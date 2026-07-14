@@ -39,11 +39,13 @@
 #                   required to retarget the PR onto the base before it reports done. So a
 #                   stood-down guard refuses a PR that still targets anything but the
 #                   default branch, and names the retarget BACK to it.
-#   STACKED_LIVE    correctly stacked on a base that still carries unmerged work. Require
-#                   the PR's base label to target it (gh pr view --json baseRefName), so a
-#                   PR opened against the default branch cannot drag the base's unmerged
-#                   commits into it, and pass. Rootedness is not tip-descent: a base that
-#                   merely ADVANCED past the head is fine.
+#   STACKED_LIVE    correctly stacked on a base that still carries unmerged work - PROVED
+#                   to, never merely assumed, because "we could not tell whether that base
+#                   merged" is INDETERMINATE, not this. Require the PR's base label to
+#                   target it (gh pr view --json baseRefName), so a PR opened against the
+#                   default branch cannot drag the base's unmerged commits into it, and
+#                   pass. Rootedness is not tip-descent: a base that merely ADVANCED past
+#                   the head is fine.
 #   STACKED_LANDED  a squash or rebase merge put the base's CONTENT in the default branch
 #                   but not its COMMITS, and this head still carries them. Merging it into
 #                   the default branch would land them all over again, and its diff shows
@@ -58,10 +60,15 @@
 #                   target. REFUSE by name.
 #   INDETERMINATE   we could not settle it: origin could not be asked (auth, network), the
 #                   base is gone with no usable recorded tip, its landedness could not be
-#                   decided, or the head and the base share no history. Never a relaxation
-#                   - relaxing is the guard's only concession and it takes proof. REFUSE,
-#                   naming git's own error where there is one, so an infrastructure
-#                   failure is diagnosable instead of masquerading as a wrong-base verdict.
+#                   proved either way, or the head and the base share no history. REFUSE.
+#                   Never a relaxation, and never quietly downgraded to one of the answers
+#                   above either: an unsettled landedness is NOT a live base, however
+#                   present its branch is. Passing a PR the guard never verified is the
+#                   fail-open it exists to close - if that base did in fact merge, merging
+#                   this PR into it lands the fix on a dead branch and never on the default
+#                   branch, while fm-teardown.sh reads a MERGED PR and releases the work.
+#                   Name git's own error where there is one, so an infrastructure failure
+#                   is diagnosable instead of masquerading as a wrong-base verdict.
 #
 # The no-mistakes pipeline cannot be told a base - it always rebases onto the
 # repo default and opens the PR there - so for a based task the expected recovery
@@ -199,11 +206,15 @@ stand_down_landed_base() {  # <default-branch-name> <why> <pr-number>
   return 0
 }
 
-# STACKED_LIVE. Correctly stacked on a base that still carries unmerged work - the state
+# STACKED_LIVE. Correctly stacked on a base PROVED to still carry unmerged work - the state
 # the whole feature exists to protect. The label must target that base, or merging would
 # drag its unmerged commits into whatever the PR points at instead.
-verify_stacked_on_live_base() {  # <default-branch-name> <pr-number>
-  local default_branch_name=$1 n=$2
+#
+# There is no "stacked on a base we could not settle" case to handle here, by construction:
+# an unsettled landedness resolves to INDETERMINATE, not to this verdict, so nothing that
+# reaches this function is unverified.
+verify_stacked_on_live_base() {  # <pr-number>
+  local n=$1
   if [ -z "$PR_BASE_LABEL" ]; then
     echo "error: task $ID declares intended base '$BASE' but the PR's base label could not be resolved via gh; cannot verify the PR targets that base. Refusing before merge." >&2
     return 1
@@ -212,23 +223,9 @@ verify_stacked_on_live_base() {  # <default-branch-name> <pr-number>
     echo "error: task $ID PR is opened against base '$PR_BASE_LABEL', not its intended base '$BASE' - refusing to record pr= or arm the merge poll before merge." >&2
     echo "  Merging it would land '$BASE''s unmerged commits into '$PR_BASE_LABEL'." >&2
     echo "  Recovery: retarget the PR's base with 'gh-axi pr edit $n --base $BASE'. The no-mistakes pipeline's monitor picks the new base up, re-rebases the branch onto it, and force-pushes a clean head; then re-run fm-pr-check." >&2
-    unknown_landedness_note "$default_branch_name"
     return 1
   fi
-  if [ "$FM_BASE_STATE_LANDED_RC" = "$FM_BASE_WORK_UNKNOWN" ]; then
-    echo "notice: task $ID PR is correctly stacked on its intended base '$BASE' and targets it, so it passes - but whether that base's work already reached '$default_branch_name' could not be determined ($FM_BASE_VERDICT_WHY), which is ordinary for a long-lived base that conflicts with it. The guard kept its strict checks rather than assuming." >&2
-  fi
   return 0
-}
-
-# Landedness came back indeterminate, on a path that refused anyway. Say so, so an
-# operator can tell "the guard could not settle this question" from "the guard settled it
-# against you" - and so the one honest escape (the base did in fact merge) is named.
-# Indented: it only ever follows a refusal's own lines.
-unknown_landedness_note() {  # <default-branch-name>
-  local default_branch_name=$1
-  [ "$FM_BASE_STATE_LANDED_RC" = "$FM_BASE_WORK_UNKNOWN" ] || return 0
-  echo "  Note: whether '$BASE''s work already reached '$default_branch_name' could not be determined ($FM_BASE_VERDICT_WHY), so the guard kept its strict checks rather than assuming. If that base has in fact merged, drop the 'base=$BASE' line from $META and re-run fm-pr-check." >&2
 }
 
 # STACKED_LANDED. The PR head still carries the declared base's OWN commits, and that base
@@ -273,7 +270,6 @@ refuse_head_rebased_off_base() {  # <default-branch-name> <base-sha> <pr-sha> <p
   else
     echo "  Recovery: retarget the PR's base with 'gh-axi pr edit $n --base $BASE'. The no-mistakes pipeline's monitor picks the new base up, re-rebases the branch onto it, and force-pushes a clean head; then re-run fm-pr-check." >&2
   fi
-  unknown_landedness_note "$default_branch_name"
   echo "  (A base that merely ADVANCED past the head is fine and is not refused here - only a head rooted in the default branch is.)" >&2
   return 1
 }
@@ -332,11 +328,23 @@ refuse_indeterminate() {  # <default-branch-name>
       echo "error: task $ID PR head and its intended base '$BASE' share no common history at all - refusing to record pr= or arm the merge poll before merge." >&2
       ;;
     *)
-      echo "error: task $ID declares intended base '$BASE', that branch no longer exists on origin, and whether its work reached '$default_branch_name' could not be determined ($FM_BASE_VERDICT_WHY). Refusing before merge." >&2
-      echo "  recorded base tip : $BASE_SHA" >&2
-      echo "  Replaying the base onto '$default_branch_name' did not resolve cleanly, so its work cannot be shown to be there already." >&2
-      echo "  Refusing rather than assuming: a base deleted WITHOUT merging leaves its unmerged commits on this PR head, and merging would land them on '$default_branch_name'." >&2
-      printf '%s\n' "$review" >&2
+      # An unsettleable landedness (a replay that conflicts, with no squash or rebase merge
+      # of the base to be found in the default branch). The branch may well still be on
+      # origin: presence never settled this question, so it cannot soften the refusal
+      # either. Both halves of what is unknown are hazards, and the recovery differs by
+      # which one is true, so name both.
+      echo "error: task $ID declares intended base '$BASE', and whether that base's work has already reached '$default_branch_name' could not be determined ($FM_BASE_VERDICT_WHY). Refusing before merge rather than assuming." >&2
+      echo "  base tip       : $FM_BASE_STATE_TIP" >&2
+      echo "  default branch : $default_branch_name ($FM_BASE_STATE_DEFAULT_SHA)" >&2
+      echo "  Replaying '$BASE' onto '$default_branch_name' does not resolve, and no squash or rebase merge of it can be found there, so its work can be shown neither to be there nor to be missing." >&2
+      if [ "$FM_BASE_STATE_PRESENT" = true ]; then
+        echo "  If '$BASE' has already merged, merging this PR into it would land the fix on a dead branch and never on '$default_branch_name'; if it has not, its unmerged commits could ride onto '$default_branch_name' instead." >&2
+        echo "  Note that '$BASE' does not merge cleanly into '$default_branch_name' as it stands, so its OWN PR is blocked on the same conflict." >&2
+        echo "  Recovery: rebase '$BASE' onto '$default_branch_name' and this head onto the rebased base, then re-run fm-pr-check. If '$BASE' has in fact already merged, drop the 'base=$BASE' line from $META instead and re-run." >&2
+      else
+        echo "  Refusing rather than assuming: a base deleted WITHOUT merging leaves its unmerged commits on this PR head, and merging would land them on '$default_branch_name'." >&2
+        printf '%s\n' "$review" >&2
+      fi
       ;;
   esac
   return 1
@@ -405,7 +413,7 @@ assert_pr_based_on_base() {
       stand_down_landed_base "$default_branch_name" "$FM_BASE_VERDICT_WHY" "$n"
       ;;
     "$FM_BASE_VERDICT_STACKED_LIVE")
-      verify_stacked_on_live_base "$default_branch_name" "$n"
+      verify_stacked_on_live_base "$n"
       ;;
     "$FM_BASE_VERDICT_STACKED_LANDED")
       refuse_head_carries_merged_base "$default_branch_name" "$FM_BASE_STATE_TIP" \

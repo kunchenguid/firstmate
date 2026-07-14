@@ -21,6 +21,14 @@
 #   (f) base gone from origin, no recorded tip to decide with     -> UNKNOWN
 #   (g) origin cannot be asked at all (auth, network, no remote)  -> UNKNOWN, and NOT
 #       mistaken for a base that is gone: an infrastructure failure is never a merge
+#   (n) base on origin, but replaying it onto the default branch CONFLICTS and no merge of
+#       it can be found there -> UNKNOWN, never LIVE. LIVE is the permissive answer
+#       ("correctly stacked, allow"), so inferring it from a question that could not be
+#       settled would wave through a base that had in fact merged
+#   (o) base merged, and the default branch then edited the base's OWN lines, so the replay
+#       conflicts -> still LANDED, proved by patch id (a squash merge, and a rebase merge).
+#       Without that proof a demonstrably merged base would read unsettleable forever and
+#       its child PRs would be refused for a hazard that is long gone
 #
 # fm_base_verdict (the state, plus where the head is rooted):
 #   (h) LIVE   + head stacked on the base   -> STACKED_LIVE    (allow, target the base)
@@ -146,6 +154,40 @@ merge_base_into_main() {  # <work-dir> [--squash]
 
 delete_base_on_origin() {  # <work-dir>
   git -C "$1/origin.git" update-ref -d refs/heads/feature/base
+}
+
+# Have the base rewrite a file main already has, so main can later rewrite the same lines
+# and the 3-way replay of the base onto main stops resolving. A base that only ADDS a file
+# can never conflict, which is why the containment merge alone looks sufficient until it
+# is not.
+base_edits_shared_file() {  # <work-dir>
+  local wt="$1/wt"
+  git -C "$wt" checkout -q feature/base
+  commit "$wt" seed.txt "seed-as-the-base-rewrote-it" "feature base rewrites the shared file"
+  git -C "$wt" push -q origin feature/base
+  git -C "$wt" checkout -q main
+  git -C "$wt" fetch -q origin
+}
+
+# main rewrites the same lines, differently. Now `merge-tree main feature/base` conflicts,
+# so containment can no longer be proved OR disproved by replay.
+main_edits_shared_file() {  # <work-dir>
+  local wt="$1/wt"
+  git -C "$wt" checkout -q -B main origin/main
+  commit "$wt" seed.txt "seed-as-main-rewrote-it" "main rewrites the shared file"
+  git -C "$wt" push -q origin main
+  git -C "$wt" fetch -q origin
+}
+
+# A rebase merge: the base's own commits replayed onto main, keeping their patches but not
+# their commit ids - what `git cherry` is able to see even when a replay cannot resolve.
+rebase_merge_base_into_main() {  # <work-dir>
+  local wt="$1/wt"
+  git -C "$wt" checkout -q -B main origin/main
+  git -C "$wt" -c user.name=t -c user.email=t@t \
+    cherry-pick origin/main..origin/feature/base >/dev/null
+  git -C "$wt" push -q origin main
+  git -C "$wt" fetch -q origin
 }
 
 test_state_live_base() {
@@ -308,6 +350,57 @@ test_verdict_indeterminate_is_never_a_relaxation() {
   pass "fm_base_verdict: an unanswerable question is INDETERMINATE, never a stand-down"
 }
 
+# A landedness that CANNOT BE SETTLED is not a live base. LIVE is the permissive answer -
+# it means "correctly stacked on a live base, allow" - so answering an unsettled question
+# with it is a fail-open: this base may well have squash-merged already, and a child PR
+# waved through against it would merge into a dead branch, landing the fix nowhere.
+test_state_unknown_when_landedness_cannot_be_settled() {
+  local dir head rc=0
+  dir=$(make_repo state-unsettleable)
+  base_edits_shared_file "$dir"
+  main_edits_shared_file "$dir"
+
+  # Direct call: FM_BASE_STATE_WHY is an out-param a command substitution would strand in
+  # a subshell.
+  fm_base_resolve_state "$dir/wt" feature/base "" main || rc=$?
+  assert_verdict "$FM_BASE_STATE_UNKNOWN" "$rc" \
+    "state-unsettleable: a base whose landedness cannot be proved either way is UNKNOWN, never LIVE - LIVE is a permissive verdict and this question was never answered"
+  assert_verdict no-merge "$FM_BASE_STATE_WHY" \
+    "state-unsettleable: the reason must name the question that went unanswered"
+
+  head=$(stack_head_on_base "$dir")
+  assert_verdict INDETERMINATE "$(verdict_of "$dir" "$head")" \
+    "state-unsettleable: the verdict a caller gates a merge on must be INDETERMINATE too, so it refuses rather than passing a PR it never verified"
+  pass "fm_base_resolve_state: an unsettleable landedness is UNKNOWN, and its verdict is INDETERMINATE"
+}
+
+# The other half of the same rule: refusing on UNKNOWN is only safe if UNKNOWN is rare and
+# honest. A merged base whose lines the default branch then edited conflicts on replay, so
+# containment alone cannot see it - and calling THAT unsettleable would refuse every child
+# PR of a base that demonstrably merged. The patch tests prove the merge that the replay
+# cannot.
+test_state_landed_is_provable_when_the_replay_conflicts() {
+  local dir head
+  dir=$(make_repo state-landed-squash-conflict)
+  base_edits_shared_file "$dir"
+  merge_base_into_main "$dir" --squash
+  main_edits_shared_file "$dir"
+  assert_verdict LANDED "$(state_of "$dir")" \
+    "state-landed-squash-conflict: a squash-merged base is still LANDED once the default branch edits its lines and the replay stops resolving - its squash commit carries the base's own cumulative diff"
+
+  head=$(rebase_head_onto_default "$dir")
+  assert_verdict ORDINARY "$(verdict_of "$dir" "$head")" \
+    "state-landed-squash-conflict: the ordinary default-branch PR of such a base must still pass, or the guard deadlocks a merge whose hazard is long gone"
+
+  dir=$(make_repo state-landed-rebase-conflict)
+  base_edits_shared_file "$dir"
+  rebase_merge_base_into_main "$dir"
+  main_edits_shared_file "$dir"
+  assert_verdict LANDED "$(state_of "$dir")" \
+    "state-landed-rebase-conflict: a rebase-merged base is LANDED too - every commit it added has a patch-equivalent commit in the default branch"
+  pass "fm_base_work_landed: a merged base stays provably LANDED when the default branch edits its lines and the replay conflicts"
+}
+
 # The enums travel as return codes through the same call chain. Two of them sharing a value
 # would let "we could not tell" arrive as "stand the guard down" in a merge gate, which is a
 # fail-open on exactly the path the guard exists to close.
@@ -339,4 +432,6 @@ test_verdict_ordinary_once_the_base_has_merged
 test_verdict_head_still_stacked_on_a_squash_merged_base
 test_verdict_abandoned_base_however_the_head_is_rooted
 test_verdict_indeterminate_is_never_a_relaxation
+test_state_unknown_when_landedness_cannot_be_settled
+test_state_landed_is_provable_when_the_replay_conflicts
 test_enum_values_cannot_alias_across_enums

@@ -42,6 +42,7 @@ The shared no-mistakes gate refusal used by `fm-spawn.sh`, `fm-send.sh`, and `fm
 | `fm-marker-lib.sh`       | Shared from-firstmate request marker, detector, and idempotent transformation         |
 | `fm-gate-refuse-lib.sh`  | Shared no-mistakes gate-context refusal for fleet lifecycle entrypoints               |
 | `fm-base-lib.sh`         | The one owner of what a task's declared base means: branch-name and commit-id validation, whether the base's work has landed in the default branch, whether a head is rooted in the base's unmerged history, and the single verdict every base-aware consumer decides on rather than asking its own half of the question |
+| `fm-base-state.sh`       | Print what a task's declared base is right now (`live`, `landed`, `abandoned`, `unknown`) from its meta: the crewmate's accessor onto `fm-base-lib.sh`, which a based brief has it run before branching and before targeting a PR |
 | `fm-watch-arm.sh`        | Verified home-scoped watcher arm wrapper with honest status reporting                |
 | `fm-watch-checkpoint.sh` | Run one bounded foreground watcher checkpoint for Codex-style supervision            |
 | `fm-watch.sh`            | Singleton-safe always-on watcher: absorb benign wakes, queue and exit on actionable ones |

@@ -792,9 +792,12 @@ fi
 # knows: whether this task is meeting the base for the FIRST time, or coming back to a
 # base it already declared. BASE_TIP_KNOWN is that fact.
 #
-#   LIVE       the base carries unmerged work. Record its tip and launch; the brief roots
-#              the crewmate's branch on it. This is the only state a FIRST spawn accepts,
-#              which is what keeps the brief's own base instructions unconditional.
+#   LIVE       the base carries unmerged work - proved to, never merely assumed. Record its
+#              tip and launch; the brief roots the crewmate's branch on it. This is the only
+#              state a FIRST spawn accepts. It does not make the brief's base instructions
+#              unconditional, though: the base can merge while the crewmate works, so the
+#              brief has the crewmate ask bin/fm-base-state.sh what its base IS, on every
+#              launch and again before it targets a PR at it.
 #   LANDED     first spawn: refuse. Declaring a base whose work is already in the default
 #              branch is a mistake, not a state to route around - there is nothing to stack
 #              on, and launching anyway would send a crewmate through a whole run that
@@ -806,8 +809,11 @@ fi
 #   ABANDONED  the base was deleted from origin WITHOUT merging. The task would stack on
 #              history that will never land. Refuse by name.
 #   UNKNOWN    origin could not be asked, or the base is gone with no usable recorded tip,
-#              or its landedness could not be settled. Refuse rather than record a base the
-#              guard could not verify against later.
+#              or its landedness could not be proved either way. Refuse rather than record a
+#              base the guard could not verify against later. An unsettled landedness is not
+#              a live base, however present its branch is - and a base whose replay onto the
+#              default branch will not resolve cannot merge into it either, so its own PR is
+#              blocked on the same conflict.
 #
 # This runs alongside the brief check and BEFORE any backend window or worktree lease is
 # acquired: the refusals are fail-closed, and a fail-closed refusal that fired after those
@@ -877,8 +883,16 @@ resolve_declared_base() {  # sets BASE_SHA when the spawn may proceed; returns 1
       [ -z "$FM_BASE_STATE_ERR" ] || printf '  git: %s\n' "$FM_BASE_STATE_ERR" >&2
       ;;
     *)
-      echo "error: task $ID declares intended base '$BASE', that branch is gone from origin, and whether its work reached '$default_branch_name' could not be determined ($FM_BASE_STATE_WHY). Refusing to spawn rather than assuming: a base deleted WITHOUT merging leaves this task stacked on history that will never land." >&2
-      echo "  recorded base tip : $BASE_TIP_KNOWN" >&2
+      # An unsettleable landedness: replaying the base onto the default branch conflicts,
+      # and no squash or rebase merge of it can be found there either. Its branch may still
+      # be on origin - presence never settled this question, so it cannot soften the
+      # refusal - and the recovery differs by which of the two unknowns is true.
+      echo "error: task $ID declares intended base '$BASE', and whether its work has already reached '$default_branch_name' could not be determined ($FM_BASE_STATE_WHY). Refusing to spawn rather than assuming." >&2
+      echo "  base tip : $FM_BASE_STATE_TIP" >&2
+      echo "  Replaying '$BASE' onto '$default_branch_name' does not resolve, and no squash or rebase merge of it can be found there, so its work can be shown neither to be there nor to be missing - and a base that never merged would leave this task stacked on history that will never land." >&2
+      if [ "$FM_BASE_STATE_PRESENT" = true ]; then
+        echo "  Note that '$BASE' does not merge cleanly into '$default_branch_name' as it stands, so its OWN PR is blocked on the same conflict. Recovery: rebase '$BASE' onto '$default_branch_name', then re-run this spawn." >&2
+      fi
       printf '%s\n' "$recovery" >&2
       ;;
   esac

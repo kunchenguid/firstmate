@@ -12,7 +12,9 @@
 # agree about what that declaration means RIGHT NOW:
 #
 #   bin/fm-spawn.sh       may this task be launched against that base at all?
-#   bin/fm-brief.sh       what does the crewmate root its branch on?
+#   bin/fm-base-state.sh  what is the base RIGHT NOW - the crewmate's own accessor, which
+#                         bin/fm-brief.sh's brief has it consult before it touches a branch,
+#                         because the base can merge or vanish between scaffold and run
 #   bin/fm-pr-check.sh    may this PR be recorded and armed for merge?
 #   bin/fm-review-diff.sh what is the honest diff base for review?
 #
@@ -53,6 +55,13 @@
 # down: it only tells the default branch's content story, not the head's commit story.
 # The origin probe is an INPUT to both, never the decision. Relaxing the guard takes
 # proof; anything short of proof keeps it on.
+#
+# AN UNANSWERED QUESTION NEVER PRODUCES A PERMISSIVE ANSWER. Every outcome below is either
+# proved or UNKNOWN, and UNKNOWN is not a state a caller may act on - it is a refusal.
+# LIVE, in particular, is permissive: it means "correctly stacked on a live base, allow",
+# so inferring it from a landedness that could not be settled would wave through the very
+# head the guard exists to catch (a base that had in fact squash-merged, whose child PR
+# then merges into a dead branch and never reaches the default branch at all).
 #
 # NOTHING HERE INFERS ANYTHING FROM A FETCH'S EXIT STATUS. A base we could not ask about
 # is not a base that merged, and an auth or network failure must never be read as one.
@@ -183,6 +192,18 @@ fm_base_probe_origin() {  # <git-dir> <branch>
 #             real 3-way merge (git merge-tree --write-tree, git >= 2.38), so a
 #             default branch that advanced past the squash still reads as containing
 #             the base.
+#   squashed  the replay above did not resolve, but some commit the default branch took
+#             since the fork has EXACTLY the base's cumulative diff - which is what a
+#             squash merge produces. Proved by patch id (fm_base_patch_landed).
+#   replayed  the replay did not resolve, but every commit the base added since the fork
+#             has a patch-equivalent commit in the default branch - what a rebase merge
+#             produces. Proved by patch id too.
+#
+# The last two exist because the replay conflicts as soon as the default branch edits the
+# base's own lines AFTER taking them, which is ordinary; without them, a base that had
+# demonstrably merged would read as unsettleable and its child PRs would be refused for a
+# hazard that is long gone. They only ever PROVE a merge - failing to find one proves
+# nothing, and leaves the answer UNKNOWN.
 #
 # When the tip is the recorded SPAWN-TIME one, that is exactly what we want: if the
 # base advanced and then merged, the merged content is a superset of the recorded
@@ -191,9 +212,10 @@ fm_base_probe_origin() {  # <git-dir> <branch>
 # as unlanded, and the guard rightly stays on.
 #
 # Returns FM_BASE_WORK_LANDED, FM_BASE_WORK_UNLANDED, or FM_BASE_WORK_UNKNOWN (the
-# recorded commit is not in the local object store, or the containment merge could
-# not be run or conflicted). UNKNOWN is not LANDED: callers stay fail-closed on it.
-# Sets FM_BASE_WORK_HOW to ancestor|contained|no-commit|no-merge|diverged.
+# recorded commit is not in the local object store, or the containment merge could not be
+# run or conflicted and no patch proof of a merge exists either). UNKNOWN is not LANDED,
+# and it is not UNLANDED either: callers refuse on it.
+# Sets FM_BASE_WORK_HOW to ancestor|contained|squashed|replayed|no-commit|no-merge|diverged.
 fm_base_work_landed() {  # <git-dir> <base-sha> <default-sha>
   local dir=${1-} base_sha=${2-} default_sha=${3-} out rc=0 merged_tree default_tree
   FM_BASE_WORK_HOW=
@@ -206,24 +228,74 @@ fm_base_work_landed() {  # <git-dir> <base-sha> <default-sha>
     return "$FM_BASE_WORK_LANDED"
   fi
   out=$(git -C "$dir" merge-tree --write-tree "$default_sha" "$base_sha" 2>/dev/null) || rc=$?
-  if [ "$rc" -ne 0 ]; then
-    # A conflict (rc 1) means the base's changes cannot be replayed onto the default
-    # branch cleanly, so we cannot prove they are already there; an older git with no
-    # `merge-tree --write-tree` lands here too. Neither is evidence of a merge.
-    FM_BASE_WORK_HOW=no-merge
-    return "$FM_BASE_WORK_UNKNOWN"
+  if [ "$rc" -eq 0 ]; then
+    merged_tree=${out%%$'\n'*}
+    default_tree=$(git -C "$dir" rev-parse --verify --quiet "$default_sha^{tree}") || {
+      FM_BASE_WORK_HOW=no-merge
+      return "$FM_BASE_WORK_UNKNOWN"
+    }
+    if [ -n "$merged_tree" ] && [ "$merged_tree" = "$default_tree" ]; then
+      FM_BASE_WORK_HOW=contained
+      return "$FM_BASE_WORK_LANDED"
+    fi
+    # The replay resolved and it CHANGES the default branch, so the base's work is
+    # demonstrably not all there. That is a proof, not a guess.
+    FM_BASE_WORK_HOW=diverged
+    return "$FM_BASE_WORK_UNLANDED"
   fi
-  merged_tree=${out%%$'\n'*}
-  default_tree=$(git -C "$dir" rev-parse --verify --quiet "$default_sha^{tree}") || {
-    FM_BASE_WORK_HOW=no-merge
-    return "$FM_BASE_WORK_UNKNOWN"
-  }
-  if [ -n "$merged_tree" ] && [ "$merged_tree" = "$default_tree" ]; then
-    FM_BASE_WORK_HOW=contained
+  # The replay conflicted (rc 1), or this git is too old for `merge-tree --write-tree`.
+  # Containment is unproven - which is not the same as disproven, so the patch tests get
+  # their turn before the answer becomes UNKNOWN.
+  if fm_base_patch_landed "$dir" "$base_sha" "$default_sha"; then
     return "$FM_BASE_WORK_LANDED"
   fi
-  FM_BASE_WORK_HOW=diverged
-  return "$FM_BASE_WORK_UNLANDED"
+  FM_BASE_WORK_HOW=no-merge
+  return "$FM_BASE_WORK_UNKNOWN"
+}
+
+# fm_base_patch_landed: can the base's merge be proved by PATCH, where replaying it onto
+# the default branch could not resolve? Two proofs, both by patch id, both positive-only:
+#
+#   squashed  a commit the default branch took since the fork has exactly the base's
+#             cumulative diff - a squash merge of the base, firstmate's own default.
+#   replayed  every commit the base added since the fork has a patch-equivalent commit in
+#             the default branch (git cherry) - a rebase merge of the base.
+#
+# Both survive the default branch editing the base's lines afterwards, which is exactly the
+# state that makes the 3-way replay conflict, so this is what keeps a demonstrably merged
+# base from reading as unsettleable forever.
+#
+# Returns 0 and sets FM_BASE_WORK_HOW when it proves a merge, 1 when it proves nothing.
+# Finding no proof is NOT evidence of the opposite: the caller stays UNKNOWN, never
+# UNLANDED, on a 1.
+fm_base_patch_landed() {  # <git-dir> <base-sha> <default-sha>
+  local dir=${1-} base_sha=${2-} default_sha=${3-} fork base_patch match cherry
+  fork=$(git -C "$dir" merge-base "$base_sha" "$default_sha" 2>/dev/null) || return 1
+  [ -n "$fork" ] || return 1
+
+  # One `git log -p | git patch-id` pipeline covers every commit the default branch took
+  # since the fork, so this costs two processes rather than one per commit.
+  base_patch=$(git -C "$dir" diff "$fork" "$base_sha" 2>/dev/null \
+    | git -C "$dir" patch-id --stable 2>/dev/null | cut -d' ' -f1)
+  if [ -n "$base_patch" ]; then
+    match=$(git -C "$dir" log -p --no-merges "$fork..$default_sha" 2>/dev/null \
+      | git -C "$dir" patch-id --stable 2>/dev/null \
+      | awk -v p="$base_patch" '$1 == p { print $2; exit }')
+    if [ -n "$match" ]; then
+      FM_BASE_WORK_HOW=squashed
+      return 0
+    fi
+  fi
+
+  cherry=$(git -C "$dir" cherry "$default_sha" "$base_sha" "$fork" 2>/dev/null) || return 1
+  # Every line is "- <sha>" (patch-equivalent upstream) or "+ <sha>" (not there). No lines
+  # at all means the base added nothing since the fork, which proves nothing on its own.
+  [ -n "$cherry" ] || return 1
+  if printf '%s\n' "$cherry" | grep -q '^+'; then
+    return 1
+  fi
+  FM_BASE_WORK_HOW=replayed
+  return 0
 }
 
 # fm_base_head_rooted: is <head-sha> rooted in the base's OWN unmerged history, rather
@@ -280,26 +352,32 @@ fm_base_head_rooted() {  # <git-dir> <base-sha> <head-sha> <default-sha>
 # was abandoned.
 #
 # Returns FM_BASE_STATE_LIVE, FM_BASE_STATE_LANDED, FM_BASE_STATE_ABANDONED, or
-# FM_BASE_STATE_UNKNOWN. A base still on origin whose landedness cannot be settled reads
-# LIVE, not UNKNOWN: a long-lived base that conflicts with the default branch is ordinary,
-# the branch is right there to check a head against, and treating it as live keeps the
-# guard ON - the fail-closed answer. A base that is GONE and undecidable has nothing left
-# to check against at all, so it reads UNKNOWN and callers refuse.
+# FM_BASE_STATE_UNKNOWN. LANDED, LIVE and ABANDONED are all PROVED: the base's work is in
+# the default branch, or it demonstrably is not and the branch is still on origin, or it
+# demonstrably is not and the branch is gone. A landedness that could not be settled is
+# UNKNOWN whether the branch is on origin or not, and callers refuse on it - because LIVE
+# is not the cautious answer, it is the permissive one ("correctly stacked, allow"), and a
+# base that had in fact squash-merged would sail through it: its child PR would merge into
+# a dead branch and the fix would never reach the default branch. Landedness is unsettleable
+# only when replaying the base onto the default branch conflicts AND no squash or rebase
+# merge of it can be found there - which is also the state in which the base's OWN PR
+# cannot merge, so the refusal names a real repo problem rather than an arbitrary one.
 #
 # Sets FM_BASE_STATE_TIP (the tip to reason from), FM_BASE_STATE_DEFAULT_SHA (the freshly
 # fetched default branch, which callers pass on to fm_base_head_rooted),
-# FM_BASE_STATE_PRESENT (true|false), FM_BASE_STATE_LANDED_RC (the raw fm_base_work_landed
-# outcome, so a caller can say landedness was merely unsettled rather than settled against
-# it), FM_BASE_STATE_WHY (ancestor|contained|diverged|no-commit|no-merge|probe-failed|
-# fetch-failed|no-tip|gone-no-tip|gone-tip-unknown|default-fetch-failed|default-no-tip) and
-# FM_BASE_STATE_ERR (git's own stderr when the probe or a fetch failed).
+# FM_BASE_STATE_PRESENT (true|false), FM_BASE_STATE_WHY (ancestor|contained|squashed|
+# replayed|diverged|no-commit|no-merge|probe-failed|fetch-failed|no-tip|gone-no-tip|
+# gone-tip-unknown|default-fetch-failed|default-no-tip) and FM_BASE_STATE_ERR (git's own
+# stderr when the probe or a fetch failed). The state IS the answer: there is no separate
+# "landedness was merely unsettled" out-param, because an unsettled landedness no longer
+# produces any state but UNKNOWN, and FM_BASE_STATE_WHY already names which question went
+# unanswered.
 fm_base_resolve_state() {  # <git-dir> <base-branch> <recorded-base-sha> <default-branch-name>
   local dir=${1-} branch=${2-} recorded=${3-} default_branch=${4-}
   local probe_rc=0 landed_rc=0 tip err
   FM_BASE_STATE_TIP=
   FM_BASE_STATE_DEFAULT_SHA=
   FM_BASE_STATE_PRESENT=false
-  FM_BASE_STATE_LANDED_RC=
   FM_BASE_STATE_WHY=
   FM_BASE_STATE_ERR=
 
@@ -358,15 +436,16 @@ fm_base_resolve_state() {  # <git-dir> <base-branch> <recorded-base-sha> <defaul
 
   FM_BASE_STATE_TIP=$tip
   fm_base_work_landed "$dir" "$tip" "$FM_BASE_STATE_DEFAULT_SHA" || landed_rc=$?
-  FM_BASE_STATE_LANDED_RC=$landed_rc
   FM_BASE_STATE_WHY=$FM_BASE_WORK_HOW
   if [ "$landed_rc" -eq "$FM_BASE_WORK_LANDED" ]; then
     return "$FM_BASE_STATE_LANDED"
   fi
-  if "$FM_BASE_STATE_PRESENT"; then
-    return "$FM_BASE_STATE_LIVE"
-  fi
+  # Only a PROVED unlanded base is live or abandoned; branch existence just says which of
+  # the two. An unsettled landedness is neither, however present the branch is.
   if [ "$landed_rc" -eq "$FM_BASE_WORK_UNLANDED" ]; then
+    if "$FM_BASE_STATE_PRESENT"; then
+      return "$FM_BASE_STATE_LIVE"
+    fi
     return "$FM_BASE_STATE_ABANDONED"
   fi
   return "$FM_BASE_STATE_UNKNOWN"

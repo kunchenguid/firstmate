@@ -240,7 +240,7 @@ if [ -n "$BASE_DECLARED" ] && "$HAS_ORIGIN"; then
           echo "warning: task $ID declares intended base $BASE_DECLARED, but that branch no longer exists on origin and its spawn-time tip is not usable ($FM_BASE_VERDICT_WHY), so whether it merged or was abandoned cannot be told apart; diffing against the default branch $DEFAULT instead, so this shows everything the PR would land on $DEFAULT" >&2
           ;;
         *)
-          echo "warning: task $ID declares intended base $BASE_DECLARED, but what became of that base could not be determined ($FM_BASE_VERDICT_WHY); diffing against the default branch $DEFAULT instead, so this shows everything the PR would land on $DEFAULT" >&2
+          echo "warning: task $ID declares intended base $BASE_DECLARED, but what became of that base could not be determined ($FM_BASE_VERDICT_WHY); diffing against the default branch $DEFAULT instead, so this shows everything the PR would land on $DEFAULT. bin/fm-pr-check.sh refuses this PR before merge until that question can be settled" >&2
           ;;
       esac
       BASE_BRANCH=$DEFAULT

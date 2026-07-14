@@ -272,7 +272,7 @@ test_base_no_mistakes_shapes_brief_and_records_nothing() {
   out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --base feature/admin-dashboard 2>&1) \
     || fail "base-nm: fm-brief.sh --base should exit 0 for a no-mistakes ship task"
   brief="$home/data/$id/brief.md"
-  assert_grep "**Base branch.** This task targets base branch \`feature/admin-dashboard\`" "$brief" \
+  assert_grep "this task targets base branch \`feature/admin-dashboard\`" "$brief" \
     "base-nm: brief missing the Setup base note"
   [ ! -e "$home/data/$id/base" ] \
     || fail "base-nm: the scaffold wrote a second source of truth for the base; meta is the only one"
@@ -301,43 +301,45 @@ test_base_roots_branch_on_the_base() {
   pass "fm-brief.sh: --base roots the crewmate's branch on the intended base, not the default branch"
 }
 
-# A fetch's exit status separates NOTHING: a base that is gone from origin and an origin that
-# cannot be reached both fail it, and reading either one as "the base must have merged" is the
-# fail-open that would silently turn a based task into an unbased one. So the brief must not
-# decide on the fetch at all. It asks `git ls-remote --exit-code`, the discriminator
-# bin/fm-base-lib.sh itself trusts, and gives a FOLLOWABLE instruction for each definite answer:
-# gone (root on the default branch - fm-spawn.sh refuses to launch against an abandoned base, so
-# a base that has since disappeared is one that merged) and unreachable (blocked). The gone case
-# is not hypothetical: fm-spawn.sh deliberately relaunches a task whose base merged mid-flight
-# with this very brief, so an instruction that could only stop there would dead-end a recovery
-# the spawn intends to proceed.
-test_base_setup_decides_on_a_definite_probe_not_a_failed_fetch() {
+# The base a brief is scaffolded against MOVES. It can merge while the crewmate works (the base
+# lands first and the child follows is the normal order of a stack), with its branch kept or
+# deleted, and fm-spawn.sh deliberately relaunches such a task with this very brief. So the base's
+# state has to be established on EVERY path the crewmate can take, and from the one owner of that
+# question - not re-derived, and above all never read off a fetch's exit status, which cannot tell
+# a branch that is gone from an origin that could not be reached.
+test_base_setup_asks_the_one_owner_what_the_base_is() {
   local home id brief
-  home="$TMP_ROOT/base-gone-home"
+  home="$TMP_ROOT/base-state-home"
   mkdir -p "$home/data"
-  id="brief-base-gone1"
+  id="brief-base-state1"
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --base feature/x >/dev/null 2>&1 \
-    || fail "base-gone: fm-brief.sh --base should exit 0"
+    || fail "base-state: fm-brief.sh --base should exit 0"
   brief="$home/data/$id/brief.md"
-  assert_grep "git ls-remote --exit-code --heads origin refs/heads/feature/x" "$brief" \
-    "base-gone: the brief never has the crewmate ask the one question that tells a gone base from an unreachable origin"
-  assert_grep "Exit status 2" "$brief" \
-    "base-gone: the brief does not name the exit status that definitively means the base is gone"
-  assert_grep "Root your branch on the default branch the worktree already sits on" "$brief" \
-    "base-gone: a definitively gone base leaves the crewmate with nothing to root on - the state fm-spawn.sh deliberately allows on a respawn"
-  assert_grep "working: intended base feature/x is gone from origin" "$brief" \
-    "base-gone: the crewmate never tells firstmate it fell back to the default branch"
-  assert_grep "blocked: intended base feature/x could not be fetched from origin" "$brief" \
-    "base-gone: an origin that could not be asked is no longer reported as a blocker"
-  assert_no_grep "If that fetch does not succeed, STOP" "$brief" \
-    "base-gone: the brief still stops on the fetch's exit status alone, dead-ending the respawn the spawn allows"
-  pass "fm-brief.sh: --base decides the gone-base fallback on a definite probe, never on a failed fetch"
+  assert_grep "bin/fm-base-state.sh" "$brief" \
+    "base-state: the brief never has the crewmate ask the one owner what its base is right now"
+  assert_grep "First action: find out what your intended base" "$brief" \
+    "base-state: the base's state is not established before the crewmate touches a branch"
+  assert_grep "on every launch of this task, a relaunch included" "$brief" \
+    "base-state: a relaunched crewmate is exempted from asking, so it would follow base instructions that no longer apply"
+  # A followable instruction for every state the crewmate can actually be handed.
+  assert_grep "**\`state=live\`**" "$brief" \
+    "base-state: no instruction for a live base"
+  assert_grep "THIS IS AN ORDINARY DEFAULT-BRANCH TASK" "$brief" \
+    "base-state: no instruction for a base that has already merged - the state fm-spawn.sh deliberately relaunches into"
+  assert_grep "working: intended base feature/x has merged" "$brief" \
+    "base-state: the crewmate never tells firstmate the base merged under it"
+  assert_grep "blocked: intended base feature/x is {the state printed}" "$brief" \
+    "base-state: an abandoned or unsettleable base is not reported as a blocker"
+  assert_no_grep "git ls-remote --exit-code" "$brief" \
+    "base-state: the brief still re-derives the base's state itself instead of asking the owner that every other consumer asks"
+  pass "fm-brief.sh: --base has the crewmate ask the one owner what the base is, on every path"
 }
 
 # fm-spawn.sh relaunches a task with the SAME brief.md, and by then its fm/<id> branch already
-# exists - rooted on the base it was originally rooted on. Re-rooting it there would rebuild the
-# branch on a base that may have squash-merged since, which is precisely the head fm-pr-check.sh
-# refuses. So the branch step must resume an existing branch rather than assume a fresh start.
+# exists - rooted on the base it was originally rooted on. Two things must hold: the crewmate
+# resumes that branch rather than re-rooting it, AND, if the base has merged since, it moves its
+# own commits off the base's pre-merge commits, which a squash merge left out of the default
+# branch by commit id and which merging would otherwise land a second time.
 test_base_branch_step_resumes_an_existing_branch() {
   local home id brief
   home="$TMP_ROOT/base-resume-home"
@@ -350,9 +352,31 @@ test_base_branch_step_resumes_an_existing_branch() {
     "base-resume: the brief never has the crewmate check whether its branch already exists"
   assert_grep "git checkout fm/$id" "$brief" \
     "base-resume: the brief gives no way to resume an existing branch, so a respawn re-roots it on a base that may have merged"
-  assert_grep "Do not re-root it and do not rebase it." "$brief" \
+  assert_grep "Check it out rather than re-rooting it" "$brief" \
     "base-resume: the brief does not forbid re-rooting a branch that already exists"
-  pass "fm-brief.sh: --base has a relaunched crewmate resume its branch instead of re-rooting it"
+  assert_grep "git rebase --onto origin/{default} {tip} fm/$id" "$brief" \
+    "base-resume: a relaunched crewmate whose base has since merged is left stacked on the base's pre-merge commits, with no command to get off them"
+  pass "fm-brief.sh: --base has a relaunched crewmate resume its branch, and rebase it off a base that merged"
+}
+
+# A base merges most often exactly while its child is in flight, so the state established at the
+# start of the run is stale by the time the PR exists. The crewmate must ask again before it
+# targets a PR at the base: retargeting onto a base that has since merged produces a PR firstmate
+# is guaranteed to refuse, and reporting `blocked` because the retarget failed is a false blocker
+# on a task that is now perfectly mergeable.
+test_base_recheck_before_targeting_the_pr() {
+  local home id brief
+  home="$TMP_ROOT/base-recheck-home"
+  mkdir -p "$home/data"
+  id="brief-base-recheck1"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --base feature/x >/dev/null 2>&1 \
+    || fail "base-recheck: fm-brief.sh --base should exit 0"
+  brief="$home/data/$id/brief.md"
+  [ "$(grep -c 'bin/fm-base-state.sh' "$brief")" -ge 2 ] \
+    || fail "base-recheck: the brief asks what the base is only once, at the start - so a base that merges mid-flight is never noticed and the crewmate retargets onto it anyway"
+  assert_grep "the base merged while you worked. Do NOT retarget it" "$brief" \
+    "base-recheck: the brief has no instruction for a base that merged after the run began"
+  pass "fm-brief.sh: --base has the crewmate re-ask what the base is before it targets a PR at it"
 }
 
 # The definition of done is the section a crewmate treats as its completion contract, and it is
@@ -595,8 +619,9 @@ test_secondmate_no_projects_charter
 test_pause_verb_override_renders_all_brief_scaffolds
 test_base_no_mistakes_shapes_brief_and_records_nothing
 test_base_roots_branch_on_the_base
-test_base_setup_decides_on_a_definite_probe_not_a_failed_fetch
+test_base_setup_asks_the_one_owner_what_the_base_is
 test_base_branch_step_resumes_an_existing_branch
+test_base_recheck_before_targeting_the_pr
 test_base_done_condition_is_self_qualifying
 test_base_no_mistakes_brief_documents_the_real_recovery
 test_base_gate_precedes_the_done_terminator
