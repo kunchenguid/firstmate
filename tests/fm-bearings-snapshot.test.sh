@@ -312,10 +312,11 @@ test_active_child_overrides_old_parent_event() {
   home=$(make_home active-child-parent)
   mate="$TMP_ROOT/active-child-home"
   write_domain_alpha_fixture "$home" "$mate"
-  mkdir -p "$mate/projects/phase8"
+  mkdir -p "$mate/projects/phase8" "$mate/projects/phase9"
   cat > "$mate/data/backlog.md" <<'EOF'
 ## In flight
 - [ ] phase8 - Sample rollout Phase 8 (repo: sample) (kind: ship) (since 2026-07-13)
+- [ ] phase9 - Sample rollout Phase 9 (repo: sample) (kind: ship) (since 2026-07-14)
 
 ## Queued
 
@@ -324,8 +325,12 @@ test_active_child_overrides_old_parent_event() {
 EOF
   fm_write_meta "$mate/state/phase8.meta" \
     "window=firstmate:fm-phase8" "worktree=$mate/projects/phase8" "project=sample" \
-    "harness=codex" "kind=ship" "mode=no-mistakes"
+    "harness=codex" "permissions=bounded" "kind=ship" "mode=no-mistakes"
   printf 'working [key=phase8]: implementing Phase 8 parity\n' > "$mate/state/phase8.status"
+  fm_write_meta "$mate/state/phase9.meta" \
+    "window=firstmate:fm-phase9" "worktree=$mate/projects/phase9" "project=sample" \
+    "harness=codex" "kind=ship" "mode=no-mistakes"
+  printf 'working [key=phase9]: implementing Phase 9 compatibility\n' > "$mate/state/phase9.status"
   fakebin=$(make_fakebin "$home")
   json=$(run "$home" "$fakebin" --json)
   printf '%s' "$json" | jq -e '
@@ -336,12 +341,17 @@ EOF
   canonical=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
     "$ROOT/bin/fm-fleet-snapshot.sh" --json)
   printf '%s' "$canonical" | jq -e '
-    .secondmate_current.records[] | select(.id == "domain-alpha") | .endpoints[] | select(.id == "phase8")
-    | .endpoint.status == "unknown"
-      and .endpoint.exists == true
-      and .endpoint.freshness == "fresh"
-      and .endpoint.observed_at == "2026-07-11T18:00:00Z"
-  ' >/dev/null || fail "child endpoint observation lacked bounded current freshness: $canonical"
+    .secondmate_current.records[] | select(.id == "domain-alpha")
+    | (.active_children | any(.id == "phase8" and .permissions == "bounded"))
+      and (.active_children | any(.id == "phase9" and .permissions == "unknown"))
+      and (.endpoints | any(.id == "phase8"
+        and .permissions == "bounded"
+        and .endpoint.status == "unknown"
+        and .endpoint.exists == true
+        and .endpoint.freshness == "fresh"
+        and .endpoint.observed_at == "2026-07-11T18:00:00Z"))
+      and (.endpoints | any(.id == "phase9" and .permissions == "unknown"))
+  ' >/dev/null || fail "nested child permission or endpoint evidence was incomplete: $canonical"
   pass "active child work overrides an old parent event with fresh endpoint evidence"
 }
 

@@ -353,7 +353,16 @@ test_unverified_bounded_harnesses_fail_closed() {
   expect_code 1 "$status" "opencode should fail closed without an unrestricted approval"
   assert_contains "$out" "no verified bounded launch profile" "opencode refusal did not explain the bounded-profile gate"
   assert_absent "$HOME_DIR/state/$id.meta" "bounded-profile refusal should happen before meta is written"
-  pass "OpenCode and Grok class adapters fail closed without --unrestricted"
+
+  id=profile-pi-bounded-z7e
+  rec=$(make_spawn_case profile-pi-bounded pi "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 1 "$status" "pi should fail closed without an unrestricted approval"
+  assert_contains "$out" "no verified bounded launch profile" "pi refusal did not explain the bounded-profile gate"
+  assert_absent "$HOME_DIR/state/$id.meta" "bounded Pi refusal should happen before meta is written"
+  pass "OpenCode, Pi, and Grok adapters fail closed without --unrestricted"
 }
 
 test_unrestricted_profile_preserves_bypass_launches() {
@@ -378,10 +387,10 @@ test_pi_omits_invalid_max_effort() {
   rec=$(make_spawn_case profile-pi pi "$id")
   read_case_record "$rec"
 
-  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model sonnet --effort max)
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model sonnet --effort max --unrestricted)
   status=$?
   expect_code 0 "$status" "pi spawn with max effort should not pass an invalid flag"
-  assert_meta_profile "$HOME_DIR/state/$id.meta" pi sonnet max
+  assert_meta_profile "$HOME_DIR/state/$id.meta" pi sonnet max unrestricted
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" "pi --model 'sonnet' -e" "pi launch did not thread model"
   assert_not_contains "$launch" "--thinking" "pi launch must omit --thinking max because the CLI rejects it"

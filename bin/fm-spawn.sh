@@ -5,10 +5,10 @@
 #        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--unrestricted] --secondmate
 #   --harness <name> is the explicit per-spawn harness/profile adapter. The old
 #   positional harness arg still works for back-compat.
-#   Verified harness launches use bounded permissions by default. --unrestricted
-#   opts this spawn into the harness's permission-bypass mode and requires the
-#   captain's explicit per-task approval. Raw launch commands are recorded as
-#   permissions=custom unless --unrestricted is also present.
+#   Harnesses with verified bounded profiles use them by default. Adapters without
+#   one fail closed unless --unrestricted explicitly opts this spawn into the
+#   harness's autonomous mode with the captain's per-task approval. Raw launch
+#   commands are recorded as permissions=custom unless --unrestricted is also present.
 #   --model <name> and --effort <low|medium|high|xhigh|max> are concrete profile
 #   axes chosen by firstmate at intake. They are only threaded into harnesses whose
 #   installed CLIs were verified to support that axis; unsupported axes are omitted
@@ -354,6 +354,7 @@ launch_template() {
       printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}}'\'' opencode __MODELFLAG__--prompt "$(cat __BRIEF__)"'
       ;;
     pi)
+      [ "$permissions" = unrestricted ] || return 2
       if [ "$kind" = secondmate ]; then
         printf '%s' 'pi __MODELFLAG____EFFORTFLAG__-e __PITURNEND__ -e __PIWATCH__ "$(cat __BRIEF__)"'
       else

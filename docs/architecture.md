@@ -130,9 +130,9 @@ That keeps spawn launch compatible across claude, codex, grok, pi, and opencode 
 
 ## Bounded crew permissions
 
-Verified harness launches are bounded by default, and `fm-spawn.sh --help` owns the exact per-harness launch mechanics.
-Claude launches in `acceptEdits` mode, Codex launches with workspace-write sandboxing and on-request auto-reviewed escalation, and Pi keeps its non-bypass launch.
-OpenCode and Grok fail closed by default because Firstmate has not yet verified a bounded unattended contract for those adapters.
+Harnesses with verified bounded profiles launch bounded by default, and `fm-spawn.sh --help` owns the exact per-harness launch mechanics.
+Claude launches in `acceptEdits` mode, and Codex launches with workspace-write sandboxing and on-request auto-reviewed escalation.
+OpenCode, Pi, and Grok fail closed by default because Firstmate has not verified a bounded unattended contract for those adapters.
 `--unrestricted` is the explicit per-spawn escape hatch and must only be used with the captain's approval for that task.
 Raw launch commands remain an adapter-development escape hatch and are classified as custom unless the caller explicitly marks them unrestricted.
 Every new task records `permissions=bounded`, `permissions=unrestricted`, or `permissions=custom` in its meta file, and the Fleet snapshot projects that value for dashboard consumers.
