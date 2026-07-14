@@ -1673,14 +1673,21 @@ if [ "$HARNESS" = devin ]; then
   if [ "$KIND" != secondmate ]; then
     turnend_json=$(json_escape "touch $(shell_quote "$TURNEND")")
     project_devin_config="$WT/.devin/config.json"
+    rm -f "$DEVIN_CONFIG"
     if [ -f "$project_devin_config" ]; then
-      node - "$project_devin_config" "touch $(shell_quote "$TURNEND")" > "$DEVIN_CONFIG" <<'NODE'
+      (umask 077; node - "$project_devin_config" "touch $(shell_quote "$TURNEND")" > "$DEVIN_CONFIG") <<'NODE'
 const fs = require("node:fs");
 const path = process.argv[2];
 try {
   const config = JSON.parse(fs.readFileSync(path, "utf8"));
-  config.hooks ??= {};
-  config.hooks.Stop ??= [];
+  if (config === null || Array.isArray(config) || typeof config !== "object") {
+    throw new Error("config root must be an object");
+  }
+  if (config.hooks === undefined) config.hooks = {};
+  if (config.hooks === null || Array.isArray(config.hooks) || typeof config.hooks !== "object") {
+    throw new Error("hooks must be an object");
+  }
+  if (config.hooks.Stop === undefined) config.hooks.Stop = [];
   if (!Array.isArray(config.hooks.Stop)) throw new Error("hooks.Stop must be an array");
   config.hooks.Stop.push({ hooks: [{ type: "command", command: process.argv[3] }] });
   process.stdout.write(`${JSON.stringify(config)}\n`);
@@ -1690,7 +1697,7 @@ try {
 }
 NODE
     else
-      printf '{"version":1,"hooks":{"Stop":[{"hooks":[{"type":"command","command":"%s"}]}]}}\n' "$turnend_json" > "$DEVIN_CONFIG"
+      (umask 077; printf '{"version":1,"hooks":{"Stop":[{"hooks":[{"type":"command","command":"%s"}]}]}}\n' "$turnend_json" > "$DEVIN_CONFIG")
     fi
   fi
 fi

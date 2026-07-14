@@ -13,6 +13,8 @@ test_detection_marker() {
   local out
   out=$(DEVIN_CLI=1 "$ROOT/bin/fm-harness.sh")
   [ "$out" = devin ] || fail "DEVIN_CLI marker resolved '$out', expected devin"
+  out=$(DEVIN_CLI=1 CLAUDECODE=1 PI_CODING_AGENT=true "$ROOT/bin/fm-harness.sh")
+  [ "$out" = devin ] || fail "DEVIN_CLI marker lost precedence to inherited harness markers: $out"
   pass "fm-harness detects the verified Devin launch marker"
 }
 
@@ -50,7 +52,7 @@ test_primary_pretool_hook_blocks() {
 }
 
 test_spawn_launch_and_turnend_config() {
-  local d home proj wt fakebin id out log config project_config
+  local d home proj wt fakebin id out log config project_config config_mode
   d="$TMP_ROOT/spawn"
   home="$d/home"
   proj="$d/project"
@@ -97,6 +99,8 @@ SH
   assert_grep '--prompt-file' "$log" "Devin prompt-file launch missing"
   config="$home/state/$id.devin-config.json"
   [ -f "$config" ] || fail "Devin per-task config was not created"
+  if [ "$(uname)" = Darwin ]; then config_mode=$(stat -f '%Lp' "$config"); else config_mode=$(stat -c '%a' "$config"); fi
+  [ "$config_mode" = 600 ] || fail "Devin per-task config permissions are not 0600"
   jq -e '.model == "repo-model"
     and .hooks.PreToolUse[0].matcher == "exec"
     and .hooks.PreToolUse[0].hooks[0].command == "repo-safety-hook"
@@ -110,9 +114,14 @@ SH
 
 test_invalid_project_config_remains_recoverable() {
   local name contents expected d home proj wt fakebin id out rc log config
-  for name in malformed stop-shape; do
+  for name in malformed root-null root-array hooks-null hooks-array stop-null stop-shape; do
     case "$name" in
       malformed) contents='{"hooks":' ; expected='Unexpected end of JSON input' ;;
+      root-null) contents='null' ; expected='config root must be an object' ;;
+      root-array) contents='[]' ; expected='config root must be an object' ;;
+      hooks-null) contents='{"hooks":null}' ; expected='hooks must be an object' ;;
+      hooks-array) contents='{"hooks":[]}' ; expected='hooks must be an object' ;;
+      stop-null) contents='{"hooks":{"Stop":null}}' ; expected='hooks.Stop must be an array' ;;
       stop-shape) contents='{"hooks":{"Stop":{}}}' ; expected='hooks.Stop must be an array' ;;
     esac
     d="$TMP_ROOT/$name"
