@@ -10,9 +10,13 @@
 #   (b) pr= without pr_head= -> fetch refs/pull/<n>/head and diff that
 #   (c) pr= absent -> unchanged worktree-branch diff
 #   (d) pr= present but PR head unreachable -> fallback to local branch + warning
-#   (e) base= declared and that branch is still on origin -> diff against that base, not the
-#       repo default, so the review shows the crewmate's own change rather than the whole
-#       feature base's unmerged history on top of it
+#   (e) base= declared, that branch is still on origin, and the head is ROOTED in it -> diff
+#       against that base, not the repo default, so the review shows the crewmate's own change
+#       rather than the whole feature base's unmerged history on top of it
+#   (e2) base= declared and still on origin, but the head was REBASED OFF it onto the default
+#       branch (what the no-mistakes pipeline does to every head, and what fm-pr-check.sh
+#       refuses) -> the declared base is no longer an honest diff base: its merge base with the
+#       head is the old fork point, so fall back to the default branch with a warning
 #   (f) base= declared but GONE from origin -> fall back to the default branch with a
 #       warning, never a hard stop. What became of that base - merged, squashed, abandoned -
 #       is not a question this script answers, and bin/fm-pr-check.sh defers the same PR to a
@@ -262,11 +266,61 @@ test_unreachable_origin_stops_instead_of_guessing() {
   pass "fm-review-diff stops when origin cannot be asked whether the declared base exists"
 }
 
+# A base that is still ON ORIGIN is not automatically the honest diff base: the head has to be
+# ROOTED in it. The no-mistakes pipeline rebases every head onto the default branch and opens
+# the PR there, so this is the standard pre-retarget state of every based no-mistakes task -
+# and it is precisely the head bin/fm-pr-check.sh refuses, which is when firstmate is most
+# likely to run this helper. Diffing such a head against the declared base takes the merge base
+# at the OLD fork point, so the diff shows every default-branch commit since the fork as part
+# of the crewmate's change: the inflated diff this feature exists to prevent, arriving from the
+# other side, and relayed to the captain as a one-paragraph summary.
+test_head_rebased_off_a_live_base_falls_back_to_default() {
+  local case_dir out err
+  case_dir=$(make_case unrooted-head)
+
+  # A live feature base with its own unmerged work.
+  git -C "$case_dir/wt" checkout -q -b feature/base origin/main
+  printf 'feature-base-work\n' > "$case_dir/wt/base-only.txt"
+  git -C "$case_dir/wt" add base-only.txt
+  git -C "$case_dir/wt" commit -qm "feature base work"
+  git -C "$case_dir/wt" push -q origin feature/base
+
+  # main advances after the base forked off it.
+  git -C "$case_dir/wt" checkout -q -b main-advance origin/main
+  printf 'main-moved-on\n' > "$case_dir/wt/main-only.txt"
+  git -C "$case_dir/wt" add main-only.txt
+  git -C "$case_dir/wt" commit -qm "default branch advances"
+  git -C "$case_dir/wt" push -q origin main-advance:main
+
+  # The head is REBASED ONTO the default branch, carrying only the task's own change -
+  # what the pipeline does to every head, and what the guard refuses.
+  git -C "$case_dir/wt" checkout -q fm/task-x1
+  git -C "$case_dir/wt" reset -q --hard main-advance
+  printf 'crew-fix\n' > "$case_dir/wt/fix.txt"
+  git -C "$case_dir/wt" add fix.txt
+  git -C "$case_dir/wt" commit -qm "the crewmate's fix"
+
+  write_task_meta "$case_dir" "base=feature/base"
+
+  out=$(run_review_diff "$case_dir" task-x1 2> "$case_dir/stderr")
+  err=$(cat "$case_dir/stderr")
+
+  assert_contains "$out" 'diff base: origin/main' \
+    "unrooted-head: a head rebased off its declared base must be diffed against the default branch, not that base"
+  assert_grep 'not rooted in that base' "$case_dir/stderr" \
+    "unrooted-head: the substituted diff base must say why, or the reviewer cannot tell it was substituted"
+  assert_contains "$out" '+crew-fix' "unrooted-head: the crewmate's own change should still be shown"
+  assert_not_contains "$out" 'main-moved-on' \
+    "unrooted-head: the diff presents the default branch's own commits as part of the crewmate's change"
+  pass "fm-review-diff falls back to the default branch when the head was rebased off its declared base"
+}
+
 test_pr_meta_uses_pr_head_not_stale_local
 test_pr_meta_fetches_pull_head_without_recorded_sha
 test_no_pr_meta_uses_local_branch
 test_unreachable_pr_head_falls_back_with_warning
 test_declared_base_is_the_diff_base
+test_head_rebased_off_a_live_base_falls_back_to_default
 test_deleted_base_falls_back_to_default_with_warning
 test_unreachable_origin_stops_instead_of_guessing
 test_no_declared_base_still_diffs_against_default

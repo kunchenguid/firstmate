@@ -306,8 +306,15 @@ test_base_roots_branch_on_the_base() {
 # fm-spawn.sh relaunches a task with the SAME brief.md, and by then its fm/<id> branch already
 # exists, rooted where it was originally rooted. The crewmate must resume that branch rather
 # than re-root it, which `git checkout -b` would refuse anyway.
+#
+# ORDER IS THE WHOLE POINT. A crewmate reads top-down and acts, so the relaunch check must come
+# BEFORE the base fetch. The other way round, a relaunch whose base merged and was deleted -
+# the normal end-state of a stacked PR, and exactly when a stuck crewmate gets relaunched -
+# fetches, fails, and reports `blocked:` before it ever reaches the line telling it to just
+# resume the branch it already has. fm-spawn.sh deliberately permits that respawn; the brief
+# must not dead-end it one step later.
 test_base_branch_step_resumes_an_existing_branch() {
-  local home id brief
+  local home id brief resume_line fetch_line
   home="$TMP_ROOT/base-resume-home"
   mkdir -p "$home/data"
   id="brief-base-resume1"
@@ -318,9 +325,36 @@ test_base_branch_step_resumes_an_existing_branch() {
     "base-resume: the brief never has the crewmate check whether its branch already exists"
   assert_grep "git checkout fm/$id" "$brief" \
     "base-resume: the brief gives no way to resume an existing branch, so a respawn re-roots it"
-  assert_grep "rather than re-rooting it" "$brief" \
-    "base-resume: the brief does not forbid re-rooting a branch that already exists"
-  pass "fm-brief.sh: --base has a relaunched crewmate resume its branch rather than re-root it"
+
+  resume_line=$(grep -n "git rev-parse --verify --quiet fm/$id" "$brief" | head -1 | cut -d: -f1)
+  fetch_line=$(grep -n "git fetch origin feature/x" "$brief" | head -1 | cut -d: -f1)
+  [ -n "$resume_line" ] && [ -n "$fetch_line" ] \
+    || fail "base-resume: could not locate both the relaunch check and the base fetch in the brief"
+  [ "$resume_line" -lt "$fetch_line" ] \
+    || fail "base-resume: the base fetch (line $fetch_line) comes BEFORE the relaunch check (line $resume_line), so a relaunch whose base has since been deleted blocks on a fetch it never needed"
+  pass "fm-brief.sh: --base checks for a relaunch before fetching the base, so a gone base cannot dead-end a resume"
+}
+
+# A failed fetch is not a verdict about the base. A branch that is gone from origin and an
+# origin that could not be reached fail identically, so a crewmate that reads "the fetch
+# failed" as "the base merged" would fall back to the default branch on a network blip - which
+# is how a feature branch's unmerged work reaches the default branch. The brief must hand it
+# the command that tells the two apart, not an inference from an exit status.
+test_base_brief_never_infers_the_base_state_from_a_failed_fetch() {
+  local home id brief
+  home="$TMP_ROOT/base-probe-home"
+  mkdir -p "$home/data"
+  id="brief-base-probe1"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --base feature/x >/dev/null 2>&1 \
+    || fail "base-probe: fm-brief.sh --base should exit 0"
+  brief="$home/data/$id/brief.md"
+  assert_grep "git ls-remote --exit-code --heads origin refs/heads/feature/x" "$brief" \
+    "base-probe: the brief gives the crewmate no way to tell a gone base from an unreachable origin"
+  assert_grep "Exit 2 means origin genuinely has no such branch" "$brief" \
+    "base-probe: the brief does not say which exit code actually means the branch is gone"
+  assert_grep "blocked: origin could not be asked about intended base feature/x" "$brief" \
+    "base-probe: an infrastructure failure has no distinct report, so it would masquerade as a gone base"
+  pass "fm-brief.sh: --base tells a gone base from an unreachable origin instead of inferring it from a failed fetch"
 }
 
 
@@ -373,11 +407,11 @@ test_base_gate_precedes_the_done_terminator() {
   pass "fm-brief.sh: the base gate is read before the definition of done's terminator"
 }
 
-# The --base=<branch> form is accepted too.
-# A crewmate cannot tell a merged base from an abandoned one, nor either from an origin it
-# could not reach - and a wrong guess is how a feature branch's unmerged work reaches the
-# default branch. So the brief gives it exactly one rule: if the base cannot be fetched,
-# report `blocked:` and stop. It must NOT quietly fall back to the default branch.
+# A crewmate cannot tell a merged base from an abandoned one - and a wrong guess is how a
+# feature branch's unmerged work reaches the default branch. So whatever it finds, the brief
+# sends it to `blocked:` and stops. It must NOT quietly fall back to the default branch.
+# Which blocked line it reports is the business of the probe test above; what this pins is
+# that BOTH outcomes stop, and neither re-roots on the default branch.
 test_base_unfetchable_base_blocks_rather_than_guessing() {
   local home id brief
   home="$TMP_ROOT/base-unfetchable-home"
@@ -386,8 +420,10 @@ test_base_unfetchable_base_blocks_rather_than_guessing() {
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --base feature/x >/dev/null 2>&1 \
     || fail "base-unfetchable: fm-brief.sh --base should exit 0"
   brief="$home/data/$id/brief.md"
-  assert_grep "blocked: intended base feature/x could not be fetched from origin" "$brief" \
-    "base-unfetchable: the brief gives the crewmate no instruction for a base it cannot fetch"
+  assert_grep "blocked: intended base feature/x is gone from origin" "$brief" \
+    "base-unfetchable: the brief gives the crewmate no instruction for a base that is gone from origin"
+  assert_grep "blocked: origin could not be asked about intended base feature/x" "$brief" \
+    "base-unfetchable: the brief gives the crewmate no instruction for an origin it could not reach"
   assert_grep "do NOT fall back to the default branch" "$brief" \
     "base-unfetchable: the brief lets the crewmate silently re-root on the default branch when the base is gone"
   pass "fm-brief.sh: a base that cannot be fetched sends the crewmate to blocked, never to a guess"
@@ -584,6 +620,7 @@ test_pause_verb_override_renders_all_brief_scaffolds
 test_base_no_mistakes_shapes_brief_and_records_nothing
 test_base_roots_branch_on_the_base
 test_base_branch_step_resumes_an_existing_branch
+test_base_brief_never_infers_the_base_state_from_a_failed_fetch
 test_base_no_mistakes_brief_documents_the_real_recovery
 test_base_gate_precedes_the_done_terminator
 test_base_unfetchable_base_blocks_rather_than_guessing

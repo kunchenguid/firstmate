@@ -20,9 +20,14 @@
 #   THE CREWMATE NEVER ADJUDICATES ITS OWN BASE. A base can merge, or be deleted,
 #   between the writing of this brief and the run - the base lands first and the child
 #   follows is the normal order of a stack - and no crewmate can tell a merged base from
-#   an abandoned one, or either from an origin it could not reach. So the brief gives it
-#   exactly one rule for that: if the base cannot be fetched, do not guess and do not
-#   fall back to the default branch - report `blocked:` and stop. Firstmate decides.
+#   an abandoned one. So whatever it finds, the brief has it report `blocked:` and stop
+#   rather than guess or fall back to the default branch; firstmate decides.
+#   It does NOT read that state off a failed command, though. A branch that is gone and an
+#   origin that could not be reached fail a fetch identically, so the brief hands the crewmate
+#   `git ls-remote --exit-code` to tell them apart at the source (2 = no such ref, anything
+#   else = the probe failed) and a distinct `blocked:` line for each. An infrastructure
+#   failure reported as a merged base is how a feature branch's unmerged work reaches the
+#   default branch.
 #   direct-PR opens the PR against the base directly (gh-axi pr create --base).
 #   no-mistakes cannot be told a base: the pipeline always rebases onto the repo
 #   default branch and opens the PR against it. So the brief has the crewmate
@@ -333,7 +338,23 @@ EOF
 # default branch. This writes no state: fm-spawn.sh --base owns the durable record
 # (state/<id>.meta), so the same flag must be passed there too.
 BASE_SETUP=""
-BASE_BLOCKED="If \`git fetch origin $BASE\` fails for ANY reason - the branch is gone from origin, or origin cannot be reached - do NOT guess what became of it, and do NOT fall back to the default branch. A base that merged, a base that was abandoned, and an origin you could not reach look alike from here, and picking wrong is how a feature branch's unmerged work reaches the default branch. Append \`blocked: intended base $BASE could not be fetched from origin\` and stop; firstmate decides what that means."
+# Never read a base's STATE off a command's exit status. A fetch fails identically whether the
+# branch is gone from origin or origin could not be reached at all, so a crewmate that treats
+# "the fetch failed" as "the base merged" would fall back to the default branch on a network
+# blip - which is how a feature branch's unmerged work reaches the default branch. `git
+# ls-remote --exit-code` separates the cases at the source (2 = no such ref, anything else =
+# the probe itself failed), which is the same discrimination bin/fm-base-lib.sh makes.
+BASE_GONE_PROBE="Ask origin directly, which tells the two apart at the source:
+   \`\`\`
+   git ls-remote --exit-code --heads origin refs/heads/$BASE
+   \`\`\`
+   Exit 2 means origin genuinely has no such branch. Any other non-zero exit is an infrastructure failure - auth, network - and NOT a verdict about \`$BASE\`."
+BASE_BLOCKED="If that fetch fails, do NOT guess what became of \`$BASE\`, and do NOT fall back to the default branch. A base that merged, a base that was abandoned, and an origin you could not reach all look alike from a failed fetch, and picking wrong is how a feature branch's unmerged work reaches the default branch.
+   $BASE_GONE_PROBE
+   Whichever it is, it is not yours to adjudicate: append \`blocked: intended base $BASE is gone from origin\` for the first, or \`blocked: origin could not be asked about intended base $BASE: {git's error}\` for the second, and stop. Firstmate decides."
+# The same discrimination at PR time, where the crewmate is reading a failed retarget rather
+# than a failed fetch: a command that failed is still not a verdict about the base.
+BASE_GONE_CONFIRM="Confirm which it is with \`git ls-remote --exit-code --heads origin refs/heads/$BASE\`: exit 2 means origin genuinely has no such branch, so append \`blocked: intended base $BASE is gone from origin\`; any other non-zero exit is an infrastructure failure - auth, network - so append \`blocked: origin could not be asked about intended base $BASE: {git's error}\` instead. Then stop."
 BRANCH_STEP="1. First action: create your branch: \`git checkout -b fm/$ID\`"
 if [ -n "$BASE" ]; then
   if [ "$MODE" = local-only ]; then
@@ -341,13 +362,21 @@ if [ -n "$BASE" ]; then
     exit 1
   fi
   BASE_META=$(shell_quote "$STATE/$ID.meta")
-  BRANCH_STEP="1. First action: create your \`fm/$ID\` branch, rooted on your intended base \`$BASE\` - NOT on the default branch this worktree starts on.
+  # The relaunch check comes FIRST. The base fetch exists only to ROOT a new branch, so a
+  # relaunched task does not need it - and a relaunch is exactly when the base is most likely
+  # to be gone, because a base merging mid-flight is the normal end-state of a stacked PR.
+  # Ordered the other way, a crewmate reading top-down would fetch, fail, and report `blocked:`
+  # on a task whose PR may be perfectly mergeable - the recovery bin/fm-spawn.sh deliberately
+  # permits, dead-ended one step later by its own brief.
+  BRANCH_STEP="1. First action: get onto your \`fm/$ID\` branch.
+
+   If \`fm/$ID\` already exists (\`git rev-parse --verify --quiet fm/$ID\` prints a commit), this task has been RELAUNCHED: check it out with \`git checkout fm/$ID\` and carry on with the work already on it. It is already rooted where it belongs, so you do not need \`$BASE\` to resume and the rest of this step does not apply - skip to the next one.
+
+   Otherwise this is a fresh start: create the branch rooted on your intended base \`$BASE\` - NOT on the default branch this worktree starts on.
    \`\`\`
    git fetch origin $BASE && git checkout -b fm/$ID FETCH_HEAD
    \`\`\`
-   $BASE_BLOCKED
-
-   If \`fm/$ID\` already exists (\`git rev-parse --verify --quiet fm/$ID\` prints a commit), this task has been relaunched: check it out with \`git checkout fm/$ID\` and carry on with the work already on it, rather than re-rooting it."
+   $BASE_BLOCKED"
   # The Setup note and the definition of done must not disagree about whether the branch
   # may end up rebased onto the default branch. Under direct-PR the crewmate owns the
   # branch end to end, so "never rebase onto the default" is the whole truth. Under
@@ -356,10 +385,14 @@ if [ -n "$BASE" ]; then
   # and would send the crewmate to `blocked:` instead of to the retarget it is supposed to
   # perform. State that once, and let the definition of done own the recovery.
   BASE_ARMED="Firstmate's pre-merge base guard only runs when this task's meta records the base. Confirm it once, before you start: \`grep -qxF 'base=$BASE' $BASE_META\`. If that does not match, the guard is NOT armed and nothing would catch a wrong-based PR - append \`blocked: intended base $BASE is not recorded in this task's meta\` and stop."
+  # The marker line bin/fm-spawn.sh requires before it will launch a task whose meta declares
+  # this base. bin/fm-base-lib.sh owns its text, so the brief that writes it and the spawn that
+  # reads it cannot drift apart.
+  BASE_MARKER=$(fm_base_brief_marker "$BASE")
   if [ "$MODE" = direct-PR ]; then
     BASE_SETUP="
 
-**Base branch.** This task targets base branch \`$BASE\`, not the repo default branch.
+**Base branch.** $BASE_MARKER
 Step 1 roots your \`fm/$ID\` branch on \`$BASE\`; keep it there and never rebase it onto the default branch yourself.
 You open the PR against \`$BASE\` yourself - see the definition of done.
 Firstmate refuses to record or merge a PR whose head is not rooted in \`$BASE\`'s history, or whose base label is not \`$BASE\`.
@@ -367,7 +400,7 @@ $BASE_ARMED"
   else
     BASE_SETUP="
 
-**Base branch.** This task targets base branch \`$BASE\`, not the repo default branch.
+**Base branch.** $BASE_MARKER
 Step 1 roots your \`fm/$ID\` branch on \`$BASE\`, and you must never rebase it onto the default branch by hand.
 The no-mistakes pipeline WILL rebase it onto the default branch and open the PR there; it cannot be told a base. That is expected, it is not a failure, and it is not yours to fight.
 The definition of done below owns what to do about it, and you are not done until you have done it.
@@ -390,7 +423,8 @@ EOF
     [ -z "$BASE" ] || DOD="$DOD
 
 Open the PR against base branch \`$BASE\`, not the repo default: \`gh-axi pr create --base $BASE ...\`.
-If \`$BASE\` is gone from origin by then - a base merges most often exactly while its child is in flight - do not retarget the PR at the default branch on your own judgement: append \`blocked: intended base $BASE is gone from origin\` and stop. Firstmate decides."
+If that fails, \`$BASE\` may be gone from origin by then - a base merges most often exactly while its child is in flight - but do not retarget the PR at the default branch on your own judgement, and do not read a failed command as a verdict about \`$BASE\`. $BASE_GONE_CONFIRM
+Either way you stop and firstmate decides; a gone base is not yours to adjudicate."
     ;;
   local-only)
     SETUP2=""
@@ -423,7 +457,8 @@ The pipeline cannot be told a base: it always rebases onto the repo default bran
 Instead, let the PR open as it will, then retarget it once it exists: \`gh-axi pr edit {n} --base $BASE\`.
 The pipeline's monitor picks the new base up, re-rebases your branch onto \`$BASE\`, and force-pushes a clean head; you do not rebuild anything by hand.
 Then confirm \`gh-axi pr view {n} --json baseRefName\` reports \`$BASE\`.
-If the retarget fails because \`$BASE\` is gone from origin - a base merges most often exactly while its child is in flight - do not decide for yourself what that means and do not leave the PR on the default branch: append \`blocked: intended base $BASE is gone from origin\` and stop. Firstmate decides.
+If the retarget fails, \`$BASE\` may be gone from origin - a base merges most often exactly while its child is in flight - but do not decide for yourself what that means, do not leave the PR on the default branch, and do not read a failed command as a verdict about \`$BASE\`. $BASE_GONE_CONFIRM
+Either way you stop and firstmate decides; a gone base is not yours to adjudicate.
 If the retarget or the re-rebase simply does not take, append \`blocked: PR still based on the default branch, not $BASE\` and stop; a wrong-based PR is refused before merge, so it will not slip through - it will just sit.
 
 "

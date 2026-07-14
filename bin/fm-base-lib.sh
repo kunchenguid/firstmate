@@ -12,6 +12,7 @@
 #   fm_base_valid_branch_name  is the recorded value a git branch name at all?
 #   fm_base_probe_origin       does that branch exist on origin right now?
 #   fm_base_head_rooted        is a given head rooted in that base's own history?
+#   fm_base_brief_marker       the line a based brief carries, so a spawn can check it
 #
 # bin/fm-pr-check.sh's header owns what the guard DOES with these; this file only answers
 # the questions. It deliberately answers nothing about a base's END OF LIFE - whether it
@@ -103,4 +104,15 @@ fm_base_head_rooted() {  # <git-dir> <base-sha> <head-sha> <default-sha>
     return "$FM_BASE_HEAD_UNROOTED"
   fi
   return "$FM_BASE_HEAD_ROOTED"
+}
+
+# fm_base_brief_marker: the one line a based brief carries to prove it was rendered for that
+# base. fm-brief.sh writes it into the brief; fm-spawn.sh requires it before launching a task
+# whose meta declares a base, so a crewmate can never be handed a brief that says nothing
+# about the base its PR will be guarded on. Defined here so the writer and the reader of the
+# line cannot drift apart.
+fm_base_brief_marker() {  # <branch>
+  # shellcheck disable=SC2016  # Single quotes are deliberate: the backticks are literal
+  # markdown in the brief the crewmate reads, not a command substitution.
+  printf 'This task targets base branch `%s`, not the repo default.' "${1-}"
 }

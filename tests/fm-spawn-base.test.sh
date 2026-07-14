@@ -28,10 +28,18 @@
 #       normal end-state of a stacked PR, and it is exactly when a stuck crewmate gets
 #       relaunched; re-probing origin there would dead-end the recovery of a task whose PR
 #       fm-pr-check.sh may well pass
+#   (k) --base against a brief that was never written for that base -> the same early, loud
+#       refusal, because that crewmate would root on the default branch and have its finished
+#       PR refused after a whole run
 set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# For fm_base_brief_marker: the line a based brief must carry. Taking it from the lib rather
+# than retyping it here is the point - the spawn refuses a brief that lacks it, so a test that
+# hardcoded the wording could pass against a brief no real crewmate would ever be handed.
+# shellcheck source=bin/fm-base-lib.sh
+. "$ROOT/bin/fm-base-lib.sh"
 
 SPAWN="$ROOT/bin/fm-spawn.sh"
 TMP_ROOT=$(fm_test_tmproot fm-spawn-base)
@@ -68,8 +76,15 @@ SH
 # The project gets a real origin carrying the base branch, because a NEW declaration is
 # probed against origin before the spawn is allowed. origin_base names the branch actually
 # created there, so a case can declare a base origin does NOT have.
+#
+# brief_base names the base the BRIEF is written for, which is a separate fact from either of
+# those: the spawn refuses to launch a task whose meta declares a base its brief never
+# mentions, because that crewmate would root on the default branch and have its PR refused
+# after a whole run. Pass it whenever the case spawns with --base, and pass a DIFFERENT value
+# when the case means to exercise a mismatch. Empty (the default) is the ordinary unbased
+# brief.
 make_spawn_case() {
-  local name=$1 id=$2 origin_base=${3:-feature/base} case_dir home proj wt fakebin
+  local name=$1 id=$2 origin_base=${3:-feature/base} brief_base=${4:-} case_dir home proj wt fakebin
   case_dir="$TMP_ROOT/$name"
   home="$case_dir/home"
   proj="$case_dir/project"
@@ -80,8 +95,19 @@ make_spawn_case() {
   fm_git_worktree "$proj" "$wt" "wt-$name"
   make_project_origin "$case_dir" "$proj" "$origin_base"
   touch "$home/state/.last-watcher-beat"
-  printf 'brief for %s\n' "$id" > "$home/data/$id/brief.md"
+  write_case_brief "$home" "$id" "$brief_base"
   printf '%s|%s|%s|%s|%s\n' "$case_dir" "$home" "$proj" "$wt" "$fakebin"
+}
+
+# The brief a real fm-brief.sh --base run would produce, reduced to the one line fm-spawn.sh
+# actually checks for.
+write_case_brief() {  # <home> <id> [declared_base]
+  local home=$1 id=$2 base=${3:-}
+  {
+    printf 'brief for %s\n' "$id"
+    [ -z "$base" ] || fm_base_brief_marker "$base"
+    [ -z "$base" ] || printf '\n'
+  } > "$home/data/$id/brief.md"
 }
 
 # Give the project clone a real origin carrying <origin_base>, so `git ls-remote` in
@@ -147,7 +173,7 @@ run_spawn() {
 test_base_flag_is_recorded_in_meta() {
   local rec id out status
   id=spawn-base-b1
-  rec=$(make_spawn_case record "$id" feature/admin-dashboard)
+  rec=$(make_spawn_case record "$id" feature/admin-dashboard feature/admin-dashboard)
   read_case_record "$rec"
 
   out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR" --base feature/admin-dashboard)
@@ -164,7 +190,7 @@ test_base_flag_is_recorded_in_meta() {
 test_base_missing_from_origin_refuses_before_creating_anything() {
   local rec id out status log
   id=spawn-base-b6
-  rec=$(make_spawn_case nosuchbase "$id" feature/base)
+  rec=$(make_spawn_case nosuchbase "$id" feature/base feature/typo)
   read_case_record "$rec"
   log="$CASE_DIR/tmux.log"
   : > "$log"
@@ -234,7 +260,7 @@ test_invalid_base_refuses_before_creating_anything() {
 test_a_good_spawn_does_create_the_window_and_worktree() {
   local rec id out status log
   id=spawn-base-b5
-  rec=$(make_spawn_case createscheck "$id" feature/x)
+  rec=$(make_spawn_case createscheck "$id" feature/x feature/x)
   read_case_record "$rec"
   log="$CASE_DIR/tmux.log"
   : > "$log"
@@ -283,7 +309,7 @@ test_base_rejected_for_scout_and_secondmate() {
 test_respawn_without_base_carries_the_declaration_forward() {
   local rec id out status
   id=spawn-base-b8
-  rec=$(make_spawn_case respawn "$id" feature/keepme)
+  rec=$(make_spawn_case respawn "$id" feature/keepme feature/keepme)
   read_case_record "$rec"
 
   out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR" --base feature/keepme)
@@ -307,7 +333,7 @@ test_respawn_without_base_carries_the_declaration_forward() {
 test_base_rejected_for_a_local_only_project() {
   local rec id out status log
   id=spawn-base-b9
-  rec=$(make_spawn_case localonly "$id" feature/x)
+  rec=$(make_spawn_case localonly "$id" feature/x feature/x)
   read_case_record "$rec"
   log="$CASE_DIR/tmux.log"
   : > "$log"
@@ -335,7 +361,7 @@ test_base_rejected_for_a_local_only_project() {
 test_respawn_with_base_after_the_base_was_deleted_from_origin() {
   local rec id out status
   id=spawn-base-b10
-  rec=$(make_spawn_case basegone "$id" feature/merged)
+  rec=$(make_spawn_case basegone "$id" feature/merged feature/merged)
   read_case_record "$rec"
 
   out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR" --base feature/merged)
@@ -373,10 +399,108 @@ test_base_rejected_in_a_batch() {
   pass "fm-spawn rejects --base in a batch spawn"
 }
 
+# The brief/spawn flag mismatch, in the direction that had no guard. A brief scaffolded WITH
+# --base whose spawn omits it is caught from the other side: fm-brief.sh has the crewmate check
+# meta for base= before it starts, and stop when the guard is not armed. The reverse - a spawn
+# that declares a base against a brief written without one - had nothing at all, and it is the
+# worse of the two: meta records the base, so the guard IS armed, but the brief hands the
+# crewmate the plain default-branch branch step and none of the retarget instructions. The run
+# is doomed before it begins - fm-pr-check.sh hard-refuses the finished PR - and the whole
+# implementation and pipeline run is spent first. Refuse the command instead, and refuse it
+# where a refusal is free: before any window or worktree exists to strand.
+test_base_without_a_matching_brief_refuses_before_creating_anything() {
+  local rec id out status log
+  id=spawn-base-b11
+  # origin HAS the base, and the brief is written for a DIFFERENT one, so nothing but the
+  # brief mismatch can account for the refusal.
+  rec=$(make_spawn_case briefmismatch "$id" feature/x feature/other)
+  read_case_record "$rec"
+  log="$CASE_DIR/tmux.log"
+  : > "$log"
+
+  out=$(FM_TEST_TMUX_LOG="$log" run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR" --base feature/x)
+  status=$?
+  expect_code 1 "$status" "briefmismatch: a base whose brief never mentions it must refuse, not launch a crewmate that will root on the default branch"
+  assert_contains "$out" "was not written for that base" \
+    "briefmismatch: refusal did not explain that the brief and the declared base disagree"
+  assert_absent "$HOME_DIR/state/$id.meta" "briefmismatch: refusal should happen before meta is written"
+  assert_no_grep "new-window" "$log" \
+    "briefmismatch: the refusal created a backend window it then abandoned, with no meta to reconcile it"
+  assert_no_grep "treehouse get" "$log" \
+    "briefmismatch: the refusal leased a task worktree it then abandoned, with no meta to release it"
+
+  # The same spawn, once the brief actually declares that base, must go through - so the
+  # refusal above is pinning the mismatch and not some unrelated failure.
+  write_case_brief "$HOME_DIR" "$id" feature/x
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR" --base feature/x)
+  status=$?
+  expect_code 0 "$status" "briefmismatch: a brief written for the declared base should spawn"$'\n'"$out"
+  assert_grep "base=feature/x" "$HOME_DIR/state/$id.meta" \
+    "briefmismatch: the accepted spawn should still record the base"
+  pass "fm-spawn refuses a declared base its brief was never written for, before any window or worktree exists"
+}
+
+# EVERY writer of meta preserves base=, not just the happy path.
+#
+# The Orca abort-cleanup trap is the second place fm-spawn.sh writes state/<id>.meta: when a
+# spawn dies after Orca handed over a worktree it then could not remove, the trap rewrites meta
+# WHOLESALE as an orphan record so fm-teardown.sh has something to reconcile the leak against.
+# A base dropped there is a base gone - meta is the single source of truth, and the next
+# respawn finds nothing to carry forward, so the task comes back UNGUARDED and fm-pr-check.sh
+# waves its PR through with no diagnostic. That is the silent-disarm this whole design exists
+# to make impossible, and it would arrive through the one meta write nobody updated.
+#
+# Fake Orca hands back a worktree, then fails to create the terminal (arming the trap) and
+# fails to remove the worktree (forcing the orphan record), which is the exact path.
+make_orca_spawn_fakebin() {  # <dir> <worktree-path>
+  local dir=$1 wt=$2 fakebin
+  fakebin=$(make_spawn_fakebin "$dir")
+  cat > "$fakebin/orca" <<SH
+#!/usr/bin/env bash
+set -u
+case "\$1 \${2:-}" in
+  "status --json")
+    printf '{"ok":true,"result":{"runtime":{"reachable":true,"state":"ready"}}}\n'; exit 0 ;;
+  "repo show")
+    printf '{"ok":true,"result":{"repo":{"id":"r1"}}}\n'; exit 0 ;;
+  "worktree create")
+    printf '{"ok":true,"result":{"worktree":{"id":"w1","path":"%s"}}}\n' "$wt"; exit 0 ;;
+  "terminal create")
+    echo "fake orca: terminal create failed" >&2; exit 1 ;;
+  "worktree rm")
+    echo "fake orca: worktree rm failed" >&2; exit 1 ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/orca"
+  printf '%s\n' "$fakebin"
+}
+
+test_orca_abort_orphan_meta_keeps_the_declared_base() {
+  local rec id out status fakebin
+  id=spawn-base-b12
+  rec=$(make_spawn_case orcaabort "$id" feature/x feature/x)
+  read_case_record "$rec"
+  fakebin=$(make_orca_spawn_fakebin "$CASE_DIR/orcafake" "$WT_DIR")
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$fakebin" "$id" "$PROJ_DIR" --backend orca --base feature/x)
+  status=$?
+  expect_code 1 "$status" "orcaabort: the spawn should fail once orca cannot create the terminal"$'\n'"$out"
+
+  # The trap fired and left the orphan record (otherwise this test proves nothing about it).
+  assert_grep "orca_worktree_id=w1" "$HOME_DIR/state/$id.meta" \
+    "orcaabort: the abort trap never wrote the orphan record, so the base assertion below is inert"
+  assert_grep "base=feature/x" "$HOME_DIR/state/$id.meta" \
+    "orcaabort: the orphan record dropped the declared base, so the next respawn would relaunch this task with no PR-base guard at all"
+  pass "fm-spawn's Orca abort record keeps the declared base, so an aborted task cannot come back unguarded"
+}
+
 test_base_flag_is_recorded_in_meta
 test_no_base_writes_no_base_key
 test_invalid_base_refuses_before_creating_anything
 test_base_missing_from_origin_refuses_before_creating_anything
+test_base_without_a_matching_brief_refuses_before_creating_anything
+test_orca_abort_orphan_meta_keeps_the_declared_base
 test_a_good_spawn_does_create_the_window_and_worktree
 test_base_rejected_for_scout_and_secondmate
 test_respawn_without_base_carries_the_declaration_forward

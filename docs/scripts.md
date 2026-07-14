@@ -38,10 +38,10 @@ The shared no-mistakes gate refusal used by `fm-spawn.sh`, `fm-send.sh`, and `fm
 | `fm-config-push.sh`      | Push declared inheritable local config to live secondmate homes mid-session          |
 | `fm-project-mode.sh`     | Resolve a project's delivery mode and `+yolo` flag from `data/projects.md`           |
 | `fm-merge-local.sh`      | Fast-forward a `local-only` project's local default branch after approval            |
-| `fm-review-diff.sh`      | Review a crewmate branch or recorded PR head against the authoritative base: the declared `base=` while that branch is on origin, else the repo default |
+| `fm-review-diff.sh`      | Review a crewmate branch or recorded PR head against the authoritative base: the declared `base=` while that branch is on origin AND the head is rooted in it, else the repo default with a one-line notice |
 | `fm-marker-lib.sh`       | Shared from-firstmate request marker, detector, and idempotent transformation         |
 | `fm-gate-refuse-lib.sh`  | Shared no-mistakes gate-context refusal for fleet lifecycle entrypoints               |
-| `fm-base-lib.sh`         | Shared facts about a task's declared base: branch-name validation, whether that branch exists on origin, and whether a head is rooted in the base's own history |
+| `fm-base-lib.sh`         | Shared facts about a task's declared base: branch-name validation, whether that branch exists on origin, whether a head is rooted in the base's own history, and the marker line a based brief carries |
 | `fm-watch-arm.sh`        | Verified home-scoped watcher arm wrapper with honest status reporting                |
 | `fm-watch-checkpoint.sh` | Run one bounded foreground watcher checkpoint for Codex-style supervision            |
 | `fm-watch.sh`            | Singleton-safe always-on watcher: absorb benign wakes, queue and exit on actionable ones |

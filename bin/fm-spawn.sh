@@ -282,6 +282,11 @@ orca_spawn_abort_cleanup() {
           echo "kind=$KIND"
           echo "mode=${MODE:-no-mistakes}"
           echo "yolo=${YOLO:-off}"
+          # meta is the single source of truth for a task's base, and this orphan record
+          # REPLACES it. A base dropped here is a base gone: the next respawn finds nothing
+          # to carry forward and relaunches the task unguarded, so fm-pr-check.sh would wave
+          # its PR through. Every writer of meta preserves base=, not just the happy path.
+          [ -z "${BASE:-}" ] || echo "base=$BASE"
           echo "tasktmp=${TASK_TMP:-}"
           echo "model=${MODEL:-default}"
           echo "effort=${EFFORT:-default}"
@@ -750,6 +755,30 @@ fi
 # the record, not only in fm-brief.sh's friendlier early check.
 if [ -n "$BASE" ] && [ "$MODE" = local-only ]; then
   echo "error: task $ID declares intended base '$BASE', but project '$PROJ_NAME' ships local-only (no remote, no PR), so nothing can guard a based merge into local main. Re-run without --base, or register the project in a PR-based mode." >&2
+  exit 1
+fi
+
+# DOES THE BRIEF ACTUALLY TELL THE CREWMATE ABOUT THIS BASE? The mismatch was guarded in
+# one direction only: a brief scaffolded --base whose spawn omits it makes the crewmate stop
+# (fm-brief.sh has it check meta for base= before it starts), but a spawn that declares a base
+# against a brief scaffolded without one had nothing. That brief hands the crewmate the plain
+# `git checkout -b fm/<id>` step from a detached HEAD on the DEFAULT branch and none of the
+# retarget instructions, so the run is doomed before it begins: meta records the base, the
+# crewmate roots on the default branch, and fm-pr-check.sh hard-refuses the finished PR after
+# the whole implementation and pipeline run. Refuse the command instead - the same trade the
+# origin probe below makes, and cheap, because nothing has been created yet.
+#
+# Like every other refusal here, the recovery it prints has to be performable in the state that
+# prints it: on a first spawn there is no state/<id>.meta yet, so naming a base= line to drop
+# would send the operator to a file that is not on disk.
+if [ -n "$BASE" ] && ! grep -qF "$(fm_base_brief_marker "$BASE")" "$BRIEF"; then
+  echo "error: task $ID declares intended base '$BASE', but its brief at $BRIEF was not written for that base, so a crewmate would be launched with no instruction to root its branch on it - refusing to spawn." >&2
+  echo "  Recovery: re-scaffold the brief for that base and re-spawn ('bin/fm-brief.sh $ID <repo> --base $BASE')." >&2
+  if [ -n "$BASE_RECORDED" ]; then
+    echo "  Or, if this task has no intended base after all, drop the 'base=$BASE_RECORDED' line from $STATE/$ID.meta and re-run without --base." >&2
+  else
+    echo "  Or, if this task has no intended base after all, re-run without --base." >&2
+  fi
   exit 1
 fi
 
