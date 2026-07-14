@@ -16,6 +16,8 @@
 #     Canonical tasks-axi rows are structured; free-form non-empty lines in
 #     those sections are preserved as unstructured records.
 #   tasks[]: one row per state/<id>.meta, sorted by id.
+#     permissions is the recorded bounded, unrestricted, or custom launch profile;
+#     legacy metadata without that field is projected as unknown.
 #     current_state is parsed from bin/fm-crew-state.sh <id> and preserves
 #     state, source, detail, and raw line separately.
 #     paths.status_log.last_event is historical wake-event data only, never
@@ -27,6 +29,8 @@
 #     endpoint.exists is the cheap backend endpoint-presence read.
 #     endpoint.agent_alive is populated for secondmates only, where it is useful
 #     return-channel supervision data; other tasks use "not_checked".
+#     Registered-secondmate active_children and endpoints preserve each nested
+#     task's permissions value for Fleet consumers.
 #   scout_reports[]: present data/<id>/report.md pointers.
 #   secondmate_current: {records[],total,shown,truncated} - bounded current summaries
 #     for registered secondmates, selected from validated structured state inside

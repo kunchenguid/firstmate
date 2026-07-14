@@ -72,6 +72,7 @@ All three have verified turn-end guard paths when launched with their documented
 Pick whichever one matches your subscription and workflow.
 
 Codex and OpenCode are also verified and supported as primary harnesses; Codex uses bounded foreground checkpoints, and OpenCode uses a TUI plugin, so both carry more harness-specific supervision tradeoffs than the three co-primaries.
+Primary-session support is separate from crew launch permissions: crew launches are bounded by default, and an adapter without a verified bounded profile requires explicit per-task approval as documented in [Bounded crew permissions](docs/architecture.md#bounded-crew-permissions).
 
 ### Install and launch
 
