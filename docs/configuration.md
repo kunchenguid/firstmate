@@ -74,16 +74,27 @@ That keeps a tmux pane nested inside herdr on the tmux transport, matching the r
 Target detection uses `FM_SUPERVISOR_TARGET`, then `$TMUX_PANE`, then `"${HERDR_SESSION:-default}:${HERDR_PANE_ID}"` under herdr, then the legacy `firstmate:0` tmux fallback with a warning.
 Selecting any other supervisor backend, including `zellij`, `orca`, or `cmux`, refuses at daemon startup instead of trying tmux injection primitives against a non-tmux pane.
 
+The target has to be right, because injection fails closed on it.
+The daemon types a digest only into a pane whose agent process reads `alive` (`fm_backend_agent_alive`), so a target pointing at a bare shell - or at a harness the backend cannot attribute, which is `pi`, whose agent runs as a generic `node` - receives no escalation for the whole away session; see [Agent-liveness injection guard](herdr-backend.md#agent-liveness-injection-guard-2026-07-14-the-starship-glyph-hole).
+That state is announced rather than left to be discovered: `bin/fm-afk-launch.sh` prints a bordered warning as away mode is armed, and `bin/fm-bootstrap.sh` re-probes at every session start as an `AFK_INJECTION_DISABLED:` line ("Toolchain" below).
+Nothing is lost when it does - escalations buffer, raise the wedge alarm, and flush on afk exit - but none reach the pane while the captain is away.
+
 ## Away-mode wedge alarm channels (config/wedge-alarm)
 
-When away-mode injection wedges past `FM_MAX_DEFER_SECS`, the sub-supervisor raises a loud, rate-limited alarm.
-Beyond the durable `state/.subsuper-inject-wedged` marker and the tmux status-line flash, it attempts a configured backend-independent active alert that can reach the captain even when every pane and its backend status-line is unreadable.
+When away-mode delivery breaks past `FM_MAX_DEFER_SECS`, the sub-supervisor raises a loud, rate-limited alarm.
+Beyond a durable marker and the tmux status-line flash, it attempts a configured backend-independent active alert that can reach the captain even when every pane and its backend status-line is unreadable.
+
+Two alarms share these channels, and which one fired is what every captain-facing surface says.
+The **buffer wedge** means escalations are stuck behind a supervisor pane that still exists and is still being retried; it writes `state/.subsuper-inject-wedged`, is gated on a non-empty buffer, and re-raises at most once per max-defer window until the buffer lands.
+The **vanished pane** means the supervisor pane has not resolved for a full max-defer window, so away-mode supervision is DOWN and nothing can be delivered at all; it writes its own `state/.subsuper-pane-gone`, fires even on an empty buffer, and fires exactly once per absence episode rather than once per window, because a vanished pane cannot heal on its own and an all-night repeat would be alert fatigue on the one channel that has to work.
+Both carry a diagnostic `cause` tag naming what the last delivery attempt recorded (`pane-busy`, `composer-not-empty`, `agent-dead`, `agent-unknown`, `submit-unconfirmed`, `pane-gone`), so a wedge never has to be diagnosed by guesswork.
+
 `config/wedge-alarm` (local, gitignored) lists channel directives, one per non-empty, non-comment line; every listed non-`off` channel fires, best-effort.
 `FM_WEDGE_ALARM_CHANNEL` overrides the file with a single directive.
 Directives are `off` (a position-independent kill switch that disables every active alert), `auto`/`default`, `osascript` (macOS Notification Center banner), `herdr` (herdr UI notification), and `command:<cmd>` (run `<cmd>` via `sh -c`, summary on `$1` and stdin).
-An absent file means `auto`, i.e. default-on on macOS: the alarm exists precisely so a wedged away-mode primary is never silent, and it fires at most once per max-defer window after a genuine wedge.
+An absent file means `auto`, i.e. default-on on macOS: the alarm exists precisely so a broken away-mode delivery is never silent.
 A missing or failing channel logs and falls through to the next, never crashing the daemon.
-See [`wedge-alarm.md`](wedge-alarm.md) for the channel reference and macOS verification evidence, and [`examples/wedge-alarm`](examples/wedge-alarm) for a copyable config.
+See [`wedge-alarm.md`](wedge-alarm.md) for the two alarms, the reach each one guarantees, the channel reference, and macOS verification evidence, and [`examples/wedge-alarm`](examples/wedge-alarm) for a copyable config.
 
 ## Gate defaults (.no-mistakes.yaml)
 
@@ -224,6 +235,9 @@ An absent or incompatible `tasks-axi` reports `MISSING: tasks-axi (install: npm 
 An absent `quota-axi` reports `MISSING: quota-axi (install: npm install -g quota-axi)`; `bin/fm-dispatch-select.sh` still degrades to the first profile at runtime when quota data is unavailable.
 Bootstrap also reports a `TANGLE:` line when `FM_ROOT` is on a named non-default branch; follow the printed checkout remediation rather than treating it as an installable tool problem.
 In a read-only session that did not get the fleet lock, the same line is advisory and omits the checkout command.
+It reports an `AFK_INJECTION_DISABLED:` line, likewise not a tool problem, when away mode is armed (`state/.afk`) but the away-mode daemon's fail-closed agent-liveness guard cannot deliver into the pane it injects into - that pane reads dead or unattributable, or no longer exists at all (see "Away-mode supervisor backend" above).
+Like `TANGLE:`, it is re-derived live on every run rather than read from a marker, so a corrected target or a respawned agent clears it on the next session start; and when a daemon is already running, the pane probed is the one THAT daemon injects into, not the pane this session happens to occupy, which is what makes it survive a firstmate restart into a new pane.
+Follow the remediation the line prints: re-arming does not retarget a running daemon, so a verdict resolved from one says to stop away mode first and arm it again from firstmate's own pane.
 The locked session-start bootstrap step also runs a best-effort project clone refresh through `fm-fleet-sync.sh`.
 It emits `FLEET_SYNC:` for skipped refreshes that may matter, recovered self-heals, and `STUCK:` alarms.
 Normal completed runs keep local-only and no-origin skips silent.
@@ -390,7 +404,7 @@ FM_SUPERVISOR_BACKEND=             # optional supervisor pane backend override; 
 FM_SUPERVISOR_TARGET=              # optional supervisor pane target override; tmux target or herdr <session>:<pane-id>, otherwise auto-detected
 FM_INJECT_SKIP=heartbeat           # |-prefixes force-self-handled bypassing classification; empty disables
 FM_ESCALATE_BATCH_SECS=90          # buffer window for batched escalation digests; 0 = flush immediately
-FM_MAX_DEFER_SECS=300              # max buffered escalation age before retry plus wedge alarm; 0 disables
+FM_MAX_DEFER_SECS=300              # max buffered escalation age before retry plus wedge alarm; also the continuous-absence window a vanished supervisor pane must persist for before its own supervision-DOWN alarm; 0 disables both
 FM_WEDGE_ALARM_CHANNEL=            # override config/wedge-alarm with one active-alert directive for the wedge alarm; off|auto|osascript|herdr|command:<cmd>; absent = auto (macOS -> an OS notification)
 FM_WEDGE_ALARM_EXEC=              # notifier seam: route every channel (osascript, herdr, command:) through this command as `<cmd> <channel> <summary>`; "discard" fires nothing; unset in production; the daemon defaults it to "discard" when sourced so no test posts a real notification (docs/wedge-alarm.md)
 FM_WEDGE_ALARM_TIMEOUT_SECS=10    # maximum seconds for each osascript, herdr, override, or command: notifier before its watchdog terminates it and continues to the next channel; invalid or zero values use 10

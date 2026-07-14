@@ -1,7 +1,14 @@
-# config/wedge-alarm - active alert channels for the away-mode injection wedge
-# alarm (bin/fm-supervise-daemon.sh's inject_wedge_alarm). Copy this into a
+# config/wedge-alarm - active alert channels for the away-mode alarms
+# (bin/fm-supervise-daemon.sh's inject_wedge_alarm). Copy this into a
 # local, gitignored config/wedge-alarm and edit. One channel directive per
 # non-empty, non-comment line; every listed non-off channel fires, best-effort.
+#
+# Two alarms share these channels, and the banner title says which fired:
+#   escalations WEDGED    escalations are stuck behind a supervisor pane that is
+#                         still there and still being retried; re-raised once per
+#                         max-defer window until they land
+#   supervision DOWN      the supervisor pane is gone, so nothing can be delivered
+#                         at all; fired once per absence episode, buffered or not
 #
 # Directives:
 #   off              position-independent kill switch: disable every active
