@@ -334,10 +334,20 @@ if [ -n "$BASE" ]; then
     echo "error: --base does not apply to local-only mode (no remote or PR; merges into local main)" >&2
     exit 1
   fi
+  # fm-spawn.sh deliberately launches a based task whose base has MERGED and had its
+  # branch deleted - the normal end-state of a stacked PR - because nothing is left to
+  # stack on and nothing can be dragged anywhere. The fetch below then fails, so the
+  # brief has to say what to do about it: an instruction with no path through a state
+  # the spawn allows is not an instruction. A base that was ABANDONED rather than
+  # merged never gets here; fm-spawn.sh refuses that launch.
   BRANCH_STEP="1. First action: fetch the intended base and root your branch ON it. The worktree starts on the DEFAULT branch, so branching without this step would root your work on the wrong base:
    \`\`\`
    git fetch origin $BASE
    git checkout -b fm/$ID FETCH_HEAD
+   \`\`\`
+   If that fetch fails because \`$BASE\` no longer exists on origin, that base has already merged into the default branch and there is nothing left to stack on. Root your branch on the default branch you are already sitting on instead (\`git checkout -b fm/$ID\`), IGNORE every other base-branch instruction in this brief, and work the task as an ordinary default-branch one. Report it once so firstmate can retire the declaration:
+   \`\`\`
+   echo \"working: intended base $BASE is gone from origin (it merged); proceeding as an ordinary default-branch task\" >> $STATUS_FILE
    \`\`\`"
   # The Setup note and the definition of done must not disagree about whether the
   # branch may end up rebased onto the default branch. Under direct-PR the

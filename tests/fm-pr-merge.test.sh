@@ -25,15 +25,20 @@
 #   (g) explicit merge method is not overridden by the default --squash
 #   (h) repo override args fail fast because the repo comes from the URL
 #
-# WHETHER THE BASE BRANCH STILL EXISTS DECIDES NOTHING. What decides is whether the
-# BASE'S WORK HAS LANDED in the default branch, and branch existence is an unsound
-# proxy for that in both directions: a base can be deleted WITHOUT merging (an
-# abandoned feature - its unmerged commits ride on the head, the original incident),
-# and a base can merge and NOT be deleted (GitHub's delete-on-merge is off by default -
-# nothing left to guard, and guarding it would refuse a safe merge forever). So the
-# guard asks fm_base_work_landed on BOTH paths, from the base's live tip while the
-# branch is there and from the recorded spawn-time tip (base_sha=) once it is gone, and
-# stands down only on proof that the work landed.
+# WHETHER THE BASE BRANCH STILL EXISTS DECIDES NOTHING - it is an unsound proxy in both
+# directions: a base can be deleted WITHOUT merging (an abandoned feature - its unmerged
+# commits ride on the head, the original incident), and a base can merge and NOT be
+# deleted (GitHub's delete-on-merge is off by default - guarding that would refuse a safe
+# merge forever). Existence only chooses WHICH TIP the checks reason from: the live tip
+# while the branch is there, the recorded spawn-time tip (base_sha=) once it is gone.
+#
+# WHAT DECIDES IS TWO INDEPENDENT QUESTIONS, ASKED IN THIS ORDER. WHERE IS THE HEAD
+# ROOTED (fm_base_head_rooted) - in the default branch, or in the base's own commits?
+# And HAS THE BASE'S WORK LANDED (fm_base_work_landed), which says what the first answer
+# MEANS. Landedness alone is not a licence to stand down: it speaks for the default
+# branch's CONTENT, and a squash merge leaves the base's COMMITS out of the default
+# branch, so a head still rooted in that base still carries them (see the
+# stacked-on-a-squash-merged-base cases below, which refuse).
 #
 # Matrix (fm-pr-check.sh based-on-base guard). Base UNLANDED - the live feature branch
 # the guard exists for:
@@ -48,13 +53,14 @@
 #       refuses: this is the original incident, and standing down would land the abandoned
 #       base's commits on main
 #
-# Base LANDED - the base merged, so there is no unmerged history left to drag anywhere
-# and the guard must stand down rather than deadlock a legitimate merge. Standing down
-# is not skipping the check: it re-checks the PR as the ordinary default-branch PR it
-# now is, so the base label must be the DEFAULT branch:
+# Base LANDED and the head sits on the DEFAULT BRANCH - the base merged and the head
+# carries none of its commits, so there is nothing left to drag anywhere and the guard
+# must stand down rather than deadlock a legitimate merge. Standing down is not skipping
+# the check: it re-checks the PR as the ordinary default-branch PR it now is, so the base
+# label must be the DEFAULT branch:
 #   (o) base still PRESENT on origin, squash-merged into main, head rebased onto main ->
-#       stands down; enforcing rootedness here would refuse forever, with a recovery
-#       (retarget onto the base) that is a no-op
+#       stands down; enforcing rootedness against the base here would refuse forever,
+#       with a recovery (retarget onto the base) that is a no-op
 #   (p) base still PRESENT on origin, ancestor-merged into main, PR label is main ->
 #       stands down; the label check against the BASE alone would refuse forever
 #   (q) base GONE, recorded tip is an ANCESTOR of main (it merged and was auto-deleted)
@@ -64,6 +70,15 @@
 #   (s) base merged but NOT deleted, and the PR still targets THAT base -> refuses:
 #       merging would merge into an already-merged branch, so the fix would never reach
 #       main while the PR would still read MERGED and teardown would release the work
+#
+# Base LANDED but the head is STILL ROOTED IN IT - the case landedness alone cannot see.
+# A squash merge puts the base's content in main without its commits, so this head still
+# carries every one of them and merging would land them again:
+#   (s2) base squash-merged, branch KEPT, head still stacked on it -> refuses, and
+#        prescribes the head's REBASE onto main; a retarget alone leaves those commits
+#        on the head
+#   (s3) the same, with the branch DELETED too -> refuses identically; absence changes
+#        only which tip the checks reason from, never the verdict
 #
 # Landedness INDETERMINATE or unaskable - never a stand-down, because standing down is
 # the guard's only relaxation and it takes proof. Note that "do not relax" is not the
@@ -757,9 +772,12 @@ test_pr_check_stands_down_when_present_base_ancestor_merged() {
 # more (the squash rewrote it), so an ancestor-only test would call this an abandoned
 # base and deadlock the merge. Its work IS in main, which is what actually matters.
 # main also advances afterwards, so this pins containment rather than tip equality.
+# The head is where the pipeline leaves it - rebased onto main - so it carries none of
+# the base's own commits. A head still STACKED on that squash-merged base is a different
+# state entirely and must refuse; that is the case below this one.
 test_pr_check_stands_down_when_base_squash_merged_and_deleted() {
   local case_dir rc tip tree parent squash
-  case_dir=$(make_git_case squashedbase feature main)
+  case_dir=$(make_git_case squashedbase main main)
   tip=$(base_tip "$case_dir")
   # Squash feature/base into main: one new commit on main carrying the base's tree,
   # with no ancestry back to the base's own commits. Then origin deletes the branch,
@@ -787,6 +805,84 @@ test_pr_check_stands_down_when_base_squash_merged_and_deleted() {
     "squashed-base: pr= should be recorded once the guard stands down"
   assert_present "$case_dir/state/task-x1.check.sh" "squashed-base: the merge poll should be armed"
   pass "fm-pr-check stands down when the declared base was squash-merged and deleted"
+}
+
+# The hole a landedness-only stand-down opens, and it is the ORIGINAL incident reached
+# through the other door. The base SQUASH-merged (firstmate's own default merge method,
+# and GitHub's most common setting), so its CONTENT is in main but its COMMITS are not -
+# main carries one new commit with a different id. A head still STACKED on that base -
+# the ordinary direct-PR shape, where the crewmate owns its branch and never rebases it -
+# therefore still carries every one of the base's pre-squash commits. Merging it into
+# main lands them a second time, and its diff shows the base's already-merged changes as
+# this task's. Landedness says "no unmerged content left"; rootedness says "this head
+# still carries the base's commits". BOTH are true, and only the second one is about the
+# head. So the guard asks rootedness FIRST and refuses here - and it must prescribe the
+# head's REBASE, because retargeting the label leaves those commits exactly where they are.
+test_pr_check_refuses_head_still_stacked_on_squash_merged_base() {
+  local case_dir rc tree parent squash
+  case_dir=$(make_git_case stackedonsquashed feature feature/base)
+  tree=$(git -C "$case_dir/origin.git" rev-parse "refs/heads/feature/base^{tree}")
+  parent=$(git -C "$case_dir/origin.git" rev-parse refs/heads/main)
+  squash=$(git -C "$case_dir/origin.git" commit-tree "$tree" -p "$parent" -m 'squash feature/base')
+  git -C "$case_dir/origin.git" update-ref refs/heads/main "$squash"
+  advance_main "$case_dir"
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    "window=fm-task-x1" "worktree=$case_dir/wt" "project=$case_dir/project" \
+    "kind=ship" "mode=no-mistakes" "base=feature/base" "base_sha=$(base_tip "$case_dir")"
+
+  set +e
+  run_pr_check "$case_dir" task-x1 https://github.com/example/repo/pull/9 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "stacked-on-squashed: a head still carrying a squash-merged base's commits must not be waved through"
+  assert_grep 'still stacked on its intended base' "$case_dir/stderr" \
+    "stacked-on-squashed: the refusal did not say the head still sits on the merged base"
+  assert_grep 'git rebase --onto origin/main' "$case_dir/stderr" \
+    "stacked-on-squashed: the refusal did not prescribe the head's rebase, which is the only thing that resolves this state"
+  assert_no_grep 'guard stands down' "$case_dir/stderr" \
+    "stacked-on-squashed: the guard stood down for a head that still carries the base's pre-squash commits"
+  assert_no_grep 'pr=https://github.com/example/repo/pull/9' "$case_dir/state/task-x1.meta" \
+    "stacked-on-squashed: a head carrying the merged base's commits must not record pr= before merge"
+  assert_absent "$case_dir/state/task-x1.check.sh" \
+    "stacked-on-squashed: a head carrying the merged base's commits must not arm the merge poll"
+  pass "fm-pr-check refuses a head still rooted in a squash-merged base, and prescribes the rebase"
+}
+
+# The same head, after the squash-merged base's branch was deleted too. Absence changes
+# only which tip the checks reason from (the spawn-time base_sha=), never the verdict:
+# the head still carries the base's pre-squash commits, so merging still lands them.
+test_pr_check_refuses_head_still_stacked_on_squash_merged_gone_base() {
+  local case_dir rc tip tree parent squash
+  case_dir=$(make_git_case stackedonsquashedgone feature main)
+  tip=$(base_tip "$case_dir")
+  tree=$(git -C "$case_dir/origin.git" rev-parse "refs/heads/feature/base^{tree}")
+  parent=$(git -C "$case_dir/origin.git" rev-parse refs/heads/main)
+  squash=$(git -C "$case_dir/origin.git" commit-tree "$tree" -p "$parent" -m 'squash feature/base')
+  git -C "$case_dir/origin.git" update-ref refs/heads/main "$squash"
+  git -C "$case_dir/origin.git" update-ref -d refs/heads/feature/base
+  advance_main "$case_dir"
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    "window=fm-task-x1" "worktree=$case_dir/wt" "project=$case_dir/project" \
+    "kind=ship" "mode=no-mistakes" "base=feature/base" "base_sha=$tip"
+
+  set +e
+  run_pr_check "$case_dir" task-x1 https://github.com/example/repo/pull/9 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "stacked-on-squashed-gone: a deleted base does not make the head's carried commits disappear"
+  assert_grep 'still stacked on its intended base' "$case_dir/stderr" \
+    "stacked-on-squashed-gone: the refusal did not say the head still sits on the merged base"
+  assert_grep 'git rebase --onto origin/main' "$case_dir/stderr" \
+    "stacked-on-squashed-gone: the refusal did not prescribe the head's rebase"
+  assert_no_grep 'pr=https://github.com/example/repo/pull/9' "$case_dir/state/task-x1.meta" \
+    "stacked-on-squashed-gone: a head carrying the merged base's commits must not record pr= before merge"
+  assert_absent "$case_dir/state/task-x1.check.sh" \
+    "stacked-on-squashed-gone: a head carrying the merged base's commits must not arm the merge poll"
+  pass "fm-pr-check refuses a head still rooted in a squash-merged base whose branch was deleted"
 }
 
 # The hole a "gone means merged" stand-down would open, and it is the ORIGINAL
@@ -1045,6 +1141,8 @@ test_pr_check_stands_down_when_base_merged_and_deleted
 test_pr_check_stands_down_when_base_squash_merged_and_deleted
 test_pr_check_stands_down_when_present_base_squash_merged
 test_pr_check_stands_down_when_present_base_ancestor_merged
+test_pr_check_refuses_head_still_stacked_on_squash_merged_base
+test_pr_check_refuses_head_still_stacked_on_squash_merged_gone_base
 test_pr_check_refuses_when_base_deleted_without_merging
 test_pr_check_refuses_gone_base_with_no_recorded_tip
 test_pr_check_refuses_gone_base_with_unknowable_tip

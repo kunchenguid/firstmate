@@ -816,7 +816,7 @@ resolve_absent_base() {
     "$FM_BASE_WORK_LANDED")
       echo "notice: task $ID declares intended base '$BASE', and that branch is gone from origin - its work IS carried by the default branch '$default_branch_name' ($FM_BASE_WORK_HOW), so it merged and was deleted, the normal end-state of a stacked PR." >&2
       echo "  recorded base tip : $BASE_TIP_KNOWN" >&2
-      echo "  Keeping the declaration: nothing is left to stack on, and fm-pr-check.sh stands its guard down for a merged base and verifies the PR as the ordinary '$default_branch_name' PR it now is. Drop the 'base=$BASE' line from $STATE/$ID.meta to retire it for good." >&2
+      echo "  Keeping the declaration: nothing is left to stack on, so the brief tells the crewmate to root its branch on '$default_branch_name' instead, and fm-pr-check.sh then stands its guard down and verifies the PR as the ordinary '$default_branch_name' PR it now is. Drop the 'base=$BASE' line from $STATE/$ID.meta to retire it for good." >&2
       BASE_SHA=$BASE_TIP_KNOWN
       return 0
       ;;

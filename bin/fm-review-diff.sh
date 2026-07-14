@@ -9,20 +9,21 @@
 # with fm-spawn.sh --base): then it is that base, so review shows the crewmate's
 # own change rather than the entire feature base's unmerged history on top of it.
 #
-# A declared base is only a useful diff base while it still carries unmerged history
-# AND the branch under review actually sits on that history. Three ways it stops
-# being one, each falling back to the default branch with a warning rather than
-# erroring out, so the review is never blocked and the diff always answers the honest
-# question - what would this merge land on the default branch:
-#   - the base is gone from origin;
-#   - the base's work has already landed in the default branch (it merged, whether or
-#     not its branch was deleted), so it has no unmerged history left to subtract;
-#   - the branch under review is not rooted in the base's unmerged history, because
-#     the no-mistakes pipeline rebased it onto the default branch. Diffing against the
-#     base then adds every default-branch commit since the base forked - the very
-#     misleading diff a declared base exists to prevent, in the other direction.
+# WHAT MAKES A DECLARED BASE THE RIGHT DIFF BASE IS THAT THE BRANCH UNDER REVIEW IS
+# ACTUALLY ROOTED IN IT (fm_base_head_rooted) - that its fork point is a commit the
+# default branch cannot reach. That is asked first, and it stays true even after the base
+# merges: a squash merge leaves the base's own commits out of the default branch by
+# commit id, so a branch still stacked on them still forks where it always did.
+# Two ways the declared base stops being the right diff base, each falling back to the
+# default branch with a warning rather than erroring out, so the review is never blocked:
+#   - the base is gone from origin, so there is nothing to diff against;
+#   - the branch under review is NOT rooted in it, because the pipeline rebased the
+#     branch onto the default branch, or because the base ancestor-merged into it and
+#     carries no history of its own any more. Diffing against the base would then take
+#     the old fork point as the merge base and add every default-branch commit since -
+#     the very misleading diff a declared base exists to prevent, in the other direction.
 # A probe origin cannot answer at all still stops. bin/fm-base-lib.sh owns the shared
-# landedness and rootedness predicates, which bin/fm-pr-check.sh's guard decides on
+# rootedness and landedness predicates, which bin/fm-pr-check.sh's guard decides on
 # too, so review and merge never disagree about what the declared base means.
 # When state/<id>.meta records pr= for an open PR, the compare side is the PR
 # head (recorded pr_head= when reachable, else refs/pull/<n>/head) so review
@@ -197,10 +198,20 @@ if [ -n "$BASE_DECLARED" ] && "$HAS_ORIGIN"; then
       fm_base_work_landed "$WT" "$BASE_SHA" "$DEFAULT_SHA" || LANDED_RC=$?
       ROOTED_RC=0
       fm_base_head_rooted "$WT" "$BASE_SHA" "$COMPARE_SHA" "$DEFAULT_SHA" || ROOTED_RC=$?
-      if [ "$LANDED_RC" -eq "$FM_BASE_WORK_LANDED" ]; then
+      if [ "$ROOTED_RC" -eq "$FM_BASE_HEAD_ROOTED" ]; then
+        # The branch forks from a commit $DEFAULT cannot reach, so the base is where it
+        # actually sits and the fork point is real. That stays true after the base
+        # merges: a squash merge leaves the base's own commits out of $DEFAULT by commit
+        # id, so falling back to $DEFAULT here would take the OLD fork point as the merge
+        # base and show every one of the base's already-merged changes as part of this
+        # task's - the very diff a declared base exists to prevent, in the other direction.
+        if [ "$LANDED_RC" -eq "$FM_BASE_WORK_LANDED" ]; then
+          echo "warning: task $ID declares intended base $BASE_DECLARED, and that base has already merged - its work is carried by $DEFAULT ($FM_BASE_WORK_HOW) - but the branch under review is still rooted in the base's own pre-merge commits, so $BASE_DECLARED remains its real fork point and the diff below is taken against it; the head must be rebased onto $DEFAULT before this can merge, and bin/fm-pr-check.sh refuses it until then" >&2
+        fi
+      elif [ "$LANDED_RC" -eq "$FM_BASE_WORK_LANDED" ]; then
         echo "warning: task $ID declares intended base $BASE_DECLARED, but that base has already merged - its work is carried by $DEFAULT ($FM_BASE_WORK_HOW), so it has no unmerged history left to subtract; diffing against the default branch $DEFAULT instead, so this shows everything the PR would land on $DEFAULT" >&2
         BASE_BRANCH=$DEFAULT
-      elif [ "$ROOTED_RC" -ne "$FM_BASE_HEAD_ROOTED" ]; then
+      else
         echo "warning: task $ID declares intended base $BASE_DECLARED, but the branch under review is not rooted in that base's unmerged history (the pipeline rebased it onto $DEFAULT); diffing against it would present every $DEFAULT commit since the base forked as part of the change, so diffing against the default branch $DEFAULT instead" >&2
         BASE_BRANCH=$DEFAULT
       fi

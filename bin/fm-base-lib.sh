@@ -7,9 +7,8 @@
 #                         PR head is rooted in the base's unmerged history.
 #   - bin/fm-review-diff.sh  diffs the crewmate's branch against that base.
 #
-# THE DECIDING QUESTION IS NOT WHETHER THE BASE BRANCH STILL EXISTS. It is whether
-# THE BASE'S WORK HAS LANDED IN THE DEFAULT BRANCH. Branch existence is an unsound
-# proxy for that in BOTH directions:
+# THE DECIDING QUESTION IS NOT WHETHER THE BASE BRANCH STILL EXISTS. Branch existence
+# is an unsound proxy for anything, in BOTH directions:
 #
 #   deleted without merging   an abandoned feature, a closed base PR, a force-deleted
 #                             branch. The base's commits never landed, the pipeline
@@ -19,13 +18,27 @@
 #   merged but NOT deleted    GitHub's "automatically delete head branches" is OFF by
 #                             default, so this is at least as common an end-state as
 #                             the deleted one. The base's work is already in the
-#                             default branch: nothing is left to drag anywhere, and
+#                             default branch, so a head that was rebased onto the
+#                             default branch has nothing left to drag anywhere, and
 #                             guarding it would refuse a safe merge forever.
 #
-# So fm_base_work_landed below is the single predicate both consumers decide on, and
-# the origin probe is an INPUT to it, not the decision. Standing the guard down is
-# the only relaxation, and it requires proof that the work landed; anything short of
-# proof keeps the guard on.
+# WHAT DECIDES IS TWO INDEPENDENT QUESTIONS, AND BOTH MUST BE ASKED:
+#
+#   WHERE IS THE HEAD ROOTED (fm_base_head_rooted)? In the default branch, or in the
+#   base's own commits? This is asked FIRST, because it is what says whether merging
+#   the head into the default branch would carry the base's commits along at all.
+#
+#   HAS THE BASE'S WORK LANDED (fm_base_work_landed)? It refines what the first answer
+#   MEANS: a head rooted in a live base is correctly stacked, while a head rooted in a
+#   base that has already SQUASH-merged still carries that base's pre-squash commits -
+#   which the default branch does not have by commit id, however much it has their
+#   content - so merging it into the default branch would land them all over again.
+#
+# Neither question subsumes the other, and landedness alone is NOT a licence to stand
+# down: it only tells the default branch's content story, not the head's commit story.
+# The origin probe is an INPUT to both, never the decision. Standing the guard down is
+# the only relaxation there is, and it takes proof; anything short of proof keeps the
+# guard on.
 #
 # The probe still has three states, because a base that is ABSENT from origin is not
 # the same as a base we FAILED TO ASK ABOUT:
@@ -126,22 +139,24 @@ fm_base_probe_origin() {  # <git-dir> <branch>
   esac
 }
 
-# fm_base_work_landed: did the declared base's work actually reach the default
-# branch? THIS IS THE ONE PREDICATE THE GUARD AND THE REVIEW DIFF BOTH DECIDE ON,
-# whether the base branch is still on origin or not, because it is the question that
-# actually determines whether any hazard is left:
+# fm_base_work_landed: did the declared base's work actually reach the default branch?
+# Asked of the base's CONTENT, not of the head, and answered the same way whether the
+# base branch is still on origin or not:
 #
-#   landed    the base's work is in the default branch already. There is no unmerged
-#             feature history left to drag into it, so the declared base has nothing
-#             to guard and nothing to diff against: callers stand down and treat the
-#             task as an ordinary default-branch PR. It does not matter whether the
-#             branch was deleted afterwards or kept.
+#   landed    the base's work is in the default branch already. It merged - whether its
+#             branch was deleted afterwards or kept. A head that sits on the DEFAULT
+#             branch therefore has no unmerged feature history left to drag into it, and
+#             callers stand down. A head still ROOTED IN THE BASE is a different story:
+#             see fm_base_head_rooted, because a squash merge leaves the base's own
+#             commits out of the default branch by commit id even though their content
+#             is in it, and such a head still carries them.
 #   unlanded  the base still carries unmerged work. This is the live-feature-branch
 #             case the guard exists for - and it is ALSO an abandoned base that was
 #             deleted without merging, whose commits the pipeline replayed onto the
 #             head. Callers keep guarding.
-#   unknown   we could not tell. Not landed: callers stay fail-closed and never
-#             relax on it.
+#   unknown   we could not tell. Not landed: callers never relax on it. "Do not relax"
+#             is not "refuse" - a caller with the strict rootedness and label checks
+#             still available runs them, which costs a correctly stacked PR nothing.
 #
 # The fact it reasons from is a base tip: the live tip on origin while the branch is
 # still there, else base_sha=, the tip fm-spawn.sh recorded at spawn time when the
@@ -212,10 +227,21 @@ fm_base_work_landed() {  # <git-dir> <base-sha> <default-sha>
 # a head that is merely behind is still correctly based and safe to merge; demanding
 # tip-descent would turn every routine base advance into a hard merge refusal.
 #
-# Only meaningful for an UNLANDED base. Once the base's work is in the default branch it
-# has no unmerged history of its own, so every merge-base is reachable from the default
-# branch and this would report UNROOTED for a head that is perfectly fine - which is why
-# callers ask fm_base_work_landed FIRST and stand down before ever getting here.
+# THIS IS ASKED FIRST, AND IT IS MEANINGFUL WHATEVER fm_base_work_landed SAYS - it reads
+# the head's commits, where landedness reads the default branch's content, and a merged
+# base does not make the head's own history disappear:
+#
+#   ancestor-merged base   its commits ARE in the default branch, so a head stacked on it
+#                          forks from a commit the default branch can reach and reads
+#                          UNROOTED. Correct: the head carries nothing the default branch
+#                          lacks, and it is an ordinary default-branch PR.
+#   squash-merged base     its commits are NOT in the default branch by id, only their
+#                          content is, so a head still stacked on it forks from a commit
+#                          the default branch cannot reach and reads ROOTED. Correct, and
+#                          it is exactly the head that would re-land the base's commits.
+#
+# So a caller that asked landedness first and stood down on it would wave that second
+# head straight through.
 #
 # Returns FM_BASE_HEAD_ROOTED, FM_BASE_HEAD_UNROOTED, or FM_BASE_HEAD_UNRELATED (the two
 # commits share no history at all). Sets FM_BASE_MERGE_BASE to the branch point when
