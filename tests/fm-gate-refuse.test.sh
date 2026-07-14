@@ -356,12 +356,16 @@ test_no_mistakes_yaml_disables_project_settings() {
 }
 
 test_herdr_acceptance_gate_ci_parity() {
-  local gate="$ROOT/.no-mistakes.yaml" ci="$ROOT/.github/workflows/ci.yml"
+  local gate="$ROOT/.no-mistakes.yaml" ci="$ROOT/.github/workflows/ci.yml" contributing="$ROOT/CONTRIBUTING.md"
   assert_grep "export FM_RUN_HERDR_GUIDE_E2E=1" "$gate" \
     "no-mistakes commands.test must enable the guarded Herdr acceptance"
   assert_grep "FM_RUN_HERDR_GUIDE_E2E: 1" "$ci" \
     "CI behavior tests must enable the guarded Herdr acceptance"
-  pass "no-mistakes and CI both require the guarded Herdr acceptance"
+  assert_grep "export FM_RUN_HERDR_GUIDE_E2E=1" "$contributing" \
+    "CONTRIBUTING run-all must enable the guarded Herdr acceptance"
+  assert_grep "operates only through \`bin/fm-herdr-lab.sh\` on a generated non-default session" "$contributing" \
+    "CONTRIBUTING must document Herdr acceptance isolation"
+  pass "documented run-all, no-mistakes, and CI require guarded Herdr acceptance"
 }
 
 test_helper_env_marker_refuses
