@@ -11,6 +11,23 @@
 # detection all see the same adapter contract they saw before, so they did not
 # need to change.
 #
+# P5 addendum: orca's UI sidebar hides worktrees whose git-common-dir does not
+# match the orca-registered repo path (firstmate's projects/<repo> copy vs the
+# captain's Desktop/<repo> copy) and gates visibility on the
+# `externalWorktreeVisibility` setting, which defaults to "hide". When the
+# firstmate-owned projects/<repo> clone is not registered with orca, the
+# worktree this adapter creates is "external" and the captain cannot see it in
+# the GUI without manually clicking the "Hiding 1 discovered worktree" line.
+# To bridge that gap at spawn time, fm_backend_orca_worktree_create and
+# fm_backend_orca_remove_worktree now call bin/fm-mod-orca-ui.sh to register the
+# worktree in orca's profile (profiles/local-default/orca-data.json
+# `worktreeMeta`). Known limitation (P5): orca rewrites that file on its own
+# graceful shutdown, so any registration only survives until the next orca
+# restart. That is acceptable for firstmate's lifetime of a single session
+# (the captain is looking at orca right now), but a long-running firstmate
+# that outlasts an orca restart needs a re-registration sweep - tracked as
+# future work.
+#
 # The Orca backend owns both the git worktree path and the terminal endpoint.
 # The worktree is acquired through `git worktree add` (the daemon has no
 # worktree primitive and the broken `orca worktree create` CLI is what drove
@@ -114,15 +131,18 @@ fm_backend_orca_worktree_dir() {  # <project-path> <name>
 # does NOT run `treehouse get` - the worktree IS the project - so this only
 # protects against a `command` injected at create time (currently unused).
 fm_backend_orca_create_terminal() {  # <session-id> <cwd> <title>
-  local session_id=$1 cwd=$2 title=$3 actual_cwd
+  local session_id=$1 cwd=$2 title=$3 actual_cwd expected_cwd
   fm_backend_orca_tool_check || return 1
   fmod create "$session_id" --cwd "$cwd" --cols 200 --rows 50 --shell-ready >/dev/null || return 1
   actual_cwd=$(fmod get-cwd "$session_id") || return 1
-  # fmod get-cwd normalizes the path with a trailing slash; the caller-supplied
-  # $cwd never has one. Compare on the canonical stripped form so a sane create
-  # is not misclassified as a cwd mismatch and aborted.
-  if [ "${actual_cwd%/}" != "${cwd%/}" ]; then
-    echo "error: orca session $session_id attached at $actual_cwd, expected $cwd" >&2
+  # Compare on the canonical shell-resolved form so symlinked worktrees (e.g.
+  # under FM_HOME/FM_STATE_OVERRIDE where the captain points FM_HOME at a
+  # symlinked tree) do not false-positive. fmod get-cwd canonicalizes its
+  # returned path; we mirror that here with `readlink -f`. The trailing-slash
+  # rstrip is preserved because fmod historically returned paths with one.
+  expected_cwd=$(readlink -f -- "$cwd" 2>/dev/null || printf '%s' "$cwd")
+  if [ "${actual_cwd%/}" != "${expected_cwd%/}" ]; then
+    echo "error: orca session $session_id attached at $actual_cwd, expected $expected_cwd (resolved from $cwd)" >&2
     fmod kill "$session_id" --immediate >/dev/null 2>&1 || true
     return 1
   fi
@@ -230,6 +250,31 @@ fm_backend_orca_worktree_create() {  # <project-path> <name>
   # Stash the session id in the worktree so remove can find the terminal.
   printf '%s\n' "$session_id" > "$wt_path/.fm-orca-session"
 
+  # P5: register the worktree in orca's profile so it appears in the sidebar
+  # for the current orca session. Pass the original project path (not the
+  # worktree's git-common-dir) because firstmate's projects/ copy and the
+  # captain's Desktop copy are sibling clones and only one has an orca
+  # session; orca's UI follows the parent project's session id, not the
+  # worktree's git topology. fm-mod-orca-ui.sh resolves the orca-registered
+  # path via fmod list. Best-effort: registration failure does not block the
+  # spawn, only the sidebar visibility, but the captain should know when
+  # the spawn succeeds without orca showing the new session.
+  if [ -n "$project" ] && [ -d "$project" ] && [ -n "${FM_ROOT:-}" ] && [ -x "${FM_ROOT}/bin/fm-mod-orca-ui.sh" ]; then
+    if "$FM_ROOT/bin/fm-mod-orca-ui.sh" register "$wt_path" --parent-path "$project" \
+        >"$wt_path/.fm-orca-ui-key" 2>/dev/null; then
+      :
+    else
+      rc=$?
+      rm -f "$wt_path/.fm-orca-ui-key"
+      # stderr line so firstmate / the captain can see the spawn succeeded
+      # without orca surfacing the session. The full fix path lives in
+      # docs/orca-backend.md; until then, a one-line warning on stderr is
+      # the best visibility we can offer without breaking the spawn.
+      printf 'warn: orca UI sidebar registration failed for %s (rc=%d); the spawned worktree will appear as "Hiding 1 discovered worktree" in orca until the registration is reapplied\n' \
+        "$wt_path" "$rc" >&2
+    fi
+  fi
+
   # Adapter contract: TAB-separated wt_id \t wt_path [\t terminal].
   printf '%s\t%s\t%s' "$wt_path" "$wt_path" "$session_id"
 }
@@ -314,16 +359,37 @@ fm_backend_orca_remove_worktree() {  # <wt-id>
       main_repo="$home_guess/$project_name"
     fi
   fi
+  # P5: capture the orca worktreeMeta key BEFORE removing the worktree, since
+  # the key file lives inside $wt_path and disappears with `git worktree
+  # remove --force`. Reading it first keeps the unregister call on the
+  # happy-path teardown (the previous placement AFTER the remove silently
+  # never ran).
+  local ui_key=""
+  if [ -f "$wt_path/.fm-orca-ui-key" ]; then
+    ui_key=$(cat "$wt_path/.fm-orca-ui-key")
+  fi
   if [ -n "$main_repo" ] && [ -d "$main_repo" ]; then
     git -C "$main_repo" worktree remove --force "$wt_path" || return 1
     case "$branch" in
       fm/*) git -C "$main_repo" branch -D -- "$branch" >/dev/null 2>&1 || true ;;
     esac
     fmod kill "$session_id" >/dev/null 2>&1 || true
+    # P5: best-effort unregister from orca's profile, matching the register
+    # call in fm_backend_orca_worktree_create. Tolerate a missing key file
+    # (older worktrees created before P5) and a missing tool (tests).
+    if [ -n "$ui_key" ] && [ -n "${FM_ROOT:-}" ] && [ -x "${FM_ROOT}/bin/fm-mod-orca-ui.sh" ]; then
+      "$FM_ROOT/bin/fm-mod-orca-ui.sh" unregister "$ui_key" \
+        >/dev/null 2>&1 || true
+    fi
     return 0
   fi
   git -C "$wt_path" worktree remove --force "$wt_path" || return 1
   fmod kill "$session_id" >/dev/null 2>&1 || true
+  # P5: best-effort unregister (see matching register call above).
+  if [ -n "$ui_key" ] && [ -n "${FM_ROOT:-}" ] && [ -x "${FM_ROOT}/bin/fm-mod-orca-ui.sh" ]; then
+    "$FM_ROOT/bin/fm-mod-orca-ui.sh" unregister "$ui_key" \
+      >/dev/null 2>&1 || true
+  fi
 }
 
 # fm_backend_orca_worktree_path <wt-id>: the worktree IS its path. Kept for

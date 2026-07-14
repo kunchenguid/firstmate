@@ -871,6 +871,7 @@ exclude_path() {
 if [ "$KIND" != secondmate ]; then
   if [ "$BACKEND" = orca ]; then
     exclude_path '.fm-orca-session'
+    exclude_path '.fm-orca-ui-key'
   fi
   case "$HARNESS" in
     claude*)

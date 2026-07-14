@@ -56,7 +56,10 @@ log() { printf '[orca-supervisor] %s\n' "$*"; }
 
 fmod_info_reachable() {
   timeout 5 "$FMOD" info 2>/dev/null \
-    | python3 -c 'import json,sys; d=json.load(sys.stdin); sys.exit(0 if d.get("daemon_reachable") and d.get("daemon_pong",{}).get("pong") else 1)' \
+    | python3 -c 'import json,sys
+d = json.load(sys.stdin)
+pong = d.get("daemon_pong") if isinstance(d.get("daemon_pong"), dict) else None
+sys.exit(0 if d.get("daemon_reachable") is True and pong and pong.get("pong") is True else 1)' \
     2>/dev/null
 }
 
@@ -90,8 +93,9 @@ relaunch_orca() {
   [ -n "$ORCA_BIN" ] || { log "error: no orca binary on PATH"; return 1; }
   [ -x "$(command -v setsid)" ] || { log "error: setsid missing (install util-linux)"; return 1; }
   # setsid --fork detaches into its own session so the AppImage survives our
-  # parent shell exit; stdin/stdout/stderr all go to /dev/null.
-  setsid --fork "$ORCA_BIN" </dev/null >/tmp/orca-supervisor.log 2>&1 || {
+  # parent shell exit; stdin/stdout/stderr all go to /dev/null. Log path is
+  # per-instance (rooted at $STATE) so multi-home setups don't collide.
+  setsid --fork "$ORCA_BIN" </dev/null >"$STATE/orca-supervisor.log" 2>&1 || {
     log "error: setsid --fork orca failed"; return 1; }
   # Give the daemon time to bind the unix socket before we return success.
   local i
@@ -194,7 +198,10 @@ case "${1:-status}" in
     # the supervisor's first poll would just report what we already saw.
     ensure_healthy || exit 2
     clear_pidfile
-    setsid --fork "$0" --follow </dev/null >/tmp/fm-supervise-orca.log 2>&1 &
+    # Log to per-instance state dir; multiple firstmate homes on this host
+    # stay on separate log files (otherwise their supervisors race each
+    # other's writes and confuse the orca-test-suite supervisor-log check).
+    setsid --fork "$0" --follow </dev/null >"$STATE/.orca-supervisor.log" 2>&1 &
     disown
     for _ in 1 2 3 4 5 6 7 8 9 10; do
       if already_supervised; then

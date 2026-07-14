@@ -219,7 +219,7 @@ BRIEF
   # turn-end marker rather than sleeping a fixed duration so the smoke is
   # honest about whether the agent actually fired the extension.
   local waited=0 state_dir
-  state_dir=$(FM_STATE_OVERRIDE="$STATE" printf '%s' "$STATE")
+  state_dir=$STATE
   while [ ! -f "$state_dir/smoke-use-orca.turn-ended" ] && [ "$waited" -lt 60 ]; do
     sleep 2
     waited=$((waited + 2))

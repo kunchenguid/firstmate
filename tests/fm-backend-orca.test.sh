@@ -1115,6 +1115,56 @@ test_fm_backend_orca_create_terminal_prints_session_id() {
   pass "fm_backend_orca_create_terminal: returns the session id on stdout for \$() capture"
 }
 
+# ---- orca create_terminal: realpath comparison tolerates a symlinked cwd ----
+# When the captain runs FM_HOME under a symlinked tree, the caller's $cwd
+# string form differs from what fmod get-cwd returns (which canonicalizes
+# symlinks). Earlier the comparison was a bare string match and the
+# mismatch triggered an unnecessary kill + recreate. Now both sides go
+# through readlink -f before the comparison.
+test_fm_backend_orca_create_terminal_realpath_tolerant() {
+  fmod_case create-terminal-realpath
+  # Build a real dir with a symlinked alias; the caller passes the alias.
+  # fmod get-cwd returns the canonical path. Both must compare equal.
+  local real alias
+  real=$(mktemp -d "${TMPDIR:-/tmp}/fm-orca-real.XXXXXX")
+  alias=$(mktemp -d "${TMPDIR:-/tmp}/fm-orca-alias.XXXXXX")
+  rm -rf "$alias"
+  ln -s "$real" "$alias"
+  # fmod create returns the session id; fmod get-cwd returns the canonical
+  # path. The alias passes through readlink -f to land at $real. Pass the
+  # alias as a positional arg to bash -c so the subshell can read it
+  # (`local` does not survive into bash -c).
+  printf 'fm-secondmate-realpath\n' > "$RESP/1.out"
+  printf '%s\n' "$real" > "$RESP/2.out"
+  local got
+  got=$( PATH="$FB:$PATH" FMOD_FAKE_LOG="$LOG" FMOD_FAKE_RESPONSES="$RESP" \
+    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_create_terminal "fm-secondmate-realpath" "$1" "fm-secondmate-realpath"' \
+    "$ROOT" "$alias" ) || fail "create_terminal should succeed for symlinked cwd"
+  [ "$got" = "fm-secondmate-realpath" ] || fail "create_terminal stdout should be the session id, got: '$got'"
+  rm -rf "$real" "$alias"
+  pass "fm_backend_orca_create_terminal: readlink -f tolerates symlinked cwd"
+}
+
+# ---- orca create_terminal: real path mismatch is still detected ----
+# The realpath normalization is helpful for symlinks; it must not paper
+# over a genuine cwd mismatch (e.g. the daemon attached at the wrong path).
+# This regression test asserts the kill-on-mismatch branch still fires when
+# the canonicalized forms differ.
+test_fm_backend_orca_create_terminal_realpath_mismatch_kills() {
+  fmod_case create-terminal-realpath-mismatch
+  local real
+  real=$(mktemp -d "${TMPDIR:-/tmp}/fm-orca-realmm.XXXXXX")
+  printf 'fm-mismatch\n' > "$RESP/1.out"   # fmod create succeeds
+  printf '/totally/different/path\n' > "$RESP/2.out"  # fmod get-cwd returns a different path
+  local rc=0 got
+  got=$( PATH="$FB:$PATH" FMOD_FAKE_LOG="$LOG" FMOD_FAKE_RESPONSES="$RESP" \
+    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_create_terminal "fm-mismatch" "$real" "fm-mismatch"' \
+    "$ROOT" ) || rc=$?
+  rm -rf "$real"
+  [ "$rc" -ne 0 ] || fail "create_terminal should fail on real cwd mismatch, got rc=$rc stdout='$got'"
+  pass "fm_backend_orca_create_terminal: real cwd mismatch still fails closed"
+}
+
 test_fm_spawn_orca_secondmate_sessions_include_id_and_home_hash() {
   fmod_case secondmate-session-id
   local primary data state config base_a base_b home_a home_b

@@ -182,8 +182,19 @@ else
   run_check "supervisor-live" 1 "${supervisor_line:-no live pid (run bin/fm-supervise-orca.sh start)}"
 fi
 
-# 9. supervisor log fresh + no recent errors
-log_file=/tmp/fm-supervise-orca.log
+# 9. supervisor log fresh + no recent errors.
+# The supervisor is event-driven: a healthy host with a stable daemon
+# produces no log lines, so a quiet log is "no news is good news" and
+# is reported as a soft warning, not a hard fail. A log with errors
+# is still a hard fail regardless of age. A supervisor that is NOT
+# alive and has a stale log is also a hard fail (the supervisor is
+# supposed to be writing events).
+log_file="${FM_SUPERVISOR_LOG:-${STATE:-/tmp}/.orca-supervisor.log}"
+# Backward compat: pre-P5 supervisors logged to /tmp. If only the legacy
+# path exists, fall back to it.
+if [ ! -f "$log_file" ] && [ -f /tmp/fm-supervise-orca.log ]; then
+  log_file=/tmp/fm-supervise-orca.log
+fi
 if [ -f "$log_file" ]; then
   age_s=$(( $(date +%s) - $(stat -c %Y "$log_file" 2>/dev/null || stat -f %m "$log_file" 2>/dev/null || echo 0) ))
   if [ "$age_s" -lt 600 ]; then
@@ -255,7 +266,7 @@ fi
 
 # 12, 13, 14. unit tests
 if [ "$NO_UNIT" -eq 0 ]; then
-  for t in tests/fm-backend-orca.test.sh tests/fm-supervise-orca.test.sh tests/fm-use-orca.test.sh; do
+  for t in tests/fm-mod-orca-ui.test.sh tests/fm-backend-orca.test.sh tests/fm-supervise-orca.test.sh tests/fm-use-orca.test.sh; do
     if [ -x "$FM_ROOT/$t" ]; then
       # shellcheck disable=SC2086
       if out=$(bash "$FM_ROOT/$t" 2>&1); then

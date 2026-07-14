@@ -15,6 +15,8 @@ config/backend
 config/x-mode.env
 config/cmux-socket-password
 _orca-wt/
-"Skill bundle/"
 Skill bundle/
 firstmate/
+
+# Local pi (omp) extensions (deployed from a source clone, not tracked)
+.pi/
