@@ -149,14 +149,14 @@ A restored tab with no registered live agent is a replaceable husk; an ambiguous
 
 Every adapter operation sets `HERDR_SESSION` and appends a trailing `--session <name>`.
 Ambient `HERDR_SESSION` alone is not accepted as isolation for lifecycle verification.
-The lab helper performs fresh baseline and ownership checks immediately before stop and delete, rejects default or ambiguous records, and verifies the initial default-session tripwire after cleanup.
+The lab helper performs fresh baseline and ownership checks immediately before guarded stop and any backend-authorized delete attempt, rejects default or ambiguous records, and verifies the initial default-session tripwire after cleanup.
 The canonical tripwire accepts only one structurally valid JSON inventory whose initial `sessions` array is exactly empty or contains exactly one session named `default`, records its exact running state, and rejects every foreign or contradictory record.
 After provisioning, the same state record binds a cryptographic launch nonce to the foreground server's socket-owning PID, process start identity, and the device/inode identity of the directory derived from the authoritative `socket_path`, without extending Herdr's inventory schema.
 The guarded stop verifies the exact baseline, record, and persistent storage identity, confirms that the captured process exited and released its socket, and only then persists the stopped phase.
 Delete authorization is a one-use in-memory record bound to the lifecycle lock owner, helper PID and process start identity, launch nonce, exact session and socket identities, and the canonical hash of the post-stop inventory.
-Immediately before a backend-atomic delete, the helper revalidates that complete record against the unchanged lock, process, ownership state, baseline, and full inventory, then consumes it.
+An atomic-capable backend would receive that authorization only after the helper revalidated the complete record against the unchanged lock, process, ownership state, baseline, and full inventory, then consumed it.
 A session stopped by an earlier operation must be reprovisioned through the helper to establish a fresh live proof before teardown, because Herdr 0.7.3 exposes no persistent instance ID.
-Herdr 0.7.3 also exposes no atomic conditional-delete proof, so real teardown stops the verified session, refuses delete, preserves the tripwire and nonce, and emits reprovision guidance rather than trusting a racy snapshot.
+Herdr 0.7.3 exposes neither conditional instance identity after stop nor an atomic conditional-delete proof, so deletion is unavailable: real teardown stops the verified session, preserves the tripwire and nonce, and emits reprovision guidance rather than trusting a racy snapshot.
 The canonical E2E verifies that refusal and removes its wholly isolated temporary sandbox only after confirming the server stopped, the evidence remained, and the default baseline was unchanged.
 
 ### ID stability
