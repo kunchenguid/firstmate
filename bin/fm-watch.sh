@@ -685,7 +685,9 @@ watcher_cleanup() {
   fm_lock_release "$WATCH_LOCK"
 }
 trap watcher_cleanup EXIT
-trap 'exit 1' HUP INT TERM
+trap 'exit 129' HUP
+trap 'exit 143' TERM
+trap 'exit 130' INT
 # This watcher's own pid, as recorded in the lock by fm_lock_claim (which writes
 # ${BASHPID:-$$} from this same main shell). Read directly, never via a command
 # substitution, so it matches the stored holder pid for the self-eviction check.
