@@ -122,7 +122,7 @@ test_scan_captain_relevant_statuses_classifier() {
 }
 
 test_classifier_primitives() {
-  local dir state open
+  local dir state open activity
   dir=$(make_case classify-primitives); state="$dir/state"
   printf 'working: a\n\ndone: b\n\n' > "$state/x.status"
   [ "$(last_status_line "$state/x.status")" = "done: b" ] || fail "last_status_line did not return the last non-blank line"
@@ -142,7 +142,29 @@ test_classifier_primitives() {
     && fail "a key token in note prose changed the decision key"
   printf '%s' "$open" | grep -F $'bad key\t' >/dev/null \
     && fail "an invalid key slug entered the open-decision set"
-  pass "classifier primitives: last line, captain-relevance, window->task, FM_CAPTAIN_RE override"
+  cat > "$state/activity.status" <<'EOF'
+working [key=gp7]: GP7 started
+working [key=gp6]: GP6 started
+working [key=legal]: reviewing legal dependency
+done [key=gp6]: GP6 completed
+resolved [key=gp7]: GP7 completed and moved to Done
+paused [key=legal]: awaiting external counsel
+resolved [key=legal]: legal item returned to the queue
+working [key=gp8]: GP8 started
+EOF
+  activity=$(status_open_activities "$state/activity.status")
+  printf '%s' "$activity" | grep -F $'gp8\tworking\tGP8 started' >/dev/null \
+    || fail "the current keyed working phase was not retained"
+  printf '%s' "$activity" | grep -F $'gp7\t' >/dev/null \
+    && fail "a keyed resolved event did not close the older working phase"
+  printf '%s' "$activity" | grep -F $'gp6\t' >/dev/null \
+    && fail "a same-key terminal event did not supersede the older working phase"
+  printf '%s' "$activity" | grep -F $'legal\t' >/dev/null \
+    && fail "a keyed resolved event did not close the declared pause"
+  printf 'working: legacy start\ndone: legacy completion\n' > "$state/legacy-activity.status"
+  [ -z "$(status_open_activities "$state/legacy-activity.status")" ] \
+    || fail "a legacy terminal event did not supersede the default working phase"
+  pass "classifier primitives: keyed decisions and activity phases, captain relevance, window-to-task, and overrides"
 }
 
 # crew_is_provably_working: the absorb-only-when-provably-working predicate. It is
