@@ -50,7 +50,7 @@ test_primary_pretool_hook_blocks() {
 }
 
 test_spawn_launch_and_turnend_config() {
-  local d home proj wt fakebin id out log config
+  local d home proj wt fakebin id out log config project_config
   d="$TMP_ROOT/spawn"
   home="$d/home"
   proj="$d/project"
@@ -61,6 +61,9 @@ test_spawn_launch_and_turnend_config() {
   mkdir -p "$home/data/$id" "$home/projects" "$home/state" "$home/config"
   printf 'brief\n' > "$home/data/$id/brief.md"
   fm_git_worktree "$proj" "$wt" "fm/$id"
+  project_config="$wt/.devin/config.json"
+  mkdir -p "$(dirname "$project_config")"
+  printf '%s\n' '{"version":1,"model":"repo-model","hooks":{"PreToolUse":[{"matcher":"exec","hooks":[{"type":"command","command":"repo-safety-hook"}]}],"Stop":[{"hooks":[{"type":"command","command":"repo-stop-hook"}]}]}}' > "$project_config"
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
@@ -89,10 +92,15 @@ SH
   assert_grep '--prompt-file' "$log" "Devin prompt-file launch missing"
   config="$home/state/$id.devin-config.json"
   [ -f "$config" ] || fail "Devin per-task config was not created"
-  jq -e '.version == 1 and (.hooks.Stop[0].hooks[0].command | contains(".turn-ended"))' "$config" >/dev/null \
-    || fail "Devin per-task Stop hook config is invalid: $(cat "$config")"
-  [ ! -e "$wt/.devin/config.json" ] || fail "spawn overwrote project-local Devin config"
-  pass "fm-spawn launches Devin autonomously with model, brief, and isolated turn-end config"
+  jq -e '.model == "repo-model"
+    and .hooks.PreToolUse[0].matcher == "exec"
+    and .hooks.PreToolUse[0].hooks[0].command == "repo-safety-hook"
+    and .hooks.Stop[0].hooks[0].command == "repo-stop-hook"
+    and (.hooks.Stop[1].hooks[0].command | contains(".turn-ended"))' "$config" >/dev/null \
+    || fail "Devin task config did not preserve repository settings and hooks: $(cat "$config")"
+  jq -e '.model == "repo-model" and (.hooks.Stop | length == 1)' "$project_config" >/dev/null \
+    || fail "spawn modified the project-local Devin config: $(cat "$project_config")"
+  pass "fm-spawn composes the task Stop hook with repository Devin configuration"
 }
 
 test_lock_recognizes_devin_holder() {

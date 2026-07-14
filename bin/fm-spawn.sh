@@ -115,7 +115,7 @@
 # Verified per-harness turn-end hooks are installed automatically where enabled; some live outside the worktree.
 # Kimi uses one surgically installed Firstmate region in $HOME/.kimi-code/config.toml,
 # a firstmate-owned global hook and registry, and a gitignored per-task pointer.
-#     __DEVINCONFIG__ absolute path to state/<task-id>.devin-config.json
+#     __DEVINCONFIG__ absolute path to state/<task-id>.devin-config.json (project config plus task Stop hook)
 # Per-harness turn-end hooks are installed automatically; some live outside the worktree.
 # grok uses a firstmate-owned global hook under ${GROK_HOME:-$HOME/.grok}/hooks
 # plus a gitignored .fm-grok-turnend worktree pointer and a state token.
@@ -1537,8 +1537,8 @@ EOF
       # the launch command via -c notify=[...] and __TURNEND__.
       ;;
     devin*)
-      # Devin auto-loads project hooks, but use an isolated state-owned config for
-      # crewmates so firstmate never overwrites a project's own .devin/config.json.
+      # Crewmates use an isolated state-owned merge of project config and the task
+      # Stop hook, so firstmate never overwrites a project's own .devin/config.json.
       # The same config is harmless for a secondmate, whose tracked primary hooks
       # are loaded from its repository after the launch-time override is omitted.
       ;;
@@ -1614,7 +1614,14 @@ DEVIN_CONFIG="$STATE/$ID.devin-config.json"
 if [ "$HARNESS" = devin ]; then
   if [ "$KIND" != secondmate ]; then
     turnend_json=$(json_escape "touch $(shell_quote "$TURNEND")")
-    printf '{"version":1,"hooks":{"Stop":[{"hooks":[{"type":"command","command":"%s"}]}]}}\n' "$turnend_json" > "$DEVIN_CONFIG"
+    project_devin_config="$WT/.devin/config.json"
+    if [ -f "$project_devin_config" ]; then
+      jq --arg command "touch $(shell_quote "$TURNEND")" '
+        .hooks = ((.hooks // {}) | .Stop = ((.Stop // []) + [{hooks: [{type: "command", command: $command}]}]))
+      ' "$project_devin_config" > "$DEVIN_CONFIG"
+    else
+      printf '{"version":1,"hooks":{"Stop":[{"hooks":[{"type":"command","command":"%s"}]}]}}\n' "$turnend_json" > "$DEVIN_CONFIG"
+    fi
   fi
 fi
 
