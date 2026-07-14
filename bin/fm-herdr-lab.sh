@@ -17,10 +17,10 @@
 # operation.
 # Session stop is available only through guarded stop or teardown, and session
 # delete is available only through teardown.
-# Both paths perform a fresh refuse-default check immediately before each
-# destructive call.
-# Provision records the initial default-session state as a fleet-state tripwire
-# and teardown requires that record to be identical afterward.
+# Both paths perform fresh baseline and ownership checks immediately before
+# each destructive call.
+# Provision records the initial fleet baseline and the created lab session's
+# stable identity, and every lifecycle operation requires both to match.
 set -u
 
 fm_herdr_lab_error() {
@@ -44,6 +44,16 @@ fm_herdr_lab_state_dir() {
 
 fm_herdr_lab_tripwire_path() { # <session>
   printf '%s/%s.fleet-state.json' "$(fm_herdr_lab_state_dir)" "$1"
+}
+
+fm_herdr_lab_write_state() { # <session> <state-json>
+  local name=$1 state=$2 path tmp
+  path=$(fm_herdr_lab_tripwire_path "$name")
+  tmp=$(mktemp "${path}.tmp.XXXXXX") || return 1
+  if ! printf '%s\n' "$state" > "$tmp" || ! mv "$tmp" "$path"; then
+    rm -f "$tmp"
+    return 1
+  fi
 }
 
 fm_herdr_lab_raw() { # <session> <herdr arguments...>
@@ -99,6 +109,129 @@ fm_herdr_lab_baseline_from_list() { # <session> <session-list-json> <allow-owned
   ' 2>/dev/null
 }
 
+fm_herdr_lab_identity_from_list() { # <session> <session-list-json>
+  local name=$1 info=$2
+  fm_herdr_lab_session_list_is_valid "$info" || return 1
+  printf '%s' "$info" | jq -S -c -s --arg name "$name" '
+    [.[0].sessions[] | select(.name == $name)]
+    | if length == 1 and .[0].default == false
+      then .[0] | del(.running)
+      else empty
+      end
+  ' 2>/dev/null
+}
+
+fm_herdr_lab_state_read() { # <session>
+  local name=$1 path raw state baseline canonical_baseline
+  path=$(fm_herdr_lab_tripwire_path "$name")
+  [ -f "$path" ] || return 1
+  raw=$(cat "$path") || return 1
+  state=$(printf '%s' "$raw" | jq -S -c -e -s --arg name "$name" '
+    if (
+      length == 1
+      and (.[0] | type == "object")
+      and ((.[0] | keys | sort) == ["baseline", "owned_session"])
+      and (
+        .[0].owned_session == null
+        or (
+          (.[0].owned_session | type == "object")
+          and .[0].owned_session.name == $name
+          and .[0].owned_session.default == false
+          and (.[0].owned_session.socket_path | type == "string" and length > 0)
+          and (.[0].owned_session | has("running") | not)
+        )
+      )
+    )
+    then .[0]
+    else empty
+    end
+  ' 2>/dev/null) || return 1
+  [ -n "$state" ] || return 1
+  baseline=$(printf '%s' "$state" | jq -S -c '.baseline' 2>/dev/null) || return 1
+  canonical_baseline=$(fm_herdr_lab_baseline_from_list "$name" "$baseline" false) || return 1
+  [ -n "$canonical_baseline" ] && [ "$baseline" = "$canonical_baseline" ] || return 1
+  printf '%s\n' "$state"
+}
+
+fm_herdr_lab_state_owned_identity() { # <session>
+  local state
+  state=$(fm_herdr_lab_state_read "$1") || return 1
+  printf '%s' "$state" | jq -S -c -r '.owned_session // empty' 2>/dev/null
+}
+
+fm_herdr_lab_check_baseline_from_list() { # <session> <session-list-json>
+  local name=$1 info=$2 state before after
+  state=$(fm_herdr_lab_state_read "$name") || {
+    fm_herdr_lab_error "missing or invalid fleet-state tripwire for '$name'"
+    return 1
+  }
+  before=$(printf '%s' "$state" | jq -S -c '.baseline' 2>/dev/null) || return 1
+  after=$(fm_herdr_lab_baseline_from_list "$name" "$info" true) || after=""
+  if [ -n "$after" ] && [ "$before" = "$after" ]; then
+    return 0
+  fi
+  fm_herdr_lab_error "FLEET-STATE TRIPWIRE FAILED: default session changed during lab work"
+  fm_herdr_lab_error "before: $before"
+  fm_herdr_lab_error "after:  ${after:-<invalid inventory>}"
+  return 1
+}
+
+fm_herdr_lab_assert_owned_from_list() { # <session> <session-list-json>
+  local name=$1 info=$2 expected actual
+  fm_herdr_lab_check_baseline_from_list "$name" "$info" || return 1
+  expected=$(fm_herdr_lab_state_owned_identity "$name") || expected=""
+  actual=$(fm_herdr_lab_identity_from_list "$name" "$info") || actual=""
+  if [ -n "$expected" ] && [ "$expected" = "$actual" ]; then
+    return 0
+  fi
+  fm_herdr_lab_error "OWNERSHIP TRIPWIRE FAILED: session '$name' is missing, unproven, or changed"
+  return 1
+}
+
+fm_herdr_lab_capture_identity_from_list() { # <session> <session-list-json> <server-pid>
+  local name=$1 info=$2 server_pid=$3 state expected actual updated running
+  kill -0 "$server_pid" 2>/dev/null || {
+    fm_herdr_lab_error "cannot prove ownership for '$name': provisioning process exited"
+    return 1
+  }
+  fm_herdr_lab_check_baseline_from_list "$name" "$info" || return 1
+  state=$(fm_herdr_lab_state_read "$name") || return 1
+  expected=$(printf '%s' "$state" | jq -S -c -r '.owned_session // empty' 2>/dev/null) || return 1
+  actual=$(fm_herdr_lab_identity_from_list "$name" "$info") || actual=""
+  running=$(printf '%s' "$info" | jq -r --arg name "$name" \
+    '.sessions[] | select(.name == $name) | .running' 2>/dev/null) || running=false
+  [ -n "$actual" ] || {
+    fm_herdr_lab_error "cannot capture stable identity for lab session '$name'"
+    return 1
+  }
+  [ "$running" = true ] || {
+    fm_herdr_lab_error "cannot capture ownership for '$name': session is not running"
+    return 1
+  }
+  if [ -n "$expected" ]; then
+    [ "$expected" = "$actual" ] || {
+      fm_herdr_lab_error "OWNERSHIP TRIPWIRE FAILED: session '$name' changed during provisioning"
+      return 1
+    }
+    kill -0 "$server_pid" 2>/dev/null || {
+      fm_herdr_lab_error "cannot prove ownership for '$name': provisioning process exited during verification"
+      return 1
+    }
+    return 0
+  fi
+  updated=$(printf '%s' "$state" | jq -S -c --argjson identity "$actual" '.owned_session = $identity') || return 1
+  kill -0 "$server_pid" 2>/dev/null || {
+    fm_herdr_lab_error "cannot prove ownership for '$name': provisioning process exited before identity capture"
+    return 1
+  }
+  fm_herdr_lab_write_state "$name" "$updated" || return 1
+  kill -0 "$server_pid" 2>/dev/null || {
+    fm_herdr_lab_write_state "$name" "$state" || true
+    fm_herdr_lab_error "cannot prove ownership for '$name': provisioning process exited during identity capture"
+    return 1
+  }
+}
+
 fm_herdr_lab_session_state_from_list() { # <session> <session-list-json>
   local name=$1 info=$2 count flag
   fm_herdr_lab_session_list_is_valid "$info" || return 1
@@ -118,22 +251,8 @@ fm_herdr_lab_session_state_from_list() { # <session> <session-list-json>
   esac
 }
 
-fm_herdr_lab_fleet_state() { # <session>
-  local name=$1 sessions snapshot
-  sessions=$(fm_herdr_lab_session_list "$name" 2>/dev/null) || {
-    fm_herdr_lab_error "cannot read Herdr sessions for the fleet-state tripwire"
-    return 1
-  }
-  snapshot=$(fm_herdr_lab_baseline_from_list "$name" "$sessions" true) || snapshot=""
-  [ -n "$snapshot" ] || {
-    fm_herdr_lab_error "fleet-state tripwire found malformed, foreign, contradictory, or ambiguous session state"
-    return 1
-  }
-  printf '%s\n' "$snapshot"
-}
-
 fm_herdr_lab_prepare() { # <session>
-  local name=$1 sessions state_dir tripwire baseline
+  local name=$1 sessions state_dir tripwire baseline state
   fm_herdr_lab_validate_name "$name" || return 1
   command -v herdr >/dev/null 2>&1 || { fm_herdr_lab_error "herdr is required"; return 1; }
   command -v jq >/dev/null 2>&1 || { fm_herdr_lab_error "jq is required"; return 1; }
@@ -164,14 +283,15 @@ fm_herdr_lab_prepare() { # <session>
     rm -f "$tripwire"
     return 1
   }
-  printf '%s\n' "$baseline" > "$tripwire" || {
+  state=$(jq -S -c -n --argjson baseline "$baseline" '{baseline:$baseline,owned_session:null}') || {
     rm -f "$tripwire"
     return 1
   }
+  fm_herdr_lab_write_state "$name" "$state" || return 1
 }
 
-fm_herdr_lab_refuse_if_default() { # <session>
-  local name=$1 info state tripwire before after
+fm_herdr_lab_assert_owned() { # <session>
+  local name=$1 info tripwire
   fm_herdr_lab_validate_name "$name" || return 1
   tripwire=$(fm_herdr_lab_tripwire_path "$name")
   [ -f "$tripwire" ] || {
@@ -182,14 +302,10 @@ fm_herdr_lab_refuse_if_default() { # <session>
     fm_herdr_lab_error "refusing destructive call because session list failed"
     return 1
   }
-  state=$(fm_herdr_lab_session_state_from_list "$name" "$info") || state=invalid
-  after=$(fm_herdr_lab_baseline_from_list "$name" "$info" true) || after=""
-  before=$(cat "$tripwire")
-  if [ "$state" = nondefault ] && [ -n "$after" ] && [ "$before" = "$after" ]; then
-    return 0
-  fi
-  fm_herdr_lab_error "refusing destructive call for '$name': session is absent, default, or ambiguous (state=$state)"
-  return 1
+  fm_herdr_lab_assert_owned_from_list "$name" "$info" || {
+    fm_herdr_lab_error "refusing destructive call for '$name': ownership is absent or ambiguous"
+    return 1
+  }
 }
 
 fm_herdr_lab_cli() { # <session> <herdr arguments...>
@@ -240,8 +356,30 @@ fm_herdr_lab_cancel_provision() { # <pid>
   wait "$pid" 2>/dev/null || true
 }
 
+fm_herdr_lab_timeout_postcheck() { # <session>
+  local name=$1 info expected state
+  info=$(fm_herdr_lab_session_list "$name" 2>/dev/null) || {
+    fm_herdr_lab_error "PROVISION POSTCHECK FAILED: cannot read Herdr sessions after cancellation"
+    return 1
+  }
+  fm_herdr_lab_check_baseline_from_list "$name" "$info" || return 1
+  expected=$(fm_herdr_lab_state_owned_identity "$name") || expected=""
+  state=$(fm_herdr_lab_session_state_from_list "$name" "$info") || state=invalid
+  case "$state" in
+    absent) return 0 ;;
+    nondefault)
+      if [ -n "$expected" ]; then
+        fm_herdr_lab_assert_owned_from_list "$name" "$info"
+        return
+      fi
+      ;;
+  esac
+  fm_herdr_lab_error "PROVISION POSTCHECK FAILED: session '$name' exists without proven ownership"
+  return 1
+}
+
 fm_herdr_lab_provision() { # <session>
-  local name=$1 sessions tripwire running attempt server_pid
+  local name=$1 sessions tripwire running attempt server_pid expected state
   fm_herdr_lab_validate_name "$name" || return 1
   command -v herdr >/dev/null 2>&1 || { fm_herdr_lab_error "herdr is required"; return 1; }
   command -v jq >/dev/null 2>&1 || { fm_herdr_lab_error "jq is required"; return 1; }
@@ -260,7 +398,7 @@ fm_herdr_lab_provision() { # <session>
       fm_herdr_lab_error "missing fleet-state tripwire for existing session '$name'; refusing to adopt it"
       return 1
     }
-    fm_herdr_lab_refuse_if_default "$name" || return 1
+    fm_herdr_lab_assert_owned_from_list "$name" "$sessions" || return 1
     running=$(printf '%s' "$sessions" | jq -r --arg name "$name" \
       '.sessions[] | select(.name == $name) | .running' 2>/dev/null)
     [ "$running" = false ] || {
@@ -271,14 +409,37 @@ fm_herdr_lab_provision() { # <session>
   else
     fm_herdr_lab_prepare "$name" || return 1
   fi
+  sessions=$(fm_herdr_lab_session_list "$name" 2>/dev/null) || {
+    fm_herdr_lab_error "cannot list Herdr sessions immediately before provisioning '$name'"
+    return 1
+  }
+  expected=$(fm_herdr_lab_state_owned_identity "$name") || expected=""
+  state=$(fm_herdr_lab_session_state_from_list "$name" "$sessions") || state=invalid
+  if [ -n "$expected" ]; then
+    fm_herdr_lab_assert_owned_from_list "$name" "$sessions" || return 1
+    running=$(printf '%s' "$sessions" | jq -r --arg name "$name" \
+      '.sessions[] | select(.name == $name) | .running' 2>/dev/null)
+    [ "$running" = false ] || {
+      fm_herdr_lab_error "session '$name' is not stopped immediately before provisioning"
+      return 1
+    }
+  else
+    [ "$state" = absent ] || {
+      fm_herdr_lab_error "session '$name' appeared before provisioning; refusing to adopt it"
+      return 1
+    }
+    fm_herdr_lab_check_baseline_from_list "$name" "$sessions" || return 1
+  fi
   fm_herdr_lab_raw "$name" server >/dev/null 2>&1 &
   server_pid=$!
   attempt=0
   while [ "$attempt" -lt 50 ]; do
     running=$(fm_herdr_lab_cli "$name" status --json 2>/dev/null | jq -r '.server.running // false' 2>/dev/null) || running=false
     if [ "$running" = true ]; then
-      fm_herdr_lab_refuse_if_default "$name" || {
+      sessions=$(fm_herdr_lab_session_list "$name" 2>/dev/null) || sessions=""
+      fm_herdr_lab_capture_identity_from_list "$name" "$sessions" "$server_pid" || {
         fm_herdr_lab_cancel_provision "$server_pid"
+        fm_herdr_lab_timeout_postcheck "$name" || true
         return 1
       }
       return 0
@@ -288,24 +449,22 @@ fm_herdr_lab_provision() { # <session>
   done
   fm_herdr_lab_cancel_provision "$server_pid"
   fm_herdr_lab_error "lab session '$name' did not report running within 10 seconds"
+  fm_herdr_lab_timeout_postcheck "$name" || true
   return 1
 }
 
 fm_herdr_lab_check_tripwire() { # <session>
-  local name=$1 tripwire before after
+  local name=$1 tripwire sessions
   tripwire=$(fm_herdr_lab_tripwire_path "$name")
   [ -f "$tripwire" ] || {
     fm_herdr_lab_error "missing fleet-state tripwire for '$name'; refusing unverified teardown"
     return 1
   }
-  before=$(cat "$tripwire")
-  after=$(fm_herdr_lab_fleet_state "$name") || return 1
-  [ "$before" = "$after" ] || {
-    fm_herdr_lab_error "FLEET-STATE TRIPWIRE FAILED: default session changed during lab work"
-    fm_herdr_lab_error "before: $before"
-    fm_herdr_lab_error "after:  $after"
+  sessions=$(fm_herdr_lab_session_list "$name" 2>/dev/null) || {
+    fm_herdr_lab_error "cannot read Herdr sessions for the fleet-state tripwire"
     return 1
   }
+  fm_herdr_lab_check_baseline_from_list "$name" "$sessions"
 }
 
 fm_herdr_lab_verify_tripwire() { # <session>
@@ -323,7 +482,7 @@ fm_herdr_lab_stop() { # <session>
     fm_herdr_lab_error "missing fleet-state tripwire for '$name'; refusing stop"
     return 1
   }
-  fm_herdr_lab_refuse_if_default "$name" || return 1
+  fm_herdr_lab_assert_owned "$name" || return 1
   fm_herdr_lab_raw "$name" session stop "$name" --json
 }
 
@@ -345,10 +504,10 @@ fm_herdr_lab_teardown() { # <session>
   }
   case "$state" in
     absent) fm_herdr_lab_verify_tripwire "$name"; return ;;
-    nondefault) ;;
+    nondefault) fm_herdr_lab_assert_owned_from_list "$name" "$sessions" || return 1 ;;
     *) fm_herdr_lab_error "refusing teardown for '$name': unsafe session state '$state'"; return 1 ;;
   esac
-  fm_herdr_lab_stop "$name" >/dev/null 2>&1 || true
+  fm_herdr_lab_stop "$name" >/dev/null 2>&1 || return 1
   sleep 0.5
   sessions=$(fm_herdr_lab_session_list "$name" 2>/dev/null) || {
     fm_herdr_lab_error "cannot list Herdr sessions before delete"
@@ -363,7 +522,7 @@ fm_herdr_lab_teardown() { # <session>
     nondefault) ;;
     *) fm_herdr_lab_error "refusing delete for '$name': unsafe session state '$state'"; return 1 ;;
   esac
-  fm_herdr_lab_refuse_if_default "$name" || return 1
+  fm_herdr_lab_assert_owned "$name" || return 1
   fm_herdr_lab_raw "$name" session delete "$name" --json >/dev/null 2>&1 || delete_status=$?
   while [ "$attempt" -lt 20 ]; do
     sessions=$(fm_herdr_lab_session_list "$name" 2>/dev/null) || {
@@ -376,7 +535,7 @@ fm_herdr_lab_teardown() { # <session>
     }
     case "$state" in
       absent) fm_herdr_lab_verify_tripwire "$name"; return ;;
-      nondefault) ;;
+      nondefault) fm_herdr_lab_assert_owned_from_list "$name" "$sessions" || return 1 ;;
       *) fm_herdr_lab_error "lab session '$name' became unsafe while awaiting deletion (state=$state)"; return 1 ;;
     esac
     sleep 0.1

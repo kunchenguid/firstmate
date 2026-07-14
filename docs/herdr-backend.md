@@ -148,9 +148,10 @@ A restored tab with no registered live agent is a replaceable husk; an ambiguous
 
 Every adapter operation sets `HERDR_SESSION` and appends a trailing `--session <name>`.
 Ambient `HERDR_SESSION` alone is not accepted as isolation for lifecycle verification.
-The lab helper performs a fresh session-list classification immediately before stop and delete, rejects default or ambiguous records, and verifies the initial default-session tripwire after cleanup.
+The lab helper performs fresh baseline and ownership checks immediately before stop and delete, rejects default or ambiguous records, and verifies the initial default-session tripwire after cleanup.
 The canonical tripwire accepts only one structurally valid JSON inventory whose initial `sessions` array is exactly empty or contains exactly one running session named `default`, records that complete baseline, and rejects every foreign or contradictory record.
-Later checks allow only that exact baseline plus the helper-owned non-default lab session.
+After provisioning, the same state record captures every authoritative field of the created non-default lab session except its mutable `running` status.
+Later checks require both the exact baseline and that byte-identical stable identity before every stop, delete, teardown, or restart lifecycle action.
 
 ### ID stability
 
