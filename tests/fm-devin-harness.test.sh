@@ -194,9 +194,51 @@ SH
   pass "fm-lock recognizes Devin harness processes"
 }
 
+test_lock_rejects_unrelated_devin_argv() {
+  local home fakebin out
+  home="$TMP_ROOT/unrelated-lock-home"
+  fakebin=$(fm_fakebin "$TMP_ROOT/unrelated-lock-fake")
+  mkdir -p "$home/state"
+  printf '%s\n' "$$" > "$home/state/.lock"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *"comm="*) printf '%s\n' '/usr/local/bin/node'; exit 0 ;;
+  *"args="*) printf '%s\n' 'node /srv/worker.js --cache /tmp/devin-state'; exit 0 ;;
+esac
+exit 1
+SH
+  chmod +x "$fakebin/ps"
+  out=$(FM_HOME="$home" PATH="$fakebin:$PATH" "$ROOT/bin/fm-lock.sh" status)
+  assert_contains "$out" "lock: stale" "fm-lock treated an unrelated Devin argv substring as a harness"
+  pass "fm-lock rejects unrelated argv containing Devin"
+}
+
+test_lock_recognizes_devin_interpreter_script() {
+  local home fakebin out
+  home="$TMP_ROOT/interpreter-lock-home"
+  fakebin=$(fm_fakebin "$TMP_ROOT/interpreter-lock-fake")
+  mkdir -p "$home/state"
+  printf '%s\n' "$$" > "$home/state/.lock"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *"comm="*) printf '%s\n' '/usr/local/bin/node'; exit 0 ;;
+  *"args="*) printf '%s\n' 'node /Users/test/.local/lib/devin'; exit 0 ;;
+esac
+exit 1
+SH
+  chmod +x "$fakebin/ps"
+  out=$(FM_HOME="$home" PATH="$fakebin:$PATH" "$ROOT/bin/fm-lock.sh" status)
+  assert_contains "$out" "lock: held by live harness pid" "fm-lock did not recognize an interpreter-launched Devin script"
+  pass "fm-lock recognizes Devin interpreter scripts"
+}
+
 test_detection_marker
 test_primary_hook_wiring
 test_primary_pretool_hook_blocks
 test_spawn_launch_and_turnend_config
 test_invalid_user_config_remains_recoverable
 test_lock_recognizes_devin_holder
+test_lock_rejects_unrelated_devin_argv
+test_lock_recognizes_devin_interpreter_script
