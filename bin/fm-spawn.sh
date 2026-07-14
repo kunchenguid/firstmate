@@ -65,19 +65,31 @@
 #   fm-brief.sh, which only shapes the brief's prose and records nothing.
 #   fm-pr-check.sh then asserts the PR head is based on that intended base before
 #   merge, and base_sha= is what still tells a base that merged from one that was
-#   abandoned once the branch itself is deleted from origin (bin/fm-base-lib.sh owns
-#   that rule). A base gone from origin is NOT refused on its absence - a base that
-#   merged and had its branch deleted is the normal end-state of a stacked PR, and
-#   refusing it would dead-end the respawn of a task whose PR is perfectly mergeable.
-#   The spawn asks the same question the guard does: has the base's work LANDED in the
-#   default branch? Landed, the declaration is kept and the spawn proceeds; deleted
-#   WITHOUT merging (abandoned) or undecidable, it refuses and says which. An invalid
-#   branch name, an origin that cannot be asked, and a base with no branch and no
-#   recorded tip to decide from all refuse too, rather than recording a base the guard
-#   could not later verify against. So does a local-only project: it has no remote and
+#   abandoned once the branch itself is deleted from origin.
+#   THE SPAWN DOES NOT ASK ITS OWN QUESTION EITHER: it resolves the base with
+#   bin/fm-base-lib.sh's fm_base_resolve_state, the same predicate fm-pr-check.sh and
+#   fm-review-diff.sh decide on, so the base a crewmate is launched against and the base
+#   its PR is later judged against can never be two different things. Branch existence
+#   decides nothing; landedness does.
+#     LIVE       the base carries unmerged work. This is what a based task is FOR: record
+#                the tip and launch. The brief roots the crewmate's branch on it.
+#     LANDED     the base's work is already in the default branch. On a FIRST spawn that
+#                is a mistake, not a state to work around - there is nothing left to stack
+#                on - so it refuses and says to re-run without --base. On a RESPAWN of a
+#                task that already declares this base it is the NORMAL end-state of a
+#                stacked PR (the base merged while the crewmate worked, and GitHub deletes
+#                the branch by default), and refusing would dead-end the recovery of a task
+#                whose PR is perfectly mergeable: the declaration is kept, the spawn
+#                proceeds, and fm-pr-check.sh decides the PR on its own merits.
+#     ABANDONED  the base was deleted WITHOUT merging. The task would stack on history that
+#                will never land. Refuse by name.
+#     UNKNOWN    an origin that cannot be asked, a gone base with no usable recorded tip,
+#                an undecidable landedness. Refuse rather than record a base the guard
+#                could not later verify against.
+#   An invalid branch name refuses too, as does a local-only project: it has no remote and
 #   no PR, so bin/fm-merge-local.sh would merge a based branch into local main with no
-#   guard to run at all. Those refusals are raised with the brief check, BEFORE any
-#   backend window or worktree lease is acquired, so they strand nothing for recovery
+#   guard to run at all. Every one of those refusals is raised with the brief check, BEFORE
+#   any backend window or worktree lease is acquired, so they strand nothing for recovery
 #   or fm-teardown.sh to reconcile. It applies only to a ship task, and only to a
 #   single-task spawn (a base is per-task, so a batch cannot share one).
 #   Absent means the repo default branch is the base and the meta stays
@@ -771,98 +783,112 @@ if [ -n "$BASE" ] && [ "$MODE" = local-only ]; then
   exit 1
 fi
 
-# The declared base is GONE from origin. THAT DECIDES NOTHING ON ITS OWN, and refusing on
-# it alone would dead-end the documented recovery for a based task at exactly the moment
-# the base became harmless: a base that merges and has its branch deleted (GitHub does
-# that by default) is the NORMAL end-state of a stacked PR. The question is the same one
-# fm-pr-check.sh's guard and fm-review-diff.sh's diff base decide on - HAS THE BASE'S WORK
-# LANDED IN THE DEFAULT BRANCH (bin/fm-base-lib.sh owns it) - and the recorded spawn-time
-# tip is the fact that answers it:
+# WHAT IS THE DECLARED BASE? Not "does the branch exist" - that answers nothing, in either
+# direction. The question is the one fm-pr-check.sh's guard and fm-review-diff.sh's diff
+# base decide on too, and bin/fm-base-lib.sh's fm_base_resolve_state is the single place
+# that answers it: HAS THE BASE'S WORK LANDED IN THE DEFAULT BRANCH?
 #
-#   landed    the base merged. Nothing is left to stack on and no unmerged history can be
-#             dragged anywhere, so keep the declaration (fm-pr-check.sh stands its guard
-#             down for it) and let the spawn through.
-#   unlanded  the base was deleted WITHOUT merging - abandoned. This task is stacked on
-#             history that will never land, so refuse and say exactly that.
-#   unknown   we could not tell. Refuse rather than assume, and name why.
+# The state, and what a spawn does with it, turns on one more thing this script alone
+# knows: whether this task is meeting the base for the FIRST time, or coming back to a
+# base it already declared. BASE_TIP_KNOWN is that fact.
 #
-# With no recorded tip (a first spawn, or a --base that re-declares) there is nothing to
-# root a branch on AND nothing to decide with, so that refuses too.
-# Sets BASE_SHA when the spawn may proceed; returns 1 to refuse it.
-resolve_absent_base() {
-  local default_branch_name default_sha err landed_rc=0 recovery
-  if [ -z "$BASE_TIP_KNOWN" ]; then
-    echo "error: task $ID declares intended base '$BASE', but no such branch exists on origin for $PROJ_ABS and no base_sha= tip is recorded for it: a crewmate has nothing to root its branch on, and whether that base merged or was abandoned cannot be told apart. Re-run with the right --base <branch>. If that base has already merged, its work is in the default branch - re-run without --base." >&2
-    return 1
-  fi
+#   LIVE       the base carries unmerged work. Record its tip and launch; the brief roots
+#              the crewmate's branch on it. This is the only state a FIRST spawn accepts,
+#              which is what keeps the brief's own base instructions unconditional.
+#   LANDED     first spawn: refuse. Declaring a base whose work is already in the default
+#              branch is a mistake, not a state to route around - there is nothing to stack
+#              on, and launching anyway would send a crewmate through a whole run that
+#              fm-pr-check.sh is guaranteed to refuse (it would be rooted in the base's
+#              pre-squash commits). Say so, and say to re-run without --base.
+#              Respawn: proceed, declaration intact. The base merged while the crewmate was
+#              working - the NORMAL end-state of a stacked PR - and refusing here would
+#              dead-end the recovery of a task whose PR fm-pr-check.sh may well pass.
+#   ABANDONED  the base was deleted from origin WITHOUT merging. The task would stack on
+#              history that will never land. Refuse by name.
+#   UNKNOWN    origin could not be asked, or the base is gone with no usable recorded tip,
+#              or its landedness could not be settled. Refuse rather than record a base the
+#              guard could not verify against later.
+#
+# This runs alongside the brief check and BEFORE any backend window or worktree lease is
+# acquired: the refusals are fail-closed, and a fail-closed refusal that fired after those
+# resources exist would strand them with no meta for recovery or fm-teardown.sh to
+# reconcile. Refusing here is free - nothing has been created yet - and it also catches a
+# mistyped base before a crewmate spends a whole run on it.
+resolve_declared_base() {  # sets BASE_SHA when the spawn may proceed; returns 1 to refuse
+  local default_branch_name state_rc=0 recovery respawn=false
+  [ -z "$BASE_TIP_KNOWN" ] || respawn=true
   default_branch_name=$(default_branch "$PROJ_ABS") || {
-    echo "error: task $ID declares intended base '$BASE', which is gone from origin, but the repo's default branch cannot be resolved in $PROJ_ABS (expected origin/HEAD, main, or master), so whether that base merged cannot be determined. Refusing to spawn." >&2
-    return 1
-  }
-  if ! err=$(git -C "$PROJ_ABS" fetch --quiet origin \
-    "+refs/heads/$default_branch_name:refs/remotes/origin/$default_branch_name" 2>&1); then
-    echo "error: task $ID declares intended base '$BASE', which is gone from origin, but the default branch ('$default_branch_name') could not be fetched, so whether that base merged cannot be determined. Refusing to spawn." >&2
-    [ -z "$err" ] || printf '  git: %s\n' "$err" >&2
-    return 1
-  fi
-  default_sha=$(git -C "$PROJ_ABS" rev-parse --verify --quiet \
-    "refs/remotes/origin/$default_branch_name^{commit}") || {
-    echo "error: task $ID declares intended base '$BASE', which is gone from origin, and the default branch ('$default_branch_name') did not resolve to a commit, so whether that base merged cannot be determined. Refusing to spawn." >&2
+    echo "error: task $ID declares intended base '$BASE' but the repo's default branch cannot be resolved in $PROJ_ABS (expected origin/HEAD, main, or master), so whether that base still carries unmerged work cannot be determined. Refusing to spawn." >&2
     return 1
   }
   recovery="  Recovery: re-run with the base this task should target now ('--base <branch>'), or drop the 'base=$BASE' line from $STATE/$ID.meta to make this an ordinary '$default_branch_name' task and re-run without --base."
-  fm_base_work_landed "$PROJ_ABS" "$BASE_TIP_KNOWN" "$default_sha" || landed_rc=$?
-  case "$landed_rc" in
-    "$FM_BASE_WORK_LANDED")
-      echo "notice: task $ID declares intended base '$BASE', and that branch is gone from origin - its work IS carried by the default branch '$default_branch_name' ($FM_BASE_WORK_HOW), so it merged and was deleted, the normal end-state of a stacked PR." >&2
+
+  fm_base_resolve_state "$PROJ_ABS" "$BASE" "$BASE_TIP_KNOWN" "$default_branch_name" \
+    || state_rc=$?
+  case "$state_rc" in
+    "$FM_BASE_STATE_LIVE")
+      # Keep the tip already recorded for this base when there is one: it is the
+      # spawn-time fact fm-pr-check.sh reasons from, and a base that merges later carries
+      # a superset of it either way, so re-recording buys nothing and churns meta on every
+      # respawn.
+      BASE_SHA=${BASE_TIP_KNOWN:-$FM_BASE_STATE_TIP}
+      return 0
+      ;;
+    "$FM_BASE_STATE_LANDED")
+      if ! "$respawn"; then
+        echo "error: task $ID declares intended base '$BASE', but that base's work has ALREADY MERGED into the default branch '$default_branch_name' ($FM_BASE_STATE_WHY) - refusing to spawn." >&2
+        echo "  There is nothing left to stack on: the base carries no unmerged work, so a branch rooted on it would carry only the base's own pre-merge commits, and fm-pr-check.sh would refuse the resulting PR before merge." >&2
+        echo "  Recovery: re-run WITHOUT --base. This is an ordinary '$default_branch_name' task now." >&2
+        return 1
+      fi
+      echo "notice: task $ID declares intended base '$BASE', and that base's work has since merged into the default branch '$default_branch_name' ($FM_BASE_STATE_WHY) - the normal end-state of a stacked PR." >&2
+      "$FM_BASE_STATE_PRESENT" \
+        || echo "  Its branch was deleted from origin afterwards, which GitHub does by default; that is what a merged base usually looks like, and it is not a reason to refuse." >&2
       echo "  recorded base tip : $BASE_TIP_KNOWN" >&2
-      echo "  Keeping the declaration: nothing is left to stack on, so the brief tells the crewmate to root its branch on '$default_branch_name' instead, and fm-pr-check.sh then stands its guard down and verifies the PR as the ordinary '$default_branch_name' PR it now is. Drop the 'base=$BASE' line from $STATE/$ID.meta to retire it for good." >&2
+      echo "  Keeping the declaration and respawning: the branch already exists and fm-pr-check.sh decides the PR on its own merits - it stands the guard down for a head that now sits on '$default_branch_name', and refuses one still rooted in the base's pre-merge commits, naming the rebase. Drop the 'base=$BASE' line from $STATE/$ID.meta to retire the declaration for good." >&2
       BASE_SHA=$BASE_TIP_KNOWN
       return 0
       ;;
-    "$FM_BASE_WORK_UNLANDED")
+    "$FM_BASE_STATE_ABANDONED")
       echo "error: task $ID declares intended base '$BASE', and that branch was deleted from origin WITHOUT merging - refusing to spawn." >&2
       echo "  recorded base tip : $BASE_TIP_KNOWN" >&2
-      echo "  default branch    : $default_branch_name ($default_sha)" >&2
+      echo "  default branch    : $default_branch_name ($FM_BASE_STATE_DEFAULT_SHA)" >&2
       echo "  The base's work is NOT in '$default_branch_name', so it was abandoned, not merged: this task would stack on history that will never land, and fm-pr-check.sh would refuse its PR before merge." >&2
       printf '%s\n' "$recovery" >&2
       return 1
       ;;
+  esac
+
+  # UNKNOWN. Never a guess: name which question went unanswered.
+  case "$FM_BASE_STATE_WHY" in
+    probe-failed)
+      echo "error: task $ID declares intended base '$BASE', but origin could not be asked whether that branch exists, so its tip cannot be recorded and the PR-base guard would have nothing to verify against later. Refusing to spawn." >&2
+      [ -z "$FM_BASE_STATE_ERR" ] || printf '  git: %s\n' "$FM_BASE_STATE_ERR" >&2
+      ;;
+    gone-no-tip)
+      echo "error: task $ID declares intended base '$BASE', but no such branch exists on origin for $PROJ_ABS and no base_sha= tip is recorded for it: a crewmate has nothing to root its branch on, and whether that base merged or was abandoned cannot be told apart. Re-run with the right --base <branch>. If that base has already merged, its work is in the default branch - re-run without --base." >&2
+      ;;
+    gone-tip-unknown)
+      echo "error: task $ID declares intended base '$BASE', that branch is gone from origin, and its recorded tip ($BASE_TIP_KNOWN) is not in this clone's object store, so whether it merged or was abandoned cannot be told apart. Refusing to spawn." >&2
+      printf '%s\n' "$recovery" >&2
+      ;;
+    fetch-failed | default-fetch-failed | no-tip | default-no-tip)
+      echo "error: task $ID declares intended base '$BASE', but that base or the default branch ('$default_branch_name') could not be resolved from origin ($FM_BASE_STATE_WHY), so whether the base still carries unmerged work cannot be determined. Refusing to spawn." >&2
+      [ -z "$FM_BASE_STATE_ERR" ] || printf '  git: %s\n' "$FM_BASE_STATE_ERR" >&2
+      ;;
     *)
-      echo "error: task $ID declares intended base '$BASE', that branch is gone from origin, and whether its work reached '$default_branch_name' could not be determined ($FM_BASE_WORK_HOW). Refusing to spawn rather than assuming: a base deleted WITHOUT merging leaves this task stacked on history that will never land." >&2
+      echo "error: task $ID declares intended base '$BASE', that branch is gone from origin, and whether its work reached '$default_branch_name' could not be determined ($FM_BASE_STATE_WHY). Refusing to spawn rather than assuming: a base deleted WITHOUT merging leaves this task stacked on history that will never land." >&2
       echo "  recorded base tip : $BASE_TIP_KNOWN" >&2
       printf '%s\n' "$recovery" >&2
-      return 1
       ;;
   esac
+  return 1
 }
 
-# Ask origin what the declared base IS, then act on what it answers. This runs alongside
-# the brief check and BEFORE any backend window or worktree lease is acquired: the
-# refusals are fail-closed, and a fail-closed refusal that fired after those resources
-# exist would strand them with no meta for recovery or fm-teardown.sh to reconcile.
-# Refusing here is free - nothing has been created yet - and it also catches a mistyped
-# base before a crewmate spends a whole run on it.
 if [ -n "$BASE" ]; then
-  BASE_PROBE_RC=0
-  fm_base_probe_origin "$PROJ_ABS" "$BASE" || BASE_PROBE_RC=$?
-  case "$BASE_PROBE_RC" in
-    "$FM_BASE_PRESENT")
-      # The base is live, so there is a branch to root on and a tip to record. Keep the
-      # tip already recorded for it when there is one: it is the spawn-time fact
-      # fm-pr-check.sh reasons from, and a base that merges later carries a superset of
-      # it either way, so re-recording buys nothing and churns meta on every respawn.
-      BASE_SHA=${BASE_TIP_KNOWN:-$FM_BASE_PROBE_SHA}
-      ;;
-    "$FM_BASE_ABSENT") resolve_absent_base || exit 1 ;;
-    *)
-      echo "error: task $ID declares intended base '$BASE', but origin could not be asked whether that branch exists, so its tip cannot be recorded and the PR-base guard would have nothing to verify against later. Refusing to spawn." >&2
-      [ -z "$FM_BASE_PROBE_ERR" ] || printf '  git: %s\n' "$FM_BASE_PROBE_ERR" >&2
-      exit 1
-      ;;
-  esac
+  resolve_declared_base || exit 1
   if [ -z "$BASE_SHA" ]; then
-    echo "error: task $ID declares intended base '$BASE' and origin reports it exists, but its tip commit did not resolve, so the PR-base guard would have nothing to verify against later. Refusing to spawn." >&2
+    echo "error: task $ID declares intended base '$BASE' but its tip commit did not resolve, so the PR-base guard would have nothing to verify against later. Refusing to spawn." >&2
     exit 1
   fi
 fi

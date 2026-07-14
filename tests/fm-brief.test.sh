@@ -301,13 +301,14 @@ test_base_roots_branch_on_the_base() {
   pass "fm-brief.sh: --base roots the crewmate's branch on the intended base, not the default branch"
 }
 
-# fm-spawn.sh deliberately launches a based task whose base MERGED and had its branch
-# deleted - the normal end-state of a stacked PR, and the state its own respawn path
-# keeps the declaration through. The brief's very first action then fetches a branch
-# that no longer exists, so it must say what to do about it. An instruction with no
-# path through a state the code deliberately allows is a bug in the instruction, and
-# the crewmate never sees the notice fm-spawn.sh prints to firstmate.
-test_base_setup_is_followable_when_the_base_is_gone() {
+# A crewmate cannot tell "the branch is gone" from "origin is unreachable" by looking at a
+# fetch's exit status, and reading either one as "the base must have merged" is a fail-open:
+# it would silently turn a based task into an unbased one and hand firstmate a status line
+# it believes. The brief must therefore never invite that inference. It does not need to:
+# fm-spawn.sh only launches a based task against a LIVE base, so the fetch failing is a real
+# problem, and firstmate - which holds the recorded tip and bin/fm-base-lib.sh - is the only
+# one that can tell a merged base from an abandoned one.
+test_base_setup_never_infers_a_merge_from_a_failed_fetch() {
   local home id brief
   home="$TMP_ROOT/base-gone-home"
   mkdir -p "$home/data"
@@ -315,15 +316,15 @@ test_base_setup_is_followable_when_the_base_is_gone() {
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --base feature/x >/dev/null 2>&1 \
     || fail "base-gone: fm-brief.sh --base should exit 0"
   brief="$home/data/$id/brief.md"
-  assert_grep "no longer exists on origin" "$brief" \
-    "base-gone: the brief leaves the crewmate stuck on a fetch of a branch that is gone"
-  assert_grep "git checkout -b fm/$id\`" "$brief" \
-    "base-gone: the fallback does not give the crewmate the command to root on the default branch instead"
-  assert_grep "IGNORE every other base-branch instruction" "$brief" \
-    "base-gone: the fallback leaves the brief's other base instructions in force, and they cannot be followed either"
-  assert_grep "is gone from origin (it merged)" "$brief" \
-    "base-gone: the crewmate is not told to report the gone base, so firstmate never learns to retire the declaration"
-  pass "fm-brief.sh: --base gives the crewmate a followable path when the intended base has merged and gone"
+  assert_grep "If that fetch does not succeed, STOP" "$brief" \
+    "base-gone: the brief leaves the crewmate to improvise when the base cannot be fetched"
+  assert_grep "blocked: intended base feature/x could not be fetched from origin" "$brief" \
+    "base-gone: the crewmate is not told to report the unfetchable base, so firstmate never learns of it"
+  assert_no_grep "it merged" "$brief" \
+    "base-gone: the brief still reads a failed fetch as a merged base - the fail-open this closes"
+  assert_no_grep "IGNORE every other base-branch instruction" "$brief" \
+    "base-gone: the brief still tells the crewmate to discard its base instructions on a guess"
+  pass "fm-brief.sh: --base tells the crewmate to stop, not to guess, when the base cannot be fetched"
 }
 
 # The no-mistakes pipeline cannot be told a base: it always rebases onto the repo
@@ -547,7 +548,7 @@ test_secondmate_no_projects_charter
 test_pause_verb_override_renders_all_brief_scaffolds
 test_base_no_mistakes_shapes_brief_and_records_nothing
 test_base_roots_branch_on_the_base
-test_base_setup_is_followable_when_the_base_is_gone
+test_base_setup_never_infers_a_merge_from_a_failed_fetch
 test_base_no_mistakes_brief_documents_the_real_recovery
 test_base_gate_precedes_the_done_terminator
 test_base_equals_form

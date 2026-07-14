@@ -1,14 +1,29 @@
 #!/usr/bin/env bash
-# fm-base-lib.sh - the one owner of what a task's declared base branch (base= in
-# state/<id>.meta, from fm-spawn.sh --base) means on origin RIGHT NOW.
+# Every FM_BASE_* variable here is an OUT-PARAM read by the scripts that source this lib,
+# never by the lib itself, so SC2034's "appears unused" is structurally wrong about all of
+# them. Disabled once, at the file level, rather than annotating each assignment - which
+# would only rot as out-params are added.
+# shellcheck disable=SC2034
 #
-# Two consumers must agree exactly, because they gate the same merge:
-#   - bin/fm-pr-check.sh  refuses to record pr= or arm the merge poll unless the
-#                         PR head is rooted in the base's unmerged history.
-#   - bin/fm-review-diff.sh  diffs the crewmate's branch against that base.
+# fm-base-lib.sh - THE ONE OWNER OF WHAT A TASK'S DECLARED BASE BRANCH MEANS.
 #
-# THE DECIDING QUESTION IS NOT WHETHER THE BASE BRANCH STILL EXISTS. Branch existence
-# is an unsound proxy for anything, in BOTH directions:
+# A task declares its intended base with fm-spawn.sh --base, which records base= and the
+# base's spawn-time tip as base_sha= into state/<id>.meta. Four scripts then have to
+# agree about what that declaration means RIGHT NOW:
+#
+#   bin/fm-spawn.sh       may this task be launched against that base at all?
+#   bin/fm-brief.sh       what does the crewmate root its branch on?
+#   bin/fm-pr-check.sh    may this PR be recorded and armed for merge?
+#   bin/fm-review-diff.sh what is the honest diff base for review?
+#
+# THEY DO NOT EACH ASK THEIR OWN VERSION OF THE QUESTION. Every one of them decides on the
+# predicates below, and the two consumers that have a head to look at decide on one shared
+# verdict (fm_base_verdict), so review and merge can never reach opposite conclusions from
+# the same facts. Four half-questions, each subtly wrong in its own way, is what this file
+# exists to prevent.
+#
+# THE DECIDING QUESTION IS NEVER WHETHER THE BASE BRANCH STILL EXISTS. Branch existence is
+# an unsound proxy in BOTH directions:
 #
 #   deleted without merging   an abandoned feature, a closed base PR, a force-deleted
 #                             branch. The base's commits never landed, the pipeline
@@ -36,50 +51,56 @@
 #
 # Neither question subsumes the other, and landedness alone is NOT a licence to stand
 # down: it only tells the default branch's content story, not the head's commit story.
-# The origin probe is an INPUT to both, never the decision. Standing the guard down is
-# the only relaxation there is, and it takes proof; anything short of proof keeps the
-# guard on.
+# The origin probe is an INPUT to both, never the decision. Relaxing the guard takes
+# proof; anything short of proof keeps it on.
 #
-# The probe still has three states, because a base that is ABSENT from origin is not
-# the same as a base we FAILED TO ASK ABOUT:
-#
-#   present  the base is live on origin, so its own tip is the authoritative fact to
-#            test for landedness.
-#   absent   the base no longer exists on origin. That is the state, and ONLY the
-#            state. The fact to test is then the tip recorded at spawn (base_sha=),
-#            the last time the branch demonstrably existed.
-#   failed   the probe itself could not run (auth, network, a broken remote). We
-#            know nothing, so callers stay fail-closed.
-#
-# `git ls-remote --exit-code` distinguishes all three at the source: 0 = the ref
-# matched, 2 = no ref matched, anything else = the probe failed. That is a real
+# NOTHING HERE INFERS ANYTHING FROM A FETCH'S EXIT STATUS. A base we could not ask about
+# is not a base that merged, and an auth or network failure must never be read as one.
+# `git ls-remote --exit-code` separates the three cases at the source: 0 = the ref matched,
+# 2 = no ref matched, anything else = the probe itself failed. That is a real
 # discriminator, not a guess at git's error text.
 #
-# Sourced by bin/fm-pr-check.sh and bin/fm-review-diff.sh. No side effects on
-# source. set -u / set -e safe.
+# Sourced by fm-spawn.sh, fm-brief.sh, fm-pr-check.sh and fm-review-diff.sh. No side
+# effects on source. set -u / set -e safe.
 
-# Probe outcomes. Callers compare against these names, never bare numbers.
+# Every enum below travels as a RETURN CODE, and several of them pass through the same
+# scope in the same call chain. They are therefore given non-overlapping numeric ranges,
+# so no value of one enum can ever be mistaken for a value of another - "we could not
+# tell" and "stand the guard down" aliasing to the same number in a merge gate is a
+# fail-open, and giving them disjoint ranges makes that impossible by construction rather
+# than by everyone remembering to capture the code into a local first.
+
+# Probe outcomes (fm_base_probe_origin). Callers compare against these names, never bare
+# numbers.
 FM_BASE_PRESENT=0
 FM_BASE_PROBE_FAILED=1
 FM_BASE_ABSENT=2
 
 # Landedness outcomes (fm_base_work_landed).
-FM_BASE_WORK_LANDED=0
-FM_BASE_WORK_UNLANDED=1
-FM_BASE_WORK_UNKNOWN=3
+FM_BASE_WORK_LANDED=3
+FM_BASE_WORK_UNLANDED=4
+FM_BASE_WORK_UNKNOWN=5
 
 # Rootedness outcomes (fm_base_head_rooted).
-FM_BASE_HEAD_ROOTED=0
-FM_BASE_HEAD_UNROOTED=1
-FM_BASE_HEAD_UNRELATED=2
+FM_BASE_HEAD_ROOTED=6
+FM_BASE_HEAD_UNROOTED=7
+FM_BASE_HEAD_UNRELATED=8
 
-# The guard's own verdict, returned up through bin/fm-pr-check.sh's assertion and
-# compared by its caller. It MUST NOT share a value with any FM_BASE_* outcome above:
-# those travel as return codes through the same scope, and "stand the guard down and
-# record pr=" is the exact opposite verdict to "we could not tell" (FM_BASE_WORK_UNKNOWN)
-# in a merge gate. Aliasing them would turn every indeterminate answer into a fail-open.
-# shellcheck disable=SC2034 # FM_BASE_GUARD_STAND_DOWN is read by bin/fm-pr-check.sh, which sources this lib.
-FM_BASE_GUARD_STAND_DOWN=4
+# What the declared base IS right now (fm_base_resolve_state), for the consumers that
+# have no head to look at yet.
+FM_BASE_STATE_LIVE=10       # it exists on origin and still carries unmerged work
+FM_BASE_STATE_LANDED=11     # its work is in the default branch (branch kept OR deleted)
+FM_BASE_STATE_ABANDONED=12  # it is gone from origin and its work never landed
+FM_BASE_STATE_UNKNOWN=13    # we could not tell; callers stay fail-closed
+
+# What a PR head IS, given the state of the base it declared (fm_base_verdict).
+# This is the single verdict fm-pr-check.sh and fm-review-diff.sh both decide on.
+FM_BASE_VERDICT_ORDINARY=20        # head sits on the default branch, base has merged: no hazard
+FM_BASE_VERDICT_STACKED_LIVE=21    # head is rooted in a base that still carries unmerged work
+FM_BASE_VERDICT_STACKED_LANDED=22  # head is rooted in a base that has merged: it carries the base's pre-merge commits
+FM_BASE_VERDICT_UNSTACKED=23       # head sits on the default branch but the base is still unmerged: the incident
+FM_BASE_VERDICT_ABANDONED_BASE=24  # the base was deleted without ever merging
+FM_BASE_VERDICT_INDETERMINATE=25   # we could not tell; callers stay fail-closed
 
 # fm_base_valid_branch_name: 0 (true) if <name> is a non-empty, dash-free,
 # whitespace-free, git-legal branch name. A leading dash matters beyond tidiness:
@@ -110,30 +131,22 @@ fm_base_valid_commit_id() {  # <id>
   [ "${#id}" -ge 7 ] && [ "${#id}" -le 64 ]
 }
 
-# fm_base_probe_origin: ask origin whether <branch> exists, from within <git-dir>.
-# Returns FM_BASE_PRESENT, FM_BASE_ABSENT, or FM_BASE_PROBE_FAILED. On PRESENT it
-# sets FM_BASE_PROBE_SHA to the branch's tip on origin, which is how fm-spawn.sh
-# records the durable base_sha= that fm_base_work_landed later reasons from. It
-# always sets FM_BASE_PROBE_ERR to git's stderr, so a caller's fail-closed refusal
-# can name the infrastructure failure instead of it masquerading as a wrong-base
-# verdict. The ref is fully qualified, so a branch name can never be read as an
-# option.
+# fm_base_probe_origin: ask origin whether <branch> exists, from within <git-dir>. This
+# is the INPUT to fm_base_resolve_state below, not a decision anybody makes on its own.
+# Returns FM_BASE_PRESENT, FM_BASE_ABSENT, or FM_BASE_PROBE_FAILED, and always sets
+# FM_BASE_PROBE_ERR to git's stderr, so a caller's fail-closed refusal can name the
+# infrastructure failure instead of it masquerading as a wrong-base verdict. The ref
+# is fully qualified, so a branch name can never be read as an option.
 fm_base_probe_origin() {  # <git-dir> <branch>
-  local dir=${1-} branch=${2-} rc=0 out err_file
+  local dir=${1-} branch=${2-} rc=0 err_file
   FM_BASE_PROBE_ERR=
-  FM_BASE_PROBE_SHA=
   err_file=$(mktemp "${TMPDIR:-/tmp}/fm-base-probe.XXXXXX")
-  out=$(git -C "$dir" ls-remote --exit-code --heads origin \
-    "refs/heads/$branch" 2>"$err_file") || rc=$?
-  # shellcheck disable=SC2034 # FM_BASE_PROBE_ERR is read by callers (fm-pr-check.sh, fm-review-diff.sh) after the probe returns.
+  git -C "$dir" ls-remote --exit-code --heads origin \
+    "refs/heads/$branch" >/dev/null 2>"$err_file" || rc=$?
   FM_BASE_PROBE_ERR=$(cat "$err_file" 2>/dev/null || true)
   rm -f "$err_file"
   case "$rc" in
-    0)
-      # shellcheck disable=SC2034 # FM_BASE_PROBE_SHA is read by fm-spawn.sh after the probe returns.
-      FM_BASE_PROBE_SHA=${out%%[[:space:]]*}
-      return "$FM_BASE_PRESENT"
-      ;;
+    0) return "$FM_BASE_PRESENT" ;;
     2) return "$FM_BASE_ABSENT" ;;
     *) return "$FM_BASE_PROBE_FAILED" ;;
   esac
@@ -145,18 +158,16 @@ fm_base_probe_origin() {  # <git-dir> <branch>
 #
 #   landed    the base's work is in the default branch already. It merged - whether its
 #             branch was deleted afterwards or kept. A head that sits on the DEFAULT
-#             branch therefore has no unmerged feature history left to drag into it, and
-#             callers stand down. A head still ROOTED IN THE BASE is a different story:
-#             see fm_base_head_rooted, because a squash merge leaves the base's own
-#             commits out of the default branch by commit id even though their content
-#             is in it, and such a head still carries them.
+#             branch therefore has no unmerged feature history left to drag into it. A
+#             head still ROOTED IN THE BASE is a different story: see fm_base_head_rooted,
+#             because a squash merge leaves the base's own commits out of the default
+#             branch by commit id even though their content is in it, and such a head
+#             still carries them.
 #   unlanded  the base still carries unmerged work. This is the live-feature-branch
 #             case the guard exists for - and it is ALSO an abandoned base that was
 #             deleted without merging, whose commits the pipeline replayed onto the
 #             head. Callers keep guarding.
-#   unknown   we could not tell. Not landed: callers never relax on it. "Do not relax"
-#             is not "refuse" - a caller with the strict rootedness and label checks
-#             still available runs them, which costs a correctly stacked PR nothing.
+#   unknown   we could not tell. Not landed: callers never relax on it.
 #
 # The fact it reasons from is a base tip: the live tip on origin while the branch is
 # still there, else base_sha=, the tip fm-spawn.sh recorded at spawn time when the
@@ -187,7 +198,6 @@ fm_base_work_landed() {  # <git-dir> <base-sha> <default-sha>
   local dir=${1-} base_sha=${2-} default_sha=${3-} out rc=0 merged_tree default_tree
   FM_BASE_WORK_HOW=
   if ! git -C "$dir" cat-file -e "$base_sha^{commit}" 2>/dev/null; then
-    # shellcheck disable=SC2034 # FM_BASE_WORK_HOW is read by callers after the check returns.
     FM_BASE_WORK_HOW=no-commit
     return "$FM_BASE_WORK_UNKNOWN"
   fi
@@ -212,7 +222,6 @@ fm_base_work_landed() {  # <git-dir> <base-sha> <default-sha>
     FM_BASE_WORK_HOW=contained
     return "$FM_BASE_WORK_LANDED"
   fi
-  # shellcheck disable=SC2034 # FM_BASE_WORK_HOW is read by callers after the check returns.
   FM_BASE_WORK_HOW=diverged
   return "$FM_BASE_WORK_UNLANDED"
 }
@@ -252,10 +261,176 @@ fm_base_head_rooted() {  # <git-dir> <base-sha> <head-sha> <default-sha>
   merge_base=$(git -C "$dir" merge-base "$base_sha" "$head_sha" 2>/dev/null) \
     || return "$FM_BASE_HEAD_UNRELATED"
   [ -n "$merge_base" ] || return "$FM_BASE_HEAD_UNRELATED"
-  # shellcheck disable=SC2034 # FM_BASE_MERGE_BASE is read by callers after the check returns.
   FM_BASE_MERGE_BASE=$merge_base
   if git -C "$dir" merge-base --is-ancestor "$merge_base" "$default_sha" 2>/dev/null; then
     return "$FM_BASE_HEAD_UNROOTED"
   fi
   return "$FM_BASE_HEAD_ROOTED"
+}
+
+# fm_base_resolve_state: what IS the declared base right now? The whole question, asked
+# once, for the consumer that has no head to look at (fm-spawn.sh) and as the first half
+# of the verdict below.
+#
+# It probes origin, fetches the base's objects when the branch is there and the default
+# branch always, picks the tip the predicates may reason from, and asks landedness. The
+# probe runs first, so an origin that cannot be reached is never mistaken for a base that
+# is gone. Branch existence is only ever an INPUT: it chooses WHICH tip (the live one, or
+# the recorded spawn-time one) and, for an unlanded base, whether the base is still live or
+# was abandoned.
+#
+# Returns FM_BASE_STATE_LIVE, FM_BASE_STATE_LANDED, FM_BASE_STATE_ABANDONED, or
+# FM_BASE_STATE_UNKNOWN. A base still on origin whose landedness cannot be settled reads
+# LIVE, not UNKNOWN: a long-lived base that conflicts with the default branch is ordinary,
+# the branch is right there to check a head against, and treating it as live keeps the
+# guard ON - the fail-closed answer. A base that is GONE and undecidable has nothing left
+# to check against at all, so it reads UNKNOWN and callers refuse.
+#
+# Sets FM_BASE_STATE_TIP (the tip to reason from), FM_BASE_STATE_DEFAULT_SHA (the freshly
+# fetched default branch, which callers pass on to fm_base_head_rooted),
+# FM_BASE_STATE_PRESENT (true|false), FM_BASE_STATE_LANDED_RC (the raw fm_base_work_landed
+# outcome, so a caller can say landedness was merely unsettled rather than settled against
+# it), FM_BASE_STATE_WHY (ancestor|contained|diverged|no-commit|no-merge|probe-failed|
+# fetch-failed|no-tip|gone-no-tip|gone-tip-unknown|default-fetch-failed|default-no-tip) and
+# FM_BASE_STATE_ERR (git's own stderr when the probe or a fetch failed).
+fm_base_resolve_state() {  # <git-dir> <base-branch> <recorded-base-sha> <default-branch-name>
+  local dir=${1-} branch=${2-} recorded=${3-} default_branch=${4-}
+  local probe_rc=0 landed_rc=0 tip err
+  FM_BASE_STATE_TIP=
+  FM_BASE_STATE_DEFAULT_SHA=
+  FM_BASE_STATE_PRESENT=false
+  FM_BASE_STATE_LANDED_RC=
+  FM_BASE_STATE_WHY=
+  FM_BASE_STATE_ERR=
+
+  # The probe runs BEFORE any fetch, so an origin that cannot be reached at all is
+  # reported as exactly that rather than as whichever fetch happened to fail first.
+  fm_base_probe_origin "$dir" "$branch" || probe_rc=$?
+  case "$probe_rc" in
+    "$FM_BASE_PRESENT") FM_BASE_STATE_PRESENT=true ;;
+    "$FM_BASE_ABSENT") ;;
+    *)
+      FM_BASE_STATE_ERR=$FM_BASE_PROBE_ERR
+      FM_BASE_STATE_WHY=probe-failed
+      return "$FM_BASE_STATE_UNKNOWN"
+      ;;
+  esac
+
+  if "$FM_BASE_STATE_PRESENT"; then
+    # The predicates read commits, not refs, so the base's objects have to be here.
+    if ! err=$(git -C "$dir" fetch --quiet origin \
+      "+refs/heads/$branch:refs/remotes/origin/$branch" 2>&1); then
+      FM_BASE_STATE_ERR=$err
+      FM_BASE_STATE_WHY=fetch-failed
+      return "$FM_BASE_STATE_UNKNOWN"
+    fi
+    tip=$(git -C "$dir" rev-parse --verify --quiet \
+      "refs/remotes/origin/$branch^{commit}") || {
+      FM_BASE_STATE_WHY=no-tip
+      return "$FM_BASE_STATE_UNKNOWN"
+    }
+  else
+    # Gone. That is the state, and ONLY the state - it says nothing about whether the
+    # base merged. The tip recorded at spawn, the last time the branch demonstrably
+    # existed, is the fact that does.
+    if [ -z "$recorded" ] || ! fm_base_valid_commit_id "$recorded"; then
+      FM_BASE_STATE_WHY=gone-no-tip
+      return "$FM_BASE_STATE_UNKNOWN"
+    fi
+    if ! git -C "$dir" cat-file -e "$recorded^{commit}" 2>/dev/null; then
+      FM_BASE_STATE_WHY=gone-tip-unknown
+      return "$FM_BASE_STATE_UNKNOWN"
+    fi
+    tip=$recorded
+  fi
+
+  if ! err=$(git -C "$dir" fetch --quiet origin \
+    "+refs/heads/$default_branch:refs/remotes/origin/$default_branch" 2>&1); then
+    FM_BASE_STATE_ERR=$err
+    FM_BASE_STATE_WHY=default-fetch-failed
+    return "$FM_BASE_STATE_UNKNOWN"
+  fi
+  FM_BASE_STATE_DEFAULT_SHA=$(git -C "$dir" rev-parse --verify --quiet \
+    "refs/remotes/origin/$default_branch^{commit}") || {
+    FM_BASE_STATE_WHY=default-no-tip
+    return "$FM_BASE_STATE_UNKNOWN"
+  }
+
+  FM_BASE_STATE_TIP=$tip
+  fm_base_work_landed "$dir" "$tip" "$FM_BASE_STATE_DEFAULT_SHA" || landed_rc=$?
+  FM_BASE_STATE_LANDED_RC=$landed_rc
+  FM_BASE_STATE_WHY=$FM_BASE_WORK_HOW
+  if [ "$landed_rc" -eq "$FM_BASE_WORK_LANDED" ]; then
+    return "$FM_BASE_STATE_LANDED"
+  fi
+  if "$FM_BASE_STATE_PRESENT"; then
+    return "$FM_BASE_STATE_LIVE"
+  fi
+  if [ "$landed_rc" -eq "$FM_BASE_WORK_UNLANDED" ]; then
+    return "$FM_BASE_STATE_ABANDONED"
+  fi
+  return "$FM_BASE_STATE_UNKNOWN"
+}
+
+# fm_base_verdict: THE ONE DECISION. Combine what the base IS (fm_base_resolve_state) with
+# where the head is ROOTED (fm_base_head_rooted) into the single verdict bin/fm-pr-check.sh
+# gates the merge on and bin/fm-review-diff.sh picks its diff base from, so the two cannot
+# reach opposite conclusions from the same facts.
+#
+# It is a pure combiner over the two answers, and it demands BOTH, so no caller can settle
+# a base on half the question. Callers sequence the two lookups themselves - fm-pr-check.sh
+# has to fetch a PR head from GitHub before it has one to root, fm-review-diff.sh already
+# has its compare ref - but neither of them decides anything.
+#
+#   ORDINARY         the head sits on the default branch and the base has merged. Nothing
+#                    it once carried is unmerged any more, so there is no hazard: verify
+#                    the PR as the ordinary default-branch PR it now is, and diff it
+#                    against the default branch.
+#   STACKED_LIVE     the head is rooted in a base that still carries unmerged work. This
+#                    is what a based task is supposed to look like: allow it, require the
+#                    PR to target that base, and diff against it.
+#   STACKED_LANDED   the head is rooted in a base that has merged. A squash or rebase
+#                    merge put the base's CONTENT in the default branch but not its
+#                    COMMITS, and this head still carries them, so merging would land them
+#                    all over again. Refuse; the recovery is the head's REBASE onto the
+#                    default branch, not a retarget. The base is still the head's honest
+#                    fork point, so review keeps diffing against it.
+#   UNSTACKED        the head sits on the default branch but the base still carries
+#                    unmerged work, so the head was rebased off it - and the pipeline
+#                    replayed the base's own commits onto the head when it did. That is
+#                    the launch incident (data/learnings.md 2026-07-07). Refuse.
+#   ABANDONED_BASE   the base was deleted from origin WITHOUT ever merging. Its commits
+#                    are on this head either way, and there is no branch left to target.
+#                    Refuse.
+#   INDETERMINATE    we could not settle it - the base's state is UNKNOWN (the probe
+#                    failed, or it is gone with no usable recorded tip), or the head and
+#                    the base share no history at all. Refuse.
+#
+# Sets FM_BASE_VERDICT_WHY: "unrelated" when rootedness is what could not be settled,
+# otherwise FM_BASE_STATE_WHY, so a caller's refusal names the question that went
+# unanswered rather than the one it never got to.
+fm_base_verdict() {  # <state-rc> <rooted-rc>
+  local state_rc=${1-} rooted_rc=${2-}
+  FM_BASE_VERDICT_WHY=$FM_BASE_STATE_WHY
+  if [ "$state_rc" -eq "$FM_BASE_STATE_UNKNOWN" ]; then
+    return "$FM_BASE_VERDICT_INDETERMINATE"
+  fi
+  if [ "$rooted_rc" -eq "$FM_BASE_HEAD_UNRELATED" ]; then
+    FM_BASE_VERDICT_WHY=unrelated
+    return "$FM_BASE_VERDICT_INDETERMINATE"
+  fi
+  if [ "$rooted_rc" -eq "$FM_BASE_HEAD_ROOTED" ]; then
+    case "$state_rc" in
+      "$FM_BASE_STATE_LANDED") return "$FM_BASE_VERDICT_STACKED_LANDED" ;;
+      "$FM_BASE_STATE_ABANDONED") return "$FM_BASE_VERDICT_ABANDONED_BASE" ;;
+      *) return "$FM_BASE_VERDICT_STACKED_LIVE" ;;
+    esac
+  fi
+  # UNROOTED: the head forks from a commit the default branch can reach, so it carries
+  # none of the base's own commits by id.
+  case "$state_rc" in
+    "$FM_BASE_STATE_LANDED") return "$FM_BASE_VERDICT_ORDINARY" ;;
+    "$FM_BASE_STATE_ABANDONED") return "$FM_BASE_VERDICT_ABANDONED_BASE" ;;
+    *) return "$FM_BASE_VERDICT_UNSTACKED" ;;
+  esac
 }

@@ -7,8 +7,14 @@
 # that could silently disarm fm-pr-check.sh's guard by failing to hand the branch
 # name along.
 #
+# The spawn decides on the SAME question fm-pr-check.sh and fm-review-diff.sh decide on -
+# has the base's work LANDED in the default branch (bin/fm-base-lib.sh's
+# fm_base_resolve_state) - never on whether the branch happens to exist. What a spawn does
+# with each answer turns on one thing only this script knows: whether the task is meeting
+# the base for the FIRST time, or coming back to a base it already declared.
+#
 # Matrix:
-#   (a) --base <branch> -> meta records base=<branch> and base_sha=<origin tip>
+#   (a) --base <branch> on a LIVE base -> meta records base=<branch> and base_sha=<origin tip>
 #   (b) no --base (the common case) -> meta records no base= line at all
 #   (c) an invalid branch name -> loud refusal, raised before any window or worktree exists
 #   (d) an accepted spawn does create both, so (c)'s assertions are live
@@ -22,13 +28,20 @@
 #       intact - the normal end-state of a stacked PR, not a reason to dead-end recovery
 #   (k) a respawn whose base was deleted from origin WITHOUT merging is refused by name,
 #       whether the base is supplied again or carried forward
+#   (l) a FIRST spawn against a base that has already MERGED (branch still on origin -
+#       GitHub's delete-on-merge is off by default) is refused BY NAME. There is nothing
+#       left to stack on, and the brief would send the crewmate to root its branch on the
+#       base's pre-merge commits - a whole run that fm-pr-check.sh is guaranteed to refuse.
+#       Deciding on the branch's mere existence would have waved this through
+#   (m) a RESPAWN whose base merged but was NOT deleted is accepted, declaration intact -
+#       the same landedness, a different question, because the branch already exists and
+#       fm-pr-check.sh decides that PR on its own merits
 #
 # base_sha= is the base's tip on origin at spawn time, resolved while the base
 # necessarily still exists. That is the fact fm-pr-check.sh needs once the branch is
 # deleted from origin, where absence alone cannot say whether the base merged
 # (harmless) or was abandoned (its unmerged commits replayed on the PR head) - and it is
-# the same fact this script decides (j) and (k) with, because the deciding question at
-# spawn is landedness too, never the branch's mere existence.
+# the same fact this script decides (j) through (m) with.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -71,6 +84,12 @@ SH
 # fact fm-pr-check.sh needs to tell a merged base from an abandoned one once the
 # branch itself is deleted. origin_base names the branch actually created on origin,
 # so a case can declare a base origin does NOT have.
+#
+# That base is given a commit of its OWN, so it is LIVE - it carries unmerged work. A base
+# sitting at the default branch's own tip carries none, which reads (correctly) as already
+# landed, and the spawn refuses to launch a first task against a base there is nothing left
+# to stack on. Every case that expects an accepted based spawn therefore needs a base that
+# is genuinely live, and this is where it gets one.
 make_spawn_case() {
   local name=$1 id=$2 origin_base=${3:-feature/base} case_dir home proj wt fakebin
   case_dir="$TMP_ROOT/$name"
@@ -82,6 +101,7 @@ make_spawn_case() {
   printf 'claude\n' > "$home/config/crew-harness"
   fm_git_worktree "$proj" "$wt" "wt-$name"
   make_project_origin "$case_dir" "$proj" "$origin_base"
+  [ -z "$origin_base" ] || advance_origin_base "$case_dir" "$proj" "$origin_base"
   touch "$home/state/.last-watcher-beat"
   printf 'brief for %s\n' "$id" > "$home/data/$id/brief.md"
   printf '%s|%s|%s|%s|%s\n' "$case_dir" "$home" "$proj" "$wt" "$fakebin"
@@ -371,7 +391,6 @@ test_respawn_with_base_after_the_base_merged_and_was_deleted() {
   id=spawn-base-b10
   rec=$(make_spawn_case basemerged "$id" feature/merged)
   read_case_record "$rec"
-  advance_origin_base "$CASE_DIR" "$PROJ_DIR" feature/merged
   base_sha=$(git -C "$CASE_DIR/origin.git" rev-parse refs/heads/feature/merged)
 
   out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR" --base feature/merged)
@@ -386,8 +405,10 @@ test_respawn_with_base_after_the_base_merged_and_was_deleted() {
   out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR" --base feature/merged)
   status=$?
   expect_code 0 "$status" "basemerged: a respawn with --base after the base merged and was deleted must succeed, not dead-end on the branch being gone"$'\n'"$out"
-  assert_contains "$out" "merged and was deleted" \
+  assert_contains "$out" "has since merged" \
     "basemerged: the spawn should say out loud that the base merged, not just proceed"
+  assert_contains "$out" "deleted from origin" \
+    "basemerged: the spawn should say the branch is gone as well, so the operator is not left guessing why"
   assert_grep "base=feature/merged" "$HOME_DIR/state/$id.meta" \
     "basemerged: the respawn dropped the declared base, leaving the task unguarded at merge"
   assert_grep "base_sha=$base_sha" "$HOME_DIR/state/$id.meta" \
@@ -408,7 +429,6 @@ test_respawn_after_the_base_was_abandoned_refuses() {
   rec=$(make_spawn_case baseabandoned "$id" feature/abandoned)
   read_case_record "$rec"
   log="$CASE_DIR/tmux.log"
-  advance_origin_base "$CASE_DIR" "$PROJ_DIR" feature/abandoned
 
   out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR" --base feature/abandoned)
   status=$?
@@ -431,6 +451,72 @@ test_respawn_after_the_base_was_abandoned_refuses() {
   expect_code 1 "$status" "baseabandoned: the carried-forward base must be held to the same rule as the supplied one"
   assert_contains "$out" "WITHOUT merging" "baseabandoned: the carry-forward refusal did not name the abandoned base"
   pass "fm-spawn refuses a respawn whose declared base was deleted from origin without merging"
+}
+
+# GitHub's delete-on-merge is OFF by default, so "merged, branch kept" is at least as
+# ordinary an end-state as the deleted one - and firstmate's queued/blocked-by flow
+# dispatches a stacked task exactly when its base has just merged. Deciding on the
+# branch's EXISTENCE would wave that first spawn straight through: the brief would send the
+# crewmate to fetch the base and root fm/<id> on the base's pre-squash commits, and
+# fm-pr-check.sh would then refuse the finished PR and demand a rebase onto the default
+# branch. A whole run, doomed at launch. Landedness is the question, so the spawn refuses
+# it here, by name, and says the one thing that actually resolves it.
+test_first_spawn_against_an_already_merged_base_refuses() {
+  local rec id out status log
+  id=spawn-base-b12
+  rec=$(make_spawn_case basealreadymerged "$id" feature/done)
+  read_case_record "$rec"
+  log="$CASE_DIR/tmux.log"
+  : > "$log"
+
+  # feature/done merges into main and origin KEEPS the branch.
+  merge_origin_base_into_main "$CASE_DIR" feature/done
+
+  out=$(FM_TEST_TMUX_LOG="$log" run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR" --base feature/done)
+  status=$?
+  expect_code 1 "$status" "basealreadymerged: a first spawn against a base whose work has already merged must refuse, not launch a doomed run"
+  assert_contains "$out" "ALREADY MERGED" \
+    "basealreadymerged: the refusal did not say the base has already merged"
+  assert_contains "$out" "re-run WITHOUT --base" \
+    "basealreadymerged: the refusal did not name the one recovery that resolves it"
+  assert_absent "$HOME_DIR/state/$id.meta" \
+    "basealreadymerged: a refused base must not be recorded"
+  assert_no_grep "new-window" "$log" \
+    "basealreadymerged: the refusal created a backend window it then abandoned, with no meta to reconcile it"
+  assert_no_grep "treehouse get" "$log" \
+    "basealreadymerged: the refusal leased a task worktree it then abandoned, with no meta to release it"
+  pass "fm-spawn refuses a first spawn against a base whose work has already merged"
+}
+
+# The mirror of the case above, and the reason existence is not the question in EITHER
+# direction: the same landed base, but the task already declared it and its branch already
+# exists. Refusing here would dead-end the recovery of a task whose PR fm-pr-check.sh may
+# well pass - it stands its guard down for a head that now sits on the default branch. So
+# the declaration is kept and the respawn goes through.
+test_respawn_after_the_base_merged_without_being_deleted() {
+  local rec id out status base_sha
+  id=spawn-base-b13
+  rec=$(make_spawn_case basemergedkept "$id" feature/kept)
+  read_case_record "$rec"
+  base_sha=$(git -C "$CASE_DIR/origin.git" rev-parse refs/heads/feature/kept)
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR" --base feature/kept)
+  status=$?
+  expect_code 0 "$status" "basemergedkept: the first (based) spawn should succeed while the base is still live"$'\n'"$out"
+
+  # feature/kept merges into main; origin KEEPS the branch (GitHub's default).
+  merge_origin_base_into_main "$CASE_DIR" feature/kept
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR" --base feature/kept)
+  status=$?
+  expect_code 0 "$status" "basemergedkept: a respawn whose base merged mid-flight must not dead-end recovery"$'\n'"$out"
+  assert_contains "$out" "has since merged" \
+    "basemergedkept: the spawn should say out loud that the base merged rather than quietly proceeding"
+  assert_grep "base=feature/kept" "$HOME_DIR/state/$id.meta" \
+    "basemergedkept: the respawn dropped the declared base, leaving the task unguarded at merge"
+  assert_grep "base_sha=$base_sha" "$HOME_DIR/state/$id.meta" \
+    "basemergedkept: the respawn dropped the recorded spawn-time tip, so fm-pr-check could no longer tell that base merged"
+  pass "fm-spawn accepts a respawn whose declared base merged without being deleted"
 }
 
 # A base is a fact about ONE task. Shared across a batch it would silently guard
@@ -458,5 +544,7 @@ test_base_rejected_for_scout_and_secondmate
 test_respawn_without_base_carries_the_declaration_forward
 test_respawn_with_base_after_the_base_merged_and_was_deleted
 test_respawn_after_the_base_was_abandoned_refuses
+test_first_spawn_against_an_already_merged_base_refuses
+test_respawn_after_the_base_merged_without_being_deleted
 test_base_rejected_for_a_local_only_project
 test_base_rejected_in_a_batch

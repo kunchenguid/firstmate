@@ -18,6 +18,13 @@
 #   SAME --base <branch> to fm-spawn.sh, which records base= and the base's tip on
 #   origin as base_sha=. fm-pr-check.sh then guards the PR's base before merge; its
 #   header owns that contract in full.
+#   THE BRIEF TELLS ONE STORY ABOUT THE BASE, unconditionally, and it can because
+#   fm-spawn.sh only launches a based task against a LIVE base - one that still carries
+#   unmerged work. A base that has already merged, or that was abandoned, is refused at
+#   the spawn, so the crewmate never meets it and is never asked to work out which state
+#   it is in. The brief asks it to diagnose nothing: if the base cannot be fetched it
+#   stops and says so, because a base you cannot reach is not a base that merged, and
+#   only firstmate holds the recorded tip that can tell those apart (bin/fm-base-lib.sh).
 #   direct-PR opens the PR against the base directly (gh-axi pr create --base).
 #   no-mistakes cannot be told a base: the pipeline always rebases onto the repo
 #   default branch and opens the PR against it. So the brief has the crewmate
@@ -334,20 +341,27 @@ if [ -n "$BASE" ]; then
     echo "error: --base does not apply to local-only mode (no remote or PR; merges into local main)" >&2
     exit 1
   fi
-  # fm-spawn.sh deliberately launches a based task whose base has MERGED and had its
-  # branch deleted - the normal end-state of a stacked PR - because nothing is left to
-  # stack on and nothing can be dragged anywhere. The fetch below then fails, so the
-  # brief has to say what to do about it: an instruction with no path through a state
-  # the spawn allows is not an instruction. A base that was ABANDONED rather than
-  # merged never gets here; fm-spawn.sh refuses that launch.
+  # The brief tells ONE story about the base, and it can, because fm-spawn.sh will only
+  # launch a based task whose base is LIVE - it refuses a first spawn against a base whose
+  # work has already merged, and against one that was abandoned. So "fetch the base and
+  # root on it" is always the right instruction here, and there is no state the crewmate
+  # has to diagnose for itself.
+  #
+  # Which is why the fetch failing is NOT an invitation to improvise. A crewmate cannot
+  # tell "the branch is gone" from "origin is unreachable" by looking at a fetch's exit
+  # status, and reading either one as "the base must have merged" is the fail-open this
+  # whole design exists to close: it would silently turn a based task into an unbased one
+  # and hand firstmate a status line it believes. Stop instead. Firstmate holds the
+  # recorded tip and bin/fm-base-lib.sh, so it - and only it - can tell a base that merged
+  # from one that was abandoned.
   BRANCH_STEP="1. First action: fetch the intended base and root your branch ON it. The worktree starts on the DEFAULT branch, so branching without this step would root your work on the wrong base:
    \`\`\`
    git fetch origin $BASE
    git checkout -b fm/$ID FETCH_HEAD
    \`\`\`
-   If that fetch fails because \`$BASE\` no longer exists on origin, that base has already merged into the default branch and there is nothing left to stack on. Root your branch on the default branch you are already sitting on instead (\`git checkout -b fm/$ID\`), IGNORE every other base-branch instruction in this brief, and work the task as an ordinary default-branch one. Report it once so firstmate can retire the declaration:
+   If that fetch does not succeed, STOP. Do not diagnose why, and do not fall back to the default branch: a base you cannot reach is not a base that merged, and rooting on the default branch would silently make this an unbased task. Report it and stop - firstmate can tell those apart and you cannot:
    \`\`\`
-   echo \"working: intended base $BASE is gone from origin (it merged); proceeding as an ordinary default-branch task\" >> $STATUS_FILE
+   echo \"blocked: intended base $BASE could not be fetched from origin\" >> $STATUS_FILE
    \`\`\`"
   # The Setup note and the definition of done must not disagree about whether the
   # branch may end up rebased onto the default branch. Under direct-PR the
