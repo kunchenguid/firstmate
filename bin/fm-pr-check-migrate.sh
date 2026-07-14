@@ -156,8 +156,10 @@ MIGRATION_SCAN_MARKER_TMP=
 MIGRATION_LOG_TMP=
 MIGRATION_OBLIGATION_TMP=
 MIGRATION_QUARANTINE_TMP=
+MIGRATION_X_SHIM_TMP=
 migration_cleanup() {
   fm_pr_poll_cleanup
+  [ -z "$MIGRATION_X_SHIM_TMP" ] || rm -f -- "$MIGRATION_X_SHIM_TMP"
   [ -z "$MIGRATION_QUARANTINE_TMP" ] || rm -f -- "$MIGRATION_QUARANTINE_TMP"
   [ -z "$MIGRATION_OBLIGATION_TMP" ] || rm -f -- "$MIGRATION_OBLIGATION_TMP"
   [ -z "$MIGRATION_LOG_TMP" ] || rm -f -- "$MIGRATION_LOG_TMP"
@@ -174,6 +176,25 @@ if [ ! -d "$STATE" ] || [ -L "$STATE" ]; then
 fi
 STATE_DEVICE=$(fm_pr_file_device "$STATE") || exit 1
 [ -n "$STATE_DEVICE" ] || exit 1
+refresh_v1_x_shim() {
+  local shim="$STATE/x-watch.check.sh"
+  fmx_poll_shim_v1_valid "$shim" "$FM_HOME" "$FM_ROOT" || return 0
+  fm_pr_regular_destination_on_device_or_absent "$shim" "$STATE_DEVICE" || return 1
+  MIGRATION_X_SHIM_TMP=$(mktemp "$STATE/.fm-x-watch.XXXXXX") || return 1
+  fmx_poll_shim_content "$FM_HOME" "$FM_ROOT" > "$MIGRATION_X_SHIM_TMP" || return 1
+  chmod 0700 "$MIGRATION_X_SHIM_TMP" || return 1
+  fmx_poll_shim_valid "$MIGRATION_X_SHIM_TMP" "$FM_HOME" "$FM_ROOT" || return 1
+  fm_pr_regular_destination_on_device_or_absent "$shim" "$STATE_DEVICE" || return 1
+  mv -f -- "$MIGRATION_X_SHIM_TMP" "$shim" || return 1
+  MIGRATION_X_SHIM_TMP=
+  [ "$(fm_pr_file_device "$shim")" = "$STATE_DEVICE" ] || return 1
+  [ "$(fm_pr_file_mode "$shim")" = 700 ] || return 1
+  fmx_poll_shim_valid "$shim" "$FM_HOME" "$FM_ROOT"
+}
+if ! refresh_v1_x_shim; then
+  echo "PR_CHECK_MIGRATION: authenticated X poll shim could not be refreshed; migration did not complete safely" >&2
+  exit 1
+fi
 # A marker contradicted by a pending or failed obligation is not authoritative.
 # Remove only an ordinary marker under exclusion; unsafe marker paths remain a
 # hard refusal for the publication checks below.
