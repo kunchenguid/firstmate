@@ -2,12 +2,12 @@
 # Durable captain-attention lifecycle for a firstmate primary.
 #
 # `arm` records a stable semantic identity before firstmate yields with a
-# question that genuinely needs the captain's response. The primary harness's
-# turn-end seam calls `publish`; it claims and emits at most one notification for that
-# identity. The user-input seam calls `clear` before the response turn starts.
-# Clearing retains the last-notified identity so a Stop retry, supervision wake,
-# or restatement of the same still-pending question cannot replay the sound.
-# A genuinely new question must use a new identity.
+# question that genuinely needs the captain's response. An existing pending
+# wait cannot be replaced before the captain responds. The primary harness's
+# turn-end seam calls `publish`; it claims and emits at most one notification for
+# the pending epoch. The user-input seam calls `clear` before the response turn
+# starts, ending that epoch so a later genuine wait can notify even when it uses
+# the same identity text.
 #
 # State is owned by $FM_HOME/state/.captain-wait (or FM_STATE_OVERRIDE), so
 # separate firstmate and secondmate homes never share dedupe state.
@@ -35,7 +35,7 @@ Usage: fm-captain-wait.sh arm <wait-id> | publish | clear
 
   arm ID   Record the stable identity of a genuine pending captain question.
   publish  Claim the pending identity and notify once; repeated calls are silent.
-  clear    Resolve the pending wait without forgetting its notification claim.
+  clear    Resolve the pending wait and end its notification epoch.
 
 State is home-scoped under FM_HOME/state/.captain-wait. Set
 FM_CAPTAIN_ATTENTION_EXEC=/path/to/command to inject a notifier; it receives the
@@ -52,7 +52,10 @@ usage_error() {
 
 lock_acquire() {
   fm_lock_acquire_wait "$LOCK"
-  trap 'fm_lock_release "$LOCK"' EXIT HUP INT TERM
+  trap 'fm_lock_release "$LOCK"' EXIT
+  trap 'exit 129' HUP
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
 }
 
 atomic_write() { # <path> <value>
@@ -93,6 +96,10 @@ case "$cmd" in
     case "$wait_id" in *[!A-Za-z0-9._:-]*) usage_error ;; esac
     lock_acquire || exit 1
     mkdir -p "$WAIT_DIR" || exit 1
+    if [ -e "$WAIT_DIR/pending" ] || [ -L "$WAIT_DIR/pending" ]; then
+      exit 0
+    fi
+    rm -f "$WAIT_DIR/last-notified" || exit 1
     atomic_write "$WAIT_DIR/pending" "$wait_id"
     ;;
   publish)
@@ -113,7 +120,7 @@ case "$cmd" in
     [ "$#" -eq 1 ] || usage_error
     [ -d "$WAIT_DIR" ] || exit 0
     lock_acquire || exit 1
-    rm -f "$WAIT_DIR/pending"
+    rm -f "$WAIT_DIR/pending" "$WAIT_DIR/last-notified"
     ;;
   *) usage_error ;;
 esac

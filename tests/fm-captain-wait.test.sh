@@ -56,22 +56,29 @@ test_public_transition() {
   [ "$(notification_count "$log")" = 0 ] || fail "fleet wake without an armed captain wait must stay silent"
 
   run_wait "$home" "$dir/notify.sh" "$log" arm review-pr-42
+  run_wait "$home" "$dir/notify.sh" "$log" arm must-not-replace-pending
   run_wait "$home" "$dir/notify.sh" "$log" publish
   [ "$(notification_count "$log")" = 1 ] || fail "the first published captain wait must notify exactly once"
   assert_grep 'review-pr-42' "$log" "the notifier must receive the durable wait identity"
+  assert_no_grep 'must-not-replace-pending' "$log" "a second arm must not replace an uncleared pending wait"
 
   run_wait "$home" "$dir/notify.sh" "$log" publish
-  run_wait "$home" "$dir/notify.sh" "$log" arm review-pr-42
+  run_wait "$home" "$dir/notify.sh" "$log" arm still-must-not-replace-pending
   run_wait "$home" "$dir/notify.sh" "$log" publish
-  [ "$(notification_count "$log")" = 1 ] || fail "Stop retries and restatements of the same wait must stay silent"
+  [ "$(notification_count "$log")" = 1 ] || fail "Stop retries and re-arms before captain input must stay silent"
 
   run_wait "$home" "$dir/notify.sh" "$log" clear
   run_wait "$home" "$dir/notify.sh" "$log" publish
   [ "$(notification_count "$log")" = 1 ] || fail "captain response clearing the wait must not notify"
 
+  run_wait "$home" "$dir/notify.sh" "$log" arm review-pr-42
+  run_wait "$home" "$dir/notify.sh" "$log" publish
+  [ "$(notification_count "$log")" = 2 ] || fail "a cleared epoch must allow the same identity text to notify again"
+
+  run_wait "$home" "$dir/notify.sh" "$log" clear
   run_wait "$home" "$dir/notify.sh" "$log" arm choose-release-name
   run_wait "$home" "$dir/notify.sh" "$log" publish
-  [ "$(notification_count "$log")" = 2 ] || fail "a genuinely new captain wait must notify once"
+  [ "$(notification_count "$log")" = 3 ] || fail "a genuinely new captain wait must notify once"
 
   run_wait "$home" "$dir/notify.sh" "$log" clear
   run_wait "$home" "$dir/notify.sh" "$log" arm concurrent-stop-retry
@@ -81,8 +88,37 @@ test_public_transition() {
   local second=$!
   wait "$first"
   wait "$second"
-  [ "$(notification_count "$log")" = 3 ] || fail "concurrent Stop-hook retries must still notify exactly once"
+  [ "$(notification_count "$log")" = 4 ] || fail "concurrent Stop-hook retries must still notify exactly once"
   pass "captain-attention public transition is silent -> one -> silent -> clear -> one"
+}
+
+test_signal_terminates_lock_owner() {
+  local dir="$TMP_ROOT/signal" home="$TMP_ROOT/signal/home" log="$TMP_ROOT/signal/notify.log"
+  local publisher status i
+  mkdir -p "$home/state" "$dir"
+  cat > "$dir/slow-notify.sh" <<'SH'
+#!/usr/bin/env bash
+: > "$FM_NOTIFY_READY"
+sleep 0.2
+SH
+  chmod +x "$dir/slow-notify.sh"
+
+  run_wait "$home" "$dir/slow-notify.sh" "$log" arm signal-exit
+  FM_HOME="$home" FM_CAPTAIN_ATTENTION_EXEC="$dir/slow-notify.sh" \
+    FM_NOTIFY_LOG="$log" FM_NOTIFY_READY="$dir/ready" bash "$WAIT" publish &
+  publisher=$!
+  i=0
+  while [ "$i" -lt 100 ] && [ ! -f "$dir/ready" ]; do
+    sleep 0.01
+    i=$((i + 1))
+  done
+  [ -f "$dir/ready" ] || fail "signal test notifier did not start"
+  kill -TERM "$publisher"
+  wait "$publisher"
+  status=$?
+  expect_code 143 "$status" "TERM must terminate the lock owner"
+  assert_absent "$home/state/.captain-wait.lock" "TERM must release the captain-wait lock through EXIT"
+  pass "captain-attention signal handlers terminate before releasing the lock"
 }
 
 test_notification_claim_survives_notifier_failure() {
@@ -166,6 +202,7 @@ test_script_help() {
 }
 
 test_public_transition
+test_signal_terminates_lock_owner
 test_notification_claim_survives_notifier_failure
 test_home_isolation
 test_codex_lifecycle_hooks
