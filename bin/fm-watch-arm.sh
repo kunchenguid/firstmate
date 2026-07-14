@@ -82,9 +82,10 @@ BEAT="$STATE/.last-watcher-beat"
 WATCH_OUT="$STATE/.watch.out"
 # "Fresh" reuses the guard's threshold so there is one definition of liveness.
 GRACE=${FM_GUARD_GRACE:-300}
-# How long to wait for a freshly forked watcher to acquire the lock and beat.
+# How long to wait for a freshly launched watcher to acquire the lock and beat.
 CONFIRM_TIMEOUT=${FM_ARM_CONFIRM_TIMEOUT:-10}
-# Poll interval while attached to an existing healthy watcher.
+# Poll interval while following a watcher cycle: one this arm started, or an
+# existing healthy one it attached to.
 ATTACH_POLL=${FM_ARM_ATTACH_POLL:-0.5}
 
 clear_stale_recorded_watcher_lock() {
