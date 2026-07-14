@@ -18,10 +18,12 @@
 # parse a full https://github.com/<owner>/<repo>/pull/<n> URL. This script
 # parses the URL (via bin/fm-pr-lib.sh) and invokes gh-axi in the form it accepts.
 #
-# Hooks: the pr-ready hook point belongs to the recording step, so when this run
-# is the first to record pr= (that same no-CI-repo flow), it fires here rather
-# than inside fm-pr-check.sh - after the merge, so it can never delay it - and
-# still exactly once per (task, PR URL). post-merge fires after it.
+# Hooks: the pr-ready hook point belongs to the recording step, so on a task
+# whose PR this run is the first to record (that same no-CI-repo flow), it fires
+# here rather than inside fm-pr-check.sh - after the merge, so it can never delay
+# it - and still exactly once per (task, PR URL). Because the recording is done
+# by then, it fires even if the merge itself failed; post-merge, which means
+# firstmate merged, fires only after a successful merge.
 #
 # Merge method: defaults to --squash when the caller passes none of --squash,
 # --merge, --rebase, or --method after the optional -- separator. An explicit
@@ -90,14 +92,11 @@ if [ ! -f "$META" ] || [ -L "$META" ]; then
   exit 1
 fi
 
-# Capture whether this run is the one that records pr= before fm-pr-check does.
-PR_NEWLY_RECORDED=0
-grep -qxF "pr=$URL" "$META" || PR_NEWLY_RECORDED=1
-
 # FM_PR_READY_HOOK=defer keeps fm-pr-check's pr-ready hook off the merge's
 # critical path: a slow hook there would sit between the recording and the merge
 # below. It is fired here instead, after the merge, still exactly once per
-# (task, PR URL) - only when this run is the one that recorded pr=.
+# (task, PR URL) - fm_hook_pr_ready_once gates on the fire it records in the
+# meta, so a merge that fails below still fires it and a retry does not re-fire.
 FM_PR_READY_HOOK=defer "$SCRIPT_DIR/fm-pr-check.sh" "$ID" "$URL"
 grep -qxF "pr=$URL" "$META" || { echo "error: fm-pr-check did not record pr=$URL in $META; refusing to merge" >&2; exit 1; }
 
@@ -106,16 +105,18 @@ if ! caller_has_merge_method "$@"; then
   merge_args=(--squash)
 fi
 
-gh-axi pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" "${merge_args[@]+"${merge_args[@]}"}" "$@"
+merge_status=0
+gh-axi pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" "${merge_args[@]+"${merge_args[@]}"}" "$@" ||
+  merge_status=$?
 
-# Hook points (bin/fm-hooks-lib.sh; docs/extension-points.md), both fired last so
-# neither can delay the merge (set -eu means a failed merge exits above and never
-# reaches these). Best-effort: a failing hook never fails the merge.
-if [ "$PR_NEWLY_RECORDED" -eq 1 ]; then
-  fm_hook_run "$CONFIG" pr-ready \
-    "FM_HOOK_TASK_ID=$ID" "FM_HOOK_PR_URL=$URL" \
-    -- "$ID" "$URL"
-fi
+# Hook points (bin/fm-hooks-lib.sh; docs/extension-points.md), fired last so
+# neither can delay the merge. Best-effort: a failing hook never fails the merge.
+# pr-ready belongs to the recording step this script already performed above, so
+# it fires whether or not the merge itself succeeded; post-merge means firstmate
+# merged, so it fires only on a successful merge.
+fm_hook_pr_ready_once "$CONFIG" "$META" "$ID" "$URL"
+
+[ "$merge_status" -eq 0 ] || exit "$merge_status"
 
 fm_hook_run "$CONFIG" post-merge \
   "FM_HOOK_TASK_ID=$ID" "FM_HOOK_REF=$URL" \

@@ -3,10 +3,10 @@
 # exact pr_head=<sha> when available, then atomically arm a static merge poll.
 # The watcher check source is byte-for-byte bin/fm-pr-poll.sh; task and PR data
 # live only in a private sidecar and are never interpolated into shell source.
-# When pr= is NEWLY recorded, also runs the best-effort pr-ready hook point
-# (bin/fm-hooks-lib.sh; docs/extension-points.md), so the hook fires once per
-# (task, PR URL) - a re-run never re-fires it. The hook fires last, after the
-# poll is armed, so hook latency never delays arming it.
+# Also runs the best-effort pr-ready hook point (bin/fm-hooks-lib.sh;
+# docs/extension-points.md) exactly once per (task, PR URL), recorded durably in
+# the meta as pr_ready_hook= so a re-run never re-fires it. The hook fires last,
+# after the poll is armed, so hook latency never delays arming it.
 # FM_PR_READY_HOOK=defer is an internal handoff, not part of the operator-facing
 # hook contract: bin/fm-pr-merge.sh calls this script before its own merge, so it
 # suppresses the hook here and fires pr-ready itself after the merge, keeping the
@@ -45,13 +45,6 @@ META="$STATE/$ID.meta"
 if [ ! -f "$META" ] || [ -L "$META" ] || [ "$(fm_pr_file_link_count "$META")" != 1 ]; then
   echo "error: task metadata is unavailable" >&2
   exit 1
-fi
-
-# Detect whether pr=<url> is already recorded so the pr-ready hook fires exactly
-# once per (task, PR URL), even across the recording re-run in fm-pr-merge.sh.
-PR_NEWLY_RECORDED=1
-if grep -qxF "pr=$URL" "$META"; then
-  PR_NEWLY_RECORDED=0
 fi
 
 # Neutralize any pre-fix poll before recording or arming this task. The
@@ -110,11 +103,10 @@ fm_pr_poll_publish_prepared || {
 }
 printf 'armed: state/%s.check.sh\n' "$ID"
 
-# Fire the pr-ready hook last, once per (task, PR URL), only when pr= was newly
-# recorded: a slow hook cannot delay arming the merge poll and an interrupt
-# mid-hook cannot leave pr= recorded with no poll armed.
-if [ "$PR_NEWLY_RECORDED" -eq 1 ] && [ "${FM_PR_READY_HOOK:-}" != "defer" ]; then
-  fm_hook_run "$CONFIG" pr-ready \
-    "FM_HOOK_TASK_ID=$ID" "FM_HOOK_PR_URL=$URL" \
-    -- "$ID" "$URL"
+# Fire the pr-ready hook last, after the poll is armed, so hook latency never
+# delays arming it. fm_hook_pr_ready_once gates on a durable pr_ready_hook=
+# marker in the meta, so it fires exactly once per (task, PR URL) across re-runs.
+# fm-pr-merge.sh sets FM_PR_READY_HOOK=defer to fire it itself after its merge.
+if [ "${FM_PR_READY_HOOK:-}" != "defer" ]; then
+  fm_hook_pr_ready_once "$CONFIG" "$META" "$ID" "$URL"
 fi

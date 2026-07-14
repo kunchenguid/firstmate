@@ -32,7 +32,8 @@
 #     (p) no mktemp, planted symlink at the fallback errfile name -> skipped
 #         rather than written through
 #     (q) chatty hook -> stderr relayed only up to FM_HOOK_STDERR_MAX_BYTES,
-#         with the truncation warned rather than dumped whole into the caller
+#         with the truncation warned rather than dumped whole into the caller,
+#         and that cap counts bytes even when the hook's stderr is multibyte
 #   integration:
 #     (j) fm-spawn fires post-spawn once per spawned task (batch included) with
 #         the task's kind and meta path; a failing hook does not fail the spawn
@@ -41,6 +42,9 @@
 #     (r) fm-pr-merge, whose nested fm-pr-check does the first pr= record, fires
 #         pr-ready exactly once and only after the merge, so a slow hook cannot
 #         delay the merge; a re-merge of a recorded PR does not re-fire it
+#     (s) a merge that FAILS after that record still fires pr-ready exactly once
+#         (never post-merge), still propagates the failure, and the retried merge
+#         does not re-fire pr-ready
 #     (h) fm-pr-merge fires post-merge with the PR URL after a successful
 #         merge; a failing hook does not fail the merge
 #     (i) fm-merge-local fires post-merge with the merged branch as ref
@@ -527,6 +531,88 @@ SH
   pass "a chatty hook's stderr is relayed as a bounded prefix and the truncation is warned"
 }
 
+# The cap is a BYTE cap: bash's 'read -N' and ${#var} count characters, so a
+# multibyte hook would relay several times the cap in a UTF-8 locale.
+test_hook_stderr_relay_cap_counts_bytes() {
+  local case_dir rc bytes
+  case_dir=$(make_case errfile-cap-multibyte)
+  cat > "$case_dir/config/hooks/post-spawn" <<'SH'
+#!/usr/bin/env bash
+i=0
+while [ "$i" -lt 200 ]; do
+  printf '🚢🚢🚢🚢🚢🚢🚢🚢🚢🚢\n' >&2
+  i=$((i + 1))
+done
+exit 0
+SH
+  chmod +x "$case_dir/config/hooks/post-spawn"
+  set +e
+  LC_ALL=en_US.UTF-8 FM_HOOK_STDERR_MAX_BYTES=512 PATH="$case_dir/fakebin:$PATH" \
+    fm_hook_run "$case_dir/config" post-spawn -- task-x1 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "errfile-cap-multibyte: fm_hook_run should return 0"
+  assert_grep 'post-spawn hook stderr truncated after 512 bytes for task-x1' "$case_dir/stderr" \
+    "errfile-cap-multibyte: the truncation was not warned"
+  bytes=$(wc -c < "$case_dir/stderr" | tr -d ' ')
+  [ "$bytes" -lt 1024 ] \
+    || fail "errfile-cap-multibyte: relayed $bytes bytes despite a 512-byte cap"
+  pass "the hook stderr cap counts bytes, not characters, on multibyte output"
+}
+
+# The merge can fail after fm-pr-check has durably recorded pr=. pr-ready belongs
+# to that recording, so it must still fire - exactly once - and the merge failure
+# must still propagate.
+test_pr_merge_fires_pr_ready_when_the_merge_fails() {
+  local case_dir rc
+  case_dir=$(make_case pr-merge-failed)
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    "window=fm-task-x1" "kind=ship" "mode=no-mistakes"
+  fm_fake_exit0 "$case_dir/fakebin" gh
+  cat > "$case_dir/fakebin/gh-axi" <<'SH'
+#!/usr/bin/env bash
+echo "merge failed: protected branch" >&2
+exit 1
+SH
+  chmod +x "$case_dir/fakebin/gh-axi"
+  local hook
+  for hook in pr-ready post-merge; do
+    cat > "$case_dir/config/hooks/$hook" <<SH
+#!/usr/bin/env bash
+printf '%s:%s|%s\n' "$hook" "\$1" "\$2" >> '$case_dir/hook.log'
+exit 0
+SH
+    chmod +x "$case_dir/config/hooks/$hook"
+  done
+
+  set +e
+  FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" \
+  FM_CONFIG_OVERRIDE="$case_dir/config" PATH="$case_dir/fakebin:$PATH" \
+    "$PR_MERGE" task-x1 https://github.com/example/repo/pull/9 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "pr-merge/failed: the merge failure must still propagate"
+  assert_grep 'pr-ready:task-x1|https://github.com/example/repo/pull/9' "$case_dir/hook.log" \
+    "pr-merge/failed: pr-ready did not fire after a failed merge"
+  grep -q '^post-merge:' "$case_dir/hook.log" \
+    && fail "pr-merge/failed: post-merge fired despite the merge failing"
+
+  # The retried merge must not re-fire pr-ready, and must fire post-merge once.
+  rm -f "$case_dir/hook.log"
+  fm_fake_exit0 "$case_dir/fakebin" gh-axi
+  FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" \
+  FM_CONFIG_OVERRIDE="$case_dir/config" PATH="$case_dir/fakebin:$PATH" \
+    "$PR_MERGE" task-x1 https://github.com/example/repo/pull/9 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "pr-merge/failed: the retried merge failed: $(cat "$case_dir/stderr")"
+  grep -q '^pr-ready:' "$case_dir/hook.log" \
+    && fail "pr-merge/failed: the retried merge re-fired pr-ready"
+  assert_grep 'post-merge:task-x1|https://github.com/example/repo/pull/9' "$case_dir/hook.log" \
+    "pr-merge/failed: the retried merge did not fire post-merge"
+  pass "fm-pr-merge fires pr-ready exactly once even when the merge fails"
+}
+
 test_pr_merge_fires_post_merge_after_merge() {
   local case_dir rc
   case_dir=$(make_case pr-merge)
@@ -671,9 +757,11 @@ test_watchdog_kills_descendants_and_never_stalls_the_caller
 test_orphaned_descendant_never_stalls_the_caller
 test_hook_stderr_is_relayed_and_leaves_no_tempfile
 test_hook_stderr_relay_is_bounded
+test_hook_stderr_relay_cap_counts_bytes
 test_errfile_fallback_refuses_a_planted_symlink
 test_spawn_fires_post_spawn_per_task_and_survives_failure
 test_pr_check_fires_pr_ready_on_first_record_only
 test_pr_merge_defers_pr_ready_until_after_the_merge
+test_pr_merge_fires_pr_ready_when_the_merge_fails
 test_pr_merge_fires_post_merge_after_merge
 test_merge_local_fires_post_merge_with_branch_ref

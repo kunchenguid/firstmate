@@ -99,6 +99,11 @@ fm_hook_errfile() {
 fm_hook_drain_errfd() {
   local hook_name=$1 task_label=$2
   local chunk relayed=0 truncated=0 tail_char=""
+  # 'read -N' and ${#chunk} count characters, so the cap is only a byte cap in a
+  # single-byte locale; without this a multibyte hook's stderr relays several
+  # times FM_HOOK_STDERR_MAX_BYTES. Bash re-reads the locale on assignment and
+  # again when this local goes out of scope, so the caller's locale is unchanged.
+  local LC_ALL=C
   local max="${FM_HOOK_STDERR_MAX_BYTES:-65536}"
   case "$max" in
     ''|*[!0-9]*) max=65536 ;;
@@ -231,5 +236,27 @@ fm_hook_run() {
       echo "warning: $hook_name hook failed (exit $hook_status) for $task_label; continuing" >&2
     fi
   fi
+  return 0
+}
+
+# fm_hook_pr_ready_once <config-dir> <meta-path> <task-id> <pr-url>
+# Fire the pr-ready hook for a task's PR URL exactly once, ever. The fire is
+# recorded in the task's meta as pr_ready_hook=<url> and gated on that marker,
+# not on whether this run is the one that appended pr=<url>: pr= is recorded by
+# bin/fm-pr-check.sh but the hook is fired after work that can fail in between
+# (bin/fm-pr-merge.sh's merge), and inferring the fire from the pr= transition
+# would drop it forever the moment that work failed - pr= is already recorded, so
+# no retry would ever see the transition again. Marking the fire itself keeps the
+# guarantee across a failed merge, a retry, and a re-run alike.
+# A task with no meta has nowhere to record the fire, so the hook is skipped.
+# Always returns 0; fm_hook_run never gates its caller.
+fm_hook_pr_ready_once() {
+  local config_dir=$1 meta=$2 id=$3 url=$4
+  [ -f "$meta" ] || return 0
+  ! grep -qxF "pr_ready_hook=$url" "$meta" || return 0
+  fm_hook_run "$config_dir" pr-ready \
+    "FM_HOOK_TASK_ID=$id" "FM_HOOK_PR_URL=$url" \
+    -- "$id" "$url"
+  echo "pr_ready_hook=$url" >> "$meta"
   return 0
 }
