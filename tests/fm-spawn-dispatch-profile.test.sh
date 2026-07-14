@@ -99,13 +99,14 @@ EOF
 }
 
 assert_meta_profile() {
-  local meta=$1 harness=$2 model=$3 effort=$4
+  local meta=$1 harness=$2 model=$3 effort=$4 permissions=${5:-bounded}
   assert_grep "harness=$harness" "$meta" "meta missing harness=$harness"
   assert_grep "model=$model" "$meta" "meta missing model=$model"
   assert_grep "effort=$effort" "$meta" "meta missing effort=$effort"
+  assert_grep "permissions=$permissions" "$meta" "meta missing permissions=$permissions"
 }
 
-test_no_profile_keeps_claude_launch_unchanged() {
+test_no_profile_uses_bounded_claude_launch() {
   local rec id out status expected launch
   id=profile-off-z1
   rec=$(make_spawn_case profile-off claude "$id")
@@ -118,9 +119,9 @@ test_no_profile_keeps_claude_launch_unchanged() {
   assert_meta_profile "$HOME_DIR/state/$id.meta" claude default default
 
   launch=$(cat "$LAUNCH_LOG")
-  expected="CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$(cat '$HOME_DIR/data/$id/brief.md')\""
-  [ "$launch" = "$expected" ] || fail "no-profile claude launch changed"$'\n'"expected: $expected"$'\n'"actual:   $launch"
-  pass "no --model/--effort records defaults and keeps the claude launch byte-identical"
+  expected="CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --permission-mode acceptEdits \"\$(cat '$HOME_DIR/data/$id/brief.md')\""
+  [ "$launch" = "$expected" ] || fail "bounded claude launch mismatch"$'\n'"expected: $expected"$'\n'"actual:   $launch"
+  pass "no --model/--effort records defaults and uses bounded Claude permissions"
 }
 
 test_active_dispatch_profile_requires_explicit_harness_for_ship() {
@@ -169,7 +170,7 @@ test_active_dispatch_profile_allows_explicit_harness() {
   assert_contains "$out" "spawned $id harness=codex" "spawn did not report explicit codex harness"
   assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5 high
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "codex --model 'gpt-5' -c 'model_reasoning_effort=\"high\"' --dangerously-bypass-approvals-and-sandbox" \
+  assert_contains "$launch" "codex --model 'gpt-5' -c 'model_reasoning_effort=\"high\"' --sandbox workspace-write --ask-for-approval on-request" \
     "explicit harness launch did not thread model and effort"
   pass "active crew-dispatch profile allows an explicit resolved harness"
 }
@@ -202,7 +203,7 @@ test_active_dispatch_profile_allows_raw_launch_command() {
   status=$?
   expect_code 0 "$status" "raw launch command should satisfy active dispatch-profile requirement"
   assert_contains "$out" "spawned $id harness=custom-agent" "spawn did not report raw command harness"
-  assert_meta_profile "$HOME_DIR/state/$id.meta" custom-agent default default
+  assert_meta_profile "$HOME_DIR/state/$id.meta" custom-agent default default custom
   launch=$(cat "$LAUNCH_LOG")
   [ "$launch" = "custom-agent --flag" ] || fail "raw launch command changed"$'\n'"actual: $launch"
   pass "active crew-dispatch profile allows the raw launch-command escape hatch"
@@ -219,7 +220,7 @@ test_claude_threads_model_and_effort() {
   expect_code 0 "$status" "claude spawn with profile flags should succeed"
   assert_meta_profile "$HOME_DIR/state/$id.meta" claude sonnet high
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "claude --dangerously-skip-permissions --model 'sonnet' --effort 'high'" \
+  assert_contains "$launch" "claude --permission-mode acceptEdits --model 'sonnet' --effort 'high'" \
     "claude launch did not thread model and effort flags"
   pass "claude receives --model and --effort profile flags"
 }
@@ -235,8 +236,10 @@ test_codex_threads_model_and_effort() {
   expect_code 0 "$status" "codex spawn with profile flags should succeed"
   assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5 high
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "codex --model 'gpt-5' -c 'model_reasoning_effort=\"high\"' --dangerously-bypass-approvals-and-sandbox" \
+  assert_contains "$launch" "codex --model 'gpt-5' -c 'model_reasoning_effort=\"high\"' --sandbox workspace-write --ask-for-approval on-request" \
     "codex launch did not thread model and reasoning effort config"
+  assert_contains "$launch" 'approvals_reviewer=\"auto_review\"' \
+    "bounded codex launch did not enable fail-closed automatic escalation review"
   pass "codex receives --model and model_reasoning_effort profile flags"
 }
 
@@ -251,7 +254,7 @@ test_codex_omits_invalid_max_effort() {
   expect_code 0 "$status" "codex spawn with unsupported max effort should omit the effort flag"
   assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5 max
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "codex --model 'gpt-5' --dangerously-bypass-approvals-and-sandbox" \
+  assert_contains "$launch" "codex --model 'gpt-5' --sandbox workspace-write --ask-for-approval on-request" \
     "codex launch did not preserve the model flag when max effort was omitted"
   assert_not_contains "$launch" "model_reasoning_effort" "codex launch must omit unsupported max reasoning effort"
   pass "codex omits unsupported max effort instead of passing a bad config value"
@@ -263,10 +266,10 @@ test_grok_threads_model_and_reasoning_effort() {
   rec=$(make_spawn_case profile-grok grok "$id")
   read_case_record "$rec"
 
-  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model grok-4 --effort high)
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model grok-4 --effort high --unrestricted)
   status=$?
   expect_code 0 "$status" "grok spawn with profile flags should succeed"
-  assert_meta_profile "$HOME_DIR/state/$id.meta" grok grok-4 high
+  assert_meta_profile "$HOME_DIR/state/$id.meta" grok grok-4 high unrestricted
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" "grok --always-approve --model 'grok-4' --reasoning-effort 'high'" \
     "grok launch did not thread model and reasoning-effort flags"
@@ -280,10 +283,10 @@ test_grok_omits_invalid_max_reasoning_effort() {
   rec=$(make_spawn_case profile-grok-max grok "$id")
   read_case_record "$rec"
 
-  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model grok-4 --effort max)
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model grok-4 --effort max --unrestricted)
   status=$?
   expect_code 0 "$status" "grok spawn with unsupported max reasoning effort should omit the effort flag"
-  assert_meta_profile "$HOME_DIR/state/$id.meta" grok grok-4 max
+  assert_meta_profile "$HOME_DIR/state/$id.meta" grok grok-4 max unrestricted
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" "grok --always-approve --model 'grok-4' \"\$(cat " \
     "grok launch did not preserve the model flag when max effort was omitted"
@@ -299,10 +302,10 @@ test_grok_omits_invalid_xhigh_reasoning_effort() {
   read_case_record "$rec"
 
   # grok 0.2.99 rejects xhigh (accepted set is only low|medium|high).
-  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model grok-4 --effort xhigh)
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model grok-4 --effort xhigh --unrestricted)
   status=$?
   expect_code 0 "$status" "grok spawn with unsupported xhigh reasoning effort should omit the effort flag"
-  assert_meta_profile "$HOME_DIR/state/$id.meta" grok grok-4 xhigh
+  assert_meta_profile "$HOME_DIR/state/$id.meta" grok grok-4 xhigh unrestricted
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" "grok --always-approve --model 'grok-4' \"\$(cat " \
     "grok launch did not preserve the model flag when xhigh effort was omitted"
@@ -317,10 +320,10 @@ test_opencode_threads_model_and_ignores_effort_axis() {
   rec=$(make_spawn_case profile-opencode opencode "$id")
   read_case_record "$rec"
 
-  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model anthropic/claude-sonnet-4-5 --effort high)
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model anthropic/claude-sonnet-4-5 --effort high --unrestricted)
   status=$?
   expect_code 0 "$status" "opencode spawn with model and ignored effort should succeed"
-  assert_meta_profile "$HOME_DIR/state/$id.meta" opencode anthropic/claude-sonnet-4-5 high
+  assert_meta_profile "$HOME_DIR/state/$id.meta" opencode anthropic/claude-sonnet-4-5 high unrestricted
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" "opencode --model 'anthropic/claude-sonnet-4-5' --prompt" \
     "opencode launch did not thread model"
@@ -328,6 +331,45 @@ test_opencode_threads_model_and_ignores_effort_axis() {
   assert_not_contains "$launch" "--variant" "opencode launch must not pass run-only --variant"
   assert_not_contains "$launch" "--thinking" "opencode launch must not pass pi thinking flag"
   pass "opencode receives --model and omits the unsupported effort axis"
+}
+
+test_unverified_bounded_harnesses_fail_closed() {
+  local rec id out status
+  id=profile-grok-bounded-z7b
+  rec=$(make_spawn_case profile-grok-bounded grok "$id")
+  read_case_record "$rec"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 1 "$status" "grok should fail closed without an unrestricted approval"
+  assert_contains "$out" "no verified bounded launch profile" "grok refusal did not explain the bounded-profile gate"
+  assert_absent "$HOME_DIR/state/$id.meta" "bounded-profile refusal should happen before meta is written"
+
+  id=profile-opencode-bounded-z7d
+  rec=$(make_spawn_case profile-opencode-bounded opencode "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 1 "$status" "opencode should fail closed without an unrestricted approval"
+  assert_contains "$out" "no verified bounded launch profile" "opencode refusal did not explain the bounded-profile gate"
+  assert_absent "$HOME_DIR/state/$id.meta" "bounded-profile refusal should happen before meta is written"
+  pass "OpenCode and Grok class adapters fail closed without --unrestricted"
+}
+
+test_unrestricted_profile_preserves_bypass_launches() {
+  local rec id out status launch
+  id=profile-claude-unrestricted-z7c
+  rec=$(make_spawn_case profile-claude-unrestricted claude "$id")
+  read_case_record "$rec"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --unrestricted)
+  status=$?
+  expect_code 0 "$status" "explicit unrestricted Claude spawn should succeed"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" claude default default unrestricted
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "claude --dangerously-skip-permissions" \
+    "explicit unrestricted profile did not preserve Claude's bypass launch"
+  pass "--unrestricted is explicit, functional, and recorded in task metadata"
 }
 
 test_pi_omits_invalid_max_effort() {
@@ -383,7 +425,7 @@ test_active_dispatch_profile_does_not_block_secondmate_launch() {
   pass "active crew-dispatch profile does not block secondmate launches"
 }
 
-test_no_profile_keeps_claude_launch_unchanged
+test_no_profile_uses_bounded_claude_launch
 test_active_dispatch_profile_requires_explicit_harness_for_ship
 test_active_dispatch_profile_requires_explicit_harness_for_scout
 test_active_dispatch_profile_allows_explicit_harness
@@ -396,6 +438,8 @@ test_grok_threads_model_and_reasoning_effort
 test_grok_omits_invalid_max_reasoning_effort
 test_grok_omits_invalid_xhigh_reasoning_effort
 test_opencode_threads_model_and_ignores_effort_axis
+test_unverified_bounded_harnesses_fail_closed
+test_unrestricted_profile_preserves_bypass_launches
 test_pi_omits_invalid_max_effort
 test_batch_forwards_shared_profile_flags
 test_active_dispatch_profile_does_not_block_secondmate_launch
