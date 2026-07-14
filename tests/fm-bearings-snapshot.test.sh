@@ -32,7 +32,7 @@ case "${1:-}" in
   display-message) case "$*" in *dead-*) exit 1 ;; *) printf '%%1\n' ;; esac ;;
   capture-pane)
     case "$*" in
-      *fm-hi-bit*) printf 'stale terminal summary: GP7 started\n> \n' ;;
+      *fm-domain-alpha*) printf 'stale terminal summary: Phase 7 started\n> \n' ;;
       *) printf 'all quiet\n> \n' ;;
     esac
     ;;
@@ -154,59 +154,59 @@ run() {  # <home> <fakebin> <args...>
   PATH="$fakebin:$PATH" FM_HOME="$home" FM_BEARINGS_NOW=2026-07-11T18:00:00Z NET_LOG="$home/net.log" "$BEARINGS" "$@"
 }
 
-# End-to-end Hi Bit regression fixture.
-# The parent event claims GP7 started, while the registered home has no child
-# metadata, every game-parity item is Done, and only an external legal hold remains.
-write_hi_bit_fixture() {  # <parent-home> <secondmate-home>
+# End-to-end Domain Alpha regression fixture.
+# The parent event claims Phase 7 started, while the registered home has no child
+# metadata, every sample-rollout item is Done, and only an external legal hold remains.
+write_domain_alpha_fixture() {  # <parent-home> <secondmate-home>
   local home=$1 mate=$2 i
   mkdir -p "$mate/state" "$mate/data" "$mate/config" "$mate/projects" "$mate/bin"
   printf '# Firstmate fixture\n' > "$mate/AGENTS.md"
-  printf 'hi-bit\n' > "$mate/.fm-secondmate-home"
-  printf -- '- hi-bit - game parity (home: %s; scope: game parity and legal release; projects: game; added 2026-07-13)\n' \
+  printf 'domain-alpha\n' > "$mate/.fm-secondmate-home"
+  printf -- '- domain-alpha - sample rollout (home: %s; scope: sample rollout and legal release; projects: sample; added 2026-07-13)\n' \
     "$mate" > "$home/data/secondmates.md"
-  fm_write_secondmate_meta "$home/state/hi-bit.meta" "$mate" "firstmate:fm-hi-bit" game
-  printf 'working: GP7 started\n' > "$home/state/hi-bit.status"
+  fm_write_secondmate_meta "$home/state/domain-alpha.meta" "$mate" "firstmate:fm-domain-alpha" sample
+  printf 'working: Phase 7 started\n' > "$home/state/domain-alpha.status"
   cat > "$mate/data/backlog.md" <<'EOF'
 ## In flight
 
 ## Queued
-- [ ] legal-release - Release approval blocked-by: external-legal - external legal dependency (repo: game) (kind: ship)
+- [ ] legal-release - Release approval blocked-by: external-legal - external legal dependency (repo: sample) (kind: ship)
 
 ## Done
 EOF
   i=1
   while [ "$i" -le 7 ]; do
-    printf -- '- [x] gp%s - Game parity GP%s (repo: game) (kind: ship) (done 2026-07-%02d)\n' \
+    printf -- '- [x] phase%s - Sample rollout Phase %s (repo: sample) (kind: ship) (done 2026-07-%02d)\n' \
       "$i" "$i" "$i" >> "$mate/data/backlog.md"
     i=$((i + 1))
   done
 }
 
-# This is the Hi Bit failure shape exactly: the structured home says GP7 is Done
+# This is the Domain Alpha failure shape exactly: the structured home says Phase 7 is Done
 # and no child is active, so the stale parent event must never become Underway.
-test_hi_bit_stale_parent_event_does_not_become_current_work() {
+test_domain_alpha_stale_parent_event_does_not_become_current_work() {
   local home mate fakebin json canonical
-  home=$(make_home hi-bit-parent)
-  mate="$TMP_ROOT/hi-bit-home"
-  write_hi_bit_fixture "$home" "$mate"
+  home=$(make_home domain-alpha-parent)
+  mate="$TMP_ROOT/domain-alpha-home"
+  write_domain_alpha_fixture "$home" "$mate"
   fakebin=$(make_fakebin "$home"); : > "$home/net.log"
   json=$(FAKE_GH_FAIL=1 run "$home" "$fakebin" --json)
   printf '%s' "$json" | jq -e '
-    (.in_flight | any(.[]; .id == "hi-bit") | not)
+    (.in_flight | any(.[]; .id == "domain-alpha") | not)
       and (.secondmates | any(.[];
-        .id == "hi-bit"
+        .id == "domain-alpha"
           and .state == "externally_held"
           and .provenance == "structured-home"
           and .freshness == "fresh"
           and .contradiction == true))
-      and (.gates | any(.[]; .id == "legal-release" and .owner == "hi-bit"))
-      and (.landed | any(.[]; .id == "gp7" and .owner == "hi-bit"))
-  ' >/dev/null || fail "stale parent GP7 event overrode authoritative Hi Bit state: $json"
+      and (.gates | any(.[]; .id == "legal-release" and .owner == "domain-alpha"))
+      and (.landed | any(.[]; .id == "phase7" and .owner == "domain-alpha"))
+  ' >/dev/null || fail "stale parent Phase 7 event overrode authoritative Domain Alpha state: $json"
   canonical=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
     FM_SNAPSHOT_NOW_EPOCH=1783792800 FM_SNAPSHOT_TERMINAL_LINES=2 FM_SNAPSHOT_TERMINAL_BYTES=64 \
     NET_LOG="$home/net.log" FAKE_GH_FAIL=1 "$ROOT/bin/fm-fleet-snapshot.sh" --json)
   printf '%s' "$canonical" | jq -e '
-    .secondmate_current.records[] | select(.id == "hi-bit")
+    .secondmate_current.records[] | select(.id == "domain-alpha")
     | .provenance.selected == "structured-home"
       and .freshness.status == "fresh"
       and .terminal_evidence.provenance == "parent-direct-report-terminal"
@@ -219,40 +219,40 @@ test_hi_bit_stale_parent_event_does_not_become_current_work() {
       and .terminal_evidence.contradiction == true
       and .contradiction == true
   ' >/dev/null || fail "bounded terminal contradiction evidence was not labeled and subordinate: $canonical"
-  [ ! -s "$home/net.log" ] || fail "Hi Bit structured-home read made a network call: $(cat "$home/net.log")"
-  pass "Hi Bit structured state overrides a stale parent GP7 event"
+  [ ! -s "$home/net.log" ] || fail "Domain Alpha structured-home read made a network call: $(cat "$home/net.log")"
+  pass "Domain Alpha structured state overrides a stale parent Phase 7 event"
 }
 
 test_active_child_overrides_old_parent_event() {
   local home mate fakebin json canonical
   home=$(make_home active-child-parent)
   mate="$TMP_ROOT/active-child-home"
-  write_hi_bit_fixture "$home" "$mate"
-  mkdir -p "$mate/projects/gp8"
+  write_domain_alpha_fixture "$home" "$mate"
+  mkdir -p "$mate/projects/phase8"
   cat > "$mate/data/backlog.md" <<'EOF'
 ## In flight
-- [ ] gp8 - Game parity GP8 (repo: game) (kind: ship) (since 2026-07-13)
+- [ ] phase8 - Sample rollout Phase 8 (repo: sample) (kind: ship) (since 2026-07-13)
 
 ## Queued
 
 ## Done
-- [x] gp7 - Game parity GP7 (repo: game) (kind: ship) (done 2026-07-12)
+- [x] phase7 - Sample rollout Phase 7 (repo: sample) (kind: ship) (done 2026-07-12)
 EOF
-  fm_write_meta "$mate/state/gp8.meta" \
-    "window=firstmate:fm-gp8" "worktree=$mate/projects/gp8" "project=game" \
+  fm_write_meta "$mate/state/phase8.meta" \
+    "window=firstmate:fm-phase8" "worktree=$mate/projects/phase8" "project=sample" \
     "harness=codex" "kind=ship" "mode=no-mistakes"
-  printf 'working [key=gp8]: implementing GP8 parity\n' > "$mate/state/gp8.status"
+  printf 'working [key=phase8]: implementing Phase 8 parity\n' > "$mate/state/phase8.status"
   fakebin=$(make_fakebin "$home")
   json=$(run "$home" "$fakebin" --json)
   printf '%s' "$json" | jq -e '
-    (.secondmates | any(.[]; .id == "hi-bit" and .state == "active_child_work"
-      and (.doing | contains("gp8")) and (.doing | contains("GP7 started") | not)))
-      and (.in_flight | any(.[]; .id == "hi-bit" and (.doing | contains("gp8"))))
+    (.secondmates | any(.[]; .id == "domain-alpha" and .state == "active_child_work"
+      and (.doing | contains("phase8")) and (.doing | contains("Phase 7 started") | not)))
+      and (.in_flight | any(.[]; .id == "domain-alpha" and (.doing | contains("phase8"))))
   ' >/dev/null || fail "active child did not override stale parent event: $json"
   canonical=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
     "$ROOT/bin/fm-fleet-snapshot.sh" --json)
   printf '%s' "$canonical" | jq -e '
-    .secondmate_current.records[] | select(.id == "hi-bit") | .endpoints[] | select(.id == "gp8")
+    .secondmate_current.records[] | select(.id == "domain-alpha") | .endpoints[] | select(.id == "phase8")
     | .endpoint.status == "unknown"
       and .endpoint.exists == true
       and .endpoint.freshness == "fresh"
@@ -265,28 +265,28 @@ test_structured_child_decision_reaches_captains_call() {
   local home mate fakebin json
   home=$(make_home child-decision-parent)
   mate="$TMP_ROOT/child-decision-home"
-  write_hi_bit_fixture "$home" "$mate"
-  mkdir -p "$mate/projects/gp8"
+  write_domain_alpha_fixture "$home" "$mate"
+  mkdir -p "$mate/projects/phase8"
   cat > "$mate/data/backlog.md" <<'EOF'
 ## In flight
-- [ ] gp8 - Game parity GP8 (repo: game) (kind: ship) (since 2026-07-13)
+- [ ] phase8 - Sample rollout Phase 8 (repo: sample) (kind: ship) (since 2026-07-13)
 
 ## Queued
 
 ## Done
-- [x] gp7 - Game parity GP7 (repo: game) (kind: ship) (done 2026-07-12)
+- [x] phase7 - Sample rollout Phase 7 (repo: sample) (kind: ship) (done 2026-07-12)
 EOF
-  fm_write_meta "$mate/state/gp8.meta" \
-    "window=firstmate:fm-gp8" "worktree=$mate/projects/gp8" "project=game" \
+  fm_write_meta "$mate/state/phase8.meta" \
+    "window=firstmate:fm-phase8" "worktree=$mate/projects/phase8" "project=sample" \
     "harness=codex" "kind=ship" "mode=no-mistakes"
-  printf 'needs-decision [key=release]: choose release A or B\n' > "$mate/state/gp8.status"
+  printf 'needs-decision [key=release]: choose release A or B\n' > "$mate/state/phase8.status"
   fakebin=$(make_fakebin "$home")
   json=$(run "$home" "$fakebin" --json)
   printf '%s' "$json" | jq -e '
-    (.secondmates | any(.[]; .id == "hi-bit" and .state == "captain_decision"))
-      and (.decisions_open | any(.[]; .id == "hi-bit/gp8" and .key == "release"
+    (.secondmates | any(.[]; .id == "domain-alpha" and .state == "captain_decision"))
+      and (.decisions_open | any(.[]; .id == "domain-alpha/phase8" and .key == "release"
         and .verb == "needs-decision" and (.summary | contains("release A or B"))))
-      and (.in_flight | any(.[]; .id == "hi-bit") | not)
+      and (.in_flight | any(.[]; .id == "domain-alpha") | not)
   ' >/dev/null || fail "structured child decision did not reach Captain Call: $json"
   pass "a real structured child decision reaches Captain's Call"
 }
@@ -306,12 +306,12 @@ EOF
 }
 
 append_secondmate_registry() {  # <parent> <id> <home>
-  printf -- '- %s - fixture domain (home: %s; scope: fixture; projects: game; added 2026-07-13)\n' \
+  printf -- '- %s - fixture domain (home: %s; scope: fixture; projects: sample; added 2026-07-13)\n' \
     "$2" "$3" >> "$1/data/secondmates.md"
 }
 
 write_parent_secondmate_event() {  # <parent> <id> <home> <note>
-  fm_write_secondmate_meta "$1/state/$2.meta" "$3" "firstmate:fm-$2" game
+  fm_write_secondmate_meta "$1/state/$2.meta" "$3" "firstmate:fm-$2" sample
   printf 'working [key=%s]: %s\n' "$2" "$4" > "$1/state/$2.status"
 }
 
@@ -346,9 +346,9 @@ test_bad_secondmate_homes_never_revive_parent_work() {
   wt="$timedout/projects/slow"
   fm_git_init_commit "$wt"
   git -C "$wt" checkout -q -b fm/slow
-  printf '## In flight\n- [ ] slow - Slow child (repo: game) (kind: ship) (since 2026-07-13)\n\n## Queued\n\n## Done\n' > "$timedout/data/backlog.md"
+  printf '## In flight\n- [ ] slow - Slow child (repo: sample) (kind: ship) (since 2026-07-13)\n\n## Queued\n\n## Done\n' > "$timedout/data/backlog.md"
   fm_write_meta "$timedout/state/slow.meta" \
-    "window=firstmate:fm-slow" "worktree=$wt" "project=game" \
+    "window=firstmate:fm-slow" "worktree=$wt" "project=sample" \
     "harness=codex" "kind=ship" "mode=no-mistakes"
   append_secondmate_registry "$home" timedout "$timedout"
   write_parent_secondmate_event "$home" timedout "$timedout" "old timed work"
@@ -388,9 +388,9 @@ test_secondmate_and_child_bounds_are_disclosed() {
   while [ "$i" -le 3 ]; do
     child="child-$i"
     mkdir -p "$mate/projects/$child"
-    printf -- '- [ ] %s - Active %s (repo: game) (kind: ship) (since 2026-07-13)\n' "$child" "$child" >> "$mate/data/backlog.md"
+    printf -- '- [ ] %s - Active %s (repo: sample) (kind: ship) (since 2026-07-13)\n' "$child" "$child" >> "$mate/data/backlog.md"
     fm_write_meta "$mate/state/$child.meta" \
-      "window=firstmate:fm-$child" "worktree=$mate/projects/$child" "project=game" \
+      "window=firstmate:fm-$child" "worktree=$mate/projects/$child" "project=sample" \
       "harness=codex" "kind=ship" "mode=no-mistakes"
     printf 'working [key=%s]: active child %s\n' "$child" "$i" > "$mate/state/$child.status"
     i=$((i + 1))
@@ -434,7 +434,7 @@ test_current_landed_baseline_is_repeatable_and_prior_report_independent() {
 - fake-old-item
 
 ## Underway
-- GP7 started
+- Phase 7 started
 EOF
   fakebin=$(make_fakebin "$home")
   one=$(run "$home" "$fakebin" --json)
@@ -445,7 +445,7 @@ EOF
     (.landed | any(.id == "done-a"))
       and (.landed | any(.id == "mate-landed"))
       and (.landed | any(.id == "fake-old-item") | not)
-      and (.in_flight | any(.doing == "GP7 started") | not)
+      and (.in_flight | any(.doing == "Phase 7 started") | not)
   ' >/dev/null || fail "prior status report influenced the standalone snapshot: $two"
   pass "repeated snapshots keep the same current landed baseline and ignore prior reports"
 }
@@ -842,7 +842,7 @@ test_chat_contract_four_sections() {
   pass "the /bearings skill states the four-section chat contract in order, with empty-states and the At Anchor exclusion"
 }
 
-test_hi_bit_stale_parent_event_does_not_become_current_work
+test_domain_alpha_stale_parent_event_does_not_become_current_work
 test_active_child_overrides_old_parent_event
 test_structured_child_decision_reaches_captains_call
 test_bad_secondmate_homes_never_revive_parent_work

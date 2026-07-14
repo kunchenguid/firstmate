@@ -143,21 +143,21 @@ test_classifier_primitives() {
   printf '%s' "$open" | grep -F $'bad key\t' >/dev/null \
     && fail "an invalid key slug entered the open-decision set"
   cat > "$state/activity.status" <<'EOF'
-working [key=gp7]: GP7 started
-working [key=gp6]: GP6 started
+working [key=phase7]: Phase 7 started
+working [key=phase6]: Phase 6 started
 working [key=legal]: reviewing legal dependency
-done [key=gp6]: GP6 completed
-resolved [key=gp7]: GP7 completed and moved to Done
+done [key=phase6]: Phase 6 completed
+resolved [key=phase7]: Phase 7 completed and moved to Done
 paused [key=legal]: awaiting external counsel
 resolved [key=legal]: legal item returned to the queue
-working [key=gp8]: GP8 started
+working [key=phase8]: Phase 8 started
 EOF
   activity=$(status_open_activities "$state/activity.status")
-  printf '%s' "$activity" | grep -F $'gp8\tworking\tGP8 started' >/dev/null \
+  printf '%s' "$activity" | grep -F $'phase8\tworking\tPhase 8 started' >/dev/null \
     || fail "the current keyed working phase was not retained"
-  printf '%s' "$activity" | grep -F $'gp7\t' >/dev/null \
+  printf '%s' "$activity" | grep -F $'phase7\t' >/dev/null \
     && fail "a keyed resolved event did not close the older working phase"
-  printf '%s' "$activity" | grep -F $'gp6\t' >/dev/null \
+  printf '%s' "$activity" | grep -F $'phase6\t' >/dev/null \
     && fail "a same-key terminal event did not supersede the older working phase"
   printf '%s' "$activity" | grep -F $'legal\t' >/dev/null \
     && fail "a keyed resolved event did not close the declared pause"
