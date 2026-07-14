@@ -20,6 +20,7 @@ SCAN_MARKER_VALUE=fm-pr-check-migration-scan-v1
 WATCH="$SCRIPT_DIR/fm-watch.sh"
 WATCH_LOCK="$STATE/.watch.lock"
 NONCANONICAL_PREFIX='!noncanonical'
+LEGACY_NONCANONICAL_PREFIX=_noncanonical
 
 ALLOW_INCOMPLETE_REPAIRS=0
 if [ "$#" -eq 1 ] && [ "$1" = --checks-safe ]; then
@@ -117,7 +118,12 @@ migration_complete() {
   scan_complete || return 1
   state_device=$(fm_pr_file_device "$STATE") || return 1
   if [ -e "$QUARANTINE" ] || [ -L "$QUARANTINE" ]; then
-    for obligation in "$QUARANTINE"/*.diagnostic.pending-* "$QUARANTINE"/*.diagnostic.failure-*; do
+    for obligation in "$QUARANTINE"/*.diagnostic.pending-canonical \
+      "$QUARANTINE"/*.diagnostic.pending-ambiguous \
+      "$QUARANTINE"/*.diagnostic.pending-noncanonical \
+      "$QUARANTINE"/*.diagnostic.failure-canonical \
+      "$QUARANTINE"/*.diagnostic.failure-ambiguous \
+      "$QUARANTINE"/*.diagnostic.failure-replacement; do
       [ -e "$obligation" ] || [ -L "$obligation" ] || continue
       return 1
     done
@@ -485,13 +491,18 @@ record_diagnostic() {
 }
 
 diagnostic_obligation_message() {
-  local basename=$1 prefix kind
+  local basename=$1 prefix kind suffix
   MIGRATION_DIAGNOSTIC_KIND=
   MIGRATION_DIAGNOSTIC_PREFIX=
   MIGRATION_DIAGNOSTIC_MESSAGE=
-  prefix=${basename%%.diagnostic.*}
   kind=${basename##*.diagnostic.}
-  if [ "$prefix" = "$NONCANONICAL_PREFIX" ]; then
+  suffix=".diagnostic.$kind"
+  [ "$basename" != "$kind" ] || return 1
+  prefix=${basename%"$suffix"}
+  [ -n "$prefix" ] && [ "$prefix$suffix" = "$basename" ] || return 1
+  if [ "$prefix" = "$NONCANONICAL_PREFIX" ] \
+    || { [ "$prefix" = "$LEGACY_NONCANONICAL_PREFIX" ] \
+      && { [ "$kind" = pending-noncanonical ] || [ "$kind" = noncanonical ]; }; }; then
     case "$kind" in
       pending-noncanonical)
         MIGRATION_DIAGNOSTIC_MESSAGE='noncanonical task artifact: migration outcome tracking started before legacy poll handling'
@@ -644,9 +655,10 @@ complete_validated_outcome() {
 }
 
 complete_noncanonical_outcome() {
-  quarantined_artifact_exists "$NONCANONICAL_PREFIX" check || return 1
-  ensure_outcome_obligation "$NONCANONICAL_PREFIX" noncanonical || return 1
-  remove_diagnostic_obligation "$NONCANONICAL_PREFIX" pending-noncanonical
+  local prefix=${1:-$NONCANONICAL_PREFIX}
+  quarantined_artifact_exists "$prefix" check || return 1
+  ensure_outcome_obligation "$prefix" noncanonical || return 1
+  remove_diagnostic_obligation "$prefix" pending-noncanonical
 }
 
 record_canonical_failure() {
@@ -728,7 +740,9 @@ recover_pending_outcomes() {
   local obligation basename prefix kind success failure replacement_failure check
   [ -e "$QUARANTINE" ] || [ -L "$QUARANTINE" ] || return 0
   quarantine_tree_repair_and_validate || return 1
-  for obligation in "$QUARANTINE"/*.diagnostic.pending-*; do
+  for obligation in "$QUARANTINE"/*.diagnostic.pending-canonical \
+    "$QUARANTINE"/*.diagnostic.pending-ambiguous \
+    "$QUARANTINE"/*.diagnostic.pending-noncanonical; do
     [ -e "$obligation" ] || [ -L "$obligation" ] || continue
     basename=${obligation##*/}
     diagnostic_obligation_message "$basename" || return 1
@@ -803,8 +817,8 @@ recover_pending_outcomes() {
         fi
         ;;
       pending-noncanonical)
-        if quarantined_artifact_exists "$NONCANONICAL_PREFIX" check; then
-          complete_noncanonical_outcome || return 1
+        if quarantined_artifact_exists "$prefix" check; then
+          complete_noncanonical_outcome "$prefix" || return 1
         fi
         ;;
     esac
@@ -814,7 +828,9 @@ recover_pending_outcomes() {
 failure_obligations_absent() {
   local failure
   [ -e "$QUARANTINE" ] || [ -L "$QUARANTINE" ] || return 0
-  for failure in "$QUARANTINE"/*.diagnostic.failure-*; do
+  for failure in "$QUARANTINE"/*.diagnostic.failure-canonical \
+    "$QUARANTINE"/*.diagnostic.failure-ambiguous \
+    "$QUARANTINE"/*.diagnostic.failure-replacement; do
     [ -e "$failure" ] || [ -L "$failure" ] || continue
     return 1
   done
@@ -823,7 +839,9 @@ failure_obligations_absent() {
 pending_outcomes_complete() {
   local pending
   [ -e "$QUARANTINE" ] || [ -L "$QUARANTINE" ] || return 0
-  for pending in "$QUARANTINE"/*.diagnostic.pending-*; do
+  for pending in "$QUARANTINE"/*.diagnostic.pending-canonical \
+    "$QUARANTINE"/*.diagnostic.pending-ambiguous \
+    "$QUARANTINE"/*.diagnostic.pending-noncanonical; do
     [ -e "$pending" ] || [ -L "$pending" ] || continue
     return 1
   done
@@ -836,7 +854,16 @@ process_diagnostic_obligations() {
   local obligation basename message
   [ -e "$QUARANTINE" ] || [ -L "$QUARANTINE" ] || return 0
   quarantine_tree_repair_and_validate || return 1
-  for obligation in "$QUARANTINE"/*.diagnostic.*; do
+  for obligation in "$QUARANTINE"/*.diagnostic.pending-canonical \
+    "$QUARANTINE"/*.diagnostic.pending-ambiguous \
+    "$QUARANTINE"/*.diagnostic.pending-noncanonical \
+    "$QUARANTINE"/*.diagnostic.canonical \
+    "$QUARANTINE"/*.diagnostic.failure-canonical \
+    "$QUARANTINE"/*.diagnostic.failure-ambiguous \
+    "$QUARANTINE"/*.diagnostic.failure-replacement \
+    "$QUARANTINE"/*.diagnostic.ambiguous \
+    "$QUARANTINE"/*.diagnostic.validated \
+    "$QUARANTINE"/*.diagnostic.noncanonical; do
     [ -e "$obligation" ] || [ -L "$obligation" ] || continue
     basename=${obligation##*/}
     diagnostic_obligation_message "$basename" || return 1
@@ -849,7 +876,16 @@ process_diagnostic_obligations() {
       ambiguous|noncanonical) quarantined_unarmed=1 ;;
     esac
   done
-  for obligation in "$QUARANTINE"/*.diagnostic.*; do
+  for obligation in "$QUARANTINE"/*.diagnostic.pending-canonical \
+    "$QUARANTINE"/*.diagnostic.pending-ambiguous \
+    "$QUARANTINE"/*.diagnostic.pending-noncanonical \
+    "$QUARANTINE"/*.diagnostic.canonical \
+    "$QUARANTINE"/*.diagnostic.failure-canonical \
+    "$QUARANTINE"/*.diagnostic.failure-ambiguous \
+    "$QUARANTINE"/*.diagnostic.failure-replacement \
+    "$QUARANTINE"/*.diagnostic.ambiguous \
+    "$QUARANTINE"/*.diagnostic.validated \
+    "$QUARANTINE"/*.diagnostic.noncanonical; do
     [ -e "$obligation" ] || [ -L "$obligation" ] || continue
     basename=${obligation##*/}
     diagnostic_obligation_message "$basename" || return 1

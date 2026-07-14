@@ -1764,6 +1764,43 @@ test_canonical_publication_failure_recovers_only_on_retry() {
   pass "canonical publication failure remains incomplete until a later clean retry rebuilds the poll"
 }
 
+test_obligation_namespace_compatibility() {
+  local dir state
+  dir=$(make_case legacy-noncanonical-obligation)
+  state="$dir/home/state"
+  mkdir -p "$state/.pr-check-quarantine"
+  chmod 0700 "$state/.pr-check-quarantine"
+  printf 'noncanonical task artifact: migration outcome tracking started before legacy poll handling\n' \
+    > "$state/.pr-check-quarantine/_noncanonical.diagnostic.pending-noncanonical"
+  printf 'legacy quarantined bytes\n' \
+    > "$state/.pr-check-quarantine/_noncanonical.check.abc123"
+  chmod 0600 "$state/.pr-check-quarantine/"*
+  FM_HOME="$dir/home" "$MIGRATE" > "$dir/migrate.out" 2> "$dir/migrate.err" \
+    || fail "migration could not recover the previous reserved obligation namespace"
+  [ ! -e "$state/.pr-check-quarantine/_noncanonical.diagnostic.pending-noncanonical" ] \
+    || fail "legacy reserved retry retained its pending obligation"
+  [ -f "$state/.pr-check-quarantine/_noncanonical.diagnostic.noncanonical" ] \
+    || fail "legacy reserved retry did not publish its terminal outcome"
+  assert_valid_migration_marker "$state/.pr-check-migration-v1"
+
+  dir=$(make_case diagnostic-delimiter-id)
+  state="$dir/home/state"
+  fm_write_meta "$state/foo.diagnostic.bar.meta" \
+    'window=fm-foo.diagnostic.bar' \
+    'pr=https://github.com/o/r/pull/41'
+  printf 'legacy delimiter bytes\n' > "$state/foo.diagnostic.bar.check.sh"
+  FM_HOME="$dir/home" "$MIGRATE" > "$dir/migrate.out" 2> "$dir/migrate.err" \
+    || fail "migration could not decode an obligation for a delimiter-bearing task ID"
+  fm_pr_poll_artifacts_valid "$state" foo.diagnostic.bar "$POLL" \
+    || fail "delimiter-bearing task ID did not rebuild an authenticated poll"
+  [ -f "$state/.pr-check-quarantine/foo.diagnostic.bar.diagnostic.canonical" ] \
+    || fail "delimiter-bearing task outcome lost the complete task ID"
+  [ ! -e "$state/.pr-check-quarantine/foo.diagnostic.canonical" ] \
+    || fail "delimiter-bearing task outcome was attributed to a truncated ID"
+  assert_valid_migration_marker "$state/.pr-check-migration-v1"
+  pass "legacy reserved obligations and delimiter-bearing task IDs retry without ambiguity"
+}
+
 test_nonexecuting_migration() {
   local dir state marker x_before x_after snap_before snap_after rc
   dir=$(make_case migration)
@@ -2407,6 +2444,7 @@ test_ambiguous_failure_accepts_validated_replacement
 test_replacement_provenance_negative_matrix
 test_complete_single_link_validation
 test_canonical_publication_failure_recovers_only_on_retry
+test_obligation_namespace_compatibility
 test_nonexecuting_migration
 test_direct_registration_refreshes_v1_x_shim
 test_bootstrap_migrates_before_other_mutations
