@@ -8,9 +8,11 @@
 # docs/architecture.md state the operator-facing outcome and point here; do not
 # restate the mechanics there.
 #
-# When state/<id>.meta records a non-default base= (declared with fm-brief.sh
-# --base and promoted into meta by fm-spawn.sh, which also records the base's tip
-# at spawn time as base_sha=), this guards the PR's base before merge.
+# When state/<id>.meta records a non-default base= (declared with fm-spawn.sh
+# --base, which also records the base's tip at spawn time as base_sha=), this guards
+# the PR's base before merge. meta is the single source of truth for a task's base,
+# so retiring a declaration is one edit - drop the base= line - and every refusal
+# below can name it as a recovery that actually works.
 #
 # THE GUARD ASKS ONE QUESTION FIRST: HAS THE BASE'S WORK LANDED IN THE DEFAULT
 # BRANCH? Not "does the base branch still exist" - that is an unsound proxy in both
@@ -37,12 +39,20 @@
 # THE BASE'S WORK HAS LANDED. The base merged: its work is in the default branch,
 # whether or not its branch was deleted afterwards (GitHub deletes it by default,
 # but the setting is off by default too - both end-states are ordinary). No unmerged
-# feature history is left to drag anywhere, so the hazard is gone and BOTH checks
-# above are meaningless: rootedness cannot even be observed, and the base label the
-# pipeline set is correct. THE GUARD STANDS DOWN, loudly, and the PR proceeds as the
-# ordinary default-branch PR it now is. Guarding here would deadlock a legitimate
-# merge forever behind a recovery - retarget onto the base - that is a no-op at best
-# and impossible at worst.
+# feature history is left to drag anywhere, so the hazard is gone and rootedness
+# against the base is meaningless - it cannot even be observed. THE GUARD STANDS
+# DOWN, loudly, and the PR is VERIFIED AS THE ORDINARY DEFAULT-BRANCH PR IT NOW IS.
+# Guarding it against the base would deadlock a legitimate merge forever behind a
+# recovery - retarget onto the base - that is a no-op at best and impossible at worst.
+#
+# Standing down is NOT skipping the check. The base label must still resolve, and it
+# must be the DEFAULT BRANCH: a PR still pointed at the merged base would merge into
+# that stale branch, so the fix would never reach the default branch at all, while
+# fm-teardown.sh would read a MERGED PR and release the work. That is reachable
+# whenever the base merged without being deleted, because a no-mistakes crewmate is
+# required to retarget the PR onto the base before it reports done. So a stood-down
+# guard refuses a PR that still targets anything but the default branch, and names
+# the retarget BACK to it.
 #
 # WE COULD NOT TELL. Never a stand-down: standing down is the only relaxation the
 # guard has, and it requires proof. With the base still on origin we keep guarding
@@ -66,11 +76,9 @@
 #
 # The assertion is otherwise fail-closed: any resolution failure (missing
 # worktree, unfetchable base/head/default, unresolvable base label) refuses, so a
-# wrong-based or unverifiable head never reaches merge. It is also closed against
-# its own fail-open path: a data/<id>/base sidecar that never reached meta (so
-# base= is absent and the guard would silently skip) refuses too.
-# With no base= and no sidecar (the common case) the whole block is skipped and
-# behavior is exactly as before: the repo default branch is the base.
+# wrong-based or unverifiable head never reaches merge.
+# With no base= (the common case) the whole block is skipped and behavior is exactly
+# as before: the repo default branch is the base.
 # Usage: fm-pr-check.sh <task-id> <pr-url>
 set -eu
 
@@ -78,7 +86,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
-DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 # shellcheck source=bin/fm-base-lib.sh
 . "$SCRIPT_DIR/fm-base-lib.sh"
 "$FM_ROOT/bin/fm-guard.sh" || true
@@ -95,24 +102,8 @@ if [ -f "$META" ]; then
   BASE_SHA=$(grep '^base_sha=' "$META" | tail -1 | cut -d= -f2- || true)
 fi
 
-# The intended base is declared to fm-brief.sh, lands in the data/<id>/base
-# sidecar, and is promoted into meta by fm-spawn.sh. If that promotion never
-# happened, base= is absent and this guard would skip silently - restoring the
-# very incident it exists to prevent. Cross-check the two and refuse on any
-# disagreement rather than trusting the weaker of the pair.
-BASE_SIDECAR=
-if [ -f "$DATA/$ID/base" ]; then
-  IFS= read -r BASE_SIDECAR < "$DATA/$ID/base" || true
-fi
-if [ -n "$BASE_SIDECAR" ] && [ "$BASE_SIDECAR" != "$BASE" ]; then
-  echo "error: task $ID declares intended base '$BASE_SIDECAR' in $DATA/$ID/base, but state/$ID.meta records base='$BASE'." >&2
-  echo "  The intended base never reached meta, so the PR-base guard would be skipped and a wrong-based PR could merge unnoticed. Refusing before merge." >&2
-  echo "  Record it with: echo 'base=$BASE_SIDECAR' >> $META" >&2
-  exit 1
-fi
-
 # A hand-edited meta could carry a base= that git would read as an option rather
-# than a ref. fm-brief.sh validates on the way in; validate again on the way out.
+# than a ref. fm-spawn.sh validates on the way in; validate again on the way out.
 if [ -n "$BASE" ] && ! fm_base_valid_branch_name "$BASE"; then
   echo "error: task $ID records base='$BASE', which is not a valid git branch name (it must be non-empty, free of whitespace, and must not begin with '-'). Refusing before merge." >&2
   exit 1
@@ -200,14 +191,30 @@ fetch_branch_sha() {
 }
 
 # The declared base's work IS in the default branch, so the base merged and there is
-# nothing left to guard. Say so out loud - a guard that relaxes silently is a guard
-# nobody can audit - and hand the caller back to the ordinary default-branch path.
-# Returns FM_BASE_GUARD_STAND_DOWN.
-stand_down_landed_base() {  # <default-branch-name> <why>
-  local default_branch_name=$1 why=$2
+# nothing left to guard it against. Say so out loud - a guard that relaxes silently is
+# a guard nobody can audit - and then VERIFY THE PR AS THE ORDINARY DEFAULT-BRANCH PR
+# IT NOW IS. Standing down is not skipping the check: it swaps the base the PR is
+# checked against, and the label must now be the default branch. A PR still pointed at
+# the merged base is reachable (a no-mistakes crewmate is required to retarget onto the
+# base before reporting done, and the base can merge afterwards without being deleted),
+# and merging it would merge into that stale branch - so the fix would never reach the
+# default branch, while fm-teardown.sh would read a MERGED PR and release the work.
+# Returns FM_BASE_GUARD_STAND_DOWN (proceed on the ordinary default-branch path) or 1.
+stand_down_landed_base() {  # <default-branch-name> <why> <pr-number>
+  local default_branch_name=$1 why=$2 n=$3
   echo "  Its work IS carried by the default branch '$default_branch_name' ($why), so the base merged and there is nothing left to guard." >&2
-  echo "  No unmerged feature history can be dragged into '$default_branch_name', so the base guard stands down and this PR is handled as an ordinary default-branch PR." >&2
-  [ -z "$PR_BASE_LABEL" ] || echo "  PR base label : $PR_BASE_LABEL" >&2
+  echo "  No unmerged feature history can be dragged into '$default_branch_name', so the base guard stands down and this PR is verified as the ordinary default-branch PR it now is." >&2
+  if [ -z "$PR_BASE_LABEL" ]; then
+    echo "error: task $ID declares intended base '$BASE', whose work has merged - but the PR's base label could not be resolved via gh, so it cannot be confirmed to target '$default_branch_name'. Refusing before merge." >&2
+    return 1
+  fi
+  echo "  PR base label : $PR_BASE_LABEL" >&2
+  if [ "$PR_BASE_LABEL" != "$default_branch_name" ]; then
+    echo "error: task $ID PR is opened against base '$PR_BASE_LABEL', but that base has already merged - refusing to record pr= or arm the merge poll before merge." >&2
+    echo "  Merging into an already-merged branch would land this fix on '$PR_BASE_LABEL' and never on '$default_branch_name', while the PR would still read as MERGED." >&2
+    echo "  Recovery: retarget the PR back to the default branch with 'gh-axi pr edit $n --base $default_branch_name', then drop the 'base=$BASE' line from $META and re-run fm-pr-check." >&2
+    return 1
+  fi
   echo "  Drop the 'base=$BASE' line from $META to retire the declaration for good." >&2
   return "$FM_BASE_GUARD_STAND_DOWN"
 }
@@ -220,8 +227,8 @@ stand_down_landed_base() {  # <default-branch-name> <why>
 # tell those apart, and there is no rootedness check left to fall back on; with no
 # fact, refuse.
 # Returns FM_BASE_GUARD_STAND_DOWN (proceed on the ordinary default-branch path) or 1.
-handle_absent_base() {  # <default-branch-name> <default-sha>
-  local default_branch_name=$1 default_sha=$2 landed_rc=0
+handle_absent_base() {  # <default-branch-name> <default-sha> <pr-number>
+  local default_branch_name=$1 default_sha=$2 n=$3 landed_rc=0
   if [ -z "$BASE_SHA" ]; then
     echo "error: task $ID declares intended base '$BASE', but that branch no longer exists on origin AND no base_sha= tip was recorded for it, so whether it merged or was abandoned cannot be told apart. Refusing before merge." >&2
     echo "  A base that merged is harmless; a base that was deleted WITHOUT merging left its unmerged commits replayed on this PR head, and merging would land them on '$default_branch_name'." >&2
@@ -233,7 +240,7 @@ handle_absent_base() {  # <default-branch-name> <default-sha>
     "$FM_BASE_WORK_LANDED")
       echo "notice: task $ID declares intended base '$BASE', but that branch no longer exists on origin - it merged and was deleted, the normal end-state of a stacked PR." >&2
       echo "  recorded base tip : $BASE_SHA" >&2
-      stand_down_landed_base "$default_branch_name" "$FM_BASE_WORK_HOW"
+      stand_down_landed_base "$default_branch_name" "$FM_BASE_WORK_HOW" "$n"
       return $?
       ;;
     "$FM_BASE_WORK_UNLANDED")
@@ -292,7 +299,7 @@ assert_pr_based_on_base() {
   case "$probe_rc" in
     "$FM_BASE_ABSENT")
       default_sha=$(fetch_branch_sha "$default_branch_name" "repo default branch") || return 1
-      handle_absent_base "$default_branch_name" "$default_sha"
+      handle_absent_base "$default_branch_name" "$default_sha" "$n"
       return $?
       ;;
     "$FM_BASE_PROBE_FAILED")
@@ -325,7 +332,7 @@ assert_pr_based_on_base() {
   if [ "$landed_rc" -eq "$FM_BASE_WORK_LANDED" ]; then
     echo "notice: task $ID declares intended base '$BASE', and that branch is still on origin - but it has already merged." >&2
     echo "  base tip : $base_sha" >&2
-    stand_down_landed_base "$default_branch_name" "$FM_BASE_WORK_HOW"
+    stand_down_landed_base "$default_branch_name" "$FM_BASE_WORK_HOW" "$n"
     return $?
   fi
 

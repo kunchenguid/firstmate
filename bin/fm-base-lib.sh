@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # fm-base-lib.sh - the one owner of what a task's declared base branch (base= in
-# state/<id>.meta, from fm-brief.sh --base) means on origin RIGHT NOW.
+# state/<id>.meta, from fm-spawn.sh --base) means on origin RIGHT NOW.
 #
 # Two consumers must agree exactly, because they gate the same merge:
 #   - bin/fm-pr-check.sh  refuses to record pr= or arm the merge poll unless the
@@ -71,7 +71,7 @@ FM_BASE_GUARD_STAND_DOWN=4
 # fm_base_valid_branch_name: 0 (true) if <name> is a non-empty, dash-free,
 # whitespace-free, git-legal branch name. A leading dash matters beyond tidiness:
 # the value reaches git as a refspec, where git would read it as an option, and
-# `--upload-pack=<cmd>` is an arbitrary-command vector. fm-brief.sh validates on
+# `--upload-pack=<cmd>` is an arbitrary-command vector. fm-spawn.sh validates on
 # the way in; the consumers validate again on the way out, because meta is a plain
 # text file a human can edit.
 fm_base_valid_branch_name() {  # <name>

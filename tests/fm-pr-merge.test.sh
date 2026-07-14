@@ -8,7 +8,7 @@
 # trigger never fires.
 #
 # fm-pr-check.sh additionally, when a non-default base= was declared for the task
-# (fm-brief.sh --base), asserts the PR head is ROOTED IN THAT BASE'S UNMERGED
+# (fm-spawn.sh --base), asserts the PR head is ROOTED IN THAT BASE'S UNMERGED
 # HISTORY before recording pr= or arming the merge poll - catching a feature-branch
 # fix that the pipeline rebased onto the repo default (data/learnings.md
 # 2026-07-07). It deliberately does NOT require the head to descend from the base's
@@ -49,32 +49,40 @@
 #       base's commits on main
 #
 # Base LANDED - the base merged, so there is no unmerged history left to drag anywhere
-# and the guard must stand down rather than deadlock a legitimate merge:
+# and the guard must stand down rather than deadlock a legitimate merge. Standing down
+# is not skipping the check: it re-checks the PR as the ordinary default-branch PR it
+# now is, so the base label must be the DEFAULT branch:
 #   (o) base still PRESENT on origin, squash-merged into main, head rebased onto main ->
 #       stands down; enforcing rootedness here would refuse forever, with a recovery
 #       (retarget onto the base) that is a no-op
 #   (p) base still PRESENT on origin, ancestor-merged into main, PR label is main ->
-#       stands down; the label check alone would refuse forever
+#       stands down; the label check against the BASE alone would refuse forever
 #   (q) base GONE, recorded tip is an ANCESTOR of main (it merged and was auto-deleted)
 #       -> stands down loudly and the PR proceeds
 #   (r) base GONE, recorded tip's work is CONTAINED in main (squash-merged, firstmate's
 #       own default) -> stands down too; an ancestor-only test would deadlock here
+#   (s) base merged but NOT deleted, and the PR still targets THAT base -> refuses:
+#       merging would merge into an already-merged branch, so the fix would never reach
+#       main while the PR would still read MERGED and teardown would release the work
 #
 # Landedness INDETERMINATE or unaskable - never a stand-down, because standing down is
 # the guard's only relaxation and it takes proof. Note that "do not relax" is not the
 # same as "refuse": with the base still on origin the strict checks are all still
 # available, and running them costs a correctly stacked PR nothing.
-#   (s) base PRESENT but conflicting with main, so landedness cannot be settled, head
+#   (t) base PRESENT but conflicting with main, so landedness cannot be settled, head
 #       stacked -> ALLOWED: the guard keeps its strict checks instead of refusing. A
 #       long-lived base drifting from main is ordinary, and refusing here would break
 #       the guard's own happy path
-#   (t) base GONE and no base_sha= recorded -> refuses; merged and abandoned cannot be
+#   (u) base GONE and no base_sha= recorded -> refuses; merged and abandoned cannot be
 #       told apart without it, and no rootedness check is left to fall back on
-#   (u) base GONE and the recorded tip is not in the local object store -> refuses,
+#   (v) base GONE and the recorded tip is not in the local object store -> refuses,
 #       naming the reason rather than assuming
-#   (v) base present but origin cannot be asked at all (auth, network) -> fail-closed refusal
-#   (w) base= present in the data/<id>/base sidecar but never promoted into meta -> refuses (no silent fail-open)
+#   (w) base present but origin cannot be asked at all (auth, network) -> fail-closed refusal
 #   (x) no base= (the common case) -> unchanged: records pr= and arms the poll
+#
+# There is no sidecar case to cover: state/<id>.meta is the single source of truth for a
+# task's base, written by fm-spawn.sh --base, so there is no second record that could
+# hold a base meta does not - and retiring a declaration is one edit to one file.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -519,16 +527,8 @@ run_pr_check() {
   local case_dir=$1; shift
   FM_ROOT_OVERRIDE="$ROOT" \
   FM_STATE_OVERRIDE="$case_dir/state" \
-  FM_DATA_OVERRIDE="$case_dir/data" \
   PATH="$case_dir/fakebin:$PATH" \
     "$PR_CHECK" "$@"
-}
-
-# Write the data/<id>/base sidecar fm-brief.sh records and fm-spawn.sh promotes.
-write_base_sidecar() {
-  local case_dir=$1 id=$2 base=$3
-  mkdir -p "$case_dir/data/$id"
-  printf '%s\n' "$base" > "$case_dir/data/$id/base"
 }
 
 test_pr_check_accepts_stacked_base() {
@@ -964,16 +964,21 @@ test_pr_check_allows_base_advanced_since_head() {
   pass "fm-pr-check allows a correctly based PR whose base advanced after the head was stacked"
 }
 
-# The sidecar -> meta promotion (fm-spawn.sh) is the one link that could disarm the
-# guard silently: with no base= in meta, the assertion would be skipped entirely and
-# a wrong-based PR would sail through. A sidecar that disagrees with meta must refuse.
-test_pr_check_refuses_when_sidecar_never_reached_meta() {
+# Standing the guard down means the PR is re-checked as the ORDINARY DEFAULT-BRANCH PR
+# it now is, not that checking stops. This is the state that proves the difference: the
+# base merged WITHOUT being deleted (GitHub's delete-on-merge is off by default) and the
+# PR still targets it - exactly what the no-mistakes brief REQUIRES the crewmate to do,
+# since it must retarget onto the base before reporting done. Merging that PR merges into
+# feature/base, an already-merged branch: the fix never reaches main, while the PR reads
+# MERGED and fm-teardown.sh releases the worktree and the task goes to Done. A stand-down
+# that only skips the base checks would wave it straight through.
+test_pr_check_refuses_stand_down_pr_still_targeting_the_merged_base() {
   local case_dir rc
-  case_dir=$(make_git_case orphansidecar main)
-  write_base_sidecar "$case_dir" task-x1 feature/base
+  case_dir=$(make_git_case landedlabel feature feature/base)
+  git -C "$case_dir/origin.git" update-ref refs/heads/main refs/heads/feature/base
   fm_write_meta "$case_dir/state/task-x1.meta" \
     "window=fm-task-x1" "worktree=$case_dir/wt" "project=$case_dir/project" \
-    "kind=ship" "mode=no-mistakes"
+    "kind=ship" "mode=no-mistakes" "base=feature/base" "base_sha=$(base_tip "$case_dir")"
 
   set +e
   run_pr_check "$case_dir" task-x1 https://github.com/example/repo/pull/9 \
@@ -981,14 +986,16 @@ test_pr_check_refuses_when_sidecar_never_reached_meta() {
   rc=$?
   set -e
 
-  expect_code 1 "$rc" "orphan-sidecar: a declared base missing from meta must refuse, not silently skip the guard"
-  assert_grep 'never reached meta' "$case_dir/stderr" \
-    "orphan-sidecar: refusal did not explain the lost base declaration"
+  expect_code 1 "$rc" "landed-label: a PR still targeting a base that has already merged must refuse, not sail through the stand-down"
+  assert_grep 'already merged' "$case_dir/stderr" \
+    "landed-label: the refusal did not say the base it targets has merged"
+  assert_grep 'pr edit 9 --base main' "$case_dir/stderr" \
+    "landed-label: the refusal did not prescribe retargeting back to the default branch"
   assert_no_grep 'pr=https://github.com/example/repo/pull/9' "$case_dir/state/task-x1.meta" \
-    "orphan-sidecar: an unguarded PR must not record pr= before merge"
+    "landed-label: a PR that would merge into a merged branch must not record pr= before merge"
   assert_absent "$case_dir/state/task-x1.check.sh" \
-    "orphan-sidecar: an unguarded PR must not arm the merge poll"
-  pass "fm-pr-check refuses when a declared base sidecar never reached meta (no silent fail-open)"
+    "landed-label: a PR that would merge into a merged branch must not arm the merge poll"
+  pass "fm-pr-check refuses a stood-down PR that still targets its now-merged base"
 }
 
 test_pr_check_no_base_arms_normally() {
@@ -1029,7 +1036,7 @@ test_pr_check_allows_base_advanced_since_head
 test_pr_check_refuses_wrong_base
 test_pr_check_refuses_wrong_base_label
 test_pr_check_rootedness_recovery_is_state_aware
-test_pr_check_refuses_when_sidecar_never_reached_meta
+test_pr_check_refuses_stand_down_pr_still_targeting_the_merged_base
 test_pr_check_stands_down_when_base_merged_and_deleted
 test_pr_check_stands_down_when_base_squash_merged_and_deleted
 test_pr_check_stands_down_when_present_base_squash_merged

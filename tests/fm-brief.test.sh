@@ -260,21 +260,25 @@ test_pause_verb_override_renders_all_brief_scaffolds() {
   pass "fm-brief.sh: custom pause verb renders in every scaffold"
 }
 
-# --base <branch> records the intended base to the data/<id>/base sidecar (which
-# fm-spawn.sh promotes into meta) and roots the brief's branch step on that base.
-test_base_no_mistakes_records_sidecar_and_brief() {
-  local home id brief
+# --base <branch> shapes the brief and NOTHING ELSE. The durable record of a task's
+# base lives in state/<id>.meta, written by fm-spawn.sh --base, so the scaffold owns
+# no state a later run could disagree with - and the operator is told to pass the
+# same flag to the spawn, because a brief alone leaves the guard unarmed.
+test_base_no_mistakes_shapes_brief_and_records_nothing() {
+  local home id brief out
   home="$TMP_ROOT/base-nm-home"
   mkdir -p "$home/data"
   id="brief-base-nm1"
-  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --base feature/admin-dashboard >/dev/null 2>&1 \
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --base feature/admin-dashboard 2>&1) \
     || fail "base-nm: fm-brief.sh --base should exit 0 for a no-mistakes ship task"
   brief="$home/data/$id/brief.md"
-  assert_present "$home/data/$id/base" "base-nm: intended-base sidecar was not written"
-  assert_grep "feature/admin-dashboard" "$home/data/$id/base" "base-nm: sidecar missing the base branch name"
   assert_grep "**Base branch.** This task targets base branch \`feature/admin-dashboard\`" "$brief" \
     "base-nm: brief missing the Setup base note"
-  pass "fm-brief.sh: --base records the sidecar and adds the base note to the no-mistakes brief"
+  [ ! -e "$home/data/$id/base" ] \
+    || fail "base-nm: the scaffold wrote a second source of truth for the base; meta is the only one"
+  assert_contains "$out" "fm-spawn.sh $id <project> --base feature/admin-dashboard" \
+    "base-nm: the scaffold did not tell the operator to declare the same base at spawn, where the guard is actually armed"
+  pass "fm-brief.sh: --base shapes the brief, records no state, and names the spawn that does"
 }
 
 # The worktree starts on the DEFAULT branch, so a based task must be given the
@@ -345,17 +349,18 @@ test_base_gate_precedes_the_done_terminator() {
   pass "fm-brief.sh: the base gate is read before the definition of done's terminator"
 }
 
-# --base also form works, and the sidecar holds only the branch name on one line.
-test_base_equals_form_and_sidecar_shape() {
-  local home id
+# The --base=<branch> form is accepted too.
+test_base_equals_form() {
+  local home id brief
   home="$TMP_ROOT/base-equals-home"
   mkdir -p "$home/data"
   id="brief-base-eq1"
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --base=feature/x >/dev/null 2>&1 \
     || fail "base-equals: --base=<branch> form should be accepted"
-  [ "$(cat "$home/data/$id/base")" = "feature/x" ] \
-    || fail "base-equals: sidecar should hold exactly the branch name"
-  pass "fm-brief.sh: --base=<branch> form records the sidecar cleanly"
+  brief="$home/data/$id/brief.md"
+  assert_grep "git checkout -b fm/$id FETCH_HEAD" "$brief" \
+    "base-equals: --base=<branch> did not root the branch step on the base"
+  pass "fm-brief.sh: --base=<branch> form shapes the brief exactly as the two-token form"
 }
 
 # For a direct-PR project, --base tells the crewmate to open the PR against it.
@@ -381,7 +386,7 @@ test_base_rejected_for_scout() {
   err=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --scout --base feature/x 2>&1); status=$?
   expect_code 1 "$status" "base-scout: --base with --scout should be rejected"
   assert_contains "$err" "applies only to ship tasks" "base-scout: refusal did not explain scope"
-  assert_absent "$home/data/$id/base" "base-scout: a rejected --base must not leave a sidecar"
+  assert_absent "$home/data/$id/brief.md" "base-scout: a rejected --base must not leave a brief"
   pass "fm-brief.sh: --base is rejected for scout tasks"
 }
 
@@ -406,7 +411,7 @@ test_base_rejects_a_flag_as_its_value() {
   err=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --base --scout 2>&1); status=$?
   expect_code 1 "$status" "base-flagvalue: --base followed by a flag should be rejected, not consumed as the branch name"
   assert_contains "$err" "requires a branch name" "base-flagvalue: refusal did not explain the missing value"
-  assert_absent "$home/data/$id/base" "base-flagvalue: a rejected --base must not leave a sidecar"
+  assert_absent "$home/data/$id/brief.md" "base-flagvalue: a rejected --base must not leave a brief"
   pass "fm-brief.sh: --base refuses to consume a following flag as its branch name"
 }
 
@@ -420,17 +425,17 @@ test_base_rejects_dash_leading_and_invalid_names() {
   err=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-base-dash1 some-proj --base=--upload-pack=touch 2>&1); status=$?
   expect_code 1 "$status" "base-badname: a dash-leading base must be rejected"
   assert_contains "$err" "must not begin with '-'" "base-badname: refusal did not explain the leading dash"
-  assert_absent "$home/data/brief-base-dash1/base" "base-badname: a rejected --base must not leave a sidecar"
+  assert_absent "$home/data/brief-base-dash1/brief.md" "base-badname: a rejected --base must not leave a brief"
 
   err=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-base-bad2 some-proj --base='feature/..x' 2>&1); status=$?
   expect_code 1 "$status" "base-badname: an invalid git branch name must be rejected"
   assert_contains "$err" "not a valid git branch name" "base-badname: refusal did not explain the invalid ref name"
-  assert_absent "$home/data/brief-base-bad2/base" "base-badname: a rejected --base must not leave a sidecar"
+  assert_absent "$home/data/brief-base-bad2/brief.md" "base-badname: a rejected --base must not leave a brief"
 
   err=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-base-empty3 some-proj --base= 2>&1); status=$?
   expect_code 1 "$status" "base-badname: an empty base must be rejected"
   assert_contains "$err" "non-empty branch name" "base-badname: refusal did not explain the empty value"
-  assert_absent "$home/data/brief-base-empty3/base" "base-badname: a rejected --base must not leave a sidecar"
+  assert_absent "$home/data/brief-base-empty3/brief.md" "base-badname: a rejected --base must not leave a brief"
 
   pass "fm-brief.sh: --base rejects empty, dash-leading, and malformed branch names"
 }
@@ -466,11 +471,11 @@ test_base_setup_note_agrees_with_the_pipeline() {
   pass "fm-brief.sh: the base Setup note agrees with the delivery mode's definition of done"
 }
 
-# The scaffold's flags are the whole truth about the task. Re-scaffolding an id
-# WITHOUT --base (AGENTS.md section 11 explicitly instructs a regenerate flow) must
-# not leave the previous run's sidecar behind: fm-spawn.sh would promote it into
-# meta, and the task would be guarded against a base its own brief never mentions.
-test_rescaffold_without_base_clears_the_sidecar() {
+# A scaffold owns no state, so re-scaffolding an id WITHOUT --base (AGENTS.md section
+# 11 explicitly instructs a regenerate flow) cannot leave a stale base behind for the
+# spawn to pick up: the brief it writes is the whole of its output, and the base lives
+# only where the spawn is told to put it.
+test_rescaffold_without_base_inherits_nothing() {
   local home id brief
   home="$TMP_ROOT/base-rescaffold-home"
   write_registry "$home"
@@ -479,20 +484,20 @@ test_rescaffold_without_base_clears_the_sidecar() {
 
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --base feature/x >/dev/null 2>&1 \
     || fail "base-rescaffold: the first --base scaffold should exit 0"
-  assert_present "$home/data/$id/base" "base-rescaffold: the first scaffold should record the sidecar"
+  assert_grep "Base branch." "$brief" "base-rescaffold: the first scaffold should carry the base note"
 
   rm -f "$brief"
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj >/dev/null 2>&1 \
     || fail "base-rescaffold: re-scaffolding without --base should exit 0"
 
-  assert_absent "$home/data/$id/base" \
-    "base-rescaffold: a scaffold without --base must clear the stale sidecar, not inherit it"
   assert_no_grep "Base branch." "$brief" \
     "base-rescaffold: the re-scaffolded brief must not carry the base note"
-  pass "fm-brief.sh: re-scaffolding without --base clears a previously recorded base"
+  [ ! -e "$home/data/$id/base" ] \
+    || fail "base-rescaffold: a scaffold left base state behind for a later spawn to inherit"
+  pass "fm-brief.sh: re-scaffolding without --base inherits nothing from the based run before it"
 }
 
-# Without --base the brief and directory are unchanged: no sidecar, no base note.
+# Without --base the brief is unchanged: no base note, and no state either way.
 test_no_base_leaves_brief_unchanged() {
   local home id brief
   home="$TMP_ROOT/no-base-home"
@@ -500,9 +505,8 @@ test_no_base_leaves_brief_unchanged() {
   id="brief-no-base1"
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj >/dev/null 2>&1
   brief="$home/data/$id/brief.md"
-  assert_absent "$home/data/$id/base" "no-base: default ship task must not write a base sidecar"
   assert_no_grep "Base branch." "$brief" "no-base: default brief must not carry the base note"
-  pass "fm-brief.sh: a ship task without --base is unchanged (no sidecar, no base note)"
+  pass "fm-brief.sh: a ship task without --base is unchanged (no base note)"
 }
 
 test_script_parses
@@ -516,14 +520,14 @@ test_herdr_lab_omission_is_loud_for_ship_and_scout
 test_herdr_lab_contract_applies_to_scouts_but_not_secondmates
 test_secondmate_no_projects_charter
 test_pause_verb_override_renders_all_brief_scaffolds
-test_base_no_mistakes_records_sidecar_and_brief
+test_base_no_mistakes_shapes_brief_and_records_nothing
 test_base_roots_branch_on_the_base
 test_base_no_mistakes_brief_documents_the_real_recovery
 test_base_gate_precedes_the_done_terminator
-test_base_equals_form_and_sidecar_shape
+test_base_equals_form
 test_base_direct_pr_targets_base
 test_base_setup_note_agrees_with_the_pipeline
-test_rescaffold_without_base_clears_the_sidecar
+test_rescaffold_without_base_inherits_nothing
 test_base_rejected_for_scout
 test_base_rejects_a_flag_as_its_value
 test_base_rejects_dash_leading_and_invalid_names

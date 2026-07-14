@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
 # secondmate in its isolated firstmate home.
-# Usage: fm-spawn.sh <task-id> <project-dir> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--scout]
+# Usage: fm-spawn.sh <task-id> <project-dir> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--base <branch>] [--scout]
 #        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
 #   --harness <name> is the explicit per-spawn harness/profile adapter. The old
 #   positional harness arg still works for back-compat.
@@ -57,19 +57,23 @@
 #   default-branch commit when safe; skipped syncs warn and launch unchanged.
 #   Ship/scout spawns refuse to launch unless the resolved task path is a real
 #   git worktree root distinct from the primary project checkout.
-#   For a ship task, if data/<task-id>/base exists (written by fm-brief.sh --base),
-#   its branch name is recorded into meta as base=<branch>, and the base's CURRENT
-#   TIP on origin is recorded alongside it as base_sha=<sha>, so fm-pr-check.sh can
-#   assert the PR head is based on that intended base before merge - and can still
-#   tell a base that merged from one that was abandoned after the branch itself is
-#   deleted from origin (bin/fm-base-lib.sh owns that rule). A sidecar that declares
-#   no branch, an invalid branch name, a base origin does not have, or an origin
+#   --base <branch> declares a ship task's non-default intended base branch, and
+#   THIS SCRIPT IS THE ONE OWNER OF THAT FACT: it records base=<branch> into meta
+#   along with the base's CURRENT TIP on origin as base_sha=<sha>. state/<id>.meta
+#   is the single source of truth for a task's base - there is no sidecar, nothing
+#   to promote, and nothing that can disagree with it. Pass the same --base to
+#   fm-brief.sh, which only shapes the brief's prose and records nothing.
+#   fm-pr-check.sh then asserts the PR head is based on that intended base before
+#   merge, and base_sha= is what still tells a base that merged from one that was
+#   abandoned once the branch itself is deleted from origin (bin/fm-base-lib.sh owns
+#   that rule). An invalid branch name, a base origin does not have, or an origin
 #   that cannot be asked all refuse the spawn rather than recording a base the guard
 #   could not later verify against. Those refusals are raised with the brief check,
 #   BEFORE any backend window or worktree lease is acquired, so they strand nothing
-#   for recovery or fm-teardown.sh to reconcile. Absent means the repo default branch
-#   is the base and the meta stays byte-identical to the pre-base default path (no
-#   base=/base_sha= lines).
+#   for recovery or fm-teardown.sh to reconcile. It applies only to a ship task, and
+#   only to a single-task spawn (a base is per-task, so a batch cannot share one).
+#   Absent means the repo default branch is the base and the meta stays
+#   byte-identical to the pre-base default path (no base=/base_sha= lines).
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
@@ -139,10 +143,13 @@ HARNESS_ARG=
 MODEL=
 EFFORT=
 BACKEND_ARG=
+BASE=
+BASE_SHA=
 HARNESS_SET=0
 MODEL_SET=0
 EFFORT_SET=0
 BACKEND_SET=0
+BASE_SET=0
 POS=()
 want_value=
 for a in "$@"; do
@@ -155,6 +162,7 @@ for a in "$@"; do
       model) MODEL=$a; MODEL_SET=1 ;;
       effort) EFFORT=$a; EFFORT_SET=1 ;;
       backend) BACKEND_ARG=$a; BACKEND_SET=1 ;;
+      base) BASE=$a; BASE_SET=1 ;;
       *) echo "error: internal parser state for --$want_value" >&2; exit 1 ;;
     esac
     want_value=
@@ -171,6 +179,8 @@ for a in "$@"; do
     --effort=*) EFFORT=${a#--effort=}; EFFORT_SET=1 ;;
     --backend) want_value=backend ;;
     --backend=*) BACKEND_ARG=${a#--backend=}; BACKEND_SET=1 ;;
+    --base) want_value=base ;;
+    --base=*) BASE=${a#--base=}; BASE_SET=1 ;;
     *) POS+=("$a") ;;
   esac
 done
@@ -183,6 +193,18 @@ case "$EFFORT" in
   ''|low|medium|high|xhigh|max) ;;
   *) echo "error: --effort must be one of low, medium, high, xhigh, max" >&2; exit 1 ;;
 esac
+# The declared base reaches git as a refspec (here and in fm-pr-check.sh), where a
+# leading dash would be read as an option and --upload-pack=<cmd> is an
+# arbitrary-command vector. Validate it before it is recorded anywhere, and reject
+# it where it has no meaning: a scout raises no PR and a secondmate is not a task.
+if [ "$BASE_SET" -eq 1 ]; then
+  [ -n "$BASE" ] || { echo "error: --base requires a non-empty branch name" >&2; exit 1; }
+  fm_base_valid_branch_name "$BASE" || {
+    echo "error: --base is not a valid git branch name (it must be non-empty, free of whitespace, and must not begin with '-'): '$BASE'" >&2
+    exit 1
+  }
+  [ "$KIND" = ship ] || { echo "error: --base applies only to ship tasks, not --scout or --secondmate" >&2; exit 1; }
+fi
 
 # Backend selection (data/fm-backend-design-d7): explicit --backend, else
 # FM_BACKEND env, else config/backend, else runtime auto-detection, else
@@ -274,6 +296,12 @@ idpart=${idpart%%=*}
 if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in */*) false ;; *) true ;; esac; then
   if [ "$KIND" != secondmate ] && [ -z "$HARNESS_ARG" ] && [ -f "$CONFIG/crew-dispatch.json" ]; then
     echo "error: config/crew-dispatch.json is active - pass an explicit harness resolved from the dispatch rules (the consultation backstop, so the rules are never silently skipped)." >&2
+    exit 1
+  fi
+  # A base is a fact about ONE task, so there is no coherent way to share it across a
+  # batch: applying it to every pair would silently guard tasks nobody based.
+  if [ "$BASE_SET" -eq 1 ]; then
+    echo "error: --base is per-task and cannot be shared across a batch; spawn a based task on its own" >&2
     exit 1
   fi
   rc=0
@@ -667,41 +695,24 @@ else
 fi
 [ -f "$BRIEF" ] || { echo "error: no brief at $BRIEF" >&2; exit 1; }
 
-# A ship task can declare a non-default intended base branch via fm-brief.sh
-# --base, which drops the branch name in data/<id>/base. Read it here, alongside
-# the brief check and BEFORE any backend window or worktree lease is acquired:
-# the refusals below are fail-closed, and a fail-closed refusal that fires after
-# those resources exist would strand them with no meta for recovery or teardown
-# to reconcile. Absent sidecar -> no base= -> the repo default branch is the base
-# and the meta stays byte-identical to the pre-base default path.
-BASE=
-BASE_SHA=
-if [ "$KIND" != secondmate ] && [ -f "$DATA/$ID/base" ]; then
-  IFS= read -r BASE < "$DATA/$ID/base" || true
-  # This promotion is the one link that could silently disarm the guard: an
-  # unreadable sidecar would leave no base= in meta, and fm-pr-check would then
-  # skip the base assertion entirely. Refuse instead of spawning unguarded.
-  if [ -z "$BASE" ]; then
-    echo "error: $DATA/$ID/base exists but declares no branch, so the task's intended base cannot be recorded in meta and the PR-base guard would be silently skipped. Re-scaffold the brief with fm-brief.sh --base <branch>." >&2
-    exit 1
-  fi
-  if ! fm_base_valid_branch_name "$BASE"; then
-    echo "error: $DATA/$ID/base declares '$BASE', which is not a valid git branch name (it must be non-empty, free of whitespace, and must not begin with '-'). Re-scaffold the brief with fm-brief.sh --base <branch>." >&2
-    exit 1
-  fi
-  # Resolve the base's tip on origin NOW, while the base necessarily still exists,
-  # and record it in meta. It is the durable fact fm-pr-check.sh needs later: once
-  # the base branch is deleted from origin, its absence alone cannot say whether it
-  # merged (hazard gone) or was abandoned (hazard replayed onto the PR head), and
-  # only a commit recorded from when it existed can settle that. Refusing here is
-  # cheap - nothing has been created yet - and it also catches a mistyped base
-  # before a crewmate spends a run on it.
+# Resolve the declared base's tip on origin NOW, while the base necessarily still
+# exists, so meta can carry it as base_sha=. It is the durable fact fm-pr-check.sh
+# needs later: once the base branch is deleted from origin, its absence alone cannot
+# say whether it merged (hazard gone) or was abandoned (hazard replayed onto the PR
+# head), and only a commit recorded from when it existed can settle that.
+#
+# This runs alongside the brief check and BEFORE any backend window or worktree lease
+# is acquired: the refusals below are fail-closed, and a fail-closed refusal that
+# fired after those resources exist would strand them with no meta for recovery or
+# teardown to reconcile. Refusing here is free - nothing has been created yet - and it
+# also catches a mistyped base before a crewmate spends a whole run on it.
+if [ -n "$BASE" ]; then
   BASE_PROBE_RC=0
   fm_base_probe_origin "$PROJ_ABS" "$BASE" || BASE_PROBE_RC=$?
   case "$BASE_PROBE_RC" in
     "$FM_BASE_PRESENT") BASE_SHA=$FM_BASE_PROBE_SHA ;;
     "$FM_BASE_ABSENT")
-      echo "error: task $ID declares intended base '$BASE', but no such branch exists on origin for $PROJ_ABS. A crewmate cannot root its branch on a base that is not there. Re-scaffold the brief with the right branch (fm-brief.sh --base <branch>), or without --base." >&2
+      echo "error: task $ID declares intended base '$BASE', but no such branch exists on origin for $PROJ_ABS. A crewmate cannot root its branch on a base that is not there. Re-run with the right --base <branch>, or without --base." >&2
       exit 1
       ;;
     *)

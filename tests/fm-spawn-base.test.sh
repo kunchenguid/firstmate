@@ -1,25 +1,25 @@
 #!/usr/bin/env bash
-# Behavior tests for fm-spawn.sh's data/<id>/base -> state/<id>.meta base= promotion.
+# Behavior tests for fm-spawn.sh --base, the one owner of a task's declared base.
 #
-# This promotion is the one link in an otherwise fail-closed feature that could
-# disarm it silently: fm-brief.sh writes the sidecar and fm-pr-check.sh reads meta,
-# but if the branch name never makes the hop between them, fm-pr-check finds no
-# base= and the wrong-base guard is skipped entirely - restoring the exact incident
-# the guard exists to prevent, with no diagnostic. Both ends were covered; this is
-# the middle.
+# state/<id>.meta is the single source of truth for a task's base: fm-spawn.sh
+# writes base= and base_sha= straight from its own flag, and nothing else records
+# a base anywhere. There is no sidecar to promote, so there is no link in the chain
+# that could silently disarm fm-pr-check.sh's guard by failing to hand the branch
+# name along.
 #
 # Matrix:
-#   (a) sidecar present -> meta records base=<branch>
-#   (b) no sidecar (the common case) -> meta records no base= line at all
-#   (c) empty sidecar -> loud refusal, raised before any window or worktree exists
+#   (a) --base <branch> -> meta records base=<branch> and base_sha=<origin tip>
+#   (b) no --base (the common case) -> meta records no base= line at all
+#   (c) an invalid branch name -> loud refusal, raised before any window or worktree exists
 #   (d) an accepted spawn does create both, so (c)'s assertions are live
-#   (e) a secondmate never carries a task base, even with a stray sidecar
+#   (e) --base is rejected for a scout and for a secondmate
 #   (f) a declared base origin does not have -> the same early, loud refusal
+#   (g) --base is rejected in a batch spawn, where it could not name one task
 #
-# A promoted base also carries the base's tip on origin (base_sha=), resolved while
-# the base necessarily still exists. That is the fact fm-pr-check.sh needs once the
-# branch is deleted from origin, where absence alone cannot say whether the base
-# merged (harmless) or was abandoned (its unmerged commits replayed on the PR head).
+# base_sha= is the base's tip on origin at spawn time, resolved while the base
+# necessarily still exists. That is the fact fm-pr-check.sh needs once the branch is
+# deleted from origin, where absence alone cannot say whether the base merged
+# (harmless) or was abandoned (its unmerged commits replayed on the PR head).
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -55,8 +55,7 @@ SH
 }
 
 # Build a spawn case: an isolated firstmate home, a real project + git worktree, and
-# a brief for the task. base is written to the data/<id>/base sidecar when non-empty;
-# pass "empty" to write the sidecar with no branch name in it.
+# a brief for the task.
 #
 # The project gets a real origin with a feature/base branch on it, because a based
 # spawn resolves the base's tip from origin and records it as base_sha= - the durable
@@ -64,7 +63,7 @@ SH
 # branch itself is deleted. origin_base names the branch actually created on origin,
 # so a case can declare a base origin does NOT have.
 make_spawn_case() {
-  local name=$1 id=$2 base=${3:-} origin_base=${4:-feature/base} case_dir home proj wt fakebin
+  local name=$1 id=$2 origin_base=${3:-feature/base} case_dir home proj wt fakebin
   case_dir="$TMP_ROOT/$name"
   home="$case_dir/home"
   proj="$case_dir/project"
@@ -76,11 +75,6 @@ make_spawn_case() {
   make_project_origin "$case_dir" "$proj" "$origin_base"
   touch "$home/state/.last-watcher-beat"
   printf 'brief for %s\n' "$id" > "$home/data/$id/brief.md"
-  case "$base" in
-    '') ;;
-    empty) : > "$home/data/$id/base" ;;
-    *) printf '%s\n' "$base" > "$home/data/$id/base" ;;
-  esac
   printf '%s|%s|%s|%s|%s\n' "$case_dir" "$home" "$proj" "$wt" "$fakebin"
 }
 
@@ -115,21 +109,21 @@ run_spawn() {
     "$SPAWN" "$@" 2>&1
 }
 
-test_sidecar_is_promoted_into_meta() {
+test_base_flag_is_recorded_in_meta() {
   local rec id out status origin_sha
   id=spawn-base-b1
-  rec=$(make_spawn_case promote "$id" feature/admin-dashboard feature/admin-dashboard)
+  rec=$(make_spawn_case record "$id" feature/admin-dashboard)
   read_case_record "$rec"
 
-  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR" --base feature/admin-dashboard)
   status=$?
-  expect_code 0 "$status" "promote: spawn with a base sidecar should succeed"$'\n'"$out"
+  expect_code 0 "$status" "record: a spawn with --base should succeed"$'\n'"$out"
   assert_grep "base=feature/admin-dashboard" "$HOME_DIR/state/$id.meta" \
-    "promote: the declared base never reached meta, so fm-pr-check would skip the wrong-base guard"
+    "record: the declared base never reached meta, so fm-pr-check would skip the wrong-base guard"
   origin_sha=$(git -C "$CASE_DIR/origin.git" rev-parse refs/heads/feature/admin-dashboard)
   assert_grep "base_sha=$origin_sha" "$HOME_DIR/state/$id.meta" \
-    "promote: the base's tip on origin was not recorded, so a base later deleted from origin could not be told merged from abandoned"
-  pass "fm-spawn promotes the data/<id>/base sidecar into meta as base= and records the base's tip as base_sha="
+    "record: the base's tip on origin was not recorded, so a base later deleted from origin could not be told merged from abandoned"
+  pass "fm-spawn --base records base= and the base's spawn-time tip as base_sha="
 }
 
 # base_sha= is what makes the absent-base decision SOUND rather than a guess, so the
@@ -139,12 +133,12 @@ test_sidecar_is_promoted_into_meta() {
 test_base_missing_from_origin_refuses_before_creating_anything() {
   local rec id out status log
   id=spawn-base-b6
-  rec=$(make_spawn_case nosuchbase "$id" feature/typo feature/base)
+  rec=$(make_spawn_case nosuchbase "$id" feature/base)
   read_case_record "$rec"
   log="$CASE_DIR/tmux.log"
   : > "$log"
 
-  out=$(FM_TEST_TMUX_LOG="$log" run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  out=$(FM_TEST_TMUX_LOG="$log" run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR" --base feature/typo)
   status=$?
   expect_code 1 "$status" "nosuchbase: a base that does not exist on origin must refuse, not spawn with an unverifiable base"
   assert_contains "$out" "no such branch exists on origin" "nosuchbase: refusal did not explain the missing base branch"
@@ -156,60 +150,65 @@ test_base_missing_from_origin_refuses_before_creating_anything() {
   pass "fm-spawn refuses a declared base origin does not have, before any window or worktree exists"
 }
 
-test_no_sidecar_writes_no_base_key() {
+test_no_base_writes_no_base_key() {
   local rec id out status
   id=spawn-base-b2
-  rec=$(make_spawn_case nosidecar "$id")
+  rec=$(make_spawn_case nobase "$id")
   read_case_record "$rec"
 
   out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
   status=$?
-  expect_code 0 "$status" "nosidecar: an ordinary spawn should succeed"$'\n'"$out"
+  expect_code 0 "$status" "nobase: an ordinary spawn should succeed"$'\n'"$out"
   # Fixed-string, unanchored: assert_no_grep is grep -F, so a "^base=" pattern
   # would search for a literal caret and pass no matter what meta holds. No other
   # meta key contains "base=" as a substring, so this is both live and precise.
   assert_no_grep "base=" "$HOME_DIR/state/$id.meta" \
-    "nosidecar: a task with no declared base must not gain a base= line"
+    "nobase: a task with no declared base must not gain a base= line"
   pass "fm-spawn writes no base= for the common no-declared-base task"
 }
 
-# The refusal is fail-closed, so it must also be cheap: it has to fire BEFORE the
-# backend window and the treehouse worktree lease are acquired. Refusing after
-# them - but before meta is written, as it did originally - strands both with no
-# state/<id>.meta, and every reconciliation path (recovery, fm-teardown.sh) keys
-# off meta, so nothing could ever clean them up but a human.
-test_empty_sidecar_refuses_before_creating_anything() {
+# The base reaches git as a refspec, where a leading dash is read as an option and
+# --upload-pack=<cmd> is an arbitrary-command vector. The refusal is fail-closed, so
+# it must also be cheap: it has to fire BEFORE the backend window and the treehouse
+# worktree lease are acquired. Refusing after them - but before meta is written -
+# strands both with no state/<id>.meta, and every reconciliation path (recovery,
+# fm-teardown.sh) keys off meta, so nothing could ever clean them up but a human.
+test_invalid_base_refuses_before_creating_anything() {
   local rec id out status log
   id=spawn-base-b3
-  rec=$(make_spawn_case emptysidecar "$id" empty)
+  rec=$(make_spawn_case badname "$id")
   read_case_record "$rec"
   log="$CASE_DIR/tmux.log"
   : > "$log"
 
-  out=$(FM_TEST_TMUX_LOG="$log" run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  out=$(FM_TEST_TMUX_LOG="$log" run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR" --base=--upload-pack=touch)
   status=$?
-  expect_code 1 "$status" "emptysidecar: a base declaration that cannot be recorded must refuse, not spawn unguarded"
-  assert_contains "$out" "declares no branch" "emptysidecar: refusal did not explain the unusable sidecar"
-  assert_absent "$HOME_DIR/state/$id.meta" "emptysidecar: refusal should happen before meta is written"
+  expect_code 1 "$status" "badname: a base git would read as an option must refuse, not spawn"
+  assert_contains "$out" "not a valid git branch name" "badname: refusal did not explain the invalid branch name"
+  assert_absent "$HOME_DIR/state/$id.meta" "badname: refusal should happen before meta is written"
   assert_no_grep "new-window" "$log" \
-    "emptysidecar: the refusal created a backend window it then abandoned, with no meta to reconcile it"
+    "badname: the refusal created a backend window it then abandoned, with no meta to reconcile it"
   assert_no_grep "treehouse get" "$log" \
-    "emptysidecar: the refusal leased a task worktree it then abandoned, with no meta to release it"
-  pass "fm-spawn refuses an unusable base sidecar before any window or worktree exists (nothing stranded)"
+    "badname: the refusal leased a task worktree it then abandoned, with no meta to release it"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR" --base=)
+  status=$?
+  expect_code 1 "$status" "badname: an empty --base must refuse"
+  assert_contains "$out" "non-empty branch name" "badname: refusal did not explain the empty value"
+  pass "fm-spawn refuses an unusable --base before any window or worktree exists (nothing stranded)"
 }
 
-# The same spawn path, one character different in the sidecar, must still create
-# the window and take the lease - so the assertions above are pinning the refusal,
-# not an inert log.
+# The same spawn path, with a base that resolves, must still create the window and
+# take the lease - so the assertions above are pinning the refusal, not an inert log.
 test_a_good_spawn_does_create_the_window_and_worktree() {
   local rec id out status log
   id=spawn-base-b5
-  rec=$(make_spawn_case createscheck "$id" feature/x feature/x)
+  rec=$(make_spawn_case createscheck "$id" feature/x)
   read_case_record "$rec"
   log="$CASE_DIR/tmux.log"
   : > "$log"
 
-  out=$(FM_TEST_TMUX_LOG="$log" run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  out=$(FM_TEST_TMUX_LOG="$log" run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR" --base feature/x)
   status=$?
   expect_code 0 "$status" "createscheck: a well-formed based spawn should succeed"$'\n'"$out"
   assert_grep "new-window" "$log" "createscheck: the spawn never created a window, so the refusal test proves nothing"
@@ -217,28 +216,53 @@ test_a_good_spawn_does_create_the_window_and_worktree() {
   pass "fm-spawn does create the window and worktree on an accepted spawn (the leak assertions are live)"
 }
 
-test_secondmate_ignores_a_stray_base_sidecar() {
+# A base only means something for a ship task's PR. A scout raises none, and a
+# secondmate is a persistent supervisor rather than a task at all.
+test_base_rejected_for_scout_and_secondmate() {
   local rec id out status home
   id=spawn-base-sm4
-  rec=$(make_spawn_case secondmate "$id" feature/x feature/x)
+  rec=$(make_spawn_case scoutsm "$id" feature/x)
   read_case_record "$rec"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR" --scout --base feature/x)
+  status=$?
+  expect_code 1 "$status" "scoutsm: --base must be rejected for a scout, which raises no PR"
+  assert_contains "$out" "applies only to ship tasks" "scoutsm: refusal did not explain the scope"
+  assert_absent "$HOME_DIR/state/$id.meta" "scoutsm: a rejected --base must not spawn"
+
   home="$CASE_DIR/sm-home"
   mkdir -p "$home/bin" "$home/data"
   printf '# Firstmate\n' > "$home/AGENTS.md"
   printf '%s\n' "$id" > "$home/.fm-secondmate-home"
   printf 'charter for %s\n' "$id" > "$home/data/charter.md"
 
-  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$home" --secondmate)
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$home" --secondmate --base feature/x)
   status=$?
-  expect_code 0 "$status" "secondmate: spawn should succeed"$'\n'"$out"
-  assert_no_grep "base=" "$HOME_DIR/state/$id.meta" \
-    "secondmate: a persistent supervisor has no task base and must never record one"
-  pass "fm-spawn never records base= for a secondmate"
+  expect_code 1 "$status" "scoutsm: --base must be rejected for a secondmate, which has no task base"
+  assert_contains "$out" "applies only to ship tasks" "scoutsm: refusal did not explain the scope"
+  pass "fm-spawn rejects --base for scouts and secondmates"
 }
 
-test_sidecar_is_promoted_into_meta
-test_no_sidecar_writes_no_base_key
-test_empty_sidecar_refuses_before_creating_anything
+# A base is a fact about ONE task. Shared across a batch it would silently guard
+# every pair against a base only one of them declared.
+test_base_rejected_in_a_batch() {
+  local rec id out status
+  id=spawn-base-b7
+  rec=$(make_spawn_case batch "$id" feature/x)
+  read_case_record "$rec"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id=$PROJ_DIR" --base feature/x)
+  status=$?
+  expect_code 1 "$status" "batch: --base must be rejected in a batch spawn, where it cannot name one task"
+  assert_contains "$out" "per-task" "batch: refusal did not explain why a batch cannot share a base"
+  assert_absent "$HOME_DIR/state/$id.meta" "batch: a rejected batch --base must not spawn"
+  pass "fm-spawn rejects --base in a batch spawn"
+}
+
+test_base_flag_is_recorded_in_meta
+test_no_base_writes_no_base_key
+test_invalid_base_refuses_before_creating_anything
 test_base_missing_from_origin_refuses_before_creating_anything
 test_a_good_spawn_does_create_the_window_and_worktree
-test_secondmate_ignores_a_stray_base_sidecar
+test_base_rejected_for_scout_and_secondmate
+test_base_rejected_in_a_batch

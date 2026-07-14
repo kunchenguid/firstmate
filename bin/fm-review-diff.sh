@@ -6,7 +6,7 @@
 # it, and local-only projects against the local branch.
 # The diff base is the repo default branch, unless state/<id>.meta records a
 # non-default base= (a task whose intended base is a feature branch, declared
-# with fm-brief.sh --base): then it is that base, so review shows the crewmate's
+# with fm-spawn.sh --base): then it is that base, so review shows the crewmate's
 # own change rather than the entire feature base's unmerged history on top of it.
 #
 # A declared base is only a useful diff base while it still carries unmerged history
@@ -173,6 +173,7 @@ fetch_origin_branch() {  # <branch>; echoes the fetched commit
 # refuses the second case. A probe origin could not answer is different: that is an
 # infrastructure failure, and reviewing against the wrong base silently would be worse
 # than stopping.
+PREFETCHED=""
 if [ -n "$BASE_DECLARED" ] && "$HAS_ORIGIN"; then
   PROBE_RC=0
   fm_base_probe_origin "$WT" "$BASE_DECLARED" || PROBE_RC=$?
@@ -189,6 +190,7 @@ if [ -n "$BASE_DECLARED" ] && "$HAS_ORIGIN"; then
     *)
       BASE_SHA=$(fetch_origin_branch "$BASE_DECLARED") || exit 1
       DEFAULT_SHA=$(fetch_origin_branch "$DEFAULT") || exit 1
+      PREFETCHED=" $BASE_DECLARED $DEFAULT "
       COMPARE_SHA=$(git -C "$WT" rev-parse --verify --quiet "$COMPARE_REF^{commit}") \
         || { echo "error: compare ref $COMPARE_REF does not resolve in $WT" >&2; exit 1; }
       LANDED_RC=0
@@ -207,7 +209,13 @@ if [ -n "$BASE_DECLARED" ] && "$HAS_ORIGIN"; then
 fi
 
 if "$HAS_ORIGIN"; then
-  fetch_origin_branch "$BASE_BRANCH" >/dev/null || exit 1
+  # The probe above already fetched the declared base and the default branch into
+  # their remote-tracking refs, and BASE_BRANCH is always one of them by then, so
+  # fetching again would just buy a second network round-trip for the same ref.
+  case "$PREFETCHED" in
+    *" $BASE_BRANCH "*) : ;;
+    *) fetch_origin_branch "$BASE_BRANCH" >/dev/null || exit 1 ;;
+  esac
   BASE="origin/$BASE_BRANCH"
 else
   BASE="$BASE_BRANCH"

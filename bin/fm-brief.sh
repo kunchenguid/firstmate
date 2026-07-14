@@ -11,12 +11,13 @@
 #   --scout writes the scout contract instead: the deliverable is a report at
 #   data/<task-id>/report.md (no branch, no push, no PR) and the worktree is scratch.
 #   --base <branch> declares a non-default intended base branch for a ship task in
-#   a PR-based mode (no-mistakes or direct-PR). It records the branch name to
-#   data/<task-id>/base so fm-spawn.sh promotes it into state/<task-id>.meta as
-#   base=<branch> (with the base's tip on origin as base_sha=), roots the brief's
-#   branch step on that base, and writes the mode-specific path to a correctly based
-#   PR. fm-pr-check.sh then guards the PR's base before merge; its header owns that
-#   contract in full.
+#   a PR-based mode (no-mistakes or direct-PR). HERE IT ONLY SHAPES THE BRIEF: it
+#   roots the branch step on that base and writes the mode-specific path to a
+#   correctly based PR. IT RECORDS NO STATE. state/<task-id>.meta is the single
+#   source of truth for a task's base, and bin/fm-spawn.sh writes it - so pass the
+#   SAME --base <branch> to fm-spawn.sh, which records base= and the base's tip on
+#   origin as base_sha=. fm-pr-check.sh then guards the PR's base before merge; its
+#   header owns that contract in full.
 #   direct-PR opens the PR against the base directly (gh-axi pr create --base).
 #   no-mistakes cannot be told a base: the pipeline always rebases onto the repo
 #   default branch and opens the PR against it. So the brief has the crewmate
@@ -26,9 +27,6 @@
 #   The value must be a valid, non-empty git branch name that does not begin
 #   with '-'. Rejected for --scout, --secondmate, and local-only mode; absent
 #   means the repo default branch.
-#   A scaffold is authoritative about the base: re-scaffolding an id WITHOUT
-#   --base clears any sidecar an earlier scaffold of that id left behind, so a
-#   brief that never mentions a base can never leave the task guarded against one.
 #   --secondmate writes a persistent secondmate charter. The project list
 #   is cloned into the secondmate home, while the natural-language scope
 #   tells the main firstmate when to route work there; routine churn stays in its own home;
@@ -151,14 +149,6 @@ fi
 BRIEF="$DATA/$ID/brief.md"
 [ -e "$BRIEF" ] && { echo "error: $BRIEF already exists" >&2; exit 1; }
 mkdir -p "$DATA/$ID"
-
-# The scaffold's arguments are the whole truth about the task it scaffolds. A
-# re-scaffold of the same id (delete the brief, run again) must therefore not
-# inherit a base from the run before it: a leftover sidecar is promoted into meta
-# by fm-spawn.sh, so the task would still be guarded against a base its own brief
-# never mentions, and its PR would be refused pre-merge for no visible reason.
-# Clear it unconditionally; the ship path below rewrites it when --base is given.
-rm -f "$DATA/$ID/base"
 
 shell_quote() {
   printf "'"
@@ -333,10 +323,10 @@ $("$FM_ROOT/bin/fm-project-mode.sh" "$REPO")
 EOF
 
 # A non-default intended base only fits a PR-based mode. local-only has no remote
-# and merges into local main, so reject --base there. When accepted, record the
-# base to the data/<id>/base sidecar so fm-spawn.sh promotes it into meta, root
-# the branch step on that base, and add the Setup note that keeps the crewmate off
-# the default branch.
+# and merges into local main, so reject --base there. When accepted, root the
+# branch step on that base and add the Setup note that keeps the crewmate off the
+# default branch. This writes no state: fm-spawn.sh --base owns the durable record
+# (state/<id>.meta), so the same flag must be passed there too.
 BASE_SETUP=""
 BRANCH_STEP="1. First action: create your branch: \`git checkout -b fm/$ID\`"
 if [ -n "$BASE" ]; then
@@ -344,7 +334,6 @@ if [ -n "$BASE" ]; then
     echo "error: --base does not apply to local-only mode (no remote or PR; merges into local main)" >&2
     exit 1
   fi
-  printf '%s\n' "$BASE" > "$DATA/$ID/base"
   BRANCH_STEP="1. First action: fetch the intended base and root your branch ON it. The worktree starts on the DEFAULT branch, so branching without this step would root your work on the wrong base:
    \`\`\`
    git fetch origin $BASE
@@ -498,4 +487,9 @@ Keep it proportionate: skip \`AGENTS.md\` edits for trivial tasks that produced 
 
 $DOD
 EOF
-echo "scaffolded: $BRIEF (ship, mode=$MODE; replace {TASK})"
+if [ -n "$BASE" ]; then
+  echo "scaffolded: $BRIEF (ship, mode=$MODE; replace {TASK})"
+  echo "note: this brief only TELLS the crewmate about base '$BASE'; the durable record lives in meta, so spawn with the same flag or the PR-base guard never runs: fm-spawn.sh $ID <project> --base $BASE"
+else
+  echo "scaffolded: $BRIEF (ship, mode=$MODE; replace {TASK})"
+fi
