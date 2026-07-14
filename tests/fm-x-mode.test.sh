@@ -443,7 +443,11 @@ test_bootstrap_reports_missing_x_dependency() {
   home="$TMP_ROOT/boot-missing-x"; mkdir -p "$home"
   fakebin=$(fm_fakebin "$home")
   fm_fake_exit0 "$fakebin" tmux node no-mistakes gh-axi chrome-devtools-axi lavish-axi curl
-  for tool in dirname grep tail; do
+  # PATH is fakebin-only so jq is guaranteed absent on every host, which means every
+  # coreutil bootstrap itself needs must be handed to it explicitly. mkdir is one:
+  # bootstrap sources fm-afk-start.sh for the away-mode canary, and that pulls in
+  # fm-wake-lib.sh, which creates the state dir at source time under set -e.
+  for tool in dirname grep tail mkdir; do
     tool_path=$(command -v "$tool") || fail "test host must provide $tool"
     ln -s "$tool_path" "$fakebin/$tool"
   done
