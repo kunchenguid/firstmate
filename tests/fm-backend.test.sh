@@ -871,6 +871,86 @@ test_spawn_symlinked_project_prefix_avoids_false_refusal() {
   pass "fm-spawn.sh: a project reached through a symlinked prefix (e.g. macOS /tmp -> /private/tmp) does not trip the isolation guard's false refusal"
 }
 
+# --- symlinked projects/ ENTRY: worktree detection + logical meta ------------
+#
+# The sibling of the prefix case above: here projects/<name> is ITSELF a
+# symlink to the real repo (projects/farming -> ~/src/farming), so the
+# backend's physical pane cwd is an ENTIRELY different string from PROJ_ABS,
+# not merely prefix-shifted. Pre-#294, the worktree-discovery poll's logical
+# comparison broke out on its very first read - before treehouse moved the
+# pane - handing validate_spawn_worktree the primary checkout as "the
+# worktree" and tripping its refusal. These cases lock the symlinked-entry
+# behaviors specifically:
+#   - the poll waits through the unmoved physical-cwd read and detects the
+#     real worktree once the pane actually moves
+#   - meta project= records the LOGICAL projects/<name> path, whose basename
+#     is the registry name fm-project-mode.sh / teardown / fleet-sync key on
+#   - a pane that never leaves the (symlinked) project still fails closed with
+#     the poll-timeout error instead of false-passing the isolation guard
+run_spawn_projects_entry_case() {  # <label> <moves:yes|no>
+  local label=$1 moves=$2 real_repo projects proj_logical proj_phys wt id fb data state config log out rc meta_val
+  real_repo="$TMP_ROOT/entry-real-$label"
+  projects="$TMP_ROOT/entry-projects-$label"
+  wt="$TMP_ROOT/entry-wt-$label"
+  id="spawnentry$label"
+  fm_git_worktree "$real_repo" "$wt" "fm/$id"
+  mkdir -p "$projects"
+  ln -s "$real_repo" "$projects/farm-$label"
+  # Logical pwd (not -P): keeps the symlink component while normalizing any
+  # slash artifacts TMP_ROOT inherited from TMPDIR, matching fm-spawn.sh's own
+  # logical PROJ_ABS computation.
+  proj_logical=$(cd "$projects/farm-$label" && pwd)
+  proj_phys=$(cd "$real_repo" && pwd -P)
+  case "$moves" in
+    yes) fb=$(make_spawn_symlink_fakebin "$TMP_ROOT/entry-fake-$label" "$proj_phys" "$wt") ;;
+    no)  fb=$(make_spawn_symlink_fakebin "$TMP_ROOT/entry-fake-$label" "$proj_phys" "$proj_phys") ;;
+    *) fail "unknown projects-entry moves mode: $moves" ;;
+  esac
+  # The stuck-pane case rides the poll to its full 60-iteration timeout; an
+  # instant fake sleep keeps both cases fast without touching the real loop.
+  fm_fake_exit0 "$fb" sleep
+  data="$TMP_ROOT/entry-data-$label"
+  mkdir -p "$data/$id"
+  printf 'test brief content\n' > "$data/$id/brief.md"
+  state="$TMP_ROOT/entry-state-$label"; config="$TMP_ROOT/entry-config-$label"
+  mkdir -p "$state" "$config"
+  log="$TMP_ROOT/entry-spawn-$label.log"
+
+  : > "$log"
+  out=$(env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    FM_PROJECTS_OVERRIDE="$projects" \
+    FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" FM_TMUX_LOG="$log" \
+    "$ROOT/bin/fm-spawn.sh" "$id" "projects/farm-$label" claude 2>&1)
+  rc=$?
+
+  if [ "$moves" = yes ]; then
+    expect_code 0 "$rc" "fm-spawn.sh should succeed for a symlinked projects/ entry once the pane moves to the worktree"$'\n'"$out"
+    assert_contains "$out" "worktree=$wt" \
+      "fm-spawn.sh did not detect the real worktree for a symlinked projects/ entry"
+    meta_val=$(grep '^project=' "$state/$id.meta" | cut -d= -f2-)
+    [ "$meta_val" = "$proj_logical" ] \
+      || fail "meta project= must record the logical projects/ entry path (got '$meta_val', want '$proj_logical')"
+    meta_val=$(grep '^worktree=' "$state/$id.meta" | cut -d= -f2-)
+    [ "$meta_val" = "$wt" ] \
+      || fail "meta worktree= must record the detected worktree (got '$meta_val', want '$wt')"
+    rm -rf "/tmp/fm-$id"
+  else
+    [ "$rc" -ne 0 ] \
+      || fail "fm-spawn.sh must fail closed when the pane never leaves a symlinked projects/ entry"$'\n'"$out"
+    assert_contains "$out" "did not enter a worktree" \
+      "stuck pane in a symlinked projects/ entry should hit the poll timeout, not a false worktree detection"
+    [ ! -e "$state/$id.meta" ] \
+      || fail "no meta may be written when the worktree poll times out for a symlinked projects/ entry"
+  fi
+}
+
+test_spawn_symlinked_projects_entry() {
+  run_spawn_projects_entry_case moves yes
+  run_spawn_projects_entry_case stuck no
+  pass "fm-spawn.sh: a symlinked projects/ entry is detected through the physical pane cwd, records the logical project= path, and still fails closed on an unmoved pane"
+}
+
 # --- old vs new: fm-teardown.sh ----------------------------------------------
 
 make_teardown_fakebin() {  # <dir> -> echoes fakebin dir; logs tmux+treehouse calls
@@ -1082,6 +1162,7 @@ test_backend_of_selector_matches_explicit_target_meta
 test_send_conformance_old_vs_new
 test_peek_conformance_old_vs_new
 test_spawn_symlinked_project_prefix_avoids_false_refusal
+test_spawn_symlinked_projects_entry
 test_teardown_conformance_old_vs_new
 test_spawn_refuses_unknown_backend_flag
 test_spawn_refuses_codex_app_backend_flag

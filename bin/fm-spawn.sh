@@ -993,6 +993,10 @@ META_WINDOW=$T
 {
   echo "window=$META_WINDOW"
   echo "worktree=$WT"
+  # project= stays LOGICAL deliberately: when projects/<name> is a symlink to
+  # the real repo, this basename is the registry name fm-project-mode.sh,
+  # teardown, and fleet-sync key on. Physical form is PROJ_ABS_REAL, used only
+  # for cwd comparisons above.
   echo "project=$PROJ_ABS"
   echo "harness=$HARNESS"
   echo "kind=$KIND"
