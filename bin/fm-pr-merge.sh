@@ -92,12 +92,12 @@ if [ ! -f "$META" ] || [ -L "$META" ]; then
   exit 1
 fi
 
-# FM_PR_READY_HOOK=defer keeps fm-pr-check's pr-ready hook off the merge's
+# --defer-pr-ready-hook keeps fm-pr-check's pr-ready hook off the merge's
 # critical path: a slow hook there would sit between the recording and the merge
 # below. It is fired here instead, after the merge, still exactly once per
 # (task, PR URL) - fm_hook_pr_ready_once gates on the fire it records in the
 # meta, so a merge that fails below still fires it and a retry does not re-fire.
-FM_PR_READY_HOOK=defer "$SCRIPT_DIR/fm-pr-check.sh" "$ID" "$URL"
+"$SCRIPT_DIR/fm-pr-check.sh" --defer-pr-ready-hook "$ID" "$URL"
 grep -qxF "pr=$URL" "$META" || { echo "error: fm-pr-check did not record pr=$URL in $META; refusing to merge" >&2; exit 1; }
 
 merge_args=()

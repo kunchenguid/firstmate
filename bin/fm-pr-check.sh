@@ -11,11 +11,14 @@
 # The marker is written only when a pr-ready hook is actually installed, so a home
 # with no hooks records nothing. The hook fires last, after the poll is armed, so
 # hook latency never delays arming it.
-# FM_PR_READY_HOOK=defer is an internal handoff, not part of the operator-facing
+# --defer-pr-ready-hook is an internal handoff, not part of the operator-facing
 # hook contract: bin/fm-pr-merge.sh calls this script before its own merge, so it
 # suppresses the hook here and fires pr-ready itself after the merge, keeping the
-# hook off the merge's critical path without firing it twice or not at all.
-# Usage: fm-pr-check.sh <task-id> <pr-url>
+# hook off the merge's critical path without firing it twice or not at all. It is
+# an explicit flag rather than an environment variable so that nothing an operator
+# happens to export can silently suppress the fire on a standalone run - the one
+# path where nothing else would fire it later.
+# Usage: fm-pr-check.sh [--defer-pr-ready-hook] <task-id> <pr-url>
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -25,6 +28,19 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 # shellcheck source=bin/fm-hooks-lib.sh
 . "$SCRIPT_DIR/fm-hooks-lib.sh"
+
+# Strip the explicit --defer-pr-ready-hook flag before canonical arg validation;
+# fm-pr-merge.sh passes it to fire pr-ready itself after its own merge.
+DEFER_PR_READY=0
+POSITIONAL=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --defer-pr-ready-hook) DEFER_PR_READY=1 ;;
+    *) POSITIONAL+=("$1") ;;
+  esac
+  shift
+done
+set -- "${POSITIONAL[@]+"${POSITIONAL[@]}"}"
 
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
@@ -110,7 +126,7 @@ printf 'armed: state/%s.check.sh\n' "$ID"
 # Fire the pr-ready hook last, after the poll is armed, so hook latency never
 # delays arming it. fm_hook_pr_ready_once gates on a durable pr_ready_hook=
 # marker in the meta, so it fires exactly once per (task, PR URL) across re-runs.
-# fm-pr-merge.sh sets FM_PR_READY_HOOK=defer to fire it itself after its merge.
-if [ "${FM_PR_READY_HOOK:-}" != "defer" ]; then
+# fm-pr-merge.sh passes --defer-pr-ready-hook to fire it itself after its merge.
+if [ "$DEFER_PR_READY" -eq 0 ]; then
   fm_hook_pr_ready_once "$CONFIG" "$META" "$ID" "$URL"
 fi

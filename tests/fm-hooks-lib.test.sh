@@ -455,6 +455,26 @@ test_pr_check_fires_pr_ready_on_first_record_only() {
   pass "fm-pr-check fires pr-ready once per recorded PR and survives a failing hook"
 }
 
+# The deferral is fm-pr-merge's own explicit flag, so nothing an operator exports
+# can suppress a standalone fm-pr-check's fire - the one path where nothing else
+# would fire the hook later.
+test_pr_check_ignores_an_ambient_defer_variable() {
+  local case_dir
+  case_dir=$(make_case pr-check-ambient)
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    "window=fm-task-x1" "kind=ship" "mode=no-mistakes"
+  write_logging_hook "$case_dir" pr-ready 0 FM_HOOK_TASK_ID FM_HOOK_PR_URL
+
+  FM_PR_READY_HOOK=defer \
+  FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" \
+  FM_CONFIG_OVERRIDE="$case_dir/config" PATH="$case_dir/fakebin:$PATH" \
+    "$PR_CHECK" task-x1 https://github.com/example/repo/pull/9 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" || fail "pr-check/ambient: run failed"
+  assert_grep 'args:task-x1 https://github.com/example/repo/pull/9' "$case_dir/hook.log" \
+    "pr-check/ambient: an inherited FM_PR_READY_HOOK=defer suppressed the fire"
+  pass "a standalone fm-pr-check fires pr-ready regardless of the ambient environment"
+}
+
 # fm-pr-merge records pr= through fm-pr-check before merging, so a pr-ready hook
 # fired there would sit between the recording and the merge and could hold the
 # merge for the whole hook budget. It is deferred to after the merge instead, and
@@ -839,6 +859,7 @@ test_errfile_fallback_refuses_a_planted_symlink
 test_spawn_fires_post_spawn_per_task_and_survives_failure
 test_pr_check_fires_pr_ready_on_first_record_only
 test_pr_check_records_no_marker_without_a_pr_ready_hook
+test_pr_check_ignores_an_ambient_defer_variable
 test_pr_merge_defers_pr_ready_until_after_the_merge
 test_pr_merge_fires_pr_ready_when_the_merge_fails
 test_pr_merge_fires_post_merge_after_merge
