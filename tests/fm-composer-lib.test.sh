@@ -324,6 +324,67 @@ test_idle_placeholder_case_mode_is_explicit() {
   pass "fm_composer_classify_content: idle matching preserves the caller's case mode"
 }
 
+# composer_with_extended_shell_set: source the lib in a locale-pinned child, add
+# <extra-glyph> to FM_COMPOSER_SHELL_GLYPHS the way a maintainer teaching the fleet a
+# further dead-shell prompt glyph would, then run <fn> with the remaining args. The
+# extension happens in a child because the set is assigned at source time.
+composer_with_extended_shell_set() {  # <extra-glyph> <fn> <args...>
+  LC_ALL=C bash -c '
+    lib=$1; extra=$2; fn=$3; shift 3
+    . "$lib"
+    FM_COMPOSER_SHELL_GLYPHS="$FM_COMPOSER_SHELL_GLYPHS $extra"
+    "$fn" "$@"
+  ' _ "$ROOT/bin/fm-composer-lib.sh" "$@"
+}
+
+# FM_COMPOSER_SHELL_GLYPHS is the declared source of truth for the dead-shell rule,
+# so extending it - the way the fleet learns a further shell prompt glyph, e.g. the
+# oh-my-zsh `➜` - must reach every layer. It used to reach only the sanitizer and the
+# chokepoint: fm_composer_classify_content re-spelled the four glyphs inline at three
+# sites, so a newly declared glyph was silently left out of the classifier and read
+# `pending` bare (instead of `unknown`, the dead-shell verdict) and `pending` inside a
+# composer box (instead of `empty`), wedging away-mode behind input that was never
+# there. One owner, one reader pair, no drift.
+test_shell_glyph_set_has_one_owner() {
+  local extra='➜' idle='^Type a message\.\.\.$' out
+  # The reader pair itself honors the declared set - this is what the classifier's
+  # stripped-content guard rests on, whose verdict the chokepoint would also produce,
+  # so it is asserted here on the helper rather than vacuously through that verdict.
+  composer_with_extended_shell_set "$extra" fm_composer_is_shell_glyph "$extra" \
+    || fail "fm_composer_is_shell_glyph must honor a glyph declared in FM_COMPOSER_SHELL_GLYPHS"
+  composer_with_extended_shell_set "$extra" fm_composer_leading_shell_glyph "$extra ls -la" \
+    || fail "fm_composer_leading_shell_glyph must honor a glyph declared in FM_COMPOSER_SHELL_GLYPHS"
+  # The sanitizer rejects the newly declared glyph out of an agent set.
+  out=$(composer_with_extended_shell_set "$extra" fm_composer_sanitize_agent_glyphs "❯ › $extra" 2>/dev/null)
+  [ "$out" = '❯ ›' ] \
+    || fail "the sanitizer must reject a newly declared shell glyph '$extra' from an agent set, got '$out'"
+  # The chokepoint refuses to match it as an agent prompt, whatever set it is handed.
+  if composer_with_extended_shell_set "$extra" fm_composer_leading_agent_glyph "$extra" "❯ › $extra"; then
+    fail "fm_composer_leading_agent_glyph must never match a newly declared shell glyph '$extra' as an agent prompt"
+  fi
+  # The classifier: a bare newly declared shell glyph is a DEAD SHELL, never a safe
+  # injection target - the site the inline spelling used to leave behind.
+  out=$(composer_with_extended_shell_set "$extra" fm_composer_classify_content 0 "$extra")
+  [ "$out" = unknown ] \
+    || fail "a bare newly declared shell glyph '$extra' must read unknown (dead shell, unsafe), got '$out'"
+  out=$(composer_with_extended_shell_set "$extra" fm_composer_classify_content 0 "$extra ls -la")
+  [ "$out" != empty ] \
+    || fail "a dead-shell prompt line leading with '$extra' must never read empty, got '$out'"
+  # Inside a composer box the same glyph is the harness's own prompt: an empty composer.
+  out=$(composer_with_extended_shell_set "$extra" fm_composer_classify_content 1 "$extra")
+  [ "$out" = empty ] \
+    || fail "a newly declared shell glyph '$extra' inside a bordered composer box must read empty, got '$out'"
+  # And the classifier's leading-glyph strip knows it too, so an idle composer whose
+  # harness draws '$extra' still reads empty instead of wedging on pending forever.
+  out=$(composer_with_extended_shell_set "$extra" fm_composer_classify_content 1 "$extra Type a message..." "$idle")
+  [ "$out" = empty ] \
+    || fail "the leading-glyph strip must remove a newly declared shell glyph '$extra', got '$out'"
+  # Extending the SHELL set costs the agent glyphs nothing.
+  out=$(composer_with_extended_shell_set "$extra" fm_composer_classify_content 0 '❯')
+  [ "$out" = empty ] || fail "a bare '❯' must still read empty after the shell set is extended, got '$out'"
+  pass "fm_composer_classify_content: FM_COMPOSER_SHELL_GLYPHS has one owner - extending it is honored at every layer"
+}
+
 # --- Real text is pending ---------------------------------------------------
 
 test_real_text_is_pending() {
@@ -346,6 +407,7 @@ test_glyph_strip_is_locale_invariant
 test_caller_supplied_glyph_set_is_honored
 test_shell_glyph_cannot_be_configured_into_agent_set
 test_shell_only_glyph_set_falls_back_to_default
+test_shell_glyph_set_has_one_owner
 test_idle_regex_match_is_locale_pinned
 test_idle_placeholder_case_mode_is_explicit
 test_real_text_is_pending

@@ -193,11 +193,46 @@ fm_composer_strip_ghost() {
 #      row; rendered dim or dark-truecolor (an ordinary muted prompt theme) it
 #      then ghost-strips to nothing and falls out of the classifier as `empty` -
 #      a dead shell, reported injectable, with layer 3 never consulted.
-#   3. fm_composer_classify_content evaluates the hardcoded shell-glyph rule
-#      BEFORE the configurable agent-glyph match, so even a set handed straight
-#      to it by a caller cannot promote a bare shell prompt to `empty`.
+#   3. fm_composer_classify_content evaluates the shell-glyph rule BEFORE the
+#      configurable agent-glyph match, so even a set handed straight to it by a
+#      caller cannot promote a bare shell prompt to `empty`.
+# All three layers read the shell set through fm_composer_is_shell_glyph /
+# fm_composer_leading_shell_glyph below and nowhere else, so FM_COMPOSER_SHELL_GLYPHS
+# has ONE owner: teaching the fleet a further dead-shell prompt glyph is a one-line
+# edit here, and cannot leave a layer behind. The property the layers protect is not
+# that the shell glyphs are spelled inline - it is that this set is INDEPENDENT of
+# the configurable AGENT set and can never be widened or emptied from the
+# environment.
 FM_COMPOSER_SHELL_GLYPHS='> $ % #'
 FM_COMPOSER_AGENT_GLYPHS_DEFAULT='❯ ›'
+
+# fm_composer_leading_shell_glyph: set FM_COMPOSER_MATCHED_SHELL_GLYPH to the shell
+# prompt glyph <content> starts with and return 0; return 1 and clear it when it
+# starts with none. Pathname expansion is disabled around the split so a glob
+# character in the set stays literal (same idiom as fm_composer_leading_agent_glyph).
+fm_composer_leading_shell_glyph() {  # <content>
+  local content=$1 g restore_glob=0
+  FM_COMPOSER_MATCHED_SHELL_GLYPH=''
+  [ -n "$content" ] || return 1
+  case $- in *f*) : ;; *) restore_glob=1 ;; esac
+  set -f
+  # shellcheck disable=SC2086  # deliberate split: the glyph set is whitespace-separated
+  set -- $FM_COMPOSER_SHELL_GLYPHS
+  if [ "$restore_glob" = 1 ]; then set +f; fi
+  for g in "$@"; do
+    [ -n "$g" ] || continue
+    case "$content" in
+      "$g"*) FM_COMPOSER_MATCHED_SHELL_GLYPH=$g; return 0 ;;
+    esac
+  done
+  return 1
+}
+
+# fm_composer_is_shell_glyph: is <s> EXACTLY a shell prompt glyph - a bare
+# dead-shell prompt row - rather than merely a line starting with one?
+fm_composer_is_shell_glyph() {  # <s>
+  fm_composer_leading_shell_glyph "$1" && [ "$FM_COMPOSER_MATCHED_SHELL_GLYPH" = "$1" ]
+}
 
 # fm_composer_sanitize_agent_glyphs: print <set> with every SHELL prompt glyph
 # removed, warning once per rejected glyph on stderr. Applied to every agent glyph
@@ -217,7 +252,7 @@ FM_COMPOSER_AGENT_GLYPHS_DEFAULT='❯ ›'
 # The set is split with pathname expansion disabled, so a glob character in an
 # operator-supplied set stays literal (same idiom as fm_composer_leading_agent_glyph).
 fm_composer_sanitize_agent_glyphs() {  # <set>
-  local g out='' shell_g restore_glob=0
+  local g out='' restore_glob=0
   case $- in *f*) : ;; *) restore_glob=1 ;; esac
   set -f
   # shellcheck disable=SC2086  # deliberate split: the glyph set is whitespace-separated
@@ -225,14 +260,12 @@ fm_composer_sanitize_agent_glyphs() {  # <set>
   if [ "$restore_glob" = 1 ]; then set +f; fi
   for g in "$@"; do
     [ -n "$g" ] || continue
-    for shell_g in $FM_COMPOSER_SHELL_GLYPHS; do
-      if [ "$g" = "$shell_g" ]; then
-        printf '%s\n' \
-          "firstmate: WARNING: shell prompt glyph '$g' was REJECTED from an agent prompt glyph set." \
-          "firstmate: a bare '$g' is a DEAD SHELL, not an empty agent composer; reading it as empty would let the away-mode injector type an escalation into that shell (bin/fm-composer-lib.sh)." >&2
-        continue 2
-      fi
-    done
+    if fm_composer_is_shell_glyph "$g"; then
+      printf '%s\n' \
+        "firstmate: WARNING: shell prompt glyph '$g' was REJECTED from an agent prompt glyph set." \
+        "firstmate: a bare '$g' is a DEAD SHELL, not an empty agent composer; reading it as empty would let the away-mode injector type an escalation into that shell (bin/fm-composer-lib.sh)." >&2
+      continue
+    fi
     out="${out:+$out }$g"
   done
   if [ -z "$out" ]; then
@@ -262,7 +295,7 @@ FM_COMPOSER_AGENT_GLYPHS=$(fm_composer_sanitize_agent_glyphs \
 # This is the only shell-glyph guard an adapter's structural row detection has, so
 # it lives here at the shared chokepoint rather than in any one caller.
 fm_composer_leading_agent_glyph() {  # <content> [glyphs]
-  local content=$1 glyphs=${2:-$FM_COMPOSER_AGENT_GLYPHS} g shell_g restore_glob=0
+  local content=$1 glyphs=${2:-$FM_COMPOSER_AGENT_GLYPHS} g restore_glob=0
   FM_COMPOSER_MATCHED_GLYPH=''
   [ -n "$content" ] || return 1
   case $- in *f*) : ;; *) restore_glob=1 ;; esac
@@ -271,9 +304,7 @@ fm_composer_leading_agent_glyph() {  # <content> [glyphs]
   set -- $glyphs
   if [ "$restore_glob" = 1 ]; then set +f; fi
   for g in "$@"; do
-    for shell_g in $FM_COMPOSER_SHELL_GLYPHS; do
-      if [ "$g" = "$shell_g" ]; then continue 2; fi
-    done
+    if fm_composer_is_shell_glyph "$g"; then continue; fi
     case "$content" in
       "$g"*) FM_COMPOSER_MATCHED_GLYPH=$g; return 0 ;;
     esac
@@ -330,27 +361,25 @@ fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [
   if [ "$bordered" != 1 ] && [ -z "$content" ] && [ -n "$plain_content" ]; then
     # Shell rule first, exactly as below: this row is unbordered by construction,
     # so a bare shell glyph is a dead shell whatever the glyph set claims.
-    case "$plain_content" in
-      '>'|'$'|'%'|'#') printf 'unknown'; return 0 ;;
-    esac
+    if fm_composer_is_shell_glyph "$plain_content"; then printf 'unknown'; return 0; fi
     if fm_composer_leading_agent_glyph "$plain_content" "$glyphs" \
       && [ "$FM_COMPOSER_MATCHED_GLYPH" = "$plain_content" ]; then
       printf 'empty'; return 0
     fi
     printf 'unknown'; return 0
   fi
-  # A bare prompt glyph on its own row. The SHELL rule is hardcoded and is
-  # evaluated BEFORE the configurable agent-glyph match below, so a shell glyph
-  # that reached the set anyway - past fm_composer_sanitize_agent_glyphs, e.g.
-  # handed straight to this function by a caller - still cannot make a dead shell
-  # read `empty`. Neither guard is load-bearing alone.
-  case "$content" in
-    '>'|'$'|'%'|'#')
-      # Shell prompt glyph: empty ONLY inside a composer box (the harness's own
-      # prompt). Bare, it is a dead-shell prompt - never a safe injection target.
-      if [ "$bordered" = 1 ]; then printf 'empty'; else printf 'unknown'; fi
-      return 0 ;;
-  esac
+  # A bare prompt glyph on its own row. The SHELL rule reads the non-configurable
+  # FM_COMPOSER_SHELL_GLYPHS and is evaluated BEFORE the configurable agent-glyph
+  # match below, so a shell glyph that reached the agent set anyway - past
+  # fm_composer_sanitize_agent_glyphs, e.g. handed straight to this function by a
+  # caller - still cannot make a dead shell read `empty`. Neither guard is
+  # load-bearing alone.
+  if fm_composer_is_shell_glyph "$content"; then
+    # Shell prompt glyph: empty ONLY inside a composer box (the harness's own
+    # prompt). Bare, it is a dead-shell prompt - never a safe injection target.
+    if [ "$bordered" = 1 ]; then printf 'empty'; else printf 'unknown'; fi
+    return 0
+  fi
   if fm_composer_leading_agent_glyph "$content" "$glyphs" \
     && [ "$FM_COMPOSER_MATCHED_GLYPH" = "$content" ]; then
     # Agent prompt glyph: a genuine empty agent composer, bordered or bare.
@@ -370,13 +399,8 @@ fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [
   # stripped, so a shell glyph is only considered when no agent glyph led the row.
   if fm_composer_leading_agent_glyph "$content" "$glyphs"; then
     content=${content#"$FM_COMPOSER_MATCHED_GLYPH"}
-  else
-    case "$content" in
-      '>'*) content=${content#'>'} ;;
-      '$'*) content=${content#'$'} ;;
-      '%'*) content=${content#'%'} ;;
-      '#'*) content=${content#'#'} ;;
-    esac
+  elif fm_composer_leading_shell_glyph "$content"; then
+    content=${content#"$FM_COMPOSER_MATCHED_SHELL_GLYPH"}
   fi
   content="${content#"${content%%[![:space:]]*}"}"
   content="${content%"${content##*[![:space:]]}"}"
