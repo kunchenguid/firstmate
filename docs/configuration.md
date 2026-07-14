@@ -219,7 +219,8 @@ When the file is absent or contains `auto`, claude agents launch with `--permiss
 Any other valid `claude --permission-mode` choice (`acceptEdits`, `plan`, `manual`, `dontAsk`) passes through as `--permission-mode <value>`.
 An unrecognized value aborts the spawn loudly before any fleet mutation, so a crew is never silently launched in an unintended permission mode.
 Raw launch commands carry their own flags and skip the knob entirely.
-The file is not inherited into secondmate homes.
+Claude ship, scout, and secondmate launches share a single launch template, so a claude secondmate launched by the primary follows the primary's knob too (pinned by `tests/fm-secondmate-harness.test.sh`).
+The file is not inherited into secondmate homes, so a secondmate's own claude crewmates resolve the secondmate home's own file, defaulting to `auto` when it is absent.
 
 ## Crew dispatch profiles (config/crew-dispatch.json)
 
