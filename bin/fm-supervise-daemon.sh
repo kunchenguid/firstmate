@@ -890,13 +890,18 @@ wedge_alarm_notify() {  # <summary> <marker>
 # be gone outright. Naming a busy pane when the truth is a dead agent points
 # debugging in the wrong direction, so the ERROR log, the durable marker, and the
 # active alert all report the recorded cause.
-# The wording follows the CAUSE, not the buffer. A refused injection means N
-# buffered escalations are stuck behind it. A VANISHED pane means away-mode
-# supervision is down: nothing can be delivered, buffered or not, and the buffer
-# cannot even grow (the main loop's pane-gone backoff never reaches the wake
-# handling that buffers). Telling the captain "escalations undelivered" there
-# sends them hunting for messages that may not exist, when what they need to know
-# is that away mode is dead and must be restarted.
+# The wording follows the KIND - the same discriminator that picks the marker and
+# the throttle - and only names the cause as a tag, so what the captain is told can
+# never disagree with which alarm actually fired. A buffer wedge means N buffered
+# escalations are stuck behind a pane that is still being retried every tick. The
+# `pane-gone` kind is the debounced, latched declaration that away-mode supervision
+# is DOWN: nothing can be delivered, buffered or not, and the buffer cannot even
+# grow (the main loop's pane-gone backoff never reaches the wake handling that
+# buffers). Keying the wording on the cause instead would let one flaky existence
+# probe during a max-defer flush record cause=pane-gone and render that
+# supervision-DOWN verdict from a buffer wedge, skipping the full max-defer window
+# of continuous absence pane_gone_wedge_alarm requires before declaring it - and an
+# away captain told away mode is dead tears down a healthy session.
 # The daemon must NEVER silently wedge: this logs an ERROR, drops a durable
 # marker firstmate/recovery can surface, flashes the tmux supervisor client's
 # status line when applicable, and attempts a configurable backend-independent
@@ -938,7 +943,7 @@ inject_wedge_alarm() {  # <state> <age-seconds> [kind:buffer|pane-gone]
   if [ -s "$state/.subsuper-escalations" ]; then
     buffered=$(grep -c . "$state/.subsuper-escalations" 2>/dev/null || echo 0)
   fi
-  if [ "$cause" = pane-gone ]; then
+  if [ "$kind" = pane-gone ]; then
     WEDGE_ALARM_TITLE='firstmate: away-mode supervision DOWN'
     summary="away-mode supervision DOWN ${age}s ($cause): supervisor pane gone, nothing can be delivered"
     header=$(printf 'fm away-mode supervision DOWN: supervisor pane gone %ss as of %s' \

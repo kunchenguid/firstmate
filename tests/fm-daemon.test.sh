@@ -2224,6 +2224,49 @@ test_pane_gone_recovery_keeps_a_real_buffer_wedge_marker() {
   pass "a pane-gone alarm and its recovery never overwrite or retire a marker describing a real undelivered buffer"
 }
 
+# "Supervision is DOWN" is the loudest verdict in the design, and pane_gone_wedge_alarm
+# earns it with a full max-defer window of CONTINUOUS absence. A buffer wedge must not
+# be able to borrow it: the pane can pass the main loop's existence check and then die
+# during housekeeping's max-defer flush, so inject_msg records cause=pane-gone while the
+# alarm that fires is the BUFFER wedge - one flaky existence probe telling an away
+# captain away mode is dead, which per the /afk skill means tearing down a healthy
+# session. The buffer wording still names the cause as a tag, which is the truth: the
+# buffer IS stuck, and it IS still being retried every tick.
+test_buffer_wedge_alarm_never_declares_supervision_down() {
+  local dir state log daemon_log
+  dir=$(make_wedge_case wedge-pane-gone-cause)
+  state="$dir/state"; log="$dir/alert.log"; daemon_log="$dir/daemon.log"
+  escalate_add "$state" "needs-decision: pick A"
+
+  # What _inject_defer records when the pane dies between the main loop's check and
+  # housekeeping's flush; the alarm housekeeping then raises is still the buffer wedge.
+  INJECT_LAST_DEFER_CAUSE='pane-gone'
+  INJECT_LAST_DEFER_REASON="supervisor target 's:0' no longer resolves on backend 'tmux'"
+  WEDGE_ALARM_TITLE=$WEDGE_ALARM_TITLE_DEFAULT
+  WEDGE_ALARM_LAST_EPOCH=0
+  LOG="$daemon_log" FM_WEDGE_ALARM_LOG="$log" FM_MAX_DEFER_SECS=300 \
+    FM_WEDGE_ALARM_CHANNEL=osascript FM_SUPERVISOR_BACKEND=herdr \
+    inject_wedge_alarm "$state" 900
+
+  [ -s "$state/.subsuper-inject-wedged" ] \
+    || fail "the buffer wedge did not write its own marker"
+  [ ! -e "$state/.subsuper-pane-gone" ] \
+    || fail "a buffer wedge wrote the pane-gone alarm's marker, which pane recovery may retire"
+  grep -F 'supervision DOWN' "$log" >/dev/null \
+    && fail "a buffer wedge told an away captain away mode was DOWN, on one failed existence probe: $(cat "$log")"
+  grep -F 'WEDGED 900s undelivered (pane-gone)' "$log" >/dev/null \
+    || fail "the active alert did not report a wedged buffer tagged with its cause: $(cat "$log")"
+  [ "$WEDGE_ALARM_TITLE" = "$WEDGE_ALARM_TITLE_DEFAULT" ] \
+    || fail "a buffer wedge borrowed the supervision-DOWN banner title (got: $WEDGE_ALARM_TITLE)"
+  grep -F 'ERROR: away-mode escalation undelivered 900s' "$daemon_log" >/dev/null \
+    || fail "the ERROR log did not report the wedged buffer: $(grep -F ERROR "$daemon_log" || true)"
+  grep -F 'supervision DOWN' "$daemon_log" >/dev/null \
+    && fail "the ERROR log declared supervision DOWN for a buffer wedge: $(grep -F ERROR "$daemon_log" || true)"
+  grep -F 'cause: pane-gone' "$state/.subsuper-inject-wedged" >/dev/null \
+    || fail "the wedge marker dropped the recorded cause: $(cat "$state/.subsuper-inject-wedged")"
+  pass "a buffer wedge whose last defer hit a gone pane stays a buffer wedge; only the debounced pane-gone alarm declares supervision DOWN"
+}
+
 test_afk_start_refuses_when_flag_cannot_be_written
 test_afk_start_ignores_stale_pidfile_without_lock
 test_afk_start_reclaims_stale_daemon_lock_reused_pid
@@ -2332,3 +2375,4 @@ test_pane_gone_alarm_reports_supervision_down_on_an_empty_buffer
 test_pane_gone_marker_cleared_when_the_pane_returns
 test_pane_gone_alarm_fires_once_per_episode
 test_pane_gone_recovery_keeps_a_real_buffer_wedge_marker
+test_buffer_wedge_alarm_never_declares_supervision_down

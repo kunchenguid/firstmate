@@ -351,11 +351,10 @@ fm_afk_launch_reconcile() {
 
 fm_afk_launch_restore_backup() {  # <backup> <had-afk>
   local backup=$1 had_afk=$2 artifact result=0
-  rm -f "$FM_AFK_LAUNCH_STATE/.afk" \
-    "$FM_AFK_LAUNCH_STATE/.subsuper-escalations" \
-    "$FM_AFK_LAUNCH_STATE/.subsuper-escalations.since" \
-    "$FM_AFK_LAUNCH_STATE/.subsuper-inject-wedged" \
-    "$FM_AFK_LAUNCH_STATE/.subsuper-pane-gone" || result=1
+  rm -f "$FM_AFK_LAUNCH_STATE/.afk" || result=1
+  for artifact in "${FM_AFK_LAUNCH_ARTIFACTS[@]}"; do
+    rm -f "$FM_AFK_LAUNCH_STATE/$artifact" || result=1
+  done
   if [ "$had_afk" -eq 1 ]; then
     cp "$backup/.afk" "$FM_AFK_LAUNCH_STATE/.afk" || result=1
   fi

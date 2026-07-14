@@ -746,6 +746,34 @@ unit_incomplete_restore_retains_backup() {
   rm -rf "$st"
 }
 
+# The rollback has to leave NO trace of the failed arm, and FM_AFK_LAUNCH_ARTIFACTS is
+# the one list that says what a failed arm can have written. Asserted through the list
+# itself, so an artifact added to the daemon later cannot be forgotten here: whatever
+# the list holds must not survive the rollback.
+unit_rollback_clears_every_artifact() {
+  local st backup
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-rollback-artifacts.XXXXXX")
+  mkdir -p "$st/state"
+  backup=$(mktemp -d "$st/state/.afk-launch-backup.XXXXXX")
+  : > "$st/state/.afk"
+  if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" bash -c '
+    . "$1"
+    for artifact in "${FM_AFK_LAUNCH_ARTIFACTS[@]}"; do
+      printf "written by the failed arm\n" > "$FM_AFK_LAUNCH_STATE/$artifact"
+    done
+    fm_afk_launch_restore_backup "$2" 0 || exit 1
+    for artifact in "${FM_AFK_LAUNCH_ARTIFACTS[@]}"; do
+      [ ! -e "$FM_AFK_LAUNCH_STATE/$artifact" ] || exit 1
+    done
+    [ ! -e "$FM_AFK_LAUNCH_STATE/.afk" ]
+  ' _ "$LAUNCH" "$backup"; then
+    pass "rollback: every away-session artifact a failed arm can write is cleared"
+  else
+    fail "rollback: a failed arm left an away-session artifact behind"
+  fi
+  rm -rf "$st"
+}
+
 unit_flag_write_failure_aborts() {
   local st
   st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-flag-fail.XXXXXX")
@@ -1145,6 +1173,7 @@ unit_refresh_validates_record
 unit_clear_failure_aborts_entry
 unit_confirmed_absence_succeeds
 unit_incomplete_restore_retains_backup
+unit_rollback_clears_every_artifact
 unit_flag_write_failure_aborts
 e2e_herdr
 e2e_tmux

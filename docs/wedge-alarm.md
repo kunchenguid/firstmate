@@ -104,8 +104,9 @@ $ echo $?
 ```
 
 Exit 0; a Notification Center banner titled "FIRSTMATE TEST - IGNORE" was posted with the label as its body.
-The title is an argv item like the body, never interpolated into the AppleScript source, because it is no longer a constant: it follows the cause.
-In production a refused injection posts "firstmate: away-mode escalations WEDGED" over the `<age>s undelivered (<cause>) - see <marker>` summary, and a vanished pane posts "firstmate: away-mode supervision DOWN" over its own summary.
+The title is an argv item like the body, never interpolated into the AppleScript source, because it is no longer a constant: it follows the alarm that fired.
+In production the buffer wedge posts "firstmate: away-mode escalations WEDGED" over the `<age>s undelivered (<cause>) - see <marker>` summary, naming the last recorded cause only as a tag, and the debounced vanished-pane alarm posts "firstmate: away-mode supervision DOWN" over its own summary.
+Which alarm fired is what the captain is told, never the last recorded cause: a pane can pass the main loop's existence check and then die during a max-defer flush, and one such probe must not declare supervision down when the buffer is still stuck behind a pane the daemon keeps retrying.
 A banner's title is often all a truncated notification shows, so a vanished pane must not be titled as a queue of stuck escalations (re-verified 2026-07-14 in the argv form above; the herdr channel's title is a plain argument and needed no re-verification).
 
 ### herdr channel
