@@ -73,9 +73,10 @@
 #          checkout command. Used by
 #          fm-session-start.sh's read-only path when another live session holds
 #          the fleet lock, so a second concurrent session never race-mutates
-#          secondmate homes, X-mode artifacts, project clones, or repair
-#          instructions. Unset/0 (the default) runs every sweep exactly as
-#          before - this flag is purely additive.
+#          PR-check artifacts, secondmate homes, X-mode artifacts, project
+#          clones, or repair instructions.
+#          Unset/0 (the default) runs every sweep exactly as before - this flag
+#          is purely additive.
 #        fm-bootstrap.sh install <tool>...
 #          Install the named tools (only ones the captain approved).
 set -u
@@ -389,10 +390,10 @@ write_if_changed() {
 }
 
 # X mode (opt-in): when this home's .env carries a non-empty FMX_PAIRING_TOKEN,
-# wire the relay poll into the EXISTING watcher check mechanism without touching
-# fm-watch.sh or any other watcher-backbone file. Drops two idempotent,
-# gitignored artifacts:
-#   state/x-watch.check.sh - check shim that execs bin/fm-x-poll.sh each cycle
+# wire the relay poll into the existing authenticated watcher dispatch.
+# Drops two idempotent, gitignored artifacts:
+#   state/x-watch.check.sh - byte-static identity shim; the watcher validates
+#                            its bytes and invokes bin/fm-x-poll.sh directly
 #   config/x-mode.env      - exports FM_CHECK_INTERVAL=30, sourced by the watcher
 #                            arm so only an X instance polls at the 30s cadence
 # On opt-out (no token, or empty) it removes any such artifacts so the instance
