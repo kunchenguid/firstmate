@@ -59,7 +59,7 @@ Full detail on every feature lives in [docs/architecture.md](docs/architecture.m
 ### Requirements
 
 - A verified agent harness: Claude Code, Grok, Pi, Codex, or OpenCode.
-- Git and the GitHub CLI, authenticated through `gh auth login`.
+- Git and the GitHub CLI, authenticated through `gh auth login`; the GitLab CLI (`glab`), authenticated, for shipping to GitLab-hosted projects.
 - tmux, for the reference session backend.
 
 The first mate detects and offers to install everything else.

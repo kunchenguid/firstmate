@@ -8,12 +8,12 @@ It is a verification record, not a contract restatement: the delivery-mode, `pr=
 
 GitLab support lands in three separate increments.
 
-1. **Foundation (this increment).** `bin/fm-git-host-lib.sh` centralizes git-host classification and PR/MR URL parsing, with `tests/fm-git-host-lib.test.sh` and this doc.
-   Pure addition, zero behavior change: the library has no in-repo caller yet.
-   It lands first so increments #2 and #3 each consume ONE verified parser instead of re-spelling host detection and URL-shape logic.
-2. **Merge/check.** Teach `bin/fm-pr-merge.sh` and `bin/fm-pr-check.sh` to route a GitLab MR URL through `glab` (merge, `pr_head=` recording, CI-green poll) instead of `gh`/`gh-axi`.
-3. **Teardown.** Teach `bin/fm-teardown.sh`'s landed-work fallback to verify a GitLab MR the way it verifies a GitHub PR, using `refs/merge-requests/<iid>/head`.
-   `bin/fm-review-diff.sh` and `bin/fm-project-mode.sh` are reviewed in the same increment.
+1. **Foundation (landed).** `bin/fm-git-host-lib.sh` centralizes git-host classification and PR/MR URL parsing, with `tests/fm-git-host-lib.test.sh` and this doc.
+   A pure addition with zero behavior change when it first landed; increments #2 and #3 (now also landed) are its in-repo callers.
+   It landed first so increments #2 and #3 each consume ONE verified parser instead of re-spelling host detection and URL-shape logic.
+2. **Merge/check (landed).** `bin/fm-pr-merge.sh` and `bin/fm-pr-check.sh` route a GitLab MR URL through `glab` (merge, `pr_head=` recording, merged-state poll) instead of `gh`/`gh-axi`.
+3. **Teardown (landed).** `bin/fm-teardown.sh`'s landed-work fallback verifies a GitLab MR the way it verifies a GitHub PR, using `refs/merge-requests/<iid>/head`.
+   `bin/fm-review-diff.sh` was updated in the same increment to fetch the GitLab head ref, and `bin/fm-brief.sh` now infers the crewmate's git-host tool instruction from the clone's origin.
 
 ## Design decisions this evidence supports
 

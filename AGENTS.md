@@ -95,7 +95,7 @@ state/               volatile runtime signals; gitignored
   <id>.status        appended by crewmates: "<state>: <note>" wake-event lines, not current-state truth
   <id>.turn-ended    touched by turn-end hooks
   <id>.grok-turnend-token   firstmate-owned grok hook registry token for the task; removed by teardown
-  <id>.meta          written by fm-spawn: window=, worktree=, project=, harness=, model=, effort=, kind=, mode=, yolo=, tasktmp=; kind=secondmate also records home= and projects=; a non-default runtime backend records further backend-specific fields (docs/configuration.md "Runtime backend"; bin/fm-backend.sh, section 8); fm-pr-check, including through fm-pr-merge, appends pr= and GitHub's pr_head= when available; fm-x-link appends x_request=, x_request_ts=, x_followups=, and optional x_platform=/x_reply_max_chars= for an X-mode-originated task (section 14)
+  <id>.meta          written by fm-spawn: window=, worktree=, project=, harness=, model=, effort=, kind=, mode=, yolo=, tasktmp=; kind=secondmate also records home= and projects=; a non-default runtime backend records further backend-specific fields (docs/configuration.md "Runtime backend"; bin/fm-backend.sh, section 8); fm-pr-check, including through fm-pr-merge, appends pr= and the PR/MR head pr_head= when available; fm-x-link appends x_request=, x_request_ts=, x_followups=, and optional x_platform=/x_reply_max_chars= for an X-mode-originated task (section 14)
   <id>.check.sh      optional slow poll you write per task (e.g. merged-PR check)
   x-watch.check.sh   generated X-mode relay poll shim; present only when opted in (section 14)
   x-inbox/           generated X-mode pending mention payloads; fmx-respond drains it (section 14)
@@ -336,7 +336,7 @@ It sweeps the current session for uncaptured durable knowledge, routes findings 
 **Delivery mode (choose at add).** `<mode>` is how a finished change reaches `main`, picked per project when you add it and recorded in the registry line (`fm-project-mode.sh` parses it; `fm-spawn` records it into each task's meta):
 
 - `no-mistakes` (default; `[...]` may be omitted) - full pipeline -> PR -> captain merge. Highest assurance.
-- `direct-PR` - push + open a PR via `gh-axi`, no pipeline -> captain merge.
+- `direct-PR` - push + open a PR/MR, no pipeline -> captain merge (host-routed per the note below).
 - `local-only` - local branch, no remote, no PR; firstmate reviews the diff, the captain approves, firstmate merges to local `main` (section 7).
 
 Orthogonal to mode is an optional `+yolo` flag (`[direct-PR +yolo]`), default off and **not recommended**: with `yolo` on, firstmate makes the approval decisions itself instead of asking the captain (section 7). When the captain adds a project without saying, default to `no-mistakes` with yolo off; only set a faster mode or `+yolo` on the captain's explicit say-so.
@@ -462,9 +462,9 @@ Firstmate's own repo is the exception: its `.no-mistakes/` stays gitignored, unt
 This do-not-fight rule does not license evidence commits in firstmate's own repo.
 
 **yolo (orthogonal).** With `yolo=off` (default) every approval is the captain's: ask-user findings, PR merges, the local-only merge.
-With `yolo=on`, firstmate makes those calls itself without asking - resolve ask-user findings on your judgment, and run `bin/fm-pr-merge.sh <id> <full GitHub PR URL>` / `bin/fm-merge-local.sh` once the work is green/approved - EXCEPT anything destructive, irreversible, or security-sensitive, which still escalates to the captain.
+With `yolo=on`, firstmate makes those calls itself without asking - resolve ask-user findings on your judgment, and run `bin/fm-pr-merge.sh <id> <full PR or MR URL>` / `bin/fm-merge-local.sh` once the work is green/approved - EXCEPT anything destructive, irreversible, or security-sensitive, which still escalates to the captain.
 Never merge a red PR even under yolo.
-`bin/fm-pr-merge.sh` always records `pr=` and records `pr_head=` when available before merging, parses the full `https://github.com/<owner>/<repo>/pull/<n>` URL into `gh-axi pr merge <n> --repo <owner>/<repo>`, and defaults to `--squash` unless an explicit merge method is forwarded after `--`; this holds even on a repo with no PR CI where the "checks green" signal that normally triggers `bin/fm-pr-check.sh` never fires - do not call `gh-axi pr merge` directly for a task's PR, or the recording step can be silently skipped and a later `fm-teardown.sh` has nothing to verify a squash merge against.
+`bin/fm-pr-merge.sh` always records `pr=` and records `pr_head=` when available before merging, parses the full PR or MR URL into the host's merge CLI (`gh-axi pr merge <n> --repo <owner>/<repo>` for GitHub, `glab mr merge <iid> -R https://<host>/<namespace>` for GitLab; host inferred via `bin/fm-git-host-lib.sh`), and defaults to `--squash` unless an explicit merge method is forwarded after `--`; this holds even on a repo with no PR CI where the "checks green" signal that normally triggers `bin/fm-pr-check.sh` never fires - do not call `gh-axi pr merge` or `glab mr merge` directly for a task's PR/MR, or the recording step can be silently skipped and a later `fm-teardown.sh` has nothing to verify a squash merge against.
 After any merge you perform without asking the captain, post a one-line "merged <full PR URL or local main> after checks passed" FYI so the captain keeps a trail.
 
 ### Validate
@@ -497,11 +497,11 @@ During the `ci` monitor phase, `bin/fm-crew-state.sh` also reads the ci step log
 ### PR ready
 
 For PR-based ship tasks, the ready signal depends on mode: `no-mistakes` reports `done: PR <url> checks green` after CI is green, while `direct-PR` reports `done: PR <url>` after opening the PR.
-Run `bin/fm-pr-check.sh <id> <PR url>` - it records `pr=` and GitHub's `pr_head=` when available in the task's meta and arms the watcher's merge poll.
+Run `bin/fm-pr-check.sh <id> <PR url>` - it records `pr=` and the PR/MR head `pr_head=` when available in the task's meta and arms the watcher's merge poll.
 Tell the captain: the PR's full URL (always the complete `https://...` link, never a bare `#number` - the captain's terminal makes a full URL clickable), a one-paragraph summary, and, for `no-mistakes`, the risk level it emitted.
 (The check contract, for any custom `state/<id>.check.sh` you write yourself: print one line only when firstmate should wake, print nothing otherwise, and finish before `FM_CHECK_TIMEOUT`.)
 
-If the captain says "merge it", run `bin/fm-pr-merge.sh <id> <full GitHub PR URL>` yourself; that instruction is the explicit approval.
+If the captain says "merge it", run `bin/fm-pr-merge.sh <id> <full PR or MR URL>` yourself; that instruction is the explicit approval.
 If `yolo=on`, merge a green/approved PR yourself the same way and post the required FYI.
 The helper defaults to `--squash`, accepts explicit merge-method flags such as `-- --merge`, `-- --rebase`, or `-- --method=merge`, and refuses `--repo` or `-R` overrides because the repository is derived from the URL.
 
