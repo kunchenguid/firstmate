@@ -1109,6 +1109,54 @@ test_composer_state_fleet_wide_glyph_knob_layers_into_herdr() {
   pass "fm_backend_herdr_composer_state: the fleet-wide FM_COMPOSER_AGENT_GLYPHS is herdr's default glyph set, so herdr agrees with the other backends"
 }
 
+# The dead-shell rule at the structural layer, where herdr has no backstop.
+#
+# Every other guard in this system sits in fm_composer_classify_content, which
+# hardcodes the shell rule ahead of the configurable agent match. The structural
+# scan below reaches NONE of it: fm_backend_herdr_is_bare_prompt asks only "does
+# this row open with a glyph from the set". A shell glyph reaching that set makes a
+# dead-shell prompt row register as a bare COMPOSER row (shape=bare, bordered=0),
+# and a dim or dark-truecolor prompt - an ordinary muted prompt theme - then
+# ghost-strips to nothing, so the classifier sees empty content on what it has been
+# told is a composer and returns `empty`. A dead shell, reported injectable: the
+# exact away-mode target bin/fm-composer-lib.sh exists to deny. Verified reachable
+# before the fix, for all four glyphs.
+#
+# Both routes into the set are pinned: through the env knob (where the sanitizer
+# rejects it) and handed straight to the scan with the sanitizer bypassed (where
+# fm_composer_leading_agent_glyph's refusal is the only thing left).
+test_composer_state_shell_glyph_is_never_a_bare_composer_row() {
+  local dir log resp fb out g idx=1
+  dir="$TMP_ROOT/composer-shell-glyph-structural"; mkdir -p "$dir/responses"
+  log="$dir/log"; resp="$dir/responses"; : > "$log"
+  # A dead shell prompt rendered dim - what a muted prompt theme looks like, and
+  # what makes the ghost stripper empty the row.
+  for g in '>' '$' '%' '#'; do
+    printf '\033[2m%s\033[0m\n' "$g" > "$resp/$idx.out"
+    idx=$((idx + 1))
+  done
+  fb=$(make_herdr_fakebin "$dir")
+  for g in '>' '$' '%' '#'; do
+    # Sanitizer BYPASSED: the set is poisoned after sourcing, so this asserts the
+    # shared chokepoint's own refusal, not the sanitizer's removal.
+    out=$( LC_ALL=C PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+      bash -c '. "$0/bin/backends/herdr.sh"
+        FM_BACKEND_HERDR_BARE_PROMPT_GLYPHS="❯ › $1"
+        fm_backend_herdr_composer_state default:w1:p2' "$ROOT" "$g" 2>/dev/null )
+    [ "$out" != empty ] \
+      || fail "a dim-rendered dead shell prompt '$g' must NEVER read empty just because '$g' reached herdr's bare-prompt glyph set - that hands the away-mode injector a live shell to type into (got '$out')"
+  done
+  # And through the env knob, the way an operator would actually set it: the
+  # sanitizer rejects the glyph before it can ever reach the scan.
+  echo 0 > "$resp/.count"
+  out=$( LC_ALL=C PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    FM_BACKEND_HERDR_BARE_PROMPT_GLYPHS='❯ › >' \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT" 2>/dev/null )
+  [ "$out" != empty ] \
+    || fail "a shell glyph set in FM_BACKEND_HERDR_BARE_PROMPT_GLYPHS must be rejected before it reaches the structural scan, got '$out'"
+  pass "fm_backend_herdr_is_bare_prompt: a shell prompt glyph in the glyph set never makes a dead-shell row a bare composer row (the structural layer has no shell-rule backstop)"
+}
+
 # The herdr-only knob still wins for herdr when both are set: fleet-wide is the
 # default, not a ceiling.
 test_composer_state_herdr_glyph_knob_overrides_fleet_wide() {
@@ -2173,6 +2221,7 @@ test_composer_state_bare_prompt_override_is_honored
 test_composer_state_bare_prompt_override_idle_row_is_empty
 test_composer_state_fleet_wide_glyph_knob_layers_into_herdr
 test_composer_state_herdr_glyph_knob_overrides_fleet_wide
+test_composer_state_shell_glyph_is_never_a_bare_composer_row
 test_bare_prompt_re_is_retired_loudly
 test_composer_state_codex_bare_prompt_glyph_is_empty
 test_composer_state_codex_faint_suggestion_is_empty

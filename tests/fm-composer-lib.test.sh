@@ -180,36 +180,62 @@ fm_test_utf8_locale() {
   return 1
 }
 
-# The agent glyph set is operator-configurable; the dead-shell rule is not. A
-# shell prompt glyph in the set would make a dead shell read `empty` - handing the
+# The agent glyph set is operator-configurable; the dead-shell rule is not. A shell
+# prompt glyph in the set would make a dead shell read `empty` - handing the
 # away-mode injector the exact target this owner exists to deny it - so it is
-# refused in two independent layers, each tested alone here: the sanitizer strips
-# it out of the env knob, and the classifier evaluates the hardcoded shell rule
-# BEFORE the configurable agent match, so even a set handed straight to the
-# classifier cannot promote a bare shell prompt.
+# refused in three layers, each asserted on its OWN behavior below rather than
+# through a verdict a later layer would produce anyway. Asserting only the final
+# `unknown` would be vacuous: the classifier's hardcoded shell rule runs before the
+# configurable agent match, so `unknown` comes back even from a sanitizer that has
+# stopped rejecting anything at all.
+#   1. fm_composer_sanitize_agent_glyphs REMOVES the glyph from an env-read set.
+#   2. fm_composer_leading_agent_glyph refuses to MATCH it whatever set it is
+#      handed - the chokepoint an adapter's structural row detection depends on,
+#      which has no classifier beneath it (see the herdr suite).
+#   3. fm_composer_classify_content's check order, tested with the poisoned set
+#      handed straight in.
 test_shell_glyph_cannot_be_configured_into_agent_set() {
-  local g out err
+  local g out err sanitized
   for g in '>' '$' '%' '#'; do
-    # Layer 1: rejected out of the environment knob.
-    out=$(classify_with_glyphs_env_in_c_locale "❯ › $g" 0 "$g" 2>/dev/null)
-    [ "$out" = unknown ] \
-      || fail "shell glyph '$g' in FM_COMPOSER_AGENT_GLYPHS must still read unknown (dead shell), got '$out'"
-    # Layer 2: ordering, with the poisoned set handed straight to the classifier.
+    # Layer 1, asserted on the sanitizer's own output: the glyph is REMOVED from a
+    # MIXED set, leaving the agent glyphs intact. Fails if removal ever regresses.
+    sanitized=$(fm_composer_sanitize_agent_glyphs "❯ › $g" 2>/dev/null)
+    [ "$sanitized" = '❯ ›' ] \
+      || fail "the sanitizer must remove shell glyph '$g' from the mixed set '❯ › $g' and keep the agent glyphs, got '$sanitized'"
+    # Layer 2, asserted at the chokepoint: even handed the poisoned set directly,
+    # a shell glyph is never matched as a leading AGENT glyph. This is the guard
+    # bin/backends/herdr.sh's structural bare-prompt scan rests on.
+    if fm_composer_leading_agent_glyph "$g" "❯ › $g"; then
+      fail "fm_composer_leading_agent_glyph must never match shell glyph '$g' as an agent prompt, even from a poisoned set (herdr's structural scan has no shell rule beneath it)"
+    fi
+    if fm_composer_leading_agent_glyph "$g ls -la" "❯ › $g"; then
+      fail "fm_composer_leading_agent_glyph must never match a dead-shell prompt line leading with '$g', even from a poisoned set"
+    fi
+    # Layer 3: the classifier's check order, with the poisoned set handed straight in.
     out=$(classify_in_c_locale 0 "$g" '' sensitive '' "❯ › $g")
     [ "$out" = unknown ] \
       || fail "shell glyph '$g' in a caller-supplied set must still read unknown, got '$out'"
     out=$(classify_in_c_locale 0 '' '' sensitive "$g" "❯ › $g")
     [ "$out" = unknown ] \
       || fail "shell glyph '$g' in a caller-supplied set must still read unknown on the stripped-content path, got '$out'"
+    # End to end through the env knob, the way an operator would actually set it.
+    out=$(classify_with_glyphs_env_in_c_locale "❯ › $g" 0 "$g" 2>/dev/null)
+    [ "$out" = unknown ] \
+      || fail "shell glyph '$g' in FM_COMPOSER_AGENT_GLYPHS must still read unknown (dead shell), got '$out'"
+    # The agent glyphs still work with the poisoned set: rejection costs nothing else.
+    out=$(classify_with_glyphs_env_in_c_locale "❯ › $g" 0 '❯' 2>/dev/null)
+    [ "$out" = empty ] \
+      || fail "a bare '❯' must still read empty when the set also carried shell glyph '$g', got '$out'"
+    # The rejection is loud, not silent, and names the glyph it refused.
+    err=$(LC_ALL=C FM_COMPOSER_AGENT_GLYPHS="❯ › $g" \
+      bash -c '. "$1"' _ "$ROOT/bin/fm-composer-lib.sh" 2>&1 >/dev/null)
+    assert_contains "$err" 'REJECTED' "a shell glyph rejected from the agent set must warn loudly on stderr"
+    assert_contains "$err" "'$g'" "the rejection warning must name the shell glyph '$g' it refused"
   done
   # Preserved: inside a real composer box the shell glyph is the harness's own prompt.
   out=$(classify_in_c_locale 1 '>' '' sensitive '' '❯ › >')
   [ "$out" = empty ] || fail "a shell glyph inside a bordered composer box must still read empty, got '$out'"
-  # The rejection is loud, not silent.
-  err=$(LC_ALL=C FM_COMPOSER_AGENT_GLYPHS='❯ › >' \
-    bash -c '. "$1"' _ "$ROOT/bin/fm-composer-lib.sh" 2>&1 >/dev/null)
-  assert_contains "$err" 'REJECTED' "a shell glyph rejected from the agent set must warn loudly on stderr"
-  pass "fm_composer_classify_content: a shell prompt glyph cannot be configured into the agent set (sanitizer and check order each hold alone)"
+  pass "fm_composer_classify_content: a shell prompt glyph cannot be configured into the agent set (sanitizer, chokepoint, and check order each asserted alone)"
 }
 
 # Rejecting the shell glyphs must not cost the AGENT glyphs with them. A set made

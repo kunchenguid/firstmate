@@ -778,6 +778,16 @@ fi
 # fm_backend_herdr_is_bare_prompt: does <trimmed-row> open with a bare AGENT
 # prompt glyph? Matched with a locale-invariant `case` on the literal glyphs by
 # the shared owner, so an operator-supplied set is as locale-safe as the default.
+#
+# This scan has NO classifier beneath it to catch a bad glyph set, so the shared
+# owner's sanitizer is not the only thing keeping a shell glyph out of it, and
+# must not be relied on as if it were. A shell glyph reaching here would make a
+# dead-shell prompt row register as a bare COMPOSER row (shape=bare, bordered=0);
+# rendered dim or dark-truecolor, an ordinary muted prompt theme, it then
+# ghost-strips to nothing and the classifier - told it is looking at a composer -
+# reads `empty`, handing the away-mode injector a live shell to type into. The
+# guard is at the shared chokepoint: fm_composer_leading_agent_glyph refuses to
+# match a shell glyph whatever set it is handed (bin/fm-composer-lib.sh).
 fm_backend_herdr_is_bare_prompt() {  # <trimmed-row>
   fm_composer_leading_agent_glyph "$1" "$FM_BACKEND_HERDR_BARE_PROMPT_GLYPHS"
 }

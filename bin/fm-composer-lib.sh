@@ -176,15 +176,24 @@ fm_composer_strip_ghost() {
 # injection behind input that was never there.
 # SHELL prompt glyphs (`>`, `$`, `%`, `#`) are deliberately NOT part of this set
 # and are never configurable: the safety rule at the top of this file turns on
-# telling them apart from agent glyphs. That is ENFORCED, not merely stated, and
-# in two independent layers - because a shell glyph accepted into the set would
-# make a dead-shell prompt read `empty`, handing the away-mode injector the exact
-# target this owner exists to deny it:
+# telling them apart from agent glyphs. That is ENFORCED, not merely stated,
+# because a shell glyph accepted into the set would make a dead-shell prompt read
+# `empty`, handing the away-mode injector the exact target this owner exists to
+# deny it. Three layers, and only the middle one covers every consumer:
 #   1. fm_composer_sanitize_agent_glyphs rejects a shell glyph out of any set
 #      read from the environment, loudly, naming the glyph - and never leaves the
 #      set EMPTY doing so, because an empty set would trade the dead-shell hazard
 #      for the false-pending one (see that function).
-#   2. fm_composer_classify_content evaluates the hardcoded shell-glyph rule
+#   2. fm_composer_leading_agent_glyph refuses to MATCH a shell glyph whatever set
+#      it is handed. This is the load-bearing one: it is the single chokepoint
+#      every consumer of a glyph set goes through, including an adapter's
+#      STRUCTURAL row detection (bin/backends/herdr.sh's bare-prompt scan), which
+#      has no classifier beneath it to catch a mistake. A shell glyph reaching
+#      that scan would make a dead-shell prompt row register as a bare COMPOSER
+#      row; rendered dim or dark-truecolor (an ordinary muted prompt theme) it
+#      then ghost-strips to nothing and falls out of the classifier as `empty` -
+#      a dead shell, reported injectable, with layer 3 never consulted.
+#   3. fm_composer_classify_content evaluates the hardcoded shell-glyph rule
 #      BEFORE the configurable agent-glyph match, so even a set handed straight
 #      to it by a caller cannot promote a bare shell prompt to `empty`.
 FM_COMPOSER_SHELL_GLYPHS='> $ % #'
@@ -247,8 +256,13 @@ FM_COMPOSER_AGENT_GLYPHS=$(fm_composer_sanitize_agent_glyphs \
 # starts with none. [glyphs] overrides the glyph set for this call. The set is
 # split on ASCII whitespace, and pathname expansion is disabled around the split
 # so a glob character in an operator-supplied set stays literal.
+#
+# A SHELL prompt glyph in the set is skipped rather than matched, whatever set is
+# handed in - layer 2 of the dead-shell rule (see the glyph-set comment above).
+# This is the only shell-glyph guard an adapter's structural row detection has, so
+# it lives here at the shared chokepoint rather than in any one caller.
 fm_composer_leading_agent_glyph() {  # <content> [glyphs]
-  local content=$1 glyphs=${2:-$FM_COMPOSER_AGENT_GLYPHS} g restore_glob=0
+  local content=$1 glyphs=${2:-$FM_COMPOSER_AGENT_GLYPHS} g shell_g restore_glob=0
   FM_COMPOSER_MATCHED_GLYPH=''
   [ -n "$content" ] || return 1
   case $- in *f*) : ;; *) restore_glob=1 ;; esac
@@ -257,6 +271,9 @@ fm_composer_leading_agent_glyph() {  # <content> [glyphs]
   set -- $glyphs
   if [ "$restore_glob" = 1 ]; then set +f; fi
   for g in "$@"; do
+    for shell_g in $FM_COMPOSER_SHELL_GLYPHS; do
+      if [ "$g" = "$shell_g" ]; then continue 2; fi
+    done
     case "$content" in
       "$g"*) FM_COMPOSER_MATCHED_GLYPH=$g; return 0 ;;
     esac
