@@ -373,7 +373,10 @@ test_policy_cli_direct() {
 # --- per-harness wiring -----------------------------------------------------
 
 test_scripts_are_shellcheck_clean() {
-  command -v shellcheck >/dev/null 2>&1 || { pass "shellcheck not installed, skipping"; return; }
+  if ! command -v shellcheck >/dev/null 2>&1; then
+    pass "shellcheck not installed, skipping"
+    return 0
+  fi
   shellcheck "$ROOT/bin/fm-cd-pretool-check.sh" >/dev/null 2>&1 \
     || fail "bin/fm-cd-pretool-check.sh is not shellcheck-clean"
   pass "bin/fm-cd-pretool-check.sh is shellcheck-clean"
