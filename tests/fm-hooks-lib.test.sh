@@ -213,7 +213,7 @@ make_no_timeout_path() {
   local case_dir=$1 minbin bin src
   minbin="$case_dir/minbin"
   mkdir -p "$minbin"
-  for bin in bash env sleep mktemp rm; do
+  for bin in bash env sleep mktemp mkfifo rmdir head cat rm; do
     src=$(command -v "$bin") || fail "watchdog: '$bin' not found on PATH"
     ln -sf "$src" "$minbin/$bin"
   done

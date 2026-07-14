@@ -50,6 +50,14 @@
 # by another user and nothing is left behind in TMPDIR even if firstmate is
 # interrupted mid-hook.
 #
+# Everything here stays within bash 3.2, the interpreter stock macOS ships as
+# /bin/bash and the floor every firstmate script is held to (tests/fm-bash32.test.sh
+# parses the whole shipped bin/ surface under it). That rules out 'coproc' and
+# 'read -N' for the capture path, so the pipe into the cap writer is a private
+# FIFO and the byte-exact reads are 'head -c'. A host missing mkfifo or head keeps
+# working: the capture is simply skipped and the hook's stderr is discarded, the
+# same degradation as a host where no private temp file can be created.
+#
 # Each hook receives its values both as positional arguments and as FM_HOOK_*
 # environment variables, so a hook can read whichever is convenient; the
 # per-hook argument and environment sets are listed in docs/extension-points.md.
@@ -90,6 +98,48 @@ fm_hook_errfile() {
   printf '%s\n' "$file"
 }
 
+# fm_hook_fifo
+# Print the path of a freshly created private FIFO to carry one hook's stderr
+# into the cap writer, so the on-disk capture is bounded by firstmate rather than
+# by the hook's restraint. mkfifo never follows a symlink and never clobbers an
+# existing name, so the pid-keyed fallback used when mktemp is unavailable is safe
+# on a shared TMPDIR too. Prints nothing when no FIFO could be created, which the
+# caller reads as "discard the stderr". Always returns 0.
+fm_hook_fifo() {
+  local dir="${TMPDIR:-/tmp}" tmpdir="" candidate n=0
+  tmpdir=$(umask 077; mktemp -d "${dir%/}/fm-hook-cap.XXXXXX" 2>/dev/null) || tmpdir=""
+  if [ -n "$tmpdir" ]; then
+    if mkfifo -m 600 "$tmpdir/err" 2>/dev/null; then
+      printf '%s\n' "$tmpdir/err"
+      return 0
+    fi
+    rm -rf "$tmpdir" 2>/dev/null || true
+  fi
+  while [ "$n" -lt 20 ]; do
+    candidate="${dir%/}/fm-hook-cap.$$.$n"
+    if mkfifo -m 600 "$candidate" 2>/dev/null; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+    n=$((n + 1))
+  done
+  printf '\n'
+}
+
+# fm_hook_fifo_cleanup <fifo-path>
+# Unlink a FIFO from fm_hook_fifo, and the private directory it was created in
+# when it had one, once both of its ends are open. Always returns 0.
+fm_hook_fifo_cleanup() {
+  local fifo=${1:-} dir
+  [ -n "$fifo" ] || return 0
+  rm -f "$fifo" 2>/dev/null || true
+  dir=${fifo%/*}
+  case "${dir##*/}" in
+    fm-hook-cap.*) rmdir "$dir" 2>/dev/null || true ;;
+  esac
+  return 0
+}
+
 # fm_hook_max_stderr_bytes
 # Print the stderr cap, FM_HOOK_STDERR_MAX_BYTES (default 65536), ignoring a
 # non-numeric setting. Always returns 0.
@@ -102,7 +152,7 @@ fm_hook_max_stderr_bytes() {
 }
 
 # fm_hook_cap_writer <max>
-# Copy stdin - the pipe the hook writes its stderr into - to fd 8, the private,
+# Copy stdin - the FIFO the hook writes its stderr into - to fd 8, the private,
 # already-unlinked capture file, keeping at most <max>+1 bytes of it on disk and
 # reading and discarding everything past that. The one byte over the cap is what
 # lets fm_hook_drain_errfd tell a capped stream from an exactly-cap-sized one, so
@@ -111,40 +161,43 @@ fm_hook_max_stderr_bytes() {
 # on-disk size is bounded by firstmate rather than by the hook's restraint: a
 # looping hook - or a background descendant that outlives it still holding the
 # pipe - can neither grow the file until TMPDIR is full nor block on a pipe nobody
-# reads. Reads on a timeout, so a partial chunk still reaches the file while such
-# a survivor keeps the pipe open and EOF never comes. Builtins only, so it works
-# on a minimal PATH. Always returns 0.
+# reads, because the 'cat' below keeps draining the pipe into /dev/null for as
+# long as any writer holds it. Always returns 0.
 fm_hook_cap_writer() {
   local limit=$(($1 + 1))
-  local chunk rc keep written=0 fd=3
-  local LC_ALL=C
+  local fd=3
   # This is the one process that can outlive the hook - a descendant that survives
   # it keeps the pipe open, so this keeps reading - which means it must hold none
   # of firstmate's own descriptors, or it would stall a caller capturing
-  # firstmate's output exactly as the orphan itself would. Inheriting them is not
-  # hypothetical: bash saves the descriptors it redirects for a coprocess to high
-  # fds in this child, so firstmate's stdout and stderr are both still in here,
-  # alongside anything else the caller holds open (a lock, the capture file's read
-  # end). Everything but stdin (the hook's stderr), stdout (the pipe whose EOF
-  # tells firstmate this writer is done), and fd 8 (the capture file) is dropped.
+  # firstmate's output exactly as the orphan itself would. Its stdout and stderr
+  # are detached where it is launched; everything else the caller holds open (a
+  # lock, the capture file's read end) is dropped here, keeping only fd 8, the
+  # capture file it is being forked to own.
   while [ "$fd" -le 30 ]; do
     [ "$fd" -eq 8 ] || eval "exec $fd>&-" 2>/dev/null || true
     fd=$((fd + 1))
   done
-  exec 2>/dev/null || true
-  while :; do
-    chunk=""
-    rc=0
-    IFS= read -r -N 4096 -t 1 chunk || rc=$?
-    if [ -n "$chunk" ] && [ "$written" -lt "$limit" ]; then
-      keep=${chunk:0:$((limit - written))}
-      printf '%s' "$keep" >&8 || true
-      written=$((written + ${#keep}))
-    fi
-    # rc 0 is a full chunk and anything above 128 is the read's own timeout; only
-    # a plain failure means EOF, which is the one thing that ends the drain.
-    [ "$rc" -eq 0 ] || [ "$rc" -gt 128 ] || break
+  head -c "$limit" >&8 2>/dev/null || true
+  # The file is now full, so hand it to nobody else and keep only the drain: 'cat'
+  # inherits this stdin at the byte 'head' stopped on and swallows the rest.
+  exec 8>&-
+  cat >/dev/null 2>/dev/null || true
+  return 0
+}
+
+# fm_hook_wait_pid <pid> <seconds>
+# Wait up to <seconds> for a child to exit, polling in sub-second ticks, and reap
+# it if it did. A child that is still alive is left alone rather than waited on,
+# so a caller can never be blocked by one. Always returns 0.
+fm_hook_wait_pid() {
+  local pid=${1:-} secs=$2 waited=0 ticks
+  [ -n "$pid" ] || return 0
+  ticks=$((secs * 5))
+  while [ "$waited" -lt "$ticks" ] && kill -0 "$pid" 2>/dev/null; do
+    sleep 0.2 || true
+    waited=$((waited + 1))
   done
+  kill -0 "$pid" 2>/dev/null || wait "$pid" 2>/dev/null || true
   return 0
 }
 
@@ -153,37 +206,29 @@ fm_hook_cap_writer() {
 # whose file is already unlinked - to firstmate's stderr, up to
 # FM_HOOK_STDERR_MAX_BYTES (default 65536). Beyond that the rest is discarded and
 # the truncation is warned, so a chatty or looping hook cannot flood a caller that
-# captures firstmate's output. Reads in fixed chunks with builtins only, so it
-# works on a minimal PATH and an enormous single line is bounded too. Returns 0.
+# captures firstmate's output. Returns 0.
 fm_hook_drain_errfd() {
   local hook_name=$1 task_label=$2
-  local chunk relayed=0 truncated=0 tail_char=""
-  # 'read -N' and ${#chunk} count characters, so the cap is only a byte cap in a
-  # single-byte locale; without this a multibyte hook's stderr relays several
-  # times FM_HOOK_STDERR_MAX_BYTES. Bash re-reads the locale on assignment and
-  # again when this local goes out of scope, so the caller's locale is unchanged.
+  local content truncated=0 max
+  # ${#var} and substring expansion count characters, so the cap is only a byte
+  # cap in a single-byte locale; without this a multibyte hook's stderr relays
+  # several times FM_HOOK_STDERR_MAX_BYTES. Bash re-reads the locale on
+  # assignment and again when this local goes out of scope, so the caller's locale
+  # is unchanged.
   local LC_ALL=C
-  local max
   max=$(fm_hook_max_stderr_bytes)
-  while [ "$relayed" -lt "$max" ]; do
-    chunk=""
-    IFS= read -r -N 4096 chunk <&9 || true
-    [ -n "$chunk" ] || break
-    if [ "$((relayed + ${#chunk}))" -gt "$max" ]; then
-      chunk=${chunk:0:$((max - relayed))}
-      truncated=1
-    fi
-    printf '%s' "$chunk" >&2
-    relayed=$((relayed + ${#chunk}))
-    tail_char=${chunk: -1}
-  done
-  if [ "$truncated" -eq 0 ] && [ "$relayed" -ge "$max" ]; then
-    chunk=""
-    IFS= read -r -N 1 chunk <&9 || true
-    [ -z "$chunk" ] || truncated=1
+  # fm_hook_cap_writer already bounded the file at max+1 bytes, so reading all of
+  # it is bounded too; the byte over the cap is what marks the stream truncated.
+  # The 'x' sentinel keeps the trailing newlines the substitution would strip.
+  content=$(head -c "$((max + 1))" <&9 2>/dev/null; printf x)
+  content=${content%x}
+  if [ "${#content}" -gt "$max" ]; then
+    content=${content:0:$max}
+    truncated=1
   fi
-  if [ -n "$tail_char" ] && [ "$tail_char" != $'\n' ]; then
-    printf '\n' >&2
+  if [ -n "$content" ]; then
+    printf '%s' "$content" >&2
+    [ "${content: -1}" = $'\n' ] || printf '\n' >&2
   fi
   if [ "$truncated" -eq 1 ]; then
     echo "warning: $hook_name hook stderr truncated after ${max} bytes for $task_label; the rest was discarded" >&2
@@ -214,36 +259,35 @@ fm_hook_run() {
   case "$budget" in
     ''|*[!0-9]*) budget=120 ;;
   esac
-  local task_label=${1:-} timed_out=0 hook_err have_errfd=0 cap_done_fd=
-  # fd 8 writes the capture file and fd 9 reads it back; the file is unlinked at
+  local task_label=${1:-} timed_out=0 hook_err hook_fifo have_errfd=0 cap_pid=
+  # fd 7 writes the capture file and fd 9 reads it back; the file is unlinked at
   # once, so nothing survives an interrupt and only these descriptors can reach
-  # it. The hook gets neither: its stderr is a pipe into fm_hook_cap_writer, which
-  # owns fd 8 and is what keeps the file inside the stderr cap no matter how much
-  # the hook, or a descendant that outlives it, writes.
+  # it. The hook gets neither: its stderr (fd 8) is a FIFO into fm_hook_cap_writer,
+  # which is forked owning fd 7 as its own fd 8 and is what keeps the file inside
+  # the stderr cap no matter how much the hook, or a descendant that outlives it,
+  # writes.
   hook_err=$(fm_hook_errfile)
+  hook_fifo=$(fm_hook_fifo)
   # SC2094 reads this as reading and writing one file by accident; opening both
-  # ends of the same file is the point - fd 8 is what the cap writer writes the
+  # ends of the same file is the point - fd 7 is what the cap writer writes the
   # captured stderr to and fd 9 is how the runner reads it back once the file is
   # unlinked.
   # shellcheck disable=SC2094
-  if [ -n "$hook_err" ] && exec 8>"$hook_err" 9<"$hook_err"; then
+  if [ -n "$hook_err" ] && [ -n "$hook_fifo" ] && exec 7>"$hook_err" 9<"$hook_err"; then
     have_errfd=1
     rm -f "$hook_err" 2>/dev/null || true
-    # The cap writer forks here, inheriting fd 8 (the file) and reading the hook's
-    # stderr from its stdin pipe. A previous hook's cap writer can still be alive
-    # draining an orphan's pipe, and bash warns when it replaces a live coproc;
-    # that warning is noise here, not a problem, so it is kept out of firstmate's
-    # stderr.
-    { coproc FM_HOOK_CAP { fm_hook_cap_writer "$(fm_hook_max_stderr_bytes)"; } } 2>/dev/null
-    # Copied now: bash clears the array once it reaps the cap writer, and the
-    # relay below still needs its stdout to wait on.
-    cap_done_fd=${FM_HOOK_CAP[0]}
-    # fd 8 becomes the pipe into the cap writer, which now solely owns the file.
-    # A plain fd, not the coproc's own: bash closes coproc descriptors in every
-    # subshell, and the watchdog path runs the hook as a background job.
-    exec 8>&"${FM_HOOK_CAP[1]}"
-    eval "exec ${FM_HOOK_CAP[1]}>&-"
+    # Opening the FIFO read-write cannot block on a reader, so the runner is safe
+    # even if the cap writer never comes up; the writer's own read-only open then
+    # finds this write end already there and cannot block either.
+    exec 8<>"$hook_fifo"
+    fm_hook_cap_writer "$(fm_hook_max_stderr_bytes)" \
+      < "$hook_fifo" 8>&7 >/dev/null 2>/dev/null &
+    cap_pid=$!
+    exec 7>&-
+    fm_hook_fifo_cleanup "$hook_fifo"
   else
+    [ -z "$hook_err" ] || rm -f "$hook_err" 2>/dev/null || true
+    fm_hook_fifo_cleanup "$hook_fifo"
     exec 8>/dev/null
   fi
   # Every launch below hands the hook stdout on /dev/null and stderr on a copy of
@@ -298,16 +342,14 @@ fm_hook_run() {
     fi
   fi
   if [ "$have_errfd" -eq 1 ]; then
-    # Closing firstmate's end of the pipe is EOF for the cap writer, which then
-    # flushes and exits, closing its stdout - so reading that stdout to EOF is how
-    # firstmate knows the capture is complete before it relays it. A descendant
-    # that outlived the hook still holds the pipe, so the cap writer cannot exit
-    # then; the read's timeout is what keeps such an orphan from stalling the
-    # relay, and the cap writer's own read timeout has already flushed the hook's
-    # stderr to the file by the time it expires.
+    # Closing firstmate's end of the FIFO is EOF for the cap writer, which then
+    # finishes and exits - so waiting for it to exit is how firstmate knows the
+    # capture is complete before it relays it. A descendant that outlived the hook
+    # still holds the FIFO, so the cap writer cannot exit then; the wait's bound is
+    # what keeps such an orphan from stalling the relay, and the hook's own stderr
+    # has long since reached the file by the time it expires.
     exec 8>&-
-    IFS= read -r -t 3 -u "$cap_done_fd" _ 2>/dev/null || true
-    eval "exec ${cap_done_fd}<&-" 2>/dev/null || true
+    fm_hook_wait_pid "$cap_pid" 3
     fm_hook_drain_errfd "$hook_name" "$task_label"
     exec 9<&-
   else

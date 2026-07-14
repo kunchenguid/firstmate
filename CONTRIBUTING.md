@@ -41,7 +41,9 @@ See the [no-mistakes quick start](https://kunchenguid.github.io/no-mistakes/star
   A local `config/backlog-backend=manual` opt-out forces firstmate's routine backlog updates to hand-editing and stays gitignored; validated secondmate handoffs still delegate through `tasks-axi mv`.
   A local `config/backend` file explicitly overrides runtime auto-detection for new task endpoints and stays gitignored; spawn-supported values are `tmux` plus experimental `herdr`, `zellij`, `orca`, and `cmux`, while `codex-app` is documented only in `docs/codex-app-backend.md`.
   It does not make `data/` tracked.
-- Helper scripts in `bin/` are plain bash.
+- Helper scripts in `bin/` are plain bash, and bash 3.2 - the interpreter stock macOS ships as `/bin/bash` - is the floor they must parse and run under.
+  A bash 4+ only construct (`coproc`, `read -N`, `declare -A`, `mapfile`, `${var^^}`) is not a style nit but a parse error that kills the script on a stock-macOS home before its first line runs, and both CI and the local suite run bash 5, which parses them happily.
+  `tests/fm-bash32.test.sh` is the guard: it parses the whole shipped `bin/` surface under a real bash 3.2 when the host has one, and scans for those constructs everywhere else.
   Each starts with a usage header comment; keep it accurate when you change behavior.
   Test scripts and helpers in `tests/` are plain bash too.
   `bin/fm-lint.sh` must pass: it is the single owner of the lint definition (the shellcheck file set, config, and pinned shellcheck version), and both CI and the no-mistakes pre-push gate run it, so local and CI can never diverge.
