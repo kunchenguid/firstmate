@@ -186,7 +186,7 @@ remove_grok_turnend_auth() {
 validate_pr_poll_cleanup() {
   local state_dir=$1 id=$2 quarantine state_device artifact
   fm_pr_task_id_valid "$id" || return 0
-  for artifact in "$state_dir/$id.check.sh" "$state_dir/$id.pr-poll"; do
+  for artifact in "$state_dir/$id.check.sh" "$state_dir/$id.pr-poll" "$state_dir/$id.check-trust"; do
     if [ ! -L "$artifact" ] && [ -d "$artifact" ]; then
       echo "REFUSED: task PR-check artifact is a directory; preserving task state." >&2
       return 1
@@ -216,7 +216,7 @@ validate_pr_poll_cleanup() {
 remove_pr_poll_artifacts() {
   local state_dir=$1 id=$2 quarantine artifact
   validate_pr_poll_cleanup "$state_dir" "$id" || return 1
-  rm -f "$state_dir/$id.check.sh" "$state_dir/$id.pr-poll" || return 1
+  rm -f "$state_dir/$id.check.sh" "$state_dir/$id.pr-poll" "$state_dir/$id.check-trust" || return 1
   if fm_pr_task_id_valid "$id"; then
     quarantine="$state_dir/.pr-check-quarantine"
     if [ -d "$quarantine" ] && [ ! -L "$quarantine" ]; then

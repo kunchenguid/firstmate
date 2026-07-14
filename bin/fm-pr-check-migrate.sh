@@ -33,6 +33,8 @@ fi
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-x-lib.sh
 . "$SCRIPT_DIR/fm-x-lib.sh"
+# shellcheck source=bin/fm-check-lib.sh
+. "$SCRIPT_DIR/fm-check-lib.sh"
 
 umask 077
 if [ ! -e "$STATE" ] && [ ! -L "$STATE" ]; then
@@ -192,6 +194,7 @@ migration_needed() {
       continue
     fi
     id=$(basename "$check" .check.sh)
+    fm_custom_check_registered "$STATE" "$id" && continue
     if ! fm_pr_poll_artifacts_valid "$STATE" "$id" "$TEMPLATE"; then
       return 0
     fi
@@ -208,6 +211,7 @@ unsafe_checks_absent() {
       continue
     fi
     id=$(basename "$check" .check.sh)
+    fm_custom_check_registered "$STATE" "$id" && continue
     fm_pr_poll_artifacts_valid "$STATE" "$id" "$TEMPLATE" || return 1
   done
 }
@@ -762,6 +766,7 @@ if migration_needed; then
       continue
     fi
     id=$(basename "$check" .check.sh)
+    fm_custom_check_registered "$STATE" "$id" && continue
     fm_pr_poll_artifacts_valid "$STATE" "$id" "$TEMPLATE" && continue
 
     if fm_pr_task_id_valid "$id"; then

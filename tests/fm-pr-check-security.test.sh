@@ -16,6 +16,7 @@ MIGRATE="$ROOT/bin/fm-pr-check-migrate.sh"
 POLL="$ROOT/bin/fm-pr-poll.sh"
 WATCH="$ROOT/bin/fm-watch.sh"
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
+REGISTER="$ROOT/bin/fm-check-register.sh"
 TMP_ROOT=$(fm_test_tmproot fm-pr-check-security)
 BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
 REAL_CP=$(command -v cp)
@@ -1491,6 +1492,37 @@ SH
     "watcher did not continue the healthy authenticated poll"
   [ ! -e "$state/task-a.check.sh" ] && [ ! -L "$state/task-a.check.sh" ] \
     || fail "watcher continuation rearmed the unsafe legacy check"
+  rm -f "$state/a-replaced.check.sh" "$state/.last-check" "$x_poll_marker"
+  printf '%s\n' '#!/usr/bin/env bash' "printf '%s\\n' custom-ready" > "$state/b-custom.check.sh"
+  chmod 0700 "$state/b-custom.check.sh"
+  FM_HOME="$dir/home" "$REGISTER" b-custom > "$dir/register.out" \
+    || fail "custom check registration failed"
+  assert_grep 'registered: state/b-custom.check.sh' "$dir/register.out" \
+    "custom check registration was not visible"
+  set +e
+  FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$dir/root" FM_TEST_X_POLL_MARKER="$x_poll_marker" \
+    FM_TEST_GH_STATE=OPEN FM_POLL=0 FM_CHECK_INTERVAL=0 FM_SIGNAL_GRACE=0 \
+    PATH="$fakebin:$BASE_PATH" "$WATCH" > "$dir/watch-custom.out" 2> "$dir/watch-custom.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "registered custom check did not run: $(cat "$dir/watch-custom.err")"
+  assert_grep "check: $state/b-custom.check.sh: custom-ready" "$dir/watch-custom.out" \
+    "registered custom check output did not wake the watcher"
+  printf '%s\n' '#!/usr/bin/env bash' "printf '%s\\n' custom-replacement-ran" > "$state/b-custom.check.sh"
+  chmod 0700 "$state/b-custom.check.sh"
+  rm -f "$state/.last-check" "$x_poll_marker"
+  set +e
+  FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$dir/root" FM_TEST_X_POLL_MARKER="$x_poll_marker" \
+    FM_TEST_GH_STATE=OPEN FM_POLL=0 FM_CHECK_INTERVAL=0 FM_SIGNAL_GRACE=0 \
+    PATH="$fakebin:$BASE_PATH" "$WATCH" > "$dir/watch-custom-replaced.out" 2> "$dir/watch-custom-replaced.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "watcher failed while rejecting a replaced custom check: $(cat "$dir/watch-custom-replaced.err")"
+  assert_no_grep 'custom-replacement-ran' "$dir/watch-custom-replaced.out" \
+    "watcher executed a custom check after its registered bytes changed"
+  [ -e "$x_poll_marker" ] || fail "custom replacement rejection suppressed the trusted X poll"
+  assert_grep "check: rejected unauthenticated state checks: $state/b-custom.check.sh" \
+    "$dir/watch-custom-replaced.out" "watcher did not surface the replaced custom check"
   printf '%s\n' '#!/usr/bin/env bash' "printf '%s\\n' forged-x-ran" > "$state/x-watch.check.sh"
   chmod 0700 "$state/x-watch.check.sh"
   rm -f "$state/.last-check" "$x_poll_marker"
@@ -1504,7 +1536,7 @@ SH
   assert_no_grep 'forged-x-ran' "$dir/watch-replaced.out" \
     "watcher executed a filename-only X shim replacement"
   [ ! -e "$x_poll_marker" ] || fail "watcher trusted the replaced X shim identity"
-  assert_grep "check: rejected unauthenticated state checks: $state/a-replaced.check.sh $state/x-watch.check.sh" \
+  assert_grep "check: rejected unauthenticated state checks: $state/b-custom.check.sh $state/x-watch.check.sh" \
     "$dir/watch-replaced.out" "watcher did not surface rejected state check replacements"
   [ -f "$state/.pr-check-quarantine/task-a.diagnostic.failure-canonical" ] \
     || fail "watcher continuation lost the durable repair obligation"
@@ -1523,6 +1555,7 @@ test_teardown_removes_poll_artifacts() {
     'mode=local-only'
   printf 'check\n' > "$dir/home/state/task-a.check.sh"
   printf 'data\n' > "$dir/home/state/task-a.pr-poll"
+  printf 'trust\n' > "$dir/home/state/task-a.check-trust"
   mkdir -p "$dir/home/state/.pr-check-quarantine"
   printf 'legacy\n' > "$dir/home/state/.pr-check-quarantine/task-a.check.abc123"
   cat > "$fakebin/tmux" <<'SH'
@@ -1537,6 +1570,7 @@ SH
     || fail "teardown cleanup fixture failed"
   [ ! -e "$dir/home/state/task-a.check.sh" ] || fail "teardown left the runnable check"
   [ ! -e "$dir/home/state/task-a.pr-poll" ] || fail "teardown left the sidecar"
+  [ ! -e "$dir/home/state/task-a.check-trust" ] || fail "teardown left the custom check registration"
   ! find "$dir/home/state/.pr-check-quarantine" -name 'task-a.*' -print 2>/dev/null | grep . >/dev/null \
     || fail "teardown left task quarantine artifacts"
 

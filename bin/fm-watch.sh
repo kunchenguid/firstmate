@@ -72,6 +72,8 @@ mkdir -p "$STATE"
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-x-lib.sh
 . "$SCRIPT_DIR/fm-x-lib.sh"
+# shellcheck source=bin/fm-check-lib.sh
+. "$SCRIPT_DIR/fm-check-lib.sh"
 
 WATCH_LOCK="$STATE/.watch.lock"
 WATCH_PATH="$SCRIPT_DIR/fm-watch.sh"
@@ -666,7 +668,12 @@ while :; do
           repo=$FM_PR_DATA_REPO
           number=$FM_PR_DATA_NUMBER
           out=$(run_check "$SCRIPT_DIR/fm-pr-poll.sh" --validated "$url" "$owner" "$repo" "$number")
+        elif fm_custom_check_snapshot_prepare "$STATE" "$id"; then
+          custom_snapshot=$FM_CUSTOM_CHECK_SNAPSHOT
+          out=$(run_check "$custom_snapshot")
+          fm_custom_check_snapshot_cleanup
         else
+          fm_custom_check_snapshot_cleanup
           rejected_checks="$rejected_checks $c"
           continue
         fi
