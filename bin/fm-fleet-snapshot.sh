@@ -686,8 +686,9 @@ registry_secondmates_json() {
     if [ "$bytes" -gt "$max_bytes" ]; then
       byte_truncated=true
       content=$(printf "%s" "$content" | LC_ALL=C head -c "$max_bytes")
+      nl=$'\n'
       case "$content" in
-        *$'\n'*) content=${content%$'\n'*} ;;
+        *"$nl"*) content=${content%"$nl"*} ;;
         *) content= ;;
       esac
     fi
@@ -783,8 +784,9 @@ bounded_parent_activities_json() {  # <status-file>
     byte_truncated=false
     if [ "$size" -gt "$max_bytes" ]; then
       byte_truncated=true
+      nl=$'\n'
       case "$content" in
-        *$'\n'*) content=${content#*$'\n'} ;;
+        *"$nl"*) content=${content#*"$nl"} ;;
         *) content= ;;
       esac
     fi
