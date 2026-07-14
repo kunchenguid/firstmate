@@ -335,12 +335,19 @@ test_base_branch_step_resumes_an_existing_branch() {
   pass "fm-brief.sh: --base checks for a relaunch before fetching the base, so a gone base cannot dead-end a resume"
 }
 
-# A failed fetch is not a verdict about the base. A branch that is gone from origin and an
-# origin that could not be reached fail identically, so a crewmate that reads "the fetch
-# failed" as "the base merged" would fall back to the default branch on a network blip - which
-# is how a feature branch's unmerged work reaches the default branch. The brief must hand it
-# the command that tells the two apart, not an inference from an exit status.
-test_base_brief_never_infers_the_base_state_from_a_failed_fetch() {
+# THE CREWMATE ASKS THE SAME QUESTION EVERY SCRIPT ASKS: is `<base>` still a LIVE feature base
+# - on origin, AND still carrying something the default branch does not already have? A brief
+# that asked only whether the fetch worked would have no branch at all for the ordinary case of
+# a base that merged and kept its branch (delete-on-merge is off by default): every command
+# would succeed, the crewmate would stack on a spent base, and the merge gate would refuse the
+# finished PR.
+#
+# And it never reads the answer off a command's exit status. A gone branch and an origin that
+# could not be reached fail identically, so a crewmate that read "the fetch failed" as "the base
+# merged" would fall back to the default branch on a network blip - which is how a feature
+# branch's unmerged work reaches the default branch. Every answer liveness can return gets its
+# own instruction; none of them is inferred.
+test_base_brief_asks_the_liveness_question_and_answers_every_outcome() {
   local home id brief
   home="$TMP_ROOT/base-probe-home"
   mkdir -p "$home/data"
@@ -350,11 +357,48 @@ test_base_brief_never_infers_the_base_state_from_a_failed_fetch() {
   brief="$home/data/$id/brief.md"
   assert_grep "git ls-remote --exit-code --heads origin refs/heads/feature/x" "$brief" \
     "base-probe: the brief gives the crewmate no way to tell a gone base from an unreachable origin"
-  assert_grep "Exit 2 means origin genuinely has no such branch" "$brief" \
-    "base-probe: the brief does not say which exit code actually means the branch is gone"
+  assert_grep "git rev-list --count origin/feature/x ^origin/HEAD" "$brief" \
+    "base-probe: the brief never has the crewmate ask whether the base still carries anything the default branch lacks - the half of liveness a mere existence check misses"
+  assert_grep "blocked: intended base feature/x carries nothing the default branch does not already have" "$brief" \
+    "base-probe: an absorbed base has no instruction, so the crewmate would stack on a spent base and have its PR refused at the merge gate"
+  assert_grep "blocked: intended base feature/x is gone from origin" "$brief" \
+    "base-probe: a base that is gone has no instruction"
   assert_grep "blocked: origin could not be asked about intended base feature/x" "$brief" \
-    "base-probe: an infrastructure failure has no distinct report, so it would masquerade as a gone base"
-  pass "fm-brief.sh: --base tells a gone base from an unreachable origin instead of inferring it from a failed fetch"
+    "base-probe: an infrastructure failure has no distinct report, so it would masquerade as a verdict about the base"
+  assert_no_grep "If that fetch fails" "$brief" \
+    "base-probe: the brief still has the crewmate read the base's state off a command that failed"
+  pass "fm-brief.sh: --base has the crewmate ask the liveness question and gives it an instruction for every answer"
+}
+
+# A base merges most often exactly while its child is in flight, so the answer at step 1 is not
+# the answer at PR time. Both PR-based modes must re-ask before they point a PR at the base -
+# otherwise the crewmate targets a base that has since been absorbed, and the merge gate refuses
+# a PR the brief told it to open.
+test_base_brief_reasks_liveness_before_pointing_a_pr_at_the_base() {
+  local home id brief proj
+  home="$TMP_ROOT/base-reask-home"
+  mkdir -p "$home/data"
+
+  id="brief-base-reask-nm"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --base feature/x >/dev/null 2>&1 \
+    || fail "base-reask: fm-brief.sh --base should exit 0 for no-mistakes"
+  brief="$home/data/$id/brief.md"
+  assert_grep "re-ask what state \`feature/x\` is in" "$brief" \
+    "base-reask: the no-mistakes brief retargets the PR at the base without re-asking whether that base is still live"
+  assert_grep "Only \`live\` means you retarget" "$brief" \
+    "base-reask: the no-mistakes brief does not gate the retarget on the base still being live"
+
+  proj=direct-proj
+  printf -- '- %s [direct-PR] - test project (added 2026-07-14)\n' "$proj" > "$home/data/projects.md"
+  id="brief-base-reask-dpr"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" "$proj" --base feature/x >/dev/null 2>&1 \
+    || fail "base-reask: fm-brief.sh --base should exit 0 for direct-PR"
+  brief="$home/data/$id/brief.md"
+  assert_grep "re-ask what state \`feature/x\` is in" "$brief" \
+    "base-reask: the direct-PR brief opens the PR against the base without re-asking whether that base is still live"
+  assert_grep "Only \`live\` means you open the PR against \`feature/x\`" "$brief" \
+    "base-reask: the direct-PR brief does not gate 'pr create --base' on the base still being live"
+  pass "fm-brief.sh: --base has the crewmate re-ask the liveness question before it points a PR at the base"
 }
 
 
@@ -620,7 +664,8 @@ test_pause_verb_override_renders_all_brief_scaffolds
 test_base_no_mistakes_shapes_brief_and_records_nothing
 test_base_roots_branch_on_the_base
 test_base_branch_step_resumes_an_existing_branch
-test_base_brief_never_infers_the_base_state_from_a_failed_fetch
+test_base_brief_asks_the_liveness_question_and_answers_every_outcome
+test_base_brief_reasks_liveness_before_pointing_a_pr_at_the_base
 test_base_no_mistakes_brief_documents_the_real_recovery
 test_base_gate_precedes_the_done_terminator
 test_base_unfetchable_base_blocks_rather_than_guessing

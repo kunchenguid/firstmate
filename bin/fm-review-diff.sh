@@ -17,9 +17,10 @@
 # what the no-mistakes pipeline does to every head, and the state fm-pr-check.sh refuses - is
 # worse than useless as a diff base: the merge base is then the old fork point, so the diff
 # would show every default-branch commit since the fork as part of the crewmate's change.
-# Liveness and rootedness are asked with the same bin/fm-base-lib.sh predicates the guard
-# uses, in the same order, so review and the merge gate never tell different stories about
-# one head.
+# Liveness is bin/fm-base-lib.sh's fm_base_liveness - the one predicate every base-aware
+# consumer decides on, and the one owner of what "live" means - and rootedness is its
+# fm_base_head_rooted, asked in that order, so review and the merge gate can never tell
+# different stories about one head.
 #
 # In every case that rules the declared base out, this script falls back to the default branch
 # and SAYS SO in one line, rather than erroring or guessing: review is exactly what firstmate
@@ -138,6 +139,7 @@ if [ -n "$PR_URL" ]; then
     echo "warning: PR head unavailable; diff may lag the open PR (using local branch $BRANCH)" >&2
   fi
 fi
+git -C "$WT" rev-parse --verify --quiet "$COMPARE_REF^{commit}" >/dev/null || { echo "error: compare ref $COMPARE_REF does not resolve in $WT" >&2; exit 1; }
 
 # A task that declared a non-default intended base is reviewed against that base;
 # diffing it against the repo default would present the whole feature base's
@@ -148,30 +150,72 @@ if [ -n "$BASE_DECLARED" ] && ! fm_base_valid_branch_name "$BASE_DECLARED"; then
   exit 1
 fi
 BASE_BRANCH=${BASE_DECLARED:-$DEFAULT}
+# fm_base_liveness fetches the refs it compares, so whatever it settled on is already
+# current and must not be fetched a second time below.
+BASE_BRANCH_FETCHED=false
 
 HAS_ORIGIN=false
 if git -C "$PROJ" remote get-url origin >/dev/null 2>&1; then
   HAS_ORIGIN=true
 fi
 
-# A declared base is only the diff base while that branch is still on origin. Once it is
-# gone - or origin cannot be asked - review does not guess what became of it; it falls back
-# to the default branch and says so, which is the same call bin/fm-pr-check.sh's guard
-# makes on the same input (it defers that PR to a human). Review is never blocked by it:
-# what the fallback diff shows is everything the PR would land on the default branch, which
-# is exactly what firstmate needs while sorting the base out.
+# A declared base is the honest diff base only while it is a LIVE feature base - one that
+# still carries unmerged work of its own - AND the reviewed head is actually ROOTED in it.
+# Both are asked with the bin/fm-base-lib.sh predicates bin/fm-pr-check.sh's guard decides
+# on, in the same order, so review and the merge gate can never tell different stories about
+# one head.
+#
+# Liveness first, and for the same reason the guard asks it first: a base that is still on
+# origin but that the default branch has already absorbed carries nothing to diff against,
+# and rootedness cannot even be asked of it (every fork point with such a base is reachable
+# from the default branch, so a correctly stacked head reads UNROOTED and the warning below
+# would tell the reviewer something untrue about it).
+#
+# Then rootedness. A head the no-mistakes pipeline has rebased onto the default branch is not
+# rooted in the base: its merge base with the declared base is the OLD fork point, so a
+# three-dot diff against that base would show every default-branch commit since the fork as
+# part of the crewmate's change - the inflated diff this helper exists to prevent, arriving
+# from the other side. And that is precisely the head bin/fm-pr-check.sh refuses, which is
+# when firstmate is most likely to be running this.
+#
+# In every case that rules the declared base out, review falls back to the default branch and
+# SAYS SO, rather than erroring or guessing: what that diff shows is everything the PR would
+# land on the default branch, which is exactly what firstmate needs while sorting out a base
+# the guard has deferred or refused, so review is never the thing that is blocked.
 if [ -n "$BASE_DECLARED" ] && "$HAS_ORIGIN"; then
-  PROBE_RC=0
-  fm_base_probe_origin "$WT" "$BASE_DECLARED" || PROBE_RC=$?
-  case "$PROBE_RC" in
-    "$FM_BASE_PRESENT") ;;
-    "$FM_BASE_ABSENT")
+  LIVENESS_RC=0
+  fm_base_liveness "$WT" "$BASE_DECLARED" "$DEFAULT" || LIVENESS_RC=$?
+  case "$LIVENESS_RC" in
+    "$FM_BASE_LIVE")
+      ROOTED_RC=0
+      fm_base_head_rooted "$WT" "$FM_BASE_TIP" "$COMPARE_REF" "$FM_BASE_DEFAULT_SHA" \
+        || ROOTED_RC=$?
+      case "$ROOTED_RC" in
+        "$FM_BASE_HEAD_ROOTED") BASE_BRANCH_FETCHED=true ;;
+        "$FM_BASE_HEAD_UNROOTED")
+          echo "warning: task $ID declares intended base $BASE_DECLARED, but the reviewed head is not rooted in that base's history - it was rebased onto the default branch - so diffing against $BASE_DECLARED would present every $DEFAULT commit since the fork as part of this change; diffing against the default branch $DEFAULT instead, which shows what this head actually adds. This is the head bin/fm-pr-check.sh refuses before merge." >&2
+          BASE_BRANCH=$DEFAULT
+          BASE_BRANCH_FETCHED=true
+          ;;
+        *)
+          echo "warning: task $ID declares intended base $BASE_DECLARED, but the reviewed head shares no history with that base at all, so it cannot be the diff base; diffing against the default branch $DEFAULT instead" >&2
+          BASE_BRANCH=$DEFAULT
+          BASE_BRANCH_FETCHED=true
+          ;;
+      esac
+      ;;
+    "$FM_BASE_ABSORBED")
+      echo "warning: task $ID declares intended base $BASE_DECLARED, but that branch carries no commits $DEFAULT does not already have, so it is no longer a live feature base and is no longer a distinct diff base; diffing against the default branch $DEFAULT instead, which shows what this head actually adds" >&2
+      BASE_BRANCH=$DEFAULT
+      BASE_BRANCH_FETCHED=true
+      ;;
+    "$FM_BASE_GONE")
       echo "warning: task $ID declares intended base $BASE_DECLARED, but that branch no longer exists on origin, so it cannot be the diff base; diffing against the default branch $DEFAULT instead, which shows everything this PR would land on $DEFAULT" >&2
       BASE_BRANCH=$DEFAULT
       ;;
     *)
-      echo "warning: task $ID declares intended base $BASE_DECLARED, but origin could not be asked whether that branch still exists; diffing against the default branch $DEFAULT instead, which shows everything this PR would land on $DEFAULT" >&2
-      [ -z "$FM_BASE_PROBE_ERR" ] || printf '  git: %s\n' "$FM_BASE_PROBE_ERR" >&2
+      echo "warning: task $ID declares intended base $BASE_DECLARED, but whether it is still a live feature base could not be settled - $FM_BASE_LIVENESS_WHY; diffing against the default branch $DEFAULT instead, which shows everything this PR would land on $DEFAULT" >&2
+      [ -z "$FM_BASE_LIVENESS_ERR" ] || printf '  git: %s\n' "$FM_BASE_LIVENESS_ERR" >&2
       BASE_BRANCH=$DEFAULT
       ;;
   esac
@@ -185,10 +229,12 @@ fetch_tracking_ref() {  # <branch>; prints git's error on failure
 }
 
 if "$HAS_ORIGIN"; then
-  if ! FETCH_ERR=$(fetch_tracking_ref "$BASE_BRANCH"); then
-    echo "error: cannot fetch base branch $BASE_BRANCH from origin for task $ID" >&2
-    [ -z "$FETCH_ERR" ] || printf '  git: %s\n' "$FETCH_ERR" >&2
-    exit 1
+  if ! "$BASE_BRANCH_FETCHED"; then
+    if ! FETCH_ERR=$(fetch_tracking_ref "$BASE_BRANCH"); then
+      echo "error: cannot fetch base branch $BASE_BRANCH from origin for task $ID" >&2
+      [ -z "$FETCH_ERR" ] || printf '  git: %s\n' "$FETCH_ERR" >&2
+      exit 1
+    fi
   fi
   BASE="origin/$BASE_BRANCH"
 else
@@ -196,66 +242,6 @@ else
 fi
 
 git -C "$WT" rev-parse --verify --quiet "$BASE^{commit}" >/dev/null || { echo "error: base $BASE does not exist in $WT" >&2; exit 1; }
-git -C "$WT" rev-parse --verify --quiet "$COMPARE_REF^{commit}" >/dev/null || { echo "error: compare ref $COMPARE_REF does not resolve in $WT" >&2; exit 1; }
-
-# A declared base is the honest diff base only while it is a LIVE feature base - one that
-# still carries unmerged work of its own - AND the reviewed head is actually ROOTED in it.
-#
-# Liveness first, and for the same reason bin/fm-pr-check.sh asks it first: a base that is
-# still on origin but that the default branch has already absorbed carries nothing to diff
-# against, and rootedness cannot even be asked of it (every fork point with such a base is
-# reachable from the default branch, so a correctly stacked head reads UNROOTED and the
-# warning below would tell the reviewer something untrue about it).
-#
-# Then rootedness. A head the no-mistakes pipeline has rebased onto the default branch is not
-# rooted in the base: its merge base with the declared base is the OLD fork point, so a
-# three-dot diff against that base would show every default-branch commit since the fork as
-# part of the crewmate's change - the inflated diff this helper exists to prevent, arriving
-# from the other side. And that is precisely the head bin/fm-pr-check.sh refuses, which is
-# when firstmate is most likely to be running this. Same questions, same predicates, in the
-# same order, so review and the merge gate never tell different stories about one head.
-if [ -n "$BASE_DECLARED" ] && [ "$BASE_BRANCH" = "$BASE_DECLARED" ]; then
-  if "$HAS_ORIGIN"; then
-    if ! FETCH_ERR=$(fetch_tracking_ref "$DEFAULT"); then
-      echo "error: cannot fetch default branch $DEFAULT from origin for task $ID" >&2
-      [ -z "$FETCH_ERR" ] || printf '  git: %s\n' "$FETCH_ERR" >&2
-      exit 1
-    fi
-    DEFAULT_REF="origin/$DEFAULT"
-  else
-    DEFAULT_REF="$DEFAULT"
-  fi
-  git -C "$WT" rev-parse --verify --quiet "$DEFAULT_REF^{commit}" >/dev/null \
-    || { echo "error: default branch $DEFAULT_REF does not exist in $WT" >&2; exit 1; }
-
-  OWN_RC=0
-  fm_base_has_own_commits "$WT" "$BASE" "$DEFAULT_REF" || OWN_RC=$?
-  case "$OWN_RC" in
-    "$FM_BASE_HAS_OWN_COMMITS")
-      ROOTED_RC=0
-      fm_base_head_rooted "$WT" "$BASE" "$COMPARE_REF" "$DEFAULT_REF" || ROOTED_RC=$?
-      case "$ROOTED_RC" in
-        "$FM_BASE_HEAD_ROOTED") ;;
-        "$FM_BASE_HEAD_UNROOTED")
-          echo "warning: task $ID declares intended base $BASE_DECLARED, but the reviewed head is not rooted in that base's history - it was rebased onto the default branch - so diffing against $BASE_DECLARED would present every $DEFAULT commit since the fork as part of this change; diffing against the default branch $DEFAULT instead, which shows what this head actually adds. This is the head bin/fm-pr-check.sh refuses before merge." >&2
-          BASE=$DEFAULT_REF
-          ;;
-        *)
-          echo "warning: task $ID declares intended base $BASE_DECLARED, but the reviewed head shares no history with that base at all, so it cannot be the diff base; diffing against the default branch $DEFAULT instead" >&2
-          BASE=$DEFAULT_REF
-          ;;
-      esac
-      ;;
-    "$FM_BASE_NO_OWN_COMMITS")
-      echo "warning: task $ID declares intended base $BASE_DECLARED, but that branch carries no commits $DEFAULT does not already have, so it is no longer a live feature base and is no longer a distinct diff base; diffing against the default branch $DEFAULT instead, which shows what this head actually adds" >&2
-      BASE=$DEFAULT_REF
-      ;;
-    *)
-      echo "warning: task $ID declares intended base $BASE_DECLARED, but git could not count what that branch carries that $DEFAULT does not, so whether it is still a live feature base cannot be settled; diffing against the default branch $DEFAULT instead, which shows everything this head would land on $DEFAULT" >&2
-      BASE=$DEFAULT_REF
-      ;;
-  esac
-fi
 
 echo "diff base: $BASE"
 if git -C "$WT" diff --quiet "$BASE...$COMPARE_REF" --; then

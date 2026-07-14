@@ -6,16 +6,16 @@
 # to promote, so there is no link in the chain that could silently disarm fm-pr-check.sh's
 # guard by failing to hand the branch name along.
 #
-# Of a NEW declaration the spawn asks exactly two questions, both cheap and both about the
-# flag rather than about the base's fate: is that branch something other than the repo default
-# (--base means a NON-default base), and is it on origin at all? The first catches a
-# misunderstanding of the flag, the second a typo, and each costs a command instead of a whole
-# crewmate run. It asks nothing further - whether a base has merged, been squash-merged, or
-# been abandoned is not decidable from git without a guess, and this design does not guess:
-# bin/fm-pr-check.sh hands an unverifiable base to a human at the merge gate.
+# Of a NEW declaration the spawn asks exactly two questions, both cheap: is that branch
+# something other than the repo default (--base means a NON-default base), and is it still a
+# LIVE feature base - fm-base-lib.sh's fm_base_liveness, the SAME predicate bin/fm-pr-check.sh
+# decides on, so a spawn can never accept a base the merge gate would refuse. It asks nothing
+# further - whether a base that is gone merged, was squash-merged, or was abandoned is not
+# decidable from git without a guess, and this design does not guess: bin/fm-pr-check.sh hands
+# an unverifiable base to a human at the merge gate.
 #
 # Matrix:
-#   (a) --base <branch> on a base that is on origin -> meta records base=<branch>
+#   (a) --base <branch> on a live feature base -> meta records base=<branch>
 #   (b) no --base (the common case) -> meta records no base= line at all
 #   (c) an invalid branch name -> loud refusal, raised before any window or worktree exists
 #   (d) an accepted spawn does create both, so (c)'s assertions are live
@@ -24,6 +24,10 @@
 #   (f2) --base naming the repo DEFAULT branch -> the same early, loud refusal. --base means a
 #       NON-default base; a default-branch task needs no flag, and arming a feature-base guard
 #       against a branch with no feature history of its own is not a harmless no-op
+#   (f3) a declared base that is STILL ON ORIGIN but that the default branch has already
+#       absorbed -> the same early, loud refusal. Existing is not liveness: there is nothing
+#       to stack on and nothing for the guard to protect, so the run would end at the merge
+#       gate's refusal after the whole implementation and pipeline
 #   (g) --base is rejected in a batch spawn, where it could not name one task
 #   (h) a respawn without --base carries the recorded base= forward, because meta is
 #       rewritten wholesale and a base lost on recovery is a task unguarded
@@ -115,23 +119,42 @@ write_case_brief() {  # <home> <id> [declared_base]
   } > "$home/data/$id/brief.md"
 }
 
-# Give the project clone a real origin carrying <origin_base>, so `git ls-remote` in
-# the spawn resolves a tip for it. Pass an empty origin_base for an origin with no
-# feature branch at all.
+# Give the project clone a real origin carrying <origin_base> as a LIVE feature base - on
+# origin, and carrying a commit of its own that main does not have. That is what the spawn
+# asks about, so a fixture that branched <origin_base> at main's tip would be testing nothing:
+# such a branch exists but is not live, and the spawn refuses it (see the absorbed case).
+# Pass an empty origin_base for an origin with no feature branch at all.
 #
 # origin/HEAD and the bare repo's own HEAD are pinned to main the way a real `git clone`
 # would leave them, so the default branch resolves to main whatever the local
 # init.defaultBranch happens to be.
 make_project_origin() {
-  local case_dir=$1 proj=$2 origin_base=$3 origin
+  local case_dir=$1 proj=$2 origin_base=$3 origin scratch
   origin="$case_dir/origin.git"
   git init -q --bare "$origin"
   git -C "$proj" remote add origin "$origin"
   git -C "$proj" push -q origin HEAD:refs/heads/main
-  [ -z "$origin_base" ] || git -C "$proj" push -q origin "HEAD:refs/heads/$origin_base"
   git -C "$origin" symbolic-ref HEAD refs/heads/main
+  if [ -n "$origin_base" ]; then
+    scratch=$(origin_scratch "$case_dir")
+    git -C "$scratch" checkout -q -b "$origin_base" origin/main
+    printf 'feature base work\n' > "$scratch/base-only.txt"
+    git -C "$scratch" add base-only.txt
+    git_commit "$scratch" "work only $origin_base has"
+    git -C "$scratch" push -q origin "$origin_base"
+  fi
   git -C "$proj" fetch -q origin
   git -C "$proj" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/main
+}
+
+# main absorbs <branch> and origin KEEPS the branch - the ordinary end-state of a stacked PR,
+# since GitHub's delete-on-merge is off by default. The branch still EXISTS on origin, and it
+# is no longer LIVE: main carries every commit it has.
+absorb_origin_base() {  # <case_dir> <branch>
+  local case_dir=$1 branch=$2 scratch
+  scratch=$(origin_scratch "$case_dir")
+  git -C "$scratch" fetch -q origin
+  git -C "$scratch" push -q origin "refs/remotes/origin/$branch:refs/heads/main"
 }
 
 # A scratch clone of the case's origin, so origin-side history (a commit on the base, a
@@ -210,6 +233,36 @@ test_base_missing_from_origin_refuses_before_creating_anything() {
   assert_no_grep "treehouse get" "$log" \
     "nosuchbase: the refusal leased a task worktree it then abandoned, with no meta to release it"
   pass "fm-spawn refuses a declared base origin does not have, before any window or worktree exists"
+}
+
+# EXISTING ON ORIGIN IS NOT BEING LIVE, and the spawn must ask the same question the merge
+# gate asks, or it accepts a base that gate will refuse. A base that merged and KEPT its
+# branch (delete-on-merge is off by default, and the base landing first is the normal order of
+# a stack) is still on origin and has nothing left to stack on: main carries every commit it
+# has. Left to run, the crewmate roots on a commit main already carries, every command it
+# issues succeeds, and bin/fm-pr-check.sh refuses the finished PR after the whole
+# implementation and pipeline run. Refuse the command instead - a command is cheap, a run is
+# not.
+test_base_absorbed_by_the_default_branch_refuses_before_creating_anything() {
+  local rec id out status log
+  id=spawn-base-b13
+  rec=$(make_spawn_case absorbedbase "$id" feature/spent feature/spent)
+  read_case_record "$rec"
+  log="$CASE_DIR/tmux.log"
+  : > "$log"
+  absorb_origin_base "$CASE_DIR" feature/spent
+
+  out=$(FM_TEST_TMUX_LOG="$log" run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR" --base feature/spent)
+  status=$?
+  expect_code 1 "$status" "absorbedbase: a base the default branch has already absorbed is not a live feature base and must refuse, not spawn a crewmate whose PR the merge gate will refuse"
+  assert_contains "$out" "no longer a live feature base" \
+    "absorbedbase: the refusal did not explain that the branch exists but carries nothing of its own"
+  assert_absent "$HOME_DIR/state/$id.meta" "absorbedbase: refusal should happen before meta is written"
+  assert_no_grep "new-window" "$log" \
+    "absorbedbase: the refusal created a backend window it then abandoned, with no meta to reconcile it"
+  assert_no_grep "treehouse get" "$log" \
+    "absorbedbase: the refusal leased a task worktree it then abandoned, with no meta to release it"
+  pass "fm-spawn refuses a declared base the default branch has already absorbed, though that branch is still on origin"
 }
 
 # --base declares a NON-DEFAULT intended base, and naming the default branch is not a
@@ -531,6 +584,7 @@ test_base_flag_is_recorded_in_meta
 test_no_base_writes_no_base_key
 test_invalid_base_refuses_before_creating_anything
 test_base_missing_from_origin_refuses_before_creating_anything
+test_base_absorbed_by_the_default_branch_refuses_before_creating_anything
 test_base_equal_to_the_default_branch_refuses_before_creating_anything
 test_base_without_a_matching_brief_refuses_before_creating_anything
 test_orca_abort_orphan_meta_keeps_the_declared_base

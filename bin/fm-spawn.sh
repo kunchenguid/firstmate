@@ -66,11 +66,18 @@
 #   that contract in full.
 #   A NEW declaration is checked twice, and no further: the branch must not be the
 #   repo default (--base means a NON-default base; a default-branch task needs no
-#   flag), and it must exist on origin. Those catch a misunderstanding of the flag
-#   and a mistyped base before a crewmate spends a whole run on either. The script
-#   does not try to work out whether a base has merged or been abandoned, because git
-#   cannot tell those apart without a guess (fm-pr-check.sh hands that to a human).
-#   A RESPAWN of a task whose meta already declares the same base skips that probe:
+#   flag), and it must still be a LIVE feature base - fm-base-lib.sh's fm_base_liveness,
+#   the same predicate fm-pr-check.sh's guard decides on, so the spawn cannot accept a
+#   base the merge gate would then refuse. Live means on origin AND still carrying at
+#   least one commit the default branch does not already have; a base that merged and
+#   kept its branch is not live, and a crewmate stacked on it would work a whole run for
+#   a PR the gate refuses. Those two checks catch a misunderstanding of the flag, a
+#   mistyped base, and a spent one, each for the price of a command rather than a run.
+#   The check fetches origin's remote-tracking refs into the project clone and changes
+#   nothing else. It still asks nothing about a base's END OF LIFE: whether a gone base
+#   merged or was abandoned is not decidable from git without a guess, so fm-pr-check.sh
+#   hands that to a human.
+#   A RESPAWN of a task whose meta already declares the same base skips that check:
 #   a base that merged and was deleted mid-flight is the normal end-state of a
 #   stacked PR, and refusing there would dead-end the recovery of a task whose PR
 #   may be perfectly mergeable.
@@ -783,21 +790,32 @@ if [ -n "$BASE" ] && ! grep -qF "$(fm_base_brief_marker "$BASE")" "$BRIEF"; then
   exit 1
 fi
 
-# DOES THE DECLARED BASE EXIST ON ORIGIN? That is the only question a spawn asks about a
-# base, and it asks it only of a NEW declaration - one this task's meta does not already
-# record. A branch that is not there is almost always a typo, and catching it costs a
-# command rather than a whole crewmate run.
+# IS THE DECLARED BASE A LIVE FEATURE BASE? That is the question a spawn asks of a NEW
+# declaration - one this task's meta does not already record - and it is the SAME question
+# bin/fm-pr-check.sh's guard will ask of the finished PR: bin/fm-base-lib.sh's
+# fm_base_liveness, which owns what "live" means (on origin, and still carrying at least one
+# commit the repo default branch does not already have).
 #
-# It deliberately asks nothing further. Whether a base has merged, been squash-merged, or
-# been abandoned cannot be told apart from git without a guess, and this branch is not in
-# the business of guessing: bin/fm-pr-check.sh hands an unverifiable base to a human at
-# the merge gate, which is where a human is looking anyway.
+# Asking the weaker does-it-exist question here would let the spawn accept a base the merge
+# gate then refuses. A base that merged and kept its branch still EXISTS - GitHub's
+# delete-on-merge is off by default, and the ordinary order of a stack is that the base lands
+# first - but there is nothing left to stack on and nothing left for the guard to protect, so
+# the crewmate would root on a commit the default branch already carries, work a whole run,
+# and have its PR refused at the gate. Refuse the command instead: a command is cheap, a run
+# is not. That is the same trade the brief check above makes.
 #
-# A RESPAWN of a task that already declares this base skips the probe entirely. The base
-# merging and its branch being deleted mid-flight is the NORMAL end-state of a stacked PR
-# (GitHub deletes the branch by default), so refusing there would dead-end the recovery of
-# a task whose PR may be perfectly mergeable - and the declaration is kept either way, so
-# nothing comes back unguarded.
+# It still asks nothing about a base's END OF LIFE. Liveness is decidable from plain ancestry;
+# whether a gone base merged or was abandoned is not, and this script does not guess:
+# bin/fm-pr-check.sh hands that to a human at the merge gate, where a human is looking anyway.
+#
+# A RESPAWN of a task that already declares this base skips the check entirely. The base
+# merging and its branch being deleted mid-flight is the NORMAL end-state of a stacked PR, so
+# refusing there would dead-end the recovery of a task whose PR may be perfectly mergeable -
+# and the declaration is kept either way, so nothing comes back unguarded.
+#
+# The liveness check fetches origin's remote-tracking refs into the project clone (nothing
+# else - no working tree, no local branch, no HEAD), the same fast-forward-only refresh
+# bin/fm-fleet-sync.sh performs on every clone at session start.
 #
 # This runs alongside the brief check and BEFORE any backend window or worktree lease is
 # acquired: a refusal that fired after those resources exist would strand them with no meta
@@ -808,13 +826,19 @@ fi
 # so the recovery text is scoped by whether meta records a base at all: on a first spawn
 # there is no state/<id>.meta yet - it is written at the end of the spawn - so telling the
 # operator to edit it would name a file that is not on disk.
-probe_new_declared_base() {  # returns 1 to refuse
-  local probe_rc=0 recovery repo_default
+check_new_declared_base() {  # returns 1 to refuse
+  local liveness_rc=0 recovery repo_default
   if [ -n "$BASE_RECORDED" ]; then
-    recovery="  Recovery: re-run with a base that exists on origin ('--base <branch>'), or drop the 'base=$BASE_RECORDED' line from $STATE/$ID.meta to make this an ordinary default-branch task and re-run without --base."
+    recovery="  Recovery: re-run with a base that is still a live feature branch on origin ('--base <branch>'), or drop the 'base=$BASE_RECORDED' line from $STATE/$ID.meta to make this an ordinary default-branch task and re-run without --base."
   else
     recovery="  Recovery: re-run with the base this task should target ('--base <branch>'), or re-run WITHOUT --base to make this an ordinary default-branch task. (This task has no state/$ID.meta yet - a first spawn writes it only once every check has passed - so there is no recorded base to edit.)"
   fi
+
+  repo_default=$(default_branch "$PROJ_ABS") || {
+    echo "error: task $ID declares intended base '$BASE', but the repo default branch cannot be resolved in $PROJ_ABS (expected origin/HEAD, main, or master), so whether that base is still a live feature branch cannot be settled - refusing to spawn." >&2
+    echo "  This is an infrastructure failure, not a verdict about '$BASE'. Re-run once the clone's origin/HEAD resolves." >&2
+    return 1
+  }
 
   # --base declares a NON-DEFAULT intended base, and naming the default branch is not a
   # harmless way of saying "the usual". It arms a guard whose whole premise is a feature
@@ -822,24 +846,30 @@ probe_new_declared_base() {  # returns 1 to refuse
   # and every message the task then produces would talk about an "intended base" that is
   # the default branch. Refuse it rather than quietly normalising it away, so the flag's
   # actual meaning is the thing the operator learns.
-  if repo_default=$(default_branch "$PROJ_ABS") && [ "$BASE" = "$repo_default" ]; then
+  if [ "$BASE" = "$repo_default" ]; then
     echo "error: task $ID declares intended base '$BASE', but that IS the repo default branch for $PROJ_ABS - refusing to spawn. --base declares a NON-DEFAULT intended base (a feature branch this task is stacked on); a task that targets the default branch needs no --base at all." >&2
     echo "  Recovery: re-run WITHOUT --base, or pass the feature branch this task is actually stacked on." >&2
     return 1
   fi
 
-  fm_base_probe_origin "$PROJ_ABS" "$BASE" || probe_rc=$?
-  case "$probe_rc" in
-    "$FM_BASE_PRESENT") return 0 ;;
-    "$FM_BASE_ABSENT")
+  fm_base_liveness "$PROJ_ABS" "$BASE" "$repo_default" || liveness_rc=$?
+  case "$liveness_rc" in
+    "$FM_BASE_LIVE") return 0 ;;
+    "$FM_BASE_ABSORBED")
+      echo "error: task $ID declares intended base '$BASE', but that branch is no longer a live feature base: it is still on origin, and '$repo_default' already carries every commit it has - refusing to spawn." >&2
+      echo "  A base with no unmerged history of its own has nothing for a crewmate to stack on and nothing for the pre-merge base guard to protect: this is an ordinary '$repo_default' task now." >&2
+      printf '%s\n' "$recovery" >&2
+      return 1
+      ;;
+    "$FM_BASE_GONE")
       echo "error: task $ID declares intended base '$BASE', but no such branch exists on origin for $PROJ_ABS, so a crewmate has nothing to root its branch on - refusing to spawn." >&2
       echo "  If that base has already merged, its work is in the default branch: this is an ordinary default-branch task now." >&2
       printf '%s\n' "$recovery" >&2
       return 1
       ;;
     *)
-      echo "error: task $ID declares intended base '$BASE', but origin could not be asked whether that branch exists, so the base a crewmate would be launched against cannot be confirmed - refusing to spawn." >&2
-      [ -z "$FM_BASE_PROBE_ERR" ] || printf '  git: %s\n' "$FM_BASE_PROBE_ERR" >&2
+      echo "error: task $ID declares intended base '$BASE', but whether it is still a live feature base on origin could not be settled - $FM_BASE_LIVENESS_WHY - so the base a crewmate would be launched against cannot be confirmed - refusing to spawn." >&2
+      [ -z "$FM_BASE_LIVENESS_ERR" ] || printf '  git: %s\n' "$FM_BASE_LIVENESS_ERR" >&2
       echo "  This is an infrastructure failure, not a verdict about '$BASE'. Re-run once origin can be reached." >&2
       return 1
       ;;
@@ -847,7 +877,7 @@ probe_new_declared_base() {  # returns 1 to refuse
 }
 
 if [ -n "$BASE" ] && [ "$BASE" != "$BASE_RECORDED" ]; then
-  probe_new_declared_base || exit 1
+  check_new_declared_base || exit 1
 fi
 
 # PROJ_ABS can still carry a symlinked path component (e.g. macOS's /tmp ->

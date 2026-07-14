@@ -10,14 +10,15 @@
 #
 # THE GUARD, IN FULL. When state/<id>.meta records a non-default base= (declared with
 # fm-spawn.sh --base), the guard first asks whether that base is a LIVE feature base at
-# all: it must still EXIST on origin, and it must still carry at least one commit the
-# default branch does not already have (fm_base_has_own_commits). Existing is not enough.
-# GitHub's delete-on-merge is off by default, so a base that merged and kept its branch is
-# an ordinary end-state - and it has no unmerged history left to drag anywhere, which means
-# the hazard is gone and rootedness is not even observable against it (every fork point
-# with such a base is reachable from the default branch, so a perfectly stacked head would
-# read UNROOTED). Guarding it as though it were live refuses a safe PR and says something
-# false about its head.
+# all - bin/fm-base-lib.sh's fm_base_liveness, the one predicate every base-aware consumer
+# decides on, and the one owner of what "live" means: the branch must still EXIST on origin,
+# and it must still carry at least one commit the default branch does not already have.
+# Existing is not enough. GitHub's delete-on-merge is off by default, so a base that merged
+# and kept its branch is an ordinary end-state - and it has no unmerged history left to drag
+# anywhere, which means the hazard is gone and rootedness is not even observable against it
+# (every fork point with such a base is reachable from the default branch, so a perfectly
+# stacked head would read UNROOTED). Guarding it as though it were live refuses a safe PR and
+# says something false about its head.
 #
 # Against a LIVE base, two things must both hold before pr= is recorded and the merge poll
 # is armed:
@@ -243,14 +244,15 @@ verify_as_ordinary_default_pr() {  # <default-branch-name> <base-tip> <pr-number
   return 0
 }
 
-# Assert the PR head is rooted in its declared base AND targets it. Fetches the base, the
-# default branch, and the PR head from origin so the checks run against authoritative
-# commits in the local object store - not a stale local branch, or a head SHA whose objects
-# were never fetched. Returns 0 (verified: the PR may be recorded and armed) or 1 (refuse
-# or defer, both of which have already said which).
+# Assert the declared base is still live, that the PR head is rooted in it, and that the PR
+# targets it. fm_base_liveness fetches the base and the default branch; the PR head is fetched
+# here, so every check runs against origin's authoritative commits in the local object store -
+# not a stale local branch, or a head SHA whose objects were never fetched. Returns 0
+# (verified: the PR may be recorded and armed) or 1 (refuse or defer, both of which have
+# already said which).
 guard_pr_base() {
   local n pr_sha default_branch_name default_sha base_tip err
-  local probe_rc=0 own_rc=0 rooted_rc=0
+  local liveness_rc=0 rooted_rc=0
 
   if [ -z "$WT" ] || [ ! -d "$WT" ]; then
     defer_to_human "its worktree is unavailable ('$WT'), so nothing can be fetched or compared"
@@ -269,41 +271,32 @@ guard_pr_base() {
     return 1
   }
 
-  # DOES THE BASE STILL EXIST? The probe runs before any fetch, so an origin that cannot be
-  # reached reports itself as exactly that rather than surfacing as whichever fetch happened
-  # to fail first. Both outcomes defer; they defer with different words.
-  fm_base_probe_origin "$WT" "$BASE" || probe_rc=$?
-  case "$probe_rc" in
-    "$FM_BASE_PRESENT") ;;
-    "$FM_BASE_ABSENT")
+  # IS THE BASE STILL LIVE? The one question, asked with the one predicate every base-aware
+  # consumer shares (bin/fm-base-lib.sh's fm_base_liveness), which also leaves the base and
+  # default-branch commits it resolved in FM_BASE_TIP / FM_BASE_DEFAULT_SHA. Asked FIRST and
+  # always: rootedness cannot be asked of a base the default branch has already absorbed,
+  # because every fork point with such a base is reachable from the default branch, so a
+  # correctly stacked head would read UNROOTED and be refused with a diagnosis that is simply
+  # untrue.
+  fm_base_liveness "$WT" "$BASE" "$default_branch_name" || liveness_rc=$?
+  base_tip=$FM_BASE_TIP
+  default_sha=$FM_BASE_DEFAULT_SHA
+  case "$liveness_rc" in
+    "$FM_BASE_LIVE") ;;
+    "$FM_BASE_ABSORBED")
+      verify_as_ordinary_default_pr "$default_branch_name" "$base_tip" "$n" || return 1
+      return 0
+      ;;
+    "$FM_BASE_GONE")
       defer_to_human "that branch no longer exists on origin, so there is nothing left to check the PR head against"
       return 1
       ;;
     *)
-      defer_to_human "origin could not be asked whether that branch still exists" "$FM_BASE_PROBE_ERR"
+      defer_to_human "$FM_BASE_LIVENESS_WHY, so whether that base is still a live feature branch cannot be settled" "$FM_BASE_LIVENESS_ERR"
       return 1
       ;;
   esac
 
-  if ! err=$(git -C "$WT" fetch --quiet origin \
-    "+refs/heads/$BASE:refs/remotes/origin/$BASE" 2>&1); then
-    defer_to_human "that branch is on origin but could not be fetched" "$err"
-    return 1
-  fi
-  base_tip=$(git -C "$WT" rev-parse --verify --quiet "refs/remotes/origin/$BASE^{commit}") || {
-    defer_to_human "that branch did not resolve to a commit after fetching"
-    return 1
-  }
-  if ! err=$(git -C "$WT" fetch --quiet origin \
-    "+refs/heads/$default_branch_name:refs/remotes/origin/$default_branch_name" 2>&1); then
-    defer_to_human "the repo default branch ('$default_branch_name') could not be fetched from origin, so the base's own history cannot be told apart from history the default branch already carries" "$err"
-    return 1
-  fi
-  default_sha=$(git -C "$WT" rev-parse --verify --quiet \
-    "refs/remotes/origin/$default_branch_name^{commit}") || {
-    defer_to_human "the repo default branch ('$default_branch_name') did not resolve to a commit"
-    return 1
-  }
   if ! err=$(git -C "$WT" fetch --quiet origin "refs/pull/$n/head" 2>&1); then
     defer_to_human "the PR head (refs/pull/$n/head) could not be fetched from origin" "$err"
     return 1
@@ -312,24 +305,6 @@ guard_pr_base() {
     defer_to_human "the fetched PR head did not resolve to a commit"
     return 1
   }
-
-  # IS THE BASE EVEN LIVE? A branch that is on origin but carries nothing the default branch
-  # lacks has no unmerged history to protect, and rootedness cannot be asked of it at all:
-  # every fork point with it is reachable from the default branch, so a correctly stacked
-  # head would read UNROOTED and be refused with a diagnosis that is simply untrue. Ask this
-  # BEFORE rootedness, always.
-  fm_base_has_own_commits "$WT" "$base_tip" "$default_sha" || own_rc=$?
-  case "$own_rc" in
-    "$FM_BASE_HAS_OWN_COMMITS") ;;
-    "$FM_BASE_NO_OWN_COMMITS")
-      verify_as_ordinary_default_pr "$default_branch_name" "$base_tip" "$n" || return 1
-      return 0
-      ;;
-    *)
-      defer_to_human "git could not count what '$BASE' ($base_tip) carries that '$default_branch_name' ($default_sha) does not, so whether that base is still a live feature branch cannot be settled"
-      return 1
-      ;;
-  esac
 
   # ROOTED?
   fm_base_head_rooted "$WT" "$base_tip" "$pr_sha" "$default_sha" || rooted_rc=$?

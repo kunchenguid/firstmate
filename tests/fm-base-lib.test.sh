@@ -5,6 +5,21 @@
 # end of life - merged, squash-merged, abandoned - because git cannot tell those apart
 # without a guess, and every consumer hands that question to a human instead.
 #
+# fm_base_liveness - IS THIS BASE STILL A LIVE FEATURE BASE? The one question, and the one
+# every base-aware consumer decides on: fm-spawn.sh before it records a declaration,
+# fm-pr-check.sh before it records pr=, fm-review-diff.sh before it picks a diff base, and
+# fm-brief.sh through the crewmate's form of it. A consumer asking a weaker question is how
+# four scripts came to give four different answers about one base.
+#   (l) on origin, carrying a commit of its own    -> LIVE (guard it)
+#   (m) on origin, but the default branch has absorbed everything it carries -> ABSORBED.
+#       Existing is NOT liveness: delete-on-merge is off by default, so a merged base that
+#       kept its branch is an ordinary end-state with no unmerged history left to drag
+#       anywhere - and rootedness is not observable against it (see (h))
+#   (n) not on origin at all                       -> GONE, and NOT a claim about whether it
+#       merged or was abandoned
+#   (o) the question could not be settled          -> LIVENESS_UNKNOWN, never read as either
+#       verdict, and carrying git's own error
+#
 # fm_base_probe_origin - does the branch exist on origin?
 #   (a) it is there                                             -> PRESENT
 #   (b) it is not there                                         -> ABSENT
@@ -101,6 +116,17 @@ rooted_word() {  # <dir> <base-rev> <head-rev>; echoes rooted|unrooted|unrelated
     "$FM_BASE_HEAD_ROOTED") printf 'rooted' ;;
     "$FM_BASE_HEAD_UNROOTED") printf 'unrooted' ;;
     *) printf 'unrelated' ;;
+  esac
+}
+
+liveness_word() {  # <dir> <base-branch>; echoes live|absorbed|gone|unknown
+  local rc=0
+  fm_base_liveness "$1/wt" "$2" main || rc=$?
+  case "$rc" in
+    "$FM_BASE_LIVE") printf 'live' ;;
+    "$FM_BASE_ABSORBED") printf 'absorbed' ;;
+    "$FM_BASE_GONE") printf 'gone' ;;
+    *) printf 'unknown' ;;
   esac
 }
 
@@ -264,20 +290,123 @@ test_unrelated_histories() {
   pass "fm_base_head_rooted reports a head sharing no history with the base as UNRELATED"
 }
 
-# The two enums travel as return codes through the same scope in fm-pr-check.sh. Sharing a
-# value would let a probe outcome be read as a rootedness outcome in a merge gate.
+# THE question, and the one every consumer decides on. A base carrying unmerged work of its
+# own is the case the guard exists for.
+test_liveness_live_base() {
+  local dir
+  dir=$(make_repo liveness-live)
+  expect_word live "$(liveness_word "$dir" feature/base)" \
+    "liveness-live: a base carrying unmerged work of its own must read LIVE"
+  pass "fm_base_liveness reports a base with unmerged work of its own as LIVE"
+}
+
+# EXISTING IS NOT LIVENESS. GitHub's delete-on-merge is off by default, so a base that merged
+# and kept its branch is an ordinary end-state: nothing left to drag onto the default branch,
+# and a head stacked on it reads UNROOTED. A consumer that asked the weaker does-it-exist
+# question would spawn against it, refuse its PR, and claim its head was rebased when it was
+# not.
+test_liveness_absorbed_base() {
+  local dir
+  dir=$(make_repo liveness-absorbed)
+  git -C "$dir/origin.git" update-ref refs/heads/main refs/heads/feature/base
+  expect_word absorbed "$(liveness_word "$dir" feature/base)" \
+    "liveness-absorbed: a base still on origin that the default branch has absorbed must read ABSORBED, not LIVE"
+  pass "fm_base_liveness reports a base the default branch has absorbed as ABSORBED, though it is still on origin"
+}
+
+# GONE is not a claim about what became of the base. Whether it merged or was abandoned is a
+# human's call (bin/fm-pr-check.sh defers it); the lib only reports that origin has no such
+# branch.
+test_liveness_gone_base() {
+  local dir
+  dir=$(make_repo liveness-gone)
+  git -C "$dir/origin.git" update-ref -d refs/heads/feature/base
+  expect_word gone "$(liveness_word "$dir" feature/base)" \
+    "liveness-gone: a base deleted from origin must read GONE"
+  pass "fm_base_liveness reports a base deleted from origin as GONE"
+}
+
+# An infrastructure failure is not a fact about a base. Reading it as either verdict would let
+# a network blip spawn a task, pick a diff base, or decide a merge.
+test_liveness_unknown_is_not_a_verdict() {
+  local dir rc=0
+  dir=$(make_repo liveness-unknown)
+  git -C "$dir/wt" remote set-url origin "$TMP_ROOT/does-not-exist.git"
+  expect_word unknown "$(liveness_word "$dir" feature/base)" \
+    "liveness-unknown: an unreachable origin must read UNKNOWN, never LIVE, ABSORBED, or GONE"
+  # Called here rather than through liveness_word: an out-param set inside a command
+  # substitution never reaches this scope.
+  fm_base_liveness "$dir/wt" feature/base main || rc=$?
+  [ -n "${FM_BASE_LIVENESS_WHY:-}" ] \
+    || fail "liveness-unknown: the caller was given no clause naming what could not be determined"
+  [ -n "${FM_BASE_LIVENESS_ERR:-}" ] \
+    || fail "liveness-unknown: git's own error was swallowed, so an infrastructure failure cannot be told from a verdict about the base"
+  pass "fm_base_liveness reports an unsettleable question as UNKNOWN, naming what failed and keeping git's error"
+}
+
+# The commits a caller needs next come back with the answer, so no consumer has to re-resolve
+# them - and none can re-resolve them differently.
+test_liveness_hands_back_the_commits_it_compared() {
+  local dir rc=0
+  dir=$(make_repo liveness-outparams)
+  fm_base_liveness "$dir/wt" feature/base main || rc=$?
+  [ "$rc" = "$FM_BASE_LIVE" ] || fail "liveness-outparams: the fixture base should read LIVE"
+  [ "$FM_BASE_TIP" = "$(git -C "$dir/wt" rev-parse origin/feature/base)" ] \
+    || fail "liveness-outparams: FM_BASE_TIP is not the base tip it counted against"
+  [ "$FM_BASE_DEFAULT_SHA" = "$(git -C "$dir/wt" rev-parse origin/main)" ] \
+    || fail "liveness-outparams: FM_BASE_DEFAULT_SHA is not the default-branch commit it counted against"
+  pass "fm_base_liveness hands back the base and default-branch commits it compared, for fm_base_head_rooted"
+}
+
+# The enums travel as return codes through the same scope in fm-pr-check.sh. Sharing a value
+# would let a liveness outcome be read as a rootedness outcome in a merge gate.
 test_enum_values_cannot_alias_across_enums() {
   local dupes
   dupes=$(printf '%s\n' \
     "$FM_BASE_PRESENT" "$FM_BASE_PROBE_FAILED" "$FM_BASE_ABSENT" \
     "$FM_BASE_HEAD_ROOTED" "$FM_BASE_HEAD_UNROOTED" "$FM_BASE_HEAD_UNRELATED" \
     "$FM_BASE_HAS_OWN_COMMITS" "$FM_BASE_NO_OWN_COMMITS" "$FM_BASE_OWN_COMMITS_UNKNOWN" \
+    "$FM_BASE_LIVE" "$FM_BASE_ABSORBED" "$FM_BASE_GONE" "$FM_BASE_LIVENESS_UNKNOWN" \
     | sort | uniq -d)
   [ -z "$dupes" ] \
     || fail "enum: FM_BASE_* outcomes share the value(s) [$dupes] across enums; a value of one could be read as a value of another in the same scope"
   pass "fm-base-lib: no two FM_BASE_* outcomes share a numeric value"
 }
 
+# The crewmate's form of the liveness question must cover EVERY answer it can return. An
+# answer with no instruction is an answer the crewmate resolves by guessing.
+test_liveness_brief_block_answers_every_outcome() {
+  local block
+  block=$(fm_base_liveness_brief_block feature/base)
+  case "$block" in
+    *"git ls-remote --exit-code --heads origin refs/heads/feature/base"*) ;;
+    *) fail "brief-block: the crewmate is not told to ask origin whether the branch is there" ;;
+  esac
+  case "$block" in
+    *"git rev-list --count origin/feature/base ^origin/HEAD"*) ;;
+    *) fail "brief-block: the crewmate is not told to ask whether the base carries anything the default branch lacks - the half of liveness a mere existence check misses" ;;
+  esac
+  case "$block" in
+    *"blocked: intended base feature/base carries nothing the default branch does not already have"*) ;;
+    *) fail "brief-block: an ABSORBED base has no instruction, so the crewmate would stack on a spent base and have its PR refused" ;;
+  esac
+  case "$block" in
+    *"blocked: intended base feature/base is gone from origin"*) ;;
+    *) fail "brief-block: a GONE base has no instruction" ;;
+  esac
+  case "$block" in
+    *"blocked: origin could not be asked about intended base feature/base"*) ;;
+    *) fail "brief-block: an infrastructure failure has no distinct report, so it would masquerade as a verdict about the base" ;;
+  esac
+  pass "fm_base_liveness_brief_block gives the crewmate a followable instruction for every answer liveness can return"
+}
+
+test_liveness_live_base
+test_liveness_absorbed_base
+test_liveness_gone_base
+test_liveness_unknown_is_not_a_verdict
+test_liveness_hands_back_the_commits_it_compared
+test_liveness_brief_block_answers_every_outcome
 test_valid_branch_name
 test_probe_present
 test_probe_absent
