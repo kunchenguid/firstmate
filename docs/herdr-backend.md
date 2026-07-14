@@ -148,7 +148,8 @@ A restored tab with no registered live agent is a replaceable husk; an ambiguous
 
 Every adapter operation sets `HERDR_SESSION` and appends a trailing `--session <name>`.
 Ambient `HERDR_SESSION` alone is not accepted as isolation for lifecycle verification.
-The lab helper performs a fresh session-list classification immediately before stop and delete, rejects default or ambiguous records, and verifies the default-fleet tripwire after cleanup.
+The lab helper performs a fresh session-list classification immediately before stop and delete, rejects default or ambiguous records, and verifies the initial default-session tripwire after cleanup.
+The canonical tripwire accepts either no default session or exactly one running session named `default`, records that state exactly, and fails if it changes during lab work.
 
 ### ID stability
 
@@ -182,6 +183,7 @@ Durable truth remains in the wake queue and per-task status logs.
 
 The removal migration was verified against a real named non-default Herdr lab session.
 The verification covered a clean isolated install, required protocol, implicit and explicit backend selection, server readiness, separate-tab spawn, steer delivery, watcher signal wake, guarded stop and restart, husk replacement through recovery spawn, endpoint teardown, guarded lab teardown, and an unchanged default fleet.
+CI and the no-mistakes gate both opt into that guarded acceptance; a clean runner with no default session records and preserves that absence without creating or operating on `default`.
 
 Exact version, commands, selected output, session name, and cleanup evidence are recorded here after each release-blocking verification run.
 
