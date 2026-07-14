@@ -56,7 +56,9 @@
 #   Before a secondmate launch, the home is locally fast-forwarded to the primary
 #   default-branch commit when safe; skipped syncs warn and launch unchanged.
 #   Ship/scout spawns refuse to launch unless the resolved task path is a real
-#   git worktree root distinct from the primary project checkout.
+#   git worktree root of the TARGET project (same git common dir, HEAD present
+#   in the target repo) distinct from the primary project checkout; on refusal
+#   the just-created window is killed and no meta is recorded.
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
@@ -84,7 +86,7 @@ set -eu
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 usage() {
-  sed -n '2,78p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,80p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 case "${1:-}" in
@@ -674,22 +676,102 @@ real_path_or_raw() {  # <path>
 # herdr-sm-spaces-k4). Both branches converge on the same $T ("target") string
 # that every downstream operation (send/capture/kill) already treats as opaque
 # per-backend routing (fm_backend_resolve_selector).
-validate_spawn_worktree() {  # <source> <inspect-target>
-  local source=$1 inspect_target=$2 wt_real proj_real wt_top wt_top_real
-  wt_real=
-  if ! wt_real=$(cd "$WT" 2>/dev/null && pwd -P); then
-    wt_real=
+# Spawn-time isolation guard: one predicate, two consumers. The treehouse
+# pane-cwd poll below accepts a path only once it passes, and
+# validate_spawn_worktree aborts the spawn when the final resolution still
+# fails it. "Isolated worktree of the TARGET project" means ALL of:
+#   1. the path is the root of a git worktree (not a subdir, not a plain dir);
+#   2. it is not the primary project checkout itself;
+#   3. its git common dir is the target project's git common dir, i.e. the
+#      worktree shares the target repo's object store. This is the
+#      authoritative repo-identity check: an UNRELATED git repo (the
+#      2026-07-14 incident resolved a 3pc-pram spawn to ~/.oh-my-zsh) passes
+#      1-2 but can never pass 3;
+#   4. its HEAD commit exists in the target repo (implied by 3; kept for a
+#      specific message when HEAD is unborn or corrupt).
+git_common_dir_real() {  # <dir> -> physical absolute git common dir, or fail
+  local dir=$1 common
+  common=$(git -C "$dir" rev-parse --git-common-dir 2>/dev/null) || return 1
+  [ -n "$common" ] || return 1
+  case "$common" in
+    /*) ;;
+    *) common="$dir/$common" ;;
+  esac
+  (cd "$common" 2>/dev/null && pwd -P)
+}
+
+PROJ_GIT_COMMON_REAL=
+PROJ_GIT_COMMON_RESOLVED=
+proj_git_common_real() {  # target project's common dir, resolved once, lazily
+  if [ -z "$PROJ_GIT_COMMON_RESOLVED" ]; then
+    PROJ_GIT_COMMON_REAL=$(git_common_dir_real "$PROJ_ABS") || PROJ_GIT_COMMON_REAL=
+    PROJ_GIT_COMMON_RESOLVED=1
   fi
-  proj_real=$PROJ_ABS_REAL
-  wt_top=$(git -C "$WT" rev-parse --show-toplevel 2>/dev/null || true)
+  printf '%s\n' "$PROJ_GIT_COMMON_REAL"
+}
+
+SPAWN_WT_FAIL=
+spawn_worktree_check() {  # <path>; sets SPAWN_WT_FAIL ('' = isolated worktree of the target project)
+  local cand=$1 cand_real wt_top wt_top_real wt_common proj_common wt_head
+  SPAWN_WT_FAIL=
+  cand_real=$(cd "$cand" 2>/dev/null && pwd -P) || cand_real=
+  wt_top=$(git -C "$cand" rev-parse --show-toplevel 2>/dev/null || true)
   wt_top_real=
-  if ! wt_top_real=$(cd "$wt_top" 2>/dev/null && pwd -P); then
-    wt_top_real=
+  if [ -n "$wt_top" ]; then
+    wt_top_real=$(cd "$wt_top" 2>/dev/null && pwd -P) || wt_top_real=
   fi
-  if [ -z "$wt_real" ] || [ -z "$wt_top_real" ] || [ "$wt_real" != "$wt_top_real" ] || [ "$wt_real" = "$proj_real" ]; then
-    echo "error: $source did not yield an isolated worktree (resolved '$WT'; worktree root '${wt_top:-none}'; primary '$PROJ_ABS'); refusing to launch to avoid tangling the primary checkout. Inspect target $inspect_target" >&2
-    exit 1
+  if [ -z "$cand_real" ] || [ -z "$wt_top_real" ] || [ "$cand_real" != "$wt_top_real" ]; then
+    SPAWN_WT_FAIL="resolved path is not the root of a git worktree (worktree root '${wt_top:-none}')"
+    return 0
   fi
+  if [ "$cand_real" = "$PROJ_ABS_REAL" ]; then
+    SPAWN_WT_FAIL="resolved path is the primary project checkout itself"
+    return 0
+  fi
+  proj_common=$(proj_git_common_real)
+  if [ -z "$proj_common" ]; then
+    SPAWN_WT_FAIL="cannot resolve the target project's git common dir from '$PROJ_ABS'"
+    return 0
+  fi
+  wt_common=$(git_common_dir_real "$cand_real") || wt_common=
+  if [ "$wt_common" != "$proj_common" ]; then
+    SPAWN_WT_FAIL="resolved worktree belongs to a DIFFERENT repo (its git common dir is '${wt_common:-unresolvable}', expected '$proj_common')"
+    return 0
+  fi
+  wt_head=$(git -C "$cand_real" rev-parse HEAD 2>/dev/null || true)
+  if [ -z "$wt_head" ] || ! git -C "$PROJ_ABS" cat-file -e "$wt_head^{commit}" 2>/dev/null; then
+    SPAWN_WT_FAIL="worktree HEAD '${wt_head:-unresolvable}' does not exist in the target repo"
+    return 0
+  fi
+}
+
+worktree_of_target_repo() {  # <path> -> 0 iff the full isolation check passes
+  spawn_worktree_check "$1"
+  [ -z "$SPAWN_WT_FAIL" ]
+}
+
+# On an isolation abort, remove the just-created backend endpoint so a refused
+# spawn never leaves a live agent-ready window behind. Orca is excluded: its
+# EXIT trap (orca_spawn_abort_cleanup, armed before its validate call) already
+# owns terminal + worktree cleanup.
+spawn_abort_kill_window() {
+  [ "$BACKEND" != orca ] || return 0
+  [ -n "${T:-}" ] || return 0
+  fm_backend_kill "$BACKEND" "$T" "${ZELLIJ_TAB_ID:-}" "$W" 2>/dev/null || true
+}
+
+validate_spawn_worktree() {  # <source> <inspect-target>
+  local source=$1 inspect_target=$2
+  spawn_worktree_check "$WT"
+  [ -n "$SPAWN_WT_FAIL" ] || return 0
+  {
+    echo "error: $source did not yield an isolated worktree of the target project; refusing to launch. $SPAWN_WT_FAIL"
+    echo "  resolved: '$WT'"
+    echo "  expected: a linked worktree of '$PROJ_ABS' (git common dir '$(proj_git_common_real)')"
+    echo "  hint: a raced or stale treehouse lease, or an rc-driven cd in the pane's shell, can leave the pane cwd in an unrelated repo; inspect the pool state ('treehouse status' in the project; ~/.treehouse/*/treehouse-state.json) and target $inspect_target before respawning. The just-created window is killed and no meta is recorded; respawning is a human or supervisor decision."
+  } >&2
+  spawn_abort_kill_window
+  exit 1
 }
 
 W="fm-$ID"
@@ -845,16 +927,36 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   # Compare against PROJ_ABS_REAL (physical), not PROJ_ABS: a symlinked project
   # prefix would otherwise make the pane's OS-level cwd read differ from
   # PROJ_ABS on the very first poll, before the pane has actually moved.
-  for _ in $(seq 1 60); do
+  # Accept a pane cwd only once it passes the full isolation check
+  # (worktree_of_target_repo), never on "left the project dir" alone: the
+  # interactive `treehouse get` subshell runs the user's whole rc stack, so a
+  # transient foreground cwd during shell startup (2026-07-14 incident:
+  # oh-my-zsh's updater surfaced ~/.oh-my-zsh, an unrelated git repo, as the
+  # pane cwd while the lease itself was healthy) or a raced/stale lease can
+  # surface an arbitrary path first. A not-yet-valid path is kept only as the
+  # abort candidate so a persistent wrong landing still fails with the
+  # specific diagnostics instead of a bare timeout.
+  # FM_SPAWN_WT_WAIT_SECS shrinks the poll budget for tests.
+  WT_CANDIDATE=
+  for _ in $(seq 1 "${FM_SPAWN_WT_WAIT_SECS:-60}"); do
     p=$(spawn_current_path "$WT_TARGET" || true)
     if [ -n "$p" ] && [ "$(real_path_or_raw "$p")" != "$PROJ_ABS_REAL" ]; then
-      WT="$p"
-      break
+      WT_CANDIDATE="$p"
+      if worktree_of_target_repo "$p"; then
+        WT="$p"
+        break
+      fi
     fi
     sleep 1
   done
+  if [ -z "$WT" ] && [ -n "$WT_CANDIDATE" ]; then
+    # The pane left the project but never settled in a worktree of the TARGET
+    # repo; let validate_spawn_worktree print the specific failure, kill the
+    # window, and exit non-zero.
+    WT="$WT_CANDIDATE"
+  fi
   if [ -z "$WT" ]; then
-    echo "error: treehouse get did not enter a worktree within 60s; inspect window $T" >&2
+    echo "error: treehouse get did not enter a worktree within ${FM_SPAWN_WT_WAIT_SECS:-60}s; inspect window $T" >&2
     exit 1
   fi
 
