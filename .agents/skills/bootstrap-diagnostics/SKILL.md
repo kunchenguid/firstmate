@@ -2,7 +2,7 @@
 name: bootstrap-diagnostics
 description: >-
   Agent-only handling playbook for session-start bootstrap diagnostics.
-  Use whenever the session-start digest's bootstrap section prints any diagnostic or capability line - MISSING, NEEDS_GH_AUTH, TANGLE, CREW_HARNESS_OVERRIDE, CREW_DISPATCH, HARNESS_OVERRIDES, FLEET_SYNC, SECONDMATE_SYNC, SECONDMATE_LIVENESS, TASKS_AXI, NUDGE_SECONDMATES, or FMX - or when a standalone bin/fm-bootstrap.sh run prints one.
+  Use whenever the session-start digest's bootstrap section prints any diagnostic or capability line - MISSING, NEEDS_GH_AUTH, TANGLE, BACKLOG_ORPHAN, CREW_HARNESS_OVERRIDE, CREW_DISPATCH, HARNESS_OVERRIDES, FLEET_SYNC, SECONDMATE_SYNC, SECONDMATE_LIVENESS, TASKS_AXI, NUDGE_SECONDMATES, or FMX - or when a standalone bin/fm-bootstrap.sh run prints one.
   A silent bootstrap section means all good and needs no skill load.
 user-invocable: false
 metadata:
@@ -24,6 +24,10 @@ The inline rules in `AGENTS.md` section 3 still bind: detect, then consent, then
 - `TANGLE: <remediation>` - the primary checkout is stranded on a feature branch instead of its default branch; `AGENTS.md` section 8 explains why this guard exists and what it protects.
   The work is safe on that branch ref; restore the primary to its default branch with the printed `git -C <root> checkout <default>`, then re-validate that branch in a proper worktree.
   This is the only sanctioned firstmate-initiated git write to the primary, and it is a non-destructive branch switch that strands nothing.
+- `BACKLOG_ORPHAN: <id> is In flight in data/backlog.md but has no state/<id>.meta ...` - the task's runtime record is gone but its row was never closed, so this is finished work that firstmate would keep re-reporting to the captain as still open (exactly how four merged tasks were re-reported as awaiting approval days after landing).
+  `bin/fm-teardown.sh` closes the row itself, so an orphan means that write failed or the task ended outside teardown; resolve it before dispatching, and never just re-report the row as in-flight work.
+  Establish how the task actually ended first - a merged PR/MR, a local merge, or a scout report - then close the row with `tasks-axi done <id>` plus the right link flag (`--pr` for a GitHub pull URL, `--note <url>` for a Codebase MR, `--report <path>` for a scout), or hand-edit `data/backlog.md` when the backlog backend is `manual`.
+  If the task turns out to be genuinely unfinished (its worktree and meta were cleaned up while the work was not landed), tell the captain and re-dispatch it rather than closing the row.
 - `CREW_HARNESS_OVERRIDE: <name>` - record and use the override silently; surface a harness fact only if it actually blocks work or the captain asks.
 - `CREW_DISPATCH: invalid config/crew-dispatch.json - <reason>` - the optional dispatch profile file exists but failed low-cost bootstrap validation; continue with the normal fallback chain, resolve and pass the chosen fallback harness explicitly while the file remains present, fix the malformed schema, unverified harness name, unknown selector, or invalid harness/effort pair when convenient, and do not select a bad profile.
 - `CREW_DISPATCH: active config/crew-dispatch.json` - bootstrap validated the optional dispatch profile file and printed its active rules and `default:` when present.

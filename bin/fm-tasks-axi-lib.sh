@@ -74,3 +74,39 @@ fm_tasks_axi_backend_available() {
   fm_backlog_backend_manual "$config_dir" && return 1
   fm_tasks_axi_compatible
 }
+
+# Print the task id of every item under `## In flight` in a backlog file, one per
+# line. Reads item HEADER lines only, in both forms AGENTS.md section 10 keeps as
+# the contract: the checkbox form `- [ ] <id> - ...` and the bold form
+# `- **<id>** - ...`. Body lines and other sections are ignored. Absent file
+# prints nothing.
+# The orphan check in fm-bootstrap.sh is the only caller: a task whose row is here
+# but whose state/<id>.meta is gone was torn down without its row being closed.
+fm_backlog_inflight_ids() {
+  local file=$1
+  [ -f "$file" ] || return 0
+  awk '
+    /^##[[:space:]]+/ {
+      section = $0
+      sub(/^##[[:space:]]+/, "", section)
+      sub(/[[:space:]]+$/, "", section)
+      inflight = (tolower(section) == "in flight")
+      next
+    }
+    !inflight { next }
+    /^-[[:space:]]+\[[ xX]\][[:space:]]+/ {
+      id = $0
+      sub(/^-[[:space:]]+\[[ xX]\][[:space:]]+/, "", id)
+      sub(/[[:space:]].*/, "", id)
+      if (id != "") print id
+      next
+    }
+    /^-[[:space:]]+\*\*[^*]+\*\*/ {
+      id = $0
+      sub(/^-[[:space:]]+\*\*/, "", id)
+      sub(/\*\*.*/, "", id)
+      if (id != "") print id
+      next
+    }
+  ' "$file"
+}

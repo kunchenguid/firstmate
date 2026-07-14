@@ -467,6 +467,49 @@ test_crew_dispatch_active_rules_are_surfaced() {
   pass "bootstrap surfaces active crew-dispatch rules and default"
 }
 
+# Orphan-row integrity check: a row under `## In flight` whose state/<id>.meta is
+# gone was torn down without its row being closed, and firstmate then re-reports
+# landed work as still open (four merged tasks did exactly that). A row WITH a meta
+# is ordinary in-flight work and must stay silent.
+test_backlog_orphan_rows_are_reported() {
+  local case_dir fakebin out
+  case_dir="$TMP_ROOT/backlog-orphan"
+  mkdir -p "$case_dir/home/config" "$case_dir/home/data" "$case_dir/home/state"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  cat > "$case_dir/home/data/backlog.md" <<'MD'
+# Backlog
+
+## In flight
+- [ ] live-task-a1 - still running (repo: alpha) (kind: ship) (since 2026-07-12)
+- **bold-orphan-b2** - merged but never closed (repo: beta, since 2026-07-10)
+- [ ] orphan-c3 - merged but never closed (repo: gamma) (kind: ship) (since 2026-07-11)
+## Queued
+- [ ] queued-d4 - not dispatched yet (repo: delta)
+## Done
+- [x] done-e5 - landed (repo: eps) (done 2026-07-09)
+MD
+  fm_write_meta "$case_dir/home/state/live-task-a1.meta" \
+    "window=fm-live-task-a1" "worktree=$case_dir/wt" "project=$case_dir/project" "kind=ship" "mode=no-mistakes"
+
+  # This case has a state/ dir, so the secondmate sweep runs and greps a non-git
+  # home; its git noise is stderr-only and irrelevant to the reported lines.
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
+
+  printf '%s\n' "$out" | grep -F 'BACKLOG_ORPHAN: orphan-c3 is In flight in data/backlog.md but has no state/orphan-c3.meta' >/dev/null \
+    || fail "orphan row with no meta was not reported: $out"
+  printf '%s\n' "$out" | grep -F 'BACKLOG_ORPHAN: bold-orphan-b2' >/dev/null \
+    || fail "bold-form orphan row was not reported: $out"
+  printf '%s\n' "$out" | grep -F 'BACKLOG_ORPHAN: live-task-a1' >/dev/null \
+    && fail "in-flight row WITH a meta was falsely reported as an orphan: $out"
+  printf '%s\n' "$out" | grep -F 'BACKLOG_ORPHAN: queued-d4' >/dev/null \
+    && fail "a Queued row was reported as an In-flight orphan: $out"
+  printf '%s\n' "$out" | grep -F 'BACKLOG_ORPHAN: done-e5' >/dev/null \
+    && fail "a Done row was reported as an In-flight orphan: $out"
+  pass "bootstrap reports In-flight backlog rows whose task meta is gone"
+}
+
 test_crew_dispatch_validation() {
   local label body expect mode case_dir fakebin out n
   n=0
@@ -516,3 +559,4 @@ test_fleet_sync_timeout_empty_override_uses_default
 test_fleet_sync_timeout_is_computed_before_launch
 test_crew_dispatch_active_rules_are_surfaced
 test_crew_dispatch_validation
+test_backlog_orphan_rows_are_reported

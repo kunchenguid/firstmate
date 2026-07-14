@@ -10,6 +10,7 @@
 #                 "HARNESS_OVERRIDES: invalid config/harness-overrides.json - <reason>",
 #                 "FLEET_SYNC: <repo>: skipped|recovered|STUCK: <detail>",
 #                 "TASKS_AXI: available", "TANGLE: <remediation>",
+#                 "BACKLOG_ORPHAN: <id> is In flight in data/backlog.md but has no state/<id>.meta ...",
 #                 "SECONDMATE_SYNC: secondmate <id>: skipped: <reason>",
 #                 "NUDGE_SECONDMATES: fm-<id>...",
 #                 "SECONDMATE_LIVENESS: secondmate <id>: already-live|respawned|skipped: <reason>|respawn failed: <reason>",
@@ -37,6 +38,11 @@
 #          reading would spin up a duplicate agent). Session-start scope only;
 #          see AGENTS.md "Session start" and docs/tmux-backend.md /
 #          docs/herdr-backend.md "Agent liveness probe" for the empirical basis.
+#          A BACKLOG_ORPHAN line means an item still sits under `## In flight` in
+#          data/backlog.md while its state/<id>.meta is gone: the task's runtime
+#          record was torn down but its row was never closed, so firstmate would
+#          keep re-reporting finished work as still open. Purely local: it compares
+#          backlog rows against state/*.meta and queries no git provider.
 #          A TANGLE line means the firstmate primary checkout (FM_ROOT) is stranded
 #          on a feature branch instead of its default branch - a crewmate's work
 #          landed in the primary instead of its own worktree; restore it per the line.
@@ -84,6 +90,7 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 # shellcheck source=bin/fm-tasks-axi-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
 # shellcheck source=bin/fm-tangle-lib.sh disable=SC1091
@@ -465,6 +472,24 @@ EOF
   echo "FMX: X mode on - relay poll armed via state/x-watch.check.sh; 30s watcher cadence in config/x-mode.env"
 }
 
+# Orphan-row integrity check: an item under `## In flight` in data/backlog.md whose
+# state/<id>.meta is gone. The meta is written at spawn and removed at teardown, so
+# a row with no meta means the task's runtime record was cleaned up while its row
+# stayed open - and firstmate then re-reports landed work as still awaiting the
+# captain. bin/fm-teardown.sh now closes the row itself, so this is the backstop for
+# a failed write or a path that bypasses teardown. Pure local comparison: no git
+# provider is queried, so it costs nothing and works offline.
+backlog_orphan_rows() {
+  local backlog id
+  backlog="$DATA/backlog.md"
+  [ -f "$backlog" ] || return 0
+  while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    [ -f "$STATE/$id.meta" ] && continue
+    echo "BACKLOG_ORPHAN: $id is In flight in data/backlog.md but has no state/$id.meta (torn down without closing its row); confirm how it ended, then close it with tasks-axi done $id (--pr/--note/--report) or hand-edit data/backlog.md"
+  done < <(fm_backlog_inflight_ids "$backlog")
+}
+
 crew_dispatch_validate() {
   local file err
   file="$CONFIG/crew-dispatch.json"
@@ -623,6 +648,7 @@ crew=
 [ -n "$crew" ] && [ "$crew" != "default" ] && echo "CREW_HARNESS_OVERRIDE: $crew"
 crew_dispatch_validate
 harness_overrides_validate
+backlog_orphan_rows
 if ! fm_backlog_backend_manual "$CONFIG" && fm_tasks_axi_compatible; then
   echo "TASKS_AXI: available"
 fi
