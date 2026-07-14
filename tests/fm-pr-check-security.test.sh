@@ -1606,6 +1606,90 @@ SH
   pass "watcher signals promptly stop custom checks and clean private state"
 }
 
+test_returned_custom_check_descendants_are_drained() {
+  local backend dir state fakebin ready direct_done child_pid_file sentinel watcher_pid child_pid i rc alive force_fallback
+  for backend in installed-timeout fallback-timeout; do
+    dir=$(make_case "returned-custom-descendant-$backend")
+    state="$dir/home/state"
+    fakebin="$dir/fakebin"
+    ready="$dir/descendant-ready"
+    direct_done="$dir/direct-check-done"
+    child_pid_file="$dir/descendant.pid"
+    sentinel="$dir/descendant-sentinel"
+    printf '%s\n' fm-pr-check-migration-v1 > "$state/.pr-check-migration-v1"
+    chmod 0600 "$state/.pr-check-migration-v1"
+    cat > "$state/custom.check.sh" <<'SH'
+#!/usr/bin/env bash
+perl -e '$SIG{TERM}="IGNORE"; open my $ready, ">", $ENV{FM_TEST_DESCENDANT_READY} or die $!; print {$ready} "ready\n"; close $ready; select undef, undef, undef, 4; open my $sentinel, ">", $ENV{FM_TEST_DESCENDANT_SENTINEL} or die $!; print {$sentinel} "late\n"; close $sentinel; select undef, undef, undef, 1' &
+printf '%s\n' "$!" > "$FM_TEST_DESCENDANT_PID"
+while [ ! -s "$FM_TEST_DESCENDANT_READY" ]; do sleep 0.01; done
+: > "$FM_TEST_DIRECT_DONE"
+SH
+    chmod 0700 "$state/custom.check.sh"
+    FM_HOME="$dir/home" "$REGISTER" custom >/dev/null \
+      || fail "could not register $backend returned-descendant check"
+    if [ "$backend" = installed-timeout ]; then
+      cat > "$fakebin/timeout" <<'SH'
+#!/usr/bin/env bash
+shift
+exec "$@"
+SH
+      chmod 0700 "$fakebin/timeout"
+      force_fallback=0
+    else
+      rm -f "$fakebin/timeout" "$fakebin/gtimeout"
+      force_fallback=1
+    fi
+
+    FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" FM_POLL=0.1 FM_CHECK_INTERVAL=999999 \
+      FM_CHECK_TIMEOUT=10 FM_HEARTBEAT=999999 FM_SIGNAL_GRACE=0 \
+      FM_CHECK_FORCE_FALLBACK="$force_fallback" FM_TEST_DESCENDANT_READY="$ready" \
+      FM_TEST_DESCENDANT_SENTINEL="$sentinel" FM_TEST_DESCENDANT_PID="$child_pid_file" \
+      FM_TEST_DIRECT_DONE="$direct_done" PATH="$fakebin:$BASE_PATH" "$WATCH" \
+      > "$dir/watch.out" 2> "$dir/watch.err" &
+    watcher_pid=$!
+    i=0
+    while [ "$i" -lt 200 ]; do
+      [ -s "$ready" ] && [ -s "$child_pid_file" ] && [ -e "$direct_done" ] \
+        && [ -e "$state/.last-check" ] && break
+      kill -0 "$watcher_pid" 2>/dev/null || break
+      sleep 0.02
+      i=$((i + 1))
+    done
+    [ -s "$ready" ] && [ -s "$child_pid_file" ] && [ -e "$direct_done" ] \
+      && [ -e "$state/.last-check" ] \
+      || fail "$backend watcher did not complete the direct custom check"
+    child_pid=$(cat "$child_pid_file")
+    kill -TERM "$watcher_pid" 2>/dev/null || fail "could not stop $backend watcher"
+    i=0
+    while kill -0 "$watcher_pid" 2>/dev/null && [ "$i" -lt 150 ]; do
+      sleep 0.02
+      i=$((i + 1))
+    done
+    if kill -0 "$watcher_pid" 2>/dev/null; then
+      kill -KILL "$watcher_pid" 2>/dev/null || true
+      wait "$watcher_pid" 2>/dev/null || true
+      kill -KILL "$child_pid" 2>/dev/null || true
+      fail "$backend watcher did not stop after the direct check returned"
+    fi
+    rc=0
+    wait "$watcher_pid" || rc=$?
+    [ "$rc" -ne 0 ] || fail "$backend signaled watcher exited successfully"
+    alive=0
+    kill -0 "$child_pid" 2>/dev/null && alive=1
+    [ "$alive" -eq 0 ] || kill -KILL "$child_pid" 2>/dev/null || true
+    wait "$child_pid" 2>/dev/null || true
+    [ "$alive" -eq 0 ] || fail "$backend watcher left a returned check descendant alive"
+    [ ! -e "$sentinel" ] || fail "$backend returned check descendant reached its sentinel"
+    ! find "$state" -maxdepth 1 -name '.fm-custom-check.*' -print | grep . >/dev/null \
+      || fail "$backend watcher left a private custom check snapshot"
+    ! find "$state" -maxdepth 1 -name '.fm-check-output.*' -print | grep . >/dev/null \
+      || fail "$backend watcher left a private check output file"
+    [ ! -e "$state/.watch.lock/pid" ] || fail "$backend watcher left its singleton lock"
+  done
+  pass "returned custom check descendants are drained on installed and fallback timeout paths"
+}
+
 test_teardown_removes_poll_artifacts() {
   local dir fakebin kind artifact counterpart rc
   dir=$(make_case teardown-cleanup)
@@ -1765,4 +1849,5 @@ test_nonexecuting_migration
 test_bootstrap_migrates_before_other_mutations
 test_bootstrap_isolates_incomplete_poll_migration
 test_custom_snapshot_cleanup_on_signal
+test_returned_custom_check_descendants_are_drained
 test_teardown_removes_poll_artifacts
