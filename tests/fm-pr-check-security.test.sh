@@ -7,6 +7,8 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh disable=SC1091
 . "$ROOT/bin/fm-pr-lib.sh"
+# shellcheck source=bin/fm-x-lib.sh disable=SC1091
+. "$ROOT/bin/fm-x-lib.sh"
 
 PR_CHECK="$ROOT/bin/fm-pr-check.sh"
 PR_MERGE="$ROOT/bin/fm-pr-merge.sh"
@@ -443,6 +445,9 @@ test_rejected_metacharacter_bytes_are_inert() {
   local dir family rc before after
   dir=$(make_case rejected-metacharacters)
   write_task_meta "$dir"
+  fm_pr_poll_prepare "$dir/home/state" safe-check https://github.com/o/r/pull/99 o r 99 "$POLL" \
+    || fail "could not prepare bounded watcher poll"
+  fm_pr_poll_publish_prepared || fail "could not publish bounded watcher poll"
   families=(
     'https://github.com/o$/r/pull/1'
     'https://github.com/o(/r/pull/1'
@@ -459,17 +464,12 @@ test_rejected_metacharacter_bytes_are_inert() {
     [ ! -e "$dir/home/state/task-a.check.sh" ] || fail "rejected input left a runnable task check"
     [ ! -e "$dir/home/state/task-a.pr-poll" ] || fail "rejected input left a sidecar"
 
-    cat > "$dir/home/state/x-watch.check.sh" <<'SH'
-#!/usr/bin/env bash
-printf '%s\n' stop
-SH
-    chmod 0700 "$dir/home/state/x-watch.check.sh"
     set +e
-    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch.out" 2> "$dir/watch.err"
+    FM_TEST_GH_STATE=MERGED run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch.out" 2> "$dir/watch.err"
     rc=$?
     set -e
-    [ "$rc" -eq 0 ] || fail "bounded watcher did not complete through the X shim"
-    rm -f "$dir/home/state/x-watch.check.sh" "$dir/home/state/.last-check"
+    [ "$rc" -eq 0 ] || fail "bounded watcher did not complete through the authenticated poll"
+    rm -f "$dir/home/state/.last-check"
   done
 
   FM_TEST_GH_STATE=OPEN run_check_entry "$dir" task-a https://github.com/o/r/pull/1 >/dev/null 2>/dev/null \
@@ -1300,10 +1300,7 @@ test_nonexecuting_migration() {
     'pr=https://github.com/o/r/pull/9'
   printf 'printf legacy > %q\n' "$marker" > "$state/task-a.check.sh"
   chmod 0644 "$state/task-a.check.sh"
-  cat > "$state/x-watch.check.sh" <<'SH'
-#!/usr/bin/env bash
-printf '%s\n' x
-SH
+  fmx_poll_shim_content "$dir/home" "$ROOT" > "$state/x-watch.check.sh"
   chmod 0755 "$state/x-watch.check.sh"
   x_before=$(state_snapshot "$state" | grep 'x-watch.check.sh')
 
@@ -1478,6 +1475,8 @@ SH
   [ -e "$fleet_marker" ] || fail "incomplete poll migration suppressed fleet refresh"
   assert_grep 'FLEET_SYNC: alpha: recovered: continued after isolated migration failure' "$dir/bootstrap.out" \
     "continued fleet refresh was not operator-visible"
+  printf '%s\n' '#!/usr/bin/env bash' "printf '%s\\n' replacement-ran" > "$state/a-replaced.check.sh"
+  chmod 0600 "$state/a-replaced.check.sh"
   set +e
   FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$dir/root" FM_TEST_X_POLL_MARKER="$x_poll_marker" \
     FM_TEST_GH_STATE=MERGED FM_POLL=0 FM_CHECK_INTERVAL=0 FM_SIGNAL_GRACE=0 \
@@ -1486,10 +1485,27 @@ SH
   set -e
   [ "$rc" -eq 0 ] || fail "watcher remained blocked after unsafe legacy check exclusion: $(cat "$dir/watch.err")"
   [ -e "$x_poll_marker" ] || fail "watcher did not continue X mention polling after isolated migration failure"
+  assert_no_grep 'replacement-ran' "$dir/watch.out" \
+    "watcher executed an unauthenticated check created after scan completion"
   assert_grep "check: $state/z-healthy.check.sh: merged" "$dir/watch.out" \
     "watcher did not continue the healthy authenticated poll"
   [ ! -e "$state/task-a.check.sh" ] && [ ! -L "$state/task-a.check.sh" ] \
     || fail "watcher continuation rearmed the unsafe legacy check"
+  printf '%s\n' '#!/usr/bin/env bash' "printf '%s\\n' forged-x-ran" > "$state/x-watch.check.sh"
+  chmod 0700 "$state/x-watch.check.sh"
+  rm -f "$state/.last-check" "$x_poll_marker"
+  set +e
+  FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$dir/root" FM_TEST_X_POLL_MARKER="$x_poll_marker" \
+    FM_TEST_GH_STATE=OPEN FM_POLL=0 FM_CHECK_INTERVAL=0 FM_SIGNAL_GRACE=0 \
+    PATH="$fakebin:$BASE_PATH" "$WATCH" > "$dir/watch-replaced.out" 2> "$dir/watch-replaced.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "watcher failed while rejecting a replaced X shim: $(cat "$dir/watch-replaced.err")"
+  assert_no_grep 'forged-x-ran' "$dir/watch-replaced.out" \
+    "watcher executed a filename-only X shim replacement"
+  [ ! -e "$x_poll_marker" ] || fail "watcher trusted the replaced X shim identity"
+  assert_grep "check: rejected unauthenticated state checks: $state/a-replaced.check.sh $state/x-watch.check.sh" \
+    "$dir/watch-replaced.out" "watcher did not surface rejected state check replacements"
   [ -f "$state/.pr-check-quarantine/task-a.diagnostic.failure-canonical" ] \
     || fail "watcher continuation lost the durable repair obligation"
   pass "bootstrap isolates incomplete poll migration from unrelated recovery sweeps"

@@ -46,7 +46,7 @@ test_signal_passes_through_and_exits_zero() {
   pass "checkpoint passes through a real watcher wake and leaves the queue for drain"
 }
 
-test_check_uses_preserved_watcher_environment() {
+test_unauthenticated_check_is_rejected() {
   local home out err status
   home=$(make_home check-env)
   out="$home/out.txt"
@@ -61,9 +61,9 @@ SH
   status=0
   FM_HOME="$home" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=1 "$CHECKPOINT" --seconds 5 >"$out" 2>"$err" || status=$?
   expect_code 0 "$status" "check checkpoint exit"
-  assert_contains "$(cat "$out")" "check:" "check wake was not passed through"
-  assert_contains "$(cat "$out")" "FM_CHECK_INTERVAL=1" "watcher environment was not preserved"
-  pass "checkpoint preserves watcher environment for the foreground fm-watch.sh"
+  assert_contains "$(cat "$out")" "check: rejected unauthenticated state checks: $home/state/env-check.check.sh" "rejected-check wake was not passed through"
+  assert_not_contains "$(cat "$out")" "env check fired" "unauthenticated check was executed"
+  pass "checkpoint surfaces unauthenticated checks without executing them"
 }
 
 test_existing_singleton_watcher_is_not_success() {
@@ -85,5 +85,5 @@ test_existing_singleton_watcher_is_not_success() {
 
 test_quiet_checkpoint_exits_124_cleanly
 test_signal_passes_through_and_exits_zero
-test_check_uses_preserved_watcher_environment
+test_unauthenticated_check_is_rejected
 test_existing_singleton_watcher_is_not_success

@@ -2,7 +2,7 @@
 # Non-executing migration for watcher PR checks created by older Firstmate
 # versions. Legacy check files are never run, sourced, or parsed by Bash.
 # Canonical polls are rebuilt from validated metadata; every other task poll is
-# quarantined for private review. The X-mode shim is preserved by its fixed name.
+# quarantined for private review. The X-mode shim is preserved by exact content.
 # Usage: fm-pr-check-migrate.sh [--checks-safe]
 set -u
 
@@ -31,6 +31,8 @@ fi
 
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-x-lib.sh
+. "$SCRIPT_DIR/fm-x-lib.sh"
 
 umask 077
 if [ ! -e "$STATE" ] && [ ! -L "$STATE" ]; then
@@ -185,7 +187,10 @@ migration_needed() {
   local check id
   for check in "$STATE"/*.check.sh; do
     [ -e "$check" ] || [ -L "$check" ] || continue
-    [ "$(basename "$check")" = x-watch.check.sh ] && continue
+    if [ "$(basename "$check")" = x-watch.check.sh ] \
+      && fmx_poll_shim_valid "$check" "$FM_HOME" "$FM_ROOT"; then
+      continue
+    fi
     id=$(basename "$check" .check.sh)
     if ! fm_pr_poll_artifacts_valid "$STATE" "$id" "$TEMPLATE"; then
       return 0
@@ -198,7 +203,10 @@ unsafe_checks_absent() {
   local check id
   for check in "$STATE"/*.check.sh; do
     [ -e "$check" ] || [ -L "$check" ] || continue
-    [ "$(basename "$check")" = x-watch.check.sh ] && continue
+    if [ "$(basename "$check")" = x-watch.check.sh ] \
+      && fmx_poll_shim_valid "$check" "$FM_HOME" "$FM_ROOT"; then
+      continue
+    fi
     id=$(basename "$check" .check.sh)
     fm_pr_poll_artifacts_valid "$STATE" "$id" "$TEMPLATE" || return 1
   done
@@ -749,7 +757,10 @@ if migration_needed; then
 
   for check in "$STATE"/*.check.sh; do
     [ -e "$check" ] || [ -L "$check" ] || continue
-    [ "$(basename "$check")" = x-watch.check.sh ] && continue
+    if [ "$(basename "$check")" = x-watch.check.sh ] \
+      && fmx_poll_shim_valid "$check" "$FM_HOME" "$FM_ROOT"; then
+      continue
+    fi
     id=$(basename "$check" .check.sh)
     fm_pr_poll_artifacts_valid "$STATE" "$id" "$TEMPLATE" && continue
 

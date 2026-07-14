@@ -85,7 +85,7 @@ state/               volatile runtime signals; gitignored
   <id>.turn-ended    touched by turn-end hooks
   <id>.grok-turnend-token   firstmate-owned grok hook registry token for the task; removed by teardown
   <id>.meta          written by fm-spawn: window=, worktree=, project=, harness=, model=, effort=, kind=, mode=, yolo=, tasktmp=; kind=secondmate also records home= and projects=; a non-default runtime backend records further backend-specific fields (docs/configuration.md "Runtime backend"; bin/fm-backend.sh, section 8); fm-pr-check, including through fm-pr-merge, appends pr= and GitHub's pr_head= when available; fm-x-link appends x_request=, x_request_ts=, x_followups=, and optional x_platform=/x_reply_max_chars= for an X-mode-originated task (section 14)
-  <id>.check.sh      optional slow poll; PR merge polls use byte-static source and are published only after their validated data sidecar
+  <id>.check.sh      authenticated slow poll; the watcher dispatches validated PR data and the byte-identified X shim only through trusted repository scripts, and rejects every other state check without execution
   <id>.pr-poll       private validated data sidecar for the byte-static PR merge poll
   .pr-check-quarantine/  private non-runnable storage for checks neutralized by the non-executing migration
   .pr-check-migration.log  private per-task outcomes distinguishing rebuilt armed polls, quarantined unarmed polls, and incomplete migrations
