@@ -9,8 +9,18 @@
 # restate the mechanics there.
 #
 # THE GUARD, IN FULL. When state/<id>.meta records a non-default base= (declared with
-# fm-spawn.sh --base) AND that base branch still EXISTS on origin, two things must both
-# hold before pr= is recorded and the merge poll is armed:
+# fm-spawn.sh --base), the guard first asks whether that base is a LIVE feature base at
+# all: it must still EXIST on origin, and it must still carry at least one commit the
+# default branch does not already have (fm_base_has_own_commits). Existing is not enough.
+# GitHub's delete-on-merge is off by default, so a base that merged and kept its branch is
+# an ordinary end-state - and it has no unmerged history left to drag anywhere, which means
+# the hazard is gone and rootedness is not even observable against it (every fork point
+# with such a base is reachable from the default branch, so a perfectly stacked head would
+# read UNROOTED). Guarding it as though it were live refuses a safe PR and says something
+# false about its head.
+#
+# Against a LIVE base, two things must both hold before pr= is recorded and the merge poll
+# is armed:
 #
 #   ROOTED   the PR head is rooted in that base's own history - its fork point is a commit
 #            the default branch cannot reach (fm_base_head_rooted). A head rooted in the
@@ -30,6 +40,17 @@
 # and every refusal names the recovery that fits the state it actually found - an
 # instruction that cannot change the state it is printed in just sends the reader in a
 # circle.
+#
+# A base that is on origin but carries NOTHING the default branch lacks is verified as the
+# ordinary default-branch PR it now is: there is no unmerged base history to protect, so
+# only the target is checked, and it must be the default branch. A PR still pointed at that
+# spent base is refused - merging it would land the fix on a branch the default branch has
+# already absorbed, so the fix would never reach the default branch at all.
+#
+# This is plain ancestry and it is NOT a merge detector. A SQUASH-merged base still has its
+# own commits absent from the default branch by SHA, so it reads live and gets the full
+# guard. Telling a squash merge from an abandoned branch takes an inference, and this guard
+# does not infer (see below).
 #
 # WHAT THIS GUARD DELIBERATELY DOES NOT DO. It does not adjudicate a base's END OF LIFE.
 # If the declared base is not on origin, or origin cannot be asked, or anything else stops
@@ -193,13 +214,43 @@ refuse_wrong_base_label() {  # <pr-number>
   return 1
 }
 
+# The declared base is still on origin, but it carries nothing the default branch does not
+# already have, so it is no longer a live feature base: there is no unmerged history a merge
+# could drag onto the default branch, and the guard's whole premise is gone with it. Verify
+# the PR as the ordinary default-branch PR it now is. Returns 0 to record and arm, 1 to
+# refuse or defer.
+#
+# The one thing still worth checking is the target. A PR left pointing at a base the default
+# branch has already absorbed merges into a spent branch, so the fix never reaches the
+# default branch at all - while the PR reads MERGED, teardown calls the work landed, and the
+# task goes to Done having delivered nothing.
+verify_as_ordinary_default_pr() {  # <default-branch-name> <base-tip> <pr-number>
+  local default_branch_name=$1 base_tip=$2 n=$3
+  if [ -z "$PR_BASE_LABEL" ]; then
+    defer_to_human "'$BASE' carries no commits '$default_branch_name' does not already have, so it is no longer a live feature base and this is an ordinary '$default_branch_name' PR - but its base label could not be resolved via gh, so what it actually targets cannot be confirmed"
+    return 1
+  fi
+  if [ "$PR_BASE_LABEL" != "$default_branch_name" ]; then
+    echo "error: task $ID PR is opened against '$PR_BASE_LABEL', a branch '$default_branch_name' has already absorbed - refusing to record pr= or arm the merge poll before merge." >&2
+    echo "  intended base : $BASE ($base_tip)" >&2
+    echo "  PR base label : $PR_BASE_LABEL" >&2
+    echo "  '$BASE' carries no commits '$default_branch_name' does not already have, so it is no longer a live feature base. Merging this PR into it would land the fix on a spent branch and never on '$default_branch_name' - and the PR would read MERGED while delivering nothing." >&2
+    echo "  Recovery: retarget the PR at the default branch with 'gh-axi pr edit $n --base $default_branch_name', then drop the 'base=$BASE' line from $META to retire the declaration - this is an ordinary '$default_branch_name' task now - and re-run fm-pr-check." >&2
+    return 1
+  fi
+  echo "note: task $ID declares intended base '$BASE', but that branch carries no commits '$default_branch_name' does not already have, so it is no longer a live feature base: there is no unmerged history this PR could carry onto '$default_branch_name', and the head's rootedness in it is no longer observable. Verified as the ordinary '$default_branch_name' PR it now targets." >&2
+  echo "  Drop the 'base=$BASE' line from $META to retire the declaration." >&2
+  return 0
+}
+
 # Assert the PR head is rooted in its declared base AND targets it. Fetches the base, the
 # default branch, and the PR head from origin so the checks run against authoritative
 # commits in the local object store - not a stale local branch, or a head SHA whose objects
 # were never fetched. Returns 0 (verified: the PR may be recorded and armed) or 1 (refuse
 # or defer, both of which have already said which).
 guard_pr_base() {
-  local n pr_sha default_branch_name default_sha base_tip err probe_rc=0 rooted_rc=0
+  local n pr_sha default_branch_name default_sha base_tip err
+  local probe_rc=0 own_rc=0 rooted_rc=0
 
   if [ -z "$WT" ] || [ ! -d "$WT" ]; then
     defer_to_human "its worktree is unavailable ('$WT'), so nothing can be fetched or compared"
@@ -261,6 +312,24 @@ guard_pr_base() {
     defer_to_human "the fetched PR head did not resolve to a commit"
     return 1
   }
+
+  # IS THE BASE EVEN LIVE? A branch that is on origin but carries nothing the default branch
+  # lacks has no unmerged history to protect, and rootedness cannot be asked of it at all:
+  # every fork point with it is reachable from the default branch, so a correctly stacked
+  # head would read UNROOTED and be refused with a diagnosis that is simply untrue. Ask this
+  # BEFORE rootedness, always.
+  fm_base_has_own_commits "$WT" "$base_tip" "$default_sha" || own_rc=$?
+  case "$own_rc" in
+    "$FM_BASE_HAS_OWN_COMMITS") ;;
+    "$FM_BASE_NO_OWN_COMMITS")
+      verify_as_ordinary_default_pr "$default_branch_name" "$base_tip" "$n" || return 1
+      return 0
+      ;;
+    *)
+      defer_to_human "git could not count what '$BASE' ($base_tip) carries that '$default_branch_name' ($default_sha) does not, so whether that base is still a live feature branch cannot be settled"
+      return 1
+      ;;
+  esac
 
   # ROOTED?
   fm_base_head_rooted "$WT" "$base_tip" "$pr_sha" "$default_sha" || rooted_rc=$?

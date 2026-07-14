@@ -452,7 +452,7 @@ EOF
     NM_DONE="After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR {url} checks green\` and stop. You are finished."
     if [ -n "$BASE" ]; then
       NM_BASE_SECTION="## Base branch \`$BASE\` - required before you are done
-This task targets base branch \`$BASE\`, not the repo default.
+$BASE_MARKER
 The pipeline cannot be told a base: it always rebases onto the repo default branch and opens the PR against it. Do not try to talk it out of that, and do not hand-rebase mid-run.
 Instead, let the PR open as it will, then retarget it once it exists: \`gh-axi pr edit {n} --base $BASE\`.
 The pipeline's monitor picks the new base up, re-rebases your branch onto \`$BASE\`, and force-pushes a clean head; you do not rebuild anything by hand.

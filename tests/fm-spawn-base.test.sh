@@ -6,11 +6,13 @@
 # to promote, so there is no link in the chain that could silently disarm fm-pr-check.sh's
 # guard by failing to hand the branch name along.
 #
-# The spawn asks ONE question about a base, and only of a NEW declaration: is that branch on
-# origin? A branch that is not there is almost always a typo, and catching it costs a command
-# rather than a whole crewmate run. It asks nothing further - whether a base has merged, been
-# squash-merged, or been abandoned is not decidable from git without a guess, and this design
-# does not guess: bin/fm-pr-check.sh hands an unverifiable base to a human at the merge gate.
+# Of a NEW declaration the spawn asks exactly two questions, both cheap and both about the
+# flag rather than about the base's fate: is that branch something other than the repo default
+# (--base means a NON-default base), and is it on origin at all? The first catches a
+# misunderstanding of the flag, the second a typo, and each costs a command instead of a whole
+# crewmate run. It asks nothing further - whether a base has merged, been squash-merged, or
+# been abandoned is not decidable from git without a guess, and this design does not guess:
+# bin/fm-pr-check.sh hands an unverifiable base to a human at the merge gate.
 #
 # Matrix:
 #   (a) --base <branch> on a base that is on origin -> meta records base=<branch>
@@ -19,6 +21,9 @@
 #   (d) an accepted spawn does create both, so (c)'s assertions are live
 #   (e) --base is rejected for a scout and for a secondmate
 #   (f) a declared base origin does not have -> the same early, loud refusal
+#   (f2) --base naming the repo DEFAULT branch -> the same early, loud refusal. --base means a
+#       NON-default base; a default-branch task needs no flag, and arming a feature-base guard
+#       against a branch with no feature history of its own is not a harmless no-op
 #   (g) --base is rejected in a batch spawn, where it could not name one task
 #   (h) a respawn without --base carries the recorded base= forward, because meta is
 #       rewritten wholesale and a base lost on recovery is a task unguarded
@@ -205,6 +210,33 @@ test_base_missing_from_origin_refuses_before_creating_anything() {
   assert_no_grep "treehouse get" "$log" \
     "nosuchbase: the refusal leased a task worktree it then abandoned, with no meta to release it"
   pass "fm-spawn refuses a declared base origin does not have, before any window or worktree exists"
+}
+
+# --base declares a NON-DEFAULT intended base, and naming the default branch is not a
+# harmless way of saying "the usual". It would arm a guard whose premise is a feature branch
+# with unmerged history of its own against a branch that by definition has none, and every
+# message the task then produced would talk about an "intended base" that is the default
+# branch. Refuse it at the point of declaration rather than quietly normalising it away, so
+# what the operator learns is what the flag actually means.
+test_base_equal_to_the_default_branch_refuses_before_creating_anything() {
+  local rec id out status log
+  id=spawn-base-b9
+  rec=$(make_spawn_case defaultbase "$id" feature/base main)
+  read_case_record "$rec"
+  log="$CASE_DIR/tmux.log"
+  : > "$log"
+
+  out=$(FM_TEST_TMUX_LOG="$log" run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR" --base main)
+  status=$?
+  expect_code 1 "$status" "defaultbase: --base naming the repo default must refuse, not arm a feature-base guard against a branch with no feature history"
+  assert_contains "$out" "IS the repo default branch" \
+    "defaultbase: the refusal did not tell the operator what --base actually means"
+  assert_absent "$HOME_DIR/state/$id.meta" "defaultbase: refusal should happen before meta is written"
+  assert_no_grep "new-window" "$log" \
+    "defaultbase: the refusal created a backend window it then abandoned, with no meta to reconcile it"
+  assert_no_grep "treehouse get" "$log" \
+    "defaultbase: the refusal leased a task worktree it then abandoned, with no meta to release it"
+  pass "fm-spawn refuses --base naming the repo default branch, before any window or worktree exists"
 }
 
 test_no_base_writes_no_base_key() {
@@ -499,6 +531,7 @@ test_base_flag_is_recorded_in_meta
 test_no_base_writes_no_base_key
 test_invalid_base_refuses_before_creating_anything
 test_base_missing_from_origin_refuses_before_creating_anything
+test_base_equal_to_the_default_branch_refuses_before_creating_anything
 test_base_without_a_matching_brief_refuses_before_creating_anything
 test_orca_abort_orphan_meta_keeps_the_declared_base
 test_a_good_spawn_does_create_the_window_and_worktree

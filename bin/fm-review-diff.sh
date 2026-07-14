@@ -6,17 +6,20 @@
 # it, and local-only projects against the local branch.
 # The diff base is the repo default branch, unless state/<id>.meta records a
 # non-default base= (a task whose intended base is a feature branch, declared
-# with fm-spawn.sh --base), that base branch still exists on origin, AND the reviewed head
-# is actually rooted in it: then it is that base, so review shows the crewmate's own change
-# rather than the entire feature base's unmerged history on top of it.
+# with fm-spawn.sh --base), that base is still a LIVE feature base on origin, AND the
+# reviewed head is actually rooted in it: then it is that base, so review shows the
+# crewmate's own change rather than the entire feature base's unmerged history on top of it.
 #
-# Both conditions matter, and the diff is wrong in a different direction without each. A base
-# that is gone cannot be diffed against at all. A base that is still there but that the head
-# was REBASED OFF - what the no-mistakes pipeline does to every head, and the state
-# fm-pr-check.sh refuses - is worse than useless as a diff base: the merge base is then the old
-# fork point, so the diff would show every default-branch commit since the fork as part of the
-# crewmate's change. Rootedness is asked with the same bin/fm-base-lib.sh predicate the guard
-# uses, so review and the merge gate never tell different stories about one head.
+# All three conditions matter, and the diff is wrong in a different direction without each. A
+# base that is gone cannot be diffed against at all. A base that is still on origin but that
+# the default branch has already absorbed carries nothing to diff against, and rootedness is
+# not observable against it. A base that is still live but that the head was REBASED OFF -
+# what the no-mistakes pipeline does to every head, and the state fm-pr-check.sh refuses - is
+# worse than useless as a diff base: the merge base is then the old fork point, so the diff
+# would show every default-branch commit since the fork as part of the crewmate's change.
+# Liveness and rootedness are asked with the same bin/fm-base-lib.sh predicates the guard
+# uses, in the same order, so review and the merge gate never tell different stories about
+# one head.
 #
 # In every case that rules the declared base out, this script falls back to the default branch
 # and SAYS SO in one line, rather than erroring or guessing: review is exactly what firstmate
@@ -195,14 +198,22 @@ fi
 git -C "$WT" rev-parse --verify --quiet "$BASE^{commit}" >/dev/null || { echo "error: base $BASE does not exist in $WT" >&2; exit 1; }
 git -C "$WT" rev-parse --verify --quiet "$COMPARE_REF^{commit}" >/dev/null || { echo "error: compare ref $COMPARE_REF does not resolve in $WT" >&2; exit 1; }
 
-# A declared base is the honest diff base only while the reviewed head is actually ROOTED in
-# it. A head the no-mistakes pipeline has rebased onto the default branch is not: its merge
-# base with the declared base is the OLD fork point, so a three-dot diff against that base
-# would show every default-branch commit since the fork as part of the crewmate's change -
-# the inflated diff this helper exists to prevent, arriving from the other side. And that is
-# precisely the head bin/fm-pr-check.sh refuses, which is when firstmate is most likely to be
-# running this. Same question, same predicate, so review and the merge gate never tell
-# different stories about one head.
+# A declared base is the honest diff base only while it is a LIVE feature base - one that
+# still carries unmerged work of its own - AND the reviewed head is actually ROOTED in it.
+#
+# Liveness first, and for the same reason bin/fm-pr-check.sh asks it first: a base that is
+# still on origin but that the default branch has already absorbed carries nothing to diff
+# against, and rootedness cannot even be asked of it (every fork point with such a base is
+# reachable from the default branch, so a correctly stacked head reads UNROOTED and the
+# warning below would tell the reviewer something untrue about it).
+#
+# Then rootedness. A head the no-mistakes pipeline has rebased onto the default branch is not
+# rooted in the base: its merge base with the declared base is the OLD fork point, so a
+# three-dot diff against that base would show every default-branch commit since the fork as
+# part of the crewmate's change - the inflated diff this helper exists to prevent, arriving
+# from the other side. And that is precisely the head bin/fm-pr-check.sh refuses, which is
+# when firstmate is most likely to be running this. Same questions, same predicates, in the
+# same order, so review and the merge gate never tell different stories about one head.
 if [ -n "$BASE_DECLARED" ] && [ "$BASE_BRANCH" = "$BASE_DECLARED" ]; then
   if "$HAS_ORIGIN"; then
     if ! FETCH_ERR=$(fetch_tracking_ref "$DEFAULT"); then
@@ -217,16 +228,30 @@ if [ -n "$BASE_DECLARED" ] && [ "$BASE_BRANCH" = "$BASE_DECLARED" ]; then
   git -C "$WT" rev-parse --verify --quiet "$DEFAULT_REF^{commit}" >/dev/null \
     || { echo "error: default branch $DEFAULT_REF does not exist in $WT" >&2; exit 1; }
 
-  ROOTED_RC=0
-  fm_base_head_rooted "$WT" "$BASE" "$COMPARE_REF" "$DEFAULT_REF" || ROOTED_RC=$?
-  case "$ROOTED_RC" in
-    "$FM_BASE_HEAD_ROOTED") ;;
-    "$FM_BASE_HEAD_UNROOTED")
-      echo "warning: task $ID declares intended base $BASE_DECLARED, but the reviewed head is not rooted in that base's history - it was rebased onto the default branch - so diffing against $BASE_DECLARED would present every $DEFAULT commit since the fork as part of this change; diffing against the default branch $DEFAULT instead, which shows what this head actually adds. This is the head bin/fm-pr-check.sh refuses before merge." >&2
+  OWN_RC=0
+  fm_base_has_own_commits "$WT" "$BASE" "$DEFAULT_REF" || OWN_RC=$?
+  case "$OWN_RC" in
+    "$FM_BASE_HAS_OWN_COMMITS")
+      ROOTED_RC=0
+      fm_base_head_rooted "$WT" "$BASE" "$COMPARE_REF" "$DEFAULT_REF" || ROOTED_RC=$?
+      case "$ROOTED_RC" in
+        "$FM_BASE_HEAD_ROOTED") ;;
+        "$FM_BASE_HEAD_UNROOTED")
+          echo "warning: task $ID declares intended base $BASE_DECLARED, but the reviewed head is not rooted in that base's history - it was rebased onto the default branch - so diffing against $BASE_DECLARED would present every $DEFAULT commit since the fork as part of this change; diffing against the default branch $DEFAULT instead, which shows what this head actually adds. This is the head bin/fm-pr-check.sh refuses before merge." >&2
+          BASE=$DEFAULT_REF
+          ;;
+        *)
+          echo "warning: task $ID declares intended base $BASE_DECLARED, but the reviewed head shares no history with that base at all, so it cannot be the diff base; diffing against the default branch $DEFAULT instead" >&2
+          BASE=$DEFAULT_REF
+          ;;
+      esac
+      ;;
+    "$FM_BASE_NO_OWN_COMMITS")
+      echo "warning: task $ID declares intended base $BASE_DECLARED, but that branch carries no commits $DEFAULT does not already have, so it is no longer a live feature base and is no longer a distinct diff base; diffing against the default branch $DEFAULT instead, which shows what this head actually adds" >&2
       BASE=$DEFAULT_REF
       ;;
     *)
-      echo "warning: task $ID declares intended base $BASE_DECLARED, but the reviewed head shares no history with that base at all, so it cannot be the diff base; diffing against the default branch $DEFAULT instead" >&2
+      echo "warning: task $ID declares intended base $BASE_DECLARED, but git could not count what that branch carries that $DEFAULT does not, so whether it is still a live feature base cannot be settled; diffing against the default branch $DEFAULT instead, which shows everything this head would land on $DEFAULT" >&2
       BASE=$DEFAULT_REF
       ;;
   esac

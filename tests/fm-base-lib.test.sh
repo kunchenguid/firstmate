@@ -12,14 +12,27 @@
 #       mistaken for a branch that is gone: an infrastructure failure is not a fact about
 #       the base
 #
+# fm_base_has_own_commits - does the base still carry anything the default branch lacks?
+# This is what separates a LIVE feature base, whose unmerged history a wrong-based merge
+# could drag onto the default branch, from a branch that is merely still on origin.
+#   (d) base carries a commit of its own              -> HAS_OWN_COMMITS (live: guard it)
+#   (e) the default branch has absorbed every commit it carries -> NO_OWN_COMMITS. Nothing
+#       left to drag anywhere, so the hazard is gone - and rootedness is not observable
+#       against such a base at all (see (h))
+#   (f) the base was SQUASH-merged                    -> still HAS_OWN_COMMITS, deliberately.
+#       Its own commits are absent from the default branch by SHA. This is plain ancestry,
+#       not a merge detector, and it does not pretend to be one
+#   (g) git cannot count                              -> OWN_COMMITS_UNKNOWN, and NOT read as
+#       either verdict
+#
 # fm_base_head_rooted - is a head rooted in the base's own history, or in the default
 # branch?
-#   (d) head stacked on the base                     -> ROOTED
-#   (e) head rebased onto the default branch         -> UNROOTED (the 2026-07-07 incident)
-#   (f) head stacked, but the base ADVANCED since    -> still ROOTED. Rootedness is not
+#   (h) head stacked on the base                     -> ROOTED
+#   (i) head rebased onto the default branch         -> UNROOTED (the 2026-07-07 incident)
+#   (j) head stacked, but the base ADVANCED since    -> still ROOTED. Rootedness is not
 #       tip-descent: a stacked PR whose own base is under review sees it advance all the
 #       time, and demanding descent from the current tip would refuse a routine merge
-#   (g) head and base share no history at all        -> UNRELATED
+#   (k) head and base share no history at all        -> UNRELATED
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -63,6 +76,18 @@ probe_word() {  # <dir> <branch>; echoes present|absent|probe-failed
     "$FM_BASE_PRESENT") printf 'present' ;;
     "$FM_BASE_ABSENT") printf 'absent' ;;
     *) printf 'probe-failed' ;;
+  esac
+}
+
+own_word() {  # <dir> <base-rev>; echoes has-own|no-own|unknown
+  local dir=$1 base default rc=0
+  base=$(git -C "$dir/wt" rev-parse "$2" 2>/dev/null) || base=$2
+  default=$(git -C "$dir/wt" rev-parse origin/main)
+  fm_base_has_own_commits "$dir/wt" "$base" "$default" || rc=$?
+  case "$rc" in
+    "$FM_BASE_HAS_OWN_COMMITS") printf 'has-own' ;;
+    "$FM_BASE_NO_OWN_COMMITS") printf 'no-own' ;;
+    *) printf 'unknown' ;;
   esac
 }
 
@@ -131,6 +156,64 @@ test_probe_failure_is_not_absence() {
   pass "fm_base_probe_origin tells an unreachable origin from a branch that is gone, and keeps git's error"
 }
 
+test_live_base_has_own_commits() {
+  local dir
+  dir=$(make_repo own-live)
+  expect_word has-own "$(own_word "$dir" origin/feature/base)" \
+    "own-live: a base carrying unmerged work of its own must read HAS_OWN_COMMITS"
+  pass "fm_base_has_own_commits reports a live feature base as carrying its own commits"
+}
+
+# A branch existing on origin does NOT make it a live feature base. GitHub's delete-on-merge
+# is off by default, so a base that merged and kept its branch is an ordinary end-state: it
+# has nothing left to drag onto the default branch, and a head stacked on it reads UNROOTED
+# (see the companion assertion below), so a guard that skips this question refuses a safe PR
+# and tells the operator its head was rebased when it never was.
+test_absorbed_base_has_no_own_commits() {
+  local dir
+  dir=$(make_repo own-absorbed)
+  git -C "$dir/wt" checkout -q -b prhead origin/feature/base
+  commit "$dir/wt" fix.txt fix "task fix"
+  # feature/base merges into main; origin KEEPS the branch.
+  git -C "$dir/origin.git" update-ref refs/heads/main refs/heads/feature/base
+  git -C "$dir/wt" fetch -q origin
+
+  expect_word no-own "$(own_word "$dir" origin/feature/base)" \
+    "own-absorbed: a base the default branch has absorbed must read NO_OWN_COMMITS"
+  expect_word unrooted "$(rooted_word "$dir" origin/feature/base prhead)" \
+    "own-absorbed: rootedness is not observable against an absorbed base - this is exactly why liveness must be asked FIRST"
+  pass "fm_base_has_own_commits reports a base the default branch has absorbed as carrying nothing of its own"
+}
+
+# Plain ancestry, not a merge detector. A squash-merged base's own commits are absent from
+# the default branch by SHA, so it still reads live and still gets the full guard. Telling a
+# squash merge from an abandoned branch takes an inference, and an inference that can be
+# wrong is the thing this design refuses to make.
+test_squash_merged_base_still_reads_live() {
+  local dir
+  dir=$(make_repo own-squashed)
+  # main gains the base's CONTENT as one new commit, never the base's commits.
+  git -C "$dir/wt" checkout -q main
+  git -C "$dir/wt" merge -q --squash feature/base >/dev/null 2>&1 || true
+  git -C "$dir/wt" -c user.name=t -c user.email=t@t commit -qm "squash feature/base"
+  git -C "$dir/wt" push -q origin main
+  git -C "$dir/wt" fetch -q origin
+
+  expect_word has-own "$(own_word "$dir" origin/feature/base)" \
+    "own-squashed: a squash-merged base still carries its own commits by SHA and must read HAS_OWN_COMMITS - this predicate does not detect a squash merge and must not pretend to"
+  pass "fm_base_has_own_commits leaves a squash-merged base reading live, because plain ancestry cannot see a squash"
+}
+
+# A question git could not answer is not an answer. Reading it as either verdict would let a
+# broken read decide a merge.
+test_uncountable_base_is_unknown() {
+  local dir
+  dir=$(make_repo own-unknown)
+  expect_word unknown "$(own_word "$dir" 0000000000000000000000000000000000000000)" \
+    "own-unknown: a base git cannot count against must read OWN_COMMITS_UNKNOWN, not live and not absorbed"
+  pass "fm_base_has_own_commits reports a count it could not take as UNKNOWN rather than guessing"
+}
+
 test_head_stacked_on_base_is_rooted() {
   local dir
   dir=$(make_repo rooted)
@@ -188,6 +271,7 @@ test_enum_values_cannot_alias_across_enums() {
   dupes=$(printf '%s\n' \
     "$FM_BASE_PRESENT" "$FM_BASE_PROBE_FAILED" "$FM_BASE_ABSENT" \
     "$FM_BASE_HEAD_ROOTED" "$FM_BASE_HEAD_UNROOTED" "$FM_BASE_HEAD_UNRELATED" \
+    "$FM_BASE_HAS_OWN_COMMITS" "$FM_BASE_NO_OWN_COMMITS" "$FM_BASE_OWN_COMMITS_UNKNOWN" \
     | sort | uniq -d)
   [ -z "$dupes" ] \
     || fail "enum: FM_BASE_* outcomes share the value(s) [$dupes] across enums; a value of one could be read as a value of another in the same scope"
@@ -198,6 +282,10 @@ test_valid_branch_name
 test_probe_present
 test_probe_absent
 test_probe_failure_is_not_absence
+test_live_base_has_own_commits
+test_absorbed_base_has_no_own_commits
+test_squash_merged_base_still_reads_live
+test_uncountable_base_is_unknown
 test_head_stacked_on_base_is_rooted
 test_head_rebased_onto_default_is_unrooted
 test_base_advanced_since_head_is_still_rooted

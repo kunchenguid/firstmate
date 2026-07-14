@@ -64,10 +64,11 @@
 #   same --base to fm-brief.sh, which only shapes the brief's prose and records
 #   nothing. fm-pr-check.sh then guards the PR's base before merge; its header owns
 #   that contract in full.
-#   A NEW declaration is checked against origin first: the branch must be there, or
-#   the spawn refuses. That catches a mistyped base before a crewmate spends a whole
-#   run on it, and it is the only question this script asks about a base - it does
-#   not try to work out whether a base has merged or been abandoned, because git
+#   A NEW declaration is checked twice, and no further: the branch must not be the
+#   repo default (--base means a NON-default base; a default-branch task needs no
+#   flag), and it must exist on origin. Those catch a misunderstanding of the flag
+#   and a mistyped base before a crewmate spends a whole run on either. The script
+#   does not try to work out whether a base has merged or been abandoned, because git
 #   cannot tell those apart without a guess (fm-pr-check.sh hands that to a human).
 #   A RESPAWN of a task whose meta already declares the same base skips that probe:
 #   a base that merged and was deleted mid-flight is the normal end-state of a
@@ -808,11 +809,23 @@ fi
 # there is no state/<id>.meta yet - it is written at the end of the spawn - so telling the
 # operator to edit it would name a file that is not on disk.
 probe_new_declared_base() {  # returns 1 to refuse
-  local probe_rc=0 recovery
+  local probe_rc=0 recovery repo_default
   if [ -n "$BASE_RECORDED" ]; then
     recovery="  Recovery: re-run with a base that exists on origin ('--base <branch>'), or drop the 'base=$BASE_RECORDED' line from $STATE/$ID.meta to make this an ordinary default-branch task and re-run without --base."
   else
     recovery="  Recovery: re-run with the base this task should target ('--base <branch>'), or re-run WITHOUT --base to make this an ordinary default-branch task. (This task has no state/$ID.meta yet - a first spawn writes it only once every check has passed - so there is no recorded base to edit.)"
+  fi
+
+  # --base declares a NON-DEFAULT intended base, and naming the default branch is not a
+  # harmless way of saying "the usual". It arms a guard whose whole premise is a feature
+  # branch with unmerged history of its own, against a branch that by definition has none,
+  # and every message the task then produces would talk about an "intended base" that is
+  # the default branch. Refuse it rather than quietly normalising it away, so the flag's
+  # actual meaning is the thing the operator learns.
+  if repo_default=$(default_branch "$PROJ_ABS") && [ "$BASE" = "$repo_default" ]; then
+    echo "error: task $ID declares intended base '$BASE', but that IS the repo default branch for $PROJ_ABS - refusing to spawn. --base declares a NON-DEFAULT intended base (a feature branch this task is stacked on); a task that targets the default branch needs no --base at all." >&2
+    echo "  Recovery: re-run WITHOUT --base, or pass the feature branch this task is actually stacked on." >&2
+    return 1
   fi
 
   fm_base_probe_origin "$PROJ_ABS" "$BASE" || probe_rc=$?

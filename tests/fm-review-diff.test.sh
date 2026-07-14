@@ -17,6 +17,11 @@
 #       branch (what the no-mistakes pipeline does to every head, and what fm-pr-check.sh
 #       refuses) -> the declared base is no longer an honest diff base: its merge base with the
 #       head is the old fork point, so fall back to the default branch with a warning
+#   (e3) base= declared and still on origin, but the default branch has ABSORBED every commit
+#       it carries (it merged and the branch was kept - the ordinary end-state) -> it is no
+#       longer a live feature base, so it is no longer a distinct diff base either. Fall back
+#       to the default branch, and say THAT, not that the head was rebased: rootedness is not
+#       observable against such a base, so a perfectly stacked head would read UNROOTED
 #   (f) base= declared but GONE from origin -> fall back to the default branch with a
 #       warning, never a hard stop. What became of that base - merged, squashed, abandoned -
 #       is not a question this script answers, and bin/fm-pr-check.sh defers the same PR to a
@@ -315,12 +320,59 @@ test_head_rebased_off_a_live_base_falls_back_to_default() {
   pass "fm-review-diff falls back to the default branch when the head was rebased off its declared base"
 }
 
+# A base still ON ORIGIN is not automatically a live feature base. Once the default branch
+# has absorbed every commit it carries - it merged and the branch was simply kept, which is
+# the ordinary end-state - it is no longer a distinct diff base, AND rootedness stops being
+# observable against it: every fork point with such a base is reachable from the default
+# branch, so a perfectly stacked head reads UNROOTED. The fallback to the default branch is
+# right either way, but the REASON given is not: without asking liveness first this warns
+# that the head "was rebased onto the default branch", which is simply false about a head
+# that never moved - and firstmate relays a summary of this review to the captain.
+test_absorbed_base_falls_back_to_default_with_an_honest_reason() {
+  local case_dir out rc
+  case_dir=$(make_case absorbed-base)
+
+  git -C "$case_dir/wt" checkout -q -b feature/base origin/main
+  printf 'feature-base-work\n' > "$case_dir/wt/base-only.txt"
+  git -C "$case_dir/wt" add base-only.txt
+  git -C "$case_dir/wt" commit -qm "feature base work"
+  git -C "$case_dir/wt" push -q origin feature/base
+  # The head is correctly STACKED on the base and never moves.
+  git -C "$case_dir/wt" checkout -q fm/task-x1
+  git -C "$case_dir/wt" reset -q --hard feature/base
+  printf 'crew-fix\n' > "$case_dir/wt/fix.txt"
+  git -C "$case_dir/wt" add fix.txt
+  git -C "$case_dir/wt" commit -qm "the crewmate's fix"
+
+  # feature/base merges into main, and origin KEEPS the branch (delete-on-merge is off by
+  # default), so the base is still present but has nothing main does not already have.
+  git -C "$case_dir/origin.git" update-ref refs/heads/main refs/heads/feature/base
+
+  write_task_meta "$case_dir" "base=feature/base"
+
+  set +e
+  out=$(run_review_diff "$case_dir" task-x1 2> "$case_dir/stderr")
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "absorbed-base: an absorbed base must not make the pre-merge review impossible"
+  assert_contains "$out" 'diff base: origin/main' \
+    "absorbed-base: a base main has absorbed is no longer a distinct diff base"
+  assert_grep 'no longer a live feature base' "$case_dir/stderr" \
+    "absorbed-base: the substituted diff base must say why"
+  assert_no_grep 'not rooted in that base' "$case_dir/stderr" \
+    "absorbed-base: review told the reviewer the head was rebased off its base when the head never moved - and firstmate relays this to the captain"
+  assert_contains "$out" '+crew-fix' "absorbed-base: the crewmate's own change should still be shown"
+  pass "fm-review-diff falls back to the default branch for an absorbed base, and says so honestly instead of blaming the head"
+}
+
 test_pr_meta_uses_pr_head_not_stale_local
 test_pr_meta_fetches_pull_head_without_recorded_sha
 test_no_pr_meta_uses_local_branch
 test_unreachable_pr_head_falls_back_with_warning
 test_declared_base_is_the_diff_base
 test_head_rebased_off_a_live_base_falls_back_to_default
+test_absorbed_base_falls_back_to_default_with_an_honest_reason
 test_deleted_base_falls_back_to_default_with_warning
 test_unreachable_origin_stops_instead_of_guessing
 test_no_declared_base_still_diffs_against_default

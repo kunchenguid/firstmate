@@ -7,10 +7,11 @@
 #
 # A ship task may declare a non-default intended base with fm-spawn.sh --base, which
 # records base=<branch> into state/<id>.meta - the single source of truth for a task's
-# base. Three scripts then need the same two facts about it, so they live here once:
+# base. Three scripts then need the same facts about it, so they live here once:
 #
 #   fm_base_valid_branch_name  is the recorded value a git branch name at all?
 #   fm_base_probe_origin       does that branch exist on origin right now?
+#   fm_base_has_own_commits    does it carry any commit the default branch lacks?
 #   fm_base_head_rooted        is a given head rooted in that base's own history?
 #   fm_base_brief_marker       the line a based brief carries, so a spawn can check it
 #
@@ -41,6 +42,11 @@ FM_BASE_ABSENT=2
 FM_BASE_HEAD_ROOTED=3
 FM_BASE_HEAD_UNROOTED=4
 FM_BASE_HEAD_UNRELATED=5
+
+# Own-commit outcomes (fm_base_has_own_commits).
+FM_BASE_HAS_OWN_COMMITS=6
+FM_BASE_NO_OWN_COMMITS=7
+FM_BASE_OWN_COMMITS_UNKNOWN=8
 
 # fm_base_valid_branch_name: 0 (true) if <name> is a non-empty, whitespace-free, git-legal
 # branch name that does not begin with '-'. The leading dash matters beyond tidiness: the
@@ -79,6 +85,42 @@ fm_base_probe_origin() {  # <git-dir> <branch>
   esac
 }
 
+# fm_base_has_own_commits: does the base still carry any commit the default branch does not
+# already have? This is the only question that separates a LIVE feature base - one with
+# unmerged history a wrong-based merge could drag onto the default branch, which is the
+# whole hazard - from a branch that is merely still on origin.
+#
+# A branch existing on origin does NOT mean it is live. GitHub's delete-on-merge is off by
+# default, so a base that merged and kept its branch is an ordinary end-state; every commit
+# it carries is then an ancestor of the default branch, it has nothing left to drag
+# anywhere, and rootedness is not even observable against it (any head's fork point with it
+# is reachable from the default branch, so a correctly stacked head reads UNROOTED).
+#
+# It is plain ancestry - `git rev-list --count <base> ^<default>` - and nothing more. It is
+# NOT a merge detector, and it does not try to be: a base that was SQUASH-merged still has
+# its own commits absent from the default branch by SHA, so it reads HAS_OWN_COMMITS and the
+# full guard applies to it. That is deliberate. Telling a squash merge from an abandoned
+# branch needs an inference, and an inference that can be wrong is exactly what this design
+# hands to a human instead.
+#
+# Returns FM_BASE_HAS_OWN_COMMITS, FM_BASE_NO_OWN_COMMITS, or FM_BASE_OWN_COMMITS_UNKNOWN
+# (git could not answer; a caller must not read that as either verdict). Sets
+# FM_BASE_OWN_COMMIT_COUNT when it could count.
+fm_base_has_own_commits() {  # <git-dir> <base-sha> <default-sha>
+  local dir=${1-} base_sha=${2-} default_sha=${3-} count
+  FM_BASE_OWN_COMMIT_COUNT=
+  count=$(git -C "$dir" rev-list --count "$base_sha" "^$default_sha" 2>/dev/null) \
+    || return "$FM_BASE_OWN_COMMITS_UNKNOWN"
+  case "$count" in
+    '' | *[!0-9]*) return "$FM_BASE_OWN_COMMITS_UNKNOWN" ;;
+  esac
+  FM_BASE_OWN_COMMIT_COUNT=$count
+  if [ "$count" -gt 0 ]; then
+    return "$FM_BASE_HAS_OWN_COMMITS"
+  fi
+  return "$FM_BASE_NO_OWN_COMMITS"
+}
+
 # fm_base_head_rooted: is <head-sha> rooted in the base's OWN history, rather than in the
 # default branch? The head must fork from a commit the default branch cannot reach; a
 # merge-base the default branch CAN reach means the head carries none of the base's work,
@@ -89,6 +131,12 @@ fm_base_probe_origin() {  # <git-dir> <branch>
 # PR whose base is itself under review sees that base advance all the time, and a head
 # that is merely behind is still correctly based and safe to merge; demanding tip-descent
 # would turn every routine base advance into a hard merge refusal.
+#
+# Ask fm_base_has_own_commits FIRST. Rootedness is only observable against a base that has
+# unmerged history of its own: once every commit the base carries is an ancestor of the
+# default branch, every fork point with it is reachable from the default branch too, so a
+# perfectly stacked head reads UNROOTED. A caller that skips that gate refuses a safe PR
+# and tells the operator its head was rebased when it was not.
 #
 # Returns FM_BASE_HEAD_ROOTED, FM_BASE_HEAD_UNROOTED, or FM_BASE_HEAD_UNRELATED (the two
 # commits share no history at all). Sets FM_BASE_MERGE_BASE to the branch point when there

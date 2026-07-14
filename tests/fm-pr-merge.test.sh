@@ -25,19 +25,32 @@
 #   (g) explicit merge method is not overridden by the default --squash
 #   (h) repo override args fail fast because the repo comes from the URL
 #
-# Matrix (fm-pr-check.sh base guard). The guard runs only when the task declares a base=
-# AND that branch still EXISTS on origin, and it then requires BOTH: the PR head is ROOTED
-# in that base's own history, and the PR's base label TARGETS it. Either failing refuses.
-#   (i) base present, head stacked on it AND base label matches -> records pr=, arms the poll
-#   (j) base present, base ADVANCED after the head was stacked -> still allowed. Rootedness
+# Matrix (fm-pr-check.sh base guard). The guard runs only when the task declares a base= AND
+# that base is still LIVE - on origin, and still carrying at least one commit main does not
+# already have. Against a live base it requires BOTH: the PR head is ROOTED in that base's own
+# history, and the PR's base label TARGETS it. Either failing refuses.
+#   (i) base live, head stacked on it AND base label matches -> records pr=, arms the poll
+#   (j) base live, base ADVANCED after the head was stacked -> still allowed. Rootedness
 #       is not tip-descent: a head that is merely behind is correctly based, and refusing it
 #       would turn every routine base advance into a hard merge refusal
-#   (k) base present, PR head rebased onto main -> refuses, no pr=, no poll. That is the
+#   (k) base live, PR head rebased onto main -> refuses, no pr=, no poll. That is the
 #       launch incident (data/learnings.md 2026-07-07)
-#   (l) base present, head stacked but PR base label targets main -> refuses, no pr=, no poll
-#   (m) base present, head rebased onto main but the PR ALREADY targets the base -> still
+#   (l) base live, head stacked but PR base label targets main -> refuses, no pr=, no poll
+#   (m) base live, head rebased onto main but the PR ALREADY targets the base -> still
 #       refuses, and prescribes the head's re-rebase rather than a retarget that has already
 #       happened and would loop
+#
+# A branch on origin is not automatically a live base. Once main has ABSORBED every commit it
+# carries (it merged and the branch was kept - the ordinary end-state, since GitHub's
+# delete-on-merge is off by default), there is no unmerged history left to drag anywhere, and
+# rootedness is not even observable against it: a perfectly stacked head reads UNROOTED. So
+# liveness is asked FIRST, and such a PR is verified as the ordinary main PR it now is.
+#   (m2) base present but ABSORBED by main, head stacked on it, PR targets main -> allowed,
+#        records pr=, arms the poll. Refusing here would block a safe merge and claim the head
+#        was rebased when it never was
+#   (m3) base present but ABSORBED by main, PR still targets that spent base -> refuses:
+#        merging would land the fix on a branch main has already taken everything from, so the
+#        fix would never reach main at all, and the recovery is to retarget at main
 #
 # EVERY OTHER STATE IS DEFERRED TO A HUMAN, NOT ADJUDICATED. A base that merged, one that
 # was squash-merged, and one that was abandoned without merging all look alike once the
@@ -400,8 +413,12 @@ PR_CHECK="$ROOT/bin/fm-pr-check.sh"
 # advance_base=advance pushes a further commit onto feature/base AFTER the PR head was
 # stacked, so the head is correctly based but merely behind - the routine state of a stacked
 # PR whose own base is still under review, which must still merge.
+#
+# absorb_base=absorb merges feature/base into main and KEEPS the branch on origin, which is
+# the ordinary end-state (GitHub's delete-on-merge is off by default). main then carries every
+# commit the base has, so the base is no longer LIVE: it has nothing left to drag onto main.
 make_git_case() {
-  local name=$1 pr_parent=$2 base_label=${3:-main} advance_base=${4:-} case_dir
+  local name=$1 pr_parent=$2 base_label=${3:-main} advance_base=${4:-} absorb_base=${5:-} case_dir
   case_dir="$TMP_ROOT/$name"
   mkdir -p "$case_dir/state" "$case_dir/fakebin"
 
@@ -436,6 +453,11 @@ make_git_case() {
       git add f.txt
       git commit -qm feature-base-2
       git push -q origin feature/base
+    fi
+    if [ "$absorb_base" = absorb ]; then
+      git checkout -q main
+      git merge -q --no-ff feature/base -m "merge feature/base into main"
+      git push -q origin main
     fi
   )
   rm -rf "$case_dir/_seed"
@@ -598,6 +620,70 @@ test_pr_check_rootedness_recovery_is_state_aware() {
   pass "fm-pr-check's rootedness refusal prescribes the re-rebase, not another retarget, once the PR already targets the base"
 }
 
+# A branch still ON ORIGIN is not automatically a LIVE feature base. Once main has absorbed
+# every commit it carries - it merged and the branch was simply kept, which is the ordinary
+# end-state because GitHub's delete-on-merge is off by default - it has no unmerged history
+# left to drag anywhere, so the hazard is gone. Rootedness cannot even be asked of such a
+# base: every fork point with it is reachable from main, so a PERFECTLY STACKED head reads
+# UNROOTED. Guarding it as though it were live would refuse a safe PR, tell the operator its
+# head was rebased when it never was, and prescribe a rebase onto a base it is already rooted
+# in - a merge-blocking refusal with no way out. So liveness is asked FIRST, and a base main
+# has absorbed is verified as the ordinary main PR it now is.
+test_pr_check_allows_pr_on_a_base_the_default_branch_absorbed() {
+  local case_dir rc
+  case_dir=$(make_git_case absorbedbase feature main '' absorb)
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    "window=fm-task-x1" "worktree=$case_dir/wt" "project=$case_dir/project" \
+    "kind=ship" "mode=no-mistakes" "base=feature/base"
+
+  set +e
+  run_pr_check "$case_dir" task-x1 https://github.com/example/repo/pull/9 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "absorbed-base: a PR on a base main has already absorbed is safe to merge and must not be refused"
+  assert_grep 'pr=https://github.com/example/repo/pull/9' "$case_dir/state/task-x1.meta" \
+    "absorbed-base: pr= should be recorded for a PR whose declared base main has absorbed"
+  assert_present "$case_dir/state/task-x1.check.sh" "absorbed-base: the merge poll should be armed"
+  assert_grep 'no longer a live feature base' "$case_dir/stderr" \
+    "absorbed-base: the guard did not say why it stopped treating the declared base as live"
+  assert_no_grep 'not stacked on its intended base' "$case_dir/stderr" \
+    "absorbed-base: the guard refused a correctly stacked head, and told the operator it was rebased when it never was"
+  pass "fm-pr-check allows a PR whose declared base the default branch has already absorbed, instead of refusing it with a false diagnosis"
+}
+
+# The other half of an absorbed base. The PR still points AT it, so merging would land the
+# fix on a branch main has already taken everything from - the fix would never reach main,
+# while the PR reads MERGED, teardown calls the work landed, and the task goes to Done having
+# delivered nothing. That is a true refusal with a recovery that resolves it.
+test_pr_check_refuses_pr_still_pointed_at_an_absorbed_base() {
+  local case_dir rc
+  case_dir=$(make_git_case absorbedtarget feature feature/base '' absorb)
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    "window=fm-task-x1" "worktree=$case_dir/wt" "project=$case_dir/project" \
+    "kind=ship" "mode=no-mistakes" "base=feature/base"
+
+  set +e
+  run_pr_check "$case_dir" task-x1 https://github.com/example/repo/pull/9 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "absorbed-target: a PR still aimed at a spent base would never deliver the fix to main and must be refused"
+  assert_grep 'has already absorbed' "$case_dir/stderr" \
+    "absorbed-target: the refusal did not say the target branch is spent"
+  assert_grep 'pr edit 9 --base main' "$case_dir/stderr" \
+    "absorbed-target: the refusal did not prescribe the retarget at the default branch that actually resolves it"
+  assert_grep "drop the 'base=feature/base' line" "$case_dir/stderr" \
+    "absorbed-target: the refusal did not name the edit that retires a declaration whose base is spent"
+  assert_no_grep 'pr=https://github.com/example/repo/pull/9' "$case_dir/state/task-x1.meta" \
+    "absorbed-target: a PR that would deliver nothing must not record pr= before merge"
+  assert_absent "$case_dir/state/task-x1.check.sh" \
+    "absorbed-target: a PR that would deliver nothing must not arm the merge poll"
+  pass "fm-pr-check refuses a PR still targeting a base the default branch has absorbed, and names the retarget that resolves it"
+}
+
 # The base is gone from origin - it merged and GitHub deleted it (the default), or it was
 # abandoned, or someone force-deleted it. Those are not distinguishable from git without a
 # guess, and guessing wrong either deadlocks a legitimate merge or lands an abandoned base's
@@ -698,6 +784,8 @@ test_pr_check_allows_base_advanced_since_head
 test_pr_check_refuses_wrong_base
 test_pr_check_refuses_wrong_base_label
 test_pr_check_rootedness_recovery_is_state_aware
+test_pr_check_allows_pr_on_a_base_the_default_branch_absorbed
+test_pr_check_refuses_pr_still_pointed_at_an_absorbed_base
 test_pr_check_defers_when_base_gone_from_origin
 test_pr_check_defers_when_base_probe_fails
 test_pr_check_no_base_arms_normally
