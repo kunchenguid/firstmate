@@ -41,7 +41,7 @@ The shared no-mistakes gate refusal used by `fm-spawn.sh`, `fm-send.sh`, and `fm
 | `fm-review-diff.sh`      | Review a crewmate branch or recorded PR head against the authoritative base: the declared `base=` when set, else the repo default |
 | `fm-marker-lib.sh`       | Shared from-firstmate request marker, detector, and idempotent transformation         |
 | `fm-gate-refuse-lib.sh`  | Shared no-mistakes gate-context refusal for fleet lifecycle entrypoints               |
-| `fm-base-lib.sh`         | Shared declared-base rule: branch-name validation and the present/absent/probe-failed origin probe |
+| `fm-base-lib.sh`         | Shared declared-base rules: branch-name validation, the present/absent/probe-failed origin probe, and whether a base that is gone from origin actually merged |
 | `fm-watch-arm.sh`        | Verified home-scoped watcher arm wrapper with honest status reporting                |
 | `fm-watch-checkpoint.sh` | Run one bounded foreground watcher checkpoint for Codex-style supervision            |
 | `fm-watch.sh`            | Singleton-safe always-on watcher: absorb benign wakes, queue and exit on actionable ones |

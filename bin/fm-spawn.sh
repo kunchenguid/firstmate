@@ -58,14 +58,18 @@
 #   Ship/scout spawns refuse to launch unless the resolved task path is a real
 #   git worktree root distinct from the primary project checkout.
 #   For a ship task, if data/<task-id>/base exists (written by fm-brief.sh --base),
-#   its branch name is recorded into meta as base=<branch> so fm-pr-check.sh can
-#   assert the PR head is based on that intended base before merge. A sidecar that
-#   declares no branch refuses the spawn rather than recording no base=, because a
-#   lost declaration would silently disarm that guard. That refusal is raised with
-#   the brief check, BEFORE any backend window or worktree lease is acquired, so it
-#   strands nothing for recovery or fm-teardown.sh to reconcile. Absent means the
-#   repo default branch is the base and the meta stays byte-identical to the
-#   pre-base default path (no base= line).
+#   its branch name is recorded into meta as base=<branch>, and the base's CURRENT
+#   TIP on origin is recorded alongside it as base_sha=<sha>, so fm-pr-check.sh can
+#   assert the PR head is based on that intended base before merge - and can still
+#   tell a base that merged from one that was abandoned after the branch itself is
+#   deleted from origin (bin/fm-base-lib.sh owns that rule). A sidecar that declares
+#   no branch, an invalid branch name, a base origin does not have, or an origin
+#   that cannot be asked all refuse the spawn rather than recording a base the guard
+#   could not later verify against. Those refusals are raised with the brief check,
+#   BEFORE any backend window or worktree lease is acquired, so they strand nothing
+#   for recovery or fm-teardown.sh to reconcile. Absent means the repo default branch
+#   is the base and the meta stays byte-identical to the pre-base default path (no
+#   base=/base_sha= lines).
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
@@ -122,6 +126,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-gate-refuse-lib.sh
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
+# shellcheck source=bin/fm-base-lib.sh
+. "$SCRIPT_DIR/fm-base-lib.sh"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
 # a direct report (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
@@ -664,11 +670,12 @@ fi
 # A ship task can declare a non-default intended base branch via fm-brief.sh
 # --base, which drops the branch name in data/<id>/base. Read it here, alongside
 # the brief check and BEFORE any backend window or worktree lease is acquired:
-# the refusal below is fail-closed, and a fail-closed refusal that fires after
+# the refusals below are fail-closed, and a fail-closed refusal that fires after
 # those resources exist would strand them with no meta for recovery or teardown
 # to reconcile. Absent sidecar -> no base= -> the repo default branch is the base
 # and the meta stays byte-identical to the pre-base default path.
 BASE=
+BASE_SHA=
 if [ "$KIND" != secondmate ] && [ -f "$DATA/$ID/base" ]; then
   IFS= read -r BASE < "$DATA/$ID/base" || true
   # This promotion is the one link that could silently disarm the guard: an
@@ -676,6 +683,35 @@ if [ "$KIND" != secondmate ] && [ -f "$DATA/$ID/base" ]; then
   # skip the base assertion entirely. Refuse instead of spawning unguarded.
   if [ -z "$BASE" ]; then
     echo "error: $DATA/$ID/base exists but declares no branch, so the task's intended base cannot be recorded in meta and the PR-base guard would be silently skipped. Re-scaffold the brief with fm-brief.sh --base <branch>." >&2
+    exit 1
+  fi
+  if ! fm_base_valid_branch_name "$BASE"; then
+    echo "error: $DATA/$ID/base declares '$BASE', which is not a valid git branch name (it must be non-empty, free of whitespace, and must not begin with '-'). Re-scaffold the brief with fm-brief.sh --base <branch>." >&2
+    exit 1
+  fi
+  # Resolve the base's tip on origin NOW, while the base necessarily still exists,
+  # and record it in meta. It is the durable fact fm-pr-check.sh needs later: once
+  # the base branch is deleted from origin, its absence alone cannot say whether it
+  # merged (hazard gone) or was abandoned (hazard replayed onto the PR head), and
+  # only a commit recorded from when it existed can settle that. Refusing here is
+  # cheap - nothing has been created yet - and it also catches a mistyped base
+  # before a crewmate spends a run on it.
+  BASE_PROBE_RC=0
+  fm_base_probe_origin "$PROJ_ABS" "$BASE" || BASE_PROBE_RC=$?
+  case "$BASE_PROBE_RC" in
+    "$FM_BASE_PRESENT") BASE_SHA=$FM_BASE_PROBE_SHA ;;
+    "$FM_BASE_ABSENT")
+      echo "error: task $ID declares intended base '$BASE', but no such branch exists on origin for $PROJ_ABS. A crewmate cannot root its branch on a base that is not there. Re-scaffold the brief with the right branch (fm-brief.sh --base <branch>), or without --base." >&2
+      exit 1
+      ;;
+    *)
+      echo "error: task $ID declares intended base '$BASE', but origin could not be asked whether that branch exists, so its tip cannot be recorded and the PR-base guard would have nothing to verify against later. Refusing to spawn." >&2
+      [ -z "$FM_BASE_PROBE_ERR" ] || printf '  git: %s\n' "$FM_BASE_PROBE_ERR" >&2
+      exit 1
+      ;;
+  esac
+  if [ -z "$BASE_SHA" ]; then
+    echo "error: task $ID declares intended base '$BASE' and origin reports it exists, but its tip commit did not resolve, so the PR-base guard would have nothing to verify against later. Refusing to spawn." >&2
     exit 1
   fi
 fi
@@ -1034,6 +1070,7 @@ META_WINDOW=$T
   echo "mode=$MODE"
   echo "yolo=$YOLO"
   [ -z "$BASE" ] || echo "base=$BASE"
+  [ -z "$BASE_SHA" ] || echo "base_sha=$BASE_SHA"
   echo "tasktmp=$TASK_TMP"
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"

@@ -8,11 +8,10 @@
 # non-default base= (a task whose intended base is a feature branch, declared
 # with fm-brief.sh --base): then it is that base, so review shows the crewmate's
 # own change rather than the entire feature base's unmerged history on top of it.
-# A declared base that no longer exists on origin - the normal end-state of a
-# stacked PR, whose base merges and is then auto-deleted - falls back to the
-# default branch with a warning rather than erroring out, so the review of a PR
-# that is now perfectly ordinary is never blocked. A probe origin cannot answer
-# at all still stops. bin/fm-base-lib.sh owns that distinction.
+# A declared base that no longer exists on origin falls back to the default branch
+# with a warning rather than erroring out, so the review is never blocked and the
+# diff shows everything the PR would land on the default branch. A probe origin
+# cannot answer at all still stops. bin/fm-base-lib.sh owns that distinction.
 # When state/<id>.meta records pr= for an open PR, the compare side is the PR
 # head (recorded pr_head= when reachable, else refs/pull/<n>/head) so review
 # stays current after no-mistakes fix rounds push to the PR; if the PR head
@@ -136,18 +135,21 @@ if [ -n "$BASE_DECLARED" ] && ! fm_base_valid_branch_name "$BASE_DECLARED"; then
 fi
 BASE_BRANCH=${BASE_DECLARED:-$DEFAULT}
 
-# A declared base that merged and was auto-deleted - the normal end-state of a
-# stacked PR - leaves nothing to diff against, and erroring out here would leave
-# firstmate unable to review a PR that is now perfectly ordinary. Say so and fall
-# back to the default branch, which is what the PR now targets. A probe origin
-# could not answer is different: that is an infrastructure failure, and reviewing
-# against the wrong base silently would be worse than stopping.
+# A declared base that is gone from origin leaves nothing to diff against, and
+# erroring out here would leave firstmate unable to review the PR at all. Fall back
+# to the default branch, which is both what the PR now targets and the honest
+# question at review time: everything this diff shows is what the merge would land
+# on the default branch - the task's own change if the base merged, the abandoned
+# base's commits too if it did not. Reviewing that is the point; deciding it is
+# fm-pr-check.sh's job, and it refuses the second case. A probe origin could not
+# answer is different: that is an infrastructure failure, and reviewing against the
+# wrong base silently would be worse than stopping.
 if [ -n "$BASE_DECLARED" ] && git -C "$PROJ" remote get-url origin >/dev/null 2>&1; then
   PROBE_RC=0
   fm_base_probe_origin "$WT" "$BASE_DECLARED" || PROBE_RC=$?
   case "$PROBE_RC" in
     "$FM_BASE_ABSENT")
-      echo "warning: task $ID declares intended base $BASE_DECLARED, but that branch no longer exists on origin (most likely merged and auto-deleted); diffing against the default branch $DEFAULT instead" >&2
+      echo "warning: task $ID declares intended base $BASE_DECLARED, but that branch no longer exists on origin; diffing against the default branch $DEFAULT instead, so this shows everything the PR would land on $DEFAULT" >&2
       BASE_BRANCH=$DEFAULT
       ;;
     "$FM_BASE_PROBE_FAILED")

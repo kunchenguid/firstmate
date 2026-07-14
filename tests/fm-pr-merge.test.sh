@@ -24,17 +24,35 @@
 #   (f) malformed PR URL fails fast without calling gh-axi
 #   (g) explicit merge method is not overridden by the default --squash
 #   (h) repo override args fail fast because the repo comes from the URL
+#
+# A base branch that is GONE from origin is the subtle case, because a base that
+# MERGED and was auto-deleted (harmless) and a base that was ABANDONED and deleted
+# (its unmerged commits replayed onto the head by the pipeline's rebase) look
+# identical to `git ls-remote`. The guard decides between them with the base's
+# spawn-time tip (base_sha=, recorded by fm-spawn.sh while the base still existed):
+# it stands down only when that tip's work is actually carried by the default branch.
+#
 # Matrix (fm-pr-check.sh based-on-base guard):
 #   (i) base= present, head stacked on the base AND base label matches -> records pr=, arms the poll
 #   (j) base= present, base ADVANCED after the head was stacked -> still allowed (merely behind, not wrong-based)
 #   (k) base= present, PR head rebased onto main -> refuses, no pr=, no poll
 #   (l) base= present, head stacked but PR base label targets main -> refuses, no pr=, no poll
-#   (m) base= present in the data/<id>/base sidecar but never promoted into meta -> refuses (no silent fail-open)
-#   (n) base= present but the base branch is GONE from origin (it merged and was
-#       auto-deleted, the normal end-state of a stacked PR) -> the guard stands down
-#       loudly and the PR proceeds; refusing would deadlock a legitimate merge forever
-#   (o) base= present but origin cannot be asked at all (auth, network) -> fail-closed refusal
-#   (p) no base= (the common case) -> unchanged: records pr= and arms the poll
+#   (m) base= present, head rebased onto main but the PR ALREADY targets the base ->
+#       still refuses, and prescribes the head's re-rebase rather than a retarget that
+#       has already happened and would loop
+#   (n) base= present in the data/<id>/base sidecar but never promoted into meta -> refuses (no silent fail-open)
+#   (o) base branch GONE from origin, recorded tip is an ANCESTOR of main (it merged
+#       and was auto-deleted) -> the guard stands down loudly and the PR proceeds;
+#       refusing would deadlock a legitimate merge forever
+#   (p) base branch GONE, recorded tip's work is CONTAINED in main (it was squash-merged,
+#       firstmate's own default) -> stands down too; an ancestor-only test would deadlock here
+#   (q) base branch GONE, recorded tip's work is NOT in main (deleted WITHOUT merging) ->
+#       refuses: this is the original incident, and standing down would land the abandoned
+#       base's commits on main
+#   (r) base branch GONE and no base_sha= recorded -> refuses; the two cases above cannot
+#       be told apart without it
+#   (s) base= present but origin cannot be asked at all (auth, network) -> fail-closed refusal
+#   (t) no base= (the common case) -> unchanged: records pr= and arms the poll
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -446,6 +464,23 @@ SH
   printf '%s\n' "$case_dir"
 }
 
+# Move origin's main on by one unrelated commit, so a containment check is pinned to
+# "the base's work is in main" rather than the accident of main still equalling the
+# squash commit's tree.
+advance_main() {
+  local case_dir=$1 tree parent blob commit
+  blob=$(printf 'later\n' | git -C "$case_dir/origin.git" hash-object -w --stdin)
+  parent=$(git -C "$case_dir/origin.git" rev-parse refs/heads/main)
+  tree=$(
+    {
+      git -C "$case_dir/origin.git" ls-tree "$parent"
+      printf '100644 blob %s\tlater.txt\n' "$blob"
+    } | git -C "$case_dir/origin.git" mktree
+  )
+  commit=$(git -C "$case_dir/origin.git" commit-tree "$tree" -p "$parent" -m 'unrelated work on main')
+  git -C "$case_dir/origin.git" update-ref refs/heads/main "$commit"
+}
+
 run_pr_check() {
   local case_dir=$1; shift
   FM_ROOT_OVERRIDE="$ROOT" \
@@ -536,6 +571,14 @@ test_pr_check_refuses_wrong_base_label() {
   pass "fm-pr-check refuses (loud, pre-merge) a stacked PR opened against the wrong base label"
 }
 
+# The base's tip on origin, as fm-spawn.sh records it in meta at spawn time. Read it
+# BEFORE a test deletes the branch from origin; that is the whole point of recording
+# it - it is the only fact that survives the deletion.
+base_tip() {
+  local case_dir=$1
+  git -C "$case_dir/origin.git" rev-parse refs/heads/feature/base
+}
+
 # The normal END-STATE of a stacked PR: the intended base merged and GitHub deleted
 # the branch (it does so by default), retargeting this PR to main. The hazard the
 # guard exists for went with it - there is no unmerged feature history left to drag
@@ -543,15 +586,20 @@ test_pr_check_refuses_wrong_base_label() {
 # proceed. Refusing here would deadlock a legitimate merge forever, with a recovery
 # message ('gh-axi pr edit --base <base>') that is impossible to follow because the
 # base branch is gone.
-test_pr_check_stands_down_when_base_gone_from_origin() {
-  local case_dir rc
+#
+# The proof that it MERGED, though, is not that the branch is gone - an abandoned base
+# looks exactly the same to origin (see the abandoned case below). It is that the tip
+# recorded at spawn is carried by main. Here it is an ancestor of main outright.
+test_pr_check_stands_down_when_base_merged_and_deleted() {
+  local case_dir rc tip
   case_dir=$(make_git_case gonebase feature main)
+  tip=$(base_tip "$case_dir")
   # feature/base merges into main, then origin deletes the branch.
   git -C "$case_dir/origin.git" update-ref refs/heads/main refs/heads/feature/base
   git -C "$case_dir/origin.git" update-ref -d refs/heads/feature/base
   fm_write_meta "$case_dir/state/task-x1.meta" \
     "window=fm-task-x1" "worktree=$case_dir/wt" "project=$case_dir/project" \
-    "kind=ship" "mode=no-mistakes" "base=feature/base"
+    "kind=ship" "mode=no-mistakes" "base=feature/base" "base_sha=$tip"
 
   set +e
   run_pr_check "$case_dir" task-x1 https://github.com/example/repo/pull/9 \
@@ -565,7 +613,131 @@ test_pr_check_stands_down_when_base_gone_from_origin() {
   assert_grep 'pr=https://github.com/example/repo/pull/9' "$case_dir/state/task-x1.meta" \
     "gone-base: pr= should be recorded once the guard stands down"
   assert_present "$case_dir/state/task-x1.check.sh" "gone-base: the merge poll should be armed"
-  pass "fm-pr-check stands down (loudly) when the declared base is gone from origin"
+  pass "fm-pr-check stands down (loudly) when the declared base merged and was deleted"
+}
+
+# The same end-state, reached by a SQUASH merge - firstmate's own default merge method
+# and GitHub's most common setting. The recorded tip is not an ancestor of main any
+# more (the squash rewrote it), so an ancestor-only test would call this an abandoned
+# base and deadlock the merge. Its work IS in main, which is what actually matters.
+# main also advances afterwards, so this pins containment rather than tip equality.
+test_pr_check_stands_down_when_base_squash_merged_and_deleted() {
+  local case_dir rc tip tree parent squash
+  case_dir=$(make_git_case squashedbase feature main)
+  tip=$(base_tip "$case_dir")
+  # Squash feature/base into main: one new commit on main carrying the base's tree,
+  # with no ancestry back to the base's own commits. Then origin deletes the branch,
+  # and main moves on.
+  tree=$(git -C "$case_dir/origin.git" rev-parse "refs/heads/feature/base^{tree}")
+  parent=$(git -C "$case_dir/origin.git" rev-parse refs/heads/main)
+  squash=$(git -C "$case_dir/origin.git" commit-tree "$tree" -p "$parent" -m 'squash feature/base')
+  git -C "$case_dir/origin.git" update-ref refs/heads/main "$squash"
+  git -C "$case_dir/origin.git" update-ref -d refs/heads/feature/base
+  advance_main "$case_dir"
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    "window=fm-task-x1" "worktree=$case_dir/wt" "project=$case_dir/project" \
+    "kind=ship" "mode=no-mistakes" "base=feature/base" "base_sha=$tip"
+
+  set +e
+  run_pr_check "$case_dir" task-x1 https://github.com/example/repo/pull/9 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "squashed-base: a squash-merged, deleted base must not deadlock the PR"
+  assert_grep 'contained' "$case_dir/stderr" \
+    "squashed-base: the stand-down should say the base's work is carried by the default branch, not just that the branch is gone"
+  assert_grep 'pr=https://github.com/example/repo/pull/9' "$case_dir/state/task-x1.meta" \
+    "squashed-base: pr= should be recorded once the guard stands down"
+  assert_present "$case_dir/state/task-x1.check.sh" "squashed-base: the merge poll should be armed"
+  pass "fm-pr-check stands down when the declared base was squash-merged and deleted"
+}
+
+# The hole a "gone means merged" stand-down would open, and it is the ORIGINAL
+# incident reached through the escape hatch: the base was deleted WITHOUT merging (an
+# abandoned feature, a closed base PR, a force-deleted branch). `git ls-remote` cannot
+# tell this from the merged case above. The pipeline has already rebased the head onto
+# main, replaying the base's never-merged commits onto it, so merging would land that
+# abandoned work on main. This MUST refuse.
+test_pr_check_refuses_when_base_deleted_without_merging() {
+  local case_dir rc tip
+  case_dir=$(make_git_case abandonedbase main main)
+  tip=$(base_tip "$case_dir")
+  git -C "$case_dir/origin.git" update-ref -d refs/heads/feature/base
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    "window=fm-task-x1" "worktree=$case_dir/wt" "project=$case_dir/project" \
+    "kind=ship" "mode=no-mistakes" "base=feature/base" "base_sha=$tip"
+
+  set +e
+  run_pr_check "$case_dir" task-x1 https://github.com/example/repo/pull/9 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "abandoned-base: a base deleted WITHOUT merging must refuse - its unmerged work rides on the PR head"
+  assert_grep 'WITHOUT merging' "$case_dir/stderr" \
+    "abandoned-base: the refusal must name the reason, not read like a generic wrong-base verdict"
+  assert_no_grep 'pr=https://github.com/example/repo/pull/9' "$case_dir/state/task-x1.meta" \
+    "abandoned-base: an abandoned base's work must not record pr= before merge"
+  assert_absent "$case_dir/state/task-x1.check.sh" \
+    "abandoned-base: an abandoned base's work must not arm the merge poll"
+  pass "fm-pr-check refuses when the declared base was deleted from origin without merging"
+}
+
+# No recorded tip, no way to tell the two cases above apart. Guessing is what opened
+# the hole; refusing is the only sound answer, and it has to name the way out.
+test_pr_check_refuses_gone_base_with_no_recorded_tip() {
+  local case_dir rc
+  case_dir=$(make_git_case notipbase feature main)
+  git -C "$case_dir/origin.git" update-ref refs/heads/main refs/heads/feature/base
+  git -C "$case_dir/origin.git" update-ref -d refs/heads/feature/base
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    "window=fm-task-x1" "worktree=$case_dir/wt" "project=$case_dir/project" \
+    "kind=ship" "mode=no-mistakes" "base=feature/base"
+
+  set +e
+  run_pr_check "$case_dir" task-x1 https://github.com/example/repo/pull/9 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "no-tip-base: a gone base with no recorded tip cannot be shown to have merged, so it must refuse"
+  assert_grep 'no base_sha= tip was recorded' "$case_dir/stderr" \
+    "no-tip-base: the refusal must explain that the deciding fact is missing"
+  assert_grep 'fm-review-diff.sh' "$case_dir/stderr" \
+    "no-tip-base: a merge-blocking refusal must name a way forward"
+  assert_no_grep 'pr=https://github.com/example/repo/pull/9' "$case_dir/state/task-x1.meta" \
+    "no-tip-base: an unverifiable base must not record pr= before merge"
+  assert_absent "$case_dir/state/task-x1.check.sh" \
+    "no-tip-base: an unverifiable base must not arm the merge poll"
+  pass "fm-pr-check refuses a gone base whose tip was never recorded (no guessing)"
+}
+
+# The state a reader can actually reach by FOLLOWING the base-label refusal: they
+# retarget the PR, then re-run the check before the pipeline's monitor has re-rebased
+# and force-pushed. The head is still rooted in main, so the guard still refuses - and
+# telling them to retarget again would send them in a circle with no way forward.
+test_pr_check_rootedness_recovery_is_state_aware() {
+  local case_dir rc
+  case_dir=$(make_git_case retargeted main feature/base)
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    "window=fm-task-x1" "worktree=$case_dir/wt" "project=$case_dir/project" \
+    "kind=ship" "mode=no-mistakes" "base=feature/base" "base_sha=$(base_tip "$case_dir")"
+
+  set +e
+  run_pr_check "$case_dir" task-x1 https://github.com/example/repo/pull/9 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "retargeted: a head still rooted in main must still refuse"
+  assert_grep 'already targets' "$case_dir/stderr" \
+    "retargeted: the refusal did not notice the retarget had already landed"
+  assert_grep 'has not been re-rebased' "$case_dir/stderr" \
+    "retargeted: the refusal did not say what is actually missing (the head's re-rebase)"
+  assert_no_grep 'pr edit' "$case_dir/stderr" \
+    "retargeted: the refusal told the reader to redo the retarget they already did - a no-op that loops"
+  pass "fm-pr-check's rootedness refusal prescribes the re-rebase, not another retarget, once the PR already targets the base"
 }
 
 # An origin that cannot be ASKED is not a base that is gone. We know nothing, so the
@@ -687,7 +859,11 @@ test_pr_check_accepts_stacked_base
 test_pr_check_allows_base_advanced_since_head
 test_pr_check_refuses_wrong_base
 test_pr_check_refuses_wrong_base_label
+test_pr_check_rootedness_recovery_is_state_aware
 test_pr_check_refuses_when_sidecar_never_reached_meta
-test_pr_check_stands_down_when_base_gone_from_origin
+test_pr_check_stands_down_when_base_merged_and_deleted
+test_pr_check_stands_down_when_base_squash_merged_and_deleted
+test_pr_check_refuses_when_base_deleted_without_merging
+test_pr_check_refuses_gone_base_with_no_recorded_tip
 test_pr_check_fail_closed_when_base_probe_fails
 test_pr_check_no_base_arms_normally

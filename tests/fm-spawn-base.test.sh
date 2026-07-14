@@ -14,6 +14,12 @@
 #   (c) empty sidecar -> loud refusal, raised before any window or worktree exists
 #   (d) an accepted spawn does create both, so (c)'s assertions are live
 #   (e) a secondmate never carries a task base, even with a stray sidecar
+#   (f) a declared base origin does not have -> the same early, loud refusal
+#
+# A promoted base also carries the base's tip on origin (base_sha=), resolved while
+# the base necessarily still exists. That is the fact fm-pr-check.sh needs once the
+# branch is deleted from origin, where absence alone cannot say whether the base
+# merged (harmless) or was abandoned (its unmerged commits replayed on the PR head).
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -51,8 +57,14 @@ SH
 # Build a spawn case: an isolated firstmate home, a real project + git worktree, and
 # a brief for the task. base is written to the data/<id>/base sidecar when non-empty;
 # pass "empty" to write the sidecar with no branch name in it.
+#
+# The project gets a real origin with a feature/base branch on it, because a based
+# spawn resolves the base's tip from origin and records it as base_sha= - the durable
+# fact fm-pr-check.sh needs to tell a merged base from an abandoned one once the
+# branch itself is deleted. origin_base names the branch actually created on origin,
+# so a case can declare a base origin does NOT have.
 make_spawn_case() {
-  local name=$1 id=$2 base=${3:-} case_dir home proj wt fakebin
+  local name=$1 id=$2 base=${3:-} origin_base=${4:-feature/base} case_dir home proj wt fakebin
   case_dir="$TMP_ROOT/$name"
   home="$case_dir/home"
   proj="$case_dir/project"
@@ -61,6 +73,7 @@ make_spawn_case() {
   mkdir -p "$home/data/$id" "$home/projects" "$home/state" "$home/config"
   printf 'claude\n' > "$home/config/crew-harness"
   fm_git_worktree "$proj" "$wt" "wt-$name"
+  make_project_origin "$case_dir" "$proj" "$origin_base"
   touch "$home/state/.last-watcher-beat"
   printf 'brief for %s\n' "$id" > "$home/data/$id/brief.md"
   case "$base" in
@@ -69,6 +82,19 @@ make_spawn_case() {
     *) printf '%s\n' "$base" > "$home/data/$id/base" ;;
   esac
   printf '%s|%s|%s|%s|%s\n' "$case_dir" "$home" "$proj" "$wt" "$fakebin"
+}
+
+# Give the project clone a real origin carrying <origin_base>, so `git ls-remote` in
+# the spawn resolves a tip for it. Pass an empty origin_base for an origin with no
+# feature branch at all.
+make_project_origin() {
+  local case_dir=$1 proj=$2 origin_base=$3 origin
+  origin="$case_dir/origin.git"
+  git init -q --bare "$origin"
+  git -C "$proj" remote add origin "$origin"
+  git -C "$proj" push -q origin HEAD:refs/heads/main
+  [ -z "$origin_base" ] || git -C "$proj" push -q origin "HEAD:refs/heads/$origin_base"
+  git -C "$proj" fetch -q origin
 }
 
 read_case_record() {
@@ -90,9 +116,9 @@ run_spawn() {
 }
 
 test_sidecar_is_promoted_into_meta() {
-  local rec id out status
+  local rec id out status origin_sha
   id=spawn-base-b1
-  rec=$(make_spawn_case promote "$id" feature/admin-dashboard)
+  rec=$(make_spawn_case promote "$id" feature/admin-dashboard feature/admin-dashboard)
   read_case_record "$rec"
 
   out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
@@ -100,7 +126,34 @@ test_sidecar_is_promoted_into_meta() {
   expect_code 0 "$status" "promote: spawn with a base sidecar should succeed"$'\n'"$out"
   assert_grep "base=feature/admin-dashboard" "$HOME_DIR/state/$id.meta" \
     "promote: the declared base never reached meta, so fm-pr-check would skip the wrong-base guard"
-  pass "fm-spawn promotes the data/<id>/base sidecar into meta as base="
+  origin_sha=$(git -C "$CASE_DIR/origin.git" rev-parse refs/heads/feature/admin-dashboard)
+  assert_grep "base_sha=$origin_sha" "$HOME_DIR/state/$id.meta" \
+    "promote: the base's tip on origin was not recorded, so a base later deleted from origin could not be told merged from abandoned"
+  pass "fm-spawn promotes the data/<id>/base sidecar into meta as base= and records the base's tip as base_sha="
+}
+
+# base_sha= is what makes the absent-base decision SOUND rather than a guess, so the
+# spawn must refuse a base origin does not have instead of recording base= with no
+# tip to verify against later. It is also the cheapest possible place to catch a
+# mistyped base: before a crewmate spends a run on it.
+test_base_missing_from_origin_refuses_before_creating_anything() {
+  local rec id out status log
+  id=spawn-base-b6
+  rec=$(make_spawn_case nosuchbase "$id" feature/typo feature/base)
+  read_case_record "$rec"
+  log="$CASE_DIR/tmux.log"
+  : > "$log"
+
+  out=$(FM_TEST_TMUX_LOG="$log" run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 1 "$status" "nosuchbase: a base that does not exist on origin must refuse, not spawn with an unverifiable base"
+  assert_contains "$out" "no such branch exists on origin" "nosuchbase: refusal did not explain the missing base branch"
+  assert_absent "$HOME_DIR/state/$id.meta" "nosuchbase: refusal should happen before meta is written"
+  assert_no_grep "new-window" "$log" \
+    "nosuchbase: the refusal created a backend window it then abandoned, with no meta to reconcile it"
+  assert_no_grep "treehouse get" "$log" \
+    "nosuchbase: the refusal leased a task worktree it then abandoned, with no meta to release it"
+  pass "fm-spawn refuses a declared base origin does not have, before any window or worktree exists"
 }
 
 test_no_sidecar_writes_no_base_key() {
@@ -151,7 +204,7 @@ test_empty_sidecar_refuses_before_creating_anything() {
 test_a_good_spawn_does_create_the_window_and_worktree() {
   local rec id out status log
   id=spawn-base-b5
-  rec=$(make_spawn_case createscheck "$id" feature/x)
+  rec=$(make_spawn_case createscheck "$id" feature/x feature/x)
   read_case_record "$rec"
   log="$CASE_DIR/tmux.log"
   : > "$log"
@@ -167,7 +220,7 @@ test_a_good_spawn_does_create_the_window_and_worktree() {
 test_secondmate_ignores_a_stray_base_sidecar() {
   local rec id out status home
   id=spawn-base-sm4
-  rec=$(make_spawn_case secondmate "$id" feature/x)
+  rec=$(make_spawn_case secondmate "$id" feature/x feature/x)
   read_case_record "$rec"
   home="$CASE_DIR/sm-home"
   mkdir -p "$home/bin" "$home/data"
@@ -186,5 +239,6 @@ test_secondmate_ignores_a_stray_base_sidecar() {
 test_sidecar_is_promoted_into_meta
 test_no_sidecar_writes_no_base_key
 test_empty_sidecar_refuses_before_creating_anything
+test_base_missing_from_origin_refuses_before_creating_anything
 test_a_good_spawn_does_create_the_window_and_worktree
 test_secondmate_ignores_a_stray_base_sidecar

@@ -13,10 +13,10 @@
 #   --base <branch> declares a non-default intended base branch for a ship task in
 #   a PR-based mode (no-mistakes or direct-PR). It records the branch name to
 #   data/<task-id>/base so fm-spawn.sh promotes it into state/<task-id>.meta as
-#   base=<branch>, roots the brief's branch step on that base, and writes the
-#   mode-specific path to a correctly based PR. fm-pr-check.sh then refuses to
-#   record pr= or arm the merge poll unless the PR head is rooted in that base's
-#   unmerged history AND the PR's base label targets it.
+#   base=<branch> (with the base's tip on origin as base_sha=), roots the brief's
+#   branch step on that base, and writes the mode-specific path to a correctly based
+#   PR. fm-pr-check.sh then guards the PR's base before merge; its header owns that
+#   contract in full.
 #   direct-PR opens the PR against the base directly (gh-axi pr create --base).
 #   no-mistakes cannot be told a base: the pipeline always rebases onto the repo
 #   default branch and opens the PR against it. So the brief has the crewmate
