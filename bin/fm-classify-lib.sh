@@ -196,9 +196,8 @@ status_open_decisions() {  # <status-file>
 # This fold is evidence about whether a parent event was explicitly superseded.
 # It is never authoritative current crew state, and consumers must not let an open
 # phase outrank a structured home snapshot or fm-crew-state result.
-status_open_activities() {  # <status-file>
-  local f=$1 line verb key note resolve open='' stripped pause
-  [ -f "$f" ] || return 0
+_fm_status_open_activities_stream() {
+  local line verb key note resolve open='' stripped pause
   resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
   pause=${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}
   while IFS= read -r line || [ -n "$line" ]; do
@@ -218,8 +217,18 @@ status_open_activities() {  # <status-file>
         [ -n "$open" ] && open="${open}"$'\n'
         ;;
     esac
-  done < "$f"
+  done
   printf '%s' "$open"
+}
+
+status_open_activities() {  # <status-file-or-dash>
+  local f=$1
+  if [ "$f" = - ]; then
+    _fm_status_open_activities_stream
+    return 0
+  fi
+  [ -f "$f" ] || return 0
+  _fm_status_open_activities_stream < "$f"
 }
 
 # task id from a recorded window target, falling back to the tmux-shaped

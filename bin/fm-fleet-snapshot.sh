@@ -70,6 +70,10 @@ FM_SNAPSHOT_SECONDMATE_DECISIONS=${FM_SNAPSHOT_SECONDMATE_DECISIONS:-20}
 FM_SNAPSHOT_TERMINAL_LINES=${FM_SNAPSHOT_TERMINAL_LINES:-8}
 FM_SNAPSHOT_TERMINAL_BYTES=${FM_SNAPSHOT_TERMINAL_BYTES:-4096}
 FM_SNAPSHOT_TERMINAL_TIMEOUT=${FM_SNAPSHOT_TERMINAL_TIMEOUT:-2}
+FM_SNAPSHOT_PARENT_ACTIVITY_LINES=${FM_SNAPSHOT_PARENT_ACTIVITY_LINES:-256}
+FM_SNAPSHOT_PARENT_ACTIVITY_BYTES=${FM_SNAPSHOT_PARENT_ACTIVITY_BYTES:-65536}
+FM_SNAPSHOT_PARENT_ACTIVITIES=${FM_SNAPSHOT_PARENT_ACTIVITIES:-20}
+FM_SNAPSHOT_PARENT_ACTIVITY_TIMEOUT=${FM_SNAPSHOT_PARENT_ACTIVITY_TIMEOUT:-2}
 validate_positive_bound() {  # <name> <value>
   case "$2" in
     ''|*[!0-9]*|0)
@@ -92,6 +96,10 @@ validate_positive_bound FM_SNAPSHOT_SECONDMATE_DECISIONS "$FM_SNAPSHOT_SECONDMAT
 validate_positive_bound FM_SNAPSHOT_TERMINAL_LINES "$FM_SNAPSHOT_TERMINAL_LINES"
 validate_positive_bound FM_SNAPSHOT_TERMINAL_BYTES "$FM_SNAPSHOT_TERMINAL_BYTES"
 validate_positive_bound FM_SNAPSHOT_TERMINAL_TIMEOUT "$FM_SNAPSHOT_TERMINAL_TIMEOUT"
+validate_positive_bound FM_SNAPSHOT_PARENT_ACTIVITY_LINES "$FM_SNAPSHOT_PARENT_ACTIVITY_LINES"
+validate_positive_bound FM_SNAPSHOT_PARENT_ACTIVITY_BYTES "$FM_SNAPSHOT_PARENT_ACTIVITY_BYTES"
+validate_positive_bound FM_SNAPSHOT_PARENT_ACTIVITIES "$FM_SNAPSHOT_PARENT_ACTIVITIES"
+validate_positive_bound FM_SNAPSHOT_PARENT_ACTIVITY_TIMEOUT "$FM_SNAPSHOT_PARENT_ACTIVITY_TIMEOUT"
 
 # shellcheck source=bin/fm-backend.sh
 # shellcheck disable=SC1091
@@ -119,6 +127,9 @@ bound), FM_SNAPSHOT_SECONDMATE_TIMEOUT, and FM_SNAPSHOT_SECONDMATE_MAX_BYTES.
 Terminal contradiction evidence uses
 FM_SNAPSHOT_TERMINAL_LINES, FM_SNAPSHOT_TERMINAL_BYTES, and
 FM_SNAPSHOT_TERMINAL_TIMEOUT and never becomes canonical current state.
+Parent activity evidence uses FM_SNAPSHOT_PARENT_ACTIVITY_LINES,
+FM_SNAPSHOT_PARENT_ACTIVITY_BYTES, FM_SNAPSHOT_PARENT_ACTIVITIES, and
+FM_SNAPSHOT_PARENT_ACTIVITY_TIMEOUT, with truncation disclosed in the result.
 EOF
 }
 
@@ -630,10 +641,80 @@ registry_secondmates_json() {
     | {present:true,readable:true,records:.}' < "$reg"
 }
 
-tsv_records_json() {
-  jq -R -s '[splits("\n") | select(length > 0)
-    | (capture("^(?<key>[^\t]*)\t(?<verb>[^\t]*)\t(?<summary>.*)$")?)
-    | select(. != null)]'
+bounded_parent_activities_json() {  # <status-file>
+  local f=$1 out rc reason
+  if [ ! -f "$f" ]; then
+    jq -n '{records:[],available:true,input_truncated:false,retained_truncated:false,reasons:[],lines_in_window:0,records_in_window:0}'
+    return 0
+  fi
+  out=$(run_timed "$FM_SNAPSHOT_PARENT_ACTIVITY_TIMEOUT" bash -c '
+    classify=$1
+    f=$2
+    max_lines=$3
+    max_bytes=$4
+    max_records=$5
+    . "$classify"
+    size=$(stat -f "%z" "$f" 2>/dev/null || stat -c "%s" "$f" 2>/dev/null) || exit 3
+    content=$(LC_ALL=C tail -c "$max_bytes" "$f") || exit 3
+    byte_truncated=false
+    if [ "$size" -gt "$max_bytes" ]; then
+      byte_truncated=true
+      case "$content" in
+        *$'"'"'\n'"'"'*) content=${content#*$'"'"'\n'"'"'} ;;
+        *) content= ;;
+      esac
+    fi
+    if [ -n "$content" ]; then
+      lines_in_chunk=$(printf "%s\n" "$content" | awk "END {print NR}")
+    else
+      lines_in_chunk=0
+    fi
+    line_truncated=false
+    if [ "$lines_in_chunk" -gt "$max_lines" ]; then line_truncated=true; fi
+    window=$(printf "%s\n" "$content" | LC_ALL=C tail -n "$max_lines") || exit 3
+    if [ -n "$window" ]; then
+      lines_in_window=$(printf "%s\n" "$window" | awk "END {print NR}")
+    else
+      lines_in_window=0
+    fi
+    records=$(printf "%s\n" "$window" | status_open_activities - \
+      | jq -R -s '"'"'[splits("\n") | select(length > 0)
+          | (capture("^(?<key>[^\t]*)\t(?<verb>[^\t]*)\t(?<summary>.*)$")?)
+          | select(. != null)]'"'"') || exit 3
+    records_in_window=$(printf "%s" "$records" | jq "length") || exit 3
+    retained_truncated=false
+    if [ "$records_in_window" -gt "$max_records" ]; then retained_truncated=true; fi
+    printf "%s" "$records" | jq \
+      --argjson byte_truncated "$byte_truncated" \
+      --argjson line_truncated "$line_truncated" \
+      --argjson retained_truncated "$retained_truncated" \
+      --argjson lines_in_window "$lines_in_window" \
+      --argjson records_in_window "$records_in_window" \
+      --argjson max_records "$max_records" '"'"'
+        {records:(if length > $max_records then .[-$max_records:] else . end),
+         available:true,
+         input_truncated:($byte_truncated or $line_truncated),
+         retained_truncated:$retained_truncated,
+         reasons:[
+           (if $byte_truncated then "byte_limit" else empty end),
+           (if $line_truncated then "line_limit" else empty end),
+           (if $retained_truncated then "activity_limit" else empty end)
+         ],
+         lines_in_window:$lines_in_window,
+         records_in_window:$records_in_window}'"'"'
+  ' fm-parent-activities "$SCRIPT_DIR/fm-classify-lib.sh" "$f" \
+    "$FM_SNAPSHOT_PARENT_ACTIVITY_LINES" "$FM_SNAPSHOT_PARENT_ACTIVITY_BYTES" \
+    "$FM_SNAPSHOT_PARENT_ACTIVITIES" 2>/dev/null)
+  rc=$?
+  if [ "$rc" -eq 0 ] && printf '%s' "$out" | jq -e '
+    (.records | type) == "array" and (.available | type) == "boolean"
+  ' >/dev/null 2>&1; then
+    printf '%s' "$out"
+    return 0
+  fi
+  [ "$rc" -eq 124 ] && reason="timeout" || reason="read_failed"
+  jq -n --arg reason "$reason" \
+    '{records:[],available:false,input_truncated:false,retained_truncated:false,reasons:[$reason],lines_in_window:0,records_in_window:0}'
 }
 
 terminal_evidence_json() {  # <parent-task-json> <event-note> <structured-state>
@@ -687,7 +768,7 @@ terminal_evidence_json() {  # <parent-task-json> <event-note> <structured-state>
 secondmate_current_json() {  # <parent-tasks-json>
   local tasks=$1 registry union rows total_registered total shown truncated
   local row id home registered registry_error task status_file event_raw event_note event_epoch event_age
-  local activities decisions provenance freshness reason summary summary_rc summary_bytes state terminal contradiction
+  local activity_scan activities decisions provenance freshness reason summary summary_rc summary_bytes state terminal contradiction
   local records='[]' seen_homes=''
   registry=$(registry_secondmates_json) || return 1
   union=$(jq -n --argjson registry "$registry" --argjson tasks "$tasks" '
@@ -717,7 +798,8 @@ secondmate_current_json() {  # <parent-tasks-json>
     status_file=$(printf '%s' "$task" | jq -r '.paths.status_log.path // ""')
     event_raw=$(printf '%s' "$task" | jq -r '.paths.status_log.last_event.raw // ""')
     event_note=$(printf '%s' "$task" | jq -r '.paths.status_log.last_event.note // ""')
-    activities=$(status_open_activities "$status_file" | tsv_records_json)
+    activity_scan=$(bounded_parent_activities_json "$status_file")
+    activities=$(printf '%s' "$activity_scan" | jq -c '.records')
     decisions=$(printf '%s' "$task" | jq -c '.hints.open_decisions // []')
     event_epoch=$(file_mtime_epoch "$status_file")
     event_age=null
@@ -795,7 +877,8 @@ secondmate_current_json() {  # <parent-tasks-json>
       record=$(jq -n \
         --arg id "$id" --arg home "$home" --arg state "$state" --arg observed "$SNAPSHOT_NOW" \
         --argjson registered "$registered" --argjson summary "$summary" --argjson decisions "$decisions" \
-        --argjson activities "$activities" --argjson terminal "$terminal" --argjson contradiction "$contradiction" \
+        --argjson activities "$activities" --argjson activity_scan "$activity_scan" \
+        --argjson terminal "$terminal" --argjson contradiction "$contradiction" \
         --arg event_raw "$event_raw" --arg event_note "$event_note" --argjson event_age "$event_age" '
         {id:$id,home:$home,registered:$registered,current:{state:$state,reason:null},
          provenance:{selected:"structured-home",structured_home:$home,parent_event_role:"historical-only"},
@@ -803,7 +886,7 @@ secondmate_current_json() {  # <parent-tasks-json>
          active_children:$summary.active_children,
          decisions_open:($summary.decisions_open + ($decisions | map(. + {id:$id}))),holds:$summary.holds,queued:$summary.queued,
          landed:$summary.landed,endpoints:$summary.endpoints,counts:$summary.counts,omitted:$summary.omitted,
-         parent_event:{raw:$event_raw,note:$event_note,age_seconds:$event_age,open_activities:$activities},
+         parent_event:{raw:$event_raw,note:$event_note,age_seconds:$event_age,open_activities:$activities,activity_scan:$activity_scan},
          terminal_evidence:$terminal,contradiction:$contradiction}')
     else
       if [ -n "$event_raw" ]; then
@@ -822,14 +905,14 @@ secondmate_current_json() {  # <parent-tasks-json>
       record=$(jq -n \
         --arg id "$id" --arg home "$home" --arg reason "$reason" --arg observed "$SNAPSHOT_NOW" \
         --arg provenance "$provenance" --arg freshness "$freshness" --arg event_raw "$event_raw" --arg event_note "$event_note" \
-        --argjson registered "$registered" --argjson event_age "$event_age" --argjson activities "$activities" \
+        --argjson registered "$registered" --argjson event_age "$event_age" --argjson activities "$activities" --argjson activity_scan "$activity_scan" \
         --argjson decisions "$decisions" --argjson terminal "$terminal" '
         {id:$id,home:($home | if . == "" then null else . end),registered:$registered,
          current:{state:"unknown",reason:$reason},
          provenance:{selected:$provenance,structured_home:($home | if . == "" then null else . end),parent_event_role:"fallback-only-not-current"},
          freshness:{status:$freshness,observed_at:$observed,age_seconds:$event_age},
          active_children:[],decisions_open:($decisions | map(. + {id:$id})),holds:[],queued:[],landed:[],endpoints:[],counts:{active_children:0,decisions_open:($decisions|length),holds:0,queued:0,landed:0,endpoints:0},omitted:[],
-         parent_event:{raw:$event_raw,note:$event_note,age_seconds:$event_age,open_activities:$activities},
+         parent_event:{raw:$event_raw,note:$event_note,age_seconds:$event_age,open_activities:$activities,activity_scan:$activity_scan},
          terminal_evidence:$terminal,contradiction:false}')
     fi
     records=$(jq -n --argjson records "$records" --argjson record "$record" '$records + [$record]')

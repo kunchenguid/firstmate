@@ -223,6 +223,39 @@ test_domain_alpha_stale_parent_event_does_not_become_current_work() {
   pass "Domain Alpha structured state overrides a stale parent Phase 7 event"
 }
 
+test_parent_activity_evidence_is_bounded_and_disclosed() {
+  local home mate fakebin canonical json i
+  home=$(make_home bounded-parent-activity)
+  mate="$TMP_ROOT/bounded-parent-activity-home"
+  write_domain_alpha_fixture "$home" "$mate"
+  : > "$home/state/domain-alpha.status"
+  i=1
+  while [ "$i" -le 6 ]; do
+    printf 'working [key=phase%s]: Phase %s started\n' "$i" "$i" >> "$home/state/domain-alpha.status"
+    i=$((i + 1))
+  done
+  fakebin=$(make_fakebin "$home")
+  canonical=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
+    FM_SNAPSHOT_PARENT_ACTIVITY_LINES=4 FM_SNAPSHOT_PARENT_ACTIVITY_BYTES=4096 \
+    FM_SNAPSHOT_PARENT_ACTIVITIES=2 "$ROOT/bin/fm-fleet-snapshot.sh" --json)
+  printf '%s' "$canonical" | jq -e '
+    .secondmate_current.records[] | select(.id == "domain-alpha")
+    | .parent_event.activity_scan.available == true
+      and .parent_event.activity_scan.input_truncated == true
+      and .parent_event.activity_scan.retained_truncated == true
+      and .parent_event.activity_scan.lines_in_window == 4
+      and .parent_event.activity_scan.records_in_window == 4
+      and .parent_event.activity_scan.reasons == ["line_limit", "activity_limit"]
+      and (.parent_event.open_activities | map(.key)) == ["phase5", "phase6"]
+  ' >/dev/null || fail "parent activity evidence was not bounded and disclosed: $canonical"
+  json=$(FM_SNAPSHOT_PARENT_ACTIVITY_LINES=4 FM_SNAPSHOT_PARENT_ACTIVITY_BYTES=4096 \
+    FM_SNAPSHOT_PARENT_ACTIVITIES=2 run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e '
+    .omitted | any(.surface == "secondmate parent activity evidence truncated for 1 record(s)")
+  ' >/dev/null || fail "bearings did not disclose bounded parent activity evidence: $json"
+  pass "parent activity evidence is bounded and disclosed"
+}
+
 test_active_child_overrides_old_parent_event() {
   local home mate fakebin json canonical
   home=$(make_home active-child-parent)
@@ -843,6 +876,7 @@ test_chat_contract_four_sections() {
 }
 
 test_domain_alpha_stale_parent_event_does_not_become_current_work
+test_parent_activity_evidence_is_bounded_and_disclosed
 test_active_child_overrides_old_parent_event
 test_structured_child_decision_reaches_captains_call
 test_bad_secondmate_homes_never_revive_parent_work
