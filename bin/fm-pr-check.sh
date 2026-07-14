@@ -58,17 +58,22 @@
 #   ABANDONED_BASE  the base was deleted from origin WITHOUT merging. Its never-merged
 #                   commits ride on this head either way, and there is no branch left to
 #                   target. REFUSE by name.
-#   INDETERMINATE   we could not settle it: origin could not be asked (auth, network), the
-#                   base is gone with no usable recorded tip, its landedness could not be
-#                   proved either way, or the head and the base share no history. REFUSE.
-#                   Never a relaxation, and never quietly downgraded to one of the answers
-#                   above either: an unsettled landedness is NOT a live base, however
-#                   present its branch is. Passing a PR the guard never verified is the
-#                   fail-open it exists to close - if that base did in fact merge, merging
-#                   this PR into it lands the fix on a dead branch and never on the default
-#                   branch, while fm-teardown.sh reads a MERGED PR and releases the work.
-#                   Name git's own error where there is one, so an infrastructure failure
-#                   is diagnosable instead of masquerading as a wrong-base verdict.
+#   INDETERMINATE   the question was never ANSWERED: origin could not be asked (auth,
+#                   network), the base is gone with no usable recorded tip, the containment
+#                   merge could not be RUN (a git older than 2.38), or the head and the base
+#                   share no history. REFUSE. Never a relaxation, and never quietly
+#                   downgraded to one of the answers above: passing a PR the guard never
+#                   verified is the fail-open it exists to close - if that base did in fact
+#                   merge, merging this PR into it lands the fix on a dead branch and never
+#                   on the default branch, while fm-teardown.sh reads a MERGED PR and
+#                   releases the work. Name git's own error where there is one, so an
+#                   infrastructure failure is diagnosable instead of masquerading as a
+#                   wrong-base verdict.
+#                   A base whose replay merely CONFLICTS with the default branch is NOT
+#                   this: a conflict proves the base's content is not cleanly in the
+#                   default branch, so it is an unmerged base like any other, and it is
+#                   judged as STACKED_LIVE or UNSTACKED above. Refusing it would block
+#                   every stacked task whose base has drifted from the default branch.
 #
 # The no-mistakes pipeline cannot be told a base - it always rebases onto the
 # repo default and opens the PR there - so for a based task the expected recovery
@@ -327,24 +332,27 @@ refuse_indeterminate() {  # <default-branch-name>
     unrelated)
       echo "error: task $ID PR head and its intended base '$BASE' share no common history at all - refusing to record pr= or arm the merge poll before merge." >&2
       ;;
+    merge-tree-failed)
+      # The TOOL failed, not the repo. A conflicting replay is an answer (the base has not
+      # merged) and never lands here; this is a merge that could not be RUN, so nothing was
+      # learned about the base either way. Say exactly that, and name the fix for the thing
+      # that is actually broken - telling the operator to rebase a base that may have
+      # nothing wrong with it would send them to repair a branch on no evidence at all.
+      echo "error: task $ID declares intended base '$BASE', but git could not RUN the 3-way merge that decides whether that base's work already reached '$default_branch_name'. Refusing before merge rather than assuming." >&2
+      echo "  base tip       : $FM_BASE_STATE_TIP" >&2
+      echo "  default branch : $default_branch_name ($FM_BASE_STATE_DEFAULT_SHA)" >&2
+      echo "  'git merge-tree --write-tree' did not run here; it needs git 2.38 or newer. That is a tool failure, not a verdict about '$BASE': the base may merge perfectly cleanly." >&2
+      echo "  Recovery: upgrade git to 2.38 or newer and re-run fm-pr-check, which can then settle the question." >&2
+      printf '%s\n' "$review" >&2
+      ;;
     *)
-      # An unsettleable landedness (a replay that conflicts, with no squash or rebase merge
-      # of the base to be found in the default branch). The branch may well still be on
-      # origin: presence never settled this question, so it cannot soften the refusal
-      # either. Both halves of what is unknown are hazards, and the recovery differs by
-      # which one is true, so name both.
+      # no-commit, no-default-tree: a commit the predicates needed was not in the object
+      # store. Also a tool-level failure rather than a fact about the base.
       echo "error: task $ID declares intended base '$BASE', and whether that base's work has already reached '$default_branch_name' could not be determined ($FM_BASE_VERDICT_WHY). Refusing before merge rather than assuming." >&2
       echo "  base tip       : $FM_BASE_STATE_TIP" >&2
       echo "  default branch : $default_branch_name ($FM_BASE_STATE_DEFAULT_SHA)" >&2
-      echo "  Replaying '$BASE' onto '$default_branch_name' does not resolve, and no squash or rebase merge of it can be found there, so its work can be shown neither to be there nor to be missing." >&2
-      if [ "$FM_BASE_STATE_PRESENT" = true ]; then
-        echo "  If '$BASE' has already merged, merging this PR into it would land the fix on a dead branch and never on '$default_branch_name'; if it has not, its unmerged commits could ride onto '$default_branch_name' instead." >&2
-        echo "  Note that '$BASE' does not merge cleanly into '$default_branch_name' as it stands, so its OWN PR is blocked on the same conflict." >&2
-        echo "  Recovery: rebase '$BASE' onto '$default_branch_name' and this head onto the rebased base, then re-run fm-pr-check. If '$BASE' has in fact already merged, drop the 'base=$BASE' line from $META instead and re-run." >&2
-      else
-        echo "  Refusing rather than assuming: a base deleted WITHOUT merging leaves its unmerged commits on this PR head, and merging would land them on '$default_branch_name'." >&2
-        printf '%s\n' "$review" >&2
-      fi
+      echo "  A commit the check needed did not resolve in this worktree, so the base's work can be shown neither to be there nor to be missing." >&2
+      printf '%s\n' "$review" >&2
       ;;
   esac
   return 1

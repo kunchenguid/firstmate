@@ -371,7 +371,7 @@ if [ -n "$BASE" ]; then
    \`\`\`
    $BASE_CHECK
    \`\`\`
-   It prints \`state=\`, along with \`base=\`, \`tip=\` and \`default=\`, and it asks firstmate's own base predicates. Act on the word it prints and on nothing else - in particular, never infer the base's fate from a fetch that failed, which cannot tell a branch that is gone from an origin that could not be reached.
+   It prints \`state=\`, along with \`base=\`, \`tip=\` and \`default=\`, and it asks firstmate's own base predicates. Act on the word it prints and on nothing else - in particular, never infer the base's fate from a fetch that failed, which cannot tell a branch that is gone from an origin that could not be reached. These are ALL the answers it has; every one of them has an instruction here, so you never have to improvise one.
 
    - **\`state=live\`** - \`$BASE\` still carries unmerged work. This is the based task you were launched for, and every base instruction in this brief applies.
    - **\`state=landed\`** - \`$BASE\`'s work is already in the default branch. Its branch may well still exist; a merged branch is usually kept, so do not go looking for its absence. There is nothing left to stack on, so THIS IS AN ORDINARY DEFAULT-BRANCH TASK from here: ignore every base instruction in the rest of this brief - do not root on \`$BASE\`, do not open or retarget a PR against it - and say so once:
@@ -383,6 +383,11 @@ if [ -n "$BASE" ]; then
    echo \"blocked: intended base $BASE is {the state printed}; cannot root this task on it\" >> $STATUS_FILE
    \`\`\`
    and stop.
+   - **\`state=none\`, or the check fails outright** (a non-zero exit, or no \`state=\` line at all) - your task's meta does not record this base, so firstmate's pre-merge base guard is NOT armed for it and nothing would catch a wrong-based PR. Do not proceed as a based task, and do not quietly proceed as an ordinary one either:
+   \`\`\`
+   echo \"blocked: intended base $BASE is not recorded in this task's meta; the PR-base guard is not armed\" >> $STATUS_FILE
+   \`\`\`
+   and stop. Firstmate relaunches the task with the base declared to the spawn, and you pick up from there.
 
 2. Get onto your \`fm/$ID\` branch, according to that state.
 
@@ -446,7 +451,8 @@ Re-run the base check from step 1 before you open the PR - a base merges most of
 $BASE_CHECK
 \`\`\`
 - Still \`state=live\`: open the PR against base branch \`$BASE\`, not the repo default - \`gh-axi pr create --base $BASE ...\`.
-- Now \`state=landed\`: that base has merged. Rebase your branch onto the default branch as step 2 describes, open the PR against the default branch as usual, and do not target \`$BASE\` at all."
+- Now \`state=landed\`: that base has merged. Rebase your branch onto the default branch as step 2 describes, open the PR against the default branch as usual, and do not target \`$BASE\` at all.
+- Any other answer (\`abandoned\`, \`unknown\`, \`none\`, or the check failing): the base's fate is not settled, so follow step 1's rule for that same answer - append the \`blocked:\` line it gives and stop. Do NOT open the PR against a base you could not verify, and do not silently retarget it at the default branch instead."
     ;;
   local-only)
     SETUP2=""
@@ -487,6 +493,7 @@ $BASE_CHECK
 \`\`\`
 - Still \`state=live\`: retarget the PR - \`gh-axi pr edit {n} --base $BASE\`. The pipeline's monitor picks the new base up, re-rebases your branch onto \`$BASE\`, and force-pushes a clean head; you do not rebuild anything by hand. Then re-check \`gh-axi pr view {n} --json baseRefName\` reports \`$BASE\`.
 - Now \`state=landed\`: the base merged while you worked. Do NOT retarget it - the pipeline has already left your head on the default branch, which is exactly where it belongs now, and CI green alone is your definition of done.
+- Any other answer (\`abandoned\`, \`unknown\`, \`none\`, or the check failing): the base's fate is not settled, so follow step 1's rule for that same answer - append the \`blocked:\` line it gives and stop. Do NOT retarget the PR at a base you could not verify; a wrong-based PR is refused before merge, so nothing slips through while firstmate sorts it out.
 If the check still reports \`state=live\` and the retarget or the re-rebase does not take, append \`blocked: PR still based on the default branch, not $BASE\` and stop; a wrong-based PR is refused before merge, so it will not slip through - it will just sit.
 
 "

@@ -36,6 +36,13 @@
 #   (m) a RESPAWN whose base merged but was NOT deleted is accepted, declaration intact -
 #       the same landedness, a different question, because the branch already exists and
 #       fm-pr-check.sh decides that PR on its own merits
+#   (n) a FIRST spawn against a base that merely CONFLICTS with the default branch is
+#       accepted: a conflict PROVES the base unmerged, and a feature branch that has
+#       drifted from the default branch is the ordinary base a stacked task is for
+#   (o) a FIRST spawn whose containment merge git could not RUN (no `merge-tree
+#       --write-tree` before git 2.38) is refused, naming the TOOL rather than asserting a
+#       conflict - and its recovery names no state/<id>.meta, because a first spawn has
+#       not written one yet
 #
 # base_sha= is the base's tip on origin at spawn time, resolved while the base
 # necessarily still exists. That is the fact fm-pr-check.sh needs once the branch is
@@ -154,6 +161,22 @@ advance_origin_base() {  # <case_dir> <proj> <branch>
   git -C "$scratch" add base-work.txt
   git_commit "$scratch" "base work"
   git -C "$scratch" push -q origin "$branch"
+  git -C "$proj" fetch -q origin
+}
+
+# Move origin's main on by a commit that rewrites the very file the base added, so replaying
+# the base onto main can no longer resolve. That is the ordinary condition of a live feature
+# branch whose default branch has moved under it - and it is an ANSWER (the base's content is
+# not in main, so it has not merged), not a question the spawn may refuse on.
+advance_origin_main_conflicting() {  # <case_dir> <proj> <branch>
+  local case_dir=$1 proj=$2 branch=$3 scratch
+  scratch=$(origin_scratch "$case_dir")
+  git -C "$scratch" fetch -q origin
+  git -C "$scratch" checkout -q -B main origin/main
+  printf 'main rewrote this\n' > "$scratch/base-work.txt"
+  git -C "$scratch" add base-work.txt
+  git_commit "$scratch" "main rewrites the file $branch added"
+  git -C "$scratch" push -q origin main
   git -C "$proj" fetch -q origin
 }
 
@@ -519,6 +542,77 @@ test_respawn_after_the_base_merged_without_being_deleted() {
   pass "fm-spawn accepts a respawn whose declared base merged without being deleted"
 }
 
+# A live feature branch DRIFTS from the default branch - that is what a branch under review
+# does - so replaying it onto main conflicts, and no merge of it can be found there because
+# it has not merged. That conflict is an ANSWER: the base is unmerged, so it is exactly the
+# base a stacked task is for. Reading it as "we cannot tell" would refuse the launch of most
+# stacked work there is.
+test_first_spawn_against_a_base_that_conflicts_with_main() {
+  local rec id out status base_sha
+  id=spawn-base-b14
+  rec=$(make_spawn_case baseconflicting "$id" feature/drifted)
+  read_case_record "$rec"
+  advance_origin_main_conflicting "$CASE_DIR" "$PROJ_DIR" feature/drifted
+  base_sha=$(git -C "$CASE_DIR/origin.git" rev-parse refs/heads/feature/drifted)
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR" --base feature/drifted)
+  status=$?
+  expect_code 0 "$status" "baseconflicting: a base that merely conflicts with main is PROVED unmerged, so it is live and the spawn must launch against it"$'\n'"$out"
+  assert_grep "base=feature/drifted" "$HOME_DIR/state/$id.meta" \
+    "baseconflicting: the declared base never reached meta, so fm-pr-check would skip the guard"
+  assert_grep "base_sha=$base_sha" "$HOME_DIR/state/$id.meta" \
+    "baseconflicting: the base's spawn-time tip was not recorded"
+  pass "fm-spawn launches a based task against a live base that conflicts with the default branch"
+}
+
+# The refusal that must stay: git could not RUN the merge that decides landedness, so nothing
+# at all was learned about the base. It must say the TOOL failed - asserting a conflict would
+# send the operator to rebase a base that may be perfectly clean - and its recovery must be
+# performable in the state that prints it, which on a FIRST spawn means naming no
+# state/<id>.meta, because the spawn writes that only once every check has passed.
+test_first_spawn_refuses_when_the_containment_merge_cannot_run() {
+  local rec id out status log real
+  id=spawn-base-b15
+  rec=$(make_spawn_case basemergetreebroken "$id" feature/base)
+  read_case_record "$rec"
+  log="$CASE_DIR/tmux.log"
+  : > "$log"
+  advance_origin_main_conflicting "$CASE_DIR" "$PROJ_DIR" feature/base
+
+  # A git older than 2.38: no 'merge-tree --write-tree' at all. Everything else is the real
+  # git, so the only thing this case changes is whether landedness can be asked.
+  real=$(command -v git)
+  cat > "$FAKEBIN_DIR/git" <<SH
+#!/usr/bin/env bash
+for a in "\$@"; do
+  if [ "\$a" = merge-tree ]; then
+    echo "error: unknown option \\\`write-tree'" >&2
+    exit 129
+  fi
+done
+exec '$real' "\$@"
+SH
+  chmod +x "$FAKEBIN_DIR/git"
+
+  out=$(FM_TEST_TMUX_LOG="$log" run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR" --base feature/base)
+  status=$?
+  rm -f "$FAKEBIN_DIR/git"
+  expect_code 1 "$status" "basemergetreebroken: a landedness that could not be ASKED must refuse, not record a base the guard could never verify against"
+  assert_contains "$out" "could not RUN" \
+    "basemergetreebroken: the refusal does not say the tool failed, so a broken git reads as a verdict about the base"
+  assert_contains "$out" "git 2.38 or newer" \
+    "basemergetreebroken: the refusal does not name the fix for the thing that is actually broken"
+  assert_not_contains "$out" "$id.meta" \
+    "basemergetreebroken: a first-spawn refusal prescribes editing a state/<id>.meta that does not exist yet - a recovery that cannot be performed in the state that prints it"
+  assert_absent "$HOME_DIR/state/$id.meta" \
+    "basemergetreebroken: a base the guard could not verify must not be recorded"
+  assert_no_grep "new-window" "$log" \
+    "basemergetreebroken: the refusal created a backend window it then abandoned, with no meta to reconcile it"
+  assert_no_grep "treehouse get" "$log" \
+    "basemergetreebroken: the refusal leased a task worktree it then abandoned, with no meta to release it"
+  pass "fm-spawn refuses when git cannot run the containment merge, and its recovery fits a first spawn"
+}
+
 # A base is a fact about ONE task. Shared across a batch it would silently guard
 # every pair against a base only one of them declared.
 test_base_rejected_in_a_batch() {
@@ -547,4 +641,6 @@ test_respawn_after_the_base_was_abandoned_refuses
 test_first_spawn_against_an_already_merged_base_refuses
 test_respawn_after_the_base_merged_without_being_deleted
 test_base_rejected_for_a_local_only_project
+test_first_spawn_against_a_base_that_conflicts_with_main
+test_first_spawn_refuses_when_the_containment_merge_cannot_run
 test_base_rejected_in_a_batch

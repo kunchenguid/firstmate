@@ -22,13 +22,19 @@
 #   (g) origin cannot be asked at all (auth, network, no remote)  -> UNKNOWN, and NOT
 #       mistaken for a base that is gone: an infrastructure failure is never a merge
 #   (n) base on origin, but replaying it onto the default branch CONFLICTS and no merge of
-#       it can be found there -> UNKNOWN, never LIVE. LIVE is the permissive answer
-#       ("correctly stacked, allow"), so inferring it from a question that could not be
-#       settled would wave through a base that had in fact merged
+#       it can be found there -> LIVE. A conflict is an ANSWER: the base's content is not
+#       cleanly in the default branch, so it has not merged, and a base that merely
+#       conflicts with the default branch is an ordinary drifted feature branch. Calling
+#       that unknown would refuse most stacked work outright
 #   (o) base merged, and the default branch then edited the base's OWN lines, so the replay
 #       conflicts -> still LANDED, proved by patch id (a squash merge, and a rebase merge).
-#       Without that proof a demonstrably merged base would read unsettleable forever and
-#       its child PRs would be refused for a hazard that is long gone
+#       Without that proof a demonstrably merged base would read unmerged forever and its
+#       child PRs would be refused for a hazard that is long gone
+#   (p) the containment merge cannot be RUN at all (a git older than 2.38 has no
+#       `merge-tree --write-tree`) -> UNKNOWN, and INDETERMINATE. A tool that failed is not
+#       a fact: it is not a conflict, and it is certainly not a merge. LIVE is the
+#       permissive answer, so inferring it from a question that was never asked would wave
+#       through a base that had in fact merged
 #
 # fm_base_verdict (the state, plus where the head is rooted):
 #   (h) LIVE   + head stacked on the base   -> STACKED_LIVE    (allow, target the base)
@@ -350,28 +356,80 @@ test_verdict_indeterminate_is_never_a_relaxation() {
   pass "fm_base_verdict: an unanswerable question is INDETERMINATE, never a stand-down"
 }
 
-# A landedness that CANNOT BE SETTLED is not a live base. LIVE is the permissive answer -
-# it means "correctly stacked on a live base, allow" - so answering an unsettled question
-# with it is a fail-open: this base may well have squash-merged already, and a child PR
-# waved through against it would merge into a dead branch, landing the fix nowhere.
-test_state_unknown_when_landedness_cannot_be_settled() {
-  local dir head rc=0
-  dir=$(make_repo state-unsettleable)
+# A CONFLICT IS AN ANSWER. Replaying the base onto the default branch and hitting a conflict
+# proves the base's content is not cleanly in the default branch, so it has not merged - and
+# a base that merely conflicts with the default branch is an ordinary live feature branch
+# that has drifted from it. Calling that "we cannot tell" and refusing would block most
+# stacked work outright: the base's own PR, the child task's spawn, and the child's merge.
+test_state_live_when_the_replay_merely_conflicts() {
+  local dir head tip rc=0
+  dir=$(make_repo state-conflicting-live)
   base_edits_shared_file "$dir"
   main_edits_shared_file "$dir"
 
   # Direct call: FM_BASE_STATE_WHY is an out-param a command substitution would strand in
   # a subshell.
   fm_base_resolve_state "$dir/wt" feature/base "" main || rc=$?
-  assert_verdict "$FM_BASE_STATE_UNKNOWN" "$rc" \
-    "state-unsettleable: a base whose landedness cannot be proved either way is UNKNOWN, never LIVE - LIVE is a permissive verdict and this question was never answered"
-  assert_verdict no-merge "$FM_BASE_STATE_WHY" \
-    "state-unsettleable: the reason must name the question that went unanswered"
+  assert_verdict "$FM_BASE_STATE_LIVE" "$rc" \
+    "state-conflicting-live: a base whose replay onto the default branch conflicts is PROVED unmerged, so it is LIVE - refusing it would block every stacked task whose base has drifted from the default branch"
+  assert_verdict conflicted "$FM_BASE_STATE_WHY" \
+    "state-conflicting-live: the reason must name the conflict, so a caller reports the answer it actually got"
 
   head=$(stack_head_on_base "$dir")
-  assert_verdict INDETERMINATE "$(verdict_of "$dir" "$head")" \
-    "state-unsettleable: the verdict a caller gates a merge on must be INDETERMINATE too, so it refuses rather than passing a PR it never verified"
-  pass "fm_base_resolve_state: an unsettleable landedness is UNKNOWN, and its verdict is INDETERMINATE"
+  assert_verdict STACKED_LIVE "$(verdict_of "$dir" "$head")" \
+    "state-conflicting-live: a head correctly stacked on such a base must be ALLOWED - it targets the base, so it cannot land anything on the default branch under any hypothesis"
+
+  # Gone from origin, same conflicting replay: still an answer, and still the one that
+  # matters - the base never merged, so it was abandoned.
+  dir=$(make_repo state-conflicting-abandoned)
+  base_edits_shared_file "$dir"
+  main_edits_shared_file "$dir"
+  tip=$(base_tip "$dir")
+  delete_base_on_origin "$dir"
+  assert_verdict ABANDONED "$(state_of "$dir" "$tip")" \
+    "state-conflicting-abandoned: a gone base whose replay conflicts is proved unmerged, so it is ABANDONED - not unknown"
+  pass "fm_base_resolve_state: a replay that conflicts PROVES the base unmerged, so it is LIVE (or ABANDONED), never UNKNOWN"
+}
+
+# The other half of that split, and the one that must stay fail-closed. A merge-tree that
+# CANNOT RUN says nothing at all about the base: every git before 2.38 lacks
+# --write-tree (Ubuntu 22.04 LTS still ships 2.34), and its exit code is not a conflict's.
+# Reading a broken tool as a verdict would either wave a PR through or send the operator to
+# rebase a branch that has nothing wrong with it.
+test_state_unknown_when_the_containment_merge_cannot_run() {
+  local dir bin real saved_path rc=0 verdict_rc=0
+  dir=$(make_repo state-merge-tree-broken)
+
+  bin="$TMP_ROOT/broken-git-bin"
+  mkdir -p "$bin"
+  real=$(command -v git)
+  cat > "$bin/git" <<SH
+#!/usr/bin/env bash
+# git < 2.38: no 'merge-tree --write-tree' at all. Not a conflict - it never ran.
+for a in "\$@"; do
+  if [ "\$a" = merge-tree ]; then
+    echo "error: unknown option \\\`write-tree'" >&2
+    exit 129
+  fi
+done
+exec '$real' "\$@"
+SH
+  chmod +x "$bin/git"
+
+  saved_path=$PATH
+  PATH="$bin:$PATH"
+  fm_base_resolve_state "$dir/wt" feature/base "" main || rc=$?
+  PATH=$saved_path
+
+  assert_verdict "$FM_BASE_STATE_UNKNOWN" "$rc" \
+    "state-merge-tree-broken: a containment merge that could not RUN answers nothing, so the state is UNKNOWN - never LIVE, which is the permissive answer"
+  assert_verdict merge-tree-failed "$FM_BASE_STATE_WHY" \
+    "state-merge-tree-broken: the reason must name the tool that could not run, so the refusal does not assert a conflict that was never observed"
+
+  fm_base_verdict "$rc" "$FM_BASE_HEAD_UNROOTED" || verdict_rc=$?
+  assert_verdict "$FM_BASE_VERDICT_INDETERMINATE" "$verdict_rc" \
+    "state-merge-tree-broken: the verdict a caller gates a merge on must be INDETERMINATE, so it refuses rather than passing a PR it never verified"
+  pass "fm_base_work_landed: a merge-tree that could not RUN is UNKNOWN and INDETERMINATE, not a conflict"
 }
 
 # The other half of the same rule: refusing on UNKNOWN is only safe if UNKNOWN is rare and
@@ -432,6 +490,7 @@ test_verdict_ordinary_once_the_base_has_merged
 test_verdict_head_still_stacked_on_a_squash_merged_base
 test_verdict_abandoned_base_however_the_head_is_rooted
 test_verdict_indeterminate_is_never_a_relaxation
-test_state_unknown_when_landedness_cannot_be_settled
+test_state_live_when_the_replay_merely_conflicts
+test_state_unknown_when_the_containment_merge_cannot_run
 test_state_landed_is_provable_when_the_replay_conflicts
 test_enum_values_cannot_alias_across_enums

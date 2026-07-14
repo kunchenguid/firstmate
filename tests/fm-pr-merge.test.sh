@@ -80,18 +80,27 @@
 #   (s3) the same, with the branch DELETED too -> refuses identically; absence changes
 #        only which tip the checks reason from, never the verdict
 #
-# Landedness INDETERMINATE or unaskable -> REFUSE. Passing is the guard's only relaxation
-# and it takes proof; a head "stacked on" a base whose landedness was never settled is not
-# a verified head, however present that base's branch is. If that base has in fact merged,
-# merging its child into it lands the fix on a dead branch and never on main, while
-# fm-teardown.sh reads a MERGED PR and releases the work - the very harm the stand-down
-# refuses by name in the case it CAN see.
+# A base that merely CONFLICTS with main is an ANSWER, not an unknown: the conflict proves
+# its content is not cleanly in main, so it has not merged, and a feature branch that has
+# drifted from main is the ordinary state of one. It is judged exactly like any other
+# unmerged base:
 #   (t) base PRESENT, replaying it onto main conflicts and no squash or rebase merge of it
-#       is in main, so landedness cannot be settled, head stacked -> REFUSES. The refusal
-#       names both hazards and both recoveries: that base does not merge cleanly into main
-#       as it stands, so its OWN PR is blocked on the same conflict. A merged base whose
-#       lines main then edited conflicts the same way, which is why the patch proofs in
-#       bin/fm-base-lib.sh exist - they keep THAT base LANDED rather than unsettleable
+#       is in main, head stacked on it and the PR targets it -> ALLOWED. Refusing here
+#       would block every stacked task whose base has drifted from main, and merging this
+#       PR merges into the base branch, which cannot touch main under any hypothesis. A
+#       merged base whose lines main then edited conflicts the same way, which is why the
+#       patch proofs in bin/fm-base-lib.sh exist - they keep THAT base LANDED
+#
+# Landedness that was never ANSWERED, or a base that cannot be asked about at all -> REFUSE.
+# Passing is the guard's only relaxation and it takes proof; a head "stacked on" a base whose
+# landedness was never settled is not a verified head, however present that base's branch is.
+# If that base has in fact merged, merging its child into it lands the fix on a dead branch
+# and never on main, while fm-teardown.sh reads a MERGED PR and releases the work - the very
+# harm the stand-down refuses by name in the case it CAN see.
+#   (t2) the containment merge cannot be RUN (a git older than 2.38 has no
+#       `merge-tree --write-tree`) -> refuses, and says the TOOL failed rather than
+#       asserting a conflict nobody observed or sending the operator to rebase a base that
+#       may be perfectly clean
 #   (u) base GONE and no base_sha= recorded -> refuses; merged and abandoned cannot be
 #       told apart without it, and no rootedness check is left to fall back on
 #   (v) base GONE and the recorded tip is not in the local object store -> refuses,
@@ -554,6 +563,26 @@ advance_main() {
   git -C "$case_dir/origin.git" update-ref refs/heads/main "$commit"
 }
 
+# A git that cannot RUN the containment merge, which is every git before 2.38 - Ubuntu 22.04
+# LTS still ships 2.34. It delegates everything else to the real git, so the ONLY thing the
+# case changes is whether that one question can be asked at all. Added after the fixture is
+# built, so the fixture itself is real git's work.
+break_merge_tree() {  # <case-dir>
+  local case_dir=$1 real
+  real=$(command -v git)
+  cat > "$case_dir/fakebin/git" <<SH
+#!/usr/bin/env bash
+for a in "\$@"; do
+  if [ "\$a" = merge-tree ]; then
+    echo "error: unknown option \\\`write-tree'" >&2
+    exit 129
+  fi
+done
+exec '$real' "\$@"
+SH
+  chmod +x "$case_dir/fakebin/git"
+}
+
 run_pr_check() {
   local case_dir=$1; shift
   FM_ROOT_OVERRIDE="$ROOT" \
@@ -584,13 +613,12 @@ test_pr_check_accepts_stacked_base() {
   pass "fm-pr-check accepts a PR head stacked on the declared base"
 }
 
-# A base whose landedness CANNOT BE SETTLED is not a live base, and "stacked on it" is not
-# a verified head. The guard has no way to see the one thing it would need to: if that base
-# has in fact already squash-merged, this PR targets a dead branch, and merging it would
-# land the fix on that branch and never on main - while the PR reads MERGED and teardown
-# releases the work. Passing here would be a fail-open, so it refuses and says why, naming
-# the recovery for both of the things that might be true.
-test_pr_check_refuses_a_base_whose_landedness_cannot_be_settled() {
+# A base that conflicts with main is not an unsettled base - it is an unmerged one, and the
+# conflict is the proof. A feature branch drifts from main all the time, so refusing its
+# child would block the ordinary case this whole feature exists to serve. Nor is there a
+# hazard to weigh: the PR targets the BASE, so merging it cannot put anything on main under
+# any hypothesis about the base's fate.
+test_pr_check_accepts_a_stacked_head_on_a_base_that_conflicts_with_main() {
   local case_dir rc
   case_dir=$(make_git_case conflictingbase feature feature/base)
   advance_main_conflicting "$case_dir"
@@ -604,18 +632,49 @@ test_pr_check_refuses_a_base_whose_landedness_cannot_be_settled() {
   rc=$?
   set -e
 
-  expect_code 1 "$rc" "unsettleable-base: a landedness that could not be settled must refuse, never pass a PR the guard did not verify"
-  assert_grep 'could not be determined' "$case_dir/stderr" \
-    "unsettleable-base: the refusal does not name the question that went unanswered"
-  assert_grep "does not merge cleanly into 'main'" "$case_dir/stderr" \
-    "unsettleable-base: the refusal does not tell the operator that the base's own PR is blocked on the same conflict, which is the state that has to change"
+  expect_code 0 "$rc" "conflicting-live-base: a head stacked on a base that merely conflicts with main must be allowed - the conflict PROVES the base unmerged, and this PR targets the base"
+  assert_grep 'pr=https://github.com/example/repo/pull/9' "$case_dir/state/task-x1.meta" \
+    "conflicting-live-base: a correctly stacked PR should record pr="
+  assert_present "$case_dir/state/task-x1.check.sh" \
+    "conflicting-live-base: a correctly stacked PR should arm the merge poll"
+  assert_no_grep 'could not be determined' "$case_dir/stderr" \
+    "conflicting-live-base: a conflict is an answer, so the guard must not report it as an unanswered question"
+  pass "fm-pr-check allows a head stacked on a live base that merely conflicts with the default branch"
+}
+
+# The other half of that split, and the one that stays fail-closed. A merge-tree that could
+# not RUN says nothing about the base: git before 2.38 has no --write-tree at all. Passing
+# would wave through a PR the guard never verified; asserting a conflict would send the
+# operator to rebase a base that may be perfectly clean. So it refuses, and names the tool.
+test_pr_check_refuses_when_the_containment_merge_cannot_run() {
+  local case_dir rc
+  case_dir=$(make_git_case mergetreebroken feature feature/base)
+  advance_main_conflicting "$case_dir"
+  break_merge_tree "$case_dir"
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    "window=fm-task-x1" "worktree=$case_dir/wt" "project=$case_dir/project" \
+    "kind=ship" "mode=no-mistakes" "base=feature/base" "base_sha=$(base_tip "$case_dir")"
+
+  set +e
+  run_pr_check "$case_dir" task-x1 https://github.com/example/repo/pull/9 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "merge-tree-broken: a landedness that could not be ASKED must refuse, never pass a PR the guard did not verify"
+  assert_grep 'could not RUN' "$case_dir/stderr" \
+    "merge-tree-broken: the refusal does not say the tool failed, so a broken git reads as a verdict about the base"
+  assert_grep 'git 2.38 or newer' "$case_dir/stderr" \
+    "merge-tree-broken: the refusal does not name the fix for the thing that is actually broken"
+  assert_no_grep "does not merge cleanly" "$case_dir/stderr" \
+    "merge-tree-broken: the refusal asserts a conflict nobody observed, and would send the operator to rebase a base that may be perfectly clean"
   assert_no_grep 'pr=https://github.com/example/repo/pull/9' "$case_dir/state/task-x1.meta" \
-    "unsettleable-base: an unverified PR must not record pr= before merge"
+    "merge-tree-broken: an unverified PR must not record pr= before merge"
   assert_absent "$case_dir/state/task-x1.check.sh" \
-    "unsettleable-base: an unverified PR must not arm the merge poll"
+    "merge-tree-broken: an unverified PR must not arm the merge poll"
   assert_no_grep 'stands down' "$case_dir/stderr" \
-    "unsettleable-base: an unprovable landedness must never relax the guard"
-  pass "fm-pr-check refuses when the base's landedness cannot be settled, instead of passing an unverified PR"
+    "merge-tree-broken: a question that could not be asked must never relax the guard"
+  pass "fm-pr-check refuses when git cannot run the containment merge, and says the tool failed rather than asserting a conflict"
 }
 
 # The mirror case, and the reason the refusal above is honest rather than merely strict: a
@@ -1182,7 +1241,8 @@ test_explicit_merge_method_not_overridden
 test_method_equals_merge_method_not_overridden
 test_parses_pr_url_for_gh_axi
 test_pr_check_accepts_stacked_base
-test_pr_check_refuses_a_base_whose_landedness_cannot_be_settled
+test_pr_check_accepts_a_stacked_head_on_a_base_that_conflicts_with_main
+test_pr_check_refuses_when_the_containment_merge_cannot_run
 test_pr_check_stands_down_for_a_merged_base_that_now_conflicts
 test_pr_check_allows_base_advanced_since_head
 test_pr_check_refuses_wrong_base

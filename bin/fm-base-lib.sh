@@ -63,6 +63,15 @@
 # head the guard exists to catch (a base that had in fact squash-merged, whose child PR
 # then merges into a dead branch and never reaches the default branch at all).
 #
+# AN ANSWER IS NOT AN UNKNOWN EITHER, AND THE DIFFERENCE IS THE WHOLE ART OF IT. A base
+# whose replay onto the default branch CONFLICTS has told us something definite - its
+# content is not cleanly in the default branch, so it has not landed - and a base that
+# merely conflicts with the default branch is an ordinary live feature branch. Calling
+# THAT unknown would refuse every stacked task whose base has drifted from the default
+# branch, which is most of them. A tool that could not RUN has told us nothing, and that
+# is the unknown. The two arrive from the same command, so they are told apart at the
+# source rather than lumped together.
+#
 # NOTHING HERE INFERS ANYTHING FROM A FETCH'S EXIT STATUS. A base we could not ask about
 # is not a base that merged, and an auth or network failure must never be read as one.
 # `git ls-remote --exit-code` separates the three cases at the source: 0 = the ref matched,
@@ -180,30 +189,38 @@ fm_base_probe_origin() {  # <git-dir> <branch>
 #
 # The fact it reasons from is a base tip: the live tip on origin while the branch is
 # still there, else base_sha=, the tip fm-spawn.sh recorded at spawn time when the
-# base necessarily still existed. Two ways that commit's work can be carried by the
-# default branch:
+# base necessarily still existed. Three ways that commit's work can be shown to be
+# carried by the default branch, and two ways it can be shown NOT to be:
 #
-#   ancestor  the base merged with a merge commit or a fast-forward, so the recorded
-#             commit is literally an ancestor of the default branch.
-#   contained the base was squash-merged or rebase-merged (a squash is firstmate's
-#             own default, and GitHub's most common setting), so the commit is NOT an
-#             ancestor, but its content is already in the default branch: merging the
-#             base into the default branch again would change nothing. Tested with a
-#             real 3-way merge (git merge-tree --write-tree, git >= 2.38), so a
-#             default branch that advanced past the squash still reads as containing
-#             the base.
-#   squashed  the replay above did not resolve, but some commit the default branch took
-#             since the fork has EXACTLY the base's cumulative diff - which is what a
-#             squash merge produces. Proved by patch id (fm_base_patch_landed).
-#   replayed  the replay did not resolve, but every commit the base added since the fork
-#             has a patch-equivalent commit in the default branch - what a rebase merge
-#             produces. Proved by patch id too.
+#   ancestor  LANDED. The base merged with a merge commit or a fast-forward, so the
+#             recorded commit is literally an ancestor of the default branch.
+#   contained LANDED. The base was squash-merged or rebase-merged (a squash is
+#             firstmate's own default, and GitHub's most common setting), so the commit
+#             is NOT an ancestor, but its content is already in the default branch:
+#             merging the base into the default branch again would change nothing.
+#             Tested with a real 3-way merge (git merge-tree --write-tree, git >= 2.38),
+#             so a default branch that advanced past the squash still reads as
+#             containing the base.
+#   squashed  LANDED. The replay above conflicted, but some commit the default branch
+#             took since the fork has EXACTLY the base's cumulative diff - which is what
+#             a squash merge produces. Proved by patch id (fm_base_patch_landed).
+#   replayed  LANDED. The replay conflicted, but every commit the base added since the
+#             fork has a patch-equivalent commit in the default branch - what a rebase
+#             merge produces. Proved by patch id too.
+#   diverged  UNLANDED. The replay resolved cleanly and it CHANGES the default branch's
+#             tree, so the base's work is demonstrably not all in there.
+#   conflicted UNLANDED. The replay CONFLICTED and no squash or rebase merge of the base
+#             can be found in the default branch either. A conflict is an answer, not a
+#             shrug: the base's content is not cleanly in the default branch. It is also
+#             the ordinary condition of a live feature branch that has drifted from the
+#             default branch, so reading it as "we cannot tell" would refuse most stacked
+#             work outright - see the header's second rule.
 #
-# The last two exist because the replay conflicts as soon as the default branch edits the
-# base's own lines AFTER taking them, which is ordinary; without them, a base that had
-# demonstrably merged would read as unsettleable and its child PRs would be refused for a
-# hazard that is long gone. They only ever PROVE a merge - failing to find one proves
-# nothing, and leaves the answer UNKNOWN.
+# The two patch proofs exist because the replay conflicts as soon as the default branch
+# edits the base's own lines AFTER taking them, which is ordinary; without them, a base
+# that had demonstrably merged would read as unmerged and its child PRs would be refused
+# for a hazard that is long gone. They only ever PROVE a merge, so they run before a
+# conflict is read as UNLANDED - never after.
 #
 # When the tip is the recorded SPAWN-TIME one, that is exactly what we want: if the
 # base advanced and then merged, the merged content is a superset of the recorded
@@ -211,11 +228,12 @@ fm_base_probe_origin() {  # <git-dir> <branch>
 # used instead, which is stricter: a base that merged and then took new commits reads
 # as unlanded, and the guard rightly stays on.
 #
-# Returns FM_BASE_WORK_LANDED, FM_BASE_WORK_UNLANDED, or FM_BASE_WORK_UNKNOWN (the
-# recorded commit is not in the local object store, or the containment merge could not be
-# run or conflicted and no patch proof of a merge exists either). UNKNOWN is not LANDED,
-# and it is not UNLANDED either: callers refuse on it.
-# Sets FM_BASE_WORK_HOW to ancestor|contained|squashed|replayed|no-commit|no-merge|diverged.
+# Returns FM_BASE_WORK_LANDED, FM_BASE_WORK_UNLANDED, or FM_BASE_WORK_UNKNOWN. UNKNOWN
+# means the question was never ANSWERED - the base's commit is not in the local object
+# store, or the containment merge could not be RUN AT ALL - and it is neither LANDED nor
+# UNLANDED: callers refuse on it.
+# Sets FM_BASE_WORK_HOW to ancestor|contained|squashed|replayed|diverged|conflicted|
+# no-commit|no-default-tree|merge-tree-failed.
 fm_base_work_landed() {  # <git-dir> <base-sha> <default-sha>
   local dir=${1-} base_sha=${2-} default_sha=${3-} out rc=0 merged_tree default_tree
   FM_BASE_WORK_HOW=
@@ -231,7 +249,7 @@ fm_base_work_landed() {  # <git-dir> <base-sha> <default-sha>
   if [ "$rc" -eq 0 ]; then
     merged_tree=${out%%$'\n'*}
     default_tree=$(git -C "$dir" rev-parse --verify --quiet "$default_sha^{tree}") || {
-      FM_BASE_WORK_HOW=no-merge
+      FM_BASE_WORK_HOW=no-default-tree
       return "$FM_BASE_WORK_UNKNOWN"
     }
     if [ -n "$merged_tree" ] && [ "$merged_tree" = "$default_tree" ]; then
@@ -243,14 +261,38 @@ fm_base_work_landed() {  # <git-dir> <base-sha> <default-sha>
     FM_BASE_WORK_HOW=diverged
     return "$FM_BASE_WORK_UNLANDED"
   fi
-  # The replay conflicted (rc 1), or this git is too old for `merge-tree --write-tree`.
-  # Containment is unproven - which is not the same as disproven, so the patch tests get
-  # their turn before the answer becomes UNKNOWN.
+  # The replay did not resolve. Containment is unproven - which is not the same as
+  # disproven - so the patch proofs get their turn first, whichever of the two things
+  # below actually happened: a merged base whose lines the default branch has since
+  # edited is exactly the base whose replay conflicts.
   if fm_base_patch_landed "$dir" "$base_sha" "$default_sha"; then
     return "$FM_BASE_WORK_LANDED"
   fi
-  FM_BASE_WORK_HOW=no-merge
+  if fm_base_merge_tree_conflicted "$rc" "$out"; then
+    FM_BASE_WORK_HOW=conflicted
+    return "$FM_BASE_WORK_UNLANDED"
+  fi
+  FM_BASE_WORK_HOW=merge-tree-failed
   return "$FM_BASE_WORK_UNKNOWN"
+}
+
+# fm_base_merge_tree_conflicted: did `git merge-tree --write-tree` REPLAY the base and find
+# a conflict, or did it never run the merge at all? Two facts, one non-zero exit, and
+# reading them as one is what turns a broken tool into a verdict about the repo.
+#
+# The exit code alone cannot tell them apart, verified against the installed git (2.39):
+# a conflicted merge exits 1, an unusable invocation exits 129, a git older than 2.38 has
+# no --write-tree at all and dies on the old three-argument form, and an argument git
+# cannot merge exits 1 as well. What separates them is STDOUT: a real replay always writes
+# the merged (conflicted) tree's object id as its first line, and a merge that never ran
+# writes nothing there. So the tree id IS the evidence that the merge happened.
+#
+# Returns 0 when the replay ran and conflicted (an answer: the base's content is not
+# cleanly in the default branch), 1 when the merge could not be run (no answer at all).
+fm_base_merge_tree_conflicted() {  # <rc> <merge-tree-stdout>
+  local rc=${1-} out=${2-}
+  [ "$rc" -eq 1 ] || return 1
+  fm_base_valid_commit_id "${out%%$'\n'*}"
 }
 
 # fm_base_patch_landed: can the base's merge be proved by PATCH, where replaying it onto
@@ -354,24 +396,27 @@ fm_base_head_rooted() {  # <git-dir> <base-sha> <head-sha> <default-sha>
 # Returns FM_BASE_STATE_LIVE, FM_BASE_STATE_LANDED, FM_BASE_STATE_ABANDONED, or
 # FM_BASE_STATE_UNKNOWN. LANDED, LIVE and ABANDONED are all PROVED: the base's work is in
 # the default branch, or it demonstrably is not and the branch is still on origin, or it
-# demonstrably is not and the branch is gone. A landedness that could not be settled is
-# UNKNOWN whether the branch is on origin or not, and callers refuse on it - because LIVE
-# is not the cautious answer, it is the permissive one ("correctly stacked, allow"), and a
-# base that had in fact squash-merged would sail through it: its child PR would merge into
-# a dead branch and the fix would never reach the default branch. Landedness is unsettleable
-# only when replaying the base onto the default branch conflicts AND no squash or rebase
-# merge of it can be found there - which is also the state in which the base's OWN PR
-# cannot merge, so the refusal names a real repo problem rather than an arbitrary one.
+# demonstrably is not and the branch is gone. A base that merely CONFLICTS with the default
+# branch is proved unmerged, so it is LIVE (or ABANDONED) like any other unmerged base -
+# that is an ordinary drifted feature branch, and refusing it would block the stacked work
+# this feature exists to support.
+#
+# UNKNOWN is reserved for a question that was never ANSWERED: origin could not be asked, the
+# base is gone with no usable recorded tip, or the containment merge could not be RUN AT ALL
+# (a git older than 2.38 has no `merge-tree --write-tree`). Callers refuse on it - because
+# LIVE is not the cautious answer, it is the permissive one ("correctly stacked, allow"),
+# and a base that had in fact squash-merged would sail through it: its child PR would merge
+# into a dead branch and the fix would never reach the default branch.
 #
 # Sets FM_BASE_STATE_TIP (the tip to reason from), FM_BASE_STATE_DEFAULT_SHA (the freshly
 # fetched default branch, which callers pass on to fm_base_head_rooted),
 # FM_BASE_STATE_PRESENT (true|false), FM_BASE_STATE_WHY (ancestor|contained|squashed|
-# replayed|diverged|no-commit|no-merge|probe-failed|fetch-failed|no-tip|gone-no-tip|
-# gone-tip-unknown|default-fetch-failed|default-no-tip) and FM_BASE_STATE_ERR (git's own
-# stderr when the probe or a fetch failed). The state IS the answer: there is no separate
-# "landedness was merely unsettled" out-param, because an unsettled landedness no longer
-# produces any state but UNKNOWN, and FM_BASE_STATE_WHY already names which question went
-# unanswered.
+# replayed|diverged|conflicted|no-commit|no-default-tree|merge-tree-failed|probe-failed|
+# fetch-failed|no-tip|gone-no-tip|gone-tip-unknown|default-fetch-failed|default-no-tip) and
+# FM_BASE_STATE_ERR (git's own stderr when the probe or a fetch failed). The state IS the
+# answer: there is no separate "landedness was merely unsettled" out-param, because an
+# unanswerable landedness produces no state but UNKNOWN, and FM_BASE_STATE_WHY already names
+# which question went unanswered.
 fm_base_resolve_state() {  # <git-dir> <base-branch> <recorded-base-sha> <default-branch-name>
   local dir=${1-} branch=${2-} recorded=${3-} default_branch=${4-}
   local probe_rc=0 landed_rc=0 tip err

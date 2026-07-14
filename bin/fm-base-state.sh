@@ -21,15 +21,18 @@
 #                    there is nothing left to stack on, so the task is an ordinary
 #                    default-branch task now
 #   state=abandoned  the branch is gone from origin and its work never landed
-#   state=unknown    it could not be settled (origin unreachable, no usable recorded tip,
-#                    or a landedness that cannot be proved either way): do not guess
+#   state=unknown    the question was never answered (origin unreachable, no usable recorded
+#                    tip, or a containment merge git could not RUN): do not guess. A base
+#                    that merely CONFLICTS with the default branch is not unknown - that
+#                    proves it has not merged, so it is live
 #   state=none       the task declares no base at all
 #   base=<branch>    the declared base (absent for state=none)
 #   tip=<sha>        the commit the state was decided from: the base's live tip while it
 #                    is on origin, else the tip recorded at spawn. This is the commit a
 #                    branch stacked on the base must be rebased OFF of once it lands
 #   default=<branch> the repo's default branch
-#   why=<reason>     how it was decided (ancestor|contained|squashed|replayed|diverged|...)
+#   why=<reason>     how it was decided (ancestor|contained|squashed|replayed|diverged|
+#                    conflicted|merge-tree-failed|probe-failed|...)
 #
 # git's own error, when there is one, goes to stderr.
 #

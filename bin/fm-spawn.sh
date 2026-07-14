@@ -83,9 +83,11 @@
 #                proceeds, and fm-pr-check.sh decides the PR on its own merits.
 #     ABANDONED  the base was deleted WITHOUT merging. The task would stack on history that
 #                will never land. Refuse by name.
-#     UNKNOWN    an origin that cannot be asked, a gone base with no usable recorded tip,
-#                an undecidable landedness. Refuse rather than record a base the guard
-#                could not later verify against.
+#     UNKNOWN    an origin that cannot be asked, a gone base with no usable recorded tip, a
+#                containment merge git could not RUN. Refuse rather than record a base the
+#                guard could not later verify against. A base that merely CONFLICTS with the
+#                default branch is not unknown - a conflict proves it has not merged - so it
+#                is LIVE, and a task stacks on it as usual.
 #   An invalid branch name refuses too, as does a local-only project: it has no remote and
 #   no PR, so bin/fm-merge-local.sh would merge a based branch into local main with no
 #   guard to run at all. Every one of those refusals is raised with the brief check, BEFORE
@@ -809,17 +811,22 @@ fi
 #   ABANDONED  the base was deleted from origin WITHOUT merging. The task would stack on
 #              history that will never land. Refuse by name.
 #   UNKNOWN    origin could not be asked, or the base is gone with no usable recorded tip,
-#              or its landedness could not be proved either way. Refuse rather than record a
-#              base the guard could not verify against later. An unsettled landedness is not
-#              a live base, however present its branch is - and a base whose replay onto the
-#              default branch will not resolve cannot merge into it either, so its own PR is
-#              blocked on the same conflict.
+#              or the containment merge could not be RUN at all (a git older than 2.38).
+#              Refuse rather than record a base the guard could not verify against later.
+#              A base whose replay onto the default branch merely CONFLICTS is not this: a
+#              conflict proves it has not merged, so it is an ordinary live feature branch
+#              that has drifted from the default branch, and a task stacks on it happily.
 #
 # This runs alongside the brief check and BEFORE any backend window or worktree lease is
 # acquired: the refusals are fail-closed, and a fail-closed refusal that fired after those
 # resources exist would strand them with no meta for recovery or fm-teardown.sh to
 # reconcile. Refusing here is free - nothing has been created yet - and it also catches a
 # mistyped base before a crewmate spends a whole run on it.
+#
+# Every refusal prescribes a recovery that can be performed IN THE STATE THAT PRINTS IT,
+# which is why the shared one is scoped by respawn: on a first spawn there is no
+# state/<id>.meta yet - it is written at the end of the spawn - so telling the operator to
+# edit it would name a file that is not on disk.
 resolve_declared_base() {  # sets BASE_SHA when the spawn may proceed; returns 1 to refuse
   local default_branch_name state_rc=0 recovery respawn=false
   [ -z "$BASE_TIP_KNOWN" ] || respawn=true
@@ -827,7 +834,11 @@ resolve_declared_base() {  # sets BASE_SHA when the spawn may proceed; returns 1
     echo "error: task $ID declares intended base '$BASE' but the repo's default branch cannot be resolved in $PROJ_ABS (expected origin/HEAD, main, or master), so whether that base still carries unmerged work cannot be determined. Refusing to spawn." >&2
     return 1
   }
-  recovery="  Recovery: re-run with the base this task should target now ('--base <branch>'), or drop the 'base=$BASE' line from $STATE/$ID.meta to make this an ordinary '$default_branch_name' task and re-run without --base."
+  if "$respawn"; then
+    recovery="  Recovery: re-run with the base this task should target now ('--base <branch>'), or drop the 'base=$BASE' line from $STATE/$ID.meta to make this an ordinary '$default_branch_name' task and re-run without --base."
+  else
+    recovery="  Recovery: re-run with the base this task should target ('--base <branch>'), or re-run WITHOUT --base to make this an ordinary '$default_branch_name' task. (This task has no state/$ID.meta yet - a first spawn writes it only once every check has passed - so there is no recorded base to edit.)"
+  fi
 
   fm_base_resolve_state "$PROJ_ABS" "$BASE" "$BASE_TIP_KNOWN" "$default_branch_name" \
     || state_rc=$?
@@ -882,17 +893,22 @@ resolve_declared_base() {  # sets BASE_SHA when the spawn may proceed; returns 1
       echo "error: task $ID declares intended base '$BASE', but that base or the default branch ('$default_branch_name') could not be resolved from origin ($FM_BASE_STATE_WHY), so whether the base still carries unmerged work cannot be determined. Refusing to spawn." >&2
       [ -z "$FM_BASE_STATE_ERR" ] || printf '  git: %s\n' "$FM_BASE_STATE_ERR" >&2
       ;;
+    merge-tree-failed)
+      # The TOOL failed, not the base. A base whose replay CONFLICTS never reaches here -
+      # that is a proof it has not merged, and such a base is LIVE - so this is a merge git
+      # could not run at all, and nothing was learned about '$BASE' either way. Naming a
+      # conflict here would send the operator to rebase a branch that may be perfectly fine.
+      echo "error: task $ID declares intended base '$BASE', but git could not RUN the 3-way merge that decides whether that base's work already reached '$default_branch_name'. Refusing to spawn rather than assuming." >&2
+      echo "  base tip : $FM_BASE_STATE_TIP" >&2
+      echo "  'git merge-tree --write-tree' did not run here; it needs git 2.38 or newer. That is a tool failure, not a verdict about '$BASE'." >&2
+      echo "  Recovery: upgrade git to 2.38 or newer and re-run this spawn, which can then settle the question." >&2
+      ;;
     *)
-      # An unsettleable landedness: replaying the base onto the default branch conflicts,
-      # and no squash or rebase merge of it can be found there either. Its branch may still
-      # be on origin - presence never settled this question, so it cannot soften the
-      # refusal - and the recovery differs by which of the two unknowns is true.
+      # no-commit, no-default-tree: a commit the predicates needed was not in the clone's
+      # object store, so the question went unanswered rather than answered badly.
       echo "error: task $ID declares intended base '$BASE', and whether its work has already reached '$default_branch_name' could not be determined ($FM_BASE_STATE_WHY). Refusing to spawn rather than assuming." >&2
       echo "  base tip : $FM_BASE_STATE_TIP" >&2
-      echo "  Replaying '$BASE' onto '$default_branch_name' does not resolve, and no squash or rebase merge of it can be found there, so its work can be shown neither to be there nor to be missing - and a base that never merged would leave this task stacked on history that will never land." >&2
-      if [ "$FM_BASE_STATE_PRESENT" = true ]; then
-        echo "  Note that '$BASE' does not merge cleanly into '$default_branch_name' as it stands, so its OWN PR is blocked on the same conflict. Recovery: rebase '$BASE' onto '$default_branch_name', then re-run this spawn." >&2
-      fi
+      echo "  A commit the check needed did not resolve in $PROJ_ABS, so the base's work can be shown neither to be there nor to be missing - and a base that never merged would leave this task stacked on history that will never land." >&2
       printf '%s\n' "$recovery" >&2
       ;;
   esac

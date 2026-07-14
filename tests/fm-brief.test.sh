@@ -330,9 +330,47 @@ test_base_setup_asks_the_one_owner_what_the_base_is() {
     "base-state: the crewmate never tells firstmate the base merged under it"
   assert_grep "blocked: intended base feature/x is {the state printed}" "$brief" \
     "base-state: an abandoned or unsettleable base is not reported as a blocker"
+  # state=none is the one answer that means the GUARD ITSELF is not armed: the brief was
+  # scaffolded with --base but the spawn was not, so meta records no base and fm-pr-check
+  # skips its check entirely. A crewmate that resolved that ambiguity toward the brief's
+  # dominant narrative would build a based PR nothing would catch - the 2026-07-07 incident.
+  assert_grep "**\`state=none\`" "$brief" \
+    "base-state: no instruction for the one answer that means the PR-base guard is not armed at all"
+  assert_grep "the PR-base guard is not armed" "$brief" \
+    "base-state: a task whose base never reached meta is not reported as a blocker, so the crewmate proceeds unguarded"
   assert_no_grep "git ls-remote --exit-code" "$brief" \
     "base-state: the brief still re-derives the base's state itself instead of asking the owner that every other consumer asks"
   pass "fm-brief.sh: --base has the crewmate ask the one owner what the base is, on every path"
+}
+
+# The base is asked again at PR time, because a base merges most often exactly while its
+# child is in flight - and abandoned, unknown and none are all reachable THERE and not at
+# step 1 (a base PR can be closed, a network call can fail). A re-check that enumerates only
+# live and landed leaves the crewmate to improvise the rest, and the surrounding text tells
+# it to act on the printed word and nothing else.
+test_base_recheck_covers_every_state_the_check_can_print() {
+  local home id brief
+  home="$TMP_ROOT/base-recheck-home"
+  mkdir -p "$home/data" "$home/projects/nm-proj" "$home/projects/dpr-proj"
+  printf -- '- nm-proj [no-mistakes] - pipeline project (added 2026-07-14)\n' \
+    > "$home/data/projects.md"
+  printf -- '- dpr-proj [direct-PR] - direct PR project (added 2026-07-14)\n' \
+    >> "$home/data/projects.md"
+
+  id="brief-base-recheck-nm"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" nm-proj --base feature/x >/dev/null 2>&1 \
+    || fail "base-recheck: fm-brief.sh --base should exit 0 for a no-mistakes project"
+  brief="$home/data/$id/brief.md"
+  assert_grep "Any other answer (\`abandoned\`, \`unknown\`, \`none\`, or the check failing)" "$brief" \
+    "base-recheck: the no-mistakes PR-time re-check handles only live and landed, so a base abandoned mid-flight leaves the crewmate improvising"
+
+  id="brief-base-recheck-dpr"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" dpr-proj --base feature/x >/dev/null 2>&1 \
+    || fail "base-recheck: fm-brief.sh --base should exit 0 for a direct-PR project"
+  brief="$home/data/$id/brief.md"
+  assert_grep "Any other answer (\`abandoned\`, \`unknown\`, \`none\`, or the check failing)" "$brief" \
+    "base-recheck: the direct-PR PR-time re-check handles only live and landed, so the crewmate could open a PR against a base it never verified"
+  pass "fm-brief.sh: the PR-time base re-check has an instruction for every state the check can print"
 }
 
 # fm-spawn.sh relaunches a task with the SAME brief.md, and by then its fm/<id> branch already
@@ -620,6 +658,7 @@ test_pause_verb_override_renders_all_brief_scaffolds
 test_base_no_mistakes_shapes_brief_and_records_nothing
 test_base_roots_branch_on_the_base
 test_base_setup_asks_the_one_owner_what_the_base_is
+test_base_recheck_covers_every_state_the_check_can_print
 test_base_branch_step_resumes_an_existing_branch
 test_base_recheck_before_targeting_the_pr
 test_base_done_condition_is_self_qualifying
