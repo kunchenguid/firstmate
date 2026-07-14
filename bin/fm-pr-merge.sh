@@ -14,22 +14,30 @@
 # by omission. Use it for every PR merge (captain-requested or yolo-authorized),
 # in place of calling `gh-axi pr merge` directly.
 #
-# gh-axi pr merge expects a PR number and --repo <owner>/<repo>; it does not
-# parse a full https://github.com/<owner>/<repo>/pull/<n> URL. This script
-# parses the URL and invokes gh-axi in the form it accepts.
+# Host-aware via bin/fm-git-host-lib.sh: a GitHub PR URL merges through
+# `gh-axi pr merge <n> --repo <owner>/<repo>`; a GitLab MR URL merges through
+# `glab mr merge <iid> -R https://<host>/<namespace>` (docs/glab-backend.md). The
+# repo/host always comes from the parsed URL, never ambient gh/glab config, and
+# the pr=/pr_head= meta contract is host-agnostic and unchanged.
+#
+# Neither gh-axi nor glab parses a full web URL directly - gh-axi pr merge expects
+# a PR number and --repo <owner>/<repo>, glab mr merge an iid and -R <repo>. This
+# script parses the URL and invokes the right CLI in the form it accepts.
 #
 # Merge method: defaults to --squash when the caller passes none of --squash,
 # --merge, --rebase, or --method after the optional -- separator. An explicit
 # caller method is never overridden.
 # Extra args must not include --repo or -R because the repo is parsed from the
-# PR URL.
+# PR/MR URL.
 #
-# Usage: fm-pr-merge.sh <task-id> <pr-url> [-- <extra gh-axi pr merge args>]
+# Usage: fm-pr-merge.sh <task-id> <pr-url> [-- <extra merge args>]
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ID=${1:?usage: fm-pr-merge.sh <task-id> <pr-url> [-- <extra gh-axi pr merge args>]}
-URL=${2:?usage: fm-pr-merge.sh <task-id> <pr-url> [-- <extra gh-axi pr merge args>]}
+# shellcheck source=bin/fm-git-host-lib.sh
+. "$SCRIPT_DIR/fm-git-host-lib.sh"
+ID=${1:?usage: fm-pr-merge.sh <task-id> <pr-url> [-- <extra merge args>]}
+URL=${2:?usage: fm-pr-merge.sh <task-id> <pr-url> [-- <extra merge args>]}
 shift 2
 [ "${1:-}" = "--" ] && shift
 
@@ -63,6 +71,19 @@ parse_pr_url() {
   return 1
 }
 
+# Parse a GitLab MR URL into MR_REPO (full-URL -R value, host-explicit) and
+# MR_IID via the shared parser in bin/fm-git-host-lib.sh, so the host and
+# variable-depth namespace come from the URL and never ambient glab config.
+parse_mr_url() {
+  local url=$1 parsed
+  parsed=$(fm_pr_url_parse "$url") && [ "${parsed%%$'\t'*}" = gitlab ] || {
+    echo "error: MR URL must match https://<host>/<namespace>/-/merge_requests/<iid> (got: $url)" >&2
+    return 1
+  }
+  MR_REPO="https://$(printf '%s' "$parsed" | cut -f2)/$(printf '%s' "$parsed" | cut -f3)"
+  MR_IID=$(printf '%s' "$parsed" | cut -f4)
+}
+
 reject_repo_overrides() {
   local arg
   for arg in "$@"; do
@@ -76,7 +97,11 @@ reject_repo_overrides() {
   return 0
 }
 
-parse_pr_url "$URL" || exit 1
+HOST_KIND=$(fm_git_host_classify "$URL")
+case "$HOST_KIND" in
+  gitlab) parse_mr_url "$URL" || exit 1 ;;
+  *)      parse_pr_url "$URL" || exit 1 ;;
+esac
 reject_repo_overrides "$@" || exit 1
 
 "$SCRIPT_DIR/fm-pr-check.sh" "$ID" "$URL"
@@ -87,4 +112,7 @@ if ! caller_has_merge_method "$@"; then
   merge_args=(--squash)
 fi
 
-gh-axi pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" ${merge_args[@]+"${merge_args[@]}"} "$@"
+case "$HOST_KIND" in
+  gitlab) glab mr merge "$MR_IID" -R "$MR_REPO" ${merge_args[@]+"${merge_args[@]}"} "$@" ;;
+  *)      gh-axi pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" ${merge_args[@]+"${merge_args[@]}"} "$@" ;;
+esac

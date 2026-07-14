@@ -38,6 +38,11 @@
 #   (o) fm-pr-check rerun after HEAD moved                      -> no stale pr_head
 #   (p) fm-pr-check when local HEAD lags                        -> record remote PR head
 #   (q) no-mistakes + NO pr= recorded, PR discovered by branch  -> ALLOW  (yolo/no-CI merge)
+#   GitLab landed-work path (host inferred from the pr= URL / origin remote):
+#   (z1) gitlab + merged MR (glab state=merged), head is HEAD       -> ALLOW
+#   (z2) gitlab + open MR (glab state=opened), content unlanded     -> REFUSE (merged != opened)
+#   (z3) gitlab + MR head only on refs/merge-requests/<iid>/head    -> ALLOW  (fetch fallback)
+#   (z4) gitlab + NO pr=, glab mr list finds no merged MR           -> REFUSE (branch discovery, fail-safe)
 #
 # Also covers backlog teardown-lock-race: a git index.lock left in the worktree by a
 # killed crew process (bin/fm-teardown.sh's teardown_treehouse_return).
@@ -242,6 +247,56 @@ append_pr_meta_for_current_head() {
   printf '%s\n' \
     'pr=https://github.com/example/repo/pull/7' \
     "pr_head=$head" >> "$case_dir/state/task-x1.meta"
+}
+
+# GitLab counterparts of the pr= meta helpers above. The MR URL host classifies as
+# gitlab, so teardown's landed-work check routes through the glab code path.
+append_mr_meta_url() {
+  local case_dir=$1
+  printf '%s\n' 'pr=https://gitlab.com/group/repo/-/merge_requests/7' >> "$case_dir/state/task-x1.meta"
+}
+
+append_mr_meta_for_current_head() {
+  local case_dir=$1 head
+  head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  printf '%s\n' \
+    'pr=https://gitlab.com/group/repo/-/merge_requests/7' \
+    "pr_head=$head" >> "$case_dir/state/task-x1.meta"
+}
+
+# glab mock: `mr view <iid> -R <repo> -F json` reports {state, sha} (state is
+# LOWERCASE per docs/glab-backend.md), and `mr list ... -F json` reports the given
+# JSON array (default one merged MR, iid 7). Every mr list call is logged so a test
+# can prove the branch-discovery path ran. Args: case_dir sha state [list_json]
+add_glab_mr() {
+  local case_dir=$1 sha=$2 state=$3 list=${4:-'[{"iid":7}]'}
+  cat > "$case_dir/fakebin/glab" <<SH
+#!/usr/bin/env bash
+case "\${1:-} \${2:-}" in
+  "mr view") printf '%s\n' '{"state":"$state","sha":"$sha"}' ; exit 0 ;;
+  "mr list") printf '%s\n' "mr list \$*" >> "\${FM_TEST_GLAB_LIST_LOG:-/dev/null}" ; printf '%s\n' '$list' ; exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/glab"
+}
+
+# Push <file>=<content> as a commit onto origin's refs/merge-requests/<iid>/head
+# from a throwaway clone, so the commit object lives ONLY on origin (not in the
+# worktree's object db). This forces teardown's ensure_commit_object_gitlab to
+# fetch refs/merge-requests/<iid>/head. Echoes the pushed commit sha. Args:
+# case_dir iid file content msg
+land_patch_on_origin_mr_ref() {
+  local case_dir=$1 iid=$2 file=$3 content=$4 msg=$5 tmp sha
+  tmp="$case_dir/_mr"
+  git clone -q "$case_dir/origin.git" "$tmp"
+  printf '%s\n' "$content" > "$tmp/$file"
+  git -C "$tmp" add -- "$file"
+  git -C "$tmp" -c user.email=t@t -c user.name=t commit -q -m "$msg"
+  git -C "$tmp" push -q origin "HEAD:refs/merge-requests/$iid/head"
+  sha=$(git -C "$tmp" rev-parse HEAD)
+  rm -rf "$tmp"
+  printf '%s' "$sha"
 }
 
 append_pr_meta_url() {
@@ -886,6 +941,105 @@ test_gh_error_and_content_absent_refuses() {
   pass "gh lookup error with content not in default refuses (fail-safe)"
 }
 
+test_gitlab_mr_merged_allows() {
+  local case_dir rc head
+  case_dir=$(make_case gitlab-mr-merged)
+  write_meta "$case_dir" no-mistakes ship
+  # Unpushed branch content; a merged GitLab MR (state=merged) whose head is the
+  # current HEAD is the only signal it landed. Mirrors test_squash_merged_branch_deleted_allows.
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  append_mr_meta_for_current_head "$case_dir"
+  head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  add_glab_mr "$case_dir" "$head" merged
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "gitlab-mr-merged: teardown should succeed when the MR is merged"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "gitlab-mr-merged: teardown printed a REFUSED line"
+  pass "GitLab MR reported merged by glab (state=merged) lets teardown proceed"
+}
+
+test_gitlab_mr_not_merged_refuses() {
+  local case_dir rc head
+  case_dir=$(make_case gitlab-mr-open)
+  write_meta "$case_dir" no-mistakes ship
+  # The MR is still open (LOWERCASE state=opened, NOT merged) and the content never
+  # landed on origin/main: the glab path must not treat `opened` as merged, and the
+  # content fallback must also fail, so teardown refuses. Guards the case-sensitive
+  # merged check (opened != merged).
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  append_mr_meta_url "$case_dir"
+  head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  add_glab_mr "$case_dir" "$head" opened
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "gitlab-mr-open: teardown should refuse when the MR is not merged"
+  grep -q REFUSED "$case_dir/stderr" || fail "gitlab-mr-open: no REFUSED line in stderr"
+  pass "GitLab MR reported open by glab (state=opened) does not count as landed"
+}
+
+test_gitlab_mr_head_fetched_via_merge_requests_ref_allows() {
+  local case_dir rc mr_head
+  case_dir=$(make_case gitlab-mr-fetch-ref)
+  write_meta "$case_dir" no-mistakes ship
+  # Local unpushed patch; the merged MR head lives ONLY on origin under
+  # refs/merge-requests/7/head (not in the worktree's object db), so teardown must
+  # fetch that ref (GitLab's equivalent of refs/pull/<n>/head) to verify containment.
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  append_mr_meta_url "$case_dir"
+  # Distinct commit message so the MR head is a different sha than the local commit
+  # (same net patch), guaranteeing it is absent locally and the fetch fallback runs.
+  mr_head=$(land_patch_on_origin_mr_ref "$case_dir" 7 feature.txt hello "squash: add feature")
+  ! git -C "$case_dir/wt" cat-file -e "$mr_head^{commit}" 2>/dev/null \
+    || fail "gitlab-mr-fetch-ref: test setup bug, MR head is already in the worktree object db"
+  add_glab_mr "$case_dir" "$mr_head" merged
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "gitlab-mr-fetch-ref: teardown should succeed after fetching refs/merge-requests/7/head"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "gitlab-mr-fetch-ref: teardown printed a REFUSED line"
+  pass "GitLab MR head absent locally is fetched via refs/merge-requests/<iid>/head for the landed check"
+}
+
+test_gitlab_no_mr_recorded_discovers_by_branch() {
+  local case_dir rc
+  case_dir=$(make_case gitlab-mr-branch-discovery)
+  write_meta "$case_dir" no-mistakes ship
+  # No pr= recorded. Host is inferred from the origin remote (a gitlab.* host), so
+  # the landed check routes through the glab branch-discovery path (glab mr list
+  # --source-branch --merged). glab reports no merged MR ([]), so the MR path finds
+  # nothing; with the content also unlanded, teardown refuses - proving the gitlab
+  # branch-discovery path ran and stays fail-safe. A non-resolvable gitlab.invalid
+  # host keeps the one content-fallback fetch offline (reserved TLD, fast DNS fail).
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  git -C "$case_dir/project" remote set-url origin 'https://gitlab.invalid/group/repo.git'
+  add_glab_mr "$case_dir" 0000000000000000000000000000000000000000 opened '[]'
+  ! grep -qE '^(pr|pr_head)=' "$case_dir/state/task-x1.meta" \
+    || fail "gitlab-mr-branch-discovery: test setup bug, meta unexpectedly has a pr= line"
+
+  set +e
+  FM_TEST_GLAB_LIST_LOG="$case_dir/glab-list.log" GIT_TERMINAL_PROMPT=0 \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "gitlab-mr-branch-discovery: teardown should refuse when no merged MR and content unlanded"
+  grep -q REFUSED "$case_dir/stderr" || fail "gitlab-mr-branch-discovery: no REFUSED line in stderr"
+  assert_grep '--source-branch=fm/task-x1 --merged' "$case_dir/glab-list.log" \
+    "gitlab-mr-branch-discovery: glab mr list branch discovery was not invoked on the gitlab path"
+  pass "teardown routes to glab branch discovery from a gitlab origin and refuses fail-safe when no MR is found"
+}
+
 test_stale_index_lock_cleared_and_teardown_succeeds() {
   local case_dir rc lock
   case_dir=$(make_case stale-index-lock)
@@ -1276,6 +1430,10 @@ test_squash_merged_branch_deleted_allows
 test_squash_merged_pr_allows_when_head_ancestor_of_pr_head
 test_no_pr_recorded_discovers_merged_pr_by_branch_allows
 test_squash_merged_pr_allows_replayed_unpushed_patch
+test_gitlab_mr_merged_allows
+test_gitlab_mr_not_merged_refuses
+test_gitlab_mr_head_fetched_via_merge_requests_ref_allows
+test_gitlab_no_mr_recorded_discovers_by_branch
 test_merged_pr_with_later_local_commit_refuses
 test_pr_check_does_not_refresh_stale_pr_head
 test_pr_check_records_remote_head_when_local_lags

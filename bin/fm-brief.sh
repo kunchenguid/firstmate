@@ -65,11 +65,14 @@ esac
 . "$SCRIPT_DIR/fm-marker-lib.sh"
 # shellcheck source=bin/fm-classify-lib.sh
 . "$SCRIPT_DIR/fm-classify-lib.sh"
+# shellcheck source=bin/fm-git-host-lib.sh
+. "$SCRIPT_DIR/fm-git-host-lib.sh"
 PAUSED_VERB=${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 KIND=ship
 HERDR_LAB=0
 NO_PROJECTS=0
@@ -186,6 +189,18 @@ fi
 
 REPO=${POS[1]}
 
+# Git-host-aware tool instruction (rule 3): infer the host from the project
+# clone's origin remote (not the registry), so a GitLab project's crewmate is
+# told to use glab rather than gh-axi, which cannot talk to a GitLab remote. A
+# clone with no readable origin (e.g. local-only, needing no git-host tooling)
+# keeps the GitHub default.
+if [ "$(fm_git_host_classify "$(git -C "$PROJECTS/$REPO" remote get-url origin 2>/dev/null || true)")" = gitlab ]; then
+  # shellcheck disable=SC2016  # backticks are literal brief text, not a substitution
+  TOOL_INSTRUCTION='3. Use `glab` for GitLab operations and chrome-devtools-axi for browser operations.'
+else
+  TOOL_INSTRUCTION='3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.'
+fi
+
 if [ "$HERDR_LAB" -eq 1 ]; then
 HERDR_LAB_HELPER=$(shell_quote "$FM_ROOT/bin/fm-herdr-lab.sh")
 # shellcheck disable=SC2016  # single quotes are deliberate: these lines are literal brief text whose backtick-wrapped $(...) and "$HERDR_LAB_SESSION" snippets must reach the reading agent verbatim, not expand at scaffold time; only the '"$VAR"' break-outs interpolate.
@@ -236,7 +251,7 @@ The report is the only thing that survives, so anything worth keeping must be in
 # Rules
 1. Never push to any remote and never open a PR.
 2. Stay inside this worktree; the only files you may write outside it are the report and the status file below.
-3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
+$TOOL_INSTRUCTION
 4. Report status by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
    States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.
@@ -342,7 +357,7 @@ If the top-level path is the primary checkout or not the worktree you were launc
 # Rules
 $RULE1
 2. Stay inside this worktree; modify nothing outside it.
-3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
+$TOOL_INSTRUCTION
 4. Report status by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
    States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.

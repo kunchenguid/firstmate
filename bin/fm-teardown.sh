@@ -19,8 +19,13 @@
 # up a merged PR whose head branch matches the worktree's branch, fetching its head
 # via refs/pull/<n>/head when the branch itself was deleted. So a missing pr= never
 # by itself causes a false refusal of landed work.
-# A gh lookup error falls back to the content check; if that is also inconclusive,
-# teardown refuses rather than risk discarding unlanded work.
+# The landed-work PR check is host-aware via bin/fm-git-host-lib.sh (host inferred
+# from the pr= URL, else the worktree's origin remote): a GitHub PR is verified with
+# gh + refs/pull/<n>/head, a GitLab MR with `glab mr view/list -F json` + the
+# refs/merge-requests/<iid>/head fetch fallback (docs/glab-backend.md). GitHub
+# behavior is unchanged; the content-in-default fallback is host-agnostic.
+# A gh/glab lookup error falls back to the content check; if that is also
+# inconclusive, teardown refuses rather than risk discarding unlanded work.
 # Uncommitted changes are never landed.
 # local-only projects additionally accept work merged into the local default
 # branch (firstmate performs that merge on the captain's approval) as a fallback
@@ -90,6 +95,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-lock-lib.sh"
 # shellcheck source=bin/fm-gate-refuse-lib.sh
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
+# shellcheck source=bin/fm-git-host-lib.sh
+. "$SCRIPT_DIR/fm-git-host-lib.sh"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never tear
 # down a worktree (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
@@ -299,14 +306,86 @@ content_in_default() {
   [ "$merged_tree" = "$default_tree" ]
 }
 
+# The git host for this task's landed-work PR check: the pr= URL's host when a
+# pr= was recorded, else the worktree's origin remote. GitHub is the default for
+# anything unrecognized, preserving the original gh-only behavior.
+git_host_of_task() {
+  local origin
+  if [ -n "$PR_URL" ]; then
+    fm_git_host_classify "$PR_URL"
+    return 0
+  fi
+  origin=$(git -C "$WT" remote get-url origin 2>/dev/null) || { printf 'unknown\n'; return 0; }
+  fm_git_host_classify "$origin"
+}
+
+# Resolve the MR iid for a worktree branch via glab. Echoes the iid on a single
+# merged match and returns 0; returns non-zero on no match or any lookup failure,
+# so the caller treats it as "no MR found" (fail-safe). GitLab counterpart of
+# pr_number_from_branch.
+mr_iid_from_branch() {
+  local branch=$1 repo=$2 out iid
+  [ -n "$branch" ] && [ "$branch" != HEAD ] || return 1
+  command -v glab >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 || return 1
+  out=$( cd "$WT" && glab mr list -R "$repo" --source-branch="$branch" --merged -F json 2>/dev/null ) || return 1
+  iid=$(printf '%s' "$out" | jq -r 'if type=="array" then (.[0].iid // empty) else (.iid // empty) end' 2>/dev/null) || return 1
+  [ -n "$iid" ] || return 1
+  printf '%s' "$iid"
+}
+
+# Ensure the MR head commit object is present locally, fetching
+# refs/merge-requests/<iid>/head (GitLab's equivalent of refs/pull/<n>/head) when
+# the source branch was deleted after merge. GitLab counterpart of
+# ensure_commit_object.
+ensure_commit_object_gitlab() {
+  local iid=$1 commit=$2
+  git -C "$WT" cat-file -e "$commit^{commit}" 2>/dev/null && return 0
+  [ -n "$iid" ] || return 1
+  git -C "$WT" remote get-url origin >/dev/null 2>&1 || return 1
+  git -C "$WT" fetch --quiet origin "refs/merge-requests/$iid/head" >/dev/null 2>&1 || return 1
+  git -C "$WT" cat-file -e "$commit^{commit}" 2>/dev/null
+}
+
+# GitLab counterpart of pr_is_merged. Resolves the MR from the recorded pr= URL
+# first (host/namespace/iid parsed from it), then from the branch name via
+# `glab mr list`, and reads state (.state, LOWERCASE `merged`) and head (.sha)
+# from `glab mr view <iid> -R <repo> -F json`. Returns non-zero when the MR is not
+# merged, the current work is not contained in the MR head, no MR is found, or any
+# glab error occurs - the caller then falls back to the content check.
+pr_is_merged_gitlab() {
+  local branch=$1 repo iid view state head current parsed
+  command -v glab >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 || return 1
+  if [ -n "$PR_URL" ]; then
+    parsed=$(fm_pr_url_parse "$PR_URL") && [ "${parsed%%$'\t'*}" = gitlab ] || return 1
+    repo="https://$(printf '%s' "$parsed" | cut -f2)/$(printf '%s' "$parsed" | cut -f3)"
+    iid=$(printf '%s' "$parsed" | cut -f4)
+  else
+    repo=$(git -C "$WT" remote get-url origin 2>/dev/null) || return 1
+    iid=$(mr_iid_from_branch "$branch" "$repo") || return 1
+  fi
+  [ -n "$iid" ] || return 1
+  view=$(cd "$WT" && glab mr view "$iid" -R "$repo" -F json 2>/dev/null) || return 1
+  state=$(printf '%s' "$view" | jq -r '.state // empty' 2>/dev/null) || return 1
+  head=$(printf '%s' "$view" | jq -r '.sha // empty' 2>/dev/null) || return 1
+  [ "$state" = merged ] || return 1
+  [ -n "$head" ] || return 1
+  ensure_commit_object_gitlab "$iid" "$head" || return 1
+  current=$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null) || return 1
+  git -C "$WT" merge-base --is-ancestor "$current" "$head" 2>/dev/null && return 0
+  unpushed_patches_are_in_pr_head "$head"
+}
+
 # Has the worktree's committed work actually LANDED, though its commits are not
-# reachable from any remote-tracking branch? True when a merged PR proves the
-# current local work is contained in the PR head, OR the content is already in the
-# default branch (fallback, which also covers the no-PR and gh-error paths). False
-# only for genuinely unlanded work.
+# reachable from any remote-tracking branch? True when a merged PR/MR proves the
+# current local work is contained in the PR/MR head, OR the content is already in
+# the default branch (fallback, which also covers the no-PR and gh/glab-error
+# paths). False only for genuinely unlanded work.
 work_is_landed() {
   local branch=$1
-  pr_is_merged "$branch" && return 0
+  case "$(git_host_of_task)" in
+    gitlab) pr_is_merged_gitlab "$branch" && return 0 ;;
+    *)      pr_is_merged "$branch" && return 0 ;;
+  esac
   content_in_default
 }
 

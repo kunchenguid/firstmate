@@ -341,6 +341,8 @@ It sweeps the current session for uncaptured durable knowledge, routes findings 
 
 Orthogonal to mode is an optional `+yolo` flag (`[direct-PR +yolo]`), default off and **not recommended**: with `yolo` on, firstmate makes the approval decisions itself instead of asking the captain (section 7). When the captain adds a project without saying, default to `no-mistakes` with yolo off; only set a faster mode or `+yolo` on the captain's explicit say-so.
 
+Mode is host-agnostic: the git host is inferred from the project's `origin` remote (not the registry), so a `direct-PR` GitLab project ships through `glab` MRs while a GitHub one ships through `gh-axi` PRs with no registry change, and a `local-only` project needs no GitLab-specific work at all (`docs/glab-backend.md`; `bin/fm-git-host-lib.sh`).
+
 **Clone existing:** `git clone <url> projects/<name>`, add its registry line with the chosen mode, then initialize only if the mode is `no-mistakes`.
 
 **Create new:** for `no-mistakes` and `direct-PR` modes a new project needs a GitHub repo first (they push to an `origin` remote); a `local-only` project needs no remote at all - a purely local git repo is fine.

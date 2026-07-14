@@ -14,6 +14,10 @@
 #   (f) malformed PR URL fails fast without calling gh-axi
 #   (g) explicit merge method is not overridden by the default --squash
 #   (h) repo override args fail fast because the repo comes from the URL
+#   (i) a GitLab MR URL merges via `glab mr merge <iid> -R https://<host>/<ns>`
+#       (default --squash), recording pr= and pr_head= from `glab mr view`
+#   (j) an explicit merge method is not overridden for GitLab either
+#   (k) repo override args fail fast for a GitLab MR URL too
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -84,11 +88,27 @@ SH
   chmod +x "$case_dir/fakebin/gh-axi" "$case_dir/fakebin/gh"
 }
 
+# glab mock recording every `mr merge` invocation and answering `mr view -F json`
+# with a state/sha object for fm-pr-check.sh's pr_head lookup. Args: case_dir head_sha
+add_glab_mock() {
+  local case_dir=$1 head=$2
+  cat > "$case_dir/fakebin/glab" <<SH
+#!/usr/bin/env bash
+case "\${1:-} \${2:-}" in
+  "mr merge") printf '%s\n' "\$*" >> "\$FM_TEST_GLAB_LOG" ; exit 0 ;;
+  "mr view") printf '%s\n' '{"state":"opened","sha":"$head"}' ; exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/glab"
+}
+
 run_pr_merge() {
   local case_dir=$1; shift
   FM_ROOT_OVERRIDE="$ROOT" \
   FM_STATE_OVERRIDE="$case_dir/state" \
   FM_TEST_GH_AXI_LOG="$case_dir/gh-axi.log" \
+  FM_TEST_GLAB_LOG="$case_dir/glab.log" \
   PATH="$case_dir/fakebin:$PATH" \
     "$PR_MERGE" "$@"
 }
@@ -181,21 +201,95 @@ test_malformed_url_refuses_before_merge() {
   : > "$case_dir/gh-axi.log"
 
   set +e
-  run_pr_merge "$case_dir" task-x1 'https://gitlab.com/example/repo/-/merge_requests/1' \
+  # Neither a GitHub pull URL nor a GitLab MR URL: classifies as an unknown host,
+  # so it falls to the GitHub parser and is rejected as a malformed PR URL.
+  run_pr_merge "$case_dir" task-x1 'https://example.com/example/repo/pull/1' \
     > "$case_dir/stdout" 2> "$case_dir/stderr"
   rc=$?
   set -e
 
-  expect_code 1 "$rc" "malformed-url: fm-pr-merge should refuse a non-GitHub PR URL"
+  expect_code 1 "$rc" "malformed-url: fm-pr-merge should refuse an unrecognized PR URL"
   assert_grep 'PR URL must match https://github.com/<owner>/<repo>/pull/<number>' "$case_dir/stderr" \
     "malformed-url: refusal did not explain the expected URL shape"
-  assert_no_grep 'pr=https://gitlab.com/example/repo/-/merge_requests/1' "$case_dir/state/task-x1.meta" \
+  assert_no_grep 'pr=https://example.com/example/repo/pull/1' "$case_dir/state/task-x1.meta" \
     "malformed-url: malformed PR URL was recorded in meta"
   assert_absent "$case_dir/state/task-x1.check.sh" \
     "malformed-url: malformed PR URL armed a merge poll"
   assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
     "malformed-url: gh-axi pr merge was invoked for a malformed URL"
   pass "fm-pr-merge refuses malformed PR URLs before calling gh-axi"
+}
+
+test_gitlab_mr_url_merges_via_glab() {
+  local case_dir
+  case_dir=$(make_case gitlab-merge)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" 0000000000000000000000000000000000000000
+  add_glab_mock "$case_dir" abc123def456abc123def456abc123def456abcd
+  : > "$case_dir/glab.log"
+
+  run_pr_merge "$case_dir" task-x1 https://gitlab.com/group/subgroup/repo/-/merge_requests/5924 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" || fail "gitlab-merge: fm-pr-merge failed"
+
+  grep -qxF 'mr merge 5924 -R https://gitlab.com/group/subgroup/repo --squash' "$case_dir/glab.log" \
+    || fail "gitlab-merge: glab mr merge was not invoked with iid, host-explicit -R, and default --squash"
+  assert_grep 'pr=https://gitlab.com/group/subgroup/repo/-/merge_requests/5924' "$case_dir/state/task-x1.meta" \
+    "gitlab-merge: MR URL was not recorded as pr="
+  assert_grep 'pr_head=abc123def456abc123def456abc123def456abcd' "$case_dir/state/task-x1.meta" \
+    "gitlab-merge: MR head SHA was not recorded as pr_head= from glab mr view .sha"
+  [ ! -s "$case_dir/gh-axi.log" ] || fail "gitlab-merge: gh-axi was invoked for a GitLab MR URL"
+  # The armed merge-poll must dispatch on the GitLab URL shape and check the
+  # LOWERCASE `merged` state via glab, never GitHub's uppercase MERGED.
+  assert_present "$case_dir/state/task-x1.check.sh" "gitlab-merge: merge poll was not armed"
+  assert_grep "glab mr view '5924' -R 'https://gitlab.com/group/subgroup/repo' -F json" \
+    "$case_dir/state/task-x1.check.sh" "gitlab-merge: poll does not query glab mr view with host-explicit -R"
+  # shellcheck disable=SC2016  # matching the literal generated poll text, no expansion
+  assert_grep '"$state" = "merged"' "$case_dir/state/task-x1.check.sh" \
+    "gitlab-merge: poll does not check the lowercase merged state"
+  assert_no_grep 'gh pr view' "$case_dir/state/task-x1.check.sh" \
+    "gitlab-merge: GitLab poll still calls gh"
+  pass "fm-pr-merge merges a GitLab MR URL via glab, recording pr= and pr_head= (default --squash)"
+}
+
+test_gitlab_explicit_merge_method_not_overridden() {
+  local case_dir
+  case_dir=$(make_case gitlab-explicit-method)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" 0000000000000000000000000000000000000000
+  add_glab_mock "$case_dir" 1111111111111111111111111111111111111111
+  : > "$case_dir/glab.log"
+
+  run_pr_merge "$case_dir" task-x1 https://gitlab.com/group/repo/-/merge_requests/12 -- --rebase \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" || fail "gitlab-explicit-method: fm-pr-merge failed"
+
+  grep -qxF 'mr merge 12 -R https://gitlab.com/group/repo --rebase' "$case_dir/glab.log" \
+    || fail "gitlab-explicit-method: caller --rebase was not forwarded without an extra default --squash"
+  pass "fm-pr-merge does not add default --squash for a GitLab MR with an explicit merge method"
+}
+
+test_gitlab_repo_override_args_refuse_before_recording() {
+  local case_dir rc
+  case_dir=$(make_case gitlab-repo-override)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" 0000000000000000000000000000000000000000
+  add_glab_mock "$case_dir" 2222222222222222222222222222222222222222
+  : > "$case_dir/glab.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://gitlab.com/group/repo/-/merge_requests/8 -- -R other/repo \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "gitlab-repo-override: fm-pr-merge should refuse repo override flags"
+  assert_grep 'must not override --repo parsed from PR URL' "$case_dir/stderr" \
+    "gitlab-repo-override: refusal did not explain the repo override"
+  assert_no_grep 'pr=https://gitlab.com/group/repo/-/merge_requests/8' "$case_dir/state/task-x1.meta" \
+    "gitlab-repo-override: MR URL was recorded before rejecting the repo override"
+  assert_absent "$case_dir/state/task-x1.check.sh" \
+    "gitlab-repo-override: repo override armed a merge poll"
+  [ ! -s "$case_dir/glab.log" ] || fail "gitlab-repo-override: glab mr merge was invoked despite repo override"
+  pass "fm-pr-merge refuses -R override args for a GitLab MR URL before recording state"
 }
 
 test_rejects_unsafe_url_segments_before_recording() {
@@ -305,3 +399,6 @@ test_repo_override_args_refuse_before_recording
 test_explicit_merge_method_not_overridden
 test_method_equals_merge_method_not_overridden
 test_parses_pr_url_for_gh_axi
+test_gitlab_mr_url_merges_via_glab
+test_gitlab_explicit_merge_method_not_overridden
+test_gitlab_repo_override_args_refuse_before_recording

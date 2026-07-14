@@ -224,6 +224,35 @@ test_herdr_lab_contract_applies_to_scouts_but_not_secondmates() {
   pass "fm-brief.sh: Herdr lab contract covers scouts and rejects secondmate misuse"
 }
 
+test_tool_instruction_is_host_aware() {
+  local home
+  home="$TMP_ROOT/host-aware-home"
+  mkdir -p "$home/data" "$home/projects"
+  # Two project clones distinguished only by their origin host. The rule-3 tool
+  # line must name glab for the GitLab clone and gh-axi for the GitHub clone; the
+  # host is read from origin, so no registry entry is needed.
+  git init -q "$home/projects/glproj" 2>/dev/null
+  git -C "$home/projects/glproj" remote add origin 'git@gitlab.com:group/subgroup/repo.git'
+  git init -q "$home/projects/ghproj" 2>/dev/null
+  git -C "$home/projects/ghproj" remote add origin 'https://github.com/owner/repo.git'
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" gl-ship glproj >/dev/null 2>&1
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" gh-ship ghproj >/dev/null 2>&1
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" gl-scout glproj --scout >/dev/null 2>&1
+
+  # shellcheck disable=SC2016 # Literal backticks are part of the brief wording.
+  assert_grep 'Use `glab` for GitLab operations and chrome-devtools-axi for browser operations.' \
+    "$home/data/gl-ship/brief.md" "GitLab ship brief did not emit glab tool guidance"
+  assert_no_grep 'gh-axi for GitHub operations' "$home/data/gl-ship/brief.md" \
+    "GitLab ship brief still told the crewmate to use gh-axi"
+  # shellcheck disable=SC2016 # Literal backticks are part of the brief wording.
+  assert_grep 'Use `glab` for GitLab operations and chrome-devtools-axi for browser operations.' \
+    "$home/data/gl-scout/brief.md" "GitLab scout brief did not emit glab tool guidance"
+  assert_grep 'Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.' \
+    "$home/data/gh-ship/brief.md" "GitHub ship brief lost its gh-axi tool guidance"
+  pass "fm-brief.sh: rule-3 tool instruction is inferred from the project's git host"
+}
+
 test_pause_verb_override_renders_all_brief_scaffolds() {
   local home kind id brief
   home="$TMP_ROOT/pause-verb-home"
@@ -270,4 +299,5 @@ test_herdr_lab_contract_quotes_foreign_firstmate_path
 test_herdr_lab_omission_is_loud_for_ship_and_scout
 test_herdr_lab_contract_applies_to_scouts_but_not_secondmates
 test_secondmate_no_projects_charter
+test_tool_instruction_is_host_aware
 test_pause_verb_override_renders_all_brief_scaffolds

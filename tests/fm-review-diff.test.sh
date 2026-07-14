@@ -8,6 +8,7 @@
 #   (b) pr= without pr_head= -> fetch refs/pull/<n>/head and diff that
 #   (c) pr= absent -> unchanged worktree-branch diff
 #   (d) pr= present but PR head unreachable -> fallback to local branch + warning
+#   (e) gitlab MR pr= without pr_head= -> fetch refs/merge-requests/<iid>/head and diff that
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -105,6 +106,25 @@ test_pr_meta_fetches_pull_head_without_recorded_sha() {
   pass "fm-review-diff fetches refs/pull/<n>/head when pr_head= is absent"
 }
 
+test_gitlab_mr_meta_fetches_merge_requests_head_without_recorded_sha() {
+  local case_dir out
+  case_dir=$(make_case gitlab-mr-fetch)
+  stale_and_pr_commits "$case_dir"
+  # GitLab exposes an MR's source-branch head at refs/merge-requests/<iid>/head,
+  # the counterpart of GitHub's refs/pull/<n>/head. With no pr_head= recorded, the
+  # gitlab branch of resolve_pr_head must fetch it and diff against it.
+  git -C "$case_dir/wt" push -q origin "pr-head-tmp:refs/merge-requests/9/head"
+  write_task_meta "$case_dir" "pr=https://gitlab.com/group/subgroup/repo/-/merge_requests/9"
+
+  out=$(run_review_diff "$case_dir" task-x1 2> "$case_dir/stderr")
+
+  assert_contains "$out" '+pr-fixed' "gitlab-mr-fetch: diff should use the fetched MR head"
+  assert_not_contains "$out" 'stale-local' "gitlab-mr-fetch: diff must not use the stale local branch"
+  assert_not_contains "$(cat "$case_dir/stderr")" 'warning: PR head unavailable' \
+    "gitlab-mr-fetch: should not warn when the MR head fetch succeeds"
+  pass "fm-review-diff fetches refs/merge-requests/<iid>/head for a GitLab MR when pr_head= is absent"
+}
+
 test_no_pr_meta_uses_local_branch() {
   local case_dir out
   case_dir=$(make_case no-pr-meta)
@@ -143,5 +163,6 @@ test_unreachable_pr_head_falls_back_with_warning() {
 
 test_pr_meta_uses_pr_head_not_stale_local
 test_pr_meta_fetches_pull_head_without_recorded_sha
+test_gitlab_mr_meta_fetches_merge_requests_head_without_recorded_sha
 test_no_pr_meta_uses_local_branch
 test_unreachable_pr_head_falls_back_with_warning
