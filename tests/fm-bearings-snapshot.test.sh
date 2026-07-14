@@ -529,7 +529,7 @@ EOF
 
 ## Done
 EOF
-  child=decision-child
+  child='decision-child'
   mkdir -p "$decision/projects/$child"
   cat > "$decision/data/backlog.md" <<EOF
 ## In flight
@@ -1064,10 +1064,11 @@ test_landed_bounded_and_disclosed() {
   local home mate fakebin json i expected actual
   home=$(make_home mate-landed-caps); write_fixture "$home"
   mate=$(fixture_mate_home "$home")
-  : > "$mate/data/backlog.md"
-  printf '## In flight\n' >> "$mate/data/backlog.md"
-  printf '%s\n\n' '- [ ] mate - Decide subscription order (repo: firstmate) (kind: ship) (since 2026-07-11)' >> "$mate/data/backlog.md"
-  printf '## Done\n' >> "$mate/data/backlog.md"
+  {
+    printf '## In flight\n'
+    printf '%s\n\n' '- [ ] mate - Decide subscription order (repo: firstmate) (kind: ship) (since 2026-07-11)'
+    printf '## Done\n'
+  } > "$mate/data/backlog.md"
   i=1
   while [ "$i" -le 12 ]; do
     printf -- '- [x] mate-landed-%02d - Secondmate fix %02d (repo: firstmate) (kind: ship) (merged 2026-06-%02d)\n' \
