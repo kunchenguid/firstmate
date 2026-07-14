@@ -356,6 +356,20 @@ test_invalid_entrypoints_have_zero_side_effects() {
     [ "$after" = "$before" ] || fail "merge invalid task ID changed state"
   done
 
+  for value in "${INVALID_IDS[@]}"; do
+    before=$(state_snapshot "$dir/home/state")
+    set +e
+    FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$dir/root" FM_TEST_GUARD_LOG="$dir/guard.log" \
+      "$TEARDOWN" "$value" --force > "$dir/stdout" 2> "$dir/stderr"
+    rc=$?
+    set -e
+    [ "$rc" -ne 0 ] || fail "teardown accepted invalid task ID"
+    [ "$(cat "$dir/stderr")" = 'error: invalid teardown request' ] \
+      || fail "teardown invalid task ID diagnostic was not fixed"
+    after=$(state_snapshot "$dir/home/state")
+    [ "$after" = "$before" ] || fail "teardown invalid task ID changed state"
+  done
+
   set +e
   run_check_entry "$dir" > /dev/null 2> "$dir/stderr"; rc=$?
   set -e
@@ -373,7 +387,7 @@ test_invalid_entrypoints_have_zero_side_effects() {
   [ ! -s "$dir/gh-axi.log" ] || fail "invalid direct or merge data called gh-axi"
   [ ! -s "$dir/guard.log" ] || fail "invalid direct or merge data called the guard"
   [ ! -e "$TMP_ROOT/escape.check.sh" ] || fail "task traversal wrote outside state"
-  pass "direct and merge entrypoints reject invalid arguments before every side effect"
+  pass "PR and teardown entrypoints reject invalid arguments before every side effect"
 }
 
 test_valid_recording_and_merge_derivation() {
@@ -1304,6 +1318,27 @@ SH
   FM_HOME="$dir/home" "$MIGRATE" >/dev/null 2>/dev/null || fail "completed migration rerun failed"
   snap_after=$(state_snapshot "$state")
   [ "$snap_after" = "$snap_before" ] || fail "completed migration changed a later custom check"
+
+  dir=$(make_case migration-x-linked)
+  state="$dir/home/state"
+  fm_write_meta "$state/task-x.meta" \
+    'window=fm-task-x' \
+    'pr=https://github.com/o/r/pull/12' \
+    'pr_head=0123456789abcdef0123456789abcdef01234567' \
+    'x_request=req-42' \
+    'x_request_ts=1700000000' \
+    'x_followups=1' \
+    'x_platform=discord' \
+    'x_reply_max_chars=1900'
+  printf 'legacy X-linked bytes\n' > "$state/task-x.check.sh"
+  snap_before=$(cat "$state/task-x.meta")
+  FM_HOME="$dir/home" "$MIGRATE" > "$dir/migrate.out" 2> "$dir/migrate.err" \
+    || fail "X-linked migration failed"
+  [ "$(cat "$dir/migrate.out")" = 'PR_CHECK_MIGRATION: canonical polls rebuilt and armed; resume supervision for this home' ] \
+    || fail "X-linked migration did not report an armed canonical poll"
+  fm_pr_poll_artifacts_valid "$state" task-x "$POLL" || fail "X-linked migration did not arm a valid pair"
+  snap_after=$(cat "$state/task-x.meta")
+  [ "$snap_after" = "$snap_before" ] || fail "X-linked migration changed task metadata"
 
   dir=$(make_case migration-ambiguous)
   state="$dir/home/state"
