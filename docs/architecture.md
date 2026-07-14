@@ -209,6 +209,14 @@ For preview testing, `FMX_DRY_RUN` makes `fm-x-reply.sh` and `fm-x-dismiss.sh` s
 Attached images are recorded as compact `{media_type, bytes, source_path}` metadata in dry-run instead of base64 bytes.
 X mode remains layered on top of the existing check mechanism without changing its request-handling behavior.
 
+## Local extension points
+
+Firstmate self-updates fast-forward-only, so a local commit on tracked files would block every future update; local extension points are how an operator adds personal automation without forking tracked code.
+An optional executable at `config/hooks/<hook-name>` runs best-effort at one of four lifecycle moments - `post-spawn`, `pr-ready`, `post-merge`, and `post-teardown` - and `bin-local/` holds the personal scripts those thin hooks delegate to.
+Both directories are gitignored and absent by default, and firstmate ships no hooks, so an installation that uses neither sees zero behavior change and the declared hook points stay the only automatic execution surface for local code.
+A hook never gates the flow it fires from: every hook point fires after its own script's work and caller-visible output are complete, and a failing, hanging, or chatty hook is bounded and warned rather than propagated.
+`bin/fm-hooks-lib.sh` is the single shared runner; the [local extension points reference](extension-points.md) owns the hook-point catalog, arguments, environment, failure semantics, and `bin-local/` rules.
+
 ## Project memory belongs to projects
 
 Durable project-intrinsic agent knowledge lives in each project's committed `AGENTS.md`, with `CLAUDE.md` as a symlink.
