@@ -1,336 +1,569 @@
 #!/usr/bin/env bash
-# bin/backends/orca.sh - the Orca terminal session-provider adapter.
+# bin/backends/orca.sh - the Orca terminal session-provider adapter (daemon-direct).
 #
-# Orca owns both the task worktree and the terminal endpoint. Escape key support
-# remains unsupported until Orca exposes a terminal-send primitive for it.
+# P4 replacement: this adapter talks to the Orca terminal daemon directly over its
+# Unix socket via bin/fmod (a small firstmate-owned Python client) instead of
+# shelling out to the `orca` CLI. The CLI could not run while the Orca GUI held
+# the single-instance lock; the daemon is the same transport the GUI itself uses
+# and is reachable regardless of GUI state. Every function in this file keeps
+# its existing signature; only the implementations changed. fm-backend.sh, the
+# spawn script, the peek script, the teardown script, and the watcher's busy
+# detection all see the same adapter contract they saw before, so they did not
+# need to change.
 #
-# Target string shape: the Orca terminal id accepted by `orca terminal ...`.
-
-# Shared composer-content classifier (empty|pending|unknown, and the fleet-wide
-# dead-shell-vs-agent-composer rule). Owned by bin/fm-composer-lib.sh, reused by
-# every backend so the decision cannot drift.
-# shellcheck source=bin/fm-composer-lib.sh
-. "$(dirname -- "${BASH_SOURCE[0]}")/../fm-composer-lib.sh"
+# P5 addendum: orca's UI sidebar hides worktrees whose git-common-dir does not
+# match the orca-registered repo path (firstmate's projects/<repo> copy vs the
+# captain's Desktop/<repo> copy) and gates visibility on the
+# `externalWorktreeVisibility` setting, which defaults to "hide". When the
+# firstmate-owned projects/<repo> clone is not registered with orca, the
+# worktree this adapter creates is "external" and the captain cannot see it in
+# the GUI without manually clicking the "Hiding 1 discovered worktree" line.
+# To bridge that gap at spawn time, fm_backend_orca_worktree_create and
+# fm_backend_orca_remove_worktree now call bin/fm-mod-orca-ui.sh to register the
+# worktree in orca's profile (profiles/local-default/orca-data.json
+# `worktreeMeta`). Known limitation (P5): orca rewrites that file on its own
+# graceful shutdown, so any registration only survives until the next orca
+# restart. That is acceptable for firstmate's lifetime of a single session
+# (the captain is looking at orca right now), but a long-running firstmate
+# that outlasts an orca restart needs a re-registration sweep - tracked as
+# future work.
+#
+# The Orca backend owns both the git worktree path and the terminal endpoint.
+# The worktree is acquired through `git worktree add` (the daemon has no
+# worktree primitive and the broken `orca worktree create` CLI is what drove
+# this rewrite); the terminal is acquired through the daemon's `createOrAttach`
+# RPC. Escape key support remains unsupported because the daemon's write
+# primitive cannot distinguish Escape from any other byte sequence without a
+# key-encoder the daemon does not expose.
+#
+# Target string shape: a stable Orca terminal id of the form `fm-<task-name>`.
+# The id is also the daemon session id, so reattach is automatic.
 
 fm_backend_orca_tool_check() {
-  command -v orca >/dev/null 2>&1 || { echo "error: backend=orca selected but the 'orca' CLI is not installed" >&2; return 1; }
-}
-
-fm_backend_orca_runtime_check() {
-  fm_backend_orca_tool_check || return 1
-  local out
-  out=$(orca status --json 2>/dev/null) || {
-    echo "error: backend=orca selected but 'orca status --json' failed; start Orca and wait for the runtime to be ready" >&2
+  local here_self here_dir bundled_fmod path_fmod
+  if ! command -v python3 >/dev/null 2>&1; then
+    echo "error: backend=orca selected but 'python3' is not installed" >&2
     return 1
-  }
-  # shellcheck disable=SC2016  # Single quotes are deliberate: ${...} belongs to the Node snippet.
-  printf '%s' "$out" | node -e '
-const fs = require("fs");
-let data;
-try {
-  data = JSON.parse(fs.readFileSync(0, "utf8"));
-} catch (err) {
-  console.error("error: invalid Orca status JSON: " + err.message);
-  process.exit(1);
-}
-if (data.ok === false) {
-  const msg = data.error && (data.error.message || data.error.code);
-  console.error("error: Orca runtime is not ready" + (msg ? ": " + msg : ""));
-  process.exit(1);
-}
-const r = data.result || {};
-const runtime = r.runtime || {};
-const reachable = runtime.reachable ?? r.runtimeReachable;
-const state = runtime.state || r.runtimeState || "";
-if (reachable === true && state === "ready") process.exit(0);
-console.error(`error: backend=orca requires a ready Orca runtime (reachable=${String(reachable)}, state=${state || "unknown"})`);
-process.exit(1);
-'
-}
+  fi
 
-fm_backend_orca_json_get() {  # <field> ; fields: worktree-id worktree-path terminal-handle worktree-terminal-handle repo-id
-  # Terminal handles are accepted only from verified terminal result shapes:
-  # result.terminal or a root terminal object with .handle. Undocumented
-  # result.id and result.worktree.terminal shapes are ignored until a real Orca
-  # smoke run proves them.
-  local field=$1
-  node -e '
-const fs = require("fs");
-const field = process.argv[1];
-const data = JSON.parse(fs.readFileSync(0, "utf8"));
-if (data.ok === false) {
-  const msg = data.error && (data.error.message || data.error.code);
-  if (msg) console.error(msg);
-  process.exit(2);
-}
-const r = data.result || {};
-const wt = r.worktree || r.item || r;
-const explicitTerm = r.terminal || null;
-const repo = r.repo || r.repository || r;
-function scalar(v) {
-  return (typeof v === "string" || typeof v === "number") ? String(v) : "";
-}
-function handle(obj) {
-  if (!obj) return "";
-  if (typeof obj === "string" || typeof obj === "number") return String(obj);
-  return scalar(obj.handle) || "";
-}
-let v = "";
-if (field === "worktree-id") v = wt.id || wt.worktreeId || r.worktreeId || "";
-if (field === "worktree-path") v = wt.path || (wt.git && wt.git.path) || r.path || "";
-if (field === "terminal-handle") v = handle(explicitTerm || r) || "";
-if (field === "worktree-terminal-handle") v = handle(explicitTerm) || "";
-if (field === "repo-id") v = repo.id || repo.repoId || r.repoId || "";
-if (!v) process.exit(1);
-process.stdout.write(String(v));
-' "$field"
-}
+  if [ -n "${FM_ORCA_FMOD:-}" ]; then
+    if [ -x "$FM_ORCA_FMOD" ]; then
+      FM_BACKEND_ORCA_FMOD=$FM_ORCA_FMOD
+      return 0
+    fi
+    echo "error: backend=orca selected but FM_ORCA_FMOD is not executable: $FM_ORCA_FMOD" >&2
+    return 1
+  fi
 
-fm_backend_orca_json_ok() {
-  node -e '
-const fs = require("fs");
-const input = fs.readFileSync(0, "utf8").trim();
-if (!input) process.exit(0);
-let data;
-try {
-  data = JSON.parse(input);
-} catch (err) {
-  console.error("invalid Orca JSON: " + err.message);
-  process.exit(2);
-}
-if (data.ok === false) {
-  const msg = data.error && (data.error.message || data.error.code);
-  if (msg) console.error(msg);
-  process.exit(2);
-}
-'
-}
-
-fm_backend_orca_run_json() {
-  local out
-  out=$("$@") || return 1
-  printf '%s' "$out" | fm_backend_orca_json_ok
-}
-
-fm_backend_orca_repo_ensure() {  # <project-path>
-  local project=$1 out repo_id
-  fm_backend_orca_tool_check || return 1
-  out=$(orca repo show --repo "path:$project" --json 2>/dev/null || true)
-  if repo_id=$(printf '%s' "$out" | fm_backend_orca_json_get repo-id 2>/dev/null); then
-    printf '%s' "$repo_id"
+  here_self="${BASH_SOURCE[0]:-$0}"
+  here_dir=$(cd "$(dirname "$here_self")" && pwd)
+  bundled_fmod="$here_dir/../fmod"
+  if [ -x "$bundled_fmod" ]; then
+    FM_BACKEND_ORCA_FMOD=$bundled_fmod
     return 0
   fi
-  out=$(orca repo add --path "$project" --json) || return 1
-  repo_id=$(printf '%s' "$out" | fm_backend_orca_json_get repo-id) || {
-    echo "error: orca repo add did not return a repo id for $project" >&2
-    return 1
-  }
-  printf '%s' "$repo_id"
+
+  path_fmod=$(type -P fmod 2>/dev/null || true)
+  if [ -n "$path_fmod" ]; then
+    FM_BACKEND_ORCA_FMOD=$path_fmod
+    return 0
+  fi
+
+  echo "error: backend=orca selected but 'fmod' is not installed (tried $bundled_fmod and PATH)" >&2
+  return 1
 }
 
-fm_backend_orca_worktree_create() {  # <project-path> <name>
-  local project=$1 name=$2 repo_id out wt_id wt_path terminal
-  repo_id=$(fm_backend_orca_repo_ensure "$project") || return 1
-  out=$(orca worktree create --repo "id:$repo_id" --name "$name" --no-parent --setup skip --json) || return 1
-  wt_id=$(printf '%s' "$out" | fm_backend_orca_json_get worktree-id) || {
-    echo "error: orca worktree create did not return a worktree id for $name" >&2
+fmod() {
+  if [ -z "${FM_BACKEND_ORCA_FMOD:-}" ]; then
+    fm_backend_orca_tool_check || return 1
+  fi
+  "$FM_BACKEND_ORCA_FMOD" "$@"
+}
+
+# fm_backend_orca_runtime_check: verify the orca daemon is reachable and answers
+# a ping. Replaces the old `orca status --json` check that died whenever the
+# Orca GUI held the single-instance lock.
+fm_backend_orca_runtime_check() {
+  fm_backend_orca_tool_check || return 1
+  local info
+  if ! info=$(fmod info 2>/dev/null); then
+    echo "error: backend=orca selected but 'fmod info' failed; is the orca daemon running?" >&2
     return 1
-  }
-  terminal=$(printf '%s' "$out" | fm_backend_orca_json_get worktree-terminal-handle 2>/dev/null || true)
-  wt_path=$(printf '%s' "$out" | fm_backend_orca_json_get worktree-path) || {
-    echo "error: orca worktree create did not return a path for $name" >&2
-    [ -z "$terminal" ] || fm_backend_orca_kill "$terminal" >/dev/null 2>&1 || true
-    if fm_backend_orca_remove_worktree "$wt_id" >/dev/null; then
+  fi
+  if ! printf '%s' "$info" | python3 -c 'import json,sys; sys.exit(0 if json.load(sys.stdin).get("daemon_reachable") is True else 1)' 2>/dev/null; then
+    echo "error: backend=orca selected but the orca daemon is not reachable (fmod info said: $info)" >&2
+    return 1
+  fi
+}
+
+# fm_backend_orca_session_id_of <window-name>: the deterministic session
+# id we use for both daemon-side createOrAttach and our later write/snapshot/
+# kill calls. fm-spawn always passes the window name in the canonical
+# `fm-<id>` form (see fm-spawn.sh line 659: `W="fm-$ID"`); we use it
+# verbatim as the session id so the orca GUI shows the same identifier
+# firstmate's meta records. Re-prefixing here produced `fm-fm-...` for
+# every task and broke the symmetry between meta and fmod list output.
+fm_backend_orca_session_id_of() {  # <window-name>
+  printf '%s' "$1"
+}
+
+fm_backend_orca_worktree_dir() {  # <project-path> <name>
+  local project=$1 name=$2 project_parent project_name home_guess state_root
+  project_parent=$(dirname "$project")
+  project_name=$(basename "$project")
+  state_root="${FM_STATE_OVERRIDE:-${STATE:-}}"
+  if [ -z "$state_root" ]; then
+    if [ "$(basename "$project_parent")" = projects ]; then
+      home_guess=$(dirname "$project_parent")
+    else
+      home_guess=$project_parent
+    fi
+    state_root="$home_guess/state"
+  fi
+  printf '%s/orca-worktrees/%s/%s' "$state_root" "$project_name" "$name"
+}
+
+# fm_backend_orca_create_terminal <session-id> <cwd> <title>: createOrAttach
+# via fmod. Returns 0 on success; non-zero on any daemon-side error. Always
+# passes --shell-ready so the daemon's shell-ready barrier (bash/zsh rcfile
+# load) blocks until the prompt is actually visible, which keeps the post-
+# create `treehouse get` race out of the harness path. Note: the orca backend
+# does NOT run `treehouse get` - the worktree IS the project - so this only
+# protects against a `command` injected at create time (currently unused).
+fm_backend_orca_create_terminal() {  # <session-id> <cwd> <title>
+  local session_id=$1 cwd=$2 title=$3 actual_cwd expected_cwd
+  fm_backend_orca_tool_check || return 1
+  fmod create "$session_id" --cwd "$cwd" --cols 200 --rows 50 --shell-ready >/dev/null || return 1
+  actual_cwd=$(fmod get-cwd "$session_id") || return 1
+  # Compare on the canonical shell-resolved form so symlinked worktrees (e.g.
+  # under FM_HOME/FM_STATE_OVERRIDE where the captain points FM_HOME at a
+  # symlinked tree) do not false-positive. fmod get-cwd canonicalizes its
+  # returned path; we mirror that here with `readlink -f`. The trailing-slash
+  # rstrip is preserved because fmod historically returned paths with one.
+  expected_cwd=$(readlink -f -- "$cwd" 2>/dev/null || printf '%s' "$cwd")
+  if [ "${actual_cwd%/}" != "${expected_cwd%/}" ]; then
+    echo "error: orca session $session_id attached at $actual_cwd, expected $expected_cwd (resolved from $cwd)" >&2
+    fmod kill "$session_id" --immediate >/dev/null 2>&1 || true
+    return 1
+  fi
+  # Return the session id on stdout so callers using $(...) capture it.
+  printf '%s' "$session_id"
+}
+
+# fm_backend_orca_worktree_create: see header. Returns TAB-separated
+#   <wt-id>\t<wt-path>[\t<terminal>]
+# where wt-id and wt-path are the same string (git's worktree identity IS its
+# path). Exit 0 on success; exit 1 on any failure after which the caller
+# bails; never exit 2 (the old CLI returned 2 to signal "worktree failed but
+# terminal created, please clean up" - that path is gone because the daemon
+# createOrAttach is atomic).
+fm_backend_orca_worktree_create() {  # <project-path> <name>
+  local project=$1 name=$2 wt_path session_id create_out actual_cwd branch start_head current_head add_err
+
+  fm_backend_orca_tool_check || return 1
+
+  if ! git -C "$project" rev-parse --git-dir >/dev/null 2>&1; then
+    echo "error: backend=orca requires $project to be a git repo (orca owns worktrees)" >&2
+    return 1
+  fi
+
+  wt_path=$(fm_backend_orca_worktree_dir "$project" "$name")
+  branch="fm/$name"
+  if [ -e "$wt_path" ]; then
+    echo "error: orca backend refused to create $wt_path: already exists" >&2
+    return 1
+  fi
+  mkdir -p "$(dirname "$wt_path")" || { echo "error: cannot create $(dirname "$wt_path")" >&2; return 1; }
+
+  # git worktree add with a fresh fm/<name> branch off the project's HEAD.
+  # --detach would leave the branch in place without checking it out; we want
+  # the branch so the crewmate commits land on something addressable.
+  # stdout is silenced - git prints "HEAD is now at ..." to stdout on success,
+  # which would corrupt the TAB-separated adapter contract on stdout.
+  start_head=$(git -C "$project" rev-parse HEAD) || { echo "error: cannot resolve HEAD for $project" >&2; return 1; }
+  add_err=$(mktemp "${TMPDIR:-/tmp}/fm-orca-wt.XXXXXX") || { echo "error: cannot create temporary file for git worktree diagnostics" >&2; return 1; }
+  if ! git -C "$project" worktree add -b "$branch" "$wt_path" HEAD >/dev/null 2>"$add_err"; then
+    echo "error: git worktree add failed for $wt_path:" >&2
+    cat "$add_err" >&2
+    rm -f "$add_err"
+    return 1
+  fi
+  rm -f "$add_err"
+
+  session_id=$(fm_backend_orca_session_id_of "$name")
+  if ! create_out=$(fmod create "$session_id" --cwd "$wt_path" --cols 200 --rows 50 --shell-ready 2>&1); then
+    echo "error: fmod create failed for $session_id at $wt_path:" >&2
+    printf '%s\n' "$create_out" >&2
+    git -C "$project" worktree remove --force "$wt_path" 2>/dev/null || true
+    current_head=$(git -C "$project" rev-parse --verify "$branch" 2>/dev/null || true)
+    if [ "$current_head" = "$start_head" ]; then
+      git -C "$project" branch -D "$branch" >/dev/null 2>&1 || true
+    fi
+    return 1
+  fi
+  if ! actual_cwd=$(fmod get-cwd "$session_id" 2>&1); then
+    echo "error: fmod get-cwd failed for $session_id after create:" >&2
+    printf '%s\n' "$actual_cwd" >&2
+    fmod kill "$session_id" --immediate >/dev/null 2>&1 || true
+    git -C "$project" worktree remove --force "$wt_path" 2>/dev/null || true
+    current_head=$(git -C "$project" rev-parse --verify "$branch" 2>/dev/null || true)
+    if [ "$current_head" = "$start_head" ]; then
+      git -C "$project" branch -D "$branch" >/dev/null 2>&1 || true
+    fi
+    return 1
+  fi
+  if [ "${actual_cwd%/}" != "${wt_path%/}" ]; then
+    fmod kill "$session_id" --immediate >/dev/null 2>&1 || true
+    if ! create_out=$(fmod create "$session_id" --cwd "$wt_path" --cols 200 --rows 50 --shell-ready 2>&1); then
+      echo "error: fmod recreate failed for $session_id at $wt_path after stale attach at $actual_cwd:" >&2
+      printf '%s\n' "$create_out" >&2
+      git -C "$project" worktree remove --force "$wt_path" 2>/dev/null || true
+      current_head=$(git -C "$project" rev-parse --verify "$branch" 2>/dev/null || true)
+      if [ "$current_head" = "$start_head" ]; then
+        git -C "$project" branch -D "$branch" >/dev/null 2>&1 || true
+      fi
       return 1
     fi
-    if [ -n "$terminal" ]; then
-      printf '%s\t\t%s' "$wt_id" "$terminal"
-    else
-      printf '%s\t' "$wt_id"
+    if ! actual_cwd=$(fmod get-cwd "$session_id" 2>&1); then
+      echo "error: fmod get-cwd failed for $session_id after recreate:" >&2
+      printf '%s\n' "$actual_cwd" >&2
+      fmod kill "$session_id" --immediate >/dev/null 2>&1 || true
+      git -C "$project" worktree remove --force "$wt_path" 2>/dev/null || true
+      current_head=$(git -C "$project" rev-parse --verify "$branch" 2>/dev/null || true)
+      if [ "$current_head" = "$start_head" ]; then
+        git -C "$project" branch -D "$branch" >/dev/null 2>&1 || true
+      fi
+      return 1
     fi
-    return 2
-  }
-  printf '%s\t%s' "$wt_id" "$wt_path"
-  [ -z "$terminal" ] || printf '\t%s' "$terminal"
-}
-
-fm_backend_orca_terminal_create() {  # <worktree-id> <title>
-  local worktree_id=$1 title=$2 out terminal
-  fm_backend_orca_tool_check || return 1
-  out=$(orca terminal create --worktree "id:$worktree_id" --title "$title" --json) || return 1
-  terminal=$(printf '%s' "$out" | fm_backend_orca_json_get terminal-handle) || {
-    echo "error: orca terminal create did not return a terminal handle for $title" >&2
-    return 1
-  }
-  printf '%s' "$terminal"
-}
-
-fm_backend_orca_send_text_line() {  # <terminal-id> <text>
-  local terminal=$1 text=$2
-  fm_backend_orca_tool_check || return 1
-  fm_backend_orca_run_json orca terminal send --terminal "$terminal" --text "$text" --enter --json
-}
-
-fm_backend_orca_send_literal() {  # <terminal-id> <text>
-  local terminal=$1 text=$2
-  fm_backend_orca_tool_check || return 1
-  fm_backend_orca_run_json orca terminal send --terminal "$terminal" --text "$text" --json
-}
-
-fm_backend_orca_remove_worktree() {  # <worktree-id>
-  local worktree_id=${1:-}
-  [ -n "$worktree_id" ] || { echo "error: missing Orca worktree id; cannot remove worktree" >&2; return 1; }
-  fm_backend_orca_tool_check || return 1
-  fm_backend_orca_run_json orca worktree rm --worktree "id:$worktree_id" --force --json
-}
-
-fm_backend_orca_worktree_path() {
-  local worktree_id=${1:-} out path
-  [ -n "$worktree_id" ] || { echo "error: missing Orca worktree id; cannot resolve worktree path" >&2; return 1; }
-  fm_backend_orca_tool_check || return 1
-  out=$(orca worktree show --worktree "id:$worktree_id" --json) || return 1
-  path=$(printf '%s' "$out" | fm_backend_orca_json_get worktree-path) || {
-    echo "error: orca worktree show did not return a path for $worktree_id" >&2
-    return 1
-  }
-  printf '%s' "$path"
-}
-
-fm_backend_orca_capture() {  # <terminal-id> <lines>
-  local terminal=$1 lines=${2:-40} out
-  fm_backend_orca_tool_check || return 1
-  out=$(orca terminal read --terminal "$terminal" --limit "$lines" --json) || return 1
-  fm_backend_orca_json_text "$out"
-}
-
-fm_backend_orca_json_text() {  # <json>
-  printf '%s' "$1" | node -e '
-const fs = require("fs");
-const data = JSON.parse(fs.readFileSync(0, "utf8"));
-if (data.ok === false) {
-  const msg = data.error && (data.error.message || data.error.code);
-  if (msg) console.error(msg);
-  process.exit(2);
-}
-const r = data.result || {};
-if (r.terminal && Array.isArray(r.terminal.tail)) {
-  process.stdout.write(r.terminal.tail.join("\n"));
-} else if (Array.isArray(r.tail)) {
-  process.stdout.write(r.tail.join("\n"));
-} else {
-  process.stdout.write(r.text || r.output || r.content || r.preview || "");
-}
-'
-}
-
-fm_backend_orca_json_field() {  # <field> <json>
-  local field=$1
-  printf '%s' "$2" | node -e '
-const fs = require("fs");
-const field = process.argv[1];
-const data = JSON.parse(fs.readFileSync(0, "utf8"));
-if (data.ok === false) process.exit(2);
-const r = data.result || {};
-const term = r.terminal || {};
-function scalar(v) {
-  return (typeof v === "string" || typeof v === "number" || typeof v === "boolean") ? String(v) : "";
-}
-let v = "";
-if (field === "limited") v = scalar(r.limited ?? term.limited);
-if (field === "oldestCursor") v = scalar(r.oldestCursor || term.oldestCursor);
-if (field === "nextCursor") v = scalar(r.nextCursor || term.nextCursor);
-if (field === "latestCursor") v = scalar(r.latestCursor || term.latestCursor);
-if (!v) process.exit(1);
-process.stdout.write(v);
-' "$field"
-}
-
-fm_backend_orca_read_text_paged() {  # <terminal-id> <limit>
-  local terminal=$1 limit=${2:-200} out limited oldest cursor_out text older_text
-  fm_backend_orca_tool_check || return 1
-  out=$(orca terminal read --terminal "$terminal" --limit "$limit" --json) || return 1
-  printf '%s' "$out" | fm_backend_orca_json_ok || return 1
-  text=$(fm_backend_orca_json_text "$out") || return 1
-  limited=$(fm_backend_orca_json_field limited "$out" 2>/dev/null || true)
-  oldest=$(fm_backend_orca_json_field oldestCursor "$out" 2>/dev/null || true)
-  if [ "$limited" = true ] && [ -n "$oldest" ]; then
-    cursor_out=$(orca terminal read --terminal "$terminal" --cursor "$oldest" --limit "$limit" --json) || return 1
-    printf '%s' "$cursor_out" | fm_backend_orca_json_ok || return 1
-    older_text=$(fm_backend_orca_json_text "$cursor_out") || return 1
-    text="${older_text}"$'\n'"${text}"
+    if [ "${actual_cwd%/}" != "${wt_path%/}" ]; then
+      echo "error: orca session $session_id attached at $actual_cwd, expected $wt_path" >&2
+      fmod kill "$session_id" --immediate >/dev/null 2>&1 || true
+      git -C "$project" worktree remove --force "$wt_path" 2>/dev/null || true
+      current_head=$(git -C "$project" rev-parse --verify "$branch" 2>/dev/null || true)
+      if [ "$current_head" = "$start_head" ]; then
+        git -C "$project" branch -D "$branch" >/dev/null 2>&1 || true
+      fi
+      return 1
+    fi
   fi
-  printf '%s' "$text"
+
+  # Stash the session id in the worktree so remove can find the terminal.
+  printf '%s\n' "$session_id" > "$wt_path/.fm-orca-session"
+
+  # P5: register the worktree in orca's profile so it appears in the sidebar
+  # for the current orca session. Pass the original project path (not the
+  # worktree's git-common-dir) because firstmate's projects/ copy and the
+  # captain's Desktop copy are sibling clones and only one has an orca
+  # session; orca's UI follows the parent project's session id, not the
+  # worktree's git topology. fm-mod-orca-ui.sh resolves the orca-registered
+  # path via fmod list. Best-effort: registration failure does not block the
+  # spawn, only the sidebar visibility, but the captain should know when
+  # the spawn succeeds without orca showing the new session.
+  if [ -n "$project" ] && [ -d "$project" ] && [ -n "${FM_ROOT:-}" ] && [ -x "${FM_ROOT}/bin/fm-mod-orca-ui.sh" ]; then
+    if "$FM_ROOT/bin/fm-mod-orca-ui.sh" register "$wt_path" --parent-path "$project" \
+        >"$wt_path/.fm-orca-ui-key" 2>/dev/null; then
+      :
+    else
+      rc=$?
+      rm -f "$wt_path/.fm-orca-ui-key"
+      # stderr line so firstmate / the captain can see the spawn succeeded
+      # without orca surfacing the session. The full fix path lives in
+      # docs/orca-backend.md; until then, a one-line warning on stderr is
+      # the best visibility we can offer without breaking the spawn.
+      printf 'warn: orca UI sidebar registration failed for %s (rc=%d); the spawned worktree will appear as "Hiding 1 discovered worktree" in orca until the registration is reapplied\n' \
+        "$wt_path" "$rc" >&2
+    fi
+  fi
+
+  # Adapter contract: TAB-separated wt_id \t wt_path [\t terminal].
+  printf '%s\t%s\t%s' "$wt_path" "$wt_path" "$session_id"
+}
+
+# fm_backend_orca_terminal_create: spawn a terminal at an EXISTING worktree.
+# Used when the worktree was created by some other path (e.g. a manual `git
+# worktree add`) and the caller wants an orca endpoint there. Keeps the old
+# signature so fm-spawn's fallback path keeps working unchanged.
+fm_backend_orca_terminal_create() {  # <wt-id> <title>
+  local wt_id=$1 title=$2 cwd session_id
+  cwd=$wt_id
+  session_id=$(fm_backend_orca_session_id_of "$title")
+  if ! fm_backend_orca_create_terminal "$session_id" "$cwd" "$title"; then
+    echo "error: orca backend failed to create terminal $session_id at $cwd" >&2
+    return 1
+  fi
+  printf '%s' "$session_id"
+}
+
+# fm_backend_orca_send_text_line <terminal> <text>: type <text> and submit.
+# The terminal is the orca session id (`fm-<name>`); we resolve it through
+# fmod's write RPC with a trailing newline (the daemon's createOrAttach
+# doesn't add a final \n to injected commands, so we own that boundary).
+# NOTE: $'\n' is bash ANSI-C quoting; "$2\n" is the literal 2-char sequence
+# `\` + `n`, which is the bug we just fixed. Do not "simplify" this back.
+fm_backend_orca_send_text_line() {  # <terminal> <text>
+  fm_backend_orca_tool_check || return 1
+  fmod write "$1" --data "$2"$'\n' >/dev/null
+}
+
+# fm_backend_orca_send_literal <terminal> <text>: same path, no Enter. Used for
+# the literal launch-command send; the caller sends Enter separately.
+fm_backend_orca_send_literal() {  # <terminal> <text>
+  fm_backend_orca_tool_check || return 1
+  fmod write "$1" --data "$2" >/dev/null
+}
+
+# fm_backend_orca_remove_worktree <wt-id>: tear down both the worktree and its
+# terminal. Worktree-first is intentional: removing the worktree fails fast if
+# the path doesn't exist or has unique commits, so we can no-op the terminal
+# kill cleanly. Terminal kill is best-effort.
+fm_backend_orca_remove_worktree() {  # <wt-id>
+  local wt_path=${1:-} session_id main_repo gitdir_line git_common_dir branch project_name bucket state_dir home_guess
+  [ -n "$wt_path" ] || { echo "error: missing Orca worktree id; cannot remove worktree" >&2; return 1; }
+  fm_backend_orca_tool_check || return 1
+
+  branch=$(git -C "$wt_path" rev-parse --abbrev-ref HEAD 2>/dev/null || true)
+  if [ -z "$branch" ] || [ "$branch" = HEAD ]; then
+    branch="fm/$(basename "$wt_path")"
+  fi
+  if [ -f "$wt_path/.fm-orca-session" ]; then
+    session_id=$(cat "$wt_path/.fm-orca-session")
+  else
+    # Fall back to deriving the session id from basename. fm-spawn always
+    # names worktrees `fm-<id>`, so basename yields the canonical session id
+    # directly. Used only when the marker file is missing (legacy CLI
+    # worktree, or a marker delete race).
+    session_id="$(basename "$wt_path")"
+  fi
+  # git worktrees carry their main-repo pointer in `<wt>/.git` (a file, not
+  # a directory). Parse it; without that file we cannot find the main repo
+  # from the worktree path alone.
+  main_repo=
+  if [ -f "$wt_path/.git" ]; then
+    gitdir_line=$(cat "$wt_path/.git" 2>/dev/null || true)
+    main_repo=$(printf '%s\n' "$gitdir_line" | sed -n 's|^gitdir: \(.*\)/.git/worktrees/[^/]*$|\1|p' | head -1)
+  fi
+  if [ -z "$main_repo" ]; then
+    git_common_dir=$(git -C "$wt_path" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)
+    if [ -n "$git_common_dir" ]; then
+      main_repo=$(dirname "$git_common_dir")
+    fi
+  fi
+  if [ -z "$main_repo" ]; then
+    project_name=$(basename "$(dirname "$wt_path")")
+    bucket=$(dirname "$(dirname "$wt_path")")
+    state_dir=$(dirname "$bucket")
+    home_guess=$(dirname "$state_dir")
+    if git -C "$home_guess/projects/$project_name" rev-parse --git-dir >/dev/null 2>&1; then
+      main_repo="$home_guess/projects/$project_name"
+    elif git -C "$home_guess/$project_name" rev-parse --git-dir >/dev/null 2>&1; then
+      main_repo="$home_guess/$project_name"
+    fi
+  fi
+  # P5: capture the orca worktreeMeta key BEFORE removing the worktree, since
+  # the key file lives inside $wt_path and disappears with `git worktree
+  # remove --force`. Reading it first keeps the unregister call on the
+  # happy-path teardown (the previous placement AFTER the remove silently
+  # never ran).
+  local ui_key=""
+  if [ -f "$wt_path/.fm-orca-ui-key" ]; then
+    ui_key=$(cat "$wt_path/.fm-orca-ui-key")
+  fi
+  if [ -n "$main_repo" ] && [ -d "$main_repo" ]; then
+    git -C "$main_repo" worktree remove --force "$wt_path" || return 1
+    case "$branch" in
+      fm/*) git -C "$main_repo" branch -D -- "$branch" >/dev/null 2>&1 || true ;;
+    esac
+    fmod kill "$session_id" >/dev/null 2>&1 || true
+    # P5: best-effort unregister from orca's profile, matching the register
+    # call in fm_backend_orca_worktree_create. Tolerate a missing key file
+    # (older worktrees created before P5) and a missing tool (tests).
+    if [ -n "$ui_key" ] && [ -n "${FM_ROOT:-}" ] && [ -x "${FM_ROOT}/bin/fm-mod-orca-ui.sh" ]; then
+      "$FM_ROOT/bin/fm-mod-orca-ui.sh" unregister "$ui_key" \
+        >/dev/null 2>&1 || true
+    fi
+    return 0
+  fi
+  git -C "$wt_path" worktree remove --force "$wt_path" || return 1
+  fmod kill "$session_id" >/dev/null 2>&1 || true
+  # P5: best-effort unregister (see matching register call above).
+  if [ -n "$ui_key" ] && [ -n "${FM_ROOT:-}" ] && [ -x "${FM_ROOT}/bin/fm-mod-orca-ui.sh" ]; then
+    "$FM_ROOT/bin/fm-mod-orca-ui.sh" unregister "$ui_key" \
+      >/dev/null 2>&1 || true
+  fi
+}
+
+# fm_backend_orca_worktree_path <wt-id>: the worktree IS its path. Kept for
+# parity with the old CLI's resolver.
+fm_backend_orca_worktree_path() {
+  local wt_id=${1:-}
+  [ -n "$wt_id" ] || { echo "error: missing Orca worktree id; cannot resolve worktree path" >&2; return 1; }
+  printf '%s' "$wt_id"
+}
+
+# fm_backend_orca_kill <terminal>: best-effort terminal kill; teardown already
+# removes the worktree, so this is for cases where the worktree stays but the
+# terminal should be torn down (currently unused but kept for parity).
+fm_backend_orca_kill() {  # <terminal-id>
+  fm_backend_orca_tool_check || return 0
+  fmod kill "$1" >/dev/null 2>&1 || true
+}
+
+# fm_backend_orca_current_path <terminal>: live cwd via the daemon's getCwd
+# RPC. Mirrors fm-tmux's pane-current-path read.
+fm_backend_orca_current_path() {  # <terminal>
+  fm_backend_orca_tool_check || return 1
+  fmod get-cwd "$1"
+}
+
+# fm_backend_orca_capture <terminal> <lines>: peek the latest snapshot, ANSI
+# stripped, truncated to last N non-empty lines. Mirrors tmux's
+# `capture-pane -p -S -N`.
+fm_backend_orca_capture() {  # <terminal-id> <lines>
+  local terminal=$1 lines=${2:-40}
+  fm_backend_orca_tool_check || return 1
+  fmod snapshot "$terminal" --strip-ansi --lines "$lines"
+}
+
+# fm_backend_orca_send_key <terminal> <key>: Enter or C-c only (the only keys
+# firstmate's harness layer actually uses).
+# NOTE: $'\n' and $'\003' are bash ANSI-C escapes. $(printf '\n') would
+# strip the trailing newline (bash command-substitution rule); do not switch
+# to printf in a subshell here.
+fm_backend_orca_send_key() {  # <terminal-id> <key>
+  fm_backend_orca_tool_check || return 1
+  case "$2" in
+    C-c|ctrl+c|Ctrl-c|Ctrl-C)
+      fmod write "$1" --data $'\003' >/dev/null
+      ;;
+    Enter|enter)
+      fmod write "$1" --data $'\n' >/dev/null
+      ;;
+    *)
+      echo "error: unsupported Orca key '$2'" >&2
+      return 1
+      ;;
+  esac
 }
 
 FM_BACKEND_ORCA_COMPOSER_LINES=${FM_BACKEND_ORCA_COMPOSER_LINES:-200}
-FM_BACKEND_ORCA_IDLE_RE=${FM_BACKEND_ORCA_IDLE_RE:-'^Type a message\.\.\.$'}
+FM_BACKEND_ORCA_IDLE_RE=${FM_BACKEND_ORCA_IDLE_RE:-'^(Type a message\.\.\.|Ask anything\.\.\..*|Type a message….*)$'}
 
-# fm_backend_orca_composer_state: classify the composer's own bordered row as
-# empty|pending|unknown. Real text stays pending, including a slash-command
-# popup that closed by filling an argument-hint placeholder into the composer;
-# that first Enter selected the popup item, it did not submit the command.
+# fm_backend_orca_composer_state <terminal>: classify the composer's bordered
+# row as empty|pending|unknown. Mirrors the old CLI version: read the last
+# FM_BACKEND_ORCA_COMPOSER_LINES lines, find the bordered row, strip borders,
+# decide.
+#
+# Two bordered-row shapes are supported:
+#   1. Full box (claude/codex/pi style): both leading AND trailing vertical,
+#      e.g. "│ > hello cap │", "┃ > hi ┃", "| > hi |".
+#   2. Left-only border (opencode style): just a leading vertical, e.g.
+#      "┃  hello world", "┃  Ask anything...". The matching bottom border
+#      renders as "╹▀▀▀..." rather than a closing vertical.
+# We accept either; rows starting with the horizontal-border markers "╹",
+# "▀", "═", "─", "╼", "╾" are explicitly skipped so the bottom of the
+# opencode composer is never mistaken for a content row.
 fm_backend_orca_composer_state() {  # <terminal-id> -> empty|pending|unknown
-  local terminal=$1 cap line trimmed stripped="" found=0
-  cap=$(fm_backend_orca_read_text_paged "$terminal" "$FM_BACKEND_ORCA_COMPOSER_LINES") || { printf 'unknown'; return 0; }
+  local terminal=$1 cap line trimmed stripped="" found=0 empty_bordered="__fm_orca_empty_bordered__"
+  fm_backend_orca_tool_check || { printf 'unknown'; return 0; }
+  cap=$(fmod snapshot "$terminal" --strip-ansi --lines "$FM_BACKEND_ORCA_COMPOSER_LINES" 2>/dev/null) || { printf 'unknown'; return 0; }
+  # Pass 1: collect bordered content rows so we can pick the right one.
+  # In opencode's TUI, the bottom region contains TWO bordered content rows:
+  # the actual composer ("┃  hello world") and a footer line ("┃  Build ·
+  # ...") sitting above the ╹▀▀▀... underline. The composer is the bordered
+  # content row whose IMMEDIATE NEXT LINE is also bordered (i.e. not the
+  # horizontal underline that follows the footer). The legacy claude/codex
+  # shape has only one bordered content row, which trivially satisfies
+  # this rule.
+  local -a bordered=()
+  local inside=""
   while IFS= read -r line; do
     trimmed="${line#"${line%%[![:space:]]*}"}"
     trimmed="${trimmed%"${trimmed##*[![:space:]]}"}"
-    [ -n "$trimmed" ] || continue
-    case "$trimmed" in
-      '│'*'│'|'┃'*'┃'|'|'*'|') : ;;
-      *) continue ;;
+    [ -n "$trimmed" ] || { bordered+=(""); continue; }
+    case "${trimmed:0:1}" in
+      '╹'|'▀'|'═'|'─'|'╼'|'╾'|'╭'|'╮'|'╰'|'╯') bordered+=(""); continue ;;
     esac
-    stripped=$trimmed
-    found=1
-  done < <(printf '%s\n' "$cap")
+    case "$trimmed" in
+      '│'*'│'|'┃'*'┃'|'|'*'|')
+        inside=$trimmed
+        inside=${inside//│/}; inside=${inside//┃/}; inside=${inside//|/}
+        inside="${inside#"${inside%%[![:space:]]*}"}"
+        inside="${inside%"${inside##*[![:space:]]}"}"
+        if [ -n "$inside" ]; then bordered+=("$trimmed"); else bordered+=("$empty_bordered"); fi
+        ;;
+      '│'*|'┃'*)
+        inside=$trimmed
+        inside=${inside//│/}; inside=${inside//┃/}; inside=${inside//|/}
+        inside="${inside#"${inside%%[![:space:]]*}"}"
+        inside="${inside%"${inside##*[![:space:]]}"}"
+        if [ -n "$inside" ]; then bordered+=("$trimmed"); else bordered+=("$empty_bordered"); fi
+        ;;
+      *) bordered+=("") ;;
+    esac
+  done <<< "$cap"
+  local i n=${#bordered[@]}
+  for ((i = n - 1; i >= 0; i--)); do
+    [ -n "${bordered[$i]:-}" ] || continue
+    [ "${bordered[$i]}" != "$empty_bordered" ] || continue
+    # Does the NEXT line also have a bordered content row? If yes, this
+    # is the composer (the line above is also bordered because the box
+    # has decorative empty ┃ rows around the content). If no, the next
+    # line is the underline and this is the footer, so step up.
+    if (( i + 1 < n )) && [ -n "${bordered[$((i + 1))]:-}" ]; then
+      stripped=${bordered[$i]}
+      found=1
+      break
+    fi
+  done
+  # Fallback: if no bordered content row was paired with another, take the
+  # LAST bordered content row we found (legacy single-region shapes).
+  if [ "$found" -eq 1 ]; then
+    :
+  else
+    for ((i = n - 1; i >= 0; i--)); do
+      [ -n "${bordered[$i]:-}" ] || continue
+      [ "${bordered[$i]}" != "$empty_bordered" ] || continue
+      stripped=${bordered[$i]}
+      found=1
+      break
+    done
+  fi
   [ "$found" -eq 1 ] || { printf 'unknown'; return 0; }
   stripped=${stripped//│/}
   stripped=${stripped//┃/}
   stripped=${stripped//|/}
   stripped="${stripped#"${stripped%%[![:space:]]*}"}"
   stripped="${stripped%"${stripped##*[![:space:]]}"}"
-  # A row was found only by the bordered shape above, so content came from a
-  # genuine composer box - delegate to the shared owner with bordered=1. A bare
-  # dead-shell prompt has no bordered row and already returned 'unknown' above.
-  fm_composer_classify_content 1 "$stripped" "$FM_BACKEND_ORCA_IDLE_RE"
-}
-
-fm_backend_orca_send_key() {  # <terminal-id> <key>
-  local terminal=$1 key=$2
-  fm_backend_orca_tool_check || return 1
-  case "$key" in
-    C-c|ctrl+c|Ctrl-c|Ctrl-C)
-      fm_backend_orca_run_json orca terminal send --terminal "$terminal" --interrupt --json
-      ;;
-    Enter|enter)
-      fm_backend_orca_run_json orca terminal send --terminal "$terminal" --text "" --enter --json
-      ;;
-    *)
-      echo "error: unsupported Orca key '$key'" >&2
-      return 1
-      ;;
+  case "$stripped" in
+    '❯'|'>'|'$'|'%'|'#') printf 'empty'; return 0 ;;
   esac
+  case "$stripped" in
+    '❯ '*|'> '*|'$ '*|'% '*|'# '*) stripped=${stripped#??} ;;
+    '❯'*|'>'*|'$'*|'%'*|'#'*) stripped=${stripped#?} ;;
+  esac
+  stripped="${stripped#"${stripped%%[![:space:]]*}"}"
+  stripped="${stripped%"${stripped##*[![:space:]]}"}"
+  [ -n "$stripped" ] || { printf 'empty'; return 0; }
+  if printf '%s' "$stripped" | grep -qE "$FM_BACKEND_ORCA_IDLE_RE"; then
+    printf 'empty'; return 0
+  fi
+  printf 'pending'
 }
 
-# fm_backend_orca_send_text_submit: type <text> once, then retry Enter until
-# the composer row reads empty. Retries send only Enter, so a slash-command
-# popup placeholder fill gets the required second Enter without duplicating text.
-fm_backend_orca_send_text_submit() {  # <terminal-id> <text> <retries> <enter-sleep> <settle>
+# fm_backend_orca_send_text_submit <terminal> <text> <retries> <enter-sleep>
+# <settle>: type once, then retry Enter until composer reads empty. Mirrors
+# fm_tmux_submit_core's contract.
+fm_backend_orca_send_text_submit() {  # <terminal> <text> <retries> <enter-sleep> <settle>
   local terminal=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 i=0 state
   fm_backend_orca_tool_check || { printf 'send-failed'; return 0; }
   fm_backend_orca_send_literal "$terminal" "$text" || { printf 'send-failed'; return 0; }
   sleep "$settle"
   while :; do
-    fm_backend_orca_send_key "$terminal" Enter || true
+    fm_backend_orca_send_key "$terminal" Enter || { printf 'send-failed'; return 0; }
     sleep "$sleep_s"
     state=$(fm_backend_orca_composer_state "$terminal")
     [ "$state" = pending ] || { printf '%s' "$state"; return 0; }
     i=$((i + 1))
     [ "$i" -lt "$retries" ] || { printf 'pending'; return 0; }
   done
-}
-
-fm_backend_orca_kill() {  # <terminal-id>
-  fm_backend_orca_tool_check || return 0
-  orca terminal close --terminal "$1" --json >/dev/null 2>&1 || true
 }

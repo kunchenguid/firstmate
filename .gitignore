@@ -3,7 +3,6 @@ state/
 data/
 .no-mistakes/
 .lavish/
-.fm-secondmate-home
 .DS_Store
 __pycache__/
 *.pyc
@@ -15,4 +14,9 @@ config/backlog-backend
 config/backend
 config/x-mode.env
 config/cmux-socket-password
-config/wedge-alarm
+_orca-wt/
+Skill bundle/
+firstmate/
+
+# Local pi (omp) extensions (deployed from a source clone, not tracked)
+.pi/
