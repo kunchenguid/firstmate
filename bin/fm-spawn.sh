@@ -79,6 +79,10 @@
 # On success prints: spawned <id> harness=<name> kind=<ship|scout|secondmate> mode=<mode> yolo=<on|off> window=<backend-target> worktree=<path>
 # mode/yolo are resolved per-project from data/projects.md for ship/scout tasks;
 # secondmate spawns record mode=secondmate, yolo=off, home=, and projects=.
+# Hooks: after that line, fires the best-effort post-spawn hook point
+# (bin/fm-hooks-lib.sh; docs/extension-points.md) once per launched task, of any
+# kind, including a secondmate respawned by the session-start liveness sweep.
+# Best-effort: a failing hook never fails the spawn.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

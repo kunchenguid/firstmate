@@ -49,6 +49,11 @@
 #   checks, and discards secondmate child work for kind=secondmate. Only use it
 #   when the captain has explicitly said to discard the work.
 #
+# Hooks: after a completed teardown, fires the best-effort post-teardown hook
+# point (bin/fm-hooks-lib.sh; docs/extension-points.md) with the task's id and
+# kind, the only identifiers left once its worktree, endpoint, and state files
+# are gone. Best-effort: a failing hook never fails the teardown.
+#
 # Transient / stale worktree git lock recovery (teardown-lock-race): a crew process
 # killed mid-git-operation can leave a .git/worktrees/<wt>/index.lock (or, for a
 # non-linked worktree, .git/index.lock) that makes `treehouse return --force` fail

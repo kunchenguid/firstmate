@@ -9,6 +9,10 @@
 # auto-approves), and only as a clean fast-forward - it refuses a diverged branch
 # and tells you to have the crewmate rebase. See AGENTS.md prime directives,
 # project management, and task lifecycle.
+#
+# Hooks: fires the best-effort post-merge hook point (bin/fm-hooks-lib.sh;
+# docs/extension-points.md) after a successful merge, with the merged branch as
+# the ref. Best-effort: a failing hook never fails the merge.
 # Usage: fm-merge-local.sh <task-id>
 set -eu
 

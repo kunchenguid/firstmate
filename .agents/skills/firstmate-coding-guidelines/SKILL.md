@@ -81,6 +81,8 @@ Keep instructions as the authority and discovery layer, but make repeated execut
 - Plain dash `-`, never an em dash.
 - Never add an agent name as a commit co-author.
 - `bin/*.sh` and `bin/backends/*.sh` must pass `shellcheck`.
+- Bash 3.2, the interpreter stock macOS ships as `/bin/bash`, is the floor every shipped `bin/` script must parse and run under; a bash 4+ only construct (`coproc`, `read -N`, `declare -A`, `mapfile`, `${var^^}`) is a parse error that kills the script before its first line runs on such a home, and CI and the local suite run bash 5, which parse them happily.
+- `tests/fm-bash32.test.sh` guards that floor: it parses the whole shipped `bin/` surface under a real bash 3.2 when the host has one, and scans for those constructs everywhere else.
 - Run `bin/fm-lint.sh` before treating a script change as done; it is the single owner of the lint definition (file set, config, and pinned shellcheck version) that CI and the no-mistakes pre-push gate both invoke, and it refuses to run under any other shellcheck version.
 - Colocate tests with the existing pattern in `tests/`, name them `<subject>.test.sh`, and extend an existing script rather than inventing a new runner.
 - A backend-verification doc (`docs/*-backend.md`) records empirical facts, not assumptions.
