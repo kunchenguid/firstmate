@@ -382,10 +382,10 @@ diagnostic_obligation_message() {
         MIGRATION_DIAGNOSTIC_MESSAGE="task $prefix: canonical legacy poll rebuilt and armed"
         ;;
       failure-canonical)
-        MIGRATION_DIAGNOSTIC_MESSAGE="task $prefix: canonical poll migration did not complete safely; poll remains unarmed pending private review"
+        MIGRATION_DIAGNOSTIC_MESSAGE="task $prefix: canonical poll migration is incomplete; poll remains unarmed; repair its private artifacts, then rerun bootstrap"
         ;;
       failure-ambiguous)
-        MIGRATION_DIAGNOSTIC_MESSAGE="task $prefix: ambiguous poll migration did not complete safely; poll remains unarmed pending private review"
+        MIGRATION_DIAGNOSTIC_MESSAGE="task $prefix: ambiguous poll migration is incomplete; poll remains unarmed; repair its private artifacts, then rerun bootstrap"
         ;;
       ambiguous)
         MIGRATION_DIAGNOSTIC_MESSAGE="task $prefix: ambiguous or invalid legacy poll quarantined and unarmed"

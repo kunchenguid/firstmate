@@ -1412,6 +1412,67 @@ test_bootstrap_migrates_before_other_mutations() {
   pass "bootstrap runs the non-executing migration at the locked session boundary"
 }
 
+test_bootstrap_isolates_incomplete_poll_migration() {
+  local dir state fakebin fleet_marker rc
+  dir=$(make_case bootstrap-migration-isolation)
+  state="$dir/home/state"
+  fakebin="$dir/fakebin"
+  fleet_marker="$dir/fleet-ran"
+  fm_write_meta "$state/task-a.meta" \
+    'window=fm-task-a' \
+    'pr=https://github.com/o/r/pull/12'
+  printf 'legacy bytes\n' > "$state/task-a.check.sh"
+  mkdir "$state/task-a.pr-poll"
+  fm_write_meta "$state/secondmate-a.meta" \
+    'window=fm-secondmate-a' \
+    'kind=secondmate' \
+    'harness=codex' \
+    'backend=tmux'
+  printf 'FMX_PAIRING_TOKEN=test-token\n' > "$dir/home/.env"
+  mkdir -p "$dir/home/projects"
+  fm_fake_exit0 "$fakebin" curl jq
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+case " $* " in
+  *' display-message '*) printf 'node\n' ;;
+esac
+SH
+  cat > "$dir/root/bin/fm-fleet-sync.sh" <<'SH'
+#!/usr/bin/env bash
+: > "${FM_TEST_FLEET_MARKER:?}"
+printf 'alpha: recovered: continued after isolated migration failure\n'
+SH
+  chmod +x "$fakebin/tmux" "$dir/root/bin/fm-fleet-sync.sh"
+
+  set +e
+  FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$dir/root" FM_TEST_FLEET_MARKER="$fleet_marker" \
+    PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-bootstrap.sh" > "$dir/bootstrap.out" 2> "$dir/bootstrap.err"
+  rc=$?
+  set -e
+
+  [ "$rc" -eq 0 ] || fail "isolated bootstrap migration failure returned $rc"
+  [ ! -e "$state/task-a.check.sh" ] && [ ! -L "$state/task-a.check.sh" ] \
+    || fail "isolated bootstrap migration left the legacy check runnable"
+  [ -d "$state/task-a.pr-poll" ] || fail "isolated bootstrap migration changed the unrepaired sidecar"
+  find "$state/.pr-check-quarantine" -name 'task-a.check.*' -type f | grep . >/dev/null \
+    || fail "isolated bootstrap migration did not quarantine the legacy check"
+  assert_grep 'task task-a: canonical poll migration is incomplete; poll remains unarmed; repair its private artifacts, then rerun bootstrap' \
+    "$state/.pr-check-migration.log" "isolated bootstrap migration did not publish a durable repair diagnostic"
+  assert_grep 'migration did not complete safely' "$dir/bootstrap.err" \
+    "isolated bootstrap migration did not surface its incomplete status"
+  assert_grep 'SECONDMATE_SYNC: secondmate secondmate-a: skipped:' "$dir/bootstrap.out" \
+    "incomplete poll migration suppressed secondmate sync"
+  assert_grep 'SECONDMATE_LIVENESS: secondmate secondmate-a: skipped: liveness probe inconclusive' "$dir/bootstrap.out" \
+    "incomplete poll migration suppressed persistent supervisor recovery"
+  assert_grep 'FMX: X mode on - relay poll armed' "$dir/bootstrap.out" \
+    "incomplete poll migration suppressed X mention setup"
+  [ -x "$state/x-watch.check.sh" ] || fail "incomplete poll migration did not arm the X relay shim"
+  [ -e "$fleet_marker" ] || fail "incomplete poll migration suppressed fleet refresh"
+  assert_grep 'FLEET_SYNC: alpha: recovered: continued after isolated migration failure' "$dir/bootstrap.out" \
+    "continued fleet refresh was not operator-visible"
+  pass "bootstrap isolates incomplete poll migration from unrelated recovery sweeps"
+}
+
 test_teardown_removes_poll_artifacts() {
   local dir fakebin kind artifact counterpart rc
   dir=$(make_case teardown-cleanup)
@@ -1567,4 +1628,5 @@ test_failed_outcomes_block_every_retry_until_repaired
 test_canonical_publication_failure_recovers_only_on_retry
 test_nonexecuting_migration
 test_bootstrap_migrates_before_other_mutations
+test_bootstrap_isolates_incomplete_poll_migration
 test_teardown_removes_poll_artifacts

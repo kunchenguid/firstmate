@@ -593,9 +593,8 @@ fi
 # identity-matched watcher, holds its lock, and neutralizes legacy PR checks
 # before any tool detection or later bootstrap mutation can leave old artifacts
 # runnable. Detect-only sessions never touch state.
-PR_CHECK_MIGRATION_OK=1
 if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
-  "$SCRIPT_DIR/fm-pr-check-migrate.sh" || PR_CHECK_MIGRATION_OK=0
+  "$SCRIPT_DIR/fm-pr-check-migrate.sh" || true
 fi
 
 if [ "$BACKEND_VALID" -eq 0 ]; then
@@ -641,7 +640,7 @@ crew_dispatch_validate
 if ! fm_backlog_backend_manual "$CONFIG" && fm_tasks_axi_compatible; then
   echo "TASKS_AXI: available"
 fi
-if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ] && [ "$PR_CHECK_MIGRATION_OK" -eq 1 ]; then
+if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
   secondmate_sync
   secondmate_liveness_sweep
   x_mode_setup
