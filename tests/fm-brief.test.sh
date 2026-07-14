@@ -118,6 +118,10 @@ test_herdr_lab_contract_is_explicit_and_complete() {
     "Herdr lab brief missing helper-owned provisioning"
   assert_grep "\"\$HERDR_LAB_HELPER\" teardown \"\$HERDR_LAB_SESSION\"" "$brief" \
     "Herdr lab brief missing helper-owned teardown"
+  assert_grep "re-checks refuse-default, launch-bound storage identity, and ownership immediately before stop and again immediately before delete" "$brief" \
+    "Herdr lab brief missing persistent stopped-instance verification"
+  assert_grep "Reprovision through the helper before a later teardown" "$brief" \
+    "Herdr lab brief allowed a separate stop proof to authorize delete"
   assert_grep "required trailing \`--session \"\$HERDR_LAB_SESSION\"\`" "$brief" \
     "Herdr lab brief missing the per-call trailing session contract"
   assert_grep "direct \`herdr server stop\`" "$brief" \
@@ -126,9 +130,9 @@ test_herdr_lab_contract_is_explicit_and_complete() {
     "Herdr lab brief missing the before tripwire"
   assert_grep "verifies the identical fleet state after teardown" "$brief" \
     "Herdr lab brief missing the after tripwire"
-  assert_grep "either explicit absence or exactly one running session named \`default\`" "$brief" \
+  assert_grep "either explicit absence or exactly one session named \`default\`" "$brief" \
     "Herdr lab brief missing the clean-runner baseline contract"
-  assert_grep "appearance, disappearance, stopping, change, or ambiguity is a hard tripwire failure" "$brief" \
+  assert_grep "any change to its captured running state, appearance, disappearance, or ambiguity is a hard tripwire failure" "$brief" \
     "Herdr lab brief missing fail-closed baseline transitions"
   assert_no_grep "Herdr lifecycle declaration - NOT ENABLED" "$brief" \
     "Herdr lab brief retained the unguarded declaration"
