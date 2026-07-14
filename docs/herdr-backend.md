@@ -657,10 +657,47 @@ Each adapter still owns its own capture and structural row-finding (genuinely di
 On a bare, unstructured row it is a dead-shell prompt and reads `unknown` (not a safe injection target), never `empty`.
 The agent prompt glyphs `❯` (claude) and `›` (codex) read `empty` either way.
 `inject_msg` was hardened to match: its composer-guard now reads `fm_backend_composer_state` directly and defers on anything that is not affirmatively `empty` (`pending` real text, or `unknown` for a dead shell or an unreadable pane), instead of only deferring on `pending`.
+This composer-empty guard is necessary but not sufficient: a bare `❯` shell prompt reads `empty` yet is a dead shell, so `inject_msg` also requires a confirmed live agent process (see [Agent-liveness injection guard](#agent-liveness-injection-guard-2026-07-14-the-starship-glyph-hole) below).
 
 **Regression coverage.** `tests/fm-composer-lib.test.sh` pins the shared owner directly (bare shell glyph -> `unknown`, the same glyph bordered -> `empty`, agent glyphs -> `empty` bordered or bare, idle placeholder, real text -> `pending`).
 Per-backend dead-shell coverage: `tests/fm-daemon.test.sh`'s `test_tmux_composer_state_bare_shell_is_unknown` and `test_inject_msg_defers_on_dead_shell_unknown` (tmux + the injector), `tests/fm-backend-herdr.test.sh`'s `test_composer_state_unknown_when_no_composer_row_found`, `tests/fm-backend-orca.test.sh`'s `test_composer_state_bare_shell_prompt_is_unknown`, and `tests/fm-backend-cmux.test.sh`'s `test_composer_state_unknown_when_no_composer_row_found`.
 The herdr incident regressions (`tests/fm-backend-herdr.test.sh`'s composer-state, wait-for-working, and send-text-submit sections) stay green, and `shellcheck bin/*.sh bin/backends/*.sh tests/*.sh` passes clean.
+
+## Agent-liveness injection guard (2026-07-14, the starship-glyph hole)
+
+Composer-emptiness is NECESSARY but not SUFFICIENT to authorize an away-mode injection, and the safety rule above quietly assumed it was sufficient.
+The gap: the agent prompt glyph `❯` (U+276F) that reads `empty` "either way" is ALSO the default shell prompt glyph of starship, pure, and spaceship - three of the most common shell prompts.
+A supervisor whose agent has exited to a starship login shell therefore shows a bare `❯`, classifies as an `empty` agent composer, and - on the composer check alone - was a live SHELL the daemon would type the escalation digest (plus Enter) into and execute.
+The `$`/`%`/`#`/`>` dead-shell glyphs were caught by the composer classifier (`unknown`); this one was not, because it is indistinguishable BY CONTENT from claude's own empty composer, and always will be.
+Removing `❯` from the glyph list is not a fix: it is a guess about a pane's identity, and an empty shell prompt and an empty agent composer are indistinguishable by content.
+The correct question is what is RUNNING in the pane, not what glyph the row shows.
+
+**Verified (2026-07-14, tmux 3.7b).**
+A real login shell with `PS1='❯ '` (starship's default `success_symbol = "[❯](purple)"`) reproduces it:
+
+```
+$ fm_tmux_composer_state s:0        # cursor row shows a bare ❯
+empty
+$ fm_backend_agent_alive tmux s:0   # foreground process is zsh, not an agent
+dead
+```
+
+Pre-fix, `empty` alone authorized the inject, so the digest was typed into the shell.
+
+**Fix (task afk-guard-fix).**
+`inject_msg` (`bin/fm-supervise-daemon.sh`) gained a third guard after the composer-empty check: it calls `fm_backend_agent_alive` (`bin/fm-backend.sh`, the confident live-agent-process probe already used by the session-start secondmate-liveness sweep and reused for both supervisor backends, tmux and herdr) and injects ONLY on a confident `alive`.
+It fails closed: `dead` (a bare shell) and `unknown` (an unreadable pane, or a harness whose liveness is unverifiable for that backend, e.g. pi's generic `node` interpreter - see `docs/tmux-backend.md` "Known gaps") both defer, on the principle that a missed escalation is an inconvenience but a command typed into the captain's shell is not.
+A deferred escalation stays buffered for the next cycle, the max-defer wedge alarm, or the afk-exit catch-up flush, so nothing is lost.
+Consequence to know: a pi-based supervisor in away mode reads `unknown` and defers all injection, degrading to the wedge-alarm and afk-exit-flush paths rather than injecting; closing that would require attributing pi's `node` process, which is separate empirical work.
+
+**Regression coverage.**
+`tests/fm-daemon.test.sh`'s `test_inject_msg_defers_on_empty_composer_dead_shell` (the hole: `empty` composer + `dead` agent must defer), `test_inject_msg_defers_on_empty_composer_unknown_liveness` (fail-closed on `unknown`), and `test_inject_msg_injects_when_agent_alive_and_composer_empty` (the positive path) pin the guard directly; each fails against the pre-fix daemon.
+`tests/fm-afk-inject-e2e.test.sh`'s Scenario D drives the genuine hazard end-to-end - a real login shell showing a bare starship `❯`, a real away-mode daemon, and an assertion that the digest is never typed into the shell.
+
+**Other injection paths.**
+`bin/fm-send.sh` (firstmate steering a crewmate/secondmate) is the only other typed-text injection path and shares the same content-blindness: it has no composer-empty or liveness guard, so a steer sent to a crewmate that has exited to a shell is typed into that shell.
+It is lower-risk than the daemon - it is firstmate-initiated and deliberate, not autonomous while nobody watches - and a strict `alive` gate there would break legitimate steering for every backend whose liveness is `unknown` (pi, zellij, orca, cmux).
+The correct hardening for `fm-send` is a `dead`-only block (refuse a confirmed dead shell, allow `alive` and `unknown` so cross-backend steering is preserved), which is a separate change from this daemon safety fix.
 
 ## Incident (2026-07-10): away-mode injection wedged all night on the primary claude-on-herdr composer's ghost text
 

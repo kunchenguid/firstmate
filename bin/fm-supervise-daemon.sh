@@ -1070,8 +1070,14 @@ window_for_task() {  # <task-key> [state]
 #     after dim/faint ghost text and borders are ignored (a human's half-typed
 #     line, or a previous injection's unsent text), defer entirely - injecting
 #     would merge with the human's text.
+#   - AGENT-LIVENESS GUARD before typing: even a confirmed-empty composer is
+#     injected into ONLY when a live harness-agent PROCESS is confirmed in the
+#     pane. Composer-emptiness alone is content-blind - a bare shell prompt glyph
+#     (starship/pure/spaceship default `❯`, identical to claude's own) reads
+#     'empty' - so the daemon must ask what is RUNNING in the pane, not what glyph
+#     it shows. Fail closed: anything but a confident 'alive' defers.
 inject_msg() {  # <message> [state]
-  local msg=$1 state target backend retries sleep_s verdict composer
+  local msg=$1 state target backend retries sleep_s verdict composer liveness
   state="${2:-$(_state_root)}"
   # (1) Presence-gate: inject ONLY when afk is active. When afk is off, the
   # daemon self-handles and stays quiet; firstmate drives the normal always-on
@@ -1109,6 +1115,28 @@ inject_msg() {  # <message> [state]
   composer=$(fm_backend_composer_state "$backend" "$target" 2>/dev/null)
   if [ "$composer" != empty ]; then
     log "inject deferred: supervisor composer not confirmed-empty (state=${composer:-unknown}: pending input, dead-shell prompt, or unreadable pane)"
+    return 1
+  fi
+  #   c) Agent-liveness guard: a confirmed-empty composer is NECESSARY but not
+  #      SUFFICIENT. An empty agent composer and an empty shell prompt are
+  #      indistinguishable BY CONTENT and always will be: the default
+  #      starship/pure/spaceship shell prompt glyph is U+276F (❯), the very glyph
+  #      claude draws for its own empty composer, so a crewmate/supervisor whose
+  #      agent has exited to its login shell reads 'empty' here and, on the
+  #      composer check alone, would be a live SHELL we type an escalation into
+  #      (arbitrary command execution). The right question is not "what glyph is
+  #      on the row" but "is a live harness-agent PROCESS actually in this pane":
+  #      fm_backend_agent_alive (bin/fm-backend.sh) answers it from the pane's
+  #      foreground process for both supervisor backends (tmux, herdr). FAIL
+  #      CLOSED: inject ONLY on a confident 'alive'. 'dead' (a bare shell - the
+  #      hole) and 'unknown' (an unreadable pane, or a harness whose liveness is
+  #      not verifiable for this backend, e.g. pi's generic node interpreter) both
+  #      defer - a missed escalation is an inconvenience, a command typed into the
+  #      captain's shell is not. A deferred escalation stays buffered for the next
+  #      cycle, the max-defer wedge alarm, or the afk-exit catch-up flush.
+  liveness=$(fm_backend_agent_alive "$backend" "$target" 2>/dev/null)
+  if [ "$liveness" != alive ]; then
+    log "inject deferred: no live agent process confirmed in supervisor pane (liveness=${liveness:-unknown}: dead shell, or agent liveness unverifiable for backend '$backend') — refusing to type into a possible shell"
     return 1
   fi
   # (4) Type the digest ONCE, then submit with Enter (retry Enter only, never

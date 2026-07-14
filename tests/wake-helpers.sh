@@ -124,8 +124,16 @@ case "${1:-}" in
     [ "${FM_FAKE_TMUX_PANE_ALIVE:-1}" = "1" ] || exit 1
     _print=0
     # Return cursor_y when the format asks for it (pane_input_pending).
+    # Return the pane's foreground command when the format asks for it (the
+    # inject-time agent-liveness guard, fm_backend_tmux_agent_alive). The fake
+    # supervisor pane stands in for a LIVE agent, so it reports an agent binary
+    # name by default (claude -> agent_alive=alive); FM_FAKE_TMUX_COMMAND lets a
+    # test simulate a bare shell (e.g. zsh -> dead) or an ambiguous process.
     for _a in "$@"; do
-      case "$_a" in *cursor_y*) printf '%s\n' "${FM_FAKE_TMUX_CURSOR_Y:-0}"; exit 0 ;; esac
+      case "$_a" in
+        *cursor_y*) printf '%s\n' "${FM_FAKE_TMUX_CURSOR_Y:-0}"; exit 0 ;;
+        *pane_current_command*) printf '%s\n' "${FM_FAKE_TMUX_COMMAND:-claude}"; exit 0 ;;
+      esac
       [ "$_a" = "-p" ] && _print=1
     done
     [ "$_print" = 1 ] && printf 'fakepane\n'
@@ -203,7 +211,14 @@ COMPOSER="${FM_FAKE_COMPOSER:?FM_FAKE_COMPOSER unset}"
 case "${1:-}" in
   display-message)
     print=0
-    for a in "$@"; do case "$a" in *cursor_y*) printf '0\n'; exit 0 ;; esac; done
+    # cursor_y for composer detection; pane_current_command for the inject-time
+    # agent-liveness guard. This fake bordered composer stands in for a LIVE
+    # agent, so it reports an agent binary (claude -> agent_alive=alive) by
+    # default; FM_FAKE_TMUX_COMMAND overrides it (e.g. zsh -> dead).
+    for a in "$@"; do case "$a" in
+      *cursor_y*) printf '0\n'; exit 0 ;;
+      *pane_current_command*) printf '%s\n' "${FM_FAKE_TMUX_COMMAND:-claude}"; exit 0 ;;
+    esac; done
     for a in "$@"; do [ "$a" = "-p" ] && print=1; done
     [ "$print" = 1 ] && printf 'fakepane\n'
     exit 0 ;;

@@ -42,6 +42,7 @@ TMUX_SHIM_DIR=
 LOG_FILE=
 DAEMON_PID=
 SUPERVISOR_PANE=
+SUPERVISOR_TARGET_OVERRIDE=
 LOOP_SCRIPT=
 
 fail() { printf 'not ok - %s\n' "$1" >&2; cleanup_all; exit 1; }
@@ -131,10 +132,23 @@ chmod +x "$LOOP_SCRIPT"
 sleep 1  # let the loop start and settle
 
 # tmux shim: redirects bare `tmux` to the private socket. Optionally swallows
-# the first Enter (file-based flag) for Scenario B.
+# the first Enter (file-based flag) for Scenario B. Also fakes the supervisor
+# pane's foreground process for the daemon's inject-time agent-liveness guard:
+# the bash composer loop stands in for a live agent, so pane_current_command must
+# report an agent binary (else the guard reads a bare shell and refuses to
+# inject). A scenario that removes .fake-pane-command falls through to the REAL
+# pane_current_command - Scenario D's genuine dead shell.
 TMUX_SHIM_DIR=$(mktemp -d "${TMPDIR:-/tmp}/fm-shim.XXXXXX")
+printf 'claude\n' > "$STATE_DIR/.fake-pane-command"
 cat > "$TMUX_SHIM_DIR/tmux" <<SHIM
 #!/usr/bin/env bash
+if [ "\${1:-}" = "display-message" ] && [ -f "$STATE_DIR/.fake-pane-command" ]; then
+  for _a in "\$@"; do
+    case "\$_a" in
+      *pane_current_command*) cat "$STATE_DIR/.fake-pane-command"; exit 0 ;;
+    esac
+  done
+fi
 if [ "\${1:-}" = "send-keys" ] && [ -f "$STATE_DIR/.swallow-enter" ]; then
   shift
   _args=()
@@ -158,7 +172,7 @@ chmod +x "$TMUX_SHIM_DIR/tmux"
 start_daemon() {
   PATH="$TMUX_SHIM_DIR:$PATH" \
   FM_STATE_OVERRIDE="$STATE_DIR" \
-  FM_SUPERVISOR_TARGET="$SUPERVISOR_PANE" \
+  FM_SUPERVISOR_TARGET="${SUPERVISOR_TARGET_OVERRIDE:-$SUPERVISOR_PANE}" \
   FM_SUPERVISOR_BACKEND=tmux \
   FM_ESCALATE_BATCH_SECS=0 \
   FM_HOUSEKEEPING_TICK=1 \
@@ -423,8 +437,75 @@ test_scenario_c() {
   pass "Scenario C: a normal captain status injects exactly one clean single-line sentinel digest"
 }
 
+# --- Scenario D: dead shell with a starship ❯ prompt (the safety hazard) ------
+# The genuine end-to-end hazard this PR closes. A REAL login shell whose prompt
+# is the default starship/pure/spaceship glyph U+276F (❯) - byte-identical to
+# claude's own empty-composer glyph - is what a supervisor pane shows once its
+# agent has exited to a login shell. The composer classifier reads that bare ❯ as
+# an EMPTY agent composer, so the PRE-FIX daemon would TYPE the escalation digest
+# (and Enter) into the live shell, executing it. The fixed daemon confirms a live
+# agent PROCESS first (fm_backend_agent_alive), reads this pane as a bare shell,
+# and refuses to inject. Assertions: the daemon actually ATTEMPTED the inject and
+# the liveness guard stopped it (log line), the escalation stayed buffered
+# (deferred, never delivered), and NOTHING was typed into the shell.
+test_scenario_d() {
+  reset_state
+
+  # A real shell pane with a bare starship-style ❯ prompt. Its foreground process
+  # is a genuine shell, so the liveness probe reads it as dead - no agent here.
+  local shell_pane cap
+  "$REAL_TMUX" -L "$SOCKET" new-window -d -n fm-deadshell -t supervisor
+  shell_pane=$("$REAL_TMUX" -L "$SOCKET" display-message -p -t fm-deadshell '#{pane_id}')
+  "$REAL_TMUX" -L "$SOCKET" send-keys -t "$shell_pane" \
+    "PS1='$(printf '\342\235\257 ')'; clear" Enter
+  sleep 1
+
+  # Read the pane's REAL foreground process for this scenario: drop the loop
+  # pane's faked agent command so the shim passes pane_current_command through.
+  rm -f "$STATE_DIR/.fake-pane-command"
+
+  afk_enter "$STATE_DIR"
+  SUPERVISOR_TARGET_OVERRIDE="$shell_pane"
+  start_daemon
+
+  # A captain-relevant status fires a real escalation the daemon will try to
+  # inject into the (dead-shell) supervisor pane.
+  echo "done: PR https://example.test/pr/400" > "$STATE_DIR/fake-c1.status"
+  sleep 8
+
+  # DIRECT hazard evidence first: nothing was typed into the shell. Against the
+  # pre-fix daemon this pane's capture contains the digest (typed and run as a
+  # shell command); the fixed daemon leaves the shell untouched.
+  cap=$("$REAL_TMUX" -L "$SOCKET" capture-pane -p -t "$shell_pane" 2>/dev/null)
+  case "$cap" in
+    *"Supervisor escalate"*)
+      fail "Scenario D: the escalation digest was typed into the live shell (found 'Supervisor escalate' in the pane) — SHELL INJECTION" ;;
+  esac
+  # And the sentinel marker byte never reached the shell either.
+  if printf '%s' "$cap" | grep -q "$(printf '\x1f')"; then
+    fail "Scenario D: the sentinel marker byte was typed into the live shell — SHELL INJECTION"
+  fi
+
+  # The escalation stayed BUFFERED (deferred), never delivered. A successful
+  # (pre-fix) inject would have CLEARED this buffer.
+  [ -s "$STATE_DIR/.subsuper-escalations" ] \
+    || fail "Scenario D: escalation buffer is empty — the daemon delivered (injected) the digest into a dead shell instead of deferring"
+
+  # Mechanism confirmation: the daemon actually TRIED to inject and the
+  # liveness guard is what stopped it (not merely never reaching the inject path).
+  grep -q 'inject deferred: no live agent process' "$STATE_DIR/.supervise-daemon.log" \
+    || fail "Scenario D: daemon did not defer on the agent-liveness guard (log has no 'no live agent process' line) — the guard may not have fired"
+
+  stop_daemon
+  SUPERVISOR_TARGET_OVERRIDE=""
+  printf 'claude\n' > "$STATE_DIR/.fake-pane-command"
+  "$REAL_TMUX" -L "$SOCKET" kill-window -t fm-deadshell 2>/dev/null || true
+  pass "Scenario D: a dead shell showing a bare starship ❯ prompt is refused — the escalation defers, nothing is typed into the shell"
+}
+
 test_scenario_a
 test_scenario_b
 test_scenario_c
+test_scenario_d
 
 echo "all e2e injection tests passed"

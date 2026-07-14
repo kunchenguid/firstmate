@@ -1615,6 +1615,7 @@ test_inject_msg_herdr_submits_through_backend_dispatch() {
     fm_backend_busy_state() { printf 'idle'; }
     fm_backend_capture() { printf 'idle prompt\n'; }
     fm_backend_composer_state() { printf 'empty'; }
+    fm_backend_agent_alive() { printf 'alive'; }   # a live herdr agent, not a bare shell
     fm_backend_send_text_submit() {
       [ "$1" = herdr ] && [ "$2" = "default:w1:p2" ] || fail "unexpected send_text_submit args: $1 $2"
       case "$3" in *"hello"*) : ;; *) fail "digest text missing from send_text_submit: $3" ;; esac
@@ -1647,6 +1648,94 @@ test_inject_msg_defers_on_dead_shell_unknown() {
     fi
   ) || fail "dead-shell inject_msg subshell failed"
   pass "inject_msg: defers on a dead-shell/unreadable composer (unknown), never typing the escalation into a shell"
+}
+
+# Safety-critical (task afk-guard-fix): the starship-glyph hole. The default
+# starship/pure/spaceship shell prompt is U+276F (❯) - the SAME glyph claude
+# draws for its own empty composer - so a supervisor whose agent has exited to a
+# bare login shell classifies as an EMPTY agent composer. Composer-emptiness
+# alone therefore CANNOT authorize an injection: the daemon must confirm a live
+# agent PROCESS in the pane. Here the composer reads `empty` (the ❯ hole) but the
+# pane's foreground process is a bare shell, so fm_backend_agent_alive reports
+# `dead`. inject_msg must defer and NEVER type the escalation into that shell.
+# This test FAILS against the pre-fix daemon, which gated on composer-emptiness
+# alone and would have called send_text_submit against the live shell.
+test_inject_msg_defers_on_empty_composer_dead_shell() {
+  local dir state submitted
+  dir=$(make_supercase inject-starship-glyph)
+  state="$dir/state"
+  submitted="$dir/submit-called"   # touched iff inject_msg reaches the submit step
+  afk_enter "$state"
+  (
+    fm_backend_target_exists() { return 0; }
+    fm_backend_busy_state() { printf 'idle'; }
+    fm_backend_capture() { printf '\342\235\257 \n'; }   # a bare starship ❯ prompt row
+    fm_backend_composer_state() { printf 'empty'; }      # the hole: bare ❯ reads empty
+    fm_backend_agent_alive() { printf 'dead'; }          # but no agent process is running
+    # Record the call and pretend the submit landed, simulating the FULL hole (the
+    # escalation typed into and "accepted" by the live shell). A marker file
+    # persists past inject_msg's internal command substitution, so the assertion
+    # below actually fails the suite - unlike a fail() inside this stub, whose
+    # exit only unwinds the $(...) capture and would be silently swallowed.
+    fm_backend_send_text_submit() { : > "$submitted"; printf 'empty'; }
+    FM_SUPERVISOR_BACKEND=tmux FM_SUPERVISOR_TARGET="s:0" inject_msg "hello" "$state" || true
+    [ ! -e "$submitted" ] \
+      || fail "inject_msg typed into a dead shell: send_text_submit ran despite agent_alive=dead even though the composer read empty (starship-glyph hole)"
+  ) || fail "starship-glyph inject_msg subshell failed"
+  pass "inject_msg: defers on an empty-composer dead shell (bare starship ❯ prompt, agent_alive=dead), closing the shell-injection hole"
+}
+
+# Fail closed on ambiguity (task afk-guard-fix): even with an empty composer, an
+# agent process that cannot be CONFIRMED alive - an unreadable pane, or a harness
+# whose liveness is unverifiable for this backend (e.g. pi's generic node) - must
+# not be injected into. Uncertainty defers, because a command typed into a shell
+# that only LOOKED unreadable is not recoverable while a deferred escalation is.
+test_inject_msg_defers_on_empty_composer_unknown_liveness() {
+  local dir state submitted
+  dir=$(make_supercase inject-unknown-liveness)
+  state="$dir/state"
+  submitted="$dir/submit-called"
+  afk_enter "$state"
+  (
+    fm_backend_target_exists() { return 0; }
+    fm_backend_busy_state() { printf 'idle'; }
+    fm_backend_capture() { printf '\342\235\257 \n'; }
+    fm_backend_composer_state() { printf 'empty'; }
+    fm_backend_agent_alive() { printf 'unknown'; }
+    fm_backend_send_text_submit() { : > "$submitted"; printf 'empty'; }
+    FM_SUPERVISOR_BACKEND=tmux FM_SUPERVISOR_TARGET="s:0" inject_msg "hello" "$state" || true
+    [ ! -e "$submitted" ] \
+      || fail "inject_msg injected while agent liveness was unknown (must fail closed): an unconfirmed agent could be a shell"
+  ) || fail "unknown-liveness inject_msg subshell failed"
+  pass "inject_msg: defers when agent liveness is unknown (fail closed), even on a confirmed-empty composer"
+}
+
+# Positive path (task afk-guard-fix): the ONLY state that authorizes injection is
+# a confirmed-live agent (agent_alive=alive) with a confirmed-empty composer. The
+# guard must not over-block a genuinely-live agent whose composer is clear.
+test_inject_msg_injects_when_agent_alive_and_composer_empty() {
+  local dir state submitted
+  dir=$(make_supercase inject-alive-empty)
+  state="$dir/state"
+  submitted="$dir/submit-called"
+  afk_enter "$state"
+  (
+    fm_backend_target_exists() { return 0; }
+    fm_backend_busy_state() { printf 'idle'; }
+    fm_backend_capture() { printf 'idle prompt\n'; }
+    fm_backend_composer_state() { printf 'empty'; }
+    fm_backend_agent_alive() { printf 'alive'; }
+    fm_backend_send_text_submit() {
+      : > "$submitted"
+      case "$3" in *"hello"*) : ;; *) fail "digest text missing from send_text_submit: $3" ;; esac
+      printf 'empty'
+    }
+    FM_SUPERVISOR_BACKEND=tmux FM_SUPERVISOR_TARGET="s:0" inject_msg "hello" "$state" \
+      || fail "inject_msg should succeed when the agent is alive and the composer is empty"
+    [ -e "$submitted" ] \
+      || fail "inject_msg did not reach the submit step even though the agent was alive and the composer empty (over-blocked the positive path)"
+  ) || fail "alive+empty inject_msg subshell failed"
+  pass "inject_msg: injects only when the agent is confirmed alive and the composer is confirmed empty (positive path)"
 }
 
 test_afk_start_refuses_when_flag_cannot_be_written
@@ -1744,3 +1833,6 @@ test_inject_msg_herdr_composer_guard_defers
 test_inject_msg_herdr_pane_gone_defers
 test_inject_msg_herdr_submits_through_backend_dispatch
 test_inject_msg_defers_on_dead_shell_unknown
+test_inject_msg_defers_on_empty_composer_dead_shell
+test_inject_msg_defers_on_empty_composer_unknown_liveness
+test_inject_msg_injects_when_agent_alive_and_composer_empty
