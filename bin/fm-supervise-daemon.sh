@@ -195,6 +195,14 @@ MAX_DEFER_SECS_DEFAULT=300
 WEDGE_ALARM_TIMEOUT_SECS_DEFAULT=10
 WEDGE_ALARM_LAST_EPOCH=0
 WEDGE_ALARM_NOTIFIER_PID=
+# Title of the active alert's banner, set per alarm by inject_wedge_alarm. A
+# banner's title is the first thing the captain reads and often all a truncated
+# one shows, so it follows the CAUSE: a vanished supervisor pane means away-mode
+# supervision is down, not that a queue of escalations is stuck behind a busy
+# composer. The notifier seam still carries only <channel> <summary>, so the
+# title lives here rather than being threaded through every channel.
+WEDGE_ALARM_TITLE_DEFAULT='firstmate: away-mode escalations WEDGED'
+WEDGE_ALARM_TITLE=$WEDGE_ALARM_TITLE_DEFAULT
 # Epoch the supervisor pane was first seen missing in this daemon process, 0 while
 # it resolves. The pane-gone alarm below times the absence from here, so a pane
 # that blinks out for a single poll never alarms.
@@ -778,8 +786,8 @@ wedge_alarm_via_osascript() {  # <summary>
   command -v osascript >/dev/null 2>&1 || {
     log "wedge alarm: osascript not found; cannot post a macOS notification"; return 1; }
   wedge_alarm_run_bounded osascript osascript -e 'on run argv' \
-    -e 'display notification (item 1 of argv) with title "firstmate: away-mode escalations WEDGED" sound name "Basso"' \
-    -e 'end run' "$summary" >/dev/null 2>&1 && return 0
+    -e 'display notification (item 1 of argv) with title (item 2 of argv) sound name "Basso"' \
+    -e 'end run' "$summary" "${WEDGE_ALARM_TITLE:-$WEDGE_ALARM_TITLE_DEFAULT}" >/dev/null 2>&1 && return 0
   log "wedge alarm: osascript notification failed"
   return 1
 }
@@ -796,7 +804,7 @@ wedge_alarm_via_herdr() {  # <summary>
   esac
   command -v herdr >/dev/null 2>&1 || {
     log "wedge alarm: herdr not found; cannot post a herdr notification"; return 1; }
-  wedge_alarm_run_bounded herdr herdr notification show "firstmate: away-mode escalations WEDGED" \
+  wedge_alarm_run_bounded herdr herdr notification show "${WEDGE_ALARM_TITLE:-$WEDGE_ALARM_TITLE_DEFAULT}" \
     --body "$summary" --sound request >/dev/null 2>&1 && return 0
   log "wedge alarm: herdr notification failed"
   return 1
@@ -866,13 +874,21 @@ wedge_alarm_notify() {  # <summary> <marker>
   return 0
 }
 
-# Raise a loud, rate-limited alarm when escalations cannot be delivered after
-# max-defer. The cause is whatever inject_msg last recorded, and it is NOT always
-# a busy/wedged pane: the supervisor's agent may have exited to a shell, or its
+# Raise a loud, rate-limited alarm when away-mode delivery is broken after
+# max-defer. The cause is whatever the last defer recorded, and it is NOT always
+# a busy/wedged pane: the supervisor's agent may have exited to a shell, its
 # liveness may be unverifiable for the backend (the agent-liveness guard fails
-# closed and refuses every injection in that state). Naming a busy pane when the
-# truth is a dead agent points debugging in the wrong direction, so the ERROR
-# log, the durable marker, and the active alert all report the recorded cause.
+# closed and refuses every injection in that state), or the supervisor pane may
+# be gone outright. Naming a busy pane when the truth is a dead agent points
+# debugging in the wrong direction, so the ERROR log, the durable marker, and the
+# active alert all report the recorded cause.
+# The wording follows the CAUSE, not the buffer. A refused injection means N
+# buffered escalations are stuck behind it. A VANISHED pane means away-mode
+# supervision is down: nothing can be delivered, buffered or not, and the buffer
+# cannot even grow (the main loop's pane-gone backoff never reaches the wake
+# handling that buffers). Telling the captain "escalations undelivered" there
+# sends them hunting for messages that may not exist, when what they need to know
+# is that away mode is dead and must be restarted.
 # The daemon must NEVER silently wedge: this logs an ERROR, drops a durable
 # marker firstmate/recovery can surface, flashes the tmux supervisor client's
 # status line when applicable, and attempts a configurable backend-independent
@@ -880,6 +896,7 @@ wedge_alarm_notify() {  # <summary> <marker>
 # wake-queue both survive - but the stall stops being invisible.
 inject_wedge_alarm() {  # <state> <age-seconds>
   local state=$1 age=$2 marker target backend max_defer now notify=1 cause reason
+  local buffered summary header detail err
   marker="$state/.subsuper-inject-wedged"
   # Defensive default: escalate_flush only returns non-zero after inject_msg ran
   # in this process, so the pair is normally fresh. An empty pair means nobody
@@ -891,17 +908,36 @@ inject_wedge_alarm() {  # <state> <age-seconds>
   if [ "$(_file_age "$marker")" -lt "$max_defer" ]; then
     return 0
   fi
+  buffered=0
+  if [ -s "$state/.subsuper-escalations" ]; then
+    buffered=$(grep -c . "$state/.subsuper-escalations" 2>/dev/null || echo 0)
+  fi
+  if [ "$cause" = pane-gone ]; then
+    WEDGE_ALARM_TITLE='firstmate: away-mode supervision DOWN'
+    summary="away-mode supervision DOWN ${age}s ($cause): supervisor pane gone, nothing can be delivered"
+    header=$(printf 'fm away-mode supervision DOWN: supervisor pane gone %ss as of %s' \
+      "$age" "$(date '+%Y-%m-%dT%H:%M:%S%z')")
+    detail=$(printf 'Away-mode supervision is DOWN (%s): %s' "$cause" "$reason")
+    err="ERROR: away-mode supervision DOWN ${age}s: $reason. ${buffered} escalation(s) buffered; buffer + wake-queue preserved; alarm marker written."
+  else
+    WEDGE_ALARM_TITLE=$WEDGE_ALARM_TITLE_DEFAULT
+    summary="away-mode escalations WEDGED ${age}s undelivered ($cause)"
+    header=$(printf 'fm away-mode inject WEDGED: %ss undelivered as of %s' \
+      "$age" "$(date '+%Y-%m-%dT%H:%M:%S%z')")
+    detail=$(printf 'The supervisor pane could not accept an escalation (%s): %s' "$cause" "$reason")
+    err="ERROR: away-mode escalation undelivered ${age}s; last inject attempt did not land: $reason. Buffer + wake-queue preserved; alarm marker written."
+  fi
   now=$(_now)
   if [ "$WEDGE_ALARM_LAST_EPOCH" -gt 0 ] && [ $((now - WEDGE_ALARM_LAST_EPOCH)) -lt "$max_defer" ]; then
     notify=0
   else
     WEDGE_ALARM_LAST_EPOCH=$now
-    log "ERROR: away-mode escalation undelivered ${age}s; last inject attempt did not land: $reason. Buffer + wake-queue preserved; alarm marker written."
+    log "$err"
   fi
   {
-    printf 'fm away-mode inject WEDGED: %ss undelivered as of %s\n' "$age" "$(date '+%Y-%m-%dT%H:%M:%S%z')"
-    printf 'The supervisor pane could not accept an escalation (%s): %s\n' "$cause" "$reason"
-    printf 'Buffered items:\n'
+    printf '%s\n' "$header"
+    printf '%s\n' "$detail"
+    printf 'Buffered items (%s):\n' "$buffered"
     cat "$state/.subsuper-escalations" 2>/dev/null
   } 2>/dev/null > "$marker" || true
   target="${FM_SUPERVISOR_TARGET:-$FM_SUPERVISOR_TARGET_DEFAULT}"
@@ -911,7 +947,7 @@ inject_wedge_alarm() {  # <state> <age-seconds>
   # the primary, backend-independent signal, so a non-tmux backend just skips
   # this cosmetic extra rather than attempting an unsupported call.
   if [ "$backend" = tmux ]; then
-    tmux display-message -t "$target" "fm: away-mode escalations WEDGED ${age}s ($cause) — see $marker" 2>/dev/null || true
+    tmux display-message -t "$target" "fm: ${summary} — see $marker" 2>/dev/null || true
   fi
   # Backend-independent active alert. Unlike the tmux flash above (skipped on
   # every non-tmux backend), this can reach the captain even when every pane and
@@ -919,7 +955,7 @@ inject_wedge_alarm() {  # <state> <age-seconds>
   # incident fell through. Configurable and best-effort; the marker above stays
   # the durable record whether or not any channel fires.
   if [ "$notify" -eq 1 ]; then
-    wedge_alarm_notify "away-mode escalations WEDGED ${age}s undelivered ($cause) - see $marker" "$marker"
+    wedge_alarm_notify "${summary} - see $marker" "$marker"
   fi
 }
 
@@ -938,6 +974,11 @@ inject_wedge_alarm() {  # <state> <age-seconds>
 # other guard here treats a single failed read as transient. Past a full max-defer
 # window of continuous absence it is not transient, and inject_wedge_alarm's own
 # marker-age throttle then holds it to one alarm per window.
+# Deliberately NOT gated on a non-empty escalation buffer, unlike housekeeping's
+# max-defer alarm: the pane being gone means supervision is DOWN, and the buffer
+# cannot grow while it is (the backoff `continue`s past the wake handling that
+# buffers), so a buffer gate here would restore exactly the away-window silence
+# this alarm exists to end. What the captain needs is the pane, not the count.
 pane_gone_wedge_alarm() {  # <state> <backend> <target>
   local state=$1 backend=$2 target=$3 max_defer now gone_for
   if ! afk_active "$state"; then
@@ -956,6 +997,29 @@ pane_gone_wedge_alarm() {  # <state> <backend> <target>
   INJECT_LAST_DEFER_CAUSE='pane-gone'
   INJECT_LAST_DEFER_REASON="supervisor pane '$target' no longer resolves on backend '$backend'; away mode can deliver nothing until it is stopped (bin/fm-afk-launch.sh stop) and armed again from firstmate's own pane"
   inject_wedge_alarm "$state" "$gone_for"
+}
+
+# The absence ended: retire the alarm it raised. Nothing else can. A pane-gone
+# alarm fires whether or not anything is buffered, but the only existing path that
+# clears the marker is housekeeping's max-defer escape flush, which runs solely on
+# a buffer still stuck past max-defer - so a pane-gone alarm raised on an empty (or
+# since-flushed) buffer would outlive the vanished pane forever. Targets are often
+# names rather than unique pane ids (FM_SUPERVISOR_TARGET_DEFAULT is `firstmate:0`),
+# and a killed-and-recreated window resolves again, so firstmate's afk-exit catch-up
+# would report a wedge that healed hours earlier, naming a pane that is now healthy.
+# Only a pane-gone marker is retired here; a marker left by a refused injection
+# still describes a real undelivered buffer and is cleared by a successful flush.
+pane_gone_recovered() {  # <state>
+  local state=$1
+  [ "$PANE_GONE_SINCE" -gt 0 ] || return 0
+  PANE_GONE_SINCE=0
+  [ "$INJECT_LAST_DEFER_CAUSE" = pane-gone ] || return 0
+  INJECT_LAST_DEFER_CAUSE=""
+  INJECT_LAST_DEFER_REASON=""
+  if [ -e "$state/.subsuper-inject-wedged" ]; then
+    rm -f "$state/.subsuper-inject-wedged"
+    log "supervisor target resolves again; cleared the pane-gone alarm marker"
+  fi
 }
 
 _oldest_line_age() {  # <buf> -> seconds since the oldest buffered item first arrived (sidecar epoch)
@@ -1566,7 +1630,7 @@ fm_super_main() {
       sleep "$INJECT_FAIL_SLEEP"
       continue
     fi
-    PANE_GONE_SINCE=0
+    pane_gone_recovered "$STATE"
 
     # --- (re)start watcher if it has exited --------------------------------
     if [ -z "${WATCHER_PID:-}" ] || ! kill -0 "${WATCHER_PID:-}" 2>/dev/null; then

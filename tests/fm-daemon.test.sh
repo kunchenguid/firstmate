@@ -2007,6 +2007,113 @@ test_pane_gone_alarm_waits_out_a_transient_absence() {
   pass "pane-gone alarm: fires only after a full MAX_DEFER of continuous absence, and never while away mode is off"
 }
 
+# A vanished pane is not a stuck queue, and must not be reported as one. The
+# buffer cannot even GROW while the pane is gone (the main loop's backoff never
+# reaches the wake handling that buffers), so an empty buffer is the ordinary
+# case: crew work flushed, then the captain's terminal died. The alarm must still
+# fire - supervision is down, which is what the captain needs to know - and every
+# captain-facing channel must say THAT rather than send them hunting for
+# escalations that do not exist.
+test_pane_gone_alarm_reports_supervision_down_on_an_empty_buffer() {
+  local dir state fakebin log alert marker
+  dir=$(make_supercase pane-gone-empty-buffer)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  log="$dir/daemon.log"; : > "$log"
+  alert="$dir/alert.log"; : > "$alert"
+  marker="$state/.subsuper-inject-wedged"
+  afk_enter "$state"
+  [ ! -s "$state/.subsuper-escalations" ] || fail "the empty-buffer case did not start with an empty buffer"
+
+  PANE_GONE_SINCE=$(( $(date +%s) - 600 ))
+  WEDGE_ALARM_LAST_EPOCH=0
+  PATH="$fakebin:$PATH" LOG="$log" FM_MAX_DEFER_SECS=300 \
+    FM_WEDGE_ALARM_LOG="$alert" FM_WEDGE_ALARM_CHANNEL=osascript \
+    pane_gone_wedge_alarm "$state" tmux "s:0"
+
+  [ -s "$marker" ] \
+    || fail "a vanished pane did not alarm because nothing was buffered; supervision was down and no channel said so"
+  [ -s "$alert" ] \
+    || fail "no active alert fired for a vanished pane with an empty buffer, so nothing reached an away captain"
+  grep -F 'supervision DOWN' "$marker" >/dev/null \
+    || fail "the wedge marker did not report supervision as DOWN: $(cat "$marker")"
+  grep -F 'undelivered' "$marker" >/dev/null \
+    && fail "the wedge marker claimed escalations were undelivered when none were buffered: $(cat "$marker")"
+  grep -F 'Buffered items (0)' "$marker" >/dev/null \
+    || fail "the wedge marker did not state the buffered count: $(cat "$marker")"
+  grep -F 'supervision DOWN' "$alert" >/dev/null \
+    || fail "the captain's active alert did not report supervision as DOWN: $(cat "$alert")"
+  grep -F 'undelivered' "$alert" >/dev/null \
+    && fail "the captain's active alert claimed undelivered escalations that do not exist: $(cat "$alert")"
+  grep -F 'ERROR' "$log" | grep -F 'supervision DOWN' >/dev/null \
+    || fail "the ERROR log did not report supervision as DOWN: $(grep -F ERROR "$log" || true)"
+  grep -F 'ERROR' "$log" | grep -F 'away-mode escalation undelivered' >/dev/null \
+    && fail "the ERROR log still framed a vanished pane as undelivered escalations: $(grep -F ERROR "$log" || true)"
+  [ "$WEDGE_ALARM_TITLE" = 'firstmate: away-mode supervision DOWN' ] \
+    || fail "the notification banner's title still blamed wedged escalations for a vanished pane (got: $WEDGE_ALARM_TITLE)"
+  pass "a vanished pane alarms on an EMPTY buffer, and says supervision is down instead of claiming stuck escalations"
+}
+
+# The absence ends: the alarm it raised must end with it. A pane-gone alarm can be
+# raised with nothing buffered, and the only path that retires the marker is the
+# max-defer escape flush of a still-stuck buffer - so without a recovery edge the
+# marker outlives the vanished pane forever, and firstmate's afk-exit catch-up
+# reports a wedge that healed hours ago, naming a pane that is now healthy. Targets
+# are usually names (FM_SUPERVISOR_TARGET_DEFAULT is `firstmate:0`), so a window
+# killed and recreated resolves again. Drives the REAL daemon through both edges.
+test_pane_gone_marker_cleared_when_the_pane_returns() {
+  local dir state fakebin err log marker alert gone pid i
+  dir=$(make_supercase pane-gone-recovery)
+  state="$dir/state"; fakebin="$dir/fakebin"; err="$dir/daemon.err"
+  log="$state/.supervise-daemon.log"
+  marker="$state/.subsuper-inject-wedged"
+  alert="$dir/alert.log"; : > "$alert"
+  gone="$dir/pane-gone"
+  afk_enter "$state"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" \
+    FM_FAKE_TMUX_COMMAND=claude FM_FAKE_TMUX_CAPTURE="$dir/pane.txt" \
+    FM_FAKE_TMUX_PANE_GONE_FILE="$gone" \
+    FM_SUPERVISOR_BACKEND=tmux FM_SUPERVISOR_TARGET="s:0" \
+    FM_MAX_DEFER_SECS=1 FM_INJECT_FAIL_SLEEP=1 FM_HOUSEKEEPING_TICK=60 \
+    FM_WEDGE_ALARM_LOG="$alert" FM_WEDGE_ALARM_CHANNEL=osascript \
+    "$DAEMON" >"$err" 2>&1 &
+  pid=$!
+  i=0
+  while [ "$i" -lt 60 ]; do
+    grep -q 'daemon starting' "$log" 2>/dev/null && break
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  # The pane dies under the armed daemon, and stays gone long enough to alarm.
+  : > "$gone"
+  i=0
+  while [ "$i" -lt 100 ]; do
+    [ -s "$marker" ] && break
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ -s "$marker" ] \
+    || fail "the vanished pane raised no alarm to recover from (daemon log: $(cat "$log" 2>/dev/null))"
+  # The window is recreated under the same name: the daemon's target resolves again.
+  rm -f "$gone"
+  i=0
+  while [ "$i" -lt 100 ]; do
+    [ -e "$marker" ] || break
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+
+  [ ! -e "$marker" ] \
+    || fail "the pane-gone alarm marker survived the pane coming back; firstmate would report a wedge that healed (marker: $(cat "$marker"))"
+  grep -F 'resolves again' "$log" >/dev/null \
+    || fail "the daemon did not record retiring the pane-gone alarm when its target came back: $(cat "$log" 2>/dev/null)"
+  pass "a pane-gone alarm marker is retired the moment the supervisor target resolves again"
+}
+
 test_afk_start_refuses_when_flag_cannot_be_written
 test_afk_start_ignores_stale_pidfile_without_lock
 test_afk_start_reclaims_stale_daemon_lock_reused_pid
@@ -2111,3 +2218,5 @@ test_daemon_publishes_its_supervisor_endpoint
 test_wedge_alarm_names_dead_agent_not_busy_pane
 test_pane_gone_during_away_fires_wedge_alarm
 test_pane_gone_alarm_waits_out_a_transient_absence
+test_pane_gone_alarm_reports_supervision_down_on_an_empty_buffer
+test_pane_gone_marker_cleared_when_the_pane_returns

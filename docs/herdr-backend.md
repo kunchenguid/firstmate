@@ -731,6 +731,12 @@ The active alert is what makes this worth doing: it is backend-independent and n
 It is timed, not triggered: the absence must persist for a full max-defer window before it alarms, because a pane that blinks out for one poll is a backend hiccup or a restart mid-flight, and every other guard here treats a single failed read as transient.
 `inject_wedge_alarm`'s existing marker-age throttle then holds it to one alarm per window, and the backoff is otherwise unchanged.
 
+A vanished pane is not a stuck queue, so it does not borrow the wedge alarm's wording, and it is not gated on the buffer the way the max-defer alarm is.
+The buffer cannot even grow while the pane is gone (the same backoff `continue`s past the wake handling that buffers), so an empty buffer is the ordinary case: crew work flushed, then the captain's terminal died.
+Gating on buffered content would therefore restore the exact away-window silence this alarm was added to end, so it fires on an empty buffer and every channel - ERROR log, durable marker, status-line flash, and the active alert's title and body - reports away-mode supervision as DOWN and states the buffered count, instead of sending the captain hunting for escalations that do not exist.
+The marker is retired by `pane_gone_recovered` the moment the target resolves again, because nothing else would: the only other path that clears it is the max-defer escape flush of a still-stuck buffer.
+Targets are usually names rather than unique pane ids (`FM_SUPERVISOR_TARGET_DEFAULT` is `firstmate:0`), so a window killed and recreated resolves again, and a marker that outlived the absence would have firstmate reporting a healed wedge against a healthy pane on the afk-exit catch-up.
+
 **Known follow-ups.**
 Two smaller canary defects are deferred rather than fixed here, and neither can cause an injection into a shell.
 `fm_afk_canary_daemon_endpoint` collapses "no live daemon" and "a live daemon that has not published its endpoint yet" into one answer, so a fresh arm can race the endpoint write and print the fresh-arm remediation when the stop-then-arm one is correct.
@@ -751,6 +757,8 @@ The observable canary surfaces are pinned too: `tests/fm-afk-launch.test.sh`'s `
 The probed-pane rule has coverage on both halves: `unit_canary_probes_the_running_daemons_target` and `test_afk_injection_canary_follows_the_running_daemon` drive the restart case directly - a live daemon recorded against pane `%5` while the script itself runs in `%9` must warn about `%5`, and both fail if the canary probes its own pane - and `tests/fm-daemon.test.sh`'s `test_daemon_publishes_its_supervisor_endpoint` pins the producer half, that the daemon writes that record at all and that releasing its lock takes the record with it.
 The away-window half is pinned by `test_pane_gone_during_away_fires_wedge_alarm`, which runs the REAL daemon binary: it arms against a live pane, the pane dies under it, and the wedge marker, the ERROR log, and the backend-independent active alert must all name the vanished pane (it fails against the pre-fix daemon, which raised nothing at all).
 `test_pane_gone_alarm_waits_out_a_transient_absence` pins the other side of it - a pane missing for one poll must NOT alarm, and away mode being off must not alarm at all - so the fix cannot cry wolf on a backend hiccup.
+`test_pane_gone_alarm_reports_supervision_down_on_an_empty_buffer` pins the wording and the missing buffer gate together: with nothing buffered the alarm must still fire, and no channel may claim undelivered escalations.
+`test_pane_gone_marker_cleared_when_the_pane_returns` drives the real daemon through both edges - the pane dies and alarms, then comes back - and requires the marker to be gone; both fail against the pre-fix daemon.
 
 **Other injection paths.**
 `bin/fm-send.sh` (firstmate steering a crewmate/secondmate) is the only other typed-text injection path and shares the same content-blindness: it has no composer-empty or liveness guard, so a steer sent to a crewmate that has exited to a shell is typed into that shell.

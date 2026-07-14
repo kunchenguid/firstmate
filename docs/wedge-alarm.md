@@ -6,6 +6,13 @@ The cause is whatever `inject_msg` last recorded, and it is not always a busy pa
 One cause comes from the daemon's main loop rather than an inject attempt: when the supervisor pane itself has not resolved for a full max-defer window (`pane-gone`), there is nowhere to attempt a delivery at all, so `pane_gone_wedge_alarm` records the vanished pane and raises the same alarm from the backoff path - the active alert below needs no pane, which is exactly why it is the channel that survives this.
 The alarm carries that cause tag in its active alert and status-line flash, and the full detail in the ERROR log line and the durable `state/.subsuper-inject-wedged` marker, so a wedge never has to be diagnosed by guesswork.
 
+`pane-gone` is the one cause whose captain-facing wording is not about the buffer, because it is not a queue stuck behind a busy pane: away-mode supervision is DOWN and nothing can be delivered, buffered or not.
+It also fires on an EMPTY buffer, deliberately unlike the max-defer alarm, which is gated on buffered content.
+The buffer cannot even grow while the pane is gone - the main loop's backoff never reaches the wake handling that buffers - so an empty buffer is the ordinary case, and a buffer gate here would restore exactly the away-window silence this alarm exists to end.
+Every channel therefore says supervision is down and states the buffered count, rather than claiming undelivered escalations that may not exist.
+`pane_gone_recovered` retires the marker the moment the target resolves again: a pane-gone alarm raised on an empty (or since-flushed) buffer is otherwise never cleared, because the only other path that removes the marker is the max-defer escape flush of a still-stuck buffer.
+Targets are usually names rather than unique pane ids (`FM_SUPERVISOR_TARGET_DEFAULT` is `firstmate:0`), so a window killed and recreated resolves again, and without that recovery edge firstmate's afk-exit catch-up would report a wedge that healed hours earlier against a pane that is now healthy.
+
 ## Why an active channel beyond the status-line flash
 
 Before this change the only ACTIVE signal `inject_wedge_alarm` sent was a tmux `display-message` status-line flash, guarded by `if [ "$backend" = tmux ]`.
@@ -62,14 +69,16 @@ These are the only verification commands that fire real notifications, and they 
 
 ```
 $ /usr/bin/osascript -e 'on run argv' \
-    -e 'display notification (item 1 of argv) with title "FIRSTMATE TEST - IGNORE" sound name "Basso"' \
-    -e 'end run' "FIRSTMATE TEST - IGNORE (wedge-alarm channel verification)"
+    -e 'display notification (item 1 of argv) with title (item 2 of argv) sound name "Basso"' \
+    -e 'end run' "FIRSTMATE TEST - IGNORE (wedge-alarm title argv verification)" "FIRSTMATE TEST - IGNORE"
 $ echo $?
 0
 ```
 
 Exit 0; a Notification Center banner titled "FIRSTMATE TEST - IGNORE" was posted with the label as its body.
-In production the title is "firstmate: away-mode escalations WEDGED" and the body is the `<age>s undelivered (<cause>) - see <marker>` summary.
+The title is an argv item like the body, never interpolated into the AppleScript source, because it is no longer a constant: it follows the cause.
+In production a refused injection posts "firstmate: away-mode escalations WEDGED" over the `<age>s undelivered (<cause>) - see <marker>` summary, and a vanished pane posts "firstmate: away-mode supervision DOWN" over its own summary.
+A banner's title is often all a truncated notification shows, so a vanished pane must not be titled as a queue of stuck escalations (re-verified 2026-07-14 in the argv form above; the herdr channel's title is a plain argument and needed no re-verification).
 
 ### herdr channel
 

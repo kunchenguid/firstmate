@@ -138,6 +138,9 @@ an ERROR in the daemon log, a durable
 catch-up if present), a tmux status-line flash when applicable, and a configurable backend-independent active alert.
 Each names the recorded cause (`pane-busy`, `composer-not-empty`, `agent-dead`, `agent-unknown`, `submit-unconfirmed`, `pane-gone`) rather than assuming a busy pane, so a dead supervisor agent is not misreported as a wedged one.
 A supervisor pane that VANISHES raises the same alarm from the daemon's backoff path once it has been gone for a full max-defer window (`pane-gone`), because there is no pane left to attempt a delivery into and the active alert is the only channel a missing pane cannot take away.
+That one reports away-mode supervision as DOWN rather than as undelivered escalations, and it fires even with nothing buffered: the pane being gone means nothing can be delivered at all, and the buffer cannot even grow while it is.
+Read it as "away mode is dead, restart it" - the buffered count it states may well be zero.
+It clears itself once the target resolves again, so a `pane-gone` marker on the catch-up is a wedge that is still live, not one that healed while the captain was away.
 `docs/wedge-alarm.md` owns the alert channel setup and verification record.
 So a guard false-positive becomes a visible stall, never an unbounded silent no-op.
 
