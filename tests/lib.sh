@@ -213,6 +213,17 @@ fm_test_expected_hometag() {  # [home]
   printf '%s-%s' "$prefix" "$(fm_test_expected_home_hash "$home")"
 }
 
+# --- node invocations that load the tracked Pi .ts extensions ----------------
+
+# Node emits "ExperimentalWarning: Type Stripping is an experimental feature" on
+# stderr whenever it strips types from a .ts file, on every Node release where
+# type stripping is still experimental. The Pi extension suites capture
+# stdout+stderr and assert the extension itself printed nothing, so that runtime
+# warning reads as extension output and fails the assertion. Suppress only that
+# category - real errors and every other warning still surface.
+# shellcheck disable=SC2034
+FM_TEST_NODE_NO_TS_WARNING=--disable-warning=ExperimentalWarning
+
 # --- common assertions ------------------------------------------------------
 
 # assert_contains <haystack> <needle> <msg>
