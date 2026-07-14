@@ -578,8 +578,23 @@ record_diagnostic() {
   fi
 }
 
+migrate_legacy_quarantine_entry() {
+  local source=$1 destination=$2
+  fm_pr_private_file_valid "$source" 600 "$STATE_DEVICE" || return 1
+  fm_pr_regular_destination_on_device_or_absent "$destination" "$STATE_DEVICE" || return 1
+  if [ -e "$destination" ] || [ -L "$destination" ]; then
+    fm_pr_private_file_valid "$destination" 600 "$STATE_DEVICE" || return 1
+    cmp -s "$source" "$destination" || return 1
+    rm -f -- "$source" || return 1
+  else
+    mv -- "$source" "$destination" || return 1
+  fi
+  [ ! -e "$source" ] && [ ! -L "$source" ] \
+    && fm_pr_private_file_valid "$destination" 600 "$STATE_DEVICE"
+}
+
 migrate_legacy_noncanonical_namespace() {
-  local source basename suffix destination
+  local source basename suffix destination legacy_pending
   [ -e "$QUARANTINE/$LEGACY_NONCANONICAL_PREFIX.diagnostic.pending-noncanonical" ] \
     || [ -L "$QUARANTINE/$LEGACY_NONCANONICAL_PREFIX.diagnostic.pending-noncanonical" ] \
     || [ -e "$QUARANTINE/$LEGACY_NONCANONICAL_PREFIX.diagnostic.noncanonical" ] \
@@ -588,19 +603,28 @@ migrate_legacy_noncanonical_namespace() {
   quarantine_tree_repair_and_validate || return 1
   for source in "$QUARANTINE/$LEGACY_NONCANONICAL_PREFIX.check."* \
     "$QUARANTINE/$LEGACY_NONCANONICAL_PREFIX.data."* \
-    "$QUARANTINE/$LEGACY_NONCANONICAL_PREFIX.registration."* \
-    "$QUARANTINE/$LEGACY_NONCANONICAL_PREFIX.diagnostic.pending-noncanonical" \
-    "$QUARANTINE/$LEGACY_NONCANONICAL_PREFIX.diagnostic.noncanonical"; do
+    "$QUARANTINE/$LEGACY_NONCANONICAL_PREFIX.registration."*; do
     [ -e "$source" ] || [ -L "$source" ] || continue
-    fm_pr_private_file_valid "$source" 600 "$STATE_DEVICE" || return 1
     basename=${source##*/}
     suffix=${basename#"$LEGACY_NONCANONICAL_PREFIX"}
     destination="$QUARANTINE/$NONCANONICAL_PREFIX$suffix"
-    fm_pr_regular_destination_on_device_or_absent "$destination" "$STATE_DEVICE" || return 1
-    [ ! -e "$destination" ] && [ ! -L "$destination" ] || return 1
-    mv -- "$source" "$destination" || return 1
-    fm_pr_private_file_valid "$destination" 600 "$STATE_DEVICE" || return 1
+    migrate_legacy_quarantine_entry "$source" "$destination" || return 1
   done
+  source="$QUARANTINE/$LEGACY_NONCANONICAL_PREFIX.diagnostic.noncanonical"
+  destination="$QUARANTINE/$NONCANONICAL_PREFIX.diagnostic.noncanonical"
+  if [ -e "$source" ] || [ -L "$source" ]; then
+    migrate_legacy_quarantine_entry "$source" "$destination" || return 1
+  fi
+  legacy_pending="$QUARANTINE/$LEGACY_NONCANONICAL_PREFIX.diagnostic.pending-noncanonical"
+  if [ -e "$legacy_pending" ] || [ -L "$legacy_pending" ]; then
+    if diagnostic_obligation_valid "$NONCANONICAL_PREFIX" noncanonical \
+      && quarantined_artifact_exists "$NONCANONICAL_PREFIX" check; then
+      rm -f -- "$legacy_pending" || return 1
+    else
+      migrate_legacy_quarantine_entry "$legacy_pending" \
+        "$QUARANTINE/$NONCANONICAL_PREFIX.diagnostic.pending-noncanonical" || return 1
+    fi
+  fi
   [ ! -e "$QUARANTINE/$LEGACY_NONCANONICAL_PREFIX.diagnostic.pending-noncanonical" ] \
     && [ ! -L "$QUARANTINE/$LEGACY_NONCANONICAL_PREFIX.diagnostic.pending-noncanonical" ] \
     && [ ! -e "$QUARANTINE/$LEGACY_NONCANONICAL_PREFIX.diagnostic.noncanonical" ] \
@@ -961,6 +985,7 @@ process_diagnostic_obligations() {
 diagnostics_failed=0
 migration_failed=0
 if ! quarantine_tree_repair_and_validate \
+  || ! diagnostic_namespace_valid \
   || ! migrate_legacy_noncanonical_namespace \
   || ! diagnostic_namespace_valid \
   || ! recover_pending_outcomes \

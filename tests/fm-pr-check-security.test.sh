@@ -1787,13 +1787,18 @@ exit 0
 SH
   chmod 0700 "$dir/fakebin/tmux"
   touch "$state/.last-watcher-beat"
+  set +e
   FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" PATH="$dir/fakebin:$BASE_PATH" \
-    "$TEARDOWN" _noncanonical --force > "$dir/teardown.out" 2> "$dir/teardown.err" \
-    || fail "legacy reserved namespace prevented safe task teardown"
+    "$TEARDOWN" _noncanonical --force > "$dir/teardown.out" 2> "$dir/teardown.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "task teardown accepted an unresolved legacy namespace collision"
+  [ -f "$state/_noncanonical.meta" ] \
+    || fail "namespace collision refusal removed task lifecycle metadata"
   [ -f "$state/.pr-check-quarantine/_noncanonical.diagnostic.pending-noncanonical" ] \
-    || fail "task teardown removed the legacy pending obligation"
+    || fail "namespace collision refusal removed the legacy pending obligation"
   [ -f "$state/.pr-check-quarantine/_noncanonical.check.abc123" ] \
-    || fail "task teardown removed legacy reserved evidence"
+    || fail "namespace collision refusal removed legacy reserved evidence"
   FM_HOME="$dir/home" "$MIGRATE" > "$dir/migrate.out" 2> "$dir/migrate.err" \
     || fail "migration could not recover the previous reserved obligation namespace"
   [ ! -e "$state/.pr-check-quarantine/_noncanonical.diagnostic.pending-noncanonical" ] \
@@ -1804,6 +1809,38 @@ SH
     || fail "legacy reserved retry did not migrate its terminal outcome"
   [ -f "$state/.pr-check-quarantine/!noncanonical.check.abc123" ] \
     || fail "legacy reserved retry did not migrate its quarantined evidence"
+  assert_valid_migration_marker "$state/.pr-check-migration-v1"
+  FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" PATH="$dir/fakebin:$BASE_PATH" \
+    "$TEARDOWN" _noncanonical --force > "$dir/teardown-2.out" 2> "$dir/teardown-2.err" \
+    || fail "task teardown did not recover after legacy namespace migration"
+  [ ! -e "$state/_noncanonical.meta" ] \
+    || fail "recovered task teardown retained lifecycle metadata"
+  [ -f "$state/.pr-check-quarantine/!noncanonical.check.abc123" ] \
+    || fail "recovered task teardown removed migrated legacy evidence"
+
+  dir=$(make_case legacy-noncanonical-idempotent)
+  state="$dir/home/state"
+  mkdir -p "$state/.pr-check-quarantine"
+  chmod 0700 "$state/.pr-check-quarantine"
+  printf 'noncanonical task artifact: migration outcome tracking started before legacy poll handling\n' \
+    > "$state/.pr-check-quarantine/_noncanonical.diagnostic.pending-noncanonical"
+  printf 'noncanonical task artifact quarantined and unarmed\n' \
+    > "$state/.pr-check-quarantine/_noncanonical.diagnostic.noncanonical"
+  cp "$state/.pr-check-quarantine/_noncanonical.diagnostic.noncanonical" \
+    "$state/.pr-check-quarantine/!noncanonical.diagnostic.noncanonical"
+  printf 'legacy quarantined bytes\n' \
+    > "$state/.pr-check-quarantine/_noncanonical.check.abc123"
+  cp "$state/.pr-check-quarantine/_noncanonical.check.abc123" \
+    "$state/.pr-check-quarantine/!noncanonical.check.abc123"
+  chmod 0600 "$state/.pr-check-quarantine/"*
+  FM_HOME="$dir/home" "$MIGRATE" > "$dir/migrate.out" 2> "$dir/migrate.err" \
+    || fail "migration could not reconcile identical legacy namespace entries"
+  [ ! -e "$state/.pr-check-quarantine/_noncanonical.diagnostic.pending-noncanonical" ] \
+    || fail "terminal legacy outcome retained a superseded pending obligation"
+  [ ! -e "$state/.pr-check-quarantine/_noncanonical.diagnostic.noncanonical" ] \
+    || fail "identical terminal legacy outcome was not deduplicated"
+  [ ! -e "$state/.pr-check-quarantine/_noncanonical.check.abc123" ] \
+    || fail "identical legacy evidence was not deduplicated"
   assert_valid_migration_marker "$state/.pr-check-migration-v1"
 
   dir=$(make_case unknown-diagnostic-obligation)

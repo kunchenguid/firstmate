@@ -187,6 +187,14 @@ validate_pr_poll_cleanup() {
   local state_dir=$1 id=$2 quarantine state_device artifact has_artifact=0
   fm_task_id_path_safe "$id" || return 0
   quarantine="$state_dir/.pr-check-quarantine"
+  if [ "$id" = _noncanonical ] \
+    && { [ -e "$quarantine/_noncanonical.diagnostic.pending-noncanonical" ] \
+      || [ -L "$quarantine/_noncanonical.diagnostic.pending-noncanonical" ] \
+      || [ -e "$quarantine/_noncanonical.diagnostic.noncanonical" ] \
+      || [ -L "$quarantine/_noncanonical.diagnostic.noncanonical" ]; }; then
+    echo "REFUSED: legacy PR-check quarantine migration is incomplete; preserving task state." >&2
+    return 1
+  fi
   for artifact in "$state_dir/$id.check.sh" "$state_dir/$id.pr-poll" \
     "$state_dir/$id.pr-poll-registration" "$state_dir/$id.check-trust"; do
     [ -e "$artifact" ] || [ -L "$artifact" ] || continue
@@ -229,23 +237,15 @@ validate_pr_poll_cleanup() {
 }
 
 remove_pr_poll_artifacts() {
-  local state_dir=$1 id=$2 quarantine artifact preserve_legacy=0
+  local state_dir=$1 id=$2 quarantine artifact
   validate_pr_poll_cleanup "$state_dir" "$id" || return 1
   rm -f "$state_dir/$id.check.sh" "$state_dir/$id.pr-poll" \
     "$state_dir/$id.pr-poll-registration" "$state_dir/$id.check-trust" || return 1
   if fm_task_id_path_safe "$id"; then
     quarantine="$state_dir/.pr-check-quarantine"
     if [ -d "$quarantine" ] && [ ! -L "$quarantine" ]; then
-      if [ "$id" = _noncanonical ] \
-        && { [ -e "$quarantine/_noncanonical.diagnostic.pending-noncanonical" ] \
-          || [ -L "$quarantine/_noncanonical.diagnostic.pending-noncanonical" ] \
-          || [ -e "$quarantine/_noncanonical.diagnostic.noncanonical" ] \
-          || [ -L "$quarantine/_noncanonical.diagnostic.noncanonical" ]; }; then
-        preserve_legacy=1
-      fi
       for artifact in "$quarantine/$id."*; do
         [ -e "$artifact" ] || [ -L "$artifact" ] || continue
-        [ "$preserve_legacy" -ne 1 ] || continue
         rm -f -- "$artifact" || return 1
       done
       rmdir "$quarantine" 2>/dev/null || true
