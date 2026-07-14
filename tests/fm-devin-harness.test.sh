@@ -78,6 +78,11 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
+  cat > "$fakebin/jq" <<'SH'
+#!/usr/bin/env bash
+exit 97
+SH
+  chmod +x "$fakebin/jq"
   fm_fake_exit0 "$fakebin" treehouse gh-axi gh
   out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \

@@ -1616,9 +1616,14 @@ if [ "$HARNESS" = devin ]; then
     turnend_json=$(json_escape "touch $(shell_quote "$TURNEND")")
     project_devin_config="$WT/.devin/config.json"
     if [ -f "$project_devin_config" ]; then
-      jq --arg command "touch $(shell_quote "$TURNEND")" '
-        .hooks = ((.hooks // {}) | .Stop = ((.Stop // []) + [{hooks: [{type: "command", command: $command}]}]))
-      ' "$project_devin_config" > "$DEVIN_CONFIG"
+      node - "$project_devin_config" "touch $(shell_quote "$TURNEND")" > "$DEVIN_CONFIG" <<'NODE'
+const fs = require("node:fs");
+const config = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+config.hooks ??= {};
+config.hooks.Stop ??= [];
+config.hooks.Stop.push({ hooks: [{ type: "command", command: process.argv[3] }] });
+process.stdout.write(`${JSON.stringify(config)}\n`);
+NODE
     else
       printf '{"version":1,"hooks":{"Stop":[{"hooks":[{"type":"command","command":"%s"}]}]}}\n' "$turnend_json" > "$DEVIN_CONFIG"
     fi
