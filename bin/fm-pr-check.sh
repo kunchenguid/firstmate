@@ -6,7 +6,8 @@
 # When pr= is NEWLY recorded, also runs the best-effort pr-ready hook point
 # (bin/fm-hooks-lib.sh; docs/extension-points.md), so the hook fires once per
 # (task, PR URL) - a re-run, including the recording re-run inside
-# bin/fm-pr-merge.sh, never re-fires it.
+# bin/fm-pr-merge.sh, never re-fires it. The hook fires last, after the poll is
+# armed, so hook latency never delays arming it.
 # Usage: fm-pr-check.sh <task-id> <pr-url>
 set -eu
 
@@ -100,15 +101,17 @@ fm_pr_metadata_identity_parse "$META" || exit 1
 [ "$FM_PR_META_URL" = "$URL" ] && [ "$FM_PR_META_OWNER" = "$OWNER" ] \
   && [ "$FM_PR_META_REPO" = "$REPO" ] && [ "$FM_PR_META_NUMBER" = "$NUMBER" ] || exit 1
 
-# Fire the pr-ready hook once per (task, PR URL), only when pr= was newly recorded.
-if [ "$PR_NEWLY_RECORDED" = 1 ]; then
-  fm_hook_run "$CONFIG" pr-ready \
-    "FM_HOOK_TASK_ID=$ID" "FM_HOOK_PR_URL=$URL" \
-    -- "$ID" "$URL"
-fi
-
 fm_pr_poll_publish_prepared || {
   echo "error: could not publish PR poll" >&2
   exit 1
 }
 printf 'armed: state/%s.check.sh\n' "$ID"
+
+# Fire the pr-ready hook last, once per (task, PR URL), only when pr= was newly
+# recorded: a slow hook cannot delay arming the merge poll and an interrupt
+# mid-hook cannot leave pr= recorded with no poll armed.
+if [ "$PR_NEWLY_RECORDED" = 1 ]; then
+  fm_hook_run "$CONFIG" pr-ready \
+    "FM_HOOK_TASK_ID=$ID" "FM_HOOK_PR_URL=$URL" \
+    -- "$ID" "$URL"
+fi

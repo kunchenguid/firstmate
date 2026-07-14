@@ -5,8 +5,11 @@
 # The contract under test: an absent or non-executable hook is a silent no-op,
 # a present hook runs with the documented positional args and FM_HOOK_* env, a
 # failing or timed-out hook is warned to stderr and never breaks the calling
-# flow, and the hook is always time-bounded: under 'timeout -k 5 <budget>' when
-# a timeout binary exists, and under the shell-native watchdog when none does.
+# flow, the hook is always time-bounded (under 'timeout -k 5 <budget>' when a
+# timeout binary exists, and under the shell-native watchdog when none does),
+# and no hook - not even one that leaves a background descendant behind - can
+# stall a caller reading the calling script's output, because a hook never
+# inherits the caller's stdout or stderr.
 #
 # Matrix:
 #   unit (fm_hook_run sourced directly):
@@ -20,6 +23,9 @@
 #     (l) no timeout binary, fast hook     -> completes normally, not killed
 #     (m) no timeout binary, hook blocked in a descendant -> the whole process
 #         group is killed, so no orphan survives holding the caller's stdout
+#     (n) hook exits clean but leaves a background child -> unreachable by any
+#         kill, yet the caller's command substitution still returns at once, on
+#         the timeout-binary, watchdog, and unbounded FM_HOOK_TIMEOUT=0 paths
 #   integration:
 #     (j) fm-spawn fires post-spawn once per spawned task (batch included) with
 #         the task's kind and meta path; a failing hook does not fail the spawn
@@ -189,7 +195,7 @@ make_no_timeout_path() {
   local case_dir=$1 minbin bin src
   minbin="$case_dir/minbin"
   mkdir -p "$minbin"
-  for bin in bash env sleep; do
+  for bin in bash env sleep mktemp rm; do
     src=$(command -v "$bin") || fail "watchdog: '$bin' not found on PATH"
     ln -sf "$src" "$minbin/$bin"
   done
@@ -280,6 +286,53 @@ SH
   kill -0 "$gc_pid" 2>/dev/null \
     && fail "descendant: the hook's descendant ($gc_pid) survived the watchdog"
   pass "the watchdog kills the hook's whole process group and never stalls the caller"
+}
+
+# A hook that exits cleanly but leaves a background child behind: no timeout and
+# no process-group kill can reach that orphan, so the only thing keeping it from
+# stalling the caller's command substitution is that the hook never inherited the
+# caller's stdout or stderr. Asserted on every path, since each runs the hook.
+test_orphaned_descendant_never_stalls_the_caller() {
+  local case_dir minbin rc out started elapsed path budget label
+  case_dir=$(make_case orphan)
+  minbin=$(make_no_timeout_path "$case_dir")
+  cat > "$case_dir/config/hooks/post-spawn" <<SH
+#!/usr/bin/env bash
+# Survives the hook: nothing firstmate can signal, and it would hold any
+# inherited pipe open for its whole life.
+sleep 30 &
+printf '%s\n' "\$!" >> '$case_dir/orphan.pid'
+exit 0
+SH
+  chmod +x "$case_dir/config/hooks/post-spawn"
+
+  # timeout-binary path, shell-watchdog path, and the unbounded FM_HOOK_TIMEOUT=0
+  # path (which has no bound at all, so only detached stdio protects the caller).
+  for label in timeout-binary watchdog unbounded; do
+    case $label in
+      timeout-binary) path="$case_dir/fakebin:$PATH"; budget=60 ;;
+      watchdog) path="$minbin"; budget=60 ;;
+      unbounded) path="$minbin"; budget=0 ;;
+    esac
+    started=$SECONDS
+    set +e
+    out=$(FM_HOOK_TIMEOUT=$budget PATH="$path" \
+      fm_hook_run "$case_dir/config" post-spawn -- task-x1 2>&1)
+    rc=$?
+    elapsed=$((SECONDS - started))
+    set -e
+    expect_code 0 "$rc" "orphan/$label: fm_hook_run should return 0"
+    [ "$elapsed" -lt 10 ] \
+      || fail "orphan/$label: an orphaned descendant stalled the caller (${elapsed}s)"
+    [ -z "$out" ] \
+      || fail "orphan/$label: a clean hook must produce no output, got: $out"
+  done
+
+  local orphan
+  while read -r orphan; do
+    kill "$orphan" 2>/dev/null || true
+  done < "$case_dir/orphan.pid"
+  pass "a hook that leaves a background descendant behind never stalls the caller"
 }
 
 test_pr_check_fires_pr_ready_on_first_record_only() {
@@ -464,6 +517,7 @@ test_timed_out_hook_warns_and_returns_zero
 test_watchdog_kills_a_hanging_hook_without_timeout_binary
 test_watchdog_lets_a_fast_hook_finish_without_timeout_binary
 test_watchdog_kills_descendants_and_never_stalls_the_caller
+test_orphaned_descendant_never_stalls_the_caller
 test_spawn_fires_post_spawn_per_task_and_survives_failure
 test_pr_check_fires_pr_ready_on_first_record_only
 test_pr_merge_fires_post_merge_after_merge
