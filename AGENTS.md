@@ -382,6 +382,9 @@ Read `data/secondmates.md` before dispatching and compare the work request to ea
 Route by the nature of the task, not just the project name.
 A project may appear in several `projects:` clone lists, so choose the secondmate whose natural-language scope actually fits the work, such as triage versus feature development.
 If the resolved project is `local-only`, keep the work with the main firstmate even when a secondmate scope sounds relevant.
+Before either routing work to a secondmate or dispatching it directly, select only the task-applicable preferences from the private `data/captain.md`, including any required language for PR titles and bodies; never copy or inherit the whole private file because project crewmates cannot read it.
+For a secondmate route, include those preferences in the marked routed request; the receiving secondmate must propagate them into its task brief, while a direct firstmate puts them in the brief itself.
+At PR ready, verify the title and body against the propagated preferences and have mismatches corrected before presenting the PR.
 If a secondmate's scope fits, steer that secondmate from an active firstmate session by sending one concise instruction via `FM_HOME=<this-firstmate-home> bin/fm-send.sh <id> '<work request>'` unless `FM_HOME` is already set to the active firstmate home, and let it run the normal lifecycle inside its own home.
 The stable `fm-<id>` label printed by lifecycle commands still works, but exact task ids resolve first through this home's `state/<id>.meta`; pass an explicit backend target containing `:` only when intentionally targeting an endpoint outside this firstmate home.
 `fm-send` is fail-closed: `FM_HOME` must be set, and any target that cannot be resolved through this home's metadata or a well-formed explicit backend target exits non-zero instead of guessing a tmux window.
@@ -406,7 +409,6 @@ Then classify readiness:
 Keep dependency judgment coarse: same repo plus overlapping area means serialize; everything else runs parallel.
 For `no-mistakes` projects, the pipeline rebase step absorbs mild overlaps; for other modes, have the crewmate rebase before review or merge if needed.
 
-Before dispatch, fold every applicable preference from the private `data/captain.md` into the task brief, including the required language for PR titles and bodies, because crewmates cannot read that private memory.
 Write the brief per section 11.
 
 ### Spawn
@@ -497,7 +499,7 @@ During the `ci` monitor phase, `bin/fm-crew-state.sh` also reads the ci step log
 
 For PR-based ship tasks, the ready signal depends on mode: `no-mistakes` reports `done: PR <url> checks green` after CI is green, while `direct-PR` reports `done: PR <url>` after opening the PR.
 Run `bin/fm-pr-check.sh <id> <PR url>` - it records `pr=` and GitHub's `pr_head=` when available in the task's meta and arms the watcher's merge poll.
-Before presenting the PR, verify its title and body against the captain preference propagated through the brief and have any mismatch corrected.
+Before presenting the PR, apply the captain-preference lifecycle contract from Intake.
 Tell the captain: the PR's full URL (always the complete `https://...` link, never a bare `#number` - the captain's terminal makes a full URL clickable), a one-paragraph summary, and, for `no-mistakes`, the risk level it emitted.
 (The check contract, for any custom `state/<id>.check.sh` you write yourself: print one line only when firstmate should wake, print nothing otherwise, and finish before `FM_CHECK_TIMEOUT`.)
 
