@@ -61,9 +61,11 @@
 #   its branch name is recorded into meta as base=<branch> so fm-pr-check.sh can
 #   assert the PR head is based on that intended base before merge. A sidecar that
 #   declares no branch refuses the spawn rather than recording no base=, because a
-#   lost declaration would silently disarm that guard. Absent means the repo
-#   default branch is the base and the meta stays byte-identical to the pre-base
-#   default path (no base= line).
+#   lost declaration would silently disarm that guard. That refusal is raised with
+#   the brief check, BEFORE any backend window or worktree lease is acquired, so it
+#   strands nothing for recovery or fm-teardown.sh to reconcile. Absent means the
+#   repo default branch is the base and the meta stays byte-identical to the
+#   pre-base default path (no base= line).
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
@@ -91,7 +93,14 @@ set -eu
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 usage() {
-  sed -n '2,83p' "$0" | sed 's/^# \{0,1\}//'
+  # Derived from the header block itself (line 2 to the last consecutive comment
+  # line), never a hardcoded range: a hand-maintained line number silently
+  # truncates --help the next time a header line is added.
+  awk '
+    NR == 1 { next }
+    /^#/ { sub(/^# ?/, ""); print; next }
+    { exit }
+  ' "$0"
 }
 
 case "${1:-}" in
@@ -652,6 +661,25 @@ else
 fi
 [ -f "$BRIEF" ] || { echo "error: no brief at $BRIEF" >&2; exit 1; }
 
+# A ship task can declare a non-default intended base branch via fm-brief.sh
+# --base, which drops the branch name in data/<id>/base. Read it here, alongside
+# the brief check and BEFORE any backend window or worktree lease is acquired:
+# the refusal below is fail-closed, and a fail-closed refusal that fires after
+# those resources exist would strand them with no meta for recovery or teardown
+# to reconcile. Absent sidecar -> no base= -> the repo default branch is the base
+# and the meta stays byte-identical to the pre-base default path.
+BASE=
+if [ "$KIND" != secondmate ] && [ -f "$DATA/$ID/base" ]; then
+  IFS= read -r BASE < "$DATA/$ID/base" || true
+  # This promotion is the one link that could silently disarm the guard: an
+  # unreadable sidecar would leave no base= in meta, and fm-pr-check would then
+  # skip the base assertion entirely. Refuse instead of spawning unguarded.
+  if [ -z "$BASE" ]; then
+    echo "error: $DATA/$ID/base exists but declares no branch, so the task's intended base cannot be recorded in meta and the PR-base guard would be silently skipped. Re-scaffold the brief with fm-brief.sh --base <branch>." >&2
+    exit 1
+  fi
+fi
+
 # PROJ_ABS can still carry a symlinked path component (e.g. macOS's /tmp ->
 # /private/tmp) when it came from the ship/scout branch's logical `pwd` above.
 # Every backend's own current-path read (tmux's pane_current_path, herdr's
@@ -993,23 +1021,6 @@ else
   read -r MODE YOLO <<EOF
 $("$FM_ROOT/bin/fm-project-mode.sh" "$PROJ_NAME")
 EOF
-fi
-
-# A ship task can declare a non-default intended base branch via fm-brief.sh
-# --base, which drops the branch name in data/<id>/base. Promote it into meta as
-# base= so fm-pr-check.sh can assert the PR head is stacked on that base before
-# merge. Absent sidecar -> no base= -> the repo default branch is the base and the
-# meta stays byte-identical to the pre-base default path.
-BASE=
-if [ "$KIND" != secondmate ] && [ -f "$DATA/$ID/base" ]; then
-  IFS= read -r BASE < "$DATA/$ID/base" || true
-  # This promotion is the one link that could silently disarm the guard: an
-  # unreadable sidecar would leave no base= in meta, and fm-pr-check would then
-  # skip the base assertion entirely. Refuse instead of spawning unguarded.
-  if [ -z "$BASE" ]; then
-    echo "error: $DATA/$ID/base exists but declares no branch, so the task's intended base cannot be recorded in meta and the PR-base guard would be silently skipped. Re-scaffold the brief with fm-brief.sh --base <branch>." >&2
-    exit 1
-  fi
 fi
 
 META_WINDOW=$T

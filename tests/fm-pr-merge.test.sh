@@ -61,9 +61,14 @@ make_case() {
 }
 
 # gh-axi mock recording every invocation to a log file, and gh mock answering
-# headRefOid for fm-pr-check.sh's pr_head lookup. Args: case_dir head_sha
+# fm-pr-check.sh's field lookup. fm-pr-check resolves the base label and the head
+# sha in ONE `gh pr view --json baseRefName,headRefOid -q '... | @tsv'` call, so
+# the mock must answer that combined query as real TSV: a bare undelimited sha
+# here would only pass by exploiting a non-strict split, and would stop
+# exercising the contract fm-pr-check actually depends on.
+# Args: case_dir head_sha [base_label]
 add_gh_mocks() {
-  local case_dir=$1 head=$2
+  local case_dir=$1 head=$2 base=${3:-main}
   cat > "$case_dir/fakebin/gh-axi" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
@@ -74,13 +79,33 @@ SH
 case "\${1:-} \${2:-}" in
   "pr view")
     case " \$* " in
+      *baseRefName*headRefOid*|*headRefOid*baseRefName*)
+        printf '%s\t%s\n' '$base' '$head' ; exit 0 ;;
       *headRefOid*) printf '%s\n' '$head' ; exit 0 ;;
+      *baseRefName*) printf '%s\n' '$base' ; exit 0 ;;
     esac
     ;;
 esac
 exit 0
 SH
   chmod +x "$case_dir/fakebin/gh-axi" "$case_dir/fakebin/gh"
+}
+
+# gh mock returning a SINGLE undelimited field where fm-pr-check asked for two.
+# `cut` without -s would echo that whole line for BOTH field requests, silently
+# landing the same string in the base label and the head sha - and a bogus
+# pr_head= (read downstream as a commit sha by fm-review-diff.sh and
+# fm-teardown.sh) would be recorded from it. The split must be delimiter-strict.
+add_gh_mock_malformed_fields() {
+  local case_dir=$1 blob=$2
+  cat > "$case_dir/fakebin/gh" <<SH
+#!/usr/bin/env bash
+case "\${1:-} \${2:-}" in
+  "pr view") printf '%s\n' '$blob' ; exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/gh"
 }
 
 # gh-axi mock that fails the merge call but succeeds everything else, so a
@@ -132,6 +157,35 @@ test_records_pr_and_head_before_merging() {
   grep -qxF 'pr merge 9 --repo example/repo --squash' "$case_dir/gh-axi.log" \
     || fail "records-before-merge: gh-axi pr merge was not invoked with number, --repo, and default --squash"
   pass "fm-pr-merge records pr= and pr_head= before invoking gh-axi pr merge"
+}
+
+# A gh response carrying one undelimited field where two were asked for is
+# malformed, and must NOT be smeared across both variables: recording the base
+# label as pr_head= would put a branch name where fm-review-diff.sh and
+# fm-teardown.sh expect a commit sha. The pr= recording still happens (that path
+# never depended on gh); only the unresolvable pr_head= is withheld, loudly.
+test_malformed_gh_fields_record_no_pr_head() {
+  local case_dir rc
+  case_dir=$(make_case malformed-fields)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" 1234567812345678123456781234567812345678
+  add_gh_mock_malformed_fields "$case_dir" onlyonefield
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/9 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "malformed-fields: an unresolvable pr_head must not break the merge path"
+  assert_grep 'pr=https://github.com/example/repo/pull/9' "$case_dir/state/task-x1.meta" \
+    "malformed-fields: pr= should still be recorded"
+  assert_no_grep 'pr_head=' "$case_dir/state/task-x1.meta" \
+    "malformed-fields: a bogus pr_head= was recorded from a response with no tab delimiter"
+  assert_grep 'malformed' "$case_dir/stderr" \
+    "malformed-fields: the malformed gh response was swallowed instead of reported"
+  pass "fm-pr-check refuses to smear a malformed gh response across base label and pr_head="
 }
 
 test_merge_failure_propagates_after_recording() {
@@ -576,6 +630,7 @@ test_pr_check_no_base_arms_normally() {
 }
 
 test_records_pr_and_head_before_merging
+test_malformed_gh_fields_record_no_pr_head
 test_merge_failure_propagates_after_recording
 test_extra_merge_args_forwarded
 test_missing_meta_refuses_before_merge

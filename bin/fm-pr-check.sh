@@ -105,14 +105,25 @@ pr_number_from_url() {
 PR_BASE_LABEL=
 PR_HEAD_OID=
 resolve_pr_fields() {
-  local out
+  local out base head extra
   [ -n "$WT" ] && [ -d "$WT" ] || return 1
   command -v gh >/dev/null 2>&1 || return 1
   out=$(cd "$WT" && gh pr view "$URL" --json baseRefName,headRefOid \
     -q '[.baseRefName, .headRefOid] | @tsv' 2>/dev/null) || return 1
   [ -n "$out" ] || return 1
-  PR_BASE_LABEL=$(printf '%s' "$out" | cut -f1)
-  PR_HEAD_OID=$(printf '%s' "$out" | cut -f2)
+  # Split strictly on the tab. `cut` would not do: without -s it echoes a line
+  # carrying no delimiter IN FULL for every field asked of it, so a single
+  # undelimited field would silently land the SAME string in both variables and
+  # record a bogus pr_head= that fm-review-diff.sh and fm-teardown.sh then read
+  # as a commit sha. Anything but exactly two non-empty fields is malformed:
+  # say so and leave both empty, so the base guard fails closed.
+  IFS=$'\t' read -r base head extra <<< "$out"
+  if [ -z "$base" ] || [ -z "$head" ] || [ -n "$extra" ]; then
+    echo "warning: gh returned a malformed base/head response for $URL ('$out'); treating both as unresolved." >&2
+    return 1
+  fi
+  PR_BASE_LABEL=$base
+  PR_HEAD_OID=$head
   return 0
 }
 resolve_pr_fields || true

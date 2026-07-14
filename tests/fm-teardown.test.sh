@@ -220,12 +220,18 @@ case "${1:-} ${2:-}" in
 esac
 exit 0
 SH
+  # Two distinct TSV queries reach this mock: fm-teardown.sh asks for
+  # state,headRefOid, and fm-pr-check.sh asks for baseRefName,headRefOid. Both
+  # must answer with a real tab-delimited pair - a bare undelimited sha would
+  # only be parsed by a non-strict split, and would stop exercising the contract
+  # the callers actually rely on.
   cat > "$case_dir/fakebin/gh" <<SH
 #!/usr/bin/env bash
 case "\${1:-} \${2:-}" in
   "pr view")
     case " \$* " in
       *"state,headRefOid"*) printf '%s\t%s\n' 'MERGED' '$head' ; exit 0 ;;
+      *"baseRefName,headRefOid"*) printf '%s\t%s\n' 'main' '$head' ; exit 0 ;;
       *"headRefOid"*) printf '%s\n' '$head' ; exit 0 ;;
     esac
     ;;

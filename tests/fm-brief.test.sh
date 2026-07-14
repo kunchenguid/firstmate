@@ -317,6 +317,34 @@ test_base_no_mistakes_brief_documents_the_real_recovery() {
   pass "fm-brief.sh: the no-mistakes base brief documents the retarget recovery, not an impossible base flag"
 }
 
+# The stock no-mistakes definition of done ends with "and stop. You are finished."
+# An extra gate appended AFTER that terminator is one the crewmate stops before
+# reaching, so the base retarget has to sit BEFORE it - otherwise the crewmate
+# reports done on a still-default-based PR, the pre-merge guard refuses it, and
+# the task stalls on a supervision round-trip that the brief was supposed to avoid.
+test_base_gate_precedes_the_done_terminator() {
+  local home id brief gate_line done_line
+  home="$TMP_ROOT/base-order-home"
+  mkdir -p "$home/data"
+  id="brief-base-order1"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --base feature/x >/dev/null 2>&1 \
+    || fail "base-order: fm-brief.sh --base should exit 0"
+  brief="$home/data/$id/brief.md"
+
+  gate_line=$(grep -n 'gh-axi pr edit {n} --base feature/x' "$brief" | head -1 | cut -d: -f1)
+  done_line=$(grep -n 'You are finished\.' "$brief" | head -1 | cut -d: -f1)
+  [ -n "$gate_line" ] || fail "base-order: the brief has no base retarget gate at all"
+  [ -n "$done_line" ] || fail "base-order: the brief has no 'You are finished.' terminator"
+  [ "$gate_line" -lt "$done_line" ] \
+    || fail "base-order: the base gate (line $gate_line) sits AFTER 'You are finished.' (line $done_line), so the crewmate stops before reading it"
+
+  # And the terminator itself must carry the base condition, so a crewmate that
+  # reads only the done line still cannot call a default-based PR done.
+  assert_grep "gh-axi pr view {n} --json baseRefName\` reports \`feature/x\`" "$brief" \
+    "base-order: the done condition does not require the PR's base label to report the intended base"
+  pass "fm-brief.sh: the base gate is read before the definition of done's terminator"
+}
+
 # --base also form works, and the sidecar holds only the branch name on one line.
 test_base_equals_form_and_sidecar_shape() {
   local home id
@@ -434,6 +462,7 @@ test_pause_verb_override_renders_all_brief_scaffolds
 test_base_no_mistakes_records_sidecar_and_brief
 test_base_roots_branch_on_the_base
 test_base_no_mistakes_brief_documents_the_real_recovery
+test_base_gate_precedes_the_done_terminator
 test_base_equals_form_and_sidecar_shape
 test_base_direct_pr_targets_base
 test_base_rejected_for_scout
