@@ -735,8 +735,21 @@ fm_herdr_lab_mark_stopped() { # <session>
   fm_herdr_lab_write_state "$name" "$updated"
 }
 
+fm_herdr_lab_stop_running_instance() { # <session>
+  local name=$1 stop_status=0 post_status=0
+  fm_herdr_lab_raw "$name" session stop "$name" --json || stop_status=$?
+  fm_herdr_lab_stop_postcheck "$name" || post_status=$?
+  if [ "$post_status" -eq 0 ]; then
+    fm_herdr_lab_mark_stopped "$name" || post_status=$?
+  fi
+  if [ "$stop_status" -ne 0 ]; then
+    fm_herdr_lab_error "session stop failed for '$name' (status=$stop_status)"
+  fi
+  [ "$stop_status" -eq 0 ] && [ "$post_status" -eq 0 ]
+}
+
 fm_herdr_lab_stop_unlocked() { # <session>
-  local name=$1 tripwire sessions running phase stop_status=0 post_status=0
+  local name=$1 tripwire sessions running phase
   fm_herdr_lab_validate_name "$name" || return 1
   tripwire=$(fm_herdr_lab_tripwire_path "$name")
   [ -f "$tripwire" ] || {
@@ -757,19 +770,35 @@ fm_herdr_lab_stop_unlocked() { # <session>
     fm_herdr_lab_mark_stopped "$name"
     return
   fi
-  fm_herdr_lab_raw "$name" session stop "$name" --json || stop_status=$?
-  fm_herdr_lab_stop_postcheck "$name" || post_status=$?
-  if [ "$post_status" -eq 0 ]; then
-    fm_herdr_lab_mark_stopped "$name" || post_status=$?
-  fi
-  if [ "$stop_status" -ne 0 ]; then
-    fm_herdr_lab_error "session stop failed for '$name' (status=$stop_status)"
-  fi
-  [ "$stop_status" -eq 0 ] && [ "$post_status" -eq 0 ]
+  fm_herdr_lab_stop_running_instance "$name"
+}
+
+fm_herdr_lab_stop_for_delete() { # <session>
+  local name=$1 sessions running phase authorization
+  sessions=$(fm_herdr_lab_session_list "$name" 2>/dev/null) || {
+    fm_herdr_lab_error "cannot list Herdr sessions immediately before the delete-authorizing stop"
+    return 1
+  }
+  fm_herdr_lab_assert_owned_from_list "$name" "$sessions" || return 1
+  running=$(printf '%s' "$sessions" | jq -r --arg name "$name" \
+    '.sessions[] | select(.name == $name) | .running' 2>/dev/null) || running=invalid
+  phase=$(fm_herdr_lab_state_phase "$name") || phase=invalid
+  [ "$running" = true ] && [ "$phase" = running ] || {
+    fm_herdr_lab_error "refusing delete for '$name': a fresh live owned instance is required; run provision before teardown"
+    return 1
+  }
+  authorization=$(od -An -tx1 -N32 /dev/urandom 2>/dev/null | tr -d ' \n') || {
+    fm_herdr_lab_error "cannot create an in-memory delete authorization for '$name'"
+    return 1
+  }
+  [ "${#authorization}" = 64 ] || return 1
+  fm_herdr_lab_stop_running_instance "$name" || return 1
+  FM_HERDR_LAB_DELETE_AUTHORIZATION=$authorization
 }
 
 fm_herdr_lab_teardown_unlocked() { # <session>
   local name=$1 tripwire sessions state running phase owned delete_status=0 attempt=0
+  local FM_HERDR_LAB_DELETE_AUTHORIZATION=""
   fm_herdr_lab_validate_name "$name" || return 1
   tripwire=$(fm_herdr_lab_tripwire_path "$name")
   [ -f "$tripwire" ] || {
@@ -799,14 +828,7 @@ fm_herdr_lab_teardown_unlocked() { # <session>
     nondefault) fm_herdr_lab_assert_owned_from_list "$name" "$sessions" || return 1 ;;
     *) fm_herdr_lab_error "refusing teardown for '$name': unsafe session state '$state'"; return 1 ;;
   esac
-  running=$(printf '%s' "$sessions" | jq -r --arg name "$name" \
-    '.sessions[] | select(.name == $name) | .running' 2>/dev/null) || running=invalid
-  phase=$(fm_herdr_lab_state_phase "$name") || phase=invalid
-  [ "$running" = true ] && [ "$phase" = running ] || {
-    fm_herdr_lab_error "refusing delete for '$name': Herdr exposes no persistent instance identity after a separate stop; reprovision through the helper before teardown"
-    return 1
-  }
-  fm_herdr_lab_stop_unlocked "$name" || return 1
+  fm_herdr_lab_stop_for_delete "$name" || return 1
   sessions=$(fm_herdr_lab_session_list "$name" 2>/dev/null) || {
     fm_herdr_lab_error "cannot list Herdr sessions immediately before delete"
     return 1
@@ -832,6 +854,12 @@ fm_herdr_lab_teardown_unlocked() { # <session>
     return 1
   }
   fm_herdr_lab_assert_owned_from_list "$name" "$sessions" || return 1
+  [ "${#FM_HERDR_LAB_DELETE_AUTHORIZATION}" = 64 ] \
+    && [[ "$FM_HERDR_LAB_DELETE_AUTHORIZATION" != *[!0-9a-f]* ]] || {
+    fm_herdr_lab_error "refusing delete for '$name': the same-lock stop authorization is missing or consumed"
+    return 1
+  }
+  FM_HERDR_LAB_DELETE_AUTHORIZATION=""
   fm_herdr_lab_raw "$name" session delete "$name" --json >/dev/null 2>&1 || delete_status=$?
   while [ "$attempt" -lt 20 ]; do
     sessions=$(fm_herdr_lab_session_list "$name" 2>/dev/null) || {

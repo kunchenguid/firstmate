@@ -50,16 +50,6 @@ esac
 
 case "$1 ${2:-}" in
   "session list")
-    if [ -f "$state/$session.replace-storage-count" ]; then
-      replace_storage_count=$(cat "$state/$session.replace-storage-count")
-      if [ "$replace_storage_count" -le 1 ]; then
-        rm -f "$state/$session.replace-storage-count"
-        rm -rf "$session_dir"
-        mkdir -p "$session_dir"
-      else
-        printf '%s\n' "$((replace_storage_count - 1))" > "$state/$session.replace-storage-count"
-      fi
-    fi
     if [ -f "$state/$session.replace-list-count" ]; then
       replace_count=$(cat "$state/$session.replace-list-count")
       if [ "$replace_count" -le 1 ]; then
@@ -539,8 +529,10 @@ test_failed_delete_retains_tripwire() {
   [ "$(cat "$FAKE_STATE/$name")" = stopped ] || fail "failed delete changed the stopped lab session"
   assert_present "$TRIPWIRES/$name.fleet-state.json" "failed delete removed the ownership tripwire"
   status=0
+  : > "$FAKE_LOG"
   run_with_fake fm_herdr_lab_teardown "$name" >/dev/null 2>&1 || status=$?
   expect_code 1 "$status" "a later teardown must not trust persisted stopped state"
+  assert_no_grep "session delete $name" "$FAKE_LOG" "consumed authorization reached delete on retry"
   run_with_fake fm_herdr_lab_provision "$name" || fail "retry after failed delete did not re-prove live ownership"
   run_with_fake fm_herdr_lab_teardown "$name" || fail "retry after failed delete did not clean up the lab session"
   assert_absent "$TRIPWIRES/$name.fleet-state.json" "successful retry left the ownership tripwire behind"
@@ -669,17 +661,20 @@ test_replacement_immediately_before_delete_fails_closed() {
 }
 
 test_stopped_replacement_with_reused_fields_fails_closed() {
-  local name="fm-lab-stopped-reused-fields-$$" status=0 token
+  local name="fm-lab-stopped-reused-fields-$$" status=0 token output
   run_with_fake fm_herdr_lab_provision "$name" || fail "stopped reused-fields fixture provision failed"
-  printf '%s\n' 4 > "$FAKE_STATE/$name.replace-storage-count"
+  run_with_fake fm_herdr_lab_stop "$name" || fail "stopped reused-fields fixture stop failed"
+  printf '%s\n' foreign-stopped > "$FAKE_STATE/$name"
   : > "$FAKE_LOG"
-  run_with_fake fm_herdr_lab_teardown "$name" >/dev/null 2>&1 || status=$?
+  output=$(run_with_fake fm_herdr_lab_teardown "$name" 2>&1) || status=$?
   expect_code 1 "$status" "stopped replacement with reused fields must fail closed"
   assert_no_grep "session delete $name" "$FAKE_LOG" "stopped reused-fields replacement reached delete"
   assert_present "$TRIPWIRES/$name.fleet-state.json" "stopped reused-fields replacement discarded evidence"
+  assert_contains "$output" "run provision before teardown" \
+    "stopped reused-fields refusal omitted actionable reprovision guidance"
   token=$(jq -r '.owned_session.instance.token_path' "$TRIPWIRES/$name.fleet-state.json")
   rm -f "$token" "$TRIPWIRES/$name.fleet-state.json" "$FAKE_STATE/$name"
-  pass "fm-herdr-lab: stopped replacements cannot reuse authoritative fields"
+  pass "fm-herdr-lab: same-directory stopped replacements cannot authorize delete"
 }
 
 test_generic_socket_parent_cannot_prove_storage_identity() {

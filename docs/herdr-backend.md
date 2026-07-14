@@ -153,7 +153,7 @@ The lab helper performs fresh baseline and ownership checks immediately before s
 The canonical tripwire accepts only one structurally valid JSON inventory whose initial `sessions` array is exactly empty or contains exactly one session named `default`, records its exact running state, and rejects every foreign or contradictory record.
 After provisioning, the same state record binds a cryptographic launch nonce to the foreground server's socket-owning PID, process start identity, and the device/inode identity of the directory derived from the authoritative `socket_path`, without extending Herdr's inventory schema.
 The guarded stop verifies the exact baseline, record, and persistent storage identity, confirms that the captured process exited and released its socket, and only then persists the stopped phase.
-Delete is authorized only when teardown itself proved the live nonce-bound process and performed that stop under the same lifecycle lock.
+Delete is authorized only by a one-use in-memory nonce created after teardown proves the live nonce-bound process and returned after that same invocation performs and postchecks stop under the same lifecycle lock.
 A session stopped by an earlier operation must be reprovisioned through the helper to establish a fresh live proof before teardown, because Herdr 0.7.3 exposes no persistent instance ID.
 Teardown repeats the exact stopped-record, session-specific storage, and baseline checks immediately before delete, confirms absence afterward, and refuses every ambiguous replacement.
 The canonical E2E removes its temporary sandbox only after confirmed guarded teardown; a cleanup failure retains the tripwire, nonce, and sandbox path for a safe retry.
@@ -207,7 +207,7 @@ Regression coverage exercises live-delete rejection, delayed deletion with a non
 ### Canonical guide acceptance run
 
 The install and lifecycle guide is encoded in `tests/fm-herdr-guide-e2e.test.sh` so the recurring mechanics remain auditable.
-The generated session was exactly `fm-lab-herdr-guide-e2e-70934-31074`.
+The generated session was exactly `fm-lab-herdr-guide-e2e-36614-14520`.
 The exact command run from the repository root on 2026-07-15 was:
 
 ```bash
@@ -219,7 +219,7 @@ It then used only the guarded helper for the generated non-default session and r
 The exact acceptance line was:
 
 ```text
-HERDR_GUIDE_E2E_OK version=0.7.3 protocol=16 session=fm-lab-herdr-guide-e2e-70934-31074 baseline=default default=herdr configured=herdr readiness=ok spawn=ok steer=ok watcher=signal restart=recovered teardown=ok lab_teardown=ok
+HERDR_GUIDE_E2E_OK version=0.7.3 protocol=16 session=fm-lab-herdr-guide-e2e-36614-14520 baseline=default default=herdr configured=herdr readiness=ok spawn=ok steer=ok watcher=signal restart=recovered teardown=ok lab_teardown=ok
 ```
 
 The guarded teardown succeeded on its first call and the fleet-state tripwire confirmed the identical stopped `default` session before and after the run.
