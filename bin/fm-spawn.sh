@@ -909,19 +909,28 @@ real_path_or_raw() {  # <path>
 # herdr-sm-spaces-k4). Both branches converge on the same $T ("target") string
 # that every downstream operation (send/capture/kill) already treats as opaque
 # per-backend routing (fm_backend_resolve_selector).
+
+# spawn_worktree_is_isolated <path>: 0 when <path> resolves to a genuine
+# isolated git worktree root distinct from the primary checkout. The worktree-
+# discovery poll and validate_spawn_worktree share this so a transient
+# foreground-cwd misread - '/' can be reported for an instant while treehouse is
+# still setting the worktree up under load - is never latched as the worktree.
+spawn_worktree_is_isolated() {  # <path>
+  local cand=$1 cand_real cand_top cand_top_real
+  cand_real=$(cd "$cand" 2>/dev/null && pwd -P) || return 1
+  [ -n "$cand_real" ] || return 1
+  cand_top=$(git -C "$cand" rev-parse --show-toplevel 2>/dev/null) || return 1
+  [ -n "$cand_top" ] || return 1
+  cand_top_real=$(cd "$cand_top" 2>/dev/null && pwd -P) || return 1
+  [ -n "$cand_top_real" ] || return 1
+  [ "$cand_real" = "$cand_top_real" ] || return 1
+  [ "$cand_real" != "$PROJ_ABS_REAL" ] || return 1
+  return 0
+}
 validate_spawn_worktree() {  # <source> <inspect-target>
-  local source=$1 inspect_target=$2 wt_real proj_real wt_top wt_top_real
-  wt_real=
-  if ! wt_real=$(cd "$WT" 2>/dev/null && pwd -P); then
-    wt_real=
-  fi
-  proj_real=$PROJ_ABS_REAL
-  wt_top=$(git -C "$WT" rev-parse --show-toplevel 2>/dev/null || true)
-  wt_top_real=
-  if ! wt_top_real=$(cd "$wt_top" 2>/dev/null && pwd -P); then
-    wt_top_real=
-  fi
-  if [ -z "$wt_real" ] || [ -z "$wt_top_real" ] || [ "$wt_real" != "$wt_top_real" ] || [ "$wt_real" = "$proj_real" ]; then
+  local source=$1 inspect_target=$2 wt_top
+  if ! spawn_worktree_is_isolated "$WT"; then
+    wt_top=$(git -C "$WT" rev-parse --show-toplevel 2>/dev/null || true)
     echo "error: $source did not yield an isolated worktree (resolved '$WT'; worktree root '${wt_top:-none}'; primary '$PROJ_ABS'); refusing to launch to avoid tangling the primary checkout. Inspect target $inspect_target" >&2
     exit 1
   fi
@@ -1080,11 +1089,30 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   # Compare against PROJ_ABS_REAL (physical), not PROJ_ABS: a symlinked project
   # prefix would otherwise make the pane's OS-level cwd read differ from
   # PROJ_ABS on the very first poll, before the pane has actually moved.
+  #
+  # Latch a genuine isolated worktree the instant it appears. A non-project path
+  # that is NOT an isolated worktree is treated two ways by its stability: a
+  # single-poll blip is skipped (foreground_cwd can momentarily read '/' while
+  # treehouse is still setting the worktree up under load - latching that bogus
+  # path used to strand the spawn on the isolation guard), but the SAME bad path
+  # seen on consecutive reads is a stable settle, a real tangle risk, so it is
+  # latched too and the guard below aborts it promptly instead of waiting out the
+  # full timeout.
+  prev_bad=
   for _ in $(seq 1 60); do
     p=$(spawn_current_path "$WT_TARGET" || true)
     if [ -n "$p" ] && [ "$(real_path_or_raw "$p")" != "$PROJ_ABS_REAL" ]; then
-      WT="$p"
-      break
+      if spawn_worktree_is_isolated "$p"; then
+        WT="$p"
+        break
+      fi
+      if [ "$p" = "$prev_bad" ]; then
+        WT="$p"
+        break
+      fi
+      prev_bad="$p"
+    else
+      prev_bad=
     fi
     sleep 1
   done
