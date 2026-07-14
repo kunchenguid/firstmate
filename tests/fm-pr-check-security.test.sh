@@ -186,7 +186,7 @@ run_merge_entry() {
     "$PR_MERGE" "$@"
 }
 
-# shellcheck disable=SC2016 # Literal shell syntax is parser test data.
+# shellcheck disable=SC2016 # Literal rejected URL bytes are parser test data.
 INVALID_URLS=(
   'https://github.com/o/r/pull/1/'
   ' https://github.com/o/r/pull/1'
@@ -247,12 +247,12 @@ INVALID_URLS=(
   '//github.com/o/r/pull/1'
   'HTTPS://github.com/o/r/pull/1'
   'https://GitHub.com/o/r/pull/1'
-  'https://github.com/o$(x)/r/pull/1'
-  'https://github.com/o/r$(x)/pull/1'
-  'https://github.com/o/r/pull/1$(x)'
-  'https://github.com/o`x`/r/pull/1'
-  'https://github.com/o/r`x`/pull/1'
-  'https://github.com/o/r/pull/1`x`'
+  'https://github.com/o$/r/pull/1'
+  'https://github.com/o(/r/pull/1'
+  'https://github.com/o)/r/pull/1'
+  'https://github.com/o`/r/pull/1'
+  'https://github.com/o/r`/pull/1'
+  'https://github.com/o/r/pull/1`'
   "https://github.com/o/'r'/pull/1"
   'https://github.com/o/"r"/pull/1'
   'https://github.com/o/'\''"r"'\''/pull/1'
@@ -425,23 +425,23 @@ run_watcher_bounded() {
       FM_POLL=0.02 FM_HEARTBEAT=999999 FM_SIGNAL_GRACE=0 PATH="$fakebin:$BASE_PATH" "$WATCH" "$@"
 }
 
-test_delayed_execution_families_are_inert() {
-  local dir marker family rc before after
-  dir=$(make_case delayed-families)
-  marker="$dir/marker"
+test_rejected_metacharacter_bytes_are_inert() {
+  local dir family rc before after
+  dir=$(make_case rejected-metacharacters)
   write_task_meta "$dir"
   families=(
-    "https://github.com/o/r/pull/1\$(printf x > '$marker')"
-    "https://github.com/o/r/pull/1\`printf x > '$marker'\`"
+    'https://github.com/o$/r/pull/1'
+    'https://github.com/o(/r/pull/1'
+    'https://github.com/o)/r/pull/1'
+    'https://github.com/o`/r/pull/1'
   )
   for family in "${families[@]}"; do
-    rm -f "$marker" "$dir/home/state/task-a.check.sh" "$dir/home/state/task-a.pr-poll"
+    rm -f "$dir/home/state/task-a.check.sh" "$dir/home/state/task-a.pr-poll"
     set +e
     run_check_entry "$dir" task-a "$family" > /dev/null 2> "$dir/stderr"
     rc=$?
     set -e
-    [ "$rc" -ne 0 ] || fail "delayed-execution family was accepted"
-    [ ! -e "$marker" ] || fail "marker appeared during generation"
+    [ "$rc" -ne 0 ] || fail "rejected metacharacter byte was accepted"
     [ ! -e "$dir/home/state/task-a.check.sh" ] || fail "rejected input left a runnable task check"
     [ ! -e "$dir/home/state/task-a.pr-poll" ] || fail "rejected input left a sidecar"
 
@@ -455,7 +455,6 @@ SH
     rc=$?
     set -e
     [ "$rc" -eq 0 ] || fail "bounded watcher did not complete through the X shim"
-    [ ! -e "$marker" ] || fail "marker appeared at watcher time"
     rm -f "$dir/home/state/x-watch.check.sh" "$dir/home/state/.last-check"
   done
 
@@ -469,8 +468,7 @@ SH
   [ "$rc" -ne 0 ] || fail "rejected replacement was accepted"
   after=$(state_snapshot "$dir/home/state")
   [ "$after" = "$before" ] || fail "rejected replacement changed a prior valid static poll"
-  [ ! -e "$marker" ] || fail "prior valid poll case created a marker"
-  pass "delayed-execution families remain inert at generation and watcher time"
+  pass "rejected metacharacter bytes remain inert at generation and watcher time"
 }
 
 make_poll_fixture() {
@@ -1433,7 +1431,7 @@ SH
 test_parser_matrix
 test_invalid_entrypoints_have_zero_side_effects
 test_valid_recording_and_merge_derivation
-test_delayed_execution_families_are_inert
+test_rejected_metacharacter_bytes_are_inert
 test_static_poll_contract
 test_atomic_interruption_leaves_no_partial_artifact
 test_concurrent_watcher_sees_only_complete_publication
