@@ -1058,12 +1058,15 @@ spawn_send_literal "$T" "$LAUNCH"
 sleep 0.3
 spawn_send_key "$T" Enter
 
+echo "spawned $ID harness=$HARNESS kind=$KIND mode=$MODE yolo=$YOLO window=$META_WINDOW worktree=$WT"
+
 # post-spawn hook point (bin/fm-hooks-lib.sh; docs/extension-points.md): the
 # task is fully launched and state/<id>.meta is written, for every kind. A
 # batch spawn re-execs this script per pair, so the hook fires once per task.
+# Fired last, after the caller-visible 'spawned' line, so hook latency can never
+# delay it and an interrupt mid-hook cannot leave a launched task looking failed
+# to a caller reading this output (bin/fm-bootstrap.sh's liveness sweep does).
 # Best-effort local wiring: absent = no-op, a failing hook never blocks the spawn.
 fm_hook_run "$CONFIG" post-spawn \
   "FM_HOOK_TASK_ID=$ID" "FM_HOOK_META=$STATE/$ID.meta" "FM_HOOK_KIND=$KIND" \
   -- "$ID" "$STATE/$ID.meta"
-
-echo "spawned $ID harness=$HARNESS kind=$KIND mode=$MODE yolo=$YOLO window=$META_WINDOW worktree=$WT"

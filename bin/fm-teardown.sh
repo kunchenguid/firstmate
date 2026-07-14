@@ -1143,10 +1143,14 @@ if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only 
   "$FM_ROOT/bin/fm-fleet-sync.sh" "$PROJ" || true
 fi
 echo "teardown $ID complete (window $T, worktree $WT)"
+backlog_refresh_reminder
+
 # post-teardown hook point (bin/fm-hooks-lib.sh; docs/extension-points.md): the
 # task's worktree, endpoint, and state files are gone; only the id and kind
-# remain as identifiers. Best-effort: a failing hook never fails the teardown.
+# remain as identifiers. Fired last, after the backlog reminder, so hook latency
+# can never delay it and an interrupt mid-hook cannot swallow it while the
+# worktree and state files are already gone.
+# Best-effort: a failing hook never fails the teardown.
 fm_hook_run "$CONFIG" post-teardown \
   "FM_HOOK_TASK_ID=$ID" "FM_HOOK_KIND=$KIND" \
   -- "$ID" "$KIND"
-backlog_refresh_reminder

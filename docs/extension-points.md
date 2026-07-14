@@ -21,6 +21,8 @@ The failure semantics are the contract's core and hold at every hook point:
 - A hook cannot stall firstmate through its output either, because a hook never inherits firstmate's stdout or stderr.
   A hook may exit cleanly and still leave a background descendant alive - a `&`-ed notifier, a `nohup`-ed sync - which no time budget and no process-group kill can reach, and that orphan would hold whichever of firstmate's pipes it inherited open for as long as it lives, stalling any firstmate script that reads the calling script's output through a command substitution.
   So every path runs the hook with its stdout discarded and its stderr captured, and firstmate relays that captured stderr to its own stderr once the hook is done: diagnostics still reach the operator, and an orphan can hold nothing that firstmate waits on.
+  That capture is a private file (mode 0600) which firstmate unlinks as soon as it holds the descriptors, so hook stderr is never readable by another user and nothing is left behind in `TMPDIR` even if firstmate is interrupted mid-hook.
+- A hook cannot delay the work either: every hook point fires last in its script, after the calling flow's own work and its caller-visible output are complete, so a slow hook holds up nothing and an interrupt mid-hook can never leave a half-finished record behind.
 
 Each hook receives its values both as positional arguments and as `FM_HOOK_*` environment variables, so a hook can read whichever is convenient.
 The first positional argument is always the task id.

@@ -25,7 +25,12 @@
 #         group is killed, so no orphan survives holding the caller's stdout
 #     (n) hook exits clean but leaves a background child -> unreachable by any
 #         kill, yet the caller's command substitution still returns at once, on
-#         the timeout-binary, watchdog, and unbounded FM_HOOK_TIMEOUT=0 paths
+#         the timeout-binary and watchdog paths and on the unbounded
+#         FM_HOOK_TIMEOUT=0 path with and without a timeout binary on PATH
+#     (o) hook stderr -> relayed to firstmate's stderr, and its temp file is
+#         already unlinked, so nothing is left behind in TMPDIR
+#     (p) no mktemp, planted symlink at the fallback errfile name -> skipped
+#         rather than written through
 #   integration:
 #     (j) fm-spawn fires post-spawn once per spawned task (batch included) with
 #         the task's kind and meta path; a failing hook does not fail the spawn
@@ -308,11 +313,14 @@ SH
 
   # timeout-binary path, shell-watchdog path, and the unbounded FM_HOOK_TIMEOUT=0
   # path (which has no bound at all, so only detached stdio protects the caller).
-  for label in timeout-binary watchdog unbounded; do
+  # Unbounded is asserted both with and without a timeout binary on PATH, because
+  # "no time limit" is firstmate's own branch, not a timeout binary's semantics.
+  for label in timeout-binary watchdog unbounded unbounded-with-timeout-binary; do
     case $label in
       timeout-binary) path="$case_dir/fakebin:$PATH"; budget=60 ;;
       watchdog) path="$minbin"; budget=60 ;;
       unbounded) path="$minbin"; budget=0 ;;
+      unbounded-with-timeout-binary) path="$case_dir/fakebin:$PATH"; budget=0 ;;
     esac
     started=$SECONDS
     set +e
@@ -333,6 +341,60 @@ SH
     kill "$orphan" 2>/dev/null || true
   done < "$case_dir/orphan.pid"
   pass "a hook that leaves a background descendant behind never stalls the caller"
+}
+
+# The captured stderr reaches the operator, and the file it was captured in is
+# gone by the time the hook is done - firstmate unlinks it as soon as it holds
+# the descriptors, so an interrupt mid-hook can leave nothing behind in TMPDIR.
+test_hook_stderr_is_relayed_and_leaves_no_tempfile() {
+  local case_dir rc tmp leftovers
+  case_dir=$(make_case errfile)
+  tmp="$case_dir/tmp"
+  mkdir -p "$tmp"
+  printf '#!/usr/bin/env bash\nprintf %%s\\\\n "hook diag" >&2\nexit 0\n' \
+    > "$case_dir/config/hooks/post-spawn"
+  chmod +x "$case_dir/config/hooks/post-spawn"
+  set +e
+  TMPDIR="$tmp" PATH="$case_dir/fakebin:$PATH" \
+    fm_hook_run "$case_dir/config" post-spawn -- task-x1 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "errfile: fm_hook_run should return 0"
+  assert_grep 'hook diag' "$case_dir/stderr" \
+    "errfile: the hook's captured stderr was not relayed to firstmate's stderr"
+  leftovers=$(find "$tmp" -name 'fm-hook-err.*' | wc -l | tr -d ' ')
+  [ "$leftovers" = 0 ] \
+    || fail "errfile: a hook stderr temp file was left behind in TMPDIR"
+  pass "hook stderr is relayed and its temp file never outlives the hook"
+}
+
+# Without mktemp the runner falls back to a pid-keyed name in TMPDIR, which on a
+# shared /tmp an attacker can pre-plant as a symlink. The fallback creates under
+# 'set -C', so it skips the planted name rather than truncating what it points at.
+test_errfile_fallback_refuses_a_planted_symlink() {
+  local case_dir minbin tmp victim rc
+  case_dir=$(make_case errfile-symlink)
+  minbin=$(make_no_timeout_path "$case_dir")
+  rm -f "$minbin/mktemp"
+  tmp="$case_dir/tmp"
+  mkdir -p "$tmp"
+  victim="$case_dir/victim"
+  printf 'precious\n' > "$victim"
+  ln -s "$victim" "$tmp/fm-hook-err.$$.0"
+  printf '#!/usr/bin/env bash\nprintf %%s\\\\n "hook diag" >&2\nexit 0\n' \
+    > "$case_dir/config/hooks/post-spawn"
+  chmod +x "$case_dir/config/hooks/post-spawn"
+  set +e
+  TMPDIR="$tmp" PATH="$minbin" \
+    fm_hook_run "$case_dir/config" post-spawn -- task-x1 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "errfile-symlink: fm_hook_run should return 0"
+  assert_grep 'precious' "$victim" \
+    "errfile-symlink: the planted symlink's target was clobbered"
+  assert_grep 'hook diag' "$case_dir/stderr" \
+    "errfile-symlink: the hook's stderr was not relayed via the next candidate"
+  pass "the no-mktemp errfile fallback never writes through a planted symlink"
 }
 
 test_pr_check_fires_pr_ready_on_first_record_only() {
@@ -518,6 +580,8 @@ test_watchdog_kills_a_hanging_hook_without_timeout_binary
 test_watchdog_lets_a_fast_hook_finish_without_timeout_binary
 test_watchdog_kills_descendants_and_never_stalls_the_caller
 test_orphaned_descendant_never_stalls_the_caller
+test_hook_stderr_is_relayed_and_leaves_no_tempfile
+test_errfile_fallback_refuses_a_planted_symlink
 test_spawn_fires_post_spawn_per_task_and_survives_failure
 test_pr_check_fires_pr_ready_on_first_record_only
 test_pr_merge_fires_post_merge_after_merge
