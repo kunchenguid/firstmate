@@ -78,6 +78,7 @@ tmp=$(mktemp -d) && printf 'done: smoke\n' > "$tmp/smoke.status" && FM_STATE_OVE
 
 Discover tests by listing `tests/*.test.sh`: each is a self-contained bash script named `<subject>.test.sh`, and its header comment describes what it covers, so run one directly to focus on a subject.
 Tests that need a real optional backend or an explicit opt-in (real herdr/zellij/cmux smoke tests, the live Pi regression) skip themselves and print the tool or environment gate needed to enable them, so the run-all loop above is always safe.
+Tests and the code they cover must not depend on the ambient locale: the no-mistakes gate's test step and every daemon-spawned run execute with no `LANG`/`LC_*` (the C/POSIX locale), where bash counts bytes as characters and a grep bracket expression over multibyte glyphs degenerates to a byte set - pin `LC_ALL=C` and match multibyte glyphs with literal prefixes or ERE alternation (see `bin/fm-composer-lib.sh`), and reproduce gate-only failures with `env -u LANG -u LC_ALL -u LC_CTYPE ... bash tests/<subject>.test.sh`.
 
 ## Questions
 

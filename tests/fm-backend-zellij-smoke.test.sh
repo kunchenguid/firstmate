@@ -49,8 +49,27 @@ fm_backend_source zellij || fail "fm_backend_source zellij failed"
 
 # --- version gate + container ensure -----------------------------------------
 
-fm_backend_zellij_version_check || fail "version_check failed against the real installed zellij"
-pass "real zellij: version_check accepts the installed binary's version"
+# The gate's accept/refuse logic is covered hermetically against controlled,
+# stubbed version strings in tests/fm-backend-zellij.test.sh (accepts the 0.44
+# minimum and newer, refuses older, refuses missing). Here the gate meets the
+# REAL installed binary: an installed zellij below the verified minimum is a
+# machine fact, not a firstmate regression, so verify the gate refuses it
+# LOUDLY (naming the installed version and the minimum) and then skip the
+# real-server smoke - the adapter itself refuses to drive that binary -
+# mirroring the not-installed skip above.
+if GATE_ERR=$(fm_backend_zellij_version_check 2>&1); then
+  pass "real zellij: version_check accepts the installed binary's version"
+else
+  INSTALLED_VER=$(zellij --version 2>/dev/null | awk '{print $2}')
+  case "$GATE_ERR" in
+    *"$INSTALLED_VER"*"verified minimum"*) : ;;
+    *) fail "version_check refused the installed zellij ($INSTALLED_VER) without naming it and the verified minimum: $GATE_ERR" ;;
+  esac
+  pass "real zellij: version_check refuses the below-minimum installed binary loudly ($INSTALLED_VER)"
+  echo "skip: installed zellij $INSTALLED_VER is below the verified minimum; real-server smoke skipped (refusal verified above; gate logic is covered with stubbed versions in tests/fm-backend-zellij.test.sh)"
+  trap - EXIT
+  exit 0
+fi
 
 CONTAINER=$(fm_backend_zellij_container_ensure) || fail "container_ensure failed"
 [ "$CONTAINER" = "$SESSION" ] || fail "container_ensure should echo the isolated session name, got '$CONTAINER'"

@@ -205,10 +205,17 @@ fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [
   if fm_composer_idle_matches "$content" "$idle_re" "$idle_case"; then
     printf 'empty'; return 0
   fi
-  # Strip a leading prompt glyph, then re-judge the remainder.
+  # Strip a leading prompt glyph, then re-judge the remainder. Each strip is a
+  # literal-prefix removal, never a `?` count: bash counts CHARACTERS per the
+  # ambient locale, so in the C/POSIX locale (any daemon-spawned run with no
+  # LANG/LC_*, e.g. the no-mistakes gate or the watcher) `${content#??}` ate
+  # only 2 of the 4 bytes of '❯ ' and the multibyte residue defeated the
+  # idle-placeholder match below; literal prefixes strip byte-exactly in every
+  # locale. The whitespace trim below already absorbs the space after a glyph.
   case "$content" in
-    '❯ '*|'› '*|'> '*|'$ '*|'% '*|'# '*) content=${content#??} ;;
-    '❯'*|'›'*|'>'*|'$'*|'%'*|'#'*) content=${content#?} ;;
+    '❯'*) content=${content#❯} ;;
+    '›'*) content=${content#›} ;;
+    '>'*|'$'*|'%'*|'#'*) content=${content#?} ;;
   esac
   content="${content#"${content%%[![:space:]]*}"}"
   content="${content%"${content##*[![:space:]]}"}"

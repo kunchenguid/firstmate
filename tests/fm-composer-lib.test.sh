@@ -114,6 +114,29 @@ test_idle_placeholder_case_mode_is_explicit() {
   pass "fm_composer_classify_content: idle matching preserves the caller's case mode"
 }
 
+# --- Locale independence -----------------------------------------------------
+
+test_classify_is_locale_independent() {
+  # Regression (2026-07-15): any daemon-spawned run has no LANG/LC_* (the
+  # no-mistakes gate's test step, the watcher, the afk daemon) and executes in
+  # the C/POSIX locale, where bash counts BYTES as characters. The old
+  # glyph-strip `${content#??}` then ate only 2 of the 4 bytes of '❯ ', the
+  # multibyte residue defeated the idle-placeholder match, and an idle
+  # composer read pending. Pin C here so the verdicts stay covered in that
+  # environment even when the suite runs from a UTF-8 interactive shell.
+  classify_c() {
+    LC_ALL=C bash -c '. "$0/bin/fm-composer-lib.sh"; fm_composer_classify_content "$@"' "$ROOT" "$@"
+  }
+  local idle='^Type a message\.\.\.$' out
+  out=$(classify_c 0 '❯')
+  [ "$out" = empty ] || fail "C locale: a bare agent glyph should read empty, got '$out'"
+  out=$(classify_c 0 '❯ Type a message...' "$idle")
+  [ "$out" = empty ] || fail "C locale: the idle placeholder after a glyph should read empty (byte-exact glyph strip), got '$out'"
+  out=$(classify_c 0 '❯ fix findings 1 and 3')
+  [ "$out" = pending ] || fail "C locale: real text after a glyph should still read pending, got '$out'"
+  pass "fm_composer_classify_content: verdicts are identical under the C/POSIX locale (no LANG, the daemon and gate environment)"
+}
+
 # --- Real text is pending ---------------------------------------------------
 
 test_real_text_is_pending() {
@@ -133,4 +156,5 @@ test_agent_glyphs_are_empty_bordered_and_bare
 test_empty_content_is_empty
 test_idle_placeholder_is_empty
 test_idle_placeholder_case_mode_is_explicit
+test_classify_is_locale_independent
 test_real_text_is_pending

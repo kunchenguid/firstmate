@@ -739,7 +739,16 @@ FM_BACKEND_HERDR_IDLE_RE=${FM_BACKEND_HERDR_IDLE_RE:-'^Type a message\.\.\.$'}
 # Known bare (unbordered) prompt glyphs a composer row may start with: ❯
 # (claude) and › (codex) only. Generic shell-style glyphs > $ % # are still
 # recognized after a bordered composer row has already been structurally found.
-FM_BACKEND_HERDR_BARE_PROMPT_RE=${FM_BACKEND_HERDR_BARE_PROMPT_RE:-'^[❯›]'}
+# Written as an ERE alternation, never a bracket expression: in the C/POSIX
+# locale (any daemon-spawned run with no LANG/LC_*, e.g. the no-mistakes gate's
+# test step or the watcher) a bracket expression degenerates to a BYTE set, and
+# every box-drawing border glyph (╭ ╰ │ ...) shares ❯/›'s UTF-8 lead byte 0xE2,
+# so the old '^[❯›]' matched the composer box's own border rows and the LAST
+# border row outranked the real composer row (verified 2026-07-15 on macOS
+# grep: `printf '╰x\n' | env -i /usr/bin/grep -cE '^[❯›]'` -> 1, alternation
+# -> 0). The scan below pins LC_ALL=C so the match is the same byte-exact
+# alternation in every environment; an override must stay alternation-shaped.
+FM_BACKEND_HERDR_BARE_PROMPT_RE=${FM_BACKEND_HERDR_BARE_PROMPT_RE:-'^(❯|›)'}
 # Pi allows a multi-line composer between its horizontal separators. Bound the
 # structural candidate so two unrelated transcript rules with an arbitrarily
 # large region between them can never be promoted into a composer.
@@ -832,7 +841,7 @@ fm_backend_herdr_composer_state() {  # <target> -> empty|pending|unknown
         found=1
         ;;
       *)
-        if printf '%s' "$trimmed" | grep -qE "$FM_BACKEND_HERDR_BARE_PROMPT_RE"; then
+        if printf '%s' "$trimmed" | LC_ALL=C grep -qE "$FM_BACKEND_HERDR_BARE_PROMPT_RE"; then
           shape=bare
           raw_match=$line
           generic_line=$row
@@ -903,7 +912,7 @@ EOF
   fi
   # Delegate the empty/pending/unknown decision to the shared owner. The bare
   # shape only ever starts with an AGENT glyph (FM_BACKEND_HERDR_BARE_PROMPT_RE
-  # is '^[❯›]'), so a bare shell prompt never reaches here - it stays 'unknown'
+  # is '^(❯|›)'), so a bare shell prompt never reaches here - it stays 'unknown'
   # via the no-composer-row path above, exactly as before.
   fm_composer_classify_content "$bordered" "$stripped" "$FM_BACKEND_HERDR_IDLE_RE"
 }

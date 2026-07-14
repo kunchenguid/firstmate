@@ -823,6 +823,26 @@ test_composer_state_bare_prompt_is_empty() {
   pass "fm_backend_herdr_composer_state: a bare '❯' composer row reads empty"
 }
 
+test_composer_state_bare_prompt_is_empty_in_c_locale() {
+  # Regression (2026-07-15): the composer scan classifies rows in whatever
+  # locale the process inherited, and any daemon-spawned run has no LANG/LC_*
+  # (the no-mistakes gate's test step, the watcher, the afk daemon), so it
+  # runs in the C/POSIX locale. There the old '^[❯›]' bracket expression
+  # degenerated to a byte set; every box-drawing glyph shares ❯/›'s UTF-8
+  # lead byte 0xE2, so the composer box's own ╰...╯ bottom border row matched
+  # as the bottom-most "bare prompt" row and an EMPTY bordered composer read
+  # as pending. Pin the whole run to LC_ALL=C here so the C-locale path stays
+  # covered even when the suite itself runs from a UTF-8 interactive shell.
+  local dir log resp fb out
+  dir="$TMP_ROOT/composer-bare-c-locale"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '  ╭────────────────────────╮\n  │ ❯                      │\n  ╰──────── Composer ─────╯\n\n  Shift+Tab:mode\n' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" LC_ALL=C \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT" )
+  [ "$out" = empty ] || fail "a bare prompt glyph should read as empty under the C locale too (daemon/gate environment), got '$out'"
+  pass "fm_backend_herdr_composer_state: a bare '❯' composer row reads empty under the C/POSIX locale (no LANG, the daemon and gate environment)"
+}
+
 test_composer_state_ghost_placeholder_is_empty() {
   local dir log resp fb out
   dir="$TMP_ROOT/composer-ghost"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
@@ -2084,6 +2104,7 @@ test_busy_state_working_maps_to_busy
 test_busy_state_done_and_blocked_map_to_idle
 test_busy_state_unknown_on_no_agent
 test_composer_state_bare_prompt_is_empty
+test_composer_state_bare_prompt_is_empty_in_c_locale
 test_composer_state_ghost_placeholder_is_empty
 test_composer_state_real_text_is_pending
 test_composer_state_popup_placeholder_fill_is_pending

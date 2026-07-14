@@ -181,6 +181,22 @@ test_version_check_refuses_old_version() {
   pass "fm_backend_zellij_version_check: refuses an old version loudly"
 }
 
+test_version_check_refuses_boundary_minor_below_minimum() {
+  # The adjacent minor below the verified 0.44 minimum: 0.43.x must refuse on
+  # the minor comparison alone (same major), the exact boundary a real machine
+  # running zellij 0.43.1 sits on.
+  local dir fb out status
+  dir="$TMP_ROOT/version-boundary"; mkdir -p "$dir/responses"
+  fb=$(make_zellij_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" FM_ZELLIJ_FAKE_VERSION=0.43.1 \
+    bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_version_check' "$ROOT" 2>&1 )
+  status=$?
+  [ "$status" -ne 0 ] || fail "version_check should refuse 0.43.1 (the minor just below the 0.44 minimum)"
+  assert_contains "$out" "0.43.1" "version_check error did not name the rejected boundary version"
+  assert_contains "$out" "verified minimum" "version_check error did not name the verified minimum"
+  pass "fm_backend_zellij_version_check: refuses the boundary minor just below the minimum (0.43.1)"
+}
+
 test_version_check_refuses_missing_zellij() {
   local dir out status
   dir="$TMP_ROOT/version-missing"; mkdir -p "$dir/empty-fakebin"
@@ -1014,6 +1030,7 @@ test_scripts_reject_fm_target_label_mismatch() {
 test_version_check_accepts_current_version
 test_version_check_accepts_newer_version
 test_version_check_refuses_old_version
+test_version_check_refuses_boundary_minor_below_minimum
 test_version_check_refuses_missing_zellij
 test_session_defaults_to_firstmate
 test_session_honors_override
