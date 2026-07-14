@@ -17,7 +17,7 @@
 #   bin/fm-cd-pretool-check.sh --command '<cmd>'
 #
 # Stdin mode extracts .toolInput.command for Grok or .tool_input.command for
-# Claude and Codex. CLI mode is used by OpenCode and Pi after their adapters
+# Claude, Codex, and Devin. CLI mode is used by OpenCode and Pi after their adapters
 # extract the exact command string.
 #
 # Exit/output contract (identical shape to bin/fm-arm-pretool-check.sh):
@@ -44,7 +44,7 @@ usage() {
 Usage: fm-cd-pretool-check.sh [--command <cmd>] [--claude]
 
 With no --command, reads a PreToolUse-style JSON payload on stdin (Grok
-toolInput.command, or Claude/Codex tool_input.command).
+toolInput.command, or Claude/Codex/Devin tool_input.command).
 Fires only in the real primary firstmate checkout; it is a silent no-op in a
 crewmate/scout task worktree or any non-firstmate repo.
 Exits 0 to allow and 2 to deny a persistent top-level cwd change.

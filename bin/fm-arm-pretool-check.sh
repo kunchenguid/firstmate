@@ -15,7 +15,7 @@
 #   bin/fm-arm-pretool-check.sh --command '<cmd>' [--background true|false]
 #
 # Stdin mode extracts .toolInput.command for Grok or .tool_input.command for
-# Claude and Codex.
+# Claude, Codex, and Devin.
 # CLI mode is used by OpenCode and Pi after their adapters extract the exact
 # command string.
 # --background remains accepted for compatibility, but harness-native tracked
@@ -44,7 +44,7 @@ usage() {
 Usage: fm-arm-pretool-check.sh [--command <cmd>] [--background true|false] [--claude]
 
 With no --command, reads a PreToolUse-style JSON payload on stdin (Grok
-toolInput.command, or Claude/Codex tool_input.command).
+toolInput.command, or Claude/Codex/Devin tool_input.command).
 Exits 0 to allow and 2 to deny.
 The deny reason is written to stderr, with a Grok decision object on stdout
 unless --claude is supplied.

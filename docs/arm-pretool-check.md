@@ -22,7 +22,7 @@ It tokenizes the bytes and classifies lexical execution positions only.
 
 `bin/fm-arm-pretool-check.sh` supports these entry forms:
 
-- Stdin JSON at `.tool_input.command` for Claude and Codex.
+- Stdin JSON at `.tool_input.command` for Claude, Codex, and Devin.
 - Stdin JSON at `.toolInput.command` for Grok.
 - `--command <exact string>` for OpenCode, Pi, and pi-signed.
 - `--background` as a compatibility-only field that never changes the decision.
