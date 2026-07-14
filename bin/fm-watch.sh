@@ -203,15 +203,13 @@ window_kind() {
   echo unknown
 }
 
-# window_backend: the backend recorded in the meta whose window= matches <w>,
-# defaulting to Herdr (absent backend= means Herdr;
-# contract) when no matching meta carries the field, or none matches at all.
+# window_backend: the backend resolved from the meta whose window= matches <w>,
+# including the central removed-runtime guard, or Herdr when no meta matches.
 window_backend() {
   local w=$1 meta backend
   meta=$(fm_backend_meta_for_window "$w" "$STATE" 2>/dev/null || true)
   if [ -n "$meta" ]; then
-    backend=$(grep '^backend=' "$meta" | cut -d= -f2- || true)
-    [ -n "$backend" ] || backend=herdr
+    backend=$(fm_backend_of_meta "$meta")
     echo "$backend"
     return 0
   fi

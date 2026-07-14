@@ -283,6 +283,10 @@ secondmate_liveness_sweep() {
     [ -n "$window" ] || continue
     harness=$(fm_meta_get "$meta" harness)
     backend=$(fm_backend_of_meta "$meta")
+    if [ "$backend" = "$FM_BACKEND_LEGACY_REMOVED" ]; then
+      echo "SECONDMATE_LIVENESS: secondmate $id: skipped: legacy removed-runtime state requires work inspection and explicit cleanup; it was not treated as Herdr"
+      continue
+    fi
     target=$(fm_backend_target_of_meta "$meta")
     [ -n "$target" ] || target="$window"
     verdict=$(fm_backend_agent_alive "$backend" "$target" 2>/dev/null) || verdict="unknown"

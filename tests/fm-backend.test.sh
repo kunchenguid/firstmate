@@ -122,6 +122,23 @@ test_absent_metadata_defaults_safely() {
   pass "metadata: absent backend resolves safely under the Herdr default"
 }
 
+test_removed_runtime_metadata_fails_closed() {
+  local meta="$STATE/removed-runtime.meta" out rc
+  printf 'window=firstmate:fm-upgrade-case\n' > "$meta"
+  [ "$(fm_backend_of_meta "$meta")" = "$FM_BACKEND_LEGACY_REMOVED" ] \
+    || fail "removed-runtime target shape was reinterpreted as a current backend"
+  out=$(fm_backend_capture "$(fm_backend_of_meta "$meta")" firstmate:fm-upgrade-case 1 2>&1)
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "removed-runtime state reached a live backend adapter"
+  assert_contains "$out" "legacy removed runtime" "removed-runtime refusal lost its actionable diagnostic"
+  assert_contains "$out" "do not reinterpret it as Herdr" "removed-runtime refusal did not guard the upgrade hazard"
+  out=$(FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$STATE" "$ROOT/bin/fm-peek.sh" removed-runtime 1 2>&1)
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "fm-peek accepted removed-runtime state"
+  assert_contains "$out" "legacy removed runtime" "fm-peek lost the removed-runtime diagnostic"
+  pass "metadata: removed-runtime records fail closed instead of routing to Herdr"
+}
+
 test_selector_resolution_refuses_guesses() {
   local out status
   printf 'window=lab:w1:p2\n' > "$STATE/task-a.meta"
@@ -161,6 +178,7 @@ test_validation_refuses_unknown_and_blocked_backends
 test_backend_source_is_shell_portable
 test_required_tools
 test_absent_metadata_defaults_safely
+test_removed_runtime_metadata_fails_closed
 test_selector_resolution_refuses_guesses
 test_default_spawn_omits_backend_metadata
 

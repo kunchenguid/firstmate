@@ -40,7 +40,10 @@ A herdr spawn additionally version-gates against the installed `herdr` binary's 
 A zellij spawn additionally version-gates against the installed `zellij` binary's version and requires `jq`, refusing loudly when either is missing or the version is older than 0.44.
 A cmux spawn additionally version-gates against the installed `cmux` binary's version, requires `jq`, and requires the control socket to be reachable and accessible (see [`docs/cmux-backend.md`](cmux-backend.md) "Setup" for the one-time socket-access configuration this needs; Automation mode is the recommended socket control mode, with Password mode supported via `config/cmux-socket-password`), refusing loudly and non-retryably on a `cmuxOnly`/unauthenticated socket.
 A backend spawn refusal from a missing dependency, version gate, or unauthenticated socket is terminal for that selected backend; firstmate surfaces it as a blocker instead of silently retrying another backend.
-Task meta records `backend=` only for a non-default backend; an absent `backend=` means Herdr, including metadata created before this default changed.
+Task meta records `backend=` only for a non-default backend; an absent `backend=` normally means Herdr for records created with the current default.
+The exception is a backend-less `window=firstmate:fm-*` record, whose target shape identifies legacy removed-runtime state and must never be reinterpreted as Herdr.
+Peek, send, and recovery reads fail closed on that state, while teardown requires `--legacy-cleanup`, retains the normal landed-work checks, and skips endpoint commands that no longer have a supported adapter.
+An old away-daemon terminal record for the removed runtime is preserved with an explicit diagnostic until the operator confirms its process and endpoint are gone and removes only `state/.afk-daemon-terminal` before retrying the away-mode command.
 A herdr task additionally records `herdr_session=`, `herdr_workspace_id=`, `herdr_tab_id=`, and `herdr_pane_id=`.
 A zellij task additionally records `zellij_session=`, `zellij_tab_id=`, and `zellij_pane_id=`.
 An Orca task additionally records `orca_worktree_id=` and `terminal=`, with `window=fm-<id>` kept as the shared firstmate alias.

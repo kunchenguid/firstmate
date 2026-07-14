@@ -488,6 +488,27 @@ unit_malformed_record_fails_closed() {
   rm -rf "$st"
 }
 
+unit_removed_runtime_record_fails_closed() {
+  local st runtime out
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-record-removed.XXXXXX")
+  mkdir -p "$st/state"
+  : > "$st/state/.afk"
+  runtime=$(printf '\164\155\165\170')
+  printf '%s\tfm-afk-daemon-upgrade\t\n' "$runtime" > "$st/state/.afk-daemon-terminal"
+  out=$(FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" bash -c '
+    . "$1"
+    ! fm_afk_launch_reconcile && ! fm_afk_launch_stop
+  ' _ "$LAUNCH" 2>&1)
+  if [ -e "$st/state/.afk" ] && [ -e "$st/state/.afk-daemon-terminal" ] \
+    && [[ "$out" == *"legacy removed-runtime daemon state"* ]] \
+    && [[ "$out" == *"remove only this terminal record"* ]]; then
+    pass "record read: removed-runtime daemon state is diagnosed and preserved"
+  else
+    fail "record read: removed-runtime daemon state was ambiguous, changed, or discarded"
+  fi
+  rm -rf "$st"
+}
+
 unit_stop_malformed_record_fails_closed() {
   local st
   st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-stop-malformed.XXXXXX")
@@ -704,6 +725,7 @@ unit_native_entry_preserves_prepared_state
 unit_close_failure_preserves_record
 unit_record_publication_atomic
 unit_malformed_record_fails_closed
+unit_removed_runtime_record_fails_closed
 unit_stop_malformed_record_fails_closed
 unit_stop_validates_before_signal
 unit_lock_requires_complete_metadata
