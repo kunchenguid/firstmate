@@ -729,13 +729,16 @@ The main loop's pane-gone backoff `continue`d past the housekeeping tick, and ho
 It now raises the alarm from the backoff path itself (`pane_gone_wedge_alarm`), tagged `pane-gone` and naming the vanished pane.
 The active alert is what makes this worth doing: it is backend-independent and needs no pane, so it reaches a captain who is nowhere near the terminal - which is the entire point of an away-mode alarm, and the one channel a missing pane cannot take away.
 It is timed, not triggered: the absence must persist for a full max-defer window before it alarms, because a pane that blinks out for one poll is a backend hiccup or a restart mid-flight, and every other guard here treats a single failed read as transient.
-`inject_wedge_alarm`'s existing marker-age throttle then holds it to one alarm per window, and the backoff is otherwise unchanged.
+Then it fires exactly ONCE, latched per absence episode rather than riding `inject_wedge_alarm`'s per-window throttles, which re-open each max-defer window.
+That re-opening is right for a cause still being retried and able to heal, and wrong for a vanished pane, which never comes back on its own: it would re-push the active alert every window until morning, at an away captain who can act on none of them, and alert fatigue on the safety channel is the failure the alarm exists to prevent.
+The backoff is otherwise unchanged.
 
 A vanished pane is not a stuck queue, so it does not borrow the wedge alarm's wording, and it is not gated on the buffer the way the max-defer alarm is.
 The buffer cannot even grow while the pane is gone (the same backoff `continue`s past the wake handling that buffers), so an empty buffer is the ordinary case: crew work flushed, then the captain's terminal died.
 Gating on buffered content would therefore restore the exact away-window silence this alarm was added to end, so it fires on an empty buffer and every channel - ERROR log, durable marker, status-line flash, and the active alert's title and body - reports away-mode supervision as DOWN and states the buffered count, instead of sending the captain hunting for escalations that do not exist.
 The marker is retired by `pane_gone_recovered` the moment the target resolves again, because nothing else would: the only other path that clears it is the max-defer escape flush of a still-stuck buffer.
 Targets are usually names rather than unique pane ids (`FM_SUPERVISOR_TARGET_DEFAULT` is `firstmate:0`), so a window killed and recreated resolves again, and a marker that outlived the absence would have firstmate reporting a healed wedge against a healthy pane on the afk-exit catch-up.
+It retires only the marker this alarm wrote, read from that marker's own `cause:` line: the last-defer global cannot say who wrote it, because `inject_msg` records `pane-gone` too when a flush finds the pane dead mid-tick without raising this alarm, and keying on it would let a brief pane blink delete a composer-wedge marker that still describes a real undelivered buffer.
 
 **Known follow-ups.**
 Two smaller canary defects are deferred rather than fixed here, and neither can cause an injection into a shell.
@@ -759,6 +762,7 @@ The away-window half is pinned by `test_pane_gone_during_away_fires_wedge_alarm`
 `test_pane_gone_alarm_waits_out_a_transient_absence` pins the other side of it - a pane missing for one poll must NOT alarm, and away mode being off must not alarm at all - so the fix cannot cry wolf on a backend hiccup.
 `test_pane_gone_alarm_reports_supervision_down_on_an_empty_buffer` pins the wording and the missing buffer gate together: with nothing buffered the alarm must still fire, and no channel may claim undelivered escalations.
 `test_pane_gone_marker_cleared_when_the_pane_returns` drives the real daemon through both edges - the pane dies and alarms, then comes back - and requires the marker to be gone; both fail against the pre-fix daemon.
+The cadence and the retirement rule have a case each: `test_pane_gone_alarm_fires_once_per_episode` holds one unbroken absence to exactly one active alert and one wedge ERROR across three max-defer windows, while still alarming again for a fresh absence episode (it fails on the per-window throttle, which pushes three), and `test_pane_gone_recovery_keeps_a_real_buffer_wedge_marker` requires a composer-wedge marker with a real undelivered buffer to survive a pane blinking out and back (it fails when the retirement is keyed on the last-defer global instead of the marker's own recorded cause).
 
 **Other injection paths.**
 `bin/fm-send.sh` (firstmate steering a crewmate/secondmate) is the only other typed-text injection path and shares the same content-blindness: it has no composer-empty or liveness guard, so a steer sent to a crewmate that has exited to a shell is typed into that shell.

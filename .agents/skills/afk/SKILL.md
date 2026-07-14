@@ -140,7 +140,8 @@ Each names the recorded cause (`pane-busy`, `composer-not-empty`, `agent-dead`, 
 A supervisor pane that VANISHES raises the same alarm from the daemon's backoff path once it has been gone for a full max-defer window (`pane-gone`), because there is no pane left to attempt a delivery into and the active alert is the only channel a missing pane cannot take away.
 That one reports away-mode supervision as DOWN rather than as undelivered escalations, and it fires even with nothing buffered: the pane being gone means nothing can be delivered at all, and the buffer cannot even grow while it is.
 Read it as "away mode is dead, restart it" - the buffered count it states may well be zero.
-It clears itself once the target resolves again, so a `pane-gone` marker on the catch-up is a wedge that is still live, not one that healed while the captain was away.
+It alerts once per absence, not once per max-defer window: a vanished pane cannot heal on its own, so repeating the alert would only bury an away captain in banners they cannot act on, and the marker plus the ERROR log stay the record.
+It clears itself once the target resolves again - and only ever clears its own marker - so a `pane-gone` marker on the catch-up is a wedge that is still live, not one that healed while the captain was away.
 `docs/wedge-alarm.md` owns the alert channel setup and verification record.
 So a guard false-positive becomes a visible stall, never an unbounded silent no-op.
 

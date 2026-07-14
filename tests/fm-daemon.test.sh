@@ -1992,6 +1992,7 @@ test_pane_gone_alarm_waits_out_a_transient_absence() {
 
   # Backdate the first-missing epoch past the window: now the absence IS a wedge.
   PANE_GONE_SINCE=$(( $(date +%s) - 600 ))
+  PANE_GONE_ALARMED=0
   WEDGE_ALARM_LAST_EPOCH=0
   PATH="$fakebin:$PATH" FM_MAX_DEFER_SECS=300 pane_gone_wedge_alarm "$state" tmux "s:0"
   [ -s "$marker" ] || fail "a pane gone for longer than MAX_DEFER did not alarm"
@@ -2025,6 +2026,7 @@ test_pane_gone_alarm_reports_supervision_down_on_an_empty_buffer() {
   [ ! -s "$state/.subsuper-escalations" ] || fail "the empty-buffer case did not start with an empty buffer"
 
   PANE_GONE_SINCE=$(( $(date +%s) - 600 ))
+  PANE_GONE_ALARMED=0
   WEDGE_ALARM_LAST_EPOCH=0
   PATH="$fakebin:$PATH" LOG="$log" FM_MAX_DEFER_SECS=300 \
     FM_WEDGE_ALARM_LOG="$alert" FM_WEDGE_ALARM_CHANNEL=osascript \
@@ -2112,6 +2114,106 @@ test_pane_gone_marker_cleared_when_the_pane_returns() {
   grep -F 'resolves again' "$log" >/dev/null \
     || fail "the daemon did not record retiring the pane-gone alarm when its target came back: $(cat "$log" 2>/dev/null)"
   pass "a pane-gone alarm marker is retired the moment the supervisor target resolves again"
+}
+
+# One alarm per absence EPISODE, not one per max-defer window forever. Every other
+# wedge throttle re-opens after a window, which is right for a condition still being
+# retried and able to heal - but a vanished pane never comes back on its own, so the
+# same throttle re-pushes the active alert every window for the life of the daemon:
+# a terminal that dies at 23:30 buys the captain ~96 Notification Center banners and
+# ~96 pushes through a configured `command:` channel by morning, none of which they
+# can act on from away. Alert fatigue on the safety channel is the failure this alarm
+# exists to prevent; the durable marker and the ERROR log remain the record.
+test_pane_gone_alarm_fires_once_per_episode() {
+  local dir state fakebin log alert marker alerts errors i
+  dir=$(make_supercase pane-gone-once)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  log="$dir/daemon.log"; : > "$log"
+  alert="$dir/alert.log"; : > "$alert"
+  marker="$state/.subsuper-inject-wedged"
+  afk_enter "$state"
+
+  PANE_GONE_SINCE=$(( $(date +%s) - 600 ))
+  PANE_GONE_ALARMED=0
+  WEDGE_ALARM_LAST_EPOCH=0
+  # MAX_DEFER of 1s, so each sleep below is a full window: by the next call both
+  # throttles the alarm used to ride on (the marker's age and the notify epoch) have
+  # re-opened. That re-opening IS the all-night repeat, reproduced in 2.2s.
+  for i in 1 2 3; do
+    [ "$i" -eq 1 ] || sleep 1.1
+    PATH="$fakebin:$PATH" LOG="$log" FM_MAX_DEFER_SECS=1 \
+      FM_WEDGE_ALARM_LOG="$alert" FM_WEDGE_ALARM_CHANNEL=osascript \
+      pane_gone_wedge_alarm "$state" tmux "s:0"
+  done
+
+  [ -s "$marker" ] || fail "the vanished pane raised no alarm at all"
+  alerts=$(grep -c . "$alert" 2>/dev/null || echo 0)
+  [ "$alerts" -eq 1 ] \
+    || fail "one unbroken absence pushed $alerts active alerts; an away captain gets another every max-defer window until morning (alerts: $(cat "$alert"))"
+  errors=$(grep -cF 'ERROR' "$log" 2>/dev/null || echo 0)
+  [ "$errors" -eq 1 ] \
+    || fail "one unbroken absence logged $errors wedge ERRORs (log: $(cat "$log"))"
+
+  # The latch belongs to the episode, not the daemon: a pane that comes back and
+  # vanishes again is a NEW absence, and owes the captain a fresh alarm.
+  LOG="$log" pane_gone_recovered "$state"
+  PANE_GONE_SINCE=$(( $(date +%s) - 600 ))
+  WEDGE_ALARM_LAST_EPOCH=0
+  PATH="$fakebin:$PATH" LOG="$log" FM_MAX_DEFER_SECS=1 \
+    FM_WEDGE_ALARM_LOG="$alert" FM_WEDGE_ALARM_CHANNEL=osascript \
+    pane_gone_wedge_alarm "$state" tmux "s:0"
+  alerts=$(grep -c . "$alert" 2>/dev/null || echo 0)
+  [ "$alerts" -eq 2 ] \
+    || fail "a fresh absence episode never alarmed; the latch outlived the absence it was raised for (alerts: $(cat "$alert"))"
+  pass "the pane-gone alarm fires once per absence episode, not once per max-defer window forever"
+}
+
+# The recovery edge retires ONLY the marker the pane-gone alarm itself wrote. The
+# process-global defer cause cannot say who wrote it: inject_msg records `pane-gone`
+# too when a flush finds the pane dead mid-tick, and that path raises no pane-gone
+# alarm and writes no pane-gone marker. So a composer wedge - a marker describing a
+# real undelivered buffer, whose contract is that only a successful flush clears it -
+# must survive a pane blinking out and back, or firstmate's afk-exit catch-up loses
+# the wedge report entirely.
+test_pane_gone_recovery_keeps_a_real_buffer_wedge_marker() {
+  local dir state log marker
+  dir=$(make_supercase pane-gone-wrong-marker)
+  state="$dir/state"
+  log="$dir/daemon.log"; : > "$log"
+  marker="$state/.subsuper-inject-wedged"
+  afk_enter "$state"
+  escalate_add "$state" "blocked: needs a credential"
+
+  # A genuine buffer wedge: the composer never cleared, so the alarm names that and
+  # the escalation is still undelivered.
+  INJECT_LAST_DEFER_CAUSE='composer-not-empty'
+  INJECT_LAST_DEFER_REASON="supervisor composer not confirmed-empty (state=pending)"
+  WEDGE_ALARM_LAST_EPOCH=0
+  LOG="$log" FM_MAX_DEFER_SECS=300 inject_wedge_alarm "$state" 900
+  grep -F 'composer-not-empty' "$marker" >/dev/null 2>&1 \
+    || fail "the buffer-wedge alarm did not write its own marker: $(cat "$marker" 2>/dev/null)"
+
+  # The pane now blinks out for a poll and returns. inject_msg's target-exists check
+  # stamps `pane-gone` on the process global on its way past, alarming nothing.
+  PANE_GONE_SINCE=$(date +%s)
+  PANE_GONE_ALARMED=0
+  INJECT_LAST_DEFER_CAUSE='pane-gone'
+  LOG="$log" pane_gone_recovered "$state"
+  [ -s "$marker" ] \
+    || fail "a pane blinking out and back deleted a composer-wedge marker describing a real undelivered buffer"
+
+  # And the marker's own recorded cause - not the latch alone - is what protects it,
+  # so the invariant holds even if a pane-gone alarm did fire in this episode.
+  PANE_GONE_SINCE=$(date +%s)
+  PANE_GONE_ALARMED=1
+  LOG="$log" pane_gone_recovered "$state"
+  [ -s "$marker" ] \
+    || fail "recovery retired a marker it did not write; only a marker recording cause=pane-gone is its to clear"
+  grep -F 'composer-not-empty' "$marker" >/dev/null 2>&1 \
+    || fail "the surviving marker no longer names the real wedge cause: $(cat "$marker")"
+  [ -s "$state/.subsuper-escalations" ] \
+    || fail "the undelivered buffer that marker describes was lost"
+  pass "pane recovery retires only the alarm it raised, never a marker describing a real undelivered buffer"
 }
 
 test_afk_start_refuses_when_flag_cannot_be_written
@@ -2220,3 +2322,5 @@ test_pane_gone_during_away_fires_wedge_alarm
 test_pane_gone_alarm_waits_out_a_transient_absence
 test_pane_gone_alarm_reports_supervision_down_on_an_empty_buffer
 test_pane_gone_marker_cleared_when_the_pane_returns
+test_pane_gone_alarm_fires_once_per_episode
+test_pane_gone_recovery_keeps_a_real_buffer_wedge_marker

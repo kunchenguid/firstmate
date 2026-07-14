@@ -10,8 +10,15 @@ The alarm carries that cause tag in its active alert and status-line flash, and 
 It also fires on an EMPTY buffer, deliberately unlike the max-defer alarm, which is gated on buffered content.
 The buffer cannot even grow while the pane is gone - the main loop's backoff never reaches the wake handling that buffers - so an empty buffer is the ordinary case, and a buffer gate here would restore exactly the away-window silence this alarm exists to end.
 Every channel therefore says supervision is down and states the buffered count, rather than claiming undelivered escalations that may not exist.
-`pane_gone_recovered` retires the marker the moment the target resolves again: a pane-gone alarm raised on an empty (or since-flushed) buffer is otherwise never cleared, because the only other path that removes the marker is the max-defer escape flush of a still-stuck buffer.
+It also alarms ONCE per absence episode, latched in `pane_gone_wedge_alarm` rather than re-thrown each window like the other causes.
+Their throttles re-open after a max-defer window because those conditions are re-tested and can heal - a busy composer clears, a flush lands - so a repeat is a progress report.
+A vanished pane heals only when the pane comes back, and the target is usually a unique pane id, so the same throttle would re-push the active alert every window for the life of the daemon: a terminal that dies at 23:30 buys the captain ~96 banners and ~96 pushes through a configured `command:` channel by morning, none of them actionable from away.
+Alert fatigue on the one channel that has to work is the failure this alarm exists to prevent, so only the re-pushing stops; the durable marker and the ERROR log remain the record.
+
+`pane_gone_recovered` retires the marker the moment the target resolves again, and re-arms the latch for the next episode: a pane-gone alarm raised on an empty (or since-flushed) buffer is otherwise never cleared, because the only other path that removes the marker is the max-defer escape flush of a still-stuck buffer.
 Targets are usually names rather than unique pane ids (`FM_SUPERVISOR_TARGET_DEFAULT` is `firstmate:0`), so a window killed and recreated resolves again, and without that recovery edge firstmate's afk-exit catch-up would report a wedge that healed hours earlier against a pane that is now healthy.
+It retires only the marker this alarm wrote, decided by that marker's own `cause:` line rather than by the last-defer global - which also reads `pane-gone` when `inject_msg` refuses a flush into a pane that died mid-tick, a path that writes no pane-gone marker at all.
+Keying on the global would let a few seconds of pane blink delete a composer-wedge marker describing a real undelivered buffer, the one marker whose contract is that only a successful flush clears it.
 
 ## Why an active channel beyond the status-line flash
 
