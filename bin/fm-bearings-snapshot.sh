@@ -285,14 +285,12 @@ MODEL=$(printf '%s' "$SNAP" | jq \
   --argjson candidate_prs "$CANDIDATE_PRS" '
   def trunc($n): if . == null then null else
     (tostring | gsub("\\s+"; " ") | if (length > $n) then (.[:$n] + "…") else . end) end;
-  def permission_summary($xs):
-    ($xs | map(if . == null or . == "" then "unknown" else . end) | unique) as $p
-    | if ($p | length) == 1 then $p[0] else "unknown" end;
   ($fields | split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(. != ""))) as $fl
   | (($fl | index("bodies")) != null) as $f_bodies
   | (($fl | index("paths")) != null) as $f_paths
   | (($fl | index("actions")) != null) as $f_actions
   | (($fl | index("endpoints")) != null) as $f_endpoints
+  | ([ .tasks[] | select(.kind == "secondmate") | {key:.id, value:(.permissions // "unknown")} ] | from_entries) as $secondmate_permissions
   | ([ .backlog.records[] | select(.state == "done" and .structured)
        | {id, title, pr_url, report_path, local_note, completion, home:"(main)", home_id:"(main)"} ]) as $main_done
   | ((.secondmate_landed.records) // []) as $mate_done
@@ -321,7 +319,7 @@ MODEL=$(printf '%s' "$SNAP" | jq \
        else empty end ]
      + [ (.secondmate_current.records // [])[]
        | {id,state:.current.state,
-          permissions:(permission_summary([.endpoints[]?.permissions])),
+          permissions:($secondmate_permissions[.id] // "unknown"),
           doing:((if .current.state == "active_child_work" then
                     ([.active_children[] | .id + ": " + (.doing // .state)] | join("; "))
                   elif .current.state == "captain_decision" then
@@ -342,7 +340,7 @@ MODEL=$(printf '%s' "$SNAP" | jq \
      + [ (.secondmate_current.records // [])[]
          | select(.current.state == "active_child_work")
          | {id,kind:"secondmate",
-            permissions:(permission_summary([.active_children[]?.permissions])),
+            permissions:($secondmate_permissions[.id] // "unknown"),
             state:.current.state,
             doing:([.active_children[] | .id + ": " + (.doing // .state)] | join("; ") | trunc(90))} ]) as $in_flight_all
   | ([ .tasks[] as $t | select($t.kind != "secondmate") | ($t.hints.open_decisions // [])[]

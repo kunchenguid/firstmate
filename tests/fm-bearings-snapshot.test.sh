@@ -313,6 +313,7 @@ test_active_child_overrides_old_parent_event() {
   home=$(make_home active-child-parent)
   mate="$TMP_ROOT/active-child-home"
   write_domain_alpha_fixture "$home" "$mate"
+  printf 'permissions=unrestricted\n' >> "$home/state/domain-alpha.meta"
   mkdir -p "$mate/projects/phase8" "$mate/projects/phase9"
   cat > "$mate/data/backlog.md" <<'EOF'
 ## In flight
@@ -336,8 +337,10 @@ EOF
   json=$(run "$home" "$fakebin" --json)
   printf '%s' "$json" | jq -e '
     (.secondmates | any(.[]; .id == "domain-alpha" and .state == "active_child_work"
+      and .permissions == "unrestricted"
       and (.doing | contains("phase8")) and (.doing | contains("Phase 7 started") | not)))
-      and (.in_flight | any(.[]; .id == "domain-alpha" and (.doing | contains("phase8"))))
+      and (.in_flight | any(.[]; .id == "domain-alpha" and .permissions == "unrestricted"
+        and (.doing | contains("phase8"))))
   ' >/dev/null || fail "active child did not override stale parent event: $json"
   canonical=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
     "$ROOT/bin/fm-fleet-snapshot.sh" --json)
