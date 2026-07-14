@@ -31,7 +31,10 @@
 #   3. Reconcile the status log: if its last line says needs-decision/blocked but
 #      the run-step shows the run moved on, the log is deterministically stale and
 #      is flagged superseded. A genuinely parked run plus a needs-decision log
-#      agree, and are reported as parked.
+#      agree, and are reported as parked. A genuinely parked run plus a declared
+#      pause (paused:) also agree, and are reported as paused with the gate
+#      detail preserved, so a deliberate hold at an ask-user gate absorbs on the
+#      pause cadence instead of wedge-nagging.
 #   4. No run for this crew (pre-validation, or kind=scout): fall back to the
 #      recorded backend's pane busy state, then the status log's last line only
 #      when its verb maps to a recognized run-state. Decision-only events such as
@@ -478,6 +481,21 @@ if [ "$HAVE_RUN" = 1 ]; then
       [ -n "$fcount" ] && RUN_DETAIL="$RUN_DETAIL: $fcount finding(s)"
       if printf '%s\n' "$RUN_OUT" | grep -q 'ask-user'; then
         RUN_DETAIL="$RUN_DETAIL (ask-user: captain decision)"
+      fi
+      # A genuinely parked run plus a declared pause AGREE, the same way the
+      # parked+needs-decision pair below agrees: the crew is deliberately
+      # holding the gate open on a known external wait (typically a relayed
+      # captain decision), so the current state is the declared pause, with
+      # the gate detail preserved for the supervisor. Without this, the
+      # absorb classifier (fm-classify-lib.sh crew_absorb_class) reads
+      # parked as none and the watcher wedge-nags the deliberate hold every
+      # poll. Working runs keep precedence over a stale pause line (the
+      # running/fixing branches above never reach here), and a stale pause
+      # masking a gate the crew itself owes is bounded by the pause
+      # re-surface cadence (FM_PAUSE_RESURFACE_SECS).
+      if status_is_paused "$LOG_LINE"; then
+        RUN_STATE=paused
+        RUN_DETAIL="$RUN_DETAIL${SEP}declared pause: $(status_line_note "$LOG_LINE")"
       fi
     else
       case "$status" in

@@ -413,6 +413,55 @@ test_scalar_gate_parked_not_superseded() {
   pass "scalar gate parked run is not flagged superseded"
 }
 
+# genuine parked run + declared pause AGREE -> paused, gate detail preserved.
+# The regression pair for the 2026-07-14 review-gate wedge-nag incident: a crew
+# deliberately holding an ask-user gate for a relayed captain decision declared
+# paused:, but the parked run-step overrode the pause to none in
+# crew_absorb_class, so the watcher surfaced a plain stale every poll for the
+# whole wait.
+test_parked_run_with_declared_pause_is_paused() {
+  reset_fakes
+  local d; d=$(new_case parked-paused)
+  make_repo_on_branch "$d/wt" fm/feat-cp
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-cp.meta" "window=fm:fm-feat-cp" "worktree=$d/wt" "kind=ship"
+  printf 'working: validating\npaused: holding review gate for captain decision [key=gate-hold]\n' > "$d/state/feat-cp.status"
+  FM_FAKE_AXI_STATUS="$(run_parked fm/feat-cp)"
+  local out; out=$(run_crew_state "$d" feat-cp)
+  assert_contains "$out" "state: paused" "parked run + declared pause -> paused"
+  assert_contains "$out" "source: run-step" "parked+pause -> run-step source"
+  assert_contains "$out" "parked at review" "pause keeps the gate detail"
+  assert_contains "$out" "declared pause: holding review gate" "pause note surfaces in detail"
+  # The absorb classifier must read this as paused (absorb on the pause
+  # cadence), never none (wedge-nag): the watcher-facing half of the fix.
+  local cls
+  cls=$(FM_CREW_STATE_BIN="$CREW_STATE" \
+        PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" \
+        bash -c '. "'"$ROOT"'/bin/fm-classify-lib.sh"; crew_absorb_class feat-cp')
+  [ "$cls" = paused ] || fail "crew_absorb_class on parked+pause: want paused, got $cls"
+  pass "parked run with declared pause classifies paused"
+}
+
+# a parked run with a NON-pause last log line still surfaces as parked (none in
+# the absorb classifier); the pause reconciliation must not widen absorption.
+test_parked_run_without_pause_stays_parked() {
+  reset_fakes
+  local d; d=$(new_case parked-no-pause)
+  make_repo_on_branch "$d/wt" fm/feat-cq
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-cq.meta" "window=fm:fm-feat-cq" "worktree=$d/wt" "kind=ship"
+  printf 'working: validating\n' > "$d/state/feat-cq.status"
+  FM_FAKE_AXI_STATUS="$(run_parked fm/feat-cq)"
+  local out; out=$(run_crew_state "$d" feat-cq)
+  assert_contains "$out" "state: parked" "parked run without pause stays parked"
+  local cls
+  cls=$(FM_CREW_STATE_BIN="$CREW_STATE" \
+        PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" \
+        bash -c '. "'"$ROOT"'/bin/fm-classify-lib.sh"; crew_absorb_class feat-cq')
+  [ "$cls" = none ] || fail "crew_absorb_class on parked without pause: want none, got $cls"
+  pass "parked run without declared pause still surfaces"
+}
+
 test_gate_block_parked_not_superseded() {
   reset_fakes
   local d; d=$(new_case parked-gate-block)
@@ -1140,6 +1189,8 @@ test_stale_needs_decision_superseded
 test_stale_blocked_superseded
 test_genuine_parked_not_superseded
 test_scalar_gate_parked_not_superseded
+test_parked_run_with_declared_pause_is_paused
+test_parked_run_without_pause_stays_parked
 test_gate_block_parked_not_superseded
 test_ci_ready_done_log_beats_monitoring_run
 test_ci_monitoring_checks_green_surfaces_done

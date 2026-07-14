@@ -280,9 +280,12 @@ signal_reason_is_actionable() {  # <file> ...
 #             pane; the crew is legitimately mid-work on a static-looking pane
 #             (e.g. waiting on CI);
 #   paused  - the crew's authoritative current state is a declared external-wait
-#             pause (paused:), which is EXPECTED to idle;
-#   none    - neither, so the wake must surface (a stopped/finished/parked/failed/
-#             torn-down/unknown crew, or an unreadable verdict).
+#             pause (paused:), which is EXPECTED to idle; fm-crew-state.sh also
+#             reconciles a genuinely parked run plus a declared pause to paused
+#             (a deliberate hold at a gate, e.g. a relayed captain decision);
+#   none    - neither, so the wake must surface (a stopped/finished/failed/
+#             torn-down/unknown crew, a run parked with no declared pause, or an
+#             unreadable verdict).
 # One fm-crew-state.sh read serves BOTH absorb reasons at once. Reading the state
 # authoritatively (not the status log) is what keeps run-step precedence: a crew
 # that appended paused: but then STARTED a run reports working, never paused.
