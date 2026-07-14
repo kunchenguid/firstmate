@@ -28,6 +28,8 @@ done
 [ "${previous:-}" = --session ] || { echo "fake herdr: missing trailing --session" >&2; exit 90; }
 session=$last
 default_socket=$(cat "$state/default-socket")
+default_present=${FM_FAKE_HERDR_DEFAULT_PRESENT:-1}
+default_running=${FM_FAKE_HERDR_DEFAULT_RUNNING:-true}
 lab_state=absent
 [ ! -f "$state/$session" ] || lab_state=$(cat "$state/$session")
 visible_lab_state=$lab_state
@@ -47,14 +49,24 @@ esac
 case "$1 ${2:-}" in
   "session list")
     if [ "$visible_lab_state" = absent ] || [ "$visible_lab_state" = deleted ]; then
-      jq -nc --arg socket "$default_socket" '{sessions:[{default:true,name:"default",running:true,socket_path:$socket}]}'
+      if [ "$default_present" = 1 ]; then
+        jq -nc --arg socket "$default_socket" --argjson running "$default_running" \
+          '{sessions:[{default:true,name:"default",running:$running,socket_path:$socket}]}'
+      else
+        printf '%s\n' '{"sessions":[]}'
+      fi
     else
       running=false
       [ "$visible_lab_state" = running ] && running=true
       lab_default=false
       [ "${FM_FAKE_HERDR_LAB_DEFAULT:-0}" != 1 ] || lab_default=true
-      jq -nc --arg socket "$default_socket" --arg name "$session" --argjson running "$running" --argjson lab_default "$lab_default" \
-        '{sessions:[{default:true,name:"default",running:true,socket_path:$socket},{default:$lab_default,name:$name,running:$running,socket_path:("/tmp/" + $name + ".sock")}]} '
+      if [ "$default_present" = 1 ]; then
+        jq -nc --arg socket "$default_socket" --arg name "$session" --argjson running "$running" --argjson default_running "$default_running" --argjson lab_default "$lab_default" \
+          '{sessions:[{default:true,name:"default",running:$default_running,socket_path:$socket},{default:$lab_default,name:$name,running:$running,socket_path:("/tmp/" + $name + ".sock")}]} '
+      else
+        jq -nc --arg name "$session" --argjson running "$running" --argjson lab_default "$lab_default" \
+          '{sessions:[{default:$lab_default,name:$name,running:$running,socket_path:("/tmp/" + $name + ".sock")}]} '
+      fi
     fi
     ;;
   "server --session")
@@ -110,6 +122,8 @@ run_with_fake() {
     FM_FAKE_HERDR_DELETE_EXIT="${FM_FAKE_HERDR_DELETE_EXIT:-0}" \
     FM_FAKE_HERDR_COLLAPSE_ON_STOP="${FM_FAKE_HERDR_COLLAPSE_ON_STOP:-0}" \
     FM_FAKE_HERDR_LAB_DEFAULT="${FM_FAKE_HERDR_LAB_DEFAULT:-0}" \
+    FM_FAKE_HERDR_DEFAULT_PRESENT="${FM_FAKE_HERDR_DEFAULT_PRESENT:-1}" \
+    FM_FAKE_HERDR_DEFAULT_RUNNING="${FM_FAKE_HERDR_DEFAULT_RUNNING:-true}" \
     FM_HERDR_LAB_STATE_DIR="$TRIPWIRES" \
     "$@"
 }
@@ -204,6 +218,48 @@ test_changed_default_trips_after_teardown() {
   printf '%s\n' '/Users/test/.config/herdr/herdr.sock' > "$FAKE_STATE/default-socket"
   rm -f "$TRIPWIRES/$name.fleet-state.json"
   pass "fm-herdr-lab: changed default fleet state is a hard failure"
+}
+
+test_absent_default_fleet_state_is_preserved() {
+  local name="fm-lab-no-default-$$" transition_name="fm-lab-default-appeared-$$"
+  local disappearance_name="fm-lab-default-disappeared-$$" invalid_name="fm-lab-invalid-default-$$" status=0
+  : > "$FAKE_LOG"
+  FM_FAKE_HERDR_DEFAULT_PRESENT=0 run_with_fake fm_herdr_lab_provision "$name" \
+    || fail "clean-runner provision required a pre-existing default session"
+  [ "$(cat "$TRIPWIRES/$name.fleet-state.json")" = '{"default_sessions":[]}' ] \
+    || fail "clean-runner tripwire did not record default-session absence"
+  FM_FAKE_HERDR_DEFAULT_PRESENT=0 run_with_fake fm_herdr_lab_teardown "$name" \
+    || fail "clean-runner teardown did not preserve default-session absence"
+  assert_absent "$TRIPWIRES/$name.fleet-state.json" \
+    "clean-runner teardown retained the verified tripwire"
+  assert_no_grep "session stop default" "$FAKE_LOG" "clean-runner lifecycle targeted the default session"
+  assert_no_grep "session delete default" "$FAKE_LOG" "clean-runner lifecycle targeted the default session"
+
+  FM_FAKE_HERDR_DEFAULT_PRESENT=0 run_with_fake fm_herdr_lab_provision "$transition_name" \
+    || fail "default-transition fixture provision failed"
+  FM_FAKE_HERDR_DEFAULT_PRESENT=1 run_with_fake fm_herdr_lab_teardown "$transition_name" >/dev/null 2>&1 || status=$?
+  expect_code 1 "$status" "an appearing default session must fail the exact-state tripwire"
+  assert_present "$TRIPWIRES/$transition_name.fleet-state.json" \
+    "default-state transition discarded tripwire evidence"
+  FM_FAKE_HERDR_DEFAULT_PRESENT=0 run_with_fake fm_herdr_lab_teardown "$transition_name" \
+    || fail "default-transition fixture cleanup failed"
+
+  run_with_fake fm_herdr_lab_provision "$disappearance_name" \
+    || fail "default-disappearance fixture provision failed"
+  status=0
+  FM_FAKE_HERDR_DEFAULT_PRESENT=0 run_with_fake fm_herdr_lab_teardown "$disappearance_name" >/dev/null 2>&1 || status=$?
+  expect_code 1 "$status" "a disappearing default session must fail the exact-state tripwire"
+  assert_present "$TRIPWIRES/$disappearance_name.fleet-state.json" \
+    "default disappearance discarded tripwire evidence"
+  run_with_fake fm_herdr_lab_teardown "$disappearance_name" \
+    || fail "default-disappearance fixture cleanup failed"
+
+  status=0
+  FM_FAKE_HERDR_DEFAULT_RUNNING=false run_with_fake fm_herdr_lab_provision "$invalid_name" >/dev/null 2>&1 || status=$?
+  expect_code 1 "$status" "a stopped default session must remain an invalid initial fleet state"
+  assert_absent "$TRIPWIRES/$invalid_name.fleet-state.json" \
+    "invalid initial default state retained an ownership tripwire"
+  pass "fm-herdr-lab: absent default state is preserved and transitions fail closed"
 }
 
 test_stopped_owned_lab_can_reprovision() {
@@ -303,6 +359,7 @@ test_refuses_unsafe_names
 test_provision_run_and_guarded_teardown
 test_missing_tripwire_blocks_destruction
 test_changed_default_trips_after_teardown
+test_absent_default_fleet_state_is_preserved
 test_stopped_owned_lab_can_reprovision
 test_failed_delete_retains_tripwire
 test_delayed_delete_converges_in_one_teardown

@@ -355,6 +355,15 @@ test_no_mistakes_yaml_disables_project_settings() {
   pass ".no-mistakes.yaml parses and sets disable_project_settings: true (trusted-only gate opt-out)"
 }
 
+test_herdr_acceptance_gate_ci_parity() {
+  local gate="$ROOT/.no-mistakes.yaml" ci="$ROOT/.github/workflows/ci.yml"
+  assert_grep "export FM_RUN_HERDR_GUIDE_E2E=1" "$gate" \
+    "no-mistakes commands.test must enable the guarded Herdr acceptance"
+  assert_grep "FM_RUN_HERDR_GUIDE_E2E: 1" "$ci" \
+    "CI behavior tests must enable the guarded Herdr acceptance"
+  pass "no-mistakes and CI both require the guarded Herdr acceptance"
+}
+
 test_helper_env_marker_refuses
 test_helper_empty_env_marker_refuses
 test_helper_path_backstop_refuses
@@ -363,3 +372,4 @@ test_spawn_refuses_and_admits
 test_send_refuses_and_admits
 test_teardown_refuses_and_admits
 test_no_mistakes_yaml_disables_project_settings
+test_herdr_acceptance_gate_ci_parity

@@ -24,7 +24,7 @@ disable_project_settings: true
 # agent-driven test step has crashed the daemon).
 commands:
   lint: 'bin/fm-lint.sh'
-  test: 'rc=0; for t in tests/*.test.sh; do echo "== $t =="; bash "$t" || rc=1; done; exit "$rc"'
+  test: 'export FM_RUN_HERDR_GUIDE_E2E=1; rc=0; for t in tests/*.test.sh; do echo "== $t =="; bash "$t" || rc=1; done; exit "$rc"'
 
 # Keep test evidence out of this repo; it stays in a temp dir instead.
 test:
