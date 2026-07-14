@@ -58,15 +58,6 @@ FM_AFK_LAUNCH_STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 FM_AFK_LAUNCH_RECORD="$FM_AFK_LAUNCH_STATE/.afk-daemon-terminal"
 FM_AFK_LAUNCH_LOCK="$FM_AFK_LAUNCH_STATE/.afk-launch.lock"
 FM_AFK_LAUNCH_WS_LABEL="firstmate-afk-daemon"
-# The away session's delivery artifacts, backed up before a fresh arm and restored
-# if that arm fails. One list, so a new artifact cannot be added to the daemon and
-# forgotten by the rollback that has to put it back.
-FM_AFK_LAUNCH_ARTIFACTS=(
-  .subsuper-escalations
-  .subsuper-escalations.since
-  .subsuper-inject-wedged
-  .subsuper-pane-gone
-)
 
 # shellcheck source=bin/fm-backend.sh
 . "$FM_AFK_LAUNCH_DIR/fm-backend.sh"
@@ -74,7 +65,8 @@ FM_AFK_LAUNCH_ARTIFACTS=(
 . "$FM_AFK_LAUNCH_DIR/fm-supervisor-target-lib.sh"
 # shellcheck source=bin/fm-afk-canary-lib.sh
 . "$FM_AFK_LAUNCH_DIR/fm-afk-canary-lib.sh"
-# fm-afk-start.sh provides the daemon-lock liveness helpers and
+# fm-afk-start.sh provides the daemon-lock liveness helpers, the canonical
+# FM_AFK_ARTIFACTS list this script's backup and rollback iterate, and
 # fm_afk_clear_stale_artifacts; it is sourceable (BASH_SOURCE guard) and its
 # main does not run on source. It sets `set -eu`, so turn errexit back off for
 # this script's best-effort flow immediately after.
@@ -352,13 +344,13 @@ fm_afk_launch_reconcile() {
 fm_afk_launch_restore_backup() {  # <backup> <had-afk>
   local backup=$1 had_afk=$2 artifact result=0
   rm -f "$FM_AFK_LAUNCH_STATE/.afk" || result=1
-  for artifact in "${FM_AFK_LAUNCH_ARTIFACTS[@]}"; do
+  for artifact in "${FM_AFK_ARTIFACTS[@]}"; do
     rm -f "$FM_AFK_LAUNCH_STATE/$artifact" || result=1
   done
   if [ "$had_afk" -eq 1 ]; then
     cp "$backup/.afk" "$FM_AFK_LAUNCH_STATE/.afk" || result=1
   fi
-  for artifact in "${FM_AFK_LAUNCH_ARTIFACTS[@]}"; do
+  for artifact in "${FM_AFK_ARTIFACTS[@]}"; do
     if [ -e "$backup/$artifact" ]; then
       cp -p "$backup/$artifact" "$FM_AFK_LAUNCH_STATE/$artifact" || result=1
     fi
@@ -477,7 +469,7 @@ fm_afk_launch_start() {
     had_afk=1
     cp "$FM_AFK_LAUNCH_STATE/.afk" "$backup/.afk" || { rm -rf "$backup"; return 1; }
   fi
-  for artifact in "${FM_AFK_LAUNCH_ARTIFACTS[@]}"; do
+  for artifact in "${FM_AFK_ARTIFACTS[@]}"; do
     if [ -e "$FM_AFK_LAUNCH_STATE/$artifact" ]; then
       cp -p "$FM_AFK_LAUNCH_STATE/$artifact" "$backup/$artifact" || { rm -rf "$backup"; return 1; }
     fi
@@ -531,7 +523,7 @@ fm_afk_launch_start_native() {
     had_afk=1
     cp "$FM_AFK_LAUNCH_STATE/.afk" "$backup/.afk" || { rm -rf "$backup"; return 1; }
   fi
-  for artifact in "${FM_AFK_LAUNCH_ARTIFACTS[@]}"; do
+  for artifact in "${FM_AFK_ARTIFACTS[@]}"; do
     if [ -e "$FM_AFK_LAUNCH_STATE/$artifact" ]; then
       cp -p "$FM_AFK_LAUNCH_STATE/$artifact" "$backup/$artifact" || { rm -rf "$backup"; return 1; }
     fi

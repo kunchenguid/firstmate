@@ -2,24 +2,31 @@
 
 The away-mode sub-supervisor (`bin/fm-supervise-daemon.sh`) buffers escalations and injects them into firstmate's own pane.
 When injection cannot deliver past `FM_MAX_DEFER_SECS`, `inject_wedge_alarm` raises a loud, rate-limited alarm so the stall never stays invisible.
-The cause is whatever `inject_msg` last recorded, and it is not always a busy pane: the supervisor's agent may have exited to a shell or be unverifiable on this backend (`agent-dead` / `agent-unknown`, from the fail-closed agent-liveness guard), a human's text may be sitting in the composer (`composer-not-empty`), the pane may be mid-turn (`pane-busy`), or the submit's Enter may have been swallowed (`submit-unconfirmed`).
-One cause comes from the daemon's main loop rather than an inject attempt: when the supervisor pane itself has not resolved for a full max-defer window (`pane-gone`), there is nowhere to attempt a delivery at all, so `pane_gone_wedge_alarm` records the vanished pane and raises the same alarm from the backoff path - the active alert below needs no pane, which is exactly why it is the channel that survives this.
-The alarm carries that cause tag in its active alert and status-line flash, and the full detail in the ERROR log line and a durable marker, so a wedge never has to be diagnosed by guesswork.
+
+Two alarms go through it, and WHICH one fired - its `kind` - is what every captain-facing surface says.
+The **buffer wedge** (`kind=buffer`) is housekeeping's max-defer alarm: escalations are stuck behind a supervisor pane that is still there and still being retried every tick.
+The **vanished pane** (`kind=pane-gone`) is what `pane_gone_wedge_alarm` raises from the main loop's backoff path after a full max-defer window in which the pane has not resolved at all: there is nowhere to attempt a delivery, so away-mode supervision is DOWN.
+The alarm's summary, its notification title, its ERROR log line, its marker file, and its throttle are all selected by that kind.
+
+The `cause` is a separate thing: a diagnostic tag naming whatever the last delivery attempt recorded, carried in the active alert and status-line flash with the full detail in the ERROR line and the durable marker, so a wedge never has to be diagnosed by guesswork.
+It is not always a busy pane - the supervisor's agent may have exited to a shell or be unverifiable on this backend (`agent-dead` / `agent-unknown`, from the fail-closed agent-liveness guard), a human's text may be sitting in the composer (`composer-not-empty`), the pane may be mid-turn (`pane-busy`), or the submit's Enter may have been swallowed (`submit-unconfirmed`).
+`pane-gone` is a cause tag as well as an alarm kind, and as a cause it can appear on EITHER alarm: `inject_msg`'s own target-exists check records it whenever the pane dies between the main loop's existence check and housekeeping's flush.
+That is a buffer wedge carrying a `pane-gone` tag, not a vanished pane, and the wording follows the kind rather than the cause precisely so it reads as one: a single flaky existence probe during a flush must not declare supervision DOWN, skipping the full max-defer window of CONTINUOUS absence the pane-gone alarm debounces on, because an away captain told away mode is dead tears down a healthy session.
 
 Each of the two alarms owns its own marker, and may only ever retire its own: the buffer wedge writes `state/.subsuper-inject-wedged`, cleared by a successful flush, and the vanished pane writes `state/.subsuper-pane-gone`, cleared when the target resolves again.
 They shared one file until 2026-07-14, and a pane-gone alarm therefore rewrote a composer wedge's record as its own and then deleted it on recovery - discarding the one marker whose contract says leave it for a successful flush to clear, while the buffer it described was still undelivered.
 
-`pane-gone` is the one cause whose captain-facing wording is not about the buffer, because it is not a queue stuck behind a busy pane: away-mode supervision is DOWN and nothing can be delivered, buffered or not.
-It also fires on an EMPTY buffer, deliberately unlike the max-defer alarm, which is gated on buffered content.
+The pane-gone alarm's captain-facing wording is the one that is not about the buffer, because it is not a queue stuck behind a busy pane: supervision is DOWN and nothing can be delivered, buffered or not.
+It fires on an EMPTY buffer, deliberately unlike the buffer wedge, which is gated on buffered content.
 The buffer cannot even grow while the pane is gone - the main loop's backoff never reaches the wake handling that buffers - so an empty buffer is the ordinary case, and a buffer gate here would restore exactly the away-window silence this alarm exists to end.
 Every channel therefore says supervision is down and states the buffered count, rather than claiming undelivered escalations that may not exist.
-It also alarms ONCE per absence episode, latched in `pane_gone_wedge_alarm` rather than re-thrown each window like the other causes.
-Their throttles re-open after a max-defer window because those conditions are re-tested and can heal - a busy composer clears, a flush lands - so a repeat is a progress report.
+It also alarms ONCE per absence episode, latched in `pane_gone_wedge_alarm` rather than re-thrown each window like the buffer wedge.
+The buffer wedge's throttle re-opens after a max-defer window because its condition is re-tested and can heal - a busy composer clears, a flush lands - so a repeat is a progress report.
 A vanished pane heals only when the pane comes back, and the target is usually a unique pane id, so the same throttle would re-push the active alert every window for the life of the daemon: a terminal that dies at 23:30 buys the captain ~96 banners and ~96 pushes through a configured `command:` channel by morning, none of them actionable from away.
 Alert fatigue on the one channel that has to work is the failure this alarm exists to prevent, so only the re-pushing stops; the durable marker and the ERROR log remain the record.
 
 `pane_gone_recovered` retires that marker the moment the target resolves again, and re-arms the latch for the next episode: nothing else would clear it, since a pane-gone alarm fires whether or not anything is buffered.
-Targets are usually names rather than unique pane ids (`FM_SUPERVISOR_TARGET_DEFAULT` is `firstmate:0`), so a window killed and recreated resolves again, and without that recovery edge firstmate's afk-exit catch-up would report a wedge that healed hours earlier against a pane that is now healthy.
+A target CAN be a name rather than a unique pane id (`FM_SUPERVISOR_TARGET_DEFAULT` is `firstmate:0`, the unconfigured fallback), and a window killed and recreated under that name resolves again, so without this recovery edge firstmate's afk-exit catch-up would report a wedge that healed hours earlier against a pane that is now healthy.
 Separate marker files are what make that safe: the recovery edge can only ever delete the file this alarm writes, so a pane blinking out and back can never take a composer wedge's record with it.
 
 ## Reach: what is guaranteed, and what is best-effort

@@ -41,24 +41,30 @@ GLOBAL_CLEANUP() {
 trap GLOBAL_CLEANUP EXIT
 
 # ---------------------------------------------------------------------------
-# UNIT 1: fm_afk_clear_stale_artifacts removes exactly the three stale artifacts.
+# UNIT 1: a fresh entry clears every away-session delivery artifact. Asserted
+# through FM_AFK_ARTIFACTS itself - the same one list the launcher's backup and
+# rollback iterate - so an artifact added to the daemon later cannot be forgotten
+# by one site and remembered by the other.
 # ---------------------------------------------------------------------------
 unit_clear_stale() {
   local st
   st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-clear.XXXXXX")
   mkdir -p "$st/state"
-  : > "$st/state/.subsuper-escalations"
-  : > "$st/state/.subsuper-escalations.since"
-  : > "$st/state/.subsuper-inject-wedged"
   : > "$st/state/.wake-queue"          # durable queue must be untouched
   # Source fm-afk-start.sh inside a child bash (it sets `set -eu` and would
-  # otherwise leak that into this test shell) and call the clear helper.
-  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" \
-    bash -c '. "$1"; fm_afk_clear_stale_artifacts "$2"' _ "$START" "$st/state"
-  if [ ! -e "$st/state/.subsuper-escalations" ] \
-     && [ ! -e "$st/state/.subsuper-escalations.since" ] \
-     && [ ! -e "$st/state/.subsuper-inject-wedged" ]; then
-    pass "clear-stale: removes escalations buffer, sidecar, and wedge marker"
+  # otherwise leak that into this test shell), write every artifact the list
+  # names, and call the clear helper.
+  if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" bash -c '
+    . "$1"
+    for artifact in "${FM_AFK_ARTIFACTS[@]}"; do
+      : > "$2/$artifact"
+    done
+    fm_afk_clear_stale_artifacts "$2" || exit 1
+    for artifact in "${FM_AFK_ARTIFACTS[@]}"; do
+      [ ! -e "$2/$artifact" ] || exit 1
+    done
+  ' _ "$START" "$st/state"; then
+    pass "clear-stale: removes every away-session delivery artifact the one list names"
   else
     fail "clear-stale: stale artifacts survived"
   fi
@@ -746,7 +752,7 @@ unit_incomplete_restore_retains_backup() {
   rm -rf "$st"
 }
 
-# The rollback has to leave NO trace of the failed arm, and FM_AFK_LAUNCH_ARTIFACTS is
+# The rollback has to leave NO trace of the failed arm, and FM_AFK_ARTIFACTS is
 # the one list that says what a failed arm can have written. Asserted through the list
 # itself, so an artifact added to the daemon later cannot be forgotten here: whatever
 # the list holds must not survive the rollback.
@@ -758,11 +764,11 @@ unit_rollback_clears_every_artifact() {
   : > "$st/state/.afk"
   if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" bash -c '
     . "$1"
-    for artifact in "${FM_AFK_LAUNCH_ARTIFACTS[@]}"; do
+    for artifact in "${FM_AFK_ARTIFACTS[@]}"; do
       printf "written by the failed arm\n" > "$FM_AFK_LAUNCH_STATE/$artifact"
     done
     fm_afk_launch_restore_backup "$2" 0 || exit 1
-    for artifact in "${FM_AFK_LAUNCH_ARTIFACTS[@]}"; do
+    for artifact in "${FM_AFK_ARTIFACTS[@]}"; do
       [ ! -e "$FM_AFK_LAUNCH_STATE/$artifact" ] || exit 1
     done
     [ ! -e "$FM_AFK_LAUNCH_STATE/.afk" ]

@@ -39,6 +39,18 @@ FM_AFK_STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 FM_AFK_LOCK="$FM_AFK_STATE/.supervise-daemon.lock"
 FM_AFK_DAEMON="$FM_AFK_START_DIR/fm-supervise-daemon.sh"
 
+# The away session's delivery artifacts. ONE list, in the file both sites source:
+# the fresh-arm clear below drops the prior session's copies, and
+# bin/fm-afk-launch.sh backs them up before a fresh arm and restores them if that
+# arm fails. A new artifact added to the daemon is therefore added in exactly one
+# place, and cannot be rolled back but survive a fresh arm, or the reverse.
+FM_AFK_ARTIFACTS=(
+  .subsuper-escalations
+  .subsuper-escalations.since
+  .subsuper-inject-wedged
+  .subsuper-pane-gone
+)
+
 # shellcheck source=bin/fm-wake-lib.sh
 . "$FM_AFK_START_DIR/fm-wake-lib.sh"
 
@@ -60,11 +72,11 @@ fm_afk_start_usage() {
 # NOT called on a refresh (daemon already alive), so the current session's own
 # buffered escalations are preserved.
 fm_afk_clear_stale_artifacts() {  # <state-dir>
-  local state=$1
-  rm -f "$state/.subsuper-escalations" \
-        "$state/.subsuper-escalations.since" \
-        "$state/.subsuper-inject-wedged" \
-        "$state/.subsuper-pane-gone" 2>/dev/null
+  local state=$1 artifact result=0
+  for artifact in "${FM_AFK_ARTIFACTS[@]}"; do
+    rm -f "$state/$artifact" 2>/dev/null || result=1
+  done
+  return "$result"
 }
 
 # The daemon-lock liveness gate. The lock path defaults to this home's, but every
