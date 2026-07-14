@@ -181,35 +181,40 @@ fm_composer_strip_ghost() {
 # make a dead-shell prompt read `empty`, handing the away-mode injector the exact
 # target this owner exists to deny it:
 #   1. fm_composer_sanitize_agent_glyphs rejects a shell glyph out of any set
-#      read from the environment, loudly, naming the glyph.
+#      read from the environment, loudly, naming the glyph - and never leaves the
+#      set EMPTY doing so, because an empty set would trade the dead-shell hazard
+#      for the false-pending one (see that function).
 #   2. fm_composer_classify_content evaluates the hardcoded shell-glyph rule
 #      BEFORE the configurable agent-glyph match, so even a set handed straight
 #      to it by a caller cannot promote a bare shell prompt to `empty`.
 FM_COMPOSER_SHELL_GLYPHS='> $ % #'
 FM_COMPOSER_AGENT_GLYPHS_DEFAULT='❯ ›'
 
-# fm_composer_split_glyphs: print the whitespace-separated glyphs of <set>, one
-# per line. Pathname expansion is disabled around the split so a glob character in
-# an operator-supplied set stays literal.
-fm_composer_split_glyphs() {  # <set>
-  local restore_glob=0
-  case $- in *f*) : ;; *) restore_glob=1 ;; esac
-  set -f
-  # shellcheck disable=SC2086  # deliberate split: the glyph set is whitespace-separated
-  set -- $1
-  if [ "$restore_glob" = 1 ]; then set +f; fi
-  [ "$#" -gt 0 ] && printf '%s\n' "$@"
-  return 0
-}
-
 # fm_composer_sanitize_agent_glyphs: print <set> with every SHELL prompt glyph
 # removed, warning once per rejected glyph on stderr. Applied to every agent glyph
 # set read from the environment (the fleet-wide knob below, and each adapter's own
 # knob), so an operator adding a harness whose composer prompt happens to be
 # shell-shaped cannot silently disarm the dead-shell rule.
+#
+# It NEVER prints an empty set. When nothing survives the rejection - an operator
+# set made only of shell glyphs, or an empty one - the built-in
+# FM_COMPOSER_AGENT_GLYPHS_DEFAULT is printed instead and the substitution is
+# announced. An empty set is not a safe degenerate: with no agent glyphs, a leading
+# `❯`/`›` is never matched and never stripped, so every real idle claude/codex
+# composer stops reading `empty` and reads `pending` forever. The away-mode injector
+# needs an affirmative `empty` to inject, so it would then defer every escalation -
+# the false-PENDING wedge, the same failure this owner exists to prevent from the
+# other direction. Rejecting a shell glyph must not cost the agent glyphs with it.
+# The set is split with pathname expansion disabled, so a glob character in an
+# operator-supplied set stays literal (same idiom as fm_composer_leading_agent_glyph).
 fm_composer_sanitize_agent_glyphs() {  # <set>
-  local g out='' shell_g
-  while IFS= read -r g; do
+  local g out='' shell_g restore_glob=0
+  case $- in *f*) : ;; *) restore_glob=1 ;; esac
+  set -f
+  # shellcheck disable=SC2086  # deliberate split: the glyph set is whitespace-separated
+  set -- $1
+  if [ "$restore_glob" = 1 ]; then set +f; fi
+  for g in "$@"; do
     [ -n "$g" ] || continue
     for shell_g in $FM_COMPOSER_SHELL_GLYPHS; do
       if [ "$g" = "$shell_g" ]; then
@@ -220,12 +225,20 @@ fm_composer_sanitize_agent_glyphs() {  # <set>
       fi
     done
     out="${out:+$out }$g"
-  done <<EOF
-$(fm_composer_split_glyphs "$1")
-EOF
+  done
+  if [ -z "$out" ]; then
+    printf '%s\n' \
+      "firstmate: WARNING: an agent prompt glyph set contained no usable agent glyphs; falling back to the built-in default '$FM_COMPOSER_AGENT_GLYPHS_DEFAULT'." \
+      "firstmate: an empty set would stop every idle agent composer from reading as empty, so away-mode would defer every escalation behind input that was never there (bin/fm-composer-lib.sh)." >&2
+    out=$FM_COMPOSER_AGENT_GLYPHS_DEFAULT
+  fi
   printf '%s' "$out"
 }
 
+# Sanitize FIRST, then let the sanitizer's own non-empty guarantee supply the
+# fallback: a `:-DEFAULT` expansion here would only cover an UNSET knob, and a knob
+# set to a shell-glyph-only value is non-empty, so it would sail past the expansion
+# and collapse to an empty set inside the sanitizer instead.
 FM_COMPOSER_AGENT_GLYPHS=$(fm_composer_sanitize_agent_glyphs \
   "${FM_COMPOSER_AGENT_GLYPHS:-$FM_COMPOSER_AGENT_GLYPHS_DEFAULT}")
 

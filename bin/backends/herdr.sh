@@ -758,7 +758,9 @@ FM_BACKEND_HERDR_IDLE_RE=${FM_BACKEND_HERDR_IDLE_RE:-'^Type a message\.\.\.$'}
 # because herdr passes its own set to the shared classifier, it would also override
 # the fleet-wide value there, so a glyph every other backend read as an empty
 # composer would read `pending` on herdr forever. Shell glyphs are rejected from
-# either set by the shared owner's sanitizer.
+# either set by the shared owner's sanitizer, which also guarantees what survives
+# is never an EMPTY set: a herdr set of only shell glyphs falls back to the built-in
+# agent glyphs rather than leaving herdr with no bare-prompt detection at all.
 FM_BACKEND_HERDR_BARE_PROMPT_GLYPHS=$(fm_composer_sanitize_agent_glyphs \
   "${FM_BACKEND_HERDR_BARE_PROMPT_GLYPHS:-$FM_COMPOSER_AGENT_GLYPHS}")
 

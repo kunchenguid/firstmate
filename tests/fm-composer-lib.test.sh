@@ -212,6 +212,50 @@ test_shell_glyph_cannot_be_configured_into_agent_set() {
   pass "fm_composer_classify_content: a shell prompt glyph cannot be configured into the agent set (sanitizer and check order each hold alone)"
 }
 
+# Rejecting the shell glyphs must not cost the AGENT glyphs with them. A set made
+# only of shell glyphs sanitizes down to nothing, and an empty set is the other
+# direction of the same fault: with no agent glyphs, a leading `❯` is never matched
+# and never stripped, so every real idle claude/codex composer reads `pending`
+# forever and the away-mode injector - which needs an affirmative `empty` - defers
+# every escalation. So the sanitizer falls back to the built-in default rather than
+# to nothing, and says so. The knob is read at SOURCE time, so it is exercised in a
+# child where the source actually happens, under both locales.
+test_shell_only_glyph_set_falls_back_to_default() {
+  local idle='^Type a message\.\.\.$' utf8 out err sanitized
+  # The degenerate set: every glyph in it is rejected, leaving nothing.
+  out=$(classify_with_glyphs_env_in_c_locale '$' 0 '❯' 2>/dev/null)
+  [ "$out" = empty ] \
+    || fail "a shell-only FM_COMPOSER_AGENT_GLYPHS must fall back to the built-in agent glyphs, so a bare '❯' still reads empty, got '$out' (false-pending: away-mode would defer every escalation)"
+  out=$(classify_with_glyphs_env_in_c_locale '$ %' 0 '❯ Type a message...' "$idle" 2>/dev/null)
+  [ "$out" = empty ] \
+    || fail "an idle composer must still read empty when the operator's glyph set sanitizes to nothing, got '$out'"
+  out=$(classify_with_glyphs_env_in_c_locale '$' 0 '› Type a message...' "$idle" 2>/dev/null)
+  [ "$out" = empty ] || fail "the codex glyph must survive the fallback too, got '$out'"
+  # The fallback restores the AGENT glyphs only - the rejected shell glyph is still
+  # a dead shell, and real text is still protected.
+  out=$(classify_with_glyphs_env_in_c_locale '$' 0 '$' 2>/dev/null)
+  [ "$out" = unknown ] || fail "the rejected shell glyph must still read unknown after the fallback, got '$out'"
+  out=$(classify_with_glyphs_env_in_c_locale '$' 0 '❯ fix the login bug' 2>/dev/null)
+  [ "$out" = pending ] || fail "real text must still read pending after the fallback, got '$out'"
+  # Same verdict under a UTF-8 locale: the fallback is not locale-dependent either.
+  if utf8=$(fm_test_utf8_locale); then
+    out=$(LC_ALL=$utf8 FM_COMPOSER_AGENT_GLYPHS='$' \
+      bash -c '. "$1"; shift; fm_composer_classify_content "$@"' \
+      _ "$ROOT/bin/fm-composer-lib.sh" 0 '❯' 2>/dev/null)
+    [ "$out" = empty ] || fail "the shell-only-set fallback must hold under LC_ALL=$utf8 too, got '$out'"
+  fi
+  # Each adapter's own knob routes through the same sanitizer, so it gets the same
+  # guarantee: bin/backends/herdr.sh's set cannot collapse to no detection either.
+  sanitized=$(fm_composer_sanitize_agent_glyphs '>' 2>/dev/null)
+  [ "$sanitized" = "$FM_COMPOSER_AGENT_GLYPHS_DEFAULT" ] \
+    || fail "a shell-only adapter glyph set must sanitize to the built-in default, got '$sanitized'"
+  # The substitution is announced, not silent.
+  err=$(LC_ALL=C FM_COMPOSER_AGENT_GLYPHS='$' \
+    bash -c '. "$1"' _ "$ROOT/bin/fm-composer-lib.sh" 2>&1 >/dev/null)
+  assert_contains "$err" 'no usable agent glyphs' "the fallback to the built-in default must warn loudly on stderr"
+  pass "fm_composer_sanitize_agent_glyphs: a shell-only glyph set falls back to the built-in agent glyphs, never to an empty set"
+}
+
 # The idle placeholder is the one composer knob that is still a regex, so it is
 # the one that can still be written unsafely. Its match is pinned to LC_ALL=C so
 # the verdict cannot depend on the ambient locale: unpinned, a bracket class over
@@ -275,6 +319,7 @@ test_idle_placeholder_is_empty
 test_glyph_strip_is_locale_invariant
 test_caller_supplied_glyph_set_is_honored
 test_shell_glyph_cannot_be_configured_into_agent_set
+test_shell_only_glyph_set_falls_back_to_default
 test_idle_regex_match_is_locale_pinned
 test_idle_placeholder_case_mode_is_explicit
 test_real_text_is_pending
