@@ -150,6 +150,7 @@ Prose may improve without changing adapter behavior.
 - Deny returns exit 2 and writes `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny"},"systemMessage":"[code] reason"}` to stderr.
 - Default deny mode also writes `{"decision":"deny","reason":"[code] reason"}` to stdout for Grok.
 - `--claude` suppresses stdout completely because Claude ignores a PreToolUse deny when stdout is nonempty.
+  Devin uses the same stderr-only response shape.
 - Codex blocks on exit 2 and displays stderr.
 - OpenCode throws only when the checker exits 2.
 - Pi and pi-signed return `{block: true}` only when the checker exits 2.
@@ -232,7 +233,7 @@ Every native-path automatic marker was present and every deny sentinel remained 
 ## Automated validation
 
 `tests/fm-arm-pretool-check.test.sh` owns the adversarial acceptance matrix.
-Every row runs through Codex-shaped stdin, Claude-shaped stdin, Grok-shaped stdin, OpenCode-shaped CLI, and Pi-shaped CLI entry forms.
+Every row runs through Codex-shaped stdin, Claude-shaped stdin, Devin-shaped stdin, Grok-shaped stdin, OpenCode-shaped CLI, and Pi-shaped CLI entry forms.
 The suite also verifies real newline bytes, direct classifier reason codes, comments, heredoc data, malformed and unsupported protected syntax, constructed dynamic payloads, malformed transport fail-open behavior, missing runtime fail-open behavior, output shapes, and exact adapter field forwarding plus exit-2 mapping.
 
 Run:

@@ -100,6 +100,7 @@ Identical in shape to `docs/arm-pretool-check.md`:
 - Deny returns exit 2 and writes `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny"},"systemMessage":"[persistent-cd] reason"}` to stderr.
 - Default deny mode also writes `{"decision":"deny","reason":"[persistent-cd] reason"}` to stdout for Grok.
 - `--claude` suppresses stdout completely because Claude ignores a PreToolUse deny when stdout is nonempty.
+  Devin uses the same stderr-only response shape.
 - Codex blocks on exit 2 and displays stderr.
 - OpenCode throws only when the checker exits 2.
 - Pi and pi-signed return `{block: true}` only when the checker exits 2.
@@ -120,6 +121,7 @@ The cd-guard never duplicates shell lexing; it adds only the cd-specific decisio
 | Grok | `.grok/hooks/fm-primary-cd-check.json` PreToolUse hook anchored on `${GROK_WORKSPACE_ROOT:-}` | Consumes the stdout `decision=deny` object. |
 | OpenCode | `.opencode/plugins/fm-primary-cd-check.js` `tool.execute.before` | Throws, which surfaces as the failed tool result. |
 | Pi | `.pi/extensions/fm-primary-turnend-guard.ts` `tool_call` handler | Returns `{block: true}`; piggybacks on the already-loaded primary extension so no extra `-e` flag is needed. |
+| Devin | `.devin/config.json` PreToolUse hook matcher-scoped to `exec` and forwarding stdin through `--claude` | Blocks the tool call; stderr deny object, stdout empty. |
 
 Each harness runs the cd-guard alongside the watcher-arm seatbelt; the two are independent checks, and either deny blocks the command.
 Every shell variable reference in the Grok hook command carries an inline default (`${GROK_WORKSPACE_ROOT:-}`) because Grok expands the raw hook command before `bash -lc` runs it, the same requirement documented in `docs/arm-pretool-check.md`.
@@ -127,7 +129,7 @@ Every shell variable reference in the Grok hook command carries an inline defaul
 ## Automated validation
 
 `tests/fm-cd-pretool-check.test.sh` owns the acceptance matrix.
-Every block and allow case runs through Codex-shaped stdin, Claude-shaped stdin, Grok-shaped stdin, OpenCode-shaped CLI, and Pi-shaped CLI entry forms.
+Every block and allow case runs through Codex-shaped stdin, Claude-shaped stdin, Devin-shaped stdin, Grok-shaped stdin, OpenCode-shaped CLI, and Pi-shaped CLI entry forms.
 The suite also proves the end-to-end cwd-leak regression (a firstmate-owned backlog write leaking into a project clone, then denied at the exact command), the checkout scoping (fires in a git-cloned secondmate fixture, inert in a crewmate/scout linked worktree, inert outside a firstmate checkout, inert outside a git repo), the fail-open transport behavior, the prefilter fast path, the policy CLI output contract, and the per-harness wiring.
 
 Run:
