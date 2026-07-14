@@ -1,9 +1,13 @@
 #!/usr/bin/env bash
+if [ "${FM_RUN_ISOLATED_HERDR_E2E:-0}" != 1 ]; then
+  printf 'ok - real Herdr adapter smoke test is opt-in\n'
+  exit 0
+fi
 # tests/fm-backend-herdr-smoke.test.sh - real herdr smoke test for the herdr
 # session-provider adapter (bin/backends/herdr.sh), P2 of
 # data/fm-backend-design-d7 (herdr-addendum.md), extended for the P3
 # workspace-per-home pass (AGENTS.md task herdr-sm-spaces-k4). Mirrors
-# tests/fm-backend-tmux-smoke.test.sh's structure: every other suite fakes the
+# tests/fm-backend-herdr-smoke.test.sh's structure: every other suite fakes the
 # CLI, this one talks to a REAL herdr server - but ALWAYS on a private, named,
 # throwaway HERDR_SESSION (never the default session), so it never touches a
 # captain's real herdr usage. Skips cleanly when herdr (or jq) is not
@@ -35,7 +39,8 @@ cleanup_all() {
   herdr_safe_stop_and_delete "$SESSION"
 }
 trap cleanup_all EXIT
-fm_herdr_lab_prepare "$SESSION" || fail "could not prepare isolated Herdr lab session"
+herdr_test_provision "$SESSION" || fail "could not provision isolated Herdr lab session"
+herdr_test_route_calls "$SESSION"
 
 # shellcheck source=bin/fm-backend.sh
 . "$ROOT/bin/fm-backend.sh"
@@ -224,10 +229,10 @@ pass "real herdr: list_live stays scoped to each home's own workspace - neither 
 # still resolve, unchanged, after a `session stop` + fresh server restart, all
 # scoped to this suite's OWN isolated $SESSION - never the default session.
 
-fm_herdr_lab_stop "$SESSION" >/dev/null 2>&1 \
+herdr_test_stop "$SESSION" >/dev/null 2>&1 \
   || fail "could not stop the isolated session for the restart-stability check"
 sleep 0.5
-fm_backend_herdr_server_ensure "$SESSION" || fail "the isolated session's server did not come back up after the stop"
+herdr_test_provision "$SESSION" || fail "the isolated session's server did not come back up after the stop"
 
 POST_LIST=$(herdr workspace list --session "$SESSION" 2>&1)
 POST_PRIMARY_ID=$(printf '%s' "$POST_LIST" | jq -r '.result.workspaces[]? | select(.label == "firstmate") | .workspace_id')

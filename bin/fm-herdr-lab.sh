@@ -56,6 +56,24 @@ fm_herdr_lab_session_list() { # <session>
   fm_herdr_lab_raw "$1" session list --json
 }
 
+fm_herdr_lab_session_state_from_list() { # <session> <session-list-json>
+  local name=$1 info=$2 count flag
+  count=$(printf '%s' "$info" | jq -r --arg name "$name" \
+    '[.sessions[]? | select(.name == $name)] | length' 2>/dev/null) || return 1
+  case "$count" in
+    0) printf 'absent'; return 0 ;;
+    1) ;;
+    *) return 1 ;;
+  esac
+  flag=$(printf '%s' "$info" | jq -r --arg name "$name" \
+    '.sessions[] | select(.name == $name) | .default' 2>/dev/null) || return 1
+  case "$flag" in
+    false) printf 'nondefault' ;;
+    true) printf 'default' ;;
+    *) return 1 ;;
+  esac
+}
+
 fm_herdr_lab_fleet_state() { # <session>
   local name=$1 sessions snapshot
   sessions=$(fm_herdr_lab_session_list "$name" 2>/dev/null) || {
@@ -105,16 +123,15 @@ fm_herdr_lab_prepare() { # <session>
 }
 
 fm_herdr_lab_refuse_if_default() { # <session>
-  local name=$1 info flag
+  local name=$1 info state
   fm_herdr_lab_validate_name "$name" || return 1
   info=$(fm_herdr_lab_session_list "$name" 2>/dev/null) || {
     fm_herdr_lab_error "refusing destructive call because session list failed"
     return 1
   }
-  flag=$(printf '%s' "$info" | jq -r --arg name "$name" \
-    '.sessions[]? | select(.name == $name) | .default' 2>/dev/null)
-  [ "$flag" = false ] && return 0
-  fm_herdr_lab_error "refusing destructive call for '$name': session is absent or default (default=${flag:-<not found>})"
+  state=$(fm_herdr_lab_session_state_from_list "$name" "$info") || state=invalid
+  [ "$state" = nondefault ] && return 0
+  fm_herdr_lab_error "refusing destructive call for '$name': session is absent, default, or ambiguous (state=$state)"
   return 1
 }
 
@@ -250,7 +267,7 @@ fm_herdr_lab_stop() { # <session>
 }
 
 fm_herdr_lab_teardown() { # <session>
-  local name=$1 tripwire sessions delete_status=0
+  local name=$1 tripwire sessions state delete_status=0 attempt=0
   fm_herdr_lab_validate_name "$name" || return 1
   tripwire=$(fm_herdr_lab_tripwire_path "$name")
   [ -f "$tripwire" ] || {
@@ -261,27 +278,54 @@ fm_herdr_lab_teardown() { # <session>
     fm_herdr_lab_error "cannot list Herdr sessions before teardown"
     return 1
   }
-  if ! printf '%s' "$sessions" | jq -e --arg name "$name" '.sessions[]? | select(.name == $name)' >/dev/null 2>&1; then
-    fm_herdr_lab_verify_tripwire "$name"
-    return
-  fi
-  fm_herdr_lab_stop "$name" >/dev/null 2>&1 || true
-  sleep 0.5
-  fm_herdr_lab_refuse_if_default "$name" || return 1
-  fm_herdr_lab_raw "$name" session delete "$name" --json >/dev/null 2>&1 || delete_status=$?
-  sessions=$(fm_herdr_lab_session_list "$name" 2>/dev/null) || {
-    fm_herdr_lab_error "cannot confirm removal of lab session '$name' after teardown"
+  state=$(fm_herdr_lab_session_state_from_list "$name" "$sessions") || {
+    fm_herdr_lab_error "cannot classify lab session '$name' before teardown"
     return 1
   }
-  if printf '%s' "$sessions" | jq -e --arg name "$name" '.sessions[]? | select(.name == $name)' >/dev/null 2>&1; then
-    if [ "$delete_status" -ne 0 ]; then
-      fm_herdr_lab_error "session delete failed for '$name' and the lab session remains"
-    else
-      fm_herdr_lab_error "lab session '$name' remains after teardown"
-    fi
+  case "$state" in
+    absent) fm_herdr_lab_verify_tripwire "$name"; return ;;
+    nondefault) ;;
+    *) fm_herdr_lab_error "refusing teardown for '$name': unsafe session state '$state'"; return 1 ;;
+  esac
+  fm_herdr_lab_stop "$name" >/dev/null 2>&1 || true
+  sleep 0.5
+  sessions=$(fm_herdr_lab_session_list "$name" 2>/dev/null) || {
+    fm_herdr_lab_error "cannot list Herdr sessions before delete"
     return 1
+  }
+  state=$(fm_herdr_lab_session_state_from_list "$name" "$sessions") || {
+    fm_herdr_lab_error "cannot classify lab session '$name' before delete"
+    return 1
+  }
+  case "$state" in
+    absent) fm_herdr_lab_verify_tripwire "$name"; return ;;
+    nondefault) ;;
+    *) fm_herdr_lab_error "refusing delete for '$name': unsafe session state '$state'"; return 1 ;;
+  esac
+  fm_herdr_lab_raw "$name" session delete "$name" --json >/dev/null 2>&1 || delete_status=$?
+  while [ "$attempt" -lt 20 ]; do
+    sessions=$(fm_herdr_lab_session_list "$name" 2>/dev/null) || {
+      fm_herdr_lab_error "cannot confirm removal of lab session '$name' after teardown"
+      return 1
+    }
+    state=$(fm_herdr_lab_session_state_from_list "$name" "$sessions") || {
+      fm_herdr_lab_error "cannot classify lab session '$name' after delete"
+      return 1
+    }
+    case "$state" in
+      absent) fm_herdr_lab_verify_tripwire "$name"; return ;;
+      nondefault) ;;
+      *) fm_herdr_lab_error "lab session '$name' became unsafe while awaiting deletion (state=$state)"; return 1 ;;
+    esac
+    sleep 0.1
+    attempt=$((attempt + 1))
+  done
+  if [ "$delete_status" -ne 0 ]; then
+    fm_herdr_lab_error "session delete failed for '$name' and the lab session remains"
+  else
+    fm_herdr_lab_error "lab session '$name' remains after teardown"
   fi
-  fm_herdr_lab_verify_tripwire "$name"
+  return 1
 }
 
 fm_herdr_lab_name() { # <label>

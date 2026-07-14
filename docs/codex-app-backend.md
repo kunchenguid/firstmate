@@ -155,7 +155,6 @@ The return channel is real at the Codex Desktop host-tool layer.
 ## Codex Desktop API blocker
 
 Firstmate's backend scripts are Bash entry points.
-They can call `tmux`, `herdr`, `zellij`, primitive Orca CLI surfaces, and `cmux` directly.
 The Codex Desktop host tools verified above are available to the Codex Desktop conversation, not to arbitrary Firstmate subprocesses.
 The missing piece is therefore a supported Codex Desktop transport that a Bash backend can call, not another Firstmate-local ledger.
 

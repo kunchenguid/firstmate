@@ -42,7 +42,7 @@ Launching a supported harness inside it instantiates your first mate - and makes
 ## Features
 
 - **One liaison** - you talk only to the first mate; it dispatches, supervises, escalates only real decisions, and reports plain outcomes.
-- **A visible crew** - every crewmate works in its own tmux window, experimental herdr/zellij tab, cmux workspace, or Orca terminal you can watch or type into; the first mate reconciles.
+- **A visible crew** - every crewmate works in its own Herdr or zellij tab, cmux workspace, or Orca terminal you can watch or type into; the first mate reconciles.
 - **Disposable worktrees** - each task runs in a clean [treehouse](https://github.com/kunchenguid/treehouse) git worktree, or an Orca-managed worktree when `backend=orca`, so parallel work on one repo never collides.
 - **Two task shapes** - ship tasks deliver a change; scout tasks investigate, plan, reproduce, or audit and leave a report.
 - **Explicit project modes** - each project ships via `no-mistakes`, `direct-PR`, or `local-only`, with an optional `+yolo` autonomy flag.
@@ -50,7 +50,7 @@ Launching a supported harness inside it instantiates your first mate - and makes
 - **Event-driven, zero-token supervision** - a bash watcher sleeps on the fleet and wakes the first mate only when something needs you; verified primary harnesses also get a turn-end backstop that blocks or follows up on a blind stop when work is in flight and supervision is not live.
 - **Optional X mode** - opt in with one local `.env` token so firstmate can answer your public `@myfirstmate` mentions, act on normal reversible mention requests through the same lifecycle as chat requests, acknowledge spawned work, and post up to three public-safe completion follow-ups within seven days for genuine milestones and the final outcome without changing non-X behavior; dry-run preview records would-be replies and dismissals locally before go-live.
 - **Guarded by construction** - the first mate is read-only over your projects outside guarded clone refreshes, safe branch pruning, and approved `local-only` fast-forward merges; crewmates make every project change behind the configured merge authority.
-- **Restart-proof** - all state lives on disk and in the active session backend (tmux by hard default, herdr or cmux when selected or auto-detected, zellij/orca when explicitly selected); kill the session anytime and the next one reconciles, including confirmed-dead secondmate agents, and carries on.
+- **Restart-proof** - all state lives on disk and in the active session backend (Herdr by default, cmux when selected or auto-detected, and zellij/Orca when explicitly selected); stop the session anytime and the next one reconciles, including confirmed-dead secondmate agents, and carries on.
 
 Full detail on every feature lives in [docs/architecture.md](docs/architecture.md).
 
@@ -60,7 +60,7 @@ Full detail on every feature lives in [docs/architecture.md](docs/architecture.m
 
 - A verified agent harness: Claude Code, Grok, Pi, Codex, or OpenCode.
 - Git and the GitHub CLI, authenticated through `gh auth login`.
-- tmux, for the reference session backend.
+- Herdr, for the reference session backend.
 
 The first mate detects and offers to install everything else.
 
@@ -122,7 +122,7 @@ For Pi, approve the project trust prompt once per clone on first launch so both 
 
 ### More backends
 
-Setup guides for tmux (the default) and every other supported backend (herdr, zellij, Orca, cmux) are linked in [Documentation](#documentation) below.
+Setup guides for Herdr (the default) and every other supported backend (zellij, Orca, cmux) are linked in [Documentation](#documentation) below.
 
 ## How It Works
 
@@ -138,7 +138,7 @@ Setup guides for tmux (the default) and every other supported backend (herdr, ze
     │ backend sends / status files │
     ▼              ▼               ▼
  ┌────────┐   ┌────────┐      ┌────────┐
- │fm-task1│   │fm-task2│  ... │fm-taskN│   tmux windows, herdr/zellij tabs, cmux workspaces, or Orca terminals
+ │fm-task1│   │fm-task2│  ... │fm-taskN│   Herdr/zellij tabs, cmux workspaces, or Orca terminals
  │crewmate│   │crewmate│      │crewmate│   one autonomous agent each
  └───┬────┘   └───┬────┘      └───┬────┘
      ▼            ▼               ▼
@@ -185,8 +185,7 @@ Firstmate's skills live in two separate places with different audiences:
 - [docs/architecture.md](docs/architecture.md) - how the crew, supervision, worktrees, secondmates, and project modes work.
 - [docs/configuration.md](docs/configuration.md) - environment variables, `FM_HOME`, runtime backend selection, optional X mode, the files you set, and harness support.
 - [docs/wedge-alarm.md](docs/wedge-alarm.md) - configure the active alert for a wedged away-mode escalation delivery.
-- [docs/tmux-backend.md](docs/tmux-backend.md) - setup guide for the tmux reference backend: prerequisites, attaching, and watching crew windows.
-- [docs/herdr-backend.md](docs/herdr-backend.md) - setup guide for the experimental herdr backend, plus its verification notes and known gaps.
+- [docs/herdr-backend.md](docs/herdr-backend.md) - setup and verification guide for the default Herdr backend.
 - [docs/zellij-backend.md](docs/zellij-backend.md) - setup guide for the experimental zellij backend, plus its verification notes and known gaps.
 - [docs/orca-backend.md](docs/orca-backend.md) - setup guide for the experimental Orca backend, plus its lifecycle notes and known gaps.
 - [docs/cmux-backend.md](docs/cmux-backend.md) - setup guide for the experimental cmux backend, plus its verification notes and known gaps.

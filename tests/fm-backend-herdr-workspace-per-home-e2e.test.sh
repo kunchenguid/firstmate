@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+if [ "${FM_RUN_ISOLATED_HERDR_E2E:-0}" != 1 ]; then
+  printf 'ok - real Herdr workspace e2e is opt-in\n'
+  exit 0
+fi
 # tests/fm-backend-herdr-workspace-per-home-e2e.test.sh - mandatory ISOLATED
 # end-to-end real-herdr test for the P3 "workspace-per-home" pass (AGENTS.md
 # task herdr-sm-spaces-k4). Drives the REAL bin/fm-spawn.sh and
@@ -9,9 +13,8 @@
 # arm) and at fm_backend_herdr_workspace_label's FM_HOME read; neither is
 # exercised by the adapter-primitive smoke test.
 #
-# Mirrors tests/fm-backend-autodetect-smoke.test.sh's isolated-session
-# convention: a private throwaway HERDR_SESSION (never the captain's
-# default), scratch FM_HOME(s), and scratch local-only projects.
+# Uses a private throwaway session, scratch FM_HOME values, and scratch
+# local-only projects.
 #
 # Safety (2026-07-02 incident, see tests/herdr-test-safety.sh): cleanup uses
 # ONLY herdr_safe_stop_and_delete, never a bare/inline-prefixed `herdr server
@@ -55,8 +58,7 @@ command -v treehouse >/dev/null 2>&1 || { echo "skip: treehouse not found (requi
 . "$ROOT/tests/herdr-test-safety.sh"
 
 # TMP_ROOT is physically resolved (mktemp -d "$(pwd -P)"-relative) for the same
-# low-noise scratch fixture shape used by
-# tests/fm-backend-autodetect-smoke.test.sh.
+# low-noise scratch fixture shape used by the production spawn tests.
 # fm-spawn no longer needs this as a symlink workaround: fm-spawn-symlink-guard-s8
 # canonicalized project and backend cwd comparisons in the worktree-discovery
 # poll.
@@ -71,7 +73,7 @@ cleanup_all() {
   rm -rf "$TMP_ROOT"
 }
 trap cleanup_all EXIT
-fm_herdr_lab_prepare "$SESSION" || fail "could not prepare isolated Herdr lab session"
+herdr_test_provision "$SESSION" || fail "could not provision isolated Herdr lab session"
 
 # shellcheck source=bin/fm-backend.sh
 . "$ROOT/bin/fm-backend.sh"
@@ -101,6 +103,70 @@ make_scratch_project() {  # <dir>
 
 PROJ1="$TMP_ROOT/scratch-project-1"; make_scratch_project "$PROJ1"
 PROJ2="$TMP_ROOT/scratch-project-2"; make_scratch_project "$PROJ2"
+WORK1="$TMP_ROOT/worktree-1"
+WORK2="$TMP_ROOT/worktree-2"
+git -C "$PROJ1" worktree add -q -b e2e-one "$WORK1"
+git -C "$PROJ2" worktree add -q -b e2e-two "$WORK2"
+
+TREEBIN="$TMP_ROOT/tree-bin"
+mkdir -p "$TREEBIN"
+cat > "$TREEBIN/treehouse" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+case "\${1:-}" in
+  get)
+    case "\$(pwd -P)" in
+      '$PROJ1') cd '$WORK1' ;;
+      '$PROJ2') cd '$WORK2' ;;
+      *) exit 2 ;;
+    esac
+    exec bash --noprofile --norc
+    ;;
+  return)
+    target=
+    for arg in "\$@"; do target=\$arg; done
+    case "\$target" in
+      '$WORK1') git -C '$PROJ1' worktree remove --force "\$target" ;;
+      '$WORK2') git -C '$PROJ2' worktree remove --force "\$target" ;;
+      *) exit 2 ;;
+    esac
+    ;;
+  *) exit 2 ;;
+esac
+EOF
+chmod +x "$TREEBIN/treehouse"
+HERDR_TEST_REAL_PATH="$TREEBIN:$HERDR_TEST_REAL_PATH"
+herdr_test_route_calls "$SESSION"
+export FM_BACKEND_HERDR_TAB_PATH="$TREEBIN:$HERDR_TEST_REAL_PATH"
+
+# Herdr pane shells inherit the tab.create environment from the server rather
+# than the client process that requested the tab.
+# Prove the production adapter's explicit tab PATH reaches an isolated pane
+# before fm-spawn relies on treehouse inside a newly created task tab.
+PANE_PATH_FILE="$TMP_ROOT/pane-path"
+PANE_TREEHOUSE_FILE="$TMP_ROOT/pane-treehouse"
+PROBE_CONTAINER_RAW=$(FM_HOME="$PRIMARY_HOME" fm_backend_herdr_container_ensure "$PROJ1") \
+  || fail "could not create the pane-environment probe container"
+PROBE_CONTAINER=${PROBE_CONTAINER_RAW%%$'\t'*}
+PROBE_SEEDED_TAB=${PROBE_CONTAINER_RAW#*$'\t'}
+PROBE_IDS=$(FM_HOME="$PRIMARY_HOME" fm_backend_herdr_create_task "$PROBE_CONTAINER" "fm-env-probe" "$PROJ1" "$PROBE_SEEDED_TAB") \
+  || fail "could not create the pane-environment probe task"
+read -r _PROBE_TAB PROBE_PANE <<EOF
+$PROBE_IDS
+EOF
+PROBE_COMMAND="resolved=\$(command -v treehouse || true); printf '%s\\n' \"\$PATH\" > '$PANE_PATH_FILE'; printf '%s\\n' \"\$resolved\" > '$PANE_TREEHOUSE_FILE'; test \"\$resolved\" = '$TREEBIN/treehouse'"
+fm_backend_herdr_send_text_line "$SESSION:$PROBE_PANE" "$PROBE_COMMAND" >/dev/null 2>&1 \
+  || fail "could not run the pane-environment assertion"
+for _ in $(seq 1 20); do
+  [ -f "$PANE_PATH_FILE" ] && [ -f "$PANE_TREEHOUSE_FILE" ] && break
+  sleep 0.1
+done
+PANE_PATH=$(cat "$PANE_PATH_FILE" 2>/dev/null || printf '<missing>')
+PANE_TREEHOUSE=$(cat "$PANE_TREEHOUSE_FILE" 2>/dev/null || printf '<missing>')
+[ "$PANE_TREEHOUSE" = "$TREEBIN/treehouse" ] \
+  || fail "pane-local treehouse preflight failed before fm-spawn"$'\n'"PATH=$PANE_PATH"$'\n'"command -v treehouse=$PANE_TREEHOUSE"
+pass "pane-local preflight: command -v treehouse resolves to the scratch wrapper before fm-spawn"
+fm_backend_herdr_kill "$SESSION:$PROBE_PANE" >/dev/null 2>&1 || true
 
 # --- 1. primary-shaped home: a crewmate spawns into the "firstmate" space ---
 
@@ -113,7 +179,7 @@ rc=$?
 
 CM1_META="$PRIMARY_HOME/state/cm1.meta"
 [ -f "$CM1_META" ] || fail "no meta written for cm1"
-assert_contains_local "$(cat "$CM1_META")" "backend=herdr" "cm1 meta missing backend=herdr"
+assert_not_contains_local "$(cat "$CM1_META")" "backend=" "default Herdr metadata should omit backend="
 WT1=$(grep '^worktree=' "$CM1_META" | cut -d= -f2-)
 CM1_PANE=$(grep '^herdr_pane_id=' "$CM1_META" | cut -d= -f2-)
 [ -n "$CM1_PANE" ] || fail "cm1 meta missing herdr_pane_id"
@@ -143,7 +209,7 @@ rc=$?
 SM_META="$PRIMARY_HOME/state/e2esm1.meta"
 [ -f "$SM_META" ] || fail "no meta written for e2esm1 (recorded in the PRIMARY's own state dir, since the primary did the spawning)"
 assert_contains_local "$(cat "$SM_META")" "kind=secondmate" "e2esm1 meta missing kind=secondmate"
-assert_contains_local "$(cat "$SM_META")" "backend=herdr" "e2esm1 meta missing backend=herdr"
+assert_not_contains_local "$(cat "$SM_META")" "backend=" "default Herdr secondmate metadata should omit backend="
 assert_contains_local "$(cat "$SM_META")" "home=$SM_HOME" "e2esm1 meta does not record its own home"
 SM_PANE=$(grep '^herdr_pane_id=' "$SM_META" | cut -d= -f2-)
 [ -n "$SM_PANE" ] || fail "e2esm1 meta missing herdr_pane_id"
@@ -168,7 +234,7 @@ rc=$?
 
 CM2_META="$SM_HOME/state/cm2.meta"
 [ -f "$CM2_META" ] || fail "no meta written for cm2 (recorded in the SECONDMATE's own state dir - it did its own spawning)"
-assert_contains_local "$(cat "$CM2_META")" "backend=herdr" "cm2 meta missing backend=herdr"
+assert_not_contains_local "$(cat "$CM2_META")" "backend=" "default Herdr metadata should omit backend="
 WT2=$(grep '^worktree=' "$CM2_META" | cut -d= -f2-)
 CM2_PANE=$(grep '^herdr_pane_id=' "$CM2_META" | cut -d= -f2-)
 [ -n "$CM2_PANE" ] || fail "cm2 meta missing herdr_pane_id"

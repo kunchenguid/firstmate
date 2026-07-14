@@ -33,7 +33,7 @@ BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
 fm_git_identity fmtest fmtest@example.com
 
 TMP_ROOT=$(fm_test_tmproot fm-secondmate-sync)
-export FM_BACKEND=tmux
+export FM_BACKEND=herdr
 
 # --- world builders --------------------------------------------------------
 
@@ -289,7 +289,7 @@ make_fake_toolchain() {
   local dir=$1 fakebin
   fakebin="$dir/fakebin"
   mkdir -p "$fakebin"
-  fm_fake_exit0 "$fakebin" tmux node gh-axi chrome-devtools-axi lavish-axi
+  fm_fake_exit0 "$fakebin" herdr node gh-axi chrome-devtools-axi lavish-axi
   cat > "$fakebin/gh" <<'SH'
 #!/usr/bin/env bash
 exit 0
@@ -363,7 +363,7 @@ test_bootstrap_sweep_nudges_only_instruction_change() {
 # --- T8b: nudge selectors stay fm-<id> when liveness respawn rotates herdr ----
 # Reproduces the 2026-07-07 session-start bug: secondmate_sync used to print raw
 # backend targets (default:w9:pY) that liveness respawn immediately replaced
-# (default:wA:p2), so fm-send with the printed target fell back to tmux and failed
+# (default:wA:p2), so fm-send with the printed target fell back to herdr and failed
 # while fm-<id> resolved through current meta.
 make_nudge_herdr_fake() {
   local dir=$1 stale=$2 fresh=$3 fakebin
@@ -515,16 +515,16 @@ test_spawn_fast_forwards_before_launch() {
   c2=$(head_of "$w/main")
   [ "$(head_of "$w/sm")" = "$c1" ] || fail "precondition: home should start behind the primary"
 
-  # tmux stub: accept every subcommand, print nothing (so no window pre-exists).
+  # herdr stub: accept every subcommand, print nothing (so no window pre-exists).
   fakebin="$w/fakebin"
   mkdir -p "$fakebin"
-  cat > "$fakebin/tmux" <<'SH'
+  cat > "$fakebin/herdr" <<'SH'
 #!/usr/bin/env bash
 exit 0
 SH
-  chmod +x "$fakebin/tmux"
+  chmod +x "$fakebin/herdr"
 
-  PATH="$fakebin:$BASE_PATH" TMUX='' \
+  PATH="$fakebin:$BASE_PATH" HERDR='' \
     FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" \
     FM_STATE_OVERRIDE="$w/home/state" FM_DATA_OVERRIDE="$w/home/data" \
     FM_PROJECTS_OVERRIDE="$w/home/projects" FM_CONFIG_OVERRIDE="$w/home/config" \
@@ -552,13 +552,13 @@ test_spawn_warns_when_sync_skipped_before_launch() {
   fakebin="$w/fakebin"
   err="$w/spawn.err"
   mkdir -p "$fakebin"
-  cat > "$fakebin/tmux" <<'SH'
+  cat > "$fakebin/herdr" <<'SH'
 #!/usr/bin/env bash
 exit 0
 SH
-  chmod +x "$fakebin/tmux"
+  chmod +x "$fakebin/herdr"
 
-  PATH="$fakebin:$BASE_PATH" TMUX='' \
+  PATH="$fakebin:$BASE_PATH" HERDR='' \
     FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" \
     FM_STATE_OVERRIDE="$w/home/state" FM_DATA_OVERRIDE="$w/home/data" \
     FM_PROJECTS_OVERRIDE="$w/home/projects" FM_CONFIG_OVERRIDE="$w/home/config" \

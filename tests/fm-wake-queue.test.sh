@@ -96,7 +96,7 @@ test_stale_enqueue_before_suppressor() {
   pane_hash=$(hash_text "idle prompt")
   printf '%s' "$pane_hash" > "$state/.hash-$key"
   printf '1\n' > "$state/.count-$key"
-  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  PATH="$fakebin:$PATH" FM_FAKE_HERDR_WINDOW="$window" FM_FAKE_HERDR_CAPTURE="$capture_file" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   wait_for_exit "$!" 40 || fail "watcher did not exit for stale pane"
   grep -Fx "stale: $window" "$out" >/dev/null || fail "watcher did not print stale wake"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" || fail "drain after stale wake failed"
@@ -132,7 +132,7 @@ test_not_working_stale_enqueue_before_suppressor() {
   # NOT provably working: no running pipeline, idle pane. (make_case installed the
   # fake fm-crew-state.sh the watcher reads via FM_CREW_STATE_BIN.)
   export FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'
-  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+  PATH="$fakebin:$PATH" FM_FAKE_HERDR_WINDOW="$window" FM_FAKE_HERDR_CAPTURE="$capture_file" \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
     FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   wait_for_exit "$!" 40 || fail "watcher did not surface a not-provably-working stale"

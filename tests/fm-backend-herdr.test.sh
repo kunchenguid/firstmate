@@ -567,6 +567,21 @@ test_create_task_creates_and_parses_ids() {
   pass "fm_backend_herdr_create_task: creates a tab and parses tab_id/pane_id from the JSON response, prunes nothing when no seeded tab id is given"
 }
 
+test_create_task_propagates_explicit_tab_path() {
+  local dir log resp fb out explicit_path
+  dir="$TMP_ROOT/create-task-path"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"tabs":[]}}\n' > "$resp/1.out"
+  printf '{"result":{"tab":{"tab_id":"w1:t2"},"root_pane":{"pane_id":"w1:p2"}}}\n' > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  explicit_path="$dir/scratch-bin:/usr/bin:/bin"
+  out=$( PATH="$fb:$PATH" FM_BACKEND_HERDR_TAB_PATH="$explicit_path" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task fmtest:w1 fm-path /tmp/proj' "$ROOT" )
+  [ "$out" = "w1:t2 w1:p2" ] || fail "create_task with an explicit tab PATH should succeed"
+  assert_contains "$(cat "$log")" $'\x1f''--env'$'\x1f'"PATH=$explicit_path" \
+    "create_task did not pass the explicit PATH through Herdr tab.create env"
+  pass "fm_backend_herdr_create_task: propagates an explicit pane PATH through Herdr's native tab environment"
+}
+
 # --- container_ensure / create_task: --no-focus and per-home label ----------
 
 test_container_ensure_creates_with_no_focus_flag() {
@@ -1436,14 +1451,6 @@ test_dispatch_routes_herdr_backend() {
   pass "fm_backend_validate: herdr is a known backend (P2)"
 }
 
-test_dispatch_busy_state_unknown_for_tmux() {
-  # shellcheck source=bin/fm-backend.sh
-  . "$ROOT/bin/fm-backend.sh"
-  [ "$(fm_backend_busy_state tmux 'sess:win')" = unknown ] \
-    || fail "fm_backend_busy_state should report unknown for tmux (no native agent-state primitive; watcher falls back to regex)"
-  pass "fm_backend_busy_state: tmux (no native primitive) always reports unknown, preserving the P1 regex-only path"
-}
-
 test_dispatch_composer_state_routes_by_backend() {
   # fm_backend_composer_state (the generic per-backend composer/pending-input
   # classifier the away-mode daemon dispatches through - bin/fm-supervise-daemon.sh's
@@ -1455,20 +1462,17 @@ test_dispatch_composer_state_routes_by_backend() {
   (
     # shellcheck source=bin/fm-backend.sh
     . "$ROOT/bin/fm-backend.sh"
-    _FM_BACKEND_TMUX_SOURCED=1
     _FM_BACKEND_HERDR_SOURCED=1
     _FM_BACKEND_ORCA_SOURCED=1
     _FM_BACKEND_ZELLIJ_SOURCED=1
-    fm_tmux_composer_state() { [ "$1" = "sess:win" ] || fail "tmux composer_state got wrong target: $1"; printf 'pending'; }
     fm_backend_herdr_composer_state() { [ "$1" = "default:w1:p2" ] || fail "herdr composer_state got wrong target: $1"; printf 'empty'; }
     fm_backend_orca_composer_state() { [ "$1" = "term-1" ] || fail "orca composer_state got wrong target: $1"; printf 'empty'; }
-    [ "$(fm_backend_composer_state tmux sess:win)" = pending ] || fail "composer_state did not dispatch to the tmux classifier"
     [ "$(fm_backend_composer_state herdr default:w1:p2)" = empty ] || fail "composer_state did not dispatch to the herdr classifier"
     [ "$(fm_backend_composer_state orca term-1)" = empty ] || fail "composer_state did not dispatch to the orca classifier"
     [ "$(fm_backend_composer_state zellij sess:win)" = unknown ] || fail "composer_state should report unknown for zellij (no named classifier yet)"
     [ "$(fm_backend_composer_state bogus x)" = unknown ] || fail "composer_state should report unknown for an unrecognized backend"
   ) || fail "composer_state dispatch subshell failed"
-  pass "fm_backend_composer_state dispatches tmux/herdr/orca to their named classifiers, unknown for zellij/unrecognized backends"
+  pass "fm_backend_composer_state dispatches Herdr and Orca to their named classifiers"
 }
 
 test_scripts_route_explicit_target_through_meta_backend() {
@@ -1480,14 +1484,6 @@ test_scripts_route_explicit_target_through_meta_backend() {
   touch "$state/.last-watcher-beat"
   printf 'captured herdr pane\n' > "$resp/1.out"
   fb=$(make_herdr_fakebin "$dir")
-  cat > "$fb/tmux" <<'SH'
-#!/usr/bin/env bash
-set -u
-printf 'tmux should not be used for a metadata-matched herdr target\n' >&2
-exit 42
-SH
-  chmod +x "$fb/tmux"
-
   out=$( PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$neutral" FM_STATE_OVERRIDE="$state" \
     FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     "$ROOT/bin/fm-peek.sh" default:w1:p2 5 2>/dev/null )
@@ -2069,6 +2065,7 @@ test_create_task_refuses_when_preexisting_husk_tab_remains
 test_create_task_refuses_when_agent_state_ambiguous
 test_create_task_husk_replacement_creates_before_closing
 test_create_task_creates_and_parses_ids
+test_create_task_propagates_explicit_tab_path
 test_create_task_creates_with_no_focus_flag
 test_workspace_find_matches_only_this_homes_own_label
 test_list_live_scoped_to_this_homes_workspace_only
@@ -2122,7 +2119,6 @@ test_send_text_submit_slow_transition_within_one_enter_needs_no_extra_enter
 test_send_text_submit_send_failed
 test_send_text_submit_unknown_on_capture_failure
 test_dispatch_routes_herdr_backend
-test_dispatch_busy_state_unknown_for_tmux
 test_dispatch_composer_state_routes_by_backend
 test_scripts_route_explicit_target_through_meta_backend
 test_normalize_event_leaves_from_empty

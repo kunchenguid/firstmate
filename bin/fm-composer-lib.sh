@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 # bin/fm-composer-lib.sh - the ONE fleet-wide owner of composer-content
-# classification, shared by every session-provider adapter: the tmux path
-# through bin/fm-tmux-lib.sh, and bin/backends/{herdr,orca,cmux}.sh directly.
+# classification, shared by the Herdr, Orca, and cmux adapters.
 #
 # WHY THIS EXISTS (task fm-composer-shellglyph-safety): the four adapters each
 # carried their own copy of the "is this composer row empty / pending / not an
@@ -33,13 +32,13 @@
 # claude and codex render ghost text) AND a dark/muted TRUECOLOR foreground (how
 # grok renders placeholder/hint text) - and keeps only normal-intensity,
 # normally-coloured text. Consolidating it here means the two ANSI-capable
-# adapters (tmux via bin/fm-tmux-lib.sh, herdr via bin/backends/herdr.sh) cannot
+# adapters cannot
 # drift into per-harness one-off strips again; the previous herdr-only faint
 # byte-pattern check missed claude's own dim ghost (its prompt glyph is not
 # bold-wrapped) and no adapter covered grok's truecolor placeholder at all.
 #
 # Each adapter still owns its own CAPTURE and structural row-finding, because
-# those use genuinely different primitives (tmux's cursor-row read, herdr's ANSI
+# those use genuinely different primitives (Herdr's ANSI
 # tail scan, orca/cmux's plain read-screen). Once an adapter has a candidate
 # composer row it hands the RAW styled row to fm_composer_strip_ghost for the
 # real-typed-content extraction, strips the box borders, trims, and hands the
@@ -47,7 +46,7 @@
 # empty|pending|unknown verdict. orca/cmux read a plain (unstyled) screen so
 # they have no ghost styling to strip and rely on the idle-placeholder match
 # below. Re-sourcing is a cheap idempotent redefinition, so this file needs no
-# include guard (matching bin/fm-tmux-lib.sh).
+# include guard.
 
 # fm_composer_strip_ansi: drop every CSI escape sequence, leaving plain text.
 # Used for STRUCTURAL row/shape detection, where ghost text must be KEPT so the
@@ -63,7 +62,7 @@ fm_composer_strip_ansi() {
 
 # fm_composer_strip_ghost: the ONE fleet-wide ANSI-aware extractor of "real typed
 # content" from a captured, styled composer row. Reads the styled line on stdin
-# (from `tmux capture-pane -e` or `herdr pane read --format ansi`) and prints the
+# (from `herdr pane read --format ansi`) and prints the
 # plain, non-ghost text on stdout, dropping:
 #   - dim/faint runs (SGR 2): how claude and codex render ghost/suggestion text.
 #     A reset (SGR 0) or normal-intensity (SGR 22) ends a dim run.
@@ -162,7 +161,7 @@ fm_composer_strip_ghost() {
 # fm_composer_classify_content: the single shared composer-content verdict.
 #   <bordered> 1 when <content> came from a genuine agent-composer container (a
 #              bordered composer box, or a structurally-identified bare AGENT
-#              prompt row); 0 for a bare, unstructured row (e.g. tmux's raw
+#              prompt row); 0 for a bare, unstructured row (for example, a raw
 #              cursor line that carried no box border).
 #   <content>  the candidate composer content, already border-stripped and
 #              whitespace-trimmed by the caller.

@@ -231,7 +231,7 @@ status_open_activities() {  # <status-file-or-dash>
   _fm_status_open_activities_stream < "$f"
 }
 
-# task id from a recorded window target, falling back to the tmux-shaped
+# task id from a recorded window target, falling back to the conventional
 # "<session>:fm-<id>" form when no metadata state is available.
 window_to_task() {
   local w=$1 state=${2:-${STATE:-${FM_STATE_OVERRIDE:-}}} meta mw mt t

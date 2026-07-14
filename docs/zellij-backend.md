@@ -1,7 +1,6 @@
 # Zellij runtime backend (experimental)
 
 This document records the empirical verification behind `bin/backends/zellij.sh`, the zellij session-provider adapter added in P3 of the runtime-backend abstraction.
-It is the zellij equivalent of the tmux facts recorded in the `harness-adapters` skill and of `docs/herdr-backend.md`'s herdr facts.
 
 Zellij is [a terminal multiplexer](https://zellij.dev) with a CLI action interface (`zellij action <subcommand>`) for scripted control of sessions, tabs, and panes.
 Verified against the real installed binary: zellij 0.44.0, macOS aarch64.
@@ -9,7 +8,6 @@ All real-zellij verification in this document and in `tests/fm-backend-zellij-sm
 
 ## Setup
 
-Pick zellij if you already use it as your terminal multiplexer and want firstmate crew windows there instead of tmux; it has no per-home container split, so it is simpler than herdr for a single-home fleet.
 
 Prerequisites:
 
@@ -18,7 +16,6 @@ Prerequisites:
 - The universal firstmate prerequisites - a verified crew harness plus the required toolchain, owned by [`docs/configuration.md`](configuration.md) ("Harness support", "Toolchain"); treehouse still provides the worktree, zellij only provides the session.
 
 Select zellij by putting `zellij` in a local `config/backend` file - the durable way to pick it - or by exporting `FM_BACKEND=zellij` when you launch your harness for a one-off session; telling the first mate in chat to use zellij also works.
-Unlike tmux and herdr, zellij is **never** auto-detected - it always requires an explicit choice.
 A zellij spawn refuses loudly before creating a session container or acquiring a ship/scout worktree if `zellij` or `jq` is missing or the installed zellij is older than 0.44.
 For `--secondmate` launches, secondmate home sync and inherited-config propagation happen before this spawn-time backend gate.
 
@@ -35,21 +32,16 @@ Limitations: zellij is experimental, has no per-home workspace split (all tasks 
 
 ## Status: experimental
 
-Zellij is experimental, exactly like every non-tmux backend in this design.
 Select it by putting `zellij` in a local `config/backend` file, by exporting `FM_BACKEND=zellij`, or by telling the first mate in chat to use zellij.
-Unlike tmux and herdr, zellij is **never** selected by runtime auto-detection: the design report's Open Question #2 recommends starting with a dedicated background session for predictability rather than reusing whatever zellij session firstmate itself might be running inside, and empirical verification below (see "Focus-steal on new-tab") confirms that recommendation was correct - reusing an ambient session a human might be attached to would risk yanking their view on every spawn.
-Absent `backend=` in a task's meta always means `tmux`; only a zellij task ever carries an explicit `backend=zellij` line.
 A zellij spawn refuses loudly if `zellij` or `jq` is missing, or if the installed zellij's version is older than the verified minimum, 0.44 (`fm_backend_zellij_version_check`).
 
 ## Worktree provider stays treehouse
 
 Zellij is a session provider only (D3, `data/fm-backend-design-d7/herdr-addendum.md`, restated for zellij in the same task).
-Treehouse remains the worktree provider, exactly as it is for tmux and herdr.
 
 ## Task container shape: one session, one tab per task
 
 Per the design report's "Zellij implementation choices" #1, unchanged by empirical verification: firstmate uses **one** zellij session (default name `firstmate`, overridable via `FM_ZELLIJ_SESSION` for test isolation - mirrors herdr's `HERDR_SESSION`) and **one tab per task**, whose caller-facing label is `fm-<id>` (its actual, home-scoped tab title is described in "Home-scoped tab titles" below).
-This is deliberately simpler than herdr's later workspace-per-firstmate-home refinement (`docs/herdr-backend.md` "Task container shape"): zellij has no workspace concept at all, only sessions/tabs/panes, so there is no analogous per-home container to split - primary and secondmate tasks share the one `firstmate` session's tab bar, distinguished only by their tab titles, exactly as the original P1/P2 tmux-parity shape worked before herdr's per-home split existed.
 No empirical evidence surfaced during verification that forces a different container shape; the report's original choice stands - only the tab TITLE gained a per-home discriminator, not the container.
 
 ## Home-scoped tab titles (cross-home collision fix)
@@ -77,7 +69,6 @@ This is accepted, exactly as it is for cmux: a task's own recorded worktree path
 
 A zellij task's `window=` meta field holds `<zellij-session>:<pane-id>`, for example `firstmate:7`.
 The pane id is a bare non-negative integer with no embedded colon (simpler than herdr's own pane-id shape, which itself contains a colon), so splitting on the first colon is trivially correct.
-This mirrors tmux's `session:window` and herdr's `session:pane` target shapes closely enough that `fm_backend_resolve_selector` (`bin/fm-backend.sh`) needed no zellij-specific logic at all.
 When the shared selector contract routes a zellij caller through firstmate metadata, it also supplies the expected caller-facing tab label `fm-<id>` to the zellij adapter, which internally checks it against the home-scoped title (falling back to the unambiguous-untagged legacy match described above).
 That label check prevents a stale numeric pane id from being trusted after an external session deletion/recreation, or from being trusted for a different firstmate home's same-named tab; explicit raw `session:pane` targets remain a pane-existence-only escape hatch because there is no metadata label to verify.
 
@@ -97,20 +88,14 @@ Zellij tasks additionally record:
 | Duplicate task check | `zellij action list-tabs --json`, match by home-scoped `.name` | Zellij does NOT enforce tab-name uniqueness itself (verified: two tabs can share a name, same as herdr's tabs). The adapter's own duplicate check is required, and it checks the home-scoped title such as `fm-firstmate-a1b2c3d4-<id>` (see "Home-scoped tab titles" above), never the bare `fm-<id>` label. |
 | Create task tab | `zellij action new-tab --cwd <dir> --name <scoped-title>` | Returns the created tab's bare integer id on stdout, exactly as documented (resolves report gap #3). No `--no-focus`-equivalent flag exists at all - see "Focus-steal on new-tab" below. The caller passes `fm-<id>`, but the adapter creates `fm-<home-label>-<id>`. |
 | Pane discovery | `zellij action list-panes --json`, filter `.tab_id == <id> and .is_plugin == false` | `tab_id`, `id` (the pane's own bare integer id), `is_plugin`, and `pane_cwd` are ALL present in the default `--json` output with no extra flags (`--tab`/`--geometry`/`--state`/`--command` add more fields but are not needed here). Terminal (non-plugin) pane ids are globally unique across a session's whole tab set - a SEPARATE incrementing namespace from plugin panes, which is why a plugin pane and a terminal pane can share the same bare `id` (the CLI's own `--pane-id` contract, `"3 (equivalent to terminal_3)"`, already documents this split). |
-| Worktree-path discovery | marked active cwd probe + capture-scrape (`fm_backend_zellij_current_path`), NOT `.pane_cwd` | `.pane_cwd` reflects a `cd` run directly in the pane's own top-level shell, but does NOT follow a NESTED SUBSHELL's own `cd` (exactly what `treehouse get` does) - see "Worktree-path discovery: pane_cwd does not track a subshell" below. This directly contradicts the design report's assumption that passive `pane_cwd` polling would be "acceptable for tmux and zellij" (report gap #4 is NOT cleanly resolved as originally framed; the adapter works around it instead). |
-| Send literal (unsubmitted) | `zellij action paste --pane-id <id> -- <text>` | Uses bracketed paste mode, does NOT auto-submit. Verified directly: a marker sent this way sits unexecuted at the prompt until a separate Enter. Behaves like tmux's `send-keys -l` / herdr's `pane send-text`. Chosen over `write-chars` per the design report's recommendation for popup-safety parity with the other backends. The `--` separator keeps option-shaped text such as `--help` literal. |
 | Send key | `zellij action send-keys --pane-id <id> <key>` | Verified names: `"Enter"` (also `"enter"`) works; `"Esc"`/`"esc"` work but `"Escape"`/`"escape"` are REJECTED with "Invalid key"; Ctrl-C must be the SINGLE shell argument `"Ctrl c"` (a two-word key expression as ONE argv entry) - `"C-c"`, `"Ctrl+c"`, and passing `Ctrl`/`c` as two SEPARATE argv words all fail. Resolves report gap #2. |
-| Send + submit, composed | `paste` then `send-keys --pane-id <id> Enter` | Zellij has no single-call atomic "type and submit" primitive (unlike tmux's `send-keys ... Enter` or herdr's `pane run`); `fm_backend_zellij_send_text_line` composes the two calls, which is the only form this adapter has for that operation. |
 | Bounded capture | `zellij action dump-screen --pane-id <id>` for 40 lines or fewer; `zellij action dump-screen --pane-id <id> --full` above that threshold | Works for a background session with NO attached client (resolves report gap #1). No `--lines`-style bound flag exists at all (unlike herdr's buggy small-N `--lines`, there is simply no flag). Routine watcher-sized reads use zellij's viewport-only dump to avoid unbounded scrollback reads; larger explicit peeks request `--full` and trim to the caller's requested line count locally with `tail`. The tradeoff: on a very short terminal viewport, a 40-line routine read can see fewer than 40 lines and miss content above the visible screen. |
-| Busy state | *(no native primitive)* | D5 (`herdr-addendum.md`): zellij has no agent-state API. `fm_backend_busy_state`'s dispatcher (`bin/fm-backend.sh`) falls through to `unknown` for zellij via its wildcard case, exactly like tmux - the watcher's existing pane-hash + regex path is the only busy-state source for this backend. |
 | Agent liveness | *(no verified primitive)* | `fm_backend_agent_alive` reports `unknown` for zellij, so `bin/fm-bootstrap.sh`'s session-start secondmate liveness sweep never auto-respawns a zellij secondmate endpoint, conservatively avoiding a false-dead reading that would create a duplicate secondmate supervisor in one home. |
-| Kill | `zellij action close-tab-by-id <id>` (tab id resolved fresh from the pane id when possible; teardown can pass recorded `zellij_tab_id` plus the expected caller-facing `fm-<id>` label when the pane is already gone) | Unlike herdr (where closing a tab's only pane also closes the tab), closing a zellij pane with `close-pane` does NOT close the now-empty tab - it survives as an empty "ghost" entry in `list-tabs`. `close-tab-by-id` on a LIVE tab (with its pane still running) verified to cleanly remove both pane and tab in one call. Kill resolves the owning tab and closes by tab id; if teardown supplies an expected label, the tab id must still match it through the home-scoped-title or unambiguous legacy-title check before it is closed, including the recorded `zellij_tab_id` ghost-tab fallback. Best-effort (`\|\| true`), matching tmux's `kill-window` and herdr's `pane close` contract. |
 | Recovery / list-live | `zellij action list-tabs --json`, filter names starting with this home's own `fm-<home-label>-` prefix | Name-based, never trusts a stored pane id blindly - the same posture herdr's `list_live` takes. Scoped to this installation's own home-scoped prefix (see "Home-scoped tab titles" above), so it never lists another firstmate home's tabs; the adapter strips the tag back off and reports the plain `fm-<id>` label. Does not attempt the legacy untagged-title fallback (that fallback is for a single already-known tab, not a bulk sweep). |
 | Session cleanup (test-only) | `zellij delete-session <name> --force` | The single-call kill-and-delete form, gated behind `tests/zellij-test-safety.sh`'s guard (refuses an empty name, the literal `"firstmate"` default name, or a name not currently listed). Never `kill-all-sessions`/`delete-all-sessions` - see "Session safety" below. |
 
 ## Worktree-path discovery: `pane_cwd` does not track a subshell (report gap #4, contradicted)
 
-The design report assumed passive `pane_cwd` polling would be "acceptable for tmux and zellij" (mirroring tmux's proven `pane_current_path`).
 This was verified WRONG for the exact case that matters most: `treehouse get`, which opens a nested interactive subshell inside the pane.
 
 Verified against the real binary, step by step:
@@ -132,7 +117,6 @@ This op is scoped to `fm-spawn.sh`'s own worktree-discovery poll loop, the only 
 
 ## Focus-steal on new-tab (report gap #5, confirmed - and mitigated)
 
-Verified against the real binary with a genuinely attached pty client (`script -q /dev/null zellij attach <session>`): `zellij action new-tab` unconditionally focuses the newly created tab for every attached client, and **there is no flag to suppress this** - `new-tab --help` lists no `--no-focus` equivalent at all (unlike herdr's `--no-focus`, verified in `docs/herdr-backend.md`, or tmux's `new-window -d`).
 Before the client attached, the freshly created tab showed `"active": false` in `list-tabs --json`; after attaching a real pty client and creating another tab, that new tab immediately showed `"active": true` and the client's live view moved to it.
 
 **Mitigation**, implemented in `fm_backend_zellij_create_task`: capture the session's previously-active tab id (`list-tabs --json`, `.active == true`) *before* calling `new-tab`, then call `go-to-tab-by-id <that-id>` afterward to restore it.
@@ -149,7 +133,6 @@ Verified three ways against the real binary:
 - Against a **live session but a nonexistent pane id**: `send-keys --pane-id 999 Enter` produced **no output on either stream** and exited **0**.
 - `dump-screen --pane-id 999 --full` against a live session but dead pane returned **empty output** (a single newline) with exit **0** - a soft, not hard, signal (a genuinely blank pane could also read this way).
 
-This means the exit code can **never** be trusted to detect a bad target on this backend - a meaningful difference from tmux, which does return a nonzero exit and a clear error for a truly nonexistent target.
 
 **Mitigation, in two layers:**
 
@@ -172,7 +155,6 @@ Every op in this adapter passes an explicit `--pane-id` (a bare integer is confi
 
 ## Tab-name duplication is not enforced (un-anticipated, but expected finding)
 
-Same as herdr's tabs and unlike tmux's own window-name uniqueness: `zellij action new-tab --name <label>` happily creates a second tab sharing an existing name.
 `fm_backend_zellij_create_task`'s own `list-tabs`-based duplicate check is therefore required, mirroring both prior adapters - and, because this session's tab bar is shared by every firstmate home with no per-home container split, that check is against the home-scoped title (see "Home-scoped tab titles" above), not the bare `fm-<id>` label, so it cannot be fooled into refusing (or worse, silently reusing) another home's same-id tab.
 
 ## Closing a pane does not close its tab (un-anticipated finding)
@@ -183,7 +165,6 @@ This is why `fm_backend_zellij_kill` resolves the owning tab id from the pane wh
 
 ## Composer verification: delta-based
 
-Zellij's CLI exposes no cursor-row/ANSI-only capture primitive (like tmux's), so `fm_backend_zellij_send_text_submit` still uses a content-diff strategy: capture the pane right after typing (the unsubmitted "typed" baseline), then after each Enter attempt capture again - unchanged means retry, changed means submitted.
 This is now zellij-specific; the herdr adapter moved away from content-diff after the 2026-07-03 grok slash-submit incident and now confirms normal idle-baseline submits through native agent-state, retaining structural composer-state for the affirmative-empty injection guard and submit fallback.
 All implemented submit-verifying backends expose the identical caller-facing verdict vocabulary (`empty`, `pending`, `unknown`, `send-failed`), so `fm-send.sh` needs no backend-specific branching.
 
@@ -210,11 +191,9 @@ Beyond the fake-CLI unit tests (`tests/fm-backend-zellij.test.sh`) and the real-
 
 The one real bug this pass caught - the `pane_cwd`-does-not-track-a-subshell gap (see "Worktree-path discovery" above) - was found and fixed during this E2E run itself: the FIRST attempt refused to launch with "did not yield an isolated worktree" because `current_path`'s original (JSON-only) implementation never saw `treehouse get`'s subshell move away from the project directory, so the 60-second poll's own comparison collapsed to "same path" and the isolation guard correctly (if confusingly) refused. After the `pwd`-probe fix, the identical flow spawned cleanly on the very next attempt.
 
-The isolated zellij session and the scratch `FM_HOME`/project were fully torn down after this run (`zellij delete-session <isolated> --force`, `rm -rf` on the scratch root); the real `firstmate` session name and the live tmux/herdr fleet were never touched at any point.
 
 ## Known gaps left for a follow-up
 
-- **No event push at all**, not even herdr's semantic busy-state (D5): zellij has no analogue to herdr's `agent.get`, so `fm-watch.sh`'s existing pane-hash + `FM_BUSY_REGEX` poll loop is the ONLY event source for this backend, identical to the tmux path. This is the expected, designed-for outcome (D5 explicitly calls for "the poll-based capture/hash/busy-regex path, same vocabulary as tmux"), not a shortfall relative to the report.
 - **No verified agent-process liveness classifier.** The session-start secondmate liveness sweep therefore receives `unknown` from `fm_backend_agent_alive` for zellij and reports `SECONDMATE_LIVENESS: ... skipped: liveness probe inconclusive` instead of killing or respawning the endpoint.
   This leaves a dead zellij secondmate for manual recovery, but avoids the worse failure mode of duplicating a live supervisor.
 - **The focus-steal mitigation has a narrow race window.** Between `new-tab` (which steals focus immediately) and the follow-up `go-to-tab-by-id` restore call, an attached client's view is briefly on the new tab. No flag-based suppression exists to close this window entirely (see "Focus-steal on new-tab" above); a future zellij release may add one.

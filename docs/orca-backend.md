@@ -6,7 +6,7 @@ Firstmate agents operating this backend should load the agent-only [`firstmate-o
 
 ## Setup
 
-Pick Orca if you already run the Orca macOS app as your terminal environment and want firstmate tasks to live in Orca-managed worktrees and terminals instead of a treehouse/tmux pair.
+Pick Orca if you already run the Orca macOS app as your terminal environment and want Firstmate tasks to live in Orca-managed worktrees and terminals instead of a treehouse-backed session endpoint.
 Orca is macOS-only, explicit-only (never auto-detected), and has no secondmate support.
 
 Prerequisites:
@@ -43,7 +43,7 @@ Before spawn mutates any repo/worktree state, firstmate runs `orca status --json
 ## Task Shape
 
 An Orca task is one Orca-managed git worktree plus one Orca terminal.
-Unlike `tmux`, `herdr`, `zellij`, and `cmux`, Orca is not only a session provider; it also provides the task worktree, so `fm-spawn.sh` does not run `treehouse get` for Orca tasks.
+Unlike Herdr, zellij, and cmux, Orca is not only a session provider; it also provides the task worktree, so `fm-spawn.sh` does not run `treehouse get` for Orca tasks.
 
 The normal firstmate invariant still applies: a ship or scout task must run outside the project primary checkout, and teardown must refuse to discard unlanded ship work.
 
@@ -62,7 +62,7 @@ worktree=<absolute path to the Orca-created git worktree>
 `window=` remains the shared firstmate alias used by selector-driven supervision tools after a task selector has resolved through metadata.
 `fm-teardown.sh <id>` uses the same recorded fields after loading `state/<id>.meta`.
 For Orca, `window=` keeps the stable firstmate alias while `terminal=` carries the stable Orca terminal handle that backend operations use.
-The recorded `backend=orca` field tells shared call sites to route capture, send, interrupt, and close through `bin/backends/orca.sh` instead of tmux assumptions.
+The recorded `backend=orca` field tells shared call sites to route capture, send, interrupt, and close through `bin/backends/orca.sh`.
 
 ## Lifecycle
 
@@ -81,7 +81,7 @@ Operation routing:
   A slash-command popup that closes by filling an argument-hint placeholder still reads as pending, so the retry loop sends the required second Enter rather than treating the first Enter as a submission.
   The bordered row is classified through the shared composer classifier; a bare shell prompt has no genuine composer row and reads `unknown`, not confirmed empty.
 - `fm-send.sh --key Enter` and `--key C-c` are supported.
-- `fm-watch.sh` treats Orca as a pull backend with no native busy-state primitive, so it falls back to the same terminal-tail busy regex used for tmux, zellij, and cmux.
+- `fm-watch.sh` treats Orca as a pull backend with no native busy-state primitive, so it falls back to the same terminal-tail busy regex used for zellij and cmux.
 - `fm-crew-state.sh` reads the recorded Orca terminal when no no-mistakes run-step applies.
 
 Teardown:

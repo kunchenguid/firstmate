@@ -60,9 +60,9 @@ A presence-gated sub-supervisor (`bin/fm-supervise-daemon.sh`) extends this for 
 The watcher and daemon share `bin/fm-classify-lib.sh` for captain-relevant status verbs, declared-external-wait vocabulary, and status-scan primitives.
 The always-on watcher also uses that library's absorb classification on no-verb signals and first-sighting stale panes before status-log terminality is trusted, while the daemon maintains distinct wedge and declared-pause recheck cadences.
 The daemon escalates captain-relevant events, plus a bounded recheck for a declared pause that remains idle, as one batched, single-line digest prefixed with a terminal-safe U+2063 sentinel marker so firstmate can tell daemon injections apart from real messages.
-Its supervisor injection path supports tmux and herdr panes, with `FM_SUPERVISOR_BACKEND` and `FM_SUPERVISOR_TARGET` resolved independently from the task-spawn backend.
-Pane existence, busy checks, composer checks, capture, and verified submit route through `bin/fm-backend.sh`: tmux keeps the same submit core used by the tmux send backend, while herdr uses native busy state, native agent-state submit confirmation on idle baselines, and its ANSI-aware structural composer classifier for pending-input guards and submit fallback.
-Composer-content classification has one shared owner, `bin/fm-composer-lib.sh`, used by tmux, herdr, Orca, and cmux after each adapter performs its own capture and composer-row recognition.
+Its supervisor injection path supports Herdr panes, with `FM_SUPERVISOR_BACKEND` and `FM_SUPERVISOR_TARGET` resolved independently from the task-spawn backend.
+Pane existence, busy checks, composer checks, capture, and verified submit route through `bin/fm-backend.sh`; Herdr uses native busy state, native agent-state submit confirmation on idle baselines, and its ANSI-aware structural composer classifier for pending-input guards and submit fallback.
+Composer-content classification has one shared owner, `bin/fm-composer-lib.sh`, used by Herdr, Orca, and cmux after each adapter performs its own capture and composer-row recognition.
 The daemon injects only into an affirmatively `empty` composer, so both `pending` and `unknown` defer and a bare dead-shell prompt cannot receive an escalation; the complete policy is in [Composer-emptiness safety](herdr-backend.md#composer-emptiness-safety-2026-07-10-fleet-wide-across-all-four-backends).
 Unsupported supervisor backends refuse at daemon startup.
 Stalled escalation delivery writes `state/.subsuper-inject-wedged` and attempts a configured backend-independent active alert after `FM_MAX_DEFER_SECS` instead of silently deferring forever.
@@ -72,17 +72,17 @@ On an unmarked return, `bin/fm-afk-return.sh` owns ordered shutdown, durable cat
 ## Runtime session backends
 
 The runtime backend is the session-provider layer below firstmate's scripts.
-It owns task endpoint creation, bounded capture, text/key sends, current-path reads for spawn-time worktree discovery when the backend does not create the worktree itself, live-window fallback lookup, agent-process liveness probes where verified, and endpoint teardown.
-`bin/fm-backend.sh` centralizes backend selection, `state/<id>.meta` helpers, selector resolution, and operation dispatch; `bin/backends/tmux.sh` is the verified reference adapter ([`docs/tmux-backend.md`](tmux-backend.md)), and `bin/backends/herdr.sh` (P2), `bin/backends/zellij.sh` (P3), `bin/backends/orca.sh` (P4), and `bin/backends/cmux.sh` (P5) are experimental task-spawn adapters.
-New spawns select a backend from `--backend`, then `FM_BACKEND`, then local `config/backend`, then runtime auto-detection from `$TMUX`, `HERDR_ENV=1`, or cmux runtime signals, then default `tmux`.
-Runtime auto-detection is innermost-first: `$TMUX` wins over `HERDR_ENV=1`, which wins over cmux's primary `CMUX_WORKSPACE_ID` marker and documented fallback signals; auto-detected herdr or cmux prints a one-time opt-out notice, auto-detected tmux stays silent, and zellij and orca are never auto-detected (only explicit selection).
+It owns task endpoint creation, bounded capture, text/key sends, current-path reads for spawn-time worktree discovery when the backend does not create the worktree itself, agent-process liveness probes where verified, and endpoint teardown.
+`bin/fm-backend.sh` centralizes backend selection, `state/<id>.meta` helpers, selector resolution, and operation dispatch; `bin/backends/herdr.sh` is the verified default adapter, and `bin/backends/zellij.sh`, `bin/backends/orca.sh`, and `bin/backends/cmux.sh` are supported alternatives.
+New spawns select a backend from `--backend`, then `FM_BACKEND`, then local `config/backend`, then runtime auto-detection from `HERDR_ENV=1` or cmux runtime signals, then Herdr.
+Runtime auto-detection prefers `HERDR_ENV=1` over cmux's primary `CMUX_WORKSPACE_ID` marker and documented fallback signals; zellij and Orca are never auto-detected.
 Unknown backend names fail loudly.
-For compatibility, default tmux tasks do not write `backend=tmux`; every reader treats a missing `backend=` field as `tmux`.
-`fm-watch.sh` polls each window's backend for a busy state: tmux, zellij, orca, and cmux have no native primitive and always report unknown, preserving the original pane-tail-regex detection unchanged; herdr's `agent.get` semantic state (working/idle/done/blocked) is consulted first for stale detection, with unknown native states falling back to the same regex.
+Default Herdr tasks omit `backend=herdr`; every reader safely treats a missing `backend=` field as Herdr.
+`fm-watch.sh` polls each endpoint's backend for a busy state: zellij, Orca, and cmux have no native primitive and report unknown, preserving pane-tail-regex detection; Herdr's `agent.get` semantic state is consulted first, with unknown native states falling back to the same regex.
 That poll loop is the default event source for backends with no native push events, so this stays an extraction of the abstraction rather than a watcher rewrite.
 For capable herdr sessions, the same watcher replaces its terminal sleep with a bounded native event wait that immediately surfaces `blocked`; [herdr-backend.md](herdr-backend.md#native-paneagent_status_changed-push-escalation-immediate-blocked-wake) owns the mechanism, capability gates, and verification evidence.
-The deeper session-start agent-process liveness probe is separate from that busy-state poll: tmux and herdr have verified classifiers for secondmate recovery, while zellij, Orca, and cmux currently report `unknown` rather than guess.
-Herdr is experimental and can be selected explicitly or by runtime auto-detection: treehouse remains the worktree provider for it exactly as it is for tmux (herdr is a session provider only), and its full verification - the container shape decision, created-vs-adopted default-tab prune safety, restored-layout husk respawn idempotency, verified CLI facts, ANSI-preserved ghost/placeholder classification through the shared extractor, a verified small-`--lines` capture bug and its workaround, and known gaps - is recorded in `docs/herdr-backend.md`.
+The deeper session-start agent-process liveness probe is separate from that busy-state poll: Herdr has a verified classifier for secondmate recovery, while zellij, Orca, and cmux currently report `unknown` rather than guess.
+Herdr is the default session provider and treehouse remains its worktree provider; its full lifecycle verification and known constraints are recorded in `docs/herdr-backend.md`.
 Herdr's container shape is workspace-per-home plus tab-per-task: the primary home uses workspace label `firstmate`, secondmate homes use `2ndmate-<secondmate-id>`, and recovery/list-live scopes to the current `FM_HOME`'s workspace.
 Zellij is experimental and selected only explicitly: treehouse remains its worktree provider too, and its full verification - the resolved "gaps to verify" list from the original design report, the unconditional-exit-0 CLI quirk and its mitigation, the focus-steal-on-new-tab finding, the home-scoped tab-title collision fix, and known gaps - is recorded in `docs/zellij-backend.md`.
 Zellij's container shape is simpler than herdr's: one shared `firstmate` session, one tab per task, with no per-home workspace split; visible tab titles are scoped by the active home label plus a short hash of the resolved `FM_ROOT` path.
@@ -93,7 +93,7 @@ Codex App support is recorded in `docs/codex-app-backend.md`; it is not selectab
 
 ## Worktrees, not branches in your checkout
 
-Crewmates never intentionally touch your project clone; [treehouse](https://github.com/kunchenguid/treehouse) pools clean worktrees for tmux, herdr, zellij, and cmux tasks, while Orca creates its own worktrees for `backend=orca`.
+Crewmates never intentionally touch your project clone; [treehouse](https://github.com/kunchenguid/treehouse) pools clean worktrees for Herdr, zellij, and cmux tasks, while Orca creates its own worktrees for `backend=orca`.
 For ship and scout work, `fm-spawn.sh` refuses to launch unless the resolved task path is a real git worktree root that is distinct from the project primary checkout.
 
 The firstmate repo has one extra exposure because it can dispatch crewmates to work on itself.
@@ -237,7 +237,7 @@ The mechanics are owned by the `/updatefirstmate` skill and firstmate's operatin
 
 ## Restart-proof
 
-Fleet state lives in each task's session-provider backend (tmux by hard default, herdr or cmux when selected or auto-detected, zellij/orca when explicitly selected), no-mistakes run records, status event logs, local markdown under `data/` including `data/captain.md` and `data/learnings.md`, and persistent secondmate homes.
+Fleet state lives in each task's session-provider backend (Herdr by default, cmux when selected or auto-detected, and zellij/Orca when explicitly selected), no-mistakes run records, status event logs, local markdown under `data/` including `data/captain.md` and `data/learnings.md`, and persistent secondmate homes.
 For herdr, respawning after a server-restored layout closes and replaces confirmed no-agent or dead task-tab husks instead of requiring manual tab cleanup.
 At session start, confirmed-dead secondmate agent endpoints are closed and relaunched through the same secondmate spawn path, while ambiguous liveness reads are left untouched to avoid duplicate supervisors.
 Use `/stow` before an intentional reset when the conversation may hold durable knowledge that has not yet been written to disk; after that, the next firstmate session can reconcile and carry on.

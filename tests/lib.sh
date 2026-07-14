@@ -9,7 +9,7 @@
 # reporters, a self-cleaning temp root, fakebin/PATH-shim helpers, deterministic
 # git identity and fixture builders, state/<id>.meta writers, and the common
 # string/exit-code/file assertions. It deliberately does NOT bundle the
-# behavior-specific fake tmux/treehouse/no-mistakes mocks: those encode terminal
+# behavior-specific fake herdr/treehouse/no-mistakes mocks: those encode terminal
 # and lifecycle assumptions that differ per suite and belong with the tests that
 # own them.
 #
@@ -212,4 +212,85 @@ assert_absent() {
 # assert_present <path> <msg>: path must exist.
 assert_present() {
   [ -e "$1" ] || fail "$2"
+}
+# Write a minimal Herdr CLI double for tests that exercise generic capture/send
+# dispatch rather than workspace creation.
+fm_test_write_basic_herdr() {  # <path>
+  cat > "$1" <<'SH'
+#!/usr/bin/env bash
+set -u
+args=("$@")
+if [ "${#args[@]}" -ge 2 ] && [ "${args[${#args[@]}-2]}" = --session ]; then
+  unset 'args[${#args[@]}-1]' 'args[${#args[@]}-1]'
+  args=("${args[@]}")
+fi
+cmd="${args[*]}"
+[ -z "${FM_HERDR_CALL_LOG:-}" ] || printf '%s\n' "$cmd" >> "$FM_HERDR_CALL_LOG"
+case "$cmd" in
+  'status --json')
+    printf '{"client":{"version":"0.7.3","protocol":16},"server":{"running":true}}\n'
+    ;;
+  'api schema')
+    printf '{"result":{"methods":[]}}\n'
+    ;;
+  'workspace list')
+    printf '{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate"}]}}\n'
+    ;;
+  workspace\ create\ *)
+    printf '{"result":{"workspace":{"workspace_id":"w1"},"tab":{"tab_id":"seed"},"root_pane":{"pane_id":"w1:p0"}}}\n'
+    ;;
+  tab\ list\ *)
+    printf '{"result":{"tabs":[]}}\n'
+    ;;
+  tab\ create\ *)
+    printf '{"result":{"tab":{"tab_id":"t1"},"root_pane":{"pane_id":"w1:p1"}}}\n'
+    ;;
+  pane\ get\ *)
+    pane=${args[2]}
+    [ "${FM_FAKE_HERDR_DEAD_PANE:-}" != "$pane" ] || exit 1
+    printf '{"result":{"pane":{"pane_id":"%s","foreground_cwd":"%s"}}}\n' "$pane" "${FM_FAKE_HERDR_CWD:-/tmp}"
+    ;;
+  pane\ send-text\ *)
+    [ -z "${FM_SEND_LOG:-}" ] || printf '%s' "${args[3]:-}" >> "$FM_SEND_LOG"
+    [ -z "${FM_FAKE_LAUNCH_LOG:-}" ] || printf '%s\n' "${args[3]:-}" >> "$FM_FAKE_LAUNCH_LOG"
+    printf 'send-keys target=%s:%s literal=1 arg=%s\n' "${HERDR_SESSION:-default}" "${args[2]}" "${args[3]:-}" >> "${FM_HERDR_LOG:-/dev/null}"
+    ;;
+  pane\ send-keys\ *)
+    key=${args[3]:-}
+    [ "$key" != enter ] || key=Enter
+    printf 'send-keys target=%s:%s literal=0 arg=%s\n' "${HERDR_SESSION:-default}" "${args[2]}" "$key" >> "${FM_HERDR_LOG:-/dev/null}"
+    ;;
+  pane\ run\ *)
+    case "${args[3]:-}" in
+      'treehouse get'|export\ GOTMPDIR=*) ;;
+      *) [ -z "${FM_FAKE_LAUNCH_LOG:-}" ] || printf '%s\n' "${args[3]:-}" >> "$FM_FAKE_LAUNCH_LOG" ;;
+    esac
+    printf 'run target=%s:%s arg=%s\n' "${HERDR_SESSION:-default}" "${args[2]}" "${args[3]:-}" >> "${FM_HERDR_LOG:-/dev/null}"
+    ;;
+  pane\ read\ *)
+    printf '%b\n' "${FM_FAKE_HERDR_CAPTURE:-│ │}"
+    ;;
+  agent\ get\ *)
+    case "${FM_FAKE_HERDR_AGENT_MODE:-live}" in
+      missing)
+        printf '{"error":{"code":"agent_not_found"}}\n' >&2
+        exit 1
+        ;;
+      malformed)
+        printf 'not-json\n'
+        ;;
+      *)
+        printf '{"result":{"agent":{"agent_status":"%s"}}}\n' "${FM_FAKE_HERDR_AGENT_STATUS:-working}"
+        ;;
+    esac
+    ;;
+  pane\ close\ *)
+    printf 'pane close %s\n' "${args[2]}" >> "${FM_HERDR_LOG:-/dev/null}"
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+SH
+  chmod +x "$1"
 }
