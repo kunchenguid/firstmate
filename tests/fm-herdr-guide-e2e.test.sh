@@ -181,11 +181,20 @@ PATH="$SHIMBIN:$PATH" FM_HOME="$HOME_ROOT" FM_GATE_REFUSE_BYPASS=1 \
   "$ROOT/bin/fm-teardown.sh" "$ID" >/dev/null
 [ ! -e "$META" ] || fail "production teardown left task metadata behind"
 
-"$LAB_HELPER" teardown "$SESSION"
-CLEANED=1
+LAB_TEARDOWN_STATUS=0
+LAB_TEARDOWN_OUTPUT=$("$LAB_HELPER" teardown "$SESSION" 2>&1) || LAB_TEARDOWN_STATUS=$?
+[ "$LAB_TEARDOWN_STATUS" -ne 0 ] || fail "Herdr 0.7.3 unexpectedly supplied an atomic delete proof"
+printf '%s' "$LAB_TEARDOWN_OUTPUT" | grep -F "exposes no atomic conditional-delete proof" >/dev/null \
+  || fail "guarded lab teardown omitted the missing atomic-proof diagnostic"
+LAB_STATE=$($LAB_HELPER run "$SESSION" session list --json)
+[ "$(printf '%s' "$LAB_STATE" | jq -r --arg session "$SESSION" '.sessions[] | select(.name == $session) | .running')" = false ] \
+  || fail "failed-closed lab teardown did not leave the named session stopped"
+[ -f "$FM_HERDR_LAB_STATE_DIR/$SESSION.fleet-state.json" ] \
+  || fail "failed-closed lab teardown discarded its ownership evidence"
 FINAL_BASELINE=$("$LAB_HELPER" run "$SESSION" session list --json | jq -S -c --arg session "$SESSION" \
   '{sessions:[.sessions[] | select(.name != $session) | {default,name,running,socket_path}]}')
 [ "$FINAL_BASELINE" = "$INITIAL_BASELINE" ] || fail "guarded lab teardown changed the captured default fleet"
+CLEANED=1
 
-printf 'HERDR_GUIDE_E2E_OK version=%s protocol=%s session=%s baseline=%s default=herdr configured=herdr readiness=ok spawn=ok steer=ok watcher=signal restart=recovered teardown=ok lab_teardown=ok\n' \
+printf 'HERDR_GUIDE_E2E_OK version=%s protocol=%s session=%s baseline=%s default=herdr configured=herdr readiness=ok spawn=ok steer=ok watcher=signal restart=recovered teardown=ok lab_teardown=refused-no-atomic-proof\n' \
   "$VERSION" "$PROTOCOL" "$SESSION" "$BASELINE_KIND"

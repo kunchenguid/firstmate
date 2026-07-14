@@ -201,7 +201,8 @@ HERDR_SECTION=$(printf '%s\n' \
 '2. Run every task-specific non-lifecycle Herdr command through `"$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" <arguments...>`.' \
 '   The helper appends the required trailing `--session "$HERDR_LAB_SESSION"`; `HERDR_SESSION` alone is never accepted as isolation.' \
 '3. Teardown only through `"$HERDR_LAB_HELPER" teardown "$HERDR_LAB_SESSION"`.' \
-'   It re-checks refuse-default, launch-bound storage identity, and ownership immediately before stop and again immediately before delete, then consumes a one-use in-memory delete authorization.' \
+'   It binds a one-use authorization record to the lock owner, helper process, launch nonce, session identities, and post-stop snapshot, then consumes it only for backend-atomic delete.' \
+'   Herdr 0.7.3 has no atomic conditional-delete proof, so teardown leaves the verified session stopped, preserves evidence, and reports the refusal.' \
 '4. If an experiment requires a deliberate mid-run session stop, use only `"$HERDR_LAB_HELPER" stop "$HERDR_LAB_SESSION"`; it performs the same immediate refuse-default check.' \
 '   Reprovision through the helper before a later teardown because Herdr exposes no persistent instance ID after a separate stop.' \
 '5. Forbidden commands: direct `herdr server stop`, every other server-global operation such as `herdr server live-handoff` or reload/update operations, direct `herdr session stop`, direct `herdr session delete`, and any Herdr call scoped only by ambient or inline `HERDR_SESSION`.' \

@@ -118,8 +118,10 @@ test_herdr_lab_contract_is_explicit_and_complete() {
     "Herdr lab brief missing helper-owned provisioning"
   assert_grep "\"\$HERDR_LAB_HELPER\" teardown \"\$HERDR_LAB_SESSION\"" "$brief" \
     "Herdr lab brief missing helper-owned teardown"
-  assert_grep "re-checks refuse-default, launch-bound storage identity, and ownership immediately before stop and again immediately before delete, then consumes a one-use in-memory delete authorization" "$brief" \
+  assert_grep "binds a one-use authorization record to the lock owner, helper process, launch nonce, session identities, and post-stop snapshot" "$brief" \
     "Herdr lab brief missing persistent stopped-instance verification"
+  assert_grep "Herdr 0.7.3 has no atomic conditional-delete proof" "$brief" \
+    "Herdr lab brief did not describe the fail-closed delete limitation"
   assert_grep "Reprovision through the helper before a later teardown" "$brief" \
     "Herdr lab brief allowed a separate stop proof to authorize delete"
   assert_grep "required trailing \`--session \"\$HERDR_LAB_SESSION\"\`" "$brief" \

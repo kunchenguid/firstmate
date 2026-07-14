@@ -76,6 +76,27 @@ fm_herdr_lab_pid_identity() { # <pid>
   printf '%s\n' "$identity" | sed 's/^[[:space:]]*//'
 }
 
+fm_herdr_lab_sha256() { # <text>
+  local text=$1 digest
+  if command -v sha256sum >/dev/null 2>&1; then
+    digest=$(printf '%s' "$text" | sha256sum 2>/dev/null | awk '{print $1}') || return 1
+  elif command -v shasum >/dev/null 2>&1; then
+    digest=$(printf '%s' "$text" | shasum -a 256 2>/dev/null | awk '{print $1}') || return 1
+  else
+    return 1
+  fi
+  [[ "$digest" =~ ^[0-9a-f]{64}$ ]] || return 1
+  printf '%s\n' "$digest"
+}
+
+fm_herdr_lab_canonical_inventory() { # <session-list-json>
+  local info=$1
+  fm_herdr_lab_session_list_is_valid "$info" || return 1
+  printf '%s' "$info" | jq -S -c -s '
+    .[0] | {sessions:(.sessions | map({default,name,running,socket_path}) | sort_by(.name))}
+  ' 2>/dev/null
+}
+
 fm_herdr_lab_pid_descends_from() { # <pid> <ancestor-pid>
   local pid=$1 ancestor=$2 parent
   while [ "$pid" -gt 1 ] 2>/dev/null; do
@@ -691,8 +712,8 @@ fm_herdr_lab_instance_process_is_gone() { # <session>
   [ ! -e "$socket" ]
 }
 
-fm_herdr_lab_stop_postcheck() { # <session>
-  local name=$1 sessions state running attempt=0
+fm_herdr_lab_stop_postcheck() { # <session> [snapshot-result-variable]
+  local name=$1 result_var=${2:-} sessions state running snapshot attempt=0
   while [ "$attempt" -lt 20 ]; do
     sessions=$(fm_herdr_lab_session_list "$name" 2>/dev/null) || {
       fm_herdr_lab_error "STOP POSTCHECK FAILED: cannot read Herdr sessions"
@@ -702,7 +723,13 @@ fm_herdr_lab_stop_postcheck() { # <session>
     state=$(fm_herdr_lab_session_state_from_list "$name" "$sessions") || state=invalid
     case "$state" in
       absent)
-        fm_herdr_lab_instance_process_is_gone "$name" && return 0
+        if fm_herdr_lab_instance_process_is_gone "$name"; then
+          if [ -n "$result_var" ]; then
+            snapshot=$(fm_herdr_lab_canonical_inventory "$sessions") || return 1
+            printf -v "$result_var" '%s' "$snapshot"
+          fi
+          return 0
+        fi
         ;;
       nondefault)
         running=$(printf '%s' "$sessions" | jq -r --arg name "$name" \
@@ -712,7 +739,13 @@ fm_herdr_lab_stop_postcheck() { # <session>
             fm_herdr_lab_error "STOP POSTCHECK FAILED: stopped instance changed"
             return 1
           }
-          fm_herdr_lab_instance_process_is_gone "$name" && return 0
+          if fm_herdr_lab_instance_process_is_gone "$name"; then
+            if [ -n "$result_var" ]; then
+              snapshot=$(fm_herdr_lab_canonical_inventory "$sessions") || return 1
+              printf -v "$result_var" '%s' "$snapshot"
+            fi
+            return 0
+          fi
         fi
         ;;
       *)
@@ -735,17 +768,20 @@ fm_herdr_lab_mark_stopped() { # <session>
   fm_herdr_lab_write_state "$name" "$updated"
 }
 
-fm_herdr_lab_stop_running_instance() { # <session>
-  local name=$1 stop_status=0 post_status=0
+fm_herdr_lab_stop_running_instance() { # <session> [snapshot-result-variable]
+  local name=$1 result_var=${2:-} verified_snapshot="" stop_status=0 post_status=0
   fm_herdr_lab_raw "$name" session stop "$name" --json || stop_status=$?
-  fm_herdr_lab_stop_postcheck "$name" || post_status=$?
+  fm_herdr_lab_stop_postcheck "$name" verified_snapshot || post_status=$?
   if [ "$post_status" -eq 0 ]; then
     fm_herdr_lab_mark_stopped "$name" || post_status=$?
   fi
   if [ "$stop_status" -ne 0 ]; then
     fm_herdr_lab_error "session stop failed for '$name' (status=$stop_status)"
   fi
-  [ "$stop_status" -eq 0 ] && [ "$post_status" -eq 0 ]
+  [ "$stop_status" -eq 0 ] && [ "$post_status" -eq 0 ] || return 1
+  if [ -n "$result_var" ]; then
+    printf -v "$result_var" '%s' "$verified_snapshot"
+  fi
 }
 
 fm_herdr_lab_stop_unlocked() { # <session>
@@ -774,7 +810,7 @@ fm_herdr_lab_stop_unlocked() { # <session>
 }
 
 fm_herdr_lab_stop_for_delete() { # <session>
-  local name=$1 sessions running phase authorization
+  local name=$1 sessions state running phase snapshot
   sessions=$(fm_herdr_lab_session_list "$name" 2>/dev/null) || {
     fm_herdr_lab_error "cannot list Herdr sessions immediately before the delete-authorizing stop"
     return 1
@@ -787,13 +823,94 @@ fm_herdr_lab_stop_for_delete() { # <session>
     fm_herdr_lab_error "refusing delete for '$name': a fresh live owned instance is required; run provision before teardown"
     return 1
   }
-  authorization=$(od -An -tx1 -N32 /dev/urandom 2>/dev/null | tr -d ' \n') || {
-    fm_herdr_lab_error "cannot create an in-memory delete authorization for '$name'"
+  fm_herdr_lab_stop_running_instance "$name" snapshot || return 1
+  [ -n "$snapshot" ] || return 1
+  state=$(fm_herdr_lab_session_state_from_list "$name" "$snapshot") || state=invalid
+  [ "$state" != absent ] || return 0
+  [ "$state" = nondefault ] || return 1
+  running=$(printf '%s' "$snapshot" | jq -r --arg name "$name" \
+    '.sessions[] | select(.name == $name) | .running' 2>/dev/null) || running=invalid
+  [ "$running" = false ] || {
+    fm_herdr_lab_error "cannot authorize delete for '$name': post-stop inventory is not stopped"
     return 1
   }
-  [ "${#authorization}" = 64 ] || return 1
-  fm_herdr_lab_stop_running_instance "$name" || return 1
-  FM_HERDR_LAB_DELETE_AUTHORIZATION=$authorization
+  fm_herdr_lab_assert_owned_from_list "$name" "$snapshot" || return 1
+  FM_HERDR_LAB_DELETE_AUTHORIZATION=$(fm_herdr_lab_build_delete_authorization "$name" "$snapshot") || return 1
+}
+
+fm_herdr_lab_build_delete_authorization() { # <session> <canonical-post-stop-snapshot>
+  local name=$1 snapshot=$2 state instance record launch_nonce socket storage snapshot_hash
+  local current_identity lock_owner
+  [ -n "${FM_HERDR_LAB_LOCK_OWNER:-}" ] \
+    && [ -n "${FM_HERDR_LAB_LOCK_PID:-}" ] \
+    && [ -n "${FM_HERDR_LAB_LOCK_PROCESS_IDENTITY:-}" ] \
+    && [ -n "${FM_HERDR_LAB_LOCK_PATH:-}" ] || return 1
+  [ -f "$FM_HERDR_LAB_LOCK_PATH" ] && [ ! -L "$FM_HERDR_LAB_LOCK_PATH" ] || return 1
+  lock_owner=$(cat "$FM_HERDR_LAB_LOCK_PATH") || return 1
+  [ "$lock_owner" = "$FM_HERDR_LAB_LOCK_OWNER" ] || return 1
+  current_identity=$(fm_herdr_lab_pid_identity "$FM_HERDR_LAB_LOCK_PID") || return 1
+  [ "$current_identity" = "$FM_HERDR_LAB_LOCK_PROCESS_IDENTITY" ] || return 1
+  state=$(fm_herdr_lab_state_read "$name") || return 1
+  instance=$(printf '%s' "$state" | jq -S -c '.owned_session.instance') || return 1
+  record=$(printf '%s' "$state" | jq -S -c '.owned_session.record') || return 1
+  launch_nonce=$(printf '%s' "$instance" | jq -r '.token_nonce') || return 1
+  socket=$(printf '%s' "$record" | jq -r '.socket_path') || return 1
+  storage=$(printf '%s' "$instance" | jq -r '.storage_identity') || return 1
+  snapshot_hash=$(fm_herdr_lab_sha256 "$snapshot") || return 1
+  jq -S -c -n \
+    --arg lock_owner "$FM_HERDR_LAB_LOCK_OWNER" \
+    --argjson helper_pid "$FM_HERDR_LAB_LOCK_PID" \
+    --arg helper_process_identity "$FM_HERDR_LAB_LOCK_PROCESS_IDENTITY" \
+    --arg launch_nonce "$launch_nonce" \
+    --arg session "$name" \
+    --arg socket_path "$socket" \
+    --arg storage_identity "$storage" \
+    --arg snapshot "$snapshot" \
+    --arg snapshot_hash "$snapshot_hash" \
+    '{lock_owner:$lock_owner,helper_pid:$helper_pid,helper_process_identity:$helper_process_identity,launch_nonce:$launch_nonce,session:$session,socket_path:$socket_path,storage_identity:$storage_identity,snapshot:$snapshot,snapshot_hash:$snapshot_hash}'
+}
+
+fm_herdr_lab_validate_delete_authorization() { # <session> <current-session-list-json>
+  local name=$1 sessions=$2 authorization state instance record canonical hash current_identity lock_owner
+  authorization=${FM_HERDR_LAB_DELETE_AUTHORIZATION:-}
+  printf '%s' "$authorization" | jq -e -s --arg name "$name" '
+    length == 1
+    and (.[0] | type == "object")
+    and ((.[0] | keys | sort) == ["helper_pid","helper_process_identity","launch_nonce","lock_owner","session","snapshot","snapshot_hash","socket_path","storage_identity"])
+    and .[0].session == $name
+    and (.[0].helper_pid | type == "number" and . > 1 and floor == .)
+    and (.[0].helper_process_identity | type == "string" and length > 0)
+    and (.[0].launch_nonce | type == "string" and test("^[0-9a-f]{64}$"))
+    and (.[0].lock_owner | type == "string" and length > 0)
+    and (.[0].socket_path | type == "string" and length > 0)
+    and (.[0].storage_identity | type == "string" and test("^[0-9]+:[0-9]+$"))
+    and (.[0].snapshot | type == "string" and length > 0)
+    and (.[0].snapshot_hash | type == "string" and test("^[0-9a-f]{64}$"))
+  ' >/dev/null 2>&1 || return 1
+  [ "$(printf '%s' "$authorization" | jq -r '.lock_owner')" = "${FM_HERDR_LAB_LOCK_OWNER:-}" ] || return 1
+  [ "$(printf '%s' "$authorization" | jq -r '.helper_pid')" = "${FM_HERDR_LAB_LOCK_PID:-}" ] || return 1
+  [ "$(printf '%s' "$authorization" | jq -r '.helper_process_identity')" = "${FM_HERDR_LAB_LOCK_PROCESS_IDENTITY:-}" ] || return 1
+  [ -f "${FM_HERDR_LAB_LOCK_PATH:-}" ] && [ ! -L "$FM_HERDR_LAB_LOCK_PATH" ] || return 1
+  lock_owner=$(cat "$FM_HERDR_LAB_LOCK_PATH") || return 1
+  [ "$lock_owner" = "$FM_HERDR_LAB_LOCK_OWNER" ] || return 1
+  current_identity=$(fm_herdr_lab_pid_identity "$FM_HERDR_LAB_LOCK_PID") || return 1
+  [ "$current_identity" = "$FM_HERDR_LAB_LOCK_PROCESS_IDENTITY" ] || return 1
+  state=$(fm_herdr_lab_state_read "$name") || return 1
+  instance=$(printf '%s' "$state" | jq -S -c '.owned_session.instance') || return 1
+  record=$(printf '%s' "$state" | jq -S -c '.owned_session.record') || return 1
+  [ "$(printf '%s' "$authorization" | jq -r '.launch_nonce')" = "$(printf '%s' "$instance" | jq -r '.token_nonce')" ] || return 1
+  [ "$(printf '%s' "$authorization" | jq -r '.socket_path')" = "$(printf '%s' "$record" | jq -r '.socket_path')" ] || return 1
+  [ "$(printf '%s' "$authorization" | jq -r '.storage_identity')" = "$(printf '%s' "$instance" | jq -r '.storage_identity')" ] || return 1
+  canonical=$(fm_herdr_lab_canonical_inventory "$sessions") || return 1
+  [ "$canonical" = "$(printf '%s' "$authorization" | jq -r '.snapshot')" ] || return 1
+  hash=$(fm_herdr_lab_sha256 "$canonical") || return 1
+  [ "$hash" = "$(printf '%s' "$authorization" | jq -r '.snapshot_hash')" ]
+}
+
+fm_herdr_lab_backend_atomic_delete() { # <session> <authorization-record>
+  local name=$1
+  fm_herdr_lab_error "refusing delete for '$name': Herdr 0.7.3 exposes no atomic conditional-delete proof; the verified session remains stopped, so reprovision before retrying teardown after backend support is available"
+  return 125
 }
 
 fm_herdr_lab_teardown_unlocked() { # <session>
@@ -854,13 +971,14 @@ fm_herdr_lab_teardown_unlocked() { # <session>
     return 1
   }
   fm_herdr_lab_assert_owned_from_list "$name" "$sessions" || return 1
-  [ "${#FM_HERDR_LAB_DELETE_AUTHORIZATION}" = 64 ] \
-    && [[ "$FM_HERDR_LAB_DELETE_AUTHORIZATION" != *[!0-9a-f]* ]] || {
-    fm_herdr_lab_error "refusing delete for '$name': the same-lock stop authorization is missing or consumed"
+  fm_herdr_lab_validate_delete_authorization "$name" "$sessions" || {
+    fm_herdr_lab_error "refusing delete for '$name': the same-lock authorization record or post-stop snapshot changed"
     return 1
   }
+  owned=$FM_HERDR_LAB_DELETE_AUTHORIZATION
   FM_HERDR_LAB_DELETE_AUTHORIZATION=""
-  fm_herdr_lab_raw "$name" session delete "$name" --json >/dev/null 2>&1 || delete_status=$?
+  fm_herdr_lab_backend_atomic_delete "$name" "$owned" || delete_status=$?
+  [ "$delete_status" -ne 125 ] || return 1
   while [ "$attempt" -lt 20 ]; do
     sessions=$(fm_herdr_lab_session_list "$name" 2>/dev/null) || {
       fm_herdr_lab_error "cannot confirm removal of lab session '$name' after teardown"
@@ -903,6 +1021,7 @@ fm_herdr_lab_release_lock() { # <lock-file> <owner-token>
 
 fm_herdr_lab_with_lock() ( # <function> <session>
   local operation=$1 name=$2 state_dir lock owner_tmp="" pid_file pid identity nonce owner lock_status=0
+  local FM_HERDR_LAB_LOCK_OWNER="" FM_HERDR_LAB_LOCK_PID="" FM_HERDR_LAB_LOCK_PROCESS_IDENTITY="" FM_HERDR_LAB_LOCK_PATH=""
   fm_herdr_lab_validate_name "$name" || return 1
   state_dir=$(fm_herdr_lab_state_dir)
   mkdir -p "$state_dir" || return 1
@@ -920,6 +1039,10 @@ fm_herdr_lab_with_lock() ( # <function> <session>
   identity=$(fm_herdr_lab_pid_identity "$pid") || return 1
   nonce=$(od -An -tx1 -N16 /dev/urandom 2>/dev/null | tr -d ' \n') || return 1
   owner=$(printf '%s\n%s\n%s' "$pid" "$identity" "$nonce")
+  FM_HERDR_LAB_LOCK_OWNER=$owner
+  FM_HERDR_LAB_LOCK_PID=$pid
+  FM_HERDR_LAB_LOCK_PROCESS_IDENTITY=$identity
+  FM_HERDR_LAB_LOCK_PATH=$lock
   trap 'lock_status=$?; trap - EXIT INT TERM; if [ -e "$lock" ]; then fm_herdr_lab_release_lock "$lock" "$owner" || lock_status=1; fi; [ -z "$owner_tmp" ] || rm -f "$owner_tmp" || lock_status=1; exit "$lock_status"' EXIT
   trap 'exit 130' INT
   trap 'exit 143' TERM
