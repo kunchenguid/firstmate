@@ -14,6 +14,9 @@
 #   (f) malformed PR URL fails fast without calling gh-axi
 #   (g) explicit merge method is not overridden by the default --squash
 #   (h) repo override args fail fast because the repo comes from the URL
+#   (i) merge-queue strategy errors fall back to enqueuePullRequest
+#   (j) merge-queue auto-merge errors fall back to enqueuePullRequest
+#   (k) enqueuePullRequest failures propagate non-zero
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -48,6 +51,15 @@ add_gh_mocks() {
   local case_dir=$1 head=$2
   cat > "$case_dir/fakebin/gh-axi" <<'SH'
 #!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  "pr merge")
+    if grep -qxF "pr=$FM_TEST_EXPECTED_PR_URL" "$FM_TEST_META"; then
+      printf '%s\n' "recorded-before-merge=yes" >> "$FM_TEST_GH_AXI_LOG"
+    else
+      printf '%s\n' "recorded-before-merge=no" >> "$FM_TEST_GH_AXI_LOG"
+    fi
+    ;;
+esac
 printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
 exit 0
 SH
@@ -71,6 +83,15 @@ add_gh_mocks_merge_fails() {
   local case_dir=$1
   cat > "$case_dir/fakebin/gh-axi" <<'SH'
 #!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  "pr merge")
+    if grep -qxF "pr=$FM_TEST_EXPECTED_PR_URL" "$FM_TEST_META"; then
+      printf '%s\n' "recorded-before-merge=yes" >> "$FM_TEST_GH_AXI_LOG"
+    else
+      printf '%s\n' "recorded-before-merge=no" >> "$FM_TEST_GH_AXI_LOG"
+    fi
+    ;;
+esac
 printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
 case "${1:-} ${2:-}" in
   "pr merge") echo "error: pr merge failed" >&2 ; exit 1 ;;
@@ -84,11 +105,64 @@ SH
   chmod +x "$case_dir/fakebin/gh-axi" "$case_dir/fakebin/gh"
 }
 
+add_gh_mocks_merge_queue() {
+  local case_dir=$1 merge_error=$2 enqueue_rc=${3:-0}
+  cat > "$case_dir/fakebin/gh-axi" <<SH
+#!/usr/bin/env bash
+case "\${1:-} \${2:-}" in
+  "pr merge")
+    if grep -qxF "pr=\$FM_TEST_EXPECTED_PR_URL" "\$FM_TEST_META"; then
+      printf '%s\n' "recorded-before-merge=yes" >> "\$FM_TEST_GH_AXI_LOG"
+    else
+      printf '%s\n' "recorded-before-merge=no" >> "\$FM_TEST_GH_AXI_LOG"
+    fi
+    ;;
+esac
+printf '%s\n' "\$*" >> "\$FM_TEST_GH_AXI_LOG"
+case "\${1:-} \${2:-}" in
+  "pr merge") printf '%s\n' "$merge_error" >&2 ; exit 1 ;;
+esac
+exit 0
+SH
+  cat > "$case_dir/fakebin/gh" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "\$FM_TEST_GH_LOG"
+case "\${1:-} \${2:-}" in
+  "pr view")
+    case " \$* " in
+      *headRefOid*) printf '%s\n' 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' ; exit 0 ;;
+    esac
+    ;;
+  "api graphql")
+    case " \$* " in
+      *enqueuePullRequest*)
+        if [ "$enqueue_rc" -ne 0 ]; then
+          echo 'GraphQL: pull request cannot be enqueued' >&2
+          exit "$enqueue_rc"
+        fi
+        printf '%s\n' 'enqueued in merge queue: position=3 state=QUEUED estimatedTimeToMerge=2026-07-14T20:00:00Z'
+        exit 0
+        ;;
+      *pullRequest\\(number:*)
+        printf '%s\n' 'PR_node_123'
+        exit 0
+        ;;
+    esac
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/gh-axi" "$case_dir/fakebin/gh"
+}
+
 run_pr_merge() {
   local case_dir=$1; shift
   FM_ROOT_OVERRIDE="$ROOT" \
   FM_STATE_OVERRIDE="$case_dir/state" \
+  FM_TEST_META="$case_dir/state/$1.meta" \
+  FM_TEST_EXPECTED_PR_URL="$2" \
   FM_TEST_GH_AXI_LOG="$case_dir/gh-axi.log" \
+  FM_TEST_GH_LOG="$case_dir/gh.log" \
   PATH="$case_dir/fakebin:$PATH" \
     "$PR_MERGE" "$@"
 }
@@ -111,6 +185,8 @@ test_records_pr_and_head_before_merging() {
     "records-before-merge: pr= was not recorded"
   assert_grep 'pr_head=deadbeefcafefeed0000000000000000deadbeef' "$case_dir/state/task-x1.meta" \
     "records-before-merge: pr_head= was not recorded"
+  grep -qxF 'recorded-before-merge=yes' "$case_dir/gh-axi.log" \
+    || fail "records-before-merge: pr= was not recorded before the merge attempt"
   grep -qxF 'pr merge 9 --repo example/repo --squash' "$case_dir/gh-axi.log" \
     || fail "records-before-merge: gh-axi pr merge was not invoked with number, --repo, and default --squash"
   pass "fm-pr-merge records pr= and pr_head= before invoking gh-axi pr merge"
@@ -132,6 +208,8 @@ test_merge_failure_propagates_after_recording() {
   expect_code 1 "$rc" "merge-fails: fm-pr-merge should propagate the gh-axi merge failure"
   assert_grep 'pr=https://github.com/example/repo/pull/13' "$case_dir/state/task-x1.meta" \
     "merge-fails: pr= should already be recorded even though the merge itself failed"
+  grep -qxF 'recorded-before-merge=yes' "$case_dir/gh-axi.log" \
+    || fail "merge-fails: pr= was not recorded before the merge attempt"
   pass "fm-pr-merge propagates a real merge failure without silently succeeding"
 }
 
@@ -280,6 +358,82 @@ test_method_equals_merge_method_not_overridden() {
   pass "fm-pr-merge respects --method=<value> as an explicit merge method"
 }
 
+test_queue_fallback_on_strategy_error() {
+  local case_dir rc
+  case_dir=$(make_case queue-strategy-error)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks_merge_queue "$case_dir" '! The merge strategy for main is set by the merge queue'
+  : > "$case_dir/gh-axi.log"
+  : > "$case_dir/gh.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/31 -- --merge \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "queue-strategy-error: fm-pr-merge should enqueue the PR"
+  grep -qxF 'recorded-before-merge=yes' "$case_dir/gh-axi.log" \
+    || fail "queue-strategy-error: pr= was not recorded before the merge attempt"
+  grep -qxF 'pr merge 31 --repo example/repo --merge' "$case_dir/gh-axi.log" \
+    || fail "queue-strategy-error: explicit merge method was not attempted first"
+  assert_grep 'api graphql' "$case_dir/gh.log" \
+    "queue-strategy-error: gh api graphql was not called"
+  assert_grep 'enqueuePullRequest' "$case_dir/gh.log" \
+    "queue-strategy-error: enqueuePullRequest was not called"
+  assert_grep 'enqueued in merge queue: position=3 state=QUEUED estimatedTimeToMerge=2026-07-14T20:00:00Z' "$case_dir/stdout" \
+    "queue-strategy-error: queue result was not printed"
+  pass "fm-pr-merge falls back to the GitHub merge queue on merge-strategy errors"
+}
+
+test_queue_fallback_on_auto_merge_error() {
+  local case_dir rc
+  case_dir=$(make_case queue-auto-merge-error)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks_merge_queue "$case_dir" 'GraphQL: Auto merge is not allowed for this repository (enablePullRequestAutoMerge)'
+  : > "$case_dir/gh-axi.log"
+  : > "$case_dir/gh.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/32 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "queue-auto-merge-error: fm-pr-merge should enqueue the PR"
+  grep -qxF 'recorded-before-merge=yes' "$case_dir/gh-axi.log" \
+    || fail "queue-auto-merge-error: pr= was not recorded before the merge attempt"
+  grep -qxF 'pr merge 32 --repo example/repo --squash' "$case_dir/gh-axi.log" \
+    || fail "queue-auto-merge-error: default squash merge was not attempted first"
+  assert_grep 'enqueuePullRequest' "$case_dir/gh.log" \
+    "queue-auto-merge-error: enqueuePullRequest was not called"
+  assert_grep 'enqueued in merge queue: position=3 state=QUEUED estimatedTimeToMerge=2026-07-14T20:00:00Z' "$case_dir/stdout" \
+    "queue-auto-merge-error: queue result was not printed"
+  pass "fm-pr-merge falls back to the GitHub merge queue on auto-merge errors"
+}
+
+test_enqueue_failure_propagates() {
+  local case_dir rc
+  case_dir=$(make_case enqueue-fails)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks_merge_queue "$case_dir" '! The merge strategy for main is set by the merge queue' 7
+  : > "$case_dir/gh-axi.log"
+  : > "$case_dir/gh.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/33 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 7 "$rc" "enqueue-fails: fm-pr-merge should propagate enqueue failure"
+  grep -qxF 'recorded-before-merge=yes' "$case_dir/gh-axi.log" \
+    || fail "enqueue-fails: pr= was not recorded before the merge attempt"
+  assert_grep 'GraphQL: pull request cannot be enqueued' "$case_dir/stderr" \
+    "enqueue-fails: GraphQL enqueue error was not surfaced"
+  pass "fm-pr-merge propagates enqueuePullRequest failures"
+}
+
 test_parses_pr_url_for_gh_axi() {
   local case_dir
   case_dir=$(make_case url-parsing)
@@ -304,4 +458,7 @@ test_rejects_unsafe_url_segments_before_recording
 test_repo_override_args_refuse_before_recording
 test_explicit_merge_method_not_overridden
 test_method_equals_merge_method_not_overridden
+test_queue_fallback_on_strategy_error
+test_queue_fallback_on_auto_merge_error
+test_enqueue_failure_propagates
 test_parses_pr_url_for_gh_axi

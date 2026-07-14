@@ -24,6 +24,13 @@
 # Extra args must not include --repo or -R because the repo is parsed from the
 # PR URL.
 #
+# Merge queue fallback: GitHub rejects `gh-axi pr merge` on merge-queue-protected
+# default branches with either "The merge strategy for <branch> is set by the
+# merge queue" or "Auto merge is not allowed for this repository".
+# When either signature appears, this script resolves the PR node id with
+# `gh api graphql`, enqueues it with `enqueuePullRequest`, and prints the queue
+# position, state, and estimatedTimeToMerge returned by GitHub.
+#
 # Usage: fm-pr-merge.sh <task-id> <pr-url> [-- <extra gh-axi pr merge args>]
 set -eu
 
@@ -76,6 +83,26 @@ reject_repo_overrides() {
   return 0
 }
 
+merge_queue_signature() {
+  local file=$1
+  grep -Eq '! The merge strategy for .+ is set by the merge queue' "$file" && return 0
+  grep -Fq 'GraphQL: Auto merge is not allowed for this repository (enablePullRequestAutoMerge)' "$file" && return 0
+  return 1
+}
+
+enqueue_merge_queue() {
+  local node_id query mutation
+  # shellcheck disable=SC2016  # GraphQL variables belong to GitHub, not this shell.
+  query='query($owner: String!, $repo: String!, $number: Int!) { repository(owner: $owner, name: $repo) { pullRequest(number: $number) { id } } }'
+  node_id=$(gh api graphql -f query="$query" -f owner="$PR_OWNER" -f repo="$PR_REPO" -F number="$PR_NUMBER" --jq '.data.repository.pullRequest.id // empty')
+  [ -n "$node_id" ] || { echo "error: GitHub returned no node id for $URL" >&2; return 1; }
+
+  # shellcheck disable=SC2016  # GraphQL variables belong to GitHub, not this shell.
+  mutation='mutation($pullRequestId: ID!) { enqueuePullRequest(input: {pullRequestId: $pullRequestId}) { mergeQueueEntry { position state estimatedTimeToMerge } } }'
+  gh api graphql -f query="$mutation" -f pullRequestId="$node_id" \
+    --jq '.data.enqueuePullRequest.mergeQueueEntry | "enqueued in merge queue: position=\(.position // "unknown") state=\(.state // "unknown") estimatedTimeToMerge=\(.estimatedTimeToMerge // "unknown")"'
+}
+
 parse_pr_url "$URL" || exit 1
 reject_repo_overrides "$@" || exit 1
 
@@ -87,4 +114,27 @@ if ! caller_has_merge_method "$@"; then
   merge_args=(--squash)
 fi
 
-gh-axi pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" ${merge_args[@]+"${merge_args[@]}"} "$@"
+MERGE_STDERR=$(mktemp "${TMPDIR:-/tmp}/fm-pr-merge.stderr.XXXXXX")
+# shellcheck disable=SC2329  # Invoked by the EXIT trap.
+cleanup() {
+  rm -f "$MERGE_STDERR"
+}
+trap cleanup EXIT
+
+set +e
+gh-axi pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" ${merge_args[@]+"${merge_args[@]}"} "$@" 2> "$MERGE_STDERR"
+merge_rc=$?
+set -e
+
+if [ "$merge_rc" -eq 0 ]; then
+  cat "$MERGE_STDERR" >&2
+  exit 0
+fi
+
+cat "$MERGE_STDERR" >&2
+if merge_queue_signature "$MERGE_STDERR"; then
+  enqueue_merge_queue
+  exit $?
+fi
+
+exit "$merge_rc"
