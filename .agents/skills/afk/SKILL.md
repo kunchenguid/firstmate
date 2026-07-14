@@ -84,9 +84,10 @@ travels with the message text; it does not rely on harness-level
 typed-vs-injected detection (which is not portable across claude, codex,
 opencode, pi, and grok).
 
-## Busy-guard and composer guard
+## Busy-guard, composer guard, and agent-liveness guard
 
-The daemon never injects into an in-use pane. Two checks run before every
+The daemon never injects into an in-use pane, and never into a pane that is not
+provably running an agent. Three checks run before every
 injection, dispatched through `bin/fm-backend.sh` for the supervisor's own
 backend (tmux or herdr; see "Auto-discovered supervisor pane" below):
 
@@ -96,17 +97,27 @@ backend (tmux or herdr; see "Auto-discovered supervisor pane" below):
   The shared `bin/fm-composer-lib.sh` owns the content decision after each backend captures and structurally identifies its own composer row.
   It preserves idle bordered composers such as claude's `│ > … │` and bare agent glyphs as empty, but a bare shell glyph is unknown unless inside a genuine bordered composer box; see `docs/herdr-backend.md` "Composer-emptiness safety" for the complete contract.
   `pane_input_pending` remains the tested predicate for callers that only need to know whether real unsubmitted text is present, but it is insufficient for an injection-safety decision because it cannot distinguish `empty` from `unknown`.
+- **Agent-liveness guard** - an empty composer is necessary but NOT sufficient, because an empty agent composer and an empty shell prompt are indistinguishable by content: the default starship/pure/spaceship prompt glyph `❯` is the same one claude draws, so a supervisor that has exited to a login shell reads `empty`.
+  `inject_msg` therefore also asks what is RUNNING in the pane (`fm_backend_agent_alive`) and types only on a confident `alive`; `dead` and `unknown` both defer, so a digest is never typed into a live shell.
+  See `docs/herdr-backend.md` "Agent-liveness injection guard" for the complete contract.
 
-Either condition, or any composer verdict other than `empty`, defers the injection; the buffered escalation survives in `state/.subsuper-escalations` and is retried on the next housekeeping tick.
+Any of the three, or any composer verdict other than `empty`, defers the injection; the buffered escalation survives in `state/.subsuper-escalations` and is retried on the next housekeeping tick.
 In afk mode the composer guard is belt-and-suspenders (no human is typing), but it protects against the race window between the captain returning and their message landing, a dead shell, and the daemon's own previous injection sitting unsent.
+
+**Arm-time liveness canary.**
+The liveness guard fails closed, so a supervisor whose harness cannot be attributed on its backend (pi runs as a generic `node`) would defer every escalation for the whole session.
+At arm time the agent is provably alive, so the daemon probes once and prints a bordered `AWAY-MODE INJECTION IS DISABLED FOR THIS SUPERVISOR` banner when the verdict is not `alive`, recording `agent_liveness=` in its startup log line.
+It is advisory: the daemon still arms, and away mode still works through the wedge alarm and the afk-exit catch-up flush.
+If that banner appears when starting away mode, tell the captain in plain outcome language that escalations will not reach them until they are back, and let them decide whether to continue.
 
 **Max-defer escape (the daemon must never silently wedge).**
 If anything stays buffered past `FM_MAX_DEFER_SECS` (default 300), the daemon
-attempts one normal flush, which still requires an idle pane and an affirmatively empty composer.
-If that submit cannot be confirmed, it raises a loud, rate-limited wedge alarm:
+attempts one normal flush, which still requires an idle pane, an affirmatively empty composer, and a live agent.
+If that cannot deliver, it raises a loud, rate-limited wedge alarm:
 an ERROR in the daemon log, a durable
 `state/.subsuper-inject-wedged` marker (surface it on the "while you were out"
 catch-up if present), a tmux status-line flash when applicable, and a configurable backend-independent active alert.
+Each names the recorded cause (`pane-busy`, `composer-not-empty`, `agent-dead`, `agent-unknown`, `submit-unconfirmed`, `pane-gone`) rather than assuming a busy pane, so a dead supervisor agent is not misreported as a wedged one.
 `docs/wedge-alarm.md` owns the alert channel setup and verification record.
 So a guard false-positive becomes a visible stall, never an unbounded silent no-op.
 
@@ -165,8 +176,11 @@ the marker lets firstmate distinguish it from a real captain message.
   separator before injection, so submission is unambiguous regardless of
   harness.
 - **Composer guard on the supervisor pane** - before injecting, the daemon checks `pane_is_busy` (harness busy footer means agent mid-turn) and reads `fm_backend_composer_state` directly.
-  Only `empty` permits injection; `pending` protects half-typed or swallowed input, and `unknown` protects unreadable panes and bare dead-shell prompts.
-  Every other result preserves the buffer for retry, so the daemon never merges its digest into the captain's half-typed line or types it into a shell.
+  Only `empty` permits injection; `pending` protects half-typed or swallowed input, and `unknown` protects unreadable panes and most bare dead-shell prompts.
+  Every other result preserves the buffer for retry, so the daemon never merges its digest into the captain's half-typed line.
+- **Agent-liveness guard on the supervisor pane** - the composer guard alone cannot keep a digest out of a shell, because a starship/pure/spaceship `❯` prompt is byte-identical to claude's empty composer and reads `empty`.
+  So the daemon also confirms a live agent process (`fm_backend_agent_alive`) and types only on `alive`, failing closed on `dead` and `unknown`.
+  Together the two guards are what actually keep the digest out of a live shell.
 - The shared composer classifier receives a candidate row only after the active backend performs its own capture and structural row recognition.
   tmux and herdr route their raw styled candidate rows through the shared `fm_composer_strip_ghost` extractor, which removes dim/faint and dark-TRUECOLOR ghost/placeholder text before classification.
   They read the composer shape from a separately ANSI-stripped plain row because a dark TRUECOLOR border can be stripped with ghost content.
@@ -174,12 +188,13 @@ the marker lets firstmate distinguish it from a real captain message.
   `FM_COMPOSER_IDLE_RE` still overrides tmux empty-composer matching after shared ghost and border stripping, and `FM_BUSY_REGEX` overrides busy footers.
 - **Max-defer escape** - the daemon must never silently wedge. If anything stays
   buffered past `FM_MAX_DEFER_SECS` (default 300s), the daemon attempts one
-  normal flush, which still requires an idle pane and an affirmatively empty composer. If that
-  cannot confirm a submit, it raises a loud, rate-limited wedge alarm: ERROR log,
+  normal flush, which still requires an idle pane, an affirmatively empty composer, and a live agent. If that
+  cannot deliver, it raises a loud, rate-limited wedge alarm: ERROR log,
   durable `state/.subsuper-inject-wedged` marker, a tmux status-line flash when
-  applicable, and a backend-independent active alert. A
-  composer false-positive surfaces as a visible stall, never an unbounded silent
-  no-op.
+  applicable, and a backend-independent active alert, each naming the recorded
+  cause rather than assuming a busy pane. A guard false-positive, a dead
+  supervisor agent, or an unverifiable one surfaces as a visible stall, never an
+  unbounded silent no-op.
 - **Verified type-once submit model** - the digest is typed once (`send-keys -l`
   on tmux, `pane send-text` on herdr), then submitted with Enter and verified.
   Enter is retried, Enter only and never a retype, until the backend submit

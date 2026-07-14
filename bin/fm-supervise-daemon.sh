@@ -188,6 +188,18 @@ MAX_DEFER_SECS_DEFAULT=300
 WEDGE_ALARM_TIMEOUT_SECS_DEFAULT=10
 WEDGE_ALARM_LAST_EPOCH=0
 WEDGE_ALARM_NOTIFIER_PID=
+# Why the last inject attempt did not land, recorded by inject_msg and reported
+# verbatim by inject_wedge_alarm. A wedge has several possible causes - a busy
+# pane, a human's pending composer text, a swallowed Enter, and (since the
+# agent-liveness guard) a supervisor whose agent has exited to a shell or whose
+# liveness this backend cannot verify at all. Naming the wrong one sends the
+# captain debugging in the wrong direction on a safety-critical path, so the
+# alarm reports what actually happened instead of guessing.
+# CAUSE is a short tag for the bounded active alert; REASON is the full detail
+# for the log and the durable marker. escalate_flush only fails after inject_msg
+# ran, so both are always fresh when the alarm reads them.
+INJECT_LAST_DEFER_CAUSE=""
+INJECT_LAST_DEFER_REASON=""
 # The captain-relevant verb set and the status classifiers (last_status_line,
 # status_is_captain_relevant, window_to_task, scan_captain_relevant_statuses) now
 # live in bin/fm-classify-lib.sh, shared with the always-on watcher.
@@ -844,16 +856,25 @@ wedge_alarm_notify() {  # <summary> <marker>
 }
 
 # Raise a loud, rate-limited alarm when escalations cannot be delivered after
-# max-defer (the supervisor pane is genuinely busy/wedged, or the submit's Enter
-# is swallowed). The daemon must NEVER silently wedge: this logs
-# an ERROR, drops a durable marker firstmate/recovery can surface, flashes
-# the tmux supervisor client's status line when applicable, and attempts a
-# configurable backend-independent active alert (wedge_alarm_notify). Nothing
-# is lost - the buffer and the
+# max-defer. The cause is whatever inject_msg last recorded, and it is NOT always
+# a busy/wedged pane: the supervisor's agent may have exited to a shell, or its
+# liveness may be unverifiable for the backend (the agent-liveness guard fails
+# closed and refuses every injection in that state). Naming a busy pane when the
+# truth is a dead agent points debugging in the wrong direction, so the ERROR
+# log, the durable marker, and the active alert all report the recorded cause.
+# The daemon must NEVER silently wedge: this logs an ERROR, drops a durable
+# marker firstmate/recovery can surface, flashes the tmux supervisor client's
+# status line when applicable, and attempts a configurable backend-independent
+# active alert (wedge_alarm_notify). Nothing is lost - the buffer and the
 # wake-queue both survive - but the stall stops being invisible.
 inject_wedge_alarm() {  # <state> <age-seconds>
-  local state=$1 age=$2 marker target backend max_defer now notify=1
+  local state=$1 age=$2 marker target backend max_defer now notify=1 cause reason
   marker="$state/.subsuper-inject-wedged"
+  # Defensive default: escalate_flush only returns non-zero after inject_msg ran
+  # in this process, so the pair is normally fresh. An empty pair means nobody
+  # recorded an attempt - say so rather than inventing a cause.
+  cause="${INJECT_LAST_DEFER_CAUSE:-unrecorded}"
+  reason="${INJECT_LAST_DEFER_REASON:-no inject attempt recorded in this daemon process}"
   max_defer="${FM_MAX_DEFER_SECS:-$MAX_DEFER_SECS_DEFAULT}"
   # Re-alarm at most once per max-defer window so a long wedge does not spam.
   if [ "$(_file_age "$marker")" -lt "$max_defer" ]; then
@@ -864,11 +885,12 @@ inject_wedge_alarm() {  # <state> <age-seconds>
     notify=0
   else
     WEDGE_ALARM_LAST_EPOCH=$now
-    log "ERROR: away-mode escalation undelivered ${age}s; inject could not confirm a submit (supervisor pane busy or wedged). Buffer + wake-queue preserved; alarm marker written."
+    log "ERROR: away-mode escalation undelivered ${age}s; last inject attempt did not land: $reason. Buffer + wake-queue preserved; alarm marker written."
   fi
   {
     printf 'fm away-mode inject WEDGED: %ss undelivered as of %s\n' "$age" "$(date '+%Y-%m-%dT%H:%M:%S%z')"
-    printf 'The supervisor pane could not accept an escalation. Buffered items:\n'
+    printf 'The supervisor pane could not accept an escalation (%s): %s\n' "$cause" "$reason"
+    printf 'Buffered items:\n'
     cat "$state/.subsuper-escalations" 2>/dev/null
   } 2>/dev/null > "$marker" || true
   target="${FM_SUPERVISOR_TARGET:-$FM_SUPERVISOR_TARGET_DEFAULT}"
@@ -878,7 +900,7 @@ inject_wedge_alarm() {  # <state> <age-seconds>
   # the primary, backend-independent signal, so a non-tmux backend just skips
   # this cosmetic extra rather than attempting an unsupported call.
   if [ "$backend" = tmux ]; then
-    tmux display-message -t "$target" "fm: away-mode escalations WEDGED ${age}s — see $marker" 2>/dev/null || true
+    tmux display-message -t "$target" "fm: away-mode escalations WEDGED ${age}s ($cause) — see $marker" 2>/dev/null || true
   fi
   # Backend-independent active alert. Unlike the tmux flash above (skipped on
   # every non-tmux backend), this can reach the captain even when every pane and
@@ -886,7 +908,7 @@ inject_wedge_alarm() {  # <state> <age-seconds>
   # incident fell through. Configurable and best-effort; the marker above stays
   # the durable record whether or not any channel fires.
   if [ "$notify" -eq 1 ]; then
-    wedge_alarm_notify "away-mode escalations WEDGED ${age}s undelivered - see $marker" "$marker"
+    wedge_alarm_notify "away-mode escalations WEDGED ${age}s undelivered ($cause) - see $marker" "$marker"
   fi
 }
 
@@ -1051,6 +1073,16 @@ window_for_task() {  # <task-key> [state]
 }
 
 # --- injection --------------------------------------------------------------
+# Record WHY an injection attempt did not land, then log it. Every inject_msg
+# refusal goes through here (or sets the pair directly, for the post-type submit
+# failure) so inject_wedge_alarm can name the real cause instead of assuming a
+# busy pane. The log wording is unchanged from the per-guard lines it replaces.
+_inject_defer() {  # <cause-tag> <detail>
+  INJECT_LAST_DEFER_CAUSE=$1
+  INJECT_LAST_DEFER_REASON=$2
+  log "inject deferred: $2"
+}
+
 # inject_msg: send one escalation digest to the supervisor pane.
 # Returns 0 on successful inject (or empty buffer), non-zero if the pane is
 # gone, the supervisor is busy, afk is inactive, or the verified submit cannot
@@ -1082,7 +1114,7 @@ inject_msg() {  # <message> [state]
   # (1) Presence-gate: inject ONLY when afk is active. When afk is off, the
   # daemon self-handles and stays quiet; firstmate drives the normal always-on
   # watcher triage. Escalations buffer and survive for the next catch-up flush.
-  afk_active "$state" || { log "inject deferred: afk inactive"; return 1; }
+  afk_active "$state" || { _inject_defer afk-inactive "afk inactive"; return 1; }
   # (2) Single-line digest: collapse any embedded newlines so submission via
   # send-keys + Enter is unambiguous regardless of how the TUI composer treats
   # them. Then prepend the sentinel marker - firstmate's afk-exit contract
@@ -1096,11 +1128,14 @@ inject_msg() {  # <message> [state]
   # when unset (sourced/test contexts that never ran fm_super_main's startup
   # discovery), matching this function's pre-existing default assumption.
   backend="${FM_SUPERVISOR_BACKEND:-tmux}"
-  fm_backend_target_exists "$backend" "$target" || return 1
+  if ! fm_backend_target_exists "$backend" "$target"; then
+    _inject_defer pane-gone "supervisor pane '$target' does not resolve on backend '$backend'"
+    return 1
+  fi
   # (3) Busy-guard: never inject into an in-use pane.
   #   a) pane_is_busy: the harness shows a busy footer (agent mid-turn).
   if pane_is_busy "$target" "$backend"; then
-    log "inject deferred: supervisor pane busy (agent mid-turn)"
+    _inject_defer pane-busy "supervisor pane busy (agent mid-turn)"
     return 1
   fi
   #   b) Composer-guard: inject ONLY into a confirmed-empty GENUINE agent
@@ -1114,7 +1149,7 @@ inject_msg() {  # <message> [state]
   #      stays buffered for the next cycle or the catch-up flush.
   composer=$(fm_backend_composer_state "$backend" "$target" 2>/dev/null)
   if [ "$composer" != empty ]; then
-    log "inject deferred: supervisor composer not confirmed-empty (state=${composer:-unknown}: pending input, dead-shell prompt, or unreadable pane)"
+    _inject_defer composer-not-empty "supervisor composer not confirmed-empty (state=${composer:-unknown}: pending input, dead-shell prompt, or unreadable pane)"
     return 1
   fi
   #   c) Agent-liveness guard: a confirmed-empty composer is NECESSARY but not
@@ -1136,7 +1171,7 @@ inject_msg() {  # <message> [state]
   #      cycle, the max-defer wedge alarm, or the afk-exit catch-up flush.
   liveness=$(fm_backend_agent_alive "$backend" "$target" 2>/dev/null)
   if [ "$liveness" != alive ]; then
-    log "inject deferred: no live agent process confirmed in supervisor pane (liveness=${liveness:-unknown}: dead shell, or agent liveness unverifiable for backend '$backend') — refusing to type into a possible shell"
+    _inject_defer "agent-${liveness:-unknown}" "no live agent process confirmed in supervisor pane (liveness=${liveness:-unknown}: dead shell, or agent liveness unverifiable for backend '$backend') — refusing to type into a possible shell"
     return 1
   fi
   # (4) Type the digest ONCE, then submit with Enter (retry Enter only, never
@@ -1150,9 +1185,13 @@ inject_msg() {  # <message> [state]
   sleep_s=${FM_INJECT_CONFIRM_SLEEP:-$INJECT_CONFIRM_SLEEP_DEFAULT}
   verdict=$(fm_backend_send_text_submit "$backend" "$target" "$msg" "$retries" "$sleep_s" "$sleep_s")
   if [ "$verdict" = empty ]; then
+    INJECT_LAST_DEFER_CAUSE=""
+    INJECT_LAST_DEFER_REASON=""
     return 0  # Backend confirmed the submit.
   fi
-  log "inject failed: submit unconfirmed after $retries retries (verdict=$verdict, text may be in composer)"
+  INJECT_LAST_DEFER_CAUSE=submit-unconfirmed
+  INJECT_LAST_DEFER_REASON="submit unconfirmed after $retries retries (verdict=$verdict, text may be in composer)"
+  log "inject failed: $INJECT_LAST_DEFER_REASON"
   return 1
 }
 
@@ -1374,9 +1413,42 @@ fm_super_main() {
     exit 1
   fi
 
+  # --- arm-time agent-liveness canary (ADVISORY, never blocking) ------------
+  # inject_msg's liveness guard fails CLOSED: it types only into a pane with a
+  # confidently 'alive' agent process. Right here, at arm time, the supervisor
+  # agent is PROVABLY alive - it just launched this daemon - so the probe has a
+  # known-good answer to give. Anything else is a permanent property of this
+  # supervisor for the whole session, not a transient read: a 'dead' pane means
+  # the target is wrong, and 'unknown' means this harness's process cannot be
+  # attributed on this backend (pi execs into a generic `node`), so EVERY
+  # escalation will defer and the captain would otherwise first learn of it
+  # ~MAX_DEFER_SECS later from a wedge alarm. Say it now, loudly, instead.
+  # Advisory by design: away mode still works degraded - escalations buffer, the
+  # wedge alarm fires, and the afk-exit catch-up flush delivers them - so
+  # refusing to arm would trade degraded supervision for none at all. A probe
+  # error is treated exactly like 'unknown': warn, then arm.
+  local startup_liveness rule
+  startup_liveness=$(fm_backend_agent_alive "$BACKEND" "$TARGET" 2>/dev/null) || true
+  [ -n "$startup_liveness" ] || startup_liveness=unknown
+  if [ "$startup_liveness" != alive ]; then
+    rule='━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'
+    {
+      printf '●%s\n' "$rule"
+      printf '●  AWAY-MODE INJECTION IS DISABLED FOR THIS SUPERVISOR\n'
+      printf '●  The agent-liveness probe reads %s (not alive) for %s on backend %s,\n' "'$startup_liveness'" "'$TARGET'" "'$BACKEND'"
+      printf '●  even though firstmate is running there right now. Injection fails closed, so it will\n'
+      printf '●  refuse EVERY escalation this session rather than risk typing into a shell.\n'
+      printf '●  Nothing is lost: escalations buffer, raise the wedge alarm after %ss, and flush on afk exit -\n' "${FM_MAX_DEFER_SECS:-$MAX_DEFER_SECS_DEFAULT}"
+      printf '●  but no escalation will reach the pane while away.\n'
+      printf '●  Usual cause: a harness whose process cannot be attributed on this backend (pi runs as a bare node).\n'
+      printf '●%s\n' "$rule"
+    } >&2
+    log "startup WARNING: supervisor agent liveness reads '$startup_liveness' (not alive) while firstmate is provably running; inject will defer every escalation this session (wedge alarm + afk-exit flush still deliver)"
+  fi
+
   local afk_status="off"
   afk_active "$STATE" && afk_status="on"
-  log "daemon starting (pid $$); target=$TARGET; target_source=$target_source; backend=$BACKEND; backend_source=$backend_source; afk=$afk_status; inject_skip='${FM_INJECT_SKIP:-$INJECT_SKIP_DEFAULT}'; stale_escalate=${FM_STALE_ESCALATE_SECS:-$STALE_ESCALATE_SECS_DEFAULT}s; batch=${FM_ESCALATE_BATCH_SECS:-$ESCALATE_BATCH_SECS_DEFAULT}s"
+  log "daemon starting (pid $$); target=$TARGET; target_source=$target_source; backend=$BACKEND; backend_source=$backend_source; agent_liveness=$startup_liveness; afk=$afk_status; inject_skip='${FM_INJECT_SKIP:-$INJECT_SKIP_DEFAULT}'; stale_escalate=${FM_STALE_ESCALATE_SECS:-$STALE_ESCALATE_SECS_DEFAULT}s; batch=${FM_ESCALATE_BATCH_SECS:-$ESCALATE_BATCH_SECS_DEFAULT}s"
   migrate_watcher_pause_markers "$STATE"
 
   # --- shutdown: flush buffered escalations, reap child, release lock -------

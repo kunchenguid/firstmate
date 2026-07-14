@@ -690,6 +690,15 @@ It fails closed: `dead` (a bare shell) and `unknown` (an unreadable pane, or a h
 A deferred escalation stays buffered for the next cycle, the max-defer wedge alarm, or the afk-exit catch-up flush, so nothing is lost.
 Consequence to know: a pi-based supervisor in away mode reads `unknown` and defers all injection, degrading to the wedge-alarm and afk-exit-flush paths rather than injecting; closing that would require attributing pi's `node` process, which is separate empirical work.
 
+**Fail closed, but never fail silent.**
+Failing closed means a supervisor whose harness cannot be attributed on its backend loses away-mode injection for the whole session, not for one tick - so that state must be announced, not discovered 300s later from a wedge alarm.
+Two things make it honest.
+At arm time the daemon probes the supervisor pane once, right where the answer is known: firstmate is provably running there, because it just launched the daemon, so anything but `alive` is a permanent property of this supervisor and not a transient read.
+A non-`alive` verdict prints a bordered banner saying away-mode injection is disabled this session and that escalations will route through the wedge alarm and the afk-exit catch-up flush instead, and it records `agent_liveness=` in the startup log line.
+The canary is ADVISORY: a bad verdict (or a probe error, treated as `unknown`) warns and arms anyway, because degraded supervision beats none - unlike the unsupported-backend check above it, which refuses.
+And the wedge alarm no longer hardcodes "pane busy or wedged" as the cause: `inject_msg` records why each attempt did not land (`pane-busy`, `composer-not-empty`, `agent-dead`, `agent-unknown`, `submit-unconfirmed`, `pane-gone`), and the alarm reports that tag in its active alert and the full detail in its ERROR log and durable marker.
+Before this, the most likely permanent wedge the guard introduces - a dead or unverifiable agent - would have been reported to the captain as a busy pane.
+
 **Regression coverage.**
 `tests/fm-daemon.test.sh`'s `test_inject_msg_defers_on_empty_composer_dead_shell` (the hole: `empty` composer + `dead` agent must defer), `test_inject_msg_defers_on_empty_composer_unknown_liveness` (fail-closed on `unknown`), and `test_inject_msg_injects_when_agent_alive_and_composer_empty` (the positive path) pin the guard directly; each fails against the pre-fix daemon.
 `tests/fm-afk-inject-e2e.test.sh`'s Scenario D drives the genuine hazard end-to-end - a real login shell showing a bare starship `❯`, a real away-mode daemon, and an assertion that the digest is never typed into the shell.

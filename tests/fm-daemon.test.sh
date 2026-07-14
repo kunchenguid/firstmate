@@ -994,7 +994,9 @@ test_max_defer_empty_swallow_types_once_and_alarms() {
     || fail "stuck max-defer inject did not raise a wedge alarm marker"
   [ -s "$state/.subsuper-escalations" ] \
     || fail "buffer lost after a failed max-defer inject (must be preserved)"
-  pass "max-defer on an empty stuck pane types once, alarms, and preserves the buffer"
+  grep -F 'submit-unconfirmed' "$state/.subsuper-inject-wedged" >/dev/null \
+    || fail "wedge marker did not name the swallowed Enter as the cause"
+  pass "max-defer on an empty stuck pane types once, alarms with the swallowed-Enter cause, and preserves the buffer"
 }
 
 test_max_defer_flushes_empty_idle_pane() {
@@ -1030,7 +1032,49 @@ test_max_defer_pending_composer_alarms_without_typing() {
   [ -s "$state/.subsuper-inject-wedged" ] || fail "pending composer did not raise a wedge alarm marker"
   [ -s "$state/.subsuper-escalations" ] || fail "buffer lost while composer was pending"
   grep -F 'human draft' "$dir/composer" >/dev/null || fail "pending composer content changed"
-  pass "max-defer on a pending composer alarms without typing"
+  grep -F 'composer-not-empty' "$state/.subsuper-inject-wedged" >/dev/null \
+    || fail "wedge marker did not name the pending composer as the cause"
+  pass "max-defer on a pending composer alarms without typing, naming the composer as the cause"
+}
+
+# The wedge alarm must name the cause inject_msg actually recorded, not a
+# hardcoded "pane busy or wedged". After the agent-liveness guard, the most
+# likely PERMANENT wedge is a supervisor whose agent has exited to a shell (or
+# whose liveness this backend cannot verify): telling the captain their pane is
+# busy when their firstmate is dead sends them debugging in the wrong direction
+# on a safety-critical path. Here the composer is empty but the pane's foreground
+# process is a bare zsh, so the alarm must say agent-dead.
+test_wedge_alarm_names_dead_agent_not_busy_pane() {
+  local dir state fakebin sent log marker
+  dir=$(make_bordered_case maxdefer-dead-agent)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  sent="$dir/sent.log"; : > "$sent"
+  log="$dir/daemon.log"; : > "$log"
+  marker="$state/.subsuper-inject-wedged"
+  printf '│ > │\n' > "$dir/composer"   # a confirmed-EMPTY composer: only liveness can refuse
+  escalate_add "$state" "blocked: needs a credential"
+  echo $(( $(date +%s) - 600 )) > "$state/.subsuper-escalations.since"
+  afk_enter "$state"
+  # The ERROR line is rate-limited per max-defer window by an in-process epoch an
+  # earlier test in this same sourced shell already stamped; clear it so this
+  # alarm is a first alarm.
+  WEDGE_ALARM_LAST_EPOCH=0
+  PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$dir/composer" FM_FAKE_SENT="$sent" \
+    FM_FAKE_TMUX_COMMAND=zsh \
+    LOG="$log" FM_ESCALATE_BATCH_SECS=99999 FM_MAX_DEFER_SECS=60 FM_INJECT_CONFIRM_SLEEP=0.05 \
+    housekeeping "$state"
+  [ ! -s "$sent" ] || fail "max-defer typed into a pane whose agent was dead"
+  [ -s "$marker" ] || fail "a dead-agent wedge did not raise the alarm marker"
+  [ -s "$state/.subsuper-escalations" ] || fail "buffer lost on a dead-agent wedge (must be preserved)"
+  grep -F 'agent-dead' "$marker" >/dev/null \
+    || fail "wedge marker did not name the dead agent as the cause: $(cat "$marker")"
+  grep -F 'no live agent process confirmed' "$marker" >/dev/null \
+    || fail "wedge marker did not carry the full dead-agent detail"
+  grep -F 'ERROR' "$log" | grep -F 'no live agent process confirmed' >/dev/null \
+    || fail "wedge ERROR log did not name the dead agent: $(grep -F ERROR "$log" || true)"
+  grep -F 'supervisor pane busy or wedged' "$log" >/dev/null \
+    && fail "wedge ERROR log still hardcodes 'pane busy or wedged' as the cause when the agent was dead"
+  pass "wedge alarm names the dead agent (agent-dead) as the cause instead of blaming a busy pane"
 }
 
 test_normal_flush_clears_stale_wedge_marker() {
@@ -1738,6 +1782,86 @@ test_inject_msg_injects_when_agent_alive_and_composer_empty() {
   pass "inject_msg: injects only when the agent is confirmed alive and the composer is confirmed empty (positive path)"
 }
 
+# Run the REAL daemon binary far enough to arm, with a fake tmux whose supervisor
+# pane reports <foreground-command>, and echo back "<stderr>||<daemon log>".
+# Killed as soon as it logs "daemon starting", so the main loop never matters.
+run_daemon_until_armed() {  # <case-name> <foreground-command>
+  local dir state fakebin err pid i log
+  dir=$(make_supercase "$1")
+  state="$dir/state"; fakebin="$dir/fakebin"; err="$dir/daemon.err"
+  log="$state/.supervise-daemon.log"
+  afk_enter "$state"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" \
+    FM_FAKE_TMUX_COMMAND="$2" FM_FAKE_TMUX_CAPTURE="$dir/pane.txt" \
+    FM_SUPERVISOR_BACKEND=tmux FM_SUPERVISOR_TARGET="s:0" \
+    FM_HOUSEKEEPING_TICK=60 \
+    "$DAEMON" >"$err" 2>&1 &
+  pid=$!
+  i=0
+  while [ "$i" -lt 60 ]; do
+    grep -q 'daemon starting' "$log" 2>/dev/null && break
+    kill -0 "$pid" 2>/dev/null || break   # died before arming
+    sleep 0.1
+    i=$((i + 1))
+  done
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  printf '%s||%s' "$(cat "$err" 2>/dev/null)" "$(cat "$log" 2>/dev/null)"
+}
+
+# Arm-time liveness canary: fail closed, but NEVER fail silent. inject_msg's
+# liveness guard refuses every injection unless the agent reads `alive`, and for
+# a harness the backend cannot attribute (pi execs into a generic `node`) that
+# verdict is `unknown` for the WHOLE session - so away-mode injection is dead on
+# arrival and the captain would otherwise first learn of it from a wedge alarm
+# ~MAX_DEFER_SECS later, blaming a busy pane. At arm time the supervisor agent is
+# PROVABLY alive (it just launched this daemon), so a non-alive probe here is
+# definitive. The daemon must warn LOUDLY and STILL ARM: buffered escalations,
+# the wedge alarm, and the afk-exit catch-up flush are a degraded mode, and
+# degraded supervision beats refusing to supervise at all.
+test_startup_liveness_canary_warns_and_still_arms() {
+  local out err log
+  out=$(run_daemon_until_armed startup-canary-dead zsh)
+  err="${out%%||*}"; log="${out#*||}"
+  case "$err" in
+    *"AWAY-MODE INJECTION IS DISABLED"*) : ;;
+    *) fail "a non-alive arm-time liveness probe printed no loud warning; daemon stderr was: $err" ;;
+  esac
+  case "$log" in
+    *"startup WARNING"*"'dead'"*) : ;;
+    *) fail "the daemon log did not record the non-alive arm-time liveness verdict" ;;
+  esac
+  # ADVISORY ONLY: the warning must not become a refusal to arm.
+  case "$log" in
+    *"daemon starting"*"agent_liveness=dead"*) : ;;
+    *) fail "daemon did not arm (or omitted agent_liveness=) after a non-alive canary; log was: $log" ;;
+  esac
+  case "$log" in
+    *"startup failed"*) fail "the advisory liveness canary aborted daemon startup; it must warn and arm anyway" ;;
+  esac
+  pass "startup liveness canary: a dead supervisor agent warns loudly at arm time and the daemon still arms (advisory, never blocking)"
+}
+
+# The canary must not cry wolf: the normal case (a live agent in the supervisor
+# pane) arms silently, with the verdict recorded for later diagnosis.
+test_startup_liveness_canary_silent_when_agent_alive() {
+  local out err log
+  out=$(run_daemon_until_armed startup-canary-alive claude)
+  err="${out%%||*}"; log="${out#*||}"
+  case "$err" in
+    *"AWAY-MODE INJECTION IS DISABLED"*)
+      fail "the liveness canary warned even though the supervisor agent was alive (false alarm)" ;;
+  esac
+  case "$log" in
+    *"startup WARNING"*) fail "the daemon logged a startup liveness warning for a live agent" ;;
+  esac
+  case "$log" in
+    *"daemon starting"*"agent_liveness=alive"*) : ;;
+    *) fail "daemon did not record agent_liveness=alive at startup; log was: $log" ;;
+  esac
+  pass "startup liveness canary: a live supervisor agent arms silently, recording agent_liveness=alive"
+}
+
 test_afk_start_refuses_when_flag_cannot_be_written
 test_afk_start_ignores_stale_pidfile_without_lock
 test_afk_start_reclaims_stale_daemon_lock_reused_pid
@@ -1836,3 +1960,6 @@ test_inject_msg_defers_on_dead_shell_unknown
 test_inject_msg_defers_on_empty_composer_dead_shell
 test_inject_msg_defers_on_empty_composer_unknown_liveness
 test_inject_msg_injects_when_agent_alive_and_composer_empty
+test_startup_liveness_canary_warns_and_still_arms
+test_startup_liveness_canary_silent_when_agent_alive
+test_wedge_alarm_names_dead_agent_not_busy_pane

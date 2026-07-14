@@ -74,8 +74,10 @@ A secondmate agent that exits leaves its pane alive as a bare idle shell, which 
 `fm_backend_tmux_agent_alive` (`bin/backends/tmux.sh`) answers a deeper question: is a real harness-agent *process* running in the pane right now, not just whether the pane exists?
 It reads tmux's own `#{pane_current_command}`, which reports the pane's live foreground process name - already resolved by tmux from the pty's controlling process group, not something this adapter derives itself.
 
-Agent liveness and composer safety are separate checks.
-During away-mode escalation delivery, `fm_tmux_composer_state` sends a bare shell glyph on an unbordered row to the shared composer classifier as `unknown`, and the daemon injects only into an affirmatively `empty` composer; see [Composer-emptiness safety](herdr-backend.md#composer-emptiness-safety-2026-07-10-fleet-wide-across-all-four-backends).
+Away-mode escalation delivery requires BOTH checks, not either one: the daemon injects only into an affirmatively `empty` composer in a pane whose agent process reads `alive`.
+They were separate until 2026-07-14, when the composer check alone proved insufficient - the bare `❯` of a default starship/pure/spaceship shell prompt is byte-identical to claude's own empty-composer glyph, so it reads `empty` and a dead-shell supervisor was a valid injection target.
+`fm_tmux_composer_state` still classifies the other bare shell glyphs (`$`, `%`, `#`, `>`) on an unbordered row as `unknown`, but only this liveness probe can tell an empty agent composer from an empty shell prompt.
+See [Composer-emptiness safety](herdr-backend.md#composer-emptiness-safety-2026-07-10-fleet-wide-across-all-four-backends) and [Agent-liveness injection guard](herdr-backend.md#agent-liveness-injection-guard-2026-07-14-the-starship-glyph-hole).
 
 Verified empirically with real tmux 3.6a on macOS (Darwin 25.5.0), 2026-07-07:
 
@@ -108,7 +110,11 @@ The classifier (`fm_backend_tmux_agent_alive`) maps the observed name to `alive`
 `pi` is a `#!/usr/bin/env node` script (confirmed via its shebang and installed path, 2026-07-07), so a live `pi` agent's pane reports `node` as its `pane_current_command`, not `pi` - verified by running a long-lived `node -e` script in a pane and confirming its foreground process is a genuine child reachable via `pgrep -P <pane_pid>` with an inspectable `ps -o args=` (the same technique `bin/fm-harness.sh`'s own self-detection uses when walking UP its ancestry), while `pi --version` itself was observed to exit too quickly under the same pane to reliably capture its live foreground state - real `pi` invocations were not available to test.
 Since `node` is also the generic name for a plain interpreter session, any future JS-based harness, or someone's unrelated node script, there is no way to attribute a bare `node` foreground process back to `pi` specifically from outside the pane without deeper (and fragile) argument introspection.
 The classifier deliberately reports `unknown` for `node`/`python`/`python3` rather than guess - per the secondmate-liveness sweep's correctness bar, a wrong `alive` is harmless but a wrong `dead` spins up a duplicate agent, so an unresolvable case must never be treated as confidently dead.
-Practical effect: a dead `pi` secondmate is not auto-healed by the liveness sweep today; it is reported as `skipped: liveness probe inconclusive` instead, which still surfaces it for a human to act on.
+Practical effect, two places, and the second is the expensive one.
+A dead `pi` secondmate is not auto-healed by the liveness sweep today; it is reported as `skipped: liveness probe inconclusive` instead, which still surfaces it for a human to act on.
+And since 2026-07-14 a `pi` PRIMARY receives no away-mode injections at all: the daemon's inject-time liveness guard fails closed, so `unknown` defers exactly like `dead` (see [Agent-liveness injection guard](herdr-backend.md#agent-liveness-injection-guard-2026-07-14-the-starship-glyph-hole)).
+That asymmetry is deliberate - for the respawn sweep a wrong `dead` duplicates a live agent, while for injection a wrong `alive` types a command into the captain's shell - so both paths refuse to act on `unknown`, but only injection loses a capability by doing so.
+Escalations are not lost (they buffer, raise the max-defer wedge alarm, and flush on afk exit), and the daemon now says so loudly at arm time instead of leaving the captain to infer it from a wedge alarm 300s later.
 Resolving this would need either a `pi`-specific env marker inspectable from outside the process (mirroring `PI_CODING_AGENT=true`, which `bin/fm-harness.sh` already uses for self-detection but which is not readable from a different process without deeper introspection) or accepting the argument-inspection fragility - not attempted here.
 
 ## Limitations
