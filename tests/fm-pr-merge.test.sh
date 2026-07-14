@@ -25,34 +25,56 @@
 #   (g) explicit merge method is not overridden by the default --squash
 #   (h) repo override args fail fast because the repo comes from the URL
 #
-# A base branch that is GONE from origin is the subtle case, because a base that
-# MERGED and was auto-deleted (harmless) and a base that was ABANDONED and deleted
-# (its unmerged commits replayed onto the head by the pipeline's rebase) look
-# identical to `git ls-remote`. The guard decides between them with the base's
-# spawn-time tip (base_sha=, recorded by fm-spawn.sh while the base still existed):
-# it stands down only when that tip's work is actually carried by the default branch.
+# WHETHER THE BASE BRANCH STILL EXISTS DECIDES NOTHING. What decides is whether the
+# BASE'S WORK HAS LANDED in the default branch, and branch existence is an unsound
+# proxy for that in both directions: a base can be deleted WITHOUT merging (an
+# abandoned feature - its unmerged commits ride on the head, the original incident),
+# and a base can merge and NOT be deleted (GitHub's delete-on-merge is off by default -
+# nothing left to guard, and guarding it would refuse a safe merge forever). So the
+# guard asks fm_base_work_landed on BOTH paths, from the base's live tip while the
+# branch is there and from the recorded spawn-time tip (base_sha=) once it is gone, and
+# stands down only on proof that the work landed.
 #
-# Matrix (fm-pr-check.sh based-on-base guard):
-#   (i) base= present, head stacked on the base AND base label matches -> records pr=, arms the poll
-#   (j) base= present, base ADVANCED after the head was stacked -> still allowed (merely behind, not wrong-based)
-#   (k) base= present, PR head rebased onto main -> refuses, no pr=, no poll
-#   (l) base= present, head stacked but PR base label targets main -> refuses, no pr=, no poll
-#   (m) base= present, head rebased onto main but the PR ALREADY targets the base ->
+# Matrix (fm-pr-check.sh based-on-base guard). Base UNLANDED - the live feature branch
+# the guard exists for:
+#   (i) base present, head stacked on it AND base label matches -> records pr=, arms the poll
+#   (j) base present, base ADVANCED after the head was stacked -> still allowed (merely behind, not wrong-based)
+#   (k) base present, PR head rebased onto main -> refuses, no pr=, no poll
+#   (l) base present, head stacked but PR base label targets main -> refuses, no pr=, no poll
+#   (m) base present, head rebased onto main but the PR ALREADY targets the base ->
 #       still refuses, and prescribes the head's re-rebase rather than a retarget that
 #       has already happened and would loop
-#   (n) base= present in the data/<id>/base sidecar but never promoted into meta -> refuses (no silent fail-open)
-#   (o) base branch GONE from origin, recorded tip is an ANCESTOR of main (it merged
-#       and was auto-deleted) -> the guard stands down loudly and the PR proceeds;
-#       refusing would deadlock a legitimate merge forever
-#   (p) base branch GONE, recorded tip's work is CONTAINED in main (it was squash-merged,
-#       firstmate's own default) -> stands down too; an ancestor-only test would deadlock here
-#   (q) base branch GONE, recorded tip's work is NOT in main (deleted WITHOUT merging) ->
+#   (n) base GONE, recorded tip's work is NOT in main (deleted WITHOUT merging) ->
 #       refuses: this is the original incident, and standing down would land the abandoned
 #       base's commits on main
-#   (r) base branch GONE and no base_sha= recorded -> refuses; the two cases above cannot
-#       be told apart without it
-#   (s) base= present but origin cannot be asked at all (auth, network) -> fail-closed refusal
-#   (t) no base= (the common case) -> unchanged: records pr= and arms the poll
+#
+# Base LANDED - the base merged, so there is no unmerged history left to drag anywhere
+# and the guard must stand down rather than deadlock a legitimate merge:
+#   (o) base still PRESENT on origin, squash-merged into main, head rebased onto main ->
+#       stands down; enforcing rootedness here would refuse forever, with a recovery
+#       (retarget onto the base) that is a no-op
+#   (p) base still PRESENT on origin, ancestor-merged into main, PR label is main ->
+#       stands down; the label check alone would refuse forever
+#   (q) base GONE, recorded tip is an ANCESTOR of main (it merged and was auto-deleted)
+#       -> stands down loudly and the PR proceeds
+#   (r) base GONE, recorded tip's work is CONTAINED in main (squash-merged, firstmate's
+#       own default) -> stands down too; an ancestor-only test would deadlock here
+#
+# Landedness INDETERMINATE or unaskable - never a stand-down, because standing down is
+# the guard's only relaxation and it takes proof. Note that "do not relax" is not the
+# same as "refuse": with the base still on origin the strict checks are all still
+# available, and running them costs a correctly stacked PR nothing.
+#   (s) base PRESENT but conflicting with main, so landedness cannot be settled, head
+#       stacked -> ALLOWED: the guard keeps its strict checks instead of refusing. A
+#       long-lived base drifting from main is ordinary, and refusing here would break
+#       the guard's own happy path
+#   (t) base GONE and no base_sha= recorded -> refuses; merged and abandoned cannot be
+#       told apart without it, and no rootedness check is left to fall back on
+#   (u) base GONE and the recorded tip is not in the local object store -> refuses,
+#       naming the reason rather than assuming
+#   (v) base present but origin cannot be asked at all (auth, network) -> fail-closed refusal
+#   (w) base= present in the data/<id>/base sidecar but never promoted into meta -> refuses (no silent fail-open)
+#   (x) no base= (the common case) -> unchanged: records pr= and arms the poll
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -464,6 +486,18 @@ SH
   printf '%s\n' "$case_dir"
 }
 
+# Move origin's main on by a commit that CONFLICTS with the base's own change, so the
+# landedness containment merge cannot resolve and reports UNKNOWN. This is an ordinary
+# state for a long-lived feature base, not an exotic one.
+advance_main_conflicting() {
+  local case_dir=$1 blob parent tree commit
+  blob=$(printf 'base\nmain-conflict\n' | git -C "$case_dir/origin.git" hash-object -w --stdin)
+  parent=$(git -C "$case_dir/origin.git" rev-parse refs/heads/main)
+  tree=$(printf '100644 blob %s\tf.txt\n' "$blob" | git -C "$case_dir/origin.git" mktree)
+  commit=$(git -C "$case_dir/origin.git" commit-tree "$tree" -p "$parent" -m 'conflicting work on main')
+  git -C "$case_dir/origin.git" update-ref refs/heads/main "$commit"
+}
+
 # Move origin's main on by one unrelated commit, so a containment check is pinned to
 # "the base's work is in main" rather than the accident of main still equalling the
 # squash commit's tree.
@@ -517,6 +551,35 @@ test_pr_check_accepts_stacked_base() {
   assert_no_grep 'not stacked on its intended base' "$case_dir/stderr" \
     "stacked-base: a stacked PR must not trip the guard"
   pass "fm-pr-check accepts a PR head stacked on the declared base"
+}
+
+# A live feature base whose changes CONFLICT with the default branch cannot be replayed
+# onto it, so landedness comes back UNKNOWN - and for a long-lived base that is ordinary,
+# not exotic. Guarding must continue exactly as before: the strict rootedness and label
+# checks cost a correctly stacked PR nothing. Turning UNKNOWN into a refusal HERE would
+# refuse every correctly stacked PR whose base has drifted from the default branch, which
+# would break the guard's own happy path. UNKNOWN means "do not relax", not "refuse".
+test_pr_check_accepts_stacked_base_that_conflicts_with_default() {
+  local case_dir rc
+  case_dir=$(make_git_case conflictingbase feature feature/base)
+  advance_main_conflicting "$case_dir"
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    "window=fm-task-x1" "worktree=$case_dir/wt" "project=$case_dir/project" \
+    "kind=ship" "mode=no-mistakes" "base=feature/base" "base_sha=$(base_tip "$case_dir")"
+
+  set +e
+  run_pr_check "$case_dir" task-x1 https://github.com/example/repo/pull/9 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "conflicting-base: an indeterminate landedness must keep guarding, not refuse a correctly stacked PR"
+  assert_grep 'pr=https://github.com/example/repo/pull/9' "$case_dir/state/task-x1.meta" \
+    "conflicting-base: a correctly stacked PR should still record pr="
+  assert_present "$case_dir/state/task-x1.check.sh" "conflicting-base: the merge poll should be armed"
+  assert_no_grep 'stands down' "$case_dir/stderr" \
+    "conflicting-base: an unprovable landedness must never relax the guard"
+  pass "fm-pr-check keeps guarding (and still passes a stacked PR) when the base conflicts with the default branch"
 }
 
 test_pr_check_refuses_wrong_base() {
@@ -616,6 +679,79 @@ test_pr_check_stands_down_when_base_merged_and_deleted() {
   pass "fm-pr-check stands down (loudly) when the declared base merged and was deleted"
 }
 
+# The base merged but its branch was NOT deleted - GitHub's "automatically delete head
+# branches" is off by default, so this end-state is at least as common as the deleted
+# one. It is a SQUASH merge (firstmate's own default), so the base's tip is not an
+# ancestor of main, and the pipeline has rebased the head onto main as it always does.
+# A guard that only stands down for an ABSENT base enforces rootedness here, finds the
+# head rooted in main, and refuses - forever, with a recovery ('retarget onto the base')
+# that would retarget the PR onto an already-merged branch. But the base's work IS in
+# main: there is no unmerged feature history left to drag anywhere, so the hazard is
+# gone and the guard must stand down exactly as it does for the deleted case. Branch
+# existence decides nothing; landedness does.
+test_pr_check_stands_down_when_present_base_squash_merged() {
+  local case_dir rc tree parent squash
+  case_dir=$(make_git_case presentsquash main main)
+  tree=$(git -C "$case_dir/origin.git" rev-parse "refs/heads/feature/base^{tree}")
+  parent=$(git -C "$case_dir/origin.git" rev-parse refs/heads/main)
+  squash=$(git -C "$case_dir/origin.git" commit-tree "$tree" -p "$parent" -m 'squash feature/base')
+  git -C "$case_dir/origin.git" update-ref refs/heads/main "$squash"
+  advance_main "$case_dir"
+  # No base_sha=: the live branch IS the fact on this path, so the guard must not need
+  # the recorded spawn-time tip to see that the base merged.
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    "window=fm-task-x1" "worktree=$case_dir/wt" "project=$case_dir/project" \
+    "kind=ship" "mode=no-mistakes" "base=feature/base"
+
+  set +e
+  run_pr_check "$case_dir" task-x1 https://github.com/example/repo/pull/9 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "present-squash: a base that merged but was not deleted must not deadlock the PR"
+  assert_grep 'already merged' "$case_dir/stderr" \
+    "present-squash: standing the guard down must be said out loud, and must name the reason"
+  assert_grep 'contained' "$case_dir/stderr" \
+    "present-squash: the stand-down should say the base's work is carried by the default branch"
+  assert_no_grep 'not stacked on its intended base' "$case_dir/stderr" \
+    "present-squash: a merged base has no unmerged history to be rooted in - rootedness must not be enforced"
+  assert_grep 'pr=https://github.com/example/repo/pull/9' "$case_dir/state/task-x1.meta" \
+    "present-squash: pr= should be recorded once the guard stands down"
+  assert_present "$case_dir/state/task-x1.check.sh" "present-squash: the merge poll should be armed"
+  pass "fm-pr-check stands down when the declared base squash-merged and its branch was kept"
+}
+
+# The same, reached by an ancestor merge with the branch kept. Rootedness is not the
+# refusal here - the base tip IS an ancestor of main, so that check is skipped - but the
+# base LABEL check still refuses, because the pipeline opened the PR against main. Same
+# deadlock, same reason: the base's work is in main, so there is nothing left to guard,
+# and 'retarget onto feature/base' is advice that cannot help.
+test_pr_check_stands_down_when_present_base_ancestor_merged() {
+  local case_dir rc
+  case_dir=$(make_git_case presentmerged feature main)
+  git -C "$case_dir/origin.git" update-ref refs/heads/main refs/heads/feature/base
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    "window=fm-task-x1" "worktree=$case_dir/wt" "project=$case_dir/project" \
+    "kind=ship" "mode=no-mistakes" "base=feature/base" "base_sha=$(base_tip "$case_dir")"
+
+  set +e
+  run_pr_check "$case_dir" task-x1 https://github.com/example/repo/pull/9 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "present-merged: a merged base whose branch was kept must not deadlock on the base label"
+  assert_grep 'already merged' "$case_dir/stderr" \
+    "present-merged: the stand-down must be said out loud"
+  assert_no_grep 'opened against base' "$case_dir/stderr" \
+    "present-merged: the base label check must not refuse a PR whose base has already merged"
+  assert_grep 'pr=https://github.com/example/repo/pull/9' "$case_dir/state/task-x1.meta" \
+    "present-merged: pr= should be recorded once the guard stands down"
+  assert_present "$case_dir/state/task-x1.check.sh" "present-merged: the merge poll should be armed"
+  pass "fm-pr-check stands down when the declared base ancestor-merged and its branch was kept"
+}
+
 # The same end-state, reached by a SQUASH merge - firstmate's own default merge method
 # and GitHub's most common setting. The recorded tip is not an ancestor of main any
 # more (the squash rewrote it), so an ancestor-only test would call this an abandoned
@@ -711,6 +847,38 @@ test_pr_check_refuses_gone_base_with_no_recorded_tip() {
   assert_absent "$case_dir/state/task-x1.check.sh" \
     "no-tip-base: an unverifiable base must not arm the merge poll"
   pass "fm-pr-check refuses a gone base whose tip was never recorded (no guessing)"
+}
+
+# A recorded tip that is not in the local object store cannot be compared against main
+# at all, so landedness is INDETERMINATE - and with the branch gone there is no
+# rootedness check left to fall back on either. Standing down is the guard's only
+# relaxation and it takes proof, so an unanswerable question refuses and names why.
+test_pr_check_refuses_gone_base_with_unknowable_tip() {
+  local case_dir rc
+  case_dir=$(make_git_case unknowabletip feature main)
+  git -C "$case_dir/origin.git" update-ref refs/heads/main refs/heads/feature/base
+  git -C "$case_dir/origin.git" update-ref -d refs/heads/feature/base
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    "window=fm-task-x1" "worktree=$case_dir/wt" "project=$case_dir/project" \
+    "kind=ship" "mode=no-mistakes" "base=feature/base" \
+    "base_sha=0123456789abcdef0123456789abcdef01234567"
+
+  set +e
+  run_pr_check "$case_dir" task-x1 https://github.com/example/repo/pull/9 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "unknowable-tip: an indeterminate landedness must refuse, never stand down"
+  assert_grep 'could not be determined' "$case_dir/stderr" \
+    "unknowable-tip: the refusal must say the question could not be answered"
+  assert_grep 'object store' "$case_dir/stderr" \
+    "unknowable-tip: the refusal must name why it could not be answered"
+  assert_no_grep 'pr=https://github.com/example/repo/pull/9' "$case_dir/state/task-x1.meta" \
+    "unknowable-tip: an unverifiable base must not record pr= before merge"
+  assert_absent "$case_dir/state/task-x1.check.sh" \
+    "unknowable-tip: an unverifiable base must not arm the merge poll"
+  pass "fm-pr-check refuses a gone base whose recorded tip cannot be compared against the default branch"
 }
 
 # The state a reader can actually reach by FOLLOWING the base-label refusal: they
@@ -856,6 +1024,7 @@ test_explicit_merge_method_not_overridden
 test_method_equals_merge_method_not_overridden
 test_parses_pr_url_for_gh_axi
 test_pr_check_accepts_stacked_base
+test_pr_check_accepts_stacked_base_that_conflicts_with_default
 test_pr_check_allows_base_advanced_since_head
 test_pr_check_refuses_wrong_base
 test_pr_check_refuses_wrong_base_label
@@ -863,7 +1032,10 @@ test_pr_check_rootedness_recovery_is_state_aware
 test_pr_check_refuses_when_sidecar_never_reached_meta
 test_pr_check_stands_down_when_base_merged_and_deleted
 test_pr_check_stands_down_when_base_squash_merged_and_deleted
+test_pr_check_stands_down_when_present_base_squash_merged
+test_pr_check_stands_down_when_present_base_ancestor_merged
 test_pr_check_refuses_when_base_deleted_without_merging
 test_pr_check_refuses_gone_base_with_no_recorded_tip
+test_pr_check_refuses_gone_base_with_unknowable_tip
 test_pr_check_fail_closed_when_base_probe_fails
 test_pr_check_no_base_arms_normally

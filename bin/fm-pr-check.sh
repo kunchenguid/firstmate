@@ -10,53 +10,46 @@
 #
 # When state/<id>.meta records a non-default base= (declared with fm-brief.sh
 # --base and promoted into meta by fm-spawn.sh, which also records the base's tip
-# at spawn time as base_sha=), this guards the PR's base before merge. What it
-# asserts depends on what origin says the base IS right now - live, gone, or
-# unaskable (bin/fm-base-lib.sh owns that three-way distinction).
+# at spawn time as base_sha=), this guards the PR's base before merge.
 #
-# THE BASE IS LIVE ON ORIGIN. Refuse to record pr= or arm the poll unless BOTH
-# hold, refusing loudly otherwise:
+# THE GUARD ASKS ONE QUESTION FIRST: HAS THE BASE'S WORK LANDED IN THE DEFAULT
+# BRANCH? Not "does the base branch still exist" - that is an unsound proxy in both
+# directions, and bin/fm-base-lib.sh owns why. fm_base_work_landed answers it from
+# the base's tip: the live tip while the branch is on origin, else the spawn-time
+# base_sha=. Everything below follows from the answer.
 #
-#   1. The PR head is ROOTED IN THAT BASE'S UNMERGED HISTORY. Concretely: the
-#      merge-base of the PR head and the base is itself a commit the default
-#      branch cannot reach, so the head genuinely carries the feature base's own
-#      work. This deliberately does NOT require the head to descend from the
-#      base's CURRENT TIP: a stacked PR whose base is itself under review sees
-#      that base advance all the time, and a head that is merely behind is still
-#      correctly based and safe to merge. Requiring tip-descent would turn every
-#      routine base advance into a hard merge refusal.
-#      When the base carries no unmerged history at all (it is already contained
-#      in the default branch), rootedness is not observable and the base label
-#      below is the whole guard.
+# THE BASE'S WORK HAS NOT LANDED. The base carries unmerged history, so a head that
+# does not sit on it would drag that history into the default branch on merge. Refuse
+# to record pr= or arm the poll unless BOTH hold, refusing loudly otherwise:
+#
+#   1. The PR head is ROOTED IN THE BASE'S UNMERGED HISTORY (fm_base_head_rooted).
+#      Not tip-descent: a base that merely ADVANCED past the head is fine.
 #   2. The PR's base label targets it (gh pr view --json baseRefName).
 #
 # Requiring both catches a head rebased onto the repo default branch and a PR
 # opened against the default branch, either of which would drag the feature
 # base's unmerged commits into the default branch on merge. That is the launch
 # incident (data/learnings.md 2026-07-07) where the pipeline rebased a whole
-# feature branch onto main and opened the PR against main.
+# feature branch onto main and opened the PR against main. An abandoned base -
+# deleted from origin WITHOUT merging - is this same case and refuses by name: its
+# commits never landed, so the pipeline's rebase replayed them onto the head.
 #
-# THE BASE IS GONE FROM ORIGIN. Absence alone decides nothing, and treating it as
-# proof of a merge would reopen the very incident above through the back door:
+# THE BASE'S WORK HAS LANDED. The base merged: its work is in the default branch,
+# whether or not its branch was deleted afterwards (GitHub deletes it by default,
+# but the setting is off by default too - both end-states are ordinary). No unmerged
+# feature history is left to drag anywhere, so the hazard is gone and BOTH checks
+# above are meaningless: rootedness cannot even be observed, and the base label the
+# pipeline set is correct. THE GUARD STANDS DOWN, loudly, and the PR proceeds as the
+# ordinary default-branch PR it now is. Guarding here would deadlock a legitimate
+# merge forever behind a recovery - retarget onto the base - that is a no-op at best
+# and impossible at worst.
 #
-#   the base merged and was auto-deleted (GitHub's default, and the normal
-#   end-state of a stacked PR) - its work is in the default branch, no unmerged
-#   feature history is left to drag anywhere, the hazard is gone. Refusing here
-#   would deadlock a legitimate merge forever behind a recovery that a deleted
-#   branch makes impossible to follow.
-#
-#   the base was ABANDONED and deleted (closed base PR, force-deleted branch) -
-#   its commits never merged, the pipeline replayed them onto the head when it
-#   rebased onto the default branch, and merging would land that abandoned work
-#   on the default branch. That is the incident, exactly.
-#
-# `git ls-remote` cannot tell those apart, so the guard does not ask it to. It
-# asks whether the base's recorded spawn-time tip (base_sha=) is CARRIED BY the
-# default branch - as an ancestor, or by content after a squash or rebase merge -
-# and stands down only for the first case, refusing the second by name. A task with
-# no recorded base_sha= (or whose recorded commit is not in the local object store,
-# so the question cannot be answered) refuses too. fm_base_work_landed in
-# bin/fm-base-lib.sh owns that landed/unlanded/unknown decision.
+# WE COULD NOT TELL. Never a stand-down: standing down is the only relaxation the
+# guard has, and it requires proof. With the base still on origin we keep guarding
+# (rootedness plus the base label), which is the strict path and refuses nothing that
+# is correctly stacked. With the base gone there is nothing left to check against, so
+# we refuse and name the reason - including the task with no base_sha= recorded at
+# all, where the merged and abandoned cases simply cannot be told apart.
 #
 # THE PROBE ITSELF FAILED (auth, network, a broken remote). We know nothing:
 # refuse, and name git's own error so an infrastructure failure is diagnosable
@@ -206,12 +199,27 @@ fetch_branch_sha() {
   }
 }
 
-# The declared base is GONE from origin. Decide whether its work actually reached
-# the default branch (it merged, so the hazard went with the branch) or never did
-# (it was abandoned, so the head still carries its replayed commits and merging
-# would land them on the default branch). The recorded spawn-time tip is the only
-# fact that can tell those apart; with no fact, refuse.
-# Returns BASE_STAND_DOWN (proceed on the ordinary default-branch path) or 1.
+# The declared base's work IS in the default branch, so the base merged and there is
+# nothing left to guard. Say so out loud - a guard that relaxes silently is a guard
+# nobody can audit - and hand the caller back to the ordinary default-branch path.
+# Returns FM_BASE_GUARD_STAND_DOWN.
+stand_down_landed_base() {  # <default-branch-name> <why>
+  local default_branch_name=$1 why=$2
+  echo "  Its work IS carried by the default branch '$default_branch_name' ($why), so the base merged and there is nothing left to guard." >&2
+  echo "  No unmerged feature history can be dragged into '$default_branch_name', so the base guard stands down and this PR is handled as an ordinary default-branch PR." >&2
+  [ -z "$PR_BASE_LABEL" ] || echo "  PR base label : $PR_BASE_LABEL" >&2
+  echo "  Drop the 'base=$BASE' line from $META to retire the declaration for good." >&2
+  return "$FM_BASE_GUARD_STAND_DOWN"
+}
+
+# The declared base is GONE from origin. Absence decides nothing on its own, so ask
+# the one question that does: did its work actually reach the default branch (it
+# merged, so the hazard went with the branch) or never did (it was abandoned, so the
+# head still carries its replayed commits and merging would land them on the default
+# branch)? With the branch gone, the recorded spawn-time tip is the only fact that can
+# tell those apart, and there is no rootedness check left to fall back on; with no
+# fact, refuse.
+# Returns FM_BASE_GUARD_STAND_DOWN (proceed on the ordinary default-branch path) or 1.
 handle_absent_base() {  # <default-branch-name> <default-sha>
   local default_branch_name=$1 default_sha=$2 landed_rc=0
   if [ -z "$BASE_SHA" ]; then
@@ -223,12 +231,10 @@ handle_absent_base() {  # <default-branch-name> <default-sha>
   fm_base_work_landed "$WT" "$BASE_SHA" "$default_sha" || landed_rc=$?
   case "$landed_rc" in
     "$FM_BASE_WORK_LANDED")
-      echo "notice: task $ID declares intended base '$BASE', but that branch no longer exists on origin." >&2
-      echo "  Its recorded tip ($BASE_SHA) IS carried by the default branch '$default_branch_name' ($FM_BASE_WORK_HOW), so the base merged and was deleted - the normal end-state of a stacked PR." >&2
-      echo "  No unmerged feature history is left to drag into '$default_branch_name', so the base guard stands down and this PR is handled as an ordinary default-branch PR." >&2
-      [ -z "$PR_BASE_LABEL" ] || echo "  PR base label : $PR_BASE_LABEL" >&2
-      echo "  Drop the 'base=$BASE' line from $META to retire the declaration for good." >&2
-      return "$BASE_STAND_DOWN"
+      echo "notice: task $ID declares intended base '$BASE', but that branch no longer exists on origin - it merged and was deleted, the normal end-state of a stacked PR." >&2
+      echo "  recorded base tip : $BASE_SHA" >&2
+      stand_down_landed_base "$default_branch_name" "$FM_BASE_WORK_HOW"
+      return $?
       ;;
     "$FM_BASE_WORK_UNLANDED")
       echo "error: task $ID declares intended base '$BASE', and that branch was deleted from origin WITHOUT merging - refusing to record pr= or arm the merge poll before merge." >&2
@@ -256,12 +262,11 @@ handle_absent_base() {  # <default-branch-name> <default-sha>
 # the PR targets that base. Fetches the PR head, the base, and the default branch
 # from origin so the check runs against authoritative commits in the local object
 # store - not a stale local branch or a head SHA whose objects were never fetched.
-# Returns 0 (verified), BASE_STAND_DOWN (the base is gone from origin and its work
-# demonstrably merged, so there is nothing left to guard and the caller proceeds on
-# the ordinary path), or 1 (refuse).
-BASE_STAND_DOWN=3
+# Returns 0 (verified), FM_BASE_GUARD_STAND_DOWN (the base's work has landed in the
+# default branch, so there is nothing left to guard and the caller proceeds on the
+# ordinary path), or 1 (refuse).
 assert_pr_based_on_base() {
-  local n pr_sha base_sha default_sha default_branch_name merge_base err probe_rc
+  local n pr_sha base_sha default_sha default_branch_name err probe_rc landed_rc rooted_rc
   if [ -z "$WT" ] || [ ! -d "$WT" ]; then
     echo "error: task $ID declares intended base '$BASE' but its worktree is unavailable ('$WT'); cannot verify the PR is based on that base. Refusing before merge." >&2
     return 1
@@ -310,25 +315,36 @@ assert_pr_based_on_base() {
   base_sha=$(fetch_branch_sha "$BASE" "intended base branch") || return 1
   default_sha=$(fetch_branch_sha "$default_branch_name" "repo default branch") || return 1
 
-  merge_base=$(git -C "$WT" merge-base "$base_sha" "$pr_sha" 2>/dev/null) || {
-    echo "error: task $ID PR head and its intended base '$BASE' share no common history at all - refusing to record pr= or arm the merge poll before merge." >&2
-    return 1
-  }
+  # The same question the absent path asks, asked of the live tip: has the base's
+  # work landed? A base that merged but was never deleted (GitHub's delete-on-merge
+  # is off by default) has no unmerged history left, so neither check below means
+  # anything - rootedness cannot be observed, and the label the pipeline set is the
+  # right one. Guarding it would refuse a safe merge with advice that cannot help.
+  landed_rc=0
+  fm_base_work_landed "$WT" "$base_sha" "$default_sha" || landed_rc=$?
+  if [ "$landed_rc" -eq "$FM_BASE_WORK_LANDED" ]; then
+    echo "notice: task $ID declares intended base '$BASE', and that branch is still on origin - but it has already merged." >&2
+    echo "  base tip : $base_sha" >&2
+    stand_down_landed_base "$default_branch_name" "$FM_BASE_WORK_HOW"
+    return $?
+  fi
 
-  # When the base is already contained in the default branch it has no unmerged
-  # history of its own, so rootedness says nothing; the base label is the guard.
-  if ! git -C "$WT" merge-base --is-ancestor "$base_sha" "$default_sha"; then
-    # The head must fork from the base's OWN history, not from the default
-    # branch. A merge-base the default branch can reach means the head carries
-    # none of the base's unmerged work - it was rebased onto the default branch.
-    # A base that merely advanced past the head leaves the merge-base on the
-    # base's own unmerged history, which is correct and passes.
-    if git -C "$WT" merge-base --is-ancestor "$merge_base" "$default_sha"; then
+  # Not landed, or not PROVABLY landed. Either way the base may still carry unmerged
+  # history, so the guard stays on: standing down is the only relaxation it has, and
+  # it takes proof. Enforcing the strict checks costs a correctly stacked PR nothing.
+  rooted_rc=0
+  fm_base_head_rooted "$WT" "$base_sha" "$pr_sha" "$default_sha" || rooted_rc=$?
+  case "$rooted_rc" in
+    "$FM_BASE_HEAD_UNRELATED")
+      echo "error: task $ID PR head and its intended base '$BASE' share no common history at all - refusing to record pr= or arm the merge poll before merge." >&2
+      return 1
+      ;;
+    "$FM_BASE_HEAD_UNROOTED")
       echo "error: task $ID PR is not stacked on its intended base - refusing to record pr= or arm the merge poll before merge." >&2
       echo "  intended base : $BASE ($base_sha)" >&2
       [ -z "$PR_BASE_LABEL" ] || echo "  PR base label : $PR_BASE_LABEL" >&2
       echo "  PR head       : $pr_sha" >&2
-      echo "  branch point  : $merge_base (reachable from the default branch '$default_branch_name')" >&2
+      echo "  branch point  : $FM_BASE_MERGE_BASE (reachable from the default branch '$default_branch_name')" >&2
       echo "  The head carries none of '$BASE''s unmerged history, so it was rebased onto the default branch - merging it would not deliver the fix onto '$BASE'." >&2
       # The recovery has to fit the state actually found. Once the PR already
       # targets the base, telling the reader to retarget it is a no-op they have
@@ -341,10 +357,13 @@ assert_pr_based_on_base() {
       else
         echo "  Recovery: retarget the PR's base with 'gh-axi pr edit $n --base $BASE'. The no-mistakes pipeline's monitor picks the new base up, re-rebases the branch onto it, and force-pushes a clean head; then re-run fm-pr-check." >&2
       fi
+      if [ "$landed_rc" -eq "$FM_BASE_WORK_UNKNOWN" ]; then
+        echo "  Note: whether '$BASE''s work already reached '$default_branch_name' could not be determined ($FM_BASE_WORK_HOW), so the guard stayed on rather than assuming. If that base has in fact merged, drop the 'base=$BASE' line from $META and re-run fm-pr-check." >&2
+      fi
       echo "  (A base that merely ADVANCED past the head is fine and is not refused here - only a head rooted in the default branch is.)" >&2
       return 1
-    fi
-  fi
+      ;;
+  esac
 
   if [ -z "$PR_BASE_LABEL" ]; then
     echo "error: task $ID declares intended base '$BASE' but the PR's base label could not be resolved via gh; cannot verify the PR targets that base. Refusing before merge." >&2
@@ -354,6 +373,9 @@ assert_pr_based_on_base() {
     echo "error: task $ID PR is opened against base '$PR_BASE_LABEL', not its intended base '$BASE' - refusing to record pr= or arm the merge poll before merge." >&2
     echo "  Merging it would land '$BASE''s unmerged commits into '$PR_BASE_LABEL'." >&2
     echo "  Recovery: retarget the PR's base with 'gh-axi pr edit $n --base $BASE'. The no-mistakes pipeline's monitor picks the new base up, re-rebases the branch onto it, and force-pushes a clean head; then re-run fm-pr-check." >&2
+    if [ "$landed_rc" -eq "$FM_BASE_WORK_UNKNOWN" ]; then
+      echo "  Note: whether '$BASE''s work already reached '$default_branch_name' could not be determined ($FM_BASE_WORK_HOW), so the guard stayed on rather than assuming. If that base has in fact merged, drop the 'base=$BASE' line from $META and re-run fm-pr-check." >&2
+    fi
     return 1
   fi
   return 0
@@ -362,9 +384,9 @@ assert_pr_based_on_base() {
 if [ -n "$BASE" ]; then
   BASE_RC=0
   assert_pr_based_on_base || BASE_RC=$?
-  # A stood-down guard (the base is gone from origin) continues on the ordinary
-  # default-branch path; anything else nonzero is a refusal.
-  [ "$BASE_RC" -eq 0 ] || [ "$BASE_RC" -eq "$BASE_STAND_DOWN" ] || exit 1
+  # A stood-down guard (the base's work has landed in the default branch) continues
+  # on the ordinary default-branch path; anything else nonzero is a refusal.
+  [ "$BASE_RC" -eq 0 ] || [ "$BASE_RC" -eq "$FM_BASE_GUARD_STAND_DOWN" ] || exit 1
 fi
 
 if [ -f "$META" ]; then

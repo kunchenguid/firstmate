@@ -10,11 +10,23 @@
 #   (b) pr= without pr_head= -> fetch refs/pull/<n>/head and diff that
 #   (c) pr= absent -> unchanged worktree-branch diff
 #   (d) pr= present but PR head unreachable -> fallback to local branch + warning
-#   (e) base= present -> diff against that base, not the repo default
-#   (f) base= present but gone from origin (merged and auto-deleted) -> fall back
-#       to the default branch with a warning, never a hard stop
-#   (g) base= present but origin cannot be asked at all -> stop, do not guess
-#   (h) base= absent -> unchanged default-branch diff base
+#   (e) base= declared and still carrying unmerged work, branch under review rooted in
+#       it -> diff against that base, not the repo default
+#   (f) base= declared but gone from origin -> fall back to the default branch with a
+#       warning, never a hard stop
+#   (g) base= declared but its work has already LANDED in the default branch (it merged,
+#       branch kept) -> fall back to the default branch: a merged base has no unmerged
+#       history left to subtract, and diffing against it would misreport the change
+#   (h) base= declared and unlanded, but the branch under review was rebased onto the
+#       default branch (the pipeline always does) -> fall back to the default branch,
+#       because diffing against the base would show every default-branch commit since
+#       the base forked as part of the crewmate's change
+#   (i) base= declared but origin cannot be asked at all -> stop, do not guess
+#   (j) base= absent -> unchanged default-branch diff base
+#
+# (g) and (h) decide on the same fm_base_work_landed / fm_base_head_rooted predicates
+# bin/fm-pr-check.sh's guard decides on, so the review diff and the merge gate never
+# disagree about what a declared base means.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -234,6 +246,102 @@ test_deleted_base_falls_back_to_default_with_warning() {
   pass "fm-review-diff falls back to the default branch when the declared base is gone from origin"
 }
 
+# The declared base merged but its branch was KEPT on origin (GitHub's delete-on-merge
+# is off by default). It has no unmerged history left to subtract, so it is no longer a
+# meaningful diff base: the branch under review has been rebased onto the default branch
+# by the pipeline, and diffing it against the merged base would take the old fork point
+# as the merge base and dress every default-branch commit since then up as the
+# crewmate's change. Branch existence is not the question; landedness is.
+test_landed_base_falls_back_to_default_with_warning() {
+  local case_dir out rc
+  case_dir=$(make_case landed-base)
+
+  git -C "$case_dir/wt" checkout -q -b feature/base origin/main
+  printf 'feature-base-work\n' > "$case_dir/wt/base-only.txt"
+  git -C "$case_dir/wt" add base-only.txt
+  git -C "$case_dir/wt" commit -qm "feature base work"
+  git -C "$case_dir/wt" push -q origin feature/base
+
+  # feature/base is squash-merged into main; the branch stays on origin. The crewmate's
+  # branch is what the pipeline leaves behind: its fix, rebased onto main.
+  git -C "$case_dir/wt" checkout -q fm/task-x1
+  git -C "$case_dir/wt" reset -q --hard origin/main
+  git -C "$case_dir/wt" merge -q --squash feature/base >/dev/null
+  git -C "$case_dir/wt" commit -qm "squash feature/base"
+  git -C "$case_dir/wt" push -q origin "fm/task-x1:main"
+  git -C "$case_dir/wt" fetch -q origin
+  git -C "$case_dir/wt" reset -q --hard origin/main
+  printf 'crew-fix\n' > "$case_dir/wt/fix.txt"
+  git -C "$case_dir/wt" add fix.txt
+  git -C "$case_dir/wt" commit -qm "the crewmate's fix"
+
+  write_task_meta "$case_dir" "base=feature/base"
+
+  set +e
+  out=$(run_review_diff "$case_dir" task-x1 2> "$case_dir/stderr")
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "landed-base: a merged base must not break the pre-merge review"
+  assert_contains "$out" 'diff base: origin/main' \
+    "landed-base: a base whose work is already in the default branch must not be the diff base"
+  assert_grep 'already merged' "$case_dir/stderr" \
+    "landed-base: the fallback must say why the declared base was not used"
+  assert_contains "$out" '+crew-fix' "landed-base: the crewmate's own change should still be shown"
+  assert_not_contains "$out" 'feature-base-work' \
+    "landed-base: the merged base's work is in main already and must not reappear as the crewmate's change"
+  pass "fm-review-diff falls back to the default branch when the declared base has already merged"
+}
+
+# The pre-retarget state firstmate actually reviews in, and the one every refusal from
+# fm-pr-check.sh sends the reader here to inspect: the base is live and unmerged, but
+# the no-mistakes pipeline has rebased the branch onto the default branch. The merge base
+# with the declared base is then the old fork point, so diffing against it would present
+# the whole default branch's history since the fork as the crewmate's change - exactly
+# the misleading diff a declared base exists to prevent, in the other direction. Firstmate
+# relays a summary of this diff to the captain, so the wrong content would reach them.
+test_unrooted_branch_falls_back_to_default_with_warning() {
+  local case_dir out rc
+  case_dir=$(make_case unrooted-branch)
+
+  git -C "$case_dir/wt" checkout -q -b feature/base origin/main
+  printf 'feature-base-work\n' > "$case_dir/wt/base-only.txt"
+  git -C "$case_dir/wt" add base-only.txt
+  git -C "$case_dir/wt" commit -qm "feature base work"
+  git -C "$case_dir/wt" push -q origin feature/base
+
+  # main moves on after the base forked, and the pipeline rebases the crewmate's branch
+  # onto main - carrying none of feature/base's unmerged history.
+  git -C "$case_dir/wt" checkout -q -b main-work origin/main
+  printf 'unrelated-main-work\n' > "$case_dir/wt/main-only.txt"
+  git -C "$case_dir/wt" add main-only.txt
+  git -C "$case_dir/wt" commit -qm "unrelated work on main"
+  git -C "$case_dir/wt" push -q origin main-work:main
+  git -C "$case_dir/wt" fetch -q origin
+  git -C "$case_dir/wt" checkout -q fm/task-x1
+  git -C "$case_dir/wt" reset -q --hard origin/main
+  printf 'crew-fix\n' > "$case_dir/wt/fix.txt"
+  git -C "$case_dir/wt" add fix.txt
+  git -C "$case_dir/wt" commit -qm "the crewmate's fix"
+
+  write_task_meta "$case_dir" "base=feature/base"
+
+  set +e
+  out=$(run_review_diff "$case_dir" task-x1 2> "$case_dir/stderr")
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "unrooted-branch: a rebased branch must not break the pre-merge review"
+  assert_contains "$out" 'diff base: origin/main' \
+    "unrooted-branch: a branch not rooted in the base's unmerged history must not be diffed against that base"
+  assert_grep 'not rooted' "$case_dir/stderr" \
+    "unrooted-branch: the fallback must say why the declared base was not used"
+  assert_contains "$out" '+crew-fix' "unrooted-branch: the crewmate's own change should be shown"
+  assert_not_contains "$out" 'unrelated-main-work' \
+    "unrooted-branch: the default branch's own history must not be dressed up as the crewmate's change"
+  pass "fm-review-diff falls back to the default branch when the branch under review was rebased off the declared base"
+}
+
 # A probe origin cannot ANSWER is not the same as a base that is gone: reviewing
 # against the wrong base silently would be worse than stopping.
 test_unreachable_origin_stops_instead_of_guessing() {
@@ -259,5 +367,7 @@ test_no_pr_meta_uses_local_branch
 test_unreachable_pr_head_falls_back_with_warning
 test_declared_base_is_the_diff_base
 test_deleted_base_falls_back_to_default_with_warning
+test_landed_base_falls_back_to_default_with_warning
+test_unrooted_branch_falls_back_to_default_with_warning
 test_unreachable_origin_stops_instead_of_guessing
 test_no_declared_base_still_diffs_against_default
