@@ -231,6 +231,49 @@ test_domain_alpha_stale_parent_event_does_not_become_current_work() {
   pass "Domain Alpha structured state overrides a stale parent Phase 7 event"
 }
 
+test_gnu_stat_uses_file_formats_without_bsd_fallback_pollution() {
+  local home mate fakebin canonical stat_log
+  home=$(make_home gnu-stat-parent)
+  mate="$TMP_ROOT/gnu-stat-home"
+  write_domain_alpha_fixture "$home" "$mate"
+  fakebin=$(make_fakebin "$home")
+  stat_log="$home/stat.log"
+  cat > "$fakebin/uname" <<'SH'
+#!/usr/bin/env bash
+printf 'Linux\n'
+SH
+  cat > "$fakebin/stat" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$STAT_LOG"
+case "$1 $2" in
+  '-c %a') printf '600\n' ;;
+  '-c %Y') printf '1783792800\n' ;;
+  '-c %s') LC_ALL=C wc -c < "$3" | tr -d ' ' ;;
+  -f\ *)
+    printf '  File: "%s"\nBlocks: Total: 1\n' "$2"
+    exit 1
+    ;;
+  *) exit 2 ;;
+esac
+SH
+  chmod +x "$fakebin/uname" "$fakebin/stat"
+  canonical=$(PATH="$fakebin:$PATH" STAT_LOG="$stat_log" FM_HOME="$home" \
+    FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z FM_SNAPSHOT_NOW_EPOCH=1783792800 \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --json)
+  printf '%s' "$canonical" | jq -e '
+    .secondmate_current.records[] | select(.id == "domain-alpha")
+    | .provenance.selected == "structured-home"
+      and .parent_event.activity_scan.available == true
+  ' >/dev/null || fail "GNU stat fixture corrupted the authoritative secondmate summary: $canonical"
+  assert_contains "$(cat "$stat_log")" '-c %a' "GNU registry mode must use stat -c"
+  assert_contains "$(cat "$stat_log")" '-c %Y' "GNU parent-event mtime must use stat -c"
+  assert_contains "$(cat "$stat_log")" '-c %s' "GNU parent-event size must use stat -c"
+  if grep -q '^-f ' "$stat_log"; then
+    fail "GNU snapshot invoked BSD stat -f before its GNU file reads: $(cat "$stat_log")"
+  fi
+  pass "GNU stat file reads select -c without BSD filesystem-report pollution"
+}
+
 test_parent_activity_evidence_is_bounded_and_disclosed() {
   local home mate fakebin canonical json i
   home=$(make_home bounded-parent-activity)
@@ -1154,6 +1197,7 @@ test_chat_contract_four_sections() {
 }
 
 test_domain_alpha_stale_parent_event_does_not_become_current_work
+test_gnu_stat_uses_file_formats_without_bsd_fallback_pollution
 test_parent_activity_evidence_is_bounded_and_disclosed
 test_active_child_overrides_old_parent_event
 test_structured_child_decision_reaches_captains_call

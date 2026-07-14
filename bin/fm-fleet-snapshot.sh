@@ -644,9 +644,17 @@ run_timed() {  # <seconds> <command...>
   fi
 }
 
-file_mtime_epoch() {  # <file>
-  stat -f '%m' "$1" 2>/dev/null || stat -c '%Y' "$1" 2>/dev/null || true
-}
+# GNU stat treats -f as a filesystem-report command, so a BSD-first fallback can
+# pollute arithmetic input before failing. Select the platform syntax once.
+if [ "$(uname 2>/dev/null || true)" = Darwin ]; then
+  SNAPSHOT_STAT_STYLE=bsd
+  file_mtime_epoch() { stat -f '%m' "$1" 2>/dev/null || true; }
+  file_mode_octal() { stat -f '%Lp' "$1" 2>/dev/null || true; }
+else
+  SNAPSHOT_STAT_STYLE=gnu
+  file_mtime_epoch() { stat -c '%Y' "$1" 2>/dev/null || true; }
+  file_mode_octal() { stat -c '%a' "$1" 2>/dev/null || true; }
+fi
 
 registry_secondmates_json() {
   local reg="$DATA/secondmates.md" out rc reason mode script parse_filter output_filter
@@ -655,7 +663,7 @@ registry_secondmates_json() {
       '{present:false,available:true,complete:true,reason:null,provenance:"registered-table",path:$path,freshness:{status:"fresh",observed_at:$observed},records:[],input_truncated:false,records_truncated:false,reasons:[],lines_in_window:0,records_in_window:0}'
     return 0
   fi
-  mode=$(stat -f '%Lp' "$reg" 2>/dev/null || stat -c '%a' "$reg" 2>/dev/null || true)
+  mode=$(file_mode_octal "$reg")
   if [ -z "$mode" ] || [ $((8#$mode & 0444)) -eq 0 ]; then
     jq -n --arg path "$reg" --arg observed "$SNAPSHOT_NOW" \
       --arg reason "registered secondmate table is unreadable" \
@@ -764,8 +772,13 @@ bounded_parent_activities_json() {  # <status-file>
     max_lines=$3
     max_bytes=$4
     max_records=$5
+    stat_style=$6
     . "$classify"
-    size=$(stat -f "%z" "$f" 2>/dev/null || stat -c "%s" "$f" 2>/dev/null) || exit 3
+    if [ "$stat_style" = bsd ]; then
+      size=$(stat -f "%z" "$f" 2>/dev/null) || exit 3
+    else
+      size=$(stat -c "%s" "$f" 2>/dev/null) || exit 3
+    fi
     content=$(LC_ALL=C tail -c "$max_bytes" "$f") || exit 3
     byte_truncated=false
     if [ "$size" -gt "$max_bytes" ]; then
@@ -818,7 +831,7 @@ BASH
   out=$(run_timed "$FM_SNAPSHOT_PARENT_ACTIVITY_TIMEOUT" bash -c "$script" \
     fm-parent-activities "$SCRIPT_DIR/fm-classify-lib.sh" "$f" \
     "$FM_SNAPSHOT_PARENT_ACTIVITY_LINES" "$FM_SNAPSHOT_PARENT_ACTIVITY_BYTES" \
-    "$FM_SNAPSHOT_PARENT_ACTIVITIES" 2>/dev/null)
+    "$FM_SNAPSHOT_PARENT_ACTIVITIES" "$SNAPSHOT_STAT_STYLE" 2>/dev/null)
   rc=$?
   if [ "$rc" -eq 0 ] && printf '%s' "$out" | jq -e '
     (.records | type) == "array" and (.available | type) == "boolean"
