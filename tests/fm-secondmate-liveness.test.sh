@@ -243,7 +243,7 @@ new_world() {
 # worktree; a non-git home just makes the unrelated fast-forward sweep log a
 # harmless "not a git repo" skip.
 add_sm_home() {
-  local w=$1 id=$2 window=$3 harness=${4:-claude}
+  local w=$1 id=$2 window=$3 harness=${4:-claude} permissions=${5:-}
   local home="$w/$id"
   mkdir -p "$home/bin" "$home/data" "$home/state" "$home/config" "$home/projects"
   printf '%s\n' "$id" > "$home/.fm-secondmate-home"
@@ -253,6 +253,7 @@ add_sm_home() {
     printf 'window=%s\n' "$window"
     printf 'kind=secondmate\n'
     printf 'harness=%s\n' "$harness"
+    [ -z "$permissions" ] || printf 'permissions=%s\n' "$permissions"
     printf 'home=%s\n' "$home"
   } > "$w/home/state/$id.meta"
 }
@@ -350,6 +351,23 @@ test_sweep_converges_no_retouch_once_alive() {
   pass "sweep: idempotent by construction - a live secondmate is never re-touched on a later run"
 }
 
+test_sweep_replays_recorded_unrestricted_permissions() {
+  local w fb tmuxfb log out
+  w=$(new_world sweep-unrestricted-replay)
+  printf 'pi\n' > "$w/home/config/secondmate-harness"
+  add_sm_home "$w" sm1 firstmate:fm-sm1 pi unrestricted
+  fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
+  log="$w/calls.log"; : > "$log"
+
+  out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" zsh "$log")
+
+  assert_contains "$out" "SECONDMATE_LIVENESS: secondmate sm1: respawned" \
+    "a recorded unrestricted secondmate should replay that approval during bootstrap recovery"
+  assert_contains "$(cat "$log")" "new-window" \
+    "replaying unrestricted permissions should relaunch the dead secondmate"
+  pass "sweep: bootstrap replays recorded unrestricted secondmate permissions"
+}
+
 test_sweep_skipped_under_detect_only() {
   local w fb tmuxfb log out
   w=$(new_world sweep-detect-only)
@@ -394,6 +412,7 @@ test_sweep_leaves_alive_secondmate_untouched
 test_sweep_never_acts_on_inconclusive_reading
 test_sweep_never_acts_on_unverified_harness_dead_reading
 test_sweep_converges_no_retouch_once_alive
+test_sweep_replays_recorded_unrestricted_permissions
 test_sweep_skipped_under_detect_only
 test_sweep_noop_with_no_secondmate_meta
 
