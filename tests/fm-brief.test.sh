@@ -261,8 +261,7 @@ test_pause_verb_override_renders_all_brief_scaffolds() {
 }
 
 # --base <branch> records the intended base to the data/<id>/base sidecar (which
-# fm-spawn.sh promotes into meta) and writes the base into the brief so the
-# crewmate/pipeline targets it instead of the repo default branch.
+# fm-spawn.sh promotes into meta) and roots the brief's branch step on that base.
 test_base_no_mistakes_records_sidecar_and_brief() {
   local home id brief
   home="$TMP_ROOT/base-nm-home"
@@ -275,9 +274,47 @@ test_base_no_mistakes_records_sidecar_and_brief() {
   assert_grep "feature/admin-dashboard" "$home/data/$id/base" "base-nm: sidecar missing the base branch name"
   assert_grep "**Base branch.** This task targets base branch \`feature/admin-dashboard\`" "$brief" \
     "base-nm: brief missing the Setup base note"
-  assert_grep "tell the run its base is \`feature/admin-dashboard\`" "$brief" \
-    "base-nm: no-mistakes DOD missing the tell-the-run-its-base instruction"
-  pass "fm-brief.sh: --base records the sidecar and stacks the no-mistakes brief on the base"
+  pass "fm-brief.sh: --base records the sidecar and adds the base note to the no-mistakes brief"
+}
+
+# The worktree starts on the DEFAULT branch, so a based task must be given the
+# actual commands to root fm/<id> on the intended base. Forbidding the wrong
+# outcome without supplying the command to avoid it is not an instruction.
+test_base_roots_branch_on_the_base() {
+  local home id brief
+  home="$TMP_ROOT/base-root-home"
+  mkdir -p "$home/data"
+  id="brief-base-root1"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --base feature/x >/dev/null 2>&1 \
+    || fail "base-root: fm-brief.sh --base should exit 0"
+  brief="$home/data/$id/brief.md"
+  assert_grep "git fetch origin feature/x" "$brief" \
+    "base-root: brief does not tell the crewmate to fetch the intended base"
+  assert_grep "git checkout -b fm/$id FETCH_HEAD" "$brief" \
+    "base-root: brief does not root the branch on the fetched base"
+  assert_no_grep "git checkout -b fm/$id\`" "$brief" \
+    "base-root: brief still carries the default-branch-rooted branch step"
+  pass "fm-brief.sh: --base roots the crewmate's branch on the intended base, not the default branch"
+}
+
+# The no-mistakes pipeline cannot be told a base: it always rebases onto the repo
+# default and opens the PR there. The brief must not ask for the impossible; it
+# must name the recovery that actually works (retarget the PR, pipeline re-rebases).
+test_base_no_mistakes_brief_documents_the_real_recovery() {
+  local home id brief
+  home="$TMP_ROOT/base-recovery-home"
+  mkdir -p "$home/data"
+  id="brief-base-rec1"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --base feature/x >/dev/null 2>&1 \
+    || fail "base-recovery: fm-brief.sh --base should exit 0"
+  brief="$home/data/$id/brief.md"
+  assert_no_grep "tell the run its base" "$brief" \
+    "base-recovery: brief still asks the crewmate to declare a base to the pipeline, which it cannot do"
+  assert_grep "gh-axi pr edit {n} --base feature/x" "$brief" \
+    "base-recovery: brief missing the PR retarget command"
+  assert_grep "re-rebases your branch onto \`feature/x\`" "$brief" \
+    "base-recovery: brief does not explain that the pipeline self-heals after the retarget"
+  pass "fm-brief.sh: the no-mistakes base brief documents the retarget recovery, not an impossible base flag"
 }
 
 # --base also form works, and the sidecar holds only the branch name on one line.
@@ -331,6 +368,45 @@ test_base_rejected_for_local_only() {
   pass "fm-brief.sh: --base is rejected for local-only projects"
 }
 
+# `--base` must not swallow the next flag as its value: `--base --scout` used to
+# record the branch name as "--scout" and silently drop the scout flag.
+test_base_rejects_a_flag_as_its_value() {
+  local home id status err
+  home="$TMP_ROOT/base-flagvalue-home"
+  mkdir -p "$home/data"
+  id="brief-base-flagvalue1"
+  err=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --base --scout 2>&1); status=$?
+  expect_code 1 "$status" "base-flagvalue: --base followed by a flag should be rejected, not consumed as the branch name"
+  assert_contains "$err" "requires a branch name" "base-flagvalue: refusal did not explain the missing value"
+  assert_absent "$home/data/$id/base" "base-flagvalue: a rejected --base must not leave a sidecar"
+  pass "fm-brief.sh: --base refuses to consume a following flag as its branch name"
+}
+
+# The base flows into `git fetch origin <base>` downstream, where a leading dash
+# would be parsed as an option rather than a refspec.
+test_base_rejects_dash_leading_and_invalid_names() {
+  local home status err
+  home="$TMP_ROOT/base-badname-home"
+  mkdir -p "$home/data"
+
+  err=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-base-dash1 some-proj --base=--upload-pack=touch 2>&1); status=$?
+  expect_code 1 "$status" "base-badname: a dash-leading base must be rejected"
+  assert_contains "$err" "must not begin with '-'" "base-badname: refusal did not explain the leading dash"
+  assert_absent "$home/data/brief-base-dash1/base" "base-badname: a rejected --base must not leave a sidecar"
+
+  err=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-base-bad2 some-proj --base='feature/..x' 2>&1); status=$?
+  expect_code 1 "$status" "base-badname: an invalid git branch name must be rejected"
+  assert_contains "$err" "not a valid git branch name" "base-badname: refusal did not explain the invalid ref name"
+  assert_absent "$home/data/brief-base-bad2/base" "base-badname: a rejected --base must not leave a sidecar"
+
+  err=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-base-empty3 some-proj --base= 2>&1); status=$?
+  expect_code 1 "$status" "base-badname: an empty base must be rejected"
+  assert_contains "$err" "non-empty branch name" "base-badname: refusal did not explain the empty value"
+  assert_absent "$home/data/brief-base-empty3/base" "base-badname: a rejected --base must not leave a sidecar"
+
+  pass "fm-brief.sh: --base rejects empty, dash-leading, and malformed branch names"
+}
+
 # Without --base the brief and directory are unchanged: no sidecar, no base note.
 test_no_base_leaves_brief_unchanged() {
   local home id brief
@@ -356,8 +432,12 @@ test_herdr_lab_contract_applies_to_scouts_but_not_secondmates
 test_secondmate_no_projects_charter
 test_pause_verb_override_renders_all_brief_scaffolds
 test_base_no_mistakes_records_sidecar_and_brief
+test_base_roots_branch_on_the_base
+test_base_no_mistakes_brief_documents_the_real_recovery
 test_base_equals_form_and_sidecar_shape
 test_base_direct_pr_targets_base
 test_base_rejected_for_scout
+test_base_rejects_a_flag_as_its_value
+test_base_rejects_dash_leading_and_invalid_names
 test_base_rejected_for_local_only
 test_no_base_leaves_brief_unchanged

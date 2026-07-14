@@ -451,6 +451,7 @@ A ship task's path from `done` to landed on `main` is set by the project's `mode
 
 When reviewing any crewmate branch diff, use `bin/fm-review-diff.sh <id>` rather than `git diff <default>...branch` directly.
 Pooled clones keep their local default refs frozen at clone time and can lag `origin`; the helper always compares against the authoritative base.
+When the task meta records a non-default `base=` (section 11's `--base`), the helper diffs against that base instead of the repo default, so review shows the crewmate's own change rather than the whole feature base's unmerged history stacked underneath it.
 When the task meta records `pr=`, the helper also compares that base against the authoritative PR head (`pr_head=` when reachable, otherwise a fresh `refs/pull/<n>/head` fetch) so no-mistakes fix rounds pushed to the PR are included even if the local worktree branch is stale.
 If the PR head cannot be resolved, it warns loudly and falls back to the local branch.
 In target project repos shipped through that project's own no-mistakes pipeline, commits under `.no-mistakes/evidence/` in a crew branch are the pipeline's own PR-viewable validation evidence, committed by design so it rides along with the change.
@@ -496,8 +497,12 @@ During the `ci` monitor phase, `bin/fm-crew-state.sh` also reads the ci step log
 
 For PR-based ship tasks, the ready signal depends on mode: `no-mistakes` reports `done: PR <url> checks green` after CI is green, while `direct-PR` reports `done: PR <url>` after opening the PR.
 Run `bin/fm-pr-check.sh <id> <PR url>` - it records `pr=` and GitHub's `pr_head=` when available in the task's meta and arms the watcher's merge poll.
-When the task declared a non-default intended base (section 11's `--base`, recorded as `base=` in meta), the check also refuses loudly before merge unless the PR head is stacked on that base AND the PR's base label targets it.
+When the task declared a non-default intended base (section 11's `--base`, recorded as `base=` in meta), the check also refuses loudly before merge unless the PR head is rooted in that base's unmerged history AND the PR's base label targets it.
 That catches both a head the pipeline rebased onto the default branch and a PR opened against the default branch, either of which would otherwise drag the feature base's unmerged commits into the default branch on merge.
+It deliberately does not require the head to descend from the base's current tip, so a stacked PR whose base simply advanced while it was under review still merges.
+The no-mistakes pipeline cannot be told a base: it always rebases onto the repo default branch and opens the PR there.
+So for a `no-mistakes` based task the PR opens against the default branch, and the fix is to retarget the PR's base to the intended branch with `gh-axi pr edit <n> --base <branch>`; the pipeline's monitor picks the new base up, re-rebases the branch onto it, and force-pushes a clean head, so nothing is rebuilt by hand.
+The guard's job is not to steer the pipeline but to make a wrong-based PR impossible to merge unnoticed, so a based task that never got retargeted blocks at the PR-ready check instead of landing feature-base commits on the default branch.
 Tell the captain: the PR's full URL (always the complete `https://...` link, never a bare `#number` - the captain's terminal makes a full URL clickable), a one-paragraph summary, and, for `no-mistakes`, the risk level it emitted.
 (The check contract, for any custom `state/<id>.check.sh` you write yourself: print one line only when firstmate should wake, print nothing otherwise, and finish before `FM_CHECK_TIMEOUT`.)
 
@@ -731,7 +736,8 @@ The ship-brief Setup opens with a worktree-isolation assertion ahead of the bran
 For a ship task the definition of done is shaped by the project's delivery mode (section 6): `no-mistakes` stops after the implementation commit, then firstmate triggers the harness-appropriate no-mistakes validation pipeline; `direct-PR` has the crewmate push and open the PR itself, and `local-only` has it stop at "ready in branch" for firstmate to review and merge locally.
 The no-mistakes brief points to no-mistakes' version-matched guidance and keeps only firstmate-specific wrapper rules for `ask-user` escalation, `--yes` avoidance, and the CI-green done line.
 The scaffold reads the mode via `fm-project-mode.sh`, so you do not pass it.
-For a PR-based ship task whose intended base is a non-default branch (a stacked feature-branch fix), pass `--base <branch>`: it records the base durably so the crewmate brief and pipeline target it, and the later PR-ready check asserts the PR head is stacked on that base rather than silently rebased onto the repo default (section 7); the flag mechanics live in the `fm-brief.sh` header.
+For a PR-based ship task whose intended base is a non-default branch (a stacked feature-branch fix), pass `--base <branch>`: it records the base durably, roots the crewmate's branch on it, and arms the PR-ready check that refuses a head rebased onto the repo default or a PR opened against it (section 7); the flag mechanics live in the `fm-brief.sh` header.
+A `direct-PR` crewmate opens the PR against the base itself, while a `no-mistakes` crewmate cannot, because the pipeline always rebases onto and opens against the repo default; its brief has it retarget the PR's base once the PR exists and let the pipeline's monitor re-rebase onto it.
 Ship briefs also include the project-memory contract: run `bin/fm-ensure-agents-md.sh` when the project already has agent-memory files or when the task produced durable project-intrinsic knowledge, then record proportionate learnings in `AGENTS.md`.
 For scout tasks add `--scout`: the scaffold swaps the definition of done for the report contract (findings to `data/<id>/report.md`, no branch, no push, no PR) and declares the worktree scratch; scout is mode-agnostic.
 Scout briefs do not include the project-memory step, because their deliverable is a report rather than a committed project change.

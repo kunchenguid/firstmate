@@ -2,12 +2,16 @@
 # Tests for bin/fm-review-diff.sh: when a task has an open PR recorded in meta,
 # the review diff must compare the authoritative base against the PR head, not a
 # stale local branch left behind after no-mistakes fix rounds push to the PR.
+# The base side is the repo default branch, unless the task declared a non-default
+# intended base (fm-brief.sh --base, recorded as base= in meta).
 #
 # Matrix:
 #   (a) pr= + reachable pr_head= -> diff uses PR head, not the lagging local branch
 #   (b) pr= without pr_head= -> fetch refs/pull/<n>/head and diff that
 #   (c) pr= absent -> unchanged worktree-branch diff
 #   (d) pr= present but PR head unreachable -> fallback to local branch + warning
+#   (e) base= present -> diff against that base, not the repo default
+#   (f) base= absent -> unchanged default-branch diff base
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -141,7 +145,56 @@ test_unreachable_pr_head_falls_back_with_warning() {
   pass "fm-review-diff falls back to local branch with a warning when PR head is unreachable"
 }
 
+# A task whose intended base is a feature branch (fm-brief.sh --base, recorded as
+# base= in meta) must be reviewed against THAT base. Diffing it against the repo
+# default would present the entire feature base's unmerged history as if it were
+# the crewmate's change - a misleading, potentially enormous diff at exactly the
+# moment firstmate decides whether to relay the PR.
+test_declared_base_is_the_diff_base() {
+  local case_dir out
+  case_dir=$(make_case declared-base)
+
+  # A feature base carrying its own unmerged work, then the crewmate's branch
+  # stacked on it carrying only the fix.
+  git -C "$case_dir/wt" checkout -q -b feature/base origin/main
+  printf 'feature-base-work\n' > "$case_dir/wt/base-only.txt"
+  git -C "$case_dir/wt" add base-only.txt
+  git -C "$case_dir/wt" commit -qm "feature base work"
+  git -C "$case_dir/wt" push -q origin feature/base
+  git -C "$case_dir/wt" checkout -q fm/task-x1
+  git -C "$case_dir/wt" reset -q --hard feature/base
+  printf 'crew-fix\n' > "$case_dir/wt/fix.txt"
+  git -C "$case_dir/wt" add fix.txt
+  git -C "$case_dir/wt" commit -qm "the crewmate's fix"
+
+  write_task_meta "$case_dir" "base=feature/base"
+
+  out=$(run_review_diff "$case_dir" task-x1 2> "$case_dir/stderr")
+
+  assert_contains "$out" 'diff base: origin/feature/base' \
+    "declared-base: the review should state the declared base as its diff base"
+  assert_contains "$out" '+crew-fix' "declared-base: diff should show the crewmate's own change"
+  assert_not_contains "$out" 'feature-base-work' \
+    "declared-base: diff must not present the feature base's unmerged history as the crewmate's change"
+  pass "fm-review-diff diffs a based task against its declared base, not the repo default"
+}
+
+test_no_declared_base_still_diffs_against_default() {
+  local case_dir out
+  case_dir=$(make_case no-declared-base)
+  stale_and_pr_commits "$case_dir"
+  write_task_meta "$case_dir"
+
+  out=$(run_review_diff "$case_dir" task-x1 2> "$case_dir/stderr")
+
+  assert_contains "$out" 'diff base: origin/main' \
+    "no-declared-base: a task without base= must keep diffing against the repo default"
+  pass "fm-review-diff without base= keeps the default-branch diff base"
+}
+
 test_pr_meta_uses_pr_head_not_stale_local
 test_pr_meta_fetches_pull_head_without_recorded_sha
 test_no_pr_meta_uses_local_branch
 test_unreachable_pr_head_falls_back_with_warning
+test_declared_base_is_the_diff_base
+test_no_declared_base_still_diffs_against_default

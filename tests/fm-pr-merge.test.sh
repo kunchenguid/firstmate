@@ -8,9 +8,12 @@
 # trigger never fires.
 #
 # fm-pr-check.sh additionally, when a non-default base= was declared for the task
-# (fm-brief.sh --base), asserts the PR head is STACKED on that intended base
-# before recording pr= or arming the merge poll - catching a feature-branch fix
-# that the pipeline rebased onto the repo default (data/learnings.md 2026-07-07).
+# (fm-brief.sh --base), asserts the PR head is ROOTED IN THAT BASE'S UNMERGED
+# HISTORY before recording pr= or arming the merge poll - catching a feature-branch
+# fix that the pipeline rebased onto the repo default (data/learnings.md
+# 2026-07-07). It deliberately does NOT require the head to descend from the base's
+# current tip, so a base that merely advanced after the head was stacked still
+# merges.
 #
 # Matrix (fm-pr-merge.sh):
 #   (a) merge records pr= and pr_head= before merging, and merges
@@ -21,12 +24,14 @@
 #   (f) malformed PR URL fails fast without calling gh-axi
 #   (g) explicit merge method is not overridden by the default --squash
 #   (h) repo override args fail fast because the repo comes from the URL
-# Matrix (fm-pr-check.sh stacked-on-base guard):
+# Matrix (fm-pr-check.sh based-on-base guard):
 #   (i) base= present, head stacked on the base AND base label matches -> records pr=, arms the poll
-#   (j) base= present, PR head rebased onto main -> refuses, no pr=, no poll
-#   (k) base= present but the base branch is unfetchable -> fail-closed refusal
-#   (l) no base= (the common case) -> unchanged: records pr= and arms the poll
-#   (m) base= present, head stacked but PR base label targets main -> refuses, no pr=, no poll
+#   (j) base= present, base ADVANCED after the head was stacked -> still allowed (merely behind, not wrong-based)
+#   (k) base= present, PR head rebased onto main -> refuses, no pr=, no poll
+#   (l) base= present, head stacked but PR base label targets main -> refuses, no pr=, no poll
+#   (m) base= present in the data/<id>/base sidecar but never promoted into meta -> refuses (no silent fail-open)
+#   (n) base= present but the base branch is unfetchable -> fail-closed refusal
+#   (o) no base= (the common case) -> unchanged: records pr= and arms the poll
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -313,11 +318,16 @@ test_parses_pr_url_for_gh_axi() {
 PR_CHECK="$ROOT/bin/fm-pr-check.sh"
 
 # Build a real git fixture: an origin with main, a feature/base branch stacked on
-# main, and a PR head (refs/pull/9/head) parented on either feature/base (stacked,
-# good) or main (rebased onto the wrong base). Echoes the case dir. The worktree
-# shares the project clone's origin remote, so fm-pr-check.sh can fetch both refs.
+# main, and a PR head (refs/pull/9/head) parented on either feature/base (correctly
+# based) or main (rebased onto the repo default - the incident). Echoes the case dir.
+# The worktree shares the project clone's origin remote, so fm-pr-check.sh can fetch
+# every ref it needs.
+#
+# advance_base=advance pushes a further commit onto feature/base AFTER the PR head
+# was stacked, so the head is correctly based but merely behind - the routine state
+# of a stacked PR whose own base is still under review, which must still merge.
 make_git_case() {
-  local name=$1 pr_parent=$2 base_label=${3:-main} case_dir
+  local name=$1 pr_parent=$2 base_label=${3:-main} advance_base=${4:-} case_dir
   case_dir="$TMP_ROOT/$name"
   mkdir -p "$case_dir/state" "$case_dir/fakebin"
 
@@ -346,18 +356,29 @@ make_git_case() {
     git add f.txt
     git commit -qm pr-fix
     git push -q origin prhead:refs/pull/9/head
+    if [ "$advance_base" = advance ]; then
+      git checkout -q feature/base
+      printf 'feature-2\n' >> f.txt
+      git add f.txt
+      git commit -qm feature-base-2
+      git push -q origin feature/base
+    fi
   )
   rm -rf "$case_dir/_seed"
 
   git clone -q "$case_dir/origin.git" "$case_dir/project"
+  git -C "$case_dir/project" remote set-head origin main 2>/dev/null || true
   git -C "$case_dir/project" worktree add -q -b fm/task-x1 "$case_dir/wt" main
 
-  # gh mock so the pr_head recording path runs and both the success-path base
-  # label check and the wrong-base diagnostic get a baseRefName; the stacking
-  # assertion itself uses fetched refs, not gh. The label is per-case configurable.
+  # gh mock so the pr_head recording path runs and the base-label check and the
+  # wrong-base diagnostic get a baseRefName; the based-on-base assertion itself uses
+  # fetched refs, not gh. fm-pr-check resolves both fields in ONE gh call, so the
+  # mock answers the combined query as TSV. The label is per-case configurable.
   cat > "$case_dir/fakebin/gh" <<SH
 #!/usr/bin/env bash
 case " \$* " in
+  *baseRefName*headRefOid*|*headRefOid*baseRefName*)
+    printf '%s\t%s\n' '$base_label' 1111111111111111111111111111111111111111 ;;
   *headRefOid*) printf '%s\n' 1111111111111111111111111111111111111111 ;;
   *baseRefName*) printf '%s\n' '$base_label' ;;
 esac
@@ -372,8 +393,16 @@ run_pr_check() {
   local case_dir=$1; shift
   FM_ROOT_OVERRIDE="$ROOT" \
   FM_STATE_OVERRIDE="$case_dir/state" \
+  FM_DATA_OVERRIDE="$case_dir/data" \
   PATH="$case_dir/fakebin:$PATH" \
     "$PR_CHECK" "$@"
+}
+
+# Write the data/<id>/base sidecar fm-brief.sh records and fm-spawn.sh promotes.
+write_base_sidecar() {
+  local case_dir=$1 id=$2 base=$3
+  mkdir -p "$case_dir/data/$id"
+  printf '%s\n' "$base" > "$case_dir/data/$id/base"
 }
 
 test_pr_check_accepts_stacked_base() {
@@ -471,6 +500,60 @@ test_pr_check_fail_closed_when_base_unfetchable() {
   pass "fm-pr-check fails closed when the declared base cannot be resolved"
 }
 
+# The base branch advanced after the PR head was stacked on it. The head is
+# correctly based - it carries feature/base's unmerged history - it is just behind
+# the base tip, which is the routine state of a stacked PR whose own base is still
+# under review. Refusing here would turn every ordinary base advance into a hard
+# merge refusal, so this MUST be allowed.
+test_pr_check_allows_base_advanced_since_head() {
+  local case_dir rc
+  case_dir=$(make_git_case baseadvanced feature feature/base advance)
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    "window=fm-task-x1" "worktree=$case_dir/wt" "project=$case_dir/project" \
+    "kind=ship" "mode=no-mistakes" "base=feature/base"
+
+  set +e
+  run_pr_check "$case_dir" task-x1 https://github.com/example/repo/pull/9 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "base-advanced: a head correctly based on a base that merely ADVANCED must not be refused"
+  assert_grep 'pr=https://github.com/example/repo/pull/9' "$case_dir/state/task-x1.meta" \
+    "base-advanced: pr= should be recorded for a correctly based PR whose base advanced"
+  assert_present "$case_dir/state/task-x1.check.sh" "base-advanced: the merge poll should be armed"
+  assert_no_grep 'not stacked on its intended base' "$case_dir/stderr" \
+    "base-advanced: a merely-behind head must not trip the guard"
+  pass "fm-pr-check allows a correctly based PR whose base advanced after the head was stacked"
+}
+
+# The sidecar -> meta promotion (fm-spawn.sh) is the one link that could disarm the
+# guard silently: with no base= in meta, the assertion would be skipped entirely and
+# a wrong-based PR would sail through. A sidecar that disagrees with meta must refuse.
+test_pr_check_refuses_when_sidecar_never_reached_meta() {
+  local case_dir rc
+  case_dir=$(make_git_case orphansidecar main)
+  write_base_sidecar "$case_dir" task-x1 feature/base
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    "window=fm-task-x1" "worktree=$case_dir/wt" "project=$case_dir/project" \
+    "kind=ship" "mode=no-mistakes"
+
+  set +e
+  run_pr_check "$case_dir" task-x1 https://github.com/example/repo/pull/9 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "orphan-sidecar: a declared base missing from meta must refuse, not silently skip the guard"
+  assert_grep 'never reached meta' "$case_dir/stderr" \
+    "orphan-sidecar: refusal did not explain the lost base declaration"
+  assert_no_grep 'pr=https://github.com/example/repo/pull/9' "$case_dir/state/task-x1.meta" \
+    "orphan-sidecar: an unguarded PR must not record pr= before merge"
+  assert_absent "$case_dir/state/task-x1.check.sh" \
+    "orphan-sidecar: an unguarded PR must not arm the merge poll"
+  pass "fm-pr-check refuses when a declared base sidecar never reached meta (no silent fail-open)"
+}
+
 test_pr_check_no_base_arms_normally() {
   local case_dir rc
   case_dir=$(make_git_case nobase feature)
@@ -503,7 +586,9 @@ test_explicit_merge_method_not_overridden
 test_method_equals_merge_method_not_overridden
 test_parses_pr_url_for_gh_axi
 test_pr_check_accepts_stacked_base
+test_pr_check_allows_base_advanced_since_head
 test_pr_check_refuses_wrong_base
 test_pr_check_refuses_wrong_base_label
+test_pr_check_refuses_when_sidecar_never_reached_meta
 test_pr_check_fail_closed_when_base_unfetchable
 test_pr_check_no_base_arms_normally

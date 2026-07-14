@@ -2,8 +2,12 @@
 # Review a crewmate branch against the authoritative base.
 #
 # Pooled project clones do not keep their local default branch current, so this
-# helper compares remote-backed projects against origin/<default> after fetching
-# the default branch, and local-only projects against the local default branch.
+# helper compares remote-backed projects against origin/<branch> after fetching
+# it, and local-only projects against the local branch.
+# The diff base is the repo default branch, unless state/<id>.meta records a
+# non-default base= (a task whose intended base is a feature branch, declared
+# with fm-brief.sh --base): then it is that base, so review shows the crewmate's
+# own change rather than the entire feature base's unmerged history on top of it.
 # When state/<id>.meta records pr= for an open PR, the compare side is the PR
 # head (recorded pr_head= when reachable, else refs/pull/<n>/head) so review
 # stays current after no-mistakes fix rounds push to the PR; if the PR head
@@ -115,13 +119,28 @@ if [ -n "$PR_URL" ]; then
   fi
 fi
 
+# A task that declared a non-default intended base is reviewed against that base;
+# diffing it against the repo default would present the whole feature base's
+# unmerged history as part of the crewmate's change.
+BASE_DECLARED=$(grep '^base=' "$META" | tail -1 | cut -d= -f2- || true)
+BASE_BRANCH=${BASE_DECLARED:-$DEFAULT}
+case "$BASE_BRANCH" in
+  -*) echo "error: task $ID records an invalid base='$BASE_BRANCH' (must not begin with '-')" >&2; exit 1 ;;
+esac
+
 if git -C "$PROJ" remote get-url origin >/dev/null 2>&1; then
   # Update the remote-tracking ref itself; a bare single-branch fetch can leave
-  # origin/<default> stale on some Git versions and only refresh FETCH_HEAD.
-  git -C "$WT" fetch origin "+refs/heads/$DEFAULT:refs/remotes/origin/$DEFAULT" --quiet
-  BASE="origin/$DEFAULT"
+  # origin/<branch> stale on some Git versions and only refresh FETCH_HEAD. The
+  # refspec is fully qualified so a dash-leading branch name cannot be read as an
+  # option.
+  if ! FETCH_ERR=$(git -C "$WT" fetch --quiet origin "+refs/heads/$BASE_BRANCH:refs/remotes/origin/$BASE_BRANCH" 2>&1); then
+    echo "error: cannot fetch base branch $BASE_BRANCH from origin for task $ID" >&2
+    [ -z "$FETCH_ERR" ] || printf '  git: %s\n' "$FETCH_ERR" >&2
+    exit 1
+  fi
+  BASE="origin/$BASE_BRANCH"
 else
-  BASE="$DEFAULT"
+  BASE="$BASE_BRANCH"
 fi
 
 git -C "$WT" rev-parse --verify --quiet "$BASE^{commit}" >/dev/null || { echo "error: base $BASE does not exist in $WT" >&2; exit 1; }

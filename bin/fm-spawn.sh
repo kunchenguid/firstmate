@@ -59,9 +59,11 @@
 #   git worktree root distinct from the primary project checkout.
 #   For a ship task, if data/<task-id>/base exists (written by fm-brief.sh --base),
 #   its branch name is recorded into meta as base=<branch> so fm-pr-check.sh can
-#   assert the PR head is stacked on that intended base before merge. Absent means
-#   the repo default branch is the base and the meta stays byte-identical to the
-#   pre-base default path (no base= line).
+#   assert the PR head is based on that intended base before merge. A sidecar that
+#   declares no branch refuses the spawn rather than recording no base=, because a
+#   lost declaration would silently disarm that guard. Absent means the repo
+#   default branch is the base and the meta stays byte-identical to the pre-base
+#   default path (no base= line).
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
@@ -1001,6 +1003,13 @@ fi
 BASE=
 if [ "$KIND" != secondmate ] && [ -f "$DATA/$ID/base" ]; then
   IFS= read -r BASE < "$DATA/$ID/base" || true
+  # This promotion is the one link that could silently disarm the guard: an
+  # unreadable sidecar would leave no base= in meta, and fm-pr-check would then
+  # skip the base assertion entirely. Refuse instead of spawning unguarded.
+  if [ -z "$BASE" ]; then
+    echo "error: $DATA/$ID/base exists but declares no branch, so the task's intended base cannot be recorded in meta and the PR-base guard would be silently skipped. Re-scaffold the brief with fm-brief.sh --base <branch>." >&2
+    exit 1
+  fi
 fi
 
 META_WINDOW=$T
