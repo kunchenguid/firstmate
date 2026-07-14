@@ -172,7 +172,8 @@ run_bootstrap_timeout_case() {
   (
     # shellcheck disable=SC2317,SC2329 # Exported and invoked by the bootstrap subprocess.
     sleep() {
-      local inc=${1:-1} tries
+      local inc tries
+      inc=${1:-1}
       if [ -n "${FM_FAKE_FLEET_SYNC_STARTED_MARKER:-}" ]; then
         tries=0
         while [ "$tries" -lt 100 ] && [ ! -e "$FM_FAKE_FLEET_SYNC_STARTED_MARKER" ]; do

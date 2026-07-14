@@ -101,7 +101,8 @@ fm_herdr_lab_prepare() { # <session>
     return 1
   }
   fm_herdr_lab_fleet_state "$name" > "$tripwire" || {
-    local rc=$?
+    local rc
+    rc=$?
     rm -f "$tripwire"
     return "$rc"
   }

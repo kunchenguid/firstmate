@@ -845,7 +845,8 @@ e2e_herdr() {
     rm -rf "$home_tmp" 2>/dev/null || true
   }
   fm_herdr_lab_prepare "$SESSION"
-  local prepare_rc=$?
+  local prepare_rc
+  prepare_rc=$?
   if [ "$prepare_rc" -eq 2 ]; then
     echo "skip: running default Herdr session required by the fleet-state tripwire (herdr e2e)"
     rm -rf "$home_tmp"
