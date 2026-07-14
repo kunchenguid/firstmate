@@ -74,6 +74,10 @@ FM_SNAPSHOT_PARENT_ACTIVITY_LINES=${FM_SNAPSHOT_PARENT_ACTIVITY_LINES:-256}
 FM_SNAPSHOT_PARENT_ACTIVITY_BYTES=${FM_SNAPSHOT_PARENT_ACTIVITY_BYTES:-65536}
 FM_SNAPSHOT_PARENT_ACTIVITIES=${FM_SNAPSHOT_PARENT_ACTIVITIES:-20}
 FM_SNAPSHOT_PARENT_ACTIVITY_TIMEOUT=${FM_SNAPSHOT_PARENT_ACTIVITY_TIMEOUT:-2}
+FM_SNAPSHOT_REGISTRY_LINES=${FM_SNAPSHOT_REGISTRY_LINES:-256}
+FM_SNAPSHOT_REGISTRY_BYTES=${FM_SNAPSHOT_REGISTRY_BYTES:-65536}
+FM_SNAPSHOT_REGISTRY_RECORDS=${FM_SNAPSHOT_REGISTRY_RECORDS:-40}
+FM_SNAPSHOT_REGISTRY_TIMEOUT=${FM_SNAPSHOT_REGISTRY_TIMEOUT:-2}
 validate_positive_bound() {  # <name> <value>
   case "$2" in
     ''|*[!0-9]*|0)
@@ -100,6 +104,10 @@ validate_positive_bound FM_SNAPSHOT_PARENT_ACTIVITY_LINES "$FM_SNAPSHOT_PARENT_A
 validate_positive_bound FM_SNAPSHOT_PARENT_ACTIVITY_BYTES "$FM_SNAPSHOT_PARENT_ACTIVITY_BYTES"
 validate_positive_bound FM_SNAPSHOT_PARENT_ACTIVITIES "$FM_SNAPSHOT_PARENT_ACTIVITIES"
 validate_positive_bound FM_SNAPSHOT_PARENT_ACTIVITY_TIMEOUT "$FM_SNAPSHOT_PARENT_ACTIVITY_TIMEOUT"
+validate_positive_bound FM_SNAPSHOT_REGISTRY_LINES "$FM_SNAPSHOT_REGISTRY_LINES"
+validate_positive_bound FM_SNAPSHOT_REGISTRY_BYTES "$FM_SNAPSHOT_REGISTRY_BYTES"
+validate_positive_bound FM_SNAPSHOT_REGISTRY_RECORDS "$FM_SNAPSHOT_REGISTRY_RECORDS"
+validate_positive_bound FM_SNAPSHOT_REGISTRY_TIMEOUT "$FM_SNAPSHOT_REGISTRY_TIMEOUT"
 
 # shellcheck source=bin/fm-backend.sh
 # shellcheck disable=SC1091
@@ -130,6 +138,9 @@ FM_SNAPSHOT_TERMINAL_TIMEOUT and never becomes canonical current state.
 Parent activity evidence uses FM_SNAPSHOT_PARENT_ACTIVITY_LINES,
 FM_SNAPSHOT_PARENT_ACTIVITY_BYTES, FM_SNAPSHOT_PARENT_ACTIVITIES, and
 FM_SNAPSHOT_PARENT_ACTIVITY_TIMEOUT, with truncation disclosed in the result.
+The registered secondmate table uses FM_SNAPSHOT_REGISTRY_LINES,
+FM_SNAPSHOT_REGISTRY_BYTES, FM_SNAPSHOT_REGISTRY_RECORDS, and
+FM_SNAPSHOT_REGISTRY_TIMEOUT, with unavailability and truncation disclosed.
 EOF
 }
 
@@ -529,26 +540,36 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
        | sort_by([(.completion.date // ""), .id]) | reverse) as $landed_all
     | ([ $tasks[] | select(.current_state.state == "unknown") ]) as $unknown_children
     | ([ $owned_in_flight[] | select(.id as $id | [$tasks[].id] | index($id) | not) ]) as $orphan_in_flight
-    | ([ $tasks[]
-         | select(.current_state.state == "working" or .current_state.state == "parked")
+    | ([ $owned_in_flight[] as $work
+         | $tasks[]
+         | select(.id == $work.id and (.current_state.state == "done" or .current_state.state == "failed"))
+         | {id,state:.current_state.state} ]) as $terminal_in_flight
+    | ([ $owned_in_flight[] as $work
+         | $tasks[]
+         | select(.id == $work.id and .current_state.state == "working")
          | {id,kind,state:.current_state.state,source:.current_state.source,
             doing:((.current_state.detail // "") | trunc(120))} ]) as $active_all
     | ([ $tasks[] as $t | ($t.hints.open_decisions // [])[]
          | {id:$t.id,key,verb,summary:(.summary | trunc(160))} ]) as $decisions_all
     | ([ $queued_all[] | select(.blocked_by != null)
          | {id:(.id | trunc(120)),title:(.title | trunc(90)),blocked_by:(.blocked_by | trunc(120)),reason:((.blocked_reason // "blocked") | trunc(120)),source:"backlog"} ]
-       + [ $tasks[]
-           | select(.current_state.state == "paused" or .current_state.state == "blocked")
+       + [ $owned_in_flight[] as $work
+           | $tasks[]
+           | select(.id == $work.id and (.current_state.state == "parked" or .current_state.state == "paused" or .current_state.state == "blocked"))
            | {id,title:((.backlog.title // .id) | trunc(90)),blocked_by:null,
               reason:((.current_state.detail // .current_state.state) | trunc(120)),source:"child-state"} ]) as $holds_all
     | ($backlog.present == true
        and ($unstructured_current | length) == 0
        and ($unknown_children | length) == 0
-       and ($orphan_in_flight | length) == 0) as $valid
+       and ($orphan_in_flight | length) == 0
+       and ($terminal_in_flight | length) == 0) as $valid
     | (if $backlog.present != true then "missing structured backlog"
        elif ($unstructured_current | length) > 0 then "unstructured current backlog row"
        elif ($unknown_children | length) > 0 then "child current state unavailable"
        elif ($orphan_in_flight | length) > 0 then "in-flight backlog item has no child metadata"
+       elif ($terminal_in_flight | length) > 0 then
+         "in-flight backlog item has terminal child state: " +
+         ($terminal_in_flight | map(.id + "=" + .state) | join(", "))
        else null end) as $reason
     | (if $valid | not then "unknown"
        elif any($decisions_all[]; .verb == "needs-decision") then "captain_decision"
@@ -617,28 +638,95 @@ file_mtime_epoch() {  # <file>
 }
 
 registry_secondmates_json() {
-  local reg="$DATA/secondmates.md"
+  local reg="$DATA/secondmates.md" out rc reason mode
   if [ ! -f "$reg" ]; then
-    jq -n '{present:false,readable:true,records:[]}'
+    jq -n --arg path "$reg" --arg observed "$SNAPSHOT_NOW" \
+      '{present:false,available:true,reason:null,provenance:"registered-table",path:$path,freshness:{status:"fresh",observed_at:$observed},records:[],input_truncated:false,records_truncated:false,reasons:[],lines_in_window:0,records_in_window:0}'
     return 0
   fi
-  if [ ! -r "$reg" ]; then
-    jq -n --arg reason "registered secondmate table is unreadable" \
-      '{present:true,readable:false,reason:$reason,records:[]}'
+  mode=$(stat -f '%Lp' "$reg" 2>/dev/null || stat -c '%a' "$reg" 2>/dev/null || true)
+  if [ -z "$mode" ] || [ $((8#$mode & 0444)) -eq 0 ]; then
+    jq -n --arg path "$reg" --arg observed "$SNAPSHOT_NOW" \
+      --arg reason "registered secondmate table is unreadable" \
+      '{present:true,available:false,reason:$reason,provenance:"registered-table",path:$path,freshness:{status:"unavailable",observed_at:$observed},records:[],input_truncated:false,records_truncated:false,reasons:[$reason],lines_in_window:0,records_in_window:0}'
     return 0
   fi
-  jq -Rn '
-    [ inputs
-      | select(startswith("- "))
-      | (capture("^- (?<id>[^[:space:]]+)")?) as $id
-      | select($id != null)
-      | (capture("\\(home:[[:space:]]*(?<home>[^;)]*);")?) as $home
-      | {id:$id.id,home:($home.home // null),registered:true,
-         registry_error:(if $home == null or ($home.home | length) == 0 then "registry entry has no home" else null end)}
-    ]
-    | group_by(.id)
-    | map(if length > 1 then .[0] + {registry_error:"duplicate secondmate id in registry"} else .[0] end)
-    | {present:true,readable:true,records:.}' < "$reg"
+  out=$(run_timed "$FM_SNAPSHOT_REGISTRY_TIMEOUT" bash -c '
+    f=$1
+    max_lines=$2
+    max_bytes=$3
+    max_records=$4
+    path=$5
+    observed=$6
+    parse_filter=$7
+    output_filter=$8
+    content=$(LC_ALL=C head -c "$((max_bytes + 1))" "$f") || exit 3
+    bytes=$(printf "%s" "$content" | LC_ALL=C wc -c | tr -d " ")
+    byte_truncated=false
+    if [ "$bytes" -gt "$max_bytes" ]; then
+      byte_truncated=true
+      content=$(printf "%s" "$content" | LC_ALL=C head -c "$max_bytes")
+      case "$content" in
+        *$'"'"'\n'"'"'*) content=${content%$'"'"'\n'"'"'*} ;;
+        *) content= ;;
+      esac
+    fi
+    if [ -n "$content" ]; then
+      lines=$(printf "%s\n" "$content" | awk "END {print NR}")
+    else
+      lines=0
+    fi
+    line_truncated=false
+    if [ "$lines" -gt "$max_lines" ]; then line_truncated=true; fi
+    window=$(printf "%s\n" "$content" | LC_ALL=C head -n "$max_lines") || exit 3
+    if [ -n "$window" ]; then
+      lines_in_window=$(printf "%s\n" "$window" | awk "END {print NR}")
+    else
+      lines_in_window=0
+    fi
+    records=$(printf "%s\n" "$window" | jq -Rn "$parse_filter") || exit 3
+    records_in_window=$(printf "%s" "$records" | jq "length") || exit 3
+    records_truncated=false
+    if [ "$records_in_window" -gt "$max_records" ]; then records_truncated=true; fi
+    printf "%s" "$records" | jq \
+      --arg path "$path" --arg observed "$observed" \
+      --argjson byte_truncated "$byte_truncated" \
+      --argjson line_truncated "$line_truncated" \
+      --argjson records_truncated "$records_truncated" \
+      --argjson lines_in_window "$lines_in_window" \
+      --argjson records_in_window "$records_in_window" \
+      --argjson max_records "$max_records" "$output_filter"
+  ' fm-secondmate-registry "$reg" "$FM_SNAPSHOT_REGISTRY_LINES" \
+    "$FM_SNAPSHOT_REGISTRY_BYTES" "$FM_SNAPSHOT_REGISTRY_RECORDS" "$reg" "$SNAPSHOT_NOW" '
+      [ inputs
+        | select(startswith("- "))
+        | (capture("^- (?<id>[^[:space:]]+)")?) as $id
+        | select($id != null)
+        | (capture("\\(home:[[:space:]]*(?<home>[^;)]*);")?) as $home
+        | {id:$id.id,home:($home.home // null),registered:true,
+           registry_error:(if $home == null or ($home.home | length) == 0 then "registry entry has no home" else null end)} ]
+      | group_by(.id)
+      | map(if length > 1 then .[0] + {registry_error:"duplicate secondmate id in registry"} else .[0] end)' '
+      {present:true,available:true,reason:null,provenance:"registered-table",path:$path,
+       freshness:{status:"fresh",observed_at:$observed},
+       records:(if length > $max_records then .[:$max_records] else . end),
+       input_truncated:($byte_truncated or $line_truncated),records_truncated:$records_truncated,
+       reasons:[
+         (if $byte_truncated then "byte_limit" else empty end),
+         (if $line_truncated then "line_limit" else empty end),
+         (if $records_truncated then "record_limit" else empty end)
+       ],lines_in_window:$lines_in_window,records_in_window:$records_in_window}' 2>/dev/null)
+  rc=$?
+  if [ "$rc" -eq 0 ] && printf '%s' "$out" | jq -e '
+    .available == true and (.records | type) == "array"
+  ' >/dev/null 2>&1; then
+    printf '%s' "$out"
+    return 0
+  fi
+  [ "$rc" -eq 124 ] && reason="registered secondmate table read timed out" \
+    || reason="registered secondmate table is unreadable"
+  jq -n --arg path "$reg" --arg observed "$SNAPSHOT_NOW" --arg reason "$reason" \
+    '{present:true,available:false,reason:$reason,provenance:"registered-table",path:$path,freshness:{status:"unavailable",observed_at:$observed},records:[],input_truncated:false,records_truncated:false,reasons:[$reason],lines_in_window:0,records_in_window:0}'
 }
 
 bounded_parent_activities_json() {  # <status-file>
@@ -862,9 +950,6 @@ secondmate_current_json() {  # <parent-tasks-json>
 
     if [ -z "$reason" ]; then
       state=$(printf '%s' "$summary" | jq -r '.state')
-      if printf '%s' "$decisions" | jq -e 'any(.[]; .verb == "needs-decision")' >/dev/null; then
-        state=captain_decision
-      fi
       if [ "$state" != active_child_work ] && [ "$(printf '%s' "$activities" | jq 'length')" -gt 0 ]; then
         terminal=$(terminal_evidence_json "$task" "$event_note" "$state")
       else
@@ -873,6 +958,7 @@ secondmate_current_json() {  # <parent-tasks-json>
       fi
       contradiction=false
       if [ "$state" != active_child_work ] && [ "$(printf '%s' "$activities" | jq 'length')" -gt 0 ]; then contradiction=true; fi
+      if [ "$state" != captain_decision ] && printf '%s' "$decisions" | jq -e 'any(.[]; .verb == "needs-decision")' >/dev/null; then contradiction=true; fi
       if printf '%s' "$terminal" | jq -e '.contradiction == true' >/dev/null; then contradiction=true; fi
       record=$(jq -n \
         --arg id "$id" --arg home "$home" --arg state "$state" --arg observed "$SNAPSHOT_NOW" \
@@ -884,9 +970,9 @@ secondmate_current_json() {  # <parent-tasks-json>
          provenance:{selected:"structured-home",structured_home:$home,parent_event_role:"historical-only"},
          freshness:{status:"fresh",observed_at:$observed,age_seconds:0},
          active_children:$summary.active_children,
-         decisions_open:($summary.decisions_open + ($decisions | map(. + {id:$id}))),holds:$summary.holds,queued:$summary.queued,
+         decisions_open:$summary.decisions_open,holds:$summary.holds,queued:$summary.queued,
          landed:$summary.landed,endpoints:$summary.endpoints,counts:$summary.counts,omitted:$summary.omitted,
-         parent_event:{raw:$event_raw,note:$event_note,age_seconds:$event_age,open_activities:$activities,activity_scan:$activity_scan},
+         parent_event:{raw:$event_raw,note:$event_note,age_seconds:$event_age,open_activities:$activities,open_decisions:$decisions,activity_scan:$activity_scan},
          terminal_evidence:$terminal,contradiction:$contradiction}')
     else
       if [ -n "$event_raw" ]; then
@@ -911,8 +997,8 @@ secondmate_current_json() {  # <parent-tasks-json>
          current:{state:"unknown",reason:$reason},
          provenance:{selected:$provenance,structured_home:($home | if . == "" then null else . end),parent_event_role:"fallback-only-not-current"},
          freshness:{status:$freshness,observed_at:$observed,age_seconds:$event_age},
-         active_children:[],decisions_open:($decisions | map(. + {id:$id})),holds:[],queued:[],landed:[],endpoints:[],counts:{active_children:0,decisions_open:($decisions|length),holds:0,queued:0,landed:0,endpoints:0},omitted:[],
-         parent_event:{raw:$event_raw,note:$event_note,age_seconds:$event_age,open_activities:$activities,activity_scan:$activity_scan},
+         active_children:[],decisions_open:[],holds:[],queued:[],landed:[],endpoints:[],counts:{active_children:0,decisions_open:0,holds:0,queued:0,landed:0,endpoints:0},omitted:[],
+         parent_event:{raw:$event_raw,note:$event_note,age_seconds:$event_age,open_activities:$activities,open_decisions:$decisions,activity_scan:$activity_scan},
          terminal_evidence:$terminal,contradiction:false}')
     fi
     records=$(jq -n --argjson records "$records" --argjson record "$record" '$records + [$record]')

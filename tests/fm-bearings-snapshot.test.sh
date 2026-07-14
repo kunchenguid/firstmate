@@ -144,9 +144,17 @@ EOF
   # secondmate home, never the main backlog, so landed-work views only see it via the
   # bounded cross-home Done roll-up.
   cat > "$mate/data/backlog.md" <<'EOF'
+## In flight
+- [ ] mate - Decide subscription order (repo: firstmate) (kind: ship) (since 2026-07-11)
+
 ## Done
 - [x] mate-landed - Secondmate-managed fix https://github.com/kunchenguid/firstmate/pull/50 (repo: firstmate) (kind: ship) (merged 2026-07-11)
 EOF
+  mkdir -p "$mate/projects/mate"
+  fm_write_meta "$mate/state/mate.meta" \
+    "window=firstmate:fm-mate" "worktree=$mate/projects/mate" "project=firstmate" \
+    "harness=codex" "kind=ship" "mode=no-mistakes"
+  printf 'needs-decision [key=race]: pick subscribe order\n' > "$mate/state/mate.status"
 }
 
 run() {  # <home> <fakebin> <args...>
@@ -455,6 +463,142 @@ test_secondmate_and_child_bounds_are_disclosed() {
       and ([.omitted[].surface] | any(test("secondmates showing|registered secondmates omitted")) | not)
   ' >/dev/null || fail "--all-secondmates did not expand the canonical and bearings bounds: $expanded"
   pass "secondmate and per-home child counts are bounded, disclosed, and explicitly expandable"
+}
+
+test_parent_decision_is_untrusted_contradiction_only() {
+  local home mate fakebin canonical json
+  home=$(make_home parent-decision-only)
+  mate="$TMP_ROOT/parent-decision-only-home"
+  make_valid_secondmate_home authority "$mate"
+  append_secondmate_registry "$home" authority "$mate"
+  fm_write_secondmate_meta "$home/state/authority.meta" "$mate" "firstmate:fm-authority" sample
+  printf 'needs-decision [key=stale]: old parent question\n' > "$home/state/authority.status"
+  fakebin=$(make_fakebin "$home")
+  canonical=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --json)
+  printf '%s' "$canonical" | jq -e '
+    .secondmate_current.records[] | select(.id == "authority")
+    | .current.state == "no_active_work"
+      and .decisions_open == []
+      and .contradiction == true
+      and (.parent_event.open_decisions | any(.key == "stale" and .verb == "needs-decision"))
+  ' >/dev/null || fail "parent decision crossed structured-home authority boundary: $canonical"
+  json=$(run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e '
+    (.secondmates | any(.[]; .id == "authority" and .state == "no_active_work" and .contradiction == true))
+      and (.decisions_open | any(.[]; .id == "authority") | not)
+  ' >/dev/null || fail "bearings promoted a stale parent decision: $json"
+  pass "parent decisions remain untrusted contradiction evidence"
+}
+
+test_nonprogressing_child_states_are_explicit() {
+  local home mate fakebin canonical
+  home=$(make_home child-state-classification)
+  mate="$TMP_ROOT/child-state-classification-home"
+  make_valid_secondmate_home states "$mate"
+  append_secondmate_registry "$home" states "$mate"
+  mkdir -p "$mate/projects/parked" "$mate/projects/done" "$mate/projects/failed"
+  cat > "$mate/data/backlog.md" <<'EOF'
+## In flight
+- [ ] parked - Parked child (repo: sample) (kind: ship) (since 2026-07-11)
+
+## Queued
+
+## Done
+EOF
+  fm_write_meta "$mate/state/parked.meta" \
+    "window=firstmate:fm-parked" "worktree=$mate/projects/parked" "project=sample" \
+    "harness=codex" "kind=ship" "mode=no-mistakes"
+  printf 'needs-decision [key=parked]: choose a route\n' > "$mate/state/parked.status"
+  fakebin=$(make_fakebin "$home")
+  canonical=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --json)
+  printf '%s' "$canonical" | jq -e '
+    .secondmate_current.records[] | select(.id == "states")
+    | .current.state == "captain_decision"
+      and .active_children == []
+      and (.holds | any(.id == "parked" and .source == "child-state"))
+  ' >/dev/null || fail "parked child was classified as active work: $canonical"
+  cat > "$mate/data/backlog.md" <<'EOF'
+## In flight
+- [ ] done - Done child still in flight (repo: sample) (kind: ship) (since 2026-07-11)
+- [ ] failed - Failed child still in flight (repo: sample) (kind: ship) (since 2026-07-11)
+
+## Queued
+
+## Done
+EOF
+  fm_write_meta "$mate/state/done.meta" \
+    "window=firstmate:fm-done" "worktree=$mate/projects/done" "project=sample" \
+    "harness=codex" "kind=ship" "mode=no-mistakes"
+  fm_write_meta "$mate/state/failed.meta" \
+    "window=firstmate:fm-failed" "worktree=$mate/projects/failed" "project=sample" \
+    "harness=codex" "kind=ship" "mode=no-mistakes"
+  printf 'done: complete\n' > "$mate/state/done.status"
+  printf 'failed: stopped\n' > "$mate/state/failed.status"
+  rm "$mate/state/parked.meta" "$mate/state/parked.status"
+  canonical=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --json)
+  printf '%s' "$canonical" | jq -e '
+    .secondmate_current.records[] | select(.id == "states")
+    | .current.state == "unknown"
+      and (.current.reason | contains("terminal child state"))
+      and (.current.reason | contains("done=done"))
+      and (.current.reason | contains("failed=failed"))
+  ' >/dev/null || fail "terminal in-flight child states were silently dropped: $canonical"
+  pass "nonprogressing child states are explicit and inconsistent terminal rows invalidate"
+}
+
+test_registry_unavailability_and_bounds_are_explicit() {
+  local home fakebin json canonical id mate
+  home=$(make_home registry-unavailable)
+  printf '%s\n' '- hidden - fixture (home: /hidden; scope: fixture; projects: sample; added 2026-07-11)' > "$home/data/secondmates.md"
+  chmod 000 "$home/data/secondmates.md"
+  fakebin=$(make_fakebin "$home")
+  json=$(run "$home" "$fakebin" --json)
+  chmod 600 "$home/data/secondmates.md"
+  printf '%s' "$json" | jq -e '
+    (.secondmates | any(.[]; .id == "(registry)" and .state == "unknown"
+      and .provenance == "registered-table" and .freshness == "unavailable"))
+      and (.omitted | any(.surface | contains("secondmate registry unavailable")))
+  ' >/dev/null || fail "unreadable registry disappeared from bearings: $json"
+  home=$(make_home registry-bounds)
+  : > "$home/data/secondmates.md"
+  for id in one two three; do
+    mate="$TMP_ROOT/registry-$id"
+    make_valid_secondmate_home "$id" "$mate"
+    append_secondmate_registry "$home" "$id" "$mate"
+  done
+  fakebin=$(make_fakebin "$home")
+  canonical=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
+    FM_SNAPSHOT_REGISTRY_RECORDS=2 "$ROOT/bin/fm-fleet-snapshot.sh" --json)
+  printf '%s' "$canonical" | jq -e '
+    .secondmate_current.registry
+    | .available == true and .provenance == "registered-table"
+      and .freshness.status == "fresh" and .records_truncated == true
+      and .records_in_window == 3 and (.records | length) == 2
+      and (.reasons | index("record_limit") != null)
+  ' >/dev/null || fail "registry record bound was not enforced or disclosed: $canonical"
+  canonical=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
+    FM_SNAPSHOT_REGISTRY_LINES=2 "$ROOT/bin/fm-fleet-snapshot.sh" --json)
+  printf '%s' "$canonical" | jq -e '
+    .secondmate_current.registry
+    | .input_truncated == true and .records_truncated == false
+      and .lines_in_window == 2 and (.records | length) == 2
+      and .reasons == ["line_limit"]
+  ' >/dev/null || fail "registry line bound was not enforced or disclosed: $canonical"
+  canonical=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
+    FM_SNAPSHOT_REGISTRY_BYTES=100 "$ROOT/bin/fm-fleet-snapshot.sh" --json)
+  printf '%s' "$canonical" | jq -e '
+    .secondmate_current.registry
+    | .input_truncated == true and (.reasons | index("byte_limit") != null)
+      and .records_in_window < 3
+  ' >/dev/null || fail "registry byte bound was not enforced or disclosed: $canonical"
+  json=$(FM_SNAPSHOT_REGISTRY_RECORDS=2 run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e '
+    .omitted | any(.surface == "secondmate registry records omitted by bounded read")
+  ' >/dev/null || fail "bearings omitted registry truncation disclosure: $json"
+  pass "registry unavailability and bounded truncation remain explicit"
 }
 
 test_current_landed_baseline_is_repeatable_and_prior_report_independent() {
@@ -881,6 +1025,9 @@ test_active_child_overrides_old_parent_event
 test_structured_child_decision_reaches_captains_call
 test_bad_secondmate_homes_never_revive_parent_work
 test_secondmate_and_child_bounds_are_disclosed
+test_parent_decision_is_untrusted_contradiction_only
+test_nonprogressing_child_states_are_explicit
+test_registry_unavailability_and_bounds_are_explicit
 test_current_landed_baseline_is_repeatable_and_prior_report_independent
 test_default_is_bounded_and_local_only
 test_toon_json_parity
