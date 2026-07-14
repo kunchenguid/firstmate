@@ -411,13 +411,16 @@ task_json_lines() {
     #     report POINTER, never as a reopened pending decision.
     # Secondmates are excluded from lifecycle clearing: they are persistent and
     # multiplex many concerns onto one stream, so activity on one concern must
-    # never clear another concern's keyed decision. A parked/blocked state, or a
+    # never clear another concern's keyed decision. A parked/paused/blocked state
+    # (paused includes fm-crew-state.sh's parked-run+declared-pause reconciliation,
+    # where the crew still holds the gate and its decision is still open), or a
     # non-authoritative status-log/none read on a still-live task, keeps the fold's
     # open decision surfacing.
     open_decisions_tsv=$(status_open_decisions "$status_log")
     if [ "$kind" != secondmate ] && \
        { { { [ "$current_source" = run-step ] || [ "$current_source" = pane ]; } \
-           && [ "$current_state" != parked ] && [ "$current_state" != blocked ]; } \
+           && [ "$current_state" != parked ] && [ "$current_state" != paused ] \
+           && [ "$current_state" != blocked ]; } \
          || { [ "$current_state" = "done" ] || [ "$current_state" = "failed" ]; }; }; then
       open_decisions_tsv=""
     fi

@@ -560,6 +560,60 @@ test_completed_scout_report_is_pointer_not_pending() {
   pass "a completed scout's stale decision surfaces as a report pointer, not pending"
 }
 
+# A run-step-sourced PAUSED state (fm-crew-state.sh's parked-run+declared-pause
+# reconciliation: the crew deliberately holds an ask-user gate while waiting on a
+# relayed captain decision) must NOT trigger the lifecycle clear: the crew has not
+# moved past the gate, so its keyed decision stays open and captain-visible.
+test_paused_gate_hold_keeps_open_decision() {
+  local home fakebin out
+  home=$(make_home paused-gate-hold)
+  fm_git_identity
+  mkdir -p "$home/projects/gate-hold"
+  git -C "$home/projects/gate-hold" init -q
+  git -C "$home/projects/gate-hold" commit -q --allow-empty -m init
+  git -C "$home/projects/gate-hold" checkout -q -b fm/gate-hold
+  fm_write_meta "$home/state/gate-hold.meta" \
+    "window=firstmate:fm-gate-hold" \
+    "worktree=$home/projects/gate-hold" \
+    "project=alpha" \
+    "harness=codex" \
+    "kind=ship" \
+    "mode=ship"
+  printf 'needs-decision [key=gate-hold]: approve product behavior change\n' > "$home/state/gate-hold.status"
+  printf 'paused: holding review gate for captain decision\n' >> "$home/state/gate-hold.status"
+  fakebin=$(make_fakebin "$home")
+  cat > "$fakebin/no-mistakes" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ "${1:-}" = axi ] && [ "${2:-}" = status ]; then
+  cat <<'TOON'
+run:
+  id: "01RUN"
+  branch: fm/gate-hold
+  status: awaiting_approval
+  awaiting_agent: parked 2m10s
+  head: "abc1234"
+  pr: ""
+  findings[1]{id,severity,file,line,action,description}:
+    r1,error,b.go,,ask-user,changes product behavior
+gate: review
+TOON
+fi
+exit 0
+SH
+  chmod +x "$fakebin/no-mistakes"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json)
+  printf '%s' "$out" | jq -e '
+    .tasks[] | select(.id == "gate-hold")
+    | .current_state.state == "paused"
+      and .current_state.source == "run-step"
+      and .hints.pending_decision == true
+      and (.hints.open_decisions | length) == 1
+      and .hints.open_decisions[0].key == "gate-hold"
+  ' >/dev/null || fail "a paused gate hold must keep its open decision captain-visible: $out"
+  pass "a run-step paused gate hold keeps its keyed decision open"
+}
+
 # The complementary safety property: a scout still PARKED at a decision (its last
 # event is the needs-decision, it has not finished) DOES stay pending. The terminal
 # clear must not over-fire on a live, undecided scout.
@@ -594,6 +648,7 @@ test_secondmate_open_decision_survives_live_endpoint
 test_open_decision_transfers_to_captain_hold
 test_open_decision_clears_on_keyed_resolution
 test_completed_scout_report_is_pointer_not_pending
+test_paused_gate_hold_keeps_open_decision
 test_parked_scout_decision_stays_pending
 test_scout_reports_include_teardown_reports
 test_backlog_tasks_axi_forms_and_overrides
