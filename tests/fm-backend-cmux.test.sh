@@ -105,44 +105,15 @@ cmux_read_screen_response() {  # <dir> <n> <text>
   jq -n --arg t "$3" '{text:$t}' > "$1/responses/$2.out"
 }
 
-# Both halves of the shared home-tag come from the SAME home ($FM_HOME), so
-# these take one home and hash exactly it.
-cmux_expected_home_hash() {  # <home>
-  local home real
-  home=$1
-  real=$(cd "$home" && pwd -P) || return 1
-  if command -v shasum >/dev/null 2>&1; then
-    printf '%s' "$real" | shasum -a 256 | awk '{print substr($1,1,8)}'
-  elif command -v sha256sum >/dev/null 2>&1; then
-    printf '%s' "$real" | sha256sum | awk '{print substr($1,1,8)}'
-  else
-    printf '%s' "$real" | cksum | awk '{printf "%08x", $1}'
-  fi
-}
-
-cmux_expected_home_label() {  # [home]
-  local home=${1:-$ROOT} marker id prefix
-  marker="$home/.fm-secondmate-home"
-  if [ -f "$marker" ]; then
-    id=$(tr -d '[:space:]' < "$marker" 2>/dev/null)
-    if [ -n "$id" ]; then
-      prefix="2ndmate-$id"
-    else
-      prefix="firstmate"
-    fi
-  else
-    prefix="firstmate"
-  fi
-  printf '%s-%s' "$prefix" "$(cmux_expected_home_hash "$home")"
-}
-
+# The home-tag half of the title comes from tests/lib.sh's shared
+# fm_test_expected_hometag; only cmux's own title shape is built here.
 cmux_expected_scoped_title() {  # <fm-task-label> [home]
   local label=$1 home=${2:-$ROOT} rest
   case "$label" in
     fm-*) rest=${label#fm-} ;;
     *) rest=$label ;;
   esac
-  printf 'fm-%s-%s' "$(cmux_expected_home_label "$home")" "$rest"
+  printf 'fm-%s-%s' "$(fm_test_expected_hometag "$home")" "$rest"
 }
 
 cmux_assert_call_order() {

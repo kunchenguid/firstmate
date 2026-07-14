@@ -102,47 +102,18 @@ zellij_multi_tab_response() {  # <dir> <n> <tab1> <name1> [<tab2> <name2> ...]
   printf '%s' "$json" > "$dir/responses/$n.out"
 }
 
-# zellij_expected_home_label / zellij_expected_scoped_title: bash-only
-# reimplementations of fm_backend_zellij_home_label/scoped_title (mirroring
-# tests/fm-backend-cmux.test.sh's identical cmux_expected_* helpers), used to
-# build canned fixtures for the home-scoped tab titles this adapter now
-# creates and matches.
-zellij_expected_home_hash() {  # <home>
-  local home real
-  home=$1
-  real=$(cd "$home" && pwd -P) || return 1
-  if command -v shasum >/dev/null 2>&1; then
-    printf '%s' "$real" | shasum -a 256 | awk '{print substr($1,1,8)}'
-  elif command -v sha256sum >/dev/null 2>&1; then
-    printf '%s' "$real" | sha256sum | awk '{print substr($1,1,8)}'
-  else
-    printf '%s' "$real" | cksum | awk '{printf "%08x", $1}'
-  fi
-}
-
-zellij_expected_home_label() {  # [home]
-  local home=${1:-$ROOT} marker id prefix
-  marker="$home/.fm-secondmate-home"
-  if [ -f "$marker" ]; then
-    id=$(tr -d '[:space:]' < "$marker" 2>/dev/null)
-    if [ -n "$id" ]; then
-      prefix="2ndmate-$id"
-    else
-      prefix="firstmate"
-    fi
-  else
-    prefix="firstmate"
-  fi
-  printf '%s-%s' "$prefix" "$(zellij_expected_home_hash "$home")"
-}
-
+# zellij_expected_scoped_title: a bash-only reimplementation of
+# fm_backend_zellij_scoped_title, used to build canned fixtures for the
+# home-scoped tab titles this adapter creates and matches. The home-tag half
+# comes from tests/lib.sh's shared fm_test_expected_hometag; only zellij's own
+# title shape is built here.
 zellij_expected_scoped_title() {  # <fm-task-label> [home]
   local label=$1 home=${2:-$ROOT} rest
   case "$label" in
     fm-*) rest=${label#fm-} ;;
     *) rest=$label ;;
   esac
-  printf 'fm-%s-%s' "$(zellij_expected_home_label "$home")" "$rest"
+  printf 'fm-%s-%s' "$(fm_test_expected_hometag "$home")" "$rest"
 }
 
 # --- version_check / tool_check ----------------------------------------------

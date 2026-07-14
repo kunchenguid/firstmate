@@ -32,19 +32,10 @@ hometag() {  # <home> [root]
   ( FM_HOME="$home"; FM_ROOT="$root"; . "$ROOT/bin/fm-backend-hometag-lib.sh"; fm_backend_hometag )
 }
 
-# path_hash <path>: the same short hash the lib computes, reimplemented in
-# bash so expectations are not path-dependent hardcodes.
-path_hash() {  # <path>
-  local real
-  real=$(cd "$1" && pwd -P) || return 1
-  if command -v shasum >/dev/null 2>&1; then
-    printf '%s' "$real" | shasum -a 256 | awk '{print substr($1,1,8)}'
-  elif command -v sha256sum >/dev/null 2>&1; then
-    printf '%s' "$real" | sha256sum | awk '{print substr($1,1,8)}'
-  else
-    printf '%s' "$real" | cksum | awk '{printf "%08x", $1}'
-  fi
-}
+# The hash half of an expected tag comes from tests/lib.sh's shared
+# fm_test_expected_home_hash. These cases spell the prefix out literally next to
+# it rather than using fm_test_expected_hometag, because the contract under test
+# is precisely that the prefix and the hash name the SAME home.
 
 # --- the cross-home regression: prefix and hash must name the SAME home -------
 
@@ -56,9 +47,9 @@ test_cross_home_prefix_and_hash_agree_for_a_secondmate() {
   # FM_HOME names the secondmate home; FM_ROOT names a DIFFERENT installation,
   # as it does whenever one home's operation runs through another repo's bin/.
   out=$(hometag "$home" "$other")
-  [ "$out" = "2ndmate-sshhip-h7-$(path_hash "$home")" ] \
+  [ "$out" = "2ndmate-sshhip-h7-$(fm_test_expected_home_hash "$home")" ] \
     || fail "a cross-home invocation must hash the home FM_HOME names, got '$out'"
-  [ "$out" != "2ndmate-sshhip-h7-$(path_hash "$other")" ] \
+  [ "$out" != "2ndmate-sshhip-h7-$(fm_test_expected_home_hash "$other")" ] \
     || fail "the tag must not carry the FM_ROOT installation's hash under a secondmate prefix"
   pass "fm_backend_hometag: a cross-home invocation's prefix and hash both name FM_HOME's home"
 }
@@ -86,7 +77,7 @@ test_wellformed_home_hashes_its_own_path() {
   # repo root). This is every real installation, and its tag is unchanged from
   # the earlier FM_ROOT-hashed derivation.
   out=$(hometag "$home" "$home")
-  [ "$out" = "firstmate-$(path_hash "$home")" ] \
+  [ "$out" = "firstmate-$(fm_test_expected_home_hash "$home")" ] \
     || fail "a well-formed primary home should resolve to 'firstmate-<own-path-hash>', got '$out'"
   pass "fm_backend_hometag: a well-formed home (FM_HOME = FM_ROOT) hashes its own path, unchanged"
 }
@@ -95,7 +86,7 @@ test_absent_fm_home_falls_back_to_fm_root() {
   local root out
   root="$TMP_ROOT/fallback-root"; mkdir -p "$root"
   out=$( FM_HOME='' FM_ROOT="$root" bash -c '. "$0/bin/fm-backend-hometag-lib.sh"; fm_backend_hometag' "$ROOT" )
-  [ "$out" = "firstmate-$(path_hash "$root")" ] \
+  [ "$out" = "firstmate-$(fm_test_expected_home_hash "$root")" ] \
     || fail "an unset FM_HOME should fall back to FM_ROOT, got '$out'"
   pass "fm_backend_hometag: an empty FM_HOME falls back to FM_ROOT for both prefix and hash"
 }
@@ -120,11 +111,11 @@ test_secondmate_marker_drives_the_prefix() {
   home="$TMP_ROOT/marker-prefix"; mkdir -p "$home"
   printf '  alpha-a1  \n\n' > "$home/.fm-secondmate-home"
   out=$(hometag "$home" "$home")
-  [ "$out" = "2ndmate-alpha-a1-$(path_hash "$home")" ] \
+  [ "$out" = "2ndmate-alpha-a1-$(fm_test_expected_home_hash "$home")" ] \
     || fail "a secondmate home should resolve to '2ndmate-<id>-<hash>' with the id trimmed, got '$out'"
   : > "$home/.fm-secondmate-home"
   out=$(hometag "$home" "$home")
-  [ "$out" = "firstmate-$(path_hash "$home")" ] \
+  [ "$out" = "firstmate-$(fm_test_expected_home_hash "$home")" ] \
     || fail "an empty marker should fall back to the primary prefix, got '$out'"
   pass "fm_backend_hometag: the .fm-secondmate-home marker drives the prefix and empty falls back to primary"
 }

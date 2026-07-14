@@ -169,6 +169,50 @@ fm_write_secondmate_meta() {
     "projects=$projects"
 }
 
+# --- backend home-tag expectations ------------------------------------------
+
+# fm_test_expected_home_hash / fm_test_expected_hometag: bash reimplementations
+# of the shared per-home tag derivation (bin/fm-backend-hometag-lib.sh), used to
+# build fixtures and expected values for the home-scoped names cmux and zellij
+# give their tab titles and herdr gives its workspace label.
+#
+# Reimplemented here rather than sourced from the lib ON PURPOSE: an expectation
+# computed by calling the function under test asserts nothing. Keep it that way.
+# This is the ONE owner of that reimplementation - the cmux, zellij, herdr, and
+# hometag-lib suites all call it - so a change to the hash length, algorithm, or
+# fallback order cannot silently drift across four copies.
+
+# fm_test_expected_home_hash <home>: the short hash of <home>'s resolved path.
+fm_test_expected_home_hash() {  # <home>
+  local real
+  real=$(cd "$1" && pwd -P) || return 1
+  if command -v shasum >/dev/null 2>&1; then
+    printf '%s' "$real" | shasum -a 256 | awk '{print substr($1,1,8)}'
+  elif command -v sha256sum >/dev/null 2>&1; then
+    printf '%s' "$real" | sha256sum | awk '{print substr($1,1,8)}'
+  else
+    printf '%s' "$real" | cksum | awk '{printf "%08x", $1}'
+  fi
+}
+
+# fm_test_expected_hometag [home]: the full tag - readable prefix plus hash.
+# Both halves come from the SAME home, as the lib's contract requires.
+fm_test_expected_hometag() {  # [home]
+  local home=${1:-$ROOT} marker id prefix
+  marker="$home/.fm-secondmate-home"
+  if [ -f "$marker" ]; then
+    id=$(tr -d '[:space:]' < "$marker" 2>/dev/null)
+    if [ -n "$id" ]; then
+      prefix="2ndmate-$id"
+    else
+      prefix="firstmate"
+    fi
+  else
+    prefix="firstmate"
+  fi
+  printf '%s-%s' "$prefix" "$(fm_test_expected_home_hash "$home")"
+}
+
 # --- common assertions ------------------------------------------------------
 
 # assert_contains <haystack> <needle> <msg>
