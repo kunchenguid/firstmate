@@ -3,7 +3,7 @@
 # versions. Legacy check files are never run, sourced, or parsed by Bash.
 # Canonical polls are rebuilt from validated metadata; every other task poll is
 # quarantined for private review. The X-mode shim is preserved by its fixed name.
-# Usage: fm-pr-check-migrate.sh
+# Usage: fm-pr-check-migrate.sh [--checks-safe]
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -15,11 +15,16 @@ LOG="$STATE/.pr-check-migration.log"
 QUARANTINE="$STATE/.pr-check-quarantine"
 MARKER="$STATE/.pr-check-migration-v1"
 MARKER_VALUE=fm-pr-check-migration-v1
+SCAN_MARKER="$STATE/.pr-check-migration-scan-v1"
+SCAN_MARKER_VALUE=fm-pr-check-migration-scan-v1
 WATCH="$SCRIPT_DIR/fm-watch.sh"
 WATCH_LOCK="$STATE/.watch.lock"
 NONCANONICAL_PREFIX=_noncanonical
 
-if [ "$#" -ne 0 ]; then
+ALLOW_INCOMPLETE_REPAIRS=0
+if [ "$#" -eq 1 ] && [ "$1" = --checks-safe ]; then
+  ALLOW_INCOMPLETE_REPAIRS=1
+elif [ "$#" -ne 0 ]; then
   echo "error: invalid PR check migration request" >&2
   exit 2
 fi
@@ -51,6 +56,28 @@ migration_marker_content_valid() {
   [ "$value" = "$MARKER_VALUE" ]
 }
 
+scan_marker_content_valid() {
+  local file=$1 value
+  { exec 7< "$file"; } 2>/dev/null || return 1
+  IFS= read -r value <&7 || { exec 7<&-; return 1; }
+  if IFS= read -r _extra <&7; then
+    exec 7<&-
+    return 1
+  fi
+  exec 7<&-
+  [ "$value" = "$SCAN_MARKER_VALUE" ]
+}
+
+scan_complete() {
+  local state_device
+  [ -d "$STATE" ] && [ ! -L "$STATE" ] || return 1
+  state_device=$(fm_pr_file_device "$STATE") || return 1
+  [ -f "$SCAN_MARKER" ] && [ ! -L "$SCAN_MARKER" ] || return 1
+  [ "$(fm_pr_file_mode "$SCAN_MARKER")" = 600 ] || return 1
+  [ "$(fm_pr_file_device "$SCAN_MARKER")" = "$state_device" ] || return 1
+  scan_marker_content_valid "$SCAN_MARKER"
+}
+
 migration_complete() {
   local state_device obligation
   [ -d "$STATE" ] && [ ! -L "$STATE" ] || return 1
@@ -72,6 +99,7 @@ migration_complete() {
 # boundary. When it is absent or invalid, watcher exclusion comes before every
 # check scan and before any marker or diagnostic publication.
 migration_complete && exit 0
+[ "$ALLOW_INCOMPLETE_REPAIRS" -eq 1 ] && scan_complete && exit 0
 
 # shellcheck source=bin/fm-wake-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-wake-lib.sh"
@@ -120,6 +148,7 @@ if [ "$lock_held" -ne 1 ]; then
 fi
 
 MIGRATION_MARKER_TMP=
+MIGRATION_SCAN_MARKER_TMP=
 MIGRATION_LOG_TMP=
 MIGRATION_OBLIGATION_TMP=
 MIGRATION_QUARANTINE_TMP=
@@ -129,6 +158,7 @@ migration_cleanup() {
   [ -z "$MIGRATION_OBLIGATION_TMP" ] || rm -f -- "$MIGRATION_OBLIGATION_TMP"
   [ -z "$MIGRATION_LOG_TMP" ] || rm -f -- "$MIGRATION_LOG_TMP"
   [ -z "$MIGRATION_MARKER_TMP" ] || rm -f -- "$MIGRATION_MARKER_TMP"
+  [ -z "$MIGRATION_SCAN_MARKER_TMP" ] || rm -f -- "$MIGRATION_SCAN_MARKER_TMP"
   [ "$lock_held" -ne 1 ] || fm_lock_release "$WATCH_LOCK"
 }
 trap migration_cleanup EXIT
@@ -147,6 +177,10 @@ if [ -f "$MARKER" ] && [ ! -L "$MARKER" ]; then
   rm -f -- "$MARKER" || exit 1
   [ ! -e "$MARKER" ] && [ ! -L "$MARKER" ] || exit 1
 fi
+if [ -f "$SCAN_MARKER" ] && [ ! -L "$SCAN_MARKER" ]; then
+  rm -f -- "$SCAN_MARKER" || exit 1
+  [ ! -e "$SCAN_MARKER" ] && [ ! -L "$SCAN_MARKER" ] || exit 1
+fi
 migration_needed() {
   local check id
   for check in "$STATE"/*.check.sh; do
@@ -158,6 +192,16 @@ migration_needed() {
     fi
   done
   return 1
+}
+
+unsafe_checks_absent() {
+  local check id
+  for check in "$STATE"/*.check.sh; do
+    [ -e "$check" ] || [ -L "$check" ] || continue
+    [ "$(basename "$check")" = x-watch.check.sh ] && continue
+    id=$(basename "$check" .check.sh)
+    fm_pr_poll_artifacts_valid "$STATE" "$id" "$TEMPLATE" || return 1
+  done
 }
 
 revoke_migration_marker() {
@@ -183,6 +227,33 @@ publish_migration_marker() {
   MIGRATION_MARKER_TMP=
   if ! migration_complete; then
     revoke_migration_marker || true
+    return 1
+  fi
+}
+
+revoke_scan_marker() {
+  if [ -e "$SCAN_MARKER" ] || [ -L "$SCAN_MARKER" ]; then
+    rm -f -- "$SCAN_MARKER" || return 1
+  fi
+  [ ! -e "$SCAN_MARKER" ] && [ ! -L "$SCAN_MARKER" ]
+}
+
+publish_scan_marker() {
+  fm_pr_regular_destination_on_device_or_absent "$SCAN_MARKER" "$STATE_DEVICE" || return 1
+  MIGRATION_SCAN_MARKER_TMP=$(mktemp "$STATE/.fm-pr-check-scan.XXXXXX") || return 1
+  [ -f "$MIGRATION_SCAN_MARKER_TMP" ] && [ ! -L "$MIGRATION_SCAN_MARKER_TMP" ] || return 1
+  [ "$(fm_pr_file_device "$MIGRATION_SCAN_MARKER_TMP")" = "$STATE_DEVICE" ] || return 1
+  printf '%s\n' "$SCAN_MARKER_VALUE" > "$MIGRATION_SCAN_MARKER_TMP" || return 1
+  chmod 0600 "$MIGRATION_SCAN_MARKER_TMP" || return 1
+  scan_marker_content_valid "$MIGRATION_SCAN_MARKER_TMP" || return 1
+  fm_pr_regular_destination_on_device_or_absent "$SCAN_MARKER" "$STATE_DEVICE" || return 1
+  if ! mv -f -- "$MIGRATION_SCAN_MARKER_TMP" "$SCAN_MARKER"; then
+    revoke_scan_marker || true
+    return 1
+  fi
+  MIGRATION_SCAN_MARKER_TMP=
+  if ! scan_complete; then
+    revoke_scan_marker || true
     return 1
   fi
 }
@@ -752,11 +823,22 @@ if ! pending_outcomes_complete || ! failure_obligations_absent; then
   migration_failed=1
 fi
 
-if [ "$migration_failed" -eq 0 ]; then
+scan_safe=0
+if [ "$diagnostics_failed" -eq 0 ] && unsafe_checks_absent && publish_scan_marker; then
+  scan_safe=1
+else
+  revoke_scan_marker || true
+  migration_failed=1
+fi
+
+if [ "$migration_failed" -eq 0 ] && [ "$scan_safe" -eq 1 ]; then
   publish_migration_marker || migration_failed=1
 fi
 
 if [ "$migration_failed" -ne 0 ]; then
+  if [ "$ALLOW_INCOMPLETE_REPAIRS" -eq 1 ] && [ "$scan_safe" -eq 1 ]; then
+    exit 0
+  fi
   if [ "$diagnostics_failed" -eq 1 ]; then
     echo "PR_CHECK_MIGRATION: private diagnostics are unavailable; migration did not complete safely" >&2
   else

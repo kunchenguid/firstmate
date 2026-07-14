@@ -39,7 +39,7 @@ fi
 # Neutralize any pre-fix poll before recording or arming this task. The
 # migration never executes legacy artifacts and holds watcher exclusion while
 # it quarantines or rebuilds them.
-"$SCRIPT_DIR/fm-pr-check-migrate.sh" || exit 1
+"$SCRIPT_DIR/fm-pr-check-migrate.sh" --checks-safe || exit 1
 "$FM_ROOT/bin/fm-guard.sh" || true
 
 WT=$(grep '^worktree=' "$META" | tail -1 | cut -d= -f2- || true)

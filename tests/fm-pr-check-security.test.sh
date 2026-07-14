@@ -1413,16 +1413,20 @@ test_bootstrap_migrates_before_other_mutations() {
 }
 
 test_bootstrap_isolates_incomplete_poll_migration() {
-  local dir state fakebin fleet_marker rc
+  local dir state fakebin fleet_marker x_poll_marker rc
   dir=$(make_case bootstrap-migration-isolation)
   state="$dir/home/state"
   fakebin="$dir/fakebin"
   fleet_marker="$dir/fleet-ran"
+  x_poll_marker="$dir/x-poll-ran"
   fm_write_meta "$state/task-a.meta" \
     'window=fm-task-a' \
     'pr=https://github.com/o/r/pull/12'
   printf 'legacy bytes\n' > "$state/task-a.check.sh"
   mkdir "$state/task-a.pr-poll"
+  fm_pr_poll_prepare "$state" z-healthy https://github.com/o/r/pull/13 o r 13 "$POLL" \
+    || fail "could not prepare healthy poll for migration isolation"
+  fm_pr_poll_publish_prepared || fail "could not publish healthy poll for migration isolation"
   fm_write_meta "$state/secondmate-a.meta" \
     'window=fm-secondmate-a' \
     'kind=secondmate' \
@@ -1442,7 +1446,11 @@ SH
 : > "${FM_TEST_FLEET_MARKER:?}"
 printf 'alpha: recovered: continued after isolated migration failure\n'
 SH
-  chmod +x "$fakebin/tmux" "$dir/root/bin/fm-fleet-sync.sh"
+  cat > "$dir/root/bin/fm-x-poll.sh" <<'SH'
+#!/usr/bin/env bash
+: > "${FM_TEST_X_POLL_MARKER:?}"
+SH
+  chmod +x "$fakebin/tmux" "$dir/root/bin/fm-fleet-sync.sh" "$dir/root/bin/fm-x-poll.sh"
 
   set +e
   FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$dir/root" FM_TEST_FLEET_MARKER="$fleet_marker" \
@@ -1470,6 +1478,20 @@ SH
   [ -e "$fleet_marker" ] || fail "incomplete poll migration suppressed fleet refresh"
   assert_grep 'FLEET_SYNC: alpha: recovered: continued after isolated migration failure' "$dir/bootstrap.out" \
     "continued fleet refresh was not operator-visible"
+  set +e
+  FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$dir/root" FM_TEST_X_POLL_MARKER="$x_poll_marker" \
+    FM_TEST_GH_STATE=MERGED FM_POLL=0 FM_CHECK_INTERVAL=0 FM_SIGNAL_GRACE=0 \
+    PATH="$fakebin:$BASE_PATH" "$WATCH" > "$dir/watch.out" 2> "$dir/watch.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "watcher remained blocked after unsafe legacy check exclusion: $(cat "$dir/watch.err")"
+  [ -e "$x_poll_marker" ] || fail "watcher did not continue X mention polling after isolated migration failure"
+  assert_grep "check: $state/z-healthy.check.sh: merged" "$dir/watch.out" \
+    "watcher did not continue the healthy authenticated poll"
+  [ ! -e "$state/task-a.check.sh" ] && [ ! -L "$state/task-a.check.sh" ] \
+    || fail "watcher continuation rearmed the unsafe legacy check"
+  [ -f "$state/.pr-check-quarantine/task-a.diagnostic.failure-canonical" ] \
+    || fail "watcher continuation lost the durable repair obligation"
   pass "bootstrap isolates incomplete poll migration from unrelated recovery sweeps"
 }
 

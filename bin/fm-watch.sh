@@ -584,7 +584,7 @@ fi
 # Before acquiring the watcher lock or enumerating any runnable check, replace
 # or quarantine checks created by older versions. The migration compares bytes
 # and reads data only; it never invokes legacy check files through Bash.
-"$SCRIPT_DIR/fm-pr-check-migrate.sh" || {
+"$SCRIPT_DIR/fm-pr-check-migrate.sh" --checks-safe || {
   echo "watcher: PR check migration blocked; refusing to execute state checks" >&2
   exit 1
 }
