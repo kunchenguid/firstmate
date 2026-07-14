@@ -902,27 +902,37 @@ wedge_alarm_notify() {  # <summary> <marker>
 # status line when applicable, and attempts a configurable backend-independent
 # active alert (wedge_alarm_notify). Nothing is lost - the buffer and the
 # wake-queue both survive - but the stall stops being invisible.
-# <latched> is set by a caller that owns its own fire-once latch (pane_gone_wedge_alarm).
-# Both throttles below re-open after one max-defer window, which is right for a
-# condition that keeps being re-tested and can heal - a busy composer clears, a
-# flush lands - but wrong for one that cannot: a vanished pane never comes back
-# on its own, so a self-re-opening throttle would re-push an active alert every
-# window for the life of the daemon. A latched caller has already decided this
-# alarm fires exactly once, so its single alarm must not be swallowed by an
-# unrelated earlier marker or notify either.
-inject_wedge_alarm() {  # <state> <age-seconds> [latched:0|1]
-  local state=$1 age=$2 latched=${3:-0} marker target backend max_defer now notify=1 cause reason
+# <kind> selects which alarm this is, and the two never share state on disk or in
+# memory. `buffer` is the max-defer wedge: escalations stuck behind a pane that
+# will not take them, throttled to one alarm per max-defer window because that
+# condition is re-tested every tick and can heal - a busy composer clears, a flush
+# lands - and cleared only by a successful flush. `pane-gone` is the vanished-pane
+# alarm, which cannot heal on its own and so owns a fire-once latch in
+# pane_gone_wedge_alarm; a self-re-opening throttle would re-push an active alert
+# every window for the life of the daemon.
+# Separate markers, because each alarm may only ever retire its own. A pane-gone
+# alarm writing the wedge marker would replace a composer wedge's record of a real
+# undelivered buffer - the one marker whose contract says leave it for a successful
+# flush to clear - and pane_gone_recovered would then delete it when the pane came
+# back. Separate throttles, for the same reason: a latched alarm that consumed the
+# shared notify epoch would silence the buffer wedge's next re-raise.
+inject_wedge_alarm() {  # <state> <age-seconds> [kind:buffer|pane-gone]
+  local state=$1 age=$2 kind=${3:-buffer} marker target backend max_defer now notify=1 cause reason
   local buffered summary header detail err
-  marker="$state/.subsuper-inject-wedged"
   # Defensive default: escalate_flush only returns non-zero after inject_msg ran
   # in this process, so the pair is normally fresh. An empty pair means nobody
   # recorded an attempt - say so rather than inventing a cause.
   cause="${INJECT_LAST_DEFER_CAUSE:-unrecorded}"
   reason="${INJECT_LAST_DEFER_REASON:-no inject attempt recorded in this daemon process}"
   max_defer="${FM_MAX_DEFER_SECS:-$MAX_DEFER_SECS_DEFAULT}"
-  # Re-alarm at most once per max-defer window so a long wedge does not spam.
-  if [ "$latched" -eq 0 ] && [ "$(_file_age "$marker")" -lt "$max_defer" ]; then
-    return 0
+  if [ "$kind" = pane-gone ]; then
+    marker="$state/.subsuper-pane-gone"
+  else
+    marker="$state/.subsuper-inject-wedged"
+    # Re-alarm at most once per max-defer window so a long wedge does not spam.
+    if [ "$(_file_age "$marker")" -lt "$max_defer" ]; then
+      return 0
+    fi
   fi
   buffered=0
   if [ -s "$state/.subsuper-escalations" ]; then
@@ -944,18 +954,16 @@ inject_wedge_alarm() {  # <state> <age-seconds> [latched:0|1]
     err="ERROR: away-mode escalation undelivered ${age}s; last inject attempt did not land: $reason. Buffer + wake-queue preserved; alarm marker written."
   fi
   now=$(_now)
-  if [ "$latched" -eq 0 ] && [ "$WEDGE_ALARM_LAST_EPOCH" -gt 0 ] && [ $((now - WEDGE_ALARM_LAST_EPOCH)) -lt "$max_defer" ]; then
+  if [ "$kind" = pane-gone ]; then
+    # The caller's latch already decided this fires exactly once per absence
+    # episode, so it neither reads nor consumes the buffer wedge's notify throttle.
+    log "$err"
+  elif [ "$WEDGE_ALARM_LAST_EPOCH" -gt 0 ] && [ $((now - WEDGE_ALARM_LAST_EPOCH)) -lt "$max_defer" ]; then
     notify=0
   else
     WEDGE_ALARM_LAST_EPOCH=$now
     log "$err"
   fi
-  # `cause:` is the marker's machine-readable field: whoever wrote this marker is
-  # the only thing that may retire it, and the process globals above cannot say
-  # who that was (inject_msg records `pane-gone` for a pane that dies mid-flush
-  # too, without ever writing a pane-gone marker). pane_gone_recovered reads this
-  # line, so a marker describing a real undelivered buffer is never mistaken for
-  # a pane-gone alarm and deleted with it.
   {
     printf '%s\n' "$header"
     printf '%s\n' "$detail"
@@ -1011,6 +1019,13 @@ inject_wedge_alarm() {  # <state> <age-seconds> [latched:0|1]
 # cannot grow while it is (the backoff `continue`s past the wake handling that
 # buffers), so a buffer gate here would restore exactly the away-window silence
 # this alarm exists to end. What the captain needs is the pane, not the count.
+# Honest about its own reach: this away-window alert is BEST-EFFORT. wedge_alarm_notify
+# is best-effort by contract (it always returns 0 and reports no per-channel success),
+# so a transient failure on the one push this latch permits is lost, and the marker
+# and ERROR log - both read only once the captain is back - are what remain. Unlike
+# an agent that died in a pane that still exists, which keeps reaching housekeeping's
+# max-defer alarm every window. Making this self-retrying without becoming an all-night
+# repeat needs a delivered-alert signal or a bounded re-fire; see docs/wedge-alarm.md.
 pane_gone_wedge_alarm() {  # <state> <backend> <target>
   local state=$1 backend=$2 target=$3 max_defer now gone_for
   if ! afk_active "$state"; then
@@ -1031,34 +1046,30 @@ pane_gone_wedge_alarm() {  # <state> <backend> <target>
   INJECT_LAST_DEFER_CAUSE='pane-gone'
   INJECT_LAST_DEFER_REASON="supervisor pane '$target' no longer resolves on backend '$backend'; away mode can deliver nothing until it is stopped (bin/fm-afk-launch.sh stop) and armed again from firstmate's own pane"
   PANE_GONE_ALARMED=1
-  inject_wedge_alarm "$state" "$gone_for" 1
+  inject_wedge_alarm "$state" "$gone_for" pane-gone
 }
 
 # The absence ended: retire the alarm it raised, and re-arm the latch for the next
 # episode. Nothing else retires it. A pane-gone alarm fires whether or not anything
-# is buffered, but the only existing path that clears the marker is housekeeping's
-# max-defer escape flush, which runs solely on a buffer still stuck past max-defer -
-# so a pane-gone alarm raised on an empty (or since-flushed) buffer would outlive the
-# vanished pane forever. Targets can be names rather than unique pane ids
+# is buffered, and the buffer wedge's only clearing path is a successful flush of a
+# still-stuck buffer, so without this edge the alarm would outlive the vanished pane
+# forever. Targets can be names rather than unique pane ids
 # (FM_SUPERVISOR_TARGET_DEFAULT is `firstmate:0`), and a killed-and-recreated window
 # resolves again, so firstmate's afk-exit catch-up would report a wedge that healed
 # hours earlier, naming a pane that is now healthy.
-# ONLY a marker this alarm wrote is retired, decided by the marker's own on-disk
-# `cause:` line rather than by INJECT_LAST_DEFER_CAUSE: that global also reads
-# `pane-gone` when inject_msg's target-exists check refuses a flush into a pane that
-# died mid-tick, which writes no pane-gone marker at all. Keying on it would let a
-# few seconds of pane blink delete a composer-wedge marker describing a real
-# undelivered buffer - the one marker whose contract says leave it for a successful
-# flush to clear.
+# It can only ever retire its own marker, because that is the only one it knows the
+# name of: the buffer wedge lives in a separate file, so a pane that blinks out and
+# back can never delete a composer-wedge marker still describing a real undelivered
+# buffer - the one marker whose contract says leave it for a successful flush to
+# clear.
 pane_gone_recovered() {  # <state>
   local state=$1 marker
   [ "$PANE_GONE_SINCE" -gt 0 ] || return 0
   PANE_GONE_SINCE=0
   [ "$PANE_GONE_ALARMED" -eq 1 ] || return 0
   PANE_GONE_ALARMED=0
-  marker="$state/.subsuper-inject-wedged"
+  marker="$state/.subsuper-pane-gone"
   [ -e "$marker" ] || return 0
-  grep -q '^cause: pane-gone$' "$marker" 2>/dev/null || return 0
   rm -f "$marker"
   log "supervisor target resolves again; cleared the pane-gone alarm marker"
 }

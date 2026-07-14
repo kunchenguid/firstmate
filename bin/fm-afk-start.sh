@@ -63,7 +63,8 @@ fm_afk_clear_stale_artifacts() {  # <state-dir>
   local state=$1
   rm -f "$state/.subsuper-escalations" \
         "$state/.subsuper-escalations.since" \
-        "$state/.subsuper-inject-wedged" 2>/dev/null
+        "$state/.subsuper-inject-wedged" \
+        "$state/.subsuper-pane-gone" 2>/dev/null
 }
 
 # The daemon-lock liveness gate. The lock path defaults to this home's, but every

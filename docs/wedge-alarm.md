@@ -4,7 +4,10 @@ The away-mode sub-supervisor (`bin/fm-supervise-daemon.sh`) buffers escalations 
 When injection cannot deliver past `FM_MAX_DEFER_SECS`, `inject_wedge_alarm` raises a loud, rate-limited alarm so the stall never stays invisible.
 The cause is whatever `inject_msg` last recorded, and it is not always a busy pane: the supervisor's agent may have exited to a shell or be unverifiable on this backend (`agent-dead` / `agent-unknown`, from the fail-closed agent-liveness guard), a human's text may be sitting in the composer (`composer-not-empty`), the pane may be mid-turn (`pane-busy`), or the submit's Enter may have been swallowed (`submit-unconfirmed`).
 One cause comes from the daemon's main loop rather than an inject attempt: when the supervisor pane itself has not resolved for a full max-defer window (`pane-gone`), there is nowhere to attempt a delivery at all, so `pane_gone_wedge_alarm` records the vanished pane and raises the same alarm from the backoff path - the active alert below needs no pane, which is exactly why it is the channel that survives this.
-The alarm carries that cause tag in its active alert and status-line flash, and the full detail in the ERROR log line and the durable `state/.subsuper-inject-wedged` marker, so a wedge never has to be diagnosed by guesswork.
+The alarm carries that cause tag in its active alert and status-line flash, and the full detail in the ERROR log line and a durable marker, so a wedge never has to be diagnosed by guesswork.
+
+Each of the two alarms owns its own marker, and may only ever retire its own: the buffer wedge writes `state/.subsuper-inject-wedged`, cleared by a successful flush, and the vanished pane writes `state/.subsuper-pane-gone`, cleared when the target resolves again.
+They shared one file until 2026-07-14, and a pane-gone alarm therefore rewrote a composer wedge's record as its own and then deleted it on recovery - discarding the one marker whose contract says leave it for a successful flush to clear, while the buffer it described was still undelivered.
 
 `pane-gone` is the one cause whose captain-facing wording is not about the buffer, because it is not a queue stuck behind a busy pane: away-mode supervision is DOWN and nothing can be delivered, buffered or not.
 It also fires on an EMPTY buffer, deliberately unlike the max-defer alarm, which is gated on buffered content.
@@ -15,10 +18,28 @@ Their throttles re-open after a max-defer window because those conditions are re
 A vanished pane heals only when the pane comes back, and the target is usually a unique pane id, so the same throttle would re-push the active alert every window for the life of the daemon: a terminal that dies at 23:30 buys the captain ~96 banners and ~96 pushes through a configured `command:` channel by morning, none of them actionable from away.
 Alert fatigue on the one channel that has to work is the failure this alarm exists to prevent, so only the re-pushing stops; the durable marker and the ERROR log remain the record.
 
-`pane_gone_recovered` retires the marker the moment the target resolves again, and re-arms the latch for the next episode: a pane-gone alarm raised on an empty (or since-flushed) buffer is otherwise never cleared, because the only other path that removes the marker is the max-defer escape flush of a still-stuck buffer.
+`pane_gone_recovered` retires that marker the moment the target resolves again, and re-arms the latch for the next episode: nothing else would clear it, since a pane-gone alarm fires whether or not anything is buffered.
 Targets are usually names rather than unique pane ids (`FM_SUPERVISOR_TARGET_DEFAULT` is `firstmate:0`), so a window killed and recreated resolves again, and without that recovery edge firstmate's afk-exit catch-up would report a wedge that healed hours earlier against a pane that is now healthy.
-It retires only the marker this alarm wrote, decided by that marker's own `cause:` line rather than by the last-defer global - which also reads `pane-gone` when `inject_msg` refuses a flush into a pane that died mid-tick, a path that writes no pane-gone marker at all.
-Keying on the global would let a few seconds of pane blink delete a composer-wedge marker describing a real undelivered buffer, the one marker whose contract is that only a successful flush clears it.
+Separate marker files are what make that safe: the recovery edge can only ever delete the file this alarm writes, so a pane blinking out and back can never take a composer wedge's record with it.
+
+## Reach: what is guaranteed, and what is best-effort
+
+The two failures the fail-closed liveness guard leaves behind do not have the same reach, and the difference matters when reading an alert - or its absence.
+
+**Agent dead, pane alive** (`agent-dead` / `agent-unknown`: firstmate exited to a shell, or its harness is unattributable on this backend) is robustly reported.
+The pane still resolves, so the daemon's main loop keeps reaching housekeeping, and the max-defer alarm re-raises once per window until the buffer is delivered - a failed push is effectively retried on the next window.
+
+**Pane gone** is BEST-EFFORT, and is the weaker of the two on purpose (see the follow-ups below).
+The main loop's pane-gone backoff never reaches housekeeping, so the alarm is raised from the backoff path itself, latched to one alert per absence episode.
+`wedge_alarm_notify` is best-effort by contract - it always returns 0 and reports no per-channel success - so the single push that latch permits cannot be confirmed, and a transient failure (a network blip on a `command:` channel, an `osascript` timeout under load) loses the alert for the rest of the away window.
+The durable marker and the ERROR log survive it, but both are read only once the captain is back.
+Making it self-retrying without recreating the all-night repeat needs either a delivered-alert signal out of `wedge_alarm_notify` or a bounded re-fire; that is a deliberate follow-up, not shipped here.
+
+## Known follow-ups
+
+- **Bounded re-fire of the pane-gone alert**, so it is both non-spammy and self-retrying: latch on a DELIVERED alert rather than an attempted one, or allow a small bounded number of re-pushes per absence episode.
+- **`fm_afk_canary_daemon_endpoint` races the endpoint publish**: it collapses "no live daemon" and "a live daemon that has not published its endpoint yet" into one answer, so a fresh arm can print the fresh-arm remediation where the stop-then-arm one is correct.
+- **The `gone` verdict comes from a single unretried existence probe**, so a flaky backend read (herdr's `pane get` is one bare RPC) is indistinguishable from a vanished pane; the retry, or a backend-reachability check that degrades to `unknown`, belongs in the same resolver.
 
 ## Why an active channel beyond the status-line flash
 

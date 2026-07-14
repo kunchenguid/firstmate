@@ -688,6 +688,7 @@ Pre-fix, `empty` alone authorized the inject, so the digest was typed into the s
 `inject_msg` (`bin/fm-supervise-daemon.sh`) gained a third guard after the composer-empty check: it calls `fm_backend_agent_alive` (`bin/fm-backend.sh`, the confident live-agent-process probe already used by the session-start secondmate-liveness sweep and reused for both supervisor backends, tmux and herdr) and injects ONLY on a confident `alive`.
 It fails closed: `dead` (a bare shell) and `unknown` (an unreadable pane, or a harness whose liveness is unverifiable for that backend, e.g. pi's generic `node` interpreter - see `docs/tmux-backend.md` "Known gaps") both defer, on the principle that a missed escalation is an inconvenience but a command typed into the captain's shell is not.
 A deferred escalation stays buffered for the next cycle, the max-defer wedge alarm, or the afk-exit catch-up flush, so nothing is lost.
+That fail-closed-to-the-wedge-alarm path is robust while the supervisor PANE still exists, which is the case this guard is about; a pane that vanishes entirely is a different, weaker story, told under "What this alarm does and does not guarantee" below.
 Consequence to know: a pi-based supervisor in away mode reads `unknown` and defers all injection, degrading to the wedge-alarm and afk-exit-flush paths rather than injecting; closing that would require attributing pi's `node` process, which is separate empirical work.
 
 **Fail closed, but never fail silent.**
@@ -736,12 +737,20 @@ The backoff is otherwise unchanged.
 A vanished pane is not a stuck queue, so it does not borrow the wedge alarm's wording, and it is not gated on the buffer the way the max-defer alarm is.
 The buffer cannot even grow while the pane is gone (the same backoff `continue`s past the wake handling that buffers), so an empty buffer is the ordinary case: crew work flushed, then the captain's terminal died.
 Gating on buffered content would therefore restore the exact away-window silence this alarm was added to end, so it fires on an empty buffer and every channel - ERROR log, durable marker, status-line flash, and the active alert's title and body - reports away-mode supervision as DOWN and states the buffered count, instead of sending the captain hunting for escalations that do not exist.
-The marker is retired by `pane_gone_recovered` the moment the target resolves again, because nothing else would: the only other path that clears it is the max-defer escape flush of a still-stuck buffer.
+It writes its OWN marker, `state/.subsuper-pane-gone`, and `pane_gone_recovered` retires that marker the moment the target resolves again, because nothing else would: a pane-gone alarm fires whether or not anything is buffered, while the buffer wedge's marker is cleared only by a successful flush of a still-stuck buffer.
 Targets are usually names rather than unique pane ids (`FM_SUPERVISOR_TARGET_DEFAULT` is `firstmate:0`), so a window killed and recreated resolves again, and a marker that outlived the absence would have firstmate reporting a healed wedge against a healthy pane on the afk-exit catch-up.
-It retires only the marker this alarm wrote, read from that marker's own `cause:` line: the last-defer global cannot say who wrote it, because `inject_msg` records `pane-gone` too when a flush finds the pane dead mid-tick without raising this alarm, and keying on it would let a brief pane blink delete a composer-wedge marker that still describes a real undelivered buffer.
+Two markers rather than one is what makes both edges safe: sharing a file had the pane-gone alarm overwrite a composer wedge's `cause:` and its recovery then delete it - discarding the record of a buffer that was still undelivered, the one marker whose contract says leave it for a successful flush to clear.
+
+**What this alarm does and does not guarantee.**
+The two failures behind the fail-closed guard have different reach, and conflating them would make this PR's own "escalations fail closed to the wedge alarm" claim false in one case.
+An AGENT-DEAD supervisor (the hole this change closes: the agent exited to a shell, or its harness is unattributable, but the PANE still resolves) is robustly reported - the main loop keeps reaching housekeeping, so the max-defer alarm re-raises every window until the buffer lands, and a failed alert push is effectively retried next window.
+A PANE-GONE supervisor gets a BEST-EFFORT alert only: the backoff never reaches housekeeping, so it is raised from the backoff path itself and latched to one alert per absence episode, and `wedge_alarm_notify` is best-effort by contract (always returns 0, reports no per-channel success), so that single push cannot be confirmed and a transient channel failure loses it for the rest of the away window.
+Making it self-retrying without recreating the all-night repeat needs a delivered-alert signal or a bounded re-fire, deliberately deferred below.
+That gap is strictly narrower than what preceded it: the pane-gone backoff's `continue` past housekeeping is PRE-EXISTING and predates the liveness guard, and where there was total away-window silence there is now a best-effort alert, an arm-time canary, and a session-start diagnostic.
 
 **Known follow-ups.**
-Two smaller canary defects are deferred rather than fixed here, and neither can cause an injection into a shell.
+Three defects are deferred rather than fixed here, and none can cause an injection into a shell.
+The pane-gone alert has no delivery retry (above): latching on a DELIVERED alert, or a small bounded number of re-pushes per absence episode, would make it self-retrying without becoming an all-night repeat.
 `fm_afk_canary_daemon_endpoint` collapses "no live daemon" and "a live daemon that has not published its endpoint yet" into one answer, so a fresh arm can race the endpoint write and print the fresh-arm remediation when the stop-then-arm one is correct.
 And the `gone` verdict comes from a single unretried existence probe, so a flaky backend read (herdr's `pane get` is one bare RPC) can be reported as a vanished pane; the retry belongs in the same resolver.
 
@@ -762,7 +771,7 @@ The away-window half is pinned by `test_pane_gone_during_away_fires_wedge_alarm`
 `test_pane_gone_alarm_waits_out_a_transient_absence` pins the other side of it - a pane missing for one poll must NOT alarm, and away mode being off must not alarm at all - so the fix cannot cry wolf on a backend hiccup.
 `test_pane_gone_alarm_reports_supervision_down_on_an_empty_buffer` pins the wording and the missing buffer gate together: with nothing buffered the alarm must still fire, and no channel may claim undelivered escalations.
 `test_pane_gone_marker_cleared_when_the_pane_returns` drives the real daemon through both edges - the pane dies and alarms, then comes back - and requires the marker to be gone; both fail against the pre-fix daemon.
-The cadence and the retirement rule have a case each: `test_pane_gone_alarm_fires_once_per_episode` holds one unbroken absence to exactly one active alert and one wedge ERROR across three max-defer windows, while still alarming again for a fresh absence episode (it fails on the per-window throttle, which pushes three), and `test_pane_gone_recovery_keeps_a_real_buffer_wedge_marker` requires a composer-wedge marker with a real undelivered buffer to survive a pane blinking out and back (it fails when the retirement is keyed on the last-defer global instead of the marker's own recorded cause).
+The cadence and the marker separation have a case each: `test_pane_gone_alarm_fires_once_per_episode` holds one unbroken absence to exactly one active alert and one wedge ERROR across three max-defer windows, while still alarming again for a fresh absence episode (it fails on the per-window throttle, which pushes three), and `test_pane_gone_recovery_keeps_a_real_buffer_wedge_marker` drives a real composer wedge through a real pane-gone alarm and its recovery, requiring the composer wedge's marker, its recorded cause, its still-undelivered buffer, and its notify throttle to come through untouched (it fails against a shared marker file, which the pane-gone alarm rewrites as its own and then deletes).
 
 **Other injection paths.**
 `bin/fm-send.sh` (firstmate steering a crewmate/secondmate) is the only other typed-text injection path and shares the same content-blindness: it has no composer-empty or liveness guard, so a steer sent to a crewmate that has exited to a shell is typed into that shell.
@@ -891,7 +900,7 @@ The topology invariant (entering AND exiting away mode leaves the captain's acti
 
 ### Stale-artifact lifecycle fix (same change)
 
-The away daemon's `state/.subsuper-escalations` (+ `.since`) and `state/.subsuper-inject-wedged` are a transient delivery cache, cleared only on a successful flush.
+The away daemon's `state/.subsuper-escalations` (+ `.since`), `state/.subsuper-inject-wedged`, and `state/.subsuper-pane-gone` are a transient delivery cache, cleared only on a successful flush or the pane's return.
 Two ordering/scoping bugs leaked them into the next away session: on a clean exit the `/afk` skill cleared `state/.afk` BEFORE stopping the daemon, so the daemon's shutdown flush hit its own presence gate (`inject_msg`: `afk_active || return 1`) and was a no-op; and nothing cleared them on entry.
 The fix: `bin/fm-afk-launch.sh stop` SIGTERMs the daemon while `state/.afk` is still present so the flush can run, closes its recorded terminal by exact id, and then clears `state/.afk` last.
 On entry the launcher drops the prior session's artifacts when the daemon is not already running, never on a refresh; the sourceable `bin/fm-afk-start.sh` exposes the shared clearing helper and also applies it for a direct, non-prepared fresh start.

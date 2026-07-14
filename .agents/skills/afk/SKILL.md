@@ -59,7 +59,7 @@ No `/back` is needed. The first genuine message is the return signal:
 
 - A message **without** the sentinel marker and **not** starting with `/afk` -> the captain is back.
   Run `bin/fm-afk-launch.sh stop`: it stops the daemon in the correct order - it SIGTERMs the daemon so its shutdown flush runs **while `state/.afk` is still present** (clearing the flag first makes that flush a no-op via the daemon's presence gate, stranding undelivered escalations), then closes the daemon's own terminal by exact id, then clears `state/.afk` last.
-  Then flush one distilled "while you were out" catch-up (drain `state/.wake-queue`, summarize any pending escalations from `state/.subsuper-escalations` and any `state/.subsuper-inject-wedged` marker), and resume full per-wake responsiveness through the emitted primary-harness supervision protocol from session start.
+  Then flush one distilled "while you were out" catch-up (drain `state/.wake-queue`, summarize any pending escalations from `state/.subsuper-escalations`, and report any `state/.subsuper-inject-wedged` or `state/.subsuper-pane-gone` marker), and resume full per-wake responsiveness through the emitted primary-harness supervision protocol from session start.
 - A message **with** the sentinel marker (`FM_INJECT_MARK`, ASCII 0x1f) -> it
   is a daemon escalation; stay afk and process it.
 - Re-invoking `/afk` while already away -> stay afk (refresh the flag); this
@@ -137,11 +137,12 @@ an ERROR in the daemon log, a durable
 `state/.subsuper-inject-wedged` marker (surface it on the "while you were out"
 catch-up if present), a tmux status-line flash when applicable, and a configurable backend-independent active alert.
 Each names the recorded cause (`pane-busy`, `composer-not-empty`, `agent-dead`, `agent-unknown`, `submit-unconfirmed`, `pane-gone`) rather than assuming a busy pane, so a dead supervisor agent is not misreported as a wedged one.
-A supervisor pane that VANISHES raises the same alarm from the daemon's backoff path once it has been gone for a full max-defer window (`pane-gone`), because there is no pane left to attempt a delivery into and the active alert is the only channel a missing pane cannot take away.
+A supervisor pane that VANISHES raises its own alarm from the daemon's backoff path once it has been gone for a full max-defer window (`pane-gone`), writing a separate `state/.subsuper-pane-gone` marker, because there is no pane left to attempt a delivery into and the active alert is the only channel a missing pane cannot take away.
 That one reports away-mode supervision as DOWN rather than as undelivered escalations, and it fires even with nothing buffered: the pane being gone means nothing can be delivered at all, and the buffer cannot even grow while it is.
 Read it as "away mode is dead, restart it" - the buffered count it states may well be zero.
 It alerts once per absence, not once per max-defer window: a vanished pane cannot heal on its own, so repeating the alert would only bury an away captain in banners they cannot act on, and the marker plus the ERROR log stay the record.
-It clears itself once the target resolves again - and only ever clears its own marker - so a `pane-gone` marker on the catch-up is a wedge that is still live, not one that healed while the captain was away.
+It clears itself once the target resolves again, and its separate marker means neither its alarm nor its recovery can ever touch the buffer wedge's - so a `state/.subsuper-pane-gone` marker on the catch-up is an absence that is still live, not one that healed while the captain was away.
+Know its reach: unlike a dead agent in a pane that still exists (which keeps re-raising the max-defer alarm every window), that single latched alert is BEST-EFFORT and cannot be confirmed delivered, so a transient channel failure loses it and only the marker and ERROR log remain - see `docs/wedge-alarm.md` "Reach".
 `docs/wedge-alarm.md` owns the alert channel setup and verification record.
 So a guard false-positive becomes a visible stall, never an unbounded silent no-op.
 
@@ -251,7 +252,7 @@ the marker lets firstmate distinguish it from a real captain message.
 
 ## Stale-artifact lifecycle
 
-Treat `state/.subsuper-escalations`, its `.since` sidecar, and `state/.subsuper-inject-wedged` as session-scoped delivery artifacts, not as the durable work record.
+Treat `state/.subsuper-escalations`, its `.since` sidecar, `state/.subsuper-inject-wedged`, and `state/.subsuper-pane-gone` as session-scoped delivery artifacts, not as the durable work record.
 Always enter through `bin/fm-afk-launch.sh`, which clears prior-session artifacts only for a fresh entry and preserves the current session's buffer on refresh.
 Always exit through `bin/fm-afk-launch.sh stop`, which keeps `state/.afk` present through the daemon's shutdown flush and clears it last.
 `docs/herdr-backend.md` "Stale-artifact lifecycle fix" owns the mechanism and verification evidence.
