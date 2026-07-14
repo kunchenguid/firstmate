@@ -46,7 +46,9 @@ fm_pr_task_id_valid() {
   local id=${1-}
   local LC_ALL=C
   [ "${#id}" -ge 1 ] && [ "${#id}" -le 64 ] || return 1
-  [[ "$id" =~ ^[a-z0-9]+(-[a-z0-9]+)*$ ]]
+  case "$id" in
+    .*|_noncanonical|*[!A-Za-z0-9._-]*) return 1 ;;
+  esac
 }
 
 fm_pr_url_parse() {

@@ -58,7 +58,7 @@ test_registered_check_uses_preserved_watcher_environment() {
 #!/usr/bin/env bash
 printf 'env check fired with FM_CHECK_INTERVAL=%s\n' "${FM_CHECK_INTERVAL:-missing}"
 SH
-  chmod +x "$home/state/env-check.check.sh"
+  chmod 0700 "$home/state/env-check.check.sh"
   FM_HOME="$home" "$ROOT/bin/fm-check-register.sh" env-check >/dev/null \
     || fail "could not register checkpoint custom check"
   status=0

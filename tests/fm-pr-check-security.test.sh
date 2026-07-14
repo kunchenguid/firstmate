@@ -324,11 +324,8 @@ INVALID_IDS=(
   'a/b'
   '.'
   '..'
-  '-task'
-  'task-'
-  'task--a'
-  'Task-a'
-  'task_a'
+  '.task'
+  '_noncanonical'
   'task a'
   $'task\ta'
   $'task\na'
@@ -341,7 +338,7 @@ INVALID_IDS=(
 )
 
 test_parser_matrix() {
-  local row url owner repo number
+  local id row url owner repo number
   while IFS='|' read -r url owner repo number; do
     [ -n "$url" ] || continue
     fm_pr_url_parse "$url" || fail "parser rejected canonical URL"
@@ -356,6 +353,9 @@ https://github.com/Owner/repo-name_with.parts/pull/123456|Owner|repo-name_with.p
 EOF
   for row in "${INVALID_URLS[@]}"; do
     ! fm_pr_url_parse "$row" || fail "parser accepted a rejected raw-byte URL class"
+  done
+  for id in -task task- task--a Task-a task_a task.a; do
+    fm_pr_task_id_valid "$id" || fail "task ID validator rejected a safe lifecycle-compatible slug"
   done
   pass "raw-byte parser accepts canonical URLs and rejects the complete adversarial matrix"
 }
@@ -494,6 +494,26 @@ test_valid_recording_and_merge_derivation() {
     || fail "valid check with malformed remote head failed"
   assert_no_grep 'pr_head=' "$dir/home/state/task-a.meta" "multiline PR head reached metadata"
   assert_no_grep 'window=unexpected' "$dir/home/state/task-a.meta" "newline metadata key was injected"
+
+  dir=$(make_case lifecycle-compatible-id)
+  write_task_meta "$dir" Task_A.1
+  run_merge_entry "$dir" Task_A.1 https://github.com/o/r/pull/3 \
+    > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "safe lifecycle-compatible task ID could not use the PR merge flow"
+  fm_pr_poll_artifacts_valid "$dir/home/state" Task_A.1 "$POLL" \
+    || fail "safe lifecycle-compatible task ID did not publish an authenticated poll"
+  rm -rf "$dir/wt"
+  cat > "$dir/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod 0700 "$dir/fakebin/tmux"
+  touch "$dir/home/state/.last-watcher-beat"
+  FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" PATH="$dir/fakebin:$BASE_PATH" \
+    "$TEARDOWN" Task_A.1 --force > "$dir/teardown.out" 2> "$dir/teardown.err" \
+    || fail "safe lifecycle-compatible task ID could not be torn down"
+  [ ! -e "$dir/home/state/Task_A.1.meta" ] \
+    || fail "safe lifecycle-compatible task teardown retained metadata"
   pass "valid direct and merge flows record exact metadata and reject multiline head metadata"
 }
 
@@ -1505,6 +1525,26 @@ test_complete_single_link_validation() {
   fm_custom_check_snapshot_cleanup
   [ -e "$alias" ] || fail "custom-check hard-link refusal removed the external alias"
 
+  dir=$(make_case private-custom-check-source)
+  state="$dir/home/state"
+  printf '#!/usr/bin/env bash\nprintf "custom-ready\\n"\n' > "$state/custom.check.sh"
+  chmod 0755 "$state/custom.check.sh"
+  set +e
+  FM_HOME="$dir/home" "$REGISTER" custom > "$dir/register.out" 2> "$dir/register.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "custom check registration accepted a non-private source"
+  [ ! -e "$state/custom.check-trust" ] || fail "non-private custom check received a trust record"
+  chmod 0700 "$state/custom.check.sh"
+  FM_HOME="$dir/home" "$REGISTER" custom >/dev/null \
+    || fail "could not register private custom check fixture"
+  chmod 0755 "$state/custom.check.sh"
+  ! fm_custom_check_registered "$state" custom \
+    || fail "registered custom check remained authenticated after becoming non-private"
+  ! fm_custom_check_snapshot_prepare "$state" custom \
+    || fail "watcher snapshot accepted a non-private custom check source"
+  fm_custom_check_snapshot_cleanup
+
   dir=$(make_case single-link-teardown-quarantine)
   state="$dir/home/state"
   fakebin="$dir/fakebin"
@@ -1748,13 +1788,13 @@ test_nonexecuting_migration() {
 
   dir=$(make_case migration-invalid-id)
   state="$dir/home/state"
-  printf 'legacy invalid-id bytes\n' > "$state/bad_id.check.sh"
+  printf 'legacy invalid-id bytes\n' > "$state/bad id.check.sh"
   set +e
   FM_HOME="$dir/home" "$MIGRATE" > "$dir/migrate.out" 2> "$dir/migrate.err"
   rc=$?
   set -e
   [ "$rc" -eq 0 ] || fail "noncanonical artifact migration failed"
-  [ ! -e "$state/bad_id.check.sh" ] || fail "noncanonical artifact remained runnable"
+  [ ! -e "$state/bad id.check.sh" ] || fail "noncanonical artifact remained runnable"
   find "$state/.pr-check-quarantine" -name '_noncanonical.check.*' -type f | grep . >/dev/null \
     || fail "noncanonical artifact did not use its reserved quarantine namespace"
   assert_grep 'noncanonical task artifact quarantined and unarmed' "$state/.pr-check-migration.log" \
@@ -1908,7 +1948,8 @@ SH
     "incomplete poll migration suppressed persistent supervisor recovery"
   assert_grep 'FMX: X mode on - relay poll armed' "$dir/bootstrap.out" \
     "incomplete poll migration suppressed X mention setup"
-  [ -x "$state/x-watch.check.sh" ] || fail "incomplete poll migration did not arm the X relay shim"
+  fmx_poll_shim_valid "$state/x-watch.check.sh" "$dir/home" "$dir/root" \
+    || fail "incomplete poll migration did not arm a private authenticated X relay shim"
   [ -e "$fleet_marker" ] || fail "incomplete poll migration suppressed fleet refresh"
   assert_grep 'FLEET_SYNC: alpha: recovered: continued after isolated migration failure' "$dir/bootstrap.out" \
     "continued fleet refresh was not operator-visible"

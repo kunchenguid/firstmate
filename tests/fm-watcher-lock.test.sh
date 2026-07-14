@@ -619,7 +619,7 @@ test_arm_propagates_immediate_wake_before_confirmation() {
 #!/usr/bin/env bash
 printf 'merged: https://example.test/pr/7\n'
 SH
-  chmod +x "$check_file"
+  chmod 0700 "$check_file"
   FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-check-register.sh" task >/dev/null \
     || fail "could not register immediate-wake custom check"
   rc=0
