@@ -274,6 +274,26 @@ pr_is_merged() {
   unpushed_patches_are_in_pr_head "$head"
 }
 
+# git < 2.38 has no `merge-tree --write-tree`; emulate the same 3-way tree merge
+# with a throwaway index (never the worktree's own). Trivial-only resolution: any
+# unmerged entry makes write-tree fail, which reads as a conflict (inconclusive)
+# exactly like the primary path. Args: <default-ref>; prints the merged tree id.
+merge_tree_compat() {
+  local ref=$1 base tmp merged rc
+  base=$(git -C "$WT" merge-base "$ref" HEAD 2>/dev/null) || return 1
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-teardown-merge.XXXXXX") || return 1
+  merged=""
+  if GIT_INDEX_FILE="$tmp/index" git -C "$WT" read-tree -i -m "$base" "$ref" HEAD 2>/dev/null; then
+    merged=$(GIT_INDEX_FILE="$tmp/index" git -C "$WT" write-tree 2>/dev/null)
+    rc=$?
+  else
+    rc=1
+  fi
+  rm -rf "$tmp"
+  [ "$rc" -eq 0 ] && [ -n "$merged" ] || return 1
+  printf '%s\n' "$merged"
+}
+
 # Is the branch's content already present in the up-to-date default branch? Fetches
 # first, then 3-way merges the default branch with HEAD: when HEAD introduces nothing
 # the default branch does not already contain (e.g. its change landed via squash) the
@@ -294,7 +314,8 @@ content_in_default() {
   fi
   default_tree=$(git -C "$WT" rev-parse --quiet --verify "$ref^{tree}" 2>/dev/null) || return 1
   [ -n "$default_tree" ] || return 1
-  merged_tree=$(git -C "$WT" merge-tree --write-tree "$ref" HEAD 2>/dev/null) || return 1
+  merged_tree=$(git -C "$WT" merge-tree --write-tree "$ref" HEAD 2>/dev/null) \
+    || merged_tree=$(merge_tree_compat "$ref") || return 1
   merged_tree=$(printf '%s\n' "$merged_tree" | head -1)
   [ "$merged_tree" = "$default_tree" ]
 }

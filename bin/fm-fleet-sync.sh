@@ -162,8 +162,15 @@ packed_refs_lock_path() {
 fetch_with_packed_refs_lock_guard() {
   local rc attempt=0 lock lock_desc
   FETCH_OUTPUT=$(git -C "$PROJ" fetch origin --prune --quiet 2>&1); rc=$?
-  [ "$rc" -eq 0 ] && return 0
-  is_packed_refs_lock_error "$FETCH_OUTPUT" || return "$rc"
+  # The exit code alone is not trustworthy here: some git versions exit 0 when
+  # the branch fetch succeeded but the --prune ref rewrite failed on the lock,
+  # so the signature in the output is authoritative and a matching "success"
+  # still enters the recovery path (the lock would otherwise persist forever).
+  if is_packed_refs_lock_error "$FETCH_OUTPUT"; then
+    [ "$rc" -eq 0 ] && rc=1
+  else
+    return "$rc"
+  fi
 
   lock=$(packed_refs_lock_path) || lock=""
   lock_desc=${lock:-packed-refs.lock}
@@ -172,7 +179,7 @@ fetch_with_packed_refs_lock_guard() {
     echo "$label: fetch blocked by packed-refs lock ($lock_desc); waiting ${FLEET_SYNC_PACKED_REFS_LOCK_RETRY_WAIT_SECS}s and retrying ($attempt/${FLEET_SYNC_PACKED_REFS_LOCK_RETRIES}) (owning process may be exiting)" >&2
     sleep "$FLEET_SYNC_PACKED_REFS_LOCK_RETRY_WAIT_SECS"
     FETCH_OUTPUT=$(git -C "$PROJ" fetch origin --prune --quiet 2>&1); rc=$?
-    if [ "$rc" -eq 0 ]; then
+    if [ "$rc" -eq 0 ] && ! is_packed_refs_lock_error "$FETCH_OUTPUT"; then
       echo "$label: fetch succeeded on retry; packed-refs lock cleared on its own" >&2
       # One stdout summary so a session-start refresh (which discards fleet-sync
       # stderr and relays only stdout) still surfaces the recovery.
@@ -180,6 +187,7 @@ fetch_with_packed_refs_lock_guard() {
       return 0
     fi
     is_packed_refs_lock_error "$FETCH_OUTPUT" || return "$rc"
+    [ "$rc" -eq 0 ] && rc=1
   done
 
   # Retries exhausted and still the lock signature. Clear ONLY if provably stale.
@@ -196,11 +204,12 @@ fetch_with_packed_refs_lock_guard() {
       fi
       echo "$label: removed provably-stale packed-refs lock $lock (age >= ${FLEET_SYNC_PACKED_REFS_LOCK_AGE_SECS}s, no live holder) and retrying fetch" >&2
       FETCH_OUTPUT=$(git -C "$PROJ" fetch origin --prune --quiet 2>&1); rc=$?
-      if [ "$rc" -eq 0 ]; then
+      if [ "$rc" -eq 0 ] && ! is_packed_refs_lock_error "$FETCH_OUTPUT"; then
         echo "$label: fetch succeeded after stale packed-refs lock cleanup" >&2
         echo "$label: recovered: removed a stale packed-refs lock (no live holder)"
         return 0
       fi
+      [ "$rc" -eq 0 ] && rc=1
       return "$rc"
     fi
     echo "$label: fetch blocked by packed-refs lock $lock that persisted across ${FLEET_SYNC_PACKED_REFS_LOCK_RETRIES} retries and is not provably stale (may belong to a live process); leaving it in place" >&2
