@@ -1550,9 +1550,19 @@ test_custom_snapshot_cleanup_on_signal() {
   child_pid_file="$dir/custom-child.pid"
   printf '%s\n' fm-pr-check-migration-v1 > "$state/.pr-check-migration-v1"
   chmod 0600 "$state/.pr-check-migration-v1"
-  printf '%s\n' '#!/usr/bin/env bash' 'printf "%s\n" "$$" > "$FM_TEST_CUSTOM_CHILD_PID"' 'sleep 30' \
+  printf '%s\n' '#!/usr/bin/env bash' 'trap "" TERM' \
+    'printf "%s\n" "$$" > "$FM_TEST_CUSTOM_CHILD_PID"' 'while :; do sleep 1; done' \
     > "$state/custom.check.sh"
   chmod 0700 "$state/custom.check.sh"
+  cat > "$dir/fakebin/timeout" <<'SH'
+#!/usr/bin/env bash
+shift
+"$@" &
+child=$!
+trap 'kill -TERM "$child" 2>/dev/null; exit 124' TERM
+wait "$child"
+SH
+  chmod 0700 "$dir/fakebin/timeout"
   FM_HOME="$dir/home" "$REGISTER" custom >/dev/null \
     || fail "could not register signal cleanup custom check"
 
