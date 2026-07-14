@@ -818,8 +818,8 @@ bounded_parent_activities_json() {  # <status-file>
     '{records:[],available:false,input_truncated:false,retained_truncated:false,reasons:[$reason],lines_in_window:0,records_in_window:0}'
 }
 
-terminal_evidence_json() {  # <parent-task-json> <event-note> <structured-state>
-  local task=$1 note=$2 structured_state=$3 backend target exists expected out rc clean bytes lines seen=false contradiction=false reason=''
+terminal_evidence_json() {  # <parent-task-json> <event-note> <evidence-contradicts>
+  local task=$1 note=$2 evidence_contradicts=$3 backend target exists expected out rc clean bytes lines seen=false contradiction=false reason=''
   backend=$(printf '%s' "$task" | jq -r '.backend // ""')
   target=$(printf '%s' "$task" | jq -r '.endpoint.target // ""')
   exists=$(printf '%s' "$task" | jq -r '.endpoint.exists // "unknown"')
@@ -856,7 +856,7 @@ terminal_evidence_json() {  # <parent-task-json> <event-note> <structured-state>
   if [ -n "$note" ]; then
     case "$clean" in *"$note"*) seen=true ;; esac
   fi
-  if [ "$seen" = true ] && [ "$structured_state" != active_child_work ]; then contradiction=true; fi
+  if [ "$seen" = true ] && [ "$evidence_contradicts" = true ]; then contradiction=true; fi
   jq -n \
     --arg observed "$SNAPSHOT_NOW" \
     --argjson lines "$lines" \
@@ -866,10 +866,69 @@ terminal_evidence_json() {  # <parent-task-json> <event-note> <structured-state>
     '{provenance:"parent-direct-report-terminal",trust:"untrusted-supplement",captured:true,observed_at:$observed,freshness:"fresh",reason:null,lines:$lines,bytes:$bytes,event_note_seen:$seen,contradiction:$contradiction}'
 }
 
+parent_evidence_reconciliation_json() {  # <summary-json> <activities-json> <decisions-json>
+  jq -n --argjson summary "$1" --argjson activities "$2" --argjson decisions "$3" '
+    def keyed: . != null and . != "" and . != "default";
+    def result($e; $matches; $complete; $surface):
+      $e + {
+        verdict:(if ($matches | length) > 0 then "corroborates"
+                 elif $complete then "contradicts"
+                 else "inconclusive" end),
+        compared_to:$surface,
+        matched:($matches[0] // null)
+      };
+    ([ $activities[] as $e
+       | if $e.verb == "working" then
+           ([ $summary.active_children[]
+              | select(if ($e.key | keyed) then .id == $e.key else true end)
+              | {surface:"active_children",id,key:null,verb:"working"}]) as $matches
+           | result($e; $matches;
+               $summary.counts.active_children == ($summary.active_children | length);
+               "active_children")
+         elif $e.verb == "paused" then
+           ([ $summary.holds[]
+              | select(if ($e.key | keyed) then .id == $e.key or .blocked_by == $e.key else true end)
+              | {surface:"holds",id,key:(.blocked_by // null),verb:"paused"}]) as $matches
+           | result($e; $matches;
+               $summary.counts.holds == ($summary.holds | length);
+               "holds")
+         else
+           $e + {verdict:"inconclusive",compared_to:null,matched:null}
+         end ]) as $activity_results
+    | ([ $decisions[] as $e
+         | if $e.verb == "needs-decision" then
+             ([ $summary.decisions_open[]
+                | select(.verb == "needs-decision")
+                | select(if ($e.key | keyed) then .key == $e.key else true end)
+                | {surface:"decisions_open",id,key,verb}]) as $matches
+             | result($e; $matches;
+                 $summary.counts.decisions_open == ($summary.decisions_open | length);
+                 "decisions_open")
+           elif $e.verb == "blocked" then
+             ([ $summary.decisions_open[]
+                | select(.verb == "blocked")
+                | select(if ($e.key | keyed) then .key == $e.key or .id == $e.key else true end)
+                | {surface:"decisions_open",id,key,verb}]
+              + [ $summary.holds[]
+                  | select(if ($e.key | keyed) then .id == $e.key or .blocked_by == $e.key else true end)
+                  | {surface:"holds",id,key:(.blocked_by // null),verb:"blocked"}]) as $matches
+             | result($e; $matches;
+                 ($summary.counts.decisions_open == ($summary.decisions_open | length)
+                  and $summary.counts.holds == ($summary.holds | length));
+                 "decisions_open_or_holds")
+           else
+             $e + {verdict:"inconclusive",compared_to:null,matched:null}
+           end ]) as $decision_results
+    | {provenance:"parent-status-keyed-fold",trust:"untrusted-supplement",
+       activities:$activity_results,decisions:$decision_results,
+       contradiction:any(($activity_results + $decision_results)[]; .verdict == "contradicts"),
+       inconclusive:any(($activity_results + $decision_results)[]; .verdict == "inconclusive")}'
+}
+
 secondmate_current_json() {  # <parent-tasks-json>
   local tasks=$1 registry union rows total_registered total shown truncated
   local row id home registered registry_error task status_file event_raw event_note event_epoch event_age
-  local activity_scan activities decisions provenance freshness reason summary summary_rc summary_bytes state terminal contradiction
+  local activity_scan activities decisions reconciliation provenance freshness reason summary summary_rc summary_bytes state terminal terminal_contradiction contradiction
   local records='[]' seen_homes=''
   registry=$(registry_secondmates_json) || return 1
   union=$(jq -n --argjson registry "$registry" --argjson tasks "$tasks" '
@@ -967,21 +1026,22 @@ secondmate_current_json() {  # <parent-tasks-json>
 
     if [ -z "$reason" ]; then
       state=$(printf '%s' "$summary" | jq -r '.state')
-      if [ "$state" != active_child_work ] && [ "$(printf '%s' "$activities" | jq 'length')" -gt 0 ]; then
-        terminal=$(terminal_evidence_json "$task" "$event_note" "$state")
+      reconciliation=$(parent_evidence_reconciliation_json "$summary" "$activities" "$decisions")
+      contradiction=$(printf '%s' "$reconciliation" | jq -r '.contradiction')
+      terminal_contradiction=$(printf '%s' "$reconciliation" | jq -r --arg note "$event_note" '
+        any(.activities[]; .verdict == "contradicts" and .summary == $note)')
+      if [ "$terminal_contradiction" = true ]; then
+        terminal=$(terminal_evidence_json "$task" "$event_note" true)
       else
         terminal=$(jq -n --arg observed "$SNAPSHOT_NOW" \
           '{provenance:"parent-direct-report-terminal",trust:"untrusted-supplement",captured:false,observed_at:$observed,freshness:"not-collected",reason:"no useful contradiction check",lines:0,bytes:0,event_note_seen:false,contradiction:false}')
       fi
-      contradiction=false
-      if [ "$state" != active_child_work ] && [ "$(printf '%s' "$activities" | jq 'length')" -gt 0 ]; then contradiction=true; fi
-      if [ "$state" != captain_decision ] && printf '%s' "$decisions" | jq -e 'any(.[]; .verb == "needs-decision")' >/dev/null; then contradiction=true; fi
       if printf '%s' "$terminal" | jq -e '.contradiction == true' >/dev/null; then contradiction=true; fi
       record=$(jq -n \
         --arg id "$id" --arg home "$home" --arg state "$state" --arg observed "$SNAPSHOT_NOW" \
         --argjson registered "$registered" --argjson summary "$summary" --argjson decisions "$decisions" \
         --argjson activities "$activities" --argjson activity_scan "$activity_scan" \
-        --argjson terminal "$terminal" --argjson contradiction "$contradiction" \
+        --argjson reconciliation "$reconciliation" --argjson terminal "$terminal" --argjson contradiction "$contradiction" \
         --arg event_raw "$event_raw" --arg event_note "$event_note" --argjson event_age "$event_age" '
         {id:$id,home:$home,registered:$registered,current:{state:$state,reason:null},
          provenance:{selected:"structured-home",structured_home:$home,parent_event_role:"historical-only"},
@@ -989,7 +1049,7 @@ secondmate_current_json() {  # <parent-tasks-json>
          active_children:$summary.active_children,
          decisions_open:$summary.decisions_open,holds:$summary.holds,queued:$summary.queued,
          landed:$summary.landed,endpoints:$summary.endpoints,counts:$summary.counts,omitted:$summary.omitted,
-         parent_event:{raw:$event_raw,note:$event_note,age_seconds:$event_age,open_activities:$activities,open_decisions:$decisions,activity_scan:$activity_scan},
+         parent_event:{raw:$event_raw,note:$event_note,age_seconds:$event_age,open_activities:$activities,open_decisions:$decisions,activity_scan:$activity_scan,reconciliation:$reconciliation},
          terminal_evidence:$terminal,contradiction:$contradiction}')
     else
       if [ -n "$event_raw" ]; then
@@ -1000,7 +1060,7 @@ secondmate_current_json() {  # <parent-tasks-json>
         freshness=unknown
       fi
       if [ -n "$event_raw" ]; then
-        terminal=$(terminal_evidence_json "$task" "$event_note" unknown)
+        terminal=$(terminal_evidence_json "$task" "$event_note" false)
       else
         terminal=$(jq -n --arg observed "$SNAPSHOT_NOW" \
           '{provenance:"parent-direct-report-terminal",trust:"untrusted-supplement",captured:false,observed_at:$observed,freshness:"not-collected",reason:"no parent event to compare",lines:0,bytes:0,event_note_seen:false,contradiction:false}')

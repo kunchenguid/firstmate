@@ -491,6 +491,81 @@ test_parent_decision_is_untrusted_contradiction_only() {
   pass "parent decisions remain untrusted contradiction evidence"
 }
 
+test_parent_evidence_reconciles_by_verb_and_key() {
+  local home hold blocked decision fakebin canonical mate child
+  home=$(make_home keyed-parent-evidence)
+  hold="$TMP_ROOT/keyed-parent-hold-home"
+  blocked="$TMP_ROOT/keyed-parent-blocked-home"
+  decision="$TMP_ROOT/keyed-parent-decision-home"
+  make_valid_secondmate_home hold "$hold"
+  make_valid_secondmate_home blocked "$blocked"
+  make_valid_secondmate_home decision "$decision"
+  append_secondmate_registry "$home" hold "$hold"
+  append_secondmate_registry "$home" blocked "$blocked"
+  append_secondmate_registry "$home" decision "$decision"
+  fm_write_secondmate_meta "$home/state/hold.meta" "$hold" "firstmate:fm-hold" sample
+  fm_write_secondmate_meta "$home/state/blocked.meta" "$blocked" "firstmate:fm-blocked" sample
+  fm_write_secondmate_meta "$home/state/decision.meta" "$decision" "firstmate:fm-decision" sample
+  printf 'working [key=stale-work]: old work still running\n' > "$home/state/hold.status"
+  printf 'paused [key=legal-release]: waiting for legal release\n' >> "$home/state/hold.status"
+  printf 'blocked [key=vendor-release]: waiting for vendor release\n' > "$home/state/blocked.status"
+  printf 'needs-decision [key=stale-route]: choose the old route\n' > "$home/state/decision.status"
+  cat > "$hold/data/backlog.md" <<'EOF'
+## In flight
+
+## Queued
+- [ ] legal-release - Legal release blocked-by: external-legal - legal review (repo: sample) (kind: ship)
+
+## Done
+EOF
+  cat > "$blocked/data/backlog.md" <<'EOF'
+## In flight
+
+## Queued
+- [ ] vendor-release - Vendor release blocked-by: external-vendor - vendor review (repo: sample) (kind: ship)
+
+## Done
+EOF
+  child=decision-child
+  mkdir -p "$decision/projects/$child"
+  cat > "$decision/data/backlog.md" <<EOF
+## In flight
+- [ ] $child - Decision child (repo: sample) (kind: ship) (since 2026-07-11)
+
+## Queued
+
+## Done
+EOF
+  fm_write_meta "$decision/state/$child.meta" \
+    "window=firstmate:fm-$child" "worktree=$decision/projects/$child" "project=sample" \
+    "harness=codex" "kind=ship" "mode=no-mistakes"
+  printf 'needs-decision [key=live-route]: choose the current route\n' > "$decision/state/$child.status"
+  fakebin=$(make_fakebin "$home")
+  canonical=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --json)
+  printf '%s' "$canonical" | jq -e '
+    (.secondmate_current.records[] | select(.id == "hold")
+      | .current.state == "externally_held"
+        and .contradiction == true
+        and .terminal_evidence.captured == false
+        and (.parent_event.reconciliation.activities
+          | any(.verb == "paused" and .key == "legal-release" and .verdict == "corroborates"))
+        and (.parent_event.reconciliation.activities
+          | any(.verb == "working" and .key == "stale-work" and .verdict == "contradicts")))
+      and (.secondmate_current.records[] | select(.id == "blocked")
+        | .current.state == "externally_held"
+          and .contradiction == false
+          and (.parent_event.reconciliation.decisions
+            | any(.verb == "blocked" and .key == "vendor-release" and .verdict == "corroborates")))
+      and (.secondmate_current.records[] | select(.id == "decision")
+        | .current.state == "captain_decision"
+          and .contradiction == true
+          and (.parent_event.reconciliation.decisions
+            | any(.verb == "needs-decision" and .key == "stale-route" and .verdict == "contradicts")))
+  ' >/dev/null || fail "parent evidence was not reconciled by verb and key: $canonical"
+  pass "parent evidence reconciliation distinguishes matching holds, blocks, and decisions"
+}
+
 test_nonprogressing_child_states_are_explicit() {
   local home mate fakebin canonical
   home=$(make_home child-state-classification)
@@ -1074,6 +1149,7 @@ test_structured_child_decision_reaches_captains_call
 test_bad_secondmate_homes_never_revive_parent_work
 test_secondmate_and_child_bounds_are_disclosed
 test_parent_decision_is_untrusted_contradiction_only
+test_parent_evidence_reconciles_by_verb_and_key
 test_nonprogressing_child_states_are_explicit
 test_registry_unavailability_and_bounds_are_explicit
 test_current_landed_baseline_is_repeatable_and_prior_report_independent
