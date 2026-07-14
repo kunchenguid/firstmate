@@ -335,6 +335,7 @@ INVALID_IDS=(
   'task$a'
 )
 
+# shellcheck disable=SC2016 # Literal shell syntax is task-ID test data.
 UNSAFE_LIFECYCLE_IDS=(
   '../escape'
   'a/b'
