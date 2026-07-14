@@ -25,10 +25,18 @@
 
 # fm_detach_spawn <stdout-file> <command> [args...]
 # Launch <command> in its OWN session and process group, with stdin on /dev/null
-# and stdout+stderr on <stdout-file> (truncated), and print the detached pid. The
+# and stdout+stderr APPENDED to <stdout-file>, and print the detached pid. The
 # caller is NOT the detached process's parent, so it cannot `wait` on it: poll the
 # pid (see fm_detach_follow) instead. The child inherits the caller's environment,
 # so FM_HOME and the rest of firstmate's context carry over unchanged.
+# TRUNCATION IS THE CALLER'S: the output file is per-home and outlives any one
+# spawn, so the launcher truncates it once as the cycle boundary and every detached
+# process only ever appends. Opening it truncating here instead would let two
+# processes racing for the same singleton (a duplicate-startup race: the loser
+# writes "already running" and exits, the winner later writes its reason) each hold
+# an fd at offset 0 and overwrite each other mid-line, handing the primary a garbled
+# tail of supervision output. O_APPEND makes every write land at end-of-file, so
+# whole lines survive intact and no remnant can be read as something it is not.
 fm_detach_spawn() {
   local out=$1
   shift
@@ -54,7 +62,7 @@ fm_detach_spawn_setsid() {
   shift
   pidfile=$(mktemp "${TMPDIR:-/tmp}/fm-detach.XXXXXX") || return 1
   # shellcheck disable=SC2016 # single quotes are deliberate: $$ and $@ must expand in the DETACHED shell (its own pid, its own args), not in this one.
-  ( setsid sh -c 'printf "%s\n" "$$" > "$1"; shift; exec "$@"' fm-detach "$pidfile" "$@" < /dev/null > "$out" 2>&1 & )
+  ( setsid sh -c 'printf "%s\n" "$$" > "$1"; shift; exec "$@"' fm-detach "$pidfile" "$@" < /dev/null >> "$out" 2>&1 & )
   pid=
   i=0
   while [ "$i" -lt 100 ]; do
@@ -81,7 +89,7 @@ fm_detach_spawn_perl() {
     if (!$pid) {
       POSIX::setsid();
       open(STDIN, "<", "/dev/null") or die "cannot read /dev/null: $!\n";
-      open(STDOUT, ">", $out) or die "cannot write $out: $!\n";
+      open(STDOUT, ">>", $out) or die "cannot write $out: $!\n";
       open(STDERR, ">&", \*STDOUT) or die "cannot dup stdout: $!\n";
       exec { $ARGV[0] } @ARGV or die "exec failed: $!\n";
     }
@@ -112,4 +120,24 @@ fm_detach_follow() {
   while fm_pid_alive "$pid" && [ "$(fm_pid_start "$pid")" = "$start" ]; do
     sleep "$poll"
   done
+}
+
+# fm_detach_kill <pid> <start> [signal]
+# Signal a process fm_detach_spawn launched, but ONLY while <pid> still names the
+# very process that was spawned - matched against the start time the caller pinned
+# with fm_pid_start at spawn, the same exec-stable identity fm_detach_follow uses.
+# A launcher that must retract a detached process it could not confirm needs this:
+# the detached process is orphaned to init, so nothing holds its pid open once it
+# exits (as a zombie child did back when it was the launcher's own child), and its
+# number can be handed to any unrelated process the moment it dies. Signalling a
+# bare recorded pid would then kill a stranger - the exact class of bug detachment
+# exists to remove - so this FAILS CLOSED: with no pinned start, no readable start
+# time, or a mismatch, it signals nothing and returns non-zero.
+fm_detach_kill() {
+  local pid=$1 start=${2:-} sig=${3:-TERM} current
+  [ -n "$start" ] || return 1
+  fm_pid_alive "$pid" || return 1
+  current=$(fm_pid_start "$pid") || return 1
+  [ "$current" = "$start" ] || return 1
+  kill -"$sig" "$pid" 2>/dev/null
 }

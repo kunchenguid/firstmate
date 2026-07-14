@@ -207,16 +207,21 @@ fi
 # it. We therefore poll its pid rather than `wait` on it, and we never kill it on
 # a signal - only on the FAILED path, where we launched a watcher that could not
 # be confirmed and must not be left behind.
+# WATCHER_START pins that watcher's identity (fm_pid_start) the moment it is
+# spawned, because being detached also means nothing holds its pid once it exits:
+# an unconfirmable watcher may well have died already, and the retraction below
+# must never signal whatever unrelated process inherited its number.
 watcher_pid=
+watcher_start=
 kill_unconfirmed_watcher() {
   [ -n "$watcher_pid" ] || return 0
-  fm_pid_alive "$watcher_pid" || return 0
   # Never kill a watcher that legitimately holds the singleton: that one IS the
   # supervision cycle, whoever launched it.
   if healthy_watcher && [ "$HEALTHY_PID" = "$watcher_pid" ]; then
     return 0
   fi
-  kill -TERM "$watcher_pid" 2>/dev/null || true
+  # Fails closed on a recycled or unreadable pid: no confirmed identity, no signal.
+  fm_detach_kill "$watcher_pid" "$watcher_start" || true
 }
 # Stand down without touching the watcher: it must survive its launcher.
 trap 'exit 129' HUP
@@ -233,6 +238,7 @@ case "$watcher_pid" in
     exit 1
     ;;
 esac
+watcher_start=$(fm_pid_start "$watcher_pid" 2>/dev/null || true)
 watcher_exited=0
 
 # Verify the outcome: poll until the watcher we launched is the confirmed healthy

@@ -713,6 +713,22 @@ test_watcher_idle_self_exit() {
     kill "$pid" 2>/dev/null || true
     wait "$pid" 2>/dev/null || true
   done
+
+  # (3) FM_IDLE_EXIT_POLLS=off disables the resting condition outright, for a caller
+  # that already bounds this watcher some other way (bin/fm-watch-checkpoint.sh runs
+  # it in the foreground under a timeout). An empty fleet must NOT end it there.
+  dir=$(make_case idle-exit-off)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_IDLE_EXIT_POLLS=off \
+    FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  sleep 5
+  is_live_non_zombie "$pid" || fail "watcher idle-exited with the resting condition disabled: $(cat "$out")"
+  ! grep -qF 'watcher: idle-exit' "$out" || fail "watcher reported idle-exit with FM_IDLE_EXIT_POLLS=off"
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
   pass "watcher idle-exits only with an empty fleet, no armed checks, and away mode off"
 }
 
@@ -823,6 +839,95 @@ test_detach_follow_is_bounded_by_process_identity() {
   status=$?
   [ "$status" -eq 0 ] || fail "fm_detach_follow did not return when the followed process exited (status $status)"
   pass "fm_detach_follow follows a live process and ends when that pid is recycled"
+}
+
+test_detach_kill_signals_only_the_process_it_pinned() {
+  # The retraction path (an arm that launched a watcher it could not confirm, an afk
+  # detach that could not confirm its daemon) signals a pid nothing holds open any
+  # more: a detached process is orphaned to init, so its number is free the instant
+  # it dies and may already belong to a stranger. fm_detach_kill must fail CLOSED -
+  # signal only while the pid still names the process pinned at spawn - because
+  # signalling the wrong process is the exact class of bug detachment exists to remove.
+  local dir out victim live start rc i
+  dir=$(make_case detach-kill)
+  out="$dir/victim.out"
+  victim="$dir/victim.sh"
+  # Detached exactly as a watcher/daemon is, so this exercises the real retraction
+  # path: the process is orphaned to init, so nothing holds its pid once it exits.
+  printf '#!/usr/bin/env bash\nexec sleep 300\n' > "$victim"
+  chmod +x "$victim"
+  live=$(bash -c '. "$1"; . "$2"; fm_detach_spawn "$3" "$4"' _ "$LIB" "$DETACH_LIB" "$out" "$victim") \
+    || fail "could not detach the process to retract"
+  case "$live" in
+    ''|*[!0-9]*) fail "fm_detach_spawn printed no detached pid (got '$live')" ;;
+  esac
+  start=$(bash -c '. "$1"; fm_pid_start "$2"' _ "$LIB" "$live") || fail "could not pin the process start time"
+  [ -n "$start" ] || fail "fm_pid_start produced no start time to pin"
+  # A recycled pid: alive, but no longer the process that was pinned.
+  rc=0
+  bash -c '. "$1"; . "$2"; fm_detach_kill "$3" "start-of-a-DIFFERENT-process"' _ "$LIB" "$DETACH_LIB" "$live" || rc=$?
+  [ "$rc" -ne 0 ] || fail "fm_detach_kill reported success against a pid it never launched"
+  sleep 0.3
+  is_live_non_zombie "$live" || fail "REGRESSION: fm_detach_kill signalled an unrelated process that inherited the pid"
+  # No pinned identity at all (the start time could not be read at spawn): still no signal.
+  rc=0
+  bash -c '. "$1"; . "$2"; fm_detach_kill "$3" ""' _ "$LIB" "$DETACH_LIB" "$live" || rc=$?
+  [ "$rc" -ne 0 ] || fail "fm_detach_kill reported success with no pinned identity"
+  sleep 0.3
+  is_live_non_zombie "$live" || fail "REGRESSION: fm_detach_kill signalled a pid it could not confirm"
+  # Control, so failing closed cannot pass by never signalling anything: with the
+  # real pin it must actually terminate the very process it pinned.
+  bash -c '. "$1"; . "$2"; fm_detach_kill "$3" "$4"' _ "$LIB" "$DETACH_LIB" "$live" "$start" \
+    || fail "fm_detach_kill refused to signal the process it pinned"
+  i=0
+  while [ "$i" -lt 50 ] && kill -0 "$live" 2>/dev/null; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  ! kill -0 "$live" 2>/dev/null || fail "fm_detach_kill did not terminate the process it pinned"
+  pass "fm_detach_kill signals only the process pinned at spawn and fails closed on a recycled pid"
+}
+
+test_detach_spawn_appends_to_a_shared_output() {
+  # Two detached processes legitimately share the per-home output file during the
+  # duplicate-startup race the arm handles: the loser writes "already running" and
+  # exits, the winner writes its wake reason later. Opened TRUNCATING, both hold an
+  # fd at offset 0 and the shorter write lands on top of the longer one, leaving a
+  # mid-word remnant that print_watch_output cats to the primary as supervision
+  # output. Appending keeps every line whole (the arm still truncates once, as the
+  # cycle boundary).
+  local dir out first second i
+  dir=$(make_case detach-append)
+  out="$dir/shared.out"
+  first="$dir/slow-writer.sh"
+  second="$dir/fast-writer.sh"
+  # The slow writer opens the file first and writes LAST, and its line is shorter
+  # than the one already there - the overwrite that truncating fds would produce.
+  cat > "$first" <<'SH'
+#!/usr/bin/env bash
+sleep 1
+printf 'watcher: short\n'
+SH
+  cat > "$second" <<'SH'
+#!/usr/bin/env bash
+printf 'watcher: a much longer line that a shorter later write would overwrite\n'
+SH
+  chmod +x "$first" "$second"
+  : > "$out"
+  bash -c '. "$1"; . "$2"; fm_detach_spawn "$3" "$4"' _ "$LIB" "$DETACH_LIB" "$out" "$first" >/dev/null \
+    || fail "could not detach the first writer"
+  bash -c '. "$1"; . "$2"; fm_detach_spawn "$3" "$4"' _ "$LIB" "$DETACH_LIB" "$out" "$second" >/dev/null \
+    || fail "could not detach the second writer"
+  i=0
+  while [ "$i" -lt 100 ]; do
+    grep -qF 'watcher: short' "$out" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  grep -qxF 'watcher: short' "$out" || fail "the later writer's line never landed whole: $(cat "$out")"
+  grep -qxF 'watcher: a much longer line that a shorter later write would overwrite' "$out" \
+    || fail "REGRESSION: a racing detached writer overwrote a line already in the shared output: $(cat "$out")"
+  pass "detached processes append to a shared output file instead of overwriting each other"
 }
 
 test_attached_arm_surfaces_watcher_idle_exit() {
@@ -1034,6 +1139,8 @@ test_watcher_idle_self_exit
 test_detach_spawn_contract
 test_detach_spawn_fails_loud_with_no_backend
 test_detach_follow_is_bounded_by_process_identity
+test_detach_kill_signals_only_the_process_it_pinned
+test_detach_spawn_appends_to_a_shared_output
 test_attached_arm_surfaces_watcher_idle_exit
 test_arm_truncates_the_shared_watch_output
 test_arm_attaches_and_waits_for_live_fresh_watcher

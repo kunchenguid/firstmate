@@ -1,10 +1,21 @@
 #!/usr/bin/env bash
 # Run one bounded foreground watcher checkpoint for harnesses that should not
 # rely on background-task completion to wake the model.
+#
+# This checkpoint OPTS OUT of the watcher's idle self-exit (the resting condition
+# owned by bin/fm-watch.sh, which defines it and its threshold). That condition
+# exists only to bound a DETACHED watcher that outlives its session; the watcher
+# here runs in the foreground under the timeout below, so it is already bounded and
+# the resting condition is neither needed nor contracted. Left enabled, a checkpoint
+# window longer than the idle window would end the watcher early with exit 0 and a
+# "watcher: idle-exit" line, which is neither an actionable wake nor the quiet
+# "checkpoint:"/124 outcome - it matches no branch of the Codex supervision protocol
+# (docs/supervision-protocols/codex.md).
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SECONDS_ARG=${FM_CODEX_WATCH_CHECKPOINT:-180}
+export FM_IDLE_EXIT_POLLS=off
 
 usage() {
   cat <<'EOF'

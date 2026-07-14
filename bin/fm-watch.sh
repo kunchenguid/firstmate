@@ -115,7 +115,18 @@ fi
 # dispatches, and any spawn re-arms the watcher anyway, so this can never kill a
 # watcher a live session still expects. The counter resets the moment any of the
 # three conditions stops holding.
+# FM_IDLE_EXIT_POLLS=off DISABLES the resting condition, for a caller that already
+# bounds this watcher's life some other way and therefore neither needs it nor
+# contracts for it: bin/fm-watch-checkpoint.sh runs this same script in the
+# FOREGROUND under a timeout and opts out (its header says why). Anything that is
+# not `off` and not a positive integer is not a threshold at all, so it falls back
+# to the default rather than silently becoming one.
 IDLE_EXIT_POLLS=${FM_IDLE_EXIT_POLLS:-40}
+IDLE_EXIT_ENABLED=1
+case "$IDLE_EXIT_POLLS" in
+  off) IDLE_EXIT_ENABLED=0 ;;
+  ''|0|*[!0-9]*) IDLE_EXIT_POLLS=40 ;;
+esac
 POLL=${FM_POLL:-15}                   # seconds between cycles
 HEARTBEAT=${FM_HEARTBEAT:-600}        # base seconds between heartbeat scans
 HEARTBEAT_MAX=${FM_HEARTBEAT_MAX:-7200}  # heartbeat backoff cap
@@ -667,7 +678,7 @@ while :; do
   # matches none of the signal/stale/check/heartbeat reasons, so an arm following
   # this watcher reports it as-is and firstmate simply does not re-arm an empty
   # fleet. The next spawn arms a fresh watcher.
-  if nothing_to_supervise; then
+  if [ "$IDLE_EXIT_ENABLED" = 1 ] && nothing_to_supervise; then
     idle_polls=$(( idle_polls + 1 ))
     if [ "$idle_polls" -ge "$IDLE_EXIT_POLLS" ]; then
       echo "watcher: idle-exit (nothing to supervise for $idle_polls polls: no tasks in flight, no armed checks, not away)"

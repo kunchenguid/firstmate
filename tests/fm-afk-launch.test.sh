@@ -526,6 +526,30 @@ SH
   rm -rf "$st"
 }
 
+# --detach is the SOLE entry point for the detached daemon (the afk skill instructs
+# that flag), so there is no env-var twin to document or keep in sync. An ambient
+# FM_AFK_DETACH must not silently change which host the daemon runs in.
+unit_native_detach_requires_the_flag() {
+  local st out daemon
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-detach-flag.XXXXXX")
+  mkdir -p "$st/state"
+  daemon="$st/daemon.sh"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$daemon"
+  chmod +x "$daemon"
+  out=$(FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_AFK_DETACH=1 bash -c '
+    . "$1"
+    FM_AFK_DAEMON=$2
+    fm_afk_start_main
+  ' _ "$START" "$daemon" 2>&1)
+  if printf '%s' "$out" | grep -qF 'starting supervise daemon in foreground' \
+    && ! printf '%s' "$out" | grep -qF 'detached'; then
+    pass "native entry: FM_AFK_DETACH does not detach; --detach is the sole entry point"
+  else
+    fail "native entry: an env var still switched the daemon onto the detached path: $out"
+  fi
+  rm -rf "$st"
+}
+
 unit_close_failure_preserves_record() {
   local st
   st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-close-fail.XXXXXX")
@@ -942,6 +966,7 @@ unit_tmux_absence_distinguishes_probe_failure
 unit_native_lifecycle
 unit_native_entry_preserves_prepared_state
 unit_native_detach_survives_reap
+unit_native_detach_requires_the_flag
 unit_close_failure_preserves_record
 unit_record_publication_atomic
 unit_malformed_record_fails_closed

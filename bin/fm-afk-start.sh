@@ -61,10 +61,15 @@ fm_afk_start_usage() {
 
 # Launch the daemon detached and follow it. Confirms the identity-backed daemon
 # lock names the new process before reporting success, so this never claims a
-# daemon it cannot see; an unconfirmable one is killed rather than left detached.
+# daemon it cannot see; an unconfirmable one is killed rather than left detached -
+# and killed by IDENTITY (fm_detach_kill against the start time pinned here), never
+# off the bare pid, which a detached process releases the moment it dies.
 fm_afk_start_detached() {
-  local log pid deadline
+  local log pid start deadline
   log="$FM_AFK_STATE/.supervise-daemon.out"
+  # The detached daemon APPENDS (bin/fm-detach-lib.sh), so this launch owns the
+  # truncation that makes the log this away session's.
+  : > "$log"
   pid=$(fm_detach_spawn "$log" "$FM_AFK_DAEMON") || pid=
   case "$pid" in
     ''|*[!0-9]*)
@@ -72,6 +77,7 @@ fm_afk_start_detached() {
       return 1
       ;;
   esac
+  start=$(fm_pid_start "$pid" 2>/dev/null || true)
   deadline=$(( $(date +%s) + FM_AFK_DETACH_CONFIRM_TIMEOUT ))
   while :; do
     if daemon_lock_held_by_live_daemon && [ "$(daemon_lock_pid)" = "$pid" ]; then
@@ -88,7 +94,7 @@ fm_afk_start_detached() {
     [ "$(date +%s)" -ge "$deadline" ] && break
     sleep 0.2
   done
-  kill -TERM "$pid" 2>/dev/null || true
+  fm_detach_kill "$pid" "$start" || true
   echo "afk: FAILED - could not confirm the detached supervise daemon (see $log)" >&2
   return 1
 }
@@ -158,7 +164,9 @@ daemon_lock_held_by_live_daemon() {
 }
 
 fm_afk_start_main() {
-  local detach=${FM_AFK_DETACH:-0}
+  # --detach is the SOLE way to ask for the detached daemon: one entry point, and
+  # the afk skill instructs exactly that flag.
+  local detach=0
   case "${1:-}" in
     '' ) ;;
     --detach) detach=1 ;;
