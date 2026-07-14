@@ -20,7 +20,9 @@
 # glyph (e.g. claude's older `| > ... |`). On a bare, unstructured row it is a
 # dead-shell prompt and is NEVER "empty"; it classifies as `unknown` (not a safe
 # injection target). The AGENT prompt glyphs `❯` (claude) and `›` (codex) are a
-# genuine empty agent composer either way, bordered or bare.
+# genuine empty agent composer either way, bordered or bare; that set is the
+# configurable half of the rule and the shell set is not, both enforced as
+# literal, locale-invariant glyph sets - see THE AGENT PROMPT GLYPH SET below.
 #
 # GHOST/PLACEHOLDER TEXT is the other half of this owner (task
 # afk-herdr-false-pending): a harness fills an otherwise-empty composer with

@@ -33,6 +33,9 @@ The supervision knowledge lives here: busy signature, exit command, interrupt, d
 Never dispatch a crewmate or secondmate on an unverified adapter.
 If `config/crew-harness` or `config/secondmate-harness` names an unverified adapter, tell the captain and fall back to firstmate's own harness until that adapter is verified.
 If the captain asks for a new harness, propose verifying it first: spawn a trivial supervised task using `fm-spawn`'s raw-launch-command escape hatch, confirm every fact empirically, then record the mechanics in `fm-spawn`, the busy signature in `fm-watch.sh` and `fm-tmux-lib.sh` defaults, any needed `FM_COMPOSER_IDLE_RE` empty-composer override plus any novel bare agent prompt glyph in `bin/fm-composer-lib.sh`'s shared composer classifier (the one fleet-wide owner of the empty/dead-shell/pending decision, so a new harness's own idle composer is not misread as a dead shell), the tmux agent-process liveness classification in `bin/backends/tmux.sh` when the harness can launch a secondmate, and the verified knowledge here.
+A novel prompt glyph is added to that owner's literal glyph set (`FM_COMPOSER_AGENT_GLYPHS_DEFAULT`, overridable fleet-wide with `FM_COMPOSER_AGENT_GLYPHS`), never spelled as a regex, and a shell prompt glyph (`>`, `$`, `%`, `#`) is refused from that set by design - it is a dead shell, not an empty composer.
+An idle-placeholder regex is matched under a pinned `LC_ALL=C`, so write it glyph-free (the leading glyph is stripped for you before the pattern is matched again) and never as a bracket class over multibyte glyphs, which degenerates into a byte class under that locale and matches box-drawing rows instead of the glyphs it names.
+The full contract is `docs/herdr-backend.md`'s "Composer-emptiness safety" section, and the knob reference is `docs/configuration.md`.
 
 ## Detection
 
