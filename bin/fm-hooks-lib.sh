@@ -29,25 +29,26 @@
 # session-start liveness sweep in bin/fm-bootstrap.sh captures fm-spawn.sh with
 # out=$(... 2>&1), so both pipes are exposed). So every path - the timeout-binary
 # path, the shell-watchdog path, and the unbounded FM_HOOK_TIMEOUT=0 path - runs
-# the hook with stdout discarded and stderr captured to a private temp file,
-# which is relayed to firstmate's own stderr once the hook is done. Diagnostics
-# still reach the operator; an orphaned descendant can hold nothing but that temp
-# file, so firstmate can never be stalled by a hook. Only stdin stays inherited.
+# the hook with stdout discarded and stderr captured, which is relayed to
+# firstmate's own stderr once the hook is done. Diagnostics still reach the
+# operator; an orphaned descendant can hold nothing firstmate waits on, so
+# firstmate can never be stalled by a hook. Only stdin stays inherited.
 #
-# The relay is bounded at FM_HOOK_STDERR_MAX_BYTES (default 65536): a chatty or
-# looping hook gets its first bytes relayed and the rest discarded with an
-# explicit truncation warning, so it can never dump an unbounded volume into a
+# The capture is bounded at both ends by FM_HOOK_STDERR_MAX_BYTES (default 65536).
+# The hook's stderr is a pipe drained by fm_hook_cap_writer, which keeps at most
+# that many bytes in a private temp file and reads and discards the rest, and the
+# relay out of that file is capped at the same size with an explicit truncation
+# warning. So a chatty or looping hook can neither dump an unbounded volume into a
 # caller that captures firstmate's output - bin/fm-bootstrap.sh's session-start
 # liveness sweep reads fm-spawn.sh through out=$(... 2>&1) straight into the
-# session-start digest.
+# session-start digest - nor fill TMPDIR, and neither can a background descendant
+# that survives the hook still holding that pipe.
 #
 # The temp file is created private (mode 0600, and never through a pre-planted
-# symlink) and is unlinked as soon as the runner holds its descriptors, so hook
-# stderr - which can carry tokens or URLs - is never readable by another user and
-# nothing is left behind in TMPDIR even if firstmate is interrupted mid-hook. Its
-# blocks are reclaimed the moment the hook and any descendant holding the
-# inherited descriptor exit, so a runaway hook's stderr is transient rather than
-# accumulating in TMPDIR.
+# symlink) and is unlinked as soon as the runner and the cap writer hold its
+# descriptors, so hook stderr - which can carry tokens or URLs - is never readable
+# by another user and nothing is left behind in TMPDIR even if firstmate is
+# interrupted mid-hook.
 #
 # Each hook receives its values both as positional arguments and as FM_HOOK_*
 # environment variables, so a hook can read whichever is convenient; the
@@ -89,6 +90,64 @@ fm_hook_errfile() {
   printf '%s\n' "$file"
 }
 
+# fm_hook_max_stderr_bytes
+# Print the stderr cap, FM_HOOK_STDERR_MAX_BYTES (default 65536), ignoring a
+# non-numeric setting. Always returns 0.
+fm_hook_max_stderr_bytes() {
+  local max="${FM_HOOK_STDERR_MAX_BYTES:-65536}"
+  case "$max" in
+    ''|*[!0-9]*) max=65536 ;;
+  esac
+  printf '%s\n' "$max"
+}
+
+# fm_hook_cap_writer <max>
+# Copy stdin - the pipe the hook writes its stderr into - to fd 8, the private,
+# already-unlinked capture file, keeping at most <max>+1 bytes of it on disk and
+# reading and discarding everything past that. The one byte over the cap is what
+# lets fm_hook_drain_errfd tell a capped stream from an exactly-cap-sized one, so
+# it can warn about the truncation.
+# The hook writes into this pipe rather than straight into the file so that the
+# on-disk size is bounded by firstmate rather than by the hook's restraint: a
+# looping hook - or a background descendant that outlives it still holding the
+# pipe - can neither grow the file until TMPDIR is full nor block on a pipe nobody
+# reads. Reads on a timeout, so a partial chunk still reaches the file while such
+# a survivor keeps the pipe open and EOF never comes. Builtins only, so it works
+# on a minimal PATH. Always returns 0.
+fm_hook_cap_writer() {
+  local limit=$(($1 + 1))
+  local chunk rc keep written=0 fd=3
+  local LC_ALL=C
+  # This is the one process that can outlive the hook - a descendant that survives
+  # it keeps the pipe open, so this keeps reading - which means it must hold none
+  # of firstmate's own descriptors, or it would stall a caller capturing
+  # firstmate's output exactly as the orphan itself would. Inheriting them is not
+  # hypothetical: bash saves the descriptors it redirects for a coprocess to high
+  # fds in this child, so firstmate's stdout and stderr are both still in here,
+  # alongside anything else the caller holds open (a lock, the capture file's read
+  # end). Everything but stdin (the hook's stderr), stdout (the pipe whose EOF
+  # tells firstmate this writer is done), and fd 8 (the capture file) is dropped.
+  while [ "$fd" -le 30 ]; do
+    [ "$fd" -eq 8 ] || eval "exec $fd>&-" 2>/dev/null || true
+    fd=$((fd + 1))
+  done
+  exec 2>/dev/null || true
+  while :; do
+    chunk=""
+    rc=0
+    IFS= read -r -N 4096 -t 1 chunk || rc=$?
+    if [ -n "$chunk" ] && [ "$written" -lt "$limit" ]; then
+      keep=${chunk:0:$((limit - written))}
+      printf '%s' "$keep" >&8 || true
+      written=$((written + ${#keep}))
+    fi
+    # rc 0 is a full chunk and anything above 128 is the read's own timeout; only
+    # a plain failure means EOF, which is the one thing that ends the drain.
+    [ "$rc" -eq 0 ] || [ "$rc" -gt 128 ] || break
+  done
+  return 0
+}
+
 # fm_hook_drain_errfd <hook-name> <task-label>
 # Relay a finished hook's captured stderr - held open on fd 9 by fm_hook_run,
 # whose file is already unlinked - to firstmate's stderr, up to
@@ -104,10 +163,8 @@ fm_hook_drain_errfd() {
   # times FM_HOOK_STDERR_MAX_BYTES. Bash re-reads the locale on assignment and
   # again when this local goes out of scope, so the caller's locale is unchanged.
   local LC_ALL=C
-  local max="${FM_HOOK_STDERR_MAX_BYTES:-65536}"
-  case "$max" in
-    ''|*[!0-9]*) max=65536 ;;
-  esac
+  local max
+  max=$(fm_hook_max_stderr_bytes)
   while [ "$relayed" -lt "$max" ]; do
     chunk=""
     IFS= read -r -N 4096 chunk <&9 || true
@@ -157,23 +214,40 @@ fm_hook_run() {
   case "$budget" in
     ''|*[!0-9]*) budget=120 ;;
   esac
-  local task_label=${1:-} timed_out=0 hook_err have_errfd=0
-  # fd 8 is the hook's stderr and fd 9 reads it back; the file is unlinked at
+  local task_label=${1:-} timed_out=0 hook_err have_errfd=0 cap_done_fd=
+  # fd 8 writes the capture file and fd 9 reads it back; the file is unlinked at
   # once, so nothing survives an interrupt and only these descriptors can reach
-  # it. The hook gets neither fd, just its stderr on a copy of fd 8.
+  # it. The hook gets neither: its stderr is a pipe into fm_hook_cap_writer, which
+  # owns fd 8 and is what keeps the file inside the stderr cap no matter how much
+  # the hook, or a descendant that outlives it, writes.
   hook_err=$(fm_hook_errfile)
   # SC2094 reads this as reading and writing one file by accident; opening both
-  # ends of the same file is the point - fd 8 is what the hook writes its stderr
-  # to and fd 9 is how the runner reads it back once the file is unlinked.
+  # ends of the same file is the point - fd 8 is what the cap writer writes the
+  # captured stderr to and fd 9 is how the runner reads it back once the file is
+  # unlinked.
   # shellcheck disable=SC2094
   if [ -n "$hook_err" ] && exec 8>"$hook_err" 9<"$hook_err"; then
     have_errfd=1
     rm -f "$hook_err" 2>/dev/null || true
+    # The cap writer forks here, inheriting fd 8 (the file) and reading the hook's
+    # stderr from its stdin pipe. A previous hook's cap writer can still be alive
+    # draining an orphan's pipe, and bash warns when it replaces a live coproc;
+    # that warning is noise here, not a problem, so it is kept out of firstmate's
+    # stderr.
+    { coproc FM_HOOK_CAP { fm_hook_cap_writer "$(fm_hook_max_stderr_bytes)"; } } 2>/dev/null
+    # Copied now: bash clears the array once it reaps the cap writer, and the
+    # relay below still needs its stdout to wait on.
+    cap_done_fd=${FM_HOOK_CAP[0]}
+    # fd 8 becomes the pipe into the cap writer, which now solely owns the file.
+    # A plain fd, not the coproc's own: bash closes coproc descriptors in every
+    # subshell, and the watchdog path runs the hook as a background job.
+    exec 8>&"${FM_HOOK_CAP[1]}"
+    eval "exec ${FM_HOOK_CAP[1]}>&-"
   else
     exec 8>/dev/null
   fi
   # Every launch below hands the hook stdout on /dev/null and stderr on a copy of
-  # fd 8, and keeps fd 8 and fd 9 out of its table; stdin stays inherited.
+  # fd 8, and keeps fd 8 itself and fd 9 out of its table; stdin stays inherited.
   if [ "$budget" -eq 0 ]; then
     # The documented opt-out: no time limit at all, on every host, rather than
     # relying on a timeout binary's own "a duration of 0 disables it" semantics.
@@ -223,10 +297,21 @@ fm_hook_run() {
       wait "$hook_pid" 2>/dev/null || hook_status=$?
     fi
   fi
-  exec 8>&-
   if [ "$have_errfd" -eq 1 ]; then
+    # Closing firstmate's end of the pipe is EOF for the cap writer, which then
+    # flushes and exits, closing its stdout - so reading that stdout to EOF is how
+    # firstmate knows the capture is complete before it relays it. A descendant
+    # that outlived the hook still holds the pipe, so the cap writer cannot exit
+    # then; the read's timeout is what keeps such an orphan from stalling the
+    # relay, and the cap writer's own read timeout has already flushed the hook's
+    # stderr to the file by the time it expires.
+    exec 8>&-
+    IFS= read -r -t 3 -u "$cap_done_fd" _ 2>/dev/null || true
+    eval "exec ${cap_done_fd}<&-" 2>/dev/null || true
     fm_hook_drain_errfd "$hook_name" "$task_label"
     exec 9<&-
+  else
+    exec 8>&-
   fi
   if [ "$hook_status" -ne 0 ]; then
     if [ "$timed_out" -eq 1 ] ||
@@ -240,18 +325,28 @@ fm_hook_run() {
 }
 
 # fm_hook_pr_ready_once <config-dir> <meta-path> <task-id> <pr-url>
-# Fire the pr-ready hook for a task's PR URL exactly once, ever. The fire is
-# recorded in the task's meta as pr_ready_hook=<url> and gated on that marker,
-# not on whether this run is the one that appended pr=<url>: pr= is recorded by
-# bin/fm-pr-check.sh but the hook is fired after work that can fail in between
-# (bin/fm-pr-merge.sh's merge), and inferring the fire from the pr= transition
-# would drop it forever the moment that work failed - pr= is already recorded, so
-# no retry would ever see the transition again. Marking the fire itself keeps the
-# guarantee across a failed merge, a retry, and a re-run alike.
+# Fire an installed pr-ready hook for a task's PR URL at least once, and normally
+# exactly once. The fire is recorded in the task's meta as pr_ready_hook=<url> and
+# gated on that marker, not on whether this run is the one that appended pr=<url>:
+# pr= is recorded by bin/fm-pr-check.sh but the hook is fired after work that can
+# fail in between (bin/fm-pr-merge.sh's merge), and inferring the fire from the
+# pr= transition would drop it forever the moment that work failed - pr= is
+# already recorded, so no retry would ever see the transition again. Marking the
+# fire itself keeps the guarantee across a failed merge, a retry, and a re-run
+# alike. The marker is written after the hook returns, so the one way the hook
+# fires twice is firstmate being hard-interrupted inside the hook's execution
+# window, leaving no marker for the next run to see. That is the deliberate side
+# to err on - writing the marker first would drop the fire entirely on the same
+# interrupt - so a pr-ready hook should be idempotent for a (task, PR URL) pair.
 # A task with no meta has nowhere to record the fire, so the hook is skipped.
+# Nothing is recorded when no pr-ready hook is installed: firstmate ships none, so
+# an operator without one gets exactly the meta they got before hook points
+# existed.
 # Always returns 0; fm_hook_run never gates its caller.
 fm_hook_pr_ready_once() {
   local config_dir=$1 meta=$2 id=$3 url=$4
+  local hook="$config_dir/hooks/pr-ready"
+  [ -f "$hook" ] && [ -x "$hook" ] || return 0
   [ -f "$meta" ] || return 0
   ! grep -qxF "pr_ready_hook=$url" "$meta" || return 0
   fm_hook_run "$config_dir" pr-ready \

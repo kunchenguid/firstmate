@@ -21,9 +21,9 @@
 # Hooks: the pr-ready hook point belongs to the recording step, so on a task
 # whose PR this run is the first to record (that same no-CI-repo flow), it fires
 # here rather than inside fm-pr-check.sh - after the merge, so it can never delay
-# it - and still exactly once per (task, PR URL). Because the recording is done
-# by then, it fires even if the merge itself failed; post-merge, which means
-# firstmate merged, fires only after a successful merge.
+# it - and still at least once, normally exactly once, per (task, PR URL). Because
+# the recording is done by then, it fires even if the merge itself failed;
+# post-merge, which means firstmate merged, fires only after a successful merge.
 #
 # Merge method: defaults to --squash when the caller passes none of --squash,
 # --merge, --rebase, or --method after the optional -- separator. An explicit

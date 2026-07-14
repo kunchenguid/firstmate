@@ -34,11 +34,15 @@
 #     (q) chatty hook -> stderr relayed only up to FM_HOOK_STDERR_MAX_BYTES,
 #         with the truncation warned rather than dumped whole into the caller,
 #         and that cap counts bytes even when the hook's stderr is multibyte
+#     (t) the same cap bounds what reaches DISK, so a looping hook - or a
+#         descendant still writing after it - cannot fill TMPDIR
 #   integration:
 #     (j) fm-spawn fires post-spawn once per spawned task (batch included) with
 #         the task's kind and meta path; a failing hook does not fail the spawn
 #     (g) fm-pr-check fires pr-ready on first pr= record only; a failing hook
 #         does not break fm-pr-check (exit 0, merge poll still armed)
+#     (u) with no pr-ready hook installed - every home by default, since firstmate
+#         ships none - fm-pr-check records no pr_ready_hook= marker at all
 #     (r) fm-pr-merge, whose nested fm-pr-check does the first pr= record, fires
 #         pr-ready exactly once and only after the merge, so a slow hook cannot
 #         delay the merge; a re-merge of a recorded PR does not re-fire it
@@ -560,6 +564,74 @@ SH
   pass "the hook stderr cap counts bytes, not characters, on multibyte output"
 }
 
+# The relay cap bounds what the operator sees; this bounds what reaches DISK. The
+# capture file is unlinked while the hook runs, so the bound is asserted on the
+# writer that owns it: a hook that loops, or a descendant that keeps writing after
+# the hook is gone, feeds this and must never grow the file past the cap.
+test_hook_stderr_on_disk_capture_is_bounded() {
+  local case_dir sink bytes
+  case_dir=$(make_case errfile-disk-cap)
+  sink="$case_dir/captured"
+  # 64 KiB of hook stderr into a 512-byte cap. The extra byte the writer keeps is
+  # what tells the relay the stream was truncated rather than exactly cap-sized.
+  {
+    yes 'noise-noise-noise-noise-noise-noise-noise' 2>/dev/null | head -c 65536 |
+      fm_hook_cap_writer 512
+  } 8> "$sink"
+  bytes=$(wc -c < "$sink" | tr -d ' ')
+  [ "$bytes" -le 513 ] \
+    || fail "errfile-disk-cap: $bytes bytes reached disk despite a 512-byte cap"
+  [ "$bytes" -ge 512 ] \
+    || fail "errfile-disk-cap: only $bytes bytes reached disk; the prefix was lost"
+  pass "a runaway hook's stderr is capped on disk, not just in the relay"
+}
+
+# firstmate ships no hooks, so the common case is a home with none. Such a home's
+# task meta must be exactly what it was before hook points existed - the marker
+# records a fire, and with no hook installed there is no fire to record.
+test_pr_check_records_no_marker_without_a_pr_ready_hook() {
+  local case_dir before after
+  case_dir=$(make_case pr-check-no-hook)
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    "window=fm-task-x1" "kind=ship" "mode=no-mistakes"
+
+  FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" \
+  FM_CONFIG_OVERRIDE="$case_dir/config" PATH="$case_dir/fakebin:$PATH" \
+    "$PR_CHECK" task-x1 https://github.com/example/repo/pull/9 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" || fail "pr-check/no-hook: run failed"
+  grep -q '^pr_ready_hook=' "$case_dir/state/task-x1.meta" \
+    && fail "pr-check/no-hook: a hook fire was recorded though no pr-ready hook is installed"
+  assert_grep 'pr=https://github.com/example/repo/pull/9' "$case_dir/state/task-x1.meta" \
+    "pr-check/no-hook: the PR was not recorded"
+
+  # And a re-run leaves that meta byte-identical, as it did before hook points.
+  before=$(cat "$case_dir/state/task-x1.meta")
+  FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" \
+  FM_CONFIG_OVERRIDE="$case_dir/config" PATH="$case_dir/fakebin:$PATH" \
+    "$PR_CHECK" task-x1 https://github.com/example/repo/pull/9 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" || fail "pr-check/no-hook: re-run failed"
+  after=$(cat "$case_dir/state/task-x1.meta")
+  [ "$before" = "$after" ] \
+    || fail "pr-check/no-hook: the re-run changed the meta of a hookless home"
+
+  # Installing the hook then makes the marker appear and gate the re-fire.
+  write_logging_hook "$case_dir" pr-ready 0 FM_HOOK_TASK_ID FM_HOOK_PR_URL
+  FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" \
+  FM_CONFIG_OVERRIDE="$case_dir/config" PATH="$case_dir/fakebin:$PATH" \
+    "$PR_CHECK" task-x1 https://github.com/example/repo/pull/9 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" || fail "pr-check/no-hook: hooked run failed"
+  assert_present "$case_dir/hook.log" "pr-check/no-hook: an installed pr-ready hook did not fire"
+  assert_grep 'pr_ready_hook=https://github.com/example/repo/pull/9' \
+    "$case_dir/state/task-x1.meta" "pr-check/no-hook: the fire was not recorded"
+  rm -f "$case_dir/hook.log"
+  FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" \
+  FM_CONFIG_OVERRIDE="$case_dir/config" PATH="$case_dir/fakebin:$PATH" \
+    "$PR_CHECK" task-x1 https://github.com/example/repo/pull/9 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" || fail "pr-check/no-hook: hooked re-run failed"
+  assert_absent "$case_dir/hook.log" "pr-check/no-hook: the recorded fire did not gate the re-run"
+  pass "a home with no pr-ready hook records no hook marker in a task's meta"
+}
+
 # The merge can fail after fm-pr-check has durably recorded pr=. pr-ready belongs
 # to that recording, so it must still fire - exactly once - and the merge failure
 # must still propagate.
@@ -758,9 +830,11 @@ test_orphaned_descendant_never_stalls_the_caller
 test_hook_stderr_is_relayed_and_leaves_no_tempfile
 test_hook_stderr_relay_is_bounded
 test_hook_stderr_relay_cap_counts_bytes
+test_hook_stderr_on_disk_capture_is_bounded
 test_errfile_fallback_refuses_a_planted_symlink
 test_spawn_fires_post_spawn_per_task_and_survives_failure
 test_pr_check_fires_pr_ready_on_first_record_only
+test_pr_check_records_no_marker_without_a_pr_ready_hook
 test_pr_merge_defers_pr_ready_until_after_the_merge
 test_pr_merge_fires_pr_ready_when_the_merge_fails
 test_pr_merge_fires_post_merge_after_merge

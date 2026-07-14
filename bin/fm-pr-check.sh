@@ -4,9 +4,13 @@
 # The watcher check source is byte-for-byte bin/fm-pr-poll.sh; task and PR data
 # live only in a private sidecar and are never interpolated into shell source.
 # Also runs the best-effort pr-ready hook point (bin/fm-hooks-lib.sh;
-# docs/extension-points.md) exactly once per (task, PR URL), recorded durably in
-# the meta as pr_ready_hook= so a re-run never re-fires it. The hook fires last,
-# after the poll is armed, so hook latency never delays arming it.
+# docs/extension-points.md), at least once and normally exactly once per
+# (task, PR URL): the fire is recorded durably in the meta as pr_ready_hook= so a
+# re-run does not re-fire it, and only firstmate being hard-interrupted inside the
+# hook itself, before that marker is written, can make the next run fire it again.
+# The marker is written only when a pr-ready hook is actually installed, so a home
+# with no hooks records nothing. The hook fires last, after the poll is armed, so
+# hook latency never delays arming it.
 # FM_PR_READY_HOOK=defer is an internal handoff, not part of the operator-facing
 # hook contract: bin/fm-pr-merge.sh calls this script before its own merge, so it
 # suppresses the hook here and fires pr-ready itself after the merge, keeping the
