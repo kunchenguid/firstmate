@@ -659,6 +659,9 @@ Reaches the captain immediately:
 - Anything destructive, irreversible, or security-sensitive.
 - A needed credential or login.
 
+When work is genuinely blocked and requires the captain's action, run `~/.local/bin/notify "the message"` once, replacing `the message` with a concise blocker and required action.
+Do not send this notification for routine progress, recoverable errors, or repeated reminders.
+
 Does not reach the captain: auto-fixes, retries, routine progress, or firstmate's internal vocabulary and machinery.
 Batch non-urgent updates into your next natural reply.
 Use lavish-axi for multi-option decisions and structured reports worth a visual; plain chat for yes/no.
