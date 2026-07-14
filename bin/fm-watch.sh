@@ -412,17 +412,57 @@ scan_signals() {
   return 0
 }
 
-run_check() {
+run_check_process() {
   local c=$1
   shift
   if command -v timeout >/dev/null 2>&1; then
-    timeout "$CHECK_TIMEOUT" bash "$c" "$@" 2>/dev/null || true
+    exec timeout "$CHECK_TIMEOUT" bash "$c" "$@"
   elif command -v gtimeout >/dev/null 2>&1; then
-    gtimeout "$CHECK_TIMEOUT" bash "$c" "$@" 2>/dev/null || true
+    exec gtimeout "$CHECK_TIMEOUT" bash "$c" "$@"
   else
     # shellcheck disable=SC2016  # single quotes are deliberate: Perl expands its own variables.
-    perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' "$CHECK_TIMEOUT" bash "$c" "$@" 2>/dev/null || true
+    exec perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } my $stop = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; waitpid $pid, 0; exit 124 }; local $SIG{ALRM} = $stop; local $SIG{HUP} = $stop; local $SIG{INT} = $stop; local $SIG{TERM} = $stop; alarm $t; waitpid $pid, 0; exit($? >> 8)' "$CHECK_TIMEOUT" bash "$c" "$@"
   fi
+}
+
+run_check() {
+  ( run_check_process "$@" ) 2>/dev/null || true
+}
+
+FM_ACTIVE_CHECK_PID=
+FM_CHECK_OUTPUT=
+FM_CHECK_RESULT=
+
+fm_check_output_cleanup() {
+  [ -z "$FM_CHECK_OUTPUT" ] || rm -f -- "$FM_CHECK_OUTPUT"
+  FM_CHECK_OUTPUT=
+}
+
+fm_active_check_stop() {
+  local pid=${FM_ACTIVE_CHECK_PID:-} i
+  [ -n "$pid" ] || return 0
+  kill -TERM "$pid" 2>/dev/null || true
+  i=0
+  while kill -0 "$pid" 2>/dev/null && [ "$i" -lt 20 ]; do
+    sleep 0.01
+    i=$((i + 1))
+  done
+  kill -KILL "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  FM_ACTIVE_CHECK_PID=
+}
+
+run_check_capture() {
+  fm_check_output_cleanup
+  FM_CHECK_RESULT=
+  FM_CHECK_OUTPUT=$(mktemp "$STATE/.fm-check-output.XXXXXX") || return 1
+  chmod 0600 "$FM_CHECK_OUTPUT" || { fm_check_output_cleanup; return 1; }
+  ( run_check_process "$@" ) > "$FM_CHECK_OUTPUT" 2>/dev/null &
+  FM_ACTIVE_CHECK_PID=$!
+  wait "$FM_ACTIVE_CHECK_PID" 2>/dev/null || true
+  FM_ACTIVE_CHECK_PID=
+  FM_CHECK_RESULT=$(cat "$FM_CHECK_OUTPUT" 2>/dev/null || true)
+  fm_check_output_cleanup
 }
 
 # Surfaced-marker bookkeeping for the heartbeat backstop. The watcher records the
@@ -616,11 +656,13 @@ if ! fm_lock_try_acquire "$WATCH_LOCK"; then
   exit 0
 fi
 watcher_cleanup() {
+  fm_active_check_stop
+  fm_check_output_cleanup
   fm_custom_check_snapshot_cleanup
   fm_lock_release "$WATCH_LOCK"
 }
 trap watcher_cleanup EXIT
-trap 'fm_custom_check_snapshot_cleanup; exit 1' HUP INT TERM
+trap 'exit 1' HUP INT TERM
 # This watcher's own pid, as recorded in the lock by fm_lock_claim (which writes
 # ${BASHPID:-$$} from this same main shell). Read directly, never via a command
 # substitution, so it matches the stored holder pid for the self-eviction check.
@@ -660,7 +702,8 @@ while :; do
       if [ "$(basename "$c")" = x-watch.check.sh ]; then
         if fmx_poll_shim_valid "$c" "$FM_HOME" "$FM_ROOT" \
           && [ -f "$FM_ROOT/bin/fm-x-poll.sh" ] && [ ! -L "$FM_ROOT/bin/fm-x-poll.sh" ]; then
-          out=$(FM_HOME="$FM_HOME" run_check "$FM_ROOT/bin/fm-x-poll.sh")
+          FM_HOME="$FM_HOME" run_check_capture "$FM_ROOT/bin/fm-x-poll.sh"
+          out=$FM_CHECK_RESULT
         else
           rejected_checks="$rejected_checks $c"
           continue
@@ -672,10 +715,12 @@ while :; do
           owner=$FM_PR_DATA_OWNER
           repo=$FM_PR_DATA_REPO
           number=$FM_PR_DATA_NUMBER
-          out=$(run_check "$SCRIPT_DIR/fm-pr-poll.sh" --validated "$url" "$owner" "$repo" "$number")
+          run_check_capture "$SCRIPT_DIR/fm-pr-poll.sh" --validated "$url" "$owner" "$repo" "$number"
+          out=$FM_CHECK_RESULT
         elif fm_custom_check_snapshot_prepare "$STATE" "$id"; then
           custom_snapshot=$FM_CUSTOM_CHECK_SNAPSHOT
-          out=$(run_check "$custom_snapshot")
+          run_check_capture "$custom_snapshot"
+          out=$FM_CHECK_RESULT
           fm_custom_check_snapshot_cleanup
         else
           fm_custom_check_snapshot_cleanup

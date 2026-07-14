@@ -1544,37 +1544,55 @@ SH
 }
 
 test_custom_snapshot_cleanup_on_signal() {
-  local dir state pid i rc
+  local dir state child_pid_file pid child_pid i rc
   dir=$(make_case custom-snapshot-signal)
   state="$dir/home/state"
+  child_pid_file="$dir/custom-child.pid"
   printf '%s\n' fm-pr-check-migration-v1 > "$state/.pr-check-migration-v1"
   chmod 0600 "$state/.pr-check-migration-v1"
-  printf '%s\n' '#!/usr/bin/env bash' 'sleep 3' > "$state/custom.check.sh"
+  printf '%s\n' '#!/usr/bin/env bash' 'printf "%s\n" "$$" > "$FM_TEST_CUSTOM_CHILD_PID"' 'sleep 30' \
+    > "$state/custom.check.sh"
   chmod 0700 "$state/custom.check.sh"
   FM_HOME="$dir/home" "$REGISTER" custom >/dev/null \
     || fail "could not register signal cleanup custom check"
 
   FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" FM_POLL=0 FM_CHECK_INTERVAL=0 \
-    FM_SIGNAL_GRACE=0 PATH="$dir/fakebin:$BASE_PATH" "$WATCH" \
+    FM_SIGNAL_GRACE=0 FM_TEST_CUSTOM_CHILD_PID="$child_pid_file" \
+    PATH="$dir/fakebin:$BASE_PATH" "$WATCH" \
     > "$dir/watch.out" 2> "$dir/watch.err" &
   pid=$!
   i=0
   while [ "$i" -lt 100 ]; do
-    find "$state" -maxdepth 1 -name '.fm-custom-check.*' -print | grep . >/dev/null && break
+    [ -s "$child_pid_file" ] && break
     kill -0 "$pid" 2>/dev/null || break
     sleep 0.02
     i=$((i + 1))
   done
+  [ -s "$child_pid_file" ] || fail "watcher did not start the custom check child"
   find "$state" -maxdepth 1 -name '.fm-custom-check.*' -print | grep . >/dev/null \
     || fail "watcher did not create the custom check snapshot"
+  child_pid=$(cat "$child_pid_file")
   kill -TERM "$pid" 2>/dev/null || fail "could not signal watcher during custom check"
+  i=0
+  while kill -0 "$pid" 2>/dev/null && [ "$i" -lt 100 ]; do
+    sleep 0.02
+    i=$((i + 1))
+  done
+  if kill -0 "$pid" 2>/dev/null; then
+    kill -KILL "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    fail "signaled watcher did not exit promptly"
+  fi
   rc=0
   wait "$pid" || rc=$?
   [ "$rc" -ne 0 ] || fail "signaled watcher exited successfully"
+  ! kill -0 "$child_pid" 2>/dev/null || fail "signaled watcher left the custom check child running"
   ! find "$state" -maxdepth 1 -name '.fm-custom-check.*' -print | grep . >/dev/null \
     || fail "signaled watcher left a private custom check snapshot"
+  ! find "$state" -maxdepth 1 -name '.fm-check-output.*' -print | grep . >/dev/null \
+    || fail "signaled watcher left a private check output file"
   [ ! -e "$state/.watch.lock/pid" ] || fail "signaled watcher left its singleton lock"
-  pass "watcher signals remove custom check snapshots and release the lock"
+  pass "watcher signals promptly stop custom checks and clean private state"
 }
 
 test_teardown_removes_poll_artifacts() {
