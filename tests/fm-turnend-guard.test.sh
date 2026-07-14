@@ -764,6 +764,11 @@ test_pi_extension_forces_followup() {
   pass ".pi primary extension: agent_settled forces one follow-up through the shared guard"
 }
 
+# The two Pi tests below capture stderr and assert the extension itself printed
+# nothing. Node type-strips the .ts extension on import and announces that with its
+# own ExperimentalWarning, which is node's notice, not the extension's output;
+# --disable-warning=ExperimentalWarning keeps the assertion about the extension.
+# Drop the flag and both tests fail on a stock node.
 test_pi_extension_injects_once_per_logical_agent_run() {
   local repo home ext log out status
   repo="$TMP_ROOT/pi-logical-run-root"
@@ -784,7 +789,7 @@ SH
 exit 0
 SH
   chmod +x "$repo/bin/fm-turnend-guard.sh" "$repo/bin/fm-arm-pretool-check.sh"
-  out=$(PLUGIN="$ext" FM_HOME="$home" FM_GUARD_LOG="$log" node --input-type=module 2>&1 <<'EOF'
+  out=$(PLUGIN="$ext" FM_HOME="$home" FM_GUARD_LOG="$log" node --disable-warning=ExperimentalWarning --input-type=module 2>&1 <<'EOF'
 import { readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
@@ -844,7 +849,7 @@ SH
 exit 0
 SH
   chmod +x "$repo/bin/fm-turnend-guard.sh" "$repo/bin/fm-arm-pretool-check.sh"
-  out=$(PLUGIN="$ext" FM_HOME="$home" node --input-type=module 2>&1 <<'EOF'
+  out=$(PLUGIN="$ext" FM_HOME="$home" node --disable-warning=ExperimentalWarning --input-type=module 2>&1 <<'EOF'
 import { pathToFileURL } from "node:url";
 
 const handlers = new Map();
