@@ -197,10 +197,13 @@ WEDGE_ALARM_LAST_EPOCH=0
 WEDGE_ALARM_NOTIFIER_PID=
 # Title of the active alert's banner, set per alarm by inject_wedge_alarm. A
 # banner's title is the first thing the captain reads and often all a truncated
-# one shows, so it follows the CAUSE: a vanished supervisor pane means away-mode
-# supervision is down, not that a queue of escalations is stuck behind a busy
-# composer. The notifier seam still carries only <channel> <summary>, so the
-# title lives here rather than being threaded through every channel.
+# one shows, so it follows the alarm KIND - the same discriminator that picks the
+# marker and the throttle - and never the last recorded cause: the pane-gone alarm
+# says away-mode supervision is down, while a buffer wedge says a queue of
+# escalations is stuck behind a pane that is still being retried. The cause rides
+# along only as a diagnostic tag. The notifier seam still carries only
+# <channel> <summary>, so the title lives here rather than being threaded through
+# every channel.
 WEDGE_ALARM_TITLE_DEFAULT='firstmate: away-mode escalations WEDGED'
 WEDGE_ALARM_TITLE=$WEDGE_ALARM_TITLE_DEFAULT
 # Epoch the supervisor pane was first seen missing in this daemon process, 0 while
@@ -889,7 +892,7 @@ wedge_alarm_notify() {  # <summary> <marker>
 # closed and refuses every injection in that state), or the supervisor pane may
 # be gone outright. Naming a busy pane when the truth is a dead agent points
 # debugging in the wrong direction, so the ERROR log, the durable marker, and the
-# active alert all report the recorded cause.
+# active alert all carry the recorded cause as a diagnostic tag.
 # The wording follows the KIND - the same discriminator that picks the marker and
 # the throttle - and only names the cause as a tag, so what the captain is told can
 # never disagree with which alarm actually fired. A buffer wedge means N buffered
