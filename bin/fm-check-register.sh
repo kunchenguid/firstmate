@@ -25,6 +25,7 @@ TRUST="$STATE/$ID.check-trust"
 [ -f "$CHECK" ] && [ ! -L "$CHECK" ] || { echo "error: custom check is unavailable" >&2; exit 1; }
 STATE_DEVICE=$(fm_pr_file_device "$STATE") || exit 1
 [ "$(fm_pr_file_device "$CHECK")" = "$STATE_DEVICE" ] || { echo "error: custom check is unavailable" >&2; exit 1; }
+[ "$(fm_pr_file_link_count "$CHECK")" = 1 ] || { echo "error: custom check is unavailable" >&2; exit 1; }
 fm_pr_regular_destination_on_device_or_absent "$TRUST" "$STATE_DEVICE" \
   || { echo "error: custom check trust path is unavailable" >&2; exit 1; }
 HASH=$(fm_custom_check_sha256 "$CHECK") || { echo "error: custom check hash is unavailable" >&2; exit 1; }

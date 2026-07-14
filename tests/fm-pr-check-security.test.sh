@@ -9,6 +9,8 @@ set -u
 . "$ROOT/bin/fm-pr-lib.sh"
 # shellcheck source=bin/fm-x-lib.sh disable=SC1091
 . "$ROOT/bin/fm-x-lib.sh"
+# shellcheck source=bin/fm-check-lib.sh disable=SC1091
+. "$ROOT/bin/fm-check-lib.sh"
 
 PR_CHECK="$ROOT/bin/fm-pr-check.sh"
 PR_MERGE="$ROOT/bin/fm-pr-merge.sh"
@@ -1472,6 +1474,37 @@ test_complete_single_link_validation() {
   [ "$rc" -ne 0 ] || fail "hard-linked X shim passed marker-aware migration"
   [ -e "$alias" ] || fail "X-shim hard-link refusal removed the external alias"
 
+  dir=$(make_case single-link-custom-check-registration)
+  state="$dir/home/state"
+  printf '#!/usr/bin/env bash\nprintf "custom-ready\\n"\n' > "$state/custom.check.sh"
+  chmod 0700 "$state/custom.check.sh"
+  alias="$dir/custom-check.alias"
+  ln "$state/custom.check.sh" "$alias"
+  set +e
+  FM_HOME="$dir/home" "$REGISTER" custom > "$dir/register.out" 2> "$dir/register.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "custom check registration accepted a hard-linked source"
+  [ ! -e "$state/custom.check-trust" ] || fail "rejected hard-linked custom check received a trust record"
+  rm -f "$alias"
+  FM_HOME="$dir/home" "$REGISTER" custom >/dev/null \
+    || fail "could not register the custom check single-link fixture"
+  ln "$state/custom.check.sh" "$alias"
+  ! fm_custom_check_registered "$state" custom \
+    || fail "registered custom check remained authenticated after source hard-linking"
+  ! fm_custom_check_snapshot_prepare "$state" custom \
+    || fail "watcher snapshot accepted a hard-linked custom check source"
+  fm_custom_check_snapshot_cleanup
+  rm -f "$alias"
+  alias="$dir/custom-trust.alias"
+  ln "$state/custom.check-trust" "$alias"
+  ! fm_custom_check_registered "$state" custom \
+    || fail "hard-linked custom check trust remained authenticated"
+  ! fm_custom_check_snapshot_prepare "$state" custom \
+    || fail "watcher snapshot accepted a hard-linked custom check trust record"
+  fm_custom_check_snapshot_cleanup
+  [ -e "$alias" ] || fail "custom-check hard-link refusal removed the external alias"
+
   dir=$(make_case single-link-teardown-quarantine)
   state="$dir/home/state"
   fakebin="$dir/fakebin"
@@ -1501,7 +1534,7 @@ SH
   [ "$rc" -ne 0 ] || fail "teardown accepted a multiply linked quarantine entry"
   [ -e "$state/.pr-check-quarantine/task-a.check.linked" ] && [ -e "$alias" ] \
     || fail "teardown removed a multiply linked quarantine name"
-  pass "all live, marker, diagnostic, X, obligation, and teardown boundaries require single-link files"
+  pass "all live, marker, diagnostic, X, custom-check, obligation, and teardown boundaries require single-link files"
 }
 
 test_failed_outcomes_block_every_retry_until_repaired() {
