@@ -108,6 +108,55 @@ SH
   pass "fm-spawn composes the task Stop hook with repository Devin configuration"
 }
 
+test_invalid_project_config_remains_recoverable() {
+  local name contents expected d home proj wt fakebin id out rc log config
+  for name in malformed stop-shape; do
+    case "$name" in
+      malformed) contents='{"hooks":' ; expected='Unexpected end of JSON input' ;;
+      stop-shape) contents='{"hooks":{"Stop":{}}}' ; expected='hooks.Stop must be an array' ;;
+    esac
+    d="$TMP_ROOT/$name"
+    home="$d/home"
+    proj="$d/project"
+    wt="$d/wt"
+    id="devin-$name-x1"
+    log="$d/tmux.log"
+    fakebin=$(fm_fakebin "$d/fake")
+    mkdir -p "$home/data/$id" "$home/projects" "$home/state" "$home/config"
+    printf 'brief\n' > "$home/data/$id/brief.md"
+    fm_git_worktree "$proj" "$wt" "fm/$id"
+    config="$wt/.devin/config.json"
+    mkdir -p "$(dirname "$config")"
+    printf '%s\n' "$contents" > "$config"
+    cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+printf '%s\n' "$*" >> "$FM_FAKE_TMUX_LOG"
+case "$*" in
+  *"#{pane_current_path}"*) printf '%s\n' "$FM_FAKE_PANE_PATH"; exit 0 ;;
+esac
+case "${1:-}" in
+  display-message) printf 'firstmate\n'; exit 0 ;;
+  list-windows|has-session|new-session|new-window|send-keys|set-buffer|paste-buffer|delete-buffer|kill-window) exit 0 ;;
+esac
+exit 0
+SH
+    chmod +x "$fakebin/tmux"
+    fm_fake_exit0 "$fakebin" treehouse gh-axi gh
+    out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+      FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
+      FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" FM_FAKE_TMUX_LOG="$log" \
+      TMUX='fake,1,0' PATH="$fakebin:$PATH" "$SPAWN" "$id" "$proj" \
+      --harness devin 2>&1)
+    rc=$?
+    [ "$rc" -ne 0 ] || fail "$name Devin config unexpectedly spawned"
+    assert_contains "$out" "error: invalid Devin config at $config: $expected" "$name diagnostic was not actionable"
+    [ -f "$home/state/$id.meta" ] || fail "$name failure did not persist recoverable task metadata"
+    grep '^worktree=/' "$home/state/$id.meta" >/dev/null || fail "$name metadata omitted the isolated worktree"
+  done
+  pass "invalid Devin project configs leave endpoints and worktrees recoverable"
+}
+
 test_lock_recognizes_devin_holder() {
   local home fakebin out
   home="$TMP_ROOT/lock-home"
@@ -132,4 +181,5 @@ test_detection_marker
 test_primary_hook_wiring
 test_primary_pretool_hook_blocks
 test_spawn_launch_and_turnend_config
+test_invalid_project_config_remains_recoverable
 test_lock_recognizes_devin_holder

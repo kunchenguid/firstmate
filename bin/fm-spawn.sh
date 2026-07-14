@@ -426,8 +426,7 @@ FIRSTMATE_HOME=
 
 if [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
-    ''|claude|codex|opencode|pi|pi-signed|grok|kimi)
-    ''|claude|codex|opencode|pi|grok|devin)
+    ''|claude|codex|opencode|pi|pi-signed|grok|kimi|devin)
       ARG3=${POS[1]:-}
       ;;
     *' '*)
@@ -627,8 +626,7 @@ model_flag_for_harness() {
   local harness=$1 model=$2
   [ -n "$model" ] && [ "$model" != default ] || return 0
   case "$harness" in
-    claude|codex|opencode|pi|pi-signed|grok|kimi)
-    claude|codex|opencode|pi|grok|devin)
+    claude|codex|opencode|pi|pi-signed|grok|kimi|devin)
       printf -- '--model %s ' "$(shell_quote "$model")"
       ;;
   esac
@@ -1609,27 +1607,6 @@ EOF
   esac
 fi
 
-# Per-project delivery mode + yolo flag (bin/fm-project-mode.sh; the project-management skill and AGENTS.md task lifecycle).
-DEVIN_CONFIG="$STATE/$ID.devin-config.json"
-if [ "$HARNESS" = devin ]; then
-  if [ "$KIND" != secondmate ]; then
-    turnend_json=$(json_escape "touch $(shell_quote "$TURNEND")")
-    project_devin_config="$WT/.devin/config.json"
-    if [ -f "$project_devin_config" ]; then
-      node - "$project_devin_config" "touch $(shell_quote "$TURNEND")" > "$DEVIN_CONFIG" <<'NODE'
-const fs = require("node:fs");
-const config = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
-config.hooks ??= {};
-config.hooks.Stop ??= [];
-config.hooks.Stop.push({ hooks: [{ type: "command", command: process.argv[3] }] });
-process.stdout.write(`${JSON.stringify(config)}\n`);
-NODE
-    else
-      printf '{"version":1,"hooks":{"Stop":[{"hooks":[{"type":"command","command":"%s"}]}]}}\n' "$turnend_json" > "$DEVIN_CONFIG"
-    fi
-  fi
-fi
-
 # Per-project delivery mode + yolo flag (bin/fm-project-mode.sh; AGENTS.md project management and task lifecycle).
 # Recorded in meta so fm-teardown's safety check and the validate/merge stages can
 # branch on them. Mode governs ship tasks; a scout's deliverable is a report, not a
@@ -1690,6 +1667,33 @@ META_WINDOW=$T
   fi
 } > "$STATE/$ID.meta"
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
+
+DEVIN_CONFIG="$STATE/$ID.devin-config.json"
+if [ "$HARNESS" = devin ]; then
+  if [ "$KIND" != secondmate ]; then
+    turnend_json=$(json_escape "touch $(shell_quote "$TURNEND")")
+    project_devin_config="$WT/.devin/config.json"
+    if [ -f "$project_devin_config" ]; then
+      node - "$project_devin_config" "touch $(shell_quote "$TURNEND")" > "$DEVIN_CONFIG" <<'NODE'
+const fs = require("node:fs");
+const path = process.argv[2];
+try {
+  const config = JSON.parse(fs.readFileSync(path, "utf8"));
+  config.hooks ??= {};
+  config.hooks.Stop ??= [];
+  if (!Array.isArray(config.hooks.Stop)) throw new Error("hooks.Stop must be an array");
+  config.hooks.Stop.push({ hooks: [{ type: "command", command: process.argv[3] }] });
+  process.stdout.write(`${JSON.stringify(config)}\n`);
+} catch (error) {
+  process.stderr.write(`error: invalid Devin config at ${path}: ${error.message}\n`);
+  process.exit(1);
+}
+NODE
+    else
+      printf '{"version":1,"hooks":{"Stop":[{"hooks":[{"type":"command","command":"%s"}]}]}}\n' "$turnend_json" > "$DEVIN_CONFIG"
+    fi
+  fi
+fi
 
 sq_brief=$(shell_quote "$BRIEF")
 sq_turnend=$(shell_quote "$TURNEND")
