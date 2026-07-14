@@ -5,8 +5,9 @@
 # check contract: output = wake firstmate, silence = keep sleeping).
 #
 # When state/<id>.meta records a non-default base= (declared with fm-brief.sh
-# --base and promoted into meta by fm-spawn.sh), this refuses to record pr= or arm
-# the poll unless BOTH hold, refusing loudly otherwise:
+# --base and promoted into meta by fm-spawn.sh) AND that base is still live on
+# origin, this refuses to record pr= or arm the poll unless BOTH hold, refusing
+# loudly otherwise:
 #
 #   1. The PR head is ROOTED IN THAT BASE'S UNMERGED HISTORY. Concretely: the
 #      merge-base of the PR head and the base is itself a commit the default
@@ -27,6 +28,15 @@
 # incident (data/learnings.md 2026-07-07) where the pipeline rebased a whole
 # feature branch onto main and opened the PR against main.
 #
+# A declared base that is GONE from origin is the third state, and it is not a
+# failure: it is the normal end-state of a stacked PR, whose base merges and is
+# then auto-deleted (GitHub's default), retargeting the child PR to the default
+# branch. With no base branch there is no unmerged feature history left to drag
+# anywhere, so the hazard is gone and the guard stands down with a loud notice,
+# falling back to ordinary default-branch behavior. Refusing there would deadlock
+# a legitimate merge forever, which is worse than the incident this prevents.
+# bin/fm-base-lib.sh owns that present/absent/probe-failed distinction.
+#
 # The no-mistakes pipeline cannot be told a base - it always rebases onto the
 # repo default and opens the PR there - so for a based task the expected recovery
 # is to retarget the PR's base (gh-axi pr edit --base <branch>), which the
@@ -34,11 +44,12 @@
 # clean head. This guard is what makes a wrong-based PR impossible to merge
 # unnoticed; it does not steer the pipeline.
 #
-# The assertion is fail-closed: any resolution failure (missing worktree,
-# unfetchable base/head/default, unresolvable base label) also refuses, so a
-# wrong-based or unverifiable head never reaches merge. It is also closed against
-# its own fail-open path: a data/<id>/base sidecar that never reached meta (so
-# base= is absent and the guard would silently skip) refuses too.
+# The assertion is otherwise fail-closed: any resolution failure (missing
+# worktree, a probe origin could not answer, unfetchable base/head/default,
+# unresolvable base label) refuses, so a wrong-based or unverifiable head never
+# reaches merge. It is also closed against its own fail-open path: a data/<id>/base
+# sidecar that never reached meta (so base= is absent and the guard would silently
+# skip) refuses too.
 # With no base= and no sidecar (the common case) the whole block is skipped and
 # behavior is exactly as before: the repo default branch is the base.
 # Usage: fm-pr-check.sh <task-id> <pr-url>
@@ -49,6 +60,8 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
+# shellcheck source=bin/fm-base-lib.sh
+. "$SCRIPT_DIR/fm-base-lib.sh"
 "$FM_ROOT/bin/fm-guard.sh" || true
 ID=$1
 URL=$2
@@ -79,12 +92,9 @@ fi
 
 # A hand-edited meta could carry a base= that git would read as an option rather
 # than a ref. fm-brief.sh validates on the way in; validate again on the way out.
-if [ -n "$BASE" ]; then
-  case "$BASE" in
-    -*) echo "error: task $ID records an invalid base='$BASE' (must not begin with '-'). Refusing before merge." >&2; exit 1 ;;
-  esac
-  git check-ref-format --branch "$BASE" >/dev/null 2>&1 \
-    || { echo "error: task $ID records base='$BASE', which is not a valid git branch name. Refusing before merge." >&2; exit 1; }
+if [ -n "$BASE" ] && ! fm_base_valid_branch_name "$BASE"; then
+  echo "error: task $ID records base='$BASE', which is not a valid git branch name (it must be non-empty, free of whitespace, and must not begin with '-'). Refusing before merge." >&2
+  exit 1
 fi
 
 # Parse the PR number from the URL for the refs/pull/<n>/head fetch below.
@@ -168,8 +178,12 @@ fetch_branch_sha() {
 # the PR targets that base. Fetches the PR head, the base, and the default branch
 # from origin so the check runs against authoritative commits in the local object
 # store - not a stale local branch or a head SHA whose objects were never fetched.
+# Returns 0 (verified), BASE_STAND_DOWN (the base is gone from origin, so there is
+# nothing left to guard and the caller proceeds on the ordinary path), or 1
+# (refuse).
+BASE_STAND_DOWN=3
 assert_pr_based_on_base() {
-  local n pr_sha base_sha default_sha default_branch_name merge_base err
+  local n pr_sha base_sha default_sha default_branch_name merge_base err probe_rc
   if [ -z "$WT" ] || [ ! -d "$WT" ]; then
     echo "error: task $ID declares intended base '$BASE' but its worktree is unavailable ('$WT'); cannot verify the PR is based on that base. Refusing before merge." >&2
     return 1
@@ -182,6 +196,28 @@ assert_pr_based_on_base() {
     echo "error: task $ID declares intended base '$BASE' but a PR number cannot be parsed from '$URL'; cannot verify the PR is based on that base. Refusing before merge." >&2
     return 1
   }
+
+  # Ask origin what the declared base IS before verifying anything against it.
+  # Gone is not the same as unverifiable: a base that merged and was auto-deleted
+  # takes the hazard with it, and refusing would strand a correct PR forever.
+  probe_rc=0
+  fm_base_probe_origin "$WT" "$BASE" || probe_rc=$?
+  case "$probe_rc" in
+    "$FM_BASE_ABSENT")
+      echo "notice: task $ID declares intended base '$BASE', but that branch no longer exists on origin." >&2
+      echo "  This is the normal end-state of a stacked PR: the base merged and was auto-deleted, and GitHub retargeted this PR to the default branch." >&2
+      echo "  With the base gone there is no unmerged feature history left to drag into the default branch, so the base guard stands down and this PR is handled as an ordinary default-branch PR." >&2
+      [ -z "$PR_BASE_LABEL" ] || echo "  PR base label : $PR_BASE_LABEL" >&2
+      echo "  Drop the 'base=$BASE' line from $META to retire the declaration for good." >&2
+      return "$BASE_STAND_DOWN"
+      ;;
+    "$FM_BASE_PROBE_FAILED")
+      echo "error: task $ID declares intended base '$BASE' but origin could not be asked whether that branch still exists; cannot verify the PR is based on it. Refusing before merge." >&2
+      [ -z "$FM_BASE_PROBE_ERR" ] || printf '  git: %s\n' "$FM_BASE_PROBE_ERR" >&2
+      return 1
+      ;;
+  esac
+
   if ! err=$(git -C "$WT" fetch --quiet origin "refs/pull/$n/head" 2>&1); then
     echo "error: task $ID declares intended base '$BASE' but the PR head (refs/pull/$n/head) could not be fetched from origin; cannot verify the PR is based on that base. Refusing before merge." >&2
     [ -z "$err" ] || printf '  git: %s\n' "$err" >&2
@@ -239,7 +275,11 @@ assert_pr_based_on_base() {
 }
 
 if [ -n "$BASE" ]; then
-  assert_pr_based_on_base || exit 1
+  BASE_RC=0
+  assert_pr_based_on_base || BASE_RC=$?
+  # A stood-down guard (the base is gone from origin) continues on the ordinary
+  # default-branch path; anything else nonzero is a refusal.
+  [ "$BASE_RC" -eq 0 ] || [ "$BASE_RC" -eq "$BASE_STAND_DOWN" ] || exit 1
 fi
 
 if [ -f "$META" ]; then

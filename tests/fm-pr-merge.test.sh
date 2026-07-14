@@ -30,8 +30,11 @@
 #   (k) base= present, PR head rebased onto main -> refuses, no pr=, no poll
 #   (l) base= present, head stacked but PR base label targets main -> refuses, no pr=, no poll
 #   (m) base= present in the data/<id>/base sidecar but never promoted into meta -> refuses (no silent fail-open)
-#   (n) base= present but the base branch is unfetchable -> fail-closed refusal
-#   (o) no base= (the common case) -> unchanged: records pr= and arms the poll
+#   (n) base= present but the base branch is GONE from origin (it merged and was
+#       auto-deleted, the normal end-state of a stacked PR) -> the guard stands down
+#       loudly and the PR proceeds; refusing would deadlock a legitimate merge forever
+#   (o) base= present but origin cannot be asked at all (auth, network) -> fail-closed refusal
+#   (p) no base= (the common case) -> unchanged: records pr= and arms the poll
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -533,12 +536,22 @@ test_pr_check_refuses_wrong_base_label() {
   pass "fm-pr-check refuses (loud, pre-merge) a stacked PR opened against the wrong base label"
 }
 
-test_pr_check_fail_closed_when_base_unfetchable() {
+# The normal END-STATE of a stacked PR: the intended base merged and GitHub deleted
+# the branch (it does so by default), retargeting this PR to main. The hazard the
+# guard exists for went with it - there is no unmerged feature history left to drag
+# into main - so the guard must stand down loudly and let the now-ordinary PR
+# proceed. Refusing here would deadlock a legitimate merge forever, with a recovery
+# message ('gh-axi pr edit --base <base>') that is impossible to follow because the
+# base branch is gone.
+test_pr_check_stands_down_when_base_gone_from_origin() {
   local case_dir rc
-  case_dir=$(make_git_case unfetchable feature)
+  case_dir=$(make_git_case gonebase feature main)
+  # feature/base merges into main, then origin deletes the branch.
+  git -C "$case_dir/origin.git" update-ref refs/heads/main refs/heads/feature/base
+  git -C "$case_dir/origin.git" update-ref -d refs/heads/feature/base
   fm_write_meta "$case_dir/state/task-x1.meta" \
     "window=fm-task-x1" "worktree=$case_dir/wt" "project=$case_dir/project" \
-    "kind=ship" "mode=no-mistakes" "base=feature/does-not-exist"
+    "kind=ship" "mode=no-mistakes" "base=feature/base"
 
   set +e
   run_pr_check "$case_dir" task-x1 https://github.com/example/repo/pull/9 \
@@ -546,12 +559,42 @@ test_pr_check_fail_closed_when_base_unfetchable() {
   rc=$?
   set -e
 
-  expect_code 1 "$rc" "unfetchable-base: fm-pr-check should fail closed when the base cannot be verified"
-  assert_grep 'could not be fetched from origin' "$case_dir/stderr" \
-    "unfetchable-base: refusal did not explain the unresolvable base"
+  expect_code 0 "$rc" "gone-base: a base that merged and was deleted must not deadlock the PR"
+  assert_grep 'no longer exists on origin' "$case_dir/stderr" \
+    "gone-base: standing the guard down must be said out loud, not done silently"
+  assert_grep 'pr=https://github.com/example/repo/pull/9' "$case_dir/state/task-x1.meta" \
+    "gone-base: pr= should be recorded once the guard stands down"
+  assert_present "$case_dir/state/task-x1.check.sh" "gone-base: the merge poll should be armed"
+  pass "fm-pr-check stands down (loudly) when the declared base is gone from origin"
+}
+
+# An origin that cannot be ASKED is not a base that is gone. We know nothing, so the
+# refusal stays fail-closed - and it names git's own error so an auth or network
+# failure is diagnosable instead of masquerading as a wrong-base verdict.
+test_pr_check_fail_closed_when_base_probe_fails() {
+  local case_dir rc
+  case_dir=$(make_git_case probefails feature feature/base)
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    "window=fm-task-x1" "worktree=$case_dir/wt" "project=$case_dir/project" \
+    "kind=ship" "mode=no-mistakes" "base=feature/base"
+  git -C "$case_dir/project" remote set-url origin "$case_dir/no-such-origin.git"
+
+  set +e
+  run_pr_check "$case_dir" task-x1 https://github.com/example/repo/pull/9 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "probe-fails: fm-pr-check should fail closed when the base cannot be verified at all"
+  assert_grep 'could not be asked' "$case_dir/stderr" \
+    "probe-fails: refusal did not explain that the probe itself failed"
+  assert_grep 'git:' "$case_dir/stderr" \
+    "probe-fails: refusal did not surface git's own error"
+  assert_no_grep 'pr=https://github.com/example/repo/pull/9' "$case_dir/state/task-x1.meta" \
+    "probe-fails: an unverifiable base must not record pr= before merge"
   assert_absent "$case_dir/state/task-x1.check.sh" \
-    "unfetchable-base: an unverifiable base must not arm the merge poll"
-  pass "fm-pr-check fails closed when the declared base cannot be resolved"
+    "probe-fails: an unverifiable base must not arm the merge poll"
+  pass "fm-pr-check fails closed when origin cannot be asked whether the base exists"
 }
 
 # The base branch advanced after the PR head was stacked on it. The head is
@@ -645,5 +688,6 @@ test_pr_check_allows_base_advanced_since_head
 test_pr_check_refuses_wrong_base
 test_pr_check_refuses_wrong_base_label
 test_pr_check_refuses_when_sidecar_never_reached_meta
-test_pr_check_fail_closed_when_base_unfetchable
+test_pr_check_stands_down_when_base_gone_from_origin
+test_pr_check_fail_closed_when_base_probe_fails
 test_pr_check_no_base_arms_normally

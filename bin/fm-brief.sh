@@ -26,6 +26,9 @@
 #   The value must be a valid, non-empty git branch name that does not begin
 #   with '-'. Rejected for --scout, --secondmate, and local-only mode; absent
 #   means the repo default branch.
+#   A scaffold is authoritative about the base: re-scaffolding an id WITHOUT
+#   --base clears any sidecar an earlier scaffold of that id left behind, so a
+#   brief that never mentions a base can never leave the task guarded against one.
 #   --secondmate writes a persistent secondmate charter. The project list
 #   is cloned into the secondmate home, while the natural-language scope
 #   tells the main firstmate when to route work there; routine churn stays in its own home;
@@ -81,6 +84,8 @@ esac
 . "$SCRIPT_DIR/fm-marker-lib.sh"
 # shellcheck source=bin/fm-classify-lib.sh
 . "$SCRIPT_DIR/fm-classify-lib.sh"
+# shellcheck source=bin/fm-base-lib.sh
+. "$SCRIPT_DIR/fm-base-lib.sh"
 PAUSED_VERB=${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
@@ -118,13 +123,16 @@ done
 # happens once the delivery mode is resolved below. The branch name is validated
 # up front because it reaches git as a refspec in fm-pr-check.sh and
 # fm-review-diff.sh, where a leading dash would be read as an option.
+# The specific cases below precede the shared predicate only to name the exact
+# failure; fm_base_valid_branch_name is the rule the consumers re-assert on the
+# way out of meta, so the two can never drift.
 if [ "$BASE_DECLARED" -eq 1 ]; then
   [ -n "$BASE" ] || { echo "error: --base requires a non-empty branch name" >&2; exit 1; }
   case "$BASE" in
     -*) echo "error: --base branch name must not begin with '-': '$BASE'" >&2; exit 1 ;;
     *[[:space:]]*) echo "error: --base branch name must not contain whitespace: '$BASE'" >&2; exit 1 ;;
   esac
-  git check-ref-format --branch "$BASE" >/dev/null 2>&1 \
+  fm_base_valid_branch_name "$BASE" \
     || { echo "error: --base is not a valid git branch name: '$BASE'" >&2; exit 1; }
   [ "$KIND" = ship ] || { echo "error: --base applies only to ship tasks, not --scout or --secondmate" >&2; exit 1; }
 fi
@@ -143,6 +151,14 @@ fi
 BRIEF="$DATA/$ID/brief.md"
 [ -e "$BRIEF" ] && { echo "error: $BRIEF already exists" >&2; exit 1; }
 mkdir -p "$DATA/$ID"
+
+# The scaffold's arguments are the whole truth about the task it scaffolds. A
+# re-scaffold of the same id (delete the brief, run again) must therefore not
+# inherit a base from the run before it: a leftover sidecar is promoted into meta
+# by fm-spawn.sh, so the task would still be guarded against a base its own brief
+# never mentions, and its PR would be refused pre-merge for no visible reason.
+# Clear it unconditionally; the ship path below rewrites it when --base is given.
+rm -f "$DATA/$ID/base"
 
 shell_quote() {
   printf "'"
@@ -334,11 +350,29 @@ if [ -n "$BASE" ]; then
    git fetch origin $BASE
    git checkout -b fm/$ID FETCH_HEAD
    \`\`\`"
-  BASE_SETUP="
+  # The Setup note and the definition of done must not disagree about whether the
+  # branch may end up rebased onto the default branch. Under direct-PR the
+  # crewmate owns the branch end to end, so "never rebase onto the default" is
+  # the whole truth. Under no-mistakes the pipeline WILL rebase it onto the
+  # default branch and there is no way to stop it, so saying "never" here would
+  # read as a violation the moment the pipeline runs and would send the crewmate
+  # to `blocked:` instead of to the retarget it is supposed to perform. State
+  # that once, and let the definition of done own the recovery.
+  if [ "$MODE" = direct-PR ]; then
+    BASE_SETUP="
 
 **Base branch.** This task targets base branch \`$BASE\`, not the repo default branch.
-Your \`fm/$ID\` branch is rooted on \`$BASE\` by the step above; keep it there and never rebase it onto the default branch.
+The step above roots your \`fm/$ID\` branch on \`$BASE\`; keep it there and never rebase it onto the default branch.
+You open the PR against \`$BASE\` yourself - see the definition of done.
 Firstmate refuses to record or merge a PR whose head is not rooted in \`$BASE\`'s history, or whose base label is not \`$BASE\`."
+  else
+    BASE_SETUP="
+
+**Base branch.** This task targets base branch \`$BASE\`, not the repo default branch.
+The step above roots your \`fm/$ID\` branch on \`$BASE\`, and you must never rebase it onto the default branch by hand.
+The no-mistakes pipeline WILL rebase it onto the default branch and open the PR there; it cannot be told a base. That is expected, it is not a failure, and it is not yours to fight.
+The definition of done below owns what to do about it, and you are not done until you have done it."
+  fi
 fi
 
 case "$MODE" in

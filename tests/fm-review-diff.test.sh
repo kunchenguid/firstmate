@@ -11,7 +11,10 @@
 #   (c) pr= absent -> unchanged worktree-branch diff
 #   (d) pr= present but PR head unreachable -> fallback to local branch + warning
 #   (e) base= present -> diff against that base, not the repo default
-#   (f) base= absent -> unchanged default-branch diff base
+#   (f) base= present but gone from origin (merged and auto-deleted) -> fall back
+#       to the default branch with a warning, never a hard stop
+#   (g) base= present but origin cannot be asked at all -> stop, do not guess
+#   (h) base= absent -> unchanged default-branch diff base
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -192,9 +195,69 @@ test_no_declared_base_still_diffs_against_default() {
   pass "fm-review-diff without base= keeps the default-branch diff base"
 }
 
+# The normal END-STATE of a stacked PR: the intended base merged and its branch was
+# deleted from origin (GitHub does this by default). Erroring out on the missing
+# branch would leave firstmate unable to review a PR that is now perfectly ordinary,
+# so the diff falls back to the default branch and says why.
+test_deleted_base_falls_back_to_default_with_warning() {
+  local case_dir out rc
+  case_dir=$(make_case deleted-base)
+
+  git -C "$case_dir/wt" checkout -q -b feature/base origin/main
+  printf 'feature-base-work\n' > "$case_dir/wt/base-only.txt"
+  git -C "$case_dir/wt" add base-only.txt
+  git -C "$case_dir/wt" commit -qm "feature base work"
+  git -C "$case_dir/wt" push -q origin feature/base
+  git -C "$case_dir/wt" checkout -q fm/task-x1
+  git -C "$case_dir/wt" reset -q --hard feature/base
+  printf 'crew-fix\n' > "$case_dir/wt/fix.txt"
+  git -C "$case_dir/wt" add fix.txt
+  git -C "$case_dir/wt" commit -qm "the crewmate's fix"
+
+  # feature/base merges into main and origin deletes the branch.
+  git -C "$case_dir/origin.git" update-ref refs/heads/main refs/heads/feature/base
+  git -C "$case_dir/origin.git" update-ref -d refs/heads/feature/base
+
+  write_task_meta "$case_dir" "base=feature/base"
+
+  set +e
+  out=$(run_review_diff "$case_dir" task-x1 2> "$case_dir/stderr")
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "deleted-base: a gone base must not make the pre-merge review impossible"
+  assert_contains "$out" 'diff base: origin/main' \
+    "deleted-base: a base that no longer exists on origin must fall back to the default branch"
+  assert_grep 'no longer exists on origin' "$case_dir/stderr" \
+    "deleted-base: the fallback must say why it is not using the declared base"
+  assert_contains "$out" '+crew-fix' "deleted-base: the crewmate's own change should still be shown"
+  pass "fm-review-diff falls back to the default branch when the declared base is gone from origin"
+}
+
+# A probe origin cannot ANSWER is not the same as a base that is gone: reviewing
+# against the wrong base silently would be worse than stopping.
+test_unreachable_origin_stops_instead_of_guessing() {
+  local case_dir rc
+  case_dir=$(make_case unreachable-origin)
+  write_task_meta "$case_dir" "base=feature/base"
+  git -C "$case_dir/project" remote set-url origin "$case_dir/no-such-origin.git"
+
+  set +e
+  run_review_diff "$case_dir" task-x1 > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "unreachable-origin: an unanswerable base probe must not silently pick a base"
+  assert_grep 'could not be asked' "$case_dir/stderr" \
+    "unreachable-origin: the error did not name the failed probe"
+  pass "fm-review-diff stops when origin cannot be asked whether the declared base exists"
+}
+
 test_pr_meta_uses_pr_head_not_stale_local
 test_pr_meta_fetches_pull_head_without_recorded_sha
 test_no_pr_meta_uses_local_branch
 test_unreachable_pr_head_falls_back_with_warning
 test_declared_base_is_the_diff_base
+test_deleted_base_falls_back_to_default_with_warning
+test_unreachable_origin_stops_instead_of_guessing
 test_no_declared_base_still_diffs_against_default

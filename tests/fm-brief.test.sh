@@ -435,6 +435,63 @@ test_base_rejects_dash_leading_and_invalid_names() {
   pass "fm-brief.sh: --base rejects empty, dash-leading, and malformed branch names"
 }
 
+# The Setup note and the definition of done must not disagree about the pipeline's
+# rebase. A no-mistakes crewmate reads Setup first; if Setup forbids the branch ever
+# ending up on the default branch, the pipeline's own (unavoidable, expected) rebase
+# reads as the forbidden outcome, and the crewmate blocks instead of retargeting.
+test_base_setup_note_agrees_with_the_pipeline() {
+  local home id brief
+  home="$TMP_ROOT/base-coherent-home"
+  write_registry "$home"
+
+  id="brief-base-coherent-nm1"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --base feature/x >/dev/null 2>&1 \
+    || fail "base-coherent: fm-brief.sh --base should exit 0 for a no-mistakes ship task"
+  brief="$home/data/$id/brief.md"
+  assert_grep "The no-mistakes pipeline WILL rebase it onto the default branch" "$brief" \
+    "base-coherent: the no-mistakes Setup note does not admit the pipeline's rebase is expected"
+  assert_no_grep "Firstmate refuses to record or merge a PR whose head is not rooted" "$brief" \
+    "base-coherent: the no-mistakes Setup note still states a refusal the pipeline's own rebase would trip"
+
+  # direct-PR has no pipeline, so the crewmate owns the branch end to end and the
+  # absolute IS the truth there.
+  id="brief-base-coherent-dpr1"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" direct-proj --base feature/x >/dev/null 2>&1 \
+    || fail "base-coherent: fm-brief.sh --base should exit 0 for a direct-PR ship task"
+  brief="$home/data/$id/brief.md"
+  assert_grep "keep it there and never rebase it onto the default branch" "$brief" \
+    "base-coherent: the direct-PR Setup note should keep the branch on its base"
+  assert_no_grep "The no-mistakes pipeline WILL rebase it" "$brief" \
+    "base-coherent: a direct-PR brief must not talk about the pipeline it never runs"
+  pass "fm-brief.sh: the base Setup note agrees with the delivery mode's definition of done"
+}
+
+# The scaffold's flags are the whole truth about the task. Re-scaffolding an id
+# WITHOUT --base (AGENTS.md section 11 explicitly instructs a regenerate flow) must
+# not leave the previous run's sidecar behind: fm-spawn.sh would promote it into
+# meta, and the task would be guarded against a base its own brief never mentions.
+test_rescaffold_without_base_clears_the_sidecar() {
+  local home id brief
+  home="$TMP_ROOT/base-rescaffold-home"
+  write_registry "$home"
+  id="brief-base-rescaffold1"
+  brief="$home/data/$id/brief.md"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --base feature/x >/dev/null 2>&1 \
+    || fail "base-rescaffold: the first --base scaffold should exit 0"
+  assert_present "$home/data/$id/base" "base-rescaffold: the first scaffold should record the sidecar"
+
+  rm -f "$brief"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj >/dev/null 2>&1 \
+    || fail "base-rescaffold: re-scaffolding without --base should exit 0"
+
+  assert_absent "$home/data/$id/base" \
+    "base-rescaffold: a scaffold without --base must clear the stale sidecar, not inherit it"
+  assert_no_grep "Base branch." "$brief" \
+    "base-rescaffold: the re-scaffolded brief must not carry the base note"
+  pass "fm-brief.sh: re-scaffolding without --base clears a previously recorded base"
+}
+
 # Without --base the brief and directory are unchanged: no sidecar, no base note.
 test_no_base_leaves_brief_unchanged() {
   local home id brief
@@ -465,6 +522,8 @@ test_base_no_mistakes_brief_documents_the_real_recovery
 test_base_gate_precedes_the_done_terminator
 test_base_equals_form_and_sidecar_shape
 test_base_direct_pr_targets_base
+test_base_setup_note_agrees_with_the_pipeline
+test_rescaffold_without_base_clears_the_sidecar
 test_base_rejected_for_scout
 test_base_rejects_a_flag_as_its_value
 test_base_rejects_dash_leading_and_invalid_names

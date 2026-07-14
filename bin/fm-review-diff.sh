@@ -8,6 +8,11 @@
 # non-default base= (a task whose intended base is a feature branch, declared
 # with fm-brief.sh --base): then it is that base, so review shows the crewmate's
 # own change rather than the entire feature base's unmerged history on top of it.
+# A declared base that no longer exists on origin - the normal end-state of a
+# stacked PR, whose base merges and is then auto-deleted - falls back to the
+# default branch with a warning rather than erroring out, so the review of a PR
+# that is now perfectly ordinary is never blocked. A probe origin cannot answer
+# at all still stops. bin/fm-base-lib.sh owns that distinction.
 # When state/<id>.meta records pr= for an open PR, the compare side is the PR
 # head (recorded pr_head= when reachable, else refs/pull/<n>/head) so review
 # stays current after no-mistakes fix rounds push to the PR; if the PR head
@@ -20,6 +25,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+# shellcheck source=bin/fm-base-lib.sh
+. "$SCRIPT_DIR/fm-base-lib.sh"
 "$FM_ROOT/bin/fm-guard.sh" || true
 
 usage() {
@@ -123,10 +130,33 @@ fi
 # diffing it against the repo default would present the whole feature base's
 # unmerged history as part of the crewmate's change.
 BASE_DECLARED=$(grep '^base=' "$META" | tail -1 | cut -d= -f2- || true)
+if [ -n "$BASE_DECLARED" ] && ! fm_base_valid_branch_name "$BASE_DECLARED"; then
+  echo "error: task $ID records base='$BASE_DECLARED', which is not a valid git branch name (it must be non-empty, free of whitespace, and must not begin with '-')" >&2
+  exit 1
+fi
 BASE_BRANCH=${BASE_DECLARED:-$DEFAULT}
-case "$BASE_BRANCH" in
-  -*) echo "error: task $ID records an invalid base='$BASE_BRANCH' (must not begin with '-')" >&2; exit 1 ;;
-esac
+
+# A declared base that merged and was auto-deleted - the normal end-state of a
+# stacked PR - leaves nothing to diff against, and erroring out here would leave
+# firstmate unable to review a PR that is now perfectly ordinary. Say so and fall
+# back to the default branch, which is what the PR now targets. A probe origin
+# could not answer is different: that is an infrastructure failure, and reviewing
+# against the wrong base silently would be worse than stopping.
+if [ -n "$BASE_DECLARED" ] && git -C "$PROJ" remote get-url origin >/dev/null 2>&1; then
+  PROBE_RC=0
+  fm_base_probe_origin "$WT" "$BASE_DECLARED" || PROBE_RC=$?
+  case "$PROBE_RC" in
+    "$FM_BASE_ABSENT")
+      echo "warning: task $ID declares intended base $BASE_DECLARED, but that branch no longer exists on origin (most likely merged and auto-deleted); diffing against the default branch $DEFAULT instead" >&2
+      BASE_BRANCH=$DEFAULT
+      ;;
+    "$FM_BASE_PROBE_FAILED")
+      echo "error: task $ID declares intended base $BASE_DECLARED, but origin could not be asked whether that branch still exists" >&2
+      [ -z "$FM_BASE_PROBE_ERR" ] || printf '  git: %s\n' "$FM_BASE_PROBE_ERR" >&2
+      exit 1
+      ;;
+  esac
+fi
 
 if git -C "$PROJ" remote get-url origin >/dev/null 2>&1; then
   # Update the remote-tracking ref itself; a bare single-branch fetch can leave
