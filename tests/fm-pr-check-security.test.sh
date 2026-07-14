@@ -133,6 +133,14 @@ assert_valid_migration_marker() {
   [ "$(awk 'END { print NR + 0 }' "$marker")" -eq 1 ] || fail "migration marker had extra records"
 }
 
+assert_valid_scan_marker() {
+  local marker=$1
+  [ -f "$marker" ] && [ ! -L "$marker" ] || fail "migration success did not publish an ordinary scan marker"
+  [ "$(file_mode "$marker")" = 600 ] || fail "migration scan marker mode was not 0600"
+  grep -qxF fm-pr-check-migration-scan-v1 "$marker" || fail "migration scan marker bytes were not exact"
+  [ "$(awk 'END { print NR + 0 }' "$marker")" -eq 1 ] || fail "migration scan marker had extra records"
+}
+
 LINK_KIND=
 LINK_TARGET=
 LINK_CONTENT=
@@ -1479,25 +1487,48 @@ test_nonexecuting_migration() {
 }
 
 test_direct_registration_refreshes_v1_x_shim() {
-  local dir state shim quarantined
-  dir=$(make_case direct-registration-x-transition)
-  state="$dir/home/state"
-  shim="$state/x-watch.check.sh"
-  fm_write_meta "$state/task-a.meta" 'window=fm-task-a'
-  write_v1_x_shim "$shim" "$dir/home" "$dir/root"
-  chmod 0755 "$shim"
+  local dir state shim quarantined marker_kind number snapshot_before snapshot_after
+  number=20
+  for marker_kind in unmarked completed safe-scan; do
+    number=$((number + 1))
+    dir=$(make_case "direct-registration-x-transition-$marker_kind")
+    state="$dir/home/state"
+    shim="$state/x-watch.check.sh"
+    fm_write_meta "$state/task-a.meta" 'window=fm-task-a'
+    write_v1_x_shim "$shim" "$dir/home" "$dir/root"
+    chmod 0755 "$shim"
+    case "$marker_kind" in
+      completed)
+        printf '%s\n' fm-pr-check-migration-v1 > "$state/.pr-check-migration-v1"
+        chmod 0600 "$state/.pr-check-migration-v1"
+        ;;
+      safe-scan)
+        printf '%s\n' fm-pr-check-migration-scan-v1 > "$state/.pr-check-migration-scan-v1"
+        chmod 0600 "$state/.pr-check-migration-scan-v1"
+        ;;
+    esac
 
-  FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$dir/root" FM_TEST_GUARD_LOG="$dir/guard.log" \
-    PATH="$dir/fakebin:$BASE_PATH" "$PR_CHECK" task-a https://github.com/o/r/pull/21 \
-    > "$dir/register.out" 2> "$dir/register.err" \
-    || fail "direct registration did not preserve the previous X shim: $(cat "$dir/register.err")"
-  fmx_poll_shim_valid "$shim" "$dir/home" "$dir/root" \
-    || fail "direct registration did not refresh the previous X shim identity"
-  [ "$(file_mode "$shim")" = 700 ] || fail "refreshed X shim was not private and executable"
-  fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
-    || fail "X shim refresh suppressed direct PR registration"
-  quarantined=$(find "$state/.pr-check-quarantine" -name 'x-watch.check.*' -type f 2>/dev/null || true)
-  [ -z "$quarantined" ] || fail "authenticated previous X shim was quarantined"
+    FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$dir/root" FM_TEST_GUARD_LOG="$dir/guard.log" \
+      PATH="$dir/fakebin:$BASE_PATH" "$PR_CHECK" task-a "https://github.com/o/r/pull/$number" \
+      > "$dir/register.out" 2> "$dir/register.err" \
+      || fail "$marker_kind direct registration did not preserve the v1 X shim: $(cat "$dir/register.err")"
+    fmx_poll_shim_valid "$shim" "$dir/home" "$dir/root" \
+      || fail "$marker_kind direct registration did not refresh the v1 X shim identity"
+    [ "$(file_mode "$shim")" = 700 ] || fail "$marker_kind refreshed X shim was not private and executable"
+    fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+      || fail "$marker_kind X shim refresh suppressed direct PR registration"
+    assert_valid_migration_marker "$state/.pr-check-migration-v1"
+    assert_valid_scan_marker "$state/.pr-check-migration-scan-v1"
+    quarantined=$(find "$state/.pr-check-quarantine" -name 'x-watch.check.*' -type f 2>/dev/null || true)
+    [ -z "$quarantined" ] || fail "$marker_kind authenticated v1 X shim was quarantined"
+
+    snapshot_before=$(state_snapshot "$state")
+    FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$dir/root" "$MIGRATE" --checks-safe >/dev/null \
+      || fail "$marker_kind current X shim marker rerun failed"
+    snapshot_after=$(state_snapshot "$state")
+    [ "$snapshot_after" = "$snapshot_before" ] \
+      || fail "$marker_kind current X shim marker rerun changed state"
+  done
 
   dir=$(make_case direct-registration-x-lookalike)
   state="$dir/home/state"
@@ -1517,7 +1548,7 @@ test_direct_registration_refreshes_v1_x_shim() {
     || fail "unrecognized X shim lookalike was not quarantined"
   fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
     || fail "lookalike quarantine suppressed direct PR registration"
-  pass "direct registration refreshes only the authenticated previous X shim version"
+  pass "direct registration refreshes authenticated v1 X shims across marker states"
 }
 
 test_bootstrap_migrates_before_other_mutations() {

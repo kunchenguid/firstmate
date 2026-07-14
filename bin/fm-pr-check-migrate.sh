@@ -99,11 +99,16 @@ migration_complete() {
   migration_marker_content_valid "$MARKER"
 }
 
-# A valid completion marker proves this home already crossed the one-time
-# boundary. When it is absent or invalid, watcher exclusion comes before every
-# check scan and before any marker or diagnostic publication.
-migration_complete && exit 0
-[ "$ALLOW_INCOMPLETE_REPAIRS" -eq 1 ] && scan_complete && exit 0
+x_shim_transition_needed() {
+  fmx_poll_shim_v1_valid "$STATE/x-watch.check.sh" "$FM_HOME" "$FM_ROOT"
+}
+
+# Marker short-circuits apply only when generated artifact identities are current.
+# Otherwise watcher exclusion comes before every check scan and state mutation.
+if ! x_shim_transition_needed; then
+  migration_complete && exit 0
+  [ "$ALLOW_INCOMPLETE_REPAIRS" -eq 1 ] && scan_complete && exit 0
+fi
 
 # shellcheck source=bin/fm-wake-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-wake-lib.sh"
@@ -142,7 +147,9 @@ while [ "$i" -lt 100 ]; do
   # Its validated marker proves the old watcher crossed the boundary, so this
   # process can continue to the normal watcher singleton instead of competing
   # with the newly started watcher for a second migration lock.
-  migration_complete && exit 0
+  if migration_complete && ! x_shim_transition_needed; then
+    exit 0
+  fi
   sleep 0.05
   i=$((i + 1))
 done
