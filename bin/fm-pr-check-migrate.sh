@@ -17,6 +17,7 @@ MARKER="$STATE/.pr-check-migration-v1"
 MARKER_VALUE=fm-pr-check-migration-v1
 WATCH="$SCRIPT_DIR/fm-watch.sh"
 WATCH_LOCK="$STATE/.watch.lock"
+NONCANONICAL_PREFIX=_noncanonical
 
 if [ "$#" -ne 0 ]; then
   echo "error: invalid PR check migration request" >&2
@@ -349,7 +350,7 @@ diagnostic_obligation_message() {
   MIGRATION_DIAGNOSTIC_MESSAGE=
   prefix=${basename%%.diagnostic.*}
   kind=${basename##*.diagnostic.}
-  if [ "$prefix" = invalid ]; then
+  if [ "$prefix" = "$NONCANONICAL_PREFIX" ]; then
     case "$kind" in
       pending-noncanonical)
         MIGRATION_DIAGNOSTIC_MESSAGE='noncanonical task artifact: migration outcome tracking started before legacy poll handling'
@@ -390,7 +391,7 @@ ensure_diagnostic_obligation() {
     pending-canonical|pending-ambiguous|pending-noncanonical|canonical|failure-canonical|failure-ambiguous|ambiguous|noncanonical) ;;
     *) return 1 ;;
   esac
-  [ "$prefix" = invalid ] || fm_pr_task_id_valid "$prefix" || return 1
+  [ "$prefix" = "$NONCANONICAL_PREFIX" ] || fm_pr_task_id_valid "$prefix" || return 1
   ensure_quarantine_dir || return 1
   destination="$QUARANTINE/$prefix.diagnostic.$kind"
   if [ -e "$destination" ] || [ -L "$destination" ]; then
@@ -490,9 +491,9 @@ complete_ambiguous_outcome() {
 }
 
 complete_noncanonical_outcome() {
-  quarantined_artifact_exists invalid check || return 1
-  ensure_outcome_obligation invalid noncanonical || return 1
-  remove_diagnostic_obligation invalid pending-noncanonical
+  quarantined_artifact_exists "$NONCANONICAL_PREFIX" check || return 1
+  ensure_outcome_obligation "$NONCANONICAL_PREFIX" noncanonical || return 1
+  remove_diagnostic_obligation "$NONCANONICAL_PREFIX" pending-noncanonical
 }
 
 record_canonical_failure() {
@@ -596,7 +597,7 @@ recover_pending_outcomes() {
         fi
         ;;
       pending-noncanonical)
-        if quarantined_artifact_exists invalid check; then
+        if quarantined_artifact_exists "$NONCANONICAL_PREFIX" check; then
           complete_noncanonical_outcome || return 1
         fi
         ;;
@@ -714,13 +715,13 @@ if migration_needed; then
       fi
     else
       message='noncanonical task artifact: migration outcome tracking started before legacy poll handling'
-      if ! ensure_diagnostic_obligation invalid pending-noncanonical "$message" \
+      if ! ensure_diagnostic_obligation "$NONCANONICAL_PREFIX" pending-noncanonical "$message" \
         || ! process_diagnostic_obligations; then
         diagnostics_failed=1
         migration_failed=1
         continue
       fi
-      if quarantine_artifact "$check" invalid check \
+      if quarantine_artifact "$check" "$NONCANONICAL_PREFIX" check \
         && complete_noncanonical_outcome; then
         :
       else

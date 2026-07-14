@@ -1334,6 +1334,8 @@ SH
   set -e
   [ "$rc" -eq 0 ] || fail "noncanonical artifact migration failed"
   [ ! -e "$state/bad_id.check.sh" ] || fail "noncanonical artifact remained runnable"
+  find "$state/.pr-check-quarantine" -name '_noncanonical.check.*' -type f | grep . >/dev/null \
+    || fail "noncanonical artifact did not use its reserved quarantine namespace"
   assert_grep 'noncanonical task artifact quarantined and unarmed' "$state/.pr-check-migration.log" \
     "noncanonical artifact outcome diagnostic was missing"
   assert_valid_migration_marker "$state/.pr-check-migration-v1"
@@ -1385,6 +1387,32 @@ SH
   [ ! -e "$dir/home/state/task-a.pr-poll" ] || fail "teardown left the sidecar"
   ! find "$dir/home/state/.pr-check-quarantine" -name 'task-a.*' -print 2>/dev/null | grep . >/dev/null \
     || fail "teardown left task quarantine artifacts"
+
+  dir=$(make_case teardown-reserved-quarantine)
+  fakebin="$dir/fakebin"
+  fm_write_meta "$dir/home/state/invalid.meta" \
+    'window=fm-invalid' \
+    "worktree=$dir/missing-worktree" \
+    "project=$dir/project" \
+    'kind=ship' \
+    'mode=local-only'
+  mkdir -p "$dir/home/state/.pr-check-quarantine"
+  printf 'task artifact\n' > "$dir/home/state/.pr-check-quarantine/invalid.check.abc123"
+  printf 'noncanonical evidence\n' > "$dir/home/state/.pr-check-quarantine/_noncanonical.check.abc123"
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$fakebin/tmux"
+  touch "$dir/home/state/.last-watcher-beat"
+
+  FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" PATH="$fakebin:$BASE_PATH" \
+    "$TEARDOWN" invalid --force > "$dir/teardown.out" 2> "$dir/teardown.err" \
+    || fail "valid invalid task teardown failed"
+  [ ! -e "$dir/home/state/.pr-check-quarantine/invalid.check.abc123" ] \
+    || fail "teardown left the valid invalid task artifact"
+  [ "$(cat "$dir/home/state/.pr-check-quarantine/_noncanonical.check.abc123")" = 'noncanonical evidence' ] \
+    || fail "teardown removed noncanonical quarantine evidence"
 
   for kind in regular dangling directory; do
     dir=$(make_case "teardown-quarantine-link-$kind")
