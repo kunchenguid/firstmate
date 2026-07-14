@@ -15,6 +15,16 @@ LIB="$ROOT/bin/fm-wake-lib.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-watcher-lock-tests)
 
+# Portable mtime (macOS stat has no -c, GNU stat has no -f), for the beacon
+# freshness assertions in the reap-survival case.
+stat_mtime_portable() {
+  if [ "$(uname)" = Darwin ]; then
+    stat -f %m "$1" 2>/dev/null
+  else
+    stat -c %Y "$1" 2>/dev/null
+  fi
+}
+
 
 test_singleton_start() {
   local dir state fakebin out1 out2 pid1 pid2 live i
@@ -422,13 +432,24 @@ test_watch_restart_rejects_reused_pid() {
 }
 
 test_watch_restart_reports_healthy_peer_without_attaching() {
-  local dir state fakebin out peer identity armpid status
+  local dir state fakebin out peer identity armpid status i
   dir=$(make_case restart-healthy-peer)
   state="$dir/state"
   fakebin="$dir/fakebin"
   out="$dir/restart.out"
-  node -e 'process.on("SIGTERM", () => {}); setTimeout(() => {}, 300000)' &
+  # The peer must be TERM-RESISTANT before --restart signals it, or the test races
+  # node's startup: a TERM landing before the handler is installed kills the peer,
+  # the arm then legitimately steals the free lock and reports `started`, and the
+  # case under test never happens. Have node announce readiness only AFTER the
+  # handler is installed, and wait for that.
+  node -e 'process.on("SIGTERM", () => {}); require("fs").writeFileSync(process.argv[1], "ready"); setTimeout(() => {}, 300000)' "$dir/peer.ready" &
   peer=$!
+  i=0
+  while [ "$i" -lt 100 ] && [ ! -s "$dir/peer.ready" ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ -s "$dir/peer.ready" ] || fail "TERM-resistant peer never became ready"
   identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$peer") || fail "could not identify peer pid"
   mkdir "$state/.watch.lock"
   printf '%s\n' "$peer" > "$state/.watch.lock/pid"
@@ -558,9 +579,13 @@ test_arm_starts_and_self_heals() {
   pass "arm starts+confirms a fresh watcher on a clean lock and self-heals a dead-pid lock (never healthy off a dead pid)"
 }
 
-test_arm_hup_cleans_child_and_temp_output() {
+test_arm_hup_stands_down_without_killing_the_watcher() {
+  # The inversion at the heart of the reaped-background-task fix: a signalled arm
+  # is only the FOLLOWER, so it must stand down and leave the detached watcher -
+  # the actual supervision - running. The old shape killed its watcher child here,
+  # which is exactly how a harness reap took supervision down.
   local dir state fakebin armout i armpid lock_pid status
-  dir=$(make_case arm-hup-cleanup)
+  dir=$(make_case arm-hup-standdown)
   state="$dir/state"
   fakebin="$dir/fakebin"
   armout="$dir/arm.out"
@@ -572,20 +597,118 @@ test_arm_hup_cleans_child_and_temp_output() {
     sleep 0.1
     i=$((i + 1))
   done
-  grep -qF 'watcher: started pid=' "$armout" || fail "arm did not start before HUP cleanup check"
+  grep -qF 'watcher: started pid=' "$armout" || fail "arm did not start before HUP stand-down check"
   lock_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+  [ -n "$lock_pid" ] || fail "no watcher held the lock before HUP"
   kill -HUP "$armpid" 2>/dev/null || fail "could not send HUP to arm"
   wait_for_exit "$armpid" 80
   status=$?
   [ "$status" -eq 129 ] || fail "arm did not exit with HUP status (got $status)"
+  sleep 0.5
+  is_live_non_zombie "$lock_pid" || fail "HUP killed the detached watcher; it must survive its follower"
+  [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$lock_pid" ] \
+    || fail "detached watcher lost the singleton lock after its arm was signalled"
+  ! ls "$state"/.watch-arm-output.* >/dev/null 2>&1 || fail "arm left an arm-scoped temp output behind"
+  kill "$lock_pid" 2>/dev/null || true
+  pass "a signalled arm stands down without killing the detached watcher"
+}
+
+test_watcher_survives_arm_process_group_sigterm() {
+  # The reproduction of the reported bug, at the level the harness actually acts:
+  # the reaper SIGTERMs the background task's whole PROCESS GROUP. Run the arm in
+  # its own process group, signal that GROUP, and require the watcher to keep the
+  # lock and a fresh beacon - i.e. supervision stays up, which is the acceptance
+  # criterion. A same-process-group child (the old shape) dies to this signal.
+  local dir state fakebin armout armpid pgid lock_pid i beat_before beat_after
+  dir=$(make_case arm-reap-survival)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout="$dir/arm.out"
+  # setsid(1) does not exist on macOS; perl fork+setpgrp is the portable way to
+  # give the arm its own killable process group, mirroring a harness background task.
+  perl -e 'use POSIX (); my $pid = fork; die unless defined $pid;
+    if (!$pid) { POSIX::setsid(); exec @ARGV; } print "$pid\n";' \
+    env PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 bash -c "\"$WATCH_ARM\" > \"$armout\" 2>&1" > "$dir/armpid"
+  armpid=$(cat "$dir/armpid")
   i=0
-  while [ "$i" -lt 80 ] && is_live_non_zombie "$lock_pid"; do
+  while [ "$i" -lt 100 ]; do
+    grep -qF 'watcher: started pid=' "$armout" 2>/dev/null && break
     sleep 0.1
     i=$((i + 1))
   done
-  ! is_live_non_zombie "$lock_pid" || fail "HUP cleanup left watcher child running"
-  ! ls "$state"/.watch-arm-output.* >/dev/null 2>&1 || fail "HUP cleanup left temp output behind"
-  pass "arm cleans child watcher and temp output on HUP"
+  grep -qF 'watcher: started pid=' "$armout" || fail "arm never started a watcher: $(cat "$armout" 2>/dev/null)"
+  lock_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+  [ -n "$lock_pid" ] || fail "no watcher held the lock before the reap"
+  pgid=$(ps -o pgid= -p "$armpid" | tr -d ' ')
+  [ -n "$pgid" ] || fail "could not read the arm's process group"
+  [ "$(ps -o pgid= -p "$lock_pid" | tr -d ' ')" != "$pgid" ] \
+    || fail "watcher shares the arm's process group; a group-wide reap would kill it"
+  beat_before=$(stat_mtime_portable "$state/.last-watcher-beat")
+  # Reap the arm exactly as the harness does: SIGTERM the whole process group.
+  kill -TERM -"$pgid" 2>/dev/null || fail "could not signal the arm's process group"
+  # The arm is deliberately NOT this shell's child here (it has its own process
+  # group), so poll it rather than `wait` on it.
+  i=0
+  while [ "$i" -lt 80 ] && kill -0 "$armpid" 2>/dev/null; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  ! kill -0 "$armpid" 2>/dev/null || fail "the arm survived the SIGTERM of its own process group"
+  sleep 2
+  is_live_non_zombie "$lock_pid" || fail "REGRESSION: the process-group reap killed the watcher - supervision is off"
+  [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$lock_pid" ] \
+    || fail "watcher lost the singleton lock after the reap"
+  beat_after=$(stat_mtime_portable "$state/.last-watcher-beat")
+  [ -n "$beat_after" ] || fail "watcher stopped writing its liveness beacon after the reap"
+  [ "$beat_after" -ge "${beat_before:-0}" ] || fail "watcher beacon went backwards after the reap"
+  kill "$lock_pid" 2>/dev/null || true
+  pass "the watcher survives a SIGTERM of the arm's whole process group (the harness reap)"
+}
+
+test_watcher_idle_self_exit() {
+  # Orphan control for a now-detached watcher. It must rest only when NOTHING in
+  # the home needs supervising, and must keep running while any one of the three
+  # conditions says otherwise - a watcher a live session still expects must never
+  # be killed by this.
+  local dir state fakebin out pid status row
+  # (1) Empty fleet, no X mode, not afk -> idle-exit after the configured polls.
+  dir=$(make_case idle-exit)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_IDLE_EXIT_POLLS=2 \
+    FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 120
+  status=$?
+  [ "$status" -eq 0 ] || fail "idle watcher did not exit cleanly (status $status)"
+  grep -qF 'watcher: idle-exit' "$out" || fail "idle watcher did not report its idle-exit: $(cat "$out")"
+  # An idle-exit is NOT a wake: it must not be mistaken for one by the arm or drain.
+  ! grep -qE '^(signal:|stale:|check:|heartbeat)' "$out" \
+    || fail "idle-exit line looks like an actionable wake reason"
+
+  # (2) Each condition alone must KEEP the watcher alive past the same threshold.
+  for row in in-flight-task x-mode afk; do
+    dir=$(make_case "idle-exit-held-$row")
+    state="$dir/state"
+    fakebin="$dir/fakebin"
+    out="$dir/watch.out"
+    case "$row" in
+      in-flight-task) printf 'project=x\n' > "$state/task.meta" ;;
+      x-mode)         printf 'exit 0\n' > "$state/x-watch.check.sh" ;;
+      afk)            : > "$state/.afk" ;;
+    esac
+    PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_IDLE_EXIT_POLLS=2 \
+      FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+    pid=$!
+    sleep 5
+    is_live_non_zombie "$pid" || fail "watcher idle-exited despite '$row' - it is still needed: $(cat "$out")"
+    ! grep -qF 'watcher: idle-exit' "$out" || fail "watcher reported idle-exit despite '$row'"
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+  done
+  pass "watcher idle-exits only with an empty fleet, no X mode, and away mode off"
 }
 
 test_arm_propagates_immediate_wake_before_confirmation() {
@@ -719,9 +842,11 @@ test_lock_paused_mid_acquire_claim_fails_during_steal
 test_watch_restart_rejects_reused_pid
 test_watch_restart_reports_healthy_peer_without_attaching
 test_watcher_self_evicts_on_lock_takeover
+test_watcher_idle_self_exit
 test_arm_attaches_and_waits_for_live_fresh_watcher
 test_arm_starts_and_self_heals
-test_arm_hup_cleans_child_and_temp_output
+test_arm_hup_stands_down_without_killing_the_watcher
+test_watcher_survives_arm_process_group_sigterm
 test_arm_propagates_immediate_wake_before_confirmation
 test_arm_waits_for_peer_beacon_after_child_stands_down
 test_arm_fails_loud_when_no_fresh_watcher_confirmable

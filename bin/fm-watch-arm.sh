@@ -17,11 +17,25 @@
 # docs/arm-pretool-check.md for the blessed tree and deny reason codes. It is a
 # pre-execution seatbelt, not a substitute for the verification here.
 #
-# This script forks the watcher as a tracked child, then VERIFIES the outcome
-# before it settles in. It confirms a watcher process is genuinely alive AND the
-# liveness beacon (state/.last-watcher-beat) is fresh within FM_GUARD_GRACE (the
-# single source of truth, shared with fm-watch.sh and fm-guard.sh), and prints
-# exactly one unambiguous status line:
+# This script launches the watcher DETACHED (bin/fm-detach-lib.sh: its own
+# session and process group), then FOLLOWS it. That split is what makes
+# supervision survive a reaped background task: the harness's reap SIGTERMs the
+# task's whole process group, which used to kill the watcher along with this arm.
+# Now a reap kills only the follower - the watcher keeps the singleton lock, the
+# liveness beacon, and the durable wake queue - and the reap still arrives as a
+# task-completion notification, so firstmate wakes, drains nothing new, and
+# re-arms straight onto the live watcher via the `attached` path below.
+# The wake path is unchanged: the watcher enqueues an actionable wake and exits,
+# this follower observes that exit, prints the reason, and completes - and the
+# background task's completion is still what wakes the primary.
+# Because the watcher outlives this process, its stdout goes to a stable per-home
+# file (state/.watch.out, truncated by whichever arm launches it) rather than an
+# arm-scoped temp file.
+#
+# It then VERIFIES the outcome before it settles in. It confirms a watcher
+# process is genuinely alive AND the liveness beacon (state/.last-watcher-beat)
+# is fresh within FM_GUARD_GRACE (the single source of truth, shared with
+# fm-watch.sh and fm-guard.sh), and prints exactly one unambiguous status line:
 #   watcher: started pid=<N> (beacon fresh)              - it launched one and confirmed it
 #   watcher: attached pid=<N> (beacon <age>s)            - arm mode found a live+fresh watcher
 #                                                          holding the lock; this arm attaches and
@@ -30,14 +44,19 @@
 #                                                          watcher it did not own
 #   watcher: FAILED - no live watcher with a fresh beacon  - could not confirm one
 # It NEVER reports started/attached/healthy off a stale beacon or a dead/reused pid: a
-# stale-beacon or dead-pid holder either self-heals (the fresh child steals the
+# stale-beacon or dead-pid holder either self-heals (the fresh watcher steals the
 # dead lock per the singleton self-eviction/steal path and is confirmed) or this
-# returns the FAILED line. On started it waits the child and propagates the wake
-# reason; on attached it stays live until the identity-matched holder is no longer
-# healthy, then exits zero so the harness background-notify fires then (not as a
-# false empty wake). On restart-only healthy it exits zero after the duplicate
-# child stands down. On FAILED it exits non-zero so the failure is loud. A live
-# cycle already present means re-arm attaches - do not start a second watcher.
+# returns the FAILED line. On started it follows the detached watcher and
+# propagates the wake reason; on attached it stays live until the identity-matched
+# holder is no longer healthy, then exits zero so the harness background-notify
+# fires then (not as a false empty wake). On restart-only healthy it exits zero
+# after the duplicate watcher stands down. On FAILED it exits non-zero so the
+# failure is loud, and it kills the watcher it launched but could not confirm, so
+# an unconfirmable one is never left detached. A live cycle already present means
+# re-arm attaches - do not start a second watcher.
+# On HUP/TERM/INT this arm STANDS DOWN WITHOUT killing the watcher: surviving the
+# death of its launcher is the whole point, so a signalled follower must never
+# take supervision with it.
 #
 # --restart: stop ONLY this FM_HOME's watcher (the pid recorded in THIS home's
 # state/.watch.lock) and own a fresh cycle, or report restart-only healthy if a
@@ -52,10 +71,14 @@ set -u
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-detach-lib.sh
+. "$SCRIPT_DIR/fm-detach-lib.sh"
 
 WATCH="$SCRIPT_DIR/fm-watch.sh"
 WATCH_LOCK="$STATE/.watch.lock"
 BEAT="$STATE/.last-watcher-beat"
+# The detached watcher outlives this arm, so its output needs a stable home.
+WATCH_OUT="$STATE/.watch.out"
 # "Fresh" reuses the guard's threshold so there is one definition of liveness.
 GRACE=${FM_GUARD_GRACE:-300}
 # How long to wait for a freshly forked watcher to acquire the lock and beat.
@@ -164,67 +187,66 @@ if [ "$mode" = arm ] && healthy_watcher; then
   attach_and_wait "$HEALTHY_PID"
 fi
 
-# Start a watcher as a tracked child and confirm it before settling in. The child
-# stays our child for its whole life: we wait on it, so killing this arm (the
-# harness-tracked task) tears the watcher down too, and the watcher's eventual
-# wake exit propagates out so the harness re-notifies firstmate.
-child=
-child_out=
-cleanup_child() {
-  if [ -n "$child" ] && fm_pid_alive "$child"; then
-    kill -TERM "$child" 2>/dev/null || true
+# Launch a DETACHED watcher and confirm it before settling in. It is deliberately
+# NOT our child: it lives in its own session and process group, so a SIGTERM to
+# this arm's process group (a harness reaping its background task) cannot reach
+# it. We therefore poll its pid rather than `wait` on it, and we never kill it on
+# a signal - only on the FAILED path, where we launched a watcher that could not
+# be confirmed and must not be left behind.
+watcher_pid=
+kill_unconfirmed_watcher() {
+  [ -n "$watcher_pid" ] || return 0
+  fm_pid_alive "$watcher_pid" || return 0
+  # Never kill a watcher that legitimately holds the singleton: that one IS the
+  # supervision cycle, whoever launched it.
+  if healthy_watcher && [ "$HEALTHY_PID" = "$watcher_pid" ]; then
+    return 0
   fi
-  if [ -n "$child_out" ]; then
-    rm -f "$child_out" 2>/dev/null || true
-  fi
+  kill -TERM "$watcher_pid" 2>/dev/null || true
 }
-trap 'cleanup_child; exit 129' HUP
-trap 'cleanup_child; exit 143' TERM INT
+# Stand down without touching the watcher: it must survive its launcher.
+trap 'exit 129' HUP
+trap 'exit 143' TERM INT
 
-child_out=$(mktemp "$STATE/.watch-arm-output.XXXXXX") || {
-  echo "watcher: FAILED - no live watcher with a fresh beacon"
-  exit 1
-}
-"$WATCH" >"$child_out" &
-child=$!
-child_done=0
+watcher_pid=$(fm_detach_spawn "$WATCH_OUT" "$WATCH") || watcher_pid=
+case "$watcher_pid" in
+  ''|*[!0-9]*)
+    echo "watcher: FAILED - no live watcher with a fresh beacon"
+    exit 1
+    ;;
+esac
+watcher_exited=0
 
-# Verify the outcome: poll until this child is the confirmed healthy watcher, or
-# until some other watcher legitimately holds the singleton (a startup race), or
-# until the child gives up. Only then print the honest line.
+# Verify the outcome: poll until the watcher we launched is the confirmed healthy
+# one, or until some other watcher legitimately holds the singleton (a startup
+# race), or until ours gives up. Only then print the honest line.
 deadline=$(( $(date +%s) + CONFIRM_TIMEOUT ))
 while :; do
   if healthy_watcher; then
-    if [ "$HEALTHY_PID" = "$child" ]; then
-      echo "watcher: started pid=$child (beacon fresh)"
-      wait "$child"
-      rc=$?
-      print_watch_output "$child_out"
-      rm -f "$child_out" 2>/dev/null || true
-      exit "$rc"
+    if [ "$HEALTHY_PID" = "$watcher_pid" ]; then
+      echo "watcher: started pid=$watcher_pid (beacon fresh)"
+      # Follow the detached watcher: stay live for exactly as long as that cycle
+      # lasts, so this background task completes when - and only when - the cycle
+      # ends. Being reaped here is harmless now: the watcher keeps running.
+      fm_detach_follow "$watcher_pid" "$ATTACH_POLL"
+      print_watch_output "$WATCH_OUT"
+      exit 0
     fi
-    # Another watcher won the singleton; our child stood down.
+    # Another watcher won the singleton; the one we launched stood down.
     if [ "$mode" = arm ]; then
       report_attached
-      wait "$child" 2>/dev/null || true
-      rm -f "$child_out" 2>/dev/null || true
-      child=
-      child_out=
       trap - HUP TERM INT
       attach_and_wait "$HEALTHY_PID"
     fi
     report_healthy
-    wait "$child" 2>/dev/null || true
-    rm -f "$child_out" 2>/dev/null || true
     exit 0
   fi
-  if [ "$child_done" -eq 0 ] && ! fm_pid_alive "$child"; then
-    wait "$child"
-    rc=$?
-    child_done=1
-    if [ "$rc" -eq 0 ] && watch_output_has_wake "$child_out"; then
-      print_watch_output "$child_out"
-      rm -f "$child_out" 2>/dev/null || true
+  if [ "$watcher_exited" -eq 0 ] && ! fm_pid_alive "$watcher_pid"; then
+    watcher_exited=1
+    # The watcher can wake and exit before it ever looks healthy here (an
+    # immediate check wake). Its reason line is the proof; propagate it.
+    if watch_output_has_wake "$WATCH_OUT"; then
+      print_watch_output "$WATCH_OUT"
       exit 0
     fi
   fi
@@ -234,6 +256,5 @@ done
 
 trap - HUP TERM INT
 echo "watcher: FAILED - no live watcher with a fresh beacon"
-cleanup_child
-wait "$child" 2>/dev/null || true
+kill_unconfirmed_watcher
 exit 1

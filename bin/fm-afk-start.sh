@@ -2,7 +2,7 @@
 # Enter away mode and run the sub-supervisor daemon in a harness-tracked
 # foreground process when one is not already alive.
 #
-# Usage: fm-afk-start.sh
+# Usage: fm-afk-start.sh [--detach]
 #   Sets state/.afk unless FM_AFK_STATE_PREPARED=1, checks
 #   state/.supervise-daemon.lock, and:
 #     - prints "afk: daemon already running pid=<pid>" then exits 0 when that
@@ -11,6 +11,15 @@
 #       (fm_afk_clear_stale_artifacts) for a direct, non-prepared start, then
 #       execs bin/fm-supervise-daemon.sh in the foreground. A prepared start was
 #       already cleared transactionally by bin/fm-afk-launch.sh.
+#   --detach: launch the daemon DETACHED (bin/fm-detach-lib.sh: its own session
+#     and process group) and then FOLLOW it instead of exec'ing it. Required on
+#     the harness-native background path (claude, grok), where this script runs
+#     inside a tracked background task: reaping that task SIGTERMs its whole
+#     process group, which used to kill the daemon - and with it the watcher the
+#     daemon wraps - leaving state/.afk set with nothing supervising. Detached,
+#     the daemon (and therefore its watcher child) survives the reap; the reaped
+#     follower is harmless. The terminal-backed path (herdr/tmux via
+#     bin/fm-afk-launch.sh) already has a reap-proof host and keeps exec'ing.
 #
 # This file is sourceable: its BASH_SOURCE guard keeps main from running, while
 # exposing the daemon-lock helpers and fm_afk_clear_stale_artifacts. Sourcing it
@@ -41,9 +50,47 @@ FM_AFK_DAEMON="$FM_AFK_START_DIR/fm-supervise-daemon.sh"
 
 # shellcheck source=bin/fm-wake-lib.sh
 . "$FM_AFK_START_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-detach-lib.sh
+. "$FM_AFK_START_DIR/fm-detach-lib.sh"
+
+FM_AFK_DETACH_CONFIRM_TIMEOUT=${FM_AFK_DETACH_CONFIRM_TIMEOUT:-10}
 
 fm_afk_start_usage() {
-  sed -n '2,14p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '2,24p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+}
+
+# Launch the daemon detached and follow it. Confirms the identity-backed daemon
+# lock names the new process before reporting success, so this never claims a
+# daemon it cannot see; an unconfirmable one is killed rather than left detached.
+fm_afk_start_detached() {
+  local log pid deadline
+  log="$FM_AFK_STATE/.supervise-daemon.out"
+  pid=$(fm_detach_spawn "$log" "$FM_AFK_DAEMON") || pid=
+  case "$pid" in
+    ''|*[!0-9]*)
+      echo "afk: FAILED to launch the supervise daemon" >&2
+      return 1
+      ;;
+  esac
+  deadline=$(( $(date +%s) + FM_AFK_DETACH_CONFIRM_TIMEOUT ))
+  while :; do
+    if daemon_lock_held_by_live_daemon && [ "$(daemon_lock_pid)" = "$pid" ]; then
+      echo "afk: supervise daemon detached pid=$pid; it survives a reaped background task"
+      # Follow it: this tracked task stays live for as long as the daemon does, and
+      # being reaped only ends the follower.
+      fm_detach_follow "$pid"
+      return 0
+    fi
+    if ! fm_pid_alive "$pid"; then
+      echo "afk: FAILED - the supervise daemon exited before taking its lock (see $log)" >&2
+      return 1
+    fi
+    [ "$(date +%s)" -ge "$deadline" ] && break
+    sleep 0.2
+  done
+  kill -TERM "$pid" 2>/dev/null || true
+  echo "afk: FAILED - could not confirm the detached supervise daemon (see $log)" >&2
+  return 1
 }
 
 # fm_afk_clear_stale_artifacts: on a FRESH away-session entry (the daemon is not
@@ -111,10 +158,12 @@ daemon_lock_held_by_live_daemon() {
 }
 
 fm_afk_start_main() {
+  local detach=${FM_AFK_DETACH:-0}
   case "${1:-}" in
     '' ) ;;
+    --detach) detach=1 ;;
     -h|--help) fm_afk_start_usage; return 0 ;;
-    * ) echo "usage: $(basename "${BASH_SOURCE[1]:-fm-afk-start.sh}")" >&2; return 2 ;;
+    * ) echo "usage: $(basename "${BASH_SOURCE[1]:-fm-afk-start.sh}") [--detach]" >&2; return 2 ;;
   esac
 
   mkdir -p "$FM_AFK_STATE"
@@ -139,6 +188,11 @@ fm_afk_start_main() {
   # before the new daemon can surface them (fix for the leaked-artifact defect).
   if [ "${FM_AFK_STATE_PREPARED:-0}" != 1 ]; then
     fm_afk_clear_stale_artifacts "$FM_AFK_STATE"
+  fi
+
+  if [ "$detach" = 1 ]; then
+    fm_afk_start_detached
+    return
   fi
 
   echo "afk: starting supervise daemon in foreground; keep this command as a tracked background session"

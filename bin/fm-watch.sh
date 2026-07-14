@@ -94,6 +94,25 @@ else
   stat_sig()   { stat -c '%s:%Y' "$1" 2>/dev/null; }
 fi
 
+# Idle self-exit. bin/fm-watch-arm.sh now launches this watcher DETACHED (its own
+# session and process group) so a reaped harness background task cannot kill
+# supervision. The cost of that durability is that nothing kills the watcher when
+# its session ends either, so it needs its own resting condition or an orphaned
+# watcher would poll forever. Exit only after IDLE_EXIT_POLLS consecutive polls
+# in which ALL THREE hold, which together mean nothing in this home needs
+# supervising:
+#   - zero in-flight tasks (in-flight work always has a state/<id>.meta);
+#   - no X-mode relay shim (X mode deliberately keeps a watcher armed on an empty
+#     fleet, so an X-only home is still served - AGENTS.md section 14);
+#   - away mode off (the daemon RESTARTS the watcher it wraps, so idle-exiting
+#     under afk would spin a restart loop).
+# The default is deliberately conservative: 40 polls at the 15s default FM_POLL is
+# ~10 minutes of a CONTINUOUSLY empty fleet. A live session's empty-fleet gaps -
+# between a teardown and the next spawn - are bounded by how fast firstmate
+# dispatches, and any spawn re-arms the watcher anyway, so this can never kill a
+# watcher a live session still expects. The counter resets the moment any of the
+# three conditions stops holding.
+IDLE_EXIT_POLLS=${FM_IDLE_EXIT_POLLS:-40}
 POLL=${FM_POLL:-15}                   # seconds between cycles
 HEARTBEAT=${FM_HEARTBEAT:-600}        # base seconds between heartbeat scans
 HEARTBEAT_MAX=${FM_HEARTBEAT_MAX:-7200}  # heartbeat backoff cap
@@ -152,6 +171,19 @@ _event_cap_fails=0
 # every wake) and let the daemon classify - never absorb here, or the daemon's
 # digest/injection layer would never see the wake.
 afk_present() { [ -e "$STATE/.afk" ]; }
+
+# nothing_to_supervise: 0 when this home has no in-flight task meta, no X-mode
+# relay shim, and away mode is off - the three conditions of the idle self-exit
+# above. Pure read; the caller owns the consecutive-poll counting.
+nothing_to_supervise() {
+  local meta
+  afk_present && return 1
+  [ -e "$STATE/x-watch.check.sh" ] && return 1
+  for meta in "$STATE"/*.meta; do
+    [ -e "$meta" ] && return 1
+  done
+  return 0
+}
 
 # Append one line to the triage debug log explaining an absorbed (benign) wake,
 # size-capped so a long benign stretch cannot grow it without bound. Best-effort:
@@ -611,6 +643,8 @@ fm_pid_identity "$WATCHER_PID" > "$WATCH_LOCK/pid-identity" 2>/dev/null || true
 
 [ -e "$STATE/.last-heartbeat" ] || touch "$STATE/.last-heartbeat"
 
+idle_polls=0
+
 while :; do
   # Self-eviction: if the singleton lock no longer names this process, a second
   # watcher has taken over (e.g. a transient duplicate from a racy arm). Stand
@@ -625,6 +659,21 @@ while :; do
   # Liveness beacon for fm-guard.sh: a fresh mtime here means a watcher is
   # alive. Supervision scripts warn when this goes stale with tasks in flight.
   touch "$STATE/.last-watcher-beat"
+
+  # Idle self-exit (see IDLE_EXIT_POLLS above): the resting condition that keeps a
+  # detached watcher from outliving its purpose. Deliberately NOT a wake: the line
+  # matches none of the signal/stale/check/heartbeat reasons, so an arm following
+  # this watcher reports it as-is and firstmate simply does not re-arm an empty
+  # fleet. The next spawn arms a fresh watcher.
+  if nothing_to_supervise; then
+    idle_polls=$(( idle_polls + 1 ))
+    if [ "$idle_polls" -ge "$IDLE_EXIT_POLLS" ]; then
+      echo "watcher: idle-exit (nothing to supervise for $idle_polls polls: no tasks in flight, no X mode, not away)"
+      exit 0
+    fi
+  else
+    idle_polls=0
+  fi
 
   # Slow per-task checks (firstmate writes these, e.g. a merged-PR poll).
   # Time-based via .last-check mtime so the cadence survives watcher restarts.

@@ -47,8 +47,12 @@ Optional X mode rides the same check path: the locked session-start bootstrap st
 
 At session start, `bin/fm-session-start.sh` emits exactly one primary-harness supervision block rendered by `bin/fm-supervision-instructions.sh` from `docs/supervision-protocols/`.
 That block owns the live wait shape for the running primary harness: Claude and Grok use background-notify cycles, Codex uses bounded foreground checkpoints, Pi uses its two tracked primary extensions, and OpenCode uses its TUI plugin.
-`bin/fm-watch-arm.sh` remains the verified arm wrapper for protocols that call it; it forks the watcher as a tracked child, verifies it is genuinely alive with a fresh liveness beacon, and prints exactly one honest status line (`started` / `attached` / restart-only `healthy` / `FAILED`, the last exiting non-zero).
+`bin/fm-watch-arm.sh` remains the verified arm wrapper for protocols that call it; it launches the watcher detached, verifies it is genuinely alive with a fresh liveness beacon, and prints exactly one honest status line (`started` / `attached` / restart-only `healthy` / `FAILED`, the last exiting non-zero).
 On `attached` it stays live until that existing cycle ends so background-notify harnesses do not get an empty false wake from a healthy no-op exit.
+On a background-notify primary the arm runs inside a harness-tracked background task, and reaping that task SIGTERMs its whole process group, so the watcher is launched into its own session (`bin/fm-detach-lib.sh`) and the arm merely FOLLOWS it: a reap ends the follower while the watcher keeps the singleton lock, the beacon, and the durable queue, and the primary re-arms straight back onto it.
+The wake path is unchanged, because the watcher still enqueues an actionable wake and exits, and the follower's completion is still what notifies the primary.
+The same detachment carries the away-mode daemon, which must outlive the turn by construction; `bin/fm-afk-start.sh --detach` is the native-background path's entry.
+Because nothing kills a detached watcher when its session ends, the watcher self-exits after a bounded run of polls in which the fleet is empty, X mode is off, and away mode is off; `bin/fm-watch.sh`'s header owns that resting condition and its threshold.
 Its `--restart` mode signals only the watcher recorded in the current home's `state/.watch.lock`, so restarting one home cannot kill sibling secondmate watchers.
 A pull-based guard (`bin/fm-guard.sh`) warns through supervision tool output if the primary checkout is tangled, or if tasks are in flight and that watcher stops running or queued wakes are waiting to be drained.
 The drain script calls that guard after emptying the queue, which avoids repeating the queued-wakes warning for records it just consumed while still warning on stale watcher liveness.
@@ -243,5 +247,5 @@ Use `/stow` before an intentional reset when the conversation may hold durable k
 
 ## Development notes
 
-The current watcher reliability work combines always-on bash triage with a durable queue for actionable wakes, a race-proof singleton lock, duplicate self-eviction, drain-time liveness assertion, and a self-verifying tracked-child arm wrapper.
+The current watcher reliability work combines always-on bash triage with a durable queue for actionable wakes, a race-proof singleton lock, duplicate self-eviction, drain-time liveness assertion, and a self-verifying arm wrapper that follows a detached watcher so a reaped harness background task cannot take supervision down.
 The presence-gated sub-supervisor (`bin/fm-supervise-daemon.sh`) provides walk-away supervision via the `/afk` skill while reusing the same shared wake classifier as the always-on watcher.

@@ -20,8 +20,10 @@ Verification on 2026-07-09 used Pi 0.80.5, an isolated `PI_CODING_AGENT_DIR`, an
 The command `Use the fm_watch_arm_pi custom tool now. Do not use bash.` rendered `watcher: started Pi extension arm child 1`, then the model returned `DONE` without the prior `result.content.filter(...)` crash.
 The extension tool returned Pi's required text `content` plus structured `details` and used `Type.Object({})` for its parameter schema.
 The human command `/fm-watch-arm-pi` notified through `ctx.ui.notify(...)` and returned no value.
-The clean-exit probe ran `/quit`, printed `PI_EXIT=0`, and confirmed that both the attached arm process and watcher child were gone.
+The clean-exit probe ran `/quit`, printed `PI_EXIT=0`, and confirmed that the attached arm process was gone.
 That cleanup is owned by a one-shot process `exit` listener because Pi 0.80.5 did not reliably emit `session_shutdown` for `/quit`; the listener is removed when `session_shutdown` does run.
+Since 2026-07-13 the watcher itself is launched detached rather than as the arm's child, so it deliberately OUTLIVES a clean Pi exit: the arm dies, supervision does not.
+An orphaned watcher is self-adopting - the next session's arm reports `attached` onto it - and it rests on its own idle self-exit once nothing is in flight; `docs/turnend-guard.md` owns the reasoning and evidence.
 Command run for the complete interactive regression: `FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh`.
 Observed output: `ok - Pi 0.80.5 live E2E rendered the tool, guarded once, woke, re-armed, and cleaned up on exit`.
 Command run for the installed-type contract: `tests/fm-pi-primary-types.test.sh`.

@@ -462,6 +462,70 @@ unit_native_entry_preserves_prepared_state() {
   rm -rf "$st"
 }
 
+# The away-mode half of the reaped-background-task fix. On a harness-native
+# background path (claude, grok) fm-afk-start.sh runs INSIDE a tracked background
+# task, and reaping that task SIGTERMs its whole process group - which used to
+# kill the exec'd daemon, and with it the watcher the daemon wraps, leaving
+# state/.afk set with nothing supervising. With --detach the daemon lives in its
+# own session, so only the follower dies.
+unit_native_detach_survives_reap() {
+  local st fake armpid pgid dpid i
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-detach-reap.XXXXXX")
+  mkdir -p "$st/state" "$st/fake"
+  # Named fm-supervise-daemon.sh so the daemon-lock identity check recognizes it.
+  fake="$st/fake/fm-supervise-daemon.sh"
+  cat > "$fake" <<'SH'
+#!/usr/bin/env bash
+set -u
+lock="$FM_STATE_OVERRIDE/.supervise-daemon.lock"
+mkdir -p "$lock"
+printf '%s\n' "$$" > "$lock/pid"
+while :; do sleep 1; done
+SH
+  chmod +x "$fake"
+  # Run the follower in its OWN process group, exactly as a harness background task.
+  perl -e 'use POSIX (); my $p = fork; die unless defined $p;
+    if (!$p) { POSIX::setsid(); exec @ARGV; } print "$p\n";' \
+    env FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" bash -c \
+    ". \"$START\"; FM_AFK_DAEMON=\"$fake\"; fm_afk_start_main --detach > \"$st/out\" 2>&1" \
+    > "$st/armpid" 2>/dev/null
+  armpid=$(cat "$st/armpid" 2>/dev/null)
+  i=0
+  while [ "$i" -lt 100 ] && [ ! -s "$st/state/.supervise-daemon.lock/pid" ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  dpid=$(cat "$st/state/.supervise-daemon.lock/pid" 2>/dev/null || true)
+  if [ -z "$dpid" ] || ! kill -0 "$dpid" 2>/dev/null; then
+    fail "detached daemon never took its lock"
+    kill "$armpid" 2>/dev/null || true
+    rm -rf "$st"
+    return
+  fi
+  pgid=$(ps -o pgid= -p "$armpid" | tr -d ' ')
+  if [ "$(ps -o pgid= -p "$dpid" | tr -d ' ')" = "$pgid" ]; then
+    fail "daemon shares the follower's process group; a group-wide reap would kill it"
+  else
+    pass "detach: daemon lands in its own process group, not the tracked task's"
+  fi
+  # Reap the background task the way the harness does: SIGTERM the process group.
+  kill -TERM -"$pgid" 2>/dev/null || true
+  i=0
+  while [ "$i" -lt 80 ] && kill -0 "$armpid" 2>/dev/null; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  sleep 1
+  if kill -0 "$dpid" 2>/dev/null \
+    && [ "$(cat "$st/state/.supervise-daemon.lock/pid" 2>/dev/null || true)" = "$dpid" ]; then
+    pass "detach: the away-mode daemon survives a reap of its launching task"
+  else
+    fail "REGRESSION: the process-group reap killed the away-mode daemon - away supervision is off"
+  fi
+  kill "$dpid" 2>/dev/null || true
+  rm -rf "$st"
+}
+
 unit_close_failure_preserves_record() {
   local st
   st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-close-fail.XXXXXX")
@@ -877,6 +941,7 @@ unit_readiness_failure_preserves_unconfirmed_record
 unit_tmux_absence_distinguishes_probe_failure
 unit_native_lifecycle
 unit_native_entry_preserves_prepared_state
+unit_native_detach_survives_reap
 unit_close_failure_preserves_record
 unit_record_publication_atomic
 unit_malformed_record_fails_closed

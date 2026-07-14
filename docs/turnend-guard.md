@@ -144,6 +144,46 @@ So the model was re-invoked solely by the background task's completion while idl
 This matches the harness tool contract that a `run_in_background` task "keeps running across turns and re-invokes you when it exits", and reproduces the 11s latency the task audit measured independently on the same harness version.
 No Herdr command was issued and no fleet state was touched; the experiment wrote only to the session scratchpad, which was discarded.
 
+### 2026-07-13: the reaped background task, and why supervision is now detached
+
+The Mechanism A measurement above assumes the background task lives long enough to carry a wake.
+On 2026-07-12 that assumption broke on a live home: Claude Code background tasks were terminated from outside within a minute or two of starting, with a clean SIGTERM (`Terminated: 15`).
+The away-mode daemon was killed three times in a row and the armed watcher roughly eight, each time leaving `pgrep fm-watch.sh` empty; load average was normal (~1.3), so this was not the OOM killer.
+Because `bin/fm-watch-arm.sh` and `bin/fm-afk-start.sh` both ran as Claude background tasks, and the watcher and daemon were CHILDREN of those tasks, the reap took supervision down with it - `state/.afk` stayed set while nothing supervised, which is the exact failure away mode exists to prevent.
+
+Measured first-hand on Claude Code (Darwin 25.5.0) on 2026-07-13.
+Procedure: a background task ran a parent that forked two children - one ordinary child in the parent's process group (the old arm/watcher shape) and one detached into its own session and process group - then the task was stopped, and each process was checked for survival.
+
+```
+parent   = 37805  pgid 37803   -> KILLED
+plain    = 37820  pgid 37803   -> KILLED    (ordinary child, same process group)
+detached = 37824  pgid 37824   -> SURVIVED  (own session, reparented to init, still running 6s+ later)
+```
+
+The reaper therefore signals the task's whole PROCESS GROUP, not just the direct child.
+Escaping the process group is what makes a supervision process survive, so neither `nohup` nor a bare `&` is sufficient.
+`setsid(1)` does not exist on macOS, so the portable primitive is perl `fork` + `POSIX::setsid()`, the idiom `bin/fm-watch.sh`'s `run_check` and `bin/fm-watch-checkpoint.sh` already use; it is now shared as `bin/fm-detach-lib.sh`.
+
+Detaching the watcher does not disturb this guard's predicate.
+The watcher writes `.watch.lock/{pid,pid-identity,fm-home,watcher-path}` and `.last-watcher-beat` from its own main shell, so a detached watcher is still the lock holder and still identity-matches.
+Verified by running the real `bin/fm-watch.sh` detached against an isolated primary-shaped home carrying one in-flight meta:
+
+| watcher state | `fm-guard.sh` | `fm-turnend-guard.sh` |
+| --- | --- | --- |
+| none | `WATCHER DOWN` banner | `TURN WOULD END BLIND`, exit 2 |
+| detached, alive | silent | silent, exit 0 |
+| detached, killed | silent only while the beacon is inside the 300s grace (pre-existing grace behavior) | `TURN WOULD END BLIND`, exit 2 |
+
+Mechanism A survives too, in a stronger form.
+The arm is now a FOLLOWER of the detached watcher, so a reap ends only the follower; the reap still arrives as a task-completion notification, the primary drains an empty queue and re-arms, and the re-arm `attached`es to the watcher that never stopped running.
+A wake still reaches the primary the same way it always did: the watcher enqueues an actionable wake and exits, and the follower's completion notifies the model.
+
+Two consequences of detachment are deliberate, and supersede the earlier Pi record above.
+A watcher now outlives the primary session that armed it, on every harness: the 2026-07-09 Pi validation's "the second arm process plus its watcher child were both gone afterward" no longer holds, and `tests/fm-pi-primary-live-e2e.test.sh` asserts the new contract - the arm dies with the session, the detached watcher survives it.
+An orphaned watcher is self-adopting rather than harmful, because the singleton lock plus attach-on-re-arm hand it straight back to the next session, and it keeps filling the durable queue in the meantime.
+It is bounded by the watcher's own idle self-exit, which rests it only after a run of polls with an empty fleet, X mode off, and away mode off; `bin/fm-watch.sh`'s header owns that condition and its threshold.
+Cross-session eviction was considered and deliberately rejected: it would add a kill path across sessions to the supervision backbone for no gain the lock does not already provide.
+
 ## Tests
 
 `tests/fm-turnend-guard.test.sh` covers the shared predicate, primary scoping (including a secondmate's own home being guarded like the main primary while its child worktrees stay exempt), `FM_HOME` and `FM_STATE_OVERRIDE` precedence, Pi logical-run latch behavior for no-tool and multi-tool runs, fail-open behavior without `jq`, tracked hook registration for all five harnesses, and the Grok adapter's forced-resume loop guard and permission-mode regression.

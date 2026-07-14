@@ -27,11 +27,13 @@ batched digest rather than per-wake injections.
    - **Harness WITH a native in-pane tracked-background tool** (e.g. claude's
      background bash, grok's background tool): first run
      `bin/fm-afk-launch.sh start-native`, then run
-     `FM_AFK_STATE_PREPARED=1 bin/fm-afk-start.sh` through that native tool.
+     `FM_AFK_STATE_PREPARED=1 bin/fm-afk-start.sh --detach` through that native tool.
      This is a deliberate no-separate-terminal exception because the harness-hosted job creates no terminal or layout mutation, and a shell launcher cannot invoke a harness-native background tool.
+     `--detach` is REQUIRED on this path: the harness reaps a background task by SIGTERMing its whole process group, which would otherwise kill the daemon and the watcher it wraps, leaving `state/.afk` set with nothing supervising.
+     Detached, the daemon survives that reap and the reaped task is harmless; `bin/fm-afk-start.sh`'s header owns the mechanism.
      The launcher still owns lifecycle state and records the no-terminal mode, while the daemon inherits and auto-discovers the captain pane.
      If the native launch fails, run `bin/fm-afk-launch.sh stop` to roll back the prepared lifecycle.
-     Do not wrap it in `nohup ... &` (Codex/herdr can reap fire-and-forget shell children after a tool call returns).
+     Do not wrap it in `nohup ... &` (Codex/herdr can reap fire-and-forget shell children after a tool call returns, and `nohup` does not escape the process group anyway).
    - **Harness WITHOUT one** (e.g. pi): run `bin/fm-afk-launch.sh start`. It is
      the single owner of the daemon terminal: it creates a NON-VISIBLE tracked
      terminal for the current backend (a herdr dedicated `--no-focus` workspace,
