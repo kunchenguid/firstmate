@@ -280,7 +280,7 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
   exit "$rc"
 fi
 ID=${POS[0]}
-fm_pr_task_id_valid "$ID" || { echo "error: invalid task id" >&2; exit 2; }
+fm_task_id_creation_valid "$ID" || { echo "error: invalid task id" >&2; exit 2; }
 PROJ=
 ARG3=
 FIRSTMATE_HOME=

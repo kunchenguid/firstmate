@@ -52,8 +52,13 @@ fm_task_id_path_safe() {
 
 fm_pr_task_id_valid() {
   local id=${1-}
-  fm_task_id_path_safe "$id" || return 1
-  [ "${#id}" -le 64 ] && [ "$id" != _noncanonical ]
+  fm_task_id_path_safe "$id"
+}
+
+fm_task_id_creation_valid() {
+  local id=${1-}
+  fm_pr_task_id_valid "$id" || return 1
+  [ "${#id}" -le 64 ]
 }
 
 fm_pr_url_parse() {

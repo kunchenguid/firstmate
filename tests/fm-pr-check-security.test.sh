@@ -325,7 +325,6 @@ INVALID_IDS=(
   '.'
   '..'
   '.task'
-  '_noncanonical'
   'task a'
   $'task\ta'
   $'task\na'
@@ -334,7 +333,6 @@ INVALID_IDS=(
   'task"a'
   'task;a'
   'task$a'
-  'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
 )
 
 UNSAFE_LIFECYCLE_IDS=(
@@ -373,10 +371,11 @@ EOF
   for id in -task task- task--a Task-a task_a task.a; do
     fm_pr_task_id_valid "$id" || fail "task ID validator rejected a safe lifecycle-compatible slug"
   done
-  for id in _noncanonical aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa; do
-    fm_task_id_path_safe "$id" || fail "legacy task ID was not path-safe for teardown"
-    ! fm_pr_task_id_valid "$id" || fail "creation validator accepted a reserved or overlong task ID"
-  done
+  fm_task_id_creation_valid _noncanonical \
+    || fail "creation validator rejected a task ID after its reserved namespace moved"
+  id=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  fm_pr_task_id_valid "$id" || fail "operational validator rejected a path-safe legacy task ID"
+  ! fm_task_id_creation_valid "$id" || fail "creation validator accepted an overlong task ID"
   pass "raw-byte parser accepts canonical URLs and rejects the complete adversarial matrix"
 }
 
@@ -546,19 +545,40 @@ SH
     mkdir -p "$dir/home/state/.pr-check-quarantine"
     chmod 0700 "$dir/home/state/.pr-check-quarantine"
     printf 'reserved migration evidence\n' \
-      > "$dir/home/state/.pr-check-quarantine/_noncanonical.check.evidence"
-    chmod 0600 "$dir/home/state/.pr-check-quarantine/_noncanonical.check.evidence"
+      > "$dir/home/state/.pr-check-quarantine/!noncanonical.check.evidence"
+    chmod 0600 "$dir/home/state/.pr-check-quarantine/!noncanonical.check.evidence"
     cat > "$dir/fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 exit 0
 SH
     chmod 0700 "$dir/fakebin/tmux"
     touch "$dir/home/state/.last-watcher-beat"
+    mkdir "$dir/home/state/$id.check.sh"
+    set +e
+    FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" PATH="$dir/fakebin:$BASE_PATH" \
+      "$TEARDOWN" "$id" --force > "$dir/unsafe-teardown.out" 2> "$dir/unsafe-teardown.err"
+    rc=$?
+    set -e
+    [ "$rc" -ne 0 ] || fail "legacy task teardown accepted an unsafe direct artifact"
+    [ -e "$dir/home/state/$id.meta" ] \
+      || fail "legacy task teardown mutated lifecycle state before artifact refusal"
+    [ -d "$dir/home/state/$id.check.sh" ] \
+      || fail "legacy task teardown changed the unsafe direct artifact"
+    rmdir "$dir/home/state/$id.check.sh"
+    FM_HOME="$dir/home" "$ROOT/bin/fm-x-link.sh" "$id" req-legacy \
+      --carry-count 0 --carry-ts 1700000000 --carry-platform x --carry-max 280 \
+      > "$dir/x-link.out" 2> "$dir/x-link.err" \
+      || fail "path-safe legacy task ID could not link an X request"
+    run_merge_entry "$dir" "$id" https://github.com/o/r/pull/4 \
+      > "$dir/merge.out" 2> "$dir/merge.err" \
+      || fail "path-safe legacy task ID could not use the PR merge flow"
+    fm_pr_poll_artifacts_valid "$dir/home/state" "$id" "$POLL" \
+      || fail "path-safe legacy task ID did not publish an authenticated poll"
     FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" PATH="$dir/fakebin:$BASE_PATH" \
       "$TEARDOWN" "$id" --force > "$dir/teardown.out" 2> "$dir/teardown.err" \
       || fail "legacy path-safe task ID could not be torn down"
     [ ! -e "$dir/home/state/$id.meta" ] || fail "legacy task teardown retained metadata"
-    [ "$(cat "$dir/home/state/.pr-check-quarantine/_noncanonical.check.evidence")" = 'reserved migration evidence' ] \
+    [ "$(cat "$dir/home/state/.pr-check-quarantine/!noncanonical.check.evidence")" = 'reserved migration evidence' ] \
       || fail "legacy task teardown changed the reserved migration namespace"
   done
   pass "valid direct and merge flows record exact metadata and reject multiline head metadata"
@@ -1842,7 +1862,7 @@ test_nonexecuting_migration() {
   set -e
   [ "$rc" -eq 0 ] || fail "noncanonical artifact migration failed"
   [ ! -e "$state/bad id.check.sh" ] || fail "noncanonical artifact remained runnable"
-  find "$state/.pr-check-quarantine" -name '_noncanonical.check.*' -type f | grep . >/dev/null \
+  find "$state/.pr-check-quarantine" -name '!noncanonical.check.*' -type f | grep . >/dev/null \
     || fail "noncanonical artifact did not use its reserved quarantine namespace"
   assert_grep 'noncanonical task artifact quarantined and unarmed' "$state/.pr-check-migration.log" \
     "noncanonical artifact outcome diagnostic was missing"
@@ -2268,9 +2288,9 @@ SH
   mkdir -p "$dir/home/state/.pr-check-quarantine"
   chmod 0700 "$dir/home/state/.pr-check-quarantine"
   printf 'task artifact\n' > "$dir/home/state/.pr-check-quarantine/invalid.check.abc123"
-  printf 'noncanonical evidence\n' > "$dir/home/state/.pr-check-quarantine/_noncanonical.check.abc123"
+  printf 'noncanonical evidence\n' > "$dir/home/state/.pr-check-quarantine/!noncanonical.check.abc123"
   chmod 0600 "$dir/home/state/.pr-check-quarantine/invalid.check.abc123" \
-    "$dir/home/state/.pr-check-quarantine/_noncanonical.check.abc123"
+    "$dir/home/state/.pr-check-quarantine/!noncanonical.check.abc123"
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 exit 0
@@ -2283,7 +2303,7 @@ SH
     || fail "valid invalid task teardown failed"
   [ ! -e "$dir/home/state/.pr-check-quarantine/invalid.check.abc123" ] \
     || fail "teardown left the valid invalid task artifact"
-  [ "$(cat "$dir/home/state/.pr-check-quarantine/_noncanonical.check.abc123")" = 'noncanonical evidence' ] \
+  [ "$(cat "$dir/home/state/.pr-check-quarantine/!noncanonical.check.abc123")" = 'noncanonical evidence' ] \
     || fail "teardown removed noncanonical quarantine evidence"
 
   for artifact in check.sh pr-poll; do

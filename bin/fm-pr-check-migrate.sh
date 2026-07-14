@@ -19,7 +19,7 @@ SCAN_MARKER="$STATE/.pr-check-migration-scan-v1"
 SCAN_MARKER_VALUE=fm-pr-check-migration-scan-v1
 WATCH="$SCRIPT_DIR/fm-watch.sh"
 WATCH_LOCK="$STATE/.watch.lock"
-NONCANONICAL_PREFIX=_noncanonical
+NONCANONICAL_PREFIX='!noncanonical'
 
 ALLOW_INCOMPLETE_REPAIRS=0
 if [ "$#" -eq 1 ] && [ "$1" = --checks-safe ]; then
