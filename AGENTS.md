@@ -305,6 +305,7 @@ Reach the captain immediately for:
 Do not surface automatic fixes, retries, routine progress, or internal supervision mechanics.
 Batch non-urgent updates into the next natural reply.
 Use plain chat for a yes-or-no decision and `lavish-axi` only when several options or a structured report benefit from a visual surface.
+Before a Codex primary yields with a question that genuinely requires the captain's response, load `harness-adapters` and follow its captain-wait instruction; never arm informational replies.
 Whenever a PR is mentioned, include its full `https://...` URL before any shorthand reference.
 Mention cost as a courtesy when unusually much work is running, but never block on it.
 

@@ -78,6 +78,80 @@ Observed output: the first command printed `<scratch>/outside`, the second comma
 The tracked command therefore treats hook process PWD as the hook-loaded firstmate root and does not let payload `cwd` choose an executable.
 It still passes the original payload to `bin/fm-turnend-guard.sh`, so the shared loop guard reads `stop_hook_active`.
 
+### 2026-07-14: Codex captain-attention lifecycle
+
+Codex 0.144.4 has no reliable structured event that distinguishes a reply requiring the captain from an ordinary informational reply.
+Its external `notify` callback reports `type=agent-turn-complete`, `thread-id`, `turn-id`, `cwd`, `client`, `input-messages`, and `last-assistant-message` for both cases.
+Firstmate therefore does not infer attention from punctuation or prose.
+
+The header of `bin/fm-captain-wait.sh` is the single owner of the wait lifecycle and notification mechanics; its `--help` exposes the operational subset.
+The captain-attention path is separate from `fm-supervise-daemon.sh`'s urgent wedge alarm and does not read or write wedge state.
+
+Codex refuses `notify` in project-local `.codex/config.toml` because that key runs a machine-local command.
+`bin/fm-codex-primary.sh --help` owns the supported primary launch seam.
+Because the callback lacks a requires-response bit, the remaining explicit semantic boundary is the instruction loaded through `harness-adapters` before firstmate yields for the captain.
+
+Live verification used the mandatory isolated Herdr lab, never the default session:
+
+```sh
+HERDR_LAB_HELPER=/Users/sviridov/Documents/firstmate/bin/fm-herdr-lab.sh
+HERDR_LAB_SESSION=$("$HERDR_LAB_HELPER" name notify-captain-wait-s2)
+trap '"$HERDR_LAB_HELPER" teardown "$HERDR_LAB_SESSION"' EXIT
+"$HERDR_LAB_HELPER" provision "$HERDR_LAB_SESSION"
+"$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" status --json
+```
+
+The exact version probes were `herdr --version` -> `Herdr 0.7.3 (protocol 16)` and `codex --version` -> `codex-cli 0.144.4`.
+The status response reported the non-default `fm-lab-notify-captain-wait-s2-*` session as running.
+
+In the real Codex TUI, the exact input `Ask me exactly one short question and then wait.` produced exactly one question callback:
+
+```json
+{"type":"agent-turn-complete","thread-id":"019f61b1-3861-73f1-9cbe-ca7560d365b1","turn-id":"019f61b1-474a-70c2-a332-4bffcd028fc1","client":"codex-tui","last-assistant-message":"Капитан, что вы хотите сделать?"}
+```
+
+The next exact input `Reply with exactly: READY` produced this callback:
+
+```json
+{"type":"agent-turn-complete","thread-id":"019f61b1-3861-73f1-9cbe-ca7560d365b1","turn-id":"019f61b3-64f2-7ee3-a052-6750274480cd","client":"codex-tui","last-assistant-message":"READY"}
+```
+
+This is the empirical reason the hook cannot safely infer requires-response semantics.
+
+For the launch override, the lab put a capture executable named `true` first on `PATH`, then ran the exact command `bin/fm-codex-primary.sh --dangerously-bypass-approvals-and-sandbox 'Reply with exactly WRAPPER_OK.'` inside an isolated Herdr pane.
+The exact rendered output was `WRAPPER_OK`; the pane status field was `agent_status=done`; and the capture count was `1` with `type=agent-turn-complete` and `last-assistant-message=WRAPPER_OK`.
+That proves the wrapper's CLI `notify=["true"]` replaced the global notifier at the real Codex lifecycle seam.
+An additional plain-git scratch-repo attempt reached and accepted Codex's real project trust dialog with `--dangerously-bypass-hook-trust`, but the account then returned the exact text `You've hit your usage limit` before the model could arm a wait, so this run supplies no semantic-hook claim.
+The final tracked-hook attempt provisioned `fm-lab-notify-captain-wait-s2-hooks-34304-17425` and ran these exact helper-routed lifecycle commands:
+
+```sh
+"$HERDR_LAB_HELPER" provision "$HERDR_LAB_SESSION"
+"$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" status --json
+"$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" workspace create --cwd "$PWD" --label notify-hooks --no-focus
+"$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" tab create --workspace "$wsid" --cwd "$PWD" --label codex-hook --no-focus
+"$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" pane run "$pane" "$launch"
+"$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" agent get "$pane"
+"$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" pane read "$pane" --source recent-unwrapped --lines 30 --format text
+```
+
+The exact status output was:
+
+```json
+{"client":{"version":"0.7.3","channel":"stable","protocol":16,"binary":"/Users/sviridov/.local/bin/herdr","session":"fm-lab-notify-captain-wait-s2-hooks-34304-17425"},"server":{"status":"running","running":true,"version":"0.7.3","protocol":16,"capabilities":{"live_handoff":true,"detached_server_daemon":false},"compatible":true,"socket":"/Users/sviridov/.config/herdr/sessions/fm-lab-notify-captain-wait-s2-hooks-34304-17425/herdr.sock","session":"fm-lab-notify-captain-wait-s2-hooks-34304-17425","restart_needed":false},"update":{"restart_needed":false}}
+```
+
+The exact launch command rendered by the experiment was:
+
+```text
+exec env FM_HOME=/var/folders/zx/jptv31pd1nz_tb5pcnpp93vh0000gn/T//fm-captain-hook-lab.mENvFB FM_CAPTAIN_ATTENTION_EXEC=discard /Users/sviridov/.treehouse/firstmate-7bab20/3/firstmate/bin/fm-codex-primary.sh --dangerously-bypass-approvals-and-sandbox Run\ bin/fm-captain-wait.sh\ arm\ real-hook-wait-1,\ then\ ask\ exactly:\ Continue\?
+```
+
+Codex reached Herdr `agent_status=idle`, but the exact visible Codex output was `You have 2 usage limit resets available. Run /usage to use one.` and `LAST_NOTIFIED=absent`; the model never received the prompt.
+Using a quota reset was outside this task's authority, so a real semantic `UserPromptSubmit -> model arm -> accepted Stop` run remains unverified.
+The tracked hook test is therefore the strongest deterministic supported seam, not a claimed live guarantee.
+The full user-visible `fleet wake silent -> one -> repeat silent -> clear -> new one` transition is instead verified deterministically through `tests/fm-captain-wait.test.sh`, including a routine fleet-wake run through the tracked Stop command, home isolation, and the tracked Codex hook registrations.
+Teardown ran through the installed trap and returned exit `0`; the helper's fleet-state tripwire produced no error output.
+
 OpenCode 1.17.6 was validated with project plugins under scratch `.opencode/plugins/`.
 Hook file used: `.opencode/plugins/fm-smoke.js` for throw testing and `.opencode/plugins/fm-primary-turnend-guard.js` for follow-up testing.
 Command run for passive behavior: `opencode run --print-logs --log-level DEBUG --dangerously-skip-permissions 'Say hi in exactly one word.'`.

@@ -101,8 +101,15 @@ grok --trust
 pi
 ```
 
+**Codex**
+
+```sh
+bin/fm-codex-primary.sh
+```
+
 For Grok, `--trust` is needed once per clone so project hooks and the turn-end guard load; `/hooks-trust` inside Grok works too.
 For Pi, approve the project trust prompt once per clone on first launch so both tracked `.pi/extensions/*.ts` files auto-load.
+For Codex, use the tracked wrapper so generic turn-completion notifications stay silent and only an explicitly armed captain-response wait can play the project-owned attention sound.
 
 ### Talk to it
 
