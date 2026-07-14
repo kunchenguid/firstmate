@@ -150,10 +150,13 @@ A restored tab with no registered live agent is a replaceable husk; an ambiguous
 Every adapter operation sets `HERDR_SESSION` and appends a trailing `--session <name>`.
 Ambient `HERDR_SESSION` alone is not accepted as isolation for lifecycle verification.
 The lab helper performs fresh baseline and ownership checks immediately before stop and delete, rejects default or ambiguous records, and verifies the initial default-session tripwire after cleanup.
-The canonical tripwire accepts only one structurally valid JSON inventory whose initial `sessions` array is exactly empty or contains exactly one running session named `default`, records that complete baseline, and rejects every foreign or contradictory record.
-After provisioning, the same state record binds a cryptographic launch nonce to the foreground server's socket-owning PID, process start identity, and persistent session marker.
-Later destructive checks require the exact baseline, byte-identical session record, matching process start identity, socket ownership, and the inherited launch nonce descriptor.
-Standalone stop verifies that the captured process exited and released its socket, while teardown deletes only a still-running proven instance and refuses deletion after standalone stop until guarded reprovision establishes a new live identity.
+The canonical tripwire accepts only one structurally valid JSON inventory whose initial `sessions` array is exactly empty or contains exactly one session named `default`, records its exact running state, and rejects every foreign or contradictory record.
+After provisioning, the same state record binds a cryptographic launch nonce to the foreground server's socket-owning PID, process start identity, and the device/inode identity of the directory derived from the authoritative `socket_path`, without extending Herdr's inventory schema.
+The guarded stop verifies the exact baseline, record, and persistent storage identity, confirms that the captured process exited and released its socket, and only then persists the stopped phase.
+Delete is authorized only when teardown itself proved the live nonce-bound process and performed that stop under the same lifecycle lock.
+A session stopped by an earlier operation must be reprovisioned through the helper to establish a fresh live proof before teardown, because Herdr 0.7.3 exposes no persistent instance ID.
+Teardown repeats the exact stopped-record, session-specific storage, and baseline checks immediately before delete, confirms absence afterward, and refuses every ambiguous replacement.
+The canonical E2E removes its temporary sandbox only after confirmed guarded teardown; a cleanup failure retains the tripwire, nonce, and sandbox path for a safe retry.
 
 ### ID stability
 
@@ -163,7 +166,7 @@ Workspace labels are not unique, and native agent-state accuracy depends on the 
 
 ### Known gaps
 
-Herdr cannot relocate its API socket through `HERDR_CONFIG_PATH`, `XDG_CONFIG_HOME`, or `HOME`, so lifecycle tests require a generated non-default session and the guarded helper.
+Herdr 0.7.3 honors `XDG_CONFIG_HOME`, so the canonical acceptance uses an isolated temporary config root in addition to a generated non-default session and the guarded helper.
 Workspace labels remain non-unique, and restored pane IDs may change across a server restart.
 
 ## Away-mode daemon supervisor-pane support
@@ -193,36 +196,30 @@ Exact version, commands, selected output, session name, and cleanup evidence are
 
 ### Removal migration record
 
-On 2026-07-14, the migration was verified with Herdr 0.7.3 in a generated non-default lab session.
+On 2026-07-15, the hardened migration was verified with Herdr 0.7.3 in a generated non-default lab session.
 The production spawn path created an isolated E2E task, omitted `backend=` from its metadata, and resolved that absent field back to Herdr.
-The live endpoint accepted a steer, `fm-crew-state.sh` reported `working`, and production teardown removed the endpoint, worktree, and metadata.
-The run produced `metadata_backend=absent resolved_backend=herdr spawn=ok steer=ok crew_state=working teardown=ok`.
+The live endpoint accepted a steer, the watcher surfaced a signal wake, guarded stop and reprovision recovered the runtime, and production teardown removed the endpoint, worktree, and metadata.
+Guarded lab teardown stopped the owned running instance, verified the exact stopped record and untouched baseline, deleted only that stopped session, and confirmed process, socket, and inventory absence.
 
-That run also reproduced a Herdr 0.7.3 cleanup race after closing the last task pane: the first guarded lab teardown observed the session briefly after delete, while an immediate retry found it absent.
-The helper polls a bounded interval for confirmed process and inventory absence after delete while rejecting default or ambiguous session records at every destructive boundary.
-Regression coverage exercises delayed deletion with a nonzero delete exit, process-survival races after stop, instance replacement, and fail-closed default-session protection.
-
-The fix was verified again against real Herdr 0.7.3 through the canonical guide acceptance run below.
-Its first guarded teardown call succeeded, and the helper's fleet-state tripwire confirmed that the live `default` session was unchanged.
+The helper polls a bounded interval for confirmed process and inventory absence after stop and delete while rejecting default, replaced, or ambiguous session records at every destructive boundary.
+Regression coverage exercises live-delete rejection, delayed deletion with a nonzero delete exit, process-survival races after stop, instance replacement, signal-safe lifecycle-lock cleanup, and fail-closed default-session protection.
 
 ### Canonical guide acceptance run
 
 The install and lifecycle guide is encoded in `tests/fm-herdr-guide-e2e.test.sh` so the recurring mechanics remain auditable.
-The generated session was exactly `fm-lab-herdr-guide-e2e-19733-24933`.
-The exact command run on 2026-07-14 was:
+The generated session was exactly `fm-lab-herdr-guide-e2e-70934-31074`.
+The exact command run from the repository root on 2026-07-15 was:
 
 ```bash
-FM_RUN_HERDR_GUIDE_E2E=1 \
-HERDR_LAB_HELPER='/Users/sviridov/Documents/firstmate/bin/fm-herdr-lab.sh' \
-bash tests/fm-herdr-guide-e2e.test.sh
+FM_RUN_HERDR_GUIDE_E2E=1 bash tests/fm-herdr-guide-e2e.test.sh
 ```
 
-The test downloaded the stable installer, set `HERDR_INSTALL_DIR` to a fresh worktree-local prefix, and confirmed that the installed binary was first on `PATH`.
+The test downloaded the stable installer, set `HERDR_INSTALL_DIR` to a fresh isolated temporary prefix, and confirmed that the installed binary was first on `PATH`.
 It then used only the guarded helper for the generated non-default session and routed production adapter calls back through that helper.
 The exact acceptance line was:
 
 ```text
-HERDR_GUIDE_E2E_OK version=0.7.3 protocol=16 default=herdr configured=herdr readiness=ok spawn=ok steer=ok watcher=signal restart=recovered teardown=ok
+HERDR_GUIDE_E2E_OK version=0.7.3 protocol=16 session=fm-lab-herdr-guide-e2e-70934-31074 baseline=default default=herdr configured=herdr readiness=ok spawn=ok steer=ok watcher=signal restart=recovered teardown=ok lab_teardown=ok
 ```
 
-The EXIT teardown succeeded on its first call and the fleet-state tripwire confirmed the identical running `default` session before and after the run.
+The guarded teardown succeeded on its first call and the fleet-state tripwire confirmed the identical stopped `default` session before and after the run.

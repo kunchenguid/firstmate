@@ -16,7 +16,7 @@
 # before the subcommand, all session lifecycle operations, and every server
 # operation.
 # Session stop is available only through guarded stop, and session delete is
-# available only through teardown while live instance ownership is proven.
+# available only through teardown after a verified guarded stop.
 # Both paths perform fresh baseline and ownership checks immediately before
 # each destructive call.
 # Provision records the initial fleet baseline and a nonce-bound process and
@@ -165,11 +165,10 @@ fm_herdr_lab_baseline_from_list() { # <session> <session-list-json> <allow-owned
             ($baseline | length) == 1
             and $baseline[0].name == "default"
             and $baseline[0].default == true
-            and $baseline[0].running == true
           )
         )
       )
-      then $inventory | .sessions = $baseline
+      then {sessions: ($baseline | map({default, name, running, socket_path}))}
       else empty
       end
   ' 2>/dev/null
@@ -180,12 +179,8 @@ fm_herdr_lab_identity_from_list() { # <session> <session-list-json>
   fm_herdr_lab_session_list_is_valid "$info" || return 1
   printf '%s' "$info" | jq -S -c -s --arg name "$name" '
     [.[0].sessions[] | select(.name == $name)]
-    | if (
-        length == 1
-        and .[0].default == false
-        and (.[0].session_dir | type == "string" and startswith("/"))
-      )
-      then .[0] | del(.running)
+    | if (length == 1 and .[0].default == false)
+      then .[0] | {default, name, socket_path}
       else empty
       end
   ' 2>/dev/null
@@ -205,17 +200,19 @@ fm_herdr_lab_state_read() { # <session>
         .[0].owned_session == null
         or (
           (.[0].owned_session | type == "object")
-          and ((.[0].owned_session | keys | sort) == ["instance", "record"])
+          and ((.[0].owned_session | keys | sort) == ["instance", "phase", "record"])
+          and ((.[0].owned_session.record | keys | sort) == ["default", "name", "socket_path"])
           and .[0].owned_session.record.name == $name
           and .[0].owned_session.record.default == false
           and (.[0].owned_session.record.socket_path | type == "string" and length > 0)
-          and (.[0].owned_session.record.session_dir | type == "string" and startswith("/"))
           and (.[0].owned_session.record | has("running") | not)
+          and (.[0].owned_session.phase == "running" or .[0].owned_session.phase == "stopped")
+          and ((.[0].owned_session.instance | keys | sort) == ["pid", "process_identity", "storage_identity", "token_nonce", "token_path"])
           and (.[0].owned_session.instance.pid | type == "number" and . > 1 and floor == .)
           and (.[0].owned_session.instance.process_identity | type == "string" and length > 0)
+          and (.[0].owned_session.instance.storage_identity | type == "string" and test("^[0-9]+:[0-9]+$"))
           and (.[0].owned_session.instance.token_path | type == "string" and length > 0)
           and (.[0].owned_session.instance.token_nonce | type == "string" and test("^[0-9a-f]{64}$"))
-          and .[0].owned_session.instance.marker_path == (.[0].owned_session.record.session_dir + "/.firstmate-lab-instance")
         )
       )
     )
@@ -242,6 +239,12 @@ fm_herdr_lab_state_instance() { # <session>
   printf '%s' "$state" | jq -S -c -r '.owned_session.instance // empty' 2>/dev/null
 }
 
+fm_herdr_lab_state_phase() { # <session>
+  local state
+  state=$(fm_herdr_lab_state_read "$1") || return 1
+  printf '%s' "$state" | jq -r '.owned_session.phase // empty' 2>/dev/null
+}
+
 fm_herdr_lab_check_baseline_from_list() { # <session> <session-list-json>
   local name=$1 info=$2 state before after
   state=$(fm_herdr_lab_state_read "$name") || {
@@ -259,12 +262,29 @@ fm_herdr_lab_check_baseline_from_list() { # <session> <session-list-json>
   return 1
 }
 
+fm_herdr_lab_record_storage_identity() { # <record-json>
+  local record=$1 name socket storage identity
+  name=$(printf '%s' "$record" | jq -r '.name') || return 1
+  socket=$(printf '%s' "$record" | jq -r '.socket_path') || return 1
+  storage=${socket%/*}
+  [ "$storage" != "$socket" ] && [ -d "$storage" ] && [ ! -L "$storage" ] || return 1
+  [ "${storage##*/}" = "$name" ] || return 1
+  identity=$(LC_ALL=C stat -c '%d:%i' "$storage" 2>/dev/null) \
+    || identity=$(LC_ALL=C stat -f '%d:%i' "$storage" 2>/dev/null) \
+    || return 1
+  case "$identity" in
+    *[!0-9:]*|:|*::*|:*|*:) return 1 ;;
+  esac
+  printf '%s\n' "$identity"
+}
+
 fm_herdr_lab_instance_storage_matches() { # <session>
-  local name=$1 instance token marker nonce state_dir
-  instance=$(fm_herdr_lab_state_instance "$name") || return 1
+  local name=$1 state instance record token nonce state_dir expected_storage actual_storage
+  state=$(fm_herdr_lab_state_read "$name") || return 1
+  instance=$(printf '%s' "$state" | jq -S -c '.owned_session.instance') || return 1
+  record=$(printf '%s' "$state" | jq -S -c '.owned_session.record') || return 1
   [ -n "$instance" ] || return 1
   token=$(printf '%s' "$instance" | jq -r '.token_path') || return 1
-  marker=$(printf '%s' "$instance" | jq -r '.marker_path') || return 1
   nonce=$(printf '%s' "$instance" | jq -r '.token_nonce') || return 1
   state_dir=$(fm_herdr_lab_state_dir)
   case "$token" in
@@ -272,9 +292,10 @@ fm_herdr_lab_instance_storage_matches() { # <session>
     *) return 1 ;;
   esac
   [ -f "$token" ] && [ ! -L "$token" ] || return 1
-  [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
   [ "$(cat "$token" 2>/dev/null)" = "$nonce" ] || return 1
-  [ "$(cat "$marker" 2>/dev/null)" = "$nonce" ] || return 1
+  expected_storage=$(printf '%s' "$instance" | jq -r '.storage_identity') || return 1
+  actual_storage=$(fm_herdr_lab_record_storage_identity "$record") || return 1
+  [ "$actual_storage" = "$expected_storage" ]
 }
 
 fm_herdr_lab_live_instance_matches() { # <session> <record-json>
@@ -293,7 +314,7 @@ fm_herdr_lab_live_instance_matches() { # <session> <record-json>
 }
 
 fm_herdr_lab_assert_owned_from_list() { # <session> <session-list-json>
-  local name=$1 info=$2 expected actual running
+  local name=$1 info=$2 expected actual running phase
   fm_herdr_lab_check_baseline_from_list "$name" "$info" || return 1
   expected=$(fm_herdr_lab_state_owned_record "$name") || expected=""
   actual=$(fm_herdr_lab_identity_from_list "$name" "$info") || actual=""
@@ -303,12 +324,21 @@ fm_herdr_lab_assert_owned_from_list() { # <session> <session-list-json>
   }
   running=$(printf '%s' "$info" | jq -r --arg name "$name" \
     '.sessions[] | select(.name == $name) | .running' 2>/dev/null) || return 1
+  phase=$(fm_herdr_lab_state_phase "$name") || return 1
   if [ "$running" = true ]; then
+    [ "$phase" = running ] || {
+      fm_herdr_lab_error "INSTANCE TRIPWIRE FAILED: stopped proof cannot authorize a running session '$name'"
+      return 1
+    }
     fm_herdr_lab_live_instance_matches "$name" "$actual" || {
       fm_herdr_lab_error "INSTANCE TRIPWIRE FAILED: live session '$name' is not the launched process"
       return 1
     }
   else
+    case "$phase" in
+      running|stopped) ;;
+      *) return 1 ;;
+    esac
     fm_herdr_lab_instance_storage_matches "$name" || {
       fm_herdr_lab_error "INSTANCE TRIPWIRE FAILED: stopped session '$name' lost its launch nonce"
       return 1
@@ -318,7 +348,7 @@ fm_herdr_lab_assert_owned_from_list() { # <session> <session-list-json>
 
 fm_herdr_lab_capture_identity_from_list() { # <session> <session-list-json> <server-pid> <token-path>
   local name=$1 info=$2 server_pid=$3 token=$4 state expected actual updated running
-  local socket owner process_identity nonce session_dir marker marker_tmp old_token old_nonce
+  local socket owner process_identity storage_identity nonce old_token old_nonce
   kill -0 "$server_pid" 2>/dev/null || {
     fm_herdr_lab_error "cannot prove ownership for '$name': provisioning process exited"
     return 1
@@ -342,7 +372,6 @@ fm_herdr_lab_capture_identity_from_list() { # <session> <session-list-json> <ser
     return 1
   }
   socket=$(printf '%s' "$actual" | jq -r '.socket_path') || return 1
-  session_dir=$(printf '%s' "$actual" | jq -r '.session_dir') || return 1
   owner=$(fm_herdr_lab_path_owner_pid "$socket") || {
     fm_herdr_lab_error "cannot prove ownership for '$name': socket owner is missing or ambiguous"
     return 1
@@ -356,58 +385,26 @@ fm_herdr_lab_capture_identity_from_list() { # <session> <session-list-json> <ser
     return 1
   }
   process_identity=$(fm_herdr_lab_pid_identity "$owner") || return 1
-  nonce=$(cat "$token") || return 1
-  marker="$session_dir/.firstmate-lab-instance"
-  [ -d "$session_dir" ] && [ ! -L "$session_dir" ] || {
-    fm_herdr_lab_error "cannot capture ownership for '$name': session directory is missing or ambiguous"
+  storage_identity=$(fm_herdr_lab_record_storage_identity "$actual") || {
+    fm_herdr_lab_error "cannot prove ownership for '$name': session storage identity is unavailable"
     return 1
   }
+  nonce=$(cat "$token") || return 1
   if [ -n "$expected" ]; then
     fm_herdr_lab_instance_storage_matches "$name" || return 1
     old_token=$(printf '%s' "$state" | jq -r '.owned_session.instance.token_path') || return 1
     old_nonce=$(printf '%s' "$state" | jq -r '.owned_session.instance.token_nonce') || return 1
   else
-    [ ! -e "$marker" ] || {
-      fm_herdr_lab_error "cannot claim '$name': instance marker already exists"
-      return 1
-    }
     old_token=""
     old_nonce=""
   fi
   updated=$(printf '%s' "$state" | jq -S -c \
     --argjson record "$actual" --argjson pid "$owner" --arg process_identity "$process_identity" \
-    --arg token_path "$token" --arg token_nonce "$nonce" --arg marker_path "$marker" \
-    '.owned_session = {record:$record,instance:{pid:$pid,process_identity:$process_identity,token_path:$token_path,token_nonce:$token_nonce,marker_path:$marker_path}}') || return 1
-  marker_tmp=$(mktemp "$session_dir/.firstmate-lab-instance.XXXXXX") || return 1
-  if ! chmod 600 "$marker_tmp" || ! printf '%s\n' "$nonce" > "$marker_tmp"; then
-    rm -f "$marker_tmp"
-    return 1
-  fi
-  if [ -z "$expected" ]; then
-    if ! ln "$marker_tmp" "$marker"; then
-      rm -f "$marker_tmp"
-      return 1
-    fi
-    rm -f "$marker_tmp"
-  elif ! mv "$marker_tmp" "$marker"; then
-    rm -f "$marker_tmp"
-    return 1
-  fi
-  fm_herdr_lab_write_state "$name" "$updated" || {
-    if [ -n "$old_nonce" ]; then
-      printf '%s\n' "$old_nonce" > "$marker" || true
-    else
-      rm -f "$marker"
-    fi
-    return 1
-  }
+    --arg storage_identity "$storage_identity" --arg token_path "$token" --arg token_nonce "$nonce" \
+    '.owned_session = {record:$record,phase:"running",instance:{pid:$pid,process_identity:$process_identity,storage_identity:$storage_identity,token_path:$token_path,token_nonce:$token_nonce}}') || return 1
+  fm_herdr_lab_write_state "$name" "$updated" || return 1
   fm_herdr_lab_live_instance_matches "$name" "$actual" || {
     fm_herdr_lab_write_state "$name" "$state" || true
-    if [ -n "$old_nonce" ]; then
-      printf '%s\n' "$old_nonce" > "$marker" || true
-    else
-      rm -f "$marker"
-    fi
     fm_herdr_lab_error "cannot prove ownership for '$name': instance changed during identity capture"
     return 1
   }
@@ -463,7 +460,7 @@ fm_herdr_lab_prepare_unlocked() { # <session>
   }
   baseline=$(fm_herdr_lab_baseline_from_list "$name" "$sessions" false) || baseline=""
   [ -n "$baseline" ] || {
-    fm_herdr_lab_error "initial fleet-state must be exactly empty or exactly one running default session"
+    fm_herdr_lab_error "initial fleet-state must be exactly empty or exactly one default session"
     rm -f "$tripwire"
     return 1
   }
@@ -668,19 +665,14 @@ fm_herdr_lab_check_tripwire() { # <session>
 }
 
 fm_herdr_lab_verify_tripwire() { # <session>
-  local name=$1 tripwire instance token marker nonce
+  local name=$1 tripwire instance token nonce
   fm_herdr_lab_check_tripwire "$name" || return 1
   tripwire=$(fm_herdr_lab_tripwire_path "$name")
   instance=$(fm_herdr_lab_state_instance "$name" 2>/dev/null) || instance=""
   if [ -n "$instance" ]; then
     token=$(printf '%s' "$instance" | jq -r '.token_path') || return 1
-    marker=$(printf '%s' "$instance" | jq -r '.marker_path') || return 1
     nonce=$(printf '%s' "$instance" | jq -r '.token_nonce') || return 1
     [ "$(cat "$token" 2>/dev/null)" = "$nonce" ] || return 1
-    if [ -e "$marker" ]; then
-      [ "$(cat "$marker" 2>/dev/null)" = "$nonce" ] || return 1
-      rm -f "$marker" || return 1
-    fi
     rm -f "$token" || return 1
   fi
   rm -f "$tripwire"
@@ -735,17 +727,41 @@ fm_herdr_lab_stop_postcheck() { # <session>
   return 1
 }
 
+fm_herdr_lab_mark_stopped() { # <session>
+  local name=$1 state updated
+  state=$(fm_herdr_lab_state_read "$name") || return 1
+  [ "$(printf '%s' "$state" | jq -r '.owned_session.phase')" = running ] || return 1
+  updated=$(printf '%s' "$state" | jq -S -c '.owned_session.phase = "stopped"') || return 1
+  fm_herdr_lab_write_state "$name" "$updated"
+}
+
 fm_herdr_lab_stop_unlocked() { # <session>
-  local name=$1 tripwire stop_status=0 post_status=0
+  local name=$1 tripwire sessions running phase stop_status=0 post_status=0
   fm_herdr_lab_validate_name "$name" || return 1
   tripwire=$(fm_herdr_lab_tripwire_path "$name")
   [ -f "$tripwire" ] || {
     fm_herdr_lab_error "missing fleet-state tripwire for '$name'; refusing stop"
     return 1
   }
-  fm_herdr_lab_assert_owned "$name" || return 1
+  sessions=$(fm_herdr_lab_session_list "$name" 2>/dev/null) || {
+    fm_herdr_lab_error "cannot list Herdr sessions immediately before stop"
+    return 1
+  }
+  fm_herdr_lab_assert_owned_from_list "$name" "$sessions" || return 1
+  running=$(printf '%s' "$sessions" | jq -r --arg name "$name" \
+    '.sessions[] | select(.name == $name) | .running' 2>/dev/null) || return 1
+  phase=$(fm_herdr_lab_state_phase "$name") || return 1
+  if [ "$running" = false ]; then
+    [ "$phase" = stopped ] && return 0
+    fm_herdr_lab_stop_postcheck "$name" || return 1
+    fm_herdr_lab_mark_stopped "$name"
+    return
+  fi
   fm_herdr_lab_raw "$name" session stop "$name" --json || stop_status=$?
   fm_herdr_lab_stop_postcheck "$name" || post_status=$?
+  if [ "$post_status" -eq 0 ]; then
+    fm_herdr_lab_mark_stopped "$name" || post_status=$?
+  fi
   if [ "$stop_status" -ne 0 ]; then
     fm_herdr_lab_error "session stop failed for '$name' (status=$stop_status)"
   fi
@@ -753,7 +769,7 @@ fm_herdr_lab_stop_unlocked() { # <session>
 }
 
 fm_herdr_lab_teardown_unlocked() { # <session>
-  local name=$1 tripwire sessions state running owned delete_status=0 attempt=0
+  local name=$1 tripwire sessions state running phase owned delete_status=0 attempt=0
   fm_herdr_lab_validate_name "$name" || return 1
   tripwire=$(fm_herdr_lab_tripwire_path "$name")
   [ -f "$tripwire" ] || {
@@ -783,19 +799,36 @@ fm_herdr_lab_teardown_unlocked() { # <session>
     nondefault) fm_herdr_lab_assert_owned_from_list "$name" "$sessions" || return 1 ;;
     *) fm_herdr_lab_error "refusing teardown for '$name': unsafe session state '$state'"; return 1 ;;
   esac
+  running=$(printf '%s' "$sessions" | jq -r --arg name "$name" \
+    '.sessions[] | select(.name == $name) | .running' 2>/dev/null) || running=invalid
+  phase=$(fm_herdr_lab_state_phase "$name") || phase=invalid
+  [ "$running" = true ] && [ "$phase" = running ] || {
+    fm_herdr_lab_error "refusing delete for '$name': Herdr exposes no persistent instance identity after a separate stop; reprovision through the helper before teardown"
+    return 1
+  }
+  fm_herdr_lab_stop_unlocked "$name" || return 1
   sessions=$(fm_herdr_lab_session_list "$name" 2>/dev/null) || {
     fm_herdr_lab_error "cannot list Herdr sessions immediately before delete"
     return 1
   }
   state=$(fm_herdr_lab_session_state_from_list "$name" "$sessions") || state=invalid
+  if [ "$state" = absent ]; then
+    fm_herdr_lab_instance_process_is_gone "$name" || {
+      fm_herdr_lab_error "refusing teardown: session '$name' disappeared while its launched process remains"
+      return 1
+    }
+    fm_herdr_lab_verify_tripwire "$name"
+    return
+  fi
   [ "$state" = nondefault ] || {
     fm_herdr_lab_error "refusing delete for '$name': session changed immediately before delete"
     return 1
   }
   running=$(printf '%s' "$sessions" | jq -r --arg name "$name" \
     '.sessions[] | select(.name == $name) | .running' 2>/dev/null) || running=invalid
-  [ "$running" = true ] || {
-    fm_herdr_lab_error "refusing delete for stopped session '$name': Herdr exposes no stable instance identity"
+  phase=$(fm_herdr_lab_state_phase "$name") || phase=invalid
+  [ "$running" = false ] && [ "$phase" = stopped ] || {
+    fm_herdr_lab_error "refusing delete for '$name': guarded stopped proof is missing"
     return 1
   }
   fm_herdr_lab_assert_owned_from_list "$name" "$sessions" || return 1
@@ -815,7 +848,9 @@ fm_herdr_lab_teardown_unlocked() { # <session>
         fm_herdr_lab_verify_tripwire "$name"
         return
       fi
-    elif [ "$state" != nondefault ]; then
+    elif [ "$state" = nondefault ]; then
+      fm_herdr_lab_assert_owned_from_list "$name" "$sessions" || return 1
+    else
       fm_herdr_lab_error "lab session '$name' became unsafe while awaiting deletion (state=$state)"
       return 1
     fi
@@ -830,23 +865,46 @@ fm_herdr_lab_teardown_unlocked() { # <session>
   return 1
 }
 
-fm_herdr_lab_with_lock() { # <function> <session>
-  local operation=$1 name=$2 state_dir lock status=0
+fm_herdr_lab_release_lock() { # <lock-file> <owner-token>
+  local lock=$1 owner=$2 actual
+  [ -f "$lock" ] && [ ! -L "$lock" ] || return 1
+  actual=$(cat "$lock") || return 1
+  [ "$actual" = "$owner" ] || return 1
+  rm -f "$lock"
+}
+
+fm_herdr_lab_with_lock() ( # <function> <session>
+  local operation=$1 name=$2 state_dir lock owner_tmp="" pid_file pid identity nonce owner lock_status=0
   fm_herdr_lab_validate_name "$name" || return 1
   state_dir=$(fm_herdr_lab_state_dir)
   mkdir -p "$state_dir" || return 1
   lock="$state_dir/$name.lifecycle-lock"
-  mkdir "$lock" 2>/dev/null || {
+  pid_file=$(mktemp "$state_dir/$name.lock-pid.XXXXXX") || return 1
+  sh -c 'printf "%s\n" "$PPID" > "$1"' _ "$pid_file" || {
+    rm -f "$pid_file"
+    return 1
+  }
+  pid=$(cat "$pid_file") || {
+    rm -f "$pid_file"
+    return 1
+  }
+  rm -f "$pid_file" || return 1
+  identity=$(fm_herdr_lab_pid_identity "$pid") || return 1
+  nonce=$(od -An -tx1 -N16 /dev/urandom 2>/dev/null | tr -d ' \n') || return 1
+  owner=$(printf '%s\n%s\n%s' "$pid" "$identity" "$nonce")
+  trap 'lock_status=$?; trap - EXIT INT TERM; if [ -e "$lock" ]; then fm_herdr_lab_release_lock "$lock" "$owner" || lock_status=1; fi; [ -z "$owner_tmp" ] || rm -f "$owner_tmp" || lock_status=1; exit "$lock_status"' EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  owner_tmp=$(mktemp "$state_dir/$name.lock-owner.XXXXXX") || return 1
+  printf '%s\n' "$owner" > "$owner_tmp" || return 1
+  ln "$owner_tmp" "$lock" 2>/dev/null || {
     fm_herdr_lab_error "lifecycle operation already active for '$name'"
     return 1
   }
-  "$operation" "$name" || status=$?
-  rmdir "$lock" || {
-    fm_herdr_lab_error "cannot release lifecycle lock for '$name'"
-    return 1
-  }
-  return "$status"
-}
+  rm -f "$owner_tmp" || return 1
+  owner_tmp=""
+  "$operation" "$name"
+)
 
 fm_herdr_lab_prepare() { # <session>
   fm_herdr_lab_with_lock fm_herdr_lab_prepare_unlocked "$1"

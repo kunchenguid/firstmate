@@ -77,7 +77,7 @@ for test_script in tests/*.test.sh; do bash "$test_script"; done   # behavior te
 tmp=$(mktemp -d) && printf 'done: smoke\n' > "$tmp/smoke.status" && FM_STATE_OVERRIDE="$tmp" FM_SIGNAL_GRACE=1 FM_POLL=1 FM_HEARTBEAT=999999 bin/fm-watch-arm.sh  # watcher re-arm smoke test (prints arm status, then an actionable signal)
 ```
 
-The run-all command requires network access for the canonical Herdr acceptance, installs Herdr into an isolated worktree-local prefix, and operates only through `bin/fm-herdr-lab.sh` on a generated non-default session.
+The run-all command requires network access for the canonical Herdr acceptance, installs Herdr into an isolated temporary prefix, and operates only through `bin/fm-herdr-lab.sh` on a generated non-default session.
 It never creates, stops, deletes, or otherwise operates on the live `default` session.
 
 Discover tests by listing `tests/*.test.sh`: each is a self-contained bash script named `<subject>.test.sh`, and its header comment describes what it covers, so run one directly to focus on a subject.

@@ -13,13 +13,17 @@ if [ "${FM_RUN_HERDR_GUIDE_E2E:-0}" != 1 ]; then
   exit 0
 fi
 
-for tool in curl git jq; do
+for tool in curl git jq lsof ps; do
   command -v "$tool" >/dev/null 2>&1 || fail "$tool is required for the Herdr guide E2E"
 done
 
 LAB_HELPER=${HERDR_LAB_HELPER:-$ROOT/bin/fm-herdr-lab.sh}
 SESSION=$("$LAB_HELPER" name herdr-guide-e2e)
-TMP_ROOT=$(mktemp -d "$ROOT/.herdr-guide-e2e.XXXXXX")
+TMP_ROOT=$(mktemp -d /tmp/fh.XXXXXX)
+XDG_CONFIG_HOME="$TMP_ROOT/c"
+export XDG_CONFIG_HOME
+FM_HERDR_LAB_STATE_DIR="$TMP_ROOT/s"
+export FM_HERDR_LAB_STATE_DIR
 INSTALL_BIN="$TMP_ROOT/install/bin"
 HOME_ROOT="$TMP_ROOT/home"
 PROJECT="$TMP_ROOT/project"
@@ -28,20 +32,29 @@ TREEBIN="$TMP_ROOT/treebin"
 SHIMBIN="$TMP_ROOT/shimbin"
 ORIGINAL_PATH=$PATH
 ID=herdr-guide-e2e
+CLEANED=0
 
 cleanup() {
   local rc=$?
   trap - EXIT
-  if ! "$LAB_HELPER" teardown "$SESSION"; then
-    rc=1
+  if [ "$CLEANED" != 1 ]; then
+    if "$LAB_HELPER" teardown "$SESSION"; then
+      CLEANED=1
+    else
+      rc=1
+      echo "Herdr guide E2E retained failed-cleanup evidence at $TMP_ROOT" >&2
+    fi
   fi
-  rm -rf "$TMP_ROOT"
+  if [ "$CLEANED" = 1 ]; then
+    rm -rf "$TMP_ROOT"
+  fi
   exit "$rc"
 }
 trap cleanup EXIT
 
 mkdir -p "$INSTALL_BIN" "$HOME_ROOT/data/$ID" "$HOME_ROOT/state" \
-  "$HOME_ROOT/config" "$HOME_ROOT/projects" "$PROJECT" "$TREEBIN" "$SHIMBIN"
+  "$HOME_ROOT/config" "$HOME_ROOT/projects" "$PROJECT" "$TREEBIN" "$SHIMBIN" \
+  "$FM_HERDR_LAB_STATE_DIR"
 
 # This is the clean Linux/macOS install command documented by Herdr and by the
 # canonical Firstmate guide. HERDR_INSTALL_DIR keeps the verification isolated.
@@ -95,6 +108,9 @@ PATH="\$real_path" exec "\$helper" run "\$session" "\${args[@]}"
 EOF
 chmod +x "$SHIMBIN/herdr"
 
+INITIAL_BASELINE=$("$LAB_HELPER" run "$SESSION" session list --json | jq -S -c --arg session "$SESSION" \
+  '{sessions:[.sessions[] | select(.name != $session) | {default,name,running,socket_path}]}')
+BASELINE_KIND=$(printf '%s' "$INITIAL_BASELINE" | jq -r 'if (.sessions | length) == 0 then "absent" else "default" end')
 "$LAB_HELPER" provision "$SESSION"
 STATUS=$("$LAB_HELPER" run "$SESSION" status --json)
 VERSION=$(printf '%s' "$STATUS" | jq -r '.client.version')
@@ -165,5 +181,11 @@ PATH="$SHIMBIN:$PATH" FM_HOME="$HOME_ROOT" FM_GATE_REFUSE_BYPASS=1 \
   "$ROOT/bin/fm-teardown.sh" "$ID" >/dev/null
 [ ! -e "$META" ] || fail "production teardown left task metadata behind"
 
-printf 'HERDR_GUIDE_E2E_OK version=%s protocol=%s default=herdr configured=herdr readiness=ok spawn=ok steer=ok watcher=signal restart=recovered teardown=ok\n' \
-  "$VERSION" "$PROTOCOL"
+"$LAB_HELPER" teardown "$SESSION"
+CLEANED=1
+FINAL_BASELINE=$("$LAB_HELPER" run "$SESSION" session list --json | jq -S -c --arg session "$SESSION" \
+  '{sessions:[.sessions[] | select(.name != $session) | {default,name,running,socket_path}]}')
+[ "$FINAL_BASELINE" = "$INITIAL_BASELINE" ] || fail "guarded lab teardown changed the captured default fleet"
+
+printf 'HERDR_GUIDE_E2E_OK version=%s protocol=%s session=%s baseline=%s default=herdr configured=herdr readiness=ok spawn=ok steer=ok watcher=signal restart=recovered teardown=ok lab_teardown=ok\n' \
+  "$VERSION" "$PROTOCOL" "$SESSION" "$BASELINE_KIND"
