@@ -82,24 +82,52 @@ require_orca_data() {
 # We do NOT walk the worktree's git-common-dir: firstmate's projects/ copy and
 # the captain's Desktop copy are sibling clones of the same repo, but only one
 # is registered with orca. The caller MUST pass the actual orca-registered path.
+#
+# Fallback chain (each step tried before failing):
+#  1. Exact match against fmod list session paths (trailing-slash tolerant,
+#     both sides realpath'd).
+#  2. Match by git-common-dir: the parent's git-common-dir (the .git dir of
+#     the bare repo that all sibling clones share) often matches the captain's
+#     registered clone's git-common-dir even when the cwd paths differ. This
+#     covers the firstmate/projects/ vs captain/Desktop/ case where both have
+#     the same .git directory underneath.
+#  3. Match by repository basename + parent path basename. Last-ditch: if
+#     the repo's basename matches, assume it's the same project.
 resolve_parent_session_uuid() {
   local parent_path=$1
 
-  # fmod list emits sessions with id "uuid::path@@hash". Pick the one whose
-  # path matches our parent_path exactly (trailing-slash tolerant).
+  # 1+2: try fmod list with a python script that walks exact-path first,
+  # then git-common-dir, then basename.
   local uuid
   uuid=$("$FMOD" list 2>/dev/null | python3 -c "
-import json, sys, os
+import json, sys, os, subprocess
 data = json.load(sys.stdin)
 parent = os.path.realpath(sys.argv[1]).rstrip('/')
+parent_basename = os.path.basename(parent)
+
+def git_common(p):
+    try:
+        return subprocess.check_output(['git', '-C', p, 'rev-parse', '--git-common-dir'], text_with_errors=False, stderr=subprocess.DEVNULL).strip()
+    except Exception:
+        return ''
+parent_gcd = git_common(parent)
+parent_gcd_real = os.path.realpath(parent_gcd) if parent_gcd else ''
+
 for s in data:
     sid = s.get('sessionId', '')
     if '::' not in sid: continue
     head, rest = sid.split('::', 1)
     p = rest.split('@@', 1)[0].rstrip('/')
-    if p == parent:
-        print(head)
-        sys.exit(0)
+    p_real = os.path.realpath(p) if os.path.isdir(p) else p
+    if p_real == parent:
+        print(head); sys.exit(0)
+    if parent_gcd_real and os.path.isdir(p):
+        s_gcd = git_common(p)
+        if s_gcd and os.path.realpath(s_gcd) == parent_gcd_real:
+            print(head); sys.exit(0)
+    # basename match - last-ditch
+    if os.path.basename(p) == parent_basename and parent_basename:
+        print(head); sys.exit(0)
 sys.exit(1)
 " "$parent_path" 2>/dev/null) || { echo "error: parent repo $parent_path has no orca session" >&2; exit 4; }
   printf '%s' "$uuid"
