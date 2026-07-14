@@ -1264,10 +1264,10 @@ SH
 }
 
 test_removed_runtime_teardown_requires_safe_explicit_cleanup() {
-  local case_dir rc
+  local case_dir forced_case reverse_case rc
   case_dir=$(make_case removed-runtime-cleanup)
   write_meta "$case_dir" no-mistakes ship
-  sed -i.bak 's/^window=.*/window=firstmate:fm-task-x1/' "$case_dir/state/task-x1.meta"
+  sed -i.bak 's/^window=.*/window=custom-session:fm-task-x1/' "$case_dir/state/task-x1.meta"
   rm -f "$case_dir/state/task-x1.meta.bak"
   wt_commit_file "$case_dir" legacy-change.txt "unlanded legacy work" "unlanded legacy work"
 
@@ -1295,7 +1295,29 @@ test_removed_runtime_teardown_requires_safe_explicit_cleanup() {
     || fail "landed removed-runtime cleanup failed"
   [ ! -e "$case_dir/state/task-x1.meta" ] \
     || fail "landed removed-runtime cleanup retained task metadata"
-  pass "removed-runtime teardown fails closed and cleans only through landed-work checks"
+  run_teardown "$case_dir" --legacy-cleanup > "$case_dir/repeat.out" 2> "$case_dir/repeat.err" \
+    || fail "repeated removed-runtime cleanup should be idempotent"
+
+  forced_case=$(make_case removed-runtime-force-cleanup)
+  write_meta "$forced_case" no-mistakes ship
+  sed -i.bak 's/^window=.*/window=other-session:fm-task-x1/' "$forced_case/state/task-x1.meta"
+  rm -f "$forced_case/state/task-x1.meta.bak"
+  wt_commit_file "$forced_case" discarded.txt "discarded legacy work" "discarded legacy work"
+  run_teardown "$forced_case" --legacy-cleanup --force > "$forced_case/force.out" 2> "$forced_case/force.err" \
+    || fail "legacy cleanup and force permissions did not compose"
+  [ ! -e "$forced_case/state/task-x1.meta" ] \
+    || fail "forced legacy cleanup retained task metadata"
+
+  reverse_case=$(make_case removed-runtime-reverse-force-cleanup)
+  write_meta "$reverse_case" no-mistakes ship
+  sed -i.bak 's/^window=.*/window=third-session:fm-task-x1/' "$reverse_case/state/task-x1.meta"
+  rm -f "$reverse_case/state/task-x1.meta.bak"
+  wt_commit_file "$reverse_case" discarded.txt "discarded legacy work" "discarded legacy work"
+  run_teardown "$reverse_case" --force --legacy-cleanup > "$reverse_case/force.out" 2> "$reverse_case/force.err" \
+    || fail "legacy cleanup flags should be order-independent"
+  [ ! -e "$reverse_case/state/task-x1.meta" ] \
+    || fail "reverse-order forced legacy cleanup retained task metadata"
+  pass "removed-runtime teardown requires independent safe and discard permissions"
 }
 
 test_local_only_fork_remote_allows

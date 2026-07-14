@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Send one line of literal text to a crewmate endpoint, then Enter.
-# Usage: fm-send.sh <target> <text...>
+# Usage: fm-send.sh [--backend <name>] <target> <text...>
 #   <target> may be an exact task id, a legacy fm-<id> task label resolved
 #   through this home's state/<id>.meta, or an explicit well-formed backend
-#   target.
+#   target. External endpoints require an explicit Herdr, zellij, Orca, or cmux
+#   backend through --backend.
 #   fm-send refuses unresolved guesses because a "successful" send to the wrong endpoint is
 #   worse than a loud failure.
 # Special keys instead of text: fm-send.sh <target> --key Enter
@@ -83,14 +84,8 @@ fm_send_meta_for_key_value() {  # <state-dir> <key> <value>
   return 1
 }
 
-fm_send_count_colons() {  # <string>
-  local s=$1 no_colons
-  no_colons=${s//:/}
-  printf '%s' $(( ${#s} - ${#no_colons} ))
-}
-
 fm_send_resolve_target() {  # <raw-target>
-  local raw=$1 meta pane_meta target backend assumed colons id session hint
+  local raw=$1 meta pane_meta target backend id session hint
 
   RESOLVED_TARGET=""
   TARGET_BACKEND=""
@@ -102,6 +97,10 @@ fm_send_resolve_target() {  # <raw-target>
 
   meta=$(fm_backend_meta_for_selector "$raw" "$STATE" 2>/dev/null || true)
   if [ -n "$meta" ]; then
+    if [ -n "$EXPLICIT_BACKEND" ]; then
+      echo "error: --backend is only for external endpoints; task selector '$raw' already has recorded metadata" >&2
+      return 1
+    fi
     RESOLUTION_TRIED="meta=$meta; backend=from-meta"
     target=$(fm_backend_target_of_meta "$meta")
     if [ -z "$target" ]; then
@@ -118,15 +117,18 @@ fm_send_resolve_target() {  # <raw-target>
     return 0
   fi
 
-  case "$raw" in
-    fm-*)
+  case "$raw:$EXPLICIT_BACKEND" in
+    fm-*:)
       RESOLUTION_TRIED="meta=$STATE/$raw.meta; legacy-meta=$STATE/${raw#fm-}.meta; backend=none"
       echo "error: no metadata for $raw in $STATE (tried $RESOLUTION_TRIED); pass a well-formed explicit backend target only when targeting outside this firstmate home" >&2
       return 1
       ;;
   esac
 
-  pane_meta=$(fm_send_meta_for_key_value "$STATE" herdr_pane_id "$raw" 2>/dev/null || true)
+  pane_meta=""
+  if [ -z "$EXPLICIT_BACKEND" ]; then
+    pane_meta=$(fm_send_meta_for_key_value "$STATE" herdr_pane_id "$raw" 2>/dev/null || true)
+  fi
   if [ -n "$pane_meta" ]; then
     session=$(fm_meta_get "$pane_meta" herdr_session)
     hint="${session:-<herdr-session>}:$raw"
@@ -142,36 +144,41 @@ fm_send_resolve_target() {  # <raw-target>
       echo "error: no backend target recorded in $meta (tried explicit target '$raw' via recorded window/terminal; backend=from-meta)" >&2
       return 1
     fi
+    backend=$(fm_backend_of_meta "$meta")
+    if [ -n "$EXPLICIT_BACKEND" ] && [ "$EXPLICIT_BACKEND" != "$backend" ]; then
+      echo "error: explicit backend '$EXPLICIT_BACKEND' conflicts with backend '$backend' recorded in $meta" >&2
+      return 1
+    fi
     RESOLVED_TARGET=$target
-    TARGET_BACKEND=$(fm_backend_of_meta "$meta")
+    TARGET_BACKEND=$backend
     TARGET_META=$meta
     TARGET_HARNESS=$(fm_meta_get "$meta" harness)
     RESOLUTION_TRIED="explicit target '$raw' matched $meta; backend=$TARGET_BACKEND"
     return 0
   fi
 
-  case "$raw" in
-    *:*)
-      colons=$(fm_send_count_colons "$raw")
-      if [ "$colons" -lt 2 ]; then
-        echo "error: explicit target '$raw' has no unambiguous backend shape; use a recorded task selector" >&2
-        return 1
-      fi
-      assumed=herdr
-      if ! fm_backend_target_exists "$assumed" "$raw"; then
-        echo "error: explicit target '$raw' is not a live $assumed endpoint (tried meta=$STATE/$raw.meta; metadata window/terminal lookup; backend=$assumed). Use fm-<id> for a recorded task/lane, or pass a target whose backend endpoint can be verified." >&2
-        return 1
-      fi
-      RESOLVED_TARGET=$raw
-      TARGET_BACKEND=$assumed
-      RESOLUTION_TRIED="meta=$STATE/$raw.meta; metadata window/terminal lookup; backend=$assumed; endpoint=verified"
-      return 0
-      ;;
-  esac
+  if [ -n "$EXPLICIT_BACKEND" ]; then
+    if ! fm_backend_target_exists "$EXPLICIT_BACKEND" "$raw"; then
+      echo "error: explicit target '$raw' is not a live $EXPLICIT_BACKEND endpoint (tried metadata window/terminal lookup; backend=$EXPLICIT_BACKEND)" >&2
+      return 1
+    fi
+    RESOLVED_TARGET=$raw
+    TARGET_BACKEND=$EXPLICIT_BACKEND
+    RESOLUTION_TRIED="metadata window/terminal lookup; backend=$EXPLICIT_BACKEND; endpoint=verified"
+    return 0
+  fi
 
-  echo "error: target '$raw' is not resolvable (tried meta=$STATE/$raw.meta; metadata window/terminal lookup; backend=none). Use fm-$raw for a recorded task/lane, or pass a well-formed explicit backend target such as session:window." >&2
+  echo "error: target '$raw' is not resolvable (tried meta=$STATE/$raw.meta; metadata window/terminal lookup; backend=none). Use fm-$raw for a recorded task/lane, or pass --backend <herdr|zellij|orca|cmux> with an external endpoint." >&2
   return 1
 }
+
+EXPLICIT_BACKEND=""
+if [ "${1:-}" = --backend ]; then
+  [ $# -ge 3 ] || { echo "usage: fm-send.sh [--backend <name>] <target> <text...>" >&2; exit 2; }
+  EXPLICIT_BACKEND=$2
+  shift 2
+  fm_backend_validate "$EXPLICIT_BACKEND" || exit 1
+fi
 
 RAW_TARGET=$1
 fm_send_resolve_target "$RAW_TARGET" || exit 1

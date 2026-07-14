@@ -91,18 +91,38 @@ test_prefixless_herdr_pane_id_fails() {
   pass "fm-send strict: prefixless herdr pane ids are rejected before herdr fallback"
 }
 
-test_unmatched_single_colon_target_must_exist() {
-  local dir fb home err log rc
+test_explicit_backend_target_must_exist() {
+  local dir fb home err log rc got
   dir="$TMP_ROOT/dead-explicit"; mkdir -p "$dir"
   fb=$(make_stubs "$dir"); home=$(setup_home deadexplicit); err="$dir/send.err"; log="$dir/herdr.log"; : > "$log"
 
   PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_HERDR_LOG="$log" FM_FAKE_HERDR_DEAD_PANE=w1:missing FM_SEND_SETTLE=0 \
-    "$SEND" sess:w1:missing "hello" >/dev/null 2>"$err"; rc=$?
+    "$SEND" --backend herdr sess:w1:missing "hello" >/dev/null 2>"$err"; rc=$?
   [ "$rc" -ne 0 ] || fail "dead explicit herdr-shaped target should fail"
   assert_contains "$(cat "$err")" "not a live herdr endpoint" "dead explicit target diagnostic should name the assumed backend"
   assert_contains "$(cat "$err")" "backend=herdr" "dead explicit target diagnostic should name the tried backend"
   [ ! -s "$log" ] || fail "dead explicit target still attempted a send"$'\n'"$(cat "$log")"
-  pass "fm-send strict: unmatched single-colon explicit targets must verify live before sending"
+
+  PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_HERDR_LOG="$log" FM_SEND_SETTLE=0 \
+    "$SEND" --backend herdr sess:w1:p3 "hello" >/dev/null 2>"$err"; rc=$?
+  expect_code 0 "$rc" "live explicitly routed Herdr target should accept a send"
+  got=$(cat "$log")
+  assert_contains "$got" "target=sess:w1:p3 literal=1 arg=hello" "explicit backend send did not reach the requested target"
+  pass "fm-send strict: explicit backend targets must verify live before sending"
+}
+
+test_unrecorded_colon_target_requires_backend() {
+  local dir fb home err log rc
+  dir="$TMP_ROOT/ambiguous-explicit"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); home=$(setup_home ambiguous); err="$dir/send.err"; log="$dir/herdr.log"; : > "$log"
+
+  PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_HERDR_LOG="$log" FM_SEND_SETTLE=0 \
+    "$SEND" sess:w1:p2 "hello" >/dev/null 2>"$err"; rc=$?
+  [ "$rc" -ne 0 ] || fail "unrecorded colon target should fail without --backend"
+  assert_contains "$(cat "$err")" "--backend" "ambiguous endpoint diagnostic should require an explicit backend"
+  assert_contains "$(cat "$err")" "backend=none" "ambiguous endpoint should not guess Herdr"
+  [ ! -s "$log" ] || fail "ambiguous endpoint invoked Herdr"$'\n'"$(cat "$log")"
+  pass "fm-send strict: unrecorded endpoint punctuation never guesses a backend"
 }
 
 test_healthy_fm_id_send_still_works() {
@@ -125,7 +145,7 @@ test_removed_runtime_record_never_sends_to_herdr() {
   local dir fb home err log rc
   dir="$TMP_ROOT/removed-runtime"; mkdir -p "$dir"
   fb=$(make_stubs "$dir"); home=$(setup_home removedruntime); err="$dir/send.err"; log="$dir/herdr.log"; : > "$log"
-  fm_write_meta "$home/state/upgrade-case.meta" "window=firstmate:fm-upgrade-case" "kind=ship"
+  fm_write_meta "$home/state/upgrade-case.meta" "window=custom-session:fm-upgrade-case" "kind=ship"
 
   PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_HERDR_LOG="$log" FM_SEND_SETTLE=0 \
     "$SEND" upgrade-case "do not misroute" >/dev/null 2>"$err"; rc=$?
@@ -140,6 +160,7 @@ test_exact_lane_id_send_still_works
 test_unset_fm_home_fails
 test_unresolvable_target_does_not_herdr_fallback
 test_prefixless_herdr_pane_id_fails
-test_unmatched_single_colon_target_must_exist
+test_explicit_backend_target_must_exist
+test_unrecorded_colon_target_requires_backend
 test_healthy_fm_id_send_still_works
 test_removed_runtime_record_never_sends_to_herdr

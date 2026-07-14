@@ -124,10 +124,10 @@ test_absent_metadata_defaults_safely() {
 
 test_removed_runtime_metadata_fails_closed() {
   local meta="$STATE/removed-runtime.meta" out rc
-  printf 'window=firstmate:fm-upgrade-case\n' > "$meta"
+  printf 'window=custom-session:fm-upgrade-case\n' > "$meta"
   [ "$(fm_backend_of_meta "$meta")" = "$FM_BACKEND_LEGACY_REMOVED" ] \
     || fail "removed-runtime target shape was reinterpreted as a current backend"
-  out=$(fm_backend_capture "$(fm_backend_of_meta "$meta")" firstmate:fm-upgrade-case 1 2>&1)
+  out=$(fm_backend_capture "$(fm_backend_of_meta "$meta")" custom-session:fm-upgrade-case 1 2>&1)
   rc=$?
   [ "$rc" -ne 0 ] || fail "removed-runtime state reached a live backend adapter"
   assert_contains "$out" "legacy removed runtime" "removed-runtime refusal lost its actionable diagnostic"
@@ -147,7 +147,27 @@ test_selector_resolution_refuses_guesses() {
   status=$?
   [ "$status" -ne 0 ] || fail "unrecorded bare selector should be rejected"
   assert_contains "$out" "not recorded" "bare-selector refusal should explain the safe path"
+  out=$(fm_backend_resolve_selector external:target "$STATE" 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "unrecorded colon target should require an explicit backend"
+  assert_contains "$out" "--backend" "external-endpoint refusal should name the explicit backend path"
   pass "selector resolution: recorded targets work and unresolved guesses fail closed"
+}
+
+test_peek_external_endpoint_requires_explicit_backend() {
+  local fakebin="$TMP_ROOT/peek-bin" out status
+  mkdir -p "$fakebin"
+  fm_test_write_basic_herdr "$fakebin/herdr"
+  out=$(PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$STATE" \
+    "$ROOT/bin/fm-peek.sh" external:w1:p7 1 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "fm-peek guessed a backend for an unrecorded endpoint"
+  assert_contains "$out" "--backend" "fm-peek ambiguity diagnostic should name the explicit backend path"
+  out=$(PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$STATE" \
+    FM_FAKE_HERDR_CAPTURE=EXPLICIT_PEEK_OK "$ROOT/bin/fm-peek.sh" --backend herdr external:w1:p7 1 2>&1) \
+    || fail "fm-peek rejected an explicitly routed Herdr endpoint"
+  assert_contains "$out" "EXPLICIT_PEEK_OK" "fm-peek did not capture the explicitly routed endpoint"
+  pass "fm-peek routes external endpoints only through an explicit backend"
 }
 
 test_default_spawn_omits_backend_metadata() {
@@ -180,6 +200,7 @@ test_required_tools
 test_absent_metadata_defaults_safely
 test_removed_runtime_metadata_fails_closed
 test_selector_resolution_refuses_guesses
+test_peek_external_endpoint_requires_explicit_backend
 test_default_spawn_omits_backend_metadata
 
 echo "All backend tests passed."

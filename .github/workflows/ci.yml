@@ -44,7 +44,10 @@ jobs:
           set -eu
           npm install -g tasks-axi
           tasks-axi --version
-      - run: |
+      - name: Run behavior tests with guarded Herdr acceptance
+        env:
+          FM_RUN_HERDR_GUIDE_E2E: 1
+        run: |
           set -eu
           for test_script in tests/*.test.sh; do
             "$test_script"
