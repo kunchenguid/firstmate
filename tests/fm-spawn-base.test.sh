@@ -18,11 +18,17 @@
 #   (h) a respawn without --base carries the recorded base=/base_sha= forward, because
 #       meta is rewritten wholesale and a base lost on recovery is a task unguarded
 #   (i) --base is rejected for a local-only project, whose merge path has no guard
+#   (j) a respawn whose base MERGED and was deleted from origin is accepted, declaration
+#       intact - the normal end-state of a stacked PR, not a reason to dead-end recovery
+#   (k) a respawn whose base was deleted from origin WITHOUT merging is refused by name,
+#       whether the base is supplied again or carried forward
 #
 # base_sha= is the base's tip on origin at spawn time, resolved while the base
 # necessarily still exists. That is the fact fm-pr-check.sh needs once the branch is
 # deleted from origin, where absence alone cannot say whether the base merged
-# (harmless) or was abandoned (its unmerged commits replayed on the PR head).
+# (harmless) or was abandoned (its unmerged commits replayed on the PR head) - and it is
+# the same fact this script decides (j) and (k) with, because the deciding question at
+# spawn is landedness too, never the branch's mere existence.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -84,6 +90,11 @@ make_spawn_case() {
 # Give the project clone a real origin carrying <origin_base>, so `git ls-remote` in
 # the spawn resolves a tip for it. Pass an empty origin_base for an origin with no
 # feature branch at all.
+#
+# origin/HEAD and the bare repo's own HEAD are pinned to main the way a real `git clone`
+# would leave them, so the default branch resolves to main whatever the local
+# init.defaultBranch happens to be - the spawn reads it to decide whether a base that is
+# gone from origin merged or was abandoned.
 make_project_origin() {
   local case_dir=$1 proj=$2 origin_base=$3 origin
   origin="$case_dir/origin.git"
@@ -91,7 +102,54 @@ make_project_origin() {
   git -C "$proj" remote add origin "$origin"
   git -C "$proj" push -q origin HEAD:refs/heads/main
   [ -z "$origin_base" ] || git -C "$proj" push -q origin "HEAD:refs/heads/$origin_base"
+  git -C "$origin" symbolic-ref HEAD refs/heads/main
   git -C "$proj" fetch -q origin
+  git -C "$proj" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/main
+}
+
+# A scratch clone of the case's origin, so origin-side history (a commit on the base, a
+# merge into main, a deleted branch) can be built without touching the project clone or
+# its attached worktree.
+origin_scratch() {  # <case_dir>
+  local case_dir=$1 scratch="$1/origin-scratch"
+  [ -d "$scratch" ] || git clone -q "$case_dir/origin.git" "$scratch"
+  printf '%s\n' "$scratch"
+}
+
+git_commit() {  # <dir> <message>
+  git -C "$1" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit -qm "$2"
+}
+
+# Put a commit of the base's OWN on the base branch, so "has this base's work landed in
+# the default branch" is a real question rather than trivially true. The project clone
+# then fetches it, exactly as a fleet sync or the crewmate's own `git fetch origin
+# <base>` would: the base's commits reach its object store, which is what keeps the
+# landed/abandoned question answerable once the branch itself is gone from origin.
+advance_origin_base() {  # <case_dir> <proj> <branch>
+  local case_dir=$1 proj=$2 branch=$3 scratch
+  scratch=$(origin_scratch "$case_dir")
+  git -C "$scratch" checkout -q -B "$branch" "origin/$branch"
+  printf 'base work\n' > "$scratch/base-work.txt"
+  git -C "$scratch" add base-work.txt
+  git_commit "$scratch" "base work"
+  git -C "$scratch" push -q origin "$branch"
+  git -C "$proj" fetch -q origin
+}
+
+merge_origin_base_into_main() {  # <case_dir> <branch>
+  local case_dir=$1 branch=$2 scratch
+  scratch=$(origin_scratch "$case_dir")
+  git -C "$scratch" checkout -q -B main origin/main
+  git -C "$scratch" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    merge -q --no-ff -m "merge $branch" "origin/$branch"
+  git -C "$scratch" push -q origin main
+}
+
+delete_origin_base() {  # <case_dir> <branch>
+  local case_dir=$1 branch=$2 scratch
+  scratch=$(origin_scratch "$case_dir")
+  git -C "$scratch" push -q origin --delete "$branch"
 }
 
 read_case_record() {
@@ -301,6 +359,80 @@ test_base_rejected_for_a_local_only_project() {
   pass "fm-spawn refuses --base for a local-only project, before any window or worktree exists"
 }
 
+# The base branch merging and being deleted is the NORMAL end-state of a stacked PR -
+# GitHub deletes the head branch on merge by default - and it is exactly when a stuck
+# crewmate gets relaunched. Deciding on the branch's EXISTENCE would refuse that respawn
+# on the documented invocation (--base to both fm-brief.sh and fm-spawn.sh) and dead-end
+# a task whose PR is perfectly mergeable. The question is landedness: the base's work is
+# in the default branch, so nothing is left to stack on and nothing can be dragged
+# anywhere. Keep the declaration, and let the spawn through.
+test_respawn_with_base_after_the_base_merged_and_was_deleted() {
+  local rec id out status base_sha
+  id=spawn-base-b10
+  rec=$(make_spawn_case basemerged "$id" feature/merged)
+  read_case_record "$rec"
+  advance_origin_base "$CASE_DIR" "$PROJ_DIR" feature/merged
+  base_sha=$(git -C "$CASE_DIR/origin.git" rev-parse refs/heads/feature/merged)
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR" --base feature/merged)
+  status=$?
+  expect_code 0 "$status" "basemerged: the first (based) spawn should succeed"$'\n'"$out"
+  assert_grep "base_sha=$base_sha" "$HOME_DIR/state/$id.meta" \
+    "basemerged: the first spawn did not record the base's tip, so the respawn below would have no fact to decide with"
+
+  merge_origin_base_into_main "$CASE_DIR" feature/merged
+  delete_origin_base "$CASE_DIR" feature/merged
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR" --base feature/merged)
+  status=$?
+  expect_code 0 "$status" "basemerged: a respawn with --base after the base merged and was deleted must succeed, not dead-end on the branch being gone"$'\n'"$out"
+  assert_contains "$out" "merged and was deleted" \
+    "basemerged: the spawn should say out loud that the base merged, not just proceed"
+  assert_grep "base=feature/merged" "$HOME_DIR/state/$id.meta" \
+    "basemerged: the respawn dropped the declared base, leaving the task unguarded at merge"
+  assert_grep "base_sha=$base_sha" "$HOME_DIR/state/$id.meta" \
+    "basemerged: the respawn dropped the recorded base tip, so fm-pr-check could no longer tell that base merged"
+  pass "fm-spawn accepts a respawn whose declared base merged and was deleted from origin"
+}
+
+# The other half of the same question, and the one the guard exists for: a base branch
+# deleted WITHOUT merging is ABANDONED. Its commits never reached the default branch, so
+# a task stacked on it is stacked on history that will never land, and fm-pr-check.sh
+# would refuse its PR before merge. Absence looks identical to `git ls-remote` in both
+# cases, so the recorded tip is what tells them apart - and this refusal must fire on the
+# respawn that omits --base too, since the carried-forward declaration means the same
+# thing as the supplied one.
+test_respawn_after_the_base_was_abandoned_refuses() {
+  local rec id out status log
+  id=spawn-base-b11
+  rec=$(make_spawn_case baseabandoned "$id" feature/abandoned)
+  read_case_record "$rec"
+  log="$CASE_DIR/tmux.log"
+  advance_origin_base "$CASE_DIR" "$PROJ_DIR" feature/abandoned
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR" --base feature/abandoned)
+  status=$?
+  expect_code 0 "$status" "baseabandoned: the first (based) spawn should succeed"$'\n'"$out"
+
+  delete_origin_base "$CASE_DIR" feature/abandoned
+  : > "$log"
+
+  out=$(FM_TEST_TMUX_LOG="$log" run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR" --base feature/abandoned)
+  status=$?
+  expect_code 1 "$status" "baseabandoned: a base deleted from origin WITHOUT merging must refuse the respawn, not be waved through as merged"
+  assert_contains "$out" "WITHOUT merging" "baseabandoned: refusal did not name the abandoned base"
+  assert_no_grep "new-window" "$log" \
+    "baseabandoned: the refusal created a backend window it then abandoned, with no meta to reconcile it"
+  assert_no_grep "treehouse get" "$log" \
+    "baseabandoned: the refusal leased a task worktree it then abandoned, with no meta to release it"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 1 "$status" "baseabandoned: the carried-forward base must be held to the same rule as the supplied one"
+  assert_contains "$out" "WITHOUT merging" "baseabandoned: the carry-forward refusal did not name the abandoned base"
+  pass "fm-spawn refuses a respawn whose declared base was deleted from origin without merging"
+}
+
 # A base is a fact about ONE task. Shared across a batch it would silently guard
 # every pair against a base only one of them declared.
 test_base_rejected_in_a_batch() {
@@ -324,5 +456,7 @@ test_base_missing_from_origin_refuses_before_creating_anything
 test_a_good_spawn_does_create_the_window_and_worktree
 test_base_rejected_for_scout_and_secondmate
 test_respawn_without_base_carries_the_declaration_forward
+test_respawn_with_base_after_the_base_merged_and_was_deleted
+test_respawn_after_the_base_was_abandoned_refuses
 test_base_rejected_for_a_local_only_project
 test_base_rejected_in_a_batch
