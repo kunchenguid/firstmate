@@ -173,7 +173,7 @@ write_domain_alpha_fixture() {  # <parent-home> <secondmate-home>
   printf -- '- domain-alpha - sample rollout (home: %s; scope: sample rollout and legal release; projects: sample; added 2026-07-13)\n' \
     "$mate" > "$home/data/secondmates.md"
   fm_write_secondmate_meta "$home/state/domain-alpha.meta" "$mate" "firstmate:fm-domain-alpha" sample
-  printf 'working: Phase 7 started\n' > "$home/state/domain-alpha.status"
+  printf 'working [key=phase7]: Phase 7 started\n' > "$home/state/domain-alpha.status"
   cat > "$mate/data/backlog.md" <<'EOF'
 ## In flight
 
@@ -508,8 +508,11 @@ test_parent_evidence_reconciles_by_verb_and_key() {
   fm_write_secondmate_meta "$home/state/decision.meta" "$decision" "firstmate:fm-decision" sample
   printf 'working [key=stale-work]: old work still running\n' > "$home/state/hold.status"
   printf 'paused [key=legal-release]: waiting for legal release\n' >> "$home/state/hold.status"
+  printf 'paused: legacy pause without an identity\n' >> "$home/state/hold.status"
   printf 'blocked [key=vendor-release]: waiting for vendor release\n' > "$home/state/blocked.status"
+  printf 'blocked: legacy block without an identity\n' >> "$home/state/blocked.status"
   printf 'needs-decision [key=stale-route]: choose the old route\n' > "$home/state/decision.status"
+  printf 'working: legacy work without an identity\n' >> "$home/state/decision.status"
   cat > "$hold/data/backlog.md" <<'EOF'
 ## In flight
 
@@ -551,15 +554,22 @@ EOF
         and (.parent_event.reconciliation.activities
           | any(.verb == "paused" and .key == "legal-release" and .verdict == "corroborates"))
         and (.parent_event.reconciliation.activities
+          | any(.verb == "paused" and .key == "default" and .verdict == "inconclusive" and .matched == null))
+        and (.parent_event.reconciliation.activities
           | any(.verb == "working" and .key == "stale-work" and .verdict == "contradicts")))
       and (.secondmate_current.records[] | select(.id == "blocked")
         | .current.state == "externally_held"
           and .contradiction == false
           and (.parent_event.reconciliation.decisions
-            | any(.verb == "blocked" and .key == "vendor-release" and .verdict == "corroborates")))
+            | any(.verb == "blocked" and .key == "vendor-release" and .verdict == "corroborates"))
+          and (.parent_event.reconciliation.decisions
+            | any(.verb == "blocked" and .key == "default" and .verdict == "inconclusive" and .matched == null)))
       and (.secondmate_current.records[] | select(.id == "decision")
         | .current.state == "captain_decision"
           and .contradiction == true
+          and .terminal_evidence.captured == false
+          and (.parent_event.reconciliation.activities
+            | any(.verb == "working" and .key == "default" and .verdict == "inconclusive" and .matched == null))
           and (.parent_event.reconciliation.decisions
             | any(.verb == "needs-decision" and .key == "stale-route" and .verdict == "contradicts")))
   ' >/dev/null || fail "parent evidence was not reconciled by verb and key: $canonical"

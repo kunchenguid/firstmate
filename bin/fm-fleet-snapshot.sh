@@ -871,11 +871,12 @@ parent_evidence_reconciliation_json() {  # <summary-json> <activities-json> <dec
     def keyed: . != null and . != "" and . != "default";
     def result($e; $matches; $complete; $surface):
       $e + {
-        verdict:(if ($matches | length) > 0 then "corroborates"
+        verdict:(if ($e.key | keyed | not) then "inconclusive"
+                 elif ($matches | length) > 0 then "corroborates"
                  elif $complete then "contradicts"
                  else "inconclusive" end),
         compared_to:$surface,
-        matched:($matches[0] // null)
+        matched:(if ($e.key | keyed) then ($matches[0] // null) else null end)
       };
     ([ $activities[] as $e
        | if $e.verb == "working" then
