@@ -30,6 +30,9 @@
 # When either signature appears, this script resolves the PR node id with
 # `gh api graphql`, enqueues it with `enqueuePullRequest`, and prints the queue
 # position, state, and estimatedTimeToMerge returned by GitHub.
+# These two GraphQL calls deliberately use plain `gh` instead of gh-axi:
+# gh-axi's `api` command is REST-path-only (no graphql subcommand, no GraphQL
+# variable flags, no --jq), so it cannot express this mutation.
 #
 # Usage: fm-pr-merge.sh <task-id> <pr-url> [-- <extra gh-axi pr merge args>]
 set -eu
@@ -126,12 +129,12 @@ gh-axi pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" ${merge_args[@]+"${merg
 merge_rc=$?
 set -e
 
+cat "$MERGE_STDERR" >&2
+
 if [ "$merge_rc" -eq 0 ]; then
-  cat "$MERGE_STDERR" >&2
   exit 0
 fi
 
-cat "$MERGE_STDERR" >&2
 if merge_queue_signature "$MERGE_STDERR"; then
   enqueue_merge_queue
   exit $?
