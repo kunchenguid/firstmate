@@ -18,6 +18,8 @@ TMP_ROOT=$(fm_test_tmproot fm-pr-check-security)
 BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
 REAL_CP=$(command -v cp)
 REAL_MV=$(command -v mv)
+REAL_STAT=$(command -v stat)
+REAL_CHMOD=$(command -v chmod)
 REAL_BASENAME=$(command -v basename)
 
 file_mode() {
@@ -738,6 +740,86 @@ test_private_artifact_paths_refuse_symlinks_and_directories() {
   pass "poll, marker, diagnostic, and quarantine paths refuse symlinks and directories"
 }
 
+install_final_publication_fault() {
+  local dir=$1
+  cat > "$dir/fakebin/mv" <<'SH'
+#!/usr/bin/env bash
+last=${!#}
+"${FM_TEST_REAL_MV:?}" "$@" || exit $?
+[ "$last" = "${FM_TEST_FINAL_PATH:?}" ] || exit 0
+case "${FM_TEST_FINAL_ACTION:?}" in
+  type)
+    rm -f -- "$last"
+    ln -s "${FM_TEST_FAULT_LINK_TARGET:?}" "$last"
+    ;;
+  mode) "${FM_TEST_REAL_CHMOD:?}" 0644 "$last" ;;
+  content) printf 'faulted final bytes\n' > "$last" ;;
+  device) : > "${FM_TEST_FAULT_GATE:?}" ;;
+  *) exit 2 ;;
+esac
+SH
+  cat > "$dir/fakebin/stat" <<'SH'
+#!/usr/bin/env bash
+last=${!#}
+if [ "$last" = "${FM_TEST_FINAL_PATH:-}" ] && [ -e "${FM_TEST_FAULT_GATE:-/nonexistent}" ]; then
+  case " $* " in
+    *" %d "*) printf '%s\n' 999999; exit 0 ;;
+  esac
+fi
+exec "${FM_TEST_REAL_STAT:?}" "$@"
+SH
+  chmod +x "$dir/fakebin/mv" "$dir/fakebin/stat"
+}
+
+assert_no_final_poll() {
+  local state=$1
+  [ ! -e "$state/task-a.check.sh" ] && [ ! -L "$state/task-a.check.sh" ] \
+    || fail "failed publication left a runnable check name"
+  [ ! -e "$state/task-a.pr-poll" ] && [ ! -L "$state/task-a.pr-poll" ] \
+    || fail "failed publication left a sidecar name"
+}
+
+test_postrename_poll_validation_revokes_and_retries() {
+  local artifact action dir state destination link_target gate
+  for artifact in data check; do
+    for action in type mode device content; do
+      dir=$(make_case "poll-final-$artifact-$action")
+      state="$dir/home/state"
+      fm_pr_poll_prepare "$state" task-a https://github.com/o/r/pull/1 o r 1 "$POLL" \
+        || fail "could not prepare prior poll"
+      fm_pr_poll_publish_prepared || fail "could not publish prior poll"
+      fm_pr_poll_prepare "$state" task-a https://github.com/o/r/pull/2 o r 2 "$POLL" \
+        || fail "could not stage replacement poll"
+      if [ "$artifact" = data ]; then
+        destination="$state/task-a.pr-poll"
+      else
+        destination="$state/task-a.check.sh"
+      fi
+      link_target="$dir/external-sentinel"
+      gate="$dir/device-fault"
+      printf 'external sentinel\n' > "$link_target"
+      chmod 0644 "$link_target"
+      install_final_publication_fault "$dir"
+      if FM_TEST_FINAL_PATH="$destination" FM_TEST_FINAL_ACTION="$action" \
+        FM_TEST_FAULT_LINK_TARGET="$link_target" FM_TEST_FAULT_GATE="$gate" \
+        FM_TEST_REAL_MV="$REAL_MV" FM_TEST_REAL_STAT="$REAL_STAT" FM_TEST_REAL_CHMOD="$REAL_CHMOD" \
+        PATH="$dir/fakebin:$BASE_PATH" fm_pr_poll_publish_prepared; then
+        fail "post-rename $artifact $action fault was reported as success"
+      fi
+      fm_pr_poll_cleanup
+      assert_no_final_poll "$state"
+      [ "$(cat "$link_target")" = 'external sentinel' ] || fail "poll type fault changed an external target"
+      [ "$(file_mode "$link_target")" = 644 ] || fail "poll type fault changed an external target mode"
+
+      fm_pr_poll_prepare "$state" task-a https://github.com/o/r/pull/2 o r 2 "$POLL" \
+        || fail "could not prepare poll retry"
+      PATH="$BASE_PATH" fm_pr_poll_publish_prepared || fail "poll retry did not recover after final validation fault"
+      fm_pr_poll_artifacts_valid "$state" task-a "$POLL" || fail "poll retry did not publish a valid pair"
+    done
+  done
+  pass "post-rename poll validation faults revoke both names and allow a clean retry"
+}
+
 install_mv_fault() {
   local dir=$1
   cat > "$dir/fakebin/mv" <<'SH'
@@ -778,6 +860,10 @@ test_marker_and_diagnostic_rename_fail_closed() {
     [ ! -e "$state/.pr-check-migration-v1" ] || fail "marker rename $action left a completion marker"
     ! find "$state" -name '.fm-pr-check-migration.*' -print | grep . >/dev/null \
       || fail "marker rename $action left a staged marker"
+    rm -f "$dir/fakebin/mv"
+    FM_HOME="$dir/home" PATH="$BASE_PATH" "$MIGRATE" >/dev/null 2>/dev/null \
+      || fail "marker rename $action did not recover on retry"
+    assert_valid_migration_marker "$state/.pr-check-migration-v1"
 
     dir=$(make_case "diagnostic-rename-$action")
     state="$dir/home/state"
@@ -791,10 +877,264 @@ test_marker_and_diagnostic_rename_fail_closed() {
     [ "$rc" -ne 0 ] || fail "diagnostic rename $action was reported as success"
     [ ! -e "$state/.pr-check-migration-v1" ] || fail "diagnostic rename $action published a completion marker"
     [ ! -e "$state/.pr-check-migration.log" ] || fail "diagnostic rename $action published a partial log"
+    [ -e "$state/task-a.check.sh" ] || fail "diagnostic rename $action removed the source before recording its obligation"
     ! find "$state" -name '.fm-pr-check-log.*' -print | grep . >/dev/null \
       || fail "diagnostic rename $action left a staged log"
+    rm -f "$dir/fakebin/mv"
+    FM_HOME="$dir/home" PATH="$BASE_PATH" "$MIGRATE" >/dev/null 2>/dev/null \
+      || fail "diagnostic rename $action did not recover on retry"
+    assert_valid_migration_marker "$state/.pr-check-migration-v1"
+    assert_grep 'task task-a: poll metadata is ambiguous or invalid' "$state/.pr-check-migration.log" \
+      "diagnostic rename retry forgot the required diagnostic"
   done
-  pass "marker and diagnostic rename errors and signals fail closed without partial publication"
+  pass "marker and diagnostic rename errors and signals fail closed and recover durably on retry"
+}
+
+test_postrename_marker_and_diagnostic_validation_retries() {
+  local artifact action dir state destination link_target gate rc
+  for artifact in marker diagnostic obligation; do
+    for action in type mode device content; do
+      dir=$(make_case "migration-final-$artifact-$action")
+      state="$dir/home/state"
+      case "$artifact" in
+        marker)
+          destination="$state/.pr-check-migration-v1"
+          ;;
+        diagnostic)
+          write_ambiguous_poll "$dir"
+          destination="$state/.pr-check-migration.log"
+          ;;
+        obligation)
+          write_ambiguous_poll "$dir"
+          destination="$state/.pr-check-quarantine/task-a.diagnostic.ambiguous"
+          ;;
+      esac
+      link_target="$dir/external-sentinel"
+      gate="$dir/device-fault"
+      printf 'external sentinel\n' > "$link_target"
+      chmod 0644 "$link_target"
+      install_final_publication_fault "$dir"
+      set +e
+      FM_TEST_FINAL_PATH="$destination" FM_TEST_FINAL_ACTION="$action" \
+        FM_TEST_FAULT_LINK_TARGET="$link_target" FM_TEST_FAULT_GATE="$gate" \
+        FM_TEST_REAL_MV="$REAL_MV" FM_TEST_REAL_STAT="$REAL_STAT" FM_TEST_REAL_CHMOD="$REAL_CHMOD" \
+        FM_HOME="$dir/home" PATH="$dir/fakebin:$BASE_PATH" "$MIGRATE" > "$dir/migrate.out" 2> "$dir/migrate.err"
+      rc=$?
+      set -e
+      [ "$rc" -ne 0 ] || fail "post-rename $artifact $action fault was reported as success"
+      [ ! -e "$state/.pr-check-migration-v1" ] && [ ! -L "$state/.pr-check-migration-v1" ] \
+        || fail "post-rename $artifact $action fault left a trusted marker"
+      if [ "$artifact" = diagnostic ]; then
+        [ ! -e "$state/.pr-check-migration.log" ] && [ ! -L "$state/.pr-check-migration.log" ] \
+          || fail "post-rename diagnostic $action fault left an invalid log"
+      fi
+      if [ "$artifact" = diagnostic ] || [ "$artifact" = obligation ]; then
+        [ -e "$state/task-a.check.sh" ] || fail "$artifact $action fault removed the runnable source before durable recording"
+      fi
+      if [ "$artifact" = obligation ]; then
+        [ ! -e "$destination" ] && [ ! -L "$destination" ] \
+          || fail "post-rename obligation $action fault left an invalid obligation"
+      fi
+      [ "$(cat "$link_target")" = 'external sentinel' ] || fail "migration type fault changed an external target"
+      [ "$(file_mode "$link_target")" = 644 ] || fail "migration type fault changed an external target mode"
+
+      FM_HOME="$dir/home" PATH="$BASE_PATH" "$MIGRATE" >/dev/null 2>/dev/null \
+        || fail "post-rename $artifact $action retry did not recover"
+      assert_valid_migration_marker "$state/.pr-check-migration-v1"
+      if [ "$artifact" = diagnostic ] || [ "$artifact" = obligation ]; then
+        assert_grep 'task task-a: poll metadata is ambiguous or invalid' "$state/.pr-check-migration.log" \
+          "$artifact $action retry forgot the durable obligation"
+      fi
+    done
+  done
+  pass "post-rename marker, diagnostic, and obligation faults are revoked and reconstructed on retry"
+}
+
+install_chmod_noop_fault() {
+  local dir=$1
+  cat > "$dir/fakebin/chmod" <<'SH'
+#!/usr/bin/env bash
+last=${!#}
+case "$last" in
+  ${FM_TEST_CHMOD_MATCH:?}) exit 0 ;;
+esac
+exec "${FM_TEST_REAL_CHMOD:?}" "$@"
+SH
+  chmod +x "$dir/fakebin/chmod"
+}
+
+test_quarantine_validation_and_retry_contract() {
+  local dir state rc quarantined external source_kind
+
+  dir=$(make_case quarantine-dir-mode-retry)
+  state="$dir/home/state"
+  write_ambiguous_poll "$dir"
+  mkdir "$state/.pr-check-quarantine"
+  chmod 0755 "$state/.pr-check-quarantine"
+  install_chmod_noop_fault "$dir"
+  set +e
+  FM_TEST_CHMOD_MATCH="$state/.pr-check-quarantine" FM_TEST_REAL_CHMOD="$REAL_CHMOD" \
+    FM_HOME="$dir/home" PATH="$dir/fakebin:$BASE_PATH" "$MIGRATE" >/dev/null 2>/dev/null
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "migration accepted a nonprivate quarantine directory"
+  [ ! -e "$state/.pr-check-migration-v1" ] || fail "quarantine directory mode fault published a marker"
+  FM_HOME="$dir/home" PATH="$BASE_PATH" "$MIGRATE" >/dev/null 2>/dev/null \
+    || fail "quarantine directory mode fault did not recover on retry"
+  [ "$(file_mode "$state/.pr-check-quarantine")" = 700 ] || fail "retry did not repair quarantine directory mode"
+  assert_valid_migration_marker "$state/.pr-check-migration-v1"
+
+  dir=$(make_case quarantine-artifact-mode-retry)
+  state="$dir/home/state"
+  write_ambiguous_poll "$dir"
+  chmod 0644 "$state/task-a.check.sh"
+  install_chmod_noop_fault "$dir"
+  set +e
+  FM_TEST_CHMOD_MATCH="$state/.pr-check-quarantine/task-a.check.*" FM_TEST_REAL_CHMOD="$REAL_CHMOD" \
+    FM_HOME="$dir/home" PATH="$dir/fakebin:$BASE_PATH" "$MIGRATE" >/dev/null 2>/dev/null
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "migration accepted a nonprivate quarantine artifact"
+  [ ! -e "$state/.pr-check-migration-v1" ] || fail "quarantine artifact mode fault published a marker"
+  FM_HOME="$dir/home" PATH="$BASE_PATH" "$MIGRATE" >/dev/null 2>/dev/null \
+    || fail "quarantine artifact mode fault did not recover on retry"
+  quarantined=$(find "$state/.pr-check-quarantine" -name 'task-a.check.*' -type f | head -1)
+  [ -n "$quarantined" ] && [ "$(file_mode "$quarantined")" = 600 ] \
+    || fail "retry did not repair and validate the quarantine artifact"
+  assert_valid_migration_marker "$state/.pr-check-migration-v1"
+
+  dir=$(make_case quarantine-artifact-device-retry)
+  state="$dir/home/state"
+  write_ambiguous_poll "$dir"
+  cat > "$dir/fakebin/mv" <<'SH'
+#!/usr/bin/env bash
+last=${!#}
+"${FM_TEST_REAL_MV:?}" "$@" || exit $?
+case "$last" in
+  */.pr-check-quarantine/task-a.check.*) : > "${FM_TEST_FAULT_GATE:?}" ;;
+esac
+SH
+  cat > "$dir/fakebin/stat" <<'SH'
+#!/usr/bin/env bash
+last=${!#}
+case "$last" in
+  */.pr-check-quarantine/task-a.check.*)
+    if [ -e "${FM_TEST_FAULT_GATE:?}" ]; then
+      case " $* " in
+        *" %d "*) printf '%s\n' 999999; exit 0 ;;
+      esac
+    fi
+    ;;
+esac
+exec "${FM_TEST_REAL_STAT:?}" "$@"
+SH
+  chmod +x "$dir/fakebin/mv" "$dir/fakebin/stat"
+  set +e
+  FM_TEST_REAL_MV="$REAL_MV" FM_TEST_REAL_STAT="$REAL_STAT" FM_TEST_FAULT_GATE="$dir/device-fault" \
+    FM_HOME="$dir/home" PATH="$dir/fakebin:$BASE_PATH" "$MIGRATE" >/dev/null 2>/dev/null
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "migration accepted a wrong-device quarantine artifact"
+  [ ! -e "$state/.pr-check-migration-v1" ] || fail "quarantine device fault published a marker"
+  FM_HOME="$dir/home" PATH="$BASE_PATH" "$MIGRATE" >/dev/null 2>/dev/null \
+    || fail "quarantine device fault did not recover on retry"
+  assert_valid_migration_marker "$state/.pr-check-migration-v1"
+
+  dir=$(make_case quarantine-source-remains-retry)
+  state="$dir/home/state"
+  write_ambiguous_poll "$dir"
+  cat > "$dir/fakebin/mv" <<'SH'
+#!/usr/bin/env bash
+args=("$@")
+last=${args[${#args[@]}-1]}
+source=${args[${#args[@]}-2]}
+case "$last" in
+  */.pr-check-quarantine/task-a.check.*)
+    "${FM_TEST_REAL_CP:?}" "$source" "$last"
+    exit $?
+    ;;
+esac
+exec "${FM_TEST_REAL_MV:?}" "$@"
+SH
+  chmod +x "$dir/fakebin/mv"
+  set +e
+  FM_TEST_REAL_MV="$REAL_MV" FM_TEST_REAL_CP="$REAL_CP" \
+    FM_HOME="$dir/home" PATH="$dir/fakebin:$BASE_PATH" "$MIGRATE" >/dev/null 2>/dev/null
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "migration accepted a quarantine result whose source name remained"
+  [ -e "$state/task-a.check.sh" ] || fail "source-remains fault did not preserve the source fixture"
+  [ ! -e "$state/.pr-check-migration-v1" ] || fail "source-remains fault published a marker"
+  FM_HOME="$dir/home" PATH="$BASE_PATH" "$MIGRATE" >/dev/null 2>/dev/null \
+    || fail "source-remains fault did not recover on retry"
+  [ ! -e "$state/task-a.check.sh" ] || fail "source-remains retry did not finish quarantine"
+  assert_valid_migration_marker "$state/.pr-check-migration-v1"
+
+  dir=$(make_case quarantine-final-symlink)
+  state="$dir/home/state"
+  write_ambiguous_poll "$dir"
+  external="$dir/external-sentinel"
+  printf 'external sentinel\n' > "$external"
+  chmod 0644 "$external"
+  cat > "$dir/fakebin/mv" <<'SH'
+#!/usr/bin/env bash
+last=${!#}
+"${FM_TEST_REAL_MV:?}" "$@" || exit $?
+case "$last" in
+  */.pr-check-quarantine/task-a.check.*)
+    rm -f -- "$last"
+    ln -s "${FM_TEST_FAULT_LINK_TARGET:?}" "$last"
+    ;;
+esac
+SH
+  chmod +x "$dir/fakebin/mv"
+  set +e
+  FM_TEST_REAL_MV="$REAL_MV" FM_TEST_FAULT_LINK_TARGET="$external" \
+    FM_HOME="$dir/home" PATH="$dir/fakebin:$BASE_PATH" "$MIGRATE" >/dev/null 2>/dev/null
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "migration accepted a symlink as a final quarantine artifact"
+  [ ! -e "$state/.pr-check-migration-v1" ] || fail "quarantine symlink fault published a marker"
+  set +e
+  FM_HOME="$dir/home" PATH="$BASE_PATH" "$MIGRATE" >/dev/null 2>/dev/null
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "retry trusted a symlinked quarantine artifact"
+  [ ! -e "$state/.pr-check-migration-v1" ] || fail "quarantine symlink retry published a marker"
+  [ "$(cat "$external")" = 'external sentinel' ] || fail "quarantine symlink fault changed the external target"
+  [ "$(file_mode "$external")" = 644 ] || fail "quarantine symlink fault changed the external target mode"
+
+  for source_kind in symlink fifo directory; do
+    dir=$(make_case "quarantine-source-$source_kind")
+    state="$dir/home/state"
+    write_ambiguous_poll "$dir"
+    rm -f "$state/task-a.check.sh"
+    case "$source_kind" in
+      symlink)
+        external="$dir/external-source"
+        printf 'external source\n' > "$external"
+        ln -s "$external" "$state/task-a.check.sh"
+        ;;
+      fifo) mkfifo "$state/task-a.check.sh" ;;
+      directory) mkdir "$state/task-a.check.sh" ;;
+    esac
+    set +e
+    FM_HOME="$dir/home" PATH="$BASE_PATH" "$MIGRATE" >/dev/null 2>/dev/null
+    rc=$?
+    set -e
+    [ "$rc" -ne 0 ] || fail "migration accepted a nonordinary $source_kind quarantine source"
+    [ ! -e "$state/.pr-check-migration-v1" ] || fail "$source_kind quarantine source published a marker"
+    set +e
+    FM_HOME="$dir/home" PATH="$BASE_PATH" "$MIGRATE" >/dev/null 2>/dev/null
+    rc=$?
+    set -e
+    [ "$rc" -ne 0 ] || fail "retry accepted a nonordinary $source_kind quarantine source"
+    [ ! -e "$state/.pr-check-migration-v1" ] || fail "$source_kind quarantine source retry published a marker"
+    if [ "$source_kind" = symlink ]; then
+      [ "$(cat "$external")" = 'external source' ] || fail "quarantine source symlink changed its target"
+    fi
+  done
+  pass "quarantine type and mode faults fail closed and recover only when a retry can validate them"
 }
 
 test_nonexecuting_migration() {
@@ -889,7 +1229,7 @@ test_bootstrap_migrates_before_other_mutations() {
 }
 
 test_teardown_removes_poll_artifacts() {
-  local dir fakebin
+  local dir fakebin kind rc
   dir=$(make_case teardown-cleanup)
   fakebin="$dir/fakebin"
   fm_write_meta "$dir/home/state/task-a.meta" \
@@ -916,7 +1256,47 @@ SH
   [ ! -e "$dir/home/state/task-a.pr-poll" ] || fail "teardown left the sidecar"
   ! find "$dir/home/state/.pr-check-quarantine" -name 'task-a.*' -print 2>/dev/null | grep . >/dev/null \
     || fail "teardown left task quarantine artifacts"
-  pass "teardown removes checks, sidecars, and task quarantine artifacts"
+
+  for kind in regular dangling directory; do
+    dir=$(make_case "teardown-quarantine-link-$kind")
+    fakebin="$dir/fakebin"
+    fm_write_meta "$dir/home/state/task-a.meta" \
+      'window=fm-task-a' \
+      "worktree=$dir/missing-worktree" \
+      "project=$dir/project" \
+      'kind=ship' \
+      'mode=local-only'
+    printf 'check sentinel\n' > "$dir/home/state/task-a.check.sh"
+    printf 'data sentinel\n' > "$dir/home/state/task-a.pr-poll"
+    make_private_symlink "$dir" "$dir/home/state/.pr-check-quarantine" "$kind"
+    if [ "$kind" = directory ]; then
+      printf 'external task artifact\n' > "$LINK_TARGET/task-a.check.protected"
+      chmod 0640 "$LINK_TARGET/task-a.check.protected"
+    fi
+    cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+    chmod +x "$fakebin/tmux"
+    touch "$dir/home/state/.last-watcher-beat"
+    set +e
+    FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" PATH="$fakebin:$BASE_PATH" \
+      "$TEARDOWN" task-a --force > "$dir/teardown.out" 2> "$dir/teardown.err"
+    rc=$?
+    set -e
+    [ "$rc" -ne 0 ] || fail "teardown accepted a $kind-target quarantine symlink"
+    assert_private_symlink_unchanged "$dir/home/state/.pr-check-quarantine"
+    [ "$(cat "$dir/home/state/task-a.check.sh")" = 'check sentinel' ] || fail "unsafe teardown removed the task check before refusal"
+    [ "$(cat "$dir/home/state/task-a.pr-poll")" = 'data sentinel' ] || fail "unsafe teardown removed the task sidecar before refusal"
+    [ -e "$dir/home/state/task-a.meta" ] || fail "unsafe teardown removed task metadata before refusal"
+    if [ "$kind" = directory ]; then
+      [ "$(cat "$LINK_TARGET/task-a.check.protected")" = 'external task artifact' ] \
+        || fail "teardown changed an external quarantine artifact"
+      [ "$(file_mode "$LINK_TARGET/task-a.check.protected")" = 640 ] \
+        || fail "teardown changed an external quarantine artifact mode"
+    fi
+  done
+  pass "teardown removes safe poll artifacts and refuses quarantine-directory symlinks without traversal"
 }
 
 test_parser_matrix
@@ -926,9 +1306,12 @@ test_delayed_execution_families_are_inert
 test_static_poll_contract
 test_atomic_interruption_leaves_no_partial_artifact
 test_concurrent_watcher_sees_only_complete_publication
+test_postrename_poll_validation_revokes_and_retries
 test_migration_excludes_older_watcher_before_scan
 test_private_artifact_paths_refuse_symlinks_and_directories
 test_marker_and_diagnostic_rename_fail_closed
+test_postrename_marker_and_diagnostic_validation_retries
+test_quarantine_validation_and_retry_contract
 test_nonexecuting_migration
 test_bootstrap_migrates_before_other_mutations
 test_teardown_removes_poll_artifacts

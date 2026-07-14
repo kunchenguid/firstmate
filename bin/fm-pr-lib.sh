@@ -116,6 +116,21 @@ fm_pr_poll_cleanup() {
   FM_PR_POLL_CHECK_TMP=
 }
 
+fm_pr_poll_revoke_final() {
+  local failed=0
+  # Neutralize the runnable name first so a failed rearm cannot consume a
+  # sidecar whose publication did not commit successfully.
+  if [ -e "$FM_PR_POLL_CHECK_DEST" ] || [ -L "$FM_PR_POLL_CHECK_DEST" ]; then
+    rm -f -- "$FM_PR_POLL_CHECK_DEST" || failed=1
+  fi
+  if [ -e "$FM_PR_POLL_DATA_DEST" ] || [ -L "$FM_PR_POLL_DATA_DEST" ]; then
+    rm -f -- "$FM_PR_POLL_DATA_DEST" || failed=1
+  fi
+  [ ! -e "$FM_PR_POLL_CHECK_DEST" ] && [ ! -L "$FM_PR_POLL_CHECK_DEST" ] || failed=1
+  [ ! -e "$FM_PR_POLL_DATA_DEST" ] && [ ! -L "$FM_PR_POLL_DATA_DEST" ] || failed=1
+  return "$failed"
+}
+
 fm_pr_poll_prepare() {
   local state=$1 id=$2 url=$3 owner=$4 repo=$5 number=$6 template=$7
   fm_pr_task_id_valid "$id" || return 1
@@ -164,33 +179,49 @@ fm_pr_poll_publish_prepared() {
   fm_pr_regular_destination_on_device_or_absent "$FM_PR_POLL_DATA_DEST" "$FM_PR_POLL_STATE_DEVICE" || return 1
   fm_pr_regular_destination_on_device_or_absent "$FM_PR_POLL_CHECK_DEST" "$FM_PR_POLL_STATE_DEVICE" || return 1
 
-  mv -f -- "$FM_PR_POLL_DATA_TMP" "$FM_PR_POLL_DATA_DEST" || return 1
-  [ -f "$FM_PR_POLL_DATA_DEST" ] && [ ! -L "$FM_PR_POLL_DATA_DEST" ] || return 1
-  [ "$(fm_pr_file_mode "$FM_PR_POLL_DATA_DEST")" = 600 ] || return 1
-  [ "$(fm_pr_file_device "$FM_PR_POLL_DATA_DEST")" = "$FM_PR_POLL_STATE_DEVICE" ] || return 1
-  fm_pr_poll_data_parse "$FM_PR_POLL_DATA_DEST" || return 1
-  [ "$FM_PR_DATA_URL" = "$FM_PR_POLL_EXPECT_URL" ] || return 1
-  [ "$FM_PR_DATA_OWNER" = "$FM_PR_POLL_EXPECT_OWNER" ] || return 1
-  [ "$FM_PR_DATA_REPO" = "$FM_PR_POLL_EXPECT_REPO" ] || return 1
-  [ "$FM_PR_DATA_NUMBER" = "$FM_PR_POLL_EXPECT_NUMBER" ] || return 1
+  if ! mv -f -- "$FM_PR_POLL_DATA_TMP" "$FM_PR_POLL_DATA_DEST"; then
+    fm_pr_poll_revoke_final || true
+    return 1
+  fi
   FM_PR_POLL_DATA_TMP=
+  if ! [ -f "$FM_PR_POLL_DATA_DEST" ] || [ -L "$FM_PR_POLL_DATA_DEST" ] \
+    || [ "$(fm_pr_file_mode "$FM_PR_POLL_DATA_DEST")" != 600 ] \
+    || [ "$(fm_pr_file_device "$FM_PR_POLL_DATA_DEST")" != "$FM_PR_POLL_STATE_DEVICE" ] \
+    || ! fm_pr_poll_data_parse "$FM_PR_POLL_DATA_DEST" \
+    || [ "$FM_PR_DATA_URL" != "$FM_PR_POLL_EXPECT_URL" ] \
+    || [ "$FM_PR_DATA_OWNER" != "$FM_PR_POLL_EXPECT_OWNER" ] \
+    || [ "$FM_PR_DATA_REPO" != "$FM_PR_POLL_EXPECT_REPO" ] \
+    || [ "$FM_PR_DATA_NUMBER" != "$FM_PR_POLL_EXPECT_NUMBER" ]; then
+    fm_pr_poll_revoke_final || true
+    return 1
+  fi
 
-  fm_pr_regular_destination_on_device_or_absent "$FM_PR_POLL_CHECK_DEST" "$FM_PR_POLL_STATE_DEVICE" || return 1
-  mv -f -- "$FM_PR_POLL_CHECK_TMP" "$FM_PR_POLL_CHECK_DEST" || return 1
-  [ -f "$FM_PR_POLL_CHECK_DEST" ] && [ ! -L "$FM_PR_POLL_CHECK_DEST" ] || return 1
-  [ "$(fm_pr_file_mode "$FM_PR_POLL_CHECK_DEST")" = 600 ] || return 1
-  [ "$(fm_pr_file_device "$FM_PR_POLL_CHECK_DEST")" = "$FM_PR_POLL_STATE_DEVICE" ] || return 1
-  cmp -s "$FM_PR_POLL_TEMPLATE" "$FM_PR_POLL_CHECK_DEST" || return 1
+  if ! fm_pr_regular_destination_on_device_or_absent "$FM_PR_POLL_CHECK_DEST" "$FM_PR_POLL_STATE_DEVICE" \
+    || ! mv -f -- "$FM_PR_POLL_CHECK_TMP" "$FM_PR_POLL_CHECK_DEST"; then
+    fm_pr_poll_revoke_final || true
+    return 1
+  fi
   FM_PR_POLL_CHECK_TMP=
+  if ! [ -f "$FM_PR_POLL_CHECK_DEST" ] || [ -L "$FM_PR_POLL_CHECK_DEST" ] \
+    || [ "$(fm_pr_file_mode "$FM_PR_POLL_CHECK_DEST")" != 600 ] \
+    || [ "$(fm_pr_file_device "$FM_PR_POLL_CHECK_DEST")" != "$FM_PR_POLL_STATE_DEVICE" ] \
+    || ! cmp -s "$FM_PR_POLL_TEMPLATE" "$FM_PR_POLL_CHECK_DEST"; then
+    fm_pr_poll_revoke_final || true
+    return 1
+  fi
 }
 
 fm_pr_poll_artifacts_valid() {
-  local state=$1 id=$2 template=$3
+  local state=$1 id=$2 template=$3 state_device
   fm_pr_task_id_valid "$id" || return 1
+  [ -d "$state" ] && [ ! -L "$state" ] || return 1
+  state_device=$(fm_pr_file_device "$state") || return 1
   [ -f "$state/$id.check.sh" ] && [ ! -L "$state/$id.check.sh" ] || return 1
   [ -f "$state/$id.pr-poll" ] && [ ! -L "$state/$id.pr-poll" ] || return 1
   [ "$(fm_pr_file_mode "$state/$id.check.sh")" = 600 ] || return 1
   [ "$(fm_pr_file_mode "$state/$id.pr-poll")" = 600 ] || return 1
+  [ "$(fm_pr_file_device "$state/$id.check.sh")" = "$state_device" ] || return 1
+  [ "$(fm_pr_file_device "$state/$id.pr-poll")" = "$state_device" ] || return 1
   cmp -s "$template" "$state/$id.check.sh" || return 1
   fm_pr_poll_data_parse "$state/$id.pr-poll"
 }

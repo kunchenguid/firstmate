@@ -101,10 +101,12 @@ fi
 
 MIGRATION_MARKER_TMP=
 MIGRATION_LOG_TMP=
+MIGRATION_OBLIGATION_TMP=
 MIGRATION_QUARANTINE_TMP=
 migration_cleanup() {
   fm_pr_poll_cleanup
   [ -z "$MIGRATION_QUARANTINE_TMP" ] || rm -f -- "$MIGRATION_QUARANTINE_TMP"
+  [ -z "$MIGRATION_OBLIGATION_TMP" ] || rm -f -- "$MIGRATION_OBLIGATION_TMP"
   [ -z "$MIGRATION_LOG_TMP" ] || rm -f -- "$MIGRATION_LOG_TMP"
   [ -z "$MIGRATION_MARKER_TMP" ] || rm -f -- "$MIGRATION_MARKER_TMP"
   [ "$lock_held" -ne 1 ] || fm_lock_release "$WATCH_LOCK"
@@ -133,6 +135,13 @@ migration_needed() {
   return 1
 }
 
+revoke_migration_marker() {
+  if [ -e "$MARKER" ] || [ -L "$MARKER" ]; then
+    rm -f -- "$MARKER" || return 1
+  fi
+  [ ! -e "$MARKER" ] && [ ! -L "$MARKER" ]
+}
+
 publish_migration_marker() {
   fm_pr_regular_destination_on_device_or_absent "$MARKER" "$STATE_DEVICE" || return 1
   MIGRATION_MARKER_TMP=$(mktemp "$STATE/.fm-pr-check-migration.XXXXXX") || return 1
@@ -142,24 +151,46 @@ publish_migration_marker() {
   chmod 0600 "$MIGRATION_MARKER_TMP" || return 1
   migration_marker_content_valid "$MIGRATION_MARKER_TMP" || return 1
   fm_pr_regular_destination_on_device_or_absent "$MARKER" "$STATE_DEVICE" || return 1
-  mv -f -- "$MIGRATION_MARKER_TMP" "$MARKER" || return 1
-  migration_complete || return 1
+  if ! mv -f -- "$MIGRATION_MARKER_TMP" "$MARKER"; then
+    revoke_migration_marker || true
+    return 1
+  fi
   MIGRATION_MARKER_TMP=
+  if ! migration_complete; then
+    revoke_migration_marker || true
+    return 1
+  fi
 }
 
 quarantine_dir_valid() {
   [ -d "$QUARANTINE" ] && [ ! -L "$QUARANTINE" ] || return 1
+  [ "$(fm_pr_file_mode "$QUARANTINE")" = 700 ] || return 1
   [ "$(fm_pr_file_device "$QUARANTINE")" = "$STATE_DEVICE" ]
 }
 
 ensure_quarantine_dir() {
   if [ -e "$QUARANTINE" ] || [ -L "$QUARANTINE" ]; then
     [ -d "$QUARANTINE" ] && [ ! -L "$QUARANTINE" ] || return 1
+    [ "$(fm_pr_file_device "$QUARANTINE")" = "$STATE_DEVICE" ] || return 1
   else
     mkdir "$QUARANTINE" || return 1
   fi
-  quarantine_dir_valid || return 1
   chmod 0700 "$QUARANTINE" || return 1
+  quarantine_dir_valid
+}
+
+quarantine_tree_repair_and_validate() {
+  local artifact
+  [ -e "$QUARANTINE" ] || [ -L "$QUARANTINE" ] || return 0
+  ensure_quarantine_dir || return 1
+  for artifact in "$QUARANTINE"/* "$QUARANTINE"/.[!.]* "$QUARANTINE"/..?*; do
+    [ -e "$artifact" ] || [ -L "$artifact" ] || continue
+    [ -f "$artifact" ] && [ ! -L "$artifact" ] || return 1
+    [ "$(fm_pr_file_device "$artifact")" = "$STATE_DEVICE" ] || return 1
+    chmod 0600 "$artifact" || return 1
+    [ "$(fm_pr_file_mode "$artifact")" = 600 ] || return 1
+    [ "$(fm_pr_file_device "$artifact")" = "$STATE_DEVICE" ] || return 1
+  done
   quarantine_dir_valid
 }
 
@@ -207,10 +238,12 @@ metadata_pr_is_canonical() {
 quarantine_artifact() {
   local source=$1 prefix=$2 kind=$3 destination source_device
   [ -e "$source" ] || [ -L "$source" ] || return 0
-  [ ! -d "$source" ] || return 1
+  [ -f "$source" ] && [ ! -L "$source" ] || return 1
   quarantine_dir_valid || return 1
   source_device=$(fm_pr_file_device "$source") || return 1
   [ "$source_device" = "$STATE_DEVICE" ] || return 1
+  [ -z "$MIGRATION_QUARANTINE_TMP" ] || rm -f -- "$MIGRATION_QUARANTINE_TMP"
+  MIGRATION_QUARANTINE_TMP=
   MIGRATION_QUARANTINE_TMP=$(mktemp "$QUARANTINE/$prefix.$kind.XXXXXX") || return 1
   [ -f "$MIGRATION_QUARANTINE_TMP" ] && [ ! -L "$MIGRATION_QUARANTINE_TMP" ] || return 1
   [ "$(fm_pr_file_device "$MIGRATION_QUARANTINE_TMP")" = "$STATE_DEVICE" ] || return 1
@@ -219,23 +252,63 @@ quarantine_artifact() {
   MIGRATION_QUARANTINE_TMP=
   quarantine_dir_valid || return 1
   mv -- "$source" "$destination" || return 1
+  [ -f "$destination" ] && [ ! -L "$destination" ] || return 1
+  chmod 0600 "$destination" || return 1
+  [ -f "$destination" ] && [ ! -L "$destination" ] || return 1
+  [ "$(fm_pr_file_mode "$destination")" = 600 ] || return 1
   [ "$(fm_pr_file_device "$destination")" = "$STATE_DEVICE" ] || return 1
-  [ -L "$destination" ] || chmod 0600 "$destination" || return 1
+  [ ! -e "$source" ] && [ ! -L "$source" ]
 }
 
-diagnostic_last_line_is() {
-  local file=$1 expected=$2 line last='' found=0
+diagnostic_file_is_one_line() {
+  local file=$1 expected=$2 value
+  [ -f "$file" ] && [ ! -L "$file" ] || return 1
+  exec 6< "$file" || return 1
+  IFS= read -r value <&6 || { exec 6<&-; return 1; }
+  if IFS= read -r _extra <&6; then
+    exec 6<&-
+    return 1
+  fi
+  exec 6<&-
+  [ "$value" = "$expected" ]
+}
+
+diagnostic_file_contains() {
+  local file=$1 expected=$2 line
   [ -f "$file" ] && [ ! -L "$file" ] || return 1
   while IFS= read -r line || [ -n "$line" ]; do
-    last=$line
-    found=1
+    [ "$line" != "$expected" ] || return 0
   done < "$file"
-  [ "$found" -eq 1 ] && [ "$last" = "$expected" ]
+  return 1
 }
 
+diagnostic_log_valid() {
+  [ -f "$LOG" ] && [ ! -L "$LOG" ] || return 1
+  [ "$(fm_pr_file_mode "$LOG")" = 600 ] || return 1
+  [ "$(fm_pr_file_device "$LOG")" = "$STATE_DEVICE" ]
+}
+
+diagnostic_log_contains() {
+  local expected=$1
+  diagnostic_log_valid || return 1
+  diagnostic_file_contains "$LOG" "$expected"
+}
+
+revoke_migration_log() {
+  if [ -e "$LOG" ] || [ -L "$LOG" ]; then
+    rm -f -- "$LOG" || return 1
+  fi
+  [ ! -e "$LOG" ] && [ ! -L "$LOG" ]
+}
+
+diagnostics_added=0
 record_diagnostic() {
   local message=$1
+  diagnostic_log_contains "$message" && return 0
   fm_pr_regular_destination_on_device_or_absent "$LOG" "$STATE_DEVICE" || return 1
+  [ ! -e "$LOG" ] || diagnostic_log_valid || return 1
+  [ -z "$MIGRATION_LOG_TMP" ] || rm -f -- "$MIGRATION_LOG_TMP"
+  MIGRATION_LOG_TMP=
   MIGRATION_LOG_TMP=$(mktemp "$STATE/.fm-pr-check-log.XXXXXX") || return 1
   [ -f "$MIGRATION_LOG_TMP" ] && [ ! -L "$MIGRATION_LOG_TMP" ] || return 1
   [ "$(fm_pr_file_device "$MIGRATION_LOG_TMP")" = "$STATE_DEVICE" ] || return 1
@@ -244,28 +317,102 @@ record_diagnostic() {
   fi
   printf '%s\n' "$message" >> "$MIGRATION_LOG_TMP" || return 1
   chmod 0600 "$MIGRATION_LOG_TMP" || return 1
-  diagnostic_last_line_is "$MIGRATION_LOG_TMP" "$message" || return 1
+  diagnostic_file_contains "$MIGRATION_LOG_TMP" "$message" || return 1
   fm_pr_regular_destination_on_device_or_absent "$LOG" "$STATE_DEVICE" || return 1
-  mv -f -- "$MIGRATION_LOG_TMP" "$LOG" || return 1
-  [ -f "$LOG" ] && [ ! -L "$LOG" ] || return 1
-  [ "$(fm_pr_file_mode "$LOG")" = 600 ] || return 1
-  [ "$(fm_pr_file_device "$LOG")" = "$STATE_DEVICE" ] || return 1
-  diagnostic_last_line_is "$LOG" "$message" || return 1
+  if ! mv -f -- "$MIGRATION_LOG_TMP" "$LOG"; then
+    return 1
+  fi
   MIGRATION_LOG_TMP=
+  if ! diagnostic_log_valid || ! diagnostic_log_contains "$message"; then
+    revoke_migration_log || true
+    return 1
+  fi
+  diagnostics_added=1
 }
 
-diagnostics_added=0
-diagnostics_failed=0
-migration_failed=0
-add_diagnostic() {
-  local message=$1
-  if record_diagnostic "$message"; then
-    diagnostics_added=1
-  else
-    diagnostics_failed=1
-    migration_failed=1
+diagnostic_obligation_message() {
+  local basename=$1 prefix kind
+  MIGRATION_DIAGNOSTIC_MESSAGE=
+  case "$basename" in
+    invalid.diagnostic.noncanonical)
+      MIGRATION_DIAGNOSTIC_MESSAGE='noncanonical task artifact: poll remains unarmed pending private review'
+      ;;
+    *.diagnostic.canonical|*.diagnostic.ambiguous)
+      prefix=${basename%%.diagnostic.*}
+      kind=${basename##*.diagnostic.}
+      fm_pr_task_id_valid "$prefix" || return 1
+      case "$kind" in
+        canonical)
+          MIGRATION_DIAGNOSTIC_MESSAGE="task $prefix: canonical legacy poll required migration; inspect private record before rearming"
+          ;;
+        ambiguous)
+          MIGRATION_DIAGNOSTIC_MESSAGE="task $prefix: poll metadata is ambiguous or invalid; poll remains unarmed pending private review"
+          ;;
+      esac
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+ensure_diagnostic_obligation() {
+  local prefix=$1 kind=$2 message=$3 destination
+  case "$kind" in canonical|ambiguous|noncanonical) ;; *) return 1 ;; esac
+  [ "$prefix" = invalid ] || fm_pr_task_id_valid "$prefix" || return 1
+  ensure_quarantine_dir || return 1
+  destination="$QUARANTINE/$prefix.diagnostic.$kind"
+  if [ -e "$destination" ] || [ -L "$destination" ]; then
+    [ -f "$destination" ] && [ ! -L "$destination" ] || return 1
+    [ "$(fm_pr_file_mode "$destination")" = 600 ] || return 1
+    [ "$(fm_pr_file_device "$destination")" = "$STATE_DEVICE" ] || return 1
+    diagnostic_file_is_one_line "$destination" "$message"
+    return
+  fi
+  [ -z "$MIGRATION_OBLIGATION_TMP" ] || rm -f -- "$MIGRATION_OBLIGATION_TMP"
+  MIGRATION_OBLIGATION_TMP=
+  MIGRATION_OBLIGATION_TMP=$(mktemp "$QUARANTINE/.fm-pr-check-obligation.XXXXXX") || return 1
+  printf '%s\n' "$message" > "$MIGRATION_OBLIGATION_TMP" || return 1
+  chmod 0600 "$MIGRATION_OBLIGATION_TMP" || return 1
+  diagnostic_file_is_one_line "$MIGRATION_OBLIGATION_TMP" "$message" || return 1
+  fm_pr_regular_destination_on_device_or_absent "$destination" "$STATE_DEVICE" || return 1
+  if ! mv -f -- "$MIGRATION_OBLIGATION_TMP" "$destination"; then
+    return 1
+  fi
+  MIGRATION_OBLIGATION_TMP=
+  if ! [ -f "$destination" ] || [ -L "$destination" ] \
+    || [ "$(fm_pr_file_mode "$destination")" != 600 ] \
+    || [ "$(fm_pr_file_device "$destination")" != "$STATE_DEVICE" ] \
+    || ! diagnostic_file_is_one_line "$destination" "$message"; then
+    rm -f -- "$destination" || true
+    return 1
   fi
 }
+
+process_diagnostic_obligations() {
+  local obligation basename message
+  [ -e "$QUARANTINE" ] || [ -L "$QUARANTINE" ] || return 0
+  quarantine_tree_repair_and_validate || return 1
+  for obligation in "$QUARANTINE"/*.diagnostic.*; do
+    [ -e "$obligation" ] || [ -L "$obligation" ] || continue
+    basename=${obligation##*/}
+    diagnostic_obligation_message "$basename" || return 1
+    message=$MIGRATION_DIAGNOSTIC_MESSAGE
+    diagnostic_file_is_one_line "$obligation" "$message" || return 1
+    record_diagnostic "$message" || return 1
+  done
+  for obligation in "$QUARANTINE"/*.diagnostic.*; do
+    [ -e "$obligation" ] || [ -L "$obligation" ] || continue
+    basename=${obligation##*/}
+    diagnostic_obligation_message "$basename" || return 1
+    diagnostic_log_contains "$MIGRATION_DIAGNOSTIC_MESSAGE" || return 1
+  done
+}
+
+diagnostics_failed=0
+migration_failed=0
+if ! quarantine_tree_repair_and_validate || ! process_diagnostic_obligations; then
+  diagnostics_failed=1
+  migration_failed=1
+fi
 
 if migration_needed; then
   if ! ensure_quarantine_dir; then
@@ -288,31 +435,48 @@ if migration_needed; then
         owner=$MIGRATION_OWNER
         repo=$MIGRATION_REPO
         number=$MIGRATION_NUMBER
+        message="task $id: canonical legacy poll required migration; inspect private record before rearming"
+        if ! ensure_diagnostic_obligation "$prefix" canonical "$message" \
+          || ! process_diagnostic_obligations; then
+          diagnostics_failed=1
+          migration_failed=1
+          continue
+        fi
         if ! quarantine_artifact "$check" "$prefix" check \
           || ! quarantine_artifact "$data" "$prefix" data \
           || ! fm_pr_poll_prepare "$STATE" "$id" "$url" "$owner" "$repo" "$number" "$TEMPLATE" \
           || ! fm_pr_poll_publish_prepared; then
           migration_failed=1
-          add_diagnostic "task $id: migration was interrupted; poll remains unarmed pending private review"
         fi
       else
-        if quarantine_artifact "$check" "$prefix" check \
-          && quarantine_artifact "$data" "$prefix" data; then
-          add_diagnostic "task $id: poll metadata is ambiguous or invalid; poll remains unarmed pending private review"
-        else
+        message="task $id: poll metadata is ambiguous or invalid; poll remains unarmed pending private review"
+        if ! ensure_diagnostic_obligation "$prefix" ambiguous "$message" \
+          || ! process_diagnostic_obligations; then
+          diagnostics_failed=1
           migration_failed=1
-          add_diagnostic "task $id: quarantine was interrupted; inspect state artifacts before rearming"
+          continue
+        fi
+        if ! quarantine_artifact "$check" "$prefix" check \
+          || ! quarantine_artifact "$data" "$prefix" data; then
+          migration_failed=1
         fi
       fi
     else
-      if quarantine_artifact "$check" invalid check; then
-        add_diagnostic "noncanonical task artifact: poll remains unarmed pending private review"
-      else
+      message='noncanonical task artifact: poll remains unarmed pending private review'
+      if ! ensure_diagnostic_obligation invalid noncanonical "$message" \
+        || ! process_diagnostic_obligations; then
+        diagnostics_failed=1
         migration_failed=1
-        add_diagnostic "noncanonical task artifact: quarantine was interrupted; inspect state artifacts before rearming"
+        continue
       fi
+      quarantine_artifact "$check" invalid check || migration_failed=1
     fi
   done
+fi
+
+if ! quarantine_tree_repair_and_validate || ! process_diagnostic_obligations; then
+  diagnostics_failed=1
+  migration_failed=1
 fi
 
 if [ "$migration_failed" -eq 0 ]; then
