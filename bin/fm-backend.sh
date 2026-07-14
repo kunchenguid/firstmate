@@ -11,7 +11,8 @@
 # docs/codex-app-backend.md owns that blocked backend contract.
 #
 # Compatibility contract: a task's meta may omit `backend=`.
-# Every reader treats an absent value as `herdr`, matching the default backend.
+# Every reader treats an absent value as `herdr`, matching the default backend,
+# unless a historical `*:fm-*` target identifies legacy removed-runtime state.
 # Only tasks spawned on a non-default backend carry an explicit `backend=` line.
 #
 # Event-source framing (herdr-addendum "Events as the core abstraction"): a
@@ -74,7 +75,7 @@ fm_backend_meta_is_legacy_removed() {  # <meta-file>
   fi
   window=$(fm_meta_get "$meta" window)
   case "$window" in
-    firstmate:fm-*) return 0 ;;
+    *:fm-*) return 0 ;;
   esac
   return 1
 }
@@ -393,7 +394,8 @@ fm_backend_of_selector() {  # <raw-target> <resolved-target> <state-dir>
     meta=$(fm_backend_meta_for_window "$resolved" "$state" 2>/dev/null || true)
     [ -n "$meta" ] && { fm_backend_of_meta "$meta"; return 0; }
   fi
-  printf 'herdr'
+  echo "error: target '$raw' has no recorded backend; pass --backend <herdr|zellij|orca|cmux> for an external endpoint" >&2
+  return 1
 }
 
 fm_backend_expected_label_of_selector() {  # <raw-target> <state-dir>
@@ -440,9 +442,7 @@ fm_backend_source() {  # <name>
 }
 
 # fm_backend_resolve_selector: resolve a raw fm-send.sh/fm-peek.sh style
-# selector to a live session-provider target. Four forms, in order:
-#   target with ":"   used as-is (the escape hatch for a window/pane outside
-#                      this firstmate home) - backend-independent, a literal string.
+# selector to a recorded session-provider target. Three forms, in order:
 #   exact task id      routed through <state-dir>/<id>.meta's backend target
 #                      (`window=` normally, `terminal=` for Orca) -
 #                      backend-independent, a stored value, NOT re-verified
@@ -452,16 +452,11 @@ fm_backend_source() {  # <name>
 #   "fm-<id>"          legacy task window label fallback routed through
 #                      <state-dir>/<id>.meta when no exact
 #                      <state-dir>/fm-<id>.meta exists.
-#   anything else      matched against recorded `window=`/`terminal=` metadata;
-#                      unresolved guesses are rejected.
+#   anything else      matched against recorded `window=`/`terminal=` metadata.
+# Unrecorded external endpoints are rejected here and must be paired with an
+# explicit backend by the caller.
 fm_backend_resolve_selector() {  # <raw-target> <state-dir>
   local raw=$1 state=$2 meta window
-  case "$raw" in
-    *:*)
-      printf '%s' "$raw"
-      return 0
-      ;;
-  esac
   meta=$(fm_backend_meta_for_selector "$raw" "$state" 2>/dev/null || true)
   if [ -n "$meta" ]; then
     window=$(fm_backend_target_of_meta "$meta")
@@ -469,23 +464,19 @@ fm_backend_resolve_selector() {  # <raw-target> <state-dir>
     printf '%s' "$window"
     return 0
   fi
+  meta=$(fm_backend_meta_for_window "$raw" "$state" 2>/dev/null || true)
+  if [ -n "$meta" ]; then
+    window=$(fm_backend_target_of_meta "$meta")
+    [ -n "$window" ] || { echo "error: no backend target recorded in $meta" >&2; return 1; }
+    printf '%s' "$window"
+    return 0
+  fi
   case "$raw" in
-    fm-*)
-      echo "error: no metadata for $raw in $state; pass session:window to target a window outside this firstmate home" >&2
-      return 1
-      ;;
-    *)
-      meta=$(fm_backend_meta_for_window "$raw" "$state" 2>/dev/null || true)
-      if [ -n "$meta" ]; then
-        window=$(fm_backend_target_of_meta "$meta")
-        [ -n "$window" ] || { echo "error: no backend target recorded in $meta" >&2; return 1; }
-        printf '%s' "$window"
-        return 0
-      fi
-      echo "error: target '$raw' is not recorded in $state; pass a fully qualified backend target" >&2
-      return 1
-      ;;
+    fm-*) echo "error: no metadata for $raw in $state" >&2 ;;
+    *) echo "error: target '$raw' is not recorded in $state" >&2 ;;
   esac
+  echo "Use a task selector, or pass --backend <herdr|zellij|orca|cmux> with an external endpoint." >&2
+  return 1
 }
 
 # --- generic per-op dispatch -------------------------------------------------

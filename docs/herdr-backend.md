@@ -40,7 +40,7 @@ Backend selection precedence is `--backend`, `FM_BACKEND`, `config/backend`, run
 Zellij and Orca are never auto-detected.
 
 Herdr is the metadata default, so new Herdr tasks omit `backend=herdr`.
-Legacy metadata with no `backend=` field resolves to Herdr.
+Backend-less metadata normally resolves to Herdr, while the historical removed-runtime exception and its safe migration path are owned by [`docs/configuration.md`](configuration.md#runtime-backend).
 Readers must never interpret an absent backend as permission to probe an unrelated live endpoint.
 
 ## Container shape
@@ -141,7 +141,7 @@ A missing pane or agent-less restored shell is replaceable; unreadable or ambigu
 ## Teardown and recovery
 
 Teardown resolves the recorded pane, closes only that pane, returns the treehouse worktree when safe, and removes task state.
-Recovery treats missing `backend=` as Herdr and uses the recorded endpoint rather than scanning global sessions.
+Recovery treats missing `backend=` as Herdr except for the historical removed-runtime target shape documented in [`docs/configuration.md`](configuration.md#runtime-backend), and uses the recorded endpoint rather than scanning global sessions.
 A restored tab with no registered live agent is a replaceable husk; an ambiguous liveness result is left untouched.
 
 ### Session targeting: the --session flag, not HERDR_SESSION alone
