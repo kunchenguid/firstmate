@@ -686,10 +686,12 @@ registry_secondmates_json() {
     if [ "$bytes" -gt "$max_bytes" ]; then
       byte_truncated=true
       content=$(printf "%s" "$content" | LC_ALL=C head -c "$max_bytes")
-      case "$content" in
-        *$'\n'*) content=${content%$'\n'*} ;;
-        *) content= ;;
-      esac
+      complete=${content%$'\n'*}
+      if [ "$complete" != "$content" ]; then
+        content=$complete
+      else
+        content=
+      fi
     fi
     if [ -n "$content" ]; then
       lines=$(printf "%s\n" "$content" | awk "END {print NR}")
@@ -783,10 +785,12 @@ bounded_parent_activities_json() {  # <status-file>
     byte_truncated=false
     if [ "$size" -gt "$max_bytes" ]; then
       byte_truncated=true
-      case "$content" in
-        *$'\n'*) content=${content#*$'\n'} ;;
-        *) content= ;;
-      esac
+      complete=${content#*$'\n'}
+      if [ "$complete" != "$content" ]; then
+        content=$complete
+      else
+        content=
+      fi
     fi
     if [ -n "$content" ]; then
       lines_in_chunk=$(printf "%s\n" "$content" | awk "END {print NR}")
