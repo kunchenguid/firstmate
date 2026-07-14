@@ -30,6 +30,10 @@
 #       locally-detected expiry, so an old relay (which only ever supported one
 #       follow-up) or an already-exhausted binding degrades gracefully instead
 #       of retrying forever.
+#       On fm-x-reply's fail-safe refusal (exit 8: platform or explicit budget
+#       unresolved): KEEPS the link and exits non-zero. This is a
+#       retryable hold, not an exhausted binding - retry once both values are
+#       recoverable rather than posting with a local default.
 #       On any other post failure: leaves the link in place so it can be
 #       retried, exit non-zero.
 #     Window or cap already exhausted: clears the link, posts nothing, exit 0
@@ -228,6 +232,15 @@ case "$post_rc" in
     fi
     printf '%s\n' "$RID"
     exit 0
+    ;;
+  8)
+    # fm-x-reply.sh refused this follow-up (exit 8) because it could not
+    # authoritatively determine both the reply platform and explicit budget.
+    # That is a RETRYABLE HOLD, not an exhausted binding: keep the link so
+    # the follow-up can post once both values are recoverable. Never clear the
+    # link here.
+    echo "fm-x-followup: follow-up for $ID held: reply context lacks an authoritative platform or explicit budget; left the link in place to retry once both values are recoverable" >&2
+    exit 1
     ;;
   9)
     # fm-x-reply.sh distinguishes a relay rejection of this specific follow-up

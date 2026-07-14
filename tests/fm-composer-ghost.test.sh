@@ -1,13 +1,18 @@
 #!/usr/bin/env bash
-# Ghost-text robustness (incident composer-robust).
+# Ghost-text robustness (incident composer-robust; task afk-herdr-false-pending).
 #
-# claude renders a predicted-next-prompt "suggestion" as DIM/FAINT (ANSI SGR 2)
-# text inside an otherwise-empty composer. A plain pane capture cannot tell that
-# ghost text apart from text a human typed, which made the composer reader see an
-# idle pane as holding pending input. These tests pin two guarantees:
-#   1. fm_tmux_strip_ghost drops dim/faint runs and keeps normal-intensity text.
-#   2. fm_pane_input_pending reads a dim-ghost-only composer as NOT pending, while
-#      still treating real (normal-intensity) text as pending.
+# A harness fills an otherwise-empty composer with de-emphasised ghost text that a
+# plain pane capture cannot tell apart from human input, so the composer reader
+# saw an idle pane as holding pending input. Two rendering styles are covered by
+# the one shared ANSI-aware owner (fm_composer_strip_ghost, bin/fm-composer-lib.sh,
+# reached here through the fm_tmux_strip_ghost thin adapter):
+#   - DIM/FAINT (SGR 2): claude's rotating prompt suggestion, codex's idle tip.
+#   - a dark/muted TRUECOLOR foreground: grok's placeholder/hint text.
+# These tests pin:
+#   1. fm_tmux_strip_ghost drops dim/faint AND dark-truecolor runs, keeping
+#      normal-intensity, brightly-coloured text.
+#   2. fm_pane_input_pending reads a ghost-only composer (either style) as NOT
+#      pending, while still treating real (normal/bright) text as pending.
 #   3. The human/LLM-facing capture path (fm-peek.sh) stays PLAIN - no escape codes
 #      ever reach firstmate's context.
 set -u
@@ -92,21 +97,45 @@ test_strip_ghost_handles_combined_and_boundary_codes() {
 
 test_strip_ghost_keeps_colored_text_with_2_payloads() {
   local out
+  # These pin that the awk's truecolor/256-color `2` payload SELECTOR is not
+  # mistaken for the SGR-2 dim attribute. The truecolor foregrounds use a BRIGHT
+  # colour (grok's real-input RGB 224,222,244, luminance ~225), because a DARK
+  # truecolor foreground is now itself a ghost signal (grok's placeholder) and is
+  # covered by test_strip_ghost_drops_dark_truecolor_ghost below.
   out=$(printf '\033[38;5;2mgreen typed\033[0m\n' | fm_tmux_strip_ghost)
   [ "$out" = "green typed" ] || fail "8-bit color payload 2 was treated as dim: '$out'"
-  out=$(printf '\033[38;2;1;2;3mtruecolor typed\033[0m\n' | fm_tmux_strip_ghost)
-  [ "$out" = "truecolor typed" ] || fail "truecolor payload 2 was treated as dim: '$out'"
+  out=$(printf '\033[38;2;224;222;244mtruecolor typed\033[0m\n' | fm_tmux_strip_ghost)
+  [ "$out" = "truecolor typed" ] || fail "bright truecolor payload 2 was treated as dim/ghost: '$out'"
   out=$(printf '\033[48;2;4;5;6mbackground typed\033[0m\n' | fm_tmux_strip_ghost)
   [ "$out" = "background typed" ] || fail "background truecolor payload was treated as dim: '$out'"
   out=$(printf '\033[58;5;2munderline-color typed\033[0m\n' | fm_tmux_strip_ghost)
   [ "$out" = "underline-color typed" ] || fail "underline color payload 2 was treated as dim: '$out'"
-  out=$(printf '\033[38:2::1:2:3mcolon truecolor typed\033[0m\n' | fm_tmux_strip_ghost)
-  [ "$out" = "colon truecolor typed" ] || fail "colon truecolor payload 2 was treated as dim: '$out'"
+  out=$(printf '\033[38:2::224:222:244mcolon truecolor typed\033[0m\n' | fm_tmux_strip_ghost)
+  [ "$out" = "colon truecolor typed" ] || fail "bright colon truecolor payload 2 was treated as dim/ghost: '$out'"
   out=$(printf '\033[58::5::2mcolon underline typed\033[0m\n' | fm_tmux_strip_ghost)
   [ "$out" = "colon underline typed" ] || fail "colon underline SGR leaked or dimmed text: '$out'"
   out=$(printf '\033[4:2mnot dim underline\033[0m\n' | fm_tmux_strip_ghost)
   [ "$out" = "not dim underline" ] || fail "colon subparameter 2 was treated as dim: '$out'"
-  pass "fm_tmux_strip_ghost keeps colored text with 2 payloads"
+  pass "fm_tmux_strip_ghost keeps bright colored text with 2 payloads"
+}
+
+# --- Dark truecolor foreground is ghost (grok placeholder), dropped ----------
+
+test_strip_ghost_drops_dark_truecolor_ghost() {
+  local out
+  # grok renders its placeholder/hint text with a dark, muted truecolor
+  # foreground (empirically 38;2;50;47;70 .. 38;2;110;106;134, luminance ~51..110,
+  # verified live against grok 0.2.93; the pristine "Type a message..." placeholder
+  # was this shape in grok 0.2.82). The shared owner drops it while keeping the
+  # bright prompt glyph, so an idle grok composer never reads as pending.
+  out=$(printf '\xe2\x9d\xaf \033[38;2;50;47;70mType a message...\033[0m\n' | fm_tmux_strip_ghost)
+  [ "$out" = "$(printf '\xe2\x9d\xaf ')" ] || fail "dark truecolor ghost not dropped: '$out'"
+  out=$(printf '\033[38;2;110;106;134mplaceholder hint text\033[39m\n' | fm_tmux_strip_ghost)
+  [ -z "$out" ] || fail "dark truecolor hint not dropped: '$out'"
+  # The colon form drops too.
+  out=$(printf '\xe2\x9d\xaf \033[38:2::86:82:110mmuted\033[0m\n' | fm_tmux_strip_ghost)
+  [ "$out" = "$(printf '\xe2\x9d\xaf ')" ] || fail "dark colon-truecolor ghost not dropped: '$out'"
+  pass "fm_tmux_strip_ghost drops a dark/muted truecolor foreground (grok placeholder)"
 }
 
 # --- fm_pane_input_pending: dim ghost is not pending ------------------------
@@ -161,10 +190,10 @@ test_colored_text_with_2_payload_still_pending() {
   PATH="$fb:$PATH" FM_FAKE_STYLED="$capture" FM_FAKE_CY=0 \
     fm_pane_input_pending "fakepane" \
     || fail "8-bit colored typed text was not detected as pending"
-  printf '\xe2\x9d\xaf \033[38;2;1;2;3mtruecolor typed\033[0m\n' > "$capture"
+  printf '\xe2\x9d\xaf \033[38;2;224;222;244mtruecolor typed\033[0m\n' > "$capture"
   PATH="$fb:$PATH" FM_FAKE_STYLED="$capture" FM_FAKE_CY=0 \
     fm_pane_input_pending "fakepane" \
-    || fail "truecolor typed text was not detected as pending"
+    || fail "bright truecolor typed text was not detected as pending"
   printf '\xe2\x9d\xaf \033[58;5;2munderline-color typed\033[0m\n' > "$capture"
   PATH="$fb:$PATH" FM_FAKE_STYLED="$capture" FM_FAKE_CY=0 \
     fm_pane_input_pending "fakepane" \
@@ -173,7 +202,38 @@ test_colored_text_with_2_payload_still_pending() {
   PATH="$fb:$PATH" FM_FAKE_STYLED="$capture" FM_FAKE_CY=0 \
     fm_pane_input_pending "fakepane" \
     || fail "colon underline typed text was not detected as pending"
-  pass "fm_pane_input_pending: colored text with 2 payloads is still pending"
+  pass "fm_pane_input_pending: bright colored text with 2 payloads is still pending"
+}
+
+test_dark_truecolor_ghost_only_composer_is_not_pending() {
+  local dir fb capture
+  dir="$TMP_ROOT/grok-ghost"; mkdir -p "$dir"
+  fb=$(make_fake_tmux "$dir")
+  capture="$dir/styled.txt"
+  # A grok-style pristine composer: bright prompt glyph + a dark/muted truecolor
+  # placeholder. It must read NOT pending (the grok TRUECOLOR gap, now covered by
+  # the same ANSI-aware owner as claude's dim ghost).
+  printf '\xe2\x9d\xaf \033[38;2;50;47;70mType a message...\033[0m\n' > "$capture"
+  if PATH="$fb:$PATH" FM_FAKE_STYLED="$capture" FM_FAKE_CY=0 \
+     fm_pane_input_pending "fakepane"; then
+    fail "dark truecolor ghost-only composer falsely read as pending"
+  fi
+  pass "fm_pane_input_pending: a dark truecolor ghost-only composer (grok placeholder) is NOT pending"
+}
+
+test_dark_truecolor_bare_shell_prompt_is_unknown() {
+  local dir fb capture out prompt
+  dir="$TMP_ROOT/dark-shell-prompt"; mkdir -p "$dir"
+  fb=$(make_fake_tmux "$dir")
+  capture="$dir/styled.txt"
+  for prompt in '$' 'user@host $'; do
+    printf '\033[38;2;50;47;70m%s\033[0m\n' "$prompt" > "$capture"
+    out=$(PATH="$fb:$PATH" FM_FAKE_STYLED="$capture" FM_FAKE_CY=0 \
+      fm_tmux_composer_state "fakepane")
+    [ "$out" = unknown ] \
+      || fail "dark truecolor bare shell prompt '$prompt' must read unknown, got '$out'"
+  done
+  pass "fm_tmux_composer_state: dark truecolor shell prompts read unknown"
 }
 
 test_real_text_with_trailing_ghost_is_pending() {
@@ -219,9 +279,12 @@ test_peek_output_is_escape_free() {
 test_strip_ghost_drops_dim_keeps_normal
 test_strip_ghost_handles_combined_and_boundary_codes
 test_strip_ghost_keeps_colored_text_with_2_payloads
+test_strip_ghost_drops_dark_truecolor_ghost
 test_dim_ghost_only_composer_is_not_pending
 test_dim_ghost_inside_bordered_composer_is_not_pending
 test_normal_text_still_pending
 test_colored_text_with_2_payload_still_pending
+test_dark_truecolor_ghost_only_composer_is_not_pending
+test_dark_truecolor_bare_shell_prompt_is_unknown
 test_real_text_with_trailing_ghost_is_pending
 test_peek_output_is_escape_free

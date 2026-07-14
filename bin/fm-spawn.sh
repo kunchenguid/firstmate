@@ -106,6 +106,11 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-config-inherit-lib.sh"
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
+# shellcheck source=bin/fm-gate-refuse-lib.sh
+. "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
+# Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
+# a direct report (see bin/fm-gate-refuse-lib.sh).
+fm_refuse_if_gate_agent
 # Skip the watcher guard when re-exec'd for one pair of a batch (FM_SPAWN_NO_GUARD is
 # set by the batch loop below), so the guard runs once for the batch, not once per pair.
 [ -n "${FM_SPAWN_NO_GUARD:-}" ] || "$FM_ROOT/bin/fm-guard.sh" || true
@@ -463,10 +468,11 @@ effort_flag_for_harness() {
       ;;
     grok)
       # grok exposes both --effort and --reasoning-effort; firstmate's profile
-      # axis is the reasoning knob, and --reasoning-effort rejects max, so pass
-      # only its accepted shared vocabulary subset.
+      # axis is the reasoning knob. As of grok 0.2.99, --reasoning-effort accepts
+      # only low|medium|high and rejects both xhigh and max, so omit those rather
+      # than passing a known-bad value.
       case "$effort" in
-        low|medium|high|xhigh) printf -- '--reasoning-effort %s ' "$(shell_quote "$effort")" ;;
+        low|medium|high) printf -- '--reasoning-effort %s ' "$(shell_quote "$effort")" ;;
       esac
       ;;
     pi)
@@ -710,7 +716,14 @@ case "$BACKEND" in
   tmux)
     SES=$(fm_backend_tmux_container_ensure)
     T="$SES:$W"
-    fm_backend_tmux_create_task "$SES" "$W" "$PROJ_ABS" || exit 1
+    # #134 robustness (tmux): fm_backend_tmux_create_task captures a stable window
+    # id and pins the window name (automatic-rename/allow-rename off) so a captain's
+    # non-default tmux config cannot rename the window away from fm-<id> once
+    # treehouse cd's into the worktree. WT_TARGET carries that stable id for the
+    # rename-critical worktree-detection steps below; the persisted window= handle
+    # stays $T (the name form), which is safe now that rename is disabled.
+    WID=$(fm_backend_tmux_create_task "$SES" "$W" "$PROJ_ABS") || exit 1
+    WT_TARGET="$WID"
     ;;
   herdr)
     # fm_backend_herdr_workspace_label resolves the target workspace from
@@ -799,6 +812,12 @@ EOF
     T="$ORCA_TERMINAL"
     ;;
 esac
+# #134 robustness: only tmux needs a worktree-detection target distinct from $T -
+# its rename-safe stable window id, set as WT_TARGET=$WID in the tmux branch above.
+# Every other backend addresses its pane/surface by the id already in $T, so default
+# WT_TARGET to $T for them (and for any future backend) - the shared treehouse-get +
+# worktree-detection steps below must never reference an unbound WT_TARGET under set -u.
+: "${WT_TARGET:=$T}"
 spawn_send_text_line() {  # <target> <text>
   case "$BACKEND" in
     tmux) fm_backend_tmux_send_text_line "$1" "$2" ;;
@@ -835,14 +854,18 @@ spawn_send_key() {  # <target> <key>
   esac
 }
 if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
-  spawn_send_text_line "$T" 'treehouse get'
+  spawn_send_text_line "$WT_TARGET" 'treehouse get'
 
   # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
+  # Target the stable window id, not the name: if the name is ever lost (e.g. an
+  # automatic-rename slips through), display-message -t <bad-name> falls back to the
+  # active client's window, which would misread firstmate's OWN pane path as the
+  # worktree and tangle a hook into the primary checkout. The window id never lies.
   # Compare against PROJ_ABS_REAL (physical), not PROJ_ABS: a symlinked project
   # prefix would otherwise make the pane's OS-level cwd read differ from
   # PROJ_ABS on the very first poll, before the pane has actually moved.
   for _ in $(seq 1 60); do
-    p=$(spawn_current_path "$T" || true)
+    p=$(spawn_current_path "$WT_TARGET" || true)
     if [ -n "$p" ] && [ "$(real_path_or_raw "$p")" != "$PROJ_ABS_REAL" ]; then
       WT="$p"
       break
