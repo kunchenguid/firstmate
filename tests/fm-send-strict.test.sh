@@ -121,9 +121,25 @@ test_healthy_fm_id_send_still_works() {
   pass "fm-send strict: healthy fm-<id> sends still type once and submit"
 }
 
+test_removed_runtime_record_never_sends_to_herdr() {
+  local dir fb home err log rc
+  dir="$TMP_ROOT/removed-runtime"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); home=$(setup_home removedruntime); err="$dir/send.err"; log="$dir/herdr.log"; : > "$log"
+  fm_write_meta "$home/state/upgrade-case.meta" "window=firstmate:fm-upgrade-case" "kind=ship"
+
+  PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_HERDR_LOG="$log" FM_SEND_SETTLE=0 \
+    "$SEND" upgrade-case "do not misroute" >/dev/null 2>"$err"; rc=$?
+  [ "$rc" -ne 0 ] || fail "removed-runtime record should fail closed"
+  assert_contains "$(cat "$err")" "legacy removed runtime" "removed-runtime send refusal lost its diagnostic"
+  assert_contains "$(cat "$err")" "do not reinterpret it as Herdr" "removed-runtime send refusal lost its migration warning"
+  [ ! -s "$log" ] || fail "removed-runtime record invoked Herdr"$'\n'"$(cat "$log")"
+  pass "fm-send strict: removed-runtime records never route to Herdr"
+}
+
 test_exact_lane_id_send_still_works
 test_unset_fm_home_fails
 test_unresolvable_target_does_not_herdr_fallback
 test_prefixless_herdr_pane_id_fails
 test_unmatched_single_colon_target_must_exist
 test_healthy_fm_id_send_still_works
+test_removed_runtime_record_never_sends_to_herdr

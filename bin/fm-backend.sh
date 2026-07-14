@@ -38,6 +38,8 @@ FM_BACKEND_CONFIG_DIR="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 # codex-app remains deliberately absent; see docs/codex-app-backend.md.
 FM_BACKEND_KNOWN="herdr zellij orca cmux"
 FM_BACKEND_SPAWN="herdr zellij orca cmux"
+FM_BACKEND_LEGACY_REMOVED="legacy-removed-runtime"
+FM_BACKEND_LEGACY_PERSISTED_NAME=$(printf '\164\155\165\170')
 # shellcheck disable=SC2034 # sourced callers consume the shared fallback
 FM_BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel'
 
@@ -57,6 +59,29 @@ fm_backend_list_contains() {  # <list> <name>
 
 fm_backend_is_known() {  # <name>
   fm_backend_list_contains "$FM_BACKEND_KNOWN" "$1"
+}
+
+fm_backend_is_legacy_removed_name() {  # <name>
+  [ "$1" = "$FM_BACKEND_LEGACY_PERSISTED_NAME" ]
+}
+
+fm_backend_meta_is_legacy_removed() {  # <meta-file>
+  local meta=$1 backend window
+  backend=$(fm_meta_get "$meta" backend)
+  if [ -n "$backend" ]; then
+    fm_backend_is_legacy_removed_name "$backend"
+    return
+  fi
+  window=$(fm_meta_get "$meta" window)
+  case "$window" in
+    firstmate:fm-*) return 0 ;;
+  esac
+  return 1
+}
+
+fm_backend_legacy_removed_diagnostic() {  # [state-description]
+  local state=${1:-recorded state}
+  echo "error: $state belongs to a legacy removed runtime and cannot be routed automatically; do not reinterpret it as Herdr. Preserve and inspect its work before using the documented explicit cleanup path." >&2
 }
 
 # fm_backend_detect: detect the runtime firstmate itself is CURRENTLY executing
@@ -232,6 +257,10 @@ fm_backend_name() {
 # fm_backend_validate: refuse an unknown backend LOUDLY. Silent on success.
 fm_backend_validate() {  # <name>
   local name=$1
+  if [ "$name" = "$FM_BACKEND_LEGACY_REMOVED" ]; then
+    fm_backend_legacy_removed_diagnostic
+    return 1
+  fi
   if ! fm_backend_is_known "$name"; then
     echo "error: unknown backend '$name' (known: $FM_BACKEND_KNOWN)" >&2
     return 1
@@ -294,9 +323,14 @@ fm_meta_get() {  # <meta-file> <key>
 }
 
 # fm_backend_of_meta: the backend recorded in <meta-file>, defaulting to
-# `herdr` when the field is absent.
+# `herdr` when the field is absent unless the target shape proves that the
+# record belongs to the removed runtime.
 fm_backend_of_meta() {  # <meta-file>
   local v
+  if fm_backend_meta_is_legacy_removed "$1"; then
+    printf '%s' "$FM_BACKEND_LEGACY_REMOVED"
+    return 0
+  fi
   v=$(fm_meta_get "$1" backend)
   printf '%s' "${v:-herdr}"
 }

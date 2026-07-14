@@ -162,6 +162,10 @@ fm_afk_launch_record_read() {
     fm_afk_launch_log "daemon terminal record is malformed; refusing to act on it"
     return 2
   fi
+  if fm_backend_is_legacy_removed_name "$FM_AFK_REC_BACKEND"; then
+    fm_afk_launch_log "legacy removed-runtime daemon state at $FM_AFK_LAUNCH_RECORD cannot be cleaned automatically; confirm the prior daemon process and endpoint are gone, remove only this terminal record, then retry the away-mode command"
+    return 3
+  fi
   case "$FM_AFK_REC_BACKEND" in
     herdr) [ -n "$extra" ] ;;
     none) [ "$FM_AFK_REC_TARGET" = - ] && [ "$extra" = native ] ;;
@@ -173,7 +177,7 @@ fm_afk_launch_record_validate_if_present() {
   local result
   fm_afk_launch_record_read
   result=$?
-  [ "$result" -ne 2 ]
+  [ "$result" -eq 0 ] || [ "$result" -eq 1 ]
 }
 
 # Close a recorded terminal by EXACT id (never a broad sweep). The
@@ -314,7 +318,7 @@ fm_afk_launch_reconcile() {
   if [ "$read_result" -eq 0 ]; then
     fm_afk_launch_log "reconciling leaked daemon terminal ${FM_AFK_REC_BACKEND}:${FM_AFK_REC_TARGET}"
     fm_afk_launch_close_recorded
-  elif [ "$read_result" -eq 2 ]; then
+  elif [ "$read_result" -eq 2 ] || [ "$read_result" -eq 3 ]; then
     return 1
   fi
 }
@@ -513,6 +517,10 @@ fm_afk_launch_stop() {
   read_result=$?
   if [ "$read_result" -eq 2 ]; then
     fm_afk_launch_log "malformed daemon terminal record; refusing to stop away mode"
+    return 1
+  fi
+  if [ "$read_result" -eq 3 ]; then
+    fm_afk_launch_log "legacy removed-runtime daemon state is preserved; refusing to stop away mode until its terminal record is explicitly cleaned"
     return 1
   fi
   # (1) SIGTERM the daemon so its cleanup trap flushes buffered escalations

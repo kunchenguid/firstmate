@@ -1263,6 +1263,41 @@ SH
   pass "herdr teardown removes pane-owned escalation dedupe state"
 }
 
+test_removed_runtime_teardown_requires_safe_explicit_cleanup() {
+  local case_dir rc
+  case_dir=$(make_case removed-runtime-cleanup)
+  write_meta "$case_dir" no-mistakes ship
+  sed -i.bak 's/^window=.*/window=firstmate:fm-task-x1/' "$case_dir/state/task-x1.meta"
+  rm -f "$case_dir/state/task-x1.meta.bak"
+  wt_commit_file "$case_dir" legacy-change.txt "unlanded legacy work" "unlanded legacy work"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/refuse.out" 2> "$case_dir/refuse.err"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "removed-runtime teardown should require the explicit cleanup path"
+  assert_grep "--legacy-cleanup" "$case_dir/refuse.err" "removed-runtime teardown did not name its cleanup path"
+  [ -e "$case_dir/state/task-x1.meta" ] && [ -d "$case_dir/wt" ] \
+    || fail "removed-runtime refusal changed protected state or worktree"
+
+  set +e
+  run_teardown "$case_dir" --legacy-cleanup > "$case_dir/unlanded.out" 2> "$case_dir/unlanded.err"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "explicit legacy cleanup should retain landed-work safety"
+  assert_grep "REFUSED" "$case_dir/unlanded.err" "explicit legacy cleanup bypassed the unlanded-work refusal"
+  [ -e "$case_dir/state/task-x1.meta" ] && [ -d "$case_dir/wt" ] \
+    || fail "unlanded legacy cleanup changed protected state or worktree"
+
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+  run_teardown "$case_dir" --legacy-cleanup > "$case_dir/landed.out" 2> "$case_dir/landed.err" \
+    || fail "landed removed-runtime cleanup failed"
+  [ ! -e "$case_dir/state/task-x1.meta" ] \
+    || fail "landed removed-runtime cleanup retained task metadata"
+  pass "removed-runtime teardown fails closed and cleans only through landed-work checks"
+}
+
 test_local_only_fork_remote_allows
 test_teardown_prompts_tasks_axi_done_when_compatible
 test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present
@@ -1272,6 +1307,7 @@ test_no_mistakes_origin_remote_allows
 test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed
 test_herdr_teardown_clears_escalation_marker
+test_removed_runtime_teardown_requires_safe_explicit_cleanup
 test_squash_merged_branch_deleted_allows
 test_squash_merged_pr_allows_when_head_ancestor_of_pr_head
 test_no_pr_recorded_discovers_merged_pr_by_branch_allows
