@@ -1420,6 +1420,22 @@ fm_super_main() {
     exit 1
   fi
 
+  # --- publish the endpoint this daemon actually injects into ---------------
+  # The observing canaries (bin/fm-afk-launch.sh, bin/fm-bootstrap.sh) run in
+  # whatever pane firstmate happens to occupy, which is NOT necessarily the pane
+  # this daemon was launched to inject into: away mode armed in one pane survives
+  # firstmate restarting into another, and the launcher's already-running-daemon
+  # path deliberately does not retarget a live daemon. Probing the caller's own
+  # pane there would report a healthy agent while escalations pile up unread in a
+  # pane nobody is looking at. So record the real endpoint next to the lock's
+  # pid-identity: the lock dir is created when this daemon takes the lock and
+  # removed when it releases it, so the record lives and dies with the process and
+  # cannot be read back from a daemon that is already gone. It is deliberately not
+  # in the startup log below - that log is size-capped, and a long away session
+  # would trim the line away underneath a reader.
+  printf '%s\t%s\n' "$BACKEND" "$TARGET" > "$LOCK/supervisor-endpoint" 2>/dev/null || \
+    log "startup WARNING: could not record the supervisor endpoint; the arm-time and session-start canaries will fall back to whichever pane they run in"
+
   # --- arm-time agent-liveness canary (ADVISORY, never blocking) ------------
   # inject_msg's liveness guard fails CLOSED: it types only into a pane with a
   # confidently 'alive' agent process. Right here, at arm time, the supervisor

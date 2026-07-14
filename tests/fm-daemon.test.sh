@@ -1862,6 +1862,57 @@ test_startup_liveness_canary_silent_when_agent_alive() {
   pass "startup liveness canary: a live supervisor agent arms silently, recording agent_liveness=alive"
 }
 
+# The PRODUCER half of the canary's target resolution. The two observing surfaces
+# (bin/fm-afk-launch.sh's arm path, bin/fm-bootstrap.sh's session start) run in
+# whatever pane firstmate currently occupies, which stops being the daemon's target
+# the moment firstmate restarts elsewhere - so they ask the daemon which pane it is
+# really injecting into. They can only do that because the daemon publishes it into
+# the lock dir it holds. Two properties, and the canaries are wrong without either:
+# the record must EXIST (or both observers silently fall back to their own pane and
+# report all-clear on an undeliverable away mode), and it must not OUTLIVE the
+# daemon (or a dead daemon's stale target gets probed as if it were live). The lock
+# dir gives both: it is created when the daemon takes the lock and removed when it
+# releases it. Deliberately not the startup log, which is size-capped and would trim
+# the line away underneath a reader during a long away session.
+test_daemon_publishes_its_supervisor_endpoint() {
+  local dir state fakebin err log lock pid i endpoint want
+  dir=$(make_supercase supervisor-endpoint)
+  state="$dir/state"; fakebin="$dir/fakebin"; err="$dir/daemon.err"
+  log="$state/.supervise-daemon.log"
+  lock="$state/.supervise-daemon.lock"
+  afk_enter "$state"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" \
+    FM_FAKE_TMUX_COMMAND=claude FM_FAKE_TMUX_CAPTURE="$dir/pane.txt" \
+    FM_SUPERVISOR_BACKEND=tmux FM_SUPERVISOR_TARGET="s:0" \
+    FM_HOUSEKEEPING_TICK=60 \
+    "$DAEMON" >"$err" 2>&1 &
+  pid=$!
+  i=0
+  while [ "$i" -lt 60 ]; do
+    grep -q 'daemon starting' "$log" 2>/dev/null && break
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  # Read it while the daemon still holds the lock - the record is scoped to the
+  # process, so releasing the lock is supposed to take it away.
+  endpoint=$(cat "$lock/supervisor-endpoint" 2>/dev/null || true)
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+
+  want=$(printf 'tmux\ts:0')
+  if [ "$endpoint" = "$want" ]; then
+    pass "daemon publishes the supervisor endpoint it injects into, so the canaries probe THAT pane"
+  else
+    fail "daemon did not publish the endpoint it injects into (got '$endpoint'); the arm-time and session-start canaries would fall back to their own pane and miss an undeliverable away mode"
+  fi
+  if [ -e "$lock" ] || [ -L "$lock" ]; then
+    fail "the daemon lock outlived the daemon, so its endpoint record could be probed as a live daemon's target"
+  else
+    pass "the endpoint record is released with the lock, never speaking for a daemon that is gone"
+  fi
+}
+
 test_afk_start_refuses_when_flag_cannot_be_written
 test_afk_start_ignores_stale_pidfile_without_lock
 test_afk_start_reclaims_stale_daemon_lock_reused_pid
@@ -1962,4 +2013,5 @@ test_inject_msg_defers_on_empty_composer_unknown_liveness
 test_inject_msg_injects_when_agent_alive_and_composer_empty
 test_startup_liveness_canary_warns_and_still_arms
 test_startup_liveness_canary_silent_when_agent_alive
+test_daemon_publishes_its_supervisor_endpoint
 test_wedge_alarm_names_dead_agent_not_busy_pane

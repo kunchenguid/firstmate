@@ -108,6 +108,8 @@ In afk mode the composer guard is belt-and-suspenders (no human is typing), but 
 The liveness guard fails closed, so a supervisor whose harness cannot be attributed on its backend (pi runs as a generic `node`) would defer every escalation for the whole session.
 At arm time the agent is provably alive, so anything but `alive` is a permanent property of this supervisor, and the fail-closed state must be announced rather than discovered from a wedge alarm 300 seconds later.
 `bin/fm-afk-canary-lib.sh` owns the probe, and every surface **re-derives it live** from the resolved supervisor pane - there is no marker file and no cached flag to go stale.
+When a daemon is already running, the pane it probes is the one THAT daemon injects into, not the pane the probing script happens to run in.
+The daemon fixes its target once, at launch, and is never retargeted, so after firstmate restarts into a new pane the two are different - and probing the new one would find firstmate obviously alive and report all-clear while escalations pile up in a pane nobody is reading.
 Two surfaces are observable, and they are the ones to act on:
 
 - **The foreground arm path.** `bin/fm-afk-launch.sh start` and `start-native` re-probe after arming and print a bordered `AWAY-MODE INJECTION IS DISABLED FOR THIS SUPERVISOR` warning on their own stderr - the output firstmate reads when it arms away mode.
@@ -116,9 +118,10 @@ Two surfaces are observable, and they are the ones to act on:
 The daemon also records its own `agent_liveness=` verdict in `state/.supervise-daemon.log`, but that is a record for later diagnosis, not a captain-facing channel: on the path a bad verdict is most likely on, the daemon lives in a manufactured terminal nobody attaches to.
 
 The canary is advisory: away mode still arms and still works through the wedge alarm and the afk-exit catch-up flush.
-Read the cause the warning prints, because the two verdicts need opposite responses.
+Read the cause the warning prints, because the verdicts need opposite responses.
 A `dead` supervisor target is a bare shell while firstmate is provably running, so the target points at the wrong pane - a fixable misconfiguration; repoint it and re-arm.
-An `unknown` verdict is an unattributable harness, an accepted degradation - tell the captain in plain outcome language that escalations will not reach them until they are back, and let them decide whether to continue.
+An `unknown` verdict is genuinely ambiguous and the warning says so: it is either an unattributable harness (pi's generic `node`) or a pane the probe could not read, and only the first is an accepted degradation.
+Confirm the target names firstmate's own pane before accepting it; once it does, tell the captain in plain outcome language that escalations will not reach them until they are back, and let them decide whether to continue.
 
 **Max-defer escape (the daemon must never silently wedge).**
 If anything stays buffered past `FM_MAX_DEFER_SECS` (default 300), the daemon

@@ -589,18 +589,21 @@ crew_dispatch_validate() {
 # guard), so a supervisor that reads dead or unattributable receives NOTHING until
 # the captain returns. The launcher warns about that when away mode is armed, but a
 # cold or restarted session never saw it - and firstmate's recovery re-enters afk
-# from the flag alone. So probe again here, from firstmate's own pane. Silent
-# unless away mode is actually armed AND the resolved supervisor pane exists AND
-# the probe is not confidently alive; an unresolvable pane stays quiet rather than
-# inventing a failure a real away session is not having.
+# from the flag alone. So probe again here.
+#
+# This is the session-start half of the SAME check the arm path makes, so it enters
+# through the one owner (bin/fm-afk-canary-lib.sh's fm_afk_canary_resolve) rather
+# than re-deriving the sequence: a restarted session is precisely where the two
+# would otherwise disagree, because the pane firstmate came back in is not the pane
+# the still-running daemon is injecting into. Silent unless away mode is actually
+# armed and the supervisor pane both exists and reads not-alive.
 afk_injection_check() {
-  local target backend verdict
+  local resolved rc backend target verdict
   [ -e "$STATE/.afk" ] || return 0
-  target=$(discover_supervisor_target) || return 0
-  backend=$(discover_supervisor_backend) || return 0
-  fm_backend_target_exists "$backend" "$target" || return 0
-  verdict=$(fm_afk_canary_verdict "$backend" "$target")
-  [ "$verdict" = alive ] && return 0
+  resolved=$(fm_afk_canary_resolve "$STATE")
+  rc=$?
+  [ "$rc" -eq 1 ] || return 0
+  IFS="$FM_AFK_CANARY_TAB" read -r backend target verdict <<<"$resolved"
   echo "AFK_INJECTION_DISABLED: away mode is armed but escalations cannot reach firstmate - $(fm_afk_canary_cause "$verdict" "$backend" "$target"); $(fm_afk_canary_fix "$verdict")"
 }
 

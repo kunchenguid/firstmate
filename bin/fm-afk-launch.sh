@@ -609,13 +609,24 @@ fm_afk_launch_stop() {
 # relays to the captain. Re-derived live on every arm, including a refresh of an
 # already-running daemon: the verdict must follow the pane's current reality, never
 # a stored flag (bin/fm-guard.sh's tangle check re-derives for the same reason).
+#
+# fm_afk_canary_resolve picks the pane to probe, and on a refresh that is the pane
+# the LIVE daemon injects into, not this one - fm_afk_launch_start returns early on
+# a healthy daemon without retargeting it, so after firstmate restarts into a new
+# pane the two are different, and probing this one would report all-clear while the
+# daemon talks to a pane nobody is reading.
+#
 # ADVISORY - away mode is already armed by the time this runs, and a non-alive
 # verdict must never turn into a failed arm.
 fm_afk_launch_canary() {
-  local target backend
-  target=$(discover_supervisor_target) || return 0
-  backend=$(discover_supervisor_backend) || return 0
-  fm_afk_canary_warn "$backend" "$target" >/dev/null || true
+  local resolved rc backend target verdict
+  resolved=$(fm_afk_canary_resolve "$FM_AFK_LAUNCH_STATE")
+  rc=$?
+  # 0 = injection is live, 2 = no supervisor pane to speak about. Either way, quiet.
+  [ "$rc" -eq 1 ] || return 0
+  IFS="$FM_AFK_CANARY_TAB" read -r backend target verdict <<<"$resolved"
+  fm_afk_canary_banner "$verdict" "$backend" "$target" >&2
+  return 0
 }
 
 fm_afk_launch_main() {

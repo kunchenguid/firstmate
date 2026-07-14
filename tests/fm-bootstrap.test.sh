@@ -645,13 +645,27 @@ test_fleet_sync_timeout_is_computed_before_launch() {
 # FM_FAKE_TMUX_COMMAND is the only thing a case varies, which is the point: the
 # canary must be re-derived from the live pane, so changing the pane's foreground
 # process alone has to flip the diagnostic.
+# It answers PER TARGET (`-t <pane>`), because WHICH pane the canary probes is
+# itself under test: FM_FAKE_TMUX_COMMAND is what runs in firstmate's own pane,
+# FM_FAKE_DAEMON_PANE_COMMAND what runs in the pane a live daemon was launched
+# against. The two are the same pane only until firstmate restarts.
 make_liveness_tmux() {  # <fakebin>
   cat > "$1/tmux" <<'SH'
 #!/usr/bin/env bash
+target=""
+prev=""
+for arg in "$@"; do
+  [ "$prev" = "-t" ] && target="$arg"
+  prev="$arg"
+done
+command=${FM_FAKE_TMUX_COMMAND:-claude}
+if [ -n "${FM_FAKE_DAEMON_PANE:-}" ] && [ "$target" = "$FM_FAKE_DAEMON_PANE" ]; then
+  command=${FM_FAKE_DAEMON_PANE_COMMAND:-$command}
+fi
 for arg in "$@"; do
   case "$arg" in
-    *pane_current_command*) printf '%s\n' "${FM_FAKE_TMUX_COMMAND:-claude}"; exit 0 ;;
-    *pane_id*) printf '%s\n' '%1'; exit 0 ;;
+    *pane_current_command*) printf '%s\n' "$command"; exit 0 ;;
+    *pane_id*) printf '%s\n' "${target:-%1}"; exit 0 ;;
   esac
 done
 exit 0
@@ -699,7 +713,7 @@ test_afk_injection_canary() {
   done <<'ROWS'
 away mode armed with a live agent stays silent^1^claude^empty^
 away mode armed on a bare shell names the wrong target^1^zsh^grep^AFK_INJECTION_DISABLED: away mode is armed but escalations cannot reach firstmate - supervisor target '%1' on backend 'tmux' is a bare shell, not the pane running firstmate; point FM_SUPERVISOR_TARGET at firstmate's own pane and re-arm away mode
-away mode armed on an unattributable harness names the accepted degradation^1^node^grep^AFK_INJECTION_DISABLED: away mode is armed but escalations cannot reach firstmate - firstmate's harness cannot be attributed on backend 'tmux' (pi runs as a generic node), so target '%1' can never read alive; accepted degradation
+away mode armed on an ambiguous verdict offers both its causes^1^node^grep^AFK_INJECTION_DISABLED: away mode is armed but escalations cannot reach firstmate - liveness could not be confirmed for target '%1' on backend 'tmux' - either firstmate's harness cannot be attributed there (pi runs as a generic node) or that pane could not be read; check that FM_SUPERVISOR_TARGET still names firstmate's own pane and re-arm away mode; if it does, this harness is simply unattributable on this backend - an accepted degradation
 a dead supervisor pane with away mode OFF is not a diagnostic^0^zsh^empty^
 ROWS
   # Same home, same (absent) state files: only the pane's foreground process
@@ -725,6 +739,55 @@ ROWS
   [ ! -e "$case_dir/home/state/.afk-injection-disabled" ] \
     || fail "re-derive: the canary wrote a durable marker; it must be re-derived live, never cached"
   pass "bootstrap re-derives the away-mode injection canary live and names the right cause"
+}
+
+# The cold-restart false all-clear. Away mode was armed in pane %5, so the daemon
+# injects into %5 forever - it fixes that target once, at launch. The captain's
+# session ends and firstmate restarts in a NEW pane %9 with state/.afk still set,
+# which is exactly the case this session-start diagnostic exists for. Probing the
+# pane bootstrap is RUNNING in finds firstmate alive in %9 and says nothing, while
+# the daemon quietly types escalations into a pane nobody is reading. Session start
+# has to ask the running daemon which pane it is actually injecting into.
+test_afk_injection_canary_follows_the_running_daemon() {
+  local case_dir fakebin out daemon_stub daemon_pid lock
+  case_dir="$TMP_ROOT/afk-canary-restart"
+  mkdir -p "$case_dir/home/config" "$case_dir/home/state"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  make_liveness_tmux "$fakebin"
+  date '+%s' > "$case_dir/home/state/.afk"
+
+  # A live process that reads as the away-mode daemon, holding the daemon lock and
+  # publishing the pane it injects into (%5). The command line is what tells the
+  # canary this lock belongs to a real daemon and not a recycled pid.
+  daemon_stub="$case_dir/fm-supervise-daemon.sh"
+  printf '#!/usr/bin/env bash\nwhile :; do sleep 0.2; done\n' > "$daemon_stub"
+  chmod +x "$daemon_stub"
+  "$daemon_stub" &
+  daemon_pid=$!
+  lock="$case_dir/home/state/.supervise-daemon.lock"
+  mkdir -p "$lock"
+  printf '%s' "$daemon_pid" > "$lock/pid"
+  ( . "$ROOT/bin/fm-wake-lib.sh"; fm_pid_identity "$daemon_pid" > "$lock/pid-identity" 2>/dev/null ) || true
+  printf 'tmux\t%%5\n' > "$lock/supervisor-endpoint"
+
+  # firstmate came back in %9 and is provably alive there; the daemon's %5 is a shell.
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_BOOTSTRAP_DETECT_ONLY=1 FM_FAKE_TREEHOUSE_LEASE_HELP=1 \
+    FM_FAKE_TMUX_COMMAND=claude FM_FAKE_DAEMON_PANE='%5' FM_FAKE_DAEMON_PANE_COMMAND=zsh \
+    TMUX_PANE='%9' \
+    "$ROOT/bin/fm-bootstrap.sh")
+  kill "$daemon_pid" 2>/dev/null || true
+  wait "$daemon_pid" 2>/dev/null || true
+
+  printf '%s\n' "$out" | grep -F 'AFK_INJECTION_DISABLED:' >/dev/null \
+    || fail "restart: bootstrap probed its own live pane instead of the pane the running daemon injects into, so an undeliverable away mode reported all-clear: $out"
+  printf '%s\n' "$out" | grep -F "target '%5'" >/dev/null \
+    || fail "restart: the diagnostic did not name the daemon's actual target: $out"
+  if printf '%s\n' "$out" | grep -F "target '%9'" >/dev/null; then
+    fail "restart: bootstrap probed the pane it was RUN in, not the daemon's target: $out"
+  fi
+  pass "bootstrap's canary follows the running daemon's target across a firstmate restart"
 }
 
 test_crew_dispatch_active_rules_are_surfaced() {
@@ -800,5 +863,6 @@ test_fleet_sync_timeout_explicit_override_wins
 test_fleet_sync_timeout_empty_override_uses_default
 test_fleet_sync_timeout_is_computed_before_launch
 test_afk_injection_canary
+test_afk_injection_canary_follows_the_running_daemon
 test_crew_dispatch_active_rules_are_surfaced
 test_crew_dispatch_validation

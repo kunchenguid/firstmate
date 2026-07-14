@@ -877,16 +877,29 @@ e2e_tmux() {
 #
 # A fake tmux answers pane_current_command - the whole input to the liveness
 # verdict - and no-ops the terminal lifecycle, the same seam tests/fm-daemon.test.sh
-# uses for the daemon's own probe.
+# uses for the daemon's own probe. It answers PER TARGET (`-t <pane>`), because
+# which pane the canary probes is itself under test: FM_FAKE_TMUX_COMMAND is what
+# runs in firstmate's own pane, while FM_FAKE_DAEMON_PANE_COMMAND is what runs in
+# the separate pane a live daemon was launched against.
 make_canary_tmux() {  # <dir> -> prints the fakebin path
   local fakebin="$1/fakebin"
   mkdir -p "$fakebin"
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
+target=""
+prev=""
+for arg in "$@"; do
+  [ "$prev" = "-t" ] && target="$arg"
+  prev="$arg"
+done
+command=${FM_FAKE_TMUX_COMMAND:-claude}
+if [ -n "${FM_FAKE_DAEMON_PANE:-}" ] && [ "$target" = "$FM_FAKE_DAEMON_PANE" ]; then
+  command=${FM_FAKE_DAEMON_PANE_COMMAND:-$command}
+fi
 for arg in "$@"; do
   case "$arg" in
-    *pane_current_command*) printf '%s\n' "${FM_FAKE_TMUX_COMMAND:-claude}"; exit 0 ;;
-    *pane_id*) printf '%s\n' '%1'; exit 0 ;;
+    *pane_current_command*) printf '%s\n' "$command"; exit 0 ;;
+    *pane_id*) printf '%s\n' "${target:-%1}"; exit 0 ;;
   esac
 done
 exit 0
@@ -935,20 +948,81 @@ unit_canary_warns_on_dead_supervisor() {
   rm -rf "$CANARY_HOME"
 }
 
+# `unknown` is not one condition, so it must not be diagnosed as one. The probe
+# returns it for pi's unattributable generic `node`, but equally for a wrapper, an
+# unreadable pane, or an outright probe error - and only the first of those is the
+# accepted degradation. A confident "do nothing" here would send a captain whose
+# supervisor pane is simply unreadable off to live with a problem they could fix.
 unit_canary_warns_on_unattributable_harness() {
   run_canary_arm unknown node
   assert_canary_still_armed unknown
   grep -F 'AWAY-MODE INJECTION IS DISABLED FOR THIS SUPERVISOR' "$CANARY_ERR" >/dev/null \
     || fail "canary(unknown): an unattributable harness armed with no foreground warning: $(cat "$CANARY_ERR")"
-  grep -F 'cannot be attributed on backend' "$CANARY_ERR" >/dev/null \
-    || fail "canary(unknown): the warning did not name the unattributable harness as the cause"
+  grep -F 'liveness could not be confirmed' "$CANARY_ERR" >/dev/null \
+    || fail "canary(unknown): an ambiguous verdict was not reported as ambiguous"
+  grep -F 'cannot be attributed there (pi runs as a generic node)' "$CANARY_ERR" >/dev/null \
+    || fail "canary(unknown): the warning did not offer the unattributable harness as a cause"
+  grep -F 'could not be read' "$CANARY_ERR" >/dev/null \
+    || fail "canary(unknown): the warning did not offer an unreadable pane as the OTHER cause of the same verdict"
   grep -F 'accepted degradation' "$CANARY_ERR" >/dev/null \
-    || fail "canary(unknown): the warning did not say this is an accepted degradation"
-  if grep -F 'point FM_SUPERVISOR_TARGET' "$CANARY_ERR" >/dev/null; then
-    fail "canary(unknown): an unattributable harness was misreported as a repointable wrong target"
+    || fail "canary(unknown): the warning never says a confirmed-target unknown is an accepted degradation"
+  grep -F 'check that FM_SUPERVISOR_TARGET' "$CANARY_ERR" >/dev/null \
+    || fail "canary(unknown): the remediation skipped straight to acceptance without having the captain confirm the target first"
+  if grep -F 'is a bare shell' "$CANARY_ERR" >/dev/null; then
+    fail "canary(unknown): an ambiguous verdict was misreported with the definite dead-target diagnosis"
   fi
-  pass "arm canary: an unattributable harness warns in the foreground as an accepted degradation, and still arms"
+  pass "arm canary: an ambiguous verdict names BOTH its causes and confirms the target before accepting it"
   rm -rf "$CANARY_HOME"
+}
+
+# The daemon fixes its injection target ONCE, at launch, and fm_afk_launch_start
+# returns early on a live daemon WITHOUT retargeting it. So away mode armed in pane
+# %5 outlives firstmate's session: the captain restarts firstmate in a new pane %9,
+# state/.afk is still set, recovery re-arms - and the daemon is still typing into
+# %5. A canary that probed the pane it was RUN in would find firstmate obviously
+# alive in %9 and report all-clear, while every escalation lands in a pane nobody
+# is reading. It has to probe the pane the running daemon actually injects into.
+unit_canary_probes_the_running_daemons_target() {
+  local st fakebin err rc daemon_stub daemon_pid lock
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-canary-restart.XXXXXX")
+  mkdir -p "$st/state"
+  fakebin=$(make_canary_tmux "$st")
+  err="$st/arm.err"
+
+  # A live process that reads as the away-mode daemon, holding the daemon lock and
+  # publishing the pane it injects into. Not `exec sleep`: the command line itself
+  # is what marks the lock's owner as a real daemon rather than a recycled pid.
+  daemon_stub="$st/fm-supervise-daemon.sh"
+  printf '#!/usr/bin/env bash\nwhile :; do sleep 0.2; done\n' > "$daemon_stub"
+  chmod +x "$daemon_stub"
+  "$daemon_stub" &
+  daemon_pid=$!
+  lock="$st/state/.supervise-daemon.lock"
+  mkdir -p "$lock"
+  printf '%s' "$daemon_pid" > "$lock/pid"
+  ( . "$ROOT/bin/fm-wake-lib.sh"; fm_pid_identity "$daemon_pid" > "$lock/pid-identity" 2>/dev/null ) || true
+  printf 'tmux\t%%5\n' > "$lock/supervisor-endpoint"
+  date '+%s' > "$st/state/.afk"
+
+  # firstmate is back, in %9, provably alive there. The daemon's %5 is a bare shell.
+  PATH="$fakebin:$PATH" FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" \
+    FM_SUPERVISOR_TARGET='%9' FM_SUPERVISOR_BACKEND=tmux \
+    FM_FAKE_TMUX_COMMAND=claude FM_FAKE_DAEMON_PANE='%5' FM_FAKE_DAEMON_PANE_COMMAND=zsh \
+    FM_AFK_LAUNCH_ENTRY="$SLEEPER" "$LAUNCH" start >/dev/null 2>"$err"
+  rc=$?
+  kill "$daemon_pid" 2>/dev/null || true
+  wait "$daemon_pid" 2>/dev/null || true
+
+  [ "$rc" -eq 0 ] || fail "canary(restart): the canary is advisory and must never fail the arm (exit $rc)"
+  grep -F 'AWAY-MODE INJECTION IS DISABLED FOR THIS SUPERVISOR' "$err" >/dev/null \
+    || fail "canary(restart): probed firstmate's own live pane instead of the one the running daemon injects into, so a broken away mode reported all-clear: $(cat "$err")"
+  grep -F "target '%5'" "$err" >/dev/null \
+    || fail "canary(restart): the warning did not name the daemon's actual target: $(cat "$err")"
+  if grep -F "target '%9'" "$err" >/dev/null; then
+    fail "canary(restart): the canary probed the pane it was RUN in, not the daemon's target"
+  fi
+  pass "arm canary: a refresh probes the running daemon's target, not the pane firstmate restarted into"
+  rm -rf "$st"
 }
 
 unit_canary_silent_when_agent_alive() {
@@ -966,6 +1040,7 @@ unit_fresh_vs_refresh
 unit_canary_warns_on_dead_supervisor
 unit_canary_warns_on_unattributable_harness
 unit_canary_silent_when_agent_alive
+unit_canary_probes_the_running_daemons_target
 unit_stop_ordering
 unit_stop_rejects_reused_pid
 unit_failed_start_rolls_back_state

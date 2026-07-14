@@ -79,6 +79,9 @@ fm_watcher_healthy() {
   return 0
 }
 
+# Every file any lock holder may drop in its owner dir must be listed here: the
+# rmdir that follows only succeeds on an empty dir, so an unlisted file leaks the
+# lock forever.
 fm_lock_clean_known_files() {
   local lockdir=$1
   rm -f \
@@ -86,6 +89,7 @@ fm_lock_clean_known_files() {
     "$lockdir/fm-home" \
     "$lockdir/pid-identity" \
     "$lockdir/watcher-path" \
+    "$lockdir/supervisor-endpoint" \
     2>/dev/null || true
 }
 
