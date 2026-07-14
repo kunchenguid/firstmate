@@ -12,6 +12,7 @@ WATCH="$ROOT/bin/fm-watch.sh"
 WATCH_ARM="$ROOT/bin/fm-watch-arm.sh"
 DRAIN="$ROOT/bin/fm-wake-drain.sh"
 LIB="$ROOT/bin/fm-wake-lib.sh"
+DETACH_LIB="$ROOT/bin/fm-detach-lib.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-watcher-lock-tests)
 
@@ -689,7 +690,10 @@ test_watcher_idle_self_exit() {
     || fail "idle-exit line looks like an actionable wake reason"
 
   # (2) Each condition alone must KEEP the watcher alive past the same threshold.
-  for row in in-flight-task x-mode afk; do
+  # An armed check is work the watcher owes whether or not a task is still in
+  # flight, so ANY state/*.check.sh holds it - the X-mode relay shim is just one of
+  # them, and a per-task poll (a merged-PR check) must not be silently dropped.
+  for row in in-flight-task x-mode armed-check afk; do
     dir=$(make_case "idle-exit-held-$row")
     state="$dir/state"
     fakebin="$dir/fakebin"
@@ -697,6 +701,7 @@ test_watcher_idle_self_exit() {
     case "$row" in
       in-flight-task) printf 'project=x\n' > "$state/task.meta" ;;
       x-mode)         printf 'exit 0\n' > "$state/x-watch.check.sh" ;;
+      armed-check)    printf 'exit 0\n' > "$state/task.check.sh" ;;
       afk)            : > "$state/.afk" ;;
     esac
     PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_IDLE_EXIT_POLLS=2 \
@@ -708,7 +713,190 @@ test_watcher_idle_self_exit() {
     kill "$pid" 2>/dev/null || true
     wait "$pid" 2>/dev/null || true
   done
-  pass "watcher idle-exits only with an empty fleet, no X mode, and away mode off"
+  pass "watcher idle-exits only with an empty fleet, no armed checks, and away mode off"
+}
+
+test_detach_spawn_contract() {
+  # Every detach backend the host actually has must meet ONE contract, because
+  # supervision must never be unable to start: the process lands in its OWN process
+  # group (what a group-wide harness reap cannot reach), inherits the environment,
+  # reads /dev/null, sends stdout AND stderr to the named file, and the spawner
+  # prints its pid. macOS has no setsid(1) and exercises perl alone; a host with
+  # both must not be able to tell them apart.
+  local dir probe impl out pid pgid i
+  dir=$(make_case detach-spawn)
+  probe="$dir/probe.sh"
+  cat > "$probe" <<'SH'
+#!/usr/bin/env bash
+printf 'pid=%s\n' "$$"
+printf 'pgid=%s\n' "$(ps -p $$ -o pgid= | tr -d ' ')"
+printf 'stdin=[%s]\n' "$(cat)"
+printf 'env=%s\n' "${FM_DETACH_PROBE:-unset}"
+printf 'to-stderr\n' >&2
+SH
+  chmod +x "$probe"
+  for impl in setsid perl; do
+    command -v "$impl" >/dev/null 2>&1 || continue
+    out="$dir/$impl.out"
+    pid=$(FM_DETACH_PROBE=inherited bash -c '. "$1"; . "$2"; "fm_detach_spawn_$3" "$4" "$5"' _ "$LIB" "$DETACH_LIB" "$impl" "$out" "$probe") \
+      || fail "fm_detach_spawn_$impl could not launch the probe"
+    case "$pid" in
+      ''|*[!0-9]*) fail "fm_detach_spawn_$impl printed no detached pid (got '$pid')" ;;
+    esac
+    i=0
+    while [ "$i" -lt 100 ]; do
+      grep -qF 'to-stderr' "$out" 2>/dev/null && break
+      sleep 0.1
+      i=$((i + 1))
+    done
+    grep -qF 'to-stderr' "$out" || fail "$impl: the detached process's stderr never reached the output file: $(cat "$out" 2>/dev/null)"
+    grep -qF "pid=$pid" "$out" || fail "$impl: the printed pid $pid is not the detached process's own pid: $(cat "$out")"
+    pgid=$(sed -n 's/^pgid=//p' "$out")
+    [ "$pgid" = "$pid" ] || fail "$impl: the detached process is not its own process-group leader (pgid '$pgid', pid '$pid')"
+    [ "$pgid" != "$(ps -p $$ -o pgid= | tr -d ' ')" ] || fail "$impl: the detached process shares the caller's process group; a group reap would kill it"
+    grep -qF 'stdin=[]' "$out" || fail "$impl: the detached process's stdin is not /dev/null: $(cat "$out")"
+    grep -qF 'env=inherited' "$out" || fail "$impl: the detached process did not inherit the caller's environment"
+  done
+  pass "every detach backend on this host gives the process its own group, /dev/null stdin, and the named output file"
+}
+
+test_detach_spawn_fails_loud_with_no_backend() {
+  # A host with neither setsid(1) nor perl cannot detach, so it cannot supervise:
+  # say so on stderr and fail, rather than printing no pid and leaving the arm to
+  # report an unexplained FAILED forever.
+  local dir out err stdout rc
+  dir=$(make_case detach-no-backend)
+  out="$dir/spawn.out"
+  err="$dir/spawn.err"
+  stdout="$dir/spawn.stdout"
+  rc=0
+  bash -c '. "$1"; . "$2"; PATH=/nonexistent; fm_detach_spawn "$3" /bin/true' _ "$LIB" "$DETACH_LIB" "$out" > "$stdout" 2> "$err" || rc=$?
+  [ "$rc" -ne 0 ] || fail "fm_detach_spawn reported success with no way to detach"
+  [ ! -s "$stdout" ] || fail "fm_detach_spawn printed a pid it could not have launched: $(cat "$stdout")"
+  grep -qF 'neither setsid(1) nor perl' "$err" || fail "fm_detach_spawn did not name the missing dependency: $(cat "$err")"
+  pass "fm_detach_spawn fails loudly when the host has no way to detach"
+}
+
+test_detach_follow_is_bounded_by_process_identity() {
+  # The follower must track the PROCESS it started following, not the number. A bare
+  # kill -0 poll blocks forever once the pid is recycled: the harness task never
+  # completes, the primary is never notified, and the wake the watcher already
+  # enqueued sits undrained. A real pid recycle is not reproducible, so shadow
+  # fm_pid_start (the start-time pin) to make the pid come back as a different
+  # process, and require the follow to end rather than hang.
+  local dir marker live follower status
+  dir=$(make_case detach-follow-identity)
+  marker="$dir/followed-once"
+  sleep 300 &
+  live=$!
+  # The shadow keeps its "have we been called yet" state on DISK: fm_detach_follow
+  # reads the start time through a command substitution, so an in-shell counter
+  # would live and die in that subshell and never advance.
+  bash -c '
+    . "$1"; . "$2"
+    marker=$4
+    fm_pid_start() {
+      if [ -e "$marker" ]; then
+        printf "start-of-recycled-pid\n"
+      else
+        : > "$marker"
+        printf "start-of-followed-process\n"
+      fi
+    }
+    fm_detach_follow "$3" 0.05
+  ' _ "$LIB" "$DETACH_LIB" "$live" "$marker" &
+  follower=$!
+  wait_for_exit "$follower" 50
+  status=$?
+  [ "$status" -ne 124 ] || fail "fm_detach_follow blocked on a live pid that no longer names the process it followed"
+  [ "$status" -eq 0 ] || fail "fm_detach_follow exited non-zero on a recycled pid (status $status)"
+
+  # Control, so the bound above cannot pass by giving up early: an UNCHANGED live
+  # process keeps the follower blocked, and its exit is what releases it.
+  bash -c '. "$1"; . "$2"; fm_detach_follow "$3" 0.05' _ "$LIB" "$DETACH_LIB" "$live" &
+  follower=$!
+  sleep 1
+  is_live_non_zombie "$follower" || fail "fm_detach_follow returned while the process it followed was still alive"
+  kill "$live" 2>/dev/null || true
+  wait "$live" 2>/dev/null || true
+  wait_for_exit "$follower" 80
+  status=$?
+  [ "$status" -eq 0 ] || fail "fm_detach_follow did not return when the followed process exited (status $status)"
+  pass "fm_detach_follow follows a live process and ends when that pid is recycled"
+}
+
+test_attached_arm_surfaces_watcher_idle_exit() {
+  # An attached arm must not complete EMPTY when the watcher it followed rested. An
+  # idle-exit queues nothing, so an empty completion reads as a plain harness reap
+  # (docs/supervision-protocols/claude.md step 9), firstmate re-arms a fresh watcher
+  # onto the same empty fleet, and the home pays another full idle window plus a
+  # spurious wake. It must surface the resting line the watcher actually wrote.
+  local dir state fakebin watchout armout wpid armpid i status
+  dir=$(make_case arm-attach-idle-exit)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  # The shared per-home output the arm launches the watcher into and reads back.
+  watchout="$state/.watch.out"
+  armout="$dir/arm.out"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_IDLE_EXIT_POLLS=8 \
+    FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$watchout" &
+  wpid=$!
+  i=0
+  while [ "$i" -lt 60 ]; do
+    [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$wpid" ] && [ -e "$state/.last-watcher-beat" ] && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$wpid" ] || fail "seed watcher did not take the lock"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_ARM_ATTACH_POLL=0.1 "$WATCH_ARM" > "$armout" &
+  armpid=$!
+  i=0
+  while [ "$i" -lt 60 ]; do
+    grep -qF "watcher: attached pid=$wpid" "$armout" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  grep -qF "watcher: attached pid=$wpid" "$armout" || fail "arm did not attach to the idle watcher: $(cat "$armout")"
+  wait_for_exit "$wpid" 200
+  wait_for_exit "$armpid" 100
+  status=$?
+  [ "$status" -eq 0 ] || fail "attached arm did not exit zero after the watcher idle-exited (status $status)"
+  grep -qF 'watcher: idle-exit' "$armout" \
+    || fail "attached arm completed with no reason; firstmate would re-arm a fresh watcher on the empty fleet: $(cat "$armout")"
+  ! grep -qE '^(signal:|stale:|check:|heartbeat)' "$armout" \
+    || fail "attached arm printed a wake reason the watcher never wrote: $(cat "$armout")"
+  pass "an attached arm surfaces the idle-exit of the watcher it followed"
+}
+
+test_arm_truncates_the_shared_watch_output() {
+  # state/.watch.out is per-HOME, not per-arm, so the launching arm must truncate it
+  # BEFORE the watcher starts. Otherwise a detached child that dies before it can
+  # open the file (a failed exec, say) leaves the PREVIOUS cycle's reason line in
+  # place, and the arm re-reads it as a phantom wake - reporting a successful wake to
+  # the primary with no watcher running at all.
+  local dir state fakebin armout watchout armpid i lock_pid
+  dir=$(make_case arm-watch-out-truncate)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout="$dir/arm.out"
+  watchout="$state/.watch.out"
+  printf 'signal: task-x: blocked: a wake from a PREVIOUS cycle\n' > "$watchout"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$armout" &
+  armpid=$!
+  i=0
+  while [ "$i" -lt 80 ]; do
+    grep -qF 'watcher: started pid=' "$armout" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  grep -qF 'watcher: started pid=' "$armout" || fail "arm did not start a watcher: $(cat "$armout")"
+  ! grep -qF 'PREVIOUS cycle' "$watchout" || fail "arm left the previous cycle's reason line in the shared watch output"
+  ! grep -qF 'PREVIOUS cycle' "$armout" || fail "arm reported a phantom wake off the previous cycle's leftover output"
+  lock_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+  kill "$armpid" "$lock_pid" 2>/dev/null || true
+  wait "$armpid" 2>/dev/null || true
+  pass "an arming arm truncates the shared watch output before launching the watcher"
 }
 
 test_arm_propagates_immediate_wake_before_confirmation() {
@@ -843,6 +1031,11 @@ test_watch_restart_rejects_reused_pid
 test_watch_restart_reports_healthy_peer_without_attaching
 test_watcher_self_evicts_on_lock_takeover
 test_watcher_idle_self_exit
+test_detach_spawn_contract
+test_detach_spawn_fails_loud_with_no_backend
+test_detach_follow_is_bounded_by_process_identity
+test_attached_arm_surfaces_watcher_idle_exit
+test_arm_truncates_the_shared_watch_output
 test_arm_attaches_and_waits_for_live_fresh_watcher
 test_arm_starts_and_self_heals
 test_arm_hup_stands_down_without_killing_the_watcher

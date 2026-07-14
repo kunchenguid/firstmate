@@ -15,7 +15,7 @@ When this session owns supervision and away mode is not active:
 9. A completion carrying NO wake reason usually means the harness reaped the background task.
    That is not a lost wake and not a supervision lapse: the watcher runs detached and survives the reap.
    Drain, then re-arm as usual - the re-arm reports `attached` onto that still-live watcher.
-10. `watcher: idle-exit ...` means the fleet is empty, X mode is off, and nothing needs supervising.
+10. `watcher: idle-exit ...` means the fleet is empty, no checks are armed, and nothing needs supervising.
     It is not a wake reason: do not re-arm on it. The next spawn arms a fresh watcher.
 11. If a forced restart is genuinely needed, run `bin/fm-watch-arm.sh --restart` through the same Claude background task mechanism.
 12. Do not send idle progress while the watcher is parked.

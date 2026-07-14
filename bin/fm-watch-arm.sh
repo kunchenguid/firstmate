@@ -49,7 +49,8 @@
 # returns the FAILED line. On started it follows the detached watcher and
 # propagates the wake reason; on attached it stays live until the identity-matched
 # holder is no longer healthy, then exits zero so the harness background-notify
-# fires then (not as a false empty wake). On restart-only healthy it exits zero
+# fires then (not as a false empty wake), propagating the watcher's idle-exit line
+# if that is how the cycle ended. On restart-only healthy it exits zero
 # after the duplicate watcher stands down. On FAILED it exits non-zero so the
 # failure is loud, and it kills the watcher it launched but could not confirm, so
 # an unconfirmable one is never left detached. A live cycle already present means
@@ -123,8 +124,13 @@ report_healthy() {
 
 # Stay alive until the attached identity-matched healthy holder is gone.
 # If a different healthy watcher appears mid-attach (rare steal), re-attach.
-# Does not reprint the starter arm's wake reason line; exit 0 lets the harness
-# notify, and firstmate drains state/.wake-queue on background completion.
+# Does not reprint the starter arm's wake reason line: a wake carries itself in
+# the durable queue, so exit 0 lets the harness notify and firstmate drains
+# state/.wake-queue on background completion. An IDLE-EXIT is the exception - it
+# queues nothing, so an empty completion here would read as a plain harness reap
+# (docs/supervision-protocols/claude.md step 9) and firstmate would re-arm a fresh
+# watcher onto the same empty fleet for another full idle window. Surface the
+# resting line the watcher actually wrote so step 10 fires on THIS completion.
 attach_and_wait() {
   local attached_pid=$1
   while :; do
@@ -137,6 +143,9 @@ attach_and_wait() {
       continue
     fi
     # Attached cycle ended (pid gone, identity mismatch, or beacon no longer fresh).
+    if watch_output_has_idle_exit "$WATCH_OUT"; then
+      print_watch_output "$WATCH_OUT"
+    fi
     exit 0
   done
 }
@@ -144,6 +153,11 @@ attach_and_wait() {
 watch_output_has_wake() {
   local out=$1
   grep -Eq '^(signal:|stale:|check:|heartbeat($|:))' "$out" 2>/dev/null
+}
+
+watch_output_has_idle_exit() {
+  local out=$1
+  grep -q '^watcher: idle-exit' "$out" 2>/dev/null
 }
 
 print_watch_output() {
@@ -208,6 +222,10 @@ kill_unconfirmed_watcher() {
 trap 'exit 129' HUP
 trap 'exit 143' TERM INT
 
+# Truncate the shared output BEFORE launching: a detached child that dies before
+# it can open the file (a failed exec, say) must never leave the previous cycle's
+# reason line behind, or this arm would re-read it and report a phantom wake.
+: > "$WATCH_OUT"
 watcher_pid=$(fm_detach_spawn "$WATCH_OUT" "$WATCH") || watcher_pid=
 case "$watcher_pid" in
   ''|*[!0-9]*)

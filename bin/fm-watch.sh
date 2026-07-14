@@ -102,8 +102,11 @@ fi
 # in which ALL THREE hold, which together mean nothing in this home needs
 # supervising:
 #   - zero in-flight tasks (in-flight work always has a state/<id>.meta);
-#   - no X-mode relay shim (X mode deliberately keeps a watcher armed on an empty
-#     fleet, so an X-only home is still served - AGENTS.md section 14);
+#   - no armed check shim (any state/*.check.sh: a per-task slow poll such as a
+#     merged-PR check, or the X-mode relay shim, which deliberately keeps a watcher
+#     armed on an empty fleet so an X-only home is still served - AGENTS.md
+#     section 14). An armed check is work this watcher owes whether or not its task
+#     is still in flight, so it holds the watcher on its own;
 #   - away mode off (the daemon RESTARTS the watcher it wraps, so idle-exiting
 #     under afk would spin a restart loop).
 # The default is deliberately conservative: 40 polls at the 15s default FM_POLL is
@@ -172,15 +175,14 @@ _event_cap_fails=0
 # digest/injection layer would never see the wake.
 afk_present() { [ -e "$STATE/.afk" ]; }
 
-# nothing_to_supervise: 0 when this home has no in-flight task meta, no X-mode
-# relay shim, and away mode is off - the three conditions of the idle self-exit
+# nothing_to_supervise: 0 when this home has no in-flight task meta, no armed
+# check shim, and away mode is off - the three conditions of the idle self-exit
 # above. Pure read; the caller owns the consecutive-poll counting.
 nothing_to_supervise() {
-  local meta
+  local path
   afk_present && return 1
-  [ -e "$STATE/x-watch.check.sh" ] && return 1
-  for meta in "$STATE"/*.meta; do
-    [ -e "$meta" ] && return 1
+  for path in "$STATE"/*.meta "$STATE"/*.check.sh; do
+    [ -e "$path" ] && return 1
   done
   return 0
 }
@@ -668,7 +670,7 @@ while :; do
   if nothing_to_supervise; then
     idle_polls=$(( idle_polls + 1 ))
     if [ "$idle_polls" -ge "$IDLE_EXIT_POLLS" ]; then
-      echo "watcher: idle-exit (nothing to supervise for $idle_polls polls: no tasks in flight, no X mode, not away)"
+      echo "watcher: idle-exit (nothing to supervise for $idle_polls polls: no tasks in flight, no armed checks, not away)"
       exit 0
     fi
   else

@@ -162,7 +162,8 @@ detached = 37824  pgid 37824   -> SURVIVED  (own session, reparented to init, st
 
 The reaper therefore signals the task's whole PROCESS GROUP, not just the direct child.
 Escaping the process group is what makes a supervision process survive, so neither `nohup` nor a bare `&` is sufficient.
-`setsid(1)` does not exist on macOS, so the portable primitive is perl `fork` + `POSIX::setsid()`, the idiom `bin/fm-watch.sh`'s `run_check` and `bin/fm-watch-checkpoint.sh` already use; it is now shared as `bin/fm-detach-lib.sh`.
+`bin/fm-detach-lib.sh` now owns that escape for every supervision process: it uses `setsid(1)` where the host has it, and falls back to perl `fork` + `POSIX::setsid()` where it does not (macOS has no `setsid(1)`), which is the idiom `bin/fm-watch.sh`'s `run_check` and `bin/fm-watch-checkpoint.sh` already use.
+With neither on PATH it fails loudly rather than returning no pid, because a host that cannot detach cannot supervise at all.
 
 Detaching the watcher does not disturb this guard's predicate.
 The watcher writes `.watch.lock/{pid,pid-identity,fm-home,watcher-path}` and `.last-watcher-beat` from its own main shell, so a detached watcher is still the lock holder and still identity-matches.

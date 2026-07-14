@@ -36,6 +36,21 @@ fm_pid_identity() {
   printf '%s\n' "$out" | sed 's/^[[:space:]]*//'
 }
 
+# The exec-stable half of fm_pid_identity: a process keeps its start time across
+# an exec, where its command line does not. That makes this the identity a caller
+# can pin a pid to from the instant it is forked, before it has exec'd the target
+# (bin/fm-detach-lib.sh's fm_detach_follow), and it is just as reuse-proof: a
+# recycled pid belongs to a process that started later.
+fm_pid_start() {
+  local pid=$1 out
+  case "$pid" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  out=$(LC_ALL=C ps -p "$pid" -o lstart= 2>/dev/null) || return 1
+  [ -n "$out" ] || return 1
+  printf '%s\n' "$out" | sed 's/^[[:space:]]*//'
+}
+
 fm_path_mtime() {
   if [ "$(uname)" = Darwin ]; then
     stat -f %m "$1" 2>/dev/null

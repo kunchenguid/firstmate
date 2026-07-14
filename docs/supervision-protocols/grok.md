@@ -30,7 +30,7 @@ When you see a background-task-completed system reminder for the arm:
    Re-arm attaches to an existing cycle when one is already healthy, so the background task stays live until that cycle ends.
 6. A completion carrying NO wake reason usually means the harness reaped the background task.
    The watcher runs detached and survives that reap, so it is not a lost wake and not a supervision lapse: drain, then re-arm, which reports `attached` onto the still-live watcher.
-7. `watcher: idle-exit ...` means the fleet is empty, X mode is off, and nothing needs supervising.
+7. `watcher: idle-exit ...` means the fleet is empty, no checks are armed, and nothing needs supervising.
    It is not a wake reason: do not re-arm on it. The next spawn arms a fresh watcher.
 
 Grok Stop hooks are passive.

@@ -61,6 +61,7 @@ Full detail on every feature lives in [docs/architecture.md](docs/architecture.m
 - A verified agent harness: Claude Code, Grok, Pi, Codex, or OpenCode.
 - Git and the GitHub CLI, authenticated through `gh auth login`.
 - tmux, for the reference session backend.
+- `perl` or `setsid(1)`, to detach the supervision processes so they survive a reaped background task (macOS ships perl; Linux distributions ship setsid, perl, or both).
 
 The first mate detects and offers to install everything else.
 
