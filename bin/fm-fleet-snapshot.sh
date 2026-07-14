@@ -702,9 +702,10 @@ registry_secondmates_json() {
     if [ "$bytes" -gt "$max_bytes" ]; then
       byte_truncated=true
       content=$(printf "%s" "$content" | LC_ALL=C head -c "$max_bytes")
-      complete=${content%$'\n'*}
-      if [ "$complete" != "$content" ]; then
-        content=$complete
+      # bash 3.2 cannot parse a case statement inside this $(cat <<'BASH') command
+      # substitution, so drop the partial trailing line with an if instead.
+      if [ "${content#*$'\n'}" != "$content" ]; then
+        content=${content%$'\n'*}
       else
         content=
       fi
@@ -801,9 +802,10 @@ bounded_parent_activities_json() {  # <status-file>
     byte_truncated=false
     if [ "$size" -gt "$max_bytes" ]; then
       byte_truncated=true
-      complete=${content#*$'\n'}
-      if [ "$complete" != "$content" ]; then
-        content=$complete
+      # bash 3.2 cannot parse a case statement inside this $(cat <<'BASH') command
+      # substitution, so drop the partial leading line with an if instead.
+      if [ "${content#*$'\n'}" != "$content" ]; then
+        content=${content#*$'\n'}
       else
         content=
       fi
