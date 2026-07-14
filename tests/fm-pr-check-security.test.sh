@@ -1550,6 +1550,7 @@ test_custom_snapshot_cleanup_on_signal() {
   child_pid_file="$dir/custom-child.pid"
   printf '%s\n' fm-pr-check-migration-v1 > "$state/.pr-check-migration-v1"
   chmod 0600 "$state/.pr-check-migration-v1"
+  # shellcheck disable=SC2016  # The generated child expands $$ when it runs.
   printf '%s\n' '#!/usr/bin/env bash' 'trap "" TERM' \
     'printf "%s\n" "$$" > "$FM_TEST_CUSTOM_CHILD_PID"' 'while :; do sleep 1; done' \
     > "$state/custom.check.sh"
