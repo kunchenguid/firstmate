@@ -159,6 +159,92 @@ test_caller_supplied_glyph_set_is_honored() {
   pass "fm_composer_classify_content: a caller-supplied agent glyph set is honored for classification, not just detection"
 }
 
+# classify_with_glyphs_env_in_c_locale: classify_in_c_locale with the fleet-wide
+# glyph knob exported into the locale-pinned child, so an env-knob regression is
+# exercised where the knob is actually read (at source time). The assignments are
+# a prefix on `bash`, an EXTERNAL command, so they really do reach the child and
+# really do re-run setlocale there - unlike a prefix on a shell function.
+classify_with_glyphs_env_in_c_locale() {  # <glyph-set> <bordered> <content> ...
+  local glyphs=$1; shift
+  LC_ALL=C FM_COMPOSER_AGENT_GLYPHS="$glyphs" \
+    bash -c '. "$1"; shift; fm_composer_classify_content "$@"' \
+    _ "$ROOT/bin/fm-composer-lib.sh" "$@"
+}
+
+# fm_test_utf8_locale: echo an installed UTF-8 locale, or nothing when none is.
+fm_test_utf8_locale() {
+  local loc
+  for loc in C.UTF-8 en_US.UTF-8; do
+    if locale -a 2>/dev/null | grep -qxF "$loc"; then printf '%s' "$loc"; return 0; fi
+  done
+  return 1
+}
+
+# The agent glyph set is operator-configurable; the dead-shell rule is not. A
+# shell prompt glyph in the set would make a dead shell read `empty` - handing the
+# away-mode injector the exact target this owner exists to deny it - so it is
+# refused in two independent layers, each tested alone here: the sanitizer strips
+# it out of the env knob, and the classifier evaluates the hardcoded shell rule
+# BEFORE the configurable agent match, so even a set handed straight to the
+# classifier cannot promote a bare shell prompt.
+test_shell_glyph_cannot_be_configured_into_agent_set() {
+  local g out err
+  for g in '>' '$' '%' '#'; do
+    # Layer 1: rejected out of the environment knob.
+    out=$(classify_with_glyphs_env_in_c_locale "❯ › $g" 0 "$g" 2>/dev/null)
+    [ "$out" = unknown ] \
+      || fail "shell glyph '$g' in FM_COMPOSER_AGENT_GLYPHS must still read unknown (dead shell), got '$out'"
+    # Layer 2: ordering, with the poisoned set handed straight to the classifier.
+    out=$(classify_in_c_locale 0 "$g" '' sensitive '' "❯ › $g")
+    [ "$out" = unknown ] \
+      || fail "shell glyph '$g' in a caller-supplied set must still read unknown, got '$out'"
+    out=$(classify_in_c_locale 0 '' '' sensitive "$g" "❯ › $g")
+    [ "$out" = unknown ] \
+      || fail "shell glyph '$g' in a caller-supplied set must still read unknown on the stripped-content path, got '$out'"
+  done
+  # Preserved: inside a real composer box the shell glyph is the harness's own prompt.
+  out=$(classify_in_c_locale 1 '>' '' sensitive '' '❯ › >')
+  [ "$out" = empty ] || fail "a shell glyph inside a bordered composer box must still read empty, got '$out'"
+  # The rejection is loud, not silent.
+  err=$(LC_ALL=C FM_COMPOSER_AGENT_GLYPHS='❯ › >' \
+    bash -c '. "$1"' _ "$ROOT/bin/fm-composer-lib.sh" 2>&1 >/dev/null)
+  assert_contains "$err" 'REJECTED' "a shell glyph rejected from the agent set must warn loudly on stderr"
+  pass "fm_composer_classify_content: a shell prompt glyph cannot be configured into the agent set (sanitizer and check order each hold alone)"
+}
+
+# The idle placeholder is the one composer knob that is still a regex, so it is
+# the one that can still be written unsafely. Its match is pinned to LC_ALL=C so
+# the verdict cannot depend on the ambient locale: unpinned, a bracket class over
+# multibyte glyphs reads `empty` in an interactive UTF-8 shell and `pending` inside
+# the C-locale supervise daemon, so a pattern tested by hand silently wedges
+# away-mode. Pinning costs no expressiveness - a literal glyph still matches.
+test_idle_regex_match_is_locale_pinned() {
+  local utf8 bracket_re='^[❯›] ?Type a message\.\.\.$' out_c out_utf8
+  local literal_re='^(❯|›) ?Type a message\.\.\.$' plain_re='^Type a message\.\.\.$'
+  # A literal (or alternation-of-literals) glyph pattern keeps working under C.
+  out_c=$(classify_in_c_locale 0 '❯ Type a message...' "$literal_re")
+  [ "$out_c" = empty ] || fail "a literal-glyph idle pattern must still read empty under LC_ALL=C, got '$out_c'"
+  # The recommended glyph-free form matches after the glyph is stripped.
+  out_c=$(classify_in_c_locale 0 '❯ Type a message...' "$plain_re")
+  [ "$out_c" = empty ] || fail "a glyph-free idle pattern must read empty under LC_ALL=C, got '$out_c'"
+  if ! utf8=$(fm_test_utf8_locale); then
+    pass "fm_composer_idle_matches: idle matching is locale-pinned (no UTF-8 locale installed; C-locale half only)"
+    return 0
+  fi
+  # The verdict must not move with the ambient locale, for ANY pattern - including
+  # the unsafe bracket-class form, which degenerates to a byte class under C.
+  out_c=$(classify_in_c_locale 0 '❯ Type a message...' "$bracket_re")
+  out_utf8=$(LC_ALL=$utf8 bash -c '. "$1"; shift; fm_composer_classify_content "$@"' \
+    _ "$ROOT/bin/fm-composer-lib.sh" 0 '❯ Type a message...' "$bracket_re")
+  [ "$out_c" = "$out_utf8" ] \
+    || fail "the idle verdict must not depend on the ambient locale: LC_ALL=C gave '$out_c' but LC_ALL=$utf8 gave '$out_utf8' (a hand-tested pattern would silently wedge the C-locale daemon)"
+  # And the safe forms agree across locales too.
+  out_utf8=$(LC_ALL=$utf8 bash -c '. "$1"; shift; fm_composer_classify_content "$@"' \
+    _ "$ROOT/bin/fm-composer-lib.sh" 0 '❯ Type a message...' "$literal_re")
+  [ "$out_utf8" = empty ] || fail "a literal-glyph idle pattern must read empty under LC_ALL=$utf8 too, got '$out_utf8'"
+  pass "fm_composer_idle_matches: the idle-placeholder match is locale-pinned, so its verdict is the same in the daemon as by hand"
+}
+
 test_idle_placeholder_case_mode_is_explicit() {
   local idle='^Type a message\.\.\.$' out
   out=$(classify 1 'type a message...' "$idle")
@@ -188,5 +274,7 @@ test_empty_content_is_empty
 test_idle_placeholder_is_empty
 test_glyph_strip_is_locale_invariant
 test_caller_supplied_glyph_set_is_honored
+test_shell_glyph_cannot_be_configured_into_agent_set
+test_idle_regex_match_is_locale_pinned
 test_idle_placeholder_case_mode_is_explicit
 test_real_text_is_pending

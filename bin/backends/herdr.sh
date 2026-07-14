@@ -750,7 +750,17 @@ FM_BACKEND_HERDR_IDLE_RE=${FM_BACKEND_HERDR_IDLE_RE:-'^Type a message\.\.\.$'}
 # composer row but unknown to the classifier would leave that harness's idle
 # composer reading `pending` forever - the false-PENDING direction, where away-mode
 # defers every escalation behind input that was never there.
-FM_BACKEND_HERDR_BARE_PROMPT_GLYPHS=${FM_BACKEND_HERDR_BARE_PROMPT_GLYPHS:-$FM_COMPOSER_AGENT_GLYPHS_DEFAULT}
+#
+# The knobs LAYER: this herdr-only set falls back to the LIVE fleet-wide
+# FM_COMPOSER_AGENT_GLYPHS, not to the built-in default, so an operator who widens
+# the fleet-wide set widens it for herdr too. Defaulting to the frozen default
+# instead would make herdr the one backend that ignores the fleet-wide knob - and
+# because herdr passes its own set to the shared classifier, it would also override
+# the fleet-wide value there, so a glyph every other backend read as an empty
+# composer would read `pending` on herdr forever. Shell glyphs are rejected from
+# either set by the shared owner's sanitizer.
+FM_BACKEND_HERDR_BARE_PROMPT_GLYPHS=$(fm_composer_sanitize_agent_glyphs \
+  "${FM_BACKEND_HERDR_BARE_PROMPT_GLYPHS:-$FM_COMPOSER_AGENT_GLYPHS}")
 
 # FM_BACKEND_HERDR_BARE_PROMPT_RE is the retired regex spelling of the knob above.
 # It cannot be honored: any regex form has to reach grep, which is exactly the

@@ -1080,6 +1080,49 @@ test_composer_state_bare_prompt_override_is_honored() {
 # placeholder and reads `pending` forever. That is the false-PENDING direction:
 # away-mode defers every escalation behind input that was never there, the
 # overnight wedge of task afk-herdr-false-pending re-entered through the knob.
+# The fleet-wide FM_COMPOSER_AGENT_GLYPHS is the DEFAULT for herdr's own glyph
+# knob, so widening it widens herdr too and all four backends agree on what an
+# empty composer looks like. Defaulting to the built-in set instead made herdr the
+# one backend that ignored the fleet-wide knob - and because herdr hands its own
+# set to the shared classifier, it overrode the fleet-wide value there as well, so
+# a glyph tmux/orca/cmux read as an empty composer read `pending` on herdr forever:
+# away-mode would defer every escalation behind input that was never there.
+test_composer_state_fleet_wide_glyph_knob_layers_into_herdr() {
+  local dir log resp fb out shared
+  dir="$TMP_ROOT/composer-fleet-wide-glyph"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '\xc2\xbb\n' > "$resp/1.out"
+  printf '\xc2\xbb hello captain\n' > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  # No herdr-specific knob: only the fleet-wide one is set.
+  out=$( LC_ALL=C PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_COMPOSER_AGENT_GLYPHS='❯ › »' \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT" )
+  # The verdict every other backend reaches for the same row, through the shared owner.
+  shared=$( LC_ALL=C FM_COMPOSER_AGENT_GLYPHS='❯ › »' \
+    bash -c '. "$0/bin/fm-composer-lib.sh"; fm_composer_classify_content 0 "»"' "$ROOT" )
+  [ "$shared" = empty ] || fail "the shared classifier should read a fleet-wide glyph row as empty, got '$shared'"
+  [ "$out" = "$shared" ] \
+    || fail "herdr must honor the fleet-wide FM_COMPOSER_AGENT_GLYPHS like every other backend, got '$out' where the shared owner says '$shared' (false-pending: away-mode would defer every escalation)"
+  # Real text on the same fleet-wide glyph row is still protected.
+  out=$( LC_ALL=C PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_COMPOSER_AGENT_GLYPHS='❯ › »' \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT" )
+  [ "$out" = pending ] || fail "real text after a fleet-wide glyph must read pending, got '$out'"
+  pass "fm_backend_herdr_composer_state: the fleet-wide FM_COMPOSER_AGENT_GLYPHS is herdr's default glyph set, so herdr agrees with the other backends"
+}
+
+# The herdr-only knob still wins for herdr when both are set: fleet-wide is the
+# default, not a ceiling.
+test_composer_state_herdr_glyph_knob_overrides_fleet_wide() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/composer-herdr-over-fleet"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '\xe2\x80\xa3\n' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( LC_ALL=C PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    FM_COMPOSER_AGENT_GLYPHS='❯ › »' FM_BACKEND_HERDR_BARE_PROMPT_GLYPHS='❯ ‣' \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT" )
+  [ "$out" = empty ] || fail "an explicit herdr glyph set must override the fleet-wide default, got '$out'"
+  pass "fm_backend_herdr_composer_state: an explicit FM_BACKEND_HERDR_BARE_PROMPT_GLYPHS still overrides the fleet-wide set"
+}
+
 test_composer_state_bare_prompt_override_idle_row_is_empty() {
   local dir log resp fb out
   dir="$TMP_ROOT/composer-bare-override-idle"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
@@ -2128,6 +2171,8 @@ test_composer_state_border_row_is_not_a_bare_prompt_under_c_locale
 test_composer_state_unbordered_idle_prompt_is_empty_under_c_locale
 test_composer_state_bare_prompt_override_is_honored
 test_composer_state_bare_prompt_override_idle_row_is_empty
+test_composer_state_fleet_wide_glyph_knob_layers_into_herdr
+test_composer_state_herdr_glyph_knob_overrides_fleet_wide
 test_bare_prompt_re_is_retired_loudly
 test_composer_state_codex_bare_prompt_glyph_is_empty
 test_composer_state_codex_faint_suggestion_is_empty

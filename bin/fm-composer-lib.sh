@@ -176,9 +176,58 @@ fm_composer_strip_ghost() {
 # injection behind input that was never there.
 # SHELL prompt glyphs (`>`, `$`, `%`, `#`) are deliberately NOT part of this set
 # and are never configurable: the safety rule at the top of this file turns on
-# telling them apart from agent glyphs.
+# telling them apart from agent glyphs. That is ENFORCED, not merely stated, and
+# in two independent layers - because a shell glyph accepted into the set would
+# make a dead-shell prompt read `empty`, handing the away-mode injector the exact
+# target this owner exists to deny it:
+#   1. fm_composer_sanitize_agent_glyphs rejects a shell glyph out of any set
+#      read from the environment, loudly, naming the glyph.
+#   2. fm_composer_classify_content evaluates the hardcoded shell-glyph rule
+#      BEFORE the configurable agent-glyph match, so even a set handed straight
+#      to it by a caller cannot promote a bare shell prompt to `empty`.
+FM_COMPOSER_SHELL_GLYPHS='> $ % #'
 FM_COMPOSER_AGENT_GLYPHS_DEFAULT='❯ ›'
-FM_COMPOSER_AGENT_GLYPHS=${FM_COMPOSER_AGENT_GLYPHS:-$FM_COMPOSER_AGENT_GLYPHS_DEFAULT}
+
+# fm_composer_split_glyphs: print the whitespace-separated glyphs of <set>, one
+# per line. Pathname expansion is disabled around the split so a glob character in
+# an operator-supplied set stays literal.
+fm_composer_split_glyphs() {  # <set>
+  local restore_glob=0
+  case $- in *f*) : ;; *) restore_glob=1 ;; esac
+  set -f
+  # shellcheck disable=SC2086  # deliberate split: the glyph set is whitespace-separated
+  set -- $1
+  if [ "$restore_glob" = 1 ]; then set +f; fi
+  [ "$#" -gt 0 ] && printf '%s\n' "$@"
+  return 0
+}
+
+# fm_composer_sanitize_agent_glyphs: print <set> with every SHELL prompt glyph
+# removed, warning once per rejected glyph on stderr. Applied to every agent glyph
+# set read from the environment (the fleet-wide knob below, and each adapter's own
+# knob), so an operator adding a harness whose composer prompt happens to be
+# shell-shaped cannot silently disarm the dead-shell rule.
+fm_composer_sanitize_agent_glyphs() {  # <set>
+  local g out='' shell_g
+  while IFS= read -r g; do
+    [ -n "$g" ] || continue
+    for shell_g in $FM_COMPOSER_SHELL_GLYPHS; do
+      if [ "$g" = "$shell_g" ]; then
+        printf '%s\n' \
+          "firstmate: WARNING: shell prompt glyph '$g' was REJECTED from an agent prompt glyph set." \
+          "firstmate: a bare '$g' is a DEAD SHELL, not an empty agent composer; reading it as empty would let the away-mode injector type an escalation into that shell (bin/fm-composer-lib.sh)." >&2
+        continue 2
+      fi
+    done
+    out="${out:+$out }$g"
+  done <<EOF
+$(fm_composer_split_glyphs "$1")
+EOF
+  printf '%s' "$out"
+}
+
+FM_COMPOSER_AGENT_GLYPHS=$(fm_composer_sanitize_agent_glyphs \
+  "${FM_COMPOSER_AGENT_GLYPHS:-$FM_COMPOSER_AGENT_GLYPHS_DEFAULT}")
 
 # fm_composer_leading_agent_glyph: set FM_COMPOSER_MATCHED_GLYPH to the agent
 # prompt glyph <content> starts with and return 0; return 1 and clear it when it
@@ -202,6 +251,25 @@ fm_composer_leading_agent_glyph() {  # <content> [glyphs]
   return 1
 }
 
+# fm_composer_idle_matches: does <content> match the harness's idle-placeholder
+# regex? This is the one place in this owner that still needs real regex
+# semantics, so it is the one place that still reaches grep - and the grep is
+# pinned to LC_ALL=C so the verdict cannot depend on the ambient locale. Without
+# the pin the same pattern can read `empty` in an interactive UTF-8 shell and
+# `pending` inside bin/fm-supervise-daemon.sh, which runs under a C/POSIX locale:
+# a pattern is tested by hand, looks right, and then silently wedges away-mode.
+# Pinning costs no expressiveness - a LITERAL multibyte glyph still matches its
+# own bytes under C - it only rules out a bracket class over multibyte glyphs,
+# which is unusable here regardless (see the glyph-set comment above).
+fm_composer_idle_matches() {
+  local content=$1 idle_re=$2 idle_case=$3
+  [ -n "$idle_re" ] || return 1
+  case "$idle_case" in
+    insensitive) printf '%s' "$content" | LC_ALL=C grep -qiE "$idle_re" ;;
+    *) printf '%s' "$content" | LC_ALL=C grep -qE "$idle_re" ;;
+  esac
+}
+
 # fm_composer_classify_content: the single shared composer-content verdict.
 #   <bordered> 1 when <content> came from a genuine agent-composer container (a
 #              bordered composer box, or a structurally-identified bare AGENT
@@ -210,39 +278,42 @@ fm_composer_leading_agent_glyph() {  # <content> [glyphs]
 #   <content>  the candidate composer content, already border-stripped and
 #              whitespace-trimmed by the caller.
 #   [idle_re]  optional per-harness idle-placeholder regex (e.g. grok's
-#              "Type a message...") that reads as empty; matched both before and
-#              after a leading prompt glyph is stripped, so a pattern written
-#              with or without the glyph both land.
+#              "Type a message...") that reads as empty. Write it WITHOUT a
+#              leading prompt glyph: the glyph is stripped before the pattern is
+#              matched a second time, so the bare placeholder text is what needs
+#              to match. A pattern that does name a glyph must spell it as a
+#              LITERAL (or an alternation of literals), NEVER as a bracket class -
+#              `[❯›]` degenerates into the byte class {E2,9D,AF,80,BA} under the
+#              C/POSIX locale this match is pinned to, matching any byte of any
+#              box-drawing glyph and none of the glyphs it names.
 #   [glyphs]   optional agent prompt glyph set for this caller, defaulting to
 #              FM_COMPOSER_AGENT_GLYPHS. An adapter whose structural row
 #              detection recognizes an extra harness glyph MUST pass the same set
-#              here, or that harness's idle composer never classifies empty.
-fm_composer_idle_matches() {
-  local content=$1 idle_re=$2 idle_case=$3
-  [ -n "$idle_re" ] || return 1
-  case "$idle_case" in
-    insensitive) printf '%s' "$content" | grep -qiE "$idle_re" ;;
-    *) printf '%s' "$content" | grep -qE "$idle_re" ;;
-  esac
-}
+#              here, or that harness's idle composer never classifies empty. A
+#              SHELL glyph in this set is inert: the shell rule below is evaluated
+#              first, so it can never promote a dead shell to `empty`.
 
 fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [plain_content] [glyphs]
   local bordered=$1 content=$2 idle_re=${3:-} idle_case=${4:-sensitive} plain_content glyphs
   plain_content=${5:-$content}
   glyphs=${6:-$FM_COMPOSER_AGENT_GLYPHS}
   if [ "$bordered" != 1 ] && [ -z "$content" ] && [ -n "$plain_content" ]; then
+    # Shell rule first, exactly as below: this row is unbordered by construction,
+    # so a bare shell glyph is a dead shell whatever the glyph set claims.
+    case "$plain_content" in
+      '>'|'$'|'%'|'#') printf 'unknown'; return 0 ;;
+    esac
     if fm_composer_leading_agent_glyph "$plain_content" "$glyphs" \
       && [ "$FM_COMPOSER_MATCHED_GLYPH" = "$plain_content" ]; then
       printf 'empty'; return 0
     fi
     printf 'unknown'; return 0
   fi
-  # A bare prompt glyph on its own row.
-  if fm_composer_leading_agent_glyph "$content" "$glyphs" \
-    && [ "$FM_COMPOSER_MATCHED_GLYPH" = "$content" ]; then
-    # Agent prompt glyph: a genuine empty agent composer, bordered or bare.
-    printf 'empty'; return 0
-  fi
+  # A bare prompt glyph on its own row. The SHELL rule is hardcoded and is
+  # evaluated BEFORE the configurable agent-glyph match below, so a shell glyph
+  # that reached the set anyway - past fm_composer_sanitize_agent_glyphs, e.g.
+  # handed straight to this function by a caller - still cannot make a dead shell
+  # read `empty`. Neither guard is load-bearing alone.
   case "$content" in
     '>'|'$'|'%'|'#')
       # Shell prompt glyph: empty ONLY inside a composer box (the harness's own
@@ -250,6 +321,11 @@ fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [
       if [ "$bordered" = 1 ]; then printf 'empty'; else printf 'unknown'; fi
       return 0 ;;
   esac
+  if fm_composer_leading_agent_glyph "$content" "$glyphs" \
+    && [ "$FM_COMPOSER_MATCHED_GLYPH" = "$content" ]; then
+    # Agent prompt glyph: a genuine empty agent composer, bordered or bare.
+    printf 'empty'; return 0
+  fi
   # Nothing on the row = empty composer.
   [ -n "$content" ] || { printf 'empty'; return 0; }
   # Known idle placeholder (matched before a leading glyph is stripped).
