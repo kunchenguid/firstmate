@@ -18,6 +18,19 @@ herdr_refuse_if_default() { # <session>
   fm_herdr_lab_refuse_if_default "$1"
 }
 
+# The lab's fleet-state tripwire (fm_herdr_lab_prepare) requires exactly one
+# RUNNING default session, so on a machine where herdr is installed but its
+# default session is stopped every prepare refuses. Probe that precondition so
+# real-Herdr tests can skip cleanly, mirroring the herdr-not-installed skip.
+herdr_lab_ready() { # <session>
+  fm_herdr_lab_fleet_state "$1" >/dev/null 2>&1
+}
+
+herdr_lab_skip() {
+  echo "skip: herdr default session is not running (lab fleet-state precondition)"
+  exit 0
+}
+
 herdr_safe_stop_and_delete() { # <session>
   fm_herdr_lab_teardown "$1"
 }

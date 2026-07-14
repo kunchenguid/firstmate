@@ -27,6 +27,7 @@ command -v python3 >/dev/null 2>&1 || { echo "skip: python3 not found (required 
 
 SESSION="fm-lab-eventwait-smoke-$$"
 export HERDR_SESSION="$SESSION"
+herdr_lab_ready "$SESSION" || herdr_lab_skip
 SCRATCH=
 cleanup_all() {
   [ -n "$SCRATCH" ] && rm -rf "$SCRATCH"

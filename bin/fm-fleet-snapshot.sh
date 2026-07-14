@@ -686,9 +686,13 @@ registry_secondmates_json() {
     if [ "$bytes" -gt "$max_bytes" ]; then
       byte_truncated=true
       content=$(printf "%s" "$content" | LC_ALL=C head -c "$max_bytes")
+      nl="
+"
+      # (pattern) parens and the nl variable keep this parseable by the
+      # bash 3.2 command-substitution scanner (macOS system bash).
       case "$content" in
-        *$'\n'*) content=${content%$'\n'*} ;;
-        *) content= ;;
+        (*"$nl"*) content=${content%"$nl"*} ;;
+        (*) content= ;;
       esac
     fi
     if [ -n "$content" ]; then
@@ -783,9 +787,13 @@ bounded_parent_activities_json() {  # <status-file>
     byte_truncated=false
     if [ "$size" -gt "$max_bytes" ]; then
       byte_truncated=true
+      nl="
+"
+      # (pattern) parens and the nl variable keep this parseable by the
+      # bash 3.2 command-substitution scanner (macOS system bash).
       case "$content" in
-        *$'\n'*) content=${content#*$'\n'} ;;
-        *) content= ;;
+        (*"$nl"*) content=${content#*"$nl"} ;;
+        (*) content= ;;
       esac
     fi
     if [ -n "$content" ]; then
