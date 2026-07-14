@@ -86,6 +86,33 @@ SH
   printf '%s\n' "$case_dir"
 }
 
+# Install a logging `no-mistakes` mock. Every invocation appends a line to
+# $case_dir/nm.log recording its args, cwd, and the git branch at that cwd, so
+# tests can assert whether/where/on-which-branch `axi abort` ran. Args: case_dir
+add_logging_no_mistakes() {
+  local case_dir=$1 log="$case_dir/nm.log"
+  : > "$log"
+  cat > "$case_dir/fakebin/no-mistakes" <<SH
+#!/usr/bin/env bash
+branch=\$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo NO-GIT)
+printf 'ARGS=[%s] CWD=%s BRANCH=%s\n' "\$*" "\$(pwd)" "\$branch" >> "$log"
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/no-mistakes"
+}
+
+# Install a `no-mistakes` mock that fails (non-zero) to prove teardown's abort
+# step is best-effort. Args: case_dir
+add_failing_no_mistakes() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/no-mistakes" <<'SH'
+#!/usr/bin/env bash
+echo "no active run" >&2
+exit 3
+SH
+  chmod +x "$case_dir/fakebin/no-mistakes"
+}
+
 add_compatible_tasks_axi() {
   local case_dir=$1
   cat > "$case_dir/fakebin/tasks-axi" <<'SH'
@@ -273,8 +300,88 @@ test_local_only_force_overrides_unpushed() {
   pass "local-only worktree with unpushed work is torn down under --force (escape hatch)"
 }
 
+# The zombie-run fix: a no-mistakes ship teardown must close the run by calling
+# `no-mistakes axi abort` from inside the worktree while still on the task branch
+# (before the detach), so an externally-merged run does not linger as "running".
+test_no_mistakes_ship_aborts_run_on_task_branch() {
+  local case_dir line
+  case_dir=$(make_case abort-nm-ship)
+  write_meta "$case_dir" no-mistakes ship
+  add_logging_no_mistakes "$case_dir"
+
+  run_teardown "$case_dir" >/dev/null 2>&1 || fail "abort-nm-ship: teardown failed"
+
+  [ -s "$case_dir/nm.log" ] || fail "abort-nm-ship: no-mistakes was never invoked"
+  line=$(cat "$case_dir/nm.log")
+  printf '%s\n' "$line" | grep -qF 'ARGS=[axi abort]' \
+    || fail "abort-nm-ship: expected 'axi abort', got: $line"
+  printf '%s\n' "$line" | grep -qF "CWD=$case_dir/wt" \
+    || fail "abort-nm-ship: abort did not run from inside the worktree: $line"
+  printf '%s\n' "$line" | grep -qF 'BRANCH=fm/task-x1' \
+    || fail "abort-nm-ship: abort did not run while on the task branch: $line"
+  pass "no-mistakes ship teardown aborts the run from the worktree on the task branch"
+}
+
+# Guarded to KIND!=scout: a scout teardown must NOT abort a run.
+test_scout_does_not_abort_run() {
+  local case_dir
+  case_dir=$(make_case abort-scout)
+  write_meta "$case_dir" no-mistakes scout
+  add_logging_no_mistakes "$case_dir"
+  # Scout teardown needs a report to be eligible; point DATA at the case dir.
+  mkdir -p "$case_dir/data/task-x1"
+  echo findings > "$case_dir/data/task-x1/report.md"
+
+  FM_ROOT_OVERRIDE="$ROOT" \
+  FM_STATE_OVERRIDE="$case_dir/state" \
+  FM_DATA_OVERRIDE="$case_dir/data" \
+  PATH="$case_dir/fakebin:$PATH" \
+    "$TEARDOWN" task-x1 >/dev/null 2>&1 || fail "abort-scout: teardown failed"
+
+  [ ! -s "$case_dir/nm.log" ] \
+    || fail "abort-scout: scout teardown invoked no-mistakes: $(cat "$case_dir/nm.log")"
+  pass "scout teardown does not abort a no-mistakes run (KIND!=scout guard holds)"
+}
+
+# Guarded to MODE=no-mistakes: a local-only teardown must NOT abort a run.
+test_local_only_does_not_abort_run() {
+  local case_dir
+  case_dir=$(make_case abort-local-only)
+  write_meta "$case_dir" local-only ship
+  add_logging_no_mistakes "$case_dir"
+  # Make it teardown-eligible: merge the (unchanged) HEAD is already on main.
+
+  run_teardown "$case_dir" >/dev/null 2>&1 || fail "abort-local-only: teardown failed"
+
+  [ ! -s "$case_dir/nm.log" ] \
+    || fail "abort-local-only: local-only teardown invoked no-mistakes: $(cat "$case_dir/nm.log")"
+  pass "local-only teardown does not abort a run (MODE=no-mistakes guard holds)"
+}
+
+# Best-effort: a failing `no-mistakes axi abort` must not fail teardown.
+test_abort_failure_does_not_fail_teardown() {
+  local case_dir rc
+  case_dir=$(make_case abort-fails)
+  write_meta "$case_dir" no-mistakes ship
+  add_failing_no_mistakes "$case_dir"
+
+  set +e
+  run_teardown "$case_dir" >/dev/null 2>&1
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "abort-fails: teardown must succeed despite a failing abort"
+  [ ! -f "$case_dir/state/task-x1.meta" ] \
+    || fail "abort-fails: teardown did not complete (meta still present)"
+  pass "a failing no-mistakes abort does not fail teardown (best-effort |\\| true)"
+}
+
 test_local_only_fork_remote_allows
 test_teardown_prompts_tasks_axi_done_when_compatible
+test_no_mistakes_ship_aborts_run_on_task_branch
+test_scout_does_not_abort_run
+test_local_only_does_not_abort_run
+test_abort_failure_does_not_fail_teardown
 test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
 test_no_mistakes_origin_remote_allows

@@ -459,6 +459,16 @@ fi
 
 # Best-effort: drop the local task branch so the shared repo does not accumulate refs.
 if [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
+  # Close the no-mistakes run for this task so a merged/landed run does not linger as a
+  # zombie "running" record. Firstmate merges PRs externally (gh-axi), so no-mistakes'
+  # background PR monitor may never observe the merge and never close the run; left alone,
+  # every shipped task leaks a "running" record that accumulates and clogs the daemon.
+  # Do this while the worktree is still on the task branch (abort resolves the active run
+  # by repo+branch from the cwd) and before the detach below. Best-effort: never fail
+  # teardown, and a harmless no-op when there is no active run (e.g. scout tasks).
+  if [ "$MODE" = no-mistakes ] && [ "$KIND" != scout ]; then
+    ( cd "$WT" && no-mistakes axi abort ) >/dev/null 2>&1 || true
+  fi
   branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
   if [ "$branch" != "HEAD" ]; then
     if git -C "$WT" checkout --detach -q 2>/dev/null; then
