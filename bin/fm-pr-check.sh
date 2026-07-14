@@ -195,9 +195,15 @@ refuse_head_rebased_off_base() {  # <default-branch-name> <base-sha> <pr-sha> <p
   # telling the reader to retarget it is a no-op they have performed - and re-running this
   # check would just print it again, so a merge-blocking refusal would offer no way forward
   # at all. What is missing then is the HEAD's re-rebase, not the label's.
+  #
+  # And the reader here is FIRSTMATE, which never runs a state-changing git command in a
+  # project or a worktree (AGENTS.md hard rule 1). The rebase is the crewmate's to perform in
+  # its own worktree, so the recovery names the steer, not a command firstmate is forbidden to
+  # run - bin/fm-merge-local.sh says the same thing when it needs a branch rebased.
   if [ "$PR_BASE_LABEL" = "$BASE" ]; then
     echo "  The PR already targets '$BASE', so the retarget landed; it is the head that has not been re-rebased onto it yet." >&2
-    echo "  Recovery: let the no-mistakes pipeline's monitor re-rebase the branch onto '$BASE' and force-push, then re-run fm-pr-check. To do it by hand: 'git rebase --onto origin/$BASE origin/$default_branch_name fm/$ID' then force-push with lease." >&2
+    echo "  Recovery: the head must be rebased onto '$BASE' and force-pushed. The no-mistakes pipeline's monitor does that on its own once the retarget lands - let it, then re-run fm-pr-check." >&2
+    echo "  If its run has already finished, have the CREWMATE do it in its own worktree (firstmate does not run git commands in a worktree): FM_HOME=<this home> bin/fm-send.sh $ID 'rebase fm/$ID onto origin/$BASE with git rebase --onto origin/$BASE origin/$default_branch_name fm/$ID, then force-push with lease'. Then re-run fm-pr-check." >&2
   else
     echo "  Recovery: retarget the PR's base with 'gh-axi pr edit $n --base $BASE'. The no-mistakes pipeline's monitor picks the new base up, re-rebases the branch onto it, and force-pushes a clean head; then re-run fm-pr-check." >&2
   fi

@@ -382,8 +382,9 @@ test_liveness_brief_block_answers_every_outcome() {
     *"git ls-remote --exit-code --heads origin refs/heads/feature/base"*) ;;
     *) fail "brief-block: the crewmate is not told to ask origin whether the branch is there" ;;
   esac
+  # shellcheck disable=SC2016  # A literal match against the brief's text: $default is not ours.
   case "$block" in
-    *"git rev-list --count origin/feature/base ^origin/HEAD"*) ;;
+    *'git rev-list --count "origin/feature/base" "^origin/$default"'*) ;;
     *) fail "brief-block: the crewmate is not told to ask whether the base carries anything the default branch lacks - the half of liveness a mere existence check misses" ;;
   esac
   case "$block" in
@@ -401,12 +402,53 @@ test_liveness_brief_block_answers_every_outcome() {
   pass "fm_base_liveness_brief_block gives the crewmate a followable instruction for every answer liveness can return"
 }
 
+# Naming the right commands is not enough: the commands must RUN, in the clone the crewmate
+# actually gets, and reach the SAME answer fm_base_liveness reaches. `origin/HEAD` is not that
+# question and is not dependable - a clone of an empty repo never gets one, which is exactly what
+# firstmate's create-the-repo-then-clone-it flow produces (make_repo clones an empty bare repo for
+# the same reason). A block that asked `^origin/HEAD` dies with a fatal on a base the scripts call
+# LIVE, and the crewmate's decision table reads that fatal as "cannot tell" and blocks a healthy
+# task, claiming an infrastructure failure that never happened.
+test_liveness_brief_block_agrees_with_the_scripts() {
+  local dir snippet out rc count
+  dir=$(make_repo brief-block-agrees)
+  ! git -C "$dir/wt" symbolic-ref --quiet refs/remotes/origin/HEAD >/dev/null 2>&1 \
+    || fail "brief-block-agrees: this clone HAS an origin/HEAD, so it no longer pins the case the crewmate hits in a clone of an empty repo"
+
+  snippet="$TMP_ROOT/brief-block-agrees.sh"
+  fm_base_liveness_brief_block feature/base | awk '/^```$/ { f = !f; next } f' > "$snippet"
+
+  # LIVE: the scripts say the base carries one commit main does not have. So must the crewmate.
+  expect_word live "$(liveness_word "$dir" feature/base)" \
+    "brief-block-agrees: the scripts do not call this base live, so there is nothing for the crewmate's answer to agree with"
+  out=$(cd "$dir/wt" && bash "$snippet" 2>&1) && rc=0 || rc=$?
+  [ "$rc" -eq 0 ] \
+    || fail "brief-block-agrees: the commands the brief hands the crewmate do not run in the task's own clone (rc=$rc)"$'\n'"  git: $out"
+  count=$(printf '%s\n' "$out" | tail -1)
+  expect_word 1 "$count" \
+    "brief-block-agrees: the crewmate counts something other than what fm_base_liveness counted for a LIVE base, so the brief and the merge gate would tell different stories about one base"
+
+  # ABSORBED: the default branch takes everything the base carries. Both must see the count fall
+  # to 0 - a crewmate that still read 1 here would stack on a spent base.
+  git -C "$dir/origin.git" update-ref refs/heads/main refs/heads/feature/base
+  expect_word absorbed "$(liveness_word "$dir" feature/base)" \
+    "brief-block-agrees: the scripts do not call this base absorbed, so the crewmate's answer cannot be checked against it"
+  out=$(cd "$dir/wt" && bash "$snippet" 2>&1) && rc=0 || rc=$?
+  [ "$rc" -eq 0 ] \
+    || fail "brief-block-agrees: the crewmate's commands fail against an absorbed base (rc=$rc)"$'\n'"  git: $out"
+  count=$(printf '%s\n' "$out" | tail -1)
+  expect_word 0 "$count" \
+    "brief-block-agrees: the crewmate does not see an absorbed base as absorbed, so it would root on a base the merge gate refuses"
+  pass "fm_base_liveness_brief_block's own commands run in the task's clone and reach the same verdict the scripts reach"
+}
+
 test_liveness_live_base
 test_liveness_absorbed_base
 test_liveness_gone_base
 test_liveness_unknown_is_not_a_verdict
 test_liveness_hands_back_the_commits_it_compared
 test_liveness_brief_block_answers_every_outcome
+test_liveness_brief_block_agrees_with_the_scripts
 test_valid_branch_name
 test_probe_present
 test_probe_absent

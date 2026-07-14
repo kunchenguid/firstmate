@@ -283,22 +283,39 @@ fm_base_brief_marker() {  # <branch>
 # the answer off a command that failed - a gone branch, an unfetchable default branch, and an
 # unreachable origin all fail identically, and reading any of them as "the base merged" is how
 # a feature branch's unmerged work reaches the default branch.
+#
+# It resolves the DEFAULT branch the way every script here resolves it: origin/HEAD when that
+# resolves, else origin/main, else origin/master. `origin/HEAD` alone is not that question and
+# is not dependable - a clone of an empty repo never gets one, which is exactly what firstmate's
+# own create-then-clone flow produces - so a crewmate asking `^origin/HEAD` would hit a fatal on
+# a base the scripts call LIVE, and report an infrastructure failure that never happened.
 fm_base_liveness_brief_block() {  # <branch>
   local base=${1-}
   cat <<EOF
 **Ask what state \`$base\` is in before you use it.** Do this on a fresh start before you root your branch on it, and again before you point a PR at it - a base merges most often exactly while its child is in flight.
 \`\`\`
-# Exits 0 if it is still on origin, 2 if origin has no such branch, anything else if origin could not be asked.
+# Is \`$base\` still on origin? Exits 0 if it is, 2 if origin has no such branch, anything else if origin could not be asked.
 git ls-remote --exit-code --heads origin refs/heads/$base
-# Refresh origin/$base and origin/HEAD, then count what \`$base\` carries that the default branch does not.
+# Refresh origin's refs, then resolve the repo default branch the way firstmate's scripts do:
+# origin/HEAD when it resolves, else origin/main, else origin/master. Plenty of clones never get
+# an origin/HEAD, so asking \`^origin/HEAD\` on its own would fail on a perfectly live base.
 git fetch --quiet origin
-git rev-list --count origin/$base ^origin/HEAD
+default=\$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)
+default=\${default#origin/}
+if [ -z "\$default" ]; then
+  for b in main master; do
+    git show-ref --verify --quiet "refs/remotes/origin/\$b" && default=\$b && break
+  done
+fi
+echo "default branch: \${default:-UNRESOLVED}"
+# Count what \`$base\` carries that the default branch does not.
+git rev-list --count "origin/$base" "^origin/\$default"
 \`\`\`
-Act on what those two answers actually say, and on nothing else. A command that failed is not a verdict about \`$base\`.
+Act on what those answers actually say, and on nothing else. A command that failed is not a verdict about \`$base\`.
 - \`ls-remote\` exits 0 and the count is 1 or more - **live**. This is the ordinary case: \`$base\` is a feature branch with unmerged work of its own. Carry on with it.
 - \`ls-remote\` exits 0 and the count is 0 - **absorbed**: the default branch already carries every commit \`$base\` has, so it is not a base to stack on and there is nothing left for the pre-merge guard to protect. Append \`blocked: intended base $base carries nothing the default branch does not already have\` and stop.
 - \`ls-remote\` exits 2 - **gone**: origin has no such branch. Append \`blocked: intended base $base is gone from origin\` and stop.
-- Anything else - \`ls-remote\` exits neither 0 nor 2, a fetch fails, \`origin/HEAD\` does not resolve, or the count does not print a number - **cannot tell**. This is an infrastructure failure, not a fact about \`$base\`. Append \`blocked: origin could not be asked about intended base $base: {git's error}\` and stop.
+- Anything else - \`ls-remote\` exits neither 0 nor 2, a fetch fails, the default branch prints \`UNRESOLVED\`, or the count does not print a number - **cannot tell**. This is an infrastructure failure, not a fact about \`$base\`. Append \`blocked: origin could not be asked about intended base $base: {git's error}\` and stop.
 
 Whichever it is, a base that is not live is firstmate's call, not yours: do NOT fall back to the default branch on your own judgement, and do not guess what became of \`$base\`.
 EOF

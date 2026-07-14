@@ -617,7 +617,15 @@ test_pr_check_rootedness_recovery_is_state_aware() {
     "retargeted: the refusal did not say what is actually missing (the head's re-rebase)"
   assert_no_grep 'pr edit' "$case_dir/stderr" \
     "retargeted: the refusal told the reader to redo the retarget they already did - a no-op that loops"
-  pass "fm-pr-check's rootedness refusal prescribes the re-rebase, not another retarget, once the PR already targets the base"
+  # The reader of this refusal is FIRSTMATE, which never runs a state-changing git command in a
+  # project or a worktree (AGENTS.md hard rule 1). The rebase belongs to the crewmate, so the
+  # recovery must name the steer - an instruction the reader is forbidden to follow is no better
+  # than one that cannot change the state it is printed in.
+  assert_grep 'bin/fm-send.sh task-x1' "$case_dir/stderr" \
+    "retargeted: the recovery does not steer the crewmate to rebase, so the only actor allowed to do it is never asked"
+  assert_grep 'firstmate does not run git commands in a worktree' "$case_dir/stderr" \
+    "retargeted: the recovery does not say whose job the rebase is, so firstmate is left to read it as its own"
+  pass "fm-pr-check's rootedness refusal prescribes the re-rebase, not another retarget, and steers the crewmate to do it"
 }
 
 # A branch still ON ORIGIN is not automatically a LIVE feature base. Once main has absorbed

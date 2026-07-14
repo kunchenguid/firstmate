@@ -357,8 +357,18 @@ test_base_brief_asks_the_liveness_question_and_answers_every_outcome() {
   brief="$home/data/$id/brief.md"
   assert_grep "git ls-remote --exit-code --heads origin refs/heads/feature/x" "$brief" \
     "base-probe: the brief gives the crewmate no way to tell a gone base from an unreachable origin"
-  assert_grep "git rev-list --count origin/feature/x ^origin/HEAD" "$brief" \
+  # shellcheck disable=SC2016  # A fixed-string grep pattern: $default is literal brief text.
+  assert_grep 'git rev-list --count "origin/feature/x" "^origin/$default"' "$brief" \
     "base-probe: the brief never has the crewmate ask whether the base still carries anything the default branch lacks - the half of liveness a mere existence check misses"
+  # The crewmate resolves the default branch the way the scripts do, rather than assuming
+  # origin/HEAD: a clone of an empty repo never gets one, and `^origin/HEAD` would then fatal on
+  # a base the scripts call live. tests/fm-base-lib.test.sh runs the block's own commands in such
+  # a clone; this only pins that the brief still carries the resolution.
+  assert_no_grep 'rev-list --count origin/feature/x ^origin/HEAD' "$brief" \
+    "base-probe: the brief asks '^origin/HEAD' directly, so in a clone with no origin/HEAD the crewmate would block a live base with an infrastructure failure that never happened"
+  # shellcheck disable=SC2016  # A fixed-string grep pattern: $b is literal brief text.
+  assert_grep 'git show-ref --verify --quiet "refs/remotes/origin/$b"' "$brief" \
+    "base-probe: the brief gives the crewmate no fallback for a clone with no origin/HEAD, so it does not resolve the default branch the way the scripts resolve it"
   assert_grep "blocked: intended base feature/x carries nothing the default branch does not already have" "$brief" \
     "base-probe: an absorbed base has no instruction, so the crewmate would stack on a spent base and have its PR refused at the merge gate"
   assert_grep "blocked: intended base feature/x is gone from origin" "$brief" \
