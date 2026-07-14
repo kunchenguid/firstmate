@@ -173,6 +173,32 @@ hash_pane() {
   if command -v md5 >/dev/null 2>&1; then md5 -q; else md5sum | cut -d' ' -f1; fi
 }
 
+# Resource sampling cadence. The sampler (bin/fm-resource-sample.sh) costs one
+# `ps` plus one memory read per pass whatever the fleet size, so it rides this
+# poll loop instead of a daemon of its own: no new process, nothing on the spawn
+# path. It is also the death detector - it writes state/<id>.postmortem when a
+# task's agent process disappears - so it must keep running even on the quiet
+# polls where nothing else does.
+RESOURCE_SAMPLE_INTERVAL=${FM_RESOURCE_SAMPLE_INTERVAL:-30}
+case "$RESOURCE_SAMPLE_INTERVAL" in ''|*[!0-9]*) RESOURCE_SAMPLE_INTERVAL=30 ;; esac
+
+# kill_suffix: the recorded cause of an agent's death, appended to the wake reason
+# that reports the crew as stale. A SIGKILLed crew goes stale like any other quiet
+# crew, so without this the wake says only "the pane stopped changing" and the
+# cause has to be dug for by hand - which is how a kill went unexplained in the
+# first place. Only an ABNORMAL death speaks up (abnormal=1); an agent that exited
+# after reporting done stays silent.
+kill_suffix() {  # <window>
+  local w=$1 task pm
+  task=$(window_to_task "$w" "$STATE")
+  [ -n "$task" ] || return 0
+  pm="$STATE/$task.postmortem"
+  [ -f "$pm" ] || return 0
+  [ "$(grep '^abnormal=' "$pm" 2>/dev/null | cut -d= -f2-)" = 1 ] || return 0
+  printf ' - agent died: %s (evidence: %s)' \
+    "$(grep '^verdict=' "$pm" 2>/dev/null | cut -d= -f2-)" "$pm"
+}
+
 # window_is_busy: 0 (busy) iff the task's harness is actively working. Prefers
 # a backend's native semantic busy state (fm_backend_busy_state - herdr's
 # agent.get; herdr-addendum "busy state" row, "the first backend where
@@ -385,13 +411,14 @@ pause_state_class() {  # <window> <task>
 # 2026-07-13: nm-6951-fullflow-e2e, a stale wake every ~40s), and paid a costly
 # crew-state read for each one.
 surface_nonterminal_stale() {  # <window> <hash>
-  local win=$1 h=$2 key
+  local win=$1 h=$2 key reason
   key=$(printf '%s' "$win" | tr ':/.' '___')
-  fm_wake_append stale "$win" "stale: $win" || exit 1
+  reason="stale: $win$(kill_suffix "$win")"
+  fm_wake_append stale "$win" "$reason" || exit 1
   printf '%s' "$h" > "$STATE/.stale-$key"
   printf '%s' "$h" > "$STATE/.surfaced-$key"
   rm -f "$STATE/.stale-since-$key" "$STATE/.paused-$key" "$STATE/.paused-rechecked-$key" "$STATE/.paused-resurfaced-$key"
-  wake "stale: $win"
+  wake "$reason"
 }
 
 # Check and heartbeat cadence must survive actionable exits and restarts: the
@@ -506,6 +533,14 @@ while :; do
   # Liveness beacon for fm-guard.sh: a fresh mtime here means a watcher is
   # alive. Supervision scripts warn when this goes stale with tasks in flight.
   touch "$STATE/.last-watcher-beat"
+
+  # Resource sampling + agent-death detection, on its own (slower) cadence.
+  # Best-effort and non-fatal by construction: an evidence collector must never
+  # be able to take supervision down with it.
+  if [ "$(age_of "$STATE/.last-resource-sample")" -ge "$RESOURCE_SAMPLE_INTERVAL" ]; then
+    touch "$STATE/.last-resource-sample"
+    "$SCRIPT_DIR/fm-resource-sample.sh" >/dev/null 2>&1 || true
+  fi
 
   # Slow per-task checks (firstmate writes these, e.g. a merged-PR poll).
   # Time-based via .last-check mtime so the cadence survives watcher restarts.
@@ -631,9 +666,10 @@ EOF
         elif afk_present; then
           # Daemon owns triage: one-shot per distinct stale hash, as before.
           if [ "$(cat "$sf" 2>/dev/null || true)" != "$h" ]; then
-            fm_wake_append stale "$w" "stale: $w" || exit 1
+            reason="stale: $w$(kill_suffix "$w")"
+            fm_wake_append stale "$w" "$reason" || exit 1
             printf '%s' "$h" > "$sf"
-            wake "stale: $w"
+            wake "$reason"
           fi
         elif stale_is_terminal "$w" "$STATE"; then
           # The log's last line is captain-relevant - but that alone is not
@@ -656,11 +692,12 @@ EOF
               date +%s > "$ssf"
               triage_log "absorbed stale (provably working, overriding a stale captain-relevant status): $w"
             else
-              fm_wake_append stale "$w" "stale: $w" || exit 1
+              reason="stale: $w$(kill_suffix "$w")"
+              fm_wake_append stale "$w" "$reason" || exit 1
               printf '%s' "$h" > "$sf"
               rm -f "$ssf"
               mark_surfaced "$STATE/$(window_to_task "$w" "$STATE").status"
-              wake "stale: $w"
+              wake "$reason"
             fi
           elif [ -e "$ssf" ]; then
             # This exact hash was already overridden as provably-working (a

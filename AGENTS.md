@@ -100,6 +100,9 @@ state/               volatile runtime signals; gitignored
   <id>.check.sh      optional slow poll you write per task (e.g. merged-PR check)
   <id>.check.fails   firstmate-owned consecutive-failure count for the generated merge poll's provider lookup; any success clears it; removed by fm-pr-check re-arm and by teardown
   <id>.check.error   firstmate-owned marker that the generated merge poll went blind (unloadable seam, or repeated provider lookup failure) and already woke firstmate once; removed by fm-pr-check re-arm and by teardown
+  <id>.resource      per-agent RSS plus machine memory-pressure samples, appended by the watcher's sampler (bin/fm-resource-sample.sh); trimmed, and removed by teardown
+  <id>.agentpid      the task's live agent process, recorded by the same sampler; its disappearance is what triggers a kill postmortem
+  <id>.postmortem    why the agent died (bin/fm-agent-postmortem.sh): exit signal, jetsam and kernel termination reports, and the memory picture at the death; docs/agent-kill-evidence.md owns what macOS does and does not expose
   x-watch.check.sh   generated X-mode relay poll shim; present only when opted in (section 14)
   x-inbox/           generated X-mode pending mention payloads; fmx-respond drains it (section 14)
   x-outbox/          generated X-mode dry-run reply and dismiss previews; inspect it when FMX_DRY_RUN is set (section 14)
@@ -586,6 +589,7 @@ bin/fm-watch-checkpoint.sh          # bounded foreground watcher checkpoint for 
 bin/fm-watch.sh                     # the watcher itself; exits with: signal|stale|check|heartbeat
 bin/fm-wake-drain.sh                # drain queued wake records at turn start; asserts guard after draining
 bin/fm-crew-state.sh <id>           # one-line current-state read; reconciles matching run-step, pane, and status log
+bin/fm-agent-postmortem.sh <id>     # why a task's agent process died (written automatically at the death)
 bin/fm-fleet-view.sh                # read-only Markdown whole-fleet view rendered from the structured snapshot
 ```
 
@@ -595,6 +599,7 @@ On wake, in order of cheapness:
 2. `signal:` read the listed status files first; a wake lists every signal that landed within the coalescing grace window (e.g. a status write plus the same turn's turn-end marker), and each is ~30 tokens and usually sufficient.
    A status line is the wake *event*, not the crewmate's current state; when you need the live state - especially to confirm a `needs-decision`/`blocked`/`paused` status is still real and not already resolved-and-resumed - read it with `bin/fm-crew-state.sh <id>`, which reconciles the authoritative run-step over the possibly-stale log line, and never `tail` the status log as the current-state source.
 3. `stale:` the crewmate stopped without reporting; peek the pane (`bin/fm-peek.sh <window>`) to diagnose.
+   When the agent PROCESS died rather than merely going quiet, the wake reason already carries the recorded cause and the path to its evidence, so a SIGKILLed crew says so instead of reading as an ordinary silence.
    If the stale reason includes `demand-deep-inspection`, inspect the pane, `bin/fm-crew-state.sh <id>`, and the validation logs before resuming supervision.
    If the pane is waiting, looping, confused, or unresponsive, load `stuck-crewmate-recovery`.
 4. `check:` a per-task poll fired (usually a merge, or X mode when enabled); act on it.

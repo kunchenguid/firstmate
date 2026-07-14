@@ -499,6 +499,45 @@ test_nonterminal_stale_not_working_surfaced() {
   pass "a not-provably-working non-terminal stale is surfaced immediately (never left to wait out the timer)"
 }
 
+# --- a stale crew whose agent was SIGKILLed says so on the wake ---------------
+# A killed agent goes quiet exactly like any other stopped crew, so the stale wake
+# alone reads as "the pane stopped changing" and the cause has to be dug for by
+# hand - which is how a kill went unexplained in the first place. When the resource
+# sampler recorded a postmortem (bin/fm-agent-postmortem.sh), the reason carries the
+# recorded cause and points at the evidence.
+
+test_stale_agent_kill_reason_carries_cause() {
+  local dir state fakebin out drain_out capture_file window key pane_hash sig pid
+  dir=$(make_case stale-agent-killed); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"
+  window="test:fm-killed"
+  printf 'zsh: killed  claude' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/killed.meta"
+  printf 'working: implementing\n' > "$state/killed.status"
+  sig=$(seen_sig "$state/killed.status"); printf '%s' "$sig" > "$state/.seen-killed_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "zsh: killed  claude")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  # The sampler's verdict for this task, as it would have written it at the death.
+  printf 'task=killed\nabnormal=1\nverdict=SIGKILL, killer unidentified\n' > "$state/killed.postmortem"
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "watcher did not surface the stale killed crew"
+  grep -F "agent died: SIGKILL, killer unidentified" "$out" >/dev/null || fail "the stale wake did not carry the recorded cause of death"
+  grep -F "killed.postmortem" "$out" >/dev/null || fail "the stale wake did not point at the evidence"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the killed-crew stale failed"
+  grep -F "agent died:" "$drain_out" >/dev/null || fail "the queued wake lost the cause of death"
+  # The sampler rides this same poll loop: if it stopped running, nothing would
+  # ever write a postmortem in the first place.
+  [ -e "$state/.last-resource-sample" ] || fail "the watcher poll did not run the resource sampler"
+  pass "a stale crew whose agent was SIGKILLed carries the cause on the wake"
+}
+
 # --- non-terminal stale, crew DECLARED a pause: absorbed, re-surfaced on a long
 #     cadence, never wedge-escalated ------------------------------------------
 # The live 2026-07-09/10 case: a crew intentionally held awaiting an upstream tool
@@ -1094,6 +1133,7 @@ test_nonterminal_stale_provably_working_absorbed_then_escalated
 test_wedge_escalation_marks_demand_deep_inspection_after_threshold
 test_wedge_escalation_resets_when_pane_becomes_active
 test_nonterminal_stale_not_working_surfaced
+test_stale_agent_kill_reason_carries_cause
 test_nonterminal_stale_paused_absorbed_then_resurfaced
 test_secondmate_paused_resurfaces_in_normal_mode
 test_secondmate_nonpaused_stale_remains_suppressed

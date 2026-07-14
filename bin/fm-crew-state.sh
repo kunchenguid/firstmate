@@ -75,10 +75,26 @@ FM_CREW_STATE_RUNS_LIMIT=${FM_CREW_STATE_RUNS_LIMIT:-200}
 case "$FM_CREW_STATE_RUNS_LIMIT" in ''|*[!0-9]*) FM_CREW_STATE_RUNS_LIMIT=200 ;; esac
 SEP=' · '
 
+# The recorded cause of an abnormal agent death, when the resource sampler saw
+# this task's agent process die (bin/fm-agent-postmortem.sh). Carried in the
+# detail of EVERY emitted state, not just the obviously-dead ones: an agent
+# SIGKILLed mid-validation can still leave a run-step reporting `working`, and a
+# supervisor reading this line must not have to guess that the agent behind that
+# run is gone. Silent for a normal exit (abnormal=0) and when nothing died.
+kill_note() {
+  local pm="$STATE/$ID.postmortem"
+  [ -f "$pm" ] || return 0
+  [ "$(grep '^abnormal=' "$pm" 2>/dev/null | cut -d= -f2-)" = 1 ] || return 0
+  printf 'agent died: %s (evidence: %s)' \
+    "$(grep '^verdict=' "$pm" 2>/dev/null | cut -d= -f2-)" "$pm"
+}
+
 # Emit the one canonical line and exit 0. Detail is optional.
 emit() {  # <state> <source> [detail]
-  local line="state: $1${SEP}source: $2"
+  local line="state: $1${SEP}source: $2" kn
   [ -n "${3:-}" ] && line="$line${SEP}$3"
+  kn=$(kill_note)
+  [ -n "$kn" ] && line="$line${SEP}$kn"
   printf '%s\n' "$line"
   exit 0
 }
