@@ -51,8 +51,9 @@ test_registered_check_uses_preserved_watcher_environment() {
   home=$(make_home check-env)
   out="$home/out.txt"
   err="$home/err.txt"
+  printf '%s\n' fm-pr-check-migration-scan-v1 > "$home/state/.pr-check-migration-scan-v1"
   printf '%s\n' fm-pr-check-migration-v1 > "$home/state/.pr-check-migration-v1"
-  chmod 0600 "$home/state/.pr-check-migration-v1"
+  chmod 0600 "$home/state/.pr-check-migration-scan-v1" "$home/state/.pr-check-migration-v1"
   cat > "$home/state/env-check.check.sh" <<'SH'
 #!/usr/bin/env bash
 printf 'env check fired with FM_CHECK_INTERVAL=%s\n' "${FM_CHECK_INTERVAL:-missing}"
@@ -73,8 +74,9 @@ test_existing_singleton_watcher_is_not_success() {
   home=$(make_home singleton)
   out="$home/out.txt"
   err="$home/err.txt"
+  printf '%s\n' fm-pr-check-migration-scan-v1 > "$home/state/.pr-check-migration-scan-v1"
   printf '%s\n' fm-pr-check-migration-v1 > "$home/state/.pr-check-migration-v1"
-  chmod 0600 "$home/state/.pr-check-migration-v1"
+  chmod 0600 "$home/state/.pr-check-migration-scan-v1" "$home/state/.pr-check-migration-v1"
   mkdir "$home/state/.watch.lock"
   printf '%s\n' "$$" > "$home/state/.watch.lock/pid"
   status=0

@@ -37,7 +37,7 @@ The inline rules in `AGENTS.md` section 3 still bind: detect, then consent, then
   A loud STUCK, especially a growing N across bootstraps, means that clone needs hands-on attention; dispatch a crewmate or resolve it before it strands work.
 - `PR_CHECK_MIGRATION: canonical polls rebuilt and armed; resume supervision for this home` - the non-executing migration rebuilt canonical task polls from validated metadata, and those polls are already armed.
   Independently verify the private per-task outcome record, then resume the emitted supervision protocol after finishing the session-start wake handling.
-- `PR_CHECK_MIGRATION: validated replacement polls armed; resume supervision for this home` - a retry proved that an exact byte-static replacement poll and canonical sidecar safely resolve an earlier ambiguous migration outcome.
+- `PR_CHECK_MIGRATION: validated replacement polls armed; resume supervision for this home` - a retry proved canonical publication provenance, metadata identity binding, and single-link integrity for a replacement poll resolving an earlier ambiguous migration outcome.
   Independently verify the private per-task outcome record, then resume the emitted supervision protocol after finishing the session-start wake handling.
 - `PR_CHECK_MIGRATION: quarantined polls remain unarmed; review state/.pr-check-migration.log before rearming` - one or more ambiguous or invalid task polls were quarantined without execution and remain unarmed.
   Read the private mode-`0600` per-task outcome record, verify the task's recorded PR independently, and rearm only through `bin/fm-pr-check.sh` with canonical inputs.

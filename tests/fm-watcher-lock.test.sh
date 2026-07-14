@@ -17,8 +17,9 @@ TMP_ROOT=$(fm_test_tmproot fm-watcher-lock-tests)
 
 mark_pr_check_migration_complete() {
   local state=$1
+  printf '%s\n' fm-pr-check-migration-scan-v1 > "$state/.pr-check-migration-scan-v1"
   printf '%s\n' fm-pr-check-migration-v1 > "$state/.pr-check-migration-v1"
-  chmod 0600 "$state/.pr-check-migration-v1"
+  chmod 0600 "$state/.pr-check-migration-scan-v1" "$state/.pr-check-migration-v1"
 }
 
 
@@ -611,8 +612,9 @@ test_arm_propagates_immediate_wake_before_confirmation() {
   armout="$dir/arm.out"
   drain_out="$dir/drain.out"
   check_file="$state/task.check.sh"
+  printf '%s\n' fm-pr-check-migration-scan-v1 > "$state/.pr-check-migration-scan-v1"
   printf '%s\n' fm-pr-check-migration-v1 > "$state/.pr-check-migration-v1"
-  chmod 0600 "$state/.pr-check-migration-v1"
+  chmod 0600 "$state/.pr-check-migration-scan-v1" "$state/.pr-check-migration-v1"
   cat > "$check_file" <<'SH'
 #!/usr/bin/env bash
 printf 'merged: https://example.test/pr/7\n'

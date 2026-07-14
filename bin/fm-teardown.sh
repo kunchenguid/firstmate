@@ -184,30 +184,45 @@ remove_grok_turnend_auth() {
 }
 
 validate_pr_poll_cleanup() {
-  local state_dir=$1 id=$2 quarantine state_device artifact
+  local state_dir=$1 id=$2 quarantine state_device artifact has_artifact=0
   fm_pr_task_id_valid "$id" || return 0
-  for artifact in "$state_dir/$id.check.sh" "$state_dir/$id.pr-poll" "$state_dir/$id.check-trust"; do
-    if [ ! -L "$artifact" ] && [ -d "$artifact" ]; then
-      echo "REFUSED: task PR-check artifact is a directory; preserving task state." >&2
+  quarantine="$state_dir/.pr-check-quarantine"
+  for artifact in "$state_dir/$id.check.sh" "$state_dir/$id.pr-poll" \
+    "$state_dir/$id.pr-poll-registration" "$state_dir/$id.check-trust"; do
+    [ -e "$artifact" ] || [ -L "$artifact" ] || continue
+    has_artifact=1
+  done
+  if [ -e "$quarantine" ] || [ -L "$quarantine" ]; then
+    has_artifact=1
+  fi
+  [ "$has_artifact" -eq 1 ] || return 0
+  [ -d "$state_dir" ] && [ ! -L "$state_dir" ] || return 1
+  state_device=$(fm_pr_file_device "$state_dir") || return 1
+  for artifact in "$state_dir/$id.check.sh" "$state_dir/$id.pr-poll" \
+    "$state_dir/$id.pr-poll-registration" "$state_dir/$id.check-trust"; do
+    [ -e "$artifact" ] || [ -L "$artifact" ] || continue
+    if [ ! -f "$artifact" ] || [ -L "$artifact" ] \
+      || [ "$(fm_pr_file_device "$artifact")" != "$state_device" ] \
+      || [ "$(fm_pr_file_link_count "$artifact")" != 1 ]; then
+      echo "REFUSED: unsafe task PR-check artifact; preserving task state." >&2
       return 1
     fi
   done
-  quarantine="$state_dir/.pr-check-quarantine"
   [ -e "$quarantine" ] || [ -L "$quarantine" ] || return 0
   if [ ! -d "$state_dir" ] || [ -L "$state_dir" ] \
     || [ ! -d "$quarantine" ] || [ -L "$quarantine" ]; then
     echo "REFUSED: unsafe PR-check quarantine path $quarantine; preserving task state." >&2
     return 1
   fi
-  state_device=$(fm_pr_file_device "$state_dir") || return 1
-  if [ "$(fm_pr_file_device "$quarantine")" != "$state_device" ]; then
+  if [ "$(fm_pr_file_device "$quarantine")" != "$state_device" ] \
+    || [ "$(fm_pr_file_mode "$quarantine")" != 700 ]; then
     echo "REFUSED: PR-check quarantine is not on the task state device; preserving task state." >&2
     return 1
   fi
   for artifact in "$quarantine/$id."*; do
     [ -e "$artifact" ] || [ -L "$artifact" ] || continue
-    if [ ! -L "$artifact" ] && [ -d "$artifact" ]; then
-      echo "REFUSED: task quarantine entry is a directory; preserving task state." >&2
+    if ! fm_pr_private_file_valid "$artifact" 600 "$state_device"; then
+      echo "REFUSED: unsafe task quarantine entry; preserving task state." >&2
       return 1
     fi
   done
@@ -216,7 +231,8 @@ validate_pr_poll_cleanup() {
 remove_pr_poll_artifacts() {
   local state_dir=$1 id=$2 quarantine artifact
   validate_pr_poll_cleanup "$state_dir" "$id" || return 1
-  rm -f "$state_dir/$id.check.sh" "$state_dir/$id.pr-poll" "$state_dir/$id.check-trust" || return 1
+  rm -f "$state_dir/$id.check.sh" "$state_dir/$id.pr-poll" \
+    "$state_dir/$id.pr-poll-registration" "$state_dir/$id.check-trust" || return 1
   if fm_pr_task_id_valid "$id"; then
     quarantine="$state_dir/.pr-check-quarantine"
     if [ -d "$quarantine" ] && [ ! -L "$quarantine" ]; then

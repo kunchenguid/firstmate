@@ -72,40 +72,70 @@ scan_marker_content_valid() {
   [ "$value" = "$SCAN_MARKER_VALUE" ]
 }
 
+current_checks_authenticated() {
+  local check id
+  for check in "$STATE"/*.check.sh; do
+    [ -e "$check" ] || [ -L "$check" ] || continue
+    if [ "$(basename "$check")" = x-watch.check.sh ] \
+      && fmx_poll_shim_valid "$check" "$FM_HOME" "$FM_ROOT"; then
+      continue
+    fi
+    id=$(basename "$check" .check.sh)
+    fm_custom_check_registered "$STATE" "$id" && continue
+    fm_pr_poll_artifacts_valid "$STATE" "$id" "$TEMPLATE" || return 1
+  done
+}
+
+private_migration_boundaries_valid() {
+  local state_device=$1 artifact
+  if [ -e "$LOG" ] || [ -L "$LOG" ]; then
+    fm_pr_private_file_valid "$LOG" 600 "$state_device" || return 1
+  fi
+  if [ -e "$QUARANTINE" ] || [ -L "$QUARANTINE" ]; then
+    [ -d "$QUARANTINE" ] && [ ! -L "$QUARANTINE" ] || return 1
+    [ "$(fm_pr_file_mode "$QUARANTINE")" = 700 ] || return 1
+    [ "$(fm_pr_file_device "$QUARANTINE")" = "$state_device" ] || return 1
+    for artifact in "$QUARANTINE"/* "$QUARANTINE"/.[!.]* "$QUARANTINE"/..?*; do
+      [ -e "$artifact" ] || [ -L "$artifact" ] || continue
+      fm_pr_private_file_valid "$artifact" 600 "$state_device" || return 1
+    done
+  fi
+}
+
 scan_complete() {
   local state_device
   [ -d "$STATE" ] && [ ! -L "$STATE" ] || return 1
   state_device=$(fm_pr_file_device "$STATE") || return 1
-  [ -f "$SCAN_MARKER" ] && [ ! -L "$SCAN_MARKER" ] || return 1
-  [ "$(fm_pr_file_mode "$SCAN_MARKER")" = 600 ] || return 1
-  [ "$(fm_pr_file_device "$SCAN_MARKER")" = "$state_device" ] || return 1
-  scan_marker_content_valid "$SCAN_MARKER"
+  fm_pr_private_file_valid "$SCAN_MARKER" 600 "$state_device" || return 1
+  scan_marker_content_valid "$SCAN_MARKER" || return 1
+  private_migration_boundaries_valid "$state_device" || return 1
+  current_checks_authenticated
 }
 
 migration_complete() {
   local state_device obligation
-  [ -d "$STATE" ] && [ ! -L "$STATE" ] || return 1
+  scan_complete || return 1
   state_device=$(fm_pr_file_device "$STATE") || return 1
   if [ -e "$QUARANTINE" ] || [ -L "$QUARANTINE" ]; then
-    [ -d "$QUARANTINE" ] && [ ! -L "$QUARANTINE" ] || return 1
     for obligation in "$QUARANTINE"/*.diagnostic.pending-* "$QUARANTINE"/*.diagnostic.failure-*; do
       [ -e "$obligation" ] || [ -L "$obligation" ] || continue
       return 1
     done
   fi
-  [ -f "$MARKER" ] && [ ! -L "$MARKER" ] || return 1
-  [ "$(fm_pr_file_mode "$MARKER")" = 600 ] || return 1
-  [ "$(fm_pr_file_device "$MARKER")" = "$state_device" ] || return 1
+  fm_pr_private_file_valid "$MARKER" 600 "$state_device" || return 1
   migration_marker_content_valid "$MARKER"
 }
 
-x_shim_transition_needed() {
-  fmx_poll_shim_v1_valid "$STATE/x-watch.check.sh" "$FM_HOME" "$FM_ROOT"
+x_shim_locked_scan_needed() {
+  local shim="$STATE/x-watch.check.sh"
+  [ -e "$shim" ] || [ -L "$shim" ] || return 1
+  fmx_poll_shim_valid "$shim" "$FM_HOME" "$FM_ROOT" && return 1
+  return 0
 }
 
 # Marker short-circuits apply only when generated artifact identities are current.
 # Otherwise watcher exclusion comes before every check scan and state mutation.
-if ! x_shim_transition_needed; then
+if ! x_shim_locked_scan_needed; then
   migration_complete && exit 0
   [ "$ALLOW_INCOMPLETE_REPAIRS" -eq 1 ] && scan_complete && exit 0
 fi
@@ -147,7 +177,7 @@ while [ "$i" -lt 100 ]; do
   # Its validated marker proves the old watcher crossed the boundary, so this
   # process can continue to the normal watcher singleton instead of competing
   # with the newly started watcher for a second migration lock.
-  if migration_complete && ! x_shim_transition_needed; then
+  if migration_complete && ! x_shim_locked_scan_needed; then
     exit 0
   fi
   sleep 0.05
@@ -205,11 +235,13 @@ fi
 # A marker contradicted by a pending or failed obligation is not authoritative.
 # Remove only an ordinary marker under exclusion; unsafe marker paths remain a
 # hard refusal for the publication checks below.
-if [ -f "$MARKER" ] && [ ! -L "$MARKER" ]; then
+if [ -e "$MARKER" ] || [ -L "$MARKER" ]; then
+  fm_pr_private_file_valid "$MARKER" 600 "$STATE_DEVICE" || exit 1
   rm -f -- "$MARKER" || exit 1
   [ ! -e "$MARKER" ] && [ ! -L "$MARKER" ] || exit 1
 fi
-if [ -f "$SCAN_MARKER" ] && [ ! -L "$SCAN_MARKER" ]; then
+if [ -e "$SCAN_MARKER" ] || [ -L "$SCAN_MARKER" ]; then
+  fm_pr_private_file_valid "$SCAN_MARKER" 600 "$STATE_DEVICE" || exit 1
   rm -f -- "$SCAN_MARKER" || exit 1
   [ ! -e "$SCAN_MARKER" ] && [ ! -L "$SCAN_MARKER" ] || exit 1
 fi
@@ -246,6 +278,9 @@ unsafe_checks_absent() {
 
 revoke_migration_marker() {
   if [ -e "$MARKER" ] || [ -L "$MARKER" ]; then
+    if [ -f "$MARKER" ] && [ ! -L "$MARKER" ]; then
+      [ "$(fm_pr_file_link_count "$MARKER")" = 1 ] || return 1
+    fi
     rm -f -- "$MARKER" || return 1
   fi
   [ ! -e "$MARKER" ] && [ ! -L "$MARKER" ]
@@ -254,8 +289,7 @@ revoke_migration_marker() {
 publish_migration_marker() {
   fm_pr_regular_destination_on_device_or_absent "$MARKER" "$STATE_DEVICE" || return 1
   MIGRATION_MARKER_TMP=$(mktemp "$STATE/.fm-pr-check-migration.XXXXXX") || return 1
-  [ -f "$MIGRATION_MARKER_TMP" ] && [ ! -L "$MIGRATION_MARKER_TMP" ] || return 1
-  [ "$(fm_pr_file_device "$MIGRATION_MARKER_TMP")" = "$STATE_DEVICE" ] || return 1
+  fm_pr_private_file_valid "$MIGRATION_MARKER_TMP" 600 "$STATE_DEVICE" || return 1
   printf '%s\n' "$MARKER_VALUE" > "$MIGRATION_MARKER_TMP" || return 1
   chmod 0600 "$MIGRATION_MARKER_TMP" || return 1
   migration_marker_content_valid "$MIGRATION_MARKER_TMP" || return 1
@@ -273,6 +307,9 @@ publish_migration_marker() {
 
 revoke_scan_marker() {
   if [ -e "$SCAN_MARKER" ] || [ -L "$SCAN_MARKER" ]; then
+    if [ -f "$SCAN_MARKER" ] && [ ! -L "$SCAN_MARKER" ]; then
+      [ "$(fm_pr_file_link_count "$SCAN_MARKER")" = 1 ] || return 1
+    fi
     rm -f -- "$SCAN_MARKER" || return 1
   fi
   [ ! -e "$SCAN_MARKER" ] && [ ! -L "$SCAN_MARKER" ]
@@ -281,8 +318,7 @@ revoke_scan_marker() {
 publish_scan_marker() {
   fm_pr_regular_destination_on_device_or_absent "$SCAN_MARKER" "$STATE_DEVICE" || return 1
   MIGRATION_SCAN_MARKER_TMP=$(mktemp "$STATE/.fm-pr-check-scan.XXXXXX") || return 1
-  [ -f "$MIGRATION_SCAN_MARKER_TMP" ] && [ ! -L "$MIGRATION_SCAN_MARKER_TMP" ] || return 1
-  [ "$(fm_pr_file_device "$MIGRATION_SCAN_MARKER_TMP")" = "$STATE_DEVICE" ] || return 1
+  fm_pr_private_file_valid "$MIGRATION_SCAN_MARKER_TMP" 600 "$STATE_DEVICE" || return 1
   printf '%s\n' "$SCAN_MARKER_VALUE" > "$MIGRATION_SCAN_MARKER_TMP" || return 1
   chmod 0600 "$MIGRATION_SCAN_MARKER_TMP" || return 1
   scan_marker_content_valid "$MIGRATION_SCAN_MARKER_TMP" || return 1
@@ -337,42 +373,16 @@ MIGRATION_OWNER=
 MIGRATION_REPO=
 MIGRATION_NUMBER=
 metadata_pr_is_canonical() {
-  local meta=$1 line value pr_count=0 seen_pr=0 post_pr_invalid=0
+  local meta=$1
   MIGRATION_URL=
   MIGRATION_OWNER=
   MIGRATION_REPO=
   MIGRATION_NUMBER=
-  [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
-  while IFS= read -r line || [ -n "$line" ]; do
-    case "$line" in
-      pr=*)
-        pr_count=$((pr_count + 1))
-        [ "$pr_count" -eq 1 ] || continue
-        value=${line#pr=}
-        if fm_pr_url_parse "$value"; then
-          MIGRATION_URL=$FM_PR_URL
-          MIGRATION_OWNER=$FM_PR_OWNER
-          MIGRATION_REPO=$FM_PR_REPO
-          MIGRATION_NUMBER=$FM_PR_NUMBER
-        fi
-        seen_pr=1
-        ;;
-      pr_head=*)
-        if [ "$seen_pr" -eq 1 ]; then
-          value=${line#pr_head=}
-          fm_pr_head_valid "$value" || post_pr_invalid=1
-        fi
-        ;;
-      x_request=*|x_request_ts=*|x_followups=*|x_platform=*|x_reply_max_chars=*)
-        ;;
-      *)
-        [ "$seen_pr" -eq 0 ] || post_pr_invalid=1
-        ;;
-    esac
-  done < "$meta"
-  [ "$pr_count" -eq 1 ] || return 1
-  [ "$post_pr_invalid" -eq 0 ] || return 1
-  [ -n "$MIGRATION_URL" ]
+  fm_pr_metadata_identity_parse "$meta" || return 1
+  MIGRATION_URL=$FM_PR_META_URL
+  MIGRATION_OWNER=$FM_PR_META_OWNER
+  MIGRATION_REPO=$FM_PR_META_REPO
+  MIGRATION_NUMBER=$FM_PR_META_NUMBER
 }
 
 quarantine_artifact() {
@@ -406,6 +416,7 @@ quarantine_artifact() {
 diagnostic_file_is_one_line() {
   local file=$1 expected=$2 value
   [ -f "$file" ] && [ ! -L "$file" ] || return 1
+  [ "$(fm_pr_file_link_count "$file")" = 1 ] || return 1
   exec 6< "$file" || return 1
   IFS= read -r value <&6 || { exec 6<&-; return 1; }
   if IFS= read -r _extra <&6; then
@@ -419,6 +430,7 @@ diagnostic_file_is_one_line() {
 diagnostic_file_contains() {
   local file=$1 expected=$2 line
   [ -f "$file" ] && [ ! -L "$file" ] || return 1
+  [ "$(fm_pr_file_link_count "$file")" = 1 ] || return 1
   while IFS= read -r line || [ -n "$line" ]; do
     [ "$line" != "$expected" ] || return 0
   done < "$file"
@@ -426,9 +438,7 @@ diagnostic_file_contains() {
 }
 
 diagnostic_log_valid() {
-  [ -f "$LOG" ] && [ ! -L "$LOG" ] || return 1
-  [ "$(fm_pr_file_mode "$LOG")" = 600 ] || return 1
-  [ "$(fm_pr_file_device "$LOG")" = "$STATE_DEVICE" ]
+  fm_pr_private_file_valid "$LOG" 600 "$STATE_DEVICE"
 }
 
 diagnostic_log_contains() {
@@ -439,6 +449,9 @@ diagnostic_log_contains() {
 
 revoke_migration_log() {
   if [ -e "$LOG" ] || [ -L "$LOG" ]; then
+    if [ -f "$LOG" ] && [ ! -L "$LOG" ]; then
+      [ "$(fm_pr_file_link_count "$LOG")" = 1 ] || return 1
+    fi
     rm -f -- "$LOG" || return 1
   fi
   [ ! -e "$LOG" ] && [ ! -L "$LOG" ]
@@ -503,6 +516,9 @@ diagnostic_obligation_message() {
       failure-ambiguous)
         MIGRATION_DIAGNOSTIC_MESSAGE="task $prefix: ambiguous poll migration is incomplete; poll remains unarmed; repair its private artifacts, then rerun bootstrap"
         ;;
+      failure-replacement)
+        MIGRATION_DIAGNOSTIC_MESSAGE="task $prefix: replacement poll lacks canonical provenance or metadata binding; poll remains unarmed; republish it through fm-pr-check.sh"
+        ;;
       ambiguous)
         MIGRATION_DIAGNOSTIC_MESSAGE="task $prefix: ambiguous or invalid legacy poll quarantined and unarmed"
         ;;
@@ -519,16 +535,14 @@ diagnostic_obligation_message() {
 ensure_diagnostic_obligation() {
   local prefix=$1 kind=$2 message=$3 destination
   case "$kind" in
-    pending-canonical|pending-ambiguous|pending-noncanonical|canonical|failure-canonical|failure-ambiguous|ambiguous|validated|noncanonical) ;;
+    pending-canonical|pending-ambiguous|pending-noncanonical|canonical|failure-canonical|failure-ambiguous|failure-replacement|ambiguous|validated|noncanonical) ;;
     *) return 1 ;;
   esac
   [ "$prefix" = "$NONCANONICAL_PREFIX" ] || fm_pr_task_id_valid "$prefix" || return 1
   ensure_quarantine_dir || return 1
   destination="$QUARANTINE/$prefix.diagnostic.$kind"
   if [ -e "$destination" ] || [ -L "$destination" ]; then
-    [ -f "$destination" ] && [ ! -L "$destination" ] || return 1
-    [ "$(fm_pr_file_mode "$destination")" = 600 ] || return 1
-    [ "$(fm_pr_file_device "$destination")" = "$STATE_DEVICE" ] || return 1
+    fm_pr_private_file_valid "$destination" 600 "$STATE_DEVICE" || return 1
     diagnostic_file_is_one_line "$destination" "$message"
     return
   fi
@@ -543,9 +557,7 @@ ensure_diagnostic_obligation() {
     return 1
   fi
   MIGRATION_OBLIGATION_TMP=
-  if ! [ -f "$destination" ] || [ -L "$destination" ] \
-    || [ "$(fm_pr_file_mode "$destination")" != 600 ] \
-    || [ "$(fm_pr_file_device "$destination")" != "$STATE_DEVICE" ] \
+  if ! fm_pr_private_file_valid "$destination" 600 "$STATE_DEVICE" \
     || ! diagnostic_file_is_one_line "$destination" "$message"; then
     rm -f -- "$destination" || true
     return 1
@@ -563,7 +575,7 @@ quarantined_artifact_exists() {
   local prefix=$1 kind=$2 artifact
   for artifact in "$QUARANTINE/$prefix.$kind."*; do
     [ -e "$artifact" ] || [ -L "$artifact" ] || continue
-    [ -f "$artifact" ] && [ ! -L "$artifact" ] || return 1
+    fm_pr_private_file_valid "$artifact" 600 "$STATE_DEVICE" || return 1
     return 0
   done
   return 1
@@ -573,9 +585,7 @@ diagnostic_obligation_valid() {
   local prefix=$1 kind=$2 path basename
   path="$QUARANTINE/$prefix.diagnostic.$kind"
   [ -e "$path" ] || [ -L "$path" ] || return 1
-  [ -f "$path" ] && [ ! -L "$path" ] || return 1
-  [ "$(fm_pr_file_mode "$path")" = 600 ] || return 1
-  [ "$(fm_pr_file_device "$path")" = "$STATE_DEVICE" ] || return 1
+  fm_pr_private_file_valid "$path" 600 "$STATE_DEVICE" || return 1
   basename=${path##*/}
   diagnostic_obligation_message "$basename" || return 1
   diagnostic_file_is_one_line "$path" "$MIGRATION_DIAGNOSTIC_MESSAGE"
@@ -597,11 +607,13 @@ canonical_terminal_success() {
 }
 
 ambiguous_terminal_success() {
-  local id=$1 check data
+  local id=$1 check data registration
   check="$STATE/$id.check.sh"
   data="$STATE/$id.pr-poll"
+  registration="$STATE/$id.pr-poll-registration"
   [ ! -e "$check" ] && [ ! -L "$check" ] \
     && [ ! -e "$data" ] && [ ! -L "$data" ] \
+    && [ ! -e "$registration" ] && [ ! -L "$registration" ] \
     && quarantined_artifact_exists "$id" check
 }
 
@@ -625,6 +637,7 @@ complete_validated_outcome() {
   local id=$1
   canonical_terminal_success "$id" || return 1
   remove_diagnostic_obligation "$id" failure-ambiguous || return 1
+  remove_diagnostic_obligation "$id" failure-replacement || return 1
   remove_diagnostic_obligation "$id" ambiguous || return 1
   ensure_outcome_obligation "$id" validated || return 1
   remove_diagnostic_obligation "$id" pending-ambiguous
@@ -649,9 +662,10 @@ record_ambiguous_failure() {
 }
 
 canonical_repair_from_pending() {
-  local id=$1 meta data url owner repo number check
+  local id=$1 meta data registration url owner repo number check
   meta="$STATE/$id.meta"
   data="$STATE/$id.pr-poll"
+  registration="$STATE/$id.pr-poll-registration"
   check="$STATE/$id.check.sh"
   [ ! -e "$check" ] && [ ! -L "$check" ] || return 1
   quarantined_artifact_exists "$id" check || return 1
@@ -661,24 +675,57 @@ canonical_repair_from_pending() {
   repo=$MIGRATION_REPO
   number=$MIGRATION_NUMBER
   quarantine_artifact "$data" "$id" data || return 1
+  quarantine_artifact "$registration" "$id" registration || return 1
   [ ! -e "$data" ] && [ ! -L "$data" ] || return 1
+  [ ! -e "$registration" ] && [ ! -L "$registration" ] || return 1
   fm_pr_poll_prepare "$STATE" "$id" "$url" "$owner" "$repo" "$number" "$TEMPLATE" || return 1
   fm_pr_poll_publish_prepared || return 1
   canonical_terminal_success "$id"
 }
 
 ambiguous_repair_from_pending() {
-  local id=$1 check data
+  local id=$1 check data registration
   check="$STATE/$id.check.sh"
   data="$STATE/$id.pr-poll"
+  registration="$STATE/$id.pr-poll-registration"
   [ ! -e "$check" ] && [ ! -L "$check" ] || return 1
   quarantined_artifact_exists "$id" check || return 1
   quarantine_artifact "$data" "$id" data || return 1
+  quarantine_artifact "$registration" "$id" registration || return 1
   ambiguous_terminal_success "$id"
 }
 
+live_check_matches_quarantined() {
+  local id=$1 live artifact
+  live="$STATE/$id.check.sh"
+  [ -f "$live" ] && [ ! -L "$live" ] || return 1
+  for artifact in "$QUARANTINE/$id.check."*; do
+    [ -e "$artifact" ] || [ -L "$artifact" ] || continue
+    fm_pr_private_file_valid "$artifact" 600 "$STATE_DEVICE" || return 1
+    cmp -s "$live" "$artifact" && return 0
+  done
+  return 1
+}
+
+replacement_artifacts_present() {
+  local id=$1 path
+  for path in "$STATE/$id.check.sh" "$STATE/$id.pr-poll" "$STATE/$id.pr-poll-registration"; do
+    [ -e "$path" ] || [ -L "$path" ] || continue
+    return 0
+  done
+  return 1
+}
+
+quarantine_untrusted_replacement() {
+  local id=$1
+  ensure_outcome_obligation "$id" failure-replacement || return 1
+  quarantine_artifact "$STATE/$id.check.sh" "$id" replacement-check || return 1
+  quarantine_artifact "$STATE/$id.pr-poll" "$id" replacement-data || return 1
+  quarantine_artifact "$STATE/$id.pr-poll-registration" "$id" replacement-registration || return 1
+}
+
 recover_pending_outcomes() {
-  local obligation basename prefix kind success failure check
+  local obligation basename prefix kind success failure replacement_failure check
   [ -e "$QUARANTINE" ] || [ -L "$QUARANTINE" ] || return 0
   quarantine_tree_repair_and_validate || return 1
   for obligation in "$QUARANTINE"/*.diagnostic.pending-*; do
@@ -715,8 +762,23 @@ recover_pending_outcomes() {
       pending-ambiguous)
         success="$QUARANTINE/$prefix.diagnostic.ambiguous"
         failure="$QUARANTINE/$prefix.diagnostic.failure-ambiguous"
+        replacement_failure="$QUARANTINE/$prefix.diagnostic.failure-replacement"
         if canonical_terminal_success "$prefix"; then
           complete_validated_outcome "$prefix" || return 1
+          continue
+        fi
+        if [ -e "$replacement_failure" ] || [ -L "$replacement_failure" ]; then
+          if replacement_artifacts_present "$prefix"; then
+            quarantine_untrusted_replacement "$prefix" || return 1
+          fi
+          migration_failed=1
+          continue
+        fi
+        if quarantined_artifact_exists "$prefix" check \
+          && { [ -e "$STATE/$prefix.check.sh" ] || [ -L "$STATE/$prefix.check.sh" ]; } \
+          && ! live_check_matches_quarantined "$prefix"; then
+          quarantine_untrusted_replacement "$prefix" || return 1
+          migration_failed=1
           continue
         fi
         if ambiguous_terminal_success "$prefix"; then
@@ -824,6 +886,7 @@ if migration_needed; then
       prefix=$id
       meta="$STATE/$id.meta"
       data="$STATE/$id.pr-poll"
+      registration="$STATE/$id.pr-poll-registration"
       if metadata_pr_is_canonical "$meta"; then
         url=$MIGRATION_URL
         owner=$MIGRATION_OWNER
@@ -838,6 +901,7 @@ if migration_needed; then
         fi
         if quarantine_artifact "$check" "$prefix" check \
           && quarantine_artifact "$data" "$prefix" data \
+          && quarantine_artifact "$registration" "$prefix" registration \
           && fm_pr_poll_prepare "$STATE" "$id" "$url" "$owner" "$repo" "$number" "$TEMPLATE" \
           && fm_pr_poll_publish_prepared \
           && complete_canonical_outcome "$id"; then
@@ -856,6 +920,7 @@ if migration_needed; then
         fi
         if quarantine_artifact "$check" "$prefix" check \
           && quarantine_artifact "$data" "$prefix" data \
+          && quarantine_artifact "$registration" "$prefix" registration \
           && complete_ambiguous_outcome "$id"; then
           :
         else
@@ -872,6 +937,8 @@ if migration_needed; then
         continue
       fi
       if quarantine_artifact "$check" "$NONCANONICAL_PREFIX" check \
+        && quarantine_artifact "$STATE/$id.pr-poll" "$NONCANONICAL_PREFIX" data \
+        && quarantine_artifact "$STATE/$id.pr-poll-registration" "$NONCANONICAL_PREFIX" registration \
         && complete_noncanonical_outcome; then
         :
       else

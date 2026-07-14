@@ -31,7 +31,7 @@ NUMBER=$FM_PR_NUMBER
 
 # Task-derived paths are constructed only after the canonical ID validation.
 META="$STATE/$ID.meta"
-if [ ! -f "$META" ] || [ -L "$META" ]; then
+if [ ! -f "$META" ] || [ -L "$META" ] || [ "$(fm_pr_file_link_count "$META")" != 1 ]; then
   echo "error: task metadata is unavailable" >&2
   exit 1
 fi
@@ -51,17 +51,40 @@ if [ -n "$WT" ] && [ -d "$WT" ] && command -v gh >/dev/null 2>&1; then
   fi
 fi
 
-trap fm_pr_poll_cleanup EXIT
+META_TMP=
+pr_check_cleanup() {
+  fm_pr_poll_cleanup
+  [ -z "$META_TMP" ] || rm -f -- "$META_TMP"
+}
+trap pr_check_cleanup EXIT
 trap 'exit 1' HUP INT TERM
 fm_pr_poll_prepare "$STATE" "$ID" "$URL" "$OWNER" "$REPO" "$NUMBER" "$SCRIPT_DIR/fm-pr-poll.sh" \
   || { echo "error: could not prepare PR poll" >&2; exit 1; }
 
-if ! grep -qxF "pr=$URL" "$META"; then
-  printf 'pr=%s\n' "$URL" >> "$META"
-fi
-if [ -n "$PR_HEAD" ] && ! grep -qxF "pr_head=$PR_HEAD" "$META"; then
-  printf 'pr_head=%s\n' "$PR_HEAD" >> "$META"
-fi
+META_DEVICE=$(fm_pr_file_device "$META") || exit 1
+STATE_DEVICE=$(fm_pr_file_device "$STATE") || exit 1
+[ "$META_DEVICE" = "$STATE_DEVICE" ] || { echo "error: task metadata is unavailable" >&2; exit 1; }
+META_TMP=$(mktemp "$STATE/.fm-pr-meta.XXXXXX") || exit 1
+while IFS= read -r line || [ -n "$line" ]; do
+  case "$line" in
+    pr=*|pr_head=*) ;;
+    *) printf '%s\n' "$line" >> "$META_TMP" || exit 1 ;;
+  esac
+done < "$META"
+printf 'pr=%s\n' "$URL" >> "$META_TMP" || exit 1
+[ -z "$PR_HEAD" ] || printf 'pr_head=%s\n' "$PR_HEAD" >> "$META_TMP" || exit 1
+chmod 0600 "$META_TMP" || exit 1
+fm_pr_private_file_valid "$META_TMP" 600 "$STATE_DEVICE" || exit 1
+fm_pr_metadata_identity_parse "$META_TMP" || exit 1
+[ "$FM_PR_META_URL" = "$URL" ] && [ "$FM_PR_META_OWNER" = "$OWNER" ] \
+  && [ "$FM_PR_META_REPO" = "$REPO" ] && [ "$FM_PR_META_NUMBER" = "$NUMBER" ] || exit 1
+fm_pr_regular_destination_on_device_or_absent "$META" "$STATE_DEVICE" || exit 1
+mv -f -- "$META_TMP" "$META" || exit 1
+META_TMP=
+fm_pr_private_file_valid "$META" 600 "$STATE_DEVICE" || exit 1
+fm_pr_metadata_identity_parse "$META" || exit 1
+[ "$FM_PR_META_URL" = "$URL" ] && [ "$FM_PR_META_OWNER" = "$OWNER" ] \
+  && [ "$FM_PR_META_REPO" = "$REPO" ] && [ "$FM_PR_META_NUMBER" = "$NUMBER" ] || exit 1
 
 fm_pr_poll_publish_prepared || {
   echo "error: could not publish PR poll" >&2
