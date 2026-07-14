@@ -43,11 +43,13 @@
 #          on a feature branch instead of its default branch - a crewmate's work
 #          landed in the primary instead of its own worktree; restore it per the line.
 #          An AFK_INJECTION_DISABLED line means away mode is armed (state/.afk) but
-#          the away-mode daemon's fail-closed agent-liveness guard could never
-#          deliver an escalation into firstmate's own pane, so nothing reaches the
-#          captain until they are back. Re-derived live from the resolved supervisor
-#          pane on every run (bin/fm-afk-canary-lib.sh), never read from a marker,
-#          so a respawned agent or a corrected target clears it immediately.
+#          the away-mode daemon cannot deliver an escalation into the pane it injects
+#          into - its fail-closed agent-liveness guard reads dead or unattributable
+#          there, or that pane is gone outright - so nothing reaches the captain until
+#          they are back. Re-derived live from the running daemon's own recorded
+#          endpoint, or the current pane on a fresh arm (bin/fm-afk-canary-lib.sh),
+#          never read from a marker, so a respawned agent or a corrected target
+#          clears it immediately.
 #          treehouse is also MISSING when its installed version lacks
 #          "treehouse get --lease" support.
 #          no-mistakes is also MISSING when its installed version is older than
@@ -108,6 +110,12 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-supervisor-target-lib.sh"
 # shellcheck source=bin/fm-afk-canary-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-afk-canary-lib.sh"
+# fm-afk-start.sh owns the daemon-lock liveness gate the canary needs to find the
+# pane a LIVE away-mode daemon injects into. It is sourceable (BASH_SOURCE guard)
+# but sets `set -eu`, so restore this script's errexit-off flow immediately after.
+# shellcheck source=bin/fm-afk-start.sh disable=SC1091
+. "$SCRIPT_DIR/fm-afk-start.sh"
+set +e
 
 fleet_sync_origin_backed_project_count() {
   local count proj
@@ -596,15 +604,16 @@ crew_dispatch_validate() {
 # than re-deriving the sequence: a restarted session is precisely where the two
 # would otherwise disagree, because the pane firstmate came back in is not the pane
 # the still-running daemon is injecting into. Silent unless away mode is actually
-# armed and the supervisor pane both exists and reads not-alive.
+# armed and the resolved pane reads not-alive - or, when a live daemon named it,
+# no longer exists at all, which is the one state nothing else reports.
 afk_injection_check() {
-  local resolved rc backend target verdict
+  local resolved rc backend target verdict source
   [ -e "$STATE/.afk" ] || return 0
   resolved=$(fm_afk_canary_resolve "$STATE")
   rc=$?
   [ "$rc" -eq 1 ] || return 0
-  IFS="$FM_AFK_CANARY_TAB" read -r backend target verdict <<<"$resolved"
-  echo "AFK_INJECTION_DISABLED: away mode is armed but escalations cannot reach firstmate - $(fm_afk_canary_cause "$verdict" "$backend" "$target"); $(fm_afk_canary_fix "$verdict")"
+  IFS="$FM_AFK_CANARY_TAB" read -r backend target verdict source <<<"$resolved"
+  echo "AFK_INJECTION_DISABLED: away mode is armed but escalations cannot reach firstmate - $(fm_afk_canary_cause "$verdict" "$backend" "$target"); $(fm_afk_canary_fix "$verdict" "$source")"
 }
 
 if [ "${1:-}" = "install" ]; then

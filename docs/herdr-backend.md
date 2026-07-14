@@ -706,15 +706,25 @@ WHICH pane they probe is its own question, and the wrong answer is a false all-c
 The daemon fixes its target once, at launch, and the launcher's already-running path deliberately does not retarget a live daemon - so away mode armed in one pane outlives firstmate's session: the captain restarts firstmate in a NEW pane, `state/.afk` is still set, recovery re-arms, and the daemon is still typing into the OLD one.
 Probing the pane the script happens to run in would find firstmate obviously alive there and say nothing, while every escalation lands in a pane nobody is reading - and if that pane is gone entirely, `inject_msg`'s pane-gone guard skips housekeeping, so not even the wedge alarm fires.
 So the daemon publishes the endpoint it actually injects into (`<backend>\t<target>`) in the lock dir it holds, next to the lock's `pid-identity`, and `fm_afk_canary_resolve` probes THAT pane whenever a live daemon owns the lock, falling back to the current pane only for a fresh arm.
+Whether the lock's owner is a live daemon at all is decided by `bin/fm-afk-start.sh`'s existing gate (`daemon_lock_held_by_live_daemon`), which prefers the lock's `pid-identity` over a bare pid + command match and so cannot be fooled by pid reuse; a second, weaker gate in the canary would be one more contract to drift.
 That record is scoped to the process - the lock dir is created when the daemon takes the lock and removed when it releases it - so it cannot be read back from a daemon that is already gone, and it is deliberately not the startup log, which is size-capped and would trim the line away underneath a reader during a long away session.
 Reading it is not a cached verdict: it resolves which pane to ask, and the liveness of that pane is still probed live, every single time.
 
-Second, the warning names the RIGHT cause, because `dead` and `unknown` are different problems.
+Second, the warning names the RIGHT cause, because `gone`, `dead`, and `unknown` are different problems.
 At arm time firstmate is provably running, so `dead` (a bare shell) means the resolved TARGET points somewhere else - a fixable misconfiguration, repoint `FM_SUPERVISOR_TARGET` and re-arm.
 `unknown` is genuinely AMBIGUOUS and is worded as such, because it is not one condition: `fm_backend_agent_alive` returns it for any foreground command outside its known set - the unattributable pi `node`, but equally a wrapper, another runtime, or a pane it could not read - and a probe error normalizes into it too.
 Only the unattributable-harness case is the accepted degradation, so the `unknown` line offers both causes and has the reader confirm the target before accepting it; a confident "accepted degradation, do nothing" would send an operator whose pane is simply unreadable off to live with a bug, which is the mirror image of telling a wrong-target operator to accept a known limitation.
 The canary is ADVISORY throughout: a bad verdict (or a probe error, treated as `unknown`) warns and arms anyway, because degraded supervision beats none - unlike the unsupported-backend check above it, which refuses.
-An unresolvable pane stays QUIET rather than inventing a failure: with no pane there is no foreground process to read, so any verdict would be a guess dressed up as a diagnosis.
+
+A missing pane means opposite things depending on where the target came from, so the existence gate branches on that rather than collapsing both into silence.
+An unresolvable pane from the fallback - no live daemon, so the pane in hand is just the one the observer is running in - stays QUIET rather than inventing a failure: with no pane there is no foreground process to read, so any verdict would be a guess dressed up as a diagnosis.
+But a LIVE daemon's own asserted target vanishing (`gone`) is the diagnosis, and it is the worst state in the design: that daemon delivers nothing, and having no pane it skips the housekeeping tick where `inject_wedge_alarm` lives, so the alarm built to catch a wedged injection is silent about exactly this.
+Treating it as "nothing to say" would make the one failure with no other channel the one every surface reports all-clear on, so it gets its own loud line naming the vanished pane.
+
+And the remediation has to be one that WORKS on a running daemon.
+Re-arming does not retarget one: `fm_afk_launch_start` returns early on a live daemon lock, refreshing `state/.afk` and nothing else, and there is no retarget subcommand.
+So whenever the verdict was resolved from a live daemon's endpoint - which is by construction every `gone`, and every `dead`/`unknown` after a restart - the printed fix is to STOP away mode first (`bin/fm-afk-launch.sh stop`, which SIGTERMs the daemon so its buffered escalations flush) and arm it again from firstmate's own pane.
+"Repoint `FM_SUPERVISOR_TARGET` and re-arm" is kept only for the fresh-arm path, where it is actually what fixes it.
 
 Third, the wedge alarm no longer hardcodes "pane busy or wedged" as the cause: `inject_msg` records why each attempt did not land (`pane-busy`, `composer-not-empty`, `agent-dead`, `agent-unknown`, `submit-unconfirmed`, `pane-gone`), and the alarm reports that tag in its active alert and the full detail in its ERROR log and durable marker.
 Before this, the most likely permanent wedge the guard introduces - a dead or unverifiable agent - would have been reported to the captain as a busy pane.

@@ -119,9 +119,14 @@ The daemon also records its own `agent_liveness=` verdict in `state/.supervise-d
 
 The canary is advisory: away mode still arms and still works through the wedge alarm and the afk-exit catch-up flush.
 Read the cause the warning prints, because the verdicts need opposite responses.
-A `dead` supervisor target is a bare shell while firstmate is provably running, so the target points at the wrong pane - a fixable misconfiguration; repoint it and re-arm.
+A `dead` supervisor target is a bare shell while firstmate is provably running, so the target points at the wrong pane - a fixable misconfiguration.
 An `unknown` verdict is genuinely ambiguous and the warning says so: it is either an unattributable harness (pi's generic `node`) or a pane the probe could not read, and only the first is an accepted degradation.
 Confirm the target names firstmate's own pane before accepting it; once it does, tell the captain in plain outcome language that escalations will not reach them until they are back, and let them decide whether to continue.
+The one verdict that is never an accepted degradation is a vanished pane: when a running daemon's own target no longer exists it delivers nothing AND never reaches the wedge alarm, so the captain hears nothing at all - report it and fix it rather than continuing away mode.
+
+Do what the printed fix says, because the two forms are not interchangeable.
+Re-arming never retargets a running daemon - `bin/fm-afk-launch.sh start` returns early on a live daemon and only refreshes the flag - so when the verdict came from a running daemon's endpoint the fix is to stop away mode first (`bin/fm-afk-launch.sh stop`, which flushes what it buffered) and then arm it again from firstmate's own pane.
+Repointing `FM_SUPERVISOR_TARGET` and re-arming only fixes a fresh arm.
 
 **Max-defer escape (the daemon must never silently wedge).**
 If anything stays buffered past `FM_MAX_DEFER_SECS` (default 300), the daemon

@@ -619,13 +619,13 @@ fm_afk_launch_stop() {
 # ADVISORY - away mode is already armed by the time this runs, and a non-alive
 # verdict must never turn into a failed arm.
 fm_afk_launch_canary() {
-  local resolved rc backend target verdict
+  local resolved rc backend target verdict source
   resolved=$(fm_afk_canary_resolve "$FM_AFK_LAUNCH_STATE")
   rc=$?
   # 0 = injection is live, 2 = no supervisor pane to speak about. Either way, quiet.
   [ "$rc" -eq 1 ] || return 0
-  IFS="$FM_AFK_CANARY_TAB" read -r backend target verdict <<<"$resolved"
-  fm_afk_canary_banner "$verdict" "$backend" "$target" >&2
+  IFS="$FM_AFK_CANARY_TAB" read -r backend target verdict source <<<"$resolved"
+  fm_afk_canary_banner "$verdict" "$backend" "$target" "$source" >&2
   return 0
 }
 

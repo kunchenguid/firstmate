@@ -34,6 +34,8 @@
 #
 # Source bin/fm-backend.sh (fm_backend_agent_alive, fm_backend_target_exists) and
 # bin/fm-supervisor-target-lib.sh (discover_supervisor_target/_backend) first.
+# Callers of fm_afk_canary_resolve/_daemon_endpoint must also source
+# bin/fm-afk-start.sh, which owns the daemon-lock liveness gate.
 
 FM_AFK_CANARY_RULE='━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'
 FM_AFK_CANARY_TAB=$(printf '\t')
@@ -48,8 +50,13 @@ fm_afk_canary_verdict() {  # <backend> <target>
   printf '%s' "${verdict:-unknown}"
 }
 
-# fm_afk_canary_cause: why this supervisor cannot receive injections. `dead` and
-# `unknown` are DIFFERENT problems and must never share one line.
+# fm_afk_canary_cause: why this supervisor cannot receive injections. `gone`,
+# `dead`, and `unknown` are DIFFERENT problems and must never share one line.
+#
+# `gone` is the worst of the three: a LIVE daemon is injecting into a pane that no
+# longer exists. It cannot deliver, and with no pane it never reaches housekeeping
+# either, so not even the wedge alarm fires (bin/fm-supervise-daemon.sh's pane-gone
+# guard). Nothing at all reaches the captain until away mode is restarted.
 #
 # `dead` is definite: the probe read the target's foreground process and it is a
 # bare shell, while firstmate is provably running somewhere. The TARGET points at
@@ -64,6 +71,9 @@ fm_afk_canary_verdict() {  # <backend> <target>
 # a problem they could have fixed.
 fm_afk_canary_cause() {  # <verdict> <backend> <target>
   case "$1" in
+    gone)
+      printf "the running away-mode daemon injects into target '%s' on backend '%s', and that pane no longer exists - it cannot even raise the wedge alarm" "$3" "$2"
+      ;;
     dead)
       printf "supervisor target '%s' on backend '%s' is a bare shell, not the pane running firstmate" "$3" "$2"
       ;;
@@ -73,16 +83,31 @@ fm_afk_canary_cause() {  # <verdict> <backend> <target>
   esac
 }
 
-# fm_afk_canary_fix: what to do about it, branched on the same distinction. The
-# `unknown` remediation must cover BOTH of its causes and must not open with a
-# confident "do nothing" - that is only right once the target is confirmed.
-fm_afk_canary_fix() {  # <verdict>
+# fm_afk_canary_fix: what to do about it, branched on the verdict AND on where the
+# target came from, because the obvious remediation is a no-op for half of them.
+#
+# A LIVE daemon fixed its target once, at launch, and bin/fm-afk-launch.sh's
+# already-running path returns early on a healthy daemon lock - it refreshes
+# state/.afk and never retargets. So telling the reader to "re-arm away mode" when
+# the verdict came from that daemon's own endpoint is advice that provably changes
+# nothing. Away mode has to be STOPPED first (which is also what flushes what the
+# daemon buffered) and armed again from firstmate's own pane.
+#
+# The `unknown` remediation must additionally cover BOTH of its causes and must not
+# open with a confident "do nothing" - that is only right once the target is confirmed.
+fm_afk_canary_fix() {  # <verdict> [<source>]
+  local retarget
+  if [ "${2:-}" = daemon ]; then
+    retarget="stop away mode (bin/fm-afk-launch.sh stop, which flushes what the daemon buffered) and arm it again from firstmate's own pane - re-arming alone only refreshes the flag and leaves the running daemon on its old target"
+  else
+    retarget="point FM_SUPERVISOR_TARGET at firstmate's own pane and re-arm away mode"
+  fi
   case "$1" in
-    dead)
-      printf "point FM_SUPERVISOR_TARGET at firstmate's own pane and re-arm away mode"
+    gone|dead)
+      printf '%s' "$retarget"
       ;;
     *)
-      printf "check that FM_SUPERVISOR_TARGET still names firstmate's own pane and re-arm away mode; if it does, this harness is simply unattributable on this backend - an accepted degradation, and escalations still reach the captain through the wedge alarm and the afk-exit catch-up, or arm away mode on an attributable harness (claude, codex, opencode, grok)"
+      printf "check that the target above is still firstmate's own pane; if it is, this harness is simply unattributable on this backend - an accepted degradation, and escalations still reach the captain through the wedge alarm and the afk-exit catch-up; if it is not, %s, or arm away mode on an attributable harness (claude, codex, opencode, grok)" "$retarget"
       ;;
   esac
 }
@@ -90,16 +115,23 @@ fm_afk_canary_fix() {  # <verdict>
 # fm_afk_canary_banner: the loud, bordered arm-time warning, in the same shape as
 # bin/fm-guard.sh's alarms so it cannot be skimmed past in tool output. Printed on
 # stdout; callers redirect it to the channel their reader actually watches.
-fm_afk_canary_banner() {  # <verdict> <backend> <target>
+fm_afk_canary_banner() {  # <verdict> <backend> <target> [<source>]
   printf '●%s\n' "$FM_AFK_CANARY_RULE"
   printf '●  AWAY-MODE INJECTION IS DISABLED FOR THIS SUPERVISOR\n'
-  printf "●  The agent-liveness probe reads '%s' (not alive) for '%s' on backend '%s',\n" "$1" "$3" "$2"
-  printf '●  even though firstmate is running right now. Injection fails closed, so it will\n'
-  printf '●  refuse EVERY escalation this away session rather than risk typing into a shell.\n'
-  printf '●  Nothing is lost: escalations buffer, raise the wedge alarm past FM_MAX_DEFER_SECS,\n'
-  printf '●  and flush on afk exit - but none will reach the pane while the captain is away.\n'
-  printf '●  Cause: %s.\n' "$(fm_afk_canary_cause "$@")"
-  printf '●  Fix:   %s.\n' "$(fm_afk_canary_fix "$1")"
+  if [ "$1" = gone ]; then
+    printf "●  The pane the running away-mode daemon injects into ('%s' on backend '%s') is\n" "$3" "$2"
+    printf '●  GONE. It has nowhere to deliver an escalation, and with no pane it never reaches\n'
+    printf '●  housekeeping either, so not even the wedge alarm fires: NOTHING will reach the\n'
+    printf '●  captain, and nothing will say so, until away mode is restarted.\n'
+  else
+    printf "●  The agent-liveness probe reads '%s' (not alive) for '%s' on backend '%s',\n" "$1" "$3" "$2"
+    printf '●  even though firstmate is running right now. Injection fails closed, so it will\n'
+    printf '●  refuse EVERY escalation this away session rather than risk typing into a shell.\n'
+    printf '●  Nothing is lost: escalations buffer, raise the wedge alarm past FM_MAX_DEFER_SECS,\n'
+    printf '●  and flush on afk exit - but none will reach the pane while the captain is away.\n'
+  fi
+  printf '●  Cause: %s.\n' "$(fm_afk_canary_cause "$1" "$2" "$3")"
+  printf '●  Fix:   %s.\n' "$(fm_afk_canary_fix "$1" "${4:-}")"
   printf '●%s\n' "$FM_AFK_CANARY_RULE"
 }
 
@@ -111,13 +143,15 @@ fm_afk_canary_banner() {  # <verdict> <backend> <target>
 #
 # For the DAEMON, which already holds its own validated backend/target. The two
 # observing surfaces must go through fm_afk_canary_resolve instead, because they
-# do not know the endpoint yet.
+# do not know the endpoint yet. The source is `daemon` because by the time this
+# runs the daemon holds the lock: whoever reads this banner has a live daemon to
+# stop, not just an env var to repoint.
 fm_afk_canary_warn() {  # <backend> <target>
   local verdict
   verdict=$(fm_afk_canary_verdict "$1" "$2")
   printf '%s' "$verdict"
   [ "$verdict" = alive ] && return 0
-  fm_afk_canary_banner "$verdict" "$1" "$2" >&2
+  fm_afk_canary_banner "$verdict" "$1" "$2" daemon >&2
   return 1
 }
 
@@ -133,20 +167,15 @@ fm_afk_canary_warn() {  # <backend> <target>
 # dir (bin/fm-supervise-daemon.sh), which exists only while it holds the lock.
 #
 # Reading it is not a cached verdict: this resolves WHICH pane to probe, and the
-# probe itself still runs live below. The pid gate keeps a crashed daemon's leftover
-# lock from speaking for a process that is gone.
+# probe itself still runs live below. The liveness gate belongs to bin/fm-afk-start.sh
+# (daemon_lock_held_by_live_daemon), which prefers the lock's pid-identity over a
+# bare pid + command match and so cannot be fooled by pid reuse - a second, weaker
+# gate here would be one more contract to drift.
 fm_afk_canary_daemon_endpoint() {  # <state-dir>
-  local lock="$1/.supervise-daemon.lock" pid record
-  pid=$(cat "$lock/pid" 2>/dev/null) || return 1
-  case "$pid" in
-    ''|*[!0-9]*) return 1 ;;
-  esac
-  kill -0 "$pid" 2>/dev/null || return 1
-  case "$(ps -p "$pid" -o command= 2>/dev/null)" in
-    *fm-supervise-daemon*) ;;
-    *) return 1 ;;
-  esac
-  record=$(cat "$lock/supervisor-endpoint" 2>/dev/null) || return 1
+  local lock="$1/.supervise-daemon.lock" owner record
+  daemon_lock_held_by_live_daemon "$lock" || return 1
+  owner=$(daemon_lock_owner "$lock") || return 1
+  record=$(cat "$owner/supervisor-endpoint" 2>/dev/null) || return 1
   case "$record" in
     *"$FM_AFK_CANARY_TAB"*) printf '%s' "$record" ;;
     *) return 1 ;;
@@ -158,26 +187,40 @@ fm_afk_canary_daemon_endpoint() {  # <state-dir>
 # bin/fm-bootstrap.sh's session-start diagnostic) cannot answer differently about
 # the same supervisor. Each caller decides only how to render the result.
 #
-# Prints "<backend>\t<target>\t<verdict>" and returns:
+# A missing pane means opposite things depending on WHERE the target came from, so
+# the existence gate branches on the source rather than collapsing both into silence:
+#
+#   - `discover` (no live daemon; this is the pane the caller is running in). Stay
+#     QUIET. Without a pane there is no foreground process to read, so every verdict
+#     it could produce would be a guess dressed up as a diagnosis.
+#   - `daemon` (a LIVE daemon asserting the pane it injects into). REPORT IT. The
+#     non-existence IS the diagnosis, and it is the worst state in the design: that
+#     daemon delivers nothing and, having no pane, skips the housekeeping tick that
+#     would have raised the wedge alarm about it.
+#
+# Prints "<backend>\t<target>\t<verdict>\t<source>" and returns:
 #   0 - injection is live (verdict `alive`); say nothing.
 #   1 - injection is disabled; report it with fm_afk_canary_cause/_fix or the banner.
-#   2 - nothing to report. The supervisor pane could not be resolved, or does not
-#       exist on its backend. An unresolvable pane stays QUIET rather than inventing
-#       a failure: without a pane there is no foreground process to read, so every
-#       verdict it could produce would be a guess dressed up as a diagnosis.
+#   2 - nothing to report; no supervisor pane could be resolved to speak about.
 fm_afk_canary_resolve() {  # <state-dir>
-  local record backend target verdict
+  local record backend target verdict source=daemon
   if record=$(fm_afk_canary_daemon_endpoint "$1"); then
     backend=${record%%"$FM_AFK_CANARY_TAB"*}
     target=${record#*"$FM_AFK_CANARY_TAB"}
   else
+    source=discover
     target=$(discover_supervisor_target) || return 2
     backend=$(discover_supervisor_backend) || return 2
   fi
   [ -n "$backend" ] && [ -n "$target" ] || return 2
-  fm_backend_target_exists "$backend" "$target" || return 2
-  verdict=$(fm_afk_canary_verdict "$backend" "$target")
-  printf '%s%s%s%s%s' "$backend" "$FM_AFK_CANARY_TAB" "$target" "$FM_AFK_CANARY_TAB" "$verdict"
+  if fm_backend_target_exists "$backend" "$target"; then
+    verdict=$(fm_afk_canary_verdict "$backend" "$target")
+  else
+    [ "$source" = daemon ] || return 2
+    verdict=gone
+  fi
+  printf '%s%s%s%s%s%s%s' "$backend" "$FM_AFK_CANARY_TAB" "$target" \
+    "$FM_AFK_CANARY_TAB" "$verdict" "$FM_AFK_CANARY_TAB" "$source"
   [ "$verdict" = alive ] && return 0
   return 1
 }

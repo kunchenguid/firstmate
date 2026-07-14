@@ -66,19 +66,25 @@ fm_afk_clear_stale_artifacts() {  # <state-dir>
         "$state/.subsuper-inject-wedged" 2>/dev/null
 }
 
-daemon_lock_owner() {
-  local owner
-  if [ -L "$FM_AFK_LOCK" ]; then
-    owner=$(readlink "$FM_AFK_LOCK" 2>/dev/null) || return 1
+# The daemon-lock liveness gate. The lock path defaults to this home's, but every
+# helper takes it as an argument so a caller holding a state dir rather than this
+# script's globals (bin/fm-afk-canary-lib.sh, asking which pane a live daemon
+# injects into) can reuse the gate instead of hand-rolling a weaker one - a bare
+# pid + command match cannot rule out pid reuse, which is exactly what
+# daemon_pid_matches prefers pid-identity to close.
+daemon_lock_owner() {  # [<lock-path>]
+  local lock=${1:-$FM_AFK_LOCK} owner
+  if [ -L "$lock" ]; then
+    owner=$(readlink "$lock" 2>/dev/null) || return 1
     [ -n "$owner" ] || return 1
     case "$owner" in
       /*) printf '%s\n' "$owner" ;;
-      *) printf '%s/%s\n' "$(dirname "$FM_AFK_LOCK")" "$owner" ;;
+      *) printf '%s/%s\n' "$(dirname "$lock")" "$owner" ;;
     esac
     return 0
   fi
-  [ -d "$FM_AFK_LOCK" ] || return 1
-  printf '%s\n' "$FM_AFK_LOCK"
+  [ -d "$lock" ] || return 1
+  printf '%s\n' "$lock"
 }
 
 daemon_pid_matches() {
@@ -96,15 +102,15 @@ daemon_pid_matches() {
   return 1
 }
 
-daemon_lock_pid() {
+daemon_lock_pid() {  # [<lock-path>]
   local owner
-  owner=$(daemon_lock_owner) || return 1
+  owner=$(daemon_lock_owner "${1:-$FM_AFK_LOCK}") || return 1
   cat "$owner/pid" 2>/dev/null || true
 }
 
-daemon_lock_held_by_live_daemon() {
+daemon_lock_held_by_live_daemon() {  # [<lock-path>]
   local owner pid
-  owner=$(daemon_lock_owner) || return 1
+  owner=$(daemon_lock_owner "${1:-$FM_AFK_LOCK}") || return 1
   pid=$(cat "$owner/pid" 2>/dev/null || true)
   fm_pid_alive "$pid" || return 1
   daemon_pid_matches "$pid" "$owner"
