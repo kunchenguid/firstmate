@@ -17,18 +17,29 @@ mkdir -p "$STATE"
 # Known harness command names; extend when a new adapter is verified.
 HARNESS_RE='claude|codex|opencode|grok|^pi$'
 
+# harness_match <comm> <args>: true if a process looks like a harness. A match on
+# the command basename catches the common case (comm=claude); a match on the
+# argument vector catches interpreter-hosted harnesses (node/python whose comm is
+# the interpreter) and Claude builds whose comm is a bare version number
+# ("2.1.206") with no literal harness token in comm - the executable path or a
+# parent's args still carry it (the WSL ".../claude/versions/<v> --session-id"
+# session process and its "claude bg-pty-host ..." parent). Anchored "^pi$" only
+# matches a bare-"pi" comm, never an arbitrary arg substring, so args-matching
+# stays conservative.
+harness_match() {
+  local comm=$1 args=$2
+  printf '%s' "$(basename "$comm")" | grep -qE "$HARNESS_RE" && return 0
+  printf '%s' "$args" | grep -qE "$HARNESS_RE"
+}
+
 harness_pid() {
   local pid=$$ comm args
   for _ in 1 2 3 4 5 6 7 8; do
     comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
     args=$(ps -o args= -p "$pid" 2>/dev/null)
-    if printf '%s' "$(basename "$comm")" | grep -qE "$HARNESS_RE"; then
+    if harness_match "$comm" "$args"; then
       echo "$pid"; return 0
     fi
-    # Bare interpreter (e.g. node): match the harness name in its script path.
-    case "$comm" in
-      *node*|*python*) printf '%s' "$args" | grep -qE "$HARNESS_RE" && { echo "$pid"; return 0; } ;;
-    esac
     pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
     [ -n "$pid" ] && [ "$pid" -gt 1 ] || return 1
   done
@@ -39,7 +50,7 @@ holder_alive() {  # true if $1 is a live process that looks like a harness
   local pid=$1 comm
   kill -0 "$pid" 2>/dev/null || return 1
   comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
-  printf '%s' "$(basename "$comm") $(ps -o args= -p "$pid" 2>/dev/null)" | grep -qE "$HARNESS_RE"
+  harness_match "$comm" "$(ps -o args= -p "$pid" 2>/dev/null)"
 }
 
 if [ "${1:-}" = "status" ]; then
