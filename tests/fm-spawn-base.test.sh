@@ -15,6 +15,9 @@
 #   (e) --base is rejected for a scout and for a secondmate
 #   (f) a declared base origin does not have -> the same early, loud refusal
 #   (g) --base is rejected in a batch spawn, where it could not name one task
+#   (h) a respawn without --base carries the recorded base=/base_sha= forward, because
+#       meta is rewritten wholesale and a base lost on recovery is a task unguarded
+#   (i) --base is rejected for a local-only project, whose merge path has no guard
 #
 # base_sha= is the base's tip on origin at spawn time, resolved while the base
 # necessarily still exists. That is the fact fm-pr-check.sh needs once the branch is
@@ -243,6 +246,61 @@ test_base_rejected_for_scout_and_secondmate() {
   pass "fm-spawn rejects --base for scouts and secondmates"
 }
 
+# state/<id>.meta is rewritten wholesale on every spawn, so a respawn (recovery, a
+# relaunch after a stuck crewmate) that does not re-supply --base would silently drop
+# the declaration - and fm-pr-check.sh, finding no base=, would skip the guard entirely
+# and record pr= for a wrong-based PR with no diagnostic. That is the exact fail-open
+# this whole design exists to make impossible, so a respawn must carry the recorded
+# declaration forward, tip and all. Retiring a base stays a deliberate meta edit.
+test_respawn_without_base_carries_the_declaration_forward() {
+  local rec id out status origin_sha
+  id=spawn-base-b8
+  rec=$(make_spawn_case respawn "$id" feature/keepme)
+  read_case_record "$rec"
+  origin_sha=$(git -C "$CASE_DIR/origin.git" rev-parse refs/heads/feature/keepme)
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR" --base feature/keepme)
+  status=$?
+  expect_code 0 "$status" "respawn: the first (based) spawn should succeed"$'\n'"$out"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "respawn: a respawn without --base should succeed"$'\n'"$out"
+  assert_grep "base=feature/keepme" "$HOME_DIR/state/$id.meta" \
+    "respawn: a respawn without --base dropped the declared base, leaving the task unguarded at merge"
+  assert_grep "base_sha=$origin_sha" "$HOME_DIR/state/$id.meta" \
+    "respawn: the recorded base tip was dropped, so a base later deleted from origin could not be told merged from abandoned"
+  assert_contains "$out" "carrying it forward" "respawn: the carried-forward base should be said out loud"
+  pass "fm-spawn carries a declared base forward across a respawn that omits --base"
+}
+
+# A base is a fact about a PR's target. local-only has neither remote nor PR: its work
+# reaches main through bin/fm-merge-local.sh, which has no base guard at all. Recording
+# a base there would leave the one delivery mode where a wrong-based branch merges
+# unchecked - the 2026-07-07 incident, in the mode the guard does not cover. fm-brief.sh
+# refuses it too, but this script owns the durable record, so it must enforce its own rule.
+test_base_rejected_for_a_local_only_project() {
+  local rec id out status log
+  id=spawn-base-b9
+  rec=$(make_spawn_case localonly "$id" feature/x)
+  read_case_record "$rec"
+  log="$CASE_DIR/tmux.log"
+  : > "$log"
+  printf -- '- %s [local-only] - test project (added 2026-07-14)\n' "$(basename "$PROJ_DIR")" \
+    > "$HOME_DIR/data/projects.md"
+
+  out=$(FM_TEST_TMUX_LOG="$log" run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR" --base feature/x)
+  status=$?
+  expect_code 1 "$status" "localonly: --base must be refused for a local-only project, whose merge path has no guard"
+  assert_contains "$out" "ships local-only" "localonly: refusal did not explain why a local-only project cannot carry a base"
+  assert_absent "$HOME_DIR/state/$id.meta" "localonly: a refused --base must not record a base it cannot guard"
+  assert_no_grep "new-window" "$log" \
+    "localonly: the refusal created a backend window it then abandoned, with no meta to reconcile it"
+  assert_no_grep "treehouse get" "$log" \
+    "localonly: the refusal leased a task worktree it then abandoned, with no meta to release it"
+  pass "fm-spawn refuses --base for a local-only project, before any window or worktree exists"
+}
+
 # A base is a fact about ONE task. Shared across a batch it would silently guard
 # every pair against a base only one of them declared.
 test_base_rejected_in_a_batch() {
@@ -265,4 +323,6 @@ test_invalid_base_refuses_before_creating_anything
 test_base_missing_from_origin_refuses_before_creating_anything
 test_a_good_spawn_does_create_the_window_and_worktree
 test_base_rejected_for_scout_and_secondmate
+test_respawn_without_base_carries_the_declaration_forward
+test_base_rejected_for_a_local_only_project
 test_base_rejected_in_a_batch

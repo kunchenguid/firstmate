@@ -68,12 +68,19 @@
 #   abandoned once the branch itself is deleted from origin (bin/fm-base-lib.sh owns
 #   that rule). An invalid branch name, a base origin does not have, or an origin
 #   that cannot be asked all refuse the spawn rather than recording a base the guard
-#   could not later verify against. Those refusals are raised with the brief check,
-#   BEFORE any backend window or worktree lease is acquired, so they strand nothing
-#   for recovery or fm-teardown.sh to reconcile. It applies only to a ship task, and
-#   only to a single-task spawn (a base is per-task, so a batch cannot share one).
+#   could not later verify against. So does a local-only project: it has no remote and
+#   no PR, so bin/fm-merge-local.sh would merge a based branch into local main with no
+#   guard to run at all. Those refusals are raised with the brief check, BEFORE any
+#   backend window or worktree lease is acquired, so they strand nothing for recovery
+#   or fm-teardown.sh to reconcile. It applies only to a ship task, and only to a
+#   single-task spawn (a base is per-task, so a batch cannot share one).
 #   Absent means the repo default branch is the base and the meta stays
-#   byte-identical to the pre-base default path (no base=/base_sha= lines).
+#   byte-identical to the pre-base default path (no base=/base_sha= lines) - EXCEPT on
+#   a respawn of a task whose meta already declares one, where the recorded
+#   base=/base_sha= are carried forward rather than silently dropped: meta is rewritten
+#   wholesale, and a base that vanished on recovery would leave the task unguarded.
+#   Retiring a base is the deliberate gesture fm-pr-check.sh's refusals prescribe -
+#   drop the base= line from meta.
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
@@ -695,6 +702,60 @@ else
 fi
 [ -f "$BRIEF" ] || { echo "error: no brief at $BRIEF" >&2; exit 1; }
 
+# Per-project delivery mode + yolo flag (bin/fm-project-mode.sh; AGENTS.md project management and task lifecycle).
+# Recorded in meta so fm-teardown's safety check and the validate/merge stages can
+# branch on them. Mode governs ship tasks; a scout's deliverable is a report, not a
+# merge, so scout teardown ignores mode. Resolved here rather than at the meta write,
+# because the base block below refuses a base a local-only project cannot guard, and
+# that refusal has to land before any window or worktree lease exists.
+SECONDMATE_PROJECTS=
+if [ "$KIND" = secondmate ]; then
+  MODE=secondmate
+  YOLO=off
+  SECONDMATE_PROJECTS=$(secondmate_registry_value "$ID" projects || true)
+else
+  PROJ_NAME=$(basename "$PROJ_ABS")
+  read -r MODE YOLO <<EOF
+$("$FM_ROOT/bin/fm-project-mode.sh" "$PROJ_NAME")
+EOF
+fi
+
+# A respawn (recovery, a relaunch after a stuck crewmate) rewrites meta wholesale, so a
+# base that was declared once but not re-supplied would silently vanish - and with it
+# the guard, leaving exactly the unguarded based task this whole design exists to make
+# impossible. Carry the recorded declaration forward instead. Retiring a base stays the
+# one deliberate gesture every refusal in fm-pr-check.sh prescribes: drop the base= line
+# from meta. Forgetting is never an accident.
+#
+# The recorded tip comes with it, so the carry-forward does not re-probe origin: a base
+# that has since merged and been deleted is a normal end-state, and re-probing would
+# refuse the respawn of a task whose PR is perfectly mergeable.
+BASE_CARRIED=0
+if [ "$BASE_SET" -eq 0 ] && [ "$KIND" = ship ] && [ -f "$STATE/$ID.meta" ]; then
+  RECORDED_BASE=$(grep '^base=' "$STATE/$ID.meta" | tail -1 | cut -d= -f2- || true)
+  if [ -n "$RECORDED_BASE" ]; then
+    fm_base_valid_branch_name "$RECORDED_BASE" || {
+      echo "error: task $ID records base='$RECORDED_BASE' in $STATE/$ID.meta, which is not a valid git branch name, so the PR-base guard could not verify against it. Fix or drop that base= line before respawning." >&2
+      exit 1
+    }
+    BASE=$RECORDED_BASE
+    BASE_SHA=$(grep '^base_sha=' "$STATE/$ID.meta" | tail -1 | cut -d= -f2- || true)
+    BASE_CARRIED=1
+    echo "note: task $ID already declares intended base '$BASE'; carrying it forward. A respawn without --base does not retire a base - drop the 'base=' line from $STATE/$ID.meta to do that." >&2
+    [ -n "$BASE_SHA" ] || echo "warning: task $ID records base='$BASE' with no base_sha= tip, so once that branch leaves origin the guard cannot tell a merged base from an abandoned one and will refuse. Re-spawn with --base $BASE to record the tip." >&2
+  fi
+fi
+
+# A base is a fact about a PR's target, and local-only has no remote and no PR: it
+# merges the crewmate's branch into local main through bin/fm-merge-local.sh, which
+# has no base guard to run. Recording a base there would leave the one delivery mode
+# where a wrong-based branch merges unchecked. Refuse it - here, in the one owner of
+# the record, not only in fm-brief.sh's friendlier early check.
+if [ -n "$BASE" ] && [ "$MODE" = local-only ]; then
+  echo "error: task $ID declares intended base '$BASE', but project '$PROJ_NAME' ships local-only (no remote, no PR), so nothing can guard a based merge into local main. Re-run without --base, or register the project in a PR-based mode." >&2
+  exit 1
+fi
+
 # Resolve the declared base's tip on origin NOW, while the base necessarily still
 # exists, so meta can carry it as base_sha=. It is the durable fact fm-pr-check.sh
 # needs later: once the base branch is deleted from origin, its absence alone cannot
@@ -706,7 +767,7 @@ fi
 # fired after those resources exist would strand them with no meta for recovery or
 # teardown to reconcile. Refusing here is free - nothing has been created yet - and it
 # also catches a mistyped base before a crewmate spends a whole run on it.
-if [ -n "$BASE" ]; then
+if [ -n "$BASE" ] && [ "$BASE_CARRIED" -eq 0 ]; then
   BASE_PROBE_RC=0
   fm_base_probe_origin "$PROJ_ABS" "$BASE" || BASE_PROBE_RC=$?
   case "$BASE_PROBE_RC" in
@@ -1052,22 +1113,6 @@ EOF
       exclude_path '.fm-grok-turnend'
       ;;
   esac
-fi
-
-# Per-project delivery mode + yolo flag (bin/fm-project-mode.sh; AGENTS.md project management and task lifecycle).
-# Recorded in meta so fm-teardown's safety check and the validate/merge stages can
-# branch on them. Mode governs ship tasks; a scout's deliverable is a report, not a
-# merge, so scout teardown ignores mode.
-SECONDMATE_PROJECTS=
-if [ "$KIND" = secondmate ]; then
-  MODE=secondmate
-  YOLO=off
-  SECONDMATE_PROJECTS=$(secondmate_registry_value "$ID" projects || true)
-else
-  PROJ_NAME=$(basename "$PROJ_ABS")
-  read -r MODE YOLO <<EOF
-$("$FM_ROOT/bin/fm-project-mode.sh" "$PROJ_NAME")
-EOF
 fi
 
 META_WINDOW=$T

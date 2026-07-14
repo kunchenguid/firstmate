@@ -991,6 +991,10 @@ test_pr_check_refuses_stand_down_pr_still_targeting_the_merged_base() {
     "landed-label: the refusal did not say the base it targets has merged"
   assert_grep 'pr edit 9 --base main' "$case_dir/stderr" \
     "landed-label: the refusal did not prescribe retargeting back to the default branch"
+  # In a merge gate the message is the only signal. Announcing the stand-down above a
+  # refusal the very same call reaches would have the output contradict itself.
+  assert_no_grep 'guard stands down' "$case_dir/stderr" \
+    "landed-label: the stand-down was announced before the check that then refused, so the output claims an outcome it never reached"
   assert_no_grep 'pr=https://github.com/example/repo/pull/9' "$case_dir/state/task-x1.meta" \
     "landed-label: a PR that would merge into a merged branch must not record pr= before merge"
   assert_absent "$case_dir/state/task-x1.check.sh" \

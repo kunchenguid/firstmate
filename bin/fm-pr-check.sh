@@ -202,19 +202,23 @@ fetch_branch_sha() {
 # Returns FM_BASE_GUARD_STAND_DOWN (proceed on the ordinary default-branch path) or 1.
 stand_down_landed_base() {  # <default-branch-name> <why> <pr-number>
   local default_branch_name=$1 why=$2 n=$3
-  echo "  Its work IS carried by the default branch '$default_branch_name' ($why), so the base merged and there is nothing left to guard." >&2
-  echo "  No unmerged feature history can be dragged into '$default_branch_name', so the base guard stands down and this PR is verified as the ordinary default-branch PR it now is." >&2
+  # Verify BEFORE announcing. The label check below can still refuse, and in a merge
+  # gate the message is the only signal an operator gets - a confident "the guard
+  # stands down and this PR is verified" printed one line above "error: refusing"
+  # contradicts itself and teaches the reader to distrust both.
   if [ -z "$PR_BASE_LABEL" ]; then
     echo "error: task $ID declares intended base '$BASE', whose work has merged - but the PR's base label could not be resolved via gh, so it cannot be confirmed to target '$default_branch_name'. Refusing before merge." >&2
     return 1
   fi
-  echo "  PR base label : $PR_BASE_LABEL" >&2
   if [ "$PR_BASE_LABEL" != "$default_branch_name" ]; then
     echo "error: task $ID PR is opened against base '$PR_BASE_LABEL', but that base has already merged - refusing to record pr= or arm the merge poll before merge." >&2
     echo "  Merging into an already-merged branch would land this fix on '$PR_BASE_LABEL' and never on '$default_branch_name', while the PR would still read as MERGED." >&2
     echo "  Recovery: retarget the PR back to the default branch with 'gh-axi pr edit $n --base $default_branch_name', then drop the 'base=$BASE' line from $META and re-run fm-pr-check." >&2
     return 1
   fi
+  echo "  Its work IS carried by the default branch '$default_branch_name' ($why), so the base merged and there is nothing left to guard." >&2
+  echo "  PR base label : $PR_BASE_LABEL" >&2
+  echo "  No unmerged feature history can be dragged into '$default_branch_name', so the base guard stands down and this PR is verified as the ordinary default-branch PR it now is." >&2
   echo "  Drop the 'base=$BASE' line from $META to retire the declaration for good." >&2
   return "$FM_BASE_GUARD_STAND_DOWN"
 }

@@ -487,9 +487,5 @@ Keep it proportionate: skip \`AGENTS.md\` edits for trivial tasks that produced 
 
 $DOD
 EOF
-if [ -n "$BASE" ]; then
-  echo "scaffolded: $BRIEF (ship, mode=$MODE; replace {TASK})"
-  echo "note: this brief only TELLS the crewmate about base '$BASE'; the durable record lives in meta, so spawn with the same flag or the PR-base guard never runs: fm-spawn.sh $ID <project> --base $BASE"
-else
-  echo "scaffolded: $BRIEF (ship, mode=$MODE; replace {TASK})"
-fi
+echo "scaffolded: $BRIEF (ship, mode=$MODE; replace {TASK})"
+[ -z "$BASE" ] || echo "note: this brief only TELLS the crewmate about base '$BASE'; the durable record lives in meta, so spawn with the same flag or the PR-base guard never runs: fm-spawn.sh $ID <project> --base $BASE"
