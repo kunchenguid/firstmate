@@ -595,10 +595,17 @@ fm_afk_launch_stop() {
 
 fm_afk_launch_main() {
   local result
-  fm_afk_launch_lock_acquire || return 1
+  # Install the cleanup traps BEFORE acquiring the lock so a signal arriving
+  # during acquisition (after the lock dir is created but before acquire
+  # returns) still releases the lock instead of leaking it. Release is a safe
+  # no-op when the lock is not ours.
   trap fm_afk_launch_lock_release EXIT
   trap 'exit 130' INT
   trap 'exit 143' TERM
+  if ! fm_afk_launch_lock_acquire; then
+    trap - EXIT INT TERM
+    return 1
+  fi
   case "${1:-start}" in
     start) fm_afk_launch_start ;;
     start-native) fm_afk_launch_start_native ;;
