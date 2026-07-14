@@ -68,6 +68,14 @@ fm_pr_file_device() {
   fi
 }
 
+fm_pr_file_link_count() {
+  if [ "$(uname)" = Darwin ]; then
+    stat -f %l "$1" 2>/dev/null
+  else
+    stat -c %h "$1" 2>/dev/null
+  fi
+}
+
 fm_pr_regular_destination_or_absent() {
   local path=$1
   [ ! -L "$path" ] || return 1

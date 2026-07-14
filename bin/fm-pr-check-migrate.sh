@@ -295,9 +295,11 @@ quarantine_tree_repair_and_validate() {
     [ -e "$artifact" ] || [ -L "$artifact" ] || continue
     [ -f "$artifact" ] && [ ! -L "$artifact" ] || return 1
     [ "$(fm_pr_file_device "$artifact")" = "$STATE_DEVICE" ] || return 1
+    [ "$(fm_pr_file_link_count "$artifact")" = 1 ] || return 1
     chmod 0600 "$artifact" || return 1
     [ "$(fm_pr_file_mode "$artifact")" = 600 ] || return 1
     [ "$(fm_pr_file_device "$artifact")" = "$STATE_DEVICE" ] || return 1
+    [ "$(fm_pr_file_link_count "$artifact")" = 1 ] || return 1
   done
   quarantine_dir_valid
 }
@@ -352,6 +354,7 @@ quarantine_artifact() {
   quarantine_dir_valid || return 1
   source_device=$(fm_pr_file_device "$source") || return 1
   [ "$source_device" = "$STATE_DEVICE" ] || return 1
+  [ "$(fm_pr_file_link_count "$source")" = 1 ] || return 1
   [ -z "$MIGRATION_QUARANTINE_TMP" ] || rm -f -- "$MIGRATION_QUARANTINE_TMP"
   MIGRATION_QUARANTINE_TMP=
   MIGRATION_QUARANTINE_TMP=$(mktemp "$QUARANTINE/$prefix.$kind.XXXXXX") || return 1
@@ -363,10 +366,12 @@ quarantine_artifact() {
   quarantine_dir_valid || return 1
   mv -- "$source" "$destination" || return 1
   [ -f "$destination" ] && [ ! -L "$destination" ] || return 1
+  [ "$(fm_pr_file_link_count "$destination")" = 1 ] || return 1
   chmod 0600 "$destination" || return 1
   [ -f "$destination" ] && [ ! -L "$destination" ] || return 1
   [ "$(fm_pr_file_mode "$destination")" = 600 ] || return 1
   [ "$(fm_pr_file_device "$destination")" = "$STATE_DEVICE" ] || return 1
+  [ "$(fm_pr_file_link_count "$destination")" = 1 ] || return 1
   [ ! -e "$source" ] && [ ! -L "$source" ]
 }
 
@@ -473,6 +478,9 @@ diagnostic_obligation_message() {
       ambiguous)
         MIGRATION_DIAGNOSTIC_MESSAGE="task $prefix: ambiguous or invalid legacy poll quarantined and unarmed"
         ;;
+      validated)
+        MIGRATION_DIAGNOSTIC_MESSAGE="task $prefix: validated replacement poll armed after legacy quarantine"
+        ;;
       *) return 1 ;;
     esac
   fi
@@ -483,7 +491,7 @@ diagnostic_obligation_message() {
 ensure_diagnostic_obligation() {
   local prefix=$1 kind=$2 message=$3 destination
   case "$kind" in
-    pending-canonical|pending-ambiguous|pending-noncanonical|canonical|failure-canonical|failure-ambiguous|ambiguous|noncanonical) ;;
+    pending-canonical|pending-ambiguous|pending-noncanonical|canonical|failure-canonical|failure-ambiguous|ambiguous|validated|noncanonical) ;;
     *) return 1 ;;
   esac
   [ "$prefix" = "$NONCANONICAL_PREFIX" ] || fm_pr_task_id_valid "$prefix" || return 1
@@ -585,6 +593,15 @@ complete_ambiguous_outcome() {
   remove_diagnostic_obligation "$id" pending-ambiguous
 }
 
+complete_validated_outcome() {
+  local id=$1
+  canonical_terminal_success "$id" || return 1
+  remove_diagnostic_obligation "$id" failure-ambiguous || return 1
+  remove_diagnostic_obligation "$id" ambiguous || return 1
+  ensure_outcome_obligation "$id" validated || return 1
+  remove_diagnostic_obligation "$id" pending-ambiguous
+}
+
 complete_noncanonical_outcome() {
   quarantined_artifact_exists "$NONCANONICAL_PREFIX" check || return 1
   ensure_outcome_obligation "$NONCANONICAL_PREFIX" noncanonical || return 1
@@ -670,6 +687,10 @@ recover_pending_outcomes() {
       pending-ambiguous)
         success="$QUARANTINE/$prefix.diagnostic.ambiguous"
         failure="$QUARANTINE/$prefix.diagnostic.failure-ambiguous"
+        if canonical_terminal_success "$prefix"; then
+          complete_validated_outcome "$prefix" || return 1
+          continue
+        fi
         if ambiguous_terminal_success "$prefix"; then
           complete_ambiguous_outcome "$prefix" || return 1
           continue
@@ -719,6 +740,7 @@ pending_outcomes_complete() {
 }
 
 canonical_rebuilt=0
+validated_rearmed=0
 quarantined_unarmed=0
 process_diagnostic_obligations() {
   local obligation basename message
@@ -733,6 +755,7 @@ process_diagnostic_obligations() {
     record_diagnostic "$message" || return 1
     case "$MIGRATION_DIAGNOSTIC_KIND" in
       canonical) canonical_rebuilt=1 ;;
+      validated) validated_rearmed=1 ;;
       ambiguous|noncanonical) quarantined_unarmed=1 ;;
     esac
   done
@@ -866,10 +889,14 @@ fi
 if [ "$canonical_rebuilt" -eq 1 ]; then
   echo "PR_CHECK_MIGRATION: canonical polls rebuilt and armed; resume supervision for this home"
 fi
+if [ "$validated_rearmed" -eq 1 ]; then
+  echo "PR_CHECK_MIGRATION: validated replacement polls armed; resume supervision for this home"
+fi
 if [ "$quarantined_unarmed" -eq 1 ]; then
   echo "PR_CHECK_MIGRATION: quarantined polls remain unarmed; review state/.pr-check-migration.log before rearming"
 fi
-if [ "$canonical_rebuilt" -eq 0 ] && [ "$quarantined_unarmed" -eq 0 ] \
+if [ "$canonical_rebuilt" -eq 0 ] && [ "$validated_rearmed" -eq 0 ] \
+  && [ "$quarantined_unarmed" -eq 0 ] \
   && [ "$stopped_watcher" -eq 1 ]; then
   echo "PR_CHECK_MIGRATION: migration completed safely; resume supervision for this home"
 fi

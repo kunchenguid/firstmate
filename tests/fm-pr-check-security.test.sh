@@ -1167,7 +1167,81 @@ SH
       [ "$(cat "$external")" = 'external source' ] || fail "quarantine source symlink changed its target"
     fi
   done
+
+  dir=$(make_case quarantine-existing-hardlink)
+  state="$dir/home/state"
+  write_ambiguous_poll "$dir"
+  mkdir "$state/.pr-check-quarantine"
+  external="$dir/external-quarantine-hardlink"
+  printf 'external quarantine hardlink\n' > "$external"
+  chmod 0644 "$external"
+  ln "$external" "$state/.pr-check-quarantine/preexisting"
+  set +e
+  FM_HOME="$dir/home" PATH="$BASE_PATH" "$MIGRATE" >/dev/null 2>/dev/null
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "migration accepted a hardlinked quarantine artifact"
+  [ "$(cat "$external")" = 'external quarantine hardlink' ] \
+    || fail "quarantine validation changed a hardlinked external file"
+  [ "$(file_mode "$external")" = 644 ] \
+    || fail "quarantine validation changed a hardlinked external file mode"
+
+  dir=$(make_case quarantine-source-hardlink)
+  state="$dir/home/state"
+  write_ambiguous_poll "$dir"
+  external="$dir/external-source-hardlink"
+  rm "$state/task-a.check.sh"
+  printf 'external source hardlink\n' > "$external"
+  chmod 0644 "$external"
+  ln "$external" "$state/task-a.check.sh"
+  set +e
+  FM_HOME="$dir/home" PATH="$BASE_PATH" "$MIGRATE" >/dev/null 2>/dev/null
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "migration accepted a hardlinked quarantine source"
+  [ "$(cat "$external")" = 'external source hardlink' ] \
+    || fail "source quarantine changed a hardlinked external file"
+  [ "$(file_mode "$external")" = 644 ] \
+    || fail "source quarantine changed a hardlinked external file mode"
   pass "quarantine type and mode faults fail closed and recover only when a retry can validate them"
+}
+
+test_ambiguous_failure_accepts_validated_replacement() {
+  local dir state rc pending failure success
+  dir=$(make_case ambiguous-validated-replacement)
+  state="$dir/home/state"
+  write_ambiguous_poll "$dir"
+  mkdir "$state/task-a.pr-poll"
+
+  set +e
+  FM_HOME="$dir/home" PATH="$BASE_PATH" "$MIGRATE" >/dev/null 2>/dev/null
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "ambiguous partial migration unexpectedly succeeded"
+  pending="$state/.pr-check-quarantine/task-a.diagnostic.pending-ambiguous"
+  failure="$state/.pr-check-quarantine/task-a.diagnostic.failure-ambiguous"
+  success="$state/.pr-check-quarantine/task-a.diagnostic.validated"
+  [ -f "$pending" ] && [ -f "$failure" ] \
+    || fail "ambiguous partial migration did not persist recovery obligations"
+
+  rmdir "$state/task-a.pr-poll"
+  FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" PATH="$dir/fakebin:$BASE_PATH" \
+    "$PR_CHECK" task-a https://github.com/o/r/pull/10 >/dev/null \
+    || fail "validated replacement poll could not be published"
+  fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+    || fail "replacement registration did not publish a valid poll pair"
+
+  FM_HOME="$dir/home" PATH="$BASE_PATH" "$MIGRATE" > "$dir/migrate-retry.out" 2> "$dir/migrate-retry.err" \
+    || fail "migration did not accept the validated replacement: $(cat "$dir/migrate-retry.err")"
+  assert_valid_migration_marker "$state/.pr-check-migration-v1"
+  [ ! -e "$pending" ] && [ ! -e "$failure" ] \
+    || fail "validated replacement retained ambiguous failure obligations"
+  [ -f "$success" ] || fail "validated replacement did not persist its recovery outcome"
+  fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+    || fail "migration changed the validated replacement poll"
+  assert_grep 'validated replacement polls armed' "$dir/migrate-retry.out" \
+    "replacement recovery did not report its armed outcome"
+  pass "ambiguous migration recovery accepts an explicitly validated replacement poll"
 }
 
 test_failed_outcomes_block_every_retry_until_repaired() {
@@ -1844,6 +1918,7 @@ test_marker_and_diagnostic_rename_fail_closed
 test_postrename_marker_and_diagnostic_validation_retries
 test_quarantine_validation_and_retry_contract
 test_failed_outcomes_block_every_retry_until_repaired
+test_ambiguous_failure_accepts_validated_replacement
 test_canonical_publication_failure_recovers_only_on_retry
 test_nonexecuting_migration
 test_bootstrap_migrates_before_other_mutations
