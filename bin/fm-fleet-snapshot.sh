@@ -540,6 +540,13 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
        | sort_by([(.completion.date // ""), .id]) | reverse) as $landed_all
     | ([ $tasks[] | select(.current_state.state == "unknown") ]) as $unknown_children
     | ([ $owned_in_flight[] | select(.id as $id | [$tasks[].id] | index($id) | not) ]) as $orphan_in_flight
+    | ([ $tasks[]
+         | select(.current_state.state == "working"
+                  or .current_state.state == "parked"
+                  or .current_state.state == "paused"
+                  or .current_state.state == "blocked")
+         | select(.id as $id | [$owned_in_flight[].id] | index($id) | not)
+         | {id,state:.current_state.state} ]) as $unowned_current
     | ([ $owned_in_flight[] as $work
          | $tasks[]
          | select(.id == $work.id and (.current_state.state == "done" or .current_state.state == "failed"))
@@ -562,11 +569,15 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
        and ($unstructured_current | length) == 0
        and ($unknown_children | length) == 0
        and ($orphan_in_flight | length) == 0
+       and ($unowned_current | length) == 0
        and ($terminal_in_flight | length) == 0) as $valid
     | (if $backlog.present != true then "missing structured backlog"
        elif ($unstructured_current | length) > 0 then "unstructured current backlog row"
        elif ($unknown_children | length) > 0 then "child current state unavailable"
        elif ($orphan_in_flight | length) > 0 then "in-flight backlog item has no child metadata"
+       elif ($unowned_current | length) > 0 then
+         "live child state has no in-flight backlog item: " +
+         ($unowned_current | map(.id + "=" + .state) | join(", "))
        elif ($terminal_in_flight | length) > 0 then
          "in-flight backlog item has terminal child state: " +
          ($terminal_in_flight | map(.id + "=" + .state) | join(", "))
@@ -641,14 +652,14 @@ registry_secondmates_json() {
   local reg="$DATA/secondmates.md" out rc reason mode
   if [ ! -f "$reg" ]; then
     jq -n --arg path "$reg" --arg observed "$SNAPSHOT_NOW" \
-      '{present:false,available:true,reason:null,provenance:"registered-table",path:$path,freshness:{status:"fresh",observed_at:$observed},records:[],input_truncated:false,records_truncated:false,reasons:[],lines_in_window:0,records_in_window:0}'
+      '{present:false,available:true,complete:true,reason:null,provenance:"registered-table",path:$path,freshness:{status:"fresh",observed_at:$observed},records:[],input_truncated:false,records_truncated:false,reasons:[],lines_in_window:0,records_in_window:0}'
     return 0
   fi
   mode=$(stat -f '%Lp' "$reg" 2>/dev/null || stat -c '%a' "$reg" 2>/dev/null || true)
   if [ -z "$mode" ] || [ $((8#$mode & 0444)) -eq 0 ]; then
     jq -n --arg path "$reg" --arg observed "$SNAPSHOT_NOW" \
       --arg reason "registered secondmate table is unreadable" \
-      '{present:true,available:false,reason:$reason,provenance:"registered-table",path:$path,freshness:{status:"unavailable",observed_at:$observed},records:[],input_truncated:false,records_truncated:false,reasons:[$reason],lines_in_window:0,records_in_window:0}'
+      '{present:true,available:false,complete:false,reason:$reason,provenance:"registered-table",path:$path,freshness:{status:"unavailable",observed_at:$observed},records:[],input_truncated:false,records_truncated:false,reasons:[$reason],lines_in_window:0,records_in_window:0}'
     return 0
   fi
   out=$(run_timed "$FM_SNAPSHOT_REGISTRY_TIMEOUT" bash -c '
@@ -660,7 +671,8 @@ registry_secondmates_json() {
     observed=$6
     parse_filter=$7
     output_filter=$8
-    content=$(LC_ALL=C head -c "$((max_bytes + 1))" "$f") || exit 3
+    content=$(LC_ALL=C head -c "$((max_bytes + 1))" "$f" || exit 3; printf "\036") || exit 3
+    content=${content%$'\036'}
     bytes=$(printf "%s" "$content" | LC_ALL=C wc -c | tr -d " ")
     byte_truncated=false
     if [ "$bytes" -gt "$max_bytes" ]; then
@@ -711,6 +723,7 @@ registry_secondmates_json() {
        freshness:{status:"fresh",observed_at:$observed},
        records:(if length > $max_records then .[:$max_records] else . end),
        input_truncated:($byte_truncated or $line_truncated),records_truncated:$records_truncated,
+       complete:(($byte_truncated or $line_truncated or $records_truncated) | not),
        reasons:[
          (if $byte_truncated then "byte_limit" else empty end),
          (if $line_truncated then "line_limit" else empty end),
@@ -726,7 +739,7 @@ registry_secondmates_json() {
   [ "$rc" -eq 124 ] && reason="registered secondmate table read timed out" \
     || reason="registered secondmate table is unreadable"
   jq -n --arg path "$reg" --arg observed "$SNAPSHOT_NOW" --arg reason "$reason" \
-    '{present:true,available:false,reason:$reason,provenance:"registered-table",path:$path,freshness:{status:"unavailable",observed_at:$observed},records:[],input_truncated:false,records_truncated:false,reasons:[$reason],lines_in_window:0,records_in_window:0}'
+    '{present:true,available:false,complete:false,reason:$reason,provenance:"registered-table",path:$path,freshness:{status:"unavailable",observed_at:$observed},records:[],input_truncated:false,records_truncated:false,reasons:[$reason],lines_in_window:0,records_in_window:0}'
 }
 
 bounded_parent_activities_json() {  # <status-file>
@@ -866,8 +879,12 @@ secondmate_current_json() {  # <parent-tasks-json>
          | $r + {parent_task:([$tasks[] | select(.id == $r.id)][0] // null)} ]
        + [ $tasks[] | select(.kind == "secondmate") as $t
            | select(($registered_ids | index($t.id)) == null)
-           | {id:$t.id,home:($t.paths.home.path // null),registered:false,
-              registry_error:"secondmate metadata is not registered",parent_task:$t} ])
+           | {id:$t.id,home:($t.paths.home.path // null),
+              registered:(if $registry.complete == true then false else null end),
+              registry_error:(if $registry.complete == true
+                              then "secondmate metadata is not registered"
+                              else "secondmate registration is unknown because the registry read is incomplete or unavailable" end),
+              parent_task:$t} ])
     | sort_by(.id)
     | {registry:$registry,records:.}') || return 1
   total_registered=$(printf '%s' "$union" | jq '[.records[] | select(.registered)] | length')

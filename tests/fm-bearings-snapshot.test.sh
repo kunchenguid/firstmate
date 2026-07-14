@@ -521,6 +521,21 @@ EOF
   ' >/dev/null || fail "parked child was classified as active work: $canonical"
   cat > "$mate/data/backlog.md" <<'EOF'
 ## In flight
+
+## Queued
+
+## Done
+EOF
+  canonical=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --json)
+  printf '%s' "$canonical" | jq -e '
+    .secondmate_current.records[] | select(.id == "states")
+    | .current.state == "unknown"
+      and (.current.reason | contains("live child state has no in-flight backlog item"))
+      and (.current.reason | contains("parked=parked"))
+  ' >/dev/null || fail "unowned held child was silently dropped: $canonical"
+  cat > "$mate/data/backlog.md" <<'EOF'
+## In flight
 - [ ] done - Done child still in flight (repo: sample) (kind: ship) (since 2026-07-11)
 - [ ] failed - Failed child still in flight (repo: sample) (kind: ship) (since 2026-07-11)
 
@@ -550,13 +565,24 @@ EOF
 }
 
 test_registry_unavailability_and_bounds_are_explicit() {
-  local home fakebin json canonical id mate
+  local home fakebin json canonical id mate boundary
   home=$(make_home registry-unavailable)
-  printf '%s\n' '- hidden - fixture (home: /hidden; scope: fixture; projects: sample; added 2026-07-11)' > "$home/data/secondmates.md"
+  mate="$TMP_ROOT/registry-hidden"
+  make_valid_secondmate_home hidden "$mate"
+  printf -- '- hidden - fixture (home: %s; scope: fixture; projects: sample; added 2026-07-11)\n' "$mate" > "$home/data/secondmates.md"
+  fm_write_secondmate_meta "$home/state/hidden.meta" "$mate" "firstmate:fm-hidden" sample
   chmod 000 "$home/data/secondmates.md"
   fakebin=$(make_fakebin "$home")
+  canonical=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --json)
   json=$(run "$home" "$fakebin" --json)
   chmod 600 "$home/data/secondmates.md"
+  printf '%s' "$canonical" | jq -e '
+    .secondmate_current.registry.complete == false
+      and (.secondmate_current.records[] | select(.id == "hidden")
+        | .registered == null
+          and (.current.reason | contains("registration is unknown")))
+  ' >/dev/null || fail "unavailable registry produced false unregistered provenance: $canonical"
   printf '%s' "$json" | jq -e '
     (.secondmates | any(.[]; .id == "(registry)" and .state == "unknown"
       and .provenance == "registered-table" and .freshness == "unavailable"))
@@ -594,10 +620,30 @@ test_registry_unavailability_and_bounds_are_explicit() {
     | .input_truncated == true and (.reasons | index("byte_limit") != null)
       and .records_in_window < 3
   ' >/dev/null || fail "registry byte bound was not enforced or disclosed: $canonical"
+  boundary=$(LC_ALL=C head -n 1 "$home/data/secondmates.md" | wc -c | tr -d ' ')
+  canonical=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
+    FM_SNAPSHOT_REGISTRY_BYTES="$((boundary - 1))" "$ROOT/bin/fm-fleet-snapshot.sh" --json)
+  printf '%s' "$canonical" | jq -e '
+    .secondmate_current.registry
+    | .input_truncated == true and .complete == false
+      and (.reasons | index("byte_limit") != null)
+  ' >/dev/null || fail "registry newline byte boundary hid truncation: $canonical"
   json=$(FM_SNAPSHOT_REGISTRY_RECORDS=2 run "$home" "$fakebin" --json)
   printf '%s' "$json" | jq -e '
     .omitted | any(.surface == "secondmate registry records omitted by bounded read")
   ' >/dev/null || fail "bearings omitted registry truncation disclosure: $json"
+  mate="$TMP_ROOT/registry-z-hidden"
+  make_valid_secondmate_home z-hidden "$mate"
+  append_secondmate_registry "$home" z-hidden "$mate"
+  fm_write_secondmate_meta "$home/state/z-hidden.meta" "$mate" "firstmate:fm-z-hidden" sample
+  canonical=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
+    FM_SNAPSHOT_REGISTRY_RECORDS=3 "$ROOT/bin/fm-fleet-snapshot.sh" --json)
+  printf '%s' "$canonical" | jq -e '
+    .secondmate_current.registry.complete == false
+      and (.secondmate_current.records[] | select(.id == "z-hidden")
+        | .registered == null
+          and (.current.reason | contains("registration is unknown")))
+  ' >/dev/null || fail "truncated registry produced false unregistered provenance: $canonical"
   pass "registry unavailability and bounded truncation remain explicit"
 }
 
@@ -934,6 +980,8 @@ test_landed_bounded_and_disclosed() {
   home=$(make_home mate-landed-caps); write_fixture "$home"
   mate=$(fixture_mate_home "$home")
   : > "$mate/data/backlog.md"
+  printf '## In flight\n' >> "$mate/data/backlog.md"
+  printf '%s\n\n' '- [ ] mate - Decide subscription order (repo: firstmate) (kind: ship) (since 2026-07-11)' >> "$mate/data/backlog.md"
   printf '## Done\n' >> "$mate/data/backlog.md"
   i=1
   while [ "$i" -le 12 ]; do
