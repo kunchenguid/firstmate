@@ -303,10 +303,10 @@ fm_backend_cmux_container_ensure() {
 }
 
 # fm_backend_cmux_home_label: readable home prefix plus a short hash of the
-# resolved FM_ROOT path. cmux has one app-global workspace namespace, so the
+# resolved FM_HOME path. cmux has one app-global workspace namespace, so the
 # path hash distinguishes every firstmate installation, including multiple
-# primary homes. Moving an installation changes this tag and old cmux titles
-# stop matching; task meta already records absolute worktree paths, so repo
+# primary homes. Moving a home changes this tag and old cmux titles stop
+# matching; task meta already records absolute worktree paths, so repo
 # relocation is already outside the supported recovery contract. Derivation
 # itself lives in bin/fm-backend-hometag-lib.sh, shared with zellij's
 # identical shared-namespace collision fix (docs/zellij-backend.md

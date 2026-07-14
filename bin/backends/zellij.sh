@@ -136,12 +136,12 @@ fm_backend_zellij_session() {
 }
 
 # fm_backend_zellij_home_label: readable home prefix plus a short hash of the
-# resolved FM_ROOT path (bin/fm-backend-hometag-lib.sh). Zellij has one
+# resolved FM_HOME path (bin/fm-backend-hometag-lib.sh). Zellij has one
 # session-global tab namespace shared by every firstmate home, so the path
 # hash distinguishes every installation, including multiple primary homes.
-# Moving an installation changes this tag and old zellij tab titles stop
-# matching; task meta already records absolute worktree paths, so repo
-# relocation is already outside the supported recovery contract.
+# Moving a home changes this tag and old zellij tab titles stop matching; task
+# meta already records absolute worktree paths, so repo relocation is already
+# outside the supported recovery contract.
 fm_backend_zellij_home_label() {
   fm_backend_hometag
 }

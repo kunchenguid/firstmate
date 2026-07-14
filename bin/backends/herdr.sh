@@ -95,18 +95,18 @@ FM_BACKEND_HERDR_ESCALATED_PREFIX=".herdr-escalated-"
 #   - the PRIMARY home (no .fm-secondmate-home marker) -> "firstmate-<hash>"
 #   - a SECONDMATE home (carrying .fm-secondmate-home, written by
 #     bin/fm-home-seed.sh with that secondmate's id) -> "2ndmate-<id>-<hash>"
-# The readable prefix comes from $FM_HOME's marker; the hash from $FM_ROOT. The
-# hash is what makes two INDEPENDENT PRIMARY homes on one machine (e.g.
-# ~/code/firstmate and ~/code/firstmate-herdr) resolve to two DISTINCT
-# workspaces instead of both collapsing into one shared space: before it, every
-# primary returned the bare constant "firstmate" and fm_backend_herdr_workspace_find
-# adopted the first such workspace in the shared session, commingling both
-# fleets' tabs. Read fresh from FM_HOME/FM_ROOT on every call rather than cached
-# at source time, so the label is automatically stable across every respawn and
-# recovery for the life of that home. fm-spawn.sh briefly shadows BOTH FM_HOME
-# and FM_ROOT to a secondmate's own home when the PRIMARY spawns that secondmate
-# (the primary's own process still names the primary at that point) - see
-# fm-spawn.sh's herdr case arm.
+# Both halves - the readable prefix's marker read and the hash - come from
+# $FM_HOME, the one variable that names the operational home. The hash is what
+# makes two INDEPENDENT PRIMARY homes on one machine (e.g. ~/code/firstmate and
+# ~/code/firstmate-herdr) resolve to two DISTINCT workspaces instead of both
+# collapsing into one shared space: before it, every primary returned the bare
+# constant "firstmate" and fm_backend_herdr_workspace_find adopted the first
+# such workspace in the shared session, commingling both fleets' tabs. Read
+# fresh from FM_HOME on every call rather than cached at source time, so the
+# label is automatically stable across every respawn and recovery for the life
+# of that home. fm-spawn.sh shadows FM_HOME to a secondmate's own home when the
+# PRIMARY spawns that secondmate (the primary's own process still names the
+# primary at that point) - see fm-spawn.sh's herdr case arm.
 fm_backend_herdr_workspace_label() {
   fm_backend_hometag
 }
@@ -226,19 +226,19 @@ fm_backend_herdr_workspace_find() {  # <session>
 # "Label collisions") and derives an unlabeled workspace's DISPLAYED label from
 # its pane cwd's basename, so a captain launching herdr directly inside a
 # directory named "firstmate" produced a workspace that looked byte-identical,
-# by label alone, to firstmate's own auto-created container - the primary's
-# label was the bare constant "firstmate" then; the home-tag's path hash now
-# defuses this specific cwd-basename trigger, though the created-vs-adopted
-# gate below remains the real fix for a full home-tag collision - one tab,
-# label "1". workspace_find adopted that pre-existing (captain-owned, LIVE) workspace
+# by label alone, to firstmate's own auto-created container - one tab, label
+# "1". workspace_find adopted that pre-existing (captain-owned, LIVE) workspace
 # by the label match, the heuristic matched too, and the very next spawn
-# closed the captain's own live pane 27ms after creating its task tab. The
-# fix is structural, not another heuristic: only a workspace THIS SAME
+# closed the captain's own live pane 27ms after creating its task tab. The fix
+# is structural, not another heuristic: only a workspace THIS SAME
 # fm_backend_herdr_workspace_ensure call just created carries a non-empty
 # seeded_tab_id at all (see FM_BACKEND_HERDR_WS_SEEDED_TAB_ID below); an
 # ADOPTED workspace's seeded_tab_id is always empty, so create_task never
 # calls this function for one, regardless of how its tabs happen to be
-# labeled.
+# labeled. The primary's label was the bare constant "firstmate" back then, so
+# the home-tag's path hash now defuses this specific cwd-basename trigger too,
+# but that created-vs-adopted gate remains the real fix for a full home-tag
+# collision.
 #
 # Defense in depth on top of that gate (not the primary safety mechanism):
 # re-verify <seeded_tab_id> is still present, still carries label "1" (a

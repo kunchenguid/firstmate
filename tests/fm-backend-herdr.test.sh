@@ -18,15 +18,17 @@ command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (required by the her
 TMP_ROOT=$(fm_test_tmproot fm-backend-herdr-tests)
 export FM_BACKEND_HERDR_SUBMIT_MIN_SLEEP=0
 
-# herdr_expected_root_hash / herdr_expected_workspace_label: bash-only
+# herdr_expected_home_hash / herdr_expected_workspace_label: bash-only
 # reimplementations of the shared home-tag derivation (bin/fm-backend-hometag-lib.sh),
 # mirroring tests/fm-backend-zellij.test.sh's zellij_expected_* helpers. Used
 # to build canned fixtures and expected values for the hash-suffixed workspace
 # label this adapter now derives, without hardcoding a path-dependent hash.
-herdr_expected_root_hash() {  # <root>
-  local root real
-  root=$1
-  real=$(cd "$root" && pwd -P) || return 1
+# Both halves of the tag come from the SAME home ($FM_HOME), so these take one
+# home and hash exactly it.
+herdr_expected_home_hash() {  # <home>
+  local home real
+  home=$1
+  real=$(cd "$home" && pwd -P) || return 1
   if command -v shasum >/dev/null 2>&1; then
     printf '%s' "$real" | shasum -a 256 | awk '{print substr($1,1,8)}'
   elif command -v sha256sum >/dev/null 2>&1; then
@@ -36,8 +38,8 @@ herdr_expected_root_hash() {  # <root>
   fi
 }
 
-herdr_expected_workspace_label() {  # [home] [root]
-  local home=${1:-$ROOT} root=${2:-$ROOT} marker id prefix
+herdr_expected_workspace_label() {  # [home]
+  local home=${1:-$ROOT} marker id prefix
   marker="$home/.fm-secondmate-home"
   if [ -f "$marker" ]; then
     id=$(tr -d '[:space:]' < "$marker" 2>/dev/null)
@@ -49,7 +51,7 @@ herdr_expected_workspace_label() {  # [home] [root]
   else
     prefix="firstmate"
   fi
-  printf '%s-%s' "$prefix" "$(herdr_expected_root_hash "$root")"
+  printf '%s-%s' "$prefix" "$(herdr_expected_home_hash "$home")"
 }
 
 # make_herdr_fakebin: a `herdr` stub that logs every invocation (one line,
@@ -253,11 +255,12 @@ test_version_check_refuses_missing_herdr() {
 
 # --- workspace_label: per-firstmate-HOME home-tag resolution -----------------
 # The label is now the shared home-tag (bin/fm-backend-hometag-lib.sh):
-# "<readable-prefix>-<FM_ROOT-hash>". Expected values are computed with
+# "<readable-prefix>-<FM_HOME-hash>". Expected values are computed with
 # herdr_expected_workspace_label rather than hardcoded, since the hash depends
-# on the resolved repo path. In these subprocesses FM_ROOT resolves to $ROOT
-# (herdr.sh's own fallback), so herdr_expected_workspace_label's root defaults
-# to $ROOT and matches.
+# on the home's path. These subprocesses set only FM_HOME, leaving FM_ROOT on
+# herdr.sh's own $ROOT fallback - the cross-home shape - so they also assert
+# that the prefix and the hash agree on the ONE home FM_HOME names
+# (tests/fm-backend-hometag-lib.test.sh owns that contract directly).
 
 test_workspace_label_primary_home_no_marker() {
   local home expected
@@ -325,8 +328,8 @@ test_workspace_label_two_primaries_get_distinct_labels() {
   out2=$( FM_HOME="$root2" FM_ROOT_OVERRIDE="$root2" bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_workspace_label' "$ROOT" )
   case "$out1" in firstmate-*) : ;; *) fail "primary home one should resolve to a 'firstmate-<hash>' label, got '$out1'" ;; esac
   case "$out2" in firstmate-*) : ;; *) fail "primary home two should resolve to a 'firstmate-<hash>' label, got '$out2'" ;; esac
-  [ "$out1" = "$(herdr_expected_workspace_label "$root1" "$root1")" ] || fail "primary home one label mismatch: $out1"
-  [ "$out2" = "$(herdr_expected_workspace_label "$root2" "$root2")" ] || fail "primary home two label mismatch: $out2"
+  [ "$out1" = "$(herdr_expected_workspace_label "$root1")" ] || fail "primary home one label mismatch: $out1"
+  [ "$out2" = "$(herdr_expected_workspace_label "$root2")" ] || fail "primary home two label mismatch: $out2"
   [ "$out1" != "$out2" ] || fail "two independent primary homes must not collapse into one shared 'firstmate' workspace (got identical '$out1')"
   pass "fm_backend_herdr_workspace_label: two independent primary homes get two distinct firstmate-<hash> labels (the multi-primary collision fix)"
 }

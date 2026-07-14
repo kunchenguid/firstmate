@@ -105,10 +105,12 @@ cmux_read_screen_response() {  # <dir> <n> <text>
   jq -n --arg t "$3" '{text:$t}' > "$1/responses/$2.out"
 }
 
-cmux_expected_root_hash() {  # <root>
-  local root real
-  root=$1
-  real=$(cd "$root" && pwd -P) || return 1
+# Both halves of the shared home-tag come from the SAME home ($FM_HOME), so
+# these take one home and hash exactly it.
+cmux_expected_home_hash() {  # <home>
+  local home real
+  home=$1
+  real=$(cd "$home" && pwd -P) || return 1
   if command -v shasum >/dev/null 2>&1; then
     printf '%s' "$real" | shasum -a 256 | awk '{print substr($1,1,8)}'
   elif command -v sha256sum >/dev/null 2>&1; then
@@ -118,8 +120,8 @@ cmux_expected_root_hash() {  # <root>
   fi
 }
 
-cmux_expected_home_label() {  # [home] [root]
-  local home=${1:-$ROOT} root=${2:-$ROOT} marker id prefix
+cmux_expected_home_label() {  # [home]
+  local home=${1:-$ROOT} marker id prefix
   marker="$home/.fm-secondmate-home"
   if [ -f "$marker" ]; then
     id=$(tr -d '[:space:]' < "$marker" 2>/dev/null)
@@ -131,16 +133,16 @@ cmux_expected_home_label() {  # [home] [root]
   else
     prefix="firstmate"
   fi
-  printf '%s-%s' "$prefix" "$(cmux_expected_root_hash "$root")"
+  printf '%s-%s' "$prefix" "$(cmux_expected_home_hash "$home")"
 }
 
-cmux_expected_scoped_title() {  # <fm-task-label> [home] [root]
-  local label=$1 home=${2:-$ROOT} root=${3:-$ROOT} rest
+cmux_expected_scoped_title() {  # <fm-task-label> [home]
+  local label=$1 home=${2:-$ROOT} rest
   case "$label" in
     fm-*) rest=${label#fm-} ;;
     *) rest=$label ;;
   esac
-  printf 'fm-%s-%s' "$(cmux_expected_home_label "$home" "$root")" "$rest"
+  printf 'fm-%s-%s' "$(cmux_expected_home_label "$home")" "$rest"
 }
 
 cmux_assert_call_order() {
@@ -295,18 +297,33 @@ test_scoped_title_uses_secondmate_home_label() {
   pass "fm_backend_cmux_scoped_title: scopes a secondmate task title with the home marker plus root hash"
 }
 
-test_scoped_title_changes_with_root_path() {
-  local dir home root_one root_two out_one out_two expected_one expected_two
-  dir="$TMP_ROOT/scoped-title-root-hash"; home="$dir/home"; root_one="$dir/root-one"; root_two="$dir/root-two"
-  mkdir -p "$home" "$root_one" "$root_two"
-  expected_one=$(cmux_expected_scoped_title fm-task1 "$home" "$root_one")
-  expected_two=$(cmux_expected_scoped_title fm-task1 "$home" "$root_two")
-  out_one=$( FM_HOME="$home" FM_ROOT_OVERRIDE="$root_one" bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_scoped_title fm-task1' "$ROOT" )
-  out_two=$( FM_HOME="$home" FM_ROOT_OVERRIDE="$root_two" bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_scoped_title fm-task1' "$ROOT" )
-  [ "$out_one" = "$expected_one" ] || fail "scoped title should include root-one hash as $expected_one, got '$out_one'"
-  [ "$out_two" = "$expected_two" ] || fail "scoped title should include root-two hash as $expected_two, got '$out_two'"
-  [ "$out_one" != "$out_two" ] || fail "scoped titles should differ for distinct FM_ROOT paths"
-  pass "fm_backend_cmux_scoped_title: includes the resolved FM_ROOT hash in the home label"
+test_scoped_title_changes_with_home_path() {
+  local dir home_one home_two out_one out_two expected_one expected_two
+  dir="$TMP_ROOT/scoped-title-home-hash"; home_one="$dir/home-one"; home_two="$dir/home-two"
+  mkdir -p "$home_one" "$home_two"
+  expected_one=$(cmux_expected_scoped_title fm-task1 "$home_one")
+  expected_two=$(cmux_expected_scoped_title fm-task1 "$home_two")
+  out_one=$( FM_HOME="$home_one" FM_ROOT_OVERRIDE="$home_one" bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_scoped_title fm-task1' "$ROOT" )
+  out_two=$( FM_HOME="$home_two" FM_ROOT_OVERRIDE="$home_two" bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_scoped_title fm-task1' "$ROOT" )
+  [ "$out_one" = "$expected_one" ] || fail "scoped title should include home-one hash as $expected_one, got '$out_one'"
+  [ "$out_two" = "$expected_two" ] || fail "scoped title should include home-two hash as $expected_two, got '$out_two'"
+  [ "$out_one" != "$out_two" ] || fail "scoped titles should differ for distinct home paths"
+  pass "fm_backend_cmux_scoped_title: includes the resolved FM_HOME hash in the home label"
+}
+
+test_scoped_title_cross_home_prefix_and_hash_agree() {
+  local dir home other out
+  dir="$TMP_ROOT/scoped-title-cross-home"; home="$dir/home"; other="$dir/other-root"
+  mkdir -p "$home" "$other"
+  printf 'sm-one\n' > "$home/.fm-secondmate-home"
+  # A cross-home invocation: FM_HOME names the home being operated on while the
+  # scripts run out of ANOTHER installation's root. The title must name ONE
+  # home - the readable prefix and the hash must not disagree, or the workspace
+  # belongs to neither home and no list_live can ever match it.
+  out=$( FM_HOME="$home" FM_ROOT_OVERRIDE="$other" bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_scoped_title fm-task1' "$ROOT" )
+  [ "$out" = "$(cmux_expected_scoped_title fm-task1 "$home")" ] \
+    || fail "a cross-home scoped title should tag FM_HOME's home, got '$out'"
+  pass "fm_backend_cmux_scoped_title: a cross-home invocation tags the home FM_HOME names, prefix and hash agreeing"
 }
 
 # --- dispatch wiring (fm-backend.sh) ------------------------------------------
@@ -973,7 +990,7 @@ test_list_live_filters_by_title_prefix() {
   dir="$TMP_ROOT/list-live"; mkdir -p "$dir/responses"
   other_root="$dir/other-root"; mkdir -p "$other_root"
   title=$(cmux_expected_scoped_title fm-task1)
-  other_title=$(cmux_expected_scoped_title fm-task2 "$ROOT" "$other_root")
+  other_title=$(cmux_expected_scoped_title fm-task2 "$other_root")
   # 1: workspace list --json --id-format uuids -> one in-home task, two unrelated
   cmux_workspace_list_response "$dir" 1 \
     "aaaaaaaa-0000-0000-0000-000000000000" "$title" \
@@ -1019,7 +1036,8 @@ test_parse_target
 test_normalize_key
 test_scoped_title_uses_primary_home_label
 test_scoped_title_uses_secondmate_home_label
-test_scoped_title_changes_with_root_path
+test_scoped_title_changes_with_home_path
+test_scoped_title_cross_home_prefix_and_hash_agree
 test_dispatch_routes_cmux_backend
 test_dispatch_busy_state_unknown_for_cmux
 test_dispatch_composer_state_routes_cmux

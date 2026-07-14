@@ -59,7 +59,7 @@ This is the exact gap a captain-directed no-mistakes review gate caught for the 
 
 The caller-facing task label stays `fm-<id>` in meta and briefs; task-selector resolution is the shared contract owned by [`docs/configuration.md`](configuration.md) ("Runtime backend").
 The actual zellij tab title a NEW task's tab is created with is home-scoped: `fm-<home-label>-<id>`.
-`<home-label>` is `firstmate` for the primary home, or `2ndmate-<id>` when `$FM_HOME/.fm-secondmate-home` contains a secondmate id, plus a short stable hash of the resolved `FM_ROOT` path - the same identity scheme as cmux's home label (`docs/cmux-backend.md` "Task container shape"), so e.g. `fm-firstmate-a1b2c3d4-fix-login-k3` or `fm-2ndmate-sm1-9f8e7d6c-fix-login-k3`.
+`<home-label>` is `firstmate` for the primary home, or `2ndmate-<id>` when `$FM_HOME/.fm-secondmate-home` contains a secondmate id, plus a short stable hash of the resolved `FM_HOME` path - the same identity scheme as cmux's home label (`docs/cmux-backend.md` "Task container shape"), so e.g. `fm-firstmate-a1b2c3d4-fix-login-k3` or `fm-2ndmate-sm1-9f8e7d6c-fix-login-k3`.
 The path hash means even two independent PRIMARY installations on one machine (each with no `.fm-secondmate-home` marker, so both would otherwise resolve to the same `firstmate` prefix) still get distinct tags.
 `fm_backend_zellij_create_task` creates every new tab with this scoped title and checks for a duplicate against the scoped title, never the bare label.
 Every list/find/recover/kill path (`fm_backend_zellij_target_ready`'s and `fm_backend_zellij_kill`'s expected-label verification, `fm_backend_zellij_list_live`'s recovery sweep, `fm_backend_zellij_resolve_bare_selector`'s ad hoc lookup) is scoped the same way: it checks the home-scoped title first and never trusts a bare, unscoped title match against another home's tab.
@@ -70,7 +70,7 @@ If 2+ live tabs share the same untagged bare title (this home's own pre-migratio
 A task already reachable through its recorded `window=` meta therefore keeps working unmodified after an upgrade to this fix, with no manual re-tagging step, as long as its title is not itself ambiguous; a genuinely ambiguous legacy collision (rare - it requires two homes to have independently generated the exact same task id before this fix shipped) surfaces as a loud refusal rather than a silent misdirect, and is resolved the same way any other stuck task is: tear down and respawn, which always gets the new home-scoped title.
 `fm_backend_zellij_list_live`'s bulk recovery sweep deliberately does NOT attempt this legacy bare-title fallback (telling apart "our own pre-migration tab" from "another home's same-shaped bare title" in a sweep with no numeric id already in hand is not something this adapter can do safely); a pre-migration task stays reachable through its meta's `window=` field instead.
 
-**Moving/relocating a firstmate installation** changes its resolved `FM_ROOT` path and therefore its tag; tabs titled under the old tag simply stop matching new lookups.
+**Moving/relocating a firstmate home** changes its resolved `FM_HOME` path and therefore its tag; tabs titled under the old tag simply stop matching new lookups.
 This is accepted, exactly as it is for cmux: a task's own recorded worktree path in `state/<id>.meta` does not survive a repo relocation either, so this is consistent with an existing, already-accepted limitation, not a new one.
 
 ## Target string and meta fields

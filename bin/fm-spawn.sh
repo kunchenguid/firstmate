@@ -708,23 +708,23 @@ case "$BACKEND" in
     ;;
   herdr)
     # fm_backend_herdr_workspace_label (the shared home-tag) resolves the
-    # target workspace from BOTH FM_HOME (readable prefix / secondmate marker)
-    # and FM_ROOT (the path hash). For every KIND except secondmate, this
-    # process's own FM_HOME/FM_ROOT already name the right home (the primary
-    # spawning its own crewmate/scout, or a secondmate spawning ITS OWN
-    # crewmate/scout from its own process, whose FM_HOME/FM_ROOT already ARE
-    # that secondmate's home - no glue needed). A --secondmate spawn is the one
-    # case that does: it is the PRIMARY's own fm-spawn.sh process launching a
-    # DIFFERENT home (PROJ_ABS, already validated above as the secondmate's
-    # home), so FM_HOME/FM_ROOT here still name the primary. Shadow BOTH to
-    # PROJ_ABS for just these two calls (bash restores them automatically after
-    # each prefixed simple-command call) so the secondmate's tab lands in the
-    # secondmate's own workspace, computing the SAME hash the secondmate's own
-    # process will when it later spawns its own crewmates (whose FM_ROOT is
-    # that same home). Shadow only FM_HOME and the two processes would disagree
-    # on the hash and split the secondmate across two workspaces. This matches
-    # fm-teardown.sh's zellij child cleanup, which shadows FM_HOME AND FM_ROOT
-    # to the child home for the same cross-home home-tag reason.
+    # target workspace from FM_HOME, the variable that names the operational
+    # home - both the readable prefix's secondmate-marker read and the path
+    # hash. For every KIND except secondmate, this process's own FM_HOME
+    # already names the right home (the primary spawning its own
+    # crewmate/scout, or a secondmate spawning ITS OWN crewmate/scout from its
+    # own process, whose FM_HOME already IS that secondmate's home - no glue
+    # needed). A --secondmate spawn is the one case that does: it is the
+    # PRIMARY's own fm-spawn.sh process launching a DIFFERENT home (PROJ_ABS,
+    # already validated above as the secondmate's home), so FM_HOME here still
+    # names the primary. Shadow it to PROJ_ABS for just these two calls (bash
+    # restores it automatically after each prefixed simple-command call) so the
+    # secondmate's tab lands in the secondmate's own workspace, computing the
+    # SAME tag the secondmate's own process will when it later spawns its own
+    # crewmates. FM_ROOT is shadowed alongside it so the temporary environment
+    # names ONE home consistently, exactly as the secondmate's own process does
+    # (its repo root IS its home) - matching fm-teardown.sh's zellij child
+    # cleanup, which shadows FM_HOME and FM_ROOT to the child home the same way.
     HERDR_LABEL_HOME=$FM_HOME
     HERDR_LABEL_ROOT=$FM_ROOT
     if [ "$KIND" = secondmate ]; then

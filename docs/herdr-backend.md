@@ -72,7 +72,7 @@ Workspace-per-HOME fixes that while keeping tab-per-task's original human-watchi
 ### Label derivation (the shared home-tag: a readable prefix plus a path hash)
 
 `fm_backend_herdr_workspace_label` (`bin/backends/herdr.sh`) delegates to the shared home-tag derivation in `bin/fm-backend-hometag-lib.sh` - the SAME tag cmux (`docs/cmux-backend.md`) and zellij (`docs/zellij-backend.md` "Home-scoped tab titles") use, factored out so the three adapters cannot drift.
-`fm_backend_hometag` returns a readable prefix plus a short hash of the resolved home path, read fresh from `$FM_HOME` (prefix) and `$FM_ROOT` (hash) on every call rather than cached or threaded through env plumbing:
+`fm_backend_hometag` returns a readable prefix plus a short hash of the resolved home path, both read fresh from `$FM_HOME` on every call rather than cached or threaded through env plumbing:
 
 - The PRIMARY home (no `.fm-secondmate-home` marker at its root) resolves to `firstmate-<hash>`.
 - A SECONDMATE home (carrying `.fm-secondmate-home`, written by `bin/fm-home-seed.sh` at seed time and containing exactly that secondmate's id) resolves to `2ndmate-<secondmate-id>-<hash>`, e.g. `2ndmate-sshhip-h7-1a2b3c4d`.
@@ -90,14 +90,14 @@ The per-task tab labels stay the bare caller-facing `fm-<id>` - unlike cmux and 
 ### The one wrinkle: a `--secondmate` spawn is launched BY the primary
 
 For every other spawn kind, `$FM_HOME`/`$FM_ROOT` at spawn time already name the right home: the primary spawning its own crewmate/scout, or a secondmate spawning a crewmate/scout FROM ITS OWN `fm-spawn.sh` process (its own `$FM_HOME`/`$FM_ROOT` already ARE that secondmate's home).
-The one exception is `bin/fm-spawn.sh <id> <secondmate-home> --secondmate`: this command runs IN THE PRIMARY's own process, so the primary's OWN `$FM_HOME`/`$FM_ROOT` are what the label-resolution helpers would see by default, even though the tab being created belongs to the SECONDMATE.
-`fm-spawn.sh`'s herdr case arm handles this with a narrow, targeted shadow of BOTH variables: it computes `HERDR_LABEL_HOME`/`HERDR_LABEL_ROOT` (the secondmate's own home, `PROJ_ABS`, for `KIND = secondmate`; the process's own `$FM_HOME`/`$FM_ROOT` otherwise) and passes them as a bash temporary-assignment prefix - `FM_HOME="$HERDR_LABEL_HOME" FM_ROOT="$HERDR_LABEL_ROOT" fm_backend_herdr_container_ensure ...` and the same on `fm_backend_herdr_create_task ...` - which scopes the override to exactly those two calls and is automatically restored afterward (bash's temporary-assignment-before-a-simple-command form applies for the duration of a shell FUNCTION call too, not only external commands).
+The one exception is `bin/fm-spawn.sh <id> <secondmate-home> --secondmate`: this command runs IN THE PRIMARY's own process, so the primary's OWN `$FM_HOME` is what the label-resolution helpers would see by default, even though the tab being created belongs to the SECONDMATE.
+`fm-spawn.sh`'s herdr case arm handles this with a narrow, targeted shadow: it computes `HERDR_LABEL_HOME`/`HERDR_LABEL_ROOT` (the secondmate's own home, `PROJ_ABS`, for `KIND = secondmate`; the process's own `$FM_HOME`/`$FM_ROOT` otherwise) and passes them as a bash temporary-assignment prefix - `FM_HOME="$HERDR_LABEL_HOME" FM_ROOT="$HERDR_LABEL_ROOT" fm_backend_herdr_container_ensure ...` and the same on `fm_backend_herdr_create_task ...` - which scopes the override to exactly those two calls and is automatically restored afterward (bash's temporary-assignment-before-a-simple-command form applies for the duration of a shell FUNCTION call too, not only external commands).
 Nothing else in `fm-spawn.sh` reads `$FM_HOME`/`$FM_ROOT` again after this point, so no explicit restore is needed.
 
-BOTH variables must be shadowed, not just `$FM_HOME`, because the home-tag hashes `$FM_ROOT`.
-Shadowing only `$FM_HOME` would give the secondmate's workspace the readable `2ndmate-<id>` prefix but the PRIMARY's path hash, while the secondmate's OWN later crewmate spawns (running in the secondmate's process, whose `$FM_ROOT` is its home) would compute the secondmate's own hash - the two would disagree and split one home across two workspaces.
-Shadowing both makes the primary compute the exact same home-tag the secondmate itself will, so the secondmate's agent tab and every crewmate it later spawns share one workspace.
-This mirrors the choice `fm-teardown.sh` already made for zellij child cleanup, which shadows `FM_HOME` AND `FM_ROOT` to the child home for the same cross-home home-tag reason.
+`$FM_HOME` is the variable that decides the tag, so shadowing it is what makes the primary compute the exact same home-tag the secondmate itself will, giving the secondmate's agent tab and every crewmate it later spawns one shared workspace.
+`$FM_ROOT` is shadowed alongside it so the temporary environment names ONE home consistently, exactly as the secondmate's own process does (a secondmate home is a firstmate worktree, so its repo root IS its home).
+This mirrors the choice `fm-teardown.sh` already made for zellij child cleanup, which shadows `FM_HOME` and `FM_ROOT` to the child home the same way.
+Deriving the two halves of the tag from two different variables is precisely what a cross-home invocation would break: the prefix would name one home and the hash another, minting a workspace neither home's `workspace_find`/`list_live` could ever match (`tests/fm-backend-hometag-lib.test.sh`).
 
 Every other backend-scoped call site needs no such glue: it already runs inside a process whose own `$FM_HOME`/`$FM_ROOT` correctly name the home doing the work.
 This includes the path of a crewmate spawned FROM a secondmate's own `fm-spawn.sh` - proven end to end in `tests/fm-backend-herdr-workspace-per-home-e2e.test.sh`, not merely by code inspection (see "End-to-end verification" below).
@@ -129,7 +129,12 @@ So a task spawned before the home-tag keeps working exactly as before, from what
 New workspace lookup does not adopt those old bare labels: for new spawns, recovery, and list-live, the adapter exact-matches the current home-tag (`firstmate-<hash>` / `2ndmate-<secondmate-id>-<hash>`), so a workspace still carrying an old bare `firstmate` or `2ndmate-<id>` label no longer matches.
 Each home's NEXT spawn therefore mints a fresh workspace under its new home-tag label, and the old bare-labeled workspace simply lingers, holding only its already-live tabs, until its last tab closes (closing a workspace's last tab deletes it - see "Workspace lifecycle").
 No work is lost or moved; the two workspaces coexist for the tail of the old tasks' lifetimes.
-To keep continuity - reuse one existing workspace under the new label rather than let a fresh one appear alongside it - rename it once with `herdr workspace rename <workspace_id> <new-home-tag>` (the same remedy this doc already prescribed for pre-rename secondmate workspaces); derive `<new-home-tag>` by running the home's own `fm_backend_herdr_workspace_label`.
+To keep continuity - reuse one existing workspace under the new label rather than let a fresh one appear alongside it - rename it once with `herdr workspace rename <workspace_id> <new-home-tag>` (the same remedy this doc already prescribed for pre-rename secondmate workspaces).
+Derive `<new-home-tag>` by printing it from the home itself:
+
+```sh
+cd <home> && FM_HOME="$PWD" bash -c '. bin/backends/herdr.sh; fm_backend_herdr_workspace_label'
+```
 
 Tab-per-task (within each home's own workspace) still wins on the human-watching axis for the reason P2 originally found: attaching once shows every one of that home's tasks as a tab in one tab bar, switchable with `ctrl+b <n>`, matching how a captain already watches a tmux-backed fleet.
 Workspace-per-task - tried against the real binary in P2 and again considered here - would still only show one task's workspace at a time by default, requiring a separate top-level "space" switch to see the rest of even a single home's fleet; that tradeoff is unchanged by the per-home refinement and workspace-per-task remains rejected.

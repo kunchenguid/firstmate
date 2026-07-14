@@ -143,9 +143,9 @@ cmux's hierarchy is macOS window -> workspace (a vertical-tab entry, cmux's roug
 There is no "session" concept to multiplex the way tmux/herdr/zellij have - there is just "the app" (one running GUI instance, optionally split across native macOS windows).
 firstmate uses **one cmux workspace per task**, keyed by the caller-facing `fm-<id>` label, with exactly one surface inside it - mirroring tmux's one-window-per-task and zellij's one-tab-per-task shape.
 The caller-facing task label stays `fm-<id>`, but the visible cmux workspace title is `fm-<home-label>-<id>`.
-The home label is the shared home-tag (`bin/fm-backend-hometag-lib.sh`, also used by zellij's tab titles and herdr's workspace labels): `firstmate` for the primary home, or `2ndmate-<id>` when `$FM_HOME/.fm-secondmate-home` contains a secondmate id, plus a short stable hash of the resolved `FM_ROOT` path.
+The home label is the shared home-tag (`bin/fm-backend-hometag-lib.sh`, also used by zellij's tab titles and herdr's workspace labels): `firstmate` for the primary home, or `2ndmate-<id>` when `$FM_HOME/.fm-secondmate-home` contains a secondmate id, plus a short stable hash of the resolved `FM_HOME` path.
 That yields labels like `firstmate-<8hex>` or `2ndmate-<id>-<8hex>`, making the visible workspace title `fm-firstmate-<8hex>-<id>` or `fm-2ndmate-<id>-<8hex>-<task>`.
-This was hardened in two captain-directed no-mistakes review gate follow-ups: first by adding the home tag for primary-vs-secondmate collisions, then by adding the `FM_ROOT` hash so two distinct primary installations cannot collide either.
+This was hardened in two captain-directed no-mistakes review gate follow-ups: first by adding the home tag for primary-vs-secondmate collisions, then by adding the home-path hash so two distinct primary installations cannot collide either.
 Physically moving or relocating a firstmate installation changes its tag, so workspaces titled under the old tag stop matching after a move.
 That is acceptable because a task's own recorded worktree path in `state/<id>.meta` does not survive a repo relocation either, so this is consistent with an existing, already accepted limitation, not a new one.
 There is still no per-home cmux container split (unlike herdr's later refinement); the home tag is a title discriminator only.
@@ -156,7 +156,7 @@ A cmux task's `window=` meta field holds `<workspace_uuid>:<surface_uuid>`, for 
 Both are bare UUIDs with no embedded colon, so splitting on the first colon is trivially correct (mirrors herdr's/zellij's target-string convention).
 The meta target is still the UUID pair, not the human title.
 The human title is reconstructed internally from the caller-facing `fm-<id>` label as `fm-<home-label>-<id>` whenever cmux needs to create, recover, or list a workspace.
-`<home-label>` includes the readable home prefix and the short `FM_ROOT` path hash described above.
+`<home-label>` includes the readable home prefix and the short `FM_HOME` path hash described above.
 cmux tasks additionally record:
 
 - `cmux_workspace_id=` - the task's workspace UUID (same value as the `window=` field's first component).
@@ -181,7 +181,7 @@ No session field is needed - unlike herdr/zellij there is no session layer to re
 | Worktree-path discovery | marked active cwd probe + capture-scrape (`fm_backend_cmux_current_path`), NOT `current_directory` | `current_directory` DOES reflect a `cd` run directly in the surface's own top-level shell, but stays FROZEN at wherever that shell was when it launched a foreground subshell (exactly what `treehouse get` does) - zellij-shape, not herdr-shape. See "Worktree-path discovery: current_directory does not track a subshell" below. |
 | Busy state | *(no native primitive)* | cmux has agent-awareness elsewhere (Claude Code hooks integration, session-resume tokens) but exposes nothing over the socket API for generic busy/idle classification; `surface.health`/`surface-health` is render health, not agent status. `fm_backend_busy_state`'s dispatcher (`bin/fm-backend.sh`) falls through to `unknown` for cmux via its wildcard case, exactly like tmux/zellij/Orca - the watcher's existing pane-hash + regex path is the only busy-state source for this backend. |
 | Kill | `cmux close-workspace --workspace <id>`, preceded by a throwaway `new-workspace --window <win> --focus false --id-format uuids` when the target is the only workspace in its window | See "Closing the last workspace in a window" below. The backend owns the whole task workspace; kill closes it best-effort (`\|\| true`), but cmux silently refuses to close the LAST workspace in a window, so kill first detects that case (`fm_backend_cmux_window_of_workspace`) and adds a throwaway sibling before closing, matching every other backend's `kill` contract. |
-| Recovery / list-live | `cmux workspace list --json --id-format uuids`, filter titles starting with this home's `fm-<home-label>-`, then `list-panes` per match for the surface id | Title-based, never trusts a stored workspace uuid blindly - ids do NOT survive an app relaunch (see "Workspace ids do not survive a relaunch" below), so this is the only safe recovery posture. The adapter prints the plain `fm-<id>` label back to callers after stripping the readable home tag and `FM_ROOT` hash. |
+| Recovery / list-live | `cmux workspace list --json --id-format uuids`, filter titles starting with this home's `fm-<home-label>-`, then `list-panes` per match for the surface id | Title-based, never trusts a stored workspace uuid blindly - ids do NOT survive an app relaunch (see "Workspace ids do not survive a relaunch" below), so this is the only safe recovery posture. The adapter prints the plain `fm-<id>` label back to callers after stripping the readable home tag and home-path hash. |
 
 ## Socket control modes: the full matrix (default `cmuxOnly` rejects external CLIs)
 
