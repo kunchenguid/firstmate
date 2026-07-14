@@ -209,6 +209,18 @@ The Kimi installer requires an existing regular non-symlink `~/.kimi-code/config
 Its `remove` action excises only the marker-delimited Firstmate region and removes Firstmate's hook files.
 For Pi and pi-signed secondmate launches, `fm-spawn.sh` starts the selected executable with `-e` pointed at the secondmate home's own tracked `.pi/extensions/fm-primary-pi-watch.ts` and `.pi/extensions/fm-primary-turnend-guard.ts`, both already present from the secondmate home's git worktree.
 
+## Crew permission mode (config/crew-permission-mode)
+
+`config/crew-permission-mode` is a local, gitignored file that selects the permission flag spliced into claude launches built from `fm-spawn.sh`'s claude template.
+It is claude-only: the other adapters' autonomy flags are fixed in their launch templates in [`bin/fm-spawn.sh`](../bin/fm-spawn.sh) and are untouched by this knob.
+When the file is absent or contains `auto`, claude agents launch with `--permission-mode auto`, the default.
+`auto` keeps a permission classifier in front of risky actions without blocking an unattended agent: a denied action fails fast with a message instead of hanging on an interactive prompt, verified empirically through real multi-step crewmate work and a full validation pipeline on both the tmux and cmux runtime backends.
+`bypass` or `bypassPermissions` restores the prior `--dangerously-skip-permissions` behavior as an explicit opt-in, for example in a disposable sandbox.
+Any other valid `claude --permission-mode` choice (`acceptEdits`, `plan`, `manual`, `dontAsk`) passes through as `--permission-mode <value>`.
+An unrecognized value aborts the spawn loudly before any fleet mutation, so a crew is never silently launched in an unintended permission mode.
+Raw launch commands carry their own flags and skip the knob entirely.
+The file is not inherited into secondmate homes.
+
 ## Crew dispatch profiles (config/crew-dispatch.json)
 
 `config/crew-dispatch.json` is an optional local, gitignored file containing natural-language rules that firstmate reads before dispatching a crewmate or scout.

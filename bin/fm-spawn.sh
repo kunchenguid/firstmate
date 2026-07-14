@@ -9,6 +9,14 @@
 #   axes chosen by firstmate at intake. They are only threaded into harnesses whose
 #   installed CLIs were verified to support that axis; unsupported axes are omitted
 #   from that harness's launch rather than guessed.
+#   config/crew-permission-mode (LOCAL, gitignored) selects the permission flag
+#   spliced into the claude launch template. Absent or "auto" (the default)
+#   resolves to --permission-mode auto; "bypass" or "bypassPermissions" restores
+#   the prior --dangerously-skip-permissions; any other valid claude
+#   --permission-mode choice (acceptEdits, plan, manual, dontAsk) passes through
+#   as --permission-mode <value>; anything else aborts the spawn loudly before
+#   any fleet mutation. The knob is claude-only: raw launch commands and the
+#   other adapters' autonomy flags are untouched by it.
 #   --backend <name> is the explicit runtime session-provider backend for this
 #   spawn. Without it, the script resolves FM_BACKEND, then config/backend, then
 #   runtime auto-detection (the runtime firstmate itself is executing inside -
@@ -94,6 +102,8 @@
 #   multi-task shell loop (the tool shell is zsh, which does not word-split unquoted
 #   $vars and silently breaks ad-hoc `for ... in $pairs` loops).
 #   Launch templates live in launch_template() below; placeholders replaced before launch:
+#     __PERMFLAG__ claude permission flag resolved from config/crew-permission-mode
+#                  (claude_permission_flag below; validated before any fleet mutation)
 #     __BRIEF__    absolute path to data/<task-id>/brief.md
 #     __TURNEND__  absolute path to state/<task-id>.turn-ended (for harnesses whose
 #                  turn-end signal rides the launch command, e.g. codex -c notify=[...])
@@ -115,7 +125,7 @@ set -eu
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 usage() {
-  sed -n '2,78p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,122p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 case "${1:-}" in
@@ -431,6 +441,29 @@ else
 fi
 [ -z "$HARNESS_ARG" ] || ARG3=$HARNESS_ARG
 
+# Resolve claude's permission flag from config/crew-permission-mode (accepted
+# values in the usage header). --permission-mode auto is the safe default: the
+# auto classifier DENIES a risky action (the call fails with a message) instead
+# of blocking on a human prompt, so an unattended crew fails fast rather than
+# hanging; bypass stays available as the opt-in escape hatch. An unrecognized
+# value returns 1 so the caller aborts the spawn instead of silently launching
+# a crew in the wrong permission mode.
+claude_permission_flag() {
+  local mode=
+  if [ -f "$CONFIG/crew-permission-mode" ]; then
+    mode=$(tr -d '[:space:]' < "$CONFIG/crew-permission-mode" || true)
+  fi
+  case "$mode" in
+    ''|auto) printf -- '--permission-mode auto' ;;
+    bypass|bypassPermissions) printf -- '--dangerously-skip-permissions' ;;
+    acceptEdits|plan|manual|dontAsk) printf -- '--permission-mode %s' "$mode" ;;
+    *)
+      echo "error: config/crew-permission-mode value '$mode' is not recognized; use auto (default), bypass/bypassPermissions, or a valid claude --permission-mode choice (acceptEdits, plan, manual, dontAsk)" >&2
+      return 1
+      ;;
+  esac
+}
+
 # The verified launch command per adapter. The knowledge half of each adapter
 # (busy signature, exit command, dialogs, quirks) lives in the harness-adapters skill.
 launch_template() {
@@ -446,7 +479,7 @@ launch_template() {
     # does NOT suppress the interactive ghost text (verified empirically), so the env
     # var is the correct control. The dim-aware composer reader in fm-tmux-lib.sh is
     # the defense-in-depth backstop for any pane this flag cannot reach.
-    claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude __PERMFLAG__ __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     codex)
       if [ "$kind" = secondmate ]; then
         printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
@@ -465,8 +498,8 @@ launch_template() {
     # grok (Grok Build TUI): a positional prompt starts the supervised interactive
     # session. --always-approve auto-approves every tool execution (verified: the
     # crewmate runs fully autonomously, no permission gate), which an unattended
-    # crewmate needs; it is the targeted equivalent of claude's
-    # --dangerously-skip-permissions. grok's turn-end signal does NOT ride the
+    # crewmate needs; it is the targeted equivalent of claude's bypass permission
+    # mode (config/crew-permission-mode bypass). grok's turn-end signal does NOT ride the
     # launch command - it is a Stop-event hook installed below (global hook +
     # per-task pointer), so the template is identical for ship/scout/secondmate.
     grok) printf '%s' 'grok --always-approve __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
@@ -515,6 +548,17 @@ case "$ARG3" in
     ;;
 esac
 
+# Splice the claude permission flag into the template now, before any fleet
+# mutation, so an unrecognized config/crew-permission-mode value aborts the
+# spawn while nothing has been created yet. Raw launch commands carry no
+# placeholder, so their caller-supplied flags stay untouched.
+case "$LAUNCH" in
+  *__PERMFLAG__*)
+    PERMFLAG=$(claude_permission_flag) || exit 1
+    LAUNCH=${LAUNCH//__PERMFLAG__/$PERMFLAG}
+    ;;
+esac
+
 case "$HARNESS" in
   pi|pi-signed) LAUNCH="FM_PI_HARNESS=$HARNESS $LAUNCH" ;;
 esac
@@ -526,6 +570,7 @@ if [ "$HARNESS" = pi-signed ] && ! command -v pi-signed >/dev/null 2>&1; then
   echo "error: pi-signed executable not found on PATH; install the signed Pi wrapper or select a different verified harness" >&2
   exit 1
 fi
+
 
 # config/secondmate-harness may carry optional model/effort tokens alongside the
 # harness ("<harness> [<model>] [<effort>]"). They apply only when this is a

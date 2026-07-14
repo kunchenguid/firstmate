@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Behavior tests for fm-spawn.sh concrete dispatch profile flags.
+# Behavior tests for fm-spawn.sh concrete dispatch profile flags and the
+# config/crew-permission-mode resolution in the claude launch template.
 #
 # These tests drive fm-spawn through meta writing and launch construction with a
 # fake tmux pane and a real isolated git worktree. The fake tmux captures the
@@ -123,7 +124,7 @@ test_no_profile_keeps_claude_profile_defaults() {
   assert_meta_profile "$HOME_DIR/state/$id.meta" claude default default
 
   launch=$(cat "$LAUNCH_LOG")
-  expected="CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/brief.md')\""
+  expected="CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --permission-mode auto \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/brief.md')\""
   [ "$launch" = "$expected" ] || fail "no-profile claude launch did not use the canonical launch kind"$'\n'"expected: $expected"$'\n'"actual:   $launch"
   pass "no --model/--effort records defaults and types the claude launch instructions"
 }
@@ -371,9 +372,94 @@ test_claude_threads_model_and_effort() {
   expect_code 0 "$status" "claude spawn with profile flags should succeed"
   assert_meta_profile "$HOME_DIR/state/$id.meta" claude sonnet high
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "claude --dangerously-skip-permissions --model 'sonnet' --effort 'high'" \
+  assert_contains "$launch" "claude --permission-mode auto --model 'sonnet' --effort 'high'" \
     "claude launch did not thread model and effort flags"
   pass "claude receives --model and --effort profile flags"
+}
+
+test_claude_permission_mode_bypass_restores_skip_permissions() {
+  local rec id out status launch
+  id=permmode-bypass-z17
+  rec=$(make_spawn_case permmode-bypass claude "$id")
+  read_case_record "$rec"
+  printf 'bypass\n' > "$HOME_DIR/config/crew-permission-mode"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "claude spawn with bypass permission mode should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "claude --dangerously-skip-permissions" \
+    "bypass did not restore --dangerously-skip-permissions"
+  assert_not_contains "$launch" "--permission-mode" "bypass launch must not carry --permission-mode"
+  pass "config/crew-permission-mode bypass restores --dangerously-skip-permissions"
+}
+
+test_claude_permission_mode_bypassPermissions_alias() {
+  local rec id out status launch
+  id=permmode-bypassalias-z18
+  rec=$(make_spawn_case permmode-bypassalias claude "$id")
+  read_case_record "$rec"
+  printf 'bypassPermissions\n' > "$HOME_DIR/config/crew-permission-mode"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "claude spawn with bypassPermissions should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "claude --dangerously-skip-permissions" \
+    "bypassPermissions did not restore --dangerously-skip-permissions"
+  pass "config/crew-permission-mode bypassPermissions behaves as bypass"
+}
+
+test_claude_permission_mode_valid_value_passes_through() {
+  local rec id out status launch
+  id=permmode-passthrough-z19
+  rec=$(make_spawn_case permmode-passthrough claude "$id")
+  read_case_record "$rec"
+  printf 'acceptEdits\n' > "$HOME_DIR/config/crew-permission-mode"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "claude spawn with a valid passthrough permission mode should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "claude --permission-mode acceptEdits" \
+    "valid permission mode did not pass through as --permission-mode acceptEdits"
+  assert_not_contains "$launch" "dangerously-skip-permissions" \
+    "passthrough launch must not carry --dangerously-skip-permissions"
+  pass "a valid claude --permission-mode choice passes through from config/crew-permission-mode"
+}
+
+test_claude_permission_mode_invalid_value_fails_before_meta() {
+  local rec id out status launch
+  id=permmode-invalid-z20
+  rec=$(make_spawn_case permmode-invalid claude "$id")
+  read_case_record "$rec"
+  printf 'yolo\n' > "$HOME_DIR/config/crew-permission-mode"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 1 "$status" "claude spawn with an unrecognized permission mode should fail"
+  assert_contains "$out" "config/crew-permission-mode value 'yolo' is not recognized" \
+    "spawn did not name the unrecognized permission-mode value"
+  assert_absent "$HOME_DIR/state/$id.meta" "permission-mode refusal should happen before meta is written"
+  launch=$(cat "$LAUNCH_LOG")
+  [ -z "$launch" ] || fail "permission-mode refusal must not send any launch command"$'\n'"actual: $launch"
+  pass "an unrecognized config/crew-permission-mode value aborts the spawn loudly"
+}
+
+test_claude_permission_mode_does_not_affect_other_harnesses() {
+  local rec id out status launch
+  id=permmode-codex-z21
+  rec=$(make_spawn_case permmode-codex codex "$id")
+  read_case_record "$rec"
+  printf 'yolo\n' > "$HOME_DIR/config/crew-permission-mode"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "codex spawn should ignore config/crew-permission-mode entirely"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "codex --dangerously-bypass-approvals-and-sandbox" \
+    "codex launch changed under a claude-only permission-mode config"
+  pass "config/crew-permission-mode is claude-only and never blocks other harnesses"
 }
 
 test_codex_threads_model_and_effort() {
@@ -666,6 +752,11 @@ test_active_dispatch_profile_allows_explicit_harness
 test_active_dispatch_profile_allows_positional_harness
 test_active_dispatch_profile_allows_raw_launch_command
 test_claude_threads_model_and_effort
+test_claude_permission_mode_bypass_restores_skip_permissions
+test_claude_permission_mode_bypassPermissions_alias
+test_claude_permission_mode_valid_value_passes_through
+test_claude_permission_mode_invalid_value_fails_before_meta
+test_claude_permission_mode_does_not_affect_other_harnesses
 test_codex_threads_model_and_effort
 test_codex_omits_invalid_max_effort
 test_grok_threads_model_and_reasoning_effort
