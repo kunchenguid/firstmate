@@ -63,7 +63,9 @@ test_durable_session_sanitizes_every_command() {
   first=$(sed -n '1p' "$log")
   second=$(sed -n '2p' "$log")
   third=$(sed -n '3p' "$log")
-  [ -n "$first" ] && [ -n "$second" ] && [ -n "$third" ] || fail "AXI wrapper did not run every command"
+  if [ -z "$first" ] || [ -z "$second" ] || [ -z "$third" ]; then
+    fail "AXI wrapper did not run every command"
+  fi
   IFS='|' read -r session auto browser profile args port headers mcp command <<< "$first"
   case "$session" in
     firstmate-isolated-*) ;;

@@ -274,7 +274,7 @@ retire_browser_hook_json() {
     rm -f "$tmp"
     return 1
   fi
-  mode=$(stat -f '%Lp' "$target" 2>/dev/null || stat -c '%a' "$target" 2>/dev/null || true)
+  mode=$(stat -c '%a' "$target" 2>/dev/null || stat -f '%Lp' "$target" 2>/dev/null || true)
   [ -z "$mode" ] || chmod "$mode" "$tmp" || { rm -f "$tmp"; return 1; }
   mv "$tmp" "$target"
 }
