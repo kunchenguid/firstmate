@@ -94,23 +94,6 @@ function healthyWatcherPid(): string {
   return result.status === 0 ? result.stdout.trim() : "";
 }
 
-function ownedWatcherPid(): string {
-  const result = spawnSync(
-    "bash",
-    [
-      "-c",
-      '. "$1"; pid=$(cat "$2/.watch.lock/pid" 2>/dev/null || true); fm_pid_alive "$pid" && fm_watcher_lock_matches_pid "$2" "$3" "$pid" "$4" && printf "%s" "$pid"',
-      "_",
-      wakeLib,
-      state,
-      watchScript,
-      fmHome,
-    ],
-    { encoding: "utf8", env: process.env, timeout: 2000 },
-  );
-  return result.status === 0 ? result.stdout.trim() : "";
-}
-
 function childOwnsWatcher(arm: ArmChild, watcherPid: string): boolean {
   let pid = watcherPid;
   for (let i = 0; i < 16 && pid; i += 1) {
@@ -194,8 +177,7 @@ export default function (pi: ExtensionAPI) {
       if (watcherPid && childOwnsWatcher(child, watcherPid)) {
         return { ok: true, message: `watcher: healthy - Pi extension owns watcher pid ${watcherPid}` };
       }
-      const staleOwnedWatcherPid = ownedWatcherPid();
-      if (!staleOwnedWatcherPid && childIsStillStarting(child)) {
+      if (childIsStillStarting(child)) {
         return { ok: true, message: "watcher: starting - Pi extension already has an arm child" };
       }
       stopArm();

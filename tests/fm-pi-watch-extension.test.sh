@@ -577,6 +577,75 @@ EOF
   pass "Pi orphaned delayed-close recovery preserves buffered wakes"
 }
 
+test_pi_repeated_arm_reuses_starting_child() {
+  local repo home plugin launch_log out status
+  repo="$TMP_ROOT/pi-repeated-arm-root"
+  home="$TMP_ROOT/pi-repeated-arm-home"
+  launch_log="$TMP_ROOT/pi-repeated-arm-launches"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cp "$ROOT/bin/fm-wake-lib.sh" "$repo/bin/fm-wake-lib.sh"
+  : > "$repo/bin/fm-watch.sh"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+set -u
+printf '%s\n' "$$" >> "${FM_LAUNCH_LOG:?}"
+sleep 1
+mkdir -p "$FM_HOME/state/.watch.lock"
+printf '%s\n' "$$" > "$FM_HOME/state/.watch.lock/pid"
+printf '%s\n' "$FM_HOME" > "$FM_HOME/state/.watch.lock/fm-home"
+printf '%s\n' "${FM_WATCH_PATH:?}" > "$FM_HOME/state/.watch.lock/watcher-path"
+LC_ALL=C ps -p "$$" -o lstart= -o command= | sed 's/^[[:space:]]*//' > "$FM_HOME/state/.watch.lock/pid-identity"
+touch "$FM_HOME/state/.last-watcher-beat"
+trap 'exit 0' TERM
+while :; do sleep 1; done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh" "$repo/bin/fm-watch.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_LAUNCH_LOG="$launch_log" FM_WATCH_PATH="$repo/bin/fm-watch.sh" node --input-type=module 2>&1 <<'EOF'
+import { readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+let tool = null;
+const pi = {
+  on() {},
+  registerCommand() {},
+  registerTool(candidate) {
+    if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+  },
+  sendUserMessage: async () => {},
+};
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+const first = await tool.execute("first", {}, undefined, undefined, {});
+if (!first.content[0].text.includes("started Pi extension arm child 1")) throw new Error(first.content[0].text);
+for (let i = 0; i < 100; i += 1) {
+  try {
+    if (readFileSync(process.env.FM_LAUNCH_LOG, "utf8").trim()) break;
+  } catch {}
+  await new Promise((resolve) => setTimeout(resolve, 20));
+}
+const second = await tool.execute("second", {}, undefined, undefined, {});
+if (!second.content[0].text.includes("already has an arm child")) throw new Error(second.content[0].text);
+for (let i = 0; i < 100; i += 1) {
+  try {
+    if (readFileSync(process.env.FM_HOME + "/state/.watch.lock/pid", "utf8").trim()) break;
+  } catch {}
+  await new Promise((resolve) => setTimeout(resolve, 20));
+}
+const third = await tool.execute("third", {}, undefined, undefined, {});
+if (!third.content[0].text.includes("Pi extension owns watcher pid")) throw new Error(third.content[0].text);
+process.exit(0);
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "Pi extension must reuse an in-flight arm child during startup retries"
+  [ -z "$out" ] || fail "Pi repeated-arm test printed output: $out"
+  [ "$(wc -l < "$launch_log" | tr -d '[:space:]')" = 1 ] || fail "repeated Pi arm spawned a duplicate watcher during startup"
+  pass "Pi repeated arm reuses the starting child"
+}
+
 test_pi_alias_root_reuses_owned_healthy_watcher() {
   local repo alias home plugin launch_log canon_watch out status
   repo="$TMP_ROOT/pi-alias-root-real"
@@ -1070,6 +1139,7 @@ test_pi_stale_child_is_reconciled_and_inherited_pipe_descendants_are_reaped
 test_pi_unexpected_arm_exit_reports_failure_wake
 test_pi_orphaned_delayed_close_reap_stays_silent
 test_pi_orphaned_delayed_close_preserves_buffered_wake
+test_pi_repeated_arm_reuses_starting_child
 test_pi_alias_root_reuses_owned_healthy_watcher
 test_opencode_primary_watch_plugin_static_wiring
 test_opencode_primary_watch_plugin_uses_effective_state_home
