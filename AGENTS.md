@@ -89,6 +89,7 @@ data/                personal fleet records; LOCAL, gitignored as a whole
   secondmates.md      secondmate routing table; firstmate-private, maintained by fm-home-seed.sh (section 6)
   <id>/brief.md      per-task crewmate brief, or per-secondmate charter brief when kind=secondmate
   <id>/report.md     scout task deliverable, written by the crewmate; survives teardown
+  <id>/axi-session   firstmate-owned isolated AXI browser-session record; teardown stops the session and clears the record after a successful close
 projects/            default clone root and Firstmate-owned task-worktree root; gitignored; READ-ONLY for you except script-managed codex-app task worktrees under `.firstmate-worktrees/`
 state/               volatile runtime signals; gitignored
   <id>.status        appended by crewmates: "<state>: <note>" wake-event lines, not current-state truth

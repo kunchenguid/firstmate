@@ -1,5 +1,8 @@
 # shellcheck shell=bash
 
+# Shared chrome-devtools-axi version compatibility helpers for isolated sessions.
+# Sourced by fm-bootstrap.sh and fm-axi-isolated.sh.
+
 fm_axi_version_parts() {
   local output
   command -v chrome-devtools-axi >/dev/null 2>&1 || return 1
