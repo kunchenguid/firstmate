@@ -5,7 +5,7 @@
 // a cross-home process-name kill.
 import { spawn, spawnSync, type ChildProcessByStdio } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Readable } from "node:stream";
@@ -27,7 +27,14 @@ const fmRoot = process.env.FM_ROOT_OVERRIDE || root;
 const state = process.env.FM_STATE_OVERRIDE || `${fmHome}/state`;
 const config = process.env.FM_CONFIG_OVERRIDE || `${fmHome}/config`;
 const armScript = `${fmRoot}/bin/fm-watch-arm.sh`;
-const watchScript = `${fmRoot}/bin/fm-watch.sh`;
+const watchScript = (() => {
+  const path = `${fmRoot}/bin/fm-watch.sh`;
+  try {
+    return realpathSync(path);
+  } catch {
+    return path;
+  }
+})();
 const wakeLib = `${fmRoot}/bin/fm-wake-lib.sh`;
 const marker = `${state}/.pi-watch-extension-loaded`;
 const extensionVersion = `sha256:${createHash("sha256").update(readFileSync(extensionFile)).digest("hex")}`;
