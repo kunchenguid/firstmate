@@ -420,7 +420,7 @@ task_json_lines() {
     blocked_event=$(printf '%s' "$open_decisions_json" | jq 'if any(.[]; .verb == "blocked") then 1 else 0 end')
 
     endpoint_exists=null
-    if [ -n "$target" ]; then
+    if [ -n "$target" ] && [ "$backend" != "$FM_BACKEND_LEGACY_REMOVED" ]; then
       if fm_backend_target_exists "$backend" "$target" "fm-$id" >/dev/null 2>&1; then
         endpoint_exists=true
       else
@@ -428,7 +428,7 @@ task_json_lines() {
       fi
     fi
     agent_alive=not_checked
-    if [ "$kind" = secondmate ] && [ -n "$target" ]; then
+    if [ "$kind" = secondmate ] && [ -n "$target" ] && [ "$backend" != "$FM_BACKEND_LEGACY_REMOVED" ]; then
       agent_alive=$(fm_backend_agent_alive "$backend" "$target" 2>/dev/null || printf unknown)
     fi
 

@@ -7,7 +7,7 @@
 # (bin/fm-marker-lib.sh) when, and only when, the resolved target is a task
 # selector whose meta records kind=secondmate, so the secondmate can recognize
 # the request and route its reply via the status path. These tests pin that
-# behavior hermetically (stubbed tmux, no real agent):
+# behavior hermetically (stubbed herdr, no real agent):
 #   1. Exact-id and stable-label kind=secondmate selectors prepend the marker.
 #   2. Exact-id and stable-label ordinary crewmate selectors stay unmarked.
 #   3. Explicit endpoints stay unmarked, with or without matching local meta.
@@ -25,42 +25,15 @@ SEND="$ROOT/bin/fm-send.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-send-marker)
 
-# A fake tmux that (a) records the literal text of every `send-keys -l` to
+# A fake Herdr CLI that records each literal `pane send-text` payload in
 # FM_SEND_LOG and (b) lets fm-send's submit path reach a clean "empty" verdict.
-# display-message yields a numeric cursor_y; capture-pane returns an empty
-# bordered composer so fm_tmux_composer_state reads "empty" (submit landed) on the
-# first Enter. Only the literal (-l) text is logged; Enter retries and --key sends
-# are not, so the log holds exactly what was typed into the composer.
+# Its pane read response is an empty bordered composer, so the Herdr composer
+# classifier observes that the first Enter submitted successfully.
+# Key sends are not logged, so the log holds exactly what was typed.
 make_stubs() {  # <dir> -> echoes fakebin dir
   local dir=$1 fb="$1/fakebin"
   mkdir -p "$fb"
-  cat > "$fb/tmux" <<'SH'
-#!/usr/bin/env bash
-set -u
-case "${1:-}" in
-  send-keys)
-    shift
-    literal=0
-    while [ $# -gt 0 ]; do
-      case "$1" in
-        -t) shift 2 ;;
-        -l) literal=1; shift ;;
-        *) break ;;
-      esac
-    done
-    if [ "$literal" = 1 ]; then
-      printf '%s' "${1:-}" >> "$FM_SEND_LOG"
-    fi
-    exit 0 ;;
-  display-message)
-    for a in "$@"; do case "$a" in *cursor_y*) printf '0\n'; exit 0 ;; esac; done
-    printf 'fakepane\n'; exit 0 ;;
-  capture-pane) printf '\xe2\x94\x82 \xe2\x94\x82\n'; exit 0 ;;
-  list-windows) exit 0 ;;
-esac
-exit 0
-SH
-  chmod +x "$fb/tmux"
+  fm_test_write_basic_herdr "$fb/herdr"
   cat > "$fb/sleep" <<'SH'
 #!/usr/bin/env bash
 exit 0
@@ -95,7 +68,7 @@ test_secondmate_target_is_marked() {
   dir="$TMP_ROOT/sm"; mkdir -p "$dir"
   fb=$(make_stubs "$dir"); log="$dir/send.log"
   home=$(setup_home sm)
-  fm_write_secondmate_meta "$home/state/domain.meta" "$home" "sess:fm-domain"
+  fm_write_secondmate_meta "$home/state/domain.meta" "$home" "sess:w1:p1"
   run_send "$fb" "$home" "$log" "fm-domain" "audit the build"; rc=$?
   expect_code 0 "$rc" "send to a secondmate target should succeed"
   got=$(cat "$log")
@@ -111,7 +84,7 @@ test_exact_secondmate_task_id_is_marked() {
   dir="$TMP_ROOT/sm-exact"; mkdir -p "$dir"
   fb=$(make_stubs "$dir"); log="$dir/send.log"
   home=$(setup_home sm-exact)
-  fm_write_secondmate_meta "$home/state/domain.meta" "$home" "sess:fm-domain"
+  fm_write_secondmate_meta "$home/state/domain.meta" "$home" "sess:w1:p1"
   run_send "$fb" "$home" "$log" "domain" "audit the build"; rc=$?
   expect_code 0 "$rc" "send to an exact secondmate task id should succeed"
   got=$(cat "$log")
@@ -134,7 +107,7 @@ test_crewmate_target_is_not_marked() {
   fb=$(make_stubs "$dir"); log="$dir/send.log"
   home=$(setup_home crew)
   fm_write_meta "$home/state/build.meta" \
-    "window=sess:fm-build" "worktree=$home/wt" "project=$home/p" \
+    "window=sess:w1:p2" "worktree=$home/wt" "project=$home/p" \
     "harness=echo" "kind=ship" "mode=no-mistakes" "yolo=off"
   run_send "$fb" "$home" "$log" "fm-build" "fix the test"; rc=$?
   expect_code 0 "$rc" "send to a stable-label crewmate target should succeed"
@@ -156,15 +129,15 @@ test_explicit_window_is_not_marked() {
   home=$(setup_home explicit)
   # An explicit endpoint is not a task selector, so even matching secondmate
   # metadata must not make fm-send guess the caller's intent and mark it.
-  fm_write_secondmate_meta "$home/state/win.meta" "$home" "other:win"
-  run_send "$fb" "$home" "$log" "other:win" "ping"; rc=$?
+  fm_write_secondmate_meta "$home/state/win.meta" "$home" "other:w1:p1"
+  run_send "$fb" "$home" "$log" "other:w1:p1" "ping"; rc=$?
   expect_code 0 "$rc" "send to an explicit window with matching meta should succeed"
   got=$(cat "$log")
   [ "$got" = "ping" ] \
     || fail "explicit session:window send with meta: expected bare text, got marker"$'\n'"--- bytes ---"$'\n'"$(printf '%s' "$got" | od -An -c)"
 
   home=$(setup_home explicit-no-meta)
-  run_send "$fb" "$home" "$log" "outside:window" "outside ping"; rc=$?
+  run_send "$fb" "$home" "$log" --backend herdr "outside:w2:p2" "outside ping"; rc=$?
   expect_code 0 "$rc" "send to an explicit window with no local meta should succeed"
   got=$(cat "$log")
   [ "$got" = "outside ping" ] \
@@ -177,7 +150,7 @@ test_key_path_is_not_marked() {
   dir="$TMP_ROOT/key"; mkdir -p "$dir"
   fb=$(make_stubs "$dir"); log="$dir/send.log"
   home=$(setup_home key)
-  fm_write_secondmate_meta "$home/state/domain.meta" "$home" "sess:fm-domain"
+  fm_write_secondmate_meta "$home/state/domain.meta" "$home" "sess:w1:p1"
   run_send "$fb" "$home" "$log" "fm-domain" --key Escape; rc=$?
   expect_code 0 "$rc" "--key send to a secondmate should succeed"
   [ ! -s "$log" ] \
@@ -220,7 +193,7 @@ test_marked_send_preserves_trailing_newlines() {
   dir="$TMP_ROOT/sm-trailing-newlines"; mkdir -p "$dir"
   fb=$(make_stubs "$dir"); log="$dir/send.log"
   home=$(setup_home sm-trailing-newlines)
-  fm_write_secondmate_meta "$home/state/domain.meta" "$home" "sess:fm-domain"
+  fm_write_secondmate_meta "$home/state/domain.meta" "$home" "sess:w1:p1"
   payload=$'audit the build\n\n'
   run_send "$fb" "$home" "$log" "domain" "$payload"; rc=$?
   expect_code 0 "$rc" "marked send with trailing newlines should succeed"

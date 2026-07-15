@@ -52,8 +52,8 @@ matrix_case R05 allow "git grep 'fm-watch-checkpoint.sh && echo bad'"
 matrix_case R06 allow "sed -n '/fm-watch-checkpoint.sh/p' docs/arm-pretool-check.md"
 matrix_case R07 allow 'assert_contains "$content" '\''fm-watch-arm.sh &'\'''
 matrix_case R08 allow "printf '%s\\n' 'bin/fm-watch-checkpoint.sh --seconds 180 >/tmp/out'"
-matrix_case R09 allow "tmux send-keys -t isolated-pi-lab 'bin/fm-watch-arm.sh &' Enter"
-matrix_case R10 allow "tmux send-keys -t isolated-pi-lab \"printf '%s\\n' 'bin/fm-watch-arm.sh &'\"; tmux send-keys -t isolated-pi-lab Enter"
+matrix_case R09 allow "herdr send-keys -t isolated-pi-lab 'bin/fm-watch-arm.sh &' Enter"
+matrix_case R10 allow "herdr send-keys -t isolated-pi-lab \"printf '%s\\n' 'bin/fm-watch-arm.sh &'\"; herdr send-keys -t isolated-pi-lab Enter"
 matrix_case R11 allow "python3 -c 'print(\"bin/fm-watch-arm.sh; echo data\")'"
 matrix_case R12 allow "bash -lc \"rg -n 'fm-watch-arm.sh &' docs\""
 matrix_case R13 allow "echo 'pkill -f fm-watch'"
@@ -61,7 +61,7 @@ matrix_case R14 allow "rg -n 'pkill -f fm-watch' docs tests"
 matrix_case R15 allow "echo ok # bin/fm-watch-arm.sh &"
 matrix_case R16 allow $'# bin/fm-watch-arm.sh &\necho ok'
 matrix_case R17 allow "printf '%s\\n' 'fm-watch.sh; a && b || c > out' | sed -n '1p'"
-matrix_case R18 allow "sh -c 'tmux send-keys -t lab \"bin/fm-watch-arm.sh &\" Enter'"
+matrix_case R18 allow "sh -c 'herdr send-keys -t lab \"bin/fm-watch-arm.sh &\" Enter'"
 matrix_case R19 allow "eval 'printf \"%s\\n\" \"bin/fm-watch-arm.sh &\"'"
 
 matrix_case D01 deny 'bin/fm-watch-arm.sh &'

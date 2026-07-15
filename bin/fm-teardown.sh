@@ -38,10 +38,13 @@
 # leased home releases its durable treehouse lease so the pool slot is freed,
 # never left leased forever. If the treehouse return fails, teardown leaves the
 # leased home and state in place instead of hiding a still-held lease.
-# Usage: fm-teardown.sh <task-id> [--force]
+# Usage: fm-teardown.sh <task-id> [--legacy-cleanup] [--force]
+#   --legacy-cleanup authorizes idempotent cleanup only for legacy
+#   removed-runtime state and keeps ordinary work-safety checks enabled.
 #   --force skips ordinary-task dirty and landed-work checks, skips scout report
 #   checks, and discards secondmate child work for kind=secondmate. Only use it
-#   when the captain has explicitly said to discard the work.
+#   when the captain has explicitly said to discard the work. Legacy state still
+#   requires the independent --legacy-cleanup permission.
 #
 # Transient / stale worktree git lock recovery (teardown-lock-race): a crew process
 # killed mid-git-operation can leave a .git/worktrees/<wt>/index.lock (or, for a
@@ -96,14 +99,42 @@ fm_refuse_if_gate_agent
 FM_LOCK_LOG_PREFIX=teardown
 "$FM_ROOT/bin/fm-guard.sh" || true
 ID=$1
-FORCE=${2:-}
+shift
+FORCE=""
+LEGACY_REMOVED_CLEANUP_REQUESTED=0
+for arg in "$@"; do
+  case "$arg" in
+    --force) FORCE=--force ;;
+    --legacy-cleanup) LEGACY_REMOVED_CLEANUP_REQUESTED=1 ;;
+    *) echo "usage: fm-teardown.sh <task-id> [--legacy-cleanup] [--force]" >&2; exit 2 ;;
+  esac
+done
 
 META="$STATE/$ID.meta"
-[ -f "$META" ] || { echo "error: no meta for task $ID at $META" >&2; exit 1; }
+if [ ! -f "$META" ]; then
+  if [ "$LEGACY_REMOVED_CLEANUP_REQUESTED" -eq 1 ]; then
+    echo "legacy removed-runtime state for task $ID is already absent"
+    exit 0
+  fi
+  echo "error: no meta for task $ID at $META" >&2
+  exit 1
+fi
 WT=$(grep '^worktree=' "$META" | cut -d= -f2-)
 T=$(grep '^window=' "$META" | cut -d= -f2-)
 PROJ=$(grep '^project=' "$META" | cut -d= -f2-)
 BACKEND=$(fm_backend_of_meta "$META")
+LEGACY_REMOVED_CLEANUP=0
+if [ "$BACKEND" = "$FM_BACKEND_LEGACY_REMOVED" ]; then
+  if [ "$LEGACY_REMOVED_CLEANUP_REQUESTED" -ne 1 ]; then
+    echo "REFUSED: task $ID uses legacy removed-runtime state at $META; no endpoint, worktree, or state was changed." >&2
+    echo "Inspect and land its work, confirm the old endpoint is gone, then run bin/fm-teardown.sh $ID --legacy-cleanup; the normal landed-work safety checks still apply." >&2
+    exit 1
+  fi
+  LEGACY_REMOVED_CLEANUP=1
+elif [ "$LEGACY_REMOVED_CLEANUP_REQUESTED" -eq 1 ]; then
+  echo "REFUSED: --legacy-cleanup applies only to clearly identified legacy removed-runtime state; no endpoint, worktree, or state was changed." >&2
+  exit 1
+fi
 if [ "$BACKEND" = orca ]; then
   T_ORCA=$(grep '^terminal=' "$META" | tail -1 | cut -d= -f2- || true)
   [ -n "$T_ORCA" ] && T=$T_ORCA
@@ -839,6 +870,10 @@ validate_firstmate_home_children_removal() {
     child_kind=$(meta_value "$child_meta" kind)
     [ -n "$child_kind" ] || child_kind=ship
     child_backend=$(fm_backend_of_meta "$child_meta")
+    if [ "$child_backend" = "$FM_BACKEND_LEGACY_REMOVED" ]; then
+      echo "REFUSED: child task $child_id uses legacy removed-runtime state at $child_meta; clean it explicitly before removing its parent home." >&2
+      return 1
+    fi
     if [ "$child_kind" = secondmate ]; then
       child_home=$(meta_value "$child_meta" home)
       [ -n "$child_home" ] || child_home=$child_wt
@@ -1030,7 +1065,7 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   }
 fi
 
-if [ "$BACKEND" != orca ]; then
+if [ "$BACKEND" != orca ] && [ "$LEGACY_REMOVED_CLEANUP" -ne 1 ]; then
   fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" 2>/dev/null || true
 fi
 if [ "$KIND" = secondmate ]; then
@@ -1039,7 +1074,9 @@ if [ "$KIND" = secondmate ]; then
   remove_secondmate_registry_entry "$ID"
 fi
 remove_grok_turnend_auth "$STATE" "$ID"
-fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
+if [ "$LEGACY_REMOVED_CLEANUP" -ne 1 ]; then
+  fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
+fi
 # Remove the per-task temp root (/tmp/fm-<id>/, incl. its gotmp/) recorded by spawn.
 # Read before the state-file rm below; empty (pre-fix tasks without tasktmp=) is a no-op.
 [ -n "$TASK_TMP" ] && rm -rf "$TASK_TMP"

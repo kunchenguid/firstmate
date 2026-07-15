@@ -133,25 +133,12 @@ test_helper_normal_is_noop() {
 
 # --- fm-spawn ---------------------------------------------------------------
 
-# A fake tmux/treehouse so fm-spawn resolves the crew worktree from a controlled
+# A fake herdr/treehouse so fm-spawn resolves the crew worktree from a controlled
 # pane path and completes without a live terminal (mirrors tests/fm-tangle-guard).
 make_spawn_fakebin() {
   local dir=$1 fakebin
   fakebin=$(fm_fakebin "$dir")
-  cat > "$fakebin/tmux" <<'SH'
-#!/usr/bin/env bash
-set -u
-case "$*" in
-  *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
-esac
-case "${1:-}" in
-  display-message) printf 'firstmate\n'; exit 0 ;;
-  list-windows) exit 0 ;;
-  has-session|new-session|new-window|send-keys|set-window-option) exit 0 ;;
-esac
-exit 0
-SH
-  chmod +x "$fakebin/tmux"
+  fm_test_write_basic_herdr "$fakebin/herdr"
   fm_fake_exit0 "$fakebin" treehouse
   printf '%s\n' "$fakebin"
 }
@@ -165,7 +152,7 @@ run_spawn() {
       "FM_ROOT_OVERRIDE=" "FM_HOME=$home" \
       "FM_STATE_OVERRIDE=$home/state" "FM_DATA_OVERRIDE=$home/data" \
       "FM_PROJECTS_OVERRIDE=$home/projects" "FM_CONFIG_OVERRIDE=$home/config" \
-      "FM_SPAWN_NO_GUARD=1" "FM_FAKE_PANE_PATH=$pane" "TMUX=fake,1,0" \
+      "FM_SPAWN_NO_GUARD=1" "FM_FAKE_HERDR_CWD=$pane" \
       "PATH=$fakebin:$PATH" "$@" \
       "$SPAWN" "$id" "$proj" codex ) 2>&1
 }
@@ -202,33 +189,13 @@ test_spawn_refuses_and_admits() {
 
 # --- fm-send ----------------------------------------------------------------
 
-# A fake tmux that logs send-keys to FM_TMUX_LOG and reports live endpoints
+# A fake herdr that logs send-keys to FM_HERDR_LOG and reports live endpoints
 # (mirrors tests/fm-send-strict), so a successful send is observable and a
 # refused one leaves an empty log (proving no message was typed).
 make_send_fakebin() {
   local dir=$1 fakebin
   fakebin=$(fm_fakebin "$dir")
-  cat > "$fakebin/tmux" <<'SH'
-#!/usr/bin/env bash
-set -u
-case "${1:-}" in
-  send-keys)
-    shift; literal=0; target=
-    while [ $# -gt 0 ]; do
-      case "$1" in
-        -t) target=$2; shift 2 ;;
-        -l) literal=1; shift ;;
-        *) break ;;
-      esac
-    done
-    printf 'send-keys target=%s literal=%s arg=%s\n' "$target" "$literal" "${1:-}" >> "$FM_TMUX_LOG"
-    exit 0 ;;
-  display-message) printf '%%1\n'; exit 0 ;;
-  capture-pane) printf '\xe2\x94\x82 \xe2\x94\x82\n'; exit 0 ;;
-esac
-exit 0
-SH
-  chmod +x "$fakebin/tmux"
+  fm_test_write_basic_herdr "$fakebin/herdr"
   printf '#!/usr/bin/env bash\nexit 0\n' > "$fakebin/sleep"
   chmod +x "$fakebin/sleep"
   printf '%s\n' "$fakebin"
@@ -239,7 +206,7 @@ run_send() {
   local cwd=$1 home=$2 fakebin=$3 log=$4 target=$5 text=$6; shift 6
   ( cd "$cwd" && env -u NO_MISTAKES_GATE -u FM_GATE_REFUSE_BYPASS \
       "PATH=$fakebin:$PATH" "FM_HOME=$home" "FM_ROOT_OVERRIDE=$home" \
-      "FM_TMUX_LOG=$log" "FM_SEND_SETTLE=0" "$@" \
+      "FM_HERDR_LOG=$log" "FM_SEND_SETTLE=0" "$@" \
       "$SEND" "$target" "$text" ) 2>&1
 }
 
@@ -247,8 +214,8 @@ test_send_refuses_and_admits() {
   local home fakebin log out rc
   home="$TMP/send-home"; mkdir -p "$home/state"
   fakebin=$(make_send_fakebin "$TMP/send-fake")
-  log="$TMP/send-tmux.log"
-  fm_write_meta "$home/state/lane-ok.meta" "window=sess:fm-lane-ok" "kind=ship" "harness=codex"
+  log="$TMP/send-herdr.log"
+  fm_write_meta "$home/state/lane-ok.meta" "window=sess:w1:p1" "kind=ship" "harness=codex"
 
   # env-marker refuse.
   : > "$log"
@@ -270,7 +237,7 @@ test_send_refuses_and_admits() {
   expect_code 0 "$rc" "send: a normal session must still send"
   assert_not_contains "$out" "$ENV_MSG" "send: normal send must not print the gate refusal"
   assert_not_contains "$out" "$PATH_MSG" "send: normal send must not print the backstop refusal"
-  assert_contains "$(cat "$log")" "target=sess:fm-lane-ok literal=1 arg=hello captain" "send: normal send should type the text"
+  assert_contains "$(cat "$log")" "target=sess:w1:p1 literal=1 arg=hello captain" "send: normal send should type the text"
   pass "fm-send: refuses on marker and gate-worktree backstop; a normal steer is unaffected"
 }
 
@@ -283,7 +250,7 @@ make_teardown_case() {
   local name=$1 case_dir fakebin t
   case_dir="$TMP/$name"; fakebin="$case_dir/fakebin"
   mkdir -p "$case_dir/state" "$case_dir/config" "$fakebin"
-  for t in treehouse tmux; do
+  for t in treehouse herdr; do
     printf '#!/usr/bin/env bash\nexit 0\n' > "$fakebin/$t"
     chmod +x "$fakebin/$t"
   done
@@ -388,6 +355,19 @@ test_no_mistakes_yaml_disables_project_settings() {
   pass ".no-mistakes.yaml parses and sets disable_project_settings: true (trusted-only gate opt-out)"
 }
 
+test_herdr_acceptance_gate_ci_parity() {
+  local gate="$ROOT/.no-mistakes.yaml" ci="$ROOT/.github/workflows/ci.yml" contributing="$ROOT/CONTRIBUTING.md"
+  assert_grep "export FM_RUN_HERDR_GUIDE_E2E=1" "$gate" \
+    "no-mistakes commands.test must enable the guarded Herdr acceptance"
+  assert_grep "FM_RUN_HERDR_GUIDE_E2E: 1" "$ci" \
+    "CI behavior tests must enable the guarded Herdr acceptance"
+  assert_grep "export FM_RUN_HERDR_GUIDE_E2E=1" "$contributing" \
+    "CONTRIBUTING run-all must enable the guarded Herdr acceptance"
+  assert_grep "operates only through \`bin/fm-herdr-lab.sh\` on a generated non-default session" "$contributing" \
+    "CONTRIBUTING must document Herdr acceptance isolation"
+  pass "documented run-all, no-mistakes, and CI require guarded Herdr acceptance"
+}
+
 test_helper_env_marker_refuses
 test_helper_empty_env_marker_refuses
 test_helper_path_backstop_refuses
@@ -396,3 +376,4 @@ test_spawn_refuses_and_admits
 test_send_refuses_and_admits
 test_teardown_refuses_and_admits
 test_no_mistakes_yaml_disables_project_settings
+test_herdr_acceptance_gate_ci_parity

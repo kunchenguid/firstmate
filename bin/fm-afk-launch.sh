@@ -10,7 +10,7 @@
 # native background mechanism (pi) has to manufacture a terminal, and doing that
 # by SPLITTING the captain's active pane visibly shrinks it - the regression this
 # script fixes. Instead this creates a non-visible tracked terminal (a herdr tab/
-# workspace with --no-focus, or a detached tmux session) that never touches the
+# workspace with --no-focus) that never touches the
 # captain's active tab, and NEVER uses shell `&` (which herdr/codex can reap).
 #
 # Correct supervisor targeting: the daemon finds the captain pane to inject into
@@ -36,7 +36,8 @@
 #   fm-afk-launch.sh reconcile Close a recorded-but-dead daemon terminal by exact
 #                              id and drop the record (recovery after a crash).
 #
-# Supported backends: herdr, tmux. Others (zellij, orca, cmux) have no verified
+# Supported backend: Herdr.
+# Others (zellij, Orca, cmux) have no verified
 # non-visible-launch primitive here yet and refuse loudly.
 #
 # Test seam: FM_AFK_LAUNCH_ENTRY overrides the command run in the created
@@ -161,9 +162,12 @@ fm_afk_launch_record_read() {
     fm_afk_launch_log "daemon terminal record is malformed; refusing to act on it"
     return 2
   fi
+  if fm_backend_is_legacy_removed_name "$FM_AFK_REC_BACKEND"; then
+    fm_afk_launch_log "legacy removed-runtime daemon state at $FM_AFK_LAUNCH_RECORD cannot be cleaned automatically; confirm the prior daemon process and endpoint are gone, remove only this terminal record, then retry the away-mode command"
+    return 3
+  fi
   case "$FM_AFK_REC_BACKEND" in
     herdr) [ -n "$extra" ] ;;
-    tmux) : ;;
     none) [ "$FM_AFK_REC_TARGET" = - ] && [ "$extra" = native ] ;;
     *) return 2 ;;
   esac || { fm_afk_launch_log "daemon terminal record is malformed; refusing to act on it"; return 2; }
@@ -173,7 +177,7 @@ fm_afk_launch_record_validate_if_present() {
   local result
   fm_afk_launch_record_read
   result=$?
-  [ "$result" -ne 2 ]
+  [ "$result" -eq 0 ] || [ "$result" -eq 1 ]
 }
 
 # Close a recorded terminal by EXACT id (never a broad sweep). The
@@ -187,10 +191,6 @@ fm_afk_launch_close_terminal() {  # <backend> <target>
       local session=${target%%:*} pane=${target#*:}
       [ -n "$session" ] && [ -n "$pane" ] && [ "$pane" != "$target" ] || return 1
       fm_backend_herdr_cli "$session" pane close "$pane" >/dev/null 2>&1
-      ;;
-    tmux)
-      # target is the dedicated daemon session name - kill exactly it.
-      tmux kill-session -t "$target" 2>/dev/null
       ;;
     none)
       return 0
@@ -214,12 +214,6 @@ fm_afk_launch_terminal_absent() {  # <backend> <target>
       [ "$result" -ne 0 ] || return 1
       code=$(printf '%s' "$out" | jq -r '.error.code // empty' 2>/dev/null) || return 1
       [ "$code" = pane_not_found ]
-      ;;
-    tmux)
-      out=$(tmux has-session -t "$target" 2>&1)
-      result=$?
-      [ "$result" -eq 1 ] || return 1
-      printf '%s' "$out" | grep -Eq "can't find session"
       ;;
     none)
       return 0
@@ -248,9 +242,6 @@ fm_afk_launch_terminal_alive() {  # <backend> <target>
       pane=${target#*:}
       [ -n "$session" ] && [ -n "$pane" ] && [ "$pane" != "$target" ] || return 1
       fm_backend_herdr_cli "$session" pane get "$pane" >/dev/null 2>&1
-      ;;
-    tmux)
-      tmux has-session -t "$target" 2>/dev/null
       ;;
     *) return 1 ;;
   esac
@@ -327,7 +318,7 @@ fm_afk_launch_reconcile() {
   if [ "$read_result" -eq 0 ]; then
     fm_afk_launch_log "reconciling leaked daemon terminal ${FM_AFK_REC_BACKEND}:${FM_AFK_REC_TARGET}"
     fm_afk_launch_close_recorded
-  elif [ "$read_result" -eq 2 ]; then
+  elif [ "$read_result" -eq 2 ] || [ "$read_result" -eq 3 ]; then
     return 1
   fi
 }
@@ -409,32 +400,6 @@ fm_afk_launch_create_herdr() {  # <captain-target> <captain-backend>
   fm_afk_launch_log "daemon launched in non-visible herdr workspace $wsid (pane $session:$pane), supervising $captain_target"
 }
 
-# Launch the daemon in a detached tmux session (never a split-window in the
-# captain's window). tmux pane ids are server-global, so the daemon reaches the
-# captain pane by its %id from this separate session.
-fm_afk_launch_create_tmux() {  # <captain-target> <captain-backend>
-  local captain_target=$1 captain_backend=$2 session entry cmd hash nonce
-  hash=$(printf '%s' "$FM_HOME" | cksum | cut -d' ' -f1)
-  nonce="$$-${RANDOM:-0}-$(date '+%s')"
-  session="fm-afk-daemon-$hash-$nonce"
-  entry=$(fm_afk_launch_entry_cmd)
-  cmd=$(printf 'exec env FM_HOME=%q FM_SUPERVISOR_TARGET=%q FM_SUPERVISOR_BACKEND=%q %q' \
-    "$FM_HOME" "$captain_target" "$captain_backend" "$entry")
-  if ! fm_afk_launch_record_write tmux "$session" ""; then
-    fm_afk_launch_log "failed to persist planned tmux daemon session '$session'"
-    return 1
-  fi
-  if ! tmux new-session -d -s "$session" "$cmd" 2>/dev/null; then
-    fm_afk_launch_log "failed to create detached tmux daemon session '$session'"
-    if ! rm -f "$FM_AFK_LAUNCH_RECORD"; then
-      fm_afk_launch_log "failed to remove planned tmux daemon record after creation failure"
-    fi
-    return 1
-  fi
-  fm_afk_launch_commit_terminal tmux "$session" "" 1 || return 1
-  fm_afk_launch_log "daemon launched in detached tmux session '$session', supervising $captain_target"
-}
-
 fm_afk_launch_start() {
   local captain_target captain_backend backup artifact had_afk=0 result
   if [ -e "$FM_AFK_LAUNCH_STATE/.afk-return-catchup" ]; then
@@ -489,9 +454,8 @@ fm_afk_launch_start() {
   if [ "$result" -eq 0 ]; then
     case "$captain_backend" in
       herdr) fm_afk_launch_create_herdr "$captain_target" "$captain_backend"; result=$? ;;
-      tmux)  fm_afk_launch_create_tmux "$captain_target" "$captain_backend"; result=$? ;;
       *)
-        fm_afk_launch_log "no non-visible daemon-launch primitive for backend '$captain_backend' yet (supported: herdr, tmux)"
+        fm_afk_launch_log "no non-visible daemon-launch primitive for backend '$captain_backend' yet (supported: herdr)"
         result=1
         ;;
     esac
@@ -553,6 +517,10 @@ fm_afk_launch_stop() {
   read_result=$?
   if [ "$read_result" -eq 2 ]; then
     fm_afk_launch_log "malformed daemon terminal record; refusing to stop away mode"
+    return 1
+  fi
+  if [ "$read_result" -eq 3 ]; then
+    fm_afk_launch_log "legacy removed-runtime daemon state is preserved; refusing to stop away mode until its terminal record is explicitly cleaned"
     return 1
   fi
   # (1) SIGTERM the daemon so its cleanup trap flushes buffered escalations

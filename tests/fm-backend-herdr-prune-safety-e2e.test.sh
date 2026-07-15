@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+if [ "${FM_RUN_ISOLATED_HERDR_E2E:-0}" != 1 ]; then
+  printf 'ok - real Herdr prune-safety e2e is opt-in\n'
+  exit 0
+fi
 # tests/fm-backend-herdr-prune-safety-e2e.test.sh - isolated real-herdr
 # regression test for the 2026-07-02 self-kill incident and its fix
 # (bin/backends/herdr.sh's created-vs-adopted default-tab-prune gate; see
@@ -41,7 +45,8 @@ cleanup_all() {
   rm -rf "$SCRATCH"
 }
 trap cleanup_all EXIT
-fm_herdr_lab_prepare "$SESSION" || fail "could not prepare isolated Herdr lab session"
+herdr_test_provision "$SESSION" || fail "could not provision isolated Herdr lab session"
+herdr_test_route_calls "$SESSION"
 
 # shellcheck source=bin/fm-backend.sh
 . "$ROOT/bin/fm-backend.sh"

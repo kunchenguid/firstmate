@@ -4,7 +4,7 @@
 # When the MAIN firstmate relays a work request to one of its SECONDMATES,
 # bin/fm-send.sh prepends this marker to the message text. A secondmate is itself
 # a firstmate running in its own home, so without a marker it treats every
-# incoming fm-send/tmux line as if its captain typed it and answers
+# incoming fm-send line as if its captain typed it and answers
 # CONVERSATIONALLY in its own chat. But the main firstmate never reads a
 # secondmate's chat: the only main<-secondmate wakeup channel is the status file
 # (charter escalation), optionally pointing to a doc for detail. A detailed

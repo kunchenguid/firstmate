@@ -63,7 +63,7 @@ export REAL_GIT_FOR_TEST
 
 # Build a fresh sandbox for one test case. Sets up:
 #   $CASE/state/        - firstmate state dir (with a fresh watcher beacon)
-#   $CASE/fakebin/      - mocks for treehouse, tmux (PATH-prepended by caller)
+#   $CASE/fakebin/      - mocks for treehouse, herdr (PATH-prepended by caller)
 #   $CASE/origin.git/   - bare upstream repo (so the project clone has origin)
 #   $CASE/project/      - clone of origin; acts as the firstmate project dir
 #   $CASE/wt/           - a worktree of the project (the task worktree)
@@ -81,9 +81,9 @@ make_case() {
 # `treehouse return --force <wt>`: succeed silently.
 exit 0
 SH
-  cat > "$fakebin/tmux" <<'SH'
+  cat > "$fakebin/herdr" <<'SH'
 #!/usr/bin/env bash
-# tmux kill-window etc.: succeed silently.
+# Herdr pane cleanup calls succeed silently.
 exit 0
 SH
   # Default gh-axi mock: no PR is associated with the branch, and viewing any PR
@@ -105,7 +105,7 @@ case "${1:-} ${2:-}" in
 esac
 exit 0
 SH
-  chmod +x "$fakebin/treehouse" "$fakebin/tmux" "$fakebin/gh-axi" "$fakebin/gh"
+  chmod +x "$fakebin/treehouse" "$fakebin/herdr" "$fakebin/gh-axi" "$fakebin/gh"
 
   # Bare origin so the clone has an `origin` remote and origin/HEAD.
   git init -q --bare "$case_dir/origin.git"
@@ -1263,6 +1263,63 @@ SH
   pass "herdr teardown removes pane-owned escalation dedupe state"
 }
 
+test_removed_runtime_teardown_requires_safe_explicit_cleanup() {
+  local case_dir forced_case reverse_case rc
+  case_dir=$(make_case removed-runtime-cleanup)
+  write_meta "$case_dir" no-mistakes ship
+  sed -i.bak 's/^window=.*/window=custom-session:fm-task-x1/' "$case_dir/state/task-x1.meta"
+  rm -f "$case_dir/state/task-x1.meta.bak"
+  wt_commit_file "$case_dir" legacy-change.txt "unlanded legacy work" "unlanded legacy work"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/refuse.out" 2> "$case_dir/refuse.err"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "removed-runtime teardown should require the explicit cleanup path"
+  assert_grep "--legacy-cleanup" "$case_dir/refuse.err" "removed-runtime teardown did not name its cleanup path"
+  [ -e "$case_dir/state/task-x1.meta" ] && [ -d "$case_dir/wt" ] \
+    || fail "removed-runtime refusal changed protected state or worktree"
+
+  set +e
+  run_teardown "$case_dir" --legacy-cleanup > "$case_dir/unlanded.out" 2> "$case_dir/unlanded.err"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "explicit legacy cleanup should retain landed-work safety"
+  assert_grep "REFUSED" "$case_dir/unlanded.err" "explicit legacy cleanup bypassed the unlanded-work refusal"
+  [ -e "$case_dir/state/task-x1.meta" ] && [ -d "$case_dir/wt" ] \
+    || fail "unlanded legacy cleanup changed protected state or worktree"
+
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+  run_teardown "$case_dir" --legacy-cleanup > "$case_dir/landed.out" 2> "$case_dir/landed.err" \
+    || fail "landed removed-runtime cleanup failed"
+  [ ! -e "$case_dir/state/task-x1.meta" ] \
+    || fail "landed removed-runtime cleanup retained task metadata"
+  run_teardown "$case_dir" --legacy-cleanup > "$case_dir/repeat.out" 2> "$case_dir/repeat.err" \
+    || fail "repeated removed-runtime cleanup should be idempotent"
+
+  forced_case=$(make_case removed-runtime-force-cleanup)
+  write_meta "$forced_case" no-mistakes ship
+  sed -i.bak 's/^window=.*/window=other-session:fm-task-x1/' "$forced_case/state/task-x1.meta"
+  rm -f "$forced_case/state/task-x1.meta.bak"
+  wt_commit_file "$forced_case" discarded.txt "discarded legacy work" "discarded legacy work"
+  run_teardown "$forced_case" --legacy-cleanup --force > "$forced_case/force.out" 2> "$forced_case/force.err" \
+    || fail "legacy cleanup and force permissions did not compose"
+  [ ! -e "$forced_case/state/task-x1.meta" ] \
+    || fail "forced legacy cleanup retained task metadata"
+
+  reverse_case=$(make_case removed-runtime-reverse-force-cleanup)
+  write_meta "$reverse_case" no-mistakes ship
+  sed -i.bak 's/^window=.*/window=third-session:fm-task-x1/' "$reverse_case/state/task-x1.meta"
+  rm -f "$reverse_case/state/task-x1.meta.bak"
+  wt_commit_file "$reverse_case" discarded.txt "discarded legacy work" "discarded legacy work"
+  run_teardown "$reverse_case" --force --legacy-cleanup > "$reverse_case/force.out" 2> "$reverse_case/force.err" \
+    || fail "legacy cleanup flags should be order-independent"
+  [ ! -e "$reverse_case/state/task-x1.meta" ] \
+    || fail "reverse-order forced legacy cleanup retained task metadata"
+  pass "removed-runtime teardown requires independent safe and discard permissions"
+}
+
 test_local_only_fork_remote_allows
 test_teardown_prompts_tasks_axi_done_when_compatible
 test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present
@@ -1272,6 +1329,7 @@ test_no_mistakes_origin_remote_allows
 test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed
 test_herdr_teardown_clears_escalation_marker
+test_removed_runtime_teardown_requires_safe_explicit_cleanup
 test_squash_merged_branch_deleted_allows
 test_squash_merged_pr_allows_when_head_ancestor_of_pr_head
 test_no_pr_recorded_discovers_merged_pr_by_branch_allows

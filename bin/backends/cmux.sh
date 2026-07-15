@@ -9,8 +9,8 @@
 # in normal operation; the unit tests source it directly.
 #
 # Container shape: cmux has no "session" layer to multiplex the way
-# tmux/herdr/zellij do - there is just "the app" (one running GUI instance).
-# ONE cmux workspace PER TASK (mirrors tmux's one-window-per-task / zellij's
+# Herdr and zellij do - there is just "the app" (one running GUI instance).
+# ONE cmux workspace PER TASK (matching the one-container-per-task model and zellij's
 # one-tab-per-task), with exactly one surface inside it. cmux has no session
 # layer, so workspace titles are scoped by firstmate home and installation
 # path inside this adapter.
@@ -107,7 +107,7 @@
 # sourcing fm-backend.sh (which sources this file); this exists only so this
 # file's own unit tests, which source it directly, resolve sanely. Mirrors
 # bin/backends/zellij.sh's identical fallback.
-FM_BACKEND_CMUX_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+FM_BACKEND_CMUX_ROOT="${FM_BACKEND_DEFAULT_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 FM_ROOT="${FM_ROOT_OVERRIDE:-${FM_ROOT:-$FM_BACKEND_CMUX_ROOT}}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 
@@ -241,11 +241,11 @@ fm_backend_cmux_ping_state() {
 # matrix) plus the config/backend opt-out for a caller who only landed on
 # cmux via auto-detection.
 fm_backend_cmux_refuse_denied() {
-  echo "error: backend=cmux socket rejected the connection (automation.socketControlMode is cmuxOnly, the default, which never admits an external CLI like firstmate). In cmux Settings > Automation set Socket Control Mode to 'Automation mode' (recommended - same-user external clients, no password), or 'Password mode' plus config/cmux-socket-password/CMUX_SOCKET_PASSWORD, or 'Full open access' (NOT recommended - admits every local user) - see docs/cmux-backend.md 'Setup' - or set config/backend to tmux (or pass --backend tmux) if you did not mean to use cmux." >&2
+  echo "error: backend=cmux socket rejected the connection (automation.socketControlMode is cmuxOnly, the default, which never admits an external CLI like firstmate). In cmux Settings > Automation set Socket Control Mode to 'Automation mode' (recommended - same-user external clients, no password), or 'Password mode' plus config/cmux-socket-password/CMUX_SOCKET_PASSWORD, or 'Full open access' (NOT recommended - admits every local user) - see docs/cmux-backend.md 'Setup' - or set config/backend to herdr (or pass --backend herdr) if you did not mean to use cmux." >&2
 }
 
 fm_backend_cmux_refuse_unauth() {
-  echo "error: backend=cmux socket requires a password (automation.socketControlMode=password) but none is configured for this caller, or the configured one was rejected. Set config/cmux-socket-password or export CMUX_SOCKET_PASSWORD to the password from cmux Settings > Automation, or switch Socket Control Mode to 'Automation mode' (recommended - no password needed) - see docs/cmux-backend.md 'Setup' - or set config/backend to tmux (or pass --backend tmux) if you did not mean to use cmux." >&2
+  echo "error: backend=cmux socket requires a password (automation.socketControlMode=password) but none is configured for this caller, or the configured one was rejected. Set config/cmux-socket-password or export CMUX_SOCKET_PASSWORD to the password from cmux Settings > Automation, or switch Socket Control Mode to 'Automation mode' (recommended - no password needed) - see docs/cmux-backend.md 'Setup' - or set config/backend to herdr (or pass --backend herdr) if you did not mean to use cmux." >&2
 }
 
 # fm_backend_cmux_ensure_running: launch cmux (mirrors the CLI's own

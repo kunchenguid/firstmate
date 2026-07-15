@@ -440,8 +440,8 @@ test_dispatch_busy_state_unknown_for_zellij() {
   # shellcheck source=bin/fm-backend.sh
   . "$ROOT/bin/fm-backend.sh"
   [ "$(fm_backend_busy_state zellij 'firstmate:5')" = unknown ] \
-    || fail "fm_backend_busy_state should report unknown for zellij (no native agent-state primitive; D5: watcher falls back to regex, same as tmux)"
-  pass "fm_backend_busy_state: zellij (no native primitive) always reports unknown, same as tmux"
+    || fail "fm_backend_busy_state should report unknown for zellij (no native agent-state primitive; D5: watcher falls back to regex, same as herdr)"
+  pass "fm_backend_busy_state: zellij (no native primitive) always reports unknown, same as herdr"
 }
 
 # --- create_task: duplicate refusal, id parsing, focus-restore mitigation ----
@@ -937,13 +937,13 @@ test_scripts_route_explicit_target_through_meta_backend() {
   printf 'captured zellij pane\n' > "$dir/responses/2.out"
   zellij_pane_response "$dir" 3 7 3
   fb=$(make_zellij_fakebin "$dir")
-  cat > "$fb/tmux" <<'SH'
+  cat > "$fb/herdr" <<'SH'
 #!/usr/bin/env bash
 set -u
-printf 'tmux should not be used for a metadata-matched zellij target\n' >&2
+printf 'herdr should not be used for a metadata-matched zellij target\n' >&2
 exit 42
 SH
-  chmod +x "$fb/tmux"
+  chmod +x "$fb/herdr"
 
   out=$( PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$neutral" FM_STATE_OVERRIDE="$state" \
     FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" FM_ZELLIJ_SESSION_LIST="firstmate" \
