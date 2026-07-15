@@ -24,7 +24,8 @@ Scout teardown calls the script's read-only `verify` subcommand after checking f
 The `--force` path remains the explicit captain-approved discard escape hatch.
 
 The `resolve` subcommand requires a decision file and at least one existing dependent task whose structured `blocked-by` edge points to the hold.
-It records the decision and routed task identities in the hold body, clears each dependency edge through tasks-axi, and marks the hold Done only after those writes succeed.
+It records the decision digest and routed task identities as a retry identity in the hold body, clears each dependency edge through tasks-axi, and marks the hold Done only after those writes succeed.
+An exact retry can finish a partial routing operation, while a changed decision or routed-task set is rejected.
 A failed intermediate step leaves the hold open.
 
 ## Structured read surfaces
@@ -49,7 +50,9 @@ The final verification commands and their exact summarized outputs follow.
 ```text
 $ bash tests/fm-decision-hold-lifecycle.test.sh
 ok - report-only unresolved decision is reproduced and completion refuses before loss
+ok - non-forced scout teardown always requires durable inventory verification
 ok - captain holds are idempotent, distinct, teardown-safe, Bearings-visible, and durably routed before close
+ok - completion and verification validate origins before constructing paths
 ok - ended visual review follows the same decision-hold completion owner
 ok - resolved findings and decision-like prose do not create false holds
 ok - main-home and secondmate-home captain holds remain correctly routed

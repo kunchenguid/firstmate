@@ -74,7 +74,7 @@ For a messy Orca-backed task:
 6. Stop and inspect if the recorded worktree path, Orca worktree id, or project checkout no longer matches expectations.
 
 Teardown remains governed by the normal firstmate landing rules.
-Scout work can be torn down after the report exists.
+Scout work can be torn down after the report exists and the `decision-hold-lifecycle` completion gate passes.
 Ship work can be torn down only after the work is landed by its project mode.
 
 ## Smoke Test
