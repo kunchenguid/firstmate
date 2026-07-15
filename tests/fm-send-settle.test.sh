@@ -52,7 +52,7 @@ run_send() {
   : > "$log"
   env "$@" PATH="$fb:$PATH" \
     FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SLEEP_LOG="$log" \
-    "$SEND" "sess:w1:p1" "hello captain" 2>/dev/null
+    "$SEND" --backend herdr "sess:w1:p1" "hello captain" 2>/dev/null
 }
 
 test_default_send_pauses_one_second() {
@@ -98,7 +98,7 @@ test_key_path_never_pauses() {
   home="$dir/home"; mkdir -p "$home/state"
   : > "$log"
   env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SLEEP_LOG="$log" \
-    "$SEND" "sess:w1:p1" --key Escape 2>/dev/null; rc=$?
+    "$SEND" --backend herdr "sess:w1:p1" --key Escape 2>/dev/null; rc=$?
   expect_code 0 "$rc" "--key send should succeed"
   [ ! -s "$log" ] || fail "--key path paused but must not"$'\n'"--- sleeps ---"$'\n'"$(cat "$log")"
   pass "fm-send: the --key path never pauses (settle scoped to text submit)"

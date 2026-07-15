@@ -1153,6 +1153,7 @@ test_secondmate_force_teardown_removes_orca_child_via_orca() {
   printf 'domain\n' > "$subhome/.fm-secondmate-home"
   fm_git_worktree "$childproj" "$childwt" "fm/$child_id"
   fm_write_meta "$home/state/domain.meta" \
+    "backend=herdr" \
     "window=firstmate:fm-domain" "worktree=$subhome" "project=$subhome" \
     "harness=echo" "kind=secondmate" "mode=secondmate" "yolo=off" \
     "home=$subhome" "projects=alpha"
@@ -1195,6 +1196,7 @@ test_secondmate_force_teardown_refuses_orca_child_id_path_mismatch() {
   fm_git_worktree "$childproj" "$childwt" "fm/$child_id"
   git -C "$childproj" worktree add --quiet -b "fm/$child_id-other" "$other_wt"
   fm_write_meta "$home/state/domain.meta" \
+    "backend=herdr" \
     "window=firstmate:fm-domain" "worktree=$subhome" "project=$subhome" \
     "harness=echo" "kind=secondmate" "mode=secondmate" "yolo=off" \
     "home=$subhome" "projects=alpha"
@@ -1235,6 +1237,7 @@ test_secondmate_force_teardown_removes_partial_orca_child() {
   printf 'domain\n' > "$subhome/.fm-secondmate-home"
   fm_git_worktree "$childproj" "$childwt" "fm/$child_id"
   fm_write_meta "$home/state/domain.meta" \
+    "backend=herdr" \
     "window=firstmate:fm-domain" "worktree=$subhome" "project=$subhome" \
     "harness=echo" "kind=secondmate" "mode=secondmate" "yolo=off" \
     "home=$subhome" "projects=alpha"

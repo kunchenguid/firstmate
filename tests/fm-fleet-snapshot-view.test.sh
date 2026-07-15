@@ -69,6 +69,7 @@ EOF
   mkdir -p "$home/data/scout-task"
   printf '# Scout\n' > "$home/data/scout-task/report.md"
   fm_write_meta "$home/state/ship-task.meta" \
+    "backend=herdr" \
     "window=firstmate:fm-ship-task" \
     "worktree=$home/projects/alpha-worktree" \
     "project=alpha" \
@@ -79,6 +80,7 @@ EOF
     "pr=https://github.com/kunchenguid/firstmate/pull/9"
   printf 'needs-decision: choose an API shape\n' > "$home/state/ship-task.status"
   fm_write_meta "$home/state/scout-task.meta" \
+    "backend=herdr" \
     "window=firstmate:fm-scout-task" \
     "worktree=$home/projects/scout-worktree" \
     "project=alpha" \
@@ -88,6 +90,7 @@ EOF
     "yolo=off"
   printf 'done: report ready\n' > "$home/state/scout-task.status"
   fm_write_meta "$home/state/secondmate-task.meta" \
+    "backend=herdr" \
     "window=firstmate:fm-secondmate-task" \
     "worktree=$home/secondmate-home" \
     "project=$home/secondmate-home" \
@@ -173,6 +176,7 @@ test_event_hints_follow_reconciled_current_state() {
     "$home/projects/stale-decision" \
     "$home/projects/stale-blocked"
   fm_write_meta "$home/state/active-decision.meta" \
+    "backend=herdr" \
     "window=firstmate:fm-active-decision" \
     "worktree=$home/projects/active-decision" \
     "project=alpha" \
@@ -181,6 +185,7 @@ test_event_hints_follow_reconciled_current_state() {
     "mode=ship"
   printf 'needs-decision: choose an API shape\n' > "$home/state/active-decision.status"
   fm_write_meta "$home/state/active-blocked.meta" \
+    "backend=herdr" \
     "window=firstmate:fm-active-blocked" \
     "worktree=$home/projects/active-blocked" \
     "project=alpha" \
@@ -189,6 +194,7 @@ test_event_hints_follow_reconciled_current_state() {
     "mode=ship"
   printf 'blocked: waiting on access\n' > "$home/state/active-blocked.status"
   fm_write_meta "$home/state/stale-decision.meta" \
+    "backend=herdr" \
     "window=firstmate:fm-stale-decision-ship-task" \
     "worktree=$home/projects/stale-decision" \
     "project=alpha" \
@@ -197,6 +203,7 @@ test_event_hints_follow_reconciled_current_state() {
     "mode=ship"
   printf 'needs-decision: already answered\n' > "$home/state/stale-decision.status"
   fm_write_meta "$home/state/stale-blocked.meta" \
+    "backend=herdr" \
     "window=firstmate:fm-stale-blocked-ship-task" \
     "worktree=$home/projects/stale-blocked" \
     "project=alpha" \
@@ -265,6 +272,7 @@ test_backlog_tasks_axi_forms_and_overrides() {
 EOF
   printf '# Bold Scout\n' > "$data/bold-task/report.md"
   fm_write_meta "$home/state/bold-task.meta" \
+    "backend=herdr" \
     "window=firstmate:fm-bold-task" \
     "worktree=$projects/bold-worktree" \
     "project=alpha" \
@@ -378,6 +386,7 @@ test_view_renders_dead_secondmate_agent_status() {
   local home fakebin view
   home=$(make_home dead-secondmate)
   fm_write_meta "$home/state/dead-secondmate.meta" \
+    "backend=herdr" \
     "window=firstmate:fm-dead-secondmate" \
     "project=$home/secondmate-home" \
     "harness=codex" \
@@ -404,6 +413,7 @@ test_open_decision_survives_later_unrelated_event() {
   home=$(make_home masking)
   mkdir -p "$home/secondmate-home"
   fm_write_meta "$home/state/masked-decision.meta" \
+    "backend=herdr" \
     "window=firstmate:fm-masked-decision" \
     "worktree=$home/secondmate-home" \
     "project=$home/secondmate-home" \
@@ -433,6 +443,7 @@ test_secondmate_open_decision_survives_live_endpoint() {
   home=$(make_home active-secondmate)
   mkdir -p "$home/secondmate-home"
   fm_write_meta "$home/state/active-secondmate.meta" \
+    "backend=herdr" \
     "window=firstmate:fm-active-secondmate" \
     "worktree=$home/secondmate-home" \
     "project=$home/secondmate-home" \
@@ -460,6 +471,7 @@ test_open_decision_clears_on_keyed_resolution() {
   home=$(make_home resolution)
   mkdir -p "$home/secondmate-home"
   fm_write_meta "$home/state/resolved-decision.meta" \
+    "backend=herdr" \
     "window=firstmate:fm-resolved-decision" \
     "worktree=$home/secondmate-home" \
     "project=$home/secondmate-home" \
@@ -494,6 +506,7 @@ test_completed_scout_report_is_pointer_not_pending() {
   home=$(make_home completed-scout)
   mkdir -p "$home/projects/scout-wt" "$home/data/lavish-103"
   fm_write_meta "$home/state/lavish-103.meta" \
+    "backend=herdr" \
     "window=firstmate:fm-lavish-103" \
     "worktree=$home/projects/scout-wt" \
     "project=firstmate" \
@@ -525,6 +538,7 @@ test_parked_scout_decision_stays_pending() {
   home=$(make_home parked-scout)
   mkdir -p "$home/projects/scout-wt2"
   fm_write_meta "$home/state/parked-scout.meta" \
+    "backend=herdr" \
     "window=firstmate:fm-parked-scout" \
     "worktree=$home/projects/scout-wt2" \
     "project=firstmate" \
