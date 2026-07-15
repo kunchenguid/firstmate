@@ -3,42 +3,25 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { auditRegistry } from './registry.mjs';
 import { canonicalCheckout, registryDir } from './paths.mjs';
+import { assembleDoctor, packageLockStatus, versionMatches } from './doctor-core.mjs';
 
-export function checkDoctor(root, env = process.env) {
-  const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
-  const lockPath = path.join(root, 'package-lock.json');
-  const lock = fs.existsSync(lockPath) ? JSON.parse(fs.readFileSync(lockPath, 'utf8')) : null;
-  const major = Number(process.version.replace(/^v/, '').split('.')[0]);
-  const requiredMissing = [];
-  for (const name of Object.keys(pkg.dependencies || {})) {
-    if (!fs.existsSync(path.join(root, 'node_modules', name, 'package.json'))) requiredMissing.push(name);
+function requiredDependencies(root, pkg) {
+  const missing = [];
+  const mismatched = [];
+  for (const [name, want] of Object.entries(pkg.dependencies || {})) {
+    const depPkg = path.join(root, 'node_modules', name, 'package.json');
+    if (!fs.existsSync(depPkg)) {
+      missing.push(name);
+      continue;
+    }
+    try {
+      const installed = JSON.parse(fs.readFileSync(depPkg, 'utf8')).version;
+      if (!versionMatches(installed, want)) mismatched.push(`${name}@${installed} != ${want}`);
+    } catch {
+      missing.push(name);
+    }
   }
-  let registryStatus = 'missing';
-  let activeIndexStatus = 'missing';
-  let registryHealth = null;
-  try {
-    const audit = auditRegistry(registryDir(env));
-    registryStatus = audit.registry.health === 'critical' ? 'critical' : fs.existsSync(audit.registry.path) ? writable(registryDir(env)) : 'missing';
-    registryHealth = audit.registry;
-    activeIndexStatus = audit.activeIndex.status;
-  } catch (error) {
-    registryStatus = `error: ${error.message}`;
-  }
-  const payload = {
-    ok: major >= 20 && major < 23 && requiredMissing.length === 0 && registryStatus !== 'critical',
-    cli: { available: true, path: fileURLToPath(new URL('../bin/mem.mjs', import.meta.url)) },
-    canonicalCheckout: { path: canonicalCheckout(env), source: env.FM_HOME ? 'FM_HOME' : 'HOME' },
-    node: { version: process.version, compatible: major >= 20 && major < 23, required: pkg.engines.node },
-    packageLock: { path: lockPath, present: Boolean(lock), current: Boolean(lock && lock.version === pkg.version && lock.packages?.['']?.dependencies?.zod === pkg.dependencies.zod) },
-    requiredDependencies: { ok: requiredMissing.length === 0, missing: requiredMissing },
-    pglite: { available: dependencyAvailable(root, '@electric-sql/pglite'), required: false, status: 'not installed for current milestone' },
-    vectorExtension: { available: dependencyAvailable(root, '@electric-sql/pglite-pgvector'), required: false, status: 'not installed for current milestone' },
-    embeddingProvider: { configured: Boolean(env.MEM_EMBEDDING_KEY || env.OPENAI_API_KEY), required: false },
-    registry: { path: registryDir(env), status: registryStatus, health: registryHealth },
-    activeIndex: { status: activeIndexStatus }
-  };
-  payload.ok = payload.ok && payload.packageLock.present && payload.packageLock.current;
-  return payload;
+  return { ok: missing.length === 0 && mismatched.length === 0, missing, mismatched };
 }
 
 function dependencyAvailable(root, name) {
@@ -53,4 +36,42 @@ function writable(dir) {
   } catch {
     return 'read-only';
   }
+}
+
+export function checkDoctor(root, env = process.env) {
+  const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
+  const lockPath = path.join(root, 'package-lock.json');
+  const lock = fs.existsSync(lockPath) ? JSON.parse(fs.readFileSync(lockPath, 'utf8')) : null;
+
+  let registryStatus = 'missing';
+  let registryHealth = null;
+  let registryReason = null;
+  let activeIndexStatus = 'missing';
+  let activeIndexWatermark = null;
+  try {
+    const audit = auditRegistry(registryDir(env));
+    registryHealth = audit.registry.health;
+    if (audit.registry.health === 'critical') registryStatus = 'critical';
+    else if (fs.existsSync(audit.registry.path)) registryStatus = writable(registryDir(env));
+    else registryStatus = 'missing';
+    activeIndexStatus = audit.activeIndex.status;
+    activeIndexWatermark = audit.activeIndex.watermark;
+  } catch (error) {
+    registryStatus = `error: ${error.message}`;
+    registryReason = error.message;
+  }
+
+  return assembleDoctor({
+    nodeVersion: process.version,
+    engines: pkg.engines.node,
+    cli: { available: true, path: fileURLToPath(new URL('../bin/mem.mjs', import.meta.url)) },
+    canonicalCheckout: { path: canonicalCheckout(env), source: 'HOME' },
+    packageLock: packageLockStatus(lock, pkg, lockPath),
+    requiredDependencies: requiredDependencies(root, pkg),
+    pglite: { available: dependencyAvailable(root, '@electric-sql/pglite'), required: false, status: 'not installed for current milestone' },
+    vectorExtension: { available: dependencyAvailable(root, '@electric-sql/pglite-pgvector'), required: false, status: 'not installed for current milestone' },
+    embeddingProvider: { configured: Boolean(env.MEM_EMBEDDING_KEY || env.OPENAI_API_KEY), required: false, status: 'optional' },
+    registry: { path: registryDir(env), status: registryStatus, health: registryHealth, reason: registryReason },
+    activeIndex: { status: activeIndexStatus, watermark: activeIndexWatermark, reason: null }
+  });
 }

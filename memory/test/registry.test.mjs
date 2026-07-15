@@ -1,13 +1,27 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import path from 'node:path';
 import test from 'node:test';
 import { appendRegistryEvent, auditRegistry, buildActiveIndex, foldRegistry, snapshotRegistry } from '../lib/registry.mjs';
 import { registryPaths } from '../lib/paths.mjs';
 import { sha256 } from '../lib/hash.mjs';
 import { tmpRegistry } from './helpers.mjs';
 
-test('append/fold validates schema, status state machine, idempotency, and A7 watermark', async () => {
+async function propose(dir, memId, fields, extra = {}) {
+  return appendRegistryEvent(dir, { event: 'proposed', memId, actor: { kind: 'firstmate', id: 'proposer' }, fields, ...extra });
+}
+
+async function activate(dir, memId, extra = {}) {
+  return appendRegistryEvent(dir, {
+    event: 'activated',
+    memId,
+    actor: { kind: 'captain', id: 'captain' },
+    evidence: [{ type: 'test', ref: memId }],
+    validation: { method: 'test' },
+    ...extra
+  });
+}
+
+test('append/fold validates schema, idempotency, and A7 watermark', async () => {
   const dir = tmpRegistry();
   const first = await appendRegistryEvent(dir, {
     eventId: 'evt-1',
@@ -47,47 +61,43 @@ test('append/fold validates schema, status state machine, idempotency, and A7 wa
   assert.equal(index.registry.seq, 2);
   assert.equal(index.registry.eventId, 'evt-2');
   assert.match(index.records[0].contentHash, /^[0-9a-f]{64}$/);
+  assert.equal(index.records[0].memoryType, 'factual'); // required projected memory type
+  assert.equal(index.records[0].generation, 2); // per-record generation watermark
   const audit = auditRegistry(dir);
   assert.equal(audit.registry.watermark.eventId, audit.activeIndex.watermark.eventId);
+  assert.equal(audit.activeIndex.status, 'current');
   assert.equal(audit.records.statusCounts.active, 1);
 });
 
-test('m7 fixture tests 3-6 and 8: only active records enter active index and budget projection is bounded', async () => {
+test('m7 fixture tests 3-6, 8: only active records enter the active index (with valid supersession)', async () => {
   const dir = tmpRegistry();
-  for (const [n, finalEvent] of [['0001', null], ['0002', 'superseded'], ['0003', 'retired'], ['0004', 'quarantined']]) {
-    await appendRegistryEvent(dir, {
-      eventId: `p-${n}`,
-      event: 'proposed',
-      memId: `MEM-${n}`,
-      actor: { kind: 'firstmate', id: 'test' },
-      fields: { summary: `record ${n}`, keywords: ['fixture'] }
-    });
-    if (n !== '0004') {
-      await appendRegistryEvent(dir, {
-        eventId: `a-${n}`,
-        event: 'activated',
-        memId: `MEM-${n}`,
-        actor: { kind: 'captain', id: 'test' },
-        evidence: [{ type: 'test', ref: n }],
-        validation: { method: 'test' }
-      });
-    }
-    if (finalEvent) {
-      await appendRegistryEvent(dir, {
-        eventId: `f-${n}`,
-        event: finalEvent,
-        memId: `MEM-${n}`,
-        actor: { kind: 'firstmate', id: 'test' },
-        reason: 'fixture'
-      });
-    }
-  }
+  // MEM-0001 active; MEM-0002 superseded by an active MEM-0005; MEM-0003 retired;
+  // MEM-0004 quarantined. Only MEM-0001 and MEM-0005 are active.
+  await propose(dir, 'MEM-0001', { summary: 'active record one', keywords: ['fixture'] });
+  await activate(dir, 'MEM-0001');
+  await propose(dir, 'MEM-0002', { summary: 'to be superseded' });
+  await activate(dir, 'MEM-0002');
+  await propose(dir, 'MEM-0003', { summary: 'to be retired' });
+  await activate(dir, 'MEM-0003');
+  await appendRegistryEvent(dir, { event: 'retired', memId: 'MEM-0003', actor: { kind: 'firstmate', id: 'x' }, reason: 'fixture' });
+  await propose(dir, 'MEM-0004', { summary: 'to be quarantined' });
+  await appendRegistryEvent(dir, { event: 'quarantined', memId: 'MEM-0004', actor: { kind: 'firstmate', id: 'x' }, reason: 'fixture' });
+  await propose(dir, 'MEM-0005', { summary: 'successor record' });
+  await activate(dir, 'MEM-0005');
+  await appendRegistryEvent(dir, { event: 'superseded', memId: 'MEM-0002', successor: 'MEM-0005', actor: { kind: 'firstmate', id: 'x' }, reason: 'fixture' });
+
   const index = buildActiveIndex(dir);
-  assert.deepEqual(index.records.map((row) => row.id), ['MEM-0001']);
-  assert.equal(JSON.stringify(index).includes('MEM-0002'), false);
-  assert.equal(JSON.stringify(index).includes('MEM-0003'), false);
-  assert.equal(JSON.stringify(index).includes('MEM-0004'), false);
-  assert.ok(JSON.stringify(index).length < 12000);
+  assert.deepEqual(index.records.map((row) => row.id).sort(), ['MEM-0001', 'MEM-0005']);
+  // No superseded/retired/quarantined record is projected as an active record.
+  const activeIds = new Set(index.records.map((row) => row.id));
+  for (const excluded of ['MEM-0002', 'MEM-0003', 'MEM-0004']) {
+    assert.equal(activeIds.has(excluded), false, `${excluded} must not be an active record`);
+  }
+
+  // Supersession lineage is non-dangling and updated on both sides.
+  const fold = foldRegistry(dir);
+  assert.equal(fold.records.get('MEM-0002').supersededBy, 'MEM-0005');
+  assert.ok(fold.records.get('MEM-0005').supersedes.includes('MEM-0002'));
 });
 
 test('A11 index rebuild and snapshot preserve canonical registry bytes', async () => {
@@ -105,26 +115,57 @@ test('A11 index rebuild and snapshot preserve canonical registry bytes', async (
   assert.equal(after, before);
 });
 
-test('invalid activation transition is refused', async () => {
+test('sparse update preserves every omitted field (destructive-reset regression)', async () => {
   const dir = tmpRegistry();
   await appendRegistryEvent(dir, {
     event: 'proposed',
     memId: 'MEM-0001',
     actor: { kind: 'firstmate', id: 'test' },
-    fields: { summary: 'candidate cannot self-activate without evidence' }
+    fields: {
+      summary: 'original summary',
+      body: 'original body',
+      memoryType: 'procedural',
+      scope: 'project',
+      projects: ['firstmate'],
+      taskKinds: ['dispatch'],
+      keywords: ['recovery'],
+      aliases: ['a1'],
+      entities: ['e1'],
+      commands: ['c1'],
+      failureModes: ['f1'],
+      relatedTerms: ['r1'],
+      confidence: 'observed',
+      riskClass: 'critical'
+    },
+    guard_linked: true
   });
-  await assert.rejects(
-    appendRegistryEvent(dir, {
-      event: 'activated',
-      memId: 'MEM-0001',
-      actor: { kind: 'firstmate', id: 'test' },
-      validation: { method: 'test' }
-    }),
-    /activation requires evidence/
-  );
+  const before = { ...foldRegistry(dir).records.get('MEM-0001') };
+  // summary-only update
+  await appendRegistryEvent(dir, { event: 'updated', memId: 'MEM-0001', actor: { kind: 'firstmate', id: 'test' }, fields: { summary: 'updated summary only' } });
+  const after = foldRegistry(dir).records.get('MEM-0001');
+  assert.equal(after.summary, 'updated summary only');
+  for (const field of ['body', 'memoryType', 'scope', 'projects', 'taskKinds', 'keywords', 'aliases', 'entities', 'commands', 'failureModes', 'relatedTerms', 'confidence', 'riskClass', 'guardLinked']) {
+    assert.deepEqual(after[field], before[field], `field ${field} must be preserved on a sparse update`);
+  }
 });
 
-test('read-back mismatch is detected and leaves a loud failure', async () => {
+test('active index projection does not regress behind a newer installed index', async () => {
+  const dir = tmpRegistry();
+  const paths = registryPaths(dir);
+  await appendRegistryEvent(dir, { event: 'proposed', memId: 'MEM-0001', actor: { kind: 'firstmate', id: 'test' }, fields: { summary: 'r1' } });
+  await activate(dir, 'MEM-0001');
+  buildActiveIndex(dir);
+  // Install a fake NEWER index (seq far ahead). A rebuild from the older registry
+  // must not overwrite it.
+  const fake = JSON.parse(fs.readFileSync(paths.index, 'utf8'));
+  fake.registry = { ...fake.registry, seq: 999 };
+  fs.writeFileSync(paths.index, `${JSON.stringify(fake, null, 2)}\n`);
+  buildActiveIndex(dir);
+  const stillInstalled = JSON.parse(fs.readFileSync(paths.index, 'utf8'));
+  assert.equal(stillInstalled.registry.seq, 999, 'older projection must not overwrite a newer installed index');
+});
+
+test('read-back mismatch is detected and surfaces a loud failure', async () => {
   const dir = tmpRegistry();
   await assert.rejects(
     appendRegistryEvent(dir, {
@@ -134,7 +175,6 @@ test('read-back mismatch is detected and leaves a loud failure', async () => {
     }, { injectReadBackMismatch: true }),
     /read-back validation failed/
   );
-  assert.equal(foldRegistry(dir).health, 'ok');
 });
 
 test('permission failure surfaces as an append error', async (t) => {

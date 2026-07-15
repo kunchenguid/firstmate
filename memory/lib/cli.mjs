@@ -1,4 +1,3 @@
-import fs from 'node:fs';
 import path from 'node:path';
 import { appendRegistryEvent, auditRegistry, buildActiveIndex, foldRegistry, recoverRegistry, snapshotRegistry } from './registry.mjs';
 import { checkDoctor } from './doctor.mjs';
@@ -29,10 +28,12 @@ function list(value) {
   return Array.isArray(value) ? value : [value];
 }
 
-function fieldsFromFlags(flags) {
-  return {
+// Full field set for a NEW record: proposal defaults are appropriate here.
+function proposeFieldsFromFlags(flags) {
+  const fields = {
     summary: flags.summary,
-    body: flags.body || '',
+    body: typeof flags.body === 'string' ? flags.body : '',
+    memoryType: flags['memory-type'] || 'factual',
     scope: flags.scope || 'fleet',
     projects: list(flags.project).length ? list(flags.project) : ['*'],
     taskKinds: list(flags.kind).length ? list(flags.kind) : ['*'],
@@ -45,6 +46,38 @@ function fieldsFromFlags(flags) {
     confidence: flags.confidence || 'unverified',
     riskClass: flags['risk-class'] || 'standard'
   };
+  if ('guard-linked' in flags) fields.guard_linked = flags['guard-linked'] === true || flags['guard-linked'] === 'true';
+  return fields;
+}
+
+// Sparse field set for an UPDATE: ONLY fields the caller explicitly supplied are
+// included. Omitted fields are absent, so the fold preserves them. Proposal
+// defaults are never applied to an update.
+function updateFieldsFromFlags(flags) {
+  const fields = {};
+  const setStr = (flag, field) => {
+    if (flag in flags && typeof flags[flag] === 'string') fields[field] = flags[flag];
+  };
+  const setList = (flag, field) => {
+    if (flag in flags) fields[field] = list(flags[flag]);
+  };
+  setStr('summary', 'summary');
+  setStr('body', 'body');
+  setStr('memory-type', 'memoryType');
+  setStr('scope', 'scope');
+  setList('project', 'projects');
+  setList('kind', 'taskKinds');
+  setList('keyword', 'keywords');
+  setList('alias', 'aliases');
+  setList('entity', 'entities');
+  setList('command', 'commands');
+  setList('failure-mode', 'failureModes');
+  setList('related-term', 'relatedTerms');
+  setStr('confidence', 'confidence');
+  setStr('risk-class', 'riskClass');
+  setStr('valid-to', 'validTo');
+  if ('guard-linked' in flags) fields.guard_linked = flags['guard-linked'] === true || flags['guard-linked'] === 'true';
+  return fields;
 }
 
 function evidence(flags) {
@@ -71,29 +104,35 @@ export async function main(args, options = {}) {
   try {
     if (verb === 'propose') {
       if (!flags.summary) throw new Error('propose requires --summary');
-      const result = await appendRegistryEvent(dir, { event: 'proposed', actor: actor(flags), fields: fieldsFromFlags(flags), evidence: evidence(flags), reason: flags.reason });
-      buildActiveIndex(dir);
+      const result = await appendRegistryEvent(dir, { event: 'proposed', actor: actor(flags), fields: proposeFieldsFromFlags(flags), evidence: evidence(flags), reason: flags.reason });
       print({ memId: result.event.memId, eventId: result.event.eventId, skipped: result.skipped }, flags.json);
     } else if (verb === 'activate') {
       const memId = flags._[1];
       if (!memId) throw new Error('activate requires MEM id');
       const result = await appendRegistryEvent(dir, { event: 'activated', memId, actor: actor(flags), fields: { confidence: flags.confidence || 'observed' }, evidence: evidence(flags), validation: { method: flags.method || 'captain', by: flags.actor || 'mem-cli', ref: flags.validation || flags.evidence }, reason: flags.reason });
-      buildActiveIndex(dir);
+      print({ memId, eventId: result.event.eventId }, flags.json);
+    } else if (verb === 'revalidate') {
+      const memId = flags._[1];
+      if (!memId) throw new Error('revalidate requires MEM id');
+      const result = await appendRegistryEvent(dir, { event: 'revalidated', memId, actor: actor(flags), evidence: evidence(flags), validation: { method: flags.method || 'captain', by: flags.actor || 'mem-cli', ref: flags.validation || flags.evidence }, reason: flags.reason });
       print({ memId, eventId: result.event.eventId }, flags.json);
     } else if (verb === 'update') {
       const memId = flags._[1];
       if (!memId) throw new Error('update requires MEM id');
-      const result = await appendRegistryEvent(dir, { event: 'updated', memId, actor: actor(flags), fields: fieldsFromFlags(flags), evidence: evidence(flags), reason: flags.reason });
-      buildActiveIndex(dir);
+      const fields = updateFieldsFromFlags(flags);
+      const result = await appendRegistryEvent(dir, { event: 'updated', memId, actor: actor(flags), fields, evidence: evidence(flags), reason: flags.reason });
       print({ memId, eventId: result.event.eventId }, flags.json);
     } else if (['supersede', 'retire', 'quarantine'].includes(verb)) {
       const memId = flags._[1];
       if (!memId) throw new Error(`${verb} requires MEM id`);
       const event = verb === 'supersede' ? 'superseded' : `${verb}d`;
       const result = await appendRegistryEvent(dir, { event, memId, actor: actor(flags), successor: flags.successor, evidence: evidence(flags), reason: flags.reason });
-      buildActiveIndex(dir);
       print({ memId, eventId: result.event.eventId }, flags.json);
     } else if (verb === 'show') {
+      // `mem show` is intentionally READ-ONLY in PR-1: it emits no `opened`
+      // activity event. Compatibility contract: the activity event schema accepts
+      // any event name (`event: z.string().min(1)`), so adding an `opened` event in
+      // a later PR requires no activity schema migration.
       const memId = flags._[1];
       const fold = foldRegistry(dir);
       const record = fold.records.get(memId);
@@ -109,6 +148,7 @@ export async function main(args, options = {}) {
         console.log(`Registry: ${audit.registry.health} ${audit.registry.watermark.seq}:${audit.registry.watermark.eventId || 'none'}`);
         console.log(`Records: ${audit.records.total} total, ${audit.records.active} active`);
         console.log(`Active index: ${audit.activeIndex.status}`);
+        if (audit.activeIndex.issues?.length) console.log(`Index issues: ${audit.activeIndex.issues.join('; ')}`);
         if (audit.registry.corrupt) console.log(`CRITICAL: ${audit.registry.corrupt.reason}`);
       }
       process.exitCode = audit.ok ? 0 : 1;
@@ -127,7 +167,7 @@ export async function main(args, options = {}) {
         console.log(`Canonical checkout: ${doctor.canonicalCheckout.path}`);
         console.log(`Node: ${doctor.node.version} (${doctor.node.compatible ? 'compatible' : 'incompatible'})`);
         console.log(`Package lock: ${doctor.packageLock.current ? 'current' : 'not current'}`);
-        console.log(`Required dependencies: ${doctor.requiredDependencies.ok ? 'available' : `missing ${doctor.requiredDependencies.missing.join(', ')}`}`);
+        console.log(`Required dependencies: ${doctor.requiredDependencies.ok ? 'available' : `missing ${[...doctor.requiredDependencies.missing, ...(doctor.requiredDependencies.mismatched || [])].join(', ')}`}`);
         console.log(`PGlite: ${doctor.pglite.available ? 'available' : doctor.pglite.status}`);
         console.log(`Vector extension: ${doctor.vectorExtension.available ? 'available' : doctor.vectorExtension.status}`);
         console.log(`Embedding provider: ${doctor.embeddingProvider.configured ? 'configured' : 'not configured (optional)'}`);
@@ -136,7 +176,7 @@ export async function main(args, options = {}) {
       }
       process.exitCode = doctor.ok ? 0 : 1;
     } else if (verb === 'help' || !verb) {
-      console.log('Usage: mem propose|activate|show|update|supersede|retire|quarantine|audit|project|index rebuild|snapshot|recover|doctor');
+      console.log('Usage: mem propose|activate|revalidate|show|update|supersede|retire|quarantine|audit|project|index rebuild|snapshot|recover|doctor');
     } else {
       throw new Error(`unknown command: ${verb}`);
     }
