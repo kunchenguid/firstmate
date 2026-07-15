@@ -1146,6 +1146,27 @@ test_teardown_stops_and_clears_axi_session() {
   pass "teardown stops and clears durable AXI sessions"
 }
 
+test_teardown_tolerates_axi_session_directory() {
+  local case_dir session_file rc
+  case_dir=$(make_case axi-session-directory)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "shippable work"
+  add_fork_with_pushed_branch "$case_dir"
+  session_file="$case_dir/data/task-x1/axi-session"
+  mkdir -p "$session_file"
+  add_fake_axi "$case_dir"
+
+  set +e
+  FM_AXI_LOG="$case_dir/axi.log" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "AXI-session directory should not abort teardown"
+  [ -d "$session_file" ] || fail "teardown removed the non-record AXI session directory"
+  assert_absent "$case_dir/state/task-x1.meta" "teardown retained task metadata after an AXI session directory"
+  pass "teardown tolerates a non-file AXI session entry"
+}
+
 test_local_only_fork_remote_allows
 test_teardown_prompts_tasks_axi_done_when_compatible
 test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present
@@ -1156,6 +1177,7 @@ test_no_mistakes_origin_remote_allows
 test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed
 test_teardown_stops_and_clears_axi_session
+test_teardown_tolerates_axi_session_directory
 test_squash_merged_branch_deleted_allows
 test_squash_merged_pr_allows_when_head_ancestor_of_pr_head
 test_no_pr_recorded_discovers_merged_pr_by_branch_allows

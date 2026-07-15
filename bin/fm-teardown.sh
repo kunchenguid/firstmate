@@ -199,7 +199,7 @@ remove_axi_isolated_session() {
   local session_file=$1
   [ -e "$session_file" ] || [ -L "$session_file" ] || return 0
   "$SCRIPT_DIR/fm-axi-isolated.sh" "$session_file" stop >/dev/null 2>&1 || true
-  rm -f "$session_file"
+  rm -f "$session_file" || true
 }
 
 # Resolve the PR number for a worktree branch via gh-axi. Echoes the number on a
