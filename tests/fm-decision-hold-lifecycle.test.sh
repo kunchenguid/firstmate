@@ -243,6 +243,8 @@ EOF
     > "$home/partial-drifted-decision.out" 2> "$home/partial-drifted-decision.err"; then
     fail "partial resolution retry accepted a different captain decision"
   fi
+  tasks_in "$home" "done" sample-route-followup >/dev/null \
+    || fail "could not complete already-routed dependent work"
   run_decisions "$home" resolve "$id" route --decision-file "$home/route-decision.txt" \
     --routed-to sample-route-implementation --routed-to sample-route-followup >/dev/null \
     || fail "could not resume and complete partial decision routing"

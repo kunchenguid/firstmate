@@ -314,21 +314,35 @@ MODEL=$(printf '%s' "$SNAP" | jq \
      + [ (.secondmate_current.records // [])[] as $m | $m.endpoints[]?
          | select(.endpoint.exists == false or .endpoint.agent_alive == "dead")
          | {id:($m.id + "/" + .id),backend:"secondmate-home",target:(.endpoint.target // "-"),exists:.endpoint.exists,agent:.endpoint.agent_alive} ]) as $unhealthy_all
+  | ([ (.secondmate_current.records // [])[]
+       | ([.decisions_open[]? | select(.source == "backlog" and .verb == "captain-hold")]) as $captain_holds
+       | ([.holds[]? | select(.source == "backlog")]) as $backlog_holds
+       | . + {
+           bearings_captain_holds:$captain_holds,
+           bearings_holds:(if .current.state == "captain_decision" then $backlog_holds else .holds end),
+           bearings_state:(
+             if .current.state == "captain_decision" then
+               if ($captain_holds | length) > 0 then "captain_decision"
+               elif (.active_children | length) > 0 then "active_child_work"
+               elif ($backlog_holds | length) > 0 then "externally_held"
+               else "unknown" end
+             else .current.state end)
+         } ]) as $secondmate_views
   | ([ if .secondmate_current.registry.available == false then
          {id:"(registry)",state:"unknown",doing:(.secondmate_current.registry.reason // "Registered secondmate table unavailable"),
           provenance:(.secondmate_current.registry.provenance // "registered-table"),
           freshness:(.secondmate_current.registry.freshness.status // "unavailable"),
           age_seconds:null,contradiction:false,reason:(.secondmate_current.registry.reason // "Registered secondmate table unavailable")}
        else empty end ]
-     + [ (.secondmate_current.records // [])[]
-       | {id,state:.current.state,
-          doing:((if .current.state == "active_child_work" then
+     + [ $secondmate_views[]
+       | {id,state:.bearings_state,
+          doing:((if .bearings_state == "active_child_work" then
                     ([.active_children[] | .id + ": " + (.doing // .state)] | join("; "))
-                  elif .current.state == "captain_decision" then
-                    ([.decisions_open[] | .summary] | join("; "))
-                  elif .current.state == "externally_held" then
-                    ([.holds[] | .id + ": " + (.reason // "held")] | join("; "))
-                  elif .current.state == "no_active_work" then "No active child work"
+                  elif .bearings_state == "captain_decision" then
+                    ([.bearings_captain_holds[] | .summary] | join("; "))
+                  elif .bearings_state == "externally_held" then
+                    ([.bearings_holds[] | .id + ": " + (.reason // "held")] | join("; "))
+                  elif .bearings_state == "no_active_work" then "No active child work"
                   else (.current.reason // "Current home state unavailable") end) | trunc(120)),
           provenance:.provenance.selected,freshness:.freshness.status,
           age_seconds:.freshness.age_seconds,contradiction:(.contradiction // false),
@@ -339,9 +353,9 @@ MODEL=$(printf '%s' "$SNAP" | jq \
         doing: ((.current_state.detail // "") as $d
                 | (if $d != "" then $d else (.hints.last_event_text // "") end) | trunc(90))
       } ]
-     + [ (.secondmate_current.records // [])[]
-         | select(.current.state == "active_child_work")
-         | {id,kind:"secondmate",state:.current.state,
+     + [ $secondmate_views[]
+         | select(.bearings_state == "active_child_work")
+         | {id,kind:"secondmate",state:.bearings_state,
             doing:([.active_children[] | .id + ": " + (.doing // .state)] | join("; ") | trunc(90))} ]) as $in_flight_all
   | ([ .backlog.records[]
          | select(.state == "queued" and .structured and .kind == "captain"

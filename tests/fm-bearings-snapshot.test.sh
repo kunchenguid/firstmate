@@ -328,14 +328,15 @@ EOF
   fm_write_meta "$mate/state/phase8.meta" \
     "window=firstmate:fm-phase8" "worktree=$mate/projects/phase8" "project=sample" \
     "harness=codex" "kind=ship" "mode=no-mistakes"
-  printf 'working [key=phase8]: implementing Phase 8 parity\n' > "$mate/state/phase8.status"
+  printf 'working [key=phase8]: implementing Phase 8 parity\nneeds-decision [key=release]: choose release A or B\n' \
+    > "$mate/state/phase8.status"
   fakebin=$(make_fakebin "$home")
   json=$(run "$home" "$fakebin" --json)
   printf '%s' "$json" | jq -e '
-    (.secondmates | any(.[]; .id == "domain-alpha" and .state == "active_child_work"
-      and (.doing | contains("phase8")) and (.doing | contains("Phase 7 started") | not)))
-      and (.in_flight | any(.[]; .id == "domain-alpha" and (.doing | contains("phase8"))))
-  ' >/dev/null || fail "active child did not override stale parent event: $json"
+    (.secondmates | any(.[]; .id == "domain-alpha" and .state != "captain_decision"
+      and (.doing | contains("release A or B") | not)))
+      and (.decisions_open | any(.owner == "domain-alpha") | not)
+  ' >/dev/null || fail "status-only child decision leaked into Bearings: $json"
   canonical=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
     "$ROOT/bin/fm-fleet-snapshot.sh" --json)
   printf '%s' "$canonical" | jq -e '
@@ -345,7 +346,7 @@ EOF
       and .endpoint.freshness == "fresh"
       and .endpoint.observed_at == "2026-07-11T18:00:00Z"
   ' >/dev/null || fail "child endpoint observation lacked bounded current freshness: $canonical"
-  pass "active child work overrides an old parent event with fresh endpoint evidence"
+  pass "Bearings excludes a status-only child decision"
 }
 
 test_structured_child_decision_reaches_captains_call() {
