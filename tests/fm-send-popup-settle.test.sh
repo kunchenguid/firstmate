@@ -70,7 +70,9 @@ first_settle() {  # <expected> <label> <harness|--explicit> <message> [selector-
   fb=$(make_stubs "$dir"); log="$dir/sleep.log"; home="$dir"
   if [ "$harness" = --explicit ]; then
     target="sess:w1:p1"
+    set -- --backend herdr
   else
+    set --
     case "$selector_form" in
       exact)
         target="popupcase"
@@ -89,7 +91,7 @@ first_settle() {  # <expected> <label> <harness|--explicit> <message> [selector-
   : > "$log"
   env FM_SEND_SETTLE=0 PATH="$fb:$PATH" \
     FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SLEEP_LOG="$log" \
-    "$SEND" "$target" "$msg" 2>/dev/null; rc=$?
+    "$SEND" "$@" "$target" "$msg" 2>/dev/null; rc=$?
   expect_code 0 "$rc" "$label: send should succeed"
   first=$(head -1 "$log")
   [ "$first" = "$expected" ] || fail "$label: expected popup-settle $expected, got '$first'"$'\n'"--- sleeps ---"$'\n'"$(cat "$log")"

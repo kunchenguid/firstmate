@@ -137,7 +137,7 @@ test_explicit_window_is_not_marked() {
     || fail "explicit session:window send with meta: expected bare text, got marker"$'\n'"--- bytes ---"$'\n'"$(printf '%s' "$got" | od -An -c)"
 
   home=$(setup_home explicit-no-meta)
-  run_send "$fb" "$home" "$log" "outside:w2:p2" "outside ping"; rc=$?
+  run_send "$fb" "$home" "$log" --backend herdr "outside:w2:p2" "outside ping"; rc=$?
   expect_code 0 "$rc" "send to an explicit window with no local meta should succeed"
   got=$(cat "$log")
   [ "$got" = "outside ping" ] \

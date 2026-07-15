@@ -84,7 +84,7 @@ test_stale_enqueue_before_suppressor() {
   capture_file="$dir/pane.txt"
   window="test:fm-stale"
   printf 'idle prompt' > "$capture_file"
-  printf 'window=%s\nkind=ship\n' "$window" > "$state/stale.meta"
+  printf 'backend=herdr\nwindow=%s\nkind=ship\n' "$window" > "$state/stale.meta"
   # A stale pane sitting on a captain-relevant status is actionable when the crew
   # is not provably working, so give the window one and prime the .seen-* marker
   # to its current signature so the per-poll signal scan does not pre-empt the
@@ -119,7 +119,7 @@ test_not_working_stale_enqueue_before_suppressor() {
   capture_file="$dir/pane.txt"
   window="test:fm-stopped"
   printf 'idle prompt, finished' > "$capture_file"
-  printf 'window=%s\nkind=ship\n' "$window" > "$state/stopped.meta"
+  printf 'backend=herdr\nwindow=%s\nkind=ship\n' "$window" > "$state/stopped.meta"
   # Non-terminal status (no captain-relevant verb); prime .seen-* so the per-poll
   # signal scan does not pre-empt the stale path.
   printf 'working: implementing\n' > "$state/stopped.status"
@@ -217,7 +217,7 @@ test_drain_asserts_watcher_liveness() {
   dir=$(make_case drain-liveness)
   state="$dir/state"
   err="$dir/drain.err"
-  printf 'window=test:fm-x\nkind=ship\n' > "$state/x.meta"
+  printf 'backend=herdr\nwindow=test:fm-x\nkind=ship\n' > "$state/x.meta"
   FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null 2> "$err" || fail "drain failed while asserting liveness"
   grep -F 'WATCHER DOWN' "$err" >/dev/null || fail "drain did not surface the watcher-down banner with work in flight and no live watcher"
   : > "$err"

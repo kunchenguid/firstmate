@@ -1439,14 +1439,14 @@ test_fm_send_exits_nonzero_on_confirmed_swallow() {
   fakebin="$dir/fakebin"; err="$dir/send.err"
   # Clean submit -> exit 0.
   PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" FM_FAKE_COMPOSER="$dir/composer" \
-    FM_SEND_SLEEP=0.05 "$ROOT/bin/fm-send.sh" lab:w1:p2 'route this work' >/dev/null 2>"$err" \
+    FM_SEND_SLEEP=0.05 "$ROOT/bin/fm-send.sh" --backend herdr lab:w1:p2 'route this work' >/dev/null 2>"$err" \
     || fail "fm-send exited non-zero on a clean submit: $(cat "$err")"
   # Persistent swallow -> exit non-zero with a clear message.
   printf '│ > │\n' > "$dir/composer"
   touch "$dir/.swallow"
   if PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" FM_FAKE_COMPOSER="$dir/composer" \
     FM_FAKE_SWALLOW="$dir/.swallow" FM_FAKE_PERSIST_SWALLOW=1 FM_SEND_SLEEP=0.05 \
-    "$ROOT/bin/fm-send.sh" lab:w1:p2 'fix findings 1 and 3, skip 2' >/dev/null 2>"$err"; then
+    "$ROOT/bin/fm-send.sh" --backend herdr lab:w1:p2 'fix findings 1 and 3, skip 2' >/dev/null 2>"$err"; then
     fail "fm-send exited zero despite a swallowed Enter (silent unsubmitted instruction)"
   fi
   grep -F 'not submitted' "$err" >/dev/null || fail "fm-send did not explain the swallowed submit: $(cat "$err")"
@@ -1459,7 +1459,7 @@ test_fm_send_exits_nonzero_on_initial_send_failure() {
   fakebin="$dir/fakebin"; err="$dir/send.err"
   if PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" FM_FAKE_COMPOSER="$dir/composer" \
     FM_FAKE_SEND_FAIL=1 FM_SEND_SLEEP=0.05 \
-    "$ROOT/bin/fm-send.sh" lab:w1:p2 'route this work' >/dev/null 2>"$err"; then
+    "$ROOT/bin/fm-send.sh" --backend herdr lab:w1:p2 'route this work' >/dev/null 2>"$err"; then
     fail "fm-send exited zero despite initial herdr send-keys failure"
   fi
   grep -F 'text not sent' "$err" >/dev/null || fail "fm-send did not explain initial send failure: $(cat "$err")"

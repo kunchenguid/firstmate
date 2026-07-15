@@ -158,6 +158,7 @@ fm_write_meta() {
 fm_write_secondmate_meta() {
   local file=$1 home=$2 window=${3:-firstmate:fm-domain} projects=${4:-alpha}
   fm_write_meta "$file" \
+    "backend=herdr" \
     "window=$window" \
     "worktree=$home" \
     "project=$home" \

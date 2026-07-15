@@ -109,6 +109,7 @@ write_fixture() {  # <home>
 EOF
   printf '# Scout X\n' > "$home/data/scout-x/report.md"
   fm_write_meta "$home/state/ship-task.meta" \
+    "backend=herdr" \
     "window=firstmate:fm-ship-task" \
     "worktree=$home/projects/ship-wt" \
     "project=firstmate" \
@@ -118,6 +119,7 @@ EOF
     "pr=https://github.com/kunchenguid/firstmate/pull/9"
   printf 'working: building the thing\n' > "$home/state/ship-task.status"
   fm_write_meta "$home/state/scout-x.meta" \
+    "backend=herdr" \
     "window=firstmate:fm-scout-x" \
     "worktree=$home/projects/ship-wt" \
     "project=firstmate" \
@@ -126,6 +128,7 @@ EOF
     "mode=scout"
   printf 'done: report ready\n' > "$home/state/scout-x.status"
   fm_write_meta "$home/state/mate.meta" \
+    "backend=herdr" \
     "window=firstmate:fm-mate" \
     "worktree=$mate" \
     "project=$mate" \
@@ -137,6 +140,7 @@ EOF
   printf 'needs-decision [key=race]: pick subscribe order\n' > "$home/state/mate.status"
   printf 'done: an unrelated subtask finished\n' >> "$home/state/mate.status"
   fm_write_meta "$home/state/external-wait.meta" \
+    "backend=herdr" \
     "window=firstmate:fm-external-wait" \
     "worktree=$home/projects/ship-wt" \
     "project=firstmate" \
@@ -156,7 +160,7 @@ EOF
 EOF
   mkdir -p "$mate/projects/mate"
   fm_write_meta "$mate/state/mate.meta" \
-    "window=firstmate:fm-mate" "worktree=$mate/projects/mate" "project=firstmate" \
+    "backend=herdr" "window=firstmate:fm-mate" "worktree=$mate/projects/mate" "project=firstmate" \
     "harness=codex" "kind=ship" "mode=no-mistakes"
   printf 'needs-decision [key=race]: pick subscribe order\n' > "$mate/state/mate.status"
 }
@@ -327,7 +331,7 @@ test_active_child_overrides_old_parent_event() {
 - [x] phase7 - Sample rollout Phase 7 (repo: sample) (kind: ship) (done 2026-07-12)
 EOF
   fm_write_meta "$mate/state/phase8.meta" \
-    "window=firstmate:fm-phase8" "worktree=$mate/projects/phase8" "project=sample" \
+    "backend=herdr" "window=firstmate:fm-phase8" "worktree=$mate/projects/phase8" "project=sample" \
     "harness=codex" "kind=ship" "mode=no-mistakes"
   printf 'working [key=phase8]: implementing Phase 8 parity\n' > "$mate/state/phase8.status"
   fakebin=$(make_fakebin "$home")
@@ -365,7 +369,7 @@ test_structured_child_decision_reaches_captains_call() {
 - [x] phase7 - Sample rollout Phase 7 (repo: sample) (kind: ship) (done 2026-07-12)
 EOF
   fm_write_meta "$mate/state/phase8.meta" \
-    "window=firstmate:fm-phase8" "worktree=$mate/projects/phase8" "project=sample" \
+    "backend=herdr" "window=firstmate:fm-phase8" "worktree=$mate/projects/phase8" "project=sample" \
     "harness=codex" "kind=ship" "mode=no-mistakes"
   printf 'needs-decision [key=release]: choose release A or B\n' > "$mate/state/phase8.status"
   fakebin=$(make_fakebin "$home")
@@ -436,7 +440,7 @@ test_bad_secondmate_homes_never_revive_parent_work() {
   git -C "$wt" checkout -q -b fm/slow
   printf '## In flight\n- [ ] slow - Slow child (repo: sample) (kind: ship) (since 2026-07-13)\n\n## Queued\n\n## Done\n' > "$timedout/data/backlog.md"
   fm_write_meta "$timedout/state/slow.meta" \
-    "window=firstmate:fm-slow" "worktree=$wt" "project=sample" \
+    "backend=herdr" "window=firstmate:fm-slow" "worktree=$wt" "project=sample" \
     "harness=codex" "kind=ship" "mode=no-mistakes"
   append_secondmate_registry "$home" timedout "$timedout"
   write_parent_secondmate_event "$home" timedout "$timedout" "old timed work"
@@ -478,7 +482,7 @@ test_secondmate_and_child_bounds_are_disclosed() {
     mkdir -p "$mate/projects/$child"
     printf -- '- [ ] %s - Active %s (repo: sample) (kind: ship) (since 2026-07-13)\n' "$child" "$child" >> "$mate/data/backlog.md"
     fm_write_meta "$mate/state/$child.meta" \
-      "window=firstmate:fm-$child" "worktree=$mate/projects/$child" "project=sample" \
+      "backend=herdr" "window=firstmate:fm-$child" "worktree=$mate/projects/$child" "project=sample" \
       "harness=codex" "kind=ship" "mode=no-mistakes"
     printf 'working [key=%s]: active child %s\n' "$child" "$i" > "$mate/state/$child.status"
     i=$((i + 1))
@@ -587,7 +591,7 @@ EOF
 ## Done
 EOF
   fm_write_meta "$decision/state/$child.meta" \
-    "window=firstmate:fm-$child" "worktree=$decision/projects/$child" "project=sample" \
+    "backend=herdr" "window=firstmate:fm-$child" "worktree=$decision/projects/$child" "project=sample" \
     "harness=codex" "kind=ship" "mode=no-mistakes"
   printf 'needs-decision [key=live-route]: choose the current route\n' > "$decision/state/$child.status"
   fakebin=$(make_fakebin "$home")
@@ -639,7 +643,7 @@ test_nonprogressing_child_states_are_explicit() {
 ## Done
 EOF
   fm_write_meta "$mate/state/parked.meta" \
-    "window=firstmate:fm-parked" "worktree=$mate/projects/parked" "project=sample" \
+    "backend=herdr" "window=firstmate:fm-parked" "worktree=$mate/projects/parked" "project=sample" \
     "harness=codex" "kind=ship" "mode=no-mistakes"
   printf 'needs-decision [key=parked]: choose a route\n' > "$mate/state/parked.status"
   fakebin=$(make_fakebin "$home")
@@ -676,10 +680,10 @@ EOF
 ## Done
 EOF
   fm_write_meta "$mate/state/done.meta" \
-    "window=firstmate:fm-done" "worktree=$mate/projects/done" "project=sample" \
+    "backend=herdr" "window=firstmate:fm-done" "worktree=$mate/projects/done" "project=sample" \
     "harness=codex" "kind=ship" "mode=no-mistakes"
   fm_write_meta "$mate/state/failed.meta" \
-    "window=firstmate:fm-failed" "worktree=$mate/projects/failed" "project=sample" \
+    "backend=herdr" "window=firstmate:fm-failed" "worktree=$mate/projects/failed" "project=sample" \
     "harness=codex" "kind=ship" "mode=no-mistakes"
   printf 'done: complete\n' > "$mate/state/done.status"
   printf 'failed: stopped\n' > "$mate/state/failed.status"
@@ -955,6 +959,7 @@ write_large_fixture() {  # <home> <count>
     printf '# Report\n' > "$home/data/$id/report.md"
     printf -- '- [ ] gate-%s - Gate %s blocked-by: task-%s (repo: repo-%s) (kind: ship)\n' "$i" "$i" "$i" "$i" >> "$home/data/backlog.md"
     fm_write_meta "$home/state/$id.meta" \
+      "backend=herdr" \
       "window=firstmate:fm-$id" \
       "worktree=$home/projects/$id" \
       "project=repo-$i" \
@@ -1070,6 +1075,7 @@ test_completed_scout_report_not_pending() {
   fakebin=$(make_fakebin "$home")
   mkdir -p "$home/projects/lav-wt" "$home/data/lavish-103"
   fm_write_meta "$home/state/lavish-103.meta" \
+    "backend=herdr" \
     "window=firstmate:fm-lavish-103" \
     "worktree=$home/projects/lav-wt" \
     "project=firstmate" \

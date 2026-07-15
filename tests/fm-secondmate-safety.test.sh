@@ -1282,6 +1282,7 @@ test_secondmate_teardown_retires_empty_home() {
   printf 'domain\n' > "$subhome/.fm-secondmate-home"
   subhome_abs=$(cd "$subhome" && pwd -P)
   cat > "$home/state/domain.meta" <<EOF
+backend=herdr
 window=firstmate:fm-domain
 worktree=$subhome
 project=$subhome
@@ -1321,6 +1322,7 @@ test_secondmate_teardown_refuses_failed_leased_home_return() {
   printf 'domain\n' > "$subhome/.fm-secondmate-home"
   subhome_abs=$(cd "$subhome" && pwd -P)
   cat > "$home/state/domain.meta" <<EOF
+backend=herdr
 window=firstmate:fm-domain
 worktree=$subhome
 project=$subhome
@@ -1360,6 +1362,7 @@ test_secondmate_teardown_removes_plain_clone_home_without_treehouse_return() {
   printf 'domain\n' > "$subhome/.fm-secondmate-home"
   subhome_abs=$(cd "$subhome" && pwd -P)
   cat > "$home/state/domain.meta" <<EOF
+backend=herdr
 window=firstmate:fm-domain
 worktree=$subhome
 project=$subhome
@@ -1395,6 +1398,7 @@ test_secondmate_force_teardown_discards_child_work() {
   fm_git_worktree "$childproj" "$childwt" force-child
   printf 'domain\n' > "$subhome/.fm-secondmate-home"
   cat > "$home/state/domain.meta" <<EOF
+backend=herdr
 window=firstmate:fm-domain
 worktree=$subhome
 project=$subhome
@@ -1407,6 +1411,7 @@ projects=alpha
 EOF
   printf '%s\n' '- domain - design domain (home: '"$subhome"'; scope: design domain; projects: alpha; added 2026-06-22)' > "$home/data/secondmates.md"
   cat > "$subhome/state/child.meta" <<EOF
+backend=herdr
 window=firstmate:fm-child
 worktree=$childwt
 project=$childproj
@@ -1444,6 +1449,7 @@ test_secondmate_force_teardown_preserves_child_on_unproven_lock() {
   fm_git_worktree "$childproj" "$childwt" force-child-lock
   printf 'domain\n' > "$subhome/.fm-secondmate-home"
   cat > "$home/state/domain.meta" <<EOF
+backend=herdr
 window=firstmate:fm-domain
 worktree=$subhome
 project=$subhome
@@ -1456,6 +1462,7 @@ projects=alpha
 EOF
   printf '%s\n' '- domain - design domain (home: '"$subhome"'; scope: design domain; projects: alpha; added 2026-06-22)' > "$home/data/secondmates.md"
   cat > "$subhome/state/child.meta" <<EOF
+backend=herdr
 window=firstmate:fm-child
 worktree=$childwt
 project=$childproj
@@ -1530,6 +1537,7 @@ test_secondmate_force_teardown_allows_operational_dir_symlinks_inside_home() {
     printf 'domain\n' > "$subhome/.fm-secondmate-home"
     ln -s "$target" "$subhome/$opdir"
     cat > "$home/state/domain.meta" <<EOF
+backend=herdr
 window=firstmate:fm-domain
 worktree=$subhome
 project=$subhome
@@ -1563,6 +1571,7 @@ test_secondmate_force_teardown_refuses_operational_dir_symlink_outside_home() {
   printf 'domain\n' > "$subhome/.fm-secondmate-home"
   ln -s "$external_state" "$subhome/state"
   cat > "$home/state/domain.meta" <<EOF
+backend=herdr
 window=firstmate:fm-domain
 worktree=$subhome
 project=$subhome
@@ -1662,6 +1671,7 @@ test_secondmate_teardown_refuses_registered_nested_home() {
   printf 'domain\n' > "$subhome/.fm-secondmate-home"
   printf 'nested\n' > "$nested/.fm-secondmate-home"
   cat > "$home/state/domain.meta" <<EOF
+backend=herdr
 window=firstmate:fm-domain
 worktree=$subhome
 project=$subhome
@@ -1712,6 +1722,7 @@ test_secondmate_teardown_refuses_child_registry_nested_home() {
   printf 'domain\n' > "$subhome/.fm-secondmate-home"
   printf 'nested\n' > "$nested/.fm-secondmate-home"
   cat > "$home/state/domain.meta" <<EOF
+backend=herdr
 window=firstmate:fm-domain
 worktree=$subhome
 project=$subhome
@@ -1747,6 +1758,7 @@ test_secondmate_force_teardown_prevalidates_before_child_cleanup() {
   err="$TMP_ROOT/prevalidate-teardown.err"
   mkdir -p "$home/state" "$home/data" "$subhome/state" "$childproj" "$childwt"
   cat > "$home/state/domain.meta" <<EOF
+backend=herdr
 window=firstmate:fm-domain
 worktree=$subhome
 project=$subhome
@@ -1759,6 +1771,7 @@ projects=alpha
 EOF
   printf '%s\n' '- domain - design domain (home: '"$subhome"'; scope: design domain; projects: alpha; added 2026-06-22)' > "$home/data/secondmates.md"
   cat > "$subhome/state/child.meta" <<EOF
+backend=herdr
 window=firstmate:fm-child
 worktree=$childwt
 project=$childproj
@@ -1792,6 +1805,7 @@ test_secondmate_force_teardown_refuses_child_active_home_descendant() {
   mkdir -p "$home/state" "$home/data" "$subhome/state" "$childproj"
   printf 'domain\n' > "$subhome/.fm-secondmate-home"
   cat > "$home/state/domain.meta" <<EOF
+backend=herdr
 window=firstmate:fm-domain
 worktree=$subhome
 project=$subhome
@@ -1804,6 +1818,7 @@ projects=alpha
 EOF
   printf '%s\n' '- domain - design domain (home: '"$subhome"'; scope: design domain; projects: alpha; added 2026-06-22)' > "$home/data/secondmates.md"
   cat > "$subhome/state/child.meta" <<EOF
+backend=herdr
 window=firstmate:fm-child
 worktree=$childwt
 project=$childproj
@@ -1843,6 +1858,7 @@ SH
   chmod +x "$fakeroot/bin/fm-guard.sh"
   printf 'domain\n' > "$subhome/.fm-secondmate-home"
   cat > "$home/state/domain.meta" <<EOF
+backend=herdr
 window=firstmate:fm-domain
 worktree=$subhome
 project=$subhome
@@ -1855,6 +1871,7 @@ projects=alpha
 EOF
   printf '%s\n' '- domain - design domain (home: '"$subhome"'; scope: design domain; projects: alpha; added 2026-06-22)' > "$home/data/secondmates.md"
   cat > "$subhome/state/child.meta" <<EOF
+backend=herdr
 window=firstmate:fm-child
 worktree=$childwt
 project=$childproj
@@ -1888,6 +1905,7 @@ test_secondmate_force_teardown_refuses_unregistered_child_worktree() {
   mkdir -p "$home/state" "$home/data" "$subhome/state" "$childproj" "$childwt"
   printf 'domain\n' > "$subhome/.fm-secondmate-home"
   cat > "$home/state/domain.meta" <<EOF
+backend=herdr
 window=firstmate:fm-domain
 worktree=$subhome
 project=$subhome
@@ -1900,6 +1918,7 @@ projects=alpha
 EOF
   printf '%s\n' '- domain - design domain (home: '"$subhome"'; scope: design domain; projects: alpha; added 2026-06-22)' > "$home/data/secondmates.md"
   cat > "$subhome/state/child.meta" <<EOF
+backend=herdr
 window=firstmate:fm-child
 worktree=$childwt
 project=$childproj
