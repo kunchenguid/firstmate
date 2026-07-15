@@ -42,6 +42,8 @@ test('rewritten A20: canonical corruption blocks mutations but reads through las
   assert.equal(auditRegistry(dir).registry.health, 'ok');
   assert.equal(auditRegistry(dir).activeIndex.status, 'current');
   assert.equal(result.recoveryEvent.event, 'registry_recovered');
+  assert.ok(result.recoveryEvent.eventId);
+  assert.equal(JSON.parse(fs.readFileSync(result.recoveryStateFile, 'utf8')).currentStage, 'completed');
 });
 
 test('recovery preserves arbitrary corrupt bytes byte-for-byte in the sidecar', async () => {
@@ -70,7 +72,8 @@ test('recovery is durable across every failpoint: partial recovery is diagnosabl
   const stages = [
     'before-backup', 'after-backup', 'after-sidecar', 'after-repaired-write',
     'before-validation', 'before-rename', 'after-rename', 'before-recovery-event',
-    'before-index-rebuild', 'before-final-audit'
+    'after-recovery-activity', 'before-index-rebuild', 'after-index-rebuild',
+    'before-final-audit'
   ];
   for (const stage of stages) {
     const dir = tmpRegistry();
@@ -81,6 +84,14 @@ test('recovery is durable across every failpoint: partial recovery is diagnosabl
     const corruptHash = sha256(fs.readFileSync(paths.registry));
 
     await assert.rejects(recoverRegistry(dir, { failpoints: [stage] }), /recovery failpoint/);
+    const incompleteAudit = auditRegistry(dir);
+    assert.equal(incompleteAudit.ok, false, `${stage}: incomplete recovery cannot audit green`);
+    assert.equal(incompleteAudit.registry.health, 'recovery_incomplete', `${stage}: health exposes incomplete recovery`);
+    await assert.rejects(
+      appendRegistryEvent(dir, { event: 'proposed', actor: { kind: 'firstmate', id: 'test' }, fields: { summary: 'blocked during recovery' } }),
+      /recovery is incomplete|CRITICAL/,
+      `${stage}: ordinary mutations remain blocked`
+    );
 
     // Before the atomic rename the canonical file is untouched (still CRITICAL,
     // re-runnable). After the rename it is the repaired valid prefix.
@@ -89,12 +100,15 @@ test('recovery is durable across every failpoint: partial recovery is diagnosabl
     if (preRename) {
       assert.equal(sha256(registryNow), corruptHash, `${stage}: canonical file must be untouched before rename`);
       assert.equal(foldRegistry(dir).health, 'critical');
-      // Recovery can be re-run to completion.
-      await recoverRegistry(dir);
-      assert.equal(auditRegistry(dir).ok, true, `${stage}: recovery is re-runnable`);
     } else {
       assert.equal(sha256(registryNow), sha256(validBytes), `${stage}: canonical file is the repaired valid prefix after rename`);
     }
+    const completed = await recoverRegistry(dir);
+    assert.equal(auditRegistry(dir).ok, true, `${stage}: recovery is resumable`);
+    assert.ok(completed.recoveryEvent.eventId, `${stage}: durable recovery event exists`);
+    const marker = JSON.parse(fs.readFileSync(completed.recoveryStateFile, 'utf8'));
+    assert.equal(marker.currentStage, 'completed');
+    assert.ok(marker.completedAt);
   }
 });
 

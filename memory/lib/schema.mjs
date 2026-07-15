@@ -82,16 +82,33 @@ export const registryEventSchema = z.object({
 
 export const activityEventSchema = z.object({
   schema: z.literal(ACTIVITY_SCHEMA),
-  schemaVersion: z.number().int().default(1),
+  schemaVersion: z.number().int(),
   eventId: z.string().min(1),
   ts: z.string().datetime(),
   event: z.string().min(1),
-  actor: actorSchema.optional(),
+  actor: actorSchema,
   task: z.string().nullable().optional(),
   order: z.string().nullable().optional(),
   bug: z.string().nullable().optional(),
   detail: z.record(z.any()).default({})
-}).passthrough();
+}).passthrough().superRefine((event, ctx) => {
+  const require = (cond, path, message) => {
+    if (!cond) ctx.addIssue({ code: z.ZodIssueCode.custom, path, message });
+  };
+  if (event.schemaVersion !== 1) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['schemaVersion'], message: 'unsupported activity schemaVersion' });
+  }
+  if (event.event === 'registry_recovered') {
+    for (const key of ['originalHash', 'sidecarHash', 'repairedHash', 'backup', 'sidecar', 'lastValidPreRecoveryWatermark', 'postRecoveryWatermark']) {
+      require(event.detail?.[key] !== undefined, ['detail', key], `registry_recovered requires detail.${key}`);
+    }
+  }
+  if (event.event === 'risk_override') {
+    for (const key of ['computedMinimum', 'requestedRisk', 'appliedRisk', 'matchedRiskRuleIds', 'reason', 'captainAuthorization', 'outcome']) {
+      require(event.detail?.[key] !== undefined, ['detail', key], `risk_override requires detail.${key}`);
+    }
+  }
+});
 
 export function validateRegistryEvent(event) {
   return registryEventSchema.parse(event);

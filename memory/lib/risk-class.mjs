@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import { appendActivity } from './activity.mjs';
 
 export const RISK_CLASS_RULE_VERSION = 'risk-rules/v1';
 export const RISK_ORDER = ['low', 'standard', 'high', 'critical'];
@@ -99,14 +100,68 @@ export function enforceRiskRequest(requested, classification, options = {}) {
     error.detail = classification;
     throw error;
   }
+  const error = new Error('riskClass downgrade refused: durable Captain override log required');
+  error.code = 'RISK_DOWNGRADE_LOG_REQUIRED';
+  error.detail = classification;
+  throw error;
+}
+
+export async function enforceRiskRequestDurably(requested, classification, options = {}) {
+  if (!requested) return classification;
+  if (!RISK_ORDER.includes(requested)) throw new Error(`unknown requested riskClass: ${requested}`);
+  const minimum = classification.riskClass;
+  if (rank(requested) >= rank(minimum)) return enforceRiskRequest(requested, classification, options);
+  if (!options.captainOverrideToken) {
+    const error = new Error(`riskClass downgrade refused: requested ${requested}, minimum ${minimum}`);
+    error.code = 'RISK_DOWNGRADE_REFUSED';
+    error.detail = classification;
+    throw error;
+  }
+  if (!options.activityDir) {
+    const error = new Error('riskClass downgrade refused: activityDir required for durable Captain override log');
+    error.code = 'RISK_DOWNGRADE_LOG_REQUIRED';
+    error.detail = classification;
+    throw error;
+  }
   const ref = overrideReference(options.captainOverrideToken);
+  let event;
+  try {
+    const append = options.appendActivityFn || appendActivity;
+    event = await append(options.activityDir, {
+      event: 'risk_override',
+      actor: options.actor || { kind: 'captain', id: options.captainId || 'captain' },
+      task: options.taskId || null,
+      detail: {
+        ruleVersion: classification.ruleVersion,
+        computedMinimum: minimum,
+        requestedRisk: requested,
+        appliedRisk: requested,
+        matchedRiskRuleIds: classification.matchedRules || [],
+        reason: options.reason || 'captain-authorized downgrade',
+        captainAuthorization: ref,
+        target: {
+          repository: options.repository || classification.metadata?.repository || null,
+          paths: Array.isArray(classification.metadata?.paths) ? classification.metadata.paths : [],
+          pathsHash: crypto.createHash('sha256').update(JSON.stringify(classification.metadata?.paths || [])).digest('hex')
+        },
+        outcome: 'applied'
+      }
+    });
+  } catch (cause) {
+    const error = new Error(`riskClass downgrade refused: failed to persist Captain override (${cause.message})`);
+    error.code = 'RISK_DOWNGRADE_LOG_FAILED';
+    error.cause = cause;
+    error.detail = classification;
+    throw error;
+  }
   const override = {
     ref,
     captainAuthorization: ref,
+    eventId: event.eventId,
     computedMinimum: minimum,
     appliedClass: requested,
     reason: options.reason || 'captain-authorized downgrade',
-    recordedAt: options.recordedAt || null
+    recordedAt: event.ts
   };
   return {
     ...classification,

@@ -22,6 +22,14 @@ function readOwner(lockDir) {
   }
 }
 
+function readOwnerForRelease(lockDir) {
+  try {
+    return { owner: JSON.parse(fs.readFileSync(path.join(lockDir, 'owner.json'), 'utf8')), error: null };
+  } catch (error) {
+    return { owner: null, error };
+  }
+}
+
 function lockAgeMs(lockDir, owner) {
   if (owner?.ts) {
     const parsed = Date.parse(owner.ts);
@@ -60,8 +68,12 @@ function tryStealLock(lockDir) {
 // stale-reclaim while we ran, owner.json now carries a different token, so we
 // must not delete the new owner's live lock.
 function releaseLock(lockDir, token) {
-  const owner = readOwner(lockDir);
-  if (owner && owner.token && owner.token !== token) return;
+  const { owner, error } = readOwnerForRelease(lockDir);
+  if (!owner || !owner.token) {
+    console.error(`mem: refusing to release registry lock without readable owner token: ${error?.message || 'missing owner token'}`);
+    return;
+  }
+  if (owner.token !== token) return;
   try {
     fs.rmSync(lockDir, { recursive: true, force: true });
   } catch {

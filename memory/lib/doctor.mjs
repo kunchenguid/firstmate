@@ -51,7 +51,7 @@ export function checkDoctor(root, env = process.env) {
   try {
     const audit = auditRegistry(registryDir(env));
     registryHealth = audit.registry.health;
-    if (audit.registry.health === 'critical') registryStatus = 'critical';
+    if (audit.registry.health === 'critical' || audit.registry.health === 'recovery_incomplete') registryStatus = audit.registry.health;
     else if (fs.existsSync(audit.registry.path)) registryStatus = writable(registryDir(env));
     else registryStatus = 'missing';
     activeIndexStatus = audit.activeIndex.status;

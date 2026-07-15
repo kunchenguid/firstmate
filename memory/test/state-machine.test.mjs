@@ -10,15 +10,19 @@ async function propose(dir, memId, fields = {}, extra = {}) {
   return appendRegistryEvent(dir, { event: 'proposed', memId, actor: firstmate, fields: { summary: `${memId} summary`, ...fields }, ...extra });
 }
 async function activate(dir, memId, actor = captain, extra = {}) {
-  return appendRegistryEvent(dir, { event: 'activated', memId, actor, evidence: [{ type: 'test', ref: memId }], validation: { method: 'test' }, ...extra });
+  return appendRegistryEvent(dir, { event: 'activated', memId, actor, evidence: [{ type: 'test', ref: memId }], validation: { method: 'test', by: actor.id || 'validator', ref: `auth-${memId}` }, ...extra });
 }
 
-test('m7-17 independent high-impact activation: proposer cannot self-activate dispatch guidance', async () => {
+test('m7-17 independent high-impact activation requires concrete independent actor IDs', async () => {
   const dir = tmpRegistry();
   await appendRegistryEvent(dir, { event: 'proposed', memId: 'MEM-0001', actor: { kind: 'agent', id: 'same-agent' }, fields: { summary: 'dispatch guidance', taskKinds: ['dispatch'] } });
+  await assert.rejects(
+    appendRegistryEvent(dir, { event: 'activated', memId: 'MEM-0001', actor: { kind: 'agent' }, evidence: [{ type: 'test', ref: 'missing-activator' }], validation: { method: 'qa', by: 'qa', ref: 'qa-ref' } }),
+    /requires activator actor\.id/
+  );
   // Same actor, high-impact task kind, no captain authority -> refused.
   await assert.rejects(
-    appendRegistryEvent(dir, { event: 'activated', memId: 'MEM-0001', actor: { kind: 'agent', id: 'same-agent' }, evidence: [{ type: 'test', ref: 'self' }], validation: { method: 'qa' } }),
+    appendRegistryEvent(dir, { event: 'activated', memId: 'MEM-0001', actor: { kind: 'agent', id: 'same-agent' }, evidence: [{ type: 'test', ref: 'self' }], validation: { method: 'qa', by: 'qa', ref: 'qa-ref' } }),
     /high-impact activation requires an independent activator or captain authority/
   );
   // An independent activator succeeds.
@@ -26,7 +30,30 @@ test('m7-17 independent high-impact activation: proposer cannot self-activate di
   assert.equal(foldRegistry(dir).records.get('MEM-0001').status, 'active');
 });
 
-test('captain authority may activate high-impact memory even as the proposer', async () => {
+test('high-impact proposal requires proposer ID and Captain authority requires an authorization reference', async () => {
+  const dir = tmpRegistry();
+  await assert.rejects(
+    appendRegistryEvent(dir, { event: 'proposed', memId: 'MEM-0001', actor: { kind: 'agent' }, fields: { summary: 'anonymous governance', taskKinds: ['governance'] } }),
+    /high-impact proposal requires actor\.id/
+  );
+  await appendRegistryEvent(dir, { event: 'proposed', memId: 'MEM-0001', actor: captain, fields: { summary: 'governance rule', taskKinds: ['governance'] } });
+  await assert.rejects(
+    appendRegistryEvent(dir, { event: 'activated', memId: 'MEM-0001', actor: captain, evidence: [{ type: 'test', ref: 'cap' }], validation: { method: 'test', by: 'captain' } }),
+    /authorization reference/
+  );
+  await activate(dir, 'MEM-0001', captain);
+  assert.equal(foldRegistry(dir).records.get('MEM-0001').activatedBy.authorizationRef, 'auth-MEM-0001');
+});
+
+test('two missing actor IDs are not independent for high-impact activation', async () => {
+  const dir = tmpRegistry();
+  await assert.rejects(
+    appendRegistryEvent(dir, { event: 'proposed', memId: 'MEM-0001', actor: { kind: 'agent' }, fields: { summary: 'dispatch anonymous', taskKinds: ['dispatch'] } }),
+    /high-impact proposal requires actor\.id/
+  );
+});
+
+test('captain authority may activate high-impact memory even as the proposer with authorization', async () => {
   const dir = tmpRegistry();
   await appendRegistryEvent(dir, { event: 'proposed', memId: 'MEM-0001', actor: captain, fields: { summary: 'governance rule', taskKinds: ['governance'] } });
   await activate(dir, 'MEM-0001', captain);
@@ -82,6 +109,31 @@ test('supersession requires an existing active successor and is non-dangling', a
   assert.equal(fold.records.get('MEM-0001').status, 'superseded');
   assert.equal(fold.records.get('MEM-0001').supersededBy, 'MEM-0002');
   assert.ok(fold.records.get('MEM-0002').supersedes.includes('MEM-0001'));
+});
+
+test('supersession refuses self-cycles and A-to-B then B-to-A cycles without mutating state', async () => {
+  const dir = tmpRegistry();
+  await propose(dir, 'MEM-0001');
+  await activate(dir, 'MEM-0001');
+  const beforeSelf = foldRegistry(dir).watermark.seq;
+  await assert.rejects(
+    appendRegistryEvent(dir, { event: 'superseded', memId: 'MEM-0001', successor: 'MEM-0001', actor: firstmate }),
+    /cannot supersede itself/
+  );
+  assert.equal(foldRegistry(dir).watermark.seq, beforeSelf);
+
+  await propose(dir, 'MEM-0002');
+  await activate(dir, 'MEM-0002');
+  await appendRegistryEvent(dir, { event: 'superseded', memId: 'MEM-0001', successor: 'MEM-0002', actor: firstmate });
+  const beforeCycle = foldRegistry(dir).watermark.seq;
+  await assert.rejects(
+    appendRegistryEvent(dir, { event: 'superseded', memId: 'MEM-0002', successor: 'MEM-0001', actor: firstmate }),
+    /successor must be active/
+  );
+  const fold = foldRegistry(dir);
+  assert.equal(fold.watermark.seq, beforeCycle);
+  assert.equal(fold.records.get('MEM-0002').status, 'active');
+  assert.deepEqual(fold.records.get('MEM-0002').supersedes, ['MEM-0001']);
 });
 
 test('candidate cannot self-activate without validation evidence', async () => {

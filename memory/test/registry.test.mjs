@@ -16,7 +16,7 @@ async function activate(dir, memId, extra = {}) {
     memId,
     actor: { kind: 'captain', id: 'captain' },
     evidence: [{ type: 'test', ref: memId }],
-    validation: { method: 'test' },
+    validation: { method: 'test', by: 'captain', ref: `auth-${memId}` },
     ...extra
   });
 }
@@ -54,7 +54,7 @@ test('append/fold validates schema, idempotency, and A7 watermark', async () => 
     memId: 'MEM-0001',
     actor: { kind: 'captain', id: 'test' },
     evidence: [{ type: 'test', ref: 'memory/test/registry.test.mjs' }],
-    validation: { method: 'test', by: 'captain' }
+    validation: { method: 'test', by: 'captain', ref: 'captain-auth-evt-2' }
   });
   const index = buildActiveIndex(dir);
   assert.equal(index.recordCount, 1);

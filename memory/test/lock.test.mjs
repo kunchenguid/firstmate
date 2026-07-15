@@ -75,6 +75,15 @@ test('release verifies the ownership token and never deletes a reclaimed lock', 
   assert.equal(JSON.parse(fs.readFileSync(path.join(paths.lock, 'owner.json'), 'utf8')).token, 'other-owner');
 });
 
+test('release refuses to delete a lock when owner metadata is missing', async () => {
+  const dir = tmpRegistry();
+  const paths = registryPaths(dir);
+  await withRegistryLock(paths.lock, async () => {
+    fs.rmSync(path.join(paths.lock, 'owner.json'), { force: true });
+  });
+  assert.equal(fs.existsSync(paths.lock), true);
+});
+
 test('active lock refuses a competing writer after the wait timeout', async () => {
   const dir = tmpRegistry();
   const paths = registryPaths(dir);

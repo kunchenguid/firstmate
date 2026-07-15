@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { appendActivity } from './activity.mjs';
+import { appendActivity, auditActivity } from './activity.mjs';
 import { contentHash, sha256, stableJson } from './hash.mjs';
 import { registryPaths } from './paths.mjs';
 import { ACTIVE_INDEX_SCHEMA, REGISTRY_SCHEMA, validateRegistryEvent } from './schema.mjs';
@@ -30,6 +30,14 @@ function isHighImpact(record) {
   if (record.riskClass === 'critical') return true;
   if (record.guardLinked) return true;
   return (record.taskKinds || []).some((kind) => HIGH_IMPACT_KINDS.has(kind));
+}
+
+function actorId(actor) {
+  return typeof actor?.id === 'string' && actor.id.length > 0 ? actor.id : null;
+}
+
+function validationRef(event) {
+  return typeof event.validation?.ref === 'string' && event.validation.ref.length > 0 ? event.validation.ref : null;
 }
 
 export function emptyFold(paths = registryPaths()) {
@@ -124,8 +132,11 @@ function applyEvent(records, event) {
     if (record) throw new Error(`record already exists: ${event.memId}`);
     record = defaultRecord(event.memId, event);
     applyFields(record, event.fields || {});
+    if (isHighImpact(record) && !actorId(event.actor)) {
+      throw new Error(`high-impact proposal requires actor.id: ${event.memId}`);
+    }
     record.status = 'candidate';
-    record.proposedBy = { kind: event.actor?.kind, id: event.actor?.id ?? null };
+    record.proposedBy = { kind: event.actor?.kind, id: actorId(event.actor) };
     if (event.guard_linked !== undefined) record.guardLinked = Boolean(event.guard_linked);
     record.evidence = mergeEvidence(record.evidence, event.evidence || []);
     record.eventIds.push(event.eventId);
@@ -140,25 +151,40 @@ function applyEvent(records, event) {
       throw new Error(`${event.event} requires evidence and validation: ${event.memId}`);
     }
     if (event.event === 'activated' && isHighImpact(record)) {
-      const captainAuthority = event.actor?.kind === 'captain';
-      const proposer = record.proposedBy?.id ?? null;
-      const activator = event.actor?.id ?? null;
-      if (!captainAuthority && proposer !== null && activator !== null && proposer === activator) {
+      const captainAuthority = event.actor?.kind === 'captain' && Boolean(validationRef(event));
+      const proposer = actorId(record.proposedBy);
+      const activator = actorId(event.actor);
+      if (!proposer) throw new Error(`high-impact activation requires proposer actor.id: ${event.memId}`);
+      if (!activator) throw new Error(`high-impact activation requires activator actor.id: ${event.memId}`);
+      if (!event.validation?.by) throw new Error(`high-impact activation requires validation.by: ${event.memId}`);
+      if (event.actor?.kind === 'captain' && !validationRef(event)) {
+        throw new Error(`captain-authorized high-impact activation requires an authorization reference: ${event.memId}`);
+      }
+      if (!captainAuthority && proposer === activator) {
         throw new Error(`high-impact activation requires an independent activator or captain authority: ${event.memId}`);
       }
     }
     record.status = 'active';
     record.verifiedAt = event.ts;
     record.confidence = event.fields?.confidence || record.confidence || 'observed';
-    record.activatedBy = { kind: event.actor?.kind, id: event.actor?.id ?? null };
+    record.activatedBy = { kind: event.actor?.kind, id: actorId(event.actor), validationBy: event.validation?.by ?? null, authorizationRef: validationRef(event) };
     record.evidence = mergeEvidence(record.evidence, event.evidence);
   } else if (event.event === 'updated') {
     record.evidence = mergeEvidence(record.evidence, event.evidence || []);
   } else if (event.event === 'superseded') {
     const successorId = event.successor;
+    if (successorId === event.memId) throw new Error(`memory record cannot supersede itself: ${event.memId}`);
     const successor = records.get(successorId);
     if (!successor) throw new Error(`supersession successor not found: ${successorId} for ${event.memId}`);
     if (successor.status !== 'active') throw new Error(`supersession successor must be active: ${successorId}`);
+    let cursor = successorId;
+    const seen = new Set();
+    while (cursor) {
+      if (cursor === event.memId) throw new Error(`supersession lineage cycle detected: ${event.memId} -> ${successorId}`);
+      if (seen.has(cursor)) throw new Error(`supersession lineage cycle detected at ${cursor}`);
+      seen.add(cursor);
+      cursor = records.get(cursor)?.supersededBy ?? null;
+    }
     // Update both sides of the lineage atomically within this one fold event.
     record.status = 'superseded';
     record.validTo = event.ts;
@@ -270,6 +296,9 @@ function fsyncFile(file) {
 // Durable write: temp file in the destination directory, fsync the file, atomic
 // rename, then fsync the containing directory so the rename itself is durable.
 function atomicWrite(file, data, mode = 0o600) {
+  if (process.env.MEM_ATOMIC_WRITE_FAIL_PATH && file.includes(process.env.MEM_ATOMIC_WRITE_FAIL_PATH)) {
+    throw new Error(`injected atomic write failure for ${file}`);
+  }
   const dir = path.dirname(file);
   fs.mkdirSync(dir, { recursive: true, mode: 0o755 });
   const tmp = path.join(dir, `.${path.basename(file)}.tmp-${process.pid}-${crypto.randomBytes(4).toString('hex')}`);
@@ -309,6 +338,8 @@ export async function appendRegistryEvent(dir, partial, options = {}) {
   return withRegistryLock(paths.lock, async () => {
     const fold = foldRegistry(paths);
     if (fold.health === 'critical') throw new Error(`registry is CRITICAL: run mem recover before mutating (${fold.corrupt?.reason})`);
+    const recovery = readRecoveryState(paths);
+    if (recovery?.incomplete) throw new Error(`registry recovery is incomplete: run mem recover before mutating (${recovery.state?.currentStage || 'unknown'})`);
     const memId = partial.memId || nextMemId(fold);
     const event = validateRegistryEvent({
       schema: REGISTRY_SCHEMA,
@@ -331,6 +362,7 @@ export async function appendRegistryEvent(dir, partial, options = {}) {
     appendLine(paths.registry, line, options.injectReadBackMismatch || process.env.MEM_INJECT_READBACK_MISMATCH === '1');
     const newFold = foldRegistry(paths);
     installIndexFromFold(paths, newFold);
+    maybeAutoSnapshot(paths, newFold);
     return { event, skipped: false, fold: newFold };
   }, options.lock);
 }
@@ -341,7 +373,7 @@ function contentFields(record) {
     summary: record.summary,
     body: record.body,
     source: record.source ?? null,
-    memoryType: record.memoryType ?? 'factual',
+    memoryType: record.memoryType,
     scope: record.scope,
     projects: record.projects,
     taskKinds: record.taskKinds,
@@ -357,6 +389,15 @@ function contentFields(record) {
     riskClass: record.riskClass
   };
 }
+
+const REQUIRED_PROJECTED_FIELDS = [
+  'id', 'summary', 'body', 'source', 'memoryType', 'scope', 'projects', 'taskKinds',
+  'keywords', 'aliases', 'entities', 'commands', 'failureModes', 'relatedTerms',
+  'confidence', 'guard', 'guardLinked', 'riskClass', 'status', 'validFrom',
+  'validTo', 'recordedAt', 'verifiedAt', 'supersedes', 'supersededBy',
+  'contradicts', 'evidence', 'proposedBy', 'activatedBy', 'generation',
+  'eventIds', 'contentHash'
+];
 
 function projectRecord(record) {
   const content = contentFields(record);
@@ -420,6 +461,9 @@ export function buildActiveIndex(dir) {
   const paths = registryPaths(dir);
   const fold = foldRegistry(paths);
   if (fold.health === 'critical') throw new Error(`registry is CRITICAL: ${fold.corrupt?.reason}`);
+  const recovery = readRecoveryState(paths);
+  if (recovery?.incomplete) throw new Error(`registry recovery is incomplete: run mem recover before rebuilding (${recovery.state?.currentStage || 'unknown'})`);
+  snapshotFromFold(paths, fold, { reason: 'pre-index-rebuild', sourceCommand: 'mem index rebuild' });
   return installIndexFromFold(paths, fold);
 }
 
@@ -431,7 +475,12 @@ function verifyActiveIndex(fold, installed) {
   if (installed === undefined) return { status: 'missing', issues: ['index file missing'] };
   if (installed === null) return { status: 'invalid', issues: ['index file is not valid JSON'] };
   const issues = [];
+  if (!installed || typeof installed !== 'object' || Array.isArray(installed)) {
+    return { status: 'invalid', issues: ['index document is not an object'] };
+  }
   if (installed.schema !== ACTIVE_INDEX_SCHEMA) issues.push('index schema mismatch');
+  if (typeof installed.generatedAt !== 'string') issues.push('index generatedAt missing or invalid');
+  if (!installed.registry || typeof installed.registry !== 'object') issues.push('index registry watermark missing');
   const w = installed.registry || {};
   if (Number(w.seq) !== fold.watermark.seq) issues.push('watermark seq mismatch');
   if ((w.eventId ?? null) !== fold.watermark.eventId) issues.push('watermark eventId mismatch');
@@ -440,6 +489,8 @@ function verifyActiveIndex(fold, installed) {
   const expected = activeRecords(fold);
   const expectedById = new Map(expected.map((rec) => [rec.id, rec]));
   const activeIds = new Set(expected.map((rec) => rec.id));
+  const installedIds = new Set();
+  const installedIdCounts = new Map();
   if (Number(installed.recordCount) !== expected.length) issues.push('recordCount mismatch');
   if (!Array.isArray(installed.records)) {
     issues.push('index records is not an array');
@@ -450,25 +501,50 @@ function verifyActiveIndex(fold, installed) {
         issues.push('index record missing id');
         continue;
       }
+      installedIdCounts.set(rec.id, (installedIdCounts.get(rec.id) || 0) + 1);
+      if (installedIdCounts.get(rec.id) > 1) issues.push(`duplicate active index id: ${rec.id}`);
+      installedIds.add(rec.id);
       if (!activeIds.has(rec.id)) {
         issues.push(`inactive or unknown record in active index: ${rec.id}`);
         continue;
       }
       const exp = expectedById.get(rec.id);
+      for (const field of REQUIRED_PROJECTED_FIELDS) {
+        if (!Object.prototype.hasOwnProperty.call(rec, field)) issues.push(`required projected field missing: ${rec.id}.${field}`);
+      }
       const installedContent = contentFields(rec);
       const recomputed = contentHash(installedContent);
       if (rec.contentHash !== exp.contentHash) issues.push(`content hash mismatch: ${rec.id}`);
       if (recomputed !== rec.contentHash) issues.push(`installed content hash not self-consistent: ${rec.id}`);
       if (stableJson(installedContent) !== stableJson(contentFields(exp))) issues.push(`record content mismatch: ${rec.id}`);
       if (Number(rec.generation ?? -1) !== Number(exp.generation ?? -1)) issues.push(`generation watermark mismatch: ${rec.id}`);
+      if (stableJson(rec) !== stableJson(exp)) issues.push(`projected record mismatch: ${rec.id}`);
+    }
+    for (const id of activeIds) {
+      if (!installedIds.has(id)) issues.push(`missing active record in active index: ${id}`);
+    }
+    for (const id of installedIds) {
+      if (!activeIds.has(id)) issues.push(`extra active index record id: ${id}`);
     }
   }
   return { status: issues.length ? 'stale' : 'current', issues };
 }
 
-export function auditRegistry(dir) {
+function readRecoveryState(paths) {
+  const file = path.join(paths.recovery, 'recovery-state.json');
+  if (!fs.existsSync(file)) return null;
+  try {
+    const state = JSON.parse(fs.readFileSync(file, 'utf8'));
+    return { file, state, incomplete: !state.completedAt };
+  } catch (error) {
+    return { file, state: null, incomplete: true, error: error.message };
+  }
+}
+
+export function auditRegistry(dir, options = {}) {
   const paths = registryPaths(dir);
   const fold = foldRegistry(paths);
+  const recovery = readRecoveryState(paths);
   let installed;
   if (!fs.existsSync(paths.index)) {
     installed = undefined;
@@ -482,43 +558,80 @@ export function auditRegistry(dir) {
   const verification = fold.health === 'critical'
     ? { status: installed === undefined ? 'missing' : 'unknown', issues: ['registry CRITICAL: projection not verified'] }
     : verifyActiveIndex(fold, installed);
+  const activity = auditActivity(dir);
+  if (recovery?.incomplete && !options.ignoreRecovery) {
+    verification.issues = [...verification.issues, 'recovery incomplete'];
+    if (verification.status === 'current') verification.status = 'stale';
+  }
   const statusCounts = {};
   for (const record of fold.records.values()) statusCounts[record.status] = (statusCounts[record.status] || 0) + 1;
   return {
-    ok: fold.health !== 'critical' && verification.status === 'current',
+    ok: fold.health !== 'critical' && verification.status === 'current' && activity.health === 'ok' && (!recovery?.incomplete || options.ignoreRecovery),
     registry: {
       path: paths.registry,
-      health: fold.health,
+      health: recovery?.incomplete && !options.ignoreRecovery ? 'recovery_incomplete' : fold.health,
       watermark: fold.watermark,
-      corrupt: fold.corrupt ? { line: fold.corrupt.line, reason: fold.corrupt.reason, byteOffset: fold.corrupt.byteOffset, bytes: fold.corrupt.bytes.length } : null
+      corrupt: fold.corrupt ? { line: fold.corrupt.line, reason: fold.corrupt.reason, byteOffset: fold.corrupt.byteOffset, bytes: fold.corrupt.bytes.length } : null,
+      recovery: recovery ? {
+        path: recovery.file,
+        incomplete: recovery.incomplete,
+        stage: recovery.state?.currentStage || null,
+        recoveryId: recovery.state?.recoveryId || null,
+        error: recovery.error || recovery.state?.lastError || null
+      } : null
     },
     records: { total: fold.records.size, active: activeRecords(fold).length, statusCounts },
     duplicates: fold.duplicates,
-    activeIndex: { path: paths.index, status: verification.status, issues: verification.issues, watermark: installed?.registry || null }
+    activeIndex: { path: paths.index, status: verification.status, issues: verification.issues, watermark: installed?.registry || null },
+    activity
   };
 }
 
 // Snapshot filenames are built only from the numeric sequence and a hash of the
 // event ID. A raw (possibly hostile) event ID never enters the filesystem path,
 // so a `../../../evil` event ID cannot traverse out of the snapshots directory.
-export function snapshotRegistry(dir) {
-  const paths = registryPaths(dir);
-  const fold = foldRegistry(paths);
-  if (fold.health === 'critical') throw new Error(`registry is CRITICAL: ${fold.corrupt?.reason}`);
+function snapshotPayload(fold, reason, sourceCommand) {
+  const base = {
+    schema: 'kraken-memory/registry-snapshot/v1',
+    createdAt: new Date().toISOString(),
+    reason,
+    sourceCommand,
+    registry: fold.watermark,
+    registryHash: fold.watermark.registryHash,
+    records: [...fold.records.values()].map((record) => ({ ...record }))
+  };
+  return { ...base, snapshotHash: sha256(stableJson(base)) };
+}
+
+function snapshotFromFold(paths, fold, { reason = 'manual', sourceCommand = 'mem snapshot' } = {}) {
+  if (process.env.MEM_SNAPSHOT_FAIL === '1') throw new Error('injected snapshot failure');
   fs.mkdirSync(paths.snapshots, { recursive: true, mode: 0o755 });
+  const safeReason = String(reason).replace(/[^a-z0-9._-]/gi, '-').slice(0, 48) || 'snapshot';
   const tag = sha256(String(fold.watermark.eventId || 'empty')).slice(0, 16);
-  const file = path.join(paths.snapshots, `registry-${Number(fold.watermark.seq)}-${tag}.json`);
+  const file = path.join(paths.snapshots, `registry-${Number(fold.watermark.seq)}-${safeReason}-${tag}.json`);
   if (path.dirname(path.resolve(file)) !== path.resolve(paths.snapshots)) {
     throw new Error('refusing to write snapshot outside the snapshots directory');
   }
-  const payload = {
-    schema: 'kraken-memory/registry-snapshot/v1',
-    createdAt: new Date().toISOString(),
-    registry: fold.watermark,
-    records: [...fold.records.values()].map((record) => ({ ...record }))
-  };
+  if (fs.existsSync(file)) {
+    return { file, snapshot: JSON.parse(fs.readFileSync(file, 'utf8')), created: false };
+  }
+  const payload = snapshotPayload(fold, reason, sourceCommand);
   atomicWrite(file, `${JSON.stringify(payload, null, 2)}\n`);
-  return { file, snapshot: payload };
+  return { file, snapshot: payload, created: true };
+}
+
+function maybeAutoSnapshot(paths, fold) {
+  if (fold.watermark.seq > 0 && fold.watermark.seq % 500 === 0) {
+    return snapshotFromFold(paths, fold, { reason: `automatic-${fold.watermark.seq}-event-boundary`, sourceCommand: 'mem append' });
+  }
+  return null;
+}
+
+export function snapshotRegistry(dir, options = {}) {
+  const paths = registryPaths(dir);
+  const fold = foldRegistry(paths);
+  if (fold.health === 'critical') throw new Error(`registry is CRITICAL: ${fold.corrupt?.reason}`);
+  return snapshotFromFold(paths, fold, { reason: options.reason || 'manual', sourceCommand: options.sourceCommand || 'mem snapshot' });
 }
 
 function makeFailpoint(failpoints) {
@@ -535,6 +648,156 @@ function makeFailpoint(failpoints) {
   };
 }
 
+function recoveryStateFile(paths) {
+  return path.join(paths.recovery, 'recovery-state.json');
+}
+
+function writeRecoveryState(paths, state) {
+  atomicWrite(recoveryStateFile(paths), `${JSON.stringify(state, null, 2)}\n`);
+  return state;
+}
+
+function loadRecoveryState(paths) {
+  const found = readRecoveryState(paths);
+  return found?.state && !found.state.completedAt ? found.state : null;
+}
+
+function verifyHash(file, expected, label) {
+  const actual = sha256(fs.readFileSync(file));
+  if (actual !== expected) throw new Error(`${label} hash verification failed: expected ${expected}, got ${actual}`);
+  return actual;
+}
+
+function updateRecovery(paths, state, patch) {
+  return writeRecoveryState(paths, { ...state, ...patch, updatedAt: new Date().toISOString(), lastError: null });
+}
+
+function readSourceForRecovery(paths, state) {
+  const buffer = fs.readFileSync(paths.registry);
+  const fold = foldRegistry(paths);
+  if (fold.health !== 'critical') {
+    return { buffer, fold, repaired: true };
+  }
+  if (sha256(buffer) !== state.originalRegistryHash) {
+    throw new Error('canonical registry hash changed during incomplete recovery');
+  }
+  return { buffer, fold, repaired: false };
+}
+
+async function runRecoveryState(dir, paths, state, fail) {
+  let source = readSourceForRecovery(paths, state);
+
+  if (!state.backupHash) {
+    fail('before-backup');
+    atomicWrite(state.backupPath, source.buffer);
+    state = updateRecovery(paths, state, { backupHash: verifyHash(state.backupPath, state.originalRegistryHash, 'backup'), currentStage: 'backup-written' });
+    fail('after-backup');
+  } else {
+    verifyHash(state.backupPath, state.originalRegistryHash, 'backup');
+  }
+
+  if (!state.sidecarHash) {
+    if (source.fold.health !== 'critical') throw new Error('cannot create recovery sidecar after canonical repair without sidecar hash');
+    const corruptBytes = source.fold.corrupt.bytes;
+    atomicWrite(state.sidecarPath, corruptBytes);
+    const sidecarHash = sha256(corruptBytes);
+    state = updateRecovery(paths, state, { sidecarHash, currentStage: 'sidecar-written' });
+    fail('after-sidecar');
+  } else {
+    verifyHash(state.sidecarPath, state.sidecarHash, 'sidecar');
+  }
+
+  if (!state.repairedHash) {
+    if (source.fold.health !== 'critical') throw new Error('cannot create repaired registry after canonical repair without repaired hash');
+    const repairedBytes = source.buffer.subarray(0, source.fold.corrupt.byteOffset);
+    atomicWrite(state.repairedPath, repairedBytes);
+    const repairedHash = sha256(repairedBytes);
+    state = updateRecovery(paths, state, { repairedHash, currentStage: 'repaired-written' });
+    fail('after-repaired-write');
+  } else {
+    verifyHash(state.repairedPath, state.repairedHash, 'repaired registry');
+  }
+
+  fail('before-validation');
+  const repairedFold = foldRegistry({ ...paths, registry: state.repairedPath });
+  if (repairedFold.health === 'critical') throw new Error(`repaired registry failed validation: ${repairedFold.corrupt?.reason}`);
+  state = updateRecovery(paths, state, { currentStage: 'repaired-validated', validPrefixWatermark: state.validPrefixWatermark || repairedFold.watermark });
+
+  if (!state.installedRegistryHash) {
+    fail('before-rename');
+    const replaceTmp = `${paths.registry}.recover-${process.pid}-${crypto.randomBytes(4).toString('hex')}`;
+    fs.copyFileSync(state.repairedPath, replaceTmp);
+    fsyncFile(replaceTmp);
+    fs.renameSync(replaceTmp, paths.registry);
+    fsyncDir(paths.dir);
+    const installedRegistryHash = verifyHash(paths.registry, state.repairedHash, 'installed registry');
+    state = updateRecovery(paths, state, { installedRegistryHash, currentStage: 'registry-installed' });
+    fail('after-rename');
+  } else {
+    verifyHash(paths.registry, state.installedRegistryHash, 'installed registry');
+  }
+
+  if (!state.recoveryEventId) {
+    fail('before-recovery-event');
+    const recoveryEvent = await appendActivity(dir, {
+      event: 'registry_recovered',
+      actor: state.actor || { kind: 'mem', id: 'memory-cli' },
+      detail: {
+        recoveryId: state.recoveryId,
+        originalHash: state.originalRegistryHash,
+        sidecarHash: state.sidecarHash,
+        repairedHash: state.repairedHash,
+        installedRegistryHash: state.installedRegistryHash,
+        backup: state.backupPath,
+        sidecar: state.sidecarPath,
+        repaired: state.repairedPath,
+        lastValidPreRecoveryWatermark: state.lastValidPreRecoveryWatermark,
+        postRecoveryWatermark: repairedFold.watermark
+      }
+    });
+    state = updateRecovery(paths, state, { recoveryEventId: recoveryEvent.eventId, currentStage: 'recovery-event-written' });
+    fail('after-recovery-activity');
+  }
+
+  if (!state.activeIndexWatermark) {
+    fail('before-index-rebuild');
+    const index = installIndexFromFold(paths, foldRegistry(paths), { force: true });
+    state = updateRecovery(paths, state, { activeIndexWatermark: index.registry, currentStage: 'index-rebuilt' });
+    fail('after-index-rebuild');
+  }
+
+  if (!state.finalAuditOk) {
+    fail('before-final-audit');
+    verifyHash(state.backupPath, state.originalRegistryHash, 'backup');
+    verifyHash(state.sidecarPath, state.sidecarHash, 'sidecar');
+    verifyHash(state.repairedPath, state.repairedHash, 'repaired registry');
+    verifyHash(paths.registry, state.installedRegistryHash, 'installed registry');
+    const finalAudit = auditRegistry(dir, { ignoreRecovery: true });
+    if (!finalAudit.ok) {
+      throw new Error(`recovery final audit failed: ${JSON.stringify(finalAudit.activeIndex?.issues || finalAudit.registry?.corrupt || finalAudit.activity?.issues)}`);
+    }
+    state = updateRecovery(paths, state, { finalAuditOk: true, finalAuditWatermark: finalAudit.registry.watermark, currentStage: 'final-audit-complete' });
+  }
+
+  state = writeRecoveryState(paths, { ...state, currentStage: 'completed', completedAt: new Date().toISOString(), updatedAt: new Date().toISOString(), lastError: null });
+  return {
+    backup: state.backupPath,
+    sidecar: state.sidecarPath,
+    repaired: state.repairedPath,
+    originalHash: state.originalRegistryHash,
+    sidecarHash: state.sidecarHash,
+    repairedHash: state.repairedHash,
+    installedRegistryHash: state.installedRegistryHash,
+    lastValidPreRecoveryWatermark: state.lastValidPreRecoveryWatermark,
+    postRecoveryWatermark: state.validPrefixWatermark,
+    activeIndexWatermark: state.activeIndexWatermark,
+    audit: auditRegistry(dir),
+    recoveryEvent: { event: 'registry_recovered', eventId: state.recoveryEventId },
+    recoveryState: state,
+    recoveryStateFile: recoveryStateFile(paths)
+  };
+}
+
 // Provenance: original FirstMate Runtime recovery core (not ported from Fleet
 // Bridge), implementing the amendment's strict CRITICAL + explicit `mem recover`
 // model. Reuses this package's withRegistryLock and atomicWrite discipline.
@@ -548,78 +811,43 @@ export async function recoverRegistry(dir, options = {}) {
   const paths = registryPaths(dir);
   const fail = makeFailpoint(options.failpoints);
   return withRegistryLock(paths.lock, async () => {
-    const before = fs.existsSync(paths.registry) ? fs.readFileSync(paths.registry) : Buffer.alloc(0);
-    const originalHash = sha256(before);
-    const fold = foldRegistry(paths);
-    if (fold.health !== 'critical') throw new Error('registry is not CRITICAL; recovery refused');
     fs.mkdirSync(paths.recovery, { recursive: true, mode: 0o700 });
-    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-    const backup = path.join(paths.recovery, `memory-registry.${stamp}.backup.jsonl`);
-    const sidecar = path.join(paths.recovery, `memory-registry.${stamp}.corrupt-bytes`);
-    const repaired = path.join(paths.recovery, `memory-registry.${stamp}.repaired.jsonl`);
-
-    fail('before-backup');
-    atomicWrite(backup, before);
-    fail('after-backup');
-
-    const corruptBytes = fold.corrupt.bytes; // raw suffix, byte-for-byte
-    atomicWrite(sidecar, corruptBytes);
-    const sidecarHash = sha256(corruptBytes);
-    fail('after-sidecar');
-
-    const repairedBytes = before.subarray(0, fold.corrupt.byteOffset); // exact valid prefix
-    const repairedHash = sha256(repairedBytes);
-    atomicWrite(repaired, repairedBytes);
-    fail('after-repaired-write');
-
-    fail('before-validation');
-    const repairedFold = foldRegistry({ ...paths, registry: repaired });
-    if (repairedFold.health === 'critical') throw new Error(`repaired registry failed validation: ${repairedFold.corrupt?.reason}`);
-    const lastValidPreRecoveryWatermark = fold.watermark;
-
-    fail('before-rename');
-    const replaceTmp = `${paths.registry}.recover-${process.pid}-${crypto.randomBytes(4).toString('hex')}`;
-    fs.copyFileSync(repaired, replaceTmp);
-    fsyncFile(replaceTmp);
-    fs.renameSync(replaceTmp, paths.registry);
-    fsyncDir(paths.dir);
-    fail('after-rename');
-
-    fail('before-recovery-event');
-    const recoveryEvent = await appendActivity(dir, {
-      event: 'registry_recovered',
-      detail: {
-        originalHash,
-        sidecarHash,
-        repairedHash,
-        backup,
-        sidecar,
-        lastValidPreRecoveryWatermark,
-        postRecoveryWatermark: repairedFold.watermark
-      }
-    });
-
-    fail('before-index-rebuild');
-    const index = installIndexFromFold(paths, foldRegistry(paths), { force: true });
-
-    fail('before-final-audit');
-    const finalAudit = auditRegistry(dir);
-    if (!finalAudit.ok) {
-      throw new Error(`recovery final audit failed: ${JSON.stringify(finalAudit.activeIndex?.issues || finalAudit.registry?.corrupt)}`);
+    let state = loadRecoveryState(paths);
+    if (!state) {
+      const before = fs.existsSync(paths.registry) ? fs.readFileSync(paths.registry) : Buffer.alloc(0);
+      const originalHash = sha256(before);
+      const fold = foldRegistry(paths);
+      if (fold.health !== 'critical') throw new Error('registry is not CRITICAL; recovery refused');
+      const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+      const recoveryId = `rec-${crypto.randomBytes(8).toString('hex')}`;
+      state = {
+        schema: 'kraken-memory/recovery-state/v1',
+        recoveryId,
+        originalRegistryHash: originalHash,
+        lastValidPreRecoveryWatermark: fold.watermark,
+        validPrefixWatermark: null,
+        backupPath: path.join(paths.recovery, `memory-registry.${stamp}.${recoveryId}.backup.jsonl`),
+        backupHash: null,
+        sidecarPath: path.join(paths.recovery, `memory-registry.${stamp}.${recoveryId}.corrupt-bytes`),
+        sidecarHash: null,
+        repairedPath: path.join(paths.recovery, `memory-registry.${stamp}.${recoveryId}.repaired.jsonl`),
+        repairedHash: null,
+        installedRegistryHash: null,
+        currentStage: 'started',
+        startedAt: new Date().toISOString(),
+        completedAt: null,
+        updatedAt: new Date().toISOString(),
+        actor: options.actor || { kind: 'mem', id: 'memory-cli' },
+        lastError: null
+      };
+      writeRecoveryState(paths, state);
     }
-
-    return {
-      backup,
-      sidecar,
-      repaired,
-      originalHash,
-      sidecarHash,
-      repairedHash,
-      lastValidPreRecoveryWatermark,
-      postRecoveryWatermark: repairedFold.watermark,
-      activeIndexWatermark: index.registry,
-      audit: finalAudit,
-      recoveryEvent
-    };
+    try {
+      return await runRecoveryState(dir, paths, state, fail);
+    } catch (error) {
+      const latest = loadRecoveryState(paths);
+      if (latest) writeRecoveryState(paths, { ...latest, lastError: error.message, updatedAt: new Date().toISOString() });
+      throw error;
+    }
   }, options.lock);
 }

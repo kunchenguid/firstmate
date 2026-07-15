@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 import test from 'node:test';
-import { classifyRisk, enforceRiskRequest, RISK_CLASS_RULE_VERSION } from '../lib/risk-class.mjs';
+import { classifyRisk, enforceRiskRequest, enforceRiskRequestDurably, RISK_CLASS_RULE_VERSION } from '../lib/risk-class.mjs';
+import { auditActivity, activityFile } from '../lib/activity.mjs';
+import { tmpRegistry } from './helpers.mjs';
 
 // A fully-inspected implementation touching a given path set, so path/inspection
 // fail-safes do not fire and we isolate the minimum-rule under test.
@@ -56,11 +59,22 @@ test('FirstMate may raise a classification without an override', () => {
   assert.equal(enforceRiskRequest('high', result).riskClass, 'high');
 });
 
-test('a Captain-authorized downgrade applies, logs an opaque reference, and never leaks the raw token', () => {
+test('a Captain token without durable logging does not make a downgrade effective', () => {
   const RAW = 'CAPTAIN-RAW-SECRET-TOKEN';
   const result = classifyRisk({ kind: 'ship', inspected: true, paths: ['memory/lib/x.mjs'], operationFlags: { memorySchema: true } });
   assert.equal(result.riskClass, 'critical');
-  const overridden = enforceRiskRequest('standard', result, { captainOverrideToken: RAW, reason: 'captain approved' });
+  assert.throws(
+    () => enforceRiskRequest('standard', result, { captainOverrideToken: RAW, reason: 'captain approved' }),
+    /durable Captain override log required/
+  );
+});
+
+test('a Captain-authorized downgrade persists a durable activity event and never leaks the raw token', async () => {
+  const dir = tmpRegistry();
+  const RAW = 'CAPTAIN-RAW-SECRET-TOKEN';
+  const result = classifyRisk({ kind: 'ship', inspected: true, paths: ['memory/lib/x.mjs'], operationFlags: { memorySchema: true } });
+  assert.equal(result.riskClass, 'critical');
+  const overridden = await enforceRiskRequestDurably('standard', result, { activityDir: dir, captainOverrideToken: RAW, reason: 'captain approved', taskId: 'memory-pr1-fix-f2' });
   // The downgrade is actually applied...
   assert.equal(overridden.riskClass, 'standard');
   assert.equal(overridden.appliedClass, 'standard');
@@ -69,7 +83,26 @@ test('a Captain-authorized downgrade applies, logs an opaque reference, and neve
   // ...an opaque reference is recorded (not the raw token)...
   assert.match(overridden.override.ref, /^ovr-[0-9a-f]{16}$/);
   assert.equal(overridden.override.captainAuthorization, overridden.override.ref);
+  assert.match(overridden.override.eventId, /^[0-9a-f-]{36}$/);
   assert.equal(overridden.override.reason, 'captain approved');
   // ...and NO sensitive override material appears anywhere in the output.
   assert.equal(JSON.stringify(overridden).includes(RAW), false);
+  const activity = fs.readFileSync(activityFile(dir), 'utf8');
+  assert.equal(activity.includes(RAW), false);
+  assert.ok(activity.includes(overridden.override.eventId));
+  assert.ok(activity.includes('"computedMinimum":"critical"'));
+  assert.ok(activity.includes('"appliedRisk":"standard"'));
+  assert.equal(auditActivity(dir).health, 'ok');
+});
+
+test('activity-write failure refuses a Captain downgrade', async () => {
+  const result = classifyRisk({ kind: 'ship', inspected: true, paths: ['memory/lib/x.mjs'], operationFlags: { memorySchema: true } });
+  await assert.rejects(
+    enforceRiskRequestDurably('standard', result, {
+      activityDir: tmpRegistry(),
+      captainOverrideToken: 'TOKEN',
+      appendActivityFn: async () => { throw new Error('disk full'); }
+    }),
+    /failed to persist Captain override/
+  );
 });
