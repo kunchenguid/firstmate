@@ -43,6 +43,7 @@ type ArmChild = ChildProcessByStdio<null, Readable, Readable>;
 
 let child: ArmChild | null = null;
 const ownedGroups = new Set<number>();
+const intentionalStops = new WeakSet<ArmChild>();
 let seq = 0;
 
 function parentPid(pid: string): string {
@@ -134,6 +135,7 @@ export default function (pi: ExtensionAPI) {
   }
 
   function stopArm(): void {
+    if (child) intentionalStops.add(child);
     stopOwnedGroups();
     child = null;
   }
@@ -193,6 +195,9 @@ export default function (pi: ExtensionAPI) {
     });
     armChild.on("close", async (code: number | null) => {
       if (armChild.pid) ownedGroups.delete(armChild.pid);
+      const stoppedByExtension = intentionalStops.has(armChild);
+      intentionalStops.delete(armChild);
+      if (stoppedByExtension) return;
       const reason = actionableLine(`${stdout}\n${stderr}`);
       const failure = reason ? "" : failureLine(stdout, stderr, code);
       if (!reason && !failure) return;
@@ -205,6 +210,9 @@ export default function (pi: ExtensionAPI) {
     armChild.on("error", async (error: Error) => {
       if (child === armChild) child = null;
       if (armChild.pid) ownedGroups.delete(armChild.pid);
+      const stoppedByExtension = intentionalStops.has(armChild);
+      intentionalStops.delete(armChild);
+      if (stoppedByExtension) return;
       try {
         await sendWake(`watcher: FAILED - Pi extension arm child ${id} failed: ${error.message}`);
       } catch {
