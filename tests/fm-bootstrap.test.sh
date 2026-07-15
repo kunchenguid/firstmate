@@ -297,6 +297,40 @@ test_unmanaged_opencode_plugin_is_preserved() {
   pass "browser-hook migration preserves an unmanaged colliding OpenCode plugin"
 }
 
+test_legacy_browser_hook_symlinks_are_preserved() {
+  local case_dir hook_home claude codex claude_target codex_target fakebin out
+  case_dir="$TMP_ROOT/legacy-browser-hook-symlinks"
+  hook_home="$case_dir/browser-home"
+  claude="$hook_home/.claude/settings.json"
+  codex="$hook_home/.codex/hooks.json"
+  claude_target="$hook_home/dotfiles/claude-settings.json"
+  codex_target="$hook_home/dotfiles/codex-hooks.json"
+  mkdir -p "$case_dir/home/config" "$(dirname "$claude")" "$(dirname "$codex")" "$(dirname "$claude_target")"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  printf '%s\n' '{"hooks":{"SessionStart":[{"matcher":"","hooks":[{"type":"command","command":"chrome-devtools-axi"},{"type":"command","command":"keep-claude-hook"}]}]}}' > "$claude_target"
+  printf '%s\n' '{"hooks":{"SessionStart":[{"matcher":"","hooks":[{"type":"command","command":"chrome-devtools-axi"},{"type":"command","command":"keep-codex-hook"}]}]}}' > "$codex_target"
+  ln -s ../dotfiles/claude-settings.json "$claude"
+  ln -s ../dotfiles/codex-hooks.json "$codex"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  add_real_jq "$fakebin"
+
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_BROWSER_HOOK_HOME_OVERRIDE="$hook_home" "$ROOT/bin/fm-bootstrap.sh" migrate-browser-hooks)
+  [ "$out" = "BROWSER_HOOKS: chrome-devtools-axi ambient hooks retired" ] || \
+    fail "symlinked browser-hook migration output mismatch: $out"
+  [ -L "$claude" ] || fail "Claude config symlink was replaced"
+  [ -L "$codex" ] || fail "Codex config symlink was replaced"
+  [ "$(readlink "$claude")" = ../dotfiles/claude-settings.json ] || fail "Claude config symlink target changed"
+  [ "$(readlink "$codex")" = ../dotfiles/codex-hooks.json ] || fail "Codex config symlink target changed"
+  ! grep -Fq chrome-devtools-axi "$claude_target" || fail "Claude symlink target retained managed browser hook"
+  ! grep -Fq chrome-devtools-axi "$codex_target" || fail "Codex symlink target retained managed browser hook"
+  jq -e '.hooks.SessionStart[0].hooks[0].command == "keep-claude-hook"' "$claude_target" >/dev/null || \
+    fail "Claude symlink target did not preserve its unrelated hook"
+  jq -e '.hooks.SessionStart[0].hooks[0].command == "keep-codex-hook"' "$codex_target" >/dev/null || \
+    fail "Codex symlink target did not preserve its unrelated hook"
+  pass "browser-hook migration updates symlink targets without replacing links"
+}
+
 test_orca_backend_gates_orca_tool_only_when_selected() {
   local case_dir fakebin out missing_orca
   missing_orca="MISSING: orca (install: brew install orca  # or the platform's package manager)"
@@ -438,6 +472,7 @@ test_no_mistakes_min_version
 test_axi_install_commands_keep_browser_fallback_hook_free
 test_legacy_browser_hooks_are_detected_and_retired_selectively
 test_unmanaged_opencode_plugin_is_preserved
+test_legacy_browser_hook_symlinks_are_preserved
 test_orca_backend_gates_orca_tool_only_when_selected
 test_codex_app_backend_gates_codex_cli_only_when_selected
 test_crew_dispatch_active_rules_are_surfaced

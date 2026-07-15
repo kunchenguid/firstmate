@@ -221,10 +221,27 @@ browser_hooks_detected() {
   browser_hook_plugin_has_managed "$BROWSER_HOOK_HOME/.config/opencode/plugins/axi-chrome-devtools-axi.js"
 }
 
+browser_hook_config_target() {
+  local path=$1 link dir hops
+  hops=0
+  while [ -L "$path" ]; do
+    hops=$((hops + 1))
+    [ "$hops" -le 40 ] || return 1
+    dir=$(cd -P "$(dirname "$path")" && pwd) || return 1
+    link=$(readlink "$path") || return 1
+    case "$link" in
+      /*) path=$link ;;
+      *) path="$dir/$link" ;;
+    esac
+  done
+  printf '%s\n' "$path"
+}
+
 retire_browser_hook_json() {
-  local file=$1 tmp mode
+  local file=$1 target tmp mode
   browser_hook_json_has_managed "$file" || return 0
-  tmp=$(mktemp "${file}.fm-browser-hooks.XXXXXX") || return 1
+  target=$(browser_hook_config_target "$file") || return 1
+  tmp=$(mktemp "${target}.fm-browser-hooks.XXXXXX") || return 1
   if ! jq '
     def managed:
       (.command? | type) == "string"
@@ -239,7 +256,7 @@ retire_browser_hook_json() {
            else . end
        else . end)
       | (if (.hooks.SessionStart? | type) == "array" then
-           (.hooks.SessionStart | any(.hooks[]?; managed)) as $had_managed
+           (.hooks.SessionStart | any(.[] | .hooks[]?; managed)) as $had_managed
            | if $had_managed then
                .hooks.SessionStart |= map(
                  if (.hooks? | type) == "array" and any(.hooks[]?; managed) then
@@ -251,13 +268,13 @@ retire_browser_hook_json() {
              else . end
          else . end)
     end
-  ' "$file" > "$tmp"; then
+  ' "$target" > "$tmp"; then
     rm -f "$tmp"
     return 1
   fi
-  mode=$(stat -f '%Lp' "$file" 2>/dev/null || stat -c '%a' "$file" 2>/dev/null || true)
+  mode=$(stat -f '%Lp' "$target" 2>/dev/null || stat -c '%a' "$target" 2>/dev/null || true)
   [ -z "$mode" ] || chmod "$mode" "$tmp" || { rm -f "$tmp"; return 1; }
-  mv "$tmp" "$file"
+  mv "$tmp" "$target"
 }
 
 retire_browser_hooks() {
