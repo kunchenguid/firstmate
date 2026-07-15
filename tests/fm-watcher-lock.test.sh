@@ -703,6 +703,138 @@ test_pid_identity_is_locale_invariant() {
   pass "fm_pid_identity is locale-invariant across LC_ALL/LC_TIME"
 }
 
+# make_path_alias <real-dir> <alias-name>: create a differently-named path to
+# the SAME physical directory as <real-dir>, so `cd + pwd -P` canonicalizes both
+# to one string. A symlink reproduces this deterministically on every OS and
+# filesystem (unlike relying on the host's case-folding behavior, which is only
+# sometimes present on macOS and never on a case-sensitive Linux CI runner), and
+# it exercises the identical fm_canonical_path codepath the real case-insensitive-
+# filesystem bug hits: `pwd -P` resolves a symlink alias exactly the way it
+# resolves a same-directory casing alias. Echoes the alias path.
+make_path_alias() {
+  local real=$1 name=$2 alias
+  alias="$(dirname "$real")/$name"
+  ln -s "$real" "$alias" || fail "could not create path alias for $real"
+  printf '%s\n' "$alias"
+}
+
+test_watcher_lock_matches_pid_tolerates_case_alias() {
+  # macOS's default filesystem is case-insensitive: the same directory is
+  # reachable via differently-cased path strings. fm-watch.sh and fm-watch-arm.sh
+  # each derive FM_HOME/WATCH via `cd + pwd`, which preserves whatever casing the
+  # caller's cwd had, so a lock written under one casing must still match a
+  # caller resolving the other casing. Modeled portably here with a symlink
+  # alias (see make_path_alias) so this asserts deterministically on any
+  # filesystem instead of skipping wherever case-folding isn't observed.
+  # Exercises the library comparator directly (both the fm-home and
+  # watcher-path fields) without spinning up a real watcher process.
+  local dir alias state lockdir pid identity out
+  dir=$(make_case CaseLibHome)
+  alias=$(make_path_alias "$dir" CaseLibHome-alias)
+  state="$dir/state"
+  lockdir="$state/.watch.lock"
+  mkdir -p "$lockdir"
+  pid=$$
+  identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$pid") || fail "could not identify test pid"
+  # The lock was written by a watcher that resolved home/watcher-path under the
+  # ORIGINAL path.
+  printf '%s\n' "$dir" > "$lockdir/fm-home"
+  printf '%s\n' "$WATCH" > "$lockdir/watcher-path"
+  printf '%s\n' "$identity" > "$lockdir/pid-identity"
+  # A caller resolves FM_HOME via the alias (the harness-set-differently-cased-
+  # cwd scenario) and asks whether the recorded lock is this home's own.
+  out=$(FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    if fm_watcher_lock_matches_pid "$2" "$3" "$4" "$5"; then echo match; else echo nomatch; fi
+  ' _ "$LIB" "$state" "$WATCH" "$pid" "$alias")
+  [ "$out" = match ] || fail "fm_watcher_lock_matches_pid rejected a path-aliased fm-home (case bug not fixed)"
+  pass "fm_watcher_lock_matches_pid tolerates a path-aliased fm-home"
+}
+
+test_arm_attaches_healthy_watcher_case_aliased_home() {
+  # Reproduces the reported bug directly through fm-watch-arm.sh: a genuinely
+  # live, fresh watcher is seeded under FM_HOME's original path, then arm is
+  # invoked with FM_HOME set to an alias of that SAME physical directory (see
+  # make_path_alias - portable stand-in for a case-insensitive-filesystem
+  # casing alias). Pre-fix this string-mismatches, so healthy_watcher() returns
+  # false, arm reports FAILED, and it forks a duplicate child that loses the
+  # singleton race. Post-fix arm must attach to the existing watcher instead.
+  local dir alias state fakebin out armout wpid armpid i
+  dir=$(make_case CaseAliasHome)
+  alias=$(make_path_alias "$dir" CaseAliasHome-alias)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  armout="$dir/arm.out"
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  wpid=$!
+  i=0
+  while [ "$i" -lt 60 ]; do
+    [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$wpid" ] && [ -e "$state/.last-watcher-beat" ] && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$wpid" ] || fail "seed watcher (case-aliased home) did not take the lock"
+  PATH="$fakebin:$PATH" FM_HOME="$alias" FM_ARM_ATTACH_POLL=0.1 FM_ARM_CONFIRM_TIMEOUT=3 "$WATCH_ARM" > "$armout" &
+  armpid=$!
+  i=0
+  while [ "$i" -lt 80 ]; do
+    grep -qF "watcher: attached pid=$wpid" "$armout" 2>/dev/null && break
+    grep -qF 'watcher: FAILED' "$armout" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  grep -qF "watcher: attached pid=$wpid" "$armout" || fail "case-aliased arm did not attach to the healthy watcher (case bug not fixed): $(cat "$armout")"
+  ! grep -qF 'watcher: FAILED' "$armout" || fail "case-aliased arm falsely reported FAILED for a healthy watcher"
+  ! grep -qF 'watcher: started' "$armout" || fail "case-aliased arm forked a duplicate child instead of attaching"
+  [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$wpid" ] || fail "case-aliased arm disturbed the healthy watcher's lock"
+  is_live_non_zombie "$armpid" || fail "case-aliased arm exited while the seed watcher was still healthy"
+  kill "$wpid" 2>/dev/null || true
+  wait "$wpid" 2>/dev/null || true
+  wait_for_exit "$armpid" 80
+  pass "arm attaches to a healthy watcher despite a case-aliased FM_HOME (reports healthy, not FAILED)"
+}
+
+test_arm_restart_case_aliased_home_restarts_watcher() {
+  # Same alias setup, exercising --restart: pre-fix, watch_lock_matches_pid
+  # cannot match the case-aliased fm-home, so restart silently no-ops instead of
+  # stopping and relaunching this home's own watcher. Post-fix it must recognize
+  # the seed watcher as its own, stop it, and confirm a fresh one.
+  local dir alias state fakebin out armout wpid armpid i lock_pid
+  dir=$(make_case CaseAliasRestart)
+  alias=$(make_path_alias "$dir" CaseAliasRestart-alias)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  armout="$dir/restart.out"
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  wpid=$!
+  i=0
+  while [ "$i" -lt 60 ]; do
+    [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$wpid" ] && [ -e "$state/.last-watcher-beat" ] && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$wpid" ] || fail "seed watcher (case-aliased restart) did not take the lock"
+  PATH="$fakebin:$PATH" FM_HOME="$alias" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" --restart > "$armout" &
+  armpid=$!
+  i=0
+  while [ "$i" -lt 80 ]; do
+    grep -qF 'watcher: started pid=' "$armout" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  grep -qF 'watcher: started pid=' "$armout" || fail "case-aliased restart did not report a fresh started watcher (silent no-op, case bug not fixed): $(cat "$armout")"
+  lock_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+  { [ -n "$lock_pid" ] && [ "$lock_pid" != "$wpid" ] && kill -0 "$lock_pid" 2>/dev/null; } \
+    || fail "case-aliased restart did not replace the seed watcher pid with a live one (got '$lock_pid')"
+  is_live_non_zombie "$wpid" && fail "case-aliased restart did not stop the original seed watcher"
+  kill "$armpid" "$lock_pid" "$wpid" 2>/dev/null || true
+  wait "$armpid" 2>/dev/null || true
+  wait "$wpid" 2>/dev/null || true
+  pass "case-aliased --restart recognizes and restarts this home's own live watcher"
+}
+
 test_singleton_start
 test_pid_identity_is_locale_invariant
 test_stale_watch_lock_reclaimed
@@ -725,3 +857,6 @@ test_arm_hup_cleans_child_and_temp_output
 test_arm_propagates_immediate_wake_before_confirmation
 test_arm_waits_for_peer_beacon_after_child_stands_down
 test_arm_fails_loud_when_no_fresh_watcher_confirmable
+test_watcher_lock_matches_pid_tolerates_case_alias
+test_arm_attaches_healthy_watcher_case_aliased_home
+test_arm_restart_case_aliased_home_restarts_watcher

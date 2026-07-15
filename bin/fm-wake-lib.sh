@@ -50,14 +50,49 @@ fm_path_age() {
   echo $(( $(date +%s) - m ))
 }
 
+# fm_canonical_path <path>
+# Resolves <path> to its physical form (no symlinks, on-disk casing) via `cd` +
+# `pwd -P` - bash 3.2 safe, no GNU realpath dependency. On a case-insensitive
+# filesystem (macOS default), two differently-cased strings for the same
+# directory canonicalize to one identical string, so callers that compare
+# resolved paths instead of raw strings never false-negative on a casing or
+# symlink alias of the same location (e.g. a harness that cd'd via a
+# lower-cased path alias). Works for both directories and regular files: a
+# file's containing directory is resolved and its basename is reattached
+# unchanged, since a differently-cased leaf *filename* (as opposed to a
+# directory component in the chain) is not something this codebase's
+# fixed-literal script paths ever vary. Falls back to the original string
+# unresolved (and a non-zero return) when <path> is empty or its directory
+# cannot be entered (e.g. it does not exist), so a miss degrades to the prior
+# literal-string comparison rather than silently matching everything.
+fm_canonical_path() {
+  local path=$1 dir base resolved
+  [ -n "$path" ] || { printf '%s\n' "$path"; return 1; }
+  if [ -d "$path" ]; then
+    resolved=$(cd "$path" 2>/dev/null && pwd -P) || { printf '%s\n' "$path"; return 1; }
+    printf '%s\n' "$resolved"
+    return 0
+  fi
+  dir=$(dirname "$path")
+  base=$(basename "$path")
+  resolved=$(cd "$dir" 2>/dev/null && pwd -P) || { printf '%s\n' "$path"; return 1; }
+  printf '%s/%s\n' "$resolved" "$base"
+}
+
 fm_watcher_lock_matches_pid() {
   local state=$1 watch_path=$2 pid=$3 home=${4:-$FM_HOME} lockdir lock_home lock_path lock_identity current_identity
   lockdir="$state/.watch.lock"
   lock_home=$(cat "$lockdir/fm-home" 2>/dev/null || true)
   lock_path=$(cat "$lockdir/watcher-path" 2>/dev/null || true)
   lock_identity=$(cat "$lockdir/pid-identity" 2>/dev/null || true)
-  [ "$lock_home" = "$home" ] || return 1
-  [ "$lock_path" = "$watch_path" ] || return 1
+  [ -n "$lock_home" ] && [ -n "$lock_path" ] || return 1
+  # Compare canonical (physical, case-normalized) forms so a case-insensitive-
+  # filesystem alias of the recorded home/watcher path - or of the caller's own
+  # $home/$watch_path - still matches. Both sides are re-canonicalized here
+  # (not trusted from the writer) so this stays correct even against a lock
+  # written before this fix shipped.
+  [ "$(fm_canonical_path "$lock_home")" = "$(fm_canonical_path "$home")" ] || return 1
+  [ "$(fm_canonical_path "$lock_path")" = "$(fm_canonical_path "$watch_path")" ] || return 1
   [ -n "$lock_identity" ] || return 1
   current_identity=$(fm_pid_identity "$pid") || return 1
   [ "$current_identity" = "$lock_identity" ]

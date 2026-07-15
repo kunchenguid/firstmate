@@ -605,8 +605,12 @@ trap 'fm_lock_release "$WATCH_LOCK"' EXIT
 # ${BASHPID:-$$} from this same main shell). Read directly, never via a command
 # substitution, so it matches the stored holder pid for the self-eviction check.
 WATCHER_PID=${BASHPID:-$$}
-printf '%s\n' "$FM_HOME" > "$WATCH_LOCK/fm-home" || true
-printf '%s\n' "$WATCH_PATH" > "$WATCH_LOCK/watcher-path" || true
+# Record canonical (physical, case-normalized) forms so a reader on a
+# case-insensitive filesystem never has to reconcile a casing alias against
+# what this watcher actually saw; fm_watcher_lock_matches_pid re-canonicalizes
+# on read too, so a lock from an older, un-canonicalized writer still matches.
+printf '%s\n' "$(fm_canonical_path "$FM_HOME")" > "$WATCH_LOCK/fm-home" || true
+printf '%s\n' "$(fm_canonical_path "$WATCH_PATH")" > "$WATCH_LOCK/watcher-path" || true
 fm_pid_identity "$WATCHER_PID" > "$WATCH_LOCK/pid-identity" 2>/dev/null || true
 
 [ -e "$STATE/.last-heartbeat" ] || touch "$STATE/.last-heartbeat"
