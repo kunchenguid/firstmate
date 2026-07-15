@@ -141,22 +141,7 @@ the marker lets firstmate distinguish it from a real captain message.
 - **Single-line digest** - embedded newlines are collapsed to a literal
   separator before injection, so submission is unambiguous regardless of
   harness.
-- **Composer guard on the supervisor pane** - before injecting, the daemon checks `pane_is_busy` (harness busy footer means agent mid-turn) and reads `fm_backend_composer_state` directly.
-  Only `empty` permits injection; `pending` protects half-typed or swallowed input, and `unknown` protects unreadable panes and bare dead-shell prompts.
-  Every other result preserves the buffer for retry, so the daemon never merges its digest into the captain's half-typed line or types it into a shell.
-- The shared composer classifier receives a candidate row only after the active backend performs its own capture and structural row recognition.
-  Herdr routes its raw styled candidate rows through the shared `fm_composer_strip_ghost` extractor, which removes dim/faint and dark-TRUECOLOR ghost/placeholder text before classification.
-  They read the composer shape from a separately ANSI-stripped plain row because a dark TRUECOLOR border can be stripped with ghost content.
-  A ghost-only or idle bordered composer such as claude's `│ > ... │` therefore reads empty without allowing an unbordered shell prompt to do the same.
-  `FM_COMPOSER_IDLE_RE` overrides empty-composer matching after shared ghost and border stripping, and `FM_BUSY_REGEX` overrides busy footers.
-- **Max-defer escape** - the daemon must never silently wedge.
-  If anything stays buffered past `FM_MAX_DEFER_SECS` (default 300s), the daemon attempts one normal flush, which still requires an idle pane and an affirmatively empty composer.
-  If that cannot confirm a submit, it raises a loud, rate-limited wedge alarm through the ERROR log, the durable `state/.subsuper-inject-wedged` marker, and a backend-independent active alert.
-  A composer false-positive surfaces as a visible stall, never an unbounded silent no-op.
-- **Verified type-once submit model** - the digest is typed once with Herdr `pane send-text`, then submitted with Enter and verified.
-  Enter is retried, Enter only and never a retype, until the backend submit primitive reports `empty` as its caller-facing success verdict.
-  For Herdr's normal idle-baseline path it means native agent-state observed a real turn start; Herdr uses the ANSI-aware structural classifier for the pre-injection composer guard and fallback paths.
-  This lets ghost-only or bordered-empty composers count as empty where a composer read is the active confirmation signal.
+- **Composer, max-defer, and type-once submit safety** - use the authoritative contracts in "Busy-guard and composer guard" and "Submit model" above.
 - **Marker strip** - `strip_injection_marker` removes the sentinel prefix before
   classification or relay, so the digest text firstmate sees is clean.
 - **Portable singleton lock** - the daemon uses the repo's portable lock helper
