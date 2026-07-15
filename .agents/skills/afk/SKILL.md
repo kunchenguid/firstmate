@@ -80,7 +80,7 @@ explicit word - the daemon just batches the notification.
 
 The daemon prefixes every injection with `FM_INJECT_MARK` (U+2063 INVISIBLE SEPARATOR), which has no normal keyboard keystroke and survives terminal transport as UTF-8 text.
 This is how firstmate tells a daemon escalation apart from a real message in the same pane.
-The marker travels with the message text; it does not rely on harness-level typed-vs-injected detection, which is not portable across claude, codex, opencode, pi, and grok.
+The marker travels with the message text; it does not rely on harness-level typed-vs-injected detection, which is not portable across claude, codex, cursor, opencode, pi, and grok.
 
 ## Busy-guard and composer guard
 
