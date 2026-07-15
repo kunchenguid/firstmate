@@ -50,14 +50,22 @@ fm_path_age() {
   echo $(( $(date +%s) - m ))
 }
 
+fm_watcher_path_identity() {
+  local path=$1 canon
+  canon=$(fm_lock_abs_path "$path" 2>/dev/null) || canon=$path
+  printf '%s\n' "$canon"
+}
+
 fm_watcher_lock_matches_pid() {
-  local state=$1 watch_path=$2 pid=$3 home=${4:-$FM_HOME} lockdir lock_home lock_path lock_identity current_identity
+  local state=$1 watch_path=$2 pid=$3 home=${4:-$FM_HOME} lockdir lock_home lock_path lock_identity current_identity expected_path recorded_path
   lockdir="$state/.watch.lock"
   lock_home=$(cat "$lockdir/fm-home" 2>/dev/null || true)
   lock_path=$(cat "$lockdir/watcher-path" 2>/dev/null || true)
   lock_identity=$(cat "$lockdir/pid-identity" 2>/dev/null || true)
+  expected_path=$(fm_watcher_path_identity "$watch_path")
+  recorded_path=$(fm_watcher_path_identity "$lock_path")
   [ "$lock_home" = "$home" ] || return 1
-  [ "$lock_path" = "$watch_path" ] || return 1
+  [ "$recorded_path" = "$expected_path" ] || return 1
   [ -n "$lock_identity" ] || return 1
   current_identity=$(fm_pid_identity "$pid") || return 1
   [ "$current_identity" = "$lock_identity" ]

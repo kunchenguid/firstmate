@@ -456,6 +456,29 @@ test_watch_restart_reports_healthy_peer_without_attaching() {
   pass "watch restart reports a healthy peer without attaching to it"
 }
 
+test_watch_records_canonical_path_under_aliased_root() {
+  local dir state fakebin alias_root out pid actual expected i
+  dir=$(make_case canonical-watch-path)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  alias_root="$dir/root-link"
+  out="$dir/watch.out"
+  ln -s "$ROOT" "$alias_root"
+  expected="$(cd "$ROOT/bin" && pwd -P)/fm-watch.sh"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$alias_root/bin/fm-watch.sh" > "$out" &
+  pid=$!
+  i=0
+  while [ "$i" -lt 50 ] && [ ! -s "$state/.watch.lock/watcher-path" ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  actual=$(cat "$state/.watch.lock/watcher-path" 2>/dev/null || true)
+  [ "$actual" = "$expected" ] || fail "watcher-path lock entry was '$actual', want canonical '$expected'"
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  pass "watch records a canonical watcher-path under an aliased root"
+}
+
 test_watcher_self_evicts_on_lock_takeover() {
   local dir state fakebin out pid i lock_pid
   dir=$(make_case self-evict)
@@ -725,6 +748,7 @@ test_lock_late_claim_loses_after_recreate
 test_lock_paused_mid_acquire_claim_fails_during_steal
 test_watch_restart_rejects_reused_pid
 test_watch_restart_reports_healthy_peer_without_attaching
+test_watch_records_canonical_path_under_aliased_root
 test_watcher_self_evicts_on_lock_takeover
 test_arm_attaches_and_waits_for_live_fresh_watcher
 test_arm_starts_and_self_heals
