@@ -13,10 +13,15 @@
 
 fm_tasks_axi_compatible() {
   local probe source destination replacement previous
+  local expected_source expected_destination rejected_source rejected_destination
   command -v tasks-axi >/dev/null 2>&1 || return 1
   probe=$(mktemp -d "${TMPDIR:-/tmp}/fm-tasks-axi-probe.XXXXXX") || return 1
   source="$probe/source.md"
   destination="$probe/destination.md"
+  expected_source="$probe/expected-source.md"
+  expected_destination="$probe/expected-destination.md"
+  rejected_source="$probe/rejected-source.md"
+  rejected_destination="$probe/rejected-destination.md"
   replacement='replacement probe body'
   previous='previous probe body'
 
@@ -36,18 +41,41 @@ fm_tasks_axi_compatible() {
     return 1
   fi
 
+  if ! printf '%s\n' \
+    '## Queued' \
+    '- [ ] fm-probe-a - first probe item (repo: firstmate)' \
+    "  $replacement" \
+    '- [ ] fm-probe-b - second probe item (repo: firstmate)' \
+    '  second probe body' > "$expected_source" ||
+    ! cmp -s "$source" "$expected_source" ||
+    ! cp "$source" "$rejected_source" ||
+    ! cp "$destination" "$rejected_destination"; then
+    rm -rf "$probe"
+    return 1
+  fi
+
   # A failed two-ID move must not leave the valid item half-moved.
   if tasks-axi mv fm-probe-a fm-probe-missing --file "$source" --to "$destination" >/dev/null 2>&1 ||
-    ! grep -Fq 'fm-probe-a' "$source" ||
-    grep -Fq 'fm-probe-a' "$destination"; then
+    ! cmp -s "$source" "$rejected_source" ||
+    ! cmp -s "$destination" "$rejected_destination"; then
+    rm -rf "$probe"
+    return 1
+  fi
+
+  if ! printf '%s\n' \
+    '## In flight' '' '## Queued' \
+    '- [ ] fm-probe-a - first probe item (repo: firstmate)' \
+    "  $replacement" \
+    '- [ ] fm-probe-b - second probe item (repo: firstmate)' \
+    '  second probe body' '' '## Done' > "$expected_destination" ||
+    ! printf '%s\n' '## Queued' > "$expected_source"; then
     rm -rf "$probe"
     return 1
   fi
 
   if ! tasks-axi mv fm-probe-a fm-probe-b --file "$source" --to "$destination" >/dev/null 2>&1 ||
-    grep -Eq 'fm-probe-a|fm-probe-b' "$source" ||
-    ! grep -Fq 'fm-probe-a' "$destination" ||
-    ! grep -Fq 'fm-probe-b' "$destination"; then
+    ! cmp -s "$source" "$expected_source" ||
+    ! cmp -s "$destination" "$expected_destination"; then
     rm -rf "$probe"
     return 1
   fi

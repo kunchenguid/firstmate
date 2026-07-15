@@ -85,7 +85,8 @@ SH
 
 add_tasks_axi() {
   local fakebin=$1 version=$2 archive_help=${3:-yes} multi_help=${4:-yes}
-  local archive_live=${5:-yes} multi_live=${6:-yes} archive_line mv_usage
+  local archive_live=${5:-yes} multi_live=${6:-yes} reject_atomic=${7:-yes}
+  local move_bodies=${8:-yes} transient_live=${9:-no} archive_line mv_usage
   archive_line=""
   [ "$archive_help" = yes ] && archive_line='  --archive-body'
   mv_usage='usage: tasks-axi mv <id> [<id>...] --to <path-or-dir>'
@@ -108,6 +109,14 @@ if [ "\${1:-}" = mv ] && [ "\${2:-}" = --help ]; then
 fi
 if [ "\${1:-}" = update ]; then
   [ '$archive_live' = yes ] || exit 64
+  if [ '$transient_live' = yes ]; then
+    probe_attempt_file='$fakebin/tasks-axi-probe-attempts'
+    probe_attempt=0
+    [ ! -f "\$probe_attempt_file" ] || probe_attempt=\$(cat "\$probe_attempt_file")
+    probe_attempt=\$((probe_attempt + 1))
+    printf '%s\n' "\$probe_attempt" > "\$probe_attempt_file"
+    [ "\$probe_attempt" -gt 1 ] || exit 64
+  fi
   file=
   while [ "\$#" -gt 0 ]; do
     case "\$1" in
@@ -140,14 +149,27 @@ if [ "\${1:-}" = mv ]; then
   done
   [ "\${#ids[@]}" -gt 1 ] && [ '$multi_live' != yes ] && exit 64
   [ -n "\$file" ] && [ -n "\$destination" ] || exit 64
-  [ "\${ids[*]}" = 'fm-probe-a fm-probe-b' ] || exit 1
+  if [ "\${ids[*]}" != 'fm-probe-a fm-probe-b' ]; then
+    if [ '$reject_atomic' != yes ]; then
+      printf '%s\n' '  rejected move mutation' >> "\$file"
+      printf '%s\n' 'rejected move mutation' >> "\$destination"
+    fi
+    exit 1
+  fi
   printf '%s\n' '## Queued' > "\$file"
-  printf '%s\n' \\
-    '## In flight' '' '## Queued' \\
-    '- [ ] fm-probe-a - first probe item (repo: firstmate)' \\
-    '  replacement probe body' \\
-    '- [ ] fm-probe-b - second probe item (repo: firstmate)' \\
-    '  second probe body' '' '## Done' > "\$destination"
+  if [ '$move_bodies' = yes ]; then
+    printf '%s\n' \\
+      '## In flight' '' '## Queued' \\
+      '- [ ] fm-probe-a - first probe item (repo: firstmate)' \\
+      '  replacement probe body' \\
+      '- [ ] fm-probe-b - second probe item (repo: firstmate)' \\
+      '  second probe body' '' '## Done' > "\$destination"
+  else
+    printf '%s\n' '## In flight' '' '## Queued' \
+      '- [ ] fm-probe-a - first probe item (repo: firstmate)' \
+      '- [ ] fm-probe-b - second probe item (repo: firstmate)' \
+      '' '## Done' > "\$destination"
+  fi
   exit 0
 fi
 exit 64
@@ -272,6 +294,7 @@ assert_timeout_report() {
 test_bootstrap_reporting() {
   local label lease tasks quota backend mode expect notcontains case_dir fakebin out n
   local version features archive_help multi_help archive_live multi_live
+  local reject_atomic move_bodies transient_live
   n=0
   while IFS='^' read -r label lease tasks quota backend mode expect notcontains; do
     [ -n "$label" ] || continue
@@ -293,12 +316,19 @@ test_bootstrap_reporting() {
       multi_help=yes
       archive_live=yes
       multi_live=yes
+      reject_atomic=yes
+      move_bodies=yes
+      transient_live=no
       case ":$features:" in *:noarchive:*) archive_help=no; archive_live=no ;; esac
       case ":$features:" in *:nomulti:*) multi_help=no; multi_live=no ;; esac
       # This CLI advertises the newest version and both flags, but rejects the
       # real operations. The bootstrap must fail closed instead of trusting it.
       case ":$features:" in *:lies:*) archive_live=no; multi_live=no ;; esac
-      add_tasks_axi "$fakebin" "$version" "$archive_help" "$multi_help" "$archive_live" "$multi_live"
+      case ":$features:" in *:mutatereject:*) reject_atomic=no ;; esac
+      case ":$features:" in *:dropbodies:*) move_bodies=no ;; esac
+      case ":$features:" in *:transient:*) transient_live=yes ;; esac
+      add_tasks_axi "$fakebin" "$version" "$archive_help" "$multi_help" "$archive_live" "$multi_live" \
+        "$reject_atomic" "$move_bodies" "$transient_live"
     fi
     if [ "$quota" = "0" ]; then
       rm -f "$fakebin/quota-axi"
@@ -327,6 +357,9 @@ compatible tasks-axi is silent by default^1^development build^1^-^empty^^
 missing tasks-axi is required by default^1^-^1^-^exact^MISSING: tasks-axi (install: npm install -g tasks-axi@0.2.3)^
 incompatible old tasks-axi is required by default^1^0.1.2:noarchive:nomulti^1^-^exact^MISSING: tasks-axi (install: npm install -g tasks-axi@0.2.3)^
 tasks-axi with misleading version/help output is required by default^1^0.2.3:lies^1^-^exact^MISSING: tasks-axi (install: npm install -g tasks-axi@0.2.3)^
+tasks-axi rejected move mutation fails closed^1^0.2.3:mutatereject^1^-^exact^MISSING: tasks-axi (install: npm install -g tasks-axi@0.2.3)^
+tasks-axi dropped move bodies fail closed^1^0.2.3:dropbodies^1^-^exact^MISSING: tasks-axi (install: npm install -g tasks-axi@0.2.3)^
+tasks-axi transient probe result stays cached^1^0.2.3:transient^1^-^exact^MISSING: tasks-axi (install: npm install -g tasks-axi@0.2.3)^
 missing quota-axi is required by default^1^0.1.1^0^manual^exact^MISSING: quota-axi (install: npm install -g quota-axi)^
 manual backlog backend still requires missing tasks-axi^1^-^1^manual^exact^MISSING: tasks-axi (install: npm install -g tasks-axi@0.2.3)^
 manual backlog backend suppresses tasks-axi availability^1^development build^1^manual^empty^^
