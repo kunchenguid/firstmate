@@ -71,6 +71,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 BROWSER_HOOK_HOME="${FM_BROWSER_HOOK_HOME_OVERRIDE:-${HOME:-}}"
 # shellcheck source=bin/fm-tasks-axi-lib.sh
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
+# shellcheck source=bin/fm-axi-lib.sh
+. "$SCRIPT_DIR/fm-axi-lib.sh"
 # shellcheck source=bin/fm-tangle-lib.sh
 . "$SCRIPT_DIR/fm-tangle-lib.sh"
 # shellcheck source=bin/fm-ff-lib.sh
@@ -552,6 +554,9 @@ if tool_required treehouse && command -v treehouse >/dev/null 2>&1 && ! treehous
 fi
 if command -v no-mistakes >/dev/null 2>&1 && ! no_mistakes_compatible; then
   echo "MISSING: no-mistakes (install: $(install_cmd no-mistakes))"
+fi
+if command -v chrome-devtools-axi >/dev/null 2>&1 && ! fm_axi_isolated_sessions_supported; then
+  echo "MISSING: chrome-devtools-axi (install: $(install_cmd chrome-devtools-axi))"
 fi
 gh auth status >/dev/null 2>&1 || echo "NEEDS_GH_AUTH"
 # Worktree-tangle check: the firstmate primary checkout (FM_ROOT) must sit on its

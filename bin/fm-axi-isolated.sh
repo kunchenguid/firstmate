@@ -3,6 +3,10 @@
 # Usage: fm-axi-isolated.sh <session-file> <chrome-devtools-axi command> [args...]
 set -u
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=bin/fm-axi-lib.sh
+. "$SCRIPT_DIR/fm-axi-lib.sh"
+
 [ $# -ge 2 ] || {
   echo "usage: fm-axi-isolated.sh <session-file> <chrome-devtools-axi command> [args...]" >&2
   exit 1
@@ -11,6 +15,11 @@ set -u
 SESSION_FILE=$1
 shift
 COMMAND=$1
+
+fm_axi_isolated_sessions_supported || {
+  echo "error: chrome-devtools-axi 0.1.26 or newer is required for isolated sessions" >&2
+  exit 1
+}
 
 [ ! -L "$SESSION_FILE" ] || {
   echo "error: session file must not be a symlink: $SESSION_FILE" >&2

@@ -23,7 +23,15 @@ mkdir -p "$FM_BROWSER_HOOK_HOME_OVERRIDE"
 make_fake_toolchain() {
   local dir=$1 fakebin
   fakebin=$(fm_fakebin "$dir")
-  fm_fake_exit0 "$fakebin" tmux node gh-axi chrome-devtools-axi lavish-axi
+  fm_fake_exit0 "$fakebin" tmux node gh-axi lavish-axi
+  cat > "$fakebin/chrome-devtools-axi" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --version ]; then
+  printf '%s\n' "${FM_FAKE_CHROME_DEVTOOLS_AXI_VERSION:-0.1.26}"
+fi
+exit 0
+SH
+  chmod +x "$fakebin/chrome-devtools-axi"
   cat > "$fakebin/gh" <<'SH'
 #!/usr/bin/env bash
 if [ "${1:-}" = auth ] && [ "${2:-}" = status ]; then
@@ -182,6 +190,34 @@ older no-mistakes patch reports an upgrade^no-mistakes version v1.31.1 (fake)^mi
 unparseable no-mistakes version reports an upgrade^no-mistakes development build^missing
 ROWS
   pass "bootstrap enforces no-mistakes minimum version"
+}
+
+test_axi_isolation_min_version() {
+  local label version mode case_dir fakebin out missing n
+  missing='MISSING: chrome-devtools-axi (install: npm install -g chrome-devtools-axi)'
+  n=0
+  while IFS='^' read -r label version mode; do
+    [ -n "$label" ] || continue
+    n=$((n + 1))
+    case_dir="$TMP_ROOT/axi-version-$n"
+    mkdir -p "$case_dir/home/config"
+    printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+    fakebin=$(make_fake_toolchain "$case_dir")
+    out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+      FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_FAKE_CHROME_DEVTOOLS_AXI_VERSION="$version" "$ROOT/bin/fm-bootstrap.sh")
+    case "$mode" in
+      empty)
+        [ -z "$out" ] || fail "$label: expected silence, got: $out" ;;
+      missing)
+        [ "$out" = "$missing" ] || fail "$label: expected '$missing', got: $out" ;;
+    esac
+  done <<'ROWS'
+minimum isolated-session AXI version is accepted^0.1.26^empty
+newer isolated-session AXI version is accepted^0.2.0^empty
+older AXI is unavailable for isolated fallback^0.1.25^missing
+unparseable AXI version is unavailable for isolated fallback^development build^missing
+ROWS
+  pass "bootstrap requires AXI isolated-session support"
 }
 
 test_axi_install_commands_keep_browser_fallback_hook_free() {
@@ -469,6 +505,7 @@ ROWS
 
 test_bootstrap_reporting
 test_no_mistakes_min_version
+test_axi_isolation_min_version
 test_axi_install_commands_keep_browser_fallback_hook_free
 test_legacy_browser_hooks_are_detected_and_retired_selectively
 test_unmanaged_opencode_plugin_is_preserved

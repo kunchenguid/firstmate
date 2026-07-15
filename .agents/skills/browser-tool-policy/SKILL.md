@@ -56,6 +56,7 @@ Use AXI's isolated browser session by default.
 Unless the user explicitly authorizes attachment, sanitize every AXI invocation so inherited connection or profile state cannot select an existing browser or persistent profile.
 Each fallback task must use `bin/fm-axi-isolated.sh <session-file> <command>`, never a raw AXI command.
 The wrapper records a fresh session name in the task's durable session file, clears inherited attachment and profile configuration on every call, reuses that session only for related commands, and removes the record after a successful `stop`.
+It requires `chrome-devtools-axi` 0.1.26 or newer and refuses unsupported versions rather than falling back to AXI's shared legacy session.
 For a Firstmate task, use the session-file path printed in its brief.
 For primary work outside a generated task brief, create a new session file under `$FM_HOME/state/` for that one task and use the wrapper for every related command, including `stop`.
 Do not reuse a session file from an earlier task or bypass the wrapper unless the user explicitly authorizes attachment.

@@ -195,6 +195,13 @@ remove_grok_turnend_auth() {
   rm -f "$hooks_dir/$token"
 }
 
+remove_axi_isolated_session() {
+  local session_file=$1
+  [ -e "$session_file" ] || [ -L "$session_file" ] || return 0
+  "$SCRIPT_DIR/fm-axi-isolated.sh" "$session_file" stop >/dev/null 2>&1 || true
+  rm -f "$session_file"
+}
+
 # Resolve the PR number for a worktree branch via gh-axi. Echoes the number on a
 # single match and returns 0; returns non-zero on no match or any lookup failure,
 # so the caller treats it as "no PR found" (fail-safe).
@@ -988,6 +995,7 @@ cleanup_firstmate_home_children() {
       fi
     fi
     remove_grok_turnend_auth "$sub_state" "$child_id"
+    remove_axi_isolated_session "$home/data/$child_id/axi-session"
     rm -f "$sub_state/$child_id.status" "$sub_state/$child_id.turn-ended" "$sub_state/$child_id.check.sh" "$sub_state/$child_id.meta" "$sub_state/$child_id.pi-ext.ts" "$sub_state/$child_id.grok-turnend-token"
   done
 }
@@ -1118,6 +1126,7 @@ if [ "$KIND" = secondmate ]; then
   remove_secondmate_registry_entry "$ID"
 fi
 remove_grok_turnend_auth "$STATE" "$ID"
+remove_axi_isolated_session "$DATA/$ID/axi-session"
 # Remove the per-task temp root (/tmp/fm-<id>/, incl. its gotmp/) recorded by spawn.
 # Read before the state-file rm below; empty (pre-fix tasks without tasktmp=) is a no-op.
 [ -n "$TASK_TMP" ] && rm -rf "$TASK_TMP"

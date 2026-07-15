@@ -420,9 +420,23 @@ run_teardown() {
   local case_dir=$1; shift
   FM_ROOT_OVERRIDE="$ROOT" \
   FM_STATE_OVERRIDE="$case_dir/state" \
+  FM_DATA_OVERRIDE="$case_dir/data" \
   FM_CONFIG_OVERRIDE="$case_dir/config" \
   PATH="$case_dir/fakebin:$PATH" \
     "$TEARDOWN" task-x1 "$@"
+}
+
+add_fake_axi() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/chrome-devtools-axi" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --version ]; then
+  printf '%s\n' '0.1.26'
+  exit 0
+fi
+printf '%s|%s\n' "${CHROME_DEVTOOLS_AXI_SESSION-}" "$*" >> "${FM_AXI_LOG:?}"
+SH
+  chmod +x "$case_dir/fakebin/chrome-devtools-axi"
 }
 
 run_merge_local() {
@@ -1109,6 +1123,29 @@ test_local_only_force_overrides_unpushed() {
   pass "local-only worktree with unpushed work is torn down under --force (escape hatch)"
 }
 
+test_teardown_stops_and_clears_axi_session() {
+  local case_dir session_file log rc
+  case_dir=$(make_case axi-session-cleanup)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "shippable work"
+  add_fork_with_pushed_branch "$case_dir"
+  session_file="$case_dir/data/task-x1/axi-session"
+  log="$case_dir/axi.log"
+  mkdir -p "$(dirname "$session_file")"
+  printf '%s\n' 'firstmate-isolated-teardown-test' > "$session_file"
+  add_fake_axi "$case_dir"
+
+  set +e
+  FM_AXI_LOG="$log" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "AXI-session teardown should succeed"
+  assert_absent "$session_file" "teardown retained the AXI session record"
+  [ "$(cat "$log")" = 'firstmate-isolated-teardown-test|stop' ] || fail "teardown did not stop the recorded AXI session"
+  pass "teardown stops and clears durable AXI sessions"
+}
+
 test_local_only_fork_remote_allows
 test_teardown_prompts_tasks_axi_done_when_compatible
 test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present
@@ -1118,6 +1155,7 @@ test_local_only_registered_base_ref_teardown_uses_local_branch
 test_no_mistakes_origin_remote_allows
 test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed
+test_teardown_stops_and_clears_axi_session
 test_squash_merged_branch_deleted_allows
 test_squash_merged_pr_allows_when_head_ancestor_of_pr_head
 test_no_pr_recorded_discovers_merged_pr_by_branch_allows

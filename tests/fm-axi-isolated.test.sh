@@ -12,6 +12,10 @@ make_fake_axi() {
   fakebin=$(fm_fakebin "$dir")
   cat > "$fakebin/chrome-devtools-axi" <<'SH'
 #!/usr/bin/env bash
+if [ "${1:-}" = --version ]; then
+  printf '%s\n' "${FM_AXI_VERSION:-0.1.26}"
+  exit 0
+fi
 printf '%s|%s|%s|%s|%s|%s|%s|%s|%s\n' \
   "${CHROME_DEVTOOLS_AXI_SESSION-}" \
   "${CHROME_DEVTOOLS_AXI_AUTO_CONNECT-}" \
@@ -31,6 +35,7 @@ run_axi() {
   local fakebin=$1 log=$2 session_file=$3
   shift 3
   PATH="$fakebin:$PATH" FM_AXI_LOG="$log" \
+    FM_AXI_VERSION="${FM_AXI_VERSION:-0.1.26}" \
     CHROME_DEVTOOLS_AXI_AUTO_CONNECT=1 \
     CHROME_DEVTOOLS_AXI_BROWSER_URL=http://127.0.0.1:9222 \
     CHROME_DEVTOOLS_AXI_USER_DATA_DIR=/tmp/profile \
@@ -75,4 +80,24 @@ test_durable_session_sanitizes_every_command() {
   pass "fm-axi-isolated.sh persists one sanitized session through stop"
 }
 
+test_legacy_axi_cannot_create_an_isolated_session() {
+  local case_dir fakebin log session_file rc
+  case_dir="$TMP_ROOT/legacy-version"
+  fakebin=$(make_fake_axi "$case_dir")
+  log="$case_dir/axi.log"
+  session_file="$case_dir/state/axi-session"
+
+  set +e
+  FM_AXI_VERSION=0.1.25 run_axi "$fakebin" "$log" "$session_file" open https://example.test > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "legacy AXI should be rejected before use"
+  assert_absent "$session_file" "legacy AXI created an unsafe session record"
+  assert_absent "$log" "legacy AXI received a browser command"
+  grep -F '0.1.26 or newer' "$case_dir/stderr" >/dev/null || fail "legacy AXI rejection did not explain the session requirement"
+  pass "fm-axi-isolated.sh rejects AXI without named sessions"
+}
+
 test_durable_session_sanitizes_every_command
+test_legacy_axi_cannot_create_an_isolated_session
