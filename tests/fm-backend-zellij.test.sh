@@ -800,7 +800,9 @@ test_teardown_passes_recorded_tab_id_to_zellij_kill() {
     "zellij_tab_id=3" \
     "worktree=$dir/missing-worktree" \
     "project=$project" \
-    "kind=scout"
+    "kind=scout" \
+    "decisions_reviewed=1" \
+    "decision_keys="
   printf '[]\n' > "$dir/responses/1.out"
   printf '[{"tab_id":3,"name":"fm-zghost"}]\n' > "$dir/responses/2.out"
   fb=$(make_zellij_fakebin "$dir")
