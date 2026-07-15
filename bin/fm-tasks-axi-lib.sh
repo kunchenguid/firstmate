@@ -2,54 +2,57 @@
 # Shared tasks-axi backend selection and compatibility probe for bootstrap,
 # teardown, and secondmate backlog handoff.
 # Usage: . bin/fm-tasks-axi-lib.sh
-# Compatible means tasks-axi --version reports 0.1.1 or newer,
-# `tasks-axi update --help` exposes --archive-body for recoverable note rewrites,
-# and `tasks-axi mv --help` exposes [<id>...] for atomic multi-ID moves required
-# by secondmate handoffs (introduced in tasks-axi 0.2.2).
+# Compatibility is proved by one live, disposable-fixture probe: `update
+# --archive-body` must preserve the replaced body outside the backlog, and a
+# two-ID `mv` must reject an incomplete set without mutation before moving the
+# complete set together. Version and help output are advisory and never gates.
 # `config/backlog-backend=manual` opts out of tasks-axi for routine firstmate
 # backlog mutations, but validated secondmate handoffs always use `tasks-axi mv`.
 # Absent or any other value keeps the default tasks-axi backend path, falling
 # back to manual mutation when the tool is not compatible.
 
-fm_tasks_axi_version_parts() {
-  local output
-  command -v tasks-axi >/dev/null 2>&1 || return 1
-  output=$(tasks-axi --version 2>/dev/null) || return 1
-  printf '%s\n' "$output" |
-    sed -n 's/.*\([0-9][0-9]*\)\.\([0-9][0-9]*\)\.\([0-9][0-9]*\).*/\1 \2 \3/p' |
-    head -1
-}
-
 fm_tasks_axi_compatible() {
-  local parts major minor patch rest
-  parts=$(fm_tasks_axi_version_parts) || return 1
-  [ -n "$parts" ] || return 1
-  major=${parts%% *}
-  rest=${parts#* }
-  minor=${rest%% *}
-  patch=${rest##* }
+  local probe source destination replacement previous
+  command -v tasks-axi >/dev/null 2>&1 || return 1
+  probe=$(mktemp -d "${TMPDIR:-/tmp}/fm-tasks-axi-probe.XXXXXX") || return 1
+  source="$probe/source.md"
+  destination="$probe/destination.md"
+  replacement='replacement probe body'
+  previous='previous probe body'
 
-  if [ "$major" -gt 0 ] ||
-    { [ "$major" -eq 0 ] && [ "$minor" -gt 1 ]; } ||
-    { [ "$major" -eq 0 ] && [ "$minor" -eq 1 ] && [ "$patch" -ge 1 ]; }; then
-    fm_tasks_axi_update_has_archive_body && fm_tasks_axi_mv_has_multi_id
-    return $?
+  printf '%s\n' \
+    '## Queued' \
+    '- [ ] fm-probe-a - first probe item (repo: firstmate)' \
+    "  $previous" \
+    '- [ ] fm-probe-b - second probe item (repo: firstmate)' \
+    '  second probe body' > "$source"
+  printf '%s\n' '## In flight' '' '## Queued' '' '## Done' > "$destination"
+
+  if ! tasks-axi update fm-probe-a --file "$source" --body "$replacement" --archive-body >/dev/null 2>&1 ||
+    ! grep -Fqx "  $replacement" "$source" ||
+    grep -Fqx "  $previous" "$source" ||
+    ! grep -R -Fqx "  $previous" "$probe" 2>/dev/null; then
+    rm -rf "$probe"
+    return 1
   fi
-  return 1
-}
 
-fm_tasks_axi_update_has_archive_body() {
-  local output
-  command -v tasks-axi >/dev/null 2>&1 || return 1
-  output=$(tasks-axi update --help 2>&1) || return 1
-  printf '%s\n' "$output" | grep -F -- '--archive-body' >/dev/null
-}
+  # A failed two-ID move must not leave the valid item half-moved.
+  if tasks-axi mv fm-probe-a fm-probe-missing --file "$source" --to "$destination" >/dev/null 2>&1 ||
+    ! grep -Fq 'fm-probe-a' "$source" ||
+    grep -Fq 'fm-probe-a' "$destination"; then
+    rm -rf "$probe"
+    return 1
+  fi
 
-fm_tasks_axi_mv_has_multi_id() {
-  local output
-  command -v tasks-axi >/dev/null 2>&1 || return 1
-  output=$(tasks-axi mv --help 2>&1) || return 1
-  printf '%s\n' "$output" | grep -F -- '[<id>...]' >/dev/null
+  if ! tasks-axi mv fm-probe-a fm-probe-b --file "$source" --to "$destination" >/dev/null 2>&1 ||
+    grep -Eq 'fm-probe-a|fm-probe-b' "$source" ||
+    ! grep -Fq 'fm-probe-a' "$destination" ||
+    ! grep -Fq 'fm-probe-b' "$destination"; then
+    rm -rf "$probe"
+    return 1
+  fi
+
+  rm -rf "$probe"
 }
 
 fm_backlog_backend_value() {

@@ -26,6 +26,8 @@ set -u
 
 # shellcheck source=tests/secondmate-helpers.sh disable=SC1091
 . "$(dirname "${BASH_SOURCE[0]}")/secondmate-helpers.sh"
+# shellcheck source=bin/fm-tasks-axi-lib.sh disable=SC1091
+. "$ROOT/bin/fm-tasks-axi-lib.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-secondmate-lifecycle)
 export FM_BACKEND=tmux
@@ -151,10 +153,11 @@ phase_send() {
 }
 
 phase_handoff() {
-  # The move is delegated to `tasks-axi mv`; skip cleanly when it is absent (the
-  # downstream recovery and teardown phases do not depend on this phase).
-  if ! command -v tasks-axi >/dev/null 2>&1; then
-    echo "skip: tasks-axi not found (backlog handoff delegates to it)"
+  # The move is delegated to `tasks-axi mv`; skip cleanly when the shared live
+  # compatibility probe rejects the installed CLI. The downstream recovery and
+  # teardown phases do not depend on this phase.
+  if ! fm_tasks_axi_compatible; then
+    echo "skip: compatible tasks-axi not found (backlog handoff delegates to it)"
     return 0
   fi
   cat > "$HOME_DIR/data/backlog.md" <<'EOF'

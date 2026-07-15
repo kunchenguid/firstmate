@@ -36,8 +36,8 @@
 # Item bodies must use at least two leading spaces. The helper refuses a selected
 # item with a single-space or tab-indented continuation rather than risk leaving
 # it orphaned, because tasks-axi treats only two-or-more-space lines as body.
-# The move needs compatible `tasks-axi` on PATH, including atomic multi-ID `mv`
-# (introduced in 0.2.2). Bootstrap requires it fleet-wide, so this works
+# The move needs compatible `tasks-axi` on PATH, including atomic multi-ID `mv`.
+# Bootstrap requires the shared live compatibility probe fleet-wide, so this works
 # everywhere; the `config/backlog-backend=manual` knob only governs firstmate's
 # own hand-editing of its own backlog, not this validated helper. Idempotent:
 # re-running converges. Atomic: on any move failure nothing moves.
@@ -300,7 +300,7 @@ if [ "$FAILED" -ne 0 ]; then
 fi
 
 if ! fm_tasks_axi_compatible; then
-  echo "error: tasks-axi with atomic multi-ID mv support (0.2.2+) is required to move backlog items" >&2
+  echo "error: compatible tasks-axi with atomic multi-ID mv support is required to move backlog items" >&2
   exit 1
 fi
 

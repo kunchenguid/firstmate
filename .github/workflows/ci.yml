@@ -50,7 +50,7 @@ jobs:
       - name: Install tasks-axi for backlog-handoff delegation
         run: |
           set -eu
-          npm install -g tasks-axi
+          npm install -g tasks-axi@0.2.3
           tasks-axi --version
       - run: |
           set -eu

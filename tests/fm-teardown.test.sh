@@ -132,21 +132,49 @@ add_compatible_tasks_axi() {
   local case_dir=$1
   cat > "$case_dir/fakebin/tasks-axi" <<'SH'
 #!/usr/bin/env bash
-if [ "${1:-}" = --version ]; then
-  printf '%s\n' '0.1.1'
+if [ "${1:-}" = update ]; then
+  file=
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --file) file=$2; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  [ -n "$file" ] || exit 64
+  printf '%s\n' \
+    '## Queued' \
+    '- [ ] fm-probe-a - first probe item (repo: firstmate)' \
+    '  replacement probe body' \
+    '- [ ] fm-probe-b - second probe item (repo: firstmate)' \
+    '  second probe body' > "$file"
+  printf '%s\n' '## Archived probe' '- [ ] fm-probe-a - first probe item (repo: firstmate)' \
+    '  previous probe body' > "$(dirname "$file")/note-archive.md"
   exit 0
 fi
-if [ "${1:-}" = update ] && [ "${2:-}" = --help ]; then
-  printf '%s\n' 'usage: tasks-axi update <id> [flags]'
-  printf '%s\n' '  --body-file <path>'
-  printf '%s\n' '  --archive-body'
+if [ "${1:-}" = mv ]; then
+  shift
+  ids=()
+  file=
+  destination=
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --file) file=$2; shift 2 ;;
+      --to) destination=$2; shift 2 ;;
+      *) ids+=("$1"); shift ;;
+    esac
+  done
+  [ -n "$file" ] && [ -n "$destination" ] || exit 64
+  [ "${ids[*]}" = 'fm-probe-a fm-probe-b' ] || exit 1
+  printf '%s\n' '## Queued' > "$file"
+  printf '%s\n' \
+    '## In flight' '' '## Queued' \
+    '- [ ] fm-probe-a - first probe item (repo: firstmate)' \
+    '  replacement probe body' \
+    '- [ ] fm-probe-b - second probe item (repo: firstmate)' \
+    '  second probe body' '' '## Done' > "$destination"
   exit 0
 fi
-if [ "${1:-}" = mv ] && [ "${2:-}" = --help ]; then
-  printf '%s\n' 'usage: tasks-axi mv <id> [<id>...] --to <path-or-dir>'
-  exit 0
-fi
-exit 0
+exit 64
 SH
   chmod +x "$case_dir/fakebin/tasks-axi"
 }

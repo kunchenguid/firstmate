@@ -7,9 +7,9 @@
 # 'MISSING: tasks-axi (install: ...)', 'MISSING: quota-axi (install: ...)', and
 # 'BOOTSTRAP_INFO: ...' lines, so those contracts are pinned verbatim. The cases
 # are table-driven over the inputs that vary: whether `treehouse get --help`
-# advertises --lease, which (if any) tasks-axi version is on PATH, whether
-# tasks-axi update advertises --archive-body, whether its mv help advertises
-# multi-ID moves, whether quota-axi is on PATH,
+# advertises --lease, whether tasks-axi can execute recoverable body updates and
+# atomic multi-ID moves (rather than merely claim them in version/help output),
+# whether quota-axi is on PATH,
 # whether the local backend config opts out of tasks-axi backlog mutations, and
 # which no-mistakes version is on PATH.
 # Dedicated fleet-sync cases pin the computed bootstrap timeout, explicit
@@ -84,11 +84,12 @@ SH
 }
 
 add_tasks_axi() {
-  local fakebin=$1 version=$2 archive_body=${3:-yes} multi_id=${4:-yes} archive_line mv_usage
+  local fakebin=$1 version=$2 archive_help=${3:-yes} multi_help=${4:-yes}
+  local archive_live=${5:-yes} multi_live=${6:-yes} archive_line mv_usage
   archive_line=""
-  [ "$archive_body" = yes ] && archive_line='  --archive-body'
+  [ "$archive_help" = yes ] && archive_line='  --archive-body'
   mv_usage='usage: tasks-axi mv <id> [<id>...] --to <path-or-dir>'
-  [ "$multi_id" = yes ] || mv_usage='usage: tasks-axi mv <id> --to <path-or-dir>'
+  [ "$multi_help" = yes ] || mv_usage='usage: tasks-axi mv <id> --to <path-or-dir>'
   cat > "$fakebin/tasks-axi" <<SH
 #!/usr/bin/env bash
 if [ "\${1:-}" = --version ]; then
@@ -105,7 +106,51 @@ if [ "\${1:-}" = mv ] && [ "\${2:-}" = --help ]; then
   printf '%s\n' '$mv_usage'
   exit 0
 fi
-exit 0
+if [ "\${1:-}" = update ]; then
+  [ '$archive_live' = yes ] || exit 64
+  file=
+  while [ "\$#" -gt 0 ]; do
+    case "\$1" in
+      --file) file=\$2; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  [ -n "\$file" ] || exit 64
+  printf '%s\n' \\
+    '## Queued' \\
+    '- [ ] fm-probe-a - first probe item (repo: firstmate)' \\
+    '  replacement probe body' \\
+    '- [ ] fm-probe-b - second probe item (repo: firstmate)' \\
+    '  second probe body' > "\$file"
+  printf '%s\n' '## Archived probe' '- [ ] fm-probe-a - first probe item (repo: firstmate)' \\
+    '  previous probe body' > "\$(dirname "\$file")/note-archive.md"
+  exit 0
+fi
+if [ "\${1:-}" = mv ]; then
+  shift
+  ids=()
+  file=
+  destination=
+  while [ "\$#" -gt 0 ]; do
+    case "\$1" in
+      --file) file=\$2; shift 2 ;;
+      --to) destination=\$2; shift 2 ;;
+      *) ids+=("\$1"); shift ;;
+    esac
+  done
+  [ "\${#ids[@]}" -gt 1 ] && [ '$multi_live' != yes ] && exit 64
+  [ -n "\$file" ] && [ -n "\$destination" ] || exit 64
+  [ "\${ids[*]}" = 'fm-probe-a fm-probe-b' ] || exit 1
+  printf '%s\n' '## Queued' > "\$file"
+  printf '%s\n' \\
+    '## In flight' '' '## Queued' \\
+    '- [ ] fm-probe-a - first probe item (repo: firstmate)' \\
+    '  replacement probe body' \\
+    '- [ ] fm-probe-b - second probe item (repo: firstmate)' \\
+    '  second probe body' '' '## Done' > "\$destination"
+  exit 0
+fi
+exit 64
 SH
   chmod +x "$fakebin/tasks-axi"
 }
@@ -225,7 +270,8 @@ assert_timeout_report() {
 #   mode=exact -> output must equal <expect>
 #   mode=grep  -> output must contain <expect> (fixed string); <notcontains> must not appear
 test_bootstrap_reporting() {
-  local label lease tasks quota backend mode expect notcontains case_dir fakebin out n archive_body multi_id
+  local label lease tasks quota backend mode expect notcontains case_dir fakebin out n
+  local version features archive_help multi_help archive_live multi_live
   n=0
   while IFS='^' read -r label lease tasks quota backend mode expect notcontains; do
     [ -n "$label" ] || continue
@@ -240,21 +286,19 @@ test_bootstrap_reporting() {
     if [ "$tasks" = "-" ]; then
       rm -f "$fakebin/tasks-axi"
     else
-      archive_body=yes
-      multi_id=yes
-      case "$tasks" in
-        *:noarchive)
-          archive_body=no
-          tasks=${tasks%:noarchive}
-          ;;
-      esac
-      case "$tasks" in
-        *:nomulti)
-          multi_id=no
-          tasks=${tasks%:nomulti}
-          ;;
-      esac
-      add_tasks_axi "$fakebin" "$tasks" "$archive_body" "$multi_id"
+      version=${tasks%%:*}
+      features=
+      [ "$version" = "$tasks" ] || features=${tasks#*:}
+      archive_help=yes
+      multi_help=yes
+      archive_live=yes
+      multi_live=yes
+      case ":$features:" in *:noarchive:*) archive_help=no; archive_live=no ;; esac
+      case ":$features:" in *:nomulti:*) multi_help=no; multi_live=no ;; esac
+      # This CLI advertises the newest version and both flags, but rejects the
+      # real operations. The bootstrap must fail closed instead of trusting it.
+      case ":$features:" in *:lies:*) archive_live=no; multi_live=no ;; esac
+      add_tasks_axi "$fakebin" "$version" "$archive_help" "$multi_help" "$archive_live" "$multi_live"
     fi
     if [ "$quota" = "0" ]; then
       rm -f "$fakebin/quota-axi"
@@ -279,14 +323,13 @@ test_bootstrap_reporting() {
   done <<'ROWS'
 treehouse --lease support is accepted silently^1^0.1.1^1^manual^empty^^
 treehouse without --lease reports an upgrade, gh auth is fine^0^0.1.1^1^-^grep^MISSING: treehouse (install: curl -fsSL https://kunchenguid.github.io/treehouse/install.sh | sh)^NEEDS_GH_AUTH
-compatible tasks-axi is silent by default^1^0.1.1^1^-^empty^^
-missing tasks-axi is required by default^1^-^1^-^exact^MISSING: tasks-axi (install: npm install -g tasks-axi)^
-incompatible tasks-axi is required by default^1^0.1.0^1^-^exact^MISSING: tasks-axi (install: npm install -g tasks-axi)^
-tasks-axi without archive-body is required by default^1^0.1.2:noarchive^1^-^exact^MISSING: tasks-axi (install: npm install -g tasks-axi)^
-tasks-axi without multi-id mv is required by default^1^0.2.2:nomulti^1^-^exact^MISSING: tasks-axi (install: npm install -g tasks-axi)^
+compatible tasks-axi is silent by default^1^development build^1^-^empty^^
+missing tasks-axi is required by default^1^-^1^-^exact^MISSING: tasks-axi (install: npm install -g tasks-axi@0.2.3)^
+incompatible old tasks-axi is required by default^1^0.1.2:noarchive:nomulti^1^-^exact^MISSING: tasks-axi (install: npm install -g tasks-axi@0.2.3)^
+tasks-axi with misleading version/help output is required by default^1^0.2.3:lies^1^-^exact^MISSING: tasks-axi (install: npm install -g tasks-axi@0.2.3)^
 missing quota-axi is required by default^1^0.1.1^0^manual^exact^MISSING: quota-axi (install: npm install -g quota-axi)^
-manual backlog backend still requires missing tasks-axi^1^-^1^manual^exact^MISSING: tasks-axi (install: npm install -g tasks-axi)^
-manual backlog backend suppresses tasks-axi availability^1^0.1.1^1^manual^empty^^
+manual backlog backend still requires missing tasks-axi^1^-^1^manual^exact^MISSING: tasks-axi (install: npm install -g tasks-axi@0.2.3)^
+manual backlog backend suppresses tasks-axi availability^1^development build^1^manual^empty^^
 ROWS
   pass "bootstrap reports treehouse lease + tasks-axi/quota-axi bootstrap contracts"
 }
