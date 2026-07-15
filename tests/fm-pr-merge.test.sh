@@ -218,9 +218,9 @@ test_rejects_unsafe_url_segments_before_recording() {
   rc=$?
   set -e
 
-  expect_code 2 "$rc" "unsafe-url-segment: fm-pr-merge should refuse unsafe owner/repo characters"
-  assert_grep 'error: invalid PR merge request' "$case_dir/stderr" \
-    "unsafe-url-segment: refusal was not fixed and non-probing"
+  expect_code 1 "$rc" "unsafe-url-segment: fm-pr-merge should refuse unsafe owner/repo characters"
+  assert_grep 'PR URL must match https://github.com/<owner>/<repo>/pull/<number>' "$case_dir/stderr" \
+    "unsafe-url-segment: refusal did not explain the expected URL shape"
   # shellcheck disable=SC2016  # Literal command substitution must not reach meta.
   assert_no_grep 'pr=https://github.com/evil$(echo pwned)/repo/pull/7' "$case_dir/state/task-x1.meta" \
     "unsafe-url-segment: unsafe PR URL was recorded in meta"
