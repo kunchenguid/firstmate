@@ -155,6 +155,12 @@ test_browser_policy_sanitizes_axi_fallback() {
   done
   assert_grep "chrome-devtools-axi <command>" "$policy" \
     "browser policy does not require a sanitized AXI invocation"
+  assert_grep "AXI_SESSION=\"firstmate-isolated-\$(node -e" "$policy" \
+    "browser policy does not generate a fresh AXI session"
+  assert_grep "CHROME_DEVTOOLS_AXI_SESSION=\"\$AXI_SESSION\"" "$policy" \
+    "browser policy does not bind AXI to its fresh session"
+  assert_grep "Never use AXI's default session" "$policy" \
+    "browser policy permits AXI default-session bridge reuse"
   pass "browser policy sanitizes inherited AXI connection and profile state"
 }
 
