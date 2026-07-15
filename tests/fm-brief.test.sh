@@ -145,8 +145,22 @@ test_ship_and_scout_briefs_reference_native_first_browser_policy() {
   pass "fm-brief.sh: ship and scout briefs reference the native-first browser policy"
 }
 
+test_browser_policy_sanitizes_axi_fallback() {
+  local policy
+  policy="$ROOT/.agents/skills/browser-tool-policy/SKILL.md"
+
+  for variable in AUTO_CONNECT BROWSER_URL USER_DATA_DIR CHROME_ARGS PORT SESSION WS_HEADERS MCP_PATH; do
+    assert_grep "-u CHROME_DEVTOOLS_AXI_$variable" "$policy" \
+      "browser policy does not clear inherited AXI $variable state"
+  done
+  assert_grep "chrome-devtools-axi <command>" "$policy" \
+    "browser policy does not require a sanitized AXI invocation"
+  pass "browser policy sanitizes inherited AXI connection and profile state"
+}
+
 test_script_parses
 test_ship_modes_generate_clean_briefs
 test_no_mistakes_dod_wording
 test_local_only_brief_uses_registry_default_branch
 test_ship_and_scout_briefs_reference_native_first_browser_policy
+test_browser_policy_sanitizes_axi_fallback

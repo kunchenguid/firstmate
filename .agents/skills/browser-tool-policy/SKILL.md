@@ -53,7 +53,21 @@ Do not use AXI to bypass missing authentication in the user's chosen or preferre
 ## AXI isolation boundary
 
 Use AXI's isolated browser session by default.
-Do not set `CHROME_DEVTOOLS_AXI_AUTO_CONNECT=1`, point `CHROME_DEVTOOLS_AXI_BROWSER_URL` at the user's browser, supply the user's Chrome profile, or otherwise attach to the user's existing Chrome unless the user explicitly authorizes that attachment.
+Unless the user explicitly authorizes attachment, sanitize every AXI invocation so inherited connection or profile state cannot select an existing browser or persistent profile.
+
+```sh
+env -u CHROME_DEVTOOLS_AXI_AUTO_CONNECT \
+  -u CHROME_DEVTOOLS_AXI_BROWSER_URL \
+  -u CHROME_DEVTOOLS_AXI_USER_DATA_DIR \
+  -u CHROME_DEVTOOLS_AXI_CHROME_ARGS \
+  -u CHROME_DEVTOOLS_AXI_PORT \
+  -u CHROME_DEVTOOLS_AXI_SESSION \
+  -u CHROME_DEVTOOLS_AXI_WS_HEADERS \
+  -u CHROME_DEVTOOLS_AXI_MCP_PATH \
+  chrome-devtools-axi <command>
+```
+
+Do not set, inherit, or reintroduce those variables through an alias, wrapper, or script unless the user explicitly authorizes attachment.
 Explicit authorization to use AXI is not by itself authorization to attach AXI to the user's Chrome profile or signed-in browser.
 Inspect `chrome-devtools-axi --help` for current mechanics instead of memorizing flags.
 
