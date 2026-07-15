@@ -60,6 +60,7 @@ shell_quote() {
 }
 
 STATUS_FILE=$(shell_quote "$STATE/$ID.status")
+AXI_SESSION_FILE=$(shell_quote "$DATA/$ID/axi-session")
 
 if [ "$KIND" = secondmate ]; then
 SECONDMATE_PROJECTS=""
@@ -153,9 +154,9 @@ The report is the only thing that survives, so anything worth keeping must be in
 
 # Rules
 1. Never push to any remote and never open a PR.
-2. Stay inside this worktree; the only files you may write outside it are the report and the status file below.
+2. Stay inside this worktree; the only files you may write outside it are the report, status file, and AXI session file below.
 3. Use gh-axi for GitHub operations.
-   Before browser work, read and follow $FM_ROOT/.agents/skills/browser-tool-policy/SKILL.md completely; it prefers the active harness native browser capability and keeps chrome-devtools-axi as an isolated fallback.
+   Before browser work, read and follow $FM_ROOT/.agents/skills/browser-tool-policy/SKILL.md completely; it prefers the active harness native browser capability and keeps chrome-devtools-axi as an isolated fallback through $FM_ROOT/bin/fm-axi-isolated.sh $AXI_SESSION_FILE.
 4. Report status by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
    States: working, needs-decision, blocked, done, failed.
@@ -251,9 +252,9 @@ If the top-level path is the primary checkout or not the worktree you were launc
 
 # Rules
 $RULE1
-2. Stay inside this worktree; modify nothing outside it.
+2. Stay inside this worktree; modify nothing outside it except the task status file and AXI session file below.
 3. Use gh-axi for GitHub operations.
-   Before browser work, read and follow $FM_ROOT/.agents/skills/browser-tool-policy/SKILL.md completely; it prefers the active harness native browser capability and keeps chrome-devtools-axi as an isolated fallback.
+   Before browser work, read and follow $FM_ROOT/.agents/skills/browser-tool-policy/SKILL.md completely; it prefers the active harness native browser capability and keeps chrome-devtools-axi as an isolated fallback through $FM_ROOT/bin/fm-axi-isolated.sh $AXI_SESSION_FILE.
 4. Report status by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
    States: working, needs-decision, blocked, done, failed.

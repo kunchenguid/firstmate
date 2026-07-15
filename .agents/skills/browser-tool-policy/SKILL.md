@@ -54,25 +54,11 @@ Do not use AXI to bypass missing authentication in the user's chosen or preferre
 
 Use AXI's isolated browser session by default.
 Unless the user explicitly authorizes attachment, sanitize every AXI invocation so inherited connection or profile state cannot select an existing browser or persistent profile.
-Each fallback task must start a fresh, uniquely named AXI session and retain that name only for its related AXI commands.
-Never use AXI's default session or a session name from an earlier task.
-
-```sh
-AXI_SESSION="firstmate-isolated-$(node -e 'process.stdout.write(require("node:crypto").randomUUID())')"
-env -u CHROME_DEVTOOLS_AXI_AUTO_CONNECT \
-  -u CHROME_DEVTOOLS_AXI_BROWSER_URL \
-  -u CHROME_DEVTOOLS_AXI_USER_DATA_DIR \
-  -u CHROME_DEVTOOLS_AXI_CHROME_ARGS \
-  -u CHROME_DEVTOOLS_AXI_PORT \
-  -u CHROME_DEVTOOLS_AXI_SESSION \
-  -u CHROME_DEVTOOLS_AXI_WS_HEADERS \
-  -u CHROME_DEVTOOLS_AXI_MCP_PATH \
-  CHROME_DEVTOOLS_AXI_SESSION="$AXI_SESSION" \
-  chrome-devtools-axi <command>
-```
-
-Do not set, inherit, or reintroduce those variables through an alias, wrapper, or script unless the user explicitly authorizes attachment.
-Finish the fallback work by running `stop` through the same sanitized named-session command.
+Each fallback task must use `bin/fm-axi-isolated.sh <session-file> <command>`, never a raw AXI command.
+The wrapper records a fresh session name in the task's durable session file, clears inherited attachment and profile configuration on every call, reuses that session only for related commands, and removes the record after a successful `stop`.
+For a Firstmate task, use the session-file path printed in its brief.
+For primary work outside a generated task brief, create a new session file under `$FM_HOME/state/` for that one task and use the wrapper for every related command, including `stop`.
+Do not reuse a session file from an earlier task or bypass the wrapper unless the user explicitly authorizes attachment.
 Explicit authorization to use AXI is not by itself authorization to attach AXI to the user's Chrome profile or signed-in browser.
 Inspect `chrome-devtools-axi --help` for current mechanics instead of memorizing flags.
 

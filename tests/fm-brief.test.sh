@@ -139,9 +139,15 @@ test_ship_and_scout_briefs_reference_native_first_browser_policy() {
       "generated brief did not summarize the native-first browser policy"
     assert_grep "chrome-devtools-axi as an isolated fallback" "$brief" \
       "generated brief did not preserve AXI as an isolated fallback"
+    assert_grep "$ROOT/bin/fm-axi-isolated.sh" "$brief" \
+      "generated brief did not direct AXI fallback through the isolated wrapper"
     assert_no_grep "chrome-devtools-axi for browser operations" "$brief" \
       "generated brief retained the unconditional AXI-first browser rule"
   done
+  assert_grep "$home/data/$ship_id/axi-session" "$ship_brief" \
+    "ship brief did not provide a durable AXI session-file path"
+  assert_grep "$home/data/$scout_id/axi-session" "$scout_brief" \
+    "scout brief did not provide a durable AXI session-file path"
   pass "fm-brief.sh: ship and scout briefs reference the native-first browser policy"
 }
 
@@ -149,19 +155,11 @@ test_browser_policy_sanitizes_axi_fallback() {
   local policy
   policy="$ROOT/.agents/skills/browser-tool-policy/SKILL.md"
 
-  for variable in AUTO_CONNECT BROWSER_URL USER_DATA_DIR CHROME_ARGS PORT SESSION WS_HEADERS MCP_PATH; do
-    assert_grep "-u CHROME_DEVTOOLS_AXI_$variable" "$policy" \
-      "browser policy does not clear inherited AXI $variable state"
-  done
-  assert_grep "chrome-devtools-axi <command>" "$policy" \
-    "browser policy does not require a sanitized AXI invocation"
-  assert_grep "AXI_SESSION=\"firstmate-isolated-\$(node -e" "$policy" \
-    "browser policy does not generate a fresh AXI session"
-  assert_grep "CHROME_DEVTOOLS_AXI_SESSION=\"\$AXI_SESSION\"" "$policy" \
-    "browser policy does not bind AXI to its fresh session"
-  assert_grep "Never use AXI's default session" "$policy" \
-    "browser policy permits AXI default-session bridge reuse"
-  pass "browser policy sanitizes inherited AXI connection and profile state"
+  assert_grep "bin/fm-axi-isolated.sh <session-file> <command>" "$policy" \
+    "browser policy does not require the durable AXI wrapper"
+  assert_grep "removes the record after a successful \`stop\`" "$policy" \
+    "browser policy does not end durable AXI sessions"
+  pass "browser policy requires a durable isolated AXI wrapper"
 }
 
 test_script_parses
