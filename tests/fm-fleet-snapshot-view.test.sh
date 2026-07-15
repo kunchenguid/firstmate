@@ -265,6 +265,7 @@ test_backlog_tasks_axi_forms_and_overrides() {
 - [ ] queued-comma - Queued Comma Task (repo: beta, since 2026-07-08) (kind: ship)
 - [ ] parenthetical-title - Refresh sidebar (mobile) (repo: beta) (kind: ship)
 - [ ] blocked-reason - Blocked Reason (repo: beta) (kind: ship) blocked-by: queued-comma - waits on queued-comma
+- [ ] sample-decision-route - Choose sample route (repo: sample) (kind: captain) (since 2026-07-14) (hold: captain route choice pending) (hold-kind: captain)
 
 ## Done
 - [x] done-comma - Done Comma Task https://github.com/kunchenguid/firstmate/pull/42 (repo: gamma, merged 2026-07-09) (kind: ship)
@@ -315,6 +316,14 @@ EOF
       and .blocked_by == "queued-comma"
       and .blocked_reason == "waits on queued-comma"
   ' >/dev/null || fail "blocked suffix did not parse into title and reason"
+  printf '%s' "$out" | jq -e '
+    .backlog.records[] | select(.id == "sample-decision-route")
+    | .title == "Choose sample route"
+      and .repo == "sample"
+      and .kind == "captain"
+      and .hold_reason == "captain route choice pending"
+      and .hold_kind == "captain"
+  ' >/dev/null || fail "tasks-axi captain-hold metadata did not parse"
   printf '%s' "$out" | jq -e '
     .backlog.records[] | select(.id == "done-comma")
     | .repo == "gamma"
@@ -464,6 +473,31 @@ test_secondmate_open_decision_survives_live_endpoint() {
 
 # An open decision clears ONLY on an explicit resolution referencing its key, never
 # on an unrelated terminal line.
+test_open_decision_transfers_to_captain_hold() {
+  local home fakebin out
+  home=$(make_home captain-held-transfer)
+  mkdir -p "$home/secondmate-home"
+  fm_write_meta "$home/state/transferred-decision.meta" \
+    "window=firstmate:fm-transferred-decision" \
+    "worktree=$home/secondmate-home" \
+    "project=$home/secondmate-home" \
+    "harness=codex" \
+    "kind=secondmate" \
+    "mode=secondmate" \
+    "home=$home/secondmate-home" \
+    "projects=sample"
+  printf 'needs-decision [key=route]: choose a sample route\n' > "$home/state/transferred-decision.status"
+  printf 'captain-held [key=route]: tracked by transferred-decision-route\n' >> "$home/state/transferred-decision.status"
+  fakebin=$(make_fakebin "$home")
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json)
+  printf '%s' "$out" | jq -e '
+    .tasks[] | select(.id == "transferred-decision")
+    | .hints.pending_decision == false
+      and (.hints.open_decisions | length) == 0
+  ' >/dev/null || fail "captain-held transfer must close only the duplicate status copy: $out"
+  pass "durable captain-held transfer closes the duplicate live status decision"
+}
+
 test_open_decision_clears_on_keyed_resolution() {
   local home fakebin out
   home=$(make_home resolution)
@@ -557,6 +591,7 @@ test_fixture_snapshot_json
 test_event_hints_follow_reconciled_current_state
 test_open_decision_survives_later_unrelated_event
 test_secondmate_open_decision_survives_live_endpoint
+test_open_decision_transfers_to_captain_hold
 test_open_decision_clears_on_keyed_resolution
 test_completed_scout_report_is_pointer_not_pending
 test_parked_scout_decision_stays_pending

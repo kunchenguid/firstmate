@@ -19,8 +19,8 @@
 # explicitly (the prs: line and the omitted[] surfaces) what was not requested, so an
 # absence is never ambiguous.
 #
-# This wrapper consumes the canonical snapshot's hints.open_decisions field.
-# fm-classify-lib.sh owns the durable keyed-decision contract.
+# This wrapper consumes canonical status decisions plus structured captain-held
+# backlog items. It never infers decisions from report or visual-review prose.
 #
 # The landed section merges this home's Done with the canonical snapshot's
 # secondmate_landed roll-up (fm-fleet-snapshot.sh), so merges a secondmate managed -
@@ -295,7 +295,7 @@ MODEL=$(printf '%s' "$SNAP" | jq \
   | (($fl | index("paths")) != null) as $f_paths
   | (($fl | index("actions")) != null) as $f_actions
   | (($fl | index("endpoints")) != null) as $f_endpoints
-  | ([ .backlog.records[] | select(.state == "done" and .structured)
+  | ([ .backlog.records[] | select(.state == "done" and .structured and .kind != "captain")
        | {id, title, pr_url, report_path, local_note, completion, home:"(main)", home_id:"(main)"} ]) as $main_done
   | ((.secondmate_landed.records) // []) as $mate_done
   | ($main_done + $mate_done) as $all_landed_rows
@@ -345,10 +345,16 @@ MODEL=$(printf '%s' "$SNAP" | jq \
             doing:([.active_children[] | .id + ": " + (.doing // .state)] | join("; ") | trunc(90))} ]) as $in_flight_all
   | ([ .tasks[] as $t | select($t.kind != "secondmate") | ($t.hints.open_decisions // [])[]
        | {id:$t.id, key, verb, summary:(.summary | trunc(90)),owner:"(main)"} ]
+     + [ .backlog.records[]
+         | select(.state == "queued" and .structured and .kind == "captain"
+                  and .hold_kind == "captain" and .hold_reason != null)
+         | {id,key:.id,verb:"captain-hold",
+            summary:((.title + ": " + .hold_reason) | trunc(90)),owner:"(main)"} ]
      + [ (.secondmate_current.records // [])[] as $m | $m.decisions_open[]?
          | {id:(if (.id // $m.id) == $m.id then $m.id else ($m.id + "/" + .id) end),key,verb,summary:(.summary | trunc(90)),owner:$m.id} ]) as $decisions_all
   | ([ .backlog.records[]
        | select(.state == "queued" and .structured)
+       | select((.kind == "captain" and .hold_kind == "captain" and .hold_reason != null) | not)
        | select(($all_queued == 1)
                 or (((.body_excerpt // "") | test("SUPERSEDED|NOT REQUIRED|NOT-REQUIRED|DEFERRED"; "i")) | not))
        | {id, title:(.title | trunc(60)), blocked_by:(.blocked_by // "-"),
@@ -356,6 +362,7 @@ MODEL=$(printf '%s' "$SNAP" | jq \
      + [ (.secondmate_current.records // [])[] as $m
          | select($m.provenance.selected == "structured-home")
          | $m.queued[]?
+         | select((.kind == "captain" and .hold_kind == "captain" and .hold_reason != null) | not)
          | {id,title:(.title | trunc(60)),blocked_by:(.blocked_by // "-"),
             reason:((.blocked_reason // "-") | trunc(40)),owner:$m.id} ]) as $gates_all
   | ([ .scout_reports[]

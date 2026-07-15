@@ -27,7 +27,8 @@
 # for the common case where there is no remote at all.
 # Scout tasks (kind=scout in meta) carve out of that check: their worktree is
 # declared scratch and the report at data/<task-id>/report.md is the work
-# product - teardown proceeds once the report exists, and refuses without it.
+# product. Teardown proceeds only once the report exists and the shared
+# unresolved-decision completion gate verifies its captain-held inventory.
 # Orca tasks use the same safety checks, then close the recorded terminal and
 # remove the recorded worktree through `orca worktree rm`; teardown never guesses
 # an Orca target from ambient CLI state.
@@ -962,6 +963,19 @@ if [ "$KIND" = scout ] && [ "$FORCE" != "--force" ]; then
   if [ ! -f "$REPORT" ]; then
     echo "REFUSED: scout task $ID has no report at $REPORT." >&2
     echo "The report is the work product. Have the crewmate write it, or use --force after explicit discard approval." >&2
+    exit 1
+  fi
+  REVIEW_GATE_REQUIRED=0
+  [ "$(meta_value "$META" decisions_reviewed)" = 1 ] && REVIEW_GATE_REQUIRED=1
+  if [ "$REVIEW_GATE_REQUIRED" = 0 ] && fm_tasks_axi_compatible \
+    && (cd "$FM_HOME" && tasks-axi show "$ID" --full >/dev/null 2>&1); then
+    REVIEW_GATE_REQUIRED=1
+  fi
+  if [ "$REVIEW_GATE_REQUIRED" = 1 ] \
+    && ! FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
+      FM_CONFIG_OVERRIDE="$CONFIG" "$SCRIPT_DIR/fm-decision-hold.sh" verify "$ID" >/dev/null; then
+    echo "REFUSED: scout task $ID has not passed the unresolved-decision completion gate." >&2
+    echo "Inventory its report and any visual review through bin/fm-decision-hold.sh before teardown." >&2
     exit 1
   fi
 fi

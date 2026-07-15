@@ -289,6 +289,25 @@ test_pause_verb_override_renders_all_brief_scaffolds() {
   pass "fm-brief.sh: custom pause verb renders in every scaffold"
 }
 
+test_scout_and_secondmate_load_decision_hold_policy() {
+  local home scout charter
+  home="$TMP_ROOT/decision-policy-home"
+  mkdir -p "$home/data"
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    "$ROOT/bin/fm-brief.sh" sample-investigation sample --scout >/dev/null 2>&1
+  scout="$home/data/sample-investigation/brief.md"
+  assert_grep "$ROOT/.agents/skills/decision-hold-lifecycle/SKILL.md" "$scout" \
+    "scout brief did not load the unresolved-decision policy before done"
+  assert_grep "pass its shared completion gate for the report and any visual review" "$scout" \
+    "scout brief did not cross-reference visual-review completion"
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_SECONDMATE_CHARTER='sample reviews' \
+    "$ROOT/bin/fm-brief.sh" sample-mate --secondmate --no-projects >/dev/null 2>&1
+  charter="$home/data/sample-mate/brief.md"
+  assert_grep "load \`decision-hold-lifecycle\`" "$charter" \
+    "secondmate charter did not load the shared decision policy for detailed investigations"
+  pass "fm-brief.sh: investigation and visual-review completions load the shared decision policy"
+}
+
 test_script_parses
 test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
@@ -301,3 +320,4 @@ test_herdr_lab_omission_is_loud_for_ship_and_scout
 test_herdr_lab_contract_applies_to_scouts_but_not_secondmates
 test_secondmate_no_projects_charter
 test_pause_verb_override_renders_all_brief_scaffolds
+test_scout_and_secondmate_load_decision_hold_policy
