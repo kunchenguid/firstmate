@@ -80,6 +80,16 @@ validate_one_line() {  # <label> <value>
   esac
 }
 
+sha256_text() {  # <text>
+  if command -v shasum >/dev/null 2>&1; then
+    printf '%s' "$1" | shasum -a 256 | awk '{print $1}'
+  elif command -v sha256sum >/dev/null 2>&1; then
+    printf '%s' "$1" | sha256sum | awk '{print $1}'
+  else
+    fail "shasum or sha256sum is required"
+  fi
+}
+
 hold_id() {  # <origin-id> <decision-key>
   validate_slug origin-id "$1"
   validate_slug decision-key "$2"
@@ -230,6 +240,7 @@ command_hold() {
 command_complete() {
   local origin=${1:-} meta previous='' supplied='' keys='' key status_file open key_seen=0 has_meta=0
   [ "$#" -ge 2 ] || { usage >&2; exit 2; }
+  validate_slug origin-id "$origin"
   shift
   meta="$STATE/$origin.meta"
   [ -f "$meta" ] && has_meta=1
@@ -290,6 +301,7 @@ EOF
 command_verify() {
   local origin=${1:-} meta reviewed keys key open
   [ "$#" -eq 1 ] || { usage >&2; exit 2; }
+  validate_slug origin-id "$origin"
   meta="$STATE/$origin.meta"
   [ -f "$meta" ] || fail "origin metadata is absent: $meta"
   require_tasks_axi
@@ -317,7 +329,7 @@ EOF
 }
 
 command_resolve() {
-  local origin=${1:-} key=${2:-} decision_file='' id='' decision='' body='' routed='' dep show blocked state hold_show hold_body
+  local origin=${1:-} key=${2:-} decision_file='' id='' decision='' decision_digest='' body='' routed='' routed_csv='' dep show blocked state hold_show hold_body resolution_prefix resolution_fields recorded_digest recorded_routes
   [ "$#" -ge 2 ] || { usage >&2; exit 2; }
   shift 2
   while [ "$#" -gt 0 ]; do
@@ -338,9 +350,25 @@ command_resolve() {
     || fail "decision file exceeds 8192 bytes"
   [ -n "$routed" ] || fail "at least one --routed-to task is required"
   routed=$(printf '%s\n' "$routed" | tr ' ' '\n' | sed '/^$/d' | LC_ALL=C sort -u | paste -sd' ' -)
+  routed_csv=$(printf '%s\n' "$routed" | tr ' ' ',')
+  decision_digest=$(sha256_text "$decision")
   require_tasks_axi
   id=$(hold_id "$origin" "$key")
   if verify_hold_resolved "$id"; then
+    hold_show=$(task_show "$id")
+    hold_body=$(show_field "$hold_show" body)
+    resolution_prefix='"Resolution recorded by fm-decision-hold.\nDecision digest: '
+    case "$hold_body" in
+      "$resolution_prefix"*) resolution_fields=${hold_body#"$resolution_prefix"} ;;
+      *) fail "resolved captain hold $id has no retry identity record" ;;
+    esac
+    recorded_digest=${resolution_fields%%\\n*}
+    resolution_fields=${resolution_fields#*\\nRouted identities: }
+    recorded_routes=${resolution_fields%%\\n*}
+    [ "$recorded_digest" = "$decision_digest" ] \
+      || fail "resolved captain hold $id records a different captain decision"
+    [ "$recorded_routes" = "$routed_csv" ] \
+      || fail "resolved captain hold $id records different routed work"
     printf 'resolved: %s\n' "$id"
     return 0
   fi
@@ -364,7 +392,7 @@ command_resolve() {
     esac
   done
 
-  body=$(printf 'Resolution recorded by fm-decision-hold.\n\nCaptain decision:\n%s\n\nRouted work:\n' "$decision")
+  body=$(printf 'Resolution recorded by fm-decision-hold.\nDecision digest: %s\nRouted identities: %s\n\nCaptain decision:\n%s\n\nRouted work:\n' "$decision_digest" "$routed_csv" "$decision")
   for dep in $routed; do
     body="${body}- ${dep}"$'\n'
   done

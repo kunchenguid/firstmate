@@ -207,9 +207,25 @@ EOF
   assert_contains "$show" "held: yes" "failed routing attempt released the hold"
   tasks_in "$home" block sample-route-implementation --by "$route_hold" >/dev/null \
     || fail "could not route dependent work behind the decision hold"
+  tasks_in "$home" add sample-route-followup "Check the selected sample route" \
+    --kind ship --repo sample --blocked-by "$route_hold" >/dev/null \
+    || fail "could not create second dependent work fixture"
   run_decisions "$home" resolve "$id" route --decision-file "$home/route-decision.txt" \
     --routed-to sample-route-implementation >/dev/null \
     || fail "could not durably resolve and route the captain decision"
+  run_decisions "$home" resolve "$id" route --decision-file "$home/route-decision.txt" \
+    --routed-to sample-route-implementation >/dev/null \
+    || fail "identical resolution retry was not idempotent"
+  printf 'Use route south for the sample system.\n' > "$home/changed-route-decision.txt"
+  if run_decisions "$home" resolve "$id" route --decision-file "$home/changed-route-decision.txt" \
+    --routed-to sample-route-implementation > "$home/drifted-decision.out" 2> "$home/drifted-decision.err"; then
+    fail "resolution retry accepted a different captain decision"
+  fi
+  if run_decisions "$home" resolve "$id" route --decision-file "$home/route-decision.txt" \
+    --routed-to sample-route-implementation --routed-to sample-route-followup \
+    > "$home/drifted-routes.out" 2> "$home/drifted-routes.err"; then
+    fail "resolution retry accepted a different routed task set"
+  fi
   show=$(tasks_in "$home" show "$route_hold" --full)
   assert_contains "$show" "state: done" "resolved hold did not close"
   assert_contains "$show" "Resolution recorded by fm-decision-hold" "resolved hold lost the decision record"
@@ -223,6 +239,24 @@ EOF
       and (.decisions_open | any(.id == "sample-systems-review") | not)
   ' >/dev/null || fail "resolved or decision-like report prose produced a false hold: $json"
   pass "captain holds are idempotent, distinct, teardown-safe, Bearings-visible, and durably routed before close"
+}
+
+test_origin_slug_validation_precedes_path_construction() {
+  local home escaped
+  home=$(make_home origin-validation)
+  escaped="$home/escaped-origin.meta"
+  printf 'sentinel=unchanged\n' > "$escaped"
+  if run_decisions "$home" complete ../escaped-origin --none \
+    > "$home/invalid-complete.out" 2> "$home/invalid-complete.err"; then
+    fail "completion accepted an origin path traversal"
+  fi
+  if run_decisions "$home" verify ../escaped-origin \
+    > "$home/invalid-verify.out" 2> "$home/invalid-verify.err"; then
+    fail "verification accepted an origin path traversal"
+  fi
+  [ "$(cat "$escaped")" = "sentinel=unchanged" ] \
+    || fail "invalid origin changed metadata outside the state directory"
+  pass "completion and verification validate origins before constructing paths"
 }
 
 test_visual_review_uses_shared_completion_owner() {
@@ -328,6 +362,7 @@ EOF
 
 test_uninventoried_report_decision_refuses_completion
 test_structured_holds_survive_teardown_and_route_resolution
+test_origin_slug_validation_precedes_path_construction
 test_visual_review_uses_shared_completion_owner
 test_none_inventory_and_resolved_prose_do_not_create_holds
 test_secondmate_hold_stays_in_authoritative_home
