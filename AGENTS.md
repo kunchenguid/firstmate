@@ -470,9 +470,12 @@ After any merge you perform without asking the captain, post a one-line "merged 
 For `no-mistakes`-mode ship tasks, when a crewmate's status says `done`, trigger validation using the crew's harness from `state/<id>.meta`.
 Load `harness-adapters` for the target harness's skill invocation form; natural language also works if uncertain.
 
-The crewmate drives the no-mistakes pipeline (review, test, document, lint, push, PR, CI) itself.
+The task worker that starts a no-mistakes run drives the pipeline (review, test, document, lint, push, PR, CI) itself and owns every `no-mistakes axi run` and `no-mistakes axi respond` call through the next gate or outcome.
 The ship brief intentionally does not restate no-mistakes gate mechanics; it points the crewmate to the version-matched SKILL.md loaded by `/no-mistakes`, `no-mistakes axi run --help`, and per-response `help` lines.
-Firstmate's wrapper stays narrow: `ask-user` findings return through `needs-decision`, captain-owned decisions go back through `no-mistakes axi respond`, crewmate validation avoids `--yes`, and CI-green completion is reported as `done: PR {url} checks green`.
+Firstmate's wrapper stays narrow: `ask-user` findings return through `needs-decision`, and CI-green completion is reported as `done: PR {url} checks green`.
+Firstmate never invokes `no-mistakes axi respond` for a crew-owned run.
+Instead, Firstmate sends the same task worker one exact single-line `fm-send` decision naming the decision key, step, action, finding IDs where applicable, instructions where applicable, and exact command to execute; it requires a matching `resolved` event carrying the same key, forbids `--yes`, and requires the worker to process every synchronous return until completion or a genuinely new escalation.
+After `fm-send` verifies submission, Firstmate immediately resumes fleet supervision.
 That checks-green status is owed at the CI-ready return point, when `/no-mistakes` first reports CI green, not after the monitor-until-merge loop observes the PR merged or closed.
 Use chat for yes/no decisions; use lavish-axi when there are multiple findings or options to triage.
 
@@ -619,7 +622,6 @@ On every verified primary harness, "no turn ends blind" has a structural backsto
 Watcher liveness is harness-aware.
 Do not assume one primary harness can use another harness's foreground or background shape.
 For example, Claude uses a background-notify cycle, while Codex intentionally uses bounded foreground checkpoints.
-A crewmate driving its own `no-mistakes` validation still drives that gate loop synchronously and processes every return, never idle-waiting for its own validation run to advance on its own.
 
 Token discipline: for a crewmate's current state prefer `bin/fm-crew-state.sh <id>`, which looks for a branch-matched run-step before checking pane liveness, then falls back to the pane and log in that cheap-first order and treats the status log's last line as a wake event rather than the current state; default peeks to 40 lines; never stream a pane repeatedly through yourself; batch what you tell the captain.
 The context-% shown in a peek is not actionable as crew health; ignore it and intervene only on real signals (`signal`, `stale`, `needs-decision`, `blocked`), looping or confusion in the pane, or a question the brief already answers.
