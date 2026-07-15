@@ -873,6 +873,10 @@ case "$WT_WAIT_TRIES" in ''|*[!0-9]*|0) WT_WAIT_TRIES=60 ;; esac
 WT_WAIT_ROUNDS=${FM_SPAWN_WT_WAIT_ROUNDS:-3}
 case "$WT_WAIT_ROUNDS" in ''|*[!0-9]*|0) WT_WAIT_ROUNDS=3 ;; esac
 WT_WAIT_INTERVAL=${FM_SPAWN_WT_WAIT_INTERVAL:-1}
+if ! [[ "$WT_WAIT_INTERVAL" =~ ^([0-9]+([.][0-9]*)?|[.][0-9]+)$ ]]; then
+  echo "spawn: invalid worktree wait interval '$WT_WAIT_INTERVAL'; using 1s" >&2
+  WT_WAIT_INTERVAL=1
+fi
 
 if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   spawn_send_text_line "$WT_TARGET" 'treehouse get'
