@@ -64,6 +64,7 @@ The shared no-mistakes gate refusal used by `fm-spawn.sh`, `fm-send.sh`, and `fm
 | `fm-peek.sh`             | Print a bounded tail of a crewmate endpoint                                          |
 | `fm-pr-check.sh`         | Record `pr=` and `pr_head=` for a PR-ready task, then arm the watcher's merge poll   |
 | `fm-pr-merge.sh`         | Record PR metadata, then merge a task's PR from its full GitHub URL                  |
+| `fm-pr-screenshots.sh`   | Upload UI screenshots as GitHub release assets and print PR-embeddable markdown, or `embed` it into an existing PR body; `--dry-run` prints the deterministic markdown offline (docs/pr-screenshots.md) |
 | `fm-promote.sh`          | Promote a scout task in place to a protected ship task                               |
 | `fm-teardown.sh`         | Fail-closed teardown: return landed ship worktrees, require scout reports, retire secondmate homes |
 | `fm-harness.sh`          | Detect the running harness and resolve crew or secondmate harness, model, and effort |
