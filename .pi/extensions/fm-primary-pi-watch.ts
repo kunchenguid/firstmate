@@ -43,6 +43,7 @@ type ArmChild = ChildProcessByStdio<null, Readable, Readable>;
 
 let child: ArmChild | null = null;
 const ownedGroups = new Set<number>();
+const closingChildren = new Map<number, ArmChild>();
 const intentionalStops = new WeakSet<ArmChild>();
 let seq = 0;
 
@@ -125,6 +126,8 @@ function failureLine(stdout: string, stderr: string, code: number | null): strin
 export default function (pi: ExtensionAPI) {
   function stopOwnedGroups(): void {
     for (const pid of ownedGroups) {
+      const closingChild = closingChildren.get(pid);
+      if (closingChild) intentionalStops.add(closingChild);
       spawnSync(
         "bash",
         ["-c", 'kill -TERM -- "-$1" 2>/dev/null || true; sleep 0.2; kill -KILL -- "-$1" 2>/dev/null || true', "_", String(pid)],
@@ -181,7 +184,10 @@ export default function (pi: ExtensionAPI) {
       detached: true,
     });
     child = armChild;
-    if (armChild.pid) ownedGroups.add(armChild.pid);
+    if (armChild.pid) {
+      ownedGroups.add(armChild.pid);
+      closingChildren.set(armChild.pid, armChild);
+    }
     let stdout = "";
     let stderr = "";
     armChild.stdout.on("data", (chunk: Buffer) => {
@@ -194,7 +200,10 @@ export default function (pi: ExtensionAPI) {
       if (child === armChild) child = null;
     });
     armChild.on("close", async (code: number | null) => {
-      if (armChild.pid) ownedGroups.delete(armChild.pid);
+      if (armChild.pid) {
+        ownedGroups.delete(armChild.pid);
+        closingChildren.delete(armChild.pid);
+      }
       const stoppedByExtension = intentionalStops.has(armChild);
       intentionalStops.delete(armChild);
       if (stoppedByExtension) return;
@@ -209,7 +218,10 @@ export default function (pi: ExtensionAPI) {
     });
     armChild.on("error", async (error: Error) => {
       if (child === armChild) child = null;
-      if (armChild.pid) ownedGroups.delete(armChild.pid);
+      if (armChild.pid) {
+        ownedGroups.delete(armChild.pid);
+        closingChildren.delete(armChild.pid);
+      }
       const stoppedByExtension = intentionalStops.has(armChild);
       intentionalStops.delete(armChild);
       if (stoppedByExtension) return;
