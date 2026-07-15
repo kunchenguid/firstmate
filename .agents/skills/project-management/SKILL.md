@@ -64,6 +64,10 @@ Run no-mistakes initialization only for `no-mistakes` projects:
 cd projects/<name> && no-mistakes init && no-mistakes doctor
 ```
 
+When the current GitHub user cannot push to the project's upstream, as with a fork-contributed upstream such as the firstmate repo itself, initialize with `no-mistakes init --fork-url git@github.com:<you>/<repo>.git` instead, so the gate pushes branches to the writable fork and opens the PR cross-repo.
+Plain `no-mistakes init` is only for an upstream you can push to directly.
+`CONTRIBUTING.md` owns the fork onboarding detail, and `bin/fm-gate-fork-assert.sh`, surfaced as the session-start `GATE_FORK:` line, catches a missing or non-writable fork target before a ship wastes the whole pipeline and 403s at push.
+
 Initialization configures the local gate and does not vendor a no-mistakes skill into the project.
 Do not create a commit merely because initialization ran.
 If doctor reports an environment, authentication, or daemon problem, resolve that blocker before dispatching work and never restart the shared daemon from a project operation.

@@ -11,6 +11,7 @@
 #                 "CREW_DISPATCH: active config/crew-dispatch.json" plus indented rules,
 #                 "FLEET_SYNC: <repo>: skipped|recovered|STUCK: <detail>",
 #                 "TASKS_AXI: available", "TANGLE: <remediation>",
+#                 "GATE_FORK: <working_path>: ... Fix: no-mistakes init --fork-url ...",
 #                 "SECONDMATE_SYNC: secondmate <id>: skipped: <reason>",
 #                 "NUDGE_SECONDMATES: fm-<id>...",
 #                 "SECONDMATE_LIVENESS: secondmate <id>: already-live|respawned|skipped: <reason>|respawn failed: <reason>",
@@ -41,6 +42,10 @@
 #          A TANGLE line means the firstmate primary checkout (FM_ROOT) is stranded
 #          on a feature branch instead of its default branch - a crewmate's work
 #          landed in the primary instead of its own worktree; restore it per the line.
+#          A GATE_FORK line means a gate-initialized repo whose upstream the
+#          current gh user cannot push to has a missing or non-writable fork_url,
+#          so the next no-mistakes ship would 403 at the push step (7 of 9) after
+#          the whole pipeline; fm-gate-fork-assert.sh owns the check and message.
 #          treehouse is also MISSING when its installed version lacks
 #          "treehouse get --lease" support.
 #          no-mistakes is also MISSING when its installed version is older than
@@ -624,6 +629,11 @@ if [ -n "$tangle_branch" ]; then
     echo "TANGLE: primary checkout on feature branch '$tangle_branch' (expected '$tangle_default'); the work is safe on that ref - restore the primary with: git -C $FM_ROOT checkout $tangle_default, then re-validate the branch in a proper worktree"
   fi
 fi
+# Fork-push pre-flight: a gate-initialized repo whose upstream the current gh
+# user cannot push to must have a push-writable fork_url, or the next ship 403s
+# at the push step after the whole pipeline. fm-gate-fork-assert.sh owns the
+# check and the GATE_FORK: line; read-only, best-effort, never fatal here.
+"$SCRIPT_DIR/fm-gate-fork-assert.sh" 2>/dev/null || true
 crew=
 [ -f "$CONFIG/crew-harness" ] && crew=$(tr -d '[:space:]' < "$CONFIG/crew-harness" || true)
 [ -n "$crew" ] && [ "$crew" != "default" ] && echo "CREW_HARNESS_OVERRIDE: $crew"
