@@ -23,7 +23,8 @@ Firstmate requires session-scoped workspace, tab, pane, agent, event, send, capt
 Every Firstmate call passes an explicit trailing `--session <name>`.
 
 Never scope operational automation only through ambient `HERDR_SESSION`.
-Lifecycle verification must use a named non-default lab session and a guarded helper that refuses the `default` session immediately before stop and delete.
+Lifecycle verification must use a named non-default lab session and a guarded helper that refuses the `default` session immediately before every production guarded stop.
+Herdr 0.7.3 production teardown never issues `session delete`: its conditional-delete hook returns code 125, preserves the stopped session and ownership evidence, and reports recovery guidance.
 
 ## Configuration and readiness
 
@@ -202,8 +203,10 @@ The production spawn path created an isolated E2E task, omitted `backend=` from 
 The live endpoint accepted a steer, the watcher surfaced a signal wake, guarded stop and reprovision recovered the runtime, and production teardown removed the endpoint, worktree, and metadata.
 Guarded lab teardown stopped the owned running instance, verified the exact stopped record and untouched baseline, refused deletion because Herdr 0.7.3 lacks atomic proof, and retained ownership evidence until the isolated test root was removed.
 
-The helper polls a bounded interval for confirmed process and inventory absence after stop and delete while rejecting default, replaced, or ambiguous session records at every destructive boundary.
-Regression coverage exercises live-delete rejection, delayed deletion with a nonzero delete exit, process-survival races after stop, instance replacement, signal-safe lifecycle-lock cleanup, and fail-closed default-session protection.
+In the real Herdr 0.7.3 path, the helper confirms process exit and the stopped inventory after guarded stop, receives code 125 from the production conditional-delete hook, and returns with the session, tripwire, and nonce preserved.
+It does not enter post-delete absence polling.
+Bounded post-delete polling and delayed deletion with a nonzero delete exit are exercised only through the injected backend-atomic fake used by lifecycle and race regressions; they are not evidence that Herdr 0.7.3 can delete the stopped session safely.
+The remaining regressions cover live-delete rejection, process-survival races after stop, instance replacement, signal-safe lifecycle-lock cleanup, and fail-closed default-session protection.
 
 ### Canonical guide acceptance run
 
