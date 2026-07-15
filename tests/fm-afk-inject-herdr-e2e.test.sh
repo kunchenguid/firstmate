@@ -201,7 +201,24 @@ chmod +x "$LOOP_SCRIPT"
 
 fm_backend_herdr_send_text_line "$SUPERVISOR_TARGET" "bash '$LOOP_SCRIPT' '$LOG_FILE'" \
   || fail "could not start the supervisor-loop script in the scratch herdr pane"
-sleep 1  # let the loop start and settle
+# Wait for the loop to actually start drawing its bordered composer row before
+# trusting the pane: a fixed sleep raced shell/bash startup, so a slow launch
+# left the self-check (and scenarios) typing into a bare shell prompt instead
+# of the composer (capture showed 'selfcheck-marker-12345%').
+wait_composer_ready() {
+  local i=0
+  while [ "$i" -lt 40 ]; do
+    if fm_backend_herdr_capture "$SUPERVISOR_TARGET" 10 2>/dev/null | grep -q '│ >'; then
+      return 0
+    fi
+    sleep 0.25
+    i=$((i + 1))
+  done
+  echo "supervisor-loop composer never appeared in the scratch herdr pane:" >&2
+  fm_backend_herdr_capture "$SUPERVISOR_TARGET" 10 2>/dev/null | sed 's/^/    /' >&2
+  fail "supervisor-loop.sh did not start drawing its composer"
+}
+wait_composer_ready
 
 # --- herdr shim: forwards to the real binary, optionally swallows one Enter --
 REAL_HERDR=$(command -v herdr)
