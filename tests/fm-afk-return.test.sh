@@ -24,6 +24,11 @@ install_runner() {  # <case-dir>
 [ "${1:-}" = stop ] || exit 2
 printf 'stop\n' >> "$FM_HOME/stop.log"
 rm -f "$FM_HOME/state/.afk"
+if [ -e "$FM_HOME/state/.fail-terminal-stop-once" ]; then
+  rm -f "$FM_HOME/state/.fail-terminal-stop-once"
+  exit 1
+fi
+rm -f "$FM_HOME/state/.afk-daemon-terminal"
 SH
   cat > "$dir/bin/fm-wake-drain.sh" <<'SH'
 #!/usr/bin/env bash
@@ -174,7 +179,33 @@ test_away_reentry_refuses_pending_return_gate() {
   pass "away-mode re-entry fails closed while the prior return catch-up is pending"
 }
 
+test_check_retries_recorded_terminal_teardown() {
+  local dir gate out rc
+  dir="$TMP_ROOT/terminal-teardown"
+  install_runner "$dir"
+  gate="$dir/home/state/.afk-return-catchup"
+  date +%s > "$dir/home/state/.afk"
+  printf 'herdr\tsynthetic:pane\tsynthetic-workspace\n' > "$dir/home/state/.afk-daemon-terminal"
+  touch "$dir/home/state/.fail-terminal-stop-once"
+
+  set +e
+  out=$(run_return "$dir" begin)
+  rc=$?
+  set -e
+  [ "$rc" -eq 3 ] || fail "failed terminal teardown should keep return catch-up gated (rc=$rc): $out"
+  [ -e "$gate" ] || fail "failed terminal teardown cleared the return gate"
+  [ -e "$dir/home/state/.afk-daemon-terminal" ] || fail "failed terminal teardown discarded its durable record"
+  [ ! -e "$dir/home/state/.afk" ] || fail "failed terminal teardown did not preserve stop ordering"
+
+  out=$(run_return "$dir" check) || fail "check did not retry recorded terminal teardown: $out"
+  [ ! -e "$dir/home/state/.afk-daemon-terminal" ] || fail "successful check left the terminal teardown record behind"
+  [ ! -e "$gate" ] || fail "successful terminal teardown retry left the return gate behind"
+  [ "$(wc -l < "$dir/home/stop.log" | tr -d ' ')" -eq 2 ] || fail "check did not retry terminal teardown exactly once"
+  pass "check retries recorded terminal teardown and keeps catch-up gated until success"
+}
+
 test_return_gate_orders_catchup_before_bearings
 test_explicit_reclassification_requires_durable_reason
 test_captain_decision_does_not_masquerade_as_firstmate_blocker
 test_away_reentry_refuses_pending_return_gate
+test_check_retries_recorded_terminal_teardown

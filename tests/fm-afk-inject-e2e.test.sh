@@ -341,19 +341,14 @@ test_scenario_b() {
   # swallowed Enter, the retry path fires).
   sleep 8
 
-  # Assert: exactly ONE digest in the log (no duplicate, no loss).
-  local digest_count
-  digest_count=$(grep -c 'Supervisor escalate' "$LOG_FILE" || true)
-  [ "$digest_count" -eq 1 ] \
-    || fail "Scenario B: expected exactly 1 digest, got $digest_count (duplicate or lost)"
-
-  # Assert: the digest is not concatenated with itself (two markers in one line).
-  if grep -q "$(printf '\x1f').*$(printf '\x1f')" "$LOG_FILE"; then
-    fail "Scenario B: digest concatenated with itself (two sentinel markers in one line)"
-  fi
+  # Assert: exactly ONE terminal-safe marker in the log (no duplicate, no loss).
+  local marker_count
+  marker_count=$(awk -F '\t' '{ hex=$1; count += gsub(/e281a3/, "", hex) } END { print count + 0 }' "$LOG_FILE")
+  [ "$marker_count" -eq 1 ] \
+    || fail "Scenario B: expected exactly 1 U+2063 marker, got $marker_count (duplicate or lost)"
 
   # Assert: the digest line is classified as "injection" and starts with the
-  # sentinel marker (hex starts with 1f).
+  # terminal-safe sentinel marker (hex starts with e281a3).
   local digest_line digest_hex
   digest_line=$(grep 'Supervisor escalate' "$LOG_FILE" | head -1)
   digest_hex=$(printf '%s' "$digest_line" | cut -f1)
@@ -388,16 +383,11 @@ test_scenario_c() {
   echo "done: PR https://example.test/pr/300" > "$STATE_DIR/fake-c1.status"
   sleep 6
 
-  # Exactly one digest line in the submitted log (no duplicate, no loss).
-  local digest_count
-  digest_count=$(grep -c 'Supervisor escalate' "$LOG_FILE" || true)
-  [ "$digest_count" -eq 1 ] \
-    || fail "Scenario C: expected exactly 1 digest, got $digest_count"
-
-  # Not concatenated with itself (two sentinel markers in one line).
-  if grep -q "$(printf '\x1f').*$(printf '\x1f')" "$LOG_FILE"; then
-    fail "Scenario C: digest concatenated with itself (two sentinel markers in one line)"
-  fi
+  # Exactly one terminal-safe marker in the submitted log (no duplicate, no loss).
+  local marker_count
+  marker_count=$(awk -F '\t' '{ hex=$1; count += gsub(/e281a3/, "", hex) } END { print count + 0 }' "$LOG_FILE")
+  [ "$marker_count" -eq 1 ] \
+    || fail "Scenario C: expected exactly 1 U+2063 marker, got $marker_count"
 
   # The digest is classified as an injection and starts with the sentinel byte.
   local digest_line digest_hex

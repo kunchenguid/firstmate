@@ -139,21 +139,17 @@ return_guard() {
   return 0
 }
 
-return_reconcile() {  # <begin|check>
-  local mode=$1 evidence blockers drained wedge escalations lifecycle_ok=1
+return_reconcile() {
+  local evidence blockers drained wedge escalations lifecycle_ok=1
   evidence=$(mktemp "$STATE/.afk-return-evidence.XXXXXX") || return 1
   blockers=$(mktemp "$STATE/.afk-return-blockers.XXXXXX") || { rm -f "$evidence"; return 1; }
   preserve_evidence "$evidence"
 
-  if [ "$mode" = begin ] \
-     && { [ -e "$STATE/.afk" ] || [ -e "$STATE/.afk-daemon-terminal" ]; }; then
+  if [ -e "$STATE/.afk" ] || [ -e "$STATE/.afk-daemon-terminal" ]; then
     if ! "$SCRIPT_DIR/fm-afk-launch.sh" stop; then
       lifecycle_ok=0
       append_evidence lifecycle 'away-mode shutdown failed; lifecycle state preserved for retry' "$evidence"
     fi
-  elif [ "$mode" = check ] && [ -e "$STATE/.afk" ]; then
-    lifecycle_ok=0
-    append_evidence lifecycle 'away mode is active; begin must complete shutdown before check' "$evidence"
   fi
 
   drained=$("$SCRIPT_DIR/fm-wake-drain.sh") || {
@@ -212,7 +208,7 @@ main() {
   fm_lock_acquire_wait "$LOCK"
   trap 'fm_lock_release "$LOCK"' EXIT
   write_pending_seed || { fm_lock_release "$LOCK"; trap - EXIT; return 1; }
-  return_reconcile "$mode"
+  return_reconcile
   rc=$?
   fm_lock_release "$LOCK"
   trap - EXIT
