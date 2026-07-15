@@ -1502,6 +1502,64 @@ EOF
   pass "secondmate force teardown discards child work"
 }
 
+test_secondmate_force_teardown_archives_failed_axi_child_session() {
+  local home subhome childproj childwt fakebin log err recovery
+  home="$TMP_ROOT/force-axi-recovery-home"
+  subhome="$TMP_ROOT/force-axi-recovery-subhome"
+  childproj="$subhome/projects/alpha"
+  childwt="$TMP_ROOT/force-axi-recovery-child-worktree"
+  err="$TMP_ROOT/force-axi-recovery.err"
+  mkdir -p "$home/state" "$home/data" "$subhome/state" "$subhome/data/child"
+  fm_git_worktree "$childproj" "$childwt" force-axi-recovery-child
+  printf 'domain\n' > "$subhome/.fm-secondmate-home"
+  cat > "$home/state/domain.meta" <<EOF
+window=firstmate:fm-domain
+worktree=$subhome
+project=$subhome
+harness=echo
+kind=secondmate
+mode=secondmate
+yolo=off
+home=$subhome
+projects=alpha
+EOF
+  printf '%s\n' '- domain - design domain (home: '"$subhome"'; scope: design domain; projects: alpha; added 2026-06-22)' > "$home/data/secondmates.md"
+  cat > "$subhome/state/child.meta" <<EOF
+window=firstmate:fm-child
+worktree=$childwt
+project=$childproj
+harness=echo
+kind=ship
+mode=no-mistakes
+yolo=off
+EOF
+  printf '%s\n' firstmate-isolated-child-retry > "$subhome/data/child/axi-session"
+  fakebin=$(make_fake_tmux "$TMP_ROOT/force-axi-recovery-fake")
+  log="$TMP_ROOT/force-axi-recovery-fake/tmux.log"
+  cat > "$fakebin/chrome-devtools-axi" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --version ]; then
+  printf '%s\n' 0.1.26
+  exit 0
+fi
+exit 1
+SH
+  chmod +x "$fakebin/chrome-devtools-axi"
+
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/force-axi-recovery-fake/pane.txt" \
+    "$ROOT/bin/fm-teardown.sh" domain --force > /dev/null 2> "$err" \
+    || fail "force teardown failed after an AXI child stop failure"
+
+  recovery=$(find "$home/data/domain/axi-recovery" -type f -print -quit)
+  assert_present "$recovery" "force teardown did not archive the failed AXI child session"
+  assert_grep 'session=firstmate-isolated-child-retry' "$recovery" "AXI recovery record lost the session identifier"
+  assert_grep "source=$subhome/data/child/axi-session" "$recovery" "AXI recovery record lost the source path"
+  assert_grep 'AXI session cleanup failed; saved recovery record at' "$err" "force teardown did not report the archived AXI child session"
+  [ ! -d "$subhome" ] || fail "force teardown retained the retired secondmate home"
+  assert_absent "$home/state/domain.meta" "force teardown retained parent metadata after archiving AXI recovery"
+  pass "secondmate force teardown archives failed AXI child sessions"
+}
+
 test_secondmate_force_teardown_preserves_child_on_unproven_lock() {
   local home subhome childproj childwt fakebin log err rc lock
   home="$TMP_ROOT/force-lock-home"
@@ -2205,6 +2263,7 @@ test_secondmate_teardown_retires_empty_home
 test_secondmate_teardown_refuses_failed_leased_home_return
 test_secondmate_teardown_removes_plain_clone_home_without_treehouse_return
 test_secondmate_force_teardown_discards_child_work
+test_secondmate_force_teardown_archives_failed_axi_child_session
 test_secondmate_force_teardown_preserves_child_on_unproven_lock
 test_secondmate_force_teardown_allows_operational_dir_symlinks_inside_home
 test_secondmate_force_teardown_refuses_operational_dir_symlink_outside_home

@@ -195,11 +195,34 @@ remove_grok_turnend_auth() {
   rm -f "$hooks_dir/$token"
 }
 
+archive_axi_session_record() {
+  local session_file=$1 recovery_dir=$2 session extra recovery_file
+  [ -f "$session_file" ] || return 1
+  IFS= read -r session < "$session_file" || return 1
+  IFS= read -r extra < <(sed -n '2p' "$session_file") || true
+  [ -z "$extra" ] || return 1
+  [[ "$session" =~ ^firstmate-isolated-[A-Za-z0-9._-]{1,44}$ ]] || return 1
+  mkdir -p "$recovery_dir" || return 1
+  recovery_file=$(mktemp "$recovery_dir/session.XXXXXX") || return 1
+  if ! printf 'session=%s\nsource=%s\n' "$session" "$session_file" > "$recovery_file"; then
+    rm -f "$recovery_file"
+    return 1
+  fi
+  printf '%s\n' "$recovery_file"
+}
+
 remove_axi_isolated_session() {
-  local session_file=$1
+  local session_file=$1 recovery_dir=${2:-} recovery_file
   [ -e "$session_file" ] || [ -L "$session_file" ] || return 0
-  "$SCRIPT_DIR/fm-axi-isolated.sh" "$session_file" stop >/dev/null 2>&1 || true
-  rm -f "$session_file" || true
+  if "$SCRIPT_DIR/fm-axi-isolated.sh" "$session_file" stop >/dev/null 2>&1; then
+    rm -f "$session_file" || true
+    return 0
+  fi
+  if [ -n "$recovery_dir" ] && recovery_file=$(archive_axi_session_record "$session_file" "$recovery_dir"); then
+    echo "warning: AXI session cleanup failed; saved recovery record at $recovery_file" >&2
+  else
+    echo "warning: AXI session cleanup failed; retained session record at $session_file" >&2
+  fi
 }
 
 # Resolve the PR number for a worktree branch via gh-axi. Echoes the number on a
@@ -995,7 +1018,7 @@ cleanup_firstmate_home_children() {
       fi
     fi
     remove_grok_turnend_auth "$sub_state" "$child_id"
-    remove_axi_isolated_session "$home/data/$child_id/axi-session"
+    remove_axi_isolated_session "$home/data/$child_id/axi-session" "$DATA/$ID/axi-recovery"
     rm -f "$sub_state/$child_id.status" "$sub_state/$child_id.turn-ended" "$sub_state/$child_id.check.sh" "$sub_state/$child_id.meta" "$sub_state/$child_id.pi-ext.ts" "$sub_state/$child_id.grok-turnend-token"
   done
 }
