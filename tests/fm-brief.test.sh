@@ -58,7 +58,7 @@ test_ship_modes_generate_clean_briefs() {
     assert_no_grep "EOF" "$brief" "$id: brief leaked a heredoc EOF marker (unterminated heredoc)"
     case "$proj" in
       no-registry-proj)
-        assert_grep "Follow the no-mistakes guidance for the mechanics" "$brief" \
+        assert_grep "Follow no-mistakes' own guidance for the mechanics" "$brief" \
           "$id: no-mistakes contract was not rendered literally"
         ;;
       direct-proj)
@@ -84,7 +84,7 @@ test_no_mistakes_dod_contract() {
   FM_HOME="$home" /bin/bash "$ROOT/bin/fm-brief.sh" "$id" some-proj >/dev/null 2>&1
   brief="$home/data/$id/brief.md"
   assert_present "$brief" "brief was not scaffolded"
-  assert_grep "Follow the no-mistakes guidance for the mechanics" "$brief" \
+  assert_grep "Follow no-mistakes' own guidance for the mechanics" "$brief" \
     "no-mistakes DOD lost its guidance-reference sentence"
   assert_grep 'When the decision comes back, feed it to the gate with `no-mistakes axi respond` and let the pipeline apply it - do not route the question to "the user" or implement the fix yourself.' "$brief" \
     "no-mistakes DOD lost its ask-user response contract"
@@ -107,7 +107,7 @@ test_scout_generation_remains_unaffected() {
     "scout brief lost its report-only contract"
   assert_grep "Write your findings to \`$home/data/$id/report.md\`" "$brief" \
     "scout brief lost its report path contract"
-  assert_no_grep "Follow the no-mistakes guidance for the mechanics" "$brief" \
+  assert_no_grep "Follow no-mistakes' own guidance for the mechanics" "$brief" \
     "scout brief unexpectedly received the ship no-mistakes contract"
   pass "fm-brief.sh: scout generation remains unaffected"
 }

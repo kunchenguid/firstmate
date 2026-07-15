@@ -77,6 +77,7 @@ jobs:
           /bin/bash --version | head -1
           command -v jq >/dev/null || { echo "::error::jq is required"; exit 1; }
           /bin/bash -n bin/fm-fleet-snapshot.sh
+          /bin/bash tests/fm-brief.test.sh
 
           snapshot_output=$(/bin/bash tests/fm-fleet-snapshot-view.test.sh)
           printf '%s\n' "$snapshot_output"
