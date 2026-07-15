@@ -498,6 +498,85 @@ EOF
   pass "Pi orphaned delayed-close reap stays silent"
 }
 
+test_pi_orphaned_delayed_close_preserves_buffered_wake() {
+  local repo home plugin launch_log wake_log canon_watch out status
+  repo="$TMP_ROOT/pi-orphaned-buffered-wake-root"
+  home="$TMP_ROOT/pi-orphaned-buffered-wake-home"
+  launch_log="$TMP_ROOT/pi-orphaned-buffered-wake-launches"
+  wake_log="$TMP_ROOT/pi-orphaned-buffered-wake-wakes"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cp "$ROOT/bin/fm-wake-lib.sh" "$repo/bin/fm-wake-lib.sh"
+  : > "$repo/bin/fm-watch.sh"
+  canon_watch="$(cd "$repo/bin" && pwd -P)/fm-watch.sh"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+set -u
+mkdir -p "$FM_HOME/state/.watch.lock"
+printf '%s\n' "$$" >> "${FM_LAUNCH_LOG:?}"
+printf '%s\n' "$$" > "$FM_HOME/state/.watch.lock/pid"
+printf '%s\n' "$FM_HOME" > "$FM_HOME/state/.watch.lock/fm-home"
+printf '%s\n' "${FM_CANON_WATCH:?}" > "$FM_HOME/state/.watch.lock/watcher-path"
+LC_ALL=C ps -p "$$" -o lstart= -o command= | sed 's/^[[:space:]]*//' > "$FM_HOME/state/.watch.lock/pid-identity"
+touch "$FM_HOME/state/.last-watcher-beat"
+printf 'signal: buffered wake\n'
+/bin/sh -c 'trap "" TERM; sleep 300' &
+printf '%s\n' "$!" >/dev/null
+exit 0
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh" "$repo/bin/fm-watch.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_LAUNCH_LOG="$launch_log" FM_WAKE_LOG="$wake_log" FM_CANON_WATCH="$canon_watch" node --input-type=module 2>&1 <<'EOF'
+import { appendFileSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+let tool = null;
+const pi = {
+  on() {},
+  registerCommand() {},
+  registerTool(candidate) {
+    if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+  },
+  sendUserMessage: async (message) => {
+    appendFileSync(process.env.FM_WAKE_LOG, `${message}\n---\n`);
+  },
+};
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+const first = await tool.execute("first", {}, undefined, undefined, {});
+if (!first.content[0].text.includes("started Pi extension arm child 1")) throw new Error(first.content[0].text);
+for (let i = 0; i < 100; i += 1) {
+  try {
+    if (readFileSync(process.env.FM_LAUNCH_LOG, "utf8").trim()) break;
+  } catch {}
+  await new Promise((resolve) => setTimeout(resolve, 20));
+}
+utimesSync(`${process.env.FM_HOME}/state/.last-watcher-beat`, new Date(0), new Date(0));
+const recovered = await tool.execute("recover", {}, undefined, undefined, {});
+if (!recovered.content[0].text.includes("started Pi extension arm child 2")) throw new Error(recovered.content[0].text);
+for (let i = 0; i < 100; i += 1) {
+  try {
+    if (readFileSync(process.env.FM_LAUNCH_LOG, "utf8").trim().split("\n").length === 2) break;
+  } catch {}
+  await new Promise((resolve) => setTimeout(resolve, 20));
+}
+for (let i = 0; i < 100; i += 1) {
+  try {
+    if (readFileSync(process.env.FM_WAKE_LOG, "utf8").includes("signal: buffered wake")) break;
+  } catch {}
+  await new Promise((resolve) => setTimeout(resolve, 20));
+}
+process.exit(0);
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "Pi extension must preserve buffered watcher wakes during orphaned delayed-close recovery"
+  [ -z "$out" ] || fail "Pi orphaned-buffered-wake test printed output: $out"
+  grep -F 'signal: buffered wake' "$wake_log" >/dev/null || fail "buffered delayed-close wake was lost: $(cat "$wake_log")"
+  pass "Pi orphaned delayed-close recovery preserves buffered wakes"
+}
+
 test_pi_alias_root_reuses_owned_healthy_watcher() {
   local repo alias home plugin launch_log canon_watch out status
   repo="$TMP_ROOT/pi-alias-root-real"
@@ -990,6 +1069,7 @@ test_pi_process_exit_cleanup_stops_arm_child
 test_pi_stale_child_is_reconciled_and_inherited_pipe_descendants_are_reaped
 test_pi_unexpected_arm_exit_reports_failure_wake
 test_pi_orphaned_delayed_close_reap_stays_silent
+test_pi_orphaned_delayed_close_preserves_buffered_wake
 test_pi_alias_root_reuses_owned_healthy_watcher
 test_opencode_primary_watch_plugin_static_wiring
 test_opencode_primary_watch_plugin_uses_effective_state_home

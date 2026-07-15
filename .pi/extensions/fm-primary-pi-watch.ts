@@ -113,12 +113,17 @@ function actionableLine(output: string): string {
   return lines.find((line) => /^(signal:|stale:|check:|heartbeat($|:))/.test(line)) || "";
 }
 
+function reportedFailureLine(output: string): string {
+  const lines = output.split(/\r?\n/);
+  const healthy = lines.find((line) => /^watcher: healthy\b/.test(line));
+  if (healthy) return `watcher: FAILED - Pi extension arm child found an external healthy watcher instead of owning wake delivery\n${healthy}`;
+  return lines.find((line) => /^watcher: FAILED/.test(line)) || "";
+}
+
 function failureLine(stdout: string, stderr: string, code: number | null): string {
   const combined = `${stdout}\n${stderr}`.trim();
-  const healthy = combined.split(/\r?\n/).find((line) => /^watcher: healthy\b/.test(line));
-  if (healthy) return `watcher: FAILED - Pi extension arm child found an external healthy watcher instead of owning wake delivery\n${healthy}`;
-  const failed = combined.split(/\r?\n/).find((line) => /^watcher: FAILED/.test(line));
-  if (failed) return failed;
+  const reported = reportedFailureLine(combined);
+  if (reported) return reported;
   if (code && code !== 0) return `watcher: FAILED - fm-watch-arm.sh exited ${code}${combined ? `\n${combined}` : ""}`;
   return "";
 }
@@ -204,11 +209,13 @@ export default function (pi: ExtensionAPI) {
         ownedGroups.delete(armChild.pid);
         closingChildren.delete(armChild.pid);
       }
+      const combined = `${stdout}\n${stderr}`.trim();
+      const reason = actionableLine(combined);
+      const reportedFailure = reportedFailureLine(combined);
       const stoppedByExtension = intentionalStops.has(armChild);
       intentionalStops.delete(armChild);
-      if (stoppedByExtension) return;
-      const reason = actionableLine(`${stdout}\n${stderr}`);
-      const failure = reason ? "" : failureLine(stdout, stderr, code);
+      if (stoppedByExtension && !reason && !reportedFailure) return;
+      const failure = reason ? "" : reportedFailure || failureLine(stdout, stderr, code);
       if (!reason && !failure) return;
       try {
         await sendWake(reason || failure);
