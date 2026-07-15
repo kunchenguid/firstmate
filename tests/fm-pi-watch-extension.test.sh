@@ -293,6 +293,85 @@ EOF
   pass "Pi process-exit cleanup stops the attached arm child"
 }
 
+test_pi_stale_child_is_reconciled_and_inherited_pipe_descendants_are_reaped() {
+  local repo home plugin launch_log descendant_log out status first_arm first_descendant i
+  repo="$TMP_ROOT/pi-stale-child-root"
+  home="$TMP_ROOT/pi-stale-child-home"
+  launch_log="$TMP_ROOT/pi-stale-child-launches"
+  descendant_log="$TMP_ROOT/pi-stale-child-descendants"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cp "$ROOT/bin/fm-wake-lib.sh" "$repo/bin/fm-wake-lib.sh"
+  : > "$repo/bin/fm-watch.sh"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+set -u
+mkdir -p "$FM_HOME/state/.watch.lock"
+printf '%s\n' "$$" >> "${FM_LAUNCH_LOG:?}"
+printf '%s\n' "$$" > "$FM_HOME/state/.watch.lock/pid"
+printf '%s\n' "$FM_HOME" > "$FM_HOME/state/.watch.lock/fm-home"
+printf '%s\n' "$FM_ROOT_OVERRIDE/bin/fm-watch.sh" > "$FM_HOME/state/.watch.lock/watcher-path"
+LC_ALL=C ps -p "$$" -o lstart= -o command= | sed 's/^[[:space:]]*//' > "$FM_HOME/state/.watch.lock/pid-identity"
+touch "$FM_HOME/state/.last-watcher-beat"
+/bin/sleep 300 &
+printf '%s\n' "$!" >> "${FM_DESCENDANT_LOG:?}"
+trap 'exit 0' TERM
+wait
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh" "$repo/bin/fm-watch.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_GUARD_GRACE=2 FM_LAUNCH_LOG="$launch_log" FM_DESCENDANT_LOG="$descendant_log" node --input-type=module 2>&1 <<'EOF'
+import { readFileSync, utimesSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+let tool = null;
+const pi = {
+  on() {},
+  registerCommand() {},
+  registerTool(candidate) {
+    if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+  },
+  sendUserMessage: async () => {},
+};
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+const first = await tool.execute("first", {}, undefined, undefined, {});
+if (!first.content[0].text.includes("started Pi extension arm child 1")) throw new Error(first.content[0].text);
+for (let i = 0; i < 100; i += 1) {
+  try {
+    if (readFileSync(process.env.FM_LAUNCH_LOG, "utf8").trim()) break;
+  } catch {}
+  await new Promise((resolve) => setTimeout(resolve, 20));
+}
+const healthy = await tool.execute("healthy", {}, undefined, undefined, {});
+if (!healthy.content[0].text.includes("Pi extension owns watcher pid")) throw new Error(healthy.content[0].text);
+utimesSync(`${process.env.FM_HOME}/state/.last-watcher-beat`, new Date(0), new Date(0));
+const recovered = await tool.execute("recover", {}, undefined, undefined, {});
+if (!recovered.content[0].text.includes("started Pi extension arm child 2")) throw new Error(recovered.content[0].text);
+for (let i = 0; i < 100; i += 1) {
+  if (readFileSync(process.env.FM_LAUNCH_LOG, "utf8").trim().split("\n").length === 2) break;
+  await new Promise((resolve) => setTimeout(resolve, 20));
+}
+process.exit(0);
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "Pi extension must replace a live child whose identity-matched watcher beacon is stale"
+  [ -z "$out" ] || fail "Pi stale-child reconciliation test printed output: $out"
+  first_arm=$(sed -n '1p' "$launch_log")
+  first_descendant=$(sed -n '1p' "$descendant_log")
+  i=0
+  while [ "$i" -lt 50 ] && { kill -0 "$first_arm" 2>/dev/null || kill -0 "$first_descendant" 2>/dev/null; }; do
+    sleep 0.02
+    i=$((i + 1))
+  done
+  ! kill -0 "$first_arm" 2>/dev/null || fail "the stale arm shell survived recovery"
+  ! kill -0 "$first_descendant" 2>/dev/null || fail "an inherited-pipe descendant survived exact process-group cleanup"
+  [ "$(wc -l < "$launch_log" | tr -d '[:space:]')" = 2 ] || fail "stale recovery did not launch exactly one replacement cycle"
+  pass "Pi stale child recovery checks lock+beacon health and reaps inherited-pipe descendants"
+}
+
 test_opencode_primary_watch_plugin_static_wiring() {
   local plugin text
   plugin="$ROOT/.opencode/plugins/fm-primary-watch-arm.js"
@@ -719,6 +798,7 @@ test_pi_extension_reports_external_healthy_watcher
 test_pi_tool_returns_agent_tool_result
 test_pi_process_exit_cleanup_listener_lifecycle
 test_pi_process_exit_cleanup_stops_arm_child
+test_pi_stale_child_is_reconciled_and_inherited_pipe_descendants_are_reaped
 test_opencode_primary_watch_plugin_static_wiring
 test_opencode_primary_watch_plugin_uses_effective_state_home
 test_opencode_primary_watch_plugin_sources_effective_config

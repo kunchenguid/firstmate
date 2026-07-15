@@ -107,6 +107,10 @@ cp "$ROOT/.pi/extensions/fm-primary-pi-watch.ts" "$PROJECT/.pi/extensions/fm-pri
 cp "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$PROJECT/.pi/extensions/fm-primary-turnend-guard.ts"
 cp "$ROOT/bin/fm-supervision-instructions.sh" "$PROJECT/bin/fm-supervision-instructions.sh"
 mkdir -p "$HOME_DIR/state" "$HOME_DIR/config" "$PI_DIR"
+if [ -n "${FM_PI_AUTH_DIR:-}" ]; then
+  [ -f "$FM_PI_AUTH_DIR/auth.json" ] && ln -s "$FM_PI_AUTH_DIR/auth.json" "$PI_DIR/auth.json"
+  [ -f "$FM_PI_AUTH_DIR/models.json" ] && ln -s "$FM_PI_AUTH_DIR/models.json" "$PI_DIR/models.json"
+fi
 
 "$TMUX" -L "$SOCKET" new-session -d -s "$SESSION" -c "$PROJECT" \
   "env PI_CODING_AGENT_DIR='$PI_DIR' FM_HOME='$HOME_DIR' FM_ROOT_OVERRIDE='$PROJECT' FM_POLL=1 FM_SIGNAL_GRACE=0 FM_HEARTBEAT=600 PI_OFFLINE=1 bash -lc 'printf \"%s\\n\" \"\$\$\" > \"\$FM_HOME/state/.lock\"; pi; rc=\$?; printf \"PI_EXIT=%s\\n\" \"\$rc\"; sleep 300'"

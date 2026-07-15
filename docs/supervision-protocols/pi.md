@@ -6,7 +6,7 @@ When this session owns supervision and away mode is not active:
 3. Arm supervision with the `fm_watch_arm_pi` tool.
    Use `/fm-watch-arm-pi` only as a human-entered fallback.
    Never run `bin/fm-watch-arm.sh` through Pi's bash tool because that foreground arm can wedge the agent and bypasses extension-owned cleanup.
-4. The extension starts `bin/fm-watch-arm.sh --restart`, keeps the child attached to the live Pi process, and sends a follow-up user message when the child exits with an actionable watcher reason.
+4. The extension starts `bin/fm-watch-arm.sh --restart`, validates owned supervision through the shared watcher lock-identity and beacon predicate on every repeated arm call, and sends a follow-up user message when the child exits with an actionable watcher reason.
 5. If the extension says the watcher is already healthy, do not start another cycle.
 6. If the extension reports a watcher failure, drain queued wakes, inspect the failure text, and restart Pi with both extensions loaded if needed.
 7. Never use shell `&` for watcher supervision.
@@ -26,3 +26,14 @@ Command run for the complete interactive regression: `FM_PI_LIVE_E2E=1 tests/fm-
 Observed output: `ok - Pi 0.80.5 live E2E rendered the tool, guarded once, woke, re-armed, and cleaned up on exit`.
 Command run for the installed-type contract: `tests/fm-pi-primary-types.test.sh`.
 Observed output: `ok - Pi primary extensions pass strict no-emit typecheck against Pi 0.80.5`.
+
+Verification on 2026-07-15 reproduced the false-health incident with two Herdr-backed task records, an isolated `FM_HOME`, an isolated `PI_CODING_AGENT_DIR`, and a fake backend CLI that never returned.
+Before the fix, the native event capability command blocked beneath nested `fm-watch.sh` command-substitution shells, the beacon stopped advancing, and terminating only the arm shell left descendants holding its output pipes, so Pi's child `close` event could not clear the active reference.
+The watcher now bounds both native capability probes and event waits, refreshes its beacon only while that bounded child is supervised, and terminates the exact child tree on timeout or watcher shutdown.
+The Pi extension now calls `fm_watcher_healthy` for the shared live-pid, lock-identity, home, watcher-path, and beacon predicate, accepts health only when that watcher descends from its arm process, and owns a detached process group until inherited pipes close.
+Command run for deterministic regressions: `tests/fm-supervision-events.test.sh && tests/fm-pi-watch-extension.test.sh`.
+Observed output included `ok - event_wait_or_sleep: a hung backend probe is bounded and its exact process tree is reaped` and `ok - Pi stale child recovery checks lock+beacon health and reaps inherited-pipe descendants`.
+Command run for the real lifecycle: `FM_PI_LIVE_E2E=1 FM_PI_AUTH_DIR=<existing-auth-dir> tests/fm-pi-primary-live-e2e.test.sh`.
+Observed output: `ok - Pi 0.80.7 live E2E rendered the tool, guarded once, woke, re-armed, and cleaned up on exit`.
+Command run for strict installed declarations: `PATH=<cached-typescript-bin>:$PATH tests/fm-pi-primary-types.test.sh`.
+Observed output: `ok - Pi primary extensions pass strict no-emit typecheck against Pi 0.80.7`.

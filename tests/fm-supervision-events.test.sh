@@ -93,14 +93,15 @@ pass "event_wait_or_sleep: herdr windows go on the event pane list, but kind=sec
 
 reset_state
 fm_write_meta "$STATE_DIR/tk3.meta" "window=default:wG:pQ" "backend=herdr" "kind=ship"
-CAP_CALLS=0
-fm_backend_events_capable() { CAP_CALLS=$((CAP_CALLS + 1)); return 0; }
+: > "$TMP/capcalls"
+fm_backend_events_capable() { printf 'CAP\n' >> "$TMP/capcalls"; return 0; }
 fm_backend_wait_transition() {
   [ "${FM_BACKEND_EVENTS_CAPABILITY_CONFIRMED:-0}" = 1 ] || fail "cached capability verdict was not passed to the wait"
   return 1
 }
 event_wait_or_sleep
 event_wait_or_sleep
+CAP_CALLS=$(wc -l < "$TMP/capcalls" | tr -d '[:space:]')
 [ "$CAP_CALLS" = 1 ] || fail "capability probe must be memoized across waits, got $CAP_CALLS calls"
 pass "event_wait_or_sleep: one cached capability probe owns validation across bounded waits"
 
@@ -128,5 +129,28 @@ event_wait_or_sleep   # disabled: sleeps without calling wait_transition
 WTN=$(wc -l < "$TMP/wtcalls" | tr -d '[:space:]')
 [ "$WTN" = 2 ] || fail "after EVENT_CAP_FAIL_MAX connect failures the event path must be disabled for the process (expected 2 wait_transition calls, got $WTN)"
 pass "event_wait_or_sleep: consecutive event-path failures disable the fast-path and revert to pure polling (fail-closed)"
+
+# --- event_wait_or_sleep: a hung capability subprocess is killed exactly -----
+
+reset_state
+fm_write_meta "$STATE_DIR/tk6.meta" "window=isolated:wG:pQ" "backend=herdr" "kind=ship"
+EVENT_WAIT_TIMEOUT=1
+fm_backend_events_capable() {
+  /bin/sleep 30 &
+  printf '%s\n' "$!" > "$TMP/hung-capability.pid"
+  wait "$!"
+}
+started=$(date +%s)
+event_wait_or_sleep
+elapsed=$(( $(date +%s) - started ))
+[ "$elapsed" -lt 5 ] || fail "a hung event capability probe froze the watcher for ${elapsed}s"
+hung_pid=$(cat "$TMP/hung-capability.pid")
+hung_stat=$(ps -p "$hung_pid" -o stat= 2>/dev/null | tr -d '[:space:]' || true)
+case "$hung_stat" in
+  ''|Z*) : ;;
+  *) hung_command=$(ps -p "$hung_pid" -o command= 2>/dev/null || true)
+     fail "the timed-out capability subprocess survived exact-tree cleanup (stat $hung_stat, command $hung_command)" ;;
+esac
+pass "event_wait_or_sleep: a hung backend probe is bounded and its exact process tree is reaped"
 
 echo "# fm-supervision-events.test.sh: all assertions passed"

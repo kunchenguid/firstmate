@@ -37,6 +37,10 @@
 # For normal supervision, resume the session-start primary-harness protocol
 # after each printed reason. Direct duplicate invocations of this script still
 # no-op through the watcher singleton lock.
+# Native backend probes and waits run as bounded task-owned subprocess trees.
+# The watcher refreshes its beacon while they run and terminates only that exact
+# tree on timeout or watcher shutdown, so a hung backend CLI cannot freeze the
+# poll loop or leave inherited-pipe descendants behind.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -140,12 +144,89 @@ TRIAGE_LOG_MAX_BYTES=${FM_WATCH_TRIAGE_LOG_MAX_BYTES:-262144}
 # 5c trigger 3: proven-unreliable-at-runtime). A watcher restart re-probes
 # capability, so a transient herdr hiccup self-heals on the next cycle chain.
 EVENT_CAP_FAIL_MAX=${FM_EVENT_CAP_FAIL_MAX:-3}
+# Hard ceiling for one native-event capability probe or wait call. The backend
+# reader has its own timeout, but every discovery/reconcile command around it
+# must also be bounded so a stuck CLI cannot freeze the watcher and its beacon.
+EVENT_WAIT_TIMEOUT=${FM_EVENT_WAIT_TIMEOUT:-30}
 # Per-process memo for the push-capability probe (fm_backend_events_capable runs
 # a ~220KB `herdr api schema` read, too heavy to repeat every poll). Keyed by
 # "<backend>:<session>"; re-probed only when that key changes.
 _event_cap_key=""
 _event_cap_ok=0
 _event_cap_fails=0
+_bounded_pid=
+_bounded_out=
+BOUNDED_RC=0
+BOUNDED_OUTPUT=
+
+stop_process_tree() {  # <pid>
+  local pid=$1 i
+  # bounded_call launches each job in its own process group, so the negative pid
+  # targets only that call and every descendant it created.
+  kill -TERM -- "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
+  i=0
+  while [ "$i" -lt 10 ] && fm_pid_alive "$pid"; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  if fm_pid_alive "$pid"; then
+    kill -KILL -- "-$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true
+  fi
+}
+
+cleanup_bounded_call() {
+  if [ -n "$_bounded_pid" ] && fm_pid_alive "$_bounded_pid"; then
+    stop_process_tree "$_bounded_pid"
+    wait "$_bounded_pid" 2>/dev/null || true
+  fi
+  [ -z "$_bounded_out" ] || rm -f "$_bounded_out" 2>/dev/null || true
+  _bounded_pid=
+  _bounded_out=
+}
+
+# Run one shell function in a task-owned subprocess, capture its output, and
+# terminate that exact process tree if it exceeds the deadline. The parent
+# keeps beating while it waits, so the guard sees either a live bounded cycle
+# or the recovered poll loop, never a silently frozen watcher.
+bounded_call() {  # <timeout-seconds> <function> [args...]
+  local timeout=$1 started now rc
+  shift
+  case "$timeout" in ''|*[!0-9]*|0) timeout=30 ;; esac
+  BOUNDED_RC=0
+  BOUNDED_OUTPUT=
+  _bounded_out=$(mktemp "$STATE/.watch-event-output.XXXXXX") || { BOUNDED_RC=2; return; }
+  set -m
+  ( "$@" ) >"$_bounded_out" 2>/dev/null &
+  _bounded_pid=$!
+  set +m
+  started=$(date +%s)
+  while fm_pid_alive "$_bounded_pid"; do
+    now=$(date +%s)
+    if [ $((now - started)) -ge "$timeout" ]; then
+      stop_process_tree "$_bounded_pid"
+      wait "$_bounded_pid" 2>/dev/null || true
+      BOUNDED_RC=124
+      BOUNDED_OUTPUT=$(cat "$_bounded_out" 2>/dev/null || true)
+      rm -f "$_bounded_out" 2>/dev/null || true
+      _bounded_pid=
+      _bounded_out=
+      return
+    fi
+    touch "$STATE/.last-watcher-beat"
+    sleep 0.1
+  done
+  wait "$_bounded_pid" 2>/dev/null
+  rc=$?
+  BOUNDED_RC=$rc
+  BOUNDED_OUTPUT=$(cat "$_bounded_out" 2>/dev/null || true)
+  rm -f "$_bounded_out" 2>/dev/null || true
+  _bounded_pid=
+  _bounded_out=
+}
+
+wait_transition_confirmed() {
+  FM_BACKEND_EVENTS_CAPABILITY_CONFIRMED=1 fm_backend_wait_transition "$@"
+}
 
 # afk_present: 0 while the away-mode flag exists. When set, the daemon wraps this
 # watcher and owns triage, so the watcher must behave one-shot (enqueue + exit on
@@ -511,7 +592,8 @@ event_wait_or_sleep() {
   # read); re-probed only when the backend/session key changes.
   if [ "$_event_cap_key" != "$first_backend:$first_session" ]; then
     _event_cap_key="$first_backend:$first_session"
-    if fm_backend_events_capable "$first_backend" "$first_session"; then
+    bounded_call "$EVENT_WAIT_TIMEOUT" fm_backend_events_capable "$first_backend" "$first_session"
+    if [ "$BOUNDED_RC" -eq 0 ]; then
       _event_cap_ok=1
     else
       _event_cap_ok=0
@@ -523,8 +605,11 @@ event_wait_or_sleep() {
     return
   fi
 
-  rec=$(FM_BACKEND_EVENTS_CAPABILITY_CONFIRMED=1 fm_backend_wait_transition "$first_backend" "$first_session" "$POLL" "$STATE" "${windows[@]}")
-  rc=$?
+  bounded_call "$EVENT_WAIT_TIMEOUT" wait_transition_confirmed \
+    "$first_backend" "$first_session" "$POLL" "$STATE" "${windows[@]}"
+  rec=$BOUNDED_OUTPUT
+  rc=$BOUNDED_RC
+  [ "$rc" -eq 124 ] && rc=2
   case "$rc" in
     0)
       _event_cap_fails=0
@@ -600,7 +685,9 @@ if ! fm_lock_try_acquire "$WATCH_LOCK"; then
   fi
   exit 0
 fi
-trap 'fm_lock_release "$WATCH_LOCK"' EXIT
+trap 'cleanup_bounded_call; fm_lock_release "$WATCH_LOCK"' EXIT
+trap 'exit 129' HUP
+trap 'exit 143' TERM INT
 # This watcher's own pid, as recorded in the lock by fm_lock_claim (which writes
 # ${BASHPID:-$$} from this same main shell). Read directly, never via a command
 # substitution, so it matches the stored holder pid for the self-eviction check.
