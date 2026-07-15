@@ -2,13 +2,9 @@
 # Behavior tests for bin/fm-brief.sh.
 #
 # Regression coverage for the heredoc-in-command-substitution parse bug (issue
-# #166): each ship-mode branch builds its Definition-of-done text with
-# `VAR=$(cat <<EOF ... EOF)`. Bash's lexer tracks quote state through the
-# heredoc body while it scans for the matching `)` of the command
-# substitution, so a single unescaped apostrophe anywhere in that body breaks
-# parsing of the *entire rest of the script* - `bash -n` fails, not just the
-# generated brief. A plain `cat > file <<EOF ... EOF` (not wrapped in `$(...)`)
-# is unaffected, so the secondmate charter block does not need this guard.
+# #166): Bash's lexer tracks quote state through a heredoc body while it scans
+# for the matching `)` of the command substitution, so an apostrophe anywhere
+# in that body can break parsing of the entire rest of the script.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -16,12 +12,10 @@ set -u
 
 TMP_ROOT=$(fm_test_tmproot fm-brief)
 
-# The script itself must always parse. This is the direct regression test for
-# issue #166: a stray apostrophe in any of the three DOD heredoc bodies
-# (no-mistakes/direct-PR/local-only) breaks `bash -n` on the whole file.
+# The script itself must always parse under the system Bash 3.2.
 test_script_parses() {
-  bash -n "$ROOT/bin/fm-brief.sh" 2>&1 || fail "bin/fm-brief.sh fails bash -n (heredoc/quote regression)"
-  pass "fm-brief.sh: bash -n succeeds"
+  /bin/bash -n "$ROOT/bin/fm-brief.sh" 2>&1 || fail "bin/fm-brief.sh fails Bash 3.2 syntax check"
+  pass "fm-brief.sh: Bash 3.2 syntax check succeeds"
 }
 
 test_help_includes_entire_header() {
@@ -55,32 +49,67 @@ test_ship_modes_generate_clean_briefs() {
   for id_proj in "brief-nomistakes-a1:no-registry-proj" "brief-directpr-a2:direct-proj" "brief-localonly-a3:local-proj"; do
     id=${id_proj%%:*}
     proj=${id_proj##*:}
-    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" "$proj" >/dev/null 2>&1; status=$?
+    FM_HOME="$home" /bin/bash "$ROOT/bin/fm-brief.sh" "$id" "$proj" >/dev/null 2>&1; status=$?
     expect_code 0 "$status" "fm-brief.sh $id $proj should exit 0"
     brief="$home/data/$id/brief.md"
     assert_present "$brief" "$id: brief was not scaffolded"
     assert_grep "# Definition of done" "$brief" "$id: brief missing Definition of done section"
     assert_grep "{TASK}" "$brief" "$id: brief missing the {TASK} placeholder"
     assert_no_grep "EOF" "$brief" "$id: brief leaked a heredoc EOF marker (unterminated heredoc)"
+    case "$proj" in
+      no-registry-proj)
+        assert_grep "Follow the no-mistakes guidance for the mechanics" "$brief" \
+          "$id: no-mistakes contract was not rendered literally"
+        ;;
+      direct-proj)
+        assert_grep "This project ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline." "$brief" \
+          "$id: direct-PR contract was not rendered literally"
+        ;;
+      local-proj)
+        assert_grep "This project ships **local-only**: no remote, no PR, no pipeline." "$brief" \
+          "$id: local-only contract was not rendered literally"
+        ;;
+    esac
   done
   pass "fm-brief.sh: no-mistakes/direct-PR/local-only briefs generate cleanly"
 }
 
-# Pin the specific line the bug lived on: the no-mistakes DOD's no-mistakes
-# reference must render as plain prose with no dangling apostrophe artifact.
-test_no_mistakes_dod_wording() {
+# Execute the real ship path under Bash 3.2 and assert that the full no-mistakes
+# contract, including its apostrophe, survives into the generated brief.
+test_no_mistakes_dod_contract() {
   local home id brief
   home="$TMP_ROOT/wording-home"
   mkdir -p "$home/data"
   id="brief-wording-b1"
-  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj >/dev/null 2>&1
+  FM_HOME="$home" /bin/bash "$ROOT/bin/fm-brief.sh" "$id" some-proj >/dev/null 2>&1
   brief="$home/data/$id/brief.md"
   assert_present "$brief" "brief was not scaffolded"
-  assert_grep "no-mistakes itself provides for the mechanics" "$brief" \
+  assert_grep "Follow the no-mistakes guidance for the mechanics" "$brief" \
     "no-mistakes DOD lost its guidance-reference sentence"
-  assert_no_grep "no-mistakes' own guidance" "$brief" \
-    "no-mistakes DOD regressed to the apostrophe form that breaks bash -n"
-  pass "fm-brief.sh: no-mistakes DOD wording avoids the apostrophe regression"
+  assert_grep 'When the decision comes back, feed it to the gate with `no-mistakes axi respond` and let the pipeline apply it - do not route the question to "the user" or implement the fix yourself.' "$brief" \
+    "no-mistakes DOD lost its ask-user response contract"
+  assert_grep 'After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append `done: PR {url} checks green` and stop. You are finished.' "$brief" \
+    "no-mistakes DOD lost its CI-ready completion contract"
+  pass "fm-brief.sh: Bash 3.2 preserves the complete no-mistakes DOD contract"
+}
+
+# Scout generation uses a separate direct heredoc and must remain unaffected by
+# the ship-mode Definition-of-done construction.
+test_scout_generation_remains_unaffected() {
+  local home id brief
+  home="$TMP_ROOT/scout-home"
+  mkdir -p "$home/data"
+  id="brief-scout-e2"
+  FM_HOME="$home" /bin/bash "$ROOT/bin/fm-brief.sh" "$id" some-proj --scout >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_present "$brief" "scout brief was not scaffolded"
+  assert_grep "This is a SCOUT task: the deliverable is a written report, not a PR." "$brief" \
+    "scout brief lost its report-only contract"
+  assert_grep "Write your findings to \`$home/data/$id/report.md\`" "$brief" \
+    "scout brief lost its report path contract"
+  assert_no_grep "Follow the no-mistakes guidance for the mechanics" "$brief" \
+    "scout brief unexpectedly received the ship no-mistakes contract"
+  pass "fm-brief.sh: scout generation remains unaffected"
 }
 
 test_ship_project_memory_wording() {
@@ -269,7 +298,8 @@ test_pause_verb_override_renders_all_brief_scaffolds() {
 test_script_parses
 test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
-test_no_mistakes_dod_wording
+test_no_mistakes_dod_contract
+test_scout_generation_remains_unaffected
 test_ship_project_memory_wording
 test_herdr_lab_contract_is_explicit_and_complete
 test_herdr_lab_contract_quotes_foreign_firstmate_path
