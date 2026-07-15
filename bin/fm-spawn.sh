@@ -668,7 +668,7 @@ real_path_or_raw() {  # <path>
 # A Herdr spawn goes through the version-gated, workspace-per-HOME,
 # tab-per-task sequence in bin/backends/herdr.sh instead (D4/D5 as refined by
 # docs/herdr-backend.md's "workspace-per-home" pass, AGENTS.md task
-# herdr-sm-spaces-k4). Both branches converge on the same $T ("target") string
+# herdr-sm-spaces-k4). All backend branches converge on the same $T ("target") string
 # that every downstream operation (send/capture/kill) already treats as opaque
 # per-backend routing (fm_backend_resolve_selector).
 validate_spawn_worktree() {  # <source> <inspect-target>
