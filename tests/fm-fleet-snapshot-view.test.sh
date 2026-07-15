@@ -552,6 +552,91 @@ test_parked_scout_decision_stays_pending() {
   pass "a scout still parked at a decision stays pending (terminal clear does not over-fire)"
 }
 
+test_held_backlog_item_is_distinguishable() {
+  local home data fakebin out
+  home=$(make_home held)
+  data=$TMP_ROOT/held-data
+  mkdir -p "$data"
+  cat > "$data/backlog.md" <<'EOF'
+## In flight
+
+## Queued
+- [ ] plain-item - Dispatchable work (repo: demo) (since 2026-07-15)
+- [ ] held-item - Gated work (repo: demo) (since 2026-07-15) (hold: captain decision pending) (hold-kind: captain)
+- [ ] comma-hold - Comma form (repo: demo, hold: waiting on captain, hold-kind: captain)
+- [ ] until-hold - Dated hold (repo: demo) (hold: waiting on legal) (hold-kind: future) (hold-until: 2026-12-01)
+
+## Done
+EOF
+  fakebin=$(make_fakebin "$home")
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_DATA_OVERRIDE="$data" "$SNAPSHOT" --json)
+  printf '%s' "$out" | jq -e '
+    .backlog.records[] | select(.id == "plain-item")
+    | .held == false and .hold_reason == null and .title == "Dispatchable work"
+  ' >/dev/null || fail "unheld queued row should not report a hold"
+  # The hold markers are trailing, and the metadata strip is end-anchored, so a
+  # hold-blind strip also strands the repo/since parens in the title.
+  printf '%s' "$out" | jq -e '
+    .backlog.records[] | select(.id == "held-item")
+    | .held == true
+      and .hold_reason == "captain decision pending"
+      and .hold_kind == "captain"
+      and .title == "Gated work"
+      and .repo == "demo"
+      and .since == "2026-07-15"
+  ' >/dev/null || fail "held queued row did not parse its hold or clean its title"
+  # Hold detection must fail CLOSED. The comma metadata form is hand-written and
+  # ambiguous for a free-text reason, but an unreadable reason must never
+  # downgrade the item to dispatchable.
+  printf '%s' "$out" | jq -e '
+    .backlog.records[] | select(.id == "comma-hold")
+    | .held == true and .hold_kind == "captain" and .title == "Comma form"
+  ' >/dev/null || fail "comma-form hold failed open: held must be true"
+  # tasks-axi hold --until writes a third marker; an unstripped one also strands
+  # the earlier parens, because the metadata strip is end-anchored.
+  printf '%s' "$out" | jq -e '
+    .backlog.records[] | select(.id == "until-hold")
+    | .held == true
+      and .hold_until == "2026-12-01"
+      and .title == "Dated hold"
+  ' >/dev/null || fail "hold-until was not parsed or did not clean the title"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_DATA_OVERRIDE="$data" "$VIEW")
+  printf '%s' "$out" | grep -q "held: captain decision pending (captain)" ||
+    fail "view did not surface the hold in the gate column"
+  pass "held backlog items are distinguishable from dispatchable queued work"
+}
+
+test_hold_reason_keeps_its_commas() {
+  local home data fakebin out
+  home=$(make_home holdcomma)
+  data=$TMP_ROOT/holdcomma-data
+  mkdir -p "$data"
+  cat > "$data/backlog.md" <<'EOF'
+## In flight
+
+## Queued
+- [ ] comma-item - Gated work (repo: demo) (hold: waiting on captain, then legal) (hold-kind: captain)
+
+## Done
+EOF
+  fakebin=$(make_fakebin "$home")
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_DATA_OVERRIDE="$data" "$SNAPSHOT" --json)
+  # A hold reason is free prose, so it must not be clipped at its first comma
+  # the way the single-token repo/kind/priority values legitimately are.
+  printf '%s' "$out" | jq -e '
+    .backlog.records[] | select(.id == "comma-item")
+    | .held == true
+      and .hold_reason == "waiting on captain, then legal"
+      and .hold_kind == "captain"
+      and .title == "Gated work"
+      and .repo == "demo"
+  ' >/dev/null || fail "a comma-containing hold reason was not parsed intact"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_DATA_OVERRIDE="$data" "$VIEW")
+  printf '%s' "$out" | grep -q "held: waiting on captain, then legal (captain)" ||
+    fail "view clipped the hold reason at its comma"
+  pass "a hold reason survives its commas through snapshot and view"
+}
+
 test_empty_fleet_json
 test_fixture_snapshot_json
 test_event_hints_follow_reconciled_current_state
@@ -564,3 +649,5 @@ test_scout_reports_include_teardown_reports
 test_backlog_tasks_axi_forms_and_overrides
 test_view_renders_snapshot
 test_view_renders_dead_secondmate_agent_status
+test_held_backlog_item_is_distinguishable
+test_hold_reason_keeps_its_commas

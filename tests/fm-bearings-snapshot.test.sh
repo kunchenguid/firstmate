@@ -890,6 +890,26 @@ test_superseded_queued_item_dropped_by_default() {
   pass "superseded queued items are dropped by default and restored with --all-queued"
 }
 
+# A held queued item is gated even with no blocker. Without the hold projection it
+# renders as blocked_by "-" / reason "-", reading as ungated next work.
+test_held_queued_item_is_gated() {
+  local home fakebin json
+  home=$(make_home held-gate); write_fixture "$home"
+  cat >> "$home/data/backlog.md" <<'EOF'
+
+## Queued
+- [ ] held-gate - Work the captain parked (repo: firstmate) (kind: ship) (hold: captain decision pending) (hold-kind: captain)
+EOF
+  fakebin=$(make_fakebin "$home")
+  json=$(run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e '
+    .gates | any(.[]; .id == "held-gate"
+      and (.blocked_by | test("hold"))
+      and (.reason | test("captain decision pending")))
+  ' >/dev/null || fail "a held queued item must be reported as gated: $json"
+  pass "a held queued item is reported as gated rather than next work"
+}
+
 test_include_prs_is_the_only_fetch_path() {
   local home fakebin json
   home=$(make_home prs); write_fixture "$home"
@@ -1238,6 +1258,7 @@ test_completed_scout_report_not_pending
 test_open_decision_surfaces_end_to_end
 test_report_pointers_surface
 test_superseded_queued_item_dropped_by_default
+test_held_queued_item_is_gated
 test_include_prs_is_the_only_fetch_path
 test_partial_github_failure_degrades
 test_perl_fallback_bounds_github_call

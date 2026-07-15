@@ -517,7 +517,7 @@ The script refuses if the worktree holds uncommitted changes or committed work t
 Known benign case: after an external-PR task, a squash merge leaves the branch commits reachable only on the contributor's fork; add the fork as a remote and fetch (`git remote add fork <fork url> && git fetch fork`), then retry - never reach for `--force`.
 A successful PR-based teardown also refreshes that project's clone through `bin/fm-fleet-sync.sh`, best-effort.
 Then update the backlog using the teardown reminder: run `tasks-axi done` when the default tasks-axi backend is active and compatible, otherwise move the task to Done in `data/backlog.md` manually with the full `https://...` PR URL or local merge note and date and keep Done to the 10 most recent.
-Re-evaluate the queue and dispatch only queued work whose blockers are gone and whose time/date gate, if any, has arrived.
+Re-evaluate the queue and dispatch only queued work that is not held and whose blockers are gone and whose time/date gate, if any, has arrived.
 
 ### Secondmate teardown (explicit only)
 
@@ -535,7 +535,7 @@ A scout task follows Intake, Spawn, and Supervise exactly as above - scaffold th
 - There is no Validate or PR-ready stage. When the crewmate's status says `done`, read `data/<id>/report.md`.
 - Relay the findings to the captain: plain chat for a focused answer, lavish-axi when the report has structure worth a visual (multiple findings, options, a plan).
 - Tear down immediately - no merge gate. `bin/fm-teardown.sh` allows a scout worktree's scratch commits and dirty files once the report exists; if the report is missing, it refuses, because the findings are the work product.
-- Record it in Done with the report path instead of a PR link using `tasks-axi done` when the default tasks-axi backend is active and compatible, otherwise hand-edit `data/backlog.md` and keep Done to the 10 most recent, then re-evaluate the queue and dispatch only queued work whose blockers are gone and whose time/date gate, if any, has arrived.
+- Record it in Done with the report path instead of a PR link using `tasks-axi done` when the default tasks-axi backend is active and compatible, otherwise hand-edit `data/backlog.md` and keep Done to the 10 most recent, then re-evaluate the queue and dispatch only queued work that is not held and whose blockers are gone and whose time/date gate, if any, has arrived.
 
 **Promotion.** When a scout's findings reveal shippable work (a reproduced bug with a clear fix) and the captain wants it shipped, promote the task in place instead of respawning: run `bin/fm-promote.sh <id>` (flips `kind=` to ship in meta, restoring teardown's full protection), then from an active firstmate session send the crewmate its ship instructions with `FM_HOME=<this-firstmate-home> bin/fm-send.sh` unless `FM_HOME` is already set to the active firstmate home - inventory scratch state, reset to a clean default-branch base, carry over only intended fix changes, create branch `fm/<id>`, implement, and report `done` according to the project's delivery mode.
 The crewmate keeps its worktree, loaded context, and repro, but the ship branch must start from a clean base with only intended changes; scratch commits and debug edits from the scout phase never ride along.
@@ -689,12 +689,13 @@ Update the backlog on every dispatch, completion, and decision for a work item.
 - [x] <id> - <one line> - data/<id>/report.md (reported <date>)
 ```
 
-Re-evaluate Queued on every teardown and every heartbeat: anything whose blocker is gone and whose time/date gate, if any, has arrived gets dispatched.
+Re-evaluate Queued on every teardown and every heartbeat: anything that is not held and whose blocker is gone and whose time/date gate, if any, has arrived gets dispatched.
+A held item is never dispatchable until its hold is cleared, whoever set it and for whatever reason.
 
 A tracked `.tasks.toml` at this repo root pins the default `tasks-axi` markdown backend to `data/backlog.md`, with `done_keep = 10` and an archive at `data/done-archive.md`.
 The local, gitignored `config/backlog-backend` file is the explicit opt-out knob.
 Absent or `tasks-axi` means use the default tasks-axi backend; `manual` means force routine backlog updates to hand-editing even when `tasks-axi` is installed.
-Compatible means the shared bootstrap probe accepts `tasks-axi --version` as 0.1.1 or newer, `tasks-axi update --help` exposes `--archive-body`, and `tasks-axi mv --help` exposes `[<id>...]` for atomic multi-ID moves.
+Compatible is defined in full by `docs/configuration.md`; its mandatory atomic multi-ID `mv` probe puts the effective floor at tasks-axi 0.2.2 or newer.
 When the default backend is selected and compatible `tasks-axi` is on PATH, firstmate mutates the backlog through its verbs instead of hand-editing, with secondmate handoffs still going through the validated helper described in section 6.
 When the default backend is selected but `tasks-axi` is missing or incompatible, bootstrap reports it through the normal `MISSING:` consent flow in `docs/configuration.md` "Toolchain", and every firstmate home falls back to hand-editing routine `data/backlog.md` updates exactly as this section describes until it is installed.
 When `config/backlog-backend=manual`, every firstmate home hand-edits routine backlog updates; bootstrap still requires compatible `tasks-axi` on `PATH` but does not print `TASKS_AXI: available`.
@@ -708,11 +709,14 @@ Pruning loses nothing: finished PR-based ship tasks live on as GitHub PRs, local
 Map firstmate's real backlog operations to the approved commands:
 
 - File an item: `tasks-axi add <id> "<one line>" --kind <ship|scout> --repo <name>`, plus `--start` for immediate dispatch (In flight) or the default queue placement, and `--blocked-by <id>` (repeatable) when it waits on another task.
-- Start an existing queued item: `tasks-axi start <id>` before dispatching work from Queued, after checking that blockers are gone and any time/date gate has arrived.
+- Start an existing queued item: `tasks-axi start <id>` before dispatching work from Queued, after checking that it is not held and that blockers are gone and any time/date gate has arrived.
+  `tasks-axi start` moves a held item anyway and carries its hold marker into In flight, so check the hold yourself rather than relying on the verb to refuse.
 - Move a finished task to Done: `tasks-axi done <id> --pr <url>` for a PR-based ship, `--report <path>` for a scout, or `--note "local main"` for a local-only merge.
 - Update task notes: inspect first with `tasks-axi show <id> --full`, then replace the considered body with `tasks-axi update <id> --body-file <path>`.
   Add `--archive-body` to that update command when superseding prior state should remain recoverable.
-- Manage dependencies: `tasks-axi block <id> --by <other>` and `tasks-axi unblock <id> --by <other>`, then `tasks-axi ready` to list queued work with no unresolved blockers.
+- Hold and release an item: `tasks-axi hold <id> --reason "<reason>" --kind captain` gates it until `tasks-axi unhold <id>` clears it; both are idempotent.
+  When hand-editing, the same hold reads `(hold: <reason>) (hold-kind: <kind>)` on the item line.
+- Manage dependencies: `tasks-axi block <id> --by <other>` and `tasks-axi unblock <id> --by <other>`, then `tasks-axi ready` to list queued work with no unresolved blockers; `ready` excludes held work by default.
   This is a dependency check only; future-dated items still stay queued until their date arrives.
 - Read an item's full notes: `tasks-axi show <id> --full`.
 - Hand a task off to a secondmate home: load `secondmate-provisioning`, then keep using `bin/fm-backlog-handoff.sh <secondmate-id> <item-key>...`; do not call bare `tasks-axi mv` for this path, because the helper resolves and validates the secondmate home before moving anything.

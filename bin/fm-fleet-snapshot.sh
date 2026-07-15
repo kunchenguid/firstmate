@@ -249,12 +249,24 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
       cap($rest; ".*(?:\\(|,[[:space:]]*)" + $key + ":[[:space:]]*(?<v>[^,)]*)");
     def metadata_word($rest; $key):
       cap($rest; ".*(?:\\(|,[[:space:]]*)" + $key + "[[:space:]]+(?<v>[^,)]*)");
+    # A hold gates dispatch, so detection fails CLOSED: any hold: key in either
+    # the paren or the comma metadata form marks the item held, even when its
+    # reason cannot be read cleanly. Reporting a held item as dispatchable is the
+    # one error this must never make.
+    def hold_present($rest):
+      $rest | test(".*(?:\\(|,[[:space:]]*)hold:");
+    # tasks-axi renders a hold in its own paren and forbids ")" in --reason, so
+    # the paren form can carry a comma-bearing reason verbatim. The comma form is
+    # hand-written only and is ambiguous for free text, so it falls back to the
+    # shared helper and truncates at the first comma rather than guessing.
+    def hold_reason_of($rest):
+      cap($rest; ".*\\(hold:[[:space:]]*(?<v>[^)]*)\\)") // metadata($rest; "hold");
     def url_pattern: "https?://[^[:space:])\"<>]+";
     def wrapped_url_pattern: "<?" + url_pattern + ">?";
     def links($rest): [$rest | scan(url_pattern)];
     def strip_trailing_metadata:
       reduce range(0; 20) as $_ (.;
-        sub("[[:space:]]*\\([[:space:]]*(?:(?:repo|kind|priority):[[:space:]]*[^)]*|(?:since|merged|reported|done)[[:space:]]+[^)]*)[[:space:]]*\\)[[:space:]]*$"; ""));
+        sub("[[:space:]]*\\([[:space:]]*(?:(?:repo|kind|priority|hold-until|hold-kind|hold):[[:space:]]*[^)]*|(?:since|merged|reported|done)[[:space:]]+[^)]*)[[:space:]]*\\)[[:space:]]*$"; ""));
     def strip_title_artifacts:
       sub("[[:space:]]+-[[:space:]]+data/[^[:space:])]+/report\\.md$"; "")
       | sub("[[:space:]]+data/[^[:space:])]+/report\\.md$"; "")
@@ -309,6 +321,10 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
              repo:metadata($rest; "repo"),
              kind:metadata($rest; "kind"),
              priority:metadata($rest; "priority"),
+             hold_reason:hold_reason_of($rest),
+             hold_kind:metadata($rest; "hold-kind"),
+             hold_until:metadata($rest; "hold-until"),
+             held:hold_present($rest),
              blocked_by:cap($rest; ".*blocked-by:[[:space:]]*(?<v>[^[:space:])]+).*"),
              blocked_reason:blocked_reason($rest),
              since:metadata_word($rest; "since"),
@@ -600,6 +616,9 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
         queued:([$queued_all[] | {id:(.id | trunc(120)),title:(.title | trunc(120)),
           blocked_by:((.blocked_by // null) | if . == null then null else trunc(120) end),
           blocked_reason:((.blocked_reason // null) | if . == null then null else trunc(160) end),
+          held:(.held // false),
+          hold_reason:((.hold_reason // null) | if . == null then null else trunc(160) end),
+          hold_kind:((.hold_kind // null) | if . == null then null else trunc(40) end),
           repo:((.repo // null) | if . == null then null else trunc(120) end),
           kind:((.kind // null) | if . == null then null else trunc(40) end)}][:$queued_n]),
         landed:(if $landed_n == 0 then $landed_all else $landed_all[:$landed_n] end),

@@ -56,8 +56,14 @@ printf '%s\n' "$SNAPSHOT" | jq -r '
     if ($r.blocked_by // "") == "" then "-"
     elif ($r.blocked_reason // "") == "" then $r.blocked_by
     else "\($r.blocked_by) - \($r.blocked_reason)" end;
+  def gate($r):
+    (if ($r.held // false) then
+       "held: \(if ($r.hold_reason // "") == "" then "no reason recorded" else $r.hold_reason end)\(if ($r.hold_kind // "") == "" then "" else " (\($r.hold_kind))" end)"
+     else null end) as $hold
+    | (blocker($r) | if . == "-" then null else . end) as $blocked
+    | [$hold, $blocked] | map(select(. != null)) | if length == 0 then "-" else join("; ") end;
   def backlog_row($r):
-    "| \($r.id // "-") | \(dash($r.title // $r.raw)) | \(dash($r.repo)) | \(dash($r.kind)) | \(blocker($r)) | \(dash($r.pr_url // $r.report_path // $r.local_note)) |";
+    "| \($r.id // "-") | \(dash($r.title // $r.raw)) | \(dash($r.repo)) | \(dash($r.kind)) | \(gate($r)) | \(dash($r.pr_url // $r.report_path // $r.local_note)) |";
 
   "# Fleet View",
   "",
@@ -77,7 +83,7 @@ printf '%s\n' "$SNAPSHOT" | jq -r '
   (if ([.backlog.records[]? | select(.state == "queued")] | length) == 0 then
     "No queued backlog records found."
    else
-    "| ID | Title | Repo | Kind | Blocked By | Artifact |",
+    "| ID | Title | Repo | Kind | Gate | Artifact |",
     "| --- | --- | --- | --- | --- | --- |",
     (.backlog.records[] | select(.state == "queued") | backlog_row(.))
    end),
@@ -86,7 +92,7 @@ printf '%s\n' "$SNAPSHOT" | jq -r '
   (if ([.backlog.records[]? | select(.state == "done")] | length) == 0 then
     "No done backlog records found."
    else
-    "| ID | Title | Repo | Kind | Blocked By | Artifact |",
+    "| ID | Title | Repo | Kind | Gate | Artifact |",
     "| --- | --- | --- | --- | --- | --- |",
     (.backlog.records[] | select(.state == "done") | backlog_row(.))
    end),
