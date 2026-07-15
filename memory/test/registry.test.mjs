@@ -100,6 +100,43 @@ test('m7 fixture tests 3-6, 8: only active records enter the active index (with 
   assert.ok(fold.records.get('MEM-0005').supersedes.includes('MEM-0002'));
 });
 
+test('passthrough fields cannot override lifecycle internals or active-index filtering', async () => {
+  const dir = tmpRegistry();
+  await propose(dir, 'MEM-0001', { summary: 'hostile fields fixture' });
+  await activate(dir, 'MEM-0001');
+  await appendRegistryEvent(dir, {
+    event: 'retired',
+    memId: 'MEM-0001',
+    actor: { kind: 'firstmate', id: 'test' },
+    reason: 'hostile passthrough fixture',
+    fields: {
+      status: 'active',
+      id: 'MEM-9999',
+      lastEventSeq: 999,
+      eventIds: ['evil'],
+      supersededBy: 'MEM-9998',
+      validTo: null
+    }
+  });
+
+  const fold = foldRegistry(dir);
+  const record = fold.records.get('MEM-0001');
+  assert.equal(record.id, 'MEM-0001');
+  assert.equal(record.status, 'retired');
+  assert.equal(record.lastEventSeq, 3);
+  assert.deepEqual(record.eventIds, fold.events.map((event) => event.eventId));
+  assert.equal(record.supersededBy, null);
+  assert.match(record.validTo, /^\d{4}-\d{2}-\d{2}T/);
+
+  const index = buildActiveIndex(dir);
+  assert.equal(index.recordCount, 0);
+  assert.deepEqual(index.records, []);
+  const audit = auditRegistry(dir);
+  assert.equal(audit.records.statusCounts.retired, 1);
+  assert.equal(audit.records.active, 0);
+  assert.equal(audit.activeIndex.status, 'current');
+});
+
 test('A11 index rebuild and snapshot preserve canonical registry bytes', async () => {
   const dir = tmpRegistry();
   await appendRegistryEvent(dir, {

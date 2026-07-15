@@ -105,9 +105,32 @@ function defaultRecord(memId, event) {
   };
 }
 
-// Sparse field application: only keys explicitly present (and not undefined) are
-// written. This is what makes `mem update` non-destructive - omitted fields are
-// never reset to a default.
+const MUTABLE_FIELD_KEYS = new Set([
+  'summary',
+  'body',
+  'source',
+  'memoryType',
+  'scope',
+  'projects',
+  'taskKinds',
+  'keywords',
+  'aliases',
+  'entities',
+  'commands',
+  'failureModes',
+  'relatedTerms',
+  'validFrom',
+  'validTo',
+  'confidence',
+  'contradicts',
+  'guard',
+  'riskClass'
+]);
+
+// Sparse field application: only known mutable record keys explicitly present
+// (and not undefined) are written. This is what makes `mem update`
+// non-destructive while keeping passthrough event fields from mutating lifecycle
+// internals such as status, ids, sequence watermarks, or lineage.
 function applyFields(record, fields = {}) {
   for (const [key, value] of Object.entries(fields)) {
     if (value === undefined) continue;
@@ -115,6 +138,7 @@ function applyFields(record, fields = {}) {
       record.guardLinked = Boolean(value);
       continue;
     }
+    if (!MUTABLE_FIELD_KEYS.has(key)) continue;
     record[key] = value;
   }
 }
@@ -145,6 +169,7 @@ function applyEvent(records, event) {
   }
   if (!record) throw new Error(`unknown memory record: ${event.memId}`);
   assertTransition(record, event);
+  applyFields(record, event.fields || {});
 
   if (event.event === 'activated' || event.event === 'revalidated') {
     if ((event.evidence || []).length === 0 || !event.validation?.method) {
@@ -201,7 +226,6 @@ function applyEvent(records, event) {
   }
 
   if (event.guard_linked !== undefined) record.guardLinked = Boolean(event.guard_linked);
-  applyFields(record, event.fields || {});
   if (event.supersedes?.length) record.supersedes = [...new Set([...(record.supersedes || []), ...event.supersedes])];
   record.eventIds.push(event.eventId);
 }

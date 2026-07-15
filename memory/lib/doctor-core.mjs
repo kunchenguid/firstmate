@@ -50,6 +50,8 @@ export function versionMatches(installed, want) {
 export function assembleDoctor(parts) {
   const compatible = satisfiesRange(parts.nodeVersion, parts.engines);
   const registryOk = parts.registry.status !== 'critical' && !String(parts.registry.status).startsWith('error');
+  const registryPresentAndHealthy = registryOk && parts.registry.status !== 'missing' && parts.registry.health !== null;
+  const activeIndexOk = !registryPresentAndHealthy || parts.activeIndex?.status === 'current';
   const snapshotsOk = !parts.snapshots || !['degraded', 'critical'].includes(parts.snapshots.health);
   const ok = Boolean(
     compatible
@@ -57,6 +59,7 @@ export function assembleDoctor(parts) {
     && parts.packageLock.present
     && parts.packageLock.current
     && registryOk
+    && activeIndexOk
     && snapshotsOk
   );
   return {

@@ -4,6 +4,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import test from 'node:test';
+import { appendRegistryEvent } from '../lib/registry.mjs';
+import { registryPaths } from '../lib/paths.mjs';
 import { satisfiesRange, versionMatches } from '../lib/doctor-core.mjs';
 import { memoryRoot, runMemIn, tmpRegistry } from './helpers.mjs';
 
@@ -70,6 +72,42 @@ test('doctor reports critical registry as non-green', () => {
   const parsed = JSON.parse(json.stdout);
   assert.equal(parsed.registry.status, 'critical');
   assert.equal(parsed.ok, false);
+});
+
+test('doctor fails closed when a healthy registry has a missing or stale active index', async () => {
+  const dir = tmpRegistry();
+  await appendRegistryEvent(dir, {
+    event: 'proposed',
+    memId: 'MEM-0001',
+    actor: { kind: 'firstmate', id: 'test' },
+    fields: { summary: 'doctor active index fixture' }
+  });
+  const paths = registryPaths(dir);
+  fs.unlinkSync(paths.index);
+
+  const missing = runMemIn(dir, ['doctor', '--json']);
+  assert.equal(missing.status, 1);
+  const missingParsed = JSON.parse(missing.stdout);
+  assert.equal(missingParsed.registry.status, 'writable');
+  assert.equal(missingParsed.activeIndex.status, 'missing');
+  assert.equal(missingParsed.ok, false);
+
+  await appendRegistryEvent(dir, {
+    event: 'updated',
+    memId: 'MEM-0001',
+    actor: { kind: 'firstmate', id: 'test' },
+    fields: { summary: 'doctor active index fixture updated' }
+  });
+  const staleIndex = JSON.parse(fs.readFileSync(paths.index, 'utf8'));
+  staleIndex.registry.seq = 0;
+  fs.writeFileSync(paths.index, `${JSON.stringify(staleIndex, null, 2)}\n`);
+
+  const stale = runMemIn(dir, ['doctor', '--json']);
+  assert.equal(stale.status, 1);
+  const staleParsed = JSON.parse(stale.stdout);
+  assert.equal(staleParsed.registry.status, 'writable');
+  assert.equal(staleParsed.activeIndex.status, 'stale');
+  assert.equal(staleParsed.ok, false);
 });
 
 test('doctor --json has ONE stable schema in healthy and missing-dependency modes', () => {
