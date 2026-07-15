@@ -15,10 +15,13 @@
 # and fetch failures.
 # Pruning never deletes the checked-out branch or a branch that still has a
 # worktree, so it cannot discard unlanded work; set FM_FLEET_PRUNE=0 to disable it.
-# When the fetch fails on an orphaned .git/packed-refs.lock (left by a ref rewrite
+# When the fetch hits an orphaned .git/packed-refs.lock (left by a ref rewrite
 # killed mid-write - e.g. a timed-out bootstrap sync or a teardown process kill),
-# it is retried with a bounded wait and removed only when provably stale; see
-# fetch_with_packed_refs_lock_guard and the FM_FLEET_SYNC_PACKED_REFS_LOCK_* knobs.
+# it is retried with a bounded wait and removed only when provably stale; the lock
+# signature in the fetch output is authoritative over the exit code, since some git
+# versions exit 0 when the branch fetch succeeded but the --prune ref rewrite failed
+# on the lock; see fetch_with_packed_refs_lock_guard and the
+# FM_FLEET_SYNC_PACKED_REFS_LOCK_* knobs.
 # Usage: fm-fleet-sync.sh [<project-dir-or-name>]
 # The single-project form accepts either a path (absolute, or relative to the
 # caller's cwd) or a bare "<name>"/"projects/<name>" form, resolved against
