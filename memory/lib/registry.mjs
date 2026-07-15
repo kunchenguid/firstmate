@@ -623,23 +623,61 @@ function snapshotPayload(fold, reason, sourceCommand) {
 }
 
 function validateSnapshotPayload(snapshot, fold, reason) {
-  if (!snapshot || typeof snapshot !== 'object' || Array.isArray(snapshot)) return 'snapshot document is not an object';
-  if (snapshot.schema !== 'kraken-memory/registry-snapshot/v1') return 'snapshot schema mismatch';
-  if (snapshot.reason !== reason) return 'snapshot reason mismatch';
-  if (Number(snapshot.registry?.seq) !== Number(fold.watermark.seq)) return 'snapshot registry seq mismatch';
-  if ((snapshot.registry?.eventId ?? null) !== (fold.watermark.eventId ?? null)) return 'snapshot registry eventId mismatch';
-  if (snapshot.registry?.registryHash !== fold.watermark.registryHash) return 'snapshot registry hash mismatch';
-  if (snapshot.registryHash !== fold.watermark.registryHash) return 'snapshot registryHash mismatch';
+  const issues = [];
+  if (!snapshot || typeof snapshot !== 'object' || Array.isArray(snapshot)) return ['snapshot document is not an object'];
+  for (const field of ['schema', 'createdAt', 'reason', 'sourceCommand', 'registry', 'registryHash', 'records', 'snapshotHash']) {
+    if (!Object.prototype.hasOwnProperty.call(snapshot, field)) issues.push(`snapshot required field missing: ${field}`);
+  }
+  if (snapshot.schema !== 'kraken-memory/registry-snapshot/v1') issues.push('snapshot schema mismatch');
+  if (typeof snapshot.createdAt !== 'string' || !snapshot.createdAt) issues.push('snapshot createdAt missing or invalid');
+  if (typeof snapshot.sourceCommand !== 'string' || !snapshot.sourceCommand) issues.push('snapshot sourceCommand missing or invalid');
+  if (snapshot.reason !== reason) issues.push('snapshot reason mismatch');
+  if (!snapshot.registry || typeof snapshot.registry !== 'object' || Array.isArray(snapshot.registry)) {
+    issues.push('snapshot registry watermark missing');
+  }
+  if (Number(snapshot.registry?.seq) !== Number(fold.watermark.seq)) issues.push('snapshot registry seq mismatch');
+  if ((snapshot.registry?.eventId ?? null) !== (fold.watermark.eventId ?? null)) issues.push('snapshot registry eventId mismatch');
+  if (snapshot.registry?.registryHash !== fold.watermark.registryHash) issues.push('snapshot registry hash mismatch');
+  if (snapshot.registryHash !== fold.watermark.registryHash) issues.push('snapshot registryHash mismatch');
+  const expectedRecords = [...fold.records.values()].map((record) => ({ ...record }));
+  if (!Array.isArray(snapshot.records)) {
+    issues.push('snapshot records is not an array');
+  } else if (stableJson(snapshot.records) !== stableJson(expectedRecords)) {
+    issues.push('snapshot records do not match boundary fold');
+  }
   const { snapshotHash, ...base } = snapshot;
-  if (snapshotHash !== sha256(stableJson(base))) return 'snapshot hash mismatch';
-  return null;
+  if (snapshotHash !== sha256(stableJson(base))) issues.push('snapshot hash mismatch');
+  return issues;
 }
 
 function readValidSnapshot(file, fold, reason) {
+  const resolvedFile = path.resolve(file);
+  const resolvedSnapshots = path.resolve(fold.paths.snapshots);
+  const relative = path.relative(resolvedSnapshots, resolvedFile);
+  if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) {
+    return { file, valid: false, issue: 'snapshot file is outside the snapshots directory' };
+  }
+  let stat;
+  try {
+    stat = fs.lstatSync(file);
+  } catch (error) {
+    return { file, valid: false, issue: `snapshot file is not readable: ${error.message}` };
+  }
+  if (!stat.isFile()) return { file, valid: false, issue: 'snapshot file is not a regular file' };
+  try {
+    const realFile = fs.realpathSync(file);
+    const realRelative = path.relative(resolvedSnapshots, realFile);
+    if (!realRelative || realRelative.startsWith('..') || path.isAbsolute(realRelative)) {
+      return { file, valid: false, issue: 'snapshot file resolves outside the snapshots directory' };
+    }
+  } catch (error) {
+    return { file, valid: false, issue: `snapshot file is not readable: ${error.message}` };
+  }
+  if ((stat.mode & 0o777) !== 0o600) return { file, valid: false, issue: 'snapshot file mode must be 600' };
   try {
     const snapshot = JSON.parse(fs.readFileSync(file, 'utf8'));
-    const issue = validateSnapshotPayload(snapshot, fold, reason);
-    return issue ? { file, valid: false, issue } : { file, valid: true, snapshot };
+    const issues = validateSnapshotPayload(snapshot, fold, reason);
+    return issues.length ? { file, valid: false, issue: issues.join('; ') } : { file, valid: true, snapshot };
   } catch (error) {
     return { file, valid: false, issue: `snapshot is not valid JSON: ${error.message}` };
   }
@@ -725,6 +763,32 @@ function obligationBase(paths, fold) {
   };
 }
 
+function validateSnapshotObligation(stored, boundaryFold, validSnapshot) {
+  if (!stored) return ['snapshot obligation missing'];
+  const issues = [];
+  const base = obligationBase(boundaryFold.paths, boundaryFold);
+  const expectedPath = typeof stored.expectedSnapshot === 'string'
+    ? path.resolve(boundaryFold.paths.snapshots, stored.expectedSnapshot)
+    : null;
+  if (stored.status !== 'complete') issues.push('snapshot obligation is not complete');
+  if (Number(stored.boundarySeq) !== Number(base.boundarySeq)) issues.push('snapshot obligation boundarySeq mismatch');
+  if (stored.reason !== base.reason) issues.push('snapshot obligation reason mismatch');
+  if (stored.expectedSnapshot !== base.expectedSnapshot) issues.push('snapshot obligation expectedSnapshot mismatch');
+  if (!expectedPath) {
+    issues.push('snapshot obligation expectedSnapshot missing');
+  } else {
+    const resolvedSnapshots = path.resolve(boundaryFold.paths.snapshots);
+    const relative = path.relative(resolvedSnapshots, expectedPath);
+    if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) issues.push('snapshot obligation expectedSnapshot escapes snapshots directory');
+  }
+  if (stored.file !== base.expectedSnapshot) issues.push('snapshot obligation file mismatch');
+  if (Number(stored.registry?.seq) !== Number(boundaryFold.watermark.seq)) issues.push('snapshot obligation registry seq mismatch');
+  if ((stored.registry?.eventId ?? null) !== (boundaryFold.watermark.eventId ?? null)) issues.push('snapshot obligation registry eventId mismatch');
+  if (stored.registry?.registryHash !== boundaryFold.watermark.registryHash) issues.push('snapshot obligation registry hash mismatch');
+  if (validSnapshot && stored.snapshotHash !== validSnapshot.snapshot.snapshotHash) issues.push('snapshot obligation hash mismatch');
+  return issues;
+}
+
 function updateSnapshotObligation(paths, boundaryFold, patch) {
   const state = readSnapshotState(paths);
   if (state.corrupt) throw new Error(`snapshot obligation state is corrupt: ${state.corrupt}`);
@@ -764,18 +828,7 @@ function boundarySequences(watermark) {
 }
 
 function snapshotReconciliationNeeded(paths, fold) {
-  const sequences = boundarySequences(fold.watermark);
-  if (sequences.length === 0) return false;
-  const state = readSnapshotState(paths);
-  if (state.corrupt) return true;
-  const bySeq = new Map(state.obligations.map((item) => [Number(item.boundarySeq), item]));
-  for (const seq of sequences) {
-    const obligation = bySeq.get(seq);
-    if (!obligation || obligation.status !== 'complete') return true;
-    if (!obligation.expectedSnapshot || !fs.existsSync(path.join(paths.snapshots, obligation.expectedSnapshot))) return true;
-    if (!obligation.registry || Number(obligation.registry.seq) !== seq || !obligation.registry.eventId || !obligation.registry.registryHash) return true;
-  }
-  return false;
+  return inspectBoundarySnapshotObligations(paths, fold).health !== 'ok';
 }
 
 function inspectBoundarySnapshotObligations(paths, fold) {
@@ -792,15 +845,18 @@ function inspectBoundarySnapshotObligations(paths, fold) {
     if (inspected.valid.length > 1) issues.push(`duplicate valid boundary snapshots for sequence ${seq}`);
     issues.push(...invalidIssues.map((issue) => `invalid boundary snapshot for sequence ${seq}: ${issue}`));
     const complete = inspected.valid.length === 1;
+    const metadataIssues = validateSnapshotObligation(stored, boundaryFold, complete ? inspected.valid[0] : null);
+    if (complete) issues.push(...metadataIssues.map((issue) => `invalid boundary snapshot obligation for sequence ${seq}: ${issue}`));
     if (!complete) issues.push(`required boundary snapshot missing for sequence ${seq}`);
     obligations.push({
       ...base,
-      status: complete ? 'complete' : (stored?.status || 'missing'),
+      status: complete && metadataIssues.length === 0 ? 'complete' : (stored?.status || 'missing'),
       file: complete ? path.basename(inspected.valid[0].file) : null,
       attempts: stored?.attempts || 0,
       lastFailure: stored?.lastFailure || null,
-      outstanding: !complete,
-      invalid: invalidIssues
+      outstanding: !complete || metadataIssues.length > 0,
+      invalid: invalidIssues,
+      metadataIssues
     });
   }
   return {
@@ -812,23 +868,67 @@ function inspectBoundarySnapshotObligations(paths, fold) {
   };
 }
 
+function quarantineSnapshotArtifact(paths, file, issue) {
+  const corruptDir = path.join(paths.snapshots, 'corrupt');
+  fs.mkdirSync(corruptDir, { recursive: true, mode: 0o700 });
+  let stat = null;
+  let corruptHash = null;
+  try {
+    stat = fs.lstatSync(file);
+    if (stat.isFile()) {
+      const bytes = fs.readFileSync(file);
+      corruptHash = sha256(bytes);
+      fsyncFile(file);
+    }
+  } catch {
+    // Preserve by rename even when metadata or bytes cannot be fully inspected.
+  }
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const suffix = corruptHash ? corruptHash.slice(0, 16) : crypto.randomBytes(8).toString('hex');
+  let quarantine = path.join(corruptDir, `${path.basename(file)}.corrupt-${stamp}-${suffix}`);
+  while (fs.existsSync(quarantine)) quarantine = `${quarantine}-${crypto.randomBytes(2).toString('hex')}`;
+  fs.renameSync(file, quarantine);
+  if (stat?.isFile() && corruptHash) fsyncFile(quarantine);
+  fsyncDir(corruptDir);
+  fsyncDir(path.dirname(file));
+  return {
+    original: path.basename(file),
+    quarantine: path.relative(paths.snapshots, quarantine),
+    corruptHash,
+    issue
+  };
+}
+
+function quarantineInvalidBoundarySnapshots(paths, inspected) {
+  const quarantined = [];
+  for (const item of inspected.invalid) {
+    if (!fs.existsSync(item.file)) continue;
+    quarantined.push(quarantineSnapshotArtifact(paths, item.file, item.issue));
+  }
+  return quarantined;
+}
+
 function reconcileBoundarySnapshotObligations(paths, fold, { repair = false, sourceCommand = 'mem append' } = {}) {
   if (fold.health === 'critical') return inspectBoundarySnapshotObligations(paths, fold);
   for (const seq of boundarySequences(fold.watermark)) {
     const boundaryFold = foldAtSequence(paths, fold, seq);
     const inspected = inspectBoundarySnapshot(paths, boundaryFold);
     if (inspected.valid.length > 1) throw new Error(`duplicate valid boundary snapshots for sequence ${seq}`);
-    if (inspected.invalid.length > 0 && inspected.valid.length === 0) {
-      throw new Error(`invalid boundary snapshot for sequence ${seq}: ${inspected.invalid[0].issue}`);
-    }
+    if (inspected.invalid.length > 0 && !repair) throw new Error(`invalid boundary snapshot for sequence ${seq}: ${inspected.invalid[0].issue}`);
     if (inspected.valid.length === 1) {
+      const state = readSnapshotState(paths);
+      const existing = state.obligations.find((item) => Number(item.boundarySeq) === seq);
+      const metadataIssues = validateSnapshotObligation(existing, boundaryFold, inspected.valid[0]);
+      const quarantined = repair ? quarantineInvalidBoundarySnapshots(paths, inspected) : [];
       if (repair) {
         updateSnapshotObligation(paths, boundaryFold, {
           status: 'complete',
           file: path.basename(inspected.valid[0].file),
           snapshotHash: inspected.valid[0].snapshot.snapshotHash,
           completedAt: new Date().toISOString(),
-          lastFailure: null
+          lastFailure: null,
+          repairs: [...(existing?.repairs || []), ...quarantined],
+          metadataRepair: metadataIssues.length ? metadataIssues : existing?.metadataRepair || null
         });
       }
       continue;
@@ -836,14 +936,18 @@ function reconcileBoundarySnapshotObligations(paths, fold, { repair = false, sou
     if (!repair) continue;
     const state = readSnapshotState(paths);
     const existing = state.obligations.find((item) => Number(item.boundarySeq) === seq);
+    const quarantined = quarantineInvalidBoundarySnapshots(paths, inspected);
     updateSnapshotObligation(paths, boundaryFold, {
       status: 'pending',
       attempts: existing?.attempts || 0,
       firstRequiredAt: existing?.firstRequiredAt || new Date().toISOString(),
-      lastFailure: existing?.lastFailure || null
+      lastFailure: existing?.lastFailure || null,
+      repairs: [...(existing?.repairs || []), ...quarantined]
     });
     try {
       const made = snapshotFromFold(paths, boundaryFold, { reason: inspected.reason, sourceCommand });
+      const replacement = readValidSnapshot(made.file, boundaryFold, inspected.reason);
+      if (!replacement.valid) throw new Error(`replacement snapshot failed validation: ${replacement.issue}`);
       updateSnapshotObligation(paths, boundaryFold, {
         status: 'complete',
         file: path.basename(made.file),
