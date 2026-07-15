@@ -603,7 +603,7 @@ while :; do sleep 1; done
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh" "$repo/bin/fm-watch.sh"
   out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_LAUNCH_LOG="$launch_log" FM_WATCH_PATH="$repo/bin/fm-watch.sh" node --input-type=module 2>&1 <<'EOF'
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
 let tool = null;
@@ -615,7 +615,11 @@ const pi = {
   },
   sendUserMessage: async () => {},
 };
+const fixedNow = 1000;
+Date.now = () => fixedNow;
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+writeFileSync(`${process.env.FM_HOME}/state/.last-watcher-beat`, "");
+utimesSync(`${process.env.FM_HOME}/state/.last-watcher-beat`, new Date(fixedNow), new Date(fixedNow));
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 mod.default(pi);
 const first = await tool.execute("first", {}, undefined, undefined, {});
@@ -630,7 +634,7 @@ const second = await tool.execute("second", {}, undefined, undefined, {});
 if (!second.content[0].text.includes("already has an arm child")) throw new Error(second.content[0].text);
 for (let i = 0; i < 100; i += 1) {
   try {
-    if (readFileSync(process.env.FM_HOME + "/state/.last-watcher-beat", "utf8") !== undefined) break;
+    if (statSync(process.env.FM_HOME + "/state/.last-watcher-beat").mtimeMs > fixedNow) break;
   } catch {}
   await new Promise((resolve) => setTimeout(resolve, 20));
 }

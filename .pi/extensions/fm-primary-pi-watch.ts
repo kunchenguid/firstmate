@@ -46,6 +46,7 @@ let child: ArmChild | null = null;
 const ownedGroups = new Set<number>();
 const intentionalStops = new WeakSet<ArmChild>();
 const childStartedAt = new WeakMap<ArmChild, number>();
+const beatMtimeAtStart = new WeakMap<ArmChild, number | null>();
 const healthyChildren = new WeakSet<ArmChild>();
 let seq = 0;
 
@@ -187,14 +188,16 @@ export default function (pi: ExtensionAPI) {
     return typeof startedAt === "number" && Date.now() - startedAt < startupGraceMs;
   }
 
-  function beatPredatesChildStart(arm: ArmChild): boolean {
-    const startedAt = childStartedAt.get(arm);
-    if (typeof startedAt !== "number") return false;
+  function beatMtime(): number | null {
     try {
-      return statSync(`${state}/.last-watcher-beat`).mtimeMs < startedAt;
+      return statSync(`${state}/.last-watcher-beat`).mtimeMs;
     } catch {
-      return true;
+      return null;
     }
+  }
+
+  function beatUnchangedSinceStart(arm: ArmChild): boolean {
+    return beatMtime() === (beatMtimeAtStart.get(arm) ?? null);
   }
 
   function startArm(): ArmResult {
@@ -207,7 +210,7 @@ export default function (pi: ExtensionAPI) {
         return { ok: true, message: `watcher: healthy - Pi extension owns watcher pid ${watcherPid}` };
       }
       const watcherStartupPid = ownedWatcherPid();
-      if (!healthyChildren.has(child) && childIsStillStarting(child) && (!watcherStartupPid || (childOwnsWatcher(child, watcherStartupPid) && beatPredatesChildStart(child)))) {
+      if (!healthyChildren.has(child) && childIsStillStarting(child) && (!watcherStartupPid || (childOwnsWatcher(child, watcherStartupPid) && beatUnchangedSinceStart(child)))) {
         return { ok: true, message: "watcher: starting - Pi extension already has an arm child" };
       }
       stopArm();
@@ -231,6 +234,7 @@ export default function (pi: ExtensionAPI) {
       ownedGroups.add(armChild.pid);
     }
     childStartedAt.set(armChild, Date.now());
+    beatMtimeAtStart.set(armChild, beatMtime());
     let stdout = "";
     let stderr = "";
     armChild.stdout.on("data", (chunk: Buffer) => {
