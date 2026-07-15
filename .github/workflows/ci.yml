@@ -81,8 +81,8 @@ jobs:
           snapshot_output=$(/bin/bash tests/fm-fleet-snapshot-view.test.sh)
           printf '%s\n' "$snapshot_output"
           snapshot_count=$(printf '%s\n' "$snapshot_output" | grep -c '^ok - ')
-          [ "$snapshot_count" -eq 12 ] || {
-            echo "::error::expected 12 snapshot/fleet-view tests, got $snapshot_count"
+          [ "$snapshot_count" -eq 13 ] || {
+            echo "::error::expected 13 snapshot/fleet-view tests, got $snapshot_count"
             exit 1
           }
 
