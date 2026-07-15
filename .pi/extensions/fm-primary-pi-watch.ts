@@ -5,7 +5,7 @@
 // a cross-home process-name kill.
 import { spawn, spawnSync, type ChildProcessByStdio } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Readable } from "node:stream";
@@ -46,6 +46,7 @@ let child: ArmChild | null = null;
 const ownedGroups = new Set<number>();
 const intentionalStops = new WeakSet<ArmChild>();
 const childStartedAt = new WeakMap<ArmChild, number>();
+const healthyChildren = new WeakSet<ArmChild>();
 let seq = 0;
 
 function parentPid(pid: string): string {
@@ -186,16 +187,27 @@ export default function (pi: ExtensionAPI) {
     return typeof startedAt === "number" && Date.now() - startedAt < startupGraceMs;
   }
 
+  function beatPredatesChildStart(arm: ArmChild): boolean {
+    const startedAt = childStartedAt.get(arm);
+    if (typeof startedAt !== "number") return false;
+    try {
+      return statSync(`${state}/.last-watcher-beat`).mtimeMs < startedAt;
+    } catch {
+      return true;
+    }
+  }
+
   function startArm(): ArmResult {
     if (!sessionOwnsLock()) return { ok: false, message: "watcher: read-only - session lock is held by another firstmate session" };
     markLoaded();
     if (child) {
       const watcherPid = healthyWatcherPid();
       if (watcherPid && childOwnsWatcher(child, watcherPid)) {
+        healthyChildren.add(child);
         return { ok: true, message: `watcher: healthy - Pi extension owns watcher pid ${watcherPid}` };
       }
-      const staleOwnedWatcherPid = ownedWatcherPid();
-      if (!staleOwnedWatcherPid && childIsStillStarting(child)) {
+      const watcherStartupPid = ownedWatcherPid();
+      if (!healthyChildren.has(child) && childIsStillStarting(child) && (!watcherStartupPid || (childOwnsWatcher(child, watcherStartupPid) && beatPredatesChildStart(child)))) {
         return { ok: true, message: "watcher: starting - Pi extension already has an arm child" };
       }
       stopArm();

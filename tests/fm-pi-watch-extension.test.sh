@@ -591,12 +591,12 @@ test_pi_repeated_arm_reuses_starting_child() {
 #!/usr/bin/env bash
 set -u
 printf '%s\n' "$$" >> "${FM_LAUNCH_LOG:?}"
-sleep 1
 mkdir -p "$FM_HOME/state/.watch.lock"
 printf '%s\n' "$$" > "$FM_HOME/state/.watch.lock/pid"
 printf '%s\n' "$FM_HOME" > "$FM_HOME/state/.watch.lock/fm-home"
 printf '%s\n' "${FM_WATCH_PATH:?}" > "$FM_HOME/state/.watch.lock/watcher-path"
 LC_ALL=C ps -p "$$" -o lstart= -o command= | sed 's/^[[:space:]]*//' > "$FM_HOME/state/.watch.lock/pid-identity"
+sleep 1
 touch "$FM_HOME/state/.last-watcher-beat"
 trap 'exit 0' TERM
 while :; do sleep 1; done
@@ -630,7 +630,7 @@ const second = await tool.execute("second", {}, undefined, undefined, {});
 if (!second.content[0].text.includes("already has an arm child")) throw new Error(second.content[0].text);
 for (let i = 0; i < 100; i += 1) {
   try {
-    if (readFileSync(process.env.FM_HOME + "/state/.watch.lock/pid", "utf8").trim()) break;
+    if (readFileSync(process.env.FM_HOME + "/state/.last-watcher-beat", "utf8") !== undefined) break;
   } catch {}
   await new Promise((resolve) => setTimeout(resolve, 20));
 }

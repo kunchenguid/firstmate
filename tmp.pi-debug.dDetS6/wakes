@@ -1,6 +1,0 @@
-FIRSTMATE WATCHER WAKE: watcher: FAILED - fm-watch-arm.sh exited 126
-bash: /Users/rt/.no-mistakes/worktrees/da6a6f4f8432/01KXKJEAGRQYFZTNSQ2W4CH4Y7/tmp.pi-debug.dDetS6/repo/tmp.pi-debug.dDetS6/repo/bin/fm-watch-arm.sh: No such file or directory
-bash: line 0: exec: /Users/rt/.no-mistakes/worktrees/da6a6f4f8432/01KXKJEAGRQYFZTNSQ2W4CH4Y7/tmp.pi-debug.dDetS6/repo/tmp.pi-debug.dDetS6/repo/bin/fm-watch-arm.sh: cannot execute: No such file or directory
-
-Run bin/fm-wake-drain.sh first, handle the queued wake, then resume Pi supervision.
----
