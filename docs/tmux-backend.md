@@ -99,7 +99,9 @@ Verified the same session: a persisting parent process running a child command (
 
 The classifier (`fm_backend_tmux_agent_alive`) maps the observed name to `alive`, `dead`, or `unknown`:
 
-- `alive` - the name contains `claude`, `codex`, `opencode`, or `grok`. All four were confirmed to run as their own literal process name (`ps -ef`, 2026-07-07): `claude` and `codex` and `opencode` are each a native compiled binary (`file` reports Mach-O), so their `comm` is their own binary name with no interpreter wrapper to hide behind.
+- `alive` - the name contains `claude`, `codex`, `opencode`, or `grok`, or the pane reports `node` and that pane process's first argument has the exact basename `cursor-agent`.
+  The four native-name harnesses were confirmed with `ps -ef` on 2026-07-07.
+  Cursor's stricter argument check was confirmed on 2026-07-14 and never matches a generic process named `agent` or a bare `node`.
 - `dead` - the name is a bare shell (`zsh`, `bash`, `sh`, `dash`, `ash`, `ksh`, `mksh`, `tcsh`, `csh`, `fish`).
 - `unknown` - anything else, including an unreadable pane.
 
@@ -110,6 +112,20 @@ Since `node` is also the generic name for a plain interpreter session, any futur
 The classifier deliberately reports `unknown` for `node`/`python`/`python3` rather than guess - per the secondmate-liveness sweep's correctness bar, a wrong `alive` is harmless but a wrong `dead` spins up a duplicate agent, so an unresolvable case must never be treated as confidently dead.
 Practical effect: a dead `pi` secondmate is not auto-healed by the liveness sweep today; it is reported as `skipped: liveness probe inconclusive` instead, which still surfaces it for a human to act on.
 Resolving this would need either a `pi`-specific env marker inspectable from outside the process (mirroring `PI_CODING_AGENT=true`, which `bin/fm-harness.sh` already uses for self-detection but which is not readable from a different process without deeper introspection) or accepting the argument-inspection fragility - not attempted here.
+
+### Cursor Agent verification, 2026-07-14
+
+Version: `2026.07.09-a3815c0`.
+Launch command: `cursor-agent --force --model gpt-5.6-sol-high`.
+Command run while the interactive TUI was live: `tmux display-message -p -t fm-cursor-verify '#{pane_current_command}'`.
+Exact output: `node`.
+Commands then read the same pane's `#{pane_pid}` and ran `ps -o pid=,ppid=,pgid=,comm=,args= -g <foreground-pgid>`.
+The single foreground row's arguments began with `/Users/shawn.petros/.local/bin/cursor-agent --use-system-ca .../cursor-agent/versions/2026.07.09-a3815c0/index.js`.
+This is why the liveness classifier inspects only a `node` pane's own pid and requires argv[0]'s basename to equal `cursor-agent`; unrelated Node programs remain `unknown`.
+
+The busy TUI was captured while the agent ran `sleep 30`.
+Its status line was `⠘⠆ Running  50 tokens`, while the idle TUI had no `Running ... tokens` line.
+The shared busy regex therefore matches a leading spinner token followed by `Running`, a numeric token count, and `tokens`, without depending on one animated braille glyph.
 
 ## Limitations
 
