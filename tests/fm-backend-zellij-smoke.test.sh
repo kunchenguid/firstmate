@@ -6,8 +6,10 @@
 # the CLI, this one talks to a REAL zellij server - but ALWAYS on a private,
 # named, throwaway session (via FM_ZELLIJ_SESSION, never the real "firstmate"
 # session name), so it never touches a captain's real zellij usage. Skips
-# cleanly when zellij (or jq) is not installed, so CI/dev machines without
-# zellij are unaffected.
+# cleanly when zellij (or jq) is not installed, and skips the real-server
+# smoke when the installed zellij is below the adapter's verified minimum
+# (after first verifying the version gate refuses it loudly), so CI/dev
+# machines without a usable zellij are unaffected.
 #
 # Safety: cleanup uses ONLY zellij_safe_delete (tests/zellij-test-safety.sh),
 # never a bare kill-session/delete-session and never kill-all-sessions /
