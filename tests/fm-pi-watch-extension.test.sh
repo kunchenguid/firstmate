@@ -344,6 +344,7 @@ const first = await tool.execute("first", {}, undefined, undefined, {});
 if (!first.content[0].text.includes("started Pi extension arm child 1")) throw new Error(first.content[0].text);
 for (let i = 0; i < 100; i += 1) {
   try {
+    readFileSync(`${process.env.FM_HOME}/state/.last-watcher-beat`, "utf8");
     if (readFileSync(process.env.FM_LAUNCH_LOG, "utf8").trim()) break;
   } catch {}
   await new Promise((resolve) => setTimeout(resolve, 20));
@@ -474,6 +475,7 @@ const first = await tool.execute("first", {}, undefined, undefined, {});
 if (!first.content[0].text.includes("started Pi extension arm child 1")) throw new Error(first.content[0].text);
 for (let i = 0; i < 100; i += 1) {
   try {
+    readFileSync(`${process.env.FM_HOME}/state/.last-watcher-beat`, "utf8");
     if (readFileSync(process.env.FM_LAUNCH_LOG, "utf8").trim()) break;
   } catch {}
   await new Promise((resolve) => setTimeout(resolve, 20));
@@ -548,6 +550,7 @@ const first = await tool.execute("first", {}, undefined, undefined, {});
 if (!first.content[0].text.includes("started Pi extension arm child 1")) throw new Error(first.content[0].text);
 for (let i = 0; i < 100; i += 1) {
   try {
+    readFileSync(`${process.env.FM_HOME}/state/.last-watcher-beat`, "utf8");
     if (readFileSync(process.env.FM_LAUNCH_LOG, "utf8").trim()) break;
   } catch {}
   await new Promise((resolve) => setTimeout(resolve, 20));

@@ -32,6 +32,7 @@ The watcher now bounds both native capability probes and event waits, refreshes 
 The Pi extension now calls `fm_watcher_healthy` for the shared live-pid, lock-identity, home, watcher-path, and beacon predicate, accepts health only when that watcher descends from its arm process, and owns a detached process group until inherited pipes close.
 Command run for deterministic regressions: `tests/fm-supervision-events.test.sh && tests/fm-pi-watch-extension.test.sh`.
 Observed output included `ok - event_wait_or_sleep: a hung backend probe is bounded and its exact process tree is reaped` and `ok - Pi stale child recovery checks lock+beacon health and reaps inherited-pipe descendants`.
+Re-validation on 2026-07-15 also pinned the orphaned delayed-close regressions to wait for `.last-watcher-beat` before forcing staleness, removing the launch-log versus beacon-file race that could flake the recovery coverage without changing runtime behavior.
 Re-validation on 2026-07-15 used Pi 0.80.7.
 Command run for the real lifecycle: `FM_PI_LIVE_E2E=1 FM_PI_AUTH_DIR=<existing-auth-dir> tests/fm-pi-primary-live-e2e.test.sh`.
 Observed output: `ok - Pi 0.80.7 live E2E rendered the tool, guarded once, woke, re-armed, and cleaned up on exit`.
