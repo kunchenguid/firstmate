@@ -86,11 +86,14 @@ SH
 add_tasks_axi() {
   local fakebin=$1 version=$2 archive_help=${3:-yes} multi_help=${4:-yes}
   local archive_live=${5:-yes} multi_live=${6:-yes} reject_atomic=${7:-yes}
-  local move_bodies=${8:-yes} transient_live=${9:-no} archive_line mv_usage
+  local move_bodies=${8:-yes} transient_live=${9:-no} preserve_dependency=${10:-yes}
+  local archive_line mv_usage destination_dependency
   archive_line=""
   [ "$archive_help" = yes ] && archive_line='  --archive-body'
   mv_usage='usage: tasks-axi mv <id> [<id>...] --to <path-or-dir>'
   [ "$multi_help" = yes ] || mv_usage='usage: tasks-axi mv <id> --to <path-or-dir>'
+  destination_dependency='- [ ] fm-probe-b - second probe item (repo: firstmate) blocked-by: fm-probe-a - probe dependency'
+  [ "$preserve_dependency" = yes ] || destination_dependency='- [ ] fm-probe-b - second probe item (repo: firstmate)'
   cat > "$fakebin/tasks-axi" <<SH
 #!/usr/bin/env bash
 if [ "\${1:-}" = --version ]; then
@@ -129,7 +132,7 @@ if [ "\${1:-}" = update ]; then
     '## Queued' \\
     '- [ ] fm-probe-a - first probe item (repo: firstmate)' \\
     '  replacement probe body' \\
-    '- [ ] fm-probe-b - second probe item (repo: firstmate)' \\
+    '- [ ] fm-probe-b - second probe item (repo: firstmate) blocked-by: fm-probe-a - probe dependency' \\
     '  second probe body' > "\$file"
   printf '%s\n' '## Archived probe' '- [ ] fm-probe-a - first probe item (repo: firstmate)' \\
     '  previous probe body' > "\$(dirname "\$file")/note-archive.md"
@@ -162,12 +165,12 @@ if [ "\${1:-}" = mv ]; then
       '## In flight' '' '## Queued' \\
       '- [ ] fm-probe-a - first probe item (repo: firstmate)' \\
       '  replacement probe body' \\
-      '- [ ] fm-probe-b - second probe item (repo: firstmate)' \\
+      '$destination_dependency' \\
       '  second probe body' '' '## Done' > "\$destination"
   else
     printf '%s\n' '## In flight' '' '## Queued' \
       '- [ ] fm-probe-a - first probe item (repo: firstmate)' \
-      '- [ ] fm-probe-b - second probe item (repo: firstmate)' \
+      '$destination_dependency' \
       '' '## Done' > "\$destination"
   fi
   exit 0
@@ -294,7 +297,7 @@ assert_timeout_report() {
 test_bootstrap_reporting() {
   local label lease tasks quota backend mode expect notcontains case_dir fakebin out n
   local version features archive_help multi_help archive_live multi_live
-  local reject_atomic move_bodies transient_live
+  local reject_atomic move_bodies transient_live preserve_dependency
   n=0
   while IFS='^' read -r label lease tasks quota backend mode expect notcontains; do
     [ -n "$label" ] || continue
@@ -319,6 +322,7 @@ test_bootstrap_reporting() {
       reject_atomic=yes
       move_bodies=yes
       transient_live=no
+      preserve_dependency=yes
       case ":$features:" in *:noarchive:*) archive_help=no; archive_live=no ;; esac
       case ":$features:" in *:nomulti:*) multi_help=no; multi_live=no ;; esac
       # This CLI advertises the newest version and both flags, but rejects the
@@ -327,8 +331,9 @@ test_bootstrap_reporting() {
       case ":$features:" in *:mutatereject:*) reject_atomic=no ;; esac
       case ":$features:" in *:dropbodies:*) move_bodies=no ;; esac
       case ":$features:" in *:transient:*) transient_live=yes ;; esac
+      case ":$features:" in *:dropdependency:*) preserve_dependency=no ;; esac
       add_tasks_axi "$fakebin" "$version" "$archive_help" "$multi_help" "$archive_live" "$multi_live" \
-        "$reject_atomic" "$move_bodies" "$transient_live"
+        "$reject_atomic" "$move_bodies" "$transient_live" "$preserve_dependency"
     fi
     if [ "$quota" = "0" ]; then
       rm -f "$fakebin/quota-axi"
@@ -359,6 +364,7 @@ incompatible old tasks-axi is required by default^1^0.1.2:noarchive:nomulti^1^-^
 tasks-axi with misleading version/help output is required by default^1^0.2.3:lies^1^-^exact^MISSING: tasks-axi (install: npm install -g tasks-axi@0.2.3)^
 tasks-axi rejected move mutation fails closed^1^0.2.3:mutatereject^1^-^exact^MISSING: tasks-axi (install: npm install -g tasks-axi@0.2.3)^
 tasks-axi dropped move bodies fail closed^1^0.2.3:dropbodies^1^-^exact^MISSING: tasks-axi (install: npm install -g tasks-axi@0.2.3)^
+tasks-axi dropped dependency edge fails closed^1^0.2.3:dropdependency^1^-^exact^MISSING: tasks-axi (install: npm install -g tasks-axi@0.2.3)^
 tasks-axi transient probe result stays cached^1^0.2.3:transient^1^-^exact^MISSING: tasks-axi (install: npm install -g tasks-axi@0.2.3)^
 missing quota-axi is required by default^1^0.1.1^0^manual^exact^MISSING: quota-axi (install: npm install -g quota-axi)^
 manual backlog backend still requires missing tasks-axi^1^-^1^manual^exact^MISSING: tasks-axi (install: npm install -g tasks-axi@0.2.3)^

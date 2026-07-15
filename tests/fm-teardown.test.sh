@@ -145,7 +145,7 @@ if [ "${1:-}" = update ]; then
     '## Queued' \
     '- [ ] fm-probe-a - first probe item (repo: firstmate)' \
     '  replacement probe body' \
-    '- [ ] fm-probe-b - second probe item (repo: firstmate)' \
+    '- [ ] fm-probe-b - second probe item (repo: firstmate) blocked-by: fm-probe-a - probe dependency' \
     '  second probe body' > "$file"
   printf '%s\n' '## Archived probe' '- [ ] fm-probe-a - first probe item (repo: firstmate)' \
     '  previous probe body' > "$(dirname "$file")/note-archive.md"
@@ -170,7 +170,7 @@ if [ "${1:-}" = mv ]; then
     '## In flight' '' '## Queued' \
     '- [ ] fm-probe-a - first probe item (repo: firstmate)' \
     '  replacement probe body' \
-    '- [ ] fm-probe-b - second probe item (repo: firstmate)' \
+    '- [ ] fm-probe-b - second probe item (repo: firstmate) blocked-by: fm-probe-a - probe dependency' \
     '  second probe body' '' '## Done' > "$destination"
   exit 0
 fi

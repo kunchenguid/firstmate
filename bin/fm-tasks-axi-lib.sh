@@ -29,7 +29,7 @@ fm_tasks_axi_compatible() {
     '## Queued' \
     '- [ ] fm-probe-a - first probe item (repo: firstmate)' \
     "  $previous" \
-    '- [ ] fm-probe-b - second probe item (repo: firstmate)' \
+    '- [ ] fm-probe-b - second probe item (repo: firstmate) blocked-by: fm-probe-a - probe dependency' \
     '  second probe body' > "$source"
   printf '%s\n' '## In flight' '' '## Queued' '' '## Done' > "$destination"
 
@@ -45,7 +45,7 @@ fm_tasks_axi_compatible() {
     '## Queued' \
     '- [ ] fm-probe-a - first probe item (repo: firstmate)' \
     "  $replacement" \
-    '- [ ] fm-probe-b - second probe item (repo: firstmate)' \
+    '- [ ] fm-probe-b - second probe item (repo: firstmate) blocked-by: fm-probe-a - probe dependency' \
     '  second probe body' > "$expected_source" ||
     ! cmp -s "$source" "$expected_source" ||
     ! cp "$source" "$rejected_source" ||
@@ -66,7 +66,7 @@ fm_tasks_axi_compatible() {
     '## In flight' '' '## Queued' \
     '- [ ] fm-probe-a - first probe item (repo: firstmate)' \
     "  $replacement" \
-    '- [ ] fm-probe-b - second probe item (repo: firstmate)' \
+    '- [ ] fm-probe-b - second probe item (repo: firstmate) blocked-by: fm-probe-a - probe dependency' \
     '  second probe body' '' '## Done' > "$expected_destination" ||
     ! printf '%s\n' '## Queued' > "$expected_source"; then
     rm -rf "$probe"
