@@ -406,6 +406,10 @@ Then classify readiness:
 Keep dependency judgment coarse: same repo plus overlapping area means serialize; everything else runs parallel.
 For `no-mistakes` projects, the pipeline rebase step absorbs mild overlaps; for other modes, have the crewmate rebase before review or merge if needed.
 
+For a non-trivial feature whose shape is still fuzzy, an optional sharpening path runs before dispatch: load the `grill` skill when the captain invokes `/grill`, or offer it when a request is too vague to write acceptance criteria against.
+It interviews the captain into a short spec at `data/spec-<project>-<slug>.md`, which then feeds the ordinary brief below.
+Skip it for a sharp request, a bug, or a scout question; dispatching directly stays the default.
+
 Write the brief per section 11.
 
 ### Spawn
