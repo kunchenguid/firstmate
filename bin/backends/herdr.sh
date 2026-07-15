@@ -767,11 +767,13 @@ fm_backend_herdr_pi_composer_find() {  # <ansi-capture>
   FM_BACKEND_HERDR_PI_PAIR_VALID=0
   FM_BACKEND_HERDR_PI_PAIR_OPEN_LINE=0
   FM_BACKEND_HERDR_PI_PAIR_LINE=0
+  FM_BACKEND_HERDR_PI_LAST_SEPARATOR_LINE=0
   FM_BACKEND_HERDR_PI_CONTENT=""
   while IFS= read -r line; do
     row=$((row + 1))
     plain=$(fm_backend_herdr_strip_ansi "$line")
     if fm_backend_herdr_pi_separator_row "$plain"; then
+      FM_BACKEND_HERDR_PI_LAST_SEPARATOR_LINE=$row
       if [ "$open" -eq 1 ]; then
         FM_BACKEND_HERDR_PI_PAIR_FOUND=1
         FM_BACKEND_HERDR_PI_PAIR_OPEN_LINE=$open_row
@@ -868,6 +870,11 @@ EOF
         ;;
       *) : ;; # A known non-Pi agent keeps its established generic verdict.
     esac
+  elif [ "$FM_BACKEND_HERDR_PI_PAIR_FOUND" -eq 0 ] \
+       && [ "$FM_BACKEND_HERDR_PI_LAST_SEPARATOR_LINE" -gt "$generic_line" ]; then
+    # A lower unmatched separator proves the generic row is stale, but does
+    # not provide the complete Pi composer structure required for injection.
+    found=0
   fi
   [ "$found" -eq 1 ] || { printf 'unknown'; return 0; }
   # Content: extract the real typed text from the raw row with the shared,
