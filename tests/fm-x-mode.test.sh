@@ -488,6 +488,39 @@ test_bootstrap_does_not_announce_when_arm_fails() {
   pass "bootstrap does not report X mode on when activation artifacts cannot be written"
 }
 
+test_bootstrap_does_not_follow_x_artifact_symlinks() {
+  local home shim_target cadence_target out
+  home="$TMP_ROOT/boot-linked-artifacts"
+  mkdir -p "$home/state" "$home/config" "$home/external-quarantine"
+  printf 'FMX_PAIRING_TOKEN=tok-linked\n' > "$home/.env"
+  shim_target="$home/external-shim"
+  cadence_target="$home/external-cadence"
+  printf 'external shim sentinel\n' > "$shim_target"
+  printf 'external cadence sentinel\n' > "$cadence_target"
+  chmod 0640 "$shim_target" "$cadence_target"
+  ln -s "$shim_target" "$home/state/x-watch.check.sh"
+  ln -s "$cadence_target" "$home/config/x-mode.env"
+  ln -s "$home/external-quarantine" "$home/state/.pr-check-quarantine"
+
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-bootstrap.sh" 2>"$home/bootstrap.err")
+
+  assert_contains "$out" "FMX: X mode off - failed to arm relay poll shim or 30s cadence" \
+    "bootstrap must reject linked X-mode destinations"
+  assert_not_contains "$out" "FMX: X mode on" \
+    "bootstrap must not announce X mode after rejecting linked destinations"
+  [ "$(cat "$shim_target")" = 'external shim sentinel' ] \
+    || fail "bootstrap changed the linked shim target"
+  [ "$(cat "$cadence_target")" = 'external cadence sentinel' ] \
+    || fail "bootstrap changed the linked cadence target"
+  [ "$(stat -f %Lp "$shim_target" 2>/dev/null || stat -c %a "$shim_target")" = 640 ] \
+    || fail "bootstrap changed the linked shim target mode"
+  [ "$(stat -f %Lp "$cadence_target" 2>/dev/null || stat -c %a "$cadence_target")" = 640 ] \
+    || fail "bootstrap changed the linked cadence target mode"
+  assert_absent "$home/state/x-watch.check.sh" "bootstrap must remove the rejected shim link"
+  assert_absent "$home/config/x-mode.env" "bootstrap must remove the rejected cadence link"
+  pass "bootstrap rejects linked X artifacts without touching their targets"
+}
+
 test_bootstrap_inert_without_token() {
   local home out
   # No .env at all.
@@ -2282,6 +2315,7 @@ test_followup_usage_errors
 test_bootstrap_activates_on_env_token
 test_bootstrap_reports_missing_x_dependency
 test_bootstrap_does_not_announce_when_arm_fails
+test_bootstrap_does_not_follow_x_artifact_symlinks
 test_bootstrap_inert_without_token
 test_bootstrap_opt_out_cleanup
 test_bootstrap_opt_out_reports_cleanup_failure

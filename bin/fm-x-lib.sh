@@ -85,20 +85,33 @@ fmx_poll_shim_v1_content() {
     "exec $(printf '%q' "$root/bin/fm-x-poll.sh")"
 }
 
-fmx_poll_shim_identity_valid() {
-  local file=$1 expected_mode=$2 expected_device=${3-} mode links device
+fmx_single_link_file_valid() {
+  local file=$1 expected_device=${2-} links device
   [ -f "$file" ] && [ ! -L "$file" ] || return 1
   if [ "$(uname)" = Darwin ]; then
-    mode=$(stat -f %Lp "$file" 2>/dev/null) || return 1
     links=$(stat -f %l "$file" 2>/dev/null) || return 1
     device=$(stat -f %d "$file" 2>/dev/null) || return 1
   else
-    mode=$(stat -c %a "$file" 2>/dev/null) || return 1
     links=$(stat -c %h "$file" 2>/dev/null) || return 1
     device=$(stat -c %d "$file" 2>/dev/null) || return 1
   fi
-  [ "$mode" = "$expected_mode" ] && [ "$links" = 1 ] || return 1
+  [ "$links" = 1 ] || return 1
   [ -z "$expected_device" ] || [ "$device" = "$expected_device" ]
+}
+
+fmx_single_link_file_mode_valid() {
+  local file=$1 expected_mode=$2 expected_device=${3-} mode
+  fmx_single_link_file_valid "$file" "$expected_device" || return 1
+  if [ "$(uname)" = Darwin ]; then
+    mode=$(stat -f %Lp "$file" 2>/dev/null) || return 1
+  else
+    mode=$(stat -c %a "$file" 2>/dev/null) || return 1
+  fi
+  [ "$mode" = "$expected_mode" ]
+}
+
+fmx_poll_shim_identity_valid() {
+  fmx_single_link_file_mode_valid "$1" "$2" "${3-}"
 }
 
 fmx_poll_shim_private_identity_valid() {
