@@ -144,6 +144,7 @@ Proceed on one confident match while naming the project in plain language; ask o
 Route by the nature of the work against each registered secondmate scope, not by a non-exclusive clone list.
 Keep `local-only` work in the main home.
 Send in-scope work to the fitting secondmate unless it is blocked or the captain explicitly redirects it; do not read the secondmate's chat because marked routed replies return through its status or referenced document.
+Use the stable `fm-<id>` label or exact task id for recorded tasks; for an endpoint outside this firstmate home, follow the explicit-provider syntax and fail-closed selector contract owned by `docs/configuration.md` ("Runtime backend").
 If no secondmate scope fits, use the main home or discuss creating an appropriate persistent secondmate.
 
 Classify the deliverable:
