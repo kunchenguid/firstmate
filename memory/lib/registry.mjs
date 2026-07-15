@@ -169,13 +169,16 @@ function applyEvent(records, event) {
   }
   if (!record) throw new Error(`unknown memory record: ${event.memId}`);
   assertTransition(record, event);
+  const activationGovernanceRecord = event.event === 'activated'
+    ? { ...record, taskKinds: [...(record.taskKinds || [])] }
+    : null;
   applyFields(record, event.fields || {});
 
   if (event.event === 'activated' || event.event === 'revalidated') {
     if ((event.evidence || []).length === 0 || !event.validation?.method) {
       throw new Error(`${event.event} requires evidence and validation: ${event.memId}`);
     }
-    if (event.event === 'activated' && isHighImpact(record)) {
+    if (event.event === 'activated' && (isHighImpact(activationGovernanceRecord) || isHighImpact(record))) {
       const captainAuthority = event.actor?.kind === 'captain' && Boolean(validationRef(event));
       const proposer = actorId(record.proposedBy);
       const activator = actorId(event.actor);

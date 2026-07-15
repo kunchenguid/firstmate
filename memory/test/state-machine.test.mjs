@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { appendRegistryEvent, foldRegistry } from '../lib/registry.mjs';
+import { appendRegistryEvent, buildActiveIndex, foldRegistry } from '../lib/registry.mjs';
 import { tmpRegistry } from './helpers.mjs';
 
 const firstmate = { kind: 'firstmate', id: 'fm' };
@@ -28,6 +28,44 @@ test('m7-17 independent high-impact activation requires concrete independent act
   // An independent activator succeeds.
   await activate(dir, 'MEM-0001', { kind: 'agent', id: 'other-agent' });
   assert.equal(foldRegistry(dir).records.get('MEM-0001').status, 'active');
+});
+
+test('activation fields cannot erase high-impact governance before authorization', async () => {
+  const dir = tmpRegistry();
+  await appendRegistryEvent(dir, {
+    event: 'proposed',
+    memId: 'MEM-0001',
+    actor: { kind: 'agent', id: 'same-agent' },
+    fields: {
+      summary: 'critical dispatch governance',
+      riskClass: 'critical',
+      taskKinds: ['dispatch'],
+      guard_linked: true
+    }
+  });
+
+  await assert.rejects(
+    appendRegistryEvent(dir, {
+      event: 'activated',
+      memId: 'MEM-0001',
+      actor: { kind: 'agent', id: 'same-agent' },
+      fields: {
+        riskClass: 'standard',
+        taskKinds: [],
+        guard_linked: false
+      },
+      evidence: [{ type: 'test', ref: 'self-downgrade' }],
+      validation: { method: 'qa', by: 'same-agent', ref: 'qa-ref' }
+    }),
+    /high-impact activation requires an independent activator or captain authority/
+  );
+
+  const record = foldRegistry(dir).records.get('MEM-0001');
+  assert.equal(record.status, 'candidate');
+  assert.equal(record.riskClass, 'critical');
+  assert.deepEqual(record.taskKinds, ['dispatch']);
+  assert.equal(record.guardLinked, true);
+  assert.deepEqual(buildActiveIndex(dir).records, []);
 });
 
 test('high-impact proposal requires proposer ID and Captain authority requires an authorization reference', async () => {
