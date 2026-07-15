@@ -58,10 +58,12 @@ batched digest rather than per-wake injections.
 No `/back` is needed. The first genuine message is the return signal:
 
 - A message **without** the sentinel marker and **not** starting with `/afk` -> the captain is back.
-  Run `bin/fm-afk-launch.sh stop`: it stops the daemon in the correct order - it SIGTERMs the daemon so its shutdown flush runs **while `state/.afk` is still present** (clearing the flag first makes that flush a no-op via the daemon's presence gate, stranding undelivered escalations), then closes the daemon's own terminal by exact id, then clears `state/.afk` last.
-  Then flush one distilled "while you were out" catch-up (drain `state/.wake-queue`, summarize any pending escalations from `state/.subsuper-escalations` and any `state/.subsuper-inject-wedged` marker), and resume full per-wake responsiveness through the emitted primary-harness supervision protocol from session start.
-- A message **with** the sentinel marker (`FM_INJECT_MARK`, ASCII 0x1f) -> it
-  is a daemon escalation; stay afk and process it.
+  Run `bin/fm-afk-return.sh` before acting on the message that brought the captain back.
+  That script owns correct-ordered daemon shutdown, durable wake draining, escalation and wedge evidence, and the return-catch-up gate.
+  If it reports a firstmate-actionable `blocked:` event, remediate it immediately through the normal lifecycle, or explicitly reclassify it with a durable reason and close its decision key with `resolved [key=...]`, then run `bin/fm-afk-return.sh check`.
+  Once the daemon stops, resume full per-wake responsiveness through the emitted primary-harness supervision protocol while blocker handling proceeds, so the gate never creates a blind wait.
+  Do not answer a Bearings request or perform any other ordinary captain work until the check exits successfully.
+- A message **with** the sentinel marker (`FM_INJECT_MARK`, U+2063 INVISIBLE SEPARATOR) -> it is a daemon escalation; stay afk and process it.
 - Re-invoking `/afk` while already away -> stay afk (refresh the flag); this
   does **not** trigger an exit.
 
@@ -77,12 +79,9 @@ explicit word - the daemon just batches the notification.
 
 ## Sentinel marker contract
 
-The daemon prefixes every injection with `FM_INJECT_MARK` (ASCII unit
-separator, 0x1f), invisible and untypable. This is how firstmate tells a
-daemon escalation apart from a real message in the same pane. The marker
-travels with the message text; it does not rely on harness-level
-typed-vs-injected detection (which is not portable across claude, codex,
-opencode, pi, and grok).
+The daemon prefixes every injection with `FM_INJECT_MARK` (U+2063 INVISIBLE SEPARATOR), which has no normal keyboard keystroke and survives terminal transport as UTF-8 text.
+This is how firstmate tells a daemon escalation apart from a real message in the same pane.
+The marker travels with the message text; it does not rely on harness-level typed-vs-injected detection, which is not portable across claude, codex, opencode, pi, and grok.
 
 ## Busy-guard and composer guard
 
@@ -103,6 +102,7 @@ In afk mode the composer guard is belt-and-suspenders (no human is typing), but 
 **Max-defer escape (the daemon must never silently wedge).**
 If anything stays buffered past `FM_MAX_DEFER_SECS` (default 300), the daemon
 attempts one normal flush, which still requires an idle pane and an affirmatively empty composer.
+The alarm is defense in depth rather than a substitute for keeping every genuinely idle supported composer injectable.
 If that submit cannot be confirmed, it raises a loud, rate-limited wedge alarm:
 an ERROR in the daemon log, a durable
 `state/.subsuper-inject-wedged` marker (surface it on the "while you were out"

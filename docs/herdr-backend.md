@@ -259,6 +259,82 @@ evidence: direct-input received-hex=464d5f4d41524b45525f48455244525f444952454354
 Unit coverage in `tests/fm-send-secondmate-marker.test.sh` pins exact-id and stable-label secondmates, exact-id and stable-label ordinary crewmates, explicit endpoints with and without local metadata, key-only sends, direct unmarked input, exact U+2063 bytes, and idempotence.
 Strict unresolved-selector behavior remains covered by `tests/fm-send-strict.test.sh`.
 
+## Incident (2026-07-14): Pi-on-Herdr away escalation stayed non-injectable for 4555 seconds
+
+A guarded reproduction used Herdr 0.7.3, Pi 0.80.7, a generated non-`default` session from `bin/fm-herdr-lab.sh`, an isolated Firstmate home, a real Pi primary pane, the public `bin/fm-afk-launch.sh start` entrypoint, a live synthetic child pane, the real daemon and wake queue, `bin/fm-afk-launch.sh stop`, `bin/fm-wake-drain.sh`, and `bin/fm-bearings-snapshot.sh`.
+Every production-adapter and explicit Herdr command was routed through the lab helper, and teardown verified that the running `default` session was unchanged.
+The synthetic child appended `blocked [key=synthetic-dependency]: firstmate can refresh the synthetic token` while away mode was active.
+The daemon classified the status as captain-relevant, retained it in `state/.subsuper-escalations`, and the watcher retained the matching `signal` in `state/.wake-queue`.
+The oldest-escalation sidecar was backdated by 4555 seconds to reproduce the observed interval without waiting in wall-clock time.
+The alarm then recorded `fm away-mode inject WEDGED: 4556s undelivered`, the active notifier fired exactly once, the buffer remained intact, and Pi captured zero injected prompts.
+
+The causal probes against the exact recorded supervisor target were:
+
+```text
+target_exists=yes
+busy_state=idle
+composer_state=unknown
+```
+
+The plain Pi capture showed a blank content row between two horizontal separators:
+
+```text
+─────────────────────────────────────────────────────
+
+─────────────────────────────────────────────────────
+<project and model footer>
+```
+
+The ANSI capture showed the same two blue separator rows with a reverse-video cursor in the blank content row.
+Real pending text occupied that same middle row and native `agent get` remained idle, which proved native agent state alone could not distinguish an empty Pi composer from an unsubmitted Pi draft.
+The exact target was correct, the agent was not busy, and submit verification was never reached because the affirmative-empty pre-injection guard rejected the unrecognized structure.
+This rules out target resolution, busy detection, submit acknowledgement, and shutdown ordering as the 4555-second cause.
+The root cause was solely that the Herdr structural classifier recognized bordered composers and bare `❯` or `›` prompt rows, while Pi renders a separator-only composer.
+
+`fm_backend_herdr_composer_state` remains the single backend owner of structural row recognition.
+It now accepts content between the bottom-most complete pair of Pi separator rows only when Herdr's native identity says the target agent is exactly `pi` and its status is `idle`, `done`, or `blocked`.
+A working Pi, a pending middle row, a missing or non-Pi identity, an incomplete pair, or an over-tall candidate remains `pending` or `unknown`, so dead shells and ambiguous panes are still non-injectable.
+The extracted content still routes through the shared `bin/fm-composer-lib.sh` decision owner.
+
+Making the Pi composer injectable exposed the already-proven terminal-control hazard from the 2026-07-13 incident: Herdr consumed a leading ASCII `0x1f`, so Pi received `Supervisor escalate...` without the away marker.
+`FM_INJECT_MARK` now uses a bare leading U+2063 INVISIBLE SEPARATOR, while the from-firstmate marker remains a visible label followed by U+2063, so their full prefixes stay distinct.
+U+2063 has no normal keyboard keystroke and the real post-fix Pi prompt capture retained its `e281a3` prefix byte-exact.
+
+The return half of the same reproduction showed that separate `stop` and `wake-drain` calls left policy ownership to the operator and allowed an ordinary Bearings request to begin while the live blocker remained open.
+Bearings' authoritative structured projection was already correct:
+
+```json
+{"in_flight":[{"id":"synthetic-child","state":"blocked"}],"decisions_open":[{"id":"synthetic-child","verb":"blocked"}],"gates":[]}
+```
+
+The live blocker was never structured as queued work, so no return policy was duplicated into Bearings wording or its projection.
+`bin/fm-afk-return.sh` now owns deterministic stop, drain, durable evidence, and the fail-closed return gate.
+It refuses ordinary work until each live open `blocked:` key is resolved after immediate remediation or explicitly reclassified with a durable reason.
+The `/afk` skill owns the situation-specific procedure, and the always-loaded `AGENTS.md` away stub contains only the safety-critical trigger to run that owner before processing the return message.
+`bin/fm-bearings-snapshot.sh` consults the owner's read-only guard and contains no copy of the policy.
+
+The guarded post-fix command was:
+
+```sh
+FM_AFK_PI_HERDR_E2E=1 HERDR_LAB_HELPER=bin/fm-herdr-lab.sh tests/fm-afk-pi-herdr-return-e2e.test.sh
+```
+
+The real result was:
+
+```text
+ok - real Pi/Herdr pending composer refuses injection without forced submit and raises one observable fallback
+ok - real idle Pi/Herdr accepts one marked escalation promptly, verifies submit, clears wedge state, and emits no duplicate alert
+ok - real unmarked Pi return opens catch-up and blocks Bearings before the unresolved blocker can be deferred
+ok - resolved return catch-up allows Bearings and a clean idempotent away re-entry
+evidence: herdr=herdr 0.7.3 pi=0.80.7 inject-hex-prefix=e281a3 notifier-count=1
+```
+
+Unit coverage in `tests/fm-backend-herdr.test.sh` pins the exact idle and pending Pi captures plus working, non-Pi, unreadable, and over-tall refusal.
+`tests/fm-afk-return.test.sh` pins durable catch-up evidence, blocker ownership, Bearings precedence, explicit reclassification, re-entry, and tmux/Herdr parity.
+`tests/fm-bearings-snapshot.test.sh` pins that live blocked work remains live structured state and never becomes a queued gate.
+The existing tmux injection E2E remains the transport-parity proof for type-once, verified-submit behavior.
+The wedge alarm remains defense in depth and is not the primary delivery path.
+
 ## Verified bug: `pane read --lines N` returns empty for small N
 
 This was the most significant finding of this verification pass.

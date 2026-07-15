@@ -25,17 +25,14 @@
 # travels with the live secondmate, and is summarized in AGENTS.md.
 #
 # Distinct from the afk daemon marker, on purpose.
-# The away-mode daemon (bin/fm-supervise-daemon.sh) marks its daemon->firstmate
-# escalations with a BARE leading unit separator (FM_INJECT_MARK, ASCII 0x1f).
-# The from-firstmate marker instead uses U+2063 INVISIBLE SEPARATOR after its
-# human-readable label. U+2063 has no normal keyboard keystroke but travels as
-# UTF-8 text rather than a terminal control byte. The original ASCII 0x1f
-# separator did not survive terminal input faithfully: on Herdr 0.7.3 feeding
-# it to a real Pi composer removed the preceding label, so Pi received only the
-# unmarked request (docs/herdr-backend.md records the incident and live proof).
-# The afk contract keys on a LEADING 0x1f, while this marker begins with its
-# label and contains no 0x1f, so the two cannot conflate. The visible label is
-# what the secondmate's LLM reads; U+2063 remains invisible.
+# Both terminal-safe markers use U+2063 INVISIBLE SEPARATOR because it has no
+# normal keyboard keystroke but travels as UTF-8 text rather than a terminal
+# control byte. The away-mode marker is a BARE leading U+2063; this marker begins
+# with its human-readable label and places U+2063 after it, so the two cannot
+# conflate. The original ASCII 0x1f separator did not survive terminal input
+# faithfully: on Herdr 0.7.3 feeding it to a real Pi composer removed marker
+# content, so Pi received an unmarked message. docs/herdr-backend.md records both
+# incidents and their live proof.
 #
 # Sourced by bin/fm-send.sh, bin/fm-brief.sh, and the tests. No side effects on
 # source. set -u / set -e safe.

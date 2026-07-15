@@ -1142,6 +1142,25 @@ $(printf 'mate-landed-%02d' "$i")"
   pass "landed stays bounded with per-home + overall caps and omitted[] disclosure"
 }
 
+# Bearings projects authoritative structured state rather than inventing return
+# policy. A live blocked child remains a live in-flight record with state=blocked
+# and an open blocker; it must never be converted into a queued `gates` record.
+# The return-catch-up owner prevents this state from reaching ordinary rendering
+# during an away return, while this test pins Bearings' own projection boundary.
+test_live_blocker_is_not_charted_queue_work() {
+  local home fakebin json
+  home=$(make_home live-blocker); write_fixture "$home"
+  printf 'blocked [key=synthetic-dependency]: firstmate can refresh the synthetic token\n' > "$home/state/ship-task.status"
+  fakebin=$(make_fakebin "$home")
+  json=$(run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e '
+    (.in_flight | any(.[]; .id == "ship-task" and .state == "blocked"))
+      and (.decisions_open | any(.[]; .id == "ship-task" and .verb == "blocked" and .key == "synthetic-dependency"))
+      and (.gates | any(.[]; .id == "ship-task") | not)
+  ' >/dev/null || fail "live blocked work was projected as queued/deferred work: $json"
+  pass "Bearings keeps a live blocker in structured live state and never converts it to Charted Next queue work"
+}
+
 # Captain's Call is populated only from the durable keyed open-decision set. The
 # anti-leak guard: action-free highlights - a working task, a completed scout,
 # queued/gated items, landed work - must never surface as an open decision, so they
@@ -1212,6 +1231,7 @@ test_default_is_bounded_and_local_only
 test_toon_json_parity
 test_landed_includes_secondmate_home_merges
 test_landed_bounded_and_disclosed
+test_live_blocker_is_not_charted_queue_work
 test_captains_call_anti_leak
 test_chat_contract_four_sections
 test_completed_scout_report_not_pending

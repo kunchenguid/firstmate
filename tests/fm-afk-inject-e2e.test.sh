@@ -83,7 +83,7 @@ SUPERVISOR_PANE=$("$REAL_TMUX" -L "$SOCKET" display-message -p -t supervisor '#{
 LOOP_SCRIPT="$STATE_DIR/supervisor-loop.sh"
 cat > "$LOOP_SCRIPT" <<'LOOP'
 #!/usr/bin/env bash
-MARK=$'\x1f'
+MARK=$'\xE2\x81\xA3'
 LOG="$1"
 OLD_STTY=$(stty -g 2>/dev/null || true)
 [ -z "$OLD_STTY" ] || stty -echo -icanon min 1 time 0 2>/dev/null || true
@@ -358,7 +358,7 @@ test_scenario_b() {
   digest_line=$(grep 'Supervisor escalate' "$LOG_FILE" | head -1)
   digest_hex=$(printf '%s' "$digest_line" | cut -f1)
   case "$digest_hex" in
-    1f*) ;;  # correct: starts with the sentinel marker byte
+    e281a3*) ;;  # correct: starts with the terminal-safe sentinel marker
     *) fail "Scenario B: digest does not start with sentinel marker (hex: $digest_hex)" ;;
   esac
 
@@ -408,7 +408,7 @@ test_scenario_c() {
   esac
   digest_hex=$(printf '%s' "$digest_line" | cut -f1)
   case "$digest_hex" in
-    1f*) ;;
+    e281a3*) ;;
     *) fail "Scenario C: digest does not start with sentinel marker (hex: $digest_hex)" ;;
   esac
 

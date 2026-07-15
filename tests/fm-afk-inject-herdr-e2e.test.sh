@@ -124,7 +124,7 @@ EOF
 LOOP_SCRIPT="$STATE_DIR/supervisor-loop.sh"
 cat > "$LOOP_SCRIPT" <<'LOOP'
 #!/usr/bin/env bash
-MARK=$'\x1f'
+MARK=$'\xE2\x81\xA3'
 LOG="$1"
 AGENT_SOURCE=fm-test-supervisor
 AGENT_LABEL=fm-test-supervisor
@@ -391,8 +391,8 @@ test_scenario_b() {
   digest_line=$(grep 'Supervisor escalate' "$LOG_FILE" | head -1)
   digest_hex=$(printf '%s' "$digest_line" | cut -f1)
   case "$digest_hex" in
-    1f*) ;;
-    *) fail "Scenario B: digest does not start with the sentinel marker (hex: $digest_hex)" ;;
+    e281a3*) ;;
+    *) fail "Scenario B: digest does not start with the terminal-safe sentinel marker (hex: $digest_hex)" ;;
   esac
 
   local user_count
@@ -431,8 +431,8 @@ test_scenario_c() {
   esac
   digest_hex=$(printf '%s' "$digest_line" | cut -f1)
   case "$digest_hex" in
-    1f*) ;;
-    *) fail "Scenario C: digest does not start with the sentinel marker (hex: $digest_hex)" ;;
+    e281a3*) ;;
+    *) fail "Scenario C: digest does not start with the terminal-safe sentinel marker (hex: $digest_hex)" ;;
   esac
 
   local user_count

@@ -668,9 +668,9 @@ fm_backend_herdr_strip_ansi() {  # <text>
 # fm_backend_herdr_composer_state: classify the composer's own row as
 # empty|pending|unknown, scanning a generous tail-window capture of <target>.
 # herdr's CLI exposes no cursor-row primitive (unlike tmux's #{cursor_y}), so
-# this locates the composer row structurally, recognizing TWO row shapes and
-# keeping whichever match comes LAST (scanning forward), so a shape earlier in
-# scrollback/a popup can never outrank the real (bottom-anchored) composer row:
+# this locates the composer structurally, recognizing THREE shapes and keeping
+# whichever match comes LAST (scanning forward), so a shape earlier in
+# scrollback/a popup can never outrank the real (bottom-anchored) composer:
 #
 #   bordered - a boxed composer (verified grok 0.2.82): the row's TRIMMED
 #              content both STARTS and ENDS with the same border glyph (│, ┃,
@@ -697,6 +697,15 @@ fm_backend_herdr_strip_ansi() {  # <text>
 #              deliberately narrower than the bordered content classifier so a
 #              no-agent shell fallback prompt (`>`, `$`, `%`, or `#`) falls
 #              through to `unknown` instead of being misread as delivered.
+#   separated - Pi's composer is one or more content rows between two solid
+#              horizontal `─` separator rows, with no prompt glyph or side
+#              borders. This shape is accepted ONLY when Herdr's native
+#              `agent get` identifies the target as Pi and reports it idle,
+#              done, or blocked. A missing/stale/non-Pi agent identity, a
+#              working Pi, an over-tall candidate, or an incomplete separator
+#              pair remains unknown. This identity + structure conjunction is
+#              what makes a blank Pi row safe without weakening dead-shell or
+#              ambiguous-pane refusal.
 #
 #   empty   - blank, a bare prompt glyph, known ghost/placeholder text
 #             ("Type a message...", verified grok 0.2.82's empty-composer
@@ -731,9 +740,76 @@ FM_BACKEND_HERDR_IDLE_RE=${FM_BACKEND_HERDR_IDLE_RE:-'^Type a message\.\.\.$'}
 # (claude) and › (codex) only. Generic shell-style glyphs > $ % # are still
 # recognized after a bordered composer row has already been structurally found.
 FM_BACKEND_HERDR_BARE_PROMPT_RE=${FM_BACKEND_HERDR_BARE_PROMPT_RE:-'^[❯›]'}
+# Pi allows a multi-line composer between its horizontal separators. Bound the
+# structural candidate so two unrelated transcript rules with an arbitrarily
+# large region between them can never be promoted into a composer.
+FM_BACKEND_HERDR_PI_COMPOSER_MAX_LINES=${FM_BACKEND_HERDR_PI_COMPOSER_MAX_LINES:-8}
+
+fm_backend_herdr_pi_separator_row() {  # <plain-row>
+  local row=$1
+  row="${row#"${row%%[![:space:]]*}"}"
+  row="${row%"${row##*[![:space:]]}"}"
+  [ "${#row}" -ge 8 ] || return 1
+  [ -z "${row//─/}" ]
+}
+
+# Locate the content and closing-row position of the bottom-most complete pair
+# of Pi separator rows. A separator closes the preceding candidate and
+# immediately opens the next, so an earlier transcript rule can never outrank
+# the live bottom composer pair. Globals let the caller compare this shape's
+# screen position with generic bordered/bare candidates without losing empty
+# composer content through command substitution.
+fm_backend_herdr_pi_composer_find() {  # <ansi-capture>
+  local cap=$1 line plain open=0 lines=0 candidate="" max row=0 open_row=0
+  max=$FM_BACKEND_HERDR_PI_COMPOSER_MAX_LINES
+  case "$max" in ''|*[!0-9]*|0) max=8 ;; esac
+  FM_BACKEND_HERDR_PI_PAIR_FOUND=0
+  FM_BACKEND_HERDR_PI_PAIR_VALID=0
+  FM_BACKEND_HERDR_PI_PAIR_OPEN_LINE=0
+  FM_BACKEND_HERDR_PI_PAIR_LINE=0
+  FM_BACKEND_HERDR_PI_CONTENT=""
+  while IFS= read -r line; do
+    row=$((row + 1))
+    plain=$(fm_backend_herdr_strip_ansi "$line")
+    if fm_backend_herdr_pi_separator_row "$plain"; then
+      if [ "$open" -eq 1 ]; then
+        FM_BACKEND_HERDR_PI_PAIR_FOUND=1
+        FM_BACKEND_HERDR_PI_PAIR_OPEN_LINE=$open_row
+        FM_BACKEND_HERDR_PI_PAIR_LINE=$row
+        if [ "$lines" -le "$max" ]; then
+          FM_BACKEND_HERDR_PI_PAIR_VALID=1
+          FM_BACKEND_HERDR_PI_CONTENT=$candidate
+        else
+          FM_BACKEND_HERDR_PI_PAIR_VALID=0
+          FM_BACKEND_HERDR_PI_CONTENT=""
+        fi
+      fi
+      open=1
+      open_row=$row
+      lines=0
+      candidate=""
+    elif [ "$open" -eq 1 ]; then
+      [ -z "$candidate" ] || candidate="${candidate}"$'\n'
+      candidate="${candidate}${line}"
+      lines=$((lines + 1))
+    fi
+  done <<EOF
+$cap
+EOF
+}
+
+fm_backend_herdr_agent_identity_raw() {  # <session> <pane> -> <agent>\t<status>
+  local out
+  out=$(fm_backend_herdr_cli "$1" agent get "$2" 2>/dev/null) || return 1
+  printf '%s' "$out" | jq -r '[.result.agent.agent // "", .result.agent.agent_status // ""] | @tsv' 2>/dev/null
+}
 
 fm_backend_herdr_composer_state() {  # <target> -> empty|pending|unknown
-  local target=$1 cap line trimmed found=0 shape="" raw_match="" bordered=0 stripped
+  local target=$1 session pane cap line trimmed found=0 shape="" raw_match="" bordered=0 stripped
+  local identity agent agent_status row=0 generic_line=0
+  fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
+  session=$FM_BACKEND_HERDR_SESSION
+  pane=$FM_BACKEND_HERDR_PANE
   cap=$(fm_backend_herdr_capture_ansi "$target" "$FM_BACKEND_HERDR_COMPOSER_LINES" 2>/dev/null \
     || fm_backend_herdr_capture "$target" "$FM_BACKEND_HERDR_COMPOSER_LINES") || { printf 'unknown'; return 0; }
   # Structural scan: locate the bottom-most composer row and remember its RAW
@@ -741,6 +817,7 @@ fm_backend_herdr_composer_state() {  # <target> -> empty|pending|unknown
   # keeps ghost text so the border/prompt glyph is still visible); the raw row is
   # kept for ANSI-aware content extraction after the scan.
   while IFS= read -r line; do
+    row=$((row + 1))
     trimmed=$(fm_backend_herdr_strip_ansi "$line")
     trimmed="${trimmed#"${trimmed%%[![:space:]]*}"}"
     trimmed="${trimmed%"${trimmed##*[![:space:]]}"}"
@@ -749,17 +826,49 @@ fm_backend_herdr_composer_state() {  # <target> -> empty|pending|unknown
       '│'*'│'|'┃'*'┃'|'|'*'|')
         shape=bordered
         raw_match=$line
+        generic_line=$row
         found=1
         ;;
       *)
         if printf '%s' "$trimmed" | grep -qE "$FM_BACKEND_HERDR_BARE_PROMPT_RE"; then
           shape=bare
           raw_match=$line
+          generic_line=$row
           found=1
         fi
         ;;
     esac
   done < <(printf '%s\n' "$cap")
+  # Pi has no prompt glyph or side border. Compare its bottom-most complete
+  # separator pair with the last generic match so an earlier bordered transcript
+  # row can never suppress the live Pi composer. Identity is consulted only when
+  # a lower separator pair could change the verdict.
+  fm_backend_herdr_pi_composer_find "$cap"
+  if [ "$FM_BACKEND_HERDR_PI_PAIR_FOUND" -eq 1 ] \
+     && [ "$FM_BACKEND_HERDR_PI_PAIR_LINE" -gt "$generic_line" ] \
+     && [ "$generic_line" -lt "$FM_BACKEND_HERDR_PI_PAIR_OPEN_LINE" ]; then
+    identity=$(fm_backend_herdr_agent_identity_raw "$session" "$pane" 2>/dev/null || true)
+    IFS=$'\t' read -r agent agent_status <<EOF
+$identity
+EOF
+    case "$agent:$agent_status" in
+      pi:idle|pi:done|pi:blocked)
+        if [ "$FM_BACKEND_HERDR_PI_PAIR_VALID" -eq 1 ]; then
+          shape=separated
+          raw_match=$FM_BACKEND_HERDR_PI_CONTENT
+          found=1
+        else
+          found=0
+        fi
+        ;;
+      pi:*|:*)
+        # A working Pi or unreadable identity cannot authorize injection, and
+        # the lower separator pair proves any generic row above is not current.
+        found=0
+        ;;
+      *) : ;; # A known non-Pi agent keeps its established generic verdict.
+    esac
+  fi
   [ "$found" -eq 1 ] || { printf 'unknown'; return 0; }
   # Content: extract the real typed text from the raw row with the shared,
   # fleet-wide ghost stripper (bin/fm-composer-lib.sh), which drops dim/faint AND
@@ -779,6 +888,11 @@ fm_backend_herdr_composer_state() {  # <target> -> empty|pending|unknown
     stripped=${stripped//|/}
     stripped="${stripped#"${stripped%%[![:space:]]*}"}"
     stripped="${stripped%"${stripped##*[![:space:]]}"}"
+  elif [ "$shape" = separated ]; then
+    # The native Pi identity plus the complete separator pair is the genuine
+    # composer container, equivalent to a bordered box for shared content
+    # classification. ANSI stripping keeps real text and drops only styling.
+    bordered=1
   fi
   # Delegate the empty/pending/unknown decision to the shared owner. The bare
   # shape only ever starts with an AGENT glyph (FM_BACKEND_HERDR_BARE_PROMPT_RE
