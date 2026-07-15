@@ -51,6 +51,14 @@ if [ "${1:-}" = "--required-version" ]; then
   exit 0
 fi
 
+# Environments with no system ShellCheck can provision the pinned build into
+# this gitignored path with `bin/fm-install-shellcheck.sh .no-mistakes/tools`;
+# it is only consulted when PATH has no shellcheck at all, and the version
+# assertion below still enforces the pin, so CI parity cannot relax.
+if ! command -v shellcheck >/dev/null 2>&1 && [ -x "$ROOT/.no-mistakes/tools/shellcheck" ]; then
+  PATH="$ROOT/.no-mistakes/tools:$PATH"
+fi
+
 # Enforce the pin so local and CI resolve the identical rule set.
 if ! command -v shellcheck >/dev/null 2>&1; then
   printf 'fm-lint.sh: ShellCheck not found; install ShellCheck %s for CI parity.\n' \
