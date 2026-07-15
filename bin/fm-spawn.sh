@@ -56,7 +56,12 @@
 #   Before a secondmate launch, the home is locally fast-forwarded to the primary
 #   default-branch commit when safe; skipped syncs warn and launch unchanged.
 #   Ship/scout spawns refuse to launch unless the resolved task path is a real
-#   git worktree root distinct from the primary project checkout.
+#   git worktree root distinct from the primary project checkout, killing the
+#   already-launched window on refusal. The wait for that worktree retries
+#   across bounded rounds (FM_SPAWN_WT_WAIT_ROUNDS et al.), re-sending
+#   `treehouse get` each round, since a transiently exhausted treehouse pool
+#   grows new slots asynchronously; recorded worktree= is always the
+#   isolation check's own freshly re-resolved, canonicalized path.
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
@@ -674,8 +679,26 @@ real_path_or_raw() {  # <path>
 # herdr-sm-spaces-k4). Both branches converge on the same $T ("target") string
 # that every downstream operation (send/capture/kill) already treats as opaque
 # per-backend routing (fm_backend_resolve_selector).
-validate_spawn_worktree() {  # <source> <inspect-target>
-  local source=$1 inspect_target=$2 wt_real proj_real wt_top wt_top_real
+# validate_spawn_worktree also doubles as the SOLE authoritative source for what
+# gets recorded as worktree=: on success it sets VALIDATED_WT_REAL to the
+# freshly re-resolved, canonicalized worktree toplevel (a fresh `cd`+`pwd -P`
+# and `git rev-parse --show-toplevel`, not the possibly-transient raw pane read
+# that got us here). Callers that record worktree= from a live pane poll (the
+# treehouse-get wait below) MUST reassign WT=$VALIDATED_WT_REAL afterward
+# instead of trusting the polled value directly, so a spawn can never record a
+# worktree that diverges from what this assert actually verified (task
+# fm-spawn-worktree-report, 2026-07-14: a stale/transient poll read was
+# recorded verbatim, once landing the project clone's own path in
+# state/<id>.meta). Orca's own worktree-create API path calls this without a
+# kill_target and without consuming VALIDATED_WT_REAL: Orca's WT already comes
+# from its own worktree API response, not a polled pane, and existing tests
+# pin that exact (non-canonicalized) string.
+#
+# kill_target, when given, names the backend target (the already-launched
+# window/pane) to kill before refusing, so a failed isolation check never
+# leaves an agent-less window sitting in the tangled directory.
+validate_spawn_worktree() {  # <source> <inspect-target> [<kill-target>]
+  local source=$1 inspect_target=$2 kill_target=${3:-} wt_real proj_real wt_top wt_top_real
   wt_real=
   if ! wt_real=$(cd "$WT" 2>/dev/null && pwd -P); then
     wt_real=
@@ -687,9 +710,13 @@ validate_spawn_worktree() {  # <source> <inspect-target>
     wt_top_real=
   fi
   if [ -z "$wt_real" ] || [ -z "$wt_top_real" ] || [ "$wt_real" != "$wt_top_real" ] || [ "$wt_real" = "$proj_real" ]; then
+    if [ -n "$kill_target" ]; then
+      fm_backend_kill "$BACKEND" "$kill_target" 2>/dev/null || true
+    fi
     echo "error: $source did not yield an isolated worktree (resolved '$WT'; worktree root '${wt_top:-none}'; primary '$PROJ_ABS'); refusing to launch to avoid tangling the primary checkout. Inspect target $inspect_target" >&2
     exit 1
   fi
+  VALIDATED_WT_REAL=$wt_top_real
 }
 
 W="fm-$ID"
@@ -834,6 +861,19 @@ spawn_send_key() {  # <target> <key>
     cmux) fm_backend_cmux_send_key "$1" "$2" "$W" ;;
   esac
 }
+# WT_WAIT_TRIES x WT_WAIT_INTERVAL is one round's bound (60x1s by default,
+# matching the original single-round wait); WT_WAIT_ROUNDS repeats it,
+# re-sending 'treehouse get' at the start of each retry round, because a
+# transiently exhausted treehouse pool grows slots asynchronously - observed
+# recovering within minutes of "pool full" - so one round's timeout used to be
+# indistinguishable from a genuinely stuck pane. All three are overridable so
+# tests can shrink the bound instead of sleeping for real minutes.
+WT_WAIT_TRIES=${FM_SPAWN_WT_WAIT_TRIES:-60}
+case "$WT_WAIT_TRIES" in ''|*[!0-9]*|0) WT_WAIT_TRIES=60 ;; esac
+WT_WAIT_ROUNDS=${FM_SPAWN_WT_WAIT_ROUNDS:-3}
+case "$WT_WAIT_ROUNDS" in ''|*[!0-9]*|0) WT_WAIT_ROUNDS=3 ;; esac
+WT_WAIT_INTERVAL=${FM_SPAWN_WT_WAIT_INTERVAL:-1}
+
 if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   spawn_send_text_line "$WT_TARGET" 'treehouse get'
 
@@ -845,20 +885,36 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   # Compare against PROJ_ABS_REAL (physical), not PROJ_ABS: a symlinked project
   # prefix would otherwise make the pane's OS-level cwd read differ from
   # PROJ_ABS on the very first poll, before the pane has actually moved.
-  for _ in $(seq 1 60); do
-    p=$(spawn_current_path "$WT_TARGET" || true)
-    if [ -n "$p" ] && [ "$(real_path_or_raw "$p")" != "$PROJ_ABS_REAL" ]; then
-      WT="$p"
-      break
+  wt_round=1
+  while [ "$wt_round" -le "$WT_WAIT_ROUNDS" ]; do
+    if [ "$wt_round" -gt 1 ]; then
+      spawn_send_text_line "$WT_TARGET" 'treehouse get'
     fi
-    sleep 1
+    wt_try=1
+    while [ "$wt_try" -le "$WT_WAIT_TRIES" ]; do
+      p=$(spawn_current_path "$WT_TARGET" || true)
+      if [ -n "$p" ] && [ "$(real_path_or_raw "$p")" != "$PROJ_ABS_REAL" ]; then
+        WT="$p"
+        break 2
+      fi
+      wt_try=$((wt_try + 1))
+      sleep "$WT_WAIT_INTERVAL"
+    done
+    wt_round=$((wt_round + 1))
   done
   if [ -z "$WT" ]; then
-    echo "error: treehouse get did not enter a worktree within 60s; inspect window $T" >&2
+    fm_backend_kill "$BACKEND" "$WT_TARGET" 2>/dev/null || true
+    echo "error: treehouse get did not enter a worktree after $WT_WAIT_ROUNDS retries (${WT_WAIT_TRIES}x${WT_WAIT_INTERVAL}s each; the treehouse pool may be transiently exhausted and grows slots asynchronously, so retrying the spawn once a slot frees up may succeed); inspect window $T" >&2
     exit 1
   fi
 
-  validate_spawn_worktree "treehouse get" "$T"
+  # validate_spawn_worktree re-resolves and verifies $WT fresh; on success it
+  # sets VALIDATED_WT_REAL to that freshly-verified, canonicalized toplevel.
+  # Recording THAT (not the raw pane read captured above, which can be a
+  # transient value read before the pane's treehouse-get subshell has actually
+  # settled) is what keeps the summary line and state/<id>.meta truthful.
+  validate_spawn_worktree "treehouse get" "$T" "$WT_TARGET"
+  WT=$VALIDATED_WT_REAL
 fi
 
 # Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. Go won't

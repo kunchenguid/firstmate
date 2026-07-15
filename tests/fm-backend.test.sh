@@ -829,7 +829,7 @@ SH
 }
 
 run_spawn_symlink_case() {  # <label> <physical|logical>
-  local label=$1 first_reply=$2 real_root link_root proj wt id fb data state config log out rc proj_phys initial_path
+  local label=$1 first_reply=$2 real_root link_root proj wt wt_real id fb data state config log out rc proj_phys initial_path
   real_root="$TMP_ROOT/symlink-real-$label"; link_root="$TMP_ROOT/symlink-link-$label"
   mkdir -p "$real_root"
   ln -s "$real_root" "$link_root"
@@ -843,6 +843,11 @@ run_spawn_symlink_case() {  # <label> <physical|logical>
   # fm-spawn.sh's own PROJ_ABS_REAL computes, including any symlink layers
   # ABOVE this test's own synthetic real_root/link_root pair.
   proj_phys=$(cd "$real_root/proj" && pwd -P)
+  # fm-spawn.sh now records the isolation assert's own freshly re-resolved,
+  # canonicalized worktree toplevel (task fm-spawn-worktree-report), not the
+  # raw pane-reported $wt string, so the expectation below must be the same
+  # canonical form.
+  wt_real=$(cd "$wt" && pwd -P)
   case "$first_reply" in
     physical) initial_path=$proj_phys ;;
     logical) initial_path=$proj ;;
@@ -859,7 +864,7 @@ run_spawn_symlink_case() {  # <label> <physical|logical>
   out=$(run_spawn_case "$ROOT" "$fb" "$log" "$state" "$data" "$config" "$proj" -- "$id" "$proj" claude 2>&1)
   rc=$?
   expect_code 0 "$rc" "fm-spawn.sh should succeed for a project reached through a symlinked prefix when the backend reports $first_reply cwd"$'\n'"$out"
-  assert_contains "$out" "worktree=$wt" \
+  assert_contains "$out" "worktree=$wt_real" \
     "fm-spawn.sh did not resolve a symlinked-prefix project to its real worktree when the backend reports $first_reply cwd"
 
   rm -rf "/tmp/fm-$id"
@@ -869,6 +874,146 @@ test_spawn_symlinked_project_prefix_avoids_false_refusal() {
   run_spawn_symlink_case physical physical
   run_spawn_symlink_case logical logical
   pass "fm-spawn.sh: a project reached through a symlinked prefix (e.g. macOS /tmp -> /private/tmp) does not trip the isolation guard's false refusal"
+}
+
+# --- treehouse pool exhaustion / late-settling pane (task fm-spawn-worktree-report) ---
+#
+# 2026-07-14 incident: with a transiently exhausted treehouse pool, a pane's
+# cwd sometimes never left the project clone, yet fm-spawn.sh still launched
+# an agent there and reported success (two scout crews scratch-committed into
+# the mirror clone before being emergency-stopped). Separately, a successful
+# spawn once recorded worktree=<project clone path> in the summary and
+# state/<id>.meta instead of the real treehouse slot, even though the pane's
+# actual cwd was the slot - the recorded value came from a raw, possibly
+# transient pane-path read rather than the freshly re-verified, canonicalized
+# value validate_spawn_worktree itself checks.
+# make_spawn_stuck_fakebin's tmux stub always answers pane_current_path with
+# the (unmoved) project directory, no matter how many times it is polled -
+# fm-spawn.sh must refuse and kill the window it already launched, never
+# silently proceed.
+
+make_spawn_stuck_fakebin() {  # <dir> <project-real-path> -> echoes fakebin dir
+  local dir=$1 proj_real=$2 fb="$1/fakebin"
+  mkdir -p "$fb"
+  cat > "$fb/tmux" <<SH
+#!/usr/bin/env bash
+set -u
+{ printf 'tmux'; for a in "\$@"; do printf '\\x1f%s' "\$a"; done; printf '\\n'; } >> "\${FM_TMUX_LOG:?}"
+case "\${1:-}" in
+  display-message)
+    for a in "\$@"; do case "\$a" in *pane_current_path*) printf '%s\\n' "$proj_real"; exit 0 ;; esac; done
+    printf 'firstmate\\n'; exit 0 ;;
+  list-windows) exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$fb/tmux"
+  fm_fake_exit0 "$fb" treehouse
+  printf '%s\n' "$fb"
+}
+
+test_spawn_refuses_and_kills_window_when_pane_never_leaves_project() {
+  local proj proj_real id fb data state config log out rc
+  proj="$TMP_ROOT/neverleaves-project"
+  fm_git_init_commit "$proj"
+  proj_real=$(cd "$proj" && pwd -P)
+  id="neverleavesz1"
+  fb=$(make_spawn_stuck_fakebin "$TMP_ROOT/neverleaves-fake" "$proj_real")
+  data="$TMP_ROOT/neverleaves-data"; mkdir -p "$data/$id"
+  printf 'test brief content\n' > "$data/$id/brief.md"
+  state="$TMP_ROOT/neverleaves-state"; config="$TMP_ROOT/neverleaves-config"
+  mkdir -p "$state" "$config"
+  log="$TMP_ROOT/neverleaves-spawn.log"
+
+  # Small, fast bounds so a permanently-stuck pane fails the wait quickly
+  # instead of the real 60x3-round default.
+  export FM_SPAWN_WT_WAIT_TRIES=2 FM_SPAWN_WT_WAIT_ROUNDS=2 FM_SPAWN_WT_WAIT_INTERVAL=0
+  out=$(run_spawn_case "$ROOT" "$fb" "$log" "$state" "$data" "$config" "$proj" -- "$id" "$proj" claude 2>&1)
+  rc=$?
+  unset FM_SPAWN_WT_WAIT_TRIES FM_SPAWN_WT_WAIT_ROUNDS FM_SPAWN_WT_WAIT_INTERVAL
+
+  [ "$rc" -ne 0 ] || fail "fm-spawn.sh should refuse when the pane's cwd never leaves the project directory"$'\n'"$out"
+  assert_contains "$out" "did not enter a worktree" \
+    "refusal should explain the treehouse-get wait never left the project"$'\n'"$out"
+  assert_grep $'tmux\x1fkill-window' "$log" \
+    "fm-spawn.sh must kill the already-launched window when it refuses rather than leaving it stranded in the project clone"
+  assert_absent "$state/$id.meta" "a refused spawn must not leave task metadata behind"
+
+  rm -rf "/tmp/fm-$id"
+  pass "fm-spawn.sh: refuses and kills the window when the pane's cwd never leaves the project directory (pool exhaustion)"
+}
+
+# make_spawn_late_move_fakebin's tmux stub answers pane_current_path with the
+# (unmoved) project directory for the first <unmoved-polls> calls - spanning
+# past a retry-round boundary, so fm-spawn.sh must actually retry rather than
+# giving up after one round - then switches to <delayed-path>, a path string
+# that differs from the worktree's own canonical form (a symlink alias) so a
+# test can tell whether fm-spawn.sh recorded that raw read verbatim or
+# re-derived the authoritative, canonicalized worktree toplevel.
+make_spawn_late_move_fakebin() {  # <dir> <initial-path> <delayed-path> <unmoved-polls> -> echoes fakebin dir
+  local dir=$1 initial_path=$2 delayed_path=$3 unmoved_polls=$4 fb="$1/fakebin" counter="$1/poll-count"
+  mkdir -p "$fb"
+  : > "$counter"
+  cat > "$fb/tmux" <<SH
+#!/usr/bin/env bash
+set -u
+{ printf 'tmux'; for a in "\$@"; do printf '\\x1f%s' "\$a"; done; printf '\\n'; } >> "\${FM_TMUX_LOG:?}"
+case "\${1:-}" in
+  display-message)
+    for a in "\$@"; do case "\$a" in *pane_current_path*)
+      printf x >> "$counter"
+      if [ "\$(wc -c < "$counter")" -le "$unmoved_polls" ]; then
+        printf '%s\\n' "$initial_path"
+      else
+        printf '%s\\n' "$delayed_path"
+      fi
+      exit 0
+    ;; esac; done
+    printf 'firstmate\\n'; exit 0 ;;
+  list-windows) exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$fb/tmux"
+  fm_fake_exit0 "$fb" treehouse
+  printf '%s\n' "$fb"
+}
+
+test_spawn_records_authoritative_worktree_after_late_move() {
+  local real_root wt wt_alias wt_real proj id fb data state config log out rc proj_real resend_count
+  real_root="$TMP_ROOT/latemove-real"; wt="$TMP_ROOT/latemove-wt"; wt_alias="$TMP_ROOT/latemove-wt-alias"
+  proj="$real_root/proj"
+  id="latemovez1"
+  fm_git_worktree "$proj" "$wt" "fm/$id"
+  wt_real=$(cd "$wt" && pwd -P)
+  ln -s "$wt" "$wt_alias"
+  proj_real=$(cd "$proj" && pwd -P)
+
+  fb=$(make_spawn_late_move_fakebin "$TMP_ROOT/latemove-fake" "$proj_real" "$wt_alias" 3)
+  data="$TMP_ROOT/latemove-data"; mkdir -p "$data/$id"
+  printf 'test brief content\n' > "$data/$id/brief.md"
+  state="$TMP_ROOT/latemove-state"; config="$TMP_ROOT/latemove-config"
+  mkdir -p "$state" "$config"
+  log="$TMP_ROOT/latemove-spawn.log"
+
+  # 2 tries/round x 3 unmoved polls forces the pane to settle only after the
+  # first retry round has already resent 'treehouse get' once.
+  export FM_SPAWN_WT_WAIT_TRIES=2 FM_SPAWN_WT_WAIT_ROUNDS=3 FM_SPAWN_WT_WAIT_INTERVAL=0
+  out=$(run_spawn_case "$ROOT" "$fb" "$log" "$state" "$data" "$config" "$proj" -- "$id" "$proj" claude 2>&1)
+  rc=$?
+  unset FM_SPAWN_WT_WAIT_TRIES FM_SPAWN_WT_WAIT_ROUNDS FM_SPAWN_WT_WAIT_INTERVAL
+
+  expect_code 0 "$rc" "fm-spawn.sh should succeed once the pane eventually leaves the project directory"$'\n'"$out"
+  assert_contains "$out" "worktree=$wt_real" \
+    "a late-settling pane must record the authoritative, canonicalized final worktree"
+  assert_not_contains "$out" "worktree=$wt_alias" \
+    "fm-spawn.sh must not record the raw (possibly transient/differently-formed) pane path verbatim"
+  assert_grep "worktree=$wt_real" "$state/$id.meta" "meta must record the same authoritative worktree path"
+  resend_count=$(grep -Fc $'\x1ftreehouse get\x1fEnter' "$log")
+  [ "$resend_count" -eq 2 ] || fail "expected fm-spawn.sh to resend 'treehouse get' once per retry round (got $resend_count sends)"$'\n'"$out"
+
+  rm -rf "/tmp/fm-$id"
+  pass "fm-spawn.sh: records the authoritative canonicalized worktree even when the pane settles late via a differently-formed path"
 }
 
 # --- old vs new: fm-teardown.sh ----------------------------------------------
@@ -1082,6 +1227,8 @@ test_backend_of_selector_matches_explicit_target_meta
 test_send_conformance_old_vs_new
 test_peek_conformance_old_vs_new
 test_spawn_symlinked_project_prefix_avoids_false_refusal
+test_spawn_refuses_and_kills_window_when_pane_never_leaves_project
+test_spawn_records_authoritative_worktree_after_late_move
 test_teardown_conformance_old_vs_new
 test_spawn_refuses_unknown_backend_flag
 test_spawn_refuses_codex_app_backend_flag

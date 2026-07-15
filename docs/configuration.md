@@ -373,6 +373,9 @@ FM_WATCH_TRIAGE_LOG_MAX_BYTES=262144   # size cap for the watcher's absorbed-wak
 FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT=     # optional seconds allowed for bootstrap's best-effort clone refresh; unset/blank defaults to max(20, 5 + 3 * origin-backed-project-count)
 FM_FLEET_PRUNE=1        # set to 0 to skip pruning local branches whose upstream is gone
 FM_STALE_WORKTREE_LOCK_AGE_SECS=30       # min mtime age before fm-teardown.sh treats a leftover worktree git index.lock as provably stale
+FM_SPAWN_WT_WAIT_TRIES=60          # fm-spawn.sh: poll attempts per treehouse-get wait round (1s apart)
+FM_SPAWN_WT_WAIT_INTERVAL=1        # fm-spawn.sh: seconds slept between treehouse-get wait polls
+FM_SPAWN_WT_WAIT_ROUNDS=3          # fm-spawn.sh: retry rounds for the treehouse-get wait, re-sending 'treehouse get' each round after the first
 FM_TREEHOUSE_RETURN_LOCK_RETRIES=3        # retries after a treehouse return fails on the transient git index.lock signature
 FM_TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS=1 # seconds fm-teardown.sh waits before each retry after that signature
 FM_STALE_WORKTREE_LOCK_RETRY_WAIT_SECS=   # legacy alias for FM_TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS when the new variable is unset
@@ -414,6 +417,8 @@ FM_LOG_KEEP_LINES=2000             # daemon log lines kept when trimming
 When it is unset or blank, `FM_STALE_WORKTREE_LOCK_RETRY_WAIT_SECS` remains a compatible fallback, and a blank fallback uses the 1-second default.
 An invalid nonblank wait falls back to 1 second rather than interrupting teardown.
 Teardown never removes a lock during the retry window, and after that window it attempts stale-lock cleanup only for a still-present lock that passes the configured age and live-holder checks.
+
+`fm-spawn.sh`'s ship/scout worktree-discovery wait (the poll after sending `treehouse get`, immediately followed by `validate_spawn_worktree`'s isolation check) runs across up to `FM_SPAWN_WT_WAIT_ROUNDS` rounds of `FM_SPAWN_WT_WAIT_TRIES` polls spaced `FM_SPAWN_WT_WAIT_INTERVAL` seconds apart, re-sending `treehouse get` at the start of every round after the first: a transiently exhausted treehouse pool has been observed growing new slots asynchronously within minutes, so one round's timeout is not by itself proof the pool stays exhausted. Only exhausting every round is a hard refusal, and that refusal (like every isolation-check refusal) kills the already-launched window before exiting non-zero rather than leaving an agent-less window sitting in the tangled directory. Whatever the wait resolves is re-verified once by `validate_spawn_worktree`, and the value it records into the summary line and `state/<id>.meta` is that assert's own freshly re-resolved, canonicalized worktree toplevel - never the raw, possibly-transient pane read the wait loop first observed - so a spawn can never record a worktree path that diverges from what was actually checked.
 
 `fm-fleet-sync.sh` applies the same shape to an orphaned `.git/packed-refs.lock`: it retries only Git's `Unable to create '...packed-refs.lock': File exists` fetch failure up to `FM_FLEET_SYNC_PACKED_REFS_LOCK_RETRIES` times (nonnegative integer; unset, blank, or invalid uses the default of 3), waiting `FM_FLEET_SYNC_PACKED_REFS_LOCK_RETRY_WAIT_SECS` seconds (nonnegative whole or fractional; invalid falls back to 1 second) before each.
 Only after those retries exhaust does it remove the lock, and only when it is provably stale - still present, mtime age at least `FM_FLEET_SYNC_PACKED_REFS_LOCK_AGE_SECS` (default 30), and no `lsof` holder of the lock file or of the clone worktree itself (a live `git` keeps that as its cwd even in the window after it closes the lock and before it exits).
