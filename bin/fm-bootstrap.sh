@@ -48,9 +48,9 @@
 #          no-mistakes is also MISSING when its installed version is older than
 #          1.31.2.
 #          tasks-axi and quota-axi are required bootstrap tools (same class as
-#          lavish-axi). tasks-axi runs one shared live compatibility probe for
-#          recoverable body updates and atomic multi-ID handoffs; an installed
-#          but incompatible build reports MISSING like no-mistakes. A compatible
+#          lavish-axi). tasks-axi runs the shared live compatibility probe owned
+#          by docs/configuration.md "Backlog backend"; an installed but
+#          incompatible build reports MISSING like no-mistakes. A compatible
 #          tasks-axi default backend is silent unless verbose facts are enabled.
 #          quota-axi is required because
 #          crew-dispatch quota-balanced may call it; fm-dispatch-select.sh still

@@ -31,7 +31,7 @@ Secondmate handoffs are separate and unconditional: `fm-backlog-handoff.sh` keep
 It moves in-scope `## Queued` items only and refuses `## In flight` and historical `## Done` records, which stay with their home for pruning or archiving.
 Handoff item bodies must use at least two leading spaces, and the helper refuses a selected item with a single-space or tab-indented continuation rather than risk orphaning it.
 Because bootstrap requires `tasks-axi` on `PATH` on every profile, that delegation works fleet-wide, and the `config/backlog-backend=manual` knob governs firstmate's own hand-editing of its backlog, not this validated helper.
-Compatible means the shared `fm_tasks_axi_compatible` live probe succeeds in an isolated fixture: `tasks-axi update --archive-body` replaces a body while preserving the old body recoverably, and a two-ID `tasks-axi mv` first rejects an incomplete set without mutation, then moves the complete set together.
+Compatible means the shared `fm_tasks_axi_compatible` live probe succeeds in an isolated fixture: `tasks-axi update --archive-body` replaces a body while preserving the old body recoverably, and a two-ID `tasks-axi mv` first rejects an incomplete set without mutation, then moves the complete set together with both item bodies and the `blocked-by` dependency edge intact.
 The probe does not trust `--version` or `--help`, so a CLI that advertises the flags but cannot execute the contract is incompatible.
 The first published release verified against that contract is `tasks-axi@0.2.3`; bootstrap's install and upgrade guidance pins that release with `npm install -g tasks-axi@0.2.3`.
 This paragraph is the single owner of the tasks-axi compatibility definition; every other document points here instead of restating it.
