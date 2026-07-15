@@ -136,15 +136,26 @@ fm_backend_tmux_current_command() {  # <target>
   tmux display-message -p -t "$1" '#{pane_current_command}' 2>/dev/null
 }
 
+# Cursor's launcher retains cursor-agent as argv[0] while tmux reports its
+# JavaScript runtime as pane_current_command=node. Resolve the pane shell's
+# foreground process-group leader and require the Cursor-specific executable.
+fm_backend_tmux_current_args() {  # <target>
+  local pid tpgid
+  pid=$(tmux display-message -p -t "$1" '#{pane_pid}' 2>/dev/null) || return 1
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  tpgid=$(ps -o tpgid= -p "$pid" 2>/dev/null | tr -d ' ') || return 1
+  case "$tpgid" in ''|*[!0-9]*) return 1 ;; esac
+  ps -o args= -p "$tpgid" 2>/dev/null
+}
+
 # fm_backend_tmux_agent_alive: CONFIDENT liveness of a live harness-agent
 # PROCESS in <target>'s pane, distinct from fm_backend_target_exists's
 # pane-PRESENCE-only check (a pane that still exists but is sitting at a bare
 # idle shell passes THAT check as "alive" - the secondmate-liveness gap
 # AGENTS.md's session-start guarantee closes). See docs/tmux-backend.md
 # "Agent liveness probe" for the empirical basis. Prints one of:
-#   alive   - the foreground command is one of the verified harness binaries
-#             (claude, codex, opencode, grok - each confirmed to run as its
-#             own process name, never wrapped by a generic interpreter).
+#   alive   - the foreground command is one of the verified harness binaries,
+#             or node with argv[0] specifically naming cursor-agent.
 #   dead    - the foreground command is a bare shell: nothing is running in
 #             the pane, so a prior agent process has exited.
 #   unknown - anything else, INCLUDING a bare "node"/"python" interpreter
@@ -155,12 +166,20 @@ fm_backend_tmux_current_command() {  # <target>
 #             signal (bin/fm-bootstrap.sh's secondmate-liveness sweep gates a
 #             respawn on `dead` only).
 fm_backend_tmux_agent_alive() {  # <target>
-  local target=$1 comm
+  local target=$1 comm args first
   comm=$(fm_backend_tmux_current_command "$target") || { printf 'unknown'; return 0; }
   comm=${comm#-}
   case "$comm" in
     '') printf 'unknown' ;;
     *claude*|*codex*|*opencode*|*grok*) printf 'alive' ;;
+    node)
+      args=$(fm_backend_tmux_current_args "$target") || { printf 'unknown'; return 0; }
+      first=${args%%[[:space:]]*}
+      case "${first##*/}" in
+        cursor-agent) printf 'alive' ;;
+        *) printf 'unknown' ;;
+      esac
+      ;;
     zsh|bash|sh|dash|ash|ksh|mksh|tcsh|csh|fish) printf 'dead' ;;
     *) printf 'unknown' ;;
   esac

@@ -42,6 +42,8 @@ All verified primary harnesses have a tracked integration:
 
 - `claude`: `.claude/settings.json` registers a `Stop` hook command anchored through `"$CLAUDE_PROJECT_DIR"/bin/fm-turnend-guard.sh`.
 - `codex`: `.codex/hooks.json` registers a `Stop` hook that reads the hook payload once, anchors the executable to the hook command process working directory, verifies that root is firstmate-shaped and hook-bearing, and pipes the original payload to that checkout's `bin/fm-turnend-guard.sh`.
+- `cursor`: `.cursor/hooks.json` registers a fail-open `stop` hook anchored through `CURSOR_PROJECT_DIR`.
+  `bin/fm-turnend-guard-cursor.sh` maps Cursor's zero-based `loop_count` to the shared loop guard and returns the shared predicate's exit-2 reason as one `followup_message`.
 - `opencode`: `.opencode/plugins/fm-primary-turnend-guard.js` listens for `session.idle`, lets the watcher-arm coordinator handle normal idle supervision first, runs the shared guard only when that coordinator does not act, and uses `client.session.promptAsync` to force one follow-up prompt when the guard returns 2.
 - `pi`: `.pi/extensions/fm-primary-turnend-guard.ts` listens for `agent_settled`, marks the extension version loaded for session-start checks, runs the shared guard once per logical agent run, and uses `pi.sendUserMessage(..., { deliverAs: "followUp" })` to force one follow-up prompt when the guard returns 2.
 - `grok`: `.grok/hooks/fm-primary-turnend-guard.json` registers a `Stop` hook that invokes `bin/fm-turnend-guard-grok.sh`.
@@ -52,7 +54,7 @@ Claude and Codex support a direct blocking Stop hook.
 For those harnesses, exit status 2 plus stderr from `bin/fm-turnend-guard.sh` blocks the stop and feeds the reason back into the model.
 Both payloads include `stop_hook_active`; when it is true, the shared guard exits 0 so the harness can end after one forced continuation.
 
-OpenCode, Pi, and Grok expose passive lifecycle callbacks for this purpose.
+Cursor, OpenCode, Pi, and Grok expose passive lifecycle callbacks for this purpose.
 Their adapters fail open at the hook boundary to avoid corrupting a user session, but they force one follow-up turn when the shared predicate blocks.
 Each adapter carries its own in-process or environment loop guard so the forced follow-up does not recursively schedule another follow-up.
 Pi keeps that latch active across every internal tool turn and clears it only when the generated guard follow-up reaches `agent_settled`, or immediately when follow-up delivery fails.
@@ -78,6 +80,22 @@ Command run for root-signal probe: `codex exec --ephemeral --json --dangerously-
 Observed output: the first command printed `<scratch>/outside`, the second command printed `<scratch>`, the Stop hook process `pwd -P` printed `<scratch>`, payload `cwd` printed `<scratch>`, and `CODEX_PROJECT_DIR`, `CODEX_WORKSPACE_ROOT`, and `CODEX_CWD` were empty.
 The tracked command therefore treats hook process PWD as the hook-loaded firstmate root and does not let payload `cwd` choose an executable.
 It still passes the original payload to `bin/fm-turnend-guard.sh`, so the shared loop guard reads `stop_hook_active`.
+
+Cursor Agent `2026.07.09-a3815c0` was validated on 2026-07-14 in a git-initialized scratch project.
+Hook file used: `.cursor/hooks.json`.
+Command run: `cursor-agent --print --trust --force --model gpt-5.6-sol-high "Reply with exactly FIRST"`.
+Observed output: the project `stop` hook received `status`, `loop_count: 0`, `workspace_roots`, `conversation_id`, and `session_id`; `CURSOR_PROJECT_DIR` and hook process PWD both resolved to the scratch project; returning `{"followup_message":"CURSORHOOK: reply with exactly SECOND"}` caused one same-session continuation.
+The tracked adapter sets `loop_limit: 1` and also allows any payload whose `loop_count` is already nonzero.
+The local tracked-background Shell mechanism was exercised with `block_until_ms: 0`; the command returned a background-task handle immediately and later reported `CURSOR_BG_DONE` with exit code 0.
+Desktop Agents Window proof remains incomplete: this environment did not expose a desktop Agents Window process tree, so the remaining check is to run `bin/fm-session-start.sh` from that window and confirm its tool subprocess either descends from `cursor-agent` or exposes a Cursor-specific marker that can be added without matching a generic `agent` process.
+
+Task-worker hook loading was tested separately with a correctly structured plugin root containing `.cursor-plugin/plugin.json` with `"hooks":"hooks/hooks.json"` and `hooks/hooks.json` containing an absolute `stop` callback.
+Commands run: `cursor-agent --print --trust --force --plugin-dir <plugin-root> --workspace <scratch> --model gpt-5.6-sol-high "Reply exactly PLUGIN"` and the equivalent interactive TUI launch.
+Exact model outputs were `PLUGIN` and `PLUGININTERACTIVE`, but the callback marker remained absent in both cases.
+Debug startup reported `plugin_imports_team_settings_ms: 1` and no ad hoc plugin-hook execution; user and project hooks still fired.
+Firstmate therefore keeps passing the correctly structured task plugin for forward compatibility and installs one additive entry in `~/.cursor/hooks.json` as the documented fallback.
+That fallback reads `workspace_roots`, requires a gitignored `.fm-cursor-turnend` token in the task worktree, validates the token against a private Firstmate registry, and no-ops for unrelated Cursor sessions.
+It merges into the existing `stop` array and refuses malformed existing configuration instead of overwriting it.
 
 OpenCode 1.17.6 was validated with project plugins under scratch `.opencode/plugins/`.
 Hook file used: `.opencode/plugins/fm-smoke.js` for throw testing and `.opencode/plugins/fm-primary-turnend-guard.js` for follow-up testing.
@@ -147,6 +165,7 @@ No Herdr command was issued and no fleet state was touched; the experiment wrote
 
 ## Tests
 
-`tests/fm-turnend-guard.test.sh` covers the shared predicate, primary scoping (including a secondmate's own home being guarded like the main primary while its child worktrees stay exempt), `FM_HOME` and `FM_STATE_OVERRIDE` precedence, Pi logical-run latch behavior for no-tool and multi-tool runs, fail-open behavior without `jq`, tracked hook registration for all five harnesses, and the Grok adapter's forced-resume loop guard and permission-mode regression.
+`tests/fm-turnend-guard.test.sh` covers the shared predicate, primary scoping (including a secondmate's own home being guarded like the main primary while its child worktrees stay exempt), `FM_HOME` and `FM_STATE_OVERRIDE` precedence, Pi logical-run latch behavior for no-tool and multi-tool runs, fail-open behavior without `jq`, tracked hook registration for the existing integrations, and the Grok adapter's forced-resume loop guard and permission-mode regression.
+`tests/fm-cursor-harness.test.sh` covers Cursor's tracked hook registration and follow-up adapter.
 The default behavior suite does not invoke live language-model harnesses.
 `FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh` opts into the isolated interactive Pi regression recorded above.
