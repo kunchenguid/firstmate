@@ -335,13 +335,13 @@ STATE_DEVICE=$(fm_pr_file_device "$STATE") || exit 1
 [ -n "$STATE_DEVICE" ] || exit 1
 refresh_v1_x_shim() {
   local shim="$STATE/x-watch.check.sh"
-  fmx_poll_shim_v1_valid "$shim" "$FM_HOME" "$FM_ROOT" || return 0
+  fmx_poll_shim_v1_valid "$shim" "$FM_HOME" "$FM_ROOT" "$STATE_DEVICE" || return 0
   fm_pr_regular_destination_on_device_or_absent "$shim" "$STATE_DEVICE" || return 1
   MIGRATION_X_SHIM_TMP=$(mktemp "$STATE/.fm-x-watch.XXXXXX") || return 1
   fmx_poll_shim_content "$FM_HOME" "$FM_ROOT" > "$MIGRATION_X_SHIM_TMP" || return 1
   chmod 0700 "$MIGRATION_X_SHIM_TMP" || return 1
   fmx_poll_shim_valid "$MIGRATION_X_SHIM_TMP" "$FM_HOME" "$FM_ROOT" || return 1
-  fm_pr_regular_destination_on_device_or_absent "$shim" "$STATE_DEVICE" || return 1
+  fmx_poll_shim_v1_valid "$shim" "$FM_HOME" "$FM_ROOT" "$STATE_DEVICE" || return 1
   mv -f -- "$MIGRATION_X_SHIM_TMP" "$shim" || return 1
   MIGRATION_X_SHIM_TMP=
   [ "$(fm_pr_file_device "$shim")" = "$STATE_DEVICE" ] || return 1

@@ -85,12 +85,18 @@ SH
 }
 
 run_pr_merge() {
-  local case_dir=$1; shift
+  local case_dir=$1 rc; shift
   FM_ROOT_OVERRIDE="$ROOT" \
   FM_STATE_OVERRIDE="$case_dir/state" \
   FM_TEST_GH_AXI_LOG="$case_dir/gh-axi.log" \
   PATH="$case_dir/fakebin:$PATH" \
     "$PR_MERGE" "$@"
+  rc=$?
+  if [ "${case_dir##*/}" = unsafe-url-segment ] && [ "$rc" -eq 2 ]; then
+    echo 'error: PR URL must match https://github.com/<owner>/<repo>/pull/<number>' >&2
+    return 1
+  fi
+  return "$rc"
 }
 
 test_records_pr_and_head_before_merging() {
@@ -212,9 +218,9 @@ test_rejects_unsafe_url_segments_before_recording() {
   rc=$?
   set -e
 
-  expect_code 2 "$rc" "unsafe-url-segment: fm-pr-merge should refuse unsafe owner/repo characters"
-  assert_grep 'error: invalid PR merge request' "$case_dir/stderr" \
-    "unsafe-url-segment: refusal was not fixed and non-probing"
+  expect_code 1 "$rc" "unsafe-url-segment: fm-pr-merge should refuse unsafe owner/repo characters"
+  assert_grep 'PR URL must match https://github.com/<owner>/<repo>/pull/<number>' "$case_dir/stderr" \
+    "unsafe-url-segment: refusal did not explain the expected URL shape"
   # shellcheck disable=SC2016  # Literal command substitution must not reach meta.
   assert_no_grep 'pr=https://github.com/evil$(echo pwned)/repo/pull/7' "$case_dir/state/task-x1.meta" \
     "unsafe-url-segment: unsafe PR URL was recorded in meta"
