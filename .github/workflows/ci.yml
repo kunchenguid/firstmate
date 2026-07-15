@@ -94,6 +94,25 @@ jobs:
             exit 1
           }
 
+          /bin/bash -n bin/fm-brief.sh
+          /bin/bash -n bin/fm-spawn.sh
+
+          brief_output=$(/bin/bash tests/fm-brief.test.sh)
+          printf '%s\n' "$brief_output"
+          brief_count=$(printf '%s\n' "$brief_output" | grep -c '^ok - ')
+          [ "$brief_count" -eq 11 ] || {
+            echo "::error::expected 11 fm-brief.sh tests, got $brief_count"
+            exit 1
+          }
+
+          spawn_batch_output=$(/bin/bash tests/fm-spawn-batch.test.sh)
+          printf '%s\n' "$spawn_batch_output"
+          spawn_batch_count=$(printf '%s\n' "$spawn_batch_output" | grep -c '^ok - ')
+          [ "$spawn_batch_count" -eq 3 ] || {
+            echo "::error::expected 3 fm-spawn.sh batch tests, got $spawn_batch_count"
+            exit 1
+          }
+
   invariants:
     name: Repo invariants
     runs-on: ubuntu-latest
