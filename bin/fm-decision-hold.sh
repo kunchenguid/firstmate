@@ -186,6 +186,26 @@ verify_hold_durable() {  # <hold-id>
   fail "captain decision $id is neither actively held nor durably resolved"
 }
 
+verify_resolution_identity() {
+  local id=$1 hold_body=$2 decision_digest=$3 routed_csv=$4 resolution_prefix resolution_fields recorded_digest recorded_routes
+  resolution_prefix='"Resolution recorded by fm-decision-hold.\nDecision digest: '
+  case "$hold_body" in
+    "$resolution_prefix"*) resolution_fields=${hold_body#"$resolution_prefix"} ;;
+    *) fail "captain hold $id has no retry identity record" ;;
+  esac
+  case "$resolution_fields" in
+    *'\nRouted identities: '*'\n\nCaptain decision:'*) : ;;
+    *) fail "captain hold $id has an invalid retry identity record" ;;
+  esac
+  recorded_digest=${resolution_fields%%\\n*}
+  resolution_fields=${resolution_fields#*\\nRouted identities: }
+  recorded_routes=${resolution_fields%%\\n*}
+  [ "$recorded_digest" = "$decision_digest" ] \
+    || fail "captain hold $id records a different captain decision"
+  [ "$recorded_routes" = "$routed_csv" ] \
+    || fail "captain hold $id records different routed work"
+}
+
 command_id() {
   [ "$#" -eq 2 ] || { usage >&2; exit 2; }
   hold_id "$1" "$2"
@@ -329,7 +349,7 @@ EOF
 }
 
 command_resolve() {
-  local origin=${1:-} key=${2:-} decision_file='' id='' decision='' decision_digest='' body='' routed='' routed_csv='' dep show blocked state hold_show hold_body resolution_prefix resolution_fields recorded_digest recorded_routes
+  local origin=${1:-} key=${2:-} decision_file='' id='' decision='' decision_digest='' body='' routed='' routed_csv='' dep show blocked state hold_show hold_body
   [ "$#" -ge 2 ] || { usage >&2; exit 2; }
   shift 2
   while [ "$#" -gt 0 ]; do
@@ -357,24 +377,18 @@ command_resolve() {
   if verify_hold_resolved "$id"; then
     hold_show=$(task_show "$id")
     hold_body=$(show_field "$hold_show" body)
-    resolution_prefix='"Resolution recorded by fm-decision-hold.\nDecision digest: '
-    case "$hold_body" in
-      "$resolution_prefix"*) resolution_fields=${hold_body#"$resolution_prefix"} ;;
-      *) fail "resolved captain hold $id has no retry identity record" ;;
-    esac
-    recorded_digest=${resolution_fields%%\\n*}
-    resolution_fields=${resolution_fields#*\\nRouted identities: }
-    recorded_routes=${resolution_fields%%\\n*}
-    [ "$recorded_digest" = "$decision_digest" ] \
-      || fail "resolved captain hold $id records a different captain decision"
-    [ "$recorded_routes" = "$routed_csv" ] \
-      || fail "resolved captain hold $id records different routed work"
+    verify_resolution_identity "$id" "$hold_body" "$decision_digest" "$routed_csv"
     printf 'resolved: %s\n' "$id"
     return 0
   fi
   verify_hold_active "$id"
   hold_show=$(task_show "$id")
   hold_body=$(show_field "$hold_show" body)
+  case "$hold_body" in
+    *"Resolution recorded by fm-decision-hold."*)
+      verify_resolution_identity "$id" "$hold_body" "$decision_digest" "$routed_csv"
+      ;;
+  esac
 
   for dep in $routed; do
     show=$(task_show "$dep") || fail "routed task $dep does not exist in the active home"

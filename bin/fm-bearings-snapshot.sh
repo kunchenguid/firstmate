@@ -343,15 +343,15 @@ MODEL=$(printf '%s' "$SNAP" | jq \
          | select(.current.state == "active_child_work")
          | {id,kind:"secondmate",state:.current.state,
             doing:([.active_children[] | .id + ": " + (.doing // .state)] | join("; ") | trunc(90))} ]) as $in_flight_all
-  | ([ .tasks[] as $t | select($t.kind != "secondmate") | ($t.hints.open_decisions // [])[]
-       | {id:$t.id, key, verb, summary:(.summary | trunc(90)),owner:"(main)"} ]
-     + [ .backlog.records[]
+  | ([ .backlog.records[]
          | select(.state == "queued" and .structured and .kind == "captain"
                   and .hold_kind == "captain" and .hold_reason != null)
          | {id,key:.id,verb:"captain-hold",
             summary:((.title + ": " + .hold_reason) | trunc(90)),owner:"(main)"} ]
      + [ (.secondmate_current.records // [])[] as $m | $m.decisions_open[]?
-         | {id:(if (.id // $m.id) == $m.id then $m.id else ($m.id + "/" + .id) end),key,verb,summary:(.summary | trunc(90)),owner:$m.id} ]) as $decisions_all
+         | select(.source == "backlog" and .verb == "captain-hold")
+         | {id:($m.id + "/" + .id),key,verb,
+            summary:(((.summary // .id) + ": " + (.reason // "captain decision pending")) | trunc(90)),owner:$m.id} ]) as $decisions_all
   | ([ .backlog.records[]
        | select(.state == "queued" and .structured)
        | select((.kind == "captain" and .hold_kind == "captain" and .hold_reason != null) | not)

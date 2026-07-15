@@ -10,6 +10,7 @@ set -u
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
 BEARINGS="$ROOT/bin/fm-bearings-snapshot.sh"
 TMP_ROOT=$(fm_test_tmproot fm-decision-hold)
+TASKS_AXI_BIN=$(command -v tasks-axi || true)
 
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found"; exit 0; }
 command -v tasks-axi >/dev/null 2>&1 || { echo "skip: tasks-axi not found"; exit 0; }
@@ -101,7 +102,8 @@ tasks_in() {  # <home> <tasks-axi args...>
 run_decisions() {  # <home> <command args...>
   local home=$1
   shift
-  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+  PATH="$home/fakebin:$PATH" REAL_TASKS_AXI="$TASKS_AXI_BIN" \
+    FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_CONFIG_OVERRIDE="$home/config" "$ROOT/bin/fm-decision-hold.sh" "$@"
 }
 
@@ -210,19 +212,50 @@ EOF
   tasks_in "$home" add sample-route-followup "Check the selected sample route" \
     --kind ship --repo sample --blocked-by "$route_hold" >/dev/null \
     || fail "could not create second dependent work fixture"
-  run_decisions "$home" resolve "$id" route --decision-file "$home/route-decision.txt" \
-    --routed-to sample-route-implementation >/dev/null \
-    || fail "could not durably resolve and route the captain decision"
-  run_decisions "$home" resolve "$id" route --decision-file "$home/route-decision.txt" \
-    --routed-to sample-route-implementation >/dev/null \
-    || fail "identical resolution retry was not idempotent"
+  cat > "$home/fakebin/tasks-axi" <<'EOF'
+#!/usr/bin/env bash
+if [ "${1:-}" = unblock ] && [ "${2:-}" = sample-route-implementation ] \
+  && [ ! -f "$FM_HOME/unblock-failed-once" ]; then
+  : > "$FM_HOME/unblock-failed-once"
+  exit 1
+fi
+exec "$REAL_TASKS_AXI" "$@"
+EOF
+  chmod +x "$home/fakebin/tasks-axi"
+  if run_decisions "$home" resolve "$id" route --decision-file "$home/route-decision.txt" \
+    --routed-to sample-route-implementation --routed-to sample-route-followup \
+    > "$home/partial-route.out" 2> "$home/partial-route.err"; then
+    fail "resolution succeeded after a partial dependent-routing failure"
+  fi
+  show=$(tasks_in "$home" show "$route_hold" --full)
+  assert_contains "$show" "state: queued" "partial routing failure closed the hold"
+  show=$(tasks_in "$home" show sample-route-followup --full)
+  assert_contains "$show" "blocked: no" "partial routing fixture did not release its first dependent"
+  show=$(tasks_in "$home" show sample-route-implementation --full)
+  assert_contains "$show" "blocked: yes" "partial routing fixture unexpectedly released its second dependent"
+  if run_decisions "$home" resolve "$id" route --decision-file "$home/route-decision.txt" \
+    --routed-to sample-route-followup > "$home/reduced-retry.out" 2> "$home/reduced-retry.err"; then
+    fail "partial resolution retry accepted a reduced routed task set"
+  fi
   printf 'Use route south for the sample system.\n' > "$home/changed-route-decision.txt"
   if run_decisions "$home" resolve "$id" route --decision-file "$home/changed-route-decision.txt" \
-    --routed-to sample-route-implementation > "$home/drifted-decision.out" 2> "$home/drifted-decision.err"; then
+    --routed-to sample-route-implementation --routed-to sample-route-followup \
+    > "$home/partial-drifted-decision.out" 2> "$home/partial-drifted-decision.err"; then
+    fail "partial resolution retry accepted a different captain decision"
+  fi
+  run_decisions "$home" resolve "$id" route --decision-file "$home/route-decision.txt" \
+    --routed-to sample-route-implementation --routed-to sample-route-followup >/dev/null \
+    || fail "could not resume and complete partial decision routing"
+  run_decisions "$home" resolve "$id" route --decision-file "$home/route-decision.txt" \
+    --routed-to sample-route-implementation --routed-to sample-route-followup >/dev/null \
+    || fail "identical resolution retry was not idempotent"
+  if run_decisions "$home" resolve "$id" route --decision-file "$home/changed-route-decision.txt" \
+    --routed-to sample-route-implementation --routed-to sample-route-followup \
+    > "$home/drifted-decision.out" 2> "$home/drifted-decision.err"; then
     fail "resolution retry accepted a different captain decision"
   fi
   if run_decisions "$home" resolve "$id" route --decision-file "$home/route-decision.txt" \
-    --routed-to sample-route-implementation --routed-to sample-route-followup \
+    --routed-to sample-route-implementation \
     > "$home/drifted-routes.out" 2> "$home/drifted-routes.err"; then
     fail "resolution retry accepted a different routed task set"
   fi
@@ -239,6 +272,35 @@ EOF
       and (.decisions_open | any(.id == "sample-systems-review") | not)
   ' >/dev/null || fail "resolved or decision-like report prose produced a false hold: $json"
   pass "captain holds are idempotent, distinct, teardown-safe, Bearings-visible, and durably routed before close"
+}
+
+test_scout_teardown_always_requires_inventory_verification() {
+  local home id
+  home=$(make_home unconditional-teardown)
+  id=sample-absent-review
+  mkdir -p "$home/data/$id"
+  write_origin_meta "$home" "$id"
+  printf '# Sample absent review\n\nNo decision inventory was recorded.\n' > "$home/data/$id/report.md"
+  if run_teardown "$home" "$id" > "$home/absent-teardown.out" 2> "$home/absent-teardown.err"; then
+    fail "scout teardown skipped verification when its backlog task was absent"
+  fi
+  assert_present "$home/state/$id.meta" "refused absent-task teardown removed metadata"
+
+  home=$(make_home unavailable-teardown)
+  id=sample-unavailable-review
+  mkdir -p "$home/data/$id"
+  write_origin_meta "$home" "$id"
+  printf '# Sample unavailable review\n\nNo decision inventory was recorded.\n' > "$home/data/$id/report.md"
+  cat > "$home/fakebin/tasks-axi" <<'EOF'
+#!/usr/bin/env bash
+exit 127
+EOF
+  chmod +x "$home/fakebin/tasks-axi"
+  if run_teardown "$home" "$id" > "$home/unavailable-teardown.out" 2> "$home/unavailable-teardown.err"; then
+    fail "scout teardown skipped verification when tasks-axi was unavailable"
+  fi
+  assert_present "$home/state/$id.meta" "refused unavailable-task teardown removed metadata"
+  pass "non-forced scout teardown always requires durable inventory verification"
 }
 
 test_origin_slug_validation_precedes_path_construction() {
@@ -361,6 +423,7 @@ EOF
 }
 
 test_uninventoried_report_decision_refuses_completion
+test_scout_teardown_always_requires_inventory_verification
 test_structured_holds_survive_teardown_and_route_resolution
 test_origin_slug_validation_precedes_path_construction
 test_visual_review_uses_shared_completion_owner

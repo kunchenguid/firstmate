@@ -562,9 +562,9 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
          | select(.id == $work.id and .current_state.state == "working")
          | {id,kind,state:.current_state.state,source:.current_state.source,
             doing:((.current_state.detail // "") | trunc(120))} ]) as $active_all
-    | (([ $tasks[] as $t | ($t.hints.open_decisions // [])[]
-          | {id:$t.id,key,verb,summary:(.summary | trunc(160)),reason:null,source:"status"} ])
-       + $captain_holds_all) as $decisions_all
+    | ($captain_holds_all
+       + ([ $tasks[] as $t | ($t.hints.open_decisions // [])[]
+            | {id:$t.id,key,verb,summary:(.summary | trunc(160)),reason:null,source:"status"} ])) as $decisions_all
     | ([ $queued_all[] | select(.blocked_by != null)
          | {id:(.id | trunc(120)),title:(.title | trunc(90)),blocked_by:(.blocked_by | trunc(120)),reason:((.blocked_reason // "blocked") | trunc(120)),source:"backlog"} ]
        + [ $owned_in_flight[] as $work

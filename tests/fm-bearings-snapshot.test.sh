@@ -147,6 +147,9 @@ EOF
 ## In flight
 - [ ] mate - Decide subscription order (repo: firstmate) (kind: ship) (since 2026-07-11)
 
+## Queued
+- [ ] mate-decision-race - Choose subscription order (repo: firstmate) (kind: captain) (hold: captain choice pending) (hold-kind: captain)
+
 ## Done
 - [x] mate-landed - Secondmate-managed fix https://github.com/kunchenguid/firstmate/pull/50 (repo: firstmate) (kind: ship) (merged 2026-07-11)
 EOF
@@ -356,6 +359,7 @@ test_structured_child_decision_reaches_captains_call() {
 - [ ] phase8 - Sample rollout Phase 8 (repo: sample) (kind: ship) (since 2026-07-13)
 
 ## Queued
+- [ ] phase8-decision-release - Choose sample release (repo: sample) (kind: captain) (hold: captain release choice pending) (hold-kind: captain)
 
 ## Done
 - [x] phase7 - Sample rollout Phase 7 (repo: sample) (kind: ship) (done 2026-07-12)
@@ -368,11 +372,11 @@ EOF
   json=$(run "$home" "$fakebin" --json)
   printf '%s' "$json" | jq -e '
     (.secondmates | any(.[]; .id == "domain-alpha" and .state == "captain_decision"))
-      and (.decisions_open | any(.[]; .id == "domain-alpha/phase8" and .key == "release"
-        and .verb == "needs-decision" and (.summary | contains("release A or B"))))
+      and (.decisions_open | any(.[]; .id == "domain-alpha/phase8-decision-release"
+        and .key == "phase8-decision-release" and .verb == "captain-hold"))
       and (.in_flight | any(.[]; .id == "domain-alpha") | not)
-  ' >/dev/null || fail "structured child decision did not reach Captain Call: $json"
-  pass "a real structured child decision reaches Captain's Call"
+  ' >/dev/null || fail "structured child captain hold did not reach Captain Call: $json"
+  pass "a structured child captain hold reaches Captain's Call"
 }
 
 make_valid_secondmate_home() {  # <id> <home>
@@ -860,9 +864,10 @@ test_open_decision_surfaces_end_to_end() {
   fakebin=$(make_fakebin "$home")
   json=$(run "$home" "$fakebin" --json)
   printf '%s' "$json" | jq -e '
-    .decisions_open | any(.[]; .id == "mate" and .key == "race" and .verb == "needs-decision")
-  ' >/dev/null || fail "a still-open decision masked by a later done must surface in decisions_open: $json"
-  pass "an open decision masked by a later event surfaces end-to-end"
+    .decisions_open | any(.[]; .id == "mate/mate-decision-race"
+      and .key == "mate-decision-race" and .verb == "captain-hold")
+  ' >/dev/null || fail "an authoritative captain hold must surface in decisions_open: $json"
+  pass "an authoritative captain hold surfaces end-to-end"
 }
 
 test_report_pointers_surface() {
@@ -950,6 +955,7 @@ write_large_fixture() {  # <home> <count>
     mkdir -p "$home/projects/$id" "$home/data/$id"
     printf '# Report\n' > "$home/data/$id/report.md"
     printf -- '- [ ] gate-%s - Gate %s blocked-by: task-%s (repo: repo-%s) (kind: ship)\n' "$i" "$i" "$i" "$i" >> "$home/data/backlog.md"
+    printf -- '- [ ] decision-%s - Decision %s (repo: repo-%s) (kind: captain) (hold: captain choice pending) (hold-kind: captain)\n' "$i" "$i" "$i" >> "$home/data/backlog.md"
     fm_write_meta "$home/state/$id.meta" \
       "window=firstmate:fm-$id" \
       "worktree=$home/projects/$id" \
@@ -1155,7 +1161,7 @@ test_live_blocker_is_not_charted_queue_work() {
   json=$(run "$home" "$fakebin" --json)
   printf '%s' "$json" | jq -e '
     (.in_flight | any(.[]; .id == "ship-task" and .state == "blocked"))
-      and (.decisions_open | any(.[]; .id == "ship-task" and .verb == "blocked" and .key == "synthetic-dependency"))
+      and (.decisions_open | any(.[]; .id == "ship-task") | not)
       and (.gates | any(.[]; .id == "ship-task") | not)
   ' >/dev/null || fail "live blocked work was projected as queued/deferred work: $json"
   pass "Bearings keeps a live blocker in structured live state and never converts it to Charted Next queue work"
@@ -1165,7 +1171,7 @@ test_live_blocker_is_not_charted_queue_work() {
 # anti-leak guard: action-free highlights - a working task, a completed scout,
 # queued/gated items, landed work - must never surface as an open decision, so they
 # cannot leak into Captain's Call. The standard fixture has exactly one genuine open
-# decision (the secondmate's masked needs-decision).
+# decision (the secondmate's structured captain hold).
 test_captains_call_anti_leak() {
   local home fakebin json canonical
   home=$(make_home anti-leak); write_fixture "$home"
@@ -1173,8 +1179,10 @@ test_captains_call_anti_leak() {
   json=$(run "$home" "$fakebin" --json)
   canonical=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$ROOT/bin/fm-fleet-snapshot.sh" --json)
   jq -n -e --argjson bearings "$json" --argjson canonical "$canonical" '
-    (([$bearings.decisions_open[].id]
-      + [$canonical.tasks[] | select(.hints.pending_decision or .hints.blocked_event) | .id]) | unique) == ["mate"]
+    ([$bearings.decisions_open[].id] == ["mate/mate-decision-race"])
+      and ($canonical.secondmate_current.records[] | select(.id == "mate")
+        | (.decisions_open | any(.source == "status"))
+          and (.decisions_open | any(.source == "backlog")))
       and ([$bearings.decisions_open[].id] | index("ship-task") | not)
       and ([$bearings.decisions_open[].id] | index("scout-x") | not)
       and ([$bearings.decisions_open[].id] | index("external-wait") | not)
