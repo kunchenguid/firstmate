@@ -50,12 +50,14 @@ export function versionMatches(installed, want) {
 export function assembleDoctor(parts) {
   const compatible = satisfiesRange(parts.nodeVersion, parts.engines);
   const registryOk = parts.registry.status !== 'critical' && !String(parts.registry.status).startsWith('error');
+  const snapshotsOk = !parts.snapshots || !['degraded', 'critical'].includes(parts.snapshots.health);
   const ok = Boolean(
     compatible
     && parts.requiredDependencies.ok
     && parts.packageLock.present
     && parts.packageLock.current
     && registryOk
+    && snapshotsOk
   );
   return {
     ok,
@@ -68,6 +70,7 @@ export function assembleDoctor(parts) {
     vectorExtension: parts.vectorExtension,
     embeddingProvider: parts.embeddingProvider,
     registry: parts.registry,
+    snapshots: parts.snapshots || { health: null, outstanding: [], issues: [], reason: null },
     activeIndex: parts.activeIndex
   };
 }

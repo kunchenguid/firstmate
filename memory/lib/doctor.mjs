@@ -48,6 +48,7 @@ export function checkDoctor(root, env = process.env) {
   let registryReason = null;
   let activeIndexStatus = 'missing';
   let activeIndexWatermark = null;
+  let snapshots = { health: null, outstanding: [], issues: [], reason: null };
   try {
     const audit = auditRegistry(registryDir(env));
     registryHealth = audit.registry.health;
@@ -56,6 +57,13 @@ export function checkDoctor(root, env = process.env) {
     else registryStatus = 'missing';
     activeIndexStatus = audit.activeIndex.status;
     activeIndexWatermark = audit.activeIndex.watermark;
+    snapshots = {
+      health: audit.snapshots.health,
+      outstanding: audit.snapshots.outstanding,
+      issues: audit.snapshots.issues,
+      path: audit.snapshots.path,
+      reason: audit.snapshots.issues[0] || null
+    };
   } catch (error) {
     registryStatus = `error: ${error.message}`;
     registryReason = error.message;
@@ -72,6 +80,7 @@ export function checkDoctor(root, env = process.env) {
     vectorExtension: { available: dependencyAvailable(root, '@electric-sql/pglite-pgvector'), required: false, status: 'not installed for current milestone' },
     embeddingProvider: { configured: Boolean(env.MEM_EMBEDDING_KEY || env.OPENAI_API_KEY), required: false, status: 'optional' },
     registry: { path: registryDir(env), status: registryStatus, health: registryHealth, reason: registryReason },
+    snapshots,
     activeIndex: { status: activeIndexStatus, watermark: activeIndexWatermark, reason: null }
   });
 }

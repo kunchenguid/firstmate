@@ -149,6 +149,8 @@ export async function main(args, options = {}) {
         console.log(`Records: ${audit.records.total} total, ${audit.records.active} active`);
         console.log(`Active index: ${audit.activeIndex.status}`);
         if (audit.activeIndex.issues?.length) console.log(`Index issues: ${audit.activeIndex.issues.join('; ')}`);
+        console.log(`Snapshots: ${audit.snapshots.health}`);
+        if (audit.snapshots.issues?.length) console.log(`Snapshot issues: ${audit.snapshots.issues.join('; ')}`);
         if (audit.registry.corrupt) console.log(`CRITICAL: ${audit.registry.corrupt.reason}`);
       }
       process.exitCode = audit.ok ? 0 : 1;
@@ -172,6 +174,7 @@ export async function main(args, options = {}) {
         console.log(`Vector extension: ${doctor.vectorExtension.available ? 'available' : doctor.vectorExtension.status}`);
         console.log(`Embedding provider: ${doctor.embeddingProvider.configured ? 'configured' : 'not configured (optional)'}`);
         console.log(`Registry: ${doctor.registry.status} (${doctor.registry.path})`);
+        console.log(`Snapshots: ${doctor.snapshots.health || 'unknown'}`);
         console.log(`Active-memory index: ${doctor.activeIndex.status}`);
       }
       process.exitCode = doctor.ok ? 0 : 1;

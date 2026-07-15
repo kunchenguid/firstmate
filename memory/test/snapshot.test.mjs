@@ -2,10 +2,10 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import test from 'node:test';
-import { appendRegistryEvent, buildActiveIndex, foldRegistry, snapshotRegistry } from '../lib/registry.mjs';
+import { appendRegistryEvent, auditRegistry, buildActiveIndex, foldRegistry, snapshotRegistry } from '../lib/registry.mjs';
 import { sha256 } from '../lib/hash.mjs';
 import { registryPaths } from '../lib/paths.mjs';
-import { tmpRegistry } from './helpers.mjs';
+import { runMemIn, tmpRegistry } from './helpers.mjs';
 
 test('snapshot filename is derived from seq + hash and stays inside the snapshots dir', async () => {
   const dir = tmpRegistry();
@@ -71,6 +71,72 @@ test('automatic snapshots are created once at every 500-event boundary', async (
   await appendMany(dir, 501, 1000);
   assert.equal(fs.readdirSync(paths.snapshots).filter((name) => name.includes('automatic-500-event-boundary')).length, 1);
   assert.equal(fs.readdirSync(paths.snapshots).filter((name) => name.includes('automatic-1000-event-boundary')).length, 1);
+});
+
+test('failed automatic boundary snapshot creates repairable exactly-once debt', async () => {
+  const dir = tmpRegistry();
+  const paths = registryPaths(dir);
+  await appendMany(dir, 1, 499);
+  const event500 = { event: 'proposed', eventId: 'event-500-fixed', actor: { kind: 'firstmate', id: 'snap-test' }, fields: { summary: 'snapshot boundary 500' } };
+
+  const old = process.env.MEM_SNAPSHOT_FAIL;
+  process.env.MEM_SNAPSHOT_FAIL = '1';
+  try {
+    await assert.rejects(appendRegistryEvent(dir, event500), /snapshot failure/);
+  } finally {
+    if (old === undefined) delete process.env.MEM_SNAPSHOT_FAIL;
+    else process.env.MEM_SNAPSHOT_FAIL = old;
+  }
+
+  assert.equal(foldRegistry(dir).watermark.seq, 500, 'event 500 remains committed');
+  assert.equal(fs.readdirSync(paths.snapshots).filter((name) => name.includes('automatic-500-event-boundary')).length, 0);
+  assert.equal(fs.existsSync(paths.snapshotState), true, 'snapshot obligation is durable');
+  let state = JSON.parse(fs.readFileSync(paths.snapshotState, 'utf8'));
+  assert.equal(state.obligations[0].boundarySeq, 500);
+  assert.equal(state.obligations[0].status, 'failed');
+
+  const auditDuringDebt = auditRegistry(dir);
+  assert.equal(auditDuringDebt.ok, false);
+  assert.equal(auditDuringDebt.registry.health, 'ok');
+  assert.equal(auditDuringDebt.snapshots.health, 'degraded');
+  assert.equal(auditDuringDebt.snapshots.outstanding[0].boundarySeq, 500);
+  const doctorDuringDebt = runMemIn(dir, ['doctor', '--json']);
+  assert.equal(doctorDuringDebt.status, 1);
+  assert.equal(JSON.parse(doctorDuringDebt.stdout).snapshots.outstanding[0].boundarySeq, 500);
+
+  const retry = await appendRegistryEvent(dir, event500);
+  assert.equal(retry.skipped, true, 'idempotent retry skips the already-committed event');
+  const boundarySnapshots = fs.readdirSync(paths.snapshots).filter((name) => name.includes('automatic-500-event-boundary'));
+  assert.equal(boundarySnapshots.length, 1, 'retry repairs exactly one boundary snapshot');
+  state = JSON.parse(fs.readFileSync(paths.snapshotState, 'utf8'));
+  assert.equal(state.obligations[0].status, 'complete');
+  assert.equal(auditRegistry(dir).ok, true);
+
+  await appendRegistryEvent(dir, { event: 'proposed', actor: { kind: 'firstmate', id: 'snap-test' }, fields: { summary: 'snapshot boundary 501' } });
+  assert.equal(fs.readdirSync(paths.snapshots).filter((name) => name.includes('automatic-500-event-boundary')).length, 1, 'later mutation does not duplicate repaired snapshot');
+});
+
+test('a later mutation repairs missing boundary snapshot debt before appending', async () => {
+  const dir = tmpRegistry();
+  const paths = registryPaths(dir);
+  await appendMany(dir, 1, 499);
+  const old = process.env.MEM_SNAPSHOT_FAIL;
+  process.env.MEM_SNAPSHOT_FAIL = '1';
+  try {
+    await assert.rejects(
+      appendRegistryEvent(dir, { event: 'proposed', eventId: 'event-500-later-repair', actor: { kind: 'firstmate', id: 'snap-test' }, fields: { summary: 'snapshot boundary 500' } }),
+      /snapshot failure/
+    );
+  } finally {
+    if (old === undefined) delete process.env.MEM_SNAPSHOT_FAIL;
+    else process.env.MEM_SNAPSHOT_FAIL = old;
+  }
+  assert.equal(auditRegistry(dir).snapshots.outstanding[0].boundarySeq, 500);
+
+  await appendRegistryEvent(dir, { event: 'proposed', actor: { kind: 'firstmate', id: 'snap-test' }, fields: { summary: 'snapshot boundary 501' } });
+  assert.equal(foldRegistry(dir).watermark.seq, 501);
+  assert.equal(fs.readdirSync(paths.snapshots).filter((name) => name.includes('automatic-500-event-boundary')).length, 1);
+  assert.equal(auditRegistry(dir).ok, true);
 });
 
 test('explicit index rebuild creates a pre-rebuild snapshot and preserves canonical bytes', async () => {

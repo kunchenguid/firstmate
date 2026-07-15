@@ -25,6 +25,7 @@ export function registryPaths(dir = registryDir()) {
     lock: path.join(dir, '.memory-registry.lock'),
     activityLock: path.join(dir, '.memory-activity.lock'),
     snapshots: path.join(dir, 'snapshots'),
+    snapshotState: path.join(dir, 'snapshots', 'snapshot-obligations.json'),
     recovery: path.join(dir, 'recovery')
   };
 }

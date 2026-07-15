@@ -14,6 +14,8 @@ const actorSchema = z.object({
   session: z.string().optional()
 }).passthrough();
 
+const taskIdSchema = z.string().trim().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/);
+
 const evidenceSchema = z.object({
   type: z.string().min(1),
   ref: z.string().min(1),
@@ -104,6 +106,7 @@ export const activityEventSchema = z.object({
     }
   }
   if (event.event === 'risk_override') {
+    require(typeof event.task === 'string' && taskIdSchema.safeParse(event.task).success, ['task'], 'risk_override requires a valid task');
     for (const key of ['computedMinimum', 'requestedRisk', 'appliedRisk', 'matchedRiskRuleIds', 'reason', 'captainAuthorization', 'outcome']) {
       require(event.detail?.[key] !== undefined, ['detail', key], `risk_override requires detail.${key}`);
     }

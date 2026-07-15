@@ -56,6 +56,7 @@ function fallbackDoctor(json) {
     vectorExtension: { available: false, required: false, status: 'not installed for current milestone' },
     embeddingProvider: { configured: Boolean(process.env.MEM_EMBEDDING_KEY || process.env.OPENAI_API_KEY), required: false, status: 'optional' },
     registry: { path: process.env.MEM_REGISTRY_DIR || path.join(process.env.HOME || '', 'fleet', 'state', 'memory'), status: 'unknown', health: null, reason },
+    snapshots: { health: null, outstanding: [], issues: [], path: null, reason },
     activeIndex: { status: 'unknown', watermark: null, reason }
   });
   if (json) {

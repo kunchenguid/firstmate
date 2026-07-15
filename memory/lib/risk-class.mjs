@@ -82,6 +82,16 @@ function overrideReference(token) {
   return `ovr-${crypto.createHash('sha256').update(String(token)).digest('hex').slice(0, 16)}`;
 }
 
+// General task identifier schema for durable governance activity: printable
+// token, no whitespace/path separators, max 128 chars. KrakenLoop task slugs
+// such as `memory-pr1-fix-f3` are a subset of this format.
+export function normalizeRiskOverrideTaskId(taskId) {
+  if (typeof taskId !== 'string') return null;
+  const trimmed = taskId.trim();
+  if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(trimmed)) return null;
+  return trimmed;
+}
+
 export function enforceRiskRequest(requested, classification, options = {}) {
   if (!requested) return classification;
   if (!RISK_ORDER.includes(requested)) throw new Error(`unknown requested riskClass: ${requested}`);
@@ -123,6 +133,13 @@ export async function enforceRiskRequestDurably(requested, classification, optio
     error.detail = classification;
     throw error;
   }
+  const taskId = normalizeRiskOverrideTaskId(options.taskId);
+  if (!taskId) {
+    const error = new Error('riskClass downgrade refused: valid taskId required for durable Captain override log');
+    error.code = 'RISK_DOWNGRADE_TASK_REQUIRED';
+    error.detail = classification;
+    throw error;
+  }
   const ref = overrideReference(options.captainOverrideToken);
   let event;
   try {
@@ -130,7 +147,7 @@ export async function enforceRiskRequestDurably(requested, classification, optio
     event = await append(options.activityDir, {
       event: 'risk_override',
       actor: options.actor || { kind: 'captain', id: options.captainId || 'captain' },
-      task: options.taskId || null,
+      task: taskId,
       detail: {
         ruleVersion: classification.ruleVersion,
         computedMinimum: minimum,

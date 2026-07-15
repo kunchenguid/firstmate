@@ -88,11 +88,41 @@ test('a Captain-authorized downgrade persists a durable activity event and never
   // ...and NO sensitive override material appears anywhere in the output.
   assert.equal(JSON.stringify(overridden).includes(RAW), false);
   const activity = fs.readFileSync(activityFile(dir), 'utf8');
+  const event = JSON.parse(activity.trim());
+  assert.equal(event.task, 'memory-pr1-fix-f2');
   assert.equal(activity.includes(RAW), false);
   assert.ok(activity.includes(overridden.override.eventId));
   assert.ok(activity.includes('"computedMinimum":"critical"'));
   assert.ok(activity.includes('"appliedRisk":"standard"'));
   assert.equal(auditActivity(dir).health, 'ok');
+});
+
+test('Captain downgrade requires a valid non-empty task ID before persistence or application', async () => {
+  const RAW = 'CAPTAIN-RAW-SECRET-TOKEN';
+  const result = classifyRisk({ kind: 'ship', inspected: true, paths: ['memory/lib/x.mjs'], operationFlags: { memorySchema: true } });
+  const invalid = [
+    {},
+    { taskId: null },
+    { taskId: '' },
+    { taskId: '   ' },
+    { taskId: '../malformed task' }
+  ];
+  for (const extra of invalid) {
+    const dir = tmpRegistry();
+    await assert.rejects(
+      enforceRiskRequestDurably('standard', result, {
+        activityDir: dir,
+        captainOverrideToken: RAW,
+        reason: 'missing task probe',
+        ...extra
+      }),
+      (error) => {
+        assert.equal(error.code, 'RISK_DOWNGRADE_TASK_REQUIRED');
+        return /valid taskId required/.test(error.message);
+      }
+    );
+    assert.equal(fs.existsSync(activityFile(dir)), false, `no risk override event for ${JSON.stringify(extra)}`);
+  }
 });
 
 test('activity-write failure refuses a Captain downgrade', async () => {
@@ -101,6 +131,7 @@ test('activity-write failure refuses a Captain downgrade', async () => {
     enforceRiskRequestDurably('standard', result, {
       activityDir: tmpRegistry(),
       captainOverrideToken: 'TOKEN',
+      taskId: 'memory-pr1-fix-f3',
       appendActivityFn: async () => { throw new Error('disk full'); }
     }),
     /failed to persist Captain override/
