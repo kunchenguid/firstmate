@@ -99,17 +99,10 @@ case "$REQ" in
 esac
 
 INBOX="$STATE/x-inbox"
-mkdir -p "$INBOX" 2>/dev/null || { emit_error_once "cannot create inbox"; exit 0; }
 # Stash the full mention object atomically so a concurrent reader never sees a
 # half-written file.
-if jq '.' "$BODY_FILE" > "$INBOX/$REQ.json.tmp" 2>/dev/null; then
-  if ! mv -f "$INBOX/$REQ.json.tmp" "$INBOX/$REQ.json" 2>/dev/null; then
-    rm -f "$INBOX/$REQ.json.tmp"
-    emit_error_once "cannot write inbox"
-    exit 0
-  fi
-else
-  rm -f "$INBOX/$REQ.json.tmp"
+if ! (set -o pipefail; jq '.' "$BODY_FILE" 2>/dev/null \
+  | fmx_private_artifact_publish_stdin "$INBOX" "$REQ.json" 600); then
   emit_error_once "cannot write inbox"
   exit 0
 fi

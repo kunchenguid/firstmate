@@ -110,6 +110,67 @@ fmx_single_link_file_mode_valid() {
   [ "$mode" = "$expected_mode" ]
 }
 
+fmx_private_artifact_dir_prepare() {
+  local dir=$1 parent mode device
+  parent=${dir%/*}
+  if [ "$parent" != "$dir" ]; then
+    if [ -e "$parent" ] || [ -L "$parent" ]; then
+      [ -d "$parent" ] && [ ! -L "$parent" ] || return 1
+    else
+      (umask 077; mkdir -p "$parent" 2>/dev/null) || return 1
+      [ -d "$parent" ] && [ ! -L "$parent" ] || return 1
+    fi
+  fi
+  if [ -e "$dir" ] || [ -L "$dir" ]; then
+    [ -d "$dir" ] && [ ! -L "$dir" ] || return 1
+  else
+    (umask 077; mkdir -p "$dir" 2>/dev/null) || return 1
+  fi
+  [ -d "$dir" ] && [ ! -L "$dir" ] || return 1
+  if [ "$(uname)" = Darwin ]; then
+    mode=$(stat -f %Lp "$dir" 2>/dev/null) || return 1
+    device=$(stat -f %d "$dir" 2>/dev/null) || return 1
+  else
+    mode=$(stat -c %a "$dir" 2>/dev/null) || return 1
+    device=$(stat -c %d "$dir" 2>/dev/null) || return 1
+  fi
+  [ "$mode" = 700 ] || return 1
+  printf '%s\n' "$device"
+}
+
+fmx_private_artifact_publish_stdin() {
+  local dir=$1 base=$2 mode=$3 device tmp dest
+  case "$base" in
+    ''|.*|*/*) return 1 ;;
+  esac
+  case "$mode" in
+    600|700) ;;
+    *) return 1 ;;
+  esac
+  device=$(fmx_private_artifact_dir_prepare "$dir") || return 1
+  dest="$dir/$base"
+  tmp=$(umask 077; mktemp "$dir/.${base}.fm-x.XXXXXX" 2>/dev/null) || return 1
+  if ! cat > "$tmp" \
+    || ! chmod "$mode" "$tmp" 2>/dev/null \
+    || ! fmx_single_link_file_mode_valid "$tmp" "$mode" "$device"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+  if { [ -e "$dest" ] || [ -L "$dest" ]; } \
+    && ! fmx_single_link_file_mode_valid "$dest" "$mode" "$device"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+  if ! mv -f -- "$tmp" "$dest" 2>/dev/null; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+  if ! fmx_single_link_file_mode_valid "$dest" "$mode" "$device"; then
+    rm -f -- "$dest"
+    return 1
+  fi
+}
+
 fmx_poll_shim_identity_valid() {
   fmx_single_link_file_mode_valid "$1" "$2" "${3-}"
 }
@@ -330,6 +391,7 @@ fmx_context_registry_prune() {
   local state=$1 dir now max_age file recorded_at age
   dir="$state/x-context"
   [ -d "$dir" ] || return 0
+  [ ! -L "$dir" ] || return 0
   now=${FMX_NOW_OVERRIDE:-$(date +%s)}
   case "$now" in
     ''|*[!0-9]*) return 0 ;;
@@ -362,7 +424,7 @@ fmx_context_registry_prune() {
 # never write an empty, useless record. Returns non-zero only on invalid input or
 # a write failure; callers treat the write as best-effort.
 fmx_context_registry_set() {
-  local state=$1 rid=$2 platform=${3:-} reply_max=${4:-} refresh=${5:-0} dir file tmp now recorded_at
+  local state=$1 rid=$2 platform=${3:-} reply_max=${4:-} refresh=${5:-0} dir file dir_device now recorded_at
   case "$rid" in
     ''|.*|*[!A-Za-z0-9._-]*) return 1 ;;
   esac
@@ -382,14 +444,18 @@ fmx_context_registry_set() {
     return 0
   fi
   dir="$state/x-context"
-  mkdir -p "$dir" 2>/dev/null || return 1
+  dir_device=$(fmx_private_artifact_dir_prepare "$dir") || return 1
+  file="$dir/$rid.json"
+  if { [ -e "$file" ] || [ -L "$file" ]; } \
+    && ! fmx_single_link_file_mode_valid "$file" 600 "$dir_device"; then
+    return 1
+  fi
   fmx_context_registry_prune "$state"
   now=${FMX_NOW_OVERRIDE:-$(date +%s)}
   case "$now" in
     ''|*[!0-9]*) return 1 ;;
   esac
   [ "${#now}" -le 18 ] || return 1
-  file="$dir/$rid.json"
   recorded_at=
   if [ "$refresh" = 0 ] && [ -f "$file" ]; then
     recorded_at=$(fmx_context_registry_recorded_at "$file" "$now") || recorded_at=
@@ -397,14 +463,10 @@ fmx_context_registry_set() {
   if [ -z "$recorded_at" ]; then
     recorded_at=$now
   fi
-  tmp=$(mktemp "$dir/.${rid}.fm-x.XXXXXX" 2>/dev/null) || return 1
-  if jq -cn --arg rid "$rid" --arg platform "$platform" --arg max "$reply_max" \
-      --argjson recorded_at "$recorded_at" \
-      '{request_id:$rid, platform:$platform, reply_max_chars:$max, recorded_at:$recorded_at}' > "$tmp" 2>/dev/null; then
-    mv -f "$tmp" "$file" 2>/dev/null || { rm -f "$tmp"; return 1; }
-  else
-    rm -f "$tmp"; return 1
-  fi
+  (set -o pipefail; jq -cn --arg rid "$rid" --arg platform "$platform" --arg max "$reply_max" \
+    --argjson recorded_at "$recorded_at" \
+    '{request_id:$rid, platform:$platform, reply_max_chars:$max, recorded_at:$recorded_at}' \
+    | fmx_private_artifact_publish_stdin "$dir" "$rid.json" 600) || return 1
 }
 
 # fmx_context_registry_get <state> <request_id>: print the durable per-request
@@ -429,11 +491,13 @@ fmx_context_registry_get() {
 # Idempotent and best-effort; a dismiss (no follow-up will ever come) uses it so
 # a skipped mention leaves no stray context behind.
 fmx_context_registry_clear() {
-  local state=$1 rid=$2
+  local state=$1 rid=$2 dir
   case "$rid" in
     ''|.*|*[!A-Za-z0-9._-]*) return 0 ;;
   esac
-  rm -f "$state/x-context/$rid.json" 2>/dev/null || true
+  dir="$state/x-context"
+  [ -d "$dir" ] && [ ! -L "$dir" ] || return 0
+  rm -f "$dir/$rid.json" 2>/dev/null || true
   return 0
 }
 

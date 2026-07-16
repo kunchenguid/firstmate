@@ -288,18 +288,14 @@ fi
 # Preview / dry-run: surface what we WOULD post and stop, without auth or network.
 if [ -n "$FMX_DRY" ]; then
   outbox_dir="$STATE/x-outbox"
-  outbox_file="$outbox_dir/$REQ.json"
-  mkdir -p "$outbox_dir" 2>/dev/null || {
-    echo "fm-x-reply: cannot create dry-run outbox: $outbox_dir" >&2
-    exit 1
-  }
   # The recorded body is the would-be POST body, except image bytes are replaced
   # by a compact marker. A follow-up preview additionally carries an
   # "endpoint":"followup" marker so an outbox record is self-describing.
   OUTREC=$(fmx_reply_outbox_json "$REQ" "$CHUNKS" "$N" "$FOLLOWUP" "$IMAGE_PREVIEW") || {
     echo "fm-x-reply: failed to build dry-run outbox record" >&2; exit 1; }
-  printf '%s\n' "$OUTREC" > "$outbox_file" 2>/dev/null || {
-    echo "fm-x-reply: cannot write dry-run outbox: $outbox_file" >&2
+  printf '%s\n' "$OUTREC" \
+    | fmx_private_artifact_publish_stdin "$outbox_dir" "$REQ.json" 600 || {
+    echo "fm-x-reply: cannot write dry-run outbox: $outbox_dir/$REQ.json" >&2
     exit 1
   }
   if [ "$N" -le 1 ]; then
