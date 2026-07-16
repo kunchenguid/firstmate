@@ -113,31 +113,40 @@ test_shared_authoring_requirements_are_owned() {
 }
 
 test_secondmate_registry_contract_stays_concise() {
-  local section schema_line
-  section=$(awk '
+  local guidance routing_section schema_line
+  routing_section=$(awk '
     /^## Routing table$/ { found = 1 }
     found && /^## Charter and seed$/ { exit }
     found { print }
   ' "$SECONDMATE")
+  guidance=$(awk '
+    /^## Routing table$/ { found = 1 }
+    found && /^## Backlog handoff$/ { exit }
+    found { print }
+  ' "$SECONDMATE")
   schema_line="- <id> - <one-sentence charter summary> (home: <absolute-home-path>; scope: <natural-language responsibility>; projects: <project-a>, <project-b>; added <date>)"
-  assert_contains "$section" "$schema_line" \
+  assert_contains "$routing_section" "$schema_line" \
     "secondmate routing table lost the parser-compatible single-line schema"
-  assert_contains "$section" "Each registry entry stays concise and single-line" \
+  assert_contains "$routing_section" "Each registry entry stays concise and single-line" \
     "secondmate routing table no longer requires concise single-line entries"
-  assert_contains "$section" "genuinely domain-specific hard rules" \
+  assert_contains "$routing_section" "genuinely domain-specific hard rules" \
     "secondmate routing table no longer limits extra prose to domain-specific hard rules"
-  assert_contains "$section" "The home-seeded \`data/charter.md\` is the sole owner of boilerplate idle-by-default behavior, the normal delegation lifecycle, and standard escalation contracts" \
+  assert_contains "$routing_section" "The home-seeded \`data/charter.md\` is the sole owner of boilerplate idle-by-default behavior, the normal delegation lifecycle, and standard escalation contracts" \
     "secondmate routing table lost the explicit charter ownership pointer"
-  assert_contains "$section" "no extra registry pointer field is needed" \
+  assert_contains "$routing_section" "no extra registry pointer field is needed" \
     "secondmate routing table no longer explains why the existing home field is the charter pointer"
   for phrase in \
     "go idle and wait silently" \
     "Act only on tasks" \
     "never spawn a survey" \
     "run normal firstmate bootstrap" \
-    "marked supervisor requests return through status"; do
-    if printf '%s\n' "$section" | grep -F "$phrase" >/dev/null; then
-      fail "secondmate routing table restated charter boilerplate: $phrase"
+    "escalation back to the main firstmate status file" \
+    "requests-from-main-firstmate contract" \
+    "waits for routed tasks, never self-initiating a survey or audit" \
+    "marked supervisor requests return through status" \
+    "unmarked captain messages stay conversational"; do
+    if printf '%s\n' "$guidance" | grep -F "$phrase" >/dev/null; then
+      fail "secondmate provisioning guidance restated charter boilerplate: $phrase"
     fi
   done
   pass "secondmate registry guidance keeps concise routes and points to the charter"
