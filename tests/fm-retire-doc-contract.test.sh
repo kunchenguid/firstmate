@@ -26,6 +26,10 @@ test_retire_doc_skill_encodes_safety_procedure() {
   # shellcheck disable=SC2016 # Literal backticks/paths must remain unexpanded.
   assert_grep 'data/backups/' "$skill" "retire-doc skill does not require a dated backup tarball"
   assert_grep 'hash' "$skill" "retire-doc skill does not record the backup hash"
+  assert_grep 'command -v shasum' "$skill" "retire-doc skill does not prefer the portable SHA-256 command"
+  assert_grep 'command -v sha256sum' "$skill" "retire-doc skill does not fall back to sha256sum"
+  assert_grep 'No SHA-256 command is available; stop before retiring anything.' "$skill" \
+    "retire-doc skill does not fail closed when no SHA-256 command is available"
   for kind in archive rewrite-claim delete; do
     assert_grep "**$kind**" "$skill" "retire-doc skill is missing the $kind classification"
   done
@@ -33,6 +37,8 @@ test_retire_doc_skill_encodes_safety_procedure() {
   assert_grep 'wait for the captain' "$skill" "retire-doc skill does not stop and wait at the provenance gate"
   assert_grep 'single source of truth' "$skill" "retire-doc skill does not enforce single-source consolidation"
   assert_grep 'Never leave two full copies' "$skill" "retire-doc skill does not forbid duplicate full copies"
+  assert_grep 'at its former path to a one-line pointer to that authoritative home' "$skill" \
+    "retire-doc skill does not preserve a pointer at every consolidated document's former path"
   assert_grep 'never points at a retired path' "$skill" "retire-doc skill does not require the index update"
   assert_grep 'own document-lifecycle SOP' "$skill" "retire-doc skill does not defer to a local SOP"
   pass "retire-doc skill encodes backup, classification, gate, consolidation, index, and local-override steps"

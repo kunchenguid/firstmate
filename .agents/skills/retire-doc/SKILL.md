@@ -29,8 +29,17 @@ Example:
 ```
 mkdir -p data/backups
 ts="$(date +%Y%m%d-%H%M%S)"
-tar czf "data/backups/retire-<slug>-${ts}.tar.gz" <affected-path> [<affected-path> ...]
-sha256sum "data/backups/retire-<slug>-${ts}.tar.gz"
+backup="data/backups/retire-<slug>-${ts}.tar.gz"
+tar czf "$backup" <affected-path> [<affected-path> ...]
+if command -v shasum >/dev/null 2>&1; then
+  hash="$(shasum -a 256 "$backup" | awk '{print $1}')"
+elif command -v sha256sum >/dev/null 2>&1; then
+  hash="$(sha256sum "$backup" | awk '{print $1}')"
+else
+  printf '%s\n' 'No SHA-256 command is available; stop before retiring anything.' >&2
+  exit 1
+fi
+printf '%s  %s\n' "$hash" "$backup"
 ```
 
 Carry the tarball path and its hash forward; the final report cites them.
@@ -64,7 +73,7 @@ If you are a crewmate rather than firstmate itself, surface this as a decision f
 
 When the retirement is really a consolidation - the same information living in two places - merge it into the one authoritative home and replace the other copy with a pointer to that home.
 Never leave two full copies: the moment only one is edited, they drift.
-Choose the authoritative home deliberately (the more discoverable, more maintained, or index-referenced location), fold in anything unique from the copy being retired, then reduce the retired copy to a one-line pointer or remove it with a tombstone per step 2.
+Choose the authoritative home deliberately (the more discoverable, more maintained, or index-referenced location), fold in anything unique from the copy being retired, then reduce the retired document at its former path to a one-line pointer to that authoritative home.
 
 ## 5. Update the index in the same action
 
