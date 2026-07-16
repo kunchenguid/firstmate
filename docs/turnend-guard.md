@@ -147,11 +147,8 @@ No Herdr command was issued and no fleet state was touched; the experiment wrote
 
 ### 2026-07-16: native Pi resume lock recovery
 
-Pi 0.80.7 native resume restores the conversation without rerunning `bin/fm-session-start.sh`, so the watcher extension now checks the production lock owner during `session_start`.
-The production owner matches native `pi` only by exact process basename and inspects argv only for the explicitly allowed bare interpreters `node`, `nodejs`, `python`, and `python3`.
-Session-lock publication is serialized through the portable lock primitive in `bin/fm-wake-lib.sh`, while `bin/fm-lock.sh` remains the only writer of `state/.lock`.
-The watcher calls acquisition only for `missing` or `dead`, reads ownership again, and starts supervision only after observing `owned`.
-A verified live other holder and malformed lock remain byte-for-byte unchanged.
+Pi 0.80.7 native resume restores the conversation without rerunning `bin/fm-session-start.sh`; `docs/supervision-protocols/pi.md` owns the resulting lock-recovery and watcher-arm protocol.
+`bin/fm-lock.sh` remains the sole production session-lock owner, and its header owns classification and mutation mechanics.
 
 Command run: `bash tests/fm-session-lock.test.sh`.
 Observed output covered exact native names for Claude, Codex, OpenCode, Pi, and Grok, same-holder idempotence, dead reclaim, malformed refusal, missing ancestry, exact interpreter script matching, and one winner from two synchronized contenders.
@@ -168,4 +165,4 @@ No Herdr lifecycle command was required for these subprocess fixtures.
 `tests/fm-session-lock.test.sh` covers the shared session-lock classifier and serialized mutation contract for every supported primary harness.
 `tests/fm-pi-watch-extension.test.sh` covers resume recovery through the production owner and the shared read-only ownership API used by both Pi extensions.
 The default behavior suite does not invoke live language-model harnesses.
-`FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh` opts into the isolated interactive Pi regression recorded above.
+`FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh` opts into the current isolated interactive Pi regression, whose post-change expectations are owned by `docs/supervision-protocols/pi.md`.
