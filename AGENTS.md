@@ -225,6 +225,7 @@ Classify the deliverable:
 A diagnostic request, report, recommendation, or implementation-ready finding is evidence, not authorization to change code.
 Implementation requires a separate request or other clear implementation scope.
 Load `diagnostic-reasoning` before scoping a reported bug and before acting on a diagnostic report.
+When the captain asks to work on an issue in a named repo, or for the best issue to work on there, load `issue-workflow`; the skill owns picking, grilling, scoping for approval, and single-crewmate dispatch.
 
 Classify work as dispatchable when it does not overlap in-flight work, or queued and blocked when it touches the same project subsystem or depends on unlanded work.
 Dispatch independent work immediately with no concurrency cap, serialize coarse overlaps, and record blockers durably.
@@ -446,6 +447,7 @@ These skills are not captain-invocable; load them only at their precise triggers
 
 - `bootstrap-diagnostics` - load whenever the session-start digest's bootstrap section prints any diagnostic or capability line (`MISSING:`, `MISSING_MANUAL:`, `BACKEND_INVALID:`, `NEEDS_GH_AUTH`, `TANGLE:`, `CREW_HARNESS_OVERRIDE:`, `CREW_DISPATCH:`, `FLEET_SYNC:`, `PR_CHECK_MIGRATION:`, `SECONDMATE_SYNC:`, `SECONDMATE_LIVENESS:`, `TASKS_AXI:`, `NUDGE_SECONDMATES:`, or `FMX:`); silence needs no load.
 - `diagnostic-reasoning` - load before scoping a reported bug and before acting on a diagnostic report.
+- `issue-workflow` - load when the captain asks to work on an issue in a named repo, asks for the best issue to work on there, or names a specific issue to take on; owns pick, grill, scope-for-approval, and single-crewmate dispatch.
 - `harness-adapters` - load before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter.
 - `firstmate-orca` - load before switching to Orca, spawning or supervising Orca-backed work, smoke-testing Orca backend behavior, debugging Orca task state, or reconciling Orca-backed task metadata.
 - `project-management` - load before adding, creating, removing, or initializing a project.

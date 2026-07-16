@@ -6,10 +6,15 @@
 # description, acceptance criteria, and context, and may adjust other sections
 # when the task genuinely deviates (e.g. working an existing external PR instead
 # of shipping a new one).
-# Usage: fm-brief.sh <task-id> <repo-name> [--scout] [--herdr-lab]
+# Usage: fm-brief.sh <task-id> <repo-name> [--scout] [--herdr-lab] [--plan <path>]
 #        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
 #   --scout writes the scout contract instead: the deliverable is a report at
 #   data/<task-id>/report.md (no branch, no push, no PR) and the worktree is scratch.
+#   --plan <path> marks a SHIP brief as executing a binding approved plan: it adds an
+#   "# Approved plan" block after the Task section naming the plan path and stating the
+#   deviation threshold (minor = adapt and list every deviation in the PR body; material =
+#   stop and append a needs-decision line). The path must exist. Ship briefs only.
+#   Without --plan the scaffold output is byte-identical to before.
 #   --secondmate writes a persistent secondmate charter. The project list
 #   is cloned into the secondmate home, while the natural-language scope
 #   tells the main firstmate when to route work there; routine churn stays in its own home;
@@ -73,17 +78,32 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 KIND=ship
 HERDR_LAB=0
 NO_PROJECTS=0
+PLAN_PATH=""
 POS=()
-for a in "$@"; do
-  case "$a" in
+while [ "$#" -gt 0 ]; do
+  case "$1" in
     --scout) KIND=scout ;;
     --secondmate) KIND=secondmate ;;
     --herdr-lab) HERDR_LAB=1 ;;
     --no-projects) NO_PROJECTS=1 ;;
-    *) POS+=("$a") ;;
+    --plan)
+      shift
+      [ "$#" -gt 0 ] || { echo "error: --plan requires a path argument" >&2; exit 1; }
+      PLAN_PATH="$1"
+      ;;
+    *) POS+=("$1") ;;
   esac
+  shift
 done
 ID=${POS[0]}
+
+if [ -n "$PLAN_PATH" ]; then
+  if [ "$KIND" != ship ]; then
+    echo "error: --plan applies only to ship briefs" >&2
+    exit 1
+  fi
+  [ -f "$PLAN_PATH" ] || { echo "error: --plan file not found: $PLAN_PATH" >&2; exit 1; }
+fi
 
 if [ "$KIND" = secondmate ] && [ "$HERDR_LAB" -eq 1 ]; then
   echo "error: --herdr-lab applies only to crewmate ship or scout briefs" >&2
@@ -326,11 +346,30 @@ EOF
     ;;
 esac
 
+# When executing a captain-approved plan, inject a binding-plan block after the Task
+# section. PLAN_SECTION stays empty otherwise so the scaffold is byte-identical to before.
+# Its leading blank lines are baked in here (command substitution strips trailing ones),
+# so `{TASK}${PLAN_SECTION}` renders with the correct spacing in both cases.
+if [ -n "$PLAN_PATH" ]; then
+PLAN_SECTION=$(cat <<EOF
+
+
+# Approved plan
+The approved implementation plan for this task is at \`$PLAN_PATH\`.
+Read it first, before writing any code. It is binding.
+- Minor mechanical deviations (wording, ordering, naming): adapt, and list EVERY one in the PR body under "Deviations from approved plan".
+- Material deviations (a different approach, files added or dropped, changed success criteria): STOP - append \`needs-decision: plan deviation - {summary}\` to the status file and wait.
+EOF
+)
+else
+PLAN_SECTION=""
+fi
+
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
 
 # Task
-{TASK}
+{TASK}${PLAN_SECTION}
 
 $HERDR_SECTION
 

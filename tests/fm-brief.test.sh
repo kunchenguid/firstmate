@@ -289,6 +289,74 @@ test_pause_verb_override_renders_all_brief_scaffolds() {
   pass "fm-brief.sh: custom pause verb renders in every scaffold"
 }
 
+test_plan_flag_injects_binding_block() {
+  local home id brief plan
+  home="$TMP_ROOT/plan-flag-home"
+  mkdir -p "$home/data"
+  plan="$home/data/plan.md"
+  printf '# plan\nbody\n' > "$plan"
+  id="brief-plan-e1"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --plan "$plan" >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_present "$brief" "plan brief was not scaffolded"
+  assert_grep "# Approved plan" "$brief" \
+    "--plan did not inject the approved-plan block"
+  assert_grep "The approved implementation plan for this task is at \`$plan\`." "$brief" \
+    "--plan block did not name the plan path"
+  assert_grep "Read it first, before writing any code. It is binding." "$brief" \
+    "--plan block did not declare the plan binding"
+  assert_grep 'list EVERY one in the PR body under "Deviations from approved plan"' "$brief" \
+    "--plan block lost the minor-deviation disclosure rule"
+  assert_grep 'append `needs-decision: plan deviation - {summary}`' "$brief" \
+    "--plan block lost the material-deviation stop rule"
+  # The block sits between the Task section and the Herdr declaration.
+  local block
+  block=$(awk '/^# Task$/{f=1} f{print} /^# Herdr/{exit}' "$brief")
+  assert_contains "$block" "{TASK}"$'\n'$'\n'"# Approved plan" \
+    "--plan block was not placed immediately after the Task section"
+  pass "fm-brief.sh: --plan injects the binding-plan block naming the path"
+}
+
+test_plan_flag_missing_file_fails_clearly() {
+  local home out status
+  home="$TMP_ROOT/plan-missing-home"
+  mkdir -p "$home/data"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-plan-e2 some-proj --plan "$home/data/nope.md" 2>&1); status=$?
+  expect_code 1 "$status" "--plan with a missing file must fail"
+  assert_contains "$out" "--plan file not found" "--plan missing-file error was not clear"
+  assert_absent "$home/data/brief-plan-e2/brief.md" "failed --plan run still wrote a brief"
+
+  # A bare --plan with no path argument also fails loudly.
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-plan-e3 some-proj --plan 2>&1); status=$?
+  expect_code 1 "$status" "--plan with no path argument must fail"
+  assert_contains "$out" "--plan requires a path argument" "--plan no-argument error was not clear"
+
+  # --plan applies only to ship briefs, never scout or secondmate.
+  printf 'x\n' > "$home/data/plan.md"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-plan-e4 some-proj --scout --plan "$home/data/plan.md" 2>&1); status=$?
+  expect_code 1 "$status" "--plan on a scout brief must fail"
+  assert_contains "$out" "--plan applies only to ship briefs" "--plan scout-rejection error was not clear"
+  pass "fm-brief.sh: --plan validates its path and ship-only scope"
+}
+
+test_plan_flag_absent_is_byte_identical() {
+  local home id brief block expected
+  home="$TMP_ROOT/plan-absent-home"
+  mkdir -p "$home/data"
+  id="brief-plan-e5"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_present "$brief" "no-flag brief was not scaffolded"
+  assert_no_grep "# Approved plan" "$brief" \
+    "no-flag brief leaked the approved-plan block"
+  # Without --plan the Task section is followed by exactly one blank line and then
+  # the Herdr declaration - no stray blank line from the injection point.
+  block=$(awk '/^# Task$/{f=1} f{print} /^# Herdr/{exit}' "$brief")
+  expected=$(printf '# Task\n{TASK}\n\n# Herdr lifecycle declaration - NOT ENABLED')
+  [ "$block" = "$expected" ] || fail "no-flag Task section is not byte-identical to legacy output"
+  pass "fm-brief.sh: without --plan the scaffold output is unchanged"
+}
+
 test_scout_and_secondmate_load_decision_hold_policy() {
   local home scout charter
   home="$TMP_ROOT/decision-policy-home"
@@ -320,4 +388,7 @@ test_herdr_lab_omission_is_loud_for_ship_and_scout
 test_herdr_lab_contract_applies_to_scouts_but_not_secondmates
 test_secondmate_no_projects_charter
 test_pause_verb_override_renders_all_brief_scaffolds
+test_plan_flag_injects_binding_block
+test_plan_flag_missing_file_fails_clearly
+test_plan_flag_absent_is_byte_identical
 test_scout_and_secondmate_load_decision_hold_policy
