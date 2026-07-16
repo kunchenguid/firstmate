@@ -52,6 +52,17 @@ jobs:
           set -eu
           npm install -g tasks-axi
           tasks-axi --version
+      - name: Install the Pi extension type contract
+        run: |
+          set -eu
+          prefix="$RUNNER_TEMP/pi-types"
+          npm install --prefix "$prefix" --ignore-scripts --no-audit --no-fund \
+            typescript@5.9.3 \
+            @types/node@24 \
+            typebox@1.1.38 \
+            @earendil-works/pi-coding-agent@0.80.6
+          printf '%s\n' "$prefix/node_modules/.bin" >> "$GITHUB_PATH"
+          printf 'FM_PI_PACKAGE_DIR=%s\n' "$prefix/node_modules/@earendil-works/pi-coding-agent" >> "$GITHUB_ENV"
       - run: |
           set -eu
           for test_script in tests/*.test.sh; do

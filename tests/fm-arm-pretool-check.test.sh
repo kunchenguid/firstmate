@@ -513,7 +513,7 @@ test_opencode_pretool_plugin_wired() {
 
 test_pi_extension_carries_pretool_check() {
   local ext content
-  ext="$ROOT/.pi/extensions/fm-primary-turnend-guard.ts"
+  ext="$ROOT/.pi/extensions/fm-primary-pi-watch.ts"
   [ -f "$ext" ] || fail "tracked pi primary extension is missing"
   content=$(cat "$ext")
   assert_contains "$content" 'tool_call' "pi extension must hook tool_call for the pretool seatbelt"

@@ -161,7 +161,7 @@ Prose may improve without changing adapter behavior.
 | Claude | `.tool_input.command` | `.claude/settings.json` forwards stdin with `--claude`, leaving stdout empty and returning the stderr deny object. |
 | Grok | `.toolInput.command` | `.grok/hooks/fm-primary-pretool-check.json` forwards stdin and Grok consumes the stdout `decision=deny` object. |
 | OpenCode | `output.args.command` | `.opencode/plugins/fm-primary-pretool-check.js` passes one `--command` argument and throws only for exit 2. |
-| Pi | `event.input.command` | `.pi/extensions/fm-primary-turnend-guard.ts` passes one `--command` argument and returns `{block: true}` only for exit 2. |
+| Pi | `event.input.command` | `.pi/extensions/fm-primary-pi-watch.ts` passes one `--command` argument and returns `{block: true}` only for exit 2. |
 
 Grok project hooks require folder trust.
 Every shell variable reference in a Grok hook command must carry an inline default such as `${GROK_WORKSPACE_ROOT:-}` because Grok expands the raw hook command before `bash -lc` runs it.
@@ -205,6 +205,8 @@ OPENCODE_CONFIG_CONTENT='{"permission":{"*":"allow"}}' opencode run --print-logs
 pi -p -e .pi/extensions/fm-primary-turnend-guard.ts --no-context-files --no-session "$PROMPT"
 ```
 
+The Pi command names the then-current seatbelt carrier used for this 2026-07-09 validation; the later watcher-only lifecycle change removed that extension and moved the current wiring to `.pi/extensions/fm-primary-pi-watch.ts` as documented above.
+
 Observed output for the four allowed calls was `UNRELATED_EXECUTED`, a successful read-only `pgrep`, `CHECKPOINT_EXECUTED`, and two `TMUX_ARGS:` lines that preserved the watcher text as data.
 Each harness blocked the final command with exit 2 mapped through its native adapter behavior.
 The stable reason was `[watcher-background] a protected watcher command cannot run in an asynchronous shell list or through nohup/disown`.
@@ -222,7 +224,7 @@ Native supervision paths were also validated in the same scratch project:
 - Grok ran the same exact command with `background: true`, its hook returned exit 0, and the dummy arm produced the same started line.
 - Codex ran the foreground checkpoint above and produced `CHECKPOINT_EXECUTED`.
 - OpenCode ran in an interactive TUI on `tmux -L fm-pretool-smoke`, reached `session.idle`, and its unchanged watch-arm plugin created the scratch automatic-arm marker.
-- Pi loaded both primary extensions, called `fm_watch_arm_pi`, and created the scratch automatic-arm marker.
+- Pi loaded both then-current primary extensions, called `fm_watch_arm_pi`, and created the scratch automatic-arm marker.
 
 Every native-path automatic marker was present and every deny sentinel remained absent.
 

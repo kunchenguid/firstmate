@@ -424,7 +424,7 @@ test_opencode_wiring() {
 
 test_pi_wiring() {
   local ext content
-  ext="$ROOT/.pi/extensions/fm-primary-turnend-guard.ts"
+  ext="$ROOT/.pi/extensions/fm-primary-pi-watch.ts"
   [ -f "$ext" ] || fail "tracked pi primary extension is missing"
   content=$(cat "$ext")
   assert_contains "$content" 'runCdCheck(command)' "pi extension must run the cd check in tool_call"

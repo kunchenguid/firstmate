@@ -116,7 +116,7 @@ The cd-guard never duplicates shell lexing; it adds only the cd-specific decisio
 | Codex | `.codex/hooks.json` PreToolUse hook that anchors from `pwd -P`, verifies the hook-loaded firstmate root, and forwards the payload | Blocks on exit 2 and displays stderr. |
 | Grok | `.grok/hooks/fm-primary-cd-check.json` PreToolUse hook anchored on `${GROK_WORKSPACE_ROOT:-}` | Consumes the stdout `decision=deny` object. |
 | OpenCode | `.opencode/plugins/fm-primary-cd-check.js` `tool.execute.before` | Throws, which surfaces as the failed tool result. |
-| Pi | `.pi/extensions/fm-primary-turnend-guard.ts` `tool_call` handler | Returns `{block: true}`; piggybacks on the already-loaded primary extension so no extra `-e` flag is needed. |
+| Pi | `.pi/extensions/fm-primary-pi-watch.ts` `tool_call` handler | Returns `{block: true}`; piggybacks on the already-loaded watcher extension so no extra `-e` flag is needed. |
 
 Each harness runs the cd-guard alongside the watcher-arm seatbelt; the two are independent checks, and either deny blocks the command.
 Every shell variable reference in the Grok hook command carries an inline default (`${GROK_WORKSPACE_ROOT:-}`) because Grok expands the raw hook command before `bash -lc` runs it, the same requirement documented in `docs/arm-pretool-check.md`.
@@ -161,3 +161,5 @@ OPENCODE_CONFIG_CONTENT='{"permission":{"*":"allow"}}' opencode run --print-logs
 pi -p -e .pi/extensions/fm-primary-turnend-guard.ts --no-context-files --no-session "$PROMPT"
 grok --trust -p "$PROMPT" --permission-mode bypassPermissions --output-format plain
 ```
+
+The Pi command names the then-current cd-guard carrier used for this 2026-07-11 validation; the current wiring is owned by the harness table above.
