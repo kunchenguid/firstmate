@@ -379,6 +379,37 @@ EOF
   pass "resolved findings and decision-like prose do not create false holds"
 }
 
+test_terminal_single_owner_status_decision_does_not_block_empty_inventory() {
+  local home id open secondmate
+  home=$(make_home stale-terminal-decision)
+  id=sample-terminal-review
+  mkdir -p "$home/data/$id"
+  tasks_in "$home" add "$id" "Review a terminal sample finding" --kind scout --repo sample --start >/dev/null
+  write_origin_meta "$home" "$id"
+  printf 'needs-decision [key=default]: choose route A or route B\ndone: report complete\n' \
+    > "$home/state/$id.status"
+  printf '# Terminal sample review\n\nNo unresolved captain choice remains.\n' > "$home/data/$id/report.md"
+  open=$(bash -c '. "$1"; status_open_decisions "$2"' _ \
+    "$ROOT/bin/fm-classify-lib.sh" "$home/state/$id.status")
+  assert_contains "$open" "default" "fixture must retain the raw stale status decision"
+  run_decisions "$home" complete "$id" --none >/dev/null \
+    || fail "terminal single-owner stale status decision blocked empty inventory completion"
+  run_decisions "$home" verify "$id" >/dev/null \
+    || fail "terminal single-owner stale status decision blocked inventory verification"
+  run_teardown "$home" "$id" >/dev/null 2> "$home/terminal-teardown.err" \
+    || fail "terminal single-owner stale status decision blocked teardown: $(cat "$home/terminal-teardown.err")"
+
+  secondmate=sample-secondmate
+  write_origin_meta "$home" "$secondmate" secondmate
+  printf 'needs-decision [key=route]: choose route A or route B\ndone: heartbeat complete\n' \
+    > "$home/state/$secondmate.status"
+  if run_decisions "$home" complete "$secondmate" --none \
+    > "$home/secondmate-terminal.out" 2> "$home/secondmate-terminal.err"; then
+    fail "secondmate terminal status decision was incorrectly cleared"
+  fi
+  pass "terminal single-owner stale status decisions do not block empty inventory"
+}
+
 test_secondmate_hold_stays_in_authoritative_home() {
   local parent mate origin hold json
   parent=$(make_home main-routing)
@@ -430,4 +461,5 @@ test_structured_holds_survive_teardown_and_route_resolution
 test_origin_slug_validation_precedes_path_construction
 test_visual_review_uses_shared_completion_owner
 test_none_inventory_and_resolved_prose_do_not_create_holds
+test_terminal_single_owner_status_decision_does_not_block_empty_inventory
 test_secondmate_hold_stays_in_authoritative_home

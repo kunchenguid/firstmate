@@ -140,6 +140,23 @@ meta_value() {  # <meta> <key>
   grep "^$2=" "$1" 2>/dev/null | tail -1 | cut -d= -f2- || true
 }
 
+origin_open_decisions() {  # <origin-id>
+  local origin=$1 meta="$STATE/$1.meta" status_file="$STATE/$1.status" open kind last verb
+  open=$(status_open_decisions "$status_file")
+  [ -n "$open" ] || return 0
+  [ -f "$meta" ] || { printf '%s' "$open"; return 0; }
+  kind=$(meta_value "$meta" kind)
+  [ -n "$kind" ] || kind=ship
+  if [ "$kind" != secondmate ]; then
+    last=$(last_status_line "$status_file")
+    verb=$(status_line_verb "$last")
+    case "$verb" in
+      done|failed) return 0 ;;
+    esac
+  fi
+  printf '%s' "$open"
+}
+
 verify_hold_active() {  # <hold-id>
   local id=$1 show state held kind hold_kind
   show=$(task_show "$id") || fail "captain hold $id is absent from $FM_HOME/data/backlog.md"
@@ -258,7 +275,7 @@ command_hold() {
 }
 
 command_complete() {
-  local origin=${1:-} meta previous='' supplied='' keys='' key status_file open key_seen=0 has_meta=0
+  local origin=${1:-} meta previous='' supplied='' keys='' key status_file open raw_open key_seen=0 has_meta=0
   [ "$#" -ge 2 ] || { usage >&2; exit 2; }
   validate_slug origin-id "$origin"
   shift
@@ -290,7 +307,8 @@ EOF
   fi
 
   status_file="$STATE/$origin.status"
-  open=$(status_open_decisions "$status_file")
+  raw_open=$(status_open_decisions "$status_file")
+  open=$(origin_open_decisions "$origin")
   while IFS=$'\t' read -r key _verb _summary; do
     [ -n "$key" ] || continue
     list_has_key "$keys" "$key" \
@@ -308,10 +326,11 @@ EOF
     # live status fold does not duplicate the same Captain's Call item.
     while IFS=$'\t' read -r key _verb _summary; do
       [ -n "$key" ] || continue
+      list_has_key "$keys" "$key" || continue
       printf 'captain-held [key=%s]: tracked by %s\n' "$key" "$(hold_id "$origin" "$key")" >> "$status_file"
       key_seen=1
     done <<EOF
-$open
+$raw_open
 EOF
   fi
   : "$key_seen"
@@ -336,7 +355,7 @@ command_verify() {
 $(printf '%s\n' "$keys" | tr ',' '\n')
 EOF
   fi
-  open=$(status_open_decisions "$STATE/$origin.status")
+  open=$(origin_open_decisions "$origin")
   while IFS=$'\t' read -r key _verb _summary; do
     [ -n "$key" ] || continue
     list_has_key "$keys" "$key" \
