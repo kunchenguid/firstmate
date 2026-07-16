@@ -9,6 +9,7 @@ __pycache__/
 *.pyc
 .env
 config/crew-harness
+config/crew-config-dir
 config/crew-dispatch.json
 config/secondmate-harness
 config/backlog-backend
