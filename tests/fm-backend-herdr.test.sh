@@ -893,6 +893,75 @@ test_composer_state_unknown_when_no_composer_row_found() {
   pass "fm_backend_herdr_composer_state: reports unknown for bare shell prompts with no composer row"
 }
 
+# Real Pi 0.80.7 on Herdr 0.7.3 renders no prompt glyph and no side border.
+# Its content is the row(s) between two blue horizontal separators; the idle row
+# carries only a reverse-video cursor. This exact shape was `unknown` for 4555s
+# during the 2026-07-14 incident, so the safe injector never attempted submit.
+test_composer_state_pi_separator_idle_is_empty() {
+  local dir log resp fb out calls
+  dir="$TMP_ROOT/composer-pi-separated-idle"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '│ stale bordered transcript row │\n\x1b[0m\x1b[38;2;129;162;190m─────────────────────────────────────────────────────\x1b[0m\n\x1b[0m\x1b[7m \x1b[0m                                                    \n\x1b[0m\x1b[38;2;129;162;190m─────────────────────────────────────────────────────\x1b[0m\n\x1b[0m\x1b[38;2;102;102;102m~/synthetic-primary (main)\x1b[0m\n' > "$resp/1.out"
+  printf '{"result":{"agent":{"agent":"pi","agent_status":"idle"}}}\n' > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state lab:w1:p2' "$ROOT" )
+  [ "$out" = empty ] || fail "an idle native Pi separator composer should read empty, got '$out'"
+  calls=$(grep -c $'\x1f''agent'$'\x1f''get' "$log")
+  [ "$calls" -eq 1 ] || fail "Pi separator recognition must corroborate identity exactly once, made $calls agent calls"
+  pass "fm_backend_herdr_composer_state: a native idle Pi separator composer reads empty"
+}
+
+test_composer_state_pi_separator_real_text_is_pending() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/composer-pi-separated-pending"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '\x1b[38;2;129;162;190m─────────────────────────────────────────────────────\x1b[0m\nprivacy safe human draft\x1b[7m \x1b[0m\n\x1b[38;2;129;162;190m─────────────────────────────────────────────────────\x1b[0m\n' > "$resp/1.out"
+  printf '{"result":{"agent":{"agent":"pi","agent_status":"done"}}}\n' > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state lab:w1:p2' "$ROOT" )
+  [ "$out" = pending ] || fail "real text in a native Pi separator composer should read pending, got '$out'"
+  pass "fm_backend_herdr_composer_state: real Pi composer text remains pending"
+}
+
+test_composer_state_pi_incomplete_separator_below_stale_generic_is_unknown() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/composer-pi-separated-incomplete"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '│   │\n─────────────────────────────────────────────────────\n\n' > "$resp/1.out"
+  printf '{"result":{"agent":{"agent":"pi","agent_status":"idle"}}}\n' > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state lab:w1:p2' "$ROOT" )
+  [ "$out" = unknown ] || fail "an incomplete Pi separator below a stale generic row should remain unknown, got '$out'"
+  pass "fm_backend_herdr_composer_state: an incomplete lower Pi separator cannot inherit a stale empty row"
+}
+
+test_composer_state_pi_separator_requires_safe_native_identity() {
+  local dir log resp fb out status case_id idx=0
+  for case_id in working non-pi unreadable over-tall; do
+    dir="$TMP_ROOT/composer-pi-separated-$case_id"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+    if [ "$case_id" = over-tall ]; then
+      {
+        printf '─────────────────────────────────────────────────────\n'
+        for idx in $(seq 1 9); do printf 'line %s\n' "$idx"; done
+        printf '─────────────────────────────────────────────────────\n'
+      } > "$resp/1.out"
+    else
+      printf '─────────────────────────────────────────────────────\n\n─────────────────────────────────────────────────────\n' > "$resp/1.out"
+    fi
+    case "$case_id" in
+      working) printf '{"result":{"agent":{"agent":"pi","agent_status":"working"}}}\n' > "$resp/2.out" ;;
+      non-pi) printf '{"result":{"agent":{"agent":"shell","agent_status":"idle"}}}\n' > "$resp/2.out" ;;
+      unreadable) printf '1\n' > "$resp/2.exit" ;;
+      over-tall) printf '{"result":{"agent":{"agent":"pi","agent_status":"idle"}}}\n' > "$resp/2.out" ;;
+    esac
+    fb=$(make_herdr_fakebin "$dir")
+    out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+      bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state lab:w1:p2' "$ROOT" )
+    [ "$out" = unknown ] || fail "unsafe Pi separator case '$case_id' must remain unknown, got '$out'"
+  done
+  pass "fm_backend_herdr_composer_state: Pi separators never authorize working, non-Pi, unreadable, or over-tall targets"
+}
+
 # --- composer_state: unbordered (bare) composer rows -------------------------
 # Regression coverage for the away-mode redelivery-loop incident
 # (docs/herdr-backend.md "Incident (2026-07-07)"): real claude and codex
@@ -1662,6 +1731,312 @@ test_no_jq_reserved_keyword_arg_names() {
   pass "no bin/ jq filter names a --arg/--argjson variable after a jq reserved keyword"
 }
 
+# --- native event push: normalize / policy-routing / dedupe / wait ----------
+#
+# These exercise the herdr subscriber (fm_backend_herdr_wait_transition and its
+# helpers) with a FAKE socket reader and fake herdr CLI, so the policy routing,
+# per-pane dedupe marker, reconnect level-reconcile, and fail-closed return
+# codes are asserted without a real herdr server. The isolated real-herdr smoke
+# that drives a live idle->blocked transition lives in
+# tests/fm-backend-herdr-eventwait-smoke.test.sh.
+
+# make_herdr_eventfake: a herdr stub answering exactly the calls the event path
+# makes - `session list --json` (echoes one session, name FM_FAKE_SESSION_NAME,
+# socket FM_FAKE_SOCKET), `status --json`, and `agent get <pane>` (per-pane
+# status read from $FM_FAKE_AGENT_DIR/<key>.status, else agent_not_found).
+make_herdr_eventfake() {  # <dir> -> echoes fakebin dir
+  local dir=$1 fb="$1/fakebin"
+  mkdir -p "$fb"
+  cat > "$fb/herdr" <<'SH'
+#!/usr/bin/env bash
+set -u
+LOG="${FM_HERDR_LOG:-/dev/null}"
+{ printf 'HERDR_SESSION=%s' "${HERDR_SESSION:-}"; for a in "$@"; do printf '\x1f%s' "$a"; done; printf '\n'; } >> "$LOG"
+cmd=${1:-}; sub=${2:-}
+case "$cmd $sub" in
+  "status --json")
+    printf '{"client":{"version":"0.7.3","protocol":16},"server":{"running":true}}\n' ;;
+  "session list")
+    printf '{"sessions":[{"name":"%s","running":true,"default":false,"socket_path":"%s"}]}\n' \
+      "${FM_FAKE_SESSION_NAME:-default}" "${FM_FAKE_SOCKET:-/tmp/fm-fake.sock}" ;;
+  "agent get")
+    if [ -n "${FM_FAKE_READER_READY_FILE:-}" ] && [ ! -e "$FM_FAKE_READER_READY_FILE" ]; then
+      exit 9
+    fi
+    pane=${3:-}
+    key=$(printf '%s' "$pane" | tr ':/.' '___')
+    f="${FM_FAKE_AGENT_DIR:-/tmp}/$key.status"
+    if [ -f "$f" ]; then
+      printf '{"result":{"agent":{"agent_status":"%s"}}}\n' "$(cat "$f")"
+    else
+      printf '{"error":{"code":"agent_not_found"}}\n' >&2
+      exit 1
+    fi ;;
+  *) : ;;
+esac
+exit 0
+SH
+  chmod +x "$fb/herdr"
+  printf '%s\n' "$fb"
+}
+
+# make_fake_reader: a stand-in for bin/backends/herdr-eventwait.py. It ignores
+# the socket, streams the TAB-separated lines in $FM_FAKE_READER_LINES to stdout
+# (one projected event per line: pane_id\tworkspace_id\tagent_status\tagent),
+# then exits $FM_FAKE_READER_EXIT (default 0). A non-zero exit with no lines
+# models a connect/subscribe failure.
+make_fake_reader() {  # <dir> -> echoes reader path
+  local dir=$1 path="$1/fake-reader.sh"
+  cat > "$path" <<'SH'
+#!/usr/bin/env bash
+set -u
+# argv: <sock> <timeout> <pane...> - ignored; behavior is env-driven.
+if [ -n "${FM_FAKE_READER_READY_FILE:-}" ]; then
+  : > "$FM_FAKE_READER_READY_FILE"
+fi
+printf '%s\n' "${FM_FAKE_READER_ACK:-@subscribed}"
+if [ -n "${FM_FAKE_READER_LINES:-}" ] && [ -f "$FM_FAKE_READER_LINES" ]; then
+  cat "$FM_FAKE_READER_LINES"
+fi
+exit "${FM_FAKE_READER_EXIT:-0}"
+SH
+  chmod +x "$path"
+  printf '%s\n' "$path"
+}
+
+set_fake_agent() {  # <agent-dir> <window-or-pane> <status>
+  local dir=$1 target=$2 status=$3 key
+  key=$(printf '%s' "$target" | tr ':/.' '___')
+  mkdir -p "$dir"
+  printf '%s' "$status" > "$dir/$key.status"
+}
+
+test_normalize_event_leaves_from_empty() {
+  local rec
+  rec=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_normalize_event wG:pQ wG blocked claude' "$ROOT")
+  [ "$(bash -c '. "$0/bin/fm-transition-lib.sh"; fm_transition_pane_id "$1"' "$ROOT" "$rec")" = "wG:pQ" ] \
+    || fail "normalize_event pane_id wrong: $rec"
+  [ "$(bash -c '. "$0/bin/fm-transition-lib.sh"; fm_transition_from_status "$1"' "$ROOT" "$rec")" = "" ] \
+    || fail "normalize_event should leave from_status empty (herdr carries no previous status): $rec"
+  [ "$(bash -c '. "$0/bin/fm-transition-lib.sh"; fm_transition_to_status "$1"' "$ROOT" "$rec")" = "blocked" ] \
+    || fail "normalize_event to_status wrong: $rec"
+  pass "fm_backend_herdr_normalize_event routes through the shared record with an empty from_status"
+}
+
+test_escalation_marker_keys_like_watcher() {
+  local m
+  m=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_escalation_marker /st default:wG:pQ' "$ROOT")
+  [ "$m" = "/st/.herdr-escalated-default_wG_pQ" ] \
+    || fail "escalation marker key must match the watcher's tr ':/.' '___' scheme, got '$m'"
+  pass "fm_backend_herdr_escalation_marker keys the dedupe marker exactly like the watcher's .stale-<key>"
+}
+
+test_apply_transition_blocked_requires_commit_to_dedupe() {
+  local dir state rec out rc marker
+  dir="$TMP_ROOT/apply-blocked"; state="$dir/state"; mkdir -p "$state"
+  rec=$(bash -c '. "$0/bin/fm-transition-lib.sh"; fm_transition_record wG:pQ wG "" blocked claude' "$ROOT")
+  marker="$state/.herdr-escalated-default_wG_pQ"
+  out=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_apply_transition "$1" "$2" "$3"' "$ROOT" "$state" default "$rec"); rc=$?
+  [ "$rc" = 0 ] || fail "a fresh blocked edge must return 0 (actionable), got $rc"
+  case "$out" in *blocked*) : ;; *) fail "apply_transition should print the record on a fresh actionable edge, got '$out'" ;; esac
+  [ ! -e "$marker" ] || fail "detecting a blocked edge must not commit its marker before durable handling"
+  bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_commit_transition "$1" "$2" "$3"' "$ROOT" "$state" default "$rec"
+  [ -e "$marker" ] || fail "commit_transition must set the marker after the caller handles the edge"
+  # Second identical blocked edge (marker present) must NOT re-fire.
+  out=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_apply_transition "$1" "$2" "$3"' "$ROOT" "$state" default "$rec"); rc=$?
+  [ "$rc" = 1 ] || fail "an already-marked blocked pane must return 1 (deduped), got $rc"
+  [ -z "$out" ] || fail "an already-marked blocked pane must print nothing, got '$out'"
+  pass "fm_backend_herdr_apply_transition: blocked dedupe starts only after explicit commit"
+}
+
+test_apply_transition_working_clears_marker() {
+  local dir state blocked working marker rc
+  dir="$TMP_ROOT/apply-working"; state="$dir/state"; mkdir -p "$state"
+  marker="$state/.herdr-escalated-default_wG_pQ"
+  blocked=$(bash -c '. "$0/bin/fm-transition-lib.sh"; fm_transition_record wG:pQ wG "" blocked claude' "$ROOT")
+  working=$(bash -c '. "$0/bin/fm-transition-lib.sh"; fm_transition_record wG:pQ wG "" working claude' "$ROOT")
+  bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_commit_transition "$1" "$2" "$3"' "$ROOT" "$state" default "$blocked"
+  [ -e "$marker" ] || fail "setup: committed blocked edge should have set the marker"
+  bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_apply_transition "$1" "$2" "$3"' "$ROOT" "$state" default "$working"; rc=$?
+  [ "$rc" = 1 ] || fail "a working (absorb) edge must return 1 (no wake), got $rc"
+  [ ! -e "$marker" ] || fail "a working edge must CLEAR the escalation marker so a later re-block re-fires"
+  # A re-block after the clear must fire again.
+  bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_apply_transition "$1" "$2" "$3"' "$ROOT" "$state" default "$blocked" >/dev/null; rc=$?
+  [ "$rc" = 0 ] || fail "a re-block after a working clear must re-fire (return 0), got $rc"
+  pass "fm_backend_herdr_apply_transition: a working edge clears the marker so the next ->blocked re-escalates"
+}
+
+test_clear_transition_removes_task_marker() {
+  local dir state marker
+  dir="$TMP_ROOT/clear-transition"; state="$dir/state"; mkdir -p "$state"
+  marker="$state/.herdr-escalated-default_wG_pQ"
+  : > "$marker"
+  bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_clear_transition "$1" "$2"' "$ROOT" "$state" default:wG:pQ
+  [ ! -e "$marker" ] || fail "clear_transition must remove the marker owned by a torn-down pane"
+  pass "fm_backend_herdr_clear_transition removes task-owned dedupe state"
+}
+
+test_apply_transition_defer_and_fallback_are_noops() {
+  local dir state marker rc s
+  dir="$TMP_ROOT/apply-defer"; state="$dir/state"; mkdir -p "$state"
+  marker="$state/.herdr-escalated-default_wG_pQ"
+  for s in idle "done" unknown ""; do
+    local rec
+    rec=$(bash -c '. "$0/bin/fm-transition-lib.sh"; fm_transition_record wG:pQ wG "" "$1" claude' "$ROOT" "$s")
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_apply_transition "$1" "$2" "$3"' "$ROOT" "$state" default "$rec"; rc=$?
+    [ "$rc" = 1 ] || fail "defer/fallback status '$s' must return 1 (no fast action), got $rc"
+    [ ! -e "$marker" ] || fail "defer/fallback status '$s' must not touch the escalation marker"
+  done
+  pass "fm_backend_herdr_apply_transition: idle/done (defer) and unknown/empty (fallback) take no fast action"
+}
+
+test_wait_transition_no_panes_returns_2() {
+  local rc
+  bash -c '. "$0/bin/backends/herdr.sh"; FM_BACKEND_HERDR_EVENTS_FORCE=1 fm_backend_herdr_wait_transition default 1 /tmp/st' "$ROOT"; rc=$?
+  [ "$rc" = 2 ] || fail "wait_transition with no pane windows must return 2 (fall back to sleep), got $rc"
+  pass "fm_backend_herdr_wait_transition: a home with no herdr panes falls back to polling (rc 2)"
+}
+
+test_wait_transition_not_capable_returns_2() {
+  local dir state fb rc
+  dir="$TMP_ROOT/wt-incapable"; state="$dir/state"; mkdir -p "$state"
+  fb=$(make_herdr_eventfake "$dir")
+  rc=$(PATH="$fb:$PATH" FM_BACKEND_HERDR_EVENTS_FORCE=0 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_wait_transition sess 1 "$1" sess:wG:pQ; echo $?' "$ROOT" "$state" | tail -1)
+  [ "$rc" = 2 ] || fail "wait_transition must return 2 when events are below capability (fail closed to poll), got $rc"
+  pass "fm_backend_herdr_wait_transition: below-capability protocol/schema falls back to polling (rc 2)"
+}
+
+test_wait_transition_reconcile_blocked_returns_record() {
+  local dir state agent temp fb reader lines out rc marker
+  dir="$TMP_ROOT/wt-reconcile"; state="$dir/state"; agent="$dir/agents"; temp="$dir/temp"; mkdir -p "$state" "$agent" "$temp"
+  fb=$(make_herdr_eventfake "$dir")
+  set_fake_agent "$agent" "wG:pQ" blocked
+  reader=$(make_fake_reader "$dir"); lines="$dir/lines"; : > "$lines"
+  marker="$state/.herdr-escalated-sess_wG_pQ"
+  out=$(PATH="$fb:$PATH" TMPDIR="$temp" FM_BACKEND_HERDR_EVENTS_FORCE=1 FM_FAKE_SESSION_NAME=sess FM_FAKE_SOCKET="$dir/x.sock" FM_FAKE_AGENT_DIR="$agent" \
+    FM_BACKEND_HERDR_EVENT_READER="$reader" FM_FAKE_READER_LINES="$lines" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_wait_transition sess 1 "$1" sess:wG:pQ' "$ROOT" "$state"); rc=$?
+  [ "$rc" = 0 ] || fail "reconcile of an already-blocked pane must return 0, got $rc"
+  case "$out" in *blocked*) : ;; *) fail "reconcile must print the blocked record, got '$out'" ;; esac
+  [ ! -e "$marker" ] || fail "reconcile must not mark a blocked pane before the caller durably handles it"
+  [ -z "$(find "$temp" -mindepth 1 -print -quit)" ] || fail "actionable reconciliation must remove its private FIFO directory"
+  pass "fm_backend_herdr_wait_transition: reconnect level-reconcile returns an uncommitted blocked pane"
+}
+
+test_wait_transition_subscribes_before_reconcile() {
+  local dir state agent fb reader lines ready rc
+  dir="$TMP_ROOT/wt-subscribe-first"; state="$dir/state"; agent="$dir/agents"; mkdir -p "$state" "$agent"
+  fb=$(make_herdr_eventfake "$dir")
+  set_fake_agent "$agent" "wG:pQ" idle
+  reader=$(make_fake_reader "$dir"); lines="$dir/lines"; ready="$dir/subscribed"; : > "$lines"
+  rc=$(PATH="$fb:$PATH" FM_BACKEND_HERDR_EVENTS_FORCE=1 FM_FAKE_SESSION_NAME=sess FM_FAKE_SOCKET="$dir/x.sock" FM_FAKE_AGENT_DIR="$agent" \
+    FM_BACKEND_HERDR_EVENT_READER="$reader" FM_FAKE_READER_LINES="$lines" FM_FAKE_READER_READY_FILE="$ready" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_wait_transition sess 1 "$1" sess:wG:pQ; echo $?' "$ROOT" "$state" | tail -1)
+  [ "$rc" = 1 ] || fail "subscription must be acknowledged before reconciliation begins, got $rc"
+  pass "fm_backend_herdr_wait_transition: subscribes before reconnect level-reconcile"
+}
+
+test_wait_transition_reconcile_dedupes_when_marked() {
+  local dir state agent fb rc
+  dir="$TMP_ROOT/wt-reconcile-dedupe"; state="$dir/state"; agent="$dir/agents"; mkdir -p "$state" "$agent"
+  fb=$(make_herdr_eventfake "$dir")
+  set_fake_agent "$agent" "wG:pQ" blocked
+  # Pre-mark: this blocked was already escalated.
+  : > "$state/.herdr-escalated-sess_wG_pQ"
+  # No stream events, reader exits 0 -> a clean timeout (rc 1), NOT a re-fire.
+  local reader lines
+  reader=$(make_fake_reader "$dir"); lines="$dir/lines"; : > "$lines"
+  rc=$(PATH="$fb:$PATH" FM_BACKEND_HERDR_EVENTS_FORCE=1 FM_FAKE_SESSION_NAME=sess FM_FAKE_SOCKET="$dir/x.sock" FM_FAKE_AGENT_DIR="$agent" \
+    FM_BACKEND_HERDR_EVENT_READER="$reader" FM_FAKE_READER_LINES="$lines" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_wait_transition sess 1 "$1" sess:wG:pQ; echo $?' "$ROOT" "$state" | tail -1)
+  [ "$rc" = 1 ] || fail "an already-marked blocked pane must not re-fire on reconcile (expect clean timeout rc 1), got $rc"
+  pass "fm_backend_herdr_wait_transition: a still-blocked, already-escalated pane is not re-delivered on reconnect"
+}
+
+test_wait_transition_stream_blocked_returns_record() {
+  local dir state agent fb reader lines out rc marker
+  dir="$TMP_ROOT/wt-stream-blocked"; state="$dir/state"; agent="$dir/agents"; mkdir -p "$state" "$agent"
+  fb=$(make_herdr_eventfake "$dir")
+  set_fake_agent "$agent" "wG:pQ" idle   # reconcile sees idle -> proceeds to stream
+  reader=$(make_fake_reader "$dir"); lines="$dir/lines"
+  printf 'wG:pQ\t\tblocked\tclaude\n' > "$lines"
+  marker="$state/.herdr-escalated-sess_wG_pQ"
+  out=$(PATH="$fb:$PATH" FM_BACKEND_HERDR_EVENTS_FORCE=1 FM_FAKE_SESSION_NAME=sess FM_FAKE_SOCKET="$dir/x.sock" FM_FAKE_AGENT_DIR="$agent" \
+    FM_BACKEND_HERDR_EVENT_READER="$reader" FM_FAKE_READER_LINES="$lines" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_wait_transition sess 2 "$1" sess:wG:pQ' "$ROOT" "$state"); rc=$?
+  [ "$rc" = 0 ] || fail "a streamed blocked edge must return 0, got $rc"
+  case "$out" in *blocked*) : ;; *) fail "a streamed blocked edge must print the record, got '$out'" ;; esac
+  [ ! -e "$marker" ] || fail "a streamed blocked edge must remain uncommitted until durable handling"
+  pass "fm_backend_herdr_wait_transition: a streamed ->blocked edge returns the record sub-poll"
+}
+
+test_wait_transition_stream_absorb_clears_then_timeout() {
+  local dir state agent fb reader lines rc marker
+  dir="$TMP_ROOT/wt-stream-absorb"; state="$dir/state"; agent="$dir/agents"; mkdir -p "$state" "$agent"
+  fb=$(make_herdr_eventfake "$dir")
+  set_fake_agent "$agent" "wG:pQ" idle
+  : > "$state/.herdr-escalated-sess_wG_pQ"   # previously escalated
+  reader=$(make_fake_reader "$dir"); lines="$dir/lines"
+  marker="$state/.herdr-escalated-sess_wG_pQ"
+  # Stream a working edge (absorb) then an idle edge (defer). Neither is a fresh
+  # actionable edge, so the wait ends as a clean timeout (rc 1) and the marker
+  # is cleared by the working edge.
+  printf 'wG:pQ\t\tworking\tclaude\nwG:pQ\t\tidle\tclaude\n' > "$lines"
+  rc=$(PATH="$fb:$PATH" FM_BACKEND_HERDR_EVENTS_FORCE=1 FM_FAKE_SESSION_NAME=sess FM_FAKE_SOCKET="$dir/x.sock" FM_FAKE_AGENT_DIR="$agent" \
+    FM_BACKEND_HERDR_EVENT_READER="$reader" FM_FAKE_READER_LINES="$lines" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_wait_transition sess 2 "$1" sess:wG:pQ; echo $?' "$ROOT" "$state" | tail -1)
+  [ "$rc" = 1 ] || fail "a stream of only working/idle edges must end as a clean timeout (rc 1), got $rc"
+  [ ! -e "$marker" ] || fail "a streamed working edge must clear the escalation marker"
+  pass "fm_backend_herdr_wait_transition: streamed working clears the marker, idle/done are deferred (clean timeout)"
+}
+
+test_wait_transition_reader_failure_returns_2() {
+  local dir state agent temp fb reader lines rc
+  dir="$TMP_ROOT/wt-reader-fail"; state="$dir/state"; agent="$dir/agents"; temp="$dir/temp"; mkdir -p "$state" "$agent" "$temp"
+  fb=$(make_herdr_eventfake "$dir")
+  set_fake_agent "$agent" "wG:pQ" idle
+  reader=$(make_fake_reader "$dir"); lines="$dir/lines"; : > "$lines"
+  rc=$(PATH="$fb:$PATH" TMPDIR="$temp" FM_BACKEND_HERDR_EVENTS_FORCE=1 FM_FAKE_SESSION_NAME=sess FM_FAKE_SOCKET="$dir/x.sock" FM_FAKE_AGENT_DIR="$agent" \
+    FM_BACKEND_HERDR_EVENT_READER="$reader" FM_FAKE_READER_LINES="$lines" FM_FAKE_READER_EXIT=2 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_wait_transition sess 1 "$1" sess:wG:pQ; echo $?' "$ROOT" "$state" | tail -1)
+  [ "$rc" = 2 ] || fail "a reader connect/subscribe failure must return 2 (fall back to poll), got $rc"
+  [ -z "$(find "$temp" -mindepth 1 -print -quit)" ] || fail "reader failure must remove its private FIFO directory"
+  pass "fm_backend_herdr_wait_transition: a reader/subscribe failure falls back to polling (rc 2)"
+}
+
+test_wait_transition_bad_ack_returns_2_and_cleans_up() {
+  local dir state agent temp fb reader lines result rc fd_open
+  dir="$TMP_ROOT/wt-bad-ack"; state="$dir/state"; agent="$dir/agents"; temp="$dir/temp"; mkdir -p "$state" "$agent" "$temp"
+  fb=$(make_herdr_eventfake "$dir")
+  set_fake_agent "$agent" "wG:pQ" idle
+  reader=$(make_fake_reader "$dir"); lines="$dir/lines"; : > "$lines"
+  result=$(PATH="$fb:$PATH" TMPDIR="$temp" FM_BACKEND_HERDR_EVENTS_FORCE=1 FM_FAKE_SESSION_NAME=sess FM_FAKE_SOCKET="$dir/x.sock" FM_FAKE_AGENT_DIR="$agent" \
+    FM_BACKEND_HERDR_EVENT_READER="$reader" FM_FAKE_READER_LINES="$lines" FM_FAKE_READER_ACK=invalid \
+    /bin/bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_wait_transition sess 1 "$1" sess:wG:pQ; rc=$?; [ -e /dev/fd/9 ] && fd_open=yes || fd_open=no; printf "%s %s\n" "$rc" "$fd_open"' "$ROOT" "$state")
+  rc=${result%% *}; fd_open=${result#* }
+  [ "$rc" = 2 ] || fail "an invalid subscription acknowledgement must return 2, got $rc"
+  [ "$fd_open" = no ] || fail "an invalid subscription acknowledgement must close fixed fd 9"
+  [ -z "$(find "$temp" -mindepth 1 -print -quit)" ] || fail "an invalid subscription acknowledgement must remove its private FIFO directory"
+  pass "fm_backend_herdr_wait_transition: Bash 3.2-safe bad-ack path closes fd 9 and removes its FIFO"
+}
+
+test_wait_transition_clean_timeout_returns_1() {
+  local dir state agent temp fb reader lines result rc fd_open
+  dir="$TMP_ROOT/wt-timeout"; state="$dir/state"; agent="$dir/agents"; temp="$dir/temp"; mkdir -p "$state" "$agent" "$temp"
+  fb=$(make_herdr_eventfake "$dir")
+  set_fake_agent "$agent" "wG:pQ" idle
+  reader=$(make_fake_reader "$dir"); lines="$dir/lines"; : > "$lines"   # no events, reader exits 0
+  result=$(PATH="$fb:$PATH" TMPDIR="$temp" FM_BACKEND_HERDR_EVENTS_FORCE=1 FM_FAKE_SESSION_NAME=sess FM_FAKE_SOCKET="$dir/x.sock" FM_FAKE_AGENT_DIR="$agent" \
+    FM_BACKEND_HERDR_EVENT_READER="$reader" FM_FAKE_READER_LINES="$lines" \
+    /bin/bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_wait_transition sess 1 "$1" sess:wG:pQ; rc=$?; [ -e /dev/fd/9 ] && fd_open=yes || fd_open=no; printf "%s %s\n" "$rc" "$fd_open"' "$ROOT" "$state")
+  rc=${result%% *}; fd_open=${result#* }
+  [ "$rc" = 1 ] || fail "a clean full-budget wait with no actionable edge must return 1, got $rc"
+  [ "$fd_open" = no ] || fail "a clean timeout must close fixed fd 9"
+  [ -z "$(find "$temp" -mindepth 1 -print -quit)" ] || fail "a clean timeout must remove its private FIFO directory"
+  pass "fm_backend_herdr_wait_transition: stock macOS Bash clean timeout closes fd 9 and returns 1"
+}
+
 # shellcheck source=bin/fm-backend.sh
 . "$ROOT/bin/fm-backend.sh"
 
@@ -1714,6 +2089,10 @@ test_composer_state_real_text_is_pending
 test_composer_state_popup_placeholder_fill_is_pending
 test_composer_state_unknown_on_capture_failure
 test_composer_state_unknown_when_no_composer_row_found
+test_composer_state_pi_separator_idle_is_empty
+test_composer_state_pi_separator_real_text_is_pending
+test_composer_state_pi_incomplete_separator_below_stale_generic_is_unknown
+test_composer_state_pi_separator_requires_safe_native_identity
 test_composer_state_claude_unbordered_prompt_is_empty
 test_composer_state_claude_unbordered_prompt_is_pending
 test_composer_state_bare_prompt_below_stale_bordered_banner_wins
@@ -1746,3 +2125,19 @@ test_dispatch_routes_herdr_backend
 test_dispatch_busy_state_unknown_for_tmux
 test_dispatch_composer_state_routes_by_backend
 test_scripts_route_explicit_target_through_meta_backend
+test_normalize_event_leaves_from_empty
+test_escalation_marker_keys_like_watcher
+test_apply_transition_blocked_requires_commit_to_dedupe
+test_apply_transition_working_clears_marker
+test_clear_transition_removes_task_marker
+test_apply_transition_defer_and_fallback_are_noops
+test_wait_transition_no_panes_returns_2
+test_wait_transition_not_capable_returns_2
+test_wait_transition_reconcile_blocked_returns_record
+test_wait_transition_subscribes_before_reconcile
+test_wait_transition_reconcile_dedupes_when_marked
+test_wait_transition_stream_blocked_returns_record
+test_wait_transition_stream_absorb_clears_then_timeout
+test_wait_transition_reader_failure_returns_2
+test_wait_transition_bad_ack_returns_2_and_cleans_up
+test_wait_transition_clean_timeout_returns_1

@@ -11,11 +11,23 @@
 #   fmx_load_config            - resolve FMX_TOKEN, FMX_RELAY, FMX_DRY, FMX_MAX,
 #                                and FMX_THREAD_MAX (env wins over .env)
 #   fmx_auth_header_file       - write the bearer header to a 0600 temp file
-#   fmx_request_inbox_context <state> <request_id> - infer reply platform/limit
-#                                from a stashed mention payload
+#   fmx_extract_reply_context <json-file> - the single owner of reply-context
+#                                extraction: infer {platform, reply_max_chars}
+#                                from any mention/relay payload file
+#   fmx_request_inbox_context <state> <request_id> - reply context from a stashed
+#                                mention payload (wrapper over the extractor)
 #   fmx_request_relay_context <request_id> - resolve reply platform/limit
 #                                AUTHORITATIVELY from the relay by request_id when
 #                                no local inbox payload survives
+#   fmx_context_registry_set <state> <request_id> <platform> <reply-max> [refresh]
+#                                - persist the durable per-request reply context;
+#                                refresh=1 resets its retention timestamp
+#   fmx_context_registry_prune <state> - remove records older than seven days
+#   fmx_context_registry_get <state> <request_id> - read the durable per-request
+#                                reply context, or the empty shape when absent
+#   fmx_context_registry_clear <state> <request_id> - drop the durable record
+#   fmx_resolve_reply_context <state> <request_id> <allow-relay> - resolve reply
+#                                context through registry -> inbox -> relay
 #   fmx_reply_limit_for_platform <platform> <explicit-limit> - pick split budget
 #   fmx_split_thread <max> <cap> - split a reply (stdin) into a numbered thread
 #   fmx_image_payload_file <path> <client> <payload-file> - encode one image
@@ -107,15 +119,17 @@ fmx_load_config() {
   FMX_THREAD_MAX=$threadraw
 }
 
-# fmx_request_inbox_context <state> <request_id>: inspect a stashed mention
-# payload and print {"platform": "...", "reply_max_chars": "..."}.
-# Explicit relay-provided platform/limit fields win. When absent, the legacy
-# tweet_id shape is used: "discord:<channel>:<message>" means Discord, while a
-# numeric id means X. Empty fields mean unknown, and callers must default safely.
-fmx_request_inbox_context() {
-  local state=$1 rid=$2 inbox
-  inbox="$state/x-inbox/$rid.json"
-  if [ ! -f "$inbox" ]; then
+# fmx_extract_reply_context <json-file>: the SINGLE owner of reply-context
+# extraction. Print {"platform":"...","reply_max_chars":"..."} inferred from a
+# mention/relay payload file. Explicit relay-provided platform/limit fields win;
+# absent those, the legacy tweet_id shape is used ("discord:<channel>:<message>"
+# means Discord, a numeric id means X). Empty fields mean unknown, and callers
+# must default safely. A missing file yields the empty shape. The inbox, relay,
+# and poll paths all feed their payload through this one function so platform
+# inference can never drift between them.
+fmx_extract_reply_context() {
+  local file=$1
+  if [ ! -f "$file" ]; then
     printf '{"platform":"","reply_max_chars":""}\n'
     return 0
   fi
@@ -141,16 +155,22 @@ fmx_request_inbox_context() {
           else "" end),
         reply_max_chars: first_limit([.reply_max_chars, .reply_max_characters, .message_max_chars, .message_limit, .max_chars])
       }
-  ' "$inbox"
+  ' "$file"
+}
+
+# fmx_request_inbox_context <state> <request_id>: reply context from a stashed
+# mention payload (state/x-inbox/<request_id>.json), or the empty shape when the
+# inbox file is absent. Thin wrapper over fmx_extract_reply_context.
+fmx_request_inbox_context() {
+  local state=$1 rid=$2
+  fmx_extract_reply_context "$state/x-inbox/$rid.json"
 }
 
 # fmx_request_relay_context <request_id>: resolve the reply platform/limit
-# AUTHORITATIVELY from the relay by request_id, for when no local inbox payload
-# survives - e.g. the task is linked to its mention AFTER the inbox file was
-# drained (posting the ack reply removes it), which otherwise strands the link
-# with no platform and silently defaults follow-ups to the X 280-char budget.
-# The request_id is the durable key the relay still holds within the follow-up
-# window, so this makes the local ordering of link-vs-cleanup irrelevant.
+# AUTHORITATIVELY from the relay by request_id when local per-request registry or
+# inbox context is missing an axis. The request_id is the durable key the relay
+# still holds within the follow-up window, so live follow-ups can recover missing
+# context without using a local platform or budget default.
 #
 # POSTs {request_id} to $RELAY/connector/request-context and prints
 # {"platform":"...","reply_max_chars":"..."} in the SAME shape as
@@ -180,24 +200,9 @@ fmx_request_relay_context() {
     2[0-9][0-9]) ;;
     *) rm -f "$body_file"; printf '%s\n' "$empty"; return 1 ;;
   esac
-  ctx=$(jq -c '
-    def norm_platform:
-      tostring | ascii_downcase
-      | if . == "discord" or . == "discordapp" then "discord"
-        elif . == "x" or . == "twitter" then "x"
-        else "" end;
-    def first_string($items):
-      [$items[] | select(type == "string" and length > 0)][0] // "";
-    def first_limit($items):
-      [$items[]
-        | select(type == "number" or type == "string")
-        | tostring
-        | select(test("^[0-9]+$"))][0] // "";
-    {
-      platform: (first_string([.reply_platform, .platform, .target_platform, .source_platform, .provider]) | norm_platform),
-      reply_max_chars: first_limit([.reply_max_chars, .reply_max_characters, .message_max_chars, .message_limit, .max_chars])
-    }
-  ' "$body_file" 2>/dev/null) || ctx=
+  # Same extraction as the inbox path, so a relay-resolved context and an
+  # inbox-resolved one normalize identically.
+  ctx=$(fmx_extract_reply_context "$body_file" 2>/dev/null) || ctx=
   rm -f "$body_file"
   [ -n "$ctx" ] || { printf '%s\n' "$empty"; return 1; }
   # A 200 that resolved neither a platform nor a limit is treated as unresolved so
@@ -207,6 +212,201 @@ fmx_request_relay_context() {
     printf '%s\n' "$empty"; return 1
   fi
   printf '%s\n' "$ctx"
+}
+
+# --- durable per-request reply-context registry (state/x-context/<rid>.json) ---
+#
+# A single x_request per task collides across concurrent public requests routed
+# through one persistent secondmate: linking request B onto a task overwrites
+# request A's recorded platform/budget, so A's later follow-up loses its context.
+# And the inbox payload is drained right after the acknowledgement, so a delayed
+# request-id follow-up has no local platform source at all. This registry is the
+# durable fix: one small JSON per request_id, keyed independently of any task
+# link, written at poll time from the authoritative relay payload. It survives
+# inbox cleanup, process restart, and concurrent requests, so
+# fmx_resolve_reply_context can always recover the ORIGINAL platform/budget for a
+# request without depending on task-link state. Entries are volatile runtime
+# state under state/ and are pruned after the relay's 7-day follow-up window.
+
+fmx_context_registry_mtime() {
+  local file=$1 mtime
+  mtime=$(stat -f '%m' "$file" 2>/dev/null) || mtime=$(stat -c '%Y' "$file" 2>/dev/null) || return 1
+  case "$mtime" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  printf '%s\n' "$mtime"
+}
+
+fmx_context_registry_recorded_at() {
+  local file=$1 now=${2:-} recorded_at
+  recorded_at=$(jq -r '
+    .recorded_at
+    | if type == "number" and floor == . and . >= 0 then tostring
+      elif type == "string" and test("^[0-9]+$") then .
+      else "" end
+  ' "$file" 2>/dev/null) || recorded_at=
+  case "$recorded_at" in
+    ''|*[!0-9]*) recorded_at= ;;
+  esac
+  [ "${#recorded_at}" -le 18 ] || recorded_at=
+  if [ -n "$recorded_at" ] && [ -n "$now" ] && [ "$recorded_at" -gt "$now" ]; then
+    recorded_at=
+  fi
+  if [ -z "$recorded_at" ]; then
+    recorded_at=$(fmx_context_registry_mtime "$file") || return 1
+    if [ -n "$now" ] && [ "$recorded_at" -gt "$now" ]; then
+      return 1
+    fi
+  fi
+  printf '%s\n' "$recorded_at"
+}
+
+fmx_context_registry_prune() {
+  local state=$1 dir now max_age file recorded_at age
+  dir="$state/x-context"
+  [ -d "$dir" ] || return 0
+  now=${FMX_NOW_OVERRIDE:-$(date +%s)}
+  case "$now" in
+    ''|*[!0-9]*) return 0 ;;
+  esac
+  [ "${#now}" -le 18 ] || return 0
+  max_age=${FMX_FOLLOWUP_MAX_AGE_SECS:-604800}
+  case "$max_age" in
+    ''|*[!0-9]*) max_age=604800 ;;
+  esac
+  [ "${#max_age}" -le 18 ] || max_age=604800
+  [ "$max_age" -le 604800 ] || max_age=604800
+  while IFS= read -r -d '' file; do
+    if ! recorded_at=$(fmx_context_registry_recorded_at "$file" "$now"); then
+      rm -f -- "$file" 2>/dev/null || true
+      continue
+    fi
+    age=$((10#$now - 10#$recorded_at))
+    if [ "$age" -gt "$max_age" ]; then
+      rm -f -- "$file" 2>/dev/null || true
+    fi
+  done < <(find "$dir" -type f -name '*.json' -print0 2>/dev/null)
+  return 0
+}
+
+# fmx_context_registry_set <state> <request_id> <platform> <reply-max> [refresh]:
+# persist the durable per-request reply context atomically. Normalizes platform
+# (twitter -> x, anything unrecognized -> empty) and requires a numeric budget.
+# A refresh value of 1 resets the retention timestamp; ordinary writes preserve
+# it. A no-op (success) when neither a platform nor a budget is known, so callers
+# never write an empty, useless record. Returns non-zero only on invalid input or
+# a write failure; callers treat the write as best-effort.
+fmx_context_registry_set() {
+  local state=$1 rid=$2 platform=${3:-} reply_max=${4:-} refresh=${5:-0} dir file tmp now recorded_at
+  case "$rid" in
+    ''|.*|*[!A-Za-z0-9._-]*) return 1 ;;
+  esac
+  case "$platform" in
+    discord|x) ;;
+    twitter) platform=x ;;
+    *) platform= ;;
+  esac
+  case "$reply_max" in
+    ''|*[!0-9]*) reply_max= ;;
+  esac
+  case "$refresh" in
+    0|1) ;;
+    *) return 1 ;;
+  esac
+  if [ -z "$platform" ] && [ -z "$reply_max" ]; then
+    return 0
+  fi
+  dir="$state/x-context"
+  mkdir -p "$dir" 2>/dev/null || return 1
+  fmx_context_registry_prune "$state"
+  now=${FMX_NOW_OVERRIDE:-$(date +%s)}
+  case "$now" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  [ "${#now}" -le 18 ] || return 1
+  file="$dir/$rid.json"
+  recorded_at=
+  if [ "$refresh" = 0 ] && [ -f "$file" ]; then
+    recorded_at=$(fmx_context_registry_recorded_at "$file" "$now") || recorded_at=
+  fi
+  if [ -z "$recorded_at" ]; then
+    recorded_at=$now
+  fi
+  tmp=$(mktemp "$dir/.${rid}.fm-x.XXXXXX" 2>/dev/null) || return 1
+  if jq -cn --arg rid "$rid" --arg platform "$platform" --arg max "$reply_max" \
+      --argjson recorded_at "$recorded_at" \
+      '{request_id:$rid, platform:$platform, reply_max_chars:$max, recorded_at:$recorded_at}' > "$tmp" 2>/dev/null; then
+    mv -f "$tmp" "$file" 2>/dev/null || { rm -f "$tmp"; return 1; }
+  else
+    rm -f "$tmp"; return 1
+  fi
+}
+
+# fmx_context_registry_get <state> <request_id>: print the durable per-request
+# reply context as {"platform":"...","reply_max_chars":"..."} (the same shape as
+# the inbox and relay extractors), or the empty shape when no record exists.
+fmx_context_registry_get() {
+  local state=$1 rid=$2 file
+  case "$rid" in
+    ''|.*|*[!A-Za-z0-9._-]*) printf '{"platform":"","reply_max_chars":""}\n'; return 0 ;;
+  esac
+  fmx_context_registry_prune "$state"
+  file="$state/x-context/$rid.json"
+  if [ ! -f "$file" ]; then
+    printf '{"platform":"","reply_max_chars":""}\n'
+    return 0
+  fi
+  jq -c '{platform:(.platform // ""), reply_max_chars:(.reply_max_chars // "")}' "$file" 2>/dev/null \
+    || printf '{"platform":"","reply_max_chars":""}\n'
+}
+
+# fmx_context_registry_clear <state> <request_id>: drop the durable record.
+# Idempotent and best-effort; a dismiss (no follow-up will ever come) uses it so
+# a skipped mention leaves no stray context behind.
+fmx_context_registry_clear() {
+  local state=$1 rid=$2
+  case "$rid" in
+    ''|.*|*[!A-Za-z0-9._-]*) return 0 ;;
+  esac
+  rm -f "$state/x-context/$rid.json" 2>/dev/null || true
+  return 0
+}
+
+# fmx_resolve_reply_context <state> <request_id> <allow-relay>: resolve the reply
+# platform/budget for a request through the durable sources, in order:
+#   1. the per-request context registry (durable, survives inbox cleanup, restart,
+#      and concurrent requests - the primary source after this fix);
+#   2. the still-present inbox payload;
+#   3. when <allow-relay> is 1, an AUTHORITATIVE relay lookup by request_id.
+# Prints {"platform":"...","reply_max_chars":"..."}; each axis is filled from
+# the first source that provides it, continuing through later sources until both
+# are present or the sources are exhausted. <allow-relay>
+# must be 0 in dry-run / no-token / no-network contexts; the caller gates it
+# (typically: follow-up + live + token) so the answer path and dry-run stay
+# network-free. Requires fmx_load_config to have run when <allow-relay> is 1.
+fmx_resolve_reply_context() {
+  # Bash local accepts p= and m= as explicit empty assignment arguments.
+  # shellcheck disable=SC1007
+  local state=$1 rid=$2 allow_relay=${3:-0} src ctx source_p source_m p= m=
+  for src in registry inbox relay; do
+    case "$src" in
+      registry) ctx=$(fmx_context_registry_get "$state" "$rid" 2>/dev/null) || ctx= ;;
+      inbox)    ctx=$(fmx_request_inbox_context "$state" "$rid" 2>/dev/null) || ctx= ;;
+      relay)
+        [ "$allow_relay" = 1 ] || continue
+        ctx=$(fmx_request_relay_context "$rid" 2>/dev/null) || ctx=
+        ;;
+    esac
+    [ -n "$ctx" ] || continue
+    source_p=$(printf '%s' "$ctx" | jq -r '.platform // ""' 2>/dev/null) || source_p=
+    source_m=$(printf '%s' "$ctx" | jq -r '.reply_max_chars // ""' 2>/dev/null) || source_m=
+    case "$source_p" in discord|x) [ -n "$p" ] || p=$source_p ;; esac
+    case "$source_m" in ''|*[!0-9]*) ;; *) [ -n "$m" ] || m=$source_m ;; esac
+    [ -n "$p" ] && [ -n "$m" ] && break
+  done
+  jq -cn --arg platform "$p" --arg max "$m" \
+    '{platform:$platform, reply_max_chars:$max}'
+  return 0
 }
 
 # fmx_reply_limit_for_platform <platform> <explicit-limit>: choose the split

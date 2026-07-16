@@ -765,6 +765,10 @@ test_startup_refuses_fallback_login_shell_releases_lock() {
 }
 
 test_marker_detection() {
+  local marker_hex
+  marker_hex=$(printf '%s' "$FM_INJECT_MARK" | od -An -tx1 | tr -d ' \n')
+  [ "$marker_hex" = e281a3 ] \
+    || fail "FM_INJECT_MARK must use terminal-safe U+2063 bytes, got $marker_hex"
   # message_is_injection: marker present -> injection; absent -> real message
   message_is_injection "${FM_INJECT_MARK}Supervisor escalate: done" \
     || fail "marker-prefixed message not detected as injection"

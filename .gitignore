@@ -10,4 +10,6 @@ config/
 .lavish/
 .fm-secondmate-home
 .DS_Store
+__pycache__/
+*.pyc
 .env

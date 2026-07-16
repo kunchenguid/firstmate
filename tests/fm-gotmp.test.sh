@@ -11,6 +11,12 @@
 # the contract lines) and behaviorally (the mkdir + meta-write pattern it uses).
 set -u
 
+# This suite does not source tests/lib.sh, so exempt its teardown subprocess from
+# the gate-lifecycle refusal (bin/fm-gate-refuse-lib.sh) the way lib.sh does for
+# the rest of the suite: the no-mistakes gate runs this suite from a gate worktree,
+# which the guard would otherwise refuse.
+export FM_GATE_REFUSE_BYPASS=1
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SPAWN="$ROOT/bin/fm-spawn.sh"
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
@@ -59,6 +65,10 @@ make_fake_root() {
   # fm-scm-lib.sh: symlink the REAL file (teardown sources it for the SCM/PR-merge
   # seam used by the landed-work check; a newly required sibling, unchanged here).
   ln -s "$ROOT/bin/fm-scm-lib.sh" "$fake/bin/fm-scm-lib.sh"
+  # fm-lock-lib.sh: teardown sources it for the shared lock-staleness proof.
+  ln -s "$ROOT/bin/fm-lock-lib.sh" "$fake/bin/fm-lock-lib.sh"
+  # fm-gate-refuse-lib.sh: teardown sources it before any fleet mutation.
+  ln -s "$ROOT/bin/fm-gate-refuse-lib.sh" "$fake/bin/fm-gate-refuse-lib.sh"
   # fm-guard.sh: stub (teardown calls it with `|| true`).
   cat > "$fake/bin/fm-guard.sh" <<'SH'
 #!/usr/bin/env bash
@@ -71,20 +81,22 @@ SH
 exit 0
 SH
   chmod +x "$fake/bin/fm-fleet-sync.sh"
-  # fm-tasks-axi-lib.sh: stub (teardown sources it). Report not-compatible so
+  # fm-tasks-axi-lib.sh: stub (teardown sources it). Report no backend so
   # backlog_refresh_reminder takes the plain-message path; no tasks-axi here.
   cat > "$fake/bin/fm-tasks-axi-lib.sh" <<'SH'
-fm_tasks_axi_compatible() { return 1; }
+fm_tasks_axi_backend_available() { return 1; }
 SH
-  # Scout meta with a report bypasses landed-work proof; this fixture is scoped
-  # to tasktmp cleanup, not ship teardown safety.
-  printf 'gotmp cleanup report\n' > "$fake/data/$id/report.md"
+  # Ship meta against a nonexistent worktree: there is no work to prove landed, so
+  # teardown reaches the tasktmp cleanup this suite is scoped to. Not kind=scout -
+  # scout teardown now runs the unresolved-decision completion gate, which needs a
+  # compatible tasks-axi and fm-decision-hold.sh; this fixture is scoped to tasktmp
+  # cleanup, not ship teardown safety or the decision-hold contract.
   cat > "$fake/state/$id.meta" <<META
 window=fakeses:fm-$id
 worktree=$TMP_ROOT/nonexistent-worktree-$id
 project=$TMP_ROOT/nonexistent-project-$id
 harness=claude
-kind=scout
+kind=ship
 mode=no-mistakes
 yolo=off
 tasktmp=$tasktmp
@@ -158,6 +170,9 @@ test_teardown_skips_gracefully_without_tasktmp() {
   ln -s "$ROOT/bin/fm-composer-lib.sh" "$fake/bin/fm-composer-lib.sh"
   ln -s "$ROOT/bin/fm-wake-lib.sh" "$fake/bin/fm-wake-lib.sh"
   ln -s "$ROOT/bin/fm-scm-lib.sh" "$fake/bin/fm-scm-lib.sh"
+  ln -s "$ROOT/bin/fm-lock-lib.sh" "$fake/bin/fm-lock-lib.sh"
+  # fm-gate-refuse-lib.sh: teardown sources it before any fleet mutation.
+  ln -s "$ROOT/bin/fm-gate-refuse-lib.sh" "$fake/bin/fm-gate-refuse-lib.sh"
   cat > "$fake/bin/fm-guard.sh" <<'SH'
 #!/usr/bin/env bash
 exit 0
@@ -169,17 +184,19 @@ exit 0
 SH
   chmod +x "$fake/bin/fm-fleet-sync.sh"
   cat > "$fake/bin/fm-tasks-axi-lib.sh" <<'SH'
-fm_tasks_axi_compatible() { return 1; }
+fm_tasks_axi_backend_available() { return 1; }
 SH
-  # Scout meta with a report bypasses landed-work proof; this fixture is scoped
-  # to missing tasktmp backward compatibility, not ship teardown safety.
-  printf 'gotmp cleanup report\n' > "$fake/data/$id/report.md"
+  # Ship meta against a nonexistent worktree: there is no work to prove landed, so
+  # teardown reaches the tasktmp handling this fixture is scoped to. Not kind=scout -
+  # scout teardown now runs the unresolved-decision completion gate, which needs a
+  # compatible tasks-axi and fm-decision-hold.sh; this fixture is scoped to missing
+  # tasktmp backward compatibility, not ship teardown safety.
   cat > "$fake/state/$id.meta" <<META
 window=fakeses:fm-$id
 worktree=$TMP_ROOT/nonexistent-wt-$id
 project=$TMP_ROOT/nonexistent-proj-$id
 harness=claude
-kind=scout
+kind=ship
 mode=no-mistakes
 yolo=off
 META

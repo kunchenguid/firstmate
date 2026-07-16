@@ -38,6 +38,12 @@ set -eu
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 
+# shellcheck source=bin/fm-gate-refuse-lib.sh
+. "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
+# Fail closed before any fleet mutation: a no-mistakes gate agent must never steer
+# a crewmate (see bin/fm-gate-refuse-lib.sh).
+fm_refuse_if_gate_agent
+
 if [ -z "${FM_HOME+x}" ] || [ -z "${FM_HOME:-}" ]; then
   echo "error: FM_HOME is not set; fm-send refuses to resolve targets without an explicit firstmate home" >&2
   exit 1
@@ -175,14 +181,14 @@ shift
 
 fm_backend_validate "$TARGET_BACKEND" || exit 1
 
-# Mark a from-firstmate -> secondmate request. Only a task selector resolved
-# through this home's meta and recording kind=secondmate is marked: the
+# Classify a from-firstmate -> secondmate request. Only a task selector resolved
+# through this home's meta whose authoritative kind is secondmate is marked: the
 # secondmate then routes its reply via the status path (see fm-marker-lib.sh).
 # An explicit backend target (the escape hatch for endpoints outside this home)
 # and any crewmate/scout target are left unmarked, and so is the --key path.
-MARK_PREFIX=""
-if [ -n "$TARGET_SELECTOR" ] && [ -n "$TARGET_META" ] && grep -q '^kind=secondmate$' "$TARGET_META" 2>/dev/null; then
-  MARK_PREFIX="$FM_FROMFIRST_MARK"
+MARK_FROM_FIRSTMATE=0
+if [ -n "$TARGET_SELECTOR" ] && [ -n "$TARGET_META" ] && [ "$(fm_meta_get "$TARGET_META" kind)" = secondmate ]; then
+  MARK_FROM_FIRSTMATE=1
 fi
 
 # Resolve the target's harness from its meta (recorded by fm-spawn), used only to
@@ -203,6 +209,10 @@ if [ "${1:-}" = "--key" ]; then
     exit 1
   fi
 else
+  MESSAGE=$*
+  if [ "$MARK_FROM_FIRSTMATE" = 1 ]; then
+    fm_message_mark_from_firstmate "$MESSAGE" MESSAGE
+  fi
   # Slash commands open a completion popup in some TUIs (verified on codex);
   # submitting too fast selects nothing, so give the popup time to settle before
   # the (retried) Enter. Codex opens the same kind of popup for a `$<skill>`
@@ -222,7 +232,7 @@ else
   sleep_s=${FM_SEND_SLEEP:-0.4}
   # Type once, submit, verify. Lenient: only a positively-confirmed swallow
   # (text still in the composer) is an error; an unreadable pane is assumed sent.
-  if ! verdict=$(fm_backend_send_text_submit "$TARGET_BACKEND" "$T" "$MARK_PREFIX$*" "$retries" "$sleep_s" "$settle" "$EXPECTED_LABEL"); then
+  if ! verdict=$(fm_backend_send_text_submit "$TARGET_BACKEND" "$T" "$MESSAGE" "$retries" "$sleep_s" "$settle" "$EXPECTED_LABEL"); then
     echo "error: text not sent to $T ($TARGET_BACKEND send failed; tried $RESOLUTION_TRIED)" >&2
     exit 1
   fi
