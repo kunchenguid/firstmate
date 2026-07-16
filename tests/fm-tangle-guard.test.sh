@@ -7,7 +7,10 @@
 # is a crewmate branching/committing in the primary instead of its own worktree,
 # stranding the primary on a feature branch. Two guards cover it:
 #   GUARD 1 (prevention) - the brief asserts isolation before its branch step, and
-#            fm-spawn refuses to launch unless the resolved worktree is isolated.
+#            fm-spawn refuses to launch unless the resolved worktree is isolated
+#            AND belongs to the target project (same git common dir - a mere
+#            "git root distinct from the primary" once let a spawn land in
+#            ~/.oh-my-zsh, an unrelated repo; 2026-07-14 incident).
 #   GUARD 2 (detection)  - fm-guard and fm-bootstrap alarm when the primary is on
 #            a feature branch, and stay silent on the default branch or detached.
 # These cases pin: the shared lib's branch classification, the fm-guard banner,
@@ -181,6 +184,7 @@ run_spawn() {
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$pane" TMUX="fake,1,0" \
+    FM_SPAWN_WT_WAIT_SECS=3 \
     PATH="$fakebin:$PATH" \
     "$ROOT/bin/fm-spawn.sh" "$id" "$proj" codex 2>&1
 }
@@ -237,7 +241,18 @@ make_spawn_record_fakebin() {
 set -u
 [ -n "${FM_TMUX_REC:-}" ] && printf 'tmux %s\n' "$*" >> "$FM_TMUX_REC"
 case "$*" in
-  *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
+  *"#{pane_current_path}"*)
+    # FM_FAKE_PANE_SEQ serves one line per query (keeping the last), so a test
+    # can model a pane cwd that moves - e.g. a transient rc-driven cd before
+    # the treehouse subshell settles in the real worktree.
+    if [ -n "${FM_FAKE_PANE_SEQ:-}" ] && [ -s "$FM_FAKE_PANE_SEQ" ]; then
+      head -n 1 "$FM_FAKE_PANE_SEQ"
+      if [ "$(wc -l < "$FM_FAKE_PANE_SEQ")" -gt 1 ]; then
+        tail -n +2 "$FM_FAKE_PANE_SEQ" > "$FM_FAKE_PANE_SEQ.next" && mv "$FM_FAKE_PANE_SEQ.next" "$FM_FAKE_PANE_SEQ"
+      fi
+      exit 0
+    fi
+    printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
 esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
@@ -260,7 +275,8 @@ run_spawn_record() {
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$pane" TMUX="fake,1,0" \
-    FM_TMUX_REC="$rec" \
+    FM_TMUX_REC="$rec" FM_FAKE_PANE_SEQ="${FM_FAKE_PANE_SEQ:-}" \
+    FM_SPAWN_WT_WAIT_SECS=3 \
     PATH="$fakebin:$PATH" \
     "$ROOT/bin/fm-spawn.sh" "$id" "$proj" codex 2>&1
 }
@@ -301,9 +317,81 @@ test_spawn_tmux_window_construction() {
   pass "fm-spawn: appends windows by session-colon, pins the name, and targets the window id"
 }
 
+# --- GUARD 1d: fm-spawn target-repo identity (2026-07-14 incident) -----------
+
+# The old guard accepted ANY git root distinct from the primary checkout: a
+# 3pc-pram spawn once resolved its worktree to ~/.oh-my-zsh (an unrelated repo)
+# and launched an autonomous agent with bypass permissions inside it. The fix
+# asserts the resolved worktree shares the TARGET project's git common dir.
+# These cases pin: the wrong-repo abort for both an unrelated repo's own
+# checkout and its linked worktree, the abort contract (diagnostics with
+# resolved path + expected repo + pool-state hint, window killed, no meta),
+# and the poll's refusal to accept a transient non-target pane cwd when the
+# real worktree settles afterwards.
+test_spawn_wrong_repo_abort() {
+  local home proj unrelated fakebin rec out status
+  home="$TMP_ROOT/wrongrepo-home"
+  mkdir -p "$home/data"
+  proj=$(make_repo "$TMP_ROOT/wrongrepo-proj")
+  # Stands in for ~/.oh-my-zsh: a healthy unrelated repo on its own branch.
+  unrelated=$(make_repo "$TMP_ROOT/wrongrepo-unrelated")
+  git -C "$unrelated" worktree add -q --detach "$TMP_ROOT/wrongrepo-unrelated-wt" >/dev/null 2>&1
+  fakebin=$(make_spawn_record_fakebin "$TMP_ROOT/wrongrepo-fake")
+  rec="$TMP_ROOT/wrongrepo-rec.log"
+
+  # An unrelated repo's own checkout is a git root distinct from the primary -
+  # exactly what the old check wrongly accepted.
+  : > "$rec"
+  out=$(run_spawn_record "$home" wrong-repo-hh8 "$proj" "$unrelated" "$fakebin" "$rec"); status=$?
+  expect_code 1 "$status" "spawn resolving to an unrelated repo should abort"
+  assert_contains "$out" "belongs to a DIFFERENT repo" "wrong-repo abort lacked the repo-identity reason"
+  # Substring-match on the repo dir names: $TMPDIR's raw form can differ from
+  # the normalized paths the diagnostics print (macOS /var vs /private/var).
+  assert_contains "$out" "wrongrepo-unrelated" "wrong-repo abort did not print the resolved path"
+  assert_contains "$out" "wrongrepo-proj" "wrong-repo abort did not print the expected project"
+  assert_contains "$out" "treehouse-state.json" "wrong-repo abort did not hint at the pool state"
+  assert_absent "$home/state/wrong-repo-hh8.meta" "wrong-repo abort must not record meta"
+  assert_grep "kill-window" "$rec" "wrong-repo abort must kill the just-created window"
+
+  # A linked worktree OF the unrelated repo is still the wrong repo.
+  : > "$rec"
+  out=$(run_spawn_record "$home" wrong-repo-wt-jj9 "$proj" "$TMP_ROOT/wrongrepo-unrelated-wt" "$fakebin" "$rec"); status=$?
+  expect_code 1 "$status" "spawn resolving to an unrelated repo's worktree should abort"
+  assert_contains "$out" "belongs to a DIFFERENT repo" "unrelated-worktree abort lacked the repo-identity reason"
+  assert_absent "$home/state/wrong-repo-wt-jj9.meta" "unrelated-worktree abort must not record meta"
+  assert_grep "kill-window" "$rec" "unrelated-worktree abort must kill the just-created window"
+  pass "fm-spawn: aborts, kills the window, and records no meta when the resolved worktree is another repo's"
+}
+
+test_spawn_transient_wrong_path_recovers() {
+  local home proj unrelated wt fakebin rec seq out status
+  home="$TMP_ROOT/transient-home"
+  mkdir -p "$home/data"
+  proj=$(make_repo "$TMP_ROOT/transient-proj")
+  unrelated=$(make_repo "$TMP_ROOT/transient-unrelated")
+  wt="$TMP_ROOT/transient-wt"
+  git -C "$proj" worktree add -q --detach "$wt" >/dev/null 2>&1
+  fakebin=$(make_spawn_record_fakebin "$TMP_ROOT/transient-fake")
+  rec="$TMP_ROOT/transient-rec.log"
+  : > "$rec"
+  # First poll sees the unrelated repo (the incident's transient rc-driven
+  # cwd), the next polls see the settled target worktree.
+  seq="$TMP_ROOT/transient-pane-seq"
+  printf '%s\n%s\n' "$unrelated" "$wt" > "$seq"
+
+  out=$(FM_FAKE_PANE_SEQ="$seq" run_spawn_record "$home" transient-kk0 "$proj" "" "$fakebin" "$rec"); status=$?
+  expect_code 0 "$status" "a transient non-target pane cwd must not fail the spawn once the real worktree appears"
+  assert_contains "$out" "spawned transient-kk0" "transient-path spawn did not report success"
+  assert_grep "worktree=$wt" "$home/state/transient-kk0.meta" \
+    "spawn must record the settled target worktree, not the transient wrong path"
+  pass "fm-spawn: a transient non-target pane cwd is never accepted as the worktree"
+}
+
 test_lib_classification
 test_guard_banner
 test_bootstrap_line
 test_brief_assertion_precedes_branch
 test_spawn_isolation_abort
 test_spawn_tmux_window_construction
+test_spawn_wrong_repo_abort
+test_spawn_transient_wrong_path_recovers
