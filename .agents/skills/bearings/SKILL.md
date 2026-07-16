@@ -42,7 +42,7 @@ It never tears down a task, merges a PR, dispatches new work, or mutates any tas
      This is the required artifact; it lives in gitignored `data/`.
      If today's file already exists, delete it first, then create a new file from scratch.
    - The chat response is the concise four-section digest defined by the contract below: materially shorter than the report file, complete as a current snapshot, internally consistent with the file, and linked to that file for the full picture.
-   - For a richer review surface, optionally offer a Lavish board with `lavish-axi` when the report has enough structure to deserve one, but the markdown file is the required artifact and the four-section chat digest is the required minimum.
+   - For a richer review surface, optionally offer a Lavish board under the `decision-hold-lifecycle` rich-review contract, while keeping the Markdown file and four-section chat digest as Bearings' required artifacts.
 
 ## Chat-response contract
 

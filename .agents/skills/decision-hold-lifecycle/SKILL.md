@@ -1,18 +1,35 @@
 ---
 name: decision-hold-lifecycle
 description: >-
-  Agent-only policy for completing investigations and visual reviews without losing unresolved captain decisions.
-  Load before treating an investigation, scout report, structured review, or Lavish review as complete, before ending a visual review that exposed a decision, and when recording or routing the captain's answer.
+  Agent-only policy for safe rich-review surfaces and for completing investigations and visual reviews without losing unresolved captain decisions.
+  Load before creating, presenting, or ending a structured or Lavish review, before treating an investigation or scout report as complete, and when recording or routing the captain's answer.
 user-invocable: false
 metadata:
   internal: true
 ---
 
-# Durable unresolved-decision lifecycle
+# Rich review and durable decision lifecycle
 
-This skill is the single policy owner for unresolved captain decisions discovered by an investigation or visual review.
+This skill is the single policy owner for Firstmate-generated rich-review surfaces and for unresolved captain decisions discovered by an investigation or visual review.
 
-## Policy
+## Rich-review and decision-input contract
+
+Rich-review surfaces are optional companions for rich reports, visual comparisons, annotated sources, structured evidence, or multi-finding review.
+Keep the primary chat path available, and use it alone for simple yes-or-no decisions.
+Primary chat is the only approval channel unless the integration has both a durable return path into Firstmate's authoritative workflow and verified submission idempotence with acknowledgement.
+An active `poll` or browser `listening` banner proves neither requirement.
+
+Every rich-review surface must expose the authoritative absolute and repository-relative source paths when available, the exact commit or snapshot, a raw-file option, and the artifact type and fidelity.
+When a review rendering could be mistaken for product direction, state explicitly whether it is a product mockup.
+Evidence-bearing decision reports must include citations or line references, severity rationale, alternatives, disconfirming evidence, consequences, and reversibility in proportion to the decision's impact.
+
+Inputs are inactive by default and must be omitted or visibly disabled whenever no durable return path is armed.
+Until both approval-channel guarantees are verified, direct the captain to decide in primary chat instead of submitting through the rich surface.
+Artifact code must not claim `sent`, `delivered`, or `acknowledged` without specific evidence for the claimed state.
+If an exceptional interactive surface meets both guarantees, disable repeated submission on first activation, prevent the same logical submission from being sent again, and show only truthful locally observed states.
+Never preselect a choice that grants authority, changes security, or permits private access.
+
+## Unresolved-decision lifecycle
 
 Every unresolved decision that belongs to the captain and is discovered while producing, reading, presenting, or ending an investigation or visual review must become a structured captain-held work item in the authoritative backlog of the home that owns the originating work before that work or review may be treated as complete.
 The agent performs the semantic inventory because scripts must not infer decisions from report prose, visual-review artifacts, terminal output, or chat.
