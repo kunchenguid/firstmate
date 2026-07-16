@@ -27,7 +27,7 @@ test_retire_doc_skill_encodes_safety_procedure() {
   assert_grep 'data/backups/' "$skill" "retire-doc skill does not require a dated backup tarball"
   assert_grep 'hash' "$skill" "retire-doc skill does not record the backup hash"
   for kind in archive rewrite-claim delete; do
-    assert_grep "$kind" "$skill" "retire-doc skill is missing the $kind classification"
+    assert_grep "**$kind**" "$skill" "retire-doc skill is missing the $kind classification"
   done
   assert_grep 'sign-off' "$skill" "retire-doc skill does not require captain sign-off"
   assert_grep 'wait for the captain' "$skill" "retire-doc skill does not stop and wait at the provenance gate"
