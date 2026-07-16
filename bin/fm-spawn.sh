@@ -95,6 +95,8 @@
 #   $vars and silently breaks ad-hoc `for ... in $pairs` loops).
 #   Launch templates live in launch_template() below; placeholders replaced before launch:
 #     __BRIEF__    absolute path to data/<task-id>/brief.md
+#     __CLAUDECONFIGDIR__  optional `CLAUDE_CONFIG_DIR=<dir> ` prefix from config/crew-config-dir
+#                  (claude only; absent knob = bare `claude`, default config dir; see #599)
 #     __TURNEND__  absolute path to state/<task-id>.turn-ended (for harnesses whose
 #                  turn-end signal rides the launch command, e.g. codex -c notify=[...])
 #     __PIEXT__    absolute path to state/<task-id>.pi-ext.ts (pi turn-end extension,
@@ -426,7 +428,13 @@ launch_template() {
     # does NOT suppress the interactive ghost text (verified empirically), so the env
     # var is the correct control. The dim-aware composer reader in fm-tmux-lib.sh is
     # the defense-in-depth backstop for any pane this flag cannot reach.
-    claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    # __CLAUDECONFIGDIR__ expands to a `CLAUDE_CONFIG_DIR=<dir> ` env prefix when
+    # config/crew-config-dir names an authenticated config dir, or to nothing when
+    # the knob is absent (bare `claude`, default config dir). See claude_config_dir_prefix
+    # below and #599 (hands-free spawn on a multi-account machine). Like the ghost-text
+    # var above it is a simple-command env prefix, so it reaches only `claude` itself and
+    # never the __OPINPUT__ brief-encoder subshell, which needs no config dir.
+    claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false __CLAUDECONFIGDIR__claude --dangerously-skip-permissions __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     codex)
       if [ "$kind" = secondmate ]; then
         printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
@@ -637,6 +645,26 @@ case "$LAUNCH" in
     fi
     ;;
 esac
+
+# The optional CLAUDE_CONFIG_DIR launch prefix for a claude crewmate (#599).
+# config/crew-config-dir is a local, gitignored file naming the config dir the
+# crewmate authenticates with. On a multi-account machine the default ~/.claude
+# can be empty/unauthenticated, stranding a bare-`claude` crewmate on the login
+# wall; pointing it at an authenticated dir makes the spawn hands-free. The
+# trimmed value becomes a `CLAUDE_CONFIG_DIR=<dir> ` env prefix scoped to this
+# firstmate-launched agent, so it never mutates the captain's global config.
+# Absent, empty, or a non-claude harness -> nothing, i.e. today's bare-`claude`,
+# default-config-dir behavior. Only the claude template carries the placeholder.
+claude_config_dir_prefix() {
+  local harness=$1 dir=
+  [ "$harness" = claude ] || return 0
+  [ -f "$CONFIG/crew-config-dir" ] || return 0
+  dir=$(head -n 1 "$CONFIG/crew-config-dir")
+  dir="${dir#"${dir%%[![:space:]]*}"}"   # trim leading whitespace
+  dir="${dir%"${dir##*[![:space:]]}"}"   # trim trailing whitespace
+  [ -n "$dir" ] || return 0
+  printf 'CLAUDE_CONFIG_DIR=%s ' "$(shell_quote "$dir")"
+}
 
 json_escape() {
   printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
@@ -1483,8 +1511,10 @@ sq_piwatch=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-pi-watch.ts")
 sq_opinput=$(shell_quote "$FM_ROOT/bin/fm-operational-input.sh")
 MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
 EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT")
+CLAUDECONFIGDIR=$(claude_config_dir_prefix "$HARNESS")
 LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
 LAUNCH=${LAUNCH//__EFFORTFLAG__/$EFFORTFLAG}
+LAUNCH=${LAUNCH//__CLAUDECONFIGDIR__/$CLAUDECONFIGDIR}
 LAUNCH=${LAUNCH//__BRIEF__/$sq_brief}
 LAUNCH=${LAUNCH//__TURNEND__/$sq_turnend}
 LAUNCH=${LAUNCH//__PIEXT__/$sq_piext}
