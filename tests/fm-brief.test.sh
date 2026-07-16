@@ -27,6 +27,8 @@ test_script_parses() {
 test_help_includes_entire_header() {
   local help
   help=$("$ROOT/bin/fm-brief.sh" --help)
+  assert_contains "$help" "Every scaffold requires loading decision-hold-lifecycle before creating or presenting a rich-review surface." \
+    "fm-brief.sh --help omitted the rich-review skill-load trigger"
   assert_contains "$help" "Refuses to overwrite an existing brief." "fm-brief.sh --help omitted its header terminator"
   pass "fm-brief.sh: --help renders the complete header"
 }
@@ -311,8 +313,8 @@ test_all_briefs_load_decision_hold_policy_before_rich_review() {
     "scout brief did not load the unresolved-decision policy before done"
   assert_grep "pass its shared completion gate for the report and any visual review" "$scout" \
     "scout brief did not cross-reference visual-review completion"
-  assert_grep "load \`decision-hold-lifecycle\`" "$charter" \
-    "secondmate charter did not load the shared decision policy for detailed investigations"
+  assert_grep "Before treating an investigation or visual review as complete, load \`decision-hold-lifecycle\` from this home's \`.agents/skills/\` and pass its shared completion gate." "$charter" \
+    "secondmate charter did not independently load the shared decision policy before completion"
   pass "fm-brief.sh: all brief kinds load the shared decision policy before rich review"
 }
 
