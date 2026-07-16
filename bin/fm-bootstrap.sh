@@ -260,11 +260,19 @@ secondmate_sync() {
   }
 
   secondmate_retry_pending_nudges() {
-    local marker id selector home commit message meta meta_home home_real head
+    local marker id selector home commit message expected_marker meta meta_home home_real head
     [ -d "$SECOND_MATE_NUDGE_PENDING_DIR" ] || return 0
     for marker in "$SECOND_MATE_NUDGE_PENDING_DIR"/*.pending; do
       [ -f "$marker" ] || continue
       id=$(fm_meta_get "$marker" id)
+      if ! expected_marker=$(secondmate_nudge_marker_path "$id"); then
+        echo "NUDGE_SECONDMATES: secondmate ${id:-unknown}: send failed: retry marker has unsafe id"
+        continue
+      fi
+      [ "$expected_marker" = "$marker" ] || {
+        echo "NUDGE_SECONDMATES: secondmate $id: send failed: retry marker filename mismatch"
+        continue
+      }
       selector=$(fm_meta_get "$marker" selector)
       home=$(fm_meta_get "$marker" home)
       commit=$(fm_meta_get "$marker" commit)

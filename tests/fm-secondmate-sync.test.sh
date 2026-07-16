@@ -428,6 +428,44 @@ test_bootstrap_nudge_send_uses_state_override() {
   pass "T8a bootstrap nudge send respects FM_STATE_OVERRIDE"
 }
 
+test_bootstrap_nudge_retry_rejects_malformed_marker_id() {
+  local w c1 fakebin out marker log evil
+  w=$(new_world nudge-malformed-id)
+  c1=$(head_of "$w/main")
+  evil="$w/evil"
+  git -C "$w/main" worktree add -q --detach "$evil" "$c1"
+  printf '../escape\n' > "$evil/.fm-secondmate-home"
+  mkdir -p "$w/home/state/.secondmate-nudge-pending"
+  marker="$w/home/state/.secondmate-nudge-pending/bad.pending"
+  {
+    printf 'id=../escape\n'
+    printf 'selector=fm-../escape\n'
+    printf 'home=%s\n' "$evil"
+    printf 'commit=%s\n' "$c1"
+    printf 'instructions=AGENTS.md\n'
+    printf 'message=firstmate was updated to the latest - please re-read your AGENTS.md to pick up the new instructions.\n'
+  } > "$marker"
+  {
+    printf 'window=firstmate:fm-evil\n'
+    printf 'kind=secondmate\n'
+    printf 'home=%s\n' "$evil"
+  } > "$w/home/escape.meta"
+  fakebin=$(make_fake_toolchain "$w")
+  log="$w/tmux.log"
+
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
+    FM_SEND_SETTLE=0 FM_FAKE_TMUX_LOG="$log" \
+    "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
+
+  assert_contains "$out" "NUDGE_SECONDMATES: secondmate ../escape: send failed: retry marker has unsafe id" \
+    "malformed retry marker id should be rejected before target resolution"
+  assert_not_contains "$out" "BOOTSTRAP_INFO: nudged fm-../escape" \
+    "malformed retry marker id must never send through a path-traversed selector"
+  assert_present "$marker" "malformed retry marker should remain for operator inspection"
+  assert_absent "$log" "malformed retry marker should not invoke fm-send"
+  pass "T8f bootstrap nudge retry rejects malformed marker ids"
+}
+
 test_bootstrap_nudge_failure_records_retry_marker() {
   local w c1 fakebin out marker
   w=$(new_world nudge-failure)
@@ -811,6 +849,7 @@ test_no_fetch_in_local_path
 test_sweep_nudge_requires_instruction_change
 test_bootstrap_sweep_nudges_only_instruction_change
 test_bootstrap_nudge_send_uses_state_override
+test_bootstrap_nudge_retry_rejects_malformed_marker_id
 test_bootstrap_nudge_failure_records_retry_marker
 test_bootstrap_nudge_retry_is_idempotent
 test_bootstrap_nudge_retry_refuses_changed_home
