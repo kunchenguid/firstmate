@@ -455,7 +455,103 @@ EOF
   pass "main-home and secondmate-home captain holds remain correctly routed"
 }
 
+# tasks-axi quotes multi-entry blocked_by values as "a,b,c". resolve must strip
+# those surrounding quotes before comma-boundary membership so the first and last
+# list elements match, not only middle elements.
+test_resolve_matches_quoted_blocked_by_edges() {
+  local home origin hold_first hold_mid hold_last hold_absent show
+  home=$(make_home quoted-blocked-by-edges)
+  origin=sample-quote-review
+  mkdir -p "$home/data/$origin"
+  tasks_in "$home" add "$origin" "Quoted blocked_by edge review" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create quote-edge origin"
+  write_origin_meta "$home" "$origin"
+  printf 'done: report complete\n' > "$home/state/$origin.status"
+  printf '# Quote edge review\n\nThree edge decisions and one absent control.\n' > "$home/data/$origin/report.md"
+
+  hold_first=$(run_decisions "$home" hold "$origin" edge-first \
+    --title "First edge decision" --reason "captain first pending" --repo sample) \
+    || fail "could not register first-edge hold"
+  hold_mid=$(run_decisions "$home" hold "$origin" edge-mid \
+    --title "Middle edge decision" --reason "captain mid pending" --repo sample) \
+    || fail "could not register mid-edge hold"
+  hold_last=$(run_decisions "$home" hold "$origin" edge-last \
+    --title "Last edge decision" --reason "captain last pending" --repo sample) \
+    || fail "could not register last-edge hold"
+  hold_absent=$(run_decisions "$home" hold "$origin" edge-absent \
+    --title "Absent edge decision" --reason "captain absent pending" --repo sample) \
+    || fail "could not register absent-edge hold"
+
+  tasks_in "$home" add pad-a "Pad A" --kind ship --repo sample >/dev/null \
+    || fail "could not create pad-a blocker"
+  tasks_in "$home" add pad-b "Pad B" --kind ship --repo sample >/dev/null \
+    || fail "could not create pad-b blocker"
+
+  tasks_in "$home" add dep-first "Dep first position" --kind ship --repo sample >/dev/null \
+    || fail "could not create first-position dependent"
+  tasks_in "$home" block dep-first --by "$hold_first" >/dev/null || fail "could not block dep-first by first hold"
+  tasks_in "$home" block dep-first --by pad-a >/dev/null || fail "could not block dep-first by pad-a"
+  tasks_in "$home" block dep-first --by pad-b >/dev/null || fail "could not block dep-first by pad-b"
+  show=$(tasks_in "$home" show dep-first --full)
+  assert_contains "$show" "blocked_by: \"$hold_first,pad-a,pad-b\"" \
+    "first-position fixture must quote multi-entry blocked_by"
+  printf 'Decide first edge.\n' > "$home/d-first.txt"
+  if ! run_decisions "$home" resolve "$origin" edge-first --decision-file "$home/d-first.txt" \
+    --routed-to dep-first > "$home/first.out" 2> "$home/first.err"; then
+    fail "resolve failed when hold id is FIRST in quoted blocked_by: $(cat "$home/first.err")"
+  fi
+
+  tasks_in "$home" add dep-mid "Dep mid position" --kind ship --repo sample >/dev/null \
+    || fail "could not create mid-position dependent"
+  tasks_in "$home" block dep-mid --by pad-a >/dev/null || fail "could not block dep-mid by pad-a"
+  tasks_in "$home" block dep-mid --by "$hold_mid" >/dev/null || fail "could not block dep-mid by mid hold"
+  tasks_in "$home" block dep-mid --by pad-b >/dev/null || fail "could not block dep-mid by pad-b"
+  show=$(tasks_in "$home" show dep-mid --full)
+  assert_contains "$show" "blocked_by: \"pad-a,$hold_mid,pad-b\"" \
+    "middle-position fixture must quote multi-entry blocked_by"
+  printf 'Decide mid edge.\n' > "$home/d-mid.txt"
+  if ! run_decisions "$home" resolve "$origin" edge-mid --decision-file "$home/d-mid.txt" \
+    --routed-to dep-mid > "$home/mid.out" 2> "$home/mid.err"; then
+    fail "resolve failed when hold id is MIDDLE in quoted blocked_by: $(cat "$home/mid.err")"
+  fi
+
+  tasks_in "$home" add dep-last "Dep last position" --kind ship --repo sample >/dev/null \
+    || fail "could not create last-position dependent"
+  tasks_in "$home" block dep-last --by pad-a >/dev/null || fail "could not block dep-last by pad-a"
+  tasks_in "$home" block dep-last --by pad-b >/dev/null || fail "could not block dep-last by pad-b"
+  tasks_in "$home" block dep-last --by "$hold_last" >/dev/null || fail "could not block dep-last by last hold"
+  show=$(tasks_in "$home" show dep-last --full)
+  assert_contains "$show" "blocked_by: \"pad-a,pad-b,$hold_last\"" \
+    "last-position fixture must quote multi-entry blocked_by"
+  printf 'Decide last edge.\n' > "$home/d-last.txt"
+  if ! run_decisions "$home" resolve "$origin" edge-last --decision-file "$home/d-last.txt" \
+    --routed-to dep-last > "$home/last.out" 2> "$home/last.err"; then
+    fail "resolve failed when hold id is LAST in quoted blocked_by: $(cat "$home/last.err")"
+  fi
+
+  tasks_in "$home" add dep-absent "Dep absent control" --kind ship --repo sample >/dev/null \
+    || fail "could not create absent-control dependent"
+  tasks_in "$home" block dep-absent --by pad-a >/dev/null || fail "could not block dep-absent by pad-a"
+  tasks_in "$home" block dep-absent --by pad-b >/dev/null || fail "could not block dep-absent by pad-b"
+  show=$(tasks_in "$home" show dep-absent --full)
+  assert_contains "$show" "blocked_by: \"pad-a,pad-b\"" \
+    "absent-control fixture must quote multi-entry blocked_by without the hold id"
+  printf 'Decide absent edge.\n' > "$home/d-absent.txt"
+  if run_decisions "$home" resolve "$origin" edge-absent --decision-file "$home/d-absent.txt" \
+    --routed-to dep-absent > "$home/absent.out" 2> "$home/absent.err"; then
+    fail "resolve succeeded when hold id is genuinely absent from blocked_by"
+  fi
+  assert_grep "not durably blocked by" "$home/absent.err" \
+    "absent id must fail with durable-block error"
+  show=$(tasks_in "$home" show "$hold_absent" --full)
+  assert_contains "$show" "state: queued" "failed absent resolve must leave the hold open"
+  assert_contains "$show" "held: yes" "failed absent resolve must leave the hold held"
+
+  pass "resolve matches first/middle/last in quoted blocked_by and rejects a genuinely absent id"
+}
+
 test_uninventoried_report_decision_refuses_completion
+
 test_scout_teardown_always_requires_inventory_verification
 test_structured_holds_survive_teardown_and_route_resolution
 test_origin_slug_validation_precedes_path_construction
@@ -463,3 +559,4 @@ test_visual_review_uses_shared_completion_owner
 test_none_inventory_and_resolved_prose_do_not_create_holds
 test_terminal_single_owner_status_decision_does_not_block_empty_inventory
 test_secondmate_hold_stays_in_authoritative_home
+test_resolve_matches_quoted_blocked_by_edges

@@ -415,7 +415,10 @@ command_resolve() {
     state=$(show_field "$show" state)
     [ "$state" != "done" ] || [ "$resolution_recorded" = 1 ] \
       || fail "routed task $dep is already done"
+    # tasks-axi quotes multi-entry blocked_by as "a,b,c"; strip so edge ids match.
     blocked=$(show_field "$show" blocked_by | tr -d '[:space:]')
+    blocked=${blocked#\"}
+    blocked=${blocked%\"}
     case ",$blocked," in
       *",$id,"*) : ;;
       *)
@@ -436,6 +439,8 @@ command_resolve() {
   for dep in $routed; do
     show=$(task_show "$dep") || fail "routed task $dep disappeared before routing"
     blocked=$(show_field "$show" blocked_by | tr -d '[:space:]')
+    blocked=${blocked#\"}
+    blocked=${blocked%\"}
     case ",$blocked," in
       *",$id,"*)
         tasks_axi unblock "$dep" --by "$id" >/dev/null \
