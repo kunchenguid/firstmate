@@ -13,7 +13,7 @@ DRAIN_LOCK_HELD=false
 # every wake-handling and recovery turn, so assert watcher liveness here too. A
 # lapsed supervision chain then surfaces on a plain drain-and-handle turn, not
 # only when a guarded supervision script (fm-peek/fm-send/...) happens to run.
-# Reuse fm-guard.sh's existing graced, beacon-based banner (FM_GUARD_GRACE) - do
+# Reuse fm-guard.sh's existing graced, beacon-based alarm (FM_GUARD_GRACE) - do
 # not duplicate the beacon math. Because the watcher touches its beacon every
 # poll cycle, a normal fire leaves a recent beacon well inside grace and stays
 # silent; only a genuine stale-beyond-grace lapse with work in flight warns. Call
