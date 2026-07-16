@@ -186,8 +186,15 @@ if [ "$BACKEND" = cmux ] && [ "$KIND" = secondmate ]; then
   echo "error: backend=cmux does not support --secondmate spawns yet" >&2
   exit 1
 fi
+if [ "$BACKEND" = paseo ] && [ "$KIND" = secondmate ]; then
+  echo "error: backend=paseo does not support --secondmate spawns yet" >&2
+  exit 1
+fi
 if [ "$BACKEND" = orca ]; then
   fm_backend_orca_runtime_check || exit 1
+fi
+if [ "$BACKEND" = paseo ]; then
+  fm_backend_paseo_runtime_check || exit 1
 fi
 ORCA_ABORT_CLEANUP=0
 ORCA_WORKTREE_ID=
@@ -387,6 +394,15 @@ case "$ARG3" in
     LAUNCH=$(launch_template "$HARNESS" "$KIND") || { echo "error: unknown harness '$HARNESS'; pass a raw launch command to use an unverified adapter" >&2; exit 1; }
     ;;
 esac
+
+# Paseo launches the provider agent itself (paseo run --provider), so the
+# resolved harness must map to a Paseo provider. Refuse grok (not a Paseo
+# provider) and any non-{claude,codex,opencode,pi} harness LOUDLY here, before
+# leasing a worktree - a backend refusal is terminal, never a silent fallback.
+PASEO_PROVIDER=
+if [ "$BACKEND" = paseo ]; then
+  PASEO_PROVIDER=$(fm_backend_paseo_provider_for_harness "$HARNESS") || exit 1
+fi
 
 # config/secondmate-harness may carry optional model/effort tokens alongside the
 # harness ("<harness> [<model>] [<effort>]"). They apply only when this is a
@@ -795,6 +811,25 @@ EOF
     fi
     T="$ORCA_TERMINAL"
     ;;
+  paseo)
+    # Paseo has no bare shell to type `treehouse get` into: `paseo run` launches
+    # the provider agent directly with --cwd. So acquire the treehouse worktree
+    # here, NON-interactively, with `treehouse get --lease` (prints only the
+    # absolute worktree path to stdout; banners go to stderr). The Paseo agent
+    # itself is created later, AFTER the turn-end hook is written into this
+    # worktree, so a claude crewmate starts with its Stop hook already in place
+    # (docs/paseo-backend.md "Turn-end signal"). T stays unset until then.
+    # treehouse resolves its pool from the working directory, so lease from the
+    # project checkout.
+    WT=$( cd "$PROJ_ABS" && treehouse get --lease --lease-holder "fm-$ID" 2>/dev/null ) || {
+      echo "error: 'treehouse get --lease' failed to acquire a worktree for $W from $PROJ_ABS" >&2
+      exit 1
+    }
+    WT=$(printf '%s' "$WT" | tail -1)
+    [ -n "$WT" ] || { echo "error: 'treehouse get --lease' returned no worktree path for $W" >&2; exit 1; }
+    validate_spawn_worktree "treehouse get --lease" "$WT"
+    T=""
+    ;;
 esac
 # #134 robustness: only tmux needs a worktree-detection target distinct from $T -
 # its rename-safe stable window id, set as WT_TARGET=$WID in the tmux branch above.
@@ -837,7 +872,7 @@ spawn_send_key() {  # <target> <key>
     cmux) fm_backend_cmux_send_key "$1" "$2" "$W" ;;
   esac
 }
-if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
+if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] && [ "$BACKEND" != paseo ]; then
   spawn_send_text_line "$WT_TARGET" 'treehouse get'
 
   # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
@@ -975,6 +1010,18 @@ EOF
   esac
 fi
 
+# Paseo launch: `paseo run` creates AND starts the agent in one call, launching
+# the provider directly in the leased worktree with the brief as its initial
+# prompt. Done here (not in the container case above) so the claude turn-end
+# Stop hook written into the worktree just above is already present when the
+# agent starts (verified: the hook fires under `paseo run`, docs/paseo-backend.md
+# "Turn-end signal"). GOTMPDIR rides --env since Paseo has no pane to export
+# into. The agent id becomes the operational target T and is recorded in meta.
+if [ "$BACKEND" = paseo ]; then
+  PASEO_AGENT_ID=$(fm_backend_paseo_run "$WT" "$PASEO_PROVIDER" "$MODEL" "$W" "$ID" "$TASK_TMP/gotmp" "$BRIEF") || exit 1
+  T="$PASEO_AGENT_ID"
+fi
+
 # Per-project delivery mode + yolo flag (bin/fm-project-mode.sh; the project-management skill and AGENTS.md task lifecycle).
 # Recorded in meta so fm-teardown's safety check and the validate/merge stages can
 # branch on them. Mode governs ship tasks; a scout's deliverable is a report, not a
@@ -993,6 +1040,9 @@ fi
 
 META_WINDOW=$T
 [ "$BACKEND" = orca ] && META_WINDOW=$W
+# Paseo's operational target is the agent id; window= keeps the fm-<id> display
+# alias (fm_backend_target_of_meta resolves paseo tasks to paseo_agent_id).
+[ "$BACKEND" = paseo ] && META_WINDOW=$W
 {
   echo "window=$META_WINDOW"
   echo "worktree=$WT"
@@ -1027,6 +1077,9 @@ META_WINDOW=$T
     echo "cmux_workspace_id=$CMUX_WORKSPACE_ID"
     echo "cmux_surface_id=$CMUX_SURFACE_ID"
   fi
+  if [ "$BACKEND" = paseo ]; then
+    echo "paseo_agent_id=$PASEO_AGENT_ID"
+  fi
   if [ "$KIND" = secondmate ]; then
     echo "home=$PROJ_ABS"
     echo "projects=$SECONDMATE_PROJECTS"
@@ -1034,31 +1087,35 @@ META_WINDOW=$T
 } > "$STATE/$ID.meta"
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
 
-sq_brief=$(shell_quote "$BRIEF")
-sq_turnend=$(shell_quote "$TURNEND")
-sq_piext=$(shell_quote "$STATE/$ID.pi-ext.ts")
-sq_piturnend=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-turnend-guard.ts")
-sq_piwatch=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-pi-watch.ts")
-MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
-EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT")
-LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
-LAUNCH=${LAUNCH//__EFFORTFLAG__/$EFFORTFLAG}
-LAUNCH=${LAUNCH//__BRIEF__/$sq_brief}
-LAUNCH=${LAUNCH//__TURNEND__/$sq_turnend}
-LAUNCH=${LAUNCH//__PIEXT__/$sq_piext}
-LAUNCH=${LAUNCH//__PITURNEND__/$sq_piturnend}
-LAUNCH=${LAUNCH//__PIWATCH__/$sq_piwatch}
-if [ "$KIND" = secondmate ]; then
-  sq_home=$(shell_quote "$PROJ_ABS")
-  LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_HOME=$sq_home $LAUNCH"
+# Paseo already launched the agent above (paseo run, with GOTMPDIR via --env and
+# the brief as the run prompt), so there is no pane launch command to send here.
+if [ "$BACKEND" != paseo ]; then
+  sq_brief=$(shell_quote "$BRIEF")
+  sq_turnend=$(shell_quote "$TURNEND")
+  sq_piext=$(shell_quote "$STATE/$ID.pi-ext.ts")
+  sq_piturnend=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-turnend-guard.ts")
+  sq_piwatch=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-pi-watch.ts")
+  MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
+  EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT")
+  LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
+  LAUNCH=${LAUNCH//__EFFORTFLAG__/$EFFORTFLAG}
+  LAUNCH=${LAUNCH//__BRIEF__/$sq_brief}
+  LAUNCH=${LAUNCH//__TURNEND__/$sq_turnend}
+  LAUNCH=${LAUNCH//__PIEXT__/$sq_piext}
+  LAUNCH=${LAUNCH//__PITURNEND__/$sq_piturnend}
+  LAUNCH=${LAUNCH//__PIWATCH__/$sq_piwatch}
+  if [ "$KIND" = secondmate ]; then
+    sq_home=$(shell_quote "$PROJ_ABS")
+    LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_HOME=$sq_home $LAUNCH"
+  fi
+  # Export GOTMPDIR into the crewmate's pane shell so the agent and every child
+  # process (go build, go test, ...) inherit it. Sent before the launch command so
+  # the env is set when the agent starts; the brief sleep lets the export land.
+  spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp"
+  sleep 0.3
+  spawn_send_literal "$T" "$LAUNCH"
+  sleep 0.3
+  spawn_send_key "$T" Enter
 fi
-# Export GOTMPDIR into the crewmate's pane shell so the agent and every child
-# process (go build, go test, ...) inherit it. Sent before the launch command so
-# the env is set when the agent starts; the brief sleep lets the export land.
-spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp"
-sleep 0.3
-spawn_send_literal "$T" "$LAUNCH"
-sleep 0.3
-spawn_send_key "$T" Enter
 
 echo "spawned $ID harness=$HARNESS kind=$KIND mode=$MODE yolo=$YOLO window=$META_WINDOW worktree=$WT"

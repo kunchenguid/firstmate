@@ -120,6 +120,11 @@ if [ "$BACKEND" = orca ]; then
   T_ORCA=$(grep '^terminal=' "$META" | tail -1 | cut -d= -f2- || true)
   [ -n "$T_ORCA" ] && T=$T_ORCA
 fi
+if [ "$BACKEND" = paseo ]; then
+  # window= is a display alias for a paseo task; the kill target is the agent id.
+  T_PASEO=$(fm_meta_get "$META" paseo_agent_id)
+  [ -n "$T_PASEO" ] && T=$T_PASEO
+fi
 HOME_PATH=$(grep '^home=' "$META" | cut -d= -f2- || true)
 PR_URL=$(grep '^pr=' "$META" | tail -1 | cut -d= -f2- || true)
 # tasktmp is recorded by fm-spawn for tasks that set up a per-task temp root
