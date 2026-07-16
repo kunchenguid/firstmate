@@ -27,6 +27,10 @@
 # recorded in ITS OWN backlog, never the main one - are visible. It stays bounded by
 # a per-home cap and an overall cap, with omitted[] disclosure of both and of any
 # secondmate home whose backlog was unreadable; no GitHub/network call is involved.
+# The default landed baseline is balanced across homes: each home keeps its internal
+# newest-first ordering, homes iterate in deterministic id order, sparse homes do not
+# waste capacity, and --all-landed switches back to the complete global newest-first
+# order.
 #
 # Flags:
 #   (default)        compact projection, TOON, local-only
@@ -98,7 +102,9 @@ Default fields: schema, home, generated, prs, in_flight{id,kind,state,doing},
   unhealthy_endpoints{...} (only when non-empty), omitted{surface,reveal}.
 landed merges this home's Done with registered secondmate homes' Done, bounded by
   a per-home cap (FM_BEARINGS_LANDED_PER_HOME) and an overall cap (FM_BEARINGS_LANDED),
-  with omitted[] disclosure; --all-landed reveals the full set.
+  with omitted[] disclosure. Default selection is balanced across deterministic home
+  order while preserving each home's internal newest-first order; sparse homes do
+  not waste capacity. --all-landed reveals the full global newest-first set.
 For every registered secondmate, validated structured state from its own home is
   authoritative. Parent events and bounded terminal reads are labeled fallback or
   contradiction evidence and never become current work.
