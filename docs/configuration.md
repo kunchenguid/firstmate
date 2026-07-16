@@ -207,6 +207,14 @@ The Kimi installer requires an existing regular non-symlink `~/.kimi-code/config
 Its `remove` action excises only the marker-delimited Firstmate region and removes Firstmate's hook files.
 For Pi and pi-signed secondmate launches, `fm-spawn.sh` starts the selected executable with `-e` pointed at the secondmate home's own tracked `.pi/extensions/fm-primary-pi-watch.ts` and `.pi/extensions/fm-primary-turnend-guard.ts`, both already present from the secondmate home's git worktree.
 
+### Claude config dir (config/crew-config-dir)
+
+`config/crew-config-dir` is a local, gitignored file naming the Claude config dir (`CLAUDE_CONFIG_DIR`) a spawned `claude` crewmate authenticates with.
+It exists for multi-account machines, where the default `~/.claude` can be empty or unauthenticated so a bare-`claude` crewmate lands on the login wall and never starts.
+The first line's trimmed value becomes a per-launch `CLAUDE_CONFIG_DIR=<dir>` env prefix on the claude launch command only, scoped to that firstmate-launched agent, so it never mutates the captain's global config.
+It applies to the `claude` harness only; other harnesses ignore it.
+When the file is absent or empty, launch behavior is byte-identical to before: bare `claude` on its default config dir.
+
 ## Crew dispatch profiles (config/crew-dispatch.json)
 
 `config/crew-dispatch.json` is an optional local, gitignored file containing natural-language rules that firstmate reads before dispatching a crewmate or scout.
