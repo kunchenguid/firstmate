@@ -25,8 +25,9 @@ Provide both absolute and repository-relative paths when both exist, and omit on
 When a review rendering could be mistaken for product direction, state explicitly whether it is a product mockup.
 Evidence-bearing decision reports must include citations or line references, severity rationale, alternatives, disconfirming evidence, consequences, and reversibility in proportion to the decision's impact.
 
-Inputs are inactive by default and must be omitted or visibly disabled whenever no durable return path is armed.
-Until both approval-channel guarantees are verified, direct the captain to decide in primary chat instead of submitting through the rich surface.
+Inputs are inactive by default and must be omitted or visibly disabled unless both approval-channel guarantees are verified together.
+A browser presence state, active poll, durable return path alone, warning copy, or instruction not to use controls is insufficient.
+When either guarantee is absent, keep the rich surface read-only and direct the captain to decide in primary chat instead of submitting through it.
 Artifact code must not claim `sent`, `delivered`, or `acknowledged` without specific evidence for the claimed state.
 If an exceptional interactive surface meets both guarantees, disable repeated submission on first activation, prevent the same logical submission from being sent again, and show only truthful locally observed states.
 Never preselect a choice that grants authority, changes security, or permits private access.
