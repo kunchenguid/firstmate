@@ -66,7 +66,7 @@ ok - a completed scout with decision-like report prose is a pointer, not pending
 ok - action-free items (working/done/queued/landed) do not leak into Captain's Call
 
 $ bash tests/fm-brief.test.sh
-ok - fm-brief.sh: investigation and visual-review completions load the shared decision policy
+ok - fm-brief.sh: all brief kinds load the shared decision policy before rich review
 
 $ bash tests/fm-teardown.test.sh
 all teardown safety cases passed
