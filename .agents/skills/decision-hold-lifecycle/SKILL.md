@@ -30,7 +30,7 @@ A browser presence state, active poll, durable return path alone, warning copy, 
 When either guarantee is absent, keep the rich surface read-only and direct the captain to decide in primary chat instead of submitting through it.
 Artifact code must not claim `sent`, `delivered`, or `acknowledged` without specific evidence for the claimed state.
 If an exceptional interactive surface meets both guarantees, disable repeated submission on first activation, prevent the same logical submission from being sent again, and show only truthful locally observed states.
-Never preselect a choice that grants authority, changes security, or permits private access.
+For every authority, security, or private-access decision, start from a neutral state with no option preselected and require an explicit human choice, whether an option grants, denies, revokes, restricts, or otherwise changes that category.
 
 ## Unresolved-decision lifecycle
 

@@ -66,7 +66,7 @@ ok - a completed scout with decision-like report prose is a pointer, not pending
 ok - action-free items (working/done/queued/landed) do not leak into Captain's Call
 
 $ bash tests/fm-brief.test.sh
-ok - fm-brief.sh: all brief kinds load the shared decision policy before rich review
+ok - fm-brief.sh: investigation and visual-review completions load the shared decision policy
 
 $ bash tests/fm-teardown.test.sh
 all teardown safety cases passed
@@ -80,3 +80,5 @@ $ git diff --check
 $ for test_script in tests/*.test.sh; do bash "$test_script"; done
 ALL 71 TEST SCRIPTS PASSED
 ```
+
+No new wording-lock assertion was retained, and this record does not claim ship-trigger runtime coverage.
