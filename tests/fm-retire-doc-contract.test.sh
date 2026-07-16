@@ -50,6 +50,10 @@ test_retire_doc_skill_encodes_safety_procedure() {
     "retire-doc skill does not preserve a pointer at every consolidated document's former path"
   assert_grep 'never points at a retired path' "$skill" "retire-doc skill does not require the index update"
   assert_grep 'own document-lifecycle SOP' "$skill" "retire-doc skill does not defer to a local SOP"
+  assert_grep 'A local SOP must never waive or weaken' "$skill" \
+    "retire-doc skill lets a local SOP weaken its core safeguards"
+  assert_grep 'former-path consolidation pointer, atomic index update, or final retirement report' "$skill" \
+    "retire-doc skill does not preserve every core safeguard under a local SOP"
   pass "retire-doc skill encodes backup, classification, gate, consolidation, index, and local-override steps"
 }
 

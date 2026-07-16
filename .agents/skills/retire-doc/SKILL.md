@@ -12,10 +12,10 @@ Retire a document from this home's `data/` corpus safely.
 The `data/` corpus is captain-private and gitignored, so it has no version history to fall back on: every retirement is unversioned and potentially unrecoverable unless this skill's backup step runs first.
 The goal is a corpus that no longer carries the retired material, with a durable backup, an intact index, and no silent loss of anything the corpus still relies on.
 
-## 0. Local override first
+## 0. Local SOP first
 
-If this home keeps its own document-lifecycle SOP in `data/` (for example a `data/doc-map.md`, a librarian charter, or a stated retirement procedure), read it and follow it over the defaults below wherever the two differ.
-This skill is the fallback procedure for homes that have not written their own; a home's own SOP always wins.
+If this home keeps its own document-lifecycle SOP in `data/` (for example a `data/doc-map.md`, a librarian charter, or a stated retirement procedure), read it first and let it refine or strengthen the procedure below.
+A local SOP must never waive or weaken this skill's required scoped backup, valid recorded SHA-256, captain sign-off gate, former-path consolidation pointer, atomic index update, or final retirement report.
 
 ## 1. Back up before any destructive step
 
