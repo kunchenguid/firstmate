@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Record a PR-ready task: append a validated canonical pr=<url> and GitHub's
+# Record a PR-ready task: store one validated canonical pr=<url> and GitHub's
 # exact pr_head=<sha> when available, then atomically arm a static merge poll.
 # The watcher check source is byte-for-byte bin/fm-pr-poll.sh; task and PR data
 # live only in a private sidecar and are never interpolated into shell source.

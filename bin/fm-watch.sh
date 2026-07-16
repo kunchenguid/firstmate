@@ -31,7 +31,9 @@
 #                          wake payload itself, not just repetition, forces a
 #                          closer look instead of another routine supervision
 #                          resume. Unless afk is active.
-#   check: <script>: <out> per-task check output, always actionable
+#   check: <script>: <out> authenticated check output, always actionable
+#   check: rejected unauthenticated state checks: <paths>
+#                          unsafe state checks were refused without execution
 #   heartbeat              fleet-scan backstop found an unsurfaced captain-relevant
 #                          status, unless afk is active
 # For normal supervision, resume the session-start primary-harness protocol
