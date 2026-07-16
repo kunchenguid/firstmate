@@ -212,6 +212,7 @@ For Pi and pi-signed secondmate launches, `fm-spawn.sh` starts the selected exec
 `config/crew-config-dir` is a local, gitignored file naming the Claude config dir (`CLAUDE_CONFIG_DIR`) a spawned `claude` crewmate authenticates with.
 It exists for multi-account machines, where the default `~/.claude` can be empty or unauthenticated so a bare-`claude` crewmate lands on the login wall and never starts.
 The first line's trimmed value becomes a per-launch `CLAUDE_CONFIG_DIR=<dir>` env prefix on the claude launch command only, scoped to that firstmate-launched agent, so it never mutates the captain's global config.
+A leading `~` or `~/` and any `$HOME` or `${HOME}` in the value are expanded to the captain's home directory, then the resolved path is quoted, so a value like `~/.claude-account2` or `$HOME/.claude-account2` reaches the launch as a real absolute path; the expansion is explicit, so shell metacharacters in the value are never re-parsed or executed at launch.
 It applies to the `claude` harness only; other harnesses ignore it.
 When the file is absent or empty, launch behavior is byte-identical to before: bare `claude` on its default config dir.
 

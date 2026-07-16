@@ -7,10 +7,15 @@
 # should authenticate with; when set, fm-spawn prefixes the claude launch command
 # with `CLAUDE_CONFIG_DIR=<dir> `. These tests drive a real claude ship spawn
 # through fm-spawn.sh with a fake tmux that records the literal launch string, and
-# pin both directions:
+# pin behavior on real values:
 #   1. config/crew-config-dir set  -> the launch gains the CLAUDE_CONFIG_DIR prefix.
 #   2. config/crew-config-dir absent -> NO prefix, i.e. byte-identical prior
 #      behavior (bare `claude`, default config dir).
+#   3. a leading `~`/`~/` resolves to $HOME in the launch (captain's real value).
+#   4. `$HOME`/`${HOME}` resolves to the home directory in the launch.
+#   5. a plain absolute path (no ~/$HOME) passes through unchanged.
+#   6. shell metacharacters in the value stay single-quoted, never re-parsed
+#      or executed at launch (injection guard).
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -124,5 +129,107 @@ EOF
   pass "absent config/crew-config-dir keeps the bare-claude launch byte-identical"
 }
 
+test_config_dir_expands_tilde() {
+  local rec case_dir home proj wt fakebin id send_log launch exp
+  rec=$(make_spawn_case tilde)
+  IFS='|' read -r case_dir home proj wt fakebin id <<EOF
+$rec
+EOF
+  # The captain's real-world value: a home-relative ~ path.
+  # shellcheck disable=SC2088  # A literal ~ must be written to the file, not expanded here.
+  printf '%s\n' '~/.claude-account2' > "$home/config/crew-config-dir"
+  send_log="$case_dir/launch.log"
+  exp="$HOME/.claude-account2"
+
+  launch=$(run_claude_spawn "$home" "$proj" "$wt" "$fakebin" "$id" "$send_log") \
+    || fail "claude spawn with a ~ config dir failed"
+
+  # A leading ~ must resolve to the real $HOME in the launch, shell-quoted, and
+  # the literal tilde must never survive into the launch string.
+  case "$launch" in
+    "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CONFIG_DIR='$exp' claude --dangerously-skip-permissions "*) : ;;
+    *) fail "launch did not expand a leading ~ to \$HOME"$'\n'"--- launch ---"$'\n'"$launch" ;;
+  esac
+  assert_not_contains "$launch" "'~/.claude-account2'" "a leading ~ must not reach the launch literally"
+  pass "config/crew-config-dir expands a leading ~ to the home directory"
+}
+
+test_config_dir_expands_home_var() {
+  local rec case_dir home proj wt fakebin id send_log launch exp
+  rec=$(make_spawn_case home-var)
+  IFS='|' read -r case_dir home proj wt fakebin id <<EOF
+$rec
+EOF
+  # The captain's real-world value uses $HOME literally in the file.
+  # shellcheck disable=SC2016  # A literal $HOME must be written to the file, not expanded here.
+  printf '%s\n' '$HOME/.claude-account2' > "$home/config/crew-config-dir"
+  send_log="$case_dir/launch.log"
+  exp="$HOME/.claude-account2"
+
+  launch=$(run_claude_spawn "$home" "$proj" "$wt" "$fakebin" "$id" "$send_log") \
+    || fail "claude spawn with a \$HOME config dir failed"
+
+  # $HOME must resolve to the real home in the launch; the literal token must not survive.
+  case "$launch" in
+    "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CONFIG_DIR='$exp' claude --dangerously-skip-permissions "*) : ;;
+    *) fail "launch did not expand \$HOME to the home directory"$'\n'"--- launch ---"$'\n'"$launch" ;;
+  esac
+  # shellcheck disable=SC2016  # Asserting the literal token $HOME is absent from the launch.
+  assert_not_contains "$launch" '$HOME' "a \$HOME reference must not reach the launch literally"
+  pass "config/crew-config-dir expands \$HOME to the home directory"
+}
+
+test_config_dir_plain_path_unchanged() {
+  local rec case_dir home proj wt fakebin id send_log launch plain
+  rec=$(make_spawn_case plain-path)
+  IFS='|' read -r case_dir home proj wt fakebin id <<EOF
+$rec
+EOF
+  # A plain absolute path with no ~ / $HOME must pass through untouched by expansion.
+  plain="$case_dir/plain-claude-home"
+  printf '%s\n' "$plain" > "$home/config/crew-config-dir"
+  send_log="$case_dir/launch.log"
+
+  launch=$(run_claude_spawn "$home" "$proj" "$wt" "$fakebin" "$id" "$send_log") \
+    || fail "claude spawn with a plain absolute config dir failed"
+
+  case "$launch" in
+    "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CONFIG_DIR='$plain' claude --dangerously-skip-permissions "*) : ;;
+    *) fail "a plain absolute path was altered by expansion"$'\n'"--- launch ---"$'\n'"$launch" ;;
+  esac
+  pass "a plain absolute path with no ~/\$HOME passes through unchanged"
+}
+
+test_config_dir_metachars_stay_quoted() {
+  local rec case_dir home proj wt fakebin id send_log launch evil
+  rec=$(make_spawn_case metachars)
+  IFS='|' read -r case_dir home proj wt fakebin id <<EOF
+$rec
+EOF
+  # A value carrying shell metacharacters (`;`, whitespace, a command
+  # substitution) must be emitted as one single-quoted token so nothing is
+  # re-parsed or executed at launch. No ~ / $HOME here, so only quoting is under
+  # test. The \$ is escaped so the test itself never runs `id`; the file gets a
+  # literal `$(id)`.
+  evil="$case_dir/cfg; touch $case_dir/PWNED \$(id)"
+  printf '%s\n' "$evil" > "$home/config/crew-config-dir"
+  send_log="$case_dir/launch.log"
+
+  launch=$(run_claude_spawn "$home" "$proj" "$wt" "$fakebin" "$id" "$send_log") \
+    || fail "claude spawn with a metacharacter config dir failed"
+
+  # The whole dangerous value must appear verbatim inside a single-quoted token,
+  # proving the shell that runs the launch would treat `$(id)`/`;` as literal.
+  case "$launch" in
+    "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CONFIG_DIR='$evil' claude --dangerously-skip-permissions "*) : ;;
+    *) fail "metacharacter value was not fully single-quoted"$'\n'"--- launch ---"$'\n'"$launch" ;;
+  esac
+  pass "shell metacharacters in the config dir stay single-quoted (injection guard)"
+}
+
 test_config_dir_adds_prefix
 test_absent_knob_is_backward_compatible
+test_config_dir_expands_tilde
+test_config_dir_expands_home_var
+test_config_dir_plain_path_unchanged
+test_config_dir_metachars_stay_quoted

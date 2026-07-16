@@ -653,8 +653,14 @@ esac
 # wall; pointing it at an authenticated dir makes the spawn hands-free. The
 # trimmed value becomes a `CLAUDE_CONFIG_DIR=<dir> ` env prefix scoped to this
 # firstmate-launched agent, so it never mutates the captain's global config.
-# Absent, empty, or a non-claude harness -> nothing, i.e. today's bare-`claude`,
-# default-config-dir behavior. Only the claude template carries the placeholder.
+# A leading `~`/`~/` and any `$HOME`/`${HOME}` are expanded HERE and the RESULT
+# is shell-quoted, so the launch string carries a fully resolved absolute path.
+# We deliberately do not drop the quoting and let the shell re-parse the raw
+# value, which would let arbitrary shell metacharacters in the knob execute at
+# launch. A value with no `~`/`$HOME` is unchanged, so prior behavior stays
+# byte-identical. Absent, empty, or a non-claude harness -> nothing, i.e.
+# today's bare-`claude`, default-config-dir behavior. Only the claude template
+# carries the placeholder.
 claude_config_dir_prefix() {
   local harness=$1 dir=
   [ "$harness" = claude ] || return 0
@@ -663,6 +669,15 @@ claude_config_dir_prefix() {
   dir="${dir#"${dir%%[![:space:]]*}"}"   # trim leading whitespace
   dir="${dir%"${dir##*[![:space:]]}"}"   # trim trailing whitespace
   [ -n "$dir" ] || return 0
+  # shellcheck disable=SC2088  # Literal tilde is matched here, not expanded by the shell.
+  case "$dir" in
+    '~')   dir="$HOME" ;;              # bare tilde -> home
+    '~/'*) dir="$HOME/${dir#'~/'}" ;;  # leading ~/ -> home-relative
+  esac
+  # shellcheck disable=SC2016  # The single-quoted patterns are literal $HOME/${HOME} to match, not expand.
+  dir="${dir//'${HOME}'/$HOME}"        # ${HOME} anywhere -> real home
+  # shellcheck disable=SC2016  # The single-quoted pattern is a literal $HOME to match, not expand.
+  dir="${dir//'$HOME'/$HOME}"          # $HOME anywhere -> real home
   printf 'CLAUDE_CONFIG_DIR=%s ' "$(shell_quote "$dir")"
 }
 
