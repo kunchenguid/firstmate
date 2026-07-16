@@ -290,6 +290,12 @@ MODEL=$(printf '%s' "$SNAP" | jq \
   --argjson candidate_prs "$CANDIDATE_PRS" '
   def trunc($n): if . == null then null else
     (tostring | gsub("\\s+"; " ") | if (length > $n) then (.[:$n] + "…") else . end) end;
+  def round_robin_landed($n):
+    . as $groups
+    | [range(0; (($groups | map(length) | max) // 0)) as $i
+       | $groups[]
+       | select(length > $i)
+       | .[$i]][:$n];
   ($fields | split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(. != ""))) as $fl
   | (($fl | index("bodies")) != null) as $f_bodies
   | (($fl | index("paths")) != null) as $f_paths
@@ -301,10 +307,11 @@ MODEL=$(printf '%s' "$SNAP" | jq \
   | ($main_done + $mate_done) as $all_landed_rows
   | ([ $all_landed_rows | group_by(.home_id)[]
        | sort_by([(.completion.date // ""), .id]) | reverse
-       | (if $all_landed == 1 then . else .[:$landed_per_home_n] end) ] | add // []) as $per_home_capped
+       | (if $all_landed == 1 then . else .[:$landed_per_home_n] end) ]) as $per_home_groups
+  | ($per_home_groups | add // []) as $per_home_capped
   | ([ $all_landed_rows | group_by(.home_id)[] | select(length > $landed_per_home_n) ] | length) as $home_cap_dropped
   | ($per_home_capped | sort_by([(.completion.date // ""), .id]) | reverse) as $landed_sorted
-  | (if $all_landed == 1 then $landed_sorted else $landed_sorted[:$landed_n] end) as $done
+  | (if $all_landed == 1 then $landed_sorted else ($per_home_groups | round_robin_landed($landed_n)) end) as $done
   | ($done | map(.id)) as $done_ids
   | ([.tasks[] | select(.kind != "secondmate") | .id]) as $live_ids
   | ($live_ids + $done_ids) as $rel_ids

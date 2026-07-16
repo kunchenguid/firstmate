@@ -399,6 +399,19 @@ append_secondmate_registry() {  # <parent> <id> <home>
     "$2" "$3" >> "$1/data/secondmates.md"
 }
 
+append_landed_row() {  # <secondmate-home> <id> <title> <date>
+  printf -- '- [x] %s - %s (repo: firstmate) (kind: ship) (merged %s)\n' \
+    "$2" "$3" "$4" >> "$1/data/backlog.md"
+}
+
+make_landed_secondmate() {  # <parent> <id>
+  local parent=$1 id=$2 mate
+  mate="$TMP_ROOT/$(basename "$parent")-$id-home"
+  make_valid_secondmate_home "$id" "$mate"
+  append_secondmate_registry "$parent" "$id" "$mate"
+  printf '%s\n' "$mate"
+}
+
 write_parent_secondmate_event() {  # <parent> <id> <home> <note>
   fm_write_secondmate_meta "$1/state/$2.meta" "$3" "firstmate:fm-$2" sample
   printf 'working [key=%s]: %s\n' "$2" "$4" > "$1/state/$2.status"
@@ -1107,6 +1120,166 @@ test_landed_includes_secondmate_home_merges() {
   pass "landed includes secondmate-managed merges alongside main-home merges"
 }
 
+test_landed_default_balances_dominant_and_sparse_homes() {
+  local home dominant sparse_a sparse_b sparse_c fakebin json i actual expected
+  home=$(make_home landed-balanced-default)
+  : > "$home/data/secondmates.md"
+  printf '## Done\n' > "$home/data/backlog.md"
+  dominant=$(make_landed_secondmate "$home" dominant)
+  sparse_a=$(make_landed_secondmate "$home" sparse-a)
+  sparse_b=$(make_landed_secondmate "$home" sparse-b)
+  sparse_c=$(make_landed_secondmate "$home" sparse-c)
+  i=1
+  while [ "$i" -le 12 ]; do
+    append_landed_row "$dominant" "$(printf 'dominant-landed-%02d' "$i")" \
+      "$(printf 'Dominant landed %02d' "$i")" "$(printf '2026-07-%02d' "$((31 - i))")"
+    i=$((i + 1))
+  done
+  i=1
+  while [ "$i" -le 2 ]; do
+    append_landed_row "$sparse_a" "$(printf 'sparse-a-landed-%02d' "$i")" \
+      "$(printf 'Sparse A landed %02d' "$i")" "$(printf '2026-07-%02d' "$((12 - i))")"
+    append_landed_row "$sparse_b" "$(printf 'sparse-b-landed-%02d' "$i")" \
+      "$(printf 'Sparse B landed %02d' "$i")" "$(printf '2026-07-%02d' "$((10 - i))")"
+    append_landed_row "$sparse_c" "$(printf 'sparse-c-landed-%02d' "$i")" \
+      "$(printf 'Sparse C landed %02d' "$i")" "$(printf '2026-07-%02d' "$((8 - i))")"
+    i=$((i + 1))
+  done
+  fakebin=$(make_fakebin "$home")
+  json=$(run "$home" "$fakebin" --json)
+  actual=$(printf '%s' "$json" | jq -r '.landed[] | "\(.owner)/\(.id)"')
+  expected='dominant/dominant-landed-01
+sparse-a/sparse-a-landed-01
+sparse-b/sparse-b-landed-01
+sparse-c/sparse-c-landed-01
+dominant/dominant-landed-02
+sparse-a/sparse-a-landed-02'
+  [ "$actual" = "$expected" ] || fail "default landed selection was not balanced across homes: $actual"
+  printf '%s' "$json" | jq -e '
+    (.landed | length) == 6
+      and ([.landed[].owner] | unique | length) == 4
+      and ([.omitted[].surface] | any(test("landed showing 6 of 12")))
+  ' >/dev/null || fail "balanced landed default did not preserve cap disclosure: $json"
+  pass "default landed selection balances one dominant home with sparse homes"
+}
+
+test_landed_default_refills_capacity_after_sparse_homes_exhaust() {
+  local home dominant sparse fakebin json actual expected i
+  home=$(make_home landed-sparse-refill)
+  : > "$home/data/secondmates.md"
+  printf '## Done\n' > "$home/data/backlog.md"
+  dominant=$(make_landed_secondmate "$home" dominant)
+  sparse=$(make_landed_secondmate "$home" sparse)
+  i=1
+  while [ "$i" -le 5 ]; do
+    append_landed_row "$dominant" "$(printf 'dominant-landed-%02d' "$i")" \
+      "$(printf 'Dominant landed %02d' "$i")" "$(printf '2026-07-%02d' "$((20 - i))")"
+    i=$((i + 1))
+  done
+  append_landed_row "$sparse" sparse-landed-01 "Sparse landed 01" 2026-07-01
+  fakebin=$(make_fakebin "$home")
+  json=$(run "$home" "$fakebin" --json)
+  actual=$(printf '%s' "$json" | jq -r '.landed[] | "\(.owner)/\(.id)"')
+  expected='dominant/dominant-landed-01
+sparse/sparse-landed-01
+dominant/dominant-landed-02
+dominant/dominant-landed-03
+dominant/dominant-landed-04
+dominant/dominant-landed-05'
+  [ "$actual" = "$expected" ] || fail "sparse homes wasted landed capacity: $actual"
+  pass "landed selection refills capacity after sparse homes exhaust"
+}
+
+test_landed_default_uses_deterministic_home_order_when_homes_exceed_cap() {
+  local home mate fakebin json actual expected i id
+  home=$(make_home landed-home-order)
+  : > "$home/data/secondmates.md"
+  printf '## Done\n' > "$home/data/backlog.md"
+  i=1
+  while [ "$i" -le 8 ]; do
+    id=$(printf 'home-%02d' "$i")
+    mate=$(make_landed_secondmate "$home" "$id")
+    append_landed_row "$mate" "$id-landed-01" "$id landed 01" 2026-07-10
+    i=$((i + 1))
+  done
+  fakebin=$(make_fakebin "$home")
+  json=$(run "$home" "$fakebin" --json)
+  actual=$(printf '%s' "$json" | jq -r '.landed[] | "\(.owner)/\(.id)"')
+  expected='home-01/home-01-landed-01
+home-02/home-02-landed-01
+home-03/home-03-landed-01
+home-04/home-04-landed-01
+home-05/home-05-landed-01
+home-06/home-06-landed-01'
+  [ "$actual" = "$expected" ] || fail "landed home-order tie was not deterministic: $actual"
+  printf '%s' "$json" | jq -e '
+    ([.omitted[].surface] | any(test("landed showing 6 of 8")))
+  ' >/dev/null || fail "more-homes-than-cap omission was not disclosed: $json"
+  pass "landed selection uses deterministic home order when homes exceed the cap"
+}
+
+test_landed_default_preserves_internal_order_for_ties() {
+  local home tie_a tie_b fakebin json actual expected
+  home=$(make_home landed-ties)
+  : > "$home/data/secondmates.md"
+  printf '## Done\n' > "$home/data/backlog.md"
+  tie_a=$(make_landed_secondmate "$home" tie-a)
+  tie_b=$(make_landed_secondmate "$home" tie-b)
+  append_landed_row "$tie_b" tie-b-a "Tie B A" 2026-07-10
+  append_landed_row "$tie_b" tie-b-z "Tie B Z" 2026-07-10
+  append_landed_row "$tie_a" tie-a-a "Tie A A" 2026-07-10
+  append_landed_row "$tie_a" tie-a-z "Tie A Z" 2026-07-10
+  fakebin=$(make_fakebin "$home")
+  json=$(run "$home" "$fakebin" --json)
+  actual=$(printf '%s' "$json" | jq -r '.landed[] | "\(.owner)/\(.id)"')
+  expected='tie-a/tie-a-z
+tie-b/tie-b-z
+tie-a/tie-a-a
+tie-b/tie-b-a'
+  [ "$actual" = "$expected" ] || fail "landed tie ordering changed: $actual"
+  pass "landed selection preserves deterministic home and internal tie ordering"
+}
+
+test_landed_default_handles_no_landed_items() {
+  local home fakebin json
+  home=$(make_home landed-empty)
+  : > "$home/data/secondmates.md"
+  printf '## Done\n' > "$home/data/backlog.md"
+  fakebin=$(make_fakebin "$home")
+  json=$(run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e '
+    (.landed | length) == 0
+      and ([.omitted[].surface] | any(test("landed")) | not)
+  ' >/dev/null || fail "empty landed set was not handled cleanly: $json"
+  pass "landed selection handles no landed items"
+}
+
+test_all_landed_keeps_complete_global_order() {
+  local home alpha beta fakebin json actual expected
+  home=$(make_home landed-all-order)
+  : > "$home/data/secondmates.md"
+  printf '## Done\n' > "$home/data/backlog.md"
+  alpha=$(make_landed_secondmate "$home" alpha)
+  beta=$(make_landed_secondmate "$home" beta)
+  append_landed_row "$alpha" alpha-old "Alpha old" 2026-07-01
+  append_landed_row "$alpha" alpha-new "Alpha new" 2026-07-09
+  append_landed_row "$beta" beta-new "Beta new" 2026-07-10
+  append_landed_row "$beta" beta-mid "Beta mid" 2026-07-05
+  fakebin=$(make_fakebin "$home")
+  json=$(FM_BEARINGS_LANDED=1 run "$home" "$fakebin" --json --all-landed)
+  actual=$(printf '%s' "$json" | jq -r '.landed[] | "\(.owner)/\(.id)"')
+  expected='beta/beta-new
+alpha/alpha-new
+beta/beta-mid
+alpha/alpha-old'
+  [ "$actual" = "$expected" ] || fail "--all-landed global order changed: $actual"
+  printf '%s' "$json" | jq -e '
+    (.landed | length) == 4
+      and ([.omitted[].surface] | any(test("landed|snapshot layer")) | not)
+  ' >/dev/null || fail "--all-landed no longer revealed the complete landed set: $json"
+  pass "--all-landed keeps the complete global landed output"
+}
+
 # The roll-up stays bounded: a per-home cap and an overall cap, both disclosed in
 # omitted[], with --all-landed as the counted expansion knob. This also covers the
 # previously-silent main-home landed truncation.
@@ -1239,6 +1412,12 @@ test_current_landed_baseline_is_repeatable_and_prior_report_independent
 test_default_is_bounded_and_local_only
 test_toon_json_parity
 test_landed_includes_secondmate_home_merges
+test_landed_default_balances_dominant_and_sparse_homes
+test_landed_default_refills_capacity_after_sparse_homes_exhaust
+test_landed_default_uses_deterministic_home_order_when_homes_exceed_cap
+test_landed_default_preserves_internal_order_for_ties
+test_landed_default_handles_no_landed_items
+test_all_landed_keeps_complete_global_order
 test_landed_bounded_and_disclosed
 test_live_blocker_is_not_charted_queue_work
 test_captains_call_anti_leak
