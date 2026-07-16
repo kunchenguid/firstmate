@@ -103,6 +103,7 @@ if [ -n "$PLAN_PATH" ]; then
     exit 1
   fi
   [ -f "$PLAN_PATH" ] || { echo "error: --plan file not found: $PLAN_PATH" >&2; exit 1; }
+  PLAN_PATH="$(cd "$(dirname "$PLAN_PATH")" && pwd)/$(basename "$PLAN_PATH")"
 fi
 
 if [ "$KIND" = secondmate ] && [ "$HERDR_LAB" -eq 1 ]; then

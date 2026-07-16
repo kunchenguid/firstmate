@@ -314,6 +314,14 @@ test_plan_flag_injects_binding_block() {
   block=$(awk '/^# Task$/{f=1} f{print} /^# Herdr/{exit}' "$brief")
   assert_contains "$block" "{TASK}"$'\n'$'\n'"# Approved plan" \
     "--plan block was not placed immediately after the Task section"
+  # A relative plan path is embedded absolute: the crewmate runs in an isolated
+  # task worktree, so a home-relative path would be unresolvable from its cwd.
+  id="brief-plan-e6"
+  (cd "$home" && FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --plan data/plan.md >/dev/null 2>&1)
+  brief="$home/data/$id/brief.md"
+  assert_present "$brief" "relative-path plan brief was not scaffolded"
+  assert_grep "The approved implementation plan for this task is at \`$plan\`." "$brief" \
+    "--plan did not absolutize a relative plan path"
   pass "fm-brief.sh: --plan injects the binding-plan block naming the path"
 }
 
