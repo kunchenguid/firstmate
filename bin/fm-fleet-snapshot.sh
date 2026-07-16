@@ -15,6 +15,8 @@
 #     data/backlog.md and cover In flight, Queued, and Done.
 #     Canonical tasks-axi rows are structured; free-form non-empty lines in
 #     those sections are preserved as unstructured records.
+#     Structured rows preserve captain-hold metadata such as hold_kind and
+#     hold_reason when tasks-axi emits it.
 #   tasks[]: one row per state/<id>.meta, sorted by id.
 #     current_state is parsed from bin/fm-crew-state.sh <id> and preserves
 #     state, source, detail, and raw line separately.
@@ -33,6 +35,9 @@
 #     each home with explicit provenance, freshness, endpoint evidence, and unknown
 #     failure reasons. Parent status and bounded terminal evidence are historical,
 #     untrusted supplements only and never override a valid structured summary.
+#     Each structured-home record carries active_children, decisions_open, holds,
+#     queued, landed, endpoints, counts, and omitted; captain holds appear in
+#     decisions_open and are also preserved in queued with hold metadata.
 #   secondmate_landed: {records[],truncated[],unreadable[]} - the compatibility
 #     landed-work roll-up derived from secondmate_current.
 #   secondmate_guidance: return-channel action note for renderers and bearings.
@@ -130,6 +135,8 @@ JSON is the stable machine-readable output contract.
 --secondmate-home-summary emits the bounded structured summary used after a
 validated registered-home handoff. It is local-only, skips nested secondmate
 aggregation, and marks missing or unstructured current backlog state invalid.
+Active tasks-axi captain holds appear as decisions_open and stay visible in
+queued with hold_reason and hold_kind for downstream projections.
 Cross-home reads use FM_SNAPSHOT_SECONDMATES (default 20, 0 lifts the count
 bound), FM_SNAPSHOT_SECONDMATE_TIMEOUT, and FM_SNAPSHOT_SECONDMATE_MAX_BYTES.
 Terminal contradiction evidence uses
