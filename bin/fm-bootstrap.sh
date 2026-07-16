@@ -2,7 +2,7 @@
 # Bootstrap detection, best-effort fleet refresh/prune, and installs.
 # Usage: fm-bootstrap.sh
 #          Detect: prints one line per actionable problem, or an explicit
-#          BOOTSTRAP_INFO fact for a completed no-action bootstrap mutation, and
+#          BOOTSTRAP_INFO no-action fact for completed benign bootstrap work, and
 #          exits 0.
 #          Silent = all good.
 #          Lines: "MISSING: <tool> (install: <command>)",
@@ -187,12 +187,13 @@ secondmate_sync() {
   # to the primary checkout's current default-branch commit. Purely LOCAL - no
   # fetch, no origin dependency: a linked-worktree home already holds the primary's
   # commit (fm-ff-lib.sh), while a standalone clone without it is skipped until
-  # /updatefirstmate refreshes it from origin. Emits NUDGE_SECONDMATES:
-  # only for RUNNING secondmates whose instruction surface (AGENTS.md, bin/, or
+  # /updatefirstmate refreshes it from origin. Startup sends reread nudges only
+  # for RUNNING secondmates whose instruction surface (AGENTS.md, bin/, or
   # .agents/skills/) actually changed, so a secondmate already on the primary's
   # version is never disturbed (AGENTS.md bootstrap + supervision). Unlike
   # /updatefirstmate, startup owns the live-convergence send itself because it is
-  # a deterministic locked sweep and can preserve failed sends for retry.
+  # a deterministic locked sweep and can report success as BOOTSTRAP_INFO while
+  # preserving failed sends as NUDGE_SECONDMATES retry markers.
   [ -d "$STATE" ] || return 0
   local primary_head
   if ! primary_head=$(primary_head_commit "$FM_ROOT"); then

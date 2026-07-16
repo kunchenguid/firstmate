@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # Behavior tests for fm-bootstrap.sh reporting and session-start clone refresh bounds.
 #
-# Bootstrap prints one block or line per problem or capability fact and is silent when all
-# is well. firstmate consumes the exact 'MISSING: treehouse (install: ...)',
+# Bootstrap prints one block or line per actionable problem, optional verbose
+# BOOTSTRAP_INFO fact, or completed bootstrap no-action fact and is silent when
+# all is well. firstmate consumes the exact 'MISSING: treehouse (install: ...)',
 # 'MISSING: tasks-axi (install: ...)', 'MISSING: quota-axi (install: ...)', and
-# 'TASKS_AXI: available' lines, so those contracts are pinned verbatim. The cases
+# 'BOOTSTRAP_INFO: ...' lines, so those contracts are pinned verbatim. The cases
 # are table-driven over the inputs that vary: whether `treehouse get --help`
 # advertises --lease, which (if any) tasks-axi version is on PATH, whether
 # tasks-axi update advertises --archive-body, whether its mv help advertises

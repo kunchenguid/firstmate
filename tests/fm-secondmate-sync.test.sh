@@ -12,11 +12,12 @@
 #     and refuses - leaving work untouched - on a dirty, diverged, or
 #     in-flight (feature-branch) home.
 #   - No origin fetch happens in the local-HEAD sync path.
-#   - The bootstrap sweep fast-forwards every live secondmate home and reports a
-#     nudge (NUDGE_SECONDMATES:) ONLY for a running secondmate whose instruction
-#     surface actually changed; an already-current or readme-only home is never
-#     nudged, a skipped home is reported as SECONDMATE_SYNC:, and a home with no
-#     live metadata is never swept.
+#   - The bootstrap sweep fast-forwards every live secondmate home and sends a
+#     reread nudge ONLY for a running secondmate whose instruction surface
+#     actually changed; a successful send is reported as BOOTSTRAP_INFO:, a
+#     failed send is reported as NUDGE_SECONDMATES:, an already-current or
+#     readme-only home is never nudged, a skipped home is reported as
+#     SECONDMATE_SYNC:, and a home with no live metadata is never swept.
 #   - Spawning a secondmate fast-forwards its worktree to the primary's HEAD
 #     before launch, or warns and launches unchanged when the sync is skipped.
 set -u
