@@ -354,25 +354,32 @@ test_plan_flag_missing_file_fails_clearly() {
   pass "fm-brief.sh: --plan validates its path and ship-only scope"
 }
 
-# local-only ship briefs forbid pushing and opening a PR, so the plan block's
-# "list every deviation in the PR body" disclosure rule has no destination there.
-test_plan_flag_rejects_local_only_mode() {
-  local home out status
-  home="$TMP_ROOT/plan-localonly-home"
+# --plan works in every ship mode; the deviation-disclosure destination is
+# mode-aware because local-only opens no PR body to disclose deviations in.
+test_plan_flag_disclosure_is_mode_aware() {
+  local home brief status
+  home="$TMP_ROOT/plan-modeaware-home"
   write_registry "$home"
   printf '# plan\nbody\n' > "$home/data/plan.md"
-  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-plan-e7 local-proj --plan "$home/data/plan.md" 2>&1); status=$?
-  expect_code 1 "$status" "--plan on a local-only brief must fail"
-  assert_contains "$out" "--plan applies only to PR-producing ship briefs (no-mistakes or direct-PR), not local-only" \
-    "--plan local-only rejection error was not clear"
-  assert_absent "$home/data/brief-plan-e7/brief.md" "local-only --plan run still wrote a brief"
 
-  # The PR-producing modes still accept --plan.
-  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-plan-e8 direct-proj --plan "$home/data/plan.md" >/dev/null 2>&1; status=$?
+  # PR-producing modes disclose in the PR body.
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-plan-e7 direct-proj --plan "$home/data/plan.md" >/dev/null 2>&1; status=$?
   expect_code 0 "$status" "--plan on a direct-PR brief should exit 0"
-  assert_grep "# Approved plan" "$home/data/brief-plan-e8/brief.md" \
-    "direct-PR --plan brief lost the approved-plan block"
-  pass "fm-brief.sh: --plan is rejected for local-only delivery mode"
+  brief="$home/data/brief-plan-e7/brief.md"
+  assert_grep "# Approved plan" "$brief" "direct-PR --plan brief lost the approved-plan block"
+  assert_grep 'list EVERY one in the PR body under "Deviations from approved plan"' "$brief" \
+    "direct-PR --plan brief lost the PR-body disclosure destination"
+
+  # local-only accepts --plan and routes disclosure to the done summary, not a PR.
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-plan-e8 local-proj --plan "$home/data/plan.md" >/dev/null 2>&1; status=$?
+  expect_code 0 "$status" "--plan on a local-only brief should exit 0"
+  brief="$home/data/brief-plan-e8/brief.md"
+  assert_grep "# Approved plan" "$brief" "local-only --plan brief lost the approved-plan block"
+  assert_grep 'note EVERY one in your final ready-branch done summary under "Deviations from approved plan"' "$brief" \
+    "local-only --plan brief did not route disclosure to the done summary"
+  assert_no_grep "list EVERY one in the PR body" "$brief" \
+    "local-only --plan brief still referenced a PR body that does not exist for local-only"
+  pass "fm-brief.sh: --plan disclosure destination is mode-aware"
 }
 
 test_plan_flag_absent_is_byte_identical() {
@@ -426,6 +433,6 @@ test_secondmate_no_projects_charter
 test_pause_verb_override_renders_all_brief_scaffolds
 test_plan_flag_injects_binding_block
 test_plan_flag_missing_file_fails_clearly
-test_plan_flag_rejects_local_only_mode
+test_plan_flag_disclosure_is_mode_aware
 test_plan_flag_absent_is_byte_identical
 test_scout_and_secondmate_load_decision_hold_policy

@@ -76,7 +76,7 @@ The crewmate follows the project's selected delivery path to a single PR; there 
 
 Deviation threshold, carried verbatim into every plan artifact:
 
-- **Minor mechanical deviations** (wording, ordering, naming): adapt, and list EVERY one in the PR body under "Deviations from approved plan".
+- **Minor mechanical deviations** (wording, ordering, naming): adapt, and disclose EVERY one where the delivery path surfaces it - the PR body under "Deviations from approved plan" for a PR-producing mode, or the final ready-branch done summary for local-only.
 - **Material deviations** (a different approach, files added or dropped, changed success criteria): STOP, append `needs-decision: plan deviation - {summary}` to the status file, and wait for re-approval.
 
 PR hygiene:
