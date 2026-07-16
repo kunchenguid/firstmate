@@ -15,7 +15,7 @@ This skill is the single policy owner for Firstmate-generated rich-review surfac
 ## Rich-review and decision-input contract
 
 Rich-review surfaces are optional companions for rich reports, visual comparisons, annotated sources, structured evidence, or multi-finding review.
-Keep the primary chat path available, and use it alone for simple yes-or-no decisions.
+Keep the primary chat path available, and use it alone for simple decisions.
 Primary chat is the only approval channel unless the integration has both a durable return path into Firstmate's authoritative workflow and verified submission idempotence with acknowledgement.
 For Lavish 0.1.40, a browser `waiting` or `listening` state proves only the absence or presence of an active poll, `queueKey` replaces only unsent browser entries and is not server idempotence, polling can remove feedback before agent acknowledgement, and the verified SDK cannot prove `sent`, `delivered`, or `acknowledged` state.
 None of those signals satisfies the approval-channel guarantees, and any different behavior after an upstream change must be revalidated before it can be relied upon.
