@@ -686,7 +686,7 @@ registry_secondmates_json() {
       '{present:true,available:false,complete:false,reason:$reason,provenance:"registered-table",path:$path,freshness:{status:"unavailable",observed_at:$observed},records:[],input_truncated:false,records_truncated:false,reasons:[$reason],lines_in_window:0,records_in_window:0}'
     return 0
   fi
-  script=$(cat <<'BASH'
+  IFS= read -r -d '' script <<'BASH' || true
     f=$1
     max_lines=$2
     max_bytes=$3
@@ -735,7 +735,6 @@ registry_secondmates_json() {
       --argjson records_in_window "$records_in_window" \
       --argjson max_records "$max_records" "$output_filter"
 BASH
-  )
   parse_filter=$(cat <<'JQ'
       [ inputs
         | select(startswith("- "))
@@ -784,7 +783,7 @@ bounded_parent_activities_json() {  # <status-file>
     jq -n '{records:[],available:true,input_truncated:false,retained_truncated:false,reasons:[],lines_in_window:0,records_in_window:0}'
     return 0
   fi
-  script=$(cat <<'BASH'
+  IFS= read -r -d '' script <<'BASH' || true
     classify=$1
     f=$2
     max_lines=$3
@@ -847,7 +846,6 @@ bounded_parent_activities_json() {  # <status-file>
          lines_in_window:$lines_in_window,
          records_in_window:$records_in_window}'
 BASH
-  )
   out=$(run_timed "$FM_SNAPSHOT_PARENT_ACTIVITY_TIMEOUT" bash -c "$script" \
     fm-parent-activities "$SCRIPT_DIR/fm-classify-lib.sh" "$f" \
     "$FM_SNAPSHOT_PARENT_ACTIVITY_LINES" "$FM_SNAPSHOT_PARENT_ACTIVITY_BYTES" \

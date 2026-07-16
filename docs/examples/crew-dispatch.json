@@ -11,14 +11,19 @@
       "why": "Use the cheapest fast profile when the task is narrow and low ambiguity."
     },
     {
-      "when": "The task is a big or ambiguous multi-file feature, a risky refactor, or work that requires holding many moving parts in mind.",
+      "when": "The task's primary deliverable is a plan, architecture, or design rather than an implementation or verification result.",
+      "use": { "harness": "codex", "model": "gpt-5.6-sol", "effort": "max" },
+      "why": "Always use Codex max as its own reasoning level for planning, architecture, and design work; do not rewrite it to xhigh."
+    },
+    {
+      "when": "The task's primary deliverable is implementation or verification, including a big or ambiguous multi-file feature, a risky refactor, or work that requires holding many moving parts in mind.",
       "use": [
         { "harness": "claude", "model": "claude-sonnet-5", "effort": "high" },
-        { "harness": "codex", "model": "gpt-5.5", "effort": "high" }
+        { "harness": "codex", "model": "gpt-5.6-sol", "effort": "medium" }
       ],
       "select": "quota-balanced",
-      "why": "Use a strong coding profile for broad design and implementation work."
+      "why": "Use a strong coding profile for broad implementation and verification work."
     }
   ],
-  "default": { "harness": "codex", "model": "gpt-5.5", "effort": "medium" }
+  "default": { "harness": "codex", "model": "gpt-5.6-sol", "effort": "medium" }
 }
