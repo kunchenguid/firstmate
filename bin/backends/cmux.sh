@@ -99,8 +99,9 @@
 #   command 'auth'" reply (cli/cmux.swift, authenticateSocketClientIfNeeded).
 #
 # Requires: cmux (CLI, bundled inside cmux.app - not guaranteed to be on PATH;
-# see fm_backend_cmux_bin), jq (JSON parsing). Both are gated behind selecting
-# this backend; bin/fm-bootstrap.sh's core tool list is unaffected.
+# see fm_backend_cmux_bin), jq (JSON parsing). Bootstrap detects these through
+# fm_backend_required_tools only when cmux is the resolved backend; this adapter
+# also gates them again before spawning.
 
 # FM_HOME fallback: every real caller already sets FM_HOME as a global before
 # sourcing fm-backend.sh (which sources this file); this exists only so this

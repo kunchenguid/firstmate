@@ -14,7 +14,7 @@ Prerequisites:
 - The Orca app installed at `/Applications/Orca.app`, and **running**.
 - The `orca` CLI: `brew install orca`.
 - `node`, used by firstmate's adapter to parse Orca's JSON output and to gate spawns on runtime readiness.
-- The universal firstmate prerequisites minus `tmux` and `treehouse` (Orca replaces both) - a verified crew harness plus the required toolchain, owned by [`docs/configuration.md`](configuration.md) ("Harness support", "Toolchain").
+- The universal firstmate prerequisites - a verified crew harness plus the required toolchain, owned by [`docs/configuration.md`](configuration.md) ("Harness support", "Toolchain") - with `orca` as the only backend-specific tool, since Orca replaces both the session multiplexer CLI and the `treehouse` worktree provider that the other backends require.
 
 Select Orca by putting `orca` in a local `config/backend` file - the durable way to pick it - or by exporting `FM_BACKEND=orca` when you launch your harness for a one-off session; telling the first mate in chat to use Orca also works.
 It is never auto-detected.
@@ -86,7 +86,7 @@ Operation routing:
 
 Teardown:
 
-- Scout teardown still requires `data/<id>/report.md` unless `--force` is explicitly used.
+- Scout teardown still requires `data/<id>/report.md` and the shared unresolved-decision completion gate unless `--force` is explicitly used.
 - Ship teardown still refuses dirty or unlanded work before any terminal/worktree cleanup.
 - Ship teardown resolves `orca_worktree_id` back through Orca and verifies it matches the inspected `worktree=` path before removing anything; mismatches or uninspectable paths preserve metadata and fail closed.
 - After the existing firstmate safety checks pass, teardown closes the recorded Orca terminal and releases the recorded worktree through `orca worktree rm --worktree id:<orca_worktree_id> --force`.

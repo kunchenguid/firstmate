@@ -66,6 +66,14 @@ Briefs for tasks that touch firstmate's own tracked material should tell the cre
 Firstmate adds this skill's load instruction to firstmate-repo briefs by hand instead.
 `CONTRIBUTING.md`'s "Development" section carries the same instruction as a durable reminder.
 
+## Compatibility and enforcement
+
+Before changing shared tracked behavior, review every affected supported primary harness and runtime backend rather than checking only the adapters active in the current fleet.
+Mark an axis not applicable only after inspecting its integration surface, and update the corresponding verification evidence when behavior changes.
+
+For critical safety, routing, startup, and supervision infrastructure, prefer deterministic and idempotent enforcement over relying on agent memory alone.
+Keep instructions as the authority and discovery layer, but make repeated execution converge safely and make invalid or unsafe states fail closed wherever the runtime can enforce them.
+
 ## Repo style rules
 
 - Put one full sentence per line in tracked Markdown.
@@ -73,7 +81,7 @@ Firstmate adds this skill's load instruction to firstmate-repo briefs by hand in
 - Plain dash `-`, never an em dash.
 - Never add an agent name as a commit co-author.
 - `bin/*.sh` and `bin/backends/*.sh` must pass `shellcheck`.
-- Run `shellcheck bin/*.sh bin/backends/*.sh tests/*.sh` before treating a script change as done.
+- Run `bin/fm-lint.sh` before treating a script change as done; it is the single owner of the lint definition (file set, config, and pinned shellcheck version) that CI and the no-mistakes pre-push gate both invoke, and it refuses to run under any other shellcheck version.
 - Colocate tests with the existing pattern in `tests/`, name them `<subject>.test.sh`, and extend an existing script rather than inventing a new runner.
 - A backend-verification doc (`docs/*-backend.md`) records empirical facts, not assumptions.
 - Include the date, version, exact commands run, and exact output.

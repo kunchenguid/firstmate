@@ -7,6 +7,10 @@ set -u
 
 TMP_ROOT=$(fm_test_tmproot fm-pi-watch-extension)
 EXT="$ROOT/.pi/extensions/fm-primary-pi-watch.ts"
+# Node 24 warns when these test-only dynamic imports load tracked ESM plugins
+# from a clean checkout with no tracked .opencode/package.json. The warning is
+# unrelated to plugin output, which the assertions intentionally require empty.
+export NODE_NO_WARNINGS=1
 
 install_pi_watch_extension_fixture() {
   local repo=$1

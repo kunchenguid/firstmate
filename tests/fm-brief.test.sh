@@ -66,6 +66,29 @@ test_ship_modes_generate_clean_briefs() {
   pass "fm-brief.sh: no-mistakes/direct-PR/local-only briefs generate cleanly"
 }
 
+test_faster_paths_use_configured_authority_without_stacked_review() {
+  local home id brief
+  home="$TMP_ROOT/configured-authority-home"
+  write_registry "$home"
+  id="brief-direct-authority-a4"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" direct-proj >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_grep "The configured merge authority decides whether to merge the PR; firstmate relays the outcome." "$brief" \
+    "direct-PR brief lost configured merge authority"
+  assert_no_grep "The captain reviews and merges the PR" "$brief" \
+    "direct-PR brief hard-coded captain-only authority"
+  id="brief-local-authority-a4"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" local-proj >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_grep "The configured merge authority approves the ready branch, then firstmate merges it into local \`main\` through the guarded fast-forward path." "$brief" \
+    "local-only brief lost configured merge authority and guarded landing"
+  assert_no_grep "The captain approves the ready branch" "$brief" \
+    "local-only brief hard-coded captain-only authority"
+  assert_no_grep "Firstmate then reviews your branch diff" "$brief" \
+    "local-only brief retained a personal review stacked on the selected delivery path"
+  pass "fm-brief.sh: faster paths use configured authority without stacked review"
+}
+
 # Pin the specific line the bug lived on: the no-mistakes DOD's no-mistakes
 # reference must render as plain prose with no dangling apostrophe artifact.
 test_no_mistakes_dod_wording() {
@@ -188,6 +211,12 @@ test_secondmate_no_projects_charter() {
     "project-less charter operating model lost the pooled-worktree note"
   assert_no_grep "The projects above are local clones" "$brief" \
     "project-less charter kept the with-projects operating-model line"
+  assert_grep 'working [key=<work-slug>]' "$brief" \
+    "secondmate charter did not key material routed-work phases"
+  assert_grep 'resolved [key=<work-slug>]' "$brief" \
+    "secondmate charter did not close a quietly ended routed-work phase"
+  assert_grep 'use the same key on its later' "$brief" \
+    "secondmate charter did not supersede working phases with later states"
   if grep -nE '^-[[:space:]]*$' "$brief" >/dev/null; then
     fail "project-less charter left a stray empty project bullet"
   fi
@@ -254,13 +283,35 @@ test_pause_verb_override_renders_all_brief_scaffolds() {
     # shellcheck disable=SC2016 # Literal backticks and braces must remain unexpanded.
     assert_no_grep '`paused: {why}`' "$brief" \
       "$kind brief still instructs the default paused status"
+    assert_grep 'or a blocker clears' "$brief" \
+      "$kind brief did not require durable resolution when a blocker clears"
   done
   pass "fm-brief.sh: custom pause verb renders in every scaffold"
+}
+
+test_scout_and_secondmate_load_decision_hold_policy() {
+  local home scout charter
+  home="$TMP_ROOT/decision-policy-home"
+  mkdir -p "$home/data"
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    "$ROOT/bin/fm-brief.sh" sample-investigation sample --scout >/dev/null 2>&1
+  scout="$home/data/sample-investigation/brief.md"
+  assert_grep "$ROOT/.agents/skills/decision-hold-lifecycle/SKILL.md" "$scout" \
+    "scout brief did not load the unresolved-decision policy before done"
+  assert_grep "pass its shared completion gate for the report and any visual review" "$scout" \
+    "scout brief did not cross-reference visual-review completion"
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_SECONDMATE_CHARTER='sample reviews' \
+    "$ROOT/bin/fm-brief.sh" sample-mate --secondmate --no-projects >/dev/null 2>&1
+  charter="$home/data/sample-mate/brief.md"
+  assert_grep "load \`decision-hold-lifecycle\`" "$charter" \
+    "secondmate charter did not load the shared decision policy for detailed investigations"
+  pass "fm-brief.sh: investigation and visual-review completions load the shared decision policy"
 }
 
 test_script_parses
 test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
+test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
 test_ship_project_memory_wording
 test_herdr_lab_contract_is_explicit_and_complete
@@ -269,3 +320,4 @@ test_herdr_lab_omission_is_loud_for_ship_and_scout
 test_herdr_lab_contract_applies_to_scouts_but_not_secondmates
 test_secondmate_no_projects_charter
 test_pause_verb_override_renders_all_brief_scaffolds
+test_scout_and_secondmate_load_decision_hold_policy

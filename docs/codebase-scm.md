@@ -20,7 +20,7 @@ That fetch only accepts a fully-qualified `refs/` name, passed after a `--` sepa
 Branch discovery uses `bytedcli --json codebase mr list -R <repo-path> --state merged --head <branch> -L 1`.
 Merges use `bytedcli codebase mr merge <number> -R <repo-path>`.
 
-Codebase merge defaults to `--merge-method merge_commit --squash-commits true`, matching firstmate's historical squash default.
+Codebase merge defaults to `--merge-method merge_commit --squash-commits false`: a real merge commit, never a squash, unlike GitHub's `--squash` default above.
 For compatibility with existing firstmate commands, `bin/fm-pr-merge.sh` maps `-- --squash` to `merge_commit` with `--squash-commits true`, `-- --merge` to `merge_commit` with `--squash-commits false`, and `-- --rebase` to `rebase_merge` with `--squash-commits false`.
 It also accepts explicit Codebase flags such as `--merge-method`, `--squash-commits`, `--remove-source-branch`, `--merge-commit-message`, and `--squash-commit-message`.
 Repository and MR override flags are refused because the repo and MR must come from the full URL.

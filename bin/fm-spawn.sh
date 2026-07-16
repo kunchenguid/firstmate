@@ -114,6 +114,11 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-config-inherit-lib.sh"
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
+# shellcheck source=bin/fm-gate-refuse-lib.sh
+. "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
+# Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
+# a direct report (see bin/fm-gate-refuse-lib.sh).
+fm_refuse_if_gate_agent
 # Skip the watcher guard when re-exec'd for one pair of a batch (FM_SPAWN_NO_GUARD is
 # set by the batch loop below), so the guard runs once for the batch, not once per pair.
 [ -n "${FM_SPAWN_NO_GUARD:-}" ] || "$FM_ROOT/bin/fm-guard.sh" || true
@@ -502,17 +507,18 @@ effort_flag_for_harness() {
       ;;
     grok)
       # grok exposes both --effort and --reasoning-effort; firstmate's profile
-      # axis is the reasoning knob, and --reasoning-effort rejects max, so pass
-      # only its accepted shared vocabulary subset.
+      # axis is the reasoning knob. As of grok 0.2.99, --reasoning-effort accepts
+      # only low|medium|high and rejects both xhigh and max, so omit those rather
+      # than passing a known-bad value.
       case "$effort" in
-        low|medium|high|xhigh) printf -- '--reasoning-effort %s ' "$(shell_quote "$effort")" ;;
+        low|medium|high) printf -- '--reasoning-effort %s ' "$(shell_quote "$effort")" ;;
       esac
       ;;
     pi)
-      # pi accepts --thinking low|medium|high|xhigh. It warns and ignores max, so
-      # omit max rather than passing a flag the installed CLI will reject as invalid.
+      # Pi 0.80.6 accepts the full shared effort vocabulary, including max, through
+      # its --thinking flag.
       case "$effort" in
-        low|medium|high|xhigh) printf -- '--thinking %s ' "$(shell_quote "$effort")" ;;
+        low|medium|high|xhigh|max) printf -- '--thinking %s ' "$(shell_quote "$effort")" ;;
       esac
       ;;
     # opencode's interactive `opencode --prompt` launch has a verified --model
@@ -1085,7 +1091,7 @@ EOF
   esac
 fi
 
-# Per-project delivery mode + yolo flag (bin/fm-project-mode.sh; AGENTS.md project management and task lifecycle).
+# Per-project delivery mode + yolo flag (bin/fm-project-mode.sh; the project-management skill and AGENTS.md task lifecycle).
 # Recorded in meta so fm-teardown's safety check and the validate/merge stages can
 # branch on them. Mode governs ship tasks; a scout's deliverable is a report, not a
 # merge, so scout teardown ignores mode.

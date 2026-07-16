@@ -29,11 +29,12 @@
 # teardown refuses rather than risk discarding unlanded work.
 # Uncommitted changes are never landed.
 # local-only projects additionally accept work merged into the local default
-# branch (firstmate performs that merge on the captain's approval) as a fallback
+# branch (firstmate performs that merge after configured approval) as a fallback
 # for the common case where there is no remote at all.
 # Scout tasks (kind=scout in meta) carve out of that check: their worktree is
 # declared scratch and the report at data/<task-id>/report.md is the work
-# product - teardown proceeds once the report exists, and refuses without it.
+# product. Teardown proceeds only once the report exists and the shared
+# unresolved-decision completion gate verifies its captain-held inventory.
 # Orca tasks use the same safety checks, then close the recorded terminal and
 # remove the recorded worktree through `orca worktree rm`; teardown never guesses
 # an Orca target from ambient CLI state.
@@ -65,17 +66,15 @@
 #      deserves a retry of the return.
 #   2. Other treehouse return failures still abort immediately and loudly (no retry).
 #   3. If every retry still hits the lock signature and the lock remains, it is removed
-#      and the return tried once more ONLY when the lock is provably stale, meaning ALL
-#      of the following hold:
-#        a. the lock file still exists after the retry window;
-#        b. its mtime age is at least FM_STALE_WORKTREE_LOCK_AGE_SECS (default 30s) - a
-#           freshly created lock might belong to a process `lsof` has not yet reflected;
-#        c. `lsof` reports no process holding the lock file open, and no process has the
-#           worktree directory itself open (as cwd or an fd).
+#      and the return tried once more ONLY when the lock is provably stale per
+#      bin/fm-lock-lib.sh's fm_lock_is_provably_stale, passing the worktree dir as the
+#      companion directory and FM_STALE_WORKTREE_LOCK_AGE_SECS (default 30s) as the age
+#      threshold. That shared proof owns the exact lsof-holder, mtime-age, and fail-safe
+#      rules.
 #   4. If retries exhaust and the lock is not provably stale, teardown fails as loudly
 #      as a normal return failure and notes that the lock persisted across the retry
-#      window. A missing `lsof`, or a lock that fails any of the three stale checks, is
-#      treated as NOT provably stale (fail safe): the lock is left untouched.
+#      window. A missing `lsof`, or a lock that fails any stale check, is treated as
+#      NOT provably stale (fail safe): the lock is left untouched.
 # The same proof is used when non-force safety inspection cannot run because the lock
 # is present; teardown clears only a provably stale lock, then re-runs the safety
 # checks before any destructive return. Teardown output notes every wait, retry, and
@@ -98,6 +97,14 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-scm-lib.sh
 . "$SCRIPT_DIR/fm-scm-lib.sh"
+# shellcheck source=bin/fm-lock-lib.sh
+. "$SCRIPT_DIR/fm-lock-lib.sh"
+# shellcheck source=bin/fm-gate-refuse-lib.sh
+. "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
+# Fail closed before any fleet mutation: a no-mistakes gate agent must never tear
+# down a worktree (see bin/fm-gate-refuse-lib.sh).
+fm_refuse_if_gate_agent
+FM_LOCK_LOG_PREFIX=teardown
 "$FM_ROOT/bin/fm-guard.sh" || true
 ID=$1
 FORCE=${2:-}
@@ -483,70 +490,10 @@ worktree_git_lock_path() {
   esac
 }
 
-lsof_path_has_holder() {
-  local target=$1 output status
-  if output=$(lsof -- "$target" 2>&1); then
-    return 0
-  else
-    status=$?
-  fi
-  if [ "$status" -eq 1 ] && [ -z "$output" ]; then
-    return 1
-  fi
-  if [ -n "$output" ]; then
-    printf '%s\n' "$output" | sed 's/^/teardown: lsof check failed: /' >&2
-  else
-    echo "teardown: lsof check failed for $target with exit $status" >&2
-  fi
-  return 2
-}
-
-# Does any live process hold $lock open, or hold the worktree $dir itself open
-# (as cwd or an fd)? See the script header for why this proves liveness. A
-# missing lsof is treated as "cannot prove no holder" (fail safe: assume live).
-worktree_lock_has_live_holder() {
-  local lock=$1 dir=$2 status
-  command -v lsof >/dev/null 2>&1 || return 0
-  if [ -n "$lock" ]; then
-    if lsof_path_has_holder "$lock"; then
-      return 0
-    else
-      status=$?
-      [ "$status" -eq 1 ] || return 0
-    fi
-  fi
-  if [ -n "$dir" ]; then
-    if lsof_path_has_holder "$dir"; then
-      return 0
-    else
-      status=$?
-      [ "$status" -eq 1 ] || return 0
-    fi
-  fi
-  return 1
-}
-
-worktree_lock_age() {
-  local lock=$1 m now
-  m=$(fm_path_mtime "$lock") || return 1
-  case "$m" in ''|*[!0-9]*) return 1 ;; esac
-  now=$(date +%s) || return 1
-  case "$now" in ''|*[!0-9]*) return 1 ;; esac
-  printf '%s\n' "$(( now - m ))"
-}
-
-# Is $lock provably stale per the header's staleness proof? Returns non-zero
-# (never remove) unless the lock exists, has no live holder, and is old enough.
-worktree_lock_is_provably_stale() {
-  local lock=$1 dir=$2 age
-  [ -n "$lock" ] && [ -e "$lock" ] || return 1
-  worktree_lock_has_live_holder "$lock" "$dir" && return 1
-  if ! age=$(worktree_lock_age "$lock"); then
-    echo "teardown: cannot read mtime for git lock $lock; leaving it in place" >&2
-    return 1
-  fi
-  [ "$age" -ge "$STALE_WORKTREE_LOCK_AGE_SECS" ]
-}
+# The lock-staleness proof (lsof holder check, mtime age, fail-safe defaults)
+# is owned by bin/fm-lock-lib.sh's fm_lock_is_provably_stale, sourced above.
+# Teardown passes the worktree dir as the companion directory and its own
+# STALE_WORKTREE_LOCK_AGE_SECS threshold.
 
 worktree_safety_blocked_by_lock() {
   local reason=$1 lock
@@ -569,7 +516,7 @@ cleanup_stale_lock_for_safety_check() {
     return 0
   fi
 
-  if worktree_lock_is_provably_stale "$lock" "$dir"; then
+  if fm_lock_is_provably_stale "$lock" "$dir" "$STALE_WORKTREE_LOCK_AGE_SECS"; then
     rm -f "$lock"
     echo "teardown: removed provably-stale git lock $lock (age >= ${STALE_WORKTREE_LOCK_AGE_SECS}s, no live holder) and retrying worktree safety checks" >&2
     return 0
@@ -630,7 +577,7 @@ teardown_treehouse_return() {
   lock=$(worktree_git_lock_path "$dir") || lock=""
   if [ -n "$lock" ] && [ -e "$lock" ]; then
     lock_desc=$lock
-    if worktree_lock_is_provably_stale "$lock" "$dir"; then
+    if fm_lock_is_provably_stale "$lock" "$dir" "$STALE_WORKTREE_LOCK_AGE_SECS"; then
       rm -f "$lock"
       echo "teardown: removed provably-stale git lock $lock (age >= ${STALE_WORKTREE_LOCK_AGE_SECS}s, no live holder) and retrying $label return" >&2
       if [ -n "$post_cleanup_check" ]; then
@@ -1068,6 +1015,12 @@ if [ "$KIND" = scout ] && [ "$FORCE" != "--force" ]; then
     echo "The report is the work product. Have the crewmate write it, or use --force after explicit discard approval." >&2
     exit 1
   fi
+  if ! FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
+      FM_CONFIG_OVERRIDE="$CONFIG" "$SCRIPT_DIR/fm-decision-hold.sh" verify "$ID" >/dev/null; then
+    echo "REFUSED: scout task $ID has not passed the unresolved-decision completion gate." >&2
+    echo "Inventory its report and any visual review through bin/fm-decision-hold.sh before teardown." >&2
+    exit 1
+  fi
 fi
 
 if [ "$BACKEND" = orca ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$FORCE" != "--force" ]; then
@@ -1143,6 +1096,7 @@ if [ "$KIND" = secondmate ]; then
   remove_secondmate_registry_entry "$ID"
 fi
 remove_grok_turnend_auth "$STATE" "$ID"
+fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
 # Remove the per-task temp root (/tmp/fm-<id>/, incl. its gotmp/) recorded by spawn.
 # Read before the state-file rm below; empty (pre-fix tasks without tasktmp=) is a no-op.
 [ -n "$TASK_TMP" ] && rm -rf "$TASK_TMP"

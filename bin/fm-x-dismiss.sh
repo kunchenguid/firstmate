@@ -12,9 +12,11 @@
 #
 # POSTs {"request_id":"<id>"} (no text - a dismiss has no body) to
 # $RELAY/connector/dismiss with the bearer token. On success (2xx) it echoes ONLY
-# the request_id; on a non-2xx (or transport failure) it exits non-zero so the
-# caller knows the dismiss did not land and can fall back to leaving the inbox
-# file for a later pass.
+# the request_id and clears the request's durable per-request reply context
+# (state/x-context/<id>.json; a dismissed mention never gets a follow-up); on a
+# non-2xx (or transport failure) it exits non-zero so the caller knows the
+# dismiss did not land and can fall back to leaving the inbox file for a later
+# pass.
 #
 # Live post config (home .env, FMX_ENV_FILE, or env): FMX_PAIRING_TOKEN
 # (required), FMX_RELAY_URL (default https://myfirstmate.io). Auth:
@@ -77,6 +79,9 @@ if [ -n "$FMX_DRY" ]; then
     echo "fm-x-dismiss: cannot write dry-run outbox: $outbox_file" >&2
     exit 1
   }
+  # A dismissed mention will never get a follow-up, so drop its durable
+  # per-request reply context too. Best-effort; a no-op when none was recorded.
+  fmx_context_registry_clear "$STATE" "$REQ"
   printf 'fm-x-dismiss: DRY RUN - would POST to %s/connector/dismiss (recorded: state/x-outbox/%s.json)\n' \
     "$FMX_RELAY" "$REQ" >&2
   printf '%s\n' "$REQ"
@@ -105,6 +110,11 @@ code=$(curl -m 10 -s -o /dev/null -w '%{http_code}' \
 }
 
 case "$code" in
-  2[0-9][0-9]) printf '%s\n' "$REQ" ;;
+  2[0-9][0-9])
+    # Dropped at the relay: no follow-up will come, so clear the durable
+    # per-request reply context too (best-effort, no-op when none was recorded).
+    fmx_context_registry_clear "$STATE" "$REQ"
+    printf '%s\n' "$REQ"
+    ;;
   *) echo "fm-x-dismiss: relay returned HTTP $code" >&2; exit 1 ;;
 esac

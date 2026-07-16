@@ -975,6 +975,7 @@ test_reply_followup_live_posts_to_followup_endpoint() {
   log="$home/curl.log"
   printf 'FMX_PAIRING_TOKEN=tok-fu\n' > "$home/.env"
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_RELAY_URL="https://relay.test" \
+    FMX_REPLY_PLATFORM=x FMX_REPLY_MAX_CHARS=280 \
     FAKE_CURL_LOG="$log" FAKE_FOLLOWUP_CODE=200 \
     "$ROOT/bin/fm-x-reply.sh" "req-7" --followup "Done, captain - the fix has shipped."); rc=$?
   expect_code 0 "$rc" "followup live exit"
@@ -997,6 +998,7 @@ test_reply_followup_409_marker_exits_distinctly() {
   err="$home/err.txt"
   printf 'FMX_PAIRING_TOKEN=tok-fu\n' > "$home/.env"
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_RELAY_URL="https://relay.test" \
+    FMX_REPLY_PLATFORM=x FMX_REPLY_MAX_CHARS=280 \
     FAKE_FOLLOWUP_CODE=409 FAKE_FOLLOWUP_BODY='{"error":"followup_unavailable"}' \
     "$ROOT/bin/fm-x-reply.sh" "req-409-marker" --followup "Late follow-up." 2>"$err"); rc=$?
   expect_code 9 "$rc" "followup 409 marker exit"
@@ -1013,12 +1015,14 @@ test_reply_followup_409_without_marker_still_exits_distinctly() {
   err="$home/err.txt"
   printf 'FMX_PAIRING_TOKEN=tok-fu\n' > "$home/.env"
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_RELAY_URL="https://relay.test" \
+    FMX_REPLY_PLATFORM=x FMX_REPLY_MAX_CHARS=280 \
     FAKE_FOLLOWUP_CODE=409 \
     "$ROOT/bin/fm-x-reply.sh" "req-409-bare" --followup "Late follow-up." 2>"$err"); rc=$?
   expect_code 9 "$rc" "followup bare 409 exit"
   [ -z "$out" ] || fail "followup bare 409 must not echo the request_id (got: $out)"
   assert_grep "marker absent" "$err" "bare followup 409 must use the fallback diagnostic"
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_RELAY_URL="https://relay.test" \
+    FMX_REPLY_PLATFORM=x FMX_REPLY_MAX_CHARS=280 \
     FAKE_FOLLOWUP_CODE=409 FAKE_FOLLOWUP_BODY='{"error":"some_other_conflict"}' \
     "$ROOT/bin/fm-x-reply.sh" "req-409-other" --followup "Late follow-up." 2>"$err"); rc=$?
   expect_code 9 "$rc" "followup unrelated-body 409 exit"
@@ -1053,6 +1057,7 @@ test_reply_followup_image_live_posts_image_object() {
   expected=$(base64 < "$img" | tr -d '\n\r')
   printf 'FMX_PAIRING_TOKEN=tok-fu-img\n' > "$home/.env"
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_RELAY_URL="https://relay.test" \
+    FMX_REPLY_PLATFORM=x FMX_REPLY_MAX_CHARS=280 \
     FAKE_CURL_LOG="$log" FAKE_FOLLOWUP_CODE=200 \
     "$ROOT/bin/fm-x-reply.sh" "req-fu-img" --followup --image "$img" \
     "Done - here is the generated image."); rc=$?
@@ -1076,6 +1081,7 @@ test_reply_followup_flag_position_is_flexible() {
   # --followup AFTER the text source must still select the followup endpoint.
   log="$home/after.log"
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_RELAY_URL="https://relay.test" \
+    FMX_REPLY_PLATFORM=x FMX_REPLY_MAX_CHARS=280 \
     FAKE_CURL_LOG="$log" FAKE_FOLLOWUP_CODE=200 \
     "$ROOT/bin/fm-x-reply.sh" "req-a" --text-file "$home/reply.txt" --followup); rc=$?
   expect_code 0 "$rc" "followup-after-textfile exit"
@@ -1093,7 +1099,7 @@ test_reply_followup_flag_position_is_flexible() {
 test_reply_followup_dry_run_marks_endpoint() {
   local home out rc
   home="$TMP_ROOT/reply-followup-dry"; mkdir -p "$home"
-  out=$(FM_HOME="$home" FMX_DRY_RUN=1 \
+  out=$(FM_HOME="$home" FMX_DRY_RUN=1 FMX_REPLY_PLATFORM=x FMX_REPLY_MAX_CHARS=280 \
     "$ROOT/bin/fm-x-reply.sh" "req-d" --followup "Shipped - all green." 2>"$home/err"); rc=$?
   expect_code 0 "$rc" "followup dry-run exit"
   [ "$out" = "req-d" ] || fail "followup dry-run must echo the request_id (got: $out)"
@@ -1114,7 +1120,10 @@ test_reply_followup_thread_dry_run() {
   local home out long
   home="$TMP_ROOT/reply-followup-thread"; mkdir -p "$home"
   long="The captain has me on a sign-in redirect fix, a docs tidy, and keeping the build green while other jobs run in the background today."
+  # This test exercises follow-up thread-split + endpoint-marker mechanics for a
+  # fully resolved X follow-up.
   out=$(FM_HOME="$home" FMX_DRY_RUN=1 FMX_X_REPLY_MAX_CHARS=50 \
+    FMX_REPLY_PLATFORM=x FMX_REPLY_MAX_CHARS=50 \
     "$ROOT/bin/fm-x-reply.sh" req-ft --followup "$long" 2>/dev/null)
   [ "$out" = "req-ft" ] || fail "followup thread dry-run must echo the request_id (got: $out)"
   jq -e '.texts and (.texts|length>1)' "$home/state/x-outbox/req-ft.json" >/dev/null \
@@ -1131,7 +1140,7 @@ test_reply_followup_image_dry_run_marks_endpoint_and_compacts_image() {
   home="$TMP_ROOT/reply-followup-image-dry"; mkdir -p "$home"
   img="$home/result.gif"
   make_sample_image "$img"
-  out=$(FM_HOME="$home" FMX_DRY_RUN=1 \
+  out=$(FM_HOME="$home" FMX_DRY_RUN=1 FMX_REPLY_PLATFORM=x FMX_REPLY_MAX_CHARS=280 \
     "$ROOT/bin/fm-x-reply.sh" "req-fu-img-dry" --followup --image "$img" "Done with art." \
     2>"$home/err"); rc=$?
   expect_code 0 "$rc" "followup image dry-run exit"
@@ -1143,6 +1152,349 @@ test_reply_followup_image_dry_run_marks_endpoint_and_compacts_image() {
   jq -e '.image | has("data_base64") | not' "$home/state/x-outbox/req-fu-img-dry.json" >/dev/null \
     || fail "followup image dry-run must omit base64 bytes"
   pass "fm-x-reply followup dry-run keeps endpoint marker and compact image metadata"
+}
+
+# --- durable per-request context registry + follow-up platform fail-safe ------
+# Regression: a Discord milestone follow-up posted DIRECTLY by request_id (no task
+# link, because one persistent secondmate's single x_request slot was already
+# taken by a concurrent request) AFTER the inbox was drained silently defaulted to
+# the X 280-char budget and threaded a >280 Discord reply as "(1/2)". The fix: the
+# poll records a durable per-request reply-context registry, fm-x-reply resolves
+# platform/budget through registry -> inbox -> relay, and refuses to split an
+# unresolved follow-up.
+
+test_poll_records_context_registry_from_relay_platform() {
+  local home fakebin out rc body reg
+  home="$TMP_ROOT/poll-registry"; mkdir -p "$home"
+  fakebin=$(make_fake_curl "$home")
+  printf 'FMX_PAIRING_TOKEN=tok-reg\n' > "$home/.env"
+  # An explicit Discord mention: the registry must capture platform=discord.
+  body=$(jq -cn '{request_id:"req-disc",platform:"discord",reply_max_chars:1900,text:"question from discord"}')
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_RELAY_URL="https://relay.test" \
+    FMX_NOW_OVERRIDE=1700000000 \
+    FAKE_POLL_CODE=200 FAKE_POLL_BODY="$body" "$ROOT/bin/fm-x-poll.sh"); rc=$?
+  expect_code 0 "$rc" "poll discord registry exit"
+  [ "$out" = "x-mention req-disc" ] || fail "poll must still print the wake marker (got: $out)"
+  reg="$home/state/x-context/req-disc.json"
+  assert_present "$reg" "poll must record the durable per-request context"
+  [ "$(jq -r .platform "$reg")" = "discord" ] || fail "registry must capture the Discord platform"
+  [ "$(jq -r .reply_max_chars "$reg")" = "1900" ] || fail "registry must capture the Discord reply budget"
+  [ "$(jq -r .recorded_at "$reg")" = "1700000000" ] || fail "registry must timestamp the context locally"
+  # A numeric-tweet_id X mention: the registry must capture platform=x.
+  body=$(jq -cn '{request_id:"req-x",tweet_id:"1234567890",reply_max_chars:280,text:"question from x"}')
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_RELAY_URL="https://relay.test" \
+    FAKE_POLL_CODE=200 FAKE_POLL_BODY="$body" "$ROOT/bin/fm-x-poll.sh"); rc=$?
+  expect_code 0 "$rc" "poll x registry exit"
+  [ "$(jq -r .platform "$home/state/x-context/req-x.json")" = "x" ] \
+    || fail "registry must capture the X platform from a numeric tweet_id"
+  # A mention with no platform signal at all: no useless empty record is written.
+  body=$(jq -cn '{request_id:"req-unk",text:"platformless question"}')
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_RELAY_URL="https://relay.test" \
+    FAKE_POLL_CODE=200 FAKE_POLL_BODY="$body" "$ROOT/bin/fm-x-poll.sh"); rc=$?
+  expect_code 0 "$rc" "poll unknown-platform exit"
+  assert_present "$home/state/x-inbox/req-unk.json" "an unknown-platform mention is still stashed"
+  assert_absent "$home/state/x-context/req-unk.json" \
+    "no registry record is written when the platform is unknown (no dead entry)"
+  pass "fm-x-poll records the durable per-request reply context from the relay payload"
+}
+
+test_context_registry_prunes_expired_records() {
+  local home dir fakebin keep preserved legacy malformed future out rc
+  home="$TMP_ROOT/registry-retention"
+  dir="$home/state/x-context"
+  mkdir -p "$dir"
+  keep="$dir/req-keep.json"
+  preserved="$dir/req-iP49shRy-8ue4dtxEo87Yw.json"
+  legacy="$dir/req-legacy.json"
+  malformed="$dir/req-malformed.json"
+  future="$dir/req-future.json"
+  jq -cn '{request_id:"req-expired",platform:"x",reply_max_chars:"280",recorded_at:1699395199}' \
+    > "$dir/req-expired.json"
+  jq -cn '{request_id:"req-keep",platform:"discord",reply_max_chars:"1900",recorded_at:1699395200}' \
+    > "$keep"
+  jq -cn '{request_id:"req-iP49shRy-8ue4dtxEo87Yw",platform:"x",reply_max_chars:"280",recorded_at:1700000000}' \
+    > "$preserved"
+  jq -cn '{request_id:"req-legacy",platform:"discord",reply_max_chars:"1900"}' > "$legacy"
+  printf '{not-json\n' > "$malformed"
+  jq -cn '{request_id:"req-future",platform:"x",reply_max_chars:"280",recorded_at:"9999999999999999999"}' \
+    > "$future"
+  touch -t 202001010000 "$legacy" "$malformed" "$future"
+  out=$(FMX_NOW_OVERRIDE=1700000000 bash -c \
+    '. "$1/bin/fm-x-lib.sh"; fmx_context_registry_get "$2" req-keep' _ "$ROOT" "$home/state")
+  [ "$(printf '%s' "$out" | jq -r .platform)" = "discord" ] \
+    || fail "a record exactly seven days old must remain usable"
+  assert_absent "$dir/req-expired.json" "a registry record beyond seven days must be pruned"
+  assert_present "$keep" "a registry record at the seven-day boundary must remain"
+  assert_present "$preserved" "the preserved request must remain while it is within the follow-up window"
+  assert_absent "$legacy" "an expired legacy record must be pruned using its file timestamp"
+  assert_absent "$malformed" "an expired malformed record must be pruned using its file timestamp"
+  assert_absent "$future" "an absurd future timestamp must fall back to bounded file age"
+  fakebin=$(make_fake_curl "$home")
+  printf 'FMX_PAIRING_TOKEN=tok-retention\n' > "$home/.env"
+  jq -cn '{request_id:"req-poll-expired",platform:"x",reply_max_chars:"280",recorded_at:1699395199}' \
+    > "$dir/req-poll-expired.json"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_NOW_OVERRIDE=1700000000 \
+    FMX_RELAY_URL="https://relay.test" FAKE_POLL_CODE=204 "$ROOT/bin/fm-x-poll.sh"); rc=$?
+  expect_code 0 "$rc" "poll retention sweep exit"
+  [ -z "$out" ] || fail "a 204 poll retention sweep must stay silent (got: $out)"
+  assert_absent "$dir/req-poll-expired.json" "a recurring empty poll must prune expired registry records"
+  jq -cn '{request_id:"req-short-window",platform:"x",reply_max_chars:"280",recorded_at:1699999899}' \
+    > "$dir/req-short-window.json"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_NOW_OVERRIDE=1700000000 \
+    FMX_FOLLOWUP_MAX_AGE_SECS=100 FMX_RELAY_URL="https://relay.test" FAKE_POLL_CODE=204 \
+    "$ROOT/bin/fm-x-poll.sh"); rc=$?
+  expect_code 0 "$rc" "short retention window poll exit"
+  assert_absent "$dir/req-short-window.json" "a smaller configured follow-up window must prune earlier"
+  jq -cn '{request_id:"req-overlong-window",platform:"x",reply_max_chars:"280",recorded_at:1699395199}' \
+    > "$dir/req-overlong-window.json"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_NOW_OVERRIDE=1700000000 \
+    FMX_FOLLOWUP_MAX_AGE_SECS=999999999 FMX_RELAY_URL="https://relay.test" FAKE_POLL_CODE=204 \
+    "$ROOT/bin/fm-x-poll.sh"); rc=$?
+  expect_code 0 "$rc" "capped retention window poll exit"
+  assert_absent "$dir/req-overlong-window.json" "a configured window must not extend retention past seven days"
+  pass "context registry retention is bounded to the seven-day follow-up window"
+}
+
+test_context_registry_preserves_first_seen_timestamp() {
+  local home fakebin out rc reg
+  home="$TMP_ROOT/registry-first-seen"
+  mkdir -p "$home"
+  fakebin=$(make_fake_curl "$home")
+  printf 'FMX_PAIRING_TOKEN=tok-first-seen\n' > "$home/.env"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_NOW_OVERRIDE=1700000000 \
+    FMX_RELAY_URL="https://relay.test" FAKE_POLL_CODE=200 \
+    FAKE_POLL_BODY='{"request_id":"req-repeat","platform":"x","reply_max_chars":280,"text":"q"}' \
+    "$ROOT/bin/fm-x-poll.sh"); rc=$?
+  expect_code 0 "$rc" "first registry poll exit"
+  reg="$home/state/x-context/req-repeat.json"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_NOW_OVERRIDE=1700000100 \
+    FMX_RELAY_URL="https://relay.test" FAKE_POLL_CODE=200 \
+    FAKE_POLL_BODY='{"request_id":"req-repeat","platform":"x","reply_max_chars":280,"text":"q"}' \
+    "$ROOT/bin/fm-x-poll.sh"); rc=$?
+  expect_code 0 "$rc" "repeated registry poll exit"
+  [ "$(jq -r .recorded_at "$reg")" = "1700000000" ] \
+    || fail "repeated writes must preserve the request's first-seen timestamp"
+  pass "context registry rewrites preserve the first-seen timestamp"
+}
+
+test_context_registry_retention_starts_on_successful_live_answer() {
+  local home fakebin out rc reg
+  home="$TMP_ROOT/registry-answer-window"
+  mkdir -p "$home"
+  fakebin=$(make_fake_curl "$home")
+  printf 'FMX_PAIRING_TOKEN=tok-answer-window\n' > "$home/.env"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_NOW_OVERRIDE=1700000000 \
+    FMX_RELAY_URL="https://relay.test" FAKE_POLL_CODE=200 \
+    FAKE_POLL_BODY='{"request_id":"req-answer-window","platform":"discord","reply_max_chars":1900,"text":"q"}' \
+    "$ROOT/bin/fm-x-poll.sh"); rc=$?
+  expect_code 0 "$rc" "answer-window poll exit"
+  reg="$home/state/x-context/req-answer-window.json"
+  [ "$(jq -r .recorded_at "$reg")" = "1700000000" ] \
+    || fail "the pending context must start at poll time"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_NOW_OVERRIDE=1700000100 \
+    FMX_RELAY_URL="https://relay.test" FAKE_POLL_CODE=200 \
+    FAKE_POLL_BODY='{"request_id":"req-answer-window","platform":"discord","reply_max_chars":1900,"text":"q"}' \
+    "$ROOT/bin/fm-x-poll.sh"); rc=$?
+  expect_code 0 "$rc" "repeated answer-window poll exit"
+  [ "$(jq -r .recorded_at "$reg")" = "1700000000" ] \
+    || fail "repeated polling must not move the pending context window"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_NOW_OVERRIDE=1700000200 \
+    FMX_RELAY_URL="https://relay.test" FAKE_ANSWER_CODE=500 \
+    "$ROOT/bin/fm-x-reply.sh" req-answer-window "Working on it." 2>/dev/null); rc=$?
+  [ "$rc" -ne 0 ] || fail "the failed answer fixture must fail"
+  [ "$(jq -r .recorded_at "$reg")" = "1700000000" ] \
+    || fail "a failed answer must not refresh context retention"
+  out=$(FM_HOME="$home" FMX_NOW_OVERRIDE=1700000300 FMX_DRY_RUN=1 \
+    "$ROOT/bin/fm-x-reply.sh" req-answer-window "Working on it." 2>/dev/null); rc=$?
+  expect_code 0 "$rc" "answer-window dry-run exit"
+  [ "$(jq -r .recorded_at "$reg")" = "1700000000" ] \
+    || fail "an answer dry-run must not refresh context retention"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_NOW_OVERRIDE=1700604900 \
+    FMX_RELAY_URL="https://relay.test" FAKE_ANSWER_CODE=200 \
+    "$ROOT/bin/fm-x-reply.sh" req-answer-window "Working on it."); rc=$?
+  expect_code 0 "$rc" "successful answer-window answer exit"
+  [ "$(jq -r .recorded_at "$reg")" = "1700604900" ] \
+    || fail "a late successful live initial answer must recreate and start the retained follow-up window"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_NOW_OVERRIDE=1700605000 \
+    FMX_RELAY_URL="https://relay.test" FAKE_FOLLOWUP_CODE=200 \
+    "$ROOT/bin/fm-x-reply.sh" req-answer-window --followup "Still working."); rc=$?
+  expect_code 0 "$rc" "answer-window follow-up exit"
+  [ "$(jq -r .recorded_at "$reg")" = "1700604900" ] \
+    || fail "a follow-up must not refresh context retention"
+  pass "context retention starts only when a live initial answer succeeds"
+}
+
+# Regression case 1: a Discord follow-up >280 but < the Discord budget stays ONE
+# message even after the inbox is deleted AND posted late by request_id.
+test_regression_discord_followup_survives_inbox_cleanup() {
+  local home fakebin out rc reply reg
+  home="$TMP_ROOT/reg-discord-cleanup"; mkdir -p "$home"
+  fakebin=$(make_fake_curl "$home")
+  printf 'FMX_PAIRING_TOKEN=tok-rc\n' > "$home/.env"
+  # 1. Poll a Discord mention: it stashes the inbox AND records the registry.
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_RELAY_URL="https://relay.test" \
+    FAKE_POLL_CODE=200 FAKE_POLL_BODY="$(jq -cn '{request_id:"req-disc",platform:"discord",reply_max_chars:1900,text:"q"}')" \
+    "$ROOT/bin/fm-x-poll.sh"); rc=$?
+  expect_code 0 "$rc" "poll exit"
+  reg="$home/state/x-context/req-disc.json"
+  assert_present "$reg" "poll recorded the per-request context"
+  # 2. The acknowledgement drains the inbox file (fmx-respond step 2f).
+  rm -f "$home/state/x-inbox/req-disc.json"
+  # 3. The delayed milestone follow-up is posted DIRECTLY by request_id, with no
+  #    task link at all - the exact path that regressed.
+  reply=$(cat <<'TXT'
+Aye captain, the sign-in redirect is patched and up for review. The fix restores the callback path that was dropping the return URL, adds a regression guard so it cannot silently break again, and keeps the existing session handling untouched. This message deliberately runs well past a single X tweet so it proves a Discord follow-up stays one message after the inbox is gone.
+TXT
+)
+  [ "$(printf '%s' "$reply" | wc -m | tr -d '[:space:]')" -gt 280 ] \
+    || fail "the regression reply must exceed the X 280-char budget to be meaningful"
+  out=$(FM_HOME="$home" FMX_DRY_RUN=1 "$ROOT/bin/fm-x-reply.sh" req-disc --followup - <<<"$reply" 2>/dev/null); rc=$?
+  expect_code 0 "$rc" "delayed discord follow-up exit"
+  [ "$out" = "req-disc" ] || fail "follow-up must echo the request_id (got: $out)"
+  jq -e 'has("texts")|not' "$home/state/x-outbox/req-disc.json" >/dev/null \
+    || fail "a >280 <2000 Discord follow-up must post as ONE message after inbox cleanup - NO (1/2) split"
+  pass "a delayed Discord follow-up stays one message after inbox cleanup via the durable registry"
+}
+
+# Regression case 2: an X follow-up >280 still splits correctly (not broken).
+test_regression_x_followup_still_splits_after_cleanup() {
+  local home fakebin out rc reply
+  home="$TMP_ROOT/reg-x-split"; mkdir -p "$home"
+  fakebin=$(make_fake_curl "$home")
+  printf 'FMX_PAIRING_TOKEN=tok-rx\n' > "$home/.env"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_RELAY_URL="https://relay.test" \
+    FAKE_POLL_CODE=200 FAKE_POLL_BODY="$(jq -cn '{request_id:"req-xs",tweet_id:"777",reply_max_chars:280,text:"q"}')" \
+    "$ROOT/bin/fm-x-poll.sh"); rc=$?
+  expect_code 0 "$rc" "poll x exit"
+  rm -f "$home/state/x-inbox/req-xs.json"
+  reply="This X follow-up intentionally runs well beyond the default single-tweet budget so it still needs a numbered thread on X. It carries enough plain words to comfortably cross the two hundred and eighty character limit while staying easy to split at word boundaries, which proves the established X behavior is not broken by the Discord platform fix at all."
+  [ "$(printf '%s' "$reply" | wc -m | tr -d '[:space:]')" -gt 280 ] \
+    || fail "the X regression reply must exceed 280 chars to force a split"
+  out=$(FM_HOME="$home" FMX_DRY_RUN=1 "$ROOT/bin/fm-x-reply.sh" req-xs --followup - <<<"$reply" 2>/dev/null); rc=$?
+  expect_code 0 "$rc" "delayed x follow-up exit"
+  jq -e '.texts and (.texts|length>1)' "$home/state/x-outbox/req-xs.json" >/dev/null \
+    || fail "an X follow-up over 280 characters must still split into a numbered thread"
+  [ "$(jq '.texts|map(length)|max' "$home/state/x-outbox/req-xs.json")" -le 280 ] \
+    || fail "X follow-up chunks must stay within the X budget"
+  pass "an X follow-up over 280 still splits correctly after inbox cleanup"
+}
+
+# Regression case 3: when the platform/budget cannot be authoritatively
+# determined, a splitting follow-up is REFUSED (fail-safe) - never a silent X
+# split, never a wrong-platform post.
+test_regression_unresolved_followup_fails_safe() {
+  local home fakebin log out rc reply err
+  reply="Short follow-up."
+  # (a) Dry-run, nothing resolvable, no relay reachable: refuse, no outbox.
+  home="$TMP_ROOT/reg-failsafe-dry"; mkdir -p "$home"
+  err="$home/err.txt"
+  out=$(FM_HOME="$home" FMX_DRY_RUN=1 "$ROOT/bin/fm-x-reply.sh" req-none --followup - <<<"$reply" 2>"$err"); rc=$?
+  [ "$rc" -eq 8 ] || fail "any unresolved follow-up must exit 8 (fail-safe), got: $rc"
+  [ -z "$out" ] || fail "a refused follow-up must echo nothing (got: $out)"
+  assert_absent "$home/state/x-outbox/req-none.json" "a refused follow-up must record NO outbox preview"
+  assert_grep "refusing follow-up" "$err" "the refusal must be reported plainly"
+  # (b) Live, relay unavailable (404): refuse BEFORE any followup POST.
+  home="$TMP_ROOT/reg-failsafe-live"; mkdir -p "$home"
+  fakebin=$(make_fake_curl "$home")
+  log="$home/curl.log"
+  err="$home/err.txt"
+  printf 'FMX_PAIRING_TOKEN=tok-fs\n' > "$home/.env"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_RELAY_URL="https://relay.test" \
+    FAKE_CURL_LOG="$log" FAKE_REQCTX_CODE=404 \
+    "$ROOT/bin/fm-x-reply.sh" req-live-none --followup - <<<"$reply" 2>"$err"); rc=$?
+  [ "$rc" -eq 8 ] || fail "a live unresolved follow-up must exit 8 (fail-safe), got: $rc"
+  assert_grep "url=https://relay.test/connector/request-context" "$log" \
+    "the fail-safe must have TRIED the authoritative relay lookup first"
+  assert_no_grep "url=https://relay.test/connector/followup" "$log" \
+    "the fail-safe must refuse BEFORE any follow-up post - no wrong-platform post lands"
+  assert_grep "relay did not supply" "$err" "the refusal must note the relay could not supply both values"
+  pass "every unresolved follow-up is refused before posting"
+}
+
+# Requirement 1 (authoritative relay recovery): a live follow-up with only a
+# registry platform recovers the missing explicit budget from the relay by
+# request_id, so a Discord reply stays one message.
+test_followup_partial_registry_uses_relay_budget_live() {
+  local home fakebin log out rc reply data
+  home="$TMP_ROOT/reg-relay-fallback"; mkdir -p "$home/state/x-context"
+  fakebin=$(make_fake_curl "$home")
+  log="$home/curl.log"
+  printf 'FMX_PAIRING_TOKEN=tok-rf\n' > "$home/.env"
+  jq -cn '{request_id:"req-relay",platform:"discord",reply_max_chars:""}' \
+    > "$home/state/x-context/req-relay.json"
+  reply=$(cat <<'TXT'
+Aye captain, that one is shipped and green. The change is landed, the regression guard is in place, and nothing else was disturbed along the way. This confirmation deliberately runs past a single X tweet so it proves the relay-recovered Discord budget keeps it one message.
+TXT
+)
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_RELAY_URL="https://relay.test" \
+    FAKE_CURL_LOG="$log" FAKE_REQCTX_CODE=200 FAKE_REQCTX_BODY='{"reply_max_chars":1900}' \
+    FAKE_FOLLOWUP_CODE=200 \
+    "$ROOT/bin/fm-x-reply.sh" req-relay --followup - <<<"$reply"); rc=$?
+  expect_code 0 "$rc" "live relay-fallback follow-up exit"
+  [ "$out" = "req-relay" ] || fail "relay-fallback follow-up must echo the request_id (got: $out)"
+  assert_grep "url=https://relay.test/connector/request-context" "$log" \
+    "a live follow-up with partial local context must consult the relay for the missing budget"
+  assert_grep "url=https://relay.test/connector/followup" "$log" "it must then post the follow-up"
+  data=$(grep '^data=' "$log" | tail -1 | sed 's/^data=//')
+  printf '%s' "$data" | jq -e 'has("texts")|not' >/dev/null \
+    || fail "the relay-recovered Discord follow-up must post as ONE message, not a thread"
+  pass "a partial registry platform combines with the relay's authoritative budget"
+}
+
+# Regression case 4: concurrent requests through one secondmate keep their own
+# platform/budget - the per-request registry cannot be cross-overwritten the way a
+# single x_request per task was.
+test_regression_concurrent_requests_keep_own_platform() {
+  local home fakebin out rc discord_reply x_reply
+  home="$TMP_ROOT/reg-concurrent"; mkdir -p "$home"
+  fakebin=$(make_fake_curl "$home")
+  printf 'FMX_PAIRING_TOKEN=tok-cc\n' > "$home/.env"
+  # Two concurrent public requests arrive (one Discord, one X) - as if routed
+  # through ONE persistent secondmate whose single x_request slot would collide.
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_RELAY_URL="https://relay.test" \
+    FAKE_POLL_CODE=200 FAKE_POLL_BODY="$(jq -cn '{request_id:"req-cd",platform:"discord",reply_max_chars:1900,text:"q"}')" \
+    "$ROOT/bin/fm-x-poll.sh"); rc=$?
+  expect_code 0 "$rc" "poll concurrent discord exit"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_RELAY_URL="https://relay.test" \
+    FAKE_POLL_CODE=200 FAKE_POLL_BODY="$(jq -cn '{request_id:"req-cx",tweet_id:"888",reply_max_chars:280,text:"q"}')" \
+    "$ROOT/bin/fm-x-poll.sh"); rc=$?
+  expect_code 0 "$rc" "poll concurrent x exit"
+  # Each keeps its OWN context - neither overwrote the other.
+  [ "$(jq -r .platform "$home/state/x-context/req-cd.json")" = "discord" ] \
+    || fail "concurrent Discord request must keep its own platform"
+  [ "$(jq -r .platform "$home/state/x-context/req-cx.json")" = "x" ] \
+    || fail "concurrent X request must keep its own platform"
+  # Both inboxes drained; each delayed follow-up recovers its own budget.
+  rm -f "$home/state/x-inbox/req-cd.json" "$home/state/x-inbox/req-cx.json"
+  discord_reply=$(cat <<'TXT'
+The Discord one is done, captain - patched, guarded, and up for review. This reply is deliberately over a single X tweet to prove the Discord follow-up recovers its own one-message budget while a concurrent X request is in flight.
+TXT
+)
+  x_reply="The X request is progressing on its own track, and this update deliberately runs well beyond the single-tweet budget on purpose, proving that the concurrent X follow-up still threads correctly at the X budget and did not inherit the larger Discord budget from the other in-flight request routed through the same secondmate."
+  [ "$(printf '%s' "$x_reply" | wc -m | tr -d '[:space:]')" -gt 280 ] \
+    || fail "the concurrent X reply must exceed 280 chars to force a split"
+  out=$(FM_HOME="$home" FMX_DRY_RUN=1 "$ROOT/bin/fm-x-reply.sh" req-cd --followup - <<<"$discord_reply" 2>/dev/null); rc=$?
+  expect_code 0 "$rc" "concurrent discord follow-up exit"
+  jq -e 'has("texts")|not' "$home/state/x-outbox/req-cd.json" >/dev/null \
+    || fail "the concurrent Discord follow-up must stay one message"
+  out=$(FM_HOME="$home" FMX_DRY_RUN=1 "$ROOT/bin/fm-x-reply.sh" req-cx --followup - <<<"$x_reply" 2>/dev/null); rc=$?
+  expect_code 0 "$rc" "concurrent x follow-up exit"
+  jq -e '.texts and (.texts|length>1)' "$home/state/x-outbox/req-cx.json" >/dev/null \
+    || fail "the concurrent X follow-up must still split - it kept the X budget"
+  pass "concurrent requests each recover their own platform/budget with no cross-overwrite"
+}
+
+test_dismiss_clears_context_registry() {
+  local home out rc reg
+  home="$TMP_ROOT/dismiss-clears-registry"; mkdir -p "$home/state/x-context"
+  reg="$home/state/x-context/req-dis.json"
+  jq -cn '{request_id:"req-dis",platform:"discord",reply_max_chars:""}' > "$reg"
+  # A dismissed mention will never get a follow-up, so its context is dropped.
+  out=$(FM_HOME="$home" FMX_DRY_RUN=1 "$ROOT/bin/fm-x-dismiss.sh" req-dis 2>/dev/null); rc=$?
+  expect_code 0 "$rc" "dismiss registry-clear exit"
+  [ "$out" = "req-dis" ] || fail "dismiss must still echo the request_id (got: $out)"
+  assert_absent "$reg" "dismiss must clear the durable per-request context"
+  pass "fm-x-dismiss clears the durable per-request context (a dismissed mention gets no follow-up)"
 }
 
 # --- fm-x-dismiss: drop a mention at the relay without replying ---------------
@@ -1299,7 +1651,7 @@ test_link_records_discord_platform_for_followups() {
   home="$TMP_ROOT/link-discord-platform"; mkdir -p "$home/state/x-inbox"
   meta="$home/state/fix-discord.meta"
   printf 'window=w\nworktree=/wt\nkind=ship\nmode=no-mistakes\nyolo=off\n' > "$meta"
-  jq -cn '{request_id:"req-discord-follow",tweet_id:"discord:channel:message",text:"question"}' \
+  jq -cn '{request_id:"req-discord-follow",tweet_id:"discord:channel:message",reply_max_chars:1900,text:"question"}' \
     > "$home/state/x-inbox/req-discord-follow.json"
   FM_HOME="$home" FMX_NOW_OVERRIDE=1700000000 \
     "$ROOT/bin/fm-x-link.sh" fix-discord req-discord-follow >/dev/null; rc=$?
@@ -1344,7 +1696,7 @@ test_link_resolves_platform_by_request_id_after_inbox_cleanup() {
   # The relay resolves the platform by request_id.
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_RELAY_URL="https://relay.test" \
     FMX_NOW_OVERRIDE=1700000000 FAKE_CURL_LOG="$log" \
-    FAKE_REQCTX_CODE=200 FAKE_REQCTX_BODY='{"platform":"discord"}' \
+    FAKE_REQCTX_CODE=200 FAKE_REQCTX_BODY='{"platform":"discord","reply_max_chars":1900}' \
     "$ROOT/bin/fm-x-link.sh" fix-after-cleanup req-after-cleanup); rc=$?
   expect_code 0 "$rc" "link after inbox cleanup exit"
   assert_grep "url=https://relay.test/connector/request-context" "$log" \
@@ -1370,11 +1722,9 @@ TXT
   pass "fm-x-link resolves the platform by request_id so a post-cleanup link keeps the Discord budget"
 }
 
-# Criterion 2 loud-warning branch: when neither the inbox nor the relay can
-# resolve the platform, the link is still recorded but fm-x-link WARNS loudly -
-# it must never silently fall back to the X budget. This test also confirms the
-# warned-about behavior actually happens (the follow-up does split at X length),
-# so the warning is truthful, not decorative.
+# Criterion 2 loud-warning branch: when the inbox and relay cannot resolve both
+# axes, the link is still recorded but fm-x-link warns loudly and every follow-up
+# is refused.
 test_link_warns_loudly_when_platform_unresolvable() {
   local home fakebin err meta out rc reply
   home="$TMP_ROOT/link-warn-unresolvable"; mkdir -p "$home/state"
@@ -1383,7 +1733,7 @@ test_link_warns_loudly_when_platform_unresolvable() {
   meta="$home/state/fix-unresolvable.meta"
   printf 'window=w\nkind=ship\n' > "$meta"
   printf 'FMX_PAIRING_TOKEN=tok-unresolved\n' > "$home/.env"
-  # No inbox, and the relay cannot resolve the request (404): platform unknowable.
+  # No inbox, and the relay cannot resolve the request (404).
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_RELAY_URL="https://relay.test" \
     FMX_NOW_OVERRIDE=1700000000 FAKE_REQCTX_CODE=404 \
     "$ROOT/bin/fm-x-link.sh" fix-unresolvable req-unresolvable 2>"$err"); rc=$?
@@ -1395,17 +1745,17 @@ test_link_warns_loudly_when_platform_unresolvable() {
   assert_grep "x_request=req-unresolvable" "$meta" "the link itself must still be recorded"
   assert_no_grep "x_platform=" "$meta" "no platform must be recorded when none could be resolved"
   assert_no_grep "x_reply_max_chars=" "$meta" "no split budget must be recorded when none could be resolved"
-  # The warning is truthful: a longer follow-up now really does split at X length.
-  reply=$(cat <<'TXT'
-This acknowledgement is intentionally written to run past the X tweet budget so the test can confirm the warned-about fallback truly happens: with no resolvable platform the splitter uses the 280-character X budget and breaks this into a numbered thread, which is exactly the outcome the loud warning exists to make visible.
-TXT
-)
+  reply="Short follow-up."
+  err="$home/fu-err.txt"
   out=$(FM_HOME="$home" FMX_DRY_RUN=1 FMX_NOW_OVERRIDE=1700003600 \
-    "$ROOT/bin/fm-x-followup.sh" fix-unresolvable - <<<"$reply" 2>/dev/null); rc=$?
-  expect_code 0 "$rc" "unresolvable follow-up dry-run exit"
-  jq -e '.texts and (.texts|length>1)' "$home/state/x-outbox/req-unresolvable.json" >/dev/null \
-    || fail "with no platform the follow-up falls back to the X thread split, as the warning predicts"
-  pass "fm-x-link warns loudly instead of silently defaulting to the X budget when the platform is unknown"
+    "$ROOT/bin/fm-x-followup.sh" fix-unresolvable - <<<"$reply" 2>"$err"); rc=$?
+  [ "$rc" -ne 0 ] || fail "an unresolvable follow-up must be held (non-zero), not posted"
+  [ -z "$out" ] || fail "a held follow-up must not echo the request_id (got: $out)"
+  assert_absent "$home/state/x-outbox/req-unresolvable.json" \
+    "a refused follow-up must leave no outbox preview - nothing was posted or split"
+  assert_grep "held" "$err" "the hold must be reported plainly for retry"
+  assert_grep "x_request=req-unresolvable" "$meta" "a held follow-up must leave the link in place to retry"
+  pass "fm-x-link warns loudly and the follow-up is held (not wrongly split) when the platform is unknown"
 }
 
 test_link_carry_count_and_ts_preserve_followup_binding() {
@@ -1544,15 +1894,8 @@ mk_linked_task() { # <home> <id> <request_id> <link-epoch> [starting-count]
   mkdir -p "$home/state"
   meta="$home/state/$id.meta"
   printf 'window=w\nworktree=/wt\nkind=ship\nmode=no-mistakes\nyolo=off\n' > "$meta"
-  if [ -n "$count" ]; then
-    FM_HOME="$home" FMX_NOW_OVERRIDE="$ts" "$ROOT/bin/fm-x-link.sh" "$id" "$rid" \
-      --carry-count "$count" --carry-ts "$ts" --carry-platform x --carry-max 280 >/dev/null
-  else
-    # A fresh link with no inbox and no relay reachable intentionally has no
-    # platform context, so fm-x-link warns to stderr; these follow-up fixtures
-    # exercise the counter/link mechanics, not platform resolution, so drop it.
-    FM_HOME="$home" FMX_NOW_OVERRIDE="$ts" "$ROOT/bin/fm-x-link.sh" "$id" "$rid" >/dev/null 2>&1
-  fi
+  FM_HOME="$home" FMX_NOW_OVERRIDE="$ts" "$ROOT/bin/fm-x-link.sh" "$id" "$rid" \
+    --carry-count "${count:-0}" --carry-ts "$ts" --carry-platform x --carry-max 280 >/dev/null
 }
 
 test_followup_check_states() {
@@ -1895,6 +2238,16 @@ test_reply_followup_flag_position_is_flexible
 test_reply_followup_dry_run_marks_endpoint
 test_reply_followup_thread_dry_run
 test_reply_followup_image_dry_run_marks_endpoint_and_compacts_image
+test_poll_records_context_registry_from_relay_platform
+test_context_registry_prunes_expired_records
+test_context_registry_preserves_first_seen_timestamp
+test_context_registry_retention_starts_on_successful_live_answer
+test_regression_discord_followup_survives_inbox_cleanup
+test_regression_x_followup_still_splits_after_cleanup
+test_regression_unresolved_followup_fails_safe
+test_followup_partial_registry_uses_relay_budget_live
+test_regression_concurrent_requests_keep_own_platform
+test_dismiss_clears_context_registry
 test_dismiss_success_posts_request_only
 test_dismiss_dry_run_records_not_posts
 test_dismiss_dry_run_needs_no_token
