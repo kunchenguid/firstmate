@@ -177,6 +177,14 @@ The primary propagates `config/crew-dispatch.json`, `config/crew-harness`, and `
 For grok, `fm-spawn.sh` installs one firstmate-owned global turn-end hook under `$GROK_HOME/hooks/`, or `~/.grok/hooks/` when `GROK_HOME` is unset, and drops a per-task `.fm-grok-turnend` pointer in the worktree, with teardown removing the task token and pointer.
 For Pi secondmate launches, `fm-spawn.sh` starts Pi with `-e` pointed at the secondmate home's own tracked `.pi/extensions/fm-primary-pi-watch.ts` and `.pi/extensions/fm-primary-turnend-guard.ts`, both already present from the secondmate home's git worktree.
 
+### Claude config dir (config/crew-config-dir)
+
+`config/crew-config-dir` is a local, gitignored file naming the Claude config dir (`CLAUDE_CONFIG_DIR`) a spawned `claude` crewmate authenticates with.
+It exists for multi-account machines, where the default `~/.claude` can be empty or unauthenticated so a bare-`claude` crewmate lands on the login wall and never starts.
+The first line's trimmed value becomes a per-launch `CLAUDE_CONFIG_DIR=<dir>` env prefix on the claude launch command only, scoped to that firstmate-launched agent, so it never mutates the captain's global config.
+It applies to the `claude` harness only; other harnesses ignore it.
+When the file is absent or empty, launch behavior is byte-identical to before: bare `claude` on its default config dir.
+
 ## Crew dispatch profiles (config/crew-dispatch.json)
 
 `config/crew-dispatch.json` is an optional local, gitignored file containing natural-language rules that firstmate reads before dispatching a crewmate or scout.
