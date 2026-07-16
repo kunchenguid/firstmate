@@ -107,9 +107,10 @@ shell_quote() {
 }
 
 STATUS_FILE=$(shell_quote "$STATE/$ID.status")
-RICH_REVIEW_TRIGGER="Before creating or presenting any rich-review surface, load \`decision-hold-lifecycle\` from the active Firstmate home's \`.agents/skills/\`."
+RICH_REVIEW_TRIGGER="Before creating or presenting any rich-review surface, load \`$FM_ROOT/.agents/skills/decision-hold-lifecycle/SKILL.md\`."
 
 if [ "$KIND" = secondmate ]; then
+RICH_REVIEW_TRIGGER="Before creating or presenting any rich-review surface, load \`decision-hold-lifecycle\` from this home's \`.agents/skills/decision-hold-lifecycle/SKILL.md\`."
 SECONDMATE_PROJECTS=""
 idx=1
 while [ "$idx" -lt "${#POS[@]}" ]; do

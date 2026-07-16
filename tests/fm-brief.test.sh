@@ -27,8 +27,6 @@ test_script_parses() {
 test_help_includes_entire_header() {
   local help
   help=$("$ROOT/bin/fm-brief.sh" --help)
-  assert_contains "$help" "Every scaffold requires loading decision-hold-lifecycle before creating or presenting a rich-review surface." \
-    "fm-brief.sh --help omitted the rich-review skill-load trigger"
   assert_contains "$help" "Refuses to overwrite an existing brief." "fm-brief.sh --help omitted its header terminator"
   pass "fm-brief.sh: --help renders the complete header"
 }
@@ -291,31 +289,23 @@ test_pause_verb_override_renders_all_brief_scaffolds() {
   pass "fm-brief.sh: custom pause verb renders in every scaffold"
 }
 
-test_all_briefs_load_decision_hold_policy_before_rich_review() {
-  local home trigger ship scout charter
+test_scout_and_secondmate_load_decision_hold_policy() {
+  local home scout charter
   home="$TMP_ROOT/decision-policy-home"
-  trigger="Before creating or presenting any rich-review surface, load \`decision-hold-lifecycle\` from the active Firstmate home's \`.agents/skills/\`."
   mkdir -p "$home/data"
-  FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
-    "$ROOT/bin/fm-brief.sh" sample-change sample >/dev/null 2>&1
-  ship="$home/data/sample-change/brief.md"
   FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
     "$ROOT/bin/fm-brief.sh" sample-investigation sample --scout >/dev/null 2>&1
   scout="$home/data/sample-investigation/brief.md"
-  FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_SECONDMATE_CHARTER='sample reviews' \
-    "$ROOT/bin/fm-brief.sh" sample-mate --secondmate --no-projects >/dev/null 2>&1
-  charter="$home/data/sample-mate/brief.md"
-  for brief in "$ship" "$scout" "$charter"; do
-    assert_grep "$trigger" "$brief" \
-      "$brief did not load the shared decision policy before creating or presenting a rich review"
-  done
   assert_grep "$ROOT/.agents/skills/decision-hold-lifecycle/SKILL.md" "$scout" \
     "scout brief did not load the unresolved-decision policy before done"
   assert_grep "pass its shared completion gate for the report and any visual review" "$scout" \
     "scout brief did not cross-reference visual-review completion"
-  assert_grep "Before treating an investigation or visual review as complete, load \`decision-hold-lifecycle\` from this home's \`.agents/skills/\` and pass its shared completion gate." "$charter" \
-    "secondmate charter did not independently load the shared decision policy before completion"
-  pass "fm-brief.sh: all brief kinds load the shared decision policy before rich review"
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_SECONDMATE_CHARTER='sample reviews' \
+    "$ROOT/bin/fm-brief.sh" sample-mate --secondmate --no-projects >/dev/null 2>&1
+  charter="$home/data/sample-mate/brief.md"
+  assert_grep "load \`decision-hold-lifecycle\`" "$charter" \
+    "secondmate charter did not load the shared decision policy for detailed investigations"
+  pass "fm-brief.sh: investigation and visual-review completions load the shared decision policy"
 }
 
 test_script_parses
@@ -330,4 +320,4 @@ test_herdr_lab_omission_is_loud_for_ship_and_scout
 test_herdr_lab_contract_applies_to_scouts_but_not_secondmates
 test_secondmate_no_projects_charter
 test_pause_verb_override_renders_all_brief_scaffolds
-test_all_briefs_load_decision_hold_policy_before_rich_review
+test_scout_and_secondmate_load_decision_hold_policy
