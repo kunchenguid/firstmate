@@ -400,6 +400,34 @@ test_bootstrap_sweep_nudges_only_instruction_change() {
   pass "T8 bootstrap sweeps live homes and sends exactly one marked nudge for the instruction change"
 }
 
+test_bootstrap_nudge_send_uses_state_override() {
+  local w c1 fakebin out log override_state marker
+  w=$(new_world nudge-state-override)
+  c1=$(head_of "$w/main")
+  add_sm_worktree "$w" sm-instr "$c1"
+  bump_primary "$w" instr
+  override_state="$w/override-state"
+  mkdir -p "$override_state"
+  mv "$w/home/state/sm-instr.meta" "$override_state/sm-instr.meta"
+  touch "$override_state/.last-watcher-beat"
+  fakebin=$(make_fake_toolchain "$w")
+  log="$w/tmux.log"
+
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
+    FM_STATE_OVERRIDE="$override_state" FM_SEND_SETTLE=0 FM_FAKE_TMUX_LOG="$log" \
+    "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
+
+  assert_contains "$out" "BOOTSTRAP_INFO: nudged fm-sm-instr with" \
+    "nudge send should resolve fm-sm-instr through the effective state dir"
+  assert_not_contains "$out" "NUDGE_SECONDMATES:" \
+    "effective-state nudge should not fail through FM_HOME/state"
+  assert_contains "$(cat "$log")" "[fm-from-firstmate]" \
+    "effective-state nudge should still use secondmate marker metadata"
+  marker="$override_state/.secondmate-nudge-pending/sm-instr.pending"
+  assert_absent "$marker" "successful effective-state nudge should clear its retry marker"
+  pass "T8a bootstrap nudge send respects FM_STATE_OVERRIDE"
+}
+
 test_bootstrap_nudge_failure_records_retry_marker() {
   local w c1 fakebin out marker
   w=$(new_world nudge-failure)
@@ -782,6 +810,7 @@ test_ff_inflight_feature_branch
 test_no_fetch_in_local_path
 test_sweep_nudge_requires_instruction_change
 test_bootstrap_sweep_nudges_only_instruction_change
+test_bootstrap_nudge_send_uses_state_override
 test_bootstrap_nudge_failure_records_retry_marker
 test_bootstrap_nudge_retry_is_idempotent
 test_bootstrap_nudge_retry_refuses_changed_home
