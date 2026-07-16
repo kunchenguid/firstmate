@@ -785,6 +785,48 @@ The luminance rule assumes a dark terminal theme (the fleet reality); the SGR-2 
 **Resolved: backend-independent wedge alarm.** The max-defer wedge alarm (`inject_wedge_alarm`, `bin/fm-supervise-daemon.sh`) formerly alarmed into the void because its only active signal was a tmux client status-line flash, skipped for herdr, leaving only the passive `state/.subsuper-inject-wedged` marker.
 It now also attempts a configurable active alert independent of the supervisor backend; [`wedge-alarm.md`](wedge-alarm.md) owns its channels and verification evidence.
 
+## Incident (2026-07-16): in the C locale, a composer's own border read as a bare prompt
+
+`FM_BACKEND_HERDR_BARE_PROMPT_RE` was spelled as the bracket class `'^[❯›]'`.
+A bracket class is a set of CHARACTERS only where grep knows what a character is.
+Under a byte-oriented locale (`LC_CTYPE=C`) grep has no multibyte notion and walks the class BYTE-wise instead, so `[❯›]` decomposed into the six bytes of the two glyphs' UTF-8 encodings (`e2 9d af`, `e2 80 ba`) and matched any row whose first byte was one of them.
+Every box-drawing glyph starts `0xE2`, so `╭`, `╰` and `│` all matched the "bare prompt" pattern.
+
+This is a heisenbug by construction: an interactive shell is UTF-8, where the bracket class is glyph-wise and correct, while the supervise daemon inherits the C locale, where it is not.
+The classifier was therefore correct everywhere it was ever run by hand and wrong in the only place it mattered.
+
+**Effect.** `fm_backend_herdr_composer_state` scans rows top-down and lets the LOWEST match win (the live composer is the bottom-most one).
+In a bordered composer the bottom-most row is the closing border, so the scan overwrote its own correct `shape=bordered` verdict with `shape=bare` and carried the BORDER row in as composer content, discarding the real composer row entirely.
+Both verdict directions broke, and they are not equally bad:
+
+```
+# empty composer, light theme -> the border IS the content, so it reads as text
+'╰──── Composer ─╯'  ->  pending   # away-mode defers forever: the delivery wedge
+
+# real typed text, dark theme -> the kept border is dark-truecolor, so the ghost
+# stripper drops it and the row reads blank, while '❯ hello captain' was discarded
+'❯ hello captain'    ->  empty     # away-mode injects OVER the captain's draft
+```
+
+The second is the reason this was worth a same-day fix rather than a backlog note.
+A false `pending` only defers delivery (fail-safe, and the max-defer alarm surfaces it); a false `empty` tells the injector the composer is free and destroys unsubmitted human input.
+
+**Fix.** `bin/backends/herdr.sh` spells the default as the alternation `'^(❯|›)'`, which matches each full glyph SEQUENCE rather than a set of loose bytes, and so is correct in any locale.
+The new pattern matches a strict subset of the old one's matches - it removes only false positives - so no previously-correct read changes.
+`docs/configuration.md` carries the same warning on the override knob, since a user-supplied `FM_BACKEND_HERDR_BARE_PROMPT_RE` written as a bracket class reintroduces exactly this bug.
+
+**Regression coverage (`tests/fm-backend-herdr.test.sh`).** No composer case pinned a locale before this, and that gap is what let the regression ship.
+Every existing case inherits the AMBIENT locale, so what it proves depends on where it runs: in a UTF-8 interactive shell the bracket class is glyph-wise and the suite is green on the broken pattern, while in a C-locale non-interactive context the same case fails.
+The verdict was a property of the developer's terminal rather than of the code - so the fix pins the locale in the assertion instead of inheriting it.
+
+Three cases now run the real `fm_backend_herdr_composer_state` under an explicit `LC_ALL=C`.
+Two are the regression pins, and both fail on `'^[❯›]'` and pass on `'^(❯|›)'`: an empty bordered composer reads `empty` (`test_composer_state_bare_prompt_is_empty_in_byte_locale`; `pending` before the fix, the wedge direction), and a dark-themed composer holding real typed text reads `pending` (`test_composer_state_dark_border_real_text_is_pending_in_byte_locale`; `empty` before the fix, the unsafe direction).
+The third, unbordered `❯` / `›` prompt rows reading `empty` (`test_composer_state_unbordered_prompt_glyphs_are_empty_in_byte_locale`), passes on both patterns by design: it pins that the alternation still MATCHES each full glyph in the C locale, so that a pattern matching NOTHING could not satisfy the other two while silently breaking every unbordered composer read.
+
+**Deferred to a follow-up (captain's call, deliberately not in this change).** The composer pipeline's other text steps pin their own locale (`fm_composer_strip_ansi` uses `LC_ALL=C sed`, `fm_composer_strip_ghost` uses `LC_ALL=C awk`), but the two `grep` call sites - the bare-prompt match in `fm_backend_herdr_composer_state` and `fm_composer_idle_matches` (`bin/fm-composer-lib.sh`) - inherit the ambient locale.
+The alternation makes the DEFAULT pattern locale-invariant, so the shipped behavior is correct, but an operator override of `FM_BACKEND_HERDR_BARE_PROMPT_RE` or `FM_BACKEND_HERDR_IDLE_RE` still carries locale-dependent semantics.
+Pinning `LC_ALL=C` at those call sites (and auditing the shared lib for the same byte-vs-glyph hazard) is a separate change against `bin/fm-composer-lib.sh`, which both backends share.
+
 ## Native `pane.agent_status_changed` push escalation (immediate blocked wake)
 
 Herdr exposes a native, push-based agent-state event stream, and firstmate folds it into the watcher so a crew entering `blocked` (waiting on the human at a permission/trust dialog, an interactive menu, or a wedged prompt) wakes its supervisor sub-second instead of after the ~240s stale-pane wedge timer.

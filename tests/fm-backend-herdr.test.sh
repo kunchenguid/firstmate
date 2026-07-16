@@ -823,6 +823,76 @@ test_composer_state_bare_prompt_is_empty() {
   pass "fm_backend_herdr_composer_state: a bare '❯' composer row reads empty"
 }
 
+# --- composer_state: C-locale (byte-oriented) classification ------------------
+#
+# Incident (2026-07-16, docs/herdr-backend.md): FM_BACKEND_HERDR_BARE_PROMPT_RE
+# was spelled as the bracket class '^[❯›]'. A bracket class is a set of
+# CHARACTERS only where grep knows what a character IS: under a byte-oriented
+# locale (LC_CTYPE=C - what the supervise daemon inherits, unlike an interactive
+# UTF-8 shell) grep walks the class BYTE-wise, so [❯›] became the six bytes of
+# the two glyphs' UTF-8 encodings and matched every row starting with 0xE2 - the
+# first byte of every box-drawing glyph (╭ ╰ │). The row scan lets the LOWEST
+# match win, so a composer's own closing border overwrote the correct
+# shape=bordered verdict with shape=bare and carried the BORDER row in as
+# content, discarding the real composer row entirely.
+#
+# These cases PIN the locale, which no other composer case does. The rest of the
+# suite inherits the ambient one, so their verdict depends on where they run: a
+# UTF-8 interactive shell (bracket class glyph-wise, bug invisible - how this
+# shipped) or a C-locale non-interactive/daemon context (bug visible). Pinning
+# takes that lottery out of the assertion.
+# Cases 1 and 2 fail on '^[❯›]' and pass on '^(❯|›)'; case 3 passes on both by
+# design - it exists so a pattern that matched NOTHING could not satisfy 1 and 2.
+
+# Direction 1 (the wedge): an EMPTY composer read 'pending' - the away-mode
+# injector's "captain is mid-sentence" defer signal - so delivery stalled.
+test_composer_state_bare_prompt_is_empty_in_byte_locale() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/composer-bare-c-locale"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '  ╭────────────────────────╮\n  │ ❯                      │\n  ╰──────── Composer ─────╯\n\n  Shift+Tab:mode\n' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" LC_ALL=C FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT" )
+  [ "$out" = empty ] || fail "an empty bordered composer must read empty in the byte-oriented C locale, got '$out' (a '╰──── Composer ─╯' border row matched the bare-prompt pattern byte-wise and was classified as the composer)"
+  pass "fm_backend_herdr_composer_state: an empty bordered '❯' composer reads empty in the C locale, not pending"
+}
+
+# Direction 2 (the unsafe one): with the border misread as the composer row, the
+# REAL typed row was discarded and the dark-truecolor border it kept instead was
+# dropped as ghost - so a composer holding the captain's unsubmitted draft read
+# 'empty' and the injector would have typed over it. A false 'pending' only
+# defers; a false 'empty' destroys human input.
+test_composer_state_dark_border_real_text_is_pending_in_byte_locale() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/composer-dark-border-c-locale"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '  \x1b[38;2;86;82;110m\xe2\x95\xad\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x95\xae\x1b[39m\n  \x1b[38;2;86;82;110m\xe2\x94\x82\x1b[38;2;224;222;244m \xe2\x9d\xaf hello captain \x1b[38;2;86;82;110m\xe2\x94\x82\x1b[39m\n  \x1b[38;2;86;82;110m\xe2\x95\xb0\xe2\x94\x80\xe2\x94\x80 Composer \xe2\x94\x80\xe2\x95\xaf\x1b[39m\n' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" LC_ALL=C FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT" )
+  [ "$out" = pending ] || fail "real typed text in a dark-themed bordered composer must read pending in the byte-oriented C locale, got '$out' (reading it empty lets the away-mode injector overwrite the captain's unsubmitted draft)"
+  pass "fm_backend_herdr_composer_state: a dark-themed composer holding real typed text reads pending in the C locale, never empty"
+}
+
+# Direction 3: the alternation must still MATCH each full glyph sequence in the C
+# locale, so an unbordered agent prompt is still recognized. Without this, a
+# bare-prompt pattern that matched NOTHING would satisfy both cases above while
+# silently breaking every unbordered composer read.
+test_composer_state_unbordered_prompt_glyphs_are_empty_in_byte_locale() {
+  local dir log resp fb out glyph idx=1
+  dir="$TMP_ROOT/composer-bare-glyphs-c-locale"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  for glyph in '❯' '›'; do
+    printf '%s\n' "$glyph" > "$resp/$idx.out"
+    idx=$((idx + 1))
+  done
+  fb=$(make_herdr_fakebin "$dir")
+  for glyph in '❯' '›'; do
+    out=$( PATH="$fb:$PATH" LC_ALL=C FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+      bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT" )
+    [ "$out" = empty ] || fail "an unbordered agent prompt '$glyph' must still be recognized as an empty composer row in the byte-oriented C locale, got '$out'"
+  done
+  pass "fm_backend_herdr_composer_state: unbordered '❯' and '›' prompt rows still read empty in the C locale (the alternation matches each full glyph)"
+}
+
 test_composer_state_ghost_placeholder_is_empty() {
   local dir log resp fb out
   dir="$TMP_ROOT/composer-ghost"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
@@ -2084,6 +2154,9 @@ test_busy_state_working_maps_to_busy
 test_busy_state_done_and_blocked_map_to_idle
 test_busy_state_unknown_on_no_agent
 test_composer_state_bare_prompt_is_empty
+test_composer_state_bare_prompt_is_empty_in_byte_locale
+test_composer_state_dark_border_real_text_is_pending_in_byte_locale
+test_composer_state_unbordered_prompt_glyphs_are_empty_in_byte_locale
 test_composer_state_ghost_placeholder_is_empty
 test_composer_state_real_text_is_pending
 test_composer_state_popup_placeholder_fill_is_pending
