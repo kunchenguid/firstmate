@@ -66,10 +66,10 @@ SH
 printf '%s\n' "$*" >> "$FM_TEST_GH_LOG"
 case " $* " in
   *" headRefOid "*) printf '%s\n' "${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}" ;;
-  *" state "*)
+  *state,mergeStateStatus*)
     [ "${FM_TEST_GH_FAIL:-0}" = 0 ] || exit 1
     [ "${FM_TEST_GH_SLEEP:-0}" = 0 ] || sleep "$FM_TEST_GH_SLEEP"
-    printf '%s\n' "${FM_TEST_GH_STATE:-OPEN}"
+    printf '%s %s\n' "${FM_TEST_GH_STATE:-OPEN}" "${FM_TEST_GH_MERGE:-}"
     ;;
 esac
 SH
@@ -713,6 +713,8 @@ test_static_poll_contract() {
   done
   out=$(FM_TEST_GH_STATE=MERGED run_poll "$dir")
   [ "$out" = merged ] || fail "static poll did not emit exactly one merged line"
+  out=$(FM_TEST_GH_STATE=OPEN FM_TEST_GH_MERGE=CLEAN run_poll "$dir")
+  [ "$out" = ready-to-merge ] || fail "static poll did not emit ready-to-merge for OPEN CLEAN"
   out=$(FM_TEST_GH_FAIL=1 run_poll "$dir")
   [ -z "$out" ] || fail "static poll emitted after gh failure"
 
@@ -748,7 +750,7 @@ test_static_poll_contract() {
   set -e
   [ "$rc" -eq 0 ] || fail "watcher did not surface merged poll"
   [ "$(grep -c '^check: .*: merged$' "$dir/watch.out")" -eq 1 ] || fail "watcher did not convert merged output into exactly one wake"
-  pass "static poll is silent except for one merged line and remains watcher-bounded"
+  pass "static poll wakes on merged and ready-to-merge, is silent otherwise, and remains watcher-bounded"
 }
 
 test_atomic_interruption_leaves_no_partial_artifact() {
