@@ -14,7 +14,7 @@ Only `AGENTS.md`, `bin/`, and `.agents/skills/` are a running firstmate instruct
 This skill performs that pull for the running main firstmate and every secondmate, without disturbing any in-flight work.
 
 The update is **fast-forward only** - the same sanctioned self-write as the fleet sync firstmate already runs.
-It never forces, never creates a merge commit, never stashes, and advances a target only on a clean fast-forward; anything dirty, diverged, offline, or on the wrong branch is skipped and reported.
+It never forces, never creates a merge commit, never stashes, and advances a target only on a clean fast-forward; anything dirty, diverged, ahead of origin, offline, or on the wrong branch is skipped and reported.
 A tracked-files fast-forward leaves the gitignored operational dirs (data/, state/, config/, projects/, .no-mistakes/) untouched, so a secondmate's in-flight work is never disrupted.
 This touches only the firstmate repo and its own worktrees, never anything under `projects/`.
 
@@ -46,12 +46,12 @@ This touches only the firstmate repo and its own worktrees, never anything under
 4. **Report to the captain in plain outcomes.**
    Summarize what landed under `AGENTS.md` section 9 without firstmate's internal vocabulary: which parts of the fleet are now on the latest, and which were left as-is and why.
    For example: "Captain, firstmate and both second mates are now on the latest."
-   Surface any skipped target whose reason needs the captain's attention - for instance a home with its own un-landed changes (diverged) or local edits (dirty), which were left untouched on purpose.
+   Surface any skipped target whose reason needs the captain's attention - for instance a home with its own un-landed changes (diverged), local commits not yet pushed to origin (ahead), or local edits (dirty), which were left untouched on purpose.
 
 ## Safety
 
 - **Fast-forward only.**
-  A target that has diverged, is dirty, is offline, or is on a non-default branch is skipped and reported, never forced or stashed.
+  A target that has diverged, is ahead of origin with local commits not yet pushed, is dirty, is offline, or is on a non-default branch is skipped and reported, never forced or stashed.
   Nothing with unlanded work is ever discarded - this is prime directive #3.
 - **Only the firstmate repo and its worktrees** are touched, never `projects/`.
   It is the same sanctioned self-write as the fleet sync.

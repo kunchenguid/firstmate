@@ -357,11 +357,12 @@ ff_target() {
     # only one of them is a divergence. When the BASE is an ancestor of HEAD the
     # histories never forked: the target is simply AHEAD, holding the base plus
     # newer commits. Reporting that as "diverged" sends the reader hunting for
-    # unlanded work in a target that has none, and hides the real condition - in
-    # the local-HEAD secondmate sync a home reads ahead precisely when the PRIMARY
-    # is behind, which is the earliest automatic signal that the primary is stale
-    # (nothing else reports it). Either way the target is left untouched: a
-    # fast-forward cannot run backwards, and rewinding it would discard commits.
+    # forked work that does not exist, and hides the real condition - in the
+    # local-HEAD secondmate sync a home that reads ahead usually means the PRIMARY
+    # is behind, the only automatic signal that the primary is stale (nothing else
+    # reports it), though a home holding its own commit reads ahead too. Either way
+    # the target is left untouched: a fast-forward cannot run backwards, and
+    # rewinding it would discard commits.
     if git -C "$dir" merge-base --is-ancestor "$base" HEAD 2>/dev/null; then
       ahead=$(git -C "$dir" rev-list --count "$base"..HEAD 2>/dev/null || echo 0)
       if [ "$ahead" = 1 ]; then unit=commit; else unit=commits; fi
