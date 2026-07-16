@@ -23,9 +23,9 @@ The goal is a session that is safe to reset or destroy because everything durabl
    - Decisions made: a standing choice the captain made this session that should outlive it.
    - Undone next steps: anything left open that has not yet been filed as backlog work.
 
-2. **Route each finding using AGENTS.md's knowledge-routing table.**
-   AGENTS.md (section 6, "Knowledge routing") is the single source of truth for where each kind of knowledge belongs.
-   Read that table and route each finding there instead of re-deriving the mapping here.
+2. **Route each finding using AGENTS.md's knowledge-routing rules.**
+   AGENTS.md section 6, "Project and knowledge management", is the single source of truth for where each kind of knowledge belongs.
+   Read its routing rules and route each finding there instead of re-deriving the mapping here.
 
 3. **Write within firstmate's existing write boundaries.**
    This skill does not grant any new write permission; it only prompts firstmate to use the boundaries that already exist (AGENTS.md section 1):
