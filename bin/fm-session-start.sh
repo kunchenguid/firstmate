@@ -34,9 +34,10 @@
 #                       when locked.
 #   4. context digest - data/projects.md, data/secondmates.md, data/captain.md,
 #                       data/learnings.md: read-only, always safe, always runs.
-#   5. fleet digest   - data/backlog.md, every state/*.meta, a bounded
-#                       state/*.status tail, state/.afk, and a cheap
-#                       per-task endpoint-liveness read: read-only, always runs.
+#   5. fleet digest   - compact data/backlog.md identity/metadata rows, every
+#                       state/*.meta, a bounded state/*.status tail, state/.afk,
+#                       and a cheap per-task endpoint-liveness read: read-only,
+#                       always runs.
 #   6. closing reminder - prints the context-specific watcher next step; this
 #                       script points back to the emitted harness supervision
 #                       block and deliberately never arms the watcher itself.
@@ -81,9 +82,13 @@ PRIMARY_HARNESS=$("$SCRIPT_DIR/fm-harness.sh" 2>/dev/null || printf unknown)
 
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
+# shellcheck source=bin/fm-tasks-axi-lib.sh
+. "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
 
 STATUS_TAIL=${FM_SESSION_START_STATUS_TAIL:-5}
 case "$STATUS_TAIL" in ''|*[!0-9]*) STATUS_TAIL=5 ;; esac
+BACKLOG_LIMIT=${FM_SESSION_START_BACKLOG_LIMIT:-80}
+case "$BACKLOG_LIMIT" in ''|*[!0-9]*|0) BACKLOG_LIMIT=80 ;; esac
 
 RULE='================================================================================'
 SUBRULE='--------------------------------------------------------------------------------'
@@ -103,6 +108,84 @@ print_file_or_absent() {
   if [ -f "$path" ]; then
     if [ -s "$path" ]; then
       cat "$path"
+    else
+      printf '(present, empty)\n'
+    fi
+  else
+    printf 'ABSENT\n'
+  fi
+}
+
+print_backlog_pointer() {
+  printf 'Full task bodies remain available on demand: tasks-axi show <id> --full when compatible tasks-axi is available, or data/backlog.md.\n'
+}
+
+print_backlog_manual_compact() {
+  local path=$1 reason=$2
+  printf 'compact backlog listing (%s; max %s item(s); indented task bodies omitted)\n' "$reason" "$BACKLOG_LIMIT"
+  awk -v max="$BACKLOG_LIMIT" '
+    function state_for_heading(line, heading) {
+      heading = line
+      sub(/^##[[:space:]]+/, "", heading)
+      sub(/[[:space:]]+$/, "", heading)
+      if (heading == "In flight") return "in_flight"
+      if (heading == "Queued") return "queued"
+      if (heading == "Done") return "done"
+      return ""
+    }
+    /^##[[:space:]]+/ {
+      state = state_for_heading($0)
+      if (state != "") print $0
+      next
+    }
+    state != "" && /^[-*][[:space:]]+/ {
+      total++
+      if (shown < max) {
+        print $0
+        shown++
+      }
+      next
+    }
+    END {
+      if (total == 0) {
+        print "(no backlog item title lines found)"
+      } else {
+        printf "(shown %d of %d backlog item title line(s))\n", shown, total
+        if (total > shown) {
+          printf "(truncated %d item(s); increase FM_SESSION_START_BACKLOG_LIMIT for a larger startup listing)\n", total - shown
+        }
+      }
+    }
+  ' "$path"
+}
+
+print_backlog_tasks_axi_compact() {
+  local path=$1 out rc
+  printf 'compact backlog listing (tasks-axi; max %s item(s); task bodies omitted)\n' "$BACKLOG_LIMIT"
+  out=$(tasks-axi list --file "$path" --limit "$BACKLOG_LIMIT" --fields blocked_by,hold_kind,hold_reason 2>&1)
+  rc=$?
+  if [ "$rc" -eq 0 ]; then
+    printf '%s\n' "$out"
+  else
+    printf 'tasks-axi compact listing failed; falling back to title-line rendering.\n'
+    printf '%s\n' "$out"
+    print_backlog_manual_compact "$path" "fallback"
+  fi
+}
+
+print_backlog_compact() {
+  local path=$1 label=$2
+  subsection "$label"
+  if [ -f "$path" ]; then
+    if [ -s "$path" ]; then
+      if fm_tasks_axi_backend_available "$CONFIG"; then
+        print_backlog_tasks_axi_compact "$path"
+      elif fm_backlog_backend_manual "$CONFIG"; then
+        print_backlog_manual_compact "$path" "manual backend"
+      else
+        print_backlog_manual_compact "$path" "tasks-axi unavailable or incompatible"
+      fi
+      print_backlog_pointer
     else
       printf '(present, empty)\n'
     fi
@@ -234,7 +317,7 @@ print_file_or_absent "$DATA/learnings.md" "data/learnings.md"
 
 # --- 5. fleet-state digest ---------------------------------------------
 section "FLEET STATE"
-print_file_or_absent "$DATA/backlog.md" "data/backlog.md"
+print_backlog_compact "$DATA/backlog.md" "data/backlog.md"
 
 subsection "In-flight tasks (state/*.meta)"
 META_FOUND=0
@@ -319,7 +402,9 @@ fi
 cat <<'EOF'
 The digest above is complete for this session start. Do NOT re-read
 data/projects.md, data/secondmates.md, data/captain.md, data/learnings.md,
-data/backlog.md, or state/*.meta now - they were just printed in full.
+or state/*.meta now - they were just printed in full.
+Do NOT bulk-read data/backlog.md now either: the compact identity/metadata
+listing was just printed with a pointer for targeted full-body follow-up.
 Do NOT bulk-read state/*.status now either: their bounded tails were just
 printed with full log paths for targeted follow-up when older wake-event
 history is actually needed. Re-reading everything defeats the entire point
