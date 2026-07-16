@@ -110,8 +110,22 @@ fmx_single_link_file_mode_valid() {
   [ "$mode" = "$expected_mode" ]
 }
 
+fmx_private_artifact_dir_device() {
+  local dir=$1 mode device
+  [ -d "$dir" ] && [ ! -L "$dir" ] || return 1
+  if [ "$(uname)" = Darwin ]; then
+    mode=$(stat -f %Lp "$dir" 2>/dev/null) || return 1
+    device=$(stat -f %d "$dir" 2>/dev/null) || return 1
+  else
+    mode=$(stat -c %a "$dir" 2>/dev/null) || return 1
+    device=$(stat -c %d "$dir" 2>/dev/null) || return 1
+  fi
+  [ "$mode" = 700 ] || return 1
+  printf '%s\n' "$device"
+}
+
 fmx_private_artifact_dir_prepare() {
-  local dir=$1 parent mode device
+  local dir=$1 parent
   parent=${dir%/*}
   if [ "$parent" != "$dir" ]; then
     if [ -e "$parent" ] || [ -L "$parent" ]; then
@@ -126,16 +140,7 @@ fmx_private_artifact_dir_prepare() {
   else
     (umask 077; mkdir -p "$dir" 2>/dev/null) || return 1
   fi
-  [ -d "$dir" ] && [ ! -L "$dir" ] || return 1
-  if [ "$(uname)" = Darwin ]; then
-    mode=$(stat -f %Lp "$dir" 2>/dev/null) || return 1
-    device=$(stat -f %d "$dir" 2>/dev/null) || return 1
-  else
-    mode=$(stat -c %a "$dir" 2>/dev/null) || return 1
-    device=$(stat -c %d "$dir" 2>/dev/null) || return 1
-  fi
-  [ "$mode" = 700 ] || return 1
-  printf '%s\n' "$device"
+  fmx_private_artifact_dir_device "$dir"
 }
 
 fmx_private_artifact_publish_stdin() {
@@ -169,6 +174,19 @@ fmx_private_artifact_publish_stdin() {
     rm -f -- "$dest"
     return 1
   fi
+}
+
+fmx_private_artifact_file_valid() {
+  local dir=$1 base=$2 mode=$3 device
+  case "$base" in
+    ''|.*|*/*) return 1 ;;
+  esac
+  case "$mode" in
+    600|700) ;;
+    *) return 1 ;;
+  esac
+  device=$(fmx_private_artifact_dir_device "$dir") || return 1
+  fmx_single_link_file_mode_valid "$dir/$base" "$mode" "$device"
 }
 
 fmx_poll_shim_identity_valid() {
@@ -289,6 +307,10 @@ fmx_extract_reply_context() {
 # inbox file is absent. Thin wrapper over fmx_extract_reply_context.
 fmx_request_inbox_context() {
   local state=$1 rid=$2
+  if ! fmx_private_artifact_file_valid "$state/x-inbox" "$rid.json" 600; then
+    printf '{"platform":"","reply_max_chars":""}\n'
+    return 0
+  fi
   fmx_extract_reply_context "$state/x-inbox/$rid.json"
 }
 
@@ -388,10 +410,9 @@ fmx_context_registry_recorded_at() {
 }
 
 fmx_context_registry_prune() {
-  local state=$1 dir now max_age file recorded_at age
+  local state=$1 dir now max_age file recorded_at age dir_device
   dir="$state/x-context"
-  [ -d "$dir" ] || return 0
-  [ ! -L "$dir" ] || return 0
+  dir_device=$(fmx_private_artifact_dir_device "$dir" 2>/dev/null) || return 0
   now=${FMX_NOW_OVERRIDE:-$(date +%s)}
   case "$now" in
     ''|*[!0-9]*) return 0 ;;
@@ -404,6 +425,10 @@ fmx_context_registry_prune() {
   [ "${#max_age}" -le 18 ] || max_age=604800
   [ "$max_age" -le 604800 ] || max_age=604800
   while IFS= read -r -d '' file; do
+    if ! fmx_single_link_file_mode_valid "$file" 600 "$dir_device"; then
+      rm -f -- "$file" 2>/dev/null || true
+      continue
+    fi
     if ! recorded_at=$(fmx_context_registry_recorded_at "$file" "$now"); then
       rm -f -- "$file" 2>/dev/null || true
       continue
@@ -473,16 +498,17 @@ fmx_context_registry_set() {
 # reply context as {"platform":"...","reply_max_chars":"..."} (the same shape as
 # the inbox and relay extractors), or the empty shape when no record exists.
 fmx_context_registry_get() {
-  local state=$1 rid=$2 file
+  local state=$1 rid=$2 dir file
   case "$rid" in
     ''|.*|*[!A-Za-z0-9._-]*) printf '{"platform":"","reply_max_chars":""}\n'; return 0 ;;
   esac
-  fmx_context_registry_prune "$state"
-  file="$state/x-context/$rid.json"
-  if [ ! -f "$file" ]; then
+  dir="$state/x-context"
+  file="$dir/$rid.json"
+  if ! fmx_private_artifact_file_valid "$dir" "$rid.json" 600; then
     printf '{"platform":"","reply_max_chars":""}\n'
     return 0
   fi
+  fmx_context_registry_prune "$state"
   jq -c '{platform:(.platform // ""), reply_max_chars:(.reply_max_chars // "")}' "$file" 2>/dev/null \
     || printf '{"platform":"","reply_max_chars":""}\n'
 }

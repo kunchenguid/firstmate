@@ -42,15 +42,17 @@ ERROR_FILE="$STATE/x-poll.error"
 
 emit_error_once() {
   local msg=$1
-  mkdir -p "$STATE" 2>/dev/null || true
-  if [ -f "$ERROR_FILE" ] && [ "$(cat "$ERROR_FILE" 2>/dev/null)" = "$msg" ]; then
+  if fmx_private_artifact_file_valid "$STATE" "x-poll.error" 600 \
+    && [ "$(cat "$ERROR_FILE" 2>/dev/null)" = "$msg" ]; then
     return 0
   fi
-  printf '%s\n' "$msg" > "$ERROR_FILE" 2>/dev/null || true
+  printf '%s\n' "$msg" \
+    | fmx_private_artifact_publish_stdin "$STATE" "x-poll.error" 600 2>/dev/null || true
   printf 'x-mode-error %s\n' "$msg"
 }
 
 clear_error() {
+  fmx_private_artifact_dir_device "$STATE" >/dev/null 2>&1 || return 0
   rm -f "$ERROR_FILE" 2>/dev/null || true
 }
 

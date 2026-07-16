@@ -112,6 +112,15 @@ assert_no_private_artifact_temps() {
   [ -z "$leftovers" ] || fail "private artifact temp files were not cleaned up: $leftovers"
 }
 
+private_artifact_dir() {
+  mkdir -p "$1"
+  chmod 700 "$1"
+}
+
+private_artifact_file() {
+  chmod 600 "$1"
+}
+
 # ---------------------------------------------------------------------------
 
 test_poll_no_token_is_hard_noop() {
@@ -190,6 +199,8 @@ test_poll_auth_error_reports_once() {
   [ "$out" = "x-mode-error relay returned HTTP 401" ] \
     || fail "poll auth error must emit one visible diagnostic (got: $out)"
   assert_present "$home/state/x-poll.error" "poll auth error must write a dedupe marker"
+  [ "$(path_mode "$home/state")" = 700 ] || fail "poll auth error must create private state"
+  [ "$(path_mode "$home/state/x-poll.error")" = 600 ] || fail "poll auth error marker must be private"
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_RELAY_URL="https://relay.test" \
     FAKE_POLL_CODE=401 \
     "$ROOT/bin/fm-x-poll.sh"); rc=$?
@@ -202,6 +213,57 @@ test_poll_auth_error_reports_once() {
   [ -z "$out" ] || fail "poll recovery 204 must stay silent (got: $out)"
   assert_absent "$home/state/x-poll.error" "poll 204 must clear the auth diagnostic marker"
   pass "fm-x-poll surfaces auth/config errors once and clears on recovery"
+}
+
+test_poll_error_private_publication_rejects_unsafe_paths() {
+  local home fakebin out rc target marker hardlink
+
+  home="$TMP_ROOT/poll-error-linked-state"; mkdir -p "$home/external-state"
+  fakebin=$(make_fake_curl "$home")
+  ln -s "$home/external-state" "$home/state"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_RELAY_URL="https://relay.test" \
+    FMX_PAIRING_TOKEN=tok-linked-state FAKE_POLL_CODE=401 \
+    "$ROOT/bin/fm-x-poll.sh"); rc=$?
+  expect_code 0 "$rc" "poll linked state diagnostic exit"
+  [ "$out" = "x-mode-error relay returned HTTP 401" ] \
+    || fail "poll must still emit a diagnostic when the marker cannot be safely stored (got: $out)"
+  assert_absent "$home/external-state/x-poll.error" "poll must not write the diagnostic through a linked state directory"
+  [ -L "$home/state" ] || fail "poll must leave a rejected linked state directory in place"
+
+  home="$TMP_ROOT/poll-error-linked-marker"; mkdir -p "$home/state"
+  fakebin=$(make_fake_curl "$home")
+  chmod 700 "$home/state"
+  target="$home/external-error"
+  printf 'relay returned HTTP 401\n' > "$target"
+  ln -s "$target" "$home/state/x-poll.error"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_RELAY_URL="https://relay.test" \
+    FMX_PAIRING_TOKEN=tok-linked-marker FAKE_POLL_CODE=401 \
+    "$ROOT/bin/fm-x-poll.sh"); rc=$?
+  expect_code 0 "$rc" "poll linked marker diagnostic exit"
+  [ "$out" = "x-mode-error relay returned HTTP 401" ] \
+    || fail "poll must not dedupe through a linked diagnostic marker (got: $out)"
+  [ "$(cat "$target")" = "relay returned HTTP 401" ] \
+    || fail "poll must not write through a linked diagnostic marker"
+  [ -L "$home/state/x-poll.error" ] || fail "poll must not replace a rejected linked diagnostic marker"
+
+  home="$TMP_ROOT/poll-error-hardlink-marker"; mkdir -p "$home/state"
+  fakebin=$(make_fake_curl "$home")
+  chmod 700 "$home/state"
+  marker="$home/state/x-poll.error"
+  hardlink="$home/state/x-poll.alias"
+  printf 'relay returned HTTP 401\n' > "$marker"
+  chmod 600 "$marker"
+  ln "$marker" "$hardlink"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_RELAY_URL="https://relay.test" \
+    FMX_PAIRING_TOKEN=tok-hard-marker FAKE_POLL_CODE=401 \
+    "$ROOT/bin/fm-x-poll.sh"); rc=$?
+  expect_code 0 "$rc" "poll hardlinked marker diagnostic exit"
+  [ "$out" = "x-mode-error relay returned HTTP 401" ] \
+    || fail "poll must not dedupe through a hardlinked diagnostic marker (got: $out)"
+  [ "$(cat "$marker")" = "relay returned HTTP 401" ] || fail "poll must preserve the hardlinked marker"
+  [ "$(cat "$hardlink")" = "relay returned HTTP 401" ] || fail "poll must preserve the marker hardlink peer"
+  assert_no_private_artifact_temps "$home/state"
+  pass "fm-x-poll diagnostic markers use private guarded publication"
 }
 
 test_poll_question_stashes_and_marks() {
@@ -261,7 +323,14 @@ test_poll_inbox_commit_failure_reports_error() {
   fakebin=$(make_fake_curl "$home")
   cat > "$fakebin/mv" <<'SH'
 #!/usr/bin/env bash
-exit 1
+dest=
+for arg in "$@"; do
+  dest=$arg
+done
+case "$dest" in
+  */x-inbox/*) exit 1 ;;
+esac
+exec /bin/mv "$@"
 SH
   chmod +x "$fakebin/mv"
   printf 'FMX_PAIRING_TOKEN=tok-q\n' > "$home/.env"
@@ -944,9 +1013,10 @@ test_reply_thread_dry_run() {
 
 test_reply_discord_inbox_uses_discord_budget() {
   local home out reply
-  home="$TMP_ROOT/reply-discord-budget"; mkdir -p "$home/state/x-inbox"
+  home="$TMP_ROOT/reply-discord-budget"; private_artifact_dir "$home/state/x-inbox"
   jq -cn '{request_id:"req-discord",tweet_id:"discord:channel:message",text:"question"}' \
     > "$home/state/x-inbox/req-discord.json"
+  private_artifact_file "$home/state/x-inbox/req-discord.json"
   reply=$(cat <<'TXT'
 First paragraph stays intact in a single Discord reply even though it is comfortably over the X tweet budget.
 
@@ -969,8 +1039,9 @@ TXT
 
 test_reply_x_inbox_still_uses_x_budget() {
   local home out long
-  home="$TMP_ROOT/reply-x-budget"; mkdir -p "$home/state/x-inbox"
+  home="$TMP_ROOT/reply-x-budget"; private_artifact_dir "$home/state/x-inbox"
   jq -cn '{request_id:"req-x",tweet_id:"1234567890",text:"question"}' > "$home/state/x-inbox/req-x.json"
+  private_artifact_file "$home/state/x-inbox/req-x.json"
   long="This X reply intentionally runs beyond the default tweet budget so it still needs a numbered thread on X. It has enough plain words to cross the limit while staying easy to split at word boundaries without code fences or platform ambiguity. The old default must remain intact for numeric tweet ids."
   out=$(FM_HOME="$home" FMX_DRY_RUN=1 "$ROOT/bin/fm-x-reply.sh" req-x "$long" 2>/dev/null)
   [ "$out" = "req-x" ] || fail "X dry-run must echo the request_id (got: $out)"
@@ -983,9 +1054,10 @@ test_reply_x_inbox_still_uses_x_budget() {
 
 test_reply_inbox_explicit_limit_wins() {
   local home out long
-  home="$TMP_ROOT/reply-explicit-limit"; mkdir -p "$home/state/x-inbox"
+  home="$TMP_ROOT/reply-explicit-limit"; private_artifact_dir "$home/state/x-inbox"
   jq -cn '{request_id:"req-limit",platform:"discord",reply_max_chars:90,text:"question"}' \
     > "$home/state/x-inbox/req-limit.json"
+  private_artifact_file "$home/state/x-inbox/req-limit.json"
   long="Discord normally has a much larger budget, but an explicit relay-provided reply_max_chars value must be honored when the payload carries one."
   out=$(FM_HOME="$home" FMX_DRY_RUN=1 "$ROOT/bin/fm-x-reply.sh" req-limit "$long" 2>/dev/null)
   [ "$out" = "req-limit" ] || fail "explicit-limit dry-run must echo the request_id (got: $out)"
@@ -994,6 +1066,53 @@ test_reply_inbox_explicit_limit_wins() {
   [ "$(jq '.texts|map(length)|max' "$home/state/x-outbox/req-limit.json")" -le 90 ] \
     || fail "explicit-limit chunks must stay within the relay-provided budget"
   pass "fm-x-reply prefers an explicit relay-provided reply limit"
+}
+
+test_reply_rejects_unsafe_inbox_context_reads() {
+  local home out rc reply target dest hardlink
+  reply="This reply is intentionally longer than a single X tweet, but shorter than a Discord message. If an unsafe inbox artifact is trusted it will stay one message; if it is rejected it will split at the default X budget, which is the fail-closed behavior for a local lookalike context record."
+
+  home="$TMP_ROOT/reply-inbox-linked-dir"; mkdir -p "$home/state" "$home/external-inbox"
+  jq -cn '{request_id:"req-linked-dir",platform:"discord",reply_max_chars:1900,text:"question"}' \
+    > "$home/external-inbox/req-linked-dir.json"
+  chmod 600 "$home/external-inbox/req-linked-dir.json"
+  ln -s "$home/external-inbox" "$home/state/x-inbox"
+  out=$(FM_HOME="$home" FMX_DRY_RUN=1 "$ROOT/bin/fm-x-reply.sh" req-linked-dir "$reply" 2>/dev/null); rc=$?
+  expect_code 0 "$rc" "reply linked inbox dir read exit"
+  jq -e '.texts and (.texts|length>1)' "$home/state/x-outbox/req-linked-dir.json" >/dev/null \
+    || fail "reply must not trust a linked inbox directory for Discord budget context"
+
+  home="$TMP_ROOT/reply-inbox-linked-file"; private_artifact_dir "$home/state/x-inbox"
+  target="$home/external-inbox-record.json"
+  jq -cn '{request_id:"req-linked-file",platform:"discord",reply_max_chars:1900,text:"question"}' > "$target"
+  ln -s "$target" "$home/state/x-inbox/req-linked-file.json"
+  out=$(FM_HOME="$home" FMX_DRY_RUN=1 "$ROOT/bin/fm-x-reply.sh" req-linked-file "$reply" 2>/dev/null); rc=$?
+  expect_code 0 "$rc" "reply linked inbox file read exit"
+  jq -e '.texts and (.texts|length>1)' "$home/state/x-outbox/req-linked-file.json" >/dev/null \
+    || fail "reply must not trust a linked inbox file for Discord budget context"
+
+  home="$TMP_ROOT/reply-inbox-hardlink-file"; private_artifact_dir "$home/state/x-inbox"
+  dest="$home/state/x-inbox/req-hardlink.json"
+  hardlink="$home/state/x-inbox/req-hardlink.alias"
+  jq -cn '{request_id:"req-hardlink",platform:"discord",reply_max_chars:1900,text:"question"}' > "$dest"
+  private_artifact_file "$dest"
+  ln "$dest" "$hardlink"
+  out=$(FM_HOME="$home" FMX_DRY_RUN=1 "$ROOT/bin/fm-x-reply.sh" req-hardlink "$reply" 2>/dev/null); rc=$?
+  expect_code 0 "$rc" "reply hardlinked inbox file read exit"
+  jq -e '.texts and (.texts|length>1)' "$home/state/x-outbox/req-hardlink.json" >/dev/null \
+    || fail "reply must not trust a hardlinked inbox file for Discord budget context"
+  [ "$(jq -r .platform "$dest")" = "discord" ] || fail "reply must leave a hardlinked inbox lookalike unchanged"
+
+  home="$TMP_ROOT/reply-inbox-public-dir"; mkdir -p "$home/state/x-inbox"
+  chmod 755 "$home/state/x-inbox"
+  jq -cn '{request_id:"req-public-dir",platform:"discord",reply_max_chars:1900,text:"question"}' \
+    > "$home/state/x-inbox/req-public-dir.json"
+  private_artifact_file "$home/state/x-inbox/req-public-dir.json"
+  out=$(FM_HOME="$home" FMX_DRY_RUN=1 "$ROOT/bin/fm-x-reply.sh" req-public-dir "$reply" 2>/dev/null); rc=$?
+  expect_code 0 "$rc" "reply public inbox dir read exit"
+  jq -e '.texts and (.texts|length>1)' "$home/state/x-outbox/req-public-dir.json" >/dev/null \
+    || fail "reply must not trust a nonprivate inbox directory for Discord budget context"
+  pass "fm-x-reply rejects unsafe inbox context artifacts"
 }
 
 test_reply_max_chars_floor_clamps_to_minimum() {
@@ -1443,6 +1562,52 @@ test_context_registry_private_publication_rejects_unsafe_paths() {
   pass "context registry publishes records only through private guarded artifacts"
 }
 
+test_context_registry_rejects_unsafe_reads() {
+  local home out target dest hardlink
+  # shellcheck source=bin/fm-x-lib.sh
+  . "$ROOT/bin/fm-x-lib.sh"
+
+  home="$TMP_ROOT/context-read-linked-dir"; mkdir -p "$home/state" "$home/external-context"
+  jq -cn '{request_id:"req-linked-dir",platform:"discord",reply_max_chars:"1900",recorded_at:1700000000}' \
+    > "$home/external-context/req-linked-dir.json"
+  chmod 600 "$home/external-context/req-linked-dir.json"
+  ln -s "$home/external-context" "$home/state/x-context"
+  out=$(fmx_context_registry_get "$home/state" req-linked-dir)
+  [ "$(printf '%s' "$out" | jq -r .platform)" = "" ] \
+    || fail "context registry must not read through a linked context directory"
+
+  home="$TMP_ROOT/context-read-linked-file"; private_artifact_dir "$home/state/x-context"
+  target="$home/external-context-record.json"
+  jq -cn '{request_id:"req-linked-file",platform:"discord",reply_max_chars:"1900",recorded_at:1700000000}' > "$target"
+  ln -s "$target" "$home/state/x-context/req-linked-file.json"
+  out=$(fmx_context_registry_get "$home/state" req-linked-file)
+  [ "$(printf '%s' "$out" | jq -r .platform)" = "" ] \
+    || fail "context registry must not read through a linked context file"
+  [ -L "$home/state/x-context/req-linked-file.json" ] \
+    || fail "context registry must not replace a rejected linked context file"
+
+  home="$TMP_ROOT/context-read-hardlink-file"; private_artifact_dir "$home/state/x-context"
+  dest="$home/state/x-context/req-hardlink.json"
+  hardlink="$home/state/x-context/req-hardlink.alias"
+  jq -cn '{request_id:"req-hardlink",platform:"discord",reply_max_chars:"1900",recorded_at:1700000000}' > "$dest"
+  private_artifact_file "$dest"
+  ln "$dest" "$hardlink"
+  out=$(fmx_context_registry_get "$home/state" req-hardlink)
+  [ "$(printf '%s' "$out" | jq -r .platform)" = "" ] \
+    || fail "context registry must not read a hardlinked context file"
+  [ "$(jq -r .platform "$hardlink")" = "discord" ] \
+    || fail "context registry must not rewrite a hardlink peer when rejecting the local record"
+
+  home="$TMP_ROOT/context-read-wrong-mode-file"; private_artifact_dir "$home/state/x-context"
+  dest="$home/state/x-context/req-mode.json"
+  jq -cn '{request_id:"req-mode",platform:"discord",reply_max_chars:"1900",recorded_at:1700000000}' > "$dest"
+  chmod 644 "$dest"
+  out=$(fmx_context_registry_get "$home/state" req-mode)
+  [ "$(printf '%s' "$out" | jq -r .platform)" = "" ] \
+    || fail "context registry must not read a wrong-mode context file"
+  pass "context registry reads only private single-link artifacts"
+}
+
 test_private_artifact_publisher_runs_under_system_bash() {
   local home out rc
   home="$TMP_ROOT/private-publisher-system-bash"; mkdir -p "$home"
@@ -1462,7 +1627,7 @@ test_context_registry_prunes_expired_records() {
   local home dir fakebin keep preserved legacy malformed future out rc
   home="$TMP_ROOT/registry-retention"
   dir="$home/state/x-context"
-  mkdir -p "$dir"
+  private_artifact_dir "$dir"
   keep="$dir/req-keep.json"
   preserved="$dir/req-iP49shRy-8ue4dtxEo87Yw.json"
   legacy="$dir/req-legacy.json"
@@ -1478,6 +1643,7 @@ test_context_registry_prunes_expired_records() {
   printf '{not-json\n' > "$malformed"
   jq -cn '{request_id:"req-future",platform:"x",reply_max_chars:"280",recorded_at:"9999999999999999999"}' \
     > "$future"
+  chmod 600 "$dir/"*.json
   touch -t 202001010000 "$legacy" "$malformed" "$future"
   out=$(FMX_NOW_OVERRIDE=1700000000 bash -c \
     '. "$1/bin/fm-x-lib.sh"; fmx_context_registry_get "$2" req-keep' _ "$ROOT" "$home/state")
@@ -1493,6 +1659,7 @@ test_context_registry_prunes_expired_records() {
   printf 'FMX_PAIRING_TOKEN=tok-retention\n' > "$home/.env"
   jq -cn '{request_id:"req-poll-expired",platform:"x",reply_max_chars:"280",recorded_at:1699395199}' \
     > "$dir/req-poll-expired.json"
+  private_artifact_file "$dir/req-poll-expired.json"
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_NOW_OVERRIDE=1700000000 \
     FMX_RELAY_URL="https://relay.test" FAKE_POLL_CODE=204 "$ROOT/bin/fm-x-poll.sh"); rc=$?
   expect_code 0 "$rc" "poll retention sweep exit"
@@ -1500,6 +1667,7 @@ test_context_registry_prunes_expired_records() {
   assert_absent "$dir/req-poll-expired.json" "a recurring empty poll must prune expired registry records"
   jq -cn '{request_id:"req-short-window",platform:"x",reply_max_chars:"280",recorded_at:1699999899}' \
     > "$dir/req-short-window.json"
+  private_artifact_file "$dir/req-short-window.json"
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_NOW_OVERRIDE=1700000000 \
     FMX_FOLLOWUP_MAX_AGE_SECS=100 FMX_RELAY_URL="https://relay.test" FAKE_POLL_CODE=204 \
     "$ROOT/bin/fm-x-poll.sh"); rc=$?
@@ -1507,6 +1675,7 @@ test_context_registry_prunes_expired_records() {
   assert_absent "$dir/req-short-window.json" "a smaller configured follow-up window must prune earlier"
   jq -cn '{request_id:"req-overlong-window",platform:"x",reply_max_chars:"280",recorded_at:1699395199}' \
     > "$dir/req-overlong-window.json"
+  private_artifact_file "$dir/req-overlong-window.json"
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_NOW_OVERRIDE=1700000000 \
     FMX_FOLLOWUP_MAX_AGE_SECS=999999999 FMX_RELAY_URL="https://relay.test" FAKE_POLL_CODE=204 \
     "$ROOT/bin/fm-x-poll.sh"); rc=$?
@@ -1676,12 +1845,13 @@ test_regression_unresolved_followup_fails_safe() {
 # request_id, so a Discord reply stays one message.
 test_followup_partial_registry_uses_relay_budget_live() {
   local home fakebin log out rc reply data
-  home="$TMP_ROOT/reg-relay-fallback"; mkdir -p "$home/state/x-context"
+  home="$TMP_ROOT/reg-relay-fallback"; private_artifact_dir "$home/state/x-context"
   fakebin=$(make_fake_curl "$home")
   log="$home/curl.log"
   printf 'FMX_PAIRING_TOKEN=tok-rf\n' > "$home/.env"
   jq -cn '{request_id:"req-relay",platform:"discord",reply_max_chars:""}' \
     > "$home/state/x-context/req-relay.json"
+  private_artifact_file "$home/state/x-context/req-relay.json"
   reply=$(cat <<'TXT'
 Aye captain, that one is shipped and green. The change is landed, the regression guard is in place, and nothing else was disturbed along the way. This confirmation deliberately runs past a single X tweet so it proves the relay-recovered Discord budget keeps it one message.
 TXT
@@ -1746,9 +1916,10 @@ TXT
 
 test_dismiss_clears_context_registry() {
   local home out rc reg
-  home="$TMP_ROOT/dismiss-clears-registry"; mkdir -p "$home/state/x-context"
+  home="$TMP_ROOT/dismiss-clears-registry"; private_artifact_dir "$home/state/x-context"
   reg="$home/state/x-context/req-dis.json"
   jq -cn '{request_id:"req-dis",platform:"discord",reply_max_chars:""}' > "$reg"
+  private_artifact_file "$reg"
   # A dismissed mention will never get a follow-up, so its context is dropped.
   out=$(FM_HOME="$home" FMX_DRY_RUN=1 "$ROOT/bin/fm-x-dismiss.sh" req-dis 2>/dev/null); rc=$?
   expect_code 0 "$rc" "dismiss registry-clear exit"
@@ -1942,11 +2113,12 @@ test_link_records_request_and_timestamp() {
 
 test_link_records_discord_platform_for_followups() {
   local home meta out rc reply
-  home="$TMP_ROOT/link-discord-platform"; mkdir -p "$home/state/x-inbox"
+  home="$TMP_ROOT/link-discord-platform"; private_artifact_dir "$home/state/x-inbox"
   meta="$home/state/fix-discord.meta"
   printf 'window=w\nworktree=/wt\nkind=ship\nmode=no-mistakes\nyolo=off\n' > "$meta"
   jq -cn '{request_id:"req-discord-follow",tweet_id:"discord:channel:message",reply_max_chars:1900,text:"question"}' \
     > "$home/state/x-inbox/req-discord-follow.json"
+  private_artifact_file "$home/state/x-inbox/req-discord-follow.json"
   FM_HOME="$home" FMX_NOW_OVERRIDE=1700000000 \
     "$ROOT/bin/fm-x-link.sh" fix-discord req-discord-follow >/dev/null; rc=$?
   expect_code 0 "$rc" "Discord link exit"
@@ -2493,6 +2665,7 @@ test_poll_empty_env_token_overrides_env_file
 test_poll_204_is_silent
 test_poll_empty_env_relay_overrides_env_file
 test_poll_auth_error_reports_once
+test_poll_error_private_publication_rejects_unsafe_paths
 test_poll_question_stashes_and_marks
 test_poll_preserves_conversation_context
 test_poll_inbox_commit_failure_reports_error
@@ -2518,6 +2691,7 @@ test_reply_thread_dry_run
 test_reply_discord_inbox_uses_discord_budget
 test_reply_x_inbox_still_uses_x_budget
 test_reply_inbox_explicit_limit_wins
+test_reply_rejects_unsafe_inbox_context_reads
 test_reply_max_chars_floor_clamps_to_minimum
 test_reply_thread_live_posts_texts
 test_reply_image_live_posts_image_object
@@ -2536,6 +2710,7 @@ test_reply_followup_thread_dry_run
 test_reply_followup_image_dry_run_marks_endpoint_and_compacts_image
 test_poll_records_context_registry_from_relay_platform
 test_context_registry_private_publication_rejects_unsafe_paths
+test_context_registry_rejects_unsafe_reads
 test_private_artifact_publisher_runs_under_system_bash
 test_context_registry_prunes_expired_records
 test_context_registry_preserves_first_seen_timestamp
