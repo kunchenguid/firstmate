@@ -645,6 +645,7 @@ make_routine_bootstrap_fixture() {
   root="$case_dir/root"
   home="$case_dir/home"
   sm="$case_dir/sm"
+  fm_git_identity
   mkdir -p "$home/config" "$home/state"
   printf '%s\n' codex > "$home/config/crew-harness"
   printf '%s\n' '{"rules":[{"when":"normal work","use":{"harness":"codex"}}],"default":{"harness":"claude","effort":"low"}}' \
