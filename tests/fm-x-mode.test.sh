@@ -102,7 +102,11 @@ make_sample_image() {
 }
 
 path_mode() {
-  stat -f %Lp "$1" 2>/dev/null || stat -c %a "$1"
+  if [ "$(uname)" = Darwin ]; then
+    stat -f %Lp "$1"
+  else
+    stat -c %a "$1"
+  fi
 }
 
 assert_no_private_artifact_temps() {
@@ -668,9 +672,9 @@ test_bootstrap_does_not_follow_x_artifact_symlinks() {
     || fail "bootstrap changed the linked shim target"
   [ "$(cat "$cadence_target")" = 'external cadence sentinel' ] \
     || fail "bootstrap changed the linked cadence target"
-  [ "$(stat -f %Lp "$shim_target" 2>/dev/null || stat -c %a "$shim_target")" = 640 ] \
+  [ "$(path_mode "$shim_target")" = 640 ] \
     || fail "bootstrap changed the linked shim target mode"
-  [ "$(stat -f %Lp "$cadence_target" 2>/dev/null || stat -c %a "$cadence_target")" = 640 ] \
+  [ "$(path_mode "$cadence_target")" = 640 ] \
     || fail "bootstrap changed the linked cadence target mode"
   assert_absent "$home/state/x-watch.check.sh" "bootstrap must remove the rejected shim link"
   assert_absent "$home/config/x-mode.env" "bootstrap must remove the rejected cadence link"
