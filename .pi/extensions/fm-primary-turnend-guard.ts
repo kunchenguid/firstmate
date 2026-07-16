@@ -7,57 +7,47 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 let guardFollowupActive = false;
 
-type LockOwnership = "owned" | "missing" | "other";
+type LockOwnership = "owned" | "missing" | "dead" | "other" | "malformed" | "unknown";
 
 const extensionFile = fileURLToPath(import.meta.url);
 const extensionDir = dirname(extensionFile);
 const root = resolve(extensionDir, "../..");
 const fmHome = process.env.FM_HOME || process.env.FM_ROOT_OVERRIDE || root;
+const fmRoot = process.env.FM_ROOT_OVERRIDE || root;
 const state = process.env.FM_STATE_OVERRIDE || `${fmHome}/state`;
+const lockScript = `${fmRoot}/bin/fm-lock.sh`;
 const marker = `${state}/.pi-turnend-extension-loaded`;
 const extensionVersion = `sha256:${createHash("sha256").update(readFileSync(extensionFile)).digest("hex")}`;
 
-function parentPid(pid: string): string {
-  const result = spawnSync("ps", ["-o", "ppid=", "-p", pid], { encoding: "utf8" });
-  if (result.status !== 0) return "";
-  return result.stdout.trim();
-}
-
-function pidAlive(pid: string): boolean {
-  try {
-    process.kill(Number(pid), 0);
-    return true;
-  } catch {
-    return false;
-  }
+function lockEnvironment() {
+  return {
+    ...process.env,
+    FM_HOME: fmHome,
+    FM_ROOT_OVERRIDE: fmRoot,
+    FM_STATE_OVERRIDE: state,
+  };
 }
 
 function lockOwnership(): LockOwnership {
-  let lockPid = "";
-  try {
-    lockPid = readFileSync(`${state}/.lock`, "utf8").trim();
-  } catch {
-    return "missing";
+  const result = spawnSync(lockScript, ["ownership"], { encoding: "utf8", env: lockEnvironment() });
+  const ownership = String(result.stdout || "").trim();
+  if (result.status !== 0) return "unknown";
+  if (["owned", "missing", "dead", "other", "malformed", "unknown"].includes(ownership)) {
+    return ownership as LockOwnership;
   }
-  if (!/^[0-9]+$/.test(lockPid) || lockPid === "1") return "other";
-  let pid = String(process.pid);
-  for (let i = 0; i < 8; i += 1) {
-    if (pid === lockPid) return "owned";
-    pid = parentPid(pid);
-    if (!pid || pid === "1") break;
-  }
-  return pidAlive(lockPid) ? "other" : "missing";
+  return "unknown";
 }
 
 function markLoaded(): void {
-  if (lockOwnership() === "other") return;
+  const ownership = lockOwnership();
+  if (ownership === "other" || ownership === "malformed" || ownership === "unknown") return;
   mkdirSync(state, { recursive: true });
   writeFileSync(marker, `${extensionVersion}\n${process.pid}\n`);
 }
 
 function runGuard(): Promise<{ code: number; stderr: string }> {
   return new Promise((resolveResult) => {
-    const child = spawn(`${root}/bin/fm-turnend-guard.sh`, {
+    const child = spawn(`${fmRoot}/bin/fm-turnend-guard.sh`, {
       stdio: ["pipe", "ignore", "pipe"],
     });
     let stderr = "";
@@ -79,7 +69,7 @@ function runGuard(): Promise<{ code: number; stderr: string }> {
 // script owns its own decision and is inert outside the real primary checkout.
 function runChecker(script: string, command: string): Promise<{ code: number; stderr: string }> {
   return new Promise((resolveResult) => {
-    const child = spawn(`${root}/bin/${script}`, ["--command", command], {
+    const child = spawn(`${fmRoot}/bin/${script}`, ["--command", command], {
       stdio: ["ignore", "ignore", "pipe"],
     });
     let stderr = "";

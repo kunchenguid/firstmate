@@ -12,7 +12,7 @@ type ArmResult = {
   message: string;
 };
 
-type LockOwnership = "owned" | "missing" | "other";
+type LockOwnership = "owned" | "missing" | "dead" | "other" | "malformed" | "unknown";
 
 const extensionFile = fileURLToPath(import.meta.url);
 const extensionDir = dirname(extensionFile);
@@ -22,50 +22,35 @@ const fmRoot = process.env.FM_ROOT_OVERRIDE || root;
 const state = process.env.FM_STATE_OVERRIDE || `${fmHome}/state`;
 const config = process.env.FM_CONFIG_OVERRIDE || `${fmHome}/config`;
 const armScript = `${fmRoot}/bin/fm-watch-arm.sh`;
+const lockScript = `${fmRoot}/bin/fm-lock.sh`;
 const marker = `${state}/.pi-watch-extension-loaded`;
 const extensionVersion = `sha256:${createHash("sha256").update(readFileSync(extensionFile)).digest("hex")}`;
 
 let child: any = null;
 let seq = 0;
 
-function parentPid(pid: string): string {
-  const result = spawnSync("ps", ["-o", "ppid=", "-p", pid], { encoding: "utf8" });
-  if (result.status !== 0) return "";
-  return result.stdout.trim();
-}
-
-function pidAlive(pid: string): boolean {
-  try {
-    process.kill(Number(pid), 0);
-    return true;
-  } catch {
-    return false;
-  }
+function lockEnvironment() {
+  return {
+    ...process.env,
+    FM_HOME: fmHome,
+    FM_ROOT_OVERRIDE: fmRoot,
+    FM_STATE_OVERRIDE: state,
+  };
 }
 
 function lockOwnership(): LockOwnership {
-  let lockPid = "";
-  try {
-    lockPid = readFileSync(`${state}/.lock`, "utf8").trim();
-  } catch {
-    return "missing";
+  const result = spawnSync(lockScript, ["ownership"], { encoding: "utf8", env: lockEnvironment() });
+  const ownership = String(result.stdout || "").trim();
+  if (result.status !== 0) return "unknown";
+  if (["owned", "missing", "dead", "other", "malformed", "unknown"].includes(ownership)) {
+    return ownership as LockOwnership;
   }
-  if (!/^[0-9]+$/.test(lockPid) || lockPid === "1") return "other";
-  let pid = String(process.pid);
-  for (let i = 0; i < 8; i += 1) {
-    if (pid === lockPid) return "owned";
-    pid = parentPid(pid);
-    if (!pid || pid === "1") break;
-  }
-  return pidAlive(lockPid) ? "other" : "missing";
-}
-
-function sessionOwnsLock(): boolean {
-  return lockOwnership() === "owned";
+  return "unknown";
 }
 
 function markLoaded(): void {
-  if (lockOwnership() === "other") return;
+  const ownership = lockOwnership();
+  if (ownership === "other" || ownership === "malformed" || ownership === "unknown") return;
   mkdirSync(state, { recursive: true });
   writeFileSync(marker, `${extensionVersion}\n${process.pid}\n`);
 }
@@ -104,7 +89,25 @@ export default function (pi: ExtensionAPI) {
   }
 
   function startArm(): ArmResult {
-    if (!sessionOwnsLock()) return { ok: false, message: "watcher: read-only - session lock is held by another firstmate session" };
+    let ownership = lockOwnership();
+    let acquisitionError = "";
+    let attemptedAcquisition = false;
+    if (ownership === "missing" || ownership === "dead") {
+      attemptedAcquisition = true;
+      const acquisition = spawnSync(lockScript, [], { encoding: "utf8", env: lockEnvironment() });
+      acquisitionError = String(acquisition.stderr || "").trim().split(/\r?\n/)[0] || "";
+      ownership = lockOwnership();
+    }
+    if (ownership === "other") {
+      const message = attemptedAcquisition
+        ? "watcher: lock ownership changed during resume - a verified live firstmate session now owns this home"
+        : "watcher: read-only - a verified live firstmate session owns this home";
+      return { ok: false, message };
+    }
+    if (ownership !== "owned") {
+      const detail = acquisitionError ? ` (${acquisitionError})` : "";
+      return { ok: false, message: `watcher: lock acquisition failed - session lock is ${ownership}${detail}` };
+    }
     markLoaded();
     if (child) return { ok: true, message: "watcher: healthy - Pi extension already has an arm child" };
     const id = ++seq;
@@ -150,8 +153,9 @@ export default function (pi: ExtensionAPI) {
     return { ok: true, message: `watcher: started Pi extension arm child ${id}` };
   }
 
-  pi.on?.("session_start", () => {
-    markLoaded();
+  pi.on?.("session_start", (_event, ctx) => {
+    const result = startArm();
+    if (!result.ok) ctx?.ui?.notify?.(result.message, "warning");
   });
   pi.on?.("session_shutdown", () => {
     stopArm();

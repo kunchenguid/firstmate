@@ -43,6 +43,7 @@ All verified primary harnesses have a tracked integration:
 - `codex`: `.codex/hooks.json` registers a `Stop` hook that reads the hook payload once, anchors the executable to the hook command process working directory, verifies that root is firstmate-shaped and hook-bearing, and pipes the original payload to that checkout's `bin/fm-turnend-guard.sh`.
 - `opencode`: `.opencode/plugins/fm-primary-turnend-guard.js` listens for `session.idle`, lets the watcher-arm coordinator handle normal idle supervision first, runs the shared guard only when that coordinator does not act, and uses `client.session.promptAsync` to force one follow-up prompt when the guard returns 2.
 - `pi`: `.pi/extensions/fm-primary-turnend-guard.ts` listens for `agent_settled`, marks the extension version loaded for session-start checks, runs the shared guard once per logical agent run, and uses `pi.sendUserMessage(..., { deliverAs: "followUp" })` to force one follow-up prompt when the guard returns 2.
+  Both Pi extensions use `bin/fm-lock.sh ownership` as the single read-only classifier, while only the watcher extension may ask that production owner to acquire a missing or dead lock.
 - `grok`: `.grok/hooks/fm-primary-turnend-guard.json` registers a `Stop` hook that invokes `bin/fm-turnend-guard-grok.sh`.
   The adapter runs the shared guard and, when it returns 2, invokes `grok --resume <sessionId> -p <guard-reason>` with `GROK_TURNEND_GUARD_ACTIVE=1`.
   It does not pass `--permission-mode`, so the passive Stop hook cannot grant stronger tool permissions than Grok's resumed-session default.
@@ -144,8 +145,27 @@ So the model was re-invoked solely by the background task's completion while idl
 This matches the harness tool contract that a `run_in_background` task "keeps running across turns and re-invokes you when it exits", and reproduces the 11s latency the task audit measured independently on the same harness version.
 No Herdr command was issued and no fleet state was touched; the experiment wrote only to the session scratchpad, which was discarded.
 
+### 2026-07-16: native Pi resume lock recovery
+
+Pi 0.80.7 native resume restores the conversation without rerunning `bin/fm-session-start.sh`, so the watcher extension now checks the production lock owner during `session_start`.
+The production owner matches native `pi` only by exact process basename and inspects argv only for the explicitly allowed bare interpreters `node`, `nodejs`, `python`, and `python3`.
+Session-lock publication is serialized through the portable lock primitive in `bin/fm-wake-lib.sh`, while `bin/fm-lock.sh` remains the only writer of `state/.lock`.
+The watcher calls acquisition only for `missing` or `dead`, reads ownership again, and starts supervision only after observing `owned`.
+A verified live other holder and malformed lock remain byte-for-byte unchanged.
+
+Command run: `bash tests/fm-session-lock.test.sh`.
+Observed output covered exact native names for Claude, Codex, OpenCode, Pi, and Grok, same-holder idempotence, dead reclaim, malformed refusal, missing ancestry, exact interpreter script matching, and one winner from two synchronized contenders.
+Command run: `bash tests/fm-pi-watch-extension.test.sh`.
+Observed output covered real tracked-extension `session_start` integration for missing, dead, verified live other, and owned locks, plus distinct competitor, acquisition-failure, and ownership-changed messages.
+Command run: `bash tests/fm-turnend-guard.test.sh`.
+Observed output kept the shared predicate and all five primary harness hook regressions green after removing the Pi guard's duplicate lock classifier.
+The runtime-backend axis is not applicable because session-lock ownership is per `FM_HOME` and does not call tmux, Herdr, Zellij, Orca, or cmux adapters.
+No Herdr lifecycle command was required for these subprocess fixtures.
+
 ## Tests
 
 `tests/fm-turnend-guard.test.sh` covers the shared predicate, primary scoping (including a secondmate's own home being guarded like the main primary while its child worktrees stay exempt), `FM_HOME` and `FM_STATE_OVERRIDE` precedence, Pi logical-run latch behavior for no-tool and multi-tool runs, fail-open behavior without `jq`, tracked hook registration for all five harnesses, and the Grok adapter's forced-resume loop guard and permission-mode regression.
+`tests/fm-session-lock.test.sh` covers the shared session-lock classifier and serialized mutation contract for every supported primary harness.
+`tests/fm-pi-watch-extension.test.sh` covers resume recovery through the production owner and the shared read-only ownership API used by both Pi extensions.
 The default behavior suite does not invoke live language-model harnesses.
 `FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh` opts into the isolated interactive Pi regression recorded above.

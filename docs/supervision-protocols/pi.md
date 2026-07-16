@@ -3,13 +3,16 @@ Mode: Pi extension background wake.
 When this session owns supervision and away mode is not active:
 1. Drain first with `bin/fm-wake-drain.sh`.
 2. Confirm the Pi primary auto-loaded both project extensions (plain `pi`, after approving project trust once per clone); if not, restart with `-e __FM_PI_TURNEND_EXT__ -e __FM_PI_EXT__` as a trust-free fallback.
-3. Arm supervision with the `fm_watch_arm_pi` tool.
+3. On `session_start`, the watcher extension reads ownership through `bin/fm-lock.sh ownership`.
+   A missing or dead lock is reacquired only through `bin/fm-lock.sh`, ownership is read again, and supervision starts only after the result is `owned`.
+   A verified live other owner remains unchanged and the extension refuses to arm.
+4. After each watcher wake, re-arm supervision with the `fm_watch_arm_pi` tool.
    Use `/fm-watch-arm-pi` only as a human-entered fallback.
    Never run `bin/fm-watch-arm.sh` through Pi's bash tool because that foreground arm can wedge the agent and bypasses extension-owned cleanup.
-4. The extension starts `bin/fm-watch-arm.sh --restart`, keeps the child attached to the live Pi process, and sends a follow-up user message when the child exits with an actionable watcher reason.
-5. If the extension says the watcher is already healthy, do not start another cycle.
-6. If the extension reports a watcher failure, drain queued wakes, inspect the failure text, and restart Pi with both extensions loaded if needed.
-7. Never use shell `&` for watcher supervision.
+5. The extension starts `bin/fm-watch-arm.sh --restart`, keeps the child attached to the live Pi process, and sends a follow-up user message when the child exits with an actionable watcher reason.
+6. If the extension says the watcher is already healthy, do not start another cycle.
+7. If the extension reports a watcher failure, drain queued wakes, inspect the failure text, and restart Pi with both extensions loaded if needed.
+8. Never use shell `&` for watcher supervision.
    The arm mechanism above is extension-owned, not a model tool call, but a manual recovery probe that backgrounds, pipes, or bundles the arm is denied automatically by the PreToolUse seatbelt (`bin/fm-arm-pretool-check.sh`, wired into the turn-end guard extension at `__FM_PI_TURNEND_EXT__`).
 
 The turn-end guard extension lives at `__FM_PI_TURNEND_EXT__`.
@@ -26,3 +29,10 @@ Command run for the complete interactive regression: `FM_PI_LIVE_E2E=1 tests/fm-
 Observed output: `ok - Pi 0.80.5 live E2E rendered the tool, guarded once, woke, re-armed, and cleaned up on exit`.
 Command run for the installed-type contract: `tests/fm-pi-primary-types.test.sh`.
 Observed output: `ok - Pi primary extensions pass strict no-emit typecheck against Pi 0.80.5`.
+
+Verification on 2026-07-16 added subprocess-backed resume and lock-owner coverage without changing Pi core or global Pi installation state.
+Command run: `bash tests/fm-session-lock.test.sh`.
+Observed output included `ok - native Pi comm and argv are classified as a live holder`, `ok - a verified live other holder remains byte-for-byte unchanged`, and `ok - serialized concurrent contenders produce exactly one winner`.
+Command run: `bash tests/fm-pi-watch-extension.test.sh`.
+Observed output included `ok - Pi session_start reclaims missing/dead locks, refuses live other, and idempotently arms owned locks` and `ok - Pi watcher distinguishes verified competitor, acquisition failure, and changed ownership`.
+The opt-in interactive fixture now expects native Pi ownership plus automatic first arm on `session_start`; it remains isolated behind `FM_PI_LIVE_E2E=1`.

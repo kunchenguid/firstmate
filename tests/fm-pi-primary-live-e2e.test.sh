@@ -55,6 +55,16 @@ wait_for_exact_line() {
   return 1
 }
 
+wait_for_file() {
+  local file=$1 attempts=${2:-120} i=0
+  while [ "$i" -lt "$attempts" ]; do
+    [ -f "$file" ] && return 0
+    sleep 0.5
+    i=$((i + 1))
+  done
+  return 1
+}
+
 lab_pid_is_safe() {
   local pid=$1 command
   command=$(ps -p "$pid" -o command= 2>/dev/null || true)
@@ -114,6 +124,10 @@ mkdir -p "$HOME_DIR/state" "$HOME_DIR/config" "$PI_DIR"
 wait_for_text "Trust project folder?" 40 || fail "Pi trust prompt did not appear"
 "$TMUX" -L "$SOCKET" send-keys -t "$SESSION" Enter
 wait_for_text "fm-primary-turnend-guard.ts" 60 || fail "Pi primary extensions did not load"
+wait_for_file "$HOME_DIR/state/.watch.lock/pid" 60 || fail "Pi session_start did not automatically arm supervision"
+session_lock_pid=$(cat "$HOME_DIR/state/.lock")
+session_lock_comm=$(ps -p "$session_lock_pid" -o comm= 2>/dev/null || true)
+[ "${session_lock_comm##*/}" = pi ] || fail "Pi session_start did not replace the shell fixture lock with the native Pi owner"
 
 send_prompt "Use the bash tool to run printf PI_E2E_BASH_ONE. Then reply exactly BASH-ONE."
 wait_for_exact_line "BASH-ONE" || fail "first bash turn did not complete"
@@ -123,8 +137,8 @@ send_prompt "Use the bash tool to run printf PI_E2E_BASH_TWO. Then reply exactly
 wait_for_exact_line "BASH-TWO" || fail "second bash turn did not complete"
 
 : > "$HOME_DIR/state/pi-e2e.meta"
-send_prompt "Reply exactly GUARD-TRIGGER with no tools. When the guard follow-up arrives, use fm_watch_arm_pi and never use bash to arm supervision. After any FIRSTMATE WATCHER WAKE, run bin/fm-wake-drain.sh, read the signaled status, call fm_watch_arm_pi to re-arm, and finish exactly REARMED."
-wait_for_text "watcher: started Pi extension arm child 1" || fail "guard follow-up did not render the Pi watcher tool result"
+send_prompt "Reply exactly READY with no tools. After any FIRSTMATE WATCHER WAKE, run bin/fm-wake-drain.sh, read the signaled status, call fm_watch_arm_pi to re-arm, and finish exactly REARMED."
+wait_for_exact_line "READY" 120 || fail "Pi did not settle with the automatic watcher armed"
 
 printf 'done: pi live e2e watcher fire\n' > "$HOME_DIR/state/pi-e2e.status"
 wait_for_text "watcher: started Pi extension arm child 2" 180 || fail "watcher wake did not drain and re-arm through the Pi tool"
@@ -132,7 +146,7 @@ wait_for_exact_line "REARMED" 120 || fail "Pi did not settle after re-arming wat
 
 pane=$(capture)
 guard_count=$(printf '%s\n' "$pane" | grep -Fc "TURN WOULD END BLIND - supervision is off." || true)
-[ "$guard_count" -eq 1 ] || fail "expected one guard injection, saw $guard_count"
+[ "$guard_count" -eq 0 ] || fail "automatic session_start arm should prevent guard injection, saw $guard_count"
 foreground_arm='$ bin/fm-watch-arm.sh'
 if printf '%s\n' "$pane" | grep -Fq "$foreground_arm"; then
   fail "Pi used a foreground bash watcher arm"
@@ -151,4 +165,4 @@ wait_for_text "PI_EXIT=0" 60 || fail "Pi did not exit cleanly"
 wait_pid_dead "$watcher_pid" || fail "watcher child survived clean Pi exit"
 wait_pid_dead "$arm_pid" || fail "arm child survived clean Pi exit"
 
-printf 'ok - Pi %s live E2E rendered the tool, guarded once, woke, re-armed, and cleaned up on exit\n' "$PI_VERSION"
+printf 'ok - Pi %s live E2E reclaimed the native lock, auto-armed, woke, re-armed, and cleaned up on exit\n' "$PI_VERSION"
