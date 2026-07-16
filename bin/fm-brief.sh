@@ -13,7 +13,9 @@
 #   --plan <path> marks a SHIP brief as executing a binding approved plan: it adds an
 #   "# Approved plan" block after the Task section naming the plan path and stating the
 #   deviation threshold (minor = adapt and list every deviation in the PR body; material =
-#   stop and append a needs-decision line). The path must exist. Ship briefs only.
+#   stop and append a needs-decision line). The path must exist. Ship briefs only, and
+#   only for the PR-producing delivery modes (no-mistakes or direct-PR): local-only
+#   briefs produce no PR body to disclose deviations in, so --plan is rejected there.
 #   Without --plan the scaffold output is byte-identical to before.
 #   --secondmate writes a persistent secondmate charter. The project list
 #   is cloned into the secondmate home, while the natural-language scope
@@ -296,6 +298,11 @@ fi
 read -r MODE _ <<EOF
 $("$FM_ROOT/bin/fm-project-mode.sh" "$REPO")
 EOF
+
+if [ -n "$PLAN_PATH" ] && [ "$MODE" = local-only ]; then
+  echo "error: --plan applies only to PR-producing ship briefs (no-mistakes or direct-PR), not local-only" >&2
+  exit 1
+fi
 
 case "$MODE" in
   direct-PR)

@@ -354,6 +354,27 @@ test_plan_flag_missing_file_fails_clearly() {
   pass "fm-brief.sh: --plan validates its path and ship-only scope"
 }
 
+# local-only ship briefs forbid pushing and opening a PR, so the plan block's
+# "list every deviation in the PR body" disclosure rule has no destination there.
+test_plan_flag_rejects_local_only_mode() {
+  local home out status
+  home="$TMP_ROOT/plan-localonly-home"
+  write_registry "$home"
+  printf '# plan\nbody\n' > "$home/data/plan.md"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-plan-e7 local-proj --plan "$home/data/plan.md" 2>&1); status=$?
+  expect_code 1 "$status" "--plan on a local-only brief must fail"
+  assert_contains "$out" "--plan applies only to PR-producing ship briefs (no-mistakes or direct-PR), not local-only" \
+    "--plan local-only rejection error was not clear"
+  assert_absent "$home/data/brief-plan-e7/brief.md" "local-only --plan run still wrote a brief"
+
+  # The PR-producing modes still accept --plan.
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-plan-e8 direct-proj --plan "$home/data/plan.md" >/dev/null 2>&1; status=$?
+  expect_code 0 "$status" "--plan on a direct-PR brief should exit 0"
+  assert_grep "# Approved plan" "$home/data/brief-plan-e8/brief.md" \
+    "direct-PR --plan brief lost the approved-plan block"
+  pass "fm-brief.sh: --plan is rejected for local-only delivery mode"
+}
+
 test_plan_flag_absent_is_byte_identical() {
   local home id brief block expected
   home="$TMP_ROOT/plan-absent-home"
@@ -405,5 +426,6 @@ test_secondmate_no_projects_charter
 test_pause_verb_override_renders_all_brief_scaffolds
 test_plan_flag_injects_binding_block
 test_plan_flag_missing_file_fails_clearly
+test_plan_flag_rejects_local_only_mode
 test_plan_flag_absent_is_byte_identical
 test_scout_and_secondmate_load_decision_hold_policy
