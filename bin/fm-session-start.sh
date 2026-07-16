@@ -34,10 +34,10 @@
 #                       when locked.
 #   4. context digest - data/projects.md, data/secondmates.md, data/captain.md,
 #                       data/learnings.md: read-only, always safe, always runs.
-#   5. fleet digest   - compact data/backlog.md identity/metadata rows, every
-#                       state/*.meta, a bounded state/*.status tail, state/.afk,
-#                       and a cheap per-task endpoint-liveness read: read-only,
-#                       always runs.
+#   5. fleet digest   - a compact data/backlog.md identity/metadata listing,
+#                       every state/*.meta, a bounded state/*.status tail,
+#                       state/.afk, and a cheap per-task endpoint-liveness read:
+#                       read-only, always runs.
 #   6. closing reminder - prints the context-specific watcher next step; this
 #                       script points back to the emitted harness supervision
 #                       block and deliberately never arms the watcher itself.
@@ -64,6 +64,20 @@
 # Only the five mutating sweeps and the wake-queue drain are skipped.
 # The context and fleet-state digests
 # below are always read-only, so they run unconditionally in both modes.
+#
+# BACKLOG DIGEST: FM_SESSION_START_BACKLOG_LIMIT bounds the startup backlog
+# listing, default 80 items.
+# When compatible tasks-axi is selected and available, the shared tasks-axi
+# backend probe remains the compatibility owner and this script asks
+# `tasks-axi list` for the compact identity fields plus blocked_by, hold_kind,
+# and hold_reason, never body.
+# When manual mode is selected, or tasks-axi is unavailable or incompatible,
+# this script prints only backlog section headings and item title lines, so
+# title-line hold and blocked-by metadata remain visible while indented bodies
+# stay out of the startup digest.
+# Full bodies are targeted follow-up only: `tasks-axi show <id> --full` when
+# compatible tasks-axi is available, or `data/backlog.md` when the file body is
+# truly needed.
 #
 # Usage: fm-session-start.sh
 #   Prints the full ordered digest to stdout and always exits 0: this is a
