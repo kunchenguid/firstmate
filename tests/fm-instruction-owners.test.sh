@@ -12,6 +12,7 @@ PROJECT="$ROOT/.agents/skills/project-management/SKILL.md"
 HARNESS="$ROOT/.agents/skills/harness-adapters/SKILL.md"
 CODING="$ROOT/.agents/skills/firstmate-coding-guidelines/SKILL.md"
 RECOVERY="$ROOT/.agents/skills/stuck-crewmate-recovery/SKILL.md"
+SECONDMATE="$ROOT/.agents/skills/secondmate-provisioning/SKILL.md"
 CONFIG="$ROOT/docs/configuration.md"
 AGENTS="$ROOT/AGENTS.md"
 BRIEF="$ROOT/bin/fm-brief.sh"
@@ -111,6 +112,37 @@ test_shared_authoring_requirements_are_owned() {
   pass "firstmate-coding-guidelines owns compatibility review and deterministic enforcement"
 }
 
+test_secondmate_registry_contract_stays_concise() {
+  local section schema_line
+  section=$(awk '
+    /^## Routing table$/ { found = 1 }
+    found && /^## Charter and seed$/ { exit }
+    found { print }
+  ' "$SECONDMATE")
+  schema_line="- <id> - <one-sentence charter summary> (home: <absolute-home-path>; scope: <natural-language responsibility>; projects: <project-a>, <project-b>; added <date>)"
+  assert_contains "$section" "$schema_line" \
+    "secondmate routing table lost the parser-compatible single-line schema"
+  assert_contains "$section" "Each registry entry stays concise and single-line" \
+    "secondmate routing table no longer requires concise single-line entries"
+  assert_contains "$section" "genuinely domain-specific hard rules" \
+    "secondmate routing table no longer limits extra prose to domain-specific hard rules"
+  assert_contains "$section" "The home-seeded \`data/charter.md\` is the sole owner of boilerplate idle-by-default behavior, the normal delegation lifecycle, and standard escalation contracts" \
+    "secondmate routing table lost the explicit charter ownership pointer"
+  assert_contains "$section" "no extra registry pointer field is needed" \
+    "secondmate routing table no longer explains why the existing home field is the charter pointer"
+  for phrase in \
+    "go idle and wait silently" \
+    "Act only on tasks" \
+    "never spawn a survey" \
+    "run normal firstmate bootstrap" \
+    "marked supervisor requests return through status"; do
+    if printf '%s\n' "$section" | grep -F "$phrase" >/dev/null; then
+      fail "secondmate routing table restated charter boilerplate: $phrase"
+    fi
+  done
+  pass "secondmate registry guidance keeps concise routes and points to the charter"
+}
+
 test_state_startup_and_ordinary_recovery_placement() {
   assert_grep "single owner of the top-level operational-home layout" "$CONFIG" \
     "configuration docs do not own the operational state layout"
@@ -185,6 +217,7 @@ test_diagnostic_owner_covers_causal_procedure
 test_project_management_owner_covers_guarded_operations
 test_generic_effort_fallback_respects_precedence
 test_shared_authoring_requirements_are_owned
+test_secondmate_registry_contract_stays_concise
 test_state_startup_and_ordinary_recovery_placement
 test_compressed_agents_owner_map
 test_compressed_agents_retains_authority_and_supervision_safety
