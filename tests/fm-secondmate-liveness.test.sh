@@ -23,9 +23,9 @@
 #     reports unknown for a backend with no verified classifier (never errors).
 #   - bin/fm-bootstrap.sh's secondmate_liveness_sweep respawns a confidently
 #     DEAD secondmate (killing the stale endpoint first, since the tmux
-#     adapter refuses to create a same-named window over a live one), leaves
-#     an ALIVE one untouched, and never acts on an inconclusive (UNKNOWN)
-#     reading.
+#     adapter refuses to create a same-named window over a live one), keeps
+#     handled DEAD and ALIVE results silent, and never acts on an inconclusive
+#     (UNKNOWN) reading.
 #   - The sweep converges: once a secondmate reads alive, a later run never
 #     re-touches it (idempotent by construction, not by remembering what it
 #     already did).
@@ -192,6 +192,21 @@ fi
 exit 0
 SH
   chmod +x "$fakebin/no-mistakes"
+  cat > "$fakebin/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  "--version ") printf '%s\n' '0.1.1' ;;
+  "update --help") printf '%s\n' 'usage: tasks-axi update <id> [flags]' '  --archive-body' ;;
+  "mv --help") printf '%s\n' 'usage: tasks-axi mv <id> [<id>...] --to <path-or-dir>' ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/tasks-axi"
+  cat > "$fakebin/quota-axi" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$fakebin/quota-axi"
   printf '%s\n' "$fakebin"
 }
 
@@ -273,8 +288,8 @@ test_sweep_respawns_confirmed_dead_secondmate() {
 
   out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" zsh "$log")
 
-  assert_contains "$out" "SECONDMATE_LIVENESS: secondmate sm1: respawned" \
-    "a bare-shell (dead) secondmate should be reported as respawned"
+  assert_not_contains "$out" "SECONDMATE_LIVENESS: secondmate sm1: respawned" \
+    "a successfully respawned secondmate should be handled silently"
   assert_contains "$(cat "$log")" "kill-window -t firstmate:fm-sm1" \
     "the stale endpoint must be killed before respawn (tmux refuses a same-named window over a live one)"
   assert_contains "$(cat "$log")" "new-window" \
@@ -291,8 +306,8 @@ test_sweep_leaves_alive_secondmate_untouched() {
 
   out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" claude "$log")
 
-  assert_contains "$out" "SECONDMATE_LIVENESS: secondmate sm1: already-live" \
-    "a live claude foreground process should be reported as already-live"
+  assert_not_contains "$out" "SECONDMATE_LIVENESS: secondmate sm1: already-live" \
+    "an already-live secondmate should be handled silently"
   [ ! -s "$log" ] || fail "an already-live secondmate must never be killed or respawned: $(cat "$log")"
   pass "sweep: an already-live secondmate is left untouched (no kill, no respawn)"
 }
@@ -336,16 +351,16 @@ test_sweep_converges_no_retouch_once_alive() {
   fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
   log="$w/calls.log"; : > "$log"
 
-  # Round 1: dead -> respawned (kill + new-window logged).
+  # Round 1: dead -> respawned silently (kill + new-window logged).
   out1=$(run_bootstrap "$tmuxfb:$fb" "$w/home" zsh "$log")
-  assert_contains "$out1" "SECONDMATE_LIVENESS: secondmate sm1: respawned" "round 1 should respawn the dead secondmate"
+  assert_not_contains "$out1" "SECONDMATE_LIVENESS: secondmate sm1: respawned" "round 1 should handle the successful respawn silently"
   [ -s "$log" ] || fail "round 1 should have logged the kill+respawn window operations"
 
   # Round 2: the (now-respawned) secondmate is genuinely alive - a second
   # sweep must converge to a pure no-op, not respawn again.
   : > "$log"
   out2=$(run_bootstrap "$tmuxfb:$fb" "$w/home" claude "$log")
-  assert_contains "$out2" "SECONDMATE_LIVENESS: secondmate sm1: already-live" "round 2 should see the now-live secondmate and stop touching it"
+  assert_not_contains "$out2" "SECONDMATE_LIVENESS: secondmate sm1: already-live" "round 2 should handle the already-live secondmate silently"
   [ ! -s "$log" ] || fail "round 2 must not re-kill or re-respawn an already-live secondmate: $(cat "$log")"
   pass "sweep: idempotent by construction - a live secondmate is never re-touched on a later run"
 }
@@ -361,8 +376,8 @@ test_sweep_skipped_under_detect_only() {
 
   out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" zsh "$log" FM_BOOTSTRAP_DETECT_ONLY=1)
 
-  assert_contains "$out" "CREW_HARNESS_OVERRIDE: codex" \
-    "detect-only should still execute fm-bootstrap.sh's read-only diagnostics"
+  assert_not_contains "$out" "CREW_HARNESS_OVERRIDE:" \
+    "detect-only should keep routine harness facts silent"
   assert_not_contains "$out" "SECONDMATE_LIVENESS:" \
     "the read-only detect-only path must never run the mutating liveness sweep"
   [ ! -s "$log" ] || fail "detect-only must never touch any endpoint: $(cat "$log")"
