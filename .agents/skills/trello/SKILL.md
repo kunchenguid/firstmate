@@ -53,19 +53,19 @@ Always start a wake-handling turn with the usual `bin/fm-wake-drain.sh`, then ac
 
 1. Read the card: `bin/fm-trello.sh get-card <card>` (title + description carry the request).
 2. Resolve the project and secondmate scope exactly as for any intake (AGENTS.md section 7): match the request against `data/projects.md` and the code; ask a one-line question only if genuinely ambiguous.
-3. Move the card to In Progress and comment the pickup: `bin/fm-trello.sh move <card> "In Progress"` then `bin/fm-trello.sh comment <card> "picked up - working"`.
+3. Move the card to In Progress, strip the `go` label so it cannot later be misread as a fresh decision, and comment the pickup: `bin/fm-trello.sh move <card> "In Progress"`, then `bin/fm-trello.sh label <card> remove go`, then `bin/fm-trello.sh comment <card> "picked up - working"`.
 4. Dispatch the task through the normal lifecycle (brief, spawn), then bind the card to the task so per-task nudges/holds route correctly: `bin/fm-trello.sh bind <task-id> <card>`.
-5. Refresh the card description with the status block (task id, project, state): `bin/fm-trello.sh describe <card> "<block>"`.
+5. Post the status block (task id, project, state) as a card COMMENT: `bin/fm-trello.sh comment <card> "<block>"`. Do NOT use `describe` on a captain-created card - the description holds the captain's original request text and must stay intact.
 
 If the work turns out to be blocked, leave the card in In Progress (you own it now) or move it to Queued and comment why; never send it back to Inbox.
 
 ### `trello-ready <card>` - a decision given
 
 1. Read the latest comment as the decision: `bin/fm-trello.sh get-card <card>` includes the description; fetch comments if you need the thread.
-2. Move to In Progress and comment the pickup, same as above.
+2. Move to In Progress, strip the `go` label, and comment the pickup, same as the Inbox handler (status block as a comment, description left intact).
 3. Act on the decision: if it approves an existing task's next step, steer that task (`fm-send`) or merge per the project's mode and the captain's standing rules; if it authorizes new work, dispatch it. Bind the card if a new task is spawned.
 
-A `go` label plus a comment is the same decision signal as the Ready lane; treat it identically.
+A `go` label plus a comment is the same decision signal as the Ready lane; treat it identically. Stripping the `go` label on pickup matters: an unbound card that keeps a `go` label would re-fire `trello-ready` on the next comment, so removing it (plus binding the card) is what keeps later comments classified as nudges.
 
 ### `trello-nudge <card> <task>` - extra input for a live task
 
@@ -88,7 +88,8 @@ Do not keep retrying blindly; the poll dedupes the error until it recovers.
 ## Mirroring task state onto the board
 
 The board is also a dashboard.
-When you drive a task through its lifecycle, keep its card in step with `bin/fm-trello.sh`: move it to In Review with the PR link when it is ready, to Done on merge, and refresh the description status block on material state changes.
+When you drive a task through its lifecycle, keep its card in step with `bin/fm-trello.sh`: move it to In Review with the PR link when it is ready, to Done on merge, and post a fresh status block as a COMMENT on material state changes.
+For a captain-originated card (Inbox/Ready), never overwrite the description with `describe` - the description holds the captain's request text; the status block always goes in a comment. Reserve `describe` for a card firstmate itself created with `create-card`, whose description is firstmate's to own.
 Record the binding with `bin/fm-trello.sh bind <task-id> <card>` and drop it on teardown with `bin/fm-trello.sh unbind <task-id>`.
 Deep automatic mirroring wired into the spawn/status/teardown scripts is a planned fast-follow; until then this mirroring is your responsibility on captain-facing milestones.
 

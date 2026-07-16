@@ -16,15 +16,23 @@
 # any card there is unambiguously captain-driven. That is what lets this poll
 # treat lane membership as a trust signal.
 #
-# Triggers emitted (one line per fired card; becomes the watcher's check: wake):
+# Triggers emitted (becomes the watcher's check: wake):
 #   trello-inbox <cardid>            a new/updated card in Inbox (= new task request)
-#   trello-ready <cardid>            a card in Ready/Go, or `go`-labeled + commented
-#                                    (= decision given)
+#   trello-ready <cardid>            an UNBOUND card in Ready/Go, or `go`-labeled +
+#                                    commented (= decision given)
 #   trello-nudge <cardid> <taskid>   a new captain comment on a firstmate-owned card
 #                                    bound to a live task, in In Progress / Needs Input
 #                                    (= extra input; relay to the worker)
 #   trello-hold  <cardid> <taskid>   a `hold` label, or a captain move back to Needs
 #                                    Input, of a bound In-Progress card (= per-task pause)
+#
+# At most ONE trigger line is emitted per sweep, matching fm-x-poll.sh: the
+# watcher flattens all shim stdout into a single wake payload, so emitting several
+# differing-arity trigger lines at once would collapse into an unparseable blob.
+# Any other firing-eligible card keeps its marker and fires on a later sweep.
+#
+# A card bound to a live task can only ever fire trello-nudge/trello-hold, never
+# re-fire trello-ready: the Ready/go pickup branches are scoped to unbound cards.
 #
 # Idempotency: a per-card seen marker state/.trello-seen-<cardid> records the
 # card's dateLastActivity and list id. A card fires only when activity advanced
@@ -135,11 +143,16 @@ jq -c '.[]' "$CARDS_FILE" 2>/dev/null | while IFS= read -r card; do
   taskid=$(bound_task "$cardid")
   fire=""
 
+  # A card bound to a live task can ONLY ever fire trello-nudge/trello-hold and
+  # NEVER re-fire trello-ready: the go-label and Ready-lane pickup branches are
+  # scoped to UNBOUND cards ([ -z "$taskid" ]), so a captain comment on a bound
+  # In-Progress card - even one carrying a leftover go label, or moved into the
+  # Ready lane - classifies as a nudge/hold or fires nothing, never a re-pickup.
   if [ -n "$INBOX_ID" ] && [ "$idlist" = "$INBOX_ID" ]; then
     [ "$changed" -eq 1 ] && fire="trello-inbox $cardid"
-  elif has_label "$labels" "go" && [ "$comments" -gt 0 ] 2>/dev/null; then
+  elif [ -z "$taskid" ] && has_label "$labels" "go" && [ "$comments" -gt 0 ] 2>/dev/null; then
     [ "$changed" -eq 1 ] && fire="trello-ready $cardid"
-  elif [ -n "$READY_ID" ] && [ "$idlist" = "$READY_ID" ]; then
+  elif [ -z "$taskid" ] && [ -n "$READY_ID" ] && [ "$idlist" = "$READY_ID" ]; then
     [ "$changed" -eq 1 ] && fire="trello-ready $cardid"
   elif [ -n "$taskid" ] && { [ "$idlist" = "$INPROGRESS_ID" ] || [ "$idlist" = "$NEEDSINPUT_ID" ]; }; then
     if [ "$changed" -eq 1 ]; then
@@ -156,11 +169,15 @@ jq -c '.[]' "$CARDS_FILE" 2>/dev/null | while IFS= read -r card; do
     continue
   fi
 
-  # Record the observed state so this exact activity never re-fires. Firstmate's
-  # own later fm-trello.sh mutations bump this again; a fresh captain edit
-  # advances dateLastActivity past it and fires once more.
-  if [ "$changed" -eq 1 ]; then
+  # Emit AT MOST ONE trigger per sweep, matching fm-x-poll.sh's one-line-per-sweep
+  # contract: the watcher flattens all shim stdout newlines into a single wake
+  # payload, so multiple differing-arity trigger lines would collapse into an
+  # unparseable blob. Advance the seen marker ONLY for the card we actually emit,
+  # then stop; every other firing-eligible card keeps its existing marker
+  # UNCHANGED and fires on a subsequent sweep, so no trigger is dropped.
+  if [ -n "$fire" ]; then
     trello_marker_write "$cardid" "$date" "$idlist" || true
+    printf '%s\n' "$fire"
+    break
   fi
-  [ -n "$fire" ] && printf '%s\n' "$fire"
 done

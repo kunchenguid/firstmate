@@ -24,9 +24,9 @@ The Trello CLI and the Atlassian gateway cannot post comments, so the control pl
 ## Bootstrap wiring
 
 The locked session-start bootstrap step turns the config into local generated state, purely additively, without touching any watcher-backbone file.
-It writes `state/trello-watch.check.sh`, a check shim that runs `bin/fm-trello-poll.sh`, and `config/trello-mode.env`, which exports `FM_CHECK_INTERVAL=30` for watcher processes in that home.
+It writes `state/trello-watch.check.sh`, a check shim that runs `bin/fm-trello-poll.sh`, and `config/trello-mode.env`, which exports `FM_CHECK_INTERVAL=60` for watcher processes in that home.
 The watcher runs every `*.check.sh` shim each check cycle and turns any stdout into a `check:` wake, so the poll needs no watcher edit.
-A Trello home polls every 30 seconds instead of the default 300; only a Trello (or X) home speeds up because a non-Trello home has no `config/trello-mode.env`.
+A Trello home polls once per minute instead of the default 300; only a Trello (or X) home speeds up because a non-Trello home has no `config/trello-mode.env`.
 `bin/fm-watch.sh` reads `FM_CHECK_INTERVAL` only at process start, so a cadence transition (opt-in while a watcher is already running, or opt-out) is applied by restarting the home-scoped watcher through the emitted harness protocol; bootstrap never restarts the watcher itself.
 When the config is removed or incomplete, the next locked session-start bootstrap step removes those artifacts; steady-state off is silent and writes nothing.
 Because Trello mode is a reason to keep the watcher armed even with no fleet work, a Trello-only user is still served.
@@ -66,15 +66,17 @@ The `/trello` skill owns the pickup and mirror procedure firstmate executes.
 
 `bin/fm-trello-poll.sh` is the body of the check shim.
 It is a hard no-op without the config, and also while `state/.trello-paused` exists (the global hibernate; see below).
-One board-cards fetch (`GET /1/boards/<shortLink>/cards`) gives every open card's lane, labels, and comment count, enough to classify all four triggers without per-card round-trips.
-It emits one line per fired card, which becomes the watcher's `check:` wake payload:
+One board-cards fetch (`GET /1/boards/<shortLink>/cards`) gives every open card's lane, labels, and comment count, enough to classify all triggers without per-card round-trips.
+It emits at most ONE trigger line per sweep, which becomes the watcher's `check:` wake payload:
 
 - `trello-inbox <cardid>` - a new or updated card in Inbox (a new task request).
-- `trello-ready <cardid>` - a card in Ready / Go, or a `go`-labeled card that also has a comment (a decision given).
+- `trello-ready <cardid>` - an unbound card in Ready / Go, or an unbound `go`-labeled card that also has a comment (a decision given).
 - `trello-nudge <cardid> <taskid>` - a new captain comment on a firstmate-owned card that is bound to a live task and sits in In Progress or Needs Input (extra input; firstmate relays it to that task's worker without changing the lane).
 - `trello-hold <cardid> <taskid>` - a `hold` label on, or a captain move back to Needs Input of, a bound In-Progress card (a per-task pause; firstmate tells that worker to pause).
 
-Only a card carrying a `trello_card=<cardid>` binding in some `state/<id>.meta` can fire a per-task nudge or hold; `bin/fm-trello.sh bind` records that binding, and the poll reads it.
+Only ONE trigger is emitted per sweep, matching `fm-x-poll.sh`'s one-line-per-sweep contract: the watcher captures all of the shim's stdout as a single wake payload and `fm_wake_clean_field` flattens newlines to spaces, so emitting several differing-arity trigger lines at once would collapse into an unparseable blob. Any other firing-eligible card keeps its marker and fires on a later sweep, so no trigger is dropped.
+
+A card bound to a live task can only ever fire `trello-nudge`/`trello-hold`, never re-fire `trello-ready`: the Ready-lane and `go`-label pickup branches are scoped to unbound cards, so a captain comment on a bound In-Progress card - even one carrying a leftover `go` label, or moved into the Ready lane - classifies as a nudge/hold or fires nothing, never a wrong re-pickup. Only a card carrying a `trello_card=<cardid>` binding in some `state/<id>.meta` can fire a per-task nudge or hold; `bin/fm-trello.sh bind` records that binding, and the poll reads it.
 
 ### Idempotency
 
@@ -107,7 +109,7 @@ Deep automatic mirroring wired directly into the spawn, status-change, and teard
 
 ## Webhooks (future enhancement)
 
-The current design polls the board on the watcher's 30-second cadence, which is simple, stateless, and needs no inbound network exposure.
+The current design polls the board on the watcher's once-per-minute cadence, which is simple, stateless, and needs no inbound network exposure.
 A future enhancement could register a Trello webhook (`POST /1/webhooks` with a callback URL) so board changes push to firstmate instead of being polled, cutting latency and API calls.
 That requires a reachable HTTPS callback endpoint and webhook-signature verification, so it is deferred; the poll remains the reference mechanism.
 

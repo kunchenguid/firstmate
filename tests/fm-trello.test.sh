@@ -5,7 +5,7 @@
 #
 # The control plane must be INERT by default (no config/trello.env -> every
 # subcommand and the poll are hard no-ops and bootstrap writes/prints nothing)
-# and additive when on (a check shim + a 30s cadence config, both idempotent).
+# and additive when on (a check shim + a 60s cadence config, both idempotent).
 # The network is stubbed with a fakebin `curl` that emulates api.trello.com, so
 # these stay hermetic: no ports, no server, deterministic in CI. jq stays the
 # real tool. End-to-end verification against a real board is done out of band.
@@ -457,6 +457,49 @@ test_poll_ignores_firstmate_owned_lanes() {
   pass "poll ignores firstmate-owned lanes and leaves no markers for them"
 }
 
+test_poll_bound_card_never_refires_ready() {
+  local home out
+  # A card bound to a live task can NEVER re-fire trello-ready in any lane.
+  # (1) Bound card the captain moves INTO the Ready lane -> fires nothing.
+  home="$TMP_ROOT/poll-bound-ready"; mkdir -p "$home/state"
+  write_config "$home"
+  fm_write_meta "$home/state/task-r.meta" "window=fm-task-r" "trello_card=crb"
+  printf '2026-07-15T09:00:00.000Z\tL-ip\n' > "$home/state/.trello-seen-crb"
+  local cards='[{"id":"crb","name":"bound","idList":"L-ready","dateLastActivity":"2026-07-15T10:00:00.000Z","labels":[],"badges":{"comments":1}}]'
+  out=$(run_poll "$home" "$cards")
+  [ -z "$out" ] || fail "a bound card moved into Ready must NOT fire trello-ready (got: $out)"
+  # (2) Bound In-Progress card carrying a stray go label + comment -> nudge, not ready.
+  home="$TMP_ROOT/poll-bound-golabel"; mkdir -p "$home/state"
+  write_config "$home"
+  fm_write_meta "$home/state/task-g.meta" "window=fm-task-g" "trello_card=cgb"
+  printf '2026-07-15T09:00:00.000Z\tL-ip\n' > "$home/state/.trello-seen-cgb"
+  local cards2='[{"id":"cgb","name":"bound go","idList":"L-ip","dateLastActivity":"2026-07-15T10:00:00.000Z","labels":[{"name":"go"}],"badges":{"comments":2}}]'
+  out=$(run_poll "$home" "$cards2")
+  [ "$out" = "trello-nudge cgb task-g" ] || fail "a bound In-Progress card with a stray go label must nudge, not re-fire ready (got: $out)"
+  pass "poll never re-fires trello-ready for a card bound to a live task"
+}
+
+test_poll_one_trigger_per_sweep() {
+  local home out
+  home="$TMP_ROOT/poll-one-per-sweep"; mkdir -p "$home/state"
+  write_config "$home"
+  # Two Inbox cards would fire in one sweep; only ONE line may be emitted and the
+  # other card's marker must stay unwritten so it fires on the next sweep.
+  local cards='[
+    {"id":"cA","name":"first","idList":"L-inbox","dateLastActivity":"2026-07-15T10:00:00.000Z","labels":[],"badges":{"comments":0}},
+    {"id":"cB","name":"second","idList":"L-inbox","dateLastActivity":"2026-07-15T10:00:00.000Z","labels":[],"badges":{"comments":0}}
+  ]'
+  out=$(run_poll "$home" "$cards")
+  [ "$(printf '%s' "$out" | grep -c .)" = "1" ] || fail "at most one trigger line per sweep (got: $out)"
+  [ "$out" = "trello-inbox cA" ] || fail "the first firing card must be emitted (got: $out)"
+  assert_present "$home/state/.trello-seen-cA" "the emitted card must advance its seen marker"
+  assert_absent "$home/state/.trello-seen-cB" "a deferred firing card must NOT advance its marker"
+  # Next sweep: cA is seen (unchanged), cB fires.
+  out=$(run_poll "$home" "$cards")
+  [ "$out" = "trello-inbox cB" ] || fail "the deferred card must fire on the next sweep (got: $out)"
+  pass "poll emits at most one trigger per sweep and defers the rest without dropping them"
+}
+
 test_poll_reports_error_once() {
   local home out
   home="$TMP_ROOT/poll-err"; mkdir -p "$home/state"
@@ -489,7 +532,7 @@ test_bootstrap_activates_on_config() {
   [ -x "$home/state/trello-watch.check.sh" ] || fail "the check shim must be executable"
   assert_grep "fm-trello-poll.sh" "$home/state/trello-watch.check.sh" "the shim must exec the poll script"
   assert_present "$home/config/trello-mode.env" "bootstrap must drop the cadence config"
-  assert_grep "export FM_CHECK_INTERVAL=30" "$home/config/trello-mode.env" "cadence must be 30s"
+  assert_grep "export FM_CHECK_INTERVAL=60" "$home/config/trello-mode.env" "cadence must be 60s (once per minute)"
   sum1=$(cat "$home/state/trello-watch.check.sh" "$home/config/trello-mode.env" | shasum)
   FM_HOME="$home" "$ROOT/bin/fm-bootstrap.sh" >/dev/null 2>&1
   sum2=$(cat "$home/state/trello-watch.check.sh" "$home/config/trello-mode.env" | shasum)
@@ -554,6 +597,8 @@ test_poll_ready_trigger_lane_and_go_label
 test_poll_nudge_on_bound_live_task_comment
 test_poll_hold_on_label_and_move_back
 test_poll_ignores_firstmate_owned_lanes
+test_poll_bound_card_never_refires_ready
+test_poll_one_trigger_per_sweep
 test_poll_reports_error_once
 test_bootstrap_activates_on_config
 test_bootstrap_inert_without_config
