@@ -38,6 +38,15 @@ run_guard_case() {
     "$ROOT/bin/fm-guard.sh" 2>&1
 }
 
+run_guard_case_read_only() {
+  local dir=$1
+  FM_ROOT_OVERRIDE="$(case_root "$dir")" \
+    FM_HOME="$(case_home "$dir")" \
+    FM_GUARD_GRACE=999 \
+    FM_GUARD_READ_ONLY=1 \
+    "$ROOT/bin/fm-guard.sh" 2>&1
+}
+
 count_text() {
   local haystack=$1 needle=$2
   awk -v needle="$needle" 'index($0, needle) { c++ } END { print c + 0 }' <<EOF
@@ -154,9 +163,90 @@ test_queued_wake_warning_stays_independent() {
   pass "fm-guard stale banner: queued-wake warning remains independent"
 }
 
+test_read_only_before_writable_does_not_consume_full_banner() {
+  local dir home marker lock out_ro out_rw
+  dir=$(make_guard_case read-only-before-writable)
+  home=$(case_home "$dir")
+  marker="$home/state/.guard-watcher-stale-banner"
+  lock="$home/state/.guard-watcher-stale-banner.lock"
+
+  out_ro=$(run_guard_case_read_only "$dir")
+  [ "$(count_text "$out_ro" "WATCHER DOWN - SUPERVISION IS OFF")" -eq 1 ] \
+    || fail "read-only stale call should print the advisory full banner: $out_ro"
+  assert_absent "$marker" "read-only stale call must not create the stale-banner marker"
+  assert_absent "$lock" "read-only stale call must not create the stale-banner lock"
+
+  out_rw=$(run_guard_case "$dir")
+  [ "$(count_text "$out_rw" "WATCHER DOWN - SUPERVISION IS OFF")" -eq 1 ] \
+    || fail "writable stale call should still receive the full banner after read-only: $out_rw"
+  assert_present "$marker" "writable stale call should claim the stale-banner marker"
+  pass "fm-guard stale banner: read-only before writable does not consume full banner"
+}
+
+test_read_only_during_episode_observes_without_mutating_marker() {
+  local dir home marker before after out_ro
+  dir=$(make_guard_case read-only-during-episode)
+  home=$(case_home "$dir")
+  marker="$home/state/.guard-watcher-stale-banner"
+
+  run_guard_case "$dir" >/dev/null
+  before=$(cat "$marker")
+  out_ro=$(run_guard_case_read_only "$dir")
+  after=$(cat "$marker")
+  assert_contains "$out_ro" "full banner already printed this episode" \
+    "read-only stale call during a claimed episode should print the concise reminder"
+  [ "$after" = "$before" ] || fail "read-only stale call must not update an existing marker"
+  pass "fm-guard stale banner: read-only during episode observes without mutating marker"
+}
+
+test_healthy_read_only_does_not_clear_marker() {
+  local dir home marker before after healthy
+  dir=$(make_guard_case healthy-read-only)
+  home=$(case_home "$dir")
+  marker="$home/state/.guard-watcher-stale-banner"
+
+  run_guard_case "$dir" >/dev/null
+  before=$(cat "$marker")
+  touch "$home/state/.last-watcher-beat"
+  healthy=$(run_guard_case_read_only "$dir")
+  [ -z "$healthy" ] || fail "healthy read-only guard should stay silent, got: $healthy"
+  assert_present "$marker" "healthy read-only guard must not clear the stale-banner marker"
+  after=$(cat "$marker")
+  [ "$after" = "$before" ] || fail "healthy read-only guard must not update the marker"
+  pass "fm-guard stale banner: healthy read-only does not clear marker"
+}
+
+test_read_only_never_mutates_stale_banner_state_files() {
+  local dir home marker lock before after no_work
+  dir=$(make_guard_case read-only-state-nonmutation)
+  home=$(case_home "$dir")
+  marker="$home/state/.guard-watcher-stale-banner"
+  lock="$home/state/.guard-watcher-stale-banner.lock"
+  printf '%s\n' "sentinel-marker" > "$marker"
+
+  before=$(find "$home/state" -maxdepth 1 -mindepth 1 -name '.guard-watcher-stale-banner*' -print | sort)
+  run_guard_case_read_only "$dir" >/dev/null
+  after=$(find "$home/state" -maxdepth 1 -mindepth 1 -name '.guard-watcher-stale-banner*' -print | sort)
+  [ "$after" = "$before" ] || fail "stale read-only guard changed stale-banner state files"$'\n'"before: $before"$'\n'"after: $after"
+  [ "$(cat "$marker")" = "sentinel-marker" ] || fail "stale read-only guard updated the marker content"
+  assert_absent "$lock" "stale read-only guard must not create the stale-banner lock"
+
+  rm -f "$home/state/task.meta"
+  no_work=$(run_guard_case_read_only "$dir")
+  [ -z "$no_work" ] || fail "read-only guard with no in-flight work should stay silent, got: $no_work"
+  after=$(find "$home/state" -maxdepth 1 -mindepth 1 -name '.guard-watcher-stale-banner*' -print | sort)
+  [ "$after" = "$before" ] || fail "no-work read-only guard changed stale-banner state files"$'\n'"before: $before"$'\n'"after: $after"
+  [ "$(cat "$marker")" = "sentinel-marker" ] || fail "no-work read-only guard updated the marker content"
+  pass "fm-guard stale banner: read-only never mutates stale-banner state files"
+}
+
 test_first_stale_call_prints_full_banner
 test_repeated_same_episode_prints_reminder_only
 test_healthy_recovery_rearms_next_stale_episode
 test_concurrent_same_episode_prints_one_full_banner
 test_home_isolation
 test_queued_wake_warning_stays_independent
+test_read_only_before_writable_does_not_consume_full_banner
+test_read_only_during_episode_observes_without_mutating_marker
+test_healthy_read_only_does_not_clear_marker
+test_read_only_never_mutates_stale_banner_state_files

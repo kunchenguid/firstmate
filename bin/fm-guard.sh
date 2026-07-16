@@ -99,6 +99,16 @@ fm_guard_claim_stale_banner() {
   return 0
 }
 
+fm_guard_stale_banner_seen() {
+  local state=$1 key=$2
+  local marker="$state/.guard-watcher-stale-banner"
+  local seen
+
+  seen=$(cat "$marker" 2>/dev/null || true)
+  seen=${seen%$'\n'}
+  [ "$seen" = "$key" ]
+}
+
 fm_guard_clear_stale_banner() {
   rm -f "$STALE_BANNER_MARKER" 2>/dev/null || true
 }
@@ -142,7 +152,7 @@ if [ "$in_flight" -eq 0 ]; then
   # Leave the unhealthy state (no work riding on the watcher): clear so a later
   # in-flight + stale combination is a fresh episode even if the beacon is still
   # absent with the same key string.
-  fm_guard_clear_stale_banner
+  [ "$READ_ONLY" -eq 1 ] || fm_guard_clear_stale_banner
   exit 0
 fi
 
@@ -154,7 +164,13 @@ fi
 if [ "$watcher_fresh" = false ]; then
   episode_key=$(fm_guard_stale_episode_key "$STATE")
   episode_key=${episode_key%$'\n'}
-  if fm_guard_claim_stale_banner "$STATE" "$episode_key"; then
+  print_full_banner=0
+  if [ "$READ_ONLY" -eq 1 ]; then
+    fm_guard_stale_banner_seen "$STATE" "$episode_key" || print_full_banner=1
+  elif fm_guard_claim_stale_banner "$STATE" "$episode_key"; then
+    print_full_banner=1
+  fi
+  if [ "$print_full_banner" -eq 1 ]; then
     afk=0
     [ -e "$STATE/.afk" ] && afk=1
     queue_arg=0
@@ -188,7 +204,7 @@ if [ "$watcher_fresh" = false ]; then
 else
   # Healthy again while work is still in flight: end the episode so a later
   # restale re-prints the full banner.
-  fm_guard_clear_stale_banner
+  [ "$READ_ONLY" -eq 1 ] || fm_guard_clear_stale_banner
 fi
 
 # Queued wakes are an independent hazard; warn whenever they are pending, even if
