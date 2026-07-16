@@ -66,8 +66,14 @@
 #   provisioned firstmate home; the default is kind=ship.
 #   Before a secondmate launch, the home is locally fast-forwarded to the primary
 #   default-branch commit when safe; skipped syncs warn and launch unchanged.
-#   Ship/scout spawns refuse to launch unless the resolved task path is a real
-#   git worktree root distinct from the primary project checkout.
+#   Ship/scout treehouse-backed spawns accept a sampled task path only once it is a
+#   real git worktree root distinct from the primary project checkout and the
+#   firstmate home/root (treehouse setup hops through intermediate cwds; mid-hop
+#   samples are rejected and polling continues) and two consecutive reads agree on
+#   it (a transient stale pane read can itself be a valid but wrong worktree root),
+#   and refuse to launch if none
+#   appears within FM_SPAWN_WT_TIMEOUT (default 60s); orca spawns keep validating
+#   the worktree path orca returns against the project checkout.
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
@@ -117,6 +123,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-config-inherit-lib.sh"
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
+# shellcheck source=bin/fm-tangle-lib.sh
+. "$SCRIPT_DIR/fm-tangle-lib.sh"
 # shellcheck source=bin/fm-gate-refuse-lib.sh
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
@@ -710,18 +718,11 @@ real_path_or_raw() {  # <path>
 # that every downstream operation (send/capture/kill) already treats as opaque
 # per-backend routing (fm_backend_resolve_selector).
 validate_spawn_worktree() {  # <source> <inspect-target>
-  local source=$1 inspect_target=$2 wt_real proj_real wt_top wt_top_real
-  wt_real=
-  if ! wt_real=$(cd "$WT" 2>/dev/null && pwd -P); then
-    wt_real=
-  fi
-  proj_real=$PROJ_ABS_REAL
-  wt_top=$(git -C "$WT" rev-parse --show-toplevel 2>/dev/null || true)
-  wt_top_real=
-  if ! wt_top_real=$(cd "$wt_top" 2>/dev/null && pwd -P); then
-    wt_top_real=
-  fi
-  if [ -z "$wt_real" ] || [ -z "$wt_top_real" ] || [ "$wt_real" != "$wt_top_real" ] || [ "$wt_real" = "$proj_real" ]; then
+  local source=$1 inspect_target=$2 wt_top
+  # One definition of "a genuine isolated worktree": fm_isolated_worktree_root
+  # (bin/fm-tangle-lib.sh), shared with the treehouse worktree-discovery poll.
+  if ! fm_isolated_worktree_root "$WT" "$PROJ_ABS_REAL" >/dev/null; then
+    wt_top=$(git -C "$WT" rev-parse --show-toplevel 2>/dev/null || true)
     echo "error: $source did not yield an isolated worktree (resolved '$WT'; worktree root '${wt_top:-none}'; primary '$PROJ_ABS'); refusing to launch to avoid tangling the primary checkout. Inspect target $inspect_target" >&2
     exit 1
   fi
@@ -957,46 +958,56 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   # automatic-rename slips through), display-message -t <bad-name> falls back to the
   # active client's window, which would misread firstmate's OWN pane path as the
   # worktree and tangle a hook into the primary checkout. The window id never lies.
-  # Compare against PROJ_ABS_REAL (physical), not PROJ_ABS: a symlinked project
-  # prefix would otherwise make the pane's OS-level cwd read differ from
-  # PROJ_ABS on the very first poll, before the pane has actually moved.
+  # Two independent ways a sample can be wrong, so the poll guards both.
   #
-  # A single read that already differs from PROJ_ABS_REAL is not proof the pane
-  # settled there: on some tmux/WSL setups a brand-new window's pane_current_path
+  # WRONG PLACE: the move is not atomic - treehouse's setup hops through
+  # intermediate cwds (the user's home, the firstmate home) before settling - so
+  # "left the project" is not enough. A sample landing mid-hop would record a
+  # wrong worktree= in meta and install the crew's turn-end hook into the WRONG
+  # checkout, and branching/committing in a mis-detected checkout tangles it onto
+  # a feature branch (fm-tangle-lib.sh). So accept a candidate only once it proves
+  # it is a genuine ISOLATED worktree root: physically AT a git worktree top,
+  # distinct from the project's primary checkout AND from the firstmate home/root
+  # (see fm_isolated_worktree_root in fm-tangle-lib.sh). That predicate compares
+  # physical (pwd -P) forms on both sides, so a symlinked project prefix cannot
+  # make the identical directory read as two strings, nor make the pane's
+  # OS-level cwd differ from the project on the very first poll.
+  #
+  # WRONG TIME: even a path that satisfies the predicate is not proof the pane
+  # settled there. On some tmux/WSL setups a brand-new window's pane_current_path
   # transiently reports an unrelated stale path (seen live as another real git
-  # checkout entirely) before the shell catches up with treehouse get's cd. That
-  # stale path still passes the PROJ_ABS_REAL comparison and validate_spawn_worktree
-  # below (it resolves to a real, distinct worktree top-level too), so accepting it
-  # on one read alone silently records the wrong worktree= in state/<id>.meta. Require
-  # two consecutive reads to agree on the same non-project path before accepting it;
-  # a mismatch just becomes the new candidate rather than resetting the wait, so a
-  # pane that is already settled by the first real read only costs the one existing
+  # checkout entirely) before the shell catches up with treehouse get's cd. A
+  # mis-sample can itself be another VALID repo root, so it passes the predicate
+  # too. Require two consecutive reads to agree on the same accepted path; a
+  # mismatch just becomes the new candidate rather than resetting the wait, so a
+  # pane already settled by the first real read only costs the one existing
   # inter-poll sleep as confirmation, not a whole extra cycle on top.
+  home_real=$(real_path_or_raw "$FM_HOME")
+  root_real=$(real_path_or_raw "$FM_ROOT")
+  wt_wait_secs=${FM_SPAWN_WT_TIMEOUT:-60}  # override is for tests; production keeps 60s
   candidate=""
-  for _ in $(seq 1 60); do
+  p=
+  for _ in $(seq 1 "$wt_wait_secs"); do
     p=$(spawn_current_path "$WT_TARGET" || true)
+    p_real=""
     if [ -n "$p" ]; then
-      p_real=$(real_path_or_raw "$p")
-      if [ "$p_real" != "$PROJ_ABS_REAL" ]; then
-        if [ -n "$candidate" ] && [ "$p_real" = "$candidate" ]; then
-          WT="$p"
-          break
-        fi
-        candidate="$p_real"
-      else
-        candidate=""
+      p_real=$(fm_isolated_worktree_root "$p" "$PROJ_ABS_REAL" "$home_real" "$root_real" || true)
+    fi
+    if [ -n "$p_real" ]; then
+      if [ "$p_real" = "$candidate" ]; then
+        WT="$p"
+        break
       fi
+      candidate="$p_real"
     else
       candidate=""
     fi
     sleep 1
   done
   if [ -z "$WT" ]; then
-    echo "error: treehouse get did not enter a worktree within 60s; inspect window $T" >&2
+    echo "error: treehouse get did not enter an isolated worktree within ${wt_wait_secs}s (project '$PROJ_ABS'); refusing to launch to avoid tangling a primary checkout. Last sample '$p'. Inspect window $T" >&2
     exit 1
   fi
-
-  validate_spawn_worktree "treehouse get" "$T"
 fi
 
 # Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. Go won't

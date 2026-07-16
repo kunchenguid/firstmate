@@ -51,3 +51,29 @@ fm_primary_tangle_branch() {
   printf '%s\n' "$cur"
   return 0
 }
+
+# Prevention-side isolation check for the same tangle, used by fm-spawn's
+# worktree-discovery poll. Accept <candidate> as a genuine ISOLATED worktree
+# root only when its physical path (a) sits AT a git worktree top - not merely
+# inside some repo or in a bare non-repo directory - and (b) differs from every
+# <forbidden> physical path passed after it (the project's primary checkout,
+# the firstmate home/root). treehouse get's subshell hops through intermediate
+# cwds (the user's home, the firstmate home) before settling in the final
+# worktree, and a mis-sample can itself be another VALID repo root, so the
+# not-the-project check alone is insufficient. Echoes the candidate's physical
+# path and returns 0 on acceptance; echoes nothing and returns 1 otherwise.
+fm_isolated_worktree_root() {
+  local cand=$1 cand_real top top_real f
+  shift
+  cand_real=$(cd "$cand" 2>/dev/null && pwd -P) || return 1
+  top=$(git -C "$cand_real" rev-parse --show-toplevel 2>/dev/null) || return 1
+  top_real=$(cd "$top" 2>/dev/null && pwd -P) || return 1
+  [ "$cand_real" = "$top_real" ] || return 1
+  for f in "$@"; do
+    if [ -n "$f" ] && [ "$cand_real" = "$f" ]; then
+      return 1
+    fi
+  done
+  printf '%s\n' "$cand_real"
+  return 0
+}
