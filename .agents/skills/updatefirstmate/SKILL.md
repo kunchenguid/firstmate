@@ -44,7 +44,7 @@ This touches only the firstmate repo and its own worktrees, never anything under
    A secondmate that was skipped, already current, or has no live metadata is not on the list and needs no nudge.
 
 4. **Report to the captain in plain outcomes.**
-   Summarize what landed without firstmate's internal vocabulary: which parts of the fleet are now on the latest, and which were left as-is and why.
+   Summarize what landed under `AGENTS.md` section 9 without firstmate's internal vocabulary: which parts of the fleet are now on the latest, and which were left as-is and why.
    For example: "Captain, firstmate and both domain supervisors are now on the latest."
    Surface any skipped target whose reason needs the captain's attention - for instance a home with its own un-landed changes (diverged) or local edits (dirty), which were left untouched on purpose.
 
