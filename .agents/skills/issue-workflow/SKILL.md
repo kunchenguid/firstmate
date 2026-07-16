@@ -64,6 +64,7 @@ Once approved:
 
 1. Write the approved plan to `data/<id>/plan.md` under the active home.
 2. Scaffold the brief with `bin/fm-brief.sh <id> <repo> --plan data/<id>/plan.md`, then replace `{TASK}` with the task description, acceptance criteria, and context per AGENTS.md section 11.
+   fm-brief resolves a relative `--plan` path against the current working directory, so the `data/<id>/plan.md` form above is correct only when invoked from the active firstmate home; from any other directory, pass the plan's absolute path.
    The `--plan` block already carries the binding-plan declaration and the deviation threshold, so do not restate them in the task text.
    If the task touches firstmate's own shared tracked material, add the `firstmate-coding-guidelines` load instruction by hand as section 11 requires.
 3. Spawn exactly one crewmate for the issue through `bin/fm-spawn.sh` on the execution dispatch profile, after the profile and backend checks in AGENTS.md section 4.
