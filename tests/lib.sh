@@ -43,10 +43,12 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # hermetic in every test. The guard reads the machine-global no-mistakes gate DB
 # (~/.no-mistakes/state.sqlite) and probes each repo's push access over the real
 # gh network - a bootstrap-invoking test would otherwise reach the network and
-# the developer's real DB. Point it at a guaranteed-absent path so the check is
-# an instant silent no-op unless a test (tests/fm-gate-fork-assert.test.sh) sets
-# its own synthetic FM_GATE_STATE_DB to exercise the logic.
-export FM_GATE_STATE_DB="${FM_GATE_STATE_DB:-$ROOT/tests/.no-such-dir/gate-absent.sqlite}"
+# the developer's real DB. Force it unconditionally (like FM_GATE_REFUSE_BYPASS
+# above) at a guaranteed-absent path so a pre-exported real value cannot leak
+# through, making the check an instant silent no-op. The dedicated test
+# (tests/fm-gate-fork-assert.test.sh) still exercises the logic by setting
+# FM_GATE_STATE_DB per-command, which overrides this process-level export.
+export FM_GATE_STATE_DB="$ROOT/tests/.no-such-dir/gate-absent.sqlite"
 
 # --- reporters --------------------------------------------------------------
 

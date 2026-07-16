@@ -122,3 +122,21 @@ out=$(PATH="$NOAUTH:$BASE_PATH" FM_GATE_STATE_DB="$db1" "$SCRIPT" 2>/dev/null); 
 [ "$rc" -eq 0 ] || fail "unauthenticated gh must exit 0 - NEEDS_GH_AUTH owns that case (got $rc)"
 [ -z "$out" ] || fail "unauthenticated gh must stay silent, got: $out"
 pass "is a silent no-op when the gate DB is absent or gh is unauthenticated"
+
+# --- Case 7: transient gh api failure -> cannot decide, silent no-op --------
+# A rate-limited / offline `gh api repos/<slug>` probe must NOT be read as
+# push:false and flagged as needing a fork (the transient-false-positive
+# regression): a failed probe is undecidable, so the guard stays silent.
+FAILBIN=$(fm_fakebin "$TMP/ghfail")
+cat > "$FAILBIN/gh" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = auth ] && [ "${2:-}" = status ]; then exit 0; fi
+if [ "${1:-}" = api ] && [ "${2:-}" = user ]; then echo zachlandes; exit 0; fi
+if [ "${1:-}" = api ]; then echo "gh: API rate limit exceeded" >&2; exit 1; fi
+exit 0
+SH
+chmod +x "$FAILBIN/gh"
+out=$(PATH="$FAILBIN:$BASE_PATH" FM_GATE_STATE_DB="$db1" "$SCRIPT" 2>/dev/null); rc=$?
+[ "$rc" -eq 0 ] || fail "a failed gh push probe must not flag the repo (got $rc)"
+[ -z "$out" ] || fail "a failed gh push probe must stay silent, got: $out"
+pass "stays silent when the gh push probe fails instead of flagging a false positive"

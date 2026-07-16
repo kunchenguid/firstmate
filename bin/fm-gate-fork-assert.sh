@@ -73,32 +73,52 @@ gate_github_slug() {
   return 1
 }
 
-# Return 0 if the current gh user has push access to github slug $1. Memoized.
-gate_can_push() {
-  local slug=$1 verdict perm
+# Echo the current gh user's push-access verdict for github slug $1:
+#   push    - gh confirmed .permissions.push is true
+#   nopush  - gh confirmed .permissions.push is false
+#   unknown - the gh call failed or returned unparseable output (cannot decide)
+# Verdicts (including unknown) are memoized so repos sharing a slug cost one call.
+gate_push_verdict() {
+  local slug=$1 verdict perm rc
   verdict=$(grep -F "	$slug	" "$CACHE" 2>/dev/null | cut -f1 || true)
   if [ -z "$verdict" ]; then
-    perm=$(gh api "repos/$slug" --jq '.permissions.push // false' 2>/dev/null || true)
-    [ "$perm" = true ] && verdict=push || verdict=nopush
+    perm=$(gh api "repos/$slug" --jq '.permissions.push // false' 2>/dev/null)
+    rc=$?
+    if [ "$rc" -ne 0 ]; then
+      verdict=unknown
+    else
+      case $perm in
+        true)  verdict=push ;;
+        false) verdict=nopush ;;
+        *)     verdict=unknown ;;
+      esac
+    fi
     printf '%s\t%s\t\n' "$verdict" "$slug" >> "$CACHE"
   fi
-  [ "$verdict" = push ]
+  printf '%s\n' "$verdict"
 }
 
 problem=0
 while IFS='|' read -r working_path upstream_url fork_url; do
   [ -n "$upstream_url" ] || continue
   upstream_slug=$(gate_github_slug "$upstream_url") || continue
-  # Healthy: direct push access to the upstream, no fork needed.
-  gate_can_push "$upstream_slug" && continue
+  # Only flag when we AFFIRMATIVELY know the upstream is unwritable; a writable
+  # upstream (no fork needed) or an undecidable probe both stay silent.
+  [ "$(gate_push_verdict "$upstream_slug")" = nopush ] || continue
 
   fork_state=
   if [ -z "$fork_url" ]; then
     fork_state="no fork target"
   else
     fork_slug=$(gate_github_slug "$fork_url" || true)
-    if [ -z "$fork_slug" ] || ! gate_can_push "$fork_slug"; then
-      fork_state="fork ${fork_slug:-$fork_url} not push-writable"
+    if [ -z "$fork_slug" ]; then
+      fork_state="fork $fork_url not push-writable"
+    else
+      case "$(gate_push_verdict "$fork_slug")" in
+        push)   ;;
+        nopush) fork_state="fork $fork_slug not push-writable" ;;
+        *)      continue ;;
+      esac
     fi
   fi
   [ -n "$fork_state" ] || continue
