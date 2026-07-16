@@ -435,6 +435,13 @@ test_pi_wiring() {
 }
 
 test_scripts_are_shellcheck_clean() {
+  # Skip where ShellCheck is absent, exactly as the sibling guard's test does
+  # (tests/fm-arm-pretool-check.test.sh). Without this, a suite runner that does
+  # not install ShellCheck turns a missing binary into "not shellcheck-clean":
+  # the invocation exits 127, stderr is discarded, and the failure names the
+  # wrong culprit. The file itself stays covered by the lint job, which owns the
+  # canonical file set and the pinned version (bin/fm-lint.sh).
+  command -v shellcheck >/dev/null 2>&1 || { pass "shellcheck not installed, skipping"; return; }
   shellcheck "$ROOT/bin/fm-cd-pretool-check.sh" >/dev/null 2>&1 \
     || fail "bin/fm-cd-pretool-check.sh is not shellcheck-clean"
   pass "bin/fm-cd-pretool-check.sh is shellcheck-clean"
