@@ -89,8 +89,8 @@ jobs:
           bearings_output=$(/bin/bash tests/fm-bearings-snapshot.test.sh)
           printf '%s\n' "$bearings_output"
           bearings_count=$(printf '%s\n' "$bearings_output" | grep -c '^ok - ')
-          [ "$bearings_count" -eq 30 ] || {
-            echo "::error::expected 30 Bearings tests, got $bearings_count"
+          [ "$bearings_count" -eq 36 ] || {
+            echo "::error::expected 36 Bearings tests, got $bearings_count"
             exit 1
           }
 
