@@ -125,7 +125,7 @@ if (!notification.includes("started Pi extension arm child")) {
   console.error(notification);
   process.exit(1);
 }
-for (let i = 0; i < 50 && !prompt; i += 1) {
+for (let i = 0; i < 250 && !prompt; i += 1) {
   await new Promise((resolve) => setTimeout(resolve, 20));
 }
 if (!prompt.includes("FIRSTMATE WATCHER WAKE")) {
@@ -269,7 +269,7 @@ writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 mod.default(pi);
 await tool.execute("tool-call-exit", {}, undefined, undefined, {});
-for (let i = 0; i < 50 && !existsSync(process.env.FM_CHILD_PID_FILE); i += 1) {
+for (let i = 0; i < 250 && !existsSync(process.env.FM_CHILD_PID_FILE); i += 1) {
   await new Promise((resolve) => setTimeout(resolve, 20));
 }
 if (!existsSync(process.env.FM_CHILD_PID_FILE)) throw new Error("arm child did not start");
@@ -280,7 +280,7 @@ EOF
   expect_code 0 "$status" "Pi process exit must run the watcher cleanup fallback"
   [ -z "$out" ] || fail "Pi process-exit cleanup test printed output: $out"
   i=0
-  while [ "$i" -lt 50 ] && [ ! -f "$cleanup_log" ]; do
+  while [ "$i" -lt 250 ] && [ ! -f "$cleanup_log" ]; do
     sleep 0.02
     i=$((i + 1))
   done

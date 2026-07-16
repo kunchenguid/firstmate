@@ -53,6 +53,7 @@ Each secondmate has a persistent isolated `FM_HOME`, including its own state, ba
 Tracked files hold shared instructions and tooling; `data/` holds durable private fleet records; `state/` holds volatile runtime records and append-only status events; `config/` holds local operating choices; and `projects/` contains clones that are read-only to firstmate.
 A `state/<id>.status` line is a wake event, not current-state truth; `bin/fm-crew-state.sh` owns current-state reconciliation.
 Treat `data/captain.md` as the canonical portable record of captain preferences and `data/learnings.md` as curated fleet-local knowledge, regardless of harness memory.
+Captain-wait state under `state/.captain-wait/` and its lock are firstmate-owned; never touch them directly because `bin/fm-captain-wait.sh` owns their lifecycle.
 
 ## 3. Session start (run once at every session start)
 
@@ -305,6 +306,7 @@ Reach the captain immediately for:
 Do not surface automatic fixes, retries, routine progress, or internal supervision mechanics.
 Batch non-urgent updates into the next natural reply.
 Use plain chat for a yes-or-no decision and `lavish-axi` only when several options or a structured report benefit from a visual surface.
+Before a Codex primary yields with a question that genuinely requires the captain's response, load `harness-adapters` and follow its captain-wait instruction; never arm informational replies.
 Whenever a PR is mentioned, include its full `https://...` URL before any shorthand reference.
 Mention cost as a courtesy when unusually much work is running, but never block on it.
 
