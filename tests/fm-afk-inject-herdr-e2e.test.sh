@@ -164,11 +164,10 @@ redraw() {
 }
 submit_line() {
   local _line=$_buf _c _hex
-  if [ "${_line:0:1}" = "$MARK" ]; then
-    _c="injection"
-  else
-    _c="user"
-  fi
+  case "$_line" in
+    "$MARK"*) _c="injection" ;;
+    *) _c="user" ;;
+  esac
   _hex=$(printf '%s' "$_line" | od -An -tx1 | tr -d ' \n')
   printf '%s\t%s\t%s\n' "$_hex" "$_line" "$_c" >> "$LOG"
   _buf=
