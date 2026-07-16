@@ -703,8 +703,78 @@ test_pid_identity_is_locale_invariant() {
   pass "fm_pid_identity is locale-invariant across LC_ALL/LC_TIME"
 }
 
+test_pid_identity_is_stable_across_reads() {
+  # The identity is a fingerprint of ONE live process instance, so the same live pid
+  # must fingerprint byte-identically every time or the lock's own holder eventually
+  # reads as a reused pid and supervision reports itself down while a watcher is
+  # running. ps's lstart is NOT stable: it is derived from a btime that jitters, so it
+  # drifts against its own process. The identity is derived from the kernel's own
+  # start ticks wherever they are readable, and this asserts that stability.
+  local live baseline current i
+  sleep 300 &
+  live=$!
+  baseline=$(bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$live" 2>/dev/null)
+  [ -n "$baseline" ] || fail "fm_pid_identity produced no identity for a live pid"
+  i=0
+  while [ "$i" -lt 20 ]; do
+    current=$(bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$live" 2>/dev/null)
+    [ "$current" = "$baseline" ] \
+      || fail "fm_pid_identity is not stable across reads of one live pid (got '$current', want '$baseline')"
+    sleep 0.1
+    i=$((i + 1))
+  done
+  kill "$live" 2>/dev/null || true
+  wait "$live" 2>/dev/null || true
+  pass "fm_pid_identity is byte-stable across repeated reads of one live pid"
+}
+
+test_pid_identity_is_derived_from_start_ticks_not_lstart() {
+  # The discriminator behind the drift, asserted directly rather than by the
+  # property it happens to satisfy. `ps -o lstart=` is DERIVED - btime (which is
+  # recomputed and jitters by ~1s on a WSL2 host, roughly every 30s) plus the
+  # process's own starttime ticks - so every btime jump shifts the derived lstart of
+  # EVERY live process and an lstart fingerprint goes stale against its own process
+  # with no second writer. /proc/<pid>/stat field 22 is boot-relative and carries no
+  # btime term at all, so it cannot move. This pins the fingerprint to field 22 and
+  # shows an lstart-derived one WOULD move across a btime shift, so a future refactor
+  # cannot quietly regress the cure back to lstart. btime cannot be injected, so the
+  # shift is applied to the derivation itself, which is exactly where the drift enters.
+  local live ticks identity head lstart hz derived derived_after_btime_shift
+  if [ ! -r "/proc/$$/stat" ]; then
+    echo "skip: the start-ticks fingerprint needs /proc (Linux)"
+    return 0
+  fi
+  sleep 300 &
+  live=$!
+  ticks=$(bash -c '. "$1"; fm_pid_start_ticks "$2"' _ "$LIB" "$live" 2>/dev/null)
+  identity=$(bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$live" 2>/dev/null)
+  head=${identity%%[[:space:]]*}
+  lstart=$(LC_ALL=C ps -p "$live" -o lstart= 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+  [ -n "$ticks" ] || fail "no start ticks readable for a live pid"
+  [ "$head" = "$ticks" ] \
+    || fail "fm_pid_identity's start half is not /proc/<pid>/stat field 22 (got '$head', want '$ticks')"
+  case "$identity" in
+    "$lstart"*) fail "fm_pid_identity is still lstart-derived, the primitive that drifts" ;;
+  esac
+  # What an lstart-derived fingerprint IS: btime + starttime/HZ. Move btime by the
+  # observed 1s of jitter and it moves with it, while the shipped fingerprint - which
+  # never reads btime - cannot.
+  hz=$(getconf CLK_TCK 2>/dev/null || echo 100)
+  derived=$(( $(awk '/^btime /{print $2}' /proc/stat) + ticks / hz ))
+  derived_after_btime_shift=$(( $(awk '/^btime /{print $2}' /proc/stat) + 1 + ticks / hz ))
+  [ "$derived" != "$derived_after_btime_shift" ] \
+    || fail "the lstart derivation did not move across a btime shift; the test cannot discriminate"
+  [ "$(bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$live" 2>/dev/null)" = "$identity" ] \
+    || fail "the start-ticks fingerprint moved for a fixed live pid"
+  kill "$live" 2>/dev/null || true
+  wait "$live" 2>/dev/null || true
+  pass "fm_pid_identity fingerprints from /proc start ticks, immune to the btime shift that moves lstart"
+}
+
 test_singleton_start
 test_pid_identity_is_locale_invariant
+test_pid_identity_is_stable_across_reads
+test_pid_identity_is_derived_from_start_ticks_not_lstart
 test_stale_watch_lock_reclaimed
 test_live_stale_watch_lock_is_actionable
 test_guard_warnings

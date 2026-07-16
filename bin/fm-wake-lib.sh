@@ -23,17 +23,45 @@ fm_pid_alive() {
   kill -0 "$pid" 2>/dev/null
 }
 
+# The kernel's own start time for a pid: boot-relative clock ticks, /proc/<pid>/stat
+# field 22. comm (field 2) is parenthesised and may itself contain spaces or ')',
+# so fields are counted from after the LAST ')'. Absent where /proc is (macOS).
+fm_pid_start_ticks() {
+  local pid=$1
+  [ -r "/proc/$pid/stat" ] || return 1
+  awk '{ s = $0; sub(/^.*\) /, "", s); n = split(s, f, " "); if (n < 20) exit 1; print f[20] }' \
+    "/proc/$pid/stat" 2>/dev/null
+}
+
 fm_pid_identity() {
-  local pid=$1 out
+  local pid=$1 start cmd
   case "$pid" in
     ''|*[!0-9]*) return 1 ;;
   esac
-  # Pin LC_ALL=C so lstart's date format is locale-invariant: the identity is
-  # written under one locale but re-read under the machine's ambient locale, which
-  # would otherwise mismatch on a non-C locale (e.g. ko_KR) and reject a live watcher.
-  out=$(LC_ALL=C ps -p "$pid" -o lstart= -o command= 2>/dev/null) || return 1
-  [ -n "$out" ] || return 1
-  printf '%s\n' "$out" | sed 's/^[[:space:]]*//'
+  # Pin LC_ALL=C so ps's output is locale-invariant: the identity is written under
+  # one locale but re-read under the machine's ambient locale, which would
+  # otherwise mismatch on a non-C locale (e.g. ko_KR) and reject a live watcher.
+  cmd=$(LC_ALL=C ps -p "$pid" -o command= 2>/dev/null) || return 1
+  [ -n "$cmd" ] || return 1
+  # The start half must be byte-stable across reads, or a live watcher's own lock
+  # reads as a reused pid and supervision reports itself down. `ps -o lstart=` is
+  # NOT byte-stable: it is DERIVED, from the kernel's btime plus the process's
+  # starttime ticks. starttime never moves, but btime is recomputed and jitters by
+  # ~1s (measured on a WSL2 host, roughly every 30s), and every jump shifts the
+  # derived lstart of every live process - so an lstart fingerprint goes stale
+  # against its OWN process, with no second writer, and reports a live watcher as a
+  # reused pid. That drift is the primary cause of the false "supervision off"
+  # alarms this fixes. /proc/<pid>/stat field 22 is boot-relative and immune, so it
+  # is the fix, not an optimisation: do not "simplify" this back to lstart.
+  # lstart survives only as the fallback where /proc does not exist, and it is an
+  # ACTIVELY DRIFTING primitive there, not an equivalent one. On a host with no
+  # /proc AND a jittering btime, this class of false alarm is NOT fixed.
+  start=$(fm_pid_start_ticks "$pid") \
+    || start=$(LC_ALL=C ps -p "$pid" -o lstart= 2>/dev/null) \
+    || return 1
+  start=$(printf '%s' "$start" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+  [ -n "$start" ] || return 1
+  printf '%s %s\n' "$start" "$cmd" | sed 's/^[[:space:]]*//'
 }
 
 fm_path_mtime() {
