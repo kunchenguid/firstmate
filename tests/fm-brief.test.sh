@@ -339,6 +339,13 @@ test_plan_flag_missing_file_fails_clearly() {
   expect_code 1 "$status" "--plan with no path argument must fail"
   assert_contains "$out" "--plan requires a path argument" "--plan no-argument error was not clear"
 
+  # An empty --plan value (e.g. an unset shell variable) fails closed rather than
+  # silently skipping the binding-plan block.
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-plan-e3b some-proj --plan "" 2>&1); status=$?
+  expect_code 1 "$status" "--plan with an empty path must fail"
+  assert_contains "$out" "--plan requires a non-empty path" "--plan empty-path error was not clear"
+  assert_absent "$home/data/brief-plan-e3b/brief.md" "empty --plan run still wrote a brief"
+
   # --plan applies only to ship briefs, never scout or secondmate.
   printf 'x\n' > "$home/data/plan.md"
   out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-plan-e4 some-proj --scout --plan "$home/data/plan.md" 2>&1); status=$?

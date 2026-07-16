@@ -89,6 +89,7 @@ while [ "$#" -gt 0 ]; do
     --plan)
       shift
       [ "$#" -gt 0 ] || { echo "error: --plan requires a path argument" >&2; exit 1; }
+      [ -n "$1" ] || { echo "error: --plan requires a non-empty path" >&2; exit 1; }
       PLAN_PATH="$1"
       ;;
     *) POS+=("$1") ;;
