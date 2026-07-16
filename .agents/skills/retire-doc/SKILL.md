@@ -30,15 +30,36 @@ Example:
 mkdir -p data/backups
 ts="$(date +%Y%m%d-%H%M%S)"
 backup="data/backups/retire-<slug>-${ts}.tar.gz"
-tar czf "$backup" <affected-path> [<affected-path> ...]
+if ! tar czf "$backup" <affected-path> [<affected-path> ...]; then
+  rm -f "$backup"
+  printf '%s\n' 'The scoped backup failed; stop before retiring anything.' >&2
+  exit 1
+fi
 if command -v shasum >/dev/null 2>&1; then
-  hash="$(shasum -a 256 "$backup" | awk '{print $1}')"
+  if ! hash_output="$(shasum -a 256 "$backup")"; then
+    printf '%s\n' 'SHA-256 hashing failed; stop before retiring anything.' >&2
+    exit 1
+  fi
 elif command -v sha256sum >/dev/null 2>&1; then
-  hash="$(sha256sum "$backup" | awk '{print $1}')"
+  if ! hash_output="$(sha256sum "$backup")"; then
+    printf '%s\n' 'SHA-256 hashing failed; stop before retiring anything.' >&2
+    exit 1
+  fi
 else
   printf '%s\n' 'No SHA-256 command is available; stop before retiring anything.' >&2
   exit 1
 fi
+hash="${hash_output%%[[:space:]]*}"
+if [ "${#hash}" -ne 64 ]; then
+  printf '%s\n' 'The SHA-256 digest is invalid; stop before retiring anything.' >&2
+  exit 1
+fi
+case "$hash" in
+  *[!0123456789abcdefABCDEF]*)
+    printf '%s\n' 'The SHA-256 digest is invalid; stop before retiring anything.' >&2
+    exit 1
+    ;;
+esac
 printf '%s  %s\n' "$hash" "$backup"
 ```
 
