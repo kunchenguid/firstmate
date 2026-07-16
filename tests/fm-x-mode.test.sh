@@ -361,7 +361,7 @@ SH
 }
 
 test_poll_inbox_private_publication_rejects_unsafe_paths() {
-  local home fakebin out rc body external target dir dest hardlink
+  local home fakebin out rc body target dir dest hardlink
   body='{"request_id":"req-x","tweet_id":"555","author_id":"42","text":"what are you building?"}'
 
   home="$TMP_ROOT/poll-inbox-linked-dir"; mkdir -p "$home/state" "$home/external"
@@ -1498,7 +1498,7 @@ test_poll_records_context_registry_from_relay_platform() {
 }
 
 test_context_registry_private_publication_rejects_unsafe_paths() {
-  local home external rc dest hardlink target out
+  local home rc dest hardlink target out
   # shellcheck source=bin/fm-x-lib.sh
   . "$ROOT/bin/fm-x-lib.sh"
 
