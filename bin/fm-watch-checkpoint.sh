@@ -62,8 +62,15 @@ run_with_perl_timeout() {
       die "exec failed: $!\n";
     }
     local $SIG{ALRM} = sub {
+      # Match coreutils timeout: give the TERMed watcher time to run its
+      # cleanup trap (lock removal) before the hard KILL, or the checkpoint
+      # can return with the lock pid file still present under load.
+      use POSIX ":sys_wait_h";
       kill "TERM", -$pid;
-      select undef, undef, undef, 0.2;
+      for (1 .. 50) {
+        last if waitpid($pid, WNOHANG) != 0;
+        select undef, undef, undef, 0.1;
+      }
       kill "KILL", -$pid;
       exit 124;
     };

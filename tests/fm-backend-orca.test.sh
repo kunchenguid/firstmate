@@ -36,6 +36,7 @@ fi
 exit 0
 SH
   chmod +x "$fb/orca"
+  fm_fake_compatible_tasks_axi "$fb"
   printf '%s\n' "$fb"
 }
 

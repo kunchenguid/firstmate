@@ -100,6 +100,32 @@ SH
   done
 }
 
+# fm_fake_compatible_tasks_axi <fakebin>: a minimal tasks-axi stand-in that
+# satisfies fm-tasks-axi-lib.sh's compatibility probe and fm-decision-hold.sh's
+# captain-hold contract check, so scout-teardown tests pass hermetically
+# without a globally installed tasks-axi (CI installs the real one; a dev
+# machine may not have it).
+fm_fake_compatible_tasks_axi() {
+  local fakebin=$1
+  cat > "$fakebin/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --version ]; then
+  printf '%s\n' '0.2.2'
+  exit 0
+fi
+if [ "${2:-}" = --help ]; then
+  case "${1:-}" in
+    update) printf '%s\n' 'usage: tasks-axi update <id> [flags]' '  --archive-body' ;;
+    mv) printf '%s\n' 'usage: tasks-axi mv <id> [<id>...] --to <path-or-dir>' ;;
+    hold) printf '%s\n' 'usage: tasks-axi hold <id> --reason <reason> --kind captain' ;;
+  esac
+  exit 0
+fi
+exit 0
+SH
+  chmod +x "$fakebin/tasks-axi"
+}
+
 # --- deterministic git identity and fixtures --------------------------------
 
 # fm_git_identity [name] [email]: export a fixed author/committer identity so

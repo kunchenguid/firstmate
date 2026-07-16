@@ -958,6 +958,7 @@ set -u
 exit 0
 SH
   chmod +x "$fb/tmux" "$fb/treehouse"
+  fm_fake_compatible_tasks_axi "$fb"
   printf '%s\n' "$fb"
 }
 

@@ -443,8 +443,17 @@ test_watch_restart_attaches_to_healthy_peer() {
   fakebin="$dir/fakebin"
   out="$dir/restart.out"
   mark_pr_check_migration_complete "$state"
-  node -e 'process.on("SIGTERM", () => {}); setTimeout(() => {}, 300000)' &
+  # The peer must have its SIGTERM handler installed BEFORE the arm's restart
+  # path TERMs it, or a slow node startup lets the TERM kill it and the arm's
+  # fresh child watcher takes the lock instead of standing down to the peer.
+  node -e 'process.on("SIGTERM", () => {}); require("fs").writeFileSync(process.argv[1], "ready"); setTimeout(() => {}, 300000)' "$dir/peer-ready" &
   peer=$!
+  i=0
+  while [ "$i" -lt 100 ] && [ ! -s "$dir/peer-ready" ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ -s "$dir/peer-ready" ] || fail "TERM-resistant peer never reported ready"
   identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$peer") || fail "could not identify peer pid"
   mkdir "$state/.watch.lock"
   printf '%s\n' "$peer" > "$state/.watch.lock/pid"
