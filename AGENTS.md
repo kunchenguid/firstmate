@@ -644,7 +644,7 @@ Invoke the `/afk` skill when the captain says `/afk`, says they are going afk, `
 The skill owns the full daemon procedure: classification policy, batching, injection hardening, max-defer, verified submit, marker stripping, portable lock, dedupe, target discovery, reliability properties, and `FM_INJECT_SKIP`.
 Inline facts that must survive without a loaded skill:
 
-- Every daemon injection is prefixed with `FM_INJECT_MARK`, ASCII unit separator `0x1f`, so internal escalations are distinguishable from a captain message.
+- Every daemon injection is prefixed with `FM_INJECT_MARK`, terminal-safe invisible separator `U+2063`, so internal escalations are distinguishable from a captain message.
 - While `state/.afk` exists, the daemon owns the watcher; do not separately arm `fm-watch-arm.sh` or `fm-watch.sh`.
 - If firstmate receives a marked message while afk is active, it is an internal escalation: stay afk and process it.
 - If the message starts with `/afk`, stay afk and refresh the flag.
