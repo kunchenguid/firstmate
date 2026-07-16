@@ -17,9 +17,11 @@ This skill is the single policy owner for Firstmate-generated rich-review surfac
 Rich-review surfaces are optional companions for rich reports, visual comparisons, annotated sources, structured evidence, or multi-finding review.
 Keep the primary chat path available, and use it alone for simple yes-or-no decisions.
 Primary chat is the only approval channel unless the integration has both a durable return path into Firstmate's authoritative workflow and verified submission idempotence with acknowledgement.
-An active `poll` or browser `listening` banner proves neither requirement.
+For Lavish 0.1.40, a browser `waiting` or `listening` state proves only the absence or presence of an active poll, `queueKey` replaces only unsent browser entries and is not server idempotence, polling can remove feedback before agent acknowledgement, and the verified SDK cannot prove `sent`, `delivered`, or `acknowledged` state.
+None of those signals satisfies the approval-channel guarantees, and any different behavior after an upstream change must be revalidated before it can be relied upon.
 
-Every rich-review surface must expose the authoritative absolute and repository-relative source paths when available, the exact commit or snapshot, a raw-file option, and the artifact type and fidelity.
+Every rich-review surface must expose at least one authoritative source path, the exact commit or snapshot, a raw-file option, and the artifact type and fidelity.
+Provide both absolute and repository-relative paths when both exist, and omit only a path form that is inapplicable.
 When a review rendering could be mistaken for product direction, state explicitly whether it is a product mockup.
 Evidence-bearing decision reports must include citations or line references, severity rationale, alternatives, disconfirming evidence, consequences, and reversibility in proportion to the decision's impact.
 
