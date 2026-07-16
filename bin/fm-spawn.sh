@@ -611,9 +611,10 @@ if [ "$KIND" = secondmate ]; then
   # PRIMARY checkout's current default-branch commit, so a freshly spawned or
   # recovery-respawned secondmate always runs the primary's version (AGENTS.md
   # spawn section). Purely local - no fetch: the home is a worktree of this same
-  # repo and already holds the commit. ff-only and guarded; a dirty, diverged, or
-  # wrong-branch home is left untouched and launches as-is. The agent re-reads
-  # AGENTS.md fresh on launch, so no nudge is needed here.
+  # repo and already holds the commit. ff-only and guarded; a dirty, diverged,
+  # ahead, or wrong-branch home is left untouched and launches as-is. A home that
+  # reads ahead means this primary is behind origin, not that the home is broken.
+  # The agent re-reads AGENTS.md fresh on launch, so no nudge is needed here.
   if sm_primary_head=$(primary_head_commit "$FM_ROOT"); then
     sm_ff_out=$(ff_target "$PROJ_ABS" "secondmate $ID" "$sm_primary_head" yes yes 2>&1 || true)
     case "$sm_ff_out" in

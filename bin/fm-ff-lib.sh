@@ -279,7 +279,9 @@ live_secondmate_meta_records() {
 #                  for a worktree of this same repo; a standalone clone that lacks
 #                  it is skipped rather than fetched.
 # Guards are identical in both modes: ff-only (never force/merge/stash); skip a
-# dirty, diverged, or wrong-branch target and leave its work untouched.
+# dirty, diverged, ahead, or wrong-branch target and leave its work untouched.
+# "ahead" and "diverged" are reported as distinct reasons: only a diverged target
+# has forked history that may hold unlanded work.
 FF_STATUS=""
 FF_INSTR=""
 ff_target() {
@@ -296,7 +298,7 @@ ff_target() {
     return 0
   fi
 
-  local default base cur instr local_rev base_rev before after out
+  local default base cur instr local_rev base_rev before after out ahead unit
   default=$(default_branch "$dir") || {
     echo "$label: skipped: cannot determine default branch"
     return 0
@@ -351,6 +353,21 @@ ff_target() {
     return 0
   fi
   if ! git -C "$dir" merge-base --is-ancestor HEAD "$base" 2>/dev/null; then
+    # HEAD is not contained in the base, which has two very different causes and
+    # only one of them is a divergence. When the BASE is an ancestor of HEAD the
+    # histories never forked: the target is simply AHEAD, holding the base plus
+    # newer commits. Reporting that as "diverged" sends the reader hunting for
+    # unlanded work in a target that has none, and hides the real condition - in
+    # the local-HEAD secondmate sync a home reads ahead precisely when the PRIMARY
+    # is behind, which is the earliest automatic signal that the primary is stale
+    # (nothing else reports it). Either way the target is left untouched: a
+    # fast-forward cannot run backwards, and rewinding it would discard commits.
+    if git -C "$dir" merge-base --is-ancestor "$base" HEAD 2>/dev/null; then
+      ahead=$(git -C "$dir" rev-list --count "$base"..HEAD 2>/dev/null || echo 0)
+      if [ "$ahead" = 1 ]; then unit=commit; else unit=commits; fi
+      echo "$label: skipped: ahead of $base by $ahead $unit"
+      return 0
+    fi
     echo "$label: skipped: diverged from $base"
     return 0
   fi

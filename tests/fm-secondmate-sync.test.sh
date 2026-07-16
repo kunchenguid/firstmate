@@ -9,8 +9,12 @@
 # The guarantees under test:
 #   - The shared ff helper, driven with a LOCAL commit base, advances a behind
 #     home (updated), is a no-op on an already-current home (current, no nudge),
-#     and refuses - leaving work untouched - on a dirty, diverged, or
+#     and refuses - leaving work untouched - on a dirty, diverged, ahead, or
 #     in-flight (feature-branch) home.
+#   - A home that is merely AHEAD of a stale primary is reported as ahead, never
+#     as diverged: both are skipped, so the reason string is the only thing that
+#     tells an operator whether the home holds forked work or the primary is
+#     behind origin.
 #   - No origin fetch happens in the local-HEAD sync path.
 #   - The bootstrap sweep fast-forwards every live secondmate home and sends a
 #     reread nudge ONLY for a running secondmate whose instruction surface
@@ -206,6 +210,74 @@ test_ff_diverged() {
   assert_contains "$FF_OUT" "secondmate sm: skipped: diverged from $base" "diverged home is skipped"
   [ "$(head_of "$w/sm")" = "$before" ] || fail "diverged home HEAD moved (unlanded work at risk)"
   pass "T4 diverged: a home that is not an ancestor of the primary's HEAD is skipped"
+}
+
+# --- T4b: ahead - a home NEWER than the primary is not a divergence -----------
+# Reproduces the 2026-07-16 secondmate launch: the primary sat 5 commits behind
+# origin/main (PR #593 while origin was at #644) and the freshly leased home came
+# up at origin/main, so the sync tried to fast-forward the home BACKWARDS onto the
+# primary's stale commit. Nothing had forked - the home simply held the base plus
+# newer commits - but ff_target reported "diverged", which reads as unlanded work
+# at risk in the home and hides the true condition: the PRIMARY is stale.
+# The skip itself is correct and stays; only the diagnosis is under test.
+test_ff_ahead_of_stale_primary() {
+  local w c1 base before
+  w=$(new_world ff-ahead)
+  c1=$(head_of "$w/main")
+  bump_primary "$w" instr
+  bump_primary "$w" instr
+  # The home is leased at the NEWER commit; the primary is then pinned behind it,
+  # exactly as a primary that has not fast-forwarded from origin yet.
+  git -C "$w/main" worktree add -q --detach "$w/sm" HEAD
+  git -C "$w/main" reset --hard -q "$c1"
+  base=$(primary_head_commit "$w/main")
+  before=$(head_of "$w/sm")
+  [ "$before" != "$base" ] || fail "precondition: home should start ahead of the primary"
+
+  run_ff "$w/sm" "$base"
+
+  [ "$FF_STATUS" = skipped ] || fail "FF_STATUS: expected skipped, got '$FF_STATUS'"
+  assert_contains "$FF_OUT" "secondmate sm: skipped: ahead of $base by 2 commits" \
+    "an ahead home reports how far ahead it is, naming the stale base"
+  assert_not_contains "$FF_OUT" "diverged" \
+    "an ahead home must NOT be reported as diverged: nothing forked"
+  [ "$(head_of "$w/sm")" = "$before" ] || fail "ahead home HEAD moved (a fast-forward cannot run backwards)"
+  pass "T4b ahead: a home newer than a stale primary is reported as ahead, not diverged"
+}
+
+# --- T4c: the ahead/diverged distinction is real, not cosmetic ----------------
+# Both cases fail `merge-base --is-ancestor HEAD base` and both are skipped, so the
+# reason string is the ONLY thing that tells an operator whether the target holds
+# forked work (diverged -> inspect it) or is merely newer (ahead -> the primary is
+# behind). Pin that they never collapse back into one message, and that a
+# one-commit lead reads as singular.
+test_ff_ahead_and_diverged_are_distinct() {
+  local w c1 base
+
+  # Ahead by exactly one commit: singular unit, no "diverged".
+  w=$(new_world ff-ahead-one)
+  c1=$(head_of "$w/main")
+  bump_primary "$w" instr
+  git -C "$w/main" worktree add -q --detach "$w/sm" HEAD
+  git -C "$w/main" reset --hard -q "$c1"
+  base=$(primary_head_commit "$w/main")
+  run_ff "$w/sm" "$base"
+  assert_contains "$FF_OUT" "ahead of $base by 1 commit" "a one-commit lead reads as singular"
+  assert_not_contains "$FF_OUT" "1 commits" "singular lead must not read '1 commits'"
+
+  # Genuinely forked history: still "diverged", never "ahead".
+  w=$(new_world ff-forked)
+  c1=$(head_of "$w/main")
+  git -C "$w/main" worktree add -q --detach "$w/sm" "$c1"
+  printf 'fork work\n' > "$w/sm/AGENTS.md"
+  git -C "$w/sm" add -A
+  git -C "$w/sm" commit -qm local-work
+  bump_primary "$w" instr
+  base=$(primary_head_commit "$w/main")
+  run_ff "$w/sm" "$base"
+  assert_contains "$FF_OUT" "diverged from $base" "forked history is still reported as diverged"
+  assert_not_contains "$FF_OUT" "ahead of" "forked history must never be reported as merely ahead"
+  pass "T4c ahead and diverged stay distinct reasons for the two different causes"
 }
 
 # --- T5: in-flight - a home on a feature branch is skipped, work preserved ----
@@ -760,6 +832,47 @@ SH
   pass "T11 spawn warns when pre-launch sync is skipped"
 }
 
+# --- T11b: the spawn warning itself names ahead, not diverged -----------------
+# The end-user surface of the 2026-07-16 report: the operator never reads
+# ff_target's line, only the warning fm-spawn.sh derives from it. Pin that the
+# derived warning carries the accurate reason through to launch.
+test_spawn_warns_ahead_not_diverged_before_launch() {
+  local w c1 before fakebin err
+  w=$(new_world spawn-ahead)
+  c1=$(head_of "$w/main")
+  bump_primary "$w" instr
+  git -C "$w/main" worktree add -q --detach "$w/sm" HEAD
+  printf 'sm\n' > "$w/sm/.fm-secondmate-home"
+  mkdir -p "$w/sm/data"
+  printf 'charter\n' > "$w/sm/data/charter.md"
+  git -C "$w/main" reset --hard -q "$c1"
+  before=$(head_of "$w/sm")
+
+  fakebin="$w/fakebin"
+  err="$w/spawn.err"
+  mkdir -p "$fakebin"
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$fakebin/tmux"
+
+  PATH="$fakebin:$BASE_PATH" TMUX='' \
+    FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" \
+    FM_STATE_OVERRIDE="$w/home/state" FM_DATA_OVERRIDE="$w/home/data" \
+    FM_PROJECTS_OVERRIDE="$w/home/projects" FM_CONFIG_OVERRIDE="$w/home/config" \
+    FM_SPAWN_NO_GUARD=1 \
+    "$ROOT/bin/fm-spawn.sh" sm "$w/sm" codex --secondmate >/dev/null 2>"$err" || true
+
+  assert_contains "$(cat "$err")" \
+    "warning: secondmate sm sync skipped before launch: ahead of" \
+    "the spawn warning reports the home as ahead of the stale primary"
+  assert_not_contains "$(cat "$err")" "diverged" \
+    "the spawn warning must not blame divergence when the primary is simply behind"
+  [ "$(head_of "$w/sm")" = "$before" ] || fail "ahead spawn home HEAD moved"
+  pass "T11b spawn warns that the home is ahead of a stale primary, not diverged"
+}
+
 # --- T12: a freshly seeded home reads clean once the primary ignores the marker -
 # The seed marker used to leave every home permanently dirty: bin/fm-fleet-sync.sh
 # and any other plain `git status --porcelain` check counts the untracked marker,
@@ -845,6 +958,8 @@ test_ff_updated
 test_ff_current
 test_ff_dirty
 test_ff_diverged
+test_ff_ahead_of_stale_primary
+test_ff_ahead_and_diverged_are_distinct
 test_ff_inflight_feature_branch
 test_no_fetch_in_local_path
 test_sweep_nudge_requires_instruction_change
@@ -858,6 +973,7 @@ test_nudge_retry_uses_fresh_herdr_endpoint_after_respawn
 test_bootstrap_sweep_surfaces_skipped_home
 test_spawn_fast_forwards_before_launch
 test_spawn_warns_when_sync_skipped_before_launch
+test_spawn_warns_ahead_not_diverged_before_launch
 test_seed_marker_clean_when_gitignored
 test_seed_marker_converges_existing_home
 test_seed_marker_does_not_mask_real_dirt
