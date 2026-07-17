@@ -1,7 +1,7 @@
 // Firstmate primary watcher bridge for Pi.
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, watch, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -91,7 +91,12 @@ function failureLine(stdout: string, stderr: string, code: number | null): strin
 }
 
 export default function (pi: ExtensionAPI) {
-  let awayMonitor: ReturnType<typeof watch> | null = null;
+  let awayMonitor: ReturnType<typeof setInterval> | null = null;
+  let awayMonitorError = "";
+  let awayMonitorRetry: ReturnType<typeof setTimeout> | null = null;
+  let awayObserved = existsSync(awayFlag);
+  let sessionActive = false;
+  let shuttingDown = false;
   const intentionalStops = new WeakSet<object>();
 
   function stopArm(): void {
@@ -104,28 +109,105 @@ export default function (pi: ExtensionAPI) {
     armReadiness = null;
   }
 
-  function reconcileAwayOwnership(): void {
-    if (existsSync(awayFlag)) stopArm();
+  function readAwayFlag(): boolean {
+    try {
+      statSync(awayFlag);
+      return true;
+    } catch (error) {
+      if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") return false;
+      throw error;
+    }
   }
 
-  function startAwayMonitor(): void {
-    if (awayMonitor || !isPrimaryHome()) return;
-    awayMonitor = watch(state, { persistent: false }, reconcileAwayOwnership);
-    awayMonitor.on("error", (error) => {
-      awayMonitor?.close();
-      awayMonitor = null;
-      void sendWake(`watcher: FAILED - Pi away-mode state monitor failed: ${error.message}`);
+  async function reconcileAwayOwnership(): Promise<void> {
+    const awayActive = readAwayFlag();
+    if (awayActive) {
+      awayObserved = true;
+      stopArm();
+      return;
+    }
+    if (!awayObserved) return;
+    awayObserved = false;
+    if (!sessionActive || shuttingDown || !awayMonitor) return;
+    const result = await startArm();
+    if (!result.ok) await sendWake(result.message);
+  }
+
+  const awayMonitorListener = () => {
+    void reconcileAwayOwnership().catch((error) => {
+      handleAwayMonitorFailure(error);
     });
-    reconcileAwayOwnership();
+  };
+
+  function handleAwayMonitorFailure(error: unknown): void {
+    awayMonitorError = error instanceof Error ? error.message : String(error);
+    if (awayMonitor) {
+      clearInterval(awayMonitor);
+      awayMonitor = null;
+    }
+    stopArm();
+    scheduleAwayMonitorRetry();
+  }
+
+  function scheduleAwayMonitorRetry(): void {
+    if (awayMonitorRetry || shuttingDown) return;
+    awayMonitorRetry = setTimeout(() => {
+      awayMonitorRetry = null;
+      startAwayMonitor();
+    }, 250);
+    awayMonitorRetry.unref();
+  }
+
+  function startAwayMonitor(): boolean {
+    if (awayMonitor) return true;
+    if (!isPrimaryHome()) return false;
+    let awayActive: boolean;
+    try {
+      awayActive = readAwayFlag();
+      awayMonitor = setInterval(awayMonitorListener, 50);
+      awayMonitor.unref();
+    } catch (error) {
+      handleAwayMonitorFailure(error);
+      return false;
+    }
+    awayMonitorError = "";
+    if (awayMonitorRetry) {
+      clearTimeout(awayMonitorRetry);
+      awayMonitorRetry = null;
+    }
+    awayObserved = awayActive;
+    if (awayObserved) stopArm();
+    markLoaded();
+    if (sessionActive && !awayObserved && !child) {
+      void startArm().then((result) => {
+        if (!result.ok) void sendWake(result.message);
+      }).catch((error) => {
+        const message = error instanceof Error ? error.message : String(error);
+        void sendWake(`watcher: FAILED - Pi arm recovery after monitor restart failed: ${message}`);
+      });
+    }
+    return true;
+  }
+
+  function stopAwayMonitor(): void {
+    if (awayMonitor) clearInterval(awayMonitor);
+    awayMonitor = null;
+    if (awayMonitorRetry) {
+      clearTimeout(awayMonitorRetry);
+      awayMonitorRetry = null;
+    }
   }
 
   const cleanupOnProcessExit = () => {
+    shuttingDown = true;
+    sessionActive = false;
+    stopAwayMonitor();
     stopArm();
   };
   process.once("exit", cleanupOnProcessExit);
 
   async function sendWake(message: string) {
-    if (existsSync(awayFlag)) return;
+    if (!awayMonitor || existsSync(awayFlag)) return;
     await pi.sendUserMessage(
       `FIRSTMATE WATCHER WAKE: ${message}\n\nRun bin/fm-wake-drain.sh first, handle the queued wake, then resume Pi supervision.`,
       { deliverAs: "followUp" },
@@ -135,6 +217,10 @@ export default function (pi: ExtensionAPI) {
   async function startArm(): Promise<ArmResult> {
     if (!isPrimaryHome()) {
       return { ok: false, message: "watcher: inactive - current checkout is not a primary firstmate home" };
+    }
+    if (!awayMonitor) {
+      const detail = awayMonitorError ? ` (${awayMonitorError})` : "";
+      return { ok: false, message: `watcher: inactive - away-mode state monitor unavailable${detail}` };
     }
     let ownership = lockOwnership();
     let acquisitionError = "";
@@ -238,12 +324,16 @@ export default function (pi: ExtensionAPI) {
 
   pi.on?.("session_start", async (_event, ctx) => {
     if (!isPrimaryHome()) return;
+    shuttingDown = false;
+    sessionActive = true;
+    startAwayMonitor();
     const result = await startArm();
     if (!result.ok) ctx?.ui?.notify?.(result.message, "warning");
   });
   pi.on?.("session_shutdown", () => {
-    awayMonitor?.close();
-    awayMonitor = null;
+    shuttingDown = true;
+    sessionActive = false;
+    stopAwayMonitor();
     stopArm();
     process.off("exit", cleanupOnProcessExit);
   });
@@ -274,6 +364,5 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
-  markLoaded();
   startAwayMonitor();
 }
