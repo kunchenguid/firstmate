@@ -41,12 +41,16 @@ test_tracked_extension_present_and_self_hashing() {
   assert_contains "$text" ".pi-watch-extension-loaded" "tracked extension missing loaded marker"
   assert_contains "$text" 'createHash("sha256").update(readFileSync(extensionFile)).digest("hex")' "tracked extension does not self-hash its own content for extensionVersion"
   assert_contains "$text" 'fileURLToPath(import.meta.url)' "tracked extension does not self-locate via import.meta.url"
-  assert_contains "$text" "sessionOwnsLock" "tracked extension missing session lock ownership check"
   assert_contains "$text" 'type LockOwnership = "owned" | "missing" | "other"' "tracked extension does not distinguish missing lock from another owner"
   assert_contains "$text" "readFileSync(\`\${state}/.lock\`" "tracked extension does not read the effective session lock"
   assert_contains "$text" 'return pidAlive(lockPid) ? "other" : "missing"' "tracked extension does not allow a pre-lock load marker"
   assert_contains "$text" 'if (lockOwnership() === "other") return' "tracked extension overwrites another live session marker"
-  assert_contains "$text" "if (!sessionOwnsLock()) return { ok: false" "tracked extension arms without the session lock"
+  assert_contains "$text" 'const ownership = lockOwnership()' "tracked extension arm does not inspect the distinct lock ownership state"
+  assert_contains "$text" 'if (ownership === "other") return { ok: false' "tracked extension arm does not preserve the live-other read-only refusal"
+  assert_contains "$text" 'if (ownership === "missing")' "tracked extension arm collapses a stale or absent lock into the live-other refusal"
+  assert_contains "$text" "no live session holds the lock" "tracked extension arm missing stale-lock recovery guidance"
+  assert_contains "$text" "run bin/fm-session-start.sh to reclaim it" "tracked extension arm does not direct stale-lock reclamation"
+  assert_contains "$text" "call fm_watch_arm_pi to re-arm" "tracked extension arm does not direct supervision re-arm"
   assert_contains "$text" "writeFileSync(marker, \`\${extensionVersion}\\n\${process.pid}\\n\`)" "tracked extension does not write the content version and process marker"
   assert_contains "$text" "const config = process.env.FM_CONFIG_OVERRIDE" "tracked extension missing effective config resolution"
   assert_contains "$text" "FM_CONFIG_OVERRIDE: config" "tracked extension does not pass the effective config to the watcher arm"
@@ -195,6 +199,87 @@ EOF
   expect_code 0 "$status" "Pi custom tool must return Pi's AgentToolResult shape"
   [ -z "$out" ] || fail "Pi tool-result test printed output: $out"
   pass "Pi custom tool returns text content and structured details"
+}
+
+test_pi_arm_distinguishes_session_lock_ownership() {
+  local repo home plugin log out status
+  repo="$TMP_ROOT/pi-lock-ownership-root"
+  home="$TMP_ROOT/pi-lock-ownership-home"
+  log="$TMP_ROOT/pi-lock-ownership.log"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm\n' >> "${FM_ARM_LOG:?}"
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" node --input-type=module 2>&1 <<'EOF'
+import { existsSync, unlinkSync, writeFileSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { pathToFileURL } from "node:url";
+
+let tool = null;
+const pi = {
+  on() {},
+  registerCommand() {},
+  registerTool(candidate) {
+    if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+  },
+  sendUserMessage: async () => {},
+};
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+if (!tool) throw new Error("Pi watch tool was not registered");
+
+const lock = `${process.env.FM_HOME}/state/.lock`;
+const callArm = () => tool.execute("tool-call-lock", {}, undefined, undefined, {});
+const assertMissingLock = (result, label) => {
+  if (result.details?.ok !== false) throw new Error(`${label} unexpectedly armed: ${JSON.stringify(result.details)}`);
+  if (!result.details.message.includes("no live session holds the lock")) {
+    throw new Error(`${label} missing no-live-session guidance: ${result.details.message}`);
+  }
+  if (!result.details.message.includes("bin/fm-session-start.sh") || !result.details.message.includes("re-arm")) {
+    throw new Error(`${label} missing reclaim and re-arm guidance: ${result.details.message}`);
+  }
+  if (result.details.message.includes("held by another firstmate session")) {
+    throw new Error(`${label} was misreported as a live other holder: ${result.details.message}`);
+  }
+};
+
+if (existsSync(lock)) unlinkSync(lock);
+assertMissingLock(await callArm(), "absent lock");
+writeFileSync(lock, "999999\n");
+assertMissingLock(await callArm(), "dead lock holder");
+
+const other = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+try {
+  writeFileSync(lock, `${other.pid}\n`);
+  const liveOther = await callArm();
+  if (liveOther.details?.ok !== false) throw new Error(`live other holder unexpectedly armed: ${JSON.stringify(liveOther.details)}`);
+  if (liveOther.details.message !== "watcher: read-only - session lock is held by another firstmate session") {
+    throw new Error(`unexpected live-other response: ${liveOther.details.message}`);
+  }
+} finally {
+  other.kill("SIGTERM");
+}
+
+if (existsSync(process.env.FM_ARM_LOG)) throw new Error("watcher arm ran without lock ownership");
+writeFileSync(lock, `${process.pid}\n`);
+const owned = await callArm();
+if (owned.details?.ok !== true || !owned.details.message.includes("started Pi extension arm child")) {
+  throw new Error(`owned lock did not arm: ${JSON.stringify(owned.details)}`);
+}
+for (let i = 0; i < 50 && !existsSync(process.env.FM_ARM_LOG); i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 20));
+}
+if (!existsSync(process.env.FM_ARM_LOG)) throw new Error("owned lock did not run the watcher arm");
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "Pi watcher arm must distinguish owned, live-other, and missing or dead session locks"
+  [ -z "$out" ] || fail "Pi lock-ownership arm test printed output: $out"
+  pass "Pi watcher arm distinguishes all session lock ownership states"
 }
 
 test_pi_process_exit_cleanup_listener_lifecycle() {
@@ -739,6 +824,7 @@ test_tracked_extension_present_and_self_hashing
 test_spawn_template_mentions_pi_watch_placeholder
 test_pi_extension_reports_external_healthy_watcher
 test_pi_tool_returns_agent_tool_result
+test_pi_arm_distinguishes_session_lock_ownership
 test_pi_process_exit_cleanup_listener_lifecycle
 test_pi_process_exit_cleanup_stops_arm_child
 test_opencode_primary_watch_plugin_static_wiring

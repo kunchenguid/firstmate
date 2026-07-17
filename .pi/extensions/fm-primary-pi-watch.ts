@@ -60,10 +60,6 @@ function lockOwnership(): LockOwnership {
   return pidAlive(lockPid) ? "other" : "missing";
 }
 
-function sessionOwnsLock(): boolean {
-  return lockOwnership() === "owned";
-}
-
 function markLoaded(): void {
   if (lockOwnership() === "other") return;
   mkdirSync(state, { recursive: true });
@@ -104,7 +100,14 @@ export default function (pi: ExtensionAPI) {
   }
 
   function startArm(): ArmResult {
-    if (!sessionOwnsLock()) return { ok: false, message: "watcher: read-only - session lock is held by another firstmate session" };
+    const ownership = lockOwnership();
+    if (ownership === "other") return { ok: false, message: "watcher: read-only - session lock is held by another firstmate session" };
+    if (ownership === "missing") {
+      return {
+        ok: false,
+        message: "watcher: not armed - no live session holds the lock; run bin/fm-session-start.sh to reclaim it, then call fm_watch_arm_pi to re-arm",
+      };
+    }
     markLoaded();
     if (child) return { ok: true, message: "watcher: healthy - Pi extension already has an arm child" };
     const id = ++seq;
