@@ -174,6 +174,11 @@ fm_active_wait_stop() {
     [ -z "$pgid" ] || kill -KILL -- "-$pgid" 2>/dev/null || true
     [ -z "$pid" ] || kill -KILL "$pid" 2>/dev/null || true
     [ -z "$pid" ] || wait "$pid" 2>/dev/null || true
+    i=0
+    while [ -n "$pgid" ] && kill -0 -- "-$pgid" 2>/dev/null && [ "$i" -lt 100 ]; do
+      sleep 0.01
+      i=$((i + 1))
+    done
     if [ -n "$pgid" ] && kill -0 -- "-$pgid" 2>/dev/null; then
       rc=1
     fi
