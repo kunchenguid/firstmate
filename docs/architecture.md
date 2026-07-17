@@ -16,6 +16,7 @@ No-verb wakes, such as `working:` notes and bare turn-ended signals, are benign 
 A crew that declares `paused:` for a known external wait is separately absorbed while idle and re-surfaced only on the longer pause cadence, rather than being treated as a possible wedge.
 For an ordinary crew that has stopped, the normal-mode watcher first surfaces one stale wake, then applies that same cadence to an unchanged `paused:` or durable `captain-held` endpoint only when the backend confidently reports its agent dead.
 Live or inconclusive liveness remains fail-open at that initial surface, and the secondmate idle-endpoint exemption is unchanged.
+A paused-declared crew whose run then finishes surfaces its stale pane once; when the authoritative current state confirms a terminal outcome - done (e.g. a PR raised, monitoring for merge/close) or parked at a gate - later polls re-check it on that same long pause cadence instead of re-surfacing every poll, with the current-state read itself throttled to first sight per `FM_STALE_ESCALATE_SECS` window.
 Its initial normal-mode status signal still surfaces through the no-verb path, while away mode self-handles that routine signal and owns the later recheck.
 Fresh stale panes use the same current-state read before trusting the status log, so an active run or busy pane outranks an old captain-relevant status-log line left behind before validation.
 No-change heartbeats are also benign.
