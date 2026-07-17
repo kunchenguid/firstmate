@@ -6,6 +6,7 @@ When this session owns supervision and away mode is not active:
 3. On `session_start`, the watcher extension first requires `bin/fm-primary-scope.sh` to identify a main or valid secondmate primary home, then reads ownership through `bin/fm-lock.sh ownership`.
    A missing or dead lock is reacquired only through `bin/fm-lock.sh`, ownership is read again, and supervision starts only after the result is `owned`.
    A verified live other owner remains unchanged and the extension refuses to arm.
+   Any malformed or unclassifiable lock state, failed acquisition, or post-acquisition result other than `owned` fails closed without arming.
    When `state/.afk` exists, lock recovery still completes but the extension does not start or restart a watcher because the sub-supervisor owns supervision.
    If away mode begins after the extension has armed, its direct flag monitor stops that owned arm child and suppresses direct Pi wake delivery during the handoff.
    If the AFK launch transaction rolls the flag back, the extension restores normal watcher supervision automatically.
