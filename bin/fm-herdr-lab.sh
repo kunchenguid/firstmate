@@ -11,6 +11,8 @@
 #   fm-herdr-lab.sh teardown <session>
 #
 # Session names must begin with "fm-lab-" and can never be "default".
+# The name command sanitizes the label, caps it at 16 characters, and appends
+# process/random suffixes to keep generated socket paths short.
 # Every Herdr call made here carries a trailing --session <session>.
 # The run command rejects caller-supplied --session flags, any leading option
 # before the subcommand, all session lifecycle operations, and every server
