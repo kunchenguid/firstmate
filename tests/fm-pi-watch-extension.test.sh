@@ -98,7 +98,7 @@ test_tracked_extension_present_and_self_hashing() {
   assert_contains "$text" "const lockScript = \`\${fmRoot}/bin/fm-lock.sh\`" "tracked extension does not resolve the production lock owner"
   assert_contains "$text" "const scopeScript = \`\${fmRoot}/bin/fm-primary-scope.sh\`" "tracked extension does not resolve the shared primary scope owner"
   assert_contains "$text" 'FM_ROOT_OVERRIDE: root' "tracked extension does not scope the extension checkout independently of inherited supervisor paths"
-  assert_contains "$text" 'if (!isPrimaryHome())' "tracked extension does not fail closed outside a primary home"
+  assert_contains "$text" 'if (!primaryHome)' "tracked extension does not fail closed outside a primary home"
   assert_contains "$text" 'type LockOwnership = "owned" | "missing" | "dead" | "other" | "malformed" | "unknown"' "tracked extension does not preserve the lock owner states"
   assert_contains "$text" 'spawnSync(lockScript, ["ownership"]' "tracked extension does not use the lock owner's read-only API"
   assert_contains "$text" 'if (ownership === "missing" || ownership === "dead")' "tracked extension does not restrict acquisition to reclaimable states"
@@ -111,8 +111,11 @@ test_tracked_extension_present_and_self_hashing() {
   assert_contains "$text" 'awayMonitor = setInterval(awayMonitorListener, 50)' "tracked extension does not poll the away flag directly"
   assert_contains "$text" 'handleAwayMonitorFailure(error);' "tracked extension does not fail closed on away-monitor errors"
   assert_contains "$text" 'scheduleAwayMonitorRetry();' "tracked extension does not retry away-monitor setup failures"
+  assert_contains "$text" 'awayMonitorRetryDelayMs = Math.min(awayMonitorRetryDelayMs * 2, 30000)' "tracked extension does not cap exponential monitor retry backoff"
+  assert_contains "$text" 'const primaryHome = isPrimaryHome();' "tracked extension does not cache invariant primary scope"
   assert_contains "$text" 'if (!awayMonitor)' "tracked extension can arm before away-mode monitoring is active"
   assert_contains "$text" 'if (!awayMonitor || existsSync(awayFlag)) return;' "tracked extension can still route a wake without confirmed normal-mode ownership"
+  assert_contains "$text" 'await sendWakeSafely' "tracked extension does not contain rejected Pi wake delivery"
   assert_contains "$text" 'sub-supervisor owns supervision' "tracked extension does not report away-mode ownership"
   assert_not_contains "$text" 'function parentPid' "tracked extension kept a duplicate ancestry classifier"
   assert_not_contains "$text" 'function pidAlive' "tracked extension kept a duplicate holder-liveness classifier"
@@ -495,26 +498,38 @@ EOF
 }
 
 test_pi_extension_fails_closed_and_retries_away_monitor() {
-  local scenario repo home plugin arm_log stop_log fail_flag out status
-  for scenario in failure retry runtime; do
+  local scenario repo home plugin arm_log stop_log fail_flag scope_log attempts_log fail_second out status
+  for scenario in failure retry runtime delivery; do
     repo="$TMP_ROOT/pi-away-monitor-$scenario-root"
     home="$TMP_ROOT/pi-away-monitor-$scenario-home"
     arm_log="$TMP_ROOT/pi-away-monitor-$scenario-arm.log"
     stop_log="$TMP_ROOT/pi-away-monitor-$scenario-stop.log"
     fail_flag="$TMP_ROOT/pi-away-monitor-$scenario-fail"
+    scope_log="$TMP_ROOT/pi-away-monitor-$scenario-scope.log"
+    attempts_log="$TMP_ROOT/pi-away-monitor-$scenario-attempts.log"
+    fail_second=0
+    [ "$scenario" = delivery ] && fail_second=1
     mkdir -p "$repo/bin" "$home/state" "$home/config"
     install_pi_watch_extension_fixture "$repo"
     plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+    mv "$repo/bin/fm-primary-scope.sh" "$repo/bin/fm-primary-scope-real.sh"
+    cat > "$repo/bin/fm-primary-scope.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'scope\n' >> "${FM_SCOPE_LOG:?}"
+exec "$(dirname "$0")/fm-primary-scope-real.sh"
+SH
     cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
 printf 'arm\n' >> "${FM_ARM_LOG:?}"
+count=$(wc -l < "$FM_ARM_LOG" | tr -d ' ')
+if [ "${FM_FAIL_SECOND_ARM:-0}" = 1 ] && [ "$count" -gt 1 ]; then exit 9; fi
 trap 'printf "stopped\n" >> "$FM_STOP_LOG"; exit 0' TERM INT
 printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
 while :; do sleep 1; done
 SH
-    chmod +x "$repo/bin/fm-watch-arm.sh"
-    out=$(CASE="$scenario" PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$arm_log" FM_STOP_LOG="$stop_log" FM_MONITOR_FAIL="$fail_flag" node --input-type=module 2>&1 <<'EOF'
-import fs, { existsSync, writeFileSync } from "node:fs";
+    chmod +x "$repo/bin/fm-primary-scope.sh" "$repo/bin/fm-watch-arm.sh"
+    out=$(CASE="$scenario" PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$arm_log" FM_STOP_LOG="$stop_log" FM_MONITOR_FAIL="$fail_flag" FM_SCOPE_LOG="$scope_log" FM_MONITOR_ATTEMPTS="$attempts_log" FM_FAIL_SECOND_ARM="$fail_second" node --input-type=module 2>&1 <<'EOF'
+import fs, { existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
 import { pathToFileURL } from "node:url";
 
@@ -522,10 +537,11 @@ const originalStatSync = fs.statSync;
 let attempts = 0;
 fs.statSync = (...args) => {
   attempts += 1;
+  writeFileSync(process.env.FM_MONITOR_ATTEMPTS, `${Date.now()}\n`, { flag: "a" });
   if (process.env.CASE === "failure" || (process.env.CASE === "retry" && attempts === 1)) {
     throw Object.assign(new Error("fixture monitor failure"), { code: "EIO" });
   }
-  if (process.env.CASE === "runtime" && existsSync(process.env.FM_MONITOR_FAIL)) {
+  if (["runtime", "delivery"].includes(process.env.CASE) && existsSync(process.env.FM_MONITOR_FAIL)) {
     throw Object.assign(new Error("fixture runtime monitor failure"), { code: "EIO" });
   }
   return originalStatSync(...args);
@@ -535,6 +551,10 @@ syncBuiltinESMExports();
 const handlers = new Map();
 const notifications = [];
 const prompts = [];
+const unhandled = [];
+process.on("unhandledRejection", (error) => {
+  unhandled.push(error);
+});
 const pi = {
   on(event, handler) {
     handlers.set(event, handler);
@@ -542,6 +562,7 @@ const pi = {
   registerCommand() {},
   registerTool() {},
   sendUserMessage: async (message) => {
+    if (process.env.CASE === "delivery") throw new Error("fixture delivery rejection");
     prompts.push(message);
   },
 };
@@ -549,10 +570,10 @@ writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 mod.default(pi);
 const marker = `${process.env.FM_HOME}/state/.pi-watch-extension-loaded`;
-if (process.env.CASE !== "runtime" && existsSync(marker)) {
+if (!["runtime", "delivery"].includes(process.env.CASE) && existsSync(marker)) {
   throw new Error("extension advertised loaded before away monitoring was active");
 }
-if (process.env.CASE === "runtime" && !existsSync(marker)) {
+if (["runtime", "delivery"].includes(process.env.CASE) && !existsSync(marker)) {
   throw new Error("runtime monitor fixture did not start healthy");
 }
 if (process.env.CASE === "retry") {
@@ -569,16 +590,19 @@ await handlers.get("session_start")?.({ type: "session_start" }, {
   },
 });
 if (process.env.CASE === "failure") {
+  await new Promise((resolve) => setTimeout(resolve, 900));
   if (existsSync(marker) || existsSync(process.env.FM_ARM_LOG)) {
     throw new Error("monitor failure advertised or armed the Pi watcher");
   }
   if (!notifications.some((message) => message.includes("away-mode state monitor unavailable"))) {
     throw new Error(`monitor failure was not reported: ${notifications.join(" | ")}`);
   }
+  const monitorAttempts = readFileSync(process.env.FM_MONITOR_ATTEMPTS, "utf8").trim().split(/\n/).length;
+  if (monitorAttempts > 4) throw new Error(`persistent monitor failure retried ${monitorAttempts} times without backoff`);
 } else if (process.env.CASE === "retry") {
   if (!existsSync(process.env.FM_ARM_LOG)) throw new Error("recovered away monitor did not permit watcher arming");
   if (notifications.length > 0) throw new Error(`monitor retry notified unexpectedly: ${notifications.join(" | ")}`);
-} else {
+} else if (process.env.CASE === "runtime") {
   if (!existsSync(process.env.FM_ARM_LOG)) throw new Error("runtime monitor fixture did not arm supervision");
   writeFileSync(process.env.FM_MONITOR_FAIL, "fail\n");
   writeFileSync(`${process.env.FM_HOME}/state/.afk`, "away\n");
@@ -587,7 +611,26 @@ if (process.env.CASE === "failure") {
   }
   if (!existsSync(process.env.FM_STOP_LOG)) throw new Error("runtime monitor failure did not stop the active arm");
   if (prompts.length > 0) throw new Error(`runtime monitor failure routed a wake into Pi: ${prompts.join(" | ")}`);
+} else {
+  if (!existsSync(process.env.FM_ARM_LOG)) throw new Error("delivery fixture did not arm supervision");
+  writeFileSync(process.env.FM_MONITOR_FAIL, "fail\n");
+  for (let i = 0; i < 100 && !existsSync(process.env.FM_STOP_LOG); i += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  if (!existsSync(process.env.FM_STOP_LOG)) throw new Error("delivery fixture did not enter monitor recovery");
+  unlinkSync(process.env.FM_MONITOR_FAIL);
+  for (let i = 0; i < 100; i += 1) {
+    const count = readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split(/\n/).length;
+    if (count === 2) break;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  const deliveryArmCount = readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split(/\n/).length;
+  if (deliveryArmCount !== 2) throw new Error(`delivery recovery made ${deliveryArmCount} arm attempts`);
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  if (unhandled.length > 0) throw new Error(`monitor recovery leaked an unhandled rejection: ${unhandled.join(" | ")}`);
 }
+const scopeCount = readFileSync(process.env.FM_SCOPE_LOG, "utf8").trim().split(/\n/).length;
+if (scopeCount !== 1) throw new Error(`away-monitor recovery rechecked primary scope ${scopeCount} times`);
 await handlers.get("session_shutdown")?.({ type: "session_shutdown" }, {});
 EOF
     )
@@ -595,7 +638,7 @@ EOF
     expect_code 0 "$status" "Pi watcher must handle away-monitor $scenario fail closed"
     [ -z "$out" ] || fail "Pi away-monitor $scenario test printed output: $out"
   done
-  pass "Pi watcher fails closed and retries away-monitor failures"
+  pass "Pi watcher contains delivery rejection and backs off monitor failures"
 }
 
 test_pi_resume_session_recovers_only_reclaimable_locks() {

@@ -70,11 +70,6 @@ function markLoadedForPrimary(): void {
   writeFileSync(marker, `${extensionVersion}\n${process.pid}\n`);
 }
 
-function markLoaded(): void {
-  if (!isPrimaryHome()) return;
-  markLoadedForPrimary();
-}
-
 function actionableLine(output: string): string {
   const lines = output.split(/\r?\n/);
   return lines.find((line) => /^(signal:|stale:|check:|heartbeat($|:))/.test(line)) || "";
@@ -91,9 +86,11 @@ function failureLine(stdout: string, stderr: string, code: number | null): strin
 }
 
 export default function (pi: ExtensionAPI) {
+  const primaryHome = isPrimaryHome();
   let awayMonitor: ReturnType<typeof setInterval> | null = null;
   let awayMonitorError = "";
   let awayMonitorRetry: ReturnType<typeof setTimeout> | null = null;
+  let awayMonitorRetryDelayMs = 250;
   let awayObserved = existsSync(awayFlag);
   let sessionActive = false;
   let shuttingDown = false;
@@ -130,7 +127,7 @@ export default function (pi: ExtensionAPI) {
     awayObserved = false;
     if (!sessionActive || shuttingDown || !awayMonitor) return;
     const result = await startArm();
-    if (!result.ok) await sendWake(result.message);
+    if (!result.ok) await sendWakeSafely(result.message);
   }
 
   const awayMonitorListener = () => {
@@ -151,16 +148,18 @@ export default function (pi: ExtensionAPI) {
 
   function scheduleAwayMonitorRetry(): void {
     if (awayMonitorRetry || shuttingDown) return;
+    const delay = awayMonitorRetryDelayMs;
+    awayMonitorRetryDelayMs = Math.min(awayMonitorRetryDelayMs * 2, 30000);
     awayMonitorRetry = setTimeout(() => {
       awayMonitorRetry = null;
       startAwayMonitor();
-    }, 250);
+    }, delay);
     awayMonitorRetry.unref();
   }
 
   function startAwayMonitor(): boolean {
     if (awayMonitor) return true;
-    if (!isPrimaryHome()) return false;
+    if (!primaryHome) return false;
     let awayActive: boolean;
     try {
       awayActive = readAwayFlag();
@@ -171,20 +170,16 @@ export default function (pi: ExtensionAPI) {
       return false;
     }
     awayMonitorError = "";
+    awayMonitorRetryDelayMs = 250;
     if (awayMonitorRetry) {
       clearTimeout(awayMonitorRetry);
       awayMonitorRetry = null;
     }
     awayObserved = awayActive;
     if (awayObserved) stopArm();
-    markLoaded();
+    markLoadedForPrimary();
     if (sessionActive && !awayObserved && !child) {
-      void startArm().then((result) => {
-        if (!result.ok) void sendWake(result.message);
-      }).catch((error) => {
-        const message = error instanceof Error ? error.message : String(error);
-        void sendWake(`watcher: FAILED - Pi arm recovery after monitor restart failed: ${message}`);
-      });
+      void recoverArmAfterMonitor();
     }
     return true;
   }
@@ -196,6 +191,7 @@ export default function (pi: ExtensionAPI) {
       clearTimeout(awayMonitorRetry);
       awayMonitorRetry = null;
     }
+    awayMonitorRetryDelayMs = 250;
   }
 
   const cleanupOnProcessExit = () => {
@@ -214,8 +210,26 @@ export default function (pi: ExtensionAPI) {
     );
   }
 
+  async function sendWakeSafely(message: string): Promise<void> {
+    try {
+      await sendWake(message);
+    } catch {
+      return;
+    }
+  }
+
+  async function recoverArmAfterMonitor(): Promise<void> {
+    try {
+      const result = await startArm();
+      if (!result.ok) await sendWakeSafely(result.message);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      await sendWakeSafely(`watcher: FAILED - Pi arm recovery after monitor restart failed: ${message}`);
+    }
+  }
+
   async function startArm(): Promise<ArmResult> {
-    if (!isPrimaryHome()) {
+    if (!primaryHome) {
       return { ok: false, message: "watcher: inactive - current checkout is not a primary firstmate home" };
     }
     if (!awayMonitor) {
@@ -297,11 +311,7 @@ export default function (pi: ExtensionAPI) {
           message: failure || `watcher: FAILED - Pi extension arm child ${id} exited before confirming watcher readiness`,
         });
         if (intentionallyStopped || (!reason && !failure)) return;
-        try {
-          await sendWake(reason || failure);
-        } catch {
-          // Pi owns delivery errors; fail open so the extension never wedges the session.
-        }
+        await sendWakeSafely(reason || failure);
       });
       armChild.on("error", async (error: Error) => {
         if (child === armChild) {
@@ -311,11 +321,7 @@ export default function (pi: ExtensionAPI) {
         }
         const failure = `watcher: FAILED - Pi extension arm child ${id} failed: ${error.message}`;
         settle({ ok: false, message: failure });
-        try {
-          await sendWake(failure);
-        } catch {
-          // Fail open.
-        }
+        await sendWakeSafely(failure);
       });
     });
     armReadiness = readiness;
@@ -323,7 +329,7 @@ export default function (pi: ExtensionAPI) {
   }
 
   pi.on?.("session_start", async (_event, ctx) => {
-    if (!isPrimaryHome()) return;
+    if (!primaryHome) return;
     shuttingDown = false;
     sessionActive = true;
     startAwayMonitor();
