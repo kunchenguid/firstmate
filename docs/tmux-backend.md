@@ -123,6 +123,21 @@ The classifier deliberately reports `unknown` for `node`/`python`/`python3` rath
 Practical effect: a dead `pi` secondmate is not auto-healed by the liveness sweep today; it is reported as `skipped: liveness probe inconclusive` instead, which still surfaces it for a human to act on.
 Resolving this would need either a `pi`-specific env marker inspectable from outside the process (mirroring `PI_CODING_AGENT=true`, which `bin/fm-harness.sh` already uses for self-detection but which is not readable from a different process without deeper introspection) or accepting the argument-inspection fragility - not attempted here.
 
+## Session-target resolution
+
+Bare session names are ambiguous to tmux, so the adapter pins every session-name target it composes (verified 2026-07-17, tmux 3.6, on a private `-L` socket).
+
+A bare target-window session name that is numeric is parsed as a window INDEX in the current session, not a session name.
+From a session literally named `1` with window index 1 occupied, `tmux new-window -d -t 1` fails with `create window failed: index 1 in use` - the exact failure observed live on 2026-07-16, where the first concurrent spawn filled index 1 and the second one failed.
+A trailing colon (`-t '1:'`) pins session-name parsing and appends at the next free index: two consecutive `tmux new-window -dP -F '#{window_id}' -t '1:'` calls returned `@2` and `@3`.
+
+A bare session name with no exact match falls back to PREFIX matching, then fnmatch.
+With only `firstmate2` present, `tmux has-session -t firstmate` exited 0, and with only `fm-afk-daemon-x` present, `tmux kill-session -t fm-afk` killed it.
+The `=` prefix (`-t '=firstmate'`) forces exact-name resolution and instead failed with `can't find session: firstmate` (exit 1); the compound form `-t '=1:'` combines both pins and worked for `new-window` and `list-windows` alike.
+
+`bin/backends/tmux.sh` therefore targets sessions as `=$ses` / `=$ses:`, and `bin/fm-afk-launch.sh` resolves its recorded daemon session with `=`.
+`tests/fm-backend-tmux-smoke.test.sh` (numeric session name, prefix-sibling container-ensure) and `tests/fm-afk-launch.test.sh` (prefix-sibling close/liveness) pin both behaviors against a real tmux.
+
 ## Limitations
 
 None specific to tmux for the reference path itself - it is the fully verified reference backend, while Orca and cmux are the backends without secondmate support.

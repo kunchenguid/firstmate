@@ -57,12 +57,17 @@ fm_backend_tmux_send_text_submit() {  # <target> <text> <retries> <enter-sleep> 
 # fm_backend_tmux_container_ensure: reuse the current tmux session when
 # firstmate itself runs inside tmux, else ensure a dedicated detached
 # "firstmate" session exists. Mirrors fm-spawn.sh's container-ensure block;
-# prints the resolved session name.
+# prints the resolved session name. The probe pins exact-name matching with
+# "=": a bare session target falls back to PREFIX matching (verified tmux 3.6,
+# docs/tmux-backend.md "Session-target resolution"), so with only a
+# "firstmate2"-style session present the bare probe would succeed, the real
+# "firstmate" session would never be created, and every task window would land
+# in the stranger session.
 fm_backend_tmux_container_ensure() {
   if [ -n "${TMUX:-}" ]; then
     tmux display-message -p '#S'
   else
-    tmux has-session -t firstmate 2>/dev/null || tmux new-session -d -s firstmate
+    tmux has-session -t "=firstmate" 2>/dev/null || tmux new-session -d -s firstmate
     printf 'firstmate'
   fi
 }
@@ -77,6 +82,16 @@ fm_backend_tmux_container_ensure() {
 #   - Capture a STABLE window id with -P -F '#{window_id}', and let tmux append
 #     at the next free index by targeting the session with a trailing colon
 #     ("$ses:"), so a non-default base-index (e.g. base-index 1) cannot collide.
+#     The colon also pins session-NAME parsing: a bare numeric target like
+#     -t "1" is parsed as a window INDEX in the current session, which made the
+#     second concurrent spawn from a session literally named "1" fail with
+#     "create window failed: index 1 in use" (observed live 2026-07-16).
+#   - Pin exact session-name matching with "=": a bare session name with no
+#     exact match falls back to PREFIX matching (verified tmux 3.6,
+#     docs/tmux-backend.md "Session-target resolution"), which would silently
+#     check for duplicates in - and create the window in - a stranger session
+#     whose name merely extends <session>. With "=" both calls fail loudly
+#     instead.
 #   - PIN the window name by disabling automatic-rename and allow-rename on the
 #     new window: the captain's tmux may rename the window away from fm-<id> once
 #     treehouse cd's into the worktree, which would break name-based targeting.
@@ -84,11 +99,11 @@ fm_backend_tmux_container_ensure() {
 # lost, so worktree discovery cannot fall back to the active client's window.
 fm_backend_tmux_create_task() {  # <session> <window-name> <proj-abs> -> prints window id
   local ses=$1 wname=$2 proj_abs=$3 wid
-  if tmux list-windows -t "$ses" -F '#{window_name}' | grep -qx "$wname"; then
+  if tmux list-windows -t "=$ses" -F '#{window_name}' | grep -qx "$wname"; then
     echo "error: window $ses:$wname already exists" >&2
     return 1
   fi
-  wid=$(tmux new-window -dP -F '#{window_id}' -t "$ses:" -n "$wname" -c "$proj_abs") || return 1
+  wid=$(tmux new-window -dP -F '#{window_id}' -t "=$ses:" -n "$wname" -c "$proj_abs") || return 1
   tmux set-window-option -t "$wid" automatic-rename off 2>/dev/null || true
   tmux set-window-option -t "$wid" allow-rename off 2>/dev/null || true
   printf '%s\n' "$wid"

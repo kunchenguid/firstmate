@@ -166,5 +166,48 @@ fi
 fm_backend_tmux_kill "$TARGET" || fail "fm_backend_tmux_kill on an already-dead target must stay best-effort (never fail)"
 pass "real tmux: fm_backend_tmux_kill removes the window and is idempotent/best-effort"
 
+# --- numeric session name: a bare -t "$ses" parses "1" as a window INDEX -----
+# Regression (observed live 2026-07-16): with firstmate inside a tmux session
+# literally named "1" and window index 1 occupied, the old bare-name form
+# `new-window -d -t "$ses"` resolved "1" as a window INDEX in the current
+# session, so the first spawn filled index 1 and every further concurrent
+# spawn failed with "create window failed: index 1 in use". The "=$ses:"
+# target pins exact session-NAME parsing and appends at the next free index,
+# so consecutive creations must all succeed. Kill the smoke session first so
+# "1" is the server's only (and therefore current) session, matching the live
+# failure's resolution context.
+tmux kill-session -t "=$SESSION" 2>/dev/null || true
+NUMSES="1"
+tmux new-session -d -s "$NUMSES" -x 200 -y 50 \
+  || fail "real tmux: could not create a session literally named '1'"
+tmux new-window -d -t "=$NUMSES:" -n occupier \
+  || fail "real tmux: could not occupy window index 1 of session '1'"
+fm_backend_tmux_create_task "$NUMSES" "fm-num-a" "$HOME" >/dev/null \
+  || fail "numeric session: first fm_backend_tmux_create_task failed"
+fm_backend_tmux_create_task "$NUMSES" "fm-num-b" "$HOME" >/dev/null \
+  || fail "numeric session: second fm_backend_tmux_create_task failed (bare -t parsed the session name as a window index?)"
+for w in fm-num-a fm-num-b; do
+  tmux list-windows -t "=$NUMSES" -F '#{window_name}' | grep -qx "$w" \
+    || fail "numeric session: window $w did not land in session '$NUMSES'"
+done
+pass "real tmux: two consecutive task creations succeed in a session literally named '1' with index 1 occupied"
+
+# --- exact-match session resolution: bare session names PREFIX-match ---------
+# tmux resolves an unqualified session target by exact name, then prefix, then
+# fnmatch: with only "firstmate2" present, a bare `has-session -t firstmate`
+# succeeds, container-ensure would never create the real "firstmate" session,
+# and every task window would land in the stranger session. The "=" probe pins
+# exact-name matching, so the dedicated session must be created alongside the
+# prefix-sibling. TMUX is unset in a subshell to force the detached-session
+# branch regardless of where the test itself runs.
+tmux new-session -d -s firstmate2 -x 200 -y 50 \
+  || fail "real tmux: could not create the decoy session firstmate2"
+ses=$( (unset TMUX; fm_backend_tmux_container_ensure) ) \
+  || fail "fm_backend_tmux_container_ensure failed next to a prefix-sibling session"
+[ "$ses" = firstmate ] || fail "fm_backend_tmux_container_ensure printed '$ses', expected 'firstmate'"
+tmux has-session -t "=firstmate" 2>/dev/null \
+  || fail "container-ensure did not create the exact 'firstmate' session (bare probe prefix-matched 'firstmate2'?)"
+pass "real tmux: fm_backend_tmux_container_ensure creates the exact 'firstmate' session even when a prefix-sibling exists"
+
 cleanup_all
 trap - EXIT
