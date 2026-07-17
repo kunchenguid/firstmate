@@ -52,7 +52,7 @@ The shared no-mistakes gate refusal used by `fm-spawn.sh`, `fm-send.sh`, and `fm
 | `fm-supervise-daemon.sh` | Presence-gated away-mode sub-supervisor: self-handle routine wakes, escalate batched digests, alert on failed delivery |
 | `fm-crew-state.sh`       | Print one deterministic current-state line for a crew                                |
 | `fm-tangle-lib.sh`       | Shared default-branch resolution and primary-checkout tangle classification          |
-| `fm-supervision-lib.sh`  | Shared in-flight-work-without-fresh-watcher-beacon predicate                         |
+| `fm-supervision-lib.sh`  | Shared supervision-required-without-fresh-watcher-beacon predicate (in-flight work or an enabled topic board) |
 | `fm-ff-lib.sh`           | Shared guarded fast-forward helper for origin pulls and local secondmate syncs       |
 | `fm-lock-lib.sh`         | Shared "is this git lock provably abandoned?" proof used by teardown and fleet-sync   |
 | `fm-config-inherit-lib.sh` | Shared primary-to-secondmate inherited local-material propagation                  |
@@ -80,3 +80,8 @@ The shared no-mistakes gate refusal used by `fm-spawn.sh`, `fm-send.sh`, and `fm
 | `fm-x-dismiss.sh`        | Dismiss a skipped X-mode mention at the relay without replying                       |
 | `fm-x-link.sh`           | Link a spawned task to its originating X-mode mention in task meta                   |
 | `fm-x-followup.sh`       | Detect, post, and cap completion follow-ups for an X-mode-linked task                |
+| `fm-topic-lib.sh`        | Shared paths, validation, atomic persistence, and item lookup for the Telegram topic board |
+| `fm-topic-listener.sh`   | Long-poll Telegram with the dedicated topic-board bot and durably queue captain messages before advancing the offset |
+| `fm-topic-inbox.sh`      | Inspect and claim durable Telegram topic-board inbox items without deleting them     |
+| `fm-topic-reply.sh`      | Send an idempotently keyed reply into an item's originating Telegram topic and archive it after its initial answer |
+| `fm-topic-service.sh`    | Install and manage the persistent systemd user service for the Telegram topic-board listener |
