@@ -1,0 +1,4 @@
+interface:
+  display_name: "Beautify GitHub README"
+  short_description: "Redesign READMEs or create SVG and animated GIF assets"
+  default_prompt: "Use $beautify-github-readme to improve a whole README or create visual assets; ask which scope I want, keep assets static by default, and add GIF motion only after opt-in."
