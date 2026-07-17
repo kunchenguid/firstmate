@@ -462,6 +462,40 @@ unit_native_entry_preserves_prepared_state() {
   rm -rf "$st"
 }
 
+unit_gui_hosted_refuses_start() {
+  local st out status
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-gui-start.XXXXXX")
+  mkdir -p "$st/state"
+  out=$(TMUX_PANE='' HERDR_ENV='' HERDR_PANE_ID='' __CFBundleIdentifier=com.anthropic.claudefordesktop \
+    FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_SUPERVISOR_TARGET='' FM_SUPERVISOR_BACKEND='' \
+    "$LAUNCH" start 2>&1)
+  status=$?
+  if [ "$status" -ne 0 ] && [ ! -e "$st/state/.afk" ] && [ ! -e "$st/state/.afk-daemon-terminal" ]; then
+    pass "start: refuses on a detected GUI-hosted primary, no state or terminal created"
+  else
+    fail "start: should refuse without creating state/a terminal on GUI-hosted detection (status=$status out=$out)"
+  fi
+  printf '%s' "$out" | grep -qi "GUI-hosted" || fail "start: refusal should name GUI-hosted primary: $out"
+  rm -rf "$st"
+}
+
+unit_gui_hosted_refuses_start_native() {
+  local st out status
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-gui-native.XXXXXX")
+  mkdir -p "$st/state"
+  out=$(TMUX_PANE='' HERDR_ENV='' HERDR_PANE_ID='' __CFBundleIdentifier=com.anthropic.claudefordesktop \
+    FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_SUPERVISOR_TARGET='' FM_SUPERVISOR_BACKEND='' \
+    "$LAUNCH" start-native 2>&1)
+  status=$?
+  if [ "$status" -ne 0 ] && [ ! -e "$st/state/.afk" ]; then
+    pass "start-native: refuses on a detected GUI-hosted primary, no lifecycle state created"
+  else
+    fail "start-native: should refuse without creating state on GUI-hosted detection (status=$status out=$out)"
+  fi
+  printf '%s' "$out" | grep -qi "GUI-hosted" || fail "start-native: refusal should name GUI-hosted primary: $out"
+  rm -rf "$st"
+}
+
 unit_close_failure_preserves_record() {
   local st
   st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-close-fail.XXXXXX")
@@ -877,6 +911,8 @@ unit_readiness_failure_preserves_unconfirmed_record
 unit_tmux_absence_distinguishes_probe_failure
 unit_native_lifecycle
 unit_native_entry_preserves_prepared_state
+unit_gui_hosted_refuses_start
+unit_gui_hosted_refuses_start_native
 unit_close_failure_preserves_record
 unit_record_publication_atomic
 unit_malformed_record_fails_closed

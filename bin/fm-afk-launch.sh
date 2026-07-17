@@ -441,6 +441,14 @@ fm_afk_launch_start() {
     fm_afk_launch_log "return catch-up is still pending; run bin/fm-afk-return.sh check before re-entering away mode"
     return 1
   fi
+  # Refuse loudly instead of guessing a pane when firstmate looks GUI-hosted
+  # (Claude Desktop): there is no tmux/herdr pane to inject escalations into
+  # (data/learnings.md "afk daemon does NOT work when firstmate is GUI-hosted").
+  if [ -z "${FM_SUPERVISOR_TARGET:-}" ] && [ -z "${FM_SUPERVISOR_BACKEND:-}" ] \
+      && fm_supervisor_gui_hosted; then
+    fm_afk_launch_log "refusing to start the away-mode daemon: firstmate looks GUI-hosted (Claude Desktop), which has no tmux/herdr pane to inject escalations into; keep the always-on watcher running instead of /afk"
+    return 1
+  fi
   # Capture the captain pane FIRST, before creating anything.
   captain_target=$(discover_supervisor_target) || {
     fm_afk_launch_log "could not resolve the captain supervisor pane (set FM_SUPERVISOR_TARGET)"; return 1; }
@@ -509,6 +517,15 @@ fm_afk_launch_start_native() {
   mkdir -p "$FM_AFK_LAUNCH_STATE" || return 1
   if [ -e "$FM_AFK_LAUNCH_STATE/.afk-return-catchup" ]; then
     fm_afk_launch_log "return catch-up is still pending; run bin/fm-afk-return.sh check before re-entering away mode"
+    return 1
+  fi
+  # This path hands off to a harness-native background job that inherits this
+  # process's own env and auto-discovers the captain pane from it (see file
+  # header); refuse here too so a GUI-hosted primary fails loudly instead of
+  # spending that native job on a daemon that would guess a pane.
+  if [ -z "${FM_SUPERVISOR_TARGET:-}" ] && [ -z "${FM_SUPERVISOR_BACKEND:-}" ] \
+      && fm_supervisor_gui_hosted; then
+    fm_afk_launch_log "refusing to start the away-mode daemon: firstmate looks GUI-hosted (Claude Desktop), which has no tmux/herdr pane to inject escalations into; keep the always-on watcher running instead of /afk"
     return 1
   fi
   if daemon_lock_held_by_live_daemon; then

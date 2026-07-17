@@ -76,6 +76,13 @@ what**. "Away" never means "approves more." A PR ready for merge, a
 needs-decision finding, or anything destructive still waits for the captain's
 explicit word - the daemon just batches the notification.
 
+## Unsupported: GUI-hosted (Claude Desktop) primary
+
+The daemon injects escalations by `tmux send-keys`/herdr into the captain's pane, so it needs firstmate to actually run in a tmux or herdr pane.
+A firstmate running inside Claude Desktop's local-agent-mode is not a pane: `bin/fm-afk-launch.sh` (both `start` and `start-native`) and `bin/fm-supervise-daemon.sh` detect this via `fm_supervisor_gui_hosted` in `bin/fm-supervisor-target-lib.sh` (no `$TMUX_PANE`/herdr markers, plus Claude Desktop's `__CFBundleIdentifier`) and refuse to start rather than guess a pane that could resolve to an unrelated stale session and silently misdirect escalations (`data/learnings.md`).
+On refusal, do not retry with a different backend: stay on the normal always-on watcher, which already delivers wakes through Claude Code background-task completion instead of pane injection.
+An explicit `FM_SUPERVISOR_TARGET`/`FM_SUPERVISOR_BACKEND` still overrides the detection for a captain or test harness that knows the real pane.
+
 ## Sentinel marker contract
 
 The daemon prefixes every injection with `FM_INJECT_MARK` (U+2063 INVISIBLE SEPARATOR), which has no normal keyboard keystroke and survives terminal transport as UTF-8 text.

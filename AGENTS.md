@@ -353,6 +353,7 @@ The skill owns the daemon procedure; these safety facts remain inline:
 - Any other unmarked message means the captain returned; load `/afk`, run the return owner, and do not process that message as ordinary work until its durable catch-up gate clears.
 - Away mode never expands approval authority for merges, ask-user findings, destructive actions, irreversible actions, or security-sensitive choices.
 - Bias ambiguous input toward exit because a present captain takes precedence.
+- The daemon needs a real tmux/herdr pane to inject into; a GUI-hosted (Claude Desktop) primary has none, and launch refuses loudly rather than guessing one (`/afk` skill, "Unsupported: GUI-hosted (Claude Desktop) primary").
 
 ### Stuck-worker trigger
 

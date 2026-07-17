@@ -52,6 +52,25 @@ discover_supervisor_target() {
   return 1
 }
 
+# fm_supervisor_gui_hosted: true when firstmate itself looks like a Claude
+# Desktop local-agent-mode session rather than a tmux/herdr pane. Such a
+# session has no pane for the daemon to inject into: discover_supervisor_target
+# would fall through to FM_SUPERVISOR_TARGET_DEFAULT ("firstmate:0"), which is
+# only a guess and can accidentally resolve against an unrelated tmux session
+# of the same name, silently misdirecting escalations instead of refusing
+# (data/learnings.md "afk daemon does NOT work when firstmate is GUI-hosted").
+# Verified empirically 2026-07-16, mirroring the cmux bundle-id check
+# (docs/cmux-backend.md "Detection"): a Claude Desktop-launched `claude`
+# process carries no $TMUX_PANE and no herdr markers, but does carry
+# __CFBundleIdentifier=com.anthropic.claudefordesktop (macOS sets this on
+# every process an app bundle launches). An explicit FM_SUPERVISOR_TARGET or
+# FM_SUPERVISOR_BACKEND override, or a real tmux/herdr pane, always wins.
+fm_supervisor_gui_hosted() {
+  [ -n "${TMUX_PANE:-}" ] && return 1
+  [ "${HERDR_ENV:-}" = "1" ] && [ -n "${HERDR_PANE_ID:-}" ] && return 1
+  [ "${__CFBundleIdentifier:-}" = "com.anthropic.claudefordesktop" ]
+}
+
 # discover_supervisor_backend: resolve the supervisor pane's BACKEND, independent
 # of the target string so an explicit FM_SUPERVISOR_TARGET override still knows
 # which primitives (tmux vs herdr) to dispatch through. Priority mirrors

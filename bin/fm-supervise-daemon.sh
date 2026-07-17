@@ -1275,6 +1275,19 @@ fm_super_main() {
   echo "$$" > "$PIDFILE"
   fm_pid_identity "${BASHPID:-$$}" > "$LOCK/pid-identity" 2>/dev/null || true
 
+  # --- refuse loudly on a GUI-hosted primary instead of guessing a pane -----
+  # An explicit FM_SUPERVISOR_TARGET/FM_SUPERVISOR_BACKEND still wins (a
+  # captain or test harness that names a real pane knows better than this
+  # heuristic); only the auto-discover path is guarded.
+  if [ -z "${FM_SUPERVISOR_TARGET:-}" ] && [ -z "${FM_SUPERVISOR_BACKEND:-}" ] \
+      && fm_supervisor_gui_hosted; then
+    echo "error: firstmate looks GUI-hosted (Claude Desktop) - there is no tmux/herdr pane to inject escalations into, and guessing one risks silently misdirecting them; keep the always-on watcher running instead of the away-mode daemon (data/learnings.md), or set FM_SUPERVISOR_TARGET/FM_SUPERVISOR_BACKEND to override" >&2
+    log "startup failed: GUI-hosted primary detected, refusing to auto-discover a supervisor pane"
+    fm_lock_release "$LOCK" 2>/dev/null || true
+    rm -f "$PIDFILE" 2>/dev/null || true
+    exit 1
+  fi
+
   # --- auto-discover the supervisor BACKEND (tmux vs herdr) first -----------
   # Priority: FM_SUPERVISOR_BACKEND override > $TMUX_PANE (tmux) > $HERDR_ENV=1
   # (herdr) > tmux fallback. Resolved before the target below, since target

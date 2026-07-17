@@ -1506,6 +1506,48 @@ test_discover_supervisor_target_herdr() {
   pass "discover_supervisor_target: override > TMUX_PANE > herdr '<session>:<pane-id>' composition > firstmate:0 fallback"
 }
 
+test_fm_supervisor_gui_hosted() {
+  if TMUX_PANE='' HERDR_ENV='' HERDR_PANE_ID='' __CFBundleIdentifier=com.anthropic.claudefordesktop fm_supervisor_gui_hosted; then
+    :
+  else
+    fail "no TMUX_PANE/HERDR + Claude Desktop bundle id should detect GUI hosting"
+  fi
+
+  if TMUX_PANE='%9' HERDR_ENV='' HERDR_PANE_ID='' __CFBundleIdentifier=com.anthropic.claudefordesktop fm_supervisor_gui_hosted; then
+    fail "TMUX_PANE set should win over the Claude Desktop bundle id"
+  fi
+
+  if TMUX_PANE='' HERDR_ENV=1 HERDR_PANE_ID=w1:p1 __CFBundleIdentifier=com.anthropic.claudefordesktop fm_supervisor_gui_hosted; then
+    fail "a herdr pane should win over the Claude Desktop bundle id"
+  fi
+
+  if TMUX_PANE='' HERDR_ENV='' HERDR_PANE_ID='' __CFBundleIdentifier='' fm_supervisor_gui_hosted; then
+    fail "no pane and no Claude Desktop bundle id should not detect GUI hosting (e.g. a bare non-tmux shell)"
+  fi
+
+  if TMUX_PANE='' HERDR_ENV='' HERDR_PANE_ID='' __CFBundleIdentifier=com.github.wez.wezterm fm_supervisor_gui_hosted; then
+    fail "an unrelated terminal-app bundle id should not detect GUI hosting"
+  fi
+
+  pass "fm_supervisor_gui_hosted: no tmux/herdr pane + Claude Desktop bundle id, and only that combination"
+}
+
+test_daemon_refuses_gui_hosted_primary() {
+  local dir state out status
+  dir=$(make_supercase daemon-refuses-gui-hosted)
+  state="$dir/state"
+  mkdir -p "$state"
+
+  out=$(TMUX_PANE='' HERDR_ENV='' HERDR_PANE_ID='' __CFBundleIdentifier=com.anthropic.claudefordesktop \
+    FM_STATE_OVERRIDE="$state" FM_SUPERVISOR_TARGET='' FM_SUPERVISOR_BACKEND='' "$DAEMON" 2>&1)
+  status=$?
+
+  [ "$status" -ne 0 ] || fail "daemon should refuse to start on a detected GUI-hosted primary"
+  printf '%s' "$out" | grep -qi "GUI-hosted" || fail "refusal should name GUI-hosted primary: $out"
+
+  pass "fm-supervise-daemon.sh: refuses to auto-discover a supervisor pane on a detected GUI-hosted primary"
+}
+
 test_pane_is_busy_herdr_native_busy_state() {
   (
     fm_backend_busy_state() { [ "$1" = herdr ] && [ "$2" = "default:w1:p2" ] || fail "unexpected busy_state args: $1 $2"; printf 'busy'; }
@@ -1738,6 +1780,8 @@ test_fm_send_exits_nonzero_on_confirmed_swallow
 test_fm_send_exits_nonzero_on_initial_send_failure
 test_discover_supervisor_backend_precedence
 test_discover_supervisor_target_herdr
+test_fm_supervisor_gui_hosted
+test_daemon_refuses_gui_hosted_primary
 test_pane_is_busy_herdr_native_busy_state
 test_pane_is_busy_herdr_falls_back_to_capture_regex
 test_pane_is_busy_herdr_idle_falls_back_to_capture_regex
