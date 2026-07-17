@@ -118,9 +118,11 @@ test_no_profile_keeps_claude_launch_unchanged() {
   assert_meta_profile "$HOME_DIR/state/$id.meta" claude default default
 
   launch=$(cat "$LAUNCH_LOG")
-  expected="CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$(cat '$HOME_DIR/data/$id/brief.md')\""
+  # A claude crew (ship) now carries the crew-scoped deny set via a --settings file
+  # in the task temp root; the rest of the launch stays byte-identical.
+  expected="CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions --settings '/tmp/fm-$id/crew-deny.settings.json' \"\$(cat '$HOME_DIR/data/$id/brief.md')\""
   [ "$launch" = "$expected" ] || fail "no-profile claude launch changed"$'\n'"expected: $expected"$'\n'"actual:   $launch"
-  pass "no --model/--effort records defaults and keeps the claude launch byte-identical"
+  pass "no --model/--effort keeps the claude crew launch byte-identical apart from the deny --settings flag"
 }
 
 test_active_dispatch_profile_requires_explicit_harness_for_ship() {
@@ -219,8 +221,9 @@ test_claude_threads_model_and_effort() {
   expect_code 0 "$status" "claude spawn with profile flags should succeed"
   assert_meta_profile "$HOME_DIR/state/$id.meta" claude sonnet high
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "claude --dangerously-skip-permissions --model 'sonnet' --effort 'high'" \
-    "claude launch did not thread model and effort flags"
+  # The crew deny --settings flag sits between --dangerously-skip-permissions and --model.
+  assert_contains "$launch" "claude --dangerously-skip-permissions --settings '/tmp/fm-$id/crew-deny.settings.json' --model 'sonnet' --effort 'high'" \
+    "claude launch did not thread model and effort flags after the deny --settings flag"
   pass "claude receives --model and --effort profile flags"
 }
 

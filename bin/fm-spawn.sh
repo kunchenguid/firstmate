@@ -324,7 +324,20 @@ launch_template() {
     # does NOT suppress the interactive ghost text (verified empirically), so the env
     # var is the correct control. The dim-aware composer reader in fm-tmux-lib.sh is
     # the defense-in-depth backstop for any pane this flag cannot reach.
-    claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions __MODELFLAG____EFFORTFLAG__"$(cat __BRIEF__)"' ;;
+    claude)
+      # A crew (ship/scout) also carries a crew-scoped permissions.deny set through
+      # an fm-spawn-generated --settings file (crew_deny_settings_file; the
+      # __CREWSETTINGS__ placeholder). Claude enforces permissions.deny even under
+      # --dangerously-skip-permissions, so the deny set is a real, if partial,
+      # per-launch control on the autonomous crew (docs/crew-deny-hardening.md). A
+      # secondmate is a firstmate instance, not an autonomous crew, so it launches
+      # WITHOUT the deny set - only the crew branch gets the placeholder.
+      if [ "$kind" = secondmate ]; then
+        printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions __MODELFLAG____EFFORTFLAG__"$(cat __BRIEF__)"'
+      else
+        printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions __CREWSETTINGS____MODELFLAG____EFFORTFLAG__"$(cat __BRIEF__)"'
+      fi
+      ;;
     codex)
       if [ "$kind" = secondmate ]; then
         printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox "$(cat __BRIEF__)"'
@@ -478,6 +491,53 @@ effort_flag_for_harness() {
     # flag but no verified effort flag. Its `opencode run --variant` flag belongs
     # to a different, non-interactive launch mode, so fm-spawn does not pass it.
   esac
+}
+
+# Crew-scoped hardening deny set, baked into a --settings JSON for autonomous
+# claude crews. Claude enforces permissions.deny in EVERY permission mode,
+# including bypassPermissions (= --dangerously-skip-permissions), while allow
+# rules become moot in bypass - so this deny set really constrains a crew's Bash
+# egress, force-push, catastrophic deletes, and secret-path Read-tool access
+# (docs/crew-deny-hardening.md records the empirical proof, claude version, and
+# commands). It is a defense-in-depth speed bump, NOT a hard boundary: native
+# Bash-argument matching is fragile (a crew can still read a secret with cat or
+# node -e, or POST over HTTP with python3, and trailing-flag / path-expansion
+# forms slip prefix patterns), so the hard boundary - an OS sandbox and a
+# deny-first PreToolUse hook - stays separate, captain-gated follow-up work.
+# The file lives in the task's own temp root (outside every worktree, never
+# committed to a project) and fm-teardown removes it with that root. Only the
+# claude ship/scout launch template carries __CREWSETTINGS__; a secondmate (a
+# firstmate instance, not a crew), every other harness, and the raw-launch escape
+# hatch omit it, so none of them generate this file. This heredoc is the versioned
+# source of truth for the deny set; --settings MERGES it on top of the worktree's
+# turn-end settings.local.json rather than replacing it.
+crew_deny_settings_file() {  # <task-tmp> ; writes JSON, echoes "--settings '<path>' "
+  local task_tmp=$1 path
+  path="$task_tmp/crew-deny.settings.json"
+  cat > "$path" <<'JSON'
+{
+  "permissions": {
+    "deny": [
+      "Bash(curl:*)",
+      "Bash(wget:*)",
+      "Bash(gh auth token:*)",
+      "Bash(git push --force:*)",
+      "Bash(git push -f:*)",
+      "Bash(git push --force-with-lease:*)",
+      "Bash(rm -rf /:*)",
+      "Bash(rm -rf ~:*)",
+      "Bash(rm -rf $HOME:*)",
+      "Read(~/.ssh/**)",
+      "Read(~/.aws/**)",
+      "Read(~/.kube/**)",
+      "Read(~/.npmrc)",
+      "Read(~/.claude/.credentials.json)",
+      "Read(~/.docker/config.json)"
+    ]
+  }
+}
+JSON
+  printf -- "--settings %s " "$(shell_quote "$path")"
 }
 
 json_escape() {
@@ -1036,6 +1096,16 @@ sq_piturnend=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-turnend-guard.ts
 sq_piwatch=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-pi-watch.ts")
 MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
 EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT")
+# Crew-scoped deny set: only the claude ship/scout template carries the
+# __CREWSETTINGS__ placeholder, so its presence is the single control point.
+# Generate the deny-settings file (into the task temp root) only when it is there;
+# a secondmate, another harness, or a raw launch command has no placeholder, so
+# CREWSETTINGS stays empty and no file is written.
+CREWSETTINGS=
+case "$LAUNCH" in
+  *__CREWSETTINGS__*) CREWSETTINGS=$(crew_deny_settings_file "$TASK_TMP") ;;
+esac
+LAUNCH=${LAUNCH//__CREWSETTINGS__/$CREWSETTINGS}
 LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
 LAUNCH=${LAUNCH//__EFFORTFLAG__/$EFFORTFLAG}
 LAUNCH=${LAUNCH//__BRIEF__/$sq_brief}
