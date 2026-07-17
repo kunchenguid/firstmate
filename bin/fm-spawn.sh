@@ -73,14 +73,6 @@
 #                  written by this script; outside the worktree to avoid pi's trust gate)
 #     __PITURNEND__ absolute path to .pi/extensions/fm-primary-turnend-guard.ts in a pi secondmate home
 #     __PIWATCH__   absolute path to .pi/extensions/fm-primary-pi-watch.ts in a pi secondmate home
-#   Verified templates optionally inject agent secrets at the final launch-command
-#   boundary. Injection is enabled only when `op` and
-#   `with-1password-local-development-reader` are on PATH and /usr/bin/security
-#   can read account kunchen for service op-local-sa with stdin
-#   closed and all output silenced. Otherwise every launch command stays byte-identical.
-#   When enabled, the agent executable runs through
-#   `with-1password-local-development-reader op run --env-file "$HOME/.config/agent-secrets.env" --`.
-#   Raw launch commands and backend setup shell lines are never wrapped.
 # Per-harness turn-end hooks are installed automatically; some live outside the worktree.
 # grok uses a firstmate-owned global hook under ${GROK_HOME:-$HOME/.grok}/hooks
 # plus a gitignored .fm-grok-turnend worktree pointer and a state token.
@@ -92,7 +84,7 @@ set -eu
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 usage() {
-  sed -n '2,86p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,78p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 case "${1:-}" in
@@ -319,21 +311,8 @@ fi
 
 # The verified launch command per adapter. The knowledge half of each adapter
 # (busy signature, exit command, dialogs, quirks) lives in the harness-adapters skill.
-agent_secrets_launch_prefix() {  # [security-bin]; production omits the test seam
-  local security_bin=${1:-/usr/bin/security}
-  command -v op >/dev/null 2>&1 || return 0
-  command -v with-1password-local-development-reader >/dev/null 2>&1 || return 0
-  "$security_bin" find-generic-password \
-    -a kunchen \
-    -s op-local-sa \
-    -w </dev/null >/dev/null 2>&1 || return 0
-  # shellcheck disable=SC2016  # $HOME must expand in the target pane shell
-  printf '%s' 'with-1password-local-development-reader op run --env-file "$HOME/.config/agent-secrets.env" -- '
-}
-
 launch_template() {
-  local harness=$1 kind=${2:-ship} security_bin=${3:-/usr/bin/security} agent_secrets_prefix
-  agent_secrets_prefix=$(agent_secrets_launch_prefix "$security_bin")
+  local harness=$1 kind=${2:-ship}
   # shellcheck disable=SC2016  # single quotes are deliberate: $(cat ...) expands in the crewmate pane, not here
   case "$harness" in
     # CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false disables claude's interactive
@@ -345,20 +324,20 @@ launch_template() {
     # does NOT suppress the interactive ghost text (verified empirically), so the env
     # var is the correct control. The dim-aware composer reader in fm-tmux-lib.sh is
     # the defense-in-depth backstop for any pane this flag cannot reach.
-    claude) printf '%s%s%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false ' "$agent_secrets_prefix" 'claude --dangerously-skip-permissions __MODELFLAG____EFFORTFLAG__"$(cat __BRIEF__)"' ;;
+    claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions __MODELFLAG____EFFORTFLAG__"$(cat __BRIEF__)"' ;;
     codex)
       if [ "$kind" = secondmate ]; then
-        printf '%s%s' "$agent_secrets_prefix" 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox "$(cat __BRIEF__)"'
+        printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox "$(cat __BRIEF__)"'
       else
-        printf '%s%s' "$agent_secrets_prefix" 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(cat __BRIEF__)"'
+        printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(cat __BRIEF__)"'
       fi
       ;;
-    opencode) printf '%s%s%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}}'\'' ' "$agent_secrets_prefix" 'opencode __MODELFLAG__--prompt "$(cat __BRIEF__)"' ;;
+    opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}}'\'' opencode __MODELFLAG__--prompt "$(cat __BRIEF__)"' ;;
     pi)
       if [ "$kind" = secondmate ]; then
-        printf '%s%s' "$agent_secrets_prefix" 'pi __MODELFLAG____EFFORTFLAG__-e __PITURNEND__ -e __PIWATCH__ "$(cat __BRIEF__)"'
+        printf '%s' 'pi __MODELFLAG____EFFORTFLAG__-e __PITURNEND__ -e __PIWATCH__ "$(cat __BRIEF__)"'
       else
-        printf '%s%s' "$agent_secrets_prefix" 'pi __MODELFLAG____EFFORTFLAG__-e __PIEXT__ "$(cat __BRIEF__)"'
+        printf '%s' 'pi __MODELFLAG____EFFORTFLAG__-e __PIEXT__ "$(cat __BRIEF__)"'
       fi
       ;;
     # grok (Grok Build TUI): a positional prompt starts the supervised interactive
@@ -368,7 +347,7 @@ launch_template() {
     # --dangerously-skip-permissions. grok's turn-end signal does NOT ride the
     # launch command - it is a Stop-event hook installed below (global hook +
     # per-task pointer), so the template is identical for ship/scout/secondmate.
-    grok) printf '%s%s' "$agent_secrets_prefix" 'grok --always-approve __MODELFLAG____EFFORTFLAG__"$(cat __BRIEF__)"' ;;
+    grok) printf '%s' 'grok --always-approve __MODELFLAG____EFFORTFLAG__"$(cat __BRIEF__)"' ;;
     *) return 1 ;;
   esac
 }
