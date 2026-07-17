@@ -40,10 +40,12 @@ The projection remains read-only and does not inspect historical prose.
 ## Verification record
 
 Verification date: 2026-07-14.
+Additional quoted `blocked_by` regression verification date: 2026-07-17.
 
 The focused end-to-end regression uses only synthetic `sample` identities and decision text.
 It begins with a completed investigation and visual review whose genuine unresolved choice exists only in the report.
 The initial Bearings snapshot correctly has no open decision, and the new teardown gate refuses to erase the source.
+A later regression covers tasks-axi's quoted multi-entry `blocked_by` output so `resolve` matches the first, middle, and last ids and rejects a genuinely absent id.
 
 The final verification commands and their exact summarized outputs follow.
 
@@ -55,7 +57,9 @@ ok - captain holds are idempotent, distinct, teardown-safe, Bearings-visible, an
 ok - completion and verification validate origins before constructing paths
 ok - ended visual review follows the same decision-hold completion owner
 ok - resolved findings and decision-like prose do not create false holds
+ok - terminal single-owner stale status decisions do not block empty inventory
 ok - main-home and secondmate-home captain holds remain correctly routed
+ok - resolve matches first/middle/last in quoted blocked_by and rejects a genuinely absent id
 
 $ bash tests/fm-fleet-snapshot-view.test.sh
 ok - durable captain-held transfer closes the duplicate live status decision
