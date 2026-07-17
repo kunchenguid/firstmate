@@ -1001,6 +1001,7 @@ EOF
                          # instead of re-surfacing every poll. A genuinely stopped or
                          # unknown crew (no terminal confirmation) keeps surfacing.
                          if crew_reached_terminal "$task"; then
+                           date +%s > "$STATE/.paused-rechecked-$key"
                            handle_paused_stale "$w" "$task" "$h"
                          else
                            surface_nonterminal_stale "$w" "$h"

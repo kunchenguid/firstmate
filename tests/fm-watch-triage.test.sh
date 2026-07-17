@@ -1332,6 +1332,47 @@ test_doneparked_paused_repeat_rechecked_not_resurfaced() {
   pass "an already-noticed done-and-parked crew is absorbed, then re-surfaced once past the long pause cadence (no per-poll runaway)"
 }
 
+# The terminal recheck must also be READ-throttled: the authoritative
+# fm-crew-state.sh read (crew_absorb_class + crew_reached_terminal) runs only on
+# the first sight of a terminal-parked stale hash, then the .paused-rechecked-*
+# marker keeps pause_state_class on its zero-read fast path until
+# STALE_ESCALATE_SECS elapses. Counts real invocations of a counting fake across
+# several polls to prove the read is not repeated per poll.
+test_doneparked_paused_repeat_reads_throttled() {
+  local dir state fakebin out capture_file window key pane_hash sig pid calls reads
+  dir=$(make_case doneparked-read-throttle); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; calls="$dir/crew-state.calls"
+  window="test:fm-doneparked-reads"
+  printf 'idle pane, finished, awaiting decision' > "$capture_file"
+  printf 'window=%s\nkind=ship\nmode=no-mistakes\n' "$window" > "$state/doneparked-reads.meta"
+  printf 'paused: awaiting-captain-decision on [key=nm-pr-scope] recheck on a long cadence\n' > "$state/doneparked-reads.status"
+  sig=$(seen_sig "$state/doneparked-reads.status"); printf '%s' "$sig" > "$state/.seen-doneparked-reads_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle pane, finished, awaiting decision")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '%s' "$pane_hash" > "$state/.stale-$key"   # already surfaced once on this hash
+  printf '1\n' > "$state/.count-$key"
+  cat > "$fakebin/fm-crew-state.sh" <<SH
+#!/usr/bin/env bash
+echo x >> "$calls"
+printf '%s\n' "state: done · source: run-step · checks green: PR ready for review (still monitoring for merge/close)"
+SH
+  chmod +x "$fakebin/fm-crew-state.sh"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 60; then
+    reap "$pid"; fail "watcher exited while absorbing a read-throttled done-and-parked crew: $(cat "$out")"
+  fi
+  reap "$pid"
+  [ -e "$state/.paused-rechecked-$key" ] || fail "the terminal recheck did not record the read-throttle marker"
+  reads=$(wc -l < "$calls" 2>/dev/null | tr -d ' ')
+  [ -n "$reads" ] && [ "$reads" -ge 1 ] || fail "the first sight never read the authoritative crew state"
+  [ "$reads" -le 2 ] || fail "the crew-state read repeated across polls ($reads reads) instead of throttling to first sight"
+  pass "a done-and-parked crew's authoritative state is read on first sight only, then throttled ($reads reads over multiple polls)"
+}
+
 # Case 3 (#233 guard): the same suppressor-equal paused-last-line pane whose
 # authoritative state is WORKING (active validation) stays absorbed - the fix must
 # not move a provably-working crew off the working arm.
@@ -1462,6 +1503,7 @@ test_afk_present_reverts_watcher_to_one_shot
 test_afk_paused_changed_pane_hands_off_plain_stale
 test_doneparked_paused_finish_surfaces_once
 test_doneparked_paused_repeat_rechecked_not_resurfaced
+test_doneparked_paused_repeat_reads_throttled
 test_doneparked_paused_working_crew_absorbs
 test_doneparked_paused_paused_crew_absorbs
 test_doneparked_paused_stopped_crew_surfaces
