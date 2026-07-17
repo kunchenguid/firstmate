@@ -14,14 +14,7 @@ command -v tmux >/dev/null 2>&1 || { echo "skip: tmux not found"; exit 0; }
 TMUX=$(command -v tmux)
 SOCKET="fm-pi-live-e2e-$$"
 SESSION=pi-live-e2e
-LAB="$ROOT/.pi-live-e2e.$$"
-PROJECT="$LAB/project"
-HOME_DIR="$LAB/fmhome"
-PI_DIR="$LAB/pi-agent"
-PI_SESSION_DIR="$PI_DIR/sessions"
 PI_SESSION_ID=11111111-1111-4111-8111-111111111111
-PI_LAUNCHER="$LAB/run-pi-resume.sh"
-PI_CONFIG_SOURCE=${FM_PI_LIVE_E2E_AGENT_DIR:-$HOME/.pi/agent}
 PI_VERSION=$(pi --version)
 
 fail() {
@@ -30,9 +23,14 @@ fail() {
 }
 
 [ "$PI_VERSION" = 0.80.7 ] || fail "live resume regression requires Pi 0.80.7, found $PI_VERSION"
-for required in auth.json models.json settings.json; do
-  [ -f "$PI_CONFIG_SOURCE/$required" ] || fail "live resume regression requires $PI_CONFIG_SOURCE/$required"
-done
+LAB=$(mktemp -d "${TMPDIR:-/tmp}/fm-pi-live-e2e.XXXXXX") || fail "could not create the system temporary lab"
+chmod 700 "$LAB" || fail "could not restrict the system temporary lab"
+umask 077
+PROJECT="$LAB/project"
+HOME_DIR="$LAB/fmhome"
+PI_DIR="$LAB/pi-agent"
+PI_SESSION_DIR="$PI_DIR/sessions"
+PI_LAUNCHER="$LAB/run-pi-resume.sh"
 
 capture() {
   "$TMUX" -L "$SOCKET" capture-pane -p -t "$SESSION" -S -600 2>/dev/null || true
@@ -130,13 +128,88 @@ wait_pid_dead() {
   return 1
 }
 
-mkdir -p "$LAB"
 git clone -q "$ROOT" "$PROJECT"
 cp "$ROOT/.pi/extensions/fm-primary-pi-watch.ts" "$PROJECT/.pi/extensions/fm-primary-pi-watch.ts"
 cp "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$PROJECT/.pi/extensions/fm-primary-turnend-guard.ts"
+cp "$ROOT/bin/fm-primary-scope.sh" "$PROJECT/bin/fm-primary-scope.sh"
+cp "$ROOT/bin/fm-turnend-guard.sh" "$PROJECT/bin/fm-turnend-guard.sh"
 cp "$ROOT/bin/fm-supervision-instructions.sh" "$PROJECT/bin/fm-supervision-instructions.sh"
+chmod +x "$PROJECT/bin/fm-primary-scope.sh" "$PROJECT/bin/fm-turnend-guard.sh"
 mkdir -p "$HOME_DIR/state" "$HOME_DIR/config" "$PI_DIR" "$PI_SESSION_DIR"
-cp "$PI_CONFIG_SOURCE/auth.json" "$PI_CONFIG_SOURCE/models.json" "$PI_CONFIG_SOURCE/settings.json" "$PI_DIR/"
+
+cat > "$PROJECT/.pi/extensions/fm-live-e2e-provider.ts" <<'TS'
+import { createFauxCore, fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
+
+const provider = "fm-live-e2e";
+const model = {
+  id: provider,
+  name: "Firstmate live E2E",
+  reasoning: false,
+  input: ["text"] as ("text" | "image")[],
+  cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+  contextWindow: 32000,
+  maxTokens: 1024,
+};
+
+function contentText(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content
+    .filter((block) => block && typeof block === "object" && (block as { type?: string }).type === "text")
+    .map((block) => String((block as { text?: string }).text || ""))
+    .join("\n");
+}
+
+function respond(context: { messages: Array<{ role: string; content?: unknown; toolName?: string }> }) {
+  const userIndex = context.messages.findLastIndex((message) => message.role === "user");
+  if (userIndex < 0) throw new Error("live E2E provider received no user message");
+  const prompt = contentText(context.messages[userIndex].content);
+  const toolNames = context.messages.slice(userIndex + 1)
+    .filter((message) => message.role === "toolResult")
+    .map((message) => message.toolName || "");
+
+  if (prompt.includes("PI_E2E_BASH_ONE")) {
+    return toolNames.includes("bash")
+      ? fauxAssistantMessage("BASH-ONE")
+      : fauxAssistantMessage(fauxToolCall("bash", { command: "printf PI_E2E_BASH_ONE" }, { id: "bash-one" }), { stopReason: "toolUse" });
+  }
+  if (prompt.includes("first five lines of README.md")) {
+    return toolNames.includes("read")
+      ? fauxAssistantMessage("READ-ONE")
+      : fauxAssistantMessage(fauxToolCall("read", { path: "README.md", offset: 1, limit: 5 }, { id: "read-one" }), { stopReason: "toolUse" });
+  }
+  if (prompt.includes("PI_E2E_BASH_TWO")) {
+    return toolNames.includes("bash")
+      ? fauxAssistantMessage("BASH-TWO")
+      : fauxAssistantMessage(fauxToolCall("bash", { command: "printf PI_E2E_BASH_TWO" }, { id: "bash-two" }), { stopReason: "toolUse" });
+  }
+  if (prompt.includes("Reply exactly READY")) return fauxAssistantMessage("READY");
+  if (prompt.startsWith("FIRSTMATE WATCHER WAKE:")) {
+    if (!toolNames.includes("bash")) {
+      return fauxAssistantMessage(fauxToolCall("bash", { command: "bin/fm-wake-drain.sh" }, { id: "wake-drain" }), { stopReason: "toolUse" });
+    }
+    if (!toolNames.includes("fm_watch_arm_pi")) {
+      return fauxAssistantMessage(fauxToolCall("fm_watch_arm_pi", {}, { id: "wake-arm" }), { stopReason: "toolUse" });
+    }
+    return fauxAssistantMessage("REARMED");
+  }
+  throw new Error(`live E2E provider received an unexpected prompt: ${prompt}`);
+}
+
+const faux = createFauxCore({ api: provider, provider, models: [model], tokenSize: { min: 64, max: 64 } });
+faux.setResponses(Array.from({ length: 32 }, () => respond));
+
+export default function (pi: { registerProvider(name: string, config: Record<string, unknown>): void }) {
+  pi.registerProvider(provider, {
+    name: "Firstmate live E2E",
+    baseUrl: "http://localhost:0",
+    apiKey: "test-owned-no-network",
+    api: faux.api,
+    streamSimple: faux.streamSimple,
+    models: [model],
+  });
+}
+TS
 
 mv "$PROJECT/bin/fm-watch-arm.sh" "$PROJECT/bin/fm-watch-arm-live-e2e-real.sh"
 cat > "$PROJECT/bin/fm-watch-arm.sh" <<'SH'
@@ -165,13 +238,13 @@ cat > "$PI_LAUNCHER" <<'SH'
 #!/usr/bin/env bash
 set -u
 printf '%s\n' "$$" > "$FM_HOME/state/.lock"
-pi --session-dir "$PI_SESSION_DIR" --session-id "$PI_SESSION_ID"
+pi --provider fm-live-e2e --model fm-live-e2e --session-dir "$PI_SESSION_DIR" --session-id "$PI_SESSION_ID"
 first_rc=$?
 printf 'FIRST_PI_EXIT=%s\n' "$first_rc"
 [ "$first_rc" -eq 0 ] || exit "$first_rc"
 while [ ! -f "$FM_HOME/state/.resume-now" ]; do sleep 0.1; done
 printf 'PI_RESUME_STARTING=%s\n' "$PI_SESSION_ID"
-pi --session-dir "$PI_SESSION_DIR" --session "$PI_SESSION_ID"
+pi --provider fm-live-e2e --model fm-live-e2e --session-dir "$PI_SESSION_DIR" --session "$PI_SESSION_ID"
 resumed_rc=$?
 printf 'RESUMED_PI_EXIT=%s\n' "$resumed_rc"
 [ "$resumed_rc" -eq 0 ] || exit "$resumed_rc"
@@ -242,8 +315,8 @@ if printf '%s\n' "$pane" | grep -Fq "$foreground_arm"; then
   fail "Pi used a foreground bash watcher arm"
 fi
 
-pid_file=$(find "$HOME_DIR/state" -maxdepth 3 -type f -name pid | head -1)
-[ -n "$pid_file" ] || fail "re-armed watcher pid was not recorded"
+wait_for_file "$HOME_DIR/state/.watch.lock/pid" 60 || fail "re-armed watcher pid was not recorded"
+pid_file="$HOME_DIR/state/.watch.lock/pid"
 watcher_pid=$(sed -n '1p' "$pid_file")
 arm_pid=$(ps -p "$watcher_pid" -o ppid= | tr -d ' ')
 [ -n "$arm_pid" ] || fail "re-armed watcher parent was not live"

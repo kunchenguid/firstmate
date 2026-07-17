@@ -1,7 +1,7 @@
 # Primary turn-end supervision guard
 
 This is the authoritative contract for the "no turn ends blind" primary guard referenced from AGENTS.md section 8.
-The shared predicate lives in `bin/fm-turnend-guard.sh`.
+The shared primary scope predicate lives in `bin/fm-primary-scope.sh`, and the turn-end predicate lives in `bin/fm-turnend-guard.sh`.
 Harness-specific tracked hook files only adapt each verified harness's real turn-end mechanism to that shared predicate.
 Two related but separate PreToolUse seatbelts deny a bad command shape before it runs rather than detecting a blind turn end afterward: the watcher-arm seatbelt (`bin/fm-arm-pretool-check.sh`, `docs/arm-pretool-check.md`) and the cd-guard (`bin/fm-cd-pretool-check.sh`, `docs/cd-guard.md`).
 Each seatbelt's own document defines its scope; they do not share the turn-end guard's marker-aware primary detection.
@@ -153,7 +153,7 @@ Pi 0.80.7 native resume restores the conversation without rerunning `bin/fm-sess
 Command run: `bash tests/fm-session-lock.test.sh`.
 Observed output covered exact native names for Claude, Codex, OpenCode, Pi, and Grok, same-holder idempotence, dead reclaim, malformed refusal, missing ancestry, exact interpreter script matching, and one winner from two synchronized contenders.
 Command run: `bash tests/fm-pi-watch-extension.test.sh`.
-Observed output covered real tracked-extension `session_start` integration for missing, dead, verified live other, and owned locks, plus distinct competitor, acquisition-failure, and ownership-changed messages.
+Observed output covered real tracked-extension `session_start` integration for missing, dead, verified live other, owned, and away-mode locks, primary scope for main, linked task, and valid secondmate homes, plus distinct competitor, acquisition-failure, and ownership-changed messages.
 Command run: `bash tests/fm-turnend-guard.test.sh`.
 Observed output kept the shared predicate and all five primary harness hook regressions green after removing the Pi guard's duplicate lock classifier.
 The runtime-backend axis is not applicable because session-lock ownership is per `FM_HOME` and does not call tmux, Herdr, Zellij, Orca, or cmux adapters.

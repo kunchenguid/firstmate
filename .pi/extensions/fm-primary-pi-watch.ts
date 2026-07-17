@@ -1,7 +1,7 @@
 // Firstmate primary watcher bridge for Pi.
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -23,10 +23,13 @@ const state = process.env.FM_STATE_OVERRIDE || `${fmHome}/state`;
 const config = process.env.FM_CONFIG_OVERRIDE || `${fmHome}/config`;
 const armScript = `${fmRoot}/bin/fm-watch-arm.sh`;
 const lockScript = `${fmRoot}/bin/fm-lock.sh`;
+const scopeScript = `${fmRoot}/bin/fm-primary-scope.sh`;
 const marker = `${state}/.pi-watch-extension-loaded`;
 const extensionVersion = `sha256:${createHash("sha256").update(readFileSync(extensionFile)).digest("hex")}`;
 
 let child: any = null;
+let armReady = false;
+let armReadiness: Promise<ArmResult> | null = null;
 let seq = 0;
 
 function lockEnvironment() {
@@ -48,11 +51,27 @@ function lockOwnership(): LockOwnership {
   return "unknown";
 }
 
-function markLoaded(): void {
+function isPrimaryHome(): boolean {
+  const result = spawnSync(scopeScript, [], {
+    encoding: "utf8",
+    env: {
+      ...lockEnvironment(),
+      FM_ROOT_OVERRIDE: root,
+    },
+  });
+  return result.status === 0;
+}
+
+function markLoadedForPrimary(): void {
   const ownership = lockOwnership();
   if (ownership === "other" || ownership === "malformed" || ownership === "unknown") return;
   mkdirSync(state, { recursive: true });
   writeFileSync(marker, `${extensionVersion}\n${process.pid}\n`);
+}
+
+function markLoaded(): void {
+  if (!isPrimaryHome()) return;
+  markLoadedForPrimary();
 }
 
 function actionableLine(output: string): string {
@@ -74,6 +93,8 @@ export default function (pi: ExtensionAPI) {
   function stopArm(): void {
     if (child) child.kill("SIGTERM");
     child = null;
+    armReady = false;
+    armReadiness = null;
   }
 
   const cleanupOnProcessExit = () => {
@@ -88,7 +109,10 @@ export default function (pi: ExtensionAPI) {
     );
   }
 
-  function startArm(): ArmResult {
+  async function startArm(): Promise<ArmResult> {
+    if (!isPrimaryHome()) {
+      return { ok: false, message: "watcher: inactive - current checkout is not a primary firstmate home" };
+    }
     let ownership = lockOwnership();
     let acquisitionError = "";
     let attemptedAcquisition = false;
@@ -108,8 +132,14 @@ export default function (pi: ExtensionAPI) {
       const detail = acquisitionError ? ` (${acquisitionError})` : "";
       return { ok: false, message: `watcher: lock acquisition failed - session lock is ${ownership}${detail}` };
     }
-    markLoaded();
-    if (child) return { ok: true, message: "watcher: healthy - Pi extension already has an arm child" };
+    markLoadedForPrimary();
+    if (existsSync(`${state}/.afk`)) {
+      return { ok: true, message: "watcher: away mode - sub-supervisor owns supervision" };
+    }
+    if (child) {
+      if (armReady) return { ok: true, message: "watcher: healthy - Pi extension already has an arm child" };
+      if (armReadiness) return armReadiness;
+    }
     const id = ++seq;
     const env = {
       ...process.env,
@@ -118,43 +148,73 @@ export default function (pi: ExtensionAPI) {
       FM_CONFIG_OVERRIDE: config,
       FM_WATCH_ARM_SCRIPT: armScript,
     };
-    child = spawn("bash", ["-lc", "config_dir=\"${FM_CONFIG_OVERRIDE:-$FM_HOME/config}\"; [ -f \"$config_dir/x-mode.env\" ] && . \"$config_dir/x-mode.env\"; exec \"$FM_WATCH_ARM_SCRIPT\" --restart"], {
+    const armChild = spawn("bash", ["-lc", "config_dir=\"${FM_CONFIG_OVERRIDE:-$FM_HOME/config}\"; [ -f \"$config_dir/x-mode.env\" ] && . \"$config_dir/x-mode.env\"; exec \"$FM_WATCH_ARM_SCRIPT\" --restart"], {
       cwd: fmRoot,
       env,
       stdio: ["ignore", "pipe", "pipe"],
     });
+    child = armChild;
+    armReady = false;
     let stdout = "";
     let stderr = "";
-    child.stdout.on("data", (chunk: Buffer) => {
-      stdout += chunk.toString();
+    const readiness = new Promise<ArmResult>((resolveReadiness) => {
+      let settled = false;
+      const settle = (result: ArmResult) => {
+        if (settled) return;
+        settled = true;
+        armReady = result.ok;
+        resolveReadiness(result);
+      };
+      armChild.stdout.on("data", (chunk: Buffer) => {
+        stdout += chunk.toString();
+        if (stdout.split(/\r?\n/).some((line) => /^watcher: started\b/.test(line))) {
+          settle({ ok: true, message: `watcher: started Pi extension arm child ${id}` });
+        }
+      });
+      armChild.stderr.on("data", (chunk: Buffer) => {
+        stderr += chunk.toString();
+      });
+      armChild.on("close", async (code: number | null) => {
+        if (child === armChild) {
+          child = null;
+          armReady = false;
+          armReadiness = null;
+        }
+        const reason = actionableLine(`${stdout}\n${stderr}`);
+        const failure = reason ? "" : failureLine(stdout, stderr, code);
+        settle({
+          ok: false,
+          message: failure || `watcher: FAILED - Pi extension arm child ${id} exited before confirming watcher readiness`,
+        });
+        if (!reason && !failure) return;
+        try {
+          await sendWake(reason || failure);
+        } catch {
+          // Pi owns delivery errors; fail open so the extension never wedges the session.
+        }
+      });
+      armChild.on("error", async (error: Error) => {
+        if (child === armChild) {
+          child = null;
+          armReady = false;
+          armReadiness = null;
+        }
+        const failure = `watcher: FAILED - Pi extension arm child ${id} failed: ${error.message}`;
+        settle({ ok: false, message: failure });
+        try {
+          await sendWake(failure);
+        } catch {
+          // Fail open.
+        }
+      });
     });
-    child.stderr.on("data", (chunk: Buffer) => {
-      stderr += chunk.toString();
-    });
-    child.on("close", async (code: number | null) => {
-      child = null;
-      const reason = actionableLine(`${stdout}\n${stderr}`);
-      const failure = reason ? "" : failureLine(stdout, stderr, code);
-      if (!reason && !failure) return;
-      try {
-        await sendWake(reason || failure);
-      } catch {
-        // Pi owns delivery errors; fail open so the extension never wedges the session.
-      }
-    });
-    child.on("error", async (error: Error) => {
-      child = null;
-      try {
-        await sendWake(`watcher: FAILED - Pi extension arm child ${id} failed: ${error.message}`);
-      } catch {
-        // Fail open.
-      }
-    });
-    return { ok: true, message: `watcher: started Pi extension arm child ${id}` };
+    armReadiness = readiness;
+    return readiness;
   }
 
-  pi.on?.("session_start", (_event, ctx) => {
-    const result = startArm();
+  pi.on?.("session_start", async (_event, ctx) => {
+    if (!isPrimaryHome()) return;
+    const result = await startArm();
     if (!result.ok) ctx?.ui?.notify?.(result.message, "warning");
   });
   pi.on?.("session_shutdown", () => {
@@ -165,7 +225,7 @@ export default function (pi: ExtensionAPI) {
   pi.registerCommand?.("fm-watch-arm-pi", {
     description: "Arm firstmate watcher supervision through the Pi extension instead of foreground bash.",
     handler: async (_args, ctx) => {
-      const result = startArm();
+      const result = await startArm();
       ctx.ui.notify(result.message, result.ok ? "info" : "warning");
     },
   });
@@ -180,7 +240,7 @@ export default function (pi: ExtensionAPI) {
     ],
     parameters: Type.Object({}),
     execute: async () => {
-      const result = startArm();
+      const result = await startArm();
       return {
         content: [{ type: "text", text: result.message }],
         details: result,

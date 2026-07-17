@@ -3,10 +3,12 @@ Mode: Pi extension background wake.
 When this session owns supervision and away mode is not active:
 1. Drain first with `bin/fm-wake-drain.sh`.
 2. Confirm the Pi primary auto-loaded both project extensions (plain `pi`, after approving project trust once per clone); if not, restart with `-e __FM_PI_TURNEND_EXT__ -e __FM_PI_EXT__` as a trust-free fallback.
-3. On `session_start`, the watcher extension reads ownership through `bin/fm-lock.sh ownership`.
+3. On `session_start`, the watcher extension first requires `bin/fm-primary-scope.sh` to identify a main or valid secondmate primary home, then reads ownership through `bin/fm-lock.sh ownership`.
    A missing or dead lock is reacquired only through `bin/fm-lock.sh`, ownership is read again, and supervision starts only after the result is `owned`.
    A verified live other owner remains unchanged and the extension refuses to arm.
+   When `state/.afk` exists, lock recovery still completes but the extension does not start or restart a watcher because the sub-supervisor owns supervision.
 4. After each watcher wake, re-arm supervision with the `fm_watch_arm_pi` tool.
+   The tool returns success only after `fm-watch-arm.sh` verifies and reports a started watcher.
    Use `/fm-watch-arm-pi` only as a human-entered fallback.
    Never run `bin/fm-watch-arm.sh` through Pi's bash tool because that foreground arm can wedge the agent and bypasses extension-owned cleanup.
 5. The extension starts `bin/fm-watch-arm.sh --restart`, keeps the child attached to the live Pi process, and sends a follow-up user message when the child exits with an actionable watcher reason.
@@ -34,10 +36,11 @@ Verification on 2026-07-16 added subprocess-backed resume and lock-owner coverag
 Command run: `bash tests/fm-session-lock.test.sh`.
 Observed output included `ok - native Pi comm and argv are classified as a live holder`, `ok - a verified live other holder remains byte-for-byte unchanged`, and `ok - serialized concurrent contenders produce exactly one winner`.
 Command run: `bash tests/fm-pi-watch-extension.test.sh`.
-Observed output included `ok - Pi session_start reclaims missing/dead locks, refuses live other, and idempotently arms owned locks` and `ok - Pi watcher distinguishes verified competitor, acquisition failure, and changed ownership`.
+Observed output included `ok - Pi custom tool waits for verified watcher readiness`, `ok - Pi session_start reclaims safe locks, preserves away ownership, refuses live other, and idempotently arms`, `ok - Pi watcher stays inert in linked task worktrees and arms valid secondmate homes`, and `ok - Pi watcher distinguishes verified competitor, acquisition failure, and changed ownership`.
 
-Verification on 2026-07-17 used native Pi 0.80.7 with an isolated saved session, writable copies of the existing Pi authentication and model configuration, `PI_CODING_AGENT_DIR`, `FM_HOME`, project clone, and tmux socket.
+Verification on 2026-07-17 used native Pi 0.80.7 with a mode-0700 system temporary lab, an isolated saved session, a deterministic test-owned in-process faux provider, `PI_CODING_AGENT_DIR`, `FM_HOME`, project clone, and tmux socket.
 Command run: `FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh`.
+The provider generated every response and tool call locally without reading global Pi authentication or making an API request.
 The fixture created a saved session with `--session-id`, exited while leaving the dead native Pi PID in `.lock`, and resumed that exact session with `--session`.
 At the boundary before the real watcher arm script ran, the old PID was dead and `.lock` already named the new native Pi process.
 Observed output: `ok - Pi 0.80.7 live E2E created, exited, resumed, reclaimed before watcher startup, woke, re-armed, and cleaned up`.

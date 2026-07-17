@@ -15,7 +15,10 @@ export NODE_NO_WARNINGS=1
 install_pi_watch_extension_fixture() {
   local repo=$1
   mkdir -p "$repo/.pi/extensions" "$repo/node_modules/typebox" "$repo/bin"
+  git -C "$repo" rev-parse --git-dir >/dev/null 2>&1 || git init -q "$repo"
+  : > "$repo/AGENTS.md"
   cp "$EXT" "$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cp "$ROOT/bin/fm-primary-scope.sh" "$repo/bin/fm-primary-scope.sh"
   cat > "$repo/node_modules/typebox/package.json" <<'JSON'
 {"name":"typebox","type":"module","exports":"./index.js"}
 JSON
@@ -69,7 +72,7 @@ case "$state_name" in
 esac
 printf 'lock acquired: harness pid %s\n' "$PPID"
 SH
-  chmod +x "$repo/bin/fm-lock.sh"
+  chmod +x "$repo/bin/fm-lock.sh" "$repo/bin/fm-primary-scope.sh"
 }
 
 install_real_lock_owner() {
@@ -93,6 +96,9 @@ test_tracked_extension_present_and_self_hashing() {
   assert_contains "$text" 'createHash("sha256").update(readFileSync(extensionFile)).digest("hex")' "tracked extension does not self-hash its own content for extensionVersion"
   assert_contains "$text" 'fileURLToPath(import.meta.url)' "tracked extension does not self-locate via import.meta.url"
   assert_contains "$text" "const lockScript = \`\${fmRoot}/bin/fm-lock.sh\`" "tracked extension does not resolve the production lock owner"
+  assert_contains "$text" "const scopeScript = \`\${fmRoot}/bin/fm-primary-scope.sh\`" "tracked extension does not resolve the shared primary scope owner"
+  assert_contains "$text" 'FM_ROOT_OVERRIDE: root' "tracked extension does not scope the extension checkout independently of inherited supervisor paths"
+  assert_contains "$text" 'if (!isPrimaryHome())' "tracked extension does not fail closed outside a primary home"
   assert_contains "$text" 'type LockOwnership = "owned" | "missing" | "dead" | "other" | "malformed" | "unknown"' "tracked extension does not preserve the lock owner states"
   assert_contains "$text" 'spawnSync(lockScript, ["ownership"]' "tracked extension does not use the lock owner's read-only API"
   assert_contains "$text" 'if (ownership === "missing" || ownership === "dead")' "tracked extension does not restrict acquisition to reclaimable states"
@@ -101,7 +107,9 @@ test_tracked_extension_present_and_self_hashing() {
   assert_contains "$text" 'lock ownership changed during resume' "tracked extension does not distinguish a lost acquisition race"
   assert_contains "$text" 'a verified live firstmate session owns this home' "tracked extension does not distinguish a verified competitor"
   assert_contains "$text" 'lock acquisition failed' "tracked extension does not distinguish acquisition failure"
-  assert_contains "$text" 'const result = startArm();' "tracked extension does not recover and arm on session_start"
+  assert_contains "$text" 'const result = await startArm();' "tracked extension does not await recovery and verified arm readiness"
+  assert_contains "$text" "existsSync(\`\${state}/.afk\`)" "tracked extension does not preserve away-mode supervision ownership"
+  assert_contains "$text" 'sub-supervisor owns supervision' "tracked extension does not report away-mode ownership"
   assert_not_contains "$text" 'function parentPid' "tracked extension kept a duplicate ancestry classifier"
   assert_not_contains "$text" 'function pidAlive' "tracked extension kept a duplicate holder-liveness classifier"
   assert_not_contains "$text" "readFileSync(\`\${state}/.lock\`" "tracked extension still classifies lock bytes itself"
@@ -179,7 +187,7 @@ if (result !== undefined) {
   console.error(`Pi command returned a value: ${String(result)}`);
   process.exit(1);
 }
-if (!notification.includes("started Pi extension arm child")) {
+if (!notification.includes("external healthy watcher")) {
   console.error(notification);
   process.exit(1);
 }
@@ -215,7 +223,7 @@ test_pi_tool_returns_agent_tool_result() {
   plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
-exit 0
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
   out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" node --input-type=module 2>&1 <<'EOF'
@@ -253,6 +261,62 @@ EOF
   expect_code 0 "$status" "Pi custom tool must return Pi's AgentToolResult shape"
   [ -z "$out" ] || fail "Pi tool-result test printed output: $out"
   pass "Pi custom tool returns text content and structured details"
+}
+
+test_pi_tool_waits_for_verified_readiness() {
+  local repo home plugin started release out status
+  repo="$TMP_ROOT/pi-tool-readiness-root"
+  home="$TMP_ROOT/pi-tool-readiness-home"
+  started="$TMP_ROOT/pi-tool-readiness-started"
+  release="$TMP_ROOT/pi-tool-readiness-release"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+: > "${FM_READINESS_STARTED:?}"
+while [ ! -f "${FM_READINESS_RELEASE:?}" ]; do sleep 0.01; done
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_READINESS_STARTED="$started" FM_READINESS_RELEASE="$release" node --input-type=module 2>&1 <<'EOF'
+import { existsSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+let tool = null;
+const pi = {
+  on() {},
+  registerCommand() {},
+  registerTool(candidate) {
+    if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+  },
+  sendUserMessage: async () => {},
+};
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+let resolved = false;
+const pending = tool.execute("tool-readiness", {}, undefined, undefined, {}).then((result) => {
+  resolved = true;
+  return result;
+});
+for (let i = 0; i < 100 && !existsSync(process.env.FM_READINESS_STARTED); i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+if (!existsSync(process.env.FM_READINESS_STARTED)) throw new Error("arm child did not reach the readiness boundary");
+await new Promise((resolve) => setTimeout(resolve, 50));
+if (resolved) throw new Error("Pi tool returned before watcher readiness was verified");
+writeFileSync(process.env.FM_READINESS_RELEASE, "ready\n");
+const result = await pending;
+if (result.details?.ok !== true || !result.content[0].text.includes("started Pi extension arm child")) {
+  throw new Error(`unexpected readiness result: ${JSON.stringify(result)}`);
+}
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "Pi custom tool must wait for verified watcher readiness"
+  [ -z "$out" ] || fail "Pi tool-readiness test printed output: $out"
+  pass "Pi custom tool waits for verified watcher readiness"
 }
 
 test_pi_process_exit_cleanup_listener_lifecycle() {
@@ -307,6 +371,7 @@ test_pi_process_exit_cleanup_stops_arm_child() {
 #!/usr/bin/env bash
 trap 'printf "cleaned\n" > "$FM_CLEANUP_LOG"; exit 0' TERM
 printf '%s\n' "$$" > "$FM_CHILD_PID_FILE"
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
 while :; do sleep 1; done
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
@@ -353,7 +418,7 @@ EOF
 
 test_pi_resume_session_recovers_only_reclaimable_locks() {
   local scenario repo home plugin fakebin arm_log other_pid out status
-  for scenario in missing dead other owned; do
+  for scenario in missing dead other owned away; do
     repo="$TMP_ROOT/pi-resume-$scenario-root"
     home="$TMP_ROOT/pi-resume-$scenario-home"
     fakebin="$TMP_ROOT/pi-resume-$scenario-fakebin"
@@ -365,6 +430,7 @@ test_pi_resume_session_recovers_only_reclaimable_locks() {
     cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
 printf 'arm\n' >> "${FM_ARM_LOG:?}"
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
 trap 'exit 0' TERM INT
 while :; do sleep 1; done
 SH
@@ -418,6 +484,10 @@ import { pathToFileURL } from "node:url";
 process.env.FM_FAKE_PI_PID = String(process.pid);
 const lock = `${process.env.FM_HOME}/state/.lock`;
 if (process.env.CASE === "dead") writeFileSync(lock, "999999\n");
+if (process.env.CASE === "away") {
+  writeFileSync(lock, "999999\n");
+  writeFileSync(`${process.env.FM_HOME}/state/.afk`, "away\n");
+}
 if (process.env.CASE === "other") writeFileSync(lock, `${process.env.FM_FAKE_OTHER_PID}\n`);
 if (process.env.CASE === "owned") writeFileSync(lock, `${process.pid}\n`);
 const before = existsSync(lock) ? readFileSync(lock) : null;
@@ -447,7 +517,11 @@ await sessionStart({ type: "session_start" }, {
   },
 });
 for (let i = 0; i < 100; i += 1) {
-  const observable = process.env.CASE === "other" ? notifications.length > 0 : existsSync(process.env.FM_ARM_LOG);
+  const observable = process.env.CASE === "other"
+    ? notifications.length > 0
+    : process.env.CASE === "away"
+      ? readFileSync(lock, "utf8").trim() === String(process.pid)
+      : existsSync(process.env.FM_ARM_LOG);
   if (observable) break;
   await new Promise((resolve) => setTimeout(resolve, 20));
 }
@@ -459,6 +533,11 @@ if (process.env.CASE === "other") {
   if (!notifications.some((message) => message.includes("verified live"))) {
     throw new Error(`live-other refusal was not explicit: ${notifications.join(" | ")}`);
   }
+} else if (process.env.CASE === "away") {
+  const acquired = readFileSync(lock, "utf8").trim();
+  if (acquired !== String(process.pid)) throw new Error(`away resume lock owner is ${acquired}, expected ${process.pid}`);
+  if (existsSync(process.env.FM_ARM_LOG)) throw new Error("away resume restarted the watcher");
+  if (notifications.length > 0) throw new Error(`away resume notified unexpectedly: ${notifications.join(" | ")}`);
 } else {
   const acquired = readFileSync(lock, "utf8").trim();
   if (acquired !== String(process.pid)) throw new Error(`resume lock owner is ${acquired}, expected ${process.pid}`);
@@ -484,7 +563,77 @@ EOF
     fi
     [ -z "$out" ] || fail "Pi resume $scenario integration printed output: $out"
   done
-  pass "Pi session_start reclaims missing/dead locks, refuses live other, and idempotently arms owned locks"
+  pass "Pi session_start reclaims safe locks, preserves away ownership, refuses live other, and idempotently arms"
+}
+
+test_pi_extension_respects_primary_scope() {
+  local scenario base repo home plugin arm_log out status
+  for scenario in linked secondmate; do
+    base="$TMP_ROOT/pi-scope-$scenario-base"
+    repo="$TMP_ROOT/pi-scope-$scenario-root"
+    home="$TMP_ROOT/pi-scope-$scenario-home"
+    arm_log="$TMP_ROOT/pi-scope-$scenario-arm.log"
+    fm_git_worktree "$base" "$repo" "fm/pi-scope-$scenario"
+    mkdir -p "$home/state" "$home/config"
+    install_pi_watch_extension_fixture "$repo"
+    if [ "$scenario" = secondmate ]; then
+      printf 'scope-sm\n' > "$repo/.fm-secondmate-home"
+    fi
+    plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+    cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm\n' >> "${FM_ARM_LOG:?}"
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+trap 'exit 0' TERM INT
+while :; do sleep 1; done
+SH
+    chmod +x "$repo/bin/fm-watch-arm.sh"
+    status=0
+    out=$(CASE="$scenario" PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$arm_log" node --input-type=module 2>&1 <<'EOF'
+import { existsSync, readFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const handlers = new Map();
+const notifications = [];
+const pi = {
+  on(event, handler) {
+    handlers.set(event, handler);
+  },
+  registerCommand() {},
+  registerTool() {},
+  sendUserMessage: async () => {},
+};
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+await handlers.get("session_start")?.({ type: "session_start" }, {
+  ui: {
+    notify(message) {
+      notifications.push(message);
+    },
+  },
+});
+for (let i = 0; i < 100 && process.env.CASE === "secondmate" && !existsSync(process.env.FM_ARM_LOG); i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 20));
+}
+const lock = `${process.env.FM_HOME}/state/.lock`;
+const marker = `${process.env.FM_HOME}/state/.pi-watch-extension-loaded`;
+if (process.env.CASE === "linked") {
+  if (existsSync(lock) || existsSync(marker) || existsSync(process.env.FM_ARM_LOG)) {
+    throw new Error("linked task worktree mutated inherited supervisor state");
+  }
+  if (notifications.length > 0) throw new Error(`linked task worktree notified unexpectedly: ${notifications.join(" | ")}`);
+} else {
+  if (readFileSync(lock, "utf8").trim() !== String(process.pid)) throw new Error("valid secondmate did not acquire its lock");
+  if (!existsSync(marker)) throw new Error("valid secondmate did not mark the extension loaded");
+  if (!existsSync(process.env.FM_ARM_LOG)) throw new Error("valid secondmate did not arm supervision");
+}
+await handlers.get("session_shutdown")?.({ type: "session_shutdown" }, {});
+EOF
+    ) || status=$?
+    expect_code 0 "$status" "Pi watcher must enforce primary scope for $scenario"
+    [ -z "$out" ] || fail "Pi primary-scope $scenario test printed output: $out"
+  done
+  pass "Pi watcher stays inert in linked task worktrees and arms valid secondmate homes"
 }
 
 test_pi_extension_distinguishes_lock_refusal_states() {
@@ -980,9 +1129,11 @@ test_tracked_extension_present_and_self_hashing
 test_spawn_template_mentions_pi_watch_placeholder
 test_pi_extension_reports_external_healthy_watcher
 test_pi_tool_returns_agent_tool_result
+test_pi_tool_waits_for_verified_readiness
 test_pi_process_exit_cleanup_listener_lifecycle
 test_pi_process_exit_cleanup_stops_arm_child
 test_pi_resume_session_recovers_only_reclaimable_locks
+test_pi_extension_respects_primary_scope
 test_pi_extension_distinguishes_lock_refusal_states
 test_opencode_primary_watch_plugin_static_wiring
 test_opencode_plugin_package_boundary_is_explicit_esm
