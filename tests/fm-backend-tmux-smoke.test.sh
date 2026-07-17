@@ -48,6 +48,8 @@ TARGET="$SESSION:$WINDOW"
 
 tmux new-session -d -s "$SESSION" -x 200 -y 50 \
   || fail "real tmux: new-session failed"
+tmux set-option -g default-command "$BASH --noprofile --norc" \
+  || fail "real tmux: failed to pin the smoke-test shell"
 fm_backend_tmux_create_task "$SESSION" "$WINDOW" "$HOME" \
   || fail "fm_backend_tmux_create_task failed to create the task window"
 tmux list-windows -t "$SESSION" -F '#{window_name}' | grep -qx "$WINDOW" \
