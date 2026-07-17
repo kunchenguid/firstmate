@@ -18,12 +18,21 @@ LAB="$ROOT/.pi-live-e2e.$$"
 PROJECT="$LAB/project"
 HOME_DIR="$LAB/fmhome"
 PI_DIR="$LAB/pi-agent"
+PI_SESSION_DIR="$PI_DIR/sessions"
+PI_SESSION_ID=11111111-1111-4111-8111-111111111111
+PI_LAUNCHER="$LAB/run-pi-resume.sh"
+PI_CONFIG_SOURCE=${FM_PI_LIVE_E2E_AGENT_DIR:-$HOME/.pi/agent}
 PI_VERSION=$(pi --version)
 
 fail() {
   printf 'not ok - %s\n' "$1" >&2
   exit 1
 }
+
+[ "$PI_VERSION" = 0.80.7 ] || fail "live resume regression requires Pi 0.80.7, found $PI_VERSION"
+for required in auth.json models.json settings.json; do
+  [ -f "$PI_CONFIG_SOURCE/$required" ] || fail "live resume regression requires $PI_CONFIG_SOURCE/$required"
+done
 
 capture() {
   "$TMUX" -L "$SOCKET" capture-pane -p -t "$SESSION" -S -600 2>/dev/null || true
@@ -59,6 +68,16 @@ wait_for_file() {
   local file=$1 attempts=${2:-120} i=0
   while [ "$i" -lt "$attempts" ]; do
     [ -f "$file" ] && return 0
+    sleep 0.5
+    i=$((i + 1))
+  done
+  return 1
+}
+
+wait_for_path_absent() {
+  local path=$1 attempts=${2:-120} i=0
+  while [ "$i" -lt "$attempts" ]; do
+    [ ! -e "$path" ] && return 0
     sleep 0.5
     i=$((i + 1))
   done
@@ -116,21 +135,92 @@ git clone -q "$ROOT" "$PROJECT"
 cp "$ROOT/.pi/extensions/fm-primary-pi-watch.ts" "$PROJECT/.pi/extensions/fm-primary-pi-watch.ts"
 cp "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$PROJECT/.pi/extensions/fm-primary-turnend-guard.ts"
 cp "$ROOT/bin/fm-supervision-instructions.sh" "$PROJECT/bin/fm-supervision-instructions.sh"
-mkdir -p "$HOME_DIR/state" "$HOME_DIR/config" "$PI_DIR"
+mkdir -p "$HOME_DIR/state" "$HOME_DIR/config" "$PI_DIR" "$PI_SESSION_DIR"
+cp "$PI_CONFIG_SOURCE/auth.json" "$PI_CONFIG_SOURCE/models.json" "$PI_CONFIG_SOURCE/settings.json" "$PI_DIR/"
+
+mv "$PROJECT/bin/fm-watch-arm.sh" "$PROJECT/bin/fm-watch-arm-live-e2e-real.sh"
+cat > "$PROJECT/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+set -u
+state=${FM_STATE_OVERRIDE:-$FM_HOME/state}
+expected="$state/.resume-expected-old-pid"
+observed="$state/.resume-lock-before-watcher"
+if [ -f "$expected" ]; then
+  old=$(cat "$expected")
+  current=$(cat "$state/.lock")
+  old_state=dead
+  kill -0 "$old" 2>/dev/null && old_state=live
+  current_comm=$(ps -p "$current" -o comm= 2>/dev/null || true)
+  current_comm=${current_comm##*/}
+  temporary=$(mktemp "$state/.resume-lock-before-watcher.XXXXXX")
+  printf '%s\n%s\n%s\n' "$old_state" "$current" "$current_comm" > "$temporary"
+  mv "$temporary" "$observed"
+  [ "$old_state" = dead ] && [ "$current" != "$old" ] && [ "$current_comm" = pi ] || exit 97
+fi
+exec "$(dirname "$0")/fm-watch-arm-live-e2e-real.sh" "$@"
+SH
+chmod +x "$PROJECT/bin/fm-watch-arm.sh"
+
+cat > "$PI_LAUNCHER" <<'SH'
+#!/usr/bin/env bash
+set -u
+printf '%s\n' "$$" > "$FM_HOME/state/.lock"
+pi --session-dir "$PI_SESSION_DIR" --session-id "$PI_SESSION_ID"
+first_rc=$?
+printf 'FIRST_PI_EXIT=%s\n' "$first_rc"
+[ "$first_rc" -eq 0 ] || exit "$first_rc"
+while [ ! -f "$FM_HOME/state/.resume-now" ]; do sleep 0.1; done
+printf 'PI_RESUME_STARTING=%s\n' "$PI_SESSION_ID"
+pi --session-dir "$PI_SESSION_DIR" --session "$PI_SESSION_ID"
+resumed_rc=$?
+printf 'RESUMED_PI_EXIT=%s\n' "$resumed_rc"
+[ "$resumed_rc" -eq 0 ] || exit "$resumed_rc"
+sleep 300
+SH
+chmod +x "$PI_LAUNCHER"
 
 "$TMUX" -L "$SOCKET" new-session -d -s "$SESSION" -c "$PROJECT" \
-  "env PI_CODING_AGENT_DIR='$PI_DIR' FM_HOME='$HOME_DIR' FM_ROOT_OVERRIDE='$PROJECT' FM_POLL=1 FM_SIGNAL_GRACE=0 FM_HEARTBEAT=600 PI_OFFLINE=1 bash -lc 'printf \"%s\\n\" \"\$\$\" > \"\$FM_HOME/state/.lock\"; pi; rc=\$?; printf \"PI_EXIT=%s\\n\" \"\$rc\"; sleep 300'"
+  "env PI_CODING_AGENT_DIR='$PI_DIR' PI_SESSION_DIR='$PI_SESSION_DIR' PI_SESSION_ID='$PI_SESSION_ID' FM_HOME='$HOME_DIR' FM_ROOT_OVERRIDE='$PROJECT' FM_POLL=1 FM_SIGNAL_GRACE=0 FM_HEARTBEAT=600 PI_OFFLINE=1 '$PI_LAUNCHER'"
 
 wait_for_text "Trust project folder?" 40 || fail "Pi trust prompt did not appear"
 "$TMUX" -L "$SOCKET" send-keys -t "$SESSION" Enter
 wait_for_text "fm-primary-turnend-guard.ts" 60 || fail "Pi primary extensions did not load"
 wait_for_file "$HOME_DIR/state/.watch.lock/pid" 60 || fail "Pi session_start did not automatically arm supervision"
-session_lock_pid=$(cat "$HOME_DIR/state/.lock")
-session_lock_comm=$(ps -p "$session_lock_pid" -o comm= 2>/dev/null || true)
-[ "${session_lock_comm##*/}" = pi ] || fail "Pi session_start did not replace the shell fixture lock with the native Pi owner"
+initial_pi_pid=$(cat "$HOME_DIR/state/.lock")
+initial_pi_comm=$(ps -p "$initial_pi_pid" -o comm= 2>/dev/null || true)
+[ "${initial_pi_comm##*/}" = pi ] || fail "Pi session_start did not replace the shell fixture lock with the native Pi owner"
+initial_watcher_pid=$(cat "$HOME_DIR/state/.watch.lock/pid")
+initial_arm_pid=$(ps -p "$initial_watcher_pid" -o ppid= | tr -d ' ')
+[ -n "$initial_arm_pid" ] || fail "initial watcher parent was not live"
 
 send_prompt "Use the bash tool to run printf PI_E2E_BASH_ONE. Then reply exactly BASH-ONE."
 wait_for_exact_line "BASH-ONE" || fail "first bash turn did not complete"
+session_file=$(find "$PI_SESSION_DIR" -maxdepth 1 -type f -name "*_${PI_SESSION_ID}.jsonl" | head -1)
+[ -n "$session_file" ] || fail "Pi did not persist the session selected for native resume"
+
+"$TMUX" -L "$SOCKET" send-keys -t "$SESSION" -l '/quit'
+sleep 1
+"$TMUX" -L "$SOCKET" send-keys -t "$SESSION" Enter
+wait_for_text "FIRST_PI_EXIT=0" 60 || fail "initial Pi session did not exit cleanly"
+wait_pid_dead "$initial_pi_pid" || fail "initial native Pi owner survived clean exit"
+wait_pid_dead "$initial_watcher_pid" || fail "initial watcher survived clean Pi exit"
+wait_pid_dead "$initial_arm_pid" || fail "initial arm child survived clean Pi exit"
+wait_for_path_absent "$HOME_DIR/state/.watch.lock" 60 || fail "initial watcher lock survived clean Pi exit"
+[ "$(cat "$HOME_DIR/state/.lock")" = "$initial_pi_pid" ] || fail "initial native Pi PID was not left in the session lock"
+
+printf '%s\n' "$initial_pi_pid" > "$HOME_DIR/state/.resume-expected-old-pid"
+: > "$HOME_DIR/state/.resume-now"
+wait_for_text "PI_RESUME_STARTING=$PI_SESSION_ID" 60 || fail "native Pi resume command did not start"
+wait_for_file "$HOME_DIR/state/.resume-lock-before-watcher" 60 || fail "resume watcher boundary was not observed"
+resume_old_state=$(sed -n '1p' "$HOME_DIR/state/.resume-lock-before-watcher")
+resumed_pi_pid=$(sed -n '2p' "$HOME_DIR/state/.resume-lock-before-watcher")
+resumed_pi_comm=$(sed -n '3p' "$HOME_DIR/state/.resume-lock-before-watcher")
+[ "$resume_old_state" = dead ] || fail "old native Pi owner was still live before resumed watcher startup"
+[ "$resumed_pi_pid" != "$initial_pi_pid" ] || fail "native Pi resume did not replace the dead session lock owner"
+[ "$resumed_pi_comm" = pi ] || fail "resumed session lock owner was not native Pi"
+[ "$(cat "$HOME_DIR/state/.lock")" = "$resumed_pi_pid" ] || fail "session lock changed after resume reclamation"
+wait_for_file "$HOME_DIR/state/.watch.lock/pid" 60 || fail "resumed Pi did not arm supervision after lock reclamation"
+
 send_prompt "Use the read tool to read the first five lines of README.md. Then reply exactly READ-ONE."
 wait_for_exact_line "READ-ONE" || fail "read turn did not complete"
 send_prompt "Use the bash tool to run printf PI_E2E_BASH_TWO. Then reply exactly BASH-TWO."
@@ -161,8 +251,9 @@ arm_pid=$(ps -p "$watcher_pid" -o ppid= | tr -d ' ')
 "$TMUX" -L "$SOCKET" send-keys -t "$SESSION" -l '/quit'
 sleep 1
 "$TMUX" -L "$SOCKET" send-keys -t "$SESSION" Enter
-wait_for_text "PI_EXIT=0" 60 || fail "Pi did not exit cleanly"
+wait_for_text "RESUMED_PI_EXIT=0" 60 || fail "resumed Pi did not exit cleanly"
+wait_pid_dead "$resumed_pi_pid" || fail "resumed native Pi owner survived clean exit"
 wait_pid_dead "$watcher_pid" || fail "watcher child survived clean Pi exit"
 wait_pid_dead "$arm_pid" || fail "arm child survived clean Pi exit"
 
-printf 'ok - Pi %s live E2E reclaimed the native lock, auto-armed, woke, re-armed, and cleaned up on exit\n' "$PI_VERSION"
+printf 'ok - Pi %s live E2E created, exited, resumed, reclaimed before watcher startup, woke, re-armed, and cleaned up\n' "$PI_VERSION"

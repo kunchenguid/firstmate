@@ -35,4 +35,10 @@ Command run: `bash tests/fm-session-lock.test.sh`.
 Observed output included `ok - native Pi comm and argv are classified as a live holder`, `ok - a verified live other holder remains byte-for-byte unchanged`, and `ok - serialized concurrent contenders produce exactly one winner`.
 Command run: `bash tests/fm-pi-watch-extension.test.sh`.
 Observed output included `ok - Pi session_start reclaims missing/dead locks, refuses live other, and idempotently arms owned locks` and `ok - Pi watcher distinguishes verified competitor, acquisition failure, and changed ownership`.
-The opt-in interactive fixture now expects native Pi ownership plus automatic first arm on `session_start`; it remains isolated behind `FM_PI_LIVE_E2E=1`.
+
+Verification on 2026-07-17 used native Pi 0.80.7 with an isolated saved session, writable copies of the existing Pi authentication and model configuration, `PI_CODING_AGENT_DIR`, `FM_HOME`, project clone, and tmux socket.
+Command run: `FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh`.
+The fixture created a saved session with `--session-id`, exited while leaving the dead native Pi PID in `.lock`, and resumed that exact session with `--session`.
+At the boundary before the real watcher arm script ran, the old PID was dead and `.lock` already named the new native Pi process.
+Observed output: `ok - Pi 0.80.7 live E2E created, exited, resumed, reclaimed before watcher startup, woke, re-armed, and cleaned up`.
+The opt-in interactive fixture remains isolated behind `FM_PI_LIVE_E2E=1`.
