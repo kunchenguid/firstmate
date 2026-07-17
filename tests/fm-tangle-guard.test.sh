@@ -85,7 +85,8 @@ test_guard_banner() {
   assert_contains "$out" "checkout main" "guard banner did not print the restore remediation"
   out=$(FM_GUARD_READ_ONLY=1 run_guard "$repo")
   assert_contains "$out" "WORKTREE TANGLE" "read-only guard did not keep the tangle alarm"
-  assert_contains "$out" "read-only session must leave restore work" "read-only guard did not explain restore ownership"
+  assert_contains "$out" "read-only session must not restore it without the fleet lock" "read-only guard did not explain restore safety"
+  assert_not_contains "$out" "session holding the fleet lock" "read-only guard invented a current lock holder"
   assert_not_contains "$out" "checkout main" "read-only guard printed a state-changing restore command"
   pass "fm-guard: bordered tangle banner fires only for a feature branch and suppresses repair commands in read-only mode"
 }
@@ -114,7 +115,8 @@ test_bootstrap_line() {
   assert_contains "$out" "checkout main" "bootstrap TANGLE line lacked the restore remediation"
   out=$(FM_ROOT_OVERRIDE="$repo" FM_HOME="$repo" FM_BOOTSTRAP_DETECT_ONLY=1 "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null | grep '^TANGLE:' || true)
   assert_contains "$out" "fm/tangle-bb2" "detect-only bootstrap did not report the tangled branch"
-  assert_contains "$out" "read-only session must leave restore work" "detect-only bootstrap did not explain restore ownership"
+  assert_contains "$out" "read-only session must not restore it without the fleet lock" "detect-only bootstrap did not explain restore safety"
+  assert_not_contains "$out" "session holding the fleet lock" "detect-only bootstrap invented a current lock holder"
   assert_not_contains "$out" "checkout main" "detect-only bootstrap printed a state-changing restore command"
   pass "fm-bootstrap: TANGLE problem line fires only for a feature branch and suppresses repair commands in detect-only mode"
 }

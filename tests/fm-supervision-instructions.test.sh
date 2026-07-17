@@ -59,7 +59,8 @@ test_repair_lines() {
   assert_contains "$out" "bin/fm-watch-checkpoint.sh --seconds 7" "x-mode codex repair line lost the checkpoint helper"
 
   out=$(FM_HOME="$home" "$RENDER" --harness opencode --read-only 1 --repair-line)
-  assert_contains "$out" "session holding the fleet lock" "read-only repair line missing"
+  assert_contains "$out" "requires a session that has acquired the fleet lock" "read-only repair line missing its ownership requirement"
+  assert_not_contains "$out" "session holding the fleet lock" "read-only repair line invented a current lock holder"
 
   out=$(FM_HOME="$home" "$RENDER" --harness pi --repair-line)
   assert_contains "$out" "Pi tool fm_watch_arm_pi" "pi repair line does not direct the model to the extension-owned tool"

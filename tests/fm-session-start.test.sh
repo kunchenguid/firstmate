@@ -359,15 +359,17 @@ EOF
   wait "$holder_pid" 2>/dev/null || true
 
   expect_code 0 "$status" "fm-session-start.sh must exit 0 even on a lock refusal"
-  assert_contains "$out" "READ-ONLY SESSION" "read-only banner missing on lock refusal"
+  assert_contains "$out" "READ-ONLY SESSION - SESSION LOCK ACQUISITION WAS REFUSED" "read-only banner did not report the generic refusal"
   assert_contains "$out" "another live firstmate session holds the lock" "read-only banner did not surface fm-lock.sh's own error text"
   assert_contains "$out" "Skipping every mutating step" "read-only banner did not explain what was skipped"
-  assert_contains "$out" "skipped (read-only session)" "wake-queue section did not report itself skipped"
+  assert_contains "$out" "remain queued and untouched because this session did not acquire the fleet lock" "wake-queue section did not explain its owner-neutral refusal behavior"
   assert_contains "$out" "WATCHER DOWN - SUPERVISION IS OFF" "read-only guard did not surface watcher-liveness alarm"
-  assert_contains "$out" "queued wakes pending - left untouched for the session holding the fleet lock" "read-only guard did not leave queued wakes to the lock holder"
+  assert_contains "$out" "queued wakes pending - left untouched because this session did not acquire the fleet lock" "read-only guard did not leave queued wakes untouched"
   assert_contains "$out" "TANGLE: primary checkout on feature branch 'fm/read-only-tangle'" "read-only bootstrap did not surface the tangle diagnostic"
-  assert_contains "$out" "read-only session must leave restore work" "read-only tangle diagnostic did not explain restore ownership"
+  assert_contains "$out" "read-only session must not restore it without the fleet lock" "read-only tangle diagnostic did not explain restore safety"
   assert_contains "$out" "Stay read-only: do not arm" "read-only next step did not block direct watcher repair"
+  assert_contains "$out" "Mutable follow-up" "read-only next step omitted mutable follow-up guidance"
+  assert_contains "$out" "requires a session that has acquired the lock" "read-only next step omitted its ownership requirement"
   assert_not_contains "$out" "drain them with bin/fm-wake-drain.sh" "read-only guard printed a mutating drain instruction"
   assert_not_contains "$out" "After draining queued wakes" "read-only guard printed a drain-then-rearm instruction"
   assert_not_contains "$out" "run bin/fm-watch-arm.sh" "read-only guard printed a mutating watcher-arm instruction"
@@ -389,6 +391,35 @@ EOF
   assert_contains "$out" "NEXT STEP" "closing reminder missing on the read-only path"
 
   pass "a lock refusal prints a loud read-only banner, skips every mutating step, and still completes the digest"
+}
+
+test_malformed_lock_refusal_does_not_invent_live_owner() {
+  local rec root home fakebin out status
+  rec=$(new_world malformed-lock-refusal)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  printf '%s\n' malformed > "$home/state/.lock"
+  printf 'window=firstmate:fm-malformed\nkind=ship\n' > "$home/state/malformed.meta"
+  append_wake "$home/state" signal malformed "done: queued before malformed-lock refusal" || fail "seed malformed-lock wake failed"
+
+  status=0
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH") || status=$?
+
+  expect_code 0 "$status" "fm-session-start.sh must complete its digest after a malformed-lock refusal"
+  assert_contains "$out" "READ-ONLY SESSION - SESSION LOCK ACQUISITION WAS REFUSED" "malformed-lock banner did not report the generic refusal"
+  assert_contains "$out" "error: session lock is malformed; ownership was not changed" "malformed-lock banner lost fm-lock.sh's exact error"
+  assert_contains "$out" "remain queued and untouched because this session did not acquire the fleet lock" "malformed-lock queue guidance did not remain owner-neutral"
+  assert_contains "$out" "Watcher repair requires a session that has acquired the fleet lock" "malformed-lock repair guidance did not remain owner-neutral"
+  assert_contains "$out" "Mutable follow-up" "malformed-lock next step omitted mutable follow-up guidance"
+  assert_contains "$out" "requires a session that has acquired the lock" "malformed-lock next step did not remain owner-neutral"
+  assert_not_contains "$out" "ANOTHER LIVE FIRSTMATE SESSION" "malformed-lock banner invented a live owner"
+  assert_not_contains "$out" "another live firstmate session" "malformed-lock detail invented a live owner"
+  assert_not_contains "$out" "session holding the fleet lock" "malformed-lock helper guidance invented a current lock holder"
+
+  pass "a malformed-lock refusal stays read-only without inventing a live owner"
 }
 
 # --- output ordering ----------------------------------------------------------
@@ -903,6 +934,7 @@ EOF
 
 test_context_digest_absent_empty_present
 test_lock_refusal_read_only_path
+test_malformed_lock_refusal_does_not_invent_live_owner
 test_output_ordering_diagnostics_lead
 test_herdr_backend_diagnostics_follow_real_session_start
 test_status_tail_bounding
