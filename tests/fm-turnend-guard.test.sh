@@ -169,7 +169,7 @@ make_secondmate_linked_home_dir() {
 run_hook() {
   local dir=$1 stop_active=$2 home
   home=$(cd "$dir" && pwd)
-  printf '{"stop_hook_active":%s}' "$stop_active" | CLAUDECODE=1 FM_HOME="$home" bash "$dir/bin/fm-turnend-guard.sh" 2>&1
+  printf '{"stop_hook_active":%s}' "$stop_active" | env -u CURSOR_AGENT CLAUDECODE=1 FM_HOME="$home" bash "$dir/bin/fm-turnend-guard.sh" 2>&1
 }
 
 nonexistent_pid() {
@@ -288,7 +288,7 @@ test_hook_blocks_from_fm_home_state() {
   home="$TMP_ROOT/hook-fm-home-op"
   mkdir -p "$home/state"
   : > "$home/state/task1.meta"
-  out=$(printf '{"stop_hook_active":false}' | CLAUDECODE=1 FM_HOME="$home" bash "$dir/bin/fm-turnend-guard.sh" 2>&1); status=$?
+  out=$(printf '{"stop_hook_active":false}' | env -u CURSOR_AGENT CLAUDECODE=1 FM_HOME="$home" bash "$dir/bin/fm-turnend-guard.sh" 2>&1); status=$?
   expect_code 2 "$status" "hook must inspect the active FM_HOME state dir"
   assert_contains "$out" "$REQUIRED_REASON" "block reason must contain the exact required instruction"
   pass "fm-turnend-guard: blocks from active FM_HOME state, not only repo-root state"
@@ -326,7 +326,7 @@ test_hook_uses_state_override() {
   state="$TMP_ROOT/hook-state-override-active"
   mkdir -p "$home/state" "$state"
   : > "$state/task1.meta"
-  out=$(printf '{"stop_hook_active":false}' | CLAUDECODE=1 FM_HOME="$home" FM_STATE_OVERRIDE="$state" bash "$dir/bin/fm-turnend-guard.sh" 2>&1); status=$?
+  out=$(printf '{"stop_hook_active":false}' | env -u CURSOR_AGENT CLAUDECODE=1 FM_HOME="$home" FM_STATE_OVERRIDE="$state" bash "$dir/bin/fm-turnend-guard.sh" 2>&1); status=$?
   expect_code 2 "$status" "hook must let FM_STATE_OVERRIDE win over FM_HOME/state"
   assert_contains "$out" "$REQUIRED_REASON" "block reason must contain the exact required instruction"
   pass "fm-turnend-guard: uses FM_STATE_OVERRIDE ahead of FM_HOME/state"
@@ -913,6 +913,37 @@ test_hook_silent_with_live_lock_and_fresh_beacon
 test_hook_blocks_with_live_lock_and_stale_beacon
 test_hook_blocks_when_unhealthy_in_primary
 test_hook_blocks_from_fm_home_state
+test_cursor_hooks_register_stop_and_shell() {
+  local hooks stop_cmd shell_cmd
+  hooks="$ROOT/.cursor/hooks.json"
+  [ -f "$hooks" ] || fail "tracked .cursor/hooks.json is missing"
+  [ -x "$ROOT/bin/fm-cursor-stop.sh" ] || fail "bin/fm-cursor-stop.sh must be executable"
+  [ -x "$ROOT/bin/fm-cursor-before-shell.sh" ] || fail "bin/fm-cursor-before-shell.sh must be executable"
+  stop_cmd=$(jq -r '.hooks.stop[0].command // empty' "$hooks")
+  shell_cmd=$(jq -r '.hooks.beforeShellExecution[0].command // empty' "$hooks")
+  [ -n "$stop_cmd" ] || fail "stop hook command is missing from .cursor/hooks.json"
+  [ -n "$shell_cmd" ] || fail "beforeShellExecution hook command is missing from .cursor/hooks.json"
+  assert_contains "$stop_cmd" 'fm-cursor-stop.sh' "cursor stop hook must invoke fm-cursor-stop.sh"
+  assert_contains "$shell_cmd" 'fm-cursor-before-shell.sh' "cursor shell hook must invoke fm-cursor-before-shell.sh"
+  loop=$(jq -r '.hooks.stop[0].loop_limit // empty' "$hooks")
+  [ "$loop" = "1" ] || fail "cursor stop hook must set loop_limit 1, got: $loop"
+  pass ".cursor/hooks.json: stop + beforeShellExecution wire primary guard and seatbelts"
+}
+
+test_cursor_stop_adapter_blocks_once() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/cursor-stop-block")
+  : > "$dir/state/task1.meta"
+  # No live watcher -> guard should block
+  out=$(printf '{"stop_hook_active":false}\n' | CURSOR_AGENT=1 FM_HOME="$dir" FM_ROOT_OVERRIDE="$dir" "$ROOT/bin/fm-cursor-stop.sh" 2>&1) && status=0 || status=$?
+  [ "$status" -eq 2 ] || fail "expected exit 2 when watcher missing, got $status out=$out"
+  assert_contains "$out" 'followup_message' "cursor stop adapter should emit followup_message JSON on block"
+  # Loop guard: stop_hook_active true must allow
+  out=$(printf '{"stop_hook_active":true}\n' | CURSOR_AGENT=1 FM_HOME="$dir" FM_ROOT_OVERRIDE="$dir" "$ROOT/bin/fm-cursor-stop.sh" 2>&1) && status=0 || status=$?
+  [ "$status" -eq 0 ] || fail "expected exit 0 when stop_hook_active, got $status out=$out"
+  pass "fm-cursor-stop.sh: blocks once then allows loop-guarded retry"
+}
+
 test_hook_x_mode_reason_sources_cadence
 test_hook_ignores_repo_state_when_fm_home_set
 test_hook_uses_state_override
@@ -941,3 +972,5 @@ test_pi_extension_forces_followup
 test_pi_extension_injects_once_per_logical_agent_run
 test_pi_extension_retries_after_followup_delivery_failure
 test_grok_hook_invokes_adapter
+test_cursor_hooks_register_stop_and_shell
+test_cursor_stop_adapter_blocks_once

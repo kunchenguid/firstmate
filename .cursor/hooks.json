@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "hooks": {
+    "beforeShellExecution": [
+      {
+        "command": "./bin/fm-cursor-before-shell.sh"
+      }
+    ],
+    "stop": [
+      {
+        "command": "./bin/fm-cursor-stop.sh",
+        "loop_limit": 1
+      }
+    ]
+  }
+}

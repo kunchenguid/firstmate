@@ -133,6 +133,19 @@ test_pi_snippet_uses_effective_extension_path() {
   pass "pi supervision snippet renders the effective extension path"
 }
 
+test_cursor_is_background_notify() {
+  local out
+  out=$("$RENDER" --harness cursor)
+  assert_contains "$out" "Mode: Cursor background-notify supervision." "cursor snippet missing background-notify mode"
+  assert_contains "$out" "block_until_ms: 0" "cursor snippet missing Shell background instruction"
+  assert_contains "$out" "bin/fm-watch-arm.sh" "cursor snippet missing watcher arm"
+  assert_not_contains "$out" "bin/fm-watch-checkpoint.sh --seconds" "cursor snippet must not instruct Codex-style checkpoint arms"
+  assert_not_contains "$out" "__FM_X_MODE_ENV" "renderer leaked an x-mode path placeholder"
+  out=$("$RENDER" --harness cursor --repair-line)
+  assert_contains "$out" "Cursor Shell background task" "cursor repair line is not background-notify shaped"
+  pass "cursor supervision is Claude-shaped background notify with Cursor Hooks backstop"
+}
+
 test_selected_harness_block_only
 test_unknown_fallback
 test_conditional_stanzas
@@ -141,3 +154,4 @@ test_ordinary_wake_lines_are_distinct_from_repair
 test_grok_is_background_notify
 test_grok_command_sources_effective_config
 test_pi_snippet_uses_effective_extension_path
+test_cursor_is_background_notify

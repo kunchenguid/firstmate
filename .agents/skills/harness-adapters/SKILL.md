@@ -1,6 +1,6 @@
 ---
 name: harness-adapters
-description: Agent-only reference for firstmate harness operations. Use before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter. Contains verified facts for claude, codex, opencode, pi, and grok.
+description: Agent-only reference for firstmate harness operations. Use before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter. Contains verified facts for claude, codex, opencode, pi, grok, and cursor.
 user-invocable: false
 metadata:
   internal: true
@@ -313,8 +313,13 @@ Submit hazard and its handling (verified 2026-07-05): a `/`-command or any steer
 `fm_tmux_submit_core`'s cursor-row-read retry (`bin/fm-tmux-lib.sh`) recognizes the composer's post-submit empty state and does not false-retry; a plain steer landed and was processed on the first landed Enter, so no bespoke settle is needed.
 Cursor's idle `→ Add a follow-up` footer sits below the composer, not on the cursor row, so an idle cursor pane reads as an empty composer without a `FM_COMPOSER_IDLE_RE` override.
 
-Turn-end hook: none is wired.
-cursor-agent is Claude-Code-compatible but its interactive Stop/turn-end hook surface is unverified, so firstmate does not assume one and relies on the busy signature (provably-working check) plus stale-pane detection instead.
+Crewmate turn-end hook: none is wired for per-task Cursor panes.
+cursor-agent's interactive Stop/turn-end surface for crewmates remains unverified, so firstmate relies on the busy signature (provably-working check) plus stale-pane detection for crew supervision.
+
+**Primary-session guard fact (wired 2026-07-17).**
+Tracked `.cursor/hooks.json` registers `stop` -> `bin/fm-cursor-stop.sh` (shared `fm-turnend-guard.sh`, exit 2 blocks once with `loop_limit: 1`) and `beforeShellExecution` -> `bin/fm-cursor-before-shell.sh` (arm + cd seatbelts).
+Primary watcher protocol is Claude-shaped background-notify: arm `bin/fm-watch-arm.sh` as its own Cursor Shell background task (`block_until_ms: 0`), never shell `&`.
+Rendered from `docs/supervision-protocols/cursor.md` by `bin/fm-supervision-instructions.sh`.
 
 ## Follow-up queue thrash (cursor and similar)
 
