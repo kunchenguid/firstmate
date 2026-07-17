@@ -95,6 +95,9 @@ async function isPrimaryRoot(root, home) {
 function shouldArm(paths) {
   if (existsSync(`${paths.state}/.afk`)) return false;
   if (existsSync(`${paths.config}/x-mode.env`)) return true;
+  const topicData = process.env.FM_TOPIC_DATA_DIR || `${paths.home}/data/fm-telegram-topics`;
+  if (process.env.FM_TOPIC_CONFIG && existsSync(process.env.FM_TOPIC_CONFIG)) return true;
+  if (existsSync(`${topicData}/config.env`) || existsSync(`${topicData}/test-bot-token.txt`)) return true;
   try {
     return readdirSync(paths.state).some((name) => name.endsWith(".meta"));
   } catch {

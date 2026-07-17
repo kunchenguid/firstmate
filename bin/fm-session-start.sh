@@ -304,6 +304,13 @@ AFK_PRESENT=0
 [ -e "$STATE/.afk" ] && AFK_PRESENT=1
 X_MODE_PRESENT=0
 [ -f "$CONFIG/x-mode.env" ] && X_MODE_PRESENT=1
+TOPIC_BOARD_PRESENT=0
+TOPIC_DATA_PRESENT="${FM_TOPIC_DATA_DIR:-$DATA/fm-telegram-topics}"
+if { [ -n "${FM_TOPIC_CONFIG:-}" ] && [ -f "$FM_TOPIC_CONFIG" ]; } \
+  || [ -f "$TOPIC_DATA_PRESENT/config.env" ] \
+  || [ -f "$TOPIC_DATA_PRESENT/test-bot-token.txt" ]; then
+  TOPIC_BOARD_PRESENT=1
+fi
 
 if [ "$PRIMARY_HARNESS" = pi ]; then
   PI_EXT="$FM_ROOT/.pi/extensions/fm-primary-pi-watch.ts"
@@ -322,7 +329,8 @@ fi
   --harness "$PRIMARY_HARNESS" \
   --read-only "$READ_ONLY" \
   --afk "$AFK_PRESENT" \
-  --x-mode "$X_MODE_PRESENT"
+  --x-mode "$X_MODE_PRESENT" \
+  --topic-board "$TOPIC_BOARD_PRESENT"
 
 # --- 4. context digest -----------------------------------------------------
 section "CONTEXT"
@@ -402,10 +410,10 @@ load /afk and ensure the daemon is running, because the daemon owns watcher
 supervision.
 
 EOF
-elif [ -f "$CONFIG/x-mode.env" ]; then
+elif [ -f "$CONFIG/x-mode.env" ] || [ "$TOPIC_BOARD_PRESENT" -eq 1 ]; then
   cat <<EOF
 Follow the supervision operating instructions block above for harness '$PRIMARY_HARNESS'.
-X mode is active, so the emitted block's cadence instruction applies.
+Any active X-mode cadence and topic-board supervision instructions in that block apply.
 This script never starts supervision itself.
 
 EOF

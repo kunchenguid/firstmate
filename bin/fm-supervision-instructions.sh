@@ -14,12 +14,13 @@ HARNESS=
 READ_ONLY=0
 AFK=0
 X_MODE=0
+TOPIC_BOARD=0
 REPAIR_LINE=0
 QUEUE_PENDING=0
 
 usage() {
   cat <<'EOF'
-Usage: fm-supervision-instructions.sh [--harness <name>] [--read-only 0|1] [--afk 0|1] [--x-mode 0|1] [--repair-line] [--queue-pending 0|1]
+Usage: fm-supervision-instructions.sh [--harness <name>] [--read-only 0|1] [--afk 0|1] [--x-mode 0|1] [--topic-board 0|1] [--repair-line] [--queue-pending 0|1]
 
 Print the current primary harness's supervision operating instructions.
 With --repair-line, print one concise repair instruction for guard and hook messages.
@@ -53,6 +54,11 @@ while [ "$#" -gt 0 ]; do
     --x-mode)
       [ "$#" -gt 1 ] || { echo "error: --x-mode requires 0 or 1" >&2; exit 2; }
       X_MODE=$(bool_value "$2")
+      shift 2
+      ;;
+    --topic-board)
+      [ "$#" -gt 1 ] || { echo "error: --topic-board requires 0 or 1" >&2; exit 2; }
+      TOPIC_BOARD=$(bool_value "$2")
       shift 2
       ;;
     --queue-pending)
@@ -90,6 +96,7 @@ checkpoint_seconds=${FM_CODEX_WATCH_CHECKPOINT:-180}
 pi_ext="$FM_ROOT/.pi/extensions/fm-primary-pi-watch.ts"
 pi_turnend_ext="$FM_ROOT/.pi/extensions/fm-primary-turnend-guard.ts"
 x_mode_env="$CONFIG/x-mode.env"
+topic_data="${FM_TOPIC_DATA_DIR:-$FM_HOME/data/fm-telegram-topics}"
 
 shell_quote() {
   printf "'"
@@ -101,6 +108,9 @@ x_mode_env_sh=$(shell_quote "$x_mode_env")
 
 if [ "$X_MODE" -eq 0 ] && [ -f "$x_mode_env" ]; then
   X_MODE=1
+fi
+if [ "$TOPIC_BOARD" -eq 0 ] && { { [ -n "${FM_TOPIC_CONFIG:-}" ] && [ -f "$FM_TOPIC_CONFIG" ]; } || [ -f "$topic_data/config.env" ] || [ -f "$topic_data/test-bot-token.txt" ]; }; then
+  TOPIC_BOARD=1
 fi
 
 render_snippet() {
@@ -178,6 +188,11 @@ if [ "$X_MODE" -eq 1 ]; then
   printf '%s%s%s\n' '- X mode: active; source ' "$x_mode_env" ' before launching any watcher process so the 30s cadence is inherited.'
 else
   printf '%s\n' '- X mode: inactive; use the default watcher cadence.'
+fi
+if [ "$TOPIC_BOARD" -eq 1 ]; then
+  printf '%s\n' '- Telegram topic board: active; keep one live supervision cycle even when no project work is in flight.'
+else
+  printf '%s\n' '- Telegram topic board: inactive.'
 fi
 printf '%s\n' '- After every handled wake, resume this emitted harness protocol instead of following a hardcoded background-arm recipe.'
 printf '\n'

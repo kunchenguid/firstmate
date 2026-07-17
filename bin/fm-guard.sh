@@ -5,8 +5,8 @@
 # First, always warn if the firstmate primary checkout (FM_ROOT) is on a named
 # non-default branch, because that means firstmate-on-itself work landed in the
 # primary instead of an isolated worktree.
-# Then, if any task is in flight (a state/<id>.meta exists) and the watcher's
-# liveness beacon (state/.last-watcher-beat, touched every poll cycle) is
+# Then, if any task is in flight or the Telegram topic board is enabled and the
+# watcher's liveness beacon (state/.last-watcher-beat, touched every poll cycle) is
 # missing or older than FM_GUARD_GRACE seconds, prints a loud, clearly delimited
 # banner so the agent cannot skim past it in the tool output of whatever it was
 # doing - the one channel every harness has. The full banner is emitted once per
@@ -140,18 +140,17 @@ if [ -n "$tangle_branch" ]; then
   } >&2
 fi
 
-# Compute in-flight count and watcher-beacon freshness via the shared
-# grace-based predicate (bin/fm-supervision-lib.sh). Only act with tasks in
-# flight; count them so the banner can say how much is riding on an absent
-# watcher.
-fm_supervision_status "$STATE" "$GRACE"
+# Compute supervision demand and watcher-beacon freshness via the shared
+# grace-based predicate (bin/fm-supervision-lib.sh).
+fm_supervision_status "$STATE" "$GRACE" "$FM_HOME"
 in_flight=$FM_SUP_IN_FLIGHT
+topic_board=$FM_SUP_TOPIC_BOARD
 watcher_fresh=$FM_SUP_WATCHER_FRESH
 beacon_desc=$FM_SUP_BEACON_DESC
-if [ "$in_flight" -eq 0 ]; then
-  # Leave the unhealthy state (no work riding on the watcher): clear so a later
-  # in-flight + stale combination is a fresh episode even if the beacon is still
-  # absent with the same key string.
+if [ "$FM_SUP_REQUIRED" = false ]; then
+  # Leave the unhealthy state: clear so a later supervision-required plus stale
+  # combination is a fresh episode even if the beacon is still absent with the
+  # same key string.
   [ "$READ_ONLY" -eq 1 ] || fm_guard_clear_stale_banner
   exit 0
 fi
@@ -177,17 +176,26 @@ if [ "$watcher_fresh" = false ]; then
     "$queue_pending" && queue_arg=1
     x_mode=0
     [ -f "$CONFIG/x-mode.env" ] && x_mode=1
+    topic_arg=0
+    [ "$topic_board" = true ] && topic_arg=1
     fix=$("$SCRIPT_DIR/fm-supervision-instructions.sh" \
       --read-only "$READ_ONLY" \
       --afk "$afk" \
       --x-mode "$x_mode" \
+      --topic-board "$topic_arg" \
       --queue-pending "$queue_arg" \
       --repair-line 2>/dev/null || printf '%s\n' 'Resume supervision according to the session-start operating block.')
     rule='━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'
     {
       printf '●%s\n' "$rule"
       printf '●  WATCHER DOWN - SUPERVISION IS OFF\n'
-      printf '●  %s task(s) in flight, but no watcher has a fresh beacon (last beat: %s, grace %ss).\n' "$in_flight" "$beacon_desc" "$GRACE"
+      if [ "$topic_board" = true ] && [ "$in_flight" -gt 0 ]; then
+        printf '●  %s task(s) and the Telegram topic board need supervision, but no watcher has a fresh beacon (last beat: %s, grace %ss).\n' "$in_flight" "$beacon_desc" "$GRACE"
+      elif [ "$topic_board" = true ]; then
+        printf '●  The Telegram topic board needs supervision, but no watcher has a fresh beacon (last beat: %s, grace %ss).\n' "$beacon_desc" "$GRACE"
+      else
+        printf '●  %s task(s) in flight, but no watcher has a fresh beacon (last beat: %s, grace %ss).\n' "$in_flight" "$beacon_desc" "$GRACE"
+      fi
       if [ "$READ_ONLY" -eq 1 ]; then
         printf '●  This read-only session should report the lapse, not repair it.\n'
       else

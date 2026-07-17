@@ -34,6 +34,9 @@
 #   check: <script>: <out> authenticated check output, always actionable
 #   check: rejected unauthenticated state checks: <paths>
 #                          unsafe state checks were refused without execution
+#   check: topic-board: external event queued
+#                          the durable topic listener appended its own check
+#                          record, then used the home-scoped USR1 fast path
 #   heartbeat              fleet-scan backstop found an unsurfaced captain-relevant
 #                          status, unless afk is active
 # For normal supervision, resume the session-start primary-harness protocol
@@ -154,6 +157,38 @@ EVENT_CAP_FAIL_MAX=${FM_EVENT_CAP_FAIL_MAX:-3}
 _event_cap_key=""
 _event_cap_ok=0
 _event_cap_fails=0
+FM_ACTIVE_WAIT_PID=
+FM_ACTIVE_WAIT_PGID=
+FM_ACTIVE_WAIT_OUTPUT=
+
+fm_active_wait_stop() {
+  local pid=${FM_ACTIVE_WAIT_PID:-} pgid=${FM_ACTIVE_WAIT_PGID:-}
+  [ -z "$pgid" ] || kill -TERM -- "-$pgid" 2>/dev/null || true
+  if [ -n "$pid" ]; then
+    kill -TERM "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+  fi
+  FM_ACTIVE_WAIT_PID=
+  FM_ACTIVE_WAIT_PGID=
+  if [ -n "${FM_ACTIVE_WAIT_OUTPUT:-}" ]; then
+    rm -f "$FM_ACTIVE_WAIT_OUTPUT" 2>/dev/null || true
+  fi
+  FM_ACTIVE_WAIT_OUTPUT=
+}
+
+# A trapped USR1 interrupts Bash's builtin wait immediately, unlike a direct
+# foreground sleep whose signal trap may be deferred until the whole poll
+# budget elapses.
+fm_interruptible_sleep() {
+  set -m
+  sleep "$1" &
+  FM_ACTIVE_WAIT_PID=$!
+  FM_ACTIVE_WAIT_PGID=$FM_ACTIVE_WAIT_PID
+  set +m
+  wait "$FM_ACTIVE_WAIT_PID" 2>/dev/null || true
+  FM_ACTIVE_WAIT_PID=
+  FM_ACTIVE_WAIT_PGID=
+}
 
 # afk_present: 0 while the away-mode flag exists. When set, the daemon wraps this
 # watcher and owns triage, so the watcher must behave one-shot (enqueue + exit on
@@ -580,7 +615,7 @@ event_wait_or_sleep() {
   done < <(recorded_windows)
 
   if [ "${#windows[@]}" -eq 0 ]; then
-    sleep "$POLL"
+    fm_interruptible_sleep "$POLL"
     return
   fi
 
@@ -596,12 +631,23 @@ event_wait_or_sleep() {
     _event_cap_fails=0
   fi
   if [ "$_event_cap_ok" != 1 ]; then
-    sleep "$POLL"
+    fm_interruptible_sleep "$POLL"
     return
   fi
 
-  rec=$(FM_BACKEND_EVENTS_CAPABILITY_CONFIRMED=1 fm_backend_wait_transition "$first_backend" "$first_session" "$POLL" "$STATE" "${windows[@]}")
+  FM_ACTIVE_WAIT_OUTPUT=$(mktemp "$STATE/.fm-event-wait-output.XXXXXX") || exit 1
+  set -m
+  FM_BACKEND_EVENTS_CAPABILITY_CONFIRMED=1 fm_backend_wait_transition "$first_backend" "$first_session" "$POLL" "$STATE" "${windows[@]}" > "$FM_ACTIVE_WAIT_OUTPUT" &
+  FM_ACTIVE_WAIT_PID=$!
+  FM_ACTIVE_WAIT_PGID=$FM_ACTIVE_WAIT_PID
+  set +m
+  wait "$FM_ACTIVE_WAIT_PID" 2>/dev/null
   rc=$?
+  FM_ACTIVE_WAIT_PID=
+  FM_ACTIVE_WAIT_PGID=
+  rec=$(cat "$FM_ACTIVE_WAIT_OUTPUT" 2>/dev/null || true)
+  rm -f "$FM_ACTIVE_WAIT_OUTPUT" 2>/dev/null || true
+  FM_ACTIVE_WAIT_OUTPUT=
   case "$rc" in
     0)
       _event_cap_fails=0
@@ -613,7 +659,7 @@ event_wait_or_sleep() {
       # pure polling for the rest of this watcher process.
       _event_cap_fails=$((_event_cap_fails + 1))
       [ "$_event_cap_fails" -ge "$EVENT_CAP_FAIL_MAX" ] && _event_cap_ok=0
-      sleep "$POLL"
+      fm_interruptible_sleep "$POLL"
       ;;
     *)
       # 1: a clean full-budget wait with no actionable edge - the reader already
@@ -686,6 +732,7 @@ if ! fm_lock_try_acquire "$WATCH_LOCK"; then
   exit 0
 fi
 watcher_cleanup() {
+  fm_active_wait_stop || return 1
   fm_active_check_stop || return 1
   fm_check_output_cleanup
   fm_custom_check_snapshot_cleanup
@@ -693,6 +740,13 @@ watcher_cleanup() {
 }
 trap watcher_cleanup EXIT
 trap 'exit 1' HUP INT TERM
+# The durable topic listener may append its own wake record, verify this exact
+# home-scoped watcher identity through fm-wake-lib.sh, then send USR1 to shorten
+# notification latency without running an unauthenticated check or waiting for
+# the normal poll cadence.
+# The queue append must happen first because this trap only returns the active
+# supervision mechanism to firstmate; the durable queue remains the authority.
+trap 'wake "check: topic-board: external event queued"' USR1
 # This watcher's own pid, as recorded in the lock by fm_lock_claim (which writes
 # ${BASHPID:-$$} from this same main shell). Read directly, never via a command
 # substitution, so it matches the stored holder pid for the self-eviction check.

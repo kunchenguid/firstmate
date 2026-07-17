@@ -333,6 +333,14 @@ In dry-run, `fm-x-dismiss.sh` records `{request_id, endpoint:"dismiss"}` to the 
 The live answer and follow-up bodies intentionally stay the same shape, including optional `image`; the relay distinguishes them by endpoint, and dismiss stays `{request_id}`.
 These paths need `jq` to build the JSON payload, but they run before token and network checks, so they need neither `FMX_PAIRING_TOKEN` nor `curl`.
 
+## Telegram topic board (data/fm-telegram-topics)
+
+The optional Telegram topic board is enabled when the effective home contains private credentials at `data/fm-telegram-topics/config.env` or the legacy prototype path `data/fm-telegram-topics/test-bot-token.txt`.
+Its durable offset, inbox, answered archive, keyed reply intents, and singleton locks remain under that same gitignored data directory.
+The local `topic-map.json` binds one Telegram group and its thread ids to project names and firstmate routes.
+The tracked [topic-board guide](topic-board.md) owns activation, the systemd service, the lifeline-safety boundary, migration from the prototype check, and the operator runbook.
+The producing scripts' headers and help own exact item and reply-state mechanics.
+
 ## Environment variables
 
 Runtime tuning via environment variables (defaults shown):
@@ -367,6 +375,14 @@ FM_HEARTBEAT=600        # base seconds between heartbeat scans; no-change heartb
 FM_HEARTBEAT_MAX=7200   # heartbeat backoff cap
 FM_CHECK_INTERVAL=300   # seconds between slow checks (authenticated merge polls, custom checks, or X-mode dispatch)
 FM_CHECK_TIMEOUT=30     # seconds allowed per slow check script
+FM_TOPIC_DATA_DIR=      # optional topic-board data directory; defaults to $FM_HOME/data/fm-telegram-topics
+FM_TOPIC_CONFIG=        # optional private topic-board credential file; defaults to config.env, then the legacy test-bot-token.txt
+FM_TOPIC_MAP=           # optional topic map; defaults to $FM_TOPIC_DATA_DIR/topic-map.json
+FM_TOPIC_LIFELINE_CONFIG=   # optional direct-message plugin credential path used only for token-separation validation
+FM_TOPIC_POLL_TIMEOUT=25   # seconds per Telegram getUpdates long poll
+FM_TOPIC_REMIND_SECONDS=300   # seconds before an unanswered topic item is surfaced again
+FM_TOPIC_WATCHER_GRACE=300   # seconds within which the home-scoped watcher beacon must be fresh before the listener signals it
+FM_TOPIC_CURL_BIN=curl  # test seam for Telegram HTTP calls
 FM_CODEX_WATCH_CHECKPOINT=180   # seconds per foreground watcher checkpoint in Codex primary supervision
 FM_CREW_STATE_NM_TIMEOUT=10   # seconds allowed per no-mistakes query inside fm-crew-state.sh
 FM_CREW_STATE_RUNS_LIMIT=200  # recent no-mistakes runs rows scanned when cross-branch attribution falls back from axi status

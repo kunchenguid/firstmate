@@ -77,6 +77,18 @@ test_predicate_queue_pending_flag() {
   pass "fm_supervision_status: FM_SUP_QUEUE_PENDING tracks state/.wake-queue"
 }
 
+test_predicate_topic_board_requires_supervision() {
+  local home="$TMP_ROOT/pred-topic-board" state
+  state="$home/state"
+  mkdir -p "$state" "$home/data/fm-telegram-topics"
+  : > "$home/data/fm-telegram-topics/config.env"
+  fm_supervision_unhealthy "$state" 300 "$home" || fail "predicate did not require a watcher for an active topic board"
+  [ "$FM_SUP_IN_FLIGHT" -eq 0 ] || fail "topic-board predicate invented an in-flight task"
+  [ "$FM_SUP_TOPIC_BOARD" = true ] || fail "topic-board predicate did not expose active topic supervision"
+  [ "$FM_SUP_REQUIRED" = true ] || fail "topic-board predicate did not mark supervision required"
+  pass "fm_supervision_unhealthy: topic board requires supervision with no task in flight"
+}
+
 # --- HOOK: bin/fm-turnend-guard.sh ------------------------------------------
 #
 # Each scenario gets its own directory carrying a copy of the two guard scripts
@@ -202,6 +214,18 @@ test_hook_silent_when_no_work_in_flight() {
   expect_code 0 "$status" "hook must exit 0 with no in-flight work"
   [ -z "$out" ] || fail "hook produced output with no in-flight work: $out"
   pass "fm-turnend-guard: silent no-op with nothing in flight"
+}
+
+test_hook_blocks_for_topic_board_without_inflight_work() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-topic-board")
+  mkdir -p "$dir/data/fm-telegram-topics"
+  : > "$dir/data/fm-telegram-topics/config.env"
+  out=$(run_hook "$dir" false); status=$?
+  expect_code 2 "$status" "hook must block when the topic board is active without a watcher"
+  assert_contains "$out" "Telegram topic board needs supervision" "topic-board-only block did not name the active supervision demand"
+  assert_contains "$out" "$REQUIRED_REASON" "topic-board-only block omitted the harness repair instruction"
+  pass "fm-turnend-guard: active topic board cannot end blind with an empty fleet"
 }
 
 test_hook_blocks_when_fresh_beacon_has_no_live_lock() {
@@ -890,7 +914,9 @@ test_predicate_unhealthy_no_beacon
 test_predicate_unhealthy_stale_beacon
 test_predicate_healthy_fresh_beacon
 test_predicate_queue_pending_flag
+test_predicate_topic_board_requires_supervision
 test_hook_silent_when_no_work_in_flight
+test_hook_blocks_for_topic_board_without_inflight_work
 test_hook_blocks_when_fresh_beacon_has_no_live_lock
 test_hook_blocks_when_dead_lock_has_fresh_beacon
 test_hook_silent_with_live_lock_and_fresh_beacon
