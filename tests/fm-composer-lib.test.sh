@@ -97,7 +97,8 @@ test_idle_placeholder_is_empty() {
   out=$(classify 1 'Type a message...' "$idle")
   [ "$out" = empty ] || fail "the grok idle placeholder should read empty, got '$out'"
   # Placeholder after an agent glyph (post-strip match).
-  out=$(classify 0 '❯ Type a message...' "$idle")
+  out=$(LC_ALL=C LANG=C bash -c '. "$0/bin/fm-composer-lib.sh"; fm_composer_classify_content 0 "$1" "$2"' \
+    "$ROOT" '❯ Type a message...' "$idle")
   [ "$out" = empty ] || fail "the idle placeholder after a glyph should read empty, got '$out'"
   # Without the idle regex it is just text -> pending.
   out=$(classify 1 'Type a message...')

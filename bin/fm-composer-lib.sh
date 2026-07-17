@@ -180,7 +180,7 @@ fm_composer_idle_matches() {
 }
 
 fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [plain_content]
-  local bordered=$1 content=$2 idle_re=${3:-} idle_case=${4:-sensitive} plain_content
+  local bordered=$1 content=$2 idle_re=${3:-} idle_case=${4:-sensitive} plain_content prompt=""
   plain_content=${5:-$content}
   if [ "$bordered" != 1 ] && [ -z "$content" ] && [ -n "$plain_content" ]; then
     case "$plain_content" in
@@ -205,11 +205,16 @@ fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [
   if fm_composer_idle_matches "$content" "$idle_re" "$idle_case"; then
     printf 'empty'; return 0
   fi
-  # Strip a leading prompt glyph, then re-judge the remainder.
+  # Strip the literal prompt bytes so the verdict is independent of locale.
   case "$content" in
-    '❯ '*|'› '*|'> '*|'$ '*|'% '*|'# '*) content=${content#??} ;;
-    '❯'*|'›'*|'>'*|'$'*|'%'*|'#'*) content=${content#?} ;;
+    '❯'*) prompt='❯' ;;
+    '›'*) prompt='›' ;;
+    '>'*) prompt='>' ;;
+    '$'*) prompt='$' ;;
+    '%'*) prompt='%' ;;
+    '#'*) prompt='#' ;;
   esac
+  [ -z "$prompt" ] || content=${content#"$prompt"}
   content="${content#"${content%%[![:space:]]*}"}"
   content="${content%"${content##*[![:space:]]}"}"
   [ -n "$content" ] || { printf 'empty'; return 0; }
