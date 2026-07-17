@@ -162,11 +162,21 @@ FM_ACTIVE_WAIT_PGID=
 FM_ACTIVE_WAIT_OUTPUT=
 
 fm_active_wait_stop() {
-  local pid=${FM_ACTIVE_WAIT_PID:-} pgid=${FM_ACTIVE_WAIT_PGID:-}
-  [ -z "$pgid" ] || kill -TERM -- "-$pgid" 2>/dev/null || true
-  if [ -n "$pid" ]; then
-    kill -TERM "$pid" 2>/dev/null || true
-    wait "$pid" 2>/dev/null || true
+  local pid=${FM_ACTIVE_WAIT_PID:-} pgid=${FM_ACTIVE_WAIT_PGID:-} i rc=0
+  if [ -n "$pid" ] || [ -n "$pgid" ]; then
+    [ -z "$pgid" ] || kill -TERM -- "-$pgid" 2>/dev/null || true
+    [ -z "$pid" ] || kill -TERM "$pid" 2>/dev/null || true
+    i=0
+    while [ -n "$pgid" ] && kill -0 -- "-$pgid" 2>/dev/null && [ "$i" -lt 20 ]; do
+      sleep 0.01
+      i=$((i + 1))
+    done
+    [ -z "$pgid" ] || kill -KILL -- "-$pgid" 2>/dev/null || true
+    [ -z "$pid" ] || kill -KILL "$pid" 2>/dev/null || true
+    [ -z "$pid" ] || wait "$pid" 2>/dev/null || true
+    if [ -n "$pgid" ] && kill -0 -- "-$pgid" 2>/dev/null; then
+      rc=1
+    fi
   fi
   FM_ACTIVE_WAIT_PID=
   FM_ACTIVE_WAIT_PGID=
@@ -174,6 +184,7 @@ fm_active_wait_stop() {
     rm -f "$FM_ACTIVE_WAIT_OUTPUT" 2>/dev/null || true
   fi
   FM_ACTIVE_WAIT_OUTPUT=
+  return $rc
 }
 
 # A trapped USR1 interrupts Bash's builtin wait immediately, unlike a direct
