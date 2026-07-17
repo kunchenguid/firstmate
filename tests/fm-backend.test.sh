@@ -1064,6 +1064,49 @@ test_spawn_autodetect_nesting_resolves_tmux_silently() {
   pass "fm-spawn.sh: auto-detect resolves nested tmux-in-herdr to tmux and stays silent end to end"
 }
 
+test_tmux_session_target_disambiguates_numeric_names() {
+  local out
+  out=$(bash -c '. "$0/bin/fm-tmux-lib.sh"; fm_tmux_session_target firstmate' "$ROOT")
+  [ "$out" = firstmate ] || fail "fm_tmux_session_target should leave non-numeric names unchanged, got '$out'"
+  out=$(bash -c '. "$0/bin/fm-tmux-lib.sh"; fm_tmux_session_target 0' "$ROOT")
+  [ "$out" = '0:' ] || fail "fm_tmux_session_target should suffix numeric session names with colon, got '$out'"
+  out=$(bash -c '. "$0/bin/fm-tmux-lib.sh"; fm_tmux_session_target "0:"' "$ROOT")
+  [ "$out" = '0:' ] || fail "fm_tmux_session_target should not double-suffix, got '$out'"
+  pass "fm_tmux_session_target: numeric session names get trailing colon"
+}
+
+test_tmux_create_task_logs_disambiguated_session() {
+  local fb log
+  fb=$(mktemp -d "${TMPDIR:-/tmp}/fm-tmux-numses.XXXXXX")/fakebin
+  mkdir -p "$fb"
+  log="$TMP_ROOT/tmux-numses.log"
+  : > "$log"
+  cat > "$fb/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+{ printf 'tmux'; for a in "$@"; do printf '\x1f%s' "$a"; done; printf '\n'; } >> "${FM_TMUX_LOG:?}"
+case "${1:-}" in
+  list-windows) exit 0 ;;
+  new-window)
+    for a in "$@"; do
+      [ "$a" = '0:' ] || continue
+      exit 0
+    done
+    echo "error: new-window missing disambiguated session target 0:" >&2
+    exit 1
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$fb/tmux"
+  PATH="$fb:$PATH" FM_TMUX_LOG="$log" bash -c \
+    '. "$0/bin/fm-backend.sh"; fm_backend_source tmux; fm_backend_tmux_create_task 0 fm-numtest /tmp' "$ROOT" \
+    || fail "fm_backend_tmux_create_task should succeed with numeric session name"
+  assert_contains "$(cat "$log")" $'\x1f''new-window'$'\x1f''-d'$'\x1f''-t'$'\x1f''0:' \
+    "new-window should target session 0: not bare 0"
+  pass "fm_backend_tmux_create_task: new-window uses disambiguated numeric session target"
+}
+
 test_backend_name_precedence
 test_backend_detect_precedence
 test_backend_detect_cmux_fallback_bundle_id
@@ -1091,3 +1134,5 @@ test_spawn_refuses_unknown_fm_backend_env
 test_spawn_default_backend_writes_no_meta_field
 test_spawn_explicit_backend_flag_beats_autodetect_herdr_env
 test_spawn_autodetect_nesting_resolves_tmux_silently
+test_tmux_session_target_disambiguates_numeric_names
+test_tmux_create_task_logs_disambiguated_session

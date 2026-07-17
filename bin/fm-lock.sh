@@ -14,21 +14,38 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 LOCK="$STATE/.lock"
 mkdir -p "$STATE"
 
-# Known harness command names; extend when a new adapter is verified.
-HARNESS_RE='claude|codex|opencode|grok|^pi$'
+# Match harness processes the same way fm-harness.sh walks ancestry: comm basename
+# first, then argv. cursor-agent often runs as comm=MainThread with cursor-agent in
+# args, so comm-only regex matching is not enough.
+fm_lock_process_is_harness() {
+  local pid=$1 comm args
+  comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
+  args=$(ps -o args= -p "$pid" 2>/dev/null)
+  case "$(basename "$comm")" in
+    *cursor-agent*) return 0 ;;
+    *claude*) return 0 ;;
+    *codex*) return 0 ;;
+    *opencode*) return 0 ;;
+    *grok*) return 0 ;;
+    pi) return 0 ;;
+  esac
+  case "$args" in
+    *cursor-agent*) return 0 ;;
+    *claude*) return 0 ;;
+    *codex*) return 0 ;;
+    *opencode*) return 0 ;;
+    *grok*) return 0 ;;
+    *" pi "*|*/pi) return 0 ;;
+  esac
+  return 1
+}
 
 harness_pid() {
-  local pid=$$ comm args
-  for _ in 1 2 3 4 5 6 7 8; do
-    comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
-    args=$(ps -o args= -p "$pid" 2>/dev/null)
-    if printf '%s' "$(basename "$comm")" | grep -qE "$HARNESS_RE"; then
+  local pid=$$
+  for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do
+    if fm_lock_process_is_harness "$pid"; then
       echo "$pid"; return 0
     fi
-    # Bare interpreter (e.g. node): match the harness name in its script path.
-    case "$comm" in
-      *node*|*python*) printf '%s' "$args" | grep -qE "$HARNESS_RE" && { echo "$pid"; return 0; } ;;
-    esac
     pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
     [ -n "$pid" ] && [ "$pid" -gt 1 ] || return 1
   done
@@ -36,10 +53,9 @@ harness_pid() {
 }
 
 holder_alive() {  # true if $1 is a live process that looks like a harness
-  local pid=$1 comm
+  local pid=$1
   kill -0 "$pid" 2>/dev/null || return 1
-  comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
-  printf '%s' "$(basename "$comm") $(ps -o args= -p "$pid" 2>/dev/null)" | grep -qE "$HARNESS_RE"
+  fm_lock_process_is_harness "$pid"
 }
 
 if [ "${1:-}" = "status" ]; then

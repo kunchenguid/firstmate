@@ -19,6 +19,7 @@ function runProcess(command, args, input = "") {
     child.stderr.on("data", (chunk) => {
       stderr += chunk.toString();
     });
+    child.stdin.on("error", () => {});
     child.on("error", () => resolve({ code: 0, stdout: "", stderr: "" }));
     child.on("close", (code) => resolve({ code: code ?? 0, stdout, stderr }));
     child.stdin.end(input);

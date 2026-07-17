@@ -115,3 +115,4 @@ Resolving this would need either a `pi`-specific env marker inspectable from out
 
 None specific to tmux for the reference path itself - it is the fully verified reference backend, while Orca and cmux are the backends without secondmate support.
 The agent-liveness probe above has one known gap (`pi`'s generic `node` process name, see above).
+If your harness runs inside a tmux session whose name is purely numeric (Cursor's default session is often `0`), firstmate disambiguates session targets when creating crew windows so `new-window` is not parsed as a window index; without that, tmux reports `create window failed: index 0 in use` once a window at index 0 already exists.

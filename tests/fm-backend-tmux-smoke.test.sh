@@ -99,7 +99,12 @@ pass "real tmux: fm_backend_tmux_send_literal + fm_backend_tmux_send_key Enter s
 # far enough to still see the earliest line - the same -S -N bounding fm-peek.sh
 # and fm-watch.sh rely on for a bounded, cheap pane read.
 fm_backend_tmux_send_text_line "$TARGET" "for i in \$(seq 1 80); do echo tag-line-\$i; done"
-sleep 0.6
+for _ in $(seq 1 30); do
+  if fm_backend_tmux_capture "$TARGET" 100 | grep -q 'tag-line-80'; then
+    break
+  fi
+  sleep 0.1
+done
 small=$(fm_backend_tmux_capture "$TARGET" 3) || fail "fm_backend_tmux_capture (small window) failed"
 case "$small" in
   *tag-line-1$'\n'*) fail "a 3-line capture should not still see the very first numbered line"$'\n'"$small" ;;
@@ -136,6 +141,32 @@ fi
 # Best-effort contract: killing an already-gone window must not error.
 fm_backend_tmux_kill "$TARGET" || fail "fm_backend_tmux_kill on an already-dead target must stay best-effort (never fail)"
 pass "real tmux: fm_backend_tmux_kill removes the window and is idempotent/best-effort"
+
+# --- numeric session name (Cursor default "0") --------------------------------
+# When base-index is 1 and a window already occupies index 0, `new-window -t 0`
+# is parsed as window index 0 (in use) instead of session "0". fm_tmux_session_target
+# must disambiguate with a trailing colon.
+
+tmux set-option -g base-index 1
+tmux set-option -g renumber-windows on
+NUM_SESSION="0"
+NUM_WINDOW="fm-smoke-num"
+tmux new-session -d -s "$NUM_SESSION" -x 200 -y 50 \
+  || fail "real tmux: new-session for numeric session name failed"
+tmux new-window -d -t '0:0' -n decoy-at-zero -c "$HOME" \
+  || fail "real tmux: could not seed decoy window at index 0"
+if tmux new-window -d -t 0 -n should-fail -c "$HOME" 2>/dev/null; then
+  fail "raw tmux new-window -t 0 should fail when window index 0 is already in use"
+fi
+fm_backend_tmux_create_task "$NUM_SESSION" "$NUM_WINDOW" "$HOME" \
+  || fail "fm_backend_tmux_create_task failed for numeric session with window 0 occupied"
+if ! tmux list-windows -t "$NUM_SESSION" -F '#{window_name}' | grep -qx "$NUM_WINDOW"; then
+  fail "numeric-session create_task did not add window $NUM_WINDOW"
+fi
+fm_backend_tmux_kill "$NUM_SESSION:$NUM_WINDOW"
+tmux kill-window -t "$NUM_SESSION:decoy-at-zero" 2>/dev/null || true
+tmux kill-session -t "$NUM_SESSION" 2>/dev/null || true
+pass "real tmux: fm_backend_tmux_create_task disambiguates numeric session names"
 
 cleanup_all
 trap - EXIT

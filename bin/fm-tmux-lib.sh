@@ -48,8 +48,24 @@
 
 # Busy footers per harness (mirror fm-watch.sh). claude/codex: "esc to
 # interrupt"; opencode: "esc interrupt"; pi: "Working..."; grok: "Ctrl+c:cancel"
-# (grok's mid-turn cancel hint, shown iff a turn is running - verified grok 0.2.73).
-FM_TMUX_BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel'
+# (grok's mid-turn cancel hint, shown iff a turn is running - verified grok 0.2.73);
+# cursor: "ctrl+c to stop" (cursor-agent's mid-turn footer hint, shown iff a turn
+# is running, alongside a braille spinner + token count - verified cursor-agent
+# 2026.07.01; grep is case-insensitive so this also matches any Ctrl+C casing).
+FM_TMUX_BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel|ctrl\+c to stop'
+
+# fm_tmux_session_target: unambiguous tmux -t target for a session-only flag.
+# Purely numeric session names (e.g. Cursor's default "0") are parsed as window
+# indices unless disambiguated; a trailing colon forces session interpretation
+# so `new-window -t 0` does not fail with "index 0 in use" when window 0 exists.
+fm_tmux_session_target() {  # <session-name>
+  local ses=$1
+  case "$ses" in
+    *:*) printf '%s\n' "$ses" ;;
+    [0-9]*) printf '%s:\n' "$ses" ;;
+    *) printf '%s\n' "$ses" ;;
+  esac
+}
 
 # fm_tmux_strip_ghost: thin adapter over the shared, fleet-wide ghost extractor
 # fm_composer_strip_ghost (bin/fm-composer-lib.sh). It drops de-emphasised

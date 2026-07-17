@@ -287,3 +287,38 @@ The adapter therefore runs the shared predicate and, when it returns 2, forces o
 It does not pass `--permission-mode`, so the passive hook cannot escalate the primary session's tool permissions.
 Project-local Grok hooks require folder trust, verified with launch-time `--trust`; if the primary firstmate checkout is not trusted for Grok hooks, this primary guard fails open and `fm-guard.sh` remains the next-command alarm.
 Grok's primary watcher protocol is Claude-shaped background-notify around `bin/fm-watch-arm.sh`; the passive Stop hook is only a backstop for blind turn ends.
+
+## cursor (VERIFIED 2026-07-05, cursor-agent 2026.07.01-41b2de7)
+
+Cursor Agent (`cursor-agent`), Cursor's Claude-Code-compatible CLI.
+Binary at `~/.local/bin/cursor-agent`; `~/.local/bin` must be on PATH for the spawn shell to find it.
+Launch with a positional prompt: `cursor-agent --force "$(cat <brief>)"`.
+
+| Fact | Value |
+|---|---|
+| Busy-pane signature | `ctrl+c to stop` (ASCII, in the footer while a turn runs, shown with a braille spinner + `N tokens`). Idle composer shows `→ Add a follow-up`. The ASCII `ctrl+c to stop` is the busy regex. |
+| Exit command | double `Ctrl-C`. On exit it prints `To resume this session: agent --resume=<id>`. A single `Ctrl-C` only interrupts the current turn. |
+| Interrupt | single `Ctrl-C` (stops the current turn; the footer's `ctrl+c to stop` clears back to `→ Add a follow-up`). |
+| Skill invocation | `/<skill>`, e.g. `/no-mistakes`. Opens the `/` slash-autocomplete popup (built-in commands like `/model`, `/plan` plus discovered skills such as `/no-mistakes`), so the same too-fast-Enter popup hazard as claude/grok applies; the shared submit retry handles it (see below). |
+| Autonomy | `--force` (alias `--yolo`, footer shows `Run Everything`); runs every tool without the per-command allowlist approval dialog. The targeted equivalent of claude's `--dangerously-skip-permissions`. |
+| Env marker | `CURSOR_AGENT=1` (also sets `CURSOR_INVOKED_AS=cursor-agent` and `CURSOR_CONVERSATION_ID`). IMPORTANT: cursor ALSO sets `CLAUDECODE=1` and `AI_AGENT=claude-code_*` (it is Claude-Code-compatible under the hood), so `bin/fm-harness.sh` checks `CURSOR_AGENT` BEFORE the claude marker; a claude-first check would misdetect a cursor session as claude. |
+| Resume | `cursor-agent --resume=<id>` (id printed on exit) or `--continue`. |
+| Model / effort | `--model <id>`; effort rides the model string as a bracket parameter, e.g. `--model 'claude-opus-4-8[effort=high]'`. `fm-spawn` folds a valid effort into that bracket; a model without bracket support ignores the parameter. |
+
+Trust dialog on first interactive launch per workspace: "Do you trust the contents of this directory?" with `[a] Trust this workspace` / `[q] Quit` (the selector defaults to Trust).
+Accept with Enter.
+The `--trust` flag exists but works only in `--print`/headless mode, so it cannot be used to pre-clear the interactive dialog; peek the pane after spawn and accept with `bin/fm-send.sh <window> --key Enter`.
+
+Submit hazard and its handling (verified 2026-07-05): a `/`-command or any steer sent via `fm-send` on the tmux backend submits cleanly.
+`fm_tmux_submit_core`'s cursor-row-read retry (`bin/fm-tmux-lib.sh`) recognizes the composer's post-submit empty state and does not false-retry; a plain steer landed and was processed on the first landed Enter, so no bespoke settle is needed.
+Cursor's idle `→ Add a follow-up` footer sits below the composer, not on the cursor row, so an idle cursor pane reads as an empty composer without a `FM_COMPOSER_IDLE_RE` override.
+
+Turn-end hook: none is wired.
+cursor-agent is Claude-Code-compatible but its interactive Stop/turn-end hook surface is unverified, so firstmate does not assume one and relies on the busy signature (provably-working check) plus stale-pane detection instead.
+
+## Follow-up queue thrash (cursor and similar)
+
+When captain decisions stack as unread follow-ups while a turn is running, do not leave them piled.
+Force-apply: single Ctrl-C to interrupt, Esc to dismiss the follow-up panel if it is open, then one locked `fm-send` list of decisions.
+Full procedure: `feature-cycle-throughput`.
+

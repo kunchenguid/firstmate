@@ -33,7 +33,7 @@
 #   profile consultation. A --secondmate spawn is exempt and resolves the SECONDMATE
 #   harness (config/secondmate-harness -> config/crew-harness -> own), so the
 #   secondmate-vs-crewmate split is DURABLE across every respawn (recovery,
-#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|grok)
+#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|grok|cursor)
 #   overrides it for this spawn (either kind). A non-flag string containing
 #   whitespace is treated as a RAW launch command - the escape hatch for verifying
 #   new adapters.
@@ -287,7 +287,7 @@ FIRSTMATE_HOME=
 
 if [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
-    ''|claude|codex|opencode|pi|grok)
+    ''|claude|codex|opencode|pi|grok|cursor)
       ARG3=${POS[1]:-}
       ;;
     *' '*)
@@ -348,6 +348,9 @@ launch_template() {
     # launch command - it is a Stop-event hook installed below (global hook +
     # per-task pointer), so the template is identical for ship/scout/secondmate.
     grok) printf '%s' 'grok --always-approve __MODELFLAG____EFFORTFLAG__"$(cat __BRIEF__)"' ;;
+    # cursor (Cursor Agent CLI): positional prompt; --force auto-approves tools.
+    # No standalone effort flag - model_flag_for_harness folds effort into the model bracket.
+    cursor) printf '%s' 'cursor-agent --force __MODELFLAG__"$(cat __BRIEF__)"' ;;
     *) return 1 ;;
   esac
 }
@@ -432,10 +435,21 @@ shell_quote() {
 }
 
 model_flag_for_harness() {
-  local harness=$1 model=$2
-  [ -n "$model" ] && [ "$model" != default ] || return 0
+  local harness=$1 model=$2 effort=${3:-}
   case "$harness" in
+    cursor)
+      # cursor has no standalone effort flag; a valid effort rides the model
+      # string as a bracket parameter. When model is default/empty there is
+      # nothing to attach effort to, so omit the flag.
+      [ -n "$model" ] && [ "$model" != default ] || return 0
+      local m=$model
+      case "$effort" in
+        low|medium|high|xhigh|max) m="${model}[effort=${effort}]" ;;
+      esac
+      printf -- '--model %s ' "$(shell_quote "$m")"
+      ;;
     claude|codex|opencode|pi|grok)
+      [ -n "$model" ] && [ "$model" != default ] || return 0
       printf -- '--model %s ' "$(shell_quote "$model")"
       ;;
   esac
@@ -918,6 +932,10 @@ EOF
     codex*)
       # codex: turn-end rides the launch command via -c notify=[...] and __TURNEND__.
       ;;
+    cursor*)
+      # cursor: no turn-end hook is wired. cursor-agent Stop/turn-end surface is
+      # unverified; rely on busy-pane signature + stale-pane detection.
+      ;;
     grok*)
       # grok fires a Stop hook at every turn boundary (verified, grok 0.2.73), the
       # clean equivalent of codex's notify= and pi's turn_end. But grok only loads
@@ -1034,7 +1052,7 @@ sq_turnend=$(shell_quote "$TURNEND")
 sq_piext=$(shell_quote "$STATE/$ID.pi-ext.ts")
 sq_piturnend=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-turnend-guard.ts")
 sq_piwatch=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-pi-watch.ts")
-MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
+MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL" "$EFFORT")
 EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT")
 LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
 LAUNCH=${LAUNCH//__EFFORTFLAG__/$EFFORTFLAG}
