@@ -244,7 +244,7 @@ test_all_presence_conditions_enable_prefix() {
   [ "$output" = "$AGENT_SECRETS_PREFIX" ] \
     || fail "present gate leaked probe output or produced the wrong prefix"$'\n'"actual: $output"
   assert_contains "$(cat "$FM_FAKE_SECURITY_LOG")" \
-    "find-generic-password -a OP_SERVICE_ACCOUNT_TOKEN -s com.kunchenguid.dotfiles-private.1password.local-development-reader -w" \
+    "find-generic-password -a kunchen -s op-local-sa -w" \
     "Keychain probe did not use the exact account, service, and password-only lookup"
   assert_templates_for_gate "all conditions present" "$fakebin" "$security_bin" yes
   pass "all verified templates receive the exact prefix when every presence condition succeeds"

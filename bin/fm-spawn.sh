@@ -76,8 +76,7 @@
 #   Verified templates optionally inject agent secrets at the final launch-command
 #   boundary. Injection is enabled only when `op` and
 #   `with-1password-local-development-reader` are on PATH and /usr/bin/security
-#   can read the OP_SERVICE_ACCOUNT_TOKEN item for service
-#   com.kunchenguid.dotfiles-private.1password.local-development-reader with stdin
+#   can read account kunchen for service op-local-sa with stdin
 #   closed and all output silenced. Otherwise every launch command stays byte-identical.
 #   When enabled, the agent executable runs through
 #   `with-1password-local-development-reader op run --env-file "$HOME/.config/agent-secrets.env" --`.
@@ -93,7 +92,7 @@ set -eu
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 usage() {
-  sed -n '2,87p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,86p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 case "${1:-}" in
@@ -325,8 +324,8 @@ agent_secrets_launch_prefix() {  # [security-bin]; production omits the test sea
   command -v op >/dev/null 2>&1 || return 0
   command -v with-1password-local-development-reader >/dev/null 2>&1 || return 0
   "$security_bin" find-generic-password \
-    -a OP_SERVICE_ACCOUNT_TOKEN \
-    -s com.kunchenguid.dotfiles-private.1password.local-development-reader \
+    -a kunchen \
+    -s op-local-sa \
     -w </dev/null >/dev/null 2>&1 || return 0
   # shellcheck disable=SC2016  # $HOME must expand in the target pane shell
   printf '%s' 'with-1password-local-development-reader op run --env-file "$HOME/.config/agent-secrets.env" -- '
