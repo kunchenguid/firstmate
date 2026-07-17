@@ -1,0 +1,80 @@
+<svg xmlns="http://www.w3.org/2000/svg"
+     width="1200" height="220" viewBox="0 0 1200 220"
+     role="img" aria-labelledby="box-title box-desc">
+  <title id="box-title">What ships in the firstmate distro</title>
+  <desc id="box-desc">Three-column showcase of the repo's actual contents: 74 bin scripts for supervision tooling, 16 firstmate-loaded skills (agent-internal), and 1 public installer-facing skill under skills/.</desc>
+
+  <defs>
+    <linearGradient id="boxBg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#0a1929"/>
+      <stop offset="1" stop-color="#0d2238"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="1200" height="220" rx="16" fill="url(#boxBg)"/>
+  <rect x="0.75" y="0.75" width="1198.5" height="218.5" rx="15.25"
+        fill="none" stroke="#1a3a5c" stroke-width="1.5"/>
+
+  <text x="56" y="36"
+        font-family="ui-monospace, SFMono-Regular, Menlo, monospace"
+        font-size="11" letter-spacing="3" fill="#5d6d7e">WHAT SHIPS IN THE BOX</text>
+
+  <!-- column 1: bin/ -->
+  <g transform="translate(56 70)">
+    <text x="0" y="62"
+          font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif"
+          font-size="80" font-weight="700" fill="#c9a961"
+          letter-spacing="-2">74</text>
+    <text x="0" y="92"
+          font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif"
+          font-size="17" font-weight="600" fill="#f4e8d0">bin/ scripts</text>
+    <text x="0" y="118"
+          font-family="ui-monospace, SFMono-Regular, Menlo, monospace"
+          font-size="11" fill="#5d6d7e">fm-session-start · fm-spawn · fm-send</text>
+    <text x="0" y="132"
+          font-family="ui-monospace, SFMono-Regular, Menlo, monospace"
+          font-size="11" fill="#5d6d7e">fm-pr-merge · fm-teardown · ...</text>
+  </g>
+
+  <!-- divider -->
+  <line x1="432" y1="64" x2="432" y2="196"
+        stroke="#1a3a5c" stroke-width="1"/>
+
+  <!-- column 2: skills/ -->
+  <g transform="translate(472 70)">
+    <text x="0" y="62"
+          font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif"
+          font-size="80" font-weight="700" fill="#c9a961"
+          letter-spacing="-2">16</text>
+    <text x="0" y="92"
+          font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif"
+          font-size="17" font-weight="600" fill="#f4e8d0">firstmate skills</text>
+    <text x="0" y="118"
+          font-family="ui-monospace, SFMono-Regular, Menlo, monospace"
+          font-size="11" fill="#5d6d7e">.agents/skills/*  ·  metadata.internal=true</text>
+    <text x="0" y="132"
+          font-family="ui-monospace, SFMono-Regular, Menlo, monospace"
+          font-size="11" fill="#5d6d7e">afk · bearings · updatefirstmate · stow · ...</text>
+  </g>
+
+  <!-- divider -->
+  <line x1="848" y1="64" x2="848" y2="196"
+        stroke="#1a3a5c" stroke-width="1"/>
+
+  <!-- column 3: public skill -->
+  <g transform="translate(888 70)">
+    <text x="0" y="62"
+          font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif"
+          font-size="80" font-weight="700" fill="#c9a961"
+          letter-spacing="-2">1</text>
+    <text x="0" y="92"
+          font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif"
+          font-size="17" font-weight="600" fill="#f4e8d0">public skill</text>
+    <text x="0" y="118"
+          font-family="ui-monospace, SFMono-Regular, Menlo, monospace"
+          font-size="11" fill="#5d6d7e">skills/stow — installable standalone,</text>
+    <text x="0" y="132"
+          font-family="ui-monospace, SFMono-Regular, Menlo, monospace"
+          font-size="11" fill="#5d6d7e">no firstmate dependency</text>
+  </g>
+</svg>

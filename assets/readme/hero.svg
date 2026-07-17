@@ -1,0 +1,159 @@
+<svg xmlns="http://www.w3.org/2000/svg"
+     width="1200" height="360" viewBox="0 0 1200 360"
+     role="img" aria-labelledby="hero-title hero-desc">
+  <title id="hero-title">firstmate — an agent distro for supervising fleets of coding agents</title>
+  <desc id="hero-desc">Hero with the firstmate wordmark, the tagline "Talk to one agent. Ship with a crew.", and a compact fleet diagram: a captain routes through firstmate to crewmates producing PRs or investigation reports.</desc>
+
+  <defs>
+    <linearGradient id="heroBg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#0a1929"/>
+      <stop offset="1" stop-color="#0d2238"/>
+    </linearGradient>
+    <pattern id="heroDots" x="0" y="0" width="48" height="48" patternUnits="userSpaceOnUse">
+      <circle cx="24" cy="24" r="0.8" fill="#16314f"/>
+    </pattern>
+    <marker id="heroArrow" viewBox="0 0 10 10" refX="9" refY="5"
+            markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#c9a961"/>
+    </marker>
+  </defs>
+
+  <rect width="1200" height="360" rx="20" fill="url(#heroBg)"/>
+  <rect width="1200" height="360" rx="20" fill="url(#heroDots)" opacity="0.6"/>
+  <rect x="0.75" y="0.75" width="1198.5" height="358.5" rx="19.25"
+        fill="none" stroke="#1a3a5c" stroke-width="1.5"/>
+
+  <!-- compass-rose motif, top-right, very subtle -->
+  <g transform="translate(1124 56)" opacity="0.35">
+    <circle cx="0" cy="0" r="22" fill="none" stroke="#c9a961" stroke-width="0.8"/>
+    <circle cx="0" cy="0" r="14" fill="none" stroke="#c9a961" stroke-width="0.6"/>
+    <path d="M 0 -22 L 4 0 L 0 22 L -4 0 z" fill="#c9a961" opacity="0.5"/>
+    <path d="M -22 0 L 0 4 L 22 0 L 0 -4 z" fill="#c9a961" opacity="0.35"/>
+    <circle cx="0" cy="0" r="1.5" fill="#c9a961"/>
+  </g>
+
+  <!-- Left column: identity (x 48 .. 472) -->
+  <g transform="translate(48 56)">
+    <text x="0" y="14"
+          font-family="ui-monospace, SFMono-Regular, Menlo, monospace"
+          font-size="13" letter-spacing="3" fill="#5d6d7e">AGENT DISTRO</text>
+
+    <text x="0" y="108"
+          font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif"
+          font-size="84" font-weight="700" fill="#f4e8d0"
+          letter-spacing="-2">firstmate</text>
+
+    <text x="0" y="156"
+          font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif"
+          font-size="24" font-weight="500" fill="#c9a961">
+      Talk to one agent. Ship with a crew.
+    </text>
+
+    <text x="0" y="200"
+          font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif"
+          font-size="16" fill="#a8b5c2">
+      A portable runtime, tooling, and supervision
+    </text>
+    <text x="0" y="222"
+          font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif"
+          font-size="16" fill="#a8b5c2">
+      contract for fleets of coding agents.
+    </text>
+
+    <text x="0" y="262"
+          font-family="ui-monospace, SFMono-Regular, Menlo, monospace"
+          font-size="12" letter-spacing="2" fill="#5d6d7e">
+      CLAUDE · CODEX · GROK · PI · OPENCODE
+    </text>
+  </g>
+
+  <!-- Right column: fleet diagram (translate 580 50, spans 580..1140) -->
+  <g transform="translate(580 50)">
+    <!-- captain node (centered at x=250) -->
+    <g>
+      <rect x="160" y="0" width="180" height="38" rx="9"
+            fill="#0a1929" stroke="#c9a961" stroke-width="1.5"/>
+      <text x="250" y="16" text-anchor="middle"
+            font-family="ui-monospace, SFMono-Regular, Menlo, monospace"
+            font-size="11" letter-spacing="2" fill="#5d6d7e">CAPTAIN</text>
+      <text x="250" y="32" text-anchor="middle"
+            font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif"
+            font-size="14" fill="#f4e8d0">you, in chat</text>
+    </g>
+    <line x1="250" y1="38" x2="250" y2="64"
+          stroke="#c9a961" stroke-width="1.5" marker-end="url(#heroArrow)"/>
+
+    <!-- firstmate node (centered at x=250, width 340) -->
+    <g>
+      <rect x="80" y="72" width="340" height="62" rx="10"
+            fill="#0a1929" stroke="#c9a961" stroke-width="1.5"/>
+      <text x="250" y="94" text-anchor="middle"
+            font-family="ui-monospace, SFMono-Regular, Menlo, monospace"
+            font-size="11" letter-spacing="2" fill="#5d6d7e">FIRSTMATE</text>
+      <text x="250" y="114" text-anchor="middle"
+            font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif"
+            font-size="13" fill="#f4e8d0">reads projects/, dispatches crew,</text>
+      <text x="250" y="130" text-anchor="middle"
+            font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif"
+            font-size="13" fill="#f4e8d0">watches the fleet</text>
+    </g>
+
+    <!-- branch arrows down to three crewmate lanes (centers at 130, 250, 370) -->
+    <line x1="130" y1="134" x2="130" y2="166"
+          stroke="#c9a961" stroke-width="1.5" marker-end="url(#heroArrow)"/>
+    <line x1="250" y1="134" x2="250" y2="166"
+          stroke="#c9a961" stroke-width="1.5" marker-end="url(#heroArrow)"/>
+    <line x1="370" y1="134" x2="370" y2="166"
+          stroke="#c9a961" stroke-width="1.5" marker-end="url(#heroArrow)"/>
+
+    <!-- crewmate lanes (each width 110, centers at 130/250/370) -->
+    <g>
+      <rect x="75" y="170" width="110" height="48" rx="8"
+            fill="none" stroke="#5d6d7e" stroke-width="1.2"/>
+      <text x="130" y="190" text-anchor="middle"
+            font-family="ui-monospace, SFMono-Regular, Menlo, monospace"
+            font-size="10" fill="#a8b5c2">fm-fix-login-k3</text>
+      <text x="130" y="208" text-anchor="middle"
+            font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif"
+            font-size="11" fill="#f4e8d0">crewmate → ship</text>
+    </g>
+    <g>
+      <rect x="195" y="170" width="110" height="48" rx="8"
+            fill="none" stroke="#5d6d7e" stroke-width="1.2"/>
+      <text x="250" y="190" text-anchor="middle"
+            font-family="ui-monospace, SFMono-Regular, Menlo, monospace"
+            font-size="10" fill="#a8b5c2">fm-dark-mode-p7</text>
+      <text x="250" y="208" text-anchor="middle"
+            font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif"
+            font-size="11" fill="#f4e8d0">crewmate → ship</text>
+    </g>
+    <g>
+      <rect x="315" y="170" width="110" height="48" rx="8"
+            fill="none" stroke="#5d6d7e" stroke-width="1.2"/>
+      <text x="370" y="190" text-anchor="middle"
+            font-family="ui-monospace, SFMono-Regular, Menlo, monospace"
+            font-size="10" fill="#a8b5c2">fm-perf-audit-r2</text>
+      <text x="370" y="208" text-anchor="middle"
+            font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif"
+            font-size="11" fill="#f4e8d0">crewmate → scout</text>
+    </g>
+
+    <!-- outcome row -->
+    <line x1="130" y1="218" x2="130" y2="244"
+          stroke="#c9a961" stroke-width="1.2"/>
+    <line x1="250" y1="218" x2="250" y2="244"
+          stroke="#c9a961" stroke-width="1.2"/>
+    <line x1="370" y1="218" x2="370" y2="244"
+          stroke="#c9a961" stroke-width="1.2"/>
+
+    <text x="130" y="262" text-anchor="middle"
+          font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif"
+          font-size="13" font-weight="600" fill="#c9a961">PR #42</text>
+    <text x="250" y="262" text-anchor="middle"
+          font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif"
+          font-size="13" font-weight="600" fill="#c9a961">PR #43</text>
+    <text x="370" y="262" text-anchor="middle"
+          font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif"
+          font-size="13" font-weight="600" fill="#c9a961">report.md</text>
+  </g>
+</svg>

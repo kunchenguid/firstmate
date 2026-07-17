@@ -1,0 +1,78 @@
+<svg xmlns="http://www.w3.org/2000/svg"
+     width="1200" height="130" viewBox="0 0 1200 130"
+     role="img" aria-labelledby="lc-title lc-desc">
+  <title id="lc-title">firstmate request lifecycle</title>
+  <desc id="lc-desc">Three-stage horizontal flow: a captain chat request is routed through firstmate (brief, spawn, supervise, merge) into either a ship outcome (PR or local merge) or a scout outcome (investigation report).</desc>
+
+  <defs>
+    <linearGradient id="lcBg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#0d2238"/>
+      <stop offset="1" stop-color="#0a1929"/>
+    </linearGradient>
+    <marker id="lcArrow" viewBox="0 0 10 10" refX="9" refY="5"
+            markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#c9a961"/>
+    </marker>
+  </defs>
+
+  <rect width="1200" height="130" rx="16" fill="url(#lcBg)"/>
+  <rect x="0.75" y="0.75" width="1198.5" height="128.5" rx="15.25"
+        fill="none" stroke="#1a3a5c" stroke-width="1.5"/>
+
+  <text x="56" y="32"
+        font-family="ui-monospace, SFMono-Regular, Menlo, monospace"
+        font-size="11" letter-spacing="3" fill="#5d6d7e">REQUEST LIFECYCLE</text>
+
+  <text x="1144" y="32" text-anchor="end"
+        font-family="ui-monospace, SFMono-Regular, Menlo, monospace"
+        font-size="10" fill="#5d6d7e">captain → firstmate → outcome</text>
+
+  <!-- Stage 1: captain -->
+  <g transform="translate(56 56)">
+    <rect x="0" y="0" width="200" height="44" rx="8"
+          fill="#0a1929" stroke="#c9a961" stroke-width="1.5"/>
+    <text x="100" y="18" text-anchor="middle"
+          font-family="ui-monospace, SFMono-Regular, Menlo, monospace"
+          font-size="10" letter-spacing="2" fill="#5d6d7e">CAPTAIN</text>
+    <text x="100" y="36" text-anchor="middle"
+          font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif"
+          font-size="13" fill="#f4e8d0">"fix the flaky test"</text>
+  </g>
+
+  <line x1="260" y1="78" x2="296" y2="78"
+        stroke="#c9a961" stroke-width="1.5" marker-end="url(#lcArrow)"/>
+
+  <!-- Stage 2: firstmate (wider, the engine) -->
+  <g transform="translate(308 50)">
+    <rect x="0" y="0" width="448" height="56" rx="10"
+          fill="#0a1929" stroke="#c9a961" stroke-width="1.5"/>
+    <text x="224" y="20" text-anchor="middle"
+          font-family="ui-monospace, SFMono-Regular, Menlo, monospace"
+          font-size="10" letter-spacing="2" fill="#5d6d7e">FIRSTMATE</text>
+    <text x="224" y="42" text-anchor="middle"
+          font-family="ui-monospace, SFMono-Regular, Menlo, monospace"
+          font-size="12" fill="#f4e8d0">brief → spawn → supervise → merge</text>
+  </g>
+
+  <line x1="760" y1="78" x2="796" y2="78"
+        stroke="#c9a961" stroke-width="1.5" marker-end="url(#lcArrow)"/>
+
+  <!-- Stage 3: outcomes -->
+  <g transform="translate(808 56)">
+    <rect x="0" y="0" width="200" height="20" rx="6"
+          fill="#0a1929" stroke="#c9a961" stroke-width="1.2"/>
+    <text x="100" y="14" text-anchor="middle"
+          font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif"
+          font-size="12" fill="#f4e8d0">ship → PR or local merge</text>
+
+    <rect x="0" y="26" width="200" height="20" rx="6"
+          fill="none" stroke="#5d6d7e" stroke-width="1.2"/>
+    <text x="100" y="40" text-anchor="middle"
+          font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif"
+          font-size="12" fill="#f4e8d0">scout → data/&lt;id&gt;/report.md</text>
+  </g>
+
+  <text x="1144" y="116" text-anchor="end"
+        font-family="ui-monospace, SFMono-Regular, Menlo, monospace"
+        font-size="10" fill="#5d6d7e">PR / merge gated by configured authority · scout delivers a self-contained report</text>
+</svg>
