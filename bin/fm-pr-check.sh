@@ -56,6 +56,10 @@ trap 'exit 1' HUP INT TERM
 
 [ -d "$STATE" ] || { echo "error: state dir $STATE is missing" >&2; exit 1; }
 fm_task_lock_acquire_wait "$META_LOCK"
+if [ ! -e "$META" ] && [ ! -L "$META" ]; then
+  echo "not armed: no metadata for task $ID; no PR poll was created" >&2
+  exit 1
+fi
 if [ ! -f "$META" ] || [ -L "$META" ] || [ "$(fm_pr_file_link_count "$META")" != 1 ]; then
   echo "error: task metadata is unavailable" >&2
   exit 1
@@ -68,12 +72,6 @@ LOOKUP_TERMINAL=$(grep '^terminal=' "$META" | tail -1 | cut -d= -f2- || true)
 fm_lock_release "$META_LOCK"
 META_LOCK=
 
-# Neutralize any pre-fix poll before recording or arming this task. The
-# migration never executes legacy artifacts and holds watcher exclusion while
-# it quarantines or rebuilds them.
-"$SCRIPT_DIR/fm-pr-check-migrate.sh" --checks-safe || exit 1
-"$FM_ROOT/bin/fm-guard.sh" || true
-
 PR_HEAD=
 if [ -n "$LOOKUP_WT" ] && [ -d "$LOOKUP_WT" ] && command -v gh >/dev/null 2>&1; then
   if REMOTE_HEAD=$(cd "$LOOKUP_WT" && gh pr view "$URL" --json headRefOid -q .headRefOid 2>/dev/null) \
@@ -85,7 +83,7 @@ fi
 META_LOCK="$STATE/.$ID.meta.lock"
 fm_task_lock_acquire_wait "$META_LOCK"
 if [ ! -f "$META" ] || [ -L "$META" ] || [ "$(fm_pr_file_link_count "$META")" != 1 ]; then
-  echo "error: task metadata changed during PR lookup" >&2
+  echo "not armed: task $ID metadata changed during PR lookup; preserved the current generation and any existing poll" >&2
   exit 1
 fi
 LOCKED_WT=$(grep '^worktree=' "$META" | tail -1 | cut -d= -f2- || true)
@@ -98,9 +96,14 @@ if ! { [ "$LOOKUP_GENERATION_COUNT" -eq 1 ] && [ -n "$LOOKUP_GENERATION" ] \
   && ! { [ "$LOOKUP_GENERATION_COUNT" -eq 0 ] && [ "$LOCKED_GENERATION_COUNT" -eq 0 ] \
     && [ "$LOCKED_WT" = "$LOOKUP_WT" ] && [ "$LOCKED_WINDOW" = "$LOOKUP_WINDOW" ] \
     && [ "$LOCKED_TERMINAL" = "$LOOKUP_TERMINAL" ]; }; then
-  echo "error: task metadata changed during PR lookup" >&2
+  echo "not armed: task $ID metadata changed during PR lookup; preserved the current generation and any existing poll" >&2
   exit 1
 fi
+
+# Neutralize any pre-fix poll only after proving this task generation still
+# owns the metadata lock, so a same-id replacement keeps its poll untouched.
+"$SCRIPT_DIR/fm-pr-check-migrate.sh" --checks-safe || exit 1
+"$FM_ROOT/bin/fm-guard.sh" || true
 
 fm_pr_poll_prepare "$STATE" "$ID" "$URL" "$OWNER" "$REPO" "$NUMBER" "$SCRIPT_DIR/fm-pr-poll.sh" \
   || { echo "error: could not prepare PR poll" >&2; exit 1; }
