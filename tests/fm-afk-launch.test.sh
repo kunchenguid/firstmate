@@ -35,7 +35,9 @@ GLOBAL_CLEANUP() {
   rm -f "$SLEEPER" 2>/dev/null || true
   local s
   for s in $TRACK_TMUX_SESSIONS; do
-    tmux kill-session -t "$s" 2>/dev/null || true
+    # "=" pins exact-name matching: a tracked session already gone by trap time
+    # must not prefix-match and kill an unrelated live host session.
+    tmux kill-session -t "=$s" 2>/dev/null || true
   done
 }
 trap GLOBAL_CLEANUP EXIT
