@@ -7,6 +7,7 @@ When this session owns supervision and away mode is not active:
    A missing or dead lock is reacquired only through `bin/fm-lock.sh`, ownership is read again, and supervision starts only after the result is `owned`.
    A verified live other owner remains unchanged and the extension refuses to arm.
    When `state/.afk` exists, lock recovery still completes but the extension does not start or restart a watcher because the sub-supervisor owns supervision.
+   If away mode begins after the extension has armed, its state monitor stops that owned arm child and suppresses direct Pi wake delivery during the handoff.
 4. After each watcher wake, re-arm supervision with the `fm_watch_arm_pi` tool.
    The tool returns success only after `fm-watch-arm.sh` verifies and reports a started watcher.
    Use `/fm-watch-arm-pi` only as a human-entered fallback.
@@ -39,6 +40,8 @@ Command run: `bash tests/fm-pi-watch-extension.test.sh`.
 Observed output included `ok - Pi custom tool waits for verified watcher readiness`, `ok - Pi session_start reclaims safe locks, preserves away ownership, refuses live other, and idempotently arms`, `ok - Pi watcher stays inert in linked task worktrees and arms valid secondmate homes`, and `ok - Pi watcher distinguishes verified competitor, acquisition failure, and changed ownership`.
 
 Verification on 2026-07-17 used native Pi 0.80.7 with a mode-0700 system temporary lab, an isolated saved session, a deterministic test-owned in-process faux provider, `PI_CODING_AGENT_DIR`, `FM_HOME`, project clone, and tmux socket.
+Command run: `bash tests/fm-pi-watch-extension.test.sh`.
+Observed output included `ok - Pi watcher transfers its active arm to away-mode supervision`.
 Command run: `FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh`.
 The provider generated every response and tool call locally without reading global Pi authentication or making an API request.
 The fixture created a saved session with `--session-id`, exited while leaving the dead native Pi PID in `.lock`, and resumed that exact session with `--session`.

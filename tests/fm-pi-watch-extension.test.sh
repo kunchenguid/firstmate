@@ -108,7 +108,9 @@ test_tracked_extension_present_and_self_hashing() {
   assert_contains "$text" 'a verified live firstmate session owns this home' "tracked extension does not distinguish a verified competitor"
   assert_contains "$text" 'lock acquisition failed' "tracked extension does not distinguish acquisition failure"
   assert_contains "$text" 'const result = await startArm();' "tracked extension does not await recovery and verified arm readiness"
-  assert_contains "$text" "existsSync(\`\${state}/.afk\`)" "tracked extension does not preserve away-mode supervision ownership"
+  assert_contains "$text" 'watch(state, { persistent: false }, reconcileAwayOwnership)' "tracked extension does not observe away-mode ownership transitions"
+  assert_contains "$text" 'if (existsSync(awayFlag)) stopArm();' "tracked extension does not release its active arm on away-mode entry"
+  assert_contains "$text" 'if (existsSync(awayFlag)) return;' "tracked extension can still route an away-mode wake directly into Pi"
   assert_contains "$text" 'sub-supervisor owns supervision' "tracked extension does not report away-mode ownership"
   assert_not_contains "$text" 'function parentPid' "tracked extension kept a duplicate ancestry classifier"
   assert_not_contains "$text" 'function pidAlive' "tracked extension kept a duplicate holder-liveness classifier"
@@ -414,6 +416,73 @@ EOF
     fail "Pi arm child $pid survived process-exit cleanup"
   fi
   pass "Pi process-exit cleanup stops the attached arm child"
+}
+
+test_pi_extension_transfers_active_arm_on_away_entry() {
+  local repo home plugin arm_log stop_log out status
+  repo="$TMP_ROOT/pi-away-transfer-root"
+  home="$TMP_ROOT/pi-away-transfer-home"
+  arm_log="$TMP_ROOT/pi-away-transfer-arm.log"
+  stop_log="$TMP_ROOT/pi-away-transfer-stop.log"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm\n' >> "${FM_ARM_LOG:?}"
+trap 'printf "stopped\n" >> "$FM_STOP_LOG"; exit 0' TERM INT
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+while :; do sleep 1; done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$arm_log" FM_STOP_LOG="$stop_log" node --input-type=module 2>&1 <<'EOF'
+import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const handlers = new Map();
+const prompts = [];
+let tool = null;
+const pi = {
+  on(event, handler) {
+    handlers.set(event, handler);
+  },
+  registerCommand() {},
+  registerTool(candidate) {
+    if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+  },
+  sendUserMessage: async (message) => {
+    prompts.push(message);
+  },
+};
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+const armed = await tool.execute("away-transfer-arm", {}, undefined, undefined, {});
+if (armed.details?.ok !== true || !existsSync(process.env.FM_ARM_LOG)) {
+  throw new Error(`initial Pi arm failed: ${JSON.stringify(armed)}`);
+}
+const pending = `${process.env.FM_HOME}/state/.afk.pending`;
+writeFileSync(pending, "away\n");
+renameSync(pending, `${process.env.FM_HOME}/state/.afk`);
+for (let i = 0; i < 100 && !existsSync(process.env.FM_STOP_LOG); i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 20));
+}
+if (!existsSync(process.env.FM_STOP_LOG)) throw new Error("away entry did not stop the extension-owned arm child");
+await new Promise((resolve) => setTimeout(resolve, 50));
+if (prompts.length > 0) throw new Error(`away transfer routed a wake directly into Pi: ${prompts.join(" | ")}`);
+const away = await tool.execute("away-transfer-idempotence", {}, undefined, undefined, {});
+if (away.details?.ok !== true || !away.content[0].text.includes("sub-supervisor owns supervision")) {
+  throw new Error(`away ownership was not preserved: ${JSON.stringify(away)}`);
+}
+const armCount = readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split(/\n/).length;
+if (armCount !== 1) throw new Error(`away entry started ${armCount} arm children`);
+await handlers.get("session_shutdown")?.({ type: "session_shutdown" }, {});
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "Pi watcher must transfer an active arm to away-mode supervision"
+  [ -z "$out" ] || fail "Pi away-transfer test printed output: $out"
+  pass "Pi watcher transfers its active arm to away-mode supervision"
 }
 
 test_pi_resume_session_recovers_only_reclaimable_locks() {
@@ -1132,6 +1201,7 @@ test_pi_tool_returns_agent_tool_result
 test_pi_tool_waits_for_verified_readiness
 test_pi_process_exit_cleanup_listener_lifecycle
 test_pi_process_exit_cleanup_stops_arm_child
+test_pi_extension_transfers_active_arm_on_away_entry
 test_pi_resume_session_recovers_only_reclaimable_locks
 test_pi_extension_respects_primary_scope
 test_pi_extension_distinguishes_lock_refusal_states

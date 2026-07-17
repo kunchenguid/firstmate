@@ -1,7 +1,7 @@
 // Firstmate primary watcher bridge for Pi.
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, watch, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -24,6 +24,7 @@ const config = process.env.FM_CONFIG_OVERRIDE || `${fmHome}/config`;
 const armScript = `${fmRoot}/bin/fm-watch-arm.sh`;
 const lockScript = `${fmRoot}/bin/fm-lock.sh`;
 const scopeScript = `${fmRoot}/bin/fm-primary-scope.sh`;
+const awayFlag = `${state}/.afk`;
 const marker = `${state}/.pi-watch-extension-loaded`;
 const extensionVersion = `sha256:${createHash("sha256").update(readFileSync(extensionFile)).digest("hex")}`;
 
@@ -90,11 +91,32 @@ function failureLine(stdout: string, stderr: string, code: number | null): strin
 }
 
 export default function (pi: ExtensionAPI) {
+  let awayMonitor: ReturnType<typeof watch> | null = null;
+  const intentionalStops = new WeakSet<object>();
+
   function stopArm(): void {
-    if (child) child.kill("SIGTERM");
+    if (child) {
+      intentionalStops.add(child);
+      child.kill("SIGTERM");
+    }
     child = null;
     armReady = false;
     armReadiness = null;
+  }
+
+  function reconcileAwayOwnership(): void {
+    if (existsSync(awayFlag)) stopArm();
+  }
+
+  function startAwayMonitor(): void {
+    if (awayMonitor || !isPrimaryHome()) return;
+    awayMonitor = watch(state, { persistent: false }, reconcileAwayOwnership);
+    awayMonitor.on("error", (error) => {
+      awayMonitor?.close();
+      awayMonitor = null;
+      void sendWake(`watcher: FAILED - Pi away-mode state monitor failed: ${error.message}`);
+    });
+    reconcileAwayOwnership();
   }
 
   const cleanupOnProcessExit = () => {
@@ -103,6 +125,7 @@ export default function (pi: ExtensionAPI) {
   process.once("exit", cleanupOnProcessExit);
 
   async function sendWake(message: string) {
+    if (existsSync(awayFlag)) return;
     await pi.sendUserMessage(
       `FIRSTMATE WATCHER WAKE: ${message}\n\nRun bin/fm-wake-drain.sh first, handle the queued wake, then resume Pi supervision.`,
       { deliverAs: "followUp" },
@@ -133,7 +156,7 @@ export default function (pi: ExtensionAPI) {
       return { ok: false, message: `watcher: lock acquisition failed - session lock is ${ownership}${detail}` };
     }
     markLoadedForPrimary();
-    if (existsSync(`${state}/.afk`)) {
+    if (existsSync(awayFlag)) {
       return { ok: true, message: "watcher: away mode - sub-supervisor owns supervision" };
     }
     if (child) {
@@ -175,6 +198,7 @@ export default function (pi: ExtensionAPI) {
         stderr += chunk.toString();
       });
       armChild.on("close", async (code: number | null) => {
+        const intentionallyStopped = intentionalStops.has(armChild);
         if (child === armChild) {
           child = null;
           armReady = false;
@@ -186,7 +210,7 @@ export default function (pi: ExtensionAPI) {
           ok: false,
           message: failure || `watcher: FAILED - Pi extension arm child ${id} exited before confirming watcher readiness`,
         });
-        if (!reason && !failure) return;
+        if (intentionallyStopped || (!reason && !failure)) return;
         try {
           await sendWake(reason || failure);
         } catch {
@@ -218,6 +242,8 @@ export default function (pi: ExtensionAPI) {
     if (!result.ok) ctx?.ui?.notify?.(result.message, "warning");
   });
   pi.on?.("session_shutdown", () => {
+    awayMonitor?.close();
+    awayMonitor = null;
     stopArm();
     process.off("exit", cleanupOnProcessExit);
   });
@@ -249,4 +275,5 @@ export default function (pi: ExtensionAPI) {
   });
 
   markLoaded();
+  startAwayMonitor();
 }
