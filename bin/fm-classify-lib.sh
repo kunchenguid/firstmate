@@ -335,6 +335,25 @@ crew_is_paused() {  # <id>
   [ "$(crew_absorb_class "$1")" = paused ]
 }
 
+# 0 if crew <id>'s authoritative current state is a TERMINAL, already-surfaced-once
+# run outcome: done (finished, e.g. a PR raised and monitoring for merge/close) or
+# parked (stopped at a gate awaiting a decision). This is deliberately NARROWER than
+# crew_absorb_class's `none`, which also covers failed/unknown/torn-down crews that
+# carry no positive terminal confirmation. The stale path uses it to tell a
+# finished-and-parked crew (already noticed, so re-check on the long pause cadence)
+# apart from a genuinely stopped one (keep surfacing). Reads the same one
+# authoritative fm-crew-state.sh line as crew_absorb_class; NOT a pure read (that
+# reader may make a bounded no-mistakes call), so callers run it only on the stale
+# paths, never on every wake. FM_CREW_STATE_BIN lets tests stub the verdict.
+crew_reached_terminal() {  # <id>
+  local id=$1 line state
+  [ -n "$id" ] || return 1
+  line=$("$FM_CREW_STATE_BIN" "$id" 2>/dev/null) || true
+  case "$line" in state:*) ;; *) return 1 ;; esac
+  state=${line#state: }; state=${state%% *}
+  case "$state" in done|parked) return 0 ;; *) return 1 ;; esac
+}
+
 # 0 (benign/absorb) if EVERY task referenced by a no-verb "signal:" wake is provably
 # working; 1 (actionable/surface) if any is not, or no task can be resolved. Pass the
 # same space-separated file list as signal_reason_is_actionable. Files are mapped to

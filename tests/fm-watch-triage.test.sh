@@ -1236,6 +1236,196 @@ test_afk_paused_changed_pane_hands_off_plain_stale() {
   pass "AFK changed paused panes hand off plain stale identities for daemon-owned pause triage"
 }
 
+# --- finished-and-parked crew with a paused: LAST status line -----------------
+# Regression for the watcher runaway (RCA watcher-stale-rca-k2): a crew that
+# FINISHED its pipeline (authoritative state `done`, e.g. a PR raised and monitoring
+# for merge/close) and then appended a `paused: awaiting-captain-decision` line used
+# to re-surface a `stale:` wake on EVERY poll. The suppressor-equal paused-last-line
+# branch re-classified via pause_state_class, whose `none` verdict (crew_absorb_class
+# maps `done` -> none) fell through to surface_nonterminal_stale with no cadence gate;
+# surface then deleted the pause/wedge markers, so nothing could ever throttle it.
+# The fix: on the ALREADY-surfaced (suppressor-equal) hash, a terminal crew
+# (crew_reached_terminal: done/parked) is re-checked on the long pause cadence via
+# handle_paused_stale, while a genuinely stopped/unknown crew keeps surfacing.
+
+# Case 2: the finish is still SURFACED ONCE on the first sight of the hash (the
+# first-sight arm is untouched by the fix).
+test_doneparked_paused_finish_surfaces_once() {
+  local dir state fakebin out capture_file window key pane_hash sig pid
+  dir=$(make_case doneparked-first-sight); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-doneparked-first"
+  printf 'idle pane, finished, awaiting decision' > "$capture_file"
+  printf 'window=%s\nkind=ship\nmode=no-mistakes\n' "$window" > "$state/doneparked-first.meta"
+  printf 'paused: awaiting-captain-decision on [key=nm-pr-scope] recheck on a long cadence\n' > "$state/doneparked-first.status"
+  sig=$(seen_sig "$state/doneparked-first.status"); printf '%s' "$sig" > "$state/.seen-doneparked-first_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle pane, finished, awaiting decision")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"   # hash known, but NOT yet surfaced (.stale absent)
+  printf '1\n' > "$state/.count-$key"
+  export FM_FAKE_CREW_STATE='state: done · source: run-step · checks green: PR ready for review (still monitoring for merge/close)'
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "the finish of a done-and-parked crew was not surfaced on the first sight of its hash"
+  grep -Fx "stale: $window" "$out" >/dev/null || fail "first sight did not surface the plain stale wake: $(cat "$out")"
+  [ "$(cat "$state/.stale-$key" 2>/dev/null || true)" = "$pane_hash" ] || fail "first-sight surface did not advance the stale suppressor"
+  unset FM_FAKE_CREW_STATE
+  pass "a done-and-parked crew's finish is surfaced once on first sight (finish still noticed)"
+}
+
+# Case 1 + long cadence: on the ALREADY-surfaced hash, the same crew is ABSORBED
+# (no more per-poll runaway), then re-surfaced ONCE past PAUSE_RESURFACE_SECS as a
+# paused recheck, never a wedge.
+test_doneparked_paused_repeat_rechecked_not_resurfaced() {
+  local dir state fakebin out drain_out capture_file window key pane_hash sig pid back statusf
+  dir=$(make_case doneparked-repeat); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"
+  window="test:fm-doneparked-repeat"
+  printf 'idle pane, finished, awaiting decision' > "$capture_file"
+  printf 'window=%s\nkind=ship\nmode=no-mistakes\n' "$window" > "$state/doneparked-repeat.meta"
+  statusf="$state/doneparked-repeat.status"
+  printf 'paused: awaiting-captain-decision on [key=nm-pr-scope] recheck on a long cadence\n' > "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-doneparked-repeat_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle pane, finished, awaiting decision")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '%s' "$pane_hash" > "$state/.stale-$key"   # already surfaced once on this hash
+  printf '1\n' > "$state/.count-$key"
+  export FM_FAKE_CREW_STATE='state: done · source: run-step · checks green: PR ready for review (still monitoring for merge/close)'
+
+  # Phase A: fresh pause under a high re-surface threshold -> absorbed. Before the
+  # fix this poll re-surfaced a stale wake and exited.
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; fail "watcher re-surfaced an already-noticed done-and-parked crew instead of absorbing: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || { reap "$pid"; fail "the absorbed done-and-parked recheck printed a wake reason: $(cat "$out")"; }
+  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "the absorbed done-and-parked recheck enqueued a wake"; }
+  [ -e "$state/.paused-$key" ] || { reap "$pid"; fail "the terminal recheck did not record the long-cadence pause flag"; }
+  [ ! -e "$state/.stale-since-$key" ] || { reap "$pid"; fail "the terminal recheck armed a wedge timer (should use the long pause cadence)"; }
+  reap "$pid"
+
+  # Phase B: age the pause past the (now normal) threshold; re-surfaces once as a
+  # paused recheck, never a wedge.
+  back=$(( $(date +%s) - 500 ))
+  if [ "$(uname)" = Darwin ]; then touch -mt "$(date -r "$back" '+%Y%m%d%H%M.%S')" "$statusf"
+  else touch -m -d "@$back" "$statusf"; fi
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-doneparked-repeat_status"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "the aged done-and-parked recheck did not re-surface past the threshold"
+  grep -F "stale: $window" "$out" >/dev/null || fail "the aged recheck did not print a stale wake"
+  grep -F "awaiting external" "$out" >/dev/null || fail "the aged recheck was not labeled a paused/awaiting-external recheck"
+  grep -F "possible wedge" "$out" >/dev/null && fail "the aged done-and-parked recheck was mislabeled a possible wedge"
+  [ -e "$state/.paused-resurfaced-$key" ] || fail "the paused re-surface throttle marker was not recorded"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the aged recheck failed"
+  grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null || fail "the aged recheck was not queued"
+  unset FM_FAKE_CREW_STATE
+  pass "an already-noticed done-and-parked crew is absorbed, then re-surfaced once past the long pause cadence (no per-poll runaway)"
+}
+
+# Case 3 (#233 guard): the same suppressor-equal paused-last-line pane whose
+# authoritative state is WORKING (active validation) stays absorbed - the fix must
+# not move a provably-working crew off the working arm.
+test_doneparked_paused_working_crew_absorbs() {
+  local dir state fakebin out capture_file window key pane_hash sig pid
+  dir=$(make_case doneparked-working); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-doneparked-working"
+  printf 'idle validating pane' > "$capture_file"
+  printf 'window=%s\nkind=ship\nmode=no-mistakes\n' "$window" > "$state/doneparked-working.meta"
+  printf 'paused: awaiting-captain-decision on [key=nm-pr-scope] recheck on a long cadence\n' > "$state/doneparked-working.status"
+  sig=$(seen_sig "$state/doneparked-working.status"); printf '%s' "$sig" > "$state/.seen-doneparked-working_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle validating pane")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '%s' "$pane_hash" > "$state/.stale-$key"
+  printf '1\n' > "$state/.count-$key"
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; fail "a provably-working crew with a paused last line was surfaced (must stay absorbed): $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || { reap "$pid"; fail "the provably-working paused-last-line pane printed a wake reason: $(cat "$out")"; }
+  [ ! -e "$state/.paused-$key" ] || { reap "$pid"; fail "a provably-working crew was tracked as a declared pause"; }
+  reap "$pid"
+  unset FM_FAKE_CREW_STATE
+  pass "a provably-working crew with a paused last line stays absorbed on the wedge timer (#233 protection intact)"
+}
+
+# Case 4 (#421 guard): the same pane whose authoritative state is a genuine PAUSE
+# is absorbed on the pause cadence, as before the fix.
+test_doneparked_paused_paused_crew_absorbs() {
+  local dir state fakebin out capture_file window key pane_hash sig pid
+  dir=$(make_case doneparked-paused); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-doneparked-paused"
+  printf 'idle holding for upstream' > "$capture_file"
+  printf 'window=%s\nkind=ship\nmode=no-mistakes\n' "$window" > "$state/doneparked-paused.meta"
+  printf 'paused: holding for the upstream release\n' > "$state/doneparked-paused.status"
+  sig=$(seen_sig "$state/doneparked-paused.status"); printf '%s' "$sig" > "$state/.seen-doneparked-paused_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle holding for upstream")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '%s' "$pane_hash" > "$state/.stale-$key"
+  printf '1\n' > "$state/.count-$key"
+  export FM_FAKE_CREW_STATE='state: paused · source: status-log · holding for the upstream release'
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; fail "a genuinely paused crew was surfaced (must stay absorbed on the pause cadence): $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || { reap "$pid"; fail "the genuinely paused pane printed a wake reason: $(cat "$out")"; }
+  [ -e "$state/.paused-$key" ] || { reap "$pid"; fail "a genuinely paused crew did not record the pause flag"; }
+  reap "$pid"
+  unset FM_FAKE_CREW_STATE
+  pass "a genuinely paused crew with a paused last line is absorbed on the pause cadence (#421 behavior intact)"
+}
+
+# Case 5: a genuinely STOPPED/unknown crew with a paused last line keeps surfacing
+# on the suppressor-equal hash - the terminal carve-out must not over-absorb a crew
+# with no positive terminal confirmation.
+test_doneparked_paused_stopped_crew_surfaces() {
+  local dir state fakebin out drain_out capture_file window key pane_hash sig pid
+  dir=$(make_case doneparked-stopped); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"
+  window="test:fm-doneparked-stopped"
+  printf 'idle dead pane' > "$capture_file"
+  printf 'window=%s\nkind=ship\nmode=no-mistakes\n' "$window" > "$state/doneparked-stopped.meta"
+  printf 'paused: awaiting-captain-decision on [key=nm-pr-scope] recheck on a long cadence\n' > "$state/doneparked-stopped.status"
+  sig=$(seen_sig "$state/doneparked-stopped.status"); printf '%s' "$sig" > "$state/.seen-doneparked-stopped_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle dead pane")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '%s' "$pane_hash" > "$state/.stale-$key"
+  printf '1\n' > "$state/.count-$key"
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · worktree gone'
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "a genuinely stopped/unknown crew with a paused last line was over-absorbed (must surface)"
+  grep -Fx "stale: $window" "$out" >/dev/null || fail "the stopped crew did not surface a plain stale wake: $(cat "$out")"
+  [ ! -e "$state/.paused-$key" ] || fail "a stopped/unknown crew was tracked as a declared pause"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the stopped-crew surface failed"
+  grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null || fail "the stopped-crew stale was not queued"
+  unset FM_FAKE_CREW_STATE
+  pass "a genuinely stopped/unknown crew with a paused last line keeps surfacing (terminal carve-out does not over-absorb)"
+}
+
 test_signal_reason_is_actionable_classifier
 test_stale_is_terminal_classifier
 test_scan_captain_relevant_statuses_classifier
@@ -1270,3 +1460,8 @@ test_heartbeat_backstop_surfaces_unsurfaced_status
 test_beacon_stays_fresh_while_absorbing
 test_afk_present_reverts_watcher_to_one_shot
 test_afk_paused_changed_pane_hands_off_plain_stale
+test_doneparked_paused_finish_surfaces_once
+test_doneparked_paused_repeat_rechecked_not_resurfaced
+test_doneparked_paused_working_crew_absorbs
+test_doneparked_paused_paused_crew_absorbs
+test_doneparked_paused_stopped_crew_surfaces

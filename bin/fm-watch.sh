@@ -993,7 +993,18 @@ EOF
                          printf '%s' "$h" > "$sf"
                          wedge_timer_check "$w" "$ssf" "non-terminal stale (provably working after a declared pause)" "$ewf"
                          triage_log "absorbed non-terminal stale (provably working): $w" ;;
-                *)       handle_paused_stale "$w" "$task" "$h" ;;
+                *)       # No working/paused evidence, and this hash was already
+                         # surfaced once (first-sight arm above). A crew whose
+                         # authoritative state is terminal (done - e.g. a PR raised and
+                         # monitoring for merge/close - or parked at a gate) is awaiting
+                         # the captain, not wedged: re-check it on the long pause cadence
+                         # instead of re-surfacing every poll. A genuinely stopped or
+                         # unknown crew (no terminal confirmation) keeps surfacing.
+                         if crew_reached_terminal "$task"; then
+                           handle_paused_stale "$w" "$task" "$h"
+                         else
+                           surface_nonterminal_stale "$w" "$h"
+                         fi ;;
               esac
             else
               wedge_timer_check "$w" "$ssf" "non-terminal stale" "$ewf"
