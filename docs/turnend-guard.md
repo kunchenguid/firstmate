@@ -1,7 +1,8 @@
 # Primary turn-end supervision guard
 
 This is the authoritative contract for the "no turn ends blind" primary guard referenced from AGENTS.md section 8.
-The shared predicate lives in `bin/fm-turnend-guard.sh`.
+The turn-end supervision predicate lives in `bin/fm-turnend-guard.sh`.
+Its primary-checkout scope lives in `bin/fm-primary-scope-lib.sh`, shared with the native session-start nudge documented in `docs/sessionstart-nudge.md`.
 Harness-specific tracked hook files only adapt each verified harness's real turn-end mechanism to that shared predicate.
 Two related but separate PreToolUse seatbelts deny a bad command shape before it runs rather than detecting a blind turn end afterward: the watcher-arm seatbelt (`bin/fm-arm-pretool-check.sh`, `docs/arm-pretool-check.md`) and the cd-guard (`bin/fm-cd-pretool-check.sh`, `docs/cd-guard.md`).
 Each seatbelt's own document defines its scope; they do not share the turn-end guard's marker-aware primary detection.
@@ -17,7 +18,7 @@ When tasks are in flight and there is no live identity-matched watcher with a fr
 
 ## Shared Predicate
 
-The guard first scopes itself to a real primary checkout.
+The guard first calls the shared primary scope to constrain itself to a real primary checkout.
 A secondmate home runs its own primary firstmate session, so a genuine `.fm-secondmate-home` marker force-includes it whether treehouse leased it as a linked worktree or it is a git-cloned plain checkout.
 The marker must be a regular non-symlink file whose first line, after all whitespace is removed, contains a non-empty identifier made only of letters, digits, dots, underscores, and dashes.
 An unmarked checkout, or one with an invalid marker, falls through to the git-dir check.

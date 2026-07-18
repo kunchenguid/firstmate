@@ -1,6 +1,6 @@
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -50,9 +50,14 @@ function lockOwnership(): LockOwnership {
 }
 
 function markLoaded(): void {
-  if (lockOwnership() === "other") return;
-  mkdirSync(state, { recursive: true });
+  if (!existsSync(state) || lockOwnership() === "other") return;
   writeFileSync(marker, `${extensionVersion}\n${process.pid}\n`);
+}
+
+function runSessionstartNudge(): string {
+  const result = spawnSync(`${root}/bin/fm-sessionstart-nudge.sh`, [], { encoding: "utf8" });
+  if (result.status !== 0) return "";
+  return result.stdout.trim();
 }
 
 function runGuard(): Promise<{ code: number; stderr: string }> {
@@ -100,8 +105,15 @@ function runCdCheck(command: string): Promise<{ code: number; stderr: string }> 
 }
 
 export default function (pi: ExtensionAPI) {
-  pi.on?.("session_start", () => {
+  pi.on?.("session_start", (event) => {
+    const reason = String((event as { reason?: unknown }).reason ?? "");
+    const nudge = ["startup", "new", "resume"].includes(reason) ? runSessionstartNudge() : "";
     markLoaded();
+    if (!nudge) return;
+    try {
+      pi.sendMessage({ customType: "firstmate-sessionstart-nudge", content: nudge, display: false });
+    } catch {
+    }
   });
 
   pi.on("tool_call", async (event) => {

@@ -47,6 +47,8 @@ WATCH="$SCRIPT_DIR/fm-watch.sh"
 
 # shellcheck source=bin/fm-supervision-lib.sh
 . "$SCRIPT_DIR/fm-supervision-lib.sh"
+# shellcheck source=bin/fm-primary-scope-lib.sh
+. "$SCRIPT_DIR/fm-primary-scope-lib.sh"
 
 # Read the whole turn-end hook payload once; never block on unreadable/absent
 # stdin.
@@ -61,32 +63,6 @@ command -v jq >/dev/null 2>&1 || exit 0
 STOP_HOOK_ACTIVE=$(printf '%s' "$PAYLOAD" | jq -r '.stop_hook_active // false' 2>/dev/null) || exit 0
 [ "$STOP_HOOK_ACTIVE" = "true" ] && exit 0
 
-# Return 0 when $1 (a firstmate root) carries a GENUINE secondmate-home marker.
-# bin/fm-home-seed.sh writes .fm-secondmate-home at a seeded secondmate home's
-# root (gitignored, so it never propagates into a child worktree); its content is
-# the secondmate id. Validate the marker's form so a stray/empty/symlink file
-# cannot spoof inclusion and an unmarked child is never guarded by accident: it
-# must be a regular (non-symlink) file whose first line, with all whitespace
-# removed, is a non-empty id token (letters, digits, dot, underscore, dash only).
-# The allowlist is matched under forced C (ASCII) collation - `local LC_ALL=C`,
-# restored on return - so a locale-crafted non-ASCII id cannot slip through the
-# range match and spoof force-inclusion. This is a deliberately lightweight
-# guard-local presence check, distinct from fm-ff-lib.sh's validate_secondmate_home
-# (which matches an EXPECTED id and does path-safety); the guard does not source
-# that heavier library.
-fm_root_is_secondmate_home() {
-  local marker="$1/.fm-secondmate-home" id LC_ALL=C
-  [ -L "$marker" ] && return 1
-  [ -f "$marker" ] || return 1
-  IFS= read -r id < "$marker" 2>/dev/null || return 1
-  id=${id//[[:space:]]/}
-  [ -n "$id" ] || return 1
-  case "$id" in
-    *[!A-Za-z0-9._-]*) return 1 ;;
-  esac
-  return 0
-}
-
 # --- scope precisely to a PRIMARY checkout ----------------------------------
 # A genuinely-marked secondmate home runs its OWN primary firstmate session, so
 # force-INCLUDE it as a guarded primary whether treehouse leased it as a linked
@@ -99,14 +75,7 @@ fm_root_is_secondmate_home() {
 # and differs from the common (shared) git-dir, while a main, non-worktree
 # checkout has the two equal. Child worktrees never carry the gitignored marker,
 # so this exempts them while guarding every real secondmate home.
-if ! fm_root_is_secondmate_home "$FM_ROOT"; then
-  GIT_DIR=$(git -C "$FM_ROOT" rev-parse --git-dir 2>/dev/null) || exit 0
-  GIT_COMMON_DIR=$(git -C "$FM_ROOT" rev-parse --git-common-dir 2>/dev/null) || exit 0
-  [ "$GIT_DIR" = "$GIT_COMMON_DIR" ] || exit 0
-fi
-[ -f "$FM_ROOT/AGENTS.md" ] || exit 0
-[ -d "$FM_ROOT/bin" ] || exit 0
-[ -d "$STATE" ] || exit 0
+fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
 
 # --- the actual predicate ----------------------------------------------------
 # shellcheck source=bin/fm-wake-lib.sh
