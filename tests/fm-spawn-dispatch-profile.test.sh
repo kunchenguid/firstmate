@@ -240,20 +240,53 @@ test_codex_threads_model_and_effort() {
   pass "codex receives --model and model_reasoning_effort profile flags"
 }
 
+test_codex_pins_safe_effort_when_omitted() {
+  local rec id out status launch
+  id=profile-codex-default-z3b
+  rec=$(make_spawn_case profile-codex-default codex "$id")
+  read_case_record "$rec"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "codex spawn without an effort should succeed"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" codex default default
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "codex -c 'model_reasoning_effort=\"xhigh\"' --dangerously-bypass-approvals-and-sandbox" \
+    "codex launch did not override ambient reasoning effort with xhigh"
+  pass "codex pins xhigh when no effort is selected"
+}
+
 test_codex_threads_max_effort() {
   local rec id out status launch
   id=profile-codex-max-z4
   rec=$(make_spawn_case profile-codex-max codex "$id")
   read_case_record "$rec"
 
-  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model gpt-5 --effort max)
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model gpt-5.6-sol --effort max)
   status=$?
   expect_code 0 "$status" "codex spawn with max effort should succeed"
-  assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5 max
+  assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5.6-sol max
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "codex --model 'gpt-5' -c 'model_reasoning_effort=\"max\"' --dangerously-bypass-approvals-and-sandbox" \
+  assert_contains "$launch" "codex --model 'gpt-5.6-sol' -c 'model_reasoning_effort=\"max\"' --dangerously-bypass-approvals-and-sandbox" \
     "codex launch did not thread max reasoning effort"
-  pass "codex receives verified max reasoning effort"
+  pass "codex receives verified gpt-5.6-sol max reasoning effort"
+}
+
+test_codex_rejects_max_for_unverified_model() {
+  local rec id out status launch
+  id=profile-codex-invalid-max-z4b
+  rec=$(make_spawn_case profile-codex-invalid-max codex "$id")
+  read_case_record "$rec"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model gpt-5.5 --effort max)
+  status=$?
+  expect_code 1 "$status" "codex spawn with an unverified model/max pair should fail"
+  assert_contains "$out" "error: codex max effort requires --model gpt-5.6-sol (got 'gpt-5.5')" \
+    "codex spawn did not explain the unsupported model/max pair"
+  assert_absent "$HOME_DIR/state/$id.meta" "unsupported codex model/max pair should fail before meta is written"
+  launch=$(cat "$LAUNCH_LOG")
+  [ -z "$launch" ] || fail "unsupported codex model/max pair reached the launch command"
+  pass "codex rejects max for unverified models"
 }
 
 test_grok_threads_model_and_reasoning_effort() {
@@ -391,7 +424,9 @@ test_active_dispatch_profile_allows_positional_harness
 test_active_dispatch_profile_allows_raw_launch_command
 test_claude_threads_model_and_effort
 test_codex_threads_model_and_effort
+test_codex_pins_safe_effort_when_omitted
 test_codex_threads_max_effort
+test_codex_rejects_max_for_unverified_model
 test_grok_threads_model_and_reasoning_effort
 test_grok_omits_invalid_max_reasoning_effort
 test_grok_omits_invalid_xhigh_reasoning_effort

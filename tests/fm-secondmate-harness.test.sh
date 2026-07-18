@@ -590,12 +590,11 @@ test_spawn_explicit_harness_does_not_inherit_secondmate_harness_tokens() {
   [ "$(meta_field "$meta" model)" = default ] || fail "explicit-harness-no-tokens: meta model should stay default"
   [ "$(meta_field "$meta" effort)" = default ] || fail "explicit-harness-no-tokens: meta effort should stay default"
   launch=$(cat "$launchlog")
-  assert_contains "$launch" "codex --dangerously-bypass-approvals-and-sandbox" \
-    "explicit-harness-no-tokens: launch did not use codex"
+  assert_contains "$launch" "codex -c" "explicit-harness-no-tokens: launch did not use codex"
   assert_not_contains "$launch" "--model" "explicit-harness-no-tokens: launch must not carry a --model flag"
-  assert_not_contains "$launch" "model_reasoning_effort" \
-    "explicit-harness-no-tokens: launch must not carry a codex effort flag"
-  pass "C7 spawn: an explicit --harness starts with clean model/effort defaults"
+  assert_contains "$launch" "-c 'model_reasoning_effort=\"xhigh\"'" \
+    "explicit-harness-no-tokens: launch did not pin a safe codex effort"
+  pass "C7 spawn: an explicit --harness keeps clean profile defaults and pins safe codex effort"
 }
 
 test_spawn_explicit_harness_uses_explicit_profile_axes() {
@@ -627,8 +626,8 @@ test_spawn_explicit_harness_uses_explicit_profile_axes() {
 
 # The harness fallback chain (secondmate-harness -> crew-harness -> own) still
 # resolves correctly with no model/effort tokens anywhere in the chain, and a
-# crew/scout (non-secondmate) launch is entirely unaffected by this feature: no
-# model/effort is invented for it even though its own project has no profile set.
+# crew/scout (non-secondmate) launch keeps clean requested profile axes while
+# both Codex paths receive the launch safety fallback.
 test_spawn_fallback_chain_and_crew_scout_unaffected() {
   local w sm meta home proj wt fakebin launchlog id launch
   w="$TMP_ROOT/spawn-fallback-and-crew"
@@ -645,6 +644,9 @@ test_spawn_fallback_chain_and_crew_scout_unaffected() {
     || fail "fallback: secondmate harness did not fall back to crew-harness codex"
   [ "$(meta_field "$meta" model)" = default ] || fail "fallback: meta model should stay default with no tokens anywhere"
   [ "$(meta_field "$meta" effort)" = default ] || fail "fallback: meta effort should stay default with no tokens anywhere"
+  launch=$(cat "$launchlog")
+  assert_contains "$launch" "-c 'model_reasoning_effort=\"xhigh\"'" \
+    "fallback: secondmate launch did not pin a safe codex effort"
 
   # Crew/scout launch: same crew-harness config, no --secondmate. Must resolve
   # the crew harness and record no model/effort - this codepath must never read
@@ -672,7 +674,9 @@ test_spawn_fallback_chain_and_crew_scout_unaffected() {
   launch=$(cat "$launchlog")
   assert_not_contains "$launch" "--model" "crew-unaffected: crew launch must not carry a --model flag"
   assert_not_contains "$launch" "--effort" "crew-unaffected: crew launch must not carry an --effort flag"
-  pass "C9 spawn: the harness fallback chain still resolves with no tokens; crew/scout launches are unaffected by this feature"
+  assert_contains "$launch" "-c 'model_reasoning_effort=\"xhigh\"'" \
+    "crew-unaffected: crew launch did not pin a safe codex effort"
+  pass "C9 spawn: harness fallback keeps clean profile defaults and pins safe codex effort"
 }
 
 # ===========================================================================

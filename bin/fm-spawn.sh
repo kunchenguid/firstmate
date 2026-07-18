@@ -7,8 +7,8 @@
 #   positional harness arg still works for back-compat.
 #   --model <name> and --effort <low|medium|high|xhigh|max> are concrete profile
 #   axes chosen by firstmate at intake. They are only threaded into harnesses whose
-#   installed CLIs were verified to support that axis; unsupported axes are omitted
-#   from that harness's launch rather than guessed.
+#   installed CLIs were verified to support that axis; Codex pins omitted effort to
+#   xhigh and accepts max only with gpt-5.6-sol, while other unsupported axes are omitted.
 #   --backend <name> is the explicit runtime session-provider backend for this
 #   spawn. Without it, the script resolves FM_BACKEND, then config/backend, then
 #   runtime auto-detection (the runtime firstmate itself is executing inside -
@@ -410,6 +410,26 @@ if [ "$KIND" = secondmate ] && [ -z "$ARG3" ]; then
   fi
 fi
 
+codex_effort_supported() {
+  local model=$1 effort=$2
+  case "$effort" in
+    low|medium|high|xhigh) return 0 ;;
+    max) [ "$model" = gpt-5.6-sol ] ;;
+    *) return 1 ;;
+  esac
+}
+
+case "$ARG3" in
+  *' '*) ;;
+  *)
+    if [ "$HARNESS" = codex ] && [ -n "$EFFORT" ] \
+      && ! codex_effort_supported "$MODEL" "$EFFORT"; then
+      echo "error: codex max effort requires --model gpt-5.6-sol (got '${MODEL:-default}')" >&2
+      exit 1
+    fi
+    ;;
+esac
+
 secondmate_registry_value() {
   local id=$1 key=$2 reg line value
   reg="$DATA/secondmates.md"
@@ -442,7 +462,10 @@ model_flag_for_harness() {
 }
 
 effort_flag_for_harness() {
-  local harness=$1 effort=$2
+  local harness=$1 model=$2 effort=$3
+  if [ "$harness" = codex ] && { [ -z "$effort" ] || [ "$effort" = default ]; }; then
+    effort=xhigh
+  fi
   [ -n "$effort" ] && [ "$effort" != default ] || return 0
   case "$harness" in
     claude)
@@ -452,12 +475,11 @@ effort_flag_for_harness() {
       ;;
     codex)
       # The installed codex config schema uses model_reasoning_effort, and the
-      # bundled model catalog advertises low|medium|high|xhigh|max. Ultra is
-      # intentionally excluded because its automatic delegation conflicts with
-      # FirstMate's single task-owner routing contract.
-      case "$effort" in
-        low|medium|high|xhigh|max) printf -- '-c %s ' "$(shell_quote "model_reasoning_effort=\"$effort\"")" ;;
-      esac
+      # bundled model catalog advertises low|medium|high|xhigh across models,
+      # with max empirically verified for gpt-5.6-sol.
+      if codex_effort_supported "$model" "$effort"; then
+        printf -- '-c %s ' "$(shell_quote "model_reasoning_effort=\"$effort\"")"
+      fi
       ;;
     grok)
       # grok exposes both --effort and --reasoning-effort; firstmate's profile
@@ -1036,7 +1058,7 @@ sq_piext=$(shell_quote "$STATE/$ID.pi-ext.ts")
 sq_piturnend=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-turnend-guard.ts")
 sq_piwatch=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-pi-watch.ts")
 MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
-EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT")
+EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$MODEL" "$EFFORT")
 LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
 LAUNCH=${LAUNCH//__EFFORTFLAG__/$EFFORTFLAG}
 LAUNCH=${LAUNCH//__BRIEF__/$sq_brief}

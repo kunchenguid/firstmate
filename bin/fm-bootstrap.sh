@@ -656,11 +656,14 @@ crew_dispatch_validate() {
   fi
   err=$(jq -r '
     def verified($h): ["claude","codex","opencode","pi","grok"] | index($h);
-    def effort_ok($h; $e):
+    def effort_ok($h; $m; $e):
       if $e == null then true
       elif ($e | type) != "string" then false
       elif $h == "claude" then (["low","medium","high","xhigh","max"] | index($e))
-      elif $h == "codex" then (["low","medium","high","xhigh","max"] | index($e))
+      elif $h == "codex" then
+        if $e == "max" then $m == "gpt-5.6-sol"
+        else (["low","medium","high","xhigh"] | index($e))
+        end
       elif $h == "grok" then (["low","medium","high"] | index($e))
       elif $h == "pi" then (["low","medium","high","xhigh","max"] | index($e))
       elif $h == "opencode" then false
@@ -672,11 +675,11 @@ crew_dispatch_validate() {
       else []
       end;
     def bad_efforts:
-      ([(.rules // [])[]? | use_profiles(.use?)[]? | {h: .harness, e: .effort}]
-        + (if (.default? | type) == "object" then [{h: .default.harness, e: .default.effort}] else [] end))
+      ([(.rules // [])[]? | use_profiles(.use?)[]? | {h: .harness, m: .model, e: .effort}]
+        + (if (.default? | type) == "object" then [{h: .default.harness, m: .default.model, e: .default.effort}] else [] end))
       | map(select(.e != null))
       | map(select((.h | type) == "string" and verified(.h)))
-      | map(select(. as $p | effort_ok($p.h; $p.e) | not))
+      | map(select(. as $p | effort_ok($p.h; $p.m; $p.e) | not))
       | map("\(.h):\(.e)")
       | unique;
     if type != "object" then "top-level value must be an object"
