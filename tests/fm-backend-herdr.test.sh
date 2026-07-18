@@ -15,6 +15,27 @@ set -u
 
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (required by the herdr adapter)"; exit 0; }
 
+# The composer classifier's prompt-glyph regex (FM_BACKEND_HERDR_BARE_PROMPT_RE,
+# '^[❯›]') and this file's composer fixtures are multibyte. Under a non-UTF-8
+# host locale, grep matches the bracket expression byte-wise, so box-drawing
+# border rows false-match as bare prompt rows (╰/╭ share their first UTF-8 byte
+# with ❯) and the live-verified classifications cannot reproduce. Force a UTF-8
+# locale (preferring C.UTF-8, which keeps C collation) so the file runs in the
+# verified reality; skip only when the host has no working UTF-8 locale at all.
+if printf '╰\n' | grep -qE '^[❯›]'; then
+  for _utf8_loc in C.UTF-8 C.utf8 en_US.UTF-8; do
+    if printf '❯\n' | LC_ALL="$_utf8_loc" grep -qE '^[❯›]' 2>/dev/null \
+       && ! printf '╰\n' | LC_ALL="$_utf8_loc" grep -qE '^[❯›]' 2>/dev/null; then
+      export LC_ALL="$_utf8_loc"
+      break
+    fi
+  done
+  if printf '╰\n' | grep -qE '^[❯›]'; then
+    echo "skip: no UTF-8 locale available; host grep matches multibyte glyph brackets byte-wise"
+    exit 0
+  fi
+fi
+
 TMP_ROOT=$(fm_test_tmproot fm-backend-herdr-tests)
 export FM_BACKEND_HERDR_SUBMIT_MIN_SLEEP=0
 
