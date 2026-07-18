@@ -1173,7 +1173,12 @@ EOF
 # HOME'S OWN workspace (fm_backend_herdr_workspace_label - never another
 # home's). Legacy tabs identify themselves directly with an fm-<id> label.
 # Human-labeled tabs are mapped back to that same stable identity through the
-# label= plus herdr_session=/workspace=/tab= fields in state/<id>.meta; an
+# label= plus herdr_session=/workspace=/tab= fields in state/<id>.meta. The
+# recorded herdr_tab_id is authoritative: while that tab is present in the
+# listing, only it maps to fm-<id> - an out-of-band tab wearing the same label
+# never does (herdr enforces no label uniqueness against tabs firstmate did
+# not create). The unique-label fallback applies only when the recorded tab is
+# absent from the listing (e.g. the id was lost across a herdr restart); an
 # unmapped human label is skipped because its visible text alone cannot safely
 # reconstruct an id. Out-of-band labels may embed tab/newline controls
 # (verified in docs/herdr-backend.md's lab probe), so the jq filter strips
@@ -1187,10 +1192,11 @@ EOF
 # workspace that does not exist yet simply lists nothing. One
 # "<session>:<pane_id>\t<fm-id>" line per identifiable live task tab.
 fm_backend_herdr_list_live() {  # <session>
-  local session=$1 wsid tabs tab_id label pane_id state meta backend meta_label meta_session meta_wsid meta_tab id stable candidate matches
+  local session=$1 wsid tabs listed_tab_ids tab_id label pane_id state meta backend meta_label meta_session meta_wsid meta_tab id stable candidate matches
   wsid=$(fm_backend_herdr_workspace_find "$session") || return 0
   [ -n "$wsid" ] || return 0
   tabs=$(fm_backend_herdr_cli "$session" tab list --workspace "$wsid" 2>/dev/null) || return 0
+  listed_tab_ids=$(printf '%s' "$tabs" | jq -r '.result.tabs[]? | .tab_id' 2>/dev/null)
   state=${FM_STATE_OVERRIDE:-$FM_HOME/state}
   while IFS=$'\t' read -r tab_id label; do
     [ -n "$tab_id" ] || continue
@@ -1211,6 +1217,9 @@ fm_backend_herdr_list_live() {  # <session>
       if [ "$meta_tab" = "$tab_id" ]; then
         stable="fm-$id"
         break
+      fi
+      if [ -n "$meta_tab" ] && printf '%s\n' "$listed_tab_ids" | grep -Fxq -- "$meta_tab"; then
+        continue
       fi
       candidate="fm-$id"
       matches=$((matches + 1))

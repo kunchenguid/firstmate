@@ -780,7 +780,7 @@ case "$BACKEND" in
 $HERDR_TASK_IDS
 EOF
     if [ -z "$HERDR_TAB_ID" ] || [ -z "$HERDR_PANE_ID" ]; then
-      echo "error: herdr did not return a tab/pane id for $DISPLAY_LABEL" >&2
+      echo "error: herdr did not return a tab/pane id for $W ($DISPLAY_LABEL)" >&2
       exit 1
     fi
     T="$HERDR_SES:$HERDR_PANE_ID"
