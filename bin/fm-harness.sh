@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Detect the agent harness this process tree runs on.
-# Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|grok|unknown
+# Usage: fm-harness.sh                  print own harness:
+#                                        claude|codex|opencode|pi|grok|cursor|unknown
 #        fm-harness.sh crew             print the effective CREWMATE harness
 #                                        (config/crew-harness; "default" resolves to own)
 #        fm-harness.sh secondmate       print the harness the PRIMARY uses to launch
@@ -20,12 +21,25 @@
 # name and is never parsed for a model.
 # Detection layers: verified environment markers first, then process ancestry.
 # Record each newly verified env marker here.
+# `cursor` is detect-only (session identity / lock ancestry). It is not a verified
+# launch template - spawn with a raw `agent` command until verified. See
+# docs/cursor-harness.md.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
+
+# Match Cursor Agent CLI argv shapes observed 2026-07-18 (agent 2026.07.16):
+# argv0=.../agent, often with a .../cursor-agent/... script path; comm may be
+# MainThread rather than agent.
+args_look_like_cursor() {
+  case "$1" in
+    */agent\ *|*/agent|*/cursor-agent/*) return 0 ;;
+  esac
+  return 1
+}
 
 detect_own() {
   # Layer 1: environment markers for verified harnesses.
@@ -39,23 +53,32 @@ detect_own() {
   local pid=$$ comm args
   for _ in 1 2 3 4 5 6 7 8; do
     comm=$(ps -o comm= -p "$pid" 2>/dev/null) || break
+    args=$(ps -o args= -p "$pid" 2>/dev/null)
     case "$(basename "$comm")" in
       *claude*) echo claude; return ;;
       *codex*) echo codex; return ;;
       *opencode*) echo opencode; return ;;
       *grok*) echo grok; return ;;
       pi) echo pi; return ;;
-      node*|python*)
+      agent) echo cursor; return ;;
+      node*|python*|MainThread)
         # Bare interpreter: match the harness name in its script path.
-        args=$(ps -o args= -p "$pid" 2>/dev/null)
+        # MainThread: Cursor Agent CLI's observed process name.
         case "$args" in
           *claude*) echo claude; return ;;
           *codex*) echo codex; return ;;
           *opencode*) echo opencode; return ;;
           *grok*) echo grok; return ;;
           *" pi "*|*/pi) echo pi; return ;;
-        esac ;;
+        esac
+        if args_look_like_cursor "$args"; then
+          echo cursor; return
+        fi
+        ;;
     esac
+    if args_look_like_cursor "$args"; then
+      echo cursor; return
+    fi
     pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
     if [ -z "$pid" ] || [ "$pid" -le 1 ]; then
       break

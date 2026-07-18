@@ -44,6 +44,7 @@ If the captain asks for a new harness, propose verifying it first: spawn a trivi
 On `unknown`, ask the captain instead of guessing.
 A captain override always beats detection.
 When verifying a new adapter, record its env marker and command name in `bin/fm-harness.sh`.
+`cursor` may be detected for session identity and lock ancestry (`docs/cursor-harness.md`); it is not a verified launch template - spawn with raw `agent` / `agent --yolo` until full adapter verification lands.
 
 For stuck recovery, the target window's harness is recorded as `harness=` in `state/<id>.meta`.
 Use that value for interrupt, exit, resume, and skill-invocation facts.

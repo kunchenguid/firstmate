@@ -14,21 +14,46 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 LOCK="$STATE/.lock"
 mkdir -p "$STATE"
 
-# Known harness command names; extend when a new adapter is verified.
-HARNESS_RE='claude|codex|opencode|grok|^pi$'
+# Known harness command basenames; extend when a new adapter is verified.
+# `agent` is included so Cursor CLI can hold the session lock. Cursor is not a
+# verified launch template yet - detect/lock only; spawn via raw `agent`.
+# See docs/cursor-harness.md.
+HARNESS_RE='claude|codex|opencode|grok|^pi$|^agent$'
+
+# True when (comm, args) look like a harness process.
+# Cursor Agent CLI often reports comm=MainThread with argv0=.../agent and a
+# .../cursor-agent/... script path (observed 2026-07-18, agent 2026.07.16).
+is_harness_proc() {
+  local comm=$1 args=$2
+  if printf '%s' "$(basename "$comm")" | grep -qE "$HARNESS_RE"; then
+    return 0
+  fi
+  # Bare interpreter (e.g. node): match the harness name in its script path.
+  # MainThread: Cursor Agent CLI's observed process name.
+  case "$comm" in
+    *node*|*python*|MainThread)
+      if printf '%s' "$args" | grep -qE "$HARNESS_RE"; then
+        return 0
+      fi
+      case "$args" in
+        */agent\ *|*/agent|*/cursor-agent/*) return 0 ;;
+      esac
+      ;;
+  esac
+  case "$args" in
+    */agent\ *|*/agent) return 0 ;;
+  esac
+  return 1
+}
 
 harness_pid() {
   local pid=$$ comm args
   for _ in 1 2 3 4 5 6 7 8; do
     comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
     args=$(ps -o args= -p "$pid" 2>/dev/null)
-    if printf '%s' "$(basename "$comm")" | grep -qE "$HARNESS_RE"; then
+    if is_harness_proc "$comm" "$args"; then
       echo "$pid"; return 0
     fi
-    # Bare interpreter (e.g. node): match the harness name in its script path.
-    case "$comm" in
-      *node*|*python*) printf '%s' "$args" | grep -qE "$HARNESS_RE" && { echo "$pid"; return 0; } ;;
-    esac
     pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
     [ -n "$pid" ] && [ "$pid" -gt 1 ] || return 1
   done
@@ -36,10 +61,11 @@ harness_pid() {
 }
 
 holder_alive() {  # true if $1 is a live process that looks like a harness
-  local pid=$1 comm
+  local pid=$1 comm args
   kill -0 "$pid" 2>/dev/null || return 1
   comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
-  printf '%s' "$(basename "$comm") $(ps -o args= -p "$pid" 2>/dev/null)" | grep -qE "$HARNESS_RE"
+  args=$(ps -o args= -p "$pid" 2>/dev/null)
+  is_harness_proc "$comm" "$args"
 }
 
 if [ "${1:-}" = "status" ]; then
