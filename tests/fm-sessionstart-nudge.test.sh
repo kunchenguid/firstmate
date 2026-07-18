@@ -9,6 +9,8 @@ TMP_ROOT=$(fm_test_tmproot fm-sessionstart-nudge)
 NUDGE="$ROOT/bin/fm-sessionstart-nudge.sh"
 NUDGE_LINE="Run \`bin/fm-session-start.sh\` now, exactly once, before executing any other instructions."
 fm_git_identity fmtest fmtest@example.invalid
+# Ignore an outer gate marker; the dedicated case below sets it explicitly.
+unset NO_MISTAKES_GATE
 
 make_primary() {
   local dir=$1

@@ -334,7 +334,7 @@ test_scout_and_secondmate_scaffold() {
     || fail "fm-brief.sh secondmate scaffold exited non-zero"
   brief="$BRIEF_HOME/data/brief-sm-q6/brief.md"
   assert_present "$brief" "secondmate charter was not scaffolded"
-  assert_grep "persistent domain supervisor" "$brief" \
+  assert_grep "persistent second mate" "$brief" \
     "secondmate charter must declare its role"
   pass "fm-brief: scout and secondmate code paths still scaffold well-formed briefs"
 }
