@@ -34,6 +34,9 @@
 #   local-only   implement on branch, stop and report "ready in branch" (no push/PR);
 #                captain approves, firstmate merges to local main
 # Ship briefs begin with a worktree-isolation assertion before the branch step.
+# Remote-backed ship briefs (no-mistakes and direct-PR) also carry a Public register
+# section requiring a neutral open-web voice for all remote-facing text; local-only,
+# scout, and secondmate scaffolds omit it.
 # Scout tasks ignore mode - their deliverable is a report, not a merge.
 # Every scaffold's status protocol distinguishes the configured
 # declared-external-wait verb (FM_CLASSIFY_PAUSED_VERB, default "paused") from
