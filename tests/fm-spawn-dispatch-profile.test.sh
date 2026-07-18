@@ -20,12 +20,36 @@ make_spawn_fakebin() {
 #!/usr/bin/env bash
 set -u
 case "$*" in
-  *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
+  *"#{pane_current_path}"*)
+    target=
+    prev=
+    for a in "$@"; do
+      if [ "$prev" = "-t" ]; then
+        target=$a
+      fi
+      prev=$a
+    done
+    [ -z "${FM_FAKE_PANE_PATH_LOG:-}" ] || printf 'target=%s\n' "$target" >> "$FM_FAKE_PANE_PATH_LOG"
+    if [ -n "${FM_FAKE_PANE_PATH_SEQUENCE:-}" ] && [ -f "$FM_FAKE_PANE_PATH_SEQUENCE" ]; then
+      first=
+      IFS= read -r first < "$FM_FAKE_PANE_PATH_SEQUENCE" || true
+      if [ -n "$first" ]; then
+        tmp="$FM_FAKE_PANE_PATH_SEQUENCE.tmp"
+        sed '1d' "$FM_FAKE_PANE_PATH_SEQUENCE" > "$tmp"
+        mv "$tmp" "$FM_FAKE_PANE_PATH_SEQUENCE"
+        printf '%s\n' "$first"
+        exit 0
+      fi
+    fi
+    printf '%s\n' "${FM_FAKE_PANE_PATH:-}"
+    exit 0
+    ;;
 esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
   list-windows) exit 0 ;;
-  has-session|new-session|new-window|kill-window) exit 0 ;;
+  new-window) printf '%%42\n'; exit 0 ;;
+  has-session|new-session|kill-window) exit 0 ;;
   send-keys)
     if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
       prev=
@@ -206,6 +230,35 @@ test_active_dispatch_profile_allows_raw_launch_command() {
   launch=$(cat "$LAUNCH_LOG")
   [ "$launch" = "custom-agent --flag" ] || fail "raw launch command changed"$'\n'"actual: $launch"
   pass "active crew-dispatch profile allows the raw launch-command escape hatch"
+}
+
+test_spawn_ignores_unrelated_git_root_before_project_worktree() {
+  local rec id unrelated sequence target_log out status meta
+  id=profile-worktree-race-z17
+  rec=$(make_spawn_case profile-worktree-race codex "$id")
+  read_case_record "$rec"
+  unrelated="$CASE_DIR/unrelated-git-root"
+  sequence="$CASE_DIR/pane-path-sequence"
+  target_log="$CASE_DIR/pane-path-targets.log"
+  fm_git_init_commit "$unrelated"
+  printf '%s\n' "$PROJ_DIR" "$unrelated" "$WT_DIR" > "$sequence"
+
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
+    FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
+    FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$WT_DIR" TMUX="fake,1,0" \
+    FM_FAKE_PANE_PATH_SEQUENCE="$sequence" FM_FAKE_PANE_PATH_LOG="$target_log" \
+    FM_FAKE_LAUNCH_LOG="$LAUNCH_LOG" GROK_HOME="$HOME_DIR/grok-home" PATH="$FAKEBIN_DIR:$PATH" \
+    "$SPAWN" "$id" "$PROJ_DIR" 2>&1)
+  status=$?
+  expect_code 0 "$status" "spawn with transient unrelated git cwd should keep polling for the requested repo worktree"$'\n'"$out"
+
+  meta="$HOME_DIR/state/$id.meta"
+  assert_contains "$out" "worktree=$WT_DIR" "spawn summary chose the transient unrelated repository instead of the project worktree"
+  assert_grep "worktree=$WT_DIR" "$meta" "meta chose the transient unrelated repository instead of the project worktree"
+  assert_no_grep "worktree=$unrelated" "$meta" "meta must never persist an unrelated git root as the task worktree"
+  assert_grep 'target=%42' "$target_log" "worktree polling did not use the stable tmux window id"
+  pass "spawn poll skips unrelated git roots and records the requested project's isolated worktree"
 }
 
 test_claude_threads_model_and_effort() {
@@ -390,6 +443,7 @@ test_active_dispatch_profile_requires_explicit_harness_for_scout
 test_active_dispatch_profile_allows_explicit_harness
 test_active_dispatch_profile_allows_positional_harness
 test_active_dispatch_profile_allows_raw_launch_command
+test_spawn_ignores_unrelated_git_root_before_project_worktree
 test_claude_threads_model_and_effort
 test_codex_threads_model_and_effort
 test_codex_omits_invalid_max_effort

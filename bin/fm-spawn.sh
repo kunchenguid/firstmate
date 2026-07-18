@@ -664,6 +664,25 @@ real_path_or_raw() {  # <path>
   fi
 }
 
+git_common_dir_real() {  # <path>
+  local path=$1 common common_abs
+  common=$(git -C "$path" rev-parse --git-common-dir 2>/dev/null) || return 1
+  case "$common" in
+    /*) common_abs=$common ;;
+    *) common_abs="$path/$common" ;;
+  esac
+  cd "$common_abs" 2>/dev/null && pwd -P
+}
+
+if [ "$KIND" != secondmate ]; then
+  PROJ_GIT_COMMON_REAL=$(git_common_dir_real "$PROJ_ABS") || {
+    echo "error: project path is not a git repository: $PROJ_ABS" >&2
+    exit 1
+  }
+else
+  PROJ_GIT_COMMON_REAL=
+fi
+
 # Session-provider container-ensure + task creation. tmux stays exactly as P1
 # left it (same session-name / new-window sequence, see bin/backends/tmux.sh);
 # a herdr spawn goes through the version-gated, workspace-per-HOME,
@@ -673,7 +692,7 @@ real_path_or_raw() {  # <path>
 # that every downstream operation (send/capture/kill) already treats as opaque
 # per-backend routing (fm_backend_resolve_selector).
 validate_spawn_worktree() {  # <source> <inspect-target>
-  local source=$1 inspect_target=$2 wt_real proj_real wt_top wt_top_real
+  local source=$1 inspect_target=$2 wt_real proj_real wt_top wt_top_real wt_common_real
   wt_real=
   if ! wt_real=$(cd "$WT" 2>/dev/null && pwd -P); then
     wt_real=
@@ -684,10 +703,22 @@ validate_spawn_worktree() {  # <source> <inspect-target>
   if ! wt_top_real=$(cd "$wt_top" 2>/dev/null && pwd -P); then
     wt_top_real=
   fi
-  if [ -z "$wt_real" ] || [ -z "$wt_top_real" ] || [ "$wt_real" != "$wt_top_real" ] || [ "$wt_real" = "$proj_real" ]; then
-    echo "error: $source did not yield an isolated worktree (resolved '$WT'; worktree root '${wt_top:-none}'; primary '$PROJ_ABS'); refusing to launch to avoid tangling the primary checkout. Inspect target $inspect_target" >&2
+  wt_common_real=$(git_common_dir_real "$WT" 2>/dev/null || true)
+  if [ -z "$wt_real" ] || [ -z "$wt_top_real" ] || [ "$wt_real" != "$wt_top_real" ] || [ "$wt_real" = "$proj_real" ] || [ "$wt_common_real" != "$PROJ_GIT_COMMON_REAL" ]; then
+    echo "error: $source did not yield an isolated worktree for the requested repository (resolved '$WT'; worktree root '${wt_top:-none}'; primary '$PROJ_ABS'); refusing to launch to avoid tangling the primary checkout. Inspect target $inspect_target" >&2
     exit 1
   fi
+}
+
+spawn_candidate_is_requested_worktree() {  # <path>
+  local candidate=$1 candidate_real wt_top wt_top_real wt_common_real
+  candidate_real=$(real_path_or_raw "$candidate")
+  [ "$candidate_real" != "$PROJ_ABS_REAL" ] || return 1
+  wt_top=$(git -C "$candidate" rev-parse --show-toplevel 2>/dev/null) || return 1
+  wt_top_real=$(cd "$wt_top" 2>/dev/null && pwd -P) || return 1
+  [ "$candidate_real" = "$wt_top_real" ] || return 1
+  wt_common_real=$(git_common_dir_real "$candidate") || return 1
+  [ "$wt_common_real" = "$PROJ_GIT_COMMON_REAL" ] || return 1
 }
 
 W="fm-$ID"
@@ -845,7 +876,7 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   # PROJ_ABS on the very first poll, before the pane has actually moved.
   for _ in $(seq 1 60); do
     p=$(spawn_current_path "$WT_TARGET" || true)
-    if [ -n "$p" ] && [ "$(real_path_or_raw "$p")" != "$PROJ_ABS_REAL" ]; then
+    if [ -n "$p" ] && spawn_candidate_is_requested_worktree "$p"; then
       WT="$p"
       break
     fi
