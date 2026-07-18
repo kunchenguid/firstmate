@@ -53,6 +53,16 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 
+# Inherit X-mode and Telegram-mode watcher cadence when present. Sourcing here
+# (rather than only in harness protocol text or the Pi extension) keeps every
+# arm path on the 30s check interval without requiring harness-specific edits.
+_fm_config_dir="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
+# shellcheck disable=SC1090,SC1091
+[ -f "$_fm_config_dir/x-mode.env" ] && . "$_fm_config_dir/x-mode.env"
+# shellcheck disable=SC1090,SC1091
+[ -f "$_fm_config_dir/telegram-mode.env" ] && . "$_fm_config_dir/telegram-mode.env"
+unset _fm_config_dir
+
 WATCH="$SCRIPT_DIR/fm-watch.sh"
 WATCH_LOCK="$STATE/.watch.lock"
 BEAT="$STATE/.last-watcher-beat"

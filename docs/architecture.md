@@ -43,7 +43,7 @@ Cross-home reads validate the seeded identity and operational-directory boundari
 A bounded direct-report terminal tail can help diagnose a mismatch by showing that historical parent wording is still visible, but it is untrusted supplemental evidence because scrollback, prompts, copied output, idle shells, and agent prose are not durable state.
 The snapshot strips control sequences, retains only capture metadata and literal event-corroboration flags, and never lets terminal evidence override a valid structured classification.
 The default path remains local-only; live GitHub enrichment exists only behind the bearings `--include-prs` opt-in.
-Optional X mode integrates with the watcher only after explicit opt-in; [configuration.md](configuration.md#x-mode-env) owns its generated-artifact and dispatch mechanics.
+Optional X mode and Telegram mode integrate with the watcher only after explicit opt-in; [configuration.md](configuration.md#x-mode-env) and [telegram-mode.md](telegram-mode.md) own their generated-artifact and dispatch mechanics.
 
 At session start, `bin/fm-session-start.sh` emits exactly one primary-harness supervision block rendered by `bin/fm-supervision-instructions.sh` from `docs/supervision-protocols/`.
 That block owns the live wait shape for the running primary harness: Claude and Grok use background-notify cycles, Codex uses bounded foreground checkpoints, Pi uses its two tracked primary extensions, and OpenCode uses its TUI plugin.
@@ -201,6 +201,15 @@ If an image is attached to a split reply, the relay puts it on the first/opener 
 For preview testing, `FMX_DRY_RUN` makes `fm-x-reply.sh` and `fm-x-dismiss.sh` skip the public post or dismiss call and record the would-be payload under `state/x-outbox/`, including `texts` when the reply would be a thread and an `endpoint` marker when the preview is a completion follow-up or dismiss, while the rest of the poll -> compose -> would-post loop still succeeds.
 Attached images are recorded as compact `{media_type, bytes, source_path}` metadata in dry-run instead of base64 bytes.
 X mode remains layered on top of the existing check mechanism without changing its request-handling behavior.
+
+## Optional Telegram mode
+
+Telegram mode is opt-in presence for a private Bot API channel to the captain's phone.
+A user enables it by putting `FM_TELEGRAM_BOT_TOKEN` and `FM_TELEGRAM_CHAT_ID` in the firstmate home's gitignored `.env`; `config/telegram-mode` containing `off` is an additional kill switch.
+Outbound notifications use `bin/fm-telegram-send.sh` and default to AFK-only; inbound `getUpdates` polling uses `bin/fm-telegram-poll.sh` behind a generated watcher shim, exactly as X mode does.
+The closed Stage-2 grammar (`status`, `approve`, `deny`, `merge`) is enforced by `bin/fm-telegram-respond.sh` and the `fm-telegram-respond` skill; Stage-3 free-text prompting is not implemented.
+Telegram messages never exit away mode, and merge authority requires a full PR URL previously sent to that chat plus a green PR.
+[docs/telegram-mode.md](telegram-mode.md) owns the threat model, audit log, freshness, rate limit, and BotFather kill-switch details.
 
 ## Project memory belongs to projects
 
