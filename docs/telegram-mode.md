@@ -83,7 +83,7 @@ Point one at the sender so a wedged away-mode primary reaches the phone without 
 
 ```
 osascript
-command: FM_HOME="$HOME/path-to-this-firstmate-home" /path/to/firstmate/bin/fm-telegram-send.sh --force --text-file /dev/stdin
+command: FM_HOME="$HOME/path-to-this-firstmate-home" /path/to/firstmate/bin/fm-telegram-send.sh --force -
 ```
 
 Or a one-shot curl wrapper that reads the token from `.env` (never inline the token in the config file).

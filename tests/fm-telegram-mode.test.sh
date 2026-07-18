@@ -42,6 +42,11 @@ while [ $# -gt 0 ]; do
       shift 2
       ;;
     -H|-m|-w) shift 2 ;;
+    --config|-K)
+      cfgurl=$(sed -n 's/^url = "\(.*\)"$/\1/p' "$2" 2>/dev/null | head -n1)
+      [ -n "$cfgurl" ] && url=$cfgurl
+      shift 2
+      ;;
     -s) shift ;;
     http://*|https://*) url=$1; shift ;;
     *) shift ;;
@@ -196,13 +201,14 @@ sample_update() {
 }
 
 test_poll_allowlisted_stashes_and_wakes() {
-  local home fakebin out rc body
+  local home fakebin out rc body log
   home="$TMP_ROOT/poll-ok"; mkdir -p "$home"
   write_env "$home"
   fakebin=$(make_fake_curl "$home")
+  log="$home/curl.log"
   body=$(sample_update 10 222 111 "status")
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_TELEGRAM_API_URL="https://api.test" \
-    FAKE_POLL_CODE=200 FAKE_POLL_BODY="$body" \
+    FAKE_CURL_LOG="$log" FAKE_POLL_CODE=200 FAKE_POLL_BODY="$body" \
     "$ROOT/bin/fm-telegram-poll.sh"); rc=$?
   expect_code 0 "$rc" "poll ok exit"
   assert_contains "$out" "telegram-msg 10" "poll must emit wake"
@@ -210,6 +216,9 @@ test_poll_allowlisted_stashes_and_wakes() {
   assert_grep "status" "$home/state/telegram-inbox/10.json" "inbox must carry text"
   [ "$(cat "$home/state/telegram-offset")" = "11" ] || fail "offset must advance to update_id+1"
   assert_grep "accepted" "$home/state/telegram-audit.log" "audit must record accepted"
+  if grep '^argv=' "$log" | grep -q 'test-bot-token'; then
+    fail "bot token must not appear in curl argv"
+  fi
   pass "poll stashes allowlisted message and wakes"
 }
 
@@ -353,6 +362,9 @@ test_send_reply_bypasses_afk_gate() {
     FAKE_CURL_LOG="$log" FAKE_SEND_CODE=200 FAKE_SEND_BODY='{"ok":true}' \
     "$ROOT/bin/fm-telegram-send.sh" --text-file "$home/msg.txt" --reply >/dev/null 2>&1
   assert_grep "sendMessage" "$log" "reply must post even without AFK"
+  if grep '^argv=' "$log" | grep -q 'test-bot-token'; then
+    fail "bot token must not appear in curl argv"
+  fi
   pass "send --reply bypasses AFK-only gate"
 }
 
