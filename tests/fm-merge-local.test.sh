@@ -111,6 +111,7 @@ test_explicit_feature_target() {
   main_before=$(git -C "$case_dir/project" rev-parse refs/heads/main)
   feature_before=$(git -C "$case_dir/project" rev-parse refs/heads/feature/for-you-feed)
   task_head=$(git -C "$case_dir/project" rev-parse refs/heads/fm/task-x1)
+  printf '%s\n' 'local_merge_target=stale-target' >> "$case_dir/state/task-x1.meta"
 
   run_merge "$case_dir" task-x1 --target feature/for-you-feed \
     > "$case_dir/stdout" 2> "$case_dir/stderr" \
@@ -127,6 +128,8 @@ test_explicit_feature_target() {
     "explicit-feature: successful landing did not record the actual target"
   assert_grep 'sentinel=preserved' "$case_dir/state/task-x1.meta" \
     "explicit-feature: successful landing did not preserve existing metadata"
+  [ "$(grep -c '^local_merge_target=' "$case_dir/state/task-x1.meta")" = 1 ] \
+    || fail "explicit-feature: successful landing did not canonicalize target metadata"
   pass "fm-merge-local fast-forwards an explicitly requested clean feature target without changing main"
 }
 
@@ -269,6 +272,36 @@ test_option_parsing_refuses() {
   pass "fm-merge-local rejects malformed option shapes without mutation"
 }
 
+test_unsafe_task_metadata_refuses() {
+  local case_dir linked_meta original_meta
+  case_dir=$(make_case unsafe-meta-symlink main)
+  linked_meta="$case_dir/linked.meta"
+  mv "$case_dir/state/task-x1.meta" "$linked_meta"
+  original_meta=$(cat "$linked_meta")
+  ln -s "$linked_meta" "$case_dir/state/task-x1.meta"
+  assert_refusal_without_mutation "$case_dir" symlink-meta task-x1
+  [ "$(cat "$linked_meta")" = "$original_meta" ] \
+    || fail "symlink-meta: landing wrote through linked task metadata"
+
+  case_dir=$(make_case unsafe-meta-hardlink main)
+  linked_meta="$case_dir/linked.meta"
+  ln "$case_dir/state/task-x1.meta" "$linked_meta"
+  original_meta=$(cat "$linked_meta")
+  assert_refusal_without_mutation "$case_dir" hardlink-meta task-x1
+  [ "$(cat "$linked_meta")" = "$original_meta" ] \
+    || fail "hardlink-meta: landing changed multiply linked task metadata"
+  pass "fm-merge-local refuses symlinked and multiply linked task metadata without mutation"
+}
+
+test_unsafe_task_id_refuses() {
+  local case_dir
+  case_dir=$(make_case unsafe-task-id main)
+  assert_refusal_without_mutation "$case_dir" unsafe-task-id ../task-x1
+  assert_grep 'invalid task id' "$case_dir/unsafe-task-id.stderr" \
+    "unsafe-task-id: refusal did not identify the invalid task id"
+  pass "fm-merge-local rejects path-unsafe task ids without mutation"
+}
+
 test_legacy_default_target
 test_explicit_feature_target
 test_wrong_checked_out_branch_refuses
@@ -280,3 +313,5 @@ test_diverged_target_refuses
 test_missing_task_branch_refuses
 test_non_local_only_mode_refuses
 test_option_parsing_refuses
+test_unsafe_task_metadata_refuses
+test_unsafe_task_id_refuses

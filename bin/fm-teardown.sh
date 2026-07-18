@@ -394,7 +394,7 @@ work_is_landed() {
 }
 
 backlog_refresh_reminder() {
-  local pr done_cmd report_path
+  local pr done_cmd report_path local_note default_target
   [ "$KIND" = secondmate ] && return 0
   if fm_tasks_axi_backend_available "$CONFIG"; then
     case "$KIND" in
@@ -404,7 +404,18 @@ backlog_refresh_reminder() {
         ;;
       *)
         if [ "$MODE" = local-only ]; then
-          done_cmd="tasks-axi done $ID --note \"local main\""
+          case "$LOCAL_MERGE_TARGET" in
+            '') local_note="local main" ;;
+            *)
+              default_target=$(default_branch || true)
+              if [ -n "$default_target" ] && [ "$LOCAL_MERGE_TARGET" = "$default_target" ]; then
+                local_note="local main"
+              else
+                local_note="local $LOCAL_MERGE_TARGET"
+              fi
+              ;;
+          esac
+          done_cmd="tasks-axi done $ID --note \"$local_note\""
         else
           pr=$PR_URL
           if [ -n "$pr" ]; then

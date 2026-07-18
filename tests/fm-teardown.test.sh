@@ -586,6 +586,7 @@ test_local_only_merged_to_local_main_allows() {
   local wt_head
   wt_head=$(git -C "$case_dir/wt" rev-parse HEAD)
   git -C "$case_dir/project" update-ref refs/heads/main "$wt_head"
+  add_compatible_tasks_axi "$case_dir"
 
   set +e
   run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
@@ -594,6 +595,8 @@ test_local_only_merged_to_local_main_allows() {
 
   expect_code 0 "$rc" "merged-main: teardown should succeed when work is merged into local main"
   ! grep -q REFUSED "$case_dir/stderr" || fail "merged-main: teardown printed a REFUSED line"
+  assert_grep 'tasks-axi done task-x1 --note "local main"' "$case_dir/stdout" \
+    "merged-main: teardown did not retain the default local completion note"
   pass "local-only worktree with work merged into local main is torn down (no regression)"
 }
 
@@ -613,6 +616,7 @@ test_local_only_merge_to_recorded_feature_then_teardown_allows() {
     || fail "merged-feature: feature target did not receive the task commit"
   grep -qx 'local_merge_target=feature/for-you-feed' "$case_dir/state/task-x1.meta" \
     || fail "merged-feature: actual local merge target was not recorded"
+  add_compatible_tasks_axi "$case_dir"
 
   set +e
   run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
@@ -621,6 +625,8 @@ test_local_only_merge_to_recorded_feature_then_teardown_allows() {
 
   expect_code 0 "$rc" "merged-feature: teardown should accept work on the recorded local target"
   ! grep -q REFUSED "$case_dir/stderr" || fail "merged-feature: teardown printed a REFUSED line"
+  assert_grep 'tasks-axi done task-x1 --note "local feature/for-you-feed"' "$case_dir/stdout" \
+    "merged-feature: teardown did not report the recorded local target"
   pass "local-only work merged to a recorded feature target is torn down"
 }
 
