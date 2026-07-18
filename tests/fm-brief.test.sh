@@ -300,6 +300,29 @@ test_pause_verb_override_renders_all_brief_scaffolds() {
   pass "fm-brief.sh: custom pause verb renders in every scaffold"
 }
 
+test_lavish_visual_review_helper_renders_for_crews() {
+  local home ship scout
+  home="$TMP_ROOT/lavish-helper-home"
+  mkdir -p "$home/data"
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    "$ROOT/bin/fm-brief.sh" sample-ship sample >/dev/null 2>&1
+  ship="$home/data/sample-ship/brief.md"
+  assert_grep "$ROOT/bin/fm-lavish-review.sh sample-ship <html-file>" "$ship" \
+    "ship brief did not route Lavish reviews through the FirstMate helper"
+  assert_grep "durable monitored poll path" "$ship" \
+    "ship brief did not name the durable Lavish poll owner"
+  assert_grep "exact Lavish env/state-dir capture" "$ship" \
+    "ship brief did not name the Lavish env capture owner"
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    "$ROOT/bin/fm-brief.sh" sample-scout sample --scout >/dev/null 2>&1
+  scout="$home/data/sample-scout/brief.md"
+  assert_grep "$ROOT/bin/fm-lavish-review.sh sample-scout <html-file>" "$scout" \
+    "scout brief did not route Lavish reviews through the FirstMate helper"
+  assert_grep "structured-input submission checks" "$scout" \
+    "scout brief did not route Lavish structured-input checks to the helper"
+  pass "fm-brief.sh: crew briefs route Lavish visual reviews through the FirstMate helper"
+}
+
 test_scout_and_secondmate_load_decision_hold_policy() {
   local home scout charter
   home="$TMP_ROOT/decision-policy-home"
@@ -334,7 +357,7 @@ test_scout_and_secondmate_scaffold() {
     || fail "fm-brief.sh secondmate scaffold exited non-zero"
   brief="$BRIEF_HOME/data/brief-sm-q6/brief.md"
   assert_present "$brief" "secondmate charter was not scaffolded"
-  assert_grep "persistent domain supervisor" "$brief" \
+  assert_grep "persistent second mate managed by the main firstmate" "$brief" \
     "secondmate charter must declare its role"
   pass "fm-brief: scout and secondmate code paths still scaffold well-formed briefs"
 }
@@ -351,5 +374,6 @@ test_herdr_lab_omission_is_loud_for_ship_and_scout
 test_herdr_lab_contract_applies_to_scouts_but_not_secondmates
 test_secondmate_no_projects_charter
 test_pause_verb_override_renders_all_brief_scaffolds
+test_lavish_visual_review_helper_renders_for_crews
 test_scout_and_secondmate_load_decision_hold_policy
 test_scout_and_secondmate_scaffold
