@@ -12,6 +12,8 @@
 #   fmt_poll_shim_valid          - identity check for the generated poll shim
 #   fmt_audit_append <kind> ...  - append one audit line to state/telegram-audit.log
 #   fmt_offset_get / fmt_offset_set - durable getUpdates offset
+#   fmt_curl_url_config <url>    - 0600 curl config file keeping the URL (and
+#                                  the token embedded in it) out of curl argv
 #   fmt_rate_allow <bucket>      - inbound rate limit (per home)
 #   fmt_dedupe_seen / fmt_dedupe_mark - command dedupe window
 #   fmt_parse_command <text>     - closed grammar -> verb + args
@@ -224,6 +226,20 @@ fmt_offset_set() {
   printf '%s\n' "$next" | fmx_private_artifact_publish_stdin "$state" "telegram-offset" 600
 }
 
+# Write the request URL to a 0600 curl config file so the bot token embedded
+# in the URL path never appears in curl's argv (visible to local users via ps).
+# Prints the file path; the caller removes it.
+fmt_curl_url_config() {
+  local url=$1 file
+  case "$url" in
+    *$'\n'*|*$'\r'*|*'"'*|*\\*) return 1 ;;
+  esac
+  file=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-telegram-url.XXXXXX") || return 1
+  chmod 600 "$file" 2>/dev/null || { rm -f "$file"; return 1; }
+  printf 'url = "%s"\n' "$url" > "$file" || { rm -f "$file"; return 1; }
+  printf '%s\n' "$file"
+}
+
 # True when sender id is in the allowlist (comma/space separated).
 fmt_sender_allowed() {
   local sender=$1 entry list
@@ -306,11 +322,14 @@ fmt_dedupe_seen() {
   return 1
 }
 
+# Marking also rewrites the log with only in-window entries so it stays
+# bounded (mirrors fmt_rate_allow's prune-on-write).
 fmt_dedupe_mark() {
   local fingerprint=$1
-  local state now file
+  local state now file cutoff ts fp kept
   state=${FM_STATE_OVERRIDE:-$FM_HOME/state}
   now=$(date +%s 2>/dev/null) || now=0
+  cutoff=$((now - ${FMT_DEDUPE_WINDOW:-120}))
   file="$state/telegram-dedupe.log"
   if [ -e "$state" ] || [ -L "$state" ]; then
     [ -d "$state" ] && [ ! -L "$state" ] || return 0
@@ -321,7 +340,18 @@ fmt_dedupe_mark() {
   if [ -L "$file" ]; then
     return 0
   fi
-  (umask 077; printf '%s\t%s\n' "$now" "$fingerprint" >> "$file") 2>/dev/null || true
+  kept=
+  if [ -f "$file" ]; then
+    while IFS=$'\t' read -r ts fp || [ -n "$ts" ]; do
+      case "$ts" in
+        ''|*[!0-9]*) continue ;;
+      esac
+      [ "$ts" -ge "$cutoff" ] 2>/dev/null || continue
+      kept="${kept}${ts}"$'\t'"${fp}"$'\n'
+    done < "$file"
+  fi
+  kept="${kept}${now}"$'\t'"${fingerprint}"$'\n'
+  (umask 077; printf '%s' "$kept" > "$file") 2>/dev/null || true
   chmod 600 "$file" 2>/dev/null || true
 }
 
