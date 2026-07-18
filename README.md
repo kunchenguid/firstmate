@@ -114,7 +114,7 @@ For Pi, approve the project trust prompt once per clone on first launch so both 
 # fm-fix-login-k3 and fm-dark-mode-p7.
 # Minutes later:
 
-  PR ready for review, captain: https://github.com/you/xyz/pull/42
+  PR ready for review: https://github.com/you/xyz/pull/42
   (fix flaky login test - risk: low - CI green)
 
 > alright merge it
