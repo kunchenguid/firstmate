@@ -148,17 +148,23 @@ strip_toml_comment() {  # <line>
 }
 
 tasks_config_value() {  # <key>
-  local key=$1 config="$FM_HOME/.tasks.toml" in_markdown=0 line trimmed assignment value
+  local key=$1 config="$FM_HOME/.tasks.toml" in_markdown=0 line trimmed section assignment value
   [ -f "$config" ] || return 1
   while IFS= read -r line || [ -n "$line" ]; do
     line=$(strip_toml_comment "$line")
     trimmed=${line#"${line%%[![:space:]]*}"}
+    trimmed=${trimmed%"${trimmed##*[![:space:]]}"}
     case "$trimmed" in
+      "["*"]")
+        section=${trimmed#\[}
+        section=${section%\]}
+        section=${section#"${section%%[![:space:]]*}"}
+        section=${section%"${section##*[![:space:]]}"}
+        [ "$section" = markdown ] && in_markdown=1 || in_markdown=0
+        continue
+        ;;
       "["*)
-        case "$trimmed" in
-          "[markdown]"*) in_markdown=1 ;;
-          *) in_markdown=0 ;;
-        esac
+        in_markdown=0
         continue
         ;;
     esac
@@ -206,16 +212,12 @@ tasks_archive_path() {
 }
 
 archive_header_kind() {
-  local header=$1 metadata kind
-  case "$header" in
-    *" (repo: "*) metadata=${header##*" (repo: "} ;;
-    *) return 1 ;;
-  esac
-  case "$metadata" in
-    *") (kind: "*) kind=${metadata#*") (kind: "} ;;
-    *) return 1 ;;
-  esac
-  kind=${kind%%")"*}
+  local header=$1 kind
+  local suffix_re='[[:space:]]*\(repo:[[:space:]]*[^()]+\)[[:space:]]*\(kind:[[:space:]]*([^()]+)\)[[:space:]]*\(done[[:space:]]+[0-9]{4}-[0-9]{2}-[0-9]{2}\)([[:space:]]*\(hold:[[:space:]]*[^()]+\))?([[:space:]]*\(hold-kind:[[:space:]]*(captain|external|load|parked|future)\))?([[:space:]]*\(hold-until:[[:space:]]*[0-9]{4}-[0-9]{2}-[0-9]{2}\))?[[:space:]]*$'
+  [[ $header =~ $suffix_re ]] || return 1
+  kind=${BASH_REMATCH[1]}
+  kind=${kind#"${kind%%[![:space:]]*}"}
+  kind=${kind%"${kind##*[![:space:]]}"}
   [ -n "$kind" ] || return 1
   printf '%s\n' "$kind"
 }
@@ -234,7 +236,7 @@ toon_escape_line() {
 }
 
 archive_task_show() {  # <id>
-  local id=$1 archive found=0 header='' body='' pending_blanks='' line content kind
+  local id=$1 archive match_count=0 capture=0 header='' body='' pending_blanks='' line content kind state
   archive=$(tasks_archive_path)
   [ -e "$archive" ] || return 1
   if [ ! -f "$archive" ] || [ ! -r "$archive" ]; then
@@ -242,16 +244,36 @@ archive_task_show() {  # <id>
     return 2
   fi
   while IFS= read -r line || [ -n "$line" ]; do
-    if [ "$found" = 0 ]; then
-      case "$line" in
-        "- [x] $id - "*) found=1; header=$line; body=''; pending_blanks='' ;;
-      esac
+    line=${line%$'\r'}
+    case "$line" in
+      *[![:space:]]*) ;;
+      *) line='' ;;
+    esac
+    case "$line" in
+      "- [x] $id - "*|"- [ ] $id - "*)
+        match_count=$((match_count + 1))
+        if [ "$match_count" -eq 1 ]; then
+          capture=1
+          header=$line
+          body=''
+          pending_blanks=''
+          case "$line" in
+            "- [x] "*) state='done' ;;
+            *) state=queued ;;
+          esac
+        else
+          capture=0
+        fi
+        continue
+        ;;
+    esac
+    if [ "$capture" = 0 ]; then
       continue
     fi
     case "$line" in
       "  "*) content=${line#  } ;;
       "") content='' ;;
-      *) break ;;
+      *) capture=0; continue ;;
     esac
     if [ -z "$content" ]; then
       pending_blanks="${pending_blanks}\\n"
@@ -264,11 +286,15 @@ archive_task_show() {  # <id>
     printf 'fm-decision-hold: could not read decision archive %s\n' "$archive" >&2
     return 2
   }
-  [ "$found" = 1 ] || return 1
+  [ "$match_count" -gt 0 ] || return 1
+  if [ "$match_count" -ne 1 ]; then
+    printf 'fm-decision-hold: duplicate archived identity %s in %s\n' "$id" "$archive" >&2
+    return 2
+  fi
   kind=$(archive_header_kind "$header" || true)
   printf 'task:\n'
   printf '  id: %s\n' "$id"
-  printf '  state: done\n'
+  printf '  state: %s\n' "$state"
   printf '  kind: %s\n' "$kind"
   printf '  body: "%s"\n' "$body"
 }

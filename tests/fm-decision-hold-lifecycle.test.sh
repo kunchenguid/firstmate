@@ -885,6 +885,168 @@ EOF
   pass "archive config accepts tasks-axi optional assignment whitespace"
 }
 
+test_archived_conflicting_kind_tags_fail_closed() {
+  local home origin hold
+  home=$(make_home archived-conflicting-kind-tags)
+  origin=sample-conflicting-kind-tags
+  hold="$origin-decision-scope"
+  write_origin_meta "$home" "$origin" ship
+  printf 'decisions_reviewed=1\ndecision_keys=scope\n' >> "$home/state/$origin.meta"
+  cat > "$home/data/done-archive.md" <<EOF
+## Archived 2026-07-18
+- [x] $hold - Conflicting kind metadata (repo: sample) (kind: captain) (kind: ship) (done 2026-07-18)
+  Resolution recorded by fm-decision-hold.
+  Decision digest: 0000000000000000000000000000000000000000000000000000000000000000
+  Routed identities: sample-work
+
+  Captain decision:
+  Use the sample scope.
+
+  Routed work:
+  - sample-work
+EOF
+  if run_decisions "$home" verify "$origin" > "$home/conflicting-kind.out" 2> "$home/conflicting-kind.err"; then
+    fail "conflicting archived kind tags satisfied decision verification"
+  fi
+  pass "conflicting archived kind tags fail closed"
+}
+
+test_archived_kind_tag_spacing_fails_closed() {
+  local home origin hold
+  home=$(make_home archived-kind-tag-spacing)
+  origin=sample-kind-tag-spacing
+  hold="$origin-decision-scope"
+  write_origin_meta "$home" "$origin" ship
+  printf 'decisions_reviewed=1\ndecision_keys=scope\n' >> "$home/state/$origin.meta"
+  cat > "$home/data/done-archive.md" <<EOF
+## Archived 2026-07-18
+- [x] $hold - Conflicting kind spacing (repo: sample) (kind: captain)  (kind:ship) (done 2026-07-18)
+  Resolution recorded by fm-decision-hold.
+  Decision digest: 0000000000000000000000000000000000000000000000000000000000000000
+  Routed identities: sample-work
+
+  Captain decision:
+  Use the sample scope.
+
+  Routed work:
+  - sample-work
+EOF
+  if run_decisions "$home" verify "$origin" > "$home/kind-spacing.out" 2> "$home/kind-spacing.err"; then
+    fail "alternate archived kind spacing satisfied decision verification"
+  fi
+  pass "alternate archived kind spacing fails closed"
+}
+
+test_archived_kind_requires_contiguous_trailing_metadata() {
+  local home origin hold
+  home=$(make_home archived-kind-trailing-metadata)
+  origin=sample-kind-trailing-metadata
+  hold="$origin-decision-scope"
+  write_origin_meta "$home" "$origin" ship
+  printf 'decisions_reviewed=1\ndecision_keys=scope\n' >> "$home/state/$origin.meta"
+  cat > "$home/data/done-archive.md" <<EOF
+## Archived 2026-07-18
+- [x] $hold - Interrupted kind metadata (repo: sample) (kind: captain) trailing prose (done 2026-07-18)
+  Resolution recorded by fm-decision-hold.
+  Decision digest: 0000000000000000000000000000000000000000000000000000000000000000
+  Routed identities: sample-work
+
+  Captain decision:
+  Use the sample scope.
+
+  Routed work:
+  - sample-work
+EOF
+  if run_decisions "$home" verify "$origin" > "$home/trailing-metadata.out" 2> "$home/trailing-metadata.err"; then
+    fail "non-metadata prose left an archived captain kind valid"
+  fi
+  pass "archived kind requires contiguous trailing metadata"
+}
+
+test_duplicate_archived_identity_fails_closed() {
+  local home origin hold
+  home=$(make_home duplicate-archived-identity)
+  origin=sample-duplicate-identity
+  hold="$origin-decision-scope"
+  write_origin_meta "$home" "$origin" ship
+  printf 'decisions_reviewed=1\ndecision_keys=scope\n' >> "$home/state/$origin.meta"
+  cat > "$home/data/done-archive.md" <<EOF
+## Archived 2026-07-18
+- [x] $hold - First archived identity (repo: sample) (kind: captain) (done 2026-07-18)
+  Resolution recorded by fm-decision-hold.
+  Decision digest: 0000000000000000000000000000000000000000000000000000000000000000
+  Routed identities: sample-work
+
+  Captain decision:
+  Use the sample scope.
+
+  Routed work:
+  - sample-work
+
+- [x] $hold - Conflicting archived identity (repo: sample) (kind: ship) (done 2026-07-18)
+  Conflicting duplicate record.
+EOF
+  if run_decisions "$home" verify "$origin" > "$home/duplicate.out" 2> "$home/duplicate.err"; then
+    fail "duplicate archived identity satisfied decision verification"
+  fi
+  pass "duplicate archived identities fail closed"
+}
+
+test_archive_config_accepts_spaced_markdown_section() {
+  local home origin hold
+  home=$(make_home archive-config-spaced-section)
+  origin=sample-config-spaced-section
+  hold="$origin-decision-scope"
+  write_origin_meta "$home" "$origin" ship
+  printf 'decisions_reviewed=1\ndecision_keys=scope\n' >> "$home/state/$origin.meta"
+  sed -i.bak -e 's/^\[markdown\]$/[ markdown ]/' \
+    -e 's|archive = "data/done-archive.md"|archive = "data/spaced-section-archive.md"|' \
+    "$home/.tasks.toml"
+  rm "$home/.tasks.toml.bak"
+  cat > "$home/data/spaced-section-archive.md" <<EOF
+## Archived 2026-07-18
+- [x] $hold - Spaced markdown section (repo: sample) (kind: captain) (done 2026-07-18)
+  Resolution recorded by fm-decision-hold.
+  Decision digest: 0000000000000000000000000000000000000000000000000000000000000000
+  Routed identities: sample-work
+
+  Captain decision:
+  Use the sample scope.
+
+  Routed work:
+  - sample-work
+EOF
+  run_decisions "$home" verify "$origin" >/dev/null \
+    || fail "archive config rejected a whitespace-trimmed markdown section"
+  pass "archive config accepts whitespace-trimmed markdown sections"
+}
+
+test_archived_resolution_normalizes_semantic_lines() {
+  local home origin hold archive
+  home=$(make_home archived-semantic-lines)
+  origin=sample-semantic-lines
+  hold="$origin-decision-scope"
+  archive="$home/data/done-archive.md"
+  write_origin_meta "$home" "$origin" ship
+  printf 'decisions_reviewed=1\ndecision_keys=scope\n' >> "$home/state/$origin.meta"
+  printf '%s\r\n' \
+    '## Archived 2026-07-18' \
+    "- [x] $hold - CRLF archived decision (repo: sample) (kind: captain) (done 2026-07-18)" \
+    '  Resolution recorded by fm-decision-hold.' \
+    '  Decision digest: 0000000000000000000000000000000000000000000000000000000000000000' \
+    '  Routed identities: sample-work' \
+    '  ' \
+    '  Captain decision:' \
+    '  Use the sample scope.' \
+    '  ' \
+    '  Routed work:' \
+    '  - sample-work' \
+    '  ' > "$archive"
+  run_decisions "$home" verify "$origin" >/dev/null \
+    || fail "CRLF or whitespace-only archive lines invalidated a resolved captain decision"
+  pass "archive parsing normalizes CRLF and whitespace-only lines"
+}
+
 test_secondmate_hold_stays_in_authoritative_home() {
   local parent mate origin hold json
   parent=$(make_home main-routing)
@@ -1047,5 +1209,11 @@ test_unreadable_archive_refuses_identity_recreation
 test_archived_resolution_requires_routed_work_newline
 test_archived_resolution_requires_tasks_axi_ids
 test_archive_config_accepts_no_space_assignment
+test_archived_conflicting_kind_tags_fail_closed
+test_archived_kind_tag_spacing_fails_closed
+test_archived_kind_requires_contiguous_trailing_metadata
+test_duplicate_archived_identity_fails_closed
+test_archive_config_accepts_spaced_markdown_section
+test_archived_resolution_normalizes_semantic_lines
 test_secondmate_hold_stays_in_authoritative_home
 test_resolve_matches_quoted_blocked_by_edges
