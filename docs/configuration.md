@@ -339,6 +339,23 @@ In dry-run, `fm-x-dismiss.sh` records `{request_id, endpoint:"dismiss"}` to the 
 The live answer and follow-up bodies intentionally stay the same shape, including optional `image`; the relay distinguishes them by endpoint, and dismiss stays `{request_id}`.
 These paths need `jq` to build the JSON payload, but they run before token and network checks, so they need neither `FMX_PAIRING_TOKEN` nor `curl`.
 
+## Telegram mode (.env)
+
+Telegram mode is an opt-in phone channel for away-mode notifications and a closed Stage-2 command grammar (`status`, `approve <key>`, `deny <key> [reason]`, `merge <full green PR URL>`).
+It is off unless the firstmate home's gitignored `.env` contains non-empty `FM_TELEGRAM_BOT_TOKEN` and `FM_TELEGRAM_CHAT_ID`.
+Writing `off` alone into `config/telegram-mode` is an additional kill switch that disables the channel even when those keys remain.
+The feature never carries secrets, credentials, or destructive/irreversible/security-sensitive decisions; those stay desk-only.
+Telegram messages never exit away mode.
+
+The locked session-start bootstrap step turns a valid opt-in into local generated state: `state/telegram-watch.check.sh` (byte-static identity shim for `bin/fm-telegram-poll.sh`) and `config/telegram-mode.env` (`export FM_CHECK_INTERVAL=30`).
+The watcher accepts the shim only when its bytes match the expected generated content, then invokes the trusted repository poll script directly.
+`bin/fm-watch-arm.sh` and `bin/fm-watch-checkpoint.sh` source `config/telegram-mode.env` when present so every harness inherits the 30s cadence without Pi extension changes.
+When tokens are removed, emptied, or the kill switch is engaged, the next locked bootstrap removes those artifacts.
+Steady-state off is silent and writes nothing.
+
+Outbound notifications use `bin/fm-telegram-send.sh` and, by default, send only while `state/.afk` exists (`FM_TELEGRAM_ALWAYS_NOTIFY` or `--force` overrides; command replies use `--reply`).
+Inbound poll/respond, audit, allowlist, freshness, rate limit, merge authority, and BotFather kill-switch details live in [docs/telegram-mode.md](telegram-mode.md), which is the single owner of Telegram mode mechanics beyond this config summary.
+
 ## Environment variables
 
 Runtime tuning via environment variables (defaults shown):
@@ -371,7 +388,7 @@ FM_GUARD_CONTINUE_LINE='This is a supervision warning only; the guarded operatio
 FM_POLL=15              # seconds between watcher poll cycles
 FM_HEARTBEAT=600        # base seconds between heartbeat scans; no-change heartbeats are absorbed while idle
 FM_HEARTBEAT_MAX=7200   # heartbeat backoff cap
-FM_CHECK_INTERVAL=300   # seconds between slow checks (authenticated merge polls, custom checks, or X-mode dispatch)
+FM_CHECK_INTERVAL=300   # seconds between slow checks (authenticated merge polls, custom checks, X-mode or Telegram dispatch)
 FM_CHECK_TIMEOUT=30     # seconds allowed per slow check script
 FM_CODEX_WATCH_CHECKPOINT=180   # seconds per foreground watcher checkpoint in Codex primary supervision
 FM_CREW_STATE_NM_TIMEOUT=10   # seconds allowed per no-mistakes query inside fm-crew-state.sh
@@ -386,6 +403,17 @@ FMX_DISCORD_REPLY_MAX_CHARS=1900   # Discord reply per-message split budget; val
 FMX_X_THREAD_MAX=25     # maximum messages in one auto-split reply thread
 FMX_FOLLOWUP_MAX_AGE_SECS=604800   # local window for posting X-mode completion follow-ups (7 days)
 FMX_FOLLOWUP_MAX_COUNT=3   # local cap on X-mode completion follow-ups per linked mention
+FM_TELEGRAM_BOT_TOKEN=  # Telegram mode bot token; .env opt-in with chat id arms poll + send
+FM_TELEGRAM_CHAT_ID=    # Telegram private chat id for outbound and allowlisted inbound
+FM_TELEGRAM_ALLOW_FROM= # optional comma-separated sender user ids; defaults to chat id
+FM_TELEGRAM_API_URL=https://api.telegram.org  # optional Bot API base override
+FM_TELEGRAM_ENV_FILE=   # optional alternate .env for direct Telegram client calls; bootstrap still checks $FM_HOME/.env
+FM_TELEGRAM_DRY_RUN=    # truthy previews Telegram sends to state/telegram-outbox/ without posting
+FM_TELEGRAM_ALWAYS_NOTIFY=  # truthy sends routine outbound even when not AFK
+FM_TELEGRAM_FRESHNESS_SECS=900  # max age for approve/deny/merge commands (seconds)
+FM_TELEGRAM_RATE_MAX=10 # max inbound commands processed per rate window
+FM_TELEGRAM_RATE_WINDOW_SECS=60  # inbound rate-limit window
+FM_TELEGRAM_DEDUPE_WINDOW_SECS=120  # identical-command dedupe window
 FM_LOCK_STALE_AFTER=2   # seconds before dead-pid lock records can be reclaimed; mid-acquire locks keep at least 2s grace
 FM_GUARD_GRACE=300      # seconds before guard warnings, arm health checks, and the primary turn-end guard treat a watcher beacon as stale
 FM_ARM_CONFIRM_TIMEOUT=10   # seconds fm-watch-arm waits to confirm a fresh watcher before reporting FAILED

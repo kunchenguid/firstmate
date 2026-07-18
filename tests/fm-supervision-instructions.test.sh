@@ -113,8 +113,8 @@ test_grok_command_sources_effective_config() {
   config="$TMP_ROOT/grok-config"
   mkdir -p "$home/state" "$config"
   out=$(FM_HOME="$home" FM_CONFIG_OVERRIDE="$config" "$RENDER" --harness grok --x-mode 1)
-  assert_contains "$out" "[ -f '$config/x-mode.env' ] && . '$config/x-mode.env'; exec bin/fm-watch-arm.sh" "grok arm command did not use the effective x-mode config path"
-  pass "grok rendered command sources the effective x-mode config"
+  assert_contains "$out" "[ -f '$config/x-mode.env' ] && . '$config/x-mode.env'; [ -f '$config/telegram-mode.env' ] && . '$config/telegram-mode.env'; exec bin/fm-watch-arm.sh" "grok arm command did not use the effective X/Telegram cadence config paths"
+  pass "grok rendered command sources the effective X/Telegram cadence configs"
 }
 
 test_pi_snippet_uses_effective_extension_path() {
