@@ -5,6 +5,8 @@ set -u
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
+# A surrounding no-mistakes gate exports NO_MISTAKES_GATE=1, which makes the
+# nudge silent; clear it so only test_gate_env_is_silent exercises that path.
 unset NO_MISTAKES_GATE
 
 TMP_ROOT=$(fm_test_tmproot fm-sessionstart-nudge)
