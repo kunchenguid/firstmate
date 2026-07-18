@@ -336,9 +336,9 @@ fm_backend_cmux_workspace_id_for_label() {  # <label>
 }
 
 fm_backend_cmux_surface_id_for_workspace() {  # <workspace_id>
-  local wsid=$1
-  fm_backend_cmux_cli list-panes --workspace "$wsid" --json --id-format uuids 2>/dev/null \
-    | jq -r '.panes[0] // {} | .selected_surface_id // (.surface_ids[0] // empty)' 2>/dev/null
+  local wsid=$1 out
+  out=$(fm_backend_cmux_cli list-panes --workspace "$wsid" --json --id-format uuids 2>/dev/null) || return 1
+  printf '%s' "$out" | jq -r '.panes[0] // {} | .selected_surface_id // (.surface_ids[0] // empty)' 2>/dev/null
 }
 
 # fm_backend_cmux_create_task: create the task's workspace (one surface),

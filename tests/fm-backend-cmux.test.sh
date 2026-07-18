@@ -55,10 +55,10 @@ fi
 next=$(( $(cat "$COUNT_FILE" 2>/dev/null || echo 0) + 1 ))
 n=$next
 echo "$n" > "$COUNT_FILE"
+[ -f "$RESP/$n.out" ] && cat "$RESP/$n.out"
 if [ -f "$RESP/$n.exit" ]; then
   exit "$(cat "$RESP/$n.exit")"
 fi
-[ -f "$RESP/$n.out" ] && cat "$RESP/$n.out"
 exit 0
 SH
   chmod +x "$fb/cmux"
@@ -539,6 +539,22 @@ test_target_ready_rejects_label_mismatch() {
   assert_not_contains "$(cat "$dir/log")" $'\x1f''list-panes' \
     "target_ready should not call list-panes after a label mismatch"
   pass "fm_backend_cmux_target_ready: rejects a workspace id reused under a different title"
+}
+
+test_target_ready_fails_when_label_recovery_list_panes_fails_with_json() {
+  local dir fb status title
+  dir="$TMP_ROOT/ready-label-recovery-list-panes-fail"; mkdir -p "$dir/responses"
+  title=$(cmux_expected_scoped_title fm-label)
+  cmux_workspace_list_response "$dir" 1 "cccccccc-2222-2222-2222-222222222222" "$title"
+  cmux_workspace_list_response "$dir" 2 "cccccccc-2222-2222-2222-222222222222" "$title"
+  cmux_panes_response "$dir" 3 "dddddddd-3333-3333-3333-333333333333"
+  printf '1\n' > "$dir/responses/3.exit"
+  fb=$(make_cmux_fakebin "$dir")
+  PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_target_ready "aaaaaaaa-0000-0000-0000-000000000000:bbbbbbbb-1111-1111-1111-111111111111" fm-label' "$ROOT"
+  status=$?
+  [ "$status" -ne 0 ] || fail "target_ready should fail closed when label recovery list-panes exits nonzero even with parseable JSON"
+  pass "fm_backend_cmux_target_ready: fails closed when label recovery list-panes exits nonzero with JSON"
 }
 
 test_capture_trims_locally() {
@@ -1036,6 +1052,7 @@ test_create_task_creates_and_parses_ids
 test_target_ready_fails_when_target_absent
 test_target_ready_checks_expected_label
 test_target_ready_rejects_label_mismatch
+test_target_ready_fails_when_label_recovery_list_panes_fails_with_json
 test_capture_trims_locally
 test_capture_fails_when_read_screen_fails_empty
 test_capture_fails_when_target_not_ready
