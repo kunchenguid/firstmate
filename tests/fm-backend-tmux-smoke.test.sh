@@ -62,8 +62,16 @@ pass "real tmux: fm_backend_tmux_create_task creates a window and refuses a dupl
 
 # --- send text + Enter -------------------------------------------------------
 
-tmux send-keys -t "$TARGET" "cd /tmp && PS1='smoke\$ '" Enter
-sleep 0.3
+tmux send-keys -t "$TARGET" "cd /tmp && PS1='smoke\$ '; printf 'shell-%s\\n' ready" Enter
+shell_ready=0
+for _ in $(seq 1 100); do
+  out=$(fm_backend_tmux_capture "$TARGET" 20 2>/dev/null || true)
+  case "$out" in
+    *shell-ready*) shell_ready=1; break ;;
+  esac
+  sleep 0.05
+done
+[ "$shell_ready" -eq 1 ] || fail "real tmux: shell did not become ready before the smoke test"
 tmux send-keys -t "$TARGET" -l "clear" ; tmux send-keys -t "$TARGET" Enter
 sleep 0.3
 
@@ -99,7 +107,15 @@ pass "real tmux: fm_backend_tmux_send_literal + fm_backend_tmux_send_key Enter s
 # far enough to still see the earliest line - the same -S -N bounding fm-peek.sh
 # and fm-watch.sh rely on for a bounded, cheap pane read.
 fm_backend_tmux_send_text_line "$TARGET" "for i in \$(seq 1 80); do echo tag-line-\$i; done"
-sleep 0.6
+recent_output=0
+for _ in $(seq 1 100); do
+  out=$(fm_backend_tmux_capture "$TARGET" 20 2>/dev/null || true)
+  case "$out" in
+    *tag-line-80*) recent_output=1; break ;;
+  esac
+  sleep 0.05
+done
+[ "$recent_output" -eq 1 ] || fail "real tmux: numbered output did not complete before capture"
 small=$(fm_backend_tmux_capture "$TARGET" 3) || fail "fm_backend_tmux_capture (small window) failed"
 case "$small" in
   *tag-line-1$'\n'*) fail "a 3-line capture should not still see the very first numbered line"$'\n'"$small" ;;

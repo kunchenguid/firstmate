@@ -238,20 +238,26 @@ unit_lock_initialization_grace() {
 }
 
 unit_signal_exits_with_lock_cleanup() {
-  local st marker child
+  local st marker ready child
   st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-signal.XXXXXX")
   marker="$st/resumed"
-  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" bash -c '
+  ready="$st/ready"
+  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" READY="$ready" bash -c '
     . "$1"
-    fm_afk_launch_start() { sleep 30; }
+    fm_afk_launch_start() { : > "$READY"; while :; do sleep 0.05; done; }
     fm_afk_launch_main start
     : > "$2"
   ' _ "$LAUNCH" "$marker" &
   child=$!
-  for _ in $(seq 1 40); do
-    [ -d "$st/state/.afk-launch.lock" ] && break
+  for _ in $(seq 1 100); do
+    [ -e "$ready" ] && break
     sleep 0.05
   done
+  if [ ! -e "$ready" ]; then
+    kill -TERM "$child" 2>/dev/null || true
+    wait "$child" 2>/dev/null || true
+    fail "launcher signal: lifecycle did not become ready"
+  fi
   kill -TERM "$child" 2>/dev/null || true
   wait "$child" 2>/dev/null || true
   if [ ! -e "$marker" ] && [ ! -e "$st/state/.afk-launch.lock" ]; then
