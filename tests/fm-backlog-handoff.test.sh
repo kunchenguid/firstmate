@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # tests/fm-backlog-handoff.test.sh - full item-block handoff (header + indented body).
 #
-# The happy single-line path and safety refusals live in the secondmate lifecycle
-# and safety suites. This file owns the multi-line body contract: the full block
-# moves byte-exact, nothing orphans in the source, and re-running is a no-op.
+# The happy single-line path and broad safety refusals live in the secondmate
+# lifecycle and safety suites. This file owns focused delegated-handoff
+# regressions: the multi-line body contract and registry home parsing edge cases.
 set -u
 
 # shellcheck source=tests/secondmate-helpers.sh disable=SC1091
