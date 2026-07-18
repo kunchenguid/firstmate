@@ -722,6 +722,169 @@ EOF
   pass "trailing archive formatting is excluded from the archived task body"
 }
 
+test_archived_resolution_obeys_task_body_boundaries() {
+  local home origin raw_hold blank_hold
+  home=$(make_home archived-body-boundaries)
+  origin=sample-body-boundaries
+  raw_hold="$origin-decision-raw"
+  blank_hold="$origin-decision-blank"
+  write_origin_meta "$home" "$origin" ship
+  printf 'decisions_reviewed=1\ndecision_keys=raw\n' >> "$home/state/$origin.meta"
+  cat > "$home/data/done-archive.md" <<EOF
+## Archived 2026-07-18
+- [x] $raw_hold - Raw prose boundary (repo: sample) (kind: captain) (done 2026-07-18)
+Resolution recorded by fm-decision-hold.
+Decision digest: 0000000000000000000000000000000000000000000000000000000000000000
+Routed identities: sample-work
+
+Captain decision:
+Use the sample scope.
+
+Routed work:
+- sample-work
+
+- [x] $blank_hold - Leading blank body (repo: sample) (kind: captain) (done 2026-07-18)
+
+  Resolution recorded by fm-decision-hold.
+  Decision digest: 0000000000000000000000000000000000000000000000000000000000000000
+  Routed identities: sample-work
+
+  Captain decision:
+  Use the sample scope.
+
+  Routed work:
+  - sample-work
+EOF
+  if run_decisions "$home" verify "$origin" > "$home/raw-boundary.out" 2> "$home/raw-boundary.err"; then
+    fail "column-zero archive prose was treated as task body"
+  fi
+  printf 'decisions_reviewed=1\ndecision_keys=blank\n' >> "$home/state/$origin.meta"
+  if run_decisions "$home" verify "$origin" > "$home/blank-boundary.out" 2> "$home/blank-boundary.err"; then
+    fail "leading archived body blank was discarded"
+  fi
+  pass "archived resolutions obey tasks-axi task body boundaries"
+}
+
+test_unreadable_archive_refuses_identity_recreation() {
+  local home origin hold
+  home=$(make_home unreadable-decision-archive)
+  origin=sample-unreadable-archive
+  hold="$origin-decision-scope"
+  write_origin_meta "$home" "$origin" ship
+  mkdir "$home/data/done-archive.md"
+  if run_decisions "$home" hold "$origin" scope \
+    --title "Choose the sample scope" --reason "captain sample scope pending" --repo sample \
+    > "$home/unreadable-hold.out" 2> "$home/unreadable-hold.err"; then
+    fail "unreadable archive allowed stable hold recreation"
+  fi
+  assert_no_grep "^- \[ \] $hold -" "$home/data/backlog.md" \
+    "unreadable archive created a replacement active hold"
+  assert_grep "could not read archived backlog identity $hold" "$home/unreadable-hold.err" \
+    "hold creation treated an unreadable archive as an absent identity"
+  printf 'decisions_reviewed=1\ndecision_keys=scope\n' >> "$home/state/$origin.meta"
+  if run_decisions "$home" verify "$origin" \
+    > "$home/unreadable-verify.out" 2> "$home/unreadable-verify.err"; then
+    fail "unreadable archive satisfied durable verification"
+  fi
+  assert_grep "could not read captain decision $hold" "$home/unreadable-verify.err" \
+    "durable verification treated an unreadable archive as an absent identity"
+  pass "unreadable archives cannot be mistaken for absent identities"
+}
+
+test_archived_resolution_requires_routed_work_newline() {
+  local home origin hold
+  home=$(make_home archived-routed-newline)
+  origin=sample-routed-newline
+  hold="$origin-decision-scope"
+  write_origin_meta "$home" "$origin" ship
+  printf 'decisions_reviewed=1\ndecision_keys=scope\n' >> "$home/state/$origin.meta"
+  cat > "$home/data/done-archive.md" <<EOF
+## Archived 2026-07-18
+- [x] $hold - Missing routed newline (repo: sample) (kind: captain) (done 2026-07-18)
+  Resolution recorded by fm-decision-hold.
+  Decision digest: 0000000000000000000000000000000000000000000000000000000000000000
+  Routed identities: sample-work
+
+  Captain decision:
+  Use the sample scope.
+
+  Routed work:- sample-work
+EOF
+  if run_decisions "$home" verify "$origin" > "$home/routed-newline.out" 2> "$home/routed-newline.err"; then
+    fail "archived resolution accepted routed work without a structural newline"
+  fi
+  pass "archived routed work requires its structural newline"
+}
+
+test_archived_resolution_requires_tasks_axi_ids() {
+  local home origin dot_hold dash_hold
+  home=$(make_home archived-invalid-routed-ids)
+  origin=sample-invalid-routed-ids
+  dot_hold="$origin-decision-dot"
+  dash_hold="$origin-decision-dash"
+  write_origin_meta "$home" "$origin" ship
+  printf 'decisions_reviewed=1\ndecision_keys=dot\n' >> "$home/state/$origin.meta"
+  cat > "$home/data/done-archive.md" <<EOF
+## Archived 2026-07-18
+- [x] $dot_hold - Leading dot route (repo: sample) (kind: captain) (done 2026-07-18)
+  Resolution recorded by fm-decision-hold.
+  Decision digest: 0000000000000000000000000000000000000000000000000000000000000000
+  Routed identities: .sample-work
+
+  Captain decision:
+  Use the sample scope.
+
+  Routed work:
+  - .sample-work
+
+- [x] $dash_hold - Leading dash route (repo: sample) (kind: captain) (done 2026-07-18)
+  Resolution recorded by fm-decision-hold.
+  Decision digest: 0000000000000000000000000000000000000000000000000000000000000000
+  Routed identities: -sample-work
+
+  Captain decision:
+  Use the sample scope.
+
+  Routed work:
+  - -sample-work
+EOF
+  if run_decisions "$home" verify "$origin" > "$home/dot-route.out" 2> "$home/dot-route.err"; then
+    fail "archived resolution accepted a routed id beginning with a dot"
+  fi
+  printf 'decisions_reviewed=1\ndecision_keys=dash\n' >> "$home/state/$origin.meta"
+  if run_decisions "$home" verify "$origin" > "$home/dash-route.out" 2> "$home/dash-route.err"; then
+    fail "archived resolution accepted a routed id beginning with a dash"
+  fi
+  pass "archived routed identities use the tasks-axi id grammar"
+}
+
+test_archive_config_accepts_no_space_assignment() {
+  local home origin hold
+  home=$(make_home archive-config-no-space)
+  origin=sample-config-no-space
+  hold="$origin-decision-scope"
+  write_origin_meta "$home" "$origin" ship
+  printf 'decisions_reviewed=1\ndecision_keys=scope\n' >> "$home/state/$origin.meta"
+  sed -i.bak 's|archive = "data/done-archive.md"|archive="data/no-space-archive.md"|' "$home/.tasks.toml"
+  rm "$home/.tasks.toml.bak"
+  cat > "$home/data/no-space-archive.md" <<EOF
+## Archived 2026-07-18
+- [x] $hold - No-space archive config (repo: sample) (kind: captain) (done 2026-07-18)
+  Resolution recorded by fm-decision-hold.
+  Decision digest: 0000000000000000000000000000000000000000000000000000000000000000
+  Routed identities: sample-work
+
+  Captain decision:
+  Use the sample scope.
+
+  Routed work:
+  - sample-work
+EOF
+  run_decisions "$home" verify "$origin" >/dev/null \
+    || fail "archive config rejected an assignment without spaces around equals"
+  pass "archive config accepts tasks-axi optional assignment whitespace"
+}
+
 test_secondmate_hold_stays_in_authoritative_home() {
   local parent mate origin hold json
   parent=$(make_home main-routing)
@@ -879,5 +1042,10 @@ test_archived_resolution_preserves_literal_backslash_markers
 test_archived_identity_collision_refuses_hold_recreation
 test_durable_lookup_preserves_active_store_failures
 test_archived_resolution_ignores_trailing_blank_formatting
+test_archived_resolution_obeys_task_body_boundaries
+test_unreadable_archive_refuses_identity_recreation
+test_archived_resolution_requires_routed_work_newline
+test_archived_resolution_requires_tasks_axi_ids
+test_archive_config_accepts_no_space_assignment
 test_secondmate_hold_stays_in_authoritative_home
 test_resolve_matches_quoted_blocked_by_edges

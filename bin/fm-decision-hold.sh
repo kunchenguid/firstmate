@@ -148,7 +148,7 @@ strip_toml_comment() {  # <line>
 }
 
 tasks_config_value() {  # <key>
-  local key=$1 config="$FM_HOME/.tasks.toml" in_markdown=0 line trimmed value
+  local key=$1 config="$FM_HOME/.tasks.toml" in_markdown=0 line trimmed assignment value
   [ -f "$config" ] || return 1
   while IFS= read -r line || [ -n "$line" ]; do
     line=$(strip_toml_comment "$line")
@@ -164,8 +164,13 @@ tasks_config_value() {  # <key>
     esac
     [ "$in_markdown" = 1 ] || continue
     case "$trimmed" in
-      "$key"[[:space:]]*"="*)
-        value=${trimmed#*=}
+      "$key"*)
+        assignment=${trimmed#"$key"}
+        assignment=${assignment#"${assignment%%[![:space:]]*}"}
+        case "$assignment" in
+          "="*) value=${assignment#=} ;;
+          *) continue ;;
+        esac
         value=${value#"${value%%[![:space:]]*}"}
         value=${value%"${value##*[![:space:]]}"}
         case "$value" in
@@ -231,7 +236,11 @@ toon_escape_line() {
 archive_task_show() {  # <id>
   local id=$1 archive found=0 header='' body='' pending_blanks='' line content kind
   archive=$(tasks_archive_path)
-  [ -f "$archive" ] || return 1
+  [ -e "$archive" ] || return 1
+  if [ ! -f "$archive" ] || [ ! -r "$archive" ]; then
+    printf 'fm-decision-hold: could not read decision archive %s\n' "$archive" >&2
+    return 2
+  fi
   while IFS= read -r line || [ -n "$line" ]; do
     if [ "$found" = 0 ]; then
       case "$line" in
@@ -240,19 +249,21 @@ archive_task_show() {  # <id>
       continue
     fi
     case "$line" in
-      "## "*|"- ["*) break ;;
       "  "*) content=${line#  } ;;
       "") content='' ;;
-      *) content=$line ;;
+      *) break ;;
     esac
     if [ -z "$content" ]; then
-      [ -z "$body" ] || pending_blanks="${pending_blanks}\\n"
+      pending_blanks="${pending_blanks}\\n"
       continue
     fi
     content=$(toon_escape_line "$content")
     body="${body}${body:+\\n}${pending_blanks}$content"
     pending_blanks=''
-  done < "$archive"
+  done < "$archive" || {
+    printf 'fm-decision-hold: could not read decision archive %s\n' "$archive" >&2
+    return 2
+  }
   [ "$found" = 1 ] || return 1
   kind=$(archive_header_kind "$header" || true)
   printf 'task:\n'
@@ -336,7 +347,11 @@ verify_hold_active() {  # <hold-id>
 
 verify_hold_resolved() {  # <hold-id>
   local id=$1 show state kind body
-  show=$(task_show_durable "$id") || return 1
+  if show=$(task_show_durable "$id"); then
+    :
+  else
+    return $?
+  fi
   state=$(show_field "$show" state)
   kind=$(show_field "$show" kind)
   body=$(show_field "$show" body)
@@ -346,9 +361,16 @@ verify_hold_resolved() {  # <hold-id>
 }
 
 verify_hold_durable() {  # <hold-id>
-  local id=$1 show state held kind hold_kind body
-  show=$(task_show_durable "$id") \
-    || fail "captain decision $id is absent from $FM_HOME/data/backlog.md and $(tasks_archive_path)"
+  local id=$1 show show_status state held kind hold_kind body
+  if show=$(task_show_durable "$id"); then
+    :
+  else
+    show_status=$?
+    if [ "$show_status" -eq 1 ]; then
+      fail "captain decision $id is absent from $FM_HOME/data/backlog.md and $(tasks_archive_path)"
+    fi
+    fail "could not read captain decision $id from the active backlog or decision archive"
+  fi
   state=$(show_field "$show" state)
   held=$(show_field "$show" held)
   kind=$(show_field "$show" kind)
@@ -377,7 +399,11 @@ valid_routed_csv() {
   esac
   while IFS= read -r route; do
     case "$route" in
-      ''|*[!A-Za-z0-9._-]*) return 1 ;;
+      [A-Za-z0-9]*) : ;;
+      *) return 1 ;;
+    esac
+    case "$route" in
+      *[!A-Za-z0-9._-]*) return 1 ;;
     esac
   done <<EOF
 $(printf '%s\n' "$csv" | tr ',' '\n')
@@ -429,6 +455,7 @@ parse_resolution_identity_record() {
   [ -n "$captain" ] || return 1
   case "$routed" in
     '\n'*) routed=${routed#'\n'} ;;
+    *) return 1 ;;
   esac
   expected=$(routed_work_for_csv "$routes")
   [ "$routed" = "$expected" ] || return 1
@@ -490,9 +517,17 @@ command_hold() {
     [ "$show_status" -eq 1 ] || fail "could not read active backlog identity $id"
     if verify_hold_resolved "$id"; then
       fail "captain decision $id is already durably resolved; use a new decision key for a new decision"
-    elif archive_task_show "$id" >/dev/null; then
+    else
+      show_status=$?
+    fi
+    [ "$show_status" -eq 1 ] \
+      || fail "could not read archived backlog identity $id"
+    if archive_task_show "$id" >/dev/null; then
       fail "archived backlog identity $id is invalid and cannot be reused"
     else
+      show_status=$?
+      [ "$show_status" -eq 1 ] \
+        || fail "could not read archived backlog identity $id"
       if [ -z "$repo" ] && [ -f "$STATE/$origin.meta" ]; then
         repo=$(meta_value "$STATE/$origin.meta" project)
         repo=${repo%/}
@@ -605,7 +640,7 @@ EOF
 }
 
 command_resolve() {
-  local origin=${1:-} key=${2:-} decision_file='' id='' decision='' decision_digest='' body='' routed='' routed_csv='' dep show blocked state hold_show hold_body resolution_recorded=0
+  local origin=${1:-} key=${2:-} decision_file='' id='' decision='' decision_digest='' body='' routed='' routed_csv='' dep show blocked state hold_show hold_body resolved_status resolution_recorded=0
   [ "$#" -ge 2 ] || { usage >&2; exit 2; }
   shift 2
   while [ "$#" -gt 0 ]; do
@@ -636,7 +671,10 @@ command_resolve() {
     verify_resolution_identity "$id" "$hold_body" "$decision_digest" "$routed_csv"
     printf 'resolved: %s\n' "$id"
     return 0
+  else
+    resolved_status=$?
   fi
+  [ "$resolved_status" -eq 1 ] || fail "could not read captain decision $id"
   verify_hold_active "$id"
   hold_show=$(task_show "$id")
   hold_body=$(show_field "$hold_show" body)
@@ -667,7 +705,8 @@ command_resolve() {
     esac
   done
 
-  body=$(printf 'Resolution recorded by fm-decision-hold.\nDecision digest: %s\nRouted identities: %s\n\nCaptain decision:\n%s\n\nRouted work:\n' "$decision_digest" "$routed_csv" "$decision")
+  body=$(printf 'Resolution recorded by fm-decision-hold.\nDecision digest: %s\nRouted identities: %s\n\nCaptain decision:\n%s\n\nRouted work:' "$decision_digest" "$routed_csv" "$decision")
+  body="${body}"$'\n'
   for dep in $routed; do
     body="${body}- ${dep}"$'\n'
   done
