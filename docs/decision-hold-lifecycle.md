@@ -16,7 +16,10 @@ It rejects an identity collision, a changed title, and attempts to reopen an alr
 The `complete` subcommand unions the reviewed keys into `decision_keys=` and appends `decisions_reviewed=1` while originating task metadata is live.
 A post-teardown visual review can complete against the surviving report and durable holds without recreating volatile task metadata.
 It accepts `--none` as an explicit semantic inventory result, not as inferred absence.
-It verifies every listed identity against tasks-axi before recording completion.
+It verifies every listed identity against the active tasks-axi backlog before recording completion.
+After tasks-axi explicitly reports an identity absent, durable lookup checks the archive configured by `.tasks.toml`, so retention pruning does not invalidate an older resolved decision that remains in the inventory union.
+An archived identity is accepted only when one exact checklist record is Done, carries structured kind `captain` metadata, and contains the canonical resolution identity record with a SHA-256 decision digest and matching routed identities.
+Duplicate identities, active-and-archived collisions, legacy or title-only prose, malformed records, and unreadable archive paths fail closed.
 For an open keyed status decision, it appends a `captain-held [key=<key>]: ...` transfer event only after the matching backlog hold is durable.
 `bin/fm-classify-lib.sh` recognizes that transfer as closing the live status copy without claiming that the captain has answered it.
 
@@ -41,13 +44,15 @@ The projection remains read-only and does not inspect historical prose.
 
 Verification date: 2026-07-14.
 Additional quoted `blocked_by` regression verification date: 2026-07-17.
+Archived resolved-decision regression verification date: 2026-07-18.
 
 The focused end-to-end regression uses only synthetic `sample` identities and decision text.
 It begins with a completed investigation and visual review whose genuine unresolved choice exists only in the report.
 The initial Bearings snapshot correctly has no open decision, and the new teardown gate refuses to erase the source.
 A later regression covers tasks-axi's quoted multi-entry `blocked_by` output so `resolve` matches the first, middle, and last ids and rejects a genuinely absent id.
+The archive regression resolves and prunes a captain decision under the configured `done_keep` retention, then completes and verifies a later inventory union while rejecting malformed, ambiguous, or non-captain archive records.
 
-The final verification commands and their exact summarized outputs follow.
+The final verification commands and representative exact output lines follow.
 
 ```text
 $ bash tests/fm-decision-hold-lifecycle.test.sh
@@ -58,6 +63,7 @@ ok - completion and verification validate origins before constructing paths
 ok - ended visual review follows the same decision-hold completion owner
 ok - resolved findings and decision-like prose do not create false holds
 ok - terminal single-owner stale status decisions do not block empty inventory
+ok - archived resolved captain decision satisfies later inventory completion and verification
 ok - main-home and secondmate-home captain holds remain correctly routed
 ok - resolve matches first/middle/last in quoted blocked_by and rejects a genuinely absent id
 

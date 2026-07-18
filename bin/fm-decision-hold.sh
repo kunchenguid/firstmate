@@ -30,6 +30,11 @@
 # no unresolved captain decision. Later review passes may add keys; a live task's
 # metadata inventory is unioned idempotently. A post-teardown visual review can
 # complete against the surviving report and holds without recreating task state.
+# Durable lookup checks the active tasks-axi backlog first, then the configured
+# done archive only after an explicit NOT_FOUND result. An archived resolution is
+# accepted only as one exact Done, `kind captain` record with the canonical
+# fm-decision-hold resolution identity; duplicates, collisions, malformed records,
+# and unreadable archive paths fail closed.
 # `verify` is read-only and is called by scout teardown so teardown cannot erase a
 # source before this gate has succeeded.
 #

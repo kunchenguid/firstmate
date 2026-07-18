@@ -380,8 +380,9 @@ fm_backend_cmux_parse_target() {  # <target>
 }
 
 # fm_backend_cmux_surface_exists: does <surface_id> currently appear as one of
-# <workspace_id>'s surfaces, per list-panes? Structural existence check, never
-# a content read.
+# <workspace_id>'s surfaces, per a successful, non-empty list-panes response?
+# Structural existence check, never a content read. A failed call or empty
+# response is unavailable, not evidence that the target is live.
 #
 # Verified real-cmux pitfall NOT anticipated by the design sketch: read-screen
 # against a genuinely fresh surface that has never been written to yet fails
