@@ -14,8 +14,9 @@
 #        fm-harness.sh secondmate-effort   print the optional EFFORT token from
 #                                        config/secondmate-harness, or empty when absent.
 # config/secondmate-harness format: a single line "<harness> [<model>] [<effort>]",
-# whitespace-separated. A bare "<harness>" (today's format) behaves exactly as before:
-# harness only, no model/effort. Only the first non-empty, non-comment line is parsed.
+# whitespace-separated. A bare "<harness>" selects only the harness, so the model
+# and effort subcommands return empty; fm-spawn owns adapter-specific launch defaults.
+# Only the first non-empty, non-comment line is parsed.
 # Model/effort come ONLY from this file - config/crew-harness stays a bare adapter
 # name and is never parsed for a model.
 # Detection layers: verified environment markers first, then process ancestry.

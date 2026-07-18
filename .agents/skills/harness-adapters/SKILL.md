@@ -109,8 +109,8 @@ The supported launch-profile flags below are verified locally; each row records 
 | pi | `--model <model>` | `--thinking <low\|medium\|high\|xhigh\|max>` | Verified 2026-07-13 on Pi 0.80.6. `pi --help` advertises `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`; `pi --print --model openai-codex/gpt-5.6-sol --thinking max 'Reply with exactly OK.'` completed successfully. |
 | opencode | `--model <provider/model>` | none for firstmate's interactive launch | Verified on opencode 1.17.6. `opencode run` has `--variant`, but firstmate launches the interactive `opencode --prompt` path, which has no verified effort flag. |
 
-When a requested effort value is outside the harness-specific accepted set, `fm-spawn` records the requested `effort=` in meta but emits no effort flag for that harness, except that an unverified Codex model/max pairing is refused before launch.
-This preserves launch success instead of passing a known-bad value.
+For a harness-specific effort mismatch that supports omission, `fm-spawn` records the requested `effort=` in meta but emits no effort flag, preserving launch success without passing a known-bad value.
+An unverified Codex model/max pairing is stricter: `fm-spawn` refuses it before writing task meta or launching the process.
 
 ## no-mistakes skill invocation
 

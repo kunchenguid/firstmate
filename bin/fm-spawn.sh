@@ -41,9 +41,10 @@
 #   whitespace-separated tokens ("<harness> [<model>] [<effort>]"). For a
 #   --secondmate spawn, those tokens apply only when this spawn also resolves its
 #   harness from config/secondmate-harness. An explicit per-spawn --harness,
-#   positional harness arg, or raw launch command starts with clean model/effort
-#   defaults unless the caller also passes explicit --model/--effort flags. When
-#   the file governs the spawn, its model/effort tokens are re-resolved on every
+#   positional harness arg, or raw launch command does not inherit those profile
+#   tokens. Explicit --model/--effort flags still select those axes, verified
+#   templates apply them, and a raw launch command owns its own flags. When the
+#   file governs the spawn, its model/effort tokens are re-resolved on every
 #   respawn exactly like the harness axis, and explicit --model/--effort flags
 #   still win over the file's tokens.
 #   A --secondmate spawn also propagates the primary's declared inherited local

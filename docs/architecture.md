@@ -122,12 +122,11 @@ Ship tasks change projects and ship by project mode (`no-mistakes`, `direct-PR`,
 
 Crewmate and scout dispatch can stay on the static crewmate harness resolved by `config/crew-harness`, or it can use local dispatch profiles in `config/crew-dispatch.json`.
 The dispatch file is intentionally judgment-based: firstmate reads the natural-language rules at intake, chooses the best matching rule, resolves that rule directly or through a supported selector, and passes only concrete `--harness`, `--model`, and `--effort` axes to `fm-spawn.sh`.
-The shell scripts validate the JSON shape and verified harness/effort combinations, and `fm-dispatch-select.sh` owns deterministic selector behavior, but they do not parse task intent or match the natural-language rules.
+The shell scripts validate the JSON shape, verified harness names, and supported effort combinations including model-bound constraints, while `fm-dispatch-select.sh` owns deterministic selector behavior; they do not parse task intent or match the natural-language rules.
 The session-start bootstrap step surfaces either the active rule block or a concise invalid-config line at startup.
 When the file exists, `fm-spawn.sh` refuses crewmate and scout launches without an explicit harness, so `config/crew-harness` is only automatic when no dispatch profile file is active.
 Secondmate launches are exempt because they resolve the secondmate harness and any optional secondmate model or effort tokens instead.
-Unsupported effort values are still recorded in task meta when passed to `fm-spawn.sh`, but the launch template omits any effort flag that the selected harness does not accept.
-That keeps spawn launch compatible across claude, codex, grok, pi, and opencode while preserving the requested profile for later audit.
+[`docs/configuration.md`](configuration.md#crew-dispatch-profiles-configcrew-dispatchjson) owns the accepted profile schema, while the [`harness-adapters` launch-profile table](../.agents/skills/harness-adapters/SKILL.md#launch-profile-axes) owns per-adapter omission and refusal behavior.
 
 ## Optional secondmates
 
@@ -153,7 +152,7 @@ The [`secondmate-provisioning` skill](../.agents/skills/secondmate-provisioning/
 
 Secondmate agents can run on a different verified harness than crewmates.
 `config/secondmate-harness` controls the primary's secondmate launch harness and may also carry optional model and effort tokens as `<harness> [<model>] [<effort>]` on the first non-empty, non-comment line.
-A bare harness line remains harness-only, so existing `config/secondmate-harness` files keep their previous behavior.
+A bare harness line leaves the optional model and effort axes unselected; [configuration.md](configuration.md#harness-support) owns adapter-specific launch defaults.
 When the harness token is unset or `default`, launch falls back to `config/crew-harness`, then to the primary's own harness, and the model and effort tokens are ignored.
 Those optional tokens are re-read on every secondmate spawn or respawn and are overridden by explicit per-spawn `--model` or `--effort` flags.
 An explicit per-spawn harness or raw launch command does not inherit model or effort tokens from `config/secondmate-harness`.
