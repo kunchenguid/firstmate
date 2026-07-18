@@ -274,6 +274,27 @@ test_poll_409_surfaces_error_once() {
   pass "poll 409 conflict surfaces once then dedupes"
 }
 
+test_poll_409_resurfaces_after_healthy_poll() {
+  local home fakebin out1 out2 out3
+  home="$TMP_ROOT/poll-409-recover"; mkdir -p "$home"
+  write_env "$home"
+  fakebin=$(make_fake_curl "$home")
+  out1=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_TELEGRAM_API_URL="https://api.test" \
+    FAKE_POLL_CODE=409 FAKE_POLL_BODY='{"ok":false}' \
+    "$ROOT/bin/fm-telegram-poll.sh")
+  assert_contains "$out1" "telegram-mode-error" "first 409 must surface"
+  out2=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_TELEGRAM_API_URL="https://api.test" \
+    FAKE_POLL_CODE=200 FAKE_POLL_BODY='{"ok":true,"result":[]}' \
+    "$ROOT/bin/fm-telegram-poll.sh")
+  [ -z "$out2" ] || fail "healthy empty poll must stay silent (got: $out2)"
+  assert_absent "$home/state/telegram-poll.error" "healthy poll must clear the error marker"
+  out3=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_TELEGRAM_API_URL="https://api.test" \
+    FAKE_POLL_CODE=409 FAKE_POLL_BODY='{"ok":false}' \
+    "$ROOT/bin/fm-telegram-poll.sh")
+  assert_contains "$out3" "telegram-mode-error" "new 409 after recovery must surface again"
+  pass "poll clears error marker on healthy 200 so a new 409 surfaces"
+}
+
 # --- send / secrets / afk / audit -------------------------------------------
 
 test_send_dry_run_no_network() {
@@ -333,6 +354,26 @@ test_send_reply_bypasses_afk_gate() {
     "$ROOT/bin/fm-telegram-send.sh" --text-file "$home/msg.txt" --reply >/dev/null 2>&1
   assert_grep "sendMessage" "$log" "reply must post even without AFK"
   pass "send --reply bypasses AFK-only gate"
+}
+
+test_send_truncates_long_utf8_safely() {
+  local home rc file len
+  home="$TMP_ROOT/send-trunc"; mkdir -p "$home/state"
+  write_env "$home" "FM_TELEGRAM_DRY_RUN=1"
+  touch "$home/state/.afk"
+  jq -rn '"é" * 5000' > "$home/msg.txt"
+  FM_HOME="$home" "$ROOT/bin/fm-telegram-send.sh" --text-file "$home/msg.txt" >/dev/null 2>&1
+  rc=$?
+  expect_code 0 "$rc" "truncated dry-run send exit"
+  file=$(find "$home/state/telegram-outbox" -name '*.json' 2>/dev/null | head -n1)
+  [ -n "$file" ] || fail "truncated dry-run must write outbox"
+  len=$(jq -r '.text | length' "$file")
+  [ "$len" = "4096" ] || fail "truncated text must be 4096 chars (got $len)"
+  jq -e '.text | contains("�") | not' "$file" >/dev/null \
+    || fail "truncation must not split a multibyte character"
+  jq -e '.text | endswith("é...")' "$file" >/dev/null \
+    || fail "truncated text must keep whole characters before the ellipsis"
+  pass "send truncates long multibyte text on character boundaries"
 }
 
 # --- respond grammar / freshness / authority --------------------------------
@@ -402,6 +443,21 @@ test_respond_approve_open_key() {
   assert_present "$home/state/telegram-actions/43.json" "must write action record"
   assert_grep '"action":"approve"' "$home/state/telegram-actions/43.json" "action is approve"
   pass "respond approve records action for open key"
+}
+
+test_respond_action_write_failure_reports_error() {
+  local home out
+  home="$TMP_ROOT/resp-action-fail"; mkdir -p "$home/state"
+  write_env "$home" "FM_TELEGRAM_DRY_RUN=1"
+  seed_inbox "$home" 46 "approve api-shape"
+  printf 'needs-decision [key=api-shape]: which shape?\n' > "$home/state/ship-1.status"
+  # Occupy the actions dir path with a plain file so the durable write fails.
+  touch "$home/state/telegram-actions"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-telegram-respond.sh" 2>/dev/null)
+  assert_contains "$out" "error 46 action-write-failed" "failed action write must report error"
+  assert_present "$home/state/telegram-inbox/46.json" "inbox must stay queued for retry"
+  assert_grep "action-write-failed" "$home/state/telegram-audit.log" "must audit action write failure"
+  pass "respond reports error and keeps inbox when action write fails"
 }
 
 test_respond_approve_unknown_key_refused() {
@@ -529,6 +585,9 @@ test_audit_covers_inbound_and_outbound() {
   assert_grep $'outbound\t' "$home/state/telegram-audit.log" "audit outbound"
   # Token must never appear in the audit log.
   assert_no_grep "test-bot-token" "$home/state/telegram-audit.log" "token redacted from audit"
+  # Line-oriented log: every record is newline-terminated (wc -l counts them).
+  [ "$(wc -l < "$home/state/telegram-audit.log" | tr -d '[:space:]')" -ge 3 ] \
+    || fail "audit records must each end with a newline"
   pass "audit log covers inbound, respond, outbound without secrets"
 }
 
@@ -564,14 +623,17 @@ test_poll_non_allowlisted_dropped_and_audited
 test_poll_wrong_chat_dropped
 test_poll_group_chat_dropped
 test_poll_409_surfaces_error_once
+test_poll_409_resurfaces_after_healthy_poll
 test_send_dry_run_no_network
 test_send_refuses_secretish
 test_send_skips_when_not_afk
 test_send_reply_bypasses_afk_gate
+test_send_truncates_long_utf8_safely
 test_respond_status
 test_respond_closed_scope_refuses_free_text
 test_respond_stale_approve_refused
 test_respond_approve_open_key
+test_respond_action_write_failure_reports_error
 test_respond_approve_unknown_key_refused
 test_respond_desk_only_decision_refused
 test_respond_merge_requires_notified_and_green

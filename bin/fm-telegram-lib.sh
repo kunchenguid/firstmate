@@ -186,7 +186,7 @@ fmt_audit_append() {
   if [ -n "${FMT_TOKEN:-}" ]; then
     detail=${detail//$FMT_TOKEN/[redacted-token]}
   fi
-  line=$(printf '%s\t%s\t%s\n' "$epoch" "$kind" "$detail")
+  line=$(printf '%s\t%s\t%s' "$epoch" "$kind" "$detail")
   # Keep state private (700) so offset/inbox publishers can use the same dir.
   if [ -e "$state" ] || [ -L "$state" ]; then
     [ -d "$state" ] && [ ! -L "$state" ] || return 0
@@ -198,7 +198,7 @@ fmt_audit_append() {
   if [ -L "$state/telegram-audit.log" ]; then
     return 0
   fi
-  (umask 077; printf '%s' "$line" >> "$state/telegram-audit.log") 2>/dev/null || true
+  (umask 077; printf '%s\n' "$line" >> "$state/telegram-audit.log") 2>/dev/null || true
   chmod 600 "$state/telegram-audit.log" 2>/dev/null || true
 }
 

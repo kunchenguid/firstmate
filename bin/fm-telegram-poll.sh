@@ -32,9 +32,11 @@ fmt_load_config
 fmt_mode_enabled || exit 0
 
 ERROR_FILE="$STATE/telegram-poll.error"
+SWEEP_ERROR=
 
 emit_error_once() {
   local msg=$1
+  SWEEP_ERROR=1
   if fmx_private_artifact_file_valid "$STATE" "telegram-poll.error" 600 \
     && [ "$(cat "$ERROR_FILE" 2>/dev/null)" = "$msg" ]; then
     return 0
@@ -188,8 +190,12 @@ if [ -n "$max_id" ]; then
   fmt_offset_set "$next" || true
 fi
 
-if [ -n "$wakes" ]; then
+# Any healthy 200 sweep without a new error clears the stale marker so the
+# next distinct incident (e.g. a fresh 409 conflict) surfaces again.
+if [ -z "$SWEEP_ERROR" ]; then
   clear_error
+fi
+if [ -n "$wakes" ]; then
   printf '%s' "$wakes"
 fi
 exit 0
