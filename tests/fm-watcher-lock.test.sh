@@ -473,13 +473,21 @@ test_watcher_self_evicts_on_lock_takeover() {
   out="$dir/watch.out"
   PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=0.2 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
+  # Wait for pid-identity, not just the lock pid: fm_lock_claim publishes the
+  # pid mid-acquire and still verifies it by read-back, so a takeover written
+  # during that window is read as a claim conflict and discarded with the
+  # owner dir when the watcher retries. pid-identity is written only after
+  # acquisition completes, so its presence proves the takeover write below
+  # lands in the owner dir the watcher's eviction check actually reads.
   i=0
   while [ "$i" -lt 50 ]; do
-    [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$pid" ] && break
+    [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$pid" ] \
+      && [ -e "$state/.watch.lock/pid-identity" ] && break
     sleep 0.1
     i=$((i + 1))
   done
   [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$pid" ] || fail "watcher did not record its own pid in the lock"
+  [ -e "$state/.watch.lock/pid-identity" ] || fail "watcher did not finish lock acquisition (no pid-identity)"
   # Simulate a second watcher taking over the singleton lock. $$ (the test
   # runner) is a live pid that is not the watcher.
   printf '%s\n' "$$" > "$state/.watch.lock/pid"

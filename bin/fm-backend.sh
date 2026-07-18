@@ -341,6 +341,15 @@ fm_meta_get() {  # <meta-file> <key>
   grep "^$key=" "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true
 }
 
+# fm_task_display_label_sanitize: the shared implementation of fm-spawn.sh
+# --label normalization. bin/fm-spawn.sh's header/help owns the exact
+# user-facing contract; docs/herdr-backend.md records its empirical basis.
+fm_task_display_label_sanitize() {  # <raw-label>
+  printf '%s' "$1" \
+    | tr '[:cntrl:]' ' ' \
+    | awk '{$1=$1; print substr($0, 1, 64)}'
+}
+
 # fm_backend_of_meta: the backend recorded in <meta-file>, defaulting to
 # `tmux` when the field is absent - the P1 compatibility contract.
 fm_backend_of_meta() {  # <meta-file>
