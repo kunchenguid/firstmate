@@ -52,6 +52,7 @@ On locked session-start bootstrap, when tokens are present and the kill switch i
 - `config/telegram-mode.env` - exports `FM_CHECK_INTERVAL=30` for the watcher cadence
 
 `bin/fm-watch-arm.sh` and `bin/fm-watch-checkpoint.sh` source that cadence file when present, so every harness inherits the 30s interval without Pi extension changes.
+While away mode is active the sub-supervisor daemon owns the watcher and the default check cadence applies; inbound polling still runs, just on the slower default interval (the same deferred follow-up as X-mode away cadence, see `docs/configuration.md` "X mode (.env)").
 
 Runtime private artifacts (all gitignored, typically mode 0600/0700):
 
