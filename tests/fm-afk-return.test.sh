@@ -209,8 +209,95 @@ test_check_retries_recorded_terminal_teardown() {
   pass "check retries recorded terminal teardown and keeps catch-up gated until success"
 }
 
+# The daemon writes multi-line markers (bin/fm-supervise-daemon.sh
+# afk_slack_dm_write_failure_marker and the Slack DM wedge writer). Seed the
+# REAL formats here, not synthetic single-line text, so the test actually
+# exercises how the catch-up parses them: the failure reason lives on the
+# `Last result:` line (line 4), not the line-1 banner.
+DM_MARKER_TS='2026-07-18T02:15:04-0700'
+
+seed_dm_failure_marker() {  # <case-dir> <reason>
+  local dir=$1 reason=$2
+  {
+    printf 'fm away-mode Slack DM delivery failed as of %s\n' "$DM_MARKER_TS"
+    printf 'Buffered escalations remain in state/.subsuper-escalations for retry and catch-up.\n'
+    printf 'Terminal injection is not counted as captain delivery while config/afk-slack-dm is active.\n'
+    printf 'Last result: %s\n' "$reason"
+  } > "$dir/home/state/.subsuper-slack-dm-failed"
+}
+
+seed_dm_wedge_marker() {  # <case-dir>
+  local dir=$1
+  {
+    printf 'fm away-mode Slack DM WEDGED: 900s undelivered as of %s\n' "$DM_MARKER_TS"
+    printf 'Slack DM delivery to the captain failed repeatedly; no pane injection is attempted in DM mode.\n'
+    printf 'Per-attempt reason: see .subsuper-slack-dm-failed. Buffered items:\n'
+    printf 'repair-task.status: blocked synthetic dependency\n'
+  } > "$dir/home/state/.subsuper-slack-dm-wedged"
+}
+
+test_slack_dm_delivery_failure_markers_surface_in_catchup() {
+  local dir out rc gate wedge_banner fail_banner
+  wedge_banner="fm away-mode Slack DM WEDGED: 900s undelivered as of $DM_MARKER_TS"
+  fail_banner="fm away-mode Slack DM delivery failed as of $DM_MARKER_TS"
+
+  # Markers alone are informational: a failed away-mode DM must be surfaced in
+  # the return catch-up, but by itself it does not gate ordinary work (an open
+  # `blocked:` event or a lifecycle failure is what holds the gate). Both markers
+  # carry only sanitized text - the token never reaches them. The catch-up must
+  # preserve the actual `Last result:` failure reason, not just the banner,
+  # before clear_delivery_artifacts removes the marker.
+  dir="$TMP_ROOT/slack-dm-informational"
+  install_runner "$dir"
+  date +%s > "$dir/home/state/.afk"
+  : > "$dir/home/state/.fake-drain"
+  seed_dm_wedge_marker "$dir"
+  seed_dm_failure_marker "$dir" helper-exit-1
+
+  out=$(run_return "$dir" begin) || fail "away-mode DM failure markers alone must not gate the return: $out"
+  assert_contains "$out" "catch-up wedge: $wedge_banner" "return catch-up did not surface the Slack DM wedge summary"
+  assert_contains "$out" "catch-up slack-dm: $fail_banner" "return catch-up did not surface the Slack DM failure banner"
+  assert_contains "$out" "catch-up slack-dm: Last result: helper-exit-1" "return catch-up dropped the actual Slack DM failure reason"
+  [ ! -e "$dir/home/state/.afk-return-catchup" ] || fail "DM failure markers alone incorrectly held the return gate open"
+  [ ! -e "$dir/home/state/.subsuper-slack-dm-wedged" ] || fail "successful catch-up left the Slack DM wedge marker behind"
+  [ ! -e "$dir/home/state/.subsuper-slack-dm-failed" ] || fail "successful catch-up left the Slack DM failure marker behind"
+
+  # With a live blocker also open, the gate stays closed and the Slack DM
+  # evidence - including the `Last result:` reason - must survive in the durable
+  # gate until the blocker is resolved, then clear together on a successful check.
+  dir="$TMP_ROOT/slack-dm-gated"
+  install_runner "$dir"
+  seed_live_blocker "$dir" tmux dm-buffered-escalation
+  date +%s > "$dir/home/state/.afk"
+  : > "$dir/home/state/.fake-drain"
+  seed_dm_wedge_marker "$dir"
+  seed_dm_failure_marker "$dir" helper-exit-1
+
+  set +e
+  out=$(run_return "$dir" begin)
+  rc=$?
+  set -e
+  [ "$rc" -eq 3 ] || fail "a live blocker alongside DM failure markers should gate the return (rc=$rc): $out"
+  gate="$dir/home/state/.afk-return-catchup"
+  grep -F $'evidence\twedge\t'"$wedge_banner" "$gate" >/dev/null || fail "Slack DM wedge summary was not retained in the durable gate"
+  grep -F $'evidence\tslack-dm\tLast result: helper-exit-1' "$gate" >/dev/null || fail "Slack DM failure reason was not retained in the durable gate"
+  assert_contains "$out" "catch-up slack-dm: Last result: helper-exit-1" "gated refusal did not surface the Slack DM failure reason"
+
+  # Re-entry stays idempotent: the retained DM reason is not duplicated.
+  out=$(run_return "$dir" begin) || true
+  [ "$(grep -c $'^evidence\tslack-dm\tLast result: helper-exit-1' "$gate" || true)" -eq 1 ] || fail "repeated begin duplicated the retained Slack DM failure reason"
+
+  printf 'resolved [key=dm-buffered-escalation]: delivered the buffered escalation and cleared the DM backlog\n' >> "$dir/home/state/repair-task.status"
+  out=$(run_return "$dir" check) || fail "resolving the blocker did not clear the return catch-up: $out"
+  [ ! -e "$gate" ] || fail "successful check left the return gate behind"
+  [ ! -e "$dir/home/state/.subsuper-slack-dm-wedged" ] || fail "successful check left the Slack DM wedge marker behind"
+  [ ! -e "$dir/home/state/.subsuper-slack-dm-failed" ] || fail "successful check left the Slack DM failure marker behind"
+  pass "away-mode Slack DM failure markers surface (including the reason) in return catch-up, gate only behind a real blocker, and clear on success"
+}
+
 test_return_gate_orders_catchup_before_bearings
 test_explicit_reclassification_requires_durable_reason
 test_captain_decision_does_not_masquerade_as_firstmate_blocker
 test_away_reentry_refuses_pending_return_gate
 test_check_retries_recorded_terminal_teardown
+test_slack_dm_delivery_failure_markers_surface_in_catchup
