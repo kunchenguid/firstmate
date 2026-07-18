@@ -22,11 +22,11 @@
 # Usage:
 #   fm-lint.sh                    lint the canonical file set
 #   fm-lint.sh <path>...          lint only the given paths with the same config
-#                                  (developer convenience; the gates never pass args)
+#                                  (developer convenience; CI never passes args)
 #   fm-lint.sh --required-version print the pinned ShellCheck version and exit
 #                                  (CI reads this to install the exact same one)
 #
-# Exit status is ShellCheck's own on a lint run, so a caller (CI or the gate)
+# Exit status is ShellCheck's own on a lint run, so CI
 # fails exactly when ShellCheck reports a finding; a version mismatch or a
 # missing ShellCheck fails before linting with a distinct message.
 set -eu
