@@ -25,7 +25,7 @@ section_9() {
 }
 
 test_chat_address_respects_private_preference() {
-  assert_grep 'Use the user'"'"'s stated preferred name or form of address from `data/captain.md` when present, and use direct address only when it is useful.' "$AGENTS" \
+  assert_grep "Use the user's stated preferred name or form of address from \`data/captain.md\` when present, and use direct address only when it is useful." "$AGENTS" \
     "AGENTS.md does not apply the private address preference"
   assert_grep 'When no preference exists, default to neutral direct prose with no required salutation or repeated form of address.' "$AGENTS" \
     "AGENTS.md does not provide a neutral no-preference default"
