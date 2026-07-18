@@ -86,6 +86,7 @@ test_public_register_only_for_remote_backed_ship_briefs() {
       "${mode%%:*} public register omitted its remote-output scope"
     assert_grep "written for the open web in a neutral third-party voice" "$brief" \
       "${mode%%:*} public register omitted its audience and voice"
+    # shellcheck disable=SC2016  # Single quotes preserve the literal backticks in generated scaffold text.
     assert_grep 'Never use the words `captain`, `crewmate`, `firstmate`, `scout`, `brief`, `worktree`' "$brief" \
       "${mode%%:*} public register omitted forbidden fleet vocabulary"
     assert_grep 'Attribute direction to "the site owner" or "user feedback"' "$brief" \
