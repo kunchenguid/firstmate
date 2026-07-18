@@ -69,7 +69,9 @@ The calibration confirmed that this is a real distinction rather than a document
 
 ### Empirical containment trials
 
-The trials used the same skill runner, exactly `composer-2.5`, and fresh sessions; the two native-sandbox trials additionally used a harmless write probe targeting a sibling disposable control directory, while the other rows record the evidence each trial actually produced.
+Each trial that launched a Composer session used exactly `composer-2.5` and a fresh session: the prompt-only evidence came from the first scaffolding launch through the skill runner, while the two native-sandbox trials ran through a machine-local shim that added `--sandbox enabled` and used a harmless write probe targeting a sibling disposable control directory.
+
+The Bubblewrap trial failed before any Composer session launched, and each row below records the evidence that trial actually produced.
 
 | Trial | Result | Conclusion |
 | --- | --- | --- |
