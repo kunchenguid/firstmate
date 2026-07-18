@@ -63,7 +63,7 @@ The calibration confirmed that this is a real distinction rather than a document
 
 ### Empirical containment trials
 
-The trials used the same skill runner, exactly `composer-2.5`, fresh sessions, and a harmless write probe targeting a sibling disposable control directory.
+The trials used the same skill runner, exactly `composer-2.5`, and fresh sessions; the two native-sandbox trials additionally used a harmless write probe targeting a sibling disposable control directory, while the other rows record the evidence each trial actually produced.
 
 | Trial | Result | Conclusion |
 | --- | --- | --- |
