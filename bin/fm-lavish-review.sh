@@ -17,7 +17,8 @@
 # Pass `--` and normal open flags such as `--no-open`, `--no-gate`, or `--reopen`
 # through to `lavish-axi` when needed.
 # Use `--arm-only` only when the Lavish session was already opened with the same
-# LAVISH_AXI_* environment currently in this shell.
+# LAVISH_AXI_* environment currently in this shell; it never opens anything, so
+# it rejects `--` open arguments instead of silently dropping them.
 #
 # Structured-input rule:
 # run `lavish-axi playbook input` before writing artifacts that collect choices.
@@ -225,6 +226,10 @@ case "${1:-}" in
   '') OPEN_ARGS=() ;;
   *) echo "error: pass Lavish open arguments after --" >&2; exit 2 ;;
 esac
+if [ "$ARM_ONLY" -eq 1 ] && [ "${#OPEN_ARGS[@]}" -gt 0 ]; then
+  echo "error: --arm-only never calls lavish-axi open, so open arguments after -- would be ignored; drop them or open without --arm-only" >&2
+  exit 2
+fi
 
 lavish_input_check "$HTML"
 

@@ -111,11 +111,10 @@ FM_LAVISH_ACK_FOLLOWUP=
 
 acknowledge_prompt_feedback() {
   local ack_text=${FM_LAVISH_ACK_TEXT:-Received — routing this into the active UI work now.}
-  local ack_timeout ack_out ack_rc ack_status
-  ack_timeout=$(ack_timeout_ms)
+  local ack_out ack_rc ack_status
   FM_LAVISH_ACK_TEXT_SENT=$ack_text
   set +e
-  ack_out=$(lavish-axi poll "$HTML" --timeout-ms "$ack_timeout" --agent-reply "$ack_text" 2>&1)
+  ack_out=$(lavish-axi poll "$HTML" --timeout-ms "$ACK_TIMEOUT_MS" --agent-reply "$ack_text" 2>&1)
   ack_rc=$?
   set -e
   if [ "$ack_rc" -eq 0 ]; then
@@ -174,6 +173,20 @@ write_event() {
   printf 'lavish-%s: %s\n' "$label" "$rel"
 }
 
+emit_event() {
+  local kind=$1 label=$2 output=$3
+  if write_event "$kind" "$label" "$output"; then
+    return 0
+  fi
+  printf 'lavish-%s: persist failed under %s; inline output follows\n' "$label" "$DATA/$ID/lavish-feedback"
+  printf 'artifact: %s\n' "$HTML"
+  [ -z "$FM_LAVISH_ACK_STATUS" ] || printf 'acknowledgement: %s\n' "$FM_LAVISH_ACK_STATUS"
+  printf '%s\n' "$output"
+  if [ -n "$FM_LAVISH_ACK_FOLLOWUP" ]; then
+    printf '\nacknowledgement_poll_output:\n%s\n' "$FM_LAVISH_ACK_FOLLOWUP"
+  fi
+}
+
 FM_LAVISH_SEEN_PATH=
 FM_LAVISH_SEEN_FINGERPRINT=
 
@@ -198,17 +211,19 @@ disarm_if_ended() {
   [ "$trust" = "$STATE/$ID.check-trust" ] && rm -f -- "$trust"
 }
 
+timeout_ms=$(poll_timeout_ms)
+ACK_TIMEOUT_MS=$(ack_timeout_ms)
+
 if [ ! -f "$HTML" ]; then
   out="error: Lavish artifact is missing: $HTML"
   if seen_duplicate error "$out"; then
     exit 0
   fi
-  write_event error error "$out"
+  emit_event error error "$out"
   mark_seen
   exit 0
 fi
 
-timeout_ms=$(poll_timeout_ms)
 set +e
 out=$(lavish-axi poll "$HTML" --timeout-ms "$timeout_ms" 2>&1)
 rc=$?
@@ -218,7 +233,7 @@ if [ "$rc" -ne 0 ]; then
   if seen_duplicate error "$out"; then
     exit 0
   fi
-  write_event error error "$out"
+  emit_event error error "$out"
   mark_seen
   exit 0
 fi
@@ -230,17 +245,17 @@ case "$status" in
       acknowledge_prompt_feedback
     fi
     if printf '%s\n' "$out" | session_ended_in_output; then
-      write_event feedback feedback-final "$out"
+      emit_event feedback feedback-final "$out"
       disarm_if_ended
     else
-      write_event feedback feedback "$out"
+      emit_event feedback feedback "$out"
     fi
     ;;
   ended)
     if seen_duplicate ended "$out"; then
       exit 0
     fi
-    write_event ended ended "$out"
+    emit_event ended ended "$out"
     mark_seen
     disarm_if_ended
     ;;

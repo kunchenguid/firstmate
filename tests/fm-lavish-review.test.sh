@@ -177,6 +177,78 @@ EOF
   pass "fm-lavish-review: final feedback stores output and disarms polling"
 }
 
+test_invalid_ack_timeout_aborts_before_consuming_poll() {
+  local dir home fakebin html log rc
+  dir="$TMP_ROOT/ack-timeout"
+  mkdir -p "$dir"
+  home=$(make_home "$dir")
+  fakebin=$(fm_fakebin "$dir")
+  install_fake_lavish "$fakebin"
+  html="$dir/review.html"
+  printf '<html><body>review</body></html>\n' > "$html"
+  log="$dir/env.log"
+  FM_HOME="$home" PATH="$fakebin:$BASE_PATH" "$REVIEW" --arm-only task-ack "$html" >/dev/null
+  rc=0
+  FM_LAVISH_ACK_TIMEOUT_MS=soon FM_FAKE_LAVISH_ENV_LOG="$log" PATH="$fakebin:$BASE_PATH" \
+    bash "$home/state/task-ack.check.sh" > "$dir/check.out" 2> "$dir/check.err" || rc=$?
+  [ "$rc" -ne 0 ] || fail "invalid FM_LAVISH_ACK_TIMEOUT_MS should fail the check"
+  assert_grep 'invalid FM_LAVISH_ACK_TIMEOUT_MS' "$dir/check.err" \
+    "invalid ack timeout did not report a clear error"
+  if [ -e "$log" ]; then
+    assert_no_grep 'args=poll' "$log" "invalid ack timeout must abort before the consuming poll"
+  fi
+  pass "fm-lavish-review: invalid ack timeout aborts before consuming queued feedback"
+}
+
+test_persist_failure_still_wakes_with_inline_feedback() {
+  local dir home fakebin html response log out
+  dir="$TMP_ROOT/persist-fail"
+  mkdir -p "$dir"
+  home=$(make_home "$dir")
+  fakebin=$(fm_fakebin "$dir")
+  install_fake_lavish "$fakebin"
+  html="$dir/review.html"
+  printf '<html><body>review</body></html>\n' > "$html"
+  response="$dir/feedback.yml"
+  cat > "$response" <<'EOF'
+session:
+  file: /tmp/review.html
+  status: feedback
+prompts[1]:
+  - prompt: Captain feedback arrived
+EOF
+  log="$dir/env.log"
+  FM_HOME="$home" PATH="$fakebin:$BASE_PATH" "$REVIEW" --arm-only task-persist "$html" >/dev/null
+  chmod 0500 "$home/data/task-persist"
+  out=$(FM_FAKE_LAVISH_RESPONSE_FILE="$response" FM_FAKE_LAVISH_ENV_LOG="$log" \
+    PATH="$fakebin:$BASE_PATH" bash "$home/state/task-persist.check.sh" 2>/dev/null)
+  chmod 0700 "$home/data/task-persist"
+  assert_contains "$out" 'lavish-feedback: persist failed' \
+    "persist failure did not surface an inline Lavish wake"
+  assert_contains "$out" 'Captain feedback arrived' \
+    "inline Lavish wake lost the feedback body after persist failure"
+  pass "fm-lavish-review: persist failure still wakes FirstMate with inline feedback"
+}
+
+test_arm_only_rejects_open_args() {
+  local dir home fakebin html rc
+  dir="$TMP_ROOT/arm-only-open-args"
+  mkdir -p "$dir"
+  home=$(make_home "$dir")
+  fakebin=$(fm_fakebin "$dir")
+  install_fake_lavish "$fakebin"
+  html="$dir/review.html"
+  printf '<html><body>review</body></html>\n' > "$html"
+  rc=0
+  FM_HOME="$home" PATH="$fakebin:$BASE_PATH" \
+    "$REVIEW" --arm-only task-oa "$html" -- --reopen > "$dir/oa.out" 2> "$dir/oa.err" || rc=$?
+  [ "$rc" -eq 2 ] || fail "--arm-only with open args should exit 2, got $rc"
+  assert_grep 'open arguments after -- would be ignored' "$dir/oa.err" \
+    "--arm-only with open args did not explain the rejection"
+  assert_absent "$home/state/task-oa.check.sh" "--arm-only with open args must not arm the check"
+  pass "fm-lavish-review: --arm-only rejects Lavish open arguments"
+}
+
 test_input_notice_distinguishes_queue_only_from_send_controls() {
   local dir ambiguous paired sends err rc
   dir="$TMP_ROOT/input-notice"
@@ -206,4 +278,7 @@ test_registered_check_preserves_lavish_environment_and_wakes
 test_waiting_poll_is_silent
 test_layout_warnings_wake_without_prompt_acknowledgement
 test_final_feedback_disarms_check_after_storing_output
+test_invalid_ack_timeout_aborts_before_consuming_poll
+test_persist_failure_still_wakes_with_inline_feedback
+test_arm_only_rejects_open_args
 test_input_notice_distinguishes_queue_only_from_send_controls
