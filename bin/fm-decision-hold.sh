@@ -110,6 +110,96 @@ task_show() {  # <id>
   tasks_axi show "$1" --full 2>/dev/null
 }
 
+tasks_config_value() {  # <key>
+  local key=$1 config="$FM_HOME/.tasks.toml" in_markdown=0 line trimmed value
+  [ -f "$config" ] || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      *"#"*) line=${line%%#*} ;;
+    esac
+    trimmed=${line#"${line%%[![:space:]]*}"}
+    case "$trimmed" in
+      "["*)
+        case "$trimmed" in
+          "[markdown]"*) in_markdown=1 ;;
+          *) in_markdown=0 ;;
+        esac
+        continue
+        ;;
+    esac
+    [ "$in_markdown" = 1 ] || continue
+    case "$trimmed" in
+      "$key"[[:space:]]*"="*)
+        value=${trimmed#*=}
+        value=${value#"${value%%[![:space:]]*}"}
+        value=${value%"${value##*[![:space:]]}"}
+        case "$value" in
+          \"*\") value=${value#\"}; value=${value%\"} ;;
+          \'*\') value=${value#\'}; value=${value%\'} ;;
+          *) continue ;;
+        esac
+        [ -n "$value" ] || return 1
+        printf '%s\n' "$value"
+        return 0
+        ;;
+    esac
+  done < "$config"
+  return 1
+}
+
+tasks_config_path() {  # <path>
+  case "$1" in
+    /*) printf '%s\n' "$1" ;;
+    *) printf '%s/%s\n' "$FM_HOME" "$1" ;;
+  esac
+}
+
+tasks_archive_path() {
+  local archive backlog
+  if archive=$(tasks_config_value archive); then
+    tasks_config_path "$archive"
+    return 0
+  fi
+  backlog=$(tasks_config_value path || printf 'data/backlog.md')
+  backlog=$(tasks_config_path "$backlog")
+  printf '%s/done-archive.md\n' "$(dirname "$backlog")"
+}
+
+archive_task_show() {  # <id>
+  local id=$1 archive found=0 header='' body='' line content kind
+  archive=$(tasks_archive_path)
+  [ -f "$archive" ] || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    if [ "$found" = 0 ]; then
+      case "$line" in
+        "- [x] $id - "*) found=1; header=$line; body='' ;;
+      esac
+      continue
+    fi
+    case "$line" in
+      "## "*|"- ["*) break ;;
+      "  "*) content=${line#  } ;;
+      "") content='' ;;
+      *) content=$line ;;
+    esac
+    body="${body}${body:+\\n}$content"
+  done < "$archive"
+  [ "$found" = 1 ] || return 1
+  kind=''
+  case "$header" in
+    *" (kind: captain)"*) kind=captain ;;
+  esac
+  printf 'task:\n'
+  printf '  id: %s\n' "$id"
+  printf '  state: done\n'
+  printf '  kind: %s\n' "$kind"
+  printf '  body: "%s"\n' "$body"
+}
+
+task_show_durable() {  # <id>
+  task_show "$1" || archive_task_show "$1"
+}
+
 show_field() {  # <show-output> <field>
   local output=$1 field=$2
   printf '%s\n' "$output" | sed -n "s/^  $field: //p" | head -1
@@ -172,7 +262,7 @@ verify_hold_active() {  # <hold-id>
 
 verify_hold_resolved() {  # <hold-id>
   local id=$1 show state kind body
-  show=$(task_show "$id") || return 1
+  show=$(task_show_durable "$id") || return 1
   state=$(show_field "$show" state)
   kind=$(show_field "$show" kind)
   body=$(show_field "$show" body)
@@ -186,7 +276,8 @@ verify_hold_resolved() {  # <hold-id>
 
 verify_hold_durable() {  # <hold-id>
   local id=$1 show state held kind hold_kind body
-  show=$(task_show "$id") || fail "captain decision $id is absent from $FM_HOME/data/backlog.md"
+  show=$(task_show_durable "$id") \
+    || fail "captain decision $id is absent from $FM_HOME/data/backlog.md and $(tasks_archive_path)"
   state=$(show_field "$show" state)
   held=$(show_field "$show" held)
   kind=$(show_field "$show" kind)
@@ -256,6 +347,8 @@ command_hold() {
     [ "$state" != "done" ] || fail "captain decision $id is already durably resolved; use a new decision key for a new decision"
     [ "$kind" = captain ] || fail "existing backlog identity $id is not kind captain"
     [ "$existing_title" = "$title" ] || fail "existing captain hold $id has a different title"
+  elif verify_hold_resolved "$id"; then
+    fail "captain decision $id is already durably resolved; use a new decision key for a new decision"
   else
     if [ -z "$repo" ] && [ -f "$STATE/$origin.meta" ]; then
       repo=$(meta_value "$STATE/$origin.meta" project)
@@ -394,7 +487,7 @@ command_resolve() {
   require_tasks_axi
   id=$(hold_id "$origin" "$key")
   if verify_hold_resolved "$id"; then
-    hold_show=$(task_show "$id")
+    hold_show=$(task_show_durable "$id")
     hold_body=$(show_field "$hold_show" body)
     verify_resolution_identity "$id" "$hold_body" "$decision_digest" "$routed_csv"
     printf 'resolved: %s\n' "$id"

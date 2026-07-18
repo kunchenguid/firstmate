@@ -410,6 +410,105 @@ test_terminal_single_owner_status_decision_does_not_block_empty_inventory() {
   pass "terminal single-owner stale status decisions do not block empty inventory"
 }
 
+test_archived_resolved_captain_decision_satisfies_inventory_union() {
+  local home origin old_hold new_hold i item archive_show
+  home=$(make_home archived-resolved-decision)
+  origin=sample-archive-ship
+  mkdir -p "$home/data/$origin"
+  tasks_in "$home" add "$origin" "Ship archive-sensitive work" --kind ship --repo sample --start >/dev/null \
+    || fail "could not create active ship origin"
+  write_origin_meta "$home" "$origin" ship
+  printf 'needs-decision [key=scope]: choose the original scope\ndone: original review pass complete\n' \
+    > "$home/state/$origin.status"
+  old_hold=$(run_decisions "$home" hold "$origin" scope \
+    --title "Choose the original scope" --reason "captain original scope pending" --repo sample) \
+    || fail "could not register original decision hold"
+  run_decisions "$home" complete "$origin" scope >/dev/null \
+    || fail "could not complete the original decision inventory"
+  tasks_in "$home" add sample-scope-work "Apply the original scope" --kind ship --repo sample >/dev/null \
+    || fail "could not create routed work"
+  tasks_in "$home" block sample-scope-work --by "$old_hold" >/dev/null \
+    || fail "could not block routed work by the original hold"
+  printf 'Use the narrower sample scope.\n' > "$home/scope-decision.txt"
+  run_decisions "$home" resolve "$origin" scope --decision-file "$home/scope-decision.txt" \
+    --routed-to sample-scope-work >/dev/null \
+    || fail "could not resolve the original decision"
+
+  i=1
+  while [ "$i" -le 10 ]; do
+    item=$(printf 'sample-archive-pad-%02d' "$i")
+    tasks_in "$home" add "$item" "Archive padding $i" --kind ship --repo sample >/dev/null \
+      || fail "could not create archive padding item $i"
+    tasks_in "$home" "done" "$item" >/dev/null \
+      || fail "could not complete archive padding item $i"
+    i=$((i + 1))
+  done
+  ! grep -E "^- \[[ x]\] $old_hold -" "$home/data/backlog.md" >/dev/null \
+    || fail "resolved captain decision remained in the active backlog"
+  archive_show=$(cat "$home/data/done-archive.md") \
+    || fail "configured archive lost the exact resolved captain decision"
+  assert_contains "$archive_show" "- [x] $old_hold -" "archived decision is not done"
+  assert_contains "$archive_show" "(kind: captain)" "archived decision is not kind captain"
+  assert_contains "$archive_show" "Resolution recorded by fm-decision-hold" \
+    "archived decision lost the structured resolution record"
+  assert_contains "$archive_show" "Routed identities: sample-scope-work" \
+    "archived decision lost routed identity"
+
+  printf 'needs-decision [key=catalog]: choose the catalog completeness scope\n' \
+    >> "$home/state/$origin.status"
+  new_hold=$(run_decisions "$home" hold "$origin" catalog \
+    --title "Choose the catalog completeness scope" \
+    --reason "captain catalog completeness pending" --repo sample) \
+    || fail "could not register the new decision hold"
+  [ "$new_hold" = "$origin-decision-catalog" ] \
+    || fail "new decision identity was not deterministic: $new_hold"
+  run_decisions "$home" complete "$origin" catalog >/dev/null \
+    || fail "archived resolved decision did not satisfy inventory completion"
+  run_decisions "$home" verify "$origin" >/dev/null \
+    || fail "archived resolved decision did not satisfy inventory verification"
+  assert_grep "decision_keys=catalog,scope" "$home/state/$origin.meta" \
+    "metadata union dropped an earlier reviewed decision"
+  pass "archived resolved captain decision satisfies later inventory completion and verification"
+}
+
+test_malformed_archive_decision_does_not_satisfy_inventory() {
+  local home origin hold i item
+  home=$(make_home malformed-archived-decision)
+  origin=sample-malformed-archive
+  mkdir -p "$home/data/$origin"
+  tasks_in "$home" add "$origin" "Ship with malformed archived decision" --kind ship --repo sample --start >/dev/null \
+    || fail "could not create malformed archive origin"
+  write_origin_meta "$home" "$origin" ship
+  hold="$origin-decision-scope"
+  tasks_in "$home" add "$hold" "Title-only archived decision" --kind captain --repo sample \
+    --body "Resolution recorded by fm-decision-hold, but not the structured record." >/dev/null \
+    || fail "could not create malformed captain item"
+  tasks_in "$home" "done" "$hold" >/dev/null \
+    || fail "could not close malformed captain item"
+  i=1
+  while [ "$i" -le 10 ]; do
+    item=$(printf 'sample-malformed-pad-%02d' "$i")
+    tasks_in "$home" add "$item" "Malformed padding $i" --kind ship --repo sample >/dev/null \
+      || fail "could not create malformed archive padding item $i"
+    tasks_in "$home" "done" "$item" >/dev/null \
+      || fail "could not complete malformed archive padding item $i"
+    i=$((i + 1))
+  done
+  fm_write_meta "$home/state/$origin.meta" \
+    "window=firstmate:fm-$origin" \
+    "worktree=$home/projects/missing-$origin" \
+    "project=$home/projects/sample" \
+    "harness=codex" \
+    "kind=ship" \
+    "mode=ship" \
+    "decisions_reviewed=1" \
+    "decision_keys=scope"
+  if run_decisions "$home" verify "$origin" > "$home/malformed-verify.out" 2> "$home/malformed-verify.err"; then
+    fail "malformed archived captain prose satisfied decision verification"
+  fi
+  pass "malformed archived captain prose does not satisfy decision verification"
+}
+
 test_secondmate_hold_stays_in_authoritative_home() {
   local parent mate origin hold json
   parent=$(make_home main-routing)
@@ -558,5 +657,7 @@ test_origin_slug_validation_precedes_path_construction
 test_visual_review_uses_shared_completion_owner
 test_none_inventory_and_resolved_prose_do_not_create_holds
 test_terminal_single_owner_status_decision_does_not_block_empty_inventory
+test_archived_resolved_captain_decision_satisfies_inventory_union
+test_malformed_archive_decision_does_not_satisfy_inventory
 test_secondmate_hold_stays_in_authoritative_home
 test_resolve_matches_quoted_blocked_by_edges
