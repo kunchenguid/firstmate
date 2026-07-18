@@ -130,6 +130,7 @@ test_cursor_lib_install_is_idempotent_and_cleanup_is_last_token_scoped() {
   (
     # shellcheck source=bin/fm-cursor-lib.sh
     . "$ROOT/bin/fm-cursor-lib.sh"
+    # shellcheck disable=SC2030  # HOME is deliberately overridden only inside this subshell
     HOME="$home"
     printf '%s\n' '{"version":1,"hooks":{"stop":[{"command":"user-own-hook.sh","timeout":9,"failClosed":false}]}}' > "$home/.cursor/hooks.json"
     hook_cmd=$(fm_cursor_shell_quote "$hooks_dir/fm-turn-end.sh")
@@ -176,6 +177,7 @@ test_cursor_lib_cleanup_skips_on_held_lock_and_malformed_hooks_json() {
   (
     # shellcheck source=bin/fm-cursor-lib.sh
     . "$ROOT/bin/fm-cursor-lib.sh"
+    # shellcheck disable=SC2030  # HOME is deliberately overridden only inside this subshell
     HOME="$home"
     fm_cursor_write_turnend_hook "$hooks_dir" "$auth_dir" || exit 61
 
