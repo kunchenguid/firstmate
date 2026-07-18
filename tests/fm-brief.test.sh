@@ -71,6 +71,47 @@ test_ship_modes_generate_clean_briefs() {
   pass "fm-brief.sh: no-mistakes/direct-PR/local-only briefs generate cleanly"
 }
 
+test_public_register_only_for_remote_backed_ship_briefs() {
+  local home id brief mode
+  home="$TMP_ROOT/public-register-home"
+  write_registry "$home"
+
+  for mode in "no-mistakes:no-registry-proj" "direct-PR:direct-proj"; do
+    id="brief-public-${mode%%:*}"
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" "${mode##*:}" >/dev/null 2>&1
+    brief="$home/data/$id/brief.md"
+    assert_grep "# Public register" "$brief" \
+      "${mode%%:*} ship brief omitted the public register"
+    assert_grep "Everything leaving the worktree for the remote" "$brief" \
+      "${mode%%:*} public register omitted its remote-output scope"
+    assert_grep "written for the open web in a neutral third-party voice" "$brief" \
+      "${mode%%:*} public register omitted its audience and voice"
+    assert_grep 'Never use the words `captain`, `crewmate`, `firstmate`, `scout`, `brief`, `worktree`' "$brief" \
+      "${mode%%:*} public register omitted forbidden fleet vocabulary"
+    assert_grep 'Attribute direction to "the site owner" or "user feedback"' "$brief" \
+      "${mode%%:*} public register omitted neutral attribution"
+    assert_grep "internal scanning, suppression, validation, or supervision tooling" "$brief" \
+      "${mode%%:*} public register omitted internal-tooling privacy"
+    assert_grep "Never include local machine paths" "$brief" \
+      "${mode%%:*} public register omitted local-path privacy"
+  done
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-public-local local-proj >/dev/null 2>&1
+  assert_no_grep "# Public register" "$home/data/brief-public-local/brief.md" \
+    "local-only ship brief unexpectedly included the public register"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-public-scout direct-proj --scout >/dev/null 2>&1
+  assert_no_grep "# Public register" "$home/data/brief-public-scout/brief.md" \
+    "scout brief unexpectedly included the public register"
+
+  FM_HOME="$home" FM_SECONDMATE_CHARTER=ops \
+    "$ROOT/bin/fm-brief.sh" brief-public-secondmate --secondmate direct-proj >/dev/null 2>&1
+  assert_no_grep "# Public register" "$home/data/brief-public-secondmate/brief.md" \
+    "secondmate charter unexpectedly included the public register"
+
+  pass "fm-brief.sh: public register appears only in remote-backed ship briefs"
+}
+
 test_faster_paths_use_configured_authority_without_stacked_review() {
   local home id brief
   home="$TMP_ROOT/configured-authority-home"
@@ -342,6 +383,7 @@ test_scout_and_secondmate_scaffold() {
 test_script_parses
 test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
+test_public_register_only_for_remote_backed_ship_briefs
 test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
 test_ship_project_memory_wording

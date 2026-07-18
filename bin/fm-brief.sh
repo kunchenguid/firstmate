@@ -326,6 +326,21 @@ EOF
     ;;
 esac
 
+PUBLIC_REGISTER=""
+case "$MODE" in
+  no-mistakes|direct-PR)
+    PUBLIC_REGISTER=$(cat <<'EOF'
+# Public register
+Everything leaving the worktree for the remote - PR titles, PR bodies, PR comments, commit messages, and committed file text - must be written for the open web in a neutral third-party voice.
+Never use the words `captain`, `crewmate`, `firstmate`, `scout`, `brief`, `worktree`, or other fleet or supervisor vocabulary in that text.
+Attribute direction to "the site owner" or "user feedback".
+Never name or describe internal scanning, suppression, validation, or supervision tooling in public text.
+Never include local machine paths.
+EOF
+)
+    ;;
+esac
+
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
 
@@ -333,6 +348,8 @@ You are a crewmate: an autonomous worker agent managed by firstmate. Work on you
 {TASK}
 
 $HERDR_SECTION
+
+$PUBLIC_REGISTER
 
 # Setup
 You are in a disposable git worktree of $REPO, at a detached HEAD on a clean default branch.
