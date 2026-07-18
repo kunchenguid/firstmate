@@ -20,6 +20,8 @@ mkdir -p "$STATE"
 
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-tmux-lib.sh
+. "$SCRIPT_DIR/fm-tmux-lib.sh"
 
 WATCH_LOCK="$STATE/.watch.lock"
 WATCHER_STALE_GRACE=${FM_WATCHER_STALE_GRACE:-${FM_GUARD_GRACE:-300}}
@@ -174,15 +176,18 @@ hash_pane() {
   if command -v md5 >/dev/null 2>&1; then md5 -q; else md5sum | cut -d' ' -f1; fi
 }
 
-window_kind() {
-  local w=$1 meta mw kind
+# window_meta_field: print <field> from the state/*.meta whose window= matches
+# <window>, <default> when the matching meta lacks the field, and "unknown"
+# when no meta records the window.
+window_meta_field() {  # <window> <field> <default>
+  local w=$1 field=$2 default=$3 meta mw val
   for meta in "$STATE"/*.meta; do
     [ -e "$meta" ] || continue
     mw=$(grep '^window=' "$meta" | cut -d= -f2- || true)
     [ "$mw" = "$w" ] || continue
-    kind=$(grep '^kind=' "$meta" | cut -d= -f2- || true)
-    [ -n "$kind" ] || kind=ship
-    echo "$kind"
+    val=$(grep "^$field=" "$meta" | cut -d= -f2- || true)
+    [ -n "$val" ] || val=$default
+    echo "$val"
     return 0
   done
   echo unknown
@@ -319,12 +324,41 @@ EOF
   # signature means the crewmate finished, is waiting, or is wedged. Each distinct
   # stale state is reported once (.stale-* remembers the hash already reported).
   while IFS= read -r w; do
+    key=$(printf '%s' "$w" | tr ':/.' '___')
+    # Codex can block mid-turn on its additional-safety menu. Clear it before
+    # classifying the recorded crewmate pane so the pause never reads as stale.
+    # Only panes whose meta records the codex harness get keys, and at most
+    # FM_SAFETY_AUTOCLEAR_MAX consecutive attempts - verified clears and
+    # unverified attempts (copy-mode absorbing keys, lookalike content) both
+    # count - after which the pane falls through to stale classification
+    # instead of receiving keypresses forever. The counter resets only once
+    # the menu is confirmed gone.
+    if [ "$(window_meta_field "$w" harness unknown)" = codex ]; then
+      clearf="$STATE/.count-safety-$key"
+      cleared=$(cat "$clearf" 2>/dev/null || echo 0)
+      if [ "$cleared" -lt "${FM_SAFETY_AUTOCLEAR_MAX:-5}" ]; then
+        fm_clear_safety_prompt "$w"
+        case $? in
+          0)
+            echo $(( cleared + 1 )) > "$clearf"
+            continue
+            ;;
+          2)
+            echo $(( cleared + 1 )) > "$clearf"
+            ;;
+          *)
+            rm -f "$clearf"
+            ;;
+        esac
+      elif ! tmux capture-pane -p -t "$w" -S -20 2>/dev/null | fm_tmux_safety_prompt_selection >/dev/null; then
+        rm -f "$clearf"
+      fi
+    fi
     # A secondmate idling on its own watcher is healthy. Its parent supervises
     # it through status writes and heartbeats, not pane-idle staleness.
-    [ "$(window_kind "$w")" = secondmate ] && continue
+    [ "$(window_meta_field "$w" kind ship)" = secondmate ] && continue
     tail40=$(tmux capture-pane -p -t "$w" -S -40 2>/dev/null) || continue
     h=$(printf '%s' "$tail40" | hash_pane)
-    key=$(printf '%s' "$w" | tr ':/.' '___')
     hf="$STATE/.hash-$key"
     cf="$STATE/.count-$key"
     sf="$STATE/.stale-$key"

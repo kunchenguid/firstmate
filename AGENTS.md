@@ -180,6 +180,7 @@ That styled capture is internal to the boolean detector only; `fm-peek` and ever
 | Interrupt | single Escape |
 | Skill invocation | `$<skill>` (e.g. `$no-mistakes`); `/<skill>` is claude-only and codex rejects it as "Unrecognized command" |
 
+Firstmate auto-clears Codex's `safety-buffering-prompt` for recorded crewmate panes by choosing `Keep waiting`; set `FM_SAFETY_AUTOCLEAR=0` to disable it.
 Directory trust dialog on first run per repo root ("Do you trust the contents of this directory?") - accept with Enter; the decision persists for the repo, so later worktrees of the same project skip it.
 Resume after exit: `codex resume <session-id>` (printed on quit).
 
