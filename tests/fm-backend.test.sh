@@ -1010,6 +1010,43 @@ test_spawn_default_backend_writes_no_meta_field() {
   pass "fm-spawn.sh: an explicit --backend tmux resolves silently and writes no backend= (missing means tmux)"
 }
 
+test_spawn_human_label_records_sanitized_meta_without_renaming_tmux() {
+  local proj wt data id state config out fb raw expected log
+  proj="$TMP_ROOT/label-project"; wt="$TMP_ROOT/label-wt"; data="$TMP_ROOT/label-data"
+  id="labeltmuxz6"
+  fm_git_worktree "$proj" "$wt" "fm/$id"
+  fb=$(make_spawn_fakebin "$TMP_ROOT/label-fake" "$wt")
+  mkdir -p "$data/$id"; printf 'brief\n' > "$data/$id/brief.md"
+  state="$TMP_ROOT/label-state"; config="$TMP_ROOT/label-config"; log="$TMP_ROOT/label.log"
+  mkdir -p "$state" "$config"
+  raw=$'  #5\tbpi-auth\ncontent  '
+  expected="#5 bpi-auth content"
+
+  out=$(PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" \
+    FM_TMUX_LOG="$log" \
+    "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude --backend tmux --label "$raw" 2>&1)
+  expect_code 0 $? "tmux spawn with --label should succeed"$'\n'"$out"
+  assert_grep "label=$expected" "$state/$id.meta" \
+    "fm-spawn did not record the sanitized human label in meta"
+  assert_contains "$(cat "$log")" $'\x1f''new-window'$'\x1f''-dP'$'\x1f''-F'$'\x1f''#{window_id}'$'\x1f''-t'$'\x1f''firstmate:'$'\x1f''-n'$'\x1f'"fm-$id" \
+    "tmux must retain the stable fm-<id> window name because runtime paths still address windows by name"
+  assert_not_contains "$(cat "$log")" $'\x1f''-n'$'\x1f'"$expected" \
+    "the human label must not replace tmux's name-addressed stable window identity"
+
+  out=$(PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" \
+    FM_TMUX_LOG="$log" \
+    "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude --backend tmux 2>&1)
+  expect_code 0 $? "respawn without --label should reuse label= from existing meta"$'\n'"$out"
+  assert_grep "label=$expected" "$state/$id.meta" \
+    "respawn without --label did not preserve the existing human label"
+  rm -rf "/tmp/fm-$id"
+  pass "fm-spawn.sh --label: records sanitized meta, reuses it on respawn, and leaves tmux's name-addressed fm-<id> identity unchanged"
+}
+
 test_spawn_explicit_backend_flag_beats_autodetect_herdr_env() {
   local proj wt data id state config out fb
   proj="$TMP_ROOT/explicit-backend-project"; wt="$TMP_ROOT/explicit-backend-wt"; data="$TMP_ROOT/explicit-backend-data"
@@ -1089,5 +1126,6 @@ test_spawn_refuses_unknown_backend_flag
 test_spawn_refuses_codex_app_backend_flag
 test_spawn_refuses_unknown_fm_backend_env
 test_spawn_default_backend_writes_no_meta_field
+test_spawn_human_label_records_sanitized_meta_without_renaming_tmux
 test_spawn_explicit_backend_flag_beats_autodetect_herdr_env
 test_spawn_autodetect_nesting_resolves_tmux_silently

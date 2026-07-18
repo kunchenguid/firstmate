@@ -567,6 +567,22 @@ test_create_task_creates_and_parses_ids() {
   pass "fm_backend_herdr_create_task: creates a tab and parses tab_id/pane_id from the JSON response, prunes nothing when no seeded tab id is given"
 }
 
+test_create_task_accepts_sanitized_human_display_label() {
+  local dir log resp fb raw label out
+  dir="$TMP_ROOT/create-human-label"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"tabs":[]}}\n' > "$resp/1.out"
+  printf '{"result":{"tab":{"tab_id":"w1:t8"},"root_pane":{"pane_id":"w1:p8"}}}\n' > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  raw=$'  #5\tbpi-auth\ncontent  '
+  label=$(fm_task_display_label_sanitize "$raw")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task fmtest:w1 "$1" /tmp/proj' "$ROOT" "$label" )
+  [ "$out" = "w1:t8 w1:p8" ] || fail "create_task did not return ids for a human-readable label, got '$out'"
+  assert_contains "$(cat "$log")" $'\x1f''tab'$'\x1f''create'$'\x1f''--workspace'$'\x1f''w1'$'\x1f''--cwd'$'\x1f''/tmp/proj'$'\x1f''--label'$'\x1f''#5 bpi-auth content'$'\x1f''--no-focus' \
+    "create_task did not pass the sanitized human display label as one quoted Herdr argument"
+  pass "fm_backend_herdr_create_task: uses the sanitized human-readable label as the task tab name"
+}
+
 # --- container_ensure / create_task: --no-focus and per-home label ----------
 
 test_container_ensure_creates_with_no_focus_flag() {
@@ -648,13 +664,39 @@ test_list_live_scoped_to_this_homes_workspace_only() {
   printf '{"result":{"panes":[{"pane_id":"w2:p1","tab_id":"w2:t1"}]}}\n' > "$resp/3.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HOME="$home" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_list_live fmtest' "$ROOT" )
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_source herdr; fm_backend_herdr_list_live fmtest' "$ROOT" )
   [ "$out" = $'fmtest:w2:p1\tfm-secondmatetask' ] || fail "list_live should report only this home's own tab, got '$out'"
   assert_contains "$(cat "$log")" $'\x1f''tab'$'\x1f''list'$'\x1f''--workspace'$'\x1f''w2' \
     "list_live did not scope the tab list call to this home's own workspace (w2)"
   assert_not_contains "$(cat "$log")" $'\x1f''tab'$'\x1f''list'$'\x1f''--workspace'$'\x1f''w1' \
     "list_live must never query the primary's (or a sibling secondmate's) workspace"
   pass "fm_backend_herdr_list_live: scoped to this home's own workspace, never a sibling home's"
+}
+
+test_human_label_sanitization_and_list_live_mapping() {
+  local raw sanitized long dir log resp fb out home state meta
+  raw=$'  #5\tbpi-auth\ncontent  '
+  sanitized=$(fm_task_display_label_sanitize "$raw")
+  [ "$sanitized" = "#5 bpi-auth content" ] || fail "human task label whitespace/control sanitization mismatch: '$sanitized'"
+  long=$(printf 'x%.0s' {1..80})
+  [ "$(fm_task_display_label_sanitize "$long" | awk '{print length}')" = 64 ] \
+    || fail "human task labels must be capped at 64 characters"
+
+  dir="$TMP_ROOT/list-live-human-label"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  home="$TMP_ROOT/list-live-human-label-home"; state="$home/state"; mkdir -p "$state"
+  meta="$state/bpi-auth-impl.meta"
+  fm_write_meta "$meta" \
+    "window=fmtest:w1:p2" "backend=herdr" "label=$sanitized" \
+    "herdr_session=fmtest" "herdr_workspace_id=w1" "herdr_tab_id=w1:t2" "herdr_pane_id=w1:p2"
+  printf '{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate"}]}}\n' > "$resp/1.out"
+  printf '{"result":{"tabs":[{"tab_id":"w1:t2","label":"#5 bpi-auth content"}]}}\n' > "$resp/2.out"
+  printf '{"result":{"panes":[{"pane_id":"w1:p2","tab_id":"w1:t2"}]}}\n' > "$resp/3.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_source herdr; fm_backend_herdr_list_live fmtest' "$ROOT" )
+  [ "$out" = $'fmtest:w1:p2\tfm-bpi-auth-impl' ] \
+    || fail "list_live should map the human tab label back to the stable task id through meta, got '$out'"
+  pass "human task labels: control whitespace is sanitized, length is capped, and Herdr list-live recovers fm-<id> through meta"
 }
 
 # --- target parsing, key normalization ---------------------------------------
@@ -2069,9 +2111,11 @@ test_create_task_refuses_when_preexisting_husk_tab_remains
 test_create_task_refuses_when_agent_state_ambiguous
 test_create_task_husk_replacement_creates_before_closing
 test_create_task_creates_and_parses_ids
+test_create_task_accepts_sanitized_human_display_label
 test_create_task_creates_with_no_focus_flag
 test_workspace_find_matches_only_this_homes_own_label
 test_list_live_scoped_to_this_homes_workspace_only
+test_human_label_sanitization_and_list_live_mapping
 test_parse_target
 test_normalize_key
 test_capture_calls_pane_read

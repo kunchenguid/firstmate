@@ -29,7 +29,8 @@ For `--secondmate` launches, secondmate home sync and inherited local-material p
 
 No first-run provisioning is needed beyond having `herdr` and `jq` on `PATH`; firstmate creates the workspace and tab it needs on first spawn.
 
-Watching and attaching: each firstmate home gets its own herdr workspace (the primary uses `firstmate`; each secondmate uses `2ndmate-<secondmate-id>`), with one tab per task inside it, named `fm-<id>`.
+Watching and attaching: each firstmate home gets its own herdr workspace (the primary uses `firstmate`; each secondmate uses `2ndmate-<secondmate-id>`), with one tab per task inside it.
+Tabs use `fm-<id>` by default and use the sanitized human title from `fm-spawn.sh --label <text>` when one is supplied.
 Attach to the selected `HERDR_SESSION` and switch to the workspace for the home you want to watch to see every one of that home's tasks as tabs in one tab bar.
 You do not need to attach for routine supervision: from an active firstmate session, `bin/fm-peek.sh fm-<id>` reads a task's pane without attaching, and `FM_HOME=<this-firstmate-home> bin/fm-send.sh fm-<id> "<text>"` steers it unless `FM_HOME` is already set to the active firstmate home.
 
@@ -68,6 +69,64 @@ P2 established workspace-per-TASK vs. tab-per-task-in-one-shared-workspace and p
 What changed is the container's OWNER: P2 assumed a single firstmate instance per herdr session, so one shared `firstmate` workspace was enough.
 With secondmates now spawning their own herdr tasks, jamming every home's tabs into that one shared workspace made a captain's tab bar an unlabeled mix of primary and secondmate work with no visual way to tell them apart.
 Workspace-per-HOME fixes that while keeping tab-per-task's original human-watching win intact **within** each home: attaching to a home's own workspace (`herdr`, then switching to its space) still shows every one of *that home's* tasks as a tab in one tab bar, switchable with `ctrl+b <n>`; the ADDITIONAL win is that a captain juggling several homes on one herdr session now sees them as clearly labeled, separate spaces in herdr's spaces sidebar instead of one undifferentiated pile.
+
+### Human-readable task tab labels
+
+`bin/fm-spawn.sh --label <text>` is an optional display label for a task, for example `--label "#5 bpi-auth"`.
+The `fm-spawn.sh` header and `--help` output own the exact normalization and validation contract, and `fm_task_display_label_sanitize` in `bin/fm-backend.sh` is its shared implementation.
+The sanitized value is recorded as `label=` in `state/<id>.meta`, and a respawn with no explicit flag reuses that field so Herdr's duplicate-husk replacement finds the same visible tab.
+Without `--label`, Herdr keeps the existing `fm-<id>` tab label byte-for-byte.
+The task id, meta filename, `window=<session>:<pane-id>`, and backend ids remain the stable operational identity in either case.
+Teardown is unchanged because `fm_backend_herdr_kill` closes the recorded pane id, whose one-pane tab closes with it.
+`fm_backend_herdr_list_live` maps a human-labeled tab back to `fm-<id>` through the matching `label=` and Herdr identity fields in meta, while retaining the legacy direct `fm-<id>` path.
+An unmapped human-labeled tab is skipped rather than guessed because its display text does not necessarily contain the task id.
+The workspace label remains the deliberate per-home `firstmate` or `2ndmate-<id>` identity and is not dynamically relabeled.
+
+The accepted-label probe ran on 2026-07-18 against Herdr 0.7.3, protocol 16, in the guarded non-default lab session `fm-lab-herdr-task-label-56658-32126`.
+Every call below went through `/Users/daniel.roeding/kun-agent-workspace/bin/fm-herdr-lab.sh run`, and the helper's teardown verified the live `default` session was byte-identical to its pre-provision tripwire.
+These are the exact commands and compact outputs:
+
+```text
+$ "$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" status --json | jq -c '{client_version:.client.version,client_protocol:.client.protocol,server_version:.server.version,server_session:.server.session}'
+{"client_version":"0.7.3","client_protocol":16,"server_version":"0.7.3","server_session":"fm-lab-herdr-task-label-56658-32126"}
+
+$ WS_OUT=$("$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" workspace create --cwd "$PWD" --label fm-label-evidence --no-focus); WS_ID=$(printf '%s' "$WS_OUT" | jq -r '.result.workspace.workspace_id'); printf 'workspace=%s\n' "$WS_ID"
+workspace=w1
+
+$ "$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" tab create --workspace w1 --cwd "$PWD" --label '#1 bpi-auth' --no-focus | jq -c '{tab_id:.result.tab.tab_id,label:.result.tab.label}'
+{"tab_id":"w1:t2","label":"#1 bpi-auth"}
+
+$ "$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" tab create --workspace w1 --cwd "$PWD" --label '#2 auth/content: rollout' --no-focus | jq -c '{tab_id:.result.tab.tab_id,label:.result.tab.label}'
+{"tab_id":"w1:t3","label":"#2 auth/content: rollout"}
+
+$ "$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" tab create --workspace w1 --cwd "$PWD" --label $'#3 tab\tline\nbreak' --no-focus | jq -c '{tab_id:.result.tab.tab_id,label:.result.tab.label}'
+{"tab_id":"w1:t4","label":"#3 tab\tline\nbreak"}
+
+$ LONG_LABEL="#4 $(printf 'readable-%.0s' {1..20})"; "$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" tab create --workspace w1 --cwd "$PWD" --label "$LONG_LABEL" --no-focus | jq -c '{tab_id:.result.tab.tab_id,label_bytes:(.result.tab.label|utf8bytelength)}'
+{"tab_id":"w1:t5","label_bytes":183}
+
+$ "$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" tab list --workspace w1 | jq -c '[.result.tabs[]|.label]'
+["1","#1 bpi-auth","#2 auth/content: rollout","#3 tab\tline\nbreak","#4 readable-readable-readable-readable-readable-readable-readable-readable-readable-readable-readable-readable-readable-readable-readable-readable-readable-readable-readable-readable-"]
+```
+
+Herdr therefore accepts the requested `#` prefix, spaces, slash, colon, embedded tab/newline controls, and at least 183 bytes without truncation.
+Firstmate preserves ordinary printable text but normalizes control whitespace and limits length because those accepted values are unsafe for line-oriented meta and unhelpful in a tab bar.
+
+The other supported backends were inspected on 2026-07-18 before being marked not applicable for this display-only change.
+The exact integration-surface query and output were:
+
+```text
+$ rg -n 'persisted window= handle|fm_backend_zellij_scoped_title\(|fm_backend_cmux_scoped_title\(|orca terminal create --worktree' bin/fm-spawn.sh bin/backends/tmux.sh bin/backends/zellij.sh bin/backends/cmux.sh bin/backends/orca.sh
+bin/backends/zellij.sh:154:fm_backend_zellij_scoped_title() {  # <fm-task-label>
+bin/backends/orca.sh:160:  out=$(orca terminal create --worktree "id:$worktree_id" --title "$title" --json) || return 1
+bin/fm-spawn.sh:724:    # rename-critical worktree-detection steps below; the persisted window= handle
+bin/backends/cmux.sh:318:fm_backend_cmux_scoped_title() {  # <fm-task-label>
+```
+
+- tmux is not changed because `window=` remains a `session:fm-<id>` name target after the spawn-time stable window id is used, and the ad hoc selector path also searches `#{window_name}`.
+- Zellij is not changed because its home-scoped title is an ownership check used by send, liveness, recovery, and teardown, rather than a separate display field.
+- cmux is not changed because its workspace title is the ownership and relaunch-recovery key used by `fm_backend_cmux_target_ready` and `fm_backend_cmux_list_live`.
+- Orca is not changed because `worktree create` may return an implicit terminal before the adapter reaches its separately titled `terminal create` fallback, and the integration has no uniform rename call.
 
 ### Label derivation (stable, derived from the home itself)
 
@@ -165,6 +224,7 @@ The pane id itself contains a colon, so the adapter splits on the FIRST colon on
 This mirrors tmux's `session:window` target shape closely enough that `fm_backend_resolve_selector` (in `bin/fm-backend.sh`) needed no backend-specific logic at all - it already just returns a task's recorded `window=` value verbatim.
 Task-selector resolution is the shared contract owned by [`docs/configuration.md`](configuration.md) ("Runtime backend").
 For a bare unknown non-`fm-` name, Herdr retains the legacy tmux live-window fallback.
+When `fm-spawn.sh --label` is present, the shared base task meta also records its sanitized `label=` value; the `fm-spawn.sh` header and help are the single owner of that field's normalization and reuse mechanics.
 
 Herdr tasks additionally record:
 
@@ -189,7 +249,7 @@ Herdr tasks additionally record:
 | Busy state | `herdr agent get <pane>` -> `.result.agent.agent_status` | Verified live against an interactive `claude` session: reports `working` while generating, `done` once idle. Mapped: `working` -> busy; `idle`/`done` -> idle; `blocked` -> idle (surfaced like a stale pane, not suppressed as busy - a blocked agent is stuck waiting on the human, not grinding); anything else -> unknown (the cue for the shared tail-regex fallback). |
 | Kill | `herdr pane close <pane>` | Closing a tab's only (root) pane also closes the tab - no separate tab-close call needed for this adapter's one-pane-per-tab shape. Best-effort: closing an already-closed pane exits non-zero, matching tmux's `kill-window \|\| true` contract. Teardown itself only ever closes the task's own pane/tab, never the workspace - but closing a workspace's LAST tab (verified real-herdr behavior) deletes the workspace as a side effect, so a home's own workspace persists only while at least one task tab remains; see "Workspace lifecycle" above. |
 | Default-tab prune (create_task, first task in a fresh workspace only) | `herdr workspace create`'s own response (`.result.tab.tab_id`) identifies the seeded tab; `herdr tab list` + `herdr agent get <pane>` re-verify it; `herdr pane close <pane>` closes exactly that tab id | `herdr workspace create` seeds the new workspace with one auto-created default tab (label `1`, id captured straight from the create response) firstmate never uses. `fm_backend_herdr_create_task` closes EXACTLY that captured tab id right after creating the first real task tab in a freshly created workspace - never right after `workspace create` itself (see Kill row), and never re-derived from a tab's label or the workspace's tab count at create_task time (see "Default-tab prune" above for the created-vs-adopted safety gate and the 2026-07-02 incident it fixes). Best-effort; an ADOPTED workspace (not freshly created by this same call) is never a prune candidate at all. |
-| Recovery / list-live | `herdr tab list --workspace <id>`, filter labels starting with `fm-` | Label-based, never trusts a stored id blindly - see "ID stability" below. `<id>` is always THIS home's own workspace (`fm_backend_herdr_workspace_find`), so recovery never sees a sibling home's tabs. |
+| Recovery / list-live | `herdr tab list --workspace <id>`, then direct `fm-<id>` recognition or `label=` metadata mapping | Label-based, with the recorded tab id used only as the strongest disambiguator for a human label and a unique matching meta label as the restart fallback. `<id>` is always THIS home's own workspace (`fm_backend_herdr_workspace_find`), so recovery never sees a sibling home's tabs. |
 | Workspace create / tab create (focus) | `herdr workspace create --no-focus`, `herdr tab create --no-focus` | Verified: neither focuses by default once a workspace already exists in the session, matching pre-P3 (flagless) behavior; `--no-focus` is passed anyway for defense in depth, since the very first workspace ever created in a brand-new session focuses regardless of the flag. `--focus` was separately verified to reliably focus, confirming the flag has real effect. |
 | Session targeting for DESTRUCTIVE calls | `herdr session stop <name> --session <name> --json`, then `herdr session delete <name> --session <name> --json`; never `herdr server stop` | Owned by `bin/fm-herdr-lab.sh` (which `tests/herdr-test-safety.sh` sources), re-querying `herdr session list --json` before every destructive call. See "Session targeting" below - `HERDR_SESSION` alone is not reliably honored once another herdr server is already running on the machine. |
 
@@ -447,7 +507,7 @@ The adapter still implements label-based recovery (`fm_backend_herdr_list_live`)
 
 ## Respawn idempotency: a restored task tab is a husk, not a duplicate
 
-A restart's other consequence (the previous section's "what does NOT survive") used to make every fleet respawn after it a manual chore: a restored `fm-<id>` tab comes back alive but with a fresh shell process and no registered agent (`agent_status` reset to unknown, `agent get` reporting `agent_not_found`) - or, if the pane's own process failed to restart at all, structurally gone (`pane get` reporting `pane_not_found`).
+A restart's other consequence (the previous section's "what does NOT survive") used to make every fleet respawn after it a manual chore: a restored task tab, whether labeled `fm-<id>` or with a human title, comes back alive but with a fresh shell process and no registered agent (`agent_status` reset to unknown, `agent get` reporting `agent_not_found`) - or, if the pane's own process failed to restart at all, structurally gone (`pane get` reporting `pane_not_found`).
 Before this fix, `fm_backend_herdr_create_task`'s duplicate-label guard treated either shape identically to a genuinely live duplicate and refused unconditionally, so recovering a fleet after a real herdr server restart (or, worse, a full reboot) meant closing every husk pane by hand before firstmate could spawn into it again - this reproduced in production on 2026-07-03.
 
 The guard is now husk-aware.

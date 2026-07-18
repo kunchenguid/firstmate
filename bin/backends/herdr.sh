@@ -29,10 +29,10 @@
 # function has no herdr-specific logic; it just returns meta's window=
 # verbatim).
 #
-# Recovery/orphan discovery (ids may not deterministically match live state
-# after a server restart in a differently-configured session; see the
-# verification doc) uses LABEL matching (fm-<id> tab labels), never trusts a
-# stored pane id blindly: fm_backend_herdr_list_live.
+# Recovery/orphan discovery uses a legacy fm-<id> tab label directly or maps a
+# human display label back through state/<id>.meta, with recorded ids used only
+# as disambiguators: fm_backend_herdr_list_live and docs/herdr-backend.md
+# "Human-readable task tab labels".
 #
 # Requires: herdr (CLI + socket), jq (JSON parsing). Bootstrap detects these
 # through fm_backend_required_tools only when herdr is the resolved backend;
@@ -1169,28 +1169,60 @@ EOF
   return 1
 }
 
-# fm_backend_herdr_list_live: recovery/orphan discovery. Lists every tab whose
-# label looks like a firstmate task window (fm-<id>) in <session>'s, THIS
+# fm_backend_herdr_list_live: recovery/orphan discovery in <session>'s, THIS
 # HOME'S OWN workspace (fm_backend_herdr_workspace_label - never another
-# home's), by LABEL - never by trusting a stored pane id, since ids are not
-# guaranteed stable across every server lifecycle (see herdr-verification-p2.md
-# "ID stability"). A caller running as a given home (e.g. a secondmate
+# home's). Legacy tabs identify themselves directly with an fm-<id> label.
+# Human-labeled tabs are mapped back to that same stable identity through the
+# label= plus herdr_session=/workspace=/tab= fields in state/<id>.meta; an
+# unmapped human label is skipped because its visible text alone cannot safely
+# reconstruct an id. A caller running as a given home (e.g. a secondmate
 # recovering its own in-flight work) naturally scopes to that home's own
 # workspace because FM_HOME already names it - no glue needed, unlike the
 # primary-spawns-a-secondmate path in fm-spawn.sh. Read-only: a session/
 # workspace that does not exist yet simply lists nothing. One
-# "<session>:<pane_id>\t<label>" line per live task tab.
+# "<session>:<pane_id>\t<fm-id>" line per identifiable live task tab.
 fm_backend_herdr_list_live() {  # <session>
-  local session=$1 wsid tabs tab_id label pane_id
+  local session=$1 wsid tabs tab_id label pane_id state meta backend meta_label meta_session meta_wsid meta_tab id stable candidate matches
   wsid=$(fm_backend_herdr_workspace_find "$session") || return 0
   [ -n "$wsid" ] || return 0
   tabs=$(fm_backend_herdr_cli "$session" tab list --workspace "$wsid" 2>/dev/null) || return 0
+  state=${FM_STATE_OVERRIDE:-$FM_HOME/state}
   while IFS=$'\t' read -r tab_id label; do
     [ -n "$tab_id" ] || continue
+    stable=
+    candidate=
+    matches=0
+    for meta in "$state"/*.meta; do
+      [ -f "$meta" ] || continue
+      backend=$(fm_backend_of_meta "$meta")
+      [ "$backend" = herdr ] || continue
+      meta_label=$(fm_meta_get "$meta" label)
+      [ -n "$meta_label" ] && [ "$meta_label" = "$label" ] || continue
+      meta_session=$(fm_meta_get "$meta" herdr_session)
+      meta_wsid=$(fm_meta_get "$meta" herdr_workspace_id)
+      [ "$meta_session" = "$session" ] && [ "$meta_wsid" = "$wsid" ] || continue
+      id=$(basename "$meta" .meta)
+      meta_tab=$(fm_meta_get "$meta" herdr_tab_id)
+      if [ "$meta_tab" = "$tab_id" ]; then
+        stable="fm-$id"
+        break
+      fi
+      candidate="fm-$id"
+      matches=$((matches + 1))
+    done
+    if [ -z "$stable" ] && [ "$matches" -eq 1 ]; then
+      stable=$candidate
+    fi
+    if [ -z "$stable" ]; then
+      case "$label" in
+        fm-*) stable=$label ;;
+        *) continue ;;
+      esac
+    fi
     pane_id=$(fm_backend_herdr_pane_for_tab "$session" "$wsid" "$tab_id") || continue
     [ -n "$pane_id" ] || continue
-    printf '%s:%s\t%s\n' "$session" "$pane_id" "$label"
-  done < <(printf '%s' "$tabs" | jq -r '.result.tabs[]? | select(.label | startswith("fm-")) | "\(.tab_id)\t\(.label)"' 2>/dev/null)
+    printf '%s:%s\t%s\n' "$session" "$pane_id" "$stable"
+  done < <(printf '%s' "$tabs" | jq -r '.result.tabs[]? | "\(.tab_id)\t\(.label)"' 2>/dev/null)
 }
 
 # --- native event push: pane.agent_status_changed subscriber -----------------
