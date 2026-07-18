@@ -92,6 +92,15 @@ reply_text() {
   return "$rc"
 }
 
+# Durable action record failed: tell the captain, keep the inbox file so a
+# later sweep retries, and report a machine-readable error line.
+action_write_failed() {
+  local uid=$1 verb=$2
+  fmt_audit_append respond error "update_id=$uid verb=$verb action-write-failed"
+  reply_text "Error: could not record the $verb command; it was NOT applied. It stays queued for retry - or handle it from the desk." || true
+  printf 'error %s action-write-failed\n' "$uid"
+}
+
 process_one() {
   local file=$1
   local base uid text msg_date parsed verb key reason url fp lookup task note
@@ -195,10 +204,12 @@ process_one() {
           ;;
       esac
       if [ "$verb" = approve ]; then
-        fmt_action_write "$uid" approve "$key" "$task" >/dev/null || true
+        fmt_action_write "$uid" approve "$key" "$task" >/dev/null \
+          || { action_write_failed "$uid" approve; return 0; }
         reply_text "Approve recorded for key '$key' (task $task). Firstmate will apply it." || true
       else
-        fmt_action_write "$uid" deny "$key" "$task" "$reason" >/dev/null || true
+        fmt_action_write "$uid" deny "$key" "$task" "$reason" >/dev/null \
+          || { action_write_failed "$uid" deny; return 0; }
         if [ -n "$reason" ]; then
           reply_text "Deny recorded for key '$key' (task $task): $reason" || true
         else
@@ -234,7 +245,8 @@ process_one() {
         printf 'refused %s not-green\n' "$uid"
         return 0
       fi
-      fmt_action_write "$uid" merge "$url" >/dev/null || true
+      fmt_action_write "$uid" merge "$url" >/dev/null \
+        || { action_write_failed "$uid" merge; return 0; }
       reply_text "Merge authorized for $url (green, previously notified). Firstmate will merge." || true
       fmt_dedupe_mark "$fp"
       fmt_audit_append respond ok "update_id=$uid verb=merge url=$url"
