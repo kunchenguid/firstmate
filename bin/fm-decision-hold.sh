@@ -212,12 +212,40 @@ tasks_archive_path() {
 }
 
 archive_header_kind() {
-  local header=$1 kind
-  local suffix_re='[[:space:]]*\(repo:[[:space:]]*[^()]+\)[[:space:]]*\(kind:[[:space:]]*([^()]+)\)[[:space:]]*\((done|merged|reported)[[:space:]]+[0-9]{4}-[0-9]{2}-[0-9]{2}\)([[:space:]]*\(hold:[[:space:]]*[^()]+\))?([[:space:]]*\(hold-kind:[[:space:]]*(captain|external|load|parked|future)\))?([[:space:]]*\(hold-until:[[:space:]]*[0-9]{4}-[0-9]{2}-[0-9]{2}\))?[[:space:]]*$'
-  [[ $header =~ $suffix_re ]] || return 1
-  kind=${BASH_REMATCH[1]}
-  kind=${kind#"${kind%%[![:space:]]*}"}
-  kind=${kind%"${kind##*[![:space:]]}"}
+  local header=$1 remaining tag prefix recognized kind='' kind_seen=0 completion=0
+  local trailing_tag_re='^(.*)\(([^()]*)\)[[:space:]]*$'
+  local repo_re='^([^()]*\+[[:space:]]*)?repo:[[:space:]]*[^()]+$'
+  local kind_re='^kind:[[:space:]]*([^()]+)$'
+  local priority_re='^priority:[[:space:]]*[0-4]$'
+  local since_re='^since[[:space:]]+[0-9]{4}-[0-9]{2}-[0-9]{2}$'
+  local completion_re='^(merged|reported|done|closed)[[:space:]]+[0-9]{4}-[0-9]{2}-[0-9]{2}$'
+  local hold_re='^hold:[[:space:]]*[^()]+$'
+  local hold_kind_re='^hold-kind:[[:space:]]*(captain|external|load|parked|future)$'
+  local hold_until_re='^hold-until:[[:space:]]*[0-9]{4}-[0-9]{2}-[0-9]{2}$'
+  remaining=$header
+  while [[ $remaining =~ $trailing_tag_re ]]; do
+    prefix=${BASH_REMATCH[1]}
+    tag=${BASH_REMATCH[2]}
+    recognized=1
+    if [[ $tag =~ $repo_re ]] || [[ $tag =~ $priority_re ]] || [[ $tag =~ $since_re ]] \
+      || [[ $tag =~ $hold_re ]] || [[ $tag =~ $hold_kind_re ]] || [[ $tag =~ $hold_until_re ]]; then
+      :
+    elif [[ $tag =~ $kind_re ]]; then
+      if [ "$kind_seen" -eq 0 ]; then
+        kind=${BASH_REMATCH[1]}
+        kind=${kind#"${kind%%[![:space:]]*}"}
+        kind=${kind%"${kind##*[![:space:]]}"}
+        kind_seen=1
+      fi
+    elif [[ $tag =~ $completion_re ]]; then
+      completion=1
+    else
+      recognized=0
+    fi
+    [ "$recognized" -eq 1 ] || break
+    remaining=$prefix
+  done
+  [ "$completion" -eq 1 ] || return 1
   [ -n "$kind" ] || return 1
   printf '%s\n' "$kind"
 }
@@ -299,9 +327,21 @@ archive_task_show() {  # <id>
   printf '  body: "%s"\n' "$body"
 }
 
+active_identity_has_no_archive_collision() {  # <id>
+  local status
+  if archive_task_show "$1" >/dev/null; then
+    printf 'fm-decision-hold: identity %s exists in both the active backlog and decision archive\n' "$1" >&2
+    return 2
+  else
+    status=$?
+  fi
+  [ "$status" -eq 1 ] || return "$status"
+}
+
 task_show_durable() {  # <id>
   local show status
   if show=$(task_show "$1"); then
+    active_identity_has_no_archive_collision "$1" || return $?
     printf '%s\n' "$show"
     return 0
   else
@@ -532,6 +572,8 @@ command_hold() {
   origin_exists_here "$origin" || fail "origin $origin is not owned by the active home $FM_HOME"
   id=$(hold_id "$origin" "$key")
   if show=$(task_show "$id"); then
+    active_identity_has_no_archive_collision "$id" \
+      || fail "could not read durable backlog identity $id"
     state=$(show_field "$show" state)
     kind=$(show_field "$show" kind)
     existing_title=$(show_field "$show" title)

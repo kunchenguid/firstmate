@@ -553,6 +553,70 @@ EOF
   pass "archived completion verbs still require a done task state"
 }
 
+test_archived_resolved_decision_accepts_priority_and_legacy_closed_metadata() {
+  local home origin hold
+  home=$(make_home archived-priority-closed-decision)
+  origin=sample-priority-closed-archive
+  hold="$origin-decision-scope"
+  write_origin_meta "$home" "$origin" ship
+  printf 'decisions_reviewed=1\ndecision_keys=scope\n' >> "$home/state/$origin.meta"
+  cat > "$home/data/done-archive.md" <<EOF
+## Archived 2026-07-18
+- [x] $hold - Priority decision (repo: sample) (kind: captain) (priority: 2) (closed 2026-07-18)
+  Resolution recorded by fm-decision-hold.
+  Decision digest: 0000000000000000000000000000000000000000000000000000000000000000
+  Routed identities: sample-work
+
+  Captain decision:
+  Use the sample scope.
+
+  Routed work:
+  - sample-work
+EOF
+  run_decisions "$home" complete "$origin" scope >/dev/null \
+    || fail "archived priority and legacy closed metadata did not satisfy inventory completion"
+  run_decisions "$home" verify "$origin" >/dev/null \
+    || fail "archived priority and legacy closed metadata did not satisfy inventory verification"
+  pass "archived decisions accept priority and legacy closed metadata"
+}
+
+test_active_and_archived_identity_collision_fails_closed() {
+  local home origin hold
+  home=$(make_home active-archived-identity-collision)
+  origin=sample-active-archive-collision
+  write_origin_meta "$home" "$origin" ship
+  hold=$(run_decisions "$home" hold "$origin" scope \
+    --title "Choose the sample scope" --reason "captain sample scope pending" --repo sample) \
+    || fail "could not create active collision fixture"
+  printf 'decisions_reviewed=1\ndecision_keys=scope\n' >> "$home/state/$origin.meta"
+  cat > "$home/data/done-archive.md" <<EOF
+## Archived 2026-07-18
+- [x] $hold - Older resolved scope (repo: sample) (kind: captain) (done 2026-07-18)
+  Resolution recorded by fm-decision-hold.
+  Decision digest: 0000000000000000000000000000000000000000000000000000000000000000
+  Routed identities: sample-work
+
+  Captain decision:
+  Use the older sample scope.
+
+  Routed work:
+  - sample-work
+EOF
+  if run_decisions "$home" complete "$origin" scope \
+    > "$home/collision-complete.out" 2> "$home/collision-complete.err"; then
+    fail "active identity masked conflicting archived history during completion"
+  fi
+  if run_decisions "$home" verify "$origin" \
+    > "$home/collision-verify.out" 2> "$home/collision-verify.err"; then
+    fail "active identity masked conflicting archived history during verification"
+  fi
+  assert_grep "exists in both the active backlog and decision archive" "$home/collision-complete.err" \
+    "completion did not report the stable identity collision"
+  assert_grep "exists in both the active backlog and decision archive" "$home/collision-verify.err" \
+    "verification did not report the stable identity collision"
+  pass "active and archived stable identity collisions fail closed"
+}
+
 test_malformed_archive_decision_does_not_satisfy_inventory() {
   local home origin hold blank_hold i item
   home=$(make_home malformed-archived-decision)
@@ -991,6 +1055,32 @@ EOF
   pass "conflicting archived kind tags fail closed"
 }
 
+test_archived_rightmost_empty_kind_fails_closed() {
+  local home origin hold
+  home=$(make_home archived-empty-kind-tag)
+  origin=sample-empty-kind-tag
+  hold="$origin-decision-scope"
+  write_origin_meta "$home" "$origin" ship
+  printf 'decisions_reviewed=1\ndecision_keys=scope\n' >> "$home/state/$origin.meta"
+  cat > "$home/data/done-archive.md" <<EOF
+## Archived 2026-07-18
+- [x] $hold - Empty kind metadata (repo: sample) (kind: captain) (kind:  ) (done 2026-07-18)
+  Resolution recorded by fm-decision-hold.
+  Decision digest: 0000000000000000000000000000000000000000000000000000000000000000
+  Routed identities: sample-work
+
+  Captain decision:
+  Use the sample scope.
+
+  Routed work:
+  - sample-work
+EOF
+  if run_decisions "$home" verify "$origin" > "$home/empty-kind.out" 2> "$home/empty-kind.err"; then
+    fail "an earlier captain kind overrode the rightmost empty kind tag"
+  fi
+  pass "rightmost empty archived kind metadata fails closed"
+}
+
 test_archived_kind_tag_spacing_fails_closed() {
   local home origin hold
   home=$(make_home archived-kind-tag-spacing)
@@ -1278,6 +1368,8 @@ test_terminal_single_owner_status_decision_does_not_block_empty_inventory
 test_archived_resolved_captain_decision_satisfies_inventory_union
 test_archived_resolved_decision_accepts_all_completion_verbs
 test_archived_completion_verb_still_requires_done_state
+test_archived_resolved_decision_accepts_priority_and_legacy_closed_metadata
+test_active_and_archived_identity_collision_fails_closed
 test_malformed_archive_decision_does_not_satisfy_inventory
 test_archived_ship_title_cannot_impersonate_captain_kind
 test_archived_resolution_requires_matching_routed_identities
@@ -1292,6 +1384,7 @@ test_archived_resolution_requires_routed_work_newline
 test_archived_resolution_requires_tasks_axi_ids
 test_archive_config_accepts_no_space_assignment
 test_archived_conflicting_kind_tags_fail_closed
+test_archived_rightmost_empty_kind_fails_closed
 test_archived_kind_tag_spacing_fails_closed
 test_archived_kind_requires_contiguous_trailing_metadata
 test_duplicate_archived_identity_fails_closed
