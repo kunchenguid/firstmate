@@ -108,10 +108,18 @@ if [ -z "$trimmed" ]; then
   exit 1
 fi
 
-# Telegram hard limit (portable truncation; bash 3.2 has no ${var:0:n}).
+# Telegram hard limit is 4096 characters. jq --rawfile counts and slices whole
+# codepoints regardless of locale, so multibyte UTF-8 is never split (jq's raw
+# stdin reader can corrupt characters on its internal buffer boundaries).
 if [ "${#TEXT}" -gt 4096 ]; then
-  TEXT=$(printf '%s' "$TEXT" | head -c 4090)
-  TEXT="${TEXT}..."
+  command -v jq >/dev/null 2>&1 || { echo "error: jq required" >&2; exit 3; }
+  TRUNC_FILE=$(mktemp "${TMPDIR:-/tmp}/fm-telegram-trunc.XXXXXX") \
+    || { echo "error: cannot truncate message" >&2; exit 3; }
+  printf '%s' "$TEXT" > "$TRUNC_FILE"
+  TEXT=$(jq -rn --rawfile text "$TRUNC_FILE" \
+    '$text | if length > 4096 then .[:4093] + "..." else . end') \
+    || { rm -f "$TRUNC_FILE"; echo "error: cannot truncate message" >&2; exit 3; }
+  rm -f "$TRUNC_FILE"
 fi
 
 if fmt_secretish "$TEXT"; then
