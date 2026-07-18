@@ -186,10 +186,26 @@ tasks_config_value() {  # <key>
 }
 
 tasks_config_path() {  # <path>
+  local path=$1 part normalized='' cwd
+  local -a parts
   case "$1" in
-    /*) printf '%s\n' "$1" ;;
-    *) printf '%s/%s\n' "$FM_HOME" "$1" ;;
+    /*) printf '%s\n' "$1"; return 0 ;;
+    *) cwd=$(cd "$FM_HOME" && pwd -P); path="$cwd/$1" ;;
   esac
+  IFS=/ read -r -a parts <<< "$path"
+  for part in "${parts[@]}"; do
+    case "$part" in
+      ''|.) continue ;;
+      ..)
+        case "$normalized" in
+          ''|/) normalized=/ ;;
+          *) normalized=${normalized%/*}; [ -n "$normalized" ] || normalized=/ ;;
+        esac
+        ;;
+      *) normalized="${normalized%/}/$part" ;;
+    esac
+  done
+  printf '%s\n' "${normalized:-/}"
 }
 
 tasks_archive_path() {
@@ -266,13 +282,29 @@ toon_escape_line() {
   printf '%s\n' "$output"
 }
 
+archive_path_absence_confirmed() {
+  local path=$1 parent
+  while [ ! -e "$path" ]; do
+    [ ! -L "$path" ] || return 1
+    parent=$(dirname "$path")
+    [ "$parent" != "$path" ] || return 1
+    path=$parent
+  done
+  [ -d "$path" ] && [ -x "$path" ]
+}
+
 archive_task_show() {  # <id>
   local id=$1 archive match_count=0 malformed=0 capture=0 header='' body='' pending_blanks=''
   local line content candidate candidate_state kind state
   local done_prefix_re='^- \[x\] ([A-Za-z0-9][A-Za-z0-9._-]*)(.*)$'
   local queued_prefix_re='^- \[ \] ([A-Za-z0-9][A-Za-z0-9._-]*)(.*)$'
+  local legacy_prefix_re='^- \*\*([A-Za-z0-9][A-Za-z0-9._-]*)\*\*(.*)$'
   archive=$(tasks_archive_path)
-  [ -e "$archive" ] || return 1
+  if [ ! -e "$archive" ]; then
+    archive_path_absence_confirmed "$archive" && return 1
+    printf 'fm-decision-hold: could not read decision archive %s\n' "$archive" >&2
+    return 2
+  fi
   if [ ! -f "$archive" ] || [ ! -r "$archive" ]; then
     printf 'fm-decision-hold: could not read decision archive %s\n' "$archive" >&2
     return 2
@@ -291,6 +323,9 @@ archive_task_show() {  # <id>
     elif [[ $line =~ $queued_prefix_re ]]; then
       candidate=${BASH_REMATCH[1]}
       candidate_state=queued
+    elif [[ $line =~ $legacy_prefix_re ]]; then
+      candidate=${BASH_REMATCH[1]}
+      candidate_state=legacy
     fi
     if [ "$candidate" = "$id" ]; then
       match_count=$((match_count + 1))

@@ -935,6 +935,152 @@ test_unreadable_archive_refuses_identity_recreation() {
   pass "unreadable archives cannot be mistaken for absent identities"
 }
 
+test_unresolvable_archive_paths_refuse_identity_recreation() {
+  local home origin hold sealed_home sealed_origin sealed_hold
+  home=$(make_home dangling-decision-archive)
+  origin=sample-dangling-archive
+  hold="$origin-decision-scope"
+  write_origin_meta "$home" "$origin" ship
+  ln -s missing-done-archive.md "$home/data/done-archive.md"
+  if run_decisions "$home" hold "$origin" scope \
+    --title "Choose the sample scope" --reason "captain sample scope pending" --repo sample \
+    > "$home/dangling-hold.out" 2> "$home/dangling-hold.err"; then
+    fail "dangling archive symlink allowed stable hold recreation"
+  fi
+  assert_no_grep "^- \[ \] $hold -" "$home/data/backlog.md" \
+    "dangling archive symlink created a replacement active hold"
+  assert_grep "could not read archived backlog identity $hold" "$home/dangling-hold.err" \
+    "hold creation treated a dangling archive symlink as an absent identity"
+
+  sealed_home=$(make_home inaccessible-decision-archive)
+  sealed_origin=sample-inaccessible-archive
+  sealed_hold="$sealed_origin-decision-scope"
+  write_origin_meta "$sealed_home" "$sealed_origin" ship
+  mkdir "$sealed_home/data/sealed"
+  touch "$sealed_home/data/sealed/done-archive.md"
+  sed -i.bak 's|archive = "data/done-archive.md"|archive = "data/sealed/done-archive.md"|' \
+    "$sealed_home/.tasks.toml"
+  rm "$sealed_home/.tasks.toml.bak"
+  chmod 000 "$sealed_home/data/sealed"
+  if run_decisions "$sealed_home" hold "$sealed_origin" scope \
+    --title "Choose the sample scope" --reason "captain sample scope pending" --repo sample \
+    > "$sealed_home/inaccessible-hold.out" 2> "$sealed_home/inaccessible-hold.err"; then
+    chmod 700 "$sealed_home/data/sealed"
+    fail "inaccessible archive path allowed stable hold recreation"
+  fi
+  chmod 700 "$sealed_home/data/sealed"
+  assert_no_grep "^- \[ \] $sealed_hold -" "$sealed_home/data/backlog.md" \
+    "inaccessible archive path created a replacement active hold"
+  assert_grep "could not read archived backlog identity $sealed_hold" \
+    "$sealed_home/inaccessible-hold.err" \
+    "hold creation treated an inaccessible archive path as an absent identity"
+  pass "unresolvable archive paths cannot be mistaken for absent identities"
+}
+
+test_legacy_archived_identity_refuses_hold_recreation() {
+  local home origin hold
+  home=$(make_home legacy-archived-identity)
+  origin=sample-legacy-archive
+  hold="$origin-decision-scope"
+  write_origin_meta "$home" "$origin" ship
+  cat > "$home/data/done-archive.md" <<EOF
+## Archived 2026-07-18
+- **$hold** - Legacy unresolved decision (repo: sample) (kind: captain)
+EOF
+  if run_decisions "$home" hold "$origin" scope \
+    --title "Choose the sample scope" --reason "captain sample scope pending" --repo sample \
+    > "$home/legacy-hold.out" 2> "$home/legacy-hold.err"; then
+    fail "legacy archived identity allowed stable hold recreation"
+  fi
+  assert_no_grep "^- \[ \] $hold -" "$home/data/backlog.md" \
+    "legacy archived identity created a replacement active hold"
+  assert_grep "could not read archived backlog identity $hold" "$home/legacy-hold.err" \
+    "hold creation treated a legacy archived identity as absent"
+  pass "legacy archived identities cannot be replaced by active holds"
+}
+
+test_archive_config_normalizes_identity_lookup_path() {
+  local home origin hold
+  home=$(make_home normalized-archive-path)
+  origin=sample-normalized-archive
+  hold="$origin-decision-scope"
+  write_origin_meta "$home" "$origin" ship
+  sed -i.bak 's|archive = "data/done-archive.md"|archive = "data/missing/../done-archive.md"|' \
+    "$home/.tasks.toml"
+  rm "$home/.tasks.toml.bak"
+  cat > "$home/data/done-archive.md" <<EOF
+## Archived 2026-07-18
+- [x] $hold - Existing normalized identity (repo: sample) (kind: ship) (done 2026-07-18)
+  Incomplete archived record.
+EOF
+  if run_decisions "$home" hold "$origin" scope \
+    --title "Choose the sample scope" --reason "captain sample scope pending" --repo sample \
+    > "$home/normalized-hold.out" 2> "$home/normalized-hold.err"; then
+    fail "unnormalized archive config allowed stable hold recreation"
+  fi
+  assert_no_grep "^- \[ \] $hold -" "$home/data/backlog.md" \
+    "unnormalized archive config created a replacement active hold"
+  assert_grep "archived backlog identity $hold is invalid and cannot be reused" \
+    "$home/normalized-hold.err" \
+    "archive identity lookup did not use tasks-axi path normalization"
+  pass "archive identity lookup normalizes configured paths"
+}
+
+test_archive_config_resolves_relative_to_physical_home() {
+  local physical_home linked_home origin hold archive
+  physical_home=$(make_home physical/symlinked-archive-home)
+  linked_home="$TMP_ROOT/symlinked-archive-home"
+  ln -s "$physical_home" "$linked_home"
+  origin=sample-symlinked-home
+  hold="$origin-decision-scope"
+  archive="$(dirname "$physical_home")/symlinked-done-archive.md"
+  write_origin_meta "$linked_home" "$origin" ship
+  sed -i.bak 's|archive = "data/done-archive.md"|archive = "../symlinked-done-archive.md"|' \
+    "$linked_home/.tasks.toml"
+  rm "$linked_home/.tasks.toml.bak"
+  cat > "$archive" <<EOF
+## Archived 2026-07-18
+- [x] $hold - Existing physical-home identity (repo: sample) (kind: ship) (done 2026-07-18)
+  Incomplete archived record.
+EOF
+  if run_decisions "$linked_home" hold "$origin" scope \
+    --title "Choose the sample scope" --reason "captain sample scope pending" --repo sample \
+    > "$linked_home/symlinked-hold.out" 2> "$linked_home/symlinked-hold.err"; then
+    fail "symlinked FM_HOME resolved the archive from its textual parent"
+  fi
+  assert_no_grep "^- \[ \] $hold -" "$linked_home/data/backlog.md" \
+    "symlinked FM_HOME created a replacement active hold"
+  assert_grep "archived backlog identity $hold is invalid and cannot be reused" \
+    "$linked_home/symlinked-hold.err" \
+    "archive identity lookup did not resolve relative to the physical tasks-axi cwd"
+  pass "archive identity lookup resolves relative to the physical home"
+}
+
+test_archive_config_preserves_absolute_path_segments() {
+  local home origin hold archive show
+  home=$(make_home absolute-archive-path)
+  origin=sample-absolute-archive
+  hold="$origin-decision-scope"
+  archive="$home/data/missing/../done-archive.md"
+  write_origin_meta "$home" "$origin" ship
+  sed -i.bak "s|archive = \"data/done-archive.md\"|archive = \"$archive\"|" "$home/.tasks.toml"
+  rm "$home/.tasks.toml.bak"
+  cat > "$home/data/done-archive.md" <<EOF
+## Archived 2026-07-18
+- [x] $hold - Unreachable normalized identity (repo: sample) (kind: ship) (done 2026-07-18)
+  Incomplete archived record.
+EOF
+  run_decisions "$home" hold "$origin" scope \
+    --title "Choose the sample scope" --reason "captain sample scope pending" --repo sample \
+    > "$home/absolute-hold.out" 2> "$home/absolute-hold.err" \
+    || fail "absolute archive path segments did not match tasks-axi I/O semantics"
+  show=$(tasks_in "$home" show "$hold" --full) \
+    || fail "absolute archive path with a missing segment did not create a new active hold"
+  assert_contains "$show" "state: queued" \
+    "absolute archive path with a missing segment created a non-queued hold"
+  pass "archive identity lookup preserves absolute path segments"
+}
+
 test_archived_resolution_requires_routed_work_newline() {
   local home origin hold
   home=$(make_home archived-routed-newline)
@@ -1515,6 +1661,11 @@ test_durable_lookup_preserves_active_store_failures
 test_archived_resolution_ignores_trailing_blank_formatting
 test_archived_resolution_obeys_task_body_boundaries
 test_unreadable_archive_refuses_identity_recreation
+test_legacy_archived_identity_refuses_hold_recreation
+test_unresolvable_archive_paths_refuse_identity_recreation
+test_archive_config_normalizes_identity_lookup_path
+test_archive_config_preserves_absolute_path_segments
+test_archive_config_resolves_relative_to_physical_home
 test_archived_resolution_requires_routed_work_newline
 test_archived_resolution_requires_tasks_axi_ids
 test_archive_config_accepts_no_space_assignment
