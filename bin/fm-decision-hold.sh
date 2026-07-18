@@ -110,13 +110,39 @@ task_show() {  # <id>
   tasks_axi show "$1" --full 2>/dev/null
 }
 
+strip_toml_comment() {  # <line>
+  local input=$1 output='' char quote='' escaped=0 index
+  for ((index = 0; index < ${#input}; index++)); do
+    char=${input:index:1}
+    if [ -n "$quote" ]; then
+      output+=$char
+      if [ "$quote" = '"' ]; then
+        if [ "$escaped" = 1 ]; then
+          escaped=0
+        elif [ "$char" = "\\" ]; then
+          escaped=1
+        elif [ "$char" = "$quote" ]; then
+          quote=''
+        fi
+      elif [ "$char" = "$quote" ]; then
+        quote=''
+      fi
+      continue
+    fi
+    case "$char" in
+      \#) break ;;
+      '"'|"'") quote=$char ;;
+    esac
+    output+=$char
+  done
+  printf '%s\n' "$output"
+}
+
 tasks_config_value() {  # <key>
   local key=$1 config="$FM_HOME/.tasks.toml" in_markdown=0 line trimmed value
   [ -f "$config" ] || return 1
   while IFS= read -r line || [ -n "$line" ]; do
-    case "$line" in
-      *"#"*) line=${line%%#*} ;;
-    esac
+    line=$(strip_toml_comment "$line")
     trimmed=${line#"${line%%[![:space:]]*}"}
     case "$trimmed" in
       "["*)
@@ -268,10 +294,7 @@ verify_hold_resolved() {  # <hold-id>
   body=$(show_field "$show" body)
   [ "$state" = "done" ] || return 1
   [ "$kind" = captain ] || return 1
-  case "$body" in
-    *"Resolution recorded by fm-decision-hold."*"Routed work:"*) return 0 ;;
-  esac
-  return 1
+  has_resolution_identity_record "$body"
 }
 
 verify_hold_durable() {  # <hold-id>
@@ -287,24 +310,44 @@ verify_hold_durable() {  # <hold-id>
     return 0
   fi
   if [ "$state" = "done" ] && [ "$kind" = captain ]; then
-    case "$body" in
-      *"Resolution recorded by fm-decision-hold."*"Routed work:"*) return 0 ;;
-    esac
+    has_resolution_identity_record "$body" && return 0
   fi
   fail "captain decision $id is neither actively held nor durably resolved"
 }
 
-verify_resolution_identity() {
-  local id=$1 hold_body=$2 decision_digest=$3 routed_csv=$4 resolution_prefix resolution_fields recorded_digest recorded_routes
+has_resolution_identity_record() {  # <body>
+  local hold_body=$1 resolution_prefix resolution_fields recorded_digest recorded_routes captain_decision routed_work
   resolution_prefix='"Resolution recorded by fm-decision-hold.\nDecision digest: '
   case "$hold_body" in
     "$resolution_prefix"*) resolution_fields=${hold_body#"$resolution_prefix"} ;;
-    *) fail "captain hold $id has no retry identity record" ;;
+    *) return 1 ;;
   esac
   case "$resolution_fields" in
-    *'\nRouted identities: '*'\n\nCaptain decision:'*) : ;;
-    *) fail "captain hold $id has an invalid retry identity record" ;;
+    *'\nRouted identities: '*'\n\nCaptain decision:'*'\n\nRouted work:'*) : ;;
+    *) return 1 ;;
   esac
+  recorded_digest=${resolution_fields%%\\n*}
+  resolution_fields=${resolution_fields#*\\nRouted identities: }
+  recorded_routes=${resolution_fields%%\\n*}
+  captain_decision=${resolution_fields#*\\n\\nCaptain decision:}
+  captain_decision=${captain_decision%%\\n\\nRouted work:*}
+  captain_decision=${captain_decision#\\n}
+  routed_work=${resolution_fields#*\\n\\nRouted work:}
+  [ -n "$recorded_digest" ] || return 1
+  [ -n "$recorded_routes" ] || return 1
+  [ -n "$captain_decision" ] || return 1
+  case "$routed_work" in
+    *'- '*) return 0 ;;
+  esac
+  return 1
+}
+
+verify_resolution_identity() {
+  local id=$1 hold_body=$2 decision_digest=$3 routed_csv=$4 resolution_prefix resolution_fields recorded_digest recorded_routes
+  has_resolution_identity_record "$hold_body" \
+    || fail "captain hold $id has an invalid retry identity record"
+  resolution_prefix='"Resolution recorded by fm-decision-hold.\nDecision digest: '
+  resolution_fields=${hold_body#"$resolution_prefix"}
   recorded_digest=${resolution_fields%%\\n*}
   resolution_fields=${resolution_fields#*\\nRouted identities: }
   recorded_routes=${resolution_fields%%\\n*}

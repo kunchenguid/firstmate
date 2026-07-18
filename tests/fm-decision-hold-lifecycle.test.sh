@@ -413,6 +413,8 @@ test_terminal_single_owner_status_decision_does_not_block_empty_inventory() {
 test_archived_resolved_captain_decision_satisfies_inventory_union() {
   local home origin old_hold new_hold i item archive_show
   home=$(make_home archived-resolved-decision)
+  sed -i.bak 's|archive = "data/done-archive.md"|archive = "data/decisions#done.md" # retained decisions|' "$home/.tasks.toml"
+  rm "$home/.tasks.toml.bak"
   origin=sample-archive-ship
   mkdir -p "$home/data/$origin"
   tasks_in "$home" add "$origin" "Ship archive-sensitive work" --kind ship --repo sample --start >/dev/null \
@@ -445,7 +447,7 @@ test_archived_resolved_captain_decision_satisfies_inventory_union() {
   done
   ! grep -E "^- \[[ x]\] $old_hold -" "$home/data/backlog.md" >/dev/null \
     || fail "resolved captain decision remained in the active backlog"
-  archive_show=$(cat "$home/data/done-archive.md") \
+  archive_show=$(cat "$home/data/decisions#done.md") \
     || fail "configured archive lost the exact resolved captain decision"
   assert_contains "$archive_show" "- [x] $old_hold -" "archived decision is not done"
   assert_contains "$archive_show" "(kind: captain)" "archived decision is not kind captain"
@@ -472,7 +474,7 @@ test_archived_resolved_captain_decision_satisfies_inventory_union() {
 }
 
 test_malformed_archive_decision_does_not_satisfy_inventory() {
-  local home origin hold i item
+  local home origin hold blank_hold i item
   home=$(make_home malformed-archived-decision)
   origin=sample-malformed-archive
   mkdir -p "$home/data/$origin"
@@ -480,11 +482,17 @@ test_malformed_archive_decision_does_not_satisfy_inventory() {
     || fail "could not create malformed archive origin"
   write_origin_meta "$home" "$origin" ship
   hold="$origin-decision-scope"
-  tasks_in "$home" add "$hold" "Title-only archived decision" --kind captain --repo sample \
-    --body "Resolution recorded by fm-decision-hold, but not the structured record." >/dev/null \
+  tasks_in "$home" add "$hold" "Incomplete archived decision" --kind captain --repo sample \
+    --body $'Resolution recorded by fm-decision-hold.\n\nCaptain decision:\nUse the sample scope.\n\nRouted work:\n- sample-work' >/dev/null \
     || fail "could not create malformed captain item"
   tasks_in "$home" "done" "$hold" >/dev/null \
     || fail "could not close malformed captain item"
+  blank_hold="$origin-decision-blank"
+  tasks_in "$home" add "$blank_hold" "Blank archived decision" --kind captain --repo sample \
+    --body $'Resolution recorded by fm-decision-hold.\nDecision digest: 0000000000000000000000000000000000000000000000000000000000000000\nRouted identities: sample-work\n\nCaptain decision:\n\nRouted work:\n- sample-work' >/dev/null \
+    || fail "could not create blank captain decision item"
+  tasks_in "$home" "done" "$blank_hold" >/dev/null \
+    || fail "could not close blank captain decision item"
   i=1
   while [ "$i" -le 10 ]; do
     item=$(printf 'sample-malformed-pad-%02d' "$i")
@@ -506,7 +514,19 @@ test_malformed_archive_decision_does_not_satisfy_inventory() {
   if run_decisions "$home" verify "$origin" > "$home/malformed-verify.out" 2> "$home/malformed-verify.err"; then
     fail "malformed archived captain prose satisfied decision verification"
   fi
-  pass "malformed archived captain prose does not satisfy decision verification"
+  fm_write_meta "$home/state/$origin.meta" \
+    "window=firstmate:fm-$origin" \
+    "worktree=$home/projects/missing-$origin" \
+    "project=$home/projects/sample" \
+    "harness=codex" \
+    "kind=ship" \
+    "mode=ship" \
+    "decisions_reviewed=1" \
+    "decision_keys=blank"
+  if run_decisions "$home" verify "$origin" > "$home/blank-verify.out" 2> "$home/blank-verify.err"; then
+    fail "blank archived captain decision satisfied decision verification"
+  fi
+  pass "malformed archived captain records do not satisfy decision verification"
 }
 
 test_secondmate_hold_stays_in_authoritative_home() {
