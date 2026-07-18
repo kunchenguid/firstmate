@@ -1217,6 +1217,85 @@ test_archived_resolution_normalizes_semantic_lines() {
   pass "archive parsing normalizes CRLF and whitespace-only lines"
 }
 
+test_archived_resolution_accepts_dependency_metadata() {
+  local home origin
+  home=$(make_home archived-dependency-metadata)
+  origin=sample-dependency-metadata
+  write_origin_meta "$home" "$origin" ship
+  cat > "$home/data/done-archive.md" <<EOF
+## Archived 2026-07-18
+- [x] $origin-decision-blocked - Blocked dependency metadata (repo: sample) (kind: captain) (done 2026-07-18) blocked-by: sample-blocker - waits for sample blocker
+  Resolution recorded by fm-decision-hold.
+  Decision digest: 0000000000000000000000000000000000000000000000000000000000000000
+  Routed identities: sample-work
+
+  Captain decision:
+  Use the sample scope.
+
+  Routed work:
+  - sample-work
+
+- [x] $origin-decision-parent - Parent dependency metadata (repo: sample) (kind: captain) (done 2026-07-18) parent: sample-parent - grouped under sample parent
+  Resolution recorded by fm-decision-hold.
+  Decision digest: 0000000000000000000000000000000000000000000000000000000000000000
+  Routed identities: sample-work
+
+  Captain decision:
+  Use the sample scope.
+
+  Routed work:
+  - sample-work
+
+- [x] $origin-decision-discovered - Discovery dependency metadata (repo: sample) (kind: captain) (done 2026-07-18) discovered-from: sample-source - found during sample review
+  Resolution recorded by fm-decision-hold.
+  Decision digest: 0000000000000000000000000000000000000000000000000000000000000000
+  Routed identities: sample-work
+
+  Captain decision:
+  Use the sample scope.
+
+  Routed work:
+  - sample-work
+EOF
+  run_decisions "$home" complete "$origin" blocked parent discovered >/dev/null \
+    || fail "tasks-axi dependency metadata invalidated archived decisions"
+  run_decisions "$home" verify "$origin" >/dev/null \
+    || fail "archived dependency metadata did not survive durable verification"
+  pass "archived resolutions accept tasks-axi dependency metadata"
+}
+
+test_archive_config_matches_tasks_axi_quote_state() {
+  local home origin hold archive
+  home=$(make_home archive-config-quote-state)
+  origin=sample-config-quote-state
+  hold="$origin-decision-scope"
+  archive="$home/data/escaped\\"
+  write_origin_meta "$home" "$origin" ship
+  sed -i.bak 's|archive = "data/done-archive.md"|archive = "data/escaped\\"#ignored.md"|' \
+    "$home/.tasks.toml"
+  rm "$home/.tasks.toml.bak"
+  tasks_in "$home" list >/dev/null \
+    || fail "tasks-axi rejected the escaped-quote config fixture"
+  cat > "$archive" <<EOF
+## Archived 2026-07-18
+- [x] $hold - Escaped quote archive config (repo: sample) (kind: captain) (done 2026-07-18)
+  Resolution recorded by fm-decision-hold.
+  Decision digest: 0000000000000000000000000000000000000000000000000000000000000000
+  Routed identities: sample-work
+
+  Captain decision:
+  Use the sample scope.
+
+  Routed work:
+  - sample-work
+EOF
+  run_decisions "$home" complete "$origin" scope >/dev/null \
+    || fail "archive config did not match tasks-axi quote-state behavior"
+  run_decisions "$home" verify "$origin" >/dev/null \
+    || fail "escaped-quote archive config did not survive durable verification"
+  pass "archive config matches tasks-axi quote-state behavior"
+}
+
 test_secondmate_hold_stays_in_authoritative_home() {
   local parent mate origin hold json
   parent=$(make_home main-routing)
@@ -1390,5 +1469,7 @@ test_archived_kind_requires_contiguous_trailing_metadata
 test_duplicate_archived_identity_fails_closed
 test_archive_config_accepts_spaced_markdown_section
 test_archived_resolution_normalizes_semantic_lines
+test_archived_resolution_accepts_dependency_metadata
+test_archive_config_matches_tasks_axi_quote_state
 test_secondmate_hold_stays_in_authoritative_home
 test_resolve_matches_quoted_blocked_by_edges

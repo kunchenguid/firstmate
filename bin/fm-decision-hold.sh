@@ -120,22 +120,12 @@ task_show() {  # <id>
 }
 
 strip_toml_comment() {  # <line>
-  local input=$1 output='' char quote='' escaped=0 index
+  local input=$1 output='' char quote='' index
   for ((index = 0; index < ${#input}; index++)); do
     char=${input:index:1}
     if [ -n "$quote" ]; then
       output+=$char
-      if [ "$quote" = '"' ]; then
-        if [ "$escaped" = 1 ]; then
-          escaped=0
-        elif [ "$char" = "\\" ]; then
-          escaped=1
-        elif [ "$char" = "$quote" ]; then
-          quote=''
-        fi
-      elif [ "$char" = "$quote" ]; then
-        quote=''
-      fi
+      [ "$char" = "$quote" ] && quote=''
       continue
     fi
     case "$char" in
@@ -212,7 +202,8 @@ tasks_archive_path() {
 }
 
 archive_header_kind() {
-  local header=$1 remaining tag prefix recognized kind='' kind_seen=0 completion=0
+  local header=$1 remaining tag prefix recognized dep_reason kind='' kind_seen=0 completion=0
+  local trailing_dep_re='^(.*[[:space:]])(blocked-by|parent|discovered-from):[[:space:]]*([A-Za-z0-9][A-Za-z0-9._-]*)([[:space:]]+-[[:space:]]+(.+))?[[:space:]]*$'
   local trailing_tag_re='^(.*)\(([^()]*)\)[[:space:]]*$'
   local repo_re='^([^()]*\+[[:space:]]*)?repo:[[:space:]]*[^()]+$'
   local kind_re='^kind:[[:space:]]*([^()]+)$'
@@ -223,7 +214,17 @@ archive_header_kind() {
   local hold_kind_re='^hold-kind:[[:space:]]*(captain|external|load|parked|future)$'
   local hold_until_re='^hold-until:[[:space:]]*[0-9]{4}-[0-9]{2}-[0-9]{2}$'
   remaining=$header
-  while [[ $remaining =~ $trailing_tag_re ]]; do
+  while :; do
+    if [[ $remaining =~ $trailing_dep_re ]]; then
+      prefix=${BASH_REMATCH[1]}
+      dep_reason=${BASH_REMATCH[5]:-}
+      if [[ $dep_reason =~ [[:space:]](blocked-by|parent|discovered-from):[[:space:]] ]]; then
+        break
+      fi
+      remaining=$prefix
+      continue
+    fi
+    [[ $remaining =~ $trailing_tag_re ]] || break
     prefix=${BASH_REMATCH[1]}
     tag=${BASH_REMATCH[2]}
     recognized=1
