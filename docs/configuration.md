@@ -225,12 +225,25 @@ If no dispatch rule fits, firstmate uses the dispatch profile `default` when pre
 Because the spawn backstop is gated by file presence, any fallback path after a missing match, validation error, or missing `jq` still passes a resolved harness explicitly until the file is fixed or removed.
 Secondmate homes inherit this file from the primary, so a secondmate's own crewmates apply the same dispatch profile behavior.
 
+## SCM host (config/scm-host / FM_SCM_HOST)
+
+The local, gitignored `config/scm-host` file selects the SCM prerequisite profile for a Firstmate home.
+`FM_SCM_HOST` overrides it for one launch.
+The accepted values are `github`, `forgejo`, and `local-only`; an absent setting defaults to `github` for backward compatibility, while an unknown value emits `SCM_HOST_INVALID` and blocks dispatch.
+The `github` profile requires `gh`, `gh-axi`, and a successful `gh auth status`.
+The `forgejo` and `local-only` profiles omit those GitHub-only prerequisites while retaining Git, no-mistakes, browser and review helpers, backlog tools, and the resolved runtime backend's dependencies.
+This setting scopes bootstrap prerequisites only; it does not make GitHub-specific PR, check, merge, or watcher helpers operate against Forgejo.
+Until a Forgejo delivery adapter owns those operations, register Forgejo-backed pilot projects in Firstmate's `local-only` project mode and treat Forgejo push, review, and merge as an explicit operator-owned delivery step.
+Selecting `forgejo` never authorizes a push or merge.
+The primary home propagates `config/scm-host` to secondmate homes so the fleet uses one SCM prerequisite profile.
+
 ## Toolchain
 
 On session start the first mate detects what its required toolchain is missing or too old and lists each problem with either an exact install command or manual instructions.
 It installs automatically supported tools only after you say go; manual-only tools remain for you to install from the printed instructions.
 Required tools come in two parts: a universal toolchain every home needs regardless of backend, and a per-backend delta that follows the runtime backend actually resolved for this home.
-The universal toolchain is node, git, gh with GitHub auth via `gh auth login`, no-mistakes v1.31.2 or newer, gh-axi, chrome-devtools-axi, lavish-axi, compatible tasks-axi per "Backlog backend" above, and quota-axi.
+The universal base toolchain is node, git, no-mistakes v1.31.2 or newer, chrome-devtools-axi, lavish-axi, compatible tasks-axi per "Backlog backend" above, and quota-axi.
+The `github` SCM profile additionally requires gh with GitHub auth via `gh auth login` and gh-axi; the `forgejo` and `local-only` profiles do not.
 This section is the single owner of that universal toolchain list; backend guides' prerequisites point here and add only their backend-specific tools.
 In that list, no-mistakes runs the validation pipeline, gh-axi, chrome-devtools-axi, and lavish-axi cover GitHub, browser, and rich-review operations, and tasks-axi plus quota-axi back backlog mutations and quota-balanced dispatch.
 The per-backend delta is required only for the backend resolved from `FM_BACKEND`, then `config/backend`, then runtime auto-detection, then default `tmux`, so a home is never told to install a tool an inactive backend or feature would need.
@@ -345,6 +358,7 @@ FM_STATE_OVERRIDE=       # alternate state dir, mainly for tests
 FM_DATA_OVERRIDE=        # alternate data dir, mainly for tests
 FM_PROJECTS_OVERRIDE=    # alternate projects dir, mainly for tests
 FM_CONFIG_OVERRIDE=      # alternate config dir, mainly for tests
+FM_SCM_HOST=             # one-launch SCM prerequisite profile override; github/forgejo/local-only, otherwise config/scm-host then github
 FM_BACKEND=             # optional runtime backend override for new spawns; tmux/herdr/zellij/orca/cmux support ship/scout spawns, codex-app is not accepted
 HERDR_SESSION=default  # herdr-only: named session for normal backend ops; not enough for destructive cleanup (docs/herdr-backend.md)
 FM_BACKEND_HERDR_COMPOSER_LINES=20  # herdr-only: tail lines scanned by composer-state guard/fallback paths; idle-baseline submit confirmation uses agent-state

@@ -7,6 +7,7 @@
 #          Silent = all good.
 #          Lines: "MISSING: <tool> (install: <command>)",
 #                 "MISSING_MANUAL: <tool> (instructions: <url>)", "NEEDS_GH_AUTH",
+#                 "SCM_HOST_INVALID: <name> (known: github forgejo local-only)",
 #                 "BACKEND_INVALID: <name> (known: <names>)",
 #                 "CREW_DISPATCH: invalid config/crew-dispatch.json - <reason>",
 #                 "FLEET_SYNC: <repo>: skipped|recovered|STUCK: <detail>",
@@ -450,12 +451,29 @@ missing_tool_diagnostic() {
   echo "MISSING: $tool (install: $(install_cmd "$tool"))"
 }
 
-# Required-tool detection follows the RESOLVED backend, not a one-size default:
-# a universal toolchain every home needs plus the backend-specific delta owned by
-# fm_backend_required_tools (bin/fm-backend.sh). So a herdr/zellij/cmux home is
-# never told tmux is missing, and only orca drops treehouse. A backend value with
-# no verified dependency set is reported before the universal checks continue.
-COMMON_TOOLS="node git gh no-mistakes gh-axi chrome-devtools-axi lavish-axi tasks-axi quota-axi"
+# Required-tool detection follows both the selected SCM host and the RESOLVED
+# runtime backend. The local gitignored config/scm-host file, or FM_SCM_HOST for a
+# one-off launch, selects github (the backward-compatible default), forgejo, or
+# local-only. GitHub alone adds gh, gh-axi, and the gh-auth probe; the other
+# modes deliberately do not pretend that GitHub authentication is a prerequisite.
+fm_scm_host() {
+  local host
+  host=${FM_SCM_HOST:-}
+  if [ -z "$host" ] && [ -f "$CONFIG/scm-host" ]; then
+    host=$(awk 'NF && $1 !~ /^#/ { print $1; exit }' "$CONFIG/scm-host" 2>/dev/null || true)
+  fi
+  [ -n "$host" ] || host=github
+  printf '%s\n' "$host"
+}
+
+SCM_HOST=$(fm_scm_host)
+SCM_HOST_VALID=1
+COMMON_TOOLS="node git no-mistakes chrome-devtools-axi lavish-axi tasks-axi quota-axi"
+case "$SCM_HOST" in
+  github) COMMON_TOOLS="$COMMON_TOOLS gh gh-axi" ;;
+  forgejo|local-only) ;;
+  *) SCM_HOST_VALID=0 ;;
+esac
 BACKEND=$(fm_backend_name)
 BACKEND_VALID=1
 if ! BACKEND_TOOLS=$(fm_backend_required_tools "$BACKEND"); then
@@ -756,6 +774,9 @@ fi
 if [ "$BACKEND_VALID" -eq 0 ]; then
   echo "BACKEND_INVALID: $BACKEND (known: $FM_BACKEND_KNOWN)"
 fi
+if [ "$SCM_HOST_VALID" -eq 0 ]; then
+  echo "SCM_HOST_INVALID: $SCM_HOST (known: github forgejo local-only)"
+fi
 for t in $BACKEND_TOOLS; do
   fm_backend_required_tool_available "$BACKEND" "$t" \
     || missing_tool_diagnostic "$t"
@@ -776,7 +797,9 @@ fi
 if command -v tasks-axi >/dev/null 2>&1 && ! fm_tasks_axi_compatible; then
   echo "MISSING: tasks-axi (install: $(install_cmd tasks-axi))"
 fi
-gh auth status >/dev/null 2>&1 || echo "NEEDS_GH_AUTH"
+if [ "$SCM_HOST" = github ]; then
+  gh auth status >/dev/null 2>&1 || echo "NEEDS_GH_AUTH"
+fi
 # Worktree-tangle check: the firstmate primary checkout (FM_ROOT) must sit on its
 # default branch, not a feature branch (see fm-tangle-lib.sh). Scoped to the
 # primary only; detached-HEAD worktrees and secondmate homes never trip it.
