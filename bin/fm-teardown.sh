@@ -201,7 +201,8 @@ validate_pr_poll_cleanup() {
     return 1
   fi
   for artifact in "$state_dir/$id.check.sh" "$state_dir/$id.pr-poll" \
-    "$state_dir/$id.pr-poll-registration" "$state_dir/$id.check-trust"; do
+    "$state_dir/$id.pr-poll-registration" "$state_dir/$id.check-trust" \
+    "$state_dir/$id.lavish-last-error" "$state_dir/$id.lavish-last-ended"; do
     [ -e "$artifact" ] || [ -L "$artifact" ] || continue
     has_artifact=1
   done
@@ -212,7 +213,8 @@ validate_pr_poll_cleanup() {
   [ -d "$state_dir" ] && [ ! -L "$state_dir" ] || return 1
   state_device=$(fm_pr_file_device "$state_dir") || return 1
   for artifact in "$state_dir/$id.check.sh" "$state_dir/$id.pr-poll" \
-    "$state_dir/$id.pr-poll-registration" "$state_dir/$id.check-trust"; do
+    "$state_dir/$id.pr-poll-registration" "$state_dir/$id.check-trust" \
+    "$state_dir/$id.lavish-last-error" "$state_dir/$id.lavish-last-ended"; do
     [ -e "$artifact" ] || [ -L "$artifact" ] || continue
     if [ ! -f "$artifact" ] || [ -L "$artifact" ] \
       || [ "$(fm_pr_file_device "$artifact")" != "$state_device" ] \
@@ -245,7 +247,8 @@ remove_pr_poll_artifacts() {
   local state_dir=$1 id=$2 quarantine artifact
   validate_pr_poll_cleanup "$state_dir" "$id" || return 1
   rm -f "$state_dir/$id.check.sh" "$state_dir/$id.pr-poll" \
-    "$state_dir/$id.pr-poll-registration" "$state_dir/$id.check-trust" || return 1
+    "$state_dir/$id.pr-poll-registration" "$state_dir/$id.check-trust" \
+    "$state_dir/$id.lavish-last-error" "$state_dir/$id.lavish-last-ended" || return 1
   if fm_task_id_path_safe "$id"; then
     quarantine="$state_dir/.pr-check-quarantine"
     if [ -d "$quarantine" ] && [ ! -L "$quarantine" ]; then

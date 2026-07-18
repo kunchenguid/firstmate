@@ -49,9 +49,9 @@ case "${1:-}" in
 esac
 
 shell_quote() {
-  printf "'"
-  printf '%s' "$1" | sed "s/'/'\\''/g"
-  printf "'"
+  local value=$1
+  value=${value//\'/\'\\\'\'}
+  printf "'%s'" "$value"
 }
 
 canonical_file() {
@@ -229,7 +229,7 @@ esac
 lavish_input_check "$HTML"
 
 if [ "$ARM_ONLY" -ne 1 ]; then
-  lavish-axi "$HTML" "${OPEN_ARGS[@]}"
+  lavish-axi "$HTML" "${OPEN_ARGS[@]+"${OPEN_ARGS[@]}"}"
 fi
 
 CHECK="$STATE/$ID.check.sh"

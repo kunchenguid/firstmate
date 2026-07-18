@@ -80,7 +80,12 @@ status_from_output() {
 }
 
 session_ended_in_output() {
-  grep -Eq '^[[:space:]]*session_ended:[[:space:]]*true([[:space:]]|$)'
+  awk '
+    /^[^[:space:]]/ { in_session = ($0 ~ /^session:/) }
+    /^session_ended:[[:space:]]*true([[:space:]]|$)/ { found = 1; exit }
+    in_session && /^[[:space:]]+session_ended:[[:space:]]*true([[:space:]]|$)/ { found = 1; exit }
+    END { exit found ? 0 : 1 }
+  '
 }
 
 relpath() {
