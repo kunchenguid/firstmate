@@ -529,6 +529,113 @@ test_malformed_archive_decision_does_not_satisfy_inventory() {
   pass "malformed archived captain records do not satisfy decision verification"
 }
 
+test_archived_ship_title_cannot_impersonate_captain_kind() {
+  local home origin hold
+  home=$(make_home archived-ship-title-kind)
+  origin=sample-title-kind
+  hold="$origin-decision-scope"
+  write_origin_meta "$home" "$origin" ship
+  printf 'decisions_reviewed=1\ndecision_keys=scope\n' >> "$home/state/$origin.meta"
+  cat > "$home/data/done-archive.md" <<EOF
+## Archived 2026-07-18
+- [x] $hold - Misleading (kind: captain) title (repo: sample) (kind: ship) (done 2026-07-18)
+  Resolution recorded by fm-decision-hold.
+  Decision digest: 0000000000000000000000000000000000000000000000000000000000000000
+  Routed identities: sample-work
+
+  Captain decision:
+  Use the sample scope.
+
+  Routed work:
+  - sample-work
+EOF
+  if run_decisions "$home" verify "$origin" > "$home/title-kind.out" 2> "$home/title-kind.err"; then
+    fail "ship title metadata impersonated an archived captain decision"
+  fi
+  pass "archived task kind comes from structured metadata, not title text"
+}
+
+test_archived_resolution_requires_sha256_digest() {
+  local home origin hold
+  home=$(make_home archived-invalid-digest)
+  origin=sample-invalid-digest
+  hold="$origin-decision-scope"
+  write_origin_meta "$home" "$origin" ship
+  printf 'decisions_reviewed=1\ndecision_keys=scope\n' >> "$home/state/$origin.meta"
+  cat > "$home/data/done-archive.md" <<EOF
+## Archived 2026-07-18
+- [x] $hold - Invalid digest (repo: sample) (kind: captain) (done 2026-07-18)
+  Resolution recorded by fm-decision-hold.
+  Decision digest: x
+  Routed identities: sample-work
+
+  Captain decision:
+  Use the sample scope.
+
+  Routed work:
+  - sample-work
+EOF
+  if run_decisions "$home" verify "$origin" > "$home/invalid-digest.out" 2> "$home/invalid-digest.err"; then
+    fail "archived resolution accepted a non-SHA-256 digest"
+  fi
+  pass "archived resolution requires a SHA-256 decision digest"
+}
+
+test_archived_resolution_requires_matching_routed_identities() {
+  local home origin hold
+  home=$(make_home archived-routed-mismatch)
+  origin=sample-routed-mismatch
+  hold="$origin-decision-scope"
+  write_origin_meta "$home" "$origin" ship
+  printf 'decisions_reviewed=1\ndecision_keys=scope\n' >> "$home/state/$origin.meta"
+  cat > "$home/data/done-archive.md" <<EOF
+## Archived 2026-07-18
+- [x] $hold - Mismatched routed work (repo: sample) (kind: captain) (done 2026-07-18)
+  Resolution recorded by fm-decision-hold.
+  Decision digest: 0000000000000000000000000000000000000000000000000000000000000000
+  Routed identities: sample-work-a
+
+  Captain decision:
+  Use the sample scope.
+
+  Routed work:
+  - sample-work-b
+EOF
+  if run_decisions "$home" verify "$origin" > "$home/routed-mismatch.out" 2> "$home/routed-mismatch.err"; then
+    fail "archived resolution accepted mismatched routed identities"
+  fi
+  pass "archived routed identities match the canonical routed-work list"
+}
+
+test_archived_resolution_preserves_literal_backslash_markers() {
+  local home origin hold
+  home=$(make_home archived-literal-backslash)
+  origin=sample-literal-backslash
+  hold="$origin-decision-scope"
+  write_origin_meta "$home" "$origin" ship
+  printf 'decisions_reviewed=1\ndecision_keys=scope\n' >> "$home/state/$origin.meta"
+  cat > "$home/data/done-archive.md" <<EOF
+## Archived 2026-07-18
+- [x] $hold - Literal marker decision (repo: sample) (kind: captain) (done 2026-07-18)
+  Resolution recorded by fm-decision-hold.
+  Decision digest: 92ec27db26b55fc98687089e6172c8df29d62e00cc5c0e937ead277d5d250817
+  Routed identities: sample-work
+
+  Captain decision:
+  \nRouted work: keep this literal.
+
+  Routed work:
+  - sample-work
+EOF
+  printf '%s\n' '\nRouted work: keep this literal.' > "$home/literal-decision.txt"
+  run_decisions "$home" verify "$origin" >/dev/null \
+    || fail "literal backslash marker corrupted archived decision verification"
+  run_decisions "$home" resolve "$origin" scope --decision-file "$home/literal-decision.txt" \
+    --routed-to sample-work >/dev/null \
+    || fail "literal backslash marker corrupted archived decision retry identity"
+  pass "archived resolution preserves literal backslash marker text"
+}
+
 test_secondmate_hold_stays_in_authoritative_home() {
   local parent mate origin hold json
   parent=$(make_home main-routing)
@@ -679,5 +786,9 @@ test_none_inventory_and_resolved_prose_do_not_create_holds
 test_terminal_single_owner_status_decision_does_not_block_empty_inventory
 test_archived_resolved_captain_decision_satisfies_inventory_union
 test_malformed_archive_decision_does_not_satisfy_inventory
+test_archived_ship_title_cannot_impersonate_captain_kind
+test_archived_resolution_requires_matching_routed_identities
+test_archived_resolution_requires_sha256_digest
+test_archived_resolution_preserves_literal_backslash_markers
 test_secondmate_hold_stays_in_authoritative_home
 test_resolve_matches_quoted_blocked_by_edges

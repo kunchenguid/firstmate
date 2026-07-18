@@ -191,6 +191,34 @@ tasks_archive_path() {
   printf '%s/done-archive.md\n' "$(dirname "$backlog")"
 }
 
+archive_header_kind() {
+  local header=$1 metadata kind
+  case "$header" in
+    *" (repo: "*) metadata=${header##*" (repo: "} ;;
+    *) return 1 ;;
+  esac
+  case "$metadata" in
+    *") (kind: "*) kind=${metadata#*") (kind: "} ;;
+    *) return 1 ;;
+  esac
+  kind=${kind%%")"*}
+  [ -n "$kind" ] || return 1
+  printf '%s\n' "$kind"
+}
+
+toon_escape_line() {
+  local input=$1 output='' char index
+  for ((index = 0; index < ${#input}; index++)); do
+    char=${input:index:1}
+    case "$char" in
+      \\) output="${output}\\\\" ;;
+      \") output="${output}\\\"" ;;
+      *) output="${output}${char}" ;;
+    esac
+  done
+  printf '%s\n' "$output"
+}
+
 archive_task_show() {  # <id>
   local id=$1 archive found=0 header='' body='' line content kind
   archive=$(tasks_archive_path)
@@ -208,13 +236,11 @@ archive_task_show() {  # <id>
       "") content='' ;;
       *) content=$line ;;
     esac
+    content=$(toon_escape_line "$content")
     body="${body}${body:+\\n}$content"
   done < "$archive"
   [ "$found" = 1 ] || return 1
-  kind=''
-  case "$header" in
-    *" (kind: captain)"*) kind=captain ;;
-  esac
+  kind=$(archive_header_kind "$header" || true)
   printf 'task:\n'
   printf '  id: %s\n' "$id"
   printf '  state: done\n'
@@ -315,42 +341,89 @@ verify_hold_durable() {  # <hold-id>
   fail "captain decision $id is neither actively held nor durably resolved"
 }
 
-has_resolution_identity_record() {  # <body>
-  local hold_body=$1 resolution_prefix resolution_fields recorded_digest recorded_routes captain_decision routed_work
-  resolution_prefix='"Resolution recorded by fm-decision-hold.\nDecision digest: '
+valid_sha256_digest() {
+  [ "${#1}" -eq 64 ] || return 1
+  case "$1" in
+    *[!0-9a-f]*) return 1 ;;
+  esac
+}
+
+valid_routed_csv() {
+  local csv=$1 route canonical
+  case "$csv" in
+    ''|,*|*,|*,,*) return 1 ;;
+  esac
+  while IFS= read -r route; do
+    case "$route" in
+      ''|*[!A-Za-z0-9._-]*) return 1 ;;
+    esac
+  done <<EOF
+$(printf '%s\n' "$csv" | tr ',' '\n')
+EOF
+  canonical=$(printf '%s\n' "$csv" | tr ',' '\n' | LC_ALL=C sort -u | paste -sd, -)
+  [ "$canonical" = "$csv" ]
+}
+
+routed_work_for_csv() {
+  local csv=$1 route output=''
+  while IFS= read -r route; do
+    output="${output}${output:+\\n}- $route"
+  done <<EOF
+$(printf '%s\n' "$csv" | tr ',' '\n')
+EOF
+  printf '%s\n' "$output"
+}
+
+parse_resolution_identity_record() {
+  local hold_body=$1 encoded prefix rest digest routes captain_marker routed_marker captain routed expected
   case "$hold_body" in
-    "$resolution_prefix"*) resolution_fields=${hold_body#"$resolution_prefix"} ;;
+    \"*\") encoded=${hold_body#\"}; encoded=${encoded%\"} ;;
     *) return 1 ;;
   esac
-  case "$resolution_fields" in
-    *'\nRouted identities: '*'\n\nCaptain decision:'*'\n\nRouted work:'*) : ;;
+  prefix='Resolution recorded by fm-decision-hold.\nDecision digest: '
+  case "$encoded" in
+    "$prefix"*) rest=${encoded#"$prefix"} ;;
     *) return 1 ;;
   esac
-  recorded_digest=${resolution_fields%%\\n*}
-  resolution_fields=${resolution_fields#*\\nRouted identities: }
-  recorded_routes=${resolution_fields%%\\n*}
-  captain_decision=${resolution_fields#*\\n\\nCaptain decision:}
-  captain_decision=${captain_decision%%\\n\\nRouted work:*}
-  captain_decision=${captain_decision#\\n}
-  routed_work=${resolution_fields#*\\n\\nRouted work:}
-  [ -n "$recorded_digest" ] || return 1
-  [ -n "$recorded_routes" ] || return 1
-  [ -n "$captain_decision" ] || return 1
-  case "$routed_work" in
-    *'- '*) return 0 ;;
+  digest=${rest%%\\n*}
+  [ "$rest" != "$digest" ] || return 1
+  valid_sha256_digest "$digest" || return 1
+  rest=${rest#"$digest"}
+  case "$rest" in
+    '\nRouted identities: '*) rest=${rest#'\nRouted identities: '} ;;
+    *) return 1 ;;
   esac
-  return 1
+  captain_marker='\n\nCaptain decision:\n'
+  case "$rest" in
+    *"$captain_marker"*) routes=${rest%%"$captain_marker"*}; rest=${rest#*"$captain_marker"} ;;
+    *) return 1 ;;
+  esac
+  valid_routed_csv "$routes" || return 1
+  routed_marker='\n\nRouted work:'
+  case "$rest" in
+    *"$routed_marker"*) captain=${rest%"$routed_marker"*}; routed=${rest##*"$routed_marker"} ;;
+    *) return 1 ;;
+  esac
+  [ -n "$captain" ] || return 1
+  case "$routed" in
+    '\n'*) routed=${routed#'\n'} ;;
+  esac
+  expected=$(routed_work_for_csv "$routes")
+  [ "$routed" = "$expected" ] || return 1
+  printf '%s\t%s\n' "$digest" "$routes"
+}
+
+has_resolution_identity_record() {  # <body>
+  parse_resolution_identity_record "$1" >/dev/null
 }
 
 verify_resolution_identity() {
-  local id=$1 hold_body=$2 decision_digest=$3 routed_csv=$4 resolution_prefix resolution_fields recorded_digest recorded_routes
-  has_resolution_identity_record "$hold_body" \
+  local id=$1 hold_body=$2 decision_digest=$3 routed_csv=$4 identity recorded_digest recorded_routes
+  identity=$(parse_resolution_identity_record "$hold_body") \
     || fail "captain hold $id has an invalid retry identity record"
-  resolution_prefix='"Resolution recorded by fm-decision-hold.\nDecision digest: '
-  resolution_fields=${hold_body#"$resolution_prefix"}
-  recorded_digest=${resolution_fields%%\\n*}
-  resolution_fields=${resolution_fields#*\\nRouted identities: }
-  recorded_routes=${resolution_fields%%\\n*}
+  IFS=$'\t' read -r recorded_digest recorded_routes <<EOF
+$identity
+EOF
   [ "$recorded_digest" = "$decision_digest" ] \
     || fail "captain hold $id records a different captain decision"
   [ "$recorded_routes" = "$routed_csv" ] \
