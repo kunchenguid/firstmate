@@ -107,7 +107,16 @@ require_tasks_axi() {
 }
 
 task_show() {  # <id>
-  tasks_axi show "$1" --full 2>/dev/null
+  local output
+  if output=$(tasks_axi show "$1" --full 2>&1); then
+    printf '%s\n' "$output"
+    return 0
+  fi
+  case $'\n'"$output"$'\n' in
+    *$'\ncode: NOT_FOUND\n'*) return 1 ;;
+  esac
+  printf '%s\n' "$output" >&2
+  return 2
 }
 
 strip_toml_comment() {  # <line>
@@ -220,13 +229,13 @@ toon_escape_line() {
 }
 
 archive_task_show() {  # <id>
-  local id=$1 archive found=0 header='' body='' line content kind
+  local id=$1 archive found=0 header='' body='' pending_blanks='' line content kind
   archive=$(tasks_archive_path)
   [ -f "$archive" ] || return 1
   while IFS= read -r line || [ -n "$line" ]; do
     if [ "$found" = 0 ]; then
       case "$line" in
-        "- [x] $id - "*) found=1; header=$line; body='' ;;
+        "- [x] $id - "*) found=1; header=$line; body=''; pending_blanks='' ;;
       esac
       continue
     fi
@@ -236,8 +245,13 @@ archive_task_show() {  # <id>
       "") content='' ;;
       *) content=$line ;;
     esac
+    if [ -z "$content" ]; then
+      [ -z "$body" ] || pending_blanks="${pending_blanks}\\n"
+      continue
+    fi
     content=$(toon_escape_line "$content")
-    body="${body}${body:+\\n}$content"
+    body="${body}${body:+\\n}${pending_blanks}$content"
+    pending_blanks=''
   done < "$archive"
   [ "$found" = 1 ] || return 1
   kind=$(archive_header_kind "$header" || true)
@@ -249,7 +263,15 @@ archive_task_show() {  # <id>
 }
 
 task_show_durable() {  # <id>
-  task_show "$1" || archive_task_show "$1"
+  local show status
+  if show=$(task_show "$1"); then
+    printf '%s\n' "$show"
+    return 0
+  else
+    status=$?
+  fi
+  [ "$status" -eq 1 ] || return "$status"
+  archive_task_show "$1"
 }
 
 show_field() {  # <show-output> <field>
@@ -436,7 +458,7 @@ command_id() {
 }
 
 command_hold() {
-  local origin=${1:-} key=${2:-} title='' reason='' repo='' id show state kind existing_title body
+  local origin=${1:-} key=${2:-} title='' reason='' repo='' id show show_status state kind existing_title body
   [ "$#" -ge 2 ] || { usage >&2; exit 2; }
   shift 2
   while [ "$#" -gt 0 ]; do
@@ -463,19 +485,25 @@ command_hold() {
     [ "$state" != "done" ] || fail "captain decision $id is already durably resolved; use a new decision key for a new decision"
     [ "$kind" = captain ] || fail "existing backlog identity $id is not kind captain"
     [ "$existing_title" = "$title" ] || fail "existing captain hold $id has a different title"
-  elif verify_hold_resolved "$id"; then
-    fail "captain decision $id is already durably resolved; use a new decision key for a new decision"
   else
-    if [ -z "$repo" ] && [ -f "$STATE/$origin.meta" ]; then
-      repo=$(meta_value "$STATE/$origin.meta" project)
-      repo=${repo%/}
-      repo=${repo##*/}
+    show_status=$?
+    [ "$show_status" -eq 1 ] || fail "could not read active backlog identity $id"
+    if verify_hold_resolved "$id"; then
+      fail "captain decision $id is already durably resolved; use a new decision key for a new decision"
+    elif archive_task_show "$id" >/dev/null; then
+      fail "archived backlog identity $id is invalid and cannot be reused"
+    else
+      if [ -z "$repo" ] && [ -f "$STATE/$origin.meta" ]; then
+        repo=$(meta_value "$STATE/$origin.meta" project)
+        repo=${repo%/}
+        repo=${repo##*/}
+      fi
+      [ -n "$repo" ] || repo=firstmate
+      validate_one_line repo "$repo"
+      body=$(printf 'Origin: %s\nDecision key: %s\nState: awaiting captain decision.' "$origin" "$key")
+      tasks_axi add "$id" "$title" --kind captain --repo "$repo" --body "$body" >/dev/null \
+        || fail "could not create captain decision item $id"
     fi
-    [ -n "$repo" ] || repo=firstmate
-    validate_one_line repo "$repo"
-    body=$(printf 'Origin: %s\nDecision key: %s\nState: awaiting captain decision.' "$origin" "$key")
-    tasks_axi add "$id" "$title" --kind captain --repo "$repo" --body "$body" >/dev/null \
-      || fail "could not create captain decision item $id"
   fi
   tasks_axi hold "$id" --reason "$reason" --kind captain >/dev/null \
     || fail "could not activate captain hold $id"

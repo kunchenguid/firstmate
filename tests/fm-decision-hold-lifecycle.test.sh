@@ -636,6 +636,92 @@ EOF
   pass "archived resolution preserves literal backslash marker text"
 }
 
+test_archived_identity_collision_refuses_hold_recreation() {
+  local home origin hold
+  home=$(make_home archived-identity-collision)
+  origin=sample-archived-collision
+  hold="$origin-decision-scope"
+  write_origin_meta "$home" "$origin" ship
+  cat > "$home/data/done-archive.md" <<EOF
+## Archived 2026-07-18
+- [x] $hold - Corrupted archived identity (repo: sample) (kind: ship) (done 2026-07-18)
+  Incomplete archived record.
+EOF
+  if run_decisions "$home" hold "$origin" scope \
+    --title "Choose the sample scope" --reason "captain sample scope pending" --repo sample \
+    > "$home/collision-hold.out" 2> "$home/collision-hold.err"; then
+    fail "invalid archived identity collision allowed hold recreation"
+  fi
+  assert_no_grep "^- \[ \] $hold -" "$home/data/backlog.md" \
+    "invalid archived identity collision created a replacement active hold"
+  pass "archived identity collisions cannot be replaced by active holds"
+}
+
+test_durable_lookup_preserves_active_store_failures() {
+  local home origin hold
+  home=$(make_home durable-active-store-failure)
+  origin=sample-store-failure
+  hold="$origin-decision-scope"
+  write_origin_meta "$home" "$origin" ship
+  printf 'decisions_reviewed=1\ndecision_keys=scope\n' >> "$home/state/$origin.meta"
+  cat > "$home/data/done-archive.md" <<EOF
+## Archived 2026-07-18
+- [x] $hold - Valid archived decision (repo: sample) (kind: captain) (done 2026-07-18)
+  Resolution recorded by fm-decision-hold.
+  Decision digest: 0000000000000000000000000000000000000000000000000000000000000000
+  Routed identities: sample-work
+
+  Captain decision:
+  Use the sample scope.
+
+  Routed work:
+  - sample-work
+EOF
+  cat > "$home/fakebin/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = show ] && [ "${2:-}" = sample-store-failure-decision-scope ]; then
+  printf '%s\n' 'error: active backlog is malformed' 'code: INVALID_BACKLOG' >&2
+  exit 2
+fi
+exec "$REAL_TASKS_AXI" "$@"
+SH
+  chmod +x "$home/fakebin/tasks-axi"
+  if run_decisions "$home" verify "$origin" > "$home/store-failure.out" 2> "$home/store-failure.err"; then
+    fail "active store failure fell back to an archived decision"
+  fi
+  assert_grep "code: INVALID_BACKLOG" "$home/store-failure.err" \
+    "durable lookup discarded the authoritative active-store failure"
+  pass "durable lookup falls back only after an explicit not-found result"
+}
+
+test_archived_resolution_ignores_trailing_blank_formatting() {
+  local home origin hold
+  home=$(make_home archived-trailing-blanks)
+  origin=sample-trailing-blanks
+  hold="$origin-decision-scope"
+  write_origin_meta "$home" "$origin" ship
+  printf 'decisions_reviewed=1\ndecision_keys=scope\n' >> "$home/state/$origin.meta"
+  cat > "$home/data/done-archive.md" <<EOF
+## Archived 2026-07-18
+- [x] $hold - Archived decision with separator (repo: sample) (kind: captain) (done 2026-07-18)
+  Resolution recorded by fm-decision-hold.
+  Decision digest: 0000000000000000000000000000000000000000000000000000000000000000
+  Routed identities: sample-work
+
+  Captain decision:
+  Use the sample scope.
+
+  Routed work:
+  - sample-work
+
+
+- [x] sample-trailing-format - Formatting sentinel (repo: sample) (kind: ship) (done 2026-07-18)
+EOF
+  run_decisions "$home" verify "$origin" >/dev/null \
+    || fail "trailing archive formatting invalidated a resolved captain decision"
+  pass "trailing archive formatting is excluded from the archived task body"
+}
+
 test_secondmate_hold_stays_in_authoritative_home() {
   local parent mate origin hold json
   parent=$(make_home main-routing)
@@ -790,5 +876,8 @@ test_archived_ship_title_cannot_impersonate_captain_kind
 test_archived_resolution_requires_matching_routed_identities
 test_archived_resolution_requires_sha256_digest
 test_archived_resolution_preserves_literal_backslash_markers
+test_archived_identity_collision_refuses_hold_recreation
+test_durable_lookup_preserves_active_store_failures
+test_archived_resolution_ignores_trailing_blank_formatting
 test_secondmate_hold_stays_in_authoritative_home
 test_resolve_matches_quoted_blocked_by_edges
