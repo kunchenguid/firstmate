@@ -400,7 +400,14 @@ secondmate_liveness_sweep() {
     [ -n "$target" ] || target="$window"
     verdict=$(fm_backend_agent_alive "$backend" "$target" 2>/dev/null) || verdict="unknown"
     case "$harness" in
-      claude|codex|cursor|opencode|pi|grok) ;;
+      claude|codex|opencode|pi|grok) ;;
+      cursor)
+        # Only tmux's argv0-based classifier is verified to read a live
+        # node-wrapped cursor-agent correctly (docs/tmux-backend.md); herdr's
+        # native agent registry is unverified for cursor-agent, so a non-tmux
+        # cursor "dead" verdict is downgraded rather than trusted for respawn.
+        if [ "$backend" != tmux ] && [ "$verdict" = dead ]; then verdict=unknown; fi
+        ;;
       *) [ "$verdict" = dead ] && verdict=unknown ;;
     esac
     case "$verdict" in
