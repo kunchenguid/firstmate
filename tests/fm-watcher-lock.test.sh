@@ -647,15 +647,25 @@ test_arm_waits_for_peer_beacon_after_child_stands_down() {
   printf '%s\n' "$dir" > "$state/.watch.lock/fm-home"
   printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
   printf '%s\n' "$identity" > "$state/.watch.lock/pid-identity"
+  # Touch the beacon only after the arm has forked its child (its temp output
+  # file exists), so the arm provably entered its confirm loop with a stale
+  # beacon and had to WAIT - deterministic under full-suite load, where a fixed
+  # sleep raced the arm's wall-clock confirm budget. Bounded fallback touch so
+  # the arm can never hang beaconless if the readiness signal never appears.
   (
-    sleep 1
+    j=0
+    while [ "$j" -lt 100 ]; do
+      ls "$state"/.watch-arm-output.* >/dev/null 2>&1 && break
+      sleep 0.1
+      j=$((j + 1))
+    done
     touch "$state/.last-watcher-beat"
   ) &
   beater=$!
-  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_ARM_CONFIRM_TIMEOUT=4 FM_ARM_ATTACH_POLL=0.1 "$WATCH_ARM" > "$armout" &
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_ARM_CONFIRM_TIMEOUT=30 FM_ARM_ATTACH_POLL=0.1 "$WATCH_ARM" > "$armout" &
   armpid=$!
   i=0
-  while [ "$i" -lt 80 ]; do
+  while [ "$i" -lt 350 ]; do
     grep -qF "watcher: attached pid=$peer" "$armout" 2>/dev/null && break
     sleep 0.1
     i=$((i + 1))
