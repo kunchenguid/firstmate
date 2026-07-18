@@ -1,6 +1,13 @@
 {
   "version": 1,
   "hooks": {
+    "sessionStart": [
+      {
+        "command": "\"$CURSOR_PROJECT_DIR\"/bin/fm-sessionstart-nudge.sh",
+        "timeout": 10,
+        "failClosed": false
+      }
+    ],
     "preToolUse": [
       {
         "command": "\"$CURSOR_PROJECT_DIR\"/bin/fm-arm-pretool-check.sh",

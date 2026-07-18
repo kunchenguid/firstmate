@@ -21,6 +21,7 @@ Every path exits 0, including malformed state and adapter errors, because Claude
 |---|---|---|
 | Claude | `.claude/settings.json` registers `SessionStart` for `startup`, `resume`, and `clear`, excludes `compact`, and invokes the wrapper through `CLAUDE_PROJECT_DIR`. | Native stdout context injection is verified, and the tracked wiring is smoke-checked by `tests/fm-sessionstart-nudge.test.sh`. |
 | Codex | `.codex/hooks.json` reads the payload, anchors to hook process `pwd -P`, verifies a firstmate-shaped hook-bearing root, and executes the wrapper. | Native stdout context injection is verified on Codex 0.144.4. |
+| Cursor | `.cursor/hooks.json` registers the wrapper on the `sessionStart` event through `CURSOR_PROJECT_DIR` with `failClosed: false`. | Documented fail-open: Cursor Agent 2026.07.16-899851b executes no hooks for accounts without Cursor's server-side hooks rollout (2026-07-18, `docs/turnend-guard.md`), and `sessionStart` is confirmed in the installed bundle's hook-event registry rather than by an observed firing. |
 | OpenCode | `.opencode/plugins/fm-primary-sessionstart-nudge.js` listens for `session.created`, runs the wrapper once per session id, and calls `client.session.promptAsync` only when the wrapper prints a nudge. | Verified in the interactive TUI on OpenCode 1.17.18 and intentionally fail-open in headless `opencode run`. |
 | Pi | `.pi/extensions/fm-primary-turnend-guard.ts` handles `session_start` reasons `startup`, `new`, and `resume`, then injects the wrapper output with `pi.sendMessage`. | The custom message enters model context without racing an initial positional prompt, and the changed extension passes strict TypeScript checking on Pi 0.80.10. |
 | Grok | `.grok/hooks/fm-primary-sessionstart-nudge.json` registers a project `SessionStart` hook and invokes the wrapper through inline-defaulted `${GROK_WORKSPACE_ROOT:-}`. | The project event fires on Grok 0.2.103, but hook stdout does not reach model context, so this path is documented fail-open. |
@@ -92,6 +93,12 @@ OPENCODE_CONFIG_CONTENT='{"permission":{"*":"allow"}}' opencode --prompt 'Reply 
 The TUI created session `ses_08d62aad7ffe12xoJfGf0jHxJU`, accepted the `promptAsync` message, and rendered `OPENCODE_SESSIONSTART_CONTEXT` as the model result.
 This verifies `session.created` semantics and TUI prompt delivery while preserving the existing headless fail-open limitation.
 
+### Cursor Agent 2026.07.16-899851b (2026-07-18)
+
+A scratch-project catch-all hook logger registered on `sessionStart`, `preToolUse`, and `stop` recorded nothing across print-mode (`--print --trust --force`) and interactive tmux runs that both completed a Shell tool call, so no hook event - including `sessionStart` - executes for this individual Pro account.
+The installed bundle's hook-event registry contains `sessionStart` with an output validator accepting an `env` map, and its config reader discovers enterprise, team, user, project, and Claude-compat hook files, so the tracked wiring matches the installed contract and activates only when Cursor's server-side rollout enables hook execution.
+The full probe commands and bundle evidence live in `docs/turnend-guard.md`.
+
 ### Claude and Pi wiring smoke checks
 
 `jq empty .claude/settings.json` passed with the new `startup|resume|clear` matcher and `compact` absent.
@@ -107,5 +114,5 @@ The underlying Claude SessionStart stdout injection and Pi `session_start` event
 
 `tests/fm-sessionstart-nudge.test.sh` proves wrapper silence for both gate signals, an unmarked linked worktree, a missing state directory, and an already-owned lock.
 It proves exact one-line output for a plain primary and a marked linked secondmate primary.
-It also verifies tracked wrapper registration for Claude, Codex, OpenCode, Pi, and Grok.
+It also verifies tracked wrapper registration for Claude, Codex, Cursor, OpenCode, Pi, and Grok.
 `tests/fm-turnend-guard.test.sh` continues to cover the same shared primary scope through the turn-end path.

@@ -248,6 +248,9 @@ The hook process received `CURSOR_PROJECT_DIR` equal to the scratch project.
 Returning `{"permission":"allow"}` allowed the command and the model observed `CURSORTOOL`.
 Cursor's documented and installed exit-code contract maps exit 2 to a deny, so the tracked `Shell` matcher forwards the complete stdin payload to `bin/fm-arm-pretool-check.sh`; the checker remains the semantic owner.
 
+A 2026-07-18 revalidation on Cursor Agent `2026.07.16-899851b` with an individual Pro account found no hook execution at all for accounts without Cursor's server-side hooks rollout (`docs/turnend-guard.md` owns the dated evidence).
+The tracked Cursor seatbelt is therefore fail-open at the platform layer: it denies automatically only when Cursor executes project hooks, and the emitted supervision instructions remain the working guard otherwise.
+
 ## Automated validation
 
 `tests/fm-arm-pretool-check.test.sh` owns the adversarial acceptance matrix.

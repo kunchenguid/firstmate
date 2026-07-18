@@ -6,7 +6,7 @@ When this session owns supervision and away mode is not active:
 3. Run `bin/fm-watch-arm.sh` as its own Shell tool call with `block_until_ms: 0`.
 4. Never bundle the arm command with other commands.
 5. Never use shell `&` for watcher supervision.
-   A shell `&`, a truncating pipe, or bundling is denied automatically by the `preToolUse` seatbelt registered in `.cursor/hooks.json`.
+   When Cursor's account rollout executes project hooks, a shell `&`, a truncating pipe, or bundling is also denied automatically by the `preToolUse` seatbelt registered in `.cursor/hooks.json`; otherwise this instruction is the guard (docs/turnend-guard.md).
 6. Perform the one non-blocking status check required for a directly backgrounded Shell call.
 7. Treat `watcher: started ...` and `watcher: attached ...` as proof that one live cycle exists.
    On attach, the background task stays live until that existing cycle ends.

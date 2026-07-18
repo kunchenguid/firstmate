@@ -98,6 +98,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-cursor-lib.sh
+. "$SCRIPT_DIR/fm-cursor-lib.sh"
 if [ "$#" -lt 1 ] || ! fm_task_id_path_safe "$1"; then
   echo "error: invalid teardown request" >&2
   exit 2
@@ -258,13 +260,9 @@ remove_pr_poll_artifacts() {
   fi
 }
 
-remove_cursor_turnend_auth() {
-  local state_dir=$1 id=$2 token hooks_dir
-  token=$(cat "$state_dir/$id.cursor-turnend-token" 2>/dev/null || true)
-  case "$token" in ''|*[!A-Za-z0-9._-]*) return 0 ;; esac
-  hooks_dir="$HOME/.cursor/hooks/fm-turn-end.d"
-  rm -f "$hooks_dir/$token"
-}
+# Cursor turn-end auth removal (per-task token plus deterministic last-task
+# cleanup of the shared user-level hook artifacts) is owned by
+# fm_cursor_remove_turnend_auth in bin/fm-cursor-lib.sh.
 
 # Resolve the PR number for a worktree branch via gh-axi. Echoes the number on a
 # single match and returns 0; returns non-zero on no match or any lookup failure,
@@ -1013,7 +1011,7 @@ cleanup_firstmate_home_children() {
     fi
     remove_grok_turnend_auth "$sub_state" "$child_id"
     remove_pr_poll_artifacts "$sub_state" "$child_id" || return 1
-    remove_cursor_turnend_auth "$sub_state" "$child_id"
+    fm_cursor_remove_turnend_auth "$sub_state" "$child_id"
     rm -rf "$sub_state/$child_id.cursor-plugin"
     rm -f "$sub_state/$child_id.status" "$sub_state/$child_id.turn-ended" "$sub_state/$child_id.meta" "$sub_state/$child_id.pi-ext.ts" "$sub_state/$child_id.grok-turnend-token" "$sub_state/$child_id.cursor-turnend-token"
   done
@@ -1141,7 +1139,7 @@ if [ "$KIND" = secondmate ]; then
   remove_secondmate_registry_entry "$ID"
 fi
 remove_grok_turnend_auth "$STATE" "$ID"
-remove_cursor_turnend_auth "$STATE" "$ID"
+fm_cursor_remove_turnend_auth "$STATE" "$ID"
 rm -rf "$STATE/$ID.cursor-plugin"
 fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
 # Remove the per-task temp root (/tmp/fm-<id>/, incl. its gotmp/) recorded by spawn.

@@ -15,7 +15,7 @@
 #   bin/fm-arm-pretool-check.sh --command '<cmd>' [--background true|false]
 #
 # Stdin mode extracts .toolInput.command for Grok or .tool_input.command for
-# Claude and Codex.
+# Claude, Codex, and Cursor.
 # CLI mode is used by OpenCode and Pi after their adapters extract the exact
 # command string.
 # --background remains accepted for compatibility, but harness-native tracked
@@ -29,7 +29,8 @@
 #               missing Node or policy owner, or an invalid policy response.
 #
 # Claude requires stdout to remain empty on deny.
-# Codex blocks on exit 2 and displays stderr.
+# Codex blocks on exit 2 and displays stderr; Cursor blocks on exit 2 when its
+# account rollout executes hooks (docs/arm-pretool-check.md).
 # Grok consumes the stdout decision object.
 # OpenCode and Pi consume exit 2 plus stderr.
 set -u
