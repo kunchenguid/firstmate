@@ -559,7 +559,8 @@ x_mode_remove_artifact() {
 #   state/x-watch.check.sh - byte-static identity shim; the watcher validates
 #                            its bytes and invokes bin/fm-x-poll.sh directly
 #   config/x-mode.env      - exports FM_CHECK_INTERVAL=30, sourced by the watcher
-#                            arm so only an X instance polls at the 30s cadence
+#                            arm so a non-X home keeps the default cadence
+#                            (telegram_mode_setup arms its own equivalent file)
 # On opt-out (no token, or empty) it removes any such artifacts so the instance
 # reverts to the default 300s no-poll behavior. Absent a token AND with no leftover
 # artifacts it is a complete no-op (nothing written, nothing printed), so a non-X
