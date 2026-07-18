@@ -7,8 +7,9 @@
 #   positional harness arg still works for back-compat.
 #   --model <name> and --effort <low|medium|high|xhigh|max> are concrete profile
 #   axes chosen by firstmate at intake. They are only threaded into harnesses whose
-#   installed CLIs were verified to support that axis; Codex pins omitted effort to
-#   xhigh and accepts max only with gpt-5.6-sol, while other unsupported axes are omitted.
+#   installed CLIs were verified to support that axis; the verified Codex template
+#   pins omitted effort to xhigh and accepts max only with gpt-5.6-sol, while other
+#   unsupported axes are omitted.
 #   --backend <name> is the explicit runtime session-provider backend for this
 #   spawn. Without it, the script resolves FM_BACKEND, then config/backend, then
 #   runtime auto-detection (the runtime firstmate itself is executing inside -
