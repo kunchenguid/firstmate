@@ -24,6 +24,22 @@ section_9() {
   ' "$AGENTS"
 }
 
+test_chat_address_respects_private_preference() {
+  assert_grep 'Use the user'"'"'s stated preferred name or form of address from `data/captain.md` when present, and use direct address only when it is useful.' "$AGENTS" \
+    "AGENTS.md does not apply the private address preference"
+  assert_grep 'When no preference exists, default to neutral direct prose with no required salutation or repeated form of address.' "$AGENTS" \
+    "AGENTS.md does not provide a neutral no-preference default"
+  assert_grep 'never let it override a stated address preference' "$AGENTS" \
+    "nautical language can override the stated address preference"
+  assert_no_grep 'Address the user as "captain"' "$AGENTS" \
+    "AGENTS.md reintroduced a mandatory captain salutation"
+  assert_no_grep 'never send a response with zero direct address' "$AGENTS" \
+    "AGENTS.md reintroduced mandatory direct address"
+  assert_grep 'The user is the captain.' "$AGENTS" \
+    "the internal captain role vocabulary was removed"
+  pass "chat address follows private preference without removing internal captain vocabulary"
+}
+
 test_section_9_owns_positive_translation_contract() {
   local contract
   contract=$(section_9)
@@ -105,8 +121,10 @@ test_outward_facing_skill_points_reference_section_9_owner() {
     "bootstrap diagnostics do not reference section 9 at captain handoff"
   assert_grep "Acknowledge** in \`AGENTS.md\` section 9 language" "$AFK" \
     "afk acknowledgement does not reference section 9"
-  assert_grep "Captain, away mode is active; I will batch routine updates" "$AFK" \
-    "afk acknowledgement lacks a local plain-English example"
+  assert_grep "Away mode is active; I will batch routine updates" "$AFK" \
+    "afk acknowledgement lacks a local neutral plain-English example"
+  assert_no_grep "Captain, away mode is active" "$AFK" \
+    "afk acknowledgement overrides the address preference"
   assert_grep "as decisions from Bearings' Captain's Call section under \`AGENTS.md\` section 9" "$DECISION" \
     "decision relay does not reference section 9"
   assert_grep "using \`AGENTS.md\` section 9; do not mention metadata, harness, window, or worktree" "$RECOVERY" \
@@ -138,6 +156,7 @@ test_section_9_owner_is_not_duplicated_into_skills() {
   pass "skills cross-reference section 9 instead of duplicating the mapping list"
 }
 
+test_chat_address_respects_private_preference
 test_section_9_owns_positive_translation_contract
 test_scout_remains_allowed_house_vocabulary
 test_compressed_safety_labels_have_plain_renderings
