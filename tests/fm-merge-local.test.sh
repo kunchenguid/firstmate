@@ -45,7 +45,8 @@ SH
     "worktree=$case_dir/task-wt" \
     "project=$case_dir/project" \
     "kind=ship" \
-    "mode=$mode"
+    "mode=$mode" \
+    "sentinel=preserved"
   touch "$case_dir/state/.last-watcher-beat"
   printf '%s\n' "$case_dir"
 }
@@ -97,6 +98,10 @@ test_legacy_default_target() {
   [ "$main_after" = "$task_head" ] || fail "legacy-default: main did not fast-forward to the task branch"
   assert_grep 'local target main' "$case_dir/stdout" \
     "legacy-default: success output did not name main"
+  assert_grep 'local_merge_target=main' "$case_dir/state/task-x1.meta" \
+    "legacy-default: successful landing did not record main"
+  assert_grep 'sentinel=preserved' "$case_dir/state/task-x1.meta" \
+    "legacy-default: successful landing did not preserve existing metadata"
   pass "fm-merge-local preserves the no-option default-branch fast-forward"
 }
 
@@ -118,6 +123,10 @@ test_explicit_feature_target() {
   [ "$feature_before" != "$task_head" ] || fail "explicit-feature: fixture did not require a fast-forward"
   assert_grep 'local target feature/for-you-feed' "$case_dir/stdout" \
     "explicit-feature: success output did not name the actual target"
+  assert_grep 'local_merge_target=feature/for-you-feed' "$case_dir/state/task-x1.meta" \
+    "explicit-feature: successful landing did not record the actual target"
+  assert_grep 'sentinel=preserved' "$case_dir/state/task-x1.meta" \
+    "explicit-feature: successful landing did not preserve existing metadata"
   pass "fm-merge-local fast-forwards an explicitly requested clean feature target without changing main"
 }
 

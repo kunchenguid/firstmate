@@ -10,6 +10,8 @@
 # It only runs for mode=local-only tasks and only performs a clean
 # `git merge --ff-only` after all guards pass. See AGENTS.md prime directives,
 # project management, and task lifecycle.
+# After a successful fast-forward it appends `local_merge_target=<branch>` to
+# the task metadata so teardown can verify the branch that actually received it.
 #
 # Usage: fm-merge-local.sh <task-id> [--target <local-branch>]
 set -eu
@@ -21,6 +23,7 @@ Usage: fm-merge-local.sh <task-id> [--target <local-branch>]
 Fast-forward a clean, checked-out local branch to fm/<task-id> for an approved
 local-only task. Without --target, the project's default branch is the target.
 --target never checks out or creates the requested local branch.
+Successful landing records local_merge_target in the task metadata.
 EOF
 }
 
@@ -145,4 +148,5 @@ fi
 before=$(git -C "$PROJ" rev-parse --short "$TARGET_REF")
 git -C "$PROJ" merge --ff-only "$BRANCH_REF" >/dev/null
 after=$(git -C "$PROJ" rev-parse --short "$TARGET_REF")
+printf 'local_merge_target=%s\n' "$TARGET" >> "$META"
 echo "merged $BRANCH into local target $TARGET ($before -> $after) in $PROJ"
