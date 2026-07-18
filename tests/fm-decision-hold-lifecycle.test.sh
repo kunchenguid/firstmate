@@ -1296,6 +1296,62 @@ EOF
   pass "archive config matches tasks-axi quote-state behavior"
 }
 
+test_malformed_archived_header_refuses_hold_recreation() {
+  local home origin hold
+  home=$(make_home malformed-archived-header-collision)
+  origin=sample-malformed-header
+  hold="$origin-decision-scope"
+  write_origin_meta "$home" "$origin" ship
+  cat > "$home/data/done-archive.md" <<EOF
+## Archived 2026-07-18
+- [x] $hold -
+EOF
+
+  if run_decisions "$home" hold "$origin" scope \
+    --title "Choose the sample scope" --reason "captain scope pending" --repo sample \
+    > "$home/malformed-header.out" 2> "$home/malformed-header.err"; then
+    fail "malformed archived header allowed stable hold recreation"
+  fi
+  assert_no_grep "^- \[ \] $hold -" "$home/data/backlog.md" \
+    "malformed archived header created a replacement active identity"
+  assert_grep "malformed archived identity $hold" "$home/malformed-header.err" \
+    "malformed archived identity collision was treated as absent"
+  pass "malformed archived identity headers refuse stable hold recreation"
+}
+
+test_archive_config_uses_last_repeated_assignment() {
+  local home origin hold
+  home=$(make_home archive-config-repeated-key)
+  origin=sample-config-repeated-key
+  hold="$origin-decision-scope"
+  write_origin_meta "$home" "$origin" ship
+  sed -i.bak \
+    's|archive = "data/done-archive.md"|archive = ""\narchive = "data/old-archive.md"\narchive = "data/current-archive.md"|' \
+    "$home/.tasks.toml"
+  rm "$home/.tasks.toml.bak"
+  cat > "$home/data/current-archive.md" <<EOF
+## Archived 2026-07-18
+- [x] $hold - Repeated archive config (repo: sample) (kind: captain) (done 2026-07-18)
+  Resolution recorded by fm-decision-hold.
+  Decision digest: 0000000000000000000000000000000000000000000000000000000000000000
+  Routed identities: sample-work
+
+  Captain decision:
+  Use the sample scope.
+
+  Routed work:
+  - sample-work
+EOF
+
+  tasks_in "$home" list >/dev/null \
+    || fail "tasks-axi rejected repeated archive assignments"
+  run_decisions "$home" complete "$origin" scope >/dev/null \
+    || fail "archive config did not use the last repeated assignment"
+  run_decisions "$home" verify "$origin" >/dev/null \
+    || fail "last repeated archive assignment did not survive durable verification"
+  pass "archive config uses the last repeated assignment"
+}
+
 test_secondmate_hold_stays_in_authoritative_home() {
   local parent mate origin hold json
   parent=$(make_home main-routing)
@@ -1471,5 +1527,7 @@ test_archive_config_accepts_spaced_markdown_section
 test_archived_resolution_normalizes_semantic_lines
 test_archived_resolution_accepts_dependency_metadata
 test_archive_config_matches_tasks_axi_quote_state
+test_malformed_archived_header_refuses_hold_recreation
+test_archive_config_uses_last_repeated_assignment
 test_secondmate_hold_stays_in_authoritative_home
 test_resolve_matches_quoted_blocked_by_edges

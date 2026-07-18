@@ -138,7 +138,8 @@ strip_toml_comment() {  # <line>
 }
 
 tasks_config_value() {  # <key>
-  local key=$1 config="$FM_HOME/.tasks.toml" in_markdown=0 line trimmed section assignment value
+  local key=$1 config="$FM_HOME/.tasks.toml" in_markdown=0 found=0
+  local line trimmed section assignment value result=''
   [ -f "$config" ] || return 1
   while IFS= read -r line || [ -n "$line" ]; do
     line=$(strip_toml_comment "$line")
@@ -174,13 +175,14 @@ tasks_config_value() {  # <key>
           \'*\') value=${value#\'}; value=${value%\'} ;;
           *) continue ;;
         esac
-        [ -n "$value" ] || return 1
-        printf '%s\n' "$value"
-        return 0
+        result=$value
+        found=1
         ;;
     esac
   done < "$config"
-  return 1
+  [ "$found" -eq 1 ] || return 1
+  [ -n "$result" ] || return 1
+  printf '%s\n' "$result"
 }
 
 tasks_config_path() {  # <path>
@@ -265,7 +267,10 @@ toon_escape_line() {
 }
 
 archive_task_show() {  # <id>
-  local id=$1 archive match_count=0 capture=0 header='' body='' pending_blanks='' line content kind state
+  local id=$1 archive match_count=0 malformed=0 capture=0 header='' body='' pending_blanks=''
+  local line content candidate candidate_state kind state
+  local done_prefix_re='^- \[x\] ([A-Za-z0-9][A-Za-z0-9._-]*)(.*)$'
+  local queued_prefix_re='^- \[ \] ([A-Za-z0-9][A-Za-z0-9._-]*)(.*)$'
   archive=$(tasks_archive_path)
   [ -e "$archive" ] || return 1
   if [ ! -f "$archive" ] || [ ! -r "$archive" ]; then
@@ -278,24 +283,36 @@ archive_task_show() {  # <id>
       *[![:space:]]*) ;;
       *) line='' ;;
     esac
-    case "$line" in
-      "- [x] $id - "*|"- [ ] $id - "*)
-        match_count=$((match_count + 1))
-        if [ "$match_count" -eq 1 ]; then
-          capture=1
-          header=$line
-          body=''
-          pending_blanks=''
-          case "$line" in
-            "- [x] "*) state='done' ;;
-            *) state=queued ;;
-          esac
-        else
-          capture=0
-        fi
-        continue
-        ;;
-    esac
+    candidate=''
+    candidate_state=''
+    if [[ $line =~ $done_prefix_re ]]; then
+      candidate=${BASH_REMATCH[1]}
+      candidate_state='done'
+    elif [[ $line =~ $queued_prefix_re ]]; then
+      candidate=${BASH_REMATCH[1]}
+      candidate_state=queued
+    fi
+    if [ "$candidate" = "$id" ]; then
+      match_count=$((match_count + 1))
+      if [ "$match_count" -eq 1 ]; then
+        case "$line" in
+          "- [x] $id - "*|"- [ ] $id - "*)
+            capture=1
+            header=$line
+            body=''
+            pending_blanks=''
+            state=$candidate_state
+            ;;
+          *)
+            malformed=1
+            capture=0
+            ;;
+        esac
+      else
+        capture=0
+      fi
+      continue
+    fi
     if [ "$capture" = 0 ]; then
       continue
     fi
@@ -318,6 +335,10 @@ archive_task_show() {  # <id>
   [ "$match_count" -gt 0 ] || return 1
   if [ "$match_count" -ne 1 ]; then
     printf 'fm-decision-hold: duplicate archived identity %s in %s\n' "$id" "$archive" >&2
+    return 2
+  fi
+  if [ "$malformed" -eq 1 ]; then
+    printf 'fm-decision-hold: malformed archived identity %s in %s\n' "$id" "$archive" >&2
     return 2
   fi
   kind=$(archive_header_kind "$header" || true)
