@@ -59,7 +59,7 @@ SH
 # make_herdr_statefake: a STATEFUL `herdr` stub that models the parts of herdr's
 # real container behavior the workspace-leak fix (and the default-tab-prune
 # safety fix) depend on, so a full spawn->teardown cycle can be replayed
-# repeatedly and the "one persistent firstmate workspace, no orphans"
+# repeatedly and the "one persistent primary workspace, no orphans"
 # invariant asserted end to end (the canned, call-numbered make_herdr_fakebin
 # above cannot model state carried ACROSS calls). Backed by a JSON state file
 # ($FM_FAKE_HERDR_STATE) mutated with real jq. Modeled behaviors, all
@@ -223,8 +223,8 @@ test_workspace_label_primary_home_no_marker() {
   local home
   home="$TMP_ROOT/primary-home-no-marker"; mkdir -p "$home"
   out=$( FM_HOME="$home" bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_workspace_label' "$ROOT" )
-  [ "$out" = "firstmate" ] || fail "a primary home (no .fm-secondmate-home marker) should resolve to label 'firstmate', got '$out'"
-  pass "fm_backend_herdr_workspace_label: a primary home (no marker) resolves to 'firstmate'"
+  [ "$out" = "fm" ] || fail "a primary home (no .fm-secondmate-home marker) should resolve to label 'fm', got '$out'"
+  pass "fm_backend_herdr_workspace_label: a primary home (no marker) resolves to 'fm'"
 }
 
 test_workspace_label_secondmate_home_uses_marker_id() {
@@ -250,8 +250,8 @@ test_workspace_label_empty_marker_falls_back_to_primary() {
   home="$TMP_ROOT/secondmate-home-empty"; mkdir -p "$home"
   : > "$home/.fm-secondmate-home"
   out=$( FM_HOME="$home" bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_workspace_label' "$ROOT" )
-  [ "$out" = "firstmate" ] || fail "an empty/unreadable marker should fall back to 'firstmate', got '$out'"
-  pass "fm_backend_herdr_workspace_label: an empty marker file falls back to the primary label 'firstmate'"
+  [ "$out" = "fm" ] || fail "an empty/unreadable marker should fall back to 'fm', got '$out'"
+  pass "fm_backend_herdr_workspace_label: an empty marker file falls back to the primary label 'fm'"
 }
 
 test_workspace_label_different_secondmates_get_different_labels() {
@@ -294,19 +294,19 @@ test_container_ensure_starts_server_and_workspace() {
   # 3: `herdr server` backgrounded launch - no meaningful output
   # 4: server_ensure poll -> now running
   printf '{"server":{"running":true}}\n' > "$resp/4.out"
-  # 5: workspace list -> empty (no "firstmate" workspace yet)
+  # 5: workspace list -> empty (no "fm" workspace yet)
   printf '{"result":{"workspaces":[]}}\n' > "$resp/5.out"
   # 6: workspace create -> w1, seeding default tab w1:t9 (real herdr returns
   # the seeded tab/pane ids in the SAME response - verified empirically).
-  printf '{"result":{"workspace":{"workspace_id":"w1","label":"firstmate"},"tab":{"tab_id":"w1:t9"},"root_pane":{"pane_id":"w1:p9"}}}\n' > "$resp/6.out"
+  printf '{"result":{"workspace":{"workspace_id":"w1","label":"fm"},"tab":{"tab_id":"w1:t9"},"root_pane":{"pane_id":"w1:p9"}}}\n' > "$resp/6.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_SCRIPT_STATUS=1 HERDR_SESSION=fmtest \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_container_ensure /tmp' "$ROOT" )
   [ "$out" = $'fmtest:w1\tw1:t9' ] || fail "container_ensure should echo '<session>:<workspace_id>\\t<seeded_default_tab_id>', got '$out'"
   assert_contains "$(cat "$log")" "HERDR_SESSION=fmtest"$'\x1f''server' "container_ensure did not start the herdr server"
-  assert_contains "$(cat "$log")" $'\x1f''workspace'$'\x1f''create'$'\x1f''--cwd'$'\x1f''/tmp'$'\x1f''--label'$'\x1f''firstmate' \
-    "container_ensure did not create the firstmate workspace with the given cwd"
-  pass "fm_backend_herdr_container_ensure: version-gates, starts the server, ensures the firstmate workspace, echoes session:workspace_id + the seeded default tab id"
+  assert_contains "$(cat "$log")" $'\x1f''workspace'$'\x1f''create'$'\x1f''--cwd'$'\x1f''/tmp'$'\x1f''--label'$'\x1f''fm' \
+    "container_ensure did not create the primary 'fm' workspace with the given cwd"
+  pass "fm_backend_herdr_container_ensure: version-gates, starts the server, ensures the primary 'fm' workspace, echoes session:workspace_id + the seeded default tab id"
 }
 
 test_container_ensure_reuses_existing_workspace() {
@@ -314,13 +314,47 @@ test_container_ensure_reuses_existing_workspace() {
   dir="$TMP_ROOT/container-reuse"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
   printf '{"client":{"version":"0.7.1","protocol":14}}\n' > "$resp/1.out"
   printf '{"server":{"running":true}}\n' > "$resp/2.out"
-  printf '{"result":{"workspaces":[{"workspace_id":"w9","label":"firstmate"}]}}\n' > "$resp/3.out"
+  printf '{"result":{"workspaces":[{"workspace_id":"w9","label":"fm"}]}}\n' > "$resp/3.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_SCRIPT_STATUS=1 HERDR_SESSION=fmtest \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_container_ensure /tmp' "$ROOT" )
-  [ "$out" = $'fmtest:w9\t' ] || fail "container_ensure should reuse the existing firstmate workspace id with an EMPTY seeded-tab field (an ADOPTED workspace is never a prune candidate), got '$out'"
+  [ "$out" = $'fmtest:w9\t' ] || fail "container_ensure should reuse the existing primary 'fm' workspace id with an EMPTY seeded-tab field (an ADOPTED workspace is never a prune candidate), got '$out'"
   assert_not_contains "$(cat "$log")" $'\x1f''workspace'$'\x1f''create' "container_ensure should not create a workspace that already exists"
-  pass "fm_backend_herdr_container_ensure: reuses an existing firstmate workspace without recreating it, and reports no seeded default tab (adopted, not created)"
+  pass "fm_backend_herdr_container_ensure: reuses an existing primary 'fm' workspace without recreating it, and reports no seeded default tab (adopted, not created)"
+}
+
+test_container_ensure_does_not_force_migrate_legacy_primary_workspace() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/container-legacy-primary"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"client":{"version":"0.7.1","protocol":14}}\n' > "$resp/1.out"
+  printf '{"server":{"running":true}}\n' > "$resp/2.out"
+  printf '{"result":{"workspaces":[{"workspace_id":"w-old","label":"firstmate"}]}}\n' > "$resp/3.out"
+  printf '{"result":{"workspace":{"workspace_id":"w-new","label":"fm"},"tab":{"tab_id":"w-new:t1"},"root_pane":{"pane_id":"w-new:p1"}}}\n' > "$resp/4.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_SCRIPT_STATUS=1 HERDR_SESSION=fmtest \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_container_ensure /tmp' "$ROOT" )
+  [ "$out" = $'fmtest:w-new\tw-new:t1' ] || fail "container_ensure should leave the legacy 'firstmate' workspace alone and create the current 'fm' workspace, got '$out'"
+  assert_contains "$(cat "$log")" $'\x1f''workspace'$'\x1f''create'$'\x1f''--cwd'$'\x1f''/tmp'$'\x1f''--label'$'\x1f''fm' \
+    "container_ensure did not create a new workspace under the current primary label 'fm'"
+  assert_not_contains "$(cat "$log")" $'\x1f''workspace'$'\x1f''rename' \
+    "container_ensure must never rename a legacy live workspace automatically"
+  pass "fm_backend_herdr_container_ensure: leaves a legacy 'firstmate' workspace untouched and creates 'fm' without forced migration"
+}
+
+test_recorded_target_stays_addressable_across_primary_label_change() {
+  local dir log resp fb out home
+  dir="$TMP_ROOT/recorded-target-label-change"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  home="$dir/primary-home"; mkdir -p "$home"
+  printf 'legacy task still reachable\n' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HOME="$home" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; [ "$(fm_backend_herdr_workspace_label)" = fm ] || exit 1; fm_backend_herdr_capture fmtest:w-old:p2 20' "$ROOT" )
+  [ "$out" = "legacy task still reachable" ] || fail "a recorded pane target should remain directly addressable after the derived workspace label changes, got '$out'"
+  assert_contains "$(cat "$log")" $'\x1f''pane'$'\x1f''read'$'\x1f''w-old:p2' \
+    "capture did not use the recorded pane id directly"
+  assert_not_contains "$(cat "$log")" $'\x1f''workspace'$'\x1f''list' \
+    "a direct recorded target must not re-derive its workspace from the current label"
+  pass "recorded herdr targets: existing tasks remain addressable by pane id across the primary workspace-label change"
 }
 
 test_create_task_refuses_duplicate_label() {
@@ -575,12 +609,12 @@ test_container_ensure_creates_with_no_focus_flag() {
   printf '{"client":{"version":"0.7.1","protocol":14}}\n' > "$resp/1.out"
   printf '{"server":{"running":true}}\n' > "$resp/2.out"
   printf '{"result":{"workspaces":[]}}\n' > "$resp/3.out"
-  printf '{"result":{"workspace":{"workspace_id":"w1","label":"firstmate"},"tab":{"tab_id":"w1:t1"},"root_pane":{"pane_id":"w1:p1"}}}\n' > "$resp/4.out"
+  printf '{"result":{"workspace":{"workspace_id":"w1","label":"fm"},"tab":{"tab_id":"w1:t1"},"root_pane":{"pane_id":"w1:p1"}}}\n' > "$resp/4.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_SCRIPT_STATUS=1 HERDR_SESSION=fmtest \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_container_ensure /tmp' "$ROOT" )
   [ "$out" = $'fmtest:w1\tw1:t1' ] || fail "container_ensure should still echo '<session>:<workspace_id>\\t<seeded_default_tab_id>', got '$out'"
-  assert_contains "$(cat "$log")" $'\x1f''workspace'$'\x1f''create'$'\x1f''--cwd'$'\x1f''/tmp'$'\x1f''--label'$'\x1f''firstmate'$'\x1f''--no-focus' \
+  assert_contains "$(cat "$log")" $'\x1f''workspace'$'\x1f''create'$'\x1f''--cwd'$'\x1f''/tmp'$'\x1f''--label'$'\x1f''fm'$'\x1f''--no-focus' \
     "container_ensure's workspace create did not pass --no-focus (focus-safety: never steal the captain's attention on spawn)"
   pass "fm_backend_herdr_container_ensure: workspace create passes --no-focus"
 }
@@ -599,7 +633,7 @@ test_container_ensure_uses_secondmate_home_label() {
   [ "$out" = $'fmtest:w9\tw9:t1' ] || fail "container_ensure did not echo the expected session:workspace_id + seeded default tab id, got '$out'"
   assert_contains "$(cat "$log")" $'\x1f''workspace'$'\x1f''create'$'\x1f''--cwd'$'\x1f''/tmp'$'\x1f''--label'$'\x1f''2ndmate-sshhip-h7' \
     "container_ensure did not create the workspace under this secondmate home's own label"
-  pass "fm_backend_herdr_container_ensure: creates the workspace under the SECONDMATE home's own label, not 'firstmate'"
+  pass "fm_backend_herdr_container_ensure: creates the workspace under the SECONDMATE home's own label, not the primary's 'fm'"
 }
 
 test_create_task_creates_with_no_focus_flag() {
@@ -622,11 +656,11 @@ test_workspace_find_matches_only_this_homes_own_label() {
   local dir log resp fb out home
   dir="$TMP_ROOT/find-scoped"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
   home="$TMP_ROOT/find-scoped-home"; mkdir -p "$home"; printf 'bravo-b2\n' > "$home/.fm-secondmate-home"
-  # A workspace list carrying BOTH the primary's "firstmate" space and this
+  # A workspace list carrying BOTH the primary's "fm" space and this
   # secondmate's own "2ndmate-bravo-b2" space (as would be true once several
   # homes share one herdr session) - find must pick the one matching THIS
   # home's own label, never the primary's or a sibling secondmate's.
-  printf '{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate"},{"workspace_id":"w2","label":"2ndmate-bravo-b2"},{"workspace_id":"w3","label":"2ndmate-alpha-a1"}]}}\n' > "$resp/1.out"
+  printf '{"result":{"workspaces":[{"workspace_id":"w1","label":"fm"},{"workspace_id":"w2","label":"2ndmate-bravo-b2"},{"workspace_id":"w3","label":"2ndmate-alpha-a1"}]}}\n' > "$resp/1.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HOME="$home" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_workspace_find fmtest' "$ROOT" )
@@ -641,7 +675,7 @@ test_list_live_scoped_to_this_homes_workspace_only() {
   dir="$TMP_ROOT/list-live-scoped"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
   home="$TMP_ROOT/list-live-scoped-home"; mkdir -p "$home"; printf 'bravo-b2\n' > "$home/.fm-secondmate-home"
   # 1: workspace_find's `workspace list` - two homes coexist, secondmate's is w2
-  printf '{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate"},{"workspace_id":"w2","label":"2ndmate-bravo-b2"}]}}\n' > "$resp/1.out"
+  printf '{"result":{"workspaces":[{"workspace_id":"w1","label":"fm"},{"workspace_id":"w2","label":"2ndmate-bravo-b2"}]}}\n' > "$resp/1.out"
   # 2: tab list --workspace w2 (this secondmate's own tabs only)
   printf '{"result":{"tabs":[{"tab_id":"w2:t1","label":"fm-secondmatetask"}]}}\n' > "$resp/2.out"
   # 3: pane_for_tab's `pane list --workspace w2`
@@ -1572,9 +1606,9 @@ EOF
       bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_kill "$1"' "$ROOT" "fmtest:$pane" \
       || fail "cycle $i: kill failed"
   done
-  # exactly one firstmate workspace survives three spawn/teardown cycles
-  wscount=$(jq -r '[.workspaces[]|select(.label=="firstmate")]|length' "$state")
-  [ "$wscount" = 1 ] || fail "expected exactly 1 firstmate workspace after 3 cycles, got $wscount: $(jq -c '.workspaces' "$state")"
+  # exactly one primary "fm" workspace survives three spawn/teardown cycles
+  wscount=$(jq -r '[.workspaces[]|select(.label=="fm")]|length' "$state")
+  [ "$wscount" = 1 ] || fail "expected exactly 1 primary 'fm' workspace after 3 cycles, got $wscount: $(jq -c '.workspaces' "$state")"
   # and no orphaned workspaces of any label
   total=$(jq -r '.workspaces|length' "$state")
   [ "$total" = 1 ] || fail "expected no orphaned workspaces after 3 cycles, got $total total: $(jq -c '.workspaces' "$state")"
@@ -1584,7 +1618,7 @@ EOF
   # the workspace was minted once and reused thereafter, never re-created
   created=$(grep -c $'\x1f''workspace'$'\x1f''create' "$log")
   [ "$created" = 1 ] || fail "workspace create should run exactly once across 3 cycles (reuse, not re-mint), ran $created times"
-  pass "herdr repeated spawn/teardown: one persistent firstmate workspace reused, zero orphans, default tab pruned, create ran once"
+  pass "herdr repeated spawn/teardown: one persistent primary 'fm' workspace reused, zero orphans, default tab pruned, create ran once"
 }
 
 # --- created-vs-adopted default-tab-prune safety (2026-07-02 self-kill fix) -
@@ -1613,7 +1647,7 @@ test_adopted_workspace_never_prunes_default_tab() {
   # previous session created it), with a single tab labeled "1" - the same
   # shape herdr's own auto-seeded default tab has, but this run's own
   # container_ensure never ran a `workspace create` call to produce it.
-  jq -n '{next:2,workspaces:[{workspace_id:"w1",label:"firstmate"}],tabs:[{tab_id:"w1:t1",label:"1",workspace_id:"w1",pane_id:"w1:p1"}],agent_status:{}}' > "$state"
+  jq -n '{next:2,workspaces:[{workspace_id:"w1",label:"fm"}],tabs:[{tab_id:"w1:t1",label:"1",workspace_id:"w1",pane_id:"w1:p1"}],agent_status:{}}' > "$state"
   raw=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_FAKE_HERDR_STATE="$state" HERDR_SESSION=fmtest \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_container_ensure /proj' "$ROOT" ) \
     || fail "container_ensure failed against the stateful fake"
@@ -1640,22 +1674,20 @@ EOF
 }
 
 test_label_collision_startup_workspace_leaves_live_tab_alone() {
-  # The exact live-fire incident shape (2026-07-02): a captain launches herdr
-  # directly inside a directory named "firstmate", so herdr auto-derives that
-  # workspace's DISPLAYED label from the cwd basename - "firstmate" - byte-
-  # identical to the primary firstmate home's own derived label, with no
-  # --label ever passed and no firstmate involvement at all. That workspace's
-  # single auto-created tab (label "1") holds the captain's own live agent.
-  # The very next crewmate spawn must adopt-and-leave-alone, never prune.
+  # The exact live-fire incident shape (2026-07-02) used a directory and
+  # then-current primary label of "firstmate". This fixture substitutes the
+  # current primary label "fm" so it still exercises the same coincidental
+  # label collision: one adopted tab labeled "1" holding a live agent. The
+  # very next crewmate spawn must adopt-and-leave-alone, never prune.
   local dir log state fb raw container seeded ids pane
   dir="$TMP_ROOT/label-collision"; mkdir -p "$dir"; log="$dir/log"; state="$dir/state.json"; : > "$log"
   fb=$(make_herdr_statefake "$dir")
-  # Mimic a bare `herdr workspace create --cwd <dir-named-firstmate>` (no
-  # --label): the resulting workspace's label is the cwd basename, and its
-  # one auto-created tab is still labeled "1" - indistinguishable, by label
-  # alone, from firstmate's own freshly-seeded default tab. Its pane hosts a
-  # live agent (agent_status=working), exactly like the captain's own pane.
-  jq -n '{next:2,workspaces:[{workspace_id:"w1",label:"firstmate"}],tabs:[{tab_id:"w1:t1",label:"1",workspace_id:"w1",pane_id:"w1:p1"}],agent_status:{"w1:p1":"working"}}' > "$state"
+  # Mimic a bare `herdr workspace create --cwd <dir-named-fm>` (no --label):
+  # the resulting workspace's label is the cwd basename, and its one
+  # auto-created tab is still labeled "1" - indistinguishable, by label alone,
+  # from firstmate's own freshly-seeded default tab. Its pane hosts a live
+  # agent (agent_status=working), exactly like the captain's own pane.
+  jq -n '{next:2,workspaces:[{workspace_id:"w1",label:"fm"}],tabs:[{tab_id:"w1:t1",label:"1",workspace_id:"w1",pane_id:"w1:p1"}],agent_status:{"w1:p1":"working"}}' > "$state"
   raw=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_FAKE_HERDR_STATE="$state" HERDR_SESSION=fmtest \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_container_ensure /proj' "$ROOT" ) \
     || fail "container_ensure failed against the stateful fake"
@@ -2051,6 +2083,8 @@ test_workspace_label_different_secondmates_get_different_labels
 test_cli_helper_sets_env_and_appends_trailing_session_flag
 test_container_ensure_starts_server_and_workspace
 test_container_ensure_reuses_existing_workspace
+test_container_ensure_does_not_force_migrate_legacy_primary_workspace
+test_recorded_target_stays_addressable_across_primary_label_change
 test_container_ensure_creates_with_no_focus_flag
 test_container_ensure_uses_secondmate_home_label
 test_workspace_ensure_prunes_default_tab
