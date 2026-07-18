@@ -393,6 +393,12 @@ work_is_landed() {
   content_in_default
 }
 
+shell_quote() {
+  printf "'"
+  printf '%s' "$1" | sed "s/'/'\\\\''/g"
+  printf "'"
+}
+
 backlog_refresh_reminder() {
   local pr done_cmd report_path local_note default_target
   [ "$KIND" = secondmate ] && return 0
@@ -415,7 +421,7 @@ backlog_refresh_reminder() {
               fi
               ;;
           esac
-          done_cmd="tasks-axi done $ID --note \"$local_note\""
+          done_cmd="tasks-axi done $ID --note $(shell_quote "$local_note")"
         else
           pr=$PR_URL
           if [ -n "$pr" ]; then

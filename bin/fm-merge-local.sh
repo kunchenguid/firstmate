@@ -75,24 +75,25 @@ if [ "$#" -gt 0 ]; then
   esac
 fi
 
-if [ -n "$REQUESTED_TARGET" ]; then
-  case "$REQUESTED_TARGET" in
+validate_target() {
+  local target=$1 single_quote backslash unsafe_char
+  case "$target" in
     -*|*[[:space:]]*)
-      fail_usage "unsafe or option-like target branch '$REQUESTED_TARGET'"
+      fail_usage "unsafe or option-like target branch '$target'"
       ;;
   esac
   single_quote=$(printf '\047')
   backslash=$(printf '\134')
   for unsafe_char in '$' '`' ';' '|' '&' '<' '>' "$backslash" "$single_quote" '"' '(' ')' '{' '}'; do
-    case "$REQUESTED_TARGET" in
+    case "$target" in
       *"$unsafe_char"*)
-        fail_usage "unsafe or option-like target branch '$REQUESTED_TARGET'"
+        fail_usage "unsafe or option-like target branch '$target'"
         ;;
     esac
   done
-  git check-ref-format --branch "$REQUESTED_TARGET" >/dev/null 2>&1 \
-    || fail_usage "invalid target branch '$REQUESTED_TARGET'"
-fi
+  git check-ref-format --branch "$target" >/dev/null 2>&1 \
+    || fail_usage "invalid target branch '$target'"
+}
 
 META="$STATE/$ID.meta"
 STATE_DEVICE=$(fm_pr_file_device "$STATE") \
@@ -130,6 +131,7 @@ if [ -n "$REQUESTED_TARGET" ]; then
 else
   TARGET=$(default_branch) || { echo "error: cannot determine target default branch for $PROJ; expected origin/HEAD, main, or master" >&2; exit 1; }
 fi
+validate_target "$TARGET"
 
 BRANCH="fm/$ID"
 TARGET_REF="refs/heads/$TARGET"

@@ -191,6 +191,21 @@ test_invalid_and_injection_targets_refuse() {
   pass "fm-merge-local rejects invalid and shell-injection-shaped targets without evaluation or mutation"
 }
 
+test_injection_shaped_default_target_refuses() {
+  local case_dir target marker
+  case_dir=$(make_case injection-default main)
+  marker="$case_dir/state/injected"
+  target='release$(touch${IFS}$FM_STATE_OVERRIDE/injected)'
+  git -C "$case_dir/project" branch -m "$target"
+  git -C "$case_dir/project" symbolic-ref refs/remotes/origin/HEAD "refs/remotes/origin/$target"
+
+  assert_refusal_without_mutation "$case_dir" injection-default task-x1
+  assert_grep 'unsafe or option-like target branch' "$case_dir/injection-default.stderr" \
+    "injection-default: refusal did not identify the unsafe derived target"
+  assert_absent "$marker" "injection-default: derived target was evaluated"
+  pass "fm-merge-local rejects an injection-shaped default target without mutation"
+}
+
 test_task_branch_as_target_refuses() {
   local case_dir
   case_dir=$(make_case task-as-target main)
@@ -308,6 +323,7 @@ test_wrong_checked_out_branch_refuses
 test_dirty_target_refuses
 test_nonexistent_target_refuses
 test_invalid_and_injection_targets_refuse
+test_injection_shaped_default_target_refuses
 test_task_branch_as_target_refuses
 test_diverged_target_refuses
 test_missing_task_branch_refuses

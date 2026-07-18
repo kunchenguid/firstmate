@@ -595,7 +595,7 @@ test_local_only_merged_to_local_main_allows() {
 
   expect_code 0 "$rc" "merged-main: teardown should succeed when work is merged into local main"
   ! grep -q REFUSED "$case_dir/stderr" || fail "merged-main: teardown printed a REFUSED line"
-  assert_grep 'tasks-axi done task-x1 --note "local main"' "$case_dir/stdout" \
+  assert_grep "tasks-axi done task-x1 --note 'local main'" "$case_dir/stdout" \
     "merged-main: teardown did not retain the default local completion note"
   pass "local-only worktree with work merged into local main is torn down (no regression)"
 }
@@ -625,9 +625,31 @@ test_local_only_merge_to_recorded_feature_then_teardown_allows() {
 
   expect_code 0 "$rc" "merged-feature: teardown should accept work on the recorded local target"
   ! grep -q REFUSED "$case_dir/stderr" || fail "merged-feature: teardown printed a REFUSED line"
-  assert_grep 'tasks-axi done task-x1 --note "local feature/for-you-feed"' "$case_dir/stdout" \
+  assert_grep "tasks-axi done task-x1 --note 'local feature/for-you-feed'" "$case_dir/stdout" \
     "merged-feature: teardown did not report the recorded local target"
   pass "local-only work merged to a recorded feature target is torn down"
+}
+
+test_local_only_completion_note_shell_quotes_recorded_target() {
+  local case_dir rc marker target command
+  case_dir=$(make_case quoted-feature)
+  write_meta "$case_dir" local-only ship
+  marker="$case_dir/injected"
+  target='feature/$(touch${IFS}injected)'
+  printf 'local_merge_target=%s\n' "$target" >> "$case_dir/state/task-x1.meta"
+  add_compatible_tasks_axi "$case_dir"
+
+  set +e
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "quoted-feature: forced teardown should succeed"
+  command=$(sed -n 's/^Backlog: .* Run \(tasks-axi done .*\), then run tasks-axi ready.*/\1/p' "$case_dir/stdout")
+  [ -n "$command" ] || fail "quoted-feature: completion command was not emitted"
+  ( cd "$case_dir" && PATH="$case_dir/fakebin:$PATH" eval "$command" )
+  assert_absent "$marker" "quoted-feature: completion command evaluated recorded target content"
+  pass "local-only completion note shell-quotes the recorded target"
 }
 
 test_no_mistakes_origin_remote_allows() {
@@ -1311,6 +1333,7 @@ test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present
 test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
 test_local_only_merge_to_recorded_feature_then_teardown_allows
+test_local_only_completion_note_shell_quotes_recorded_target
 test_no_mistakes_origin_remote_allows
 test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed
