@@ -1047,6 +1047,43 @@ test_spawn_human_label_records_sanitized_meta_without_renaming_tmux() {
   pass "fm-spawn.sh --label: records sanitized meta, reuses it on respawn, and leaves tmux's name-addressed fm-<id> identity unchanged"
 }
 
+test_spawn_label_refuses_fm_prefix() {
+  local out status
+  out=$(FM_ROOT_OVERRIDE="$ROOT" FM_HOME='' FM_STATE_OVERRIDE='' FM_DATA_OVERRIDE='' \
+    FM_PROJECTS_OVERRIDE='' FM_CONFIG_OVERRIDE='' FM_SPAWN_NO_GUARD=1 \
+    "$ROOT/bin/fm-spawn.sh" labelfmz7 projects/none claude --label fm-victim 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "fm-spawn --label fm-victim should refuse (fm- is the stable identity namespace)"
+  assert_contains "$out" "must not begin with fm-" "fm-spawn did not explain the reserved fm- namespace"
+  pass "fm-spawn.sh --label: a label in the reserved fm- identity namespace is refused"
+}
+
+test_spawn_batch_refuses_shared_label() {
+  local out status
+  out=$(FM_ROOT_OVERRIDE="$ROOT" FM_HOME='' FM_STATE_OVERRIDE='' FM_DATA_OVERRIDE='' \
+    FM_PROJECTS_OVERRIDE='' FM_CONFIG_OVERRIDE='' FM_SPAWN_NO_GUARD=1 \
+    "$ROOT/bin/fm-spawn.sh" fix-a-k3=projects/foo add-b-q7=projects/bar --label "#5 shared" 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "batch dispatch with --label should refuse (a display label is per-task)"
+  assert_contains "$out" "refused in batch dispatch" "batch dispatch did not refuse the shared --label"
+  pass "fm-spawn.sh batch dispatch: a shared --label is refused because a display label names one task"
+}
+
+test_spawn_herdr_refuses_duplicate_label_of_other_task() {
+  local state out status
+  state="$TMP_ROOT/dup-label-state"; mkdir -p "$state"
+  fm_write_meta "$state/other-task.meta" \
+    "window=fmtest:w1:p2" "backend=herdr" "label=#5 bpi-auth"
+  out=$(FM_ROOT_OVERRIDE="$ROOT" FM_HOME='' FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE='' \
+    FM_PROJECTS_OVERRIDE='' FM_CONFIG_OVERRIDE='' FM_SPAWN_NO_GUARD=1 \
+    "$ROOT/bin/fm-spawn.sh" duplabelz9 projects/none claude --backend herdr --label "#5 bpi-auth" 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a herdr spawn reusing another task's label should refuse before any herdr call"
+  assert_contains "$out" "already recorded by task other-task" \
+    "the duplicate-label refusal did not name the conflicting task"
+  pass "fm-spawn.sh herdr: a label already recorded by another task in the same home is refused before spawn"
+}
+
 test_spawn_explicit_backend_flag_beats_autodetect_herdr_env() {
   local proj wt data id state config out fb
   proj="$TMP_ROOT/explicit-backend-project"; wt="$TMP_ROOT/explicit-backend-wt"; data="$TMP_ROOT/explicit-backend-data"
@@ -1127,5 +1164,8 @@ test_spawn_refuses_codex_app_backend_flag
 test_spawn_refuses_unknown_fm_backend_env
 test_spawn_default_backend_writes_no_meta_field
 test_spawn_human_label_records_sanitized_meta_without_renaming_tmux
+test_spawn_label_refuses_fm_prefix
+test_spawn_batch_refuses_shared_label
+test_spawn_herdr_refuses_duplicate_label_of_other_task
 test_spawn_explicit_backend_flag_beats_autodetect_herdr_env
 test_spawn_autodetect_nesting_resolves_tmux_silently

@@ -1175,7 +1175,12 @@ EOF
 # Human-labeled tabs are mapped back to that same stable identity through the
 # label= plus herdr_session=/workspace=/tab= fields in state/<id>.meta; an
 # unmapped human label is skipped because its visible text alone cannot safely
-# reconstruct an id. A caller running as a given home (e.g. a secondmate
+# reconstruct an id. Out-of-band labels may embed tab/newline controls
+# (verified in docs/herdr-backend.md's lab probe), so the jq filter strips
+# control characters before the label enters this line/tab-framed stream - a
+# hostile label can never forge an extra "fm-<id>" recovery line; firstmate's
+# own sanitized labels contain no controls and pass through byte-identical.
+# A caller running as a given home (e.g. a secondmate
 # recovering its own in-flight work) naturally scopes to that home's own
 # workspace because FM_HOME already names it - no glue needed, unlike the
 # primary-spawns-a-secondmate path in fm-spawn.sh. Read-only: a session/
@@ -1222,7 +1227,7 @@ fm_backend_herdr_list_live() {  # <session>
     pane_id=$(fm_backend_herdr_pane_for_tab "$session" "$wsid" "$tab_id") || continue
     [ -n "$pane_id" ] || continue
     printf '%s:%s\t%s\n' "$session" "$pane_id" "$stable"
-  done < <(printf '%s' "$tabs" | jq -r '.result.tabs[]? | "\(.tab_id)\t\(.label)"' 2>/dev/null)
+  done < <(printf '%s' "$tabs" | jq -r '.result.tabs[]? | "\(.tab_id)\t\(.label | gsub("[[:cntrl:]]"; " "))"' 2>/dev/null)
 }
 
 # --- native event push: pane.agent_status_changed subscriber -----------------

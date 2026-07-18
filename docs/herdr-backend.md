@@ -75,11 +75,13 @@ Workspace-per-HOME fixes that while keeping tab-per-task's original human-watchi
 `bin/fm-spawn.sh --label <text>` is an optional display label for a task, for example `--label "#5 bpi-auth"`.
 The `fm-spawn.sh` header and `--help` output own the exact normalization and validation contract, and `fm_task_display_label_sanitize` in `bin/fm-backend.sh` is its shared implementation.
 The sanitized value is recorded as `label=` in `state/<id>.meta`, and a respawn with no explicit flag reuses that field so Herdr's duplicate-husk replacement finds the same visible tab.
+A label beginning with `fm-` is rejected outright (that namespace is the stable task identity), batch dispatch refuses `--label` entirely (a display label names one task, not a set), and a Herdr spawn refuses a label already recorded by another task's `label=` in the same home - since `fm_backend_herdr_create_task`'s duplicate/husk handling keys on the tab label, uniqueness per home is what guarantees one task can never close or block another task's tab through a shared display name, while the same-task respawn path still reuses its own recorded label.
 Without `--label`, Herdr keeps the existing `fm-<id>` tab label byte-for-byte.
 The task id, meta filename, `window=<session>:<pane-id>`, and backend ids remain the stable operational identity in either case.
 Teardown is unchanged because `fm_backend_herdr_kill` closes the recorded pane id, whose one-pane tab closes with it.
 `fm_backend_herdr_list_live` maps a human-labeled tab back to `fm-<id>` through the matching `label=` and Herdr identity fields in meta, while retaining the legacy direct `fm-<id>` path.
 An unmapped human-labeled tab is skipped rather than guessed because its display text does not necessarily contain the task id.
+Because Herdr accepts embedded tab/newline controls in labels (see the probe below), `fm_backend_herdr_list_live` strips control characters from every label before it enters the line/tab-framed stream, so an out-of-band tab cannot forge an `fm-<id>` recovery line; firstmate's own sanitized labels contain no controls and are unaffected.
 The workspace label remains the deliberate per-home `firstmate` or `2ndmate-<id>` identity and is not dynamically relabeled.
 
 The accepted-label probe ran on 2026-07-18 against Herdr 0.7.3, protocol 16, in the guarded non-default lab session `fm-lab-herdr-task-label-56658-32126`.

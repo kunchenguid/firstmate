@@ -689,14 +689,17 @@ test_human_label_sanitization_and_list_live_mapping() {
     "window=fmtest:w1:p2" "backend=herdr" "label=$sanitized" \
     "herdr_session=fmtest" "herdr_workspace_id=w1" "herdr_tab_id=w1:t2" "herdr_pane_id=w1:p2"
   printf '{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate"}]}}\n' > "$resp/1.out"
-  printf '{"result":{"tabs":[{"tab_id":"w1:t2","label":"#5 bpi-auth content"}]}}\n' > "$resp/2.out"
+  # The second, out-of-band tab embeds real newline/tab controls in its label
+  # (Herdr accepts them; docs/herdr-backend.md lab probe) crafted to forge an
+  # extra "w1:t9\tfm-victim" recovery line if list_live framed labels raw.
+  printf '{"result":{"tabs":[{"tab_id":"w1:t2","label":"#5 bpi-auth content"},{"tab_id":"w1:t9","label":"x\\nw1:t9\\tfm-victim"}]}}\n' > "$resp/2.out"
   printf '{"result":{"panes":[{"pane_id":"w1:p2","tab_id":"w1:t2"}]}}\n' > "$resp/3.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/fm-backend.sh"; fm_backend_source herdr; fm_backend_herdr_list_live fmtest' "$ROOT" )
   [ "$out" = $'fmtest:w1:p2\tfm-bpi-auth-impl' ] \
-    || fail "list_live should map the human tab label back to the stable task id through meta, got '$out'"
-  pass "human task labels: control whitespace is sanitized, length is capped, and Herdr list-live recovers fm-<id> through meta"
+    || fail "list_live should map the human tab label back to the stable task id through meta and drop the control-embedding out-of-band tab, got '$out'"
+  pass "human task labels: control whitespace is sanitized, length is capped, Herdr list-live recovers fm-<id> through meta, and a control-embedding label cannot forge a recovery line"
 }
 
 # --- target parsing, key normalization ---------------------------------------
@@ -792,6 +795,26 @@ test_kill_is_best_effort() {
   expect_code 0 $? "kill must be best-effort (never fail even when the pane close call itself fails)"
   assert_contains "$(cat "$log")" $'\x1f''pane'$'\x1f''close'$'\x1f''w1:p2' "kill did not call pane close on the right pane"
   pass "fm_backend_herdr_kill: calls pane close and stays best-effort on failure"
+}
+
+test_kill_labeled_task_closes_recorded_pane_id() {
+  local dir log resp fb home state meta target
+  dir="$TMP_ROOT/kill-labeled"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  home="$TMP_ROOT/kill-labeled-home"; state="$home/state"; mkdir -p "$state"
+  meta="$state/bpi-auth-impl.meta"
+  fm_write_meta "$meta" \
+    "window=fmtest:w1:p7" "backend=herdr" "label=#5 bpi-auth" \
+    "herdr_session=fmtest" "herdr_workspace_id=w1" "herdr_tab_id=w1:t7" "herdr_pane_id=w1:p7"
+  fb=$(make_herdr_fakebin "$dir")
+  target=$(fm_meta_get "$meta" window)
+  PATH="$fb:$PATH" FM_HOME="$home" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_kill "$1"' "$ROOT" "$target"
+  expect_code 0 $? "teardown of a labeled task must succeed"
+  assert_contains "$(cat "$log")" $'\x1f''pane'$'\x1f''close'$'\x1f''w1:p7' \
+    "teardown did not close the meta-recorded pane id"
+  assert_not_contains "$(cat "$log")" "bpi-auth" \
+    "teardown must address the recorded pane id only; the display label plays no part"
+  pass "fm_backend_herdr_kill: a labeled task tears down by its recorded pane id, unaffected by the display label"
 }
 
 test_current_path_reads_cwd() {
@@ -2123,6 +2146,7 @@ test_capture_works_around_small_lines_bug
 test_capture_preserves_pane_read_failure
 test_send_key_normalizes_and_targets_pane
 test_kill_is_best_effort
+test_kill_labeled_task_closes_recorded_pane_id
 test_current_path_reads_cwd
 test_busy_state_working_maps_to_busy
 test_busy_state_done_and_blocked_map_to_idle
