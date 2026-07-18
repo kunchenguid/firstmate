@@ -2130,6 +2130,25 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   fi
 
   validate_spawn_worktree "treehouse get" "$T"
+
+  # Base the fresh worktree on origin's default branch so it never inherits the
+  # primary checkout's current working branch. Treehouse warms its pool from the
+  # primary's HEAD, so a worktree acquired while the primary sits on a feature
+  # branch would carry that branch's unmerged commits into the crewmate's PR
+  # (the base-pollution that produced 18-commit-wide diffs). Best-effort and
+  # fail-open: skip cleanly for local-only repos (no origin) and never abort the
+  # spawn. A crewmate that deliberately needs a non-default base still checks it
+  # out explicitly.
+  if git -C "$WT" remote get-url origin >/dev/null 2>&1; then
+    _fm_def=$(git -C "$WT" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null | sed 's#^origin/##')
+    _fm_def=${_fm_def:-main}
+    if git -C "$WT" fetch --quiet origin "$_fm_def" 2>/dev/null \
+      && git -C "$WT" checkout --quiet --detach FETCH_HEAD 2>/dev/null; then
+      :
+    else
+      echo "warning: could not base worktree on origin/$_fm_def; crewmate must base its branch on origin/$_fm_def itself" >&2
+    fi
+  fi
 fi
 
 # Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. Go won't
