@@ -4,15 +4,9 @@
 # Runs ShellCheck over firstmate's tracked shell scripts at ShellCheck's default
 # severity (which reports info, warning, and error - the levels CI fails on).
 # The lint command, the file set, the config, AND the pinned ShellCheck version
-# live here and ONLY here, so the gates cannot drift apart: both invoke this
-# script with no arguments.
+# live here and ONLY here, so local and CI cannot drift apart.
 #   - CI:       .github/workflows/ci.yml installs the version this script prints
 #               via `--required-version`, then runs `bin/fm-lint.sh`.
-#   - Pre-push: .no-mistakes.yaml `commands.lint` runs `bin/fm-lint.sh`, so the
-#               no-mistakes gate runs the SAME shellcheck as CI. Without a
-#               configured commands.lint, that gate step never ran this
-#               deterministic shellcheck, so info-level findings were not
-#               surfaced locally before CI rejected them.
 #
 # Version parity: CI's ShellCheck used to float with the runner image, and
 # ShellCheck retired SC2015 in 0.11.0, so an older CI ShellCheck rejected an
@@ -26,7 +20,7 @@
 # The local == CI parity contract is asserted by tests/fm-lint.test.sh.
 #
 # Usage:
-#   fm-lint.sh                    lint the canonical file set (what both gates run)
+#   fm-lint.sh                    lint the canonical file set
 #   fm-lint.sh <path>...          lint only the given paths with the same config
 #                                  (developer convenience; the gates never pass args)
 #   fm-lint.sh --required-version print the pinned ShellCheck version and exit

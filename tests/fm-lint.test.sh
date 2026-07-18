@@ -1,17 +1,15 @@
 #!/usr/bin/env bash
 # Parity guard for firstmate's shell-lint definition.
 #
-# bin/fm-lint.sh must be the single owner that BOTH CI
-# (.github/workflows/ci.yml) and the pre-push gate (.no-mistakes.yaml
-# commands.lint) invoke, so the local lint can never diverge from CI again.
-# Regression origin: with no commands.lint configured, the local no-mistakes
-# lint step never ran the deterministic
+# bin/fm-lint.sh must be the single owner that CI (.github/workflows/ci.yml)
+# invokes, so the local lint can never diverge from CI again.
+# Regression origin: a prior local validation path did not run the deterministic
 # `shellcheck bin/*.sh bin/backends/*.sh tests/*.sh`, so PRs passed local
 # validation yet failed that exact check in CI on info/warning findings such as
 # SC2015, SC1007, and SC2034. A second axis was tool-version skew: CI's
 # ShellCheck floated with the runner image and still emitted SC2015, which
-# ShellCheck retired in 0.11.0. fm-lint.sh now pins one exact version and both
-# gates resolve it, so command, file set, config, AND version all match.
+# ShellCheck retired in 0.11.0. fm-lint.sh now pins one exact version, so
+# command, file set, config, AND version all match.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -19,7 +17,6 @@ set -u
 
 LINT="$ROOT/bin/fm-lint.sh"
 CI="$ROOT/.github/workflows/ci.yml"
-NM="$ROOT/.no-mistakes.yaml"
 INSTALLER="$ROOT/bin/fm-install-shellcheck.sh"
 # The authoritative file set the one owner must run.
 CANON='shellcheck --norc bin/*.sh bin/backends/*.sh tests/*.sh'
@@ -54,11 +51,6 @@ test_ci_invokes_the_owner() {
   # Guard against regression to an inline re-spelling of the command.
   assert_no_grep 'run: shellcheck' "$CI" "CI must call fm-lint.sh, not re-spell shellcheck inline"
   pass "CI lint job calls the one-owner script, not an inline command"
-}
-
-test_nomistakes_invokes_the_owner() {
-  grep -Fqx "  lint: 'bin/fm-lint.sh'" "$NM" || fail "no-mistakes commands.lint must map exactly to the one-owner script"
-  pass "no-mistakes pre-push lint calls the one-owner script"
 }
 
 test_pins_an_explicit_version() {
@@ -131,7 +123,7 @@ SH
   out=$("$LINT" "$bad" 2>&1) || rc=$?
   [ "$rc" -ne 0 ] || fail "fm-lint.sh passed a known-bad fixture"$'\n'"$out"
   assert_contains "$out" "SC1007" "fm-lint.sh did not report the expected ShellCheck finding"
-  pass "fm-lint.sh catches a real lint defect the old no-op gate passed"
+  pass "fm-lint.sh catches a real lint defect before CI"
 }
 
 test_ignores_ambient_shellcheck_opts() {
@@ -183,7 +175,6 @@ SH
 test_owner_exists_and_executable
 test_owner_defines_canonical_set
 test_ci_invokes_the_owner
-test_nomistakes_invokes_the_owner
 test_pins_an_explicit_version
 test_ci_installs_and_logs_the_pinned_version
 test_rejects_wrong_shellcheck_version

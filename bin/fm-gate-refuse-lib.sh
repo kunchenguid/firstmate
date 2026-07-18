@@ -9,12 +9,11 @@
 # "delegate" and "reconcile" the shared worktree. It has real capability because
 # those entrypoints self-locate their home and never knew a gate context existed.
 #
-# no-mistakes owns the authority-removal half (it neutralizes the project
-# instructions and stamps NO_MISTAKES_GATE into the gate agent's environment).
-# THIS is the firstmate capability-removal half: an enforceable script refusal,
-# not a prose rule the neutralized agent would never read. It is sourced at the
-# top of the three fleet-lifecycle entrypoints and called before any fleet
-# mutation, so a gate agent that still reaches for the fleet is stopped cold.
+# The gate's environment marker and worktree topology identify that context.
+# This file is the firstmate capability-removal half: an enforceable script
+# refusal, not a prose rule the agent might not read. It is sourced at the top
+# of the three fleet-lifecycle entrypoints and called before any fleet mutation,
+# so a gate agent that still reaches for the fleet is stopped cold.
 #
 # Two independent signals, either of which refuses (fail closed):
 #
@@ -49,9 +48,10 @@
 # real hazard: the threat is a CONFUSED-not-adversarial gate agent that runs
 # bin/fm-spawn.sh directly after adopting firstmate's identity - it never sources
 # firstmate's test helpers, so it never carries the bypass; and the adversarial
-# case (an agent that would deliberately set it) is covered by no-mistakes'
-# neutral-execution-context and the HEAD-continuity guard. The dedicated
-# tests/fm-gate-refuse.test.sh strips the bypass so it still verifies real refusal.
+# case (an agent that would deliberately set it) is outside the confused-agent
+# threat model and remains covered by the path backstop when the default gate
+# repository topology applies. The dedicated tests/fm-gate-refuse.test.sh strips
+# the bypass so it still verifies real refusal.
 #
 # Sourced by bin/fm-spawn.sh, bin/fm-send.sh, bin/fm-teardown.sh,
 # bin/fm-sessionstart-nudge.sh, and the tests.

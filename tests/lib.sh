@@ -25,13 +25,13 @@ if [ -n "${FM_TEST_LIB_SOURCED:-}" ]; then
 fi
 FM_TEST_LIB_SOURCED=1
 
-# Exempt firstmate's own test suite from the gate-lifecycle refusal
-# (bin/fm-gate-refuse-lib.sh). The no-mistakes gate runs this suite FROM a gate
-# worktree - the exact environment that guard refuses - so without this every
-# test that drives the real fm-spawn/fm-send/fm-teardown would be refused during
-# firstmate's own validation. A confused gate agent never sources this helper, so
-# the boundary against the real hazard is unaffected. tests/fm-gate-refuse.test.sh
-# strips this to verify real refusal.
+# Exempt this test suite from the gate-lifecycle refusal
+# (bin/fm-gate-refuse-lib.sh). If the suite is run FROM a no-mistakes gate
+# worktree, that is the exact environment the guard refuses, so without this
+# every test that drives the real fm-spawn/fm-send/fm-teardown would be refused.
+# A confused gate agent never sources this helper, so the boundary against the
+# real hazard is unaffected. tests/fm-gate-refuse.test.sh strips this to verify
+# real refusal.
 export FM_GATE_REFUSE_BYPASS=1
 
 # Resolve the repo root from this library's own location. Consumed by sourcing

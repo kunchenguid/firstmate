@@ -21,7 +21,7 @@ jobs:
           bin/fm-install-shellcheck.sh "$RUNNER_TEMP/bin"
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
       # Single owner of the lint definition (file set + config + version). Do not
-      # re-spell the shellcheck command here; keep CI and the pre-push gate on it.
+      # re-spell the shellcheck command here.
       - run: bin/fm-lint.sh
 
   tests:
