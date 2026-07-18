@@ -4,6 +4,14 @@
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
+_fm_config_dir="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
+# shellcheck disable=SC1090,SC1091
+[ -f "$_fm_config_dir/x-mode.env" ] && . "$_fm_config_dir/x-mode.env"
+# shellcheck disable=SC1090,SC1091
+[ -f "$_fm_config_dir/telegram-mode.env" ] && . "$_fm_config_dir/telegram-mode.env"
+unset _fm_config_dir
 SECONDS_ARG=${FM_CODEX_WATCH_CHECKPOINT:-180}
 
 usage() {

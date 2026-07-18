@@ -89,7 +89,9 @@ afk=0
 [ -e "$STATE/.afk" ] && afk=1
 x_mode=0
 [ -f "$CONFIG/x-mode.env" ] && x_mode=1
-REASON=$("$SCRIPT_DIR/fm-supervision-instructions.sh" --afk "$afk" --x-mode "$x_mode" --repair-line 2>/dev/null \
+telegram_mode=0
+[ -f "$CONFIG/telegram-mode.env" ] && telegram_mode=1
+REASON=$("$SCRIPT_DIR/fm-supervision-instructions.sh" --afk "$afk" --x-mode "$x_mode" --telegram-mode "$telegram_mode" --repair-line 2>/dev/null \
   || printf '%s\n' 'tasks in flight, no live watcher - resume supervision according to the session-start operating block before ending the turn')
 rule='━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'
 {

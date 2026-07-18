@@ -84,3 +84,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-x-dismiss.sh`        | Dismiss a skipped X-mode mention at the relay without replying                       |
 | `fm-x-link.sh`           | Link a spawned task to its originating X-mode mention in task meta                   |
 | `fm-x-followup.sh`       | Detect, post, and cap completion follow-ups for an X-mode-linked task                |
+| `fm-telegram-lib.sh`     | Shared Telegram mode config, allowlist, audit, grammar, and PR-registry helpers      |
+| `fm-telegram-send.sh`    | Outbound Telegram Bot API sendMessage (AFK-default, secret-refusing)                 |
+| `fm-telegram-poll.sh`    | One bounded getUpdates poll: allowlist, stash inbox, print `telegram-msg <id>`       |
+| `fm-telegram-respond.sh` | Drain Telegram inbox under the closed Stage-2 command grammar                        |
