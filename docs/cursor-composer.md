@@ -6,11 +6,13 @@ Composer 2.5 is invoked by an assigned Codex crewmate after Firstmate has alread
 
 Composer 2.5 is not a verified Firstmate harness, is not a runtime backend, and is not a valid value for `config/crew-harness`, `config/secondmate-harness`, or a `config/crew-dispatch.json` harness profile.
 
-## Conservative routing policy
+## Composer-first routing policy
 
-Use Composer 2.5 selectively, not as the default implementer.
+Use Composer 2.5 before direct Codex implementation for every empirically passed task class when the individual task satisfies every condition below.
 
-An assigned Codex crewmate may invoke it only when all of these conditions hold:
+This default maximizes productive use of available Composer usage and credits inside the evidence-backed boundary without weakening the Codex and Firstmate wrapper.
+
+An assigned Codex crewmate invokes it only when all of these conditions hold:
 
 - The task is a repetitive multi-file edit, focused test creation, mechanical migration, or behavior-preserving bounded refactor.
 - The individual task has explicit workspace and file boundaries.
@@ -19,21 +21,25 @@ An assigned Codex crewmate may invoke it only when all of these conditions hold:
 - One fresh Composer session can complete the bounded task without `--continue` or `--resume`.
 - The assigned Codex crewmate has determined that prompt-only scope is acceptable on the active host, or a separately verified OS sandbox is active.
 
-Keep every other task with the normal verified crew harness.
+When every condition holds, the Codex crewmate delegates the implementation to Composer before implementing it directly.
+
+If any condition fails, keep the task with the normal verified crew harness.
 
 In particular, this calibration does not establish pass-level routing for bulk greenfield scaffolding or cross-layer feature work with subtle edge semantics.
 
-Those shapes remain conditional evidence only and require a new bounded calibration pass before routine use.
+Bulk greenfield scaffolding remains conditional, while the tested cross-layer feature is a failed boundary case.
+
+Neither shape is eligible for Composer-first routing without a new bounded calibration pass that earns a pass verdict.
 
 ## Required Codex and Firstmate wrapper
 
-Firstmate continues to assign and supervise a normal isolated Codex crewmate.
+Firstmate continues to assign and supervise a normal isolated Codex crewmate in a disposable task worktree.
 
 The Codex crewmate remains responsible for scope, review, correction, repository validation, and the selected Firstmate delivery path.
 
 The wrapper is mandatory:
 
-1. Inspect the isolated worktree and its existing changes before delegation.
+1. Inspect the isolated disposable task worktree and its existing changes before delegation.
 2. Select one calibration-passed task class and define exact workspace, file, and behavior boundaries.
 3. State deterministic acceptance checks and require preserving unrelated changes plus reporting every changed file.
 4. Confirm that no Composer 2.5 Cursor process is active.

@@ -153,7 +153,7 @@ You chat with the first mate.
 It routes each request to a crewmate in its own session endpoint and git worktree, supervises the fleet with a zero-token event-driven watcher, and brings you finished PRs, approved local merges, or investigation reports.
 Optional secondmates extend this to persistent second mates, dispatch profiles let you steer which harness handles which task, and an opt-in X mode lets the same fleet answer public mentions.
 `codex-app` is not a runtime backend yet; [docs/codex-app-backend.md](docs/codex-app-backend.md) owns the Codex App boundary.
-Cursor Composer 2.5 is an optional bounded implementation specialist used inside an assigned Codex crewmate, not a Firstmate harness; [docs/cursor-composer.md](docs/cursor-composer.md) owns its empirical capability and routing boundary.
+Cursor Composer 2.5 is the default bounded implementation specialist for empirically passed task classes inside an assigned Codex crewmate, not a Firstmate harness; [docs/cursor-composer.md](docs/cursor-composer.md) owns its empirical capability and routing boundary.
 
 Full architecture - the supervision engine, worktree isolation, secondmates, dispatch profiles, project modes, optional X mode, fleet sync, and self-update - is in [docs/architecture.md](docs/architecture.md).
 
@@ -192,7 +192,7 @@ Firstmate's skills live in two separate places with different audiences:
 - [docs/orca-backend.md](docs/orca-backend.md) - setup guide for the experimental Orca backend, plus its lifecycle notes and known gaps.
 - [docs/cmux-backend.md](docs/cmux-backend.md) - setup guide for the experimental cmux backend, plus its verification notes and known gaps.
 - [docs/codex-app-backend.md](docs/codex-app-backend.md) - Codex App backend boundary, evidence, and rollout contract.
-- [docs/cursor-composer.md](docs/cursor-composer.md) - Cursor Composer 2.5 calibration evidence, conservative routing boundaries, and the required Codex wrapper.
+- [docs/cursor-composer.md](docs/cursor-composer.md) - Cursor Composer 2.5 calibration evidence, Composer-first routing boundaries, and the required Codex wrapper.
 - [docs/turnend-guard.md](docs/turnend-guard.md) - the primary session's structural "no turn ends blind" backstop: verified per-harness hook mechanisms, scoping, loop safety, and fail-open tradeoffs.
 - [docs/supervision-protocols/](docs/supervision-protocols/) - rendered primary-harness watcher protocols for Claude, Codex, OpenCode, Pi, Grok, and unknown harness fallback.
 - [docs/scripts.md](docs/scripts.md) - the `bin/` toolbelt reference.
