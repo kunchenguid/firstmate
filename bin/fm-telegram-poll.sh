@@ -64,10 +64,12 @@ url="$FMT_API/bot${FMT_TOKEN}/getUpdates?timeout=0&allowed_updates=%5B%22message
 if [ -n "$offset" ]; then
   url="${url}&offset=${offset}"
 fi
+URL_FILE=$(fmt_curl_url_config "$url") || exit 0
+trap 'rm -f "$BODY_FILE" "$URL_FILE"' EXIT
 
 code=$(curl -m 8 -s -o "$BODY_FILE" -w '%{http_code}' \
   -H 'Accept: application/json' \
-  "$url" 2>/dev/null) || exit 0
+  --config "$URL_FILE" 2>/dev/null) || exit 0
 
 case "$code" in
   200) ;;

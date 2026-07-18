@@ -173,10 +173,12 @@ if ! jq -cn --arg text "$TEXT" --arg chat "$FMT_CHAT_ID" \
 fi
 
 url="$FMT_API/bot${FMT_TOKEN}/sendMessage"
+URL_FILE=$(fmt_curl_url_config "$url") || { echo "error: cannot prepare request" >&2; exit 3; }
+trap 'rm -f "$BODY_FILE" "$PAYLOAD_FILE" "$URL_FILE"' EXIT
 code=$(curl -m 10 -s -o "$BODY_FILE" -w '%{http_code}' \
   -H 'Content-Type: application/json' \
   --data-binary @"$PAYLOAD_FILE" \
-  "$url" 2>/dev/null) || code=000
+  --config "$URL_FILE" 2>/dev/null) || code=000
 
 case "$code" in
   2[0-9][0-9])
