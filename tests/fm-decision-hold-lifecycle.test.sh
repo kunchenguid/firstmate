@@ -473,6 +473,86 @@ test_archived_resolved_captain_decision_satisfies_inventory_union() {
   pass "archived resolved captain decision satisfies later inventory completion and verification"
 }
 
+test_archived_resolved_decision_accepts_all_completion_verbs() {
+  local verb home origin hold route title i item archive_line
+  for verb in merged reported; do
+    home=$(make_home "archived-$verb-decision")
+    origin="sample-$verb-archive"
+    route="sample-$verb-work"
+    case "$verb" in
+      merged) title="Choose https://github.com/example/sample/pull/42" ;;
+      reported) title="Choose data/$origin/report.md" ;;
+    esac
+    tasks_in "$home" add "$origin" "Ship $verb archive-sensitive work" \
+      --kind ship --repo sample --start >/dev/null \
+      || fail "could not create $verb archive origin"
+    write_origin_meta "$home" "$origin" ship
+    hold=$(run_decisions "$home" hold "$origin" scope \
+      --title "$title" --reason "captain $verb scope pending" --repo sample) \
+      || fail "could not register $verb decision hold"
+    run_decisions "$home" complete "$origin" scope >/dev/null \
+      || fail "could not complete $verb decision inventory"
+    tasks_in "$home" add "$route" "Apply the $verb decision" --kind ship --repo sample >/dev/null \
+      || fail "could not create $verb routed work"
+    tasks_in "$home" block "$route" --by "$hold" >/dev/null \
+      || fail "could not block $verb routed work"
+    printf 'Use the recorded sample scope.\n' > "$home/$verb-decision.txt"
+    run_decisions "$home" resolve "$origin" scope \
+      --decision-file "$home/$verb-decision.txt" --routed-to "$route" >/dev/null \
+      || fail "could not resolve $verb captain decision"
+
+    i=1
+    while [ "$i" -le 10 ]; do
+      item=$(printf 'sample-%s-pad-%02d' "$verb" "$i")
+      tasks_in "$home" add "$item" "$verb archive padding $i" --kind ship --repo sample >/dev/null \
+        || fail "could not create $verb archive padding item $i"
+      tasks_in "$home" "done" "$item" >/dev/null \
+        || fail "could not complete $verb archive padding item $i"
+      i=$((i + 1))
+    done
+
+    archive_line=$(grep -F -- "- [x] $hold -" "$home/data/done-archive.md") \
+      || fail "$verb captain decision was not archived"
+    assert_contains "$archive_line" "($verb " "$verb closure metadata was not archived"
+    run_decisions "$home" complete "$origin" scope >/dev/null \
+      || fail "archived $verb decision did not satisfy inventory completion"
+    run_decisions "$home" verify "$origin" >/dev/null \
+      || fail "archived $verb decision did not satisfy inventory verification"
+  done
+  pass "archived resolved captain decisions accept every completion verb"
+}
+
+test_archived_completion_verb_still_requires_done_state() {
+  local home origin hold
+  home=$(make_home archived-noncompleted-decision)
+  origin=sample-noncompleted-archive
+  hold="$origin-decision-scope"
+  write_origin_meta "$home" "$origin" ship
+  printf 'decisions_reviewed=1\ndecision_keys=scope\n' >> "$home/state/$origin.meta"
+  cat > "$home/data/done-archive.md" <<EOF
+## Archived 2026-07-18
+- [ ] $hold - Choose https://github.com/example/sample/pull/42 (repo: sample) (kind: captain) (merged 2026-07-18)
+  Resolution recorded by fm-decision-hold.
+  Decision digest: 0000000000000000000000000000000000000000000000000000000000000000
+  Routed identities: sample-work
+
+  Captain decision:
+  Use the sample scope.
+
+  Routed work:
+  - sample-work
+EOF
+  if run_decisions "$home" complete "$origin" scope \
+    > "$home/noncompleted-complete.out" 2> "$home/noncompleted-complete.err"; then
+    fail "noncompleted archived decision satisfied inventory completion"
+  fi
+  if run_decisions "$home" verify "$origin" \
+    > "$home/noncompleted-verify.out" 2> "$home/noncompleted-verify.err"; then
+    fail "noncompleted archived decision satisfied inventory verification"
+  fi
+  pass "archived completion verbs still require a done task state"
+}
+
 test_malformed_archive_decision_does_not_satisfy_inventory() {
   local home origin hold blank_hold i item
   home=$(make_home malformed-archived-decision)
@@ -1196,6 +1276,8 @@ test_visual_review_uses_shared_completion_owner
 test_none_inventory_and_resolved_prose_do_not_create_holds
 test_terminal_single_owner_status_decision_does_not_block_empty_inventory
 test_archived_resolved_captain_decision_satisfies_inventory_union
+test_archived_resolved_decision_accepts_all_completion_verbs
+test_archived_completion_verb_still_requires_done_state
 test_malformed_archive_decision_does_not_satisfy_inventory
 test_archived_ship_title_cannot_impersonate_captain_kind
 test_archived_resolution_requires_matching_routed_identities

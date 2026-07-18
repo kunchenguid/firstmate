@@ -213,7 +213,7 @@ tasks_archive_path() {
 
 archive_header_kind() {
   local header=$1 kind
-  local suffix_re='[[:space:]]*\(repo:[[:space:]]*[^()]+\)[[:space:]]*\(kind:[[:space:]]*([^()]+)\)[[:space:]]*\(done[[:space:]]+[0-9]{4}-[0-9]{2}-[0-9]{2}\)([[:space:]]*\(hold:[[:space:]]*[^()]+\))?([[:space:]]*\(hold-kind:[[:space:]]*(captain|external|load|parked|future)\))?([[:space:]]*\(hold-until:[[:space:]]*[0-9]{4}-[0-9]{2}-[0-9]{2}\))?[[:space:]]*$'
+  local suffix_re='[[:space:]]*\(repo:[[:space:]]*[^()]+\)[[:space:]]*\(kind:[[:space:]]*([^()]+)\)[[:space:]]*\((done|merged|reported)[[:space:]]+[0-9]{4}-[0-9]{2}-[0-9]{2}\)([[:space:]]*\(hold:[[:space:]]*[^()]+\))?([[:space:]]*\(hold-kind:[[:space:]]*(captain|external|load|parked|future)\))?([[:space:]]*\(hold-until:[[:space:]]*[0-9]{4}-[0-9]{2}-[0-9]{2}\))?[[:space:]]*$'
   [[ $header =~ $suffix_re ]] || return 1
   kind=${BASH_REMATCH[1]}
   kind=${kind#"${kind%%[![:space:]]*}"}
