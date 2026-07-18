@@ -141,6 +141,10 @@ test_outward_facing_skill_points_reference_section_9_owner() {
     "X reply safety does not state that it supplements section 9"
   assert_grep "under \`AGENTS.md\` section 9 without firstmate's internal vocabulary" "$UPDATE" \
     "Firstmate update reporting does not reference section 9"
+  assert_grep "Firstmate and both second mates are now on the latest" "$UPDATE" \
+    "update reporting lacks a local neutral plain-English example"
+  assert_no_grep "Captain, firstmate and both second mates" "$UPDATE" \
+    "update reporting example overrides the address preference"
   pass "outward-facing skill handoffs point to the section 9 owner"
 }
 
