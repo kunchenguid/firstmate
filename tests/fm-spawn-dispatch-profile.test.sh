@@ -341,8 +341,8 @@ test_cursor_threads_model_and_omits_effort_axis() {
   expect_code 0 "$status" "cursor spawn with model and recorded effort should succeed"
   assert_meta_profile "$HOME_DIR/state/$id.meta" cursor gpt-5.6-sol-high high
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "cursor-agent --force --plugin-dir '$HOME_DIR/state/$id.cursor-plugin' --workspace '$WT_DIR' --model 'gpt-5.6-sol-high'" \
-    "cursor launch did not thread force, plugin, workspace, and model flags"
+  assert_contains "$launch" "cursor-agent --force --approve-mcps --plugin-dir '$HOME_DIR/state/$id.cursor-plugin' --workspace '$WT_DIR' --model 'gpt-5.6-sol-high'" \
+    "cursor launch did not thread force, approve-mcps, plugin, workspace, and model flags"
   assert_not_contains "$launch" "--effort" "cursor launch must not invent a standalone effort flag"
   assert_not_contains "$launch" "--reasoning-effort" "cursor launch must not pass another harness's reasoning flag"
   assert_grep '"hooks":"hooks/hooks.json"' "$HOME_DIR/state/$id.cursor-plugin/.cursor-plugin/plugin.json" \

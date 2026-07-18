@@ -55,9 +55,11 @@
 #   provisioned firstmate home; the default is kind=ship.
 #   Before a secondmate launch, the home is locally fast-forwarded to the primary
 #   default-branch commit when safe; skipped syncs warn and launch unchanged.
-#   Cursor workers use --force, --workspace, and a task plugin under state/.
-#   The plugin is paired with one additive user-level stop-hook fallback because
-#   cursor-agent 2026.07.09 accepts --plugin-dir but does not execute plugin hooks.
+#   Cursor workers use --force, --approve-mcps, --workspace, and a task plugin
+#   under state/. The plugin is paired with one additive user-level stop-hook
+#   fallback (bin/fm-cursor-lib.sh owns the shared-artifact contract) because
+#   cursor-agent does not execute hooks for accounts without Cursor's
+#   server-side hooks rollout (verified 2026-07-18 on 2026.07.16-899851b).
 #   Ship/scout spawns refuse to launch unless the resolved task path is a real
 #   git worktree root distinct from the primary project checkout.
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
@@ -113,6 +115,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-cursor-lib.sh
+. "$SCRIPT_DIR/fm-cursor-lib.sh"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
 # a direct report (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
@@ -338,10 +342,12 @@ launch_template() {
       fi
       ;;
     cursor)
+      # --approve-mcps keeps a project-configured MCP server's trust prompt from
+      # wedging an unattended worker; --force already grants command execution.
       if [ "$kind" = secondmate ]; then
-        printf '%s' 'cursor-agent --force --workspace __WORKSPACE__ __MODELFLAG__"$(cat __BRIEF__)"'
+        printf '%s' 'cursor-agent --force --approve-mcps --workspace __WORKSPACE__ __MODELFLAG__"$(cat __BRIEF__)"'
       else
-        printf '%s' 'cursor-agent --force --plugin-dir __CURSORPLUGIN__ --workspace __WORKSPACE__ __MODELFLAG__"$(cat __BRIEF__)"'
+        printf '%s' 'cursor-agent --force --approve-mcps --plugin-dir __CURSORPLUGIN__ --workspace __WORKSPACE__ __MODELFLAG__"$(cat __BRIEF__)"'
       fi
       ;;
     opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}}'\'' opencode __MODELFLAG__--prompt "$(cat __BRIEF__)"' ;;
@@ -934,75 +940,43 @@ EOF
       # codex: turn-end rides the launch command via -c notify=[...] and __TURNEND__.
       ;;
     cursor*)
-      # cursor-agent 2026.07.09 accepts a correctly structured --plugin-dir but
-      # does not execute its stop hook in either print or interactive mode.
+      # cursor-agent accepts a correctly structured --plugin-dir but does not
+      # execute hooks at all for accounts without Cursor's server-side hooks
+      # rollout (verified 2026-07-18 on 2026.07.16-899851b; docs/turnend-guard.md).
       # Keep the task plugin wired for forward compatibility, and install one
       # additive user-level fallback hook. The fallback is a no-op unless a
       # workspace root carries a valid Firstmate token pointer.
+      # bin/fm-cursor-lib.sh owns the shared-artifact contract: the hook script
+      # write is atomic, the hooks.json merge is additive and idempotent, and
+      # the lock serializes this install against a concurrent teardown's
+      # last-token cleanup. On lock timeout the install proceeds anyway - it
+      # converges to the same installed state and must never block a spawn.
       CURSOR_HOME="$HOME/.cursor"
       CURSOR_HOOKS_DIR="$CURSOR_HOME/hooks"
       CURSOR_AUTH_DIR="$CURSOR_HOOKS_DIR/fm-turn-end.d"
       CURSOR_PLUGIN_DIR="$STATE/$ID.cursor-plugin"
       mkdir -p "$CURSOR_AUTH_DIR" "$CURSOR_PLUGIN_DIR/.cursor-plugin" "$CURSOR_PLUGIN_DIR/hooks"
+      cursor_locked=0
+      if fm_cursor_hooks_lock "$CURSOR_HOOKS_DIR"; then
+        cursor_locked=1
+      fi
       old_umask=$(umask)
       umask 077
       auth_file=$(mktemp "$CURSOR_AUTH_DIR/fm.XXXXXXXXXXXX")
       umask "$old_umask"
       printf '%s\n' "$TURNEND" > "$auth_file"
       printf '%s\n' "${auth_file##*/}" > "$STATE/$ID.cursor-turnend-token"
-      sq_cursor_auth_dir=$(shell_quote "$CURSOR_AUTH_DIR")
-      cat > "$CURSOR_HOOKS_DIR/fm-turn-end.sh" <<EOF
-#!/usr/bin/env bash
-set -u
-auth_dir=$sq_cursor_auth_dir
-payload=\$(cat 2>/dev/null || true)
-if [ -n "\$payload" ] && command -v jq >/dev/null 2>&1; then
-  printf '%s' "\$payload" | jq -r '.workspace_roots[]? | select(type == "string")' 2>/dev/null |
-  while IFS= read -r workspace; do
-    p="\$workspace/.fm-cursor-turnend"
-    [ -f "\$p" ] && [ ! -L "\$p" ] || continue
-    first=
-    IFS= read -r -n 256 first < "\$p" 2>/dev/null || [ -n "\$first" ] || continue
-    case "\$first" in token=*) token=\${first#token=} ;; *) continue ;; esac
-    case "\$token" in fm.????????????) : ;; *) continue ;; esac
-    case "\$token" in *[!A-Za-z0-9._-]*) continue ;; esac
-    t=\$(cat "\$auth_dir/\$token" 2>/dev/null) || continue
-    case "\$t" in /*.turn-ended) : ;; *) continue ;; esac
-    touch "\$t" 2>/dev/null || true
-  done
-fi
-printf '%s\n' '{}'
-exit 0
-EOF
-      chmod +x "$CURSOR_HOOKS_DIR/fm-turn-end.sh"
-      cursor_hook_command=$(shell_quote "$CURSOR_HOOKS_DIR/fm-turn-end.sh")
-      cursor_hooks_file="$CURSOR_HOME/hooks.json"
-      cursor_hooks_tmp=$(mktemp "$CURSOR_HOME/hooks.json.tmp.XXXXXXXXXXXX")
-      if [ -f "$cursor_hooks_file" ]; then
-        if ! jq -e 'type == "object" and ((.hooks? // {}) | type == "object") and ((.hooks?.stop? // []) | type == "array")' "$cursor_hooks_file" >/dev/null 2>&1; then
-          rm -f "$cursor_hooks_tmp"
-          echo "error: existing Cursor hooks file is not mergeable: $cursor_hooks_file" >&2
-          exit 1
-        fi
-        cursor_hooks_source="$cursor_hooks_file"
-      else
-        printf '%s\n' '{}' > "$cursor_hooks_tmp.source"
-        cursor_hooks_source="$cursor_hooks_tmp.source"
-      fi
-      if ! jq --arg command "$cursor_hook_command" '
-        .version = (.version // 1)
-        | .hooks = (.hooks // {})
-        | .hooks.stop = ((.hooks.stop // []) as $hooks
-            | if any($hooks[]?; .command? == $command) then $hooks
-              else $hooks + [{"command": $command, "timeout": 5, "failClosed": false}]
-              end)
-      ' "$cursor_hooks_source" > "$cursor_hooks_tmp"; then
-        rm -f "$cursor_hooks_tmp" "$cursor_hooks_tmp.source"
-        echo "error: failed to merge Firstmate's Cursor stop hook into $cursor_hooks_file" >&2
+      if ! fm_cursor_write_turnend_hook "$CURSOR_HOOKS_DIR" "$CURSOR_AUTH_DIR"; then
+        [ "$cursor_locked" -eq 0 ] || fm_cursor_hooks_unlock "$CURSOR_HOOKS_DIR"
+        echo "error: failed to install Firstmate's Cursor turn-end hook in $CURSOR_HOOKS_DIR" >&2
         exit 1
       fi
-      mv "$cursor_hooks_tmp" "$cursor_hooks_file"
-      rm -f "$cursor_hooks_tmp.source"
+      cursor_hook_command=$(shell_quote "$CURSOR_HOOKS_DIR/fm-turn-end.sh")
+      if ! fm_cursor_merge_stop_entry "$CURSOR_HOME" "$cursor_hook_command"; then
+        [ "$cursor_locked" -eq 0 ] || fm_cursor_hooks_unlock "$CURSOR_HOOKS_DIR"
+        exit 1
+      fi
+      [ "$cursor_locked" -eq 0 ] || fm_cursor_hooks_unlock "$CURSOR_HOOKS_DIR"
       printf 'token=%s\n' "${auth_file##*/}" > "$WT/.fm-cursor-turnend"
       exclude_path '.fm-cursor-turnend'
       cursor_plugin_hook=$(json_escape "$cursor_hook_command")

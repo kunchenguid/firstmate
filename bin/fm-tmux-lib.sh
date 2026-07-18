@@ -48,8 +48,10 @@
 
 # Busy footers per harness (mirror fm-watch.sh). claude/codex: "esc to
 # interrupt"; opencode: "esc interrupt"; pi: "Working..."; grok: "Ctrl+c:cancel";
-# Cursor: a braille spinner followed by "Running  <N> tokens".
-FM_TMUX_BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel|^[[:space:]]*[^[:space:]]+[[:space:]]+Running[[:space:]]+[0-9]+[[:space:]]+tokens([[:space:]]|$)'
+# Cursor: an end-anchored "ctrl+c to stop" composer footer (verified 2026-07-18
+# on Cursor Agent 2026.07.16-899851b; the end anchor keeps mid-transcript prose
+# from matching), plus the older 2026.07.09 "Running  <N> tokens" status line.
+FM_TMUX_BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel|ctrl\+c to stop[[:space:]]*$|^[[:space:]]*[^[:space:]]+[[:space:]]+Running[[:space:]]+[0-9]+[[:space:]]+tokens([[:space:]]|$)'
 
 # fm_tmux_strip_ghost: thin adapter over the shared, fleet-wide ghost extractor
 # fm_composer_strip_ghost (bin/fm-composer-lib.sh). It drops de-emphasised

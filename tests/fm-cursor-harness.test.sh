@@ -24,7 +24,10 @@ case "$field:$pid" in
 esac
 SH
   chmod +x "$fakebin/ps"
-  out=$(PATH="$fakebin:/usr/bin:/bin" "$ROOT/bin/fm-harness.sh")
+  # Drop the Layer-1 env markers so a claude/pi/grok/cursor host session cannot
+  # short-circuit the ancestry walk this test pins with its fake ps.
+  out=$(env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u CURSOR_AGENT \
+    PATH="$fakebin:/usr/bin:/bin" "$ROOT/bin/fm-harness.sh")
   [ "$out" = cursor ] || fail "cursor-agent ancestry should detect cursor, got '$out'"
 
   cat > "$fakebin/ps" <<'SH'
@@ -40,7 +43,8 @@ case "$field:$pid" in
   ppid=:*) printf '%s\n' 4242 ;;
 esac
 SH
-  out=$(PATH="$fakebin:/usr/bin:/bin" "$ROOT/bin/fm-harness.sh")
+  out=$(env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u CURSOR_AGENT \
+    PATH="$fakebin:/usr/bin:/bin" "$ROOT/bin/fm-harness.sh")
   [ "$out" = unknown ] || fail "generic agent ancestry must stay unknown, got '$out'"
   pass "fm-harness detects cursor-agent specifically and rejects generic agent"
 }
@@ -90,11 +94,110 @@ test_cursor_busy_signature_is_specific() {
   # shellcheck source=bin/fm-tmux-lib.sh
   . "$ROOT/bin/fm-tmux-lib.sh"
   printf '%s\n' ' ⠘⠆ Running  50 tokens' | grep -qiE "$FM_TMUX_BUSY_REGEX_DEFAULT" \
-    || fail "Cursor Running token status should match the busy regex"
+    || fail "Cursor 2026.07.09 Running token status should match the busy regex"
+  printf '%s\n' '  → Add a follow-up                        ctrl+c to stop' | grep -qiE "$FM_TMUX_BUSY_REGEX_DEFAULT" \
+    || fail "Cursor 2026.07.16 ctrl+c to stop footer should match the busy regex"
   if printf '%s\n' 'Running tests now' | grep -qiE "$FM_TMUX_BUSY_REGEX_DEFAULT"; then
     fail "ordinary prose containing Running must not match the Cursor busy signature"
   fi
-  pass "Cursor busy signature matches the token status without using one spinner glyph"
+  if printf '%s\n' 'Press ctrl+c to stop the dev server before rebuilding' | grep -qiE "$FM_TMUX_BUSY_REGEX_DEFAULT"; then
+    fail "mid-line prose containing ctrl+c to stop must not match the end-anchored busy signature"
+  fi
+  pass "Cursor busy signatures match both build generations without prose false positives"
+}
+
+test_cursor_primary_sessionstart_nudge_is_wired() {
+  local hooks nudge
+  hooks="$ROOT/.cursor/hooks.json"
+  [ -f "$hooks" ] || fail "tracked Cursor hooks are missing"
+  nudge=$(jq -r '.hooks.sessionStart[0].command // empty' "$hooks")
+  assert_contains "$nudge" 'CURSOR_PROJECT_DIR' "Cursor sessionStart nudge must anchor through CURSOR_PROJECT_DIR"
+  assert_contains "$nudge" 'fm-sessionstart-nudge.sh' "Cursor sessionStart nudge must invoke the shared wrapper"
+  jq -e '.hooks.sessionStart[0].failClosed == false' "$hooks" >/dev/null \
+    || fail "Cursor sessionStart nudge must stay fail-open"
+  pass "tracked Cursor hooks register the shared session-start nudge fail-open"
+}
+
+# fm-cursor-lib contract: atomic idempotent install, token-scoped registry, and
+# deterministic last-task cleanup that preserves foreign hooks.json entries.
+test_cursor_lib_install_is_idempotent_and_cleanup_is_last_token_scoped() {
+  local home hooks_dir auth_dir hook_cmd state
+  home="$TMP_ROOT/lib-home"
+  state="$TMP_ROOT/lib-state"
+  hooks_dir="$home/.cursor/hooks"
+  auth_dir="$hooks_dir/fm-turn-end.d"
+  mkdir -p "$auth_dir" "$state"
+  (
+    # shellcheck source=bin/fm-cursor-lib.sh
+    . "$ROOT/bin/fm-cursor-lib.sh"
+    HOME="$home"
+    printf '%s\n' '{"version":1,"hooks":{"stop":[{"command":"user-own-hook.sh","timeout":9,"failClosed":false}]}}' > "$home/.cursor/hooks.json"
+    hook_cmd=$(fm_cursor_shell_quote "$hooks_dir/fm-turn-end.sh")
+    fm_cursor_hooks_lock "$hooks_dir" || exit 61
+    fm_cursor_write_turnend_hook "$hooks_dir" "$auth_dir" || exit 62
+    fm_cursor_merge_stop_entry "$home/.cursor" "$hook_cmd" || exit 63
+    fm_cursor_merge_stop_entry "$home/.cursor" "$hook_cmd" || exit 64
+    fm_cursor_hooks_unlock "$hooks_dir"
+    [ -x "$hooks_dir/fm-turn-end.sh" ] || exit 65
+    [ "$(jq '.hooks.stop | length' "$home/.cursor/hooks.json")" = 2 ] || exit 66
+    ls "$hooks_dir"/fm-turn-end.sh.tmp.* >/dev/null 2>&1 && exit 67
+
+    # Two registered tokens: removing the first must keep every shared artifact.
+    printf '%s\n' "$state/a.turn-ended" > "$auth_dir/fm.aaaaaaaaaaaa"
+    printf '%s\n' "$state/b.turn-ended" > "$auth_dir/fm.bbbbbbbbbbbb"
+    printf '%s\n' 'fm.aaaaaaaaaaaa' > "$state/task-a.cursor-turnend-token"
+    printf '%s\n' 'fm.bbbbbbbbbbbb' > "$state/task-b.cursor-turnend-token"
+    fm_cursor_remove_turnend_auth "$state" task-a
+    [ ! -e "$auth_dir/fm.aaaaaaaaaaaa" ] || exit 68
+    [ -x "$hooks_dir/fm-turn-end.sh" ] || exit 69
+    [ "$(jq '.hooks.stop | length' "$home/.cursor/hooks.json")" = 2 ] || exit 70
+
+    # Removing the last token must clear the script, our entry, and the registry
+    # dir while preserving the user's own stop entry and the file's version.
+    fm_cursor_remove_turnend_auth "$state" task-b
+    [ ! -e "$auth_dir/fm.bbbbbbbbbbbb" ] || exit 71
+    [ ! -e "$hooks_dir/fm-turn-end.sh" ] || exit 72
+    [ ! -d "$auth_dir" ] || exit 73
+    [ ! -d "$hooks_dir/.fm-turn-end.lock" ] || exit 74
+    [ "$(jq '.hooks.stop | length' "$home/.cursor/hooks.json")" = 1 ] || exit 75
+    [ "$(jq -r '.hooks.stop[0].command' "$home/.cursor/hooks.json")" = 'user-own-hook.sh' ] || exit 76
+    [ "$(jq -r '.version' "$home/.cursor/hooks.json")" = 1 ] || exit 77
+  ) || fail "cursor lib install/cleanup contract failed (subshell exit $?)"
+  pass "cursor lib installs idempotently and cleans shared artifacts only after the last token"
+}
+
+test_cursor_lib_cleanup_skips_on_held_lock_and_malformed_hooks_json() {
+  local home hooks_dir auth_dir state
+  home="$TMP_ROOT/lib-home2"
+  state="$TMP_ROOT/lib-state2"
+  hooks_dir="$home/.cursor/hooks"
+  auth_dir="$hooks_dir/fm-turn-end.d"
+  mkdir -p "$auth_dir" "$state"
+  (
+    # shellcheck source=bin/fm-cursor-lib.sh
+    . "$ROOT/bin/fm-cursor-lib.sh"
+    HOME="$home"
+    fm_cursor_write_turnend_hook "$hooks_dir" "$auth_dir" || exit 61
+
+    # A held (fresh) lock: cleanup removes only the token and leaves the hook.
+    printf '%s\n' "$state/c.turn-ended" > "$auth_dir/fm.cccccccccccc"
+    printf '%s\n' 'fm.cccccccccccc' > "$state/task-c.cursor-turnend-token"
+    mkdir "$hooks_dir/.fm-turn-end.lock" || exit 62
+    FM_CURSOR_HOOK_LOCK_TRIES=2 fm_cursor_remove_turnend_auth "$state" task-c
+    [ ! -e "$auth_dir/fm.cccccccccccc" ] || exit 63
+    [ -x "$hooks_dir/fm-turn-end.sh" ] || exit 64
+    rmdir "$hooks_dir/.fm-turn-end.lock"
+
+    # A malformed hooks.json is never rewritten; the rest of cleanup still runs.
+    printf '%s\n' 'not json at all' > "$home/.cursor/hooks.json"
+    printf '%s\n' "$state/d.turn-ended" > "$auth_dir/fm.dddddddddddd"
+    printf '%s\n' 'fm.dddddddddddd' > "$state/task-d.cursor-turnend-token"
+    fm_cursor_remove_turnend_auth "$state" task-d
+    [ "$(cat "$home/.cursor/hooks.json")" = 'not json at all' ] || exit 65
+    [ ! -e "$hooks_dir/fm-turn-end.sh" ] || exit 66
+    [ ! -d "$auth_dir" ] || exit 67
+  ) || fail "cursor lib cleanup safety contract failed (subshell exit $?)"
+  pass "cursor lib cleanup skips shared removal under a held lock and never rewrites malformed hooks.json"
 }
 
 test_cursor_primary_hooks_are_wired() {
@@ -146,6 +249,9 @@ test_detects_cursor_agent_ancestry_without_generic_agent_match
 test_tmux_liveness_requires_cursor_agent_argv0
 test_tmux_args_resolve_foreground_process_group
 test_cursor_busy_signature_is_specific
+test_cursor_primary_sessionstart_nudge_is_wired
+test_cursor_lib_install_is_idempotent_and_cleanup_is_last_token_scoped
+test_cursor_lib_cleanup_skips_on_held_lock_and_malformed_hooks_json
 test_cursor_primary_hooks_are_wired
 test_cursor_turnend_adapter_maps_followup_and_loop_guard
 
