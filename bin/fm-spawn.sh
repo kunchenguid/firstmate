@@ -33,10 +33,11 @@
 #   profile consultation. A --secondmate spawn is exempt and resolves the SECONDMATE
 #   harness (config/secondmate-harness -> config/crew-harness -> own), so the
 #   secondmate-vs-crewmate split is DURABLE across every respawn (recovery,
-#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|grok)
+#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|grok|cursor)
 #   overrides it for this spawn (either kind). A non-flag string containing
 #   whitespace is treated as a RAW launch command - the escape hatch for verifying
-#   new adapters.
+#   new adapters. cursor has a provisional launch template (trust + brief feed);
+#   full adapter verification is still tracked in docs/cursor-harness.md.
 #   config/secondmate-harness may also carry an optional model and effort as extra
 #   whitespace-separated tokens ("<harness> [<model>] [<effort>]"). For a
 #   --secondmate spawn, those tokens apply only when this spawn also resolves its
@@ -348,6 +349,12 @@ launch_template() {
     # launch command - it is a Stop-event hook installed below (global hook +
     # per-task pointer), so the template is identical for ship/scout/secondmate.
     grok) printf '%s' 'grok --always-approve __MODELFLAG____EFFORTFLAG__"$(cat __BRIEF__)"' ;;
+    # cursor (Cursor Agent CLI `agent`): provisional crewmate launch only.
+    # --yolo/--force auto-approves tools; --trust skips the workspace trust
+    # prompt; a positional prompt feeds the brief like verified adapters.
+    # Busy signature, turn-end guard, and supervision protocol remain unverified
+    # (docs/cursor-harness.md) - do not treat this as a full adapter promotion.
+    cursor) printf '%s' 'agent __MODELFLAG__--yolo --trust "$(cat __BRIEF__)"' ;;
     *) return 1 ;;
   esac
 }
@@ -435,7 +442,7 @@ model_flag_for_harness() {
   local harness=$1 model=$2
   [ -n "$model" ] && [ "$model" != default ] || return 0
   case "$harness" in
-    claude|codex|opencode|pi|grok)
+    claude|codex|opencode|pi|grok|cursor)
       printf -- '--model %s ' "$(shell_quote "$model")"
       ;;
   esac

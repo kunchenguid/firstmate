@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Behavior tests for Cursor Agent CLI session-lock holder detection and
-# harness self-detection. Cursor is detect/lock-only until a launch template
-# is verified (docs/cursor-harness.md).
+# Behavior tests for Cursor Agent CLI session-lock holder detection,
+# harness self-detection, and the provisional launch template.
+# Full adapter verification remains open (docs/cursor-harness.md).
 set -u
 
 # shellcheck source=tests/lib.sh disable=SC1091
@@ -88,7 +88,18 @@ test_fm_harness_detects_cursor_basename() {
   pass "fm-harness.sh detects cursor from basename agent"
 }
 
+test_fm_spawn_cursor_launch_template() {
+  local line
+  line=$(grep -E 'cursor\) printf' "$ROOT/bin/fm-spawn.sh")
+  assert_contains "$line" 'agent __MODELFLAG__--yolo --trust' \
+    "fm-spawn.sh missing provisional cursor launch template with --yolo --trust"
+  assert_contains "$line" '__BRIEF__' \
+    "fm-spawn.sh cursor launch template must feed the brief"
+  pass "fm-spawn provisional cursor launch template includes --yolo --trust and brief"
+}
+
 test_fm_lock_recognizes_cursor_mainthread_holder
 test_fm_lock_acquires_with_cursor_basename
 test_fm_harness_detects_cursor_mainthread
 test_fm_harness_detects_cursor_basename
+test_fm_spawn_cursor_launch_template
