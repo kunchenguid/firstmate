@@ -88,10 +88,14 @@ EOF
   assert_grep 'host=0.0.0.0' "$log" "poll did not preserve LAVISH_AXI_HOST"
   assert_grep 'link_host=100.82.46.113' "$log" "poll did not preserve LAVISH_AXI_LINK_HOST"
   assert_grep 'port=4397' "$log" "poll did not preserve LAVISH_AXI_PORT"
+  assert_grep 'args=poll' "$log" "Lavish poll was not invoked"
+  assert_grep '--agent-reply Received — routing this into the active UI work now.' "$log" \
+    "picked-up Lavish prompts were not acknowledged immediately"
   feedback_file=$(find "$home/data/task-a/lavish-feedback" -type f -name '*feedback*.txt' | head -1)
   [ -n "$feedback_file" ] || fail "Lavish feedback output was not stored under task data"
+  assert_grep 'acknowledgement: sent' "$feedback_file" "stored Lavish feedback did not record acknowledgement"
   assert_grep 'Captain feedback arrived' "$feedback_file" "stored Lavish feedback lost the prompt body"
-  pass "fm-lavish-review: registered check preserves Lavish environment and wakes on feedback"
+  pass "fm-lavish-review: registered check preserves Lavish environment, acknowledges prompts, and wakes on feedback"
 }
 
 test_waiting_poll_is_silent() {
@@ -107,7 +111,38 @@ test_waiting_poll_is_silent() {
   FM_HOME="$home" PATH="$fakebin:$BASE_PATH" "$REVIEW" --arm-only task-b "$html" >/dev/null
   out=$(FM_FAKE_LAVISH_ENV_LOG="$log" PATH="$fakebin:$BASE_PATH" bash "$home/state/task-b.check.sh")
   [ -z "$out" ] || fail "waiting Lavish poll should print nothing, got: $out"
+  assert_no_grep '--agent-reply' "$log" "waiting Lavish poll should not send an acknowledgement"
   pass "fm-lavish-review: no-feedback Lavish polls stay silent"
+}
+
+test_layout_warnings_wake_without_prompt_acknowledgement() {
+  local dir home fakebin html response log out feedback_file
+  dir="$TMP_ROOT/layout-warning"
+  mkdir -p "$dir"
+  home=$(make_home "$dir")
+  fakebin=$(fm_fakebin "$dir")
+  install_fake_lavish "$fakebin"
+  html="$dir/review.html"
+  printf '<html><body>review</body></html>\n' > "$html"
+  response="$dir/layout.yml"
+  cat > "$response" <<'EOF'
+session:
+  file: /tmp/review.html
+  status: feedback
+layout_warnings[1]:
+  - severity: error
+    summary: heading clipped
+EOF
+  log="$dir/env.log"
+  FM_HOME="$home" PATH="$fakebin:$BASE_PATH" "$REVIEW" --arm-only task-layout "$html" >/dev/null
+  out=$(FM_FAKE_LAVISH_RESPONSE_FILE="$response" FM_FAKE_LAVISH_ENV_LOG="$log" \
+    PATH="$fakebin:$BASE_PATH" bash "$home/state/task-layout.check.sh")
+  assert_contains "$out" 'lavish-feedback:' "layout warning feedback did not wake FirstMate"
+  assert_no_grep '--agent-reply' "$log" "layout-warning-only feedback should not send a prompt acknowledgement"
+  feedback_file=$(find "$home/data/task-layout/lavish-feedback" -type f -name '*feedback*.txt' | head -1)
+  [ -n "$feedback_file" ] || fail "layout warning output was not stored under task data"
+  assert_grep 'layout_warnings[1]:' "$feedback_file" "stored Lavish feedback lost layout warnings"
+  pass "fm-lavish-review: layout warnings wake without prompt acknowledgement"
 }
 
 test_final_feedback_disarms_check_after_storing_output() {
@@ -135,6 +170,8 @@ EOF
   assert_contains "$out" 'lavish-feedback-final:' "final feedback did not surface as a final Lavish event"
   assert_absent "$home/state/task-c.check.sh" "final Lavish feedback did not disarm the source check"
   assert_absent "$home/state/task-c.check-trust" "final Lavish feedback did not remove custom-check trust"
+  assert_grep '--agent-reply Received — routing this into the active UI work now.' "$log" \
+    "final Lavish prompts were not acknowledged before disarming"
   assert_grep 'Final review note' "$(find "$home/data/task-c/lavish-feedback" -type f | head -1)" \
     "final Lavish feedback was not stored before disarming"
   pass "fm-lavish-review: final feedback stores output and disarms polling"
@@ -167,5 +204,6 @@ test_input_notice_distinguishes_queue_only_from_send_controls() {
 
 test_registered_check_preserves_lavish_environment_and_wakes
 test_waiting_poll_is_silent
+test_layout_warnings_wake_without_prompt_acknowledgement
 test_final_feedback_disarms_check_after_storing_output
 test_input_notice_distinguishes_queue_only_from_send_controls

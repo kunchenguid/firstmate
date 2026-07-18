@@ -313,6 +313,8 @@ test_lavish_visual_review_helper_renders_for_crews() {
     "ship brief did not name the durable Lavish poll owner"
   assert_grep "exact Lavish env/state-dir capture" "$ship" \
     "ship brief did not name the Lavish env capture owner"
+  assert_grep "immediate prompt acknowledgement" "$ship" \
+    "ship brief did not name the Lavish prompt acknowledgement owner"
   FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
     "$ROOT/bin/fm-brief.sh" sample-scout sample --scout >/dev/null 2>&1
   scout="$home/data/sample-scout/brief.md"

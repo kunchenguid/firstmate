@@ -224,7 +224,7 @@ fi
 LAVISH_SECTION=$(cat <<EOF
 # Lavish visual reviews
 If you create a Lavish visual review for this task, use \`$FM_ROOT/bin/fm-lavish-review.sh $ID <html-file>\` instead of raw \`lavish-axi <html-file>\`.
-That helper owns private/local launch, a durable monitored poll path, exact Lavish env/state-dir capture, watcher wakeup, and structured-input submission checks; read its help before use.
+That helper owns private/local launch, a durable monitored poll path, exact Lavish env/state-dir capture, immediate prompt acknowledgement, watcher wakeup, and structured-input submission checks; read its help before use.
 EOF
 )
 

@@ -3,8 +3,8 @@
 #
 # This is the FirstMate entrypoint for supervised Lavish visual reviews.
 # It preserves the exact Lavish environment used to open the review, registers a
-# trusted watcher check for the task, and keeps artifacts local to the current
-# machine or trusted network.
+# trusted watcher check for the task, immediately acknowledges picked-up prompts,
+# and keeps artifacts local to the current machine or trusted network.
 # It never calls `lavish-axi share` and never publishes the artifact publicly.
 #
 # Usage:
