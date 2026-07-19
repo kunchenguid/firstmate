@@ -81,6 +81,13 @@ The caller-facing label remains `fm-<id>`, but the actual cmux workspace title i
 Test cleanup must use the guarded path described in [`docs/cmux-backend.md`](cmux-backend.md)'s "Test safety" section, never enumerate-and-close every workspace.
 The `config/backend` file is not inherited by secondmate homes.
 
+## Upstream integration remote (config/upstream-remote)
+
+Local, gitignored `config/upstream-remote` names the git remote that `bin/fm-upstream-check.sh` and the `/upstream-integrate` skill fetch from when reviewing and selectively integrating upstream commits into a fork whose local branch has diverged.
+One line, one token.
+Absent means the default `upstream` remote; an explicit `--remote <name>` flag to `fm-upstream-check.sh` wins over the file.
+This knob exists for fork-with-local-customizations installations; a standard single-remote install has no use for it and `/updatefirstmate` remains its update path.
+
 ## Away-mode supervisor backend (FM_SUPERVISOR_BACKEND / FM_SUPERVISOR_TARGET)
 
 The `/afk` sub-supervisor injects escalation digests into firstmate's own pane independently of where new task endpoints are spawned.
@@ -198,7 +205,7 @@ This section is the single owner of the canonical schema and its per-field seman
     {
       "when": "<natural-language condition describing a kind of task>",
       "use": [
-        { "harness": "<adapter>", "model": "<optional model>", "effort": "<low|medium|high|xhigh|max, optional>" }
+        { "harness": "<adapter>", "model": "<optional model>", "effort": "<off|minimal|low|medium|high|xhigh|max, optional>" }
       ],
       "select": "<optional strategy>",
       "why": "<optional rationale that helps firstmate choose>"

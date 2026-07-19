@@ -347,6 +347,38 @@ test_pi_threads_model_and_max_effort() {
   pass "pi receives --model and --thinking max profile flags"
 }
 
+test_pi_threads_off_and_minimal_thinking() {
+  local rec id out status launch
+
+  # off: pi advertises off for models without reasoning, and firstmate threads it.
+  id=profile-pi-off-z8b
+  rec=$(make_spawn_case profile-pi-off pi "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --model openai-codex/gpt-5.6-sol --effort off)
+  status=$?
+  expect_code 0 "$status" "pi spawn with off effort should succeed"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" pi openai-codex/gpt-5.6-sol off
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "pi --model 'openai-codex/gpt-5.6-sol' --thinking 'off' -e" \
+    "pi launch did not thread the off thinking level"
+  pass "pi receives --thinking off for models without reasoning"
+
+  # minimal: same path, the level just above off.
+  id=profile-pi-minimal-z8c
+  rec=$(make_spawn_case profile-pi-minimal pi "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --model openai-codex/gpt-5.6-sol --effort minimal)
+  status=$?
+  expect_code 0 "$status" "pi spawn with minimal effort should succeed"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" pi openai-codex/gpt-5.6-sol minimal
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "pi --model 'openai-codex/gpt-5.6-sol' --thinking 'minimal' -e" \
+    "pi launch did not thread the minimal thinking level"
+  pass "pi receives --thinking minimal"
+}
+
 test_batch_forwards_shared_profile_flags() {
   local rec id1 id2 out status
   id1=profile-batch-a-z9
@@ -398,6 +430,7 @@ test_grok_omits_invalid_max_reasoning_effort
 test_grok_omits_invalid_xhigh_reasoning_effort
 test_opencode_threads_model_and_ignores_effort_axis
 test_pi_threads_model_and_max_effort
+test_pi_threads_off_and_minimal_thinking
 test_batch_forwards_shared_profile_flags
 test_active_dispatch_profile_does_not_block_secondmate_launch
 
