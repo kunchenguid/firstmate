@@ -34,6 +34,10 @@
 # device. It refuses and preserves task state when that proof fails; otherwise
 # it removes the task's check, trust record, PR sidecar, publication record, and
 # quarantine entries with the rest of the volatile state.
+# Before killing an endpoint, teardown closes every pending Pi supervised
+# question through fm-pi-question-recover.sh --cancel. It removes that task's
+# private state/questions/<id>/ directory only after ordinary teardown safety
+# checks pass and the endpoint cleanup completes.
 # Orca tasks use the same safety checks, then close the recorded terminal and
 # remove the recorded worktree through `orca worktree rm`; teardown never guesses
 # an Orca target from ambient CLI state.
@@ -965,6 +969,7 @@ cleanup_firstmate_home_children() {
       fi
     fi
     if [ -n "$child_t" ]; then
+      FM_HOME="$home" "$SCRIPT_DIR/fm-pi-question-recover.sh" --cancel "$child_id" || return 1
       if [ "$child_backend" = zellij ]; then
         # Zellij titles are scoped by the owning home tag, so forced secondmate
         # cleanup must verify child tabs as that child home, not the parent.
@@ -1082,6 +1087,11 @@ if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
   fi
 fi
 
+# Close a blocked Pi tool call before its owning endpoint is killed or its
+# worktree is returned. The recovery helper is idempotent for non-Pi tasks and
+# for calls that already reached a terminal resolution.
+FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-pi-question-recover.sh" --cancel "$ID" || exit 1
+
 # Best-effort: drop the local task branch so the shared repo does not accumulate refs.
 if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
   if [ "$ORCA_PATH_MATCH_VERIFIED" != 1 ]; then
@@ -1137,6 +1147,9 @@ fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
 [ -n "$TASK_TMP" ] && rm -rf "$TASK_TMP"
 remove_pr_poll_artifacts "$STATE" "$ID" || exit 1
 rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.meta" "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token"
+if fm_task_id_path_safe "$ID"; then
+  rm -rf "$STATE/questions/$ID"
+fi
 if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ]; then
   "$FM_ROOT/bin/fm-fleet-sync.sh" "$PROJ" || true
 fi

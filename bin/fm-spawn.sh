@@ -73,6 +73,10 @@
 #                  written by this script; outside the worktree to avoid pi's trust gate)
 #     __PITURNEND__ absolute path to .pi/extensions/fm-primary-turnend-guard.ts in a pi secondmate home
 #     __PIWATCH__   absolute path to .pi/extensions/fm-primary-pi-watch.ts in a pi secondmate home
+# Pi ship and scout launches additionally receive the explicit supervised
+# interaction envelope: FM_INTERACTION_MODE=supervised, FM_HOME, FM_TASK_ID,
+# and the absolute FM_ASK_BRIDGE path. Pi secondmates retain their existing
+# primary-shaped launch; attended-primary experiments belong to a later phase.
 # Per-harness turn-end hooks are installed automatically; some live outside the worktree.
 # grok uses a firstmate-owned global hook under ${GROK_HOME:-$HOME/.grok}/hooks
 # plus a gitignored .fm-grok-turnend worktree pointer and a state token.
@@ -408,6 +412,11 @@ if [ "$KIND" = secondmate ] && [ -z "$ARG3" ]; then
       esac
     fi
   fi
+fi
+
+if [ "$HARNESS" = pi ] && [ "$KIND" != secondmate ] && ! command -v jq >/dev/null 2>&1; then
+  echo "error: jq is required for the Pi supervised-question bridge" >&2
+  exit 1
 fi
 
 secondmate_registry_value() {
@@ -1043,6 +1052,12 @@ LAUNCH=${LAUNCH//__TURNEND__/$sq_turnend}
 LAUNCH=${LAUNCH//__PIEXT__/$sq_piext}
 LAUNCH=${LAUNCH//__PITURNEND__/$sq_piturnend}
 LAUNCH=${LAUNCH//__PIWATCH__/$sq_piwatch}
+if [ "$HARNESS" = pi ] && [ "$KIND" != secondmate ]; then
+  sq_home=$(shell_quote "$FM_HOME")
+  sq_task_id=$(shell_quote "$ID")
+  sq_ask_bridge=$(shell_quote "$FM_ROOT/bin/fm-pi-ask-bridge.sh")
+  LAUNCH="FM_INTERACTION_MODE=supervised FM_HOME=$sq_home FM_TASK_ID=$sq_task_id FM_ASK_BRIDGE=$sq_ask_bridge $LAUNCH"
+fi
 if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")
   LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_HOME=$sq_home $LAUNCH"

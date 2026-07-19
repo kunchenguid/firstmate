@@ -124,9 +124,14 @@ status_is_paused_or_captain_held() {  # <status-line>
 # terminal line never clears an open captain decision.
 #
 # Decision key grammar (backward-compatible with the existing "<verb>: <note>"
-# format): an OPTIONAL "[key=<slug>]" token sits between the verb and the colon,
+# format): an OPTIONAL "[key=<slug>]" token normally sits between the verb and the colon,
 #   needs-decision [key=api-shape]: <summary>
 #   resolved       [key=api-shape]: <how it was decided>
+# The Pi supervised-question wire protocol is the one recognized suffix form,
+# so its bounded wake line ends with the call identity without making arbitrary
+# note prose look like status control syntax:
+#   needs-decision: <relative request path> [key=ask-<call-id>]
+#   resolved: Pi question answered [key=ask-<call-id>]
 # A line with no token uses the key "default", preserving the historical
 # one-open-decision-per-task behavior (a bare "resolved:" closes "default").
 # The three parsers are pure reads of a single line; the verb parser strips any
@@ -145,7 +150,7 @@ status_line_note() {  # <status-line> -> text after the first colon, trimmed
   esac
 }
 _fm_decision_key() {  # <status-line> -> key slug, or "default" when no token
-  local prefix=${1%%:*} k
+  local line=$1 prefix=${1%%:*} k
   case "$prefix" in
     *\[key=*\]*)
       k=${prefix#*\[key=}
@@ -155,7 +160,19 @@ _fm_decision_key() {  # <status-line> -> key slug, or "default" when no token
         *) printf '%s' "$k" ;;
       esac
       ;;
-    *) printf 'default' ;;
+    *)
+      case "$line" in
+        needs-decision:\ Pi\ question\ request\ state/questions/*\ \[key=ask-*\]|resolved:\ Pi\ question\ *\ \[key=ask-*\])
+          k=${line##* [key=}
+          k=${k%]}
+          case "$k" in
+            ''|*[!A-Za-z0-9._-]*) return 1 ;;
+            *) printf '%s' "$k" ;;
+          esac
+          ;;
+        *) printf 'default' ;;
+      esac
+      ;;
   esac
 }
 # Drop the record for <key> from a newline-terminated "<key>\t<verb>\t<note>" set.
