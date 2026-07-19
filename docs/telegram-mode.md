@@ -59,7 +59,7 @@ Runtime private artifacts (all gitignored, typically mode 0600/0700):
 | Path | Role |
 | --- | --- |
 | `state/telegram-inbox/<update_id>.json` | Stashed authenticated inbound messages |
-| `state/telegram-offset` | Persisted getUpdates offset (at-most-once) |
+| `state/telegram-offset` | Persisted getUpdates offset (advances past drops and accepts; not past deferred over-cap authenticated updates) |
 | `state/telegram-audit.log` | Append-only inbound/outbound/respond audit |
 | `state/telegram-notified-prs.log` | Full PR URLs previously sent to this chat |
 | `state/telegram-actions/<update_id>.json` | Validated approve/deny/merge actions for firstmate |
@@ -92,7 +92,8 @@ See `docs/examples/wedge-alarm` for a copyable starting config.
 
 ## Stage 2 - bounded inbound replies and approvals
 
-`bin/fm-telegram-poll.sh` short-polls `getUpdates`, drops non-allowlisted senders and non-private chats (audited, never replied to), stashes accepted messages, advances the offset, and prints `telegram-msg <update_id>` so the watcher queues a `check:` wake.
+`bin/fm-telegram-poll.sh` short-polls `getUpdates`, drops non-allowlisted senders and non-private chats (audited, never replied to; those drops advance the offset so attackers cannot pin the backlog), stashes accepted messages, and prints `telegram-msg <update_id>` so the watcher queues a `check:` wake.
+Authenticated messages beyond `FM_TELEGRAM_RATE_MAX` per sweep are deferred, not dropped: the offset does not advance past them, so the next sweep re-fetches (captain decision key=`telegram-rate-cap`).
 
 Firstmate loads the `fm-telegram-respond` skill on that wake (and on `telegram-mode-error ...`), then runs `bin/fm-telegram-respond.sh` to drain the inbox.
 
@@ -118,9 +119,10 @@ Stage 3 free-text prompting is not implemented.
 
 ### Replay, rate limit, audit
 
-- Offset persistence provides at-most-once delivery of each `update_id`.
-- Approve/deny/merge older than `FM_TELEGRAM_FRESHNESS_SECS` (default 15 minutes) are not executed.
-- Inbound processing is rate-limited and identical commands are deduped inside a short window.
+- Offset advances past confirmed accepts and auth/empty drops.
+- Over-cap authenticated updates are deferred (offset holds before them) for at-least-once delivery of allowlisted commands.
+- Approve/deny/merge older than `FM_TELEGRAM_FRESHNESS_SECS` (default 15 minutes) are not executed; deferred approvals can still go stale and are re-surfaced for re-confirmation.
+- Identical commands are deduped inside a short window.
 - Every inbound verdict and outbound send appends to `state/telegram-audit.log` (tokens redacted).
 
 ## Scripts

@@ -10,9 +10,13 @@
 # Contract: "output => wake firstmate, silence => keep sleeping".
 #
 # When on:
-#   - getUpdates with persisted offset (at-most-once)
-#   - drop non-allowlisted senders and non-matching chats (audited, no reply)
-#   - cap processed updates per sweep (FMT_RATE_MAX)
+#   - getUpdates with persisted offset
+#   - drop non-allowlisted senders and non-matching chats (audited, no reply);
+#     those drops advance the offset so attackers cannot pin the backlog
+#   - cap accepted authenticated messages per sweep (FMT_RATE_MAX); excess
+#     authenticated updates are DEFERRED (not dropped): offset does not advance
+#     past them, so the next sweep re-fetches (at-least-once for allowlisted
+#     senders; captain decision key=telegram-rate-cap)
 #   - stash accepted messages at state/telegram-inbox/<update_id>.json
 #   - print one line per accepted update: "telegram-msg <update_id>"
 #   - HTTP 409 (second getUpdates consumer) surfaces as telegram-mode-error once
@@ -95,11 +99,22 @@ if [ "$ok" != true ] && [ "$ok" != "true" ]; then
   exit 0
 fi
 
-# Process updates in order; advance offset to max(update_id)+1 even for drops
-# so dropped traffic cannot be re-fetched forever.
-max_id=
+# Process updates in ascending update_id order.
+# last_confirmed = highest update_id we may acknowledge to Telegram (offset =
+# last_confirmed+1). Auth drops and successful accepts advance it. Rate-capped
+# authenticated messages are deferred: we stop confirming and leave the offset
+# before them so the next sweep re-fetches (DEFER, never drop).
+last_confirmed=
 processed=0
+deferred=
 wakes=
+
+confirm_uid() {
+  local uid=$1
+  if [ -z "$last_confirmed" ] || [ "$uid" -gt "$last_confirmed" ] 2>/dev/null; then
+    last_confirmed=$uid
+  fi
+}
 
 while IFS= read -r update_json; do
   [ -n "$update_json" ] || continue
@@ -107,19 +122,17 @@ while IFS= read -r update_json; do
   case "$uid" in
     ''|*[!0-9]*) continue ;;
   esac
-  if [ -z "$max_id" ] || [ "$uid" -gt "$max_id" ] 2>/dev/null; then
-    max_id=$uid
-  fi
 
-  # Cap accepted processing per sweep (rate limit).
-  if [ "$processed" -ge "${FMT_RATE_MAX:-10}" ]; then
-    fmt_audit_append inbound rate-limited "update_id=$uid"
+  # Once an authenticated update is deferred for rate, do not confirm anything
+  # later in this sweep (Telegram delivers in order; later ids stay pending).
+  if [ -n "$deferred" ]; then
     continue
   fi
 
   msg=$(printf '%s' "$update_json" | jq -c '.message // empty' 2>/dev/null) || msg=
   [ -n "$msg" ] || {
     fmt_audit_append inbound dropped-no-message "update_id=$uid"
+    confirm_uid "$uid"
     continue
   }
 
@@ -129,21 +142,34 @@ while IFS= read -r update_json; do
   msg_date=$(printf '%s' "$msg" | jq -r '.date // empty' 2>/dev/null) || msg_date=
   chat_type=$(printf '%s' "$msg" | jq -r '.chat.type // empty' 2>/dev/null) || chat_type=
 
-  # Direct (1:1) chat only; never groups/channels.
+  # Direct (1:1) chat only; never groups/channels. Auth rejects advance offset
+  # so unauthenticated traffic cannot pin the backlog forever.
   if [ "$chat_type" != "private" ]; then
     fmt_audit_append inbound dropped-auth "update_id=$uid chat_type=$chat_type chat=$chat_id from=$from_id"
+    confirm_uid "$uid"
     continue
   fi
   if ! fmt_chat_allowed "$chat_id"; then
     fmt_audit_append inbound dropped-auth "update_id=$uid chat=$chat_id from=$from_id"
+    confirm_uid "$uid"
     continue
   fi
   if ! fmt_sender_allowed "$from_id"; then
     fmt_audit_append inbound dropped-auth "update_id=$uid chat=$chat_id from=$from_id"
+    confirm_uid "$uid"
     continue
   fi
   if [ -z "$text" ]; then
     fmt_audit_append inbound dropped-empty "update_id=$uid from=$from_id"
+    confirm_uid "$uid"
+    continue
+  fi
+
+  # Authenticated, non-empty: subject to per-sweep rate cap. Over-cap DEFERs.
+  if [ "$processed" -ge "${FMT_RATE_MAX:-10}" ]; then
+    deferred=$uid
+    fmt_audit_append inbound deferred "update_id=$uid reason=rate-cap"
+    # Do not confirm this update_id; next sweep re-fetches from here.
     continue
   fi
 
@@ -172,23 +198,28 @@ while IFS= read -r update_json; do
 
   if [ -z "$stash" ]; then
     emit_error_once "cannot build inbox payload"
+    # Build failure is not a permanent drop; leave unconfirmed for retry.
+    deferred=$uid
     continue
   fi
 
   if ! printf '%s\n' "$stash" | fmx_private_artifact_publish_stdin "$INBOX" "$uid.json" 600; then
     emit_error_once "cannot write inbox"
+    deferred=$uid
     continue
   fi
 
   processed=$((processed + 1))
+  confirm_uid "$uid"
   first=$(printf '%s\n' "$text" | head -c 80)
   fmt_audit_append inbound accepted "update_id=$uid from=$from_id text=$first"
   wakes="${wakes}telegram-msg ${uid}"$'\n'
 done < <(jq -c '.result // [] | .[]' "$BODY_FILE" 2>/dev/null)
 
-# Advance offset past the highest update_id seen (including drops).
-if [ -n "$max_id" ]; then
-  next=$((max_id + 1))
+# Confirm only through last_confirmed. Deferred authenticated updates keep the
+# offset before them so getUpdates re-serves them next sweep.
+if [ -n "$last_confirmed" ]; then
+  next=$((last_confirmed + 1))
   fmt_offset_set "$next" || true
 fi
 
