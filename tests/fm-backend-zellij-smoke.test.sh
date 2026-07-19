@@ -49,7 +49,25 @@ fm_backend_source zellij || fail "fm_backend_source zellij failed"
 
 # --- version gate + container ensure -----------------------------------------
 
-fm_backend_zellij_version_check || fail "version_check failed against the real installed zellij"
+# A host zellij below the adapter's verified minimum is a host limitation, not
+# an adapter regression (the version gate itself is unit-tested against faked
+# versions in tests/fm-backend-zellij.test.sh), so the smoke test skips instead
+# of failing the suite. The refusal text is the production gate's own
+# below-minimum verdict, so the version comparison keeps its one owner; any
+# OTHER version_check failure still fails loudly. Nothing has been created yet
+# (the check precedes container_ensure), so the cleanup trap is dropped to keep
+# the skip free of safety-guard noise.
+if ! VC_ERR=$(fm_backend_zellij_version_check 2>&1); then
+  case "$VC_ERR" in
+    *'older than the verified minimum'*)
+      trap - EXIT
+      echo "skip: $VC_ERR"
+      exit 0 ;;
+    *)
+      printf '%s\n' "$VC_ERR" >&2
+      fail "version_check failed against the real installed zellij" ;;
+  esac
+fi
 pass "real zellij: version_check accepts the installed binary's version"
 
 CONTAINER=$(fm_backend_zellij_container_ensure) || fail "container_ensure failed"

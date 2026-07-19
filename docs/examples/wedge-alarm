@@ -20,3 +20,9 @@
 # happens overnight reaches you even away from the machine.
 osascript
 command: curl -fsS -H "Title: firstmate wedge alarm" -d "$1" https://ntfy.sh/replace-with-your-topic
+
+# Example: Telegram via Firstmate's sender (requires FM_TELEGRAM_BOT_TOKEN and
+# FM_TELEGRAM_CHAT_ID in the home's gitignored .env; see docs/telegram-mode.md).
+# --force bypasses the AFK-only gate so a wedge still reaches the phone.
+# Replace FM_HOME and the bin path with this installation's real paths.
+# command: FM_HOME="$HOME/path-to-firstmate-home" /path/to/firstmate/bin/fm-telegram-send.sh --force -
