@@ -34,12 +34,13 @@
 # Sourcing this script defaults that seam to discard so library-mode tests can
 # never post a real notification or play a real sound.
 # FM_DECISION_ALERT_TIMEOUT_SECS bounds each channel and defaults to 10 seconds.
-# FM_DECISION_ALERT_TOTAL_TIMEOUT_SECS bounds the complete invocation and
-# defaults to 10 seconds.
+# FM_DECISION_ALERT_TOTAL_TIMEOUT_SECS bounds notifier dispatch across the
+# complete invocation and defaults to 10 seconds.
 # Up to eight notifier workers run concurrently within the shared invocation
 # deadline.
 #
-# Deduplication uses state/.decision-alerted-<sha256(identity)>.
+# Deduplication uses state/.decision-alerted-<digest(identity)>; the digest is
+# SHA-256 when either supported utility is available, with a cksum fallback.
 # Marker creation is atomic and occurs before notifier execution, so concurrent
 # or repeated delivery attempts cannot double-alert.
 # The marker contains no decision text or identity.

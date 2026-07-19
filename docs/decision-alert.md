@@ -45,7 +45,7 @@ Other platforms have no built-in `auto` channel and can opt into `herdr` or a `c
 See [`examples/decision-alert`](examples/decision-alert) for a copyable file.
 
 Every channel is bounded by `FM_DECISION_ALERT_TIMEOUT_SECS`, which defaults to 10 seconds.
-The complete command is bounded by `FM_DECISION_ALERT_TOTAL_TIMEOUT_SECS`, which also defaults to 10 seconds and is shared across every open decision and configured channel in that invocation.
+Notifier dispatch is bounded by `FM_DECISION_ALERT_TOTAL_TIMEOUT_SECS`, which also defaults to 10 seconds and is shared across every open decision and configured channel in that invocation.
 Heartbeat fleet scans use one `scan-state` invocation, so the total bound also covers every status file in the scan.
 The dispatcher collects open decisions before execution and runs at most eight notifier workers concurrently within the shared deadline.
 It schedules complete channel sets for each claimed identity together and divides remaining time across pending batches, so a hung notifier cannot starve a healthy fallback while process fan-out stays fixed.
