@@ -409,3 +409,149 @@ fm_wake_print_deduped() {
     }
   ' "$file"
 }
+
+# Map one structurally valid signal key to its home-local status filename.
+# Queue payload text is intentionally ignored: it is display data, not a path
+# authority. The caller still verifies the resulting regular file immediately
+# before its bounded read.
+FM_WAKE_STATUS_KEY=
+FM_WAKE_STATUS_HISTORICAL=false
+fm_wake_status_key_map() {  # <queue-key>
+  local key=$1 id
+  FM_WAKE_STATUS_KEY=
+  FM_WAKE_STATUS_HISTORICAL=false
+  case "$key" in
+    *.status)
+      id=${key%.status}
+      ;;
+    *.turn-ended)
+      id=${key%.turn-ended}
+      FM_WAKE_STATUS_HISTORICAL=true
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+  case "$id" in
+    ''|.*|*[!A-Za-z0-9._-]*) return 1 ;;
+  esac
+  [ "${#id}" -le 64 ] || return 1
+  FM_WAKE_STATUS_KEY="$id.status"
+}
+
+fm_wake_annotation_manifest() {  # <deduped-raw-rows>
+  local rows=$1 epoch seq kind key payload
+  while IFS=$(printf '\t') read -r epoch seq kind key payload; do
+    [ "$kind" = signal ] || continue
+    fm_wake_status_key_map "$key" || continue
+    if [ "$FM_WAKE_STATUS_HISTORICAL" = true ]; then
+      printf '%s\thistorical\n' "$FM_WAKE_STATUS_KEY"
+    else
+      printf '%s\tdirect\n' "$FM_WAKE_STATUS_KEY"
+    fi
+  done <<EOF
+$rows
+EOF
+}
+
+fm_wake_file_size() {  # <regular-file>
+  if [ "$(uname)" = Darwin ]; then
+    stat -f %z "$1" 2>/dev/null
+  else
+    stat -c %s "$1" 2>/dev/null
+  fi
+}
+
+FM_WAKE_EVENT_LINE=
+FM_WAKE_EVENT_TRUNCATED=false
+fm_wake_latest_event() {  # <validated-status-path> <tail-byte-cap>
+  local path=$1 tail_bytes=$2 size chunk record line_number
+  FM_WAKE_EVENT_LINE=
+  FM_WAKE_EVENT_TRUNCATED=false
+  [ -f "$path" ] && [ ! -L "$path" ] && [ -r "$path" ] || return 1
+  size=$(fm_wake_file_size "$path") || return 1
+  case "$size" in ''|*[!0-9]*) return 1 ;; esac
+  chunk=$(LC_ALL=C tail -c "$tail_bytes" "$path" 2>/dev/null) || return 1
+  [ -n "$chunk" ] || return 1
+  record=$(printf '%s' "$chunk" | LC_ALL=C awk '
+    /[^[:space:]]/ { line = $0; line_number = NR }
+    END { if (line_number) printf "%d\t%s", line_number, line }
+  ') || return 1
+  [ -n "$record" ] || return 1
+  line_number=${record%%	*}
+  FM_WAKE_EVENT_LINE=${record#*	}
+  FM_WAKE_EVENT_LINE=$(printf '%s' "$FM_WAKE_EVENT_LINE" | LC_ALL=C tr '\t\r' '  ')
+  if [ "$size" -gt "$tail_bytes" ] && [ "$line_number" -eq 1 ]; then
+    FM_WAKE_EVENT_TRUNCATED=true
+  fi
+}
+
+# Print supplemental drain-time context only after the caller has committed the
+# raw queue consumption and released the append lock. The limits are constants,
+# so status-file volume cannot turn a drain into an unbounded context read.
+fm_wake_print_annotations() {  # <deduped-raw-rows>
+  local rows=$1 manifest status_key mode path prefix line suffix keep bytes
+  local output='' used=0 omitted=0 marker marker_reserve=96
+  local tail_bytes=8192 item_bytes=2048 global_bytes=8192
+  local LC_ALL=C
+
+  manifest=$(fm_wake_annotation_manifest "$rows" | awk -F '\t' '
+    {
+      key = $1
+      if (!(key in seen)) {
+        order[++count] = key
+        seen[key] = 1
+        mode[key] = $2
+      } else if ($2 == "direct") {
+        mode[key] = "direct"
+      }
+    }
+    END {
+      for (i = 1; i <= count; i++) print order[i] "\t" mode[order[i]]
+    }
+  ') || return 0
+
+  # Test-only latency seam for proving that queue appends remain independent of
+  # a slow best-effort annotation phase.
+  case "${FM_WAKE_ENRICH_TEST_DELAY:-0}" in
+    0) ;;
+    ''|*[!0-9]*) ;;
+    *) sleep "$FM_WAKE_ENRICH_TEST_DELAY" ;;
+  esac
+
+  while IFS=$(printf '\t') read -r status_key mode; do
+    [ -n "$status_key" ] || continue
+    path="$STATE/$status_key"
+    fm_wake_latest_event "$path" "$tail_bytes" || continue
+    prefix="wake annotation: latest wake-EVENT observed at drain, not current state"
+    if [ "$mode" = historical ]; then
+      prefix="$prefix; historical / not necessarily the triggering event"
+    fi
+    line="$prefix: $status_key: $FM_WAKE_EVENT_LINE"
+    suffix=''
+    [ "$FM_WAKE_EVENT_TRUNCATED" = false ] || suffix=' [truncated]'
+    line="$line$suffix"
+    if [ $(( ${#line} + 1 )) -gt "$item_bytes" ]; then
+      suffix=' [truncated]'
+      keep=$((item_bytes - ${#suffix} - 1))
+      line="${line:0:$keep}$suffix"
+    fi
+    bytes=$(( ${#line} + 1 ))
+    if [ $((used + bytes + marker_reserve)) -gt "$global_bytes" ]; then
+      omitted=$((omitted + 1))
+      continue
+    fi
+    output="$output$line
+"
+    used=$((used + bytes))
+  done <<EOF
+$manifest
+EOF
+
+  printf '%s' "$output"
+  if [ "$omitted" -gt 0 ]; then
+    marker="wake annotation: $omitted annotations omitted (global enrichment byte cap)"
+    printf '%s\n' "$marker"
+  fi
+  return 0
+}

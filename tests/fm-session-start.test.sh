@@ -587,7 +587,8 @@ EOF
   make_fake_ps_claude "$fakebin"
   rm -f "$fakebin/node"
 
-  append_wake "$home/state" signal task-z "needs-decision: pick a library"
+  printf 'needs-decision: pick a library\n' > "$home/state/task-z.status"
+  append_wake "$home/state" signal task-z.status "needs-decision: pick a library"
 
   out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
 
@@ -596,7 +597,8 @@ EOF
   # fm-bootstrap.sh's own exact MISSING-tool line format.
   assert_contains "$out" "MISSING: node (install:" "fm-bootstrap.sh's real detect line did not appear verbatim"
   # fm-wake-drain.sh's real drained record (raw tab-separated queue line).
-  assert_contains "$out" "$(printf 'signal\ttask-z\tneeds-decision: pick a library')" "fm-wake-drain.sh's real drained record did not appear"
+  assert_contains "$out" "$(printf 'signal\ttask-z.status\tneeds-decision: pick a library')" "fm-wake-drain.sh's real drained record did not appear"
+  assert_contains "$out" "wake annotation: latest wake-EVENT observed at drain, not current state: task-z.status: needs-decision: pick a library" "fm-session-start.sh did not preserve the drain's separate annotation line"
 
   pass "fm-session-start.sh composes the real fm-lock.sh, fm-bootstrap.sh, and fm-wake-drain.sh output verbatim"
 }
