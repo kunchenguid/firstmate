@@ -15,8 +15,10 @@ fi
 HERDR_LAB_HELPER=${HERDR_LAB_HELPER:-$ROOT/bin/fm-herdr-lab.sh}
 HERDR_LAB_SESSION=$("$HERDR_LAB_HELPER" name firstmate-visible-supervision)
 LAB=$(mktemp -d "${TMPDIR:-/tmp}/fm-supervision-visibility-herdr.XXXXXX")
+CRASH_PUBLISHER=
 
 cleanup() {
+  [ -z "$CRASH_PUBLISHER" ] || kill -KILL "$CRASH_PUBLISHER" 2>/dev/null || true
   "$HERDR_LAB_HELPER" teardown "$HERDR_LAB_SESSION"
   rm -rf "$LAB"
   fm_test_cleanup
@@ -80,5 +82,41 @@ printf '%s' "$cleared" | jq -e '
   and (.result.agent | has("state_labels") | not)
 ' >/dev/null || fail "clean clear did not restore plain idle"
 
+crash_ready="$LAB/crash-ready"
+(
+  run_lab pane report-metadata "$pane" \
+    --source firstmate-supervision:crash \
+    --custom-status supervised \
+    --state-label 'idle=idle · supervised' \
+    --ttl-ms 500 >/dev/null
+  touch "$crash_ready"
+  while :; do sleep 30; done
+) &
+crash_publisher=$!
+CRASH_PUBLISHER=$crash_publisher
+for _ in {1..100}; do
+  [ -e "$crash_ready" ] && break
+  sleep 0.05
+done
+[ -e "$crash_ready" ] || fail "crash publisher did not report short-TTL metadata"
+kill -KILL "$crash_publisher" 2>/dev/null || true
+wait "$crash_publisher" 2>/dev/null || true
+CRASH_PUBLISHER=
+
+expired=
+for _ in {1..100}; do
+  crashed=$(read_agent)
+  if printf '%s' "$crashed" | jq -e '
+    .result.agent.agent_status == "idle"
+    and (.result.agent | has("custom_status") | not)
+    and (.result.agent | has("state_labels") | not)
+  ' >/dev/null; then
+    expired=1
+    break
+  fi
+  sleep 0.05
+done
+[ "$expired" = 1 ] || fail "crashed publisher metadata did not expire through its TTL: $crashed"
+
 version=$(run_lab status --json | jq -r '.client.version // "unknown"')
-pass "real Herdr $version keeps Pi idle while showing and clearing idle-supervised metadata"
+pass "real Herdr $version keeps Pi idle with clean clearing and crash TTL cleanup"

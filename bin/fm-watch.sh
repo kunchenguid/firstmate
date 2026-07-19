@@ -162,11 +162,12 @@ _event_cap_fails=0
 # clears its own unique source on exit. The TTL lets a SIGKILL or host crash age
 # out rather than leaving a false permanent indicator. Other runtime backends
 # have no equivalent shared display surface and remain unchanged.
-FM_HERDR_SUPERVISION_STATUS_TTL_MS=360000
+FM_HERDR_SUPERVISION_STATUS_TTL_MS=${FM_HERDR_SUPERVISION_STATUS_TTL_MS:-360000}
 FM_SUPERVISION_VISIBILITY_PUBLISHED=0
 FM_SUPERVISION_VISIBILITY_SOURCE=
 FM_SUPERVISION_VISIBILITY_SESSION=
 FM_SUPERVISION_VISIBILITY_PANE=
+FM_SUPERVISION_VISIBILITY_REFRESH_PID=
 
 fm_supervision_visibility_resolve_herdr() {
   local target backend=${FM_SUPERVISOR_BACKEND:-}
@@ -200,11 +201,11 @@ fm_supervision_visibility_herdr_call() { # <session> <herdr args...>
   shift
   command -v herdr >/dev/null 2>&1 || return 1
   if command -v timeout >/dev/null 2>&1; then
-    HERDR_SESSION="$session" timeout 2 herdr "$@" --session "$session"
+    HERDR_SESSION="$session" timeout --kill-after=1 2 herdr "$@" --session "$session"
   elif command -v gtimeout >/dev/null 2>&1; then
-    HERDR_SESSION="$session" gtimeout 2 herdr "$@" --session "$session"
+    HERDR_SESSION="$session" gtimeout --kill-after=1 2 herdr "$@" --session "$session"
   elif command -v perl >/dev/null 2>&1; then
-    HERDR_SESSION="$session" perl -e 'my $seconds = shift; alarm $seconds; exec @ARGV' \
+    HERDR_SESSION="$session" perl -e 'my $seconds = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } my $stop = sub { $SIG{TERM} = $SIG{INT} = $SIG{HUP} = "IGNORE"; kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; waitpid $pid, 0; exit 124 }; local $SIG{ALRM} = $stop; local $SIG{TERM} = $stop; local $SIG{INT} = $stop; local $SIG{HUP} = $stop; alarm $seconds; waitpid $pid, 0; alarm 0; exit($? >> 8)' \
       2 herdr "$@" --session "$session"
   else
     return 1
@@ -235,6 +236,49 @@ fm_supervision_visibility_clear() {
     --source "$FM_SUPERVISION_VISIBILITY_SOURCE" \
     --clear-custom-status --clear-state-labels >/dev/null 2>&1 || true
   FM_SUPERVISION_VISIBILITY_PUBLISHED=0
+}
+
+fm_supervision_visibility_refresh_interval() {
+  local ttl=$FM_HERDR_SUPERVISION_STATUS_TTL_MS half seconds millis
+  case "$ttl" in ''|*[!0-9]*|0) ttl=360000 ;; esac
+  half=$((ttl / 2))
+  [ "$half" -gt 0 ] || half=1
+  seconds=$((half / 1000))
+  millis=$((half % 1000))
+  printf '%d.%03d\n' "$seconds" "$millis"
+}
+
+fm_supervision_visibility_refresh_loop() { # <watcher pid>
+  local owner_pid=$1 interval sleeper= expected_identity= current_identity=
+  interval=$(fm_supervision_visibility_refresh_interval)
+  trap '[ -z "$sleeper" ] || kill -TERM "$sleeper" 2>/dev/null || true; exit 0' HUP INT TERM
+  while :; do
+    sleep "$interval" &
+    sleeper=$!
+    wait "$sleeper" 2>/dev/null || exit 0
+    sleeper=
+    [ "$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)" = "$owner_pid" ] || exit 0
+    expected_identity=$(cat "$WATCH_LOCK/pid-identity" 2>/dev/null || true)
+    current_identity=$(fm_pid_identity "$owner_pid" 2>/dev/null || true)
+    [ -n "$expected_identity" ] && [ "$current_identity" = "$expected_identity" ] || exit 0
+    fm_supervision_visibility_refresh
+  done
+}
+
+fm_supervision_visibility_start() { # <watcher pid>
+  local owner_pid=$1
+  fm_supervision_visibility_resolve_herdr || return 0
+  fm_supervision_visibility_refresh
+  fm_supervision_visibility_refresh_loop "$owner_pid" &
+  FM_SUPERVISION_VISIBILITY_REFRESH_PID=$!
+}
+
+fm_supervision_visibility_stop() {
+  local pid=${FM_SUPERVISION_VISIBILITY_REFRESH_PID:-}
+  [ -n "$pid" ] || return 0
+  kill -TERM "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  FM_SUPERVISION_VISIBILITY_REFRESH_PID=
 }
 
 # afk_present: 0 while the away-mode flag exists. When set, the daemon wraps this
@@ -768,6 +812,7 @@ if ! fm_lock_try_acquire "$WATCH_LOCK"; then
   exit 0
 fi
 watcher_cleanup() {
+  fm_supervision_visibility_stop
   fm_supervision_visibility_clear
   fm_active_check_stop || return 1
   fm_check_output_cleanup
@@ -784,7 +829,7 @@ FM_SUPERVISION_VISIBILITY_SOURCE="firstmate-supervision:$WATCHER_PID"
 printf '%s\n' "$FM_HOME" > "$WATCH_LOCK/fm-home" || true
 printf '%s\n' "$WATCH_PATH" > "$WATCH_LOCK/watcher-path" || true
 fm_pid_identity "$WATCHER_PID" > "$WATCH_LOCK/pid-identity" 2>/dev/null || true
-fm_supervision_visibility_refresh
+fm_supervision_visibility_start "$WATCHER_PID"
 
 [ -e "$STATE/.last-heartbeat" ] || touch "$STATE/.last-heartbeat"
 
@@ -802,7 +847,6 @@ while :; do
   # Liveness beacon for fm-guard.sh: a fresh mtime here means a watcher is
   # alive. Supervision scripts warn when this goes stale with tasks in flight.
   touch "$STATE/.last-watcher-beat"
-  fm_supervision_visibility_refresh
 
   # Slow per-task checks (firstmate writes these, e.g. a merged-PR poll).
   # Time-based via .last-check mtime so the cadence survives watcher restarts.

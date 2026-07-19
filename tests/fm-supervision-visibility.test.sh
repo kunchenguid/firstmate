@@ -16,7 +16,8 @@ cat > "$FAKEBIN/herdr" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "${FM_FAKE_HERDR_LOG:?}"
 if [ "${FM_FAKE_HERDR_HANG:-0}" = 1 ]; then
-  exec sleep 30
+  trap '' TERM ALRM
+  while :; do :; done
 fi
 printf '%s\n' '{"ok":true}'
 SH
@@ -35,10 +36,36 @@ run_visibility() {
 }
 
 reset_visibility_globals() {
+  fm_supervision_visibility_stop
   FM_SUPERVISION_VISIBILITY_PUBLISHED=0
   FM_SUPERVISION_VISIBILITY_SOURCE=firstmate-supervision:test
   FM_SUPERVISION_VISIBILITY_SESSION=
   FM_SUPERVISION_VISIBILITY_PANE=
+}
+
+test_refresh_is_independent_of_watcher_cycle() {
+  local calls=0 attempts=0
+  reset_visibility_globals
+  : > "$HERDR_LOG"
+  FM_SUPERVISOR_BACKEND=herdr
+  FM_SUPERVISOR_TARGET=fm-lab-visible:w1:p1
+  HERDR_ENV=
+  TMUX=
+  FM_HERDR_SUPERVISION_STATUS_TTL_MS=1000
+  mkdir -p "$WATCH_LOCK"
+  printf '%s\n' "$$" > "$WATCH_LOCK/pid"
+  fm_pid_identity "$$" > "$WATCH_LOCK/pid-identity"
+  run_visibility fm_supervision_visibility_start "$$"
+  while [ "$calls" -lt 2 ] && [ "$attempts" -lt 100 ]; do
+    calls=$(grep -c -- '--custom-status supervised' "$HERDR_LOG" 2>/dev/null || true)
+    [ "$calls" -ge 2 ] && break
+    sleep 0.05
+    attempts=$((attempts + 1))
+  done
+  fm_supervision_visibility_stop
+  [ "$calls" -ge 2 ] || fail "visibility TTL was not refreshed independently of the watcher cycle"
+  FM_HERDR_SUPERVISION_STATUS_TTL_MS=360000
+  pass "Herdr visibility refresh cadence is independent of watcher cycle duration"
 }
 
 test_active_and_clean_exit_metadata() {
@@ -163,5 +190,6 @@ test_singleton_duplicate_does_not_publish_or_clear() {
 
 test_active_and_clean_exit_metadata
 test_hung_metadata_call_cannot_wedge_supervision
+test_refresh_is_independent_of_watcher_cycle
 test_inactive_and_non_herdr_runtimes_stay_unpublished
 test_singleton_duplicate_does_not_publish_or_clear
