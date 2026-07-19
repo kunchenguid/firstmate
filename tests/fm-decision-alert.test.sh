@@ -187,7 +187,7 @@ SH
 }
 
 test_concurrency_is_bounded() {
-  local home recorder task max_active
+  local home recorder task active max_active
   home="$TMP_ROOT/worker-pool"; mkdir -p "$home/state" "$home/config" "$home/active"
   recorder="$home/recorder"
   cat > "$recorder" <<'SH'
@@ -204,10 +204,14 @@ SH
       > "$home/state/$task.status"
   done
   printf 'osascript\nherdr\ncommand:true\n' > "$home/config/decision-alert"
+  : > "$home/counts"
   FM_HOME="$home" FM_DECISION_ALERT_EXEC="$recorder" FM_DECISION_ALERT_POOL_DIR="$home" \
-    FM_DECISION_ALERT_TIMEOUT_SECS=1 FM_DECISION_ALERT_TOTAL_TIMEOUT_SECS=1 \
+    FM_DECISION_ALERT_TIMEOUT_SECS=2 FM_DECISION_ALERT_TOTAL_TIMEOUT_SECS=2 \
     "$ALERT" scan-state >/dev/null 2> "$home/error.log"
-  max_active=$(sort -nr "$home/counts" | head -1 | tr -d ' ')
+  max_active=0
+  while IFS= read -r active; do
+    [ "$active" -le "$max_active" ] || max_active=$active
+  done < "$home/counts"
   [ "$max_active" -le 8 ] || fail "decision alert execution exceeded its worker limit"
   [ "$max_active" -gt 1 ] || fail "the worker pool did not preserve concurrent fallback delivery"
   pass "decision alert execution stays within eight concurrent workers"

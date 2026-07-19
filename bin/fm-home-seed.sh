@@ -650,10 +650,27 @@ seed_return_treehouse_home() {
   }
 }
 
+seed_remove_tree_bounded() {
+  local target=$1 attempts=0 absent=0
+  while [ "$attempts" -lt 5 ]; do
+    rm -rf -- "$target" 2>/dev/null || true
+    sleep 0.1
+    if [ ! -e "$target" ] && [ ! -L "$target" ]; then
+      absent=$((absent + 1))
+      [ "$absent" -ge 2 ] && return 0
+    else
+      absent=0
+    fi
+    attempts=$((attempts + 1))
+  done
+  echo "warning: failed to remove rollback target $target after bounded retries" >&2
+  return 0
+}
+
 seed_remove_created_home() {
   local home=$1 abs_home
   abs_home=$(seed_rollback_target "$home" "created home") || return 0
-  rm -rf -- "$abs_home" 2>/dev/null || true
+  seed_remove_tree_bounded "$abs_home"
 }
 
 seed_project_rollback_target() {
@@ -675,7 +692,7 @@ seed_project_rollback_target() {
 seed_remove_created_project() {
   local project_path=$1 abs_project
   abs_project=$(seed_project_rollback_target "$project_path") || return 0
-  rm -rf -- "$abs_project" 2>/dev/null || true
+  seed_remove_tree_bounded "$abs_project"
 }
 
 seed_project_was_created() {
