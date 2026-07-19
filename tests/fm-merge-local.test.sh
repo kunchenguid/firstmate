@@ -12,6 +12,8 @@ fm_git_identity fmtest fmtest@example.invalid
 
 MERGE_LOCAL="$ROOT/bin/fm-merge-local.sh"
 TMP_ROOT=$(fm_test_tmproot fm-merge-local-tests)
+REAL_GIT_FOR_TEST=$(command -v git)
+export REAL_GIT_FOR_TEST
 
 make_case() {
   local name=$1 target=${2:-main} mode=${3:-local-only}
@@ -308,6 +310,38 @@ test_unsafe_task_metadata_refuses() {
   pass "fm-merge-local refuses symlinked and multiply linked task metadata without mutation"
 }
 
+test_concurrent_metadata_update_is_preserved() {
+  local case_dir fakebin rc task_head
+  case_dir=$(make_case concurrent-meta main)
+  fakebin=$(fm_fakebin "$case_dir")
+  cat > "$fakebin/git" <<'SH'
+#!/usr/bin/env bash
+case " $* " in
+  *" merge --ff-only "*) printf '%s\n' 'concurrent=preserved' >> "${FM_TEST_META:?}" ;;
+esac
+exec "${REAL_GIT_FOR_TEST:?}" "$@"
+SH
+  chmod +x "$fakebin/git"
+  task_head=$(git -C "$case_dir/project" rev-parse refs/heads/fm/task-x1)
+
+  set +e
+  PATH="$fakebin:$PATH" FM_TEST_META="$case_dir/state/task-x1.meta" \
+    run_merge "$case_dir" task-x1 > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  [ "$rc" -ne 0 ] || fail "concurrent-meta: landing silently replaced changed metadata"
+  assert_grep 'task metadata changed during local merge' "$case_dir/stderr" \
+    "concurrent-meta: landing did not report the concurrent metadata update"
+  assert_grep 'concurrent=preserved' "$case_dir/state/task-x1.meta" \
+    "concurrent-meta: landing discarded the concurrent metadata update"
+  assert_no_grep '^local_merge_target=' "$case_dir/state/task-x1.meta" \
+    "concurrent-meta: landing replaced metadata after detecting an update"
+  [ "$(git -C "$case_dir/project" rev-parse refs/heads/main)" = "$task_head" ] \
+    || fail "concurrent-meta: fixture did not reach the post-merge metadata guard"
+  pass "fm-merge-local preserves concurrent in-place metadata updates"
+}
+
 test_unsafe_task_id_refuses() {
   local case_dir
   case_dir=$(make_case unsafe-task-id main)
@@ -330,4 +364,5 @@ test_missing_task_branch_refuses
 test_non_local_only_mode_refuses
 test_option_parsing_refuses
 test_unsafe_task_metadata_refuses
+test_concurrent_metadata_update_is_preserved
 test_unsafe_task_id_refuses

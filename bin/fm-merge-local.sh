@@ -105,6 +105,7 @@ fi
 META_DEVICE=$(fm_pr_file_device "$META") || exit 1
 META_MODE=$(fm_pr_file_mode "$META") || exit 1
 META_IDENTITY=$(fm_pr_file_identity "$META") || exit 1
+META_HASH=$(fm_pr_sha256 "$META") || exit 1
 
 PROJ=$(grep '^project=' "$META" | cut -d= -f2-)
 MODE=$(grep '^mode=' "$META" | cut -d= -f2- || true)
@@ -178,6 +179,8 @@ fm_pr_regular_destination_on_device_or_absent "$META" "$STATE_DEVICE" \
   || { echo "error: task metadata changed during local merge preparation" >&2; exit 1; }
 [ "$(fm_pr_file_identity "$META")" = "$META_IDENTITY" ] \
   || { echo "error: task metadata changed during local merge preparation" >&2; exit 1; }
+[ "$(fm_pr_sha256 "$META")" = "$META_HASH" ] \
+  || { echo "error: task metadata changed during local merge preparation" >&2; exit 1; }
 
 before=$(git -C "$PROJ" rev-parse --short "$TARGET_REF")
 git -C "$PROJ" merge --ff-only "$BRANCH_REF" >/dev/null
@@ -185,6 +188,8 @@ after=$(git -C "$PROJ" rev-parse --short "$TARGET_REF")
 fm_pr_regular_destination_on_device_or_absent "$META" "$META_DEVICE" \
   || { echo "error: task metadata changed during local merge" >&2; exit 1; }
 [ "$(fm_pr_file_identity "$META")" = "$META_IDENTITY" ] \
+  || { echo "error: task metadata changed during local merge" >&2; exit 1; }
+[ "$(fm_pr_sha256 "$META")" = "$META_HASH" ] \
   || { echo "error: task metadata changed during local merge" >&2; exit 1; }
 mv -f -- "$META_TMP" "$META" || exit 1
 META_TMP=

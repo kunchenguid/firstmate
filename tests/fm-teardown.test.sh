@@ -630,6 +630,29 @@ test_local_only_merge_to_recorded_feature_then_teardown_allows() {
   pass "local-only work merged to a recorded feature target is torn down"
 }
 
+test_local_only_recorded_default_target_note_uses_actual_branch() {
+  local case_dir rc task_head
+  case_dir=$(make_case recorded-master)
+  write_meta "$case_dir" local-only ship
+  git -C "$case_dir/project" branch -m main master
+  git -C "$case_dir/project" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/master
+  wt_commit "$case_dir" "merged master work"
+  task_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  git -C "$case_dir/project" update-ref refs/heads/master "$task_head"
+  printf '%s\n' 'local_merge_target=master' >> "$case_dir/state/task-x1.meta"
+  add_compatible_tasks_axi "$case_dir"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "recorded-master: teardown should accept work on the recorded default target"
+  assert_grep "tasks-axi done task-x1 --note 'local master'" "$case_dir/stdout" \
+    "recorded-master: teardown mislabeled the recorded default target"
+  pass "local-only completion notes name the recorded default target"
+}
+
 test_local_only_completion_note_shell_quotes_recorded_target() {
   local case_dir rc marker target command
   case_dir=$(make_case quoted-feature)
@@ -1333,6 +1356,7 @@ test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present
 test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
 test_local_only_merge_to_recorded_feature_then_teardown_allows
+test_local_only_recorded_default_target_note_uses_actual_branch
 test_local_only_completion_note_shell_quotes_recorded_target
 test_no_mistakes_origin_remote_allows
 test_no_mistakes_truly_unpushed_refuses
