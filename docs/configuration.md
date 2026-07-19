@@ -258,6 +258,7 @@ It emits `SECONDMATE_SYNC:` only when a home was skipped for an actionable sync 
 When a running home advances and its loaded instruction surface (`AGENTS.md`, `bin/`, or `.agents/skills/`) changed, bootstrap sends the re-read nudge itself through the stable `fm-<id>` selector and reports the exact completed send as `BOOTSTRAP_INFO:`.
 If that send fails, bootstrap keeps an idempotent retry marker and emits `NUDGE_SECONDMATES:` with the failure reason.
 The same bootstrap run emits `SECONDMATE_LIVENESS:` only when a live secondmate endpoint is skipped or respawn fails; already-live and successfully respawned endpoints are handled silently.
+Bootstrap also runs a best-effort self-update heads-up scoped to firstmate's own `FM_ROOT` checkout only, never `projects/`: a time-bounded `origin` fetch of the default branch (`FM_SELF_UPDATE_FETCH_TIMEOUT`, default 10s) followed by a commit-count comparison, emitting `FIRSTMATE_UPDATE:` only when the checkout is behind; it stays silent when up to date, offline, or the fetch times out (falling back to already-fetched refs), and `FM_SELF_UPDATE_CHECK=0` skips it entirely.
 For a mid-session inherited local-material edit where tracked-file sync and reread nudges are not needed, run `bin/fm-config-push.sh`.
 It uses the same live secondmate discovery and propagation helper as bootstrap, prints each live home's `crew-dispatch.json`, `crew-harness`, `backlog-backend`, and `data/captain-shared.md` result as `pushed`, `unchanged`, `skipped`, or `error`, and exits non-zero only for real propagation errors.
 That live discovery starts from `state/*.meta` records with `kind=secondmate`; `data/secondmates.md` only backfills `home=` for older or incomplete meta records.
@@ -402,6 +403,8 @@ FM_PAUSE_RESURFACE_SECS=3600       # seconds before an idle declared external wa
 FM_WEDGE_DEMAND_INSPECT_COUNT=3    # consecutive provably-working stale escalations on the same unchanged pane before demand-deep-inspection is added
 FM_WATCH_TRIAGE_LOG_MAX_BYTES=262144   # size cap for the watcher's absorbed-wake debug log
 FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT=     # optional seconds allowed for bootstrap's best-effort clone refresh; unset/blank defaults to max(20, 5 + 3 * origin-backed-project-count)
+FM_SELF_UPDATE_CHECK=1  # set to 0 to skip bootstrap's FIRSTMATE_UPDATE self-update heads-up entirely (tests/lib.sh pins this so suites stay hermetic)
+FM_SELF_UPDATE_FETCH_TIMEOUT=10  # seconds allowed for bootstrap's best-effort origin fetch of FM_ROOT's own default branch before it is killed and the check falls back to already-fetched refs
 FM_FLEET_PRUNE=1        # set to 0 to skip pruning local branches whose upstream is gone
 FM_STALE_WORKTREE_LOCK_AGE_SECS=30       # min mtime age before fm-teardown.sh treats a leftover worktree git index.lock as provably stale
 FM_TREEHOUSE_RETURN_LOCK_RETRIES=3        # retries after a treehouse return fails on the transient git index.lock signature
