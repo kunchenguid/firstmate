@@ -346,6 +346,39 @@ test_poll_mentions_wake_once_per_durable_offer() {
   pass "fm-x-poll wakes once per durable request offer across inbox cleanup"
 }
 
+test_poll_offer_claim_failure_reports_once() {
+  local home fakebin out rc body
+  home="$TMP_ROOT/poll-offer-claim-failure"; mkdir -p "$home/state" "$home/external-context"
+  fakebin=$(make_fake_curl "$home")
+  chmod 700 "$home/state"
+  ln -s "$home/external-context" "$home/state/x-context"
+  body='{"request_id":"req-claim-failure","text":"status?"}'
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_RELAY_URL="https://relay.test" \
+    FMX_PAIRING_TOKEN=tok-claim-failure FAKE_POLL_CODE=200 FAKE_POLL_BODY="$body" \
+    "$ROOT/bin/fm-x-poll.sh"); rc=$?
+  expect_code 0 "$rc" "first offer claim failure poll exit"
+  [ "$out" = "x-mode-error cannot record mention offer" ] \
+    || fail "an offer claim failure must emit one diagnostic (got: $out)"
+  assert_present "$home/state/x-poll.error" "offer claim failure must write a dedupe marker"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_RELAY_URL="https://relay.test" \
+    FMX_PAIRING_TOKEN=tok-claim-failure FAKE_POLL_CODE=200 FAKE_POLL_BODY="$body" \
+    "$ROOT/bin/fm-x-poll.sh"); rc=$?
+  expect_code 0 "$rc" "repeated offer claim failure poll exit"
+  [ -z "$out" ] || fail "a repeated offer claim failure must stay silent (got: $out)"
+  assert_present "$home/state/x-poll.error" "a repeated offer claim failure must retain its dedupe marker"
+  rm "$home/state/x-context"
+  mkdir "$home/state/x-context"
+  chmod 700 "$home/state/x-context"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_RELAY_URL="https://relay.test" \
+    FMX_PAIRING_TOKEN=tok-claim-failure FAKE_POLL_CODE=200 FAKE_POLL_BODY="$body" \
+    "$ROOT/bin/fm-x-poll.sh"); rc=$?
+  expect_code 0 "$rc" "recovered offer claim poll exit"
+  [ "$out" = "x-mention req-claim-failure" ] \
+    || fail "a recovered offer claim must emit the mention wake (got: $out)"
+  assert_absent "$home/state/x-poll.error" "a successful offer claim must clear the diagnostic marker"
+  pass "fm-x-poll retains offer claim diagnostics until recovery"
+}
+
 test_poll_preserves_conversation_context() {
   local home fakebin out rc body f
   home="$TMP_ROOT/poll-ctx"; mkdir -p "$home"
@@ -2729,6 +2762,7 @@ test_poll_auth_error_reports_once
 test_poll_error_private_publication_rejects_unsafe_paths
 test_poll_question_stashes_and_marks
 test_poll_mentions_wake_once_per_durable_offer
+test_poll_offer_claim_failure_reports_once
 test_poll_preserves_conversation_context
 test_poll_inbox_commit_failure_reports_error
 test_poll_inbox_private_publication_rejects_unsafe_paths

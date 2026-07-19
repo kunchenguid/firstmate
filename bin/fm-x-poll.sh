@@ -133,11 +133,10 @@ if [ -n "$POLL_CTX" ]; then
   fmx_context_registry_set "$STATE" "$REQ" "$POLL_PLATFORM" "$POLL_MAX" 2>/dev/null || true
 fi
 
-clear_error
 fmx_offer_registry_claim "$STATE" "$REQ"
 offer_rc=$?
 case "$offer_rc" in
-  0) printf 'x-mention %s\n' "$REQ" ;;
-  1) exit 0 ;;
+  0) clear_error; printf 'x-mention %s\n' "$REQ" ;;
+  1) clear_error; exit 0 ;;
   *) emit_error_once "cannot record mention offer"; exit 0 ;;
 esac
