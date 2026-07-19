@@ -199,7 +199,21 @@ done
 LOOP
 chmod +x "$LOOP_SCRIPT"
 
-fm_backend_herdr_send_text_line "$SUPERVISOR_TARGET" "bash './supervisor-loop.sh' './submitted.log'" \
+PANE_TAIL=
+i=0
+while [ "$i" -lt 80 ]; do
+  PANE_TAIL=$(fm_backend_herdr_capture "$SUPERVISOR_TARGET" 10 | tail -1)
+  case "$PANE_TAIL" in
+    *'❯'|*'$'|*'%'|*'#'|*'>') break ;;
+  esac
+  sleep 0.1
+  i=$((i + 1))
+done
+case "$PANE_TAIL" in
+  *'❯'|*'$'|*'%'|*'#'|*'>') ;;
+  *) fail "scratch herdr pane did not reach a shell prompt" ;;
+esac
+fm_backend_herdr_send_text_line "$SUPERVISOR_TARGET" "bash '$LOOP_SCRIPT' '$LOG_FILE'" \
   || fail "could not start the supervisor-loop script in the scratch herdr pane"
 sleep 1  # let the loop start and settle
 

@@ -99,7 +99,12 @@ pass "real tmux: fm_backend_tmux_send_literal + fm_backend_tmux_send_key Enter s
 # far enough to still see the earliest line - the same -S -N bounding fm-peek.sh
 # and fm-watch.sh rely on for a bounded, cheap pane read.
 fm_backend_tmux_send_text_line "$TARGET" "for i in \$(seq 1 80); do echo tag-line-\$i; done"
-sleep 0.6
+i=0
+while [ "$i" -lt 50 ]; do
+  fm_backend_tmux_capture "$TARGET" 3 | grep -q 'tag-line-80' && break
+  sleep 0.1
+  i=$((i + 1))
+done
 small=$(fm_backend_tmux_capture "$TARGET" 3) || fail "fm_backend_tmux_capture (small window) failed"
 case "$small" in
   *tag-line-1$'\n'*) fail "a 3-line capture should not still see the very first numbered line"$'\n'"$small" ;;
