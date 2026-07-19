@@ -116,7 +116,7 @@ assert_meta_profile() {
 
 test_spawn_serializes_metadata_replacement() {
   local rec id meta first_ready first_release second_ready second_release
-  local first_pid second_pid i first_status second_status first_instance second_instance
+  local first_pid second_pid i first_status second_status first_instance second_instance second_launch_log
   id=profile-meta-lock-z17
   rec=$(make_spawn_case profile-meta-lock claude "$id")
   read_case_record "$rec"
@@ -125,6 +125,7 @@ test_spawn_serializes_metadata_replacement() {
   first_release="$CASE_DIR/first-release"
   second_ready="$CASE_DIR/second-ready"
   second_release="$CASE_DIR/second-release"
+  second_launch_log="$CASE_DIR/second-launch.log"
   FM_FAKE_SPAWN_GATE_READY="$first_ready" FM_FAKE_SPAWN_GATE_RELEASE="$first_release" \
     run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
     > "$CASE_DIR/first.out" 2>&1 &
@@ -133,7 +134,7 @@ test_spawn_serializes_metadata_replacement() {
   while [ ! -e "$first_ready" ] && [ "$i" -lt 300 ]; do sleep 0.01; i=$((i + 1)); done
   [ -e "$first_ready" ] || fail "first spawn did not reach its lifecycle gate"
   FM_FAKE_SPAWN_GATE_READY="$second_ready" FM_FAKE_SPAWN_GATE_RELEASE="$second_release" \
-    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$second_launch_log" \
     "$id" "$PROJ_DIR" --harness codex > "$CASE_DIR/second.out" 2>&1 &
   second_pid=$!
   sleep 0.2
@@ -142,6 +143,8 @@ test_spawn_serializes_metadata_replacement() {
   i=0
   while [ ! -e "$second_ready" ] && [ "$i" -lt 300 ]; do sleep 0.01; i=$((i + 1)); done
   [ -e "$second_ready" ] || fail "second spawn did not begin after the first generation"
+  assert_grep 'claude --dangerously-skip-permissions' "$LAUNCH_LOG" \
+    "second generation began before the first worker launch was submitted"
   first_instance=$(grep '^task_instance=' "$meta" | cut -d= -f2-)
   touch "$second_release"
   first_status=0

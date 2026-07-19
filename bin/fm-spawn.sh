@@ -1066,8 +1066,6 @@ META_WRITE_STATUS=0
     echo "projects=$SECONDMATE_PROJECTS"
   fi
 } > "$STATE/$ID.meta" || META_WRITE_STATUS=$?
-fm_meta_lock_release "$STATE/$ID.meta"
-META_LOCKED=0
 [ "$META_WRITE_STATUS" -eq 0 ] || exit "$META_WRITE_STATUS"
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
 
@@ -1097,5 +1095,7 @@ sleep 0.3
 spawn_send_literal "$T" "$LAUNCH"
 sleep 0.3
 spawn_send_key "$T" Enter
+fm_meta_lock_release "$STATE/$ID.meta"
+META_LOCKED=0
 
 echo "spawned $ID harness=$HARNESS kind=$KIND mode=$MODE yolo=$YOLO window=$META_WINDOW worktree=$WT"
