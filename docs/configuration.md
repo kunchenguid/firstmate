@@ -234,12 +234,15 @@ Absent `select` means use the first array element, or the only object in the sin
 An omitted model or effort means the selected harness uses its own default for that axis.
 If a selected profile carries an effort value the chosen harness does not accept, `fm-spawn.sh` records the requested `effort=` in task meta for traceability but omits the launch flag, and bootstrap reports the invalid harness/effort pair as a `CREW_DISPATCH` diagnostic when it is visible in the file.
 `quotaBalanced` is optional local tuning used only by rules with `select: "quota-balanced"`.
-`reservePercent` keeps percentage-capacity headroom out of the usable score and defaults to 0, while a provider-level value overrides the global value.
-`staleClearMargin` defaults to 20 percentage-capacity points and preserves the policy that cached stale quota must be clearly better than fresh quota to win.
-`runRate.minimumObservationSeconds` defaults to 300 and bounds first-sample burst amplification near a reset.
-`runRate.historyMaxAgeSeconds` defaults to 86400 and prevents old local samples from influencing recent burn.
+`reservePercent` is a number from 0 through 100 that keeps percentage-capacity headroom out of the usable score and defaults to 0, while a provider-level value overrides the global value.
+`staleClearMargin` is a non-negative number that defaults to 20 percentage-capacity points and preserves the policy that cached stale quota must be clearly better than fresh quota to win.
+`runRate.minimumObservationSeconds` is a positive integer that defaults to 300 and bounds first-sample burst amplification near a reset.
+`runRate.historyMaxAgeSeconds` is a positive integer that defaults to 86400 and prevents old local samples from influencing recent burn.
 `runRate.recentWeight` ranges from 0 to 1, defaults to 1, and controls how strongly an observed recent usage delta can raise the cycle-average burn estimate.
-Each provider `windows` entry grants explicit manual reset capacity only to the matching canonical `scope` and `durationSeconds`.
+Provider tuning keys are limited to `claude`, `codex`, `copilot`, `cursor`, and `grok`.
+Each provider `windows` entry requires a `session` or `weekly` scope, a positive-integer `durationSeconds`, and a non-negative-integer `extraResets`, and duplicate scope-duration pairs are invalid within one provider.
+The canonical 18000-second duration requires `session`, and the canonical 604800-second duration requires `weekly`.
+Each valid entry grants explicit manual reset capacity only to its matching scope and duration.
 The selector derives session versus weekly scope from actual 18000-second or 604800-second duration before considering provider labels, ids, or misleading kinds.
 Weekly reset credits therefore never apply to an independent five-hour session window.
 `extraResets` is a non-negative integer and adds one full normalized window of capacity per configured reset.
@@ -267,7 +270,7 @@ This declaration is local and gitignored, so the three-reset reserve is not a sh
 See [`docs/examples/crew-dispatch.json`](examples/crew-dispatch.json) for a starting point to copy into local `config/crew-dispatch.json`.
 When the file exists, bootstrap validates it with `jq`.
 Valid files stay silent by default; with `FM_BOOTSTRAP_VERBOSE_FACTS=1`, bootstrap emits `BOOTSTRAP_INFO: crew dispatch active config/crew-dispatch.json` plus one `BOOTSTRAP_INFO:` fact per rule and default profile.
-Malformed JSON, an unverified harness, a malformed array profile, an unknown `select`, or an effort value unsupported by that harness is reported as `CREW_DISPATCH: invalid config/crew-dispatch.json - ...`; missing `jq` is reported through the normal `MISSING: jq` install-consent flow.
+Malformed JSON, an invalid `quotaBalanced` schema or value, an unverified harness, a malformed array profile, an unknown `select`, or an effort value unsupported by that harness is reported as `CREW_DISPATCH: invalid config/crew-dispatch.json - ...`; missing `jq` is reported through the normal `MISSING: jq` install-consent flow.
 If no dispatch rule fits, firstmate uses the dispatch profile `default` when present, then falls back to `config/crew-harness`.
 Because the spawn backstop is gated by file presence, any fallback path after a missing match, validation error, or missing `jq` still passes a resolved harness explicitly until the file is fixed or removed.
 Secondmate homes inherit this file from the primary, so a secondmate's own crewmates apply the same dispatch profile behavior.
