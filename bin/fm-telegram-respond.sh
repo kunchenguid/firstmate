@@ -134,7 +134,10 @@ process_one() {
     # DEFER, never drop (captain decision key=telegram-rate-cap): the offset
     # already advanced past this update, so the inbox file is the only copy.
     fmt_audit_append respond deferred "update_id=$uid rate-limited"
-    reply_text "Rate limited - command queued; it runs on a later sweep." || true
+    if ! fmt_dedupe_seen "rate-deferred:$uid"; then
+      fmt_dedupe_mark "rate-deferred:$uid"
+      reply_text "Rate limited - command queued; it runs on a later sweep." || true
+    fi
     printf 'deferred %s rate-limited\n' "$uid"
     return 0
   fi

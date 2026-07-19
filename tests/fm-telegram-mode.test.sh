@@ -434,6 +434,31 @@ test_poll_offset_write_failure_surfaces_error() {
   pass "poll surfaces offset persist failure once and keeps updates unconfirmed"
 }
 
+# Deferred drain trigger: a rate-limited inbox left by respond must be re-woken
+# by the next poll sweep even when getUpdates returns nothing new.
+test_poll_rewakes_pending_inbox_on_empty_result() {
+  local home fakebin out n
+  home="$TMP_ROOT/poll-rewake"; mkdir -p "$home/state"
+  write_env "$home"
+  fakebin=$(make_fake_curl "$home")
+  seed_inbox "$home" 95 "status"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_TELEGRAM_API_URL="https://api.test" \
+    FAKE_POLL_CODE=200 FAKE_POLL_BODY='{"ok":true,"result":[]}' \
+    "$ROOT/bin/fm-telegram-poll.sh")
+  assert_contains "$out" "telegram-msg 95" "pending inbox file must re-wake on empty poll"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_TELEGRAM_API_URL="https://api.test" \
+    FAKE_POLL_CODE=200 FAKE_POLL_BODY='{"ok":true,"result":[]}' \
+    "$ROOT/bin/fm-telegram-poll.sh")
+  assert_contains "$out" "telegram-msg 95" "still-pending inbox file must re-wake every sweep"
+  # Same uid accepted this sweep and still pending: exactly one wake line.
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_TELEGRAM_API_URL="https://api.test" \
+    FAKE_POLL_CODE=200 FAKE_POLL_BODY="$(sample_update 95 222 111 "status")" \
+    "$ROOT/bin/fm-telegram-poll.sh")
+  n=$(printf '%s' "$out" | grep -c 'telegram-msg 95')
+  [ "$n" = "1" ] || fail "accepted+pending uid must wake exactly once (got $n)"
+  pass "poll re-wakes pending inbox files without new inbound traffic"
+}
+
 test_poll_409_resurfaces_after_healthy_poll() {
   local home fakebin out1 out2 out3
   home="$TMP_ROOT/poll-409-recover"; mkdir -p "$home"
@@ -814,6 +839,7 @@ test_poll_rate_cap_deferred_processed_next_sweep
 test_poll_deferred_approve_still_subject_to_freshness
 test_poll_auth_rejects_cannot_pin_offset
 test_poll_offset_write_failure_surfaces_error
+test_poll_rewakes_pending_inbox_on_empty_result
 test_send_dry_run_no_network
 test_send_refuses_secretish
 test_send_skips_when_not_afk
