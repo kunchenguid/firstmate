@@ -66,7 +66,31 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
-  fm_fake_exit0 "$fakebin" treehouse
+  cat > "$fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ "${1:-}" = get ]; then
+  shift
+  lease=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --lease) lease=1 ;;
+      --lease-holder) shift ;;
+      --lease-holder=*) ;;
+    esac
+    shift || true
+  done
+  if [ "$lease" -eq 1 ]; then
+    if [ -n "${FM_FAKE_TREEHOUSE_LEASE_HOOK:-}" ]; then
+      sh -c "$FM_FAKE_TREEHOUSE_LEASE_HOOK"
+    fi
+    printf '%s\n' "${FM_FAKE_TREEHOUSE_LEASE_PATH:?}"
+    exit 0
+  fi
+fi
+exit 0
+SH
+  chmod +x "$fakebin/treehouse"
   printf '%s\n' "$fakebin"
 }
 
@@ -112,6 +136,7 @@ run_spawn() {
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
+    FM_FAKE_TREEHOUSE_LEASE_PATH="$wt" \
     FM_FAKE_LAUNCH_LOG="$launchlog" GROK_HOME="$home/grok-home" PATH="$fakebin:$PATH" \
     "$SPAWN" "$@" 2>&1
 }
@@ -248,6 +273,7 @@ test_spawn_ignores_unrelated_git_root_before_project_worktree() {
     FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$WT_DIR" TMUX="fake,1,0" \
     FM_FAKE_PANE_PATH_SEQUENCE="$sequence" FM_FAKE_PANE_PATH_LOG="$target_log" \
+    FM_FAKE_TREEHOUSE_LEASE_PATH="$WT_DIR" \
     FM_FAKE_LAUNCH_LOG="$LAUNCH_LOG" GROK_HOME="$HOME_DIR/grok-home" PATH="$FAKEBIN_DIR:$PATH" \
     "$SPAWN" "$id" "$PROJ_DIR" 2>&1)
   status=$?
@@ -259,6 +285,36 @@ test_spawn_ignores_unrelated_git_root_before_project_worktree() {
   assert_no_grep "worktree=$unrelated" "$meta" "meta must never persist an unrelated git root as the task worktree"
   assert_grep 'target=%42' "$target_log" "worktree polling did not use the stable tmux window id"
   pass "spawn poll skips unrelated git roots and records the requested project's isolated worktree"
+}
+
+test_spawn_ignores_other_linked_worktree_before_acquired_worktree() {
+  local rec id other sequence target_log out status meta
+  id=profile-worktree-same-repo-race-z18
+  rec=$(make_spawn_case profile-worktree-same-repo-race codex "$id")
+  read_case_record "$rec"
+  other="$CASE_DIR/other-linked-worktree"
+  sequence="$CASE_DIR/pane-path-sequence"
+  target_log="$CASE_DIR/pane-path-targets.log"
+  git -C "$PROJ_DIR" worktree add --quiet -b other-linked "$other"
+  printf '%s\n' "$PROJ_DIR" "$other" "$WT_DIR" > "$sequence"
+
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
+    FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
+    FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$WT_DIR" TMUX="fake,1,0" \
+    FM_FAKE_PANE_PATH_SEQUENCE="$sequence" FM_FAKE_PANE_PATH_LOG="$target_log" \
+    FM_FAKE_TREEHOUSE_LEASE_PATH="$WT_DIR" \
+    FM_FAKE_LAUNCH_LOG="$LAUNCH_LOG" GROK_HOME="$HOME_DIR/grok-home" PATH="$FAKEBIN_DIR:$PATH" \
+    "$SPAWN" "$id" "$PROJ_DIR" 2>&1)
+  status=$?
+  expect_code 0 "$status" "spawn with transient same-repo linked worktree should keep polling for this acquisition's worktree"$'\n'"$out"
+
+  meta="$HOME_DIR/state/$id.meta"
+  assert_contains "$out" "worktree=$WT_DIR" "spawn summary chose another task's linked worktree instead of this acquisition's worktree"
+  assert_grep "worktree=$WT_DIR" "$meta" "meta chose another task's linked worktree instead of this acquisition's worktree"
+  assert_no_grep "worktree=$other" "$meta" "meta must never persist another same-repo linked worktree as the task worktree"
+  assert_grep 'target=%42' "$target_log" "worktree polling did not use the stable tmux window id"
+  pass "spawn poll skips other same-repo linked worktrees and records this acquisition's worktree"
 }
 
 test_claude_threads_model_and_effort() {
@@ -444,6 +500,7 @@ test_active_dispatch_profile_allows_explicit_harness
 test_active_dispatch_profile_allows_positional_harness
 test_active_dispatch_profile_allows_raw_launch_command
 test_spawn_ignores_unrelated_git_root_before_project_worktree
+test_spawn_ignores_other_linked_worktree_before_acquired_worktree
 test_claude_threads_model_and_effort
 test_codex_threads_model_and_effort
 test_codex_omits_invalid_max_effort

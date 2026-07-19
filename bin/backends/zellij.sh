@@ -462,10 +462,10 @@ fm_backend_zellij_send_key() {  # <target> <key> [expected-label]
 
 # fm_backend_zellij_send_text_line: send one line of TEXT then submit,
 # ATOMICALLY - mirrors tmux's `send-keys -t T text Enter` / herdr's `pane
-# run`. Used for the fixed spawn-time commands (treehouse get, the GOTMPDIR
-# export). Zellij has no single-call atomic "run and submit" action, so this
-# composes paste (literal) + send-keys Enter, exactly like send_literal +
-# send_key are composed elsewhere - the two-step form is the ONLY form for
+# run`. Used for the fixed spawn-time commands (the leased-worktree `cd`, the
+# GOTMPDIR export). Zellij has no single-call atomic "run and submit" action,
+# so this composes paste (literal) + send-keys Enter, exactly like send_literal
+# + send_key are composed elsewhere - the two-step form is the ONLY form for
 # this adapter, unlike tmux/herdr which have a genuinely atomic primitive.
 fm_backend_zellij_send_text_line() {  # <target> <text> [expected-label]
   fm_backend_zellij_send_literal "$1" "$2" "${3:-}" || return 1

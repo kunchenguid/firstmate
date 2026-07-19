@@ -754,7 +754,28 @@ esac
 exit 0
 SH
   chmod +x "$fb/tmux"
-  fm_fake_exit0 "$fb" treehouse
+  cat > "$fb/treehouse" <<SH
+#!/usr/bin/env bash
+set -u
+if [ "\${1:-}" = get ]; then
+  shift
+  lease=0
+  while [ "\$#" -gt 0 ]; do
+    case "\$1" in
+      --lease) lease=1 ;;
+      --lease-holder) shift ;;
+      --lease-holder=*) ;;
+    esac
+    shift || true
+  done
+  if [ "\$lease" -eq 1 ]; then
+    printf '%s\n' "$wt"
+    exit 0
+  fi
+fi
+exit 0
+SH
+  chmod +x "$fb/treehouse"
   printf '%s\n' "$fb"
 }
 
@@ -824,7 +845,28 @@ esac
 exit 0
 SH
   chmod +x "$fb/tmux"
-  fm_fake_exit0 "$fb" treehouse
+  cat > "$fb/treehouse" <<SH
+#!/usr/bin/env bash
+set -u
+if [ "\${1:-}" = get ]; then
+  shift
+  lease=0
+  while [ "\$#" -gt 0 ]; do
+    case "\$1" in
+      --lease) lease=1 ;;
+      --lease-holder) shift ;;
+      --lease-holder=*) ;;
+    esac
+    shift || true
+  done
+  if [ "\$lease" -eq 1 ]; then
+    printf '%s\n' "$wt"
+    exit 0
+  fi
+fi
+exit 0
+SH
+  chmod +x "$fb/treehouse"
   printf '%s\n' "$fb"
 }
 
