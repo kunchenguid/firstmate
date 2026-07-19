@@ -16,6 +16,7 @@
 #                 "NUDGE_SECONDMATES: secondmate <id>: send failed: <reason>",
 #                 "BOOTSTRAP_INFO: nudged fm-<id> with '<message>'",
 #                 "SECONDMATE_LIVENESS: secondmate <id>: skipped: <reason>|respawn failed: <reason>",
+#                 "FIRSTMATE_UPDATE: firstmate checkout is <N> commit(s) behind origin/<default> (update: /updatefirstmate)",
 #                 "FMX: X mode on ..." or "FMX: X mode off ...".
 #          When a RUNNING secondmate worktree is fast-forwarded to firstmate's
 #          own current default-branch commit (a purely LOCAL fast-forward, never
@@ -54,6 +55,15 @@
 #          tasks-axi default backend is silent. quota-axi is required because
 #          crew-dispatch quota-balanced may call it; fm-dispatch-select.sh still
 #          degrades at runtime when quota data is unavailable.
+#          FIRSTMATE_UPDATE is a best-effort self-update heads-up scoped to
+#          firstmate's OWN repo (FM_ROOT) only, never anything under projects/:
+#          a cheap fetch of the default branch plus a rev-list count, silent
+#          when up to date and silent (comparing against the last-fetched
+#          origin ref) when the fetch fails, e.g. offline - it never fails
+#          bootstrap, mirroring fleet_sync's posture. Detect-only sessions skip
+#          the fetch (no remote-tracking ref writes) but still report from
+#          already-fetched refs. Set FM_SELF_UPDATE_CHECK=0 to skip the check
+#          entirely (tests/lib.sh pins this so suites stay hermetic).
 #          X mode is OPTIONAL and inert unless FM_HOME/.env has a non-empty
 #          FMX_PAIRING_TOKEN. When opted in, bootstrap requires curl+jq, writes
 #          the relay poll shim and 30s cadence config, and prints an FMX line.
@@ -642,6 +652,28 @@ EOF
   echo "FMX: X mode on - relay poll armed via state/x-watch.check.sh; 30s watcher cadence in config/x-mode.env"
 }
 
+firstmate_update_check() {
+  # Best-effort heads-up when this firstmate checkout (FM_ROOT, never anything
+  # under projects/) is behind its origin default branch, so the captain can be
+  # offered /updatefirstmate without having to remember to ask. Silent when up
+  # to date, when FM_ROOT has no repo/origin/default branch, and when the fetch
+  # fails (offline): a failed fetch just compares against the last-fetched
+  # origin ref. Detect-only sessions skip the fetch but still report from
+  # already-fetched refs.
+  local default behind
+  [ "${FM_SELF_UPDATE_CHECK:-1}" != 0 ] || return 0
+  git -C "$FM_ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 0
+  git -C "$FM_ROOT" remote get-url origin >/dev/null 2>&1 || return 0
+  default=$(fm_default_branch "$FM_ROOT") || return 0
+  if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
+    GIT_TERMINAL_PROMPT=0 git -C "$FM_ROOT" fetch --quiet origin "$default" >/dev/null 2>&1 || true
+  fi
+  behind=$(git -C "$FM_ROOT" rev-list --count "HEAD..origin/$default" 2>/dev/null) || return 0
+  case "$behind" in ''|*[!0-9]*) return 0 ;; esac
+  [ "$behind" -gt 0 ] || return 0
+  echo "FIRSTMATE_UPDATE: firstmate checkout is $behind commit(s) behind origin/$default (update: /updatefirstmate)"
+}
+
 crew_dispatch_validate() {
   local file err
   file="$CONFIG/crew-dispatch.json"
@@ -789,6 +821,7 @@ if [ -n "$tangle_branch" ]; then
     echo "TANGLE: primary checkout on feature branch '$tangle_branch' (expected '$tangle_default'); the work is safe on that ref - restore the primary with: git -C $FM_ROOT checkout $tangle_default, then re-validate the branch in a proper worktree"
   fi
 fi
+firstmate_update_check
 crew=
 [ -f "$CONFIG/crew-harness" ] && crew=$(tr -d '[:space:]' < "$CONFIG/crew-harness" || true)
 if [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ] && [ -n "$crew" ] && [ "$crew" != "default" ]; then

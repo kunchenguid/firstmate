@@ -34,6 +34,14 @@ FM_TEST_LIB_SOURCED=1
 # strips this to verify real refusal.
 export FM_GATE_REFUSE_BYPASS=1
 
+# Keep every suite hermetic against fm-bootstrap.sh's firstmate self-update
+# check: several suites run bootstrap with FM_ROOT resolving to the real
+# checkout, and the check's best-effort `git fetch origin` would otherwise hit
+# the real network and print a FIRSTMATE_UPDATE line whenever the developer's
+# checkout happens to be behind. The check's own tests re-enable it explicitly
+# against local file:// fixtures.
+export FM_SELF_UPDATE_CHECK=0
+
 # Resolve the repo root from this library's own location. Consumed by sourcing
 # test files, not by this library, so it reads as "unused" here.
 # shellcheck disable=SC2034

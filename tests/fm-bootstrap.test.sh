@@ -15,6 +15,10 @@
 # Dedicated fleet-sync cases pin the computed bootstrap timeout, explicit
 # override, blank-env defaulting, partial-output relay, and pre-launch timeout
 # scan.
+# Self-update-check cases pin the FIRSTMATE_UPDATE line against local file://
+# origins: silent when up to date, behind-by-N reporting, a silently tolerated
+# failed fetch, the FM_SELF_UPDATE_CHECK=0 opt-out, and detect-only's
+# no-fetch stale-ref reporting.
 set -u
 
 # shellcheck source=tests/lib.sh disable=SC1091
@@ -746,6 +750,112 @@ test_crew_dispatch_active_rules_are_verbose_bootstrap_info() {
   pass "bootstrap surfaces active crew-dispatch rules only as verbose BOOTSTRAP_INFO"
 }
 
+# --- firstmate self-update check ---------------------------------------------
+
+# make_self_update_world <case-dir>: a fully local world for the firstmate
+# self-update check - an upstream writer repo, a bare file:// origin cloned from
+# it, and a local clone (the FM_ROOT under test) that starts up to date on main.
+# Also seeds the standard silent home. Echoes "<upstream>|<local-clone>".
+make_self_update_world() {
+  local dir=$1 upstream bare local_clone
+  upstream="$dir/upstream"
+  bare="$dir/origin.git"
+  local_clone="$dir/local"
+  fm_git_identity
+  mkdir -p "$dir/home/config"
+  printf '%s\n' manual > "$dir/home/config/backlog-backend"
+  git init -q -b main "$upstream"
+  git -C "$upstream" commit -q --allow-empty -m base
+  git clone --quiet --bare "$upstream" "$bare"
+  git -C "$upstream" remote add origin "$bare"
+  git clone --quiet "file://$bare" "$local_clone"
+  printf '%s|%s\n' "$upstream" "$local_clone"
+}
+
+run_self_update_bootstrap() {  # <case-dir> <local-clone> [extra env...] -> stdout
+  local case_dir=$1 local_clone=$2 fakebin
+  shift 2
+  fakebin=$(make_fake_toolchain "$case_dir")
+  PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$local_clone" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 env "$@" "$ROOT/bin/fm-bootstrap.sh"
+}
+
+test_self_update_check_silent_when_current() {
+  local case_dir fixture local_clone out
+  case_dir="$TMP_ROOT/self-update-current"
+  fixture=$(make_self_update_world "$case_dir")
+  local_clone=${fixture#*|}
+  out=$(run_self_update_bootstrap "$case_dir" "$local_clone" FM_SELF_UPDATE_CHECK=1)
+  [ -z "$out" ] || fail "up-to-date checkout should stay silent, got: $out"
+  pass "bootstrap self-update check is silent when the checkout is up to date"
+}
+
+test_self_update_check_reports_behind_count() {
+  local case_dir fixture upstream local_clone out expect
+  case_dir="$TMP_ROOT/self-update-behind"
+  fixture=$(make_self_update_world "$case_dir")
+  upstream=${fixture%%|*}
+  local_clone=${fixture#*|}
+  git -C "$upstream" commit -q --allow-empty -m ahead-1
+  git -C "$upstream" commit -q --allow-empty -m ahead-2
+  git -C "$upstream" push -q origin main
+
+  # The check's own fetch must discover the new origin commits.
+  out=$(run_self_update_bootstrap "$case_dir" "$local_clone" FM_SELF_UPDATE_CHECK=1)
+  expect="FIRSTMATE_UPDATE: firstmate checkout is 2 commit(s) behind origin/main (update: /updatefirstmate)"
+  [ "$out" = "$expect" ] || fail "expected '$expect', got: $out"
+
+  # FM_SELF_UPDATE_CHECK=0 (the suite-wide hermeticity default from
+  # tests/lib.sh) must suppress the check even while genuinely behind.
+  out=$(run_self_update_bootstrap "$case_dir" "$local_clone")
+  [ -z "$out" ] || fail "FM_SELF_UPDATE_CHECK=0 should suppress the check, got: $out"
+  pass "bootstrap self-update check fetches, reports the behind count, and honors the opt-out"
+}
+
+test_self_update_check_failed_fetch_is_silent() {
+  local case_dir fixture upstream local_clone out status
+  case_dir="$TMP_ROOT/self-update-offline"
+  fixture=$(make_self_update_world "$case_dir")
+  upstream=${fixture%%|*}
+  local_clone=${fixture#*|}
+  git -C "$upstream" commit -q --allow-empty -m ahead-1
+  git -C "$upstream" push -q origin main
+  # Simulate offline: the origin URL is unreachable and no remote-tracking ref
+  # survives to compare against, so the check has nothing trustworthy to say.
+  git -C "$local_clone" remote set-url origin "file://$case_dir/gone.git"
+  git -C "$local_clone" symbolic-ref --delete refs/remotes/origin/HEAD 2>/dev/null || true
+  git -C "$local_clone" update-ref -d refs/remotes/origin/main
+
+  out=$(run_self_update_bootstrap "$case_dir" "$local_clone" FM_SELF_UPDATE_CHECK=1)
+  status=$?
+  [ "$status" -eq 0 ] || fail "a failed fetch must not fail bootstrap (exit $status)"
+  [ -z "$out" ] || fail "a failed fetch with no prior origin ref should stay silent, got: $out"
+  pass "bootstrap self-update check tolerates a failed fetch without failing bootstrap"
+}
+
+test_self_update_check_detect_only_skips_fetch() {
+  local case_dir fixture upstream local_clone out expect
+  case_dir="$TMP_ROOT/self-update-detect-only"
+  fixture=$(make_self_update_world "$case_dir")
+  upstream=${fixture%%|*}
+  local_clone=${fixture#*|}
+  git -C "$upstream" commit -q --allow-empty -m ahead-1
+  git -C "$upstream" commit -q --allow-empty -m ahead-2
+  git -C "$upstream" push -q origin main
+  git -C "$local_clone" fetch -q origin main
+  # A third origin commit lands after the last fetch; a detect-only session
+  # must report from the already-fetched ref (2 behind), proving it never
+  # fetched the newer state.
+  git -C "$upstream" commit -q --allow-empty -m ahead-3
+  git -C "$upstream" push -q origin main
+
+  out=$(run_self_update_bootstrap "$case_dir" "$local_clone" \
+    FM_SELF_UPDATE_CHECK=1 FM_BOOTSTRAP_DETECT_ONLY=1)
+  expect="FIRSTMATE_UPDATE: firstmate checkout is 2 commit(s) behind origin/main (update: /updatefirstmate)"
+  [ "$out" = "$expect" ] || fail "detect-only should report from already-fetched refs, got: $out"
+  pass "bootstrap self-update check never fetches in detect-only mode but still reports stale-ref drift"
+}
+
 test_crew_dispatch_validation() {
   local label body expect mode case_dir fakebin out n
   n=0
@@ -806,4 +916,8 @@ test_routine_bootstrap_confirmations_are_silent
 test_routine_bootstrap_contract_runs_under_system_bash
 test_bootstrap_info_is_no_load_and_actionable_lines_trigger
 test_crew_dispatch_active_rules_are_verbose_bootstrap_info
+test_self_update_check_silent_when_current
+test_self_update_check_reports_behind_count
+test_self_update_check_failed_fetch_is_silent
+test_self_update_check_detect_only_skips_fetch
 test_crew_dispatch_validation
