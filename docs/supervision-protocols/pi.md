@@ -20,7 +20,8 @@ When this session owns supervision and away mode is not active:
 6. After an actionable child close, the extension rechecks session-lock ownership and verifies one successor before it delivers the follow-up wake; its bounded fallback is defined in `docs/watcher-continuity.md`.
 7. Do not call `fm_watch_arm_pi` again after an ordinary wake because continuity is extension-owned rather than model-memory-owned.
 8. An unexpected child close enters bounded exponential retry, and an exhausted retry or lost session lock is surfaced as a watcher failure instead of disappearing.
-9. If the extension reports a watcher failure, drain queued wakes, inspect the failure text, and restart Pi with both extensions loaded if needed.
+9. If the extension reports `read-only`, changed, lost, or otherwise unverified session-lock ownership, remain read-only and do not drain or repair supervision.
+   For other watcher failures, drain queued wakes, inspect the failure text, and restart Pi with both extensions loaded if needed.
 10. Never use shell `&` for watcher supervision.
    The arm mechanism above is extension-owned, not a model tool call, but a manual recovery probe that backgrounds, pipes, or bundles the arm is denied automatically by the PreToolUse seatbelt (`bin/fm-arm-pretool-check.sh`, wired into the turn-end guard extension at `__FM_PI_TURNEND_EXT__`).
 
@@ -54,9 +55,3 @@ The fixture created a saved session with `--session-id`, exited while leaving th
 At the boundary before the real watcher arm script ran, the old PID was dead and `.lock` already named the new native Pi process.
 Observed output: `ok - Pi 0.80.7 live E2E created, exited, resumed, reclaimed before watcher startup, auto-started a successor, and cleaned up`.
 The opt-in interactive fixture remains isolated behind `FM_PI_LIVE_E2E=1`.
-
-Continuity verification on 2026-07-17 used Pi 0.80.10 with the existing shared Pi credential store and the explicit `openai-codex/gpt-5.6-sol` provider/model pin.
-The isolated live test copied no credential material and created no account.
-The model called `fm_watch_arm_pi` exactly once, an actionable status closed that cycle, the extension ledger-linked a verified successor before the handling turn ended, the turn-end guard never fired, and `/quit` cleaned up both child processes.
-Command: `FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh`.
-Observed output: `ok - Pi 0.80.10 live E2E used shared Codex auth, auto-started one successor before turn end, and cleaned up`.

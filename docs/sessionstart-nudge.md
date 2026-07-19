@@ -11,7 +11,7 @@ It sources `bin/fm-gate-refuse-lib.sh` and stays silent for a no-mistakes gate a
 It shares `bin/fm-primary-scope-lib.sh` with `bin/fm-turnend-guard.sh`, so the two hooks cannot drift on primary detection.
 The Shared Predicate section of `docs/turnend-guard.md` remains authoritative for marker validation, plain-checkout detection, and the required firstmate-shaped paths.
 
-Before printing, the wrapper reads `state/.lock` and walks at most eight parents from its own pid, matching `bin/fm-lock.sh` and Pi's `lockOwnership()` ancestry depth.
+Before printing, the wrapper reads `state/.lock` and walks at most eight parents from its own pid, using the same ancestry bound as `bin/fm-lock.sh`.
 If the lock names a live pid in that ancestry, session-start already ran in this harness session and the wrapper stays silent.
 Every path exits 0, including malformed state and adapter errors, because Claude SessionStart exit 2 blocks session initialization.
 

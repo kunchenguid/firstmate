@@ -52,7 +52,7 @@ Only the watcher process touches `state/.last-watcher-beat`; no helper process c
 
 All five harnesses ran against git-initialized scratch projects and isolated `FM_HOME` state.
 Existing harness-managed credentials remained in place, no credential bytes were copied into a fixture or transcript, and no account was created.
-Pi used the existing shared Pi auth store with the explicit `openai-codex/gpt-5.6-sol` provider/model pin and low thinking.
+Pi used a deterministic test-owned in-process provider without global authentication or network access.
 Each run used the smallest prompt needed to exercise the harness-native path.
 
 Harness versions:
@@ -61,7 +61,7 @@ Harness versions:
 Claude Code 2.1.214
 codex-cli 0.144.4
 OpenCode 1.17.18
-Pi 0.80.10
+Pi 0.80.7
 grok 0.2.103 (89c3d36fb6f1) [stable]
 ```
 
@@ -79,10 +79,7 @@ The model executed no watcher-arm command and the turn-end backstop did not fire
 Command: `FM_OPENCODE_LIVE_E2E=1 tests/fm-opencode-primary-live-e2e.test.sh`.
 Observed result: `ok - OpenCode 1.17.18 live E2E auto-started one successor before prompt handling without a model re-arm`.
 
-Pi loaded the tracked extensions in its interactive TUI, called `fm_watch_arm_pi` once, received an actionable close, and ledger-linked a successor before the handling turn ended.
-The turn-end backstop did not fire, and `/quit` removed both the watcher and arm child.
-Command: `FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh`.
-Observed result: `ok - Pi 0.80.10 live E2E used shared Codex auth, auto-started one successor before turn end, and cleaned up`.
+Pi's post-merge resume-and-continuity evidence is owned by [`supervision-protocols/pi.md`](supervision-protocols/pi.md).
 
 Grok ran the real arm wrapper through `run_terminal_command` with its tracked background option, surfaced its native task-completion notification after the actionable close, and recorded `reason=actionable-signal` in the cycle ledger.
 No shell ampersand was used.
