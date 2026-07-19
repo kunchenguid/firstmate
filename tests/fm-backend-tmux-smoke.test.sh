@@ -24,6 +24,20 @@ cleanup_all() {
   [ -n "${SHIM_DIR:-}" ] && rm -rf "$SHIM_DIR"
 }
 
+wait_for_capture_contains() {  # <target> <lines> <needle>
+  local target=$1 lines=$2 needle=$3 i=0 out
+  while [ "$i" -lt 50 ]; do
+    out=$(fm_backend_tmux_capture "$target" "$lines") || return 1
+    case "$out" in
+      *"$needle"*) return 0 ;;
+    esac
+    sleep 0.1
+    i=$((i + 1))
+  done
+  printf '%s' "$out"
+  return 1
+}
+
 # A `tmux` shim on PATH that transparently redirects every call to the private
 # socket, so bin/backends/tmux.sh's bare `tmux ...` invocations never touch the
 # host's real sessions.
@@ -99,7 +113,9 @@ pass "real tmux: fm_backend_tmux_send_literal + fm_backend_tmux_send_key Enter s
 # far enough to still see the earliest line - the same -S -N bounding fm-peek.sh
 # and fm-watch.sh rely on for a bounded, cheap pane read.
 fm_backend_tmux_send_text_line "$TARGET" "for i in \$(seq 1 80); do echo tag-line-\$i; done"
-sleep 0.6
+if ! wait_for_capture_contains "$TARGET" 20 "tag-line-80"; then
+  fail "recent numbered output did not appear before capture assertions"$'\n'"$(fm_backend_tmux_capture "$TARGET" 20 2>/dev/null || true)"
+fi
 small=$(fm_backend_tmux_capture "$TARGET" 3) || fail "fm_backend_tmux_capture (small window) failed"
 case "$small" in
   *tag-line-1$'\n'*) fail "a 3-line capture should not still see the very first numbered line"$'\n'"$small" ;;
