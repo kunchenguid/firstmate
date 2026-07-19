@@ -168,6 +168,7 @@ FM_SUPERVISION_VISIBILITY_SOURCE=
 FM_SUPERVISION_VISIBILITY_SESSION=
 FM_SUPERVISION_VISIBILITY_PANE=
 FM_SUPERVISION_VISIBILITY_REFRESH_PID=
+FM_SUPERVISION_VISIBILITY_REFRESH_IDENTITY=
 
 fm_supervision_visibility_resolve_herdr() {
   local target backend=${FM_SUPERVISOR_BACKEND:-}
@@ -195,7 +196,7 @@ fm_supervision_visibility_resolve_herdr() {
 
 # Display metadata is optional observability and must never wedge the watcher.
 # Use the same dual session targeting as fm_backend_herdr_cli, but put a hard
-# two-second process bound around this cosmetic call.
+# three-second process bound around this cosmetic call.
 fm_supervision_visibility_herdr_call() { # <session> <herdr args...>
   local session=$1
   shift
@@ -229,7 +230,7 @@ fm_supervision_visibility_refresh() {
 }
 
 fm_supervision_visibility_clear() {
-  [ "$FM_SUPERVISION_VISIBILITY_PUBLISHED" -eq 1 ] || return 0
+  [ -n "$FM_SUPERVISION_VISIBILITY_SOURCE" ] || return 0
   fm_supervision_visibility_resolve_herdr || return 0
   fm_supervision_visibility_herdr_call "$FM_SUPERVISION_VISIBILITY_SESSION" \
     pane report-metadata "$FM_SUPERVISION_VISIBILITY_PANE" \
@@ -266,19 +267,31 @@ fm_supervision_visibility_refresh_loop() { # <watcher pid>
 }
 
 fm_supervision_visibility_start() { # <watcher pid>
-  local owner_pid=$1
+  local owner_pid=$1 pid identity
   fm_supervision_visibility_resolve_herdr || return 0
   fm_supervision_visibility_refresh
   fm_supervision_visibility_refresh_loop "$owner_pid" &
-  FM_SUPERVISION_VISIBILITY_REFRESH_PID=$!
+  pid=$!
+  identity=$(fm_pid_identity "$pid" 2>/dev/null || true)
+  if [ -z "$identity" ]; then
+    kill -TERM "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    return 0
+  fi
+  FM_SUPERVISION_VISIBILITY_REFRESH_PID=$pid
+  FM_SUPERVISION_VISIBILITY_REFRESH_IDENTITY=$identity
 }
 
 fm_supervision_visibility_stop() {
-  local pid=${FM_SUPERVISION_VISIBILITY_REFRESH_PID:-}
+  local pid=${FM_SUPERVISION_VISIBILITY_REFRESH_PID:-} identity=${FM_SUPERVISION_VISIBILITY_REFRESH_IDENTITY:-} current=
   [ -n "$pid" ] || return 0
-  kill -TERM "$pid" 2>/dev/null || true
-  wait "$pid" 2>/dev/null || true
+  current=$(fm_pid_identity "$pid" 2>/dev/null || true)
+  if [ -n "$identity" ] && [ "$current" = "$identity" ]; then
+    kill -TERM "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+  fi
   FM_SUPERVISION_VISIBILITY_REFRESH_PID=
+  FM_SUPERVISION_VISIBILITY_REFRESH_IDENTITY=
 }
 
 # afk_present: 0 while the away-mode flag exists. When set, the daemon wraps this

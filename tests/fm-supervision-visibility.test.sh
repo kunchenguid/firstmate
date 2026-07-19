@@ -15,6 +15,10 @@ WATCH="$ROOT/bin/fm-watch.sh"
 cat > "$FAKEBIN/herdr" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "${FM_FAKE_HERDR_LOG:?}"
+if [ -n "${FM_FAKE_HERDR_FAIL_ONCE_FILE:-}" ] && [ ! -e "$FM_FAKE_HERDR_FAIL_ONCE_FILE" ]; then
+  touch "$FM_FAKE_HERDR_FAIL_ONCE_FILE"
+  exit 1
+fi
 if [ "${FM_FAKE_HERDR_HANG:-0}" = 1 ]; then
   trap '' TERM ALRM
   while :; do :; done
@@ -41,6 +45,7 @@ reset_visibility_globals() {
   FM_SUPERVISION_VISIBILITY_SOURCE=firstmate-supervision:test
   FM_SUPERVISION_VISIBILITY_SESSION=
   FM_SUPERVISION_VISIBILITY_PANE=
+  FM_SUPERVISION_VISIBILITY_REFRESH_IDENTITY=
 }
 
 test_refresh_is_independent_of_watcher_cycle() {
@@ -56,6 +61,10 @@ test_refresh_is_independent_of_watcher_cycle() {
   printf '%s\n' "$$" > "$WATCH_LOCK/pid"
   fm_pid_identity "$$" > "$WATCH_LOCK/pid-identity"
   run_visibility fm_supervision_visibility_start "$$"
+  [ -n "$FM_SUPERVISION_VISIBILITY_REFRESH_IDENTITY" ] \
+    || fail "refresher process identity was not recorded"
+  [ "$(fm_pid_identity "$FM_SUPERVISION_VISIBILITY_REFRESH_PID" 2>/dev/null || true)" = "$FM_SUPERVISION_VISIBILITY_REFRESH_IDENTITY" ] \
+    || fail "recorded refresher identity did not match its live process"
   while [ "$calls" -lt 2 ] && [ "$attempts" -lt 100 ]; do
     calls=$(grep -c -- '--custom-status supervised' "$HERDR_LOG" 2>/dev/null || true)
     [ "$calls" -ge 2 ] && break
@@ -66,6 +75,35 @@ test_refresh_is_independent_of_watcher_cycle() {
   [ "$calls" -ge 2 ] || fail "visibility TTL was not refreshed independently of the watcher cycle"
   FM_HERDR_SUPERVISION_STATUS_TTL_MS=360000
   pass "Herdr visibility refresh cadence is independent of watcher cycle duration"
+}
+
+test_background_publication_is_cleared_on_exit() {
+  local calls=0 attempts=0 fail_once="$TMP_ROOT/fail-once"
+  reset_visibility_globals
+  : > "$HERDR_LOG"
+  FM_SUPERVISOR_BACKEND=herdr
+  FM_SUPERVISOR_TARGET=fm-lab-visible:w1:p1
+  HERDR_ENV=
+  TMUX=
+  FM_HERDR_SUPERVISION_STATUS_TTL_MS=1000
+  mkdir -p "$WATCH_LOCK"
+  printf '%s\n' "$$" > "$WATCH_LOCK/pid"
+  fm_pid_identity "$$" > "$WATCH_LOCK/pid-identity"
+  FM_FAKE_HERDR_FAIL_ONCE_FILE="$fail_once" run_visibility fm_supervision_visibility_start "$$"
+  [ "$FM_SUPERVISION_VISIBILITY_PUBLISHED" -eq 0 ] \
+    || fail "failed initial publication was recorded as visible"
+  while [ "$calls" -lt 2 ] && [ "$attempts" -lt 100 ]; do
+    calls=$(grep -c -- '--custom-status supervised' "$HERDR_LOG" 2>/dev/null || true)
+    [ "$calls" -ge 2 ] && break
+    sleep 0.05
+    attempts=$((attempts + 1))
+  done
+  fm_supervision_visibility_stop
+  run_visibility fm_supervision_visibility_clear
+  grep -F -- '--source firstmate-supervision:test --clear-custom-status --clear-state-labels' "$HERDR_LOG" >/dev/null \
+    || fail "clean exit did not clear metadata published by the background refresher"
+  FM_HERDR_SUPERVISION_STATUS_TTL_MS=360000
+  pass "clean exit clears metadata after a transient initial publication failure"
 }
 
 test_active_and_clean_exit_metadata() {
@@ -191,5 +229,6 @@ test_singleton_duplicate_does_not_publish_or_clear() {
 test_active_and_clean_exit_metadata
 test_hung_metadata_call_cannot_wedge_supervision
 test_refresh_is_independent_of_watcher_cycle
+test_background_publication_is_cleared_on_exit
 test_inactive_and_non_herdr_runtimes_stay_unpublished
 test_singleton_duplicate_does_not_publish_or_clear

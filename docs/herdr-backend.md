@@ -208,7 +208,7 @@ This disproved the idea that the Pi extension or Herdr's activity classifier nee
 `bin/fm-watch.sh` now owns publication because the live singleton watcher is the backend-neutral truth that supervision is active.
 After acquiring its singleton, a watcher publishes one unique, TTL-bounded Herdr metadata source, refreshes it while alive, and clears it on clean exit.
 A process crash ages out through the TTL instead of leaving a permanent false claim.
-Each cosmetic Herdr call has a hard two-second process bound, so a stalled display surface cannot wedge supervision.
+Each cosmetic Herdr call sends TERM after two seconds and KILL one second later, so a stalled display surface cannot wedge supervision beyond a three-second process bound.
 A duplicate watcher stands down before publication, so the exactly-one-live-supervision-cycle contract is unchanged.
 The visible state label is `idle · supervised`, while Herdr's real `agent_status` remains idle.
 
@@ -228,21 +228,21 @@ The active read was:
 {"agent":"pi","agent_status":"idle","custom_status":"supervised","state_labels":{"idle":"idle · supervised"}}
 ```
 
-The inactive baseline and clean-exit read both retained `agent_status: idle` and omitted `custom_status` and `state_labels`.
+The inactive baseline, clean-exit read, and post-crash TTL-expiry read all retained `agent_status: idle` and omitted `custom_status` and `state_labels`.
 Calling the active report twice produced the same effective record.
 The exact real-smoke command run was:
 
 ```sh
-FM_SUPERVISION_VISIBILITY_HERDR_SMOKE=1 HERDR_LAB_HELPER='/Users/james/code/firstmate/bin/fm-herdr-lab.sh' bash tests/fm-supervision-visibility-herdr-smoke.test.sh
+FM_SUPERVISION_VISIBILITY_HERDR_SMOKE=1 HERDR_LAB_HELPER="$PWD/bin/fm-herdr-lab.sh" bash tests/fm-supervision-visibility-herdr-smoke.test.sh
 ```
 
 Its exact output was:
 
 ```text
-ok - real Herdr 0.7.3 keeps Pi idle while showing and clearing idle-supervised metadata
+ok - real Herdr 0.7.3 keeps Pi idle with clean clearing and crash TTL cleanup
 ```
 
-The exact deterministic test command for active, inactive, clean-exit, duplicate-arm, non-Herdr, and nested-tmux coverage is:
+The exact deterministic test command for active, inactive, clean-exit after a transient initial publication failure, independent TTL refresh, duplicate-arm, non-Herdr, and nested-tmux coverage is:
 
 ```sh
 bash tests/fm-supervision-visibility.test.sh
@@ -253,6 +253,8 @@ Its exact output is:
 ```text
 ok - Herdr visibility publishes idle-supervised without faking work and clears on clean exit
 ok - a hung optional Herdr metadata call times out without wedging supervision
+ok - Herdr visibility refresh cadence is independent of watcher cycle duration
+ok - clean exit clears metadata after a transient initial publication failure
 ok - inactive, non-Herdr, and nested-tmux supervision do not claim a Herdr indicator
 ok - duplicate arm preserves one live supervision cycle and one truthful Herdr indicator
 ```
