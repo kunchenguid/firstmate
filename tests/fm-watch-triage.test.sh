@@ -427,9 +427,10 @@ test_stale_terminal_status_overridden_by_active_run() {
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
-  if ! wait_live "$pid" 30; then
-    reap "$pid"; fail "watcher exited for a stale terminal-looking status the run-step overrides (should absorb): $(cat "$out")"
-  fi
+  wait_numeric_file "$state/.stale-since-$key" 50 \
+    || { reap "$pid"; fail "watcher did not absorb a stale terminal-looking status the run-step overrides: $(cat "$out")"; }
+  kill -0 "$pid" 2>/dev/null \
+    || { wait "$pid" 2>/dev/null || true; fail "watcher exited after absorbing a stale terminal-looking status: $(cat "$out")"; }
   [ ! -s "$out" ] || fail "the overridden stale terminal status printed a wake reason during absorb"
   [ ! -s "$state/.wake-queue" ] || fail "the overridden stale terminal status enqueued a wake during absorb"
   [ "$(cat "$state/.stale-$key" 2>/dev/null || true)" = "$pane_hash" ] || fail "stale suppressor not advanced on absorb"
@@ -480,9 +481,10 @@ test_nonterminal_stale_provably_working_absorbed_then_escalated() {
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
-  if ! wait_live "$pid" 30; then
-    reap "$pid"; fail "watcher exited for a fresh provably-working non-terminal stale (should absorb): $(cat "$out")"
-  fi
+  wait_numeric_file "$state/.stale-since-$key" 50 \
+    || { reap "$pid"; fail "watcher did not absorb a fresh provably-working non-terminal stale: $(cat "$out")"; }
+  kill -0 "$pid" 2>/dev/null \
+    || { wait "$pid" 2>/dev/null || true; fail "watcher exited after absorbing a fresh provably-working non-terminal stale: $(cat "$out")"; }
   [ ! -s "$out" ] || fail "fresh provably-working stale printed a wake reason during absorb"
   [ ! -s "$state/.wake-queue" ] || fail "fresh provably-working stale enqueued a wake during absorb"
   [ "$(cat "$state/.stale-$key" 2>/dev/null || true)" = "$pane_hash" ] || fail "stale suppressor not advanced on absorb"
@@ -554,7 +556,7 @@ test_nonterminal_stale_not_working_surfaced() {
 # the pause's own status-file age, so a churny idle pane cannot reset the cadence)
 # for a recheck, so a forgotten pause cannot rot invisibly.
 test_nonterminal_stale_paused_absorbed_then_resurfaced() {
-  local dir state fakebin out drain_out capture_file window key pane_hash sig pid back statusf
+  local dir state fakebin out drain_out capture_file window key pane_hash sig pid back statusf i
   dir=$(make_case nonterminal-stale-paused); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"
   window="test:fm-held"
@@ -578,9 +580,15 @@ test_nonterminal_stale_paused_absorbed_then_resurfaced() {
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
-  if ! wait_live "$pid" 30; then
-    reap "$pid"; fail "watcher exited for a fresh declared pause (should absorb): $(cat "$out")"
-  fi
+  i=0
+  while [ ! -e "$state/.paused-$key" ] && [ "$i" -lt 50 ]; do
+    kill -0 "$pid" 2>/dev/null \
+      || { wait "$pid" 2>/dev/null || true; fail "watcher exited before absorbing a fresh declared pause: $(cat "$out")"; }
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ -e "$state/.paused-$key" ] \
+    || { reap "$pid"; fail "watcher did not absorb a fresh declared pause: $(cat "$out")"; }
   [ ! -s "$out" ] || fail "fresh paused stale printed a wake reason during absorb"
   [ ! -s "$state/.wake-queue" ] || fail "fresh paused stale enqueued a wake during absorb"
   [ "$(cat "$state/.stale-$key" 2>/dev/null || true)" = "$pane_hash" ] || fail "stale suppressor not advanced on paused absorb"
