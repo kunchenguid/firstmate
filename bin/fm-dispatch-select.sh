@@ -11,7 +11,7 @@
 #
 # quota-balanced is deterministic, and this header is the single owner of its
 # scoring contract:
-#   - It consumes quota-axi schema version 2 through `quota-axi --full --json`
+#   - It consumes quota-axi schema version 2 through `quota-axi --json`
 #     (or the --quota-json fixture).
 #   - General windows have provider kind `session` or `weekly`; model-scoped
 #     windows are excluded regardless of label or id. An explicit positive
@@ -43,7 +43,7 @@
 #     unsupported schema, or no candidate is usable, the reason is logged and
 #     the first array element is printed. Quota trouble never blocks dispatch.
 #
-# quota-balanced uses quota-axi --full --json unless --quota-json supplies a
+# quota-balanced uses quota-axi --json unless --quota-json supplies a
 # fixture. Live calls keep private samples in state/.dispatch-quota-samples.json;
 # fixture calls are stateless unless --state-file is explicit.
 # The quotaBalanced object in config/crew-dispatch.json owns local tuning.
@@ -237,7 +237,7 @@ else
     first_profile
     exit 0
   fi
-  quota_json=$("$quota_cmd" --full --json 2>/dev/null)
+  quota_json=$("$quota_cmd" --json 2>/dev/null)
   quota_status=$?
   if [ "$quota_status" -ne 0 ]; then
     log "quota-axi exited $quota_status; using first profile"
@@ -269,14 +269,14 @@ if [ -n "$STATE_FILE" ] && [ -f "$STATE_FILE" ]; then
   fi
 fi
 
-selection=$(jq -nec \
-  --argjson quota "$quota_json" \
+selection=$(printf '%s\n' "$quota_json" | jq -ec \
   --argjson profiles "$profiles_json" \
   --argjson config "$dispatch_config" \
   --argjson history "$history_json" \
   --argjson now "$NOW_EPOCH" \
   --arg staleOverride "$STALE_CLEAR_OVERRIDE" '
-  def clean($p):
+  . as $quota
+  | def clean($p):
     {harness: $p.harness}
     + (if ($p.model? | type) == "string" then {model: $p.model} else {} end)
     + (if ($p.effort? | type) == "string" then {effort: $p.effort} else {} end);
