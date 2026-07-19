@@ -218,10 +218,16 @@ test_slack_dm_missing_token_degrades_without_request() {
   out=$(FM_SLACK_DM_API_URL="$api" "$HELPER" --config "$dir/config/afk-slack-dm" --message-file "$dir/message.txt" 2>&1)
   status=$?
 
-  [ "$status" -ne 0 ] || fail "helper should fail when token source is empty"
-  assert_contains "$out" "missing-token" "missing token was not classified"
+  # An absent token file must degrade gracefully as missing-token (exit 1), not
+  # error out (exit 3). Assert the exact code and classification string: a plain
+  # substring check for "missing-token" is a false positive here because the case
+  # directory is itself named "missing-token", so an ENOENT config-error message
+  # embeds that path and would match anyway.
+  expect_code 1 "$status" "absent token file must degrade gracefully, not fail as a config error (got: $out)"
+  assert_contains "$out" "slack-dm skipped: missing-token" "absent token file was not classified as a graceful missing-token degrade"
+  assert_not_contains "$out" "config error" "absent token file was misclassified as a config error"
   [ ! -e "$dir/requests.jsonl" ] || fail "helper called Slack despite missing token"
-  pass "fm-slack-dm degrades gracefully when no token is available"
+  pass "fm-slack-dm degrades gracefully when the token file is absent"
 }
 
 test_slack_dm_rejects_channel_destination() {

@@ -104,7 +104,15 @@ async function readToken(source) {
   if (source.startsWith("file:")) {
     const file = source.slice("file:".length).trim();
     if (!file) throw new Error("token-source file path is empty");
-    return cleanToken(await readFile(file, "utf8"));
+    try {
+      return cleanToken(await readFile(file, "utf8"));
+    } catch (err) {
+      // An absent token file degrades gracefully as missing-token (exit 1),
+      // exactly like an empty file - the documented contract. Any other read
+      // error (permissions, etc.) stays a genuine config error (exit 3).
+      if (err && err.code === "ENOENT") return "";
+      throw err;
+    }
   }
   if (source.startsWith("command:")) {
     const command = source.slice("command:".length).trim();

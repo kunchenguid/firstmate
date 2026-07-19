@@ -795,12 +795,6 @@ escalate_flush() {  # <state>
   local state=$1 buf item n msg
   buf="$state/.subsuper-escalations"
   [ -s "$buf" ] || return 0
-  n=$(wc -l < "$buf" 2>/dev/null || echo 0)
-  # Join buffered items with the literal " | " separator into one digest line.
-  msg=$(awk 'NR>1{printf " | "} {printf "%s",$0} END{print ""}' "$buf" 2>/dev/null)
-  # Single-line wrapper: no embedded newlines (inject_msg also collapses as a
-  # safety net, but keeping the source single-line makes the intent explicit).
-  msg=$(printf 'Supervisor escalate (%s event(s)): %s (pre-read; re-arm not needed — watcher daemon-managed)' "$n" "$msg")
   if afk_slack_dm_configured; then
     # The shutdown/cleanup flush must NEVER deliver a Slack DM. The sanctioned
     # captain-return stop path (bin/fm-afk-launch.sh stop) deliberately SIGTERMs
@@ -822,6 +816,15 @@ escalate_flush() {  # <state>
     if afk_slack_dm_send_buffer "$state" "$buf"; then : > "$buf"; rm -f "${buf}.since" "$state/.subsuper-inject-wedged"; return 0; fi
     return 1
   fi
+  # Injection mode only: build the single-line pane digest here, where it is
+  # consumed. In DM mode afk_slack_dm_send_buffer rebuilds the message from the
+  # buffer, so computing this above would be dead work on every DM-mode flush.
+  n=$(wc -l < "$buf" 2>/dev/null || echo 0)
+  # Join buffered items with the literal " | " separator into one digest line.
+  msg=$(awk 'NR>1{printf " | "} {printf "%s",$0} END{print ""}' "$buf" 2>/dev/null)
+  # Single-line wrapper: no embedded newlines (inject_msg also collapses as a
+  # safety net, but keeping the source single-line makes the intent explicit).
+  msg=$(printf 'Supervisor escalate (%s event(s)): %s (pre-read; re-arm not needed — watcher daemon-managed)' "$n" "$msg")
   if inject_msg "$msg" "$state"; then : > "$buf"; rm -f "${buf}.since" "$state/.subsuper-inject-wedged"; return 0; fi
   return 1
 }
