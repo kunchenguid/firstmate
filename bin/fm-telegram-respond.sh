@@ -57,7 +57,7 @@ INBOX="$STATE/telegram-inbox"
 pr_is_green() {
   local url=$1
   local parts owner repo number out rollup state draft merged summary rollup_total tail
-  local check_path check_data check_total check_completed check_allowed
+  local check_path check_data check_total page page_total page_records page_completed page_allowed fetched
   local status_path status_data status_total status_state raw_total
   if [ -n "${FM_TELEGRAM_PR_CHECK_HOOK:-}" ]; then
     # shellcheck disable=SC2086
@@ -82,18 +82,36 @@ pr_is_green() {
     case "$rollup_total" in
       ''|*[!0-9]*) return 1 ;;
     esac
-    check_path="/repos/$owner/$repo/commits/refs%2Fpull%2F${number}%2Fhead/check-runs?filter=latest&per_page=100"
-    check_data=$(gh-axi api "$check_path" 2>/dev/null) || return 1
-    check_total=$(printf '%s\n' "$check_data" | sed -n 's/^total_count: //p' | head -n1)
-    case "$check_total" in
-      ''|*[!0-9]*) return 1 ;;
-    esac
-    check_completed=$(printf '%s\n' "$check_data" \
-      | awk '$0 == "    status: completed" { count++ } END { print count + 0 }')
-    check_allowed=$(printf '%s\n' "$check_data" \
-      | awk '$0 ~ /^    conclusion: (success|neutral|skipped)$/ { count++ } END { print count + 0 }')
-    [ "$check_completed" -eq "$check_total" ] \
-      && [ "$check_allowed" -eq "$check_total" ] || return 1
+    check_total=
+    fetched=0
+    page=1
+    while :; do
+      check_path="/repos/$owner/$repo/commits/refs%2Fpull%2F${number}%2Fhead/check-runs?filter=latest&per_page=100&page=$page"
+      check_data=$(gh-axi api "$check_path" 2>/dev/null) || return 1
+      page_total=$(printf '%s\n' "$check_data" | sed -n 's/^total_count: //p' | head -n1)
+      case "$page_total" in
+        ''|*[!0-9]*) return 1 ;;
+      esac
+      [ "$page_total" -ge 0 ] 2>/dev/null || return 1
+      if [ -z "$check_total" ]; then
+        check_total=$page_total
+      else
+        [ "$page_total" -eq "$check_total" ] || return 1
+      fi
+      page_records=$(printf '%s\n' "$check_data" \
+        | awk '$0 ~ /^    status: / { count++ } END { print count + 0 }')
+      page_completed=$(printf '%s\n' "$check_data" \
+        | awk '$0 == "    status: completed" { count++ } END { print count + 0 }')
+      page_allowed=$(printf '%s\n' "$check_data" \
+        | awk '$0 ~ /^    conclusion: (success|neutral|skipped)$/ { count++ } END { print count + 0 }')
+      [ "$page_completed" -eq "$page_records" ] \
+        && [ "$page_allowed" -eq "$page_records" ] || return 1
+      fetched=$((fetched + page_records))
+      [ "$fetched" -le "$check_total" ] || return 1
+      [ "$fetched" -eq "$check_total" ] && break
+      [ "$page_records" -gt 0 ] || return 1
+      page=$((page + 1))
+    done
     status_path="/repos/$owner/$repo/commits/refs%2Fpull%2F${number}%2Fhead/status?per_page=100"
     status_data=$(gh-axi api "$status_path" 2>/dev/null) || return 1
     status_total=$(printf '%s\n' "$status_data" | sed -n 's/^total_count: //p' | head -n1)

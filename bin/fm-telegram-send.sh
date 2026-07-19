@@ -20,7 +20,7 @@
 # exists, unless --reply/--force or FM_TELEGRAM_ALWAYS_NOTIFY is set. Command
 # replies always use --reply so inbound acknowledgements still reach the phone.
 # Secrets and credential-looking text are refused (desk-only). Full GitHub PR
-# URLs in successful sends are recorded for Stage-2 merge authority.
+# URLs in successful non-reply sends are recorded for Stage-2 merge authority.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -40,6 +40,7 @@ Send one message to the configured Telegram chat. Inert when Telegram mode is
 off. --reply / --force bypass the AFK-only outbound gate (command replies and
 explicit always-send). Dry-run (FM_TELEGRAM_DRY_RUN) records to
 state/telegram-outbox/ without posting.
+Command replies never register merge authority for embedded PR URLs.
 Exit 4 means Telegram confirmed delivery but merge-authority persistence needs
 attention; callers must not retry the send.
 EOF
@@ -186,6 +187,9 @@ case "$code" in
     fi
     first=$(printf '%s\n' "$TEXT" | head -n1)
     fmt_audit_append outbound sent "$first"
+    if [ "$REPLY" -eq 1 ]; then
+      exit 0
+    fi
     authority_recovered=0
     authority_ordinal=0
     while IFS= read -r pr; do

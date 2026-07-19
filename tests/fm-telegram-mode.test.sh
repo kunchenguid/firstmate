@@ -702,15 +702,31 @@ case "$1 $2" in
       EXPECTED) printf 'summary: "0 passed, 0 failed, 1 skipped, 1 total"\n' ;;
       PENDING) printf 'summary: "0 passed, 0 failed, 1 pending, 1 total"\n' ;;
       FAILURE) printf 'summary: "0 passed, 1 failed, 1 total"\n' ;;
+      MANY|TRUNCATED) printf 'summary: "101 passed, 0 failed, 101 total"\n' ;;
       *) printf 'summary: "3 passed, 0 failed, 1 skipped, 4 total"\n' ;;
     esac
     ;;
-  'api /repos/acme/app/commits/refs%2Fpull%2F99%2Fhead/check-runs?filter=latest&per_page=100')
+  'api /repos/acme/app/commits/refs%2Fpull%2F99%2Fhead/check-runs?filter=latest&per_page=100&page='*)
+    page=${2##*page=}
     case "$mode" in
       CHECKLESS|EXPECTED) printf 'total_count: 0\ncheck_runs: []\n' ;;
       CANCELLED) printf 'total_count: 1\ncheck_runs[1]:\n  - id: 1\n    status: completed\n    conclusion: cancelled\n' ;;
       PENDING) printf 'total_count: 1\ncheck_runs[1]:\n  - id: 1\n    status: in_progress\n    conclusion: null\n' ;;
       FAILURE) printf 'total_count: 1\ncheck_runs[1]:\n  - id: 1\n    status: completed\n    conclusion: failure\n' ;;
+      MANY|TRUNCATED)
+        if [ "$page" = 1 ]; then
+          printf 'total_count: 101\ncheck_runs[100]:\n'
+          i=1
+          while [ "$i" -le 100 ]; do
+            printf '  - id: %s\n    status: completed\n    conclusion: success\n' "$i"
+            i=$((i + 1))
+          done
+        elif [ "$page" = 2 ] && [ "$mode" = MANY ]; then
+          printf 'total_count: 101\ncheck_runs[1]:\n  - id: 101\n    status: completed\n    conclusion: success\n'
+        else
+          printf 'total_count: 101\ncheck_runs: []\n'
+        fi
+        ;;
       *) printf 'total_count: 3\ncheck_runs[3]:\n  - id: 1\n    status: completed\n    conclusion: success\n  - id: 2\n    status: completed\n    conclusion: neutral\n  - id: 3\n    status: completed\n    conclusion: skipped\n' ;;
     esac
     ;;
@@ -789,6 +805,31 @@ test_respond_approve_open_key() {
   assert_contains "$text" "Approval recorded for 'api-shape'." "approval acknowledgement must name the decision"
   assert_not_contains "$text" "ship-1" "approval acknowledgement must not expose an internal id"
   pass "respond approve records action without exposing internal ids"
+}
+
+test_respond_reply_cannot_grant_merge_authority() {
+  local home out fakebin pr
+  home="$TMP_ROOT/resp-reply-authority"; mkdir -p "$home/state"
+  write_env "$home"
+  pr='https://github.com/acme/app/pull/99'
+  printf 'needs-decision [key=release]: ship?\n' > "$home/state/task-a.status"
+  seed_inbox "$home" 47 "deny release see $pr"
+  fakebin=$(make_fake_curl "$home")
+  make_fake_gh_axi "$home" >/dev/null
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_TELEGRAM_API_URL="https://api.test" \
+    "$ROOT/bin/fm-telegram-respond.sh" 2>/dev/null)
+  assert_contains "$out" "ok 47 deny release task-a" "deny acknowledgement must succeed"
+  # shellcheck source=bin/fm-telegram-lib.sh
+  . "$ROOT/bin/fm-telegram-lib.sh"
+  FM_HOME="$home" fmt_load_config
+  if FM_HOME="$home" fmt_notified_pr_seen "$pr"; then
+    fail "command reply must not grant merge authority"
+  fi
+  seed_inbox "$home" 48 "merge $pr"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_TELEGRAM_API_URL="https://api.test" \
+    "$ROOT/bin/fm-telegram-respond.sh" 2>/dev/null)
+  assert_contains "$out" "refused 48 unknown-pr" "reply URL must remain unauthorized"
+  pass "command replies cannot bootstrap merge authority"
 }
 
 test_respond_invalid_envelope_stays_queued() {
@@ -923,7 +964,7 @@ test_respond_merge_refuses_unsafe_check_states() {
   local home out fakebin pr mode uid
   pr='https://github.com/acme/app/pull/99'
   uid=56
-  for mode in CANCELLED EXPECTED PENDING FAILURE; do
+  for mode in CANCELLED EXPECTED PENDING FAILURE TRUNCATED; do
     home="$TMP_ROOT/resp-merge-$mode"; mkdir -p "$home/state"
     chmod 700 "$home/state"
     write_env "$home" "FM_TELEGRAM_DRY_RUN=1"
@@ -938,7 +979,25 @@ test_respond_merge_refuses_unsafe_check_states() {
     assert_contains "$out" "refused $uid not-green" "$mode checks must not authorize merge"
     uid=$((uid + 1))
   done
-  pass "respond refuses failed, pending, canceled, and expected checks"
+  pass "respond refuses unsafe or incompletely fetched checks"
+}
+
+test_respond_merge_pages_all_check_runs() {
+  local home out fakebin pr
+  home="$TMP_ROOT/resp-merge-many"; mkdir -p "$home/state"
+  chmod 700 "$home/state"
+  write_env "$home" "FM_TELEGRAM_DRY_RUN=1"
+  pr='https://github.com/acme/app/pull/99'
+  # shellcheck source=bin/fm-telegram-lib.sh
+  . "$ROOT/bin/fm-telegram-lib.sh"
+  FM_HOME="$home" fmt_load_config
+  FM_HOME="$home" fmt_notified_pr_record "$pr" || fail "could not record notified PR"
+  seed_inbox "$home" 60 "merge $pr"
+  fakebin=$(make_fake_gh_axi "$home")
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FAKE_GH_AXI_MODE=MANY \
+    "$ROOT/bin/fm-telegram-respond.sh" 2>/dev/null)
+  assert_contains "$out" "ok 60 merge $pr" "all check-run pages must be verified"
+  pass "respond verifies more than one page of green checks"
 }
 
 test_respond_merge_unnamed_refused() {
@@ -1094,6 +1153,7 @@ test_respond_status
 test_respond_closed_scope_refuses_free_text
 test_respond_stale_approve_refused
 test_respond_approve_open_key
+test_respond_reply_cannot_grant_merge_authority
 test_respond_invalid_envelope_stays_queued
 test_respond_action_write_failure_reports_error
 test_respond_approve_unknown_key_refused
@@ -1102,6 +1162,7 @@ test_respond_merge_requires_notified_and_green
 test_respond_merge_uses_supported_gh_axi_interface
 test_respond_merge_refuses_checkless_pr
 test_respond_merge_refuses_unsafe_check_states
+test_respond_merge_pages_all_check_runs
 test_respond_merge_unnamed_refused
 test_respond_dedupe
 test_respond_rate_limit
