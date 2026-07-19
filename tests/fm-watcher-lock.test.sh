@@ -730,14 +730,15 @@ test_arm_waits_for_peer_beacon_after_child_stands_down() {
   printf '%s\n' "$dir" > "$state/.watch.lock/fm-home"
   printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
   printf '%s\n' "$identity" > "$state/.watch.lock/pid-identity"
-  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_ARM_CONFIRM_TIMEOUT=1 FM_ARM_ATTACH_POLL=0.1 "$WATCH_ARM" > "$armout" &
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_ARM_CONFIRM_TIMEOUT=10 FM_ARM_ATTACH_POLL=0.1 "$WATCH_ARM" > "$armout" &
   armpid=$!
   # Synchronize on the owned child declining the live peer lock before making
   # the peer healthy. Sleeping for the same one-second budget as the arm made
   # this regression fixture race the confirmation deadline under full-suite
   # load, rather than testing the intended successor-handshake boundary.
+  # Keep the normal confirmation budget so loaded startup cannot preempt this event gate.
   i=0
-  while [ "$i" -lt 80 ]; do
+  while [ "$i" -lt 200 ]; do
     grep -qF "watcher: already running pid $peer" "$state"/.watch-arm-output.* 2>/dev/null && break
     sleep 0.1
     i=$((i + 1))
@@ -757,7 +758,7 @@ test_arm_waits_for_peer_beacon_after_child_stands_down() {
   # After the peer dies without a successor, the attached arm must fail loudly.
   kill "$peer" 2>/dev/null || true
   wait "$peer" 2>/dev/null || true
-  wait_for_exit "$armpid" 80
+  wait_for_exit "$armpid" 200
   status=$?
   [ "$status" -ne 0 ] && [ "$status" -ne 124 ] || fail "attached arm did not fail after peer died (status $status): $(cat "$armout")"
   grep -qF 'watcher: FAILED - cycle ended without an actionable reason' "$armout" || fail "peer-attached arm did not emit the typed cycle-end failure"
