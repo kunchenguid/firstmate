@@ -250,7 +250,7 @@ It represents currently unused manual resets and must be reduced locally when a 
 The selector keeps account-free burn samples in `state/.dispatch-quota-samples.json`; the file is volatile private state and is not a source of configured reset credits.
 `quota-balanced` selection is deterministic and implemented by `bin/fm-dispatch-select.sh`, whose header owns the exact score, rollover, clock-skew, diagnostics, vendor-availability, and degrade-to-first-element mechanics; quota trouble never blocks dispatch.
 
-To declare three Codex manual weekly resets after this version lands, merge this local object into `config/crew-dispatch.json` without adding a session entry:
+To declare three Codex manual weekly resets, merge this local object into `config/crew-dispatch.json` without adding a session entry:
 
 ```json
 {

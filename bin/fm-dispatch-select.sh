@@ -458,23 +458,52 @@ fi
 if [ -n "$STATE_FILE" ] && [ "$(printf '%s\n' "$selection" | jq '.samples | length')" -gt 0 ]; then
   state_parent=$(dirname "$STATE_FILE")
   if mkdir -p "$state_parent" 2>/dev/null; then
-    state_tmp=$(umask 077; mktemp "$state_parent/.dispatch-quota-samples.XXXXXX" 2>/dev/null) || state_tmp=
-    if [ -n "$state_tmp" ]; then
-      if jq -nec --argjson old "$history_json" --argjson current "$selection" '
-        def key: [.provider, .id, .kind, .durationSeconds];
-        {schemaVersion: 1,
-         samples: ([($old.samples[]? // empty), $current.samples[]]
-           | sort_by(key)
-           | group_by(key)
-           | map(last))}
-      ' > "$state_tmp" && chmod 600 "$state_tmp" && mv "$state_tmp" "$STATE_FILE"; then
-        :
-      else
-        rm -f "$state_tmp"
-        log "could not update quota sample history; selection remains valid"
+    history_lock="$STATE_FILE.lock"
+    # shellcheck source=bin/fm-wake-lib.sh
+    FM_STATE_OVERRIDE="$state_parent" . "$ROOT/bin/fm-wake-lib.sh"
+    history_lock_attempt=0
+    history_lock_acquired=0
+    while [ "$history_lock_attempt" -lt 10 ]; do
+      if fm_lock_try_acquire "$history_lock"; then
+        history_lock_acquired=1
+        break
       fi
+      history_lock_attempt=$((history_lock_attempt + 1))
+      [ "$history_lock_attempt" -ge 10 ] || sleep 0.1
+    done
+    if [ "$history_lock_acquired" -eq 1 ]; then
+      trap 'fm_lock_release "$history_lock"' EXIT
+      current_history='{"schemaVersion":1,"samples":[]}'
+      if [ -f "$STATE_FILE" ]; then
+        if locked_history=$(cat "$STATE_FILE" 2>/dev/null) \
+          && printf '%s\n' "$locked_history" | jq -e '
+            type == "object" and .schemaVersion == 1 and (.samples | type) == "array"
+          ' >/dev/null 2>&1; then
+          current_history=$locked_history
+        fi
+      fi
+      state_tmp=$(umask 077; mktemp "$state_parent/.dispatch-quota-samples.XXXXXX" 2>/dev/null) || state_tmp=
+      if [ -n "$state_tmp" ]; then
+        if jq -nec --argjson old "$current_history" --argjson current "$selection" '
+          def key: [.provider, .id, .kind, .durationSeconds];
+          {schemaVersion: 1,
+           samples: ([($old.samples[]? // empty), $current.samples[]]
+             | sort_by(key)
+             | group_by(key)
+             | map(max_by([.sampledAtEpoch, .resetsAtEpoch, .percentUsed])))}
+        ' > "$state_tmp" && chmod 600 "$state_tmp" && mv "$state_tmp" "$STATE_FILE"; then
+          :
+        else
+          rm -f "$state_tmp"
+          log "could not update quota sample history; selection remains valid"
+        fi
+      else
+        log "could not prepare quota sample history; selection remains valid"
+      fi
+      fm_lock_release "$history_lock"
+      trap - EXIT
     else
-      log "could not prepare quota sample history; selection remains valid"
+      log "could not acquire quota sample history lock; selection remains valid"
     fi
   else
     log "could not create quota sample state directory; selection remains valid"
