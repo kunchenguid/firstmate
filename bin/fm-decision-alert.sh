@@ -36,7 +36,8 @@
 # FM_DECISION_ALERT_TIMEOUT_SECS bounds each channel and defaults to 10 seconds.
 # FM_DECISION_ALERT_TOTAL_TIMEOUT_SECS bounds the complete invocation and
 # defaults to 10 seconds.
-# Enabled attempts run concurrently within the shared invocation deadline.
+# Up to eight notifier workers run concurrently within the shared invocation
+# deadline.
 #
 # Deduplication uses state/.decision-alerted-<sha256(identity)>.
 # Marker creation is atomic and occurs before notifier execution, so concurrent
@@ -53,10 +54,14 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 DECISION_ALERT_TIMEOUT_SECS_DEFAULT=10
 DECISION_ALERT_TOTAL_TIMEOUT_SECS_DEFAULT=10
+DECISION_ALERT_MAX_WORKERS=8
 DECISION_ALERT_TITLE='Firstmate needs your decision'
 DECISION_ALERT_BODY='Return to Firstmate to review the decision.'
 DECISION_ALERT_SOUND='Basso'
 DECISION_ALERT_DEADLINE=
+DECISION_ALERT_ORIGINS=()
+DECISION_ALERT_KEYS=()
+DECISION_ALERT_CHANNELS=()
 
 # shellcheck source=bin/fm-classify-lib.sh
 . "$SCRIPT_DIR/fm-classify-lib.sh"
@@ -152,13 +157,6 @@ decision_alert_claim() {  # <origin-id> <decision-key>
   ( set -C; : > "$marker" ) 2>/dev/null
 }
 
-decision_alert_wait_for_pids() {
-  local pid
-  for pid in "$@"; do
-    wait "$pid" || true
-  done
-}
-
 decision_alert_emit_channel() {  # <channel> <override> <timeout>
   local ch=$1 override=$2 timeout=$3 resolved_ch=$1 command_body='' rc
   if [ "${ch#command:}" != "$ch" ]; then
@@ -175,46 +173,97 @@ decision_alert_emit_channel() {  # <channel> <override> <timeout>
   return 0
 }
 
-decision_alert_notify() {  # <origin-id> <decision-key>
-  local origin=$1 key=$2 ch timeout channel_timeout override remaining
-  local -a configured=() channels=() pids=()
-  decision_alert_validate_slug origin-id "$origin" || return 2
-  decision_alert_validate_slug decision-key "$key" || return 2
+decision_alert_prepare_channels() {
+  local ch limit_logged=
+  local -a configured=()
+  DECISION_ALERT_CHANNELS=()
   while IFS= read -r ch; do
     [ -n "$ch" ] && configured+=("$ch")
   done < <(decision_alert_configured_channels)
   for ch in "${configured[@]}"; do
-    [ "$ch" = off ] && return 0
+    [ "$ch" = off ] && return 1
   done
   for ch in "${configured[@]}"; do
     case "$ch" in auto|default) ch=$(decision_alert_platform_default) ;; esac
     case "$ch" in
       '') ;;
-      osascript|herdr|command:*) channels+=("$ch") ;;
+      osascript|herdr|command:*)
+        if [ "${#DECISION_ALERT_CHANNELS[@]}" -lt "$DECISION_ALERT_MAX_WORKERS" ]; then
+          DECISION_ALERT_CHANNELS+=("$ch")
+        elif [ -z "$limit_logged" ]; then
+          decision_alert_log "channel limit is $DECISION_ALERT_MAX_WORKERS; remaining directives ignored"
+          limit_logged=1
+        fi
+        ;;
       *) decision_alert_log 'unrecognized channel directive ignored (redacted)' ;;
     esac
   done
-  [ "${#channels[@]}" -gt 0 ] || return 0
+  [ "${#DECISION_ALERT_CHANNELS[@]}" -gt 0 ]
+}
+
+decision_alert_add_identity() {  # <origin-id> <decision-key>
+  local origin=$1 key=$2
+  decision_alert_validate_slug origin-id "$origin" || return 2
+  decision_alert_validate_slug decision-key "$key" || return 2
+  DECISION_ALERT_ORIGINS+=("$origin")
+  DECISION_ALERT_KEYS+=("$key")
+}
+
+decision_alert_dispatch() {
+  local timeout override remaining identity_count channel_count batch_capacity total_jobs
+  local job_index remaining_jobs remaining_batches batch_timeout batch_end
+  local identity_index channel_index claim_state_value pid
+  local -a claim_states=() pids=()
+  [ "${#DECISION_ALERT_ORIGINS[@]}" -gt 0 ] || return 0
+  decision_alert_prepare_channels || return 0
   [ -n "$DECISION_ALERT_DEADLINE" ] || decision_alert_begin_budget
-  remaining=$(decision_alert_remaining_budget) || return 0
-  decision_alert_claim "$origin" "$key" || return 0
   timeout=${FM_DECISION_ALERT_TIMEOUT_SECS:-$DECISION_ALERT_TIMEOUT_SECS_DEFAULT}
   case "$timeout" in ''|*[!0-9]*|0) timeout=$DECISION_ALERT_TIMEOUT_SECS_DEFAULT ;; esac
   override=${FM_DECISION_ALERT_EXEC:-}
-  for ch in "${channels[@]}"; do
+  identity_count=${#DECISION_ALERT_ORIGINS[@]}
+  channel_count=${#DECISION_ALERT_CHANNELS[@]}
+  batch_capacity=$((DECISION_ALERT_MAX_WORKERS / channel_count * channel_count))
+  total_jobs=$((identity_count * channel_count))
+  job_index=0
+  while [ "$job_index" -lt "$total_jobs" ]; do
     remaining=$(decision_alert_remaining_budget) || break
-    channel_timeout=$timeout
-    [ "$channel_timeout" -le "$remaining" ] || channel_timeout=$remaining
-    decision_alert_emit_channel "$ch" "$override" "$channel_timeout" &
-    pids+=("$!")
+    remaining_jobs=$((total_jobs - job_index))
+    remaining_batches=$(((remaining_jobs + batch_capacity - 1) / batch_capacity))
+    batch_timeout=$((remaining / remaining_batches))
+    [ "$batch_timeout" -gt 0 ] || batch_timeout=1
+    [ "$batch_timeout" -le "$timeout" ] || batch_timeout=$timeout
+    batch_end=$((job_index + batch_capacity))
+    [ "$batch_end" -le "$total_jobs" ] || batch_end=$total_jobs
+    pids=()
+    while [ "$job_index" -lt "$batch_end" ]; do
+      identity_index=$((job_index / channel_count))
+      channel_index=$((job_index % channel_count))
+      claim_state_value=${claim_states[$identity_index]:-}
+      if [ -z "$claim_state_value" ]; then
+        if decision_alert_claim "${DECISION_ALERT_ORIGINS[$identity_index]}" \
+          "${DECISION_ALERT_KEYS[$identity_index]}"; then
+          claim_state_value=claimed
+        else
+          claim_state_value=skipped
+        fi
+        claim_states[identity_index]=$claim_state_value
+      fi
+      if [ "$claim_state_value" = claimed ]; then
+        decision_alert_emit_channel "${DECISION_ALERT_CHANNELS[$channel_index]}" \
+          "$override" "$batch_timeout" &
+        pids+=("$!")
+      fi
+      job_index=$((job_index + 1))
+    done
+    for pid in "${pids[@]}"; do
+      wait "$pid" || true
+    done
   done
-  decision_alert_wait_for_pids "${pids[@]}"
   return 0
 }
 
-decision_alert_status() {  # <status-file>
+decision_alert_collect_status() {  # <status-file>
   local status_file=$1 task open key verb _note
-  local -a pids=()
   [ -f "$status_file" ] || return 0
   task=$(basename "$status_file")
   task=${task%.status}
@@ -223,23 +272,35 @@ decision_alert_status() {  # <status-file>
   while IFS=$'\t' read -r key verb _note; do
     [ -n "$key" ] || continue
     [ "$verb" = needs-decision ] || continue
-    decision_alert_notify "$task" "$key" &
-    pids+=("$!")
+    decision_alert_add_identity "$task" "$key" || true
   done <<EOF
 $open
 EOF
-  decision_alert_wait_for_pids "${pids[@]}"
+}
+
+decision_alert_notify() {  # <origin-id> <decision-key>
+  DECISION_ALERT_ORIGINS=()
+  DECISION_ALERT_KEYS=()
+  decision_alert_add_identity "$1" "$2" || return $?
+  decision_alert_dispatch
+}
+
+decision_alert_status() {  # <status-file>
+  DECISION_ALERT_ORIGINS=()
+  DECISION_ALERT_KEYS=()
+  decision_alert_collect_status "$1" || return $?
+  decision_alert_dispatch
 }
 
 decision_alert_scan_state() {
   local status_file
-  local -a pids=()
+  DECISION_ALERT_ORIGINS=()
+  DECISION_ALERT_KEYS=()
   for status_file in "$STATE"/*.status; do
     [ -e "$status_file" ] || continue
-    decision_alert_status "$status_file" &
-    pids+=("$!")
+    decision_alert_collect_status "$status_file" || true
   done
-  decision_alert_wait_for_pids "${pids[@]}"
+  decision_alert_dispatch
 }
 
 decision_alert_main() {

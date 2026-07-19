@@ -186,6 +186,33 @@ SH
   pass "one total deadline bounds concurrent decisions, channels, and heartbeat status files"
 }
 
+test_concurrency_is_bounded() {
+  local home recorder task max_active
+  home="$TMP_ROOT/worker-pool"; mkdir -p "$home/state" "$home/config" "$home/active"
+  recorder="$home/recorder"
+  cat > "$recorder" <<'SH'
+#!/usr/bin/env bash
+slot="${FM_DECISION_ALERT_POOL_DIR:?}/active/$BASHPID"
+: > "$slot"
+trap 'rm -f "$slot"' EXIT
+find "${FM_DECISION_ALERT_POOL_DIR:?}/active" -type f | wc -l >> "${FM_DECISION_ALERT_POOL_DIR:?}/counts"
+sleep 5
+SH
+  chmod +x "$recorder"
+  for task in one two three; do
+    printf 'needs-decision [key=a]: choose\nneeds-decision [key=b]: choose\nneeds-decision [key=c]: choose\n' \
+      > "$home/state/$task.status"
+  done
+  printf 'osascript\nherdr\ncommand:true\n' > "$home/config/decision-alert"
+  FM_HOME="$home" FM_DECISION_ALERT_EXEC="$recorder" FM_DECISION_ALERT_POOL_DIR="$home" \
+    FM_DECISION_ALERT_TIMEOUT_SECS=1 FM_DECISION_ALERT_TOTAL_TIMEOUT_SECS=1 \
+    "$ALERT" scan-state >/dev/null 2> "$home/error.log"
+  max_active=$(sort -nr "$home/counts" | head -1 | tr -d ' ')
+  [ "$max_active" -le 8 ] || fail "decision alert execution exceeded its worker limit"
+  [ "$max_active" -gt 1 ] || fail "the worker pool did not preserve concurrent fallback delivery"
+  pass "decision alert execution stays within eight concurrent workers"
+}
+
 test_test_seam_and_watcher_integration() {
   local home stub out
   home="$TMP_ROOT/watcher"; mkdir -p "$home/state" "$home/config"
@@ -215,4 +242,5 @@ test_configuration_and_opt_out
 test_macos_notification_argv_and_command_safety
 test_notifier_failure_is_nonblocking_and_at_most_once
 test_total_runtime_is_bounded_across_decisions_and_channels
+test_concurrency_is_bounded
 test_test_seam_and_watcher_integration
