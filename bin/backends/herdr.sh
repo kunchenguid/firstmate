@@ -317,13 +317,17 @@ fm_backend_herdr_workspace_prune_seeded_default_tab() {  # <session> <workspace_
 # ${TMPDIR:-/tmp}, keyed by a cksum of $FM_HOME plus the session and the
 # home's own label - the same two axes that scope the workspace itself, so
 # two different homes (or two sessions) never contend. The holder records its
-# pid; a waiter frees the lock only when that recorded pid is provably dead
-# (`kill -0` fails). A lock dir whose pid file has not appeared yet is simply
-# waited out - the overall acquire budget bounds that.
+# pid; a waiter breaks the lock only when that recorded pid is provably dead
+# (`kill -0` fails), and the break is atomic: the waiter renames the lock dir
+# aside before removing it, so of several concurrent waiters exactly one wins
+# the break and none can rm a fresh lock a new holder just re-created. A lock
+# dir whose pid file has not appeared yet is simply waited out - the overall
+# acquire budget bounds that.
 #
-# Fail-open by design: if the lock cannot be acquired within the budget (or
-# the lock dir cannot be created at all), the caller proceeds WITHOUT the
-# lock after one stderr warning. The worst case is exactly today's unlocked
+# Fail-open by design: if the lock cannot be acquired within the budget - or
+# promptly, after three consecutive missed creations, if the lock dir cannot
+# be created at all (e.g. an unwritable TMPDIR) - the caller proceeds WITHOUT
+# the lock after one stderr warning. The worst case is exactly today's unlocked
 # find-or-create race - a duplicate workspace - never a blocked spawn,
 # mirroring the "quota trouble never blocks dispatch" posture.
 fm_backend_herdr_workspace_lock_acquire() {  # <session>

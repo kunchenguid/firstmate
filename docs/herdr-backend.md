@@ -123,7 +123,7 @@ Workspace-per-task - tried against the real binary in P2 and again considered he
 
 ## Workspace lifecycle: one persistent per-home workspace, reused
 
-Each home's own workspace (`firstmate` for the primary, `2ndmate-<secondmate-id>` for a secondmate - see "Label derivation" above) is created once per session and reused by every subsequent spawn from that home: `fm_backend_herdr_workspace_ensure` calls `fm_backend_herdr_workspace_find` first and creates a workspace only when none labelled for that home exists yet.
+Each home's own workspace (`firstmate` for the primary, `2ndmate-<secondmate-id>` for a secondmate - see "Label derivation" above) is created once per session and reused by every subsequent spawn from that home: `fm_backend_herdr_workspace_ensure` calls `fm_backend_herdr_workspace_find` first and creates a workspace only when none labelled for that home exists yet, with the find-or-create window serialized against concurrent spawns of the same home (see "Incident (2026-07-19)" below).
 Teardown (`fm_backend_herdr_kill`) closes only the task's pane/tab, never the workspace.
 
 Reserved-keyword guard: never name a `jq --arg`/`--argjson` after a `jq` keyword (`label`, `and`, `or`, `not`, `if`, `then`, `else`, `end`, `reduce`, `foreach`, `import`, `def`, `as`, `__loc__`).
@@ -180,8 +180,8 @@ Three parallel first spawns each found no workspace yet, so each minted its own;
 Sequential spawns were never affected because the second spawn's `workspace_find` adopts the first spawn's workspace.
 
 **Fix:** `fm_backend_herdr_workspace_lock_acquire` / `_release` in `bin/backends/herdr.sh` serialize the find-or-create window with an atomic `mkdir` lock (portable; macOS ships no flock) under `${TMPDIR:-/tmp}`, keyed by a cksum of `$FM_HOME` plus the session and the home's own label - the same axes that scope the workspace itself, so different homes and sessions never contend.
-The holder records its pid; a waiter frees the lock only when that pid is provably dead (`kill -0` fails), and a lock dir whose pid file has not appeared yet is simply waited out within the bounded acquire budget (12s).
-The lock is fail-open by design: on acquire timeout the spawn proceeds unlocked after one stderr warning, so the worst case is exactly the pre-fix race (a duplicate workspace), never a blocked spawn - mirroring the "quota trouble never blocks dispatch" posture.
+The holder records its pid; a waiter breaks the lock only when that pid is provably dead (`kill -0` fails), and the break is atomic - the waiter renames the lock dir aside before removing it, so of several concurrent waiters exactly one wins the break and the rest keep waiting. A lock dir whose pid file has not appeared yet is simply waited out within the bounded acquire budget (12s).
+The lock is fail-open by design: on acquire timeout - or promptly, after three consecutive failed creation attempts, when the lock dir cannot be created at all (e.g. an unwritable `TMPDIR`) - the spawn proceeds unlocked after one stderr warning, so the worst case is exactly the pre-fix race (a duplicate workspace), never a blocked spawn - mirroring the "quota trouble never blocks dispatch" posture.
 Unit coverage in `tests/fm-backend-herdr.test.sh`: `test_workspace_ensure_concurrent_first_spawns_mint_one_workspace` (three genuinely parallel `container_ensure` calls against the stateful fake mint exactly one workspace and share it), `test_workspace_ensure_waits_for_live_lock_holder_then_adopts` (a deterministic hold-then-release proof that a waiter adopts the winner's workspace with zero creates), and `test_workspace_ensure_breaks_provably_dead_lock_holder` (a crashed prior holder's lock is broken promptly and released after ensure).
 Duplicate workspaces minted BEFORE this fix self-heal through normal teardown: each duplicate disappears when its last task tab closes, and the next spawn adopts whichever single labeled workspace remains.
 
