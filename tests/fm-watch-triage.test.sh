@@ -622,7 +622,8 @@ test_nonterminal_stale_paused_absorbed_then_resurfaced() {
 
 # A captain-held crew can leave a stable backend endpoint after its agent exits.
 # fm-crew-state then authoritatively reports stopped rather than paused, but the
-# confirmed-dead agent plus the declared pause must retain bounded pause handling.
+# confirmed-dead agent plus the declared wait or captain-held transfer must retain
+# bounded pause handling.
 # A still-live agent at an external-decision gate is the disconfirming case: it
 # must surface once, while the unchanged hash must not append the same wake on
 # every watcher re-arm.

@@ -51,11 +51,12 @@ FM_CLASSIFY_CAPTAIN_RE_DEFAULT='done:|needs-decision:|blocked:|failed:|PR ready|
 # drift between the two consumers. FM_CLASSIFY_PAUSED_VERB overrides it.
 FM_CLASSIFY_PAUSED_VERB_DEFAULT='paused'
 
-# Bounded re-surface cadence for a declared pause. Far longer than the wedge
-# threshold (FM_STALE_ESCALATE_SECS, default 240s) so a deliberate wait is not
-# nagged like a wedge, yet finite so a forgotten pause cannot rot invisibly - it
-# re-surfaces once for a recheck every window. One hour by default; both consumers
-# read FM_PAUSE_RESURFACE_SECS with this default so the cadence has one owner.
+# Bounded re-surface cadence for a declared pause or a dead-agent captain hold.
+# Far longer than the wedge threshold (FM_STALE_ESCALATE_SECS, default 240s), it
+# avoids nagging a deliberate wait while ensuring a forgotten hold cannot rot
+# invisibly - it re-surfaces once for a recheck every window. One hour by default;
+# both consumers read FM_PAUSE_RESURFACE_SECS with this default so the cadence has
+# one owner.
 # shellcheck disable=SC2034 # Read by the watcher and daemon (fm-watch.sh, fm-supervise-daemon.sh), not this lib.
 FM_PAUSE_RESURFACE_SECS_DEFAULT=3600
 
