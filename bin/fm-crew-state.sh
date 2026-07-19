@@ -28,6 +28,10 @@
 #      checks" from "checks green, waiting on merge" (see nm_ci_checks_state) -
 #      a ci-step log-tail check overrides working -> done once checks read
 #      green, so a green PR is never silently read as still-validating.
+#      Second exception: a TERMINAL cancelled run whose status-log tip is a
+#      later declared pause (paused:) reports paused from the status log, so a
+#      captain mid-run delivery redirect does not leave supervision stuck on
+#      cancelled/failed. Active runs and other terminal outcomes are unchanged.
 #   3. Reconcile the status log: if its last line says needs-decision/blocked but
 #      the run-step shows the run moved on, the log is deterministically stale and
 #      is flagged superseded. A genuinely parked run plus a needs-decision log
@@ -432,6 +436,11 @@ if [ "$HAVE_RUN" = 1 ]; then
   CI_STEP_STATUS=""
   CI_LOG_STATE=""
   RUN_STATUS=""
+  # Set when the matching run reached a terminal cancelled state (outcome,
+  # status word, or coarse runs-list word). Distinct from RUN_STATE=failed so
+  # a later paused: tip can supersede cancelled without also overriding a real
+  # outcome:failed or outcome:passed terminal run.
+  RUN_TERMINAL_CANCELLED=0
   if [ "$RUN_SOURCE" = coarse ]; then
     # No step/gate detail is available from the plain runs list - only ever
     # true/working, done, or failed. A crew genuinely parked at a gate still
@@ -444,7 +453,7 @@ if [ "$HAVE_RUN" = 1 ]; then
       running)   RUN_STATE=working; RUN_DETAIL="validating (background run)" ;;
       completed) RUN_STATE="done";  RUN_DETAIL="run completed" ;;
       failed)    RUN_STATE=failed;  RUN_DETAIL="run failed" ;;
-      cancelled) RUN_STATE=failed;  RUN_DETAIL="run cancelled" ;;
+      cancelled) RUN_STATE=failed;  RUN_DETAIL="run cancelled"; RUN_TERMINAL_CANCELLED=1 ;;
       *)         RUN_STATE=unknown; RUN_DETAIL="runs list status: $COARSE_STATUS" ;;
     esac
   else
@@ -461,7 +470,7 @@ if [ "$HAVE_RUN" = 1 ]; then
         passed)        RUN_STATE="done"; RUN_DETAIL="run passed: PR merged/closed" ;;
         checks-passed) RUN_STATE="done"; RUN_DETAIL="checks green: PR ready for review" ;;
         failed)        RUN_STATE=failed; RUN_DETAIL="run failed" ;;
-        cancelled)     RUN_STATE=failed; RUN_DETAIL="run cancelled" ;;
+        cancelled)     RUN_STATE=failed; RUN_DETAIL="run cancelled"; RUN_TERMINAL_CANCELLED=1 ;;
         *)             RUN_STATE=unknown; RUN_DETAIL="outcome: $outcome" ;;
       esac
     elif [ -n "$awaiting" ] || [ "$status" = awaiting_approval ] || [ "$status" = fix_review ] || [ -n "$gate_status" ] || [ "$has_gate" = 1 ]; then
@@ -485,7 +494,7 @@ if [ "$HAVE_RUN" = 1 ]; then
         running|fixing) RUN_STATE=working; RUN_DETAIL="validating ($status)" ;;
         completed)      RUN_STATE="done"; RUN_DETAIL="run completed" ;;
         failed)         RUN_STATE=failed;  RUN_DETAIL="run failed" ;;
-        cancelled)      RUN_STATE=failed;  RUN_DETAIL="run cancelled" ;;
+        cancelled)      RUN_STATE=failed;  RUN_DETAIL="run cancelled"; RUN_TERMINAL_CANCELLED=1 ;;
         "")             RUN_STATE=working; RUN_DETAIL="run active" ;;
         *)              RUN_STATE=working; RUN_DETAIL="run active ($status)" ;;
       esac
@@ -522,6 +531,20 @@ if [ "$HAVE_RUN" = 1 ]; then
     if [ "$CI_LOG_STATE" != not-ready ]; then
       emit "done" status-log "$(status_line_note "$LOG_LINE")${SEP}run still monitoring PR"
     fi
+  fi
+
+  # Terminal cancelled + later declared pause (paused: tip on the append-only
+  # status log): prefer the pause so a captain mid-run delivery redirect does
+  # not leave supervision treating a deliberately-idle worker as failed.
+  # "Later" proxy: axi status (and the coarse runs list) do not expose a terminal
+  # transition timestamp the helper already reads, so the ordering signal is the
+  # status-log tip itself - last non-empty line is paused: while the matching
+  # run is TERMINAL cancelled. An ACTIVE run never reaches this branch (RUN_STATE
+  # is working/parked, not cancelled), so a pause written before or during an
+  # active run is still outranked by the run-step. Other terminal outcomes
+  # (passed/failed) keep run-step precedence.
+  if [ "$RUN_TERMINAL_CANCELLED" = 1 ] && [ -n "$LOG_LINE" ] && status_is_paused "$LOG_LINE"; then
+    emit paused status-log "$(status_line_note "$LOG_LINE")${SEP}run cancelled, later pause declared"
   fi
 
   # Reconcile the status log. A needs-decision/blocked log line that the run-step

@@ -13,6 +13,10 @@
 #   (b) needs-decision/blocked log + resumed run = SUPERSEDED     -> run-step
 #   (c) genuine parked run + needs-decision log = NOT superseded  -> run-step
 #   (d) terminal run-step (passed/failed) is authoritative        -> run-step
+#   (d') terminal cancelled + LATER paused: status -> paused (not cancelled);
+#        cancelled alone still failed; active run still outranks pause;
+#        other terminal outcomes keep run-step precedence. Regression for the
+#        2026-07-16 captain-redirect stale-wake loop.
 #   (e) cross-branch attribution: this branch's own run found via list lookup
 #   (f) no run + busy pane                                        -> pane
 #   (g) no run + idle pane falls to the status-log verb           -> status-log
@@ -277,6 +281,19 @@ run:
   pr: ""
   findings: none
 outcome: failed
+EOF
+}
+
+run_cancelled() {  # <branch>
+  cat <<EOF
+run:
+  id: "01RUN"
+  branch: $1
+  status: completed
+  head: "abc1234"
+  pr: ""
+  findings: none
+outcome: cancelled
 EOF
 }
 
@@ -671,6 +688,122 @@ test_terminal_failed() {
   assert_contains "$out" "state: failed" "failed run -> failed"
   assert_contains "$out" "source: run-step" "failed -> run-step source"
   pass "terminal failed run is authoritative"
+}
+
+# (d') terminal cancelled run + a LATER paused: status line must reconcile to
+# paused (declared external wait), not cancelled/failed. Incident 2026-07-16:
+# captain redirected delivery mid-run, the no-mistakes run cancelled, the
+# worker declared paused:, and supervision looped stale wakes against the
+# deliberately-idle pane because run-step cancelled outranked the pause.
+test_terminal_cancelled_later_paused_reports_paused() {
+  reset_fakes
+  local d; d=$(new_case cancelled-then-paused)
+  make_repo_on_branch "$d/wt" fm/feat-cancel-pause
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-cancel-pause.meta" \
+    "window=fm:fm-feat-cancel-pause" "worktree=$d/wt" "kind=ship"
+  # Prior working: then the post-cancel declared pause (append-only tip).
+  printf 'working: validating via no-mistakes\npaused: captain redirected delivery; holding for new path\n' \
+    > "$d/state/feat-cancel-pause.status"
+  FM_FAKE_AXI_STATUS="$(run_cancelled fm/feat-cancel-pause)"
+  FM_FAKE_BUSY=0
+  local out; out=$(run_crew_state "$d" feat-cancel-pause)
+  assert_contains "$out" "state: paused" "cancelled run + later paused: -> paused"
+  assert_contains "$out" "source: status-log" "later pause is status-log sourced"
+  assert_contains "$out" "captain redirected delivery" "pause reason is carried"
+  assert_not_contains "$out" "state: failed" "must not stick on cancelled/failed"
+  pass "terminal cancelled run + later paused: reconciles to paused"
+}
+
+# Cancelled with no later pause still reports failed from the run-step.
+test_terminal_cancelled_without_pause_reports_failed() {
+  reset_fakes
+  local d; d=$(new_case cancelled-alone)
+  make_repo_on_branch "$d/wt" fm/feat-cancel-alone
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-cancel-alone.meta" \
+    "window=fm:fm-feat-cancel-alone" "worktree=$d/wt" "kind=ship"
+  printf 'working: validating via no-mistakes\n' > "$d/state/feat-cancel-alone.status"
+  FM_FAKE_AXI_STATUS="$(run_cancelled fm/feat-cancel-alone)"
+  local out; out=$(run_crew_state "$d" feat-cancel-alone)
+  assert_contains "$out" "state: failed" "cancelled without later pause -> failed"
+  assert_contains "$out" "source: run-step" "cancelled alone stays run-step"
+  assert_contains "$out" "run cancelled" "cancelled detail is preserved"
+  pass "terminal cancelled run without a later pause still reports failed"
+}
+
+# Active run still outranks a paused: status line (precedence otherwise unchanged).
+test_active_run_outranks_paused_status() {
+  reset_fakes
+  local d; d=$(new_case active-outranks-pause)
+  make_repo_on_branch "$d/wt" fm/feat-active-pause
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-active-pause.meta" \
+    "window=fm:fm-feat-active-pause" "worktree=$d/wt" "kind=ship"
+  printf 'paused: holding for vendor window\n' > "$d/state/feat-active-pause.status"
+  FM_FAKE_AXI_STATUS="$(run_running fm/feat-active-pause)"
+  local out; out=$(run_crew_state "$d" feat-active-pause)
+  assert_contains "$out" "state: working" "active run outranks paused: status"
+  assert_contains "$out" "source: run-step" "active run stays run-step sourced"
+  assert_not_contains "$out" "state: paused" "active run must not yield to pause"
+  pass "active run still outranks a paused: status line"
+}
+
+# Other terminal outcomes (passed/failed) keep run-step precedence over pause.
+test_terminal_failed_outranks_paused_status() {
+  reset_fakes
+  local d; d=$(new_case failed-outranks-pause)
+  make_repo_on_branch "$d/wt" fm/feat-fail-pause
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-fail-pause.meta" \
+    "window=fm:fm-feat-fail-pause" "worktree=$d/wt" "kind=ship"
+  printf 'paused: holding after a real failure?\n' > "$d/state/feat-fail-pause.status"
+  FM_FAKE_AXI_STATUS="$(run_failed fm/feat-fail-pause)"
+  local out; out=$(run_crew_state "$d" feat-fail-pause)
+  assert_contains "$out" "state: failed" "failed run still outranks paused:"
+  assert_contains "$out" "source: run-step" "failed stays run-step sourced"
+  assert_not_contains "$out" "state: paused" "failed must not yield to pause"
+  pass "terminal failed run still outranks a paused: status line"
+}
+
+test_terminal_passed_outranks_paused_status() {
+  reset_fakes
+  local d; d=$(new_case passed-outranks-pause)
+  make_repo_on_branch "$d/wt" fm/feat-pass-pause
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-pass-pause.meta" \
+    "window=fm:fm-feat-pass-pause" "worktree=$d/wt" "kind=ship"
+  printf 'paused: should not mask a passed run\n' > "$d/state/feat-pass-pause.status"
+  FM_FAKE_AXI_STATUS="$(run_passed fm/feat-pass-pause)"
+  local out; out=$(run_crew_state "$d" feat-pass-pause)
+  assert_contains "$out" "state: done" "passed run still outranks paused:"
+  assert_contains "$out" "source: run-step" "passed stays run-step sourced"
+  assert_not_contains "$out" "state: paused" "passed must not yield to pause"
+  pass "terminal passed run still outranks a paused: status line"
+}
+
+# Coarse runs-list cancelled + later paused: follows the same exception.
+test_coarse_cancelled_later_paused_reports_paused() {
+  reset_fakes
+  local d; d=$(new_case coarse-cancel-pause)
+  make_repo_on_branch "$d/wt" fm/feat-coarse-cp
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-coarse-cp.meta" \
+    "window=fm:fm-feat-coarse-cp" "worktree=$d/wt" "kind=ship"
+  printf 'working: validating\npaused: redirected mid-run; holding\n' \
+    > "$d/state/feat-coarse-cp.status"
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  FM_FAKE_RUNS_LIST="$(cat <<'EOF'
+  running    fm/other-crew aaaaaaa  2026-07-16 12:10
+  cancelled  fm/feat-coarse-cp bbbbbbb  2026-07-16 12:05
+EOF
+)"
+  FM_FAKE_BUSY=0
+  local out; out=$(run_crew_state "$d" feat-coarse-cp)
+  assert_contains "$out" "state: paused" "coarse cancelled + later paused: -> paused"
+  assert_contains "$out" "source: status-log" "coarse later pause is status-log sourced"
+  assert_not_contains "$out" "state: failed" "coarse cancelled must not stick over pause"
+  pass "coarse cancelled run + later paused: reconciles to paused"
 }
 
 # (e) cross-branch attribution: `axi status` returns ANOTHER branch's run (the
@@ -1155,6 +1288,12 @@ test_top_level_fixing_ci_running_after_green_stays_working
 test_top_level_fixing_done_log_stays_working
 test_terminal_passed
 test_terminal_failed
+test_terminal_cancelled_later_paused_reports_paused
+test_terminal_cancelled_without_pause_reports_failed
+test_active_run_outranks_paused_status
+test_terminal_failed_outranks_paused_status
+test_terminal_passed_outranks_paused_status
+test_coarse_cancelled_later_paused_reports_paused
 test_cross_branch_attribution_via_runs_list
 test_cross_branch_attribution_picks_most_recent_row
 test_coarse_run_does_not_probe_other_branch_ci_log_for_ready_status
