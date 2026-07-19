@@ -174,6 +174,7 @@ run_bootstrap_timeout_case() {
     # shellcheck disable=SC2317,SC2329 # Exported and invoked by the bootstrap subprocess.
     sleep() {
       local inc=${1:-1}
+      # shellcheck disable=SC2030 # Intentionally local; unrelated to the outer SECONDS usage elsewhere in this file.
       SECONDS=$((SECONDS + inc))
       # Advance fake time quickly, but yield on every tick so the background
       # fleet-sync process can deterministically write its partial output before
@@ -860,10 +861,12 @@ exec "$real_git" "\$@"
 SH
   chmod +x "$fakebin/git"
 
+  # shellcheck disable=SC2031 # Unrelated to the subshell-local SECONDS override in run_bootstrap_timeout_case above.
   start=$SECONDS
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$local_clone" \
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_SELF_UPDATE_CHECK=1 FM_SELF_UPDATE_FETCH_TIMEOUT=1 \
     "$ROOT/bin/fm-bootstrap.sh")
+  # shellcheck disable=SC2031 # Unrelated to the subshell-local SECONDS override in run_bootstrap_timeout_case above.
   elapsed=$((SECONDS - start))
   expect="FIRSTMATE_UPDATE: firstmate checkout is 1 commit(s) behind origin/main (update: /updatefirstmate)"
   [ "$out" = "$expect" ] || fail "hanging fetch should fall back to stale refs, got: $out"
