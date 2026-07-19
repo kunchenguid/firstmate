@@ -93,13 +93,11 @@ ok - only open needs-decision events alert, and status/direct delivery deduplica
 ok - off, environment override, and multi-channel config behave deterministically
 ok - macOS uses an audible argv-safe notification and command data never becomes shell source
 ok - notifier failure never blocks the decision path and repeated delivery stays at most once
+ok - one total deadline bounds concurrent decisions, channels, and heartbeat status files
+ok - decision alert execution stays within eight concurrent workers
+ok - an integer deadline tick still starts the first bounded worker batch
+ok - Bash 3.2 empty retry batches preserve later decision alerts
 ok - the watcher invokes the automatic boundary and library-mode tests default to discard
-
-$ failures=0; count=0; for test_script in tests/*.test.sh; do count=$((count + 1)); output=$(bash "$test_script" 2>&1); rc=$?; if [ "$rc" -ne 0 ]; then failures=$((failures + 1)); fi; done; printf 'SUMMARY scripts=%s failures=%s\n' "$count" "$failures"; [ "$failures" -eq 0 ]
-SUMMARY scripts=79 failures=0
-
-$ nix-shell -p shellcheck --run 'bin/fm-lint.sh'
-fm-lint.sh: ShellCheck 0.11.0 (pinned 0.11.0)
 
 $ git diff --check
 (no output)

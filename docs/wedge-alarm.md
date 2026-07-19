@@ -84,5 +84,5 @@ The daemon redirects this stdout to `/dev/null` and treats a zero exit as succes
 
 ### command channel dispatch (summary on $1 and stdin)
 
-The `command:` channel runs `sh -c "<cmd>" fm-wedge-alarm "<summary>"` with the summary also piped on stdin.
+The `command:` channel runs `sh -c "<cmd>" fm-notify "<summary>"` with the summary also piped on stdin.
 `test_wedge_alarm_command_channel_receives_summary` deliberately unsets the seam for a safe file-writing command to verify this dispatch contract without a notification.
