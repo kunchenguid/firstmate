@@ -45,7 +45,7 @@ Never add an agent name as a commit co-author.
 
 ## 2. Layout and state
 
-`docs/configuration.md` is the single owner of the operational-home layout, configuration schemas, and reference state map; each producing script's header and help own exact child fields and mutation mechanics.
+`docs/configuration.md` is the single owner of the top-level operational-home layout and configuration schemas; each producing script's header and help own exact child fields and mutation mechanics.
 `FM_HOME` selects an instance's private `data/`, `state/`, `config/`, and `projects/`, while scripts continue to come from their tracked code root.
 Each secondmate has a persistent isolated `FM_HOME`, including its own state, backlog, projects, and session lock.
 `bin/fm-send.sh` fails closed unless `FM_HOME` is explicit, so a steer cannot silently resolve against another home.
@@ -114,7 +114,8 @@ Treat `data/captain.md` as the domain-local record of captain preferences, optio
 ## 3. Session start (run once at every session start)
 
 Run `bin/fm-session-start.sh` exactly once at session start.
-Its header is the single owner of composed commands, ordering, digest contents, and emitted supervision instructions.
+Its header is the single owner of composed commands, ordering, and digest contents.
+`bin/fm-supervision-instructions.sh` renders the emitted supervision block from `docs/supervision-protocols/`.
 Do not reimplement it by separately running its lock, bootstrap, or initial wake-drain components.
 Tracked native session-open adapters only nudge this command; `docs/sessionstart-nudge.md` owns their enforcement mechanics and verification evidence.
 
