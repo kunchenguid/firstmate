@@ -153,6 +153,35 @@ test_notifier_failure_is_nonblocking_and_at_most_once() {
   pass "notifier failure never blocks the decision path and repeated delivery stays at most once"
 }
 
+test_total_runtime_is_bounded_across_decisions_and_channels() {
+  local home start elapsed attempts markers
+  home="$TMP_ROOT/total-timeout"; mkdir -p "$home/state" "$home/config"
+  printf 'needs-decision [key=one]: choose\nneeds-decision [key=two]: choose\n' > "$home/state/sample.status"
+  printf 'command:sleep 5\ncommand:sleep 5\n' > "$home/config/decision-alert"
+  start=$SECONDS
+  env -u FM_DECISION_ALERT_EXEC FM_HOME="$home" FM_DECISION_ALERT_TIMEOUT_SECS=5 \
+    FM_DECISION_ALERT_TOTAL_TIMEOUT_SECS=1 "$ALERT" status "$home/state/sample.status" \
+    >/dev/null 2> "$home/error.log"
+  elapsed=$((SECONDS - start))
+  [ "$elapsed" -le 2 ] || fail "total alert runtime multiplied across decisions and channels"
+  markers=$(find "$home/state" -name '.decision-alerted-*' -type f | wc -l | tr -d ' ')
+  [ "$markers" -eq 1 ] || fail "the total deadline consumed an unattempted decision identity"
+
+  cat > "$home/scan-stub" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${FM_ALERT_STUB_LOG:?}"
+SH
+  chmod +x "$home/scan-stub"
+  FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_CONFIG_OVERRIDE="$home/config" FM_DECISION_ALERT_BIN="$home/scan-stub" \
+    FM_ALERT_STUB_LOG="$home/scan.log" bash -c '. "$1"; alert_all_open_decisions' \
+      _ "$ROOT/bin/fm-watch.sh"
+  attempts=$(wc -l < "$home/scan.log" | tr -d ' ')
+  [ "$attempts" -eq 1 ] || fail "the watcher split a fleet scan across multiple alert budgets"
+  assert_grep 'scan-state' "$home/scan.log" "the watcher did not use one bounded fleet scan"
+  pass "one total deadline bounds all decisions, channels, and heartbeat status files"
+}
+
 test_test_seam_and_watcher_integration() {
   local home stub out
   home="$TMP_ROOT/watcher"; mkdir -p "$home/state" "$home/config"
@@ -181,4 +210,5 @@ test_status_filtering_and_cross_boundary_dedup
 test_configuration_and_opt_out
 test_macos_notification_argv_and_command_safety
 test_notifier_failure_is_nonblocking_and_at_most_once
+test_total_runtime_is_bounded_across_decisions_and_channels
 test_test_seam_and_watcher_integration

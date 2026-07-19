@@ -108,7 +108,7 @@ See [`wedge-alarm.md`](wedge-alarm.md) for the channel reference and macOS verif
 An absent file means `auto`, which posts an audible Notification Center alert on macOS and selects no built-in channel on other platforms.
 The directives are `off`, `auto` or `default`, `osascript`, `herdr`, and `command:<cmd>`.
 `FM_DECISION_ALERT_CHANNEL` overrides the file with one directive.
-Every notifier is bounded, uses a generic privacy-safe body, and is best-effort after the durable decision boundary.
+Every notifier channel and complete alert invocation are bounded, use a generic privacy-safe body, and are best-effort after the durable decision boundary.
 See [`decision-alert.md`](decision-alert.md) for trigger coverage, deduplication, supported-surface evidence, test safety, and the direct-prompt limitation.
 See [`examples/decision-alert`](examples/decision-alert) for a copyable config.
 
@@ -438,6 +438,7 @@ FM_WEDGE_ALARM_EXEC=              # notifier seam: route every channel (osascrip
 FM_DECISION_ALERT_CHANNEL=        # override config/decision-alert with one directive; off|auto|osascript|herdr|command:<cmd>; absent = auto (macOS -> audible Notification Center alert)
 FM_DECISION_ALERT_EXEC=           # test seam replacing every real decision notifier as `<cmd> <channel> <body>`; "discard" fires nothing; unset in production (docs/decision-alert.md)
 FM_DECISION_ALERT_TIMEOUT_SECS=   # per-channel decision notifier process-group timeout; default 10
+FM_DECISION_ALERT_TOTAL_TIMEOUT_SECS= # total timeout shared by all decisions and channels in one alert invocation; default 10
 FM_WEDGE_ALARM_TIMEOUT_SECS=10    # maximum seconds for each osascript, herdr, override, or command: notifier before its watchdog terminates it and continues to the next channel; invalid or zero values use 10
 FM_INJECT_FAIL_SLEEP=30            # seconds to back off when the supervisor pane is unavailable
 FM_INJECT_CONFIRM_RETRIES=3        # daemon Enter-retry attempts after typing a digest once

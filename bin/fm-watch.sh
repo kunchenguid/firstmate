@@ -517,11 +517,8 @@ alert_decisions_in_status() {  # <status-file>
 }
 
 alert_all_open_decisions() {
-  local f
-  for f in "$STATE"/*.status; do
-    [ -e "$f" ] || continue
-    alert_decisions_in_status "$f"
-  done
+  [ -x "$FM_DECISION_ALERT_BIN" ] || return 0
+  "$FM_DECISION_ALERT_BIN" scan-state >/dev/null 2>&1 || true
 }
 
 # Record a status file's captain-relevant last line as surfaced (no-op for a

@@ -34,6 +34,8 @@
 # Sourcing this script defaults that seam to discard so library-mode tests can
 # never post a real notification or play a real sound.
 # FM_DECISION_ALERT_TIMEOUT_SECS bounds each channel and defaults to 10 seconds.
+# FM_DECISION_ALERT_TOTAL_TIMEOUT_SECS bounds the complete invocation and
+# defaults to 10 seconds.
 #
 # Deduplication uses state/.decision-alerted-<sha256(identity)>.
 # Marker creation is atomic and occurs before notifier execution, so concurrent
@@ -49,9 +51,11 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 DECISION_ALERT_TIMEOUT_SECS_DEFAULT=10
+DECISION_ALERT_TOTAL_TIMEOUT_SECS_DEFAULT=10
 DECISION_ALERT_TITLE='Firstmate needs your decision'
 DECISION_ALERT_BODY='Return to Firstmate to review the decision.'
 DECISION_ALERT_SOUND='Basso'
+DECISION_ALERT_DEADLINE=
 
 # shellcheck source=bin/fm-classify-lib.sh
 . "$SCRIPT_DIR/fm-classify-lib.sh"
@@ -126,6 +130,19 @@ decision_alert_run_bounded() {  # <timeout> <channel> <command> [args...]
   return "$rc"
 }
 
+decision_alert_begin_budget() {
+  local total
+  total=${FM_DECISION_ALERT_TOTAL_TIMEOUT_SECS:-$DECISION_ALERT_TOTAL_TIMEOUT_SECS_DEFAULT}
+  case "$total" in ''|*[!0-9]*|0) total=$DECISION_ALERT_TOTAL_TIMEOUT_SECS_DEFAULT ;; esac
+  DECISION_ALERT_DEADLINE=$((SECONDS + total))
+}
+
+decision_alert_remaining_budget() {
+  local remaining=$((DECISION_ALERT_DEADLINE - SECONDS))
+  [ "$remaining" -gt 0 ] || return 1
+  printf '%s\n' "$remaining"
+}
+
 decision_alert_claim() {  # <origin-id> <decision-key>
   local digest marker
   mkdir -p "$STATE" || return 1
@@ -135,7 +152,7 @@ decision_alert_claim() {  # <origin-id> <decision-key>
 }
 
 decision_alert_notify() {  # <origin-id> <decision-key>
-  local origin=$1 key=$2 ch resolved_ch command_body rc timeout override
+  local origin=$1 key=$2 ch resolved_ch command_body rc timeout channel_timeout override remaining
   local -a configured=() channels=()
   decision_alert_validate_slug origin-id "$origin" || return 2
   decision_alert_validate_slug decision-key "$key" || return 2
@@ -154,20 +171,25 @@ decision_alert_notify() {  # <origin-id> <decision-key>
     esac
   done
   [ "${#channels[@]}" -gt 0 ] || return 0
+  [ -n "$DECISION_ALERT_DEADLINE" ] || decision_alert_begin_budget
+  remaining=$(decision_alert_remaining_budget) || return 0
   decision_alert_claim "$origin" "$key" || return 0
   timeout=${FM_DECISION_ALERT_TIMEOUT_SECS:-$DECISION_ALERT_TIMEOUT_SECS_DEFAULT}
   case "$timeout" in ''|*[!0-9]*|0) timeout=$DECISION_ALERT_TIMEOUT_SECS_DEFAULT ;; esac
   override=${FM_DECISION_ALERT_EXEC:-}
   for ch in "${channels[@]}"; do
+    remaining=$(decision_alert_remaining_budget) || break
+    channel_timeout=$timeout
+    [ "$channel_timeout" -le "$remaining" ] || channel_timeout=$remaining
     resolved_ch=$ch
     command_body=
     if [ "${ch#command:}" != "$ch" ]; then
-      resolved_ch=command
+      resolved_ch='command'
       command_body=${ch#command:}
-      fm_notify_emit decision_alert_run_bounded "$override" "$timeout" command \
+      fm_notify_emit decision_alert_run_bounded "$override" "$channel_timeout" command \
         "$DECISION_ALERT_TITLE" "$DECISION_ALERT_BODY" "$DECISION_ALERT_SOUND" "$command_body"
     else
-      fm_notify_emit decision_alert_run_bounded "$override" "$timeout" "$ch" \
+      fm_notify_emit decision_alert_run_bounded "$override" "$channel_timeout" "$ch" \
         "$DECISION_ALERT_TITLE" "$DECISION_ALERT_BODY" "$DECISION_ALERT_SOUND"
     fi
     rc=$?
@@ -205,14 +227,17 @@ decision_alert_main() {
   case "$command" in
     decision|prompt)
       [ "$#" -eq 3 ] || { usage >&2; return 2; }
+      decision_alert_begin_budget
       decision_alert_notify "$2" "$3"
       ;;
     status)
       [ "$#" -eq 2 ] || { usage >&2; return 2; }
+      decision_alert_begin_budget
       decision_alert_status "$2"
       ;;
     scan-state)
       [ "$#" -eq 1 ] || { usage >&2; return 2; }
+      decision_alert_begin_budget
       decision_alert_scan_state
       ;;
     -h|--help) usage ;;

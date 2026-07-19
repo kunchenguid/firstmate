@@ -45,6 +45,8 @@ Other platforms have no built-in `auto` channel and can opt into `herdr` or a `c
 See [`examples/decision-alert`](examples/decision-alert) for a copyable file.
 
 Every channel is bounded by `FM_DECISION_ALERT_TIMEOUT_SECS`, which defaults to 10 seconds.
+The complete command is bounded by `FM_DECISION_ALERT_TOTAL_TIMEOUT_SECS`, which also defaults to 10 seconds and is shared across every open decision and configured channel in that invocation.
+Heartbeat fleet scans use one `scan-state` invocation, so the total bound also covers every status file in the scan.
 All execution routes through `bin/fm-notify-lib.sh`, extracted from the existing wedge-alarm seam.
 AppleScript receives title, body, and sound as argv items rather than source interpolation.
 A configured command receives the generic body in `$1` and on stdin, never as shell source.
