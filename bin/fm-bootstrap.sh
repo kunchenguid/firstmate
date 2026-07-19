@@ -679,6 +679,76 @@ crew_dispatch_validate() {
       | map(select(. as $p | effort_ok($p.h; $p.e) | not))
       | map("\(.h):\(.e)")
       | unique;
+    def nonnegative_number($value): ($value | type) == "number" and $value >= 0;
+    def positive_integer($value):
+      ($value | type) == "number" and $value > 0 and ($value | floor) == $value;
+    def nonnegative_integer($value):
+      ($value | type) == "number" and $value >= 0 and ($value | floor) == $value;
+    def quota_balanced_error:
+      (.quotaBalanced? // {}) as $quota
+      | if has("quotaBalanced") and ((.quotaBalanced | type) != "object") then
+          "quotaBalanced must be an object"
+        elif (($quota | keys_unsorted) - ["providers","reservePercent","runRate","staleClearMargin"] | length) > 0 then
+          "quotaBalanced has unknown fields"
+        elif $quota.reservePercent? != null
+          and ((nonnegative_number($quota.reservePercent) | not) or $quota.reservePercent > 100) then
+          "quotaBalanced.reservePercent must be between 0 and 100"
+        elif $quota.staleClearMargin? != null and (nonnegative_number($quota.staleClearMargin) | not) then
+          "quotaBalanced.staleClearMargin must be non-negative"
+        elif $quota.runRate? != null and (($quota.runRate | type) != "object") then
+          "quotaBalanced.runRate must be an object"
+        elif ((($quota.runRate? // {}) | keys_unsorted)
+          - ["historyMaxAgeSeconds","minimumObservationSeconds","recentWeight"] | length) > 0 then
+          "quotaBalanced.runRate has unknown fields"
+        elif $quota.runRate.minimumObservationSeconds? != null
+          and (positive_integer($quota.runRate.minimumObservationSeconds) | not) then
+          "quotaBalanced.runRate.minimumObservationSeconds must be a positive integer"
+        elif $quota.runRate.historyMaxAgeSeconds? != null
+          and (positive_integer($quota.runRate.historyMaxAgeSeconds) | not) then
+          "quotaBalanced.runRate.historyMaxAgeSeconds must be a positive integer"
+        elif $quota.runRate.recentWeight? != null
+          and ((nonnegative_number($quota.runRate.recentWeight) | not) or $quota.runRate.recentWeight > 1) then
+          "quotaBalanced.runRate.recentWeight must be between 0 and 1"
+        elif $quota.providers? != null and (($quota.providers | type) != "object") then
+          "quotaBalanced.providers must be an object"
+        elif ((($quota.providers? // {}) | keys_unsorted)
+          - ["claude","codex","copilot","cursor","grok"] | length) > 0 then
+          "quotaBalanced.providers has an unsupported provider"
+        elif [($quota.providers? // {})[] | select(type != "object")] | length > 0 then
+          "each quotaBalanced provider must be an object"
+        elif [($quota.providers? // {})[]
+          | select(((keys_unsorted - ["reservePercent","windows"]) | length) > 0)] | length > 0 then
+          "quotaBalanced provider has unknown fields"
+        elif [($quota.providers? // {})[] | .reservePercent? // empty
+          | select((nonnegative_number(.) | not) or . > 100)] | length > 0 then
+          "quotaBalanced provider reservePercent must be between 0 and 100"
+        elif [($quota.providers? // {})[]
+          | select(.windows? != null and ((.windows | type) != "array"))] | length > 0 then
+          "quotaBalanced provider windows must be an array"
+        elif [($quota.providers? // {})[] | .windows[]? | select(type != "object")] | length > 0 then
+          "each quotaBalanced window must be an object"
+        elif [($quota.providers? // {})[] | .windows[]?
+          | select(((keys_unsorted - ["durationSeconds","extraResets","scope"]) | length) > 0)] | length > 0 then
+          "quotaBalanced window has unknown fields"
+        elif [($quota.providers? // {})[] | .windows[]?
+          | select(positive_integer(.durationSeconds?) | not)] | length > 0 then
+          "quotaBalanced window durationSeconds must be a positive integer"
+        elif [($quota.providers? // {})[] | .windows[]?
+          | select(nonnegative_integer(.extraResets?) | not)] | length > 0 then
+          "quotaBalanced window extraResets must be a non-negative integer"
+        elif [($quota.providers? // {})[] | .windows[]?
+          | select(.scope != "session" and .scope != "weekly")] | length > 0 then
+          "quotaBalanced window scope must be session or weekly"
+        elif [($quota.providers? // {})[] | .windows[]?
+          | select((.durationSeconds == 18000 and .scope != "session")
+            or (.durationSeconds == 604800 and .scope != "weekly"))] | length > 0 then
+          "quotaBalanced window scope must match canonical 5-hour or 7-day duration"
+        elif [($quota.providers? // {})[]
+          | [(.windows // [])[] | [.scope, .durationSeconds]]
+          | group_by(.)[] | select(length > 1)] | length > 0 then
+          "quotaBalanced provider windows must not duplicate scope and durationSeconds"
+        else ""
+        end;
     if type != "object" then "top-level value must be an object"
     elif has("rules") and (.rules | type) != "array" then "rules must be an array"
     elif [(.rules // [])[]? | select(type != "object")] | length > 0 then "each rule must be an object"
@@ -692,6 +762,7 @@ crew_dispatch_validate() {
       "unknown select: " + ([ (.rules // [])[]? | .select? // empty | select(. != "quota-balanced") ] | unique | join(", "))
     elif has("default") and (.default | type) != "object" then "default must be an object"
     elif has("default") and ((.default.harness? | type) != "string" or (.default.harness | length) == 0) then "default needs harness when present"
+    elif (quota_balanced_error | length) > 0 then quota_balanced_error
     else
       ([(.rules // [])[]? | use_profiles(.use?)[]?.harness] + [.default?.harness?]
         | map(select(. != null))
