@@ -199,10 +199,12 @@ Route durable knowledge to its most specific owner:
 - Fleet-local operational facts belong in curated, home-local `data/learnings.md`.
 - Task-scoped notes belong with the backlog item, and investigation findings belong in the scout report.
 - Knowledge useful to almost every contributor to one project belongs in that project's committed `AGENTS.md`.
+- Build and dependency sharp edges belong there, including when a pnpm project with native dependencies requires `pnpm approve-builds` before install, start, or test can avoid `ERR_PNPM_IGNORED_BUILDS`.
 - Knowledge general to every firstmate user belongs in this repo's shared tracked surface.
 
 Firstmate never writes a project's `AGENTS.md` directly.
 A crewmate creates or updates it lazily through the project's selected delivery path, using `bin/fm-ensure-agents-md.sh` and preferring pointers to authoritative sources over copied detail.
+Keep pooled project clones read-only and dependency-free; install or approve dependencies only in isolated project work.
 Keep fleet delivery posture and captain-private strategy out of project memory.
 When the captain invokes `/stow`, load the `stow` skill for the complete knowledge-routing and unfinished-work sweep.
 
