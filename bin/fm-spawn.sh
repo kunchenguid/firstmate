@@ -73,6 +73,16 @@
 #                  written by this script; outside the worktree to avoid pi's trust gate)
 #     __PITURNEND__ absolute path to .pi/extensions/fm-primary-turnend-guard.ts in a pi secondmate home
 #     __PIWATCH__   absolute path to .pi/extensions/fm-primary-pi-watch.ts in a pi secondmate home
+#     __PIRESTRICTED__ absolute path to bin/fm-pi-restricted-tools.ts (static, tracked;
+#                  the restricted DeepSeek lane's only tool extension, see pi_restricted_model())
+# A ship/scout spawn whose --model is a restricted DeepSeek analysis model
+# (pi_restricted_model() below) launches pi with every built-in/default tool
+# disabled, extension/context/skill/prompt-template discovery disabled, no
+# session persistence, and only the four tools bin/fm-pi-restricted-tools.ts
+# registers. FM_RESTRICTED_TASK_CONFIG (a small JSON object of non-secret
+# paths: report path, status path, task id) is exported into
+# the pane before launch so that extension knows its trusted output
+# destinations without any path being model-controlled.
 # Per-harness turn-end hooks are installed automatically; some live outside the worktree.
 # grok uses a firstmate-owned global hook under ${GROK_HOME:-$HOME/.grok}/hooks
 # plus a gitignored .fm-grok-turnend worktree pointer and a state token.
@@ -84,7 +94,7 @@ set -eu
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 usage() {
-  sed -n '2,78p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,91p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 case "${1:-}" in
@@ -309,10 +319,20 @@ else
 fi
 [ -z "$HARNESS_ARG" ] || ARG3=$HARNESS_ARG
 
+# Direct Pi DeepSeek analysis models that get the restricted tool lane (see
+# __PIRESTRICTED__ above). Deliberately narrow: only a model actually verified
+# with the restricted flag combination is listed here, never guessed.
+pi_restricted_model() {
+  case "$1" in
+    deepseek/deepseek-v4-pro) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 # The verified launch command per adapter. The knowledge half of each adapter
 # (busy signature, exit command, dialogs, quirks) lives in the harness-adapters skill.
 launch_template() {
-  local harness=$1 kind=${2:-ship}
+  local harness=$1 kind=${2:-ship} model=${3:-}
   # shellcheck disable=SC2016  # single quotes are deliberate: $(cat ...) expands in the crewmate pane, not here
   case "$harness" in
     # CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false disables claude's interactive
@@ -336,6 +356,8 @@ launch_template() {
     pi)
       if [ "$kind" = secondmate ]; then
         printf '%s' 'pi __MODELFLAG____EFFORTFLAG__-e __PITURNEND__ -e __PIWATCH__ "$(cat __BRIEF__)"'
+      elif pi_restricted_model "$model"; then
+        printf '%s' 'pi __MODELFLAG____EFFORTFLAG__--no-builtin-tools --tools public_fetch,write_report,append_status,complete_scout --no-context-files --no-skills --no-prompt-templates --no-extensions --no-session -e __PIEXT__ -e __PIRESTRICTED__ "$(cat __BRIEF__)"'
       else
         printf '%s' 'pi __MODELFLAG____EFFORTFLAG__-e __PIEXT__ "$(cat __BRIEF__)"'
       fi
@@ -380,11 +402,11 @@ case "$ARG3" in
       HARNESS=$("$FM_ROOT/bin/fm-harness.sh" crew)
       harness_src='config/crew-harness'
     fi
-    LAUNCH=$(launch_template "$HARNESS" "$KIND") || { echo "error: no launch template for harness '$HARNESS' (from $harness_src or detection); pass a raw launch command to use an unverified adapter" >&2; exit 1; }
+    LAUNCH=$(launch_template "$HARNESS" "$KIND" "$MODEL") || { echo "error: no launch template for harness '$HARNESS' (from $harness_src or detection); pass a raw launch command to use an unverified adapter" >&2; exit 1; }
     ;;
   *)
     HARNESS=$ARG3
-    LAUNCH=$(launch_template "$HARNESS" "$KIND") || { echo "error: unknown harness '$HARNESS'; pass a raw launch command to use an unverified adapter" >&2; exit 1; }
+    LAUNCH=$(launch_template "$HARNESS" "$KIND" "$MODEL") || { echo "error: unknown harness '$HARNESS'; pass a raw launch command to use an unverified adapter" >&2; exit 1; }
     ;;
 esac
 
@@ -1034,6 +1056,7 @@ sq_turnend=$(shell_quote "$TURNEND")
 sq_piext=$(shell_quote "$STATE/$ID.pi-ext.ts")
 sq_piturnend=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-turnend-guard.ts")
 sq_piwatch=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-pi-watch.ts")
+sq_pirestricted=$(shell_quote "$FM_ROOT/bin/fm-pi-restricted-tools.ts")
 MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
 EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT")
 LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
@@ -1043,6 +1066,7 @@ LAUNCH=${LAUNCH//__TURNEND__/$sq_turnend}
 LAUNCH=${LAUNCH//__PIEXT__/$sq_piext}
 LAUNCH=${LAUNCH//__PITURNEND__/$sq_piturnend}
 LAUNCH=${LAUNCH//__PIWATCH__/$sq_piwatch}
+LAUNCH=${LAUNCH//__PIRESTRICTED__/$sq_pirestricted}
 if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")
   LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_HOME=$sq_home $LAUNCH"
@@ -1052,6 +1076,18 @@ fi
 # the env is set when the agent starts; the brief sleep lets the export land.
 spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp"
 sleep 0.3
+# Restricted DeepSeek lane: give bin/fm-pi-restricted-tools.ts its trusted
+# output destinations through an env var rather than any model-controlled
+# input. Non-secret paths only (report path, status path, task id); never read
+# into this from the wider environment.
+if [ "$KIND" != secondmate ] && [ "$HARNESS" = pi ] && pi_restricted_model "$MODEL"; then
+  restricted_config=$(printf '{"reportPath":"%s","statusPath":"%s","taskId":"%s"}' \
+    "$(json_escape "$DATA/$ID/report.md")" \
+    "$(json_escape "$STATE/$ID.status")" \
+    "$(json_escape "$ID")")
+  spawn_send_text_line "$T" "export FM_RESTRICTED_TASK_CONFIG=$(shell_quote "$restricted_config")"
+  sleep 0.3
+fi
 spawn_send_literal "$T" "$LAUNCH"
 sleep 0.3
 spawn_send_key "$T" Enter

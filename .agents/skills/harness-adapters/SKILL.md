@@ -231,6 +231,27 @@ The model arms through `fm_watch_arm_pi`, never a foreground bash arm; the watch
 `bin/fm-session-start.sh` reports when the live Pi session has not loaded both the turn-end guard and watcher extensions, and points at plain `pi` after project trust as the fix, with `-e` as a trust-free fallback.
 When a secondmate is launched on Pi, `fm-spawn.sh --secondmate` launches Pi with both `-e .pi/extensions/fm-primary-turnend-guard.ts` and `-e .pi/extensions/fm-primary-pi-watch.ts`, both already present in the secondmate home's git worktree.
 
+### Restricted direct-DeepSeek analysis lane
+
+`bin/fm-spawn.sh`'s `pi_restricted_model()` lists Pi's direct DeepSeek models (`deepseek/deepseek-v4-pro`) that get a structurally locked-down launch instead of the ordinary crewmate template.
+Ordinary pi/Sol crewmates and secondmates are unaffected; this branch only fires for a ship/scout (never secondmate) spawn whose `--model` matches the allowlist.
+
+The restricted launch disables every ambient/private capability structurally, not just by convention:
+
+- `--no-builtin-tools --tools public_fetch,write_report,append_status,complete_scout` removes every built-in tool, then allowlists only the four custom tools `bin/fm-pi-restricted-tools.ts` registers.
+- `--no-context-files --no-skills --no-prompt-templates --no-extensions` disable AGENTS.md/CLAUDE.md, skill, prompt-template, and extension DISCOVERY. Two extensions still load explicitly via `-e`: the ordinary turn-end hook (`state/<id>.pi-ext.ts`) and the static tracked `bin/fm-pi-restricted-tools.ts`.
+- `--no-session` runs ephemeral, so no prior session context can leak in.
+
+`bin/fm-pi-restricted-tools.ts` is deliberately static and tracked, not generated per spawn: nothing model- or task-controlled is ever interpolated into its source, closing off a whole class of injection risk.
+Its only per-spawn input is the `FM_RESTRICTED_TASK_CONFIG` env var, a small JSON object of non-secret paths (report path, status path, task id) that `fm-spawn.sh` exports into the pane before launch, the same way it exports `GOTMPDIR`.
+The extension never reads any other environment variable and never shells out, so provider credentials in Pi's own auth store are never touched.
+
+Its four tools: `public_fetch` (HTTPS-only, DNS/IP-validated on every request and redirect hop, rejects private/loopback/link-local/metadata targets, bounded bytes/time/content-type, no ambient auth/cookies/proxy), `write_report` (overwrites only the fixed report path), `append_status` (appends one bounded, newline-free line to the fixed status path, allowed states only), and `complete_scout` (the decision-hold completion gate: a declared `unresolvedDecision: true` appends `needs-decision:` and returns `terminate: true`, ending the run immediately rather than letting the model self-resolve a captain-only decision).
+
+The model-facing brief for this lane should carry only the public research question, never private absolute paths or lifecycle mechanics - the extension alone owns where output and status land.
+
+Adding a second restricted model (for example a flash variant) needs an explicit documented task class that justifies it, not just availability; add it to `pi_restricted_model()`'s case list once justified.
+
 ## grok (VERIFIED 2026-06-29, grok 0.2.73; slash-submit re-verified 2026-07-03 on 0.2.82; reasoning-effort ceiling re-verified 2026-07-13 on 0.2.99; exit paths re-verified 2026-07-19 on grok 0.2.103)
 
 Grok Build TUI (`grok`), a Claude-Code-compatible CLI from xAI.
