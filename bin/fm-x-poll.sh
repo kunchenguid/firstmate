@@ -40,6 +40,7 @@ fmx_load_config
 [ -n "$FMX_TOKEN" ] || exit 0
 
 ERROR_FILE="$STATE/x-poll.error"
+CLAIM_ERROR_FILE="$STATE/x-poll.claim-error"
 
 emit_error_once() {
   local msg=$1
@@ -55,6 +56,22 @@ emit_error_once() {
 clear_error() {
   fmx_private_artifact_dir_device "$STATE" >/dev/null 2>&1 || return 0
   rm -f "$ERROR_FILE" 2>/dev/null || true
+}
+
+emit_claim_error_once() {
+  local msg=$1
+  if fmx_private_artifact_file_valid "$STATE" "x-poll.claim-error" 600 \
+    && [ "$(cat "$CLAIM_ERROR_FILE" 2>/dev/null)" = "$msg" ]; then
+    return 0
+  fi
+  printf '%s\n' "$msg" \
+    | fmx_private_artifact_publish_stdin "$STATE" "x-poll.claim-error" 600 2>/dev/null || true
+  printf 'x-mode-error %s\n' "$msg"
+}
+
+clear_claim_error() {
+  fmx_private_artifact_dir_device "$STATE" >/dev/null 2>&1 || return 0
+  rm -f "$CLAIM_ERROR_FILE" 2>/dev/null || true
 }
 
 command -v curl >/dev/null 2>&1 || { emit_error_once "missing curl"; exit 0; }
@@ -107,6 +124,7 @@ esac
 # recreating a drained inbox. The startup prune above bounds marker retention.
 if fmx_private_artifact_file_valid "$STATE/x-context" "$REQ.offered.json" 600; then
   clear_error
+  clear_claim_error
   exit 0
 fi
 
@@ -136,7 +154,7 @@ fi
 fmx_offer_registry_claim "$STATE" "$REQ"
 offer_rc=$?
 case "$offer_rc" in
-  0) clear_error; printf 'x-mention %s\n' "$REQ" ;;
-  1) clear_error; exit 0 ;;
-  *) emit_error_once "cannot record mention offer"; exit 0 ;;
+  0) clear_error; clear_claim_error; printf 'x-mention %s\n' "$REQ" ;;
+  1) clear_error; clear_claim_error; exit 0 ;;
+  *) emit_claim_error_once "cannot record mention offer"; exit 0 ;;
 esac

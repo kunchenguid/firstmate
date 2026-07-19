@@ -359,13 +359,25 @@ test_poll_offer_claim_failure_reports_once() {
   expect_code 0 "$rc" "first offer claim failure poll exit"
   [ "$out" = "x-mode-error cannot record mention offer" ] \
     || fail "an offer claim failure must emit one diagnostic (got: $out)"
-  assert_present "$home/state/x-poll.error" "offer claim failure must write a dedupe marker"
+  assert_present "$home/state/x-poll.claim-error" "offer claim failure must write a dedupe marker"
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_RELAY_URL="https://relay.test" \
     FMX_PAIRING_TOKEN=tok-claim-failure FAKE_POLL_CODE=200 FAKE_POLL_BODY="$body" \
     "$ROOT/bin/fm-x-poll.sh"); rc=$?
   expect_code 0 "$rc" "repeated offer claim failure poll exit"
   [ -z "$out" ] || fail "a repeated offer claim failure must stay silent (got: $out)"
-  assert_present "$home/state/x-poll.error" "a repeated offer claim failure must retain its dedupe marker"
+  assert_present "$home/state/x-poll.claim-error" "a repeated offer claim failure must retain its dedupe marker"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_RELAY_URL="https://relay.test" \
+    FMX_PAIRING_TOKEN=tok-claim-failure FAKE_POLL_CODE=204 \
+    "$ROOT/bin/fm-x-poll.sh"); rc=$?
+  expect_code 0 "$rc" "no-pending poll after offer claim failure exit"
+  [ -z "$out" ] || fail "a no-pending poll must stay silent after an offer claim failure (got: $out)"
+  assert_present "$home/state/x-poll.claim-error" \
+    "a no-pending poll must retain the offer claim dedupe marker"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_RELAY_URL="https://relay.test" \
+    FMX_PAIRING_TOKEN=tok-claim-failure FAKE_POLL_CODE=200 FAKE_POLL_BODY="$body" \
+    "$ROOT/bin/fm-x-poll.sh"); rc=$?
+  expect_code 0 "$rc" "re-offered claim failure poll exit"
+  [ -z "$out" ] || fail "a re-offered claim failure must stay silent (got: $out)"
   rm "$home/state/x-context"
   mkdir "$home/state/x-context"
   chmod 700 "$home/state/x-context"
@@ -375,7 +387,7 @@ test_poll_offer_claim_failure_reports_once() {
   expect_code 0 "$rc" "recovered offer claim poll exit"
   [ "$out" = "x-mention req-claim-failure" ] \
     || fail "a recovered offer claim must emit the mention wake (got: $out)"
-  assert_absent "$home/state/x-poll.error" "a successful offer claim must clear the diagnostic marker"
+  assert_absent "$home/state/x-poll.claim-error" "a successful offer claim must clear the diagnostic marker"
   pass "fm-x-poll retains offer claim diagnostics until recovery"
 }
 
