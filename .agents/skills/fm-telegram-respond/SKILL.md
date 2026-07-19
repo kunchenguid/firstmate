@@ -6,7 +6,7 @@ description: >-
   through bin/fm-telegram-respond.sh, apply validated approve/deny/merge actions,
   and reply via bin/fm-telegram-send.sh.
   Also use on a "telegram-mode-error ..." check wake to report the Telegram
-  configuration blocker (including getUpdates 409 conflict / possible second consumer).
+  polling blocker (including getUpdates 409 conflict / possible second consumer).
   Loaded only when Telegram mode is enabled.
 user-invocable: false
 metadata:
@@ -21,8 +21,8 @@ The full message is stashed under `state/telegram-inbox/`; this skill drains tha
 
 This runs only when Telegram mode is on (`FM_TELEGRAM_BOT_TOKEN` + `FM_TELEGRAM_CHAT_ID` in `.env`, kill switch not `off`; see `docs/telegram-mode.md`).
 If you ever see a `telegram-msg` wake without Telegram mode configured, do nothing.
-A `check:` wake can also carry `telegram-mode-error ...` instead - that is a poll or configuration problem, not a command to execute.
-Report it to the captain as a Telegram configuration blocker (for HTTP 409, recommend BotFather token rotation if a second consumer is unexpected).
+A `check:` wake can also carry `telegram-mode-error ...` instead - that is a polling problem, not a command to execute.
+Report it to the captain as a Telegram polling blocker (for HTTP 409, recommend BotFather token rotation if a second consumer is unexpected).
 
 ## Hard boundaries
 
@@ -54,9 +54,10 @@ Report it to the captain as a Telegram configuration blocker (for HTTP 409, reco
 
 ## Procedure on `telegram-mode-error`
 
-Report the diagnostic to the captain in plain language (missing curl/jq, bad token, getUpdates 409 conflict).
+Report the diagnostic to the captain in plain language (missing curl/jq, bad token, getUpdates 409 conflict, or local inbox/offset persistence failure).
 For 409 conflict, say another consumer may be polling this bot token and recommend BotFather revocation if that is unexpected.
-Do not attempt to answer inbox commands until the configuration is healthy again.
+For an offset-persistence failure, process any separately surfaced `telegram-msg` wake normally, but report that Telegram will re-fetch the unconfirmed update until durable offset storage is repaired.
+For dependency, authentication, or inbox-write failures, do not attempt to answer the affected command until the polling path is healthy again.
 
 ## Outbound notifications (Stage 1)
 

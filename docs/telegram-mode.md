@@ -27,7 +27,7 @@ Optional keys:
 | `FM_TELEGRAM_DRY_RUN` | off | Record outbound to `state/telegram-outbox/` without posting |
 | `FM_TELEGRAM_ALWAYS_NOTIFY` | off | Send routine outbound even when not AFK |
 | `FM_TELEGRAM_FRESHNESS_SECS` | `900` | Max age of approve/deny/merge commands |
-| `FM_TELEGRAM_RATE_MAX` | `10` | Max inbound commands processed per rate window |
+| `FM_TELEGRAM_RATE_MAX` | `10` | Max authenticated updates accepted per poll sweep and commands processed per rate window |
 | `FM_TELEGRAM_RATE_WINDOW_SECS` | `60` | Rate-limit window |
 | `FM_TELEGRAM_DEDUPE_WINDOW_SECS` | `120` | Identical-command dedupe window |
 
@@ -61,7 +61,7 @@ Runtime private artifacts (all gitignored, typically mode 0600/0700):
 | `state/telegram-inbox/<update_id>.json` | Stashed authenticated inbound messages |
 | `state/telegram-offset` | Persisted getUpdates offset (advances past drops and accepts; not past deferred over-cap authenticated updates) |
 | `state/telegram-audit.log` | Append-only inbound/outbound/respond audit |
-| `state/telegram-notified-prs.log` | Timestamp, chat id, and full PR URL for successful sends |
+| `state/telegram-notified-prs.log` | Timestamp, chat id, and full PR URL for successful live non-reply sends |
 | `state/telegram-notified-pr-recovery/` | Confirmed sends whose primary merge-authority record could not be written |
 | `state/telegram-actions/<update_id>.json` | Validated approve/deny/merge actions for firstmate |
 | `state/telegram-outbox/` | Dry-run outbound previews |
@@ -122,7 +122,8 @@ Stage 3 free-text prompting is not implemented.
 
 ### Replay, rate limit, audit
 
-- Offset advances past confirmed accepts and auth/empty drops.
+- Offset advances past confirmed accepts and auth/empty drops only after the new offset is durably persisted.
+- An offset-persistence failure emits a deduplicated `telegram-mode-error`, leaves the update unconfirmed for the next `getUpdates` sweep, and can therefore re-fetch an already-stashed command.
 - Over-cap authenticated updates are deferred (offset holds before them) for at-least-once delivery of allowlisted commands.
 - Commands beyond the inbound rate limit stay queued in the inbox (audited `deferred`, replied "rate limited" once per dedupe window), never dropped; every poll sweep re-emits `telegram-msg` wakes for pending inbox files, so queued commands drain once the window frees without requiring a new message.
 - Approve/deny/merge older than `FM_TELEGRAM_FRESHNESS_SECS` (default 15 minutes) are not executed; deferred approvals can still go stale and are re-surfaced for re-confirmation.
