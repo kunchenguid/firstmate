@@ -17,8 +17,11 @@
 #   then tmux.
 #   Spawn-capable backends are the reference tmux adapter and experimental
 #   herdr, zellij, orca, and cmux. Orca owns both the task worktree and
-#   terminal, so ship/scout Orca spawns do not run treehouse get; cmux is a
-#   session provider only, exactly like herdr/zellij, so it does. An
+#   terminal, so ship/scout Orca spawns do not lease a treehouse worktree;
+#   cmux is a session provider only, exactly like herdr/zellij, so it does.
+#   Every non-Orca ship/scout spawn acquires its worktree with
+#   `treehouse get --lease` from THIS process and then moves the task window
+#   into it; the lease is released by fm-teardown.sh's `treehouse return`. An
 #   auto-detected herdr or cmux spawn prints a loud stderr notice;
 #   auto-detected tmux stays silent; zellij and orca are never auto-detected.
 #   codex-app is not a known backend yet; docs/codex-app-backend.md owns that
@@ -84,7 +87,7 @@ set -eu
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 usage() {
-  sed -n '2,78p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,84p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 case "${1:-}" in
@@ -833,30 +836,65 @@ spawn_send_key() {  # <target> <key>
   esac
 }
 if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
-  spawn_send_text_line "$WT_TARGET" 'treehouse get'
+  # Acquire the worktree from THIS process, not by typing `treehouse get` into
+  # the task window and inferring success from the window's cwd.
+  #
+  # Why this changed (2026-07-19, task spawn-worktree-failure): bare
+  # `treehouse get` runs its worktree setup inside the new window, and that
+  # setup can reach the network. With an https `origin` and no credential
+  # path inside that window, git stops at an interactive
+  # `Username for 'https://github.com':` prompt and never returns, so the old
+  # 60s cwd poll always expired. The observed symptom was a timeout; the
+  # actual cause was a window blocked on a password prompt, with the worktree
+  # still half-acquired. Reproduced live: the abandoned window sat at that
+  # prompt with its cwd never leaving the project.
+  #
+  # `--lease` is treehouse's purpose-built scripted path: it prints only the
+  # worktree path on stdout, durably reserves it (prune-safe, never handed to
+  # a later get until returned), and needs no subshell and no terminal. Run
+  # here, it inherits firstmate's own working credential environment instead
+  # of the task window's. The lease is released by exactly the same
+  # `treehouse return --force` that bin/fm-teardown.sh already runs, so
+  # teardown needs no change and a leased slot cannot leak past teardown.
+  if ! WT=$( ( cd "$PROJ_ABS" && treehouse get --lease --lease-holder "$W" ) 2>/dev/null ); then
+    WT=
+  fi
+  WT=$(printf '%s\n' "$WT" | sed -n '1p' | tr -d '\r')
+  if [ -z "$WT" ] || [ ! -d "$WT" ]; then
+    echo "error: treehouse get --lease did not yield a worktree for $W (run it by hand in $PROJ_ABS to see why)" >&2
+    exit 1
+  fi
 
-  # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
+  # Validate BEFORE the window is moved: an unusable lease must never become a
+  # window sitting in the primary checkout running an agent.
+  validate_spawn_worktree "treehouse get --lease" "$T"
+
+  # Move the task window into the leased worktree. This is a plain `cd` with no
+  # network and no subshell, so unlike the old acquisition step it cannot block
+  # on a prompt.
+  spawn_send_text_line "$WT_TARGET" "cd $(printf '%q' "$WT")"
+
+  # Confirm the window actually landed there before launching the agent.
   # Target the stable window id, not the name: if the name is ever lost (e.g. an
   # automatic-rename slips through), display-message -t <bad-name> falls back to the
   # active client's window, which would misread firstmate's OWN pane path as the
   # worktree and tangle a hook into the primary checkout. The window id never lies.
-  # Compare against PROJ_ABS_REAL (physical), not PROJ_ABS: a symlinked project
-  # prefix would otherwise make the pane's OS-level cwd read differ from
-  # PROJ_ABS on the very first poll, before the pane has actually moved.
-  for _ in $(seq 1 60); do
+  # Compare physical paths: a symlinked prefix would otherwise make the window's
+  # OS-level cwd read differ from the leased path even once it has arrived.
+  WT_REAL=$(real_path_or_raw "$WT")
+  WINDOW_IN_WORKTREE=
+  for _ in $(seq 1 30); do
     p=$(spawn_current_path "$WT_TARGET" || true)
-    if [ -n "$p" ] && [ "$(real_path_or_raw "$p")" != "$PROJ_ABS_REAL" ]; then
-      WT="$p"
+    if [ -n "$p" ] && [ "$(real_path_or_raw "$p")" = "$WT_REAL" ]; then
+      WINDOW_IN_WORKTREE=1
       break
     fi
     sleep 1
   done
-  if [ -z "$WT" ]; then
-    echo "error: treehouse get did not enter a worktree within 60s; inspect window $T" >&2
+  if [ -z "$WINDOW_IN_WORKTREE" ]; then
+    echo "error: task window did not enter the leased worktree $WT within 30s; inspect window $T" >&2
     exit 1
   fi
-
-  validate_spawn_worktree "treehouse get" "$T"
 fi
 
 # Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. Go won't
