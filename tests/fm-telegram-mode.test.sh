@@ -61,7 +61,9 @@ case "$url" in
     printf '%s' "${FAKE_POLL_CODE:-200}"
     ;;
   */sendMessage*)
-    [ -n "$ofile" ] && printf '%s' "${FAKE_SEND_BODY:-{\"ok\":true}}" > "$ofile"
+    body=${FAKE_SEND_BODY-}
+    [ -n "$body" ] || body='{"ok":true}'
+    [ -n "$ofile" ] && printf '%s' "$body" > "$ofile"
     printf '%s' "${FAKE_SEND_CODE:-200}"
     ;;
   *)
@@ -459,6 +461,27 @@ test_poll_rewakes_pending_inbox_on_empty_result() {
   pass "poll re-wakes pending inbox files without new inbound traffic"
 }
 
+test_poll_rewakes_pending_inbox_on_failed_results() {
+  local home fakebin out
+  home="$TMP_ROOT/poll-rewake-failures"; mkdir -p "$home/state"
+  write_env "$home"
+  fakebin=$(make_fake_curl "$home")
+  seed_inbox "$home" 96 "status"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_TELEGRAM_API_URL="https://api.test" \
+    FAKE_POLL_CODE=500 FAKE_POLL_BODY='{"ok":false}' \
+    "$ROOT/bin/fm-telegram-poll.sh")
+  assert_contains "$out" "telegram-msg 96" "pending inbox must re-wake on HTTP failure"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_TELEGRAM_API_URL="https://api.test" \
+    FAKE_POLL_CODE=200 FAKE_POLL_BODY='' \
+    "$ROOT/bin/fm-telegram-poll.sh")
+  assert_contains "$out" "telegram-msg 96" "pending inbox must re-wake on empty body"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_TELEGRAM_API_URL="https://api.test" \
+    FAKE_POLL_CODE=200 FAKE_POLL_BODY='{"ok":false}' \
+    "$ROOT/bin/fm-telegram-poll.sh")
+  assert_contains "$out" "telegram-msg 96" "pending inbox must re-wake on API failure"
+  pass "poll re-wakes pending inbox files across failed fetches"
+}
+
 test_poll_409_resurfaces_after_healthy_poll() {
   local home fakebin out1 out2 out3
   home="$TMP_ROOT/poll-409-recover"; mkdir -p "$home"
@@ -493,9 +516,39 @@ test_send_dry_run_no_network() {
   assert_contains "$out" "DRY RUN" "must print dry-run marker"
   n=$(find "$home/state/telegram-outbox" -name '*.json' 2>/dev/null | wc -l | tr -d ' ')
   [ "$n" -ge 1 ] || fail "dry-run must write outbox"
-  assert_grep "https://github.com/acme/app/pull/42" "$home/state/telegram-notified-prs.log" \
-    "dry-run must still record notified PR URLs"
-  pass "send dry-run records outbox and PR registry without network"
+  assert_absent "$home/state/telegram-notified-prs.log" "dry-run must not grant merge authority"
+  pass "send dry-run records outbox without granting merge authority"
+}
+
+test_send_pr_authority_is_bound_to_delivered_chat() {
+  local home fakebin pr now
+  home="$TMP_ROOT/send-pr-chat"; mkdir -p "$home/state"
+  write_env "$home"
+  fakebin=$(make_fake_curl "$home")
+  pr='https://github.com/acme/app/pull/42'
+  printf 'PR ready %s\n' "$pr" > "$home/msg.txt"
+  PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_TELEGRAM_API_URL="https://api.test" \
+    FAKE_SEND_CODE=200 FAKE_SEND_BODY='{"ok":true}' \
+    "$ROOT/bin/fm-telegram-send.sh" --text-file "$home/msg.txt" --force >/dev/null 2>&1
+  assert_grep $'\t111\thttps://github.com/acme/app/pull/42' "$home/state/telegram-notified-prs.log" \
+    "successful send must record its chat id"
+  printf 'FM_TELEGRAM_BOT_TOKEN=test-bot-token\nFM_TELEGRAM_CHAT_ID=333\nFM_TELEGRAM_ALLOW_FROM=222\n' > "$home/.env"
+  chmod 600 "$home/.env"
+  # shellcheck source=bin/fm-telegram-lib.sh
+  . "$ROOT/bin/fm-telegram-lib.sh"
+  FM_HOME="$home" fmt_load_config
+  if FM_HOME="$home" fmt_notified_pr_seen "$pr"; then
+    fail "PR authority from a different chat must not transfer"
+  fi
+  now=$(now_epoch)
+  printf '%s\t%s\n' "$now" "$pr" > "$home/state/telegram-notified-prs.log"
+  printf 'FM_TELEGRAM_BOT_TOKEN=test-bot-token\nFM_TELEGRAM_CHAT_ID=111\nFM_TELEGRAM_ALLOW_FROM=222\n' > "$home/.env"
+  chmod 600 "$home/.env" "$home/state/telegram-notified-prs.log"
+  FM_HOME="$home" fmt_load_config
+  if FM_HOME="$home" fmt_notified_pr_seen "$pr"; then
+    fail "legacy PR authority without a chat id must not be accepted"
+  fi
+  pass "send binds merge authority to the delivered chat"
 }
 
 test_send_refuses_secretish() {
@@ -581,18 +634,50 @@ seed_inbox() {
   chmod 600 "$home/state/telegram-inbox/$uid.json"
 }
 
+make_fake_gh_axi() {
+  local dir=$1 fakebin
+  fakebin=$(fm_fakebin "$dir")
+  cat > "$fakebin/gh-axi" <<'SH'
+#!/usr/bin/env bash
+case "$1 $2" in
+  'pr view')
+    [ "$3" = 99 ] && [ "$4" = -R ] && [ "$5" = acme/app ] || exit 64
+    printf 'pull_request:\n  number: 99\n  state: open\n  draft: no\n  merged: no\n'
+    ;;
+  'pr checks')
+    [ "$3" = 99 ] && [ "$4" = -R ] && [ "$5" = acme/app ] || exit 64
+    if [ "${FAKE_GH_AXI_CHECKLESS:-}" = 1 ]; then
+      printf 'checks: "0 passed, 0 failed - this PR has no CI checks configured"\n'
+    else
+      printf 'summary: "2 passed, 0 failed, 2 total"\nchecks[2]{name,conclusion}:\n  lint,pass\n  tests,pass\n'
+    fi
+    ;;
+  *) exit 64 ;;
+esac
+SH
+  chmod +x "$fakebin/gh-axi"
+  printf '%s\n' "$fakebin"
+}
+
 test_respond_status() {
-  local home fakebin out
+  local home fakebin out text
   home="$TMP_ROOT/resp-status"; mkdir -p "$home/state" "$home/data"
   write_env "$home" "FM_TELEGRAM_DRY_RUN=1"
   seed_inbox "$home" 40 "status"
   printf '## In flight\n- something\n' > "$home/data/backlog.md"
+  printf 'window=fm-internal-id\n' > "$home/state/internal-id.meta"
+  printf 'needs-decision: raw internal status\n' > "$home/state/internal-id.status"
   fakebin=$(make_fake_curl "$home")
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_TELEGRAM_API_URL="https://api.test" \
     "$ROOT/bin/fm-telegram-respond.sh" 2>/dev/null)
   assert_contains "$out" "ok 40 status" "status must succeed"
   assert_absent "$home/state/telegram-inbox/40.json" "inbox must clear"
-  pass "respond status replies and clears inbox"
+  text=$(jq -r '.text' "$home/state/telegram-outbox"/*.json)
+  assert_contains "$text" "Work under way: 1 item." "status must summarize work as an outcome"
+  assert_contains "$text" "Decisions awaiting your input: 1." "status must summarize open decisions"
+  assert_not_contains "$text" "internal-id" "status must not expose internal ids"
+  assert_not_contains "$text" "needs-decision:" "status must not relay status lines"
+  pass "respond status translates local records into outcome wording"
 }
 
 test_respond_closed_scope_refuses_free_text() {
@@ -712,6 +797,41 @@ SH
   pass "respond merge requires notified URL and green status"
 }
 
+test_respond_merge_uses_supported_gh_axi_interface() {
+  local home out fakebin pr
+  home="$TMP_ROOT/resp-merge-gh-axi"; mkdir -p "$home/state"
+  chmod 700 "$home/state"
+  write_env "$home" "FM_TELEGRAM_DRY_RUN=1"
+  pr='https://github.com/acme/app/pull/99'
+  # shellcheck source=bin/fm-telegram-lib.sh
+  . "$ROOT/bin/fm-telegram-lib.sh"
+  FM_HOME="$home" fmt_load_config
+  FM_HOME="$home" fmt_notified_pr_record "$pr" || fail "could not record notified PR"
+  seed_inbox "$home" 54 "merge $pr"
+  fakebin=$(make_fake_gh_axi "$home")
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" "$ROOT/bin/fm-telegram-respond.sh" 2>/dev/null)
+  assert_contains "$out" "ok 54 merge $pr" "supported gh-axi result must authorize green PR"
+  pass "respond verifies green PRs through supported gh-axi commands"
+}
+
+test_respond_merge_refuses_checkless_pr() {
+  local home out fakebin pr
+  home="$TMP_ROOT/resp-merge-checkless"; mkdir -p "$home/state"
+  chmod 700 "$home/state"
+  write_env "$home" "FM_TELEGRAM_DRY_RUN=1"
+  pr='https://github.com/acme/app/pull/99'
+  # shellcheck source=bin/fm-telegram-lib.sh
+  . "$ROOT/bin/fm-telegram-lib.sh"
+  FM_HOME="$home" fmt_load_config
+  FM_HOME="$home" fmt_notified_pr_record "$pr" || fail "could not record notified PR"
+  seed_inbox "$home" 55 "merge $pr"
+  fakebin=$(make_fake_gh_axi "$home")
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FAKE_GH_AXI_CHECKLESS=1 \
+    "$ROOT/bin/fm-telegram-respond.sh" 2>/dev/null)
+  assert_contains "$out" "refused 55 not-green" "checkless PR must not authorize merge"
+  pass "respond refuses PRs without CI checks"
+}
+
 test_respond_merge_unnamed_refused() {
   local home out
   home="$TMP_ROOT/resp-merge-unnamed"; mkdir -p "$home/state"
@@ -777,6 +897,18 @@ test_respond_rate_limit_deferred_drains_later() {
   pass "respond drains rate-deferred commands on a later sweep"
 }
 
+test_respond_rate_log_write_failure_defers() {
+  local home out
+  home="$TMP_ROOT/resp-rate-write-fail"; mkdir -p "$home/state"
+  write_env "$home" "FM_TELEGRAM_DRY_RUN=1"
+  seed_inbox "$home" 75 "status"
+  mkdir "$home/state/telegram-rate-inbound.log"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-telegram-respond.sh" 2>/dev/null)
+  assert_contains "$out" "deferred 75 rate-limited" "failed rate publication must defer"
+  assert_present "$home/state/telegram-inbox/75.json" "command must remain queued"
+  pass "respond defers when rate admission cannot be recorded"
+}
+
 test_audit_covers_inbound_and_outbound() {
   local home fakebin body
   home="$TMP_ROOT/audit"; mkdir -p "$home/state"
@@ -840,7 +972,9 @@ test_poll_deferred_approve_still_subject_to_freshness
 test_poll_auth_rejects_cannot_pin_offset
 test_poll_offset_write_failure_surfaces_error
 test_poll_rewakes_pending_inbox_on_empty_result
+test_poll_rewakes_pending_inbox_on_failed_results
 test_send_dry_run_no_network
+test_send_pr_authority_is_bound_to_delivered_chat
 test_send_refuses_secretish
 test_send_skips_when_not_afk
 test_send_reply_bypasses_afk_gate
@@ -853,10 +987,13 @@ test_respond_action_write_failure_reports_error
 test_respond_approve_unknown_key_refused
 test_respond_desk_only_decision_refused
 test_respond_merge_requires_notified_and_green
+test_respond_merge_uses_supported_gh_axi_interface
+test_respond_merge_refuses_checkless_pr
 test_respond_merge_unnamed_refused
 test_respond_dedupe
 test_respond_rate_limit
 test_respond_rate_limit_deferred_drains_later
+test_respond_rate_log_write_failure_defers
 test_audit_covers_inbound_and_outbound
 test_lib_parse_command_closed_grammar
 

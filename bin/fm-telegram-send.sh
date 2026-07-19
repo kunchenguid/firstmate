@@ -146,13 +146,6 @@ if [ -n "${FMT_DRY:-}" ]; then
     || { echo "error: jq required for dry-run" >&2; exit 1; }
   printf '%s\n' "$payload" | fmx_private_artifact_publish_stdin "$STATE/telegram-outbox" "$base.json" 600 \
     || { echo "error: cannot write dry-run outbox" >&2; exit 1; }
-  # Still record PR URLs for authority tests under dry-run.
-  while IFS= read -r pr; do
-    [ -n "$pr" ] || continue
-    fmt_notified_pr_record "$pr" || true
-  done <<EOF
-$(fmt_extract_pr_urls "$TEXT")
-EOF
   first=$(printf '%s\n' "$TEXT" | head -n1)
   fmt_audit_append outbound dry-run "$first"
   printf 'DRY RUN telegram send recorded: %s\n' "$STATE/telegram-outbox/$base.json" >&2

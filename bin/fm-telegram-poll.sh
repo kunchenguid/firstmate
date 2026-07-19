@@ -40,6 +40,8 @@ fmt_mode_enabled || exit 0
 
 ERROR_FILE="$STATE/telegram-poll.error"
 SWEEP_ERROR=
+wakes=
+INBOX="$STATE/telegram-inbox"
 
 emit_error_once() {
   local msg=$1
@@ -59,10 +61,41 @@ clear_error() {
   rm -f "$ERROR_FILE" 2>/dev/null || true
 }
 
-command -v curl >/dev/null 2>&1 || { emit_error_once "missing curl"; exit 0; }
-command -v jq   >/dev/null 2>&1 || { emit_error_once "missing jq"; exit 0; }
+queue_pending_wakes() {
+  local f base uid
+  for f in "$INBOX"/*.json; do
+    [ -f "$f" ] || continue
+    base=${f##*/}
+    uid=${base%.json}
+    case "$uid" in
+      ''|.*|*[!A-Za-z0-9._-]*) continue ;;
+    esac
+    fmx_private_artifact_file_valid "$INBOX" "$base" 600 || continue
+    queue_wake "$uid"
+  done
+}
 
-BODY_FILE=$(mktemp "${TMPDIR:-/tmp}/fm-telegram-poll.XXXXXX") || exit 0
+queue_wake() {
+  local uid=$1
+  case "$wakes" in
+    *"telegram-msg ${uid}"$'\n'*) return 0 ;;
+  esac
+  wakes="${wakes}telegram-msg ${uid}"$'\n'
+}
+
+finish() {
+  if [ -n "$wakes" ]; then
+    printf '%s' "$wakes"
+  fi
+  exit 0
+}
+
+queue_pending_wakes
+
+command -v curl >/dev/null 2>&1 || { emit_error_once "missing curl"; finish; }
+command -v jq   >/dev/null 2>&1 || { emit_error_once "missing jq"; finish; }
+
+BODY_FILE=$(mktemp "${TMPDIR:-/tmp}/fm-telegram-poll.XXXXXX") || finish
 trap 'rm -f "$BODY_FILE"' EXIT
 
 offset=$(fmt_offset_get)
@@ -71,35 +104,35 @@ url="$FMT_API/bot${FMT_TOKEN}/getUpdates?timeout=0&allowed_updates=%5B%22message
 if [ -n "$offset" ]; then
   url="${url}&offset=${offset}"
 fi
-URL_FILE=$(fmt_curl_url_config "$url") || exit 0
+URL_FILE=$(fmt_curl_url_config "$url") || finish
 trap 'rm -f "$BODY_FILE" "$URL_FILE"' EXIT
 
 code=$(curl -m 8 -s -o "$BODY_FILE" -w '%{http_code}' \
   -H 'Accept: application/json' \
-  --config "$URL_FILE" 2>/dev/null) || exit 0
+  --config "$URL_FILE" 2>/dev/null) || finish
 
 case "$code" in
   200) ;;
   409)
     emit_error_once "getUpdates HTTP 409 conflict - another consumer may hold this bot token; revoke at BotFather if unexpected"
-    exit 0
+    finish
     ;;
   401|403)
     emit_error_once "getUpdates HTTP $code - check bot token"
-    exit 0
+    finish
     ;;
   *)
     # Transient errors stay silent (next sweep retries).
-    exit 0
+    finish
     ;;
 esac
 
-[ -s "$BODY_FILE" ] || { clear_error; exit 0; }
+[ -s "$BODY_FILE" ] || { clear_error; finish; }
 
 ok=$(jq -r '.ok // false' "$BODY_FILE" 2>/dev/null) || ok=false
 if [ "$ok" != true ] && [ "$ok" != "true" ]; then
   # API-level failure with 200 is rare; treat as soft error.
-  exit 0
+  finish
 fi
 
 # Process updates in ascending update_id order.
@@ -110,7 +143,6 @@ fi
 last_confirmed=
 processed=0
 deferred=
-wakes=
 
 confirm_uid() {
   local uid=$1
@@ -216,7 +248,7 @@ while IFS= read -r update_json; do
   confirm_uid "$uid"
   first=$(printf '%s\n' "$text" | head -c 80)
   fmt_audit_append inbound accepted "update_id=$uid from=$from_id text=$first"
-  wakes="${wakes}telegram-msg ${uid}"$'\n'
+  queue_wake "$uid"
 done < <(jq -c '.result // [] | .[]' "$BODY_FILE" 2>/dev/null)
 
 # Confirm only through last_confirmed. Deferred authenticated updates keep the
@@ -226,29 +258,9 @@ if [ -n "$last_confirmed" ]; then
   fmt_offset_set "$next" || emit_error_once "cannot persist offset"
 fi
 
-# Inbox files still pending from earlier sweeps (rate-deferred or retry-queued
-# by respond) get their wake re-emitted; no re-fetch or re-stash, just a wake.
-INBOX="$STATE/telegram-inbox"
-for f in "$INBOX"/*.json; do
-  [ -f "$f" ] || continue
-  base=${f##*/}
-  uid=${base%.json}
-  case "$uid" in
-    ''|.*|*[!A-Za-z0-9._-]*) continue ;;
-  esac
-  fmx_private_artifact_file_valid "$INBOX" "$base" 600 || continue
-  case "$wakes" in
-    *"telegram-msg ${uid}"$'\n'*) continue ;;
-  esac
-  wakes="${wakes}telegram-msg ${uid}"$'\n'
-done
-
 # Any healthy 200 sweep without a new error clears the stale marker so the
 # next distinct incident (e.g. a fresh 409 conflict) surfaces again.
 if [ -z "$SWEEP_ERROR" ]; then
   clear_error
 fi
-if [ -n "$wakes" ]; then
-  printf '%s' "$wakes"
-fi
-exit 0
+finish

@@ -262,14 +262,15 @@ fmt_chat_allowed() {
 # Returns 0 when allowed (and records the event), 1 when over limit.
 fmt_rate_allow() {
   local bucket=$1
-  local state now file line kept count cutoff
+  local state now file base line kept count cutoff rate_data
   state=${FM_STATE_OVERRIDE:-$FM_HOME/state}
   case "$bucket" in
     ''|.*|*/*|*[!A-Za-z0-9._-]*) return 1 ;;
   esac
   now=$(date +%s 2>/dev/null) || now=0
   cutoff=$((now - ${FMT_RATE_WINDOW:-60}))
-  file="$state/telegram-rate-$bucket.log"
+  base="telegram-rate-$bucket.log"
+  file="$state/$base"
   if [ -e "$state" ] || [ -L "$state" ]; then
     [ -d "$state" ] && [ ! -L "$state" ] || return 1
   else
@@ -281,25 +282,28 @@ fmt_rate_allow() {
   fi
   kept=
   count=0
-  if [ -f "$file" ]; then
+  if [ -e "$file" ] || [ -L "$file" ]; then
+    fmx_private_artifact_file_valid "$state" "$base" 600 || return 1
+    rate_data=$(cat -- "$file" 2>/dev/null) || return 1
     while IFS= read -r line || [ -n "$line" ]; do
       case "$line" in
-        ''|*[!0-9]*) continue ;;
+        '') continue ;;
+        *[!0-9]*) return 1 ;;
       esac
       if [ "$line" -ge "$cutoff" ] 2>/dev/null; then
         kept="${kept}${line}"$'\n'
         count=$((count + 1))
       fi
-    done < "$file"
+    done <<EOF
+$rate_data
+EOF
   fi
   if [ "$count" -ge "${FMT_RATE_MAX:-10}" ]; then
-    printf '%s' "$kept" > "$file" 2>/dev/null || true
-    chmod 600 "$file" 2>/dev/null || true
+    printf '%s' "$kept" | fmx_private_artifact_publish_stdin "$state" "$base" 600 >/dev/null 2>&1 || true
     return 1
   fi
   kept="${kept}${now}"$'\n'
-  printf '%s' "$kept" > "$file" 2>/dev/null || true
-  chmod 600 "$file" 2>/dev/null || true
+  printf '%s' "$kept" | fmx_private_artifact_publish_stdin "$state" "$base" 600 >/dev/null 2>&1 || return 1
   return 0
 }
 
@@ -411,40 +415,46 @@ fmt_parse_command() {
     merge)
       url=$rest
       [ -n "$url" ] || { printf 'refuse\tmissing-pr\n'; return 1; }
-      # Accept full GitHub PR URLs only (named green PR = full URL previously sent).
-      case "$url" in
-        https://github.com/*/*/pull/[0-9]*)
-          # Keep only the URL path; drop trailing punctuation (not internal dots).
-          url=${url%%[[:space:]]*}
-          while [ -n "$url" ]; do
-            last=$(printf '%s' "$url" | tail -c 1)
-            case "$last" in
-              ')'|'>'|'.'|','|';') url=${url%?} ;;
-              *) break ;;
-            esac
-          done
-          case "$url" in
-            https://github.com/*/*/pull/[0-9]*)
-              printf 'merge\t%s\n' "$url"
-              return 0
-              ;;
-            *)
-              printf 'refuse\tunnamed-or-invalid-pr\n'
-              return 1
-              ;;
-          esac
-          ;;
-        *)
-          printf 'refuse\tunnamed-or-invalid-pr\n'
-          return 1
-          ;;
-      esac
+      url=${url%%[[:space:]]*}
+      while [ -n "$url" ]; do
+        last=$(printf '%s' "$url" | tail -c 1)
+        case "$last" in
+          ')'|'>'|'.'|','|';') url=${url%?} ;;
+          *) break ;;
+        esac
+      done
+      if fmt_github_pr_parts "$url" >/dev/null; then
+        printf 'merge\t%s\n' "$url"
+        return 0
+      fi
+      printf 'refuse\tunnamed-or-invalid-pr\n'
+      return 1
       ;;
     *)
       printf 'refuse\tunknown-command\n'
       return 1
       ;;
   esac
+}
+
+fmt_github_pr_parts() {
+  local url=$1 rest owner repo marker number
+  case "$url" in
+    https://github.com/*/*/pull/*) ;;
+    *) return 1 ;;
+  esac
+  rest=${url#https://github.com/}
+  owner=${rest%%/*}
+  rest=${rest#*/}
+  repo=${rest%%/*}
+  rest=${rest#*/}
+  marker=${rest%%/*}
+  number=${rest#*/}
+  [ -n "$owner" ] && [ -n "$repo" ] && [ "$marker" = pull ] || return 1
+  case "$number" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  printf '%s\t%s\t%s\n' "$owner" "$repo" "$number"
 }
 
 # Approvals older than FMT_FRESHNESS seconds are not executed.
@@ -464,10 +474,8 @@ fmt_notified_pr_record() {
   local url=$1
   local state file
   state=${FM_STATE_OVERRIDE:-$FM_HOME/state}
-  case "$url" in
-    https://github.com/*/*/pull/[0-9]*) ;;
-    *) return 1 ;;
-  esac
+  fmt_github_pr_parts "$url" >/dev/null || return 1
+  [ -n "${FMT_CHAT_ID:-}" ] || return 1
   file="$state/telegram-notified-prs.log"
   if [ -e "$state" ] || [ -L "$state" ]; then
     [ -d "$state" ] && [ ! -L "$state" ] || return 1
@@ -478,19 +486,19 @@ fmt_notified_pr_record() {
   if [ -L "$file" ]; then
     return 1
   fi
-  (umask 077; printf '%s\t%s\n' "$(date +%s 2>/dev/null || echo 0)" "$url" >> "$file") 2>/dev/null || return 1
+  (umask 077; printf '%s\t%s\t%s\n' "$(date +%s 2>/dev/null || echo 0)" "$FMT_CHAT_ID" "$url" >> "$file") 2>/dev/null || return 1
   chmod 600 "$file" 2>/dev/null || true
   return 0
 }
 
 fmt_notified_pr_seen() {
   local url=$1
-  local state file line ts recorded
+  local state file ts chat recorded
   state=${FM_STATE_OVERRIDE:-$FM_HOME/state}
   file="$state/telegram-notified-prs.log"
   [ -f "$file" ] && [ ! -L "$file" ] || return 1
-  while IFS=$'\t' read -r ts recorded || [ -n "$ts" ]; do
-    [ "$recorded" = "$url" ] && return 0
+  while IFS=$'\t' read -r ts chat recorded || [ -n "$ts" ]; do
+    [ "$chat" = "${FMT_CHAT_ID:-}" ] && [ "$recorded" = "$url" ] && return 0
   done < "$file"
   return 1
 }
@@ -528,43 +536,51 @@ fmt_extract_pr_urls() {
 
 # Build a short status summary from local fleet records (no network).
 fmt_status_summary() {
-  local state data backlog n meta id line
+  local state data backlog n meta f open key verb note decisions blockers
   state=${FM_STATE_OVERRIDE:-$FM_HOME/state}
   data=${FM_DATA_OVERRIDE:-$FM_HOME/data}
   backlog="$data/backlog.md"
-  printf 'Fleet status\n'
+  printf 'Current overview\n'
   if [ -e "$state/.afk" ]; then
-    printf 'Away mode: active\n'
+    printf 'You are marked as away.\n'
   else
-    printf 'Away mode: inactive\n'
+    printf 'You are marked as present.\n'
   fi
   n=0
   for meta in "$state"/*.meta; do
     [ -f "$meta" ] || continue
     n=$((n + 1))
-    id=$(basename "$meta" .meta)
-    line=
-    if [ -f "$state/$id.status" ]; then
-      line=$(tail -n1 "$state/$id.status" 2>/dev/null || true)
-    fi
-    if [ -n "$line" ]; then
-      printf '- %s: %s\n' "$id" "$line"
-    else
-      printf '- %s: (no status yet)\n' "$id"
-    fi
   done
   if [ "$n" -eq 0 ]; then
     printf 'No work under way.\n'
-  fi
-  if [ -f "$backlog" ]; then
-    # One line: whether backlog has an In flight section with content.
-    if grep -q '^## In flight' "$backlog" 2>/dev/null; then
-      printf 'Backlog: present (see local backlog for detail).\n'
-    else
-      printf 'Backlog: present.\n'
-    fi
+  elif [ "$n" -eq 1 ]; then
+    printf 'Work under way: 1 item.\n'
   else
-    printf 'Backlog: absent.\n'
+    printf 'Work under way: %s items.\n' "$n"
+  fi
+  decisions=0
+  blockers=0
+  # shellcheck source=bin/fm-classify-lib.sh disable=SC1091
+  . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-classify-lib.sh"
+  for f in "$state"/*.status; do
+    [ -f "$f" ] || continue
+    open=$(status_open_decisions "$f")
+    [ -n "$open" ] || continue
+    while IFS=$'\t' read -r key verb note || [ -n "$key" ]; do
+      case "$verb" in
+        needs-decision) decisions=$((decisions + 1)) ;;
+        blocked) blockers=$((blockers + 1)) ;;
+      esac
+    done <<EOF
+$open
+EOF
+  done
+  [ "$decisions" -eq 0 ] || printf 'Decisions awaiting your input: %s.\n' "$decisions"
+  [ "$blockers" -eq 0 ] || printf 'Reported blockers awaiting attention: %s.\n' "$blockers"
+  if [ -f "$backlog" ]; then
+    printf 'More planned work is available locally.\n'
+  else
+    printf 'No additional planned work is recorded.\n'
   fi
 }
 
