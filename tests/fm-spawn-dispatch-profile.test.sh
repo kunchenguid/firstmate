@@ -107,6 +107,50 @@ assert_meta_profile() {
   assert_grep "effort=$effort" "$meta" "meta missing effort=$effort"
 }
 
+test_spawn_serializes_metadata_replacement() {
+  local rec id meta ready release holder_pid spawn_pid i waiting before status
+  id=profile-meta-lock-z17
+  rec=$(make_spawn_case profile-meta-lock claude "$id")
+  read_case_record "$rec"
+  meta="$HOME_DIR/state/$id.meta"
+  ready="$CASE_DIR/lock-ready"
+  release="$CASE_DIR/lock-release"
+  printf 'sentinel=old-generation\n' > "$meta"
+  FM_STATE_OVERRIDE="$HOME_DIR/state" bash -c '
+    . "$1"
+    fm_meta_lock_acquire "$2" || exit 1
+    touch "$3"
+    while [ ! -e "$4" ]; do sleep 0.01; done
+    fm_meta_lock_release "$2"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$meta" "$ready" "$release" &
+  holder_pid=$!
+  i=0
+  while [ ! -e "$ready" ] && [ "$i" -lt 200 ]; do sleep 0.01; i=$((i + 1)); done
+  if [ ! -e "$ready" ]; then
+    kill "$holder_pid" 2>/dev/null || true
+    wait "$holder_pid" 2>/dev/null || true
+    fail "metadata lock holder did not start"
+  fi
+  run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    > "$CASE_DIR/spawn.out" 2>&1 &
+  spawn_pid=$!
+  sleep 0.2
+  waiting=0
+  kill -0 "$spawn_pid" 2>/dev/null && waiting=1
+  before=$(cat "$meta")
+  touch "$release"
+  wait "$holder_pid" || fail "metadata lock holder failed"
+  status=0
+  wait "$spawn_pid" || status=$?
+  expect_code 0 "$status" "spawn failed after metadata lock release"
+  [ "$waiting" -eq 1 ] || fail "spawn did not wait for the metadata lock"
+  [ "$before" = 'sentinel=old-generation' ] \
+    || fail "spawn replaced metadata while another writer held the lock"
+  assert_no_grep '^sentinel=' "$meta" "spawn retained superseded metadata"
+  assert_meta_profile "$meta" claude default default
+  pass "spawn serializes task metadata replacement"
+}
+
 test_no_profile_keeps_claude_launch_unchanged() {
   local rec id out status expected launch
   id=profile-off-z1
@@ -387,6 +431,7 @@ test_active_dispatch_profile_does_not_block_secondmate_launch() {
 }
 
 test_no_profile_keeps_claude_launch_unchanged
+test_spawn_serializes_metadata_replacement
 test_active_dispatch_profile_requires_explicit_harness_for_ship
 test_active_dispatch_profile_requires_explicit_harness_for_scout
 test_active_dispatch_profile_allows_explicit_harness
