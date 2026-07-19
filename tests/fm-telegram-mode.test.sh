@@ -576,6 +576,30 @@ test_send_authority_failure_surfaces_with_recovery() {
   pass "send surfaces primary authority failure and preserves recovery evidence"
 }
 
+test_send_confirmed_delivery_storage_failure_is_nonretryable() {
+  local home fakebin pr out rc
+  home="$TMP_ROOT/send-pr-storage-failure"; mkdir -p "$home/state"
+  write_env "$home"
+  fakebin=$(make_fake_curl "$home")
+  pr='https://github.com/acme/app/pull/44'
+  mkdir "$home/state/telegram-notified-prs.log"
+  printf 'blocks recovery directory\n' > "$home/state/telegram-notified-pr-recovery"
+  chmod 600 "$home/state/telegram-notified-pr-recovery"
+  printf 'PR ready %s\n' "$pr" > "$home/msg.txt"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_TELEGRAM_API_URL="https://api.test" \
+    FAKE_SEND_CODE=200 FAKE_SEND_BODY='{"ok":true}' \
+    "$ROOT/bin/fm-telegram-send.sh" --text-file "$home/msg.txt" --force 2>&1)
+  rc=$?
+  expect_code 4 "$rc" "confirmed delivery storage failure exit"
+  assert_contains "$out" "merge authority could not be recorded" \
+    "authority storage failure must surface after delivery"
+  assert_grep $'outbound\tsent' "$home/state/telegram-audit.log" \
+    "confirmed delivery must retain its sent audit"
+  assert_grep "authority-record-failed" "$home/state/telegram-audit.log" \
+    "unrecoverable authority persistence must be audited"
+  pass "confirmed delivery storage failure is non-retryable"
+}
+
 test_send_refuses_secretish() {
   local home rc
   home="$TMP_ROOT/send-secret"; mkdir -p "$home/state"
@@ -664,6 +688,7 @@ make_fake_gh_axi() {
   fakebin=$(fm_fakebin "$dir")
   cat > "$fakebin/gh-axi" <<'SH'
 #!/usr/bin/env bash
+mode=${FAKE_GH_AXI_MODE:-GREEN}
 case "$1 $2" in
   'pr view')
     [ "$3" = 99 ] && [ "$4" = -R ] && [ "$5" = acme/app ] || exit 64
@@ -671,12 +696,29 @@ case "$1 $2" in
     ;;
   'pr checks')
     [ "$3" = 99 ] && [ "$4" = -R ] && [ "$5" = acme/app ] || exit 64
-    if [ "${FAKE_GH_AXI_CHECKLESS:-}" = 1 ]; then
-      printf 'checks: "0 passed, 0 failed - this PR has no CI checks configured"\n'
-    elif [ "${FAKE_GH_AXI_SKIPPED:-}" = 1 ]; then
-      printf 'summary: "0 passed, 0 failed, 1 skipped, 1 total"\nchecks[1]{name,conclusion}:\n  cancelled-ci,skip\n'
+    case "$mode" in
+      CHECKLESS) printf 'checks: "0 passed, 0 failed - this PR has no CI checks configured"\n' ;;
+      CANCELLED) printf 'summary: "0 passed, 0 failed, 1 skipped, 1 total"\n' ;;
+      EXPECTED) printf 'summary: "0 passed, 0 failed, 1 skipped, 1 total"\n' ;;
+      PENDING) printf 'summary: "0 passed, 0 failed, 1 pending, 1 total"\n' ;;
+      FAILURE) printf 'summary: "0 passed, 1 failed, 1 total"\n' ;;
+      *) printf 'summary: "3 passed, 0 failed, 1 skipped, 4 total"\n' ;;
+    esac
+    ;;
+  'api /repos/acme/app/commits/refs%2Fpull%2F99%2Fhead/check-runs?filter=latest&per_page=100')
+    case "$mode" in
+      CHECKLESS|EXPECTED) printf 'total_count: 0\ncheck_runs: []\n' ;;
+      CANCELLED) printf 'total_count: 1\ncheck_runs[1]:\n  - id: 1\n    status: completed\n    conclusion: cancelled\n' ;;
+      PENDING) printf 'total_count: 1\ncheck_runs[1]:\n  - id: 1\n    status: in_progress\n    conclusion: null\n' ;;
+      FAILURE) printf 'total_count: 1\ncheck_runs[1]:\n  - id: 1\n    status: completed\n    conclusion: failure\n' ;;
+      *) printf 'total_count: 3\ncheck_runs[3]:\n  - id: 1\n    status: completed\n    conclusion: success\n  - id: 2\n    status: completed\n    conclusion: neutral\n  - id: 3\n    status: completed\n    conclusion: skipped\n' ;;
+    esac
+    ;;
+  'api /repos/acme/app/commits/refs%2Fpull%2F99%2Fhead/status?per_page=100')
+    if [ "$mode" = GREEN ]; then
+      printf 'state: success\nstatuses[1]{context,state}:\n  required,success\ntotal_count: 1\n'
     else
-      printf 'summary: "2 passed, 0 failed, 2 total"\nchecks[2]{name,conclusion}:\n  lint,pass\n  tests,pass\n'
+      printf 'state: pending\nstatuses: []\ntotal_count: 0\n'
     fi
     ;;
   *) exit 64 ;;
@@ -871,28 +913,32 @@ test_respond_merge_refuses_checkless_pr() {
   FM_HOME="$home" fmt_notified_pr_record "$pr" || fail "could not record notified PR"
   seed_inbox "$home" 55 "merge $pr"
   fakebin=$(make_fake_gh_axi "$home")
-  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FAKE_GH_AXI_CHECKLESS=1 \
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FAKE_GH_AXI_MODE=CHECKLESS \
     "$ROOT/bin/fm-telegram-respond.sh" 2>/dev/null)
   assert_contains "$out" "refused 55 not-green" "checkless PR must not authorize merge"
   pass "respond refuses PRs without CI checks"
 }
 
-test_respond_merge_refuses_skipped_checks() {
-  local home out fakebin pr
-  home="$TMP_ROOT/resp-merge-skipped"; mkdir -p "$home/state"
-  chmod 700 "$home/state"
-  write_env "$home" "FM_TELEGRAM_DRY_RUN=1"
+test_respond_merge_refuses_unsafe_check_states() {
+  local home out fakebin pr mode uid
   pr='https://github.com/acme/app/pull/99'
-  # shellcheck source=bin/fm-telegram-lib.sh
-  . "$ROOT/bin/fm-telegram-lib.sh"
-  FM_HOME="$home" fmt_load_config
-  FM_HOME="$home" fmt_notified_pr_record "$pr" || fail "could not record notified PR"
-  seed_inbox "$home" 56 "merge $pr"
-  fakebin=$(make_fake_gh_axi "$home")
-  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FAKE_GH_AXI_SKIPPED=1 \
-    "$ROOT/bin/fm-telegram-respond.sh" 2>/dev/null)
-  assert_contains "$out" "refused 56 not-green" "skipped checks must not authorize merge"
-  pass "respond refuses canceled or expected checks rendered as skipped"
+  uid=56
+  for mode in CANCELLED EXPECTED PENDING FAILURE; do
+    home="$TMP_ROOT/resp-merge-$mode"; mkdir -p "$home/state"
+    chmod 700 "$home/state"
+    write_env "$home" "FM_TELEGRAM_DRY_RUN=1"
+    # shellcheck source=bin/fm-telegram-lib.sh
+    . "$ROOT/bin/fm-telegram-lib.sh"
+    FM_HOME="$home" fmt_load_config
+    FM_HOME="$home" fmt_notified_pr_record "$pr" || fail "could not record notified PR"
+    seed_inbox "$home" "$uid" "merge $pr"
+    fakebin=$(make_fake_gh_axi "$home")
+    out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FAKE_GH_AXI_MODE="$mode" \
+      "$ROOT/bin/fm-telegram-respond.sh" 2>/dev/null)
+    assert_contains "$out" "refused $uid not-green" "$mode checks must not authorize merge"
+    uid=$((uid + 1))
+  done
+  pass "respond refuses failed, pending, canceled, and expected checks"
 }
 
 test_respond_merge_unnamed_refused() {
@@ -1039,6 +1085,7 @@ test_poll_rewakes_pending_inbox_on_failed_results
 test_send_dry_run_no_network
 test_send_pr_authority_is_bound_to_delivered_chat
 test_send_authority_failure_surfaces_with_recovery
+test_send_confirmed_delivery_storage_failure_is_nonretryable
 test_send_refuses_secretish
 test_send_skips_when_not_afk
 test_send_reply_bypasses_afk_gate
@@ -1054,7 +1101,7 @@ test_respond_desk_only_decision_refused
 test_respond_merge_requires_notified_and_green
 test_respond_merge_uses_supported_gh_axi_interface
 test_respond_merge_refuses_checkless_pr
-test_respond_merge_refuses_skipped_checks
+test_respond_merge_refuses_unsafe_check_states
 test_respond_merge_unnamed_refused
 test_respond_dedupe
 test_respond_rate_limit

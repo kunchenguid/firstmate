@@ -56,7 +56,9 @@ INBOX="$STATE/telegram-inbox"
 # green/mergeable. Production default uses gh-axi when available.
 pr_is_green() {
   local url=$1
-  local parts owner repo number out checks state draft merged summary passed failed total tail
+  local parts owner repo number out rollup state draft merged summary rollup_total tail
+  local check_path check_data check_total check_completed check_allowed
+  local status_path status_data status_total status_state raw_total
   if [ -n "${FM_TELEGRAM_PR_CHECK_HOOK:-}" ]; then
     # shellcheck disable=SC2086
     $FM_TELEGRAM_PR_CHECK_HOOK "$url"
@@ -72,18 +74,38 @@ pr_is_green() {
     draft=$(printf '%s\n' "$out" | sed -n 's/^  draft: //p' | head -n1)
     merged=$(printf '%s\n' "$out" | sed -n 's/^  merged: //p' | head -n1)
     [ "$state" = open ] && [ "$draft" = no ] && [ "$merged" = no ] || return 1
-    checks=$(gh-axi pr checks "$number" -R "$owner/$repo" 2>/dev/null) || return 1
-    summary=$(printf '%s\n' "$checks" | sed -n 's/^summary: "\(.*\)"$/\1/p' | head -n1)
+    rollup=$(gh-axi pr checks "$number" -R "$owner/$repo" 2>/dev/null) || return 1
+    summary=$(printf '%s\n' "$rollup" | sed -n 's/^summary: "\(.*\)"$/\1/p' | head -n1)
     [ -n "$summary" ] || return 1
-    passed=${summary%% passed*}
-    tail=${summary#*, }
-    failed=${tail%% failed*}
     tail=${summary##*, }
-    total=${tail%% total}
-    case "$passed:$failed:$total" in
-      *[!0-9:]*|:*|*::*|*:) return 1 ;;
+    rollup_total=${tail%% total}
+    case "$rollup_total" in
+      ''|*[!0-9]*) return 1 ;;
     esac
-    [ "$passed" -eq "$total" ] && [ "$failed" -eq 0 ] && [ "$total" -gt 0 ] || return 1
+    check_path="/repos/$owner/$repo/commits/refs%2Fpull%2F${number}%2Fhead/check-runs?filter=latest&per_page=100"
+    check_data=$(gh-axi api "$check_path" 2>/dev/null) || return 1
+    check_total=$(printf '%s\n' "$check_data" | sed -n 's/^total_count: //p' | head -n1)
+    case "$check_total" in
+      ''|*[!0-9]*) return 1 ;;
+    esac
+    check_completed=$(printf '%s\n' "$check_data" \
+      | awk '$0 == "    status: completed" { count++ } END { print count + 0 }')
+    check_allowed=$(printf '%s\n' "$check_data" \
+      | awk '$0 ~ /^    conclusion: (success|neutral|skipped)$/ { count++ } END { print count + 0 }')
+    [ "$check_completed" -eq "$check_total" ] \
+      && [ "$check_allowed" -eq "$check_total" ] || return 1
+    status_path="/repos/$owner/$repo/commits/refs%2Fpull%2F${number}%2Fhead/status?per_page=100"
+    status_data=$(gh-axi api "$status_path" 2>/dev/null) || return 1
+    status_total=$(printf '%s\n' "$status_data" | sed -n 's/^total_count: //p' | head -n1)
+    status_state=$(printf '%s\n' "$status_data" | sed -n 's/^state: //p' | head -n1)
+    case "$status_total" in
+      ''|*[!0-9]*) return 1 ;;
+    esac
+    if [ "$status_total" -gt 0 ] && [ "$status_state" != success ]; then
+      return 1
+    fi
+    raw_total=$((check_total + status_total))
+    [ "$raw_total" -gt 0 ] && [ "$rollup_total" -eq "$raw_total" ] || return 1
     return 0
   fi
   # Without gh-axi, refuse merge rather than guessing.
