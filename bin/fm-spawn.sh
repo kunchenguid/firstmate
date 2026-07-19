@@ -4,8 +4,8 @@
 # Usage: fm-spawn.sh <task-id> <project-dir> [harness|launch-command] [--scout]
 #        fm-spawn.sh <task-id> [<firstmate-home>] [harness|launch-command] --secondmate
 #   With no harness arg, the harness comes from fm-harness.sh crew (config/crew-harness,
-#   falling back to firstmate's own harness). A bare adapter name (claude|codex|
-#   opencode|pi) overrides it for this spawn. A non-flag string containing whitespace
+#   falling back to firstmate's own harness). A bare adapter name (agy|claude|codex|
+#   opencode|grok|glm|zai|deepseek|minimax|pi) overrides it for this spawn. A non-flag string containing whitespace
 #   is treated as a RAW launch command - the escape hatch for verifying new adapters.
 #   --scout records kind=scout in the task's meta (report deliverable, scratch worktree;
 #   see AGENTS.md task lifecycle); --secondmate records kind=secondmate and launches in a
@@ -88,7 +88,7 @@ FIRSTMATE_HOME=
 
 if [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
-    ''|claude|codex|opencode|pi)
+    ''|agy|claude|codex|opencode|grok|glm|zai|deepseek|minimax|pi)
       ARG3=${POS[1]:-}
       ;;
     *' '*)
@@ -124,7 +124,19 @@ launch_template() {
     # does NOT suppress the interactive ghost text (verified empirically), so the env
     # var is the correct control. The dim-aware composer reader in fm-tmux-lib.sh is
     # the defense-in-depth backstop for any pane this flag cannot reach.
+    agy)
+      printf '%s' 'agy --dangerously-skip-permissions --new-project --add-dir "$PWD" --model "Gemini 3.1 Pro (Low)" --prompt-interactive "$(cat __BRIEF__)"'
+      ;;
     claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions "$(cat __BRIEF__)"' ;;
+    glm|zai)
+      printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false ANTHROPIC_AUTH_TOKEN="${ZAI_API_KEY:-${ANTHROPIC_AUTH_TOKEN:-}}" ANTHROPIC_BASE_URL=https://api.z.ai/api/anthropic API_TIMEOUT_MS=3000000 CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 ANTHROPIC_DEFAULT_OPUS_MODEL=glm-5.2 ANTHROPIC_DEFAULT_SONNET_MODEL=glm-5.2 ANTHROPIC_DEFAULT_HAIKU_MODEL=glm-4.7 claude --dangerously-skip-permissions "$(cat __BRIEF__)"'
+      ;;
+    deepseek)
+      printf '%s' '/home/newball/firstmate/bin/fm-claude-deepseek.sh "$(cat __BRIEF__)"'
+      ;;
+    minimax)
+      printf '%s' 'FM_MINIMAX_KEY_FILE=/home/newball/firstmate/config/minimax-api-key /home/newball/firstmate/config/minimax "$(cat __BRIEF__)"'
+      ;;
     codex)
       if [ "$kind" = secondmate ]; then
         printf '%s' 'codex --dangerously-bypass-approvals-and-sandbox "$(cat __BRIEF__)"'
@@ -132,6 +144,7 @@ launch_template() {
         printf '%s' 'codex --dangerously-bypass-approvals-and-sandbox -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(cat __BRIEF__)"'
       fi
       ;;
+    grok) printf '%s' 'grok --no-alt-screen --always-approve "$(cat __BRIEF__)"' ;;
     opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}}'\'' opencode --prompt "$(cat __BRIEF__)"' ;;
     pi)
       if [ "$kind" = secondmate ]; then
@@ -353,7 +366,7 @@ if tmux list-windows -t "$SES" -F '#{window_name}' | grep -qx "$W"; then
   exit 1
 fi
 
-tmux new-window -d -t "$SES" -n "$W" -c "$PROJ_ABS"
+tmux new-window -d -t "$SES:" -n "$W" -c "$PROJ_ABS"
 if [ "$KIND" != secondmate ]; then
   tmux send-keys -t "$T" 'treehouse get' Enter
 
@@ -410,7 +423,7 @@ exclude_path() {
 }
 if [ "$KIND" != secondmate ]; then
   case "$HARNESS" in
-    claude*)
+    claude*|glm*|zai*|deepseek*|minimax*)
       mkdir -p "$WT/.claude"
       cat > "$WT/.claude/settings.local.json" <<EOF
 {"hooks":{"Stop":[{"hooks":[{"type":"command","command":"touch '$TURNEND'"}]}]}}
@@ -465,6 +478,20 @@ $("$FM_ROOT/bin/fm-project-mode.sh" "$PROJ_NAME")
 EOF
 fi
 
+LAUNCH_DIR=$WT
+[ "$KIND" = secondmate ] && LAUNCH_DIR=$PROJ_ABS
+if [ "$HARNESS" = agy ]; then
+  # agy rejects hidden workspace roots such as ~/.treehouse/... and silently
+  # falls back to its default project, so expose the isolated tree through a
+  # stable non-hidden symlink under firstmate state.
+  AGY_ALIAS_ROOT="$STATE/agy-workspaces"
+  AGY_ALIAS="$AGY_ALIAS_ROOT/$ID"
+  mkdir -p "$AGY_ALIAS_ROOT"
+  rm -f "$AGY_ALIAS"
+  ln -s "$LAUNCH_DIR" "$AGY_ALIAS"
+  LAUNCH_DIR=$AGY_ALIAS
+fi
+
 mkdir -p "$STATE"
 {
   echo "window=$T"
@@ -489,6 +516,11 @@ LAUNCH=${LAUNCH//__PIEXT__/$sq_piext}
 if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")
   LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_HOME=$sq_home $LAUNCH"
+fi
+if [ "$LAUNCH_DIR" != "$WT" ] || [ "$KIND" = secondmate ]; then
+  tmux send-keys -t "$T" -l "cd $(shell_quote "$LAUNCH_DIR")"
+  sleep 0.1
+  tmux send-keys -t "$T" Enter
 fi
 tmux send-keys -t "$T" -l "$LAUNCH"
 sleep 0.3

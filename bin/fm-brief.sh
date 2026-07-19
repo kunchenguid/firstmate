@@ -155,6 +155,12 @@ The report is the only thing that survives, so anything worth keeping must be in
 6. If a decision belongs to a human (product choices, destructive actions),
    append \`needs-decision: {summary of options}\` and stop. Firstmate will reply with the decision.
 
+# Progress note
+Maintain \`$DATA/$ID/progress.md\`: overwrite it on every phase change with
+GOAL (1 line), DONE (bullets), NEXT (1-3 lines), and the key file paths.
+Keep it under ~30 lines. If you are relaunched, that file plus this brief is
+your memory; chat history is not. It does not replace the status file.
+
 # Definition of done
 Write your findings to \`$DATA/$ID/report.md\`.
 The report must stand alone: what you did, what you found, the evidence (commands run, output, file:line references), and what you recommend.
@@ -256,6 +262,13 @@ $RULE1
 If \`AGENTS.md\` or \`CLAUDE.md\` already exists, or if this task produced durable project-intrinsic knowledge, run \`$FM_ROOT/bin/fm-ensure-agents-md.sh .\` in the worktree.
 If this task produced durable project-intrinsic knowledge, record it in \`AGENTS.md\` as part of your change.
 Keep it proportionate: skip \`AGENTS.md\` edits for trivial tasks that produced no durable project knowledge.
+
+# Progress note
+Maintain \`$DATA/$ID/progress.md\`: overwrite it on every phase change (setup,
+implemented, validating, PR) with GOAL (1 line), DONE (bullets), NEXT (1-3
+lines), and the key file paths.
+Keep it under ~30 lines. If you are relaunched, that file plus this brief is
+your memory; chat history is not. It does not replace the status file.
 
 $DOD
 EOF

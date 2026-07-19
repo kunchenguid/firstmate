@@ -6,4 +6,5 @@ data/
 .DS_Store
 .env
 config/crew-harness
+config/deepseek-api-key
 config/x-mode.env

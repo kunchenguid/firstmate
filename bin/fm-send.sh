@@ -15,6 +15,12 @@
 # Slash commands, and codex `$...` skill invocations resolved through harness
 # meta, get a longer pre-Enter settle so completion popups do not swallow Enter.
 #
+# Steer-compaction counter: successful text sends to a bare fm-<id> target
+# append steers=N to the task's meta; a steer starting with GOAL: resets N to 0
+# (it is a compact steer per the AGENTS.md section 7 steer contract), and from
+# N>=3 a stderr reminder suggests compacting or relaunching with the progress
+# note. Explicit session:window targets and --key sends are never counted.
+#
 # From-firstmate marker: when the resolved target is a bare `fm-<id>` whose meta
 # records kind=secondmate, the text is prefixed with the from-firstmate marker
 # (bin/fm-marker-lib.sh) so the secondmate routes its reply via its status file
@@ -101,7 +107,7 @@ else
   # invocation, so a `$...` message to a codex target gets the same settle. That
   # `$` case is scoped to codex on purpose: unlike `/`, a leading `$` commonly
   # starts ordinary text ("$5/month", "$HOME"), so a universal `$` rule would
-  # needlessly slow plain text to claude/opencode/pi. The retried Enter in
+  # needlessly slow plain text to claude/glm/agy/opencode/pi. The retried Enter in
   # fm_tmux_submit_core still backs the settle up either way.
   case "$*" in
     /*) settle=1.2 ;;
@@ -123,6 +129,28 @@ else
     send-failed)
       echo "error: text not sent to $T (tmux send-keys failed)" >&2
       exit 1
+      ;;
+  esac
+  # Steer-compaction counter (AGENTS.md section 7 steer contract): count steers
+  # per task in its meta (append-only lines; tail -1 wins, the meta read
+  # convention). A steer starting with GOAL: is a compact steer and resets the
+  # count; from the third steer on, a stderr reminder asks for a compact steer
+  # or a relaunch-with-progress-note instead of more context restating.
+  case "$RAW_TARGET" in
+    fm-*)
+      steer_meta="$STATE/${RAW_TARGET#fm-}.meta"
+      if [ -f "$steer_meta" ]; then
+        prev_steers=$(grep '^steers=' "$steer_meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+        case "$prev_steers" in ''|*[!0-9]*) prev_steers=0 ;; esac
+        case "$*" in
+          GOAL:*) steers=0 ;;
+          *) steers=$(( prev_steers + 1 )) ;;
+        esac
+        echo "steers=$steers" >> "$steer_meta"
+        if [ "$steers" -ge 3 ]; then
+          echo "fm-send: $steers steers to $RAW_TARGET since last compact steer - send a compact steer ('GOAL: ... | DONE: ... | NEXT: ... | READ: <paths>' ending 'ignore earlier steers if they conflict') or relaunch with data/${RAW_TARGET#fm-}/progress.md (AGENTS.md sections 7-8)" >&2
+        fi
+      fi
       ;;
   esac
   # Submit landed (verdict was not pending/send-failed). The cleared composer only

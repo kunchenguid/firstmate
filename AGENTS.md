@@ -360,6 +360,12 @@ Add the task to `data/backlog.md` under In flight.
 
 Covered by section 8.
 Steer a crewmate only with short single lines via `bin/fm-send.sh`; anything long belongs in a file the crewmate can read.
+**Steer contract (token discipline at the cheapest control point).**
+Default steer shape: `GOAL: <1 line> | DONE: <short bullets> | NEXT: <1-3 lines> | READ: <paths>` - state and pointers, never narrative.
+Never paste prior chat, full PR bodies, full logs, or status history into `fm-send`; put detail in a file and steer with its path.
+Send a *compact steer* - the template above only, ending with `ignore earlier steers if they conflict` - when any of: 3 steers have landed since the last compact steer, the next steer would restate more than ~half a screen of prior context, the task phase changed (implement -> validate -> PR), or the crewmate asked something its brief already answers.
+`fm-send` counts for you: it appends `steers=` to the task's meta, resets the count when a steer starts with `GOAL:`, and reminds you on stderr from the third steer on.
+An answered-by-brief question or a loop is a saturation signal, not a steering problem: do not re-explain in chat - load `stuck-crewmate-recovery` and prefer the relaunch-with-progress-note path (section 8).
 Steer a secondmate the same way.
 Its charter retargets escalation to the main firstmate's status file, so routine internal churn stays inside the secondmate home and only `done`, `blocked`, `needs-decision`, `failed`, or captain-relevant phase changes wake the main firstmate.
 Because `fm-send` to a `kind=secondmate` target marks the request as from-firstmate (section 7 intake), the secondmate's answer comes back on that status/doc path too, not in its chat; read the response there as an ordinary status signal and do not peek its chat for it.
@@ -546,6 +552,11 @@ Token discipline: for a crewmate's current state prefer `bin/fm-crew-state.sh <i
 The context-% shown in a peek is not actionable as crew health; ignore it and intervene only on real signals (`signal`, `stale`, `needs-decision`, `blocked`), looping or confusion in the pane, or a question the brief already answers.
 Silence is the correct state while a healthy background watcher is waiting.
 
+**Relaunch-with-summary is the real compaction.**
+A crewmate's context window cannot be compacted from outside, and steering more text into a saturated pane makes it worse.
+When a pane is looping, confused, or visibly drowning in its own transcript - typically after gates bounce multiple rounds or a long validation loop - interrupt and relaunch the same worktree with the original brief plus the task's `data/<id>/progress.md` (the `stuck-crewmate-recovery` relaunch path): a new context window over the same code state.
+Recycle on those signals, never on a fixed prompt count, and never lean on a harness's own compact command unless `harness-adapters` documents it as verified for that harness.
+
 ### Away-mode stub
 
 Invoke the `/afk` skill when the captain says `/afk`, says they are going afk, `state/.afk` exists, an incoming message starts with `FM_INJECT_MARK`, or any `state/.subsuper-*` marker is involved.
@@ -649,6 +660,8 @@ Preserve the requests-from-main-firstmate contract in the charter: marked reques
 Before seeding, loading, handing backlog to, or launching a secondmate home, load `secondmate-provisioning`.
 The status-reporting protocol is intentionally sparse: crewmates append status only for supervisor-actionable phase changes or `needs-decision`/`blocked`/`done`/`failed`, because every append wakes firstmate.
 For any generated brief that still contains `{TASK}`, replace it with a clear task description, acceptance criteria, and any constraints or context the crewmate needs before spawning or seeding.
+Fill `{TASK}` lean: acceptance criteria and constraints inline; deep context as file paths and links (docs, tickets, prior scout reports), never pasted bodies - the biggest token win is a shorter brief at spawn, because the brief is re-paid on every relaunch.
+The scaffold includes a progress-note contract: the crewmate maintains `data/<id>/progress.md` (goal / done / next / key paths, overwritten on each phase change), so a relaunch or resume brief says "re-read progress.md; do not rely on chat history" instead of repeating context.
 Adjust the other sections only when the task genuinely deviates from the standard ship-a-new-PR shape (e.g. fixing an existing external PR); the scaffold is the contract, not a suggestion.
 
 ## 12. Self-update

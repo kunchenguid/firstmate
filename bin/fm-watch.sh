@@ -86,8 +86,9 @@ SIGNAL_GRACE=${FM_SIGNAL_GRACE:-30}   # seconds to linger after a signal so trai
                                       # signals (a status write, then the same turn's
                                       # turn-end hook) coalesce into one wake
 # Busy signatures per harness, OR-ed. Extend via env when new adapters are verified.
-# claude/codex: "esc to interrupt"; opencode: "esc interrupt"; pi: "Working..."
-BUSY_REGEX=${FM_BUSY_REGEX:-'esc (to )?interrupt|Working\.\.\.'}
+# agy: "Press esc to interrupt generation."; claude/codex: "esc to interrupt";
+# opencode: "esc interrupt"; grok: "Esc:cancel" or "[stop]"; pi: "Working..."
+BUSY_REGEX=${FM_BUSY_REGEX:-'Press esc to interrupt generation\.|esc (to )?interrupt|Esc:cancel|\[stop\]|Working\.\.\.'}
 # Always-on wake triage: most wakes during a long crew validation are benign
 # (working: notes, bare turn-ended, a crew gone quiet mid-validation, a no-change
 # heartbeat). Rather than wake firstmate's LLM for each, this watcher classifies

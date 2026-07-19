@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Detect the agent harness this process tree runs on.
-# Usage: fm-harness.sh         print own harness: claude|codex|opencode|pi|unknown
+# Usage: fm-harness.sh         print own harness: agy|claude|codex|opencode|grok|glm|zai|deepseek|minimax|pi|unknown
 #        fm-harness.sh crew    print the effective crewmate harness
 #                              (config/crew-harness; "default" resolves to own)
 # Detection layers: verified environment markers first, then process ancestry.
@@ -15,22 +15,34 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 detect_own() {
   # Layer 1: environment markers for verified harnesses.
   [ "${CLAUDECODE:-}" = "1" ] && { echo claude; return; }
+  [ "${FIRSTMATE_HARNESS:-}" = "deepseek" ] && { echo deepseek; return; }
+  [ "${FIRSTMATE_HARNESS:-}" = "minimax" ] && { echo minimax; return; }
   [ "${PI_CODING_AGENT:-}" = "true" ] && { echo pi; return; }
   # Layer 2: walk the parent chain and match the command name.
   local pid=$$ comm args
   for _ in 1 2 3 4 5 6 7 8; do
     comm=$(ps -o comm= -p "$pid" 2>/dev/null) || break
     case "$(basename "$comm")" in
+      *agy*) echo agy; return ;;
+      *deepseek*) echo deepseek; return ;;
+      *minimax*) echo minimax; return ;;
       *claude*) echo claude; return ;;
+      *glm*|*zai*) echo glm; return ;;
       *codex*) echo codex; return ;;
+      *grok*) echo grok; return ;;
       *opencode*) echo opencode; return ;;
       pi) echo pi; return ;;
       node*|python*)
         # Bare interpreter: match the harness name in its script path.
         args=$(ps -o args= -p "$pid" 2>/dev/null)
         case "$args" in
+          *agy*) echo agy; return ;;
+          *deepseek*) echo deepseek; return ;;
+          *minimax*) echo minimax; return ;;
           *claude*) echo claude; return ;;
+          *glm*|*zai*) echo glm; return ;;
           *codex*) echo codex; return ;;
+          *grok*) echo grok; return ;;
           *opencode*) echo opencode; return ;;
           *" pi "*|*/pi) echo pi; return ;;
         esac ;;

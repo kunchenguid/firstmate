@@ -34,9 +34,10 @@
 # All functions are `set -u` and `set -e` safe (guarded tmux calls, explicit
 # returns) so they can be sourced into either context.
 
-# Busy footers per harness (mirror fm-watch.sh). claude/codex: "esc to
-# interrupt"; opencode: "esc interrupt"; pi: "Working...".
-FM_TMUX_BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working\.\.\.'
+# Busy footers per harness (mirror fm-watch.sh). agy: "Press esc to interrupt
+# generation."; claude/codex: "esc to interrupt"; opencode: "esc interrupt";
+# grok: "Esc:cancel" or "[stop]"; pi: "Working...".
+FM_TMUX_BUSY_REGEX_DEFAULT='Press esc to interrupt generation\.|esc (to )?interrupt|Esc:cancel|\[stop\]|Working\.\.\.'
 
 # fm_tmux_strip_ghost: remove dim/faint (ANSI SGR 2) styled runs from one captured
 # composer line, then drop any remaining escape sequences, leaving only the plain,
