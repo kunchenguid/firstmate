@@ -463,13 +463,13 @@ test_watch_restart_attaches_to_healthy_peer() {
   printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
   printf '%s\n' "$identity" > "$state/.watch.lock/pid-identity"
   touch "$state/.last-watcher-beat"
-  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_ARM_ATTACH_POLL=0.1 FM_ARM_CONFIRM_TIMEOUT=1 "$WATCH_ARM" --restart > "$out" &
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_ARM_ATTACH_POLL=0.1 FM_ARM_CONFIRM_TIMEOUT=8 "$WATCH_ARM" --restart > "$out" &
   armpid=$!
   # Before it can attach, the arm always rides out its full 5s TERM-resist wait
   # on the surviving peer, then runs a stood-down watcher child to completion, so
   # the poll budget needs generous headroom under full-suite load.
   i=0
-  while [ "$i" -lt 200 ]; do
+  while [ "$i" -lt 300 ]; do
     grep -qF "watcher: attached pid=$peer" "$out" 2>/dev/null && break
     sleep 0.1
     i=$((i + 1))
