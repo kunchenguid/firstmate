@@ -1078,6 +1078,7 @@ EOF
       echo 0 > "$cf"
       rm -f "$ssf" "$ewf"
       task=$(window_to_task "$w" "$STATE")
+      [ -e "$sitf" ] && window_is_busy "$w" "$tail40" && rm -f "$sitf"
       if ! afk_present && status_is_paused_or_captain_held "$(last_status_line "$STATE/$task.status")" && ! window_is_busy "$w" "$tail40"; then
         case "$(pause_state_class "$w" "$task")" in
           paused) handle_paused_stale "$w" "$task" "$h" ;;

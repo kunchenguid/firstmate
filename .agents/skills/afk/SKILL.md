@@ -113,10 +113,8 @@ So a guard false-positive becomes a visible stall, never an unbounded silent no-
 
 ## Submit model
 
-The digest is typed **once** (`send-keys -l` on tmux, with the 0x1f marker
-byte routed through a `send-keys -H 1f` hex send because tmux 3.7 silently
-drops C0 control bytes from `-l`; `pane send-text` on herdr - both literal,
-non-submitting sends), then submitted with Enter and
+The digest is typed **once** (`send-keys -l` on tmux, `pane send-text` on
+herdr - both literal, non-submitting sends), then submitted with Enter and
 **verified** through the selected backend's submit primitive.
 Enter is retried (Enter only, never a retype) until the backend confirms the
 submit landed.
@@ -198,8 +196,7 @@ the marker lets firstmate distinguish it from a real captain message.
   composer false-positive surfaces as a visible stall, never an unbounded silent
   no-op.
 - **Verified type-once submit model** - the digest is typed once (`send-keys -l`
-  on tmux with the 0x1f marker byte sent as a hex key, since tmux 3.7 drops C0
-  bytes from `-l`; `pane send-text` on herdr), then submitted with Enter and verified.
+  on tmux, `pane send-text` on herdr), then submitted with Enter and verified.
   Enter is retried, Enter only and never a retype, until the backend submit
   primitive reports `empty` as its caller-facing success verdict.
   For tmux that verdict means the shared-ghost-aware and border-aware composer

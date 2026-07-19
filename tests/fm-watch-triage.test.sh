@@ -1311,6 +1311,51 @@ test_busy_pane_rearms_stale_surfacing() {
   pass "a busy pane re-arms stale surfacing so a later stop with the same status line surfaces"
 }
 
+test_streaming_busy_pane_rearms_stale_surfacing() {
+  local dir state fakebin out capture_file window key sig pid writer i
+  dir=$(make_case streaming-busy-rearm); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-stream-rearm"
+  printf 'building step 0... esc to interrupt' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/stream-rearm.meta"
+  printf 'working: implementing\n' > "$state/stream-rearm.status"
+  sig=$(seen_sig "$state/stream-rearm.status"); printf '%s' "$sig" > "$state/.seen-stream-rearm_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  # An actively STREAMING crew changes its pane content faster than the poll
+  # cadence, so every poll sees a new hash and the same-hash busy clear (which
+  # needs two identical busy polls) never runs. The surfaced-situation record
+  # must still be cleared by that busy evidence on the hash-changed path, or a
+  # later stop with the same status line would be absorbed as already-surfaced.
+  printf 'stopped|working: implementing' > "$state/.stale-surfaced-$key"
+  : > "$dir/.streaming"
+  ( i=1
+    while [ -e "$dir/.streaming" ]; do
+      printf 'building step %d... esc to interrupt' "$i" > "$capture_file"
+      i=$((i + 1))
+      sleep 0.2
+    done ) &
+  writer=$!
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  i=0
+  while [ "$i" -lt 60 ] && [ -e "$state/.stale-surfaced-$key" ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  rm -f "$dir/.streaming"
+  wait "$writer" 2>/dev/null || true
+  [ ! -e "$state/.stale-surfaced-$key" ] || { reap "$pid"; fail "a streaming busy pane did not clear the surfaced-situation record"; }
+  # The crew stops again: same status line, new idle hash - must surface.
+  printf 'stopped at the prompt' > "$capture_file"
+  wait_for_exit "$pid" 80 || fail "a stop after streaming busy activity did not re-surface"
+  grep -Fx "stale: $window" "$out" >/dev/null || fail "post-streaming stop did not print a stale wake"
+  unset FM_FAKE_CREW_STATE
+  pass "a streaming busy pane (hash changing every poll) re-arms stale surfacing"
+}
+
 # --- triage debug log stays size capped -------------------------------------
 
 test_triage_log_size_cap_accepts_spaced_wc_counts() {
@@ -1517,6 +1562,7 @@ test_terminal_stale_not_resurfaced_per_pane_hash_tick
 test_paused_log_done_crew_not_resurfaced_per_poll
 test_surfaced_stopped_stale_not_wedge_nagged
 test_busy_pane_rearms_stale_surfacing
+test_streaming_busy_pane_rearms_stale_surfacing
 test_triage_log_size_cap_accepts_spaced_wc_counts
 test_heartbeat_no_change_absorbed
 test_heartbeat_backstop_surfaces_unsurfaced_status
