@@ -289,6 +289,63 @@ test_poll_question_stashes_and_marks() {
   pass "fm-x-poll stashes the question and prints the compact marker"
 }
 
+test_poll_mentions_wake_once_per_durable_offer() {
+  local home fakebin out rc body marker
+  home="$TMP_ROOT/poll-offer-dedupe"; mkdir -p "$home"
+  fakebin=$(make_fake_curl "$home")
+  printf 'FMX_PAIRING_TOKEN=tok-offer\n' > "$home/.env"
+  body='{"request_id":"req-repeat","platform":"discord","reply_max_chars":1900,"text":"status?"}'
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_NOW_OVERRIDE=1700000000 \
+    FMX_RELAY_URL="https://relay.test" FAKE_POLL_CODE=200 FAKE_POLL_BODY="$body" \
+    "$ROOT/bin/fm-x-poll.sh"); rc=$?
+  expect_code 0 "$rc" "first offered mention poll exit"
+  [ "$out" = "x-mention req-repeat" ] \
+    || fail "a newly offered mention must wake once (got: $out)"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_NOW_OVERRIDE=1700000030 \
+    FMX_RELAY_URL="https://relay.test" FAKE_POLL_CODE=200 FAKE_POLL_BODY="$body" \
+    "$ROOT/bin/fm-x-poll.sh"); rc=$?
+  expect_code 0 "$rc" "repeated pending mention poll exit"
+  [ -z "$out" ] || fail "an already offered pending mention must stay silent (got: $out)"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_RELAY_URL="https://relay.test" \
+    FAKE_DISMISS_CODE=200 "$ROOT/bin/fm-x-dismiss.sh" req-repeat); rc=$?
+  expect_code 0 "$rc" "successful dismiss before relay re-offer exit"
+  [ "$out" = "req-repeat" ] || fail "the dismiss fixture must succeed before the re-offer"
+  rm -f "$home/state/x-inbox/req-repeat.json"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_NOW_OVERRIDE=1700000060 \
+    FMX_RELAY_URL="https://relay.test" FAKE_POLL_CODE=200 FAKE_POLL_BODY="$body" \
+    "$ROOT/bin/fm-x-poll.sh"); rc=$?
+  expect_code 0 "$rc" "post-answer re-offer poll exit"
+  [ -z "$out" ] || fail "a relay re-offer after inbox cleanup must stay silent (got: $out)"
+  assert_absent "$home/state/x-inbox/req-repeat.json" \
+    "a suppressed post-answer re-offer must not recreate the drained inbox"
+  marker="$home/state/x-context/req-repeat.offered.json"
+  assert_present "$marker" "the durable offer marker must survive inbox cleanup"
+  rm -f "$marker"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_NOW_OVERRIDE=1700000090 \
+    FMX_RELAY_URL="https://relay.test" FAKE_POLL_CODE=200 FAKE_POLL_BODY="$body" \
+    "$ROOT/bin/fm-x-poll.sh"); rc=$?
+  expect_code 0 "$rc" "mention re-offer after local marker loss exit"
+  [ "$out" = "x-mention req-repeat" ] \
+    || fail "a re-offer after local marker loss must wake once (got: $out)"
+  body='{"request_id":"req-new","platform":"discord","reply_max_chars":1900,"text":"new status?"}'
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_NOW_OVERRIDE=1700000120 \
+    FMX_RELAY_URL="https://relay.test" FAKE_POLL_CODE=200 FAKE_POLL_BODY="$body" \
+    "$ROOT/bin/fm-x-poll.sh"); rc=$?
+  expect_code 0 "$rc" "genuinely new mention poll exit"
+  [ "$out" = "x-mention req-new" ] \
+    || fail "a genuinely new request_id must wake once (got: $out)"
+  marker="$home/state/x-context/req-new.offered.json"
+  [ "$(path_mode "$marker")" = 600 ] \
+    || fail "the durable offer marker must be a private file"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_NOW_OVERRIDE=1700604921 \
+    FMX_RELAY_URL="https://relay.test" FAKE_POLL_CODE=200 FAKE_POLL_BODY="$body" \
+    "$ROOT/bin/fm-x-poll.sh"); rc=$?
+  expect_code 0 "$rc" "mention re-offer after marker expiry exit"
+  [ "$out" = "x-mention req-new" ] \
+    || fail "a re-offer after the bounded marker expiry must wake once (got: $out)"
+  pass "fm-x-poll wakes once per durable request offer across inbox cleanup"
+}
+
 test_poll_preserves_conversation_context() {
   local home fakebin out rc body f
   home="$TMP_ROOT/poll-ctx"; mkdir -p "$home"
@@ -2671,6 +2728,7 @@ test_poll_empty_env_relay_overrides_env_file
 test_poll_auth_error_reports_once
 test_poll_error_private_publication_rejects_unsafe_paths
 test_poll_question_stashes_and_marks
+test_poll_mentions_wake_once_per_durable_offer
 test_poll_preserves_conversation_context
 test_poll_inbox_commit_failure_reports_error
 test_poll_inbox_private_publication_rejects_unsafe_paths
