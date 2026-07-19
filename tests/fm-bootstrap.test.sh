@@ -126,9 +126,9 @@ make_fake_fleet_sync_root() {
   mkdir -p "$fake_root/bin"
   cat > "$fake_root/bin/fm-fleet-sync.sh" <<'SH'
 #!/usr/bin/env bash
-[ -z "${FM_FAKE_FLEET_SYNC_STARTED_MARKER:-}" ] || : > "$FM_FAKE_FLEET_SYNC_STARTED_MARKER"
 printf '%s\n' 'alpha: synced'
 printf '%s\n' 'beta: skipped: no origin remote'
+[ -z "${FM_FAKE_FLEET_SYNC_STARTED_MARKER:-}" ] || : > "$FM_FAKE_FLEET_SYNC_STARTED_MARKER"
 exec perl -e 'sleep 300'
 SH
   chmod +x "$fake_root/bin/fm-fleet-sync.sh"
@@ -168,7 +168,17 @@ run_bootstrap_timeout_case() {
   (
     # shellcheck disable=SC2317,SC2329 # Exported and invoked by the bootstrap subprocess.
     sleep() {
-      local inc=${1:-1}
+      local inc=${1:-1} tries
+      if [ "${FM_FAKE_GIT_WAIT_FOR_FLEET_START:-}" = 1 ] \
+        && [ "${FM_FAKE_FLEET_START_WAITED:-0}" -eq 0 ] \
+        && [ -n "${FM_FAKE_FLEET_SYNC_STARTED_MARKER:-}" ]; then
+        FM_FAKE_FLEET_START_WAITED=1
+        tries=0
+        while [ "$tries" -lt 500 ] && [ ! -e "$FM_FAKE_FLEET_SYNC_STARTED_MARKER" ]; do
+          command sleep 0.01
+          tries=$((tries + 1))
+        done
+      fi
       SECONDS=$((SECONDS + inc))
       # Advance fake time quickly, but yield on every tick so the background
       # fleet-sync process can deterministically write its partial output before
