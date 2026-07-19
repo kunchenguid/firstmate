@@ -255,9 +255,11 @@ decision_alert_dispatch() {
       fi
       job_index=$((job_index + 1))
     done
-    for pid in "${pids[@]}"; do
-      wait "$pid" || true
-    done
+    if [ "${#pids[@]}" -gt 0 ]; then
+      for pid in "${pids[@]}"; do
+        wait "$pid" || true
+      done
+    fi
   done
   return 0
 }

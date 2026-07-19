@@ -213,6 +213,29 @@ SH
   pass "decision alert execution stays within eight concurrent workers"
 }
 
+test_bash32_empty_retry_batch_continues() {
+  local home recorder task markers
+  home="$TMP_ROOT/bash32-retry"; mkdir -p "$home/state" "$home/config"
+  recorder=$(make_recorder "$home")
+  printf 'osascript\n' > "$home/config/decision-alert"
+  for task in 01 02 03 04 05 06 07 08 09; do
+    printf 'needs-decision [key=choice]: choose\n' > "$home/state/$task.status"
+  done
+  for task in 01 02 03 04 05 06 07 08; do
+    FM_HOME="$home" FM_DECISION_ALERT_EXEC=discard FM_DECISION_ALERT_CHANNEL=osascript \
+      /bin/bash "$ALERT" decision "$task" choice >/dev/null 2>&1 \
+      || fail "could not seed an existing decision alert identity"
+  done
+  FM_HOME="$home" FM_DECISION_ALERT_EXEC="$recorder" FM_DECISION_ALERT_LOG="$home/alert.log" \
+    /bin/bash "$ALERT" scan-state >/dev/null 2> "$home/error.log" \
+    || fail "an empty retry batch aborted the Bash 3.2 alert scan"
+  [ "$(wc -l < "$home/alert.log" | tr -d ' ')" -eq 1 ] \
+    || fail "the unclaimed decision after an empty retry batch was not alerted"
+  markers=$(find "$home/state" -name '.decision-alerted-*' -type f | wc -l | tr -d ' ')
+  [ "$markers" -eq 9 ] || fail "the later decision identity was not claimed after an empty retry batch"
+  pass "Bash 3.2 empty retry batches preserve later decision alerts"
+}
+
 test_test_seam_and_watcher_integration() {
   local home stub out
   home="$TMP_ROOT/watcher"; mkdir -p "$home/state" "$home/config"
@@ -243,4 +266,5 @@ test_macos_notification_argv_and_command_safety
 test_notifier_failure_is_nonblocking_and_at_most_once
 test_total_runtime_is_bounded_across_decisions_and_channels
 test_concurrency_is_bounded
+test_bash32_empty_retry_batch_continues
 test_test_seam_and_watcher_integration
