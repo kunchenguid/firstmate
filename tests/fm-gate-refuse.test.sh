@@ -152,7 +152,28 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
-  fm_fake_exit0 "$fakebin" treehouse
+  cat > "$fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ "${1:-}" = get ]; then
+  shift
+  lease=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --lease) lease=1 ;;
+      --lease-holder) shift ;;
+      --lease-holder=*) ;;
+    esac
+    shift || true
+  done
+  if [ "$lease" -eq 1 ]; then
+    printf '%s\n' "${FM_FAKE_PANE_PATH:?}"
+    exit 0
+  fi
+fi
+exit 0
+SH
+  chmod +x "$fakebin/treehouse"
   printf '%s\n' "$fakebin"
 }
 
