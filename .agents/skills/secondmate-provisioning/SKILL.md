@@ -17,7 +17,7 @@ Keep the always-inline routing rules in `AGENTS.md` authoritative: route by natu
 
 ## Routing table
 
-`data/secondmates.md` has one parser-compatible line per persistent domain supervisor:
+`data/secondmates.md` has one parser-compatible line per persistent second mate:
 
 ```markdown
 - <id> - <one-sentence charter summary> (home: <absolute-home-path>; scope: <natural-language responsibility>; projects: <project-a>, <project-b>; added <date>)
@@ -91,7 +91,7 @@ Before replacing divergent secondmate bytes, the helper hash-compares source and
 Never copy any secondmate `data/captain-shared.md` back into the primary.
 Keep each home's `data/captain.md` domain-local.
 After first propagation to an existing home, trim that home's local `data/captain.md` by hand to domain-specific content plus pointers to `data/captain-shared.md`; do not automate or silently delete private content.
-Keep every `data/learnings.md` fully local by captain decision; route fleet-general machinery facts into tracked documentation through the normal Firstmate template path rather than inventing shared learnings propagation.
+Keep every `data/learnings.md` fully local by captain decision; route fleet-general machinery facts into tracked documentation through the normal firstmate repo path rather than inventing shared learnings propagation.
 No reread nudge is needed at spawn or respawn because the agent reads `AGENTS.md` fresh on launch; only the bootstrap sweep's running-home instruction-surface advance needs one.
 Bootstrap reports successful sends as `BOOTSTRAP_INFO:` and only emits `NUDGE_SECONDMATES:` when that send fails and needs retry.
 For already-live secondmates, use `bin/fm-config-push.sh` to push a mid-session inherited local-material change without running the tracked-file fast-forward or nudging the agents.
@@ -153,7 +153,7 @@ It never initiates a survey or audit during recovery.
 
 A secondmate is persistent by default.
 An empty queue is healthy and does not trigger teardown.
-Run `bin/fm-teardown.sh <id>` for `kind=secondmate` only when the captain or main firstmate explicitly decides to retire that persistent supervisor.
+Run `bin/fm-teardown.sh <id>` for `kind=secondmate` only when the captain or main firstmate explicitly decides to retire that persistent second mate.
 
 The safety check is the secondmate's own home.
 Teardown refuses while its `state/*.meta` contains in-flight work.

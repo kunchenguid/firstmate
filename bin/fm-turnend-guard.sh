@@ -2,7 +2,7 @@
 # Turn-end guard for any firstmate PRIMARY session: the main home OR a
 # secondmate's own home. A secondmate runs its own primary firstmate session and
 # is guarded exactly like the main primary; only child crew/scout worktrees are
-# exempt (see bin/fm-primary-scope.sh and docs/turnend-guard.md).
+# exempt (see bin/fm-primary-scope-lib.sh and docs/turnend-guard.md).
 #
 # fm-guard.sh (bin/fm-guard.sh) is pull-based: it only warns when some other
 # supervision script happens to run. A primary session that ends a turn without
@@ -47,6 +47,8 @@ WATCH="$SCRIPT_DIR/fm-watch.sh"
 
 # shellcheck source=bin/fm-supervision-lib.sh
 . "$SCRIPT_DIR/fm-supervision-lib.sh"
+# shellcheck source=bin/fm-primary-scope-lib.sh
+. "$SCRIPT_DIR/fm-primary-scope-lib.sh"
 
 # Read the whole turn-end hook payload once; never block on unreadable/absent
 # stdin.
@@ -61,7 +63,19 @@ command -v jq >/dev/null 2>&1 || exit 0
 STOP_HOOK_ACTIVE=$(printf '%s' "$PAYLOAD" | jq -r '.stop_hook_active // false' 2>/dev/null) || exit 0
 [ "$STOP_HOOK_ACTIVE" = "true" ] && exit 0
 
-"$SCRIPT_DIR/fm-primary-scope.sh" || exit 0
+# --- scope precisely to a PRIMARY checkout ----------------------------------
+# A genuinely-marked secondmate home runs its OWN primary firstmate session, so
+# force-INCLUDE it as a guarded primary whether treehouse leased it as a linked
+# worktree (git-dir != git-common-dir) or it is a git-cloned plain checkout. This
+# mirrors the cd-guard's intent that a secondmate's own session is a guarded
+# primary. Only an UNMARKED checkout (or one with an invalid marker) falls
+# through to the linked-worktree exemption: firstmate hands out crewmate/scout
+# task worktrees as genuine linked `git worktree`s (bin/fm-spawn.sh aborts
+# otherwise), whose git-dir lives under the parent repo's .git/worktrees/<name>
+# and differs from the common (shared) git-dir, while a main, non-worktree
+# checkout has the two equal. Child worktrees never carry the gitignored marker,
+# so this exempts them while guarding every real secondmate home.
+fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
 
 # --- the actual predicate ----------------------------------------------------
 # shellcheck source=bin/fm-wake-lib.sh

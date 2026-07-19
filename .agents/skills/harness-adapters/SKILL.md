@@ -64,6 +64,18 @@ Every verified primary harness also has a wired PreToolUse-equivalent hook that 
 The exact hook files, commands, output-shaping quirks (Claude Code only honors the deny when stdout is empty), and validation transcripts are owned by `docs/arm-pretool-check.md`.
 When changing any primary PreToolUse hook, validate the real harness behavior in a scratch project before trusting it, then update that doc.
 
+## Primary session-start nudge
+
+AGENTS.md section 3 remains the behavioral owner for session start, while tracked native adapters invoke `bin/fm-sessionstart-nudge.sh` as an idempotent enforcement layer.
+The wrapper prints only the instruction to run `bin/fm-session-start.sh`; it never runs the digest, wake drain, bootstrap sweeps, lock, or supervision arm itself.
+Full mechanics, scoping, dated commands, payloads, and fail-open evidence live in `docs/sessionstart-nudge.md`.
+
+- `claude`: verified native `SessionStart` stdout injection; `.claude/settings.json` matches `startup`, `resume`, and `clear`, but not `compact`.
+- `codex`: verified on 0.144.4; `.codex/hooks.json` receives `source=startup`, and wrapper stdout reaches model context.
+- `opencode`: verified on 1.17.18; `session.created` plus `client.session.promptAsync` starts the nudge turn in the TUI, while `opencode run` remains fail-open headless.
+- `pi`: verified native `session_start`; the existing primary extension handles `startup`, `new`, and `resume` and uses `pi.sendMessage` to inject context without racing a positional launch prompt.
+- `grok`: the 0.2.103 project `SessionStart` event fires with `source=new`, but stdout does not reach model context; the tracked project hook remains fail-open, and a global token-guarded fallback requires a captain decision.
+
 ## Primary watcher supervision
 
 At session start, `bin/fm-session-start.sh` prints exactly one watcher supervision block for the detected primary harness.

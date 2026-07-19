@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Opt-in interactive Pi primary regression on a private tmux socket and isolated homes.
+# Opt-in native Pi resume and continuity regression on a private tmux socket
+# with isolated project, home, session, and provider state.
 set -u
 
 if [ "${FM_PI_LIVE_E2E:-0}" != 1 ]; then
@@ -8,19 +9,20 @@ if [ "${FM_PI_LIVE_E2E:-0}" != 1 ]; then
 fi
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-command -v pi >/dev/null 2>&1 || { echo "skip: pi not found"; exit 0; }
-command -v tmux >/dev/null 2>&1 || { echo "skip: tmux not found"; exit 0; }
+
+fail() {
+  printf 'not ok - %s\n' "$1" >&2
+  exit 1
+}
+
+command -v pi >/dev/null 2>&1 || fail "pi not found"
+command -v tmux >/dev/null 2>&1 || fail "tmux not found"
 
 TMUX=$(command -v tmux)
 SOCKET="fm-pi-live-e2e-$$"
 SESSION=pi-live-e2e
 PI_SESSION_ID=11111111-1111-4111-8111-111111111111
 PI_VERSION=$(pi --version)
-
-fail() {
-  printf 'not ok - %s\n' "$1" >&2
-  exit 1
-}
 
 [ "$PI_VERSION" = 0.80.7 ] || fail "live resume regression requires Pi 0.80.7, found $PI_VERSION"
 LAB=$(mktemp -d "${TMPDIR:-/tmp}/fm-pi-live-e2e.XXXXXX") || fail "could not create the system temporary lab"
@@ -31,7 +33,6 @@ HOME_DIR="$LAB/fmhome"
 PI_DIR="$LAB/pi-agent"
 PI_SESSION_DIR="$PI_DIR/sessions"
 PI_LAUNCHER="$LAB/run-pi-resume.sh"
-
 capture() {
   "$TMUX" -L "$SOCKET" capture-pane -p -t "$SESSION" -S -600 2>/dev/null || true
 }
@@ -132,6 +133,7 @@ git clone -q "$ROOT" "$PROJECT"
 cp "$ROOT/.pi/extensions/fm-primary-pi-watch.ts" "$PROJECT/.pi/extensions/fm-primary-pi-watch.ts"
 cp "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$PROJECT/.pi/extensions/fm-primary-turnend-guard.ts"
 cp "$ROOT/bin/fm-primary-scope.sh" "$PROJECT/bin/fm-primary-scope.sh"
+cp "$ROOT/bin/fm-primary-scope-lib.sh" "$PROJECT/bin/fm-primary-scope-lib.sh"
 cp "$ROOT/bin/fm-turnend-guard.sh" "$PROJECT/bin/fm-turnend-guard.sh"
 cp "$ROOT/bin/fm-supervision-instructions.sh" "$PROJECT/bin/fm-supervision-instructions.sh"
 chmod +x "$PROJECT/bin/fm-primary-scope.sh" "$PROJECT/bin/fm-turnend-guard.sh"
@@ -188,10 +190,7 @@ function respond(context: { messages: Array<{ role: string; content?: unknown; t
     if (!toolNames.includes("bash")) {
       return fauxAssistantMessage(fauxToolCall("bash", { command: "bin/fm-wake-drain.sh" }, { id: "wake-drain" }), { stopReason: "toolUse" });
     }
-    if (!toolNames.includes("fm_watch_arm_pi")) {
-      return fauxAssistantMessage(fauxToolCall("fm_watch_arm_pi", {}, { id: "wake-arm" }), { stopReason: "toolUse" });
-    }
-    return fauxAssistantMessage("REARMED");
+    return fauxAssistantMessage("HANDLED");
   }
   throw new Error(`live E2E provider received an unexpected prompt: ${prompt}`);
 }
@@ -211,6 +210,7 @@ export default function (pi: { registerProvider(name: string, config: Record<str
 }
 TS
 
+cp "$ROOT/bin/fm-watch-arm.sh" "$PROJECT/bin/fm-watch-arm.sh"
 mv "$PROJECT/bin/fm-watch-arm.sh" "$PROJECT/bin/fm-watch-arm-live-e2e-real.sh"
 cat > "$PROJECT/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
@@ -300,20 +300,29 @@ send_prompt "Use the bash tool to run printf PI_E2E_BASH_TWO. Then reply exactly
 wait_for_exact_line "BASH-TWO" || fail "second bash turn did not complete"
 
 : > "$HOME_DIR/state/pi-e2e.meta"
-send_prompt "Reply exactly READY with no tools. After any FIRSTMATE WATCHER WAKE, run bin/fm-wake-drain.sh, read the signaled status, call fm_watch_arm_pi to re-arm, and finish exactly REARMED."
+send_prompt "Reply exactly READY with no tools. After any FIRSTMATE WATCHER WAKE, run bin/fm-wake-drain.sh, do not call fm_watch_arm_pi, and finish exactly HANDLED."
 wait_for_exact_line "READY" 120 || fail "Pi did not settle with the automatic watcher armed"
 
 printf 'done: pi live e2e watcher fire\n' > "$HOME_DIR/state/pi-e2e.status"
-wait_for_text "watcher: started Pi extension arm child 2" 180 || fail "watcher wake did not drain and re-arm through the Pi tool"
-wait_for_exact_line "REARMED" 120 || fail "Pi did not settle after re-arming watcher supervision"
+i=0
+while [ "$i" -lt 240 ]; do
+  grep -Eq 'reason=actionable-signal.*successor=started:[0-9]+' "$HOME_DIR/state/.watch-cycle-exits.log" 2>/dev/null && break
+  sleep 0.5
+  i=$((i + 1))
+done
+grep -Eq 'reason=actionable-signal.*successor=started:[0-9]+' "$HOME_DIR/state/.watch-cycle-exits.log" 2>/dev/null \
+  || fail "Pi extension did not start and ledger-link a successor after the actionable close"
+wait_for_exact_line "HANDLED" 120 || fail "Pi did not drain and settle after its extension-owned successor started"
 
 pane=$(capture)
 guard_count=$(printf '%s\n' "$pane" | grep -Fc "TURN WOULD END BLIND - supervision is off." || true)
-[ "$guard_count" -eq 0 ] || fail "automatic session_start arm should prevent guard injection, saw $guard_count"
+[ "$guard_count" -eq 0 ] || fail "successor was not protecting Pi before its next turn end (guard count $guard_count)"
 foreground_arm='$ bin/fm-watch-arm.sh'
 if printf '%s\n' "$pane" | grep -Fq "$foreground_arm"; then
   fail "Pi used a foreground bash watcher arm"
 fi
+arm_tool_count=$(printf '%s\n' "$pane" | grep -Fc 'started Pi extension arm child' || true)
+[ "$arm_tool_count" -eq 0 ] || fail "Pi model re-armed from memory instead of the extension (tool-result count $arm_tool_count)"
 
 wait_for_file "$HOME_DIR/state/.watch.lock/pid" 60 || fail "re-armed watcher pid was not recorded"
 pid_file="$HOME_DIR/state/.watch.lock/pid"
@@ -329,4 +338,4 @@ wait_pid_dead "$resumed_pi_pid" || fail "resumed native Pi owner survived clean 
 wait_pid_dead "$watcher_pid" || fail "watcher child survived clean Pi exit"
 wait_pid_dead "$arm_pid" || fail "arm child survived clean Pi exit"
 
-printf 'ok - Pi %s live E2E created, exited, resumed, reclaimed before watcher startup, woke, re-armed, and cleaned up\n' "$PI_VERSION"
+printf 'ok - Pi %s live E2E created, exited, resumed, reclaimed before watcher startup, auto-started a successor, and cleaned up\n' "$PI_VERSION"

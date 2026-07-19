@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # tests/fm-backlog-handoff.test.sh - full item-block handoff (header + indented body).
 #
-# The happy single-line path and safety refusals live in the secondmate lifecycle
-# and safety suites. This file owns the multi-line body contract: the full block
-# moves byte-exact, nothing orphans in the source, and re-running is a no-op.
+# The happy single-line path and broad safety refusals live in the secondmate
+# lifecycle and safety suites. This file owns focused delegated-handoff
+# regressions: the multi-line body contract and registry home parsing edge cases.
 set -u
 
 # shellcheck source=tests/secondmate-helpers.sh disable=SC1091
@@ -472,6 +472,71 @@ EOF
   pass "multi-paragraph body with internal blank lines moves whole and is idempotent"
 }
 
+# Registry lines may carry parentheticals in the summary before the structured
+# (home: ...) field (e.g. "(id is legacy)"). The home extractor must still find
+# the field; the old ^[^(]* regex treated those entries as home-less.
+test_registry_home_with_pre_home_parentheses() {
+  local home="$TMP_ROOT/reg-parens-main"
+  local sub="$TMP_ROOT/reg-parens-sub"
+  local id=oss-triage-t4
+  setup_homes "$home" "$sub" "$id"
+  local sub_abs
+  sub_abs=$(cd "$sub" && pwd -P)
+  # Prose parentheses before (home: ...), matching live registry shape.
+  printf -- '- %s - issue triage (id is legacy) (home: %s; scope: issue triage; projects: alpha; added 2026-07-09)\n' \
+    "$id" "$sub_abs" > "$home/data/secondmates.md"
+
+  cat > "$home/data/backlog.md" <<'EOF'
+## Queued
+- [ ] paren-item - should hand off (repo: alpha)
+  body line
+
+## Done
+EOF
+
+  FM_HOME="$home" "$ROOT/bin/fm-backlog-handoff.sh" "$id" paren-item >/dev/null \
+    || fail "handoff failed for registry entry with parentheses before (home: ...)"
+
+  assert_grep 'paren-item' "$sub/data/backlog.md" \
+    "item did not arrive when registry summary had pre-home parentheses"
+  assert_no_grep 'paren-item' "$home/data/backlog.md" \
+    "item still in source after handoff with pre-home parentheses"
+
+  pass "registry home parses when summary has parentheses before (home: ...)"
+}
+
+# An entry that genuinely lacks (home: ...) must still fail cleanly (empty parse
+# surfaces as "has no home"), not succeed or mis-parse prose.
+test_registry_home_missing_field_fails_cleanly() {
+  local home="$TMP_ROOT/reg-nohome-main"
+  local sub="$TMP_ROOT/reg-nohome-sub"
+  local id=no-home-mate
+  mkdir -p "$home/data" "$home/state"
+  seed_secondmate_home_marker "$sub" "$id"
+  # Registered, but no structured (home: ...) field at all.
+  printf -- '- %s - charter only (scope prose mentions home: /tmp/ignored-path)\n' \
+    "$id" > "$home/data/secondmates.md"
+
+  cat > "$home/data/backlog.md" <<'EOF'
+## Queued
+- [ ] orphan-item - never moves (repo: alpha)
+
+## Done
+EOF
+
+  local out rc=0
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-backlog-handoff.sh" "$id" orphan-item 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "handoff succeeded for registry entry with no (home: ...) field"
+  assert_contains "$out" "has no home" \
+    "missing (home: ...) field did not report the clean 'has no home' error"
+  assert_grep 'orphan-item' "$home/data/backlog.md" \
+    "source backlog was mutated despite missing home"
+  [ ! -f "$sub/data/backlog.md" ] || ! grep -q 'orphan-item' "$sub/data/backlog.md" 2>/dev/null \
+    || fail "item appeared in secondmate backlog despite missing home"
+
+  pass "registry entry without (home: ...) fails cleanly with has no home"
+}
+
 test_body_moves_when_followed_by_another_item
 test_body_moves_when_followed_by_section_heading
 test_multi_paragraph_body_with_internal_blanks_moves_whole
@@ -481,5 +546,7 @@ test_untouched_eof_line_preserves_terminator
 test_body_handoff_is_idempotent
 test_noncanonical_indented_continuations_refuse_without_changes
 test_indented_heading_is_not_section_boundary
+test_registry_home_with_pre_home_parentheses
+test_registry_home_missing_field_fails_cleanly
 
 echo "ALL TESTS PASSED"

@@ -47,8 +47,12 @@ Optional X mode integrates with the watcher only after explicit opt-in; [configu
 
 At session start, `bin/fm-session-start.sh` emits exactly one primary-harness supervision block rendered by `bin/fm-supervision-instructions.sh` from `docs/supervision-protocols/`.
 That block owns the live wait shape for the running primary harness: Claude and Grok use background-notify cycles, Codex uses bounded foreground checkpoints, Pi uses its two tracked primary extensions, and OpenCode uses its TUI plugin.
-`bin/fm-watch-arm.sh` remains the verified arm wrapper for protocols that call it; it forks the watcher as a tracked child, verifies it is genuinely alive with a fresh liveness beacon, and prints exactly one honest status line (`started` / `attached` / restart-only `healthy` / `FAILED`, the last exiting non-zero).
-On `attached` it stays live until that existing cycle ends so background-notify harnesses do not get an empty false wake from a healthy no-op exit.
+`bin/fm-watch-arm.sh` remains the verified arm wrapper for protocols that call it; it forks the watcher as a tracked child, verifies it is genuinely alive with a fresh liveness beacon, and prints an honest `started`, `attached`, or nonzero `FAILED` status.
+On `attached` it stays live across identity-matched successors, and an unexplained clean child close either attaches to a verified healthy successor or becomes the typed nonzero `watcher: FAILED - cycle ended without an actionable reason` result.
+The arm layer records one bounded lifecycle row per observed cycle in `state/.watch-cycle-exits.log`; `state/.watch-triage.log` remains exclusively the absorbed-wake debug log.
+Pi and OpenCode verify session-lock ownership and launch one singleton successor from their child-close handlers before delivering an actionable wake prompt, with bounded exponential retry for failed restoration.
+Claude keeps its tracked background-task protocol and adds a narrow PreToolUse continuity gate that allows drain and arm recovery while refusing only other fleet commands when tasks are in flight and no identity-matched live watcher holds the home lock.
+The existing turn-end guard is unchanged and remains the final backstop for all five harness protocols.
 Its `--restart` mode signals only the watcher recorded in the current home's `state/.watch.lock`, so restarting one home cannot kill sibling secondmate watchers.
 A pull-based guard (`bin/fm-guard.sh`) warns through supervision tool output if the primary checkout is tangled, or if tasks are in flight and that watcher stops running or queued wakes are waiting to be drained.
 The drain script calls that guard after emptying the queue, which avoids repeating the queued-wakes warning for records it just consumed while still warning on stale watcher liveness.
@@ -131,7 +135,7 @@ That keeps spawn launch compatible across claude, codex, grok, pi, and opencode 
 
 ## Optional secondmates
 
-`data/secondmates.md` records persistent domain supervisors with natural-language scopes, project clone lists, and home paths.
+`data/secondmates.md` records persistent secondmates with natural-language scopes, project clone lists, and home paths.
 `fm-home-seed.sh` provisions the isolated home, clones the listed PR-based projects into it, initializes newly cloned `no-mistakes` projects, copies the charter to `data/charter.md`, and `fm-spawn.sh --secondmate` launches it through the same session-provider and status-file path as any direct report.
 For a domain whose subject is the firstmate repo itself, a deliberate `--no-projects` seed creates a project-less home whose crews take pooled worktrees of that repo instead of separate clones.
 The signal cannot be mixed with project names or omitted accidentally, and a populated home cannot be converted in place; the full seed contract is in [configuration.md](configuration.md#secondmate-routes-datasecondmatesmd).
@@ -167,7 +171,7 @@ The `data/secondmates.md` line contract is owned by the [`secondmate-provisionin
 
 `data/projects.md` records each project's delivery mode and optional `+yolo` autonomy flag.
 `no-mistakes` projects run the full validation pipeline, `direct-PR` projects open PRs without that pipeline, and `local-only` projects stay local until firstmate performs an approved fast-forward merge.
-When a selected delivery path calls for a diff, `bin/fm-review-diff.sh` refreshes the authoritative base and, when task meta records `pr=`, compares against the reachable recorded `pr_head=` or a freshly fetched `refs/pull/<n>/head` before falling back to the local branch with a warning.
+When a selected delivery path calls for a diff, `bin/fm-review-diff.sh` refreshes the authoritative base and, when task meta records `pr=`, always fetches and compares against `refs/pull/<n>/head` by default (recorded `pr_head=` is only an offline fallback) before falling back to the local branch with a warning.
 For target project repos shipped through their own no-mistakes pipeline, commits under `.no-mistakes/evidence/` are the pipeline's PR-viewable validation evidence and are expected to stay in the crew branch until the evidence-hosting design changes.
 The firstmate repo itself is the exception: its `.no-mistakes/` directory is local state, stays gitignored, and is rejected by CI if tracked.
 PR-based task merges go through `bin/fm-pr-merge.sh`, which records `pr=` and any available `pr_head=` through `bin/fm-pr-check.sh` before calling `gh-axi pr merge`.
