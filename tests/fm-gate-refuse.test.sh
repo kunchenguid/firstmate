@@ -21,6 +21,9 @@
 # those runs stand in a controlled NON-gate repo, so the suite is hermetic even
 # when it is itself executed inside the real no-mistakes gate (whose process has
 # NO_MISTAKES_GATE=1 and a gate-worktree cwd).
+#
+# The tracked .no-mistakes.yaml is deliberately minimal and keeps
+# disable_project_settings: true for legacy or external gate-agent isolation.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -354,6 +357,17 @@ test_teardown_refuses_and_admits() {
   pass "fm-teardown: refuses on marker and gate-worktree backstop; a normal teardown is unaffected"
 }
 
+test_no_mistakes_yaml_keeps_project_settings_disabled() {
+  local file="$ROOT/.no-mistakes.yaml" content
+  assert_present "$file" "tracked .no-mistakes.yaml is missing"
+  git -C "$ROOT" ls-files --error-unmatch .no-mistakes.yaml >/dev/null 2>&1 \
+    || fail ".no-mistakes.yaml is not tracked by git"
+  content=$(cat "$file")
+  [ "$content" = "disable_project_settings: true" ] \
+    || fail ".no-mistakes.yaml must stay minimal with only disable_project_settings: true"
+  pass ".no-mistakes.yaml keeps project settings disabled for legacy gate isolation"
+}
+
 test_helper_env_marker_refuses
 test_helper_empty_env_marker_refuses
 test_helper_path_backstop_refuses
@@ -361,3 +375,4 @@ test_helper_normal_is_noop
 test_spawn_refuses_and_admits
 test_send_refuses_and_admits
 test_teardown_refuses_and_admits
+test_no_mistakes_yaml_keeps_project_settings_disabled

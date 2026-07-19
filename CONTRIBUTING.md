@@ -8,11 +8,18 @@ Firstmate tracked changes require focused verification, `bin/fm-lint.sh`, one bo
 
 ## Workflow
 
-1. Fork the repo, then clone the parent repo or set your local `origin` back to the parent (`git@github.com:kunchenguid/firstmate.git`).
-2. Fetch `origin`, then create a feature branch from the current `origin/main`.
+1. Fork the repo, then clone your fork and keep the parent repo as `upstream`.
+
+   ```sh
+   git clone git@github.com:<you>/firstmate.git
+   cd firstmate
+   git remote add upstream git@github.com:kunchenguid/firstmate.git
+   ```
+
+2. Fetch `upstream`, then create a feature branch from the current `upstream/main`.
 3. If you are an agent changing firstmate's shared tracked material, load `.agents/skills/firstmate-coding-guidelines/SKILL.md` before editing.
 4. Make the smallest coherent change and commit it with one atomic Conventional Commit.
-5. Run focused checks for the affected surface, then run `git diff --check` and `bin/fm-lint.sh`.
+5. Run focused checks for the affected surface, then run `git diff --check upstream/main...HEAD` and `bin/fm-lint.sh`.
 6. Run one bounded exact-head review against the final commit you intend to submit.
 7. If the review leads to changes, update the branch, rerun the focused checks and `bin/fm-lint.sh`, then run the bounded exact-head review on the new head.
 8. Push explicitly to a contributor-owned branch or fork:
@@ -54,7 +61,8 @@ There is no reliable way for `bin/fm-brief.sh`'s scaffold to detect that a task'
 A crewmate picking up such a brief should load the skill even if the brief predates this instruction.
 When supervising live crewmates, keep firstmate's own long validation or build commands in the background so watcher wakes can still be handled.
 Local `.no-mistakes/` state stays out of this repo.
-That is firstmate-specific; do not commit `.no-mistakes/evidence/` here even when another no-mistakes-managed target project keeps committed PR evidence.
+The tracked `.no-mistakes.yaml` exists only to keep legacy or external no-mistakes gate agents from loading this repo's project instructions.
+Do not commit `.no-mistakes/evidence/` here even when another no-mistakes-managed target project keeps committed PR evidence.
 
 Use the affected commands from this list when that surface changed:
 

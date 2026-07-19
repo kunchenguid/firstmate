@@ -109,6 +109,7 @@ Ship briefs also tell the crewmate to verify `pwd -P` and `git rev-parse --show-
 ## No-mistakes gate authority boundary
 
 Firstmate's own tracked changes now ship through the direct-PR workflow owned by `CONTRIBUTING.md`, but older or externally invoked no-mistakes validations can still run inside a checkout that contains the fleet-captain identity in `AGENTS.md`.
+The tracked `.no-mistakes.yaml` keeps `disable_project_settings: true` for that legacy and external gate-agent isolation.
 `fm-spawn.sh`, `fm-send.sh`, and `fm-teardown.sh` source `bin/fm-gate-refuse-lib.sh` and exit with status 3 before fleet mutation when the gate environment marker is present or the current checkout matches the default no-mistakes gate-repository topology.
 A normal primary checkout or crewmate worktree has neither signal and remains unaffected.
 The helper's header owns the exact signal detection, relocated-home limitation, test-harness bypass, and relationship to no-mistakes' HEAD-continuity guard.
