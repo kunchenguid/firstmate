@@ -33,10 +33,10 @@ test_help_includes_entire_header() {
   local help status=0
   help=$("$ROOT/bin/fm-brief.sh" --help 2>&1) || status=$?
   expect_code 0 "$status" "fm-brief.sh --help"
-  assert_contains "$help" "[--budget '<text>']" \
-    "fm-brief.sh --help omitted --budget from usage"
-  assert_contains "$help" "--budget '<text>' adds a task-specific hard stop" \
-    "fm-brief.sh --help omitted --budget documentation"
+  assert_contains "$help" "[--guideline '<text>']" \
+    "fm-brief.sh --help omitted --guideline from usage"
+  assert_contains "$help" "--guideline '<text>' adds task-specific advisory guidance" \
+    "fm-brief.sh --help omitted --guideline documentation"
   assert_contains "$help" "Refuses to overwrite an existing brief." "fm-brief.sh --help omitted its header terminator"
   pass "fm-brief.sh: --help includes the complete header"
 }
@@ -141,13 +141,13 @@ test_ship_project_memory_wording() {
   pass "fm-brief.sh: ship project-memory wording carries the AGENTS.md authoring bar"
 }
 
-test_stop_conditions_default_for_ship_and_scout() {
+test_guidelines_default_for_ship_and_scout() {
   local home id brief
-  home="$TMP_ROOT/stop-conditions-default-home"
+  home="$TMP_ROOT/guidelines-default-home"
   mkdir -p "$home/data"
 
   for kind in ship scout; do
-    id="brief-stop-default-$kind"
+    id="brief-guideline-default-$kind"
     if [ "$kind" = scout ]; then
       FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --scout >/dev/null 2>&1
     else
@@ -155,59 +155,60 @@ test_stop_conditions_default_for_ship_and_scout() {
     fi
     brief="$home/data/$id/brief.md"
     assert_grep "# Rules" "$brief" "$kind brief lost the Rules section"
-    assert_grep "## Stop conditions" "$brief" "$kind brief missing the stop-conditions block"
+    assert_grep "## Guidelines" "$brief" "$kind brief missing the guidelines block"
     assert_grep "Expected waiting on a validation run or long test suite does not count as a no-phase-change stretch." "$brief" \
-      "$kind brief treats healthy validation waiting as budget exhaustion"
+      "$kind brief treats healthy validation waiting as reaching the guideline"
     assert_grep "If roughly two hours or 50 significant actions pass without a supervisor-actionable phase change" "$brief" \
-      "$kind brief missing the default turn and time cap"
-    assert_grep "blocked: budget - {one-line progress + what remains}" "$brief" \
-      "$kind brief missing the budget exhaustion status protocol"
+      "$kind brief missing the default action and time guideline"
+    assert_grep "blocked: guideline - {one-line progress + what remains}" "$brief" \
+      "$kind brief missing the guideline status protocol"
     assert_grep "blocked: scope - {one-line progress + newly discovered work}" "$brief" \
-      "$kind brief missing the scope-expansion stop condition"
+      "$kind brief missing the scope-expansion guideline"
     assert_grep "# Definition of done" "$brief" "$kind brief lost the Definition of done section"
-    assert_no_grep "Task-specific budget:" "$brief" "$kind brief rendered a budget override without --budget"
+    assert_no_grep "Task-specific guideline:" "$brief" "$kind brief rendered task-specific guidance without --guideline"
   done
-  pass "fm-brief.sh: ship and scout briefs include safe default stop conditions"
+  pass "fm-brief.sh: ship and scout briefs include the standard guidelines"
 }
 
-test_stop_conditions_budget_override_for_ship_and_scout() {
-  local home id brief budget
-  home="$TMP_ROOT/stop-conditions-budget-home"
-  budget="hard stop at 30 minutes"
+test_task_specific_guideline_for_ship_and_scout() {
+  local home id brief guideline
+  home="$TMP_ROOT/task-specific-guideline-home"
+  guideline="check in after 30 minutes"
   mkdir -p "$home/data"
 
   for kind in ship scout; do
-    id="brief-stop-budget-$kind"
+    id="brief-task-guideline-$kind"
     if [ "$kind" = scout ]; then
-      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --scout --budget "$budget" >/dev/null 2>&1
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --scout --guideline "$guideline" >/dev/null 2>&1
     else
-      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --budget "$budget" >/dev/null 2>&1
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --guideline "$guideline" >/dev/null 2>&1
     fi
     brief="$home/data/$id/brief.md"
-    assert_grep "Task-specific budget: $budget" "$brief" "$kind brief omitted its --budget override"
-    assert_grep "Treat this as a hard cap" "$brief" "$kind brief did not make --budget a stop condition"
-    assert_grep "blocked: budget - {one-line progress + what remains}" "$brief" \
-      "$kind brief lost the budget exhaustion status protocol"
+    assert_grep "Task-specific guideline: $guideline" "$brief" "$kind brief omitted its --guideline text"
+    assert_grep "Treat this as advisory guidance alongside the standard guidelines." "$brief" \
+      "$kind brief did not describe --guideline as advisory"
+    assert_grep "blocked: guideline - {one-line progress + what remains}" "$brief" \
+      "$kind brief lost the guideline status protocol"
   done
-  pass "fm-brief.sh: --budget renders in ship and scout stop conditions"
+  pass "fm-brief.sh: --guideline renders as advisory guidance in ship and scout briefs"
 }
 
-test_budget_rejects_recognized_option_as_value() {
+test_guideline_rejects_recognized_option_as_value() {
   local home id brief option status output
-  home="$TMP_ROOT/budget-option-home"
+  home="$TMP_ROOT/guideline-option-home"
   mkdir -p "$home/data"
 
-  for option in -h --help --scout --secondmate --herdr-lab --no-projects --budget; do
-    id="brief-budget-option-${option//-/}"
+  for option in -h --help --scout --secondmate --herdr-lab --no-projects --guideline; do
+    id="brief-guideline-option-${option//-/}"
     status=0
-    output=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --budget "$option" 2>&1) || status=$?
-    expect_code 1 "$status" "--budget must reject $option as a missing value"
-    assert_contains "$output" "error: --budget requires non-empty text" \
-      "--budget $option returned the wrong error"
+    output=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --guideline "$option" 2>&1) || status=$?
+    expect_code 1 "$status" "--guideline must reject $option as a missing value"
+    assert_contains "$output" "error: --guideline requires non-empty text" \
+      "--guideline $option returned the wrong error"
     brief="$home/data/$id/brief.md"
-    assert_absent "$brief" "--budget $option still scaffolded a brief"
+    assert_absent "$brief" "--guideline $option still scaffolded a brief"
   done
-  pass "fm-brief.sh: --budget rejects recognized options as its value"
+  pass "fm-brief.sh: --guideline rejects recognized options as its value"
 }
 
 test_ship_and_scout_reject_excess_positionals() {
@@ -219,15 +220,15 @@ test_ship_and_scout_reject_excess_positionals() {
     id="brief-excess-positionals-$kind"
     status=0
     if [ "$kind" = scout ]; then
-      output=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --scout --budget hard stop at 30 minutes 2>&1) || status=$?
+      output=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --scout --guideline check in after 30 minutes 2>&1) || status=$?
     else
-      output=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --budget hard stop at 30 minutes 2>&1) || status=$?
+      output=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --guideline check in after 30 minutes 2>&1) || status=$?
     fi
     expect_code 1 "$status" "$kind brief must reject excess positional arguments"
     assert_contains "$output" "error: ship and scout briefs accept only <task-id> and <repo-name> as positional arguments" \
       "$kind brief returned the wrong excess-positionals error"
     brief="$home/data/$id/brief.md"
-    assert_absent "$brief" "$kind brief silently scaffolded with a truncated unquoted budget"
+    assert_absent "$brief" "$kind brief silently scaffolded with truncated unquoted guidance"
   done
   pass "fm-brief.sh: ship and scout briefs reject excess positional arguments"
 }
@@ -443,9 +444,9 @@ test_ship_modes_generate_clean_briefs
 test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
 test_ship_project_memory_wording
-test_stop_conditions_default_for_ship_and_scout
-test_stop_conditions_budget_override_for_ship_and_scout
-test_budget_rejects_recognized_option_as_value
+test_guidelines_default_for_ship_and_scout
+test_task_specific_guideline_for_ship_and_scout
+test_guideline_rejects_recognized_option_as_value
 test_ship_and_scout_reject_excess_positionals
 test_herdr_lab_contract_is_explicit_and_complete
 test_herdr_lab_contract_quotes_foreign_firstmate_path

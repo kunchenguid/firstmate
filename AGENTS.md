@@ -427,8 +427,8 @@ Preserve durable structured identifiers, dependencies, and completion artifact l
 
 ## 11. Crewmate briefs
 
-`bin/fm-brief.sh` and its help own scaffold syntax, generated variants, bounded stop conditions, status protocol, delivery-mode definitions of done, and exact safety mechanics.
-At intake, pass `--budget '<text>'` for ship or scout work whose unattended, long-running, or overnight shape needs a task-specific hard stop beyond the standard stop conditions; omit it for ordinary work.
+`bin/fm-brief.sh` and its help own scaffold syntax, generated variants, guidelines, status protocol, delivery-mode definitions of done, and exact safety mechanics.
+At intake, pass `--guideline '<text>'` for ship or scout work whose unattended, long-running, or overnight shape needs additional task-specific guidance beyond the standard guidelines; omit it for ordinary work.
 Use its scaffold as the contract, then replace every `{TASK}` placeholder with a clear task description, acceptance criteria, constraints, and necessary context before dispatch or seeding.
 Keep additions task-specific rather than repeating lifecycle instructions, and alter generated sections only when the task genuinely differs from the standard shape.
 
