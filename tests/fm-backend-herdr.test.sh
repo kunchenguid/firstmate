@@ -1587,6 +1587,99 @@ EOF
   pass "herdr repeated spawn/teardown: one persistent firstmate workspace reused, zero orphans, default tab pruned, create ran once"
 }
 
+# --- workspace-ensure serialization (2026-07-19 duplicate-workspace fix) ----
+#
+# Root cause and fix are documented at fm_backend_herdr_workspace_lock_acquire
+# in bin/backends/herdr.sh and docs/herdr-backend.md's "Incident (2026-07-19)"
+# section: N first spawns launched in PARALLEL each ran workspace_find while
+# no workspace existed yet, and each then minted its own workspace with the
+# identical home label (herdr enforces no label uniqueness, so nothing
+# downstream failed - the fleet just fragmented across duplicate spaces).
+
+test_workspace_ensure_concurrent_first_spawns_mint_one_workspace() {
+  # Three container_ensure calls launched in PARALLEL against an empty state,
+  # reproducing the exact 2026-07-19 batch-spawn shape. The mkdir lock (scoped
+  # to this test via TMPDIR) must serialize the find-or-create window so
+  # exactly ONE workspace create runs and all three callers resolve the SAME
+  # container.
+  local dir log state fb i p raw1 raw2 raw3 wscount created
+  dir="$TMP_ROOT/concurrent-ensure"; mkdir -p "$dir/locks"; log="$dir/log"; state="$dir/state.json"; : > "$log"
+  fb=$(make_herdr_statefake "$dir")
+  for i in 1 2 3; do
+    ( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_FAKE_HERDR_STATE="$state" HERDR_SESSION=fmtest \
+      FM_HOME="$ROOT" TMPDIR="$dir/locks" \
+      bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_container_ensure /proj' "$ROOT" > "$dir/out.$i" 2>/dev/null ) &
+  done
+  for p in $(jobs -p); do
+    wait "$p" || fail "a concurrent container_ensure failed"
+  done
+  wscount=$(jq -r '[.workspaces[]|select(.label=="firstmate")]|length' "$state")
+  [ "$wscount" = 1 ] || fail "expected exactly 1 firstmate workspace after 3 concurrent first spawns, got $wscount: $(jq -c '.workspaces' "$state")"
+  created=$(grep -c $'\x1f''workspace'$'\x1f''create' "$log")
+  [ "$created" = 1 ] || fail "workspace create should run exactly once across 3 concurrent ensures, ran $created times"
+  raw1=$(cut -d$'\t' -f1 "$dir/out.1"); raw2=$(cut -d$'\t' -f1 "$dir/out.2"); raw3=$(cut -d$'\t' -f1 "$dir/out.3")
+  [ -n "$raw1" ] || fail "concurrent ensure 1 echoed no container"
+  { [ "$raw1" = "$raw2" ] && [ "$raw2" = "$raw3" ]; } \
+    || fail "all three concurrent ensures must resolve the same container, got '$raw1' '$raw2' '$raw3'"
+  pass "fm_backend_herdr_workspace_ensure: 3 concurrent first spawns mint exactly one workspace and share it"
+}
+
+test_workspace_ensure_waits_for_live_lock_holder_then_adopts() {
+  # Deterministic serialization proof, no timing luck: this test process
+  # itself holds the lock (a live pid), a background ensure must WAIT (no
+  # workspace create while held), and after the "winner" workspace appears
+  # and the lock is released, the waiter must ADOPT it (empty seeded tab id,
+  # still zero creates).
+  local dir log state fb key lock bgpid out created
+  dir="$TMP_ROOT/lock-wait"; mkdir -p "$dir/locks"; log="$dir/log"; state="$dir/state.json"; : > "$log"
+  fb=$(make_herdr_statefake "$dir")
+  key=$(printf '%s' "$ROOT" | cksum | cut -d' ' -f1)
+  lock="$dir/locks/fm-herdr-ws.$key.fmtest.firstmate.lock"
+  mkdir "$lock" && printf '%s' "$$" > "$lock/pid"
+  ( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_FAKE_HERDR_STATE="$state" HERDR_SESSION=fmtest \
+    FM_HOME="$ROOT" TMPDIR="$dir/locks" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_container_ensure /proj' "$ROOT" > "$dir/out" 2>/dev/null ) &
+  bgpid=$!
+  sleep 1
+  created=$(grep -c $'\x1f''workspace'$'\x1f''create' "$log" || true)
+  [ "$created" = 0 ] || fail "ensure must wait while a live holder owns the lock, but a workspace create ran"
+  jq '.workspaces += [{workspace_id:"w9",label:"firstmate"}]' "$state" > "$state.tmp" && mv "$state.tmp" "$state"
+  rm -rf "$lock"
+  wait "$bgpid" || fail "the waiting ensure failed after the lock was released"
+  out=$(cat "$dir/out")
+  case "$out" in
+    "fmtest:w9"$'\t') : ;;
+    *) fail "the waiter must adopt the winner's workspace with an empty seeded tab id, got '$out'" ;;
+  esac
+  created=$(grep -c $'\x1f''workspace'$'\x1f''create' "$log" || true)
+  [ "$created" = 0 ] || fail "the adopting waiter must never create, but a workspace create ran"
+  pass "fm_backend_herdr_workspace_ensure: waits on a live lock holder, then adopts the winner's workspace"
+}
+
+test_workspace_ensure_breaks_provably_dead_lock_holder() {
+  # A lock dir whose recorded holder pid is provably dead (kill -0 fails)
+  # must be broken promptly so the spawn proceeds; fail-open never blocks
+  # dispatch on a crashed prior holder.
+  local dir log state fb key lock dead raw wscount
+  dir="$TMP_ROOT/lock-stale"; mkdir -p "$dir/locks"; log="$dir/log"; state="$dir/state.json"; : > "$log"
+  fb=$(make_herdr_statefake "$dir")
+  key=$(printf '%s' "$ROOT" | cksum | cut -d' ' -f1)
+  lock="$dir/locks/fm-herdr-ws.$key.fmtest.firstmate.lock"
+  sh -c 'echo $$ > "$1"' _ "$dir/deadpid" &
+  wait $!
+  dead=$(cat "$dir/deadpid")
+  mkdir "$lock" && printf '%s' "$dead" > "$lock/pid"
+  raw=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_FAKE_HERDR_STATE="$state" HERDR_SESSION=fmtest \
+    FM_HOME="$ROOT" TMPDIR="$dir/locks" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_container_ensure /proj' "$ROOT" ) \
+    || fail "container_ensure failed against a provably dead lock holder"
+  case "$raw" in fmtest:w*) : ;; *) fail "expected a normal container after breaking the dead holder's lock, got '$raw'" ;; esac
+  wscount=$(jq -r '[.workspaces[]|select(.label=="firstmate")]|length' "$state")
+  [ "$wscount" = 1 ] || fail "expected exactly 1 workspace after breaking the dead lock, got $wscount"
+  [ ! -d "$lock" ] || fail "the lock must be released after ensure completes"
+  pass "fm_backend_herdr_workspace_ensure: breaks a provably dead holder's lock and proceeds"
+}
+
 # --- created-vs-adopted default-tab-prune safety (2026-07-02 self-kill fix) -
 #
 # Root cause and fix are documented at
@@ -2055,6 +2148,9 @@ test_container_ensure_creates_with_no_focus_flag
 test_container_ensure_uses_secondmate_home_label
 test_workspace_ensure_prunes_default_tab
 test_repeated_cycles_reuse_one_workspace_no_orphans
+test_workspace_ensure_concurrent_first_spawns_mint_one_workspace
+test_workspace_ensure_waits_for_live_lock_holder_then_adopts
+test_workspace_ensure_breaks_provably_dead_lock_holder
 test_adopted_workspace_never_prunes_default_tab
 test_label_collision_startup_workspace_leaves_live_tab_alone
 test_prune_refuses_a_working_agent_pane_defense_in_depth

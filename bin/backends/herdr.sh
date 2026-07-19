@@ -303,20 +303,78 @@ fm_backend_herdr_workspace_prune_seeded_default_tab() {  # <session> <workspace_
 # focuses regardless of --no-focus (herdr always needs something focused to
 # attach to). --no-focus is passed unconditionally anyway, for defense in
 # depth and because it is a no-op in the already-safe case.
+# fm_backend_herdr_workspace_lock_acquire / _release: serialize
+# fm_backend_herdr_workspace_ensure's find-or-create window across CONCURRENT
+# spawn processes of the SAME home. Without this, N first spawns launched in
+# parallel each run workspace_find while no workspace exists yet, and each
+# then mints its own workspace with the identical home label - live-fired
+# 2026-07-19 (docs/herdr-backend.md "Incident (2026-07-19)"): three crewmates
+# spawned in one batch produced three "firstmate" workspaces. Herdr enforces
+# no label uniqueness, so nothing downstream ever fails; the fleet just
+# fragments across duplicate spaces.
+#
+# Mechanism: an atomic `mkdir` lock (portable; macOS ships no flock) in
+# ${TMPDIR:-/tmp}, keyed by a cksum of $FM_HOME plus the session and the
+# home's own label - the same two axes that scope the workspace itself, so
+# two different homes (or two sessions) never contend. The holder records its
+# pid; a waiter frees the lock only when that recorded pid is provably dead
+# (`kill -0` fails). A lock dir whose pid file has not appeared yet is simply
+# waited out - the overall acquire budget bounds that.
+#
+# Fail-open by design: if the lock cannot be acquired within the budget (or
+# the lock dir cannot be created at all), the caller proceeds WITHOUT the
+# lock after one stderr warning. The worst case is exactly today's unlocked
+# find-or-create race - a duplicate workspace - never a blocked spawn,
+# mirroring the "quota trouble never blocks dispatch" posture.
+fm_backend_herdr_workspace_lock_acquire() {  # <session>
+  local session=$1 label key lock i holder_pid
+  label=$(fm_backend_herdr_workspace_label)
+  key=$(printf '%s' "$FM_HOME" | cksum | cut -d' ' -f1)
+  lock="${TMPDIR:-/tmp}/fm-herdr-ws.$key.$session.$label.lock"
+  for i in $(seq 1 120); do
+    if mkdir "$lock" 2>/dev/null; then
+      printf '%s' "$$" > "$lock/pid" 2>/dev/null || true
+      FM_BACKEND_HERDR_WS_LOCK=$lock
+      return 0
+    fi
+    holder_pid=$(cat "$lock/pid" 2>/dev/null || true)
+    if [ -n "$holder_pid" ] && ! kill -0 "$holder_pid" 2>/dev/null; then
+      rm -rf "$lock" 2>/dev/null || true
+      continue
+    fi
+    sleep 0.1
+  done
+  return 1
+}
+
+fm_backend_herdr_workspace_lock_release() {
+  [ -n "${FM_BACKEND_HERDR_WS_LOCK:-}" ] || return 0
+  rm -rf "$FM_BACKEND_HERDR_WS_LOCK" 2>/dev/null || true
+  FM_BACKEND_HERDR_WS_LOCK=""
+}
+
 fm_backend_herdr_workspace_ensure() {  # <session> <cwd>
   local session=$1 cwd=$2 wsid out label
   FM_BACKEND_HERDR_WS_ID=""
   FM_BACKEND_HERDR_WS_SEEDED_TAB_ID=""
+  FM_BACKEND_HERDR_WS_LOCK=""
+  # Serialize the find-or-create window below against concurrent spawns of
+  # this same home (see fm_backend_herdr_workspace_lock_acquire above).
+  # Acquire failure warns and proceeds unlocked - never blocks the spawn.
+  fm_backend_herdr_workspace_lock_acquire "$session" \
+    || echo "warning: herdr workspace-ensure lock not acquired; proceeding unlocked (concurrent first spawns may mint duplicate workspaces)" >&2
   wsid=$(fm_backend_herdr_workspace_find "$session")
   if [ -n "$wsid" ]; then
+    fm_backend_herdr_workspace_lock_release
     FM_BACKEND_HERDR_WS_ID=$wsid
     printf '%s' "$wsid"
     return 0
   fi
   label=$(fm_backend_herdr_workspace_label)
-  out=$(fm_backend_herdr_cli "$session" workspace create --cwd "$cwd" --label "$label" --no-focus 2>/dev/null) || return 1
+  out=$(fm_backend_herdr_cli "$session" workspace create --cwd "$cwd" --label "$label" --no-focus 2>/dev/null) \
+    || { fm_backend_herdr_workspace_lock_release; return 1; }
   wsid=$(printf '%s' "$out" | jq -r '.result.workspace.workspace_id // empty' 2>/dev/null)
-  [ -n "$wsid" ] || return 1
+  [ -n "$wsid" ] || { fm_backend_herdr_workspace_lock_release; return 1; }
   FM_BACKEND_HERDR_WS_ID=$wsid
   # Herdr seeds a new workspace with one auto-created default tab firstmate
   # never uses. It is NOT pruned here: at this instant it is the workspace's
@@ -326,6 +384,7 @@ fm_backend_herdr_workspace_ensure() {  # <session> <cwd>
   # once the first real task tab exists alongside it, and only ever targets
   # this exact captured tab_id.
   FM_BACKEND_HERDR_WS_SEEDED_TAB_ID=$(printf '%s' "$out" | jq -r '.result.tab.tab_id // empty' 2>/dev/null)
+  fm_backend_herdr_workspace_lock_release
   printf '%s' "$wsid"
 }
 

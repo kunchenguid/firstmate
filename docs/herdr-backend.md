@@ -158,6 +158,33 @@ Because closing a workspace's last tab deletes it, a home's workspace does not o
 
 A workspace whose label this adapter did not derive (see "Label derivation" above) is never adopted, reused, or torn down by firstmate - `fm_backend_herdr_workspace_find` and `fm_backend_herdr_list_live` only ever match a home's own derived label.
 
+## Incident (2026-07-19): parallel first spawns minted duplicate per-home workspaces
+
+Observed on real herdr 0.7.4 (protocol 16), macOS aarch64, firstmate `b2bf95f`, primary home, session `default`.
+A batch request had the primary spawn three crewmates in parallel as each task's FIRST spawn of the session: `crew-readme-a1` (grok ship), `crew-herdr-scout-b2` (grok scout), and `crew-todo-c3` (claude ship), every task meta recording `backend=herdr`.
+The spaces sidebar immediately showed three workspaces all labeled `firstmate`, one task tab in each, instead of one `firstmate` workspace with three tabs.
+After the fastest task finished and tore down, `herdr workspace list` still showed the two surviving duplicates (the third had already vanished through the verified closing-the-last-tab-deletes-the-workspace behavior):
+
+```sh
+herdr workspace list | jq -c '.result.workspaces[] | {workspace_id, label}'
+```
+
+```text
+{"workspace_id":"w2","label":"captain"}
+{"workspace_id":"w3","label":"firstmate"}
+{"workspace_id":"w4","label":"firstmate"}
+```
+
+The root cause is the adapter's own find-before-create window, not herdr: `fm_backend_herdr_workspace_ensure` ran `workspace_find` and then `workspace create` with no serialization between concurrent spawn processes.
+Three parallel first spawns each found no workspace yet, so each minted its own; herdr enforces no label uniqueness ("Label collisions" above), so nothing downstream failed and the fleet silently fragmented across duplicate spaces.
+Sequential spawns were never affected because the second spawn's `workspace_find` adopts the first spawn's workspace.
+
+**Fix:** `fm_backend_herdr_workspace_lock_acquire` / `_release` in `bin/backends/herdr.sh` serialize the find-or-create window with an atomic `mkdir` lock (portable; macOS ships no flock) under `${TMPDIR:-/tmp}`, keyed by a cksum of `$FM_HOME` plus the session and the home's own label - the same axes that scope the workspace itself, so different homes and sessions never contend.
+The holder records its pid; a waiter frees the lock only when that pid is provably dead (`kill -0` fails), and a lock dir whose pid file has not appeared yet is simply waited out within the bounded acquire budget (12s).
+The lock is fail-open by design: on acquire timeout the spawn proceeds unlocked after one stderr warning, so the worst case is exactly the pre-fix race (a duplicate workspace), never a blocked spawn - mirroring the "quota trouble never blocks dispatch" posture.
+Unit coverage in `tests/fm-backend-herdr.test.sh`: `test_workspace_ensure_concurrent_first_spawns_mint_one_workspace` (three genuinely parallel `container_ensure` calls against the stateful fake mint exactly one workspace and share it), `test_workspace_ensure_waits_for_live_lock_holder_then_adopts` (a deterministic hold-then-release proof that a waiter adopts the winner's workspace with zero creates), and `test_workspace_ensure_breaks_provably_dead_lock_holder` (a crashed prior holder's lock is broken promptly and released after ensure).
+Duplicate workspaces minted BEFORE this fix self-heal through normal teardown: each duplicate disappears when its last task tab closes, and the next spawn adopts whichever single labeled workspace remains.
+
 ## Target string and meta fields
 
 A herdr task's `window=` meta field holds `<herdr-session>:<pane-id>`, for example `default:w1:p2`.
