@@ -112,6 +112,24 @@ test_shared_authoring_requirements_are_owned() {
   pass "firstmate-coding-guidelines owns compatibility review and deterministic enforcement"
 }
 
+test_pi_watcher_continuity_cross_reference_stays_aligned() {
+  local section
+  section=$(awk '
+    /^\*\*Primary-session guard fact / { found = 1 }
+    found && /^## grok / { exit }
+    found { print }
+  ' "$HARNESS")
+  assert_contains "$section" "starts and verifies every later successor" \
+    "Pi harness guidance lost extension-owned successor continuity"
+  assert_contains "$section" 'without calling `fm_watch_arm_pi`' \
+    "Pi harness guidance asks the model to re-arm after an ordinary wake"
+  assert_contains "$section" "only for initial arming when automatic startup has not armed or for explicit recovery" \
+    "Pi harness guidance widened the custom tool beyond initial or recovery entry"
+  assert_not_contains "$section" "after a wake, the model re-arms" \
+    "Pi harness guidance restored model-owned watcher continuity"
+  pass "Pi harness guidance preserves extension-owned watcher continuity"
+}
+
 test_secondmate_registry_contract_stays_concise() {
   local guidance routing_section schema_line
   routing_section=$(awk '
@@ -226,6 +244,7 @@ test_diagnostic_owner_covers_causal_procedure
 test_project_management_owner_covers_guarded_operations
 test_generic_effort_fallback_respects_precedence
 test_shared_authoring_requirements_are_owned
+test_pi_watcher_continuity_cross_reference_stays_aligned
 test_secondmate_registry_contract_stays_concise
 test_state_startup_and_ordinary_recovery_placement
 test_compressed_agents_owner_map
