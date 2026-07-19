@@ -92,6 +92,21 @@ EOF
 [ -n "$PANE_ID" ] || fail "create_task did not return a pane id"
 SUPERVISOR_TARGET="$SESSION:$PANE_ID"
 
+# A newly created real-Herdr pane can exist before its shell accepts Enter.
+# Prove the shell is ready before launching the fixture loop, or pane run can
+# leave that launch command as unsubmitted input and corrupt the self-check.
+PANE_READY=false
+sleep 0.5
+for _attempt in $(seq 1 20); do
+  fm_backend_herdr_cli "$SESSION" pane run "$PANE_ID" \
+    "printf '__FM_%s_%s__\\n' AFK READY" >/dev/null 2>&1 || true
+  case "$(fm_backend_herdr_cli "$SESSION" pane read "$PANE_ID" --source recent --lines 100 2>/dev/null)" in
+    *__FM_AFK_READY__*) PANE_READY=true; break ;;
+  esac
+  sleep 0.5
+done
+[ "$PANE_READY" = true ] || fail "the scratch supervisor pane's shell did not become ready"
+
 # A second, independent live task tab in the same workspace, mirroring the tmux
 # e2e's fake fm-fake-c1 crewmate window - not required by scan_signals (which
 # only watches state/*.status mtimes, no window/pane dependency), but kept for

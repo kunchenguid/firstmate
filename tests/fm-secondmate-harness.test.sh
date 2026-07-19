@@ -625,6 +625,28 @@ test_spawn_explicit_harness_uses_explicit_profile_axes() {
   pass "C8 spawn: an explicit --harness still honors explicit model/effort flags"
 }
 
+# Secondmates use the same Codex template but prepend their isolated FM_HOME.
+# Pin that this extra prefix cannot allow an ambient runtime CODEX_HOME through.
+test_secondmate_codex_normalizes_auth_boundary() {
+  local w sm sm_real launchlog launch out status
+  w="$TMP_ROOT/spawn-codex-auth-boundary"
+  sm="$w/sm"
+  launchlog="$w/launch.log"
+  mkdir -p "$w/home/config"
+  printf 'codex gpt-5 high\n' > "$w/home/config/secondmate-harness"
+  make_seeded_home "$sm" sm
+  sm_real=$(cd "$sm" && pwd -P)
+
+  out=$(CODEX_HOME=/orca/runtime/home spawn_secondmate_capture "$w" sm "$sm" "$launchlog" 2>&1)
+  status=$?
+  expect_code 0 "$status" "Codex secondmate spawn with hostile CODEX_HOME should succeed"
+  launch=$(cat "$launchlog")
+  assert_contains "$launch" "FM_HOME='$sm_real' env -u CODEX_HOME codex --model 'gpt-5' -c 'model_reasoning_effort=\"high\"' --dangerously-bypass-approvals-and-sandbox" \
+    "Codex secondmate launch must unset CODEX_HOME while preserving home, model, effort, and autonomy"
+  assert_not_contains "$launch" "notify=" "Codex secondmate launch must retain its no-notify behavior"
+  pass "Codex secondmate launch normalizes CODEX_HOME at the process boundary"
+}
+
 # The harness fallback chain (secondmate-harness -> crew-harness -> own) still
 # resolves correctly with no model/effort tokens anywhere in the chain, and a
 # crew/scout (non-secondmate) launch is entirely unaffected by this feature: no
@@ -1031,6 +1053,7 @@ test_spawn_explicit_model_overrides_secondmate_harness_token
 test_spawn_explicit_effort_overrides_secondmate_harness_token
 test_spawn_explicit_harness_does_not_inherit_secondmate_harness_tokens
 test_spawn_explicit_harness_uses_explicit_profile_axes
+test_secondmate_codex_normalizes_auth_boundary
 test_spawn_fallback_chain_and_crew_scout_unaffected
 test_bootstrap_sweep_propagates_and_reconverges
 test_bootstrap_sweep_propagates_when_tracked_current

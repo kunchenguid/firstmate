@@ -257,6 +257,67 @@ test_codex_omits_invalid_max_effort() {
   pass "codex omits unsupported max effort instead of passing a bad config value"
 }
 
+# Every Firstmate-owned Codex launch must reject an ambient runtime-specific
+# CODEX_HOME at the final process boundary. The command capture pins ship,
+# scout, and batch construction while the fake executable smoke proves the
+# child process itself receives only the canonical HOME-bound auth state.
+test_codex_normalizes_auth_boundary_for_ship_scout_and_batch() {
+  local rec ship scout batch_a batch_b out status launches ship_launch scout_launch envlog canonical_home
+  ship=auth-ship-z17
+  scout=auth-scout-z18
+  batch_a=auth-batch-a-z19
+  batch_b=auth-batch-b-z20
+  rec=$(make_spawn_case codex-auth-boundary codex "$ship" "$scout" "$batch_a" "$batch_b")
+  read_case_record "$rec"
+
+  out=$(CODEX_HOME=/orca/runtime/home run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$ship" "$PROJ_DIR" --harness codex --model gpt-5 --effort high)
+  status=$?
+  expect_code 0 "$status" "Codex ship spawn with hostile CODEX_HOME should succeed"
+  ship_launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$ship_launch" "env -u CODEX_HOME codex --model 'gpt-5' -c 'model_reasoning_effort=\"high\"' --dangerously-bypass-approvals-and-sandbox" \
+    "Codex ship launch must unset CODEX_HOME before preserving model, effort, and autonomy"
+  assert_contains "$ship_launch" "notify=[\\\"bash\\\",\\\"-c\\\",\\\"touch '" \
+    "Codex ship launch must retain its notify turn-end behavior"
+
+  out=$(CODEX_HOME=/orca/runtime/home run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$scout" "$PROJ_DIR" --harness codex --scout)
+  status=$?
+  expect_code 0 "$status" "Codex scout spawn with hostile CODEX_HOME should succeed"
+  scout_launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$scout_launch" "env -u CODEX_HOME codex --dangerously-bypass-approvals-and-sandbox" \
+    "Codex scout launch must unset CODEX_HOME before preserving autonomy"
+  assert_contains "$scout_launch" "notify=[\\\"bash\\\",\\\"-c\\\",\\\"touch '" \
+    "Codex scout launch must retain its notify turn-end behavior"
+
+  out=$(CODEX_HOME=/orca/runtime/home run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$batch_a=$PROJ_DIR" "$batch_b=$PROJ_DIR" --harness codex --model gpt-5 --effort high)
+  status=$?
+  expect_code 0 "$status" "Codex batch spawn with hostile CODEX_HOME should succeed"
+  launches=$(cat "$LAUNCH_LOG")
+  [ "$(printf '%s\n' "$launches" | grep -c '^env -u CODEX_HOME codex ' || true)" -eq 2 ] \
+    || fail "every Codex batch launch must normalize CODEX_HOME: $launches"
+
+  envlog="$CASE_DIR/fake-codex-env.log"
+  cat > "$FAKEBIN_DIR/codex" <<'SH'
+#!/usr/bin/env bash
+set -u
+printf 'HOME=%s\n' "$HOME" > "$FM_FAKE_CODEX_ENV_LOG"
+if [ "${CODEX_HOME+x}" = x ]; then
+  printf 'CODEX_HOME=set\n' >> "$FM_FAKE_CODEX_ENV_LOG"
+else
+  printf 'CODEX_HOME=unset\n' >> "$FM_FAKE_CODEX_ENV_LOG"
+fi
+SH
+  chmod +x "$FAKEBIN_DIR/codex"
+  canonical_home="$CASE_DIR/canonical-home"
+  HOME="$canonical_home" CODEX_HOME=/orca/runtime/home PATH="$FAKEBIN_DIR:$PATH" \
+    FM_FAKE_CODEX_ENV_LOG="$envlog" bash -c "$ship_launch"
+  assert_grep "HOME=$canonical_home" "$envlog" "Codex auth normalization must preserve HOME"
+  assert_grep 'CODEX_HOME=unset' "$envlog" "Codex child must see CODEX_HOME unset, not inherited"
+  pass "Codex ship, scout, and batch launches normalize CODEX_HOME while preserving launch behavior"
+}
+
 test_grok_threads_model_and_reasoning_effort() {
   local rec id out status launch
   id=profile-grok-z5
@@ -393,6 +454,7 @@ test_active_dispatch_profile_allows_raw_launch_command
 test_claude_threads_model_and_effort
 test_codex_threads_model_and_effort
 test_codex_omits_invalid_max_effort
+test_codex_normalizes_auth_boundary_for_ship_scout_and_batch
 test_grok_threads_model_and_reasoning_effort
 test_grok_omits_invalid_max_reasoning_effort
 test_grok_omits_invalid_xhigh_reasoning_effort

@@ -172,8 +172,11 @@ Directory trust dialog on first run per repo root: "Do you trust the contents of
 Accept with Enter.
 The decision persists for the repo, so later worktrees of the same project skip it.
 
-Resume after exit with `codex resume <session-id>`.
+Resume after exit with `env -u CODEX_HOME codex resume <session-id>`.
 The session id is printed on quit.
+
+`bin/fm-spawn.sh`'s verified Codex template owns the launch boundary for crewmates, scouts, batches, and secondmates; caller-supplied raw launch commands remain caller-owned escape hatches.
+Use the same process boundary when manually resuming or recovering a Codex direct report.
 
 **Primary-session guard fact (verified 2026-07-08, codex-cli 0.142.1).**
 The firstmate PRIMARY's own `.codex/hooks.json` registers a Stop hook that pipes Codex's Stop payload to `bin/fm-turnend-guard.sh`.

@@ -76,6 +76,17 @@ pass "repro setup: a pre-existing workspace labeled 'firstmate' collides with th
 # Simulate a live long-running agent in that pane: a heartbeat loop that
 # appends to a marker file, so liveness is independently verifiable (not just
 # "the pane object still exists").
+PANE_READY=false
+sleep 0.5
+for _attempt in $(seq 1 20); do
+  fm_backend_herdr_cli "$SESSION" pane run "$LIVE_PANE_ID" \
+    "printf '__FM_%s_%s__\\n' HERDR READY" >/dev/null 2>&1 || true
+  case "$(fm_backend_herdr_cli "$SESSION" pane read "$LIVE_PANE_ID" --source recent --lines 100 2>/dev/null)" in
+    *__FM_HERDR_READY__*) PANE_READY=true; break ;;
+  esac
+  sleep 0.5
+done
+[ "$PANE_READY" = true ] || fail "the startup workspace's shell did not become ready"
 MARKER="$SCRATCH/heartbeat.log"
 fm_backend_herdr_cli "$SESSION" pane run "$LIVE_PANE_ID" \
   "sh -c 'while true; do date +%s >> $MARKER; sleep 1; done'" >/dev/null 2>&1 \
