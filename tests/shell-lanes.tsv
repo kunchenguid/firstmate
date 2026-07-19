@@ -1,0 +1,91 @@
+# Shell behavior-test lane owner.
+# Format: lane<TAB>script<TAB>classification reason.
+# Lanes are resource boundaries.
+# unit is hermetic parser, policy, static, or fake-adapter coverage.
+# integration drives Firstmate scripts over temp files, git fixtures, fake tools, or local child processes.
+# e2e uses real session backends, live harnesses, or full operator-visible daemon paths.
+# Mixed files belong to the highest-resource lane they exercise.
+e2e	fm-afk-inject-e2e.test.sh	real isolated tmux socket injection path
+e2e	fm-afk-inject-herdr-e2e.test.sh	optional real Herdr injection path
+e2e	fm-afk-launch.test.sh	mixed unit plus real detached tmux or Herdr topology checks
+e2e	fm-afk-pi-herdr-return-e2e.test.sh	opt-in real Pi and Herdr away-return path
+integration	fm-afk-return.test.sh	return catch-up script behavior over temp state
+unit	fm-arm-pretool-check.test.sh	harness transport policy matrix without live harnesses
+e2e	fm-backend-autodetect-smoke.test.sh	real Herdr spawn-time autodetect smoke
+e2e	fm-backend-cmux-smoke.test.sh	optional real cmux smoke
+unit	fm-backend-cmux.test.sh	fake cmux adapter primitive coverage
+e2e	fm-backend-herdr-eventwait-smoke.test.sh	real Herdr event-wait smoke
+e2e	fm-backend-herdr-prune-safety-e2e.test.sh	real Herdr prune safety path
+e2e	fm-backend-herdr-respawn-idem-e2e.test.sh	real Herdr restart idempotency path
+e2e	fm-backend-herdr-smoke.test.sh	real Herdr adapter smoke
+e2e	fm-backend-herdr-workspace-per-home-e2e.test.sh	real Herdr spawn and teardown path
+unit	fm-backend-herdr.test.sh	fake Herdr adapter primitive coverage
+unit	fm-backend-orca.test.sh	fake Orca adapter primitive coverage
+e2e	fm-backend-tmux-smoke.test.sh	real isolated tmux adapter smoke
+e2e	fm-backend-zellij-smoke.test.sh	optional real Zellij smoke
+unit	fm-backend-zellij.test.sh	fake Zellij adapter primitive coverage
+integration	fm-backend.test.sh	backend dispatch scripts over fake tmux and git fixtures
+integration	fm-backlog-handoff.test.sh	backlog handoff over temp tasks and homes
+integration	fm-bearings-snapshot.test.sh	Bearings projection over temp fleet state
+integration	fm-bootstrap.test.sh	bootstrap script behavior over temp fleet state
+integration	fm-brief.test.sh	brief generation script behavior
+unit	fm-captain-translation-contract.test.sh	static captain-facing wording contract
+unit	fm-cd-pretool-check.test.sh	cd guard transport and policy matrix
+e2e	fm-claude-continuity-live-e2e.test.sh	opt-in live Claude continuity probe
+e2e	fm-codex-continuity-live-e2e.test.sh	opt-in live Codex continuity probe
+integration	fm-composer-ghost.test.sh	composer state behavior over fake captures
+unit	fm-composer-lib.test.sh	pure composer classifier coverage
+unit	fm-continuity-pretool-check.test.sh	continuity guard transport and policy matrix
+integration	fm-crew-state.test.sh	crew-state helper behavior over temp repos and fake no-mistakes
+integration	fm-daemon.test.sh	away daemon behavior over temp state and fake notifiers
+integration	fm-decision-hold-lifecycle.test.sh	decision lifecycle scripts over temp backlog state
+unit	fm-dispatch-select.test.sh	dispatch-profile selection logic
+integration	fm-ensure-agents-md.test.sh	project AGENTS.md helper behavior over temp repos
+integration	fm-fleet-snapshot-view.test.sh	fleet snapshot rendering over temp state
+integration	fm-fleet-sync.test.sh	fleet sync behavior over temp repos
+integration	fm-gate-refuse.test.sh	gate refusal scripts over temp gate topology
+integration	fm-gotmp.test.sh	temp-home cleanup behavior over stub scripts
+e2e	fm-grok-continuity-live-e2e.test.sh	opt-in live Grok continuity probe
+unit	fm-grok-harness.test.sh	Grok hook and harness contract checks
+integration	fm-guard-stale-banner.test.sh	guard warning behavior over temp state
+integration	fm-herdr-lab.test.sh	Herdr lab helper behavior with fake CLI
+unit	fm-instruction-owners.test.sh	static instruction ownership contract
+unit	fm-lint.test.sh	lint owner parity contract
+unit	fm-no-mistakes-ownership.test.sh	static no-mistakes ownership contract
+e2e	fm-opencode-primary-live-e2e.test.sh	opt-in live OpenCode primary probe
+e2e	fm-pi-primary-live-e2e.test.sh	opt-in live Pi primary probe
+unit	fm-pi-primary-types.test.sh	Pi extension type and static contract checks
+unit	fm-pi-watch-extension.test.sh	Pi watcher extension static contract
+integration	fm-pr-check-security.test.sh	PR-check security behavior over temp state and child processes
+integration	fm-pr-merge.test.sh	PR merge helper behavior with fake gh-axi
+integration	fm-review-diff.test.sh	review diff helper behavior over temp repos and fake gh-axi
+integration	fm-secondmate-harness.test.sh	secondmate harness resolution and spawn behavior with fake tmux
+integration	fm-secondmate-lifecycle-e2e.test.sh	secondmate lifecycle over fake tmux and treehouse
+integration	fm-secondmate-liveness.test.sh	secondmate liveness sweep over fake backends
+integration	fm-secondmate-safety.test.sh	secondmate safety over fake tmux and temp homes
+integration	fm-secondmate-sync.test.sh	secondmate sync over temp git worktrees
+integration	fm-send-popup-settle.test.sh	send settle behavior over fake tmux captures
+e2e	fm-send-secondmate-marker-herdr-e2e.test.sh	opt-in real Pi and Herdr marker path
+integration	fm-send-secondmate-marker.test.sh	secondmate marker send behavior with fake tmux
+integration	fm-send-settle.test.sh	send settle behavior with fake sleep
+integration	fm-send-strict.test.sh	strict send resolution over fake backends
+integration	fm-session-start.test.sh	session-start composition over temp state and fake tools
+integration	fm-sessionstart-nudge.test.sh	session-start nudge registration over temp repos
+integration	fm-shared-captain-inheritance.test.sh	shared captain inheritance over temp homes
+integration	fm-spawn-batch.test.sh	spawn argument routing without live launch
+integration	fm-spawn-dispatch-profile.test.sh	spawn command construction with fake tmux
+unit	fm-stow-contract.test.sh	static stow skill contract
+integration	fm-supervision-events.test.sh	watcher event handling over temp state and fake sleeps
+unit	fm-supervision-instructions.test.sh	supervision instruction rendering
+integration	fm-tangle-guard.test.sh	tangle guard behavior over temp repos and fake tools
+integration	fm-teardown.test.sh	teardown safety over temp repos and fake gh-axi
+unit	fm-test-lane.test.sh	public lane runner contract
+unit	fm-transition-lib.test.sh	pure transition record and policy coverage
+unit	fm-turnend-guard.test.sh	turn-end guard predicates over temp state
+integration	fm-update.test.sh	self-update behavior over temp repos
+e2e	fm-wake-daemon-lifecycle-e2e.test.sh	watcher and daemon lifecycle over a full operator-visible path
+integration	fm-wake-queue.test.sh	wake queue behavior over temp state and child processes
+integration	fm-watch-checkpoint.test.sh	foreground checkpoint helper behavior over temp state
+integration	fm-watch-triage.test.sh	watcher triage subprocess behavior over temp state
+integration	fm-watcher-lock.test.sh	watcher lock and process invariants over local child processes
+integration	fm-x-mode.test.sh	X-mode client and activation behavior with fake curl

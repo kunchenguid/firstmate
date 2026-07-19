@@ -24,11 +24,49 @@ jobs:
       # re-spell the shellcheck command here; keep CI and the pre-push gate on it.
       - run: bin/fm-lint.sh
 
-  tests:
-    name: Behavior tests
+  behavior-unit:
+    name: Behavior tests - unit lane
     runs-on: ubuntu-latest
-    # The suite should finish in ~2-3 minutes; this generous cap fails loudly on a
-    # hung watcher or tmux test instead of riding GitHub's 360-minute default.
+    # Hermetic parser, policy, static, and fake-adapter coverage.
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Install pinned ShellCheck
+        run: |
+          set -eu
+          bin/fm-install-shellcheck.sh "$RUNNER_TEMP/bin"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - run: bin/fm-test-lane.sh unit
+
+  behavior-integration:
+    name: Behavior tests - integration lane
+    runs-on: ubuntu-latest
+    # Full script behavior over temp files, git fixtures, fake tools, and local
+    # child processes. The lane is isolated from the real-backend e2e lane.
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Install pinned ShellCheck
+        run: |
+          set -eu
+          bin/fm-install-shellcheck.sh "$RUNNER_TEMP/bin"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - name: Install tasks-axi for backlog-handoff delegation
+        run: |
+          set -eu
+          npm install -g tasks-axi
+          tasks-axi --version
+      - run: bin/fm-test-lane.sh integration
+
+  behavior-e2e:
+    name: Behavior tests - e2e lane
+    runs-on: ubuntu-latest
+    # Real tmux, optional real backend, live-harness, and operator-visible daemon
+    # paths. Optional backend and harness probes remain self-gated by each test.
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v6
@@ -52,11 +90,7 @@ jobs:
           set -eu
           npm install -g tasks-axi
           tasks-axi --version
-      - run: |
-          set -eu
-          for test_script in tests/*.test.sh; do
-            "$test_script"
-          done
+      - run: bin/fm-test-lane.sh e2e
 
   macos-stock-bash:
     name: Stock macOS Bash snapshot compatibility

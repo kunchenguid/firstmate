@@ -19,13 +19,14 @@ disable_project_settings: true
 # them. commands.lint delegates to bin/fm-lint.sh, the single owner of the lint
 # definition that .github/workflows/ci.yml also invokes, so local can never
 # diverge from CI again (parity asserted by tests/fm-lint.test.sh).
-# The test command mirrors the Linux behavior job in .github/workflows/ci.yml:
-# iterate every tests/*.test.sh, run each, and fail the step if any one exits
-# non-zero (an agent-driven test step has crashed the daemon). The e2e tests need
-# tmux on PATH, which the firstmate environment provides.
+# The test command mirrors the Linux behavior jobs in .github/workflows/ci.yml:
+# run every shell behavior lane through bin/fm-test-lane.sh, whose manifest
+# validation fails before execution when a tests/*.test.sh file is missing,
+# duplicate, stale, or unknown. The e2e lane needs tmux on PATH, which the
+# firstmate environment provides.
 commands:
   lint: 'bin/fm-lint.sh'
-  test: 'command -v tmux >/dev/null || { echo "tmux is required for e2e tests" >&2; exit 1; }; tmux -V; rc=0; for t in tests/*.test.sh; do echo "== $t =="; bash "$t" || rc=1; done; exit "$rc"'
+  test: 'command -v tmux >/dev/null || { echo "tmux is required for e2e tests" >&2; exit 1; }; tmux -V; bin/fm-test-lane.sh unit && bin/fm-test-lane.sh integration && bin/fm-test-lane.sh e2e'
 
 # Keep test evidence out of this repo; it stays in a temp dir instead.
 test:

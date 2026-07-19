@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Parity guard for firstmate's shell-lint definition.
 #
-# bin/fm-lint.sh must be the single owner that BOTH CI
+# bin/fm-lint.sh must be the single owner that CI
 # (.github/workflows/ci.yml) and the pre-push gate (.no-mistakes.yaml
 # commands.lint) invoke, so the local lint can never diverge from CI again.
 # Regression origin: with no commands.lint configured, the local no-mistakes
@@ -73,7 +73,7 @@ test_ci_installs_and_logs_the_pinned_version() {
   # CI must derive the version from the one owner (never hardcode a divergent
   # number) and log the resolved version as parity evidence.
   assert_grep "VERSION=\"\$(\"\$ROOT/bin/fm-lint.sh\" --required-version)\"" "$INSTALLER" "installer must read the version fm-lint.sh pins"
-  [ "$(grep -Fc "bin/fm-install-shellcheck.sh \"\$RUNNER_TEMP/bin\"" "$CI")" -eq 2 ] || fail "both CI jobs must use the shared ShellCheck installer"
+  [ "$(grep -Fc "bin/fm-install-shellcheck.sh \"\$RUNNER_TEMP/bin\"" "$CI")" -eq 4 ] || fail "CI lint plus all three behavior lane jobs must use the shared ShellCheck installer"
   assert_grep "ACTUAL_SHA256=\$(sha256sum" "$INSTALLER" "installer must calculate the ShellCheck archive checksum"
   assert_grep "[ \"\$ACTUAL_SHA256\" = \"\$SHA256\" ]" "$INSTALLER" "installer must verify the ShellCheck archive checksum"
   assert_grep "\"\$DESTINATION/shellcheck\" --version" "$INSTALLER" "installer must log the resolved ShellCheck version as evidence"

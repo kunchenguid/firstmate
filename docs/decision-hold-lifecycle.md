@@ -81,6 +81,12 @@ fm-lint.sh: ShellCheck 0.11.0 (pinned 0.11.0)
 $ git diff --check
 (no output)
 
-$ for test_script in tests/*.test.sh; do bash "$test_script"; done
-ALL 71 TEST SCRIPTS PASSED
+$ bin/fm-test-lane.sh unit
+...
+
+$ bin/fm-test-lane.sh integration
+...
+
+$ bin/fm-test-lane.sh e2e
+...
 ```
