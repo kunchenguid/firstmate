@@ -11,7 +11,7 @@ permissions:
 
 concurrency:
   group: no-mistakes-required-${{ github.event.pull_request.number }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   check:
