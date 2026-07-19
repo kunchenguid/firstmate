@@ -658,6 +658,7 @@ test_local_only_completion_note_shell_quotes_recorded_target() {
   case_dir=$(make_case quoted-feature)
   write_meta "$case_dir" local-only ship
   marker="$case_dir/injected"
+  # shellcheck disable=SC2016 # Deliberately preserve the injection payload literally.
   target='feature/$(touch${IFS}injected)'
   printf 'local_merge_target=%s\n' "$target" >> "$case_dir/state/task-x1.meta"
   add_compatible_tasks_axi "$case_dir"

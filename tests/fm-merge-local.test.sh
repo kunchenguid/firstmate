@@ -197,6 +197,7 @@ test_injection_shaped_default_target_refuses() {
   local case_dir target marker
   case_dir=$(make_case injection-default main)
   marker="$case_dir/state/injected"
+  # shellcheck disable=SC2016 # Deliberately preserve the injection payload literally.
   target='release$(touch${IFS}$FM_STATE_OVERRIDE/injected)'
   git -C "$case_dir/project" branch -m "$target"
   git -C "$case_dir/project" symbolic-ref refs/remotes/origin/HEAD "refs/remotes/origin/$target"
