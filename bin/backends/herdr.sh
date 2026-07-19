@@ -327,7 +327,7 @@ fm_backend_herdr_workspace_prune_seeded_default_tab() {  # <session> <workspace_
 # find-or-create race - a duplicate workspace - never a blocked spawn,
 # mirroring the "quota trouble never blocks dispatch" posture.
 fm_backend_herdr_workspace_lock_acquire() {  # <session>
-  local session=$1 label key lock i holder_pid
+  local session=$1 label key lock i holder_pid misses=0
   label=$(fm_backend_herdr_workspace_label)
   key=$(printf '%s' "$FM_HOME" | cksum | cut -d' ' -f1)
   lock="${TMPDIR:-/tmp}/fm-herdr-ws.$key.$session.$label.lock"
@@ -337,10 +337,18 @@ fm_backend_herdr_workspace_lock_acquire() {  # <session>
       FM_BACKEND_HERDR_WS_LOCK=$lock
       return 0
     fi
+    if [ ! -d "$lock" ]; then
+      misses=$((misses + 1))
+      [ "$misses" -lt 3 ] || return 1
+      continue
+    fi
+    misses=0
     holder_pid=$(cat "$lock/pid" 2>/dev/null || true)
     if [ -n "$holder_pid" ] && ! kill -0 "$holder_pid" 2>/dev/null; then
-      rm -rf "$lock" 2>/dev/null || true
-      continue
+      if mv "$lock" "$lock.breaking.$$" 2>/dev/null; then
+        rm -rf "$lock.breaking.$$" 2>/dev/null || true
+        continue
+      fi
     fi
     sleep 0.1
   done
