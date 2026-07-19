@@ -194,6 +194,23 @@ This section is the single owner of the canonical schema and its per-field seman
 
 ```json
 {
+  "quotaBalanced": {
+    "reservePercent": 0,
+    "staleClearMargin": 20,
+    "runRate": {
+      "minimumObservationSeconds": 300,
+      "historyMaxAgeSeconds": 86400,
+      "recentWeight": 1
+    },
+    "providers": {
+      "<provider>": {
+        "reservePercent": 0,
+        "windows": [
+          { "scope": "<session|weekly>", "durationSeconds": 604800, "extraResets": 0 }
+        ]
+      }
+    }
+  },
   "rules": [
     {
       "when": "<natural-language condition describing a kind of task>",
@@ -216,7 +233,37 @@ Absent `select` means use the first array element, or the only object in the sin
 `default` is optional.
 An omitted model or effort means the selected harness uses its own default for that axis.
 If a selected profile carries an effort value the chosen harness does not accept, `fm-spawn.sh` records the requested `effort=` in task meta for traceability but omits the launch flag, and bootstrap reports the invalid harness/effort pair as a `CREW_DISPATCH` diagnostic when it is visible in the file.
-`quota-balanced` selection is deterministic and implemented by `bin/fm-dispatch-select.sh`, whose header owns the general-window rules, the 20 point stale-clear freshness margin, vendor-availability handling, and the degrade-to-first-element fallbacks; quota trouble never blocks dispatch.
+`quotaBalanced` is optional local tuning used only by rules with `select: "quota-balanced"`.
+`reservePercent` keeps percentage-capacity headroom out of the usable score and defaults to 0, while a provider-level value overrides the global value.
+`staleClearMargin` defaults to 20 percentage-capacity points and preserves the policy that cached stale quota must be clearly better than fresh quota to win.
+`runRate.minimumObservationSeconds` defaults to 300 and bounds first-sample burst amplification near a reset.
+`runRate.historyMaxAgeSeconds` defaults to 86400 and prevents old local samples from influencing recent burn.
+`runRate.recentWeight` ranges from 0 to 1, defaults to 1, and controls how strongly an observed recent usage delta can raise the cycle-average burn estimate.
+Each provider `windows` entry grants explicit manual reset capacity only to the matching canonical `scope` and `durationSeconds`.
+The selector derives session versus weekly scope from actual 18000-second or 604800-second duration before considering provider labels, ids, or misleading kinds.
+Weekly reset credits therefore never apply to an independent five-hour session window.
+`extraResets` is a non-negative integer and adds one full normalized window of capacity per configured reset.
+It represents currently unused manual resets and must be reduced locally when a reset is consumed.
+The selector keeps account-free burn samples in `state/.dispatch-quota-samples.json`; the file is volatile private state and is not a source of configured reset credits.
+`quota-balanced` selection is deterministic and implemented by `bin/fm-dispatch-select.sh`, whose header owns the exact score, rollover, clock-skew, diagnostics, vendor-availability, and degrade-to-first-element mechanics; quota trouble never blocks dispatch.
+
+To declare three Codex manual weekly resets after this version lands, merge this local object into `config/crew-dispatch.json` without adding a session entry:
+
+```json
+{
+  "quotaBalanced": {
+    "providers": {
+      "codex": {
+        "windows": [
+          { "scope": "weekly", "durationSeconds": 604800, "extraResets": 3 }
+        ]
+      }
+    }
+  }
+}
+```
+
+This declaration is local and gitignored, so the three-reset reserve is not a shared default and no account identity appears in tracked files or selector diagnostics.
 See [`docs/examples/crew-dispatch.json`](examples/crew-dispatch.json) for a starting point to copy into local `config/crew-dispatch.json`.
 When the file exists, bootstrap validates it with `jq`.
 Valid files stay silent by default; with `FM_BOOTSTRAP_VERBOSE_FACTS=1`, bootstrap emits `BOOTSTRAP_INFO: crew dispatch active config/crew-dispatch.json` plus one `BOOTSTRAP_INFO:` fact per rule and default profile.
