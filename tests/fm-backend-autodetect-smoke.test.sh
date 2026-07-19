@@ -21,9 +21,9 @@
 # by fm_backend_detect's own unit coverage plus that fake-tmux fm-spawn test.
 #
 # Safety (2026-07-02 incident): every test-owned Herdr operation goes through
-# bin/fm-herdr-lab.sh, which appends the named session flag and verifies the
-# default fleet session is unchanged after teardown. Never replace the helper
-# with an ambient HERDR_SESSION-only command.
+# bin/fm-herdr-lab.sh, which places the named session flag in Herdr's option
+# region and verifies the default fleet session is unchanged after teardown.
+# Never replace the helper with an ambient HERDR_SESSION-only command.
 set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

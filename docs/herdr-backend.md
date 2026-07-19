@@ -208,7 +208,7 @@ This disproved the idea that the Pi extension or Herdr's activity classifier nee
 `bin/fm-watch.sh` now owns publication because the live singleton watcher is the backend-neutral truth that supervision is active.
 After acquiring its singleton, a watcher publishes one unique, TTL-bounded Herdr metadata source, refreshes it while alive, and clears it on clean exit.
 A process crash ages out through the TTL instead of leaving a permanent false claim.
-Each cosmetic Herdr call sends TERM after two seconds and KILL one second later, so a stalled display surface cannot wedge supervision beyond a three-second process bound.
+Each cosmetic Herdr call sends TERM after two seconds and KILL no more than one second later, so a stalled display surface cannot wedge supervision beyond a three-second process bound.
 A duplicate watcher stands down before publication, so the exactly-one-live-supervision-cycle contract is unchanged.
 The visible state label is `idle · supervised`, while Herdr's real `agent_status` remains idle.
 
@@ -228,7 +228,7 @@ The active read was:
 {"agent":"pi","agent_status":"idle","custom_status":"supervised","state_labels":{"idle":"idle · supervised"}}
 ```
 
-The inactive baseline, clean-exit read, and post-crash TTL-expiry read all retained `agent_status: idle` and omitted `custom_status` and `state_labels`.
+The inactive baseline, explicit-clear read, and short-TTL expiry read after the synthetic publisher was killed all retained `agent_status: idle` and omitted `custom_status` and `state_labels`.
 Calling the active report twice produced the same effective record.
 The exact real-smoke command run was:
 
