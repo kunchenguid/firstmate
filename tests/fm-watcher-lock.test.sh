@@ -437,14 +437,25 @@ test_watch_restart_rejects_reused_pid() {
 }
 
 test_watch_restart_attaches_to_healthy_peer() {
-  local dir state fakebin out peer identity armpid status i
+  local dir state fakebin out peer ready identity armpid status i
   dir=$(make_case restart-healthy-peer)
   state="$dir/state"
   fakebin="$dir/fakebin"
   out="$dir/restart.out"
+  ready="$dir/peer-term-guard-ready"
   mark_pr_check_migration_complete "$state"
-  node -e 'process.on("SIGTERM", () => {}); setTimeout(() => {}, 300000)' &
+  node -e 'process.on("SIGTERM", () => {}); require("fs").writeFileSync(process.argv[1], "ready\n"); setTimeout(() => {}, 300000)' "$ready" &
   peer=$!
+  # Under full-suite load node can take seconds to bootstrap. The arm's TERM must
+  # not land before the peer's SIGTERM guard is installed, or the "healthy peer"
+  # dies and the arm honestly reports a failed confirmation instead of attaching.
+  i=0
+  while [ "$i" -lt 100 ]; do
+    [ -f "$ready" ] && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ -f "$ready" ] || fail "peer never confirmed its TERM guard"
   identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$peer") || fail "could not identify peer pid"
   mkdir "$state/.watch.lock"
   printf '%s\n' "$peer" > "$state/.watch.lock/pid"
@@ -454,8 +465,11 @@ test_watch_restart_attaches_to_healthy_peer() {
   touch "$state/.last-watcher-beat"
   PATH="$fakebin:$PATH" FM_HOME="$dir" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_ARM_ATTACH_POLL=0.1 FM_ARM_CONFIRM_TIMEOUT=1 "$WATCH_ARM" --restart > "$out" &
   armpid=$!
+  # Before it can attach, the arm always rides out its full 5s TERM-resist wait
+  # on the surviving peer, then runs a stood-down watcher child to completion, so
+  # the poll budget needs generous headroom under full-suite load.
   i=0
-  while [ "$i" -lt 80 ]; do
+  while [ "$i" -lt 200 ]; do
     grep -qF "watcher: attached pid=$peer" "$out" 2>/dev/null && break
     sleep 0.1
     i=$((i + 1))
@@ -503,7 +517,10 @@ test_arm_self_eviction_is_loud_without_successor() {
   fakebin="$dir/fakebin"
   armout="$dir/arm.out"
   mark_pr_check_migration_complete "$state"
-  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=0.2 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_ARM_CONFIRM_TIMEOUT=1 "$WATCH_ARM" > "$armout" &
+  # The confirm window must cover a loaded fm-watch.sh startup (lock claim +
+  # first beat), while its successor wait after the takeover below still ends
+  # well inside wait_for_exit's budget.
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=0.2 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_ARM_CONFIRM_TIMEOUT=3 "$WATCH_ARM" > "$armout" &
   armpid=$!
   i=0
   while [ "$i" -lt 80 ]; do
