@@ -1,39 +1,68 @@
 #!/usr/bin/env bash
 # Resolve one already-matched crew-dispatch rule to a concrete profile.
 # Usage:
-#   fm-dispatch-select.sh [--select <strategy>] [--quota-json <file>] [<rule-or-use-json>]
+#   fm-dispatch-select.sh [--select <strategy>] [--quota-json <file>]
+#     [--config <file>] [--state-file <file>] [--now-epoch <seconds>]
+#     [<rule-or-use-json>]
 #
 # Input may be a full rule object with `use` and optional `select`, a single
 # profile object, or an ordered array of profile objects.
 # Output is one compact JSON profile object on stdout.
 #
 # quota-balanced is deterministic, and this header is the single owner of its
-# contract:
-#   - It runs quota-axi --json (or the --quota-json fixture).
-#   - Per candidate vendor it takes the minimum percentRemaining across that
-#     vendor's GENERAL windows only - Claude five_hour and seven_day, Codex
-#     five_hour and weekly - ignoring model-scoped windows such as model:fable
-#     and model:codex_bengalfox:*.
-#   - The vendor with the higher minimum remaining quota wins; an exact tie
-#     between equally trusted candidates uses the first array element.
+# scoring contract:
+#   - It consumes quota-axi schema version 2 through `quota-axi --full --json`
+#     (or the --quota-json fixture).
+#   - General windows have provider kind `session` or `weekly`; model-scoped
+#     windows are excluded regardless of label or id. An explicit positive
+#     windowSeconds is authoritative. Actual 5-hour and 7-day durations define
+#     session and weekly capacity scope even when provider kind is misleading.
+#     Claude's known five_hour and seven_day windows fall back to those canonical
+#     durations because Claude omits the field. No Codex duration is inferred
+#     from its misleading five_hour id.
+#   - A window score is percentage-capacity headroom through its reset:
+#       remaining + (100 * configured extra resets) - reserve
+#         - (estimated burn per second * seconds until reset)
+#     This is normalized provider-relative capacity, not a token or per-task
+#     prediction. A provider's score is its lowest general-window score.
+#   - On a first sample, burn is percent used divided by elapsed window time.
+#     A compatible recent sample can raise that estimate from actual usage
+#     delta; recentWeight controls burst sensitivity. Rollover, decreasing
+#     usage, old history, or clock reversal discards the recent delta. Reset
+#     time is clamped to the actual duration to contain source clock skew.
+#   - The vendor with the higher score wins; an exact tie between equally
+#     trusted candidates uses the first array element.
 #   - Stale-but-cached general-window numbers are usable, but a fresh candidate
-#     wins unless the stale candidate's minimum is at least the stale-clear
-#     margin higher (default 20 points - the definition of "clearly less
-#     constrained").
+#     wins unless the stale candidate's score is at least the stale-clear margin
+#     higher (default 20 percentage-capacity points).
 #   - A vendor absent from quota output, or with no usable general windows, is
 #     unavailable; selection happens among available candidates.
-#   - If quota-axi is missing, exits non-zero, returns unparseable JSON, or no
-#     candidate is usable, the reason is logged to stderr and the first array
-#     element is printed - quota trouble never blocks dispatch.
+#   - Candidate/window scores and their inputs are logged without account data
+#     so every decision is auditable.
+#   - If quota-axi is missing, exits non-zero, returns unparseable JSON, has an
+#     unsupported schema, or no candidate is usable, the reason is logged and
+#     the first array element is printed. Quota trouble never blocks dispatch.
 #
-# quota-balanced uses quota-axi --json unless --quota-json supplies a fixture.
+# quota-balanced uses quota-axi --full --json unless --quota-json supplies a
+# fixture. Live calls keep private samples in state/.dispatch-quota-samples.json;
+# fixture calls are stateless unless --state-file is explicit.
+# The quotaBalanced object in config/crew-dispatch.json owns local tuning.
 # FM_DISPATCH_QUOTA_AXI overrides the quota command.
-# FM_DISPATCH_STALE_CLEAR_MARGIN overrides the default 20 point stale margin.
+# FM_DISPATCH_STALE_CLEAR_MARGIN overrides configured/default stale margin.
 set -u
 
-STALE_CLEAR_MARGIN=${FM_DISPATCH_STALE_CLEAR_MARGIN:-20}
+ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+FM_DISPATCH_HOME=${FM_HOME:-$ROOT}
+CONFIG_ROOT=${FM_CONFIG_OVERRIDE:-$FM_DISPATCH_HOME/config}
+STATE_ROOT=${FM_STATE_OVERRIDE:-$FM_DISPATCH_HOME/state}
+STALE_CLEAR_OVERRIDE=${FM_DISPATCH_STALE_CLEAR_MARGIN:-}
 SELECT_OVERRIDE=
 QUOTA_JSON_FILE=
+CONFIG_FILE=
+CONFIG_FILE_EXPLICIT=0
+STATE_FILE=
+STATE_FILE_EXPLICIT=0
+NOW_EPOCH=
 ARGS=()
 
 usage() {
@@ -68,6 +97,37 @@ while [ "$#" -gt 0 ]; do
       QUOTA_JSON_FILE=${1#--quota-json=}
       shift
       ;;
+    --config)
+      [ "$#" -gt 1 ] || { echo "error: --config requires a file" >&2; exit 2; }
+      CONFIG_FILE=$2
+      CONFIG_FILE_EXPLICIT=1
+      shift 2
+      ;;
+    --config=*)
+      CONFIG_FILE=${1#--config=}
+      CONFIG_FILE_EXPLICIT=1
+      shift
+      ;;
+    --state-file)
+      [ "$#" -gt 1 ] || { echo "error: --state-file requires a file" >&2; exit 2; }
+      STATE_FILE=$2
+      STATE_FILE_EXPLICIT=1
+      shift 2
+      ;;
+    --state-file=*)
+      STATE_FILE=${1#--state-file=}
+      STATE_FILE_EXPLICIT=1
+      shift
+      ;;
+    --now-epoch)
+      [ "$#" -gt 1 ] || { echo "error: --now-epoch requires seconds" >&2; exit 2; }
+      NOW_EPOCH=$2
+      shift 2
+      ;;
+    --now-epoch=*)
+      NOW_EPOCH=${1#--now-epoch=}
+      shift
+      ;;
     -h|--help)
       usage
       exit 0
@@ -92,6 +152,13 @@ done
 
 [ "${#ARGS[@]}" -le 1 ] || { echo "error: expected at most one JSON argument" >&2; exit 2; }
 command -v jq >/dev/null 2>&1 || { echo "error: jq is required" >&2; exit 2; }
+
+if [ -z "$NOW_EPOCH" ]; then
+  NOW_EPOCH=$(date -u +%s)
+fi
+case "$NOW_EPOCH" in
+  ''|*[!0-9]*) echo "error: --now-epoch must be a non-negative integer" >&2; exit 2 ;;
+esac
 
 if [ "${#ARGS[@]}" -eq 1 ]; then
   SPEC_JSON=${ARGS[0]}
@@ -135,6 +202,28 @@ if [ "$select_strategy" != quota-balanced ]; then
   exit 0
 fi
 
+if [ "$CONFIG_FILE_EXPLICIT" -eq 0 ]; then
+  CONFIG_FILE="$CONFIG_ROOT/crew-dispatch.json"
+fi
+if [ -f "$CONFIG_FILE" ]; then
+  if ! dispatch_config=$(cat "$CONFIG_FILE" 2>/dev/null); then
+    log "cannot read dispatch config; using first profile"
+    first_profile
+    exit 0
+  fi
+  if ! printf '%s\n' "$dispatch_config" | jq -e 'type == "object"' >/dev/null 2>&1; then
+    log "dispatch config is invalid; using first profile"
+    first_profile
+    exit 0
+  fi
+elif [ "$CONFIG_FILE_EXPLICIT" -eq 1 ]; then
+  log "cannot read dispatch config; using first profile"
+  first_profile
+  exit 0
+else
+  dispatch_config='{}'
+fi
+
 if [ -n "$QUOTA_JSON_FILE" ]; then
   if ! quota_json=$(cat "$QUOTA_JSON_FILE" 2>/dev/null); then
     log "cannot read quota JSON; using first profile"
@@ -148,7 +237,7 @@ else
     first_profile
     exit 0
   fi
-  quota_json=$("$quota_cmd" --json 2>/dev/null)
+  quota_json=$("$quota_cmd" --full --json 2>/dev/null)
   quota_status=$?
   if [ "$quota_status" -ne 0 ]; then
     log "quota-axi exited $quota_status; using first profile"
@@ -157,78 +246,239 @@ else
   fi
 fi
 
-if ! printf '%s\n' "$quota_json" | jq -e 'type == "object" and (.providers | type) == "array"' >/dev/null 2>&1; then
-  log "quota-axi returned unparseable JSON; using first profile"
+if ! printf '%s\n' "$quota_json" | jq -e '
+  type == "object" and .schemaVersion == 2 and (.providers | type) == "array"
+' >/dev/null 2>&1; then
+  log "quota-axi returned invalid or unsupported schema JSON; using first profile"
   first_profile
   exit 0
 fi
 
-selection=$(printf '%s\n' "$quota_json" | jq -ec \
+if [ "$STATE_FILE_EXPLICIT" -eq 0 ] && [ -z "$QUOTA_JSON_FILE" ]; then
+  STATE_FILE="$STATE_ROOT/.dispatch-quota-samples.json"
+fi
+history_json='{"schemaVersion":1,"samples":[]}'
+if [ -n "$STATE_FILE" ] && [ -f "$STATE_FILE" ]; then
+  if candidate_history=$(cat "$STATE_FILE" 2>/dev/null) \
+    && printf '%s\n' "$candidate_history" | jq -e '
+      type == "object" and .schemaVersion == 1 and (.samples | type) == "array"
+    ' >/dev/null 2>&1; then
+    history_json=$candidate_history
+  else
+    log "quota sample history is invalid; ignoring it"
+  fi
+fi
+
+selection=$(jq -nec \
+  --argjson quota "$quota_json" \
   --argjson profiles "$profiles_json" \
-  --argjson margin "$STALE_CLEAR_MARGIN" '
+  --argjson config "$dispatch_config" \
+  --argjson history "$history_json" \
+  --argjson now "$NOW_EPOCH" \
+  --arg staleOverride "$STALE_CLEAR_OVERRIDE" '
   def clean($p):
     {harness: $p.harness}
     + (if ($p.model? | type) == "string" then {model: $p.model} else {} end)
     + (if ($p.effort? | type) == "string" then {effort: $p.effort} else {} end);
-  def provider_for($h): [.providers[]? | select(.provider == $h)][0];
-  def general_ids($h):
-    if $h == "claude" then ["five_hour", "seven_day"]
-    elif $h == "codex" then ["five_hour", "weekly"]
-    else []
+  def clamp($n; $low; $high): if $n < $low then $low elif $n > $high then $high else $n end;
+  def positive_number($v): ($v | type) == "number" and $v > 0;
+  def iso_epoch($value):
+    if ($value | type) != "string" then null
+    else ($value
+      | sub("\\+00:00$"; "Z")
+      | sub("\\.[0-9]+Z$"; "Z")
+      | try fromdateiso8601 catch null)
     end;
-  def candidate_metric($p; $i):
-    . as $root
-    | ($p.harness // "") as $h
-    | ($root | provider_for($h)) as $provider
-    | if ($provider == null) or ((general_ids($h) | length) == 0) then empty
+  def duration_for($provider; $window):
+    if positive_number($window.windowSeconds?) then ($window.windowSeconds | floor)
+    elif $provider == "claude" and $window.id == "five_hour" and $window.kind == "session" then 18000
+    elif $provider == "claude" and $window.id == "seven_day" and $window.kind == "weekly" then 604800
+    else null
+    end;
+  def scope_for($window; $duration):
+    if $duration == 18000 then "session"
+    elif $duration == 604800 then "weekly"
+    else $window.kind
+    end;
+  def settings: ($config.quotaBalanced? // {});
+  def run_settings: (settings.runRate? // {});
+  def reserve_for($provider):
+    (settings.providers?[$provider].reservePercent? // settings.reservePercent? // 0);
+  def extra_resets($provider; $scope; $duration):
+    ([settings.providers?[$provider].windows[]?
+      | select(.durationSeconds == $duration and .scope == $scope)
+      | (.extraResets // 0)] | add // 0);
+  def history_for($provider; $id; $kind; $duration):
+    [$history.samples[]?
+      | select(.provider == $provider and .id == $id and .kind == $kind
+        and .durationSeconds == $duration)][0];
+  def window_metric($provider; $window):
+    (duration_for($provider; $window)) as $duration
+    | (iso_epoch($window.resetsAt?)) as $reset
+    | (if ($window.percentRemaining? | type) == "number" then $window.percentRemaining
+       elif ($window.percentUsed? | type) == "number" then (100 - $window.percentUsed)
+       else null end) as $raw_remaining
+    | if $duration == null or $reset == null or $raw_remaining == null then empty
       else
-        (($provider.windows // [])
-          | map(. as $window
-            | select(((general_ids($h) | index($window.id)) != null)
-              and (($window.kind? // "") != "model")
-              and (($window.percentRemaining? | type) == "number")))) as $windows
-        | if ($windows | length) == 0 then empty
-          else {
-            index: $i,
-            profile: clean($p),
-            harness: $h,
-            min: ($windows | map(.percentRemaining) | min),
-            fresh: (($provider.state.status? // "") == "fresh")
+        (clamp($raw_remaining; 0; 100)) as $remaining
+        | (scope_for($window; $duration)) as $scope
+        | (if ($window.percentUsed? | type) == "number" then clamp($window.percentUsed; 0; 100)
+           else (100 - $remaining) end) as $used
+        | (clamp(($reset - $now); 0; $duration)) as $until_reset
+        | ($duration - $until_reset) as $elapsed
+        | (run_settings.minimumObservationSeconds? // 300) as $minimum_observation
+        | (run_settings.historyMaxAgeSeconds? // 86400) as $history_max_age
+        | (run_settings.recentWeight? // 1) as $recent_weight
+        | (history_for($provider; ($window.id // ""); $window.kind; $duration)) as $prior
+        | (($prior != null)
+          and (($now - ($prior.sampledAtEpoch // ($now + 1))) > 0)
+          and (($now - $prior.sampledAtEpoch) <= $history_max_age)
+          and (((($prior.resetsAtEpoch // 0) - $reset) | fabs) <= 60)
+          and ($used >= ($prior.percentUsed // 101))) as $recent_valid
+        | ($used / ([$elapsed, $minimum_observation] | max)) as $cycle_rate
+        | (if $recent_valid then
+            (($used - $prior.percentUsed) / ($now - $prior.sampledAtEpoch))
+          else 0 end) as $recent_rate
+        | ([$cycle_rate, ($recent_rate * $recent_weight)] | max) as $burn_rate
+        | (extra_resets($provider; $scope; $duration)) as $extra
+        | (reserve_for($provider)) as $reserve
+        | ($burn_rate * $until_reset) as $projected
+        | ($remaining + (100 * $extra)) as $capacity
+        | {
+            id: ($window.id // ""),
+            kind: $window.kind,
+            scope: $scope,
+            durationSeconds: $duration,
+            remaining: $remaining,
+            extraResets: $extra,
+            reserve: $reserve,
+            secondsUntilReset: $until_reset,
+            burnPerHour: ($burn_rate * 3600),
+            projectedBurn: $projected,
+            score: ($capacity - $reserve - $projected),
+            rateSource: (if $recent_valid and (($recent_rate * $recent_weight) > $cycle_rate)
+              then "recent" else "cycle" end),
+            clockClamped: (($reset - $now) < 0 or ($reset - $now) > $duration),
+            sample: {
+              provider: $provider,
+              id: ($window.id // ""),
+              kind: $window.kind,
+              durationSeconds: $duration,
+              resetsAtEpoch: $reset,
+              sampledAtEpoch: $now,
+              percentUsed: $used
+            }
           }
+      end;
+  def provider_for($name): [$quota.providers[]? | select(.provider == $name)][0];
+  def candidate_metric($profile; $index):
+    ($profile.harness // "") as $provider_name
+    | (provider_for($provider_name)) as $provider
+    | if $provider == null then empty
+      else
+        ([$provider.windows[]?
+          | select((.kind == "session" or .kind == "weekly")
+            and (((.id? // "") | startswith("model:")) | not))
+          | window_metric($provider_name; .)]) as $windows
+        | if ($windows | length) == 0 then empty
+          else ($windows | min_by(.score)) as $bottleneck
+          | {
+              index: $index,
+              profile: clean($profile),
+              harness: $provider_name,
+              fresh: (($provider.state.status? // "") == "fresh"),
+              score: $bottleneck.score,
+              bottleneck: $bottleneck,
+              windows: $windows
+            }
           end
       end;
   def better($a; $b):
     if $a == null then $b
     elif $b == null then $a
-    elif ($b.min > $a.min) then $b
-    elif ($b.min == $a.min and $b.index < $a.index) then $b
+    elif $b.score > $a.score then $b
+    elif $b.score == $a.score and $b.index < $a.index then $b
     else $a
     end;
-  def best_by_min($xs): reduce $xs[] as $x (null; better(.; $x));
-  . as $quota_root
-  | ([$profiles | to_entries[] | . as $entry | ($quota_root | candidate_metric($entry.value; $entry.key))]) as $candidates
+  def best($items): reduce $items[] as $item (null; better(.; $item));
+  ([range(0; $profiles | length) as $index
+    | candidate_metric($profiles[$index]; $index)]) as $candidates
+  | (if $staleOverride == "" then (settings.staleClearMargin? // 20)
+     else ($staleOverride | tonumber) end) as $stale_margin
   | if ($candidates | length) == 0 then {
       fallback: true,
       reason: "no usable quota windows for candidate vendors",
-      profile: clean($profiles[0])
+      profile: clean($profiles[0]),
+      candidates: [],
+      samples: []
     }
     else
-      (best_by_min($candidates | map(select(.fresh)))) as $fresh_best
-      | (best_by_min($candidates | map(select(.fresh | not)))) as $stale_best
+      (best($candidates | map(select(.fresh)))) as $fresh_best
+      | (best($candidates | map(select(.fresh | not)))) as $stale_best
       | (if $fresh_best != null and $stale_best != null then
-          if $stale_best.min >= ($fresh_best.min + $margin) then $stale_best else $fresh_best end
+          if $stale_best.score >= ($fresh_best.score + $stale_margin)
+          then $stale_best else $fresh_best end
         elif $fresh_best != null then $fresh_best
         else $stale_best
         end) as $chosen
-      | {fallback: false, profile: $chosen.profile}
+      | {
+          fallback: false,
+          profile: $chosen.profile,
+          chosen: $chosen.harness,
+          candidates: $candidates,
+          samples: ([$candidates[] | select(.fresh) | .windows[].sample]
+            | unique_by([.provider, .id, .kind, .durationSeconds]))
+        }
     end
 ' 2>/dev/null) || {
-  log "quota-axi data could not be evaluated; using first profile"
+  log "quota-axi data or quota-balanced configuration could not be evaluated; using first profile"
   first_profile
   exit 0
 }
 
+while IFS= read -r diagnostic; do
+  [ -n "$diagnostic" ] && log "$diagnostic"
+done < <(printf '%s\n' "$selection" | jq -r '
+  .candidates[]?
+  | . as $candidate
+  | $candidate.windows[]
+  | "quota-balanced candidate \($candidate.harness) trust=\(if $candidate.fresh then "fresh" else "stale" end)"
+    + " window=\(.scope)/\(.durationSeconds)s source-kind=\(.kind) score=\(.score * 100 | round / 100)"
+    + " remaining=\(.remaining) extra-resets=\(.extraResets) reserve=\(.reserve)"
+    + " burn-per-hour=\(.burnPerHour * 100 | round / 100) projected=\(.projectedBurn * 100 | round / 100)"
+    + " rate-source=\(.rateSource) clock-clamped=\(.clockClamped)"
+')
+
 if [ "$(printf '%s\n' "$selection" | jq -r '.fallback')" = true ]; then
   log "$(printf '%s\n' "$selection" | jq -r '.reason'); using first profile"
+else
+  log "quota-balanced selected $(printf '%s\n' "$selection" | jq -r '.chosen') by bottleneck sustainable-headroom score"
 fi
+
+if [ -n "$STATE_FILE" ] && [ "$(printf '%s\n' "$selection" | jq '.samples | length')" -gt 0 ]; then
+  state_parent=$(dirname "$STATE_FILE")
+  if mkdir -p "$state_parent" 2>/dev/null; then
+    state_tmp=$(umask 077; mktemp "$state_parent/.dispatch-quota-samples.XXXXXX" 2>/dev/null) || state_tmp=
+    if [ -n "$state_tmp" ]; then
+      if jq -nec --argjson old "$history_json" --argjson current "$selection" '
+        def key: [.provider, .id, .kind, .durationSeconds];
+        {schemaVersion: 1,
+         samples: ([($old.samples[]? // empty), $current.samples[]]
+           | sort_by(key)
+           | group_by(key)
+           | map(last))}
+      ' > "$state_tmp" && chmod 600 "$state_tmp" && mv "$state_tmp" "$STATE_FILE"; then
+        :
+      else
+        rm -f "$state_tmp"
+        log "could not update quota sample history; selection remains valid"
+      fi
+    else
+      log "could not prepare quota sample history; selection remains valid"
+    fi
+  else
+    log "could not create quota sample state directory; selection remains valid"
+  fi
+fi
+
 printf '%s\n' "$selection" | jq -c '.profile'
