@@ -56,26 +56,37 @@ INBOX="$STATE/telegram-inbox"
 # green/mergeable. Production default uses gh-axi when available.
 pr_is_green() {
   local url=$1
-  local out
+  local parts owner repo number out checks state draft merged summary failed total tail
   if [ -n "${FM_TELEGRAM_PR_CHECK_HOOK:-}" ]; then
     # shellcheck disable=SC2086
     $FM_TELEGRAM_PR_CHECK_HOOK "$url"
     return $?
   fi
   if command -v gh-axi >/dev/null 2>&1; then
-    out=$(gh-axi pr view "$url" --json state,merged,statusCheckRollup 2>/dev/null) || return 1
-    # Green means OPEN and not already merged; prefer all checks success when present.
-    printf '%s' "$out" | jq -e '
-      (.state // "") == "OPEN"
-      and ((.merged // false) | not)
-      and (
-        (.statusCheckRollup // []) as $c
-        | ($c|length) == 0
-          or ([$c[] | .state // .conclusion // "" | ascii_upcase]
-              | all(. == "SUCCESS" or . == "NEUTRAL" or . == "SKIPPED"))
-      )
-    ' >/dev/null 2>&1
-    return $?
+    parts=$(fmt_github_pr_parts "$url") || return 1
+    owner=$(printf '%s' "$parts" | awk -F'\t' '{print $1}')
+    repo=$(printf '%s' "$parts" | awk -F'\t' '{print $2}')
+    number=$(printf '%s' "$parts" | awk -F'\t' '{print $3}')
+    out=$(gh-axi pr view "$number" -R "$owner/$repo" 2>/dev/null) || return 1
+    state=$(printf '%s\n' "$out" | sed -n 's/^  state: //p' | head -n1)
+    draft=$(printf '%s\n' "$out" | sed -n 's/^  draft: //p' | head -n1)
+    merged=$(printf '%s\n' "$out" | sed -n 's/^  merged: //p' | head -n1)
+    [ "$state" = open ] && [ "$draft" = no ] && [ "$merged" = no ] || return 1
+    checks=$(gh-axi pr checks "$number" -R "$owner/$repo" 2>/dev/null) || return 1
+    summary=$(printf '%s\n' "$checks" | sed -n 's/^summary: "\(.*\)"$/\1/p' | head -n1)
+    [ -n "$summary" ] || return 1
+    tail=${summary#*, }
+    failed=${tail%% failed*}
+    tail=${summary##*, }
+    total=${tail%% total}
+    case "$failed:$total" in
+      *[!0-9:]*|:*|*:) return 1 ;;
+    esac
+    [ "$failed" -eq 0 ] && [ "$total" -gt 0 ] || return 1
+    case "$summary" in
+      *' pending'*) return 1 ;;
+    esac
+    return 0
   fi
   # Without gh-axi, refuse merge rather than guessing.
   return 1
