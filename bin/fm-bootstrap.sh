@@ -57,10 +57,12 @@
 #          degrades at runtime when quota data is unavailable.
 #          FIRSTMATE_UPDATE is a best-effort self-update heads-up scoped to
 #          firstmate's OWN repo (FM_ROOT) only, never anything under projects/:
-#          a cheap fetch of the default branch plus a rev-list count, silent
-#          when up to date and silent (comparing against the last-fetched
-#          origin ref) when the fetch fails, e.g. offline - it never fails
-#          bootstrap, mirroring fleet_sync's posture. Detect-only sessions skip
+#          a cheap time-bounded fetch of the default branch (killed after
+#          FM_SELF_UPDATE_FETCH_TIMEOUT seconds, default 10) plus a rev-list
+#          count, silent when up to date and silent (comparing against the
+#          last-fetched origin ref) when the fetch fails or times out, e.g.
+#          offline - it never fails or blocks bootstrap, mirroring
+#          fleet_sync's posture. Detect-only sessions skip
 #          the fetch (no remote-tracking ref writes) but still report from
 #          already-fetched refs. Set FM_SELF_UPDATE_CHECK=0 to skip the check
 #          entirely (tests/lib.sh pins this so suites stay hermetic).
@@ -652,21 +654,54 @@ EOF
   echo "FMX: X mode on - relay poll armed via state/x-watch.check.sh; 30s watcher cadence in config/x-mode.env"
 }
 
+firstmate_update_fetch_timeout() {
+  case "${FM_SELF_UPDATE_FETCH_TIMEOUT:-}" in
+    ''|*[!0-9]*) echo 10 ;;
+    *) echo "$FM_SELF_UPDATE_FETCH_TIMEOUT" ;;
+  esac
+}
+
+firstmate_update_fetch() {
+  # Time-bounded origin fetch for the self-update check, mirroring fleet_sync's
+  # background+kill posture: a fetch that stalls (captive portal, half-open
+  # network, SSH waiting on a tty prompt) is killed at the timeout so it can
+  # never block session start; the check then falls back to already-fetched refs.
+  local default=$1 pid timeout start elapsed monitor_was_on
+  timeout=$(firstmate_update_fetch_timeout)
+  monitor_was_on=0
+  case $- in *m*) monitor_was_on=1 ;; esac
+  set -m 2>/dev/null || true
+  GIT_TERMINAL_PROMPT=0 git -C "$FM_ROOT" fetch --quiet origin "$default" >/dev/null 2>&1 &
+  pid=$!
+
+  start=$SECONDS
+  while jobs -r -p | grep -qx "$pid"; do
+    elapsed=$((SECONDS - start))
+    if [ "$elapsed" -ge "$timeout" ]; then
+      kill -TERM "-$pid" 2>/dev/null || kill "$pid" 2>/dev/null || true
+      break
+    fi
+    sleep 1
+  done
+  wait "$pid" 2>/dev/null || true
+  [ "$monitor_was_on" -eq 1 ] || set +m 2>/dev/null || true
+}
+
 firstmate_update_check() {
   # Best-effort heads-up when this firstmate checkout (FM_ROOT, never anything
   # under projects/) is behind its origin default branch, so the captain can be
   # offered /updatefirstmate without having to remember to ask. Silent when up
   # to date, when FM_ROOT has no repo/origin/default branch, and when the fetch
-  # fails (offline): a failed fetch just compares against the last-fetched
-  # origin ref. Detect-only sessions skip the fetch but still report from
-  # already-fetched refs.
+  # fails (offline): a failed or timed-out fetch just compares against the
+  # last-fetched origin ref. Detect-only sessions skip the fetch but still
+  # report from already-fetched refs.
   local default behind
   [ "${FM_SELF_UPDATE_CHECK:-1}" != 0 ] || return 0
   git -C "$FM_ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 0
   git -C "$FM_ROOT" remote get-url origin >/dev/null 2>&1 || return 0
   default=$(fm_default_branch "$FM_ROOT") || return 0
   if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
-    GIT_TERMINAL_PROMPT=0 git -C "$FM_ROOT" fetch --quiet origin "$default" >/dev/null 2>&1 || true
+    firstmate_update_fetch "$default"
   fi
   behind=$(git -C "$FM_ROOT" rev-list --count "HEAD..origin/$default" 2>/dev/null) || return 0
   case "$behind" in ''|*[!0-9]*) return 0 ;; esac

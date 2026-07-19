@@ -17,8 +17,9 @@
 # scan.
 # Self-update-check cases pin the FIRSTMATE_UPDATE line against local file://
 # origins: silent when up to date, behind-by-N reporting, a silently tolerated
-# failed fetch, the FM_SELF_UPDATE_CHECK=0 opt-out, and detect-only's
-# no-fetch stale-ref reporting.
+# failed fetch, a hanging fetch killed at FM_SELF_UPDATE_FETCH_TIMEOUT, the
+# FM_SELF_UPDATE_CHECK=0 opt-out, and detect-only's no-fetch stale-ref
+# reporting.
 set -u
 
 # shellcheck source=tests/lib.sh disable=SC1091
@@ -833,6 +834,43 @@ test_self_update_check_failed_fetch_is_silent() {
   pass "bootstrap self-update check tolerates a failed fetch without failing bootstrap"
 }
 
+test_self_update_check_hanging_fetch_is_bounded() {
+  local case_dir fixture upstream local_clone fakebin real_git out expect start elapsed
+  case_dir="$TMP_ROOT/self-update-hang"
+  fixture=$(make_self_update_world "$case_dir")
+  upstream=${fixture%%|*}
+  local_clone=${fixture#*|}
+  git -C "$upstream" commit -q --allow-empty -m ahead-1
+  git -C "$upstream" push -q origin main
+  git -C "$local_clone" fetch -q origin main
+  # A second origin commit lands after the last fetch; the hanging fetch below
+  # must be killed before it completes, so the check reports the stale 1-behind
+  # count (proving the fetch never finished) instead of 2.
+  git -C "$upstream" commit -q --allow-empty -m ahead-2
+  git -C "$upstream" push -q origin main
+
+  fakebin=$(make_fake_toolchain "$case_dir")
+  real_git=$(command -v git)
+  cat > "$fakebin/git" <<SH
+#!/usr/bin/env bash
+for arg in "\$@"; do
+  if [ "\$arg" = fetch ]; then sleep 60; break; fi
+done
+exec "$real_git" "\$@"
+SH
+  chmod +x "$fakebin/git"
+
+  start=$SECONDS
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$local_clone" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_SELF_UPDATE_CHECK=1 FM_SELF_UPDATE_FETCH_TIMEOUT=1 \
+    "$ROOT/bin/fm-bootstrap.sh")
+  elapsed=$((SECONDS - start))
+  expect="FIRSTMATE_UPDATE: firstmate checkout is 1 commit(s) behind origin/main (update: /updatefirstmate)"
+  [ "$out" = "$expect" ] || fail "hanging fetch should fall back to stale refs, got: $out"
+  [ "$elapsed" -lt 30 ] || fail "hanging fetch blocked bootstrap for ${elapsed}s"
+  pass "bootstrap self-update check kills a hanging fetch instead of blocking session start"
+}
+
 test_self_update_check_detect_only_skips_fetch() {
   local case_dir fixture upstream local_clone out expect
   case_dir="$TMP_ROOT/self-update-detect-only"
@@ -919,5 +957,6 @@ test_crew_dispatch_active_rules_are_verbose_bootstrap_info
 test_self_update_check_silent_when_current
 test_self_update_check_reports_behind_count
 test_self_update_check_failed_fetch_is_silent
+test_self_update_check_hanging_fetch_is_bounded
 test_self_update_check_detect_only_skips_fetch
 test_crew_dispatch_validation
