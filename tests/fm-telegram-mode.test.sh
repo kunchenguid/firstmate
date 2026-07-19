@@ -411,6 +411,29 @@ test_poll_auth_rejects_cannot_pin_offset() {
   pass "unauthenticated rejects cannot pin the getUpdates offset"
 }
 
+test_poll_offset_write_failure_surfaces_error() {
+  local home fakebin body out1 out2
+  home="$TMP_ROOT/poll-offset-fail"; mkdir -p "$home/state"
+  chmod 700 "$home/state"
+  write_env "$home"
+  fakebin=$(make_fake_curl "$home")
+  # A symlinked offset file makes the durable offset write refuse forever.
+  ln -s "$home/offset-elsewhere" "$home/state/telegram-offset"
+  body=$(sample_update 90 222 111 "status")
+  out1=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_TELEGRAM_API_URL="https://api.test" \
+    FAKE_POLL_CODE=200 FAKE_POLL_BODY="$body" \
+    "$ROOT/bin/fm-telegram-poll.sh")
+  assert_contains "$out1" "telegram-msg 90" "accepted update still wakes"
+  assert_contains "$out1" "telegram-mode-error cannot persist offset" "offset persist failure must surface"
+  assert_grep "cannot persist offset" "$home/state/telegram-audit.log" "must audit offset persist failure"
+  out2=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_TELEGRAM_API_URL="https://api.test" \
+    FAKE_POLL_CODE=200 FAKE_POLL_BODY="$body" \
+    "$ROOT/bin/fm-telegram-poll.sh")
+  assert_contains "$out2" "telegram-msg 90" "unconfirmed update must re-fetch next sweep"
+  assert_not_contains "$out2" "telegram-mode-error" "repeated offset failure surfaces once"
+  pass "poll surfaces offset persist failure once and keeps updates unconfirmed"
+}
+
 test_poll_409_resurfaces_after_healthy_poll() {
   local home fakebin out1 out2 out3
   home="$TMP_ROOT/poll-409-recover"; mkdir -p "$home"
@@ -703,8 +726,30 @@ test_respond_rate_limit() {
   seed_inbox "$home" 72 "approve k2"
   printf 'needs-decision [key=k2]: q\n' >> "$home/state/t.status"
   out=$(FM_HOME="$home" "$ROOT/bin/fm-telegram-respond.sh" 2>/dev/null)
-  assert_contains "$out" "rate-limited" "third command in window must rate-limit"
-  pass "respond rate-limits inbound commands"
+  assert_contains "$out" "deferred 72 rate-limited" "third command in window must rate-limit"
+  assert_present "$home/state/telegram-inbox/72.json" "rate-limited command must stay queued"
+  assert_grep $'respond\tdeferred' "$home/state/telegram-audit.log" "must audit rate-limit defer"
+  pass "respond rate-limits inbound commands and keeps them queued"
+}
+
+# Captain decision key=telegram-rate-cap holds through respond: over-limit
+# commands stay in the inbox and execute once the window frees up.
+test_respond_rate_limit_deferred_drains_later() {
+  local home out
+  home="$TMP_ROOT/resp-rate-defer"; mkdir -p "$home/state"
+  write_env "$home" "FM_TELEGRAM_DRY_RUN=1" "FM_TELEGRAM_RATE_MAX=1" "FM_TELEGRAM_RATE_WINDOW_SECS=2"
+  seed_inbox "$home" 73 "status"
+  FM_HOME="$home" "$ROOT/bin/fm-telegram-respond.sh" >/dev/null 2>&1
+  seed_inbox "$home" 74 "approve k1"
+  printf 'needs-decision [key=k1]: q\n' > "$home/state/t.status"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-telegram-respond.sh" 2>/dev/null)
+  assert_contains "$out" "deferred 74 rate-limited" "over-limit command must defer"
+  assert_present "$home/state/telegram-inbox/74.json" "deferred command must stay queued"
+  sleep 3
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-telegram-respond.sh" 2>/dev/null)
+  assert_contains "$out" "ok 74 approve k1 t" "deferred command must execute after window"
+  assert_absent "$home/state/telegram-inbox/74.json" "inbox must clear once deferred command runs"
+  pass "respond drains rate-deferred commands on a later sweep"
 }
 
 test_audit_covers_inbound_and_outbound() {
@@ -768,6 +813,7 @@ test_poll_rate_cap_defers_authenticated_offset_holds
 test_poll_rate_cap_deferred_processed_next_sweep
 test_poll_deferred_approve_still_subject_to_freshness
 test_poll_auth_rejects_cannot_pin_offset
+test_poll_offset_write_failure_surfaces_error
 test_send_dry_run_no_network
 test_send_refuses_secretish
 test_send_skips_when_not_afk
@@ -784,6 +830,7 @@ test_respond_merge_requires_notified_and_green
 test_respond_merge_unnamed_refused
 test_respond_dedupe
 test_respond_rate_limit
+test_respond_rate_limit_deferred_drains_later
 test_audit_covers_inbound_and_outbound
 test_lib_parse_command_closed_grammar
 

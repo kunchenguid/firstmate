@@ -50,7 +50,7 @@ Report it to the captain as a Telegram configuration blocker (for HTTP 409, reco
 
 3. After applying an action file, remove it: `rm -f state/telegram-actions/<update_id>.json`.
 
-4. Do not re-process inbox files the script already cleared. On script `error` lines, leave evidence and escalate if the failure repeats.
+4. Do not re-process inbox files the script already cleared. `deferred` lines are rate-limited commands still queued in the inbox; leave those files alone - a later drain runs them. On script `error` lines, leave evidence and escalate if the failure repeats.
 
 ## Procedure on `telegram-mode-error`
 

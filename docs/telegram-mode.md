@@ -121,6 +121,7 @@ Stage 3 free-text prompting is not implemented.
 
 - Offset advances past confirmed accepts and auth/empty drops.
 - Over-cap authenticated updates are deferred (offset holds before them) for at-least-once delivery of allowlisted commands.
+- Commands beyond the inbound rate limit stay queued in the inbox (audited `deferred`, replied "rate limited"), never dropped; a later drain runs them once the window frees up.
 - Approve/deny/merge older than `FM_TELEGRAM_FRESHNESS_SECS` (default 15 minutes) are not executed; deferred approvals can still go stale and are re-surfaced for re-confirmation.
 - Identical commands are deduped inside a short window.
 - Every inbound verdict and outbound send appends to `state/telegram-audit.log` (tokens redacted).

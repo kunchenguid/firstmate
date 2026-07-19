@@ -21,6 +21,7 @@
 # application). Prints one machine line per processed update:
 #   ok <update_id> <verb> ...
 #   refused <update_id> <reason>
+#   deferred <update_id> rate-limited
 #   error <update_id> <reason>
 set -u
 
@@ -130,11 +131,11 @@ process_one() {
   fi
 
   if ! fmt_rate_allow inbound; then
-    fmt_audit_append respond rate-limited "update_id=$uid"
-    reply_text "Rate limited - try again shortly." || true
-    printf 'refused %s rate-limited\n' "$uid"
-    # Leave file for a later sweep after the window, or drop to avoid stuck inbox.
-    rm -f -- "$file" 2>/dev/null || true
+    # DEFER, never drop (captain decision key=telegram-rate-cap): the offset
+    # already advanced past this update, so the inbox file is the only copy.
+    fmt_audit_append respond deferred "update_id=$uid rate-limited"
+    reply_text "Rate limited - command queued; it runs on a later sweep." || true
+    printf 'deferred %s rate-limited\n' "$uid"
     return 0
   fi
 
