@@ -1,12 +1,11 @@
 #!/usr/bin/env bash
 # Grok Stop-hook adapter for the firstmate PRIMARY turn-end guard.
 #
-# Grok Stop hooks are passive: exit 2 does not block or feed stderr back to the
-# model. This adapter still uses the shared primary-scoped predicate in
-# fm-turnend-guard.sh. When that predicate says the primary would end blind, the
-# adapter forces one same-session follow-up by running `grok --resume <session>`
-# with a guard instruction. GROK_TURNEND_GUARD_ACTIVE is the loop guard: the
-# nested turn's own Stop hook exits without spawning another nested turn.
+# Grok Stop hooks are passive. This adapter uses the shared primary-scoped
+# diagnostic in fm-turnend-guard.sh, whose current contract always permits
+# completion after an advisory. The legacy exit-2 resume path remains only for
+# compatibility with older recorded sessions; current code does not activate it.
+# GROK_TURNEND_GUARD_ACTIVE prevents recursion if that legacy path is replayed.
 set -u
 
 PAYLOAD=$(cat 2>/dev/null || true)
