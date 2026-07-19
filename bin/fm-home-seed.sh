@@ -651,9 +651,16 @@ seed_return_treehouse_home() {
 }
 
 seed_remove_created_home() {
-  local home=$1 abs_home
+  local home=$1 abs_home delay
   abs_home=$(seed_rollback_target "$home" "created home") || return 0
+  for delay in 0.05 0.1 0.2; do
+    rm -rf -- "$abs_home" 2>/dev/null || true
+    sleep "$delay"
+  done
   rm -rf -- "$abs_home" 2>/dev/null || true
+  if [ -e "$abs_home" ] || [ -L "$abs_home" ]; then
+    echo "warning: failed to remove created home $abs_home during seed rollback" >&2
+  fi
 }
 
 seed_project_rollback_target() {
