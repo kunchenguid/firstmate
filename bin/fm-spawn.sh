@@ -309,6 +309,47 @@ else
 fi
 [ -z "$HARNESS_ARG" ] || ARG3=$HARNESS_ARG
 
+# An optional per-ID secondmate dispatch file can replace the legacy global pin
+# for this spawn. Its profile object uses the same ordered `use` plus `select`
+# contract as crew dispatch. Missing entries fall through to the existing
+# secondmate-harness chain. Explicit per-spawn axes always win.
+if [ "$KIND" = secondmate ] && [ -z "$ARG3" ] && [ -f "$CONFIG/secondmate-dispatch.json" ]; then
+  command -v jq >/dev/null 2>&1 || {
+    echo "error: config/secondmate-dispatch.json is active but jq is unavailable" >&2
+    exit 1
+  }
+  SM_DISPATCH_SPEC=$(jq -ec --arg id "$ID" '.profiles[$id] // .default // empty' "$CONFIG/secondmate-dispatch.json" 2>/dev/null)
+  sm_dispatch_status=$?
+  if [ "$sm_dispatch_status" -ne 0 ]; then
+    if [ "$sm_dispatch_status" -ne 4 ]; then
+      echo "error: config/secondmate-dispatch.json is malformed or unreadable" >&2
+      exit 1
+    fi
+    SM_DISPATCH_SPEC=
+  fi
+  if [ -n "$SM_DISPATCH_SPEC" ]; then
+    if ! SM_SELECTED_PROFILE=$("$SCRIPT_DIR/fm-dispatch-select.sh" "$SM_DISPATCH_SPEC"); then
+      echo "error: secondmate dispatch profile for '$ID' could not be resolved" >&2
+      exit 1
+    fi
+    ARG3=$(printf '%s\n' "$SM_SELECTED_PROFILE" | jq -r '.harness // ""')
+    [ -n "$ARG3" ] || { echo "error: secondmate dispatch profile for '$ID' has no harness" >&2; exit 1; }
+    if [ "$MODEL_SET" -eq 0 ]; then
+      SM_MODEL=$(printf '%s\n' "$SM_SELECTED_PROFILE" | jq -r '.model // ""')
+      [ -z "$SM_MODEL" ] || MODEL=$SM_MODEL
+    fi
+    if [ "$EFFORT_SET" -eq 0 ]; then
+      SM_EFFORT=$(printf '%s\n' "$SM_SELECTED_PROFILE" | jq -r '.effort // ""')
+      if [ -n "$SM_EFFORT" ]; then
+        case "$SM_EFFORT" in
+          low|medium|high|xhigh|max) EFFORT=$SM_EFFORT ;;
+          *) echo "error: secondmate dispatch profile for '$ID' has invalid effort '$SM_EFFORT'" >&2; exit 1 ;;
+        esac
+      fi
+    fi
+  fi
+fi
+
 # The verified launch command per adapter. The knowledge half of each adapter
 # (busy signature, exit command, dialogs, quirks) lives in the harness-adapters skill.
 launch_template() {

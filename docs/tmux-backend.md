@@ -111,6 +111,25 @@ The classifier deliberately reports `unknown` for `node`/`python`/`python3` rath
 Practical effect: a dead `pi` secondmate is not auto-healed by the liveness sweep today; it is reported as `skipped: liveness probe inconclusive` instead, which still surfaces it for a human to act on.
 Resolving this would need either a `pi`-specific env marker inspectable from outside the process (mirroring `PI_CODING_AGENT=true`, which `bin/fm-harness.sh` already uses for self-detection but which is not readable from a different process without deeper introspection) or accepting the argument-inspection fragility - not attempted here.
 
+## Read-only operator dashboard
+
+Open a three-pane observer for an existing FirstMate tmux session with:
+
+```sh
+bin/fm-dashboard.sh <target-session>
+```
+
+The left pane is a bounded `tmux capture-pane` view of the coordinator.
+The upper-right pane renders the roster from `bin/fm-fleet-snapshot.sh --json`.
+The lower-right pane renders one active task or a definitive no-active-worker state.
+The dashboard reports role, harness, model, effort, state, repository, branch, worktree, last-change age, and decision or blocker hints when the underlying snapshot contains them.
+Phase, wave, tool-use, and other unavailable telemetry are labeled unavailable rather than inferred.
+
+The command creates a separate observer session named `fm-dashboard-<target>` and never sends keys, writes status or inbox files, arms watchers, or wakes the target.
+Its local refresh loop performs only tmux captures and filesystem-backed snapshot reads, with no model calls.
+Use `--interval <seconds>` to change the default three-second refresh, `--observer <name>` to choose the observer session name, or `--no-attach` to create it without attaching.
+Detach with `Ctrl-b d` and reattach with the command printed by the launcher.
+
 ## Limitations
 
 None specific to tmux for the reference path itself - it is the fully verified reference backend, while Orca and cmux are the backends without secondmate support.

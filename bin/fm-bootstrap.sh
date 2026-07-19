@@ -688,8 +688,8 @@ crew_dispatch_validate() {
     elif [(.rules // [])[]? | use_profiles(.use?)[]? | select(type != "object")] | length > 0 then "each use profile must be an object"
     elif [(.rules // [])[]? | use_profiles(.use?)[]? | select((.harness? | type) != "string" or (.harness | length) == 0)] | length > 0 then "each use profile needs harness"
     elif [(.rules // [])[]? | select(has("select") and ((.select? | type) != "string" or (.select | length) == 0))] | length > 0 then "select must be a non-empty string"
-    elif [(.rules // [])[]? | .select? // empty | select(. != "quota-balanced")] | length > 0 then
-      "unknown select: " + ([ (.rules // [])[]? | .select? // empty | select(. != "quota-balanced") ] | unique | join(", "))
+    elif [(.rules // [])[]? | .select? // empty | select(. != "quota-balanced" and . != "primary-available")] | length > 0 then
+      "unknown select: " + ([ (.rules // [])[]? | .select? // empty | select(. != "quota-balanced" and . != "primary-available") ] | unique | join(", "))
     elif has("default") and (.default | type) != "object" then "default must be an object"
     elif has("default") and ((.default.harness? | type) != "string" or (.default.harness | length) == 0) then "default needs harness when present"
     else
@@ -726,6 +726,54 @@ crew_dispatch_validate() {
       + (if (.default? | type) == "object" then ["BOOTSTRAP_INFO: crew dispatch default: " + profile(.default)] else [] end))
     | .[]
   ' "$file"
+  fi
+}
+
+secondmate_dispatch_validate() {
+  local file err
+  file="$CONFIG/secondmate-dispatch.json"
+  [ -f "$file" ] || return 0
+  if ! command -v jq >/dev/null 2>&1; then
+    echo "MISSING: jq (install: $(install_cmd jq))"
+    return 0
+  fi
+  if ! jq -e . "$file" >/dev/null 2>&1; then
+    echo "SECONDMATE_DISPATCH: invalid config/secondmate-dispatch.json - malformed JSON"
+    return 0
+  fi
+  err=$(jq -r '
+    def verified($h): ["claude","codex","opencode","pi","grok"] | index($h);
+    def effort_ok($h; $e):
+      if $e == null then true
+      elif ($e | type) != "string" then false
+      elif $h == "claude" then (["low","medium","high","xhigh","max"] | index($e))
+      elif $h == "codex" then (["low","medium","high","xhigh"] | index($e))
+      elif $h == "grok" then (["low","medium","high"] | index($e))
+      elif $h == "pi" then (["low","medium","high","xhigh","max"] | index($e))
+      elif $h == "opencode" then false
+      else true end;
+    def profiles($spec):
+      if ($spec.use? | type) == "array" then $spec.use
+      elif ($spec.use? | type) == "object" then [$spec.use]
+      else [] end;
+    ([((.profiles // {}) | to_entries[]? | {id:.key,spec:.value})]
+      + (if has("default") then [{id:"default",spec:.default}] else [] end)) as $entries
+    | if type != "object" then "top-level value must be an object"
+      elif has("profiles") and (.profiles | type) != "object" then "profiles must be an object"
+      elif ([$entries[] | select((.spec | type) != "object")] | length) > 0 then "each profile set must be an object"
+      elif ([$entries[] | select((profiles(.spec) | length) == 0)] | length) > 0 then "each profile set needs at least one use profile"
+      elif ([$entries[] | select(.spec.select? != null and (.spec.select as $s | ["primary-available","quota-balanced"] | index($s) | not))] | length) > 0 then "unknown select"
+      elif ([$entries[] | .spec as $spec | profiles($spec)[]? | select((.harness? | type) != "string" or (verified(.harness) | not))] | length) > 0 then "unverified harness"
+      elif ([$entries[] | .spec as $spec | profiles($spec)[]? | select(.effort? != null and (effort_ok(.harness; .effort) | not))] | length) > 0 then "invalid effort"
+      else empty end
+  ' "$file" 2>/dev/null || true)
+  if [ -n "$err" ]; then
+    echo "SECONDMATE_DISPATCH: invalid config/secondmate-dispatch.json - $err"
+    return 0
+  fi
+  if [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ]; then
+    count=$(jq '(.profiles // {}) | length' "$file")
+    echo "BOOTSTRAP_INFO: secondmate dispatch active config/secondmate-dispatch.json profiles=$count"
   fi
 }
 
@@ -795,6 +843,7 @@ if [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ] && [ -n "$crew" ] && [ "$crew" != 
   echo "BOOTSTRAP_INFO: crew harness override active: $crew"
 fi
 crew_dispatch_validate
+secondmate_dispatch_validate
 if [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ] \
   && ! fm_backlog_backend_manual "$CONFIG" && fm_tasks_axi_compatible; then
   echo "BOOTSTRAP_INFO: tasks-axi available"

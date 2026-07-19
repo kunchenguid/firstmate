@@ -73,6 +73,10 @@ An explicit per-spawn `--harness` flag, positional harness arg, or raw launch co
 When the file's tokens do apply, an explicit per-spawn `--model` or `--effort` flag always wins over the file's token for that axis.
 Because this resolves from the file on every spawn, the pin is durable across every respawn (recovery, `/updatefirstmate`, restart) exactly like the harness axis itself - e.g. `config/secondmate-harness` containing `claude opus` keeps a secondmate pinned to Opus even if the primary's own default model later changes.
 This is secondmate-only: crewmate/scout model resolution is untouched by this file.
+For domain-specific routing, the primary may additionally hold `config/secondmate-dispatch.json`, keyed by stable secondmate ID.
+A matching per-ID profile set takes precedence over the legacy global pin and uses the ordered `use` plus `select` schema owned by `docs/configuration.md`.
+Use `primary-available` when the first profile is the deliberate domain primary and later profiles are exhaustion or hard-unavailability fallbacks.
+This file is primary-only and is never inherited into secondmate homes.
 
 This section is the single owner of the secondmate sync and inherited-local-material propagation contract; `AGENTS.md` sections 3 and 4 point here.
 Before launch, `fm-spawn.sh --secondmate` locally fast-forwards the home to the primary firstmate checkout's current default-branch commit when it is safe; dirty, diverged, or in-flight homes launch unchanged with a warning.
@@ -141,6 +145,8 @@ bin/fm-spawn.sh <id> --secondmate
 Use the recorded `home=` in meta.
 If meta is missing but `data/secondmates.md` still registers the secondmate, respawn from the registry entry and its persistent on-disk home.
 Respawn re-resolves the secondmate harness from current config, uses the same guarded pre-launch sync, and re-propagates inherited local material, so recovered secondmates converge inherited config items and shared captain preferences whenever their home validates; tracked-file sync remains guarded separately.
+When `config/secondmate-dispatch.json` has a matching ID, respawn re-resolves that ordered profile policy before the legacy harness pin.
+This is the controlled provider-fallback path: keep the same ID, home, charter, backlog, and work order; never seed a replacement secondmate because one provider hit a limit.
 If the secondmate is already running and only inherited local material changed, prefer `bin/fm-config-push.sh` over respawning.
 
 Do not reconstruct a secondmate's whole tree from the main home.

@@ -174,6 +174,69 @@ SH
   pass "single-object use and no-select arrays preserve first-profile selection"
 }
 
+write_adapter_stubs() {  # <dir> [claude|codex ...]
+  local dir=$1 adapter
+  shift
+  mkdir -p "$dir"
+  for adapter in "$@"; do
+    printf '#!/usr/bin/env bash\nexit 0\n' > "$dir/$adapter"
+    chmod +x "$dir/$adapter"
+  done
+}
+
+test_primary_available_keeps_primary_until_exact_exhaustion() {
+  local quota fakebin out
+  quota="$TMP_ROOT/primary-available.json"
+  fakebin=$(fm_fakebin "$TMP_ROOT/primary-adapters")
+  write_adapter_stubs "$fakebin" claude codex
+
+  write_quota "$quota" fresh 1 1 fresh 100 100
+  out=$(PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-dispatch-select.sh" --select primary-available --quota-json "$quota" "$profiles")
+  [ "$out" = '{"harness":"claude","model":"claude-sonnet-5","effort":"high"}' ] \
+    || fail "primary-available should keep a constrained but usable primary, got: $out"
+
+  write_quota "$quota" fresh 0 0 fresh 100 100
+  out=$(PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-dispatch-select.sh" --select primary-available --quota-json "$quota" "$profiles" 2>"$TMP_ROOT/primary-exhausted.err")
+  [ "$out" = '{"harness":"codex","model":"gpt-5.5","effort":"high"}' ] \
+    || fail "primary-available should use the ordered fallback at exact exhaustion, got: $out"
+  assert_contains "$(cat "$TMP_ROOT/primary-exhausted.err")" "exhausted general quota window" \
+    "exact exhaustion fallback should be logged"
+  pass "primary-available keeps the domain primary until exact general-window exhaustion"
+}
+
+test_primary_available_treats_unknown_telemetry_as_primary() {
+  local quota fakebin out
+  quota="$TMP_ROOT/primary-unknown.json"
+  fakebin=$(fm_fakebin "$TMP_ROOT/primary-unknown-adapters")
+  write_adapter_stubs "$fakebin" claude codex
+  cat > "$quota" <<'JSON'
+{
+  "providers": [
+    {"provider":"claude","source":"unavailable","state":{"status":"auth_required"},"windows":[]},
+    {"provider":"codex","state":{"status":"fresh"},"windows":[{"id":"five_hour","kind":"session","percentRemaining":100}]}
+  ]
+}
+JSON
+  out=$(PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-dispatch-select.sh" --select primary-available --quota-json "$quota" "$profiles")
+  [ "$out" = '{"harness":"claude","model":"claude-sonnet-5","effort":"high"}' ] \
+    || fail "unknown Claude telemetry must not speculatively downgrade, got: $out"
+  pass "primary-available keeps the primary when quota telemetry is unavailable or auth-failed"
+}
+
+test_primary_available_skips_missing_adapter() {
+  local quota fakebin out
+  quota="$TMP_ROOT/primary-missing-adapter.json"
+  fakebin=$(fm_fakebin "$TMP_ROOT/primary-missing-adapter-bin")
+  write_adapter_stubs "$fakebin" codex
+  write_quota "$quota" fresh 100 100 fresh 100 100
+  out=$(PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-dispatch-select.sh" --select primary-available --quota-json "$quota" "$profiles" 2>"$TMP_ROOT/primary-missing-adapter.err")
+  [ "$out" = '{"harness":"codex","model":"gpt-5.5","effort":"high"}' ] \
+    || fail "missing primary adapter should use the next ordered profile, got: $out"
+  assert_contains "$(cat "$TMP_ROOT/primary-missing-adapter.err")" "harness 'claude' is unavailable" \
+    "missing adapter fallback should be logged"
+  pass "primary-available skips a hard-missing adapter command"
+}
+
 test_higher_min_vendor_wins
 test_exact_tie_uses_first_profile
 test_quota_missing_falls_back_to_first
@@ -182,5 +245,8 @@ test_bad_quota_json_falls_back_to_first
 test_stale_with_cache_needs_clear_margin_to_beat_fresh
 test_vendor_absent_or_unusable_falls_back_conservatively
 test_backward_compatible_first_selection
+test_primary_available_keeps_primary_until_exact_exhaustion
+test_primary_available_treats_unknown_telemetry_as_primary
+test_primary_available_skips_missing_adapter
 
 echo "# all fm-dispatch-select tests passed"

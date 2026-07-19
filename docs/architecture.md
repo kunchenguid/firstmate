@@ -132,6 +132,9 @@ When the file exists, `fm-spawn.sh` refuses crewmate and scout launches without 
 Secondmate launches are exempt because they resolve the secondmate harness and any optional secondmate model or effort tokens instead.
 Unsupported effort values are still recorded in task meta when passed to `fm-spawn.sh`, but the launch template omits any effort flag that the selected harness does not accept.
 That keeps spawn launch compatible across claude, codex, grok, pi, and opencode while preserving the requested profile for later audit.
+Persistent secondmates can use the same ordered selection contract through primary-only `config/secondmate-dispatch.json` keyed by stable secondmate ID.
+The `primary-available` selector is intentionally asymmetric: domain fit chooses the primary, while a fallback activates only on hard adapter absence or proven exact quota exhaustion.
+Unknown quota telemetry never rotates providers.
 
 ## Optional secondmates
 

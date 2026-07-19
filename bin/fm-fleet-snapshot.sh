@@ -18,6 +18,10 @@
 #     Structured rows preserve captain-hold metadata such as hold_kind and
 #     hold_reason when tasks-axi emits it.
 #   tasks[]: one row per state/<id>.meta, sorted by id.
+#     role, harness, model, and effort expose the recorded launch policy.
+#     git.repo and git.branch are best-effort read-only worktree observations.
+#     activity reports the status-log (or meta fallback) age without treating a
+#     historical event as current agent state.
 #     current_state is parsed from bin/fm-crew-state.sh <id> and preserves
 #     state, source, detail, and raw line separately.
 #     paths.status_log.last_event is historical wake-event data only, never
@@ -359,17 +363,22 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
 }
 
 task_json_lines() {
-  local meta id kind harness mode yolo project worktree home projects backend target status_log report_path
+  local meta id kind role harness model effort mode yolo project worktree home projects backend target status_log report_path
   local pr pr_source event_json current_json endpoint_exists agent_alive meta_json status_json report_json worktree_json home_json
   local last_event_raw current_state current_source pending_decision blocked_event report_present=0 pr_from_status
   local open_decisions_tsv open_decisions_json
+  local git_repo git_branch activity_path activity_source activity_epoch activity_age
 
   for meta in "$STATE"/*.meta; do
     [ -e "$meta" ] || continue
     id=$(basename "$meta" .meta)
     kind=$(meta_value "$meta" kind)
     [ -n "$kind" ] || kind=ship
+    role=$(meta_value "$meta" role)
+    [ -n "$role" ] || role=$kind
     harness=$(meta_value "$meta" harness)
+    model=$(meta_value "$meta" model)
+    effort=$(meta_value "$meta" effort)
     mode=$(meta_value "$meta" mode)
     yolo=$(meta_value "$meta" yolo)
     project=$(meta_value "$meta" project)
@@ -448,10 +457,35 @@ task_json_lines() {
     if [ -n "$worktree" ]; then worktree_json=$(path_present_json "$worktree"); else worktree_json=$(jq -n '{path:null,present:false}'); fi
     if [ -n "$home" ]; then home_json=$(path_present_json "$home"); else home_json=$(jq -n '{path:null,present:false}'); fi
 
+    git_repo=
+    git_branch=
+    if [ -n "$worktree" ] && [ -d "$worktree" ] && command -v git >/dev/null 2>&1; then
+      git_repo=$(git -C "$worktree" rev-parse --show-toplevel 2>/dev/null || true)
+      git_branch=$(git -C "$worktree" branch --show-current 2>/dev/null || true)
+      [ -n "$git_branch" ] || git_branch=$(git -C "$worktree" rev-parse --short HEAD 2>/dev/null || true)
+    fi
+
+    activity_path=$status_log
+    activity_source=status_log
+    if [ ! -e "$activity_path" ]; then
+      activity_path=$meta
+      activity_source=meta
+    fi
+    activity_epoch=$(file_mtime_epoch "$activity_path")
+    case "$activity_epoch" in
+      ''|*[!0-9]*) activity_epoch=0; activity_age=null; activity_source=unavailable ;;
+      *)
+        if [ "$SNAPSHOT_EPOCH" -ge "$activity_epoch" ]; then activity_age=$((SNAPSHOT_EPOCH - activity_epoch)); else activity_age=0; fi
+        ;;
+    esac
+
     jq -n \
       --arg id "$id" \
       --arg kind "$kind" \
+      --arg role "$role" \
       --arg harness "$harness" \
+      --arg model "$model" \
+      --arg effort "$effort" \
       --arg mode "$mode" \
       --arg yolo "$yolo" \
       --arg project "$project" \
@@ -463,7 +497,12 @@ task_json_lines() {
       --arg pr "$pr" \
       --arg pr_source "$pr_source" \
       --arg agent_alive "$agent_alive" \
+      --arg git_repo "$git_repo" \
+      --arg git_branch "$git_branch" \
+      --arg activity_source "$activity_source" \
       --arg observed_at "$SNAPSHOT_NOW" \
+      --argjson activity_epoch "$activity_epoch" \
+      --argjson activity_age "$activity_age" \
       --arg last_event_raw "$last_event_raw" \
       --argjson current_state "$current_json" \
       --argjson meta_path "$meta_json" \
@@ -479,7 +518,10 @@ task_json_lines() {
       '{
         id:$id,
         kind:$kind,
+        role:$role,
         harness:($harness // ""),
+        model:($model | if . == "" then "default" else . end),
+        effort:($effort | if . == "" then "default" else . end),
         mode:($mode // ""),
         yolo:($yolo // ""),
         project:($project // ""),
@@ -499,6 +541,8 @@ task_json_lines() {
                   else "unknown" end),
           observed_at:$observed_at,freshness:"fresh"},
         pr:{url:($pr | if . == "" then null else . end),source:$pr_source},
+        git:{repo:($git_repo | if . == "" then null else . end),branch:($git_branch | if . == "" then null else . end)},
+        activity:{source:$activity_source,last_change_epoch:(if $activity_epoch == 0 then null else $activity_epoch end),age_seconds:$activity_age},
         hints:{
           pending_decision:$pending_decision,
           blocked_event:$blocked_event,

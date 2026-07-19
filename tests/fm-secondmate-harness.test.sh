@@ -335,6 +335,40 @@ test_spawn_backward_compat_crew_fallback() {
   pass "B3 spawn: an absent secondmate-harness falls back to the crew harness (backward-compat)"
 }
 
+test_spawn_per_id_dispatch_profile() {
+  local w sm meta
+  w="$TMP_ROOT/spawn-per-id-dispatch"
+  sm="$w/sm-model-policy"
+  mkdir -p "$w/home/config"
+  cat > "$w/home/config/secondmate-dispatch.json" <<'JSON'
+{
+  "profiles": {
+    "sm-model-policy": {
+      "select": "primary-available",
+      "use": [
+        {"harness":"claude","model":"fable","effort":"xhigh"},
+        {"harness":"codex","model":"gpt-5.6-sol","effort":"xhigh"}
+      ]
+    }
+  }
+}
+JSON
+  printf 'codex\n' > "$w/home/config/secondmate-harness"
+  make_seeded_home "$sm" sm-model-policy
+
+  spawn_secondmate "$w" sm-model-policy "$sm"
+
+  meta="$w/home/state/sm-model-policy.meta"
+  [ -f "$meta" ] || fail "per-id dispatch: no meta written"
+  [ "$(meta_harness "$meta")" = claude ] \
+    || fail "per-id dispatch: expected declared primary claude, got $(meta_harness "$meta")"
+  [ "$(meta_field "$meta" model)" = fable ] \
+    || fail "per-id dispatch: expected model=fable"
+  [ "$(meta_field "$meta" effort)" = xhigh ] \
+    || fail "per-id dispatch: expected effort=xhigh"
+  pass "B3a spawn: per-ID secondmate dispatch profile overrides the legacy global pin"
+}
+
 # Bare backward-compat: no config at all. The secondmate falls through to its own
 # harness (claude here), and with no inheritable file the home is left untouched -
 # no config/ side effects.
@@ -1021,6 +1055,7 @@ test_secondmate_model_effort_tokens
 test_propagate_lib
 test_spawn_split_and_inherit
 test_spawn_backward_compat_crew_fallback
+test_spawn_per_id_dispatch_profile
 test_spawn_bare_backward_compat
 test_spawn_explicit_harness_wins
 test_spawn_unverified_secondmate_harness_refused

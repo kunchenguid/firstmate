@@ -180,6 +180,8 @@ An explicit `--model` or `--effort` overrides the matching token from `config/se
 When `config/crew-dispatch.json` exists, crewmate and scout spawns require an explicit resolved harness instead of automatically falling back to `config/crew-harness`.
 The inherited-local-material contract is owned by `secondmate-provisioning`; for harness behavior, its propagated config items make a secondmate's own crewmates, dispatch profiles, and backlog backend use the primary values.
 `config/secondmate-harness` is not inherited because secondmates do not launch secondmates.
+`config/secondmate-dispatch.json` is an optional per-ID policy that takes precedence over `config/secondmate-harness` when a matching secondmate profile exists.
+It is also primary-only and is not inherited.
 For grok, `fm-spawn.sh` installs one firstmate-owned global turn-end hook under `$GROK_HOME/hooks/`, or `~/.grok/hooks/` when `GROK_HOME` is unset, and drops a per-task `.fm-grok-turnend` pointer in the worktree, with teardown removing the task token and pointer.
 For Pi secondmate launches, `fm-spawn.sh` starts Pi with `-e` pointed at the secondmate home's own tracked `.pi/extensions/fm-primary-pi-watch.ts` and `.pi/extensions/fm-primary-turnend-guard.ts`, both already present from the secondmate home's git worktree.
 
@@ -211,12 +213,14 @@ This section is the single owner of the canonical schema and its per-field seman
 Per rule, `when` and `use` are required.
 `use` may be a single profile object or an ordered array of profile objects; the single-object form stays fully backward-compatible, and every profile needs `harness`.
 `use.model`, `use.effort`, and `why` are optional.
-`select` is optional and currently supports `quota-balanced`.
+`select` is optional and supports `quota-balanced` and `primary-available`.
 Absent `select` means use the first array element, or the only object in the single-object form; the first array element is the deterministic tie-break and the ultimate fallback.
 `default` is optional.
 An omitted model or effort means the selected harness uses its own default for that axis.
 If a selected profile carries an effort value the chosen harness does not accept, `fm-spawn.sh` records the requested `effort=` in task meta for traceability but omits the launch flag, and bootstrap reports the invalid harness/effort pair as a `CREW_DISPATCH` diagnostic when it is visible in the file.
 `quota-balanced` selection is deterministic and implemented by `bin/fm-dispatch-select.sh`, whose header owns the general-window rules, the 20 point stale-clear freshness margin, vendor-availability handling, and the degrade-to-first-element fallbacks; quota trouble never blocks dispatch.
+`primary-available` keeps the first ordered profile until its adapter command is missing or usable general-window telemetry proves exact exhaustion.
+Missing, stale, authentication-failed, or otherwise unavailable quota telemetry is unknown and keeps the primary, so a telemetry gap never causes a speculative downgrade.
 See [`docs/examples/crew-dispatch.json`](examples/crew-dispatch.json) for a starting point to copy into local `config/crew-dispatch.json`.
 When the file exists, bootstrap validates it with `jq`.
 Valid files stay silent by default; with `FM_BOOTSTRAP_VERBOSE_FACTS=1`, bootstrap emits `BOOTSTRAP_INFO: crew dispatch active config/crew-dispatch.json` plus one `BOOTSTRAP_INFO:` fact per rule and default profile.
@@ -224,6 +228,36 @@ Malformed JSON, an unverified harness, a malformed array profile, an unknown `se
 If no dispatch rule fits, firstmate uses the dispatch profile `default` when present, then falls back to `config/crew-harness`.
 Because the spawn backstop is gated by file presence, any fallback path after a missing match, validation error, or missing `jq` still passes a resolved harness explicitly until the file is fixed or removed.
 Secondmate homes inherit this file from the primary, so a secondmate's own crewmates apply the same dispatch profile behavior.
+
+## Per-secondmate dispatch profiles (config/secondmate-dispatch.json)
+
+`config/secondmate-dispatch.json` is an optional local, gitignored map from persistent secondmate ID to an ordered launch profile set.
+It exists in the primary home only and is resolved again on every secondmate spawn or recovery, so the same secondmate ID, home, charter, and work remain authoritative after a provider limit.
+An explicit per-spawn harness, model, or effort still wins for that axis.
+A missing ID falls through to the optional `default` profile set, then to the backward-compatible `config/secondmate-harness` chain.
+
+```json
+{
+  "profiles": {
+    "sm-example": {
+      "select": "primary-available",
+      "use": [
+        { "harness": "claude", "model": "opus", "effort": "high" },
+        { "harness": "codex", "model": "gpt-5.6-sol", "effort": "high" }
+      ]
+    }
+  },
+  "default": {
+    "select": "primary-available",
+    "use": { "harness": "codex", "model": "gpt-5.6-terra", "effort": "high" }
+  }
+}
+```
+
+Each value under `profiles` and the optional `default` uses the same `use` and `select` semantics as a matched crew-dispatch rule.
+Bootstrap validates the full file and reports malformed profiles as `SECONDMATE_DISPATCH` diagnostics.
+This selector handles pre-launch hard unavailability.
+If an interactive provider fails after launch, recovery preserves the existing task or persistent home and respawns the same ID after re-resolving this policy; it never creates a replacement work order.
 
 ## Toolchain
 

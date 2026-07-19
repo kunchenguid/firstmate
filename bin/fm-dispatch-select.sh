@@ -29,6 +29,13 @@
 # quota-balanced uses quota-axi --json unless --quota-json supplies a fixture.
 # FM_DISPATCH_QUOTA_AXI overrides the quota command.
 # FM_DISPATCH_STALE_CLEAR_MARGIN overrides the default 20 point stale margin.
+#
+# primary-available preserves the declared profile order. It selects the first
+# profile whose adapter command exists and whose provider is not proven exactly
+# exhausted by usable general-window telemetry. Missing, stale, auth-failed, or
+# otherwise unavailable telemetry is UNKNOWN and therefore keeps the primary;
+# it never causes a speculative downgrade. A missing adapter command and an
+# exact zero in a usable general quota window are hard-unavailable signals.
 set -u
 
 STALE_CLEAR_MARGIN=${FM_DISPATCH_STALE_CLEAR_MARGIN:-20}
@@ -120,6 +127,68 @@ first_profile() {
   '
 }
 
+clean_profile_at() {  # <zero-based-index>
+  printf '%s\n' "$profiles_json" | jq -c --argjson index "$1" '
+    def clean($p):
+      {harness: $p.harness}
+      + (if ($p.model? | type) == "string" then {model: $p.model} else {} end)
+      + (if ($p.effort? | type) == "string" then {effort: $p.effort} else {} end);
+    clean(.[$index])
+  '
+}
+
+adapter_command() {  # <harness>
+  case "$1" in
+    claude|codex|opencode|pi|grok) printf '%s\n' "$1" ;;
+    *) return 1 ;;
+  esac
+}
+
+primary_available_profile() {
+  local index harness command exhausted
+  index=0
+  while [ "$index" -lt "$profile_count" ]; do
+    harness=$(printf '%s\n' "$profiles_json" | jq -r --argjson index "$index" '.[$index].harness // ""')
+    command=$(adapter_command "$harness" 2>/dev/null || true)
+    if [ -z "$command" ] || ! command -v "$command" >/dev/null 2>&1; then
+      log "profile $index harness '$harness' is unavailable; trying next profile"
+      index=$((index + 1))
+      continue
+    fi
+
+    exhausted=false
+    if [ -n "${quota_json:-}" ]; then
+      exhausted=$(printf '%s\n' "$quota_json" | jq -r --arg harness "$harness" '
+        def general_ids($h):
+          if $h == "claude" then ["five_hour", "seven_day"]
+          elif $h == "codex" then ["five_hour", "weekly"]
+          else [] end;
+        ([.providers[]? | select(.provider == $harness)][0]) as $provider
+        | if $provider == null then false
+          else (($provider.windows // [])
+            | map(. as $window
+              | select(((general_ids($harness) | index($window.id)) != null)
+                and (($window.kind? // "") != "model")
+                and (($window.percentRemaining? | type) == "number")))) as $windows
+            | if ($windows | length) == 0 then false
+              else (($windows | map(.percentRemaining) | min) <= 0)
+              end
+          end
+      ' 2>/dev/null || printf false)
+    fi
+    if [ "$exhausted" = true ]; then
+      log "profile $index harness '$harness' has an exhausted general quota window; trying next profile"
+      index=$((index + 1))
+      continue
+    fi
+    clean_profile_at "$index"
+    return 0
+  done
+
+  log "no declared profile is hard-available; using first profile for deterministic recovery"
+  first_profile
+}
+
 select_strategy=$SELECT_OVERRIDE
 if [ -z "$select_strategy" ]; then
   select_strategy=$(printf '%s\n' "$SPEC_JSON" | jq -r '
@@ -127,7 +196,7 @@ if [ -z "$select_strategy" ]; then
   ' 2>/dev/null || true)
 fi
 
-if [ "$select_strategy" != quota-balanced ]; then
+if [ "$select_strategy" != quota-balanced ] && [ "$select_strategy" != primary-available ]; then
   if [ -n "$select_strategy" ]; then
     log "unknown select strategy '$select_strategy'; using first profile"
   fi
@@ -138,28 +207,34 @@ fi
 if [ -n "$QUOTA_JSON_FILE" ]; then
   if ! quota_json=$(cat "$QUOTA_JSON_FILE" 2>/dev/null); then
     log "cannot read quota JSON; using first profile"
-    first_profile
+    if [ "$select_strategy" = primary-available ]; then primary_available_profile; else first_profile; fi
     exit 0
   fi
 else
   quota_cmd=${FM_DISPATCH_QUOTA_AXI:-quota-axi}
   if ! command -v "$quota_cmd" >/dev/null 2>&1; then
     log "quota-axi missing; using first profile"
-    first_profile
+    if [ "$select_strategy" = primary-available ]; then primary_available_profile; else first_profile; fi
     exit 0
   fi
   quota_json=$("$quota_cmd" --json 2>/dev/null)
   quota_status=$?
   if [ "$quota_status" -ne 0 ]; then
     log "quota-axi exited $quota_status; using first profile"
-    first_profile
+    if [ "$select_strategy" = primary-available ]; then primary_available_profile; else first_profile; fi
     exit 0
   fi
 fi
 
 if ! printf '%s\n' "$quota_json" | jq -e 'type == "object" and (.providers | type) == "array"' >/dev/null 2>&1; then
   log "quota-axi returned unparseable JSON; using first profile"
-  first_profile
+  quota_json=
+  if [ "$select_strategy" = primary-available ]; then primary_available_profile; else first_profile; fi
+  exit 0
+fi
+
+if [ "$select_strategy" = primary-available ]; then
+  primary_available_profile
   exit 0
 fi
 
