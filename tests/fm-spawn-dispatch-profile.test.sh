@@ -25,7 +25,14 @@ esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
   list-windows) exit 0 ;;
-  has-session|new-session|new-window|kill-window) exit 0 ;;
+  new-window)
+    if [ -n "${FM_FAKE_SPAWN_GATE_READY:-}" ]; then
+      touch "$FM_FAKE_SPAWN_GATE_READY"
+      while [ ! -e "${FM_FAKE_SPAWN_GATE_RELEASE:?}" ]; do sleep 0.01; done
+    fi
+    exit 0
+    ;;
+  has-session|new-session|kill-window) exit 0 ;;
   send-keys)
     if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
       prev=
@@ -108,47 +115,45 @@ assert_meta_profile() {
 }
 
 test_spawn_serializes_metadata_replacement() {
-  local rec id meta ready release holder_pid spawn_pid i waiting before status
+  local rec id meta first_ready first_release second_ready second_release
+  local first_pid second_pid i first_status second_status first_instance second_instance
   id=profile-meta-lock-z17
   rec=$(make_spawn_case profile-meta-lock claude "$id")
   read_case_record "$rec"
   meta="$HOME_DIR/state/$id.meta"
-  ready="$CASE_DIR/lock-ready"
-  release="$CASE_DIR/lock-release"
-  printf 'sentinel=old-generation\n' > "$meta"
-  FM_STATE_OVERRIDE="$HOME_DIR/state" bash -c '
-    . "$1"
-    fm_meta_lock_acquire "$2" || exit 1
-    touch "$3"
-    while [ ! -e "$4" ]; do sleep 0.01; done
-    fm_meta_lock_release "$2"
-  ' _ "$ROOT/bin/fm-wake-lib.sh" "$meta" "$ready" "$release" &
-  holder_pid=$!
+  first_ready="$CASE_DIR/first-ready"
+  first_release="$CASE_DIR/first-release"
+  second_ready="$CASE_DIR/second-ready"
+  second_release="$CASE_DIR/second-release"
+  FM_FAKE_SPAWN_GATE_READY="$first_ready" FM_FAKE_SPAWN_GATE_RELEASE="$first_release" \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    > "$CASE_DIR/first.out" 2>&1 &
+  first_pid=$!
   i=0
-  while [ ! -e "$ready" ] && [ "$i" -lt 200 ]; do sleep 0.01; i=$((i + 1)); done
-  if [ ! -e "$ready" ]; then
-    kill "$holder_pid" 2>/dev/null || true
-    wait "$holder_pid" 2>/dev/null || true
-    fail "metadata lock holder did not start"
-  fi
-  run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
-    > "$CASE_DIR/spawn.out" 2>&1 &
-  spawn_pid=$!
+  while [ ! -e "$first_ready" ] && [ "$i" -lt 300 ]; do sleep 0.01; i=$((i + 1)); done
+  [ -e "$first_ready" ] || fail "first spawn did not reach its lifecycle gate"
+  FM_FAKE_SPAWN_GATE_READY="$second_ready" FM_FAKE_SPAWN_GATE_RELEASE="$second_release" \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --harness codex > "$CASE_DIR/second.out" 2>&1 &
+  second_pid=$!
   sleep 0.2
-  waiting=0
-  kill -0 "$spawn_pid" 2>/dev/null && waiting=1
-  before=$(cat "$meta")
-  touch "$release"
-  wait "$holder_pid" || fail "metadata lock holder failed"
-  status=0
-  wait "$spawn_pid" || status=$?
-  expect_code 0 "$status" "spawn failed after metadata lock release"
-  [ "$waiting" -eq 1 ] || fail "spawn did not wait for the metadata lock"
-  [ "$before" = 'sentinel=old-generation' ] \
-    || fail "spawn replaced metadata while another writer held the lock"
-  assert_no_grep '^sentinel=' "$meta" "spawn retained superseded metadata"
-  assert_meta_profile "$meta" claude default default
-  pass "spawn serializes task metadata replacement"
+  [ ! -e "$second_ready" ] || fail "second spawn crossed the first generation lifecycle"
+  touch "$first_release"
+  i=0
+  while [ ! -e "$second_ready" ] && [ "$i" -lt 300 ]; do sleep 0.01; i=$((i + 1)); done
+  [ -e "$second_ready" ] || fail "second spawn did not begin after the first generation"
+  first_instance=$(grep '^task_instance=' "$meta" | cut -d= -f2-)
+  touch "$second_release"
+  first_status=0
+  wait "$first_pid" || first_status=$?
+  second_status=0
+  wait "$second_pid" || second_status=$?
+  expect_code 0 "$first_status" "first same-ID spawn failed"
+  expect_code 0 "$second_status" "second same-ID spawn failed"
+  second_instance=$(grep '^task_instance=' "$meta" | cut -d= -f2-)
+  [ "$first_instance" != "$second_instance" ] || fail "same-ID spawns reused one task instance"
+  assert_meta_profile "$meta" codex default default
+  pass "same-ID spawn generations run and publish in lifecycle order"
 }
 
 test_no_profile_keeps_claude_launch_unchanged() {

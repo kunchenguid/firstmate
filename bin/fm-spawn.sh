@@ -223,11 +223,13 @@ parse_orca_worktree_result() {
 
 orca_spawn_abort_cleanup() {
   local status=$?
-  if [ "${META_LOCKED:-0}" = 1 ]; then
-    fm_meta_lock_release "$STATE/$ID.meta"
-    META_LOCKED=0
+  if [ "$ORCA_ABORT_CLEANUP" != 1 ]; then
+    if [ "${META_LOCKED:-0}" = 1 ]; then
+      fm_meta_lock_release "$STATE/$ID.meta"
+      META_LOCKED=0
+    fi
+    return "$status"
   fi
-  [ "$ORCA_ABORT_CLEANUP" = 1 ] || return "$status"
   ORCA_ABORT_CLEANUP=0
   if [ -n "${ORCA_TERMINAL:-}" ]; then
     fm_backend_kill orca "$ORCA_TERMINAL" 2>/dev/null || true
@@ -236,8 +238,9 @@ orca_spawn_abort_cleanup() {
     if ! fm_backend_remove_worktree orca "$ORCA_WORKTREE_ID" 2>/dev/null; then
       mkdir -p "$STATE" 2>/dev/null || true
       if [ -d "$STATE" ]; then
-        if spawn_meta_lock_load && fm_meta_lock_acquire "$STATE/$ID.meta"; then
-          META_LOCKED=1
+        if [ "$META_LOCKED" = 1 ] || {
+          spawn_meta_lock_load && fm_meta_lock_acquire "$STATE/$ID.meta" && META_LOCKED=1
+        }; then
           {
             echo "window=$W"
             echo "task_instance=$TASK_INSTANCE"
@@ -254,11 +257,13 @@ orca_spawn_abort_cleanup() {
             echo "orca_worktree_id=$ORCA_WORKTREE_ID"
             [ -z "${ORCA_TERMINAL:-}" ] || echo "terminal=$ORCA_TERMINAL"
           } > "$STATE/$ID.meta" 2>/dev/null || true
-          fm_meta_lock_release "$STATE/$ID.meta"
-          META_LOCKED=0
         fi
       fi
     fi
+  fi
+  if [ "${META_LOCKED:-0}" = 1 ]; then
+    fm_meta_lock_release "$STATE/$ID.meta"
+    META_LOCKED=0
   fi
   return "$status"
 }
@@ -713,7 +718,13 @@ validate_spawn_worktree() {  # <source> <inspect-target>
   fi
 }
 
-spawn_meta_lock_load || true
+if [ ! -e "$STATE" ]; then
+  mkdir -p "$STATE"
+fi
+if spawn_meta_lock_load; then
+  fm_meta_lock_acquire "$STATE/$ID.meta"
+  META_LOCKED=1
+fi
 
 W="fm-$ID"
 case "$BACKEND" in
@@ -1013,9 +1024,7 @@ fi
 
 META_WINDOW=$T
 [ "$BACKEND" = orca ] && META_WINDOW=$W
-spawn_meta_lock_load || exit 1
-fm_meta_lock_acquire "$STATE/$ID.meta"
-META_LOCKED=1
+[ "$META_LOCKED" = 1 ] || exit 1
 META_WRITE_STATUS=0
 {
   echo "window=$META_WINDOW"

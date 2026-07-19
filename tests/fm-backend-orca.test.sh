@@ -29,6 +29,10 @@ if [ "${1:-}" = status ] && [ "${FM_ORCA_STATUS_RESPONSE:-ready}" != sequence ];
 fi
 n=$next
 echo "$n" > "$COUNT_FILE"
+if [ "${FM_ORCA_GATE_CALL:-}" = "$n" ]; then
+  touch "${FM_ORCA_GATE_READY:?}"
+  while [ ! -e "${FM_ORCA_GATE_RELEASE:?}" ]; do sleep 0.01; done
+fi
 if [ -f "$RESP/$n.exit" ]; then
   exit "$(cat "$RESP/$n.exit")"
 fi
@@ -631,7 +635,7 @@ test_spawn_removes_orca_worktree_when_terminal_create_fails() {
 }
 
 test_spawn_preserves_orca_metadata_when_abort_cleanup_fails() {
-  local proj wt data state config id out status ready release holder_pid spawn_pid i waiting before
+  local proj wt data state config id out status ready release acquired spawn_pid probe_pid i blocked
   id="orcacleanupleakz0"
   proj="$TMP_ROOT/cleanup-fail-project"
   wt="$TMP_ROOT/cleanup-fail-wt"
@@ -650,46 +654,35 @@ test_spawn_preserves_orca_metadata_when_abort_cleanup_fails() {
   printf '1\n' > "$RESP/5.exit"
   ready="$CASE_DIR/lock-ready"
   release="$CASE_DIR/lock-release"
-  printf 'sentinel=old-generation\n' > "$state/$id.meta"
-  FM_STATE_OVERRIDE="$state" bash -c '
-    . "$1"
-    fm_meta_lock_acquire "$2" || exit 1
-    touch "$3"
-    while [ ! -e "$4" ]; do sleep 0.01; done
-    fm_meta_lock_release "$2"
-  ' _ "$ROOT/bin/fm-wake-lib.sh" "$state/$id.meta" "$ready" "$release" &
-  holder_pid=$!
-  i=0
-  while [ ! -e "$ready" ] && [ "$i" -lt 200 ]; do sleep 0.01; i=$((i + 1)); done
-  if [ ! -e "$ready" ]; then
-    kill "$holder_pid" 2>/dev/null || true
-    wait "$holder_pid" 2>/dev/null || true
-    fail "Orca metadata lock holder did not start"
-  fi
+  acquired="$CASE_DIR/probe-acquired"
   PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ORCA_GATE_CALL=5 FM_ORCA_GATE_READY="$ready" FM_ORCA_GATE_RELEASE="$release" \
     FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
     FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 \
     "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude --backend orca \
     > "$CASE_DIR/spawn.out" 2>&1 &
   spawn_pid=$!
   i=0
-  while [ "$(cat "$RESP/.count" 2>/dev/null || echo 0)" -lt 5 ] && [ "$i" -lt 300 ]; do
-    sleep 0.01
-    i=$((i + 1))
-  done
+  while [ ! -e "$ready" ] && [ "$i" -lt 300 ]; do sleep 0.01; i=$((i + 1)); done
+  [ -e "$ready" ] || fail "Orca abort cleanup did not reach its lifecycle gate"
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_meta_lock_acquire "$2" || exit 1
+    touch "$3"
+    fm_meta_lock_release "$2"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$state/$id.meta" "$acquired" &
+  probe_pid=$!
   sleep 0.2
-  waiting=0
-  kill -0 "$spawn_pid" 2>/dev/null && waiting=1
-  before=$(cat "$state/$id.meta")
+  blocked=0
+  [ ! -e "$acquired" ] && blocked=1
   touch "$release"
-  wait "$holder_pid" || fail "Orca metadata lock holder failed"
   status=0
   wait "$spawn_pid" || status=$?
+  wait "$probe_pid" || fail "post-abort metadata lock probe failed"
   out=$(cat "$CASE_DIR/spawn.out")
   [ "$status" -ne 0 ] || fail "Orca spawn should fail when terminal creation and abort cleanup fail"
-  [ "$waiting" -eq 1 ] || fail "Orca abort fallback did not wait for the metadata lock"
-  [ "$before" = 'sentinel=old-generation' ] \
-    || fail "Orca abort fallback replaced metadata while another writer held the lock"
+  [ "$blocked" -eq 1 ] || fail "Orca abort cleanup released its generation lock early"
+  assert_present "$acquired" "metadata lock remained unavailable after Orca abort cleanup"
   assert_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''rm'$'\x1f''--worktree'$'\x1f''id:wt-cleanup-fail'$'\x1f''--force'$'\x1f''--json' \
     "Orca spawn should attempt helper cleanup before preserving metadata"
   assert_present "$state/$id.meta" "failed Orca abort cleanup should preserve metadata"
