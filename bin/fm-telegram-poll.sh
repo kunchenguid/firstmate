@@ -19,6 +19,9 @@
 #     senders; captain decision key=telegram-rate-cap)
 #   - stash accepted messages at state/telegram-inbox/<update_id>.json
 #   - print one line per accepted update: "telegram-msg <update_id>"
+#   - re-emit "telegram-msg <update_id>" for inbox files still pending from
+#     earlier sweeps (e.g. rate-deferred by respond) so the drain retries
+#     without requiring new inbound traffic
 #   - HTTP 409 (second getUpdates consumer) surfaces as telegram-mode-error once
 #
 # Network is required only when configured; tests stub curl.
@@ -222,6 +225,23 @@ if [ -n "$last_confirmed" ]; then
   next=$((last_confirmed + 1))
   fmt_offset_set "$next" || emit_error_once "cannot persist offset"
 fi
+
+# Inbox files still pending from earlier sweeps (rate-deferred or retry-queued
+# by respond) get their wake re-emitted; no re-fetch or re-stash, just a wake.
+INBOX="$STATE/telegram-inbox"
+for f in "$INBOX"/*.json; do
+  [ -f "$f" ] || continue
+  base=${f##*/}
+  uid=${base%.json}
+  case "$uid" in
+    ''|.*|*[!A-Za-z0-9._-]*) continue ;;
+  esac
+  fmx_private_artifact_file_valid "$INBOX" "$base" 600 || continue
+  case "$wakes" in
+    *"telegram-msg ${uid}"$'\n'*) continue ;;
+  esac
+  wakes="${wakes}telegram-msg ${uid}"$'\n'
+done
 
 # Any healthy 200 sweep without a new error clears the stale marker so the
 # next distinct incident (e.g. a fresh 409 conflict) surfaces again.
