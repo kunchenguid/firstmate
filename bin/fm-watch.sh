@@ -155,6 +155,88 @@ _event_cap_key=""
 _event_cap_ok=0
 _event_cap_fails=0
 
+# Herdr's agent lifecycle state must stay truthful: an idle primary remains idle
+# while this watcher blocks. Display-only pane metadata provides the distinct
+# captain-visible state instead. A watcher publishes `idle · supervised` only
+# after it owns the singleton, refreshes a bounded TTL while it stays live, and
+# clears its own unique source on exit. The TTL lets a SIGKILL or host crash age
+# out rather than leaving a false permanent indicator. Other runtime backends
+# have no equivalent shared display surface and remain unchanged.
+FM_HERDR_SUPERVISION_STATUS_TTL_MS=360000
+FM_SUPERVISION_VISIBILITY_PUBLISHED=0
+FM_SUPERVISION_VISIBILITY_SOURCE=
+FM_SUPERVISION_VISIBILITY_SESSION=
+FM_SUPERVISION_VISIBILITY_PANE=
+
+fm_supervision_visibility_resolve_herdr() {
+  local target backend=${FM_SUPERVISOR_BACKEND:-}
+  FM_SUPERVISION_VISIBILITY_SESSION=
+  FM_SUPERVISION_VISIBILITY_PANE=
+  case "$backend" in
+    herdr)
+      target=${FM_SUPERVISOR_TARGET:-}
+      [ -n "$target" ] || return 1
+      FM_SUPERVISION_VISIBILITY_SESSION=${target%%:*}
+      FM_SUPERVISION_VISIBILITY_PANE=${target#*:}
+      [ "$FM_SUPERVISION_VISIBILITY_PANE" != "$target" ] || return 1
+      ;;
+    '')
+      [ "${HERDR_ENV:-}" = 1 ] || return 1
+      [ -z "${TMUX:-}" ] || return 1
+      [ -n "${HERDR_PANE_ID:-}" ] || return 1
+      FM_SUPERVISION_VISIBILITY_SESSION=${HERDR_SESSION:-default}
+      FM_SUPERVISION_VISIBILITY_PANE=$HERDR_PANE_ID
+      ;;
+    *) return 1 ;;
+  esac
+  [ -n "$FM_SUPERVISION_VISIBILITY_SESSION" ] && [ -n "$FM_SUPERVISION_VISIBILITY_PANE" ]
+}
+
+# Display metadata is optional observability and must never wedge the watcher.
+# Use the same dual session targeting as fm_backend_herdr_cli, but put a hard
+# two-second process bound around this cosmetic call.
+fm_supervision_visibility_herdr_call() { # <session> <herdr args...>
+  local session=$1
+  shift
+  command -v herdr >/dev/null 2>&1 || return 1
+  if command -v timeout >/dev/null 2>&1; then
+    HERDR_SESSION="$session" timeout 2 herdr "$@" --session "$session"
+  elif command -v gtimeout >/dev/null 2>&1; then
+    HERDR_SESSION="$session" gtimeout 2 herdr "$@" --session "$session"
+  elif command -v perl >/dev/null 2>&1; then
+    HERDR_SESSION="$session" perl -e 'my $seconds = shift; alarm $seconds; exec @ARGV' \
+      2 herdr "$@" --session "$session"
+  else
+    return 1
+  fi
+}
+
+fm_supervision_visibility_refresh() {
+  local ttl=$FM_HERDR_SUPERVISION_STATUS_TTL_MS
+  [ -n "$FM_SUPERVISION_VISIBILITY_SOURCE" ] || return 0
+  fm_supervision_visibility_resolve_herdr || return 0
+  case "$ttl" in ''|*[!0-9]*|0) ttl=360000 ;; esac
+  if fm_supervision_visibility_herdr_call "$FM_SUPERVISION_VISIBILITY_SESSION" \
+    pane report-metadata "$FM_SUPERVISION_VISIBILITY_PANE" \
+    --source "$FM_SUPERVISION_VISIBILITY_SOURCE" \
+    --custom-status supervised \
+    --state-label 'idle=idle · supervised' \
+    --ttl-ms "$ttl" >/dev/null 2>&1; then
+    FM_SUPERVISION_VISIBILITY_PUBLISHED=1
+  fi
+  return 0
+}
+
+fm_supervision_visibility_clear() {
+  [ "$FM_SUPERVISION_VISIBILITY_PUBLISHED" -eq 1 ] || return 0
+  fm_supervision_visibility_resolve_herdr || return 0
+  fm_supervision_visibility_herdr_call "$FM_SUPERVISION_VISIBILITY_SESSION" \
+    pane report-metadata "$FM_SUPERVISION_VISIBILITY_PANE" \
+    --source "$FM_SUPERVISION_VISIBILITY_SOURCE" \
+    --clear-custom-status --clear-state-labels >/dev/null 2>&1 || true
+  FM_SUPERVISION_VISIBILITY_PUBLISHED=0
+}
+
 # afk_present: 0 while the away-mode flag exists. When set, the daemon wraps this
 # watcher and owns triage, so the watcher must behave one-shot (enqueue + exit on
 # every wake) and let the daemon classify - never absorb here, or the daemon's
@@ -686,6 +768,7 @@ if ! fm_lock_try_acquire "$WATCH_LOCK"; then
   exit 0
 fi
 watcher_cleanup() {
+  fm_supervision_visibility_clear
   fm_active_check_stop || return 1
   fm_check_output_cleanup
   fm_custom_check_snapshot_cleanup
@@ -697,9 +780,11 @@ trap 'exit 1' HUP INT TERM
 # ${BASHPID:-$$} from this same main shell). Read directly, never via a command
 # substitution, so it matches the stored holder pid for the self-eviction check.
 WATCHER_PID=${BASHPID:-$$}
+FM_SUPERVISION_VISIBILITY_SOURCE="firstmate-supervision:$WATCHER_PID"
 printf '%s\n' "$FM_HOME" > "$WATCH_LOCK/fm-home" || true
 printf '%s\n' "$WATCH_PATH" > "$WATCH_LOCK/watcher-path" || true
 fm_pid_identity "$WATCHER_PID" > "$WATCH_LOCK/pid-identity" 2>/dev/null || true
+fm_supervision_visibility_refresh
 
 [ -e "$STATE/.last-heartbeat" ] || touch "$STATE/.last-heartbeat"
 
@@ -717,6 +802,7 @@ while :; do
   # Liveness beacon for fm-guard.sh: a fresh mtime here means a watcher is
   # alive. Supervision scripts warn when this goes stale with tasks in flight.
   touch "$STATE/.last-watcher-beat"
+  fm_supervision_visibility_refresh
 
   # Slow per-task checks (firstmate writes these, e.g. a merged-PR poll).
   # Time-based via .last-check mtime so the cadence survives watcher restarts.

@@ -20,13 +20,23 @@ cat > "$FAKEBIN/herdr" <<'SH'
 set -eu
 printf '%s\n' "$*" >> "$FM_FAKE_HERDR_LOG"
 state=$FM_FAKE_HERDR_STATE
-last=
+session=
+expect_session_value=0
+before_command_argv=1
 for arg in "$@"; do
-  previous=$last
-  last=$arg
+  if [ "$before_command_argv" -eq 1 ] && [ "$expect_session_value" -eq 1 ]; then
+    session=$arg
+    expect_session_value=0
+    continue
+  fi
+  if [ "$before_command_argv" -eq 1 ] && [ "$arg" = --session ]; then
+    expect_session_value=1
+    continue
+  fi
+  [ "$arg" != -- ] || before_command_argv=0
 done
-[ "${previous:-}" = --session ] || { echo "fake herdr: missing trailing --session" >&2; exit 90; }
-session=$last
+[ -n "$session" ] && [ "$expect_session_value" -eq 0 ] \
+  || { echo "fake herdr: missing --session before the command argv delimiter" >&2; exit 90; }
 default_socket=$(cat "$state/default-socket")
 lab_state=absent
 [ ! -f "$state/$session" ] || lab_state=$(cat "$state/$session")
@@ -109,6 +119,13 @@ test_provision_run_and_guarded_teardown() {
   assert_present "$TRIPWIRES/$name.fleet-state.json" "provision did not record the fleet-state tripwire"
 
   run_with_fake fm_herdr_lab_cli "$name" workspace list >/dev/null || fail "safe run command failed"
+  run_with_fake fm_herdr_lab_cli "$name" agent start benign -- /usr/bin/printf ok >/dev/null \
+    || fail "safe command-argv run failed"
+  grep -Fx "agent start benign --session $name -- /usr/bin/printf ok" "$FAKE_LOG" >/dev/null \
+    || fail "lab session flag crossed the command argv delimiter"
+  if grep -Fx "agent start benign -- /usr/bin/printf ok --session $name" "$FAKE_LOG" >/dev/null; then
+    fail "lab session flag was passed to the child command instead of Herdr"
+  fi
   run_with_fake fm_herdr_lab_cli "$name" server >/dev/null 2>&1 || status=$?
   expect_code 1 "$status" "bare server start outside provision must be refused"
   status=0
@@ -139,8 +156,8 @@ test_provision_run_and_guarded_teardown() {
 
   while IFS= read -r line; do
     case "$line" in
-      *"--session $name") : ;;
-      *) fail "Herdr call lacks a trailing lab session: $line" ;;
+      *"--session $name"|*"--session $name --"*) : ;;
+      *) fail "Herdr call lacks a lab session before any command argv delimiter: $line" ;;
     esac
   done < "$FAKE_LOG"
   line_count=$(wc -l < "$FAKE_LOG" | tr -d ' ')

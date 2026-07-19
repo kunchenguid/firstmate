@@ -193,6 +193,70 @@ Herdr tasks additionally record:
 | Workspace create / tab create (focus) | `herdr workspace create --no-focus`, `herdr tab create --no-focus` | Verified: neither focuses by default once a workspace already exists in the session, matching pre-P3 (flagless) behavior; `--no-focus` is passed anyway for defense in depth, since the very first workspace ever created in a brand-new session focuses regardless of the flag. `--focus` was separately verified to reliably focus, confirming the flag has real effect. |
 | Session targeting for DESTRUCTIVE calls | `herdr session stop <name> --session <name> --json`, then `herdr session delete <name> --session <name> --json`; never `herdr server stop` | Owned by `bin/fm-herdr-lab.sh` (which `tests/herdr-test-safety.sh` sources), re-querying `herdr session list --json` before every destructive call. See "Session targeting" below - `HERDR_SESSION` alone is not reliably honored once another herdr server is already running on the machine. |
 
+## Captain-visible supervision state (2026-07-19)
+
+A Pi primary running `fm_watch_arm_pi` successfully started the attached watcher child, while Herdr continued to report `agent_status: idle` and its Agents row remained `firstmate idle · pi`.
+Those are three separate facts: the arm action succeeded, Herdr correctly classified the model as idle while it waited, and the row had no independent supervision indicator.
+Changing Herdr's lifecycle report to `working` would have hidden the symptom by inventing model activity, so that counterfactual was rejected.
+
+Herdr 0.7.3 already exposes the owner-aligned display-only surface `pane report-metadata`.
+Its changelog describes `custom_status` as a compact status label and `state_labels` as visible state labels that do not take over integration-owned lifecycle state.
+The smallest counterfactual applied `custom_status=supervised` and `state_labels.idle="idle · supervised"` to a synthetic idle Pi record.
+`agent get` then retained `agent_status: idle` while exposing both display fields, and clearing that metadata restored the original idle record.
+This disproved the idea that the Pi extension or Herdr's activity classifier needed to fake a busy turn.
+
+`bin/fm-watch.sh` now owns publication because the live singleton watcher is the backend-neutral truth that supervision is active.
+After acquiring its singleton, a watcher publishes one unique, TTL-bounded Herdr metadata source, refreshes it while alive, and clears it on clean exit.
+A process crash ages out through the TTL instead of leaving a permanent false claim.
+Each cosmetic Herdr call has a hard two-second process bound, so a stalled display surface cannot wedge supervision.
+A duplicate watcher stands down before publication, so the exactly-one-live-supervision-cycle contract is unchanged.
+The visible state label is `idle · supervised`, while Herdr's real `agent_status` remains idle.
+
+This integration covers every supported primary harness that reaches the same watcher owner.
+Claude and Grok run `fm-watch-arm.sh`, Pi and OpenCode launch that arm through their persistent adapters, and Codex runs `fm-watch.sh` through its foreground checkpoint.
+Away mode uses its explicit Herdr supervisor target so metadata decorates the captain's pane rather than the daemon pane.
+An idle secondmate with no live watcher remains plain idle, while a secondmate that arms supervision gets the same truthful label.
+The runtime-backend axis is intentionally Herdr-only after inspection: tmux, zellij, Orca, and cmux do not render a Herdr Agents row, so they have no applicable display surface and no behavior change.
+A tmux primary nested inside Herdr is also excluded so its outer pane cannot claim the inner runtime's supervision.
+
+Real verification used Herdr 0.7.3, protocol 16, a generated non-`default` session, `bin/fm-herdr-lab.sh`, and a synthetic idle Pi lifecycle record.
+The deterministic test pins the exact argv emitted by the production refresh and clear functions.
+The real smoke sends those same display arguments directly through the named-lab helper with a 15-second bound, avoiding any recursive CLI shim or agent launch.
+The active read was:
+
+```json
+{"agent":"pi","agent_status":"idle","custom_status":"supervised","state_labels":{"idle":"idle · supervised"}}
+```
+
+The inactive baseline and clean-exit read both retained `agent_status: idle` and omitted `custom_status` and `state_labels`.
+Calling the active report twice produced the same effective record.
+The exact real-smoke command run was:
+
+```sh
+FM_SUPERVISION_VISIBILITY_HERDR_SMOKE=1 HERDR_LAB_HELPER='/Users/james/code/firstmate/bin/fm-herdr-lab.sh' bash tests/fm-supervision-visibility-herdr-smoke.test.sh
+```
+
+Its exact output was:
+
+```text
+ok - real Herdr 0.7.3 keeps Pi idle while showing and clearing idle-supervised metadata
+```
+
+The exact deterministic test command for active, inactive, clean-exit, duplicate-arm, non-Herdr, and nested-tmux coverage is:
+
+```sh
+bash tests/fm-supervision-visibility.test.sh
+```
+
+Its exact output is:
+
+```text
+ok - Herdr visibility publishes idle-supervised without faking work and clears on clean exit
+ok - a hung optional Herdr metadata call times out without wedging supervision
+ok - inactive, non-Herdr, and nested-tmux supervision do not claim a Herdr indicator
+ok - duplicate arm preserves one live supervision cycle and one truthful Herdr indicator
+```
+
 ## Incident (2026-07-13): the ASCII request separator erased the secondmate marker
 
 A routed request reached a Pi/Herdr secondmate without the visible `[fm-from-firstmate]` label, so the secondmate correctly treated it as direct captain conversation and returned nothing to the parent status path.
@@ -425,10 +489,52 @@ The fix, verified against the real binary in an isolated session (both a genuine
 - For destructive session cleanup specifically, use `herdr session stop <name>` / `herdr session delete <name>` (the explicit-by-name forms - `<name>` is a REQUIRED positional argument, so herdr cannot resolve it ambiguously; herdr's own help text requires literally typing `default` to affect the default session), never the ambient `herdr server stop`. `bin/fm-herdr-lab.sh` now owns this guard as the single source of truth: `fm_herdr_lab_teardown` does the stop-then-delete, gated by a read-only hard guard (`fm_herdr_lab_refuse_if_default`, re-querying `herdr session list --json` immediately before EVERY stop/delete call, refusing on a literal `default` name, a not-found name, or `default:true`) as a second, independent layer that fails closed on any ambiguity. `tests/herdr-test-safety.sh` now sources that helper, so its `herdr_safe_stop_and_delete`/`herdr_refuse_if_default` names are thin delegating wrappers over the same owner.
 
 The same guard is now a first-class production helper, `bin/fm-herdr-lab.sh`, not just test scaffolding.
-It provisions an isolated never-`default` lab session (names must start with `fm-lab-`), runs every task command through `run <session> ...` with a mandatory trailing `--session` appended, and refuses caller-supplied `--session`, any leading option before the subcommand, and every server or session-lifecycle subcommand.
+It provisions an isolated never-`default` lab session (names must start with `fm-lab-`), runs every task command through `run <session> ...` with a mandatory Herdr-global `--session`, and refuses caller-supplied `--session`, any leading option before the subcommand, and every server or session-lifecycle subcommand.
+For ordinary calls the helper keeps the global flag trailing.
+When the Herdr command contains a `--` child-command delimiter, the helper inserts its global session pair immediately before that delimiter so the child command cannot consume it.
 Destructive teardown goes only through `teardown <session>` (or a deliberate mid-run `stop <session>`), each re-running the refuse-default check immediately before every stop and delete.
 It also adds a before/after fleet-state tripwire: `provision` records the live `default` session before creating the lab session, and `teardown` verifies that recorded state is byte-identical afterward before clearing it, treating any missing, stopped, or changed default session as a hard failure rather than a warning.
 Crewmate briefs for tasks that drive Herdr lifecycle get this exact contract embedded by scaffolding with `bin/fm-brief.sh --herdr-lab`; every crewmate brief scaffolded without the flag instead carries a loud not-enabled gate, because the scaffold cannot detect from the caller-supplied repo string whether the task will touch Herdr lifecycle.
+
+### Incident (2026-07-19): a trailing lab session flag crossed the child-command delimiter
+
+`fm-herdr-lab.sh` formerly appended `--session <lab>` after every argument without recognizing Herdr commands that use `-- <argv...>`.
+For `herdr agent start ... -- bash ...`, the option landed after the delimiter and became a child argument instead of a Herdr global option.
+Herdr therefore used its ambient server and created the test agent in the running default session.
+The operator removed that exact unexpected pane and confirmed the recorded primary pane was intact before work resumed.
+
+A benign fake-client reproduction used the named lab `fm-lab-benign-routing` and printed the helper's exact argv without invoking Herdr or starting an agent.
+Before the fix it printed:
+
+```text
+<agent>
+<start>
+<benign>
+<-->
+</usr/bin/printf>
+<ok>
+<--session>
+<fm-lab-benign-routing>
+```
+
+The smallest fix is in the helper's single raw-call owner.
+It now inserts `--session <lab>` immediately before the first standalone `--`, while calls without a delimiter stay trailing as before.
+The same benign probe after the fix printed:
+
+```text
+<agent>
+<start>
+<benign>
+<--session>
+<fm-lab-benign-routing>
+<-->
+</usr/bin/printf>
+<ok>
+```
+
+`tests/fm-herdr-lab.test.sh` now rejects a session pair after the child-command delimiter and accepts it only in Herdr's own option region.
+The generated hard safety contract in `bin/fm-brief.sh` states the same delimiter rule.
+No further real agent launch was used for this verification.
 
 ## ID stability across a server restart
 
