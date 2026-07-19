@@ -154,18 +154,22 @@ test_notifier_failure_is_nonblocking_and_at_most_once() {
 }
 
 test_total_runtime_is_bounded_across_decisions_and_channels() {
-  local home start elapsed attempts markers
+  local home start elapsed attempts markers fallbacks
   home="$TMP_ROOT/total-timeout"; mkdir -p "$home/state" "$home/config"
-  printf 'needs-decision [key=one]: choose\nneeds-decision [key=two]: choose\n' > "$home/state/sample.status"
-  printf 'command:sleep 5\ncommand:sleep 5\n' > "$home/config/decision-alert"
+  printf 'needs-decision [key=one]: choose\n' > "$home/state/one.status"
+  printf 'needs-decision [key=two]: choose\n' > "$home/state/two.status"
+  printf "command:sleep 5\ncommand:echo fallback >> '%s/fallback.log'\n" "$home" \
+    > "$home/config/decision-alert"
   start=$SECONDS
   env -u FM_DECISION_ALERT_EXEC FM_HOME="$home" FM_DECISION_ALERT_TIMEOUT_SECS=5 \
-    FM_DECISION_ALERT_TOTAL_TIMEOUT_SECS=1 "$ALERT" status "$home/state/sample.status" \
+    FM_DECISION_ALERT_TOTAL_TIMEOUT_SECS=1 "$ALERT" scan-state \
     >/dev/null 2> "$home/error.log"
   elapsed=$((SECONDS - start))
   [ "$elapsed" -le 2 ] || fail "total alert runtime multiplied across decisions and channels"
   markers=$(find "$home/state" -name '.decision-alerted-*' -type f | wc -l | tr -d ' ')
-  [ "$markers" -eq 1 ] || fail "the total deadline consumed an unattempted decision identity"
+  [ "$markers" -eq 2 ] || fail "the total deadline did not attempt every open decision identity"
+  fallbacks=$(wc -l < "$home/fallback.log" | tr -d ' ')
+  [ "$fallbacks" -eq 2 ] || fail "hung channels starved healthy fallback channels"
 
   cat > "$home/scan-stub" <<'SH'
 #!/usr/bin/env bash
@@ -179,7 +183,7 @@ SH
   attempts=$(wc -l < "$home/scan.log" | tr -d ' ')
   [ "$attempts" -eq 1 ] || fail "the watcher split a fleet scan across multiple alert budgets"
   assert_grep 'scan-state' "$home/scan.log" "the watcher did not use one bounded fleet scan"
-  pass "one total deadline bounds all decisions, channels, and heartbeat status files"
+  pass "one total deadline bounds concurrent decisions, channels, and heartbeat status files"
 }
 
 test_test_seam_and_watcher_integration() {

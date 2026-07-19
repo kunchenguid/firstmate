@@ -36,6 +36,7 @@
 # FM_DECISION_ALERT_TIMEOUT_SECS bounds each channel and defaults to 10 seconds.
 # FM_DECISION_ALERT_TOTAL_TIMEOUT_SECS bounds the complete invocation and
 # defaults to 10 seconds.
+# Enabled attempts run concurrently within the shared invocation deadline.
 #
 # Deduplication uses state/.decision-alerted-<sha256(identity)>.
 # Marker creation is atomic and occurs before notifier execution, so concurrent
@@ -151,9 +152,32 @@ decision_alert_claim() {  # <origin-id> <decision-key>
   ( set -C; : > "$marker" ) 2>/dev/null
 }
 
+decision_alert_wait_for_pids() {
+  local pid
+  for pid in "$@"; do
+    wait "$pid" || true
+  done
+}
+
+decision_alert_emit_channel() {  # <channel> <override> <timeout>
+  local ch=$1 override=$2 timeout=$3 resolved_ch=$1 command_body='' rc
+  if [ "${ch#command:}" != "$ch" ]; then
+    resolved_ch='command'
+    command_body=${ch#command:}
+    fm_notify_emit decision_alert_run_bounded "$override" "$timeout" command \
+      "$DECISION_ALERT_TITLE" "$DECISION_ALERT_BODY" "$DECISION_ALERT_SOUND" "$command_body"
+  else
+    fm_notify_emit decision_alert_run_bounded "$override" "$timeout" "$ch" \
+      "$DECISION_ALERT_TITLE" "$DECISION_ALERT_BODY" "$DECISION_ALERT_SOUND"
+  fi
+  rc=$?
+  [ "$rc" -eq 0 ] || decision_alert_log "$resolved_ch notifier failed with status $rc"
+  return 0
+}
+
 decision_alert_notify() {  # <origin-id> <decision-key>
-  local origin=$1 key=$2 ch resolved_ch command_body rc timeout channel_timeout override remaining
-  local -a configured=() channels=()
+  local origin=$1 key=$2 ch timeout channel_timeout override remaining
+  local -a configured=() channels=() pids=()
   decision_alert_validate_slug origin-id "$origin" || return 2
   decision_alert_validate_slug decision-key "$key" || return 2
   while IFS= read -r ch; do
@@ -181,25 +205,16 @@ decision_alert_notify() {  # <origin-id> <decision-key>
     remaining=$(decision_alert_remaining_budget) || break
     channel_timeout=$timeout
     [ "$channel_timeout" -le "$remaining" ] || channel_timeout=$remaining
-    resolved_ch=$ch
-    command_body=
-    if [ "${ch#command:}" != "$ch" ]; then
-      resolved_ch='command'
-      command_body=${ch#command:}
-      fm_notify_emit decision_alert_run_bounded "$override" "$channel_timeout" command \
-        "$DECISION_ALERT_TITLE" "$DECISION_ALERT_BODY" "$DECISION_ALERT_SOUND" "$command_body"
-    else
-      fm_notify_emit decision_alert_run_bounded "$override" "$channel_timeout" "$ch" \
-        "$DECISION_ALERT_TITLE" "$DECISION_ALERT_BODY" "$DECISION_ALERT_SOUND"
-    fi
-    rc=$?
-    [ "$rc" -eq 0 ] || decision_alert_log "$resolved_ch notifier failed with status $rc"
+    decision_alert_emit_channel "$ch" "$override" "$channel_timeout" &
+    pids+=("$!")
   done
+  decision_alert_wait_for_pids "${pids[@]}"
   return 0
 }
 
 decision_alert_status() {  # <status-file>
   local status_file=$1 task open key verb _note
+  local -a pids=()
   [ -f "$status_file" ] || return 0
   task=$(basename "$status_file")
   task=${task%.status}
@@ -208,18 +223,23 @@ decision_alert_status() {  # <status-file>
   while IFS=$'\t' read -r key verb _note; do
     [ -n "$key" ] || continue
     [ "$verb" = needs-decision ] || continue
-    decision_alert_notify "$task" "$key" || true
+    decision_alert_notify "$task" "$key" &
+    pids+=("$!")
   done <<EOF
 $open
 EOF
+  decision_alert_wait_for_pids "${pids[@]}"
 }
 
 decision_alert_scan_state() {
   local status_file
+  local -a pids=()
   for status_file in "$STATE"/*.status; do
     [ -e "$status_file" ] || continue
-    decision_alert_status "$status_file" || true
+    decision_alert_status "$status_file" &
+    pids+=("$!")
   done
+  decision_alert_wait_for_pids "${pids[@]}"
 }
 
 decision_alert_main() {
