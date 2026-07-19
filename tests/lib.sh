@@ -34,6 +34,12 @@ FM_TEST_LIB_SOURCED=1
 # strips this to verify real refusal.
 export FM_GATE_REFUSE_BYPASS=1
 
+# Every active notification path must cross an explicit test seam.
+# Default the decision alert to discard for the whole behavior suite so a test
+# that reaches a real hold or watcher can never post a desktop notification or
+# play a sound.
+export FM_DECISION_ALERT_EXEC=discard
+
 # Resolve the repo root from this library's own location. Consumed by sourcing
 # test files, not by this library, so it reads as "unused" here.
 # shellcheck disable=SC2034

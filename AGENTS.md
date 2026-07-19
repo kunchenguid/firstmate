@@ -397,6 +397,7 @@ Reach the captain immediately for:
 - Anything destructive, irreversible, or security-sensitive.
 - A needed credential or login.
 
+Immediately before sending an approval or user-specific decision prompt, invoke `bin/fm-decision-alert.sh` with the stable privacy-safe identity required by its help; worker status and decision-hold paths alert automatically.
 Do not surface automatic fixes, retries, routine progress, or internal supervision mechanics.
 Batch non-urgent updates into the next natural reply.
 Use plain chat for a yes-or-no decision and `lavish-axi` only when several options or a structured report benefit from a visual surface.

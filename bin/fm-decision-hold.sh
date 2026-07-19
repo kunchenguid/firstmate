@@ -15,6 +15,9 @@
 # is idempotent. A different decision key creates a different backlog identity.
 # All backlog mutations run in the active FM_HOME, which keeps main-home and
 # secondmate-home ownership aligned with the work that discovered the decision.
+# After `hold` is verified durable, the script makes one best-effort decision
+# alert attempt using the same origin/key identity as worker status alerts.
+# Alert failure never changes the hold result.
 #
 # Usage:
 #   fm-decision-hold.sh id <origin-id> <decision-key>
@@ -271,6 +274,7 @@ command_hold() {
   tasks_axi hold "$id" --reason "$reason" --kind captain >/dev/null \
     || fail "could not activate captain hold $id"
   verify_hold_active "$id"
+  "$SCRIPT_DIR/fm-decision-alert.sh" decision "$origin" "$key" >/dev/null 2>&1 || true
   printf '%s\n' "$id"
 }
 

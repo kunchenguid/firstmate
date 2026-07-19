@@ -119,7 +119,7 @@ write_origin_meta() {  # <home> <id> [kind]
 }
 
 test_structured_holds_survive_teardown_and_route_resolution() {
-  local home id route_hold access_hold before after json open show
+  local home id route_hold access_hold before after json open show alert_recorder
   home=$(make_home durable-lifecycle)
   id=sample-systems-review
   mkdir -p "$home/data/$id"
@@ -137,6 +137,12 @@ EOF
 Two choices remain unresolved: the route and the sample access level.
 A separate recommendation is already resolved and requires no captain action.
 EOF
+  alert_recorder="$home/fakebin/decision-alert-recorder"
+  cat > "$alert_recorder" <<'SH'
+#!/usr/bin/env bash
+printf '%s\t%s\n' "$1" "$2" >> "${FM_DECISION_ALERT_LOG:?}"
+SH
+  chmod +x "$alert_recorder"
 
   if run_decisions "$home" complete "$id" route access > "$home/early-complete.out" 2> "$home/early-complete.err"; then
     fail "completion succeeded before unresolved decisions had captain holds"
@@ -144,17 +150,20 @@ EOF
   assert_no_grep "decisions_reviewed=1" "$home/state/$id.meta" \
     "failed completion recorded a false completion attestation"
 
-  route_hold=$(run_decisions "$home" hold "$id" route \
+  route_hold=$(FM_DECISION_ALERT_EXEC="$alert_recorder" FM_DECISION_ALERT_LOG="$home/decision-alert.log" \
+    FM_DECISION_ALERT_CHANNEL=osascript run_decisions "$home" hold "$id" route \
     --title "Choose the sample route" --reason "captain route choice pending" --repo sample) \
     || fail "could not register route hold"
   [ "$route_hold" = "$id-decision-route" ] || fail "route hold identity was not deterministic: $route_hold"
-  run_decisions "$home" hold "$id" route \
+  FM_DECISION_ALERT_EXEC="$alert_recorder" FM_DECISION_ALERT_LOG="$home/decision-alert.log" \
+    FM_DECISION_ALERT_CHANNEL=osascript run_decisions "$home" hold "$id" route \
     --title "Choose the sample route" --reason "captain route choice pending" --repo sample >/dev/null \
     || fail "idempotent hold retry failed"
   if run_decisions "$home" complete "$id" route access > "$home/partial-complete.out" 2> "$home/partial-complete.err"; then
     fail "completion succeeded while one of two distinct decisions lacked a hold"
   fi
-  access_hold=$(run_decisions "$home" hold "$id" access \
+  access_hold=$(FM_DECISION_ALERT_EXEC="$alert_recorder" FM_DECISION_ALERT_LOG="$home/decision-alert.log" \
+    FM_DECISION_ALERT_CHANNEL=osascript run_decisions "$home" hold "$id" access \
     --title "Choose the sample access level" --reason "captain access choice pending" --repo sample) \
     || fail "could not register access hold"
   [ "$access_hold" = "$id-decision-access" ] || fail "access hold identity was not distinct: $access_hold"
@@ -162,6 +171,8 @@ EOF
     || fail "idempotent retry duplicated the route hold"
   [ "$(grep -cE "^- \[ \] $access_hold -" "$home/data/backlog.md")" = 1 ] \
     || fail "second decision did not retain one distinct backlog identity"
+  [ "$(wc -l < "$home/decision-alert.log" | tr -d ' ')" -eq 2 ] \
+    || fail "durable hold alerts did not deduplicate retries while preserving distinct decisions"
 
   run_decisions "$home" complete "$id" route access >/dev/null \
     || fail "shared investigation completion gate failed"

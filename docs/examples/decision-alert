@@ -1,0 +1,12 @@
+# Firstmate captain decision alert channels.
+# Copy to <FM_HOME>/config/decision-alert and keep it local.
+
+# Default macOS Notification Center banner with a system sound.
+auto
+
+# Optional additional channels.
+# herdr
+# command:ntfy publish firstmate-decisions "$1"
+
+# Disable every active decision alert.
+# off

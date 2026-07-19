@@ -37,7 +37,8 @@ See `docs/examples/wedge-alarm` for a copyable starting config.
 
 ## Test safety: no test posts a real notification
 
-Every notifier channel (`osascript`, `herdr`, and `command:`) routes through a single seam, `FM_WEDGE_ALARM_EXEC`: when it is set, the daemon hands the fixed channel category and summary to that command instead of the real notifier (`wedge_alarm_emit` in `bin/fm-supervise-daemon.sh`).
+Every notifier channel (`osascript`, `herdr`, and `command:`) routes through the shared bounded execution seam in `bin/fm-notify-lib.sh`.
+`FM_WEDGE_ALARM_EXEC` remains the wedge-specific test override: when it is set, the daemon hands the fixed channel category and summary to that command instead of the real notifier (`wedge_alarm_emit` in `bin/fm-supervise-daemon.sh`).
 This makes it structurally impossible for a test to post a real desktop notification, and impossible for a future test author to forget to stub:
 
 - The daemon is only ever sourced (not executed) by tests - production `bin/fm-afk-start.sh` execs it.

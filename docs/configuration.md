@@ -102,6 +102,16 @@ An absent file means `auto`, i.e. default-on on macOS: the alarm exists precisel
 A missing or failing channel logs and falls through to the next, never crashing the daemon.
 See [`wedge-alarm.md`](wedge-alarm.md) for the channel reference and macOS verification evidence, and [`examples/wedge-alarm`](examples/wedge-alarm) for a copyable config.
 
+## Captain decision alert channels (config/decision-alert)
+
+`config/decision-alert` is a local gitignored channel list for audible and visible alerts when Firstmate needs a captain-owned approval or user-specific decision.
+An absent file means `auto`, which posts an audible Notification Center alert on macOS and selects no built-in channel on other platforms.
+The directives are `off`, `auto` or `default`, `osascript`, `herdr`, and `command:<cmd>`.
+`FM_DECISION_ALERT_CHANNEL` overrides the file with one directive.
+Every notifier is bounded, uses a generic privacy-safe body, and is best-effort after the durable decision boundary.
+See [`decision-alert.md`](decision-alert.md) for trigger coverage, deduplication, supported-surface evidence, test safety, and the direct-prompt limitation.
+See [`examples/decision-alert`](examples/decision-alert) for a copyable config.
+
 ## Gate defaults (.no-mistakes.yaml)
 
 The tracked `.no-mistakes.yaml` keeps test evidence outside the repo and defines `commands.test` so no-mistakes runs firstmate's bash behavior suite directly.
@@ -425,6 +435,9 @@ FM_ESCALATE_BATCH_SECS=90          # buffer window for batched escalation digest
 FM_MAX_DEFER_SECS=300              # max buffered escalation age before retry plus wedge alarm; 0 disables
 FM_WEDGE_ALARM_CHANNEL=            # override config/wedge-alarm with one active-alert directive for the wedge alarm; off|auto|osascript|herdr|command:<cmd>; absent = auto (macOS -> an OS notification)
 FM_WEDGE_ALARM_EXEC=              # notifier seam: route every channel (osascript, herdr, command:) through this command as `<cmd> <channel> <summary>`; "discard" fires nothing; unset in production; the daemon defaults it to "discard" when sourced so no test posts a real notification (docs/wedge-alarm.md)
+FM_DECISION_ALERT_CHANNEL=        # override config/decision-alert with one directive; off|auto|osascript|herdr|command:<cmd>; absent = auto (macOS -> audible Notification Center alert)
+FM_DECISION_ALERT_EXEC=           # test seam replacing every real decision notifier as `<cmd> <channel> <body>`; "discard" fires nothing; unset in production (docs/decision-alert.md)
+FM_DECISION_ALERT_TIMEOUT_SECS=   # per-channel decision notifier process-group timeout; default 10
 FM_WEDGE_ALARM_TIMEOUT_SECS=10    # maximum seconds for each osascript, herdr, override, or command: notifier before its watchdog terminates it and continues to the next channel; invalid or zero values use 10
 FM_INJECT_FAIL_SLEEP=30            # seconds to back off when the supervisor pane is unavailable
 FM_INJECT_CONFIRM_RETRIES=3        # daemon Enter-retry attempts after typing a digest once

@@ -77,6 +77,11 @@ mkdir -p "$STATE"
 # shellcheck source=bin/fm-check-lib.sh
 . "$SCRIPT_DIR/fm-check-lib.sh"
 
+# Worker-originated captain decisions alert at the same deterministic boundary
+# that durably enqueues their wake.
+# The executable is overridable for focused watcher tests.
+FM_DECISION_ALERT_BIN=${FM_DECISION_ALERT_BIN:-$SCRIPT_DIR/fm-decision-alert.sh}
+
 WATCH_LOCK="$STATE/.watch.lock"
 WATCH_PATH="$SCRIPT_DIR/fm-watch.sh"
 WATCHER_STALE_GRACE=${FM_WATCHER_STALE_GRACE:-${FM_GUARD_GRACE:-300}}
@@ -504,11 +509,27 @@ run_check_capture() {
 # from one that has not - the latter being a per-wake-path miss it must surface.
 _hb_surfaced_path() { printf '%s/.hb-surfaced-%s' "$STATE" "$(printf '%s' "$1" | tr ':/.' '___')"; }
 
+alert_decisions_in_status() {  # <status-file>
+  local f=$1
+  case "$f" in *.status) ;; *) return 0 ;; esac
+  [ -x "$FM_DECISION_ALERT_BIN" ] || return 0
+  "$FM_DECISION_ALERT_BIN" status "$f" >/dev/null 2>&1 || true
+}
+
+alert_all_open_decisions() {
+  local f
+  for f in "$STATE"/*.status; do
+    [ -e "$f" ] || continue
+    alert_decisions_in_status "$f"
+  done
+}
+
 # Record a status file's captain-relevant last line as surfaced (no-op for a
 # non-captain-relevant or empty status). Call AFTER the wake is enqueued, so the
 # enqueue-before-suppress ordering holds for this marker too.
 mark_surfaced() {  # <status-file>
   local f=$1 task last
+  alert_decisions_in_status "$f"
   task=$(basename "$f"); task="${task%.status}"
   last=$(last_status_line "$f")
   [ -n "$last" ] || return 0
@@ -523,6 +544,7 @@ mark_all_captain_relevant_surfaced() {
   local f task last
   while IFS=$(printf '\t') read -r f task last; do
     [ -n "$f" ] || continue
+    alert_decisions_in_status "$f"
     printf '%s' "$last" > "$(_hb_surfaced_path "$task")"
   done < <(scan_captain_relevant_statuses "$STATE")
 }
@@ -824,6 +846,11 @@ EOF
       while IFS=$(printf '\t') read -r sf sig f; do
         [ -n "$sf" ] || continue
         printf '%s' "$sig" > "$sf"
+        # The whole-stream decision fold can retain an earlier open decision
+        # behind a later routine status line.
+        # The status record is already durable even though this routine signal
+        # needs no wake, so alert it here and let identity dedup suppress retries.
+        alert_decisions_in_status "$f"
       done <<EOF
 $pending
 EOF
@@ -1004,6 +1031,7 @@ EOF
     if afk_present; then
       fm_wake_append heartbeat heartbeat heartbeat || exit 1
       touch "$STATE/.last-heartbeat"
+      alert_all_open_decisions
       wake "heartbeat"
     elif heartbeat_scan_finds_actionable; then
       # Backstop: a captain-relevant status the per-wake path absorbed by mistake.
@@ -1015,6 +1043,7 @@ EOF
       wake "heartbeat"
     else
       touch "$STATE/.last-heartbeat"
+      alert_all_open_decisions
       echo $(( $(cat "$STATE/.heartbeat-streak" 2>/dev/null || echo 0) + 1 )) > "$STATE/.heartbeat-streak"
       triage_log "absorbed heartbeat (no captain-relevant change)"
     fi
