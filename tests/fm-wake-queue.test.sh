@@ -278,10 +278,17 @@ test_structural_signal_enrichment_preserves_raw_rows() {
 }
 
 test_enrichment_caps_and_status_file_failures() {
-  local dir state out i raw_count annotation_bytes annotation_count oversized_lines
+  local dir state out fake_tail_log i raw_count annotation_bytes annotation_count oversized_lines tail_reads
   dir=$(make_case caps)
   state="$dir/state"
   out="$dir/drain.out"
+  fake_tail_log="$dir/tail.log"
+  cat > "$dir/fakebin/tail" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_WAKE_ENRICH_TAIL_LOG"
+PATH=/usr/bin:/bin tail "$@"
+SH
+  chmod +x "$dir/fakebin/tail"
   awk 'BEGIN { printf "done: "; for (i = 0; i < 20000; i++) printf "x"; printf "\n" }' > "$state/huge.status"
   append_wake "$state" signal huge.status "signal: huge" || fail "huge status wake append failed"
   i=1
@@ -299,7 +306,8 @@ test_enrichment_caps_and_status_file_failures() {
   chmod 000 "$state/unreadable.status"
   append_wake "$state" signal unreadable.status "signal: unreadable" || fail "unreadable status wake append failed"
 
-  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "capped enrichment drain failed"
+  PATH="$dir/fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_WAKE_ENRICH_TAIL_LOG="$fake_tail_log" "$DRAIN" > "$out" \
+    || fail "capped enrichment drain failed"
   raw_count=$(awk -F '\t' 'NF == 5 { count++ } END { print count + 0 }' "$out")
   [ "$raw_count" -eq 13 ] || fail "missing, unreadable, malformed, empty, or oversized status input hid a raw row"
   grep '^wake annotation:.*\[truncated\]$' "$out" >/dev/null || fail "per-item/input truncation marker was not emitted"
@@ -311,6 +319,10 @@ test_enrichment_caps_and_status_file_failures() {
   [ "$oversized_lines" -eq 0 ] || fail "a per-item annotation exceeded 2048 bytes"
   annotation_count=$(grep -c '^wake annotation: latest' "$out" || true)
   [ "$annotation_count" -lt 9 ] || fail "global cap did not omit any of the nine readable status annotations"
+  tail_reads=$(wc -l < "$fake_tail_log" | tr -d ' ')
+  [ "$tail_reads" -eq 8 ] || fail "enrichment read cap allowed $tail_reads tail reads instead of 8"
+  grep -E '^wake annotation: [1-9][0-9]* annotations omitted \(enrichment read cap\)$' "$out" >/dev/null \
+    || fail "enrichment read-cap omission marker was not emitted"
   if grep -E ': (empty|missing|malformed|unreadable)\.status:' "$out" >/dev/null; then
     fail "missing, unreadable, malformed, or empty status file produced an annotation"
   fi
