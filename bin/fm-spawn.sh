@@ -79,6 +79,7 @@
 # On success prints: spawned <id> harness=<name> kind=<ship|scout|secondmate> mode=<mode> yolo=<on|off> window=<backend-target> worktree=<path>
 # mode/yolo are resolved per-project from data/projects.md for ship/scout tasks;
 # secondmate spawns record mode=secondmate, yolo=off, home=, and projects=.
+# Every task metadata record includes a generation-unique task_instance= token.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -223,6 +224,7 @@ orca_spawn_abort_cleanup() {
       if [ -d "$STATE" ]; then
         {
           echo "window=$W"
+          echo "task_instance=$TASK_INSTANCE"
           echo "worktree=${WT:-}"
           echo "project=$PROJ_ABS"
           echo "harness=$HARNESS"
@@ -281,6 +283,8 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
 fi
 ID=${POS[0]}
 fm_task_id_creation_valid "$ID" || { echo "error: invalid task id" >&2; exit 2; }
+TASK_INSTANCE=$(fm_task_instance_new) \
+  || { echo "error: could not create task instance identity" >&2; exit 1; }
 PROJ=
 ARG3=
 FIRSTMATE_HOME=
@@ -990,6 +994,7 @@ META_WINDOW=$T
 [ "$BACKEND" = orca ] && META_WINDOW=$W
 {
   echo "window=$META_WINDOW"
+  echo "task_instance=$TASK_INSTANCE"
   echo "worktree=$WT"
   echo "project=$PROJ_ABS"
   echo "harness=$HARNESS"

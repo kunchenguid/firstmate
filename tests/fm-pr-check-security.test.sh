@@ -95,6 +95,7 @@ write_task_meta() {
   local dir=$1 id=${2:-task-a}
   fm_write_meta "$dir/home/state/$id.meta" \
     "window=fm-$id" \
+    'task_instance=11111111111111111111111111111111' \
     "worktree=$dir/wt" \
     "project=$dir/project" \
     "kind=ship" \
@@ -295,9 +296,10 @@ test_pr_lookup_rejects_recreated_task_metadata() {
   while [ ! -e "$ready" ] && [ "$i" -lt 200 ]; do sleep 0.01; i=$((i + 1)); done
   [ -e "$ready" ] || fail "stale-task PR lookup gate did not start"
   fm_write_meta "$dir/home/state/task-a.meta.new" \
-    'window=fm-task-a-recreated' \
-    "worktree=$dir/recreated-wt" \
-    "project=$dir/recreated-project" \
+    'window=fm-task-a' \
+    'task_instance=22222222222222222222222222222222' \
+    "worktree=$dir/wt" \
+    "project=$dir/project" \
     'kind=ship' \
     'mode=no-mistakes' \
     'sentinel=recreated'
@@ -314,6 +316,16 @@ test_pr_lookup_rejects_recreated_task_metadata() {
   assert_grep 'task metadata identity changed' "$dir/check.err" \
     "stale-task PR check did not report the identity change"
   pass "fm-pr-check rejects task recreation during external lookup"
+}
+
+test_task_instance_generation_is_unique() {
+  local first second
+  first=$(fm_task_instance_new) || fail "could not generate first task instance"
+  second=$(fm_task_instance_new) || fail "could not generate second task instance"
+  fm_task_instance_valid "$first" || fail "first task instance was invalid"
+  fm_task_instance_valid "$second" || fail "second task instance was invalid"
+  [ "$first" != "$second" ] || fail "task instance generation repeated a token"
+  pass "task instance generation creates distinct validated identities"
 }
 
 test_pr_poll_publication_stays_inside_metadata_lock() {
@@ -2804,6 +2816,7 @@ SH
 test_parser_matrix
 test_invalid_entrypoints_have_zero_side_effects
 test_valid_recording_and_merge_derivation
+test_task_instance_generation_is_unique
 test_pr_lookup_does_not_hold_task_metadata_lock
 test_pr_lookup_rejects_recreated_task_metadata
 test_pr_poll_publication_stays_inside_metadata_lock

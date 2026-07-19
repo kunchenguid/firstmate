@@ -100,6 +100,8 @@ EOF
 
 assert_meta_profile() {
   local meta=$1 harness=$2 model=$3 effort=$4
+  grep -Eq '^task_instance=[0-9a-f]{32}$' "$meta" \
+    || fail "meta missing a valid task_instance"
   assert_grep "harness=$harness" "$meta" "meta missing harness=$harness"
   assert_grep "model=$model" "$meta" "meta missing model=$model"
   assert_grep "effort=$effort" "$meta" "meta missing effort=$effort"

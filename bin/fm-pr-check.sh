@@ -36,7 +36,14 @@ META="$STATE/$ID.meta"
 META_LOCKED=0
 META_TMP=
 pr_check_task_identity() {
-  local meta=$1 key line
+  local meta=$1 key line instance
+  line=$(grep '^task_instance=' "$meta" 2>/dev/null | tail -1 || true)
+  if [ -n "$line" ]; then
+    instance=${line#task_instance=}
+    fm_task_instance_valid "$instance" || return 1
+    printf '%s\n' "$line"
+    return 0
+  fi
   for key in window worktree project harness kind mode tasktmp backend terminal home \
     herdr_session zellij_session orca_worktree_id cmux_workspace_id; do
     line=$(grep "^$key=" "$meta" 2>/dev/null | tail -1 || true)
@@ -53,7 +60,8 @@ if [ ! -f "$META" ] || [ -L "$META" ] || [ "$(fm_pr_file_link_count "$META")" !=
   echo "error: task metadata is unavailable" >&2
   exit 1
 fi
-TASK_IDENTITY=$(pr_check_task_identity "$META")
+TASK_IDENTITY=$(pr_check_task_identity "$META") \
+  || { echo "error: task metadata identity is invalid" >&2; exit 1; }
 
 # Neutralize any pre-fix poll before recording or arming this task. The
 # migration never executes legacy artifacts and holds watcher exclusion while
@@ -80,7 +88,9 @@ if [ ! -f "$META" ] || [ -L "$META" ] || [ "$(fm_pr_file_link_count "$META")" !=
   echo "error: task metadata is unavailable" >&2
   exit 1
 fi
-[ "$(pr_check_task_identity "$META")" = "$TASK_IDENTITY" ] \
+CURRENT_TASK_IDENTITY=$(pr_check_task_identity "$META") \
+  || { echo "error: task metadata identity is invalid" >&2; exit 1; }
+[ "$CURRENT_TASK_IDENTITY" = "$TASK_IDENTITY" ] \
   || { echo "error: task metadata identity changed during PR lookup" >&2; exit 1; }
 META_DEVICE=$(fm_pr_file_device "$META") || exit 1
 STATE_DEVICE=$(fm_pr_file_device "$STATE") || exit 1

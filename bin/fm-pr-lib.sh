@@ -61,6 +61,19 @@ fm_task_id_creation_valid() {
   [ "${#id}" -le 64 ]
 }
 
+fm_task_instance_valid() {
+  local instance=${1-}
+  local LC_ALL=C
+  [[ "$instance" =~ ^[0-9a-f]{32}$ ]]
+}
+
+fm_task_instance_new() {
+  local instance
+  instance=$(od -An -N16 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')
+  fm_task_instance_valid "$instance" || return 1
+  printf '%s\n' "$instance"
+}
+
 fm_pr_url_parse() {
   local raw=${1-} pattern
   local LC_ALL=C
