@@ -40,25 +40,36 @@ export PATH
 . "$ROOT/bin/fm-backend.sh"
 fm_backend_source tmux || fail "fm_backend_source tmux failed"
 
-SESSION="smoke"
+# Use a numeric session name to cover tmux's ambiguous bare-target parsing.
+# fm_backend_tmux_create_task must qualify it as a session, not window index 0.
+SESSION="0"
 WINDOW="fm-smoke1"
+WINDOW2="fm-smoke2"
 TARGET="$SESSION:$WINDOW"
 
 # --- create session ----------------------------------------------------------
 
-tmux new-session -d -s "$SESSION" -x 200 -y 50 \
+tmux new-session -d -s "$SESSION" -n initial -x 200 -y 50 \
   || fail "real tmux: new-session failed"
+tmux set-option -t "$SESSION" base-index 0 \
+  || fail "real tmux: setting base-index failed"
+tmux move-window -r -t "$SESSION:" \
+  || fail "real tmux: renumbering the initial window failed"
 fm_backend_tmux_create_task "$SESSION" "$WINDOW" "$HOME" \
   || fail "fm_backend_tmux_create_task failed to create the task window"
-tmux list-windows -t "$SESSION" -F '#{window_name}' | grep -qx "$WINDOW" \
-  || fail "created window is not visible in the real session"
+fm_backend_tmux_create_task "$SESSION" "$WINDOW2" "$HOME" \
+  || fail "fm_backend_tmux_create_task failed to create the second task window"
+windows=$(tmux list-windows -t "$SESSION" -F '#{window_index}:#{window_name}') \
+  || fail "real tmux: list-windows failed after task creation"
+[ "$windows" = $'0:initial\n1:fm-smoke1\n2:fm-smoke2' ] \
+  || fail "task windows did not use successive free indexes without displacing the initial window"$'\n'"$windows"
 
 # A second create for the SAME window name must refuse (mirrors fm-spawn.sh's
 # duplicate-window guard).
 if fm_backend_tmux_create_task "$SESSION" "$WINDOW" "$HOME" 2>/dev/null; then
   fail "fm_backend_tmux_create_task should refuse an existing window name"
 fi
-pass "real tmux: fm_backend_tmux_create_task creates a window and refuses a duplicate"
+pass "real tmux: fm_backend_tmux_create_task preserves existing indexes, appends windows, and refuses a duplicate"
 
 # --- send text + Enter -------------------------------------------------------
 

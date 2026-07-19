@@ -66,6 +66,43 @@ tmux list-windows -t <session-name>
 Use the current tmux session name for the run-inside-tmux path, or `firstmate` for the detached outside-tmux path.
 You should see a `fm-<id>` window for the task, live and updating as the crewmate works.
 
+## Numeric session target verification
+
+Verified empirically with real tmux 3.7b on Linux 6.6.87.2-microsoft-standard-WSL2, 2026-07-10, using a private tmux socket:
+
+```sh
+$ tmux -V
+tmux 3.7b
+$ uname -sr
+Linux 6.6.87.2-microsoft-standard-WSL2
+$ tmux -L <private-socket> new-session -d -s 0 -n shell
+$ tmux -L <private-socket> new-window -dP -F '#{session_name}:#{window_index}:#{window_name}' -t 0 -n bare
+0:0:bare
+$ tmux -L <private-socket> new-window -dP -F '#{session_name}:#{window_index}:#{window_name}' -t '0:' -n qualified
+0:2:qualified
+$ tmux -L <private-socket> list-windows -t 0 -F '#{window_index}:#{window_name}'
+0:bare
+1:shell
+2:qualified
+```
+
+The bare numeric target selected window index 0 and inserted the new window there, while the session-qualified `0:` target allocated the next free window index.
+The adapter therefore uses `"$ses:"` so numeric session names remain unambiguous and repeated spawns append instead of colliding with or displacing an existing window.
+The repository regression ran against another private socket and produced:
+
+```text
+$ tests/fm-backend-tmux-smoke.test.sh
+@1
+@2
+ok - real tmux: fm_backend_tmux_create_task preserves existing indexes, appends windows, and refuses a duplicate
+ok - real tmux: fm_backend_tmux_send_text_line sends literal text and submits with Enter
+ok - real tmux: fm_backend_tmux_send_literal + fm_backend_tmux_send_key Enter submit as two separate steps
+ok - real tmux: fm_backend_tmux_capture's -S -N bound trims old history for a small window and reaches it for a large one
+ok - real tmux: fm_backend_tmux_resolve_bare_selector (list-live) finds the created window by name
+ok - real tmux: fm_backend_tmux_resolve_bare_selector fails for a window that does not exist
+ok - real tmux: fm_backend_tmux_kill removes the window and is idempotent/best-effort
+```
+
 ## Agent liveness probe
 
 `fm_backend_target_exists` (`bin/fm-backend.sh`) only checks that a window's pane still exists.
