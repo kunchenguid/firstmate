@@ -94,7 +94,7 @@ trap cleanup EXIT INT TERM
 
 _buf=
 redraw() {
-  printf '\r\033[K%s' "$_buf"
+  printf '\r%s\033[K' "$_buf"
 }
 submit_line() {
   local _line=$_buf _c _hex
@@ -249,6 +249,23 @@ wait_for_pane_input_pending() {
   return 1
 }
 
+wait_for_stable_pending_text() {  # <text>
+  local text=$1 i=0 stable=0 state cap
+  while [ "$i" -lt 60 ]; do
+    state=$(PATH="$TMUX_SHIM_DIR:$PATH" fm_backend_composer_state tmux "$SUPERVISOR_PANE")
+    cap=$("$REAL_TMUX" -L "$SOCKET" capture-pane -p -t "$SUPERVISOR_PANE" 2>/dev/null || true)
+    if [ "$state" = pending ] && printf '%s' "$cap" | grep -F "$text" >/dev/null; then
+      stable=$((stable + 1))
+      [ "$stable" -ge 5 ] && return 0
+    else
+      stable=0
+    fi
+    sleep 0.05
+    i=$((i + 1))
+  done
+  return 1
+}
+
 selfcheck_pane_input_pending
 
 # --- Scenario A: human-partial-input ----------------------------------------
@@ -261,8 +278,8 @@ test_scenario_a() {
   # Type partial text into the supervisor pane with NO Enter. This simulates the
   # captain returning and starting to type before afk has been cleared.
   "$REAL_TMUX" -L "$SOCKET" send-keys -t "$SUPERVISOR_PANE" -l "human draft text"
-  wait_for_pane_input_pending \
-    || fail "Scenario A: human draft text did not become detectable as pending input"
+  wait_for_stable_pending_text "human draft text" \
+    || fail "Scenario A: human draft text did not become stable pending input before escalation"
 
   # Write a captain-relevant status to trigger a real escalation through the
   # real watcher child.
