@@ -33,7 +33,9 @@
 #                          A paused: log line found superseded by the
 #                          authoritative crew state is cached against the status
 #                          file's signature (.paused-none-*) so it is neither
-#                          re-read nor re-surfaced every poll.
+#                          re-read nor re-surfaced every poll; a FAILED crew-state
+#                          read is never cached, so a transient misread cannot
+#                          disarm a genuine pause's recheck cadence.
 #                          A provably-working stale past the
 #                          wedge threshold also surfaces, with an "escalation N"
 #                          count in the reason; at FM_WEDGE_DEMAND_INSPECT_COUNT
@@ -1039,7 +1041,11 @@ EOF
             # poll would only re-decide the same thing - and, before this
             # cache, re-SURFACE the same stopped crew on every poll through
             # this branch (the 2026-07-11 merge-wait incident). A new status
-            # write changes the signature and re-evaluates.
+            # write changes the signature and re-evaluates. Only a DEFINITIVE
+            # none verdict is cached: an unreadable crew-state read is no
+            # verdict at all, so it surfaces conservatively but leaves the
+            # recheck cadence armed for the next poll instead of freezing a
+            # possibly-genuine pause behind a transient read failure.
             if [ -e "$pf" ] || { status_is_paused_or_captain_held "$(last_status_line "$statusf")" \
                 && [ "$(stat_sig "$statusf")" != "$(cat "$pnf" 2>/dev/null)" ]; }; then
               case "$(pause_state_class "$w" "$task")" in
@@ -1050,8 +1056,9 @@ EOF
                          printf '%s' "$h" > "$sf"
                          wedge_timer_check "$w" "$ssf" "non-terminal stale (provably working after a declared pause)" "$ewf"
                          triage_log "absorbed non-terminal stale (provably working): $w" ;;
-                *)       stat_sig "$statusf" > "$pnf" || : > "$pnf"
+                none)    stat_sig "$statusf" > "$pnf" || : > "$pnf"
                          surface_nonterminal_stale "$w" "$h" ;;
+                *)       surface_nonterminal_stale "$w" "$h" ;;
               esac
             elif [ -e "$ssf" ] || [ ! -e "$sitf" ]; then
               # Wedge timing belongs to provably-working absorbs (and heals a

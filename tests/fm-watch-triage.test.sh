@@ -271,8 +271,22 @@ test_crew_absorb_class_classifier() {
   [ "$(crew_absorb_class a)" = none ] || fail "unknown crew classed absorbable"
   ! crew_is_paused a || fail "unknown crew classed paused"
   [ "$(crew_absorb_class "")" = none ] || fail "empty id not classed none"
+  # A failed or unparseable read is NOT a verdict: it must be distinguishable
+  # from a definitive none so consumers never durably cache it.
+  FM_FAKE_CREW_STATE='error: cannot resolve the task worktree'
+  [ "$(crew_absorb_class a)" = unreadable ] || fail "unparseable crew-state output not classed unreadable"
+  ! crew_is_paused a || fail "an unreadable verdict classed paused"
+  ! crew_is_provably_working a || fail "an unreadable verdict treated as provably working"
+  cat > "$fakebin/fm-crew-state-fail.sh" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+  chmod +x "$fakebin/fm-crew-state-fail.sh"
+  FM_CREW_STATE_BIN="$fakebin/fm-crew-state-fail.sh"
+  [ "$(crew_absorb_class a)" = unreadable ] || fail "a failing crew-state read not classed unreadable"
+  export FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh"
   unset FM_FAKE_CREW_STATE
-  pass "crew_absorb_class: working/paused/none from one read; crew_is_paused and crew_is_provably_working agree"
+  pass "crew_absorb_class: working/paused/none from one read, unreadable on a failed read; crew_is_paused and crew_is_provably_working agree"
 }
 
 # signal_crew_provably_working: a no-verb "signal:" wake is benign ONLY when EVERY
@@ -1245,6 +1259,66 @@ SH
   pass "a done crew behind a superseded paused: line surfaces once, then stays quiet without per-poll reads"
 }
 
+# A genuinely paused crew on a fully static pane whose recheck's crew-state read
+# transiently FAILS: the failed read surfaces conservatively but must never be
+# cached in .paused-none-* as a definitive superseded-pause verdict, or the
+# FM_PAUSE_RESURFACE_SECS recheck cadence stays disarmed until the crew writes a
+# new status line or the pane changes, letting the declared wait rot invisibly.
+test_paused_crew_transient_read_failure_not_cached() {
+  local dir state fakebin out capture_file window key sig pid
+  dir=$(make_case paused-read-failure); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-pause-misread"
+  printf 'composer idle at prompt' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/pause-misread.meta"
+  printf 'paused: awaiting the upstream release\n' > "$state/pause-misread.status"
+  sig=$(seen_sig "$state/pause-misread.status"); printf '%s' "$sig" > "$state/.seen-pause-misread_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  printf '%s' "$(hash_text 'composer idle at prompt')" > "$state/.hash-$key"
+  printf '%s' "$(hash_text 'composer idle at prompt')" > "$state/.stale-$key"
+  printf '1\n' > "$state/.count-$key"
+  : > "$state/.paused-$key"
+  # Fake whose read can be made to FAIL (exit 1, no verdict line) via
+  # FM_FAKE_CREW_STATE_FAIL, simulating a transient fm-crew-state.sh misread.
+  cat > "$fakebin/fm-crew-state.sh" <<'SH'
+#!/usr/bin/env bash
+set -u
+[ "${FM_FAKE_CREW_STATE_FAIL:-0}" = 1 ] && exit 1
+printf '%s\n' "${FM_FAKE_CREW_STATE:-state: unknown · source: none · fake default}"
+exit 0
+SH
+  chmod +x "$fakebin/fm-crew-state.sh"
+
+  # Round 1: the pause recheck's crew-state read fails. Surface conservatively
+  # (an unreadable crew might really have stopped), but write NO negative cache.
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" FM_FAKE_CREW_STATE_FAIL=1 \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "an unreadable paused recheck did not surface conservatively"
+  grep -Fx "stale: $window" "$out" >/dev/null || fail "round 1 did not print the conservative stale wake"
+  [ ! -e "$state/.paused-none-$key" ] || fail "a failed crew-state read was cached as a superseded-pause verdict"
+
+  # Round 2: the read succeeds and confirms the declared pause on the same
+  # static pane and status line. Pre-fix, the round-1 cache matched the status
+  # signature and skipped this recheck forever; post-fix the cadence is still
+  # armed, so the pause is re-absorbed and tracked again.
+  : > "$out"; : > "$state/.wake-queue"
+  export FM_FAKE_CREW_STATE='state: paused · source: status-log · awaiting the upstream release'
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; fail "a confirmed pause after a misread was surfaced instead of re-absorbed: $(cat "$out")"
+  fi
+  [ -e "$state/.paused-$key" ] || { reap "$pid"; fail "the recheck cadence stayed disarmed after the misread (pause not re-absorbed)"; }
+  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "the re-absorbed pause enqueued a wake"; }
+  reap "$pid"
+  unset FM_FAKE_CREW_STATE
+  pass "a transient crew-state misread surfaces once without caching, leaving the pause recheck cadence armed"
+}
+
 test_surfaced_stopped_stale_not_wedge_nagged() {
   local dir state fakebin out capture_file window key sig pid
   dir=$(make_case surfaced-stale-quiet); state="$dir/state"; fakebin="$dir/fakebin"
@@ -1560,6 +1634,7 @@ test_paused_authoritative_working_preserves_wedge_timer
 test_nonterminal_stale_repairs_missing_or_corrupt_timer
 test_terminal_stale_not_resurfaced_per_pane_hash_tick
 test_paused_log_done_crew_not_resurfaced_per_poll
+test_paused_crew_transient_read_failure_not_cached
 test_surfaced_stopped_stale_not_wedge_nagged
 test_busy_pane_rearms_stale_surfacing
 test_streaming_busy_pane_rearms_stale_surfacing

@@ -318,13 +318,17 @@ signal_reason_is_actionable() {  # <file> ...
 # Classify WHY an idle/stale crew MIGHT be safely absorbed instead of surfaced,
 # from bin/fm-crew-state.sh's one authoritative current-state line
 # ("state: <s> · source: <src> · <detail>"). Prints exactly one token:
-#   working - an actively-running no-mistakes step (running/fixing/ci) or a busy
-#             pane; the crew is legitimately mid-work on a static-looking pane
-#             (e.g. waiting on CI);
-#   paused  - the crew's authoritative current state is a declared external-wait
-#             pause (paused:), which is EXPECTED to idle;
-#   none    - neither, so the wake must surface (a stopped/finished/parked/failed/
-#             torn-down/unknown crew, or an unreadable verdict).
+#   working    - an actively-running no-mistakes step (running/fixing/ci) or a busy
+#                pane; the crew is legitimately mid-work on a static-looking pane
+#                (e.g. waiting on CI);
+#   paused     - the crew's authoritative current state is a declared external-wait
+#                pause (paused:), which is EXPECTED to idle;
+#   none       - neither, so the wake must surface (a stopped/finished/parked/
+#                failed/torn-down/unknown crew);
+#   unreadable - the fm-crew-state.sh read itself failed or produced no parseable
+#                state line: NOT a verdict about the crew. Consumers must treat it
+#                like none for surfacing (conservative) but never durably cache it
+#                as a negative verdict, so the next poll re-reads.
 # One fm-crew-state.sh read serves BOTH absorb reasons at once. Reading the state
 # authoritatively (not the status log) is what keeps run-step precedence: a crew
 # that appended paused: but then STARTED a run reports working, never paused.
@@ -334,8 +338,8 @@ signal_reason_is_actionable() {  # <file> ...
 crew_absorb_class() {  # <id>
   local id=$1 line state src
   [ -n "$id" ] || { printf 'none'; return; }
-  line=$("$FM_CREW_STATE_BIN" "$id" 2>/dev/null) || true
-  case "$line" in state:*) ;; *) printf 'none'; return ;; esac
+  line=$("$FM_CREW_STATE_BIN" "$id" 2>/dev/null) || { printf 'unreadable'; return; }
+  case "$line" in state:*) ;; *) printf 'unreadable'; return ;; esac
   state=${line#state: }; state=${state%% *}
   if [ "$state" = paused ]; then printf 'paused'; return; fi
   if [ "$state" = working ]; then
