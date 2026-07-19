@@ -30,8 +30,7 @@ fit() {  # <text> <width>
 
 age_label() {
   local seconds=${1:-}
-  case "$seconds" in ''|null|*[!0-9]*) printf 'n/a' ;; esac
-  case "$seconds" in ''|null|*[!0-9]*) return ;; esac
+  case "$seconds" in ''|null|*[!0-9]*) printf 'n/a'; return ;; esac
   if [ "$seconds" -lt 60 ]; then printf '%ss' "$seconds"
   elif [ "$seconds" -lt 3600 ]; then printf '%sm' "$((seconds / 60))"
   elif [ "$seconds" -lt 86400 ]; then printf '%sh' "$((seconds / 3600))"

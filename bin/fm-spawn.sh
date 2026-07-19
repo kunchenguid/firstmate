@@ -318,8 +318,11 @@ if [ "$KIND" = secondmate ] && [ -z "$ARG3" ] && [ -f "$CONFIG/secondmate-dispat
     echo "error: config/secondmate-dispatch.json is active but jq is unavailable" >&2
     exit 1
   }
-  SM_DISPATCH_SPEC=$(jq -ec --arg id "$ID" '.profiles[$id] // .default // empty' "$CONFIG/secondmate-dispatch.json" 2>/dev/null)
-  sm_dispatch_status=$?
+  if SM_DISPATCH_SPEC=$(jq -ec --arg id "$ID" '.profiles[$id] // .default // empty' "$CONFIG/secondmate-dispatch.json" 2>/dev/null); then
+    sm_dispatch_status=0
+  else
+    sm_dispatch_status=$?
+  fi
   if [ "$sm_dispatch_status" -ne 0 ]; then
     if [ "$sm_dispatch_status" -ne 4 ]; then
       echo "error: config/secondmate-dispatch.json is malformed or unreadable" >&2
