@@ -996,14 +996,25 @@ EOF
                          printf '%s' "$h" > "$sf"
                          wedge_timer_check "$w" "$ssf" "non-terminal stale (provably working after a declared pause)" "$ewf"
                          triage_log "absorbed non-terminal stale (provably working): $w" ;;
-                *)       # No working/paused evidence, and this hash was already
-                         # surfaced once (first-sight arm above). A crew whose
+                *)       # This hash was already surfaced once (first-sight arm
+                         # above) and pause_state_class saw no working evidence and
+                         # no confidently-dead pause. Once this key is already on the
+                         # bounded pause cadence ($pf present), keep it there with a
+                         # zero-read recheck - do NOT re-read the authoritative state
+                         # every poll (the $pf short-circuit throttles the crew-state
+                         # reads that crew_reached_terminal/crew_is_paused would run;
+                         # a change to the pane breaks the suppressor-equal hash and
+                         # forces a fresh read). On first classification, a crew whose
                          # authoritative state is terminal (done - e.g. a PR raised and
-                         # monitoring for merge/close - or parked at a gate) is awaiting
-                         # the captain, not wedged: re-check it on the long pause cadence
-                         # instead of re-surfacing every poll. A genuinely stopped or
-                         # unknown crew (no terminal confirmation) keeps surfacing.
-                         if crew_reached_terminal "$task"; then
+                         # monitoring for merge/close - or parked at a gate) or a
+                         # genuine declared pause is awaiting the captain, not wedged,
+                         # so route it to the long pause cadence too. (A live or
+                         # inconclusive declared pause reaches this arm because
+                         # pause_state_class only returns `paused` for a confidently
+                         # dead agent; the bounded cadence is the same either way.)
+                         # Only a genuinely stopped or unknown crew with no terminal
+                         # or paused confirmation keeps surfacing.
+                         if [ -e "$pf" ] || crew_reached_terminal "$task" || crew_is_paused "$task"; then
                            date +%s > "$STATE/.paused-rechecked-$key"
                            handle_paused_stale "$w" "$task" "$h"
                          else
