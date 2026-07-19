@@ -56,8 +56,9 @@ test_signal_catchup_without_running_watcher() {
   drain_out="$dir/drain.out"
   status_file="$state/task.status"
   # The durable-queue catch-up contract applies to ACTIONABLE wakes (the always-on
-  # watcher absorbs benign working: notes without queuing or exiting). Use a
-  # captain-relevant verb so the wake is surfaced and the catch-up path is tested.
+  # watcher can absorb no-verb working: notes when the crew is provably working).
+  # Use a captain-relevant verb so the wake is surfaced and the catch-up path is
+  # tested.
   printf 'blocked: first\n' > "$status_file"
   PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   wait_for_exit "$!" 40 || fail "watcher did not exit for first signal"
@@ -84,10 +85,10 @@ test_stale_enqueue_before_suppressor() {
   window="test:fm-stale"
   printf 'idle prompt' > "$capture_file"
   printf 'window=%s\nkind=ship\n' "$window" > "$state/stale.meta"
-  # The always-on watcher absorbs a NON-terminal stale (a crew quiet mid-work).
-  # A stale pane sitting on a captain-relevant (terminal) status is actionable, so
-  # give the window one and prime the .seen-* marker to its current signature so
-  # the per-poll signal scan does not pre-empt the stale wake with a signal wake.
+  # A stale pane sitting on a captain-relevant status is actionable when the crew
+  # is not provably working, so give the window one and prime the .seen-* marker
+  # to its current signature so the per-poll signal scan does not pre-empt the
+  # stale wake with a signal wake.
   printf 'done: ready in branch fm/stale\n' > "$state/stale.status"
   if [ "$(uname)" = Darwin ]; then sig=$(stat -f '%z:%Fm' "$state/stale.status"); else sig=$(stat -c '%s:%Y' "$state/stale.status"); fi
   printf '%s' "$sig" > "$state/.seen-stale_status"
@@ -104,6 +105,45 @@ test_stale_enqueue_before_suppressor() {
   pass "stale wake is queued before suppressor state is advanced"
 }
 
+# Absorb-only-when-provably-working adds a new actionable wake: a non-terminal stale
+# whose crew is NOT provably working is surfaced immediately. That new path must keep
+# the queue-safety invariant - enqueue the stale wake BEFORE advancing the .stale-*
+# suppressor - so a watcher killed between the two never swallows the surfaced finish.
+test_not_working_stale_enqueue_before_suppressor() {
+  local dir state fakebin out drain_out capture_file window key pane_hash sig
+  dir=$(make_case stale-stopped)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  drain_out="$dir/drain.out"
+  capture_file="$dir/pane.txt"
+  window="test:fm-stopped"
+  printf 'idle prompt, finished' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/stopped.meta"
+  # Non-terminal status (no captain-relevant verb); prime .seen-* so the per-poll
+  # signal scan does not pre-empt the stale path.
+  printf 'working: implementing\n' > "$state/stopped.status"
+  if [ "$(uname)" = Darwin ]; then sig=$(stat -f '%z:%Fm' "$state/stopped.status"); else sig=$(stat -c '%s:%Y' "$state/stopped.status"); fi
+  printf '%s' "$sig" > "$state/.seen-stopped_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle prompt, finished")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  # NOT provably working: no running pipeline, idle pane. (make_case installed the
+  # fake fm-crew-state.sh the watcher reads via FM_CREW_STATE_BIN.)
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  wait_for_exit "$!" 40 || fail "watcher did not surface a not-provably-working stale"
+  grep -Fx "stale: $window" "$out" >/dev/null || fail "watcher did not print the immediate stale wake"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" || fail "drain after the immediate stale wake failed"
+  grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null || fail "immediate stale wake was not queued"
+  [ "$(cat "$state/.stale-$key" 2>/dev/null || true)" = "$pane_hash" ] || fail "stale suppressor was not advanced after the enqueue"
+  unset FM_FAKE_CREW_STATE
+  pass "a not-provably-working stale wake is queued before its suppressor is advanced"
+}
+
 test_check_output_is_queued() {
   local dir state fakebin out drain_out check_file
   dir=$(make_case check)
@@ -112,18 +152,23 @@ test_check_output_is_queued() {
   out="$dir/watch.out"
   drain_out="$dir/drain.out"
   check_file="$state/task.check.sh"
+  printf '%s\n' fm-pr-check-migration-scan-v1 > "$state/.pr-check-migration-scan-v1"
+  printf '%s\n' fm-pr-check-migration-v1 > "$state/.pr-check-migration-v1"
+  chmod 0600 "$state/.pr-check-migration-scan-v1" "$state/.pr-check-migration-v1"
   cat > "$check_file" <<'SH'
 #!/usr/bin/env bash
 printf 'merged: https://example.test/pr/1\n'
 SH
-  chmod +x "$check_file"
+  chmod 0700 "$check_file"
+  FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-check-register.sh" task >/dev/null \
+    || fail "could not register queue custom check"
   PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=0 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   wait_for_exit "$!" 40 || fail "watcher did not exit for check output"
   grep -F "check: $check_file: merged: https://example.test/pr/1" "$out" >/dev/null || fail "watcher did not print check wake"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" || fail "drain after check wake failed"
   grep "$(printf '\tcheck\t')" "$drain_out" | grep -F "$check_file" | grep -F 'merged: https://example.test/pr/1' >/dev/null || fail "check wake was not queued"
   [ -e "$state/.last-check" ] || fail "check cadence marker was not written after queue append"
-  pass "check output is queued before cadence suppression"
+  pass "registered custom check output is queued before cadence suppression"
 }
 
 test_atomic_double_drain() {
@@ -192,6 +237,7 @@ test_drain_asserts_watcher_liveness() {
 test_concurrent_append_and_drain
 test_signal_catchup_without_running_watcher
 test_stale_enqueue_before_suppressor
+test_not_working_stale_enqueue_before_suppressor
 test_check_output_is_queued
 test_atomic_double_drain
 test_drain_dedupes_obvious_duplicates

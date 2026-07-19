@@ -15,7 +15,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - run: shellcheck bin/*.sh tests/*.sh
+      - name: Install pinned ShellCheck
+        run: |
+          set -eu
+          bin/fm-install-shellcheck.sh "$RUNNER_TEMP/bin"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      # Single owner of the lint definition (file set + config + version). Do not
+      # re-spell the shellcheck command here; keep CI and the pre-push gate on it.
+      - run: bin/fm-lint.sh
 
   tests:
     name: Behavior tests
@@ -25,6 +32,13 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Install pinned ShellCheck
+        run: |
+          set -eu
+          bin/fm-install-shellcheck.sh "$RUNNER_TEMP/bin"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
       - name: Require tmux for e2e tests
         run: |
           set -eu
@@ -33,11 +47,52 @@ jobs:
             exit 1
           }
           tmux -V
+      - name: Install tasks-axi for backlog-handoff delegation
+        run: |
+          set -eu
+          npm install -g tasks-axi
+          tasks-axi --version
       - run: |
           set -eu
           for test_script in tests/*.test.sh; do
             "$test_script"
           done
+
+  macos-stock-bash:
+    name: Stock macOS Bash snapshot compatibility
+    runs-on: macos-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - name: Run snapshot consumers with stock Bash
+        shell: /bin/bash {0}
+        env:
+          PATH: /bin:/usr/bin:/usr/sbin:/sbin:/usr/local/bin:/opt/homebrew/bin
+        run: |
+          set -eu
+          case "$BASH_VERSION" in
+            3.2.57*) ;;
+            *) echo "::error::expected stock macOS Bash 3.2.57, got $BASH_VERSION"; exit 1 ;;
+          esac
+          /bin/bash --version | head -1
+          command -v jq >/dev/null || { echo "::error::jq is required"; exit 1; }
+          /bin/bash -n bin/fm-fleet-snapshot.sh
+
+          snapshot_output=$(/bin/bash tests/fm-fleet-snapshot-view.test.sh)
+          printf '%s\n' "$snapshot_output"
+          snapshot_count=$(printf '%s\n' "$snapshot_output" | grep -c '^ok - ')
+          [ "$snapshot_count" -eq 13 ] || {
+            echo "::error::expected 13 snapshot/fleet-view tests, got $snapshot_count"
+            exit 1
+          }
+
+          bearings_output=$(/bin/bash tests/fm-bearings-snapshot.test.sh)
+          printf '%s\n' "$bearings_output"
+          bearings_count=$(printf '%s\n' "$bearings_output" | grep -c '^ok - ')
+          [ "$bearings_count" -eq 36 ] || {
+            echo "::error::expected 36 Bearings tests, got $bearings_count"
+            exit 1
+          }
 
   invariants:
     name: Repo invariants

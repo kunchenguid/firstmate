@@ -28,7 +28,10 @@ fm_pid_identity() {
   case "$pid" in
     ''|*[!0-9]*) return 1 ;;
   esac
-  out=$(ps -p "$pid" -o lstart= -o command= 2>/dev/null) || return 1
+  # Pin LC_ALL=C so lstart's date format is locale-invariant: the identity is
+  # written under one locale but re-read under the machine's ambient locale, which
+  # would otherwise mismatch on a non-C locale (e.g. ko_KR) and reject a live watcher.
+  out=$(LC_ALL=C ps -p "$pid" -o lstart= -o command= 2>/dev/null) || return 1
   [ -n "$out" ] || return 1
   printf '%s\n' "$out" | sed 's/^[[:space:]]*//'
 }
@@ -45,6 +48,35 @@ fm_path_age() {
   local path=$1 m
   m=$(fm_path_mtime "$path") || { echo 999999; return; }
   echo $(( $(date +%s) - m ))
+}
+
+fm_watcher_lock_matches_pid() {
+  local state=$1 watch_path=$2 pid=$3 home=${4:-$FM_HOME} lockdir lock_home lock_path lock_identity current_identity
+  lockdir="$state/.watch.lock"
+  lock_home=$(cat "$lockdir/fm-home" 2>/dev/null || true)
+  lock_path=$(cat "$lockdir/watcher-path" 2>/dev/null || true)
+  lock_identity=$(cat "$lockdir/pid-identity" 2>/dev/null || true)
+  [ "$lock_home" = "$home" ] || return 1
+  [ "$lock_path" = "$watch_path" ] || return 1
+  [ -n "$lock_identity" ] || return 1
+  current_identity=$(fm_pid_identity "$pid") || return 1
+  [ "$current_identity" = "$lock_identity" ]
+}
+
+FM_WATCHER_HEALTHY_PID=
+fm_watcher_healthy() {
+  local state=$1 watch_path=$2 grace=${3:-${FM_GUARD_GRACE:-300}} home=${4:-$FM_HOME} lockdir beat pid age
+  FM_WATCHER_HEALTHY_PID=
+  lockdir="$state/.watch.lock"
+  beat="$state/.last-watcher-beat"
+  pid=$(cat "$lockdir/pid" 2>/dev/null || true)
+  fm_pid_alive "$pid" || return 1
+  fm_watcher_lock_matches_pid "$state" "$watch_path" "$pid" "$home" || return 1
+  age=$(fm_path_age "$beat")
+  [ "$age" -lt "$grace" ] || return 1
+  # shellcheck disable=SC2034 # Read by callers after fm_watcher_healthy returns.
+  FM_WATCHER_HEALTHY_PID=$pid
+  return 0
 }
 
 fm_lock_clean_known_files() {

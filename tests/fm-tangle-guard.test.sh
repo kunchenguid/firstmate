@@ -83,7 +83,11 @@ test_guard_banner() {
   assert_contains "$out" "WORKTREE TANGLE" "guard did not alarm on a feature branch in the primary"
   assert_contains "$out" "fm/tangle-aa1" "guard banner did not name the offending branch"
   assert_contains "$out" "checkout main" "guard banner did not print the restore remediation"
-  pass "fm-guard: bordered tangle banner fires only for a feature branch in the primary"
+  out=$(FM_GUARD_READ_ONLY=1 run_guard "$repo")
+  assert_contains "$out" "WORKTREE TANGLE" "read-only guard did not keep the tangle alarm"
+  assert_contains "$out" "read-only session must leave restore work" "read-only guard did not explain restore ownership"
+  assert_not_contains "$out" "checkout main" "read-only guard printed a state-changing restore command"
+  pass "fm-guard: bordered tangle banner fires only for a feature branch and suppresses repair commands in read-only mode"
 }
 
 # --- GUARD 2b: fm-bootstrap problem line ------------------------------------
@@ -108,7 +112,11 @@ test_bootstrap_line() {
   out=$(run_bootstrap "$repo" | grep '^TANGLE:' || true)
   assert_contains "$out" "fm/tangle-bb2" "bootstrap did not report the tangled branch"
   assert_contains "$out" "checkout main" "bootstrap TANGLE line lacked the restore remediation"
-  pass "fm-bootstrap: TANGLE problem line fires only for a feature branch in the primary"
+  out=$(FM_ROOT_OVERRIDE="$repo" FM_HOME="$repo" FM_BOOTSTRAP_DETECT_ONLY=1 "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null | grep '^TANGLE:' || true)
+  assert_contains "$out" "fm/tangle-bb2" "detect-only bootstrap did not report the tangled branch"
+  assert_contains "$out" "read-only session must leave restore work" "detect-only bootstrap did not explain restore ownership"
+  assert_not_contains "$out" "checkout main" "detect-only bootstrap printed a state-changing restore command"
+  pass "fm-bootstrap: TANGLE problem line fires only for a feature branch and suppresses repair commands in detect-only mode"
 }
 
 # --- GUARD 1a: brief isolation assertion ------------------------------------
@@ -206,8 +214,96 @@ test_spawn_isolation_abort() {
   pass "fm-spawn: aborts unless the resolved worktree is a genuine, isolated worktree"
 }
 
+# --- GUARD 1c: fm-spawn tmux window construction ----------------------------
+
+# The prevention guard also depends on fm-spawn building robust tmux commands
+# under a non-default tmux config (base-index 1, automatic-rename on). A RECORDING
+# fake tmux logs every invocation and returns a sentinel window id, so these
+# assertions pin the command construction deterministically, with no live tmux:
+#   - window creation targets the session with a trailing colon (append form), so
+#     tmux appends at the next free index instead of the active window index, which
+#     collides under base-index 1;
+#   - the window id is captured (-P -F #{window_id}) and automatic-rename/allow-rename
+#     are disabled so the fm-<id> name survives treehouse cd'ing into the worktree;
+#   - the treehouse-get send-keys and the worktree wait loop target that stable
+#     window id, never the (possibly-renamed) name - a lost name would let
+#     display-message fall back to the active client's window and misread firstmate's
+#     OWN pane as the worktree, tangling a hook into the primary checkout.
+make_spawn_record_fakebin() {
+  local dir=$1 fakebin
+  fakebin=$(fm_fakebin "$dir")
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+[ -n "${FM_TMUX_REC:-}" ] && printf 'tmux %s\n' "$*" >> "$FM_TMUX_REC"
+case "$*" in
+  *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
+esac
+case "${1:-}" in
+  display-message) printf 'firstmate\n'; exit 0 ;;
+  new-window) printf '%s\n' "@spawnwid"; exit 0 ;;
+  list-windows) exit 0 ;;
+  has-session|new-session|send-keys|set-window-option) exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/tmux"
+  fm_fake_exit0 "$fakebin" treehouse
+  printf '%s\n' "$fakebin"
+}
+
+run_spawn_record() {
+  local home=$1 id=$2 proj=$3 pane=$4 fakebin=$5 rec=$6
+  mkdir -p "$home/data/$id"
+  printf 'brief\n' > "$home/data/$id/brief.md"
+  FM_ROOT_OVERRIDE='' FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$pane" TMUX="fake,1,0" \
+    FM_TMUX_REC="$rec" \
+    PATH="$fakebin:$PATH" \
+    "$ROOT/bin/fm-spawn.sh" "$id" "$proj" codex 2>&1
+}
+
+test_spawn_tmux_window_construction() {
+  local home proj fakebin rec wt out status
+  home="$TMP_ROOT/spawn-rec-home"
+  mkdir -p "$home/data"
+  proj=$(make_repo "$TMP_ROOT/spawn-rec-proj")
+  fakebin=$(make_spawn_record_fakebin "$TMP_ROOT/spawn-rec-fake")
+  rec="$TMP_ROOT/spawn-rec.log"
+  : > "$rec"
+  wt="$TMP_ROOT/spawn-rec-wt"
+  git -C "$proj" worktree add -q --detach "$wt" >/dev/null 2>&1
+
+  out=$(run_spawn_record "$home" rec-win-gg7 "$proj" "$wt" "$fakebin" "$rec"); status=$?
+  expect_code 0 "$status" "spawn into a genuine worktree should succeed"
+  assert_contains "$out" "spawned rec-win-gg7" "recording spawn did not report success"
+
+  # Bug 1 fix: append-form window creation (trailing colon on the session target).
+  assert_grep "new-window -dP -F #{window_id} -t firstmate: -n fm-rec-win-gg7" "$rec" \
+    "new-window must append at the session (trailing colon) and capture the window id"
+  assert_no_grep "new-window -dP -F #{window_id} -t firstmate -n" "$rec" \
+    "new-window must not target the bare session name (collides under base-index 1)"
+
+  # Bug 2 fix (a): pin the window name against automatic-rename / allow-rename.
+  assert_grep "set-window-option -t @spawnwid automatic-rename off" "$rec" \
+    "must disable automatic-rename on the spawned window"
+  assert_grep "set-window-option -t @spawnwid allow-rename off" "$rec" \
+    "must disable allow-rename on the spawned window"
+
+  # Bug 2 fix (b): treehouse-get and the worktree wait loop target the stable id.
+  assert_grep "send-keys -t @spawnwid treehouse get Enter" "$rec" \
+    "treehouse get must be sent to the stable window id"
+  assert_grep "display-message -p -t @spawnwid #{pane_current_path}" "$rec" \
+    "the worktree wait loop must query the stable window id, not the name"
+
+  pass "fm-spawn: appends windows by session-colon, pins the name, and targets the window id"
+}
+
 test_lib_classification
 test_guard_banner
 test_bootstrap_line
 test_brief_assertion_precedes_branch
 test_spawn_isolation_abort
+test_spawn_tmux_window_construction

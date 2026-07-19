@@ -1,20 +1,24 @@
 #!/usr/bin/env bash
-# Tests for bin/fm-teardown.sh's landed-work safety check.
+# Tests for bin/fm-teardown.sh's landed-work safety and stale-lock recovery.
 #
 # The check refuses to tear down a worktree whose work has not LANDED, because
 # treehouse return hard-resets the worktree. "Landed" means reachable from a remote
 # OR - for a normal ship task whose commits are not so reachable - its PR is merged
-# and GitHub reports the current HEAD as that PR's head, or its content is already
-# in the up-to-date default branch.
+# and GitHub reports a PR head that contains the current local work, or its content
+# is already in the up-to-date default branch.
 #
-# Covers two fixes:
+# Covers three fixes:
 #   - local-only fork-remote: a fork IS a remote, so fork-pushed upstream-
 #     contribution PRs are teardown-eligible (the pre-fix code false-refused them).
 #   - squash-merge-then-delete-branch: the branch's own commits live nowhere on a
 #     remote after a squash merge deletes the head branch, yet the change is fully in
 #     main. Reachability alone false-refused this common GitHub flow; the check now
-#     recognizes the matching merged PR head (or the content already in main) as
-#     landed.
+#     recognizes a merged PR head containing the local work (or the content already
+#     in main) as landed.
+#   - teardown-lock-race: a killed crew process can leave a transient worktree
+#     git index.lock that blocks teardown. The return path retries on the lock
+#     error signature (even if the lock self-clears mid-check), then only removes a
+#     provably stale lock before re-running safety checks.
 #
 # Matrix:
 #   (a) local-only + HEAD on a fork remote-tracking branch     -> ALLOW  (fork fix)
@@ -23,21 +27,39 @@
 #   (d) no-mistakes + HEAD on origin remote-tracking branch    -> ALLOW  (no regression)
 #   (e) no-mistakes + unpushed, no PR, content not in default  -> REFUSE (safety)
 #   (f) local-only + truly unpushed + --force                  -> ALLOW  (escape hatch)
-#   (g) no-mistakes + squash-merged PR, branch-deleted         -> ALLOW  (squash fix)
+#   (g) no-mistakes + squash-merged PR, exact PR head          -> ALLOW  (squash fix)
 #   (h) no-mistakes + no PR but content already in default     -> ALLOW  (content fallback)
 #   (i) no-mistakes + dirty worktree, even when work landed     -> REFUSE (dirty wins)
 #   (j) no-mistakes + gh lookup errors + content not in default -> REFUSE (fail-safe)
 #   (k) no-mistakes + merged PR but HEAD moved afterward        -> REFUSE (stale PR)
 #   (l) no-mistakes + stale origin/main but fetched content     -> ALLOW  (fresh fetch)
-#   (m) fm-pr-check rerun after HEAD moved                      -> no stale pr_head
+#   (m) no-mistakes + local HEAD ancestor of merged PR head     -> ALLOW  (lagging local)
+#   (n) no-mistakes + replayed unpushed patch in merged PR head -> ALLOW  (replayed local)
+#   (o) fm-pr-check rerun after HEAD moved                      -> no stale pr_head
+#   (p) fm-pr-check when local HEAD lags                        -> record remote PR head
+#   (q) no-mistakes + NO pr= recorded, PR discovered by branch  -> ALLOW  (yolo/no-CI merge)
+#
+# Also covers backlog teardown-lock-race: a git index.lock left in the worktree by a
+# killed crew process (bin/fm-teardown.sh's teardown_treehouse_return).
+#   (r) provably-stale index.lock (old mtime, no live holder) -> lock removed, ALLOW
+#   (s) index.lock with a live holder, any age                -> lock kept, REFUSE
+#   (t) lsof error while checking index.lock                  -> lock kept, REFUSE
+#   (u) dirty worktree after stale lock cleanup               -> lock removed, REFUSE
+#   (v) non-linked repo index.lock                            -> lock removed, ALLOW
+#   (w) index.lock mtime read failure                         -> lock kept, REFUSE
+#   (x) transient lock cleared after first failed return      -> retry ALLOW
+#   (y) persistent lock (never clears, not provably stale)    -> REFUSE loudly
 set -u
 
-# shellcheck source=tests/lib.sh
+# shellcheck source=tests/lib.sh disable=SC1091
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+fm_git_identity fmtest fmtest@example.invalid
 
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
 PR_CHECK="$ROOT/bin/fm-pr-check.sh"
 TMP_ROOT=$(fm_test_tmproot fm-teardown-tests)
+REAL_GIT_FOR_TEST=$(command -v git)
+export REAL_GIT_FOR_TEST
 
 # Build a fresh sandbox for one test case. Sets up:
 #   $CASE/state/        - firstmate state dir (with a fresh watcher beacon)
@@ -50,7 +72,7 @@ make_case() {
   local name=$1 case_dir fakebin
   case_dir="$TMP_ROOT/$name"
   fakebin="$case_dir/fakebin"
-  mkdir -p "$case_dir/state" "$fakebin"
+  mkdir -p "$case_dir/state" "$case_dir/config" "$fakebin"
 
   # Mocks for the post-check teardown steps. Refuse logic exits before these
   # run; the ALLOW cases need them so the script can complete cleanly.
@@ -112,6 +134,17 @@ add_compatible_tasks_axi() {
 #!/usr/bin/env bash
 if [ "${1:-}" = --version ]; then
   printf '%s\n' '0.1.1'
+  exit 0
+fi
+if [ "${1:-}" = update ] && [ "${2:-}" = --help ]; then
+  printf '%s\n' 'usage: tasks-axi update <id> [flags]'
+  printf '%s\n' '  --body-file <path>'
+  printf '%s\n' '  --archive-body'
+  exit 0
+fi
+if [ "${1:-}" = mv ] && [ "${2:-}" = --help ]; then
+  printf '%s\n' 'usage: tasks-axi mv <id> [<id>...] --to <path-or-dir>'
+  exit 0
 fi
 exit 0
 SH
@@ -211,6 +244,30 @@ append_pr_meta_for_current_head() {
     "pr_head=$head" >> "$case_dir/state/task-x1.meta"
 }
 
+append_pr_meta_url() {
+  local case_dir=$1
+  printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
+}
+
+commit_tree_from_wt_head() {
+  local case_dir=$1 parent=$2 msg=$3 tree
+  tree=$(git -C "$case_dir/wt" rev-parse "$parent^{tree}") || return 1
+  printf '%s\n' "$msg" | git -C "$case_dir/wt" commit-tree "$tree" -p "$parent"
+}
+
+land_equivalent_patch_on_origin_branch() {
+  local case_dir=$1 branch=$2 file=$3 content=$4 msg=$5 tmp
+  tmp="$case_dir/_equiv"
+  git clone -q "$case_dir/origin.git" "$tmp"
+  printf '%s\n' "$content" > "$tmp/$file"
+  git -C "$tmp" add -- "$file"
+  git -C "$tmp" -c user.email=t@t -c user.name=t commit -q -m "$msg"
+  git -C "$tmp" push -q origin "HEAD:refs/heads/$branch"
+  git -C "$case_dir/project" fetch -q origin "$branch"
+  rm -rf "$tmp"
+  git -C "$case_dir/project" rev-parse "refs/remotes/origin/$branch"
+}
+
 # Override gh-axi so every call fails, simulating an API/network error.
 add_gh_axi_error() {
   local case_dir=$1
@@ -227,11 +284,215 @@ SH
   chmod +x "$case_dir/fakebin/gh-axi" "$case_dir/fakebin/gh"
 }
 
+# Override fakebin/treehouse so `treehouse return --force <wt>` fails with a
+# git "file exists" lock error whenever the worktree's real index.lock is
+# present, and succeeds once it is gone. This drives the lock through
+# fm-teardown.sh's own retry-then-stale-cleanup logic (teardown_treehouse_return
+# in bin/fm-teardown.sh) rather than hand-simulating that logic in the test.
+add_lock_aware_treehouse() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = return ]; then
+  shift
+  wt=""
+  for a in "$@"; do
+    case "$a" in
+      --force) ;;
+      *) wt=$a ;;
+    esac
+  done
+  lock=$(git -C "$wt" rev-parse --git-path index.lock 2>/dev/null || true)
+  case "$lock" in
+    /*|'') ;;
+    *) lock="$wt/$lock" ;;
+  esac
+  if [ -n "$lock" ] && [ -e "$lock" ]; then
+    echo "fatal: Unable to create '$lock': File exists." >&2
+    exit 128
+  fi
+  exit 0
+fi
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+}
+
+# treehouse return fails once with the index.lock signature, then clears the lock
+# (simulating a dying crew git process finishing) so the next retry succeeds.
+# The first failure always reports the lock path even if the file is removed in
+# the same attempt - matching the production race where the lock self-clears
+# between the failed return and the supervisor's existence check.
+add_transient_lock_treehouse() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = return ]; then
+  shift
+  wt=""
+  for a in "$@"; do
+    case "$a" in
+      --force) ;;
+      *) wt=$a ;;
+    esac
+  done
+  lock=$(git -C "$wt" rev-parse --git-path index.lock 2>/dev/null || true)
+  case "$lock" in
+    /*|'') ;;
+    *) lock="$wt/$lock" ;;
+  esac
+  count_file="${TREEHOUSE_ATTEMPT_FILE:?}"
+  count=0
+  if [ -f "$count_file" ]; then
+    count=$(cat "$count_file")
+  fi
+  count=$(( count + 1 ))
+  printf '%s\n' "$count" > "$count_file"
+  if [ "$count" -eq 1 ]; then
+    # Emit the real git signature, then drop the lock so a lock-existence-only
+    # recovery path would wrongly abort without retrying.
+    if [ -n "$lock" ]; then
+      echo "fatal: Unable to create '$lock': File exists." >&2
+      rm -f "$lock"
+    else
+      echo "fatal: Unable to create 'index.lock': File exists." >&2
+    fi
+    exit 128
+  fi
+  exit 0
+fi
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+}
+
+# treehouse return always fails with the lock signature while the lock file
+# remains; used to assert exhausted retries still refuse loudly.
+add_persistent_lock_treehouse() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = return ]; then
+  shift
+  wt=""
+  for a in "$@"; do
+    case "$a" in
+      --force) ;;
+      *) wt=$a ;;
+    esac
+  done
+  lock=$(git -C "$wt" rev-parse --git-path index.lock 2>/dev/null || true)
+  case "$lock" in
+    /*|'') ;;
+    *) lock="$wt/$lock" ;;
+  esac
+  if [ -z "$lock" ]; then
+    lock="index.lock"
+  fi
+  echo "fatal: Unable to create '$lock': File exists." >&2
+  exit 128
+fi
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+}
+
+git_index_lock_path() {
+  local dir=$1 lock abs_dir
+  lock=$(git -C "$dir" rev-parse --git-path index.lock)
+  case "$lock" in
+    /*) printf '%s\n' "$lock" ;;
+    *)
+      abs_dir=$(cd "$dir" && pwd -P)
+      printf '%s/%s\n' "$abs_dir" "$lock"
+      ;;
+  esac
+}
+
+# fakebin/lsof stub: no process ever holds anything open (lsof's not-found exit
+# code), so a lock's staleness is decided by age alone.
+add_lsof_no_holder() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/lsof" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+  chmod +x "$case_dir/fakebin/lsof"
+}
+
+# fakebin/lsof stub: a live process holds every queried path open, so a lock is
+# never judged stale regardless of its age.
+add_lsof_live_holder() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/lsof" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/lsof"
+}
+
+add_lsof_error() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/lsof" <<'SH'
+#!/usr/bin/env bash
+echo "lsof: simulated failure for ${1:-unknown}" >&2
+exit 2
+SH
+  chmod +x "$case_dir/fakebin/lsof"
+}
+
+add_stat_error() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/stat" <<'SH'
+#!/usr/bin/env bash
+echo "stat: simulated failure" >&2
+exit 1
+SH
+  chmod +x "$case_dir/fakebin/stat"
+}
+
+add_git_status_lock_failure() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/git" <<'SH'
+#!/usr/bin/env bash
+real=${REAL_GIT_FOR_TEST:?}
+dir=
+args=()
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -C)
+      dir=$2
+      args+=("$1" "$2")
+      shift 2
+      ;;
+    *)
+      args+=("$1")
+      shift
+      ;;
+  esac
+done
+if [ -n "$dir" ] && [ "${args[2]:-}" = status ] && [ "${args[3]:-}" = --porcelain ]; then
+  lock=$("$real" -C "$dir" rev-parse --git-path index.lock 2>/dev/null || true)
+  case "$lock" in
+    /*|'') ;;
+    *) lock="$dir/$lock" ;;
+  esac
+  if [ -n "$lock" ] && [ -e "$lock" ]; then
+    echo "fatal: Unable to create '$lock': File exists." >&2
+    exit 128
+  fi
+fi
+exec "$real" "${args[@]}"
+SH
+  chmod +x "$case_dir/fakebin/git"
+}
+
 # Run teardown with PATH mocking. Args: case_dir [extra args...]
 run_teardown() {
   local case_dir=$1; shift
   FM_ROOT_OVERRIDE="$ROOT" \
   FM_STATE_OVERRIDE="$case_dir/state" \
+  FM_CONFIG_OVERRIDE="$case_dir/config" \
   PATH="$case_dir/fakebin:$PATH" \
     "$TEARDOWN" task-x1 "$@"
 }
@@ -270,6 +531,22 @@ test_teardown_prompts_tasks_axi_done_when_compatible() {
   printf '%s\n' "$out" | grep -F 'keep Done to the 10 most recent' >/dev/null \
     && fail "teardown kept manual Done pruning in compatible tasks-axi prompt: $out"
   pass "teardown prompts tasks-axi backlog refresh when compatible"
+}
+
+test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present() {
+  local case_dir out
+  case_dir=$(make_case tasks-axi-manual-optout)
+  write_meta "$case_dir" no-mistakes ship
+  printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
+  printf '%s\n' manual > "$case_dir/config/backlog-backend"
+  add_compatible_tasks_axi "$case_dir"
+
+  out=$(run_teardown "$case_dir") || fail "teardown failed with manual backlog backend"
+  printf '%s\n' "$out" | grep -F 'Update data/backlog.md - move task-x1 to Done' >/dev/null \
+    || fail "teardown did not prompt manual backlog update under opt-out: $out"
+  printf '%s\n' "$out" | grep -F 'tasks-axi done' >/dev/null \
+    && fail "teardown prompted tasks-axi despite manual backend opt-out: $out"
+  pass "teardown honors config/backlog-backend=manual even when tasks-axi is compatible"
 }
 
 test_local_only_truly_unpushed_refuses() {
@@ -373,6 +650,81 @@ test_squash_merged_branch_deleted_allows() {
   pass "squash-merged + deleted-branch worktree (PR merged) is torn down (the fix)"
 }
 
+test_squash_merged_pr_allows_when_head_ancestor_of_pr_head() {
+  local case_dir rc local_head pr_head
+  case_dir=$(make_case squash-ancestor)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  append_pr_meta_url "$case_dir"
+  local_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  pr_head=$(commit_tree_from_wt_head "$case_dir" "$local_head" "no-mistakes follow-up")
+  add_gh_pr_merged_for_head "$case_dir" "$pr_head"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "squash-ancestor: teardown should succeed when local HEAD is in the merged PR head"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "squash-ancestor: teardown printed a REFUSED line"
+  pass "squash-merged PR accepts a local HEAD that is an ancestor of the final PR head"
+}
+
+test_no_pr_recorded_discovers_merged_pr_by_branch_allows() {
+  local case_dir rc local_head pr_head
+  case_dir=$(make_case no-pr-branch-discovery)
+  write_meta "$case_dir" no-mistakes ship
+  # Reproduces the real false-refusal report exactly, with NO pr=/pr_head=
+  # recorded in meta at all (fm-pr-check.sh was never run, e.g. a yolo merge on
+  # a repo with no PR CI so the "checks green" trigger that fires it never
+  # happened): a branch with a commit, a no-mistakes auto-fix commit pushed on
+  # top that never made it back into the local worktree, a squash merge onto
+  # main under a brand-new SHA, and the head branch deleted (simulated here by
+  # never pushing fm/task-x1 at all, so no refs/remotes/origin/fm/task-x1
+  # exists to make HEAD "reachable").
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  local_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  pr_head=$(commit_tree_from_wt_head "$case_dir" "$local_head" "no-mistakes auto-fix")
+  land_on_origin_main "$case_dir" feature.txt hello
+  add_gh_pr_merged_for_head "$case_dir" "$pr_head"
+  # No append_pr_meta_* call: state/task-x1.meta has no pr= or pr_head= line.
+
+  ! grep -qE '^(pr|pr_head)=' "$case_dir/state/task-x1.meta" \
+    || fail "no-pr-branch-discovery: test setup bug, meta unexpectedly has a pr= line"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "no-pr-branch-discovery: teardown should succeed by discovering the merged PR from the branch name"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "no-pr-branch-discovery: teardown printed a REFUSED line"
+  pass "teardown discovers a merged PR by branch name and tears down when no pr= was ever recorded"
+}
+
+test_squash_merged_pr_allows_replayed_unpushed_patch() {
+  local case_dir rc parent_head pr_head
+  case_dir=$(make_case squash-replayed-patch)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" local-parent.txt parent "local parent"
+  parent_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  git -C "$case_dir/wt" push -q origin "$parent_head:refs/heads/fm/task-x1"
+  git -C "$case_dir/project" fetch -q origin fm/task-x1
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  append_pr_meta_url "$case_dir"
+  pr_head=$(land_equivalent_patch_on_origin_branch "$case_dir" pr-head feature.txt hello "add feature")
+  add_gh_pr_merged_for_head "$case_dir" "$pr_head"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "squash-replayed-patch: teardown should succeed when unpushed local patch is in the merged PR head"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "squash-replayed-patch: teardown printed a REFUSED line"
+  pass "squash-merged PR accepts replayed unpushed local patches contained in the PR head"
+}
+
 test_merged_pr_with_later_local_commit_refuses() {
   local case_dir rc pr_head
   case_dir=$(make_case stale-pr-head)
@@ -427,6 +779,27 @@ test_pr_check_does_not_refresh_stale_pr_head() {
   expect_code 1 "$rc" "pr-check-stale: teardown should refuse after a later local commit"
   grep -q REFUSED "$case_dir/stderr" || fail "pr-check-stale: no REFUSED line in stderr"
   pass "fm-pr-check does not refresh PR head after HEAD moves"
+}
+
+test_pr_check_records_remote_head_when_local_lags() {
+  local case_dir local_head pr_head
+  case_dir=$(make_case pr-check-local-lags)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  local_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  pr_head=$(commit_tree_from_wt_head "$case_dir" "$local_head" "no-mistakes follow-up")
+  add_gh_pr_merged_for_head "$case_dir" "$pr_head"
+
+  FM_ROOT_OVERRIDE="$ROOT" \
+  FM_STATE_OVERRIDE="$case_dir/state" \
+  PATH="$case_dir/fakebin:$PATH" \
+    "$PR_CHECK" task-x1 https://github.com/example/repo/pull/7 >/dev/null
+
+  grep -qxF "pr_head=$pr_head" "$case_dir/state/task-x1.meta" \
+    || fail "pr-check-local-lags: did not record GitHub PR head"
+  ! grep -qxF "pr_head=$local_head" "$case_dir/state/task-x1.meta" \
+    || fail "pr-check-local-lags: recorded local HEAD instead of remote PR head"
+  pass "fm-pr-check records the remote PR head when the local worktree lags"
 }
 
 test_content_in_default_fallback_allows() {
@@ -513,6 +886,346 @@ test_gh_error_and_content_absent_refuses() {
   pass "gh lookup error with content not in default refuses (fail-safe)"
 }
 
+test_stale_index_lock_cleared_and_teardown_succeeds() {
+  local case_dir rc lock
+  case_dir=$(make_case stale-index-lock)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit "$case_dir" "shippable work"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+
+  add_lock_aware_treehouse "$case_dir"
+  add_lsof_no_holder "$case_dir"
+
+  lock=$(git_index_lock_path "$case_dir/wt")
+  mkdir -p "$(dirname "$lock")"
+  : > "$lock"
+  touch -t 200001010000 "$lock"
+
+  set +e
+  FM_STALE_WORKTREE_LOCK_RETRY_WAIT_SECS=0 FM_STALE_WORKTREE_LOCK_AGE_SECS=1 \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "stale-index-lock: teardown should succeed after clearing the provably stale lock"
+  assert_grep "removed provably-stale git lock" "$case_dir/stderr" \
+    "stale-index-lock: teardown did not report clearing the stale lock"
+  assert_absent "$lock" "stale-index-lock: stale lock file should have been removed"
+  pass "provably-stale worktree index.lock (old, no live holder) is cleared and teardown succeeds"
+}
+
+test_live_index_lock_is_never_removed_and_teardown_refuses() {
+  local case_dir rc lock
+  case_dir=$(make_case live-index-lock)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit "$case_dir" "shippable work"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+
+  add_lock_aware_treehouse "$case_dir"
+  add_lsof_live_holder "$case_dir"
+
+  lock=$(git_index_lock_path "$case_dir/wt")
+  mkdir -p "$(dirname "$lock")"
+  : > "$lock"
+  # Even an old mtime must not be enough on its own: a live holder always wins.
+  touch -t 200001010000 "$lock"
+
+  set +e
+  FM_STALE_WORKTREE_LOCK_RETRY_WAIT_SECS=0 FM_STALE_WORKTREE_LOCK_AGE_SECS=1 \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "live-index-lock: teardown should refuse when the lock has a live holder"
+  assert_grep "not provably stale" "$case_dir/stderr" \
+    "live-index-lock: teardown did not explain the refusal"
+  assert_not_contains "$(cat "$case_dir/stderr")" "removed provably-stale git lock" \
+    "live-index-lock: teardown removed a lock with a live holder"
+  [ -e "$lock" ] || fail "live-index-lock: live-held lock file was removed"
+  pass "live-held worktree index.lock is never removed and teardown refuses"
+}
+
+test_lsof_error_never_clears_index_lock() {
+  local case_dir rc lock
+  case_dir=$(make_case lsof-error-index-lock)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit "$case_dir" "shippable work"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+
+  add_lock_aware_treehouse "$case_dir"
+  add_lsof_error "$case_dir"
+
+  lock=$(git_index_lock_path "$case_dir/wt")
+  mkdir -p "$(dirname "$lock")"
+  : > "$lock"
+  touch -t 200001010000 "$lock"
+
+  set +e
+  FM_STALE_WORKTREE_LOCK_RETRY_WAIT_SECS=0 FM_STALE_WORKTREE_LOCK_AGE_SECS=1 \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "lsof-error-index-lock: teardown should refuse when lsof errors"
+  assert_grep "lsof check failed" "$case_dir/stderr" \
+    "lsof-error-index-lock: teardown did not report the lsof failure"
+  assert_grep "not provably stale" "$case_dir/stderr" \
+    "lsof-error-index-lock: teardown did not explain the refusal"
+  assert_not_contains "$(cat "$case_dir/stderr")" "removed provably-stale git lock" \
+    "lsof-error-index-lock: teardown removed a lock after lsof failed"
+  [ -e "$lock" ] || fail "lsof-error-index-lock: lock file was removed after lsof failed"
+  pass "lsof errors leave worktree index.lock in place and refuse teardown"
+}
+
+test_stale_index_lock_cleanup_rechecks_dirty_worktree() {
+  local case_dir rc lock
+  case_dir=$(make_case stale-lock-dirty-recheck)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt landed "landed work"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+  printf '%s\n' dirty > "$case_dir/wt/feature.txt"
+
+  add_lock_aware_treehouse "$case_dir"
+  add_lsof_no_holder "$case_dir"
+  add_git_status_lock_failure "$case_dir"
+
+  lock=$(git_index_lock_path "$case_dir/wt")
+  mkdir -p "$(dirname "$lock")"
+  : > "$lock"
+  touch -t 200001010000 "$lock"
+
+  set +e
+  FM_STALE_WORKTREE_LOCK_RETRY_WAIT_SECS=0 FM_STALE_WORKTREE_LOCK_AGE_SECS=1 \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "stale-lock-dirty-recheck: teardown should refuse dirty work after clearing the stale lock"
+  assert_grep "removed provably-stale git lock" "$case_dir/stderr" \
+    "stale-lock-dirty-recheck: teardown did not report clearing the stale lock"
+  assert_grep "uncommitted changes present" "$case_dir/stderr" \
+    "stale-lock-dirty-recheck: teardown did not re-run the dirty check"
+  assert_absent "$lock" "stale-lock-dirty-recheck: stale lock file should have been removed"
+  [ -f "$case_dir/state/task-x1.meta" ] || fail "stale-lock-dirty-recheck: teardown completed despite dirty work"
+  pass "stale lock cleanup rechecks and refuses dirty worktree before return"
+}
+
+test_non_linked_index_lock_path_is_checked_from_worktree() {
+  local case_dir rc lock
+  case_dir=$(make_case non-linked-index-lock)
+  git -C "$case_dir/project" worktree remove --force "$case_dir/wt"
+  git clone -q "$case_dir/origin.git" "$case_dir/wt"
+  git -C "$case_dir/wt" checkout -q -b fm/task-x1
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit "$case_dir" "shippable normal clone work"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/wt" fetch -q origin
+
+  add_lock_aware_treehouse "$case_dir"
+  add_lsof_no_holder "$case_dir"
+
+  lock=$(git_index_lock_path "$case_dir/wt")
+  mkdir -p "$(dirname "$lock")"
+  : > "$lock"
+  touch -t 200001010000 "$lock"
+
+  set +e
+  FM_STALE_WORKTREE_LOCK_RETRY_WAIT_SECS=0 FM_STALE_WORKTREE_LOCK_AGE_SECS=1 \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "non-linked-index-lock: teardown should clear a normal repo index.lock"
+  assert_grep "removed provably-stale git lock" "$case_dir/stderr" \
+    "non-linked-index-lock: teardown did not report clearing the stale lock"
+  assert_absent "$lock" "non-linked-index-lock: stale lock file should have been removed"
+  pass "normal repo index.lock is resolved from the worktree and cleared when stale"
+}
+
+test_index_lock_mtime_read_failure_refuses() {
+  local case_dir rc lock
+  case_dir=$(make_case mtime-error-index-lock)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit "$case_dir" "shippable work"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+
+  add_lock_aware_treehouse "$case_dir"
+  add_lsof_no_holder "$case_dir"
+  add_stat_error "$case_dir"
+
+  lock=$(git_index_lock_path "$case_dir/wt")
+  mkdir -p "$(dirname "$lock")"
+  : > "$lock"
+  touch -t 200001010000 "$lock"
+
+  set +e
+  FM_STALE_WORKTREE_LOCK_RETRY_WAIT_SECS=0 FM_STALE_WORKTREE_LOCK_AGE_SECS=1 \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "mtime-error-index-lock: teardown should refuse when lock mtime cannot be read"
+  assert_grep "cannot read mtime for git lock" "$case_dir/stderr" \
+    "mtime-error-index-lock: teardown did not report the mtime read failure"
+  assert_grep "not provably stale" "$case_dir/stderr" \
+    "mtime-error-index-lock: teardown did not explain the refusal"
+  assert_not_contains "$(cat "$case_dir/stderr")" "removed provably-stale git lock" \
+    "mtime-error-index-lock: teardown removed a lock after mtime read failed"
+  [ -e "$lock" ] || fail "mtime-error-index-lock: lock file was removed after mtime read failed"
+  pass "lock mtime read failures leave worktree index.lock in place and refuse teardown"
+}
+
+test_transient_index_lock_clears_after_first_attempt_and_retry_succeeds() {
+  local case_dir rc lock attempt_file
+  case_dir=$(make_case transient-index-lock-retry)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit "$case_dir" "shippable work"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+
+  add_transient_lock_treehouse "$case_dir"
+  add_lsof_no_holder "$case_dir"
+
+  lock=$(git_index_lock_path "$case_dir/wt")
+  mkdir -p "$(dirname "$lock")"
+  : > "$lock"
+  # Fresh lock: not old enough for the force-remove path; patience must win.
+  touch "$lock"
+
+  attempt_file="$case_dir/treehouse-attempts"
+  : > "$attempt_file"
+
+  set +e
+  TREEHOUSE_ATTEMPT_FILE="$attempt_file" \
+  FM_TREEHOUSE_RETURN_LOCK_RETRIES=2 \
+  FM_TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS=0 \
+  FM_STALE_WORKTREE_LOCK_AGE_SECS=3600 \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "transient-index-lock: teardown should succeed on retry after lock self-clears"
+  assert_grep "succeeded on retry" "$case_dir/stderr" \
+    "transient-index-lock: teardown did not report success on retry"
+  assert_not_contains "$(cat "$case_dir/stderr")" "removed provably-stale git lock" \
+    "transient-index-lock: teardown force-removed a lock that only needed patience"
+  [ "$(cat "$attempt_file")" = 2 ] \
+    || fail "transient-index-lock: expected exactly 2 treehouse return attempts, got $(cat "$attempt_file")"
+  assert_absent "$lock" "transient-index-lock: lock should remain cleared after success"
+  pass "transient index.lock cleared after first failed return is retried successfully without force-remove"
+}
+
+test_persistent_index_lock_exhausts_retries_and_refuses_loudly() {
+  local case_dir rc lock
+  case_dir=$(make_case persistent-index-lock)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit "$case_dir" "shippable work"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+
+  add_persistent_lock_treehouse "$case_dir"
+  # Fresh lock with a live holder: never provably stale, never force-removed.
+  add_lsof_live_holder "$case_dir"
+
+  lock=$(git_index_lock_path "$case_dir/wt")
+  mkdir -p "$(dirname "$lock")"
+  : > "$lock"
+  touch "$lock"
+
+  set +e
+  FM_TREEHOUSE_RETURN_LOCK_RETRIES=2 \
+  FM_TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS=0 \
+  FM_STALE_WORKTREE_LOCK_AGE_SECS=3600 \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "persistent-index-lock: teardown should refuse when the lock never clears"
+  assert_grep "persisted across" "$case_dir/stderr" \
+    "persistent-index-lock: teardown did not mention the exhausted retry window"
+  assert_grep "not provably stale" "$case_dir/stderr" \
+    "persistent-index-lock: teardown did not explain the refusal"
+  assert_not_contains "$(cat "$case_dir/stderr")" "removed provably-stale git lock" \
+    "persistent-index-lock: teardown removed a non-stale lock"
+  [ -e "$lock" ] || fail "persistent-index-lock: lock file was removed"
+  [ -f "$case_dir/state/task-x1.meta" ] \
+    || fail "persistent-index-lock: teardown completed despite persistent lock"
+  pass "persistent index.lock exhausts retries and refuses without force-removing the lock"
+}
+
+test_empty_retry_wait_uses_default_without_aborting() {
+  local case_dir rc lock attempt_file
+  case_dir=$(make_case empty-retry-wait)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit "$case_dir" "shippable work"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+
+  add_transient_lock_treehouse "$case_dir"
+  add_lsof_no_holder "$case_dir"
+
+  lock=$(git_index_lock_path "$case_dir/wt")
+  mkdir -p "$(dirname "$lock")"
+  : > "$lock"
+
+  attempt_file="$case_dir/treehouse-attempts"
+  : > "$attempt_file"
+
+  set +e
+  TREEHOUSE_ATTEMPT_FILE="$attempt_file" \
+  FM_TREEHOUSE_RETURN_LOCK_RETRIES=1 \
+  FM_TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS='' \
+  FM_STALE_WORKTREE_LOCK_RETRY_WAIT_SECS='' \
+  FM_STALE_WORKTREE_LOCK_AGE_SECS=3600 \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "empty-retry-wait: teardown should fall back to the default wait"
+  assert_grep "waiting 1s and retrying" "$case_dir/stderr" \
+    "empty-retry-wait: teardown did not use the default retry wait"
+  [ "$(cat "$attempt_file")" = 2 ] \
+    || fail "empty-retry-wait: expected exactly 2 treehouse return attempts, got $(cat "$attempt_file")"
+  pass "empty retry wait overrides use the default without aborting teardown"
+}
+
+test_fractional_legacy_retry_wait_refuses_without_arithmetic_error() {
+  local case_dir rc lock
+  case_dir=$(make_case fractional-legacy-retry-wait)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit "$case_dir" "shippable work"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+
+  add_persistent_lock_treehouse "$case_dir"
+  add_lsof_live_holder "$case_dir"
+
+  lock=$(git_index_lock_path "$case_dir/wt")
+  mkdir -p "$(dirname "$lock")"
+  : > "$lock"
+
+  set +e
+  FM_TREEHOUSE_RETURN_LOCK_RETRIES=1 \
+  FM_TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS='' \
+  FM_STALE_WORKTREE_LOCK_RETRY_WAIT_SECS=0.1 \
+  FM_STALE_WORKTREE_LOCK_AGE_SECS=3600 \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "fractional-legacy-retry-wait: teardown should fail only for the persistent lock"
+  assert_grep "waiting 0.1s each" "$case_dir/stderr" \
+    "fractional-legacy-retry-wait: teardown did not preserve the legacy fractional wait"
+  assert_not_contains "$(cat "$case_dir/stderr")" "syntax error" \
+    "fractional-legacy-retry-wait: teardown hit an arithmetic error"
+  pass "fractional legacy retry wait remains supported without arithmetic"
+}
+
 test_local_only_force_overrides_unpushed() {
   local case_dir rc
   case_dir=$(make_case force-override)
@@ -529,17 +1242,54 @@ test_local_only_force_overrides_unpushed() {
   pass "local-only worktree with unpushed work is torn down under --force (escape hatch)"
 }
 
+test_herdr_teardown_clears_escalation_marker() {
+  local case_dir marker
+  case_dir=$(make_case herdr-marker-cleanup)
+  write_meta "$case_dir" local-only ship
+  sed -i.bak 's/^window=.*/window=default:wG:pQ/' "$case_dir/state/task-x1.meta"
+  rm -f "$case_dir/state/task-x1.meta.bak"
+  printf '%s\n' 'backend=herdr' >> "$case_dir/state/task-x1.meta"
+  cat > "$case_dir/fakebin/herdr" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/herdr"
+  marker="$case_dir/state/.herdr-escalated-default_wG_pQ"
+  : > "$marker"
+
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "herdr-marker-cleanup: forced teardown failed"
+  [ ! -e "$marker" ] || fail "herdr-marker-cleanup: teardown left the pane's escalation marker behind"
+  pass "herdr teardown removes pane-owned escalation dedupe state"
+}
+
 test_local_only_fork_remote_allows
 test_teardown_prompts_tasks_axi_done_when_compatible
+test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present
 test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
 test_no_mistakes_origin_remote_allows
 test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed
+test_herdr_teardown_clears_escalation_marker
 test_squash_merged_branch_deleted_allows
+test_squash_merged_pr_allows_when_head_ancestor_of_pr_head
+test_no_pr_recorded_discovers_merged_pr_by_branch_allows
+test_squash_merged_pr_allows_replayed_unpushed_patch
 test_merged_pr_with_later_local_commit_refuses
 test_pr_check_does_not_refresh_stale_pr_head
+test_pr_check_records_remote_head_when_local_lags
 test_content_in_default_fallback_allows
 test_content_fallback_refreshes_stale_origin_ref
 test_dirty_worktree_refuses
 test_gh_error_and_content_absent_refuses
+test_stale_index_lock_cleared_and_teardown_succeeds
+test_live_index_lock_is_never_removed_and_teardown_refuses
+test_lsof_error_never_clears_index_lock
+test_stale_index_lock_cleanup_rechecks_dirty_worktree
+test_non_linked_index_lock_path_is_checked_from_worktree
+test_index_lock_mtime_read_failure_refuses
+test_transient_index_lock_clears_after_first_attempt_and_retry_succeeds
+test_persistent_index_lock_exhausts_retries_and_refuses_loudly
+test_empty_retry_wait_uses_default_without_aborting
+test_fractional_legacy_retry_wait_refuses_without_arithmetic_error

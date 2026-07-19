@@ -19,9 +19,14 @@
 # A tmux shim first on PATH redirects the daemon's bare `tmux` calls to the
 # private socket. The daemon points at a throwaway state dir (FM_STATE_OVERRIDE)
 # and the test pane (FM_SUPERVISOR_TARGET). Nothing touches the live fleet.
+# FM_SUPERVISOR_BACKEND=tmux is passed explicitly (not left to auto-detection):
+# this test's own process may itself be running inside herdr (HERDR_ENV=1 is
+# inherited by every process herdr manages a pane for), which would otherwise
+# leak into the spawned daemon subprocess and misdetect backend=herdr against
+# what is actually a tmux pane on the private socket.
 #
 # Assert on submitted CONTENT (logged verbatim by the supervisor pane), not pane
-# appearance — terminal line-wrapping looks like newlines but isn't.
+# appearance - terminal line-wrapping looks like newlines but isn't.
 set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -78,7 +83,7 @@ SUPERVISOR_PANE=$("$REAL_TMUX" -L "$SOCKET" display-message -p -t supervisor '#{
 LOOP_SCRIPT="$STATE_DIR/supervisor-loop.sh"
 cat > "$LOOP_SCRIPT" <<'LOOP'
 #!/usr/bin/env bash
-MARK=$'\x1f'
+MARK=$'\xE2\x81\xA3'
 LOG="$1"
 OLD_STTY=$(stty -g 2>/dev/null || true)
 [ -z "$OLD_STTY" ] || stty -echo -icanon min 1 time 0 2>/dev/null || true
@@ -147,13 +152,14 @@ SHIM
 chmod +x "$TMUX_SHIM_DIR/tmux"
 
 # Create a fake crewmate window (the watcher lists fm-* windows for stale
-# detection). The pane is an inert shell — it just needs to exist.
+# detection). The pane is an inert shell - it just needs to exist.
 "$REAL_TMUX" -L "$SOCKET" new-window -d -n fm-fake-c1 -t supervisor
 
 start_daemon() {
   PATH="$TMUX_SHIM_DIR:$PATH" \
   FM_STATE_OVERRIDE="$STATE_DIR" \
   FM_SUPERVISOR_TARGET="$SUPERVISOR_PANE" \
+  FM_SUPERVISOR_BACKEND=tmux \
   FM_ESCALATE_BATCH_SECS=0 \
   FM_HOUSEKEEPING_TICK=1 \
   FM_POLL=1 \
@@ -212,9 +218,8 @@ reset_state() {
 selfcheck_pane_input_pending() {
   local check_text="selfcheck-marker-12345"
   "$REAL_TMUX" -L "$SOCKET" send-keys -t "$SUPERVISOR_PANE" -l "$check_text"
-  sleep 0.5
-  if PATH="$TMUX_SHIM_DIR:$PATH" pane_input_pending "$SUPERVISOR_PANE"; then
-    # Detected — clean up the text and proceed.
+  if wait_for_pane_input_pending; then
+    # Detected - clean up the text and proceed.
     "$REAL_TMUX" -L "$SOCKET" send-keys -t "$SUPERVISOR_PANE" Enter
     sleep 0.3
     return 0
@@ -232,6 +237,18 @@ selfcheck_pane_input_pending() {
   fail "pane_input_pending self-check failed"
 }
 
+wait_for_pane_input_pending() {
+  local i=0
+  while [ "$i" -lt 30 ]; do
+    if PATH="$TMUX_SHIM_DIR:$PATH" pane_input_pending "$SUPERVISOR_PANE"; then
+      return 0
+    fi
+    sleep 0.1
+    i=$((i + 1))
+  done
+  return 1
+}
+
 selfcheck_pane_input_pending
 
 # --- Scenario A: human-partial-input ----------------------------------------
@@ -244,7 +261,8 @@ test_scenario_a() {
   # Type partial text into the supervisor pane with NO Enter. This simulates the
   # captain returning and starting to type before afk has been cleared.
   "$REAL_TMUX" -L "$SOCKET" send-keys -t "$SUPERVISOR_PANE" -l "human draft text"
-  sleep 0.5
+  wait_for_pane_input_pending \
+    || fail "Scenario A: human draft text did not become detectable as pending input"
 
   # Write a captain-relevant status to trigger a real escalation through the
   # real watcher child.
@@ -323,24 +341,19 @@ test_scenario_b() {
   # swallowed Enter, the retry path fires).
   sleep 8
 
-  # Assert: exactly ONE digest in the log (no duplicate, no loss).
-  local digest_count
-  digest_count=$(grep -c 'Supervisor escalate' "$LOG_FILE" || true)
-  [ "$digest_count" -eq 1 ] \
-    || fail "Scenario B: expected exactly 1 digest, got $digest_count (duplicate or lost)"
-
-  # Assert: the digest is not concatenated with itself (two markers in one line).
-  if grep -q "$(printf '\x1f').*$(printf '\x1f')" "$LOG_FILE"; then
-    fail "Scenario B: digest concatenated with itself (two sentinel markers in one line)"
-  fi
+  # Assert: exactly ONE terminal-safe marker in the log (no duplicate, no loss).
+  local marker_count
+  marker_count=$(awk -F '\t' '{ hex=$1; count += gsub(/e281a3/, "", hex) } END { print count + 0 }' "$LOG_FILE")
+  [ "$marker_count" -eq 1 ] \
+    || fail "Scenario B: expected exactly 1 U+2063 marker, got $marker_count (duplicate or lost)"
 
   # Assert: the digest line is classified as "injection" and starts with the
-  # sentinel marker (hex starts with 1f).
+  # terminal-safe sentinel marker (hex starts with e281a3).
   local digest_line digest_hex
   digest_line=$(grep 'Supervisor escalate' "$LOG_FILE" | head -1)
   digest_hex=$(printf '%s' "$digest_line" | cut -f1)
   case "$digest_hex" in
-    1f*) ;;  # correct: starts with the sentinel marker byte
+    e281a3*) ;;  # correct: starts with the terminal-safe sentinel marker
     *) fail "Scenario B: digest does not start with sentinel marker (hex: $digest_hex)" ;;
   esac
 
@@ -370,16 +383,11 @@ test_scenario_c() {
   echo "done: PR https://example.test/pr/300" > "$STATE_DIR/fake-c1.status"
   sleep 6
 
-  # Exactly one digest line in the submitted log (no duplicate, no loss).
-  local digest_count
-  digest_count=$(grep -c 'Supervisor escalate' "$LOG_FILE" || true)
-  [ "$digest_count" -eq 1 ] \
-    || fail "Scenario C: expected exactly 1 digest, got $digest_count"
-
-  # Not concatenated with itself (two sentinel markers in one line).
-  if grep -q "$(printf '\x1f').*$(printf '\x1f')" "$LOG_FILE"; then
-    fail "Scenario C: digest concatenated with itself (two sentinel markers in one line)"
-  fi
+  # Exactly one terminal-safe marker in the submitted log (no duplicate, no loss).
+  local marker_count
+  marker_count=$(awk -F '\t' '{ hex=$1; count += gsub(/e281a3/, "", hex) } END { print count + 0 }' "$LOG_FILE")
+  [ "$marker_count" -eq 1 ] \
+    || fail "Scenario C: expected exactly 1 U+2063 marker, got $marker_count"
 
   # The digest is classified as an injection and starts with the sentinel byte.
   local digest_line digest_hex
@@ -390,7 +398,7 @@ test_scenario_c() {
   esac
   digest_hex=$(printf '%s' "$digest_line" | cut -f1)
   case "$digest_hex" in
-    1f*) ;;
+    e281a3*) ;;
     *) fail "Scenario C: digest does not start with sentinel marker (hex: $digest_hex)" ;;
   esac
 

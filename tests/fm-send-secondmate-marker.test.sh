@@ -4,16 +4,16 @@
 # A secondmate is itself a firstmate, so a request relayed to it lands in its own
 # chat - which the main firstmate never reads (the only channel back is the terse
 # status file). fm-send therefore prepends a from-firstmate marker
-# (bin/fm-marker-lib.sh) when, and only when, the resolved target is a bare
-# `fm-<id>` whose meta records kind=secondmate, so the secondmate can recognize
+# (bin/fm-marker-lib.sh) when, and only when, the resolved target is a task
+# selector whose meta records kind=secondmate, so the secondmate can recognize
 # the request and route its reply via the status path. These tests pin that
 # behavior hermetically (stubbed tmux, no real agent):
-#   1. A send to a kind=secondmate target prepends the marker to the literal text.
-#   2. A send to a crewmate (kind=ship) target sends the bare text, no marker.
-#   3. An explicit session:window target (no meta) is never marked.
+#   1. Exact-id and stable-label kind=secondmate selectors prepend the marker.
+#   2. Exact-id and stable-label ordinary crewmate selectors stay unmarked.
+#   3. Explicit endpoints stay unmarked, with or without matching local meta.
 #   4. The --key path never carries the marker.
-#   5. The marker is exactly the label "[fm-from-firstmate]" + ASCII 0x1f, and the
-#      fm_message_from_firstmate detector keys on that untypable sequence.
+#   5. Direct captain text stays unmarked, and already-marked text is idempotent.
+#   6. The marker is the label plus terminal-safe U+2063 INVISIBLE SEPARATOR.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -106,6 +106,28 @@ test_secondmate_target_is_marked() {
   pass "fm-send: a kind=secondmate target gets the from-firstmate marker prepended"
 }
 
+test_exact_secondmate_task_id_is_marked() {
+  local dir fb log home rc got already_marked
+  dir="$TMP_ROOT/sm-exact"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); log="$dir/send.log"
+  home=$(setup_home sm-exact)
+  fm_write_secondmate_meta "$home/state/domain.meta" "$home" "sess:fm-domain"
+  run_send "$fb" "$home" "$log" "domain" "audit the build"; rc=$?
+  expect_code 0 "$rc" "send to an exact secondmate task id should succeed"
+  got=$(cat "$log")
+  case "$got" in
+    "$FM_FROMFIRST_MARK"audit\ the\ build) : ;;
+    *) fail "exact secondmate send: literal text should be marker+text"$'\n'"--- bytes ---"$'\n'"$(printf '%s' "$got" | od -An -c)" ;;
+  esac
+  already_marked="${FM_FROMFIRST_MARK}already routed"
+  run_send "$fb" "$home" "$log" "domain" "$already_marked"; rc=$?
+  expect_code 0 "$rc" "send of already-marked exact-id content should succeed"
+  got=$(cat "$log")
+  [ "$got" = "$already_marked" ] \
+    || fail "exact secondmate send double-prefixed already-marked content"$'\n'"--- bytes ---"$'\n'"$(printf '%s' "$got" | od -An -tx1)"
+  pass "fm-send: an exact kind=secondmate task id is marked exactly once"
+}
+
 test_crewmate_target_is_not_marked() {
   local dir fb log home rc got
   dir="$TMP_ROOT/crew"; mkdir -p "$dir"
@@ -115,11 +137,16 @@ test_crewmate_target_is_not_marked() {
     "window=sess:fm-build" "worktree=$home/wt" "project=$home/p" \
     "harness=echo" "kind=ship" "mode=no-mistakes" "yolo=off"
   run_send "$fb" "$home" "$log" "fm-build" "fix the test"; rc=$?
-  expect_code 0 "$rc" "send to a crewmate target should succeed"
+  expect_code 0 "$rc" "send to a stable-label crewmate target should succeed"
   got=$(cat "$log")
   [ "$got" = "fix the test" ] \
-    || fail "crewmate send: expected bare text, got marker or other"$'\n'"--- bytes ---"$'\n'"$(printf '%s' "$got" | od -An -c)"
-  pass "fm-send: a kind=ship (crewmate) target is sent unmarked"
+    || fail "stable-label crewmate send: expected bare text, got marker or other"$'\n'"--- bytes ---"$'\n'"$(printf '%s' "$got" | od -An -c)"
+  run_send "$fb" "$home" "$log" "build" "fix the exact test"; rc=$?
+  expect_code 0 "$rc" "send to an exact-id crewmate target should succeed"
+  got=$(cat "$log")
+  [ "$got" = "fix the exact test" ] \
+    || fail "exact-id crewmate send: expected bare text, got marker or other"$'\n'"--- bytes ---"$'\n'"$(printf '%s' "$got" | od -An -c)"
+  pass "fm-send: exact-id and stable-label kind=ship selectors are sent unmarked"
 }
 
 test_explicit_window_is_not_marked() {
@@ -127,15 +154,22 @@ test_explicit_window_is_not_marked() {
   dir="$TMP_ROOT/explicit"; mkdir -p "$dir"
   fb=$(make_stubs "$dir"); log="$dir/send.log"
   home=$(setup_home explicit)
-  # No meta lookup happens for an explicit session:window target, so even with a
-  # same-named secondmate meta present it must stay unmarked (escape hatch).
+  # An explicit endpoint is not a task selector, so even matching secondmate
+  # metadata must not make fm-send guess the caller's intent and mark it.
   fm_write_secondmate_meta "$home/state/win.meta" "$home" "other:win"
   run_send "$fb" "$home" "$log" "other:win" "ping"; rc=$?
-  expect_code 0 "$rc" "send to an explicit window should succeed"
+  expect_code 0 "$rc" "send to an explicit window with matching meta should succeed"
   got=$(cat "$log")
   [ "$got" = "ping" ] \
-    || fail "explicit session:window send: expected bare text, got marker"$'\n'"--- bytes ---"$'\n'"$(printf '%s' "$got" | od -An -c)"
-  pass "fm-send: an explicit session:window target is never marked"
+    || fail "explicit session:window send with meta: expected bare text, got marker"$'\n'"--- bytes ---"$'\n'"$(printf '%s' "$got" | od -An -c)"
+
+  home=$(setup_home explicit-no-meta)
+  run_send "$fb" "$home" "$log" "outside:window" "outside ping"; rc=$?
+  expect_code 0 "$rc" "send to an explicit window with no local meta should succeed"
+  got=$(cat "$log")
+  [ "$got" = "outside ping" ] \
+    || fail "explicit session:window send without meta: expected bare text, got marker"$'\n'"--- bytes ---"$'\n'"$(printf '%s' "$got" | od -An -c)"
+  pass "fm-send: explicit endpoints stay unmarked with or without local metadata"
 }
 
 test_key_path_is_not_marked() {
@@ -151,30 +185,57 @@ test_key_path_is_not_marked() {
   pass "fm-send: the --key path carries no marker (no literal text is typed)"
 }
 
-test_marker_is_label_plus_unit_separator() {
-  local us hex
-  us=$(printf '\037')
-  [ "$FM_FROMFIRST_MARK" = "[fm-from-firstmate]$us" ] \
-    || fail "marker is not the expected label + 0x1f sequence"$'\n'"--- bytes ---"$'\n'"$(printf '%s' "$FM_FROMFIRST_MARK" | od -An -c)"
-  # The last byte must be ASCII unit separator 0x1f, the untypable guarantee.
+test_marker_is_label_plus_invisible_separator() {
+  local separator hex
+  separator=$(printf '\342\201\243')
+  [ "$FM_FROMFIRST_MARK" = "[fm-from-firstmate]$separator" ] \
+    || fail "marker is not the expected label + U+2063 sequence"$'\n'"--- bytes ---"$'\n'"$(printf '%s' "$FM_FROMFIRST_MARK" | od -An -tx1)"
   hex=$(printf '%s' "$FM_FROMFIRST_MARK" | od -An -tx1 | tr -d ' \n')
   case "$hex" in
-    *1f) : ;;
-    *) fail "marker does not end in a 0x1f byte; bytes were: $hex" ;;
+    *e281a3) : ;;
+    *) fail "marker does not end in UTF-8 U+2063 bytes e2 81 a3; bytes were: $hex" ;;
   esac
-  # The detector keys on that exact untypable sequence.
   fm_message_from_firstmate "${FM_FROMFIRST_MARK}do the work" \
     || fail "detector should recognize a marked message"
   fm_message_from_firstmate "do the work" \
-    && fail "detector must reject an unmarked message"
-  # The bare label without the separator (the typable part) is NOT a match.
+    && fail "direct captain input must remain unmarked"
   fm_message_from_firstmate "[fm-from-firstmate]do the work" \
-    && fail "detector must reject the label without the 0x1f separator"
-  pass "fm-send: the marker is exactly '[fm-from-firstmate]' + ASCII 0x1f, detector keys on it"
+    && fail "detector must reject the label without U+2063"
+  pass "fm-send: the marker is '[fm-from-firstmate]' + terminal-safe U+2063, while direct captain text stays unmarked"
+}
+
+test_marker_transformation_is_idempotent() {
+  local once twice
+  fm_message_mark_from_firstmate "do the work" once
+  fm_message_mark_from_firstmate "$once" twice
+  [ "$once" = "$twice" ] \
+    || fail "already-marked content was double-prefixed"$'\n'"--- once ---"$'\n'"$(printf '%s' "$once" | od -An -tx1)"$'\n'"--- twice ---"$'\n'"$(printf '%s' "$twice" | od -An -tx1)"
+  [ "$once" = "${FM_FROMFIRST_MARK}do the work" ] \
+    || fail "marker transformation did not prefix bare content exactly once"
+  pass "fm-marker: from-firstmate transformation is idempotent"
+}
+
+test_marked_send_preserves_trailing_newlines() {
+  local dir fb log home rc payload expected_hex got_hex
+  dir="$TMP_ROOT/sm-trailing-newlines"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); log="$dir/send.log"
+  home=$(setup_home sm-trailing-newlines)
+  fm_write_secondmate_meta "$home/state/domain.meta" "$home" "sess:fm-domain"
+  payload=$'audit the build\n\n'
+  run_send "$fb" "$home" "$log" "domain" "$payload"; rc=$?
+  expect_code 0 "$rc" "marked send with trailing newlines should succeed"
+  expected_hex=$(printf '%s%s' "$FM_FROMFIRST_MARK" "$payload" | od -An -tx1 | tr -d ' \n')
+  got_hex=$(od -An -tx1 "$log" | tr -d ' \n')
+  [ "$got_hex" = "$expected_hex" ] \
+    || fail "marked send changed trailing newline bytes: expected $expected_hex, got $got_hex"
+  pass "fm-send: marked secondmate payload preserves trailing newline bytes"
 }
 
 test_secondmate_target_is_marked
+test_exact_secondmate_task_id_is_marked
 test_crewmate_target_is_not_marked
 test_explicit_window_is_not_marked
 test_key_path_is_not_marked
-test_marker_is_label_plus_unit_separator
+test_marker_is_label_plus_invisible_separator
+test_marker_transformation_is_idempotent
+test_marked_send_preserves_trailing_newlines

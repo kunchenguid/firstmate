@@ -4,6 +4,10 @@
 # Pooled project clones do not keep their local default branch current, so this
 # helper compares remote-backed projects against origin/<default> after fetching
 # the default branch, and local-only projects against the local default branch.
+# When state/<id>.meta records pr= for an open PR, the compare side is the PR
+# head (recorded pr_head= when reachable, else refs/pull/<n>/head) so review
+# stays current after no-mistakes fix rounds push to the PR; if the PR head
+# cannot be resolved, the script falls back to the local branch with a warning.
 # Usage: fm-review-diff.sh <task-id> [--stat]
 #   --stat prints only the stat summary; default prints stat summary plus full diff.
 set -eu
@@ -68,6 +72,49 @@ if ! git -C "$WT" rev-parse --verify --quiet "refs/heads/$BRANCH" >/dev/null; th
   git -C "$WT" rev-parse --verify --quiet "refs/heads/$BRANCH" >/dev/null || { echo "error: branch $BRANCH does not exist in $WT" >&2; exit 1; }
 fi
 
+pr_number_from_target() {
+  local target=$1 n
+  case "$target" in
+    '' ) return 1 ;;
+    *"/pull/"*)
+      n=${target##*/pull/}
+      n=${n%%[!0-9]*}
+      ;;
+    [0-9]*)
+      n=${target%%[!0-9]*}
+      ;;
+    *) return 1 ;;
+  esac
+  [ -n "$n" ] || return 1
+  printf '%s' "$n"
+}
+
+resolve_pr_head() {
+  local pr_url=$1 recorded_head=$2 n resolved
+  if [ -n "$recorded_head" ] \
+    && git -C "$WT" cat-file -e "$recorded_head^{commit}" 2>/dev/null; then
+    printf '%s' "$recorded_head"
+    return 0
+  fi
+  n=$(pr_number_from_target "$pr_url") || return 1
+  git -C "$WT" remote get-url origin >/dev/null 2>&1 || return 1
+  git -C "$WT" fetch --quiet origin "refs/pull/$n/head" >/dev/null 2>&1 || return 1
+  resolved=$(git -C "$WT" rev-parse --verify 'FETCH_HEAD^{commit}' 2>/dev/null) || return 1
+  [ -n "$resolved" ] || return 1
+  printf '%s' "$resolved"
+}
+
+PR_URL=$(grep '^pr=' "$META" | tail -1 | cut -d= -f2- || true)
+PR_HEAD_RECORDED=$(grep '^pr_head=' "$META" | tail -1 | cut -d= -f2- || true)
+COMPARE_REF=$BRANCH
+if [ -n "$PR_URL" ]; then
+  if PR_HEAD=$(resolve_pr_head "$PR_URL" "$PR_HEAD_RECORDED"); then
+    COMPARE_REF=$PR_HEAD
+  else
+    echo "warning: PR head unavailable; diff may lag the open PR (using local branch $BRANCH)" >&2
+  fi
+fi
+
 if git -C "$PROJ" remote get-url origin >/dev/null 2>&1; then
   # Update the remote-tracking ref itself; a bare single-branch fetch can leave
   # origin/<default> stale on some Git versions and only refresh FETCH_HEAD.
@@ -78,16 +125,16 @@ else
 fi
 
 git -C "$WT" rev-parse --verify --quiet "$BASE^{commit}" >/dev/null || { echo "error: base $BASE does not exist in $WT" >&2; exit 1; }
-git -C "$WT" rev-parse --verify --quiet "$BRANCH^{commit}" >/dev/null || { echo "error: branch $BRANCH does not resolve in $WT" >&2; exit 1; }
+git -C "$WT" rev-parse --verify --quiet "$COMPARE_REF^{commit}" >/dev/null || { echo "error: compare ref $COMPARE_REF does not resolve in $WT" >&2; exit 1; }
 
 echo "diff base: $BASE"
-if git -C "$WT" diff --quiet "$BASE...$BRANCH" --; then
+if git -C "$WT" diff --quiet "$BASE...$COMPARE_REF" --; then
   echo "no changes vs $BASE"
   exit 0
 fi
 
-git -C "$WT" diff --stat "$BASE...$BRANCH" --
+git -C "$WT" diff --stat "$BASE...$COMPARE_REF" --
 if ! "$STAT_ONLY"; then
   echo
-  git -C "$WT" diff "$BASE...$BRANCH" --
+  git -C "$WT" diff "$BASE...$COMPARE_REF" --
 fi
