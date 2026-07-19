@@ -76,7 +76,7 @@ Runtime private artifacts (all gitignored, typically mode 0600/0700):
 - Command replies use `--reply` and always send (so phone acks work at the desk).
 - Text that looks like secrets, tokens, or credentials is refused (desk-only).
 - Successful sends that contain full `https://github.com/.../pull/N` URLs record those URLs for Stage-2 merge authority.
-- A confirmed send whose primary authority record fails preserves equivalent private recovery evidence, audits the condition, and returns a partial-success error.
+- A confirmed send whose primary authority record fails attempts private recovery, audits any persistence warning, and returns non-retryable exit 4.
 - Dry-run previews do not grant merge authority because Telegram received no message.
 - Telegram's 4096-character limit is enforced with truncation.
 
