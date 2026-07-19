@@ -33,8 +33,7 @@ NUMBER=$FM_PR_NUMBER
 
 # Task-derived paths are constructed only after the canonical ID validation.
 META="$STATE/$ID.meta"
-fm_meta_lock_acquire "$META"
-META_LOCKED=1
+META_LOCKED=0
 META_TMP=
 pr_check_cleanup() {
   fm_pr_poll_cleanup
@@ -42,7 +41,6 @@ pr_check_cleanup() {
   [ "${META_LOCKED:-0}" != 1 ] || fm_meta_lock_release "$META"
 }
 trap pr_check_cleanup EXIT
-trap 'exit 1' HUP INT TERM
 if [ ! -f "$META" ] || [ -L "$META" ] || [ "$(fm_pr_file_link_count "$META")" != 1 ]; then
   echo "error: task metadata is unavailable" >&2
   exit 1
@@ -66,6 +64,13 @@ fi
 fm_pr_poll_prepare "$STATE" "$ID" "$URL" "$OWNER" "$REPO" "$NUMBER" "$SCRIPT_DIR/fm-pr-poll.sh" \
   || { echo "error: could not prepare PR poll" >&2; exit 1; }
 
+fm_meta_lock_acquire "$META"
+META_LOCKED=1
+trap 'exit 1' HUP INT TERM
+if [ ! -f "$META" ] || [ -L "$META" ] || [ "$(fm_pr_file_link_count "$META")" != 1 ]; then
+  echo "error: task metadata is unavailable" >&2
+  exit 1
+fi
 META_DEVICE=$(fm_pr_file_device "$META") || exit 1
 STATE_DEVICE=$(fm_pr_file_device "$STATE") || exit 1
 [ "$META_DEVICE" = "$STATE_DEVICE" ] || { echo "error: task metadata is unavailable" >&2; exit 1; }

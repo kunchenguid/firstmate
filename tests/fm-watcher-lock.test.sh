@@ -909,8 +909,38 @@ test_pid_identity_is_locale_invariant() {
   pass "fm_pid_identity is locale-invariant across LC_ALL/LC_TIME"
 }
 
+test_metadata_lock_rejects_noncanonical_owner_symlinks() {
+  local dir state meta external lock rc
+  dir=$(make_case metadata-owner-symlink)
+  state="$dir/state"
+  meta="$state/task.meta"
+  external="$dir/external-owner"
+  lock="$meta.lock"
+  mkdir "$external"
+  printf '%s\n' sentinel > "$external/pid"
+  printf '%s\n' preserve > "$external/fm-home"
+  ln -s "$external" "$lock"
+  rc=0
+  FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_meta_lock_acquire "$2"' _ "$LIB" "$meta" || rc=$?
+  [ "$rc" -ne 0 ] || fail "metadata lock accepted an external owner symlink"
+  [ "$(cat "$external/pid")" = sentinel ] || fail "metadata lock altered the external pid file"
+  [ "$(cat "$external/fm-home")" = preserve ] || fail "metadata lock altered the external owner directory"
+
+  rm -f "$lock"
+  mkdir "$lock"
+  printf '%s\n' "$(dead_pid)" > "$lock/pid"
+  ln -s "$external" "$lock.steal"
+  rc=0
+  FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_meta_lock_acquire "$2"' _ "$LIB" "$meta" || rc=$?
+  [ "$rc" -ne 0 ] || fail "metadata lock accepted an external steal-owner symlink"
+  [ "$(cat "$external/pid")" = sentinel ] || fail "steal lock altered the external pid file"
+  [ "$(cat "$external/fm-home")" = preserve ] || fail "steal lock altered the external owner directory"
+  pass "metadata locks reject noncanonical primary and steal owner symlinks"
+}
+
 test_singleton_start
 test_pid_identity_is_locale_invariant
+test_metadata_lock_rejects_noncanonical_owner_symlinks
 test_stale_watch_lock_reclaimed
 test_live_stale_watch_lock_is_actionable
 test_guard_warnings

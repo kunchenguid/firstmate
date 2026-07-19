@@ -55,6 +55,12 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 
+DECISION_META=
+DECISION_META_LOCKED=0
+decision_meta_lock_cleanup() {
+  [ "$DECISION_META_LOCKED" != 1 ] || fm_meta_lock_release "$DECISION_META"
+}
+
 usage() {
   awk '
     NR == 1 { next }
@@ -283,7 +289,6 @@ command_complete() {
   validate_slug origin-id "$origin"
   shift
   meta="$STATE/$origin.meta"
-  [ -f "$meta" ] && has_meta=1
   require_tasks_axi
   origin_exists_here "$origin" || fail "origin $origin is not owned by the active home $FM_HOME"
   if [ "$#" -eq 1 ] && [ "$1" = --none ]; then
@@ -296,10 +301,21 @@ command_complete() {
       shift
     done
   fi
-  if [ "$has_meta" = 1 ]; then
+  DECISION_META=$meta
+  fm_meta_lock_acquire "$meta" || fail "could not acquire metadata lock for $origin"
+  DECISION_META_LOCKED=1
+  trap decision_meta_lock_cleanup EXIT
+  if [ -f "$meta" ] && [ ! -L "$meta" ]; then
+    has_meta=1
     previous=$(meta_value "$meta" decision_keys)
   fi
   keys=$(sorted_key_union "$previous" "$supplied")
+  if [ "$has_meta" != 1 ]; then
+    fm_meta_lock_release "$meta"
+    DECISION_META_LOCKED=0
+    DECISION_META=
+    trap - EXIT
+  fi
   if [ -n "$keys" ]; then
     while IFS= read -r key; do
       [ -n "$key" ] || continue
@@ -321,11 +337,14 @@ $open
 EOF
 
   if [ "$has_meta" = 1 ]; then
+    [ -f "$meta" ] && [ ! -L "$meta" ] || fail "task metadata disappeared for $origin"
     if [ "$(meta_value "$meta" decisions_reviewed)" != 1 ] || [ "$previous" != "$keys" ]; then
-      fm_meta_lock_acquire "$meta"
       printf 'decisions_reviewed=1\ndecision_keys=%s\n' "$keys" >> "$meta"
-      fm_meta_lock_release "$meta"
     fi
+    fm_meta_lock_release "$meta"
+    DECISION_META_LOCKED=0
+    DECISION_META=
+    trap - EXIT
 
     # Transfer any still-open status decision to its durable backlog owner so the
     # live status fold does not duplicate the same Captain's Call item.
