@@ -19,6 +19,7 @@
 #   fmt_parse_command <text>     - closed grammar -> verb + args
 #   fmt_fresh_enough <epoch>     - approval freshness window
 #   fmt_notified_pr_record / fmt_notified_pr_seen - PR URL merge authority
+#   fmt_notified_pr_recovery_record - fallback evidence after a confirmed send
 #   fmt_secretish <text>         - refuse outbound that looks like secrets
 #   fmt_afk_active               - state/.afk present
 # Reuses the private-artifact publisher from fm-x-lib.sh when available.
@@ -491,15 +492,40 @@ fmt_notified_pr_record() {
   return 0
 }
 
+fmt_notified_pr_recovery_record() {
+  local url=$1 ordinal=$2
+  local state dir base epoch
+  state=${FM_STATE_OVERRIDE:-$FM_HOME/state}
+  fmt_github_pr_parts "$url" >/dev/null || return 1
+  [ -n "${FMT_CHAT_ID:-}" ] || return 1
+  case "$ordinal" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  epoch=$(date +%s 2>/dev/null || echo 0)
+  dir="$state/telegram-notified-pr-recovery"
+  base="authority-$epoch-$$-$ordinal.tsv"
+  printf '%s\t%s\t%s\n' "$epoch" "$FMT_CHAT_ID" "$url" \
+    | fmx_private_artifact_publish_stdin "$dir" "$base" 600
+}
+
 fmt_notified_pr_seen() {
   local url=$1
-  local state file ts chat recorded
+  local state file recovery f base ts chat recorded
   state=${FM_STATE_OVERRIDE:-$FM_HOME/state}
   file="$state/telegram-notified-prs.log"
-  [ -f "$file" ] && [ ! -L "$file" ] || return 1
-  while IFS=$'\t' read -r ts chat recorded || [ -n "$ts" ]; do
+  if [ -f "$file" ] && [ ! -L "$file" ]; then
+    while IFS=$'\t' read -r ts chat recorded || [ -n "$ts" ]; do
+      [ "$chat" = "${FMT_CHAT_ID:-}" ] && [ "$recorded" = "$url" ] && return 0
+    done < "$file"
+  fi
+  recovery="$state/telegram-notified-pr-recovery"
+  for f in "$recovery"/*.tsv; do
+    [ -f "$f" ] || continue
+    base=${f##*/}
+    fmx_private_artifact_file_valid "$recovery" "$base" 600 || continue
+    IFS=$'\t' read -r ts chat recorded < "$f" || continue
     [ "$chat" = "${FMT_CHAT_ID:-}" ] && [ "$recorded" = "$url" ] && return 0
-  done < "$file"
+  done
   return 1
 }
 
@@ -549,6 +575,7 @@ fmt_status_summary() {
   n=0
   for meta in "$state"/*.meta; do
     [ -f "$meta" ] || continue
+    [ "$(fmx_meta_get "$meta" kind)" = secondmate ] && continue
     n=$((n + 1))
   done
   if [ "$n" -eq 0 ]; then

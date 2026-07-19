@@ -873,6 +873,7 @@ test_opencode_primary_watch_plugin_static_wiring() {
   assert_contains "$text" "rev-parse\", \"--git-dir" "OpenCode plugin does not check linked worktree scope"
   assert_contains "$text" "sessionOwnsLock" "OpenCode plugin does not gate arm attempts on the session lock"
   assert_contains "$text" 'fm-watch-arm.sh" --restart' "OpenCode plugin does not restart into its own watcher child"
+  assert_contains "$text" "telegram-mode.env" "OpenCode plugin does not recognize Telegram supervision demand"
   assert_contains "$text" 'setArmStatus("external")' "OpenCode plugin still treats an external healthy watcher as armed"
   pass "OpenCode primary watcher plugin has the verified TUI wake wiring"
 }
@@ -955,7 +956,7 @@ test_opencode_primary_watch_plugin_sources_effective_config() {
   mkdir -p "$repo/bin" "$home/state" "$home/config"
   git init -q "$repo"
   : > "$repo/AGENTS.md"
-  printf 'export FM_POLL=7\n' > "$home/config/x-mode.env"
+  printf 'export FM_POLL=7\n' > "$home/config/telegram-mode.env"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
 printf 'poll=%s\n' "${FM_POLL:-missing}" >> "${FM_ARM_LOG:?}"

@@ -14,6 +14,7 @@
 #   1 usage / missing text
 #   2 mode off / kill switch / secretish refuse
 #   3 transport / API failure
+#   4 sent, but primary merge-authority storage needed durable recovery
 #
 # AFK-only outbound (default): routine notifications send only while state/.afk
 # exists, unless --reply/--force or FM_TELEGRAM_ALWAYS_NOTIFY is set. Command
@@ -181,14 +182,30 @@ case "$code" in
       echo "error: telegram API returned ok=false (HTTP $code)" >&2
       exit 3
     fi
+    authority_recovered=0
+    authority_ordinal=0
     while IFS= read -r pr; do
       [ -n "$pr" ] || continue
-      fmt_notified_pr_record "$pr" || true
+      authority_ordinal=$((authority_ordinal + 1))
+      if ! fmt_notified_pr_record "$pr"; then
+        if fmt_notified_pr_recovery_record "$pr" "$authority_ordinal"; then
+          authority_recovered=1
+          fmt_audit_append outbound authority-recovered "url=$pr"
+        else
+          fmt_audit_append outbound failed "authority-record-failed url=$pr"
+          echo "error: Telegram received the message, but merge authority could not be recorded for $pr" >&2
+          exit 3
+        fi
+      fi
     done <<EOF
 $(fmt_extract_pr_urls "$TEXT")
 EOF
     first=$(printf '%s\n' "$TEXT" | head -n1)
     fmt_audit_append outbound sent "$first"
+    if [ "$authority_recovered" -eq 1 ]; then
+      echo "warning: Telegram received the message; merge authority was preserved in recovery storage" >&2
+      exit 4
+    fi
     exit 0
     ;;
   *)
