@@ -286,6 +286,35 @@ SH
   pass "quota-axi failure and unsupported schemas retain the first-profile fail-safe"
 }
 
+test_live_quota_uses_account_free_json_and_private_diagnostics() {
+  local fakebin args out diagnostics
+  fakebin=$(fm_fakebin "$TMP_ROOT/live-quota")
+  args="$TMP_ROOT/live-quota.args"
+  cat > "$fakebin/quota-axi" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" > '$args'
+cat <<'JSON'
+{"schemaVersion":2,"account":{"email":"private@example.com"},"providers":[
+  {"provider":"claude","state":{"status":"fresh"},"windows":[
+    {"id":"five_hour","kind":"session","percentUsed":10,"percentRemaining":90,"resetsAt":"2026-07-19T01:00:00Z"}
+  ]}
+]}
+JSON
+SH
+  chmod +x "$fakebin/quota-axi"
+
+  out=$(PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-dispatch-select.sh" --select quota-balanced \
+    --now-epoch "$NOW" "$profiles" 2> "$TMP_ROOT/live-quota.err")
+  diagnostics=$(cat "$TMP_ROOT/live-quota.err")
+  [ "$out" = '{"harness":"claude","model":"claude-sonnet-5","effort":"high"}' ] \
+    || fail "live quota JSON should select from schema-v2 windows, got: $out"
+  [ "$(cat "$args")" = "--json" ] \
+    || fail "live quota command should request only normal account-free JSON"
+  assert_not_contains "$diagnostics" "private@example.com" \
+    "quota diagnostics must not expose account identity"
+  pass "live quota requests normal JSON and keeps account data out of diagnostics"
+}
+
 test_backward_compatible_non_selector_paths() {
   local fakebin marker out single array_rule
   fakebin=$(fm_fakebin "$TMP_ROOT/no-call")
@@ -318,6 +347,7 @@ test_stale_candidate_keeps_existing_clear_margin_policy
 test_rollover_discards_incompatible_recent_sample
 test_missing_duration_and_clock_skew_are_contained
 test_quota_failures_and_old_schema_fall_back_to_first
+test_live_quota_uses_account_free_json_and_private_diagnostics
 test_backward_compatible_non_selector_paths
 
 echo "# all fm-dispatch-select tests passed"

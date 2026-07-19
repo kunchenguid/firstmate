@@ -15,6 +15,17 @@ The seatbelt rejects those command shapes before execution.
 This policy is not a post-arm liveness guarantee.
 `bin/fm-guard.sh`, `bin/fm-turnend-guard.sh`, the watcher lock, and the watcher beacon still prove whether supervision is healthy after an allowed call.
 
+## Claude continuity gate
+
+Claude also registers `bin/fm-continuity-pretool-check.sh` for Bash PreToolUse events.
+This is a separate, tightly bounded recovery gate rather than another watcher-shape policy.
+It runs only in a primary home, and it denies only an executed `bin/fm-*.sh` command other than `bin/fm-wake-drain.sh` or `bin/fm-watch-arm.sh` when task metadata is in flight and no identity-matched live watcher holds that home's lock.
+Ordinary shell commands, fleet-script names used as data, all commands in an idle fleet, child worktrees, wake drain, and watcher arm remain allowed.
+The exact denial tells Claude to run `bin/fm-wake-drain.sh` and then re-arm through a tracked Claude background task before retrying the blocked fleet command.
+`bin/fm-continuity-command-policy.mjs` reuses this document's shell lexer and command-position analysis but owns the recovery-versus-other-fleet classification.
+Malformed transport or opaque dynamic syntax fails open so this narrow gate cannot become a blanket Bash block.
+The existing `bin/fm-turnend-guard.sh` Stop integration is unchanged and remains the final backstop.
+
 The classifier never executes, sources, evaluates, or expands any part of the submitted command.
 It tokenizes the bytes and classifies lexical execution positions only.
 
