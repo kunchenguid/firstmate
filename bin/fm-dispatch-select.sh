@@ -13,13 +13,13 @@
 # scoring contract:
 #   - It consumes quota-axi schema version 2 through `quota-axi --json`
 #     (or the --quota-json fixture).
-#   - General windows have provider kind `session` or `weekly`; model-scoped
-#     windows are excluded regardless of label or id. An explicit positive
-#     windowSeconds is authoritative. Actual 5-hour and 7-day durations define
-#     session and weekly capacity scope even when provider kind is misleading.
-#     Claude's known five_hour and seven_day windows fall back to those canonical
-#     durations because Claude omits the field. No Codex duration is inferred
-#     from its misleading five_hour id.
+#   - General windows have provider kind `session` or `weekly`; model-scoped and
+#     code-review-scoped windows are excluded regardless of kind or duration. An
+#     explicit positive windowSeconds is authoritative. Actual 5-hour and 7-day
+#     durations define session and weekly capacity scope even when provider kind
+#     is misleading. Claude's known five_hour and seven_day windows fall back to
+#     those canonical durations because Claude omits the field. No Codex duration
+#     is inferred from its misleading five_hour id.
 #   - A window score is percentage-capacity headroom through its reset:
 #       remaining + (100 * configured extra resets) - reserve
 #         - (estimated burn per second * seconds until reset)
@@ -300,6 +300,10 @@ selection=$(printf '%s\n' "$quota_json" | jq -ec \
     elif $duration == 604800 then "weekly"
     else $window.kind
     end;
+  def general_window($window):
+    (($window.kind == "session" or $window.kind == "weekly")
+      and (((($window.id? // "") | startswith("model:")) or
+        (($window.id? // "") | startswith("code_review_"))) | not));
   def settings: ($config.quotaBalanced? // {});
   def run_settings: (settings.runRate? // {});
   def reserve_for($provider):
@@ -377,8 +381,7 @@ selection=$(printf '%s\n' "$quota_json" | jq -ec \
     | if $provider == null then empty
       else
         ([$provider.windows[]?
-          | select((.kind == "session" or .kind == "weekly")
-            and (((.id? // "") | startswith("model:")) | not))
+          | select(general_window(.))
           | window_metric($provider_name; .)]) as $windows
         | if ($windows | length) == 0 then empty
           else ($windows | min_by(.score)) as $bottleneck

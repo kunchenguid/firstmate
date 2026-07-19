@@ -127,6 +127,35 @@ JSON
   pass "Codex's misleading five_hour id cannot override its actual seven-day duration"
 }
 
+test_codex_code_review_windows_do_not_constrain_general_quota() {
+  local quota out err diagnostics
+  quota="$TMP_ROOT/codex-code-review.json"
+  err="$TMP_ROOT/codex-code-review.err"
+  cat > "$quota" <<'JSON'
+{
+  "schemaVersion": 2,
+  "providers": [
+    {"provider": "claude", "state": {"status": "fresh"}, "windows": [
+      {"id": "five_hour", "kind": "session", "percentUsed": 50, "percentRemaining": 50, "resetsAt": "2026-07-19T01:00:00Z"}
+    ]},
+    {"provider": "codex", "state": {"status": "fresh"}, "windows": [
+      {"id": "five_hour", "kind": "session", "windowSeconds": 604800, "percentUsed": 10, "percentRemaining": 90, "resetsAt": "2026-07-24T00:00:00Z"},
+      {"id": "code_review_five_hour", "kind": "session", "windowSeconds": 18000, "percentUsed": 99, "percentRemaining": 1, "resetsAt": "2026-07-19T01:00:00Z"},
+      {"id": "code_review_weekly", "kind": "weekly", "windowSeconds": 604800, "percentUsed": 99, "percentRemaining": 1, "resetsAt": "2026-07-24T00:00:00Z"}
+    ]}
+  ]
+}
+JSON
+
+  out=$(run_fixture "$quota" "$err")
+  diagnostics=$(cat "$err")
+  [ "$out" = '{"harness":"codex","model":"gpt-5.5","effort":"high"}' ] \
+    || fail "code-review quota should not constrain Codex general quota, got: $out"
+  assert_not_contains "$diagnostics" "code_review" \
+    "code-review windows must not enter general quota diagnostics"
+  pass "Codex code-review windows do not constrain general quota selection"
+}
+
 test_configured_codex_extra_resets_add_capacity() {
   local quota config out err diagnostics
   quota="$TMP_ROOT/extra-resets.json"
@@ -437,6 +466,7 @@ SH
 test_low_remaining_slow_burn_beats_high_remaining_burst
 test_claude_session_and_weekly_bottlenecks
 test_codex_mislabeled_window_uses_actual_duration
+test_codex_code_review_windows_do_not_constrain_general_quota
 test_configured_codex_extra_resets_add_capacity
 test_stale_candidate_keeps_existing_clear_margin_policy
 test_rollover_discards_incompatible_recent_sample
