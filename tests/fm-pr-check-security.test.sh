@@ -281,6 +281,86 @@ test_pr_lookup_does_not_hold_task_metadata_lock() {
   pass "fm-pr-check keeps external PR lookup outside the metadata lock"
 }
 
+test_pr_lookup_rejects_recreated_task_metadata() {
+  local dir ready release check_pid i rc
+  dir=$(make_case pr-stale-task)
+  write_task_meta "$dir"
+  ready="$dir/gh-ready"
+  release="$dir/gh-release"
+  FM_TEST_GH_GATE_READY="$ready" FM_TEST_GH_GATE_RELEASE="$release" \
+    run_check_entry "$dir" task-a https://github.com/o/r/pull/10 \
+    > "$dir/check.out" 2> "$dir/check.err" &
+  check_pid=$!
+  i=0
+  while [ ! -e "$ready" ] && [ "$i" -lt 200 ]; do sleep 0.01; i=$((i + 1)); done
+  [ -e "$ready" ] || fail "stale-task PR lookup gate did not start"
+  fm_write_meta "$dir/home/state/task-a.meta.new" \
+    'window=fm-task-a-recreated' \
+    "worktree=$dir/recreated-wt" \
+    "project=$dir/recreated-project" \
+    'kind=ship' \
+    'mode=no-mistakes' \
+    'sentinel=recreated'
+  mv -f "$dir/home/state/task-a.meta.new" "$dir/home/state/task-a.meta"
+  touch "$release"
+  rc=0
+  wait "$check_pid" || rc=$?
+  [ "$rc" -ne 0 ] || fail "PR check accepted recreated task metadata"
+  assert_grep 'sentinel=recreated' "$dir/home/state/task-a.meta" \
+    "PR check replaced the recreated task metadata"
+  assert_no_grep 'pr=https://github.com/o/r/pull/10' "$dir/home/state/task-a.meta" \
+    "PR check wrote the stale PR into recreated task metadata"
+  assert_absent "$dir/home/state/task-a.check.sh" "stale-task PR check published a poll"
+  assert_grep 'task metadata identity changed' "$dir/check.err" \
+    "stale-task PR check did not report the identity change"
+  pass "fm-pr-check rejects task recreation during external lookup"
+}
+
+test_pr_poll_publication_stays_inside_metadata_lock() {
+  local dir fakebin ready release acquired check_pid lock_pid i rc
+  dir=$(make_case pr-publish-lock)
+  fakebin="$dir/fakebin"
+  write_task_meta "$dir"
+  ready="$dir/publish-ready"
+  release="$dir/publish-release"
+  acquired="$dir/meta-lock-acquired"
+  cat > "$fakebin/mv" <<SH
+#!/usr/bin/env bash
+dest=
+for arg in "\$@"; do dest=\$arg; done
+case "\$dest" in
+  */task-a.check.sh)
+    touch '$ready'
+    while [ ! -e '$release' ]; do sleep 0.01; done
+    ;;
+esac
+exec '$REAL_MV' "\$@"
+SH
+  chmod +x "$fakebin/mv"
+  run_check_entry "$dir" task-a https://github.com/o/r/pull/10 \
+    > "$dir/check.out" 2> "$dir/check.err" &
+  check_pid=$!
+  i=0
+  while [ ! -e "$ready" ] && [ "$i" -lt 300 ]; do sleep 0.01; i=$((i + 1)); done
+  [ -e "$ready" ] || fail "poll publication gate did not start"
+  FM_STATE_OVERRIDE="$dir/home/state" bash -c '
+    . "$1"
+    fm_meta_lock_acquire "$2" || exit 1
+    touch "$3"
+    fm_meta_lock_release "$2"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$dir/home/state/task-a.meta" "$acquired" &
+  lock_pid=$!
+  sleep 0.1
+  assert_absent "$acquired" "poll publication released the metadata lock early"
+  touch "$release"
+  rc=0
+  wait "$check_pid" || rc=$?
+  [ "$rc" -eq 0 ] || fail "gated PR publication failed: $(cat "$dir/check.err")"
+  wait "$lock_pid" || fail "post-publication metadata lock probe failed"
+  assert_present "$acquired" "metadata lock remained unavailable after publication"
+  pass "fm-pr-check publishes prepared polls inside the metadata lock"
+}
+
 # shellcheck disable=SC2016 # Literal rejected URL bytes are parser test data.
 INVALID_URLS=(
   'https://github.com/o/r/pull/1/'
@@ -2725,6 +2805,8 @@ test_parser_matrix
 test_invalid_entrypoints_have_zero_side_effects
 test_valid_recording_and_merge_derivation
 test_pr_lookup_does_not_hold_task_metadata_lock
+test_pr_lookup_rejects_recreated_task_metadata
+test_pr_poll_publication_stays_inside_metadata_lock
 test_rejected_metacharacter_bytes_are_inert
 test_static_poll_contract
 test_atomic_interruption_leaves_no_partial_artifact

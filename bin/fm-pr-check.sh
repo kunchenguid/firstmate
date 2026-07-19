@@ -35,6 +35,14 @@ NUMBER=$FM_PR_NUMBER
 META="$STATE/$ID.meta"
 META_LOCKED=0
 META_TMP=
+pr_check_task_identity() {
+  local meta=$1 key line
+  for key in window worktree project harness kind mode tasktmp backend terminal home \
+    herdr_session zellij_session orca_worktree_id cmux_workspace_id; do
+    line=$(grep "^$key=" "$meta" 2>/dev/null | tail -1 || true)
+    printf '%s\n' "$line"
+  done
+}
 pr_check_cleanup() {
   fm_pr_poll_cleanup
   [ -z "$META_TMP" ] || rm -f -- "$META_TMP"
@@ -45,6 +53,7 @@ if [ ! -f "$META" ] || [ -L "$META" ] || [ "$(fm_pr_file_link_count "$META")" !=
   echo "error: task metadata is unavailable" >&2
   exit 1
 fi
+TASK_IDENTITY=$(pr_check_task_identity "$META")
 
 # Neutralize any pre-fix poll before recording or arming this task. The
 # migration never executes legacy artifacts and holds watcher exclusion while
@@ -71,6 +80,8 @@ if [ ! -f "$META" ] || [ -L "$META" ] || [ "$(fm_pr_file_link_count "$META")" !=
   echo "error: task metadata is unavailable" >&2
   exit 1
 fi
+[ "$(pr_check_task_identity "$META")" = "$TASK_IDENTITY" ] \
+  || { echo "error: task metadata identity changed during PR lookup" >&2; exit 1; }
 META_DEVICE=$(fm_pr_file_device "$META") || exit 1
 STATE_DEVICE=$(fm_pr_file_device "$STATE") || exit 1
 [ "$META_DEVICE" = "$STATE_DEVICE" ] || { echo "error: task metadata is unavailable" >&2; exit 1; }
@@ -95,11 +106,10 @@ fm_pr_private_file_valid "$META" 600 "$STATE_DEVICE" || exit 1
 fm_pr_metadata_identity_parse "$META" || exit 1
 [ "$FM_PR_META_URL" = "$URL" ] && [ "$FM_PR_META_OWNER" = "$OWNER" ] \
   && [ "$FM_PR_META_REPO" = "$REPO" ] && [ "$FM_PR_META_NUMBER" = "$NUMBER" ] || exit 1
-fm_meta_lock_release "$META"
-META_LOCKED=0
-
 fm_pr_poll_publish_prepared || {
   echo "error: could not publish PR poll" >&2
   exit 1
 }
+fm_meta_lock_release "$META"
+META_LOCKED=0
 printf 'armed: state/%s.check.sh\n' "$ID"
