@@ -315,7 +315,8 @@ Whenever work is under way, keep exactly one live supervision cycle using the em
 X mode may require that same live cycle with no fleet work.
 Do not substitute another harness's wait shape, use shell `&`, or create a second cycle when a healthy one already exists.
 After every actionable wake, resume the emitted protocol as the final action before ending the turn.
-No turn ends blind while work is under way, including turns described as holding or waiting.
+Do not intentionally end a turn without the emitted supervision cycle while work is under way, including turns described as holding or waiting.
+Missing or stale supervision at the turn-end hook is advisory and must never block task completion or force a follow-up turn.
 
 At the start of every wake-handling turn, drain the durable wake queue before peeking, reading beyond the reason line, steering, or starting work.
 Session start is the only exception because its one-shot digest already drained while locked or deliberately left the queue untouched in lock-refused read-only mode.
@@ -340,7 +341,7 @@ A forced repair must use the home-scoped owner path emitted by supervision instr
 Guard warnings do not replace the contract.
 Queued wakes must be drained before other action, stale liveness must be repaired through the emitted protocol, and the worktree-tangle warning must be resolved without touching unlanded work.
 The spawn assertion and generated ship brief must both enforce that project work starts in an isolated disposable worktree, never the primary checkout.
-Harness-aware turn-end guards are structural backstops, not permission to omit the live cycle.
+Harness-aware turn-end guards are advisory diagnostics, not permission to omit the live cycle.
 
 ### Away-mode stub
 

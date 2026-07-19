@@ -5,8 +5,8 @@
 #   PREDICATE  - bin/fm-supervision-lib.sh, the shared beacon/status computation
 #                used by fm-guard.sh and by the hook's banner details.
 #   HOOK       - bin/fm-turnend-guard.sh, the shared primary hook predicate that
-#                scopes in-flight work to the PRIMARY checkout only and requires
-#                a live, identity-matched watcher lock plus a fresh beacon.
+#                scopes in-flight work to the PRIMARY checkout and reports a
+#                missing live, identity-matched watcher without blocking Stop.
 # All hermetic over temp dirs; no real agent session is invoked.
 set -u
 
@@ -205,18 +205,18 @@ test_hook_silent_when_no_work_in_flight() {
   pass "fm-turnend-guard: silent no-op with nothing in flight"
 }
 
-test_hook_blocks_when_fresh_beacon_has_no_live_lock() {
+test_hook_warns_when_fresh_beacon_has_no_live_lock() {
   local dir out status
   dir=$(make_primary_dir "$TMP_ROOT/hook-fresh-no-lock")
   : > "$dir/state/task1.meta"
   touch "$dir/state/.last-watcher-beat"
   out=$(run_hook "$dir" false); status=$?
-  expect_code 2 "$status" "hook must block when a fresh beacon has no live watcher lock"
-  assert_contains "$out" "$REQUIRED_REASON" "block reason must contain the exact required instruction"
-  pass "fm-turnend-guard: blocks when a fresh beacon has no live watcher lock"
+  expect_code 0 "$status" "hook must allow Stop when a fresh beacon has no live watcher lock"
+  assert_contains "$out" "$REQUIRED_REASON" "advisory must contain the exact recovery instruction"
+  pass "fm-turnend-guard: warns without blocking when a fresh beacon has no live watcher lock"
 }
 
-test_hook_blocks_when_dead_lock_has_fresh_beacon() {
+test_hook_warns_when_dead_lock_has_fresh_beacon() {
   local dir dead out status
   dir=$(make_primary_dir "$TMP_ROOT/hook-dead-lock-fresh")
   dead=$(nonexistent_pid)
@@ -224,9 +224,9 @@ test_hook_blocks_when_dead_lock_has_fresh_beacon() {
   record_watcher_lock "$dir" "$dead" "dead watcher identity"
   touch "$dir/state/.last-watcher-beat"
   out=$(run_hook "$dir" false); status=$?
-  expect_code 2 "$status" "hook must block when the watcher lock pid is dead despite a fresh beacon"
-  assert_contains "$out" "$REQUIRED_REASON" "block reason must contain the exact required instruction"
-  pass "fm-turnend-guard: blocks on a dead watcher lock even when the beacon is fresh"
+  expect_code 0 "$status" "hook must allow Stop when the watcher lock pid is dead despite a fresh beacon"
+  assert_contains "$out" "$REQUIRED_REASON" "advisory must contain the exact recovery instruction"
+  pass "fm-turnend-guard: warns without blocking on a dead watcher lock even when the beacon is fresh"
 }
 
 test_hook_silent_with_live_lock_and_fresh_beacon() {
@@ -250,7 +250,7 @@ test_hook_silent_with_live_lock_and_fresh_beacon() {
   pass "fm-turnend-guard: silent no-op with a live watcher lock and fresh beacon"
 }
 
-test_hook_blocks_with_live_lock_and_stale_beacon() {
+test_hook_warns_with_live_lock_and_stale_beacon() {
   local dir pid identity out status
   dir=$(make_primary_dir "$TMP_ROOT/hook-live-lock-stale")
   : > "$dir/state/task1.meta"
@@ -266,32 +266,32 @@ test_hook_blocks_with_live_lock_and_stale_beacon() {
   out=$(run_hook "$dir" false); status=$?
   kill "$pid" 2>/dev/null || true
   wait "$pid" 2>/dev/null || true
-  expect_code 2 "$status" "hook must block when a live watcher lock has an ancient beacon"
-  assert_contains "$out" "$REQUIRED_REASON" "block reason must contain the exact required instruction"
-  pass "fm-turnend-guard: blocks on a live watcher lock with an ancient beacon"
+  expect_code 0 "$status" "hook must allow Stop when a live watcher lock has an ancient beacon"
+  assert_contains "$out" "$REQUIRED_REASON" "advisory must contain the exact recovery instruction"
+  pass "fm-turnend-guard: warns without blocking on a live watcher lock with an ancient beacon"
 }
 
-test_hook_blocks_when_unhealthy_in_primary() {
+test_hook_warns_when_unhealthy_in_primary() {
   local dir out status
   dir=$(make_primary_dir "$TMP_ROOT/hook-block")
   : > "$dir/state/task1.meta"
   out=$(run_hook "$dir" false); status=$?
-  expect_code 2 "$status" "hook must block (exit 2) when in-flight work has no live watcher"
-  assert_contains "$out" "$REQUIRED_REASON" "block reason must contain the exact required instruction"
-  assert_contains "$out" "TURN WOULD END BLIND" "block banner must read as an alarm"
-  pass "fm-turnend-guard: blocks with the exact required reason in the primary when unhealthy"
+  expect_code 0 "$status" "hook must allow Stop when in-flight work has no live watcher"
+  assert_contains "$out" "$REQUIRED_REASON" "advisory must contain the exact recovery instruction"
+  assert_contains "$out" "SUPERVISION ADVISORY" "advisory banner must identify itself"
+  pass "fm-turnend-guard: warns with the exact recovery instruction in the primary when unhealthy"
 }
 
-test_hook_blocks_from_fm_home_state() {
+test_hook_warns_from_fm_home_state() {
   local dir home out status
   dir=$(make_primary_dir "$TMP_ROOT/hook-fm-home")
   home="$TMP_ROOT/hook-fm-home-op"
   mkdir -p "$home/state"
   : > "$home/state/task1.meta"
   out=$(printf '{"stop_hook_active":false}' | CLAUDECODE=1 FM_HOME="$home" bash "$dir/bin/fm-turnend-guard.sh" 2>&1); status=$?
-  expect_code 2 "$status" "hook must inspect the active FM_HOME state dir"
-  assert_contains "$out" "$REQUIRED_REASON" "block reason must contain the exact required instruction"
-  pass "fm-turnend-guard: blocks from active FM_HOME state, not only repo-root state"
+  expect_code 0 "$status" "hook must allow Stop after inspecting the active FM_HOME state dir"
+  assert_contains "$out" "$REQUIRED_REASON" "advisory must contain the exact recovery instruction"
+  pass "fm-turnend-guard: warns from active FM_HOME state, not only repo-root state"
 }
 
 test_hook_x_mode_reason_sources_cadence() {
@@ -302,8 +302,8 @@ test_hook_x_mode_reason_sources_cadence() {
   : > "$dir/config/x-mode.env"
   : > "$dir/state/task1.meta"
   out=$(run_hook "$dir" false); status=$?
-  expect_code 2 "$status" "hook must block when in-flight X-mode work has no live watcher"
-  assert_contains "$out" "source '$home/config/x-mode.env' first" "block reason must source the effective X-mode cadence"
+  expect_code 0 "$status" "hook must allow Stop when in-flight X-mode work has no live watcher"
+  assert_contains "$out" "source '$home/config/x-mode.env' first" "advisory must source the effective X-mode cadence"
   pass "fm-turnend-guard: X-mode repair reason sources the cadence config"
 }
 
@@ -327,8 +327,8 @@ test_hook_uses_state_override() {
   mkdir -p "$home/state" "$state"
   : > "$state/task1.meta"
   out=$(printf '{"stop_hook_active":false}' | CLAUDECODE=1 FM_HOME="$home" FM_STATE_OVERRIDE="$state" bash "$dir/bin/fm-turnend-guard.sh" 2>&1); status=$?
-  expect_code 2 "$status" "hook must let FM_STATE_OVERRIDE win over FM_HOME/state"
-  assert_contains "$out" "$REQUIRED_REASON" "block reason must contain the exact required instruction"
+  expect_code 0 "$status" "hook must allow Stop after letting FM_STATE_OVERRIDE win over FM_HOME/state"
+  assert_contains "$out" "$REQUIRED_REASON" "advisory must contain the exact recovery instruction"
   pass "fm-turnend-guard: uses FM_STATE_OVERRIDE ahead of FM_HOME/state"
 }
 
@@ -347,15 +347,15 @@ test_hook_loop_guard_allows_retry() {
 # .fm-secondmate-home marker used to early-exit here, so an overnight secondmate
 # could end a turn with an unsupervised child and sit blind. Removing that marker
 # check makes the guard fire, mirroring the cd-guard.
-test_hook_blocks_in_secondmate_own_home() {
+test_hook_warns_in_secondmate_own_home() {
   local dir out status
   dir=$(make_secondmate_dir "$TMP_ROOT/hook-secondmate")
   : > "$dir/state/task1.meta"
   out=$(run_hook "$dir" false); status=$?
-  expect_code 2 "$status" "hook must guard a secondmate's own home like the main primary when unhealthy"
-  assert_contains "$out" "$REQUIRED_REASON" "block reason must contain the exact required instruction"
-  assert_contains "$out" "TURN WOULD END BLIND" "block banner must read as an alarm"
-  pass "fm-turnend-guard: blocks a blind turn end in a secondmate's own home (.fm-secondmate-home no longer excludes it)"
+  expect_code 0 "$status" "hook must allow Stop in a secondmate's own home when unhealthy"
+  assert_contains "$out" "$REQUIRED_REASON" "advisory must contain the exact recovery instruction"
+  assert_contains "$out" "SUPERVISION ADVISORY" "advisory banner must identify itself"
+  pass "fm-turnend-guard: warns without blocking in a secondmate's own home"
 }
 
 # Idle-by-default: an empty-queue secondmate has no in-flight meta, so the guard
@@ -385,8 +385,8 @@ test_hook_secondmate_loop_guard_allows_retry() {
 # The guard's half of the deferred-death recovery loop in a secondmate home,
 # proven deterministically without a live model or any daemon: silent while the
 # watcher is live (the secondmate ends its turn and relies on the background
-# re-invoke), then blocks to force the re-arm once the watcher has exited and a
-# second child event lands. The live half - that Claude Code autonomously
+# re-invoke), then warns once the watcher has exited and a second child event
+# lands. The live half - that Claude Code autonomously
 # re-invokes the model when the background watcher exits (Mechanism A) - is a
 # harness property recorded empirically in docs/turnend-guard.md; it needs a live
 # session and cannot be a hermetic CI assertion.
@@ -412,16 +412,16 @@ test_hook_secondmate_reinvoke_recovery_loop() {
   }
   # The watcher exits on the wake (its normal lifecycle) and a SECOND child event
   # lands. On the re-invoked recovery turn the secondmate must re-arm; if it did
-  # not, the guard blocks that turn's end and forces the re-arm (Stop #2).
+  # not, the guard warns on that turn's end without forcing the re-arm (Stop #2).
   kill "$pid" 2>/dev/null || true
   wait "$pid" 2>/dev/null || true
   rm -rf "$dir/state/.watch.lock"
   : > "$dir/state/child2.meta"
   touch "$dir/state/.last-watcher-beat"
   out=$(run_hook "$dir" false); status=$?
-  expect_code 2 "$status" "secondmate recovery turn must not end blind after the watcher exits (Stop #2)"
-  assert_contains "$out" "$REQUIRED_REASON" "block reason must contain the exact required instruction"
-  pass "fm-turnend-guard: secondmate deferred-death recovery - silent while watched, forces re-arm once the watcher exits"
+  expect_code 0 "$status" "secondmate recovery turn must remain endable after the watcher exits (Stop #2)"
+  assert_contains "$out" "$REQUIRED_REASON" "advisory must contain the exact recovery instruction"
+  pass "fm-turnend-guard: secondmate deferred-death recovery - silent while watched, advisory once the watcher exits"
 }
 
 # The marker force-include must guard only the secondmate's OWN home, never its
@@ -445,7 +445,7 @@ test_hook_silent_in_secondmate_child_worktree() {
 # remove-only form wrongly exempted. With the marker force-include, its own
 # primary session is GUARDED. The test asserts the fixture really is a linked
 # worktree so it can never silently regress back into a plain-checkout shape.
-test_hook_blocks_in_treehouse_leased_secondmate_home() {
+test_hook_warns_in_treehouse_leased_secondmate_home() {
   local base dir gd gcd out status
   base="$TMP_ROOT/hook-sm-leased-base"
   dir="$TMP_ROOT/hook-sm-leased-home"
@@ -455,10 +455,10 @@ test_hook_blocks_in_treehouse_leased_secondmate_home() {
   [ "$gd" != "$gcd" ] || fail "leased-home fixture must be a linked worktree (git-dir != git-common-dir), got equal: $gd"
   : > "$dir/state/task1.meta"
   out=$(run_hook "$dir" false); status=$?
-  expect_code 2 "$status" "hook must GUARD a treehouse-leased (linked) secondmate home via its marker when unhealthy"
-  assert_contains "$out" "$REQUIRED_REASON" "block reason must contain the exact required instruction"
-  assert_contains "$out" "TURN WOULD END BLIND" "block banner must read as an alarm"
-  pass "fm-turnend-guard: blocks a blind turn end in a treehouse-leased LINKED secondmate home (marker force-include)"
+  expect_code 0 "$status" "hook must allow Stop in a treehouse-leased secondmate home when unhealthy"
+  assert_contains "$out" "$REQUIRED_REASON" "advisory must contain the exact recovery instruction"
+  assert_contains "$out" "SUPERVISION ADVISORY" "advisory banner must identify itself"
+  pass "fm-turnend-guard: warns without blocking in a treehouse-leased linked secondmate home"
 }
 
 # Anti-spoof: a linked worktree with an INVALID (empty) marker must NOT be
@@ -544,7 +544,7 @@ test_hook_runs_fast() {
   pass "fm-turnend-guard: runs well under the generous timing margin (${elapsed_s}s)"
 }
 
-test_grok_adapter_forces_one_resume_when_unhealthy() {
+test_grok_adapter_does_not_resume_for_advisory() {
   local dir fakebin log out status
   dir=$(make_primary_dir "$TMP_ROOT/grok-adapter-block")
   : > "$dir/state/task1.meta"
@@ -564,15 +564,10 @@ test_grok_adapter_forces_one_resume_when_unhealthy() {
 EOF
   chmod +x "$fakebin/grok"
   out=$(printf '{"sessionId":"session-test","hookEventName":"stop"}' | PATH="$fakebin:$PATH" GROK_WORKSPACE_ROOT="$dir" bash "$dir/bin/fm-turnend-guard-grok.sh" 2>&1); status=$?
-  expect_code 0 "$status" "grok adapter must fail open after queuing a forced resume"
+  expect_code 0 "$status" "grok adapter must allow Stop after a supervision advisory"
   [ -z "$out" ] || fail "grok adapter printed output: $out"
-  assert_contains "$(cat "$log")" 'active=1' "grok adapter must mark its forced resume as loop-guarded"
-  assert_contains "$(cat "$log")" '<--resume>' "grok adapter must resume the current session"
-  assert_contains "$(cat "$log")" '<session-test>' "grok adapter must pass the hook session id"
-  assert_not_contains "$(cat "$log")" '<--permission-mode>' "grok adapter must not add a stronger permission mode"
-  assert_not_contains "$(cat "$log")" '<bypassPermissions>' "grok adapter must not bypass permissions on forced resume"
-  assert_contains "$(cat "$log")" 'TURN WOULD END BLIND' "grok adapter must carry the guard reason into the forced resume"
-  pass "fm-turnend-guard-grok: forces one same-session resume when the shared predicate blocks"
+  [ ! -e "$log" ] || fail "grok adapter resumed the session for an advisory: $(cat "$log")"
+  pass "fm-turnend-guard-grok: supervision advisory does not force a resumed turn"
 }
 
 test_grok_adapter_loop_guard_skips_resume() {
@@ -892,29 +887,29 @@ test_predicate_unhealthy_stale_beacon
 test_predicate_healthy_fresh_beacon
 test_predicate_queue_pending_flag
 test_hook_silent_when_no_work_in_flight
-test_hook_blocks_when_fresh_beacon_has_no_live_lock
-test_hook_blocks_when_dead_lock_has_fresh_beacon
+test_hook_warns_when_fresh_beacon_has_no_live_lock
+test_hook_warns_when_dead_lock_has_fresh_beacon
 test_hook_silent_with_live_lock_and_fresh_beacon
-test_hook_blocks_with_live_lock_and_stale_beacon
-test_hook_blocks_when_unhealthy_in_primary
-test_hook_blocks_from_fm_home_state
+test_hook_warns_with_live_lock_and_stale_beacon
+test_hook_warns_when_unhealthy_in_primary
+test_hook_warns_from_fm_home_state
 test_hook_x_mode_reason_sources_cadence
 test_hook_ignores_repo_state_when_fm_home_set
 test_hook_uses_state_override
 test_hook_loop_guard_allows_retry
-test_hook_blocks_in_secondmate_own_home
+test_hook_warns_in_secondmate_own_home
 test_hook_silent_in_idle_secondmate_home
 test_hook_secondmate_loop_guard_allows_retry
 test_hook_secondmate_reinvoke_recovery_loop
 test_hook_silent_in_secondmate_child_worktree
-test_hook_blocks_in_treehouse_leased_secondmate_home
+test_hook_warns_in_treehouse_leased_secondmate_home
 test_hook_exempts_linked_worktree_with_stray_marker
 test_hook_exempts_linked_worktree_with_non_ascii_marker
 test_hook_silent_in_crewmate_worktree
 test_hook_silent_without_jq
 test_hook_silent_without_stdin
 test_hook_runs_fast
-test_grok_adapter_forces_one_resume_when_unhealthy
+test_grok_adapter_does_not_resume_for_advisory
 test_grok_adapter_loop_guard_skips_resume
 test_settings_hook_uses_claude_project_dir
 test_codex_hook_invokes_shared_guard

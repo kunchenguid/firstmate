@@ -10,9 +10,8 @@
 # fleet-touching command itself, can sit blind for hours.
 # This script is push-based: verified harness turn-end hooks invoke it every time
 # the primary is about to end a turn.
-# Claude and codex can block directly by preserving exit status 2 and stderr.
-# OpenCode, pi, and grok adapters use the same predicate and force one bounded
-# follow-up because their turn-end events are passive.
+# Missing supervision is advisory at this boundary: the hook reports the exact
+# recovery action but always permits the turn to end.
 # See docs/turnend-guard.md for the per-harness mechanics, validation evidence,
 # and fail-open tradeoffs.
 #
@@ -26,15 +25,8 @@
 # primary checkout - the main home or a genuinely marked secondmate home - and
 # stay a silent, fast no-op inside child task worktrees.
 #
-# Loop-guard: never block twice in the same turn. Claude Code and codex Stop
-# payloads carry stop_hook_active=true when the CURRENT stop attempt was itself
-# already forced by an earlier block this turn; on that signal we always allow
-# the stop, whether or not watcher supervision actually got resumed. Passive
-# harness adapters provide their own one-follow-up guard before calling this
-# script.
-# That bounds this to at most one forced continuation per turn - never a wedged,
-# un-endable session - while still nagging again on a later turn if the problem
-# persists.
+# Legacy loop-guard payloads remain silent so an already-forced continuation is
+# never shown a duplicate advisory.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -94,9 +86,9 @@ REASON=$("$SCRIPT_DIR/fm-supervision-instructions.sh" --afk "$afk" --x-mode "$x_
 rule='━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'
 {
   printf '●%s\n' "$rule"
-  printf '●  TURN WOULD END BLIND - SUPERVISION IS OFF\n'
+  printf '●  SUPERVISION ADVISORY - MONITORING IS OFF\n'
   printf '●  %s task(s) in flight, but no live watcher holds this home lock (last beat: %s).\n' "$FM_SUP_IN_FLIGHT" "$FM_SUP_BEACON_DESC"
   printf '●  %s\n' "$REASON"
   printf '●%s\n' "$rule"
 } >&2
-exit 2
+exit 0
