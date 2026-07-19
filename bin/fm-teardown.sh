@@ -411,7 +411,7 @@ backlog_refresh_reminder() {
       *)
         if [ "$MODE" = local-only ]; then
           case "$LOCAL_MERGE_TARGET" in
-            '') local_note="local main" ;;
+            '') local_note="local $(default_branch || printf '%s' 'default branch')" ;;
             *) local_note="local $LOCAL_MERGE_TARGET" ;;
           esac
           done_cmd="tasks-axi done $ID --note $(shell_quote "$local_note")"

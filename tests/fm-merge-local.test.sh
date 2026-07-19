@@ -14,6 +14,8 @@ MERGE_LOCAL="$ROOT/bin/fm-merge-local.sh"
 TMP_ROOT=$(fm_test_tmproot fm-merge-local-tests)
 REAL_GIT_FOR_TEST=$(command -v git)
 export REAL_GIT_FOR_TEST
+REAL_SHASUM_FOR_TEST=$(command -v shasum)
+export REAL_SHASUM_FOR_TEST
 
 make_case() {
   local name=$1 target=${2:-main} mode=${3:-local-only}
@@ -130,8 +132,8 @@ test_explicit_feature_target() {
     "explicit-feature: successful landing did not record the actual target"
   assert_grep 'sentinel=preserved' "$case_dir/state/task-x1.meta" \
     "explicit-feature: successful landing did not preserve existing metadata"
-  [ "$(grep -c '^local_merge_target=' "$case_dir/state/task-x1.meta")" = 1 ] \
-    || fail "explicit-feature: successful landing did not canonicalize target metadata"
+  [ "$(grep '^local_merge_target=' "$case_dir/state/task-x1.meta" | tail -1)" = 'local_merge_target=feature/for-you-feed' ] \
+    || fail "explicit-feature: successful landing did not make the actual target effective"
   pass "fm-merge-local fast-forwards an explicitly requested clean feature target without changing main"
 }
 
@@ -343,6 +345,38 @@ SH
   pass "fm-merge-local preserves concurrent in-place metadata updates"
 }
 
+test_post_validation_metadata_update_is_preserved() {
+  local case_dir fakebin rc count_file
+  case_dir=$(make_case post-validation-meta main)
+  fakebin=$(fm_fakebin "$case_dir")
+  count_file="$case_dir/shasum-count"
+  cat > "$fakebin/shasum" <<'SH'
+#!/usr/bin/env bash
+count=0
+[ ! -f "${FM_TEST_COUNT:?}" ] || count=$(cat "$FM_TEST_COUNT")
+count=$((count + 1))
+printf '%s\n' "$count" > "$FM_TEST_COUNT"
+"${REAL_SHASUM_FOR_TEST:?}" "$@"
+if [ "$count" -eq 3 ]; then
+  printf '%s\n' 'concurrent=preserved' >> "${FM_TEST_META:?}"
+fi
+SH
+  chmod +x "$fakebin/shasum"
+
+  set +e
+  PATH="$fakebin:$PATH" FM_TEST_COUNT="$count_file" FM_TEST_META="$case_dir/state/task-x1.meta" \
+    run_merge "$case_dir" task-x1 > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  [ "$rc" -eq 0 ] || fail "post-validation-meta: landing failed"
+  assert_grep 'concurrent=preserved' "$case_dir/state/task-x1.meta" \
+    "post-validation-meta: landing discarded the post-validation metadata update"
+  [ "$(grep '^local_merge_target=' "$case_dir/state/task-x1.meta" | tail -1)" = 'local_merge_target=main' ] \
+    || fail "post-validation-meta: landing did not leave the target record effective"
+  pass "fm-merge-local preserves metadata appended after final validation"
+}
+
 test_unsafe_task_id_refuses() {
   local case_dir
   case_dir=$(make_case unsafe-task-id main)
@@ -366,4 +400,5 @@ test_non_local_only_mode_refuses
 test_option_parsing_refuses
 test_unsafe_task_metadata_refuses
 test_concurrent_metadata_update_is_preserved
+test_post_validation_metadata_update_is_preserved
 test_unsafe_task_id_refuses

@@ -10,7 +10,7 @@
 # It only runs for mode=local-only tasks and only performs a clean
 # `git merge --ff-only` after all guards pass. See AGENTS.md prime directives,
 # project management, and task lifecycle.
-# After a successful fast-forward it atomically records one
+# After a successful fast-forward it appends the effective
 # `local_merge_target=<branch>` in the task metadata for teardown verification.
 #
 # Usage: fm-merge-local.sh <task-id> [--target <local-branch>]
@@ -105,6 +105,7 @@ fi
 META_DEVICE=$(fm_pr_file_device "$META") || exit 1
 META_MODE=$(fm_pr_file_mode "$META") || exit 1
 META_IDENTITY=$(fm_pr_file_identity "$META") || exit 1
+META_INODE=$(fm_pr_file_inode "$META") || exit 1
 META_HASH=$(fm_pr_sha256 "$META") || exit 1
 
 PROJ=$(grep '^project=' "$META" | cut -d= -f2-)
@@ -159,22 +160,21 @@ if ! git -C "$PROJ" merge-base --is-ancestor "$TARGET_REF" "$BRANCH_REF"; then
   exit 1
 fi
 
-META_TMP=
 merge_local_cleanup() {
-  [ -z "$META_TMP" ] || rm -f -- "$META_TMP"
+  exec 3>&- 2>/dev/null || true
+}
+merge_local_fd_inode() {
+  if [ "$(uname)" = Darwin ]; then
+    stat -Lf '%i' /dev/fd/3 2>/dev/null
+  else
+    stat -Lc '%i' /dev/fd/3 2>/dev/null
+  fi
 }
 trap merge_local_cleanup EXIT
 trap 'exit 1' HUP INT TERM
-META_TMP=$(mktemp "$STATE/.fm-merge-local-meta.XXXXXX") || exit 1
-while IFS= read -r line || [ -n "$line" ]; do
-  case "$line" in
-    local_merge_target=*) ;;
-    *) printf '%s\n' "$line" >> "$META_TMP" || exit 1 ;;
-  esac
-done < "$META"
-printf 'local_merge_target=%s\n' "$TARGET" >> "$META_TMP" || exit 1
-chmod "$META_MODE" "$META_TMP" || exit 1
-fm_pr_private_file_valid "$META_TMP" "$META_MODE" "$STATE_DEVICE" || exit 1
+exec 3>> "$META" || exit 1
+[ "$(merge_local_fd_inode)" = "$META_INODE" ] \
+  || { echo "error: task metadata changed during local merge preparation" >&2; exit 1; }
 fm_pr_regular_destination_on_device_or_absent "$META" "$STATE_DEVICE" \
   || { echo "error: task metadata changed during local merge preparation" >&2; exit 1; }
 [ "$(fm_pr_file_identity "$META")" = "$META_IDENTITY" ] \
@@ -191,7 +191,9 @@ fm_pr_regular_destination_on_device_or_absent "$META" "$META_DEVICE" \
   || { echo "error: task metadata changed during local merge" >&2; exit 1; }
 [ "$(fm_pr_sha256 "$META")" = "$META_HASH" ] \
   || { echo "error: task metadata changed during local merge" >&2; exit 1; }
-mv -f -- "$META_TMP" "$META" || exit 1
-META_TMP=
+printf 'local_merge_target=%s\n' "$TARGET" >&3 || exit 1
+exec 3>&-
 fm_pr_private_file_valid "$META" "$META_MODE" "$STATE_DEVICE" || exit 1
+[ "$(fm_pr_file_identity "$META")" = "$META_IDENTITY" ] \
+  || { echo "error: task metadata changed while recording local merge target" >&2; exit 1; }
 echo "merged $BRANCH into local target $TARGET ($before -> $after) in $PROJ"
