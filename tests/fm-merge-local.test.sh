@@ -132,8 +132,8 @@ test_explicit_feature_target() {
     "explicit-feature: successful landing did not record the actual target"
   assert_grep 'sentinel=preserved' "$case_dir/state/task-x1.meta" \
     "explicit-feature: successful landing did not preserve existing metadata"
-  [ "$(grep '^local_merge_target=' "$case_dir/state/task-x1.meta" | tail -1)" = 'local_merge_target=feature/for-you-feed' ] \
-    || fail "explicit-feature: successful landing did not make the actual target effective"
+  [ "$(grep -c '^local_merge_target=' "$case_dir/state/task-x1.meta")" = 1 ] \
+    || fail "explicit-feature: successful landing did not canonicalize target metadata"
   pass "fm-merge-local fast-forwards an explicitly requested clean feature target without changing main"
 }
 
@@ -313,43 +313,12 @@ test_unsafe_task_metadata_refuses() {
   pass "fm-merge-local refuses symlinked and multiply linked task metadata without mutation"
 }
 
-test_concurrent_metadata_update_is_preserved() {
-  local case_dir fakebin rc task_head
-  case_dir=$(make_case concurrent-meta main)
-  fakebin=$(fm_fakebin "$case_dir")
-  cat > "$fakebin/git" <<'SH'
-#!/usr/bin/env bash
-case " $* " in
-  *" merge --ff-only "*) printf '%s\n' 'concurrent=preserved' >> "${FM_TEST_META:?}" ;;
-esac
-exec "${REAL_GIT_FOR_TEST:?}" "$@"
-SH
-  chmod +x "$fakebin/git"
-  task_head=$(git -C "$case_dir/project" rev-parse refs/heads/fm/task-x1)
-
-  set +e
-  PATH="$fakebin:$PATH" FM_TEST_META="$case_dir/state/task-x1.meta" \
-    run_merge "$case_dir" task-x1 > "$case_dir/stdout" 2> "$case_dir/stderr"
-  rc=$?
-  set -e
-
-  [ "$rc" -ne 0 ] || fail "concurrent-meta: landing silently replaced changed metadata"
-  assert_grep 'task metadata changed during local merge' "$case_dir/stderr" \
-    "concurrent-meta: landing did not report the concurrent metadata update"
-  assert_grep 'concurrent=preserved' "$case_dir/state/task-x1.meta" \
-    "concurrent-meta: landing discarded the concurrent metadata update"
-  assert_no_grep '^local_merge_target=' "$case_dir/state/task-x1.meta" \
-    "concurrent-meta: landing replaced metadata after detecting an update"
-  [ "$(git -C "$case_dir/project" rev-parse refs/heads/main)" = "$task_head" ] \
-    || fail "concurrent-meta: fixture did not reach the post-merge metadata guard"
-  pass "fm-merge-local preserves concurrent in-place metadata updates"
-}
-
-test_post_validation_metadata_update_is_preserved() {
-  local case_dir fakebin rc count_file
-  case_dir=$(make_case post-validation-meta main)
+test_concurrent_metadata_replacement_waits_for_landing() {
+  local case_dir fakebin rc count_file done_file attempts
+  case_dir=$(make_case concurrent-replacement main)
   fakebin=$(fm_fakebin "$case_dir")
   count_file="$case_dir/shasum-count"
+  done_file="$case_dir/replacement-done"
   cat > "$fakebin/shasum" <<'SH'
 #!/usr/bin/env bash
 count=0
@@ -358,23 +327,38 @@ count=$((count + 1))
 printf '%s\n' "$count" > "$FM_TEST_COUNT"
 "${REAL_SHASUM_FOR_TEST:?}" "$@"
 if [ "$count" -eq 3 ]; then
-  printf '%s\n' 'concurrent=preserved' >> "${FM_TEST_META:?}"
+  (
+    . "${FM_TEST_WAKE_LIB:?}"
+    fm_meta_lock_acquire "${FM_TEST_META:?}"
+    replacement="${FM_TEST_META}.replacement.${BASHPID:-$$}"
+    { cat "$FM_TEST_META"; printf '%s\n' 'replacement=preserved'; } > "$replacement"
+    mv -f "$replacement" "$FM_TEST_META"
+    fm_meta_lock_release "$FM_TEST_META"
+    touch "${FM_TEST_DONE:?}"
+  ) >/dev/null 2>&1 &
 fi
 SH
   chmod +x "$fakebin/shasum"
 
   set +e
-  PATH="$fakebin:$PATH" FM_TEST_COUNT="$count_file" FM_TEST_META="$case_dir/state/task-x1.meta" \
+  PATH="$fakebin:$PATH" FM_TEST_COUNT="$count_file" FM_TEST_DONE="$done_file" \
+    FM_TEST_META="$case_dir/state/task-x1.meta" FM_TEST_WAKE_LIB="$ROOT/bin/fm-wake-lib.sh" \
     run_merge "$case_dir" task-x1 > "$case_dir/stdout" 2> "$case_dir/stderr"
   rc=$?
   set -e
 
-  [ "$rc" -eq 0 ] || fail "post-validation-meta: landing failed"
-  assert_grep 'concurrent=preserved' "$case_dir/state/task-x1.meta" \
-    "post-validation-meta: landing discarded the post-validation metadata update"
-  [ "$(grep '^local_merge_target=' "$case_dir/state/task-x1.meta" | tail -1)" = 'local_merge_target=main' ] \
-    || fail "post-validation-meta: landing did not leave the target record effective"
-  pass "fm-merge-local preserves metadata appended after final validation"
+  [ "$rc" -eq 0 ] || fail "concurrent-replacement: landing failed"
+  attempts=0
+  while [ ! -f "$done_file" ] && [ "$attempts" -lt 100 ]; do
+    sleep 0.01
+    attempts=$((attempts + 1))
+  done
+  [ -f "$done_file" ] || fail "concurrent-replacement: replacement writer did not finish"
+  assert_grep 'replacement=preserved' "$case_dir/state/task-x1.meta" \
+    "concurrent-replacement: replacement writer did not publish"
+  assert_grep 'local_merge_target=main' "$case_dir/state/task-x1.meta" \
+    "concurrent-replacement: active metadata lost the landing target"
+  pass "fm-merge-local serializes branch landing with metadata replacement"
 }
 
 test_unsafe_task_id_refuses() {
@@ -399,6 +383,5 @@ test_missing_task_branch_refuses
 test_non_local_only_mode_refuses
 test_option_parsing_refuses
 test_unsafe_task_metadata_refuses
-test_concurrent_metadata_update_is_preserved
-test_post_validation_metadata_update_is_preserved
+test_concurrent_metadata_replacement_waits_for_landing
 test_unsafe_task_id_refuses

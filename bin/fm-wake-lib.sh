@@ -347,6 +347,14 @@ fm_lock_release() {
   rmdir "$lockdir" 2>/dev/null || true
 }
 
+fm_meta_lock_acquire() {
+  fm_lock_acquire_wait "$1.lock"
+}
+
+fm_meta_lock_release() {
+  fm_lock_release "$1.lock"
+}
+
 fm_wake_clean_field() {
   LC_ALL=C tr '\t\r\n' '   '
 }

@@ -46,6 +46,14 @@
 #   fmx_meta_link_clear <meta> - remove the X-request link entirely
 # Callers must have FM_HOME set before calling fmx_load_config.
 
+FM_X_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+fmx_meta_lock_load() {
+  command -v fm_meta_lock_acquire >/dev/null 2>&1 && return 0
+  # shellcheck source=bin/fm-wake-lib.sh
+  . "$FM_X_LIB_DIR/fm-wake-lib.sh"
+}
+
 # Read the value of KEY from a .env-style file: last assignment wins; tolerates a
 # leading "export ", surrounding whitespace, and one layer of matching single or
 # double quotes. Prints nothing (and succeeds) when the file or key is absent, so
@@ -870,23 +878,31 @@ fmx_meta_tmp() {
 # budget against a binding the relay already knows about. Returns non-zero if
 # <meta> is missing or the rewrite fails.
 fmx_meta_link_set() {
-  local meta=$1 rid=$2 ts=$3 followups=${4:-0} platform=${5:-} reply_max=${6:-} tmp
-  [ -f "$meta" ] || return 1
-  tmp=$(fmx_meta_tmp "$meta") || return 1
-  if ! { grep -vE '^x_request=|^x_request_ts=|^x_followups=|^x_platform=|^x_reply_max_chars=' "$meta" || true; } > "$tmp"; then
-    rm -f "$tmp"; return 1
+  local meta=$1 rid=$2 ts=$3 followups=${4:-0} platform=${5:-} reply_max=${6:-} tmp rc=0
+  fmx_meta_lock_load
+  fm_meta_lock_acquire "$meta"
+  if [ ! -f "$meta" ]; then
+    fm_meta_lock_release "$meta"
+    return 1
   fi
-  printf 'x_request=%s\n' "$rid" >> "$tmp" || { rm -f "$tmp"; return 1; }
-  printf 'x_request_ts=%s\n' "$ts" >> "$tmp" || { rm -f "$tmp"; return 1; }
-  printf 'x_followups=%s\n' "$followups" >> "$tmp" || { rm -f "$tmp"; return 1; }
+  tmp=$(fmx_meta_tmp "$meta") || { fm_meta_lock_release "$meta"; return 1; }
+  if ! { grep -vE '^x_request=|^x_request_ts=|^x_followups=|^x_platform=|^x_reply_max_chars=' "$meta" || true; } > "$tmp"; then
+    rm -f "$tmp"; fm_meta_lock_release "$meta"; return 1
+  fi
+  printf 'x_request=%s\n' "$rid" >> "$tmp" || rc=1
+  [ "$rc" -ne 0 ] || printf 'x_request_ts=%s\n' "$ts" >> "$tmp" || rc=1
+  [ "$rc" -ne 0 ] || printf 'x_followups=%s\n' "$followups" >> "$tmp" || rc=1
   if [ -n "$platform" ]; then
-    printf 'x_platform=%s\n' "$platform" >> "$tmp" || { rm -f "$tmp"; return 1; }
+    [ "$rc" -ne 0 ] || printf 'x_platform=%s\n' "$platform" >> "$tmp" || rc=1
   fi
   case "$reply_max" in
     ''|*[!0-9]*) ;;
-    *) printf 'x_reply_max_chars=%s\n' "$reply_max" >> "$tmp" || { rm -f "$tmp"; return 1; } ;;
+    *) [ "$rc" -ne 0 ] || printf 'x_reply_max_chars=%s\n' "$reply_max" >> "$tmp" || rc=1 ;;
   esac
-  mv -f "$tmp" "$meta" || { rm -f "$tmp"; return 1; }
+  [ "$rc" -ne 0 ] || mv -f "$tmp" "$meta" || rc=1
+  [ "$rc" -eq 0 ] || rm -f "$tmp"
+  fm_meta_lock_release "$meta"
+  return "$rc"
 }
 
 # fmx_meta_followups_set <meta> <n>: atomically rewrite just the x_followups
@@ -894,13 +910,17 @@ fmx_meta_link_set() {
 # Returns non-zero if <meta> is missing or the rewrite fails.
 fmx_meta_followups_set() {
   local meta=$1 n=$2 tmp
-  [ -f "$meta" ] || return 1
-  tmp=$(fmx_meta_tmp "$meta") || return 1
+  fmx_meta_lock_load
+  fm_meta_lock_acquire "$meta"
+  if [ ! -f "$meta" ]; then fm_meta_lock_release "$meta"; return 1; fi
+  tmp=$(fmx_meta_tmp "$meta") || { fm_meta_lock_release "$meta"; return 1; }
   if ! { grep -vE '^x_followups=' "$meta" || true; } > "$tmp"; then
-    rm -f "$tmp"; return 1
+    rm -f "$tmp"; fm_meta_lock_release "$meta"; return 1
   fi
-  printf 'x_followups=%s\n' "$n" >> "$tmp" || { rm -f "$tmp"; return 1; }
-  mv -f "$tmp" "$meta" || { rm -f "$tmp"; return 1; }
+  if ! printf 'x_followups=%s\n' "$n" >> "$tmp" || ! mv -f "$tmp" "$meta"; then
+    rm -f "$tmp"; fm_meta_lock_release "$meta"; return 1
+  fi
+  fm_meta_lock_release "$meta"
 }
 
 # fmx_meta_link_clear <meta>: atomically remove the x_request/x_request_ts/
@@ -909,10 +929,15 @@ fmx_meta_followups_set() {
 # missing.
 fmx_meta_link_clear() {
   local meta=$1 tmp
-  [ -f "$meta" ] || return 0
-  tmp=$(fmx_meta_tmp "$meta") || return 1
+  fmx_meta_lock_load
+  fm_meta_lock_acquire "$meta"
+  if [ ! -f "$meta" ]; then fm_meta_lock_release "$meta"; return 0; fi
+  tmp=$(fmx_meta_tmp "$meta") || { fm_meta_lock_release "$meta"; return 1; }
   if ! { grep -vE '^x_request=|^x_request_ts=|^x_followups=|^x_platform=|^x_reply_max_chars=' "$meta" || true; } > "$tmp"; then
-    rm -f "$tmp"; return 1
+    rm -f "$tmp"; fm_meta_lock_release "$meta"; return 1
   fi
-  mv -f "$tmp" "$meta" || { rm -f "$tmp"; return 1; }
+  if ! mv -f "$tmp" "$meta"; then
+    rm -f "$tmp"; fm_meta_lock_release "$meta"; return 1
+  fi
+  fm_meta_lock_release "$meta"
 }

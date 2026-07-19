@@ -51,6 +51,9 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 # shellcheck source=bin/fm-tasks-axi-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
+# shellcheck source=bin/fm-wake-lib.sh
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/fm-wake-lib.sh"
 
 usage() {
   awk '
@@ -319,7 +322,9 @@ EOF
 
   if [ "$has_meta" = 1 ]; then
     if [ "$(meta_value "$meta" decisions_reviewed)" != 1 ] || [ "$previous" != "$keys" ]; then
+      fm_meta_lock_acquire "$meta"
       printf 'decisions_reviewed=1\ndecision_keys=%s\n' "$keys" >> "$meta"
+      fm_meta_lock_release "$meta"
     fi
 
     # Transfer any still-open status decision to its durable backlog owner so the
