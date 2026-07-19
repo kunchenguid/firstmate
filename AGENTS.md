@@ -159,6 +159,8 @@ Routing precedence is an explicit per-task captain override, then the best-fit c
 The generic effort fallback and its precedence are owned by `harness-adapters`: explicit captain and standing configured effort win; otherwise use low for well-understood explicit work, xhigh for ambiguous investigation or design, intermediate levels proportionally, and never max without explicit captain preference.
 Do not add model-specific versions of that policy.
 
+The fork-local `scripts/switch-dispatch.sh <profile>` swaps the active `config/crew-dispatch.json` between saved `config/crew-dispatch.<name>.json` profiles; run it with no argument to see the current and available profiles.
+
 `secondmate-provisioning` owns secondmate harness pins and inherited local material, while `harness-adapters` owns the harness consequences.
 Dispatch only on a backend that `fm-spawn` validates as spawn-capable.
 A missing dependency, authentication failure, unsupported backend, or version refusal is a blocker; never silently retry on another backend.
