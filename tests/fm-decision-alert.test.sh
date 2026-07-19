@@ -213,6 +213,23 @@ SH
   pass "decision alert execution stays within eight concurrent workers"
 }
 
+test_deadline_tick_still_runs_first_batch() {
+  local home
+  home="$TMP_ROOT/deadline-tick"; mkdir -p "$home/state" "$home/config"
+  printf 'osascript\n' > "$home/config/decision-alert"
+  FM_HOME="$home" FM_DECISION_ALERT_TICK_LOG="$home/tick.log" bash -c '
+    . "$1"
+    DECISION_ALERT_ORIGINS=(sample)
+    DECISION_ALERT_KEYS=(tick-boundary)
+    decision_alert_remaining_budget() { return 1; }
+    decision_alert_emit_channel() { printf "started\n" >> "$FM_DECISION_ALERT_TICK_LOG"; }
+    decision_alert_dispatch
+  ' _ "$ALERT"
+  [ "$(wc -l < "$home/tick.log" | tr -d ' ')" -eq 1 ] \
+    || fail "an integer deadline tick skipped the first worker batch"
+  pass "an integer deadline tick still starts the first bounded worker batch"
+}
+
 test_bash32_empty_retry_batch_continues() {
   local home recorder task markers
   home="$TMP_ROOT/bash32-retry"; mkdir -p "$home/state" "$home/config"
@@ -266,5 +283,6 @@ test_macos_notification_argv_and_command_safety
 test_notifier_failure_is_nonblocking_and_at_most_once
 test_total_runtime_is_bounded_across_decisions_and_channels
 test_concurrency_is_bounded
+test_deadline_tick_still_runs_first_batch
 test_bash32_empty_retry_batch_continues
 test_test_seam_and_watcher_integration

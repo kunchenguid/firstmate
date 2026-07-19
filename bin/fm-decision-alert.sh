@@ -226,7 +226,10 @@ decision_alert_dispatch() {
   total_jobs=$((identity_count * channel_count))
   job_index=0
   while [ "$job_index" -lt "$total_jobs" ]; do
-    remaining=$(decision_alert_remaining_budget) || break
+    if ! remaining=$(decision_alert_remaining_budget); then
+      [ "$job_index" -eq 0 ] || break
+      remaining=1
+    fi
     remaining_jobs=$((total_jobs - job_index))
     remaining_batches=$(((remaining_jobs + batch_capacity - 1) / batch_capacity))
     batch_timeout=$((remaining / remaining_batches))
