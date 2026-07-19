@@ -18,7 +18,9 @@
 #     Structured rows preserve captain-hold metadata such as hold_kind and
 #     hold_reason when tasks-axi emits it.
 #   tasks[]: one row per state/<id>.meta, sorted by id.
-#     role, harness, model, and effort expose the recorded launch policy.
+#     harness, model, and effort expose the recorded launch policy; role is an
+#     alias of kind (no separate role is recorded at spawn) kept as a stable,
+#     human-facing label for the crewmate's role (ship, scout, or secondmate).
 #     git.repo and git.branch are best-effort read-only worktree observations.
 #     activity reports the status-log (or meta fallback) age without treating a
 #     historical event as current agent state.
@@ -374,8 +376,7 @@ task_json_lines() {
     id=$(basename "$meta" .meta)
     kind=$(meta_value "$meta" kind)
     [ -n "$kind" ] || kind=ship
-    role=$(meta_value "$meta" role)
-    [ -n "$role" ] || role=$kind
+    role=$kind
     harness=$(meta_value "$meta" harness)
     model=$(meta_value "$meta" model)
     effort=$(meta_value "$meta" effort)
