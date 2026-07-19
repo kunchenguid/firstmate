@@ -220,7 +220,7 @@ done < <(jq -c '.result // [] | .[]' "$BODY_FILE" 2>/dev/null)
 # offset before them so getUpdates re-serves them next sweep.
 if [ -n "$last_confirmed" ]; then
   next=$((last_confirmed + 1))
-  fmt_offset_set "$next" || true
+  fmt_offset_set "$next" || emit_error_once "cannot persist offset"
 fi
 
 # Any healthy 200 sweep without a new error clears the stale marker so the
