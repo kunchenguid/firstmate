@@ -200,6 +200,46 @@ sample_update() {
     '{ok:true,result:[{update_id:$uid,message:{message_id:1,date:$date,text:$text,chat:{id:$chat,type:$type},from:{id:$from}}}]}'
 }
 
+# Build a multi-update getUpdates body from lines "uid from chat text [type]".
+# Types default to private. Used for rate-cap defer / offset tests.
+sample_updates_body() {
+  local date msg type uid from chat text first=1 spec rest
+  date=$(now_epoch)
+  printf '{"ok":true,"result":['
+  for spec in "$@"; do
+    # Parse without clobbering the outer "$@".
+    uid=${spec%% *}
+    rest=${spec#"$uid"}
+    rest=${rest# }
+    from=${rest%% *}
+    rest=${rest#"$from"}
+    rest=${rest# }
+    chat=${rest%% *}
+    rest=${rest#"$chat"}
+    rest=${rest# }
+    text=${rest%% *}
+    rest=${rest#"$text"}
+    rest=${rest# }
+    type=${rest:-private}
+    [ -n "$type" ] || type=private
+    msg=$(jq -cn \
+      --argjson uid "$uid" \
+      --argjson from "$from" \
+      --argjson chat "$chat" \
+      --arg text "$text" \
+      --argjson date "$date" \
+      --arg type "$type" \
+      '{update_id:$uid,message:{message_id:1,date:$date,text:$text,chat:{id:$chat,type:$type},from:{id:$from}}}')
+    if [ "$first" -eq 1 ]; then
+      first=0
+    else
+      printf ','
+    fi
+    printf '%s' "$msg"
+  done
+  printf ']}'
+}
+
 test_poll_allowlisted_stashes_and_wakes() {
   local home fakebin out rc body log
   home="$TMP_ROOT/poll-ok"; mkdir -p "$home"
@@ -281,6 +321,94 @@ test_poll_409_surfaces_error_once() {
     "$ROOT/bin/fm-telegram-poll.sh")
   [ -z "$out2" ] || fail "duplicate 409 must be silent (got: $out2)"
   pass "poll 409 conflict surfaces once then dedupes"
+}
+
+# Captain decision key=telegram-rate-cap: DEFER, never drop authenticated over-cap.
+test_poll_rate_cap_defers_authenticated_offset_holds() {
+  local home fakebin body out offset
+  home="$TMP_ROOT/poll-defer-offset"; mkdir -p "$home"
+  write_env "$home" "FM_TELEGRAM_RATE_MAX=2"
+  fakebin=$(make_fake_curl "$home")
+  # Three authenticated messages; cap=2 so the third is deferred.
+  body=$(sample_updates_body \
+    "100 222 111 status" \
+    "101 222 111 status" \
+    "102 222 111 status")
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_TELEGRAM_API_URL="https://api.test" \
+    FAKE_POLL_CODE=200 FAKE_POLL_BODY="$body" \
+    "$ROOT/bin/fm-telegram-poll.sh")
+  assert_contains "$out" "telegram-msg 100" "first under-cap must wake"
+  assert_contains "$out" "telegram-msg 101" "second under-cap must wake"
+  assert_not_contains "$out" "telegram-msg 102" "over-cap must not wake this sweep"
+  assert_present "$home/state/telegram-inbox/100.json" "first stashed"
+  assert_present "$home/state/telegram-inbox/101.json" "second stashed"
+  assert_absent "$home/state/telegram-inbox/102.json" "deferred must not stash this sweep"
+  assert_grep "deferred" "$home/state/telegram-audit.log" "must audit deferred rate-cap"
+  offset=$(cat "$home/state/telegram-offset")
+  # Confirmed through 101 only -> offset 102, so 102 is re-fetched next sweep.
+  [ "$offset" = "102" ] || fail "offset must hold before deferred update (got $offset, want 102)"
+  pass "poll rate-cap defers authenticated updates and holds offset"
+}
+
+test_poll_rate_cap_deferred_processed_next_sweep() {
+  local home fakebin body1 body2 out1 out2 offset
+  home="$TMP_ROOT/poll-defer-next"; mkdir -p "$home"
+  write_env "$home" "FM_TELEGRAM_RATE_MAX=1"
+  fakebin=$(make_fake_curl "$home")
+  # Text tokens must be single words (helper splits on spaces).
+  body1=$(sample_updates_body "200 222 111 status" "201 222 111 approve-k1")
+  out1=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_TELEGRAM_API_URL="https://api.test" \
+    FAKE_POLL_CODE=200 FAKE_POLL_BODY="$body1" \
+    "$ROOT/bin/fm-telegram-poll.sh")
+  assert_contains "$out1" "telegram-msg 200" "sweep1 processes first"
+  assert_not_contains "$out1" "telegram-msg 201" "sweep1 defers second"
+  [ "$(cat "$home/state/telegram-offset")" = "201" ] || fail "sweep1 offset holds at deferred (got $(cat "$home/state/telegram-offset" 2>/dev/null))"
+  # Next sweep re-serves the deferred update (offset=201 means id>=201).
+  body2=$(sample_updates_body "201 222 111 approve-k1")
+  out2=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_TELEGRAM_API_URL="https://api.test" \
+    FAKE_POLL_CODE=200 FAKE_POLL_BODY="$body2" \
+    "$ROOT/bin/fm-telegram-poll.sh")
+  assert_contains "$out2" "telegram-msg 201" "sweep2 must process deferred update"
+  assert_present "$home/state/telegram-inbox/201.json" "deferred stashed on next sweep"
+  offset=$(cat "$home/state/telegram-offset")
+  [ "$offset" = "202" ] || fail "sweep2 must advance past processed deferred (got $offset)"
+  pass "poll processes deferred authenticated updates on the next sweep"
+}
+
+test_poll_deferred_approve_still_subject_to_freshness() {
+  local home fakebin body out stale
+  home="$TMP_ROOT/poll-defer-fresh"; mkdir -p "$home/state"
+  write_env "$home" "FM_TELEGRAM_DRY_RUN=1" "FM_TELEGRAM_FRESHNESS_SECS=60"
+  # Stash a deferred-style approve with a stale message date (as poll would).
+  stale=$(( $(now_epoch) - 3600 ))
+  seed_inbox "$home" 300 "approve api-shape" "$stale"
+  printf 'needs-decision [key=api-shape]: which shape?\n' > "$home/state/ship-1.status"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-telegram-respond.sh" 2>/dev/null)
+  assert_contains "$out" "refused 300 stale" "deferred approval still enforces freshness"
+  pass "deferred approvals remain subject to freshness window"
+}
+
+test_poll_auth_rejects_cannot_pin_offset() {
+  local home fakebin body out offset
+  home="$TMP_ROOT/poll-auth-pin"; mkdir -p "$home"
+  write_env "$home" "FM_TELEGRAM_RATE_MAX=1"
+  fakebin=$(make_fake_curl "$home")
+  # Flood of unauthenticated updates after one accept: auth drops advance offset.
+  body=$(sample_updates_body \
+    "400 222 111 status" \
+    "401 999 111 status" \
+    "402 999 111 status" \
+    "403 999 111 status")
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_TELEGRAM_API_URL="https://api.test" \
+    FAKE_POLL_CODE=200 FAKE_POLL_BODY="$body" \
+    "$ROOT/bin/fm-telegram-poll.sh")
+  assert_contains "$out" "telegram-msg 400" "authenticated accept wakes"
+  assert_not_contains "$out" "telegram-msg 401" "auth reject must not wake"
+  offset=$(cat "$home/state/telegram-offset")
+  # All four resolved: one accept + three auth drops -> offset 404.
+  [ "$offset" = "404" ] || fail "auth rejects must advance offset (got $offset, want 404)"
+  assert_grep "dropped-auth" "$home/state/telegram-audit.log" "auth drops audited"
+  pass "unauthenticated rejects cannot pin the getUpdates offset"
 }
 
 test_poll_409_resurfaces_after_healthy_poll() {
@@ -636,6 +764,10 @@ test_poll_wrong_chat_dropped
 test_poll_group_chat_dropped
 test_poll_409_surfaces_error_once
 test_poll_409_resurfaces_after_healthy_poll
+test_poll_rate_cap_defers_authenticated_offset_holds
+test_poll_rate_cap_deferred_processed_next_sweep
+test_poll_deferred_approve_still_subject_to_freshness
+test_poll_auth_rejects_cannot_pin_offset
 test_send_dry_run_no_network
 test_send_refuses_secretish
 test_send_skips_when_not_afk
