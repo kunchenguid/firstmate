@@ -165,6 +165,7 @@ primary_available_profile() {
           else [] end;
         ([.providers[]? | select(.provider == $harness)][0]) as $provider
         | if $provider == null then false
+          elif (($provider.state.status? // "") != "fresh") then false
           else (($provider.windows // [])
             | map(. as $window
               | select(((general_ids($harness) | index($window.id)) != null)

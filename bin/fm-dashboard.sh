@@ -30,11 +30,11 @@ tmux has-session -t "$TARGET" 2>/dev/null || { echo "error: target session '$TAR
 
 if ! tmux has-session -t "$OBSERVER" 2>/dev/null; then
   tmux new-session -d -s "$OBSERVER" -n dashboard \
-    "$SCRIPT_DIR/fm-dashboard-loop.sh coordinator '$TARGET' '$INTERVAL'"
+    "'$SCRIPT_DIR'/fm-dashboard-loop.sh coordinator '$TARGET' '$INTERVAL'"
   tmux split-window -h -p 48 -t "$OBSERVER:dashboard.0" \
-    "$SCRIPT_DIR/fm-dashboard-loop.sh roster '$TARGET' '$INTERVAL'"
+    "'$SCRIPT_DIR'/fm-dashboard-loop.sh roster '$TARGET' '$INTERVAL'"
   tmux split-window -v -p 50 -t "$OBSERVER:dashboard.1" \
-    "$SCRIPT_DIR/fm-dashboard-loop.sh details '$TARGET' '$INTERVAL'"
+    "'$SCRIPT_DIR'/fm-dashboard-loop.sh details '$TARGET' '$INTERVAL'"
 fi
 
 printf 'status: ready\n'
