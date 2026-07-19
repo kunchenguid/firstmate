@@ -236,6 +236,7 @@ fm_supervision_visibility_clear() {
     pane report-metadata "$FM_SUPERVISION_VISIBILITY_PANE" \
     --source "$FM_SUPERVISION_VISIBILITY_SOURCE" \
     --clear-custom-status --clear-state-labels >/dev/null 2>&1 || true
+  # shellcheck disable=SC2034 # Read by deterministic tests after sourcing this script.
   FM_SUPERVISION_VISIBILITY_PUBLISHED=0
 }
 
@@ -250,7 +251,7 @@ fm_supervision_visibility_refresh_interval() {
 }
 
 fm_supervision_visibility_refresh_loop() { # <watcher pid>
-  local owner_pid=$1 interval sleeper= expected_identity= current_identity=
+  local owner_pid=$1 interval sleeper='' expected_identity='' current_identity=''
   interval=$(fm_supervision_visibility_refresh_interval)
   trap '[ -z "$sleeper" ] || kill -TERM "$sleeper" 2>/dev/null || true; exit 0' HUP INT TERM
   while :; do
