@@ -232,6 +232,64 @@ JSON
   pass "window rollover discards incompatible history and records the new cycle"
 }
 
+test_concurrent_history_updates_preserve_both_samples() {
+  local state sync fakebin real_cat quota_a quota_b out_a out_b err_a err_b pid_a pid_b
+  state="$TMP_ROOT/concurrent-state.json"
+  sync="$TMP_ROOT/concurrent-sync"
+  fakebin=$(fm_fakebin "$TMP_ROOT/concurrent")
+  real_cat=$(command -v cat)
+  quota_a="$TMP_ROOT/concurrent-a.json"
+  quota_b="$TMP_ROOT/concurrent-b.json"
+  out_a="$TMP_ROOT/concurrent-a.out"
+  out_b="$TMP_ROOT/concurrent-b.out"
+  err_a="$TMP_ROOT/concurrent-a.err"
+  err_b="$TMP_ROOT/concurrent-b.err"
+  mkdir -p "$sync"
+  printf '%s\n' '{"schemaVersion":1,"samples":[]}' > "$state"
+  cat > "$fakebin/cat" <<'SH'
+#!/usr/bin/env bash
+if [ "$#" -eq 1 ] && [ "$1" = "$SYNC_STATE" ] && [ ! -e "$SYNC_DIR/$PPID.seen" ]; then
+  attempts=0
+  : > "$SYNC_DIR/$PPID.seen"
+  "$REAL_CAT" "$1"
+  : > "$SYNC_DIR/$PPID.ready"
+  while [ "$attempts" -lt 500 ]; do
+    ready=0
+    for marker in "$SYNC_DIR"/*.ready; do
+      [ -e "$marker" ] && ready=$((ready + 1))
+    done
+    [ "$ready" -ge 2 ] && exit 0
+    attempts=$((attempts + 1))
+    sleep 0.01
+  done
+  exit 9
+fi
+exec "$REAL_CAT" "$@"
+SH
+  chmod +x "$fakebin/cat"
+  cat > "$quota_a" <<'JSON'
+{"schemaVersion":2,"providers":[{"provider":"claude","state":{"status":"fresh"},"windows":[{"id":"concurrent-a","kind":"session","windowSeconds":18000,"percentUsed":10,"percentRemaining":90,"resetsAt":"2026-07-19T01:00:00Z"}]}]}
+JSON
+  cat > "$quota_b" <<'JSON'
+{"schemaVersion":2,"providers":[{"provider":"claude","state":{"status":"fresh"},"windows":[{"id":"concurrent-b","kind":"session","windowSeconds":18000,"percentUsed":20,"percentRemaining":80,"resetsAt":"2026-07-19T01:00:00Z"}]}]}
+JSON
+
+  PATH="$fakebin:$BASE_PATH" SYNC_STATE="$state" SYNC_DIR="$sync" REAL_CAT="$real_cat" \
+    run_fixture "$quota_a" "$err_a" --state-file "$state" > "$out_a" &
+  pid_a=$!
+  PATH="$fakebin:$BASE_PATH" SYNC_STATE="$state" SYNC_DIR="$sync" REAL_CAT="$real_cat" \
+    run_fixture "$quota_b" "$err_b" --state-file "$state" > "$out_b" &
+  pid_b=$!
+  wait "$pid_a" || fail "first concurrent selector failed: $(cat "$err_a")"
+  wait "$pid_b" || fail "second concurrent selector failed: $(cat "$err_b")"
+
+  [ "$(jq '.samples | length' "$state")" -eq 2 ] \
+    || fail "concurrent selectors should preserve both samples: $(cat "$state")"
+  [ "$(jq -r '[.samples[].id] | sort | join(",")' "$state")" = "concurrent-a,concurrent-b" ] \
+    || fail "concurrent selectors wrote unexpected history: $(cat "$state")"
+  pass "concurrent history updates preserve every selector's sample"
+}
+
 test_missing_duration_and_clock_skew_are_contained() {
   local quota out err diagnostics
   quota="$TMP_ROOT/missing-duration.json"
@@ -345,6 +403,7 @@ test_codex_mislabeled_window_uses_actual_duration
 test_configured_codex_extra_resets_add_capacity
 test_stale_candidate_keeps_existing_clear_margin_policy
 test_rollover_discards_incompatible_recent_sample
+test_concurrent_history_updates_preserve_both_samples
 test_missing_duration_and_clock_skew_are_contained
 test_quota_failures_and_old_schema_fall_back_to_first
 test_live_quota_uses_account_free_json_and_private_diagnostics
