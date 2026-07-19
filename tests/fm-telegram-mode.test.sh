@@ -551,6 +551,31 @@ test_send_pr_authority_is_bound_to_delivered_chat() {
   pass "send binds merge authority to the delivered chat"
 }
 
+test_send_authority_failure_surfaces_with_recovery() {
+  local home fakebin pr out rc
+  home="$TMP_ROOT/send-pr-recovery"; mkdir -p "$home/state"
+  write_env "$home"
+  fakebin=$(make_fake_curl "$home")
+  pr='https://github.com/acme/app/pull/43'
+  mkdir "$home/state/telegram-notified-prs.log"
+  printf 'PR ready %s\n' "$pr" > "$home/msg.txt"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_TELEGRAM_API_URL="https://api.test" \
+    FAKE_SEND_CODE=200 FAKE_SEND_BODY='{"ok":true}' \
+    "$ROOT/bin/fm-telegram-send.sh" --text-file "$home/msg.txt" --force 2>&1)
+  rc=$?
+  expect_code 4 "$rc" "authority recovery send exit"
+  assert_contains "$out" "merge authority was preserved in recovery storage" \
+    "authority persistence failure must surface"
+  assert_grep "authority-recovered" "$home/state/telegram-audit.log" \
+    "authority persistence failure must be audited"
+  # shellcheck source=bin/fm-telegram-lib.sh
+  . "$ROOT/bin/fm-telegram-lib.sh"
+  FM_HOME="$home" fmt_load_config
+  FM_HOME="$home" fmt_notified_pr_seen "$pr" \
+    || fail "recovery evidence must preserve merge authority"
+  pass "send surfaces primary authority failure and preserves recovery evidence"
+}
+
 test_send_refuses_secretish() {
   local home rc
   home="$TMP_ROOT/send-secret"; mkdir -p "$home/state"
@@ -648,6 +673,8 @@ case "$1 $2" in
     [ "$3" = 99 ] && [ "$4" = -R ] && [ "$5" = acme/app ] || exit 64
     if [ "${FAKE_GH_AXI_CHECKLESS:-}" = 1 ]; then
       printf 'checks: "0 passed, 0 failed - this PR has no CI checks configured"\n'
+    elif [ "${FAKE_GH_AXI_SKIPPED:-}" = 1 ]; then
+      printf 'summary: "0 passed, 0 failed, 1 skipped, 1 total"\nchecks[1]{name,conclusion}:\n  cancelled-ci,skip\n'
     else
       printf 'summary: "2 passed, 0 failed, 2 total"\nchecks[2]{name,conclusion}:\n  lint,pass\n  tests,pass\n'
     fi
@@ -666,6 +693,7 @@ test_respond_status() {
   seed_inbox "$home" 40 "status"
   printf '## In flight\n- something\n' > "$home/data/backlog.md"
   printf 'window=fm-internal-id\n' > "$home/state/internal-id.meta"
+  printf 'kind=secondmate\nwindow=fm-domain\n' > "$home/state/domain.meta"
   printf 'needs-decision: raw internal status\n' > "$home/state/internal-id.status"
   fakebin=$(make_fake_curl "$home")
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_TELEGRAM_API_URL="https://api.test" \
@@ -706,7 +734,7 @@ test_respond_stale_approve_refused() {
 }
 
 test_respond_approve_open_key() {
-  local home out
+  local home out text
   home="$TMP_ROOT/resp-approve"; mkdir -p "$home/state"
   write_env "$home" "FM_TELEGRAM_DRY_RUN=1"
   seed_inbox "$home" 43 "approve api-shape"
@@ -715,7 +743,24 @@ test_respond_approve_open_key() {
   assert_contains "$out" "ok 43 approve api-shape ship-1" "approve must succeed"
   assert_present "$home/state/telegram-actions/43.json" "must write action record"
   assert_grep '"action":"approve"' "$home/state/telegram-actions/43.json" "action is approve"
-  pass "respond approve records action for open key"
+  text=$(jq -r '.text' "$home/state/telegram-outbox"/*.json)
+  assert_contains "$text" "Approval recorded for 'api-shape'." "approval acknowledgement must name the decision"
+  assert_not_contains "$text" "ship-1" "approval acknowledgement must not expose an internal id"
+  pass "respond approve records action without exposing internal ids"
+}
+
+test_respond_invalid_envelope_stays_queued() {
+  local home out
+  home="$TMP_ROOT/resp-invalid-envelope"; mkdir -p "$home/state"
+  write_env "$home" "FM_TELEGRAM_DRY_RUN=1"
+  seed_inbox "$home" 47 "status"
+  printf '{broken-json\n' > "$home/state/telegram-inbox/47.json"
+  chmod 600 "$home/state/telegram-inbox/47.json"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-telegram-respond.sh" 2>/dev/null)
+  assert_contains "$out" "error 47 inbox-read-failed" "invalid envelope must report a retryable error"
+  assert_present "$home/state/telegram-inbox/47.json" "invalid envelope must remain queued"
+  assert_grep "inbox-read-failed" "$home/state/telegram-audit.log" "invalid envelope must be audited"
+  pass "respond preserves queued updates when envelope parsing fails"
 }
 
 test_respond_action_write_failure_reports_error() {
@@ -830,6 +875,24 @@ test_respond_merge_refuses_checkless_pr() {
     "$ROOT/bin/fm-telegram-respond.sh" 2>/dev/null)
   assert_contains "$out" "refused 55 not-green" "checkless PR must not authorize merge"
   pass "respond refuses PRs without CI checks"
+}
+
+test_respond_merge_refuses_skipped_checks() {
+  local home out fakebin pr
+  home="$TMP_ROOT/resp-merge-skipped"; mkdir -p "$home/state"
+  chmod 700 "$home/state"
+  write_env "$home" "FM_TELEGRAM_DRY_RUN=1"
+  pr='https://github.com/acme/app/pull/99'
+  # shellcheck source=bin/fm-telegram-lib.sh
+  . "$ROOT/bin/fm-telegram-lib.sh"
+  FM_HOME="$home" fmt_load_config
+  FM_HOME="$home" fmt_notified_pr_record "$pr" || fail "could not record notified PR"
+  seed_inbox "$home" 56 "merge $pr"
+  fakebin=$(make_fake_gh_axi "$home")
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FAKE_GH_AXI_SKIPPED=1 \
+    "$ROOT/bin/fm-telegram-respond.sh" 2>/dev/null)
+  assert_contains "$out" "refused 56 not-green" "skipped checks must not authorize merge"
+  pass "respond refuses canceled or expected checks rendered as skipped"
 }
 
 test_respond_merge_unnamed_refused() {
@@ -975,6 +1038,7 @@ test_poll_rewakes_pending_inbox_on_empty_result
 test_poll_rewakes_pending_inbox_on_failed_results
 test_send_dry_run_no_network
 test_send_pr_authority_is_bound_to_delivered_chat
+test_send_authority_failure_surfaces_with_recovery
 test_send_refuses_secretish
 test_send_skips_when_not_afk
 test_send_reply_bypasses_afk_gate
@@ -983,12 +1047,14 @@ test_respond_status
 test_respond_closed_scope_refuses_free_text
 test_respond_stale_approve_refused
 test_respond_approve_open_key
+test_respond_invalid_envelope_stays_queued
 test_respond_action_write_failure_reports_error
 test_respond_approve_unknown_key_refused
 test_respond_desk_only_decision_refused
 test_respond_merge_requires_notified_and_green
 test_respond_merge_uses_supported_gh_axi_interface
 test_respond_merge_refuses_checkless_pr
+test_respond_merge_refuses_skipped_checks
 test_respond_merge_unnamed_refused
 test_respond_dedupe
 test_respond_rate_limit

@@ -62,6 +62,7 @@ Runtime private artifacts (all gitignored, typically mode 0600/0700):
 | `state/telegram-offset` | Persisted getUpdates offset (advances past drops and accepts; not past deferred over-cap authenticated updates) |
 | `state/telegram-audit.log` | Append-only inbound/outbound/respond audit |
 | `state/telegram-notified-prs.log` | Timestamp, chat id, and full PR URL for successful sends |
+| `state/telegram-notified-pr-recovery/` | Confirmed sends whose primary merge-authority record could not be written |
 | `state/telegram-actions/<update_id>.json` | Validated approve/deny/merge actions for firstmate |
 | `state/telegram-outbox/` | Dry-run outbound previews |
 | `state/telegram-poll.error` | Deduped poll diagnostic marker |
@@ -75,6 +76,7 @@ Runtime private artifacts (all gitignored, typically mode 0600/0700):
 - Command replies use `--reply` and always send (so phone acks work at the desk).
 - Text that looks like secrets, tokens, or credentials is refused (desk-only).
 - Successful sends that contain full `https://github.com/.../pull/N` URLs record those URLs for Stage-2 merge authority.
+- A confirmed send whose primary authority record fails preserves equivalent private recovery evidence, audits the condition, and returns a partial-success error.
 - Dry-run previews do not grant merge authority because Telegram received no message.
 - Telegram's 4096-character limit is enforced with truncation.
 

@@ -56,7 +56,7 @@ INBOX="$STATE/telegram-inbox"
 # green/mergeable. Production default uses gh-axi when available.
 pr_is_green() {
   local url=$1
-  local parts owner repo number out checks state draft merged summary failed total tail
+  local parts owner repo number out checks state draft merged summary passed failed total tail
   if [ -n "${FM_TELEGRAM_PR_CHECK_HOOK:-}" ]; then
     # shellcheck disable=SC2086
     $FM_TELEGRAM_PR_CHECK_HOOK "$url"
@@ -75,17 +75,15 @@ pr_is_green() {
     checks=$(gh-axi pr checks "$number" -R "$owner/$repo" 2>/dev/null) || return 1
     summary=$(printf '%s\n' "$checks" | sed -n 's/^summary: "\(.*\)"$/\1/p' | head -n1)
     [ -n "$summary" ] || return 1
+    passed=${summary%% passed*}
     tail=${summary#*, }
     failed=${tail%% failed*}
     tail=${summary##*, }
     total=${tail%% total}
-    case "$failed:$total" in
-      *[!0-9:]*|:*|*:) return 1 ;;
+    case "$passed:$failed:$total" in
+      *[!0-9:]*|:*|*::*|*:) return 1 ;;
     esac
-    [ "$failed" -eq 0 ] && [ "$total" -gt 0 ] || return 1
-    case "$summary" in
-      *' pending'*) return 1 ;;
-    esac
+    [ "$passed" -eq "$total" ] && [ "$failed" -eq 0 ] && [ "$total" -gt 0 ] || return 1
     return 0
   fi
   # Without gh-axi, refuse merge rather than guessing.
@@ -113,9 +111,15 @@ action_write_failed() {
   printf 'error %s action-write-failed\n' "$uid"
 }
 
+inbox_read_failed() {
+  local uid=$1 reason=$2
+  fmt_audit_append respond error "update_id=$uid inbox-read-failed reason=$reason"
+  printf 'error %s inbox-read-failed\n' "$uid"
+}
+
 process_one() {
   local file=$1
-  local base uid text msg_date parsed verb key reason url fp lookup task note
+  local base uid envelope text msg_date parsed verb key reason url fp lookup task note
 
   base=$(basename "$file")
   case "$base" in
@@ -132,8 +136,25 @@ process_one() {
     return 0
   fi
 
-  text=$(jq -r '.text // empty' "$file" 2>/dev/null) || text=
-  msg_date=$(jq -r '.date // empty' "$file" 2>/dev/null) || msg_date=
+  if ! command -v jq >/dev/null 2>&1; then
+    inbox_read_failed "$uid" missing-jq
+    return 0
+  fi
+  if ! envelope=$(jq -ce '
+    if ((.text | type) == "string")
+      and (.date == null or ((.date | type) == "number" and .date == (.date | floor)))
+    then {text: .text, date: .date}
+    else error("invalid inbox envelope")
+    end
+  ' "$file" 2>/dev/null); then
+    inbox_read_failed "$uid" invalid-envelope
+    return 0
+  fi
+  if ! text=$(printf '%s' "$envelope" | jq -r '.text' 2>/dev/null) \
+    || ! msg_date=$(printf '%s' "$envelope" | jq -r '.date // empty' 2>/dev/null); then
+    inbox_read_failed "$uid" invalid-envelope
+    return 0
+  fi
   if [ -z "$text" ]; then
     fmt_audit_append respond refused "update_id=$uid empty"
     rm -f -- "$file" 2>/dev/null || true
@@ -221,14 +242,14 @@ process_one() {
       if [ "$verb" = approve ]; then
         fmt_action_write "$uid" approve "$key" "$task" >/dev/null \
           || { action_write_failed "$uid" approve; return 0; }
-        reply_text "Approve recorded for key '$key' (task $task). Firstmate will apply it." || true
+        reply_text "Approval recorded for '$key'. Firstmate will apply it." || true
       else
         fmt_action_write "$uid" deny "$key" "$task" "$reason" >/dev/null \
           || { action_write_failed "$uid" deny; return 0; }
         if [ -n "$reason" ]; then
-          reply_text "Deny recorded for key '$key' (task $task): $reason" || true
+          reply_text "Denial recorded for '$key': $reason" || true
         else
-          reply_text "Deny recorded for key '$key' (task $task)." || true
+          reply_text "Denial recorded for '$key'." || true
         fi
       fi
       fmt_dedupe_mark "$fp"
