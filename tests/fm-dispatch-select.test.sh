@@ -290,6 +290,43 @@ JSON
   pass "concurrent history updates preserve every selector's sample"
 }
 
+test_held_history_lock_does_not_block_dispatch() {
+  local quota state lock out err pid attempts
+  quota="$TMP_ROOT/held-lock.json"
+  state="$TMP_ROOT/held-lock-state.json"
+  lock="$state.lock"
+  out="$TMP_ROOT/held-lock.out"
+  err="$TMP_ROOT/held-lock.err"
+  cat > "$quota" <<'JSON'
+{"schemaVersion":2,"providers":[{"provider":"claude","state":{"status":"fresh"},"windows":[{"id":"five_hour","kind":"session","percentUsed":10,"percentRemaining":90,"resetsAt":"2026-07-19T01:00:00Z"}]}]}
+JSON
+  printf '%s\n' '{"schemaVersion":1,"samples":[]}' > "$state"
+  mkdir "$lock"
+  printf '%s\n' "$$" > "$lock/pid"
+
+  run_fixture "$quota" "$err" --state-file "$state" > "$out" &
+  pid=$!
+  attempts=0
+  while [ ! -s "$out" ] && [ "$attempts" -lt 30 ]; do
+    sleep 0.1
+    attempts=$((attempts + 1))
+  done
+  if [ ! -s "$out" ]; then
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    fail "held history lock blocked dispatch output"
+  fi
+  wait "$pid" || fail "selector failed while history lock was held: $(cat "$err")"
+
+  [ "$(cat "$out")" = '{"harness":"claude","model":"claude-sonnet-5","effort":"high"}' ] \
+    || fail "held history lock should not change profile selection: $(cat "$out")"
+  assert_contains "$(cat "$err")" "could not acquire quota sample history lock" \
+    "held history lock should explain the skipped history update"
+  [ "$(jq '.samples | length' "$state")" -eq 0 ] \
+    || fail "held history lock should leave history unchanged: $(cat "$state")"
+  pass "held history lock skips persistence without blocking dispatch"
+}
+
 test_missing_duration_and_clock_skew_are_contained() {
   local quota out err diagnostics
   quota="$TMP_ROOT/missing-duration.json"
@@ -404,6 +441,7 @@ test_configured_codex_extra_resets_add_capacity
 test_stale_candidate_keeps_existing_clear_margin_policy
 test_rollover_discards_incompatible_recent_sample
 test_concurrent_history_updates_preserve_both_samples
+test_held_history_lock_does_not_block_dispatch
 test_missing_duration_and_clock_skew_are_contained
 test_quota_failures_and_old_schema_fall_back_to_first
 test_live_quota_uses_account_free_json_and_private_diagnostics
