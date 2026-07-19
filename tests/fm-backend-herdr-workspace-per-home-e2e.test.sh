@@ -90,17 +90,18 @@ printf 'e2esm1\n' > "$SM_HOME/.fm-secondmate-home"
 printf 'trivial e2e secondmate charter: nothing to do.\n' > "$SM_HOME/data/charter.md"
 printf 'trivial e2e secondmate-owned crewmate brief: nothing to do.\n' > "$SM_HOME/data/cm2/brief.md"
 
-make_scratch_project() {  # <dir>
-  local dir=$1
+make_scratch_project() {  # <dir> <treehouse-root>
+  local dir=$1 treehouse_root=$2
   mkdir -p "$dir"
   git -C "$dir" init -q
   printf '# scratch\n' > "$dir/README.md"
-  git -C "$dir" add README.md
+  printf 'max_trees = 2\nroot = "%s"\n' "$treehouse_root" > "$dir/treehouse.toml"
+  git -C "$dir" add README.md treehouse.toml
   git -C "$dir" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm initial
 }
 
-PROJ1="$TMP_ROOT/scratch-project-1"; make_scratch_project "$PROJ1"
-PROJ2="$TMP_ROOT/scratch-project-2"; make_scratch_project "$PROJ2"
+PROJ1="$TMP_ROOT/scratch-project-1"; make_scratch_project "$PROJ1" "$TMP_ROOT/treehouse-pool-1"
+PROJ2="$TMP_ROOT/scratch-project-2"; make_scratch_project "$PROJ2" "$TMP_ROOT/treehouse-pool-2"
 
 # --- 1. primary-shaped home: a crewmate spawns into the "firstmate" space ---
 

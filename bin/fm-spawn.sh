@@ -686,7 +686,7 @@ validate_spawn_worktree() {  # <source> <inspect-target>
   fi
   if [ -z "$wt_real" ] || [ -z "$wt_top_real" ] || [ "$wt_real" != "$wt_top_real" ] || [ "$wt_real" = "$proj_real" ]; then
     echo "error: $source did not yield an isolated worktree (resolved '$WT'; worktree root '${wt_top:-none}'; primary '$PROJ_ABS'); refusing to launch to avoid tangling the primary checkout. Inspect target $inspect_target" >&2
-    exit 1
+    return 1
   fi
 }
 
@@ -784,7 +784,7 @@ EOF
       echo "error: orca did not return a worktree id/path for $W" >&2
       exit 1
     fi
-    validate_spawn_worktree "orca worktree create" "$W"
+    validate_spawn_worktree "orca worktree create" "$W" || exit 1
     if [ -z "$ORCA_TERMINAL" ]; then
       ORCA_TERMINAL=$(fm_backend_orca_terminal_create "$ORCA_WORKTREE_ID" "$W") || exit 1
     fi
@@ -843,20 +843,29 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   # Compare against PROJ_ABS_REAL (physical), not PROJ_ABS: a symlinked project
   # prefix would otherwise make the pane's OS-level cwd read differ from
   # PROJ_ABS on the very first poll, before the pane has actually moved.
-  for _ in $(seq 1 60); do
+  # Treehouse can also expose an intermediate setup cwd before its worktree shell
+  # starts, so accept only a candidate that already passes the isolation guard.
+  LAST_WT_CANDIDATE=
+  for _ in $(seq 1 "${FM_SPAWN_WORKTREE_POLLS:-60}"); do
     p=$(spawn_current_path "$WT_TARGET" || true)
     if [ -n "$p" ] && [ "$(real_path_or_raw "$p")" != "$PROJ_ABS_REAL" ]; then
       WT="$p"
-      break
+      LAST_WT_CANDIDATE=$p
+      if validate_spawn_worktree "treehouse get" "$T" >/dev/null 2>&1; then
+        break
+      fi
+      WT=
     fi
     sleep 1
   done
   if [ -z "$WT" ]; then
+    if [ -n "$LAST_WT_CANDIDATE" ]; then
+      WT=$LAST_WT_CANDIDATE
+      validate_spawn_worktree "treehouse get" "$T" || exit 1
+    fi
     echo "error: treehouse get did not enter a worktree within 60s; inspect window $T" >&2
     exit 1
   fi
-
-  validate_spawn_worktree "treehouse get" "$T"
 fi
 
 # Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. Go won't

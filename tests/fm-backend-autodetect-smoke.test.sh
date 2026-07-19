@@ -85,7 +85,8 @@ PROJ="$TMP_ROOT/scratch-project"
 mkdir -p "$PROJ"
 git -C "$PROJ" init -q
 printf '# scratch\n' > "$PROJ/README.md"
-git -C "$PROJ" add README.md
+printf 'max_trees = 2\nroot = "%s"\n' "$TMP_ROOT/treehouse-pool" > "$PROJ/treehouse.toml"
+git -C "$PROJ" add README.md treehouse.toml
 git -C "$PROJ" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm initial
 
 # --- spawn with NO explicit backend config; HERDR_ENV=1 is the only marker --

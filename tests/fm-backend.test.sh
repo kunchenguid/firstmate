@@ -799,8 +799,8 @@ run_spawn_case() {  # <bin-root> <fakebin> <log> <state> <data> <config> <proj> 
 # first pane_current_path poll, then the real worktree path from the second poll
 # onward, so this test fails loudly if the PROJ_ABS/PROJ_ABS_REAL
 # canonicalization in bin/fm-spawn.sh ever regresses.
-make_spawn_symlink_fakebin() {  # <dir> <initial-project-path> <worktree-path> -> echoes fakebin dir
-  local dir=$1 initial_path=$2 wt=$3 fb="$1/fakebin" counter="$1/poll-count"
+make_spawn_symlink_fakebin() {  # <dir> <initial-project-path> <worktree-path> [transient-path] -> echoes fakebin dir
+  local dir=$1 initial_path=$2 wt=$3 transient_path=${4:-} fb="$1/fakebin" counter="$1/poll-count"
   mkdir -p "$fb"
   : > "$counter"
   cat > "$fb/tmux" <<SH
@@ -811,8 +811,11 @@ case "\${1:-}" in
   display-message)
     for a in "\$@"; do case "\$a" in *pane_current_path*)
       printf x >> "$counter"
-      if [ "\$(wc -c < "$counter")" -le 1 ]; then
+      poll_count=\$(wc -c < "$counter")
+      if [ "\$poll_count" -le 1 ]; then
         printf '%s\\n' "$initial_path"
+      elif [ -n "$transient_path" ] && [ "\$poll_count" -eq 2 ]; then
+        printf '%s\\n' "$transient_path"
       else
         printf '%s\\n' "$wt"
       fi
@@ -869,6 +872,32 @@ test_spawn_symlinked_project_prefix_avoids_false_refusal() {
   run_spawn_symlink_case physical physical
   run_spawn_symlink_case logical logical
   pass "fm-spawn.sh: a project reached through a symlinked prefix (e.g. macOS /tmp -> /private/tmp) does not trip the isolation guard's false refusal"
+}
+
+test_spawn_retries_transient_non_worktree_cwd() {
+  local proj wt transient id fb data state config log out rc
+  proj="$TMP_ROOT/transient-cwd-proj"
+  wt="$TMP_ROOT/transient-cwd-wt"
+  transient="$TMP_ROOT/transient-cwd-setup"
+  id="spawntransientcwd"
+  fm_git_worktree "$proj" "$wt" "fm/$id"
+  mkdir -p "$transient"
+  fb=$(make_spawn_symlink_fakebin "$TMP_ROOT/transient-cwd-fake" "$proj" "$wt" "$transient")
+  data="$TMP_ROOT/transient-cwd-data"
+  mkdir -p "$data/$id"
+  printf 'test brief content\n' > "$data/$id/brief.md"
+  state="$TMP_ROOT/transient-cwd-state"; config="$TMP_ROOT/transient-cwd-config"
+  mkdir -p "$state" "$config"
+  log="$TMP_ROOT/transient-cwd-spawn.log"
+
+  out=$(run_spawn_case "$ROOT" "$fb" "$log" "$state" "$data" "$config" "$proj" -- "$id" "$proj" claude 2>&1)
+  rc=$?
+  expect_code 0 "$rc" "fm-spawn.sh should retry past a transient non-worktree cwd"$'\n'"$out"
+  assert_contains "$out" "worktree=$wt" \
+    "fm-spawn.sh did not wait for the genuine isolated worktree after a transient setup cwd"
+
+  rm -rf "/tmp/fm-$id"
+  pass "fm-spawn.sh: transient Treehouse setup cwd is retried until an isolated worktree appears"
 }
 
 # --- old vs new: fm-teardown.sh ----------------------------------------------
@@ -1084,6 +1113,7 @@ test_backend_of_selector_matches_explicit_target_meta
 test_send_conformance_old_vs_new
 test_peek_conformance_old_vs_new
 test_spawn_symlinked_project_prefix_avoids_false_refusal
+test_spawn_retries_transient_non_worktree_cwd
 test_teardown_conformance_old_vs_new
 test_spawn_refuses_unknown_backend_flag
 test_spawn_refuses_codex_app_backend_flag
