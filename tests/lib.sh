@@ -34,6 +34,17 @@ FM_TEST_LIB_SOURCED=1
 # strips this to verify real refusal.
 export FM_GATE_REFUSE_BYPASS=1
 
+# Pin the lane governor's memory snapshot to deterministic, safe values for the
+# whole suite. fm-spawn.sh consults bin/fm-lane-governor.sh before every launch,
+# and its default path reads the live host RAM/swap (sysctl/vm_stat). Tests that
+# drive the real fm-spawn - the secondmate lifecycle/safety flows especially -
+# would otherwise be refused whenever the host momentarily dips below the minimum
+# available-RAM line, an entirely host-dependent flake unrelated to what they
+# assert. Any test that intentionally exercises the memory gate (e.g.
+# fm-lane-governor.test.sh) sets these per invocation, which overrides the export.
+export FM_LANE_MEMORY_AVAILABLE_MB=${FM_LANE_MEMORY_AVAILABLE_MB:-4096}
+export FM_LANE_SWAP_USED_MB=${FM_LANE_SWAP_USED_MB:-0}
+
 # Resolve the repo root from this library's own location. Consumed by sourcing
 # test files, not by this library, so it reads as "unused" here.
 # shellcheck disable=SC2034
