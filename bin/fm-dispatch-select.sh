@@ -5,7 +5,11 @@
 #
 # Input may be a full rule object with `use` and optional `select`, a single
 # profile object, or an ordered array of profile objects.
-# Output is one compact JSON profile object on stdout.
+# Output is one compact JSON profile object on stdout, carrying the profile's
+# harness plus whichever of model, effort, and launch it declared. `launch` names
+# a launch variant from config/harness-overrides.json and is passed straight
+# through to fm-spawn.sh --launch; no selector ever picks a launch variant, because
+# launch identity is a human choice (docs/configuration.md).
 #
 # quota-balanced is deterministic, and this header is the single owner of its
 # contract:
@@ -115,7 +119,8 @@ first_profile() {
     def clean($p):
       {harness: $p.harness}
       + (if ($p.model? | type) == "string" then {model: $p.model} else {} end)
-      + (if ($p.effort? | type) == "string" then {effort: $p.effort} else {} end);
+      + (if ($p.effort? | type) == "string" then {effort: $p.effort} else {} end)
+      + (if ($p.launch? | type) == "string" then {launch: $p.launch} else {} end);
     clean(.[0])
   '
 }
@@ -169,7 +174,8 @@ selection=$(printf '%s\n' "$quota_json" | jq -ec \
   def clean($p):
     {harness: $p.harness}
     + (if ($p.model? | type) == "string" then {model: $p.model} else {} end)
-    + (if ($p.effort? | type) == "string" then {effort: $p.effort} else {} end);
+    + (if ($p.effort? | type) == "string" then {effort: $p.effort} else {} end)
+    + (if ($p.launch? | type) == "string" then {launch: $p.launch} else {} end);
   def provider_for($h): [.providers[]? | select(.provider == $h)][0];
   def general_ids($h):
     if $h == "claude" then ["five_hour", "seven_day"]

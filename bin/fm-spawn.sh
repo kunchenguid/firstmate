@@ -1,14 +1,22 @@
 #!/usr/bin/env bash
 # Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
 # secondmate in its isolated firstmate home.
-# Usage: fm-spawn.sh <task-id> <project-dir> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--scout]
-#        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
+# Usage: fm-spawn.sh <task-id> <project-dir> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--launch <variant>] [--backend <name>] [--scout]
+#        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--launch <variant>] [--backend <name>] --secondmate
 #   --harness <name> is the explicit per-spawn harness/profile adapter. The old
 #   positional harness arg still works for back-compat.
 #   --model <name> and --effort <low|medium|high|xhigh|max> are concrete profile
 #   axes chosen by firstmate at intake. They are only threaded into harnesses whose
 #   installed CLIs were verified to support that axis; unsupported axes are omitted
 #   from that harness's launch rather than guessed.
+#   --launch <variant> selects a NAMED LAUNCH VARIANT declared under
+#   config/harness-overrides.json .[<harness>].variants.[<variant>]. A variant changes
+#   only how the resolved harness starts (its binary, launch args, and launch env); it
+#   never changes WHICH harness runs, so the recorded harness= and every supervision
+#   fact keep applying. Variant choice is always explicit - an explicit --launch, then
+#   the dispatch profile's launch field, then .[<harness>].default_variant - and is
+#   never inferred from quota or any other runtime signal. Naming a variant the
+#   resolved harness does not declare is a hard spawn refusal, never a silent fallback.
 #   --backend <name> is the explicit runtime session-provider backend for this
 #   spawn. Without it, the script resolves FM_BACKEND, then config/backend, then
 #   runtime auto-detection (the runtime firstmate itself is executing inside -
@@ -80,10 +88,14 @@
 #   per harness; firstmate always owns the model/effort flags, the brief injection, and the
 #   turn-end hook (resolve_launch_overrides; full contract in docs/configuration.md). With no
 #   such file the assembled launch string is byte-identical to the built-in template.
+#   A named variant under .[<harness>].variants layers over that harness's own three axes,
+#   per axis: command and args replace, env merges with the variant winning. With no variant
+#   selected the assembled launch string is byte-identical to the pre-variant one.
 # Per-harness turn-end hooks are installed automatically; some live outside the worktree.
 # grok uses a firstmate-owned global hook under ${GROK_HOME:-$HOME/.grok}/hooks
 # plus a gitignored .fm-grok-turnend worktree pointer and a state token.
-# On success prints: spawned <id> harness=<name> kind=<ship|scout|secondmate> mode=<mode> yolo=<on|off> window=<backend-target> worktree=<path>
+# On success prints: spawned <id> harness=<name> [launch=<variant>] kind=<ship|scout|secondmate> mode=<mode> yolo=<on|off> window=<backend-target> worktree=<path>
+# launch= appears only when a named launch variant was selected.
 # mode/yolo are resolved per-project from data/projects.md for ship/scout tasks;
 # secondmate spawns record mode=secondmate, yolo=off, home=, and projects=.
 set -eu
@@ -91,7 +103,7 @@ set -eu
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 usage() {
-  sed -n '2,78p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,86p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 case "${1:-}" in
@@ -127,10 +139,12 @@ HARNESS_ARG=
 MODEL=
 EFFORT=
 BACKEND_ARG=
+LAUNCH_VARIANT=
 HARNESS_SET=0
 MODEL_SET=0
 EFFORT_SET=0
 BACKEND_SET=0
+LAUNCH_SET=0
 POS=()
 want_value=
 for a in "$@"; do
@@ -143,6 +157,7 @@ for a in "$@"; do
       model) MODEL=$a; MODEL_SET=1 ;;
       effort) EFFORT=$a; EFFORT_SET=1 ;;
       backend) BACKEND_ARG=$a; BACKEND_SET=1 ;;
+      launch) LAUNCH_VARIANT=$a; LAUNCH_SET=1 ;;
       *) echo "error: internal parser state for --$want_value" >&2; exit 1 ;;
     esac
     want_value=
@@ -159,6 +174,8 @@ for a in "$@"; do
     --effort=*) EFFORT=${a#--effort=}; EFFORT_SET=1 ;;
     --backend) want_value=backend ;;
     --backend=*) BACKEND_ARG=${a#--backend=}; BACKEND_SET=1 ;;
+    --launch) want_value=launch ;;
+    --launch=*) LAUNCH_VARIANT=${a#--launch=}; LAUNCH_SET=1 ;;
     *) POS+=("$a") ;;
   esac
 done
@@ -167,6 +184,7 @@ done
 [ "$MODEL_SET" -eq 0 ] || [ -n "$MODEL" ] || { echo "error: --model requires a non-empty value" >&2; exit 1; }
 [ "$EFFORT_SET" -eq 0 ] || [ -n "$EFFORT" ] || { echo "error: --effort requires a non-empty value" >&2; exit 1; }
 [ "$BACKEND_SET" -eq 0 ] || [ -n "$BACKEND_ARG" ] || { echo "error: --backend requires a non-empty value" >&2; exit 1; }
+[ "$LAUNCH_SET" -eq 0 ] || [ -n "$LAUNCH_VARIANT" ] || { echo "error: --launch requires a non-empty value" >&2; exit 1; }
 case "$EFFORT" in
   ''|low|medium|high|xhigh|max) ;;
   *) echo "error: --effort must be one of low, medium, high, xhigh, max" >&2; exit 1 ;;
@@ -270,6 +288,7 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
   [ -z "$MODEL" ] || shared_args+=(--model "$MODEL")
   [ -z "$EFFORT" ] || shared_args+=(--effort "$EFFORT")
   [ -z "$BACKEND_ARG" ] || shared_args+=(--backend "$BACKEND_ARG")
+  [ -z "$LAUNCH_VARIANT" ] || shared_args+=(--launch "$LAUNCH_VARIANT")
   for pair in "${POS[@]}"; do
     case "$pair" in
       *=*) : ;;
@@ -531,6 +550,65 @@ json_escape() {
   printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
 }
 
+# Shared jq prelude for the override file. Binds $h0 to the harness-level override
+# object and $v0 to the selected variant object ({} when no variant is selected),
+# so every axis lookup below reads the same two layers.
+# shellcheck disable=SC2016  # jq program text: $h/$v/$h0/$v0 are jq bindings, not shell vars
+OV_JQ_PRELUDE='
+  def obj($x): if ($x | type) == "object" then $x else {} end;
+  obj(.[$h]) as $h0
+  | (if $v == "" then {} else obj(obj(.[$h]).variants[$v]) end) as $v0
+  |'
+
+# Run one jq query over the override file with the two-layer prelude bound.
+ov_jq() {  # <harness> <variant> <jq-expr> [extra jq args...]
+  local harness=$1 variant=$2 expr=$3
+  shift 3
+  jq -r --arg h "$harness" --arg v "$variant" "$@" "$OV_JQ_PRELUDE $expr" \
+    "$HARNESS_OVERRIDES" 2>/dev/null || true
+}
+
+# True when the override file is present, jq is installed, and the JSON parses.
+harness_overrides_usable() {
+  [ -f "$HARNESS_OVERRIDES" ] \
+    && command -v jq >/dev/null 2>&1 \
+    && jq -e . "$HARNESS_OVERRIDES" >/dev/null 2>&1
+}
+
+# Resolve which NAMED LAUNCH VARIANT applies to this spawn and print it (empty
+# means none). Precedence is explicit only, never inferred: an explicit --launch
+# wins, then .[<harness>].default_variant from the override file. Quota, load, and
+# every other runtime signal are deliberately not inputs here - the captain chose
+# human selection over automatic routing, because the available quota readings are
+# not accurate enough to route on (see docs/configuration.md). A named variant that
+# the resolved harness does not declare is a hard refusal from both sources, so a
+# typo or a stale name can never silently fall back to a different account.
+# shellcheck disable=SC2016  # jq program text: $h0/$v0 are jq bindings, not shell vars
+resolve_launch_variant() {  # <harness>
+  local harness=$1 variant='' source=''
+  if [ -n "$LAUNCH_VARIANT" ]; then
+    variant=$LAUNCH_VARIANT
+    source="--launch"
+  fi
+  if [ -z "$variant" ]; then
+    if harness_overrides_usable; then
+      variant=$(ov_jq "$harness" "" 'if ($h0.default_variant? | type) == "string" then $h0.default_variant else empty end')
+      [ -z "$variant" ] || source="config/harness-overrides.json .$harness.default_variant"
+    fi
+  fi
+  [ -n "$variant" ] || return 0
+  if ! harness_overrides_usable; then
+    echo "error: launch variant '$variant' requested via $source but config/harness-overrides.json is absent, unreadable, or jq is missing" >&2
+    return 1
+  fi
+  if [ "$(ov_jq "$harness" "$variant" 'if ($v0 | length) > 0 then "yes" else "no" end')" != yes ]; then
+    echo "error: launch variant '$variant' (from $source) is not declared under config/harness-overrides.json .$harness.variants" >&2
+    echo "       declared variants for $harness: $(ov_jq "$harness" "" 'if ($h0.variants? | type) == "object" then ($h0.variants | keys_unsorted | join(", ")) else "" end' | sed 's/^$/(none)/')" >&2
+    return 1
+  fi
+  printf '%s\n' "$variant"
+}
+
 # Resolve the three overridable launch axes for the resolved harness, applying
 # config/harness-overrides.json when it is present, jq is available, and the file
 # is valid JSON. Sets OV_ENV_VALUE, OV_CMD, OV_ARGS_VALUE:
@@ -540,28 +618,38 @@ json_escape() {
 #     no args); absent keeps the built-in default.
 #   - env: override .[$h].env is MERGED over the built-in launch env (override wins
 #     on key conflict) and prepended as KEY=value assignments.
+# A selected named variant layers over the harness-level values per axis: command
+# and args replace when the variant declares them, and env merges with the variant
+# winning on a key conflict. Layering rather than replacing is what keeps a variant
+# a delta - the harness-level entry stays the shared base for every variant.
 # OV_ENV_VALUE and OV_ARGS_VALUE carry a single trailing space when non-empty (or
 # are empty), matching launch_template's placeholder spacing. The firstmate-owned
 # tail (model/effort flags, brief injection, turn-end wiring) is NOT touched here.
 # An absent file, absent jq, invalid JSON, absent harness key, or absent field each
 # falls back to the built-in default for that axis, so the no-override launch string
-# is byte-identical to the built-in template. Override env is deliberately never
-# recorded into meta.
-resolve_launch_overrides() {  # <harness>
-  local harness=$1 usable=0 cmd raw el first k v line merged
+# is byte-identical to the built-in template, and so is the launch string for a file
+# that declares no variant. Override env is deliberately never recorded into meta,
+# which is what keeps a variant's gateway credentials out of firstmate's state files.
+# shellcheck disable=SC2016  # jq program text: $h0/$v0/$k are jq bindings, not shell vars
+resolve_launch_overrides() {  # <harness> [<variant>]
+  local harness=$1 variant=${2:-} cmd raw el first k v line merged
   local args_str env_pairs ov_env_keys
   OV_CMD=$(harness_default_command "$harness")
   args_str=$(harness_default_args "$harness")
   env_pairs=$(harness_default_env_pairs "$harness")
   ov_env_keys=
-  if [ -f "$HARNESS_OVERRIDES" ] && command -v jq >/dev/null 2>&1 && jq -e . "$HARNESS_OVERRIDES" >/dev/null 2>&1; then
-    usable=1
-  fi
-  if [ "$usable" = 1 ]; then
-    cmd=$(jq -r --arg h "$harness" 'if ((.[$h]?|type)=="object") and ((.[$h].command?|type)=="string") and ((.[$h].command|length)>0) then .[$h].command else empty end' "$HARNESS_OVERRIDES" 2>/dev/null || true)
+  if harness_overrides_usable; then
+    cmd=$(ov_jq "$harness" "$variant" '
+      (if ($v0.command? | type) == "string" and ($v0.command | length) > 0 then $v0.command
+       elif ($h0.command? | type) == "string" and ($h0.command | length) > 0 then $h0.command
+       else empty end)')
     [ -n "$cmd" ] && OV_CMD=$cmd
-    if jq -e --arg h "$harness" '((.[$h]?|type)=="object") and (.[$h]|has("args")) and ((.[$h].args|type)=="array")' "$HARNESS_OVERRIDES" >/dev/null 2>&1; then
-      raw=$(jq -r --arg h "$harness" '.[$h].args[]' "$HARNESS_OVERRIDES" 2>/dev/null || true)
+    if [ "$(ov_jq "$harness" "$variant" '
+      if (($v0 | has("args")) and (($v0.args | type) == "array"))
+        or (($h0 | has("args")) and (($h0.args | type) == "array"))
+      then "yes" else "no" end')" = yes ]; then
+      raw=$(ov_jq "$harness" "$variant" '
+        (if ($v0 | has("args")) and (($v0.args | type) == "array") then $v0.args else $h0.args end)[]')
       args_str=
       if [ -n "$raw" ]; then
         first=1
@@ -573,7 +661,7 @@ $raw
 EOF
       fi
     fi
-    ov_env_keys=$(jq -r --arg h "$harness" 'if ((.[$h]?|type)=="object") and ((.[$h].env?|type)=="object") then (.[$h].env|keys_unsorted[]) else empty end' "$HARNESS_OVERRIDES" 2>/dev/null || true)
+    ov_env_keys=$(ov_jq "$harness" "$variant" '(obj($h0.env) + obj($v0.env)) | keys_unsorted[]')
   fi
   # env prefix: built-in pairs whose key is not overridden, then the override pairs.
   merged=
@@ -590,7 +678,7 @@ EOF
   if [ -n "$ov_env_keys" ]; then
     while IFS= read -r k; do
       [ -n "$k" ] || continue
-      v=$(jq -r --arg h "$harness" --arg k "$k" '.[$h].env[$k] | tostring' "$HARNESS_OVERRIDES" 2>/dev/null || true)
+      v=$(ov_jq "$harness" "$variant" '(obj($h0.env) + obj($v0.env))[$k] | tostring' --arg k "$k")
       merged="$merged${merged:+ }$k=$(shell_quote "$v")"
     done <<EOF
 $ov_env_keys
@@ -709,6 +797,17 @@ validate_firstmate_operational_dirs() {
     fi
   done
 }
+
+# Resolve the named launch variant here, before ANY fleet mutation, so an
+# undeclared variant name refuses the spawn instead of leaving a half-built
+# worktree behind. A raw launch command supplies its own binary and env, so a
+# variant has nothing to layer over and the combination is refused outright
+# rather than silently ignored.
+if [ -n "$LAUNCH_VARIANT" ] && [ -z "$HARNESS" ]; then
+  echo "error: --launch cannot be combined with a raw launch command; the raw command already sets its own binary, args, and env" >&2
+  exit 1
+fi
+RESOLVED_LAUNCH_VARIANT=$(resolve_launch_variant "$HARNESS") || exit 1
 
 if [ "$KIND" = secondmate ]; then
   if [ -z "$FIRSTMATE_HOME" ] && [ -f "$STATE/$ID.meta" ]; then
@@ -1120,6 +1219,11 @@ META_WINDOW=$T
   echo "tasktmp=$TASK_TMP"
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
+  # launch= records the NAME of the selected launch variant, and only when one was
+  # selected, so a home with no variants keeps a byte-identical meta. The name alone
+  # is recorded - never the variant's command or env - so a gateway launcher's
+  # credentials stay in that launcher and out of firstmate's state files.
+  [ -z "$RESOLVED_LAUNCH_VARIANT" ] || echo "launch=$RESOLVED_LAUNCH_VARIANT"
   # backend= is written only for a non-default (non-tmux) backend, so the
   # default path's meta stays byte-identical (absent backend= means tmux;
   # data/fm-backend-design-d7's P1 compatibility contract).
@@ -1160,7 +1264,7 @@ EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT")
 # Overridable axes first (command, args, env prefix), then the firstmate-owned tail.
 # For the raw-launch-command escape hatch, LAUNCH holds no __ENV__/__CMD__/__ARGS__
 # placeholders, so these substitutions are a no-op there.
-resolve_launch_overrides "$HARNESS"
+resolve_launch_overrides "$HARNESS" "$RESOLVED_LAUNCH_VARIANT"
 LAUNCH=${LAUNCH//__ENV__/$OV_ENV_VALUE}
 LAUNCH=${LAUNCH//__CMD__/$OV_CMD}
 LAUNCH=${LAUNCH//__ARGS__/$OV_ARGS_VALUE}
@@ -1184,4 +1288,4 @@ spawn_send_literal "$T" "$LAUNCH"
 sleep 0.3
 spawn_send_key "$T" Enter
 
-echo "spawned $ID harness=$HARNESS kind=$KIND mode=$MODE yolo=$YOLO window=$META_WINDOW worktree=$WT"
+echo "spawned $ID harness=$HARNESS${RESOLVED_LAUNCH_VARIANT:+ launch=$RESOLVED_LAUNCH_VARIANT} kind=$KIND mode=$MODE yolo=$YOLO window=$META_WINDOW worktree=$WT"

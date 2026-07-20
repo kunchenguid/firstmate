@@ -112,6 +112,8 @@ Unsupported effort values are still recorded in task meta when passed to `fm-spa
 That keeps spawn launch compatible across claude, codex, grok, pi, and opencode while preserving the requested profile for later audit.
 Dispatch profiles decide which harness runs a task; the separate local `config/harness-overrides.json` decides how that harness's CLI is launched, replacing its binary or launch args and merging launch env per harness name.
 `fm-spawn.sh` always owns the launch tail - model and effort flags, brief injection, and turn-end wiring - so an override never changes harness identity or weakens supervision, and with no override file the assembled launch command is byte-identical to the built-in template.
+That file may also declare named launch variants, which make an alternative launch identity such as a gateway-billed account a selectable option rather than a hidden shell function.
+A variant is chosen only by an explicit human selection - a per-spawn `--launch`, a dispatch profile's `launch` field, or the home's configured `default_variant` - never by quota or any other runtime signal, and it changes the launch, never the recorded harness.
 
 ## Optional secondmates
 
