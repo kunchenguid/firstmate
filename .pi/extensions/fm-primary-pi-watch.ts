@@ -484,6 +484,9 @@ export default function (pi: ExtensionAPI) {
     const settleReadiness = (ready: boolean): void => {
       if (readinessSettled) return;
       readinessSettled = true;
+      if (ready && lockPolicy === "defer" && activeSessionLockPolicy === "defer") {
+        activeSessionLockPolicy = "owned-only";
+      }
       resolveReadiness(ready);
     };
     const settleStartResult = (result: ArmResult): void => {
@@ -555,12 +558,7 @@ export default function (pi: ExtensionAPI) {
     const armChild = child;
     if (!armChild) return result;
     const verified = await waitForStartResult(armChild);
-    if (verified.ok) {
-      if (lockPolicy === "defer" && activeSessionLockPolicy === "defer") {
-        activeSessionLockPolicy = "owned-only";
-      }
-      return result;
-    }
+    if (verified.ok) return result;
     if (child === armChild) await retireArm(armChild, true);
     return verified;
   }

@@ -110,7 +110,7 @@ test_tracked_extension_present_and_self_hashing() {
   assert_contains "$text" 'startArm(activeSessionLockPolicy)' "tracked extension does not carry session lock policy into every arm"
   assert_contains "$text" 'launchArm(activeSessionLockPolicy, predecessorArmPid)' "tracked extension does not carry session lock policy into successor arms"
   assert_not_contains "$text" 'lockPolicy: SessionLockPolicy = "recover"' "tracked extension still has an implicit recover policy"
-  assert_contains "$text" 'if (lockPolicy === "defer" && activeSessionLockPolicy === "defer")' "tracked extension does not bound startup deferral to the first verified arm"
+  assert_contains "$text" 'if (ready && lockPolicy === "defer" && activeSessionLockPolicy === "defer")' "tracked extension does not promote startup deferral from shared verified readiness"
   assert_contains "$text" 'const acquisition = spawnSync(lockScript, []' "tracked extension does not route acquisition through the production owner"
   assert_contains "$text" 'if (ownership !== "owned")' "tracked extension arms without re-reading owned state"
   assert_contains "$text" 'lock ownership changed during resume' "tracked extension does not distinguish a lost acquisition race"
@@ -1834,6 +1834,105 @@ EOF
   pass "Pi startup and new promote defer after the first verified arm"
 }
 
+test_pi_startup_auto_successor_promotes_defer() {
+  local reason recovery repo home plugin arm_log acquire_log ready out status
+  for reason in startup new; do
+    for recovery in actionable retry; do
+      repo="$TMP_ROOT/pi-$reason-$recovery-auto-promote-root"
+      home="$TMP_ROOT/pi-$reason-$recovery-auto-promote-home"
+      arm_log="$TMP_ROOT/pi-$reason-$recovery-auto-promote-arm.log"
+      acquire_log="$TMP_ROOT/pi-$reason-$recovery-auto-promote-acquire.log"
+      ready="$TMP_ROOT/pi-$reason-$recovery-auto-promote-ready"
+      mkdir -p "$home/state" "$home/config"
+      install_pi_watch_extension_fixture "$repo"
+      plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+      cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm\n' >> "${FM_ARM_LOG:?}"
+count=$(wc -l < "$FM_ARM_LOG" | tr -d ' ')
+if [ "$count" = 1 ]; then
+  if [ "${FM_INITIAL_RECOVERY:?}" = actionable ]; then
+    printf 'signal: initial pre-ready wake\n'
+    exit 0
+  fi
+  exit 9
+fi
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+sleep 0.1
+: > "$FM_SUCCESSOR_READY"
+trap 'exit 0' TERM INT
+while :; do sleep 1; done
+SH
+      chmod +x "$repo/bin/fm-watch-arm.sh"
+      status=0
+      out=$(REASON="$reason" RECOVERY="$recovery" PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$arm_log" FM_LOCK_ACQUIRE_LOG="$acquire_log" FM_INITIAL_RECOVERY="$recovery" FM_SUCCESSOR_READY="$ready" FM_WATCH_REARM_RETRY_BASE_MS=20 FM_WATCH_REARM_RETRY_MAX_MS=20 node --input-type=module 2>&1 <<'EOF'
+import { existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const lock = `${process.env.FM_HOME}/state/.lock`;
+writeFileSync(lock, `${process.pid}\n`);
+const handlers = new Map();
+const notifications = [];
+let tool = null;
+const pi = {
+  on(event, handler) {
+    handlers.set(event, handler);
+  },
+  registerCommand() {},
+  registerTool(candidate) {
+    if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+  },
+  sendUserMessage: async () => {},
+};
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+await handlers.get("session_start")?.({ type: "session_start", reason: process.env.REASON }, {
+  ui: {
+    notify(message) {
+      notifications.push(message);
+    },
+  },
+});
+if (!tool) throw new Error("watcher tool was not registered");
+for (let i = 0; i < 150 && !existsSync(process.env.FM_SUCCESSOR_READY); i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 20));
+}
+if (!existsSync(process.env.FM_SUCCESSOR_READY)) {
+  throw new Error(`${process.env.REASON}/${process.env.RECOVERY} did not establish an automatic successor`);
+}
+const initialArmCount = readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split(/\n/).length;
+if (initialArmCount !== 2) {
+  throw new Error(`${process.env.REASON}/${process.env.RECOVERY} launched ${initialArmCount} arms before lock loss`);
+}
+
+const loss = process.env.RECOVERY === "actionable" ? "missing" : "dead";
+if (loss === "missing") unlinkSync(lock); else writeFileSync(lock, "999999\n");
+const result = await tool.execute("post-successor-loss", {}, undefined, undefined, {});
+if (result.details?.ok !== false || !result.content?.[0]?.text.includes(`existing session-lock ownership required (state: ${loss})`)) {
+  throw new Error(`${process.env.REASON}/${process.env.RECOVERY} retained defer after successor readiness: ${JSON.stringify(result)}`);
+}
+const finalArmCount = readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split(/\n/).length;
+if (finalArmCount !== 2) {
+  throw new Error(`${process.env.REASON}/${process.env.RECOVERY} launched ${finalArmCount} arms after lock loss`);
+}
+if (existsSync(process.env.FM_LOCK_ACQUIRE_LOG)) {
+  throw new Error(`${process.env.REASON}/${process.env.RECOVERY} invoked lock acquisition`);
+}
+if (loss === "missing") {
+  if (existsSync(lock)) throw new Error(`${process.env.REASON}/${process.env.RECOVERY} recreated a missing lock`);
+} else if (readFileSync(lock, "utf8").trim() !== "999999") {
+  throw new Error(`${process.env.REASON}/${process.env.RECOVERY} replaced a dead lock`);
+}
+await handlers.get("session_shutdown")?.({ type: "session_shutdown" }, {});
+EOF
+      ) || status=$?
+      expect_code 0 "$status" "Pi $reason must promote defer after a $recovery successor"
+      [ -z "$out" ] || fail "Pi $reason/$recovery auto-successor promotion test printed output: $out"
+    done
+  done
+  pass "Pi automatic successors promote startup and new to owned-only"
+}
+
 test_pi_extension_respects_primary_scope() {
   local scenario base repo home plugin arm_log out status
   for scenario in linked secondmate; do
@@ -2963,6 +3062,7 @@ test_pi_session_start_load_order_preserves_initial_nudge
 test_pi_fork_reload_rebuilds_only_owned_supervision
 test_pi_fork_reload_policy_survives_every_rearm_path
 test_pi_startup_policy_promotes_after_first_arm
+test_pi_startup_auto_successor_promotes_defer
 test_pi_extension_respects_primary_scope
 test_pi_extension_distinguishes_lock_refusal_states
 test_opencode_primary_watch_plugin_static_wiring
