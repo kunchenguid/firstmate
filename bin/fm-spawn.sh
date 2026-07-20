@@ -56,10 +56,11 @@
 #   profile consultation. A --secondmate spawn is exempt and resolves the SECONDMATE
 #   harness (config/secondmate-harness -> config/crew-harness -> own), so the
 #   secondmate-vs-crewmate split is DURABLE across every respawn (recovery,
-#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|grok)
-#   overrides it for this spawn (either kind). A non-flag string containing
-#   whitespace is treated as a RAW launch command - the escape hatch for verifying
-#   new adapters.
+#   /updatefirstmate, restart). A bare adapter name
+#   (claude|codex|opencode|pi|grok|cursor-agent) overrides it for this spawn
+#   (either kind). cursor-agent is crew oneshot only (docs/cursor-agent-crew.md).
+#   A non-flag string containing whitespace is treated as a RAW launch command -
+#   the escape hatch for verifying new adapters.
 #   config/secondmate-harness may also carry an optional model and effort as extra
 #   whitespace-separated tokens ("<harness> [<model>] [<effort>]"). For a
 #   --secondmate spawn, those tokens apply only when this spawn also resolves its
@@ -443,6 +444,12 @@ launch_template() {
     # launch command - it is a Stop-event hook installed below (global hook +
     # per-task pointer), so the template is identical for ship/scout/secondmate.
     grok) printf '%s' 'grok --always-approve __MODELFLAG____EFFORTFLAG__"$(cat __BRIEF__)"' ;;
+    # cursor-agent: crew oneshot only (verified 2026-07-20). -p prints and exits;
+    # --force/--trust skip interactive approval gates; --workspace pins the cwd.
+    # Not a verified primary (no turn-end/watch hooks). Interactive Herdr launch
+    # is unverified - do not use this template for multiturn panes. See
+    # docs/cursor-agent-crew.md. Canonical name is cursor-agent (not bare cursor).
+    cursor-agent) printf '%s' 'cursor-agent -p --force --trust --workspace "$(pwd)" "$(cat __BRIEF__)"' ;;
     *) return 1 ;;
   esac
 }

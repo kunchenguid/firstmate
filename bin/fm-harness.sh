@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Detect the agent harness this process tree runs on.
-# Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|grok|unknown
+# Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|grok|cursor-agent|unknown
 #        fm-harness.sh crew             print the effective CREWMATE harness
 #                                        (config/crew-harness; "default" resolves to own)
 #        fm-harness.sh secondmate       print the harness the PRIMARY uses to launch
@@ -20,6 +20,9 @@
 # name and is never parsed for a model.
 # Detection layers: verified environment markers first, then process ancestry.
 # Record each newly verified env marker here.
+# cursor-agent is a crew oneshot adapter only (see docs/cursor-agent-crew.md); it is
+# detected so config/crew-harness=default can resolve to it, but it is not a verified
+# primary harness (no turn-end/watch hooks).
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -35,6 +38,9 @@ detect_own() {
   # It does NOT set CLAUDECODE despite being Claude-Code-compatible, so this marker
   # is unambiguous when firstmate runs natively on grok.
   [ "${GROK_AGENT:-}" = "1" ] && { echo grok; return; }
+  # cursor-agent sets CURSOR_AGENT=1 for its child/tool processes (verified 2026-07-20).
+  # Match only this marker; do not treat the bare Cursor IDE as an agent harness.
+  [ "${CURSOR_AGENT:-}" = "1" ] && { echo cursor-agent; return; }
   # Layer 2: walk the parent chain and match the command name.
   local pid=$$ comm args
   for _ in 1 2 3 4 5 6 7 8; do
@@ -44,6 +50,7 @@ detect_own() {
       *codex*) echo codex; return ;;
       *opencode*) echo opencode; return ;;
       *grok*) echo grok; return ;;
+      *cursor-agent*) echo cursor-agent; return ;;
       pi) echo pi; return ;;
       node*|python*)
         # Bare interpreter: match the harness name in its script path.
@@ -53,6 +60,7 @@ detect_own() {
           *codex*) echo codex; return ;;
           *opencode*) echo opencode; return ;;
           *grok*) echo grok; return ;;
+          *cursor-agent*) echo cursor-agent; return ;;
           *" pi "*|*/pi) echo pi; return ;;
         esac ;;
     esac

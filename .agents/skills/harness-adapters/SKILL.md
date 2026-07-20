@@ -1,6 +1,6 @@
 ---
 name: harness-adapters
-description: Agent-only reference for firstmate harness operations. Use before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter. Contains verified facts for claude, codex, opencode, pi, and grok.
+description: Agent-only reference for firstmate harness operations. Use before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter. Contains verified facts for claude, codex, opencode, pi, and grok, plus a partial crew-oneshot adapter for cursor-agent.
 user-invocable: false
 metadata:
   internal: true
@@ -316,3 +316,20 @@ The adapter therefore runs the shared predicate and, when it returns 2, forces o
 It does not pass `--permission-mode`, so the passive hook cannot escalate the primary session's tool permissions.
 Project-local Grok hooks require folder trust, verified with launch-time `--trust`; if the primary firstmate checkout is not trusted for Grok hooks, this primary guard fails open and `fm-guard.sh` remains the next-command alarm.
 Grok's primary watcher protocol is Claude-shaped background-notify around `bin/fm-watch-arm.sh`; the passive Stop hook is only a backstop for blind turn ends.
+
+## cursor-agent (CREW ONESHOT ONLY, verified 2026-07-20)
+
+Partial crew adapter for Cursor's `cursor-agent` CLI.
+Launch template (in `bin/fm-spawn.sh`): `cursor-agent -p --force --trust --workspace "$(pwd)" "$(cat <brief>)"`.
+Canonical harness name is `cursor-agent`; do not use bare `cursor` (that names the IDE).
+
+| Fact | Value |
+|---|---|
+| Scope | Crew oneshot ship/scout only. Not a verified primary. |
+| Busy / done | Process exit of the `-p` oneshot. No pane busy-signature, turn-end hook, or watcher protocol. |
+| Env marker | `CURSOR_AGENT=1` (also match process basename/args `*cursor-agent*`; never bare `cursor`). |
+| Autonomy | `--force` and `--trust` skip interactive approval gates for the oneshot. |
+| Interactive | Unverified. Herdr `agent start … -- cursor-agent` returned `agent_status=unknown` and flaky name lookup; do not claim interactive verified. |
+
+Do not arm primary turn-end or watch hooks for this adapter.
+See `docs/cursor-agent-crew.md` for the scope contract.
