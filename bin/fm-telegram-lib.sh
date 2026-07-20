@@ -364,7 +364,7 @@ fmt_dedupe_mark() {
 # Verbs: status | approve | deny | merge | refuse
 fmt_parse_command() {
   local text=$1
-  local norm verb rest key reason url
+  local norm verb rest key reason url last
   # Collapse whitespace, strip leading slash bot commands (/status@bot -> status).
   norm=$(printf '%s' "$text" | tr '\n\r\t' '   ')
   norm=${norm#"${norm%%[![:space:]]*}"}

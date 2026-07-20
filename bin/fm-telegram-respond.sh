@@ -132,7 +132,7 @@ pr_is_green() {
 
 reply_text() {
   local text=$1
-  local tmp
+  local tmp rc
   tmp=$(mktemp "${TMPDIR:-/tmp}/fm-telegram-reply.XXXXXX") || return 1
   printf '%s\n' "$text" > "$tmp"
   # --reply bypasses AFK-only so command acks always reach the phone.
@@ -159,7 +159,7 @@ inbox_read_failed() {
 
 process_one() {
   local file=$1
-  local base uid envelope text msg_date parsed verb key reason url fp lookup task note
+  local base uid envelope text msg_date parsed verb key reason url fp lookup task note summary
 
   base=$(basename "$file")
   case "$base" in
