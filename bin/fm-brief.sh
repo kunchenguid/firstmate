@@ -366,6 +366,10 @@ $RULE1
    every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
    daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
 
+# Testing
+Verify behavior interactively while you build, but before calling the task done, promote anything that represents a real behavior contract into a committed, automated test - a manual check paid for once is cheaper than one silently re-paid on every future change.
+Follow this project's own testing conventions and layer split (unit, integration, end-to-end) when documented in its AGENTS.md; when none exist yet, default to a pyramid shape - most coverage in fast unit tests, a thinner layer of integration tests against real component boundaries rather than mocks, and end-to-end tests reserved for the project's handful of critical user journeys.
+
 # Project memory
 If \`AGENTS.md\` or \`CLAUDE.md\` already exists, or if this task produced durable project-intrinsic knowledge, run \`$FM_ROOT/bin/fm-ensure-agents-md.sh .\` in the worktree.
 Record only project knowledge useful to almost every future session.
