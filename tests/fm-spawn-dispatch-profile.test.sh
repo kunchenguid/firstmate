@@ -11,6 +11,7 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 SPAWN="$ROOT/bin/fm-spawn.sh"
+TEARDOWN="$ROOT/bin/fm-teardown.sh"
 TMP_ROOT=$(fm_test_tmproot fm-spawn-dispatch-profile)
 
 make_spawn_fakebin() {
@@ -383,6 +384,87 @@ JSON
   pass "top-level default array resolves through quota selection into the real spawn path"
 }
 
+test_omp_writes_state_extension_and_launches_with_hook() {
+  local rec id out status launch ext
+  id=profile-omp-hook-z17
+  rec=$(make_spawn_case profile-omp-hook omp "$id")
+  read_case_record "$rec"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "omp spawn should write a state extension and launch"
+  assert_contains "$out" "spawned $id harness=omp" "spawn did not report omp"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" omp default default
+
+  ext="$HOME_DIR/state/$id.omp-ext.ts"
+  assert_present "$ext" "omp spawn did not write its state extension"
+  assert_grep "turn_end" "$ext" "omp state extension does not listen for turn_end"
+  assert_grep "$id.turn-ended" "$ext" "omp state extension does not touch the task turn-ended marker"
+
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "bun \"\$HOME/.bun/bin/omp\" --auto-approve --hook '$ext' \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/brief.md')\"" \
+    "omp launch did not include the state extension hook"
+  pass "omp spawn writes a state extension and launches with --hook"
+}
+
+test_omp_threads_model_and_thinking_effort() {
+  local rec id out status launch
+  id=profile-omp-z18
+  rec=$(make_spawn_case profile-omp omp "$id")
+  read_case_record "$rec"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model opus --effort high)
+  status=$?
+  expect_code 0 "$status" "omp spawn with profile flags should succeed"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" omp opus high
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "bun \"\$HOME/.bun/bin/omp\" --auto-approve --model 'opus' --thinking 'high' --hook" \
+    "omp launch did not thread model and thinking flags"
+  assert_not_contains "$launch" "--effort" "omp launch must use --thinking, not --effort"
+  pass "omp receives --model and --thinking profile flags"
+}
+
+test_omp_omits_invalid_max_thinking_effort() {
+  local rec id out status launch
+  id=profile-omp-max-z19
+  rec=$(make_spawn_case profile-omp-max omp "$id")
+  read_case_record "$rec"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model opus --effort max)
+  status=$?
+  expect_code 0 "$status" "omp spawn with unsupported max thinking effort should omit the effort flag"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" omp opus max
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "bun \"\$HOME/.bun/bin/omp\" --auto-approve --model 'opus' --hook" \
+    "omp launch did not preserve the model flag when max effort was omitted"
+  assert_not_contains "$launch" "--thinking" "omp launch must omit unsupported max thinking effort"
+  assert_not_contains "$launch" "--effort" "omp launch must not fall back to --effort"
+  pass "omp omits unsupported max thinking effort"
+}
+
+test_omp_teardown_removes_state_extension() {
+  local rec id out status ext
+  id=profile-omp-teardown-z21
+  rec=$(make_spawn_case profile-omp-teardown omp "$id")
+  read_case_record "$rec"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "omp spawn should succeed before teardown"
+  ext="$HOME_DIR/state/$id.omp-ext.ts"
+  assert_present "$ext" "omp spawn did not write the extension before teardown"
+
+  FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" \
+    FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
+    FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
+    FM_FAKE_PANE_PATH="$WT_DIR" TMUX="fake,1,0" PATH="$FAKEBIN_DIR:$PATH" \
+    "$TEARDOWN" "$id" --force >/dev/null 2>&1 \
+    || fail "omp teardown failed"
+
+  assert_absent "$ext" "omp state extension survived teardown"
+  pass "omp teardown removes the state extension"
+}
+
 test_batch_forwards_shared_profile_flags() {
   local rec id1 id2 out status
   id1=profile-batch-a-z9
@@ -420,6 +502,32 @@ test_active_dispatch_profile_does_not_block_secondmate_launch() {
   pass "active crew-dispatch profile does not block secondmate launches"
 }
 
+test_omp_secondmate_omits_turn_end_hook() {
+  local rec id sm out status launch
+  id=profile-secondmate-omp-z20
+  rec=$(make_spawn_case profile-secondmate-omp codex "$id")
+  read_case_record "$rec"
+  enable_dispatch_profile "$HOME_DIR"
+  printf '%s\n' omp > "$HOME_DIR/config/secondmate-harness"
+  sm="$CASE_DIR/secondmate-home"
+  make_seeded_secondmate_home "$sm" "$id"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate)
+  status=$?
+  expect_code 0 "$status" "omp secondmate spawn should succeed"
+  assert_contains "$out" "spawned $id harness=omp kind=secondmate" "secondmate launch did not use omp"
+  assert_grep "kind=secondmate" "$HOME_DIR/state/$id.meta" "secondmate meta missing kind=secondmate"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" omp default default
+  assert_absent "$HOME_DIR/state/$id.omp-ext.ts" "omp secondmate should not write a turn-end extension"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "bun \"\$HOME/.bun/bin/omp\" --auto-approve \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '" \
+    "omp secondmate launch did not use the hookless template"
+  assert_contains "$launch" "/data/charter.md')" "omp secondmate launch did not use the charter prompt"
+  assert_not_contains "$launch" "--hook" "omp secondmate launch must omit --hook"
+  assert_not_contains "$launch" "turn-ended" "omp secondmate launch must not reference turn-ended"
+  pass "omp secondmate launches without a turn-end hook"
+}
+
 test_no_profile_keeps_claude_profile_defaults
 test_active_dispatch_profile_requires_explicit_harness_for_ship
 test_active_dispatch_profile_requires_explicit_harness_for_scout
@@ -435,7 +543,12 @@ test_grok_omits_invalid_xhigh_reasoning_effort
 test_opencode_threads_model_and_ignores_effort_axis
 test_pi_threads_model_and_max_effort
 test_quota_selected_default_array_reaches_spawn
+test_omp_writes_state_extension_and_launches_with_hook
+test_omp_threads_model_and_thinking_effort
+test_omp_omits_invalid_max_thinking_effort
+test_omp_teardown_removes_state_extension
 test_batch_forwards_shared_profile_flags
 test_active_dispatch_profile_does_not_block_secondmate_launch
+test_omp_secondmate_omits_turn_end_hook
 
 echo "# all fm-spawn-dispatch-profile tests passed"

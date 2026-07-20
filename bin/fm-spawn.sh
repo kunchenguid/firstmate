@@ -56,7 +56,7 @@
 #   profile consultation. A --secondmate spawn is exempt and resolves the SECONDMATE
 #   harness (config/secondmate-harness -> config/crew-harness -> own), so the
 #   secondmate-vs-crewmate split is DURABLE across every respawn (recovery,
-#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|grok)
+#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|grok|omp)
 #   overrides it for this spawn (either kind). A non-flag string containing
 #   whitespace is treated as a RAW launch command - the escape hatch for verifying
 #   new adapters.
@@ -102,6 +102,8 @@
 # Per-harness turn-end hooks are installed automatically; some live outside the worktree.
 # grok uses a firstmate-owned global hook under ${GROK_HOME:-$HOME/.grok}/hooks
 # plus a gitignored .fm-grok-turnend worktree pointer and a state token.
+# omp uses a state-owned extension under state/<id>.omp-ext.ts and passes it with
+# --hook for crewmate/scout launches; secondmate launches omit the hook.
 # On success prints: spawned <id> harness=<name> kind=<ship|scout|secondmate> mode=<mode> yolo=<on|off> window=<backend-target> worktree=<path>
 # mode/yolo are resolved per-project from data/projects.md for ship/scout tasks;
 # secondmate spawns record mode=secondmate, yolo=off, home=, and projects=.
@@ -384,7 +386,7 @@ FIRSTMATE_HOME=
 
 if [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
-    ''|claude|codex|opencode|pi|grok)
+    ''|claude|codex|opencode|pi|grok|omp)
       ARG3=${POS[1]:-}
       ;;
     *' '*)
@@ -445,6 +447,13 @@ launch_template() {
     # launch command - it is a Stop-event hook installed below (global hook +
     # per-task pointer), so the template is identical for ship/scout/secondmate.
     grok) printf '%s' 'grok --always-approve __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    omp)
+      if [ "$kind" = secondmate ]; then
+        printf '%s' 'bun "$HOME/.bun/bin/omp" --auto-approve __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+      else
+        printf '%s' 'bun "$HOME/.bun/bin/omp" --auto-approve __MODELFLAG____EFFORTFLAG__--hook __OMPEXT__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+      fi
+      ;;
     *) return 1 ;;
   esac
 }
@@ -532,7 +541,7 @@ model_flag_for_harness() {
   local harness=$1 model=$2
   [ -n "$model" ] && [ "$model" != default ] || return 0
   case "$harness" in
-    claude|codex|opencode|pi|grok)
+    claude|codex|opencode|pi|grok|omp)
       printf -- '--model %s ' "$(shell_quote "$model")"
       ;;
   esac
@@ -569,6 +578,13 @@ effort_flag_for_harness() {
       # its --thinking flag.
       case "$effort" in
         low|medium|high|xhigh|max) printf -- '--thinking %s ' "$(shell_quote "$effort")" ;;
+      esac
+      ;;
+    omp)
+      # omp 16.3.6 accepts low|medium|high|xhigh through --thinking.
+      # Omit max rather than passing an unsupported value.
+      case "$effort" in
+        low|medium|high|xhigh) printf -- '--thinking %s ' "$(shell_quote "$effort")" ;;
       esac
       ;;
     # opencode's interactive `opencode --prompt` launch has a verified --model
@@ -1192,6 +1208,17 @@ EOF
       printf 'token=%s\n' "${auth_file##*/}" > "$WT/.fm-grok-turnend"
       exclude_path '.fm-grok-turnend'
       ;;
+    omp*)
+      # Written OUTSIDE the worktree, like the pi extension, so OMP can emit a
+      # per-turn wake without project-local hook material.
+      cat > "$STATE/$ID.omp-ext.ts" <<EOF
+// Firstmate turn-end signal; written by fm-spawn.
+import { execFile } from "node:child_process";
+export default function (omp: any) {
+  omp.on("turn_end", () => execFile("touch", ["$TURNEND"]));
+}
+EOF
+      ;;
   esac
 fi
 
@@ -1257,6 +1284,7 @@ META_WINDOW=$T
 sq_brief=$(shell_quote "$BRIEF")
 sq_turnend=$(shell_quote "$TURNEND")
 sq_piext=$(shell_quote "$STATE/$ID.pi-ext.ts")
+sq_ompext=$(shell_quote "$STATE/$ID.omp-ext.ts")
 sq_piturnend=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-turnend-guard.ts")
 sq_piwatch=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-pi-watch.ts")
 sq_opinput=$(shell_quote "$FM_ROOT/bin/fm-operational-input.sh")
@@ -1269,6 +1297,7 @@ LAUNCH=${LAUNCH//__EFFORTFLAG__/$EFFORTFLAG}
 LAUNCH=${LAUNCH//__BRIEF__/$sq_brief}
 LAUNCH=${LAUNCH//__TURNEND__/$sq_turnend}
 LAUNCH=${LAUNCH//__PIEXT__/$sq_piext}
+LAUNCH=${LAUNCH//__OMPEXT__/$sq_ompext}
 LAUNCH=${LAUNCH//__PITURNEND__/$sq_piturnend}
 LAUNCH=${LAUNCH//__PIWATCH__/$sq_piwatch}
 LAUNCH=${LAUNCH//__OPINPUT__/$sq_opinput}

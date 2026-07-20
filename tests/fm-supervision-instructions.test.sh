@@ -138,6 +138,19 @@ test_grok_command_sources_effective_config() {
   pass "grok rendered command sources the effective x-mode config"
 }
 
+test_omp_is_background_notify() {
+  local out
+  out=$("$RENDER" --harness omp)
+  assert_contains "$out" "SUPERVISION OPERATING INSTRUCTIONS - primary harness: omp" "omp heading missing"
+  assert_contains "$out" "Mode: OMP background-notify supervision." "omp snippet missing background-notify mode"
+  assert_contains "$out" "background: true" "omp snippet missing tracked background tool instruction"
+  assert_contains "$out" "bin/fm-watch-arm.sh" "omp snippet missing watcher arm"
+  assert_not_contains "$out" "foreground checkpoint" "omp snippet must not be Codex-style foreground checkpoint"
+  out=$("$RENDER" --harness omp --repair-line)
+  assert_contains "$out" "OMP tracked background task" "omp repair line is not background-notify shaped"
+  pass "omp supervision is background-notify shaped"
+}
+
 test_pi_snippet_uses_effective_extension_path() {
   local home out turnend watch
   home="$TMP_ROOT/pi-home"
@@ -161,4 +174,5 @@ test_repair_lines
 test_cross_harness_ordinary_continuation_and_repair_matrix
 test_grok_is_background_notify
 test_grok_command_sources_effective_config
+test_omp_is_background_notify
 test_pi_snippet_uses_effective_extension_path

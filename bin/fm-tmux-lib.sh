@@ -61,9 +61,9 @@
 . "$(dirname -- "${BASH_SOURCE[0]}")/fm-composer-lib.sh"
 
 # Busy footers per harness (mirror fm-watch.sh). claude/codex: "esc to
-# interrupt"; opencode: "esc interrupt"; pi: "Working..."; grok: "Ctrl+c:cancel"
-# (grok's mid-turn cancel hint, shown iff a turn is running - verified grok 0.2.73).
-FM_TMUX_BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel'
+# interrupt"; opencode: "esc interrupt"; pi: "Working..."; grok: "Ctrl+c:cancel";
+# omp: "esc" inside angle brackets (mid-turn cancel hint).
+FM_TMUX_BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel|[<⟨]esc[>⟩]'
 
 # fm_tmux_strip_ghost: thin adapter over the shared, fleet-wide ghost extractor
 # fm_composer_strip_ghost (bin/fm-composer-lib.sh). It drops de-emphasised
@@ -97,8 +97,8 @@ fm_tmux_strip_ghost() { fm_composer_strip_ghost; }
 # no multibyte character classes), and delegates the empty/pending/unknown
 # decision to the shared owner fm_composer_classify_content
 # (bin/fm-composer-lib.sh). The bordered flag is what lets a bordered `│ > │`
-# (claude's own idle composer) read empty while a bare, unbordered `$ ` dead-shell
-# prompt reads unknown.
+# (claude's own idle composer) or OMP's rounded input box read empty while a bare,
+# unbordered `$ ` dead-shell prompt reads unknown.
 fm_tmux_composer_state() {  # <target> -> empty|pending|unknown
   local target=$1 cy raw plain stripped bordered=0
   cy=$(tmux display-message -p -t "$target" '#{cursor_y}' 2>/dev/null) || { printf 'unknown'; return 0; }
@@ -109,7 +109,9 @@ fm_tmux_composer_state() {  # <target> -> empty|pending|unknown
   plain="${plain#"${plain%%[![:space:]]*}"}"
   plain="${plain%"${plain##*[![:space:]]}"}"
   case "$plain" in
-    '│'*'│'|'┃'*'┃'|'|'*'|') bordered=1 ;;
+    '│'*'│'|'┃'*'┃') bordered=1 ;;
+    '|'*'|') bordered=1 ;;
+    '╭'*'╮'|'╰'*'╯') bordered=1 ;;
   esac
   # content: from the ghost-stripped row (real typed text only).
   stripped=$(printf '%s\n' "$raw" | fm_composer_strip_ghost)
@@ -120,6 +122,11 @@ fm_tmux_composer_state() {  # <target> -> empty|pending|unknown
     '┃'*'┃') stripped=${stripped#┃}; stripped=${stripped%┃} ;;
     '|'*'|') stripped=${stripped#|}; stripped=${stripped%|} ;;
   esac
+  stripped=${stripped//╭/}
+  stripped=${stripped//╮/}
+  stripped=${stripped//╰/}
+  stripped=${stripped//╯/}
+  stripped=${stripped//─/}
   stripped="${stripped#"${stripped%%[![:space:]]*}"}"
   stripped="${stripped%"${stripped##*[![:space:]]}"}"
   # A busy footer landing on the cursor line is not pending input (tmux-specific:
