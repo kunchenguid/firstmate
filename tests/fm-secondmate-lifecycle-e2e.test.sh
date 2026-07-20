@@ -157,6 +157,12 @@ phase_handoff() {
     echo "skip: tasks-axi not found (backlog handoff delegates to it)"
     return 0
   fi
+  # shellcheck source=bin/fm-tasks-axi-lib.sh disable=SC1091
+  . "$ROOT/bin/fm-tasks-axi-lib.sh"
+  if ! fm_tasks_axi_compatible; then
+    echo "skip: tasks-axi lacks the multi-ID mv contract (0.2.2+) the handoff delegates to"
+    return 0
+  fi
   cat > "$HOME_DIR/data/backlog.md" <<'EOF'
 ## In flight
 - [ ] live-task - active work (repo: alpha, since 2026-06-20)

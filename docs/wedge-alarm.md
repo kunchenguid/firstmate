@@ -2,6 +2,7 @@
 
 The away-mode sub-supervisor (`bin/fm-supervise-daemon.sh`) buffers escalations and injects them into firstmate's own pane.
 When injection cannot confirm a submit past `FM_MAX_DEFER_SECS` (the pane is genuinely busy or wedged, or its Enter is swallowed), `inject_wedge_alarm` raises a loud, rate-limited alarm so the stall never stays invisible.
+When local `config/afk-slack-dm` selects Slack DM delivery instead (see `docs/configuration.md` "Away-mode Slack DM delivery"), persistent DM failure past the same `FM_MAX_DEFER_SECS` fires the same `wedge_alarm_notify` channels, throttled by its own marker `state/.subsuper-slack-dm-wedged`.
 
 ## Why an active channel beyond the status-line flash
 
