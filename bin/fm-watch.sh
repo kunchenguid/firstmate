@@ -9,6 +9,10 @@
 # working signal is never silently swallowed. A declared external-wait pause is
 # the separate idle absorb case and re-surfaces only on its long bounded cadence,
 # although its initial no-verb status signal still surfaces in normal mode.
+# A merge-ready park (crew_is_merge_ready in fm-classify-lib.sh: a terminal
+# checks-passed run whose validated armed PR merge poll owns the merge/close
+# wait) is the third expected-idle absorb case: its stale pane never wakes or
+# wedge-escalates, while the armed poll still wakes the supervisor on merge.
 # While state/.afk exists, the daemon owns triage and this watcher queues and exits
 # on every wake. Printed reason lines:
 #   signal: <file>...      status/turn-end signals, surfaced when a listed status
@@ -275,11 +279,15 @@ FM_WEDGE_DEMAND_INSPECT_COUNT=${FM_WEDGE_DEMAND_INSPECT_COUNT:-3}
 # Repeat-poll wedge-timer bookkeeping for an already-classified stale hash
 # absorbed as provably-working - repairs a missing/corrupt timer (self-heals a
 # watcher restart between recording the hash and recording the timer), or
-# escalates once STALE_ESCALATE_SECS have elapsed. Never re-reads the crew
-# state (the costly check already ran once, at classification time). Shared by
-# both places a hash can be absorbed this way: the plain non-terminal path,
-# and the stale_is_terminal-overridden path (a captain-relevant status-log
-# line that an active run/busy pane outranked).
+# escalates once STALE_ESCALATE_SECS have elapsed. Re-reads the crew state ONLY
+# at the escalation moment (bounded to once per STALE_ESCALATE_SECS window),
+# never on the cheap per-poll aging path: a run that finished checks-passed
+# behind an unchanged pane hash - so no first-sighting reclassification ever
+# ran - must not keep wedge-escalating once the armed merge poll owns the wait
+# (crew_is_merge_ready), while a still-active or failed run escalates exactly
+# as before. Shared by both places a hash can be absorbed this way: the plain
+# non-terminal path, and the stale_is_terminal-overridden path (a
+# captain-relevant status-log line that an active run/busy pane outranked).
 wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-file>
   local win=$1 since_file=$2 label=$3 escalation_file=$4 since age n reason
   since=$(cat "$since_file" 2>/dev/null || true)
@@ -291,6 +299,11 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
     *)
       age=$(( $(date +%s) - since ))
       if [ "$age" -ge "$STALE_ESCALATE_SECS" ]; then
+        if crew_is_merge_ready "$(window_to_task "$win" "$STATE")" "$STATE"; then
+          rm -f "$since_file" "$escalation_file"
+          triage_log "absorbed $label (merge-ready: armed PR poll owns the merge wait): $win"
+          return 0
+        fi
         n=$(( $(cat "$escalation_file" 2>/dev/null || echo 0) + 1 ))
         echo "$n" > "$escalation_file"
         reason="stale: $win (idle ${age}s, possible wedge, escalation $n)"
@@ -936,6 +949,17 @@ EOF
               printf '%s' "$h" > "$sf"
               date +%s > "$ssf"
               triage_log "absorbed stale (provably working, overriding a stale captain-relevant status): $w"
+            elif crew_is_merge_ready "$task" "$STATE"; then
+              # Terminal AND genuinely merge-ready: the run is checks-passed and
+              # the validated armed merge poll owns the merge/close wait, so the
+              # idle pane is expected - no wake, no wedge timer. Each NEW hash
+              # (e.g. a harness repainting its idle UI between foreground
+              # checkpoints) re-runs this fail-closed check; a poll that later
+              # turns invalid is surfaced separately by the check sweep's
+              # rejected-unauthenticated wake.
+              printf '%s' "$h" > "$sf"
+              rm -f "$ssf" "$ewf"
+              triage_log "absorbed stale (merge-ready: armed PR poll owns the merge wait): $w"
             else
               fm_wake_append stale "$w" "stale: $w" || exit 1
               printf '%s' "$h" > "$sf"
@@ -981,7 +1005,19 @@ EOF
                 handle_paused_stale "$w" "$task" "$h"
                 ;;
               *)
-                surface_nonterminal_stale "$w" "$h"
+                # A stopped crew normally surfaces at once - unless it is
+                # genuinely merge-ready (e.g. a post-done status append left a
+                # no-verb last line), where the armed poll owns the wait; the
+                # wedge timer's escalation-moment recheck keeps revalidating
+                # that verdict on the STALE_ESCALATE_SECS cadence.
+                if crew_is_merge_ready "$task" "$STATE"; then
+                  clear_pause_tracking "$w"
+                  printf '%s' "$h" > "$sf"
+                  date +%s > "$ssf"
+                  triage_log "absorbed non-terminal stale (merge-ready: armed PR poll owns the merge wait): $w"
+                else
+                  surface_nonterminal_stale "$w" "$h"
+                fi
                 ;;
             esac
           else

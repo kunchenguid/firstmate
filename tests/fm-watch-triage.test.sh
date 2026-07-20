@@ -39,6 +39,74 @@ watch_bg() {  # <state> <fakebin> <out> [extra env assignments...]
     FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$@" "$WATCH" > "$out" &
 }
 
+# Arm the REAL canonical merge poll for <id> against a case's state dir via
+# bin/fm-pr-check.sh (the transactional check/sidecar/registration publication),
+# so the merge-ready tests exercise the genuine fail-closed trust chain instead
+# of a mock. The task's meta must already exist; it carries no worktree, so no
+# gh lookup runs. Guard output is advisory noise here and is discarded.
+arm_merge_poll() {  # <state> <id> <url>
+  local state=$1 id=$2 url=$3
+  FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-pr-check.sh" "$id" "$url" >/dev/null 2>&1 \
+    || fail "fixture could not arm the canonical merge poll for $id"
+}
+
+# Fixture for a merge-ready parked ship task: a terminal checks-green status
+# (seen marker primed so the signal scan does not pre-empt the stale path), a
+# REAL armed canonical merge poll, a stable idle pane hash one poll away from
+# stale classification, and .last-check primed so the check sweep stays out of
+# the way unless a test re-arms it. Sets the MR_* globals for assertions.
+MR_DIR=''; MR_STATE=''; MR_FAKEBIN=''; MR_WINDOW=''; MR_KEY=''; MR_CAPTURE=''; MR_HASH=''
+MR_VERDICT='state: done · source: run-step · checks green: PR ready for review'
+make_merge_ready_case() {  # <name> <id> [pane-text]
+  local name=$1 id=$2 pane=${3:-'codex idle at prompt, awaiting merge'} sig
+  MR_DIR=$(make_case "$name"); MR_STATE="$MR_DIR/state"; MR_FAKEBIN="$MR_DIR/fakebin"
+  MR_WINDOW="test:fm-$id"
+  MR_CAPTURE="$MR_DIR/pane.txt"
+  printf '%s' "$pane" > "$MR_CAPTURE"
+  printf 'window=%s\nkind=ship\n' "$MR_WINDOW" > "$MR_STATE/$id.meta"
+  printf 'done: PR https://github.com/o/r/pull/10 checks green\n' > "$MR_STATE/$id.status"
+  arm_merge_poll "$MR_STATE" "$id" https://github.com/o/r/pull/10
+  sig=$(seen_sig "$MR_STATE/$id.status"); printf '%s' "$sig" > "$MR_STATE/.seen-${id}_status"
+  MR_KEY=$(printf '%s' "$MR_WINDOW" | tr ':/.' '___')
+  MR_HASH=$(hash_text "$pane")
+  printf '%s' "$MR_HASH" > "$MR_STATE/.hash-$MR_KEY"
+  printf '1\n' > "$MR_STATE/.count-$MR_KEY"
+  touch "$MR_STATE/.last-check"
+}
+
+# Background watcher over the current MR_* fixture. Extra env assignments may be
+# passed as arguments; env applies them since an expanded word is never parsed
+# as a shell assignment prefix.
+watch_merge_ready_bg() {  # <out> [extra env assignments...]
+  local out=$1
+  shift
+  PATH="$MR_FAKEBIN:$PATH" FM_FAKE_TMUX_WINDOW="$MR_WINDOW" FM_FAKE_TMUX_CAPTURE="$MR_CAPTURE" \
+    FM_STATE_OVERRIDE="$MR_STATE" FM_CREW_STATE_BIN="$MR_FAKEBIN/fm-crew-state.sh" \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 env "$@" "$WATCH" > "$out" &
+}
+
+# Wait up to <limit> 0.1s ticks for <path> to vanish; 0 once gone, 1 on timeout.
+wait_gone() {
+  local path=$1 limit=${2:-40} i=0
+  while [ "$i" -lt "$limit" ]; do
+    [ -e "$path" ] || return 0
+    sleep 0.1
+    i=$((i + 1))
+  done
+  return 1
+}
+
+# Wait up to <limit> 0.1s ticks for <file> to hold exactly <content>.
+wait_file_equals() {
+  local file=$1 content=$2 limit=${3:-40} i=0
+  while [ "$i" -lt "$limit" ]; do
+    [ "$(cat "$file" 2>/dev/null || true)" = "$content" ] && return 0
+    sleep 0.1
+    i=$((i + 1))
+  done
+  return 1
+}
+
 # Wait up to <limit> 0.1s ticks while <pid> stays alive; 0 if still alive, 1 if it died.
 wait_live() {
   local pid=$1 limit=${2:-30} i=0
@@ -1270,6 +1338,246 @@ test_afk_paused_changed_pane_hands_off_plain_stale() {
   pass "AFK changed paused panes hand off plain stale identities for daemon-owned pause triage"
 }
 
+# --- merge-ready park: an armed canonical PR poll owns the merge wait ---------
+# Regression for the PR-ready false-stale loop: a ship task whose run is
+# genuinely checks-passed (fm-crew-state: done via run-step) and whose canonical
+# authenticated merge poll is armed sits deliberately idle awaiting captain
+# merge. Every idle-pane repaint (e.g. between Codex foreground checkpoints)
+# used to surface an immediate `stale:` wake, and a leftover wedge timer kept
+# escalating - interrupting supervision although the armed poll already owns the
+# merge/close wait. crew_is_merge_ready (fm-classify-lib.sh) absorbs exactly
+# that case and NOTHING else: every invalid-artifact or non-terminal-run variant
+# must keep surfacing.
+
+test_crew_is_merge_ready_classifier() {
+  local dir state fakebin
+  dir=$(make_case merge-ready-classify); state="$dir/state"; fakebin="$dir/fakebin"
+  printf 'window=test:fm-mr\nkind=ship\n' > "$state/mr.meta"
+  arm_merge_poll "$state" mr https://github.com/o/r/pull/12
+  export FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh"
+  export FM_FAKE_CREW_STATE
+  FM_FAKE_CREW_STATE='state: done · source: run-step · checks green: PR ready for review'
+  crew_is_merge_ready mr "$state" || fail "armed poll + checks-passed run not classed merge-ready"
+  FM_FAKE_CREW_STATE='state: done · source: status-log · PR checks green · run still monitoring PR'
+  crew_is_merge_ready mr "$state" || fail "armed poll + run-backed status-log done not classed merge-ready"
+  FM_FAKE_CREW_STATE='state: working · source: run-step · ci running'
+  ! crew_is_merge_ready mr "$state" || fail "an active run classed merge-ready"
+  FM_FAKE_CREW_STATE='state: parked · source: run-step · parked at review'
+  ! crew_is_merge_ready mr "$state" || fail "a parked run classed merge-ready"
+  FM_FAKE_CREW_STATE='state: failed · source: run-step · run failed'
+  ! crew_is_merge_ready mr "$state" || fail "a failed (red/cancelled) run classed merge-ready"
+  FM_FAKE_CREW_STATE='state: unknown · source: none · worktree gone'
+  ! crew_is_merge_ready mr "$state" || fail "an unknown crew classed merge-ready"
+  FM_FAKE_CREW_STATE='state: done · source: none · malformed source'
+  ! crew_is_merge_ready mr "$state" || fail "a done verdict without a run-backed source classed merge-ready"
+  FM_FAKE_CREW_STATE='state: done · source: run-step · checks green: PR ready for review'
+  ! crew_is_merge_ready "" "$state" || fail "an empty id classed merge-ready"
+  ! crew_is_merge_ready mr "" || fail "an empty state dir classed merge-ready"
+  # Unarmed sibling task: a terminal verdict alone must not suppress.
+  printf 'window=test:fm-bare\nkind=ship\n' > "$state/bare.meta"
+  ! crew_is_merge_ready bare "$state" || fail "an unarmed task classed merge-ready"
+  # Tampered registration chain: removing the transactional registration record
+  # invalidates the armed poll, so the suppression must fail closed.
+  mv "$state/mr.pr-poll-registration" "$state/mr.pr-poll-registration.bak"
+  ! crew_is_merge_ready mr "$state" || fail "a missing poll registration classed merge-ready"
+  mv "$state/mr.pr-poll-registration.bak" "$state/mr.pr-poll-registration"
+  crew_is_merge_ready mr "$state" || fail "restored registration did not restore the merge-ready verdict"
+  # Malformed head identity recorded after the canonical pr= line.
+  printf 'pr_head=not-a-sha\n' >> "$state/mr.meta"
+  ! crew_is_merge_ready mr "$state" || fail "a malformed pr_head identity classed merge-ready"
+  unset FM_FAKE_CREW_STATE
+  pass "crew_is_merge_ready: only a validated armed poll plus a run-backed terminal done verdict qualifies"
+}
+
+# Requirement 1: merge-ready + valid armed poll + idle pane -> NO stale wake,
+# including across idle-pane repaints (the each-new-checkpoint loop).
+test_merge_ready_stale_absorbed() {
+  local out pid
+  make_merge_ready_case merge-ready-stale mr
+  out="$MR_DIR/watch.out"
+  export FM_FAKE_CREW_STATE="$MR_VERDICT"
+  watch_merge_ready_bg "$out"
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; fail "watcher exited for a merge-ready idle pane (should absorb): $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || fail "merge-ready idle pane printed a wake reason: $(cat "$out")"
+  [ ! -s "$MR_STATE/.wake-queue" ] || fail "merge-ready idle pane enqueued a durable wake record"
+  [ "$(cat "$MR_STATE/.stale-$MR_KEY" 2>/dev/null || true)" = "$MR_HASH" ] \
+    || fail "merge-ready absorb did not advance the stale suppressor"
+  [ ! -e "$MR_STATE/.stale-since-$MR_KEY" ] || fail "merge-ready absorb started a wedge timer"
+  grep -F "merge-ready" "$MR_STATE/.watch-triage.log" >/dev/null \
+    || fail "merge-ready absorb was not logged to the triage log"
+  reap "$pid"
+
+  # The idle pane repaints (a harness UI tick between foreground checkpoints):
+  # the NEW hash must revalidate and absorb again, never re-fire a stale wake.
+  printf 'codex idle at prompt, awaiting merge [repainted]' > "$MR_CAPTURE"
+  : > "$out"
+  watch_merge_ready_bg "$out"
+  pid=$!
+  wait_file_equals "$MR_STATE/.stale-$MR_KEY" "$(hash_text 'codex idle at prompt, awaiting merge [repainted]')" 60 \
+    || { reap "$pid"; fail "repainted merge-ready pane was not reclassified and absorbed"; }
+  [ ! -s "$out" ] || { reap "$pid"; fail "repainted merge-ready pane printed a wake reason: $(cat "$out")"; }
+  [ ! -s "$MR_STATE/.wake-queue" ] || { reap "$pid"; fail "repainted merge-ready pane enqueued a wake"; }
+  reap "$pid"
+  unset FM_FAKE_CREW_STATE
+  pass "a merge-ready idle pane is absorbed with no stale wake, across repaints"
+}
+
+# Requirements 1 + 5, end-to-end at the Codex foreground-checkpoint boundary:
+# a merge-ready idle task must yield a QUIET checkpoint (exit 124, no wake),
+# checkpoint after checkpoint, preserving the checkpoint contract itself.
+test_merge_ready_checkpoint_quiet() {
+  local out err rc
+  make_merge_ready_case merge-ready-checkpoint mrc
+  out="$MR_DIR/checkpoint.out"; err="$MR_DIR/checkpoint.err"
+  export FM_FAKE_CREW_STATE="$MR_VERDICT"
+  PATH="$MR_FAKEBIN:$PATH" FM_FAKE_TMUX_WINDOW="$MR_WINDOW" FM_FAKE_TMUX_CAPTURE="$MR_CAPTURE" \
+    FM_STATE_OVERRIDE="$MR_STATE" FM_CREW_STATE_BIN="$MR_FAKEBIN/fm-crew-state.sh" \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$ROOT/bin/fm-watch-checkpoint.sh" --seconds 3 > "$out" 2> "$err"
+  rc=$?
+  expect_code 124 "$rc" "first checkpoint over a merge-ready idle task"
+  grep -F 'no actionable wake' "$out" >/dev/null || fail "first quiet checkpoint did not report its quiet outcome"
+  assert_no_grep 'stale:' "$out" "first checkpoint emitted a stale wake for a merge-ready idle task"
+  # The pane repaints between checkpoints; the next checkpoint must stay quiet
+  # too (this used to re-fire stale: on every single checkpoint).
+  printf 'codex idle at prompt, awaiting merge [repainted]' > "$MR_CAPTURE"
+  PATH="$MR_FAKEBIN:$PATH" FM_FAKE_TMUX_WINDOW="$MR_WINDOW" FM_FAKE_TMUX_CAPTURE="$MR_CAPTURE" \
+    FM_STATE_OVERRIDE="$MR_STATE" FM_CREW_STATE_BIN="$MR_FAKEBIN/fm-crew-state.sh" \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$ROOT/bin/fm-watch-checkpoint.sh" --seconds 4 > "$out" 2> "$err"
+  rc=$?
+  expect_code 124 "$rc" "second checkpoint after an idle-pane repaint"
+  assert_no_grep 'stale:' "$out" "a repainted idle pane re-fired a stale wake on the next checkpoint"
+  [ ! -s "$MR_STATE/.wake-queue" ] || fail "quiet checkpoints enqueued durable wake records"
+  unset FM_FAKE_CREW_STATE
+  pass "Codex foreground checkpoints stay quiet (exit 124) over a merge-ready idle task, across repaints"
+}
+
+# Requirement 2: the same merge-ready task's armed poll must still wake the
+# supervisor when the PR lands.
+test_merge_ready_merge_check_still_wakes() {
+  local out drain_out pid
+  make_merge_ready_case merge-ready-merged mrm
+  out="$MR_DIR/watch.out"; drain_out="$MR_DIR/drain.out"
+  cat > "$MR_FAKEBIN/gh" <<'SH'
+#!/usr/bin/env bash
+case " $* " in *" state "*) printf 'MERGED\n' ;; esac
+exit 0
+SH
+  chmod +x "$MR_FAKEBIN/gh"
+  rm -f "$MR_STATE/.last-check"   # make the slow check sweep due immediately
+  export FM_FAKE_CREW_STATE="$MR_VERDICT"
+  watch_merge_ready_bg "$out"
+  pid=$!
+  wait_for_exit "$pid" 60 || fail "watcher did not wake for the merged PR of a merge-ready task"
+  grep -F "check: $MR_STATE/mrm.check.sh: merged" "$out" >/dev/null \
+    || fail "the armed merge poll did not report the merge: $(cat "$out")"
+  FM_STATE_OVERRIDE="$MR_STATE" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the merge check failed"
+  grep "$(printf '\tcheck\t')" "$drain_out" | grep -F merged >/dev/null || fail "the merge check event was not queued"
+  unset FM_FAKE_CREW_STATE
+  pass "a merge-ready task's armed poll still wakes the supervisor on merge/close"
+}
+
+# Requirement 3: a missing or invalid poll registration must NOT suppress stale
+# detection - the fail-closed trust chain stays authoritative. At watcher
+# startup an invalid poll is owned by the non-executing migration (rebuilt from
+# canonical metadata or blocking the watcher outright), so the live-guard case
+# is MID-FLIGHT invalidation: the registration disappears while the watcher is
+# already absorbing, and the next idle-pane reclassification must surface.
+test_merge_ready_requires_valid_poll_registration() {
+  local out drain_out pid
+  make_merge_ready_case merge-ready-invalidated mri
+  out="$MR_DIR/watch.out"; drain_out="$MR_DIR/drain.out"
+  export FM_FAKE_CREW_STATE="$MR_VERDICT"
+  watch_merge_ready_bg "$out"
+  pid=$!
+  wait_file_equals "$MR_STATE/.stale-$MR_KEY" "$MR_HASH" 40 \
+    || { reap "$pid"; fail "valid merge-ready fixture was not absorbed before the tamper"; }
+  [ ! -s "$out" ] || { reap "$pid"; fail "valid merge-ready fixture surfaced before the tamper: $(cat "$out")"; }
+  # The registration record vanishes while the watcher is live; the repainted
+  # pane's next classification must fail closed and surface.
+  rm -f "$MR_STATE/mri.pr-poll-registration"
+  printf 'codex idle at prompt, awaiting merge [repainted]' > "$MR_CAPTURE"
+  wait_for_exit "$pid" 60 || fail "watcher kept suppressing stale after the poll registration vanished"
+  grep -Fx "stale: $MR_WINDOW" "$out" >/dev/null \
+    || fail "the invalidated poll did not surface the stale wake: $(cat "$out")"
+  FM_STATE_OVERRIDE="$MR_STATE" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the invalidated-poll stale failed"
+  grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$MR_WINDOW" >/dev/null \
+    || fail "the invalidated-poll stale was not queued"
+  unset FM_FAKE_CREW_STATE
+  pass "a poll registration invalidated mid-flight stops suppressing stale detection"
+}
+
+# Requirement 4: an active or failed validation run stays eligible for real
+# stale/wedge escalation even with a validly armed poll.
+test_merge_ready_does_not_mask_active_or_failed_run() {
+  local out drain_out pid
+  # A failed (red/cancelled) run with a leftover terminal status line surfaces.
+  make_merge_ready_case merge-ready-failed-run mrf
+  out="$MR_DIR/watch.out"; drain_out="$MR_DIR/drain.out"
+  export FM_FAKE_CREW_STATE='state: failed · source: run-step · run failed'
+  watch_merge_ready_bg "$out"
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "watcher did not surface a failed run despite an armed poll"
+  grep -Fx "stale: $MR_WINDOW" "$out" >/dev/null || fail "a failed run's stale pane was not surfaced: $(cat "$out")"
+  FM_STATE_OVERRIDE="$MR_STATE" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the failed-run stale failed"
+  grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$MR_WINDOW" >/dev/null || fail "the failed-run stale was not queued"
+
+  # An actively-validating run absorbs as provably working, and past the wedge
+  # threshold it still escalates - an armed poll must not mask a stuck run.
+  make_merge_ready_case merge-ready-active-run mra
+  out="$MR_DIR/watch.out"
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · ci running'
+  watch_merge_ready_bg "$out" FM_STALE_ESCALATE_SECS=999
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; fail "watcher exited for an actively-validating armed task (should absorb): $(cat "$out")"
+  fi
+  [ -s "$MR_STATE/.stale-since-$MR_KEY" ] || { reap "$pid"; fail "active-run absorb did not start the wedge timer"; }
+  reap "$pid"
+  echo $(( $(date +%s) - 500 )) > "$MR_STATE/.stale-since-$MR_KEY"
+  : > "$out"
+  watch_merge_ready_bg "$out" FM_STALE_ESCALATE_SECS=240
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "watcher did not wedge-escalate a stuck active run despite an armed poll"
+  grep -F "possible wedge" "$out" >/dev/null || fail "the stuck active run did not escalate as a possible wedge"
+  unset FM_FAKE_CREW_STATE
+  pass "an armed poll never masks a failed run or a stuck active validation run"
+}
+
+# The wedge-noise half of the regression: a run that reaches checks-passed
+# behind an UNCHANGED pane hash leaves a live wedge timer from its validating
+# phase. The escalation-moment recheck must clear it instead of escalating
+# forever, without waking the supervisor.
+test_merge_ready_clears_leftover_wedge_timer() {
+  local out pid
+  make_merge_ready_case merge-ready-wedge-noise mrw
+  out="$MR_DIR/watch.out"
+  printf '%s' "$MR_HASH" > "$MR_STATE/.stale-$MR_KEY"
+  echo $(( $(date +%s) - 500 )) > "$MR_STATE/.stale-since-$MR_KEY"
+  echo 2 > "$MR_STATE/.wedge-escalations-$MR_KEY"
+  export FM_FAKE_CREW_STATE="$MR_VERDICT"
+  watch_merge_ready_bg "$out" FM_STALE_ESCALATE_SECS=240
+  pid=$!
+  wait_gone "$MR_STATE/.stale-since-$MR_KEY" 40 \
+    || { reap "$pid"; fail "the leftover wedge timer was not cleared for a merge-ready task"; }
+  if ! wait_live "$pid" 15; then
+    reap "$pid"; fail "watcher exited while clearing a merge-ready wedge timer: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || { reap "$pid"; fail "clearing the merge-ready wedge timer printed a wake: $(cat "$out")"; }
+  [ ! -s "$MR_STATE/.wake-queue" ] || { reap "$pid"; fail "clearing the merge-ready wedge timer enqueued a wake"; }
+  [ ! -e "$MR_STATE/.wedge-escalations-$MR_KEY" ] \
+    || { reap "$pid"; fail "the wedge escalation count survived a merge-ready recheck"; }
+  grep -F "merge-ready" "$MR_STATE/.watch-triage.log" >/dev/null \
+    || { reap "$pid"; fail "the merge-ready wedge clearance was not logged"; }
+  reap "$pid"
+  unset FM_FAKE_CREW_STATE
+  pass "a leftover wedge timer is cleared, not escalated, once the run is merge-ready"
+}
+
 test_signal_reason_is_actionable_classifier
 test_stale_is_terminal_classifier
 test_scan_captain_relevant_statuses_classifier
@@ -1304,3 +1612,10 @@ test_heartbeat_backstop_surfaces_unsurfaced_status
 test_beacon_stays_fresh_while_absorbing
 test_afk_present_reverts_watcher_to_one_shot
 test_afk_paused_changed_pane_hands_off_plain_stale
+test_crew_is_merge_ready_classifier
+test_merge_ready_stale_absorbed
+test_merge_ready_checkpoint_quiet
+test_merge_ready_merge_check_still_wakes
+test_merge_ready_requires_valid_poll_registration
+test_merge_ready_does_not_mask_active_or_failed_run
+test_merge_ready_clears_leftover_wedge_timer

@@ -18,6 +18,7 @@ For an ordinary crew that has stopped, the normal-mode watcher first surfaces on
 Live or inconclusive liveness remains fail-open at that initial surface, and the secondmate idle-endpoint exemption is unchanged.
 Its initial normal-mode status signal still surfaces through the no-verb path, while away mode self-handles that routine signal and owns the later recheck.
 Fresh stale panes use the same current-state read before trusting the status log, so an active run or busy pane outranks an old captain-relevant status-log line left behind before validation.
+A merge-ready park is the third expected-idle absorb class: when `crew_is_merge_ready` (`bin/fm-classify-lib.sh`) confirms a terminal checks-passed run AND a fully validated armed PR merge poll for the task, its idle pane is absorbed without stale wakes or wedge escalation, because the authenticated poll owns the merge/close wait; any invalid artifact or non-terminal run fails that check and restores ordinary stale detection.
 No-change heartbeats are also benign.
 Absorbed wakes advance their suppression markers, log to `state/.watch-triage.log`, and keep the watcher blocking without a queue record or LLM turn.
 After each drain, `fm-wake-drain.sh` runs the same liveness guard as the supervision scripts, so a lapsed watcher chain surfaces even on a turn that only drains and handles queued wakes.

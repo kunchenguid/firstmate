@@ -31,6 +31,12 @@ _FM_CLASSIFY_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/null)"
 # or no-mistakes install; absent, it points at the real sibling script.
 FM_CREW_STATE_BIN="${FM_CREW_STATE_BIN:-$_FM_CLASSIFY_LIB_DIR/fm-crew-state.sh}"
 
+# Canonical PR merge-poll validation (fm_pr_poll_artifacts_valid) for the
+# merge-ready absorb decision below. Safe to re-source from consumers that
+# already load it: the library only defines functions and resets its own globals.
+# shellcheck source=bin/fm-pr-lib.sh
+. "$_FM_CLASSIFY_LIB_DIR/fm-pr-lib.sh"
+
 # Captain-relevant status verbs. A status line carrying any of these is work
 # firstmate must see. Lines without these verbs are no-verb signals: the watcher
 # absorbs them only with positive provably-working evidence, while the daemon uses
@@ -361,6 +367,31 @@ crew_is_provably_working() {  # <id>
 # escalating a possible wedge.
 crew_is_paused() {  # <id>
   [ "$(crew_absorb_class "$1")" = paused ]
+}
+
+# 0 if crew <id> is parked merge-ready: its canonical authenticated PR merge
+# poll is armed and fully validated (fm_pr_poll_artifacts_valid over the
+# check/sidecar/registration/meta identity chain), AND its authoritative current
+# state is a terminal PR-ready `done` from a run-backed source. Such a crew is
+# EXPECTED to idle - the armed poll owns the merge/close wait and wakes the
+# supervisor when the PR lands - so the stale path absorbs its idle pane instead
+# of surfacing a wake or aging a wedge timer. Every guard fails closed: a
+# missing, tampered, or identity-mismatched poll artifact, a red/cancelled/
+# parked/active run, or an unreadable state line all mean NOT merge-ready, so
+# ordinary stale detection proceeds unchanged. The cheap artifact validation
+# runs first; the costly FM_CREW_STATE_BIN read happens only for a genuinely
+# armed task, and callers run this only on first sighting of a stale hash or at
+# a wedge-escalation moment, never every wake.
+crew_is_merge_ready() {  # <id> <state-dir>
+  local id=$1 state=${2:-} line st src
+  [ -n "$id" ] && [ -n "$state" ] || return 1
+  fm_pr_poll_artifacts_valid "$state" "$id" "$_FM_CLASSIFY_LIB_DIR/fm-pr-poll.sh" || return 1
+  line=$("$FM_CREW_STATE_BIN" "$id" 2>/dev/null) || true
+  case "$line" in state:*) ;; *) return 1 ;; esac
+  st=${line#state: }; st=${st%% *}
+  [ "$st" = "done" ] || return 1
+  src=${line#*source: }; src=${src%% *}
+  case "$src" in run-step|status-log) return 0 ;; *) return 1 ;; esac
 }
 
 # 0 (benign/absorb) if EVERY task referenced by a no-verb "signal:" wake is provably
