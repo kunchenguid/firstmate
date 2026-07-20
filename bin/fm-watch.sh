@@ -1009,8 +1009,12 @@ EOF
                          printf '%s' "$h" > "$sf"
                          wedge_timer_check "$w" "$ssf" "non-terminal stale (provably working after a declared pause)" "$ewf"
                          triage_log "absorbed non-terminal stale (provably working): $w" ;;
-                terminal) clear_pause_state "$w"
-                          rm -f "$ssf" "$ewf" ;;
+                terminal) if [ -e "$pf" ]; then
+                            surface_terminal_stale "$w" "$h"
+                          else
+                            clear_pause_state "$w"
+                            rm -f "$ssf" "$ewf"
+                          fi ;;
                 *)       handle_paused_stale "$w" "$task" "$h" ;;
               esac
             else

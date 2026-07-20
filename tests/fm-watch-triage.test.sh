@@ -692,6 +692,52 @@ test_completed_run_overrides_paused_status_without_repeated_stale() {
   pass "a completed run overrides trailing paused status, surfaces once as terminal, and does not enter pause cadence"
 }
 
+assert_tracked_paused_stale_surfaces_terminal_transition_once() {  # <label> <crew-state>
+  local label=$1 crew_state=$2 dir state fakebin out capture_file window key pane_hash sig pid wakes
+  dir=$(make_case "tracked-pause-to-$label"); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-pause-to-$label"
+  printf 'idle after no-mistakes terminal transition\n' > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=codex\nbackend=tmux\n' "$window" > "$state/$label.meta"
+  printf 'paused: waiting for an external dependency\n' > "$state/$label.status"
+  sig=$(seen_sig "$state/$label.status"); printf '%s' "$sig" > "$state/.seen-${label}_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle after no-mistakes terminal transition")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '%s' "$pane_hash" > "$state/.stale-$key"
+  printf '1\n' > "$state/.count-$key"
+  : > "$state/.paused-$key"
+  touch -t 200001010000 "$state/.paused-rechecked-$key"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=codex FM_FAKE_CREW_STATE="$crew_state" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "tracked pause did not surface its $label transition"
+  grep -Fx "stale: $window" "$out" >/dev/null || fail "tracked pause suppressed its $label transition"
+  [ ! -e "$state/.paused-$key" ] || fail "$label transition retained declared-pause cadence"
+
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=codex FM_FAKE_CREW_STATE="$crew_state" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"
+    fail "unchanged $label transition repeated its stale alert: $(cat "$out")"
+  fi
+  reap "$pid"
+  wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' "$state/.wake-queue")
+  [ "$wakes" -eq 1 ] || fail "$label transition emitted $wakes stale alerts"
+}
+
+test_tracked_paused_stale_surfaces_terminal_transition_once() {
+  assert_tracked_paused_stale_surfaces_terminal_transition_once 'done' 'state: done · source: run-step · checks green'
+  assert_tracked_paused_stale_surfaces_terminal_transition_once failed 'state: failed · source: run-step · validation failed'
+  pass "tracked paused stale state surfaces authoritative done and failed transitions exactly once"
+}
+
 # A captain-held crew can leave a stable backend endpoint after its agent exits.
 # fm-crew-state then authoritatively reports stopped rather than paused, but the
 # confirmed-dead agent plus the declared wait or captain-held transfer must retain
@@ -1339,6 +1385,7 @@ test_wedge_escalation_resets_when_pane_becomes_active
 test_nonterminal_stale_not_working_surfaced
 test_nonterminal_stale_paused_absorbed_then_resurfaced
 test_completed_run_overrides_paused_status_without_repeated_stale
+test_tracked_paused_stale_surfaces_terminal_transition_once
 test_exited_declared_pause_is_bounded_but_live_gate_surfaces
 test_secondmate_paused_resurfaces_in_normal_mode
 test_secondmate_nonpaused_stale_remains_suppressed
