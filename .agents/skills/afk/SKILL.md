@@ -126,6 +126,21 @@ A bordered-empty or ghost-only composer is recognized as empty where that backen
 when a steer's Enter is positively swallowed, so firstmate learns an instruction
 did not land instead of leaving it unsubmitted.
 
+**Busy-queued Enter exception (tmux backend, opencode 1.18.4).** While opencode
+is mid-turn, Enter is accepted and queued for after the current turn but the
+composer keeps showing the typed text the whole time, so the cleared-composer
+check alone false-positives on a swallowed Enter for every steer sent to a
+busy opencode pane. The shared `fm_tmux_submit_enter_core` falls back to
+`fm_pane_is_busy` once the Enter-retry budget is spent: a busy pane means the
+Enter was accepted and queued (reported as `empty` so the caller does not
+re-send), while an idle pane keeps `pending` as a genuine swallow. The
+strict-buffer-clears-only-on-`empty` policy above still holds for the daemon
+and the lenient-`pending`-fails-for-`fm-send` policy still holds for steer
+verification - this exception is a busy-queue is treated as a delivered
+Enter, not a swallowed one. The herdr adapter observes the same opencode
+behavior but needs a separate fix; the gap is recorded in
+`docs/herdr-backend.md` rather than papered over here.
+
 ## Classification policy
 
 The daemon wraps `fm-watch.sh`, runs the watcher as a child, classifies each
