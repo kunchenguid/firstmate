@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# fm-lndev-captain - lane-facing wrapper for the firstmate-local lndev captain broker.
+#
+# The wrapper never reads lndev credentials.
+# It connects to the broker's host-local Unix socket and presents an opaque
+# capability handle from --handle, --handle-file, FM_LNDEV_CAPTAIN_HANDLE, or
+# FM_LNDEV_CAPTAIN_HANDLE_FILE.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+exec node "$ROOT/bin/fm-lndev-captain-broker/src/cli.mjs" request "$@"
