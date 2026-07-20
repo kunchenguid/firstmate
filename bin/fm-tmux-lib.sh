@@ -150,8 +150,18 @@ fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep>
     state=$(fm_tmux_composer_state "$target")
     [ "$state" = pending ] || { printf '%s' "$state"; return 0; }
     i=$((i + 1))
-    [ "$i" -lt "$retries" ] || { printf 'pending'; return 0; }
+    [ "$i" -lt "$retries" ] || break
   done
+  # Retries exhausted, composer still shows pending.
+  # If the pane is busy (agent mid-turn), the harness accepted the Enter
+  # and queued the message for processing when the current turn ends.
+  # Treat it as submitted so the caller does not re-send.
+  # On an idle pane, keep reporting pending - a genuine swallow.
+  if fm_pane_is_busy "$target"; then
+    printf 'empty'
+  else
+    printf 'pending'
+  fi
 }
 
 fm_tmux_submit_core() {  # <target> <text> <retries> <enter-sleep> <settle>
