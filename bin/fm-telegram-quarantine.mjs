@@ -68,12 +68,17 @@ let sourceClaimDir = "";
 let sourceRemoved = false;
 
 try {
+  const initialSource = fs.lstatSync(source, { bigint: true });
+  if (!initialSource.isFile() || initialSource.nlink !== 1n) throw new Error("unsafe source");
+  fs.chmodSync(source, 0o600);
   sourceFd = fs.openSync(
     source,
     fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK,
   );
   sourceIdentity = fs.fstatSync(sourceFd, { bigint: true });
-  if (!sourceIdentity.isFile() || sourceIdentity.nlink !== 1n) throw new Error("unsafe source");
+  if (!privateRegularFile(sourceIdentity, 1) || !sameIdentity(initialSource, sourceIdentity)) {
+    throw new Error("unsafe source");
+  }
 
   for (let attempt = 0; attempt < 100; attempt += 1) {
     const candidate = path.join(quarantineDir, uniqueBase(requestedBase));
