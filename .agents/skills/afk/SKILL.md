@@ -180,6 +180,7 @@ the marker lets firstmate distinguish it from a real captain message.
 If local `config/afk-slack-dm` exists, the same escalation buffer flushes through `bin/fm-slack-dm.mjs` instead of pane injection.
 The config schema and token-source contract live in `docs/configuration.md` "Away-mode Slack DM delivery"; do not restate them here.
 A successful DM is the captain-facing acknowledgement and clears `state/.subsuper-escalations`.
+The digest is capped to fit Slack's `chat.postMessage` length limit with an `…and N more` tail (limits and env overrides in `docs/configuration.md`); an oversized backlog always delivers a partial digest, and the undelivered overflow stays buffered for the next flush and return catch-up.
 A failed DM retains the buffer and sidecar timestamp for retry, and writes the secret-free catch-up marker `state/.subsuper-slack-dm-failed`.
 Persistent DM failure past `FM_MAX_DEFER_SECS` enters the same loud bounded wedge-alarm path as a wedged pane and writes `state/.subsuper-slack-dm-wedged` (its own throttle marker), while the per-attempt reason stays in `state/.subsuper-slack-dm-failed`.
 The daemon shutdown flush never sends a DM: `bin/fm-afk-launch.sh stop` SIGTERMs the daemon while `state/.afk` is still set (so the injection-mode shutdown flush is not a no-op), so in DM mode the shutdown flush preserves the buffer for in-chat catch-up on return or the next daemon start's safe delivery instead of DMing the now-present captain.

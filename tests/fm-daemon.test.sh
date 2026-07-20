@@ -852,6 +852,97 @@ test_slack_dm_failure_marker_redacts_helper_output() {
   pass "Slack DM daemon failure marker and output redact helper details"
 }
 
+test_slack_dm_small_backlog_delivers_untruncated() {
+  # A small backlog fits well under Slack's 40000-char chat.postMessage limit, so
+  # the digest carries every item, appends no "and N more" tail, and the whole
+  # buffer is acknowledged (cleared) exactly like before the cap existed.
+  local dir state helper dm_log i
+  dir=$(make_supercase slack-cap-small)
+  state="$dir/state"
+  dm_log="$dir/dm.log"; : > "$dm_log"
+  helper=$(make_fake_slack_dm_helper "$dir")
+  write_fake_slack_dm_config "$dir"
+  for i in 1 2 3; do escalate_add "$state" "done: item $i ready in branch fm/example-$i"; done
+  afk_enter "$state"
+
+  FM_CONFIG_OVERRIDE="$dir/config" FM_SLACK_DM_BIN="$helper" FM_FAKE_SLACK_DM_LOG="$dm_log" \
+    escalate_flush "$state" || fail "small-backlog Slack DM flush failed"
+
+  for i in 1 2 3; do
+    assert_contains "$(cat "$dm_log")" "done: item $i ready" "small digest dropped item $i"
+  done
+  assert_not_contains "$(cat "$dm_log")" "more update(s) held" "small digest wrongly appended a truncation tail"
+  [ ! -s "$state/.subsuper-escalations" ] || fail "small-backlog flush did not clear the fully delivered buffer"
+  pass "a small AFK backlog delivers untruncated and clears the buffer"
+}
+
+test_slack_dm_oversized_backlog_truncates_and_retains_overflow() {
+  # An oversized backlog must ALWAYS deliver a partial digest that fits, tagged
+  # with an "and N more" tail, while the undelivered overflow stays in the buffer
+  # for the next batch flush and for return catch-up - and the delivered head is
+  # never DMed twice. The item cap is forced low here to make truncation
+  # deterministic without building a 40000-char buffer.
+  local dir state helper dm_log i first_dm remaining count
+  dir=$(make_supercase slack-cap-oversized)
+  state="$dir/state"
+  dm_log="$dir/dm.log"; : > "$dm_log"
+  helper=$(make_fake_slack_dm_helper "$dir")
+  write_fake_slack_dm_config "$dir"
+  for i in $(seq 1 10); do escalate_add "$state" "done: item $i ready in branch fm/example-$i"; done
+  afk_enter "$state"
+
+  FM_SLACK_DM_MAX_ITEMS=3 FM_CONFIG_OVERRIDE="$dir/config" FM_SLACK_DM_BIN="$helper" \
+    FM_FAKE_SLACK_DM_LOG="$dm_log" escalate_flush "$state" \
+    || fail "oversized-backlog Slack DM flush failed (must deliver a partial digest, not fail)"
+
+  first_dm=$(sed '/^---$/q' "$dm_log")
+  assert_contains "$first_dm" "done: item 1 ready" "partial digest missing the head item"
+  assert_contains "$first_dm" "done: item 3 ready" "partial digest missing the last head item"
+  assert_not_contains "$first_dm" "done: item 4 ready" "partial digest leaked an overflow item"
+  assert_contains "$first_dm" "…and 7 more update(s) held" "partial digest missing the honest overflow tail"
+  [ "$(printf '%s' "$first_dm" | LC_ALL=C wc -c)" -lt 40000 ] \
+    || fail "partial digest exceeded Slack's 40000-char chat.postMessage limit"
+  remaining=$(wc -l < "$state/.subsuper-escalations")
+  [ "$remaining" -eq 7 ] || fail "expected 7 overflow lines retained for catch-up, got $remaining"
+  assert_no_grep "item 1 ready" "$state/.subsuper-escalations" "delivered head item was left in the overflow buffer"
+
+  # A second flush delivers the next capped chunk and never re-DMs the head.
+  FM_SLACK_DM_MAX_ITEMS=3 FM_CONFIG_OVERRIDE="$dir/config" FM_SLACK_DM_BIN="$helper" \
+    FM_FAKE_SLACK_DM_LOG="$dm_log" escalate_flush "$state" \
+    || fail "second oversized flush failed"
+  count=$(grep -c "done: item 1 ready" "$dm_log" 2>/dev/null || true)
+  [ "$count" -eq 1 ] || fail "delivered head item was DMed $count times (expected exactly 1)"
+  assert_contains "$(cat "$dm_log")" "done: item 4 ready" "second flush did not deliver the next overflow chunk"
+  pass "an oversized AFK backlog truncates with an overflow tail, retains overflow, and never double-DMs the head"
+}
+
+test_slack_dm_byte_budget_caps_digest_under_slack_limit() {
+  # The cap is byte-driven, not just item-count-driven: a backlog whose raw text
+  # dwarfs Slack's 40000-char limit still delivers one digest that fits, proving
+  # the fix for the unbounded-length failure where every retry was rejected.
+  local dir state helper dm_log i bytes
+  dir=$(make_supercase slack-cap-bytes)
+  state="$dir/state"
+  dm_log="$dir/dm.log"; : > "$dm_log"
+  helper=$(make_fake_slack_dm_helper "$dir")
+  write_fake_slack_dm_config "$dir"
+  # ~800 items x ~60 chars ~= 48000 raw chars, comfortably over the 40000 limit
+  # even before per-item bullets, with the default caps in force.
+  for i in $(seq 1 800); do
+    escalate_add "$state" "done: item $i is ready for captain review in branch fm/example-$i"
+  done
+  afk_enter "$state"
+
+  FM_CONFIG_OVERRIDE="$dir/config" FM_SLACK_DM_BIN="$helper" FM_FAKE_SLACK_DM_LOG="$dm_log" \
+    escalate_flush "$state" || fail "byte-capped Slack DM flush failed (must deliver a partial digest)"
+
+  bytes=$(LC_ALL=C wc -c < "$dm_log")
+  [ "$bytes" -lt 40000 ] || fail "byte-capped digest was $bytes bytes, over Slack's 40000-char limit"
+  assert_contains "$(cat "$dm_log")" "more update(s) held" "byte-capped digest missing the overflow tail"
+  [ -s "$state/.subsuper-escalations" ] || fail "byte-capped flush dropped the undelivered overflow"
+  pass "a backlog larger than Slack's limit still delivers one digest that fits, overflow retained"
+}
+
 test_status_digest_dm_request_is_explicit_only() {
   local dir state helper dm_log out
   dir=$(make_supercase slack-status-digest)
@@ -2065,6 +2156,9 @@ test_slack_dm_wedge_alarm_throttled_within_window
 test_slack_dm_config_absent_keeps_terminal_injection_path
 test_slack_dm_afk_inactive_defers_and_preserves_buffer
 test_slack_dm_shutdown_flush_preserves_buffer_no_dm
+test_slack_dm_small_backlog_delivers_untruncated
+test_slack_dm_oversized_backlog_truncates_and_retains_overflow
+test_slack_dm_byte_budget_caps_digest_under_slack_limit
 test_shutdown_flush_still_injects_when_no_dm_config
 test_slack_dm_failure_marker_redacts_helper_output
 test_status_digest_dm_request_is_explicit_only
