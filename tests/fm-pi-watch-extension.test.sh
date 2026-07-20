@@ -103,6 +103,8 @@ test_tracked_extension_present_and_self_hashing() {
   assert_contains "$text" 'type LockOwnership = "owned" | "missing" | "dead" | "other" | "malformed" | "unknown"' "tracked extension does not preserve the lock owner states"
   assert_contains "$text" 'spawnSync(lockScript, ["ownership"]' "tracked extension does not use the lock owner's read-only API"
   assert_contains "$text" 'if (ownership === "missing" || ownership === "dead")' "tracked extension does not restrict acquisition to reclaimable states"
+  assert_contains "$text" 'sessionCanRecoverLock = reason === "resume"' "tracked extension does not reserve missing/dead recovery for resume"
+  assert_contains "$text" 'startArm("", sessionCanRecoverLock)' "tracked extension does not carry session recovery policy into automatic arms"
   assert_contains "$text" 'const acquisition = spawnSync(lockScript, []' "tracked extension does not route acquisition through the production owner"
   assert_contains "$text" 'if (ownership !== "owned")' "tracked extension arms without re-reading owned state"
   assert_contains "$text" 'lock ownership changed during resume' "tracked extension does not distinguish a lost acquisition race"
@@ -1023,7 +1025,7 @@ const pi = {
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 mod.default(pi);
-await handlers.get("session_start")?.({ type: "session_start" }, { ui: { notify() {} } });
+await handlers.get("session_start")?.({ type: "session_start", reason: "startup" }, { ui: { notify() {} } });
 if (!existsSync(process.env.FM_ARM_LOG)) throw new Error("initial Pi session did not arm supervision");
 const pending = `${process.env.FM_HOME}/state/.afk.pending`;
 writeFileSync(pending, "away\n");
@@ -1143,7 +1145,7 @@ if (process.env.CASE === "retry") {
   }
   if (!existsSync(marker)) throw new Error("away monitor setup was not retried");
 }
-await handlers.get("session_start")?.({ type: "session_start" }, {
+await handlers.get("session_start")?.({ type: "session_start", reason: "startup" }, {
   ui: {
     notify(message) {
       notifications.push(message);
@@ -1295,7 +1297,7 @@ const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 mod.default(pi);
 const sessionStart = handlers.get("session_start");
 if (!sessionStart) throw new Error("session_start handler was not registered");
-await sessionStart({ type: "session_start" }, {
+await sessionStart({ type: "session_start", reason: "resume" }, {
   ui: {
     notify(message) {
       notifications.push(message);
@@ -1352,6 +1354,100 @@ EOF
   pass "Pi session_start reclaims safe locks, preserves away ownership, refuses live other, and idempotently arms"
 }
 
+test_pi_session_start_load_order_preserves_initial_nudge() {
+  local reason order repo home watch_plugin turnend_plugin arm_log out status
+  for reason in startup new resume; do
+    for order in watch-first nudge-first; do
+      repo="$TMP_ROOT/pi-session-order-$reason-$order-root"
+      home="$TMP_ROOT/pi-session-order-$reason-$order-home"
+      arm_log="$TMP_ROOT/pi-session-order-$reason-$order-arm.log"
+      mkdir -p "$home/state" "$home/config"
+      install_pi_watch_extension_fixture "$repo"
+      watch_plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+      turnend_plugin="$repo/.pi/extensions/fm-primary-turnend-guard.ts"
+      cp "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$turnend_plugin"
+      cp "$ROOT/bin/fm-sessionstart-nudge.sh" "$repo/bin/fm-sessionstart-nudge.sh"
+      cp "$ROOT/bin/fm-gate-refuse-lib.sh" "$repo/bin/fm-gate-refuse-lib.sh"
+      chmod +x "$repo/bin/fm-sessionstart-nudge.sh"
+      cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm\n' >> "${FM_ARM_LOG:?}"
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+trap 'exit 0' TERM INT
+while :; do sleep 1; done
+SH
+      chmod +x "$repo/bin/fm-watch-arm.sh"
+      status=0
+      out=$(REASON="$reason" ORDER="$order" WATCH_PLUGIN="$watch_plugin" TURNEND_PLUGIN="$turnend_plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$arm_log" node --input-type=module 2>&1 <<'EOF'
+import { existsSync, readFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const handlers = new Map();
+const messages = [];
+const notifications = [];
+const pi = {
+  on(event, handler) {
+    const eventHandlers = handlers.get(event) || [];
+    eventHandlers.push(handler);
+    handlers.set(event, eventHandlers);
+  },
+  registerCommand() {},
+  registerTool() {},
+  sendMessage(message) {
+    messages.push(message);
+  },
+  sendUserMessage: async () => {},
+};
+const plugins = process.env.ORDER === "watch-first"
+  ? [process.env.WATCH_PLUGIN, process.env.TURNEND_PLUGIN]
+  : [process.env.TURNEND_PLUGIN, process.env.WATCH_PLUGIN];
+for (const plugin of plugins) {
+  const mod = await import(pathToFileURL(plugin).href);
+  mod.default(pi);
+}
+for (const handler of handlers.get("session_start") || []) {
+  await handler({ type: "session_start", reason: process.env.REASON }, {
+    ui: {
+      notify(message) {
+        notifications.push(message);
+      },
+    },
+  });
+}
+
+const lock = `${process.env.FM_HOME}/state/.lock`;
+if (["startup", "new"].includes(process.env.REASON)) {
+  if (messages.length !== 1 || !messages[0]?.content?.includes("bin/fm-session-start.sh")) {
+    throw new Error(`${process.env.REASON}/${process.env.ORDER} lost the session-start nudge: ${JSON.stringify(messages)}`);
+  }
+  if (existsSync(lock)) throw new Error(`${process.env.REASON}/${process.env.ORDER} acquired the lock before session start`);
+  if (existsSync(process.env.FM_ARM_LOG)) throw new Error(`${process.env.REASON}/${process.env.ORDER} armed before session start`);
+  if (notifications.length > 0) throw new Error(`${process.env.REASON}/${process.env.ORDER} notified unexpectedly: ${notifications.join(" | ")}`);
+} else {
+  for (let i = 0; i < 100 && !existsSync(process.env.FM_ARM_LOG); i += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  if (readFileSync(lock, "utf8").trim() !== String(process.pid)) {
+    throw new Error(`${process.env.ORDER} resume did not recover owned lock state`);
+  }
+  if (!existsSync(process.env.FM_ARM_LOG)) throw new Error(`${process.env.ORDER} resume did not arm supervision`);
+  if (messages.some((message) => !message?.content?.includes("bin/fm-session-start.sh"))) {
+    throw new Error(`${process.env.ORDER} resume injected an unexpected message: ${JSON.stringify(messages)}`);
+  }
+  if (notifications.length > 0) throw new Error(`${process.env.ORDER} resume notified unexpectedly: ${notifications.join(" | ")}`);
+}
+for (const handler of handlers.get("session_shutdown") || []) {
+  await handler({ type: "session_shutdown" }, {});
+}
+EOF
+      ) || status=$?
+      expect_code 0 "$status" "Pi $reason session_start must respect $order extension ordering"
+      [ -z "$out" ] || fail "Pi $reason/$order load-order test printed output: $out"
+    done
+  done
+  pass "Pi startup and new preserve the nudge while resume recovers in either extension order"
+}
+
 test_pi_extension_respects_primary_scope() {
   local scenario base repo home plugin arm_log out status
   for scenario in linked secondmate; do
@@ -1391,7 +1487,7 @@ const pi = {
 };
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 mod.default(pi);
-await handlers.get("session_start")?.({ type: "session_start" }, {
+await handlers.get("session_start")?.({ type: "session_start", reason: "resume" }, {
   ui: {
     notify(message) {
       notifications.push(message);
@@ -2453,6 +2549,7 @@ test_pi_process_exit_cleanup_stops_arm_child
 test_pi_extension_transfers_active_arm_on_away_entry
 test_pi_extension_fails_closed_and_retries_away_monitor
 test_pi_resume_session_recovers_only_reclaimable_locks
+test_pi_session_start_load_order_preserves_initial_nudge
 test_pi_extension_respects_primary_scope
 test_pi_extension_distinguishes_lock_refusal_states
 test_opencode_primary_watch_plugin_static_wiring

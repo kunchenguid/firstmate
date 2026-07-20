@@ -135,6 +135,7 @@ export default function (pi: ExtensionAPI) {
   let awayMonitorRetryDelayMs = 250;
   let awayObserved = existsSync(awayFlag);
   let sessionActive = false;
+  let sessionCanRecoverLock = false;
   let shuttingDown = false;
   const intentionalStops = new WeakSet<object>();
 
@@ -169,7 +170,7 @@ export default function (pi: ExtensionAPI) {
     if (!awayObserved) return;
     awayObserved = false;
     if (!sessionActive || shuttingDown || !awayMonitor) return;
-    const result = await startArm();
+    const result = await startArm("", sessionCanRecoverLock);
     if (!result.ok) await sendWakeSafely(result.message);
   }
 
@@ -264,7 +265,7 @@ export default function (pi: ExtensionAPI) {
 
   async function recoverArmAfterMonitor(): Promise<void> {
     try {
-      const result = await startArm();
+      const result = await startArm("", sessionCanRecoverLock);
       if (!result.ok) await sendWakeSafely(result.message);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -384,7 +385,7 @@ export default function (pi: ExtensionAPI) {
     retryTimer = timer;
   }
 
-  function launchArm(predecessorArmPid = ""): ArmResult {
+  function launchArm(predecessorArmPid = "", recoverReclaimableLock = true): ArmResult {
     if (!primaryHome) {
       return { ok: false, message: "watcher: inactive - current checkout is not a primary firstmate home" };
     }
@@ -399,6 +400,9 @@ export default function (pi: ExtensionAPI) {
     let acquisitionError = "";
     let attemptedAcquisition = false;
     if (ownership === "missing" || ownership === "dead") {
+      if (!recoverReclaimableLock) {
+        return { ok: true, message: "watcher: pending - session start must acquire the lock before arming" };
+      }
       attemptedAcquisition = true;
       const acquisition = spawnSync(lockScript, [], { encoding: "utf8", env: lockEnvironment() });
       acquisitionError = String(acquisition.stderr || "").trim().split(/\r?\n/)[0] || "";
@@ -525,8 +529,8 @@ export default function (pi: ExtensionAPI) {
     return { ok: true, message: `watcher: started Pi extension arm child ${id}` };
   }
 
-  async function startArm(predecessorArmPid = ""): Promise<ArmResult> {
-    const result = launchArm(predecessorArmPid);
+  async function startArm(predecessorArmPid = "", recoverReclaimableLock = true): Promise<ArmResult> {
+    const result = launchArm(predecessorArmPid, recoverReclaimableLock);
     if (!result.ok) return result;
     const armChild = child;
     if (!armChild) return result;
@@ -536,19 +540,29 @@ export default function (pi: ExtensionAPI) {
     return verified;
   }
 
-  pi.on?.("session_start", async (_event, ctx) => {
+  pi.on?.("session_start", async (event, ctx) => {
     if (!primaryHome) return;
+    const reason = String((event as { reason?: unknown }).reason ?? "");
+    if (!["startup", "new", "resume"].includes(reason)) {
+      sessionActive = false;
+      sessionCanRecoverLock = false;
+      stopArm();
+      ctx?.ui?.notify?.(`watcher: inactive - unsupported Pi session_start reason: ${reason || "<missing>"}`, "warning");
+      return;
+    }
     stopping = false;
     shuttingDown = false;
     sessionActive = true;
+    sessionCanRecoverLock = reason === "resume";
     startAwayMonitor();
-    const result = await startArm();
+    const result = await startArm("", sessionCanRecoverLock);
     if (!result.ok) ctx?.ui?.notify?.(result.message, "warning");
   });
   pi.on?.("session_shutdown", () => {
     stopping = true;
     shuttingDown = true;
     sessionActive = false;
+    sessionCanRecoverLock = false;
     stopAwayMonitor();
     stopArm();
     process.off("exit", cleanupOnProcessExit);

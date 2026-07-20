@@ -33,6 +33,7 @@ HOME_DIR="$LAB/fmhome"
 PI_DIR="$LAB/pi-agent"
 PI_SESSION_DIR="$PI_DIR/sessions"
 PI_LAUNCHER="$LAB/run-pi-resume.sh"
+PI_INITIAL_LAUNCHER="$LAB/run-pi-initial.sh"
 capture() {
   "$TMUX" -L "$SOCKET" capture-pane -p -t "$SESSION" -S -600 2>/dev/null || true
 }
@@ -237,8 +238,7 @@ chmod +x "$PROJECT/bin/fm-watch-arm.sh"
 cat > "$PI_LAUNCHER" <<'SH'
 #!/usr/bin/env bash
 set -u
-printf '%s\n' "$$" > "$FM_HOME/state/.lock"
-pi --provider fm-live-e2e --model fm-live-e2e --session-dir "$PI_SESSION_DIR" --session-id "$PI_SESSION_ID"
+"$PI_INITIAL_LAUNCHER"
 first_rc=$?
 printf 'FIRST_PI_EXIT=%s\n' "$first_rc"
 [ "$first_rc" -eq 0 ] || exit "$first_rc"
@@ -252,8 +252,16 @@ sleep 300
 SH
 chmod +x "$PI_LAUNCHER"
 
+cat > "$PI_INITIAL_LAUNCHER" <<'SH'
+#!/usr/bin/env bash
+set -u
+printf '%s\n' "$$" > "$FM_HOME/state/.lock"
+exec pi --provider fm-live-e2e --model fm-live-e2e --session-dir "$PI_SESSION_DIR" --session-id "$PI_SESSION_ID"
+SH
+chmod +x "$PI_INITIAL_LAUNCHER"
+
 "$TMUX" -L "$SOCKET" new-session -d -s "$SESSION" -c "$PROJECT" \
-  "env PI_CODING_AGENT_DIR='$PI_DIR' PI_SESSION_DIR='$PI_SESSION_DIR' PI_SESSION_ID='$PI_SESSION_ID' FM_HOME='$HOME_DIR' FM_ROOT_OVERRIDE='$PROJECT' FM_POLL=1 FM_SIGNAL_GRACE=0 FM_HEARTBEAT=600 PI_OFFLINE=1 '$PI_LAUNCHER'"
+  "env PI_CODING_AGENT_DIR='$PI_DIR' PI_SESSION_DIR='$PI_SESSION_DIR' PI_SESSION_ID='$PI_SESSION_ID' PI_INITIAL_LAUNCHER='$PI_INITIAL_LAUNCHER' FM_HOME='$HOME_DIR' FM_ROOT_OVERRIDE='$PROJECT' FM_POLL=1 FM_SIGNAL_GRACE=0 FM_HEARTBEAT=600 PI_OFFLINE=1 '$PI_LAUNCHER'"
 
 wait_for_text "Trust project folder?" 40 || fail "Pi trust prompt did not appear"
 "$TMUX" -L "$SOCKET" send-keys -t "$SESSION" Enter
@@ -261,7 +269,7 @@ wait_for_text "fm-primary-turnend-guard.ts" 60 || fail "Pi primary extensions di
 wait_for_file "$HOME_DIR/state/.watch.lock/pid" 60 || fail "Pi session_start did not automatically arm supervision"
 initial_pi_pid=$(cat "$HOME_DIR/state/.lock")
 initial_pi_comm=$(ps -p "$initial_pi_pid" -o comm= 2>/dev/null || true)
-[ "${initial_pi_comm##*/}" = pi ] || fail "Pi session_start did not replace the shell fixture lock with the native Pi owner"
+[ "${initial_pi_comm##*/}" = pi ] || fail "initial session lock owner was not native Pi"
 initial_watcher_pid=$(cat "$HOME_DIR/state/.watch.lock/pid")
 initial_arm_pid=$(ps -p "$initial_watcher_pid" -o ppid= | tr -d ' ')
 [ -n "$initial_arm_pid" ] || fail "initial watcher parent was not live"
