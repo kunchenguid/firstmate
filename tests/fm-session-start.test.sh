@@ -54,6 +54,7 @@ new_world() {
 make_fake_toolchain() {
   local fakebin=$1
   fm_fake_exit0 "$fakebin" tmux node gh-axi chrome-devtools-axi lavish-axi
+  ln -sf "$(command -v node)" "$fakebin/node"
   cat > "$fakebin/gh" <<'SH'
 #!/usr/bin/env bash
 exit 0
@@ -306,6 +307,8 @@ EOF
 
   out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
 
+  assert_contains "$out" "DURABLE RECOVERY" "session start omitted the bounded durable recovery section"
+  assert_contains "$out" "RECOVERY CAPSULE" "session start omitted the recovery capsule"
   assert_contains "$out" "data/projects.md" "digest did not label the projects.md section"
   assert_contains "$out" "- demo [no-mistakes] - a demo project (added 2026-07-01)" "digest did not print projects.md content"
 
@@ -383,6 +386,7 @@ EOF
   # untouched (fm-ff-lib would have tried to fast-forward it otherwise).
   assert_not_contains "$out" "SECONDMATE_SYNC" "mutating secondmate sweep ran during a lock refusal"
   assert_not_contains "$out" "NUDGE_SECONDMATES" "mutating secondmate sweep ran during a lock refusal"
+  [ ! -e "$home/data/memory" ] || fail "lock-refused session start mutated durable memory"
 
   # The rest of the digest (read-only-safe) still completed.
   assert_contains "$out" "FLEET STATE" "fleet-state digest section missing on the read-only path"
@@ -394,7 +398,7 @@ EOF
 # --- output ordering ----------------------------------------------------------
 
 test_output_ordering_diagnostics_lead() {
-  local rec root home fakebin out lock_line boot_line wake_line context_line fleet_line next_line
+  local rec root home fakebin out lock_line boot_line wake_line recovery_line context_line fleet_line next_line
   rec=$(new_world ordering)
   IFS='|' read -r root home fakebin <<EOF
 $rec
@@ -411,17 +415,19 @@ EOF
   lock_line=$(printf '%s\n' "$out" | grep -n '^LOCK$' | head -1 | cut -d: -f1)
   boot_line=$(printf '%s\n' "$out" | grep -n '^BOOTSTRAP$' | head -1 | cut -d: -f1)
   wake_line=$(printf '%s\n' "$out" | grep -n '^WAKE QUEUE$' | head -1 | cut -d: -f1)
+  recovery_line=$(printf '%s\n' "$out" | grep -n '^DURABLE RECOVERY$' | head -1 | cut -d: -f1)
   context_line=$(printf '%s\n' "$out" | grep -n '^CONTEXT$' | head -1 | cut -d: -f1)
   fleet_line=$(printf '%s\n' "$out" | grep -n '^FLEET STATE$' | head -1 | cut -d: -f1)
   next_line=$(printf '%s\n' "$out" | grep -n '^NEXT STEP$' | head -1 | cut -d: -f1)
 
-  if [ -z "$lock_line" ] || [ -z "$boot_line" ] || [ -z "$wake_line" ] || [ -z "$context_line" ] || [ -z "$fleet_line" ] || [ -z "$next_line" ]; then
+  if [ -z "$lock_line" ] || [ -z "$boot_line" ] || [ -z "$wake_line" ] || [ -z "$recovery_line" ] || [ -z "$context_line" ] || [ -z "$fleet_line" ] || [ -z "$next_line" ]; then
     fail "one or more section headers missing from digest: $out"
   fi
 
   [ "$lock_line" -lt "$boot_line" ] || fail "LOCK did not precede BOOTSTRAP"
   [ "$boot_line" -lt "$wake_line" ] || fail "BOOTSTRAP did not precede WAKE QUEUE"
-  [ "$wake_line" -lt "$context_line" ] || fail "WAKE QUEUE did not precede CONTEXT"
+  [ "$wake_line" -lt "$recovery_line" ] || fail "WAKE QUEUE did not precede DURABLE RECOVERY"
+  [ "$recovery_line" -lt "$context_line" ] || fail "DURABLE RECOVERY did not precede CONTEXT"
   [ "$context_line" -lt "$fleet_line" ] || fail "CONTEXT did not precede FLEET STATE"
   [ "$fleet_line" -lt "$next_line" ] || fail "FLEET STATE did not precede NEXT STEP"
 

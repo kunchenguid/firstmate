@@ -33,14 +33,16 @@
 #                       when this session actually holds the lock.
 #   3. wake-drain     - mutates the durable wake queue, so it also only runs
 #                       when locked.
-#   4. context digest - data/projects.md, data/secondmates.md, data/captain.md,
+#   4. recovery       - bounded validated memory capsule; read-only in both
+#                       lock modes, followed by a checkpoint only when locked.
+#   5. context digest - data/projects.md, data/secondmates.md, data/captain.md,
 #                       data/captain-shared.md, data/learnings.md: read-only,
 #                       always safe, always runs.
-#   5. fleet digest   - a compact data/backlog.md identity/metadata listing,
+#   6. fleet digest   - a compact data/backlog.md identity/metadata listing,
 #                       every state/*.meta, a bounded state/*.status tail,
 #                       state/.afk, and a cheap per-task endpoint-liveness read:
 #                       read-only, always runs.
-#   6. closing reminder - prints the context-specific watcher next step; this
+#   7. closing reminder - prints the context-specific watcher next step; this
 #                       script points back to the emitted harness supervision
 #                       block and deliberately never arms the watcher itself.
 #
@@ -299,7 +301,21 @@ else
   fi
 fi
 
-# --- 4. supervision operating instructions ----------------------------------
+# --- 4. durable recovery -----------------------------------------------------
+section "DURABLE RECOVERY"
+MEMORY_OUT=$("$SCRIPT_DIR/fm-memory.sh" recover --max-events 20 2>&1)
+MEMORY_RC=$?
+if [ "$MEMORY_RC" -eq 0 ] && [ -n "$MEMORY_OUT" ]; then
+  printf '%s\n' "$MEMORY_OUT"
+else
+  printf 'DURABLE_MEMORY: recovery unavailable - %s\n' "${MEMORY_OUT:-memory owner returned no capsule}"
+fi
+if [ "$READ_ONLY" -eq 0 ] && [ "$MEMORY_RC" -eq 0 ] && [ -n "$MEMORY_OUT" ]; then
+  printf '{}\n' | "$SCRIPT_DIR/fm-memory.sh" boundary --reason session-start --runtime "$PRIMARY_HARNESS" >/dev/null 2>&1 || \
+    printf 'DURABLE_MEMORY: could not record the validated session-start boundary.\n'
+fi
+
+# --- 5. supervision operating instructions ----------------------------------
 AFK_PRESENT=0
 [ -e "$STATE/.afk" ] && AFK_PRESENT=1
 X_MODE_PRESENT=0
@@ -324,7 +340,7 @@ fi
   --afk "$AFK_PRESENT" \
   --x-mode "$X_MODE_PRESENT"
 
-# --- 4. context digest -----------------------------------------------------
+# --- 6. context digest -----------------------------------------------------
 section "CONTEXT"
 print_file_or_absent "$DATA/projects.md" "data/projects.md"
 print_file_or_absent "$DATA/secondmates.md" "data/secondmates.md"
@@ -332,7 +348,7 @@ print_file_or_absent "$DATA/captain.md" "data/captain.md"
 print_file_or_absent "$DATA/captain-shared.md" "data/captain-shared.md (shared, main-authoritative, read-only in secondmate homes)"
 print_file_or_absent "$DATA/learnings.md" "data/learnings.md"
 
-# --- 5. fleet-state digest ---------------------------------------------
+# --- 7. fleet-state digest ---------------------------------------------
 section "FLEET STATE"
 print_backlog_compact "$DATA/backlog.md" "data/backlog.md"
 
@@ -386,7 +402,7 @@ else
   printf 'absent\n'
 fi
 
-# --- 6. closing reminder -----------------------------------------------
+# --- 8. closing reminder -----------------------------------------------
 section "NEXT STEP"
 if [ "$READ_ONLY" -eq 1 ]; then
   cat <<'EOF'
@@ -421,6 +437,9 @@ The digest above is complete for this session start. Do NOT re-read
 data/projects.md, data/secondmates.md, data/captain.md,
 data/captain-shared.md, data/learnings.md,
 or state/*.meta now - they were just printed in full.
+The durable recovery capsule was also printed once. Do not reload it unless
+this digest reported invalid memory or a later contradiction requires the
+durable-memory recovery procedure.
 Do NOT bulk-read data/backlog.md now either: the compact identity/metadata
 listing was just printed with a pointer for targeted full-body follow-up.
 Do NOT bulk-read state/*.status now either: their bounded tails were just

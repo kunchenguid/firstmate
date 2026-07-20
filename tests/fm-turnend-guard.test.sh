@@ -779,6 +779,14 @@ test_pi_extension_forces_followup() {
   pass ".pi primary extension: agent_settled forces one follow-up through the shared guard"
 }
 
+test_shared_guard_invokes_durable_memory_boundary() {
+  local content
+  content=$(cat "$ROOT/bin/fm-turnend-guard.sh")
+  assert_contains "$content" 'fm-memory.sh" boundary --reason turn-end' "shared turn boundary does not invoke the durable-memory owner"
+  assert_contains "$content" '>/dev/null 2>&1 || true' "memory failure could block an otherwise healthy turn"
+  pass "fm-turnend-guard: all harness adapters share one non-blocking durable-memory boundary"
+}
+
 test_pi_extension_injects_once_per_logical_agent_run() {
   local repo home ext log out status
   repo="$TMP_ROOT/pi-logical-run-root"
@@ -937,6 +945,7 @@ test_codex_hook_uses_process_pwd_when_payload_cwd_is_outside_root
 test_codex_hook_ignores_nested_git_root_guard
 test_opencode_plugin_forces_followup
 test_opencode_plugin_anchors_guard_to_worktree
+test_shared_guard_invokes_durable_memory_boundary
 test_pi_extension_forces_followup
 test_pi_extension_injects_once_per_logical_agent_run
 test_pi_extension_retries_after_followup_delivery_failure

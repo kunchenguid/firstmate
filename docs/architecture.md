@@ -225,6 +225,10 @@ Memory writes use inspect-then-update: read the current destination first, then 
 Task-scoped notes use `tasks-axi show <id> --full` followed by `tasks-axi update <id> --body-file <path>`, adding `--archive-body` when the prior body should remain recoverable.
 Generalizable firstmate knowledge goes to shared tracked docs through the normal PR pipeline; the firstmate-internal `/stow` deliberately never stores findings in either skill directory.
 
+Immutable session evidence is a separate recovery layer, not another knowledge authority.
+[`bin/fm-memory.js`](../bin/fm-memory.js) owns bounded append-only events, validated checkpoints, recovery, and local search under the active home's private `data/memory/`; [`durable-memory.md`](durable-memory.md) records the full architecture, runtime support matrix, and threat model.
+The shared turn-end guard records portable boundary checkpoints because no reliable pre-compaction callback exists across all supported runtimes, and session start prints one bounded capsule before the existing authoritative digest.
+
 ## Local clones stay fresh
 
 The locked session-start bootstrap step, PR-based teardown, and merged-PR wake handling refresh remote-backed project clones when the clone is safe to move.
@@ -247,7 +251,7 @@ The mechanics are owned by the `/updatefirstmate` skill and firstmate's operatin
 Fleet state lives in each task's session-provider backend (tmux by hard default, herdr or cmux when selected or auto-detected, zellij/orca when explicitly selected), no-mistakes run records, status event logs, local markdown under `data/` including `data/captain.md`, `data/captain-shared.md`, and `data/learnings.md`, and persistent secondmate homes.
 For herdr, respawning after a server-restored layout closes and replaces confirmed no-agent or dead task-tab husks instead of requiring manual tab cleanup.
 At session start, confirmed-dead secondmate agent endpoints are closed and relaunched through the same secondmate spawn path, while ambiguous liveness reads are left untouched to avoid duplicate supervisors.
-Use `/stow` before an intentional reset when the conversation may hold durable knowledge that has not yet been written to disk; after that, the next firstmate session can reconcile and carry on.
+Use `/stow` plus the `durable-memory-recovery` procedure before an intentional reset or manual compaction; after that, the next firstmate session can validate the checkpoint, reconcile it against current authority, and carry on.
 
 ## Development notes
 

@@ -2,6 +2,7 @@
 
 This is the authoritative contract for the "no turn ends blind" primary guard referenced from AGENTS.md section 8.
 The turn-end supervision predicate lives in `bin/fm-turnend-guard.sh`.
+Before that predicate, the same shared turn boundary asks `bin/fm-memory.sh` for a lock-verified private checkpoint; memory failure stays non-blocking and does not change supervision outcomes.
 Its primary-checkout scope lives in `bin/fm-primary-scope-lib.sh`, shared with the native session-start nudge documented in `docs/sessionstart-nudge.md`.
 Harness-specific tracked hook files only adapt each verified harness's real turn-end mechanism to that shared predicate.
 Two related but separate PreToolUse seatbelts deny a bad command shape before it runs rather than detecting a blind turn end afterward: the watcher-arm seatbelt (`bin/fm-arm-pretool-check.sh`, `docs/arm-pretool-check.md`) and the cd-guard (`bin/fm-cd-pretool-check.sh`, `docs/cd-guard.md`).
@@ -56,6 +57,7 @@ OpenCode, Pi, and Grok expose passive lifecycle callbacks for this purpose.
 Their adapters fail open at the hook boundary to avoid corrupting a user session, but they force one follow-up turn when the shared predicate blocks.
 Each adapter carries its own in-process or environment loop guard so the forced follow-up does not recursively schedule another follow-up.
 Pi keeps that latch active across every internal tool turn and clears it only when the generated guard follow-up reaches `agent_settled`, or immediately when follow-up delivery fails.
+All five integrations therefore reach the same portable durable-memory boundary without a second hook registration or lifecycle cycle; [`durable-memory.md`](durable-memory.md) owns the compaction support matrix and fallback rationale.
 If a passive adapter cannot call its SDK method, cannot find `grok`, or cannot recover the Grok session id, it fails open and relies on the pull-based `fm-guard.sh` warning at the next fleet command.
 That warning uses `bin/fm-supervision-instructions.sh --repair-line`, so it points back to the active harness protocol instead of hardcoding one background-arm command.
 
