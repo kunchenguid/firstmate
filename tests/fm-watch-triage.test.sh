@@ -1642,6 +1642,64 @@ test_merge_ready_revalidates_unchanged_hash() {
   pass "merge-ready unchanged hashes revalidate active, failed, cancelled, and unarmed tasks"
 }
 
+test_merge_ready_reclassifies_after_semantic_busy_transition() {
+  local out pid verdict_file agent_status_file case_name verdict
+  for case_name in active failed unarmed; do
+    make_merge_ready_case "merge-ready-busy-$case_name" "mrb$case_name" '' herdr
+    out="$MR_DIR/watch.out"
+    verdict_file="$MR_DIR/verdict"
+    agent_status_file="$MR_DIR/agent-status"
+    printf '%s\n' "$MR_VERDICT" > "$verdict_file"
+    printf 'idle\n' > "$agent_status_file"
+    cat > "$MR_FAKEBIN/herdr" <<'SH'
+#!/usr/bin/env bash
+case " $* " in
+  *" status --json "*) printf '{"server":{"running":true}}\n' ;;
+  *" pane read "*) cat "$FM_FAKE_HERDR_CAPTURE" ;;
+  *" pane get "*) printf '{"result":{"pane":{"pane_id":"%s"}}}\n' "$3" ;;
+  *" agent get "*) printf '{"result":{"agent":{"agent":"codex","agent_status":"%s"}}}\n' "$(cat "$FM_FAKE_HERDR_AGENT_STATUS")" ;;
+  *) exit 1 ;;
+esac
+SH
+    chmod +x "$MR_FAKEBIN/herdr"
+    export FM_FAKE_CREW_STATE_FILE="$verdict_file"
+    export FM_FAKE_HERDR_CAPTURE="$MR_CAPTURE"
+    export FM_FAKE_HERDR_AGENT_STATUS="$agent_status_file"
+    watch_merge_ready_bg "$out" FM_STALE_ESCALATE_SECS=240
+    pid=$!
+    wait_file_equals "$MR_STATE/.stale-$MR_KEY" "$MR_HASH" 40 \
+      || { reap "$pid"; fail "merge-ready busy-transition $case_name fixture was not initially absorbed"; }
+    [ -s "$MR_STATE/.stale-since-$MR_KEY" ] \
+      || { reap "$pid"; fail "merge-ready busy-transition $case_name fixture had no revalidation timer"; }
+
+    printf 'working\n' > "$agent_status_file"
+    wait_gone "$MR_STATE/.stale-since-$MR_KEY" 40 \
+      || { reap "$pid"; fail "semantic busy transition did not clear the revalidation timer"; }
+    case "$case_name" in
+      active) verdict='state: working · source: run-step · validation resumed' ;;
+      failed) verdict='state: failed · source: run-step · checks failed' ;;
+      unarmed) verdict="$MR_VERDICT"; rm -f "$MR_STATE/mrbunarmed.pr-poll-registration" ;;
+    esac
+    printf '%s\n' "$verdict" > "$verdict_file"
+    printf 'idle\n' > "$agent_status_file"
+
+    if [ "$case_name" = active ]; then
+      wait_numeric_file "$MR_STATE/.stale-since-$MR_KEY" 40 \
+        || { reap "$pid"; fail "active task was not reclassified after semantic busy activity"; }
+      echo $(( $(date +%s) - 500 )) > "$MR_STATE/.stale-since-$MR_KEY"
+      wait_for_exit "$pid" 40 || fail "active task remained suppressed after semantic busy activity"
+      grep -F "possible wedge" "$out" >/dev/null \
+        || fail "active task did not resume wedge handling after semantic busy activity"
+    else
+      wait_for_exit "$pid" 40 || fail "$case_name task remained suppressed after semantic busy activity"
+      grep -Fx "stale: $MR_WINDOW" "$out" >/dev/null \
+        || fail "$case_name task did not resume stale handling after semantic busy activity"
+    fi
+  done
+  unset FM_FAKE_CREW_STATE_FILE FM_FAKE_HERDR_CAPTURE FM_FAKE_HERDR_AGENT_STATUS
+  pass "semantic busy activity invalidates merge-ready stale classification"
+}
+
 # Requirement 3: a missing or invalid poll registration must NOT suppress stale
 # detection - the fail-closed trust chain stays authoritative. At watcher
 # startup an invalid poll is owned by the non-executing migration (rebuilt from
@@ -1780,6 +1838,7 @@ test_merge_ready_checkpoint_quiet
 test_merge_ready_merge_check_still_wakes
 test_merge_ready_requires_current_green_head_and_rejects_dead_endpoint
 test_merge_ready_revalidates_unchanged_hash
+test_merge_ready_reclassifies_after_semantic_busy_transition
 test_merge_ready_requires_valid_poll_registration
 test_merge_ready_does_not_mask_active_or_failed_run
 test_merge_ready_clears_leftover_wedge_timer
