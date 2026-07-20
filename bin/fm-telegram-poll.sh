@@ -95,10 +95,12 @@ finish() {
 
 # Tool gaps are transient but must not re-wake every pending inbox file on
 # every ~30s sweep. Emit a deduped telegram-mode-error and finish silently
-# (no pending re-wakes) until curl/jq return; once present, pending files
-# resume normal re-wake/retry.
+# (no pending re-wakes) until curl/jq/node return; once present, pending files
+# resume normal re-wake/retry. node is required by the quarantine helper, so
+# without it permanently-bad files could never leave the live inbox.
 command -v curl >/dev/null 2>&1 || { emit_error_once "missing curl"; finish; }
 command -v jq   >/dev/null 2>&1 || { emit_error_once "missing jq"; finish; }
+command -v node >/dev/null 2>&1 || { emit_error_once "missing node"; finish; }
 
 queue_pending_wakes
 

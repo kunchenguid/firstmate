@@ -13,8 +13,8 @@ set -u
 BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
 JQ_DIR=$(command -v jq 2>/dev/null) && JQ_DIR=$(dirname "$JQ_DIR") || JQ_DIR=
 [ -n "$JQ_DIR" ] && BASE_PATH="$JQ_DIR:$BASE_PATH"
-# head, date, tr, etc. for status/respond paths
-for extra in "$(dirname "$(command -v head)")" "$(dirname "$(command -v date)")" "$(dirname "$(command -v tr)")"; do
+# head, date, tr for status/respond paths; node for the quarantine helper
+for extra in "$(dirname "$(command -v head)")" "$(dirname "$(command -v date)")" "$(dirname "$(command -v tr)")" "$(dirname "$(command -v node)")"; do
   case ":$BASE_PATH:" in
     *":$extra:"*) ;;
     *) BASE_PATH="$extra:$BASE_PATH" ;;
@@ -1201,6 +1201,51 @@ test_poll_missing_jq_does_not_rewake_pending() {
   pass "missing jq backs off without pending-inbox wake storm"
 }
 
+test_poll_missing_node_does_not_rewake_pending() {
+  local home out fakebin nonode tool path_entry base nodedir
+  home="$TMP_ROOT/poll-missing-node"; mkdir -p "$home/state"
+  write_env "$home"
+  seed_inbox "$home" 53 "status"
+  fakebin=$(make_fake_curl "$home")
+  nonode=$(fm_fakebin "$home/nonode")
+  # PATH with curl + every host utility except node (so command -v node fails).
+  ln -sf "$fakebin/curl" "$nonode/curl"
+  IFS=:
+  for path_entry in $PATH; do
+    [ -d "$path_entry" ] || continue
+    for tool in "$path_entry"/*; do
+      [ -x "$tool" ] || continue
+      [ -f "$tool" ] || continue
+      base=${tool##*/}
+      case "$base" in
+        node|node.*|nodejs) continue ;;
+      esac
+      [ -e "$nonode/$base" ] && continue
+      ln -sf "$tool" "$nonode/$base" 2>/dev/null || true
+    done
+  done
+  unset IFS
+  [ ! -e "$nonode/node" ] || fail "precondition: nonode PATH must not expose node"
+  out=$(PATH="$nonode" FM_HOME="$home" FM_TELEGRAM_API_URL="https://api.test" \
+    FAKE_POLL_CODE=200 FAKE_POLL_BODY='{"ok":true,"result":[]}' \
+    "$ROOT/bin/fm-telegram-poll.sh")
+  assert_contains "$out" "telegram-mode-error missing node" "missing node must surface once"
+  assert_not_contains "$out" "telegram-msg 53" "missing node must not re-wake pending inbox"
+  # Deduped: second sweep still no error repeat and no pending re-wake storm.
+  out=$(PATH="$nonode" FM_HOME="$home" FM_TELEGRAM_API_URL="https://api.test" \
+    FAKE_POLL_CODE=200 FAKE_POLL_BODY='{"ok":true,"result":[]}' \
+    "$ROOT/bin/fm-telegram-poll.sh")
+  assert_not_contains "$out" "telegram-mode-error missing node" "missing-node error must dedupe"
+  assert_not_contains "$out" "telegram-msg 53" "second missing-node sweep must still not re-wake"
+  assert_present "$home/state/telegram-inbox/53.json" "missing-node must not quarantine (transient)"
+  nodedir=$(dirname "$(command -v node)")
+  out=$(PATH="$nonode:$nodedir" FM_HOME="$home" FM_TELEGRAM_API_URL="https://api.test" \
+    FAKE_POLL_CODE=200 FAKE_POLL_BODY='{"ok":true,"result":[]}' \
+    "$ROOT/bin/fm-telegram-poll.sh")
+  assert_contains "$out" "telegram-msg 53" "pending inbox must re-wake once node returns"
+  pass "missing node backs off without pending-inbox wake storm"
+}
+
 test_quarantine_flood_cannot_drop_good_or_evade_allowlist() {
   local home out fakebin body i qcount
   home="$TMP_ROOT/quarantine-flood"; mkdir -p "$home/state"
@@ -1563,6 +1608,7 @@ test_quarantine_publish_is_exclusive
 test_quarantine_rejects_fifo_without_blocking
 test_respond_wellformed_rate_log_keeps_window
 test_poll_missing_jq_does_not_rewake_pending
+test_poll_missing_node_does_not_rewake_pending
 test_quarantine_flood_cannot_drop_good_or_evade_allowlist
 test_respond_action_write_failure_reports_error
 test_respond_approve_unknown_key_refused
