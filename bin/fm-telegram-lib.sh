@@ -27,9 +27,10 @@
 # Reuses the private-artifact publisher from fm-x-lib.sh when available.
 # Callers must have FM_HOME set before calling fmt_load_config.
 
+_fmt_lib_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 # shellcheck source=bin/fm-x-lib.sh
 if [ -z "${FMX_PRIVATE_ARTIFACT_READY:-}" ]; then
-  _fmt_lib_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
   # shellcheck disable=SC1091
   . "$_fmt_lib_dir/fm-x-lib.sh"
   FMX_PRIVATE_ARTIFACT_READY=1
@@ -261,6 +262,12 @@ fmt_chat_allowed() {
   [ -n "$chat" ] && [ "$chat" = "${FMT_CHAT_ID:-}" ]
 }
 
+fmt_quarantine_publish() {
+  local source=$1 qdir=$2 base=$3
+  command -v node >/dev/null 2>&1 || return 1
+  node "$_fmt_lib_dir/fm-telegram-quarantine.mjs" "$source" "$qdir" "$base" 2>/dev/null
+}
+
 # Move a permanently-unprocessable inbox file out of the live inbox so the
 # poller never re-emits telegram-msg wakes for it. Destination is private
 # (0700 dir / 0600 file), never silently deleted, and never reprocessed.
@@ -268,7 +275,7 @@ fmt_chat_allowed() {
 # leaves the source in place.
 fmt_inbox_quarantine() {
   local uid=$1 reason=$2
-  local state inbox qdir dest base epoch n
+  local state inbox qdir dest base epoch
   state=${FM_STATE_OVERRIDE:-$FM_HOME/state}
   case "$uid" in
     ''|.*|*/*|*[!A-Za-z0-9._-]*) return 1 ;;
@@ -283,22 +290,7 @@ fmt_inbox_quarantine() {
   fmx_private_artifact_dir_prepare "$qdir" >/dev/null || return 1
   chmod 700 "$qdir" 2>/dev/null || true
   epoch=$(date +%s 2>/dev/null) || epoch=0
-  dest="$qdir/${uid}.${epoch}.json"
-  n=0
-  while [ -e "$dest" ] || [ -L "$dest" ]; do
-    n=$((n + 1))
-    dest="$qdir/${uid}.${epoch}.${n}.json"
-    [ "$n" -lt 100 ] || return 1
-  done
-  if ! fmx_private_artifact_publish_stdin "$qdir" "$(basename "$dest")" 600 \
-    < "$inbox/$base"; then
-    rm -f -- "$dest" 2>/dev/null || true
-    return 1
-  fi
-  if ! rm -f -- "$inbox/$base" 2>/dev/null; then
-    rm -f -- "$dest" 2>/dev/null || true
-    return 1
-  fi
+  dest=$(fmt_quarantine_publish "$inbox/$base" "$qdir" "${uid}.${epoch}.json") || return 1
   fmt_audit_append quarantine inbox \
     "update_id=$uid reason=$reason path=telegram-inbox-quarantine/$(basename "$dest")"
   printf '%s\n' "$dest"
@@ -311,7 +303,7 @@ fmt_inbox_quarantine() {
 # and never silently deleted.
 fmt_rate_log_quarantine() {
   local bucket=$1 reason=$2
-  local state base file qdir dest epoch n
+  local state base file qdir dest epoch
   state=${FM_STATE_OVERRIDE:-$FM_HOME/state}
   case "$bucket" in
     ''|.*|*/*|*[!A-Za-z0-9._-]*) return 1 ;;
@@ -326,22 +318,7 @@ fmt_rate_log_quarantine() {
   fmx_private_artifact_dir_prepare "$qdir" >/dev/null || return 1
   chmod 700 "$qdir" 2>/dev/null || true
   epoch=$(date +%s 2>/dev/null) || epoch=0
-  dest="$qdir/${base}.${epoch}"
-  n=0
-  while [ -e "$dest" ] || [ -L "$dest" ]; do
-    n=$((n + 1))
-    dest="$qdir/${base}.${epoch}.${n}"
-    [ "$n" -lt 100 ] || return 1
-  done
-  if ! fmx_private_artifact_publish_stdin "$qdir" "$(basename "$dest")" 600 \
-    < "$file"; then
-    rm -f -- "$dest" 2>/dev/null || true
-    return 1
-  fi
-  if ! rm -f -- "$file" 2>/dev/null; then
-    rm -f -- "$dest" 2>/dev/null || true
-    return 1
-  fi
+  dest=$(fmt_quarantine_publish "$file" "$qdir" "${base}.${epoch}") || return 1
   fmt_audit_append quarantine rate-log \
     "bucket=$bucket reason=$reason path=telegram-rate-quarantine/$(basename "$dest")"
   printf '%s\n' "$dest"

@@ -1022,41 +1022,59 @@ test_respond_rate_quarantine_failure_audited_and_defers() {
 }
 
 test_quarantine_mode_failure_preserves_sources() {
-  local home out fakebin real_chmod qcount
+  local home out fakebin qcount
   home="$TMP_ROOT/quarantine-mode-fail"; mkdir -p "$home/state"
   chmod 700 "$home/state"
   write_env "$home" "FM_TELEGRAM_DRY_RUN=1"
   seed_inbox "$home" 56 "status"
   chmod 644 "$home/state/telegram-inbox/56.json"
   fakebin=$(fm_fakebin "$home")
-  real_chmod=$(command -v chmod)
   printf '%s\n' \
     '#!/usr/bin/env bash' \
-    'last=' \
-    'for arg in "$@"; do last=$arg; done' \
-    'case "$last" in' \
-    '  */telegram-inbox-quarantine/*|*/telegram-rate-quarantine/*) exit 1 ;;' \
-    'esac' \
-    'exec "${FM_TEST_REAL_CHMOD:?}" "$@"' > "$fakebin/chmod"
-  chmod +x "$fakebin/chmod"
-  out=$(PATH="$fakebin:$BASE_PATH" FM_TEST_REAL_CHMOD="$real_chmod" FM_HOME="$home" \
+    'exit 1' > "$fakebin/node"
+  chmod +x "$fakebin/node"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" \
     "$ROOT/bin/fm-telegram-respond.sh" 2>/dev/null)
-  assert_contains "$out" "error 56 quarantine-failed" "inbox chmod failure must fail quarantine"
-  assert_present "$home/state/telegram-inbox/56.json" "inbox source must survive chmod failure"
+  assert_contains "$out" "error 56 quarantine-failed" "inbox staging failure must fail quarantine"
+  assert_present "$home/state/telegram-inbox/56.json" "inbox source must survive staging failure"
   qcount=$(find "$home/state/telegram-inbox-quarantine" -type f 2>/dev/null | wc -l | tr -d ' ')
   [ "$qcount" -eq 0 ] || fail "failed inbox quarantine must clean destination (got $qcount)"
   rm -f "$home/state/telegram-inbox/56.json"
   seed_inbox "$home" 57 "status"
   printf 'not-a-number\n' > "$home/state/telegram-rate-inbound.log"
   chmod 600 "$home/state/telegram-rate-inbound.log"
-  out=$(PATH="$fakebin:$BASE_PATH" FM_TEST_REAL_CHMOD="$real_chmod" FM_HOME="$home" \
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" \
     "$ROOT/bin/fm-telegram-respond.sh" 2>/dev/null)
-  assert_contains "$out" "deferred 57 rate-limited" "rate chmod failure must defer"
+  assert_contains "$out" "deferred 57 rate-limited" "rate staging failure must defer"
   assert_present "$home/state/telegram-inbox/57.json" "deferred inbox command must stay queued"
-  assert_present "$home/state/telegram-rate-inbound.log" "rate source must survive chmod failure"
+  assert_present "$home/state/telegram-rate-inbound.log" "rate source must survive staging failure"
   qcount=$(find "$home/state/telegram-rate-quarantine" -type f 2>/dev/null | wc -l | tr -d ' ')
   [ "$qcount" -eq 0 ] || fail "failed rate quarantine must clean destination (got $qcount)"
-  pass "quarantine chmod failures preserve sources and clean destinations"
+  pass "quarantine staging failures preserve sources and clean destinations"
+}
+
+test_quarantine_publish_is_exclusive() {
+  local home qdir helper first second out1 out2 count first_pid second_pid
+  home="$TMP_ROOT/quarantine-exclusive"; mkdir -p "$home/state"
+  qdir="$home/state/quarantine"; mkdir -p "$qdir"; chmod 700 "$qdir"
+  helper="$ROOT/bin/fm-telegram-quarantine.mjs"
+  first="$home/state/first.json"; second="$home/state/second.json"
+  printf 'first evidence\n' > "$first"; chmod 600 "$first"
+  printf 'second evidence\n' > "$second"; chmod 600 "$second"
+  node "$helper" "$first" "$qdir" "same.json" > "$home/first.out" &
+  first_pid=$!
+  node "$helper" "$second" "$qdir" "same.json" > "$home/second.out" &
+  second_pid=$!
+  wait "$first_pid" || fail "first concurrent quarantine failed"
+  wait "$second_pid" || fail "second concurrent quarantine failed"
+  out1=$(cat "$home/first.out")
+  out2=$(cat "$home/second.out")
+  [ "$out1" != "$out2" ] || fail "concurrent quarantines selected the same destination"
+  assert_grep "first evidence" "$out1" "first quarantine evidence was overwritten"
+  assert_grep "second evidence" "$out2" "second quarantine evidence was overwritten"
+  count=$(find "$qdir" -type f | wc -l | tr -d ' ')
+  [ "$count" -eq 2 ] || fail "expected two exclusive quarantine artifacts, got $count"
+  pass "concurrent quarantine publication never clobbers evidence"
 }
 
 test_respond_wellformed_rate_log_keeps_window() {
@@ -1472,6 +1490,7 @@ test_respond_inbox_dir_drift_keeps_files_queued
 test_respond_corrupt_rate_log_is_quarantined_and_allows
 test_respond_rate_quarantine_failure_audited_and_defers
 test_quarantine_mode_failure_preserves_sources
+test_quarantine_publish_is_exclusive
 test_respond_wellformed_rate_log_keeps_window
 test_poll_missing_jq_does_not_rewake_pending
 test_quarantine_flood_cannot_drop_good_or_evade_allowlist
