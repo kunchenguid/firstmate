@@ -388,19 +388,21 @@ merge_ready_current_pr_verdict() {
   fi
 }
 
-# 0 if crew <id> is parked merge-ready: its canonical authenticated PR merge
+# 0 if crew <id> is parked merge-ready: its canonical authenticated PR merge/close
 # poll is armed and fully validated (fm_pr_poll_artifacts_valid over the
 # check/sidecar/registration/meta identity chain), AND its authoritative current
-# state is a terminal PR-ready `done` from a run-backed source. Such a crew is
-# EXPECTED to idle - the armed poll owns the merge/close wait and wakes the
-# supervisor when the PR lands - so the stale path absorbs its idle pane instead
-# of surfacing a wake or aging a wedge timer. Every guard fails closed: a
-# missing, tampered, or identity-mismatched poll artifact, a red/cancelled/
-# parked/active run, or an unreadable state line all mean NOT merge-ready, so
-# ordinary stale detection proceeds unchanged. The cheap artifact validation
-# runs first; the costly FM_CREW_STATE_BIN read happens only for a genuinely
-# armed task, and callers run this only on first sighting of a stale hash or at
-# a wedge-escalation moment, never every wake.
+# state is terminal `done` from run-step or status-log, its recorded and current
+# PR heads match, its current checks are green, and its endpoint is not known
+# dead. Such a crew is EXPECTED to idle - the armed poll owns the merge/close
+# wait and wakes the supervisor when the PR lands or closes - so the stale path
+# absorbs its idle pane instead of surfacing a wake or aging a wedge timer.
+# Every guard fails closed: a missing, tampered, or identity-mismatched poll
+# artifact, a missing or mismatched head, non-green checks, a red/cancelled/
+# parked/active run, a known-dead endpoint, or an unreadable state line all mean
+# NOT merge-ready, so ordinary stale detection proceeds unchanged. The cheap
+# artifact validation runs first; live PR and costly FM_CREW_STATE_BIN reads
+# happen only for a genuinely armed task, and callers run this only on first
+# sighting of a stale hash or at a wedge-escalation moment, never every wake.
 crew_is_merge_ready() {  # <id> <state-dir> <backend> <target>
   local id=$1 state=${2:-} backend=${3:-} target=${4:-} line st src remote_pr remote_head agent_alive
   [ -n "$id" ] && [ -n "$state" ] && [ -n "$backend" ] && [ -n "$target" ] || return 1

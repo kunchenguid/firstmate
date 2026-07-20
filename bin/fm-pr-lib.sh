@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Shared validation and atomic artifact helpers for GitHub PR merge polling.
+# Shared validation and atomic artifact helpers for GitHub PR merge/close polling.
 # Callers must validate task IDs and raw PR URLs before constructing task paths
 # or performing any side effect.
 

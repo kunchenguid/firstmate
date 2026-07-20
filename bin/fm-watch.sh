@@ -10,9 +10,9 @@
 # the separate idle absorb case and re-surfaces only on its long bounded cadence,
 # although its initial no-verb status signal still surfaces in normal mode.
 # A merge-ready park (crew_is_merge_ready in fm-classify-lib.sh: a terminal
-# checks-passed run whose validated armed PR merge poll owns the merge/close
+# done state whose validated armed PR merge/close poll owns the merge/close
 # wait) is the third expected-idle absorb case: its stale pane never wakes or
-# wedge-escalates, while the armed poll still wakes the supervisor on merge.
+# wedge-escalates, while the armed poll still wakes the supervisor on merge or close.
 # While state/.afk exists, the daemon owns triage and this watcher queues and exits
 # on every wake. Printed reason lines:
 #   signal: <file>...      status/turn-end signals, surfaced when a listed status
@@ -770,11 +770,11 @@ while :; do
   # alive. Supervision scripts warn when this goes stale with tasks in flight.
   touch "$STATE/.last-watcher-beat"
 
-  # Slow per-task checks (firstmate writes these, e.g. a merged-PR poll).
+  # Slow per-task checks (firstmate writes these, e.g. a merged-or-closed PR poll).
   # Time-based via .last-check mtime so the cadence survives watcher restarts.
   # Evaluated BEFORE the signal scan: wake() exits the cycle, so a check placed
   # after the signal scan would be starved whenever a chatty sibling crewmate
-  # keeps producing signals - the slow poll (e.g. merge detection) would then
+  # keeps producing signals - the slow poll (e.g. merge/close detection) would then
   # never run until the fleet went quiet. Checks are due only every
   # CHECK_INTERVAL, so most cycles skip this block and fall straight through.
   if [ "$(age_of "$STATE/.last-check")" -ge "$CHECK_INTERVAL" ]; then
