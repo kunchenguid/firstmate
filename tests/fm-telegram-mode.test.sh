@@ -95,6 +95,14 @@ now_epoch() {
   date +%s
 }
 
+file_mode() {
+  if [ "$(uname)" = Darwin ]; then
+    stat -f %Lp "$1"
+  else
+    stat -c %a "$1"
+  fi
+}
+
 # --- inert / config ---------------------------------------------------------
 
 test_poll_no_token_is_hard_noop() {
@@ -876,6 +884,46 @@ test_respond_unsafe_inbox_is_quarantined() {
   pass "respond quarantines unsafe-permission inbox files"
 }
 
+test_respond_symlink_inbox_cannot_touch_referent() {
+  local home out victim mode qcount
+  home="$TMP_ROOT/resp-symlink-inbox"; mkdir -p "$home/state"
+  write_env "$home" "FM_TELEGRAM_DRY_RUN=1"
+  seed_inbox "$home" 52 "status"
+  victim="$home/victim.json"
+  printf '{"text":"status"}\n' > "$victim"
+  chmod 644 "$victim"
+  rm -f "$home/state/telegram-inbox/52.json"
+  ln -s "$victim" "$home/state/telegram-inbox/52.json"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-telegram-respond.sh" 2>/dev/null)
+  assert_contains "$out" "error 52 quarantine-failed" "symlink inbox entry must refuse the quarantine move"
+  [ -L "$home/state/telegram-inbox/52.json" ] || fail "refused symlink must stay in place for desk review"
+  mode=$(file_mode "$victim")
+  [ "$mode" = 644 ] || fail "quarantine must not chmod a symlink referent (mode: $mode)"
+  qcount=$(find "$home/state/telegram-inbox-quarantine" -name '52.*' 2>/dev/null | wc -l | tr -d ' ')
+  [ "$qcount" -eq 0 ] || fail "symlink referent must not be linked into quarantine (got $qcount)"
+  assert_grep "quarantine-failed" "$home/state/telegram-audit.log" "refused symlink quarantine must be audited"
+  pass "symlinked inbox entries cannot rewrite files outside the inbox"
+}
+
+test_respond_inbox_dir_drift_keeps_files_queued() {
+  local home out
+  home="$TMP_ROOT/resp-inbox-dir-drift"; mkdir -p "$home/state"
+  write_env "$home" "FM_TELEGRAM_DRY_RUN=1"
+  seed_inbox "$home" 53 "status"
+  chmod 755 "$home/state/telegram-inbox"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-telegram-respond.sh" 2>/dev/null)
+  assert_contains "$out" "error 53 inbox-read-failed" "inbox dir drift must report a transient error"
+  assert_not_contains "$out" "quarantined" "inbox dir drift must not quarantine queued commands"
+  assert_present "$home/state/telegram-inbox/53.json" "queued command must survive inbox dir drift"
+  assert_absent "$home/state/telegram-inbox-quarantine" "inbox dir drift must not create quarantine artifacts"
+  assert_grep "unsafe-inbox-dir" "$home/state/telegram-audit.log" "inbox dir drift must be audited"
+  chmod 700 "$home/state/telegram-inbox"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-telegram-respond.sh" 2>/dev/null)
+  assert_contains "$out" "ok 53 status" "healed inbox dir must process the queued command"
+  assert_absent "$home/state/telegram-inbox/53.json" "processed command must leave the inbox"
+  pass "inbox dir permission drift is transient and heals without quarantine"
+}
+
 test_respond_corrupt_rate_log_is_quarantined_and_allows() {
   local home out qcount
   home="$TMP_ROOT/resp-corrupt-rate"; mkdir -p "$home/state"
@@ -898,6 +946,26 @@ test_respond_corrupt_rate_log_is_quarantined_and_allows() {
     ''|*[!0-9]*) fail "fresh rate log must be numeric epochs (got: $line)" ;;
   esac
   pass "corrupt rate log is quarantined once and commands proceed"
+}
+
+test_respond_rate_quarantine_failure_audited_and_defers() {
+  local home out
+  home="$TMP_ROOT/resp-rate-quarantine-fail"; mkdir -p "$home/state"
+  chmod 700 "$home/state"
+  write_env "$home" "FM_TELEGRAM_DRY_RUN=1"
+  seed_inbox "$home" 54 "status"
+  printf 'not-a-number\n' > "$home/state/telegram-rate-inbound.log"
+  chmod 600 "$home/state/telegram-rate-inbound.log"
+  # Occupy the quarantine dir path with a plain file so the move cannot complete.
+  touch "$home/state/telegram-rate-quarantine"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-telegram-respond.sh" 2>/dev/null)
+  assert_contains "$out" "deferred 54 rate-limited" "failed rate quarantine must fail closed as DEFER"
+  assert_present "$home/state/telegram-inbox/54.json" "deferred command must stay queued"
+  assert_present "$home/state/telegram-rate-inbound.log" "corrupt rate log must not be dropped when quarantine fails"
+  assert_grep "quarantine-failed" "$home/state/telegram-audit.log" "failed rate quarantine must be audited"
+  assert_grep "bucket=inbound" "$home/state/telegram-audit.log" "audit must name the rate bucket"
+  assert_no_grep "test-bot-token" "$home/state/telegram-audit.log" "token must not appear in audit"
+  pass "rate quarantine failure is audited and defers without dropping state"
 }
 
 test_respond_wellformed_rate_log_keeps_window() {
@@ -1306,7 +1374,10 @@ test_respond_approve_open_key
 test_respond_reply_cannot_grant_merge_authority
 test_respond_invalid_envelope_is_quarantined
 test_respond_unsafe_inbox_is_quarantined
+test_respond_symlink_inbox_cannot_touch_referent
+test_respond_inbox_dir_drift_keeps_files_queued
 test_respond_corrupt_rate_log_is_quarantined_and_allows
+test_respond_rate_quarantine_failure_audited_and_defers
 test_respond_wellformed_rate_log_keeps_window
 test_poll_missing_jq_does_not_rewake_pending
 test_quarantine_flood_cannot_drop_good_or_evade_allowlist

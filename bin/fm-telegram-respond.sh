@@ -26,7 +26,8 @@
 #   error <update_id> <reason>
 # Permanently-unprocessable inbox files are moved to state/telegram-inbox-quarantine/
 # (audited, never reprocessed, never silently deleted). Transient failures
-# (missing-jq, rate-limit DEFER, action-write) keep the file queued for retry.
+# (missing-jq, rate-limit DEFER, action-write, inbox-dir perms) keep the file
+# queued for retry.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -191,8 +192,14 @@ process_one() {
     ''|.*|*/*|*[!A-Za-z0-9._-]*) return 0 ;;
   esac
 
+  if ! fmx_private_artifact_dir_device "$INBOX" >/dev/null 2>&1; then
+    # Transient: one chmod on the directory heals every queued file, so this
+    # must not permanently quarantine well-formed commands.
+    inbox_read_failed_transient "$uid" "unsafe-inbox-dir"
+    return 0
+  fi
   if ! fmx_private_artifact_file_valid "$INBOX" "$base" 600; then
-    # Permanent: mode/ownership cannot self-heal on retry.
+    # Permanent: file mode/ownership cannot self-heal on retry.
     inbox_quarantine_permanent "$uid" "unsafe-inbox"
     return 0
   fi

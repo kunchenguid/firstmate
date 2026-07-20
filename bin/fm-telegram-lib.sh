@@ -280,6 +280,7 @@ fmt_inbox_quarantine() {
   qdir="$state/telegram-inbox-quarantine"
   base="$uid.json"
   [ -f "$inbox/$base" ] || return 1
+  [ ! -L "$inbox/$base" ] || return 1
   fmx_private_artifact_dir_prepare "$qdir" >/dev/null || return 1
   chmod 700 "$qdir" 2>/dev/null || true
   epoch=$(date +%s 2>/dev/null) || epoch=0
@@ -393,7 +394,11 @@ fmt_rate_allow() {
         *[!0-9]*)
           # Permanent: content cannot become valid on retry. Quarantine once
           # and continue with an empty window so commands are not blocked.
-          fmt_rate_log_quarantine "$bucket" "corrupt-line" >/dev/null 2>&1 || return 1
+          if ! fmt_rate_log_quarantine "$bucket" "corrupt-line" >/dev/null 2>&1; then
+            fmt_audit_append quarantine rate-log \
+              "bucket=$bucket quarantine-failed reason=corrupt-line"
+            return 1
+          fi
           kept=
           count=0
           break
