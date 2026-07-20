@@ -1,4 +1,15 @@
 #!/usr/bin/env node
+// Private quarantine for permanently-unprocessable Telegram inbox / rate-log
+// artifacts: no-clobber dest, single-link source validation, mode 0600 before
+// source removal, generic phone ack is owned by the shell respond path.
+//
+// Threat boundary (captain decision key=quarantine-toctou-ratchet): a same-UID
+// local-FS adversary that can rewrite this home's private state is OUT OF
+// SCOPE - that access already steals FM_TELEGRAM_BOT_TOKEN, rewrites these
+// scripts, and controls the process. Residual pathname TOCTOU under concurrent
+// same-UID mutation is accepted at that boundary; do not add openat/dirfd
+// identity-bound protocols solely for host compromise. See
+// docs/telegram-mode.md "Local-filesystem threat boundary".
 
 import fs from "node:fs";
 import path from "node:path";

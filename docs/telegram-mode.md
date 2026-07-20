@@ -122,6 +122,15 @@ Stage 3 free-text prompting is not implemented.
 - `merge` requires (1) a full GitHub PR URL previously outbound-notified to this chat and (2) a green open PR (via `gh-axi` or `FM_TELEGRAM_PR_CHECK_HOOK` in tests).
 - Red, unnamed, unknown, destructive, irreversible, or security-sensitive operations are refused.
 
+### Local-filesystem threat boundary
+
+Telegram mode hardens against remote and network-adjacent misuse: allowlist, closed grammar, DEFER never-drop, replay/freshness, private artifact modes, quarantine of permanently-bad inbox and rate-log inputs without silent delete of quarantine evidence, single-link validation before quarantine, no-clobber quarantine publication, and a generic phone acknowledgment that never echoes command content or secrets.
+
+A same-UID local filesystem adversary with write access to this home's private state directory (or the ability to rewrite the Telegram scripts) is **out of scope**.
+That access already permits stealing `FM_TELEGRAM_BOT_TOKEN`, rewriting `bin/fm-telegram-*.sh` / `bin/fm-telegram-quarantine.mjs`, and controlling the agent process - total host compromise for this home.
+Captain decision key=`quarantine-toctou-ratchet`: do not add openat/dirfd identity-bound filesystem protocols solely for that already-compromised-host scenario.
+Residual pathname TOCTOU races under concurrent same-UID mutation of private state are accepted at that boundary; remote-threat protections and the applied quarantine hardening remain in force.
+
 ### Replay, rate limit, audit
 
 - Offset advances past confirmed accepts and auth/empty drops only after the new offset is durably persisted.
@@ -141,6 +150,7 @@ Stage 3 free-text prompting is not implemented.
 | Script | Role |
 | --- | --- |
 | `bin/fm-telegram-lib.sh` | Config, allowlist, offset, audit, grammar, PR registry (sourced) |
+| `bin/fm-telegram-quarantine.mjs` | Private no-clobber quarantine of permanent inbox/rate-log failures (local-FS threat boundary: see above) |
 | `bin/fm-telegram-send.sh` | Outbound `sendMessage` |
 | `bin/fm-telegram-poll.sh` | Inbound `getUpdates` poll for the watcher |
 | `bin/fm-telegram-respond.sh` | Closed-grammar drain of `state/telegram-inbox/` |
