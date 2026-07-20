@@ -393,7 +393,7 @@ nm_runs_status_for_branch() {  # <branch>
     if [ "$br" = "$branch" ]; then
       # Same code-identity rule as axi status: skip a same-branch row whose
       # short-sha does not match this worktree (rewritten or advanced tip).
-      if [ -n "$sha" ] && ! nm_coarse_head_matches_worktree "$sha"; then
+      if ! nm_coarse_head_matches_worktree "$sha"; then
         continue
       fi
       printf '%s' "$st"
@@ -409,7 +409,7 @@ CREW_BRANCH=$(git -C "$WT" symbolic-ref --quiet --short HEAD 2>/dev/null || true
 
 # 0 if the active axi-status run's head field matches this worktree's code
 # identity. Branch match is a precondition (caller). Rules:
-#   - missing/empty head field: cannot bind; keep branch-only match (legacy)
+#   - missing/empty head field: cannot bind; reject the run
 #   - equal commits (short or full SHA): match
 #   - worktree HEAD is an ancestor of run head: match (pipeline fix commits on
 #     the same history advanced the run tip)
@@ -419,7 +419,7 @@ CREW_BRANCH=$(git -C "$WT" symbolic-ref --quiet --short HEAD 2>/dev/null || true
 nm_run_head_matches_worktree() {
   local run_head local_full run_full
   run_head=$(strip_quotes "$(nm_field head)")
-  [ -n "$run_head" ] || return 0
+  [ -n "$run_head" ] || return 1
   local_full=$(git -C "$WT" rev-parse HEAD 2>/dev/null) || return 1
   run_full=$(git -C "$WT" rev-parse --verify "${run_head}^{commit}" 2>/dev/null) || return 1
   [ "$run_full" = "$local_full" ] && return 0
@@ -434,7 +434,7 @@ nm_run_head_matches_worktree() {
 # nm_run_head_matches_worktree (equal, or local is ancestor of run tip).
 nm_coarse_head_matches_worktree() {  # <short-sha>
   local run_head=$1 local_full run_full
-  [ -n "$run_head" ] || return 0
+  [ -n "$run_head" ] || return 1
   local_full=$(git -C "$WT" rev-parse HEAD 2>/dev/null) || return 1
   run_full=$(git -C "$WT" rev-parse --verify "${run_head}^{commit}" 2>/dev/null) || return 1
   [ "$run_full" = "$local_full" ] && return 0

@@ -1214,6 +1214,24 @@ test_local_advanced_past_run_head_invalidates() {
   pass "local work advanced past run head invalidates attribution"
 }
 
+test_missing_run_head_falls_back_to_current_state() {
+  reset_fakes
+  local d out
+  d=$(new_case missing-run-head)
+  make_repo_on_branch "$d/wt" fm/feat-no-head
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/no-head.meta" "window=fm:fm-no-head" "worktree=$d/wt" "kind=ship"
+  printf 'working: current stage still in progress\n' > "$d/state/no-head.status"
+  FM_FAKE_AXI_STATUS=$(run_parked fm/feat-no-head | grep -v '^  head:')
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_BUSY=0
+  out=$(run_crew_state "$d" no-head)
+  assert_not_contains "$out" "source: run-step" "missing run head must not permit branch-only attribution"
+  assert_contains "$out" "source: status-log" "missing run head falls back to current state sources"
+  assert_contains "$out" "state: working" "status-log remains current after missing run head"
+  pass "missing run head falls back instead of matching by branch"
+}
+
 test_active_run_is_authoritative
 test_stale_needs_decision_superseded
 test_stale_blocked_superseded
@@ -1260,5 +1278,6 @@ test_usage_error
 test_historical_same_branch_rewritten_head_not_current
 test_active_run_descendant_fix_head_remains_current
 test_local_advanced_past_run_head_invalidates
+test_missing_run_head_falls_back_to_current_state
 
 echo "all fm-crew-state tests passed"

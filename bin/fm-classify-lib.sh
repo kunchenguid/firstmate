@@ -102,13 +102,15 @@ status_is_captain_relevant() {
   local line=$1 verb
   [ -n "$line" ] || return 1
   status_is_paused "$line" && return 1
+  verb=$(status_line_verb "$line")
+  case "$verb" in
+    working|resolved|captain-held|"${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}")
+      return 1
+      ;;
+  esac
   if [ -z "${FM_CAPTAIN_RE+x}" ]; then
-    verb=$(status_line_verb "$line")
     case "$verb" in
       done|needs-decision|blocked|failed) return 0 ;;
-      working|resolved|captain-held|"${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}")
-        return 1
-        ;;
     esac
   fi
   printf '%s' "$line" | grep -qiE "${FM_CAPTAIN_RE:-$FM_CLASSIFY_CAPTAIN_RE_DEFAULT}"
