@@ -99,29 +99,36 @@ BASE_REF=$(resolve_base_ref) \
 #
 # build_old_bin echoes a directory whose bin/ subdir holds the PRE-REFACTOR
 # fm-send.sh, fm-peek.sh, fm-watch.sh, fm-spawn.sh, and fm-teardown.sh
-# (extracted from BASE_REF), plus symlinks to every OTHER sibling script those
-# five source - all unchanged by this task, so the real files are exactly
-# what BASE_REF would have used too. FM_ROOT_OVERRIDE pointed at this dir's
-# root makes "$FM_ROOT/bin/fm-project-mode.sh" (etc.) resolve correctly.
+# (extracted from BASE_REF), plus symlinks to every OTHER entry in bin/ - all
+# unchanged by this task, so the real files are exactly what BASE_REF would
+# have used too. FM_ROOT_OVERRIDE pointed at this dir's root makes
+# "$FM_ROOT/bin/fm-project-mode.sh" (etc.) resolve correctly.
+# The sibling set is derived from bin/ itself rather than hand-listed: any
+# sibling a refactored script sources or executes must be a real, reachable
+# file in the old bin/ or the run aborts under set -eu, and a hand-maintained
+# list silently falls behind every script later added to bin/.
+# That drift is what broke this fixture once fm-guard.sh began sourcing
+# fm-supervision-lib.sh and fm-teardown.sh began invoking fm-decision-hold.sh.
 # fm-backend.sh (and its bin/backends/ adapters) is the dispatcher every one
-# of the five REFACTORED scripts sources; it must be a real, reachable file in
-# the old bin/ too or `. "$SCRIPT_DIR/fm-backend.sh"` aborts under set -eu -
-# hence it is a symlinked sibling, not an extracted-from-BASE_REF file: for a
-# tmux-only conformance run the tmux adapter's behavior is what is under test,
-# and that is unchanged by any later (e.g. non-tmux backend) addition to
+# of the five REFACTORED scripts sources; it is deliberately a symlinked
+# sibling, not an extracted-from-BASE_REF file, because for a tmux-only
+# conformance run the tmux adapter's behavior is what is under test, and that
+# is unchanged by any later (e.g. non-tmux backend) addition to
 # fm-backend.sh's own dispatch surface.
-OLD_BIN_UNCHANGED_SIBLINGS="fm-gate-refuse-lib.sh fm-guard.sh fm-lock-lib.sh fm-tangle-lib.sh fm-tmux-lib.sh fm-composer-lib.sh fm-marker-lib.sh fm-wake-lib.sh fm-classify-lib.sh fm-ff-lib.sh fm-config-inherit-lib.sh fm-tasks-axi-lib.sh fm-scm-lib.sh fm-project-mode.sh fm-harness.sh fm-crew-state.sh fm-backend.sh"
 OLD_BIN_REFACTORED="fm-send.sh fm-peek.sh fm-watch.sh fm-spawn.sh fm-teardown.sh"
 
 build_old_bin() {  # <name> -> echoes root dir (root/bin/<script> is the entry point)
-  local name=$1 root bin f
+  local name=$1 root bin f base
   root="$TMP_ROOT/$name"
   bin="$root/bin"
   mkdir -p "$bin"
-  for f in $OLD_BIN_UNCHANGED_SIBLINGS; do
-    ln -s "$ROOT/bin/$f" "$bin/$f"
+  for f in "$ROOT"/bin/*; do
+    base=${f##*/}
+    case " $OLD_BIN_REFACTORED " in
+      *" $base "*) continue ;;
+    esac
+    ln -s "$f" "$bin/$base"
   done
-  ln -s "$ROOT/bin/backends" "$bin/backends"
   for f in $OLD_BIN_REFACTORED; do
     git -C "$ROOT" show "$BASE_REF:bin/$f" > "$bin/$f"
     chmod +x "$bin/$f"
