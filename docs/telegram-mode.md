@@ -129,6 +129,7 @@ Stage 3 free-text prompting is not implemented.
 - Over-cap authenticated updates are deferred (offset holds before them) for at-least-once delivery of allowlisted commands.
 - Commands beyond the inbound rate limit stay queued in the inbox (audited `deferred`, replied "rate limited" once per dedupe window), never dropped; every poll sweep re-emits `telegram-msg` wakes for pending inbox files, so queued commands drain once the window frees without requiring a new message.
 - Permanently-unprocessable inbox inputs (malformed envelope, unsafe file permissions) are quarantined once under `state/telegram-inbox-quarantine/` and never re-emitted as wakes; the move is audited and never silently deleted.
+- A successful quarantine sends a generic phone acknowledgment only (no command content, envelope body, or secrets); captain decision key=`no-reply-on-quarantine`.
 - A corrupt `state/telegram-rate-*.log` is quarantined once under `state/telegram-rate-quarantine/` and replaced by a fresh window so it cannot fail-close every command forever; well-formed logs keep their legitimate rate-window state.
 - Missing `curl`/`jq` emit a deduplicated `telegram-mode-error` and skip pending re-wakes until the tool returns (transient, not quarantined).
 - Approve/deny/merge older than `FM_TELEGRAM_FRESHNESS_SECS` (default 15 minutes) are not executed; deferred approvals can still go stale and are re-surfaced for re-confirmation.

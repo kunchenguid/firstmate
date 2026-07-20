@@ -158,10 +158,15 @@ action_write_failed() {
 
 # Permanently-unprocessable inbox inputs: quarantine so poll never re-wakes.
 # Transient failures (missing-jq, rate-limit, action-write) keep the file queued.
+# On successful quarantine, send a GENERIC phone ack only (captain decision
+# key=no-reply-on-quarantine): never echo command content, envelope text, or
+# any secret/token material.
 inbox_quarantine_permanent() {
   local uid=$1 reason=$2
   if fmt_inbox_quarantine "$uid" "$reason" >/dev/null 2>&1; then
     fmt_audit_append respond quarantined "update_id=$uid reason=$reason"
+    # Fixed string only - no reason detail, no inbox text, no tokens.
+    reply_text "A command could not be processed and was set aside for desk review." || true
     printf 'quarantined %s %s\n' "$uid" "$reason"
     return 0
   fi

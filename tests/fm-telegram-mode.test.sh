@@ -869,6 +869,40 @@ test_respond_invalid_envelope_is_quarantined() {
   pass "respond quarantines invalid envelopes once; poll never re-wakes them"
 }
 
+# Captain decision key=no-reply-on-quarantine: generic phone ack only; never
+# echo command content, envelope body, or secrets/tokens.
+test_respond_quarantine_sends_generic_ack_without_content() {
+  local home out n text secret_cmd
+  home="$TMP_ROOT/resp-quarantine-ack"; mkdir -p "$home/state"
+  chmod 700 "$home/state"
+  write_env "$home" "FM_TELEGRAM_DRY_RUN=1"
+  secret_cmd='approve rotate-prod-token test-bot-token S3CR3T-payload'
+  # Malformed envelope embeds command-looking text and the bot token so a
+  # naive echo would leak both into the phone ack.
+  (umask 077; mkdir -p "$home/state/telegram-inbox")
+  chmod 700 "$home/state/telegram-inbox"
+  printf '{"text":"%s","date":"not-a-number","token":"test-bot-token"}\n' "$secret_cmd" \
+    > "$home/state/telegram-inbox/88.json"
+  chmod 600 "$home/state/telegram-inbox/88.json"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-telegram-respond.sh" 2>/dev/null)
+  assert_contains "$out" "quarantined 88 invalid-envelope" "must quarantine malformed envelope"
+  n=$(find "$home/state/telegram-outbox" -name '*.json' 2>/dev/null | wc -l | tr -d ' ')
+  [ "$n" -ge 1 ] || fail "quarantine must send a phone ack (dry-run outbox empty)"
+  text=$(jq -r '.text // empty' "$home/state/telegram-outbox"/*.json 2>/dev/null | head -n1)
+  [ -n "$text" ] || fail "quarantine ack outbox must carry a text body"
+  assert_contains "$text" "set aside for desk review" "ack must be the generic desk-review notice"
+  case "$text" in
+    *"$secret_cmd"*|*rotate-prod-token*|*S3CR3T*|*test-bot-token*|*approve*)
+      fail "quarantine ack must not echo command content or secrets (got: $text)"
+      ;;
+  esac
+  assert_no_grep "test-bot-token" "$home/state/telegram-outbox"/*.json "token must not appear in ack outbox"
+  assert_no_grep "S3CR3T" "$home/state/telegram-outbox"/*.json "secret payload must not appear in ack outbox"
+  assert_no_grep "rotate-prod-token" "$home/state/telegram-outbox"/*.json "command content must not appear in ack outbox"
+  assert_no_grep "test-bot-token" "$home/state/telegram-audit.log" "token must not appear in quarantine audit"
+  pass "quarantine sends a generic phone ack with no command content or secrets"
+}
+
 test_respond_unsafe_inbox_is_quarantined() {
   local home out qcount
   home="$TMP_ROOT/resp-unsafe-inbox"; mkdir -p "$home/state"
@@ -1392,6 +1426,7 @@ test_respond_stale_approve_refused
 test_respond_approve_open_key
 test_respond_reply_cannot_grant_merge_authority
 test_respond_invalid_envelope_is_quarantined
+test_respond_quarantine_sends_generic_ack_without_content
 test_respond_unsafe_inbox_is_quarantined
 test_respond_symlink_inbox_cannot_touch_referent
 test_respond_hardlink_inbox_cannot_touch_shared_inode
