@@ -42,6 +42,7 @@ let stopping = false;
 let seq = 0;
 let restoring = false;
 let lifecycleGeneration = 0;
+let replacementSessionStarted = false;
 const armReadiness = new WeakMap<ChildProcess, Promise<boolean>>();
 const armClose = new WeakMap<ChildProcess, Promise<void>>();
 
@@ -95,7 +96,7 @@ function stopArm(): ChildProcess | null {
   if (retryTimer) clearTimeout(retryTimer);
   retryTimer = null;
   const stoppedChild = child;
-  child = null;
+  replacementSessionStarted = false;
   restoring = false;
   stoppedChild?.kill("SIGTERM");
   return stoppedChild;
@@ -127,9 +128,13 @@ function ensureProcessExitCleanup(): void {
 
 function startSessionLifecycle(): void {
   if (stopping) {
-    retryFailures = 0;
-    restoring = false;
-    stopping = false;
+    if (child) {
+      replacementSessionStarted = true;
+    } else {
+      retryFailures = 0;
+      restoring = false;
+      stopping = false;
+    }
   }
   ensureProcessExitCleanup();
   markLoaded();
@@ -278,7 +283,14 @@ export default function (pi: ExtensionAPI) {
   }
 
   function startArm(predecessorArmPid = ""): ArmResult {
-    if (stopping) return { ok: false, message: "watcher: not armed - Pi session is shutting down" };
+    if (stopping) {
+      return {
+        ok: false,
+        message: child
+          ? "watcher: not armed - previous Pi arm child is still retiring"
+          : "watcher: not armed - Pi session is shutting down",
+      };
+    }
     const ownership = lockOwnership();
     if (ownership === "other") return { ok: false, message: "watcher: read-only - session lock is held by another firstmate session" };
     if (ownership === "missing") {
@@ -333,6 +345,13 @@ export default function (pi: ExtensionAPI) {
     const releaseChild = (): void => {
       if (child === armChild) child = null;
     };
+    const finishSessionRetirement = (): void => {
+      if (!stopping || !replacementSessionStarted || child) return;
+      retryFailures = 0;
+      restoring = false;
+      stopping = false;
+      replacementSessionStarted = false;
+    };
     armChild.stdout.on("data", (chunk: Buffer) => {
       stdout += chunk.toString();
       observeEstablishedArm();
@@ -346,8 +365,12 @@ export default function (pi: ExtensionAPI) {
       settled = true;
       resolveClosed();
       settleReadiness(false);
+      const wasStopping = stopping || generation !== lifecycleGeneration;
       releaseChild();
-      if (stopping || generation !== lifecycleGeneration) return;
+      if (wasStopping) {
+        finishSessionRetirement();
+        return;
+      }
       const classification = classifyClose(stdout, stderr, code, signal);
       const predecessor = String(armChild.pid ?? "");
       if (classification.kind === "actionable") {
@@ -372,8 +395,12 @@ export default function (pi: ExtensionAPI) {
       settled = true;
       resolveClosed();
       settleReadiness(false);
+      const wasStopping = stopping || generation !== lifecycleGeneration;
       releaseChild();
-      if (stopping || generation !== lifecycleGeneration) return;
+      if (wasStopping) {
+        finishSessionRetirement();
+        return;
+      }
       if (restoring) return;
       scheduleRetry(`watcher: FAILED - Pi extension arm child ${id} failed: ${error.message}`, String(armChild.pid ?? ""), generation);
     });

@@ -8,7 +8,7 @@ When this session owns supervision and away mode is not active:
    Never run `bin/fm-watch-arm.sh` through Pi's bash tool because that foreground arm can wedge the agent and bypasses extension-owned cleanup.
 4. If the extension says no live session holds the lock, run `bin/fm-session-start.sh` to reclaim the session lock, then call `fm_watch_arm_pi` again.
 5. The extension starts `bin/fm-watch-arm.sh --restart`, keeps the child attached to the live Pi process, and owns every later successor launch.
-6. A Pi session replacement such as `/new` stops the previous child and retry state, then the replacement `session_start` restores one process-exit cleanup listener and allows `fm_watch_arm_pi` to arm the new session in the same process.
+6. A Pi session replacement such as `/new` stops the previous child and retry state, keeps that child as the occupied arm slot until its close event, then restores one process-exit cleanup listener and allows `fm_watch_arm_pi` to arm the new session in the same process.
 7. After an actionable child close, the extension rechecks session-lock ownership and verifies one successor before it delivers the follow-up wake; its bounded fallback is defined in `docs/watcher-continuity.md`.
 8. Ordinary wake: do not call `fm_watch_arm_pi` again because continuity is extension-owned rather than model-memory-owned.
 9. An unexpected child close enters bounded exponential retry, and an exhausted retry or lost session lock is surfaced as a watcher failure instead of disappearing.

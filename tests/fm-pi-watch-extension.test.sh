@@ -871,6 +871,104 @@ EOF
   pass "Pi session replacement resets watcher lifecycle and final cleanup remains bounded"
 }
 
+test_pi_session_replacement_waits_for_retiring_child() {
+  local repo home plugin log cleanup release out status
+  repo="$TMP_ROOT/pi-session-retiring-child-root"
+  home="$TMP_ROOT/pi-session-retiring-child-home"
+  log="$TMP_ROOT/pi-session-retiring-child.log"
+  cleanup="$TMP_ROOT/pi-session-retiring-child-cleanup.log"
+  release="$TMP_ROOT/pi-session-retiring-child.release"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+if [ ! -f "$FM_ARM_LOG" ]; then
+  printf 'arm=%s\n' "$$" >> "$FM_ARM_LOG"
+  trap '' TERM INT
+  while [ ! -e "$FM_RELEASE_FILE" ]; do sleep 0.02; done
+else
+  printf 'arm=%s\n' "$$" >> "$FM_ARM_LOG"
+  trap 'printf "cleanup=%s\\n" "$$" >> "$FM_CLEANUP_LOG"; exit 0' TERM INT
+  while :; do sleep 0.02; done
+fi
+printf 'cleanup=%s\n' "$$" >> "$FM_CLEANUP_LOG"
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_CLEANUP_LOG="$cleanup" FM_RELEASE_FILE="$release" FM_WATCH_ARM_RETIRE_TIMEOUT_MS=20 node --input-type=module 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const createPiRuntime = () => {
+  const handlers = new Map();
+  let tool = null;
+  return {
+    handlers,
+    get tool() {
+      return tool;
+    },
+    pi: {
+      on(event, handler) {
+        handlers.set(event, handler);
+      },
+      registerCommand() {},
+      registerTool(candidate) {
+        if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+      },
+      sendUserMessage: async () => {},
+    },
+  };
+};
+const rows = (path) => existsSync(path)
+  ? readFileSync(path, "utf8").trim().split("\n").filter(Boolean)
+  : [];
+const waitFor = async (predicate, message) => {
+  for (let i = 0; i < 250; i += 1) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(message);
+};
+
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+const first = createPiRuntime();
+mod.default(first.pi);
+await first.handlers.get("session_start")?.({ type: "session_start", reason: "startup" }, {});
+const firstArm = await first.tool.execute("tool-call-first-session", {}, undefined, undefined, {});
+if (firstArm.details?.ok !== true) throw new Error("initial session did not arm");
+await waitFor(() => rows(process.env.FM_ARM_LOG).length === 1, "initial session child did not start");
+
+await first.handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "new" }, {});
+const second = createPiRuntime();
+mod.default(second.pi);
+await second.handlers.get("session_start")?.({ type: "session_start", reason: "new" }, {});
+const blocked = await second.tool.execute("tool-call-before-retirement", {}, undefined, undefined, {});
+if (blocked.details?.ok !== false || blocked.details.message !== "watcher: not armed - previous Pi arm child is still retiring") {
+  throw new Error(`replacement session did not block on retiring child: ${JSON.stringify(blocked.details)}`);
+}
+if (rows(process.env.FM_ARM_LOG).length !== 1) throw new Error("replacement session overlapped the retiring child");
+
+writeFileSync(process.env.FM_RELEASE_FILE, "release\n");
+await waitFor(() => rows(process.env.FM_CLEANUP_LOG).length === 1, "retiring child did not exit after release");
+let replacement = null;
+for (let i = 0; i < 250 && !replacement?.details?.ok; i += 1) {
+  replacement = await second.tool.execute("tool-call-after-retirement", {}, undefined, undefined, {});
+  if (!replacement.details?.ok) await new Promise((resolve) => setTimeout(resolve, 10));
+}
+if (!replacement?.details?.ok) throw new Error(`replacement session stayed blocked after child close: ${replacement?.details?.message}`);
+await waitFor(() => rows(process.env.FM_ARM_LOG).length === 2, "replacement session did not arm after retirement");
+
+await second.handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "quit" }, {});
+await waitFor(() => rows(process.env.FM_CLEANUP_LOG).length === 2, "replacement child did not clean up");
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "Pi session replacement must retain a retiring child until close"
+  [ -z "$out" ] || fail "Pi retiring-child lifecycle test printed output: $out"
+  pass "Pi session replacement waits for the retiring child to exit"
+}
+
 test_pi_process_exit_cleanup_listener_lifecycle() {
   local repo home plugin out status
   repo="$TMP_ROOT/pi-exit-listener-root"
@@ -1994,6 +2092,7 @@ test_pi_established_empty_close_honors_retry_limit
 test_pi_actionable_close_rechecks_session_lock
 test_pi_arm_distinguishes_session_lock_ownership
 test_pi_session_replacement_restarts_lifecycle_without_leaks
+test_pi_session_replacement_waits_for_retiring_child
 test_pi_process_exit_cleanup_listener_lifecycle
 test_pi_process_exit_cleanup_cancels_pending_retry
 test_pi_process_exit_cleanup_stops_arm_child
