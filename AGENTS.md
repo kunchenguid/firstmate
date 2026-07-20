@@ -334,6 +334,7 @@ When any wake reports a merged PR for a project cloned in this home, refresh tha
 When X-linked work reaches a milestone or terminal state, load `fmx-respond`; before terminal teardown, always post the final completion follow-up so the link clears even if earlier follow-ups were spent.
 
 A secondmate's idle endpoint is healthy, and parent supervision relies on its routed status rather than treating a quiet pane as stale.
+When a persistent secondmate goes idle with an empty queue, set its `state/<id>.meta` `supervision=resting` so it stops counting as in-flight work (section 2; `fm_sup_resting_secondmate`, `bin/fm-supervision-lib.sh`); leave the field unset or `active` for any secondmate still carrying routed work, since absence defaults to active. Set it back to `active` as soon as a resting secondmate picks up routed work again, so it resumes counting.
 Waiting on a healthy supervision cycle is silent; empty polls, elapsed time, and no-change updates are not captain-facing progress.
 Never broadly kill watchers, especially never `pkill -f bin/fm-watch.sh`, because that can kill sibling firstmate homes.
 A forced repair must use the home-scoped owner path emitted by supervision instructions.
