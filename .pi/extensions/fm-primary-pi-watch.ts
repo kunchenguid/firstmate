@@ -555,7 +555,12 @@ export default function (pi: ExtensionAPI) {
     const armChild = child;
     if (!armChild) return result;
     const verified = await waitForStartResult(armChild);
-    if (verified.ok) return result;
+    if (verified.ok) {
+      if (lockPolicy === "defer" && activeSessionLockPolicy === "defer") {
+        activeSessionLockPolicy = "owned-only";
+      }
+      return result;
+    }
     if (child === armChild) await retireArm(armChild, true);
     return verified;
   }

@@ -110,6 +110,7 @@ test_tracked_extension_present_and_self_hashing() {
   assert_contains "$text" 'startArm(activeSessionLockPolicy)' "tracked extension does not carry session lock policy into every arm"
   assert_contains "$text" 'launchArm(activeSessionLockPolicy, predecessorArmPid)' "tracked extension does not carry session lock policy into successor arms"
   assert_not_contains "$text" 'lockPolicy: SessionLockPolicy = "recover"' "tracked extension still has an implicit recover policy"
+  assert_contains "$text" 'if (lockPolicy === "defer" && activeSessionLockPolicy === "defer")' "tracked extension does not bound startup deferral to the first verified arm"
   assert_contains "$text" 'const acquisition = spawnSync(lockScript, []' "tracked extension does not route acquisition through the production owner"
   assert_contains "$text" 'if (ownership !== "owned")' "tracked extension arms without re-reading owned state"
   assert_contains "$text" 'lock ownership changed during resume' "tracked extension does not distinguish a lost acquisition race"
@@ -1681,6 +1682,158 @@ EOF
   pass "Pi fork and reload retain owned-only policy across every re-arm path"
 }
 
+test_pi_startup_policy_promotes_after_first_arm() {
+  local reason entrypoint repo home plugin arm_log acquire_log release closed stop_log monitor_fail out status
+  for reason in startup new; do
+    for entrypoint in retry away monitor command tool; do
+      repo="$TMP_ROOT/pi-$reason-$entrypoint-promote-root"
+      home="$TMP_ROOT/pi-$reason-$entrypoint-promote-home"
+      arm_log="$TMP_ROOT/pi-$reason-$entrypoint-promote-arm.log"
+      acquire_log="$TMP_ROOT/pi-$reason-$entrypoint-promote-acquire.log"
+      release="$TMP_ROOT/pi-$reason-$entrypoint-promote-release"
+      closed="$TMP_ROOT/pi-$reason-$entrypoint-promote-closed"
+      stop_log="$TMP_ROOT/pi-$reason-$entrypoint-promote-stop.log"
+      monitor_fail="$TMP_ROOT/pi-$reason-$entrypoint-promote-monitor-fail"
+      mkdir -p "$home/state" "$home/config"
+      install_pi_watch_extension_fixture "$repo"
+      plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+      cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm\n' >> "${FM_ARM_LOG:?}"
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+if [ "${FM_REARM_ENTRYPOINT:?}" = retry ]; then
+  while [ ! -e "$FM_RELEASE_FILE" ]; do sleep 0.01; done
+  printf 'closed\n' > "$FM_CLOSED_FILE"
+  exit 9
+fi
+trap 'printf "stopped\n" >> "$FM_STOP_LOG"; exit 0' TERM INT
+while :; do sleep 1; done
+SH
+      chmod +x "$repo/bin/fm-watch-arm.sh"
+      status=0
+      out=$(REASON="$reason" ENTRYPOINT="$entrypoint" PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$arm_log" FM_LOCK_ACQUIRE_LOG="$acquire_log" FM_RELEASE_FILE="$release" FM_CLOSED_FILE="$closed" FM_STOP_LOG="$stop_log" FM_MONITOR_FAIL="$monitor_fail" FM_REARM_ENTRYPOINT="$entrypoint" FM_WATCH_REARM_RETRY_BASE_MS=1000 FM_WATCH_REARM_RETRY_MAX_MS=1000 node --input-type=module 2>&1 <<'EOF'
+import fs, { existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
+import { pathToFileURL } from "node:url";
+
+const originalStatSync = fs.statSync;
+fs.statSync = (...args) => {
+  if (process.env.ENTRYPOINT === "monitor" && existsSync(process.env.FM_MONITOR_FAIL)) {
+    throw Object.assign(new Error("fixture monitor failure"), { code: "EIO" });
+  }
+  return originalStatSync(...args);
+};
+syncBuiltinESMExports();
+
+const lock = `${process.env.FM_HOME}/state/.lock`;
+writeFileSync(lock, `${process.pid}\n`);
+const handlers = new Map();
+const notifications = [];
+const prompts = [];
+let command = null;
+let tool = null;
+const pi = {
+  on(event, handler) {
+    handlers.set(event, handler);
+  },
+  registerCommand(name, options) {
+    if (name === "fm-watch-arm-pi") command = options;
+  },
+  registerTool(candidate) {
+    if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+  },
+  sendUserMessage: async (message) => {
+    prompts.push(message);
+  },
+};
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+await handlers.get("session_start")?.({ type: "session_start", reason: process.env.REASON }, {
+  ui: {
+    notify(message) {
+      notifications.push(message);
+    },
+  },
+});
+if (!command || !tool) throw new Error("public arm entrypoints were not registered");
+if (!existsSync(process.env.FM_ARM_LOG)) throw new Error(`${process.env.REASON} initial owned arm did not start`);
+
+const loss = ["retry", "away", "command"].includes(process.env.ENTRYPOINT) ? "missing" : "dead";
+if (process.env.ENTRYPOINT === "retry") {
+  writeFileSync(process.env.FM_RELEASE_FILE, "release\n");
+  for (let i = 0; i < 100 && !existsSync(process.env.FM_CLOSED_FILE); i += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  if (!existsSync(process.env.FM_CLOSED_FILE)) throw new Error("retry arm did not close");
+  await new Promise((resolve) => setTimeout(resolve, 300));
+}
+if (process.env.ENTRYPOINT === "away") {
+  writeFileSync(`${process.env.FM_HOME}/state/.afk`, "away\n");
+}
+if (process.env.ENTRYPOINT === "monitor") {
+  writeFileSync(process.env.FM_MONITOR_FAIL, "fail\n");
+}
+if (["away", "monitor"].includes(process.env.ENTRYPOINT)) {
+  for (let i = 0; i < 100 && !existsSync(process.env.FM_STOP_LOG); i += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  if (!existsSync(process.env.FM_STOP_LOG)) throw new Error(`${process.env.ENTRYPOINT} did not stop the established arm`);
+}
+if (loss === "missing") unlinkSync(lock); else writeFileSync(lock, "999999\n");
+if (process.env.ENTRYPOINT === "away") unlinkSync(`${process.env.FM_HOME}/state/.afk`);
+if (process.env.ENTRYPOINT === "monitor") unlinkSync(process.env.FM_MONITOR_FAIL);
+
+let toolResult = null;
+if (process.env.ENTRYPOINT === "command") {
+  await command.handler("", {
+    ui: {
+      notify(message) {
+        notifications.push(message);
+      },
+    },
+  });
+}
+if (process.env.ENTRYPOINT === "tool") {
+  toolResult = await tool.execute("policy-loss", {}, undefined, undefined, {});
+}
+
+for (let i = 0; i < 150; i += 1) {
+  const surfaced = process.env.ENTRYPOINT === "tool"
+    ? toolResult?.details?.ok === false
+    : process.env.ENTRYPOINT === "command"
+      ? notifications.some((message) => message.includes(`state: ${loss}`))
+      : prompts.some((message) => message.includes(`state: ${loss}`));
+  if (surfaced) break;
+  await new Promise((resolve) => setTimeout(resolve, 20));
+}
+const surfaced = process.env.ENTRYPOINT === "tool"
+  ? toolResult?.content?.[0]?.text || ""
+  : process.env.ENTRYPOINT === "command"
+    ? notifications.join(" | ")
+    : prompts.join(" | ");
+if (!surfaced.includes(`existing session-lock ownership required (state: ${loss})`)) {
+  throw new Error(`${process.env.REASON}/${process.env.ENTRYPOINT} did not promote to owned-only: ${surfaced}`);
+}
+const armCount = readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split(/\n/).length;
+if (armCount !== 1) throw new Error(`${process.env.REASON}/${process.env.ENTRYPOINT} launched ${armCount} arms`);
+if (existsSync(process.env.FM_LOCK_ACQUIRE_LOG)) {
+  throw new Error(`${process.env.REASON}/${process.env.ENTRYPOINT} invoked lock acquisition`);
+}
+if (loss === "missing") {
+  if (existsSync(lock)) throw new Error(`${process.env.REASON}/${process.env.ENTRYPOINT} recreated a missing lock`);
+} else if (readFileSync(lock, "utf8").trim() !== "999999") {
+  throw new Error(`${process.env.REASON}/${process.env.ENTRYPOINT} replaced a dead lock`);
+}
+await handlers.get("session_shutdown")?.({ type: "session_shutdown" }, {});
+EOF
+      ) || status=$?
+      expect_code 0 "$status" "Pi $reason must promote defer before $entrypoint lock loss"
+      [ -z "$out" ] || fail "Pi $reason/$entrypoint policy-promotion test printed output: $out"
+    done
+  done
+  pass "Pi startup and new promote defer after the first verified arm"
+}
+
 test_pi_extension_respects_primary_scope() {
   local scenario base repo home plugin arm_log out status
   for scenario in linked secondmate; do
@@ -2809,6 +2962,7 @@ test_pi_resume_session_recovers_only_reclaimable_locks
 test_pi_session_start_load_order_preserves_initial_nudge
 test_pi_fork_reload_rebuilds_only_owned_supervision
 test_pi_fork_reload_policy_survives_every_rearm_path
+test_pi_startup_policy_promotes_after_first_arm
 test_pi_extension_respects_primary_scope
 test_pi_extension_distinguishes_lock_refusal_states
 test_opencode_primary_watch_plugin_static_wiring
