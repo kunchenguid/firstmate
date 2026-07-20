@@ -60,10 +60,11 @@ function runSessionstartNudge(): string {
   return result.stdout.trim();
 }
 
-function runGuard(): Promise<{ code: number; stderr: string }> {
+function runGuard(sessionId: string): Promise<{ code: number; stderr: string }> {
   return new Promise((resolveResult) => {
     const child = spawn(`${root}/bin/fm-turnend-guard.sh`, {
       stdio: ["pipe", "ignore", "pipe"],
+      env: { ...process.env, FM_MEMORY_RUNTIME: "pi" },
     });
     let stderr = "";
     child.stderr.on("data", (chunk) => {
@@ -71,7 +72,7 @@ function runGuard(): Promise<{ code: number; stderr: string }> {
     });
     child.on("error", () => resolveResult({ code: 0, stderr: "" }));
     child.on("close", (code) => resolveResult({ code: code ?? 0, stderr }));
-    child.stdin.end('{"stop_hook_active":false}');
+    child.stdin.end(JSON.stringify({ stop_hook_active: false, session_id: sessionId }));
   });
 }
 
@@ -129,13 +130,14 @@ export default function (pi: ExtensionAPI) {
     return { block: true, reason: result.stderr.trim() || "denied by the watcher-arm PreToolUse seatbelt" };
   });
 
-  pi.on("agent_settled", async () => {
+  pi.on("agent_settled", async (_event, ctx) => {
     if (guardFollowupActive) {
       guardFollowupActive = false;
       return;
     }
 
-    const result = await runGuard();
+    const sessionId = String(ctx?.sessionManager?.getSessionId?.() ?? "unknown");
+    const result = await runGuard(sessionId);
     if (result.code !== 2) return;
 
     guardFollowupActive = true;

@@ -6,10 +6,11 @@ const COORDINATOR_KEY = "__firstmateOpenCodeWatchArm";
 
 let skipNextIdle = false;
 
-function runProcess(command, args, input = "") {
+function runProcess(command, args, input = "", options = {}) {
   return new Promise((resolve) => {
     const child = spawn(command, args, {
       stdio: ["pipe", "pipe", "pipe"],
+      ...options,
     });
     let stdout = "";
     let stderr = "";
@@ -41,9 +42,23 @@ function resolvePath(anchor) {
   }
 }
 
-function runGuard(root) {
+function runBoundary(root, sessionID) {
   if (!root) return Promise.resolve({ code: 0, stderr: "" });
-  return runProcess(`${root}/bin/fm-turnend-guard.sh`, [], '{"stop_hook_active":false}');
+  return runProcess(
+    `${root}/bin/fm-memory.sh`,
+    ["boundary", "--reason", "turn-end", "--runtime", "opencode", "--session", sessionID],
+    JSON.stringify({ session_id: sessionID }),
+  );
+}
+
+function runGuard(root, sessionID) {
+  if (!root) return Promise.resolve({ code: 0, stderr: "" });
+  return runProcess(
+    `${root}/bin/fm-turnend-guard.sh`,
+    [],
+    JSON.stringify({ stop_hook_active: false, session_id: sessionID }),
+    { env: { ...process.env, FM_MEMORY_BOUNDARY_DONE: "1", FM_MEMORY_RUNTIME: "opencode" } },
+  );
 }
 
 async function letWatchArmRun(sessionID, client) {
@@ -68,9 +83,10 @@ export const FmPrimaryTurnendGuard = async ({ client, directory, worktree }) => 
       const sessionID = event.properties?.sessionID;
       if (!sessionID) return;
 
+      await runBoundary(root, sessionID);
       if (await letWatchArmRun(sessionID, client)) return;
 
-      const result = await runGuard(root);
+      const result = await runGuard(root, sessionID);
       if (result.code !== 2) return;
 
       try {

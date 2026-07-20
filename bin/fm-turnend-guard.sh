@@ -81,7 +81,9 @@ fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
 # portable fallback for runtimes without a verified pre-compaction callback.
 # The memory owner independently requires this session to own the home lock;
 # hook failures never make an otherwise healthy turn un-endable.
-printf '%s' "$PAYLOAD" | "$SCRIPT_DIR/fm-memory.sh" boundary --reason turn-end >/dev/null 2>&1 || true
+if [ "${FM_MEMORY_BOUNDARY_DONE:-0}" != 1 ]; then
+  printf '%s' "$PAYLOAD" | "$SCRIPT_DIR/fm-memory.sh" boundary --reason turn-end >/dev/null 2>&1 || true
+fi
 
 # --- the actual predicate ----------------------------------------------------
 # shellcheck source=bin/fm-wake-lib.sh

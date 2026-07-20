@@ -29,7 +29,7 @@ SESSION_ID=$(printf '%s' "$PAYLOAD" | jq -r '.sessionId // empty' 2>/dev/null) |
 ERR=$(mktemp "${TMPDIR:-/tmp}/fm-turnend-grok.XXXXXX") || exit 0
 trap 'rm -f "$ERR"' EXIT
 
-printf '%s' "$PAYLOAD" | "$ROOT/bin/fm-turnend-guard.sh" 2>"$ERR"
+printf '%s' "$PAYLOAD" | FM_MEMORY_RUNTIME=grok "$ROOT/bin/fm-turnend-guard.sh" 2>"$ERR"
 RC=$?
 [ "$RC" -eq 2 ] || exit 0
 

@@ -28,12 +28,34 @@
         ]
       }
     ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -lc 'payload=$(cat 2>/dev/null || true); [ -n \"$payload\" ] || exit 0; command -v jq >/dev/null 2>&1 || exit 0; root=$(pwd -P) || exit 0; [ -x \"$root/bin/fm-memory-codex-hook.sh\" ] || exit 0; [ -f \"$root/AGENTS.md\" ] || exit 0; [ -f \"$root/.codex/hooks.json\" ] || exit 0; jq -e \"any(.hooks.PreCompact[]?.hooks[]?.command?; type == \\\"string\\\" and contains(\\\"fm-memory-codex-hook.sh\\\"))\" \"$root/.codex/hooks.json\" >/dev/null 2>&1 || exit 0; printf \"%s\" \"$payload\" | \"$root/bin/fm-memory-codex-hook.sh\" pre'",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "PostCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -lc 'payload=$(cat 2>/dev/null || true); [ -n \"$payload\" ] || exit 0; command -v jq >/dev/null 2>&1 || exit 0; root=$(pwd -P) || exit 0; [ -x \"$root/bin/fm-memory-codex-hook.sh\" ] || exit 0; [ -f \"$root/AGENTS.md\" ] || exit 0; [ -f \"$root/.codex/hooks.json\" ] || exit 0; jq -e \"any(.hooks.PostCompact[]?.hooks[]?.command?; type == \\\"string\\\" and contains(\\\"fm-memory-codex-hook.sh\\\"))\" \"$root/.codex/hooks.json\" >/dev/null 2>&1 || exit 0; printf \"%s\" \"$payload\" | \"$root/bin/fm-memory-codex-hook.sh\" post'",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
     "Stop": [
       {
         "hooks": [
           {
             "type": "command",
-            "command": "bash -lc 'payload=$(cat 2>/dev/null || true); [ -n \"$payload\" ] || exit 0; command -v jq >/dev/null 2>&1 || exit 0; root=$(pwd -P) || exit 0; [ -x \"$root/bin/fm-turnend-guard.sh\" ] || exit 0; [ -f \"$root/AGENTS.md\" ] || exit 0; [ -f \"$root/.codex/hooks.json\" ] || exit 0; jq -e \"any(.hooks.Stop[]?.hooks[]?.command?; type == \\\"string\\\" and contains(\\\"fm-turnend-guard.sh\\\"))\" \"$root/.codex/hooks.json\" >/dev/null 2>&1 || exit 0; printf \"%s\" \"$payload\" | \"$root/bin/fm-turnend-guard.sh\"'",
+            "command": "bash -lc 'payload=$(cat 2>/dev/null || true); [ -n \"$payload\" ] || exit 0; command -v jq >/dev/null 2>&1 || exit 0; root=$(pwd -P) || exit 0; [ -x \"$root/bin/fm-turnend-guard.sh\" ] || exit 0; [ -f \"$root/AGENTS.md\" ] || exit 0; [ -f \"$root/.codex/hooks.json\" ] || exit 0; jq -e \"any(.hooks.Stop[]?.hooks[]?.command?; type == \\\"string\\\" and contains(\\\"fm-turnend-guard.sh\\\"))\" \"$root/.codex/hooks.json\" >/dev/null 2>&1 || exit 0; printf \"%s\" \"$payload\" | FM_MEMORY_RUNTIME=codex \"$root/bin/fm-turnend-guard.sh\"'",
             "timeout": 30
           }
         ]

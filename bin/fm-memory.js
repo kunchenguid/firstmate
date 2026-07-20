@@ -102,9 +102,45 @@ function safeName(value, label, fallback = "none") {
   return text;
 }
 
-function mkdirPrivate(dir) {
-  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-  fs.chmodSync(dir, 0o700);
+function ensurePrivateDirectory(layout, dir) {
+  const target = path.resolve(dir);
+  if (!inside(target, layout.memory)) fail("memory directory escapes the active data root");
+  const dataStat = fs.lstatSync(layout.data);
+  if (!dataStat.isDirectory() || dataStat.isSymbolicLink()) fail("active data root must be a real directory");
+  let current = layout.data;
+  const parts = path.relative(layout.data, target).split(path.sep).filter(Boolean);
+  for (const part of parts) {
+    current = path.join(current, part);
+    try {
+      const stat = fs.lstatSync(current);
+      if (!stat.isDirectory() || stat.isSymbolicLink()) fail(`memory parent is not a real directory: ${current}`);
+    } catch (error) {
+      if (error?.code !== "ENOENT") throw error;
+      try { fs.mkdirSync(current, { mode: 0o700 }); } catch (mkdirError) {
+        if (mkdirError?.code !== "EEXIST") throw mkdirError;
+      }
+      const stat = fs.lstatSync(current);
+      if (!stat.isDirectory() || stat.isSymbolicLink()) fail(`memory parent is not a real directory: ${current}`);
+    }
+    fs.chmodSync(current, 0o700);
+  }
+}
+
+function safeMemoryDirectory(layout, dir) {
+  const target = path.resolve(dir);
+  if (!inside(target, layout.memory)) return false;
+  try {
+    const dataStat = fs.lstatSync(layout.data);
+    if (!dataStat.isDirectory() || dataStat.isSymbolicLink()) return false;
+    let current = layout.data;
+    const parts = path.relative(layout.data, target).split(path.sep).filter(Boolean);
+    for (const part of parts) {
+      current = path.join(current, part);
+      const stat = fs.lstatSync(current);
+      if (!stat.isDirectory() || stat.isSymbolicLink()) return false;
+    }
+    return true;
+  } catch { return false; }
 }
 
 function sha(value) { return crypto.createHash("sha256").update(value).digest("hex"); }
@@ -165,8 +201,8 @@ function rejectSecrets(value) {
   if (COT_RE.test(text)) fail("chain-of-thought or private reasoning is not valid memory evidence");
 }
 
-function atomicCreate(file, bytes) {
-  mkdirPrivate(path.dirname(file));
+function atomicCreate(layout, file, bytes) {
+  ensurePrivateDirectory(layout, path.dirname(file));
   const tmp = path.join(path.dirname(file), `.${path.basename(file)}.${process.pid}.${crypto.randomBytes(4).toString("hex")}.tmp`);
   const fd = fs.openSync(tmp, "wx", 0o600);
   try {
@@ -183,6 +219,56 @@ function atomicCreate(file, bytes) {
     try { fs.fsyncSync(dfd); } finally { fs.closeSync(dfd); }
   } catch { /* Directory fsync is unavailable on some filesystems. */ }
   return created;
+}
+
+function processAlive(pid) {
+  try { process.kill(pid, 0); return true; } catch (error) { return error?.code === "EPERM"; }
+}
+
+function pause(milliseconds) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, milliseconds);
+}
+
+function withWriteLock(layout, action) {
+  ensurePrivateDirectory(layout, layout.memory);
+  const lock = path.join(layout.memory, ".write-lock");
+  const token = `${process.pid}:${crypto.randomBytes(12).toString("hex")}`;
+  const deadline = Date.now() + 10000;
+  while (true) {
+    try {
+      const fd = fs.openSync(lock, "wx", 0o600);
+      try { fs.writeFileSync(fd, `${token}\n`); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+      break;
+    } catch (error) {
+      if (error?.code !== "EEXIST") throw error;
+      let stat;
+      let current;
+      try {
+        stat = fs.lstatSync(lock);
+        current = fs.readFileSync(lock, "utf8").trim();
+      } catch (readError) {
+        if (readError?.code === "ENOENT") continue;
+        throw readError;
+      }
+      if (!stat.isFile() || stat.isSymbolicLink()) fail("memory write lock is not a regular file");
+      const holder = Number(current.split(":", 1)[0]);
+      if (Number.isSafeInteger(holder) && holder > 1 && !processAlive(holder)) {
+        try {
+          if (fs.readFileSync(lock, "utf8").trim() === current) fs.unlinkSync(lock);
+        } catch (staleError) {
+          if (staleError?.code !== "ENOENT") throw staleError;
+        }
+        continue;
+      }
+      if (Date.now() >= deadline) fail("timed out waiting for the memory write lock");
+      pause(10);
+    }
+  }
+  try { return action(); } finally {
+    try {
+      if (fs.readFileSync(lock, "utf8").trim() === token) fs.unlinkSync(lock);
+    } catch { }
+  }
 }
 
 function listFiles(dir, suffix) {
@@ -207,6 +293,7 @@ function readEvent(file) {
 }
 
 function allEvents(layout) {
+  if (!safeMemoryDirectory(layout, path.join(layout.memory, "events"))) return [];
   return listFiles(path.join(layout.memory, "events"), ".json").map(readEvent).filter(Boolean).sort((a, b) => `${a.sequence}|${a.event_id}`.localeCompare(`${b.sequence}|${b.event_id}`));
 }
 
@@ -221,13 +308,12 @@ function parsePayload(opts) {
   try { return JSON.parse(raw || "{}"); } catch { return { summary: raw.trim() }; }
 }
 
-function eventCommand(opts, forced = {}) {
-  const layout = resolvedLayout();
+function writeEvent(layout, opts, forced = {}) {
   const type = forced.type || opts.type;
   if (!TYPES.has(type)) fail(`unsupported event type: ${type || "(missing)"}`);
-  const writer = safeName(forced.writer || opts.writer || `${opts.runtime || "unknown"}-${opts.session || process.pid}`, "writer");
   const runtime = safeName(forced.runtime || opts.runtime || "unknown", "runtime");
   const session = safeName(forced.session || opts.session || "unknown", "session");
+  const writer = safeName(forced.writer || opts.writer || `${runtime}-${session === "unknown" ? process.pid : session}`, "writer");
   const task = safeName(forced.task || opts.task || "none", "task");
   const project = safeName(forced.project || opts.project || "none", "project");
   const sensitivity = forced.sensitivity || opts.sensitivity || "private";
@@ -263,7 +349,7 @@ function eventCommand(opts, forced = {}) {
     previous_high_water: highWater(events),
   };
   const file = path.join(layout.memory, "events", writer, `${eventId}.json`);
-  const created = atomicCreate(file, `${stableJson(record)}\n`);
+  const created = atomicCreate(layout, file, `${stableJson(record)}\n`);
   if (!created) {
     const winner = readEvent(file);
     const retryShape = { runtime, session, task, project, type, payload, sources, sensitivity };
@@ -274,6 +360,12 @@ function eventCommand(opts, forced = {}) {
   }
   if (!forced.quiet) process.stdout.write(`${eventId}\n`);
   return record;
+}
+
+function eventCommand(opts, forced = {}) {
+  const layout = resolvedLayout();
+  if (!lockOwned(layout)) fail("event write requires the active home session lock");
+  return withWriteLock(layout, () => writeEvent(layout, opts, forced));
 }
 
 function currentGitEvidence(layout) {
@@ -346,11 +438,13 @@ function parseCheckpoint(file, layout = resolvedLayout()) {
   try {
     const target = path.resolve(file);
     if (!inside(target, path.join(layout.memory, "checkpoints"))) return { valid: false, reason: "outside checkpoint directory" };
+    if (!safeMemoryDirectory(layout, path.dirname(target))) return { valid: false, reason: "unsafe checkpoint parent" };
     const stat = fs.lstatSync(target);
     if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 131072) return { valid: false, reason: "unsafe checkpoint file" };
     const markdown = fs.readFileSync(target, "utf8");
     const sidecar = `${target}.sha256`;
-    if (!fs.existsSync(sidecar) || fs.readFileSync(sidecar, "utf8").trim() !== sha(markdown)) return { valid: false, reason: "hash mismatch" };
+    const sidecarStat = fs.lstatSync(sidecar);
+    if (!sidecarStat.isFile() || sidecarStat.isSymbolicLink() || sidecarStat.size > 256 || fs.readFileSync(sidecar, "utf8").trim() !== sha(markdown)) return { valid: false, reason: "hash mismatch" };
     const match = markdown.match(/```json\n([^\n]+)\n```/);
     if (!match) return { valid: false, reason: "missing canonical JSON fence" };
     const cp = JSON.parse(match[1]);
@@ -368,22 +462,27 @@ function parseCheckpoint(file, layout = resolvedLayout()) {
 function checkpointCommand(opts, supplied) {
   const layout = resolvedLayout();
   if (!lockOwned(layout)) fail("checkpoint write requires the active home session lock");
-  const files = listFiles(path.join(layout.memory, "checkpoints"), ".md");
-  if (files.length >= MAX_CHECKPOINTS) fail(`checkpoint capacity ${MAX_CHECKPOINTS} reached; archive this home's memory before writing more`);
   let input = supplied;
   if (!input) {
     const raw = readBounded(opts.input || "-", MAX_CHECKPOINT_INPUT);
     try { input = JSON.parse(raw); } catch { fail("checkpoint input must be valid JSON"); }
   }
-  const cp = normalizeCheckpoint(input, opts, layout);
-  const markdown = checkpointMarkdown(cp);
-  const dir = path.join(layout.memory, "checkpoints");
-  const file = path.join(dir, `${compactTime(cp.created_at)}-${cp.checkpoint_id}.md`);
-  atomicCreate(file, markdown);
-  atomicCreate(`${file}.sha256`, `${sha(markdown)}\n`);
-  const checked = parseCheckpoint(file, layout);
-  if (!checked.valid) fail(`checkpoint read-back validation failed: ${checked.reason}`);
-  eventCommand(opts, { type: "checkpoint", runtime: cp.runtime, session: cp.session, project: cp.project, payload: { checkpoint_id: cp.checkpoint_id, reason: cp.reason, event_high_water: cp.event_high_water }, sources: [`checkpoint:${cp.checkpoint_id}`], idempotency: cp.checkpoint_id, quiet: true });
+  const result = withWriteLock(layout, () => {
+    const files = listFiles(path.join(layout.memory, "checkpoints"), ".md");
+    if (files.length >= MAX_CHECKPOINTS) fail(`checkpoint capacity ${MAX_CHECKPOINTS} reached; archive this home's memory before writing more`);
+    if (allEvents(layout).length >= MAX_EVENTS) fail(`event capacity ${MAX_EVENTS} reached; archive this home's memory before writing more`);
+    const cp = normalizeCheckpoint(input, opts, layout);
+    const markdown = checkpointMarkdown(cp);
+    const dir = path.join(layout.memory, "checkpoints");
+    const file = path.join(dir, `${compactTime(cp.created_at)}-${cp.checkpoint_id}.md`);
+    atomicCreate(layout, file, markdown);
+    atomicCreate(layout, `${file}.sha256`, `${sha(markdown)}\n`);
+    const checked = parseCheckpoint(file, layout);
+    if (!checked.valid) fail(`checkpoint read-back validation failed: ${checked.reason}`);
+    writeEvent(layout, opts, { type: "checkpoint", runtime: cp.runtime, session: cp.session, project: cp.project, payload: { checkpoint_id: cp.checkpoint_id, reason: cp.reason, event_high_water: cp.event_high_water }, sources: [`checkpoint:${cp.checkpoint_id}`], idempotency: cp.checkpoint_id, quiet: true });
+    return { cp, file };
+  });
+  const { cp, file } = result;
   process.stdout.write(`${file}\n`);
   return cp;
 }
@@ -406,6 +505,7 @@ function lockOwned(layout) {
 
 function runtimeFromEnv(opts) {
   if (opts.runtime) return opts.runtime;
+  if (process.env.FM_MEMORY_RUNTIME) return process.env.FM_MEMORY_RUNTIME;
   if (process.env.CLAUDECODE) return "claude";
   if (process.env.PI_CODING_AGENT) return "pi";
   if (process.env.GROK_AGENT || process.env.GROK_HOOK_EVENT) return "grok";
@@ -419,7 +519,15 @@ function payloadSession(raw) {
   } catch { return "unknown"; }
 }
 
+function payloadTurn(raw) {
+  try {
+    const value = JSON.parse(raw || "{}");
+    return value.turn_id || value.turnId || "";
+  } catch { return ""; }
+}
+
 function latestCheckpoint(layout) {
+  if (!safeMemoryDirectory(layout, path.join(layout.memory, "checkpoints"))) return { valid: false, invalid: [] };
   const files = listFiles(path.join(layout.memory, "checkpoints"), ".md").reverse();
   const invalid = [];
   for (const file of files) {
@@ -437,7 +545,8 @@ function boundaryCommand(opts) {
   const runtime = safeName(runtimeFromEnv(opts), "runtime");
   const session = safeName(opts.session || payloadSession(raw), "session");
   const reason = opts.reason || "turn-end";
-  const lineage = eventCommand(opts, { type: "session-lineage", runtime, session, payload: { reason, evidence: "opaque runtime session identifier; transcript content not copied" }, sources: [`runtime:${runtime}`], idempotency: `${reason}:${runtime}:${session}:${opts["idempotency-key"] || compactTime(now()).slice(0, 12)}`, quiet: true });
+  const turn = payloadTurn(raw);
+  const lineage = eventCommand(opts, { type: "session-lineage", runtime, session, payload: { reason, evidence: "opaque runtime session identifier; transcript content not copied" }, sources: [`runtime:${runtime}`], idempotency: `${reason}:${runtime}:${session}:${opts["idempotency-key"] || turn || compactTime(now()).slice(0, 12)}`, quiet: true });
   const previous = latestCheckpoint(layout);
   const prior = previous.valid ? previous.checkpoint : {};
   const active = activeTaskRefs(layout);
@@ -450,6 +559,7 @@ function boundaryCommand(opts) {
     next_safe_action: prior.next_safe_action || "Read the bounded recovery capsule, then reconcile it with the session-start digest before consequential work.",
     provenance: [...(prior.provenance || []), `event:${lineage.event_id}`, "authority:data/backlog.md", "authority:state/*.meta", "authority:git"].slice(-100),
     sensitivity: "private",
+    event_high_water: prior.event_high_water || "none",
   };
   checkpointCommand({ ...opts, reason, runtime, session }, input);
 }
@@ -488,7 +598,10 @@ function recoverCommand(opts) {
   }
   const cp = latest.checkpoint;
   const events = allEvents(layout);
-  const later = events.filter((event) => cp.event_high_water === "none" || `${event.sequence}|${event.event_id}` > cp.event_high_water).slice(-maxEvents);
+  const laterAll = events.filter((event) => cp.event_high_water === "none" || `${event.sequence}|${event.event_id}` > cp.event_high_water);
+  const meaningful = laterAll.filter((event) => !["checkpoint", "session-lineage"].includes(event.type));
+  const selected = meaningful.length ? meaningful : laterAll;
+  const later = selected.slice(-maxEvents);
   const findings = reconcile(cp, layout);
   const lines = [
     "RECOVERY CAPSULE (bounded; memory is evidence, current authority wins)",
@@ -500,12 +613,19 @@ function recoverCommand(opts) {
     `blockers: ${(cp.blockers || []).length ? stableJson(cp.blockers) : "none recorded"}`,
     `active task references: ${(cp.active_tasks || []).join(", ") || "none"}`,
     `artifacts/evidence: ${(cp.evidence || []).length ? stableJson(cp.evidence).slice(0, 3000) : "none recorded"}`,
-    `later events (${later.length}): ${later.length ? later.map((e) => `${e.event_id}:${e.type}`).join(", ") : "none"}`,
+    `later event evidence (shown ${later.length} of ${selected.length}): ${later.length ? later.map((e) => `${e.event_id}:${e.type}:${stableJson(e.payload).slice(0, 400)}`).join(", ") : "none"}`,
     `contradictions: ${findings.length ? findings.join("; ") : "none found by bounded checks; reconcile with digest below"}`,
     `invalid newer checkpoints ignored: ${latest.invalid.length}`,
   ];
   let output = `${lines.join("\n")}\n`;
-  if (Buffer.byteLength(output) > MAX_CAPSULE) output = `${output.slice(0, MAX_CAPSULE - 80)}\n[recovery capsule truncated at ${MAX_CAPSULE} bytes]\n`;
+  if (Buffer.byteLength(output) > MAX_CAPSULE) {
+    const suffix = `\n[recovery capsule truncated at ${MAX_CAPSULE} bytes]\n`;
+    const budget = MAX_CAPSULE - Buffer.byteLength(suffix);
+    const bytes = Buffer.from(output);
+    let end = budget;
+    while (end > 0 && (bytes[end] & 0xc0) === 0x80) end -= 1;
+    output = `${bytes.subarray(0, end).toString("utf8")}${suffix}`;
+  }
   process.stdout.write(output);
 }
 
@@ -526,7 +646,8 @@ function searchCommand(opts) {
     }
   }
   if (!opts.kind || opts.kind === "checkpoints") {
-    for (const file of listFiles(path.join(layout.memory, "checkpoints"), ".md").reverse()) {
+    const checkpointFiles = safeMemoryDirectory(layout, path.join(layout.memory, "checkpoints")) ? listFiles(path.join(layout.memory, "checkpoints"), ".md").reverse() : [];
+    for (const file of checkpointFiles) {
       const parsed = parseCheckpoint(file, layout);
       if (!parsed.valid || !allow(parsed.checkpoint.sensitivity) || (opts.project && parsed.checkpoint.project !== opts.project) || (since && Date.parse(parsed.checkpoint.created_at) < since)) continue;
       const text = stableJson(parsed.checkpoint);

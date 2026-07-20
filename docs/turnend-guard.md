@@ -43,7 +43,7 @@ All verified primary harnesses have a tracked integration:
 
 - `claude`: `.claude/settings.json` registers a `Stop` hook command anchored through `"$CLAUDE_PROJECT_DIR"/bin/fm-turnend-guard.sh`.
 - `codex`: `.codex/hooks.json` registers a `Stop` hook that reads the hook payload once, anchors the executable to the hook command process working directory, verifies that root is firstmate-shaped and hook-bearing, and pipes the original payload to that checkout's `bin/fm-turnend-guard.sh`.
-- `opencode`: `.opencode/plugins/fm-primary-turnend-guard.js` listens for `session.idle`, lets the watcher-arm coordinator handle normal idle supervision first, runs the shared guard only when that coordinator does not act, and uses `client.session.promptAsync` to force one follow-up prompt when the guard returns 2.
+- `opencode`: `.opencode/plugins/fm-primary-turnend-guard.js` listens for `session.idle`, records the durable-memory boundary with the opaque session identifier, lets the watcher-arm coordinator handle normal idle supervision, runs the shared guard only when that coordinator does not act, and uses `client.session.promptAsync` to force one follow-up prompt when the guard returns 2.
 - `pi`: `.pi/extensions/fm-primary-turnend-guard.ts` listens for `agent_settled`, marks the extension version loaded for session-start checks, runs the shared guard once per logical agent run, and uses `pi.sendUserMessage(..., { deliverAs: "followUp" })` to force one follow-up prompt when the guard returns 2.
 - `grok`: `.grok/hooks/fm-primary-turnend-guard.json` registers a `Stop` hook that invokes `bin/fm-turnend-guard-grok.sh`.
   The adapter runs the shared guard and, when it returns 2, invokes `grok --resume <sessionId> -p <guard-reason>` with `GROK_TURNEND_GUARD_ACTIVE=1`.
@@ -57,7 +57,7 @@ OpenCode, Pi, and Grok expose passive lifecycle callbacks for this purpose.
 Their adapters fail open at the hook boundary to avoid corrupting a user session, but they force one follow-up turn when the shared predicate blocks.
 Each adapter carries its own in-process or environment loop guard so the forced follow-up does not recursively schedule another follow-up.
 Pi keeps that latch active across every internal tool turn and clears it only when the generated guard follow-up reaches `agent_settled`, or immediately when follow-up delivery fails.
-All five integrations therefore reach the same portable durable-memory boundary without a second hook registration or lifecycle cycle; [`durable-memory.md`](durable-memory.md) owns the compaction support matrix and fallback rationale.
+All five integrations therefore reach the same portable durable-memory boundary; [`durable-memory.md`](durable-memory.md) owns Codex's additional compaction hooks, the support matrix, and the fallback rationale.
 If a passive adapter cannot call its SDK method, cannot find `grok`, or cannot recover the Grok session id, it fails open and relies on the pull-based `fm-guard.sh` warning at the next fleet command.
 That warning uses `bin/fm-supervision-instructions.sh --repair-line`, so it points back to the active harness protocol instead of hardcoding one background-arm command.
 

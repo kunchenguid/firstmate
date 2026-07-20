@@ -13,9 +13,8 @@ Canonical private records live under the active home's `data/memory/` directory.
 - `checkpoints/*.md` contains immutable `fm.memory.checkpoint.v1` Markdown with canonical JSON and a sibling SHA-256 file.
 - Runtime transcript content remains in the runtime's own store; Firstmate records an opaque lineage reference and an optional file hash, size, and path only when deliberately supplied.
 
-One immutable event file per writer and event is the serialization strategy.
-It avoids a shared JSONL append race while retaining append-only semantics, deterministic event IDs, sortable sequences, retry idempotency, and previous-high-water linkage.
-That verified publication primitive permits narrowly scoped event writers to append without the session lock; checkpoint creation still requires ancestry ownership of the active home's lock.
+One immutable file per event avoids a shared JSONL append race while retaining append-only semantics, deterministic event IDs, sortable sequences, retry idempotency, and previous-high-water linkage.
+Every mutation requires ancestry ownership of the active home's session lock and is serialized through one private home-local write lock, so capacity checks and publication form one bounded operation.
 Atomic create uses a same-directory temporary file, file `fsync`, hard-link publication without overwrite, and best-effort directory `fsync`.
 Checkpoint publication uses the same primitive, then reads back and validates the hash, schema, and referenced event high-water.
 
@@ -42,8 +41,8 @@ A lock-refused session may read recovery evidence but may not append an event or
 
 ## Lifecycle
 
-Every supported primary runtime already reaches `bin/fm-turnend-guard.sh` at a logical turn boundary.
-That shared owner now invokes `fm-memory.sh boundary` before its supervision predicate.
+Every supported primary runtime reaches a logical turn boundary that invokes `fm-memory.sh boundary` before its supervision predicate.
+OpenCode records that boundary before its watcher coordinator can return from normal `session.idle` handling, while the other adapters reach it through `bin/fm-turnend-guard.sh`.
 The memory owner verifies that the hook process descends from the active home's lock holder, records only opaque runtime lineage from the bounded hook payload, and writes a validated checkpoint.
 Hook memory failure remains non-blocking so a storage problem cannot wedge a model session; session start surfaces recovery failure explicitly.
 
@@ -57,12 +56,12 @@ After detected context loss, load the same skill and reconcile before consequent
 ## Runtime Support Matrix
 
 The portable guarantee is continuous external evidence plus logical turn and session-start checkpoints.
-No runtime is claimed to provide a pre-compaction callback without direct evidence.
+Codex additionally uses its verified first-class compaction callbacks, and no other runtime is claimed to provide a pre-compaction callback without direct evidence.
 
 | Runtime | Session lineage and boundary surface | Pre-compaction support | Firstmate behavior |
 | --- | --- | --- | --- |
 | Claude | Tracked `SessionStart` and blocking `Stop` hooks. | Claude supports a `compact` session-start reason, but the tracked matcher deliberately covers `startup|resume|clear`; no pre-discard callback was verified. | Turn-boundary checkpoint plus next-session recovery. |
-| Codex | Tracked `SessionStart` and blocking `Stop` hooks; hook payload provides an opaque session identifier and process-root signal. | No trustworthy pre-compaction hook was found in Codex CLI 0.144.4. | Turn-boundary checkpoint, opaque session lineage, and mandatory bounded recovery on the next turn or session. |
+| Codex | Tracked `SessionStart`, blocking `Stop`, `PreCompact`, and `PostCompact` hooks; compaction payloads provide opaque session and turn identifiers plus `manual|auto` trigger. | Verified in Codex CLI 0.144.4. | `PreCompact` writes a validated checkpoint without stopping automatic compaction, and `PostCompact` emits the bounded recovery capsule through `systemMessage`. |
 | OpenCode | `session.created` and passive `session.idle` project plugin events. | No verified pre-compaction callback. | Passive logical-turn checkpoint and session-start recovery; headless follow-up limitations remain unchanged. |
 | Pi | `session_start` and `agent_settled` tracked extension events. | No verified pre-compaction callback. | Logical-run checkpoint and session-start recovery. |
 | Grok | Project `SessionStart` and passive `Stop` hooks with an opaque session ID. | No verified pre-compaction callback. | Passive turn-boundary checkpoint and session-start recovery; project trust remains required. |
@@ -79,11 +78,29 @@ $ opencode --version
 1.18.3
 $ grok --version
 Error: grok not found in PATH
+$ command -v shellcheck
+(no output)
+$ shellcheck --version
+zsh: command not found: shellcheck
+$ command -v tmux
+(no output)
+$ tmux -V
+zsh: command not found: tmux
+$ codex --strict-config -c model_auto_compact_token_limit=123456 --version
+codex-cli 0.144.4
+$ CODEX_JS=$(realpath "$(command -v codex)")
+$ CODEX_BIN=$(find -L "$(dirname "$CODEX_JS")/../node_modules/@openai/codex-darwin-arm64/vendor" -type f -name codex -perm -111)
+$ strings "$CODEX_BIN" | rg -x 'PreCompact|PostCompact|model_auto_compact_token_limit' | sort -u
+PostCompact
+PreCompact
+model_auto_compact_token_limit
 ```
 
 Pi was also absent from this task environment.
 The latest repository-recorded live evidence remains Pi 0.80.5 and Grok 0.2.93 in `docs/turnend-guard.md`; those records are not represented as a new live re-verification.
-The Codex hook inventory was checked with `codex --help` and the tracked `.codex/hooks.json` against the installed version.
+The Codex hook inventory was checked against the installed binary, the tracked `.codex/hooks.json`, and strict parsing of `model_auto_compact_token_limit`.
+No persistent compaction setting was added or changed, so Codex retains its model-selected automatic compaction threshold.
+ShellCheck 0.11.0 and tmux were absent before validation, and the focused local round did not install or substitute either tool.
 
 ## Transcript Evidence
 
@@ -122,7 +139,7 @@ Because no substantial source was copied, a separate bundled license copy is not
 
 ## Threat Model And Limitations
 
-The design protects against automatic compaction loss, abrupt process exit after an earlier boundary, concurrent writers, duplicate hook retries, truncated or malformed records, accidental checkpoint modification, path traversal, and stale operational claims.
+The design protects against automatic compaction loss, abrupt process exit after an earlier boundary, concurrent writers at capacity, duplicate hook retries, truncated or malformed records, accidental checkpoint modification, symlinked storage parents, path traversal, and stale operational claims.
 Hashes detect accidental changes; they are not signatures and do not defend against a malicious process with write access to the same home.
 Secret-pattern checks reduce accidental credential capture but cannot prove arbitrary prose contains no sensitive information.
 The checkpoint is only as complete as the meaningful events and semantic checkpoint input supplied before loss.

@@ -183,6 +183,7 @@ Verified on 2026-07-08: Codex runs the Stop hook command with process PWD set to
 The tracked hook anchors to `pwd -P`, verifies that root is firstmate-shaped and hook-bearing, and then invokes `bin/fm-turnend-guard.sh` with the original payload.
 Codex's primary watcher protocol is `bin/fm-watch-checkpoint.sh --seconds "${FM_CODEX_WATCH_CHECKPOINT:-180}"`, not `bin/fm-watch-arm.sh`.
 The checkpoint is deliberately foreground and bounded so Codex regains control regularly to process user messages and queued wakes.
+Codex's tracked compaction-memory bridge and 0.144.4 evidence are owned by `docs/durable-memory.md`.
 
 ## opencode (VERIFIED 2026-06-11, v1.15.7-1.17.6)
 

@@ -762,6 +762,7 @@ test_pi_extension_forces_followup() {
   [ -f "$ext" ] || fail "tracked pi primary extension is missing"
   content=$(cat "$ext")
   assert_contains "$content" 'agent_settled' "pi extension must run after one logical agent run settles"
+  assert_contains "$content" 'getSessionId' "pi extension must preserve the active opaque session identity"
   assert_contains "$content" 'fm-turnend-guard.sh' "pi extension must invoke the shared guard"
   assert_contains "$content" 'sendUserMessage' "pi extension must force a follow-up turn"
   assert_contains "$content" 'deliverAs: "followUp"' "pi extension must queue the follow-up safely"
@@ -785,6 +786,15 @@ test_shared_guard_invokes_durable_memory_boundary() {
   assert_contains "$content" 'fm-memory.sh" boundary --reason turn-end' "shared turn boundary does not invoke the durable-memory owner"
   assert_contains "$content" '>/dev/null 2>&1 || true' "memory failure could block an otherwise healthy turn"
   pass "fm-turnend-guard: all harness adapters share one non-blocking durable-memory boundary"
+}
+
+test_codex_compaction_hooks_are_tracked() {
+  local settings
+  settings="$ROOT/.codex/hooks.json"
+  jq -e '.hooks.PreCompact[0].hooks[0].command | contains("fm-memory-codex-hook.sh")' "$settings" >/dev/null || fail "Codex PreCompact memory hook is missing"
+  jq -e '.hooks.PostCompact[0].hooks[0].command | contains("fm-memory-codex-hook.sh")' "$settings" >/dev/null || fail "Codex PostCompact recovery hook is missing"
+  jq -e '.hooks.Stop[0].hooks[0].command | contains("FM_MEMORY_RUNTIME=codex")' "$settings" >/dev/null || fail "Codex Stop hook does not preserve runtime identity"
+  pass ".codex primary hooks: compaction bridge and runtime identity are tracked"
 }
 
 test_pi_extension_injects_once_per_logical_agent_run() {
@@ -915,6 +925,7 @@ test_predicate_unhealthy_stale_beacon
 test_predicate_healthy_fresh_beacon
 test_predicate_queue_pending_flag
 test_hook_silent_when_no_work_in_flight
+test_codex_compaction_hooks_are_tracked
 test_hook_blocks_when_fresh_beacon_has_no_live_lock
 test_hook_blocks_when_dead_lock_has_fresh_beacon
 test_hook_silent_with_live_lock_and_fresh_beacon
