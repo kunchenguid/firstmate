@@ -106,6 +106,25 @@ test_runs_selected_lane_in_manifest_order_with_timing_markers() {
   pass "fm-test-lane: runs selected scripts in manifest order with timing markers"
 }
 
+test_stdin_reading_script_cannot_consume_next_manifest_entry() {
+  local dir rc out
+  dir="$TMP_ROOT/stdin-isolation"; make_fixture "$dir"
+  write_script "$dir" alpha.test.sh "IFS= read -r _stolen || true; printf 'alpha\n' >> '$dir/order.log'"
+  write_script "$dir" beta.test.sh "printf 'beta\n' >> '$dir/order.log'"
+  printf 'unit\talpha.test.sh\tfixture\nunit\tbeta.test.sh\tfixture\n' > "$dir/manifest.tsv"
+
+  run_lane "$dir" unit
+  rc=$?
+
+  expect_code 0 "$rc" "unit lane should pass"
+  out=$(cat "$dir/stdout")
+  assert_contains "$(cat "$dir/order.log" 2>/dev/null || true)" $'alpha\nbeta' \
+    "stdin-reading first script must not consume the second manifest entry"
+  assert_contains "$out" "script-start lane=unit script=tests/beta.test.sh" \
+    "second script start marker missing after stdin-reading first script"
+  pass "fm-test-lane: redirects script stdin so one test cannot skip the next manifest entry"
+}
+
 test_propagates_nonzero_with_failure_identity() {
   local dir rc out
   dir="$TMP_ROOT/nonzero"; make_fixture "$dir"
@@ -128,4 +147,5 @@ test_propagates_nonzero_with_failure_identity() {
 test_requires_known_lane
 test_manifest_must_cover_each_script_once
 test_runs_selected_lane_in_manifest_order_with_timing_markers
+test_stdin_reading_script_cannot_consume_next_manifest_entry
 test_propagates_nonzero_with_failure_identity

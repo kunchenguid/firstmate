@@ -119,7 +119,7 @@ while IFS= read -r script || [ -n "$script" ]; do
   display="tests/$script"
   script_start=$(date +%s)
   printf 'script-start lane=%s script=%s started=%s\n' "$lane" "$display" "$(date -u +%FT%TZ)"
-  "$TEST_DIR/$script"
+  "$TEST_DIR/$script" </dev/null
   status=$?
   script_end=$(date +%s)
   printf 'script-end lane=%s script=%s status=%s elapsed=%ss\n' \
