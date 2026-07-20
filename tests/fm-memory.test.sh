@@ -28,6 +28,21 @@ checkpoint_json() {
   jq -cn --arg objective "$objective" '{objective:$objective,completed:[],pending:["verify"],decisions:["captain approved bounded local files"],constraints:["memory never overrides authority"],blockers:[],active_tasks:[],evidence:[],next_safe_action:"Run bounded recovery",provenance:["authority:data/backlog.md"],sensitivity:"private"}'
 }
 
+test_fresh_home_initializes_private_data_root() {
+  local home mode count
+  home="$TMP_ROOT/fresh-home"
+  mkdir -p "$home/state" "$home/config"
+  printf '%s\n' "$$" > "$home/state/.lock"
+  printf '{"session_id":"fresh-session","turn_id":"turn-one"}\n' |
+    run_memory "$home" boundary --reason pre-compact --runtime codex >/dev/null
+  [ -d "$home/data" ] && [ ! -L "$home/data" ] || fail "fresh home did not create a real data root"
+  mode=$(stat -f '%Lp' "$home/data" 2>/dev/null || stat -c '%a' "$home/data")
+  [ "$mode" = "700" ] || fail "fresh home data root mode was $mode, expected 700"
+  count=$(find "$home/data/memory/checkpoints" -type f -name '*.md' | wc -l | tr -d ' ')
+  [ "$count" -eq 1 ] || fail "fresh home did not create one pre-compaction checkpoint"
+  pass "durable memory: fresh home securely initializes its private data root"
+}
+
 test_concurrent_idempotent_events_and_malformed_recovery() {
   local home count unique i out
   home=$(new_home concurrent)
@@ -266,6 +281,7 @@ test_recovery_capsule_is_bounded() {
   pass "durable memory: recovery capsule output stays bounded"
 }
 
+test_fresh_home_initializes_private_data_root
 test_concurrent_idempotent_events_and_malformed_recovery
 test_checkpoint_atomic_validation_and_immutable_history
 test_high_water_replay_has_no_duplicate_or_loss

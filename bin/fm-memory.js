@@ -102,11 +102,28 @@ function safeName(value, label, fallback = "none") {
   return text;
 }
 
+function ensurePrivateDataRoot(layout) {
+  let stat;
+  try {
+    stat = fs.lstatSync(layout.data);
+  } catch (error) {
+    if (error?.code !== "ENOENT") throw error;
+    const parent = path.dirname(layout.data);
+    const parentStat = fs.lstatSync(parent);
+    if (!parentStat.isDirectory() || parentStat.isSymbolicLink()) fail("active data root parent must be a real directory");
+    try { fs.mkdirSync(layout.data, { mode: 0o700 }); } catch (mkdirError) {
+      if (mkdirError?.code !== "EEXIST") throw mkdirError;
+    }
+    stat = fs.lstatSync(layout.data);
+  }
+  if (!stat.isDirectory() || stat.isSymbolicLink()) fail("active data root must be a real directory");
+  fs.chmodSync(layout.data, 0o700);
+}
+
 function ensurePrivateDirectory(layout, dir) {
   const target = path.resolve(dir);
   if (!inside(target, layout.memory)) fail("memory directory escapes the active data root");
-  const dataStat = fs.lstatSync(layout.data);
-  if (!dataStat.isDirectory() || dataStat.isSymbolicLink()) fail("active data root must be a real directory");
+  ensurePrivateDataRoot(layout);
   let current = layout.data;
   const parts = path.relative(layout.data, target).split(path.sep).filter(Boolean);
   for (const part of parts) {
