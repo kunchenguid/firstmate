@@ -692,10 +692,10 @@ test_completed_run_overrides_paused_status_without_repeated_stale() {
   pass "a completed run overrides trailing paused status, surfaces once as terminal, and does not enter pause cadence"
 }
 
-assert_tracked_paused_stale_surfaces_terminal_transition_once() {  # <label> <crew-state>
-  local label=$1 crew_state=$2 dir state fakebin out capture_file window key pane_hash sig pid wakes
-  dir=$(make_case "tracked-pause-to-$label"); state="$dir/state"; fakebin="$dir/fakebin"
-  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-pause-to-$label"
+assert_tracked_stale_surfaces_terminal_transition_once() {  # <prior> <label> <crew-state>
+  local prior=$1 label=$2 crew_state=$3 dir state fakebin out capture_file window key pane_hash sig pid wakes
+  dir=$(make_case "tracked-$prior-to-$label"); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-$prior-to-$label"
   printf 'idle after no-mistakes terminal transition\n' > "$capture_file"
   printf 'window=%s\nkind=ship\nharness=codex\nbackend=tmux\n' "$window" > "$state/$label.meta"
   printf 'paused: waiting for an external dependency\n' > "$state/$label.status"
@@ -705,17 +705,25 @@ assert_tracked_paused_stale_surfaces_terminal_transition_once() {  # <label> <cr
   printf '%s' "$pane_hash" > "$state/.hash-$key"
   printf '%s' "$pane_hash" > "$state/.stale-$key"
   printf '1\n' > "$state/.count-$key"
-  : > "$state/.paused-$key"
-  touch -t 200001010000 "$state/.paused-rechecked-$key"
+  case "$prior" in
+    paused)
+      : > "$state/.paused-$key"
+      touch -t 200001010000 "$state/.paused-rechecked-$key"
+      ;;
+    working)
+      date +%s > "$state/.stale-since-$key"
+      ;;
+  esac
 
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
     FM_FAKE_TMUX_CURRENT_COMMAND=codex FM_FAKE_CREW_STATE="$crew_state" \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
-  wait_for_exit "$pid" 40 || fail "tracked pause did not surface its $label transition"
-  grep -Fx "stale: $window" "$out" >/dev/null || fail "tracked pause suppressed its $label transition"
+  wait_for_exit "$pid" 40 || fail "tracked $prior state did not surface its $label transition"
+  grep -Fx "stale: $window" "$out" >/dev/null || fail "tracked $prior state suppressed its $label transition"
   [ ! -e "$state/.paused-$key" ] || fail "$label transition retained declared-pause cadence"
+  [ ! -e "$state/.stale-since-$key" ] || fail "$label transition retained prior-working wedge cadence"
 
   : > "$out"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
@@ -733,9 +741,15 @@ assert_tracked_paused_stale_surfaces_terminal_transition_once() {  # <label> <cr
 }
 
 test_tracked_paused_stale_surfaces_terminal_transition_once() {
-  assert_tracked_paused_stale_surfaces_terminal_transition_once 'done' 'state: done · source: run-step · checks green'
-  assert_tracked_paused_stale_surfaces_terminal_transition_once failed 'state: failed · source: run-step · validation failed'
+  assert_tracked_stale_surfaces_terminal_transition_once paused 'done' 'state: done · source: run-step · checks green'
+  assert_tracked_stale_surfaces_terminal_transition_once paused failed 'state: failed · source: run-step · validation failed'
   pass "tracked paused stale state surfaces authoritative done and failed transitions exactly once"
+}
+
+test_prior_working_stale_surfaces_terminal_transition_once() {
+  assert_tracked_stale_surfaces_terminal_transition_once working 'done' 'state: done · source: run-step · checks green'
+  assert_tracked_stale_surfaces_terminal_transition_once working failed 'state: failed · source: run-step · validation failed'
+  pass "prior working stale state surfaces authoritative done and failed transitions exactly once"
 }
 
 # A captain-held crew can leave a stable backend endpoint after its agent exits.
@@ -1386,6 +1400,7 @@ test_nonterminal_stale_not_working_surfaced
 test_nonterminal_stale_paused_absorbed_then_resurfaced
 test_completed_run_overrides_paused_status_without_repeated_stale
 test_tracked_paused_stale_surfaces_terminal_transition_once
+test_prior_working_stale_surfaces_terminal_transition_once
 test_exited_declared_pause_is_bounded_but_live_gate_surfaces
 test_secondmate_paused_resurfaces_in_normal_mode
 test_secondmate_nonpaused_stale_remains_suppressed
