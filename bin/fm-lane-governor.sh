@@ -10,9 +10,15 @@
 # The governor is a spawn-time guard, not a supervisor.
 # It refuses new spawns when the current home is at its lane capacity, when swap
 # or available RAM crosses the configured lines, or when a likely orphaned
-# harness process is still alive under a launchd-reparented zsh.
+# harness process belonging to this home is still alive under a launchd-reparented zsh.
+# Lane capacity governs transient ship/scout workers only: persistent secondmates
+# keep a kind=secondmate meta in the main home permanently and are excluded from
+# the active count, and a --kind secondmate acquire/check bypasses the capacity gate
+# and lease entirely (only the memory and orphan checks apply to its provisioning).
 # Completed workers are reported for cleanup but do not consume lane capacity,
 # because PR-ready and report-ready work may legitimately wait on approval.
+# Leases held past FM_LANE_LEASE_TTL_SECONDS, or whose holder pid is dead, are reaped.
+# Orphaned harnesses under another home are reported but never block this home's spawns.
 #
 # Runtime state lives under state/.lane-governor/ and is volatile.
 # The defaults live here so no local config file is required:
@@ -29,6 +35,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 LEASE_ROOT="$STATE/.lane-governor"
 LEASE_DIR="$LEASE_ROOT/leases"
 LOCK="$LEASE_ROOT.lock"
@@ -159,7 +166,7 @@ crew_state_for_id() {  # <id>
 ACTIVE_WORKERS=0
 COMPLETED_WORKERS=
 worker_inventory() {  # [<exclude-id>]
-  local exclude=${1:-} meta id state
+  local exclude=${1:-} meta id kind state
   ACTIVE_WORKERS=0
   COMPLETED_WORKERS=
   [ -d "$STATE" ] || return 0
@@ -167,6 +174,8 @@ worker_inventory() {  # [<exclude-id>]
     [ -f "$meta" ] || continue
     id=$(basename "$meta" .meta)
     [ "$id" = "$exclude" ] && continue
+    kind=$(meta_value "$meta" kind)
+    [ "$kind" = secondmate ] && continue
     state=$(crew_state_for_id "$id")
     case "$state" in
       done|failed)
@@ -189,8 +198,10 @@ lease_field() {  # <file> <key>
 
 LEASE_COUNT=0
 reap_and_count_leases() {
-  local file pid count created age
+  local file pid count created age ttl now
   LEASE_COUNT=0
+  ttl=${FM_LANE_LEASE_TTL_SECONDS:-600}
+  case "$ttl" in ''|*[!0-9]*) ttl=600 ;; esac
   mkdir -p "$LEASE_DIR" || return 1
   for file in "$LEASE_DIR"/*.lease; do
     [ -f "$file" ] || continue
@@ -199,9 +210,14 @@ reap_and_count_leases() {
     created=$(lease_field "$file" created)
     case "$count" in ''|*[!0-9]*|0) count=1 ;; esac
     case "$created" in ''|*[!0-9]*) created=$(path_mtime_epoch "$file" || printf '0') ;; esac
-    age=$(( $(now_epoch) - created ))
+    now=$(now_epoch)
+    age=$(( now - created ))
     [ "$age" -lt 0 ] && age=0
     if ! fm_pid_alive "$pid"; then
+      rm -f "$file" 2>/dev/null || true
+      continue
+    fi
+    if [ "$ttl" -gt 0 ] && [ "$age" -ge "$ttl" ]; then
       rm -f "$file" 2>/dev/null || true
       continue
     fi
@@ -308,8 +324,56 @@ harness_from_process() {  # <comm> <args>
   return 1
 }
 
+process_cwd() {  # <pid>
+  local pid=$1
+  case "$pid" in ''|*[!0-9]*) return 0 ;; esac
+  if [ -n "${FM_LANE_PROCESS_CWD_FILE:-}" ] && [ -f "$FM_LANE_PROCESS_CWD_FILE" ]; then
+    grep "^$pid=" "$FM_LANE_PROCESS_CWD_FILE" 2>/dev/null | tail -1 | cut -d= -f2- || true
+    return 0
+  fi
+  if [ -r "/proc/$pid/cwd" ]; then
+    readlink "/proc/$pid/cwd" 2>/dev/null || true
+    return 0
+  fi
+  if command -v lsof >/dev/null 2>&1; then
+    lsof -a -p "$pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -1 || true
+  fi
+}
+
+home_worktree_paths() {
+  local clone
+  if [ -n "${FM_LANE_HOME_WORKTREES_FILE:-}" ] && [ -f "$FM_LANE_HOME_WORKTREES_FILE" ]; then
+    cat "$FM_LANE_HOME_WORKTREES_FILE" 2>/dev/null || true
+    return 0
+  fi
+  command -v git >/dev/null 2>&1 || return 0
+  [ -d "$PROJECTS" ] || return 0
+  for clone in "$PROJECTS"/*; do
+    [ -e "$clone/.git" ] || continue
+    git -C "$clone" worktree list --porcelain 2>/dev/null \
+      | awk '/^worktree /{ $1=""; sub(/^ /,""); print }'
+  done
+}
+
+orphan_belongs_to_home() {  # <cwd>
+  local cwd=$1 wt
+  [ -n "$cwd" ] || return 1
+  case "$cwd/" in
+    "$FM_HOME"/*) return 0 ;;
+  esac
+  while IFS= read -r wt; do
+    [ -n "$wt" ] || continue
+    case "$cwd/" in
+      "$wt"/*) return 0 ;;
+    esac
+  done <<EOF
+$(home_worktree_paths)
+EOF
+  return 1
+}
+
 detect_orphaned_harnesses() {
-  local pid ppid comm args harness parent_ppid parent_comm parent_base row
+  local pid ppid comm args harness parent_ppid parent_comm parent_base row cwd
   case "${FM_LANE_ORPHAN_CHECK:-1}" in
     0|false|FALSE|no|NO|off|OFF) return 0 ;;
   esac
@@ -333,12 +397,14 @@ detect_orphaned_harnesses() {
     parent_base=$(basename "$parent_comm")
     [ "$parent_ppid" = 1 ] || continue
     [ "$parent_base" = zsh ] || continue
-    printf 'pid=%s harness=%s parent_zsh=%s\n' "$pid" "$harness" "$ppid"
+    cwd=$(process_cwd "$pid")
+    printf '%s\tpid=%s harness=%s parent_zsh=%s\n' "$cwd" "$pid" "$harness" "$ppid"
   done
 }
 
 memory_and_orphan_check() {
   local swap_limit_gb avail_min_gb swap_limit_mb avail_min_mb orphans
+  local cwd desc line home_orphans foreign_orphans unresolved_orphans
   swap_limit_gb=${FM_LANE_MAX_SWAP_GB:-24}
   avail_min_gb=${FM_LANE_MIN_AVAILABLE_RAM_GB:-1}
   validate_decimal FM_LANE_MAX_SWAP_GB "$swap_limit_gb"
@@ -356,7 +422,33 @@ memory_and_orphan_check() {
 
   orphans=$(detect_orphaned_harnesses)
   if [ -n "$orphans" ]; then
-    die "refusing spawn: orphaned harness process detected: $(printf '%s\n' "$orphans" | paste -sd ';' -)"
+    home_orphans=
+    foreign_orphans=
+    unresolved_orphans=
+    while IFS= read -r line; do
+      [ -n "$line" ] || continue
+      cwd=${line%%$'\t'*}
+      desc=${line#*$'\t'}
+      [ -n "$desc" ] || continue
+      if orphan_belongs_to_home "$cwd"; then
+        home_orphans=${home_orphans:+$home_orphans;}$desc
+      elif [ -z "$cwd" ]; then
+        unresolved_orphans=${unresolved_orphans:+$unresolved_orphans;}$desc
+      else
+        foreign_orphans=${foreign_orphans:+$foreign_orphans;}$desc
+      fi
+    done <<EOF
+$orphans
+EOF
+    if [ -n "$foreign_orphans" ]; then
+      err "ignoring orphaned harness in another home (does not block this home): $foreign_orphans"
+    fi
+    if [ -n "$unresolved_orphans" ]; then
+      err "orphaned harness with unresolvable cwd - not blocking, cannot attribute home: $unresolved_orphans"
+    fi
+    if [ -n "$home_orphans" ]; then
+      die "refusing spawn: orphaned harness process detected: $home_orphans"
+    fi
   fi
 }
 
@@ -479,10 +571,15 @@ case "$MODE" in
     ;;
   check)
     memory_and_orphan_check
-    capacity_check "$COUNT"
+    [ "$KIND" = secondmate ] || capacity_check "$COUNT"
     exit 0
     ;;
   acquire)
+    if [ "$KIND" = secondmate ]; then
+      rc=0
+      memory_and_orphan_check || rc=$?
+      exit "$rc"
+    fi
     safe_lease_id "$LEASE_ID" || { err "unsafe lease id: $LEASE_ID"; exit 2; }
     mkdir -p "$LEASE_ROOT" "$LEASE_DIR" || die "cannot create lane governor state"
     fm_lock_acquire_wait "$LOCK"
