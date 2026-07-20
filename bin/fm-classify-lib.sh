@@ -13,13 +13,12 @@
 # daemon keeps its escalation-digest seen-markers; the watcher keeps its .seen-*
 # signatures).
 #
-# The one exception is the absorb classification (crew_absorb_class and its
-# working/paused wrappers). It is NOT a pure status-file read: it reuses
-# bin/fm-crew-state.sh, which may make a bounded no-mistakes call, to decide
-# whether a crew that just stopped its turn or went stale is working, deliberately
-# paused, or neither. Callers run it ONLY on no-verb signal handling and first
-# sighting of a stale hash, never on every wake, so the per-wake triage stays
-# cheap.
+# The absorb predicates are the exceptions. crew_absorb_class and its
+# working/paused wrappers reuse bin/fm-crew-state.sh, which may make a bounded
+# no-mistakes call; crew_is_merge_ready additionally validates the poll identity,
+# current PR head/checks, and endpoint liveness. Callers reserve these reads for
+# no-verb signal handling, first sighting of a stale hash, or a bounded
+# wedge-escalation recheck, never every wake, so per-wake triage stays cheap.
 
 # Directory of this library, used to locate the sibling fm-crew-state.sh reader.
 # Resolved at source time from BASH_SOURCE so it works whether sourced by a
@@ -31,7 +30,7 @@ _FM_CLASSIFY_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/null)"
 # or no-mistakes install; absent, it points at the real sibling script.
 FM_CREW_STATE_BIN="${FM_CREW_STATE_BIN:-$_FM_CLASSIFY_LIB_DIR/fm-crew-state.sh}"
 
-# Canonical PR merge-poll validation (fm_pr_poll_artifacts_valid) for the
+# Canonical PR merge/close-poll validation (fm_pr_poll_artifacts_valid) for the
 # merge-ready absorb decision below. Safe to re-source from consumers that
 # already load it: the library only defines functions and resets its own globals.
 # shellcheck source=bin/fm-pr-lib.sh
@@ -395,7 +394,8 @@ merge_ready_current_pr_verdict() {
 # PR heads match, its current checks are green, and its endpoint is not known
 # dead. Such a crew is EXPECTED to idle - the armed poll owns the merge/close
 # wait and wakes the supervisor when the PR lands or closes - so the stale path
-# absorbs its idle pane instead of surfacing a wake or aging a wedge timer.
+# absorbs its idle pane instead of surfacing a wake or escalating as a wedge.
+# The watcher reuses the stale timer only to bound revalidation of this verdict.
 # Every guard fails closed: a missing, tampered, or identity-mismatched poll
 # artifact, a missing or mismatched head, non-green checks, a red/cancelled/
 # parked/active run, a known-dead endpoint, or an unreadable state line all mean

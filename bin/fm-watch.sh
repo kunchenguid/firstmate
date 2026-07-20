@@ -6,9 +6,11 @@
 # is absorbed only when the crew shows POSITIVE evidence it is still working (an
 # actively-running no-mistakes step, or a backend busy signal), and surfaced
 # otherwise, so a crew that finishes (or stops and waits) without a current
-# working signal is never silently swallowed. A declared external-wait pause is
-# the separate idle absorb case and re-surfaces only on its long bounded cadence,
-# although its initial no-verb status signal still surfaces in normal mode.
+# working signal is never silently swallowed unless a fail-closed merge-ready
+# verdict proves the authenticated PR poll owns that expected idle wait. A
+# declared external-wait pause is the separate idle absorb case and re-surfaces
+# only on its long bounded cadence, although its initial no-verb status signal
+# still surfaces in normal mode.
 # A merge-ready park (crew_is_merge_ready in fm-classify-lib.sh: a terminal
 # done state whose validated armed PR merge/close poll owns the merge/close
 # wait) is the third expected-idle absorb case: its stale pane never wakes or
@@ -24,8 +26,11 @@
 #                          line, since the crew's own log gets no new entry once
 #                          firstmate hands it to a no-mistakes validation. A declared
 #                          external-wait pause is absorbed instead with its own long
-#                          re-surface cadence, never as a wedge. Only when neither
-#                          absorb class applies does the log's last line decide:
+#                          re-surface cadence, never as a wedge. A merge-ready park
+#                          is absorbed while its validated poll, current green head,
+#                          terminal run state, and endpoint checks remain valid.
+#                          Only when none of those absorb classes applies does the
+#                          log's last line decide:
 #                          terminal (captain-relevant) or non-terminal (no verb),
 #                          both surfaced at once. A provably-working stale past the
 #                          wedge threshold also surfaces, with an "escalation N"
@@ -131,9 +136,9 @@ BUSY_REGEX=${FM_BUSY_REGEX:-'esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel'}
 # fm-crew-state.sh); a crew that stopped its turn with no running pipeline and no
 # busy pane is SURFACED, so a finish reported only through interactive pane menus
 # (no done: status) is never swallowed. An ACTIONABLE wake (a captain-relevant
-# signal, a no-verb signal whose crew is not provably working, any check, a stale
-# pane whose crew is not provably working, a provably-working stale past the
-# threshold, or anything unknown) is written to the durable queue and exits, which
+# signal, a no-verb signal whose crew is not provably working, any check, an
+# ordinary stale pane whose crew is not provably working, a provably-working stale
+# past the threshold, or anything unknown) is written to the durable queue and exits, which
 # is what wakes the LLM through the background-task completion. The same classifier
 # (fm-classify-lib.sh) backs the away-mode daemon; while state/.afk exists the
 # daemon owns triage, so this watcher reverts to one-shot (enqueue + exit on every
