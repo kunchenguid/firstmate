@@ -711,7 +711,17 @@ assert_tracked_stale_surfaces_terminal_transition_once() {  # <prior> <label> <c
       touch -t 200001010000 "$state/.paused-rechecked-$key"
       ;;
     working)
-      date +%s > "$state/.stale-since-$key"
+      PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+        FM_FAKE_TMUX_CURRENT_COMMAND=codex FM_FAKE_CREW_STATE='state: working · source: run-step · validating' \
+        FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+        FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+      pid=$!
+      wait_numeric_file "$state/.stale-since-$key" 30 || { reap "$pid"; fail "tracked working state did not start wedge cadence"; }
+      [ "$(cat "$state/.stale-class-$key" 2>/dev/null || true)" = "working:$pane_hash" ] \
+        || { reap "$pid"; fail "tracked working state did not retain per-hash classification"; }
+      reap "$pid"
+      rm -f "$state/.stale-since-$key"
+      printf '1\n' > "$state/.wedge-escalations-$key"
       ;;
   esac
 
@@ -724,6 +734,9 @@ assert_tracked_stale_surfaces_terminal_transition_once() {  # <prior> <label> <c
   grep -Fx "stale: $window" "$out" >/dev/null || fail "tracked $prior state suppressed its $label transition"
   [ ! -e "$state/.paused-$key" ] || fail "$label transition retained declared-pause cadence"
   [ ! -e "$state/.stale-since-$key" ] || fail "$label transition retained prior-working wedge cadence"
+  [ ! -e "$state/.wedge-escalations-$key" ] || fail "$label transition retained prior-working escalation cadence"
+  [ "$(cat "$state/.stale-class-$key" 2>/dev/null || true)" = "terminal:$pane_hash" ] \
+    || fail "$label transition did not retain terminal deduplication provenance"
 
   : > "$out"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
@@ -746,10 +759,10 @@ test_tracked_paused_stale_surfaces_terminal_transition_once() {
   pass "tracked paused stale state surfaces authoritative done and failed transitions exactly once"
 }
 
-test_prior_working_stale_surfaces_terminal_transition_once() {
+test_consumed_working_stale_surfaces_terminal_transition_once() {
   assert_tracked_stale_surfaces_terminal_transition_once working 'done' 'state: done · source: run-step · checks green'
   assert_tracked_stale_surfaces_terminal_transition_once working failed 'state: failed · source: run-step · validation failed'
-  pass "prior working stale state surfaces authoritative done and failed transitions exactly once"
+  pass "consumed working stale cadence preserves authoritative done and failed transitions exactly once"
 }
 
 # A captain-held crew can leave a stable backend endpoint after its agent exits.
@@ -1400,7 +1413,7 @@ test_nonterminal_stale_not_working_surfaced
 test_nonterminal_stale_paused_absorbed_then_resurfaced
 test_completed_run_overrides_paused_status_without_repeated_stale
 test_tracked_paused_stale_surfaces_terminal_transition_once
-test_prior_working_stale_surfaces_terminal_transition_once
+test_consumed_working_stale_surfaces_terminal_transition_once
 test_exited_declared_pause_is_bounded_but_live_gate_surfaces
 test_secondmate_paused_resurfaces_in_normal_mode
 test_secondmate_nonpaused_stale_remains_suppressed

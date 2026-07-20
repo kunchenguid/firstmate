@@ -305,6 +305,18 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
   esac
 }
 
+set_stale_class() {  # <window> <hash> <class>
+  local win=$1 h=$2 class=$3 key
+  key=$(printf '%s' "$win" | tr ':/.' '___')
+  printf '%s:%s\n' "$class" "$h" > "$STATE/.stale-class-$key"
+}
+
+stale_class_is() {  # <window> <hash> <class>
+  local win=$1 h=$2 class=$3 key
+  key=$(printf '%s' "$win" | tr ':/.' '___')
+  [ "$(cat "$STATE/.stale-class-$key" 2>/dev/null || true)" = "$class:$h" ]
+}
+
 # Absorb a stale pane under a declared external-wait pause (paused:) or a
 # dead-agent captain-held transfer, and re-surface it once every
 # PAUSE_RESURFACE_SECS for a recheck so it cannot rot invisibly. Called on any
@@ -319,6 +331,7 @@ handle_paused_stale() {  # <window> <task> <hash>
   local win=$1 task=$2 h=$3 key statusf mtime age rf rf_age reason
   key=$(printf '%s' "$win" | tr ':/.' '___')
   printf '%s' "$h" > "$STATE/.stale-$key"
+  set_stale_class "$win" "$h" paused
   : > "$STATE/.paused-$key"
   rm -f "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
   statusf="$STATE/$task.status"
@@ -350,7 +363,7 @@ clear_pause_tracking() {  # <window>
   key=${key//\//_}
   key=${key//./_}
   clear_pause_state "$win"
-  rm -f "$STATE/.stale-$key" "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
+  rm -f "$STATE/.stale-$key" "$STATE/.stale-class-$key" "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
 }
 
 # Reconcile a declared pause or captain-held status with authoritative crew state.
@@ -408,6 +421,7 @@ surface_terminal_stale() {  # <window> <hash>
   key=$(printf '%s' "$win" | tr ':/.' '___')
   fm_wake_append stale "$win" "stale: $win" || exit 1
   printf '%s' "$h" > "$STATE/.stale-$key"
+  set_stale_class "$win" "$h" terminal
   rm -f "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
   clear_pause_state "$win"
   wake "stale: $win"
@@ -418,6 +432,7 @@ surface_nonterminal_stale() {  # <window> <hash>
   key=$(printf '%s' "$win" | tr ':/.' '___')
   fm_wake_append stale "$win" "stale: $win" || exit 1
   printf '%s' "$h" > "$STATE/.stale-$key"
+  set_stale_class "$win" "$h" nonterminal
   rm -f "$STATE/.stale-since-$key"
   task=$(window_to_task "$win" "$STATE")
   last=$(last_status_line "$STATE/$task.status")
@@ -901,6 +916,7 @@ EOF
     hf="$STATE/.hash-$key"
     cf="$STATE/.count-$key"
     sf="$STATE/.stale-$key"
+    scf="$STATE/.stale-class-$key"
     ssf="$STATE/.stale-since-$key"
     ewf="$STATE/.wedge-escalations-$key"
     pf="$STATE/.paused-$key"   # flag: this key's stale is using the bounded pause cadence
@@ -945,11 +961,13 @@ EOF
           if [ "$(cat "$sf" 2>/dev/null || true)" != "$h" ]; then
             if crew_is_provably_working "$(window_to_task "$w" "$STATE")"; then
               printf '%s' "$h" > "$sf"
+              set_stale_class "$w" "$h" working
               date +%s > "$ssf"
               triage_log "absorbed stale (provably working, overriding a stale captain-relevant status): $w"
             else
               fm_wake_append stale "$w" "stale: $w" || exit 1
               printf '%s' "$h" > "$sf"
+              set_stale_class "$w" "$h" terminal
               rm -f "$ssf"
               mark_surfaced "$STATE/$(window_to_task "$w" "$STATE").status"
               wake "stale: $w"
@@ -987,6 +1005,7 @@ EOF
               working)
                 clear_pause_tracking "$w"
                 printf '%s' "$h" > "$sf"
+                set_stale_class "$w" "$h" working
                 date +%s > "$ssf"
                 triage_log "absorbed non-terminal stale (provably working): $w"
                 ;;
@@ -1007,9 +1026,10 @@ EOF
                 paused)  handle_paused_stale "$w" "$task" "$h" ;;
                 working) clear_pause_state "$w"
                          printf '%s' "$h" > "$sf"
+                         set_stale_class "$w" "$h" working
                          wedge_timer_check "$w" "$ssf" "non-terminal stale (provably working after a declared pause)" "$ewf"
                          triage_log "absorbed non-terminal stale (provably working): $w" ;;
-                terminal) if [ -e "$pf" ] || [ -e "$ssf" ]; then
+                terminal) if ! stale_class_is "$w" "$h" terminal; then
                             surface_terminal_stale "$w" "$h"
                           else
                             clear_pause_state "$w"
@@ -1032,7 +1052,7 @@ EOF
     else
       printf '%s' "$h" > "$hf"
       echo 0 > "$cf"
-      rm -f "$ssf" "$ewf"
+      rm -f "$scf" "$ssf" "$ewf"
       task=$(window_to_task "$w" "$STATE")
       if ! afk_present && status_is_paused_or_captain_held "$(last_status_line "$STATE/$task.status")" && ! window_is_busy "$w" "$tail40"; then
         case "$(pause_state_class "$w" "$task")" in
