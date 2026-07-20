@@ -103,7 +103,6 @@ unit_fresh_vs_refresh() {
 # UNIT 3: exit ordering - fm_afk_launch_stop SIGTERMs the daemon WHILE .afk is
 # still present (so its flush is not a no-op), and clears .afk last.
 # ---------------------------------------------------------------------------
-# shellcheck disable=SC2031 # The SIGTERM trap writes the marker file from its intentional background process.
 unit_stop_ordering() {
   local st lock marker daemon_pid
   st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-stop.XXXXXX")
@@ -209,7 +208,6 @@ unit_concurrent_start_serialized() {
   rm -rf "$st"
 }
 
-# shellcheck disable=SC2031 # The initializer writes the marker file from its intentional background process.
 unit_lock_initialization_grace() {
   local st marker initializer
   st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-lock-init.XXXXXX")

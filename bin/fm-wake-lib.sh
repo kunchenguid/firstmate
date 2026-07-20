@@ -501,7 +501,7 @@ fm_wake_latest_event() {  # <validated-status-path> <tail-byte-cap>
 # so status-file volume cannot turn a drain into an unbounded context read.
 fm_wake_print_annotations() {  # <deduped-raw-rows>
   local rows=$1 manifest status_key mode path prefix line suffix keep bytes
-  local output='' used=0 omitted=0 read_omitted=0 marker marker_reserve=192
+  local output='' used=0 omitted=0 read_omitted=0 annotation_marker marker_reserve=192
   local tail_bytes=8192 item_bytes=2048 global_bytes=8192 read_cap=8 reads=0
   local LC_ALL=C
 
@@ -565,12 +565,12 @@ EOF
 
   printf '%s' "$output"
   if [ "$omitted" -gt 0 ]; then
-    marker="wake annotation: $omitted annotations omitted (global enrichment byte cap)"
-    printf '%s\n' "$marker"
+    annotation_marker="wake annotation: $omitted annotations omitted (global enrichment byte cap)"
+    printf '%s\n' "$annotation_marker"
   fi
   if [ "$read_omitted" -gt 0 ]; then
-    marker="wake annotation: $read_omitted annotations omitted (enrichment read cap)"
-    printf '%s\n' "$marker"
+    annotation_marker="wake annotation: $read_omitted annotations omitted (enrichment read cap)"
+    printf '%s\n' "$annotation_marker"
   fi
   return 0
 }
