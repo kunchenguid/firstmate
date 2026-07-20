@@ -616,6 +616,109 @@ test_create_task_creates_with_no_focus_flag() {
   pass "fm_backend_herdr_create_task: tab create passes --no-focus"
 }
 
+# --- default-off disposable presentation projection ------------------------
+
+test_projection_journal_is_atomic_and_uses_128_bit_token() {
+  local dir state out token parsed status
+  dir="$TMP_ROOT/projection-journal"; state="$dir/state"; mkdir -p "$state"
+  out=$(bash -c '
+    . "$0/bin/backends/herdr.sh"
+    token=$(fm_backend_herdr_projection_journal_create "$1" task-p1) || exit 1
+    parsed=$(fm_backend_herdr_projection_journal_token "$1/task-p1.herdr-presentation" task-p1) || exit 1
+    printf "%s\n%s\n" "$token" "$parsed"
+    fm_backend_herdr_projection_journal_create "$1" task-p1 >/dev/null 2>&1
+  ' "$ROOT" "$state" 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a second presentation journal publication must fail instead of overwriting the first"
+  token=$(printf '%s\n' "$out" | sed -n '1p')
+  parsed=$(printf '%s\n' "$out" | sed -n '2p')
+  [ "$token" = "$parsed" ] || fail "journal round-trip changed the projection id"
+  [ "${#token}" -eq 22 ] || fail "a 128-bit base64url projection id must be 22 characters, got '${#token}'"
+  case "$token" in *[!A-Za-z0-9_-]*) fail "projection id was not base64url: $token" ;; esac
+  [ "$(wc -l < "$state/task-p1.herdr-presentation" | tr -d '[:space:]')" = 3 ] \
+    || fail "presentation journal must contain only version, task id, and projection id"
+  pass "herdr presentation journal: atomically publishes one non-authoritative 128-bit correlator and refuses overwrite"
+}
+
+test_projection_create_uses_exact_response_ids_and_leaves_one_task_pane() {
+  local dir state log resp fb out token journal
+  dir="$TMP_ROOT/projection-create"; state="$dir/state"; mkdir -p "$dir/responses" "$state"
+  log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"workspace":{"workspace_id":"w9"},"tab":{"tab_id":"w9:t1"},"root_pane":{"pane_id":"w9:p1"}}}\n' > "$resp/1.out"
+  printf '{"result":{"tabs":[{"tab_id":"w9:t1","label":"1","workspace_id":"w9"}]}}\n' > "$resp/2.out"
+  printf '{"result":{"tab":{"tab_id":"w9:t2"},"root_pane":{"pane_id":"w9:p2"}}}\n' > "$resp/3.out"
+  printf '{"result":{"tabs":[{"tab_id":"w9:t1","label":"1","workspace_id":"w9"},{"tab_id":"w9:t2","label":"fm-task-p2","workspace_id":"w9"}]}}\n' > "$resp/4.out"
+  printf '{"result":{"panes":[{"pane_id":"w9:p1","tab_id":"w9:t1"},{"pane_id":"w9:p2","tab_id":"w9:t2"}]}}\n' > "$resp/5.out"
+  printf '{"error":{"code":"agent_not_found"}}\n' > "$resp/6.out"
+  printf '{"result":{"tabs":[{"tab_id":"w9:t2","label":"fm-task-p2","workspace_id":"w9"}]}}\n' > "$resp/8.out"
+  printf '{"result":{"panes":[{"pane_id":"w9:p2","tab_id":"w9:t2"}]}}\n' > "$resp/9.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" HERDR_SESSION=fmtest \
+    bash -c '
+      . "$0/bin/backends/herdr.sh"
+      token=$(fm_backend_herdr_projection_journal_create "$1" task-p2) || exit 1
+      label=$(fm_backend_herdr_projection_workspace_label task-p2 "$token")
+      fm_backend_herdr_projection_create_task /tmp/proj "$label" fm-task-p2 || exit 1
+      printf "%s %s %s %s %s\n" \
+        "$FM_BACKEND_HERDR_PROJECTION_WORKSPACE_ID" \
+        "$FM_BACKEND_HERDR_PROJECTION_SEEDED_TAB_ID" \
+        "$FM_BACKEND_HERDR_PROJECTION_SEEDED_PANE_ID" \
+        "$FM_BACKEND_HERDR_PROJECTION_TAB_ID" \
+        "$FM_BACKEND_HERDR_PROJECTION_PANE_ID"
+    ' "$ROOT" "$state") || fail "projection create should succeed from complete exact responses"
+  [ "$out" = "w9 w9:t1 w9:p1 w9:t2 w9:p2" ] || fail "projection create did not retain exact response IDs: $out"
+  journal="$state/task-p2.herdr-presentation"
+  token=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_journal_token "$1" task-p2' "$ROOT" "$journal") \
+    || fail "projection journal was not readable"
+  assert_contains "$(cat "$log")" $'workspace\x1fcreate\x1f--cwd\x1f/tmp/proj\x1f--label\x1ffirstmate/task-p2 · p:'"$token"$'\x1f--no-focus' \
+    "projection workspace create did not use the visible full token and --no-focus"
+  assert_contains "$(cat "$log")" $'tab\x1fcreate\x1f--workspace\x1fw9\x1f--cwd\x1f/tmp/proj\x1f--label\x1ffm-task-p2\x1f--no-focus' \
+    "projection task tab did not target the exact new workspace"
+  assert_contains "$(cat "$log")" $'pane\x1fclose\x1fw9:p1' \
+    "projection create did not prune the exact seeded root pane"
+  assert_not_contains "$(cat "$log")" $'workspace\x1fclose' \
+    "projection create must never call workspace close"
+  pass "herdr presentation create: exact response IDs yield one normal task pane with no workspace-close authority"
+}
+
+test_projection_recovery_is_read_only_and_refuses_live_duplicate_risk() {
+  local dir state log resp fb token journal out status calls
+  dir="$TMP_ROOT/projection-recovery"; state="$dir/state"; mkdir -p "$dir/responses" "$state"
+  log="$dir/log"; resp="$dir/responses"; : > "$log"
+  token=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_journal_create "$1" task-p3' "$ROOT" "$state")
+  journal="$state/task-p3.herdr-presentation"
+  printf '{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate/task-p3 · p:%s"},{"workspace_id":"w2","label":"copy/task-p3 · p:%s"}]}}\n' "$token" "$token" > "$resp/1.out"
+  printf '{"result":{"panes":[{"pane_id":"w1:p1","tab_id":"w1:t1"}]}}\n' > "$resp/2.out"
+  printf '{"result":{"pane":{"pane_id":"w1:p1"}}}\n' > "$resp/3.out"
+  printf '{"error":{"code":"agent_not_found"}}\n' > "$resp/4.out"
+  printf '{"result":{"panes":[{"pane_id":"w2:p1","tab_id":"w2:t1"}]}}\n' > "$resp/5.out"
+  printf '{"result":{"pane":{"pane_id":"w2:p1"}}}\n' > "$resp/6.out"
+  printf '{"error":{"code":"agent_not_found"}}\n' > "$resp/7.out"
+  fb=$(make_herdr_fakebin "$dir")
+  PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_recovery_allows_flat fmtest "$1" task-p3' "$ROOT" "$journal" \
+    >/dev/null || fail "agent-free duplicate token matches should allow flat fallback"
+  calls=$(cat "$log")
+  assert_not_contains "$calls" $'workspace\x1fcreate' "recovery inspection created a workspace"
+  assert_not_contains "$calls" $'workspace\x1fclose' "recovery inspection closed a workspace"
+  assert_not_contains "$calls" $'tab\x1fcreate' "recovery inspection created a tab"
+  assert_not_contains "$calls" $'tab\x1fclose' "recovery inspection closed a tab"
+  assert_not_contains "$calls" $'pane\x1fclose' "recovery inspection closed a pane"
+
+  : > "$log"; rm -f "$resp"/*.out "$resp"/*.exit "$resp/.count"
+  printf '{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate/task-p3 · p:%s"}]}}\n' "$token" > "$resp/1.out"
+  printf '{"result":{"panes":[{"pane_id":"w1:p1","tab_id":"w1:t1"}]}}\n' > "$resp/2.out"
+  printf '{"result":{"pane":{"pane_id":"w1:p1"}}}\n' > "$resp/3.out"
+  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/4.out"
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_recovery_allows_flat fmtest "$1" task-p3' "$ROOT" "$journal" 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a token match with a live registered agent must refuse duplicate launch"
+  assert_contains "$out" "has a live pane" "live duplicate refusal did not explain the risk"
+  assert_not_contains "$(cat "$log")" $'pane\x1fclose' "live duplicate refusal closed a pane"
+  pass "herdr presentation recovery: duplicate-token inspection is read-only and live-agent risk refuses fallback"
+}
+
 # --- workspace_find: scoped to THIS home's own label, not just any match ----
 
 test_workspace_find_matches_only_this_homes_own_label() {
@@ -2070,6 +2173,9 @@ test_create_task_refuses_when_agent_state_ambiguous
 test_create_task_husk_replacement_creates_before_closing
 test_create_task_creates_and_parses_ids
 test_create_task_creates_with_no_focus_flag
+test_projection_journal_is_atomic_and_uses_128_bit_token
+test_projection_create_uses_exact_response_ids_and_leaves_one_task_pane
+test_projection_recovery_is_read_only_and_refuses_live_duplicate_risk
 test_workspace_find_matches_only_this_homes_own_label
 test_list_live_scoped_to_this_homes_workspace_only
 test_parse_target
