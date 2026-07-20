@@ -59,14 +59,16 @@ Runtime private artifacts (all gitignored, typically mode 0600/0700):
 | Path | Role |
 | --- | --- |
 | `state/telegram-inbox/<update_id>.json` | Stashed authenticated inbound messages |
+| `state/telegram-inbox-quarantine/` | Permanently-unprocessable inbox files (invalid envelope, unsafe perms); never reprocessed or silently deleted |
 | `state/telegram-offset` | Persisted getUpdates offset (advances past drops and accepts; not past deferred over-cap authenticated updates) |
-| `state/telegram-audit.log` | Append-only inbound/outbound/respond audit |
+| `state/telegram-audit.log` | Append-only inbound/outbound/respond/quarantine audit |
 | `state/telegram-notified-prs.log` | Timestamp, chat id, and full PR URL for successful live non-reply sends |
 | `state/telegram-notified-pr-recovery/` | Confirmed sends whose primary merge-authority record could not be written |
 | `state/telegram-actions/<update_id>.json` | Validated approve/deny/merge actions for firstmate |
 | `state/telegram-outbox/` | Dry-run outbound previews |
 | `state/telegram-poll.error` | Deduped poll diagnostic marker |
 | `state/telegram-rate-*.log` / `state/telegram-dedupe.log` | Rate limit and dedupe windows |
+| `state/telegram-rate-quarantine/` | Permanently-corrupt rate logs set aside so a bad file cannot fail-close every command |
 
 ## Stage 1 - outbound notifications
 
@@ -126,9 +128,12 @@ Stage 3 free-text prompting is not implemented.
 - An offset-persistence failure emits a deduplicated `telegram-mode-error`, leaves the update unconfirmed for the next `getUpdates` sweep, and can therefore re-fetch an already-stashed command.
 - Over-cap authenticated updates are deferred (offset holds before them) for at-least-once delivery of allowlisted commands.
 - Commands beyond the inbound rate limit stay queued in the inbox (audited `deferred`, replied "rate limited" once per dedupe window), never dropped; every poll sweep re-emits `telegram-msg` wakes for pending inbox files, so queued commands drain once the window frees without requiring a new message.
+- Permanently-unprocessable inbox inputs (malformed envelope, unsafe file permissions) are quarantined once under `state/telegram-inbox-quarantine/` and never re-emitted as wakes; the move is audited and never silently deleted.
+- A corrupt `state/telegram-rate-*.log` is quarantined once under `state/telegram-rate-quarantine/` and replaced by a fresh window so it cannot fail-close every command forever; well-formed logs keep their legitimate rate-window state.
+- Missing `curl`/`jq` emit a deduplicated `telegram-mode-error` and skip pending re-wakes until the tool returns (transient, not quarantined).
 - Approve/deny/merge older than `FM_TELEGRAM_FRESHNESS_SECS` (default 15 minutes) are not executed; deferred approvals can still go stale and are re-surfaced for re-confirmation.
 - Identical commands are deduped inside a short window.
-- Every inbound verdict and outbound send appends to `state/telegram-audit.log` (tokens redacted).
+- Every inbound verdict, quarantine action, and outbound send appends to `state/telegram-audit.log` (tokens redacted).
 
 ## Scripts
 

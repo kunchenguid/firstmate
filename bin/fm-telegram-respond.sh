@@ -22,7 +22,11 @@
 #   ok <update_id> <verb> ...
 #   refused <update_id> <reason>
 #   deferred <update_id> rate-limited
+#   quarantined <update_id> <reason>   # permanent: invalid-envelope | unsafe-inbox
 #   error <update_id> <reason>
+# Permanently-unprocessable inbox files are moved to state/telegram-inbox-quarantine/
+# (audited, never reprocessed, never silently deleted). Transient failures
+# (missing-jq, rate-limit DEFER, action-write) keep the file queued for retry.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -151,7 +155,24 @@ action_write_failed() {
   printf 'error %s action-write-failed\n' "$uid"
 }
 
-inbox_read_failed() {
+# Permanently-unprocessable inbox inputs: quarantine so poll never re-wakes.
+# Transient failures (missing-jq, rate-limit, action-write) keep the file queued.
+inbox_quarantine_permanent() {
+  local uid=$1 reason=$2
+  if fmt_inbox_quarantine "$uid" "$reason" >/dev/null 2>&1; then
+    fmt_audit_append respond quarantined "update_id=$uid reason=$reason"
+    printf 'quarantined %s %s\n' "$uid" "$reason"
+    return 0
+  fi
+  # Quarantine itself failed: audit and leave the file so a later pass retries
+  # the quarantine move rather than silently dropping evidence.
+  fmt_audit_append respond error "update_id=$uid quarantine-failed reason=$reason"
+  printf 'error %s quarantine-failed\n' "$uid"
+  return 0
+}
+
+# Transient read failures keep the inbox file for a later sweep.
+inbox_read_failed_transient() {
   local uid=$1 reason=$2
   fmt_audit_append respond error "update_id=$uid inbox-read-failed reason=$reason"
   printf 'error %s inbox-read-failed\n' "$uid"
@@ -171,13 +192,14 @@ process_one() {
   esac
 
   if ! fmx_private_artifact_file_valid "$INBOX" "$base" 600; then
-    fmt_audit_append respond refused "update_id=$uid unsafe-inbox"
-    printf 'refused %s unsafe-inbox\n' "$uid"
+    # Permanent: mode/ownership cannot self-heal on retry.
+    inbox_quarantine_permanent "$uid" "unsafe-inbox"
     return 0
   fi
 
   if ! command -v jq >/dev/null 2>&1; then
-    inbox_read_failed "$uid" missing-jq
+    # Transient: tool/environment gap; poll backs off while jq is absent.
+    inbox_read_failed_transient "$uid" missing-jq
     return 0
   fi
   if ! envelope=$(jq -ce '
@@ -187,12 +209,13 @@ process_one() {
     else error("invalid inbox envelope")
     end
   ' "$file" 2>/dev/null); then
-    inbox_read_failed "$uid" invalid-envelope
+    # Permanent: malformed envelope cannot succeed on retry.
+    inbox_quarantine_permanent "$uid" "invalid-envelope"
     return 0
   fi
   if ! text=$(printf '%s' "$envelope" | jq -r '.text' 2>/dev/null) \
     || ! msg_date=$(printf '%s' "$envelope" | jq -r '.date // empty' 2>/dev/null); then
-    inbox_read_failed "$uid" invalid-envelope
+    inbox_quarantine_permanent "$uid" "invalid-envelope"
     return 0
   fi
   if [ -z "$text" ]; then

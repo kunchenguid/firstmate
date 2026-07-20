@@ -22,6 +22,9 @@
 #   - re-emit "telegram-msg <update_id>" for inbox files still pending from
 #     earlier sweeps (e.g. rate-deferred by respond) so the drain retries
 #     without requiring new inbound traffic
+#   - permanently-unprocessable inbox files are quarantined by respond and
+#     therefore never re-emitted; missing curl/jq emit a one-shot error and
+#     skip pending re-wakes so a tool gap cannot storm the fleet every 30s
 #   - HTTP 409 (second getUpdates consumer) surfaces as telegram-mode-error once
 #
 # Network is required only when configured; tests stub curl.
@@ -90,10 +93,14 @@ finish() {
   exit 0
 }
 
-queue_pending_wakes
-
+# Tool gaps are transient but must not re-wake every pending inbox file on
+# every ~30s sweep. Emit a deduped telegram-mode-error and finish silently
+# (no pending re-wakes) until curl/jq return; once present, pending files
+# resume normal re-wake/retry.
 command -v curl >/dev/null 2>&1 || { emit_error_once "missing curl"; finish; }
 command -v jq   >/dev/null 2>&1 || { emit_error_once "missing jq"; finish; }
+
+queue_pending_wakes
 
 BODY_FILE=$(mktemp "${TMPDIR:-/tmp}/fm-telegram-poll.XXXXXX") || finish
 trap 'rm -f "$BODY_FILE"' EXIT

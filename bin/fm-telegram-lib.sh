@@ -15,6 +15,8 @@
 #   fmt_curl_url_config <url>    - 0600 curl config file keeping the URL (and
 #                                  the token embedded in it) out of curl argv
 #   fmt_rate_allow <bucket>      - inbound rate limit (per home)
+#   fmt_rate_log_quarantine      - move a permanently-corrupt rate log aside
+#   fmt_inbox_quarantine         - move a permanently-unprocessable inbox file aside
 #   fmt_dedupe_seen / fmt_dedupe_mark - command dedupe window
 #   fmt_parse_command <text>     - closed grammar -> verb + args
 #   fmt_fresh_enough <epoch>     - approval freshness window
@@ -259,8 +261,107 @@ fmt_chat_allowed() {
   [ -n "$chat" ] && [ "$chat" = "${FMT_CHAT_ID:-}" ]
 }
 
+# Move a permanently-unprocessable inbox file out of the live inbox so the
+# poller never re-emits telegram-msg wakes for it. Destination is private
+# (0700 dir / 0600 file), never silently deleted, and never reprocessed.
+# On success prints the quarantine path and returns 0; otherwise returns 1 and
+# leaves the source in place.
+fmt_inbox_quarantine() {
+  local uid=$1 reason=$2
+  local state inbox qdir dest base epoch n
+  state=${FM_STATE_OVERRIDE:-$FM_HOME/state}
+  case "$uid" in
+    ''|.*|*/*|*[!A-Za-z0-9._-]*) return 1 ;;
+  esac
+  case "$reason" in
+    ''|*[!A-Za-z0-9._-]*) reason=permanent-unprocessable ;;
+  esac
+  inbox="$state/telegram-inbox"
+  qdir="$state/telegram-inbox-quarantine"
+  base="$uid.json"
+  [ -f "$inbox/$base" ] || return 1
+  fmx_private_artifact_dir_prepare "$qdir" >/dev/null || return 1
+  chmod 700 "$qdir" 2>/dev/null || true
+  epoch=$(date +%s 2>/dev/null) || epoch=0
+  dest="$qdir/${uid}.${epoch}.json"
+  n=0
+  while [ -e "$dest" ] || [ -L "$dest" ]; do
+    n=$((n + 1))
+    dest="$qdir/${uid}.${epoch}.${n}.json"
+    [ "$n" -lt 100 ] || return 1
+  done
+  # Prefer hardlink+unlink when same filesystem so a crash mid-move cannot
+  # lose the only copy; fall back to mv.
+  if ln -- "$inbox/$base" "$dest" 2>/dev/null; then
+    chmod 600 "$dest" 2>/dev/null || true
+    if ! rm -f -- "$inbox/$base" 2>/dev/null; then
+      rm -f -- "$dest" 2>/dev/null || true
+      return 1
+    fi
+  else
+    if ! mv -f -- "$inbox/$base" "$dest" 2>/dev/null; then
+      return 1
+    fi
+    chmod 600 "$dest" 2>/dev/null || true
+  fi
+  fmt_audit_append quarantine inbox \
+    "update_id=$uid reason=$reason path=telegram-inbox-quarantine/$(basename "$dest")"
+  printf '%s\n' "$dest"
+  return 0
+}
+
+# Move a permanently-corrupt rate log out of the live path so rate admission
+# can resume with a fresh window. Does not rewrite or partially salvage a
+# corrupt log: well-formed logs are never routed here. Destination is private
+# and never silently deleted.
+fmt_rate_log_quarantine() {
+  local bucket=$1 reason=$2
+  local state base file qdir dest epoch n
+  state=${FM_STATE_OVERRIDE:-$FM_HOME/state}
+  case "$bucket" in
+    ''|.*|*/*|*[!A-Za-z0-9._-]*) return 1 ;;
+  esac
+  case "$reason" in
+    ''|*[!A-Za-z0-9._-]*) reason=corrupt-rate-log ;;
+  esac
+  base="telegram-rate-$bucket.log"
+  file="$state/$base"
+  [ -f "$file" ] || return 1
+  [ ! -L "$file" ] || return 1
+  qdir="$state/telegram-rate-quarantine"
+  fmx_private_artifact_dir_prepare "$qdir" >/dev/null || return 1
+  chmod 700 "$qdir" 2>/dev/null || true
+  epoch=$(date +%s 2>/dev/null) || epoch=0
+  dest="$qdir/${base}.${epoch}"
+  n=0
+  while [ -e "$dest" ] || [ -L "$dest" ]; do
+    n=$((n + 1))
+    dest="$qdir/${base}.${epoch}.${n}"
+    [ "$n" -lt 100 ] || return 1
+  done
+  if ln -- "$file" "$dest" 2>/dev/null; then
+    chmod 600 "$dest" 2>/dev/null || true
+    if ! rm -f -- "$file" 2>/dev/null; then
+      rm -f -- "$dest" 2>/dev/null || true
+      return 1
+    fi
+  else
+    if ! mv -f -- "$file" "$dest" 2>/dev/null; then
+      return 1
+    fi
+    chmod 600 "$dest" 2>/dev/null || true
+  fi
+  fmt_audit_append quarantine rate-log \
+    "bucket=$bucket reason=$reason path=telegram-rate-quarantine/$(basename "$dest")"
+  printf '%s\n' "$dest"
+  return 0
+}
+
 # Rate limit: at most FMT_RATE_MAX events of <bucket> per FMT_RATE_WINDOW seconds.
 # Returns 0 when allowed (and records the event), 1 when over limit.
+# A permanently-corrupt rate log (non-numeric lines) is quarantined once and
+# replaced by a fresh empty window so one bad file cannot fail-close forever.
+# Unsafe permissions / symlink rate logs still fail closed (transient until fixed).
 fmt_rate_allow() {
   local bucket=$1
   local state now file base line kept count cutoff rate_data
@@ -289,7 +390,14 @@ fmt_rate_allow() {
     while IFS= read -r line || [ -n "$line" ]; do
       case "$line" in
         '') continue ;;
-        *[!0-9]*) return 1 ;;
+        *[!0-9]*)
+          # Permanent: content cannot become valid on retry. Quarantine once
+          # and continue with an empty window so commands are not blocked.
+          fmt_rate_log_quarantine "$bucket" "corrupt-line" >/dev/null 2>&1 || return 1
+          kept=
+          count=0
+          break
+          ;;
       esac
       if [ "$line" -ge "$cutoff" ] 2>/dev/null; then
         kept="${kept}${line}"$'\n'

@@ -832,18 +832,168 @@ test_respond_reply_cannot_grant_merge_authority() {
   pass "command replies cannot bootstrap merge authority"
 }
 
-test_respond_invalid_envelope_stays_queued() {
-  local home out
+test_respond_invalid_envelope_is_quarantined() {
+  local home out fakebin qcount
   home="$TMP_ROOT/resp-invalid-envelope"; mkdir -p "$home/state"
   write_env "$home" "FM_TELEGRAM_DRY_RUN=1"
   seed_inbox "$home" 47 "status"
   printf '{broken-json\n' > "$home/state/telegram-inbox/47.json"
   chmod 600 "$home/state/telegram-inbox/47.json"
   out=$(FM_HOME="$home" "$ROOT/bin/fm-telegram-respond.sh" 2>/dev/null)
-  assert_contains "$out" "error 47 inbox-read-failed" "invalid envelope must report a retryable error"
-  assert_present "$home/state/telegram-inbox/47.json" "invalid envelope must remain queued"
-  assert_grep "inbox-read-failed" "$home/state/telegram-audit.log" "invalid envelope must be audited"
-  pass "respond preserves queued updates when envelope parsing fails"
+  assert_contains "$out" "quarantined 47 invalid-envelope" "invalid envelope must quarantine once"
+  assert_absent "$home/state/telegram-inbox/47.json" "invalid envelope must leave the live inbox"
+  qcount=$(find "$home/state/telegram-inbox-quarantine" -name '47.*.json' -type f 2>/dev/null | wc -l | tr -d ' ')
+  [ "$qcount" -eq 1 ] || fail "expected one quarantine artifact, got $qcount"
+  assert_grep $'quarantine\tinbox' "$home/state/telegram-audit.log" "quarantine move must be audited"
+  assert_grep $'respond\tquarantined' "$home/state/telegram-audit.log" "respond quarantine verdict must be audited"
+  assert_no_grep "test-bot-token" "$home/state/telegram-audit.log" "token must not appear in quarantine audit"
+  # Subsequent poll must not re-wake the quarantined file.
+  fakebin=$(make_fake_curl "$home")
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_TELEGRAM_API_URL="https://api.test" \
+    FAKE_POLL_CODE=200 FAKE_POLL_BODY='{"ok":true,"result":[]}' \
+    "$ROOT/bin/fm-telegram-poll.sh")
+  assert_not_contains "$out" "telegram-msg 47" "quarantined file must never re-wake"
+  # Second respond is a no-op (nothing left in inbox).
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-telegram-respond.sh" 2>/dev/null)
+  [ -z "$out" ] || fail "second respond after quarantine should be silent (got: $out)"
+  qcount=$(find "$home/state/telegram-inbox-quarantine" -name '47.*.json' -type f 2>/dev/null | wc -l | tr -d ' ')
+  [ "$qcount" -eq 1 ] || fail "quarantine must not re-run; got $qcount artifacts"
+  pass "respond quarantines invalid envelopes once; poll never re-wakes them"
+}
+
+test_respond_unsafe_inbox_is_quarantined() {
+  local home out qcount
+  home="$TMP_ROOT/resp-unsafe-inbox"; mkdir -p "$home/state"
+  write_env "$home" "FM_TELEGRAM_DRY_RUN=1"
+  seed_inbox "$home" 48 "status"
+  chmod 644 "$home/state/telegram-inbox/48.json"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-telegram-respond.sh" 2>/dev/null)
+  assert_contains "$out" "quarantined 48 unsafe-inbox" "unsafe perms must quarantine"
+  assert_absent "$home/state/telegram-inbox/48.json" "unsafe inbox file must leave live inbox"
+  qcount=$(find "$home/state/telegram-inbox-quarantine" -name '48.*.json' -type f 2>/dev/null | wc -l | tr -d ' ')
+  [ "$qcount" -eq 1 ] || fail "expected one unsafe-inbox quarantine artifact, got $qcount"
+  assert_grep "unsafe-inbox" "$home/state/telegram-audit.log" "unsafe-inbox quarantine must be audited"
+  pass "respond quarantines unsafe-permission inbox files"
+}
+
+test_respond_corrupt_rate_log_is_quarantined_and_allows() {
+  local home out qcount
+  home="$TMP_ROOT/resp-corrupt-rate"; mkdir -p "$home/state"
+  chmod 700 "$home/state"
+  write_env "$home" "FM_TELEGRAM_DRY_RUN=1"
+  seed_inbox "$home" 49 "status"
+  printf 'not-a-number\n' > "$home/state/telegram-rate-inbound.log"
+  chmod 600 "$home/state/telegram-rate-inbound.log"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-telegram-respond.sh" 2>/dev/null)
+  assert_contains "$out" "ok 49 status" "corrupt rate log must not block commands forever"
+  assert_absent "$home/state/telegram-inbox/49.json" "command must complete after rate-log repair"
+  qcount=$(find "$home/state/telegram-rate-quarantine" -name 'telegram-rate-inbound.log.*' -type f 2>/dev/null | wc -l | tr -d ' ')
+  [ "$qcount" -eq 1 ] || fail "expected one rate-log quarantine artifact, got $qcount"
+  assert_grep $'quarantine\trate-log' "$home/state/telegram-audit.log" "rate-log quarantine must be audited"
+  assert_no_grep "test-bot-token" "$home/state/telegram-audit.log" "token must not appear in rate quarantine audit"
+  # Fresh well-formed rate log after repair.
+  assert_present "$home/state/telegram-rate-inbound.log" "rate admission must publish a fresh log"
+  line=$(head -n1 "$home/state/telegram-rate-inbound.log")
+  case "$line" in
+    ''|*[!0-9]*) fail "fresh rate log must be numeric epochs (got: $line)" ;;
+  esac
+  pass "corrupt rate log is quarantined once and commands proceed"
+}
+
+test_respond_wellformed_rate_log_keeps_window() {
+  local home out now
+  home="$TMP_ROOT/resp-rate-window-kept"; mkdir -p "$home/state"
+  chmod 700 "$home/state"
+  write_env "$home" "FM_TELEGRAM_DRY_RUN=1" "FM_TELEGRAM_RATE_MAX=1" "FM_TELEGRAM_RATE_WINDOW_SECS=3600" \
+    "FM_TELEGRAM_DEDUPE_WINDOW_SECS=1"
+  now=$(now_epoch)
+  printf '%s\n' "$now" > "$home/state/telegram-rate-inbound.log"
+  chmod 600 "$home/state/telegram-rate-inbound.log"
+  seed_inbox "$home" 50 "status"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-telegram-respond.sh" 2>/dev/null)
+  assert_contains "$out" "deferred 50 rate-limited" "well-formed full window must still rate-limit"
+  assert_present "$home/state/telegram-inbox/50.json" "over-cap command must stay queued (DEFER)"
+  assert_absent "$home/state/telegram-rate-quarantine" "well-formed rate log must not be quarantined"
+  pass "well-formed rate logs keep legitimate window state and DEFER over-cap"
+}
+
+test_poll_missing_jq_does_not_rewake_pending() {
+  local home out fakebin nojq tool path_entry base
+  home="$TMP_ROOT/poll-missing-jq"; mkdir -p "$home/state"
+  write_env "$home"
+  seed_inbox "$home" 51 "status"
+  fakebin=$(make_fake_curl "$home")
+  nojq=$(fm_fakebin "$home/nojq")
+  # PATH with curl + every host utility except jq (so command -v jq fails).
+  ln -sf "$fakebin/curl" "$nojq/curl"
+  IFS=:
+  for path_entry in $PATH; do
+    [ -d "$path_entry" ] || continue
+    for tool in "$path_entry"/*; do
+      [ -x "$tool" ] || continue
+      [ -f "$tool" ] || continue
+      base=${tool##*/}
+      case "$base" in
+        jq|jq.*) continue ;;
+      esac
+      [ -e "$nojq/$base" ] && continue
+      ln -sf "$tool" "$nojq/$base" 2>/dev/null || true
+    done
+  done
+  unset IFS
+  [ ! -e "$nojq/jq" ] || fail "precondition: nojq PATH must not expose jq"
+  out=$(PATH="$nojq" FM_HOME="$home" FM_TELEGRAM_API_URL="https://api.test" \
+    FAKE_POLL_CODE=200 FAKE_POLL_BODY='{"ok":true,"result":[]}' \
+    "$ROOT/bin/fm-telegram-poll.sh")
+  assert_contains "$out" "telegram-mode-error missing jq" "missing jq must surface once"
+  assert_not_contains "$out" "telegram-msg 51" "missing jq must not re-wake pending inbox"
+  # Deduped: second sweep still no pending re-wake storm.
+  out=$(PATH="$nojq" FM_HOME="$home" FM_TELEGRAM_API_URL="https://api.test" \
+    FAKE_POLL_CODE=200 FAKE_POLL_BODY='{"ok":true,"result":[]}' \
+    "$ROOT/bin/fm-telegram-poll.sh")
+  assert_not_contains "$out" "telegram-msg 51" "second missing-jq sweep must still not re-wake"
+  assert_present "$home/state/telegram-inbox/51.json" "missing-jq must not quarantine (transient)"
+  pass "missing jq backs off without pending-inbox wake storm"
+}
+
+test_quarantine_flood_cannot_drop_good_or_evade_allowlist() {
+  local home out fakebin body i qcount
+  home="$TMP_ROOT/quarantine-flood"; mkdir -p "$home/state"
+  write_env "$home" "FM_TELEGRAM_DRY_RUN=1"
+  # Flood of permanently-bad files.
+  for i in 1 2 3 4 5; do
+    seed_inbox "$home" "90$i" "status"
+    printf '{bad\n' > "$home/state/telegram-inbox/90$i.json"
+    chmod 600 "$home/state/telegram-inbox/90$i.json"
+  done
+  # One good authenticated-style inbox file mixed in.
+  seed_inbox "$home" 909 "status"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-telegram-respond.sh" 2>/dev/null)
+  assert_contains "$out" "ok 909 status" "good file must still process amid quarantine flood"
+  for i in 1 2 3 4 5; do
+    assert_absent "$home/state/telegram-inbox/90$i.json" "bad file 90$i must leave inbox"
+    assert_contains "$out" "quarantined 90$i invalid-envelope" "bad file 90$i must quarantine"
+  done
+  qcount=$(find "$home/state/telegram-inbox-quarantine" -name '90*.json' -type f 2>/dev/null | wc -l | tr -d ' ')
+  [ "$qcount" -eq 5 ] || fail "expected 5 quarantine artifacts, got $qcount"
+  # Attacker flood of non-allowlisted updates still cannot pin inbox/quarantine authority.
+  fakebin=$(make_fake_curl "$home")
+  body=$(sample_update 910 999 111 "status")
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_TELEGRAM_API_URL="https://api.test" \
+    FAKE_POLL_CODE=200 FAKE_POLL_BODY="$body" \
+    "$ROOT/bin/fm-telegram-poll.sh")
+  assert_not_contains "$out" "telegram-msg 910" "non-allowlisted must not wake"
+  assert_absent "$home/state/telegram-inbox/910.json" "non-allowlisted must not enter inbox"
+  qcount=$(find "$home/state/telegram-inbox-quarantine" -name '910.*' -type f 2>/dev/null | wc -l | tr -d ' ')
+  [ "$qcount" -eq 0 ] || fail "non-allowlisted must not enter quarantine as authority (got $qcount)"
+  # Subsequent empty poll must not re-wake any quarantined flood file.
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_TELEGRAM_API_URL="https://api.test" \
+    FAKE_POLL_CODE=200 FAKE_POLL_BODY='{"ok":true,"result":[]}' \
+    "$ROOT/bin/fm-telegram-poll.sh")
+  for i in 1 2 3 4 5; do
+    assert_not_contains "$out" "telegram-msg 90$i" "quarantined flood file 90$i must not re-wake"
+  done
+  pass "quarantine flood is bounded and cannot drop good files or evade allowlist"
 }
 
 test_respond_action_write_failure_reports_error() {
@@ -1154,7 +1304,12 @@ test_respond_closed_scope_refuses_free_text
 test_respond_stale_approve_refused
 test_respond_approve_open_key
 test_respond_reply_cannot_grant_merge_authority
-test_respond_invalid_envelope_stays_queued
+test_respond_invalid_envelope_is_quarantined
+test_respond_unsafe_inbox_is_quarantined
+test_respond_corrupt_rate_log_is_quarantined_and_allows
+test_respond_wellformed_rate_log_keeps_window
+test_poll_missing_jq_does_not_rewake_pending
+test_quarantine_flood_cannot_drop_good_or_evade_allowlist
 test_respond_action_write_failure_reports_error
 test_respond_approve_unknown_key_refused
 test_respond_desk_only_decision_refused
