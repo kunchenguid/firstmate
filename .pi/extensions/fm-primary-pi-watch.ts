@@ -97,9 +97,11 @@ function actionableLine(output: string): string {
   return lines.find((line) => /^(signal:|stale:|check:|heartbeat($|:))/.test(line)) || "";
 }
 
-function lockPolicyForSessionStart(reason: unknown): SessionLockPolicy | null {
+function lockPolicyForSessionStart(reason: unknown, hasLoadedContext: boolean, isCliFork: boolean): SessionLockPolicy | null {
   switch (String(reason ?? "")) {
     case "startup":
+      if (isCliFork) return "owned-only";
+      return hasLoadedContext ? "recover" : "defer";
     case "new":
       return "defer";
     case "resume":
@@ -566,7 +568,9 @@ export default function (pi: ExtensionAPI) {
   pi.on?.("session_start", async (event, ctx) => {
     if (!primaryHome) return;
     const reason = String((event as { reason?: unknown }).reason ?? "");
-    const lockPolicy = lockPolicyForSessionStart(reason);
+    const hasLoadedContext = reason === "startup" && ctx.sessionManager.buildSessionContext().messages.length > 0;
+    const isCliFork = reason === "startup" && process.argv.slice(2).includes("--fork");
+    const lockPolicy = lockPolicyForSessionStart(reason, hasLoadedContext, isCliFork);
     if (!lockPolicy) {
       sessionActive = false;
       activeSessionLockPolicy = "owned-only";

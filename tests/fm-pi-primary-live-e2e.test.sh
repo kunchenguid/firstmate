@@ -18,11 +18,12 @@ fail() {
 command -v pi >/dev/null 2>&1 || fail "pi not found"
 command -v tmux >/dev/null 2>&1 || fail "tmux not found"
 
+PI_BIN=$(command -v pi)
 TMUX=$(command -v tmux)
 SOCKET="fm-pi-live-e2e-$$"
 SESSION=pi-live-e2e
 PI_SESSION_ID=11111111-1111-4111-8111-111111111111
-PI_VERSION=$(pi --version)
+PI_VERSION=$("$PI_BIN" --version)
 
 [ "$PI_VERSION" = 0.80.7 ] || fail "live resume regression requires Pi 0.80.7, found $PI_VERSION"
 LAB=$(mktemp -d "${TMPDIR:-/tmp}/fm-pi-live-e2e.XXXXXX") || fail "could not create the system temporary lab"
@@ -244,7 +245,7 @@ printf 'FIRST_PI_EXIT=%s\n' "$first_rc"
 [ "$first_rc" -eq 0 ] || exit "$first_rc"
 while [ ! -f "$FM_HOME/state/.resume-now" ]; do sleep 0.1; done
 printf 'PI_RESUME_STARTING=%s\n' "$PI_SESSION_ID"
-pi --provider fm-live-e2e --model fm-live-e2e --session-dir "$PI_SESSION_DIR" --session "$PI_SESSION_ID"
+"$PI_BIN" --provider fm-live-e2e --model fm-live-e2e --session-dir "$PI_SESSION_DIR" --session "$PI_SESSION_ID"
 resumed_rc=$?
 printf 'RESUMED_PI_EXIT=%s\n' "$resumed_rc"
 [ "$resumed_rc" -eq 0 ] || exit "$resumed_rc"
@@ -256,12 +257,12 @@ cat > "$PI_INITIAL_LAUNCHER" <<'SH'
 #!/usr/bin/env bash
 set -u
 printf '%s\n' "$$" > "$FM_HOME/state/.lock"
-exec pi --provider fm-live-e2e --model fm-live-e2e --session-dir "$PI_SESSION_DIR" --session-id "$PI_SESSION_ID"
+exec "$PI_BIN" --provider fm-live-e2e --model fm-live-e2e --session-dir "$PI_SESSION_DIR" --session-id "$PI_SESSION_ID"
 SH
 chmod +x "$PI_INITIAL_LAUNCHER"
 
 "$TMUX" -L "$SOCKET" new-session -d -s "$SESSION" -c "$PROJECT" \
-  "env PI_CODING_AGENT_DIR='$PI_DIR' PI_SESSION_DIR='$PI_SESSION_DIR' PI_SESSION_ID='$PI_SESSION_ID' PI_INITIAL_LAUNCHER='$PI_INITIAL_LAUNCHER' FM_HOME='$HOME_DIR' FM_ROOT_OVERRIDE='$PROJECT' FM_POLL=1 FM_SIGNAL_GRACE=0 FM_HEARTBEAT=600 PI_OFFLINE=1 '$PI_LAUNCHER'"
+  "env PI_BIN='$PI_BIN' PI_CODING_AGENT_DIR='$PI_DIR' PI_SESSION_DIR='$PI_SESSION_DIR' PI_SESSION_ID='$PI_SESSION_ID' PI_INITIAL_LAUNCHER='$PI_INITIAL_LAUNCHER' FM_HOME='$HOME_DIR' FM_ROOT_OVERRIDE='$PROJECT' FM_POLL=1 FM_SIGNAL_GRACE=0 FM_HEARTBEAT=600 PI_OFFLINE=1 '$PI_LAUNCHER'"
 
 wait_for_text "Trust project folder?" 40 || fail "Pi trust prompt did not appear"
 "$TMUX" -L "$SOCKET" send-keys -t "$SESSION" Enter

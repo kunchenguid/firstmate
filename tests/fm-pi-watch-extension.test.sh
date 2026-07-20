@@ -107,6 +107,8 @@ test_tracked_extension_present_and_self_hashing() {
   assert_contains "$text" 'if (ownership === "missing" || ownership === "dead")' "tracked extension does not restrict acquisition to reclaimable states"
   assert_contains "$text" 'case "fork":' "tracked extension does not classify Pi fork lifecycle events"
   assert_contains "$text" 'case "reload":' "tracked extension does not classify Pi reload lifecycle events"
+  assert_contains "$text" 'reason === "startup" && ctx.sessionManager.buildSessionContext().messages.length > 0' "tracked extension does not detect a CLI startup with preloaded context"
+  assert_contains "$text" 'process.argv.slice(2).includes("--fork")' "tracked extension does not preserve CLI fork owned-only policy"
   assert_contains "$text" 'startArm(activeSessionLockPolicy)' "tracked extension does not carry session lock policy into every arm"
   assert_contains "$text" 'launchArm(activeSessionLockPolicy, predecessorArmPid)' "tracked extension does not carry session lock policy into successor arms"
   assert_not_contains "$text" 'lockPolicy: SessionLockPolicy = "recover"' "tracked extension still has an implicit recover policy"
@@ -1031,7 +1033,10 @@ const pi = {
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 mod.default(pi);
-await handlers.get("session_start")?.({ type: "session_start", reason: "startup" }, { ui: { notify() {} } });
+await handlers.get("session_start")?.({ type: "session_start", reason: "startup" }, {
+  sessionManager: { buildSessionContext: () => ({ messages: [] }) },
+  ui: { notify() {} },
+});
 if (!existsSync(process.env.FM_ARM_LOG)) throw new Error("initial Pi session did not arm supervision");
 const pending = `${process.env.FM_HOME}/state/.afk.pending`;
 writeFileSync(pending, "away\n");
@@ -1152,6 +1157,7 @@ if (process.env.CASE === "retry") {
   if (!existsSync(marker)) throw new Error("away monitor setup was not retried");
 }
 await handlers.get("session_start")?.({ type: "session_start", reason: "startup" }, {
+  sessionManager: { buildSessionContext: () => ({ messages: [] }) },
   ui: {
     notify(message) {
       notifications.push(message);
@@ -1360,6 +1366,85 @@ EOF
   pass "Pi session_start reclaims safe locks, preserves away ownership, refuses live other, and idempotently arms"
 }
 
+test_pi_cli_loaded_startup_distinguishes_resume_and_fork() {
+  local mode repo home plugin arm_log out status
+  for mode in resume fork; do
+    repo="$TMP_ROOT/pi-cli-loaded-startup-$mode-root"
+    home="$TMP_ROOT/pi-cli-loaded-startup-$mode-home"
+    arm_log="$TMP_ROOT/pi-cli-loaded-startup-$mode-arm.log"
+    mkdir -p "$home/state" "$home/config"
+    install_pi_watch_extension_fixture "$repo"
+    plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+    cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm\n' >> "${FM_ARM_LOG:?}"
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+trap 'exit 0' TERM INT
+while :; do sleep 1; done
+SH
+    chmod +x "$repo/bin/fm-watch-arm.sh"
+    status=0
+    out=$(MODE="$mode" PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$arm_log" node --input-type=module 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const lock = `${process.env.FM_HOME}/state/.lock`;
+writeFileSync(lock, "999999\n");
+if (process.env.MODE === "fork") process.argv.splice(1, 0, "pi", "--fork", "persisted-session");
+const handlers = new Map();
+const notifications = [];
+const pi = {
+  on(event, handler) {
+    handlers.set(event, handler);
+  },
+  registerCommand() {},
+  registerTool() {},
+  sendUserMessage: async () => {},
+};
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+await handlers.get("session_start")?.({ type: "session_start", reason: "startup" }, {
+  sessionManager: {
+    buildSessionContext() {
+      return { messages: [{ role: "user", content: "persisted" }] };
+    },
+  },
+  ui: {
+    notify(message) {
+      notifications.push(message);
+    },
+  },
+});
+if (process.env.MODE === "resume") {
+  if (readFileSync(lock, "utf8").trim() !== String(process.pid)) {
+    throw new Error("CLI-loaded startup did not recover the dead session lock");
+  }
+  if (!existsSync(process.env.FM_ARM_LOG)) {
+    throw new Error("CLI-loaded startup did not arm watcher supervision");
+  }
+  if (notifications.length > 0) {
+    throw new Error(`CLI-loaded startup notified unexpectedly: ${notifications.join(" | ")}`);
+  }
+} else {
+  if (readFileSync(lock, "utf8").trim() !== "999999") {
+    throw new Error("CLI fork changed dead lock ownership");
+  }
+  if (existsSync(process.env.FM_ARM_LOG)) throw new Error("CLI fork armed without ownership");
+  if (!notifications.some((message) => message.includes("existing session-lock ownership required (state: dead)"))) {
+    throw new Error(`CLI fork did not fail closed: ${notifications.join(" | ")}`);
+  }
+}
+await handlers.get("session_shutdown")?.({ type: "session_shutdown" }, {});
+EOF
+    ) || status=$?
+    if [ "$status" -ne 0 ]; then
+      fail "Pi CLI-loaded startup failed for $mode lock policy: $out"
+    fi
+    [ -z "$out" ] || fail "Pi CLI-loaded startup $mode test printed output: $out"
+  done
+  pass "Pi CLI-loaded startup distinguishes resume recovery from fork rebuilding"
+}
+
 test_pi_session_start_load_order_preserves_initial_nudge() {
   local reason order repo home watch_plugin turnend_plugin arm_log out status
   for reason in startup new resume; do
@@ -1413,6 +1498,7 @@ for (const plugin of plugins) {
 }
 for (const handler of handlers.get("session_start") || []) {
   await handler({ type: "session_start", reason: process.env.REASON }, {
+    sessionManager: { buildSessionContext: () => ({ messages: [] }) },
     ui: {
       notify(message) {
         notifications.push(message);
@@ -1502,6 +1588,7 @@ const pi = {
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 mod.default(pi);
 await handlers.get("session_start")?.({ type: "session_start", reason: process.env.REASON }, {
+  sessionManager: { buildSessionContext: () => ({ messages: [] }) },
   ui: {
     notify(message) {
       notifications.push(message);
@@ -1610,6 +1697,7 @@ const pi = {
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 mod.default(pi);
 await handlers.get("session_start")?.({ type: "session_start", reason: process.env.REASON }, {
+  sessionManager: { buildSessionContext: () => ({ messages: [] }) },
   ui: {
     notify(message) {
       notifications.push(message);
@@ -1749,6 +1837,7 @@ const pi = {
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 mod.default(pi);
 await handlers.get("session_start")?.({ type: "session_start", reason: process.env.REASON }, {
+  sessionManager: { buildSessionContext: () => ({ messages: [] }) },
   ui: {
     notify(message) {
       notifications.push(message);
@@ -1887,6 +1976,7 @@ const pi = {
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 mod.default(pi);
 await handlers.get("session_start")?.({ type: "session_start", reason: process.env.REASON }, {
+  sessionManager: { buildSessionContext: () => ({ messages: [] }) },
   ui: {
     notify(message) {
       notifications.push(message);
@@ -3058,6 +3148,7 @@ test_pi_process_exit_cleanup_stops_arm_child
 test_pi_extension_transfers_active_arm_on_away_entry
 test_pi_extension_fails_closed_and_retries_away_monitor
 test_pi_resume_session_recovers_only_reclaimable_locks
+test_pi_cli_loaded_startup_distinguishes_resume_and_fork
 test_pi_session_start_load_order_preserves_initial_nudge
 test_pi_fork_reload_rebuilds_only_owned_supervision
 test_pi_fork_reload_policy_survives_every_rearm_path
