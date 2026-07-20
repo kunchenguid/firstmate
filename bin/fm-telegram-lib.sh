@@ -279,8 +279,7 @@ fmt_inbox_quarantine() {
   inbox="$state/telegram-inbox"
   qdir="$state/telegram-inbox-quarantine"
   base="$uid.json"
-  [ -f "$inbox/$base" ] || return 1
-  [ ! -L "$inbox/$base" ] || return 1
+  fmx_single_link_file_valid "$inbox/$base" || return 1
   fmx_private_artifact_dir_prepare "$qdir" >/dev/null || return 1
   chmod 700 "$qdir" 2>/dev/null || true
   epoch=$(date +%s 2>/dev/null) || epoch=0
@@ -327,8 +326,7 @@ fmt_rate_log_quarantine() {
   esac
   base="telegram-rate-$bucket.log"
   file="$state/$base"
-  [ -f "$file" ] || return 1
-  [ ! -L "$file" ] || return 1
+  fmx_single_link_file_valid "$file" || return 1
   qdir="$state/telegram-rate-quarantine"
   fmx_private_artifact_dir_prepare "$qdir" >/dev/null || return 1
   chmod 700 "$qdir" 2>/dev/null || true

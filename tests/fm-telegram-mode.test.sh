@@ -905,6 +905,25 @@ test_respond_symlink_inbox_cannot_touch_referent() {
   pass "symlinked inbox entries cannot rewrite files outside the inbox"
 }
 
+test_respond_hardlink_inbox_cannot_touch_shared_inode() {
+  local home out victim mode qcount
+  home="$TMP_ROOT/resp-hardlink-inbox"; mkdir -p "$home/state"
+  write_env "$home" "FM_TELEGRAM_DRY_RUN=1"
+  seed_inbox "$home" 55 "status"
+  victim="$home/victim.json"
+  ln "$home/state/telegram-inbox/55.json" "$victim"
+  chmod 644 "$victim"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-telegram-respond.sh" 2>/dev/null)
+  assert_contains "$out" "error 55 quarantine-failed" "hard-linked inbox entry must refuse the quarantine move"
+  assert_present "$home/state/telegram-inbox/55.json" "refused hard link must stay in place for desk review"
+  mode=$(file_mode "$victim")
+  [ "$mode" = 644 ] || fail "quarantine must not chmod a shared inode (mode: $mode)"
+  qcount=$(find "$home/state/telegram-inbox-quarantine" -name '55.*' 2>/dev/null | wc -l | tr -d ' ')
+  [ "$qcount" -eq 0 ] || fail "shared inode must not be linked into quarantine (got $qcount)"
+  assert_grep "quarantine-failed" "$home/state/telegram-audit.log" "refused hard-link quarantine must be audited"
+  pass "hard-linked inbox entries cannot rewrite a shared inode's mode"
+}
+
 test_respond_inbox_dir_drift_keeps_files_queued() {
   local home out
   home="$TMP_ROOT/resp-inbox-dir-drift"; mkdir -p "$home/state"
@@ -1375,6 +1394,7 @@ test_respond_reply_cannot_grant_merge_authority
 test_respond_invalid_envelope_is_quarantined
 test_respond_unsafe_inbox_is_quarantined
 test_respond_symlink_inbox_cannot_touch_referent
+test_respond_hardlink_inbox_cannot_touch_shared_inode
 test_respond_inbox_dir_drift_keeps_files_queued
 test_respond_corrupt_rate_log_is_quarantined_and_allows
 test_respond_rate_quarantine_failure_audited_and_defers
