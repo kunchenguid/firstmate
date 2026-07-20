@@ -833,7 +833,7 @@ test_secondmate_unpause_clears_pause_tracking() {
 }
 
 test_nonterminal_stale_pause_transitions_reclassify_unchanged_hash() {
-  local dir state fakebin out capture_file window key pane_hash sig pid
+  local dir state fakebin out capture_file window key pane_hash sig pid i
   dir=$(make_case nonterminal-stale-pause-transition); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-transition"
   printf 'idle awaiting external\n' > "$capture_file"
@@ -853,11 +853,16 @@ test_nonterminal_stale_pause_transitions_reclassify_unchanged_hash() {
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
-  if ! wait_live "$pid" 30; then
-    reap "$pid"; fail "a stale hash that entered pause was wedge-escalated: $(cat "$out")"
-  fi
+  i=0
+  while [ "$i" -lt 100 ] && kill -0 "$pid" 2>/dev/null; do
+    [ -e "$state/.paused-$key" ] && [ ! -e "$state/.stale-since-$key" ] && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  kill -0 "$pid" 2>/dev/null || { reap "$pid"; fail "a stale hash that entered pause was wedge-escalated: $(cat "$out")"; }
   [ -e "$state/.paused-$key" ] || { reap "$pid"; fail "unchanged stale hash did not enter paused mode"; }
   [ ! -e "$state/.stale-since-$key" ] || { reap "$pid"; fail "pause transition retained its wedge timer"; }
+  wait_live "$pid" 30 || { reap "$pid"; fail "a stale hash that entered pause was wedge-escalated: $(cat "$out")"; }
   reap "$pid"
 
   printf 'working: upstream landed, resuming\n' > "$state/transition.status"
@@ -868,11 +873,16 @@ test_nonterminal_stale_pause_transitions_reclassify_unchanged_hash() {
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
-  if ! wait_live "$pid" 30; then
-    reap "$pid"; fail "a stale hash that left pause did not resume wedge tracking: $(cat "$out")"
-  fi
+  i=0
+  while [ "$i" -lt 100 ] && kill -0 "$pid" 2>/dev/null; do
+    [ ! -e "$state/.paused-$key" ] && [ -s "$state/.stale-since-$key" ] && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  kill -0 "$pid" 2>/dev/null || { reap "$pid"; fail "a stale hash that left pause did not resume wedge tracking: $(cat "$out")"; }
   [ ! -e "$state/.paused-$key" ] || { reap "$pid"; fail "unchanged stale hash retained paused mode after resume"; }
   [ -s "$state/.stale-since-$key" ] || { reap "$pid"; fail "unchanged stale hash did not restart wedge tracking after resume"; }
+  wait_live "$pid" 30 || { reap "$pid"; fail "a stale hash that left pause did not resume wedge tracking: $(cat "$out")"; }
   reap "$pid"
   unset FM_FAKE_CREW_STATE
   pass "unchanged stale hashes reclassify when a crew enters or leaves pause"
