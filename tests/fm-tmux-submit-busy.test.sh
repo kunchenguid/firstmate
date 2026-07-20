@@ -68,7 +68,7 @@ test_busy_pane_pending_returns_empty() {
   # Now test the submit - write verdict to file to avoid nested $().
   PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$composer" FM_FAKE_SENT="$sent" \
     FM_FAKE_SWALLOW="$dir/.swallow" FM_FAKE_PERSIST_SWALLOW=1 FM_FAKE_PANE_BUSY=1 \
-    fm_tmux_submit_enter_core "win" 3 0.05 > "$vfile" 2>/dev/null || [ $? -eq 0 ]
+    fm_tmux_submit_enter_core "win" 3 0.05 > "$vfile" 2>/dev/null
   [ "$(cat "$vfile")" = empty ] || fail "busy-pane pending should return empty, got '$(cat "$vfile")'"
   [ "$(grep -c 'fix findings' "$sent" 2>/dev/null || true)" -eq 0 ] \
     || fail "busy-pane should not retype text"
