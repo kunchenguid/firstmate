@@ -35,6 +35,9 @@
 #   or recovered state is never adopted, reused, closed, or deleted through that
 #   presentation path; a flat launch is allowed only after duplicate-agent risk
 #   is independently absent. Treehouse allocation and task metadata are unchanged.
+#   Every single-task invocation holds one task-id-scoped lock across backend
+#   creation through metadata publication, so concurrent same-id spawns serialize
+#   even when they select different backends.
 #   With no harness arg, a crewmate/scout spawn resolves the CREW harness only when
 #   config/crew-dispatch.json is absent. When that file exists, crewmate/scout
 #   spawns require an explicit harness so firstmate cannot silently skip dispatch

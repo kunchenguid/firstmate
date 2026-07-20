@@ -726,8 +726,12 @@ test_spawn_task_lock_covers_all_backend_creation_and_metadata_publication() {
 
 test_projected_spawn_disarms_cleanup_before_ambiguous_launch_submission() {
   local literal_pattern disarm_pattern enter_pattern literal_line disarm_line enter_line
+  # These are literal source patterns for grep, so shell expansion would invalidate the assertion.
+  # shellcheck disable=SC2016
   literal_pattern='spawn_send_literal "$T" "$LAUNCH"'
+  # shellcheck disable=SC2016
   disarm_pattern='[ "${HERDR_PROJECTED:-0}" -ne 1 ] || HERDR_PROJECTION_ABORT_CLEANUP=0'
+  # shellcheck disable=SC2016
   enter_pattern='spawn_send_key "$T" Enter'
   literal_line=$(grep -nF "$literal_pattern" "$ROOT/bin/fm-spawn.sh" | tail -1 | cut -d: -f1)
   disarm_line=$(grep -nF "$disarm_pattern" "$ROOT/bin/fm-spawn.sh" | tail -1 | cut -d: -f1)
