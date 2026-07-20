@@ -61,6 +61,14 @@ TARGET="$SESSION:$WINDOW"
 
 tmux new-session -d -s "$SESSION" -x 200 -y 50 \
   || fail "real tmux: new-session failed"
+project_session=$(fm_backend_tmux_container_ensure "fm-smoke-project") \
+  || fail "fm_backend_tmux_container_ensure failed to create a project session"
+[ "$project_session" = fm-smoke-project ] \
+  || fail "fm_backend_tmux_container_ensure returned '$project_session', expected fm-smoke-project"
+tmux has-session -t fm-smoke-project 2>/dev/null \
+  || fail "real tmux: project session was not created"
+pass "real tmux: fm_backend_tmux_container_ensure creates a requested project session"
+
 fm_backend_tmux_create_task "$SESSION" "$WINDOW" "$HOME" \
   || fail "fm_backend_tmux_create_task failed to create the task window"
 tmux list-windows -t "$SESSION" -F '#{window_name}' | grep -qx "$WINDOW" \

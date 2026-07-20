@@ -611,6 +611,22 @@ resolve_project_dir_arg() {
   esac
 }
 
+git_common_dir_abs() {
+  local repo=$1 common
+  common=$(git -C "$repo" rev-parse --git-common-dir 2>/dev/null) || return 1
+  case "$common" in
+    /*) ( cd "$common" && pwd -P ) ;;
+    *) ( cd "$repo/$common" && pwd -P ) ;;
+  esac
+}
+
+project_is_firstmate_repo() {
+  local project_common root_common
+  project_common=$(git_common_dir_abs "$1") || return 1
+  root_common=$(git_common_dir_abs "$FM_ROOT") || return 1
+  [ "$project_common" = "$root_common" ]
+}
+
 path_is_ancestor_of() {
   local ancestor=$1 path=$2
   [ -n "$ancestor" ] || return 1
@@ -790,9 +806,10 @@ real_path_or_raw() {  # <path>
   fi
 }
 
-# Session-provider container-ensure + task creation. tmux stays exactly as P1
-# left it (same session-name / new-window sequence, see bin/backends/tmux.sh);
-# a herdr spawn goes through the version-gated, workspace-per-HOME,
+# Session-provider container-ensure + task creation. tmux tasks use a
+# firstmate-owned session per project except for secondmates and firstmate-repo
+# tasks, which stay in the shared firstmate session; a herdr spawn goes through
+# the version-gated, workspace-per-HOME,
 # tab-per-task sequence in bin/backends/herdr.sh instead (D4/D5 as refined by
 # docs/herdr-backend.md's "workspace-per-home" pass, AGENTS.md task
 # herdr-sm-spaces-k4). Both branches converge on the same $T ("target") string
@@ -861,7 +878,11 @@ herdr_projection_existing_meta_allows_flat() {  # <meta>
 W="fm-$ID"
 case "$BACKEND" in
   tmux)
-    SES=$(fm_backend_tmux_container_ensure)
+    TMUX_SESSION=firstmate
+    if [ "$KIND" != secondmate ] && ! project_is_firstmate_repo "$PROJ_ABS"; then
+      TMUX_SESSION=$(fm_backend_tmux_project_session_name "$PROJ_ABS")
+    fi
+    SES=$(fm_backend_tmux_container_ensure "$TMUX_SESSION")
     T="$SES:$W"
     # #134 robustness (tmux): fm_backend_tmux_create_task captures a stable window
     # id and pins the window name (automatic-rename/allow-rename off) so a captain's

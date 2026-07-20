@@ -54,17 +54,45 @@ fm_backend_tmux_send_text_submit() {  # <target> <text> <retries> <enter-sleep> 
   fm_tmux_submit_core "$@"
 }
 
-# fm_backend_tmux_container_ensure: reuse the current tmux session when
-# firstmate itself runs inside tmux, else ensure a dedicated detached
-# "firstmate" session exists. Mirrors fm-spawn.sh's container-ensure block;
-# prints the resolved session name.
-fm_backend_tmux_container_ensure() {
+# fm_backend_tmux_sanitize_session_name: reduce an arbitrary project/repo name
+# to a tmux-safe session name. Keep ordinary repo-name characters intact; collapse
+# everything else to hyphens because ":" is tmux's target separator.
+fm_backend_tmux_sanitize_session_name() {  # <raw-name>
+  local name
+  name=$(printf '%s' "$1" | LC_ALL=C tr -c 'A-Za-z0-9_.-' '-')
+  name=$(printf '%s' "$name" | sed 's/-\{1,\}/-/g; s/^-*//; s/-*$//')
+  [ -n "$name" ] || name=firstmate
+  printf '%s' "$name"
+}
+
+# fm_backend_tmux_project_session_name: derive the tmux session name for a
+# project-scoped task from the resolved project/repo directory basename.
+# Prefixing with fm- avoids colliding with a captain's own human tmux sessions.
+fm_backend_tmux_project_session_name() {  # <project-abs>
+  local name
+  name=$(fm_backend_tmux_sanitize_session_name "$(basename "$1")")
+  case "$name" in
+    fm-*) printf '%s' "$name" ;;
+    *) fm_backend_tmux_sanitize_session_name "fm-$name" ;;
+  esac
+}
+
+# fm_backend_tmux_container_ensure: ensure the requested tmux session exists and
+# print its name. If firstmate is already running inside that same session, reuse
+# it with the legacy display-message path; otherwise create/reuse the named
+# detached session explicitly.
+fm_backend_tmux_container_ensure() {  # [session-name=firstmate]
+  local desired=${1:-firstmate} current
+  desired=$(fm_backend_tmux_sanitize_session_name "$desired")
   if [ -n "${TMUX:-}" ]; then
-    tmux display-message -p '#S'
-  else
-    tmux has-session -t firstmate 2>/dev/null || tmux new-session -d -s firstmate
-    printf 'firstmate'
+    current=$(tmux display-message -p '#S') || current=
+    if [ "$current" = "$desired" ]; then
+      printf '%s' "$current"
+      return 0
+    fi
   fi
+  tmux has-session -t "$desired" 2>/dev/null || tmux new-session -d -s "$desired"
+  printf '%s' "$desired"
 }
 
 # fm_backend_tmux_create_task: create the task's window in <proj-abs>,

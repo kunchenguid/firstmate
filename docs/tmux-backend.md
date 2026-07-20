@@ -6,7 +6,8 @@ This is the setup guide; for the shared runtime-backend abstraction and selectio
 ## What it is and when to pick it
 
 tmux is a terminal multiplexer.
-Firstmate gives each crewmate its own tmux window inside a session, so you can attach and watch a task work, or type into its window to intervene directly.
+Firstmate gives each crewmate its own tmux window inside a firstmate-owned tmux session, so you can attach and watch a task work, or type into its window to intervene directly.
+Project work uses a per-project session named `fm-<project>`, while secondmates and firstmate-repo work stay in the shared `firstmate` session.
 Pick tmux unless you have a specific reason to try an experimental backend (herdr, zellij, Orca, or cmux) - it is the fully verified reference path for secondmate homes, while Orca and cmux are the backends that do not support secondmate spawns.
 
 ## Prerequisites
@@ -29,13 +30,15 @@ The first crewmate spawn creates whatever tmux session and window it needs.
 ## Run inside tmux for the best experience
 
 Launch your harness from inside a tmux session (`tmux new -s firstmate` or similar, then start your agent).
-Every crewmate window then lands in that same session, where you can watch the crew work in real time or type into any window to intervene.
+Firstmate-repo and secondmate windows land in that same `firstmate` session when it is the selected session.
+Project task windows land in their own `fm-<project>` sessions, created on demand, so they do not collide with unrelated human sessions.
 When following the commands below, use that session's actual name.
 Inside tmux, `tmux display-message -p '#S'` prints it.
 
 ## Outside tmux: the detached `firstmate` session
 
-If you launch your harness outside of tmux, crewmate windows land in a detached session named `firstmate`, created on first use.
+If you launch your harness outside of tmux, firstmate-repo and secondmate windows land in a detached session named `firstmate`, created on first use.
+Project task windows still land in detached `fm-<project>` sessions, created on first use.
 Attach to it any time with:
 
 ```sh
@@ -44,14 +47,14 @@ tmux attach -t firstmate
 
 ## Watching and typing into crew windows
 
-Once attached, each crewmate is its own window named `fm-<id>`:
+Once attached to the relevant session, each crewmate is its own window named `fm-<id>`:
 
 ```sh
 tmux list-windows -t <session-name>          # see every crew window
 tmux select-window -t <session-name>:fm-<id> # jump to one, or use ctrl-b <n>
 ```
 
-Use the current tmux session name when firstmate was launched inside tmux; use `firstmate` only for the detached outside-tmux path.
+Use `firstmate` for firstmate-repo work and secondmates, or `fm-<project>` for ordinary project work.
 Typing directly into an attached window is authoritative direct intervention - the first mate treats it the same as any other captain instruction and reconciles at the next heartbeat.
 You do not need to attach at all for routine supervision: from an active firstmate session, the first mate reads crew windows itself with `bin/fm-peek.sh fm-<id>` (a bounded, read-only capture) and steers a crew with `FM_HOME=<this-firstmate-home> bin/fm-send.sh fm-<id> "<text>"` unless `FM_HOME` is already set to the active firstmate home.
 
