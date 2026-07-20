@@ -131,6 +131,7 @@ PR_URL=$(grep '^pr=' "$META" | tail -1 | cut -d= -f2- || true)
 TASK_TMP=$(grep '^tasktmp=' "$META" | cut -d= -f2- || true)
 ORCA_WORKTREE_ID=$(fm_meta_get "$META" orca_worktree_id)
 ORCA_PATH_MATCH_VERIFIED=0
+HARNESS=$(grep '^harness=' "$META" | tail -1 | cut -d= -f2- || true)
 
 KIND=$(grep '^kind=' "$META" | cut -d= -f2- || true)
 [ -n "$KIND" ] || KIND=ship
@@ -946,7 +947,7 @@ validate_firstmate_home_children_removal() {
 }
 
 cleanup_firstmate_home_children() {
-  local home=$1 sub_state child_meta child_id child_t child_wt child_proj child_kind child_home child_backend child_orca_worktree_id child_return_rc
+  local home=$1 sub_state child_meta child_id child_t child_wt child_proj child_kind child_home child_backend child_harness child_orca_worktree_id child_return_rc
   sub_state="$home/state"
   [ -d "$sub_state" ] || return 0
   for child_meta in "$sub_state"/*.meta; do
@@ -957,6 +958,7 @@ cleanup_firstmate_home_children() {
     child_kind=$(meta_value "$child_meta" kind)
     [ -n "$child_kind" ] || child_kind=ship
     child_backend=$(fm_backend_of_meta "$child_meta")
+    child_harness=$(meta_value "$child_meta" harness)
     if [ "$child_backend" = orca ]; then
       child_t=$(meta_value "$child_meta" terminal)
     else
@@ -969,8 +971,10 @@ cleanup_firstmate_home_children() {
       fi
     fi
     if [ -n "$child_t" ]; then
-      FM_HOME="$home" FM_STATE_OVERRIDE="$sub_state" \
-        "$SCRIPT_DIR/fm-pi-question-recover.sh" --cancel "$child_id" || return 1
+      if [ "$child_harness" = pi ]; then
+        FM_HOME="$home" FM_STATE_OVERRIDE="$sub_state" \
+          "$SCRIPT_DIR/fm-pi-question-recover.sh" --cancel "$child_id" || return 1
+      fi
       if [ "$child_backend" = zellij ]; then
         # Zellij titles are scoped by the owning home tag, so forced secondmate
         # cleanup must verify child tabs as that child home, not the parent.
@@ -1091,8 +1095,10 @@ fi
 # Close a blocked Pi tool call before its owning endpoint is killed or its
 # worktree is returned. The recovery helper is idempotent for non-Pi tasks and
 # for calls that already reached a terminal resolution.
-FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
-  "$SCRIPT_DIR/fm-pi-question-recover.sh" --cancel "$ID" || exit 1
+if [ "$HARNESS" = pi ]; then
+  FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+    "$SCRIPT_DIR/fm-pi-question-recover.sh" --cancel "$ID" || exit 1
+fi
 
 # Best-effort: drop the local task branch so the shared repo does not accumulate refs.
 if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then

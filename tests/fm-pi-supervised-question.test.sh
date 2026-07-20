@@ -377,6 +377,8 @@ test_launch_envelope_wiring() {
   # shellcheck disable=SC2016
   assert_contains "$teardown" 'fm-pi-question-recover.sh" --cancel "$ID"' "teardown does not cancel a pending Pi question"
   # shellcheck disable=SC2016
+  assert_contains "$teardown" '[ "$HARNESS" = pi ]' "teardown cancellation escaped Pi crew scope"
+  # shellcheck disable=SC2016
   assert_contains "$teardown" 'rm -rf "$STATE/questions/$ID"' "teardown does not remove terminal Pi question state"
   pass "Pi launch, startup, and teardown wiring preserve the supervised-question lifecycle"
 }
