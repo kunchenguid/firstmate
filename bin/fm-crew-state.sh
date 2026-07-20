@@ -8,8 +8,9 @@
 # or blocked and the crew resumes (responds to the gate, the pipeline fixes, it
 # re-validates), the log's last line stays stale. This helper never infers the
 # current state from a tail of the log: it reads the authoritative source (a
-# no-mistakes run-step attributed to this crew's branch, else the pane
-# busy-signature) and reconciles the possibly-stale log against it.
+# no-mistakes run-step attributed to this crew's branch and current code
+# identity, else the pane busy-signature) and reconciles the possibly-stale log
+# against it.
 #
 # The determinism lives entirely here - only run-step / pane / log reads plus
 # fixed mapping logic, no heuristics and no LLM. Output is one stable, parseable,
