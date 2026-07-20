@@ -20,6 +20,9 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-backlog-handoff.sh`  | Validate and delegate queued backlog-item moves into a secondmate home               |
 | `fm-backlog-pull.sh`     | Refresh Tim's Lindy open-work picture from GitHub and optional local hooks           |
 | `fm-decision-hold.sh`    | Create, verify, complete, and resolve durable captain-held decisions                 |
+| `fm-effort.sh`           | Append effort events, fold the ledger, and derive the captain board                  |
+| `fm-effort-lavish.sh`    | Render folded effort rows as a self-contained Lavish captain board                   |
+| `fm-effort-board-loop.sh` | Run one bounded effort-board ingest, render, Lavish poll, and decision-capture cycle |
 | `fm-brief.sh`            | Scaffold ship, scout, secondmate-charter, and Herdr-lab briefs                       |
 | `fm-herdr-lab.sh`        | Provision and guardedly operate an isolated, never-default Herdr lab session         |
 | `fm-install-herdr.sh`    | Install CI's exact-version Herdr pin with official asset URL, SHA-256, and protocol checks |
