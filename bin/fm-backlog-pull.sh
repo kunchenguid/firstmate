@@ -22,6 +22,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
+# shellcheck source=bin/fm-backlog-generated-lib.sh
+. "$SCRIPT_DIR/fm-backlog-generated-lib.sh"
 
 GH_REPO="${FM_GH_REPO:-lindy-ai/lindy}"
 GH_OWNER="${FM_GH_OWNER:-lindy-ai}"
@@ -30,8 +32,8 @@ GH_LIMIT="${FM_GH_LIMIT:-1000}"
 OUT="${FM_BACKLOG_PULL_OUT:-$DATA/lindy/open-work-backlog.md}"
 NOW="${FM_BACKLOG_PULL_NOW:-$(date -u +"%Y-%m-%dT%H:%M:%SZ")}"
 
-START_MARKER="<!-- fm-backlog-pull:generated:start -->"
-END_MARKER="<!-- fm-backlog-pull:generated:end -->"
+START_MARKER="$FM_BACKLOG_PULL_START_MARKER"
+END_MARKER="$FM_BACKLOG_PULL_END_MARKER"
 
 usage() {
   cat >&2 <<EOF
@@ -281,38 +283,8 @@ write_generated_section() {
 }
 
 replace_generated_section() {
-  local generated=$1 merged=$2 out_dir
-  out_dir=$(dirname "$OUT")
-  mkdir -p "$out_dir"
-
-  if [ -f "$OUT" ] && grep -Fxq "$START_MARKER" "$OUT" && grep -Fxq "$END_MARKER" "$OUT"; then
-    awk -v start="$START_MARKER" -v end="$END_MARKER" -v gen="$generated" '
-      $0 == start {
-        while ((getline line < gen) > 0) print line
-        close(gen)
-        skip = 1
-        next
-      }
-      $0 == end {
-        skip = 0
-        next
-      }
-      !skip { print }
-    ' "$OUT" > "$merged"
-  elif [ -f "$OUT" ]; then
-    {
-      cat "$OUT"
-      printf '\n'
-      cat "$generated"
-    } > "$merged"
-  else
-    {
-      printf '# Lindy Open Work Backlog\n\n'
-      cat "$generated"
-    } > "$merged"
-  fi
-
-  mv "$merged" "$OUT"
+  local generated=$1 merged=$2
+  fm_backlog_replace_generated_section "$OUT" "$generated" "$merged" "Lindy Open Work Backlog"
 }
 
 run_all_sources

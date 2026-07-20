@@ -3,8 +3,9 @@
 # versions. Legacy check files are never run, sourced, or parsed by Bash.
 # Canonical polls are rebuilt from validated metadata, provenance-bound polls
 # and registered custom checks remain armed, and every other task poll is
-# quarantined for private review. A current X-mode shim is preserved by exact
-# content, while the recognized older byte-static shim is refreshed in place.
+# quarantined for private review. Current generated X-mode and intake shims are
+# preserved by exact content, while the recognized older X byte-static shim is
+# refreshed in place.
 # Usage: fm-pr-check-migrate.sh [--checks-safe]
 set -u
 
@@ -36,6 +37,8 @@ fi
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-x-lib.sh
 . "$SCRIPT_DIR/fm-x-lib.sh"
+# shellcheck source=bin/fm-intake-lib.sh
+. "$SCRIPT_DIR/fm-intake-lib.sh"
 # shellcheck source=bin/fm-check-lib.sh
 . "$SCRIPT_DIR/fm-check-lib.sh"
 
@@ -75,12 +78,21 @@ scan_marker_content_valid() {
   [ "$value" = "$SCAN_MARKER_VALUE" ]
 }
 
+generated_check_valid() {
+  local check=$1 base
+  base=$(basename "$check")
+  case "$base" in
+    x-watch.check.sh) fmx_poll_shim_valid "$check" "$FM_HOME" "$FM_ROOT" ;;
+    intake.check.sh) fm_intake_poll_shim_valid "$check" "$FM_HOME" "$FM_ROOT" ;;
+    *) return 1 ;;
+  esac
+}
+
 current_checks_authenticated() {
   local check id
   for check in "$STATE"/*.check.sh; do
     [ -e "$check" ] || [ -L "$check" ] || continue
-    if [ "$(basename "$check")" = x-watch.check.sh ] \
-      && fmx_poll_shim_valid "$check" "$FM_HOME" "$FM_ROOT"; then
+    if generated_check_valid "$check"; then
       continue
     fi
     id=$(basename "$check" .check.sh)
@@ -369,8 +381,7 @@ migration_needed() {
   local check id
   for check in "$STATE"/*.check.sh; do
     [ -e "$check" ] || [ -L "$check" ] || continue
-    if [ "$(basename "$check")" = x-watch.check.sh ] \
-      && fmx_poll_shim_valid "$check" "$FM_HOME" "$FM_ROOT"; then
+    if generated_check_valid "$check"; then
       continue
     fi
     id=$(basename "$check" .check.sh)
@@ -386,8 +397,7 @@ unsafe_checks_absent() {
   local check id
   for check in "$STATE"/*.check.sh; do
     [ -e "$check" ] || [ -L "$check" ] || continue
-    if [ "$(basename "$check")" = x-watch.check.sh ] \
-      && fmx_poll_shim_valid "$check" "$FM_HOME" "$FM_ROOT"; then
+    if generated_check_valid "$check"; then
       continue
     fi
     id=$(basename "$check" .check.sh)
@@ -1018,8 +1028,7 @@ if migration_needed; then
 
   for check in "$STATE"/*.check.sh; do
     [ -e "$check" ] || [ -L "$check" ] || continue
-    if [ "$(basename "$check")" = x-watch.check.sh ] \
-      && fmx_poll_shim_valid "$check" "$FM_HOME" "$FM_ROOT"; then
+    if generated_check_valid "$check"; then
       continue
     fi
     id=$(basename "$check" .check.sh)
