@@ -1050,6 +1050,63 @@ test_submit_ack_reports_pending_on_persistent_swallow() {
   pass "submit-ACK reports pending on a persistently swallowed Enter (type-once)"
 }
 
+test_submit_ack_confirms_on_codex_queued_indicator() {
+  # Codex can accept input while busy, queueing it for the next tool boundary.
+  # The cursor row then shows a queued-input acknowledgement instead of an empty
+  # composer. That is a landed submit, not a swallowed Enter.
+  local dir fakebin sent verdict after
+  dir=$(make_bordered_case ack-codex-queued)
+  fakebin="$dir/fakebin"; sent="$dir/sent.log"; after="$dir/after-enter"; : > "$sent"
+  printf '│ Messages to be submitted after next tool call │\n' > "$after"
+  verdict=$(PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$dir/composer" FM_FAKE_SENT="$sent" \
+    FM_FAKE_AFTER_ENTER_FILE="$after" fm_tmux_submit_core "win" "queue this steer" 3 0.05 0.05)
+  [ "$verdict" = empty ] || fail "queued-input acknowledgement not treated as submitted: $verdict"
+  [ "$(grep -cv '\[ENTER\]' "$sent")" -eq 1 ] || fail "queued steer typed more than once"
+  [ "$(grep -c '\[ENTER\]' "$sent")" -eq 1 ] || fail "queued steer should need exactly one Enter"
+  pass "submit-ACK confirms codex queued-input acknowledgement as submitted"
+}
+
+test_submit_ack_confirms_when_wrapped_text_is_gone() {
+  # A long composer can wrap across rows. After submit the cursor row may still
+  # hold a footer/status fragment, but if the typed text is gone from the bounded
+  # composer region, the submit landed.
+  local dir fakebin sent verdict after text
+  dir=$(make_bordered_case ack-wrapped-gone)
+  fakebin="$dir/fakebin"; sent="$dir/sent.log"; after="$dir/after-enter"; : > "$sent"
+  text="wrapped submit sentinel with enough words to occupy more than one composer row"
+  {
+    printf '│ > │\n'
+    printf '│ queued status redrew on the final row │\n'
+  } > "$after"
+  verdict=$(PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$dir/composer" FM_FAKE_SENT="$sent" \
+    FM_FAKE_AFTER_ENTER_FILE="$after" FM_FAKE_TMUX_CURSOR_Y=1 FM_FAKE_TMUX_PANE_WIDTH=24 \
+    fm_tmux_submit_core "win" "$text" 3 0.05 0.05)
+  [ "$verdict" = empty ] || fail "wrapped composer with submitted text gone was not confirmed: $verdict"
+  [ "$(grep -cv '\[ENTER\]' "$sent")" -eq 1 ] || fail "wrapped steer typed more than once"
+  pass "submit-ACK confirms a wrapped composer once the typed text is gone"
+}
+
+test_submit_ack_reports_pending_when_text_remains_in_region() {
+  # The absence check must not weaken the real swallow case: if the typed text is
+  # still visible anywhere in the bounded composer region, the submit remains
+  # pending even when the cursor row itself is some other non-empty redraw.
+  local dir fakebin sent verdict after text visible_text
+  dir=$(make_bordered_case ack-region-still-present)
+  fakebin="$dir/fakebin"; sent="$dir/sent.log"; after="$dir/after-enter"; : > "$sent"
+  visible_text="wrapped swallow sentinel still visible"
+  text="$(printf '\037')$visible_text"
+  {
+    printf '│ > %s │\n' "$visible_text"
+    printf '│ status footer redrew on the final row │\n'
+  } > "$after"
+  verdict=$(PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$dir/composer" FM_FAKE_SENT="$sent" \
+    FM_FAKE_AFTER_ENTER_FILE="$after" FM_FAKE_TMUX_CURSOR_Y=1 FM_FAKE_TMUX_PANE_WIDTH=24 \
+    fm_tmux_submit_core "win" "$text" 3 0.05 0.05)
+  [ "$verdict" = pending ] || fail "visible typed text was not treated as pending: $verdict"
+  [ "$(grep -cv '\[ENTER\]' "$sent")" -eq 1 ] || fail "region-pending steer retyped"
+  pass "submit-ACK still reports pending when typed text remains in the composer region"
+}
+
 test_max_defer_empty_swallow_types_once_and_alarms() {
   local dir state fakebin sent
   dir=$(make_bordered_case maxdefer-stuck)
@@ -1781,6 +1838,9 @@ test_pane_input_pending_bordered_idle_not_pending
 test_pane_input_pending_bordered_with_text_is_pending
 test_submit_ack_confirms_on_bordered_empty_composer
 test_submit_ack_reports_pending_on_persistent_swallow
+test_submit_ack_confirms_on_codex_queued_indicator
+test_submit_ack_confirms_when_wrapped_text_is_gone
+test_submit_ack_reports_pending_when_text_remains_in_region
 test_max_defer_empty_swallow_types_once_and_alarms
 test_max_defer_flushes_empty_idle_pane
 test_max_defer_pending_composer_alarms_without_typing

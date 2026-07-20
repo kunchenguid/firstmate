@@ -15,6 +15,8 @@
 # submit or reports an inconclusive send. If a swallowed Enter is positively
 # confirmed, fm-send exits NON-ZERO so the caller knows the steer did not land
 # instead of silently leaving an unsubmitted instruction.
+# For tmux/codex, a pre-composer boot/update screen is also deferred before any
+# typing; if it persists, fm-send exits NON-ZERO instead of injecting into boot UI.
 # Submission dispatches through the target's recorded backend; the tmux adapter
 # shares its composer/submit core with the away-mode daemon via bin/fm-tmux-lib.sh.
 # Tune with FM_SEND_RETRIES (default 3) / FM_SEND_SLEEP (0.4).
@@ -291,6 +293,10 @@ else
       fi
       echo "error: text not sent to $T ($TARGET_BACKEND send failed; tried $RESOLUTION_TRIED)" >&2
       exit 1
+      ;;
+    send-deferred)
+      echo "send-deferred: pane booting" >&2
+      exit 2
       ;;
   esac
   # Delivery confirmed. Mark the pending expectation delivered without resolving

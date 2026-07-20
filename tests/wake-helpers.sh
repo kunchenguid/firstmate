@@ -208,11 +208,33 @@ COMPOSER="${FM_FAKE_COMPOSER:?FM_FAKE_COMPOSER unset}"
 case "${1:-}" in
   display-message)
     print=0
-    for a in "$@"; do case "$a" in *cursor_y*) printf '0\n'; exit 0 ;; esac; done
+    for a in "$@"; do
+      case "$a" in
+        *cursor_y*) printf '%s\n' "${FM_FAKE_TMUX_CURSOR_Y:-0}"; exit 0 ;;
+        *pane_width*) printf '%s\n' "${FM_FAKE_TMUX_PANE_WIDTH:-80}"; exit 0 ;;
+      esac
+    done
     for a in "$@"; do [ "$a" = "-p" ] && print=1; done
     [ "$print" = 1 ] && printf 'fakepane\n'
     exit 0 ;;
-  capture-pane) cat "$COMPOSER" 2>/dev/null; exit 0 ;;
+  capture-pane)
+    _S=""; _E=""; shift
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        -S) _S="${2:-}"; shift 2; continue ;;
+        -E) _E="${2:-}"; shift 2; continue ;;
+        *) shift ;;
+      esac
+    done
+    if [ -n "$_S" ] && [ -n "$_E" ]; then
+      case "$_S$_E" in
+        *[!0-9]*) cat "$COMPOSER" 2>/dev/null ;;
+        *) sed -n "$((_S + 1)),$((_E + 1))p" "$COMPOSER" 2>/dev/null ;;
+      esac
+    else
+      cat "$COMPOSER" 2>/dev/null
+    fi
+    exit 0 ;;
   list-windows) exit 0 ;;
   send-keys)
     shift
@@ -231,7 +253,11 @@ case "${1:-}" in
         [ "${FM_FAKE_PERSIST_SWALLOW:-0}" = 1 ] || rm -f "$FM_FAKE_SWALLOW"
       else
         [ -n "${FM_FAKE_SENT:-}" ] && printf '[ENTER]\n' >> "$FM_FAKE_SENT"
-        printf '│ > │\n' > "$COMPOSER"
+        if [ -n "${FM_FAKE_AFTER_ENTER_FILE:-}" ] && [ -f "$FM_FAKE_AFTER_ENTER_FILE" ]; then
+          cat "$FM_FAKE_AFTER_ENTER_FILE" > "$COMPOSER"
+        else
+          printf '│ > │\n' > "$COMPOSER"
+        fi
       fi
     elif [ "$lit" = 1 ]; then
       [ "${FM_FAKE_SEND_FAIL:-0}" = 1 ] && exit 1

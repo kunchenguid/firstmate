@@ -64,6 +64,7 @@
 # interrupt"; opencode: "esc interrupt"; pi: "Working..."; grok: "Ctrl+c:cancel";
 # omp: "esc" inside angle brackets (mid-turn cancel hint).
 FM_TMUX_BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel|[<⟨]esc[>⟩]'
+FM_TMUX_QUEUED_ACK_REGEX_DEFAULT='Messages? to be submitted after (the )?next tool call|submitted after (the )?next tool call|queued (for|until) (the )?next tool call'
 
 # fm_tmux_strip_ghost: thin adapter over the shared, fleet-wide ghost extractor
 # fm_composer_strip_ghost (bin/fm-composer-lib.sh). It drops de-emphasised
@@ -73,6 +74,21 @@ FM_TMUX_BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel|[<�
 # tmux entry point (and for existing callers/tests) but owns no logic of its own,
 # so the tmux and herdr adapters cannot drift apart on what counts as ghost text.
 fm_tmux_strip_ghost() { fm_composer_strip_ghost; }
+
+fm_tmux_strip_composer_borders() {  # <line>
+  local stripped=$1
+  stripped=${stripped//│/}
+  stripped=${stripped//┃/}
+  stripped=${stripped//|/}
+  stripped=${stripped//╭/}
+  stripped=${stripped//╮/}
+  stripped=${stripped//╰/}
+  stripped=${stripped//╯/}
+  stripped=${stripped//─/}
+  stripped="${stripped#"${stripped%%[![:space:]]*}"}"
+  stripped="${stripped%"${stripped##*[![:space:]]}"}"
+  printf '%s' "$stripped"
+}
 
 # fm_tmux_composer_state: classify the cursor/composer line of <target> as
 #   empty   - no pending input (blank, a busy footer, an empty agent composer, or
@@ -115,20 +131,7 @@ fm_tmux_composer_state() {  # <target> -> empty|pending|unknown
   esac
   # content: from the ghost-stripped row (real typed text only).
   stripped=$(printf '%s\n' "$raw" | fm_composer_strip_ghost)
-  stripped="${stripped#"${stripped%%[![:space:]]*}"}"
-  stripped="${stripped%"${stripped##*[![:space:]]}"}"
-  case "$stripped" in
-    '│'*'│') stripped=${stripped#│}; stripped=${stripped%│} ;;
-    '┃'*'┃') stripped=${stripped#┃}; stripped=${stripped%┃} ;;
-    '|'*'|') stripped=${stripped#|}; stripped=${stripped%|} ;;
-  esac
-  stripped=${stripped//╭/}
-  stripped=${stripped//╮/}
-  stripped=${stripped//╰/}
-  stripped=${stripped//╯/}
-  stripped=${stripped//─/}
-  stripped="${stripped#"${stripped%%[![:space:]]*}"}"
-  stripped="${stripped%"${stripped##*[![:space:]]}"}"
+  stripped=$(fm_tmux_strip_composer_borders "$stripped")
   # A busy footer landing on the cursor line is not pending input (tmux-specific:
   # only tmux captures the raw cursor row, which may BE the footer).
   if [ -n "$stripped" ] \
@@ -136,6 +139,54 @@ fm_tmux_composer_state() {  # <target> -> empty|pending|unknown
     printf 'empty'; return 0
   fi
   fm_composer_classify_content "$bordered" "$stripped" "${FM_COMPOSER_IDLE_RE:-}" insensitive "$plain"
+}
+
+fm_tmux_submit_region_bounds() {  # <target> <text> -> "<start> <end>" or blank
+  local target=$1 text=$2 cy width usable rows max_rows start
+  cy=$(tmux display-message -p -t "$target" '#{cursor_y}' 2>/dev/null) || return 1
+  case "$cy" in ''|*[!0-9]*) return 1 ;; esac
+  width=$(tmux display-message -p -t "$target" '#{pane_width}' 2>/dev/null || true)
+  case "$width" in ''|*[!0-9]*) width=80 ;; esac
+  usable=$((width - 4))
+  [ "$usable" -ge 10 ] || usable=10
+  rows=$(( (${#text} + usable - 1) / usable + 2 ))
+  [ "$rows" -ge 1 ] || rows=1
+  max_rows=${FM_TMUX_SUBMIT_VERIFY_MAX_LINES:-20}
+  case "$max_rows" in ''|*[!0-9]*) max_rows=20 ;; esac
+  [ "$max_rows" -ge 1 ] || max_rows=1
+  [ "$rows" -le "$max_rows" ] || rows=$max_rows
+  start=$((cy - rows + 1))
+  [ "$start" -ge 0 ] || start=0
+  printf '%s %s' "$start" "$cy"
+}
+
+fm_tmux_submit_region_text() {  # <target> <start> <end>
+  local target=$1 start=$2 end=$3 raw
+  raw=$(tmux capture-pane -e -p -t "$target" -S "$start" -E "$end" 2>/dev/null) || return 1
+  printf '%s\n' "$raw" | fm_composer_strip_ghost | while IFS= read -r line || [ -n "$line" ]; do
+    fm_tmux_strip_composer_borders "$line"
+    printf '\n'
+  done
+}
+
+fm_tmux_submit_region_state() {  # <target> <text> <start> <end> -> empty|pending|unknown
+  local target=$1 text=$2 start=$3 end=$4 region needle haystack match_chars
+  region=$(fm_tmux_submit_region_text "$target" "$start" "$end") || { printf 'unknown'; return 0; }
+  if printf '%s' "$region" | grep -qiE "${FM_TMUX_QUEUED_ACK_RE:-$FM_TMUX_QUEUED_ACK_REGEX_DEFAULT}"; then
+    printf 'empty'; return 0
+  fi
+  match_chars=${FM_TMUX_SUBMIT_MATCH_CHARS:-160}
+  case "$match_chars" in ''|*[!0-9]*) match_chars=160 ;; esac
+  [ "$match_chars" -ge 1 ] || match_chars=160
+  # Match the visible tail: wrapped composers keep the end of a long message
+  # near cursor_y, while control bytes such as the AFK sentinel do not render.
+  needle=$(printf '%s' "$text" | LC_ALL=C tr -d '[:space:][:cntrl:]' | tail -c "$match_chars")
+  [ -n "$needle" ] || { printf 'unknown'; return 0; }
+  haystack=$(printf '%s' "$region" | LC_ALL=C tr -d '[:space:][:cntrl:]')
+  case "$haystack" in
+    *"$needle"*) printf 'pending'; return 0 ;;
+  esac
+  printf 'empty'; return 0
 }
 
 # fm_pane_input_pending: 0 (pending) if the cursor line holds real unsubmitted
@@ -154,11 +205,41 @@ fm_pane_is_busy() {  # <target>
     | grep -qiE "${FM_BUSY_REGEX:-$FM_TMUX_BUSY_REGEX_DEFAULT}"
 }
 
+fm_tmux_pane_boot_state() {  # <target> -> booting|ready|unknown
+  local target=$1 tail40
+  tail40=$(tmux capture-pane -p -t "$target" -S -40 2>/dev/null) || { printf 'unknown'; return 0; }
+  if printf '%s\n' "$tail40" | grep -qiE 'Update available!' \
+     && printf '%s\n' "$tail40" | grep -qiE 'Press enter to continue'; then
+    printf 'booting'; return 0
+  fi
+  if printf '%s\n' "$tail40" | grep -qiE 'OpenAI Codex' \
+     && printf '%s\n' "$tail40" | grep -qiE 'model:[[:space:]]+loading'; then
+    printf 'booting'; return 0
+  fi
+  printf 'ready'; return 0
+}
+
+fm_tmux_wait_until_not_booting() {  # <target> -> ready|unknown|send-deferred
+  local target=$1 max_s=${FM_TMUX_BOOT_WAIT_SECS:-20} poll_s=${FM_TMUX_BOOT_POLL_SLEEP:-1}
+  local elapsed=0 state
+  case "$max_s" in ''|*[!0-9]*) max_s=20 ;; esac
+  case "$poll_s" in ''|*[!0-9]*) poll_s=1 ;; esac
+  [ "$poll_s" -ge 1 ] || poll_s=1
+  while :; do
+    state=$(fm_tmux_pane_boot_state "$target")
+    [ "$state" = booting ] || { printf '%s' "$state"; return 0; }
+    [ "$elapsed" -lt "$max_s" ] || { printf 'send-deferred'; return 0; }
+    sleep "$poll_s"
+    elapsed=$((elapsed + poll_s))
+  done
+}
+
 # fm_tmux_submit_core: type <text> into <target> ONCE, then submit with Enter,
 # verifying the composer cleared. Retries Enter ONLY — never retypes, because a
 # swallowed Enter leaves our text in the composer and retyping would duplicate
-# it. Echoes the final verdict on stdout (empty|pending|unknown|send-failed) so callers can
-# pick their own success policy:
+# it. Echoes the final verdict on stdout
+# (empty|pending|unknown|send-failed|send-deferred) so callers can pick their own
+# success policy:
 #   - the daemon clears its buffer only on "empty" (strict: an unknown pane must
 #     not be mistaken for a delivered escalation).
 #   - fm-send fails only on "pending" (lenient: a positively-confirmed swallow),
@@ -172,13 +253,17 @@ fm_pane_is_busy() {  # <target>
 # is the only place that exception lives, so the daemon's strict and
 # fm-send's lenient success policies both treat a busy-queued Enter as
 # delivered.
-fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep>
-  local target=$1 retries=$2 sleep_s=$3 i=0 state
+fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep> [text start end]
+  local target=$1 retries=$2 sleep_s=$3 text=${4-} start=${5-} end=${6-} i=0 state region_state
   while :; do
     tmux send-keys -t "$target" Enter 2>/dev/null || true
     sleep "$sleep_s"
     state=$(fm_tmux_composer_state "$target")
     [ "$state" = pending ] || { printf '%s' "$state"; return 0; }
+    if [ -n "$text" ] && [ -n "$start" ] && [ -n "$end" ]; then
+      region_state=$(fm_tmux_submit_region_state "$target" "$text" "$start" "$end")
+      [ "$region_state" = empty ] && { printf 'empty'; return 0; }
+    fi
     i=$((i + 1))
     [ "$i" -lt "$retries" ] || break
   done
@@ -195,8 +280,17 @@ fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep>
 }
 
 fm_tmux_submit_core() {  # <target> <text> <retries> <enter-sleep> <settle>
-  local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5
+  local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 boot_state bounds start end
+  boot_state=$(fm_tmux_wait_until_not_booting "$target")
+  [ "$boot_state" != send-deferred ] || { printf 'send-deferred'; return 0; }
   tmux send-keys -t "$target" -l "$text" 2>/dev/null || { printf 'send-failed'; return 0; }
   sleep "$settle"
-  fm_tmux_submit_enter_core "$target" "$retries" "$sleep_s"
+  bounds=$(fm_tmux_submit_region_bounds "$target" "$text" 2>/dev/null || true)
+  if [ -n "$bounds" ]; then
+    start=${bounds% *}
+    end=${bounds#* }
+    fm_tmux_submit_enter_core "$target" "$retries" "$sleep_s" "$text" "$start" "$end"
+  else
+    fm_tmux_submit_enter_core "$target" "$retries" "$sleep_s"
+  fi
 }
