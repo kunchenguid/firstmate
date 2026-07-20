@@ -169,6 +169,44 @@ fm_write_secondmate_meta() {
     "projects=$projects"
 }
 
+# --- node runner for tracked TypeScript extensions ---------------------------
+#
+# Suites drive tracked .pi/*.ts extensions through `node --input-type=module`.
+# Node only imports .ts with type stripping, which is default on newer releases
+# but needs --experimental-strip-types (plus its warning silenced, since tests
+# assert on empty stderr) on the 22.6-23.5 range. fm_node_ts probes the HOST
+# node once and runs it with whatever flags that host needs, so these suites
+# pass on every type-stripping-capable node instead of only the newest ones.
+# On a node too old for type stripping the probe leaves the flags empty and the
+# suite fails loudly with node's own unknown-extension error.
+
+FM_NODE_TS_FLAGS=
+FM_NODE_TS_PROBED=
+fm_node_ts_probe() {
+  local dir ts probe
+  [ -z "$FM_NODE_TS_PROBED" ] || return 0
+  FM_NODE_TS_PROBED=1
+  FM_NODE_TS_FLAGS=
+  command -v node >/dev/null 2>&1 || return 0
+  dir=$(mktemp -d "${TMPDIR:-/tmp}/fm-node-ts-probe.XXXXXX") || return 0
+  ts="$dir/probe.ts"
+  printf 'const probed: number = 1;\nexport default probed;\n' > "$ts"
+  probe='import { pathToFileURL } from "node:url"; await import(pathToFileURL(process.env.FM_TS_PROBE).href);'
+  if FM_TS_PROBE="$ts" node --input-type=module -e "$probe" >/dev/null 2>&1; then
+    :
+  elif FM_TS_PROBE="$ts" node --experimental-strip-types --disable-warning=ExperimentalWarning \
+      --input-type=module -e "$probe" >/dev/null 2>&1; then
+    FM_NODE_TS_FLAGS='--experimental-strip-types --disable-warning=ExperimentalWarning'
+  fi
+  rm -rf "$dir"
+}
+
+fm_node_ts() {  # node with the host-appropriate .ts import flags
+  fm_node_ts_probe
+  # shellcheck disable=SC2086  # FM_NODE_TS_FLAGS is a deliberate word list.
+  node $FM_NODE_TS_FLAGS "$@"
+}
+
 # --- common assertions ------------------------------------------------------
 
 # assert_contains <haystack> <needle> <msg>
