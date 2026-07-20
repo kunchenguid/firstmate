@@ -22,9 +22,9 @@
 # A gh lookup error falls back to the content check; if that is also inconclusive,
 # teardown refuses rather than risk discarding unlanded work.
 # Uncommitted changes are never landed.
-# local-only projects additionally accept work merged into the local default
-# branch (firstmate performs that merge after configured approval) as a fallback
-# for the common case where there is no remote at all.
+# local-only projects additionally accept work merged into the recorded
+# `local_merge_target` branch (firstmate records it after the approved merge),
+# or into the local default branch for tasks landed before that metadata existed.
 # Scout tasks (kind=scout in meta) carve out of that check: their worktree is
 # declared scratch and the report at data/<task-id>/report.md is the work
 # product. Teardown proceeds only once the report exists and the shared
@@ -98,6 +98,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-wake-lib.sh
+. "$SCRIPT_DIR/fm-wake-lib.sh"
 if [ "$#" -lt 1 ] || ! fm_task_id_path_safe "$1"; then
   echo "error: invalid teardown request" >&2
   exit 2
@@ -111,6 +113,12 @@ FM_LOCK_LOG_PREFIX=teardown
 "$FM_ROOT/bin/fm-guard.sh" || true
 
 META="$STATE/$ID.meta"
+fm_meta_lock_acquire "$META"
+META_LOCKED=1
+teardown_meta_lock_cleanup() {
+  [ "${META_LOCKED:-0}" != 1 ] || fm_meta_lock_release "$META"
+}
+trap teardown_meta_lock_cleanup EXIT
 [ -f "$META" ] || { echo "error: no meta for task $ID at $META" >&2; exit 1; }
 WT=$(grep '^worktree=' "$META" | cut -d= -f2-)
 T=$(grep '^window=' "$META" | cut -d= -f2-)
@@ -132,6 +140,7 @@ KIND=$(grep '^kind=' "$META" | cut -d= -f2- || true)
 [ -n "$KIND" ] || KIND=ship
 MODE=$(grep '^mode=' "$META" | cut -d= -f2- || true)
 [ -n "$MODE" ] || MODE=no-mistakes
+LOCAL_MERGE_TARGET=$(fm_meta_get "$META" local_merge_target)
 
 default_branch() {
   local ref branch
@@ -392,8 +401,14 @@ work_is_landed() {
   content_in_default
 }
 
+shell_quote() {
+  printf "'"
+  printf '%s' "$1" | sed "s/'/'\\\\''/g"
+  printf "'"
+}
+
 backlog_refresh_reminder() {
-  local pr done_cmd report_path
+  local pr done_cmd report_path local_note
   [ "$KIND" = secondmate ] && return 0
   if fm_tasks_axi_backend_available "$CONFIG"; then
     case "$KIND" in
@@ -403,7 +418,11 @@ backlog_refresh_reminder() {
         ;;
       *)
         if [ "$MODE" = local-only ]; then
-          done_cmd="tasks-axi done $ID --note \"local main\""
+          case "$LOCAL_MERGE_TARGET" in
+            '') local_note="local $(default_branch || printf '%s' 'default branch')" ;;
+            *) local_note="local $LOCAL_MERGE_TARGET" ;;
+          esac
+          done_cmd="tasks-axi done $ID --note $(shell_quote "$local_note")"
         else
           pr=$PR_URL
           if [ -n "$pr" ]; then
@@ -638,7 +657,7 @@ teardown_treehouse_return() {
 }
 
 validate_worktree_teardown_safety() {
-  local dirty_raw dirty unpushed_raw unpushed DEFAULT unmerged_raw unmerged branch
+  local dirty_raw dirty unpushed_raw unpushed landing_target landing_ref unmerged_raw unmerged branch
   [ -d "$WT" ] || return 0
   [ "$FORCE" != "--force" ] || return 0
   case "$KIND" in
@@ -666,21 +685,32 @@ validate_worktree_teardown_safety() {
   unpushed=$(printf '%s\n' "$unpushed_raw" | head -5)
 
   if [ -n "$unpushed" ] && [ "$MODE" = local-only ]; then
-    DEFAULT=$(default_branch) || { echo "REFUSED: cannot determine default branch for $PROJ; expected origin/HEAD, main, or master." >&2; return 1; }
-    if ! unmerged_raw=$(git -C "$WT" log --oneline HEAD --not "$DEFAULT" -- 2>/dev/null); then
-      if worktree_safety_blocked_by_lock "commits not on $DEFAULT"; then
+    if [ -n "$LOCAL_MERGE_TARGET" ]; then
+      landing_target=$LOCAL_MERGE_TARGET
+      git check-ref-format --branch "$landing_target" >/dev/null 2>&1 \
+        || { echo "REFUSED: recorded local merge target '$landing_target' is invalid." >&2; return 1; }
+      [ "$landing_target" != "fm/$ID" ] \
+        || { echo "REFUSED: recorded local merge target is the task branch." >&2; return 1; }
+    else
+      landing_target=$(default_branch) || { echo "REFUSED: cannot determine default branch for $PROJ; expected origin/HEAD, main, or master." >&2; return 1; }
+    fi
+    landing_ref="refs/heads/$landing_target"
+    git -C "$PROJ" show-ref --verify --quiet "$landing_ref" \
+      || { echo "REFUSED: recorded local merge target '$landing_target' does not exist locally." >&2; return 1; }
+    if ! unmerged_raw=$(git -C "$WT" log --oneline HEAD --not "$landing_ref" -- 2>/dev/null); then
+      if worktree_safety_blocked_by_lock "commits not on $landing_target"; then
         return "$TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED"
       fi
-      echo "REFUSED: cannot inspect worktree $WT for commits not on $DEFAULT." >&2
+      echo "REFUSED: cannot inspect worktree $WT for commits not on $landing_target." >&2
       echo "Restore the git index state, or get the captain's explicit OK to discard, then --force." >&2
       return 1
     fi
     unmerged=$(printf '%s\n' "$unmerged_raw" | head -5)
     if [ -n "$dirty" ] || [ -n "$unmerged" ]; then
-      echo "REFUSED: local-only worktree $WT has work not yet merged into $DEFAULT and not on any remote." >&2
+      echo "REFUSED: local-only worktree $WT has work not yet merged into $landing_target and not on any remote." >&2
       [ -n "$dirty" ] && echo "uncommitted changes present" >&2
-      [ -n "$unmerged" ] && printf 'commits not yet on %s:\n%s\n' "$DEFAULT" "$unmerged" >&2
-      echo "Merge the branch into local $DEFAULT first (bin/fm-merge-local.sh after the captain approves), or push to a fork/remote, or get the captain's explicit OK to discard, then --force." >&2
+      [ -n "$unmerged" ] && printf 'commits not yet on %s:\n%s\n' "$landing_target" "$unmerged" >&2
+      echo "Merge the branch into local $landing_target first (bin/fm-merge-local.sh after the captain approves), or push to a fork/remote, or get the captain's explicit OK to discard, then --force." >&2
       return 1
     fi
   elif [ -n "$dirty" ]; then
@@ -1137,6 +1167,9 @@ fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
 [ -n "$TASK_TMP" ] && rm -rf "$TASK_TMP"
 remove_pr_poll_artifacts "$STATE" "$ID" || exit 1
 rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.meta" "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token"
+fm_meta_lock_release "$META"
+META_LOCKED=0
+trap - EXIT
 if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ]; then
   "$FM_ROOT/bin/fm-fleet-sync.sh" "$PROJ" || true
 fi

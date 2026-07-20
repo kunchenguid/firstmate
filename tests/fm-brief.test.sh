@@ -85,7 +85,9 @@ test_faster_paths_use_configured_authority_without_stacked_review() {
   id="brief-local-authority-a4"
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" local-proj >/dev/null 2>&1
   brief="$home/data/$id/brief.md"
-  assert_grep "The configured merge authority approves the ready branch, then firstmate merges it into local \`main\` through the guarded fast-forward path." "$brief" \
+  assert_grep "Unless firstmate tells you that an existing local target was selected, the target is the current default branch" "$brief" \
+    "local-only brief lost default-branch fallback guidance"
+  assert_grep "The configured merge authority approves the ready branch, then firstmate merges it into the clean, checked-out local target through the guarded fast-forward path." "$brief" \
     "local-only brief lost configured merge authority and guarded landing"
   assert_no_grep "The captain approves the ready branch" "$brief" \
     "local-only brief hard-coded captain-only authority"

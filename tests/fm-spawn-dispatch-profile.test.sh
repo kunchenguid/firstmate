@@ -25,7 +25,14 @@ esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
   list-windows) exit 0 ;;
-  has-session|new-session|new-window|kill-window) exit 0 ;;
+  new-window)
+    if [ -n "${FM_FAKE_SPAWN_GATE_READY:-}" ]; then
+      touch "$FM_FAKE_SPAWN_GATE_READY"
+      while [ ! -e "${FM_FAKE_SPAWN_GATE_RELEASE:?}" ]; do sleep 0.01; done
+    fi
+    exit 0
+    ;;
+  has-session|new-session|kill-window) exit 0 ;;
   send-keys)
     if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
       prev=
@@ -100,9 +107,56 @@ EOF
 
 assert_meta_profile() {
   local meta=$1 harness=$2 model=$3 effort=$4
+  grep -Eq '^task_instance=[0-9a-f]{32}$' "$meta" \
+    || fail "meta missing a valid task_instance"
   assert_grep "harness=$harness" "$meta" "meta missing harness=$harness"
   assert_grep "model=$model" "$meta" "meta missing model=$model"
   assert_grep "effort=$effort" "$meta" "meta missing effort=$effort"
+}
+
+test_spawn_serializes_metadata_replacement() {
+  local rec id meta first_ready first_release second_ready second_release
+  local first_pid second_pid i first_status second_status first_instance second_instance second_launch_log
+  id=profile-meta-lock-z17
+  rec=$(make_spawn_case profile-meta-lock claude "$id")
+  read_case_record "$rec"
+  meta="$HOME_DIR/state/$id.meta"
+  first_ready="$CASE_DIR/first-ready"
+  first_release="$CASE_DIR/first-release"
+  second_ready="$CASE_DIR/second-ready"
+  second_release="$CASE_DIR/second-release"
+  second_launch_log="$CASE_DIR/second-launch.log"
+  FM_FAKE_SPAWN_GATE_READY="$first_ready" FM_FAKE_SPAWN_GATE_RELEASE="$first_release" \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    > "$CASE_DIR/first.out" 2>&1 &
+  first_pid=$!
+  i=0
+  while [ ! -e "$first_ready" ] && [ "$i" -lt 300 ]; do sleep 0.01; i=$((i + 1)); done
+  [ -e "$first_ready" ] || fail "first spawn did not reach its lifecycle gate"
+  FM_FAKE_SPAWN_GATE_READY="$second_ready" FM_FAKE_SPAWN_GATE_RELEASE="$second_release" \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$second_launch_log" \
+    "$id" "$PROJ_DIR" --harness codex > "$CASE_DIR/second.out" 2>&1 &
+  second_pid=$!
+  sleep 0.2
+  [ ! -e "$second_ready" ] || fail "second spawn crossed the first generation lifecycle"
+  touch "$first_release"
+  i=0
+  while [ ! -e "$second_ready" ] && [ "$i" -lt 300 ]; do sleep 0.01; i=$((i + 1)); done
+  [ -e "$second_ready" ] || fail "second spawn did not begin after the first generation"
+  assert_grep 'claude --dangerously-skip-permissions' "$LAUNCH_LOG" \
+    "second generation began before the first worker launch was submitted"
+  first_instance=$(grep '^task_instance=' "$meta" | cut -d= -f2-)
+  touch "$second_release"
+  first_status=0
+  wait "$first_pid" || first_status=$?
+  second_status=0
+  wait "$second_pid" || second_status=$?
+  expect_code 0 "$first_status" "first same-ID spawn failed"
+  expect_code 0 "$second_status" "second same-ID spawn failed"
+  second_instance=$(grep '^task_instance=' "$meta" | cut -d= -f2-)
+  [ "$first_instance" != "$second_instance" ] || fail "same-ID spawns reused one task instance"
+  assert_meta_profile "$meta" codex default default
+  pass "same-ID spawn generations run and publish in lifecycle order"
 }
 
 test_no_profile_keeps_claude_launch_unchanged() {
@@ -385,6 +439,7 @@ test_active_dispatch_profile_does_not_block_secondmate_launch() {
 }
 
 test_no_profile_keeps_claude_launch_unchanged
+test_spawn_serializes_metadata_replacement
 test_active_dispatch_profile_requires_explicit_harness_for_ship
 test_active_dispatch_profile_requires_explicit_harness_for_scout
 test_active_dispatch_profile_allows_explicit_harness

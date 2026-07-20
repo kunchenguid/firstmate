@@ -56,6 +56,7 @@ set -u
 fm_git_identity fmtest fmtest@example.invalid
 
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
+MERGE_LOCAL="$ROOT/bin/fm-merge-local.sh"
 PR_CHECK="$ROOT/bin/fm-pr-check.sh"
 TMP_ROOT=$(fm_test_tmproot fm-teardown-tests)
 REAL_GIT_FOR_TEST=$(command -v git)
@@ -497,6 +498,14 @@ run_teardown() {
     "$TEARDOWN" task-x1 "$@"
 }
 
+run_merge_local() {
+  local case_dir=$1; shift
+  FM_ROOT_OVERRIDE="$ROOT" \
+  FM_STATE_OVERRIDE="$case_dir/state" \
+  PATH="$case_dir/fakebin:$PATH" \
+    "$MERGE_LOCAL" task-x1 "$@"
+}
+
 test_local_only_fork_remote_allows() {
   local case_dir rc
   case_dir=$(make_case fork-allow)
@@ -577,6 +586,7 @@ test_local_only_merged_to_local_main_allows() {
   local wt_head
   wt_head=$(git -C "$case_dir/wt" rev-parse HEAD)
   git -C "$case_dir/project" update-ref refs/heads/main "$wt_head"
+  add_compatible_tasks_axi "$case_dir"
 
   set +e
   run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
@@ -585,7 +595,107 @@ test_local_only_merged_to_local_main_allows() {
 
   expect_code 0 "$rc" "merged-main: teardown should succeed when work is merged into local main"
   ! grep -q REFUSED "$case_dir/stderr" || fail "merged-main: teardown printed a REFUSED line"
+  assert_grep "tasks-axi done task-x1 --note 'local main'" "$case_dir/stdout" \
+    "merged-main: teardown did not retain the default local completion note"
   pass "local-only worktree with work merged into local main is torn down (no regression)"
+}
+
+test_local_only_merge_to_recorded_feature_then_teardown_allows() {
+  local case_dir rc task_head
+  case_dir=$(make_case merged-feature)
+  write_meta "$case_dir" local-only ship
+  git -C "$case_dir/project" branch feature/for-you-feed main
+  git -C "$case_dir/project" checkout -q feature/for-you-feed
+  wt_commit "$case_dir" "merged feature work"
+  task_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+
+  run_merge_local "$case_dir" --target feature/for-you-feed \
+    > "$case_dir/merge.stdout" 2> "$case_dir/merge.stderr" \
+    || fail "merged-feature: guarded landing failed"
+  [ "$(git -C "$case_dir/project" rev-parse refs/heads/feature/for-you-feed)" = "$task_head" ] \
+    || fail "merged-feature: feature target did not receive the task commit"
+  grep -qx 'local_merge_target=feature/for-you-feed' "$case_dir/state/task-x1.meta" \
+    || fail "merged-feature: actual local merge target was not recorded"
+  add_compatible_tasks_axi "$case_dir"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "merged-feature: teardown should accept work on the recorded local target"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "merged-feature: teardown printed a REFUSED line"
+  assert_grep "tasks-axi done task-x1 --note 'local feature/for-you-feed'" "$case_dir/stdout" \
+    "merged-feature: teardown did not report the recorded local target"
+  pass "local-only work merged to a recorded feature target is torn down"
+}
+
+test_local_only_recorded_default_target_note_uses_actual_branch() {
+  local case_dir rc task_head
+  case_dir=$(make_case recorded-master)
+  write_meta "$case_dir" local-only ship
+  git -C "$case_dir/project" branch -m main master
+  git -C "$case_dir/project" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/master
+  wt_commit "$case_dir" "merged master work"
+  task_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  git -C "$case_dir/project" update-ref refs/heads/master "$task_head"
+  printf '%s\n' 'local_merge_target=master' >> "$case_dir/state/task-x1.meta"
+  add_compatible_tasks_axi "$case_dir"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "recorded-master: teardown should accept work on the recorded default target"
+  assert_grep "tasks-axi done task-x1 --note 'local master'" "$case_dir/stdout" \
+    "recorded-master: teardown mislabeled the recorded default target"
+  pass "local-only completion notes name the recorded default target"
+}
+
+test_legacy_local_only_completion_note_uses_actual_default_branch() {
+  local case_dir rc task_head
+  case_dir=$(make_case legacy-master)
+  write_meta "$case_dir" local-only ship
+  git -C "$case_dir/project" branch -m main master
+  git -C "$case_dir/project" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/master
+  wt_commit "$case_dir" "merged master work"
+  task_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  git -C "$case_dir/project" update-ref refs/heads/master "$task_head"
+  add_compatible_tasks_axi "$case_dir"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "legacy-master: teardown should accept work on the legacy default target"
+  assert_grep "tasks-axi done task-x1 --note 'local master'" "$case_dir/stdout" \
+    "legacy-master: teardown mislabeled the legacy default target"
+  pass "legacy local-only completion notes resolve the actual default branch"
+}
+
+test_local_only_completion_note_shell_quotes_recorded_target() {
+  local case_dir rc marker target command
+  case_dir=$(make_case quoted-feature)
+  write_meta "$case_dir" local-only ship
+  marker="$case_dir/injected"
+  # shellcheck disable=SC2016 # Deliberately preserve the injection payload literally.
+  target='feature/$(touch${IFS}injected)'
+  printf 'local_merge_target=%s\n' "$target" >> "$case_dir/state/task-x1.meta"
+  add_compatible_tasks_axi "$case_dir"
+
+  set +e
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "quoted-feature: forced teardown should succeed"
+  command=$(sed -n 's/^Backlog: .* Run \(tasks-axi done .*\), then run tasks-axi ready.*/\1/p' "$case_dir/stdout")
+  [ -n "$command" ] || fail "quoted-feature: completion command was not emitted"
+  ( cd "$case_dir" && PATH="$case_dir/fakebin:$PATH" eval "$command" )
+  assert_absent "$marker" "quoted-feature: completion command evaluated recorded target content"
+  pass "local-only completion note shell-quotes the recorded target"
 }
 
 test_no_mistakes_origin_remote_allows() {
@@ -1268,6 +1378,10 @@ test_teardown_prompts_tasks_axi_done_when_compatible
 test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present
 test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
+test_local_only_merge_to_recorded_feature_then_teardown_allows
+test_local_only_recorded_default_target_note_uses_actual_branch
+test_legacy_local_only_completion_note_uses_actual_default_branch
+test_local_only_completion_note_shell_quotes_recorded_target
 test_no_mistakes_origin_remote_allows
 test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed

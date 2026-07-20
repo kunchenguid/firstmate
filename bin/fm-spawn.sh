@@ -79,6 +79,7 @@
 # On success prints: spawned <id> harness=<name> kind=<ship|scout|secondmate> mode=<mode> yolo=<on|off> window=<backend-target> worktree=<path>
 # mode/yolo are resolved per-project from data/projects.md for ship/scout tasks;
 # secondmate spawns record mode=secondmate, yolo=off, home=, and projects=.
+# Every task metadata record includes a generation-unique task_instance= token.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -192,6 +193,16 @@ fi
 ORCA_ABORT_CLEANUP=0
 ORCA_WORKTREE_ID=
 ORCA_TERMINAL=
+META_LOCKED=0
+META_LOCK_AVAILABLE=0
+
+spawn_meta_lock_load() {
+  [ "$META_LOCK_AVAILABLE" = 0 ] || return 0
+  [ -d "$STATE" ] || return 1
+  # shellcheck source=bin/fm-wake-lib.sh
+  . "$SCRIPT_DIR/fm-wake-lib.sh"
+  META_LOCK_AVAILABLE=1
+}
 
 parse_orca_worktree_result() {
   local raw=$1 rest
@@ -212,7 +223,13 @@ parse_orca_worktree_result() {
 
 orca_spawn_abort_cleanup() {
   local status=$?
-  [ "$ORCA_ABORT_CLEANUP" = 1 ] || return "$status"
+  if [ "$ORCA_ABORT_CLEANUP" != 1 ]; then
+    if [ "${META_LOCKED:-0}" = 1 ]; then
+      fm_meta_lock_release "$STATE/$ID.meta"
+      META_LOCKED=0
+    fi
+    return "$status"
+  fi
   ORCA_ABORT_CLEANUP=0
   if [ -n "${ORCA_TERMINAL:-}" ]; then
     fm_backend_kill orca "$ORCA_TERMINAL" 2>/dev/null || true
@@ -221,23 +238,32 @@ orca_spawn_abort_cleanup() {
     if ! fm_backend_remove_worktree orca "$ORCA_WORKTREE_ID" 2>/dev/null; then
       mkdir -p "$STATE" 2>/dev/null || true
       if [ -d "$STATE" ]; then
-        {
-          echo "window=$W"
-          echo "worktree=${WT:-}"
-          echo "project=$PROJ_ABS"
-          echo "harness=$HARNESS"
-          echo "kind=$KIND"
-          echo "mode=${MODE:-no-mistakes}"
-          echo "yolo=${YOLO:-off}"
-          echo "tasktmp=${TASK_TMP:-}"
-          echo "model=${MODEL:-default}"
-          echo "effort=${EFFORT:-default}"
-          echo "backend=orca"
-          echo "orca_worktree_id=$ORCA_WORKTREE_ID"
-          [ -z "${ORCA_TERMINAL:-}" ] || echo "terminal=$ORCA_TERMINAL"
-        } > "$STATE/$ID.meta" 2>/dev/null || true
+        if [ "$META_LOCKED" = 1 ] || {
+          spawn_meta_lock_load && fm_meta_lock_acquire "$STATE/$ID.meta" && META_LOCKED=1
+        }; then
+          {
+            echo "window=$W"
+            echo "task_instance=$TASK_INSTANCE"
+            echo "worktree=${WT:-}"
+            echo "project=$PROJ_ABS"
+            echo "harness=$HARNESS"
+            echo "kind=$KIND"
+            echo "mode=${MODE:-no-mistakes}"
+            echo "yolo=${YOLO:-off}"
+            echo "tasktmp=${TASK_TMP:-}"
+            echo "model=${MODEL:-default}"
+            echo "effort=${EFFORT:-default}"
+            echo "backend=orca"
+            echo "orca_worktree_id=$ORCA_WORKTREE_ID"
+            [ -z "${ORCA_TERMINAL:-}" ] || echo "terminal=$ORCA_TERMINAL"
+          } > "$STATE/$ID.meta" 2>/dev/null || true
+        fi
       fi
     fi
+  fi
+  if [ "${META_LOCKED:-0}" = 1 ]; then
+    fm_meta_lock_release "$STATE/$ID.meta"
+    META_LOCKED=0
   fi
   return "$status"
 }
@@ -281,6 +307,8 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
 fi
 ID=${POS[0]}
 fm_task_id_creation_valid "$ID" || { echo "error: invalid task id" >&2; exit 2; }
+TASK_INSTANCE=$(fm_task_instance_new) \
+  || { echo "error: could not create task instance identity" >&2; exit 1; }
 PROJ=
 ARG3=
 FIRSTMATE_HOME=
@@ -690,6 +718,14 @@ validate_spawn_worktree() {  # <source> <inspect-target>
   fi
 }
 
+if [ ! -e "$STATE" ]; then
+  mkdir -p "$STATE"
+fi
+if spawn_meta_lock_load; then
+  fm_meta_lock_acquire "$STATE/$ID.meta"
+  META_LOCKED=1
+fi
+
 W="fm-$ID"
 case "$BACKEND" in
   tmux)
@@ -988,8 +1024,11 @@ fi
 
 META_WINDOW=$T
 [ "$BACKEND" = orca ] && META_WINDOW=$W
+[ "$META_LOCKED" = 1 ] || exit 1
+META_WRITE_STATUS=0
 {
   echo "window=$META_WINDOW"
+  echo "task_instance=$TASK_INSTANCE"
   echo "worktree=$WT"
   echo "project=$PROJ_ABS"
   echo "harness=$HARNESS"
@@ -1026,7 +1065,8 @@ META_WINDOW=$T
     echo "home=$PROJ_ABS"
     echo "projects=$SECONDMATE_PROJECTS"
   fi
-} > "$STATE/$ID.meta"
+} > "$STATE/$ID.meta" || META_WRITE_STATUS=$?
+[ "$META_WRITE_STATUS" -eq 0 ] || exit "$META_WRITE_STATUS"
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
 
 sq_brief=$(shell_quote "$BRIEF")
@@ -1055,5 +1095,7 @@ sleep 0.3
 spawn_send_literal "$T" "$LAUNCH"
 sleep 0.3
 spawn_send_key "$T" Enter
+fm_meta_lock_release "$STATE/$ID.meta"
+META_LOCKED=0
 
 echo "spawned $ID harness=$HARNESS kind=$KIND mode=$MODE yolo=$YOLO window=$META_WINDOW worktree=$WT"

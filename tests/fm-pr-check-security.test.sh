@@ -65,7 +65,13 @@ SH
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FM_TEST_GH_LOG"
 case " $* " in
-  *" headRefOid "*) printf '%s\n' "${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}" ;;
+  *" headRefOid "*)
+    if [ -n "${FM_TEST_GH_GATE_READY:-}" ]; then
+      touch "$FM_TEST_GH_GATE_READY"
+      while [ ! -e "${FM_TEST_GH_GATE_RELEASE:?}" ]; do sleep 0.01; done
+    fi
+    printf '%s\n' "${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}"
+    ;;
   *" state "*)
     [ "${FM_TEST_GH_FAIL:-0}" = 0 ] || exit 1
     [ "${FM_TEST_GH_SLEEP:-0}" = 0 ] || sleep "$FM_TEST_GH_SLEEP"
@@ -89,6 +95,7 @@ write_task_meta() {
   local dir=$1 id=${2:-task-a}
   fm_write_meta "$dir/home/state/$id.meta" \
     "window=fm-$id" \
+    'task_instance=11111111111111111111111111111111' \
     "worktree=$dir/wt" \
     "project=$dir/project" \
     "kind=ship" \
@@ -225,7 +232,10 @@ run_check_entry() {
   shift
   FM_ROOT_OVERRIDE="$dir/root" FM_HOME="$dir/home" \
     FM_TEST_GUARD_LOG="$dir/guard.log" FM_TEST_GH_LOG="$dir/gh.log" \
-    FM_TEST_GH_AXI_LOG="$dir/gh-axi.log" PATH="$dir/fakebin:$BASE_PATH" \
+    FM_TEST_GH_AXI_LOG="$dir/gh-axi.log" \
+    FM_TEST_GH_GATE_READY="${FM_TEST_GH_GATE_READY:-}" \
+    FM_TEST_GH_GATE_RELEASE="${FM_TEST_GH_GATE_RELEASE:-}" \
+    PATH="$dir/fakebin:$BASE_PATH" \
     "$PR_CHECK" "$@"
 }
 
@@ -236,6 +246,131 @@ run_merge_entry() {
     FM_TEST_GUARD_LOG="$dir/guard.log" FM_TEST_GH_LOG="$dir/gh.log" \
     FM_TEST_GH_AXI_LOG="$dir/gh-axi.log" PATH="$dir/fakebin:$BASE_PATH" \
     "$PR_MERGE" "$@"
+}
+
+test_pr_lookup_does_not_hold_task_metadata_lock() {
+  local dir ready release acquired check_pid lock_pid i rc
+  dir=$(make_case pr-lock-scope)
+  write_task_meta "$dir"
+  ready="$dir/gh-ready"
+  release="$dir/gh-release"
+  acquired="$dir/meta-lock-acquired"
+  FM_TEST_GH_GATE_READY="$ready" FM_TEST_GH_GATE_RELEASE="$release" \
+    run_check_entry "$dir" task-a https://github.com/o/r/pull/10 \
+    > "$dir/check.out" 2> "$dir/check.err" &
+  check_pid=$!
+  i=0
+  while [ ! -e "$ready" ] && [ "$i" -lt 200 ]; do sleep 0.01; i=$((i + 1)); done
+  [ -e "$ready" ] || fail "PR lookup gate did not start"
+  FM_STATE_OVERRIDE="$dir/home/state" bash -c '
+    . "$1"
+    fm_meta_lock_acquire "$2" || exit 1
+    touch "$3"
+    fm_meta_lock_release "$2"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$dir/home/state/task-a.meta" "$acquired" &
+  lock_pid=$!
+  i=0
+  while [ ! -e "$acquired" ] && [ "$i" -lt 100 ]; do sleep 0.01; i=$((i + 1)); done
+  [ -e "$acquired" ] || fail "PR lookup held the task metadata lock"
+  wait "$lock_pid" || fail "metadata lock probe failed"
+  touch "$release"
+  rc=0
+  wait "$check_pid" || rc=$?
+  [ "$rc" -eq 0 ] || fail "PR check failed after gated lookup: $(cat "$dir/check.err")"
+  assert_grep 'pr=https://github.com/o/r/pull/10' "$dir/home/state/task-a.meta" \
+    "PR check did not record metadata after the lookup"
+  pass "fm-pr-check keeps external PR lookup outside the metadata lock"
+}
+
+test_pr_lookup_rejects_recreated_task_metadata() {
+  local dir ready release check_pid i rc
+  dir=$(make_case pr-stale-task)
+  write_task_meta "$dir"
+  ready="$dir/gh-ready"
+  release="$dir/gh-release"
+  FM_TEST_GH_GATE_READY="$ready" FM_TEST_GH_GATE_RELEASE="$release" \
+    run_check_entry "$dir" task-a https://github.com/o/r/pull/10 \
+    > "$dir/check.out" 2> "$dir/check.err" &
+  check_pid=$!
+  i=0
+  while [ ! -e "$ready" ] && [ "$i" -lt 200 ]; do sleep 0.01; i=$((i + 1)); done
+  [ -e "$ready" ] || fail "stale-task PR lookup gate did not start"
+  fm_write_meta "$dir/home/state/task-a.meta.new" \
+    'window=fm-task-a' \
+    'task_instance=22222222222222222222222222222222' \
+    "worktree=$dir/wt" \
+    "project=$dir/project" \
+    'kind=ship' \
+    'mode=no-mistakes' \
+    'sentinel=recreated'
+  mv -f "$dir/home/state/task-a.meta.new" "$dir/home/state/task-a.meta"
+  touch "$release"
+  rc=0
+  wait "$check_pid" || rc=$?
+  [ "$rc" -ne 0 ] || fail "PR check accepted recreated task metadata"
+  assert_grep 'sentinel=recreated' "$dir/home/state/task-a.meta" \
+    "PR check replaced the recreated task metadata"
+  assert_no_grep 'pr=https://github.com/o/r/pull/10' "$dir/home/state/task-a.meta" \
+    "PR check wrote the stale PR into recreated task metadata"
+  assert_absent "$dir/home/state/task-a.check.sh" "stale-task PR check published a poll"
+  assert_grep 'task metadata identity changed' "$dir/check.err" \
+    "stale-task PR check did not report the identity change"
+  pass "fm-pr-check rejects task recreation during external lookup"
+}
+
+test_task_instance_generation_is_unique() {
+  local first second
+  first=$(fm_task_instance_new) || fail "could not generate first task instance"
+  second=$(fm_task_instance_new) || fail "could not generate second task instance"
+  fm_task_instance_valid "$first" || fail "first task instance was invalid"
+  fm_task_instance_valid "$second" || fail "second task instance was invalid"
+  [ "$first" != "$second" ] || fail "task instance generation repeated a token"
+  pass "task instance generation creates distinct validated identities"
+}
+
+test_pr_poll_publication_stays_inside_metadata_lock() {
+  local dir fakebin ready release acquired check_pid lock_pid i rc
+  dir=$(make_case pr-publish-lock)
+  fakebin="$dir/fakebin"
+  write_task_meta "$dir"
+  ready="$dir/publish-ready"
+  release="$dir/publish-release"
+  acquired="$dir/meta-lock-acquired"
+  cat > "$fakebin/mv" <<SH
+#!/usr/bin/env bash
+dest=
+for arg in "\$@"; do dest=\$arg; done
+case "\$dest" in
+  */task-a.check.sh)
+    touch '$ready'
+    while [ ! -e '$release' ]; do sleep 0.01; done
+    ;;
+esac
+exec '$REAL_MV' "\$@"
+SH
+  chmod +x "$fakebin/mv"
+  run_check_entry "$dir" task-a https://github.com/o/r/pull/10 \
+    > "$dir/check.out" 2> "$dir/check.err" &
+  check_pid=$!
+  i=0
+  while [ ! -e "$ready" ] && [ "$i" -lt 300 ]; do sleep 0.01; i=$((i + 1)); done
+  [ -e "$ready" ] || fail "poll publication gate did not start"
+  FM_STATE_OVERRIDE="$dir/home/state" bash -c '
+    . "$1"
+    fm_meta_lock_acquire "$2" || exit 1
+    touch "$3"
+    fm_meta_lock_release "$2"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$dir/home/state/task-a.meta" "$acquired" &
+  lock_pid=$!
+  sleep 0.1
+  assert_absent "$acquired" "poll publication released the metadata lock early"
+  touch "$release"
+  rc=0
+  wait "$check_pid" || rc=$?
+  [ "$rc" -eq 0 ] || fail "gated PR publication failed: $(cat "$dir/check.err")"
+  wait "$lock_pid" || fail "post-publication metadata lock probe failed"
+  assert_present "$acquired" "metadata lock remained unavailable after publication"
+  pass "fm-pr-check publishes prepared polls inside the metadata lock"
 }
 
 # shellcheck disable=SC2016 # Literal rejected URL bytes are parser test data.
@@ -744,11 +879,11 @@ SH
       run_check_entry "$dir" task-a https://github.com/o/r/pull/1 > "$dir/direct.out" 2> "$dir/direct.err" &
     direct_pid=$!
     i=0
-    while [ "$i" -lt 100 ] && ! find "$dir/home/state" -name '.fm-pr-poll-check.*' -print | grep . >/dev/null; do
+    while [ "$i" -lt 300 ] && ! find "$dir/home/state" -name '.fm-pr-poll-check.*' -print | grep . >/dev/null; do
       sleep 0.01
       i=$((i + 1))
     done
-    [ "$i" -lt 100 ] || fail "atomic publication did not reach staged check"
+    [ "$i" -lt 300 ] || fail "atomic publication did not reach staged check"
 
     set +e
     FM_TEST_GH_STATE=MERGED run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch.out" 2> "$dir/watch.err"
@@ -2681,6 +2816,10 @@ SH
 test_parser_matrix
 test_invalid_entrypoints_have_zero_side_effects
 test_valid_recording_and_merge_derivation
+test_task_instance_generation_is_unique
+test_pr_lookup_does_not_hold_task_metadata_lock
+test_pr_lookup_rejects_recreated_task_metadata
+test_pr_poll_publication_stays_inside_metadata_lock
 test_rejected_metacharacter_bytes_are_inert
 test_static_poll_contract
 test_atomic_interruption_leaves_no_partial_artifact

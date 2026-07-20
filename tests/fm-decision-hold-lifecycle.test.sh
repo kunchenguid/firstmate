@@ -550,11 +550,45 @@ test_resolve_matches_quoted_blocked_by_edges() {
   pass "resolve matches first/middle/last in quoted blocked_by and rejects a genuinely absent id"
 }
 
+test_completion_does_not_recreate_metadata_removed_while_waiting() {
+  local home id ready release holder completion i rc
+  home=$(make_home stale-meta-race)
+  id=stale-origin
+  tasks_in "$home" add "$id" "Investigate stale metadata" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create stale metadata origin"
+  write_origin_meta "$home" "$id"
+  ready="$home/lock-ready"
+  release="$home/lock-release"
+  FM_STATE_OVERRIDE="$home/state" bash -c '
+    . "$1"
+    fm_meta_lock_acquire "$2"
+    touch "$3"
+    while [ ! -e "$4" ]; do sleep 0.01; done
+    fm_meta_lock_release "$2"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$home/state/$id.meta" "$ready" "$release" &
+  holder=$!
+  i=0
+  while [ ! -e "$ready" ] && [ "$i" -lt 100 ]; do sleep 0.01; i=$((i + 1)); done
+  [ -e "$ready" ] || fail "stale metadata lock holder did not start"
+  run_decisions "$home" complete "$id" --none > "$home/complete.out" 2> "$home/complete.err" &
+  completion=$!
+  sleep 0.1
+  rm -f "$home/state/$id.meta"
+  touch "$release"
+  wait "$holder" || fail "stale metadata lock holder failed"
+  rc=0
+  wait "$completion" || rc=$?
+  [ "$rc" -eq 0 ] || fail "completion failed after metadata teardown: $(cat "$home/complete.err")"
+  assert_absent "$home/state/$id.meta" "completion recreated removed task metadata"
+  pass "completion revalidates metadata after waiting for its lock"
+}
+
 test_uninventoried_report_decision_refuses_completion
 
 test_scout_teardown_always_requires_inventory_verification
 test_structured_holds_survive_teardown_and_route_resolution
 test_origin_slug_validation_precedes_path_construction
+test_completion_does_not_recreate_metadata_removed_while_waiting
 test_visual_review_uses_shared_completion_owner
 test_none_inventory_and_resolved_prose_do_not_create_holds
 test_terminal_single_owner_status_decision_does_not_block_empty_inventory
