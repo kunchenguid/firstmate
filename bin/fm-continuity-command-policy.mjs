@@ -123,14 +123,16 @@ function collectExecutedFleetScripts(command, root, depth = 0) {
 export function classifyContinuityCommand(command, root) {
   const scripts = collectExecutedFleetScripts(command, root);
   const blocked = scripts.find(({ name, unsafeTeardown }) => !RECOVERY_SCRIPTS.has(name) || unsafeTeardown);
-  return blocked ? { decision: "deny", script: blocked.name } : { decision: "allow", script: "" };
+  if (!blocked) return { decision: "allow", script: "" };
+  const code = blocked.unsafeTeardown ? "unsafe-teardown" : "other-fleet";
+  return { decision: "deny", script: blocked.name, code };
 }
 
 function main() {
   const args = parseArguments(process.argv.slice(2));
   if (!args.command || !args.root) return;
   const result = classifyContinuityCommand(args.command, args.root);
-  if (result.decision === "deny") process.stdout.write(`deny\t${result.script}\n`);
+  if (result.decision === "deny") process.stdout.write(`deny\t${result.script}\t${result.code}\n`);
 }
 
 const invokedPath = process.argv[1] ? path.resolve(process.argv[1]) : "";

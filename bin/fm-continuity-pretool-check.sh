@@ -95,9 +95,19 @@ case "$CLASSIFICATION" in
 esac
 
 TAB=$(printf '\t')
-BLOCKED_SCRIPT=${CLASSIFICATION#*"$TAB"}
-[ -n "$BLOCKED_SCRIPT" ] && [ "$BLOCKED_SCRIPT" != "$CLASSIFICATION" ] || exit 0
-REASON="[watcher-continuity] tasks are in flight and no live watcher holds this home lock; drain wakes with bin/fm-wake-drain.sh, use fail-closed bin/fm-teardown.sh for completed tasks when needed, then re-arm with bin/fm-watch-arm.sh as a tracked Claude background task before running other fleet commands (blocked: $BLOCKED_SCRIPT)"
+REST=${CLASSIFICATION#*"$TAB"}
+[ -n "$REST" ] && [ "$REST" != "$CLASSIFICATION" ] || exit 0
+BLOCKED_SCRIPT=${REST%%"$TAB"*}
+REASON_CODE=${REST#*"$TAB"}
+[ "$REASON_CODE" != "$REST" ] || REASON_CODE=""
+case "$REASON_CODE" in
+  unsafe-teardown)
+    REASON="[watcher-continuity] tasks are in flight and no live watcher holds this home lock; during recovery only the ordinary literal bin/fm-teardown.sh is allowed, so drop --force and any shell-expanded arguments and retry the literal invocation (blocked: $BLOCKED_SCRIPT)"
+    ;;
+  *)
+    REASON="[watcher-continuity] tasks are in flight and no live watcher holds this home lock; drain wakes with bin/fm-wake-drain.sh, use fail-closed bin/fm-teardown.sh for completed tasks when needed, then re-arm with bin/fm-watch-arm.sh as a tracked Claude background task before running other fleet commands (blocked: $BLOCKED_SCRIPT)"
+    ;;
+esac
 ESCAPED=$(printf '%s' "$REASON" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' | tr '\n' ' ')
 printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny"},"systemMessage":"%s"}\n' "$ESCAPED" >&2
 exit 2
