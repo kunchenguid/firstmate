@@ -67,6 +67,7 @@
 #   $vars and silently breaks ad-hoc `for ... in $pairs` loops).
 #   Launch templates live in launch_template() below; placeholders replaced before launch:
 #     __BRIEF__    absolute path to data/<task-id>/brief.md
+#     __PROVIDERFLAG__ resolved Pi provider flag for bare model ids, otherwise blank
 #     __TURNEND__  absolute path to state/<task-id>.turn-ended (for harnesses whose
 #                  turn-end signal rides the launch command, e.g. codex -c notify=[...])
 #     __PIEXT__    absolute path to state/<task-id>.pi-ext.ts (pi turn-end extension,
@@ -337,9 +338,9 @@ launch_template() {
     opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}}'\'' opencode __MODELFLAG__--prompt "$(cat __BRIEF__)"' ;;
     pi)
       if [ "$kind" = secondmate ]; then
-        printf '%s' 'pi __MODELFLAG____EFFORTFLAG__-e __PITURNEND__ -e __PIWATCH__ "$(cat __BRIEF__)"'
+        printf '%s' 'pi __PROVIDERFLAG____MODELFLAG____EFFORTFLAG__-e __PITURNEND__ -e __PIWATCH__ "$(cat __BRIEF__)"'
       else
-        printf '%s' 'pi __MODELFLAG____EFFORTFLAG__-e __PIEXT__ "$(cat __BRIEF__)"'
+        printf '%s' 'pi __PROVIDERFLAG____MODELFLAG____EFFORTFLAG__-e __PIEXT__ "$(cat __BRIEF__)"'
       fi
       ;;
     # grok (Grok Build TUI): a positional prompt starts the supervised interactive
@@ -448,6 +449,39 @@ model_flag_for_harness() {
       printf -- '--model %s ' "$(shell_quote "$model")"
       ;;
   esac
+}
+
+provider_flag_for_harness() {
+  local harness=$1 model=$2 provider=
+  [ "$harness" = pi ] || return 0
+  [ -n "$model" ] && [ "$model" != default ] || return 0
+  case "$model" in
+    */*) return 0 ;;
+  esac
+  provider=$(pi_provider_for_model "$model" || true)
+  [ -n "$provider" ] || return 0
+  printf -- '--provider %s ' "$(shell_quote "$provider")"
+}
+
+pi_provider_for_model() {
+  local model=$1 models_json=${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}/models.json
+  [ -f "$models_json" ] || return 1
+  node -e '
+const fs = require("node:fs")
+const [file, wanted] = process.argv.slice(1)
+try {
+  const data = JSON.parse(fs.readFileSync(file, "utf8"))
+  for (const [provider, cfg] of Object.entries(data.providers ?? {})) {
+    for (const model of cfg.models ?? []) {
+      if (model && model.id === wanted) {
+        console.log(provider)
+        process.exit(0)
+      }
+    }
+  }
+} catch {}
+process.exit(1)
+' "$models_json" "$model"
 }
 
 effort_flag_for_harness() {
@@ -1084,7 +1118,9 @@ sq_ompext=$(shell_quote "$STATE/$ID.omp-ext.ts")
 sq_piturnend=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-turnend-guard.ts")
 sq_piwatch=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-pi-watch.ts")
 MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
+PROVIDERFLAG=$(provider_flag_for_harness "$HARNESS" "$MODEL")
 EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT")
+LAUNCH=${LAUNCH//__PROVIDERFLAG__/$PROVIDERFLAG}
 LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
 LAUNCH=${LAUNCH//__EFFORTFLAG__/$EFFORTFLAG}
 LAUNCH=${LAUNCH//__BRIEF__/$sq_brief}
