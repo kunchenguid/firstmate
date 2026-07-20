@@ -913,7 +913,7 @@ test_spawn_refuses_unrelated_repo_pane_path() {
   local fb out rc
   spawn_pollution_fixture omz
   fb=$(make_spawn_pane_seq_fakebin "$TMP_ROOT/pollute-fake-omz" "$PUNRELATED" "$PUNRELATED")
-  out=$(export FM_SPAWN_WT_TIMEOUT=2; run_spawn_case "$ROOT" "$fb" "$PLOG" "$PSTATE" "$PDATA" "$PCONFIG" "$PPROJ" -- "$PID_" "$PPROJ" claude 2>&1)
+  out=$(FM_SPAWN_WT_TIMEOUT=2 run_spawn_case "$ROOT" "$fb" "$PLOG" "$PSTATE" "$PDATA" "$PCONFIG" "$PPROJ" -- "$PID_" "$PPROJ" claude 2>&1)
   rc=$?
   [ "$rc" -ne 0 ] || fail "fm-spawn.sh accepted an unrelated git repo as the task worktree: $out"
   assert_contains "$out" "$PUNRELATED" "refusal does not name the polluted pane path"$'\n'"$out"
@@ -927,7 +927,7 @@ test_spawn_times_out_when_pane_never_leaves_project() {
   local fb out rc
   spawn_pollution_fixture eaten
   fb=$(make_spawn_pane_seq_fakebin "$TMP_ROOT/pollute-fake-eaten" "$PPROJ" "$PPROJ")
-  out=$(export FM_SPAWN_WT_TIMEOUT=2; run_spawn_case "$ROOT" "$fb" "$PLOG" "$PSTATE" "$PDATA" "$PCONFIG" "$PPROJ" -- "$PID_" "$PPROJ" claude 2>&1)
+  out=$(FM_SPAWN_WT_TIMEOUT=2 run_spawn_case "$ROOT" "$fb" "$PLOG" "$PSTATE" "$PDATA" "$PCONFIG" "$PPROJ" -- "$PID_" "$PPROJ" claude 2>&1)
   rc=$?
   [ "$rc" -ne 0 ] || fail "fm-spawn.sh reported success although the pane never entered a worktree: $out"
   assert_contains "$out" "did not enter a worktree" "timeout refusal lost its diagnostic"$'\n'"$out"
