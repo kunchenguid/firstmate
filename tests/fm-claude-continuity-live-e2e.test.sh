@@ -68,7 +68,7 @@ PROMPT='Use Bash with run_in_background=true to run exactly `bin/fm-watch-arm.sh
 [ -f "$HOME_DIR/state/claude-arm-ran" ] || fail "Claude did not run the tracked background arm fixture"
 [ -f "$HOME_DIR/state/claude-drain-ran" ] || fail "Claude continuity gate blocked the allowed wake drain"
 [ ! -f "$HOME_DIR/state/claude-forbidden-ran" ] || fail "Claude continuity gate allowed an unrelated fleet command"
-GUIDANCE='[watcher-continuity] tasks are in flight and no live watcher holds this home lock; run bin/fm-wake-drain.sh, then re-arm with bin/fm-watch-arm.sh as a tracked Claude background task before running other fleet commands (blocked: fm-crew-state.sh)'
+GUIDANCE='[watcher-continuity] tasks are in flight and no live watcher holds this home lock; drain wakes with bin/fm-wake-drain.sh, use fail-closed bin/fm-teardown.sh for completed tasks when needed, then re-arm with bin/fm-watch-arm.sh as a tracked Claude background task before running other fleet commands (blocked: fm-crew-state.sh)'
 grep -F "$GUIDANCE" "$TRANSCRIPT" >/dev/null || fail "Claude transcript omitted the exact continuity recovery guidance"
 
 printf 'ok - Claude %s live E2E refused only the post-completion fleet command with exact re-arm guidance\n' "$CLAUDE_VERSION"
