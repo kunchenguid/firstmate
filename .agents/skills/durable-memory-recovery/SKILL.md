@@ -15,7 +15,7 @@ This skill owns the semantic procedure around those deterministic commands.
 
 1. Load `/stow` and route durable knowledge to its existing authority before creating a checkpoint.
 2. Inspect the current objective, completed and pending work, decisions, constraints, blockers, active tasks, evidence, and next safe action.
-3. Write those fields as one bounded JSON object to a private temporary file outside `projects/`.
+3. Write those fields as one bounded JSON object to a private temporary file under the active `FM_HOME/state/`, never under `projects/` or `data/memory/`.
 4. Run `bin/fm-memory.sh checkpoint --reason manual-compaction --input <file>` from the active Firstmate home.
 5. Run `bin/fm-memory.sh validate <printed-checkpoint-path>` and do not compact or reset if validation fails.
 6. Delete the temporary input after validation.

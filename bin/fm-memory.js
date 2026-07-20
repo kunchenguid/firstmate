@@ -21,18 +21,19 @@
  * pending, decisions, constraints, blockers, active_tasks, evidence,
  * next_safe_action, provenance, and sensitivity. Input is JSON from --input
  * or stdin. Unknown fields are rejected. Files are temp-written, fsynced,
- * atomically renamed, read back, schema/high-water validated, and never
+ * published by hard link, read back, schema/high-water validated, and never
  * overwritten. The sidecar hashes the exact Markdown bytes.
  *
  * Bounds: 8192-byte event payload, 65536-byte checkpoint input, 5000 events,
  * 1000 checkpoints, 20 search results by default (max 100), 12000-byte recovery
- * capsule. Restricted records are excluded from search unless explicitly
- * requested. Capacity exhaustion refuses rather than deleting evidence.
+ * capsule. Restricted events and checkpoints are excluded from search unless
+ * explicitly requested; curated files retain file-level access. Capacity
+ * exhaustion refuses rather than deleting evidence.
  *
  * Usage:
  *   fm-memory.sh event --type TYPE [scope flags] [--payload-file FILE|-]
  *   fm-memory.sh checkpoint --reason REASON [--input FILE|-]
- *   fm-memory.sh boundary --reason turn-end|manual-compaction [--runtime NAME]
+ *   fm-memory.sh boundary --reason REASON [--runtime NAME]
  *   fm-memory.sh validate [checkpoint-file]
  *   fm-memory.sh recover [--max-events N]
  *   fm-memory.sh search [--query TEXT] [--kind events|checkpoints|curated]

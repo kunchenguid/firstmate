@@ -96,8 +96,8 @@ PreCompact
 model_auto_compact_token_limit
 ```
 
-Pi was also absent from this task environment.
-The latest repository-recorded live evidence remains Pi 0.80.5 and Grok 0.2.93 in `docs/turnend-guard.md`; those records are not represented as a new live re-verification.
+Pi and Grok were absent from this task environment.
+The latest repository-recorded turn-end evidence remains Pi 0.80.5 and Grok 0.2.93 in `docs/turnend-guard.md`; the newer session-start-only evidence in `docs/sessionstart-nudge.md` is not represented as turn-end re-verification.
 The Codex hook inventory was checked against the installed binary, the tracked `.codex/hooks.json`, and strict parsing of `model_auto_compact_token_limit`.
 No persistent compaction setting was added or changed, so Codex retains its model-selected automatic compaction threshold.
 ShellCheck 0.11.0 and tmux were absent before validation, and the focused local round did not install or substitute either tool.
@@ -116,7 +116,7 @@ Targeted transcript reading remains a privacy-sensitive forensic action.
 
 `fm-memory.sh search` performs bounded local substring search over events, validated checkpoints, and the existing curated Markdown owners.
 It supports project, task, type, status, time, kind, and result-limit filters and returns provenance with every result.
-Restricted records are excluded unless `--include-sensitive` is explicit.
+Schema-backed events and checkpoints marked `restricted` are excluded unless `--include-sensitive` is explicit; curated Markdown retains its existing file-level access model.
 The implementation uses only the universally required Node runtime and canonical files.
 No SQLite projection, embeddings, graph database, cloud service, or new daemon is required.
 
