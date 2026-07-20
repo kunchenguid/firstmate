@@ -371,18 +371,20 @@ crew_is_paused() {  # <id>
 
 FM_MERGE_READY_HEAD_TIMEOUT=${FM_MERGE_READY_HEAD_TIMEOUT:-10}
 
-merge_ready_current_pr_head() {
-  local url=$1
+merge_ready_current_pr_verdict() {
+  local url=$1 query
+  # shellcheck disable=SC2016
+  query='[.headRefOid, ((.statusCheckRollup // []) as $checks | if (($checks | length) > 0 and all($checks[]; ((((.status // "") == "COMPLETED") and (((.conclusion // "") == "SUCCESS") or ((.conclusion // "") == "NEUTRAL") or ((.conclusion // "") == "SKIPPED"))) or ((.state // "") == "SUCCESS")))) then "green" else "not-green" end)] | @tsv'
   if command -v timeout >/dev/null 2>&1; then
     GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 timeout "$FM_MERGE_READY_HEAD_TIMEOUT" \
-      gh pr view "$url" --json headRefOid -q .headRefOid 2>/dev/null
+      gh pr view "$url" --json headRefOid,statusCheckRollup --jq "$query" 2>/dev/null
   elif command -v gtimeout >/dev/null 2>&1; then
     GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 gtimeout "$FM_MERGE_READY_HEAD_TIMEOUT" \
-      gh pr view "$url" --json headRefOid -q .headRefOid 2>/dev/null
+      gh pr view "$url" --json headRefOid,statusCheckRollup --jq "$query" 2>/dev/null
   else
     GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 perl -e \
       'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' \
-      "$FM_MERGE_READY_HEAD_TIMEOUT" gh pr view "$url" --json headRefOid -q .headRefOid 2>/dev/null
+      "$FM_MERGE_READY_HEAD_TIMEOUT" gh pr view "$url" --json headRefOid,statusCheckRollup --jq "$query" 2>/dev/null
   fi
 }
 
@@ -400,11 +402,13 @@ merge_ready_current_pr_head() {
 # armed task, and callers run this only on first sighting of a stale hash or at
 # a wedge-escalation moment, never every wake.
 crew_is_merge_ready() {  # <id> <state-dir> <backend> <target>
-  local id=$1 state=${2:-} backend=${3:-} target=${4:-} line st src remote_head agent_alive
+  local id=$1 state=${2:-} backend=${3:-} target=${4:-} line st src remote_pr remote_head agent_alive
   [ -n "$id" ] && [ -n "$state" ] && [ -n "$backend" ] && [ -n "$target" ] || return 1
   fm_pr_poll_artifacts_valid "$state" "$id" "$_FM_CLASSIFY_LIB_DIR/fm-pr-poll.sh" || return 1
   [ -n "$FM_PR_META_HEAD" ] || return 1
-  remote_head=$(merge_ready_current_pr_head "$FM_PR_META_URL") || return 1
+  remote_pr=$(merge_ready_current_pr_verdict "$FM_PR_META_URL") || return 1
+  remote_head=${remote_pr%%$'\t'*}
+  [ "$remote_pr" = "$remote_head"$'\tgreen' ] || return 1
   fm_pr_head_valid "$remote_head" && [ "$remote_head" = "$FM_PR_META_HEAD" ] || return 1
   line=$("$FM_CREW_STATE_BIN" "$id" 2>/dev/null) || true
   case "$line" in state:*) ;; *) return 1 ;; esac

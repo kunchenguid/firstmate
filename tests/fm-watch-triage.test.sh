@@ -70,6 +70,7 @@ make_merge_ready_case() {  # <name> <id> [pane-text] [backend]
   cat > "$MR_FAKEBIN/gh" <<'SH'
 #!/usr/bin/env bash
 case " $* " in
+  *" headRefOid,statusCheckRollup "*) printf '%s\t%s\n' "${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}" "${FM_TEST_GH_CHECKS:-green}" ;;
   *" headRefOid "*) printf '%s\n' "${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}" ;;
   *" state "*) printf '%s\n' "${FM_TEST_GH_STATE:-OPEN}" ;;
 esac
@@ -1379,7 +1380,10 @@ test_crew_is_merge_ready_classifier() {
   mkdir -p "$dir/worktree"
   cat > "$fakebin/gh" <<'SH'
 #!/usr/bin/env bash
-case " $* " in *" headRefOid "*) printf '%s\n' "${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}" ;; esac
+case " $* " in
+  *" headRefOid,statusCheckRollup "*) printf '%s\tgreen\n' "${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}" ;;
+  *" headRefOid "*) printf '%s\n' "${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}" ;;
+esac
 exit 0
 SH
   chmod +x "$fakebin/gh"
@@ -1523,8 +1527,8 @@ test_merge_ready_merge_check_still_wakes() {
   pass "a merge-ready task's armed poll still wakes the supervisor on merge/close"
 }
 
-test_merge_ready_requires_current_head_and_rejects_dead_endpoint() {
-  local out pid
+test_merge_ready_requires_current_green_head_and_rejects_dead_endpoint() {
+  local out pid check_state
   make_merge_ready_case merge-ready-head-mismatch mrh
   out="$MR_DIR/watch.out"
   export FM_FAKE_CREW_STATE="$MR_VERDICT" FM_TEST_GH_HEAD=ffffffffffffffffffffffffffffffffffffffff
@@ -1534,6 +1538,36 @@ test_merge_ready_requires_current_head_and_rejects_dead_endpoint() {
   grep -Fx "stale: $MR_WINDOW" "$out" >/dev/null || fail "a mismatched PR head did not restore stale detection"
 
   unset FM_TEST_GH_HEAD
+  for check_state in red inconclusive; do
+    make_merge_ready_case "merge-ready-checks-$check_state" "mrchecks$check_state"
+    out="$MR_DIR/watch.out"
+    export FM_TEST_GH_CHECKS="$check_state"
+    watch_merge_ready_bg "$out"
+    pid=$!
+    wait_for_exit "$pid" 40 || fail "watcher suppressed a merge-ready task whose current checks were $check_state"
+    grep -Fx "stale: $MR_WINDOW" "$out" >/dev/null \
+      || fail "current $check_state checks did not restore stale detection"
+  done
+  unset FM_TEST_GH_CHECKS
+
+  make_merge_ready_case merge-ready-checks-turned-red mrchecksrelapse
+  out="$MR_DIR/watch.out"
+  watch_merge_ready_bg "$out" FM_STALE_ESCALATE_SECS=240
+  pid=$!
+  wait_file_equals "$MR_STATE/.stale-$MR_KEY" "$MR_HASH" 40 \
+    || { reap "$pid"; fail "green-check fixture was not initially suppressed"; }
+  [ -s "$MR_STATE/.stale-since-$MR_KEY" ] \
+    || { reap "$pid"; fail "green-check suppression did not retain bounded revalidation state"; }
+  reap "$pid"
+  export FM_TEST_GH_CHECKS=red
+  echo $(( $(date +%s) - 500 )) > "$MR_STATE/.stale-since-$MR_KEY"
+  : > "$out"
+  watch_merge_ready_bg "$out" FM_STALE_ESCALATE_SECS=240
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "watcher kept suppressing an unchanged task after its checks turned red"
+  grep -F "possible wedge" "$out" >/dev/null || fail "checks turning red did not resume bounded stale handling"
+  unset FM_TEST_GH_CHECKS
+
   make_merge_ready_case merge-ready-pi-unknown mrpi
   out="$MR_DIR/watch.out"
   PATH="$MR_FAKEBIN:$PATH" FM_FAKE_TMUX_WINDOW="$MR_WINDOW" FM_FAKE_TMUX_CAPTURE="$MR_CAPTURE" \
@@ -1565,7 +1599,7 @@ test_merge_ready_requires_current_head_and_rejects_dead_endpoint() {
   wait_for_exit "$pid" 40 || fail "watcher suppressed a merge-ready task whose endpoint was confirmed dead"
   grep -Fx "stale: $MR_WINDOW" "$out" >/dev/null || fail "a dead endpoint did not restore stale detection"
   unset FM_FAKE_CREW_STATE
-  pass "merge-ready suppression accepts unknown liveness but rejects confirmed endpoint death"
+  pass "merge-ready suppression requires current green checks and rejects confirmed endpoint death"
 }
 
 test_merge_ready_revalidates_unchanged_hash() {
@@ -1744,7 +1778,7 @@ test_crew_is_merge_ready_classifier
 test_merge_ready_stale_absorbed
 test_merge_ready_checkpoint_quiet
 test_merge_ready_merge_check_still_wakes
-test_merge_ready_requires_current_head_and_rejects_dead_endpoint
+test_merge_ready_requires_current_green_head_and_rejects_dead_endpoint
 test_merge_ready_revalidates_unchanged_hash
 test_merge_ready_requires_valid_poll_registration
 test_merge_ready_does_not_mask_active_or_failed_run
