@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Static watcher program for a validated PR poll sidecar.
-# It emits exactly one merged line for MERGED and stays silent otherwise.
+# It emits exactly one terminal line for MERGED or CLOSED and stays silent otherwise.
 set -u
 LC_ALL=C
 export LC_ALL
@@ -48,5 +48,8 @@ esac
 [ "$url" = "https://github.com/$owner/$repo/pull/$number" ] || exit 0
 
 state=$(gh pr view "$url" --json state -q .state 2>/dev/null) || exit 0
-[ "$state" = MERGED ] && printf '%s\n' merged
+case "$state" in
+  MERGED) printf '%s\n' merged ;;
+  CLOSED) printf '%s\n' closed ;;
+esac
 exit 0

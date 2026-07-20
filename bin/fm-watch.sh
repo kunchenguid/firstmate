@@ -289,7 +289,7 @@ FM_WEDGE_DEMAND_INSPECT_COUNT=${FM_WEDGE_DEMAND_INSPECT_COUNT:-3}
 # non-terminal path, and the stale_is_terminal-overridden path (a
 # captain-relevant status-log line that an active run/busy pane outranked).
 wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-file>
-  local win=$1 since_file=$2 label=$3 escalation_file=$4 since age n reason
+  local win=$1 since_file=$2 label=$3 escalation_file=$4 since age n reason task backend
   since=$(cat "$since_file" 2>/dev/null || true)
   case "$since" in
     ''|*[!0-9]*)
@@ -299,8 +299,11 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
     *)
       age=$(( $(date +%s) - since ))
       if [ "$age" -ge "$STALE_ESCALATE_SECS" ]; then
-        if crew_is_merge_ready "$(window_to_task "$win" "$STATE")" "$STATE"; then
-          rm -f "$since_file" "$escalation_file"
+        task=$(window_to_task "$win" "$STATE")
+        backend=$(window_backend "$win")
+        if crew_is_merge_ready "$task" "$STATE" "$backend" "$win"; then
+          date +%s > "$since_file"
+          rm -f "$escalation_file"
           triage_log "absorbed $label (merge-ready: armed PR poll owns the merge wait): $win"
           return 0
         fi
@@ -949,16 +952,17 @@ EOF
               printf '%s' "$h" > "$sf"
               date +%s > "$ssf"
               triage_log "absorbed stale (provably working, overriding a stale captain-relevant status): $w"
-            elif crew_is_merge_ready "$task" "$STATE"; then
+            elif crew_is_merge_ready "$task" "$STATE" "$(window_backend "$w")" "$w"; then
               # Terminal AND genuinely merge-ready: the run is checks-passed and
               # the validated armed merge poll owns the merge/close wait, so the
-              # idle pane is expected - no wake, no wedge timer. Each NEW hash
+              # idle pane is expected - no wake. Each NEW hash
               # (e.g. a harness repainting its idle UI between foreground
               # checkpoints) re-runs this fail-closed check; a poll that later
               # turns invalid is surfaced separately by the check sweep's
               # rejected-unauthenticated wake.
               printf '%s' "$h" > "$sf"
-              rm -f "$ssf" "$ewf"
+              date +%s > "$ssf"
+              rm -f "$ewf"
               triage_log "absorbed stale (merge-ready: armed PR poll owns the merge wait): $w"
             else
               fm_wake_append stale "$w" "stale: $w" || exit 1
@@ -1010,7 +1014,7 @@ EOF
                 # no-verb last line), where the armed poll owns the wait; the
                 # wedge timer's escalation-moment recheck keeps revalidating
                 # that verdict on the STALE_ESCALATE_SECS cadence.
-                if crew_is_merge_ready "$task" "$STATE"; then
+                if crew_is_merge_ready "$task" "$STATE" "$(window_backend "$w")" "$w"; then
                   clear_pause_tracking "$w"
                   printf '%s' "$h" > "$sf"
                   date +%s > "$ssf"
