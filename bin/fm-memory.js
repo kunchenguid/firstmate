@@ -25,10 +25,11 @@
  * overwritten. The sidecar hashes the exact Markdown bytes.
  *
  * Bounds: 8192-byte event payload, 65536-byte checkpoint input, 5000 events,
- * 1000 checkpoints, 20 search results by default (max 100), 12000-byte recovery
- * capsule. Restricted events and checkpoints are excluded from search unless
- * explicitly requested; curated files retain file-level access. Capacity
- * exhaustion refuses rather than deleting evidence.
+ * 1000 retained checkpoints, 20 search results by default (max 100), 12000-byte
+ * recovery capsule. Restricted events and checkpoints are excluded from search
+ * unless explicitly requested; curated files retain file-level access. Event
+ * capacity exhaustion refuses, while checkpoint publication retains the newest
+ * validated 1000 records and removes older checkpoint/hash pairs.
  *
  * Usage:
  *   fm-memory.sh event --type TYPE [scope flags] [--payload-file FILE|-]
@@ -36,6 +37,8 @@
  *   fm-memory.sh boundary --reason REASON [--runtime NAME]
  *   fm-memory.sh validate [checkpoint-file]
  *   fm-memory.sh recover [--max-events N]
+ *   fm-memory.sh codex-stage-recovery
+ *   fm-memory.sh codex-claim-recovery --event Stop|UserPromptSubmit
  *   fm-memory.sh search [--query TEXT] [--kind events|checkpoints|curated]
  *                       [--project P] [--task T] [--type T] [--status S] [--since ISO]
  *                       [--limit N] [--include-sensitive]
@@ -55,6 +58,7 @@ import { fileURLToPath } from "node:url";
 
 const SCHEMA_EVENT = "fm.memory.event.v1";
 const SCHEMA_CHECKPOINT = "fm.memory.checkpoint.v1";
+const SCHEMA_CODEX_RECOVERY = "fm.memory.codex-recovery.v1";
 const MAX_EVENT_PAYLOAD = 8192;
 const MAX_CHECKPOINT_INPUT = 65536;
 const MAX_EVENTS = 5000;
@@ -77,7 +81,7 @@ function argsOf(argv) {
     const arg = argv[i];
     if (!arg.startsWith("--")) { out._.push(arg); continue; }
     const key = arg.slice(2);
-    if (["include-sensitive", "read-only"].includes(key)) { out[key] = true; continue; }
+    if (["include-sensitive", "read-only", "retain"].includes(key)) { out[key] = true; continue; }
     if (i + 1 >= argv.length) fail(`missing value for ${arg}`);
     out[key] = argv[++i];
   }
@@ -237,6 +241,24 @@ function atomicCreate(layout, file, bytes) {
     try { fs.fsyncSync(dfd); } finally { fs.closeSync(dfd); }
   } catch { /* Directory fsync is unavailable on some filesystems. */ }
   return created;
+}
+
+function atomicReplace(layout, file, bytes) {
+  ensurePrivateDirectory(layout, path.dirname(file));
+  const tmp = path.join(path.dirname(file), `.${path.basename(file)}.${process.pid}.${crypto.randomBytes(4).toString("hex")}.tmp`);
+  const fd = fs.openSync(tmp, "wx", 0o600);
+  try {
+    fs.writeFileSync(fd, bytes);
+    fs.fsyncSync(fd);
+  } finally { fs.closeSync(fd); }
+  try { fs.renameSync(tmp, file); } catch (error) {
+    try { fs.unlinkSync(tmp); } catch { }
+    throw error;
+  }
+  try {
+    const dfd = fs.openSync(path.dirname(file), "r");
+    try { fs.fsyncSync(dfd); } finally { fs.closeSync(dfd); }
+  } catch { }
 }
 
 function processAlive(pid) {
@@ -486,8 +508,6 @@ function checkpointCommand(opts, supplied) {
     try { input = JSON.parse(raw); } catch { fail("checkpoint input must be valid JSON"); }
   }
   const result = withWriteLock(layout, () => {
-    const files = listFiles(path.join(layout.memory, "checkpoints"), ".md");
-    if (files.length >= MAX_CHECKPOINTS) fail(`checkpoint capacity ${MAX_CHECKPOINTS} reached; archive this home's memory before writing more`);
     if (allEvents(layout).length >= MAX_EVENTS) fail(`event capacity ${MAX_EVENTS} reached; archive this home's memory before writing more`);
     const cp = normalizeCheckpoint(input, opts, layout);
     const markdown = checkpointMarkdown(cp);
@@ -498,11 +518,32 @@ function checkpointCommand(opts, supplied) {
     const checked = parseCheckpoint(file, layout);
     if (!checked.valid) fail(`checkpoint read-back validation failed: ${checked.reason}`);
     writeEvent(layout, opts, { type: "checkpoint", runtime: cp.runtime, session: cp.session, project: cp.project, payload: { checkpoint_id: cp.checkpoint_id, reason: cp.reason, event_high_water: cp.event_high_water }, sources: [`checkpoint:${cp.checkpoint_id}`], idempotency: cp.checkpoint_id, quiet: true });
+    retainRecentCheckpoints(layout, file);
     return { cp, file };
   });
   const { cp, file } = result;
   process.stdout.write(`${file}\n`);
   return cp;
+}
+
+function retainRecentCheckpoints(layout, protectedFile) {
+  const dir = path.join(layout.memory, "checkpoints");
+  const files = listFiles(dir, ".md");
+  const removable = files.filter((file) => path.resolve(file) !== path.resolve(protectedFile));
+  while (removable.length > MAX_CHECKPOINTS - 1) {
+    const file = removable.shift();
+    if (!file) break;
+    try { fs.unlinkSync(file); } catch (error) {
+      if (error?.code !== "ENOENT") throw error;
+    }
+    try { fs.unlinkSync(`${file}.sha256`); } catch (error) {
+      if (error?.code !== "ENOENT") throw error;
+    }
+  }
+  try {
+    const dfd = fs.openSync(dir, "r");
+    try { fs.fsyncSync(dfd); } finally { fs.closeSync(dfd); }
+  } catch { }
 }
 
 function lockOwned(layout) {
@@ -607,12 +648,15 @@ function reconcile(cp, layout) {
 
 function recoverCommand(opts) {
   const layout = resolvedLayout();
+  process.stdout.write(recoveryCapsule(layout, opts));
+}
+
+function recoveryCapsule(layout, opts) {
   const latest = latestCheckpoint(layout);
   const maxEvents = Math.max(0, Math.min(Number(opts["max-events"] || 20), 100));
   if (!latest.valid) {
     const note = latest.invalid.length ? `; ${latest.invalid.length} invalid checkpoint(s) ignored` : "";
-    process.stdout.write(`RECOVERY CAPSULE\ncheckpoint: none${note}\nobjective: use the session-start digest and authoritative records\nnext safe action: establish an objective and write a validated checkpoint before consequential work\n`);
-    return;
+    return `RECOVERY CAPSULE\ncheckpoint: none${note}\nobjective: use the session-start digest and authoritative records\nnext safe action: establish an objective and write a validated checkpoint before consequential work\n`;
   }
   const cp = latest.checkpoint;
   const events = allEvents(layout);
@@ -644,7 +688,61 @@ function recoverCommand(opts) {
     while (end > 0 && (bytes[end] & 0xc0) === 0x80) end -= 1;
     output = `${bytes.subarray(0, end).toString("utf8")}${suffix}`;
   }
-  process.stdout.write(output);
+  return output;
+}
+
+function codexHookPayload(raw, expectedEvent) {
+  let payload;
+  try { payload = JSON.parse(raw); } catch { fail("Codex hook payload must be valid JSON"); }
+  if (payload.hook_event_name !== expectedEvent) fail(`expected ${expectedEvent} hook payload`);
+  return {
+    session: safeName(payload.session_id, "Codex session"),
+    turn: safeName(payload.turn_id, "Codex turn"),
+    trigger: payload.trigger ? safeName(payload.trigger, "Codex compaction trigger") : "unknown",
+  };
+}
+
+function codexRecoveryFile(layout, session) {
+  return path.join(layout.memory, "pending", "codex", `${session}.json`);
+}
+
+function codexStageRecoveryCommand() {
+  const layout = resolvedLayout();
+  if (!lockOwned(layout)) fail("Codex recovery staging requires the active home session lock");
+  const payload = codexHookPayload(readStdinBounded(16384), "PostCompact");
+  withWriteLock(layout, () => {
+    const record = {
+      schema: SCHEMA_CODEX_RECOVERY,
+      session: payload.session,
+      turn: payload.turn,
+      trigger: payload.trigger,
+      staged_at: now(),
+      capsule: recoveryCapsule(layout, { "max-events": 20 }),
+    };
+    atomicReplace(layout, codexRecoveryFile(layout, payload.session), `${stableJson(record)}\n`);
+  });
+}
+
+function codexClaimRecoveryCommand(opts) {
+  const layout = resolvedLayout();
+  if (!lockOwned(layout)) return;
+  const event = opts.event;
+  if (!new Set(["Stop", "UserPromptSubmit"]).has(event)) fail("--event must be Stop or UserPromptSubmit");
+  const payload = codexHookPayload(readStdinBounded(16384), event);
+  const capsule = withWriteLock(layout, () => {
+    const file = codexRecoveryFile(layout, payload.session);
+    let stat;
+    try { stat = fs.lstatSync(file); } catch (error) {
+      if (error?.code === "ENOENT") return "";
+      throw error;
+    }
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 32768) fail("pending Codex recovery is not a bounded regular file");
+    const record = JSON.parse(fs.readFileSync(file, "utf8"));
+    if (record.schema !== SCHEMA_CODEX_RECOVERY || record.session !== payload.session || typeof record.capsule !== "string" || Buffer.byteLength(record.capsule) > MAX_CAPSULE) fail("pending Codex recovery record is invalid");
+    if (!opts.retain) fs.unlinkSync(file);
+    return record.capsule;
+  });
+  if (capsule) process.stdout.write(capsule);
 }
 
 function searchCommand(opts) {
@@ -718,7 +816,7 @@ function transcriptRefCommand(opts) {
 }
 
 function help() {
-  process.stdout.write("Usage: fm-memory.sh event|checkpoint|boundary|validate|recover|search|transcript-ref [options]\nSee bin/fm-memory.js header and docs/durable-memory.md for the canonical contracts.\n");
+  process.stdout.write("Usage: fm-memory.sh event|checkpoint|boundary|validate|recover|search|transcript-ref|codex-stage-recovery|codex-claim-recovery [options]\nSee bin/fm-memory.js header and docs/durable-memory.md for the canonical contracts.\n");
 }
 
 const [command, ...rest] = process.argv.slice(2);
@@ -734,6 +832,8 @@ try {
     if (!result.valid) fail(`checkpoint invalid: ${result.reason || "none found"}`, 1);
     process.stdout.write(`${result.checkpoint.checkpoint_id}\n`);
   } else if (command === "recover") recoverCommand(opts);
+  else if (command === "codex-stage-recovery") codexStageRecoveryCommand();
+  else if (command === "codex-claim-recovery") codexClaimRecoveryCommand(opts);
   else if (command === "search") searchCommand(opts);
   else if (command === "transcript-ref") transcriptRefCommand(opts);
   else if (command === "--help" || command === "help" || !command) help();

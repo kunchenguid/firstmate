@@ -237,8 +237,32 @@ EOF
   pass "durable memory: concurrent event capacity remains strict"
 }
 
+test_checkpoint_retention_keeps_automatic_writes_live() {
+  local home first renamed count latest
+  home=$(new_home checkpoint-retention)
+  first=$(checkpoint_json oldest | run_memory "$home" checkpoint --reason turn-end --runtime codex --session retention --input -)
+  renamed="$home/data/memory/checkpoints/0000-oldest.md"
+  mv "$first" "$renamed"
+  mv "$first.sha256" "$renamed.sha256"
+  CHECKPOINT_DIR="$home/data/memory/checkpoints" node <<'EOF'
+import fs from "node:fs";
+for (let i = 1; i < 1000; i += 1) {
+  const name = `1000-seed-${String(i).padStart(4, "0")}.md`;
+  fs.writeFileSync(`${process.env.CHECKPOINT_DIR}/${name}`, "invalid retained seed\n");
+  fs.writeFileSync(`${process.env.CHECKPOINT_DIR}/${name}.sha256`, "invalid\n");
+}
+EOF
+  checkpoint_json newest | run_memory "$home" checkpoint --reason turn-end --runtime codex --session retention --input - >/dev/null
+  count=$(find "$home/data/memory/checkpoints" -type f -name '*.md' | wc -l | tr -d ' ')
+  [ "$count" -eq 1000 ] || fail "checkpoint retention kept $count records instead of 1000"
+  [ ! -e "$renamed" ] && [ ! -e "$renamed.sha256" ] || fail "checkpoint retention did not remove the oldest checkpoint pair"
+  latest=$(run_memory "$home" validate)
+  [ -n "$latest" ] || fail "checkpoint retention did not leave a valid newest checkpoint"
+  pass "durable memory: rolling checkpoint retention keeps automatic writes live"
+}
+
 test_codex_compaction_hook_bridge() {
-  local home pre_count post bytes
+  local home pre_count post stop_out stop_status prompt bytes
   home=$(new_home codex-compact)
   printf '{"session_id":"codex-hook-session","turn_id":"compact-turn","hook_event_name":"PreCompact","trigger":"auto"}\n' |
     FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" "$ROOT/bin/fm-memory-codex-hook.sh" pre
@@ -246,13 +270,31 @@ test_codex_compaction_hook_bridge() {
   [ "$pre_count" -eq 1 ] || fail "Codex PreCompact bridge did not create one checkpoint"
   post=$(printf '{"session_id":"codex-hook-session","turn_id":"compact-turn","hook_event_name":"PostCompact","trigger":"auto"}\n' |
     FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" "$ROOT/bin/fm-memory-codex-hook.sh" post)
-  assert_contains "$post" '"continue":true' "Codex PostCompact bridge did not preserve compaction"
-  assert_contains "$post" 'RECOVERY CAPSULE' "Codex PostCompact bridge did not return bounded recovery"
-  bytes=$(printf '%s' "$post" | jq -r '.systemMessage' | wc -c | tr -d ' ')
+  [ -z "$post" ] || fail "Codex PostCompact bridge emitted an ineffective direct hook message"
+  [ -f "$home/data/memory/pending/codex/codex-hook-session.json" ] || fail "Codex PostCompact bridge did not stage recovery"
+  stop_status=0
+  stop_out=$(printf '{"session_id":"codex-hook-session","turn_id":"compact-turn","hook_event_name":"Stop","stop_hook_active":false}\n' |
+    FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" "$ROOT/bin/fm-memory-codex-hook.sh" stop 2>&1) || stop_status=$?
+  expect_code 2 "$stop_status" "Codex Stop bridge must request one model continuation"
+  assert_contains "$stop_out" 'RECOVERY CAPSULE' "Codex Stop bridge did not deliver model-visible recovery"
+  [ -e "$home/data/memory/pending/codex/codex-hook-session.json" ] || fail "Codex Stop bridge removed recovery before its continuation completed"
+  bytes=$(printf '%s' "$stop_out" | wc -c | tr -d ' ')
   [ "$bytes" -le 12000 ] || fail "Codex PostCompact recovery exceeded 12000 bytes: $bytes"
+  printf '{"session_id":"codex-hook-session","turn_id":"compact-turn","hook_event_name":"Stop","stop_hook_active":true}\n' |
+    FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" "$ROOT/bin/fm-memory-codex-hook.sh" stop
+  [ ! -e "$home/data/memory/pending/codex/codex-hook-session.json" ] || fail "Codex Stop bridge did not acknowledge completed recovery"
+
+  printf '{"session_id":"codex-hook-session","turn_id":"compact-turn-two","hook_event_name":"PostCompact","trigger":"auto"}\n' |
+    FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" "$ROOT/bin/fm-memory-codex-hook.sh" post
+  prompt=$(printf '{"session_id":"codex-hook-session","turn_id":"next-turn","hook_event_name":"UserPromptSubmit","prompt":"continue"}\n' |
+    FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" "$ROOT/bin/fm-memory-codex-hook.sh" prompt)
+  assert_contains "$prompt" '"hookEventName":"UserPromptSubmit"' "Codex prompt fallback did not use the model-visible hook contract"
+  assert_contains "$prompt" 'RECOVERY CAPSULE' "Codex prompt fallback did not deliver staged recovery"
   jq -e '.hooks.PreCompact[0].hooks[0].command | contains("fm-memory-codex-hook.sh")' "$ROOT/.codex/hooks.json" >/dev/null || fail "Codex PreCompact hook is not tracked"
   jq -e '.hooks.PostCompact[0].hooks[0].command | contains("fm-memory-codex-hook.sh")' "$ROOT/.codex/hooks.json" >/dev/null || fail "Codex PostCompact hook is not tracked"
-  pass "durable memory: Codex automatic compaction bridge checkpoints and recovers"
+  jq -e '.hooks.UserPromptSubmit[0].hooks[0].command | contains("fm-memory-codex-hook.sh")' "$ROOT/.codex/hooks.json" >/dev/null || fail "Codex UserPromptSubmit recovery fallback is not tracked"
+  jq -e '.hooks.Stop[0].hooks[1].command | contains("fm-memory-codex-hook.sh")' "$ROOT/.codex/hooks.json" >/dev/null || fail "Codex Stop recovery continuation is not tracked"
+  pass "durable memory: Codex compaction stages model-visible bounded recovery"
 }
 
 test_all_runtime_turn_fallbacks_share_boundary_owner() {
@@ -291,6 +333,7 @@ test_search_bounds_sensitivity_and_provenance
 test_secret_path_and_transcript_guards
 test_boundary_preserves_uncaptured_semantic_events
 test_concurrent_capacity_is_strict
+test_checkpoint_retention_keeps_automatic_writes_live
 test_codex_compaction_hook_bridge
 test_all_runtime_turn_fallbacks_share_boundary_owner
 test_recovery_capsule_is_bounded

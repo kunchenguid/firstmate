@@ -44,5 +44,5 @@ When recovery reports `stale`, `disputed`, or `unverifiable` evidence:
 4. Append a bounded `recovery` event that names the resolution and its authority.
 5. Write a new validated checkpoint after the contradiction is resolved.
 
-Do not edit old events or checkpoints.
-Their immutability preserves the evidence trail; supersession is expressed by a later event and checkpoint.
+Do not edit retained events or checkpoints.
+Their immutability preserves the retained evidence trail; supersession is expressed by a later event and checkpoint.

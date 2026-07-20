@@ -793,6 +793,8 @@ test_codex_compaction_hooks_are_tracked() {
   settings="$ROOT/.codex/hooks.json"
   jq -e '.hooks.PreCompact[0].hooks[0].command | contains("fm-memory-codex-hook.sh")' "$settings" >/dev/null || fail "Codex PreCompact memory hook is missing"
   jq -e '.hooks.PostCompact[0].hooks[0].command | contains("fm-memory-codex-hook.sh")' "$settings" >/dev/null || fail "Codex PostCompact recovery hook is missing"
+  jq -e '.hooks.UserPromptSubmit[0].hooks[0].command | contains("fm-memory-codex-hook.sh")' "$settings" >/dev/null || fail "Codex prompt recovery fallback is missing"
+  jq -e '.hooks.Stop[0].hooks[1].command | contains("fm-memory-codex-hook.sh")' "$settings" >/dev/null || fail "Codex model-visible recovery continuation is missing"
   jq -e '.hooks.Stop[0].hooks[0].command | contains("FM_MEMORY_RUNTIME=codex")' "$settings" >/dev/null || fail "Codex Stop hook does not preserve runtime identity"
   pass ".codex primary hooks: compaction bridge and runtime identity are tracked"
 }

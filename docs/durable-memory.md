@@ -20,7 +20,8 @@ Checkpoint publication uses the same primitive, then reads back and validates th
 
 Events record only objectives, decisions and approvals, blockers, task transitions, artifact, PR, and test outcomes, checkpoints, recovery outcomes, and session lineage.
 The owner rejects secret-like text, explicit chain-of-thought material, unsafe names, symlink inputs, oversized inputs, unsupported event types, and missing high-water references.
-Capacity exhaustion refuses rather than deleting canonical evidence.
+Event capacity exhaustion refuses rather than deleting canonical evidence.
+Checkpoint publication keeps the newest 1000 validated checkpoint/hash pairs and removes older pairs only after the replacement checkpoint and its event have been published and read back successfully.
 
 ## Authority
 
@@ -46,6 +47,11 @@ OpenCode records that boundary before its watcher coordinator can return from no
 The memory owner verifies that the hook process descends from the active home's lock holder, records only opaque runtime lineage from the bounded hook payload, and writes a validated checkpoint.
 Hook memory failure remains non-blocking so a storage problem cannot wedge a model session; session start surfaces recovery failure explicitly.
 
+Codex `PostCompact` output has no model-context field in 0.144.4, and its common `systemMessage` field is only a UI or event-stream warning.
+The tracked `PostCompact` hook therefore stages the bounded capsule privately and returns no output, leaving automatic compaction enabled.
+At the end of that compacted turn, the tracked blocking `Stop` hook reads the staged capsule and uses its continuation prompt, which Codex records as model input for one bounded follow-up.
+The follow-up Stop callback acknowledges the staged record; if the process ends first, the next `UserPromptSubmit` claims it through `hookSpecificOutput.additionalContext`.
+
 `fm-session-start.sh` prints the latest bounded recovery capsule after its wake queue and before the existing supervision, context, and fleet sections.
 When the session owns the lock, it then records a session-start boundary.
 When lock acquisition is refused, it performs no memory mutation.
@@ -61,7 +67,7 @@ Codex additionally uses its verified first-class compaction callbacks, and no ot
 | Runtime | Session lineage and boundary surface | Pre-compaction support | Firstmate behavior |
 | --- | --- | --- | --- |
 | Claude | Tracked `SessionStart` and blocking `Stop` hooks. | Claude supports a `compact` session-start reason, but the tracked matcher deliberately covers `startup|resume|clear`; no pre-discard callback was verified. | Turn-boundary checkpoint plus next-session recovery. |
-| Codex | Tracked `SessionStart`, blocking `Stop`, `PreCompact`, and `PostCompact` hooks; compaction payloads provide opaque session and turn identifiers plus `manual|auto` trigger. | Verified in Codex CLI 0.144.4. | `PreCompact` writes a validated checkpoint without stopping automatic compaction, and `PostCompact` emits the bounded recovery capsule through `systemMessage`. |
+| Codex | Tracked `SessionStart`, blocking `Stop`, `PreCompact`, `PostCompact`, and `UserPromptSubmit` hooks; compaction payloads provide opaque session and turn identifiers plus `manual|auto` trigger. | Verified in Codex CLI 0.144.4. | `PreCompact` writes a validated checkpoint without stopping automatic compaction, `PostCompact` privately stages recovery, `Stop` injects it through one model continuation, and the next prompt is the unclaimed-record fallback. |
 | OpenCode | `session.created` and passive `session.idle` project plugin events. | No verified pre-compaction callback. | Passive logical-turn checkpoint and session-start recovery; headless follow-up limitations remain unchanged. |
 | Pi | `session_start` and `agent_settled` tracked extension events. | No verified pre-compaction callback. | Logical-run checkpoint and session-start recovery. |
 | Grok | Project `SessionStart` and passive `Stop` hooks with an opaque session ID. | No verified pre-compaction callback. | Passive turn-boundary checkpoint and session-start recovery; project trust remains required. |
@@ -101,6 +107,15 @@ The latest repository-recorded turn-end evidence remains Pi 0.80.5 and Grok 0.2.
 The Codex hook inventory was checked against the installed binary, the tracked `.codex/hooks.json`, and strict parsing of `model_auto_compact_token_limit`.
 No persistent compaction setting was added or changed, so Codex retains its model-selected automatic compaction threshold.
 ShellCheck 0.11.0 and tmux were absent before validation, and the focused local round did not install or substitute either tool.
+
+The credentialed automatic-compaction experiment is opt-in because it spends live Codex model turns and uses ambient authentication.
+It preserves automatic compaction, sets `model_auto_compact_token_limit=8000` only for the isolated commands, records Codex's resolved token limit and automatic trigger in turn-level trace evidence, requires a `pre-compact` checkpoint and lineage event, requires the PostCompact staged record to be acknowledged, and requires the private objective marker to appear in a subsequent model response.
+Its full JSONL and stderr evidence remains under the testing evidence directory named by the script.
+
+```text
+$ FM_CODEX_LIVE_COMPACTION=1 bash tests/fm-memory-codex-live.test.sh
+ok - durable memory: Codex 0.144.4 auto compaction fires both hooks and reaches the model
+```
 
 ## Transcript Evidence
 

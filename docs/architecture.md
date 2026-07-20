@@ -227,7 +227,7 @@ Generalizable firstmate knowledge goes to shared tracked docs through the normal
 
 Immutable session evidence is a separate recovery layer, not another knowledge authority.
 [`bin/fm-memory.js`](../bin/fm-memory.js) owns bounded append-only events, validated checkpoints, recovery, and local search under the active home's private `data/memory/`; [`durable-memory.md`](durable-memory.md) records the full architecture, runtime support matrix, and threat model.
-The portable turn-boundary fallback covers all supported runtimes, Codex adds tracked `PreCompact` and `PostCompact` hooks, and session start prints one bounded capsule before the existing authoritative digest.
+The portable turn-boundary fallback covers all supported runtimes, Codex adds tracked compaction staging plus model-visible Stop/prompt recovery, and session start prints one bounded capsule before the existing authoritative digest.
 
 ## Local clones stay fresh
 
