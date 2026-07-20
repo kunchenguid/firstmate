@@ -487,6 +487,9 @@ FM_CRASH_BACKOFF=60                # seconds to wait after crossing the crash th
 FM_CRASH_NORMAL_SLEEP=5            # seconds to wait after an isolated watcher crash
 FM_LOG_MAX_BYTES=1048576           # daemon log size that triggers trimming
 FM_LOG_KEEP_LINES=2000             # daemon log lines kept when trimming
+FM_SLACK_DM_MAX_ITEMS=40           # config/afk-slack-dm: max escalation items per DM digest before an "…and N more" tail
+FM_SLACK_DM_MAX_BYTES=38000        # config/afk-slack-dm: byte budget per DM digest, under Slack's 40000-char chat.postMessage limit
+FM_SLACK_DM_MAX_ITEM_BYTES=4000    # config/afk-slack-dm: hard-cut size for a single pathological item so header + one item + tail always fits
 ```
 
 `fm-teardown.sh` retries only Git's `Unable to create '...index.lock': File exists` return failure up to `FM_TREEHOUSE_RETURN_LOCK_RETRIES` times.
