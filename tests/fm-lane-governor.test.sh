@@ -206,6 +206,71 @@ test_secondmate_metas_excluded_from_capacity() {
   pass "lane governor excludes persistent secondmate metas from lane capacity"
 }
 
+test_secondmate_spawn_bypasses_capacity_gate() {
+  local home out status lease_dir
+  home=$(make_home secondmate-bypass)
+  mkdir -p "$home/projects/a" "$home/projects/b"
+  fm_write_meta "$home/state/a.meta" "kind=ship" "worktree=$home/projects/a"
+  fm_write_meta "$home/state/b.meta" "kind=ship" "worktree=$home/projects/b"
+  printf 'a=working\nb=working\n' > "$home/states"
+
+  out=$(FM_LANE_MAX_CONCURRENT=1 FM_LANE_CREW_STATE_FILE="$home/states" \
+    run_governor "$home" acquire sm --kind secondmate --holder-pid "$$")
+  status=$?
+  [ "$status" -eq 0 ] || fail "secondmate provisioning must bypass the capacity gate, got: $out"
+  assert_not_contains "$out" "refusing spawn" "secondmate acquire must not be capacity-refused"
+
+  lease_dir="$home/state/.lane-governor/leases"
+  [ ! -f "$lease_dir/sm.lease" ] || fail "secondmate acquire must not write a capacity lease"
+
+  out=$(FM_LANE_MAX_CONCURRENT=1 FM_LANE_CREW_STATE_FILE="$home/states" \
+    run_governor "$home" check --kind secondmate)
+  status=$?
+  [ "$status" -eq 0 ] || fail "secondmate check must bypass the capacity gate, got: $out"
+  pass "lane governor bypasses capacity gate and lease for secondmate provisioning"
+}
+
+test_secondmate_spawn_still_honors_memory_and_orphan() {
+  local home fakebin out status
+  home=$(make_home secondmate-memguard)
+  out=$(FM_LANE_SWAP_USED_MB=25000 FM_LANE_MAX_SWAP_GB=24 \
+    run_governor "$home" acquire sm --kind secondmate --holder-pid "$$")
+  status=$?
+  [ "$status" -ne 0 ] || fail "secondmate provisioning must still honor memory thresholds"
+  assert_contains "$out" "swap used" "secondmate memory refusal should explain the threshold"
+
+  home=$(make_home secondmate-orphanguard)
+  fakebin=$(fm_fakebin "$home")
+  write_orphan_ps "$fakebin"
+  printf '200=%s\n' "$home/projects/x" > "$home/cwds"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_LANE_ORPHAN_CHECK=1 FM_LANE_PROCESS_CWD_FILE="$home/cwds" \
+    run_governor "$home" acquire sm --kind secondmate --holder-pid "$$")
+  status=$?
+  [ "$status" -ne 0 ] || fail "secondmate provisioning must still refuse on this home's orphan"
+  assert_contains "$out" "orphaned harness process detected" "secondmate orphan refusal missing"
+  pass "lane governor still applies memory and orphan checks to secondmate provisioning"
+}
+
+test_unresolvable_cwd_orphan_labeled_honestly() {
+  local home fakebin out status
+  home=$(make_home orphan-unresolved)
+  fakebin=$(fm_fakebin "$home")
+  write_orphan_ps "$fakebin"
+  printf '200=\n' > "$home/cwds"
+
+  out=$(PATH="$fakebin:$BASE_PATH" FM_LANE_ORPHAN_CHECK=1 FM_LANE_PROCESS_CWD_FILE="$home/cwds" run_governor "$home" memwatch)
+  status=$?
+
+  [ "$status" -eq 0 ] || fail "unresolvable-cwd orphan must not block this home's spawns, got: $out"
+  assert_contains "$out" "orphaned harness with unresolvable cwd - not blocking, cannot attribute home" \
+    "unresolvable-cwd orphan should be reported honestly"
+  assert_not_contains "$out" "in another home" \
+    "unresolvable-cwd orphan must not be mislabeled as another home"
+  assert_not_contains "$out" "refusing spawn: orphaned harness" \
+    "unresolvable-cwd orphan must not trigger a spawn refusal"
+  pass "lane governor labels unresolvable-cwd orphans honestly without blocking"
+}
+
 test_lease_ttl_reaps_stale_live_lease() {
   local home out status lease_dir
   home=$(make_home lease-ttl)
@@ -232,6 +297,9 @@ test_lease_ttl_reaps_stale_live_lease() {
 test_capacity_counts_active_workers
 test_spawn_leases_reserve_capacity_until_released
 test_secondmate_metas_excluded_from_capacity
+test_secondmate_spawn_bypasses_capacity_gate
+test_secondmate_spawn_still_honors_memory_and_orphan
+test_unresolvable_cwd_orphan_labeled_honestly
 test_lease_ttl_reaps_stale_live_lease
 test_memory_thresholds_refuse_spawn
 test_completed_workers_surface_cleanup_without_blocking

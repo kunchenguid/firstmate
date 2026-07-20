@@ -12,7 +12,9 @@
 # or available RAM crosses the configured lines, or when a likely orphaned
 # harness process belonging to this home is still alive under a launchd-reparented zsh.
 # Lane capacity governs transient ship/scout workers only: persistent secondmates
-# keep a kind=secondmate meta in the main home permanently and are excluded.
+# keep a kind=secondmate meta in the main home permanently and are excluded from
+# the active count, and a --kind secondmate acquire/check bypasses the capacity gate
+# and lease entirely (only the memory and orphan checks apply to its provisioning).
 # Completed workers are reported for cleanup but do not consume lane capacity,
 # because PR-ready and report-ready work may legitimately wait on approval.
 # Leases held past FM_LANE_LEASE_TTL_SECONDS, or whose holder pid is dead, are reaped.
@@ -49,7 +51,7 @@ lane_governor_cleanup() {
 trap lane_governor_cleanup EXIT
 
 usage() {
-  sed -n '2,29p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,31p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 case "${1:-}" in
@@ -402,7 +404,7 @@ detect_orphaned_harnesses() {
 
 memory_and_orphan_check() {
   local swap_limit_gb avail_min_gb swap_limit_mb avail_min_mb orphans
-  local cwd desc home_orphans foreign_orphans
+  local cwd desc line home_orphans foreign_orphans unresolved_orphans
   swap_limit_gb=${FM_LANE_MAX_SWAP_GB:-24}
   avail_min_gb=${FM_LANE_MIN_AVAILABLE_RAM_GB:-1}
   validate_decimal FM_LANE_MAX_SWAP_GB "$swap_limit_gb"
@@ -422,10 +424,16 @@ memory_and_orphan_check() {
   if [ -n "$orphans" ]; then
     home_orphans=
     foreign_orphans=
-    while IFS=$'\t' read -r cwd desc; do
+    unresolved_orphans=
+    while IFS= read -r line; do
+      [ -n "$line" ] || continue
+      cwd=${line%%$'\t'*}
+      desc=${line#*$'\t'}
       [ -n "$desc" ] || continue
       if orphan_belongs_to_home "$cwd"; then
         home_orphans=${home_orphans:+$home_orphans;}$desc
+      elif [ -z "$cwd" ]; then
+        unresolved_orphans=${unresolved_orphans:+$unresolved_orphans;}$desc
       else
         foreign_orphans=${foreign_orphans:+$foreign_orphans;}$desc
       fi
@@ -434,6 +442,9 @@ $orphans
 EOF
     if [ -n "$foreign_orphans" ]; then
       err "ignoring orphaned harness in another home (does not block this home): $foreign_orphans"
+    fi
+    if [ -n "$unresolved_orphans" ]; then
+      err "orphaned harness with unresolvable cwd - not blocking, cannot attribute home: $unresolved_orphans"
     fi
     if [ -n "$home_orphans" ]; then
       die "refusing spawn: orphaned harness process detected: $home_orphans"
@@ -560,10 +571,15 @@ case "$MODE" in
     ;;
   check)
     memory_and_orphan_check
-    capacity_check "$COUNT"
+    [ "$KIND" = secondmate ] || capacity_check "$COUNT"
     exit 0
     ;;
   acquire)
+    if [ "$KIND" = secondmate ]; then
+      rc=0
+      memory_and_orphan_check || rc=$?
+      exit "$rc"
+    fi
     safe_lease_id "$LEASE_ID" || { err "unsafe lease id: $LEASE_ID"; exit 2; }
     mkdir -p "$LEASE_ROOT" "$LEASE_DIR" || die "cannot create lane governor state"
     fm_lock_acquire_wait "$LOCK"
