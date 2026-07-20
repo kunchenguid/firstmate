@@ -398,8 +398,8 @@ test_sweep_unaffected_by_supervision_resting() {
   # secondmate must still be respawned exactly like an active one.
   out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" zsh "$log")
 
-  assert_contains "$out" "SECONDMATE_LIVENESS: secondmate sm1: respawned" \
-    "a resting secondmate's dead endpoint must still be respawned, unaffected by supervision=resting"
+  assert_not_contains "$out" "SECONDMATE_LIVENESS: secondmate sm1: respawned" \
+    "a successfully respawned resting secondmate should be handled silently, same as an active one"
   assert_contains "$(cat "$log")" "kill-window -t firstmate:fm-sm1" \
     "the stale endpoint must still be killed before respawn regardless of supervision="
   assert_contains "$(cat "$log")" "new-window" \
