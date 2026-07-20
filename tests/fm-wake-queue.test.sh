@@ -235,7 +235,7 @@ test_drain_asserts_watcher_liveness() {
 }
 
 test_structural_signal_enrichment_preserves_raw_rows() {
-  local dir state out expected actual annotation_count outside
+  local dir state out expected actual annotation_count outside perl_bin
   dir=$(make_case enrichment)
   state="$dir/state"
   out="$dir/drain.out"
@@ -246,15 +246,21 @@ test_structural_signal_enrichment_preserves_raw_rows() {
   printf 'working: old turn-end context\n' > "$state/turn-only.status"
   printf 'must-not-be-read\n' > "$outside"
   ln -s "$outside" "$state/escape.status"
-  cat > "$dir/fakebin/tail" <<'SH'
+  perl_bin=$(command -v perl) || fail "perl is required for safe status reads"
+  cat > "$dir/fakebin/perl" <<'SH'
 #!/usr/bin/env bash
-if [ "${3:-}" = "${FM_WAKE_ENRICH_SWAP_PATH:-}" ]; then
-  rm -f "$3"
-  ln -s "$FM_WAKE_ENRICH_SWAP_TARGET" "$3"
+if [ "${1:-}" = -MFcntl=:DEFAULT ]; then
+  for arg in "$@"; do
+    if [ "$arg" = "${FM_WAKE_ENRICH_SWAP_PATH:-}" ]; then
+      rm -f "$arg"
+      ln -s "$FM_WAKE_ENRICH_SWAP_TARGET" "$arg"
+      break
+    fi
+  done
 fi
-PATH=/usr/bin:/bin tail "$@"
+exec "$FM_WAKE_ENRICH_REAL_PERL" "$@"
 SH
-  chmod +x "$dir/fakebin/tail"
+  chmod +x "$dir/fakebin/perl"
 
   append_wake "$state" signal task.status "signal: $outside" || fail "direct status wake append failed"
   append_wake "$state" signal task.turn-ended "signal: $outside" || fail "coalesced turn-end wake append failed"
@@ -268,16 +274,15 @@ SH
   FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_wake_print_deduped "$2"' _ \
     "$ROOT/bin/fm-wake-lib.sh" "$state/.wake-queue" > "$expected"
   PATH="$dir/fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_WAKE_ENRICH_SWAP_PATH="$state/task.status" \
-    FM_WAKE_ENRICH_SWAP_TARGET="$outside" "$DRAIN" > "$out" || fail "structural enrichment drain failed"
+    FM_WAKE_ENRICH_SWAP_TARGET="$outside" FM_WAKE_ENRICH_REAL_PERL="$perl_bin" "$DRAIN" > "$out" \
+    || fail "structural enrichment drain failed"
   awk -F '\t' 'NF == 5 { print }' "$out" > "$actual"
   cmp -s "$expected" "$actual" || fail "enrichment changed or reordered an authoritative raw row"
 
   annotation_count=$(grep -c '^wake annotation:' "$out" || true)
-  [ "$annotation_count" -eq 2 ] || fail "expected one annotation per unique readable status file, got $annotation_count"
-  grep -F 'latest wake-EVENT observed at drain, not current state: task.status: done: latest event' "$out" >/dev/null \
-    || fail "direct status annotation did not carry the latest event label and line"
-  if grep -F 'task.status; historical /' "$out" >/dev/null; then
-    fail "a direct status plus turn-end mapping was incorrectly labeled historical"
+  [ "$annotation_count" -eq 1 ] || fail "expected only the unreadable-race-safe status annotation, got $annotation_count"
+  if grep -E '^wake annotation:.*: task\.status:' "$out" >/dev/null; then
+    fail "replaced status file produced an annotation"
   fi
   grep -F 'latest wake-EVENT observed at drain, not current state; historical / not necessarily the triggering event: turn-only.status:' "$out" >/dev/null \
     || fail "bare turn-end mapping did not carry the historical warning"
