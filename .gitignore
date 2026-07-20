@@ -8,6 +8,7 @@ data/
 __pycache__/
 *.pyc
 .env
+.claude/settings.local.json
 config/crew-harness
 config/crew-dispatch.json
 config/secondmate-harness
