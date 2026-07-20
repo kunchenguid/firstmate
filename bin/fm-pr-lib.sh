@@ -185,6 +185,7 @@ fm_pr_metadata_identity_parse() {
           pr_head_count=$((pr_head_count + 1))
           value=${line#pr_head=}
           if fm_pr_head_valid "$value" && [ "$pr_head_count" -eq 1 ]; then
+            # shellcheck disable=SC2034 # Read by callers after metadata validation.
             FM_PR_META_HEAD=$value
           else
             post_pr_invalid=1
