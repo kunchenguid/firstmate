@@ -108,15 +108,64 @@ function isForbiddenIPv4(address: string): boolean {
   );
 }
 
+// Expands a textual IPv6 address (with optional "::" compression and a trailing
+// dotted-quad group) into its eight 16-bit groups, or null if unparseable.
+function expandIPv6Groups(address: string): number[] | null {
+  const addr = address.split("%")[0];
+  const halves = addr.split("::");
+  if (halves.length > 2) return null;
+  const parseSide = (side: string): number[] | null => {
+    if (side === "") return [];
+    const segs = side.split(":");
+    const groups: number[] = [];
+    for (let i = 0; i < segs.length; i++) {
+      const seg = segs[i];
+      if (seg.includes(".")) {
+        if (i !== segs.length - 1) return null;
+        const bytes = seg.split(".").map(Number);
+        if (bytes.length !== 4 || bytes.some((n) => !Number.isInteger(n) || n < 0 || n > 255)) return null;
+        groups.push((bytes[0] << 8) | bytes[1], (bytes[2] << 8) | bytes[3]);
+      } else {
+        if (!/^[0-9a-f]{1,4}$/.test(seg)) return null;
+        groups.push(parseInt(seg, 16));
+      }
+    }
+    return groups;
+  };
+  if (halves.length === 1) {
+    const groups = parseSide(halves[0]);
+    return groups && groups.length === 8 ? groups : null;
+  }
+  const head = parseSide(halves[0]);
+  const tail = parseSide(halves[1]);
+  if (head === null || tail === null) return null;
+  const missing = 8 - head.length - tail.length;
+  if (missing < 0) return null;
+  return [...head, ...new Array(missing).fill(0), ...tail];
+}
+
+// Embedded-IPv4 prefixes to unwrap before re-checking the low 32 bits: IPv4-mapped
+// (::ffff:0:0/96), IPv4-compatible (deprecated ::/96), and the NAT64 well-known
+// prefix (64:ff9b::/96, RFC 6052) all carry a real IPv4 address in their low 32 bits.
+const EMBEDDED_IPV4_PREFIXES: number[][] = [
+  [0, 0, 0, 0, 0, 0xffff],
+  [0, 0, 0, 0, 0, 0],
+  [0x64, 0xff9b, 0, 0, 0, 0],
+];
+
 function isForbiddenIPv6(address: string): boolean {
   const normalized = address.toLowerCase();
   if (normalized === "::1" || normalized === "::") {
     return true;
   }
-  // IPv4-mapped/compatible IPv6 (::ffff:a.b.c.d, ::a.b.c.d): re-check the embedded IPv4.
-  const mapped = normalized.match(/^::(?:ffff:)?(\d+\.\d+\.\d+\.\d+)$/);
-  if (mapped) {
-    return isForbiddenIPv4(mapped[1]);
+  const groups = expandIPv6Groups(normalized);
+  if (groups) {
+    const prefix = groups.slice(0, 6);
+    const embedsIPv4 = EMBEDDED_IPV4_PREFIXES.some((p) => p.every((g, i) => prefix[i] === g));
+    if (embedsIPv4) {
+      const ipv4 = `${groups[6] >> 8}.${groups[6] & 0xff}.${groups[7] >> 8}.${groups[7] & 0xff}`;
+      return isForbiddenIPv4(ipv4);
+    }
   }
   if (normalized.startsWith("fe80:") || normalized.startsWith("fe8") || normalized.startsWith("fe9") || normalized.startsWith("fea") || normalized.startsWith("feb")) {
     return true; // link-local fe80::/10

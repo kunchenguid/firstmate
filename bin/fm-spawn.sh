@@ -329,6 +329,15 @@ pi_restricted_model() {
   esac
 }
 
+# Single source of truth for "does this spawn use the restricted DeepSeek lane"
+# (harness=pi, not a secondmate, model verified via pi_restricted_model). Used
+# both to pick the launch_template branch and to decide whether to export
+# FM_RESTRICTED_TASK_CONFIG, so the two decisions cannot drift apart.
+uses_restricted_pi_lane() {
+  local harness=$1 kind=$2 model=$3
+  [ "$harness" = pi ] && [ "$kind" != secondmate ] && pi_restricted_model "$model"
+}
+
 # The verified launch command per adapter. The knowledge half of each adapter
 # (busy signature, exit command, dialogs, quirks) lives in the harness-adapters skill.
 launch_template() {
@@ -356,7 +365,7 @@ launch_template() {
     pi)
       if [ "$kind" = secondmate ]; then
         printf '%s' 'pi __MODELFLAG____EFFORTFLAG__-e __PITURNEND__ -e __PIWATCH__ "$(cat __BRIEF__)"'
-      elif pi_restricted_model "$model"; then
+      elif uses_restricted_pi_lane "$harness" "$kind" "$model"; then
         printf '%s' 'pi __MODELFLAG____EFFORTFLAG__--no-builtin-tools --tools public_fetch,write_report,append_status,complete_scout --no-context-files --no-skills --no-prompt-templates --no-extensions --no-session -e __PIEXT__ -e __PIRESTRICTED__ "$(cat __BRIEF__)"'
       else
         printf '%s' 'pi __MODELFLAG____EFFORTFLAG__-e __PIEXT__ "$(cat __BRIEF__)"'
@@ -1080,7 +1089,7 @@ sleep 0.3
 # output destinations through an env var rather than any model-controlled
 # input. Non-secret paths only (report path, status path, task id); never read
 # into this from the wider environment.
-if [ "$KIND" != secondmate ] && [ "$HARNESS" = pi ] && pi_restricted_model "$MODEL"; then
+if uses_restricted_pi_lane "$HARNESS" "$KIND" "$MODEL"; then
   restricted_config=$(printf '{"reportPath":"%s","statusPath":"%s","taskId":"%s"}' \
     "$(json_escape "$DATA/$ID/report.md")" \
     "$(json_escape "$STATE/$ID.status")" \

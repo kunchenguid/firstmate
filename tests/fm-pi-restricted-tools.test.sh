@@ -152,6 +152,8 @@ const targets = [
   "https://[fe80::1]/x",                          // link-local IPv6
   "https://[fc00::1]/x",                          // unique-local IPv6
   "https://[::ffff:127.0.0.1]/x",                 // IPv4-mapped IPv6 loopback
+  "https://[64:ff9b::a9fe:a9fe]/x",               // NAT64-mapped cloud metadata (hex form)
+  "https://[64:ff9b::169.254.169.254]/x",         // NAT64-mapped cloud metadata (dotted form)
 ];
 for (const url of targets) {
   try {
