@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Record a PR-ready task: store one validated canonical pr=<url> and GitHub's
-# exact pr_head=<sha> when available, then atomically arm a static merge poll.
+# Record a PR-ready task: store one validated canonical pr=<url> and the exact
+# pr_head=<sha> when available (GitHub via gh, Bitbucket Data Center via bkt),
+# then atomically arm a static merge poll.
 # The watcher check source is byte-for-byte bin/fm-pr-poll.sh; task and PR data
 # live only in a private sidecar and are never interpolated into shell source.
 # Usage: fm-pr-check.sh <task-id> <pr-url>
@@ -44,7 +45,17 @@ fi
 
 WT=$(grep '^worktree=' "$META" | tail -1 | cut -d= -f2- || true)
 PR_HEAD=
-if [ -n "$WT" ] && [ -d "$WT" ] && command -v gh >/dev/null 2>&1; then
+if [ "$FM_PR_PROVIDER" = bitbucket-dc ]; then
+  # bkt resolves the API host from its context, so the worktree is not needed;
+  # fm_pr_dc_pr_field fails closed on any tool error or ambiguous host, leaving
+  # PR_HEAD empty so recording still proceeds without a head SHA.
+  if command -v bkt >/dev/null 2>&1; then
+    if REMOTE_HEAD=$(fm_pr_dc_pr_field "$FM_PR_HOST" "$OWNER" "$REPO" "$NUMBER" '.pull_request.fromRef.latestCommit') \
+      && fm_pr_head_valid "$REMOTE_HEAD"; then
+      PR_HEAD=$REMOTE_HEAD
+    fi
+  fi
+elif [ -n "$WT" ] && [ -d "$WT" ] && command -v gh >/dev/null 2>&1; then
   if REMOTE_HEAD=$(cd "$WT" && gh pr view "$URL" --json headRefOid -q .headRefOid 2>/dev/null) \
     && fm_pr_head_valid "$REMOTE_HEAD"; then
     PR_HEAD=$REMOTE_HEAD

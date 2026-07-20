@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Shared validation and atomic artifact helpers for GitHub PR merge polling.
+# Shared validation and atomic artifact helpers for GitHub and Bitbucket Data
+# Center PR merge polling.
 # Callers must validate task IDs and raw PR URLs before constructing task paths
 # or performing any side effect.
 
@@ -7,6 +8,8 @@ FM_PR_URL=
 FM_PR_OWNER=
 FM_PR_REPO=
 FM_PR_NUMBER=
+FM_PR_PROVIDER=
+FM_PR_HOST=
 FM_PR_DATA_URL=
 FM_PR_DATA_OWNER=
 FM_PR_DATA_REPO=
@@ -62,20 +65,127 @@ fm_task_id_creation_valid() {
 }
 
 fm_pr_url_parse() {
-  local raw=${1-} pattern
+  local raw=${1-} pattern host user slug num
   local LC_ALL=C
   FM_PR_URL=
   FM_PR_OWNER=
   FM_PR_REPO=
   FM_PR_NUMBER=
+  FM_PR_PROVIDER=
+  FM_PR_HOST=
+  # GitHub is classified first so its acceptance is byte-identical to the prior
+  # single-regex path; every other shape falls through to Bitbucket Data Center.
   pattern='^https://github\.com/([A-Za-z0-9]|[A-Za-z0-9][A-Za-z0-9-]{0,37}[A-Za-z0-9])/([A-Za-z0-9._-]{1,100})/pull/([1-9][0-9]*)$'
-  [[ "$raw" =~ $pattern ]] || return 1
-  [[ "${BASH_REMATCH[1]}" != *--* ]] || return 1
-  [ "${BASH_REMATCH[2]}" != . ] && [ "${BASH_REMATCH[2]}" != .. ] || return 1
-  FM_PR_URL=$raw
-  FM_PR_OWNER=${BASH_REMATCH[1]}
-  FM_PR_REPO=${BASH_REMATCH[2]}
-  FM_PR_NUMBER=${BASH_REMATCH[3]}
+  if [[ "$raw" =~ $pattern ]]; then
+    [[ "${BASH_REMATCH[1]}" != *--* ]] || return 1
+    [ "${BASH_REMATCH[2]}" != . ] && [ "${BASH_REMATCH[2]}" != .. ] || return 1
+    FM_PR_URL=$raw
+    FM_PR_OWNER=${BASH_REMATCH[1]}
+    FM_PR_REPO=${BASH_REMATCH[2]}
+    FM_PR_NUMBER=${BASH_REMATCH[3]}
+    FM_PR_PROVIDER=github
+    FM_PR_HOST=github.com
+    return 0
+  fi
+  # Bitbucket Data Center personal-repo shape: the project key is ~<user>. The
+  # match groups are snapshotted before the host validator runs, because any
+  # later [[ =~ ]] in that helper would clobber BASH_REMATCH.
+  pattern='^https://([A-Za-z0-9][A-Za-z0-9.-]*)/users/([A-Za-z0-9][A-Za-z0-9._-]*)/repos/([A-Za-z0-9._-]{1,100})/pull-requests/([1-9][0-9]*)$'
+  if [[ "$raw" =~ $pattern ]]; then
+    host=${BASH_REMATCH[1]}
+    user=${BASH_REMATCH[2]}
+    slug=${BASH_REMATCH[3]}
+    num=${BASH_REMATCH[4]}
+    fm_pr_dc_host_valid "$host" || return 1
+    [ "$slug" != . ] && [ "$slug" != .. ] || return 1
+    FM_PR_URL=$raw
+    FM_PR_OWNER="~$user"
+    FM_PR_REPO=$slug
+    FM_PR_NUMBER=$num
+    # shellcheck disable=SC2034 # parse-contract globals read by fm-pr-check.sh after fm_pr_url_parse.
+    FM_PR_PROVIDER=bitbucket-dc
+    # shellcheck disable=SC2034 # parse-contract global read by fm-pr-check.sh after fm_pr_url_parse.
+    FM_PR_HOST=$host
+    return 0
+  fi
+  # Bitbucket Data Center project shape: the project key is the literal segment.
+  pattern='^https://([A-Za-z0-9][A-Za-z0-9.-]*)/projects/([A-Za-z0-9][A-Za-z0-9._-]*)/repos/([A-Za-z0-9._-]{1,100})/pull-requests/([1-9][0-9]*)$'
+  if [[ "$raw" =~ $pattern ]]; then
+    host=${BASH_REMATCH[1]}
+    user=${BASH_REMATCH[2]}
+    slug=${BASH_REMATCH[3]}
+    num=${BASH_REMATCH[4]}
+    fm_pr_dc_host_valid "$host" || return 1
+    [ "$slug" != . ] && [ "$slug" != .. ] || return 1
+    FM_PR_URL=$raw
+    FM_PR_OWNER=$user
+    FM_PR_REPO=$slug
+    FM_PR_NUMBER=$num
+    # shellcheck disable=SC2034 # parse-contract globals read by fm-pr-check.sh after fm_pr_url_parse.
+    FM_PR_PROVIDER=bitbucket-dc
+    # shellcheck disable=SC2034 # parse-contract global read by fm-pr-check.sh after fm_pr_url_parse.
+    FM_PR_HOST=$host
+    return 0
+  fi
+  return 1
+}
+
+# fm_pr_dc_host_valid <host>: a Data Center host must be a dotted domain (at
+# least one label separator) that starts with an alphanumeric and does not end
+# with a dot or hyphen. The parser's leading-alphanumeric capture already
+# rejects a leading separator; this owns the dot-presence and trailing-separator
+# checks.
+fm_pr_dc_host_valid() {
+  local host=${1-}
+  local LC_ALL=C
+  [[ "$host" == *.* ]] || return 1
+  case "$host" in
+    *.|*-) return 1 ;;
+  esac
+  [[ "$host" =~ ^[A-Za-z0-9][A-Za-z0-9.-]*$ ]]
+}
+
+# fm_pr_dc_context_for_host <host>: echo the single bkt context name whose host
+# matches <host>, or return 1 when bkt is absent, no context matches, or the
+# match is ambiguous. bkt silently queries the default context's repository when
+# -c is omitted, so every Data Center caller must resolve an explicit context or
+# none at all.
+fm_pr_dc_context_for_host() {
+  local host=$1 line name tail count=0 found=
+  command -v bkt >/dev/null 2>&1 || return 1
+  tail=" (host: $host)"
+  while IFS= read -r line; do
+    case "$line" in
+      *"$tail") ;;
+      *) continue ;;
+    esac
+    name=$line
+    name=${name#"${name%%[! *]*}"}
+    name=${name%"$tail"}
+    [ -n "$name" ] || continue
+    found=$name
+    count=$((count + 1))
+  done < <(bkt context list 2>/dev/null)
+  [ "$count" -eq 1 ] || return 1
+  printf '%s\n' "$found"
+}
+
+# fm_pr_dc_pr_field <host> <owner> <repo> <number> <jq>: echo one bkt --jq field
+# for a Data Center pull request with its JSON quoting stripped, or return 1 on
+# any tool error or ambiguous context. --project and --repo are always passed
+# explicitly because bkt otherwise queries the default context's repository.
+fm_pr_dc_pr_field() {
+  local host=$1 owner=$2 repo=$3 number=$4 jq=$5 ctx value
+  ctx=$(fm_pr_dc_context_for_host "$host") || return 1
+  value=$(bkt pr view "$number" --project "$owner" --repo "$repo" -c "$ctx" \
+    --json --jq "$jq" 2>/dev/null) || return 1
+  case "$value" in
+    '"'*'"')
+      value=${value#?}
+      value=${value%?}
+      ;;
+  esac
+  printf '%s\n' "$value"
 }
 
 fm_pr_head_valid() {
