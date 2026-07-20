@@ -377,7 +377,7 @@ idle_marker_class() {  # <window-key>
 }
 
 pause_state_class() {  # <window> <task>
-  local win=$1 task=$2 key last recheck_file class agent_alive line state src
+  local win=$1 task=$2 key last recheck_file class agent_alive line src
   key=${win//:/_}
   key=${key//\//_}
   key=${key//./_}
@@ -401,6 +401,23 @@ pause_state_class() {  # <window> <task>
     printf '%s' "$class"
     return
   fi
+  line=$("$FM_CREW_STATE_BIN" "$task" 2>/dev/null) || true
+  if [ "$class" = paused ] && [ "${line##* · }" = "run cancelled" ]; then
+    date +%s > "$recheck_file"
+    printf 'paused'
+    return
+  fi
+  case "$line" in
+    state:*)
+      src=${line#*source: }; src=${src%% *}
+      ;;
+    *) src=none ;;
+  esac
+  if [ "$class" = none ] && [ "$src" = run-step ]; then
+    rm -f "$recheck_file"
+    printf 'none'
+    return
+  fi
   agent_alive=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null) || agent_alive=unknown
   if [ "$agent_alive" != dead ]; then
     rm -f "$recheck_file"
@@ -410,19 +427,6 @@ pause_state_class() {  # <window> <task>
   if [ "$class" = paused ]; then
     date +%s > "$recheck_file"
     printf 'paused'
-    return
-  fi
-  line=$("$FM_CREW_STATE_BIN" "$task" 2>/dev/null) || true
-  case "$line" in
-    state:*)
-      state=${line#state: }; state=${state%% *}
-      src=${line#*source: }; src=${src%% *}
-      ;;
-    *) state=unknown; src=none ;;
-  esac
-  if [ "$src" = run-step ] && [ "$state" != paused ]; then
-    rm -f "$recheck_file"
-    printf 'none'
     return
   fi
   date +%s > "$recheck_file"
@@ -1037,8 +1041,14 @@ EOF
                 ;;
               paused) handle_idle_stale "$w" "$task" "$h" paused ;;
               merge-wait) handle_idle_stale "$w" "$task" "$h" merge-wait ;;
-              *)
+              live-hold)
                 surface_nonterminal_stale "$w" "$h"
+                ;;
+              *)
+                clear_pause_tracking "$w"
+                fm_wake_append stale "$w" "stale: $w" || exit 1
+                printf '%s' "$h" > "$sf"
+                wake "stale: $w"
                 ;;
             esac
           else
@@ -1047,11 +1057,15 @@ EOF
               case "$(pause_state_class "$w" "$task")" in
                 paused)  handle_idle_stale "$w" "$task" "$h" paused ;;
                 merge-wait) handle_idle_stale "$w" "$task" "$h" merge-wait ;;
+                live-hold) handle_idle_stale "$w" "$task" "$h" paused ;;
                 working) clear_pause_state "$w"
                          printf '%s' "$h" > "$sf"
                          wedge_timer_check "$w" "$ssf" "non-terminal stale (provably working after a declared pause)" "$ewf"
                          triage_log "absorbed non-terminal stale (provably working): $w" ;;
-                *)       handle_paused_stale "$w" "$task" "$h" ;;
+                *)       clear_pause_tracking "$w"
+                         fm_wake_append stale "$w" "stale: $w" || exit 1
+                         printf '%s' "$h" > "$sf"
+                         wake "stale: $w" ;;
               esac
             else
               if [ "$(age_of "$ssf")" -ge "$STALE_ESCALATE_SECS" ]; then

@@ -1480,7 +1480,7 @@ test_afk_paused_changed_pane_hands_off_plain_stale() {
   key=$(printf '%s' "$window" | tr '.:/' '___')
 
   # Deliberately do not seed .hash-*: this is the changed-pane path that used to
-  # call handle_paused_stale before AFK's one-shot daemon handoff.
+  # call handle_idle_stale before AFK's one-shot daemon handoff.
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
     FM_FAKE_CREW_STATE='state: paused · source: status-log · awaiting the upstream tool release' \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
