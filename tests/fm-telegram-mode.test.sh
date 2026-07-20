@@ -1066,6 +1066,48 @@ test_quarantine_mode_failure_preserves_sources() {
   pass "quarantine staging failures preserve sources and clean destinations"
 }
 
+test_quarantine_dest_failure_restores_source_mode() {
+  local home helper src spec mode want out qcount
+  home="$TMP_ROOT/quarantine-dest-fail"; mkdir -p "$home/state"
+  chmod 700 "$home/state"
+  helper="$ROOT/bin/fm-telegram-quarantine.mjs"
+  for spec in "644=644" "000=0"; do
+    mode=${spec%%=*}; want=${spec#*=}
+    src="$home/state/m$mode.json"
+    printf '{"text":"status"}\n' > "$src"
+    chmod "$mode" "$src"
+    if node "$helper" "$src" "$home/state/missing-quarantine" "m$mode.json" >/dev/null 2>&1; then
+      fail "mode-$mode quarantine into a missing dir must fail"
+    fi
+    assert_present "$src" "mode-$mode source must survive destination failure"
+    [ "$(file_mode "$src")" = "$want" ] \
+      || fail "mode-$mode source must keep its original mode (got $(file_mode "$src"))"
+    assert_absent "$home/state/missing-quarantine" "failed quarantine must not create the destination dir"
+  done
+  mkdir -p "$home/state/inbox2" "$home/state/quarantine"
+  chmod 700 "$home/state/inbox2" "$home/state/quarantine"
+  src="$home/state/inbox2/late.json"
+  printf '{"text":"status"}\n' > "$src"
+  chmod 644 "$src"
+  chmod 500 "$home/state/inbox2"
+  if node "$helper" "$src" "$home/state/quarantine" "late.json" >/dev/null 2>&1; then
+    chmod 700 "$home/state/inbox2"
+    fail "quarantine must fail when the source cannot be claimed"
+  fi
+  chmod 700 "$home/state/inbox2"
+  assert_present "$src" "source must survive claim failure"
+  [ "$(file_mode "$src")" = 644 ] \
+    || fail "claim failure must restore the original mode (got $(file_mode "$src"))"
+  qcount=$(find "$home/state/quarantine" -type f 2>/dev/null | wc -l | tr -d ' ')
+  [ "$qcount" -eq 0 ] || fail "claim failure must clean the staged destination (got $qcount)"
+  out=$(node "$helper" "$src" "$home/state/quarantine" "late.json" 2>/dev/null) \
+    || fail "quarantine retry after a transient failure must succeed"
+  assert_absent "$src" "retried quarantine must remove the live source"
+  assert_present "$out" "retried quarantine must publish the evidence copy"
+  [ "$(file_mode "$out")" = 600 ] || fail "quarantine artifact must be private (got $(file_mode "$out"))"
+  pass "failed quarantine restores original source modes and stays retryable"
+}
+
 test_quarantine_publish_is_exclusive() {
   local home qdir helper first second out1 out2 count first_pid second_pid
   home="$TMP_ROOT/quarantine-exclusive"; mkdir -p "$home/state"
@@ -1516,6 +1558,7 @@ test_respond_inbox_dir_drift_keeps_files_queued
 test_respond_corrupt_rate_log_is_quarantined_and_allows
 test_respond_rate_quarantine_failure_audited_and_defers
 test_quarantine_mode_failure_preserves_sources
+test_quarantine_dest_failure_restores_source_mode
 test_quarantine_publish_is_exclusive
 test_quarantine_rejects_fifo_without_blocking
 test_respond_wellformed_rate_log_keeps_window

@@ -62,15 +62,20 @@ let destinationFd;
 let destination = "";
 let ownsDestination = false;
 let destinationIdentity;
+let initialSource;
 let sourceIdentity;
+let originalSourceMode = 0o600;
+let sourceModeChanged = false;
 let sourceClaim = "";
 let sourceClaimDir = "";
 let sourceRemoved = false;
 
 try {
-  const initialSource = fs.lstatSync(source, { bigint: true });
+  initialSource = fs.lstatSync(source, { bigint: true });
   if (!initialSource.isFile() || initialSource.nlink !== 1n) throw new Error("unsafe source");
+  originalSourceMode = Number(initialSource.mode & 0o777n);
   fs.chmodSync(source, 0o600);
+  sourceModeChanged = true;
   sourceFd = fs.openSync(
     source,
     fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK,
@@ -128,9 +133,9 @@ try {
   if (!entryMatches(destination, destinationIdentity)) throw new Error("destination identity changed");
   fs.unlinkSync(sourceClaim);
   sourceClaim = "";
+  sourceRemoved = true;
   fs.rmdirSync(sourceClaimDir);
   sourceClaimDir = "";
-  sourceRemoved = true;
   syncDirectory(path.dirname(source));
   if (!entryMatches(destination, destinationIdentity)) throw new Error("destination identity changed");
   fs.closeSync(destinationFd);
@@ -140,6 +145,18 @@ try {
   ownsDestination = false;
   process.stdout.write(`${destination}\n`);
 } catch {
+  let sourceModeRestored = !sourceModeChanged || sourceRemoved;
+  if (!sourceModeRestored) {
+    try {
+      if (sourceFd !== undefined && sourceIdentity && sameIdentity(initialSource, sourceIdentity)) {
+        fs.fchmodSync(sourceFd, originalSourceMode);
+        sourceModeRestored = true;
+      } else if (entryMatches(source, initialSource)) {
+        fs.chmodSync(source, originalSourceMode);
+        sourceModeRestored = true;
+      }
+    } catch {}
+  }
   if (destinationFd !== undefined) {
     try {
       fs.closeSync(destinationFd);
@@ -150,7 +167,7 @@ try {
       fs.closeSync(sourceFd);
     } catch {}
   }
-  if (sourceClaim && entryMatches(sourceClaim, sourceIdentity)) {
+  if (sourceClaim && sourceModeRestored && entryMatches(sourceClaim, sourceIdentity)) {
     try {
       if (!fs.existsSync(source)) fs.renameSync(sourceClaim, source);
     } catch {}
