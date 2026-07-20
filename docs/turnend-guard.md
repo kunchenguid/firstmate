@@ -34,6 +34,8 @@ A fresh leftover beacon blocks if the watcher lock is missing, dead, or identity
 `FM_STATE_OVERRIDE` wins over `FM_HOME/state`, and `FM_HOME` wins over repo-root `state/`.
 `FM_GUARD_GRACE` controls the beacon freshness window and defaults to 300 seconds.
 If `jq` is missing or hook stdin is empty, the guard fails open and exits 0 because it cannot safely read loop-guard fields.
+When `state/.wake-queue` holds undrained records at block time, the banner reports the record count, states that the armed watcher's completed background task will not deliver a notification, and the repair line leads with drain-first (`fm-supervision-instructions.sh --queue-pending 1`).
+The block decision itself is unchanged by the queue: pending records never allow a blind end, and an empty queue keeps the original message.
 
 ## Harness Integrations
 
@@ -144,8 +146,27 @@ So the model was re-invoked solely by the background task's completion while idl
 This matches the harness tool contract that a `run_in_background` task "keeps running across turns and re-invokes you when it exits", and reproduces the 11s latency the task audit measured independently on the same harness version.
 No Herdr command was issued and no fleet state was touched; the experiment wrote only to the session scratchpad, which was discarded.
 
+### 2026-07-21: the armed-then-fired handoff and the queue-aware block message
+
+A two-week token audit (`data/fm-token-accounting-w6`, fleet period 2026-07-07 to 2026-07-20) counted 240 guard-forced turns and 1,320 `fm-watch-arm` calls against 908 real wakes, and initially modeled the guard turns as "the model forgot to arm".
+First-hand transcript analysis of all 36 fm-main sessions (231 guard fires total) refuted that model:
+
+- 152 of 231 fires happened in turns that HAD launched `bin/fm-watch-arm.sh` as a background task before the block; only 79 turns genuinely never armed.
+- In 151 of those 152, the beacon was touched about 1s after the arm launch (median `gap - beat` = 1.0s over a median arm-to-fire gap of 6.0s): the watcher started, immediately found actionable state, queued a wake, and exited before the turn could end.
+  Persisted pane-hash state (`.hash-*`/`.count-*`) plus signals accumulated during the handling turn make a first-cycle actionable exit common; one traced case (session 066dc8cb, fire 2026-07-14T16:21:06.948Z) shows the fresh watcher enqueueing a `stale:` record 0.3s after its first beacon touch.
+- In 152 of 152, the in-turn arm's background task NEVER received a completion notification anywhere in the transcript: a background task that completes between the turn's last tool call and the stop gets its notification dropped by the harness.
+  Arms completing mid-turn (before the last tool call) and arms from earlier turns were notified normally in the same sessions.
+
+So the guard's block in these cases is correct and irreplaceable: the wake sits durably in `state/.wake-queue`, no notification is coming, and the forced continuation is that wake's only delivery path.
+What was broken was the block message: it said only "resume supervision", so the continuation re-armed blind (210 of 231 continuations re-armed, median 2 assistant requests) and the queued wake waited for the next unrelated wake's drain.
+The fix makes the guard pass `--queue-pending` to `fm-supervision-instructions.sh` and, when records are pending, add banner lines reporting the count and instructing drain-and-handle in the continuation, turning the previously wasted forced turn into the wake's timely handling turn.
+Blocking scope, exit codes, loop-guard behavior, and every adapter integration are unchanged; the banner only adds stderr lines that all five adapters already relay.
+
+Ruled out during the same investigation, with the method preserved for future re-measurement: model forgetfulness as the dominant cause (66% of fires had armed), a symlink or logical-path mismatch between `CLAUDE_PROJECT_DIR` and the model shell cwd (the primary path has no symlink component), and macOS `ps` width truncation corrupting `pid-identity` (piped `ps` output never truncates regardless of `COLUMNS`).
+Residual, pre-existing and unchanged: after one block, a second insta-exit in the same turn ends under the `stop_hook_active` loop guard with the wake queued but undelivered until the next wake's drain-first; drain-first in the forced continuation makes that second insta-fire rare because the actionable state was just consumed.
+
 ## Tests
 
-`tests/fm-turnend-guard.test.sh` covers the shared predicate, primary scoping (including a secondmate's own home being guarded like the main primary while its child worktrees stay exempt), `FM_HOME` and `FM_STATE_OVERRIDE` precedence, Pi logical-run latch behavior for no-tool and multi-tool runs, fail-open behavior without `jq`, tracked hook registration for all five harnesses, and the Grok adapter's forced-resume loop guard and permission-mode regression.
+`tests/fm-turnend-guard.test.sh` covers the shared predicate, primary scoping (including a secondmate's own home being guarded like the main primary while its child worktrees stay exempt), `FM_HOME` and `FM_STATE_OVERRIDE` precedence, the queue-aware block message (a pending queue keeps the block and adds drain-first delivery instructions; an empty queue keeps the plain message; a live healthy watcher still passes silently), Pi logical-run latch behavior for no-tool and multi-tool runs, fail-open behavior without `jq`, tracked hook registration for all five harnesses, and the Grok adapter's forced-resume loop guard and permission-mode regression.
 The default behavior suite does not invoke live language-model harnesses.
 `FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh` opts into the isolated interactive Pi regression recorded above.
