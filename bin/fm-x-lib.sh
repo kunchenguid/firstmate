@@ -22,6 +22,8 @@
 #   fmx_context_registry_set <state> <request_id> <platform> <reply-max> [refresh]
 #                                - persist the durable per-request reply context;
 #                                refresh=1 resets its retention timestamp
+#   fmx_offer_registry_claim <state> <request_id> - atomically claim the durable
+#                                one-wake offer marker; 0=new, 1=existing, 2=error
 #   fmx_context_registry_prune <state> - remove records older than seven days
 #   fmx_context_registry_get <state> <request_id> - read the durable per-request
 #                                reply context, or the empty shape when absent
@@ -174,6 +176,44 @@ fmx_private_artifact_publish_stdin() {
     rm -f -- "$dest"
     return 1
   fi
+}
+
+# Publish stdin as a new private artifact without replacing an existing path.
+# The hard-link claim is atomic within the prepared directory, so concurrent
+# callers cannot both create the destination. Returns 0 when this caller created
+# it, 1 when another valid private artifact already owns the path, and 2 on an
+# unsafe path or publication failure.
+fmx_private_artifact_publish_stdin_once() {
+  local dir=$1 base=$2 mode=$3 device tmp dest
+  case "$base" in
+    ''|.*|*/*) return 2 ;;
+  esac
+  case "$mode" in
+    600|700) ;;
+    *) return 2 ;;
+  esac
+  device=$(fmx_private_artifact_dir_prepare "$dir") || return 2
+  dest="$dir/$base"
+  tmp=$(umask 077; mktemp "$dir/.${base}.fm-x.XXXXXX" 2>/dev/null) || return 2
+  if ! cat > "$tmp" \
+    || ! chmod "$mode" "$tmp" 2>/dev/null \
+    || ! fmx_single_link_file_mode_valid "$tmp" "$mode" "$device"; then
+    rm -f -- "$tmp"
+    return 2
+  fi
+  if ln -- "$tmp" "$dest" 2>/dev/null; then
+    rm -f -- "$tmp"
+    if fmx_single_link_file_mode_valid "$dest" "$mode" "$device"; then
+      return 0
+    fi
+    rm -f -- "$dest"
+    return 2
+  fi
+  rm -f -- "$tmp"
+  if fmx_single_link_file_mode_valid "$dest" "$mode" "$device"; then
+    return 1
+  fi
+  return 2
 }
 
 fmx_private_artifact_file_valid() {
@@ -492,6 +532,32 @@ fmx_context_registry_set() {
     --argjson recorded_at "$recorded_at" \
     '{request_id:$rid, platform:$platform, reply_max_chars:$max, recorded_at:$recorded_at}' \
     | fmx_private_artifact_publish_stdin "$dir" "$rid.json" 600) || return 1
+}
+
+# fmx_offer_registry_claim <state> <request_id>: atomically claim the durable
+# one-wake marker at state/x-context/<request_id>.offered.json. The marker uses
+# the context registry's recorded_at retention contract, so its first claim
+# survives inbox cleanup and expires with the relay's bounded follow-up window.
+# Returns 0 only to the caller that created the marker, 1 when a valid marker
+# already exists, and 2 on invalid input or a publication failure.
+fmx_offer_registry_claim() {
+  local state=$1 rid=$2 dir now record rc
+  case "$rid" in
+    ''|.*|*[!A-Za-z0-9._-]*) return 2 ;;
+  esac
+  fmx_context_registry_prune "$state"
+  now=${FMX_NOW_OVERRIDE:-$(date +%s)}
+  case "$now" in
+    ''|*[!0-9]*) return 2 ;;
+  esac
+  [ "${#now}" -le 18 ] || return 2
+  record=$(jq -cn --arg rid "$rid" --argjson recorded_at "$now" \
+    '{request_id:$rid, recorded_at:$recorded_at}') || return 2
+  dir="$state/x-context"
+  printf '%s\n' "$record" \
+    | fmx_private_artifact_publish_stdin_once "$dir" "$rid.offered.json" 600
+  rc=$?
+  return "$rc"
 }
 
 # fmx_context_registry_get <state> <request_id>: print the durable per-request
