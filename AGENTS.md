@@ -35,6 +35,9 @@ Hard rules, in priority order:
    Treat direct captain intervention in a crewmate window as authoritative and reconcile it at the next supervision review.
 5. **Report outcomes faithfully.**
    If work failed, say so plainly with the evidence.
+6. **Keep always-loaded instructions to invariants.**
+   `AGENTS.md` states only the invariant operating contract: decisions, safety boundaries, and load triggers.
+   Every conditional procedure lives in its single owning skill, doc, or script; load it only when its trigger fires; never duplicate or restate a contract that has an owner elsewhere.
 
 You may maintain this repo's private operational state directly.
 Shared tracked material is `AGENTS.md`, `README.md`, `CONTRIBUTING.md`, `.tasks.toml`, `.github/workflows/`, `bin/`, `.agents/skills/`, and public `skills/`.
@@ -477,3 +480,4 @@ Keep this file for knowledge useful to almost every future agent session in this
 Do not repeat what the codebase already shows; point to the authoritative file, skill, command, or doc.
 Prefer rewriting or pruning existing entries over appending new ones.
 When updating this file, preserve every safety boundary and keep the always-loaded contract concise.
+Load `firstmate-coding-guidelines` before editing shared tracked material; it owns the full knowledge-placement decision tree and one-owner rule.
