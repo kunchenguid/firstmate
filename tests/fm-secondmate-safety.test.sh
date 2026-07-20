@@ -1114,7 +1114,7 @@ test_home_seed_refuses_symlinked_leaf_files() {
 }
 
 test_secondmate_spawn_requires_seeded_matching_home() {
-  local home subhome wronghome marker_only active_descendant active_ancestor ancestor_active_home fakeroot root_descendant root_ancestor root_inside fakebin log err
+  local home subhome wronghome marker_only active_descendant active_ancestor ancestor_active_home fakeroot root_descendant root_ancestor root_inside fakebin log err helper
   home="$TMP_ROOT/spawn-validate-home"
   subhome="$TMP_ROOT/spawn-validate-subhome"
   wronghome="$TMP_ROOT/spawn-validate-wronghome"
@@ -1127,17 +1127,25 @@ test_secondmate_spawn_requires_seeded_matching_home() {
   root_ancestor="$TMP_ROOT/spawn-root-ancestor"
   root_inside="$root_ancestor/repo"
   mkdir -p "$home/data" "$home/state" "$subhome/data" "$wronghome/data" "$marker_only/data" "$active_descendant/data" "$root_descendant/data" "$fakeroot/bin"
-  cat > "$fakeroot/bin/fm-guard.sh" <<'SH'
+  # fm-spawn resolves its sibling helpers (fm-guard.sh AND fm-lane-governor.sh)
+  # from $FM_ROOT, which these cases repoint via FM_ROOT_OVERRIDE. Stub both so the
+  # spawn reaches the home-boundary validation under test instead of erroring on a
+  # missing helper in the fake root.
+  for helper in fm-guard.sh fm-lane-governor.sh; do
+    cat > "$fakeroot/bin/$helper" <<'SH'
 #!/usr/bin/env bash
 exit 0
 SH
-  chmod +x "$fakeroot/bin/fm-guard.sh"
+    chmod +x "$fakeroot/bin/$helper"
+  done
   mkdir -p "$ancestor_active_home/data" "$ancestor_active_home/state" "$active_ancestor/data" "$root_ancestor/data" "$root_inside/bin"
-  cat > "$root_inside/bin/fm-guard.sh" <<'SH'
+  for helper in fm-guard.sh fm-lane-governor.sh; do
+    cat > "$root_inside/bin/$helper" <<'SH'
 #!/usr/bin/env bash
 exit 0
 SH
-  chmod +x "$root_inside/bin/fm-guard.sh"
+    chmod +x "$root_inside/bin/$helper"
+  done
   fakebin=$(make_fake_tmux "$TMP_ROOT/spawn-validate-fake")
   log="$TMP_ROOT/spawn-validate-fake/tmux.log"
   err="$TMP_ROOT/spawn-validate.err"
