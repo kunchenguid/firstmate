@@ -21,6 +21,8 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/wake-helpers.sh"
 # shellcheck source=bin/fm-classify-lib.sh
 . "$ROOT/bin/fm-classify-lib.sh"
+# shellcheck source=bin/fm-watch.sh
+. "$ROOT/bin/fm-watch.sh"
 
 WATCH="$ROOT/bin/fm-watch.sh"
 DRAIN="$ROOT/bin/fm-wake-drain.sh"
@@ -106,6 +108,138 @@ test_stale_is_terminal_classifier() {
   stale_is_terminal "sess:fm-nonterm" "$state" && fail "non-terminal stale classified terminal"
   stale_is_terminal "sess:fm-missing" "$state" && fail "stale with no status classified terminal"
   pass "stale_is_terminal: terminal status surfaces, non-terminal and no-status are benign"
+}
+
+test_codex_mcp_fresh_launch_stall_detector() {
+  local dir state tail window elapsed
+  dir=$(make_case codex-mcp-detector); state="$dir/state"
+  STATE="$state"
+  window="sess:fm-codex-fresh"
+  tail=$'Starting MCP servers (8/9): datadog (16s - esc to interrupt)\n'
+  fm_write_meta "$state/codex-fresh.meta" \
+    "window=$window" \
+    "project=/tmp/project" \
+    "harness=codex" \
+    "kind=ship"
+
+  elapsed=$(codex_fresh_launch_stall_elapsed "$window" "$tail" || true)
+  [ "$elapsed" = 16 ] || fail "codex MCP startup stall detector did not return elapsed seconds"
+  ! codex_fresh_launch_stall_elapsed "$window" 'Working on the brief' >/dev/null \
+    || fail "healthy codex pane falsely matched the MCP startup detector"
+  ! codex_fresh_launch_stall_elapsed "$window" 'Starting MCP servers (8/9): datadog (8s - esc to interrupt)' >/dev/null \
+    || fail "fresh codex pane below the threshold falsely matched the MCP startup detector"
+  : > "$state/codex-fresh.turn-ended"
+  ! codex_fresh_launch_stall_elapsed "$window" "$tail" >/dev/null \
+    || fail "established codex lane with a turn-end marker falsely matched the fresh-launch detector"
+  rm -f "$state/codex-fresh.turn-ended"
+  touch -t 200001010000 "$state/codex-fresh.meta"
+  ! codex_fresh_launch_stall_elapsed "$window" "$tail" >/dev/null \
+    || fail "old codex metadata falsely matched the fresh-launch detector"
+  fm_write_meta "$state/claude-fresh.meta" \
+    "window=sess:fm-claude-fresh" \
+    "project=/tmp/project" \
+    "harness=claude" \
+    "kind=ship"
+  ! codex_fresh_launch_stall_elapsed "sess:fm-claude-fresh" "$tail" >/dev/null \
+    || fail "non-codex harness falsely matched the codex MCP detector"
+  pass "codex MCP startup detector is codex-only, fresh-launch-only, and thresholded"
+}
+
+test_codex_mcp_fresh_launch_auto_recover_relaunches_nomcp() {
+  local case_dir home state proj wt fakebin launchlog source_home wrapper killlog tail window status launch codex_home
+  case_dir="$TMP_ROOT/codex-mcp-recover"
+  home="$case_dir/home"
+  state="$home/state"
+  proj="$case_dir/project"
+  wt="$case_dir/wt"
+  launchlog="$case_dir/launch.log"
+  source_home="$case_dir/source-codex"
+  wrapper="$case_dir/spawn-wrapper.sh"
+  killlog="$case_dir/kill.log"
+  fakebin="$case_dir/fakebin"
+  mkdir -p "$home/data/codex-recover" "$home/projects" "$state" "$home/config" "$source_home" "$fakebin"
+  printf 'brief\n' > "$home/data/codex-recover/brief.md"
+  printf 'codex\n' > "$home/config/crew-harness"
+  fm_git_worktree "$proj" "$wt" "wt-codex-mcp-recover"
+  cat > "$source_home/config.toml" <<'EOF'
+model = "gpt-5"
+
+[mcp_servers.blackhole]
+url = "http://127.0.0.1:9999/mcp"
+EOF
+  printf '{"tokens":"fresh"}\n' > "$source_home/auth.json"
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "$*" in
+  *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
+esac
+case "${1:-}" in
+  display-message) printf 'firstmate\n'; exit 0 ;;
+  list-windows) exit 0 ;;
+  has-session|new-session|new-window|kill-window|set-window-option) exit 0 ;;
+  send-keys)
+    if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
+      prev=
+      for a in "$@"; do
+        if [ "$prev" = "-l" ]; then
+          printf '%s\n' "$a" >> "$FM_FAKE_LAUNCH_LOG"
+        fi
+        prev=$a
+      done
+    fi
+    exit 0
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/tmux"
+  fm_fake_exit0 "$fakebin" treehouse
+  cat > "$wrapper" <<SH
+#!/usr/bin/env bash
+PATH="$fakebin:\$PATH" \\
+FM_ROOT_OVERRIDE='' \\
+FM_HOME="$home" \\
+FM_STATE_OVERRIDE="$state" \\
+FM_DATA_OVERRIDE="$home/data" \\
+FM_PROJECTS_OVERRIDE="$home/projects" \\
+FM_CONFIG_OVERRIDE="$home/config" \\
+FM_CODEX_SOURCE_HOME="$source_home" \\
+FM_SPAWN_NO_GUARD=1 \\
+FM_FAKE_PANE_PATH="$wt" \\
+FM_FAKE_LAUNCH_LOG="$launchlog" \\
+TMUX="fake,1,0" \\
+"$ROOT/bin/fm-spawn.sh" "\$@"
+SH
+  chmod +x "$wrapper"
+  window="sess:fm-codex-recover"
+  fm_write_meta "$state/codex-recover.meta" \
+    "window=$window" \
+    "project=$proj" \
+    "harness=codex" \
+    "kind=scout" \
+    "model=gpt-5" \
+    "effort=high"
+  STATE="$state"
+  TRIAGE_LOG="$state/.watch-triage.log"
+  FM_SPAWN_BIN="$wrapper"
+  fm_backend_kill() {
+    printf '%s\n' "$*" >> "$killlog"
+    return 0
+  }
+  tail=$'Starting MCP servers (9/10): blackhole (16s - esc to interrupt)\n'
+  codex_fresh_launch_auto_recover "$window" "$tail"
+  status=$?
+  expect_code 0 "$status" "codex MCP fresh-launch auto-recover should succeed"
+  assert_contains "$(cat "$killlog")" "$window" "auto-recover did not kill the stalled codex endpoint"
+  launch=$(cat "$launchlog")
+  codex_home="$(cd "$state" && pwd -P)/codex-home"
+  assert_contains "$launch" "CODEX_HOME='$codex_home' codex --model 'gpt-5' -c 'model_reasoning_effort=\"high\"' --dangerously-bypass-approvals-and-sandbox -c \"notify=" \
+    "auto-recover did not relaunch codex through the no-MCP CODEX_HOME path"
+  assert_no_grep '[mcp_servers.' "$codex_home/config.toml" "auto-recover relaunch copied the black-hole MCP server"
+  assert_present "$state/.codex-mcp-recovered-codex-recover" "auto-recover did not leave a retry guard marker"
+  assert_grep "kind=scout" "$state/codex-recover.meta" "auto-recover did not preserve scout kind on respawn"
+  pass "codex MCP fresh-launch auto-recover kills the stalled lane and relaunches through the no-MCP Codex home"
 }
 
 test_scan_captain_relevant_statuses_classifier() {
@@ -1272,6 +1406,8 @@ test_afk_paused_changed_pane_hands_off_plain_stale() {
 
 test_signal_reason_is_actionable_classifier
 test_stale_is_terminal_classifier
+test_codex_mcp_fresh_launch_stall_detector
+test_codex_mcp_fresh_launch_auto_recover_relaunches_nomcp
 test_scan_captain_relevant_statuses_classifier
 test_classifier_primitives
 test_crew_is_provably_working_classifier

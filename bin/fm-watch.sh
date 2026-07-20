@@ -140,6 +140,9 @@ BUSY_REGEX=${FM_BUSY_REGEX:-'esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel|[<
 # daemon owns triage, so this watcher reverts to one-shot (enqueue + exit on every
 # wake) and never double-triages - and never runs the costly provably-working read.
 STALE_ESCALATE_SECS=${FM_STALE_ESCALATE_SECS:-240}  # idle secs before a provably-working stale escalates as a possible wedge
+CODEX_MCP_STALL_SECS=${FM_CODEX_MCP_STALL_SECS:-15}
+CODEX_FRESH_LAUNCH_WINDOW_SECS=${FM_CODEX_FRESH_LAUNCH_WINDOW_SECS:-300}
+FM_SPAWN_BIN=${FM_SPAWN_BIN:-$FM_ROOT/bin/fm-spawn.sh}
 # A crew that declared a pause is idling on a known external wait, so its stale
 # pane is absorbed rather than wedge-escalated.
 # A captain-held or paused crew whose agent has confidently exited uses the same
@@ -423,6 +426,95 @@ surface_nonterminal_stale() {  # <window> <hash>
     rm -f "$STATE/.paused-$key" "$STATE/.paused-rechecked-$key" "$STATE/.paused-resurfaced-$key"
   fi
   wake "stale: $win"
+}
+
+codex_mcp_startup_elapsed() {  # <pane-tail>
+  local tail_text=$1 line
+  line=$(printf '%s\n' "$tail_text" \
+    | grep -v '^[[:space:]]*$' \
+    | tail -8 \
+    | grep 'Starting MCP servers (' \
+    | tail -1 || true)
+  [ -n "$line" ] || return 1
+  printf '%s\n' "$line" \
+    | sed -nE 's/.*Starting MCP servers \([0-9]+\/[0-9]+\): .* \(([0-9]+)s[^0-9].*/\1/p' \
+    | tail -1
+}
+
+codex_fresh_launch_stall_elapsed() {  # <window> <pane-tail>
+  local win=$1 tail_text=$2 meta harness kind task age elapsed
+  meta=$(fm_backend_meta_for_window "$win" "$STATE" 2>/dev/null || true)
+  [ -n "$meta" ] || return 1
+  harness=$(fm_meta_get "$meta" harness)
+  [ "$harness" = codex ] || return 1
+  kind=$(fm_meta_get "$meta" kind)
+  case "${kind:-ship}" in
+    ship|scout) ;;
+    *) return 1 ;;
+  esac
+  task=$(basename "$meta")
+  task=${task%.meta}
+  [ ! -e "$STATE/$task.turn-ended" ] || return 1
+  age=$(age_of "$meta")
+  case "$age" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$age" -le "$CODEX_FRESH_LAUNCH_WINDOW_SECS" ] || return 1
+  elapsed=$(codex_mcp_startup_elapsed "$tail_text" || true)
+  case "$elapsed" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$elapsed" -ge "$CODEX_MCP_STALL_SECS" ] || return 1
+  printf '%s' "$elapsed"
+}
+
+codex_fresh_launch_first_line() {  # <text>
+  printf '%s\n' "$1" | sed -n '1p'
+}
+
+codex_fresh_launch_spawn() {
+  FM_SPAWN_NO_GUARD=1 "$FM_SPAWN_BIN" "$@"
+}
+
+codex_fresh_launch_recover_failed() {  # <window> <detail>
+  local win=$1 detail=$2 reason
+  reason="stale: $win (codex MCP startup auto-recover failed: $detail)"
+  fm_wake_append stale "$win" "$reason" || exit 1
+  wake "$reason"
+}
+
+codex_fresh_launch_auto_recover() {  # <window> <pane-tail>
+  local win=$1 tail_text=$2 meta task task_key win_key marker project kind model effort backend elapsed out rc
+  local args=()
+  elapsed=$(codex_fresh_launch_stall_elapsed "$win" "$tail_text" || true)
+  [ -n "$elapsed" ] || return 1
+  meta=$(fm_backend_meta_for_window "$win" "$STATE" 2>/dev/null || true)
+  [ -n "$meta" ] || return 1
+  task=$(basename "$meta")
+  task=${task%.meta}
+  task_key=$(printf '%s' "$task" | tr ':/.' '___')
+  win_key=$(printf '%s' "$win" | tr ':/.' '___')
+  marker="$STATE/.codex-mcp-recovered-$task_key"
+  if [ -e "$marker" ]; then
+    codex_fresh_launch_recover_failed "$win" "startup line persisted after one recovery attempt"
+  fi
+  project=$(fm_meta_get "$meta" project)
+  [ -n "$project" ] || codex_fresh_launch_recover_failed "$win" "missing project in $meta"
+  kind=$(fm_meta_get "$meta" kind)
+  model=$(fm_meta_get "$meta" model)
+  effort=$(fm_meta_get "$meta" effort)
+  backend=$(fm_backend_of_meta "$meta")
+  date +%s > "$marker"
+  fm_backend_kill "$backend" "$win" "$(fm_meta_get "$meta" zellij_tab_id)" "fm-$task" 2>/dev/null || true
+  args=("$task" "$project" --harness codex --backend "$backend")
+  [ -z "$model" ] || [ "$model" = default ] || args+=(--model "$model")
+  [ -z "$effort" ] || [ "$effort" = default ] || args+=(--effort "$effort")
+  [ "${kind:-ship}" != scout ] || args+=(--scout)
+  out=$(codex_fresh_launch_spawn "${args[@]}" 2>&1)
+  rc=$?
+  if [ "$rc" -eq 0 ]; then
+    rm -f "$STATE/.hash-$win_key" "$STATE/.count-$win_key" "$STATE/.stale-$win_key" \
+      "$STATE/.stale-since-$win_key" "$STATE/.wedge-escalations-$win_key"
+    triage_log "auto-recovered codex MCP startup stall after ${elapsed}s: $win -> $(codex_fresh_launch_first_line "$out")"
+    return 0
+  fi
+  codex_fresh_launch_recover_failed "$win" "$(codex_fresh_launch_first_line "$out")"
 }
 
 # Check and heartbeat cadence must survive actionable exits and restarts: the
@@ -921,6 +1013,9 @@ EOF
       continue
     fi
     tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null) || continue
+    if codex_fresh_launch_auto_recover "$w" "$tail40"; then
+      continue
+    fi
     h=$(printf '%s' "$tail40" | hash_pane)
     key=$(printf '%s' "$w" | tr ':/.' '___')
     hf="$STATE/.hash-$key"

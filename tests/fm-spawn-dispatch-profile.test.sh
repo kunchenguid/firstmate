@@ -88,6 +88,7 @@ run_spawn() {
   FM_ROOT_OVERRIDE='' FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_CODEX_SOURCE_HOME="${FM_CODEX_SOURCE_HOME:-}" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
     FM_FAKE_LAUNCH_LOG="$launchlog" GROK_HOME="$home/grok-home" PATH="$fakebin:$PATH" \
     "$SPAWN" "$@" 2>&1
@@ -296,6 +297,49 @@ test_codex_threads_model_and_effort() {
   assert_contains "$launch" "codex --model 'gpt-5' -c 'model_reasoning_effort=\"high\"' --dangerously-bypass-approvals-and-sandbox" \
     "codex launch did not thread model and reasoning effort config"
   pass "codex receives --model and model_reasoning_effort profile flags"
+}
+
+test_codex_crewmate_uses_managed_nomcp_home() {
+  local rec id out status launch source_home codex_home config auth
+  id=profile-codex-home-z3b
+  rec=$(make_spawn_case profile-codex-home codex "$id")
+  read_case_record "$rec"
+  source_home="$CASE_DIR/source-codex"
+  mkdir -p "$source_home"
+  cat > "$source_home/config.toml" <<'EOF'
+model = "gpt-5"
+model_reasoning_effort = "medium"
+
+[mcp_servers.linear]
+url = "https://mcp.linear.app/mcp"
+
+[mcp_servers.node_repl]
+command = "/tmp/node_repl"
+startup_timeout_sec = 120
+EOF
+  printf '{"tokens":"fresh"}\n' > "$source_home/auth.json"
+
+  out=$(FM_CODEX_SOURCE_HOME="$source_home" run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --harness codex --model gpt-5 --effort high)
+  status=$?
+  expect_code 0 "$status" "codex crewmate spawn should succeed with managed CODEX_HOME"
+  launch=$(cat "$LAUNCH_LOG")
+  codex_home="$(cd "$HOME_DIR/state" && pwd -P)/codex-home"
+  config="$codex_home/config.toml"
+  auth="$codex_home/auth.json"
+  assert_contains "$launch" "CODEX_HOME='$codex_home' codex --model 'gpt-5' -c 'model_reasoning_effort=\"high\"' --dangerously-bypass-approvals-and-sandbox -c \"notify=" \
+    "codex launch did not preserve CODEX_HOME plus model, effort, sandbox bypass, and notify flags"
+  assert_present "$config" "managed Codex config was not created"
+  assert_grep 'model = "gpt-5"' "$config" "managed Codex config did not preserve the top-level model"
+  assert_grep 'model_reasoning_effort = "medium"' "$config" "managed Codex config did not preserve top-level reasoning effort"
+  assert_grep '[mcp_servers]' "$config" "managed Codex config should contain an empty MCP table"
+  assert_no_grep '[mcp_servers.' "$config" "managed Codex config must not copy MCP server definitions"
+  assert_no_grep 'url =' "$config" "managed Codex config must not contain remote MCP urls"
+  assert_no_grep 'command =' "$config" "managed Codex config must not contain local MCP commands"
+  [ -L "$auth" ] || fail "managed Codex auth is not a symlink"
+  [ "$(readlink "$auth")" = "$(cd "$source_home" && pwd -P)/auth.json" ] \
+    || fail "managed Codex auth symlink did not point at the source auth"
+  pass "codex crewmates use a firstmate-managed CODEX_HOME with no MCP servers and inherited auth"
 }
 
 test_codex_omits_invalid_max_effort() {
@@ -554,6 +598,7 @@ test_active_dispatch_profile_does_not_block_secondmate_launch() {
   assert_contains "$out" "spawned $id harness=codex kind=secondmate" "secondmate launch did not use secondmate harness resolution"
   assert_grep "kind=secondmate" "$HOME_DIR/state/$id.meta" "secondmate meta missing kind=secondmate"
   assert_meta_profile "$HOME_DIR/state/$id.meta" codex default default
+  assert_not_contains "$(cat "$LAUNCH_LOG")" "CODEX_HOME=" "secondmate codex launch must not use the crewmate CODEX_HOME"
   pass "active crew-dispatch profile does not block secondmate launches"
 }
 
@@ -593,6 +638,7 @@ test_active_dispatch_profile_allows_positional_harness
 test_active_dispatch_profile_allows_raw_launch_command
 test_claude_threads_model_and_effort
 test_codex_threads_model_and_effort
+test_codex_crewmate_uses_managed_nomcp_home
 test_codex_omits_invalid_max_effort
 test_grok_threads_model_and_reasoning_effort
 test_grok_omits_invalid_max_reasoning_effort
