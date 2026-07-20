@@ -107,13 +107,15 @@ test_tracked_extension_present_and_self_hashing() {
   assert_contains "$text" 'if (ownership === "missing" || ownership === "dead")' "tracked extension does not restrict acquisition to reclaimable states"
   assert_contains "$text" 'case "fork":' "tracked extension does not classify Pi fork lifecycle events"
   assert_contains "$text" 'case "reload":' "tracked extension does not classify Pi reload lifecycle events"
-  assert_contains "$text" 'startArm("", activeSessionLockPolicy)' "tracked extension does not carry session lock policy into automatic arms"
+  assert_contains "$text" 'startArm(activeSessionLockPolicy)' "tracked extension does not carry session lock policy into every arm"
+  assert_contains "$text" 'launchArm(activeSessionLockPolicy, predecessorArmPid)' "tracked extension does not carry session lock policy into successor arms"
+  assert_not_contains "$text" 'lockPolicy: SessionLockPolicy = "recover"' "tracked extension still has an implicit recover policy"
   assert_contains "$text" 'const acquisition = spawnSync(lockScript, []' "tracked extension does not route acquisition through the production owner"
   assert_contains "$text" 'if (ownership !== "owned")' "tracked extension arms without re-reading owned state"
   assert_contains "$text" 'lock ownership changed during resume' "tracked extension does not distinguish a lost acquisition race"
   assert_contains "$text" 'a verified live firstmate session owns this home' "tracked extension does not distinguish a verified competitor"
   assert_contains "$text" 'lock acquisition failed' "tracked extension does not distinguish acquisition failure"
-  assert_contains "$text" 'const result = await startArm();' "tracked extension does not await recovery and verified arm readiness"
+  assert_contains "$text" 'const verified = await waitForStartResult(armChild);' "tracked extension does not await verified arm readiness"
   assert_contains "$text" 'awayMonitor = setInterval(awayMonitorListener, 50)' "tracked extension does not poll the away flag directly"
   assert_contains "$text" 'handleAwayMonitorFailure(error);' "tracked extension does not fail closed on away-monitor errors"
   assert_contains "$text" 'scheduleAwayMonitorRetry();' "tracked extension does not retry away-monitor setup failures"
@@ -1544,6 +1546,141 @@ EOF
   pass "Pi fork and reload rebuild only with existing lock ownership"
 }
 
+test_pi_fork_reload_policy_survives_every_rearm_path() {
+  local reason entrypoint repo home plugin arm_log acquire_log release closed out status
+  for reason in fork reload; do
+    for entrypoint in actionable retry command tool; do
+      repo="$TMP_ROOT/pi-$reason-$entrypoint-policy-root"
+      home="$TMP_ROOT/pi-$reason-$entrypoint-policy-home"
+      arm_log="$TMP_ROOT/pi-$reason-$entrypoint-policy-arm.log"
+      acquire_log="$TMP_ROOT/pi-$reason-$entrypoint-policy-acquire.log"
+      release="$TMP_ROOT/pi-$reason-$entrypoint-policy-release"
+      closed="$TMP_ROOT/pi-$reason-$entrypoint-policy-closed"
+      mkdir -p "$home/state" "$home/config"
+      install_pi_watch_extension_fixture "$repo"
+      plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+      cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm\n' >> "${FM_ARM_LOG:?}"
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+case "${FM_REARM_ENTRYPOINT:?}" in
+  actionable)
+    while [ ! -e "$FM_RELEASE_FILE" ]; do sleep 0.01; done
+    printf 'signal: policy loss\n'
+    ;;
+  retry)
+    while [ ! -e "$FM_RELEASE_FILE" ]; do sleep 0.01; done
+    printf 'closed\n' > "$FM_CLOSED_FILE"
+    exit 9
+    ;;
+  command|tool)
+    trap 'exit 0' TERM INT
+    while :; do sleep 1; done
+    ;;
+esac
+SH
+      chmod +x "$repo/bin/fm-watch-arm.sh"
+      status=0
+      out=$(REASON="$reason" ENTRYPOINT="$entrypoint" PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$arm_log" FM_LOCK_ACQUIRE_LOG="$acquire_log" FM_RELEASE_FILE="$release" FM_CLOSED_FILE="$closed" FM_REARM_ENTRYPOINT="$entrypoint" FM_WATCH_REARM_RETRY_BASE_MS=1000 FM_WATCH_REARM_RETRY_MAX_MS=1000 node --input-type=module 2>&1 <<'EOF'
+import { existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const lock = `${process.env.FM_HOME}/state/.lock`;
+writeFileSync(lock, `${process.pid}\n`);
+const handlers = new Map();
+const notifications = [];
+const prompts = [];
+let command = null;
+let tool = null;
+const pi = {
+  on(event, handler) {
+    handlers.set(event, handler);
+  },
+  registerCommand(name, options) {
+    if (name === "fm-watch-arm-pi") command = options;
+  },
+  registerTool(candidate) {
+    if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+  },
+  sendUserMessage: async (message) => {
+    prompts.push(message);
+  },
+};
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+await handlers.get("session_start")?.({ type: "session_start", reason: process.env.REASON }, {
+  ui: {
+    notify(message) {
+      notifications.push(message);
+    },
+  },
+});
+if (!command || !tool) throw new Error("public arm entrypoints were not registered");
+if (!existsSync(process.env.FM_ARM_LOG)) throw new Error(`${process.env.REASON} initial owned arm did not start`);
+
+const loss = ["actionable", "command"].includes(process.env.ENTRYPOINT) ? "missing" : "dead";
+if (process.env.ENTRYPOINT === "retry") {
+  writeFileSync(process.env.FM_RELEASE_FILE, "release\n");
+  for (let i = 0; i < 100 && !existsSync(process.env.FM_CLOSED_FILE); i += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  if (!existsSync(process.env.FM_CLOSED_FILE)) throw new Error("retry arm did not close");
+  await new Promise((resolve) => setTimeout(resolve, 300));
+}
+if (loss === "missing") unlinkSync(lock); else writeFileSync(lock, "999999\n");
+
+let toolResult = null;
+if (process.env.ENTRYPOINT === "actionable") writeFileSync(process.env.FM_RELEASE_FILE, "release\n");
+if (process.env.ENTRYPOINT === "command") {
+  await command.handler("", {
+    ui: {
+      notify(message) {
+        notifications.push(message);
+      },
+    },
+  });
+}
+if (process.env.ENTRYPOINT === "tool") {
+  toolResult = await tool.execute("policy-loss", {}, undefined, undefined, {});
+}
+
+for (let i = 0; i < 150; i += 1) {
+  const surfaced = process.env.ENTRYPOINT === "tool"
+    ? toolResult?.details?.ok === false
+    : process.env.ENTRYPOINT === "command"
+      ? notifications.some((message) => message.includes(`state: ${loss}`))
+      : prompts.some((message) => message.includes(`state: ${loss}`));
+  if (surfaced) break;
+  await new Promise((resolve) => setTimeout(resolve, 20));
+}
+const surfaced = process.env.ENTRYPOINT === "tool"
+  ? toolResult?.content?.[0]?.text || ""
+  : process.env.ENTRYPOINT === "command"
+    ? notifications.join(" | ")
+    : prompts.join(" | ");
+if (!surfaced.includes(`existing session-lock ownership required (state: ${loss})`)) {
+  throw new Error(`${process.env.REASON}/${process.env.ENTRYPOINT} did not preserve owned-only policy: ${surfaced}`);
+}
+const armCount = readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split(/\n/).length;
+if (armCount !== 1) throw new Error(`${process.env.REASON}/${process.env.ENTRYPOINT} launched ${armCount} arms`);
+if (existsSync(process.env.FM_LOCK_ACQUIRE_LOG)) {
+  throw new Error(`${process.env.REASON}/${process.env.ENTRYPOINT} invoked lock acquisition`);
+}
+if (loss === "missing") {
+  if (existsSync(lock)) throw new Error(`${process.env.REASON}/${process.env.ENTRYPOINT} recreated a missing lock`);
+} else if (readFileSync(lock, "utf8").trim() !== "999999") {
+  throw new Error(`${process.env.REASON}/${process.env.ENTRYPOINT} replaced a dead lock`);
+}
+await handlers.get("session_shutdown")?.({ type: "session_shutdown" }, {});
+EOF
+      ) || status=$?
+      expect_code 0 "$status" "Pi $reason must retain owned-only policy through $entrypoint"
+      [ -z "$out" ] || fail "Pi $reason/$entrypoint policy-path test printed output: $out"
+    done
+  done
+  pass "Pi fork and reload retain owned-only policy across every re-arm path"
+}
+
 test_pi_extension_respects_primary_scope() {
   local scenario base repo home plugin arm_log out status
   for scenario in linked secondmate; do
@@ -1615,7 +1752,7 @@ EOF
 }
 
 test_pi_extension_distinguishes_lock_refusal_states() {
-  local mode expected repo home plugin out status
+  local mode event_expected tool_expected repo home plugin out status
   for mode in other failure changed; do
     repo="$TMP_ROOT/pi-lock-message-$mode-root"
     home="$TMP_ROOT/pi-lock-message-$mode-home"
@@ -1629,17 +1766,30 @@ exit 9
 SH
     chmod +x "$repo/bin/fm-watch-arm.sh"
     case "$mode" in
-      other) expected="read-only - a verified live firstmate session owns this home" ;;
-      failure) expected="lock acquisition failed - session lock is missing" ;;
-      changed) expected="lock ownership changed during resume - a verified live firstmate session now owns this home" ;;
+      other)
+        event_expected="read-only - a verified live firstmate session owns this home"
+        tool_expected="$event_expected"
+        ;;
+      failure)
+        event_expected="lock acquisition failed - session lock is missing"
+        tool_expected="$event_expected"
+        ;;
+      changed)
+        event_expected="lock ownership changed during resume - a verified live firstmate session now owns this home"
+        tool_expected="read-only - a verified live firstmate session owns this home"
+        ;;
     esac
     status=0
-    out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_LOCK_FIXTURE_MODE="$mode" EXPECTED="$expected" node --input-type=module 2>&1 <<'EOF'
+    out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_LOCK_FIXTURE_MODE="$mode" EVENT_EXPECTED="$event_expected" TOOL_EXPECTED="$tool_expected" node --input-type=module 2>&1 <<'EOF'
 import { pathToFileURL } from "node:url";
 
 let tool = null;
+const handlers = new Map();
+const notifications = [];
 const pi = {
-  on() {},
+  on(event, handler) {
+    handlers.set(event, handler);
+  },
   registerCommand() {},
   registerTool(candidate) {
     if (candidate.name === "fm_watch_arm_pi") tool = candidate;
@@ -1648,11 +1798,22 @@ const pi = {
 };
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 mod.default(pi);
+await handlers.get("session_start")?.({ type: "session_start", reason: "resume" }, {
+  ui: {
+    notify(message) {
+      notifications.push(message);
+    },
+  },
+});
+if (!notifications.some((message) => message.includes(process.env.EVENT_EXPECTED))) {
+  throw new Error(`expected session refusal '${process.env.EVENT_EXPECTED}', got '${notifications.join(" | ")}'`);
+}
 const result = await tool.execute("lock-message", {}, undefined, undefined, {});
 if (result.details?.ok !== false) throw new Error(`refusal unexpectedly succeeded: ${JSON.stringify(result)}`);
-if (!result.content[0].text.includes(process.env.EXPECTED)) {
-  throw new Error(`expected '${process.env.EXPECTED}', got '${result.content[0].text}'`);
+if (!result.content[0].text.includes(process.env.TOOL_EXPECTED)) {
+  throw new Error(`expected tool refusal '${process.env.TOOL_EXPECTED}', got '${result.content[0].text}'`);
 }
+await handlers.get("session_shutdown")?.({ type: "session_shutdown" }, {});
 EOF
     ) || status=$?
     expect_code 0 "$status" "Pi watcher must distinguish the $mode lock refusal"
@@ -2647,6 +2808,7 @@ test_pi_extension_fails_closed_and_retries_away_monitor
 test_pi_resume_session_recovers_only_reclaimable_locks
 test_pi_session_start_load_order_preserves_initial_nudge
 test_pi_fork_reload_rebuilds_only_owned_supervision
+test_pi_fork_reload_policy_survives_every_rearm_path
 test_pi_extension_respects_primary_scope
 test_pi_extension_distinguishes_lock_refusal_states
 test_opencode_primary_watch_plugin_static_wiring

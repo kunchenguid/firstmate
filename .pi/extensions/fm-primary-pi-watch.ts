@@ -186,7 +186,7 @@ export default function (pi: ExtensionAPI) {
     if (!awayObserved) return;
     awayObserved = false;
     if (!sessionActive || shuttingDown || !awayMonitor) return;
-    const result = await startArm("", activeSessionLockPolicy);
+    const result = await startArm(activeSessionLockPolicy);
     if (!result.ok) await sendWakeSafely(result.message);
   }
 
@@ -281,7 +281,7 @@ export default function (pi: ExtensionAPI) {
 
   async function recoverArmAfterMonitor(): Promise<void> {
     try {
-      const result = await startArm("", activeSessionLockPolicy);
+      const result = await startArm(activeSessionLockPolicy);
       if (!result.ok) await sendWakeSafely(result.message);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -351,14 +351,14 @@ export default function (pi: ExtensionAPI) {
   }
 
   function terminalOwnershipFailure(message: string): boolean {
-    return /(?:read-only|lock ownership changed|lock acquisition failed)/.test(message);
+    return /(?:read-only|lock ownership changed|lock acquisition failed|lock ownership unavailable)/.test(message);
   }
 
   async function restoreAfterActionableClose(predecessorArmPid: string): Promise<string> {
     let failure = "";
     for (let attempt = 0; attempt <= retryLimit; attempt += 1) {
       if (stopping || shuttingDown || existsSync(awayFlag)) return "";
-      const replacement = launchArm(predecessorArmPid);
+      const replacement = launchArm(activeSessionLockPolicy, predecessorArmPid);
       const successorChild = child;
       if (replacement.ok && successorChild && await waitForReadiness(successorChild)) return "";
       if (replacement.ok) {
@@ -392,7 +392,7 @@ export default function (pi: ExtensionAPI) {
     }
     const timer = setTimeout(() => {
       if (retryTimer === timer) retryTimer = null;
-      const result = launchArm(predecessorArmPid);
+      const result = launchArm(activeSessionLockPolicy, predecessorArmPid);
       if (!result.ok) {
         surfaceFailure(`watcher: FAILED - Pi extension could not launch a continuity retry\n${result.message}`);
       }
@@ -401,7 +401,7 @@ export default function (pi: ExtensionAPI) {
     retryTimer = timer;
   }
 
-  function launchArm(predecessorArmPid = "", lockPolicy: SessionLockPolicy = "recover"): ArmResult {
+  function launchArm(lockPolicy: SessionLockPolicy, predecessorArmPid = ""): ArmResult {
     if (!primaryHome) {
       return { ok: false, message: "watcher: inactive - current checkout is not a primary firstmate home" };
     }
@@ -549,8 +549,8 @@ export default function (pi: ExtensionAPI) {
     return { ok: true, message: `watcher: started Pi extension arm child ${id}` };
   }
 
-  async function startArm(predecessorArmPid = "", lockPolicy: SessionLockPolicy = "recover"): Promise<ArmResult> {
-    const result = launchArm(predecessorArmPid, lockPolicy);
+  async function startArm(lockPolicy: SessionLockPolicy, predecessorArmPid = ""): Promise<ArmResult> {
+    const result = launchArm(lockPolicy, predecessorArmPid);
     if (!result.ok) return result;
     const armChild = child;
     if (!armChild) return result;
@@ -576,7 +576,7 @@ export default function (pi: ExtensionAPI) {
     sessionActive = true;
     activeSessionLockPolicy = lockPolicy;
     startAwayMonitor();
-    const result = await startArm("", activeSessionLockPolicy);
+    const result = await startArm(activeSessionLockPolicy);
     if (!result.ok) ctx?.ui?.notify?.(result.message, "warning");
   });
   pi.on?.("session_shutdown", () => {
@@ -592,7 +592,7 @@ export default function (pi: ExtensionAPI) {
   pi.registerCommand?.("fm-watch-arm-pi", {
     description: "Arm firstmate watcher supervision through the Pi extension instead of foreground bash.",
     handler: async (_args, ctx) => {
-      const result = await startArm();
+      const result = await startArm(activeSessionLockPolicy);
       ctx.ui.notify(result.message, result.ok ? "info" : "warning");
     },
   });
@@ -607,7 +607,7 @@ export default function (pi: ExtensionAPI) {
     ],
     parameters: Type.Object({}),
     execute: async () => {
-      const result = await startArm();
+      const result = await startArm(activeSessionLockPolicy);
       return {
         content: [{ type: "text", text: result.message }],
         details: result,
