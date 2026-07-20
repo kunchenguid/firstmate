@@ -428,6 +428,7 @@ install_cmd() {
     cmux) echo "brew install --cask cmux  # or see https://cmux.com" ;;
     treehouse) echo "curl -fsSL https://kunchenguid.github.io/treehouse/install.sh | sh" ;;
     no-mistakes) echo "curl -fsSL https://raw.githubusercontent.com/kunchenguid/no-mistakes/main/docs/install.sh | sh" ;;
+    cursor-agent) echo "curl https://cursor.com/install -fsS | bash  # installs cursor-agent" ;;
     gh-axi|chrome-devtools-axi|lavish-axi) echo "npm install -g $1 && $1 setup hooks" ;;
     tasks-axi|quota-axi) echo "npm install -g $1" ;;
     *) return 1 ;;
@@ -793,6 +794,17 @@ crew=
 [ -f "$CONFIG/crew-harness" ] && crew=$(tr -d '[:space:]' < "$CONFIG/crew-harness" || true)
 if [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ] && [ -n "$crew" ] && [ "$crew" != "default" ]; then
   echo "BOOTSTRAP_INFO: crew harness override active: $crew"
+fi
+# When this home (or its crew override) runs cursor, cursor-agent must be on PATH.
+# Absent binary is a hard MISSING for cursor homes; other harnesses stay silent.
+own_harness=
+own_harness=$("$SCRIPT_DIR/fm-harness.sh" 2>/dev/null || true)
+effective_crew=$crew
+[ -n "$effective_crew" ] && [ "$effective_crew" != "default" ] || effective_crew=$own_harness
+if [ "$effective_crew" = "cursor" ] || [ "$own_harness" = "cursor" ]; then
+  if ! command -v cursor-agent >/dev/null 2>&1; then
+    missing_tool_diagnostic cursor-agent
+  fi
 fi
 crew_dispatch_validate
 if [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ] \

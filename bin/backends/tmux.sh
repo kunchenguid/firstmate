@@ -143,8 +143,11 @@ fm_backend_tmux_current_command() {  # <target>
 # AGENTS.md's session-start guarantee closes). See docs/tmux-backend.md
 # "Agent liveness probe" for the empirical basis. Prints one of:
 #   alive   - the foreground command is one of the verified harness binaries
-#             (claude, codex, opencode, grok - each confirmed to run as its
-#             own process name, never wrapped by a generic interpreter).
+#             (claude, codex, opencode, grok, cursor-agent - each confirmed to
+#             run as its own process name, never wrapped by a generic
+#             interpreter). cursor-agent may also appear as MainThread or as
+#             argv0 `agent` (the ~/.local/bin/agent symlink); those shapes are
+#             confirmed via pane process args before counting as alive.
 #   dead    - the foreground command is a bare shell: nothing is running in
 #             the pane, so a prior agent process has exited.
 #   unknown - anything else, INCLUDING a bare "node"/"python" interpreter
@@ -154,13 +157,42 @@ fm_backend_tmux_current_command() {  # <target>
 #             pane. Callers must never treat unknown as a confirmed-dead
 #             signal (bin/fm-bootstrap.sh's secondmate-liveness sweep gates a
 #             respawn on `dead` only).
+fm_backend_tmux_pane_has_cursor_agent() {  # <target>
+  local target=$1 pid child
+  pid=$(tmux display-message -p -t "$target" '#{pane_pid}' 2>/dev/null) || return 1
+  [ -n "$pid" ] || return 1
+  # pane_pid is usually the login shell; cursor-agent is typically a descendant.
+  if ps -o args= -p "$pid" 2>/dev/null | grep -Eq 'cursor-agent|/cursor-agent|share/cursor-agent'; then
+    return 0
+  fi
+  while IFS= read -r child; do
+    [ -n "$child" ] || continue
+    if ps -o args= -p "$child" 2>/dev/null | grep -Eq 'cursor-agent|/cursor-agent|share/cursor-agent'; then
+      return 0
+    fi
+    if ps --ppid "$child" -o args= 2>/dev/null | grep -Eq 'cursor-agent|/cursor-agent|share/cursor-agent'; then
+      return 0
+    fi
+  done <<EOF
+$(ps --ppid "$pid" -o pid= 2>/dev/null)
+EOF
+  return 1
+}
+
 fm_backend_tmux_agent_alive() {  # <target>
   local target=$1 comm
   comm=$(fm_backend_tmux_current_command "$target") || { printf 'unknown'; return 0; }
   comm=${comm#-}
   case "$comm" in
     '') printf 'unknown' ;;
-    *claude*|*codex*|*opencode*|*grok*) printf 'alive' ;;
+    *claude*|*codex*|*opencode*|*grok*|*cursor-agent*) printf 'alive' ;;
+    MainThread|agent)
+      if fm_backend_tmux_pane_has_cursor_agent "$target"; then
+        printf 'alive'
+      else
+        printf 'unknown'
+      fi
+      ;;
     zsh|bash|sh|dash|ash|ksh|mksh|tcsh|csh|fish) printf 'dead' ;;
     *) printf 'unknown' ;;
   esac
