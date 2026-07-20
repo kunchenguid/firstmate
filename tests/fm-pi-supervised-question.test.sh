@@ -26,6 +26,14 @@ cleanup_processes() {
 }
 trap cleanup_processes EXIT
 
+file_mode() {
+  if [ "$(uname)" = Darwin ]; then
+    stat -f %Lp "$1"
+  else
+    stat -c %a "$1"
+  fi
+}
+
 forget_pid() {
   local forgotten=$1 pid existing
   existing="${LIVE_PIDS[*]:-}"
@@ -142,8 +150,8 @@ test_answer_resumes_same_tool_call() {
     "$home/state/$task_id.status" "bridge did not publish the bounded decision wake"
   open=$(bash -c '. "$1"; status_open_decisions "$2"' _ "$CLASSIFY" "$home/state/$task_id.status")
   assert_contains "$open" "ask-$call_id" "status fold did not retain the Pi call identity"
-  [ "$(stat -f '%Lp' "$home/state/questions" 2>/dev/null || stat -c '%a' "$home/state/questions")" = 700 ] || fail "question root is not mode 0700"
-  [ "$(stat -f '%Lp' "$request" 2>/dev/null || stat -c '%a' "$request")" = 600 ] || fail "request is not mode 0600"
+  [ "$(file_mode "$home/state/questions")" = 700 ] || fail "question root is not mode 0700"
+  [ "$(file_mode "$request")" = 600 ] || fail "request is not mode 0600"
 
   answer_json "No mistakes" | FM_HOME="$home" "$ANSWER" "$task_id" "$call_id" >/dev/null \
     || fail "guarded Firstmate answer failed"
