@@ -12,6 +12,7 @@
 #                 "FLEET_SYNC: <repo>: skipped|recovered|STUCK: <detail>",
 #                 "PR_CHECK_MIGRATION: <private remediation>",
 #                 "TANGLE: <remediation>",
+#                 "SECONDMATE_SELF_CHECK: failed: <reason>",
 #                 "SECONDMATE_SYNC: secondmate <id>: skipped: <reason>",
 #                 "NUDGE_SECONDMATES: secondmate <id>: send failed: <reason>",
 #                 "BOOTSTRAP_INFO: nudged fm-<id> with '<message>'",
@@ -47,6 +48,9 @@
 #          "treehouse get --lease" support.
 #          no-mistakes is also MISSING when its installed version is older than
 #          1.31.2.
+#          A home marked with .fm-secondmate-home also emits SECONDMATE_SELF_CHECK
+#          when routed-work prerequisites are missing, unauthenticated, or too old;
+#          do not route work to that secondmate until the line disappears.
 #          tasks-axi and quota-axi are required bootstrap tools (same class as
 #          lavish-axi). tasks-axi is also version and feature gated (0.1.1+
 #          with update --archive-body and mv [<id>...]); an installed but
@@ -88,6 +92,7 @@ PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
+SUB_HOME_MARKER=".fm-secondmate-home"
 # shellcheck source=bin/fm-tasks-axi-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
 # shellcheck source=bin/fm-tangle-lib.sh disable=SC1091
@@ -546,6 +551,27 @@ no_mistakes_compatible() {
   [ "$patch" -ge "$NO_MISTAKES_MIN_PATCH" ]
 }
 
+secondmate_self_check() {
+  local problems=""
+  [ -f "$FM_HOME/$SUB_HOME_MARKER" ] || return 0
+  command -v tasks-axi >/dev/null 2>&1 && fm_tasks_axi_compatible \
+    || problems="$problems tasks-axi"
+  command -v quota-axi >/dev/null 2>&1 \
+    || problems="$problems quota-axi"
+  if ! command -v gh >/dev/null 2>&1; then
+    problems="$problems gh"
+  elif ! gh auth status >/dev/null 2>&1; then
+    problems="$problems gh-auth"
+  fi
+  command -v no-mistakes >/dev/null 2>&1 && no_mistakes_compatible \
+    || problems="$problems no-mistakes"
+  if [ -n "$problems" ]; then
+    echo "SECONDMATE_SELF_CHECK: failed: routed-work prerequisites not ready:${problems}"
+  elif [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ]; then
+    echo "BOOTSTRAP_INFO: secondmate self-check passed"
+  fi
+}
+
 x_mode_write_if_changed() {
   local dest=$1 content=$2 mode=$3 parent tmp parent_device current_mode
   parent=${dest%/*}
@@ -851,6 +877,7 @@ if [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ] && [ -n "$crew" ] && [ "$crew" != 
   echo "BOOTSTRAP_INFO: crew harness override active: $crew"
 fi
 crew_dispatch_validate
+secondmate_self_check
 if [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ] \
   && ! fm_backlog_backend_manual "$CONFIG" && fm_tasks_axi_compatible; then
   echo "BOOTSTRAP_INFO: tasks-axi available"
