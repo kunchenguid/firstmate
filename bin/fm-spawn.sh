@@ -100,6 +100,18 @@
 #     __PIWATCH__   absolute path to .pi/extensions/fm-primary-pi-watch.ts in a pi secondmate home
 #     __OPINPUT__   absolute path to the canonical operational-input encoder
 #     __PIBRIEFENV__ shell assignment identifying the unchanged Pi positional brief
+#     __CLAUDE_OAUTH_EXEC__ optional helper wrapper for native Claude OAuth
+#                  account rotation, inserted only when config/claude-rotation
+#                  or FM_CLAUDE_ROTATION opts in and the resolved harness is claude.
+#   Native Claude OAuth rotation is off by default.
+#   Enable it with config/claude-rotation containing `enabled`, optionally plus
+#   `policy=round-robin|first-available`, `account_dir=/path`,
+#   `cooldown_seconds=N`, `refresh_margin_seconds=N`, `refresh_url=URL`, or
+#   `client_id=ID`.
+#   `FM_CLAUDE_ROTATION=1` can also opt in for one spawn.
+#   When enabled, fm-spawn records only claude_oauth_account* identity metadata
+#   and launches through fm-claude-accounts.sh exec so the token is never written
+#   into the launch string or task metadata.
 # Per-harness turn-end hooks are installed automatically; some live outside the worktree.
 # grok uses a firstmate-owned global hook under ${GROK_HOME:-$HOME/.grok}/hooks
 # plus a gitignored .fm-grok-turnend worktree pointer and a state token.
@@ -424,7 +436,7 @@ launch_template() {
     # does NOT suppress the interactive ghost text (verified empirically), so the env
     # var is the correct control. The dim-aware composer reader in fm-tmux-lib.sh is
     # the defense-in-depth backstop for any pane this flag cannot reach.
-    claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false __CLAUDE_OAUTH_EXEC__claude --dangerously-skip-permissions __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     codex)
       if [ "$kind" = secondmate ]; then
         printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
@@ -629,6 +641,131 @@ effort_flag_for_harness() {
 
 json_escape() {
   printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
+}
+
+shell_assign() {  # <name> <value>
+  printf '%s=' "$1"
+  shell_quote "$2"
+  printf ' '
+}
+
+trim_line() {
+  printf '%s' "$1" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//'
+}
+
+claude_rotation_config_load() {
+  CLAUDE_ROTATION_ENABLED=0
+  CLAUDE_ROTATION_POLICY=round-robin
+  CLAUDE_ROTATION_ACCOUNT_DIR=
+  CLAUDE_ROTATION_REFRESH_MARGIN_SECONDS=
+  CLAUDE_ROTATION_COOLDOWN_SECONDS=
+  CLAUDE_ROTATION_REFRESH_URL=
+  CLAUDE_ROTATION_REFRESH_CLIENT_ID=
+  CLAUDE_ROTATION_CONFIG="$CONFIG/claude-rotation"
+
+  case "${FM_CLAUDE_ROTATION:-}" in
+    1|true|TRUE|yes|YES|on|ON) CLAUDE_ROTATION_ENABLED=1 ;;
+    0|false|FALSE|no|NO|off|OFF) CLAUDE_ROTATION_ENABLED=0; return 0 ;;
+  esac
+
+  if [ -f "$CLAUDE_ROTATION_CONFIG" ]; then
+    CLAUDE_ROTATION_ENABLED=1
+    while IFS= read -r raw_line || [ -n "$raw_line" ]; do
+      line=${raw_line%%#*}
+      line=$(trim_line "$line")
+      [ -n "$line" ] || continue
+      case "$line" in
+        enabled|on|true|yes|1) CLAUDE_ROTATION_ENABLED=1 ;;
+        disabled|off|false|no|0) CLAUDE_ROTATION_ENABLED=0 ;;
+        enabled=*)
+          value=$(trim_line "${line#enabled=}")
+          case "$value" in
+            1|true|TRUE|yes|YES|on|ON) CLAUDE_ROTATION_ENABLED=1 ;;
+            0|false|FALSE|no|NO|off|OFF) CLAUDE_ROTATION_ENABLED=0 ;;
+            *) echo "warning: ignoring invalid config/claude-rotation enabled=$value" >&2 ;;
+          esac
+          ;;
+        policy=*) CLAUDE_ROTATION_POLICY=$(trim_line "${line#policy=}") ;;
+        account_dir=*) CLAUDE_ROTATION_ACCOUNT_DIR=$(trim_line "${line#account_dir=}") ;;
+        refresh_margin_seconds=*) CLAUDE_ROTATION_REFRESH_MARGIN_SECONDS=$(trim_line "${line#refresh_margin_seconds=}") ;;
+        cooldown_seconds=*) CLAUDE_ROTATION_COOLDOWN_SECONDS=$(trim_line "${line#cooldown_seconds=}") ;;
+        refresh_url=*) CLAUDE_ROTATION_REFRESH_URL=$(trim_line "${line#refresh_url=}") ;;
+        client_id=*) CLAUDE_ROTATION_REFRESH_CLIENT_ID=$(trim_line "${line#client_id=}") ;;
+        *) echo "warning: ignoring config/claude-rotation line: $line" >&2 ;;
+      esac
+    done < "$CLAUDE_ROTATION_CONFIG"
+  fi
+
+  [ -z "${FM_CLAUDE_ROTATION_POLICY:-}" ] || CLAUDE_ROTATION_POLICY=$FM_CLAUDE_ROTATION_POLICY
+  [ -z "${FM_CLAUDE_ACCOUNT_DIR:-}" ] || CLAUDE_ROTATION_ACCOUNT_DIR=$FM_CLAUDE_ACCOUNT_DIR
+  [ -z "${FM_CLAUDE_REFRESH_MARGIN_SECONDS:-}" ] || CLAUDE_ROTATION_REFRESH_MARGIN_SECONDS=$FM_CLAUDE_REFRESH_MARGIN_SECONDS
+  [ -z "${FM_CLAUDE_ROTATION_COOLDOWN_SECONDS:-}" ] || CLAUDE_ROTATION_COOLDOWN_SECONDS=$FM_CLAUDE_ROTATION_COOLDOWN_SECONDS
+  [ -z "${FM_CLAUDE_REFRESH_URL:-}" ] || CLAUDE_ROTATION_REFRESH_URL=$FM_CLAUDE_REFRESH_URL
+  [ -z "${FM_CLAUDE_REFRESH_CLIENT_ID:-}" ] || CLAUDE_ROTATION_REFRESH_CLIENT_ID=$FM_CLAUDE_REFRESH_CLIENT_ID
+}
+
+claude_rotation_env_prefix() {
+  shell_assign FM_CLAUDE_ROTATION_STATE_DIR "$STATE_REAL"
+  shell_assign FM_CLAUDE_ROTATION_POLICY "$CLAUDE_ROTATION_POLICY"
+  [ -z "$CLAUDE_ROTATION_ACCOUNT_DIR" ] || shell_assign FM_CLAUDE_ACCOUNT_DIR "$CLAUDE_ROTATION_ACCOUNT_DIR"
+  [ -z "$CLAUDE_ROTATION_REFRESH_MARGIN_SECONDS" ] || shell_assign FM_CLAUDE_REFRESH_MARGIN_SECONDS "$CLAUDE_ROTATION_REFRESH_MARGIN_SECONDS"
+  [ -z "$CLAUDE_ROTATION_COOLDOWN_SECONDS" ] || shell_assign FM_CLAUDE_ROTATION_COOLDOWN_SECONDS "$CLAUDE_ROTATION_COOLDOWN_SECONDS"
+  [ -z "$CLAUDE_ROTATION_REFRESH_URL" ] || shell_assign FM_CLAUDE_REFRESH_URL "$CLAUDE_ROTATION_REFRESH_URL"
+  [ -z "$CLAUDE_ROTATION_REFRESH_CLIENT_ID" ] || shell_assign FM_CLAUDE_REFRESH_CLIENT_ID "$CLAUDE_ROTATION_REFRESH_CLIENT_ID"
+}
+
+claude_rotation_select_account() {
+  local env_args
+  env_args=(
+    "FM_CLAUDE_ROTATION_STATE_DIR=$STATE_REAL"
+    "FM_CLAUDE_ROTATION_POLICY=$CLAUDE_ROTATION_POLICY"
+  )
+  [ -z "$CLAUDE_ROTATION_ACCOUNT_DIR" ] || env_args+=("FM_CLAUDE_ACCOUNT_DIR=$CLAUDE_ROTATION_ACCOUNT_DIR")
+  [ -z "$CLAUDE_ROTATION_REFRESH_MARGIN_SECONDS" ] || env_args+=("FM_CLAUDE_REFRESH_MARGIN_SECONDS=$CLAUDE_ROTATION_REFRESH_MARGIN_SECONDS")
+  [ -z "$CLAUDE_ROTATION_COOLDOWN_SECONDS" ] || env_args+=("FM_CLAUDE_ROTATION_COOLDOWN_SECONDS=$CLAUDE_ROTATION_COOLDOWN_SECONDS")
+  [ -z "$CLAUDE_ROTATION_REFRESH_URL" ] || env_args+=("FM_CLAUDE_REFRESH_URL=$CLAUDE_ROTATION_REFRESH_URL")
+  [ -z "$CLAUDE_ROTATION_REFRESH_CLIENT_ID" ] || env_args+=("FM_CLAUDE_REFRESH_CLIENT_ID=$CLAUDE_ROTATION_REFRESH_CLIENT_ID")
+  env "${env_args[@]}" "$FM_ROOT/bin/fm-claude-accounts.sh" select
+}
+
+claude_rotation_configure_launch() {
+  local select_out select_err status helper id email policy
+  CLAUDE_OAUTH_EXEC=
+  CLAUDE_ROTATION_ACCOUNT_ID=
+  CLAUDE_ROTATION_ACCOUNT_EMAIL=
+  CLAUDE_ROTATION_POLICY_USED=
+  [ "$HARNESS" = claude ] || return 0
+
+  claude_rotation_config_load
+  [ "$CLAUDE_ROTATION_ENABLED" -eq 1 ] || return 0
+
+  case "$CLAUDE_ROTATION_POLICY" in
+    round-robin|first-available) ;;
+    *)
+      echo "warning: unsupported config/claude-rotation policy '$CLAUDE_ROTATION_POLICY'; launching claude with default auth" >&2
+      return 0
+      ;;
+  esac
+
+  select_err="$TASK_TMP/claude-rotation-select.err"
+  status=0
+  select_out=$(claude_rotation_select_account 2>"$select_err") || status=$?
+  [ ! -s "$select_err" ] || cat "$select_err" >&2
+  if [ "$status" -ne 0 ] || [ -z "$select_out" ]; then
+    echo "warning: Claude OAuth rotation is enabled but no account was selected; launching claude with default auth" >&2
+    return 0
+  fi
+
+  IFS=$'\t' read -r id email _ policy _ <<EOF
+$select_out
+EOF
+  [ -n "$id" ] || { echo "warning: Claude OAuth rotation selector returned no account id; launching claude with default auth" >&2; return 0; }
+  CLAUDE_ROTATION_ACCOUNT_ID=$id
+  CLAUDE_ROTATION_ACCOUNT_EMAIL=$email
+  CLAUDE_ROTATION_POLICY_USED=$policy
+  helper=$(shell_quote "$FM_ROOT/bin/fm-claude-accounts.sh")
+  CLAUDE_OAUTH_EXEC="$(claude_rotation_env_prefix)$helper exec $(shell_quote "$id") -- "
+  :
 }
 
 resolved_existing_dir() {
@@ -1277,6 +1414,8 @@ EOF
   esac
 fi
 
+claude_rotation_configure_launch
+
 # Per-project delivery mode + yolo flag (bin/fm-project-mode.sh; the project-management skill and AGENTS.md task lifecycle).
 # Recorded in meta so fm-teardown's safety check and the validate/merge stages can
 # branch on them. Mode governs ship tasks; a scout's deliverable is a report, not a
@@ -1306,6 +1445,11 @@ META_WINDOW=$T
   echo "tasktmp=$TASK_TMP"
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
+  if [ -n "${CLAUDE_ROTATION_ACCOUNT_ID:-}" ]; then
+    echo "claude_oauth_account=${CLAUDE_ROTATION_ACCOUNT_EMAIL:-$CLAUDE_ROTATION_ACCOUNT_ID}"
+    echo "claude_oauth_account_id=$CLAUDE_ROTATION_ACCOUNT_ID"
+    echo "claude_oauth_rotation_policy=${CLAUDE_ROTATION_POLICY_USED:-round-robin}"
+  fi
   # backend= is written only for a non-default (non-tmux) backend, so the
   # default path's meta stays byte-identical (absent backend= means tmux;
   # data/fm-backend-design-d7's P1 compatibility contract).
@@ -1351,6 +1495,7 @@ EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT")
 LAUNCH=${LAUNCH//__PROVIDERFLAG__/$PROVIDERFLAG}
 LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
 LAUNCH=${LAUNCH//__EFFORTFLAG__/$EFFORTFLAG}
+LAUNCH=${LAUNCH//__CLAUDE_OAUTH_EXEC__/${CLAUDE_OAUTH_EXEC:-}}
 LAUNCH=${LAUNCH//__BRIEF__/$sq_brief}
 LAUNCH=${LAUNCH//__TURNEND__/$sq_turnend}
 LAUNCH=${LAUNCH//__PIEXT__/$sq_piext}

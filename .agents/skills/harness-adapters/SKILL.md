@@ -162,6 +162,17 @@ Its broader dark-TRUECOLOR placeholder handling and dark-theme tradeoff are docu
 That styled capture is internal to the boolean detector only.
 `fm-peek` and every other human or LLM-facing capture path stays plain `tmux capture-pane` with no escape codes.
 
+**Native Claude OAuth rotation (verified 2026-07-07, Claude Code 2.1.202).**
+Claude Code honors `CLAUDE_CODE_OAUTH_TOKEN=<account access token>` per process with `authMethod: oauth_token`.
+That does not mutate the shared `~/.claude` login, `~/.claude.json`, or the macOS Keychain `Claude Code-credentials` item.
+Firstmate's implementation is opt-in: create local `config/claude-rotation` with `enabled`, or set `FM_CLAUDE_ROTATION=1` for one spawn.
+The default account directory is `~/.cli-proxy-api`, reading `claude-*.json`; override it with `account_dir=/path` in the config file or `FM_CLAUDE_ACCOUNT_DIR`.
+Supported policies are `policy=round-robin` and `policy=first-available`; round-robin keeps its cursor in `state/.claude-rotation-cursor`.
+When a selected account is near expiry, `bin/fm-claude-accounts.sh` refreshes it under a per-account lock and atomically rewrites that account file mode `0600`.
+If an account hits a usage limit, mark it cooling with `bin/fm-claude-accounts.sh cool <claude_oauth_account_id> [seconds]`; selection skips cooling accounts until the timestamp expires.
+`fm-spawn` records only `claude_oauth_account`, `claude_oauth_account_id`, and `claude_oauth_rotation_policy` in `state/<id>.meta`.
+The launch command uses `fm-claude-accounts.sh exec <account-id> -- claude ...`, so the token is injected into the child environment without appearing in the launch string or metadata.
+
 **Primary-session guard fact (verified 2026-07-04, Claude Code 2.1.201; preserved 2026-07-08, Claude Code 2.1.204).**
 This is separate from the per-task crewmate turn-end hook above (that one just `touch`es a marker file in a task's own `.claude/settings.local.json`).
 The firstmate PRIMARY's own `.claude/settings.json` registers `bin/fm-turnend-guard.sh` as a Stop hook, and exiting with status 2 plus stderr reliably forces the model to continue.
