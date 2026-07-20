@@ -355,7 +355,8 @@ clear_pause_tracking() {  # <window>
 
 # Reconcile a declared pause or captain-held status with authoritative crew state.
 # Only a confidently dead ordinary crew may recover paused classification after
-# fm-crew-state has fallen back to stopped or unknown.
+# fm-crew-state has fallen back to stopped or unknown. An authoritative terminal
+# run remains terminal regardless of the older sparse status event.
 pause_state_class() {  # <window> <task>
   local win=$1 task=$2 key last recheck_file class agent_alive
   key=${win//:/_}
@@ -381,9 +382,9 @@ pause_state_class() {  # <window> <task>
     return
   fi
   class=$(crew_absorb_class "$task")
-  if [ "$class" = working ]; then
+  if [ "$class" = working ] || [ "$class" = terminal ]; then
     rm -f "$recheck_file"
-    printf 'working'
+    printf '%s' "$class"
     return
   fi
   if [ "$(window_kind "$win")" != secondmate ]; then
@@ -400,6 +401,16 @@ pause_state_class() {  # <window> <task>
     *) rm -f "$recheck_file" ;;
   esac
   printf '%s' "$class"
+}
+
+surface_terminal_stale() {  # <window> <hash>
+  local win=$1 h=$2 key
+  key=$(printf '%s' "$win" | tr ':/.' '___')
+  fm_wake_append stale "$win" "stale: $win" || exit 1
+  printf '%s' "$h" > "$STATE/.stale-$key"
+  rm -f "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
+  clear_pause_state "$win"
+  wake "stale: $win"
 }
 
 surface_nonterminal_stale() {  # <window> <hash>
@@ -963,6 +974,8 @@ EOF
           #   - paused: the crew declared an external wait, or a declared pause or
           #     captain hold is paired with a confidently dead agent, so absorb on
           #     the long PAUSE_RESURFACE_SECS cadence instead of wedge-escalating;
+#           - terminal: the authoritative no-mistakes run is done or failed, so
+#             surface once even when paused: remains the latest sparse event;
           #   - none: no running pipeline, idle pane, no busy signature, no declared
           #     pause - the crew has STOPPED. Surface immediately so firstmate peeks
           #     (it may be done via an interactive menu that wrote no done: status,
@@ -980,6 +993,9 @@ EOF
               paused)
                 handle_paused_stale "$w" "$task" "$h"
                 ;;
+              terminal)
+                surface_terminal_stale "$w" "$h"
+                ;;
               *)
                 surface_nonterminal_stale "$w" "$h"
                 ;;
@@ -993,6 +1009,8 @@ EOF
                          printf '%s' "$h" > "$sf"
                          wedge_timer_check "$w" "$ssf" "non-terminal stale (provably working after a declared pause)" "$ewf"
                          triage_log "absorbed non-terminal stale (provably working): $w" ;;
+                terminal) clear_pause_state "$w"
+                          rm -f "$ssf" "$ewf" ;;
                 *)       handle_paused_stale "$w" "$task" "$h" ;;
               esac
             else
