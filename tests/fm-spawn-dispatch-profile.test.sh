@@ -465,6 +465,40 @@ test_omp_teardown_removes_state_extension() {
   pass "omp teardown removes the state extension"
 }
 
+test_pi_infers_vibeproxy_provider_from_models_json() {
+  local rec id out status launch
+  id=profile-pi-provider-z17
+  rec=$(make_spawn_case profile-pi-provider pi "$id")
+  read_case_record "$rec"
+  mkdir -p "$CASE_DIR/pi/agent"
+  cat > "$CASE_DIR/pi/agent/models.json" <<'JSON'
+{
+  "providers": {
+    "vibeproxy-openai": {
+      "models": [
+        { "id": "gpt-5.5" }
+      ]
+    },
+    "vibeproxy-zai": {
+      "models": [
+        { "id": "glm-4.7" }
+      ]
+    }
+  }
+}
+JSON
+
+  out=$(PI_CODING_AGENT_DIR="$CASE_DIR/pi/agent" \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model gpt-5.5 --effort high)
+  status=$?
+  expect_code 0 "$status" "pi spawn with configured VibeProxy model should succeed"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" pi gpt-5.5 high
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "pi --provider 'vibeproxy-openai' --model 'gpt-5.5' --thinking 'high'" \
+    "pi launch did not infer the provider from models.json"
+  pass "pi infers --provider from ~/.pi/agent/models.json for bare model ids"
+}
+
 test_batch_forwards_shared_profile_flags() {
   local rec id1 id2 out status
   id1=profile-batch-a-z9
@@ -547,6 +581,7 @@ test_omp_writes_state_extension_and_launches_with_hook
 test_omp_threads_model_and_thinking_effort
 test_omp_omits_invalid_max_thinking_effort
 test_omp_teardown_removes_state_extension
+test_pi_infers_vibeproxy_provider_from_models_json
 test_batch_forwards_shared_profile_flags
 test_active_dispatch_profile_does_not_block_secondmate_launch
 test_omp_secondmate_omits_turn_end_hook
