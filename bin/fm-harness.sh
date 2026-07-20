@@ -50,7 +50,7 @@ detect_own() {
       *grok*) echo grok; return ;;
       *copilot*) echo copilot; return ;;
       pi) echo pi; return ;;
-      node*|python*)
+      node*|python*|MainThread)
         # Bare interpreter: match the harness name in its script path.
         args=$(ps -o args= -p "$pid" 2>/dev/null)
         case "$args" in

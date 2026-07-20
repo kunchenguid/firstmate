@@ -137,6 +137,23 @@ test_fm_harness_detects_copilot_env_marker() {
   pass "fm-harness.sh detects the copilot env marker"
 }
 
+test_fm_harness_detects_copilot_mainthread_ancestry() {
+  local fakebin out
+  fakebin=$(fm_fakebin "$TMP_ROOT/harness-mainthread-fake")
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *"comm="*) printf '%s\n' 'MainThread'; exit 0 ;;
+  *"args="*) printf '%s\n' '/home/user/.cache/github-copilot-sdk/cli/1.0.0/copilot --server --stdio --no-auto-update'; exit 0 ;;
+esac
+exit 1
+SH
+  chmod +x "$fakebin/ps"
+  out=$(COPILOT_CLI='' CLAUDECODE='' PI_CODING_AGENT='' GROK_AGENT='' PATH="$fakebin:$PATH" "$HARNESS")
+  [ "$out" = "copilot" ] || fail "fm-harness.sh did not detect copilot from MainThread ancestry (got: '$out')"
+  pass "fm-harness.sh detects copilot in MainThread ancestry"
+}
+
 test_fm_lock_recognizes_copilot_mainthread_holder() {
   local home fakebin out
   home="$TMP_ROOT/lock-home"
@@ -188,5 +205,6 @@ test_copilot_spawn_does_not_clobber_existing_hook_file
 test_copilot_spawn_hook_command_handles_single_quote_paths
 test_copilot_spawn_threads_model_and_effort
 test_fm_harness_detects_copilot_env_marker
+test_fm_harness_detects_copilot_mainthread_ancestry
 test_fm_lock_recognizes_copilot_mainthread_holder
 test_fm_lock_ignores_unrelated_gh_copilot_process
