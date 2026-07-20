@@ -1077,6 +1077,19 @@ test_quarantine_publish_is_exclusive() {
   pass "concurrent quarantine publication never clobbers evidence"
 }
 
+test_quarantine_rejects_fifo_without_blocking() {
+  local home qdir fifo helper rc
+  home="$TMP_ROOT/quarantine-fifo"; mkdir -p "$home/state"
+  qdir="$home/state/quarantine"; mkdir -p "$qdir"; chmod 700 "$qdir"
+  fifo="$home/state/input.json"; mkfifo "$fifo"
+  helper="$ROOT/bin/fm-telegram-quarantine.mjs"
+  node "$helper" "$fifo" "$qdir" "fifo.json" >/dev/null 2>&1
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "FIFO quarantine source must be refused"
+  assert_present "$fifo" "refused FIFO source must remain in place"
+  pass "FIFO quarantine sources are refused without blocking"
+}
+
 test_respond_wellformed_rate_log_keeps_window() {
   local home out now
   home="$TMP_ROOT/resp-rate-window-kept"; mkdir -p "$home/state"
@@ -1491,6 +1504,7 @@ test_respond_corrupt_rate_log_is_quarantined_and_allows
 test_respond_rate_quarantine_failure_audited_and_defers
 test_quarantine_mode_failure_preserves_sources
 test_quarantine_publish_is_exclusive
+test_quarantine_rejects_fifo_without_blocking
 test_respond_wellformed_rate_log_keeps_window
 test_poll_missing_jq_does_not_rewake_pending
 test_quarantine_flood_cannot_drop_good_or_evade_allowlist
