@@ -376,12 +376,62 @@ test_abort_failure_does_not_fail_teardown() {
   pass "a failing no-mistakes abort does not fail teardown (best-effort |\\| true)"
 }
 
+# A PR-based teardown passes project= back to fm-fleet-sync.sh explicitly.
+# When that project path is a symlink, the canonical checkout must still catch
+# up to origin after teardown. The git wrapper rejects the symlink as a -C path,
+# proving fleet sync resolved it rather than relying on git to follow it.
+test_teardown_syncs_symlink_project_target() {
+  local case_dir canonical updater real_git out
+  case_dir=$(make_case symlink-project-sync)
+  canonical="$case_dir/canonical-project"
+  updater="$case_dir/updater"
+
+  mv "$case_dir/project" "$canonical"
+  ln -s "$canonical" "$case_dir/project"
+  write_meta "$case_dir" no-mistakes ship
+  add_failing_no_mistakes "$case_dir"
+
+  git clone -q "$case_dir/origin.git" "$updater"
+  printf 'merged change\n' > "$updater/merged.txt"
+  git -C "$updater" add merged.txt
+  git -C "$updater" -c user.email=t@t -c user.name=t commit -qm "merged change"
+  git -C "$updater" push -q origin main
+
+  real_git=$(command -v git)
+  cat > "$case_dir/fakebin/git" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = -C ]; then
+  printf '%s\n' "\${2:-}" >> "$case_dir/git-c.log"
+  if [ -L "\${2:-}" ]; then
+    printf 'test git wrapper refuses symlink -C path: %s\n' "\${2:-}" >&2
+    exit 97
+  fi
+fi
+exec "$real_git" "\$@"
+SH
+  chmod +x "$case_dir/fakebin/git"
+
+  out=$(run_teardown "$case_dir") || fail "symlink-project-sync: teardown failed: $out"
+
+  [ "$(git -C "$canonical" rev-parse HEAD)" = "$(git -C "$case_dir/origin.git" rev-parse main)" ] \
+    || fail "symlink-project-sync: canonical checkout did not catch up to origin/main"
+  printf '%s\n' "$out" | grep -F "$case_dir/project: synced " >/dev/null \
+    || fail "symlink-project-sync: teardown did not report the symlink project sync: $out"
+  if grep -Fx "$case_dir/project" "$case_dir/git-c.log" >/dev/null; then
+    fail "symlink-project-sync: fleet sync passed the symlink path to git -C"
+  fi
+  grep -Fx "$canonical" "$case_dir/git-c.log" >/dev/null \
+    || fail "symlink-project-sync: fleet sync did not operate on the canonical target"
+  pass "PR-based teardown fast-forwards a symlink project's canonical target"
+}
+
 test_local_only_fork_remote_allows
 test_teardown_prompts_tasks_axi_done_when_compatible
 test_no_mistakes_ship_aborts_run_on_task_branch
 test_scout_does_not_abort_run
 test_local_only_does_not_abort_run
 test_abort_failure_does_not_fail_teardown
+test_teardown_syncs_symlink_project_target
 test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
 test_no_mistakes_origin_remote_allows

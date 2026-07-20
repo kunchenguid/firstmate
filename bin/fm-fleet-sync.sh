@@ -2,7 +2,8 @@
 # Refresh project clones: fast-forward the checked-out local default branch to
 # origin/<default> when safe, and prune local branches whose upstream tracking
 # branch is gone (the remote branch was deleted, i.e. its PR merged) and that no
-# worktree still needs.
+# worktree still needs. Project entries that are symlinks are resolved first, so
+# all git operations apply to the canonical target checkout.
 # Skips local-only/no-origin projects, dirty clones, non-default checkouts,
 # diverged branches, and fetch/fast-forward failures without forcing or stashing.
 # Pruning never deletes the checked-out branch or a branch that still has a
@@ -143,6 +144,14 @@ sync_project() {
   PROJ=$1
   label=$(project_label)
   SYNC_CURRENT=0
+
+  if [ -L "$PROJ" ]; then
+    if ! resolved=$(CDPATH='' cd -- "$PROJ" 2>/dev/null && pwd -P); then
+      echo "$label: skipped: cannot resolve symlink target"
+      return 0
+    fi
+    PROJ=$resolved
+  fi
 
   if [ ! -d "$PROJ" ]; then
     echo "$label: skipped: not a directory"
@@ -309,6 +318,10 @@ fi
 
 [ -d "$PROJECTS" ] || exit 0
 for proj in "$PROJECTS"/*; do
+  if [ -L "$proj" ]; then
+    sync_project "$proj"
+    continue
+  fi
   [ -e "$proj" ] || continue
   [ -d "$proj" ] || continue
   sync_project "$proj"
