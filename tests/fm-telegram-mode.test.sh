@@ -1021,6 +1021,44 @@ test_respond_rate_quarantine_failure_audited_and_defers() {
   pass "rate quarantine failure is audited and defers without dropping state"
 }
 
+test_quarantine_mode_failure_preserves_sources() {
+  local home out fakebin real_chmod qcount
+  home="$TMP_ROOT/quarantine-mode-fail"; mkdir -p "$home/state"
+  chmod 700 "$home/state"
+  write_env "$home" "FM_TELEGRAM_DRY_RUN=1"
+  seed_inbox "$home" 56 "status"
+  chmod 644 "$home/state/telegram-inbox/56.json"
+  fakebin=$(fm_fakebin "$home")
+  real_chmod=$(command -v chmod)
+  printf '%s\n' \
+    '#!/usr/bin/env bash' \
+    'last=' \
+    'for arg in "$@"; do last=$arg; done' \
+    'case "$last" in' \
+    '  */telegram-inbox-quarantine/*|*/telegram-rate-quarantine/*) exit 1 ;;' \
+    'esac' \
+    'exec "${FM_TEST_REAL_CHMOD:?}" "$@"' > "$fakebin/chmod"
+  chmod +x "$fakebin/chmod"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_TEST_REAL_CHMOD="$real_chmod" FM_HOME="$home" \
+    "$ROOT/bin/fm-telegram-respond.sh" 2>/dev/null)
+  assert_contains "$out" "error 56 quarantine-failed" "inbox chmod failure must fail quarantine"
+  assert_present "$home/state/telegram-inbox/56.json" "inbox source must survive chmod failure"
+  qcount=$(find "$home/state/telegram-inbox-quarantine" -type f 2>/dev/null | wc -l | tr -d ' ')
+  [ "$qcount" -eq 0 ] || fail "failed inbox quarantine must clean destination (got $qcount)"
+  rm -f "$home/state/telegram-inbox/56.json"
+  seed_inbox "$home" 57 "status"
+  printf 'not-a-number\n' > "$home/state/telegram-rate-inbound.log"
+  chmod 600 "$home/state/telegram-rate-inbound.log"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_TEST_REAL_CHMOD="$real_chmod" FM_HOME="$home" \
+    "$ROOT/bin/fm-telegram-respond.sh" 2>/dev/null)
+  assert_contains "$out" "deferred 57 rate-limited" "rate chmod failure must defer"
+  assert_present "$home/state/telegram-inbox/57.json" "deferred inbox command must stay queued"
+  assert_present "$home/state/telegram-rate-inbound.log" "rate source must survive chmod failure"
+  qcount=$(find "$home/state/telegram-rate-quarantine" -type f 2>/dev/null | wc -l | tr -d ' ')
+  [ "$qcount" -eq 0 ] || fail "failed rate quarantine must clean destination (got $qcount)"
+  pass "quarantine chmod failures preserve sources and clean destinations"
+}
+
 test_respond_wellformed_rate_log_keeps_window() {
   local home out now
   home="$TMP_ROOT/resp-rate-window-kept"; mkdir -p "$home/state"
@@ -1433,6 +1471,7 @@ test_respond_hardlink_inbox_cannot_touch_shared_inode
 test_respond_inbox_dir_drift_keeps_files_queued
 test_respond_corrupt_rate_log_is_quarantined_and_allows
 test_respond_rate_quarantine_failure_audited_and_defers
+test_quarantine_mode_failure_preserves_sources
 test_respond_wellformed_rate_log_keeps_window
 test_poll_missing_jq_does_not_rewake_pending
 test_quarantine_flood_cannot_drop_good_or_evade_allowlist

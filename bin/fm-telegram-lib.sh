@@ -261,6 +261,18 @@ fmt_chat_allowed() {
   [ -n "$chat" ] && [ "$chat" = "${FMT_CHAT_ID:-}" ]
 }
 
+fmt_quarantine_mode_enforce() {
+  local file=$1 mode
+  [ -f "$file" ] && [ ! -L "$file" ] || return 1
+  chmod 600 "$file" 2>/dev/null || return 1
+  if [ "$(uname)" = Darwin ]; then
+    mode=$(stat -f %Lp "$file" 2>/dev/null) || return 1
+  else
+    mode=$(stat -c %a "$file" 2>/dev/null) || return 1
+  fi
+  [ "$mode" = 600 ]
+}
+
 # Move a permanently-unprocessable inbox file out of the live inbox so the
 # poller never re-emits telegram-msg wakes for it. Destination is private
 # (0700 dir / 0600 file), never silently deleted, and never reprocessed.
@@ -293,7 +305,10 @@ fmt_inbox_quarantine() {
   # Prefer hardlink+unlink when same filesystem so a crash mid-move cannot
   # lose the only copy; fall back to mv.
   if ln -- "$inbox/$base" "$dest" 2>/dev/null; then
-    chmod 600 "$dest" 2>/dev/null || true
+    if ! fmt_quarantine_mode_enforce "$dest"; then
+      rm -f -- "$dest" 2>/dev/null || true
+      return 1
+    fi
     if ! rm -f -- "$inbox/$base" 2>/dev/null; then
       rm -f -- "$dest" 2>/dev/null || true
       return 1
@@ -302,7 +317,10 @@ fmt_inbox_quarantine() {
     if ! mv -f -- "$inbox/$base" "$dest" 2>/dev/null; then
       return 1
     fi
-    chmod 600 "$dest" 2>/dev/null || true
+    if ! fmt_quarantine_mode_enforce "$dest"; then
+      mv -f -- "$dest" "$inbox/$base" 2>/dev/null || true
+      return 1
+    fi
   fi
   fmt_audit_append quarantine inbox \
     "update_id=$uid reason=$reason path=telegram-inbox-quarantine/$(basename "$dest")"
@@ -339,7 +357,10 @@ fmt_rate_log_quarantine() {
     [ "$n" -lt 100 ] || return 1
   done
   if ln -- "$file" "$dest" 2>/dev/null; then
-    chmod 600 "$dest" 2>/dev/null || true
+    if ! fmt_quarantine_mode_enforce "$dest"; then
+      rm -f -- "$dest" 2>/dev/null || true
+      return 1
+    fi
     if ! rm -f -- "$file" 2>/dev/null; then
       rm -f -- "$dest" 2>/dev/null || true
       return 1
@@ -348,7 +369,10 @@ fmt_rate_log_quarantine() {
     if ! mv -f -- "$file" "$dest" 2>/dev/null; then
       return 1
     fi
-    chmod 600 "$dest" 2>/dev/null || true
+    if ! fmt_quarantine_mode_enforce "$dest"; then
+      mv -f -- "$dest" "$file" 2>/dev/null || true
+      return 1
+    fi
   fi
   fmt_audit_append quarantine rate-log \
     "bucket=$bucket reason=$reason path=telegram-rate-quarantine/$(basename "$dest")"
