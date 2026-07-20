@@ -332,12 +332,51 @@ SH
   chmod +x "$fakebin/no-mistakes"
   cat > "$fakebin/tasks-axi" <<'SH'
 #!/usr/bin/env bash
-case "${1:-} ${2:-}" in
-  "--version ") printf '%s\n' '0.1.1' ;;
-  "update --help") printf '%s\n' 'usage: tasks-axi update <id> [flags]' '  --archive-body' ;;
-  "mv --help") printf '%s\n' 'usage: tasks-axi mv <id> [<id>...] --to <path-or-dir>' ;;
-esac
-exit 0
+if [ "${1:-}" = update ]; then
+  file=
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --file) file=$2; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  [ -n "$file" ] || exit 64
+  printf '%s\n' \
+    '## Queued' \
+    '- [ ] fm-probe-a - first probe item (repo: firstmate)' \
+    '  replacement probe body' \
+    '- [ ] fm-probe-b - second probe item (repo: firstmate) blocked-by: fm-probe-a - probe dependency' \
+    '  second probe body' > "$file"
+  printf '%s\n' \
+    '## Archived probe' \
+    '- [ ] fm-probe-a - first probe item (repo: firstmate)' \
+    '  previous probe body' > "$(dirname "$file")/note-archive.md"
+  exit 0
+fi
+if [ "${1:-}" = mv ]; then
+  shift
+  ids=()
+  file=
+  destination=
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --file) file=$2; shift 2 ;;
+      --to) destination=$2; shift 2 ;;
+      *) ids+=("$1"); shift ;;
+    esac
+  done
+  [ -n "$file" ] && [ -n "$destination" ] || exit 64
+  [ "${ids[*]}" = 'fm-probe-a fm-probe-b' ] || exit 1
+  printf '%s\n' '## Queued' > "$file"
+  printf '%s\n' \
+    '## In flight' '' '## Queued' \
+    '- [ ] fm-probe-a - first probe item (repo: firstmate)' \
+    '  replacement probe body' \
+    '- [ ] fm-probe-b - second probe item (repo: firstmate) blocked-by: fm-probe-a - probe dependency' \
+    '  second probe body' '' '## Done' > "$destination"
+  exit 0
+fi
+exit 64
 SH
   chmod +x "$fakebin/tasks-axi"
   cat > "$fakebin/quota-axi" <<'SH'
