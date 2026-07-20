@@ -9,7 +9,8 @@
 #   is treated as a RAW launch command - the escape hatch for verifying new adapters.
 #   --scout records kind=scout in the task's meta (report deliverable, scratch worktree;
 #   see AGENTS.md section 7); --secondmate records kind=secondmate and launches in a
-#   provisioned firstmate home; the default is kind=ship.
+#   provisioned firstmate home, normally with its safely refreshed primary-project
+#   clone as the window cwd; the default is kind=ship.
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
@@ -22,6 +23,8 @@
 #                  turn-end signal rides the launch command, e.g. codex -c notify=[...])
 #     __PIEXT__    absolute path to state/<task-id>.pi-ext.ts (pi turn-end extension,
 #                  written by this script; outside the worktree to avoid pi's trust gate)
+#     __CODEX_TRUST__ per-launch Codex projects.<cwd>.trust_level override for a
+#                     secondmate, preventing a project-native cwd trust-dialog stall
 # Per-harness turn-end hooks are installed automatically; some live outside the worktree.
 # On success prints: spawned <id> harness=<name> kind=<ship|scout|secondmate> mode=<mode> yolo=<on|off> window=<session:window> worktree=<path>
 # mode/yolo are resolved per-project from data/projects.md for ship/scout tasks;
@@ -121,7 +124,7 @@ launch_template() {
     claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions "$(cat __BRIEF__)"' ;;
     codex)
       if [ "$kind" = secondmate ]; then
-        printf '%s' 'codex --dangerously-bypass-approvals-and-sandbox "$(cat __BRIEF__)"'
+        printf '%s' 'codex --dangerously-bypass-approvals-and-sandbox -c __CODEX_TRUST__ "$(cat __BRIEF__)"'
       else
         printf '%s' 'codex --dangerously-bypass-approvals-and-sandbox -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(cat __BRIEF__)"'
       fi
@@ -177,6 +180,16 @@ shell_quote() {
   printf "'"
 }
 
+toml_escape_basic_string() {
+  local value=$1
+  value=${value//\\/\\\\}
+  value=${value//\"/\\\"}
+  value=${value//$'\n'/\\n}
+  value=${value//$'\r'/\\r}
+  value=${value//$'\t'/\\t}
+  printf '%s' "$value"
+}
+
 resolved_existing_dir() {
   local path=$1
   [ -d "$path" ] || { echo "error: firstmate home does not exist or is not a directory: $path" >&2; return 1; }
@@ -200,6 +213,10 @@ path_is_ancestor_of() {
     "$ancestor"/*) return 0 ;;
   esac
   return 1
+}
+
+trim_space() {
+  printf '%s\n' "$1" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
 }
 
 validate_firstmate_home_for_spawn() {
@@ -287,6 +304,8 @@ validate_firstmate_operational_dirs() {
   done
 }
 
+SECONDMATE_PROJECTS=
+PROJECT_NATIVE_ABS=
 if [ "$KIND" = secondmate ]; then
   if [ -z "$FIRSTMATE_HOME" ] && [ -f "$STATE/$ID.meta" ]; then
     FIRSTMATE_HOME=$(grep '^home=' "$STATE/$ID.meta" | cut -d= -f2- || true)
@@ -300,34 +319,92 @@ if [ "$KIND" = secondmate ]; then
   [ -n "$FIRSTMATE_HOME" ] || { echo "error: no firstmate home supplied or registered for $ID" >&2; exit 1; }
   PROJ_ABS=$(validate_firstmate_home_for_spawn "$ID" "$FIRSTMATE_HOME")
   WT="$PROJ_ABS"
+  WINDOW_CWD="$PROJ_ABS"
+  SECONDMATE_PROJECTS=$(secondmate_registry_value "$ID" projects || true)
   if [ -f "$PROJ_ABS/data/charter.md" ]; then
     BRIEF="$PROJ_ABS/data/charter.md"
   else
     BRIEF="$DATA/$ID/brief.md"
   fi
+
+  PROJECT_NATIVE_OVERRIDE=${FM_SECONDMATE_PROJECT_NATIVE:-}
+  if [ -n "$PROJECT_NATIVE_OVERRIDE" ]; then
+    PROJECT_NATIVE=$(trim_space "$PROJECT_NATIVE_OVERRIDE")
+  else
+    PROJECT_NATIVE=$(trim_space "${SECONDMATE_PROJECTS%%,*}")
+  fi
+
+  if [ -n "$PROJECT_NATIVE" ]; then
+    case "$PROJECT_NATIVE" in
+      .|..|*/*)
+        echo "error: invalid secondmate project-native name '$PROJECT_NATIVE'; expected one flat project name" >&2
+        exit 1
+        ;;
+    esac
+    PROJECT_NATIVE_DIR="$PROJ_ABS/projects/$PROJECT_NATIVE"
+    if [ ! -d "$PROJECT_NATIVE_DIR" ]; then
+      if [ -n "$PROJECT_NATIVE_OVERRIDE" ]; then
+        echo "error: forced secondmate project clone is missing: $PROJECT_NATIVE_DIR" >&2
+        exit 1
+      fi
+      echo "warning: secondmate $ID primary project clone is missing: $PROJECT_NATIVE_DIR; launching from firstmate home $PROJ_ABS" >&2
+    else
+      PROJECTS_ABS=$(cd "$PROJ_ABS/projects" && pwd -P)
+      PROJECT_NATIVE_ABS=$(cd "$PROJECT_NATIVE_DIR" && pwd -P)
+      if ! path_is_ancestor_of "$PROJECTS_ABS" "$PROJECT_NATIVE_ABS"; then
+        echo "error: secondmate project-native clone must resolve inside $PROJECTS_ABS: $PROJECT_NATIVE_DIR" >&2
+        exit 1
+      fi
+    fi
+  else
+    echo "warning: secondmate $ID has no primary registered project; launching from firstmate home $PROJ_ABS" >&2
+  fi
 else
   PROJ_ABS="$(cd "$(resolve_project_dir_arg "$PROJ")" && pwd -P)"
   WT=""
+  WINDOW_CWD="$PROJ_ABS"
   BRIEF="$DATA/$ID/brief.md"
 fi
 [ -f "$BRIEF" ] || { echo "error: no brief at $BRIEF" >&2; exit 1; }
 
-# Same session when firstmate already runs inside tmux; dedicated session otherwise.
+# Resolve and reject an already-live target before a project-native refresh can
+# mutate the clone beneath that advisor. Outside tmux, do not create the fallback
+# session yet: unsafe sync failures must remain free of tmux launch side effects.
 if [ -n "${TMUX:-}" ]; then
   SES=$(tmux display-message -p '#S')
 else
-  tmux has-session -t firstmate 2>/dev/null || tmux new-session -d -s firstmate
   SES=firstmate
 fi
-
 W="fm-$ID"
 T="$SES:$W"
+if tmux has-session -t "$SES" 2>/dev/null \
+  && tmux list-windows -t "$SES" -F '#{window_name}' | grep -qx "$W"; then
+  echo "error: window $T already exists" >&2
+  exit 1
+fi
+
+if [ "$KIND" = secondmate ] && [ -n "$PROJECT_NATIVE_ABS" ]; then
+  if ! FM_ROOT_OVERRIDE='' FM_STATE_OVERRIDE='' FM_DATA_OVERRIDE='' FM_PROJECTS_OVERRIDE='' FM_CONFIG_OVERRIDE='' \
+    FM_HOME="$PROJ_ABS" FM_FLEET_PRUNE=0 \
+    "$FM_ROOT/bin/fm-fleet-sync.sh" --require-current "$PROJECT_NATIVE_ABS" >&2; then
+    echo "error: secondmate $ID project clone is not proven current; refusing to spawn" >&2
+    exit 1
+  fi
+  WINDOW_CWD="$PROJECT_NATIVE_ABS"
+fi
+
+# Same session when firstmate already runs inside tmux; dedicated session otherwise.
+if [ -z "${TMUX:-}" ]; then
+  tmux has-session -t firstmate 2>/dev/null || tmux new-session -d -s firstmate
+fi
+
+# Recheck after sync/session creation to close the ordinary launch race.
 if tmux list-windows -t "$SES" -F '#{window_name}' | grep -qx "$W"; then
   echo "error: window $T already exists" >&2
   exit 1
 fi
 
-tmux new-window -d -t "$SES" -n "$W" -c "$PROJ_ABS"
+tmux new-window -d -t "$SES" -n "$W" -c "$WINDOW_CWD"
 if [ "$KIND" != secondmate ]; then
   tmux send-keys -t "$T" 'treehouse get' Enter
 
@@ -412,11 +489,9 @@ fi
 # Recorded in meta so fm-teardown's safety check and the validate/merge stages can
 # branch on them. Mode governs ship tasks; a scout's deliverable is a report, not a
 # merge, so scout teardown ignores mode.
-SECONDMATE_PROJECTS=
 if [ "$KIND" = secondmate ]; then
   MODE=secondmate
   YOLO=off
-  SECONDMATE_PROJECTS=$(secondmate_registry_value "$ID" projects || true)
 else
   # Name comes from the project arg (e.g. projects/quant-src -> quant-src), not from the
   # resolved physical path, which can differ when projects/ holds an in-place symlink
@@ -449,6 +524,14 @@ LAUNCH=${LAUNCH//__BRIEF__/$sq_brief}
 LAUNCH=${LAUNCH//__TURNEND__/$sq_turnend}
 LAUNCH=${LAUNCH//__PIEXT__/$sq_piext}
 if [ "$KIND" = secondmate ]; then
+  case "$HARNESS" in
+    codex*)
+      codex_trust_path=$(toml_escape_basic_string "$WINDOW_CWD")
+      codex_trust_config="projects={\"$codex_trust_path\"={trust_level=\"trusted\"}}"
+      sq_codex_trust=$(shell_quote "$codex_trust_config")
+      LAUNCH=${LAUNCH//__CODEX_TRUST__/$sq_codex_trust}
+      ;;
+  esac
   sq_home=$(shell_quote "$PROJ_ABS")
   LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_HOME=$sq_home $LAUNCH"
 fi

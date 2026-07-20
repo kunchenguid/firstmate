@@ -46,6 +46,33 @@ add_file_origin() {
   git -C "$repo" remote add origin "file://$remote_abs"
 }
 
+make_native_clone() {
+  local fixture=$1 clone=$2 remote_abs
+  NATIVE_SOURCE="$fixture/source"
+  NATIVE_REMOTE="$fixture/origin.git"
+  make_git_project "$NATIVE_SOURCE"
+  add_file_origin "$NATIVE_SOURCE" "$NATIVE_REMOTE"
+  remote_abs=$(cd "$NATIVE_REMOTE" && pwd -P)
+  mkdir -p "$(dirname "$clone")"
+  git clone --quiet "file://$remote_abs" "$clone"
+}
+
+setup_native_secondmate() {
+  local tag=$1 id=$2 projects=$3
+  NATIVE_HOME="$TMP_ROOT/$tag-main"
+  NATIVE_SUBHOME="$TMP_ROOT/$tag-sub"
+  NATIVE_ID=$id
+  mkdir -p "$NATIVE_HOME/data" "$NATIVE_HOME/state" "$NATIVE_SUBHOME/data" "$NATIVE_SUBHOME/projects"
+  mark_firstmate_home "$NATIVE_SUBHOME"
+  printf '%s\n' "$id" > "$NATIVE_SUBHOME/.fm-secondmate-home"
+  printf 'project-native charter\n' > "$NATIVE_SUBHOME/data/charter.md"
+  printf -- '- %s - native domain (home: %s; scope: native domain; projects: %s; added 2026-07-20)\n' \
+    "$id" "$NATIVE_SUBHOME" "$projects" > "$NATIVE_HOME/data/secondmates.md"
+  NATIVE_FAKEBIN=$(make_fake_tmux "$TMP_ROOT/$tag-fake")
+  NATIVE_LOG="$TMP_ROOT/$tag-fake/tmux.log"
+  NATIVE_CAPTURE="$TMP_ROOT/$tag-fake/pane.txt"
+}
+
 scaffold_secondmate_charter() {
   local home=$1 id=$2 charter=$3
   shift 3
@@ -166,6 +193,28 @@ SH
   chmod +x "$fakebin/treehouse"
   : > "$log"
   printf '%s\n' "$fakebin"
+}
+
+make_racing_git() {
+  local dir=$1
+  mkdir -p "$dir"
+  cat > "$dir/git" <<'SH'
+#!/usr/bin/env bash
+set -eu
+if [ "${1:-}" = -C ] && [ "${2:-}" = "$FM_RACE_CLONE" ] \
+  && [ "${3:-}" = merge ] && [ "${4:-}" = --ff-only ] \
+  && [ ! -e "$FM_RACE_MARKER" ]; then
+  : > "$FM_RACE_MARKER"
+  printf 'advanced during local fast-forward\n' > "$FM_RACE_SOURCE/RACE.md"
+  "$FM_REAL_GIT" -C "$FM_RACE_SOURCE" add RACE.md
+  "$FM_REAL_GIT" -C "$FM_RACE_SOURCE" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit -qm 'race remote advance'
+  "$FM_REAL_GIT" -C "$FM_RACE_SOURCE" push --quiet origin HEAD
+fi
+exec "$FM_REAL_GIT" "$@"
+SH
+  chmod +x "$dir/git"
+  printf '%s\n' "$dir"
 }
 
 make_fake_no_mistakes() {
@@ -1070,7 +1119,7 @@ test_home_seed_refuses_symlinked_leaf_files() {
 }
 
 test_secondmate_spawn_records_home_meta() {
-  local home subhome subhome_abs fakebin log meta
+  local home subhome subhome_abs fakebin log meta err
   home="$TMP_ROOT/spawn home"
   subhome="$TMP_ROOT/spawn subhome"
   mkdir -p "$home/data/spawn-sub" "$home/state" "$subhome/data"
@@ -1082,13 +1131,16 @@ test_secondmate_spawn_records_home_meta() {
   printf 'current persistent charter\n' > "$subhome/data/charter.md"
   fakebin=$(make_fake_tmux "$TMP_ROOT/spawn-fake")
   log="$TMP_ROOT/spawn-fake/tmux.log"
+  err="$TMP_ROOT/spawn-fake/spawn.err"
 
   PATH="$fakebin:$PATH" FM_HOME="$home" FM_CONFIG_OVERRIDE="$home/parent-config" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/spawn-fake/pane.txt" \
-    "$ROOT/bin/fm-spawn.sh" spawn-sub "$subhome" codex --secondmate >/dev/null \
+    "$ROOT/bin/fm-spawn.sh" spawn-sub "$subhome" codex --secondmate >/dev/null 2>"$err" \
     || fail "secondmate spawn failed"
 
   meta="$home/state/spawn-sub.meta"
   grep -Fx 'kind=secondmate' "$meta" >/dev/null || fail "meta did not record kind=secondmate"
+  grep -Fx "project=$subhome_abs" "$meta" >/dev/null || fail "meta project path moved away from the persistent home"
+  grep -Fx "worktree=$subhome_abs" "$meta" >/dev/null || fail "meta worktree path moved away from the persistent home"
   grep -Fx "home=$subhome_abs" "$meta" >/dev/null || fail "meta did not record subhome"
   grep -Fx 'projects=alpha, beta' "$meta" >/dev/null || fail "meta did not record project clone list"
   grep -F 'treehouse get' "$log" >/dev/null && fail "secondmate spawn should not run project treehouse get"
@@ -1099,7 +1151,235 @@ test_secondmate_spawn_records_home_meta() {
   grep -F "$home/data/spawn-sub/brief.md" "$log" >/dev/null && fail "secondmate launch used stale parent brief"
   grep -F 'notify=' "$log" >/dev/null && fail "secondmate codex launch should not install parent turn-end notify"
   grep -F 'turn-ended' "$log" >/dev/null && fail "secondmate launch should not reference parent turn-end marker"
-  pass "kind=secondmate spawn launches in the home and records routing meta"
+  grep -F "new-window -d -t firstmate -n fm-spawn-sub -c $subhome_abs" "$log" >/dev/null \
+    || fail "missing primary clone did not fall back to the persistent home cwd"
+  grep -F 'primary project clone is missing:' "$err" >/dev/null \
+    || fail "missing primary clone fallback was not reported"
+  grep -F -- "-c 'projects={\"$subhome_abs\"={trust_level=\"trusted\"}}'" "$log" >/dev/null \
+    || fail "Codex fallback launch was not pre-trusted for its window cwd"
+  pass "kind=secondmate missing-clone fallback preserves home metadata and FM_HOME"
+}
+
+test_secondmate_spawn_without_primary_project_falls_back_home() {
+  local home subhome subhome_abs fakebin log err
+  home="$TMP_ROOT/no-primary-main"
+  subhome="$TMP_ROOT/no-primary-sub"
+  mkdir -p "$home/data" "$home/state" "$subhome/data"
+  mark_firstmate_home "$subhome"
+  printf 'no-primary-sm\n' > "$subhome/.fm-secondmate-home"
+  printf 'charter\n' > "$subhome/data/charter.md"
+  subhome_abs=$(cd "$subhome" && pwd -P)
+  fakebin=$(make_fake_tmux "$TMP_ROOT/no-primary-fake")
+  log="$TMP_ROOT/no-primary-fake/tmux.log"
+  err="$TMP_ROOT/no-primary-fake/spawn.err"
+
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/no-primary-fake/pane.txt" \
+    "$ROOT/bin/fm-spawn.sh" no-primary-sm "$subhome" codex --secondmate >/dev/null 2>"$err" \
+    || fail "secondmate without a registered primary failed to use home fallback"
+
+  grep -F 'has no primary registered project' "$err" >/dev/null || fail "missing primary project fallback was not reported"
+  grep -F "new-window -d -t firstmate -n fm-no-primary-sm -c $subhome_abs" "$log" >/dev/null \
+    || fail "missing primary project did not fall back to the persistent home cwd"
+  grep -F "FM_HOME='$subhome_abs'" "$log" >/dev/null || fail "missing-primary fallback changed FM_HOME"
+  grep -Fx "home=$subhome_abs" "$home/state/no-primary-sm.meta" >/dev/null || fail "missing-primary fallback changed meta home"
+  pass "secondmate spawn falls back safely when no primary project is registered"
+}
+
+test_secondmate_spawn_fast_forwards_primary_clone_project_native() {
+  local clone clone_abs subhome_abs old expected default fake_out err meta
+  setup_native_secondmate native-current native-current-sm 'alpha, beta'
+  clone="$NATIVE_SUBHOME/projects/alpha"
+  make_native_clone "$TMP_ROOT/native-current-origin" "$clone"
+  old=$(git -C "$clone" rev-parse HEAD)
+  printf '# Current project docs\n' > "$NATIVE_SOURCE/AGENTS.md"
+  git -C "$NATIVE_SOURCE" add AGENTS.md
+  git -C "$NATIVE_SOURCE" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm 'update project docs'
+  git -C "$NATIVE_SOURCE" push --quiet origin HEAD
+  expected=$(git -C "$NATIVE_SOURCE" rev-parse HEAD)
+  default=$(git -C "$clone" symbolic-ref --short HEAD)
+  # Strict spawn must fetch the advertised default explicitly, even when the
+  # clone's configured refspec excludes it and its origin/default is stale.
+  git -C "$clone" config --unset-all remote.origin.fetch
+  git -C "$clone" config --add remote.origin.fetch '+refs/heads/not-the-default:refs/remotes/origin/not-the-default'
+  clone_abs=$(cd "$clone" && pwd -P)
+  subhome_abs=$(cd "$NATIVE_SUBHOME" && pwd -P)
+  fake_out="$TMP_ROOT/native-current-fake/spawn.out"
+  err="$TMP_ROOT/native-current-fake/spawn.err"
+
+  PATH="$NATIVE_FAKEBIN:$PATH" FM_HOME="$NATIVE_HOME" FM_FAKE_TMUX_LOG="$NATIVE_LOG" FM_FAKE_TMUX_CAPTURE="$NATIVE_CAPTURE" \
+    "$ROOT/bin/fm-spawn.sh" "$NATIVE_ID" "$NATIVE_SUBHOME" codex --secondmate >"$fake_out" 2>"$err" \
+    || fail "project-native secondmate spawn failed"
+
+  [ "$(git -C "$clone" rev-parse HEAD)" = "$expected" ] || fail "primary clone was not fast-forwarded to the fetched origin tip"
+  [ "$(git -C "$clone" rev-parse "origin/$default")" = "$expected" ] || fail "primary clone HEAD does not equal origin default"
+  [ "$(git -C "$clone" rev-parse HEAD^)" = "$old" ] || fail "primary clone did not advance directly from its old tip"
+  if git -C "$clone" rev-parse --verify HEAD^2 >/dev/null 2>&1; then
+    fail "primary clone refresh created a merge commit"
+  fi
+  [ -z "$(git -C "$clone" status --porcelain)" ] || fail "primary clone was not clean after refresh"
+  grep -F "alpha: synced " "$err" >/dev/null || fail "spawn did not report the primary clone refresh"
+  grep -F "new-window -d -t firstmate -n fm-$NATIVE_ID -c $clone_abs" "$NATIVE_LOG" >/dev/null \
+    || fail "secondmate window did not start in the primary project clone"
+  grep -F "FM_HOME='$subhome_abs'" "$NATIVE_LOG" >/dev/null || fail "project-native launch changed FM_HOME"
+  grep -F -- "-c 'projects={\"$clone_abs\"={trust_level=\"trusted\"}}'" "$NATIVE_LOG" >/dev/null \
+    || fail "project-native Codex launch was not pre-trusted for the clone cwd"
+  grep -F '__CODEX_TRUST__' "$NATIVE_LOG" >/dev/null && fail "Codex trust placeholder leaked into the launch command"
+  meta="$NATIVE_HOME/state/$NATIVE_ID.meta"
+  grep -Fx "project=$subhome_abs" "$meta" >/dev/null || fail "project-native spawn changed meta project away from the home"
+  grep -Fx "worktree=$subhome_abs" "$meta" >/dev/null || fail "project-native spawn changed meta worktree away from the home"
+  grep -Fx "home=$subhome_abs" "$meta" >/dev/null || fail "project-native spawn changed meta home"
+  grep -Fx 'projects=alpha, beta' "$meta" >/dev/null || fail "project-native spawn lost registered projects"
+  pass "secondmate spawn fast-forwards the primary clone and changes only window cwd"
+}
+
+test_secondmate_project_native_override_selects_specific_clone() {
+  local alpha beta beta_abs subhome_abs err
+  setup_native_secondmate native-override native-override-sm 'alpha, beta'
+  alpha="$NATIVE_SUBHOME/projects/alpha"
+  beta="$NATIVE_SUBHOME/projects/beta"
+  make_native_clone "$TMP_ROOT/native-override-alpha-origin" "$alpha"
+  make_native_clone "$TMP_ROOT/native-override-beta-origin" "$beta"
+  printf 'leave primary untouched\n' > "$alpha/local-note.txt"
+  beta_abs=$(cd "$beta" && pwd -P)
+  subhome_abs=$(cd "$NATIVE_SUBHOME" && pwd -P)
+  err="$TMP_ROOT/native-override-fake/spawn.err"
+
+  PATH="$NATIVE_FAKEBIN:$PATH" FM_HOME="$NATIVE_HOME" FM_SECONDMATE_PROJECT_NATIVE=beta \
+    FM_FAKE_TMUX_LOG="$NATIVE_LOG" FM_FAKE_TMUX_CAPTURE="$NATIVE_CAPTURE" \
+    "$ROOT/bin/fm-spawn.sh" "$NATIVE_ID" "$NATIVE_SUBHOME" codex --secondmate >/dev/null 2>"$err" \
+    || fail "forced project-native secondmate spawn failed"
+
+  grep -F 'beta: already current' "$err" >/dev/null || fail "override clone was not currentness-checked"
+  grep -F 'alpha:' "$err" >/dev/null && fail "primary clone was synced despite the explicit override"
+  grep -F "new-window -d -t firstmate -n fm-$NATIVE_ID -c $beta_abs" "$NATIVE_LOG" >/dev/null \
+    || fail "FM_SECONDMATE_PROJECT_NATIVE did not select the requested clone"
+  [ -f "$alpha/local-note.txt" ] || fail "override spawn disturbed the unselected primary clone"
+  grep -F "FM_HOME='$subhome_abs'" "$NATIVE_LOG" >/dev/null || fail "override launch changed FM_HOME"
+  grep -Fx "home=$subhome_abs" "$NATIVE_HOME/state/$NATIVE_ID.meta" >/dev/null || fail "override launch changed meta home"
+  pass "FM_SECONDMATE_PROJECT_NATIVE selects a specific current clone without moving FM_HOME"
+}
+
+test_secondmate_spawn_refuses_unsafe_project_native_clones() {
+  local kind clone default before expected err out
+  for kind in dirty diverged offline off-default status-error; do
+    setup_native_secondmate "native-unsafe-$kind" "native-unsafe-$kind-sm" alpha
+    clone="$NATIVE_SUBHOME/projects/alpha"
+    make_native_clone "$TMP_ROOT/native-unsafe-$kind-origin" "$clone"
+    default=$(git -C "$clone" symbolic-ref --short HEAD)
+    case "$kind" in
+      dirty)
+        printf 'uncommitted docs\n' > "$clone/LOCAL.md"
+        expected='alpha: skipped: dirty working tree'
+        ;;
+      diverged)
+        printf 'local-only commit\n' > "$clone/LOCAL.md"
+        git -C "$clone" add LOCAL.md
+        git -C "$clone" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm 'local divergence'
+        printf 'independent remote commit\n' > "$NATIVE_SOURCE/REMOTE.md"
+        git -C "$NATIVE_SOURCE" add REMOTE.md
+        git -C "$NATIVE_SOURCE" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm 'remote divergence'
+        git -C "$NATIVE_SOURCE" push --quiet origin HEAD
+        expected="alpha: skipped: local $default has diverged from origin/$default"
+        ;;
+      offline)
+        rm -rf "$NATIVE_REMOTE"
+        expected='alpha: skipped: fetch failed'
+        ;;
+      off-default)
+        git -C "$NATIVE_SOURCE" checkout -qb next-default
+        printf 'new default docs\n' > "$NATIVE_SOURCE/NEXT.md"
+        git -C "$NATIVE_SOURCE" add NEXT.md
+        git -C "$NATIVE_SOURCE" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm 'new default branch'
+        git -C "$NATIVE_SOURCE" push --quiet origin HEAD
+        git --git-dir="$NATIVE_REMOTE" symbolic-ref HEAD refs/heads/next-default
+        expected="alpha: skipped: on $default, expected next-default"
+        ;;
+      status-error)
+        git -C "$clone" config status.showUntrackedFiles bogus
+        expected='alpha: skipped: cannot read working tree status'
+        ;;
+    esac
+    before=$(git -C "$clone" rev-parse HEAD)
+    err="$TMP_ROOT/native-unsafe-$kind-fake/spawn.err"
+    out="$TMP_ROOT/native-unsafe-$kind-fake/spawn.out"
+
+    if PATH="$NATIVE_FAKEBIN:$PATH" FM_HOME="$NATIVE_HOME" FM_FAKE_TMUX_LOG="$NATIVE_LOG" FM_FAKE_TMUX_CAPTURE="$NATIVE_CAPTURE" \
+      "$ROOT/bin/fm-spawn.sh" "$NATIVE_ID" "$NATIVE_SUBHOME" codex --secondmate >"$out" 2>"$err"; then
+      fail "secondmate spawn accepted an unsafe $kind project-native clone"
+    fi
+
+    grep -F "$expected" "$err" >/dev/null || fail "unsafe $kind clone did not report its fleet-sync skip reason"
+    grep -F 'project clone is not proven current; refusing to spawn' "$err" >/dev/null \
+      || fail "unsafe $kind clone did not fail closed"
+    grep -F 'new-window' "$NATIVE_LOG" >/dev/null && fail "unsafe $kind clone created a tmux window"
+    [ ! -e "$NATIVE_HOME/state/$NATIVE_ID.meta" ] || fail "unsafe $kind clone wrote spawn metadata"
+    [ "$(git -C "$clone" rev-parse HEAD)" = "$before" ] || fail "unsafe $kind clone HEAD moved"
+    if [ "$kind" = dirty ] || [ "$kind" = diverged ]; then
+      [ -f "$clone/LOCAL.md" ] || fail "unsafe $kind clone lost local work"
+    fi
+    if [ "$kind" = off-default ]; then
+      [ "$(git -C "$clone" symbolic-ref --short refs/remotes/origin/HEAD)" = origin/next-default ] \
+        || fail "strict sync did not discover the changed origin default"
+    fi
+  done
+  pass "secondmate spawn fails closed on unsafe clones and unprovable git status"
+}
+
+test_secondmate_duplicate_window_is_rejected_before_clone_sync() {
+  local clone old err
+  setup_native_secondmate native-duplicate native-duplicate-sm alpha
+  clone="$NATIVE_SUBHOME/projects/alpha"
+  make_native_clone "$TMP_ROOT/native-duplicate-origin" "$clone"
+  old=$(git -C "$clone" rev-parse HEAD)
+  printf 'new remote docs\n' > "$NATIVE_SOURCE/AGENTS.md"
+  git -C "$NATIVE_SOURCE" add AGENTS.md
+  git -C "$NATIVE_SOURCE" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm 'new remote docs'
+  git -C "$NATIVE_SOURCE" push --quiet origin HEAD
+  err="$TMP_ROOT/native-duplicate-fake/spawn.err"
+
+  if PATH="$NATIVE_FAKEBIN:$PATH" FM_HOME="$NATIVE_HOME" FM_FAKE_TMUX_WINDOW="fm-$NATIVE_ID" \
+    FM_FAKE_TMUX_LOG="$NATIVE_LOG" FM_FAKE_TMUX_CAPTURE="$NATIVE_CAPTURE" \
+    "$ROOT/bin/fm-spawn.sh" "$NATIVE_ID" "$NATIVE_SUBHOME" codex --secondmate >/dev/null 2>"$err"; then
+    fail "duplicate secondmate window was accepted"
+  fi
+
+  grep -F "window firstmate:fm-$NATIVE_ID already exists" "$err" >/dev/null \
+    || fail "duplicate secondmate window refusal was not reported"
+  [ "$(git -C "$clone" rev-parse HEAD)" = "$old" ] || fail "duplicate spawn synced the live advisor clone before refusal"
+  grep -F 'new-window' "$NATIVE_LOG" >/dev/null && fail "duplicate spawn created another window"
+  [ ! -e "$NATIVE_HOME/state/$NATIVE_ID.meta" ] || fail "duplicate spawn rewrote advisor metadata"
+  pass "duplicate secondmate spawn is rejected before refreshing the live advisor clone"
+}
+
+test_secondmate_spawn_rechecks_origin_after_fast_forward() {
+  local clone racebin marker real_git err remote_tip
+  setup_native_secondmate native-race native-race-sm alpha
+  clone="$NATIVE_SUBHOME/projects/alpha"
+  make_native_clone "$TMP_ROOT/native-race-origin" "$clone"
+  printf 'first remote advance\n' > "$NATIVE_SOURCE/AGENTS.md"
+  git -C "$NATIVE_SOURCE" add AGENTS.md
+  git -C "$NATIVE_SOURCE" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm 'first remote advance'
+  git -C "$NATIVE_SOURCE" push --quiet origin HEAD
+  real_git=$(command -v git)
+  racebin=$(make_racing_git "$TMP_ROOT/native-race-git")
+  marker="$TMP_ROOT/native-race-git/advanced"
+  err="$TMP_ROOT/native-race-fake/spawn.err"
+
+  if PATH="$racebin:$NATIVE_FAKEBIN:$PATH" FM_HOME="$NATIVE_HOME" \
+    FM_REAL_GIT="$real_git" FM_RACE_CLONE="$clone" FM_RACE_SOURCE="$NATIVE_SOURCE" FM_RACE_MARKER="$marker" \
+    FM_FAKE_TMUX_LOG="$NATIVE_LOG" FM_FAKE_TMUX_CAPTURE="$NATIVE_CAPTURE" \
+    "$ROOT/bin/fm-spawn.sh" "$NATIVE_ID" "$NATIVE_SUBHOME" codex --secondmate >/dev/null 2>"$err"; then
+    fail "secondmate spawn accepted a clone whose origin advanced during refresh"
+  fi
+
+  [ -e "$marker" ] || fail "remote-advance race fixture did not run"
+  grep -F 'alpha: skipped: origin default changed before launch' "$err" >/dev/null \
+    || fail "post-fast-forward origin change was not reported"
+  remote_tip=$(git -C "$NATIVE_SOURCE" rev-parse HEAD)
+  [ "$(git -C "$clone" rev-parse HEAD)" != "$remote_tip" ] || fail "race fixture did not leave a newly stale local clone"
+  grep -F 'new-window' "$NATIVE_LOG" >/dev/null && fail "origin-race spawn created a tmux window"
+  [ ! -e "$NATIVE_HOME/state/$NATIVE_ID.meta" ] || fail "origin-race spawn wrote advisor metadata"
+  pass "secondmate spawn rechecks origin after fast-forward and fails closed on a late advance"
 }
 
 test_spawn_rejects_project_clone_when_home_is_treehouse_worktree() {
@@ -1990,6 +2270,7 @@ seed_secondmate_home_marker() {
   printf '%s\n' "$id" > "$home/.fm-secondmate-home"
 }
 
+# shellcheck disable=SC2016 # single quotes are deliberate: these grep -F patterns match literal $FM_HOME and `AGENTS.md` text in the brief.
 test_secondmate_charter_brief_is_idle_by_default() {
   local home brief
   home="$TMP_ROOT/idle-charter-home"
@@ -2009,6 +2290,26 @@ test_secondmate_charter_brief_is_idle_by_default() {
     || fail "charter brief dropped the bootstrap/recovery reconciliation step"
   grep -F 'only to RECONCILE work that is already yours' "$brief" >/dev/null \
     || fail "charter brief does not scope startup work to reconciling existing work"
+  # Project-native context: supervisor mechanics remain rooted at literal $FM_HOME,
+  # while cwd AGENTS files are treated as project and subsystem development manuals.
+  grep -F 'isolated firstmate operational home at `$FM_HOME`' "$brief" >/dev/null \
+    || fail "charter brief does not preserve the literal secondmate FM_HOME"
+  grep -F 'Read `$FM_HOME/AGENTS.md` for your supervisor role' "$brief" >/dev/null \
+    || fail "charter brief does not require reading the firstmate supervisor manual"
+  grep -F 'run firstmate scripts via `$FM_HOME/bin/`' "$brief" >/dev/null \
+    || fail "charter brief does not root firstmate scripts at FM_HOME"
+  grep -F 'operate your `data/`, `state/`, `config/`, and `projects/` under `$FM_HOME`' "$brief" >/dev/null \
+    || fail "charter brief does not keep operational directories under FM_HOME"
+  grep -F 'Read its local `AGENTS.md` as the project development manual' "$brief" >/dev/null \
+    || fail "charter brief does not require reading cwd AGENTS.md as the project manual"
+  grep -F 'read the relevant nested `AGENTS.md` first' "$brief" >/dev/null \
+    || fail "charter brief does not require relevant subsystem instructions"
+  grep -F '`lean_offline/AGENTS.md`' "$brief" >/dev/null \
+    || fail "charter brief is missing the backtest/WFO subsystem example"
+  grep -F '`src/realtime/AGENTS.md`' "$brief" >/dev/null \
+    || fail "charter brief is missing the realtime subsystem example"
+  grep -F 'The local `AGENTS.md` is your job description' "$brief" >/dev/null \
+    && fail "charter brief still mistakes the project manual for the supervisor job description"
   # Regression guard: the over-broad phrasing that got misread as "go find work" is gone.
   if grep -F 'then supervise work that matches your scope' "$brief" >/dev/null; then
     fail "charter brief still uses the over-broad 'supervise work that matches your scope' phrasing"
@@ -2187,6 +2488,12 @@ test_home_seed_refuses_project_destinations_outside_subhome
 test_home_seed_refuses_operational_dirs_outside_subhome
 test_home_seed_refuses_symlinked_leaf_files
 test_secondmate_spawn_records_home_meta
+test_secondmate_spawn_without_primary_project_falls_back_home
+test_secondmate_spawn_fast_forwards_primary_clone_project_native
+test_secondmate_project_native_override_selects_specific_clone
+test_secondmate_spawn_refuses_unsafe_project_native_clones
+test_secondmate_duplicate_window_is_rejected_before_clone_sync
+test_secondmate_spawn_rechecks_origin_after_fast_forward
 test_spawn_rejects_project_clone_when_home_is_treehouse_worktree
 test_secondmate_spawn_requires_seeded_matching_home
 test_secondmate_spawn_refuses_operational_dirs_outside_subhome

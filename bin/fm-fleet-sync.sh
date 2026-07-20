@@ -7,7 +7,11 @@
 # diverged branches, and fetch/fast-forward failures without forcing or stashing.
 # Pruning never deletes the checked-out branch or a branch that still has a
 # worktree, so it cannot discard unlanded work; set FM_FLEET_PRUNE=0 to disable it.
-# Usage: fm-fleet-sync.sh [<project-dir>]
+# By default every unsafe condition is a best-effort skip with a zero exit,
+# matching bootstrap/fleet refresh behavior. --require-current is the fail-closed
+# single-project form: it exits non-zero after any reported skip, so callers can
+# refuse to use a clone whose currency could not be proven by this fetch.
+# Usage: fm-fleet-sync.sh [--require-current] [<project-dir>]
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -17,14 +21,21 @@ PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 "$FM_ROOT/bin/fm-guard.sh" || true
 
 usage() {
-  echo "usage: fm-fleet-sync.sh [<project-dir>]" >&2
+  echo "usage: fm-fleet-sync.sh [--require-current] [<project-dir>]" >&2
 }
 
 if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
   usage
   exit 0
 fi
+REQUIRE_CURRENT=0
+if [ "${1:-}" = "--require-current" ]; then
+  REQUIRE_CURRENT=1
+  shift
+fi
 [ $# -le 1 ] || { usage; exit 1; }
+[ "$REQUIRE_CURRENT" = 0 ] || [ $# -eq 1 ] || { usage; exit 1; }
+SYNC_CURRENT=0
 
 project_label() {
   case "$PROJ" in
@@ -52,6 +63,46 @@ default_branch() {
 
 first_line() {
   printf '%s\n' "$1" | sed -n '1s/[[:space:]]\{1,\}/ /g;1p'
+}
+
+working_tree_status() {
+  local rc=0
+  STATUS_OUTPUT=$(git -C "$PROJ" status --porcelain 2>/dev/null) || rc=$?
+  STATUS_ERR=
+  if [ "$rc" != 0 ]; then
+    STATUS_ERR=$(first_line "$(git -C "$PROJ" status --porcelain 2>&1 1>/dev/null || true)")
+  fi
+  return "$rc"
+}
+
+remote_default_snapshot() {
+  REMOTE_HEAD_REF=
+  REMOTE_HEAD_OID=
+  REMOTE_HEAD_ERROR=
+  if ! remote_head_output=$(git -C "$PROJ" ls-remote --symref origin HEAD 2>&1); then
+    REMOTE_HEAD_ERROR=$(first_line "$remote_head_output")
+    return 1
+  fi
+  REMOTE_HEAD_REF=$(printf '%s\n' "$remote_head_output" | awk '$1 == "ref:" && $3 == "HEAD" { print $2; exit }')
+  REMOTE_HEAD_OID=$(printf '%s\n' "$remote_head_output" | awk '$2 == "HEAD" && $1 != "ref:" { print $1; exit }')
+  case "$REMOTE_HEAD_REF" in refs/heads/*) : ;; *) REMOTE_HEAD_ERROR="origin HEAD is not a branch"; return 1 ;; esac
+  case "$REMOTE_HEAD_OID" in ''|*[!0-9a-fA-F]*) REMOTE_HEAD_ERROR="origin HEAD has no valid commit"; return 1 ;; esac
+  return 0
+}
+
+fetched_default_is_still_current() {
+  local phase=$1
+  if ! remote_default_snapshot; then
+    reason="cannot verify origin default $phase"
+    [ -z "$REMOTE_HEAD_ERROR" ] || reason="$reason: $REMOTE_HEAD_ERROR"
+    echo "$label: skipped: $reason"
+    return 1
+  fi
+  if [ "$REMOTE_HEAD_REF" != "$fetched_ref" ] || [ -z "$fetched_oid" ] || [ "$REMOTE_HEAD_OID" != "$fetched_oid" ]; then
+    echo "$label: skipped: origin default changed $phase"
+    return 1
+  fi
+  return 0
 }
 
 prune_gone_branches() {
@@ -91,6 +142,7 @@ prune_gone_branches() {
 sync_project() {
   PROJ=$1
   label=$(project_label)
+  SYNC_CURRENT=0
 
   if [ ! -d "$PROJ" ]; then
     echo "$label: skipped: not a directory"
@@ -111,21 +163,54 @@ sync_project() {
     return 0
   fi
 
-  if ! fetch_output=$(git -C "$PROJ" fetch origin --prune --quiet 2>&1); then
-    reason="fetch failed"
-    if [ -n "$fetch_output" ]; then
-      reason="$reason: $(first_line "$fetch_output")"
+  if [ "$REQUIRE_CURRENT" = 1 ]; then
+    # Discover the server's advertised default independently of the clone's
+    # possibly stale origin/HEAD and configured fetch refspec. Fetch that exact
+    # branch into its remote-tracking ref without '+': a force-pushed/divergent
+    # remote ref is an unsafe skip, never a forced update. Then query the server
+    # again and require the fetched OID/default to match that later snapshot.
+    if ! remote_default_snapshot; then
+      reason="fetch failed"
+      [ -z "$REMOTE_HEAD_ERROR" ] || reason="$reason: $REMOTE_HEAD_ERROR"
+      echo "$label: skipped: $reason"
+      return 0
     fi
-    echo "$label: skipped: $reason"
-    return 0
+    fetched_ref=$REMOTE_HEAD_REF
+    DEFAULT=${fetched_ref#refs/heads/}
+    fetch_refspec="$fetched_ref:refs/remotes/origin/$DEFAULT"
+    if ! fetch_output=$(git -C "$PROJ" fetch origin --prune --quiet "$fetch_refspec" 2>&1); then
+      reason="fetch failed"
+      [ -z "$fetch_output" ] || reason="$reason: $(first_line "$fetch_output")"
+      echo "$label: skipped: $reason"
+      return 0
+    fi
+    if ! git -C "$PROJ" symbolic-ref refs/remotes/origin/HEAD "refs/remotes/origin/$DEFAULT" 2>/dev/null; then
+      echo "$label: skipped: cannot refresh origin/HEAD for $DEFAULT"
+      return 0
+    fi
+    fetched_oid=$(git -C "$PROJ" rev-parse "refs/remotes/origin/$DEFAULT" 2>/dev/null || echo "")
+    if ! fetched_default_is_still_current "during refresh"; then
+      return 0
+    fi
+  else
+    if ! fetch_output=$(git -C "$PROJ" fetch origin --prune --quiet 2>&1); then
+      reason="fetch failed"
+      if [ -n "$fetch_output" ]; then
+        reason="$reason: $(first_line "$fetch_output")"
+      fi
+      echo "$label: skipped: $reason"
+      return 0
+    fi
   fi
 
   prune_gone_branches || true
 
-  DEFAULT=$(default_branch) || {
-    echo "$label: skipped: cannot determine default branch"
-    return 0
-  }
+  if [ "$REQUIRE_CURRENT" != 1 ]; then
+    DEFAULT=$(default_branch) || {
+      echo "$label: skipped: cannot determine default branch"
+      return 0
+    }
+  fi
   BASE="origin/$DEFAULT"
   if ! git -C "$PROJ" rev-parse --verify --quiet "$BASE^{commit}" >/dev/null; then
     echo "$label: skipped: $BASE does not exist"
@@ -138,7 +223,13 @@ sync_project() {
     echo "$label: skipped: on $cur, expected $DEFAULT"
     return 0
   fi
-  if [ -n "$(git -C "$PROJ" status --porcelain 2>/dev/null | head -1)" ]; then
+  if ! working_tree_status; then
+    reason="cannot read working tree status"
+    [ -z "$STATUS_ERR" ] || reason="$reason: $STATUS_ERR"
+    echo "$label: skipped: $reason"
+    return 0
+  fi
+  if [ -n "$STATUS_OUTPUT" ]; then
     echo "$label: skipped: dirty working tree"
     return 0
   fi
@@ -156,6 +247,10 @@ sync_project() {
     return 0
   }
   if [ "$local_rev" = "$remote_rev" ]; then
+    if [ "$REQUIRE_CURRENT" = 1 ] && ! fetched_default_is_still_current "before launch"; then
+      return 0
+    fi
+    SYNC_CURRENT=1
     echo "$label: already current"
     return 0
   fi
@@ -180,12 +275,35 @@ sync_project() {
     echo "$label: skipped: fast-forward completed but cannot read local $DEFAULT"
     return 0
   }
+  if [ "$REQUIRE_CURRENT" = 1 ]; then
+    post_cur=$(git -C "$PROJ" symbolic-ref --short HEAD 2>/dev/null || echo "")
+    post_local=$(git -C "$PROJ" rev-parse HEAD 2>/dev/null || echo "")
+    post_remote=$(git -C "$PROJ" rev-parse "$BASE" 2>/dev/null || echo "")
+    if ! working_tree_status; then
+      reason="post-sync status failed"
+      [ -z "$STATUS_ERR" ] || reason="$reason: $STATUS_ERR"
+      echo "$label: skipped: $reason"
+      return 0
+    fi
+    if [ "$post_cur" != "$DEFAULT" ] || [ -z "$post_local" ] || [ "$post_local" != "$post_remote" ] \
+      || [ -n "$STATUS_OUTPUT" ]; then
+      echo "$label: skipped: post-sync verification did not prove a clean $DEFAULT at $BASE"
+      return 0
+    fi
+    if ! fetched_default_is_still_current "before launch"; then
+      return 0
+    fi
+  fi
+  SYNC_CURRENT=1
   echo "$label: synced $before..$after"
   return 0
 }
 
 if [ $# -eq 1 ]; then
   sync_project "$1"
+  if [ "$REQUIRE_CURRENT" = 1 ] && [ "$SYNC_CURRENT" != 1 ]; then
+    exit 1
+  fi
   exit 0
 fi
 

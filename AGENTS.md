@@ -60,6 +60,9 @@ When it is unset, the home is this repo root, which is today's behavior.
 When it is set, scripts still use their own `bin/` from the repo they live in, but operational dirs come from `$FM_HOME`: `state/`, `data/`, `config/`, and `projects/`.
 Existing overrides remain compatible: `FM_STATE_OVERRIDE` can still point at a custom state dir, and `FM_ROOT_OVERRIDE` still behaves like the old whole-root override when `FM_HOME` is unset.
 Each secondmate gets its own persistent `FM_HOME`, so its local state, backlog, projects, and session lock are isolated from the main firstmate.
+A secondmate launches project-native: its tmux window normally starts in the safely refreshed clone of the first project in its registered `projects:` list, or the project named by `FM_SECONDMATE_PROJECT_NATIVE`.
+This changes only the window working directory: `FM_HOME` remains the persistent firstmate home, and `data/`, `state/`, `config/`, and `projects/` continue to resolve there.
+If no primary project is registered or its clone is absent, spawn reports the degraded context and falls back to the persistent home; if a selected clone exists but cannot be proven current by a safe fetch and fast-forward-only refresh, spawn refuses before creating the window.
 
 ```
 AGENTS.md            this file (CLAUDE.md is a symlink to it)
@@ -75,7 +78,7 @@ data/                personal fleet records; LOCAL, gitignored as a whole
   backlog.md         task queue, dependencies, history
   captain.md         captain's curated personal preferences and working style - approval posture, communication style, release habits; LOCAL, gitignored; compact rewrite-and-prune counterpart to shared AGENTS.md; canonical harness-portable home, even if harness memory mirrors it as a recall cache
   projects.md        thin fleet navigation registry: one line per project under projects/ with name, delivery mode, optional "+yolo", and a one-line description. It is firstmate-private, not a project knowledge dump; fm-project-mode.sh parses it (section 6)
-  secondmates.md      secondmate routing table: one line per persistent domain supervisor, with a natural-language scope, non-exclusive project clone list, and home path; fm-home-seed.sh maintains it and validates unique ids, unique homes, and non-overlapping home paths (section 6)
+  secondmates.md      secondmate routing table: one line per persistent domain supervisor, with a natural-language scope, non-exclusive project clone list (first entry = primary project-native context), and home path; fm-home-seed.sh maintains it and validates unique ids, unique homes, and non-overlapping home paths (section 6)
   <id>/brief.md      per-task crewmate brief, or per-secondmate charter brief when kind=secondmate
   <id>/report.md     scout task deliverable, written by the crewmate; survives teardown
 projects/            cloned repos; gitignored; READ-ONLY for you
@@ -182,6 +185,7 @@ That styled capture is internal to the boolean detector only; `fm-peek` and ever
 
 Firstmate auto-clears Codex's `safety-buffering-prompt` for recorded crewmate panes by choosing `Keep waiting`; set `FM_SAFETY_AUTOCLEAR=0` to disable it.
 Directory trust dialog on first run per repo root ("Do you trust the contents of this directory?") - accept with Enter; the decision persists for the repo, so later worktrees of the same project skip it.
+For a secondmate, `fm-spawn.sh` prevents this dialog from stalling a project-native launch by passing a per-invocation `projects={"<window-cwd>"={trust_level="trusted"}}` Codex config override; this does not change the user's persistent Codex config.
 Resume after exit: `codex resume <session-id>` (printed on quit).
 
 ### opencode (VERIFIED 2026-06-11, v1.15.7-1.17.3)
@@ -393,10 +397,13 @@ Dispatch several tasks in one call by passing `id=repo` pairs instead of a singl
 If one pair fails, the rest still run and the batch exits non-zero.
 
 The script resolves the harness (`fm-harness.sh crew`), owns the verified launch templates, resolves the project's delivery mode (`fm-project-mode.sh`) for ship/scout tasks, and records `harness=`, `kind=`, `mode=`, and `yolo=` in the task's meta; a non-flag third argument containing whitespace is treated as a raw launch command (only for verifying new adapters).
-For `kind=secondmate`, the same script launches in the registered or explicit firstmate home instead of running `treehouse get` for a project, records `home=` and `projects=`, and uses the charter brief as the launch prompt.
+For `kind=secondmate`, the same script resolves the registered or explicit persistent home, chooses the first registered project (or `FM_SECONDMATE_PROJECT_NATIVE` override), and refreshes that clone through `fm-fleet-sync.sh` with fetch plus fast-forward-only safety before launch.
+It records `home=` and `projects=` and uses the charter brief as the launch prompt; a selected existing clone that is dirty, diverged, offline, off-default, or otherwise not provably current blocks spawn instead of exposing stale project docs.
 
 For ship and scout tasks, the script creates the window (in your current tmux session, or a dedicated `firstmate` session when you are outside tmux), runs `treehouse get`, waits for the worktree subshell, installs the turn-end hook, records `state/<id>.meta`, and launches the agent with the brief.
-For `kind=secondmate`, the script creates the same kind of window but starts directly in the persistent home.
+For `kind=secondmate`, the script creates the same kind of window directly in the proven-current primary-project clone, with a reported persistent-home fallback only when the primary project or its clone is missing.
+The cwd change is project context only: launch `FM_HOME`, meta `home=`, and every operational directory remain the persistent firstmate home.
+Codex secondmates also receive a per-launch trusted-project override for that cwd, so a first project-native launch cannot park on the directory-trust dialog.
 Project worktrees start at detached HEAD on a clean default branch; ship briefs tell the crewmate to create its branch, while scout briefs keep the worktree scratch.
 After spawning, peek the pane to confirm the crewmate is processing the brief (and handle any trust dialog per section 4).
 Add the task to `data/backlog.md` under In flight.
