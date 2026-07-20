@@ -904,18 +904,27 @@ test_respond_quarantine_sends_generic_ack_without_content() {
 }
 
 test_respond_unsafe_inbox_is_quarantined() {
-  local home out qcount
+  local home out fakebin qcount
   home="$TMP_ROOT/resp-unsafe-inbox"; mkdir -p "$home/state"
   write_env "$home" "FM_TELEGRAM_DRY_RUN=1"
   seed_inbox "$home" 48 "status"
   chmod 644 "$home/state/telegram-inbox/48.json"
+  fakebin=$(make_fake_curl "$home")
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_TELEGRAM_API_URL="https://api.test" \
+    FAKE_POLL_CODE=200 FAKE_POLL_BODY='{"ok":true,"result":[]}' \
+    "$ROOT/bin/fm-telegram-poll.sh")
+  assert_contains "$out" "telegram-msg 48" "unsafe-permission inbox file must wake for quarantine"
   out=$(FM_HOME="$home" "$ROOT/bin/fm-telegram-respond.sh" 2>/dev/null)
   assert_contains "$out" "quarantined 48 unsafe-inbox" "unsafe perms must quarantine"
   assert_absent "$home/state/telegram-inbox/48.json" "unsafe inbox file must leave live inbox"
   qcount=$(find "$home/state/telegram-inbox-quarantine" -name '48.*.json' -type f 2>/dev/null | wc -l | tr -d ' ')
   [ "$qcount" -eq 1 ] || fail "expected one unsafe-inbox quarantine artifact, got $qcount"
   assert_grep "unsafe-inbox" "$home/state/telegram-audit.log" "unsafe-inbox quarantine must be audited"
-  pass "respond quarantines unsafe-permission inbox files"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_TELEGRAM_API_URL="https://api.test" \
+    FAKE_POLL_CODE=200 FAKE_POLL_BODY='{"ok":true,"result":[]}' \
+    "$ROOT/bin/fm-telegram-poll.sh")
+  assert_not_contains "$out" "telegram-msg 48" "quarantined unsafe inbox file must not re-wake"
+  pass "poll wakes unsafe-permission inbox files once for respond to quarantine"
 }
 
 test_respond_symlink_inbox_cannot_touch_referent() {

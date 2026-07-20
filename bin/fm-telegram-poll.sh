@@ -73,7 +73,7 @@ queue_pending_wakes() {
     case "$uid" in
       ''|.*|*[!A-Za-z0-9._-]*) continue ;;
     esac
-    fmx_private_artifact_file_valid "$INBOX" "$base" 600 || continue
+    fmx_single_link_file_valid "$f" || continue
     queue_wake "$uid"
   done
 }
