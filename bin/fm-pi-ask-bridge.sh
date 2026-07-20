@@ -153,7 +153,7 @@ fail_from_resolution() {
 }
 
 wait_for_change() {
-  local seconds=$1 notifier_pid= notifier_start timer_pid timer_start
+  local seconds=$1 notifier_pid='' notifier_start timer_pid timer_start
   if command -v fswatch >/dev/null 2>&1; then
     fswatch -1 "$QUESTION_DIR" >/dev/null 2>&1 &
     notifier_pid=$!

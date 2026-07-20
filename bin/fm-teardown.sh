@@ -969,7 +969,8 @@ cleanup_firstmate_home_children() {
       fi
     fi
     if [ -n "$child_t" ]; then
-      FM_HOME="$home" "$SCRIPT_DIR/fm-pi-question-recover.sh" --cancel "$child_id" || return 1
+      FM_HOME="$home" FM_STATE_OVERRIDE="$sub_state" \
+        "$SCRIPT_DIR/fm-pi-question-recover.sh" --cancel "$child_id" || return 1
       if [ "$child_backend" = zellij ]; then
         # Zellij titles are scoped by the owning home tag, so forced secondmate
         # cleanup must verify child tabs as that child home, not the parent.
@@ -1090,7 +1091,8 @@ fi
 # Close a blocked Pi tool call before its owning endpoint is killed or its
 # worktree is returned. The recovery helper is idempotent for non-Pi tasks and
 # for calls that already reached a terminal resolution.
-FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-pi-question-recover.sh" --cancel "$ID" || exit 1
+FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+  "$SCRIPT_DIR/fm-pi-question-recover.sh" --cancel "$ID" || exit 1
 
 # Best-effort: drop the local task branch so the shared repo does not accumulate refs.
 if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then

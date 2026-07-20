@@ -345,6 +345,26 @@ test_startup_recovery_respects_read_only_mode() {
   pass "startup recovery abandons dead Pi calls only in the mutating lock-owning path"
 }
 
+test_recovery_honors_state_override() {
+  local task_id=override call_id=override-call home state request resolution
+  home="$TMP_ROOT/override-home"
+  state="$TMP_ROOT/override-state"
+  request="$state/questions/$task_id/$call_id.request.json"
+  resolution="$state/questions/$task_id/$call_id.resolution.json"
+  mkdir -p "$home" "$state/questions/$task_id"
+  printf 'harness=pi\n' > "$state/$task_id.meta"
+  make_request "$request" "$task_id" "$call_id"
+
+  FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$RECOVER" --cancel "$task_id" \
+    || fail "recovery ignored the effective state override"
+  [ "$(jq -r '.status' "$resolution")" = cancelled ] \
+    || fail "state-override recovery did not cancel the pending request"
+  assert_grep "resolved: Pi question was cancelled [key=ask-$call_id]" \
+    "$state/$task_id.status" "state-override recovery did not append the matching resolution"
+  assert_absent "$home/state" "state-override recovery wrote to the default home state"
+  pass "recovery and teardown use the effective state directory"
+}
+
 test_launch_envelope_wiring() {
   local source teardown
   source=$(cat "$ROOT/bin/fm-spawn.sh")
@@ -366,4 +386,5 @@ test_malformed_answers_fail_boundedly
 test_process_death_recovery_and_reissue
 test_owner_death_timeout_and_cancellation
 test_startup_recovery_respects_read_only_mode
+test_recovery_honors_state_override
 test_launch_envelope_wiring

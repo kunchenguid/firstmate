@@ -22,7 +22,7 @@ fail() {
 [ -n "${FM_HOME:-}" ] || fail "FM_HOME must be explicit" 2
 case "$FM_HOME" in /*) : ;; *) fail "FM_HOME must be absolute" 2 ;; esac
 [ -d "$FM_HOME" ] || fail "FM_HOME is not a directory" 2
-STATE="$FM_HOME/state"
+STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 [ -d "$STATE" ] && [ ! -L "$STATE" ] || fail "state directory is unavailable"
 
 MODE=${1:---all}

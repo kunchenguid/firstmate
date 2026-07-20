@@ -802,7 +802,7 @@ if [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ] \
   echo "BOOTSTRAP_INFO: tasks-axi available"
 fi
 if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
-  if ! recovery_error=$(FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-pi-question-recover.sh" --all 2>&1); then
+  if ! recovery_error=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-pi-question-recover.sh" --all 2>&1); then
     echo "PI_QUESTION_RECOVERY: failed: ${recovery_error:-unknown recovery error}"
   fi
   secondmate_sync
