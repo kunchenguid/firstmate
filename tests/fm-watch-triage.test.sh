@@ -60,8 +60,8 @@ arm_merge_poll() {  # <state> <id> <url>
 # the way unless a test re-arms it. Sets the MR_* globals for assertions.
 MR_DIR=''; MR_STATE=''; MR_FAKEBIN=''; MR_WINDOW=''; MR_KEY=''; MR_CAPTURE=''; MR_HASH=''
 MR_VERDICT='state: done · source: run-step · checks green: PR ready for review'
-make_merge_ready_case() {  # <name> <id> [pane-text]
-  local name=$1 id=$2 pane=${3:-'codex idle at prompt, awaiting merge'} sig
+make_merge_ready_case() {  # <name> <id> [pane-text] [backend]
+  local name=$1 id=$2 pane=${3:-'codex idle at prompt, awaiting merge'} backend=${4:-tmux} sig
   MR_DIR=$(make_case "$name"); MR_STATE="$MR_DIR/state"; MR_FAKEBIN="$MR_DIR/fakebin"
   MR_WINDOW="test:fm-$id"
   MR_CAPTURE="$MR_DIR/pane.txt"
@@ -76,7 +76,7 @@ esac
 exit 0
 SH
   chmod +x "$MR_FAKEBIN/gh"
-  printf 'window=%s\nkind=ship\nbackend=tmux\nworktree=%s\n' "$MR_WINDOW" "$MR_DIR/worktree" > "$MR_STATE/$id.meta"
+  printf 'window=%s\nkind=ship\nbackend=%s\nworktree=%s\n' "$MR_WINDOW" "$backend" "$MR_DIR/worktree" > "$MR_STATE/$id.meta"
   printf 'done: PR https://github.com/o/r/pull/10 checks green\n' > "$MR_STATE/$id.status"
   arm_merge_poll "$MR_STATE" "$id" https://github.com/o/r/pull/10
   sig=$(seen_sig "$MR_STATE/$id.status"); printf '%s' "$sig" > "$MR_STATE/.seen-${id}_status"
@@ -1523,7 +1523,7 @@ test_merge_ready_merge_check_still_wakes() {
   pass "a merge-ready task's armed poll still wakes the supervisor on merge/close"
 }
 
-test_merge_ready_requires_current_head_and_live_endpoint() {
+test_merge_ready_requires_current_head_and_rejects_dead_endpoint() {
   local out pid
   make_merge_ready_case merge-ready-head-mismatch mrh
   out="$MR_DIR/watch.out"
@@ -1534,6 +1534,27 @@ test_merge_ready_requires_current_head_and_live_endpoint() {
   grep -Fx "stale: $MR_WINDOW" "$out" >/dev/null || fail "a mismatched PR head did not restore stale detection"
 
   unset FM_TEST_GH_HEAD
+  make_merge_ready_case merge-ready-pi-unknown mrpi
+  out="$MR_DIR/watch.out"
+  PATH="$MR_FAKEBIN:$PATH" FM_FAKE_TMUX_WINDOW="$MR_WINDOW" FM_FAKE_TMUX_CAPTURE="$MR_CAPTURE" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=node FM_STATE_OVERRIDE="$MR_STATE" \
+    FM_CREW_STATE_BIN="$MR_FAKEBIN/fm-crew-state.sh" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; fail "watcher surfaced a merge-ready Pi task whose liveness was unknown: $(cat "$out")"
+  fi
+  [ "$(cat "$MR_STATE/.stale-$MR_KEY" 2>/dev/null || true)" = "$MR_HASH" ] \
+    || { reap "$pid"; fail "merge-ready Pi task did not reach the stale suppression path"; }
+  [ ! -s "$out" ] || { reap "$pid"; fail "merge-ready Pi task emitted a stale wake: $(cat "$out")"; }
+  [ ! -s "$MR_STATE/.wake-queue" ] || { reap "$pid"; fail "merge-ready Pi task queued a stale wake"; }
+  reap "$pid"
+
+  make_merge_ready_case merge-ready-unknown-backend mrunknown '' zellij
+  export FM_CREW_STATE_BIN="$MR_FAKEBIN/fm-crew-state.sh"
+  PATH="$MR_FAKEBIN:$PATH" crew_is_merge_ready mrunknown "$MR_STATE" zellij "$MR_WINDOW" \
+    || fail "merge-ready task on an unknown-liveness backend was not suppressed"
+
   make_merge_ready_case merge-ready-dead-endpoint mrd
   out="$MR_DIR/watch.out"
   PATH="$MR_FAKEBIN:$PATH" FM_FAKE_TMUX_WINDOW="$MR_WINDOW" FM_FAKE_TMUX_CAPTURE="$MR_CAPTURE" \
@@ -1544,7 +1565,7 @@ test_merge_ready_requires_current_head_and_live_endpoint() {
   wait_for_exit "$pid" 40 || fail "watcher suppressed a merge-ready task whose endpoint was confirmed dead"
   grep -Fx "stale: $MR_WINDOW" "$out" >/dev/null || fail "a dead endpoint did not restore stale detection"
   unset FM_FAKE_CREW_STATE
-  pass "merge-ready suppression requires the current PR head and a live endpoint"
+  pass "merge-ready suppression accepts unknown liveness but rejects confirmed endpoint death"
 }
 
 test_merge_ready_revalidates_unchanged_hash() {
@@ -1723,7 +1744,7 @@ test_crew_is_merge_ready_classifier
 test_merge_ready_stale_absorbed
 test_merge_ready_checkpoint_quiet
 test_merge_ready_merge_check_still_wakes
-test_merge_ready_requires_current_head_and_live_endpoint
+test_merge_ready_requires_current_head_and_rejects_dead_endpoint
 test_merge_ready_revalidates_unchanged_hash
 test_merge_ready_requires_valid_poll_registration
 test_merge_ready_does_not_mask_active_or_failed_run

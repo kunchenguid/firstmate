@@ -413,8 +413,8 @@ crew_is_merge_ready() {  # <id> <state-dir> <backend> <target>
   src=${line#*source: }; src=${src%% *}
   case "$src" in run-step|status-log) ;; *) return 1 ;; esac
   declare -F fm_backend_agent_alive >/dev/null || return 1
-  agent_alive=$(fm_backend_agent_alive "$backend" "$target" 2>/dev/null) || return 1
-  [ "$agent_alive" = alive ]
+  agent_alive=$(fm_backend_agent_alive "$backend" "$target" 2>/dev/null) || agent_alive=unknown
+  [ "$agent_alive" != dead ]
 }
 
 # 0 (benign/absorb) if EVERY task referenced by a no-verb "signal:" wake is provably
