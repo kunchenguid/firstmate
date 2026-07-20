@@ -41,6 +41,7 @@ let retryFailures = 0;
 let stopping = false;
 let seq = 0;
 let restoring = false;
+let lifecycleGeneration = 0;
 const armReadiness = new WeakMap<ChildProcess, Promise<boolean>>();
 const armClose = new WeakMap<ChildProcess, Promise<void>>();
 
@@ -88,6 +89,52 @@ function markLoaded(): void {
   writeFileSync(marker, `${extensionVersion}\n${process.pid}\n`);
 }
 
+function stopArm(): ChildProcess | null {
+  stopping = true;
+  lifecycleGeneration += 1;
+  if (retryTimer) clearTimeout(retryTimer);
+  retryTimer = null;
+  const stoppedChild = child;
+  child = null;
+  restoring = false;
+  stoppedChild?.kill("SIGTERM");
+  return stoppedChild;
+}
+
+async function stopSessionLifecycle(): Promise<void> {
+  const stoppedChild = stopArm();
+  if (!stoppedChild) return;
+  const closed = armClose.get(stoppedChild);
+  if (!closed) return;
+  await new Promise<void>((resolveStopped) => {
+    const timer = setTimeout(resolveStopped, armRetireTimeoutMs);
+    timer.unref();
+    void closed.then(() => {
+      clearTimeout(timer);
+      resolveStopped();
+    });
+  });
+}
+
+function cleanupOnProcessExit(): void {
+  stopArm();
+}
+
+function ensureProcessExitCleanup(): void {
+  process.off("exit", cleanupOnProcessExit);
+  process.once("exit", cleanupOnProcessExit);
+}
+
+function startSessionLifecycle(): void {
+  if (stopping) {
+    retryFailures = 0;
+    restoring = false;
+    stopping = false;
+  }
+  ensureProcessExitCleanup();
+  markLoaded();
+}
+
 function actionableLine(output: string): string {
   const lines = output.split(/\r?\n/);
   return lines.find((line) => /^(signal:|stale:|check:|heartbeat($|:))/.test(line)) || "";
@@ -125,18 +172,7 @@ function classifyClose(stdout: string, stderr: string, code: number | null, sign
 }
 
 export default function (pi: ExtensionAPI) {
-  function stopArm(): void {
-    stopping = true;
-    if (retryTimer) clearTimeout(retryTimer);
-    retryTimer = null;
-    if (child) child.kill("SIGTERM");
-    child = null;
-  }
-
-  const cleanupOnProcessExit = () => {
-    stopArm();
-  };
-  process.once("exit", cleanupOnProcessExit);
+  ensureProcessExitCleanup();
 
   async function sendWake(message: string): Promise<void> {
     await pi.sendUserMessage(
@@ -190,18 +226,21 @@ export default function (pi: ExtensionAPI) {
     });
   }
 
-  async function restoreAfterActionableClose(predecessorArmPid: string): Promise<string> {
+  async function restoreAfterActionableClose(predecessorArmPid: string, generation: number): Promise<string> {
     let failure = "";
     for (let attempt = 0; attempt <= retryLimit; attempt += 1) {
-      if (stopping) return "";
+      if (stopping || generation !== lifecycleGeneration) return "";
       const replacement = startArm(predecessorArmPid);
       const successorChild = child;
-      if (replacement.ok && successorChild && await waitForReadiness(successorChild)) return "";
+      const successorReady = replacement.ok && successorChild && await waitForReadiness(successorChild);
+      if (stopping || generation !== lifecycleGeneration) return "";
+      if (successorReady) return "";
       if (replacement.ok) {
         failure = "watcher: FAILED - Pi extension could not verify a ready successor watcher";
         if (!(await retireArm(successorChild))) {
           return `${failure}\nwatcher: FAILED - Pi extension could not restore watcher continuity because the unready successor arm did not exit within ${armRetireTimeoutMs}ms`;
         }
+        if (stopping || generation !== lifecycleGeneration) return "";
       } else {
         failure = /(?:read-only|no live session)/.test(replacement.message)
           ? `watcher: FAILED - Pi extension cannot restore continuity because this session no longer owns the lock\n${replacement.message}`
@@ -214,8 +253,8 @@ export default function (pi: ExtensionAPI) {
     return `${failure}\nwatcher: FAILED - Pi extension could not restore watcher continuity after ${retryLimit} retries`;
   }
 
-  function scheduleRetry(message: string, predecessorArmPid: string): void {
-    if (stopping || child || retryTimer) return;
+  function scheduleRetry(message: string, predecessorArmPid: string, generation: number): void {
+    if (stopping || generation !== lifecycleGeneration || child || retryTimer) return;
     const ownership = lockOwnership();
     if (ownership !== "owned") {
       surfaceFailure(`watcher: FAILED - Pi extension cannot restore continuity because this session no longer owns the lock\n${message}`);
@@ -228,6 +267,7 @@ export default function (pi: ExtensionAPI) {
     }
     const timer = setTimeout(() => {
       if (retryTimer === timer) retryTimer = null;
+      if (stopping || generation !== lifecycleGeneration) return;
       const result = startArm(predecessorArmPid);
       if (!result.ok) {
         surfaceFailure(`watcher: FAILED - Pi extension could not launch a continuity retry\n${result.message}`);
@@ -251,6 +291,7 @@ export default function (pi: ExtensionAPI) {
     if (child) return { ok: true, message: "watcher: healthy - Pi extension already has an arm child" };
     if (retryTimer) return { ok: true, message: "watcher: continuity retry already scheduled by the Pi extension" };
     const id = ++seq;
+    const generation = lifecycleGeneration;
     const env = {
       ...process.env,
       FM_HOME: fmHome,
@@ -306,14 +347,15 @@ export default function (pi: ExtensionAPI) {
       resolveClosed();
       settleReadiness(false);
       releaseChild();
-      if (stopping) return;
+      if (stopping || generation !== lifecycleGeneration) return;
       const classification = classifyClose(stdout, stderr, code, signal);
       const predecessor = String(armChild.pid ?? "");
       if (classification.kind === "actionable") {
         retryFailures = 0;
         restoring = true;
         void (async () => {
-          const failure = await restoreAfterActionableClose(predecessor);
+          const failure = await restoreAfterActionableClose(predecessor, generation);
+          if (generation !== lifecycleGeneration) return;
           restoring = false;
           if (stopping) return;
           const message = failure ? `${classification.message}\n\n${failure}` : classification.message;
@@ -323,7 +365,7 @@ export default function (pi: ExtensionAPI) {
         return;
       }
       if (restoring) return;
-      scheduleRetry(classification.message, predecessor);
+      scheduleRetry(classification.message, predecessor, generation);
     });
     armChild.on("error", (error: Error) => {
       if (settled) return;
@@ -331,18 +373,18 @@ export default function (pi: ExtensionAPI) {
       resolveClosed();
       settleReadiness(false);
       releaseChild();
-      if (stopping) return;
+      if (stopping || generation !== lifecycleGeneration) return;
       if (restoring) return;
-      scheduleRetry(`watcher: FAILED - Pi extension arm child ${id} failed: ${error.message}`, String(armChild.pid ?? ""));
+      scheduleRetry(`watcher: FAILED - Pi extension arm child ${id} failed: ${error.message}`, String(armChild.pid ?? ""), generation);
     });
     return { ok: true, message: `watcher: started Pi extension arm child ${id}` };
   }
 
   pi.on?.("session_start", () => {
-    markLoaded();
+    startSessionLifecycle();
   });
-  pi.on?.("session_shutdown", () => {
-    stopArm();
+  pi.on?.("session_shutdown", async () => {
+    await stopSessionLifecycle();
     process.off("exit", cleanupOnProcessExit);
   });
 

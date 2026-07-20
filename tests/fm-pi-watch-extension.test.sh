@@ -762,6 +762,115 @@ EOF
   pass "Pi watcher arm distinguishes all session lock ownership states"
 }
 
+test_pi_session_replacement_restarts_lifecycle_without_leaks() {
+  local repo home plugin log cleanup out status
+  repo="$TMP_ROOT/pi-session-replacement-root"
+  home="$TMP_ROOT/pi-session-replacement-home"
+  log="$TMP_ROOT/pi-session-replacement.log"
+  cleanup="$TMP_ROOT/pi-session-replacement-cleanup.log"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+trap 'printf "cleanup=%s\\n" "$$" >> "${FM_CLEANUP_LOG:?}"; exit 0' TERM INT
+while :; do sleep 0.02; done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_CLEANUP_LOG="$cleanup" node --input-type=module 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const baselineExitListeners = process.listenerCount("exit");
+const createPiRuntime = () => {
+  const handlers = new Map();
+  let tool = null;
+  return {
+    handlers,
+    get tool() {
+      return tool;
+    },
+    pi: {
+      on(event, handler) {
+        handlers.set(event, handler);
+      },
+      registerCommand() {},
+      registerTool(candidate) {
+        if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+      },
+      sendUserMessage: async () => {},
+    },
+  };
+};
+const rows = (path) => existsSync(path)
+  ? readFileSync(path, "utf8").trim().split("\n").filter(Boolean)
+  : [];
+const waitFor = async (predicate, message) => {
+  for (let i = 0; i < 250; i += 1) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(message);
+};
+
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+
+const first = createPiRuntime();
+mod.default(first.pi);
+await first.handlers.get("session_start")?.({ type: "session_start", reason: "startup" }, {});
+const firstArm = await first.tool.execute("tool-call-first-session", {}, undefined, undefined, {});
+if (firstArm.details?.ok !== true) throw new Error(`initial session did not arm: ${JSON.stringify(firstArm.details)}`);
+await waitFor(() => rows(process.env.FM_ARM_LOG).length === 1, "initial session child did not start");
+
+// Trigger: Pi replaces the session in this process, so the old runtime shuts down.
+await first.handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "new" }, {});
+await waitFor(() => rows(process.env.FM_CLEANUP_LOG).length === 1, "replaced session child was not cleaned up");
+
+// Masking state: the module stays cached while Pi binds a fresh extension runtime.
+const second = createPiRuntime();
+mod.default(second.pi);
+const stoppedArm = await second.tool.execute("tool-call-before-replacement-start", {}, undefined, undefined, {});
+if (stoppedArm.details?.ok !== false || stoppedArm.details.message !== "watcher: not armed - Pi session is shutting down") {
+  throw new Error(`session shutdown did not leave the cached module stopped: ${JSON.stringify(stoppedArm.details)}`);
+}
+
+// Trigger: the replacement runtime starts a new session in the same Pi process.
+await second.handlers.get("session_start")?.(
+  { type: "session_start", reason: "new", previousSessionFile: "previous.jsonl" },
+  {},
+);
+
+// Visible symptom: the replacement owns the lock and must no longer inherit stopping=true.
+const secondArm = await second.tool.execute("tool-call-replacement-session", {}, undefined, undefined, {});
+if (secondArm.details?.ok !== true) {
+  throw new Error(`replacement session refused to arm despite owning the lock: ${secondArm.details?.message}`);
+}
+await waitFor(() => rows(process.env.FM_ARM_LOG).length === 2, "replacement session child did not start");
+const duplicateArm = await second.tool.execute("tool-call-replacement-session-again", {}, undefined, undefined, {});
+if (duplicateArm.details?.ok !== true || !duplicateArm.details.message.includes("already has an arm child")) {
+  throw new Error(`replacement session did not preserve singleton arm ownership: ${JSON.stringify(duplicateArm.details)}`);
+}
+await new Promise((resolve) => setTimeout(resolve, 80));
+if (rows(process.env.FM_ARM_LOG).length !== 2) throw new Error("replacement session launched more than one child");
+if (process.listenerCount("exit") !== baselineExitListeners + 1) {
+  throw new Error("replacement session did not keep exactly one process-exit cleanup listener");
+}
+
+await second.handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "quit" }, {});
+await waitFor(() => rows(process.env.FM_CLEANUP_LOG).length === 2, "final session child was not cleaned up");
+if (process.listenerCount("exit") !== baselineExitListeners) {
+  throw new Error("final session cleanup leaked the process-exit listener");
+}
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "Pi session replacement must reset extension lifecycle without duplicate children or listeners"
+  [ -z "$out" ] || fail "Pi session-replacement lifecycle test printed output: $out"
+  pass "Pi session replacement resets watcher lifecycle and final cleanup remains bounded"
+}
+
 test_pi_process_exit_cleanup_listener_lifecycle() {
   local repo home plugin out status
   repo="$TMP_ROOT/pi-exit-listener-root"
@@ -799,6 +908,54 @@ EOF
   expect_code 0 "$status" "Pi cleanup fallback listener must install once and unregister on session shutdown"
   [ -z "$out" ] || fail "Pi listener-lifecycle test printed output: $out"
   pass "Pi process-exit cleanup listener has a bounded lifecycle"
+}
+
+test_pi_process_exit_cleanup_cancels_pending_retry() {
+  local repo home plugin log out status
+  repo="$TMP_ROOT/pi-process-exit-retry-root"
+  home="$TMP_ROOT/pi-process-exit-retry-home"
+  log="$TMP_ROOT/pi-process-exit-retry.log"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+exit 1
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_WATCH_REARM_RETRY_BASE_MS=500 FM_WATCH_REARM_RETRY_MAX_MS=500 node --input-type=module 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+let tool = null;
+const pi = {
+  on() {},
+  registerCommand() {},
+  registerTool(candidate) {
+    if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+  },
+  sendUserMessage: async () => {},
+};
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+await tool.execute("tool-call-exit-retry", {}, undefined, undefined, {});
+for (let i = 0; i < 250 && !existsSync(process.env.FM_ARM_LOG); i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+if (!existsSync(process.env.FM_ARM_LOG)) throw new Error("failed arm did not start");
+await new Promise((resolve) => setTimeout(resolve, 80));
+process.emit("exit", 0);
+await new Promise((resolve) => setTimeout(resolve, 600));
+const arms = readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n").filter(Boolean);
+if (arms.length !== 1) throw new Error("Pi pending retry survived process-exit cleanup");
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "Pi process exit must cancel a scheduled watcher retry"
+  [ -z "$out" ] || fail "Pi process-exit retry cleanup test printed output: $out"
+  pass "Pi process-exit cleanup cancels a pending continuity retry"
 }
 
 test_pi_process_exit_cleanup_stops_arm_child() {
@@ -1836,7 +1993,9 @@ test_pi_empty_close_retries_instead_of_disappearing
 test_pi_established_empty_close_honors_retry_limit
 test_pi_actionable_close_rechecks_session_lock
 test_pi_arm_distinguishes_session_lock_ownership
+test_pi_session_replacement_restarts_lifecycle_without_leaks
 test_pi_process_exit_cleanup_listener_lifecycle
+test_pi_process_exit_cleanup_cancels_pending_retry
 test_pi_process_exit_cleanup_stops_arm_child
 test_opencode_primary_watch_plugin_static_wiring
 test_opencode_plugin_package_boundary_is_explicit_esm
