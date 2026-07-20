@@ -190,7 +190,12 @@ It is keyed by harness name, and every field is optional:
   "claude": {
     "command": "cc",
     "args": ["--dangerously-skip-permissions"],
-    "env": { "ANTHROPIC_BASE_URL": "https://gateway.example.com", "ANTHROPIC_AUTH_TOKEN": "sk-..." }
+    "env": { "HTTPS_PROXY": "http://proxy.example.com:8080" },
+    "default_variant": "subscription",
+    "variants": {
+      "subscription": {},
+      "gateway": { "command": "/absolute/path/to/claude-gw" }
+    }
   },
   "codex": { "env": { "HTTPS_PROXY": "http://proxy.example.com:8080" } }
 }
@@ -211,6 +216,47 @@ Bootstrap reports a present-but-invalid file as `HARNESS_OVERRIDES: invalid conf
 The primary propagates this file into secondmate homes through the same inheritable-config path as `config/crew-dispatch.json`, so a secondmate's own crewmates launch with the primary's overrides.
 See [`docs/examples/harness-overrides.json`](examples/harness-overrides.json) for a starting point to copy into local `config/harness-overrides.json`.
 
+### Named launch variants
+
+A harness entry may declare `variants`, an object of named alternative ways to start that same harness.
+This is how a second launch identity - a gateway or third-party-billed account, a differently configured launcher - becomes a first-class, selectable option instead of a shell function firstmate cannot see.
+`default_variant` names the variant that applies when a spawn selects none, which makes the home's default launch identity a config value rather than something hard-coded into `command`.
+
+A variant carries the same three axes as a harness entry, and layers over the harness-level values per axis: `command` and `args` replace when the variant declares them, and `env` merges with the variant winning on a key conflict.
+The harness-level entry therefore stays the shared base for every variant, and a variant only states its delta.
+A variant declaring nothing (`{}`) launches exactly like the harness-level entry, which is the idiomatic way to name the base identity so it can be requested explicitly.
+
+Selection is always an explicit human choice, in this order:
+
+1. `fm-spawn.sh --launch <variant>` for that one spawn.
+2. The matched dispatch profile's `launch` field, which firstmate passes through as `--launch`.
+3. `.[<harness>].default_variant`.
+
+Nothing else selects a variant.
+Firstmate deliberately does not route between launch identities on quota, load, or any other runtime signal: the available quota readings are not accurate enough to route on, and `quota-axi` cannot see a gateway account's balance at all, because it reads the local subscription credentials while a gateway bills through a third party.
+`quota-balanced` selects among dispatch profiles by vendor and never picks a launch variant.
+
+Naming a variant the resolved harness does not declare is a hard spawn refusal from every source, and so is `--launch` with no usable override file.
+A silent fallback would run the work on the wrong billing account, so the refusal is the safe behavior; bootstrap reports the same problem at session start.
+`--launch` cannot be combined with a raw launch command, which already supplies its own binary, args, and env.
+
+A variant changes how the harness launches, never which harness it is.
+`state/<id>.meta` keeps `harness=` at the base adapter name, so every supervision fact - busy signature, turn-end hook, interrupt, exit - keeps applying unchanged.
+It also records `launch=<name>` for traceability, and only when a variant was selected, so a home that declares no variant keeps a byte-identical meta.
+The variant NAME is recorded, never its command or env.
+
+Credentials belong in the launcher script the variant points at, never in this file.
+A gateway launcher that exports its own `ANTHROPIC_BASE_URL` and `ANTHROPIC_AUTH_TOKEN` and then execs the real binary keeps the token in exactly one place, so rotating it is a one-file edit.
+Putting those values in `env` here spreads the same secret across this file, every secondmate home that inherits it, and every backup of them.
+
+A launcher that sets an `ANTHROPIC_AUTH_TOKEN` makes the claude CLI print `claude.ai connectors are disabled because ANTHROPIC_API_KEY or another auth source is set` on stderr at every start.
+That line is a warning, not a failure: the CLI continues, and no-mistakes appends whatever stderr it buffered onto any non-zero exit, which makes the warning look like the cause of an unrelated failure.
+Read past it to the real error.
+
+Bootstrap validates the variant shape and lists what a home declares as `HARNESS_OVERRIDES: <harness> launch variants: <name>[ (default)], ...`.
+A `variants` value that is not an object, a variant that is not an object, a bad `command`, `args`, or `env` inside one, and a `default_variant` naming a variant that is not declared are each reported as `HARNESS_OVERRIDES: invalid config/harness-overrides.json - <reason>`.
+A home with no `variants` key stays silent and behaves exactly as it did before variants existed.
+
 ## Crew dispatch profiles (config/crew-dispatch.json)
 
 `config/crew-dispatch.json` is an optional local, gitignored file containing natural-language rules that firstmate reads before dispatching a crewmate or scout.
@@ -226,7 +272,7 @@ This section is the single owner of the canonical schema and its per-field seman
     {
       "when": "<natural-language condition describing a kind of task>",
       "use": [
-        { "harness": "<adapter>", "model": "<optional model>", "effort": "<low|medium|high|xhigh|max, optional>" }
+        { "harness": "<adapter>", "model": "<optional model>", "effort": "<low|medium|high|xhigh|max, optional>", "launch": "<optional launch variant>" }
       ],
       "select": "<optional strategy>",
       "why": "<optional rationale that helps firstmate choose>"
@@ -238,7 +284,9 @@ This section is the single owner of the canonical schema and its per-field seman
 
 Per rule, `when` and `use` are required.
 `use` may be a single profile object or an ordered array of profile objects; the single-object form stays fully backward-compatible, and every profile needs `harness`.
-`use.model`, `use.effort`, and `why` are optional.
+`use.model`, `use.effort`, `use.launch`, and `why` are optional.
+`use.launch` names a launch variant from `config/harness-overrides.json` for that profile's harness, and is passed straight through to `fm-spawn.sh --launch`; see "Named launch variants" above for what a variant is and why no selector ever chooses one.
+Bootstrap cross-checks every `launch` against the declared variants and reports a stale one as `CREW_DISPATCH: invalid config/crew-dispatch.json - launch names an undeclared harness variant: <harness>.<name>`, because the two files are edited independently and a rename would otherwise only surface as a refused spawn.
 `select` is optional and currently supports `quota-balanced`.
 Absent `select` means use the first array element, or the only object in the single-object form; the first array element is the deterministic tie-break and the ultimate fallback.
 `default` is optional.

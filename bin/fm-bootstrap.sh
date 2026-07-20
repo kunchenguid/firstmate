@@ -10,6 +10,7 @@
 #                 "CREW_DISPATCH: invalid config/crew-dispatch.json - <reason>",
 #                 "CREW_DISPATCH: active config/crew-dispatch.json" plus indented rules,
 #                 "HARNESS_OVERRIDES: invalid config/harness-overrides.json - <reason>",
+#                 "HARNESS_OVERRIDES: <harness> launch variants: <name>[ (default)], ...",
 #                 "FLEET_SYNC: <repo>: skipped|recovered|STUCK: <detail>",
 #                 "TASKS_AXI: available", "TANGLE: <remediation>",
 #                 "BACKLOG_ORPHAN: <id> is In flight in data/backlog.md but has no state/<id>.meta ...",
@@ -562,6 +563,7 @@ crew_dispatch_validate() {
     elif [(.rules // [])[]? | select((.use? | type) == "array" and (.use | length) == 0)] | length > 0 then "each rule needs at least one use profile"
     elif [(.rules // [])[]? | use_profiles(.use?)[]? | select(type != "object")] | length > 0 then "each use profile must be an object"
     elif [(.rules // [])[]? | use_profiles(.use?)[]? | select((.harness? | type) != "string" or (.harness | length) == 0)] | length > 0 then "each use profile needs harness"
+    elif [((.rules // [])[]? | use_profiles(.use?)[]?), (.default? | select(type == "object")) | select(has("launch")) | select((.launch | type) != "string" or (.launch | length) == 0)] | length > 0 then "launch must be a non-empty string"
     elif [(.rules // [])[]? | select(has("select") and ((.select? | type) != "string" or (.select | length) == 0))] | length > 0 then "select must be a non-empty string"
     elif [(.rules // [])[]? | .select? // empty | select(. != "quota-balanced")] | length > 0 then
       "unknown select: " + ([ (.rules // [])[]? | .select? // empty | select(. != "quota-balanced") ] | unique | join(", "))
@@ -580,7 +582,9 @@ crew_dispatch_validate() {
   ' "$file" 2>/dev/null || true)
   if [ -n "$err" ]; then
     echo "CREW_DISPATCH: invalid config/crew-dispatch.json - $err"
-    return 0
+    # Non-zero so the caller skips the cross-file launch check: a file that fails
+    # its own schema would otherwise report a second, derived complaint.
+    return 1
   fi
   jq -r '
     def profile($p):
@@ -588,7 +592,8 @@ crew_dispatch_validate() {
       + (if ($p.model? != null) then "/" + ($p.model | tostring)
          elif ($p.effort? != null) then "/default"
          else "" end)
-      + (if ($p.effort? != null) then "/" + ($p.effort | tostring) else "" end);
+      + (if ($p.effort? != null) then "/" + ($p.effort | tostring) else "" end)
+      + (if ($p.launch? != null) then " launch=" + ($p.launch | tostring) else "" end);
     def use_label($r):
       if ($r.use | type) == "array" then
         ((if ($r.select? != null) then ($r.select | tostring) else "first" end)
@@ -620,18 +625,71 @@ harness_overrides_validate() {
     return 0
   fi
   err=$(jq -r '
+    def axis_entries: [to_entries[] | .value]
+      + [to_entries[] | .value | select((.variants|type) == "object") | .variants | to_entries[] | .value];
     if type != "object" then "top-level value must be an object"
     elif [to_entries[] | select((.value|type) != "object")] | length > 0 then "each harness entry must be an object"
-    elif [to_entries[] | select(.value|has("command")) | select((.value.command|type) != "string")] | length > 0 then "command must be a string"
-    elif [to_entries[] | select(.value|has("args")) | select((.value.args|type) != "array")] | length > 0 then "args must be an array of strings"
-    elif [to_entries[] | select(.value|has("args")) | .value.args[]? | select(type != "string")] | length > 0 then "args must be an array of strings"
-    elif [to_entries[] | select(.value|has("env")) | select((.value.env|type) != "object")] | length > 0 then "env must be an object"
-    elif [to_entries[] | select(.value|has("env")) | .value.env | to_entries[]? | select((.value|type) != "string")] | length > 0 then "env values must be strings"
+    elif [to_entries[] | select(.value|has("variants")) | select((.value.variants|type) != "object")] | length > 0 then "variants must be an object"
+    elif [to_entries[] | select((.value.variants|type) == "object") | .value.variants | to_entries[] | select((.value|type) != "object")] | length > 0 then "each variant must be an object"
+    elif [to_entries[] | select(.value|has("default_variant")) | select((.value.default_variant|type) != "string" or (.value.default_variant|length) == 0)] | length > 0 then "default_variant must be a non-empty string"
+    elif [to_entries[] | select(.value|has("default_variant")) | .value as $e
+          | select((($e.variants|type) != "object") or (($e.variants|has($e.default_variant)) | not))] | length > 0 then
+      "default_variant names a variant that is not declared: "
+        + ([to_entries[] | select(.value|has("default_variant")) | . as $row | .value as $e
+            | select((($e.variants|type) != "object") or (($e.variants|has($e.default_variant)) | not))
+            | $row.key + "." + $e.default_variant] | unique | join(", "))
+    elif [axis_entries[] | select(has("command")) | select((.command|type) != "string")] | length > 0 then "command must be a string"
+    elif [axis_entries[] | select(has("args")) | select((.args|type) != "array")] | length > 0 then "args must be an array of strings"
+    elif [axis_entries[] | select(has("args")) | .args[]? | select(type != "string")] | length > 0 then "args must be an array of strings"
+    elif [axis_entries[] | select(has("env")) | select((.env|type) != "object")] | length > 0 then "env must be an object"
+    elif [axis_entries[] | select(has("env")) | .env | to_entries[]? | select((.value|type) != "string")] | length > 0 then "env values must be strings"
     else empty
     end
   ' "$file" 2>/dev/null || true)
   if [ -n "$err" ]; then
     echo "HARNESS_OVERRIDES: invalid config/harness-overrides.json - $err"
+    return 0
+  fi
+  # Declared variants are captain-facing capability, so list them the way
+  # crew_dispatch_validate lists its rules: a home that has them should see them
+  # at session start without opening the file.
+  jq -r '
+    to_entries[]
+    | select((.value.variants | type) == "object")
+    | select((.value.variants | length) > 0)
+    | .key as $h
+    | (.value.default_variant? // "") as $d
+    | "HARNESS_OVERRIDES: " + $h + " launch variants: "
+      + ((.value.variants | keys_unsorted
+          | map(. + (if . == $d then " (default)" else "" end)) | join(", ")))
+  ' "$file" 2>/dev/null || true
+}
+
+# Cross-file check: a dispatch profile's `launch` must name a variant that the same
+# profile's harness actually declares in config/harness-overrides.json. The two
+# files are edited independently, so a renamed or deleted variant would otherwise
+# only surface as a refused spawn at dispatch time.
+crew_dispatch_launch_validate() {
+  local dispatch overrides bad
+  dispatch="$CONFIG/crew-dispatch.json"
+  overrides="$CONFIG/harness-overrides.json"
+  [ -f "$dispatch" ] || return 0
+  command -v jq >/dev/null 2>&1 || return 0
+  jq -e . "$dispatch" >/dev/null 2>&1 || return 0
+  [ -f "$overrides" ] && jq -e . "$overrides" >/dev/null 2>&1 || overrides=/dev/null
+  bad=$(jq -rn --slurpfile d "$dispatch" --slurpfile o "$overrides" '
+    def use_profiles($u):
+      if ($u | type) == "array" then $u elif ($u | type) == "object" then [$u] else [] end;
+    ($o[0] // {}) as $ov
+    | [($d[0].rules // [])[]? | use_profiles(.use?)[]?]
+      + (if ($d[0].default? | type) == "object" then [$d[0].default] else [] end)
+    | map(select((.launch? | type) == "string"))
+    | map(select(($ov[.harness]?.variants?[.launch]? | type) != "object"))
+    | map(.harness + "." + .launch)
+    | unique | join(", ")
+  ' 2>/dev/null || true)
+  if [ -n "$bad" ]; then
+    echo "CREW_DISPATCH: invalid config/crew-dispatch.json - launch names an undeclared harness variant: $bad"
   fi
 }
 
@@ -690,7 +748,7 @@ fi
 crew=
 [ -f "$CONFIG/crew-harness" ] && crew=$(tr -d '[:space:]' < "$CONFIG/crew-harness" || true)
 [ -n "$crew" ] && [ "$crew" != "default" ] && echo "CREW_HARNESS_OVERRIDE: $crew"
-crew_dispatch_validate
+crew_dispatch_validate && crew_dispatch_launch_validate
 harness_overrides_validate
 backlog_orphan_rows
 if ! fm_backlog_backend_manual "$CONFIG" && fm_tasks_axi_compatible; then

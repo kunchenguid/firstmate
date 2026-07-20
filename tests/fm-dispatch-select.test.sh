@@ -174,6 +174,28 @@ SH
   pass "single-object use and no-select arrays preserve first-profile selection"
 }
 
+# A profile's `launch` names a launch variant from config/harness-overrides.json.
+# The selector must carry it through untouched: firstmate passes it straight to
+# fm-spawn --launch. No selector ever CHOOSES a launch variant - launch identity is
+# a human choice - so this is pure passthrough on both the trivial and the
+# quota-balanced path.
+test_launch_field_passes_through() {
+  local out rule
+  out=$("$ROOT/bin/fm-dispatch-select.sh" '{"harness":"claude","launch":"gateway"}')
+  [ "$out" = '{"harness":"claude","launch":"gateway"}' ] \
+    || fail "launch should survive a bare profile, got: $out"
+
+  rule='{"when":"overflow work","use":[{"harness":"claude","model":"opus","launch":"gateway"},{"harness":"codex"}]}'
+  out=$("$ROOT/bin/fm-dispatch-select.sh" "$rule")
+  [ "$out" = '{"harness":"claude","model":"opus","launch":"gateway"}' ] \
+    || fail "launch should survive first-element array selection, got: $out"
+
+  out=$("$ROOT/bin/fm-dispatch-select.sh" '{"harness":"claude","model":"opus"}')
+  [ "$out" = '{"harness":"claude","model":"opus"}' ] \
+    || fail "a profile without launch must not gain a launch key, got: $out"
+  pass "dispatch profiles carry launch through without a selector ever choosing one"
+}
+
 test_higher_min_vendor_wins
 test_exact_tie_uses_first_profile
 test_quota_missing_falls_back_to_first
@@ -182,5 +204,7 @@ test_bad_quota_json_falls_back_to_first
 test_stale_with_cache_needs_clear_margin_to_beat_fresh
 test_vendor_absent_or_unusable_falls_back_conservatively
 test_backward_compatible_first_selection
+
+test_launch_field_passes_through
 
 echo "# all fm-dispatch-select tests passed"

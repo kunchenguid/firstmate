@@ -748,8 +748,77 @@ empty array use is flagged^{"rules":[{"when":"big feature","use":[]}]}^exact^CRE
 array profile without harness is flagged^{"rules":[{"when":"big feature","use":[{"model":"gpt-5.5"}]}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - each use profile needs harness
 unknown select is flagged^{"rules":[{"when":"big feature","use":[{"harness":"claude"},{"harness":"codex"}],"select":"mystery"}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - unknown select: mystery
 array profile unsupported effort is flagged^{"rules":[{"when":"big feature","use":[{"harness":"codex","effort":"max"}]}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: codex:max
+empty launch is flagged^{"rules":[{"when":"gateway work","use":[{"harness":"claude","launch":""}]}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - launch must be a non-empty string
+non-string launch is flagged^{"rules":[{"when":"gateway work","use":[{"harness":"claude","launch":3}]}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - launch must be a non-empty string
 ROWS
   pass "bootstrap validates crew-dispatch.json and reports malformed or unverified configs"
+}
+
+# Launch variants are the declared, human-selected alternative launch identities
+# (a gateway account, a different launcher). Bootstrap must surface which ones a
+# home has and reject the shapes that would otherwise only fail at spawn time.
+test_harness_overrides_variants_validation() {
+  local label body mode expect case_dir fakebin out n
+  n=0
+  while IFS='^' read -r label body mode expect; do
+    [ -n "$label" ] || continue
+    n=$((n + 1))
+    case_dir="$TMP_ROOT/variants-$n"
+    mkdir -p "$case_dir/home/config"
+    printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+    printf '%s\n' "$body" > "$case_dir/home/config/harness-overrides.json"
+    fakebin=$(make_fake_toolchain "$case_dir")
+    add_real_jq "$fakebin"
+    out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+      FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+    case "$mode" in
+      empty) [ -z "$out" ] || fail "$label: expected silence, got: $out" ;;
+      exact) [ "$out" = "$expect" ] || fail "$label: expected '$expect', got: $out" ;;
+    esac
+  done <<'ROWS'
+legacy file without variants stays silent^{"claude":{"command":"cc"}}^empty^
+declared variants are surfaced^{"claude":{"command":"cc","variants":{"gateway":{"command":"/opt/claude-gw"},"subscription":{}}}}^exact^HARNESS_OVERRIDES: claude launch variants: gateway, subscription
+the default variant is marked^{"claude":{"default_variant":"gateway","variants":{"gateway":{},"subscription":{}}}}^exact^HARNESS_OVERRIDES: claude launch variants: gateway (default), subscription
+non-object variants is flagged^{"claude":{"variants":"gateway"}}^exact^HARNESS_OVERRIDES: invalid config/harness-overrides.json - variants must be an object
+non-object variant entry is flagged^{"claude":{"variants":{"gateway":"cc"}}}^exact^HARNESS_OVERRIDES: invalid config/harness-overrides.json - each variant must be an object
+undeclared default_variant is flagged^{"claude":{"default_variant":"gone","variants":{"gateway":{}}}}^exact^HARNESS_OVERRIDES: invalid config/harness-overrides.json - default_variant names a variant that is not declared: claude.gone
+default_variant with no variants is flagged^{"claude":{"default_variant":"gateway"}}^exact^HARNESS_OVERRIDES: invalid config/harness-overrides.json - default_variant names a variant that is not declared: claude.gateway
+bad command inside a variant is flagged^{"claude":{"variants":{"gateway":{"command":7}}}}^exact^HARNESS_OVERRIDES: invalid config/harness-overrides.json - command must be a string
+bad env inside a variant is flagged^{"claude":{"variants":{"gateway":{"env":{"K":9}}}}}^exact^HARNESS_OVERRIDES: invalid config/harness-overrides.json - env values must be strings
+ROWS
+  pass "bootstrap validates and surfaces harness-overrides launch variants"
+}
+
+# crew-dispatch.json and harness-overrides.json are edited independently, so a
+# profile pointing at a renamed or deleted variant must be caught at session start
+# rather than as a refused spawn hours later.
+test_crew_dispatch_launch_cross_file_check() {
+  local case_dir fakebin out
+  case_dir="$TMP_ROOT/dispatch-launch-xfile"
+  mkdir -p "$case_dir/home/config"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  printf '%s\n' '{"rules":[{"when":"overflow work","use":{"harness":"claude","launch":"gateway"}}]}' \
+    > "$case_dir/home/config/crew-dispatch.json"
+  printf '%s\n' '{"claude":{"variants":{"gateway":{"command":"/opt/claude-gw"}}}}' \
+    > "$case_dir/home/config/harness-overrides.json"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  add_real_jq "$fakebin"
+
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  printf '%s\n' "$out" | grep -F 'rule: overflow work -> claude launch=gateway' >/dev/null \
+    || fail "a declared launch variant should be shown in the active rule listing: $out"
+  printf '%s\n' "$out" | grep -F 'undeclared harness variant' >/dev/null \
+    && fail "a declared variant must not be reported as undeclared: $out"
+
+  # Now break the link the way a rename would.
+  printf '%s\n' '{"claude":{"variants":{"cca":{"command":"/opt/claude-gw"}}}}' \
+    > "$case_dir/home/config/harness-overrides.json"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  printf '%s\n' "$out" | grep -F 'CREW_DISPATCH: invalid config/crew-dispatch.json - launch names an undeclared harness variant: claude.gateway' >/dev/null \
+    || fail "a dispatch profile naming a missing variant was not reported: $out"
+  pass "bootstrap cross-checks dispatch launch names against declared harness variants"
 }
 
 test_bootstrap_reporting
@@ -771,3 +840,5 @@ test_fleet_sync_timeout_is_computed_before_launch
 test_crew_dispatch_active_rules_are_surfaced
 test_crew_dispatch_validation
 test_backlog_orphan_rows_are_reported
+test_harness_overrides_variants_validation
+test_crew_dispatch_launch_cross_file_check
