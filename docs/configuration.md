@@ -425,6 +425,14 @@ FM_FLEET_SYNC_PACKED_REFS_LOCK_AGE_SECS=30       # min mtime age before fm-fleet
 FM_BUSY_REGEX='esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel'   # busy-pane signatures, shared by watcher, fm-crew-state pane fallback, and tmux helper
 FM_COMPOSER_IDLE_RE=    # optional empty-composer regex, applied after ghost and border stripping
 FM_COMPOSER_GHOST_LUMA_MAX=128   # fleet-wide: max perceived luminance (0.299R+0.587G+0.114B, 0-255) for a TRUECOLOR foreground to count as de-emphasised ghost/placeholder text and be stripped; dim/faint (SGR 2) is stripped regardless. Assumes a dark terminal theme (bin/fm-composer-lib.sh's fm_composer_strip_ghost, shared by the tmux and herdr composer readers)
+# pre-spawn lane governor (bin/fm-lane-governor.sh); refuses unsafe spawns before any launch side effect
+FM_LANE_GOVERNOR=1              # set to 0 to bypass the lane governor entirely
+FM_SPAWN_NO_GUARD=             # fm-spawn.sh escape hatch: truthy skips the governor for test/recovery paths that already own safety
+FM_LANE_MAX_CONCURRENT=4       # max transient ship/scout workers per home; persistent secondmates are excluded and --kind secondmate bypasses this gate
+FM_LANE_MAX_SWAP_GB=24         # refuse new spawns above this swap-used line; 0 disables the swap threshold
+FM_LANE_MIN_AVAILABLE_RAM_GB=1 # refuse new spawns below this available-RAM line; 0 disables the RAM threshold
+FM_LANE_LEASE_TTL_SECONDS=600  # spawn leases held past this, or whose holder pid is dead, are reaped
+FM_LANE_ORPHAN_CHECK=1         # set to 0 to skip the orphaned-harness check for this home
 GROK_HOME=              # optional Grok config home for firstmate's global grok turn-end hook; defaults to ~/.grok
 FM_SEND_RETRIES=3       # fm-send Enter-retry attempts after typing the line once
 FM_SEND_SLEEP=0.4       # seconds between fm-send submit checks

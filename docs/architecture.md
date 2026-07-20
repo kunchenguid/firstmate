@@ -106,6 +106,7 @@ Codex App support is recorded in `docs/codex-app-backend.md`; it is not selectab
 
 Crewmates never intentionally touch your project clone; [treehouse](https://github.com/kunchenguid/treehouse) pools clean worktrees for tmux, herdr, zellij, and cmux tasks, while Orca creates its own worktrees for `backend=orca`.
 For ship and scout work, `fm-spawn.sh` refuses to launch unless the resolved task path is a real git worktree root that is distinct from the project primary checkout.
+Before any launch side effect, `fm-spawn.sh` also reserves capacity through `fm-lane-governor.sh`, which refuses over-capacity, high-swap, low-RAM, or orphaned-harness starts for this home; persistent secondmate spawns bypass the lane-capacity gate but still pass the memory and orphan checks, and `FM_SPAWN_NO_GUARD=1` skips the governor for test and recovery paths that already own safety.
 
 The firstmate repo has one extra exposure because it can dispatch crewmates to work on itself.
 Its operating checkout (`FM_ROOT`) and the disposable crewmate worktrees are all linked git worktrees of the same repository, so the valid discriminator is branch state, not whether the checkout is linked.
