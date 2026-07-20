@@ -724,6 +724,21 @@ test_spawn_task_lock_covers_all_backend_creation_and_metadata_publication() {
   pass "fm-spawn: one task lock spans every backend creation path through metadata publication"
 }
 
+test_projected_spawn_disarms_cleanup_before_ambiguous_launch_submission() {
+  local literal_pattern disarm_pattern enter_pattern literal_line disarm_line enter_line
+  literal_pattern='spawn_send_literal "$T" "$LAUNCH"'
+  disarm_pattern='[ "${HERDR_PROJECTED:-0}" -ne 1 ] || HERDR_PROJECTION_ABORT_CLEANUP=0'
+  enter_pattern='spawn_send_key "$T" Enter'
+  literal_line=$(grep -nF "$literal_pattern" "$ROOT/bin/fm-spawn.sh" | tail -1 | cut -d: -f1)
+  disarm_line=$(grep -nF "$disarm_pattern" "$ROOT/bin/fm-spawn.sh" | tail -1 | cut -d: -f1)
+  enter_line=$(grep -nF "$enter_pattern" "$ROOT/bin/fm-spawn.sh" | tail -1 | cut -d: -f1)
+  [ -n "$literal_line" ] && [ -n "$disarm_line" ] && [ -n "$enter_line" ] \
+    || fail "could not locate the projected launch cleanup boundary"
+  [ "$literal_line" -lt "$disarm_line" ] && [ "$disarm_line" -lt "$enter_line" ] \
+    || fail "projected spawn cleanup must be disarmed after launch text and before ambiguous Enter submission"
+  pass "fm-spawn: projected cleanup is disarmed before ambiguous launch submission"
+}
+
 test_projection_recovery_is_read_only_and_refuses_live_duplicate_risk() {
   local dir state log resp fb token journal out status calls
   dir="$TMP_ROOT/projection-recovery"; state="$dir/state"; mkdir -p "$dir/responses" "$state"
@@ -2220,6 +2235,7 @@ test_projection_journal_is_atomic_and_uses_128_bit_token
 test_projection_create_uses_exact_response_ids_and_leaves_one_task_pane
 test_projection_create_never_closes_a_concurrent_same_label_tab
 test_spawn_task_lock_covers_all_backend_creation_and_metadata_publication
+test_projected_spawn_disarms_cleanup_before_ambiguous_launch_submission
 test_projection_recovery_is_read_only_and_refuses_live_duplicate_risk
 test_workspace_find_matches_only_this_homes_own_label
 test_list_live_scoped_to_this_homes_workspace_only
