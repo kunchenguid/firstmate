@@ -6,6 +6,7 @@ When this session owns supervision and away mode is not active:
 3. On `session_start`, the watcher extension first requires `bin/fm-primary-scope.sh` to identify a main or valid secondmate primary home, then reads ownership through `bin/fm-lock.sh ownership`.
    During `startup` and `new`, a missing or dead lock remains unchanged so the session-start nudge can require the complete initialization path; an already-owned lock may arm idempotently.
    During `resume`, a missing or dead lock is reacquired only through `bin/fm-lock.sh`, ownership is read again, and supervision starts only after the result is `owned`.
+   During `fork` and `reload`, supervision is rebuilt only from an already-owned lock; missing, dead, live-other, malformed, and unknown states remain unchanged and fail closed.
    A verified live other owner remains unchanged and the extension refuses to arm.
    Any malformed or unclassifiable lock state, failed acquisition, or post-acquisition result other than `owned` fails closed without arming.
    When `state/.afk` exists, lock recovery still completes but the extension does not start or restart a watcher because the sub-supervisor owns supervision.

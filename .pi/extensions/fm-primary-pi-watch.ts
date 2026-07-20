@@ -13,6 +13,7 @@ type ArmResult = {
 };
 
 type LockOwnership = "owned" | "missing" | "dead" | "other" | "malformed" | "unknown";
+type SessionLockPolicy = "defer" | "recover" | "owned-only";
 
 type CloseClassification = {
   kind: "actionable" | "failure";
@@ -96,6 +97,21 @@ function actionableLine(output: string): string {
   return lines.find((line) => /^(signal:|stale:|check:|heartbeat($|:))/.test(line)) || "";
 }
 
+function lockPolicyForSessionStart(reason: unknown): SessionLockPolicy | null {
+  switch (String(reason ?? "")) {
+    case "startup":
+    case "new":
+      return "defer";
+    case "resume":
+      return "recover";
+    case "fork":
+    case "reload":
+      return "owned-only";
+    default:
+      return null;
+  }
+}
+
 function classifyClose(stdout: string, stderr: string, code: number | null, signal: NodeJS.Signals | null): CloseClassification {
   const combined = `${stdout}\n${stderr}`.trim();
   const reason = actionableLine(combined);
@@ -135,7 +151,7 @@ export default function (pi: ExtensionAPI) {
   let awayMonitorRetryDelayMs = 250;
   let awayObserved = existsSync(awayFlag);
   let sessionActive = false;
-  let sessionCanRecoverLock = false;
+  let activeSessionLockPolicy: SessionLockPolicy = "owned-only";
   let shuttingDown = false;
   const intentionalStops = new WeakSet<object>();
 
@@ -170,7 +186,7 @@ export default function (pi: ExtensionAPI) {
     if (!awayObserved) return;
     awayObserved = false;
     if (!sessionActive || shuttingDown || !awayMonitor) return;
-    const result = await startArm("", sessionCanRecoverLock);
+    const result = await startArm("", activeSessionLockPolicy);
     if (!result.ok) await sendWakeSafely(result.message);
   }
 
@@ -265,7 +281,7 @@ export default function (pi: ExtensionAPI) {
 
   async function recoverArmAfterMonitor(): Promise<void> {
     try {
-      const result = await startArm("", sessionCanRecoverLock);
+      const result = await startArm("", activeSessionLockPolicy);
       if (!result.ok) await sendWakeSafely(result.message);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -385,7 +401,7 @@ export default function (pi: ExtensionAPI) {
     retryTimer = timer;
   }
 
-  function launchArm(predecessorArmPid = "", recoverReclaimableLock = true): ArmResult {
+  function launchArm(predecessorArmPid = "", lockPolicy: SessionLockPolicy = "recover"): ArmResult {
     if (!primaryHome) {
       return { ok: false, message: "watcher: inactive - current checkout is not a primary firstmate home" };
     }
@@ -400,8 +416,11 @@ export default function (pi: ExtensionAPI) {
     let acquisitionError = "";
     let attemptedAcquisition = false;
     if (ownership === "missing" || ownership === "dead") {
-      if (!recoverReclaimableLock) {
+      if (lockPolicy === "defer") {
         return { ok: true, message: "watcher: pending - session start must acquire the lock before arming" };
+      }
+      if (lockPolicy === "owned-only") {
+        return { ok: false, message: `watcher: read-only - existing session-lock ownership required (state: ${ownership})` };
       }
       attemptedAcquisition = true;
       const acquisition = spawnSync(lockScript, [], { encoding: "utf8", env: lockEnvironment() });
@@ -416,7 +435,8 @@ export default function (pi: ExtensionAPI) {
     }
     if (ownership !== "owned") {
       const detail = acquisitionError ? ` (${acquisitionError})` : "";
-      return { ok: false, message: `watcher: lock acquisition failed - session lock is ${ownership}${detail}` };
+      const failure = lockPolicy === "recover" ? "lock acquisition failed" : "lock ownership unavailable";
+      return { ok: false, message: `watcher: ${failure} - session lock is ${ownership}${detail}` };
     }
     markLoadedForPrimary();
     if (existsSync(awayFlag)) {
@@ -529,8 +549,8 @@ export default function (pi: ExtensionAPI) {
     return { ok: true, message: `watcher: started Pi extension arm child ${id}` };
   }
 
-  async function startArm(predecessorArmPid = "", recoverReclaimableLock = true): Promise<ArmResult> {
-    const result = launchArm(predecessorArmPid, recoverReclaimableLock);
+  async function startArm(predecessorArmPid = "", lockPolicy: SessionLockPolicy = "recover"): Promise<ArmResult> {
+    const result = launchArm(predecessorArmPid, lockPolicy);
     if (!result.ok) return result;
     const armChild = child;
     if (!armChild) return result;
@@ -543,9 +563,10 @@ export default function (pi: ExtensionAPI) {
   pi.on?.("session_start", async (event, ctx) => {
     if (!primaryHome) return;
     const reason = String((event as { reason?: unknown }).reason ?? "");
-    if (!["startup", "new", "resume"].includes(reason)) {
+    const lockPolicy = lockPolicyForSessionStart(reason);
+    if (!lockPolicy) {
       sessionActive = false;
-      sessionCanRecoverLock = false;
+      activeSessionLockPolicy = "owned-only";
       stopArm();
       ctx?.ui?.notify?.(`watcher: inactive - unsupported Pi session_start reason: ${reason || "<missing>"}`, "warning");
       return;
@@ -553,16 +574,16 @@ export default function (pi: ExtensionAPI) {
     stopping = false;
     shuttingDown = false;
     sessionActive = true;
-    sessionCanRecoverLock = reason === "resume";
+    activeSessionLockPolicy = lockPolicy;
     startAwayMonitor();
-    const result = await startArm("", sessionCanRecoverLock);
+    const result = await startArm("", activeSessionLockPolicy);
     if (!result.ok) ctx?.ui?.notify?.(result.message, "warning");
   });
   pi.on?.("session_shutdown", () => {
     stopping = true;
     shuttingDown = true;
     sessionActive = false;
-    sessionCanRecoverLock = false;
+    activeSessionLockPolicy = "owned-only";
     stopAwayMonitor();
     stopArm();
     process.off("exit", cleanupOnProcessExit);

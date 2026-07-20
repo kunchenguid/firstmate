@@ -56,6 +56,7 @@ classify() {
   if kill -0 "$value" 2>/dev/null; then printf 'other\n'; else printf 'dead\n'; fi
 }
 if [ "${1:-}" = "ownership" ]; then classify; exit 0; fi
+[ -z "${FM_LOCK_ACQUIRE_LOG:-}" ] || printf 'acquire\n' >> "$FM_LOCK_ACQUIRE_LOG"
 if [ "${FM_LOCK_FIXTURE_MODE:-}" = failure ]; then
   printf 'fixture acquisition failed\n' >&2
   exit 1
@@ -101,10 +102,12 @@ test_tracked_extension_present_and_self_hashing() {
   assert_contains "$text" 'FM_ROOT_OVERRIDE: root' "tracked extension does not scope the extension checkout independently of inherited supervisor paths"
   assert_contains "$text" 'if (!primaryHome)' "tracked extension does not fail closed outside a primary home"
   assert_contains "$text" 'type LockOwnership = "owned" | "missing" | "dead" | "other" | "malformed" | "unknown"' "tracked extension does not preserve the lock owner states"
+  assert_contains "$text" 'type SessionLockPolicy = "defer" | "recover" | "owned-only"' "tracked extension does not define explicit session lock policies"
   assert_contains "$text" 'spawnSync(lockScript, ["ownership"]' "tracked extension does not use the lock owner's read-only API"
   assert_contains "$text" 'if (ownership === "missing" || ownership === "dead")' "tracked extension does not restrict acquisition to reclaimable states"
-  assert_contains "$text" 'sessionCanRecoverLock = reason === "resume"' "tracked extension does not reserve missing/dead recovery for resume"
-  assert_contains "$text" 'startArm("", sessionCanRecoverLock)' "tracked extension does not carry session recovery policy into automatic arms"
+  assert_contains "$text" 'case "fork":' "tracked extension does not classify Pi fork lifecycle events"
+  assert_contains "$text" 'case "reload":' "tracked extension does not classify Pi reload lifecycle events"
+  assert_contains "$text" 'startArm("", activeSessionLockPolicy)' "tracked extension does not carry session lock policy into automatic arms"
   assert_contains "$text" 'const acquisition = spawnSync(lockScript, []' "tracked extension does not route acquisition through the production owner"
   assert_contains "$text" 'if (ownership !== "owned")' "tracked extension arms without re-reading owned state"
   assert_contains "$text" 'lock ownership changed during resume' "tracked extension does not distinguish a lost acquisition race"
@@ -1448,6 +1451,99 @@ EOF
   pass "Pi startup and new preserve the nudge while resume recovers in either extension order"
 }
 
+test_pi_fork_reload_rebuilds_only_owned_supervision() {
+  local reason scenario repo home plugin arm_log acquire_log other_pid out status
+  for reason in fork reload; do
+    for scenario in owned missing dead other malformed; do
+      repo="$TMP_ROOT/pi-$reason-$scenario-root"
+      home="$TMP_ROOT/pi-$reason-$scenario-home"
+      arm_log="$TMP_ROOT/pi-$reason-$scenario-arm.log"
+      acquire_log="$TMP_ROOT/pi-$reason-$scenario-acquire.log"
+      mkdir -p "$home/state" "$home/config"
+      install_pi_watch_extension_fixture "$repo"
+      plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+      cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm\n' >> "${FM_ARM_LOG:?}"
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+trap 'exit 0' TERM INT
+while :; do sleep 1; done
+SH
+      chmod +x "$repo/bin/fm-watch-arm.sh"
+      other_pid=
+      if [ "$scenario" = other ]; then
+        sleep 300 &
+        other_pid=$!
+      fi
+      status=0
+      out=$(REASON="$reason" CASE="$scenario" PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$arm_log" FM_LOCK_ACQUIRE_LOG="$acquire_log" FM_OTHER_PID="$other_pid" node --input-type=module 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const lock = `${process.env.FM_HOME}/state/.lock`;
+if (process.env.CASE === "owned") writeFileSync(lock, `${process.pid}\n`);
+if (process.env.CASE === "dead") writeFileSync(lock, "999999\n");
+if (process.env.CASE === "other") writeFileSync(lock, `${process.env.FM_OTHER_PID}\n`);
+if (process.env.CASE === "malformed") writeFileSync(lock, "not-a-pid\n");
+const before = existsSync(lock) ? readFileSync(lock) : null;
+const handlers = new Map();
+const notifications = [];
+const pi = {
+  on(event, handler) {
+    handlers.set(event, handler);
+  },
+  registerCommand() {},
+  registerTool() {},
+  sendUserMessage: async () => {},
+};
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+await handlers.get("session_start")?.({ type: "session_start", reason: process.env.REASON }, {
+  ui: {
+    notify(message) {
+      notifications.push(message);
+    },
+  },
+});
+
+const after = existsSync(lock) ? readFileSync(lock) : null;
+if (before === null ? after !== null : after === null || !before.equals(after)) {
+  throw new Error(`${process.env.REASON}/${process.env.CASE} changed lock bytes`);
+}
+if (process.env.CASE === "owned") {
+  for (let i = 0; i < 100 && !existsSync(process.env.FM_ARM_LOG); i += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  if (!existsSync(process.env.FM_ARM_LOG)) throw new Error(`${process.env.REASON} did not rebuild owned supervision`);
+  if (notifications.length > 0) throw new Error(`${process.env.REASON} owned rebuild notified unexpectedly: ${notifications.join(" | ")}`);
+} else {
+  if (existsSync(process.env.FM_ARM_LOG)) throw new Error(`${process.env.REASON}/${process.env.CASE} armed without ownership`);
+  const expected = ["missing", "dead"].includes(process.env.CASE)
+    ? `existing session-lock ownership required (state: ${process.env.CASE})`
+    : process.env.CASE === "other"
+      ? "verified live firstmate session owns this home"
+      : "session lock is malformed";
+  if (!notifications.some((message) => message.includes(expected))) {
+    throw new Error(`${process.env.REASON}/${process.env.CASE} did not fail closed: ${notifications.join(" | ")}`);
+  }
+}
+if (existsSync(process.env.FM_LOCK_ACQUIRE_LOG)) {
+  throw new Error(`${process.env.REASON}/${process.env.CASE} invoked lock acquisition`);
+}
+await handlers.get("session_shutdown")?.({ type: "session_shutdown" }, {});
+EOF
+      ) || status=$?
+      if [ -n "$other_pid" ]; then
+        kill "$other_pid" 2>/dev/null || true
+        wait "$other_pid" 2>/dev/null || true
+      fi
+      expect_code 0 "$status" "Pi $reason must rebuild only an owned $scenario lock state"
+      [ -z "$out" ] || fail "Pi $reason/$scenario owned-only test printed output: $out"
+    done
+  done
+  pass "Pi fork and reload rebuild only with existing lock ownership"
+}
+
 test_pi_extension_respects_primary_scope() {
   local scenario base repo home plugin arm_log out status
   for scenario in linked secondmate; do
@@ -2550,6 +2646,7 @@ test_pi_extension_transfers_active_arm_on_away_entry
 test_pi_extension_fails_closed_and_retries_away_monitor
 test_pi_resume_session_recovers_only_reclaimable_locks
 test_pi_session_start_load_order_preserves_initial_nudge
+test_pi_fork_reload_rebuilds_only_owned_supervision
 test_pi_extension_respects_primary_scope
 test_pi_extension_distinguishes_lock_refusal_states
 test_opencode_primary_watch_plugin_static_wiring
