@@ -485,6 +485,7 @@ For every X-linked terminal outcome, load that owner and post the final completi
 Telegram mode ships inert until the home opts in with `FM_TELEGRAM_BOT_TOKEN` and `FM_TELEGRAM_CHAT_ID` in its gitignored `.env` (and `config/telegram-mode` is not `off`).
 It provides AFK-default outbound notifications and a closed inbound grammar only: `status`, `approve <key>`, `deny <key> [reason]`, `merge <named green PR URL>`.
 Telegram messages never exit away mode; secrets, credentials, and destructive/irreversible/security-sensitive decisions stay desk-only.
+A same-UID adversary with write access to this home's private state is out of scope (token theft or script rewrite already equals host compromise); remote-threat controls and quarantine hardening stay in force - see `docs/telegram-mode.md` "Local-filesystem threat boundary".
 `docs/configuration.md` owns the config summary; `docs/telegram-mode.md` owns activation, security controls, grammar, and kill-switch mechanics.
 
 A Telegram-only home still requires the live supervision cycle so inbound commands can wake it without fleet work.
