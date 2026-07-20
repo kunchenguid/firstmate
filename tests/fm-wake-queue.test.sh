@@ -246,6 +246,15 @@ test_structural_signal_enrichment_preserves_raw_rows() {
   printf 'working: old turn-end context\n' > "$state/turn-only.status"
   printf 'must-not-be-read\n' > "$outside"
   ln -s "$outside" "$state/escape.status"
+  cat > "$dir/fakebin/tail" <<'SH'
+#!/usr/bin/env bash
+if [ "${3:-}" = "${FM_WAKE_ENRICH_SWAP_PATH:-}" ]; then
+  rm -f "$3"
+  ln -s "$FM_WAKE_ENRICH_SWAP_TARGET" "$3"
+fi
+PATH=/usr/bin:/bin tail "$@"
+SH
+  chmod +x "$dir/fakebin/tail"
 
   append_wake "$state" signal task.status "signal: $outside" || fail "direct status wake append failed"
   append_wake "$state" signal task.turn-ended "signal: $outside" || fail "coalesced turn-end wake append failed"
@@ -258,7 +267,8 @@ test_structural_signal_enrichment_preserves_raw_rows() {
 
   FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_wake_print_deduped "$2"' _ \
     "$ROOT/bin/fm-wake-lib.sh" "$state/.wake-queue" > "$expected"
-  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "structural enrichment drain failed"
+  PATH="$dir/fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_WAKE_ENRICH_SWAP_PATH="$state/task.status" \
+    FM_WAKE_ENRICH_SWAP_TARGET="$outside" "$DRAIN" > "$out" || fail "structural enrichment drain failed"
   awk -F '\t' 'NF == 5 { print }' "$out" > "$actual"
   cmp -s "$expected" "$actual" || fail "enrichment changed or reordered an authoritative raw row"
 
@@ -278,17 +288,20 @@ test_structural_signal_enrichment_preserves_raw_rows() {
 }
 
 test_enrichment_caps_and_status_file_failures() {
-  local dir state out fake_tail_log i raw_count annotation_bytes annotation_count oversized_lines tail_reads
+  local dir state out fake_perl_log perl_bin i raw_count annotation_bytes annotation_count oversized_lines perl_reads
   dir=$(make_case caps)
   state="$dir/state"
   out="$dir/drain.out"
-  fake_tail_log="$dir/tail.log"
-  cat > "$dir/fakebin/tail" <<'SH'
+  fake_perl_log="$dir/perl.log"
+  perl_bin=$(command -v perl) || fail "perl is required for safe status reads"
+  cat > "$dir/fakebin/perl" <<'SH'
 #!/usr/bin/env bash
-printf '%s\n' "$*" >> "$FM_WAKE_ENRICH_TAIL_LOG"
-PATH=/usr/bin:/bin tail "$@"
+if [ "${1:-}" = -MFcntl=:DEFAULT ]; then
+  printf 'read\n' >> "$FM_WAKE_ENRICH_PERL_LOG"
+fi
+exec "$FM_WAKE_ENRICH_REAL_PERL" "$@"
 SH
-  chmod +x "$dir/fakebin/tail"
+  chmod +x "$dir/fakebin/perl"
   awk 'BEGIN { printf "done: "; for (i = 0; i < 20000; i++) printf "x"; printf "\n" }' > "$state/huge.status"
   append_wake "$state" signal huge.status "signal: huge" || fail "huge status wake append failed"
   i=1
@@ -306,7 +319,8 @@ SH
   chmod 000 "$state/unreadable.status"
   append_wake "$state" signal unreadable.status "signal: unreadable" || fail "unreadable status wake append failed"
 
-  PATH="$dir/fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_WAKE_ENRICH_TAIL_LOG="$fake_tail_log" "$DRAIN" > "$out" \
+  PATH="$dir/fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_WAKE_ENRICH_PERL_LOG="$fake_perl_log" \
+    FM_WAKE_ENRICH_REAL_PERL="$perl_bin" "$DRAIN" > "$out" \
     || fail "capped enrichment drain failed"
   raw_count=$(awk -F '\t' 'NF == 5 { count++ } END { print count + 0 }' "$out")
   [ "$raw_count" -eq 13 ] || fail "missing, unreadable, malformed, empty, or oversized status input hid a raw row"
@@ -319,8 +333,8 @@ SH
   [ "$oversized_lines" -eq 0 ] || fail "a per-item annotation exceeded 2048 bytes"
   annotation_count=$(grep -c '^wake annotation: latest' "$out" || true)
   [ "$annotation_count" -lt 9 ] || fail "global cap did not omit any of the nine readable status annotations"
-  tail_reads=$(wc -l < "$fake_tail_log" | tr -d ' ')
-  [ "$tail_reads" -eq 8 ] || fail "enrichment read cap allowed $tail_reads tail reads instead of 8"
+  perl_reads=$(wc -l < "$fake_perl_log" | tr -d ' ')
+  [ "$perl_reads" -eq 8 ] || fail "enrichment read cap allowed $perl_reads safe reads instead of 8"
   grep -E '^wake annotation: [1-9][0-9]* annotations omitted \(enrichment read cap\)$' "$out" >/dev/null \
     || fail "enrichment read-cap omission marker was not emitted"
   if grep -E ': (empty|missing|malformed|unreadable)\.status:' "$out" >/dev/null; then

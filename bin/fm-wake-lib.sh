@@ -454,24 +454,34 @@ $rows
 EOF
 }
 
-fm_wake_file_size() {  # <regular-file>
-  if [ "$(uname)" = Darwin ]; then
-    stat -f %z "$1" 2>/dev/null
-  else
-    stat -c %s "$1" 2>/dev/null
-  fi
-}
-
 FM_WAKE_EVENT_LINE=
 FM_WAKE_EVENT_TRUNCATED=false
 fm_wake_latest_event() {  # <validated-status-path> <tail-byte-cap>
-  local path=$1 tail_bytes=$2 size chunk record line_number
+  local path=$1 tail_bytes=$2 result size chunk record line_number
   FM_WAKE_EVENT_LINE=
   FM_WAKE_EVENT_TRUNCATED=false
-  [ -f "$path" ] && [ ! -L "$path" ] && [ -r "$path" ] || return 1
-  size=$(fm_wake_file_size "$path") || return 1
+  result=$(perl -MFcntl=:DEFAULT -e '
+    my ($path, $limit) = @ARGV;
+    sysopen(my $file, $path, O_RDONLY | O_NOFOLLOW) or exit 1;
+    my @stat = stat $file or exit 1;
+    exit 1 unless -f _;
+    my $size = $stat[7];
+    exit 1 unless $size =~ /\A\d+\z/;
+    my $start = $size > $limit ? $size - $limit : 0;
+    seek($file, $start, 0) or exit 1;
+    printf "%s\t", $size or exit 1;
+    my $remaining = $size - $start;
+    while ($remaining > 0) {
+      my $read = read($file, my $buffer, $remaining);
+      exit 1 unless defined $read;
+      last unless $read;
+      print $buffer or exit 1;
+      $remaining -= $read;
+    }
+  ' "$path" "$tail_bytes" 2>/dev/null) || return 1
+  size=${result%%$'\t'*}
+  chunk=${result#*$'\t'}
   case "$size" in ''|*[!0-9]*) return 1 ;; esac
-  chunk=$(LC_ALL=C tail -c "$tail_bytes" "$path" 2>/dev/null) || return 1
   [ -n "$chunk" ] || return 1
   record=$(printf '%s' "$chunk" | LC_ALL=C awk '
     /[^[:space:]]/ { line = $0; line_number = NR }
