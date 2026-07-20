@@ -134,22 +134,45 @@ repair_line() {
 
   case "$HARNESS" in
     claude)
-      printf '%s%s\n' "$prefix" 'resume supervision with bin/fm-watch-arm.sh as its own Claude Code background task, never shell &.'
+      printf '%s%s\n' "$prefix" 'repair missing watcher supervision with bin/fm-watch-arm.sh as its own Claude Code background task, never shell &.'
       ;;
     codex)
-      printf '%s%s%s%s\n' "$prefix" 'resume supervision with a foreground checkpoint: bin/fm-watch-checkpoint.sh --seconds ' "$checkpoint_seconds" '.'
+      printf '%s%s%s%s\n' "$prefix" 'repair missing watcher supervision with a foreground checkpoint: bin/fm-watch-checkpoint.sh --seconds ' "$checkpoint_seconds" '.'
       ;;
     pi)
-      printf '%s%s%s%s%s%s\n' "$prefix" 'resume supervision with the Pi tool fm_watch_arm_pi or restart Pi with -e ' "$pi_turnend_ext" ' -e ' "$pi_ext" ' if the extension is not loaded.'
+      printf '%s%s%s%s%s%s\n' "$prefix" 'repair a missing or failed watcher cycle with the Pi tool fm_watch_arm_pi, or restart Pi with -e ' "$pi_turnend_ext" ' -e ' "$pi_ext" ' if the extensions are not loaded.'
       ;;
     opencode)
-      printf '%s%s\n' "$prefix" 'resume supervision by letting the OpenCode TUI plugin arm after idle; use bin/fm-watch-arm.sh only as a manual recovery probe if the plugin reports failure.'
+      printf '%s%s\n' "$prefix" 'repair missing watcher supervision by letting the OpenCode TUI plugin arm after idle; use bin/fm-watch-arm.sh only as a manual recovery probe if the plugin reports failure.'
       ;;
     grok)
-      printf '%s%s\n' "$prefix" 'resume supervision with bin/fm-watch-arm.sh as its own Grok tracked background task, never shell &.'
+      printf '%s%s\n' "$prefix" 'repair missing watcher supervision with bin/fm-watch-arm.sh as its own Grok tracked background task, never shell &.'
       ;;
     *)
-      printf '%s%s\n' "$prefix" 'resume supervision according to the session-start block for this harness; do not use shell &.'
+      printf '%s%s\n' "$prefix" 'repair missing watcher supervision according to the session-start block for this harness; do not use shell &.'
+      ;;
+  esac
+}
+
+ordinary_wake_line() {
+  case "$HARNESS" in
+    claude)
+      printf '%s\n' '- Ordinary wake: re-arm exactly one bin/fm-watch-arm.sh Claude Code background task as directed below.'
+      ;;
+    codex)
+      printf '%s\n' '- Ordinary wake: take the next foreground bin/fm-watch-checkpoint.sh checkpoint as directed below.'
+      ;;
+    pi)
+      printf '%s\n' '- Ordinary wake: the Pi extension already owns watcher continuity; do not arm another cycle.'
+      ;;
+    opencode)
+      printf '%s\n' '- Ordinary wake: the OpenCode TUI plugin already owns watcher continuity; do not arm manually.'
+      ;;
+    grok)
+      printf '%s\n' '- Ordinary wake: re-arm exactly one bin/fm-watch-arm.sh Grok tracked background task as directed below.'
+      ;;
+    *)
+      printf '%s\n' '- Ordinary wake: follow the continuation in the harness protocol below; do not use shell &.'
       ;;
   esac
 }
@@ -179,7 +202,7 @@ if [ "$X_MODE" -eq 1 ]; then
 else
   printf '%s\n' '- X mode: inactive; use the default watcher cadence.'
 fi
-printf '%s\n' '- After every handled wake, resume this emitted harness protocol instead of following a hardcoded background-arm recipe.'
+ordinary_wake_line
 printf '\n'
 render_snippet
 printf '\n'

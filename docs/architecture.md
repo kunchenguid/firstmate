@@ -14,6 +14,8 @@ Repeated provably-working stale escalations on the same unchanged pane add an es
 Those actionable wakes are written to a durable local queue (`state/.wake-queue`) before detector state advances, so a missed process exit can be recovered by draining the queue.
 No-verb wakes, such as `working:` notes and bare turn-ended signals, are benign only when `bin/fm-crew-state.sh` reports positive evidence that the crew is still working: an actively running no-mistakes step for that crew's branch or a backend busy signature.
 A crew that declares `paused:` for a known external wait is separately absorbed while idle and re-surfaced only on the longer pause cadence, rather than being treated as a possible wedge.
+For an ordinary crew that has stopped, the normal-mode watcher first surfaces one stale wake, then applies that same cadence to an unchanged `paused:` or durable `captain-held` endpoint only when the backend confidently reports its agent dead.
+Live or inconclusive liveness remains fail-open at that initial surface, and the secondmate idle-endpoint exemption is unchanged.
 Its initial normal-mode status signal still surfaces through the no-verb path, while away mode self-handles that routine signal and owns the later recheck.
 Fresh stale panes use the same current-state read before trusting the status log, so an active run or busy pane outranks an old captain-relevant status-log line left behind before validation.
 No-change heartbeats are also benign.
@@ -188,7 +190,8 @@ Destructive, irreversible, or security-sensitive asks are escalated for trusted-
 The relay uses owner-only routing: a mention delivered to a home is from that home's owner, while parent-thread context may still include other public accounts.
 On the locked session-start bootstrap step, that token creates the local polling and watcher-cadence artifacts described in the [X mode configuration reference](configuration.md#x-mode-env).
 Without the token, the locked session-start bootstrap step removes those artifacts on opt-out and otherwise stays silent, so non-X users see no behavior change.
-Pending mentions are stored as `state/x-inbox/<request_id>.json`; the `fmx-respond` agent-only skill drains that inbox, uses `in_reply_to` parent-post context for conversational continuity, classifies each mention as an actionable request, question, or pure acknowledgment, and submits public-safe replies through `bin/fm-x-reply.sh`.
+Newly offered mentions are stored as `state/x-inbox/<request_id>.json` and wake firstmate once per retained request ID; the [X mode configuration reference](configuration.md#x-mode-env) owns the durable offer-marker and re-offer contract.
+The `fmx-respond` agent-only skill drains that inbox, uses `in_reply_to` parent-post context for conversational continuity, classifies each mention as an actionable request, question, or pure acknowledgment, and submits public-safe replies through `bin/fm-x-reply.sh`.
 When a reply has a real visual artifact, `--image <path>` attaches one local PNG, JPEG, GIF, WebP, BMP, or TIFF to the relay's optional `{media_type,data_base64}` image object.
 Actionable reversible requests run through firstmate's normal intake, backlog, dispatch, investigation, or ship lifecycle.
 Work that completes in the answering turn gets one outcome reply.

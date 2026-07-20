@@ -182,7 +182,7 @@ if [ "$watcher_fresh" = false ]; then
       --afk "$afk" \
       --x-mode "$x_mode" \
       --queue-pending "$queue_arg" \
-      --repair-line 2>/dev/null || printf '%s\n' 'Resume supervision according to the session-start operating block.')
+      --repair-line 2>/dev/null || printf '%s\n' 'Repair missing watcher supervision according to the session-start operating block.')
     rule='━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'
     {
       printf '●%s\n' "$rule"
