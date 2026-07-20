@@ -612,6 +612,11 @@ test_nonterminal_stale_paused_absorbed_then_resurfaced() {
   if ! wait_live "$pid" 30; then
     reap "$pid"; fail "watcher exited for a fresh declared pause (should absorb): $(cat "$out")"
   fi
+  # wait_live only proves the process stayed up, not that it finished a poll
+  # cycle. Wait for the durable pause marker the absorb writes (alongside the
+  # stale suppressor) before asserting, so a slow first poll under load does not
+  # read the suppressor before it is written.
+  for _ in $(seq 1 100); do [ -e "$state/.paused-$key" ] && break; sleep 0.1; done
   [ ! -s "$out" ] || fail "fresh paused stale printed a wake reason during absorb"
   [ ! -s "$state/.wake-queue" ] || fail "fresh paused stale enqueued a wake during absorb"
   [ "$(cat "$state/.stale-$key" 2>/dev/null || true)" = "$pane_hash" ] || fail "stale suppressor not advanced on paused absorb"
