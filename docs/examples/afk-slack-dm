@@ -1,0 +1,32 @@
+# config/afk-slack-dm - local, gitignored away-mode Slack DM delivery.
+# Copy this to config/afk-slack-dm and edit it on the firstmate home that should
+# send AFK escalation DMs.
+# Keep the file local; never commit tokens or token-bearing commands.
+
+# Required Slack destination.
+# This must be a Slack user ID, not a channel, group, or DM conversation ID.
+destination=U0123456789
+
+# Optional attribution name.
+# When set, DMs begin "AI agent for <name> here —"; when absent, the generic
+# shared default "AI agent here —" is used. Keep any personal name here, in this
+# local gitignored config only - the shared template never hardcodes one.
+# name=Alex
+
+# Sender plugin.
+# Today only slack-api is implemented; it calls chat.postMessage.
+sender=slack-api
+
+# Token source plugin.
+# The token source must print only a dedicated least-privilege bot token for this
+# DM sender.
+# Empty output, a non-zero command, or an absent file degrades gracefully: the AFK
+# daemon keeps the escalation buffer and retries later.
+#
+# Use one of:
+# token-source=file:/absolute/path/to/dedicated-slack-bot-token
+# token-source=command:/absolute/path/to/print-dedicated-slack-bot-token
+
+# Do not point this at broad production/staging firehose tokens.
+# For unattended daemon delivery, provision a dedicated least-privilege Slack bot
+# token or add a future MCP-call token-source adapter instead.

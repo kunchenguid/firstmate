@@ -123,6 +123,8 @@
 #                                   its watchdog terminates it and continues to the
 #                                   next channel (default 10; invalid/zero uses the
 #                                   default).
+#          FM_SLACK_DM_BIN          override the Slack DM helper used when local
+#                                   config/afk-slack-dm exists (testing seam).
 #          FM_INJECT_CONFIRM_RETRIES Enter-retry attempts on a swallowed Enter
 #                                   (default 3); the digest is typed once, only
 #                                   Enter is retried. Composer-empty detection is
@@ -195,6 +197,38 @@ MAX_DEFER_SECS_DEFAULT=300
 WEDGE_ALARM_TIMEOUT_SECS_DEFAULT=10
 WEDGE_ALARM_LAST_EPOCH=0
 WEDGE_ALARM_NOTIFIER_PID=
+# Set to 1 by cleanup() on daemon shutdown so escalate_flush's DM channel
+# preserves the buffer instead of delivering (bin/fm-afk-launch.sh stop SIGTERMs
+# the daemon while state/.afk is still set; a DM flush then would hit a present
+# captain). Injection-mode shutdown flush is unaffected.
+DAEMON_SHUTTING_DOWN=0
+SLACK_DM_CONFIG_NAME="afk-slack-dm"
+SLACK_DM_FAIL_MARKER_NAME=".subsuper-slack-dm-failed"
+# Per-attempt failure marker (above) records the real delivery reason; this
+# separate wedge marker throttles and records the loud persistent-failure alarm,
+# so the alarm fires at most once per max-defer window and never clobbers the
+# failure reason. It is written ONLY by afk_slack_dm_wedge_alarm (mirroring
+# .subsuper-inject-wedged for the pane path), so its mtime is a true throttle
+# rather than being reset by every failed send.
+SLACK_DM_WEDGE_MARKER_NAME=".subsuper-slack-dm-wedged"
+SLACK_DM_STATUS_DIGEST_REQUEST_NAME=".subsuper-status-digest-dm-request"
+# Slack chat.postMessage rejects a `text` longer than 40000 characters, so an
+# unbounded away-mode backlog would build a digest Slack refuses on EVERY retry -
+# the captain then gets nothing. The digest is therefore capped by item count and
+# by byte budget, with an "and N more" tail; an oversized backlog always delivers
+# a partial digest that fits, and the undelivered overflow is retained in the
+# escalation buffer for the next batch and for return catch-up (the backstop).
+# A single pathological item is hard-cut to SLACK_DM_MAX_ITEM_BYTES so header +
+# one item + tail always fits, guaranteeing forward progress. All three are
+# overridable (FM_SLACK_DM_MAX_ITEMS / _MAX_BYTES / _MAX_ITEM_BYTES) for tests.
+SLACK_DM_MAX_ITEMS_DEFAULT=40
+SLACK_DM_MAX_BYTES_DEFAULT=38000
+SLACK_DM_MAX_ITEM_BYTES_DEFAULT=4000
+# Set by afk_slack_dm_message_from_buffer for afk_slack_dm_send_buffer: whether the
+# digest was capped, and how many leading buffer LINES it consumed (so the caller
+# trims only delivered lines and never DMs them twice).
+AFK_SLACK_DM_TRUNCATED=0
+AFK_SLACK_DM_CONSUMED_LINES=0
 # The captain-relevant verb set and the status classifiers (last_status_line,
 # status_is_captain_relevant, window_to_task, scan_captain_relevant_statuses) now
 # live in bin/fm-classify-lib.sh, shared with the always-on watcher.
@@ -619,6 +653,230 @@ escalate_add() {  # <state> <distilled-item>
   printf '%s\n' "$item" >> "$buf"
 }
 
+afk_slack_dm_config_path() {
+  printf '%s/%s' "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}" "$SLACK_DM_CONFIG_NAME"
+}
+
+afk_slack_dm_configured() {
+  [ -f "$(afk_slack_dm_config_path)" ]
+}
+
+afk_slack_dm_marker() {  # <state>
+  printf '%s/%s' "$1" "$SLACK_DM_FAIL_MARKER_NAME"
+}
+
+afk_slack_dm_wedge_marker() {  # <state>
+  printf '%s/%s' "$1" "$SLACK_DM_WEDGE_MARKER_NAME"
+}
+
+# Attribution name from config, derived identically to fm-slack-dm.mjs parseConfig
+# so the message the daemon builds always satisfies the helper's required-prefix
+# check: the LAST non-comment `name=` line wins, and the value is stripped of a
+# trailing CR (CRLF files) and surrounding whitespace. A first-occurrence or
+# untrimmed read here would build a prefix the helper rejects (exit 3), silently
+# breaking DM delivery despite valid config.
+afk_slack_dm_name() {  # <config-path>
+  local cfg=$1
+  [ -r "$cfg" ] || return 0
+  awk '
+    { line = $0; sub(/\r$/, "", line) }
+    line ~ /^[[:space:]]*#/ { next }
+    {
+      eq = index(line, "=")
+      if (eq < 2) next
+      key = substr(line, 1, eq - 1)
+      val = substr(line, eq + 1)
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", key)
+      if (key == "name") { gsub(/^[[:space:]]+|[[:space:]]+$/, "", val); found = val }
+    }
+    END { if (found != "") printf "%s", found }
+  ' "$cfg"
+}
+
+# "AI agent for <name> here —" when config declares a name, else the generic
+# shared default "AI agent here —". The shared template never hardcodes one
+# adopter's name; only a local config/afk-slack-dm names the captain.
+afk_slack_dm_prefix() {  # <config-path>
+  local name
+  name=$(afk_slack_dm_name "$1")
+  if [ -n "$name" ]; then
+    printf 'AI agent for %s here —' "$name"
+  else
+    printf 'AI agent here —'
+  fi
+}
+
+afk_slack_dm_write_failure_marker() {  # <state> <reason>
+  local state=$1 reason=$2 marker
+  marker=$(afk_slack_dm_marker "$state")
+  {
+    printf 'fm away-mode Slack DM delivery failed as of %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')"
+    printf 'Buffered escalations remain in state/.subsuper-escalations for retry and catch-up.\n'
+    printf 'Terminal injection is not counted as captain delivery while config/%s is active.\n' "$SLACK_DM_CONFIG_NAME"
+    printf 'Last result: %s\n' "$reason"
+  } > "$marker" 2>/dev/null || true
+}
+
+afk_slack_dm_sanitize_item() {  # <buffer-line>
+  local item=$1 age
+  item=$(_collapse_newlines "$item")
+  case "$item" in
+    *.status:\ *) item=${item#*: } ;;
+  esac
+  item=${item%" (catch-all scan)"}
+  case "$item" in
+    stale\ +\ terminal\ status:\ *) item=${item#stale + terminal status: } ;;
+    check:\ *:\ *) item=${item#check: }; item=${item#*: } ;;
+    unknown\ wake:*) item="An unknown away-mode event needs attention." ;;
+  esac
+  if [[ $item =~ ^stale\ persisted\ ([0-9]+)s ]]; then
+    age=${BASH_REMATCH[1]}
+    item="A worker appears stuck after ${age}s without progress."
+  elif [[ $item =~ ^paused\ ([0-9]+)s ]]; then
+    age=${BASH_REMATCH[1]}
+    item="An external wait has been idle for ${age}s and should be rechecked."
+  fi
+  printf '%s' "$item"
+}
+
+# Build the DM digest from the buffer, capped so it always fits under Slack's
+# 40000-char chat.postMessage limit. Emits at most SLACK_DM_MAX_ITEMS items and
+# stays under SLACK_DM_MAX_BYTES; any single oversized item is hard-cut to
+# SLACK_DM_MAX_ITEM_BYTES so header + one item + tail always fits (forward
+# progress is guaranteed). When items are dropped it appends an "and N more" tail.
+# Runs under LC_ALL=C so ${#var} counts BYTES, matching Slack's byte-ish limit and
+# keeping the budget check locale-independent.
+# Sets two globals for the caller: AFK_SLACK_DM_TRUNCATED (1 if capped) and
+# AFK_SLACK_DM_CONSUMED_LINES (leading buffer lines delivered, so the caller can
+# retain only the undelivered overflow for the next flush and return catch-up).
+afk_slack_dm_message_from_buffer() {  # <buffer-file> <config-path>
+  local LC_ALL=C
+  local buf=$1 cfg=$2 line cleaned itemline out header tail
+  local max_items max_bytes max_item_bytes lineno=0 consumed=0 count=0 remaining=0
+  max_items=${FM_SLACK_DM_MAX_ITEMS:-$SLACK_DM_MAX_ITEMS_DEFAULT}
+  max_bytes=${FM_SLACK_DM_MAX_BYTES:-$SLACK_DM_MAX_BYTES_DEFAULT}
+  max_item_bytes=${FM_SLACK_DM_MAX_ITEM_BYTES:-$SLACK_DM_MAX_ITEM_BYTES_DEFAULT}
+  AFK_SLACK_DM_TRUNCATED=0
+  AFK_SLACK_DM_CONSUMED_LINES=0
+  header="$(afk_slack_dm_prefix "$cfg") update from your fleet:"
+  out="$header"$'\n'
+  while IFS= read -r line || [ -n "$line" ]; do
+    lineno=$((lineno + 1))
+    cleaned=$(afk_slack_dm_sanitize_item "$line")
+    # A line that sanitizes to nothing is noise: drop it and count it consumed so
+    # it never lingers in the retained overflow.
+    if [ -z "$cleaned" ]; then
+      consumed=$lineno
+      continue
+    fi
+    # Hard-cut any single pathological item so one item can never blow the budget.
+    if [ "${#cleaned}" -gt "$max_item_bytes" ]; then
+      cleaned="${cleaned:0:max_item_bytes}…"
+    fi
+    itemline="- $cleaned"
+    # Stop before this item if we have hit the item cap or if adding it (leaving
+    # room for the tail line) would cross the byte budget. Everything from this
+    # line onward becomes retained overflow.
+    if [ "$count" -ge "$max_items" ] \
+       || { [ "$count" -gt 0 ] && [ $(( ${#out} + ${#itemline} + 100 )) -ge "$max_bytes" ]; }; then
+      AFK_SLACK_DM_TRUNCATED=1
+      break
+    fi
+    out="$out$itemline"$'\n'
+    count=$((count + 1))
+    consumed=$lineno
+  done < "$buf"
+  if [ "$AFK_SLACK_DM_TRUNCATED" -eq 1 ]; then
+    # Count the buffered lines still unaccounted for so the tail is honest.
+    remaining=$(( $(wc -l < "$buf" 2>/dev/null || echo 0) - consumed ))
+    [ "$remaining" -lt 1 ] && remaining=1
+    tail="- …and ${remaining} more update(s) held; see the away-mode buffer for the full list."
+    out="$out$tail"$'\n'
+  elif [ "$count" -eq 0 ]; then
+    out="$out- No current status details were available."$'\n'
+  fi
+  AFK_SLACK_DM_CONSUMED_LINES=$consumed
+  printf '%s' "$out"
+}
+
+afk_slack_dm_send_buffer() {  # <state> <buffer-file>
+  local state=$1 buf=$2 helper cfg msg_tmp rc
+  helper="${FM_SLACK_DM_BIN:-$FM_DAEMON_DIR/fm-slack-dm.mjs}"
+  cfg=$(afk_slack_dm_config_path)
+  if [ ! -x "$helper" ]; then
+    afk_slack_dm_write_failure_marker "$state" "helper-unavailable"
+    log "slack dm failed: helper unavailable; buffer preserved"
+    return 1
+  fi
+  msg_tmp=$(mktemp "${TMPDIR:-/tmp}/fm-slack-dm-message.XXXXXX") || {
+    afk_slack_dm_write_failure_marker "$state" "message-tempfile-failed"
+    return 1
+  }
+  afk_slack_dm_message_from_buffer "$buf" "$cfg" > "$msg_tmp"
+  # Capture the helper's real exit code directly. A `if helper; then...; fi`
+  # followed by `rc=$?` records 0 even on failure, because a false `if` with no
+  # else branch leaves $? at 0 - so the failure marker would always claim
+  # helper-exit-0 and mask the actual reason (1 network/api, 2 config-absent,
+  # 3 config-error).
+  # afk_slack_dm_message_from_buffer (called via the redirect above) has set
+  # AFK_SLACK_DM_TRUNCATED / AFK_SLACK_DM_CONSUMED_LINES describing what this
+  # message actually delivered.
+  "$helper" --config "$cfg" --message-file "$msg_tmp" >/dev/null 2>&1
+  rc=$?
+  rm -f "$msg_tmp"
+  if [ "$rc" -eq 0 ]; then
+    rm -f "$(afk_slack_dm_marker "$state")" "$(afk_slack_dm_wedge_marker "$state")" "$state/.subsuper-inject-wedged"
+    if [ "$AFK_SLACK_DM_TRUNCATED" -eq 1 ] && [ "$AFK_SLACK_DM_CONSUMED_LINES" -gt 0 ]; then
+      # Partial delivery: keep only the undelivered overflow so it reaches the
+      # captain on the next batch flush and via return catch-up, and so the
+      # delivered head lines are never DMed twice. Reset the batch clock so the
+      # remaining backlog paces at the normal cadence instead of flooding DMs.
+      if tail -n +"$((AFK_SLACK_DM_CONSUMED_LINES + 1))" "$buf" > "${buf}.trim" 2>/dev/null; then
+        mv -f "${buf}.trim" "$buf"
+        _now > "${buf}.since"
+      fi
+      log "slack dm delivered (partial): head acknowledged; overflow held for next batch and catch-up"
+      return 0
+    fi
+    : > "$buf"
+    rm -f "${buf}.since"
+    log "slack dm delivered: buffered escalation acknowledged"
+    return 0
+  fi
+  afk_slack_dm_write_failure_marker "$state" "helper-exit-$rc"
+  log "slack dm failed: helper exited $rc; buffer preserved"
+  return 1
+}
+
+afk_status_digest_item() {  # <state>
+  local state=$1 f last count=0 msg=""
+  for f in "$state"/*.status; do
+    [ -e "$f" ] || continue
+    last=$(last_status_line "$f")
+    [ -n "$last" ] || continue
+    msg="${msg}${msg:+ | }$last"
+    count=$((count + 1))
+  done
+  if [ "$count" -eq 0 ]; then
+    printf 'status digest requested: no active status updates'
+  else
+    printf 'status digest requested (%s update(s)): %s' "$count" "$msg"
+  fi
+}
+
+afk_status_digest_request_flush() {  # <state>
+  local state=$1 req
+  req="$state/$SLACK_DM_STATUS_DIGEST_REQUEST_NAME"
+  [ -e "$req" ] || return 0
+  if ! afk_slack_dm_configured; then
+    rm -f "$req"
+    log "status digest DM request ignored: Slack DM config absent"
+    return 0
+  fi
+  escalate_add "$state" "$(afk_status_digest_item "$state")"
+  rm -f "$req"
+}
+
 # Flush the escalation buffer as ONE batched, single-line digest to the
 # supervisor pane. Returns 0 on successful inject (or empty buffer), non-zero on
 # inject failure (buffer preserved for retry / catch-up).
@@ -626,6 +884,33 @@ escalate_flush() {  # <state>
   local state=$1 buf item n msg
   buf="$state/.subsuper-escalations"
   [ -s "$buf" ] || return 0
+  if afk_slack_dm_configured; then
+    # The shutdown/cleanup flush must NEVER deliver a Slack DM. The sanctioned
+    # captain-return stop path (bin/fm-afk-launch.sh stop) deliberately SIGTERMs
+    # the daemon WHILE state/.afk is still set and clears the flag LAST (the #490
+    # exit-ordering fix, so the injection-mode shutdown flush is not a no-op). A
+    # DM here would therefore hit the now-present captain and drain the buffer,
+    # defeating firstmate's in-chat "while you were out" catch-up. So in DM mode
+    # the shutdown flush preserves the buffer for catch-up (in-chat on return, or
+    # the next daemon start's safe delivery) instead of sending. Injection mode
+    # intentionally still flushes into the pane on shutdown; only the DM channel,
+    # which reaches the captain out of band, defers here.
+    if [ "${DAEMON_SHUTTING_DOWN:-0}" = 1 ]; then
+      log "slack dm deferred: daemon shutdown — buffer preserved for catch-up"
+      return 1
+    fi
+    # Otherwise presence-gate the DM path exactly like inject_msg gates the pane
+    # path: deliver only while away mode is active.
+    afk_active "$state" || { log "slack dm deferred: afk inactive"; return 1; }
+    # afk_slack_dm_send_buffer owns all buffer bookkeeping on success: it clears
+    # the buffer on a full delivery, or retains only the undelivered overflow on a
+    # capped (partial) delivery so nothing is lost and nothing is DMed twice.
+    afk_slack_dm_send_buffer "$state" "$buf"
+    return $?
+  fi
+  # Injection mode only: build the single-line pane digest here, where it is
+  # consumed. In DM mode afk_slack_dm_send_buffer rebuilds the message from the
+  # buffer, so computing this above would be dead work on every DM-mode flush.
   n=$(wc -l < "$buf" 2>/dev/null || echo 0)
   # Join buffered items with the literal " | " separator into one digest line.
   msg=$(awk 'NR>1{printf " | "} {printf "%s",$0} END{print ""}' "$buf" 2>/dev/null)
@@ -913,6 +1198,40 @@ inject_wedge_alarm() {  # <state> <age-seconds>
   fi
 }
 
+# DM-mode counterpart of inject_wedge_alarm: persistent Slack-DM delivery failure
+# is a captain-delivery wedge exactly like a wedged pane, so it enters the SAME
+# loud bounded alarm path (log + backend-independent wedge_alarm_notify) instead
+# of only leaving a passive marker. It writes its OWN marker (.subsuper-slack-dm-
+# wedged), which throttles re-alarming to once per max-defer window; the per-
+# attempt reason stays in .subsuper-slack-dm-failed and is never overwritten. No
+# pane injection is attempted in DM mode, so the marker text says so (rather than
+# inject_wedge_alarm's "supervisor pane could not accept" wording).
+afk_slack_dm_wedge_alarm() {  # <state> <age-seconds>
+  local state=$1 age=$2 marker max_defer now notify=1
+  marker=$(afk_slack_dm_wedge_marker "$state")
+  max_defer="${FM_MAX_DEFER_SECS:-$MAX_DEFER_SECS_DEFAULT}"
+  # Re-alarm at most once per max-defer window so a long wedge does not spam.
+  if [ "$(_file_age "$marker")" -lt "$max_defer" ]; then
+    return 0
+  fi
+  now=$(_now)
+  if [ "$WEDGE_ALARM_LAST_EPOCH" -gt 0 ] && [ $((now - WEDGE_ALARM_LAST_EPOCH)) -lt "$max_defer" ]; then
+    notify=0
+  else
+    WEDGE_ALARM_LAST_EPOCH=$now
+    log "ERROR: away-mode Slack DM undelivered ${age}s; delivery could not be confirmed. Buffer + wake-queue preserved; failure marker retained."
+  fi
+  {
+    printf 'fm away-mode Slack DM WEDGED: %ss undelivered as of %s\n' "$age" "$(date '+%Y-%m-%dT%H:%M:%S%z')"
+    printf 'Slack DM delivery to the captain failed repeatedly; no pane injection is attempted in DM mode.\n'
+    printf 'Per-attempt reason: see %s. Buffered items:\n' "$SLACK_DM_FAIL_MARKER_NAME"
+    cat "$state/.subsuper-escalations" 2>/dev/null
+  } 2>/dev/null > "$marker" || true
+  if [ "$notify" -eq 1 ]; then
+    wedge_alarm_notify "away-mode Slack DM WEDGED ${age}s undelivered - see $marker" "$marker"
+  fi
+}
+
 _oldest_line_age() {  # <buf> -> seconds since the oldest buffered item first arrived (sidecar epoch)
   local f=$1 since
   [ -s "$f" ] || { echo 999999; return; }
@@ -939,9 +1258,10 @@ _oldest_line_age() {  # <buf> -> seconds since the oldest buffered item first ar
 #  3) heartbeat scan: every HEARTBEAT_SCAN_SECS, grep state/*.status for a
 #     captain-relevant line the per-wake classifier missed and escalate it.
 housekeeping() {  # <state>
-  local state=$1 now due f key task win marker age last max_defer oldest pause_secs
+  local state=$1 now due f key task win marker age last max_defer oldest pause_secs defer_marker
   now=$(_now)
   migrate_watcher_pause_markers "$state"
+  afk_status_digest_request_flush "$state"
 
   # (1) batch flush
   if [ "${FM_ESCALATE_BATCH_SECS:-$ESCALATE_BATCH_SECS_DEFAULT}" -le 0 ]; then
@@ -959,14 +1279,25 @@ housekeeping() {  # <state>
   max_defer=${FM_MAX_DEFER_SECS:-$MAX_DEFER_SECS_DEFAULT}
   if afk_active "$state" && [ "$max_defer" -gt 0 ] && [ -s "$state/.subsuper-escalations" ]; then
     oldest=$(_oldest_line_age "$state/.subsuper-escalations")
-    # Throttle the alarm to once per max-defer window (the wedge marker doubles
-    # as the throttle). A successful flush clears the buffer; a failed one alarms
-    # and waits.
+    # Throttle the max-defer escape to once per window via the mode's dedicated
+    # wedge marker - written ONLY by the alarm, so its mtime is a true throttle.
+    # The DM path must NOT throttle on .subsuper-slack-dm-failed: that marker is
+    # rewritten by every failed send, so reusing it as the throttle would keep the
+    # alarm permanently deferred.
+    if afk_slack_dm_configured; then
+      defer_marker=$(afk_slack_dm_wedge_marker "$state")
+    else
+      defer_marker="$state/.subsuper-inject-wedged"
+    fi
     if [ "$oldest" -ge "$max_defer" ] \
-       && [ "$(_file_age "$state/.subsuper-inject-wedged")" -ge "$max_defer" ]; then
+       && [ "$(_file_age "$defer_marker")" -ge "$max_defer" ]; then
       if escalate_flush "$state"; then
-        log "inject recovered: max-defer flush succeeded after ${oldest}s undelivered"
-        rm -f "$state/.subsuper-inject-wedged"
+        log "delivery recovered: max-defer flush succeeded after ${oldest}s undelivered"
+        rm -f "$state/.subsuper-inject-wedged" "$(afk_slack_dm_wedge_marker "$state")"
+      elif afk_slack_dm_configured; then
+        # Persistent DM failure enters the same loud bounded alarm path as a
+        # wedged pane; the real per-attempt reason stays in the failure marker.
+        afk_slack_dm_wedge_alarm "$state" "$oldest"
       else
         inject_wedge_alarm "$state" "$oldest"
       fi
@@ -1393,6 +1724,10 @@ fm_super_main() {
   local WATCHER_PID="" CUR_TMP=""
   cleanup() {
     trap - TERM INT
+    # Mark shutdown so the DM channel preserves the buffer instead of delivering:
+    # bin/fm-afk-launch.sh stop SIGTERMs the daemon while state/.afk is still set,
+    # so an unguarded DM flush here would hit the returning captain (escalate_flush).
+    DAEMON_SHUTTING_DOWN=1
     wedge_alarm_stop_active_notifier
     escalate_flush "$STATE" 2>/dev/null || true
     if [ -n "${WATCHER_PID:-}" ]; then

@@ -61,6 +61,7 @@ No `/back` is needed. The first genuine message is the return signal:
 - A message **without** the current operational prefix or a legacy bare marker, and **not** starting with `/afk` -> the captain is back.
   Run `bin/fm-afk-return.sh` before acting on the message that brought the captain back.
   That script owns correct-ordered daemon shutdown, durable wake draining, escalation and wedge evidence, and the return-catch-up gate.
+  When `config/afk-slack-dm` is active, that evidence also covers any `state/.subsuper-slack-dm-failed` or `state/.subsuper-slack-dm-wedged` marker for an escalation the daemon could not deliver by Slack DM.
   If it reports a firstmate-actionable `blocked:` event, remediate it immediately through the normal lifecycle, or explicitly reclassify it with a durable reason and close its decision key with `resolved [key=...]`, then run `bin/fm-afk-return.sh check`.
   Once the daemon stops, resume full per-wake responsiveness through the emitted primary-harness supervision protocol while blocker handling proceeds, so the gate never creates a blind wait.
   Do not answer a Bearings request or perform any other ordinary captain work until the check exits successfully.
@@ -175,6 +176,21 @@ immediate) and flushed as one single-line digest prefixed with the current
 operational prefix, carrying pre-read status summaries and a recommended action.
 The single-line format makes the submission unambiguous across harnesses, and
 the operational prefix lets firstmate distinguish it from a real captain message.
+
+## Slack DM delivery mode
+
+If local `config/afk-slack-dm` exists, the same escalation buffer flushes through `bin/fm-slack-dm.mjs` instead of pane injection.
+The config schema and token-source contract live in `docs/configuration.md` "Away-mode Slack DM delivery"; do not restate them here.
+A successful DM is the captain-facing acknowledgement and clears `state/.subsuper-escalations`.
+The digest is capped to fit Slack's `chat.postMessage` length limit with an `…and N more` tail (limits and env overrides in `docs/configuration.md`); an oversized backlog always delivers a partial digest, and the undelivered overflow stays buffered for the next flush and return catch-up.
+A failed DM retains the buffer and sidecar timestamp for retry, and writes the secret-free catch-up marker `state/.subsuper-slack-dm-failed`.
+Persistent DM failure past `FM_MAX_DEFER_SECS` enters the same loud bounded wedge-alarm path as a wedged pane and writes `state/.subsuper-slack-dm-wedged` (its own throttle marker), while the per-attempt reason stays in `state/.subsuper-slack-dm-failed`.
+The daemon shutdown flush never sends a DM: `bin/fm-afk-launch.sh stop` SIGTERMs the daemon while `state/.afk` is still set (so the injection-mode shutdown flush is not a no-op), so in DM mode the shutdown flush preserves the buffer for in-chat catch-up on return or the next daemon start's safe delivery instead of DMing the now-present captain.
+Terminal injection is not counted as captain delivery while Slack DM mode is configured.
+Messages sent by the helper carry a config-driven attribution prefix: `AI agent for <name> here —` when local `config/afk-slack-dm` declares a `name`, otherwise the generic shared default `AI agent here —`; the shared template never hardcodes a personal name.
+The helper rejects Slack channel, group, and DM-conversation IDs.
+An explicit status digest DM request is represented by `state/.subsuper-status-digest-dm-request`; housekeeping converts it into one buffered digest item, then removes the marker.
+This explicit request does not broaden routine classification: ordinary `working:` and other non-captain-relevant statuses still self-handle unless that marker exists.
 
 ## Injection hardening
 

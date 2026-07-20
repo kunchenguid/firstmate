@@ -560,6 +560,414 @@ test_escalate_batch_age_uses_first_append() {
   pass "batch flush measures max-delay from the first append, not the last"
 }
 
+make_fake_slack_dm_helper() {  # <dir>
+  local dir=$1 helper
+  helper="$dir/fake-slack-dm"
+  cat > "$helper" <<'SH'
+#!/usr/bin/env bash
+set -u
+msg=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --message-file) msg=${2:-}; shift 2 ;;
+    --config) shift 2 ;;
+    *) shift ;;
+  esac
+done
+cat "$msg" >> "${FM_FAKE_SLACK_DM_LOG:?FM_FAKE_SLACK_DM_LOG unset}"
+printf '\n---\n' >> "$FM_FAKE_SLACK_DM_LOG"
+if [ -n "${FM_FAKE_SLACK_DM_SECRET_OUTPUT:-}" ]; then
+  printf '%s\n' "$FM_FAKE_SLACK_DM_SECRET_OUTPUT" >&2
+fi
+exit "${FM_FAKE_SLACK_DM_RC:-0}"
+SH
+  chmod +x "$helper"
+  printf '%s\n' "$helper"
+}
+
+write_fake_slack_dm_config() {  # <dir> [destination] [name]
+  local dir=$1 dest=${2:-U123ABC} name=${3:-}
+  mkdir -p "$dir/config"
+  {
+    printf 'destination=%s\n' "$dest"
+    printf 'sender=slack-api\n'
+    [ -n "$name" ] && printf 'name=%s\n' "$name"
+    printf 'token-source=none\n'
+  } > "$dir/config/afk-slack-dm"
+}
+
+test_slack_dm_flush_success_acknowledges_without_terminal_injection() {
+  local dir state fakebin sent capture helper dm_log
+  dir=$(make_supercase slack-flush-success)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  sent="$dir/sent.log"; : > "$sent"
+  capture="$dir/pane.txt"; : > "$capture"
+  dm_log="$dir/dm.log"; : > "$dm_log"
+  helper=$(make_fake_slack_dm_helper "$dir")
+  write_fake_slack_dm_config "$dir"
+  escalate_add "$state" "job.status: done: PR https://github.example/pr/1 (catch-all scan)"
+  afk_enter "$state"
+
+  PATH="$fakebin:$PATH" FM_CONFIG_OVERRIDE="$dir/config" FM_SLACK_DM_BIN="$helper" \
+    FM_FAKE_SLACK_DM_LOG="$dm_log" FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_SENT="$sent" \
+    FM_FAKE_TMUX_CAPTURE="$capture" escalate_flush "$state" \
+    || fail "Slack DM configured escalate_flush should succeed through helper"
+
+  [ ! -s "$state/.subsuper-escalations" ] || fail "buffer not cleared after successful Slack DM"
+  [ ! -s "$sent" ] || fail "terminal injection happened despite Slack DM config"
+  assert_contains "$(cat "$dm_log")" "AI agent here —" "DM message missing generic required prefix"
+  assert_contains "$(cat "$dm_log")" "done: PR https://github.example/pr/1" "DM message missing sanitized outcome"
+  assert_not_contains "$(cat "$dm_log")" "job.status" "DM message leaked status filename"
+  pass "Slack DM flush success acknowledges the buffer without terminal injection"
+}
+
+test_slack_dm_failure_preserves_buffer_for_retry() {
+  local dir state fakebin sent capture helper dm_log
+  dir=$(make_supercase slack-flush-retry)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  sent="$dir/sent.log"; : > "$sent"
+  capture="$dir/pane.txt"; : > "$capture"
+  dm_log="$dir/dm.log"; : > "$dm_log"
+  helper=$(make_fake_slack_dm_helper "$dir")
+  write_fake_slack_dm_config "$dir"
+  escalate_add "$state" "needs-decision: pick a release window"
+  afk_enter "$state"
+
+  if PATH="$fakebin:$PATH" FM_CONFIG_OVERRIDE="$dir/config" FM_SLACK_DM_BIN="$helper" \
+    FM_FAKE_SLACK_DM_LOG="$dm_log" FM_FAKE_SLACK_DM_RC=1 FM_FAKE_TMUX_PANE_ALIVE=1 \
+    FM_FAKE_TMUX_SENT="$sent" FM_FAKE_TMUX_CAPTURE="$capture" escalate_flush "$state"; then
+    fail "Slack DM failure should make escalate_flush fail"
+  fi
+  [ -s "$state/.subsuper-escalations" ] || fail "buffer lost after failed Slack DM"
+  [ -s "$state/.subsuper-slack-dm-failed" ] || fail "Slack DM failure marker missing"
+  grep -F 'helper-exit-1' "$state/.subsuper-slack-dm-failed" >/dev/null \
+    || fail "failure marker did not record the real helper exit code (a false if-branch masks it as helper-exit-0)"
+  [ ! -s "$sent" ] || fail "terminal injection happened after failed Slack DM"
+
+  PATH="$fakebin:$PATH" FM_CONFIG_OVERRIDE="$dir/config" FM_SLACK_DM_BIN="$helper" \
+    FM_FAKE_SLACK_DM_LOG="$dm_log" FM_FAKE_SLACK_DM_RC=0 FM_FAKE_TMUX_PANE_ALIVE=1 \
+    FM_FAKE_TMUX_SENT="$sent" FM_FAKE_TMUX_CAPTURE="$capture" escalate_flush "$state" \
+    || fail "Slack DM retry should succeed"
+  [ ! -s "$state/.subsuper-escalations" ] || fail "buffer not cleared after successful retry"
+  [ ! -e "$state/.subsuper-slack-dm-failed" ] || fail "failure marker not cleared after successful retry"
+  pass "Slack DM failure preserves the buffer and a later success acknowledges it"
+}
+
+test_slack_dm_no_double_send_after_ack() {
+  local dir state helper dm_log count
+  dir=$(make_supercase slack-dedupe)
+  state="$dir/state"
+  dm_log="$dir/dm.log"; : > "$dm_log"
+  helper=$(make_fake_slack_dm_helper "$dir")
+  write_fake_slack_dm_config "$dir"
+  escalate_add "$state" "done: ready in branch fm/example"
+  afk_enter "$state"
+
+  FM_CONFIG_OVERRIDE="$dir/config" FM_SLACK_DM_BIN="$helper" FM_FAKE_SLACK_DM_LOG="$dm_log" \
+    escalate_flush "$state" || fail "first Slack DM flush failed"
+  FM_CONFIG_OVERRIDE="$dir/config" FM_SLACK_DM_BIN="$helper" FM_FAKE_SLACK_DM_LOG="$dm_log" \
+    escalate_flush "$state" || fail "empty second Slack DM flush failed"
+
+  count=$(grep -c '^AI agent here' "$dm_log" 2>/dev/null || true)
+  [ "$count" -eq 1 ] || fail "expected exactly one DM after acknowledged buffer, got $count"
+  pass "Slack DM delivery does not re-send an already acknowledged buffer"
+}
+
+test_slack_dm_config_name_drives_attribution() {
+  local dir state helper dm_log
+  dir=$(make_supercase slack-named-attribution)
+  state="$dir/state"
+  dm_log="$dir/dm.log"; : > "$dm_log"
+  helper=$(make_fake_slack_dm_helper "$dir")
+  write_fake_slack_dm_config "$dir" U123ABC Tim
+  escalate_add "$state" "done: ready in branch fm/example"
+  afk_enter "$state"
+
+  FM_CONFIG_OVERRIDE="$dir/config" FM_SLACK_DM_BIN="$helper" FM_FAKE_SLACK_DM_LOG="$dm_log" \
+    escalate_flush "$state" || fail "named-attribution Slack DM flush failed"
+
+  assert_contains "$(cat "$dm_log")" "AI agent for Tim here —" "config name did not drive the daemon attribution prefix"
+  assert_not_contains "$(cat "$dm_log")" "AI agent here —" "named config still used the generic prefix"
+  pass "the daemon derives the DM attribution prefix from config name (generic default when absent)"
+}
+
+test_slack_dm_persistent_failure_fires_wedge_alarm() {
+  # Persistent Slack-DM delivery failure past max-defer must enter the SAME loud
+  # bounded alarm path as a wedged pane - fire wedge_alarm_notify and write the
+  # dedicated wedge marker - while preserving the buffer and the real per-attempt
+  # failure reason (never overwriting it with a synthetic "max-defer" reason).
+  local dir state helper dm_log alert
+  dir=$(make_supercase slack-dm-wedge)
+  state="$dir/state"
+  dm_log="$dir/dm.log"; : > "$dm_log"
+  alert="$dir/alert.log"; : > "$alert"
+  helper=$(make_fake_slack_dm_helper "$dir")
+  write_fake_slack_dm_config "$dir"
+  escalate_add "$state" "needs-decision: pick a release window"
+  echo $(( $(date +%s) - 600 )) > "$state/.subsuper-escalations.since"
+  afk_enter "$state"
+  WEDGE_ALARM_LAST_EPOCH=0  # reset the in-shell throttle so prior tests do not suppress notify
+
+  FM_CONFIG_OVERRIDE="$dir/config" FM_SLACK_DM_BIN="$helper" FM_FAKE_SLACK_DM_LOG="$dm_log" \
+    FM_FAKE_SLACK_DM_RC=1 FM_WEDGE_ALARM_LOG="$alert" FM_WEDGE_ALARM_CHANNEL=osascript \
+    FM_ESCALATE_BATCH_SECS=99999 FM_MAX_DEFER_SECS=60 housekeeping "$state"
+
+  [ -s "$state/.subsuper-escalations" ] || fail "buffer lost after persistent DM failure (must be preserved)"
+  [ -s "$state/.subsuper-slack-dm-wedged" ] || fail "persistent DM failure did not write the wedge marker"
+  grep -F 'Slack DM WEDGED' "$alert" >/dev/null || fail "persistent DM failure did not fire the loud wedge alarm"
+  grep -F 'helper-exit-1' "$state/.subsuper-slack-dm-failed" >/dev/null \
+    || fail "failure marker lost the real per-attempt delivery reason"
+  grep -F 'max-defer' "$state/.subsuper-slack-dm-failed" >/dev/null \
+    && fail "max-defer overwrote the real per-attempt failure reason"
+  pass "persistent Slack DM failure fires the loud wedge alarm, preserves the buffer and the real reason"
+}
+
+test_slack_dm_wedge_alarm_throttled_within_window() {
+  # Two housekeeping passes inside one max-defer window fire the loud alarm once:
+  # the dedicated wedge marker (written only by the alarm) is the throttle, so it
+  # is never reset by the failure marker that every failed send rewrites.
+  local dir state helper dm_log alert n
+  dir=$(make_supercase slack-dm-wedge-throttle)
+  state="$dir/state"
+  dm_log="$dir/dm.log"; : > "$dm_log"
+  alert="$dir/alert.log"; : > "$alert"
+  helper=$(make_fake_slack_dm_helper "$dir")
+  write_fake_slack_dm_config "$dir"
+  escalate_add "$state" "needs-decision: pick a release window"
+  echo $(( $(date +%s) - 600 )) > "$state/.subsuper-escalations.since"
+  afk_enter "$state"
+  WEDGE_ALARM_LAST_EPOCH=0
+
+  local i
+  for i in 1 2; do
+    FM_CONFIG_OVERRIDE="$dir/config" FM_SLACK_DM_BIN="$helper" FM_FAKE_SLACK_DM_LOG="$dm_log" \
+      FM_FAKE_SLACK_DM_RC=1 FM_WEDGE_ALARM_LOG="$alert" FM_WEDGE_ALARM_CHANNEL=osascript \
+      FM_ESCALATE_BATCH_SECS=99999 FM_MAX_DEFER_SECS=60 housekeeping "$state"
+  done
+
+  n=$(grep -c 'Slack DM WEDGED' "$alert" 2>/dev/null || true)
+  [ "$n" -eq 1 ] || fail "expected exactly one Slack DM wedge alarm within the max-defer window, got $n"
+  pass "the Slack DM wedge alarm is throttled to once per max-defer window"
+}
+
+test_slack_dm_config_absent_keeps_terminal_injection_path() {
+  local dir state fakebin sent capture
+  dir=$(make_supercase slack-config-absent)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  sent="$dir/sent.log"; : > "$sent"
+  capture="$dir/pane.txt"; : > "$capture"
+  escalate_add "$state" "done: PR 1"
+  afk_enter "$state"
+
+  PATH="$fakebin:$PATH" FM_CONFIG_OVERRIDE="$dir/config" FM_FAKE_TMUX_PANE_ALIVE=1 \
+    FM_FAKE_TMUX_SENT="$sent" FM_FAKE_TMUX_CAPTURE="$capture" escalate_flush "$state" \
+    || fail "config-absent terminal flush failed"
+
+  grep -F "Supervisor escalate" "$sent" >/dev/null || fail "config absent did not use the existing terminal injection path"
+  [ ! -s "$state/.subsuper-escalations" ] || fail "buffer not cleared on terminal injection success"
+  pass "absent Slack DM config preserves existing AFK terminal injection behavior"
+}
+
+test_slack_dm_afk_inactive_defers_and_preserves_buffer() {
+  local dir state helper dm_log
+  dir=$(make_supercase slack-afk-inactive)
+  state="$dir/state"
+  dm_log="$dir/dm.log"; : > "$dm_log"
+  helper=$(make_fake_slack_dm_helper "$dir")
+  write_fake_slack_dm_config "$dir"
+  escalate_add "$state" "done: PR https://github.example/pr/9"
+  # afk flag deliberately NOT set: the DM path must defer just like inject_msg,
+  # preserving the buffer for catch-up. (The captain-return shutdown case, where
+  # bin/fm-afk-launch.sh stop leaves .afk SET during the shutdown flush, is
+  # covered separately by test_slack_dm_shutdown_flush_preserves_buffer_no_dm.)
+  if FM_CONFIG_OVERRIDE="$dir/config" FM_SLACK_DM_BIN="$helper" FM_FAKE_SLACK_DM_LOG="$dm_log" \
+    escalate_flush "$state"; then
+    fail "Slack DM escalate_flush succeeded while afk inactive"
+  fi
+  [ ! -s "$dm_log" ] || fail "daemon sent a Slack DM while afk inactive"
+  [ -s "$state/.subsuper-escalations" ] || fail "buffer not preserved for catch-up when afk inactive"
+  [ ! -e "$state/.subsuper-slack-dm-failed" ] || fail "afk-inactive defer wrote a delivery-failure marker"
+  pass "afk inactive: Slack DM path defers and preserves the buffer, like the injection path"
+}
+
+test_slack_dm_shutdown_flush_preserves_buffer_no_dm() {
+  # The sanctioned captain-return stop path (bin/fm-afk-launch.sh stop, #490)
+  # SIGTERMs the daemon while state/.afk is STILL SET. The cleanup shutdown flush
+  # must NOT send a Slack DM at the now-present captain; it must preserve the
+  # buffer for firstmate's in-chat catch-up. Modeled by afk ACTIVE + the
+  # DAEMON_SHUTTING_DOWN marker cleanup() sets before its escalate_flush.
+  local dir state helper dm_log
+  dir=$(make_supercase slack-shutdown-flush)
+  state="$dir/state"
+  dm_log="$dir/dm.log"; : > "$dm_log"
+  helper=$(make_fake_slack_dm_helper "$dir")
+  write_fake_slack_dm_config "$dir"
+  escalate_add "$state" "needs-decision: pick a release window"
+  afk_enter "$state"
+
+  if DAEMON_SHUTTING_DOWN=1 FM_CONFIG_OVERRIDE="$dir/config" FM_SLACK_DM_BIN="$helper" \
+    FM_FAKE_SLACK_DM_LOG="$dm_log" escalate_flush "$state"; then
+    fail "shutdown Slack DM flush succeeded (must defer and preserve the buffer)"
+  fi
+  [ ! -s "$dm_log" ] || fail "daemon sent a Slack DM during shutdown while afk still active"
+  [ -s "$state/.subsuper-escalations" ] || fail "shutdown flush dropped the buffer instead of preserving it for catch-up"
+  [ ! -e "$state/.subsuper-slack-dm-failed" ] || fail "shutdown defer wrote a delivery-failure marker (it is not a failure)"
+  pass "DM shutdown flush preserves the buffer and sends no DM even while afk is still active"
+}
+
+test_shutdown_flush_still_injects_when_no_dm_config() {
+  # The shutdown gate is DM-specific: with no Slack DM config, injection mode must
+  # STILL flush its final digest into the pane on shutdown (the #490 behavior the
+  # DM gate must not regress).
+  local dir state fakebin sent capture
+  dir=$(make_supercase shutdown-inject)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  sent="$dir/sent.log"; : > "$sent"
+  capture="$dir/pane.txt"; : > "$capture"
+  escalate_add "$state" "done: PR 1"
+  afk_enter "$state"
+
+  DAEMON_SHUTTING_DOWN=1 PATH="$fakebin:$PATH" FM_CONFIG_OVERRIDE="$dir/config" \
+    FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_SENT="$sent" FM_FAKE_TMUX_CAPTURE="$capture" \
+    escalate_flush "$state" || fail "injection-mode shutdown flush failed"
+
+  grep -F "Supervisor escalate" "$sent" >/dev/null || fail "injection mode did not flush into the pane on shutdown"
+  [ ! -s "$state/.subsuper-escalations" ] || fail "injection shutdown flush did not clear the delivered buffer"
+  pass "injection-mode shutdown flush still delivers into the pane (DM gate is channel-specific)"
+}
+
+test_slack_dm_failure_marker_redacts_helper_output() {
+  local dir state helper dm_log secret out
+  dir=$(make_supercase slack-redaction)
+  state="$dir/state"
+  dm_log="$dir/dm.log"; : > "$dm_log"
+  helper=$(make_fake_slack_dm_helper "$dir")
+  write_fake_slack_dm_config "$dir"
+  secret="xoxb-redaction-secret"
+  escalate_add "$state" "failed: validation broke"
+  afk_enter "$state"
+
+  out=$(FM_CONFIG_OVERRIDE="$dir/config" FM_SLACK_DM_BIN="$helper" FM_FAKE_SLACK_DM_LOG="$dm_log" \
+    FM_FAKE_SLACK_DM_RC=1 FM_FAKE_SLACK_DM_SECRET_OUTPUT="$secret" escalate_flush "$state" 2>&1)
+  assert_not_contains "$out" "$secret" "daemon stderr/stdout leaked helper secret output"
+  assert_no_grep "$secret" "$state/.subsuper-slack-dm-failed" "failure marker leaked helper secret output"
+  pass "Slack DM daemon failure marker and output redact helper details"
+}
+
+test_slack_dm_small_backlog_delivers_untruncated() {
+  # A small backlog fits well under Slack's 40000-char chat.postMessage limit, so
+  # the digest carries every item, appends no "and N more" tail, and the whole
+  # buffer is acknowledged (cleared) exactly like before the cap existed.
+  local dir state helper dm_log i
+  dir=$(make_supercase slack-cap-small)
+  state="$dir/state"
+  dm_log="$dir/dm.log"; : > "$dm_log"
+  helper=$(make_fake_slack_dm_helper "$dir")
+  write_fake_slack_dm_config "$dir"
+  for i in 1 2 3; do escalate_add "$state" "done: item $i ready in branch fm/example-$i"; done
+  afk_enter "$state"
+
+  FM_CONFIG_OVERRIDE="$dir/config" FM_SLACK_DM_BIN="$helper" FM_FAKE_SLACK_DM_LOG="$dm_log" \
+    escalate_flush "$state" || fail "small-backlog Slack DM flush failed"
+
+  for i in 1 2 3; do
+    assert_contains "$(cat "$dm_log")" "done: item $i ready" "small digest dropped item $i"
+  done
+  assert_not_contains "$(cat "$dm_log")" "more update(s) held" "small digest wrongly appended a truncation tail"
+  [ ! -s "$state/.subsuper-escalations" ] || fail "small-backlog flush did not clear the fully delivered buffer"
+  pass "a small AFK backlog delivers untruncated and clears the buffer"
+}
+
+test_slack_dm_oversized_backlog_truncates_and_retains_overflow() {
+  # An oversized backlog must ALWAYS deliver a partial digest that fits, tagged
+  # with an "and N more" tail, while the undelivered overflow stays in the buffer
+  # for the next batch flush and for return catch-up - and the delivered head is
+  # never DMed twice. The item cap is forced low here to make truncation
+  # deterministic without building a 40000-char buffer.
+  local dir state helper dm_log i first_dm remaining count
+  dir=$(make_supercase slack-cap-oversized)
+  state="$dir/state"
+  dm_log="$dir/dm.log"; : > "$dm_log"
+  helper=$(make_fake_slack_dm_helper "$dir")
+  write_fake_slack_dm_config "$dir"
+  for i in $(seq 1 10); do escalate_add "$state" "done: item $i ready in branch fm/example-$i"; done
+  afk_enter "$state"
+
+  FM_SLACK_DM_MAX_ITEMS=3 FM_CONFIG_OVERRIDE="$dir/config" FM_SLACK_DM_BIN="$helper" \
+    FM_FAKE_SLACK_DM_LOG="$dm_log" escalate_flush "$state" \
+    || fail "oversized-backlog Slack DM flush failed (must deliver a partial digest, not fail)"
+
+  first_dm=$(sed '/^---$/q' "$dm_log")
+  assert_contains "$first_dm" "done: item 1 ready" "partial digest missing the head item"
+  assert_contains "$first_dm" "done: item 3 ready" "partial digest missing the last head item"
+  assert_not_contains "$first_dm" "done: item 4 ready" "partial digest leaked an overflow item"
+  assert_contains "$first_dm" "…and 7 more update(s) held" "partial digest missing the honest overflow tail"
+  [ "$(printf '%s' "$first_dm" | LC_ALL=C wc -c)" -lt 40000 ] \
+    || fail "partial digest exceeded Slack's 40000-char chat.postMessage limit"
+  remaining=$(wc -l < "$state/.subsuper-escalations")
+  [ "$remaining" -eq 7 ] || fail "expected 7 overflow lines retained for catch-up, got $remaining"
+  assert_no_grep "item 1 ready" "$state/.subsuper-escalations" "delivered head item was left in the overflow buffer"
+
+  # A second flush delivers the next capped chunk and never re-DMs the head.
+  FM_SLACK_DM_MAX_ITEMS=3 FM_CONFIG_OVERRIDE="$dir/config" FM_SLACK_DM_BIN="$helper" \
+    FM_FAKE_SLACK_DM_LOG="$dm_log" escalate_flush "$state" \
+    || fail "second oversized flush failed"
+  count=$(grep -c "done: item 1 ready" "$dm_log" 2>/dev/null || true)
+  [ "$count" -eq 1 ] || fail "delivered head item was DMed $count times (expected exactly 1)"
+  assert_contains "$(cat "$dm_log")" "done: item 4 ready" "second flush did not deliver the next overflow chunk"
+  pass "an oversized AFK backlog truncates with an overflow tail, retains overflow, and never double-DMs the head"
+}
+
+test_slack_dm_byte_budget_caps_digest_under_slack_limit() {
+  # The cap is byte-driven, not just item-count-driven: a backlog whose raw text
+  # dwarfs Slack's 40000-char limit still delivers one digest that fits, proving
+  # the fix for the unbounded-length failure where every retry was rejected.
+  local dir state helper dm_log i bytes
+  dir=$(make_supercase slack-cap-bytes)
+  state="$dir/state"
+  dm_log="$dir/dm.log"; : > "$dm_log"
+  helper=$(make_fake_slack_dm_helper "$dir")
+  write_fake_slack_dm_config "$dir"
+  # ~800 items x ~60 chars ~= 48000 raw chars, comfortably over the 40000 limit
+  # even before per-item bullets, with the default caps in force.
+  for i in $(seq 1 800); do
+    escalate_add "$state" "done: item $i is ready for captain review in branch fm/example-$i"
+  done
+  afk_enter "$state"
+
+  FM_CONFIG_OVERRIDE="$dir/config" FM_SLACK_DM_BIN="$helper" FM_FAKE_SLACK_DM_LOG="$dm_log" \
+    escalate_flush "$state" || fail "byte-capped Slack DM flush failed (must deliver a partial digest)"
+
+  bytes=$(LC_ALL=C wc -c < "$dm_log")
+  [ "$bytes" -lt 40000 ] || fail "byte-capped digest was $bytes bytes, over Slack's 40000-char limit"
+  assert_contains "$(cat "$dm_log")" "more update(s) held" "byte-capped digest missing the overflow tail"
+  [ -s "$state/.subsuper-escalations" ] || fail "byte-capped flush dropped the undelivered overflow"
+  pass "a backlog larger than Slack's limit still delivers one digest that fits, overflow retained"
+}
+
+test_status_digest_dm_request_is_explicit_only() {
+  local dir state helper dm_log out
+  dir=$(make_supercase slack-status-digest)
+  state="$dir/state"
+  dm_log="$dir/dm.log"; : > "$dm_log"
+  helper=$(make_fake_slack_dm_helper "$dir")
+  write_fake_slack_dm_config "$dir"
+  printf 'working: still building\n' > "$state/worker-a.status"
+
+  out=$(FM_STATE_OVERRIDE="$state" classify_signal "$state/worker-a.status" "$state")
+  case "$out" in self\|*) ;; *) fail "routine working signal became captain-relevant: $out" ;; esac
+
+  date +%s > "$state/.subsuper-status-digest-dm-request"
+  afk_enter "$state"
+  FM_CONFIG_OVERRIDE="$dir/config" FM_SLACK_DM_BIN="$helper" FM_FAKE_SLACK_DM_LOG="$dm_log" \
+    FM_ESCALATE_BATCH_SECS=0 housekeeping "$state"
+
+  assert_absent "$state/.subsuper-status-digest-dm-request" "status digest request marker was not consumed"
+  assert_contains "$(cat "$dm_log")" "status digest requested" "status digest DM was not sent"
+  assert_contains "$(cat "$dm_log")" "working: still building" "status digest omitted routine status"
+  pass "explicit status-digest DM request does not broaden routine classification"
+}
+
 test_heartbeat_scan_dedup() {
   local dir state
   dir=$(make_supercase scan-dedup)
@@ -1810,6 +2218,21 @@ test_housekeeping_herdr_resumed_stale_cleared
 test_housekeeping_orca_persistent_stale_resolves_terminal
 test_escalate_batches_into_one_digest
 test_escalate_batch_age_uses_first_append
+test_slack_dm_flush_success_acknowledges_without_terminal_injection
+test_slack_dm_failure_preserves_buffer_for_retry
+test_slack_dm_no_double_send_after_ack
+test_slack_dm_config_name_drives_attribution
+test_slack_dm_persistent_failure_fires_wedge_alarm
+test_slack_dm_wedge_alarm_throttled_within_window
+test_slack_dm_config_absent_keeps_terminal_injection_path
+test_slack_dm_afk_inactive_defers_and_preserves_buffer
+test_slack_dm_shutdown_flush_preserves_buffer_no_dm
+test_slack_dm_small_backlog_delivers_untruncated
+test_slack_dm_oversized_backlog_truncates_and_retains_overflow
+test_slack_dm_byte_budget_caps_digest_under_slack_limit
+test_shutdown_flush_still_injects_when_no_dm_config
+test_slack_dm_failure_marker_redacts_helper_output
+test_status_digest_dm_request_is_explicit_only
 test_heartbeat_scan_dedup
 test_handle_wake_routes_self_and_escalate
 test_inject_skip_forces_self

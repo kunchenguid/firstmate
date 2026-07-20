@@ -123,7 +123,9 @@ clear_delivery_artifacts() {
   rm -f \
     "$STATE/.subsuper-escalations" \
     "$STATE/.subsuper-escalations.since" \
-    "$STATE/.subsuper-inject-wedged"
+    "$STATE/.subsuper-inject-wedged" \
+    "$STATE/.subsuper-slack-dm-failed" \
+    "$STATE/.subsuper-slack-dm-wedged"
 }
 
 return_guard() {
@@ -140,7 +142,7 @@ return_guard() {
 }
 
 return_reconcile() {
-  local evidence blockers drained wedge escalations lifecycle_ok=1
+  local evidence blockers drained wedge escalations lifecycle_ok=1 slack_dm_failed slack_dm_wedge
   evidence=$(mktemp "$STATE/.afk-return-evidence.XXXXXX") || return 1
   blockers=$(mktemp "$STATE/.afk-return-blockers.XXXXXX") || { rm -f "$evidence"; return 1; }
   preserve_evidence "$evidence"
@@ -166,6 +168,24 @@ return_reconcile() {
   if [ -s "$STATE/.subsuper-escalations" ]; then
     escalations=$(cat "$STATE/.subsuper-escalations" 2>/dev/null || true)
     append_evidence escalation "$escalations" "$evidence"
+  fi
+  # Away-mode Slack DM delivery (config/afk-slack-dm) leaves secret-free markers
+  # when a captain-facing DM could not be confirmed: a persistent-wedge marker
+  # and a per-attempt failure marker. Surface them so a return catch-up reflects
+  # any escalation the daemon buffered but never delivered by DM. Both markers
+  # carry only sanitized text; the token never touches them (fm-supervise-daemon.sh).
+  if [ -s "$STATE/.subsuper-slack-dm-wedged" ]; then
+    slack_dm_wedge=$(head -1 "$STATE/.subsuper-slack-dm-wedged" 2>/dev/null || true)
+    append_evidence wedge "$slack_dm_wedge" "$evidence"
+  fi
+  if [ -s "$STATE/.subsuper-slack-dm-failed" ]; then
+    # The daemon's failure marker is multi-line: line 1 is the timestamp banner
+    # and the actual delivery-failure reason is on the "Last result:" line
+    # (fm-supervise-daemon.sh afk_slack_dm_write_failure_marker). Surface both so
+    # the reason survives into catch-up before clear_delivery_artifacts removes
+    # the marker; append_evidence records each line as its own deduped row.
+    slack_dm_failed=$(sed -n '1p;/^Last result:/p' "$STATE/.subsuper-slack-dm-failed" 2>/dev/null || true)
+    append_evidence slack-dm "$slack_dm_failed" "$evidence"
   fi
 
   scan_open_blockers > "$blockers"
