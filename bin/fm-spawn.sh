@@ -884,6 +884,25 @@ real_path_or_raw() {  # <path>
   fi
 }
 
+# git_common_dir_real <dir>: the physical path of <dir>'s git common dir, or
+# non-zero when <dir> is not inside a git repository. Every linked worktree of a
+# repository shares the primary checkout's common dir, so equality of this value
+# is the "same repository" test the isolation guard relies on.
+git_common_dir_real() {  # <dir>
+  local dir=$1 common
+  common=$(git -C "$dir" rev-parse --git-common-dir 2>/dev/null) || return 1
+  [ -n "$common" ] || return 1
+  case "$common" in
+    /*) ;;
+    *) common="$dir/$common" ;;
+  esac
+  (cd "$common" 2>/dev/null && pwd -P)
+}
+
+# Empty when the project itself is not a git repository; the isolation guard
+# below then fails closed rather than adopting any candidate worktree.
+PROJ_COMMON_REAL=$(git_common_dir_real "$PROJ_ABS") || PROJ_COMMON_REAL=
+
 # Session-provider container-ensure + task creation. tmux stays exactly as P1
 # left it (same session-name / new-window sequence, see bin/backends/tmux.sh);
 # a herdr spawn goes through the version-gated, workspace-per-HOME,
@@ -892,22 +911,34 @@ real_path_or_raw() {  # <path>
 # herdr-sm-spaces-k4). Both branches converge on the same $T ("target") string
 # that every downstream operation (send/capture/kill) already treats as opaque
 # per-backend routing (fm_backend_resolve_selector).
+# spawn_worktree_isolated <path>: 0 iff <path> is the root of a git working
+# tree that belongs to the SAME repository as the primary project checkout
+# (equal physical git common dirs) and is not the primary checkout itself.
+# The same-repository requirement is load-bearing: the pane's cwd read can
+# report a foreground process sitting in an UNRELATED repo (incident: an
+# oh-my-zsh update prompt ate the leading char of `treehouse get`, the updater
+# ran with cwd ~/.oh-my-zsh - itself a git clone - and the old
+# any-git-root-except-primary check adopted it as the task worktree).
+spawn_worktree_isolated() {  # <path>
+  local cand=$1 cand_real cand_top cand_top_real cand_common
+  [ -n "$PROJ_COMMON_REAL" ] || return 1
+  cand_real=$(cd "$cand" 2>/dev/null && pwd -P) || return 1
+  [ "$cand_real" != "$PROJ_ABS_REAL" ] || return 1
+  cand_top=$(git -C "$cand" rev-parse --show-toplevel 2>/dev/null) || return 1
+  cand_top_real=$(cd "$cand_top" 2>/dev/null && pwd -P) || return 1
+  [ "$cand_real" = "$cand_top_real" ] || return 1
+  cand_common=$(git_common_dir_real "$cand") || return 1
+  [ "$cand_common" = "$PROJ_COMMON_REAL" ]
+}
+
 validate_spawn_worktree() {  # <source> <inspect-target>
-  local source=$1 inspect_target=$2 wt_real proj_real wt_top wt_top_real
-  wt_real=
-  if ! wt_real=$(cd "$WT" 2>/dev/null && pwd -P); then
-    wt_real=
+  local source=$1 inspect_target=$2 wt_common
+  if spawn_worktree_isolated "$WT"; then
+    return 0
   fi
-  proj_real=$PROJ_ABS_REAL
-  wt_top=$(git -C "$WT" rev-parse --show-toplevel 2>/dev/null || true)
-  wt_top_real=
-  if ! wt_top_real=$(cd "$wt_top" 2>/dev/null && pwd -P); then
-    wt_top_real=
-  fi
-  if [ -z "$wt_real" ] || [ -z "$wt_top_real" ] || [ "$wt_real" != "$wt_top_real" ] || [ "$wt_real" = "$proj_real" ]; then
-    echo "error: $source did not yield an isolated worktree (resolved '$WT'; worktree root '${wt_top:-none}'; primary '$PROJ_ABS'); refusing to launch to avoid tangling the primary checkout. Inspect target $inspect_target" >&2
-    exit 1
-  fi
+  wt_common=$(git_common_dir_real "$WT") || wt_common=none
+  echo "error: $source did not yield an isolated worktree of the project repository (resolved '$WT'; its git common dir '$wt_common' vs project's '${PROJ_COMMON_REAL:-none}'; primary '$PROJ_ABS'); refusing to launch to avoid tangling the primary checkout or adopting an unrelated directory. Inspect target $inspect_target" >&2
+  exit 1
 }
 
 W="fm-$ID"
@@ -1063,16 +1094,35 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   # Compare against PROJ_ABS_REAL (physical), not PROJ_ABS: a symlinked project
   # prefix would otherwise make the pane's OS-level cwd read differ from
   # PROJ_ABS on the very first poll, before the pane has actually moved.
-  for _ in $(seq 1 60); do
+  # A candidate is latched only when spawn_worktree_isolated confirms it is a
+  # worktree of the project's own repository: the pane's cwd can transit
+  # through arbitrary directories (a shell-startup prompt intercepting the
+  # command, a foreground updater), and "any path other than the primary" is
+  # not evidence that treehouse ran. Rejected candidates keep the poll alive
+  # (the real worktree may still appear) and the last one is reported on
+  # timeout instead of ever being adopted.
+  # FM_SPAWN_WT_TIMEOUT (seconds, default 60) exists so tests can exercise
+  # the refusal path without waiting out the full production window.
+  WT_TIMEOUT=${FM_SPAWN_WT_TIMEOUT:-60}
+  case "$WT_TIMEOUT" in ''|*[!0-9]*) WT_TIMEOUT=60 ;; esac
+  WT_LAST_REJECT=
+  for _ in $(seq 1 "$WT_TIMEOUT"); do
     p=$(spawn_current_path "$WT_TARGET" || true)
     if [ -n "$p" ] && [ "$(real_path_or_raw "$p")" != "$PROJ_ABS_REAL" ]; then
-      WT="$p"
-      break
+      if spawn_worktree_isolated "$p"; then
+        WT="$p"
+        break
+      fi
+      WT_LAST_REJECT="$p"
     fi
     sleep 1
   done
   if [ -z "$WT" ]; then
-    echo "error: treehouse get did not enter a worktree within 60s; inspect window $T" >&2
+    if [ -n "$WT_LAST_REJECT" ]; then
+      echo "error: treehouse get left the pane at '$WT_LAST_REJECT', which is not a worktree of the project repository (primary '$PROJ_ABS'); the command was likely intercepted in the pane (e.g. a shell-startup prompt consuming input). Refusing to adopt that path; inspect window $T" >&2
+    else
+      echo "error: treehouse get did not enter a worktree within ${WT_TIMEOUT}s; inspect window $T" >&2
+    fi
     exit 1
   fi
 
