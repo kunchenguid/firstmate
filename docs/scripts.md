@@ -7,7 +7,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 
 | Script                   | Purpose                                                                              |
 | ------------------------ | ------------------------------------------------------------------------------------ |
-| `fm-session-start.sh`    | Compose lock, bootstrap, and wake drain into the single ordered session-start digest |
+| `fm-session-start.sh`    | Print the single ordered session-start and durable-recovery digest                   |
 | `fm-memory.sh`           | Launch the private durable event, checkpoint, recovery, transcript-reference, and search owner (`docs/durable-memory.md`) |
 | `fm-sessionstart-nudge.sh` | Print the native session-start hook nudge when the primary has not already run the digest |
 | `fm-bootstrap.sh`        | Detect toolchain and fleet problems, run the locked session-start sweeps, and install approved tools |
