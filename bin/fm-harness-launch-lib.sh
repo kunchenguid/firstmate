@@ -119,7 +119,7 @@ fm_launch_exclude_path() {
 }
 
 fm_launch_install_turn_end_hook() {
-  local harness=$1 kind=$2 wt=$3 state=$4 id=$5 turnend=$6 project_abs=$7
+  local harness=$1 kind=$2 wt=$3 state=$4 id=$5 turnend=$6
   local grok_hooks_dir grok_auth_dir old_umask auth_file sq_grok_auth_dir hook_command prior_token
   [ "$kind" != secondmate ] || return 0
   case "$harness" in
@@ -216,5 +216,4 @@ EOF
       fm_launch_exclude_path "$wt" '.fm-grok-turnend'
       ;;
   esac
-  : "$project_abs"
 }

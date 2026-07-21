@@ -128,9 +128,9 @@ test_grok_relaunch_retires_prior_auth_token() {
 
   # shellcheck source=bin/fm-harness-launch-lib.sh
   . "$ROOT/bin/fm-harness-launch-lib.sh"
-  GROK_HOME="$grok_home" fm_launch_install_turn_end_hook grok ship "$wt" "$state" "$id" "$state/$id.turn-ended" "$wt"
+  GROK_HOME="$grok_home" fm_launch_install_turn_end_hook grok ship "$wt" "$state" "$id" "$state/$id.turn-ended"
   first=$(cat "$state/$id.grok-turnend-token")
-  GROK_HOME="$grok_home" fm_launch_install_turn_end_hook grok ship "$wt" "$state" "$id" "$state/$id.turn-ended" "$wt"
+  GROK_HOME="$grok_home" fm_launch_install_turn_end_hook grok ship "$wt" "$state" "$id" "$state/$id.turn-ended"
   second=$(cat "$state/$id.grok-turnend-token")
 
   [ "$first" != "$second" ] || fail "relaunch should mint a fresh grok auth token"

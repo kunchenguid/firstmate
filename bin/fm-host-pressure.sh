@@ -193,8 +193,12 @@ emit_check() {
 }
 
 periodic_alert() {
-  local out status state reason available floor clear cooldown marker now last detail
-  if out=$(emit_check); then
+  local out status state reason available floor clear cooldown marker now last detail errfile
+  # emit_check rewrites the disk-hysteresis marker, so it is evaluated exactly
+  # once and its stderr is captured alongside its stdout instead of being
+  # recovered by a second run.
+  errfile=$(mktemp "${TMPDIR:-/tmp}/fm-host-pressure.XXXXXXXX")
+  if out=$(emit_check 2>"$errfile"); then
     status=0
   else
     status=$?
@@ -204,12 +208,15 @@ periodic_alert() {
   # stdout and discards its stderr, so surface the refusal as an alert record
   # rather than letting a broken threshold read as "nothing to alert".
   if [ "$status" -eq 2 ]; then
-    detail=$(emit_check 2>&1 >/dev/null | tail -1)
+    detail=$(tail -1 "$errfile")
+    rm -f "$errfile"
     printf 'alert=host_pressure_config_invalid\n'
     printf 'state=error\n'
     printf 'reason=%s\n' "${detail:-invalid capacity-failover configuration}"
     return 2
   fi
+  cat "$errfile" >&2
+  rm -f "$errfile"
   state=$(printf '%s\n' "$out" | sed -n 's/^state=//p' | tail -1)
   case "$state" in
     critical) ;;

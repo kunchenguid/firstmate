@@ -1035,7 +1035,7 @@ mkdir -p "$TASK_TMP/gotmp"
 mkdir -p "$STATE"
 STATE_REAL=$(cd "$STATE" && pwd -P)
 TURNEND="$STATE_REAL/$ID.turn-ended"
-fm_launch_install_turn_end_hook "$HARNESS" "$KIND" "$WT" "$STATE" "$ID" "$TURNEND" "$PROJ_ABS"
+fm_launch_install_turn_end_hook "$HARNESS" "$KIND" "$WT" "$STATE" "$ID" "$TURNEND"
 
 # Per-project delivery mode + yolo flag (bin/fm-project-mode.sh; the project-management skill and AGENTS.md task lifecycle).
 # Recorded in meta so fm-teardown's safety check and the validate/merge stages can

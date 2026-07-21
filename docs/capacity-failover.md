@@ -126,8 +126,12 @@ Cooldown records are keyed by `(provider, account, route)`.
 The account comes from `--account`, `FM_GITHUB_ACCOUNT_ID`, a locally cached account, or a best-effort `gh api user` derivation.
 An account id read out of a rate-limit body is evidence only: it is recorded as `observed_account=` and never keys a record or replaces the cached account.
 When no account resolves, `mark-from-text` writes one account-agnostic record, and `check` consults that record in addition to the keyed one, so a cooldown observed before any account is known is still read back.
+`cache-get` and `cache-put` follow the same key policy, so a cached read stays reachable under the key its cooldown was written under.
 `mark` and `mark-from-text` write the cooldown.
+`mark-from-text` accepts the reset forms real `gh` stderr carries: an ISO-8601 or `UTC` timestamp, a labeled `x-ratelimit-reset: <epoch>` header from a primary limit, or a labeled `Retry-After: <seconds>` from a secondary limit.
+A bare number is never reset evidence, so an unlabeled id or epoch in an error body cannot create a cooldown.
 `check` prints `state=allow` or `state=defer` with provider, account, route, reset time, and remaining seconds.
+Because a record's path only encodes a hash of its key, a record whose own `provider=`/`account=`/`route=` fields disagree with the key it was found under is reported as `state=allow` with `mismatched_record=1` and left in place; capacity cooldowns apply the same rule to `harness=`/`account=`/`profile=`.
 Expired records are removed by `check`, so polling resumes only at or after the recorded reset time.
 
 `fm-pr-check.sh` uses this guard when it records PR metadata and in the static `fm-pr-poll.sh` poller.

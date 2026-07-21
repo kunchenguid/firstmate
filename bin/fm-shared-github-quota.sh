@@ -197,7 +197,7 @@ NODE
 }
 
 extract_github_rate_limit() {  # <text>
-  FM_GITHUB_QUOTA_TEXT=$1 node <<'NODE'
+  FM_GITHUB_QUOTA_TEXT=$1 FM_SHARED_QUOTA_NOW=$(now_epoch) node <<'NODE'
 const text = process.env.FM_GITHUB_QUOTA_TEXT || "";
 if (!/rate[- ]?limit/i.test(text)) process.exit(1);
 // Only a clearly labeled account id is reported, and it is evidence rather
@@ -208,6 +208,13 @@ let account = "";
   const m = text.match(/(?:user|account)(?:\s+id)?\s*[:#]?\s*([0-9]{4,})/i);
   if (m) account = m[1];
 }
+// Live gh stderr rarely carries a timestamp: a primary limit reports the reset
+// only through the x-ratelimit-reset header epoch, and a secondary limit only
+// through retry-after seconds. Both labels are accepted, but a bare number
+// never is, so an unlabeled id or epoch still cannot become reset evidence.
+const nowEpoch = Number(process.env.FM_SHARED_QUOTA_NOW || 0) ||
+  Math.floor(Date.now() / 1000);
+let ms = NaN;
 let resetAt = "";
 for (const re of [
   /(20\d\d-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?Z)/i,
@@ -216,11 +223,20 @@ for (const re of [
   const m = text.match(re);
   if (m) { resetAt = m[1]; break; }
 }
-if (!resetAt) process.exit(1);
-let ms = Date.parse(resetAt);
+if (resetAt) {
+  ms = Date.parse(resetAt);
+  if (!Number.isFinite(ms)) {
+    const m = resetAt.match(/^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}:\d{2})\s+UTC$/i);
+    if (m) ms = Date.parse(`${m[1]}T${m[2]}Z`);
+  }
+}
 if (!Number.isFinite(ms)) {
-  const m = resetAt.match(/^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}:\d{2})\s+UTC$/i);
-  if (m) ms = Date.parse(`${m[1]}T${m[2]}Z`);
+  const m = text.match(/\bx-rate-?limit-reset\s*[:=]\s*([0-9]{9,})\b/i);
+  if (m) ms = Number(m[1]) * 1000;
+}
+if (!Number.isFinite(ms)) {
+  const m = text.match(/\bretry[- ]after\s*[:=]?\s*([0-9]{1,7})\b/i);
+  if (m) ms = (nowEpoch + Number(m[1])) * 1000;
 }
 if (!Number.isFinite(ms)) process.exit(1);
 if (account) console.log(`observed_account=${account}`);
@@ -258,11 +274,30 @@ observed_account=$(one_line "$observed")"
   printf '%s\n' "$file"
 }
 
+record_matches_key() {  # <file> <provider> <account> <route>
+  local file=$1 provider=$2 account=$3 route=$4 rec
+  rec=$(field_value "$file" provider)
+  [ "$rec" = "$provider" ] || return 1
+  rec=$(field_value "$file" account)
+  [ "$rec" = "$account" ] || return 1
+  rec=$(field_value "$file" route)
+  [ "$rec" = "$route" ] || return 1
+  return 0
+}
+
 check_quota() {
   local provider=$1 account=$2 route=$3 file reset_epoch now remaining
   file=$(quota_file "$provider" "$account" "$route")
   if [ ! -f "$file" ]; then
     printf 'state=allow\nprovider=%s\naccount=%s\nroute=%s\n' "$provider" "$account" "$route"
+    return 0
+  fi
+  # The path only encodes a CRC32 of the key, so the record's own identity
+  # fields must agree before its wall - and its account/route, which the merge
+  # escalation prints - are applied to this key. A mismatched record is left in
+  # place because it may still be the record another key legitimately owns.
+  if ! record_matches_key "$file" "$provider" "$account" "$route"; then
+    printf 'state=allow\nprovider=%s\naccount=%s\nroute=%s\nmismatched_record=1\n' "$provider" "$account" "$route"
     return 0
   fi
   reset_epoch=$(field_value "$file" reset_epoch)
@@ -424,12 +459,15 @@ case "$cmd" in
     ;;
   cache-get)
     [ -n "$KEY" ] || { echo "error: cache-get requires --key" >&2; exit 2; }
-    resolve_account "$PROVIDER" || exit $?
+    # One key policy across every subcommand: the cached read must stay
+    # reachable under exactly the key the cooldown that deferred it was
+    # written under, including the account-agnostic one.
+    resolve_account_or_agnostic "$PROVIDER" || exit $?
     cache_get "$PROVIDER" "$ACCOUNT" "$ROUTE" "$KEY" "$MAX_AGE_SECS"
     ;;
   cache-put)
     [ -n "$KEY" ] || { echo "error: cache-put requires --key" >&2; exit 2; }
-    resolve_account "$PROVIDER" || exit $?
+    resolve_account_or_agnostic "$PROVIDER" || exit $?
     cache_put "$PROVIDER" "$ACCOUNT" "$ROUTE" "$KEY"
     ;;
   *)

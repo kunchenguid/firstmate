@@ -93,11 +93,9 @@ KIND=$(fm_meta_get "$META" kind)
 [ -n "$KIND" ] || KIND=ship
 [ "$KIND" != secondmate ] || { echo "error: secondmate rehome is not supported; use the secondmate recovery path" >&2; exit 1; }
 WT=$(fm_meta_get "$META" worktree)
-PROJ=$(fm_meta_get "$META" project)
 TASK_TMP=$(fm_meta_get "$META" tasktmp)
 [ -n "$TASK_TMP" ] || TASK_TMP="/tmp/fm-$ID"
 [ -n "$WT" ] && [ -d "$WT" ] || { echo "error: recorded worktree is missing: ${WT:-<empty>}" >&2; exit 1; }
-[ -n "$PROJ" ] || PROJ="$WT"
 ORIG_BRIEF="$DATA/$ID/brief.md"
 [ -f "$ORIG_BRIEF" ] || { echo "error: original brief missing at $ORIG_BRIEF" >&2; exit 1; }
 
@@ -185,7 +183,7 @@ fm_backend_tmux_create_task "$SES" "$W" "$WT" >/dev/null
 mkdir -p "$TASK_TMP/gotmp" "$STATE"
 STATE_REAL=$(cd "$STATE" && pwd -P)
 TURNEND="$STATE_REAL/$ID.turn-ended"
-fm_launch_install_turn_end_hook "$HARNESS" "$KIND" "$WT" "$STATE" "$ID" "$TURNEND" "$PROJ"
+fm_launch_install_turn_end_hook "$HARNESS" "$KIND" "$WT" "$STATE" "$ID" "$TURNEND"
 
 META_TMP=$(mktemp "$STATE/$ID.meta.XXXXXXXX")
 awk -F= '

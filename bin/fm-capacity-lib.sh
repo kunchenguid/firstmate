@@ -218,10 +218,28 @@ EOF
   printf '%s\n' "$file"
 }
 
+fm_capacity_cooldown_record_matches() {  # <file> <harness> <account> <profile>
+  local file=$1 harness=$2 account=$3 profile=$4 rec
+  rec=$(sed -n 's/^harness=//p' "$file" | tail -1)
+  [ "$rec" = "$harness" ] || return 1
+  rec=$(sed -n 's/^account=//p' "$file" | tail -1)
+  [ "$rec" = "$account" ] || return 1
+  rec=$(sed -n 's/^profile=//p' "$file" | tail -1)
+  [ "$rec" = "$profile" ] || return 1
+  return 0
+}
+
 fm_capacity_cooldown_active() {  # <state-dir> <harness> <account> <profile>
   local state=$1 harness=$2 account=$3 profile=$4 file reset_epoch now remaining
   file=$(fm_capacity_cooldown_file "$state" "$harness" "$account" "$profile")
   [ -f "$file" ] || return 1
+  # The filename is only a CRC32 of the key, so the record's own identity
+  # fields decide whether it really describes this route. A collided or
+  # hand-copied record is ignored rather than applied to a different route,
+  # and it is left in place because it may still be another route's wall.
+  if ! fm_capacity_cooldown_record_matches "$file" "$harness" "$account" "$profile"; then
+    return 1
+  fi
   reset_epoch=$(sed -n 's/^reset_epoch=//p' "$file" | tail -1)
   if [ "$reset_epoch" = manual ]; then
     cat "$file"

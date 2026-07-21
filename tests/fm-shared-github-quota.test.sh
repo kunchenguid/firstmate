@@ -136,6 +136,75 @@ test_reset_without_account_text_still_records_cooldown() {
   pass "rate-limit text without an account still records a keyed cooldown"
 }
 
+test_live_gh_rate_limit_evidence_records_cooldown() {
+  local shared out active
+  shared="$TMP_ROOT/shared-live-primary"
+  out=$(printf 'HTTP 403: API rate limit exceeded for user ID 55.\nX-RateLimit-Reset: 1799999999\n' \
+    | FM_SHARED_STATE_OVERRIDE="$shared" FM_SHARED_QUOTA_NOW_EPOCH=1000 \
+      FM_GITHUB_ACCOUNT_ID="$TEST_ACCOUNT" \
+      "$QUOTA" mark-from-text --provider github --route default --source incident)
+  assert_contains "$out" "reset_epoch=1799999999" "a labeled x-ratelimit-reset header is observed reset evidence"
+  active=$(FM_SHARED_STATE_OVERRIDE="$shared" FM_SHARED_QUOTA_NOW_EPOCH=1000 \
+    "$QUOTA" check --provider github --account "$TEST_ACCOUNT" --route default)
+  assert_contains "$active" "state=defer" "a primary rate-limit body should record a cooldown"
+
+  shared="$TMP_ROOT/shared-live-secondary"
+  out=$(printf 'You have exceeded a secondary rate limit.\nRetry-After: 120\n' \
+    | FM_SHARED_STATE_OVERRIDE="$shared" FM_SHARED_QUOTA_NOW_EPOCH=1000 \
+      FM_GITHUB_ACCOUNT_ID="$TEST_ACCOUNT" \
+      "$QUOTA" mark-from-text --provider github --route default --source incident)
+  assert_contains "$out" "reset_epoch=1120" "a labeled retry-after is observed reset evidence"
+
+  shared="$TMP_ROOT/shared-live-bare"
+  set +e
+  printf 'API rate limit exceeded 1799999999 for 4242424242.\n' \
+    | FM_SHARED_STATE_OVERRIDE="$shared" FM_SHARED_QUOTA_NOW_EPOCH=1000 \
+      FM_GITHUB_ACCOUNT_ID="$TEST_ACCOUNT" \
+      "$QUOTA" mark-from-text --provider github --route default >/dev/null 2>&1
+  status=$?
+  set -e
+  expect_code 1 "$status" "an unlabeled bare number must never become reset evidence"
+  pass "real gh rate-limit evidence records cooldowns without trusting bare numbers"
+}
+
+test_cache_uses_the_same_key_policy_as_cooldowns() {
+  local shared body
+  shared="$TMP_ROOT/shared-cache-key"
+  printf 'MERGED\n' | FM_SHARED_STATE_OVERRIDE="$shared" FM_SHARED_QUOTA_NOW_EPOCH=1000 \
+    FM_SHARED_GITHUB_QUOTA_DERIVE_ACCOUNT=0 \
+    "$QUOTA" cache-put --provider github --route default --key pr-state
+  body=$(FM_SHARED_STATE_OVERRIDE="$shared" FM_SHARED_QUOTA_NOW_EPOCH=1000 \
+    FM_SHARED_GITHUB_QUOTA_DERIVE_ACCOUNT=0 \
+    "$QUOTA" cache-get --provider github --route default --key pr-state --max-age-secs 600)
+  assert_contains "$body" "MERGED" "an unresolvable account must reach its own account-agnostic cache"
+
+  set +e
+  FM_SHARED_STATE_OVERRIDE="$shared" "$QUOTA" cache-get --provider github --route default \
+    --key pr-state --account 'bad value' >/dev/null 2>&1
+  status=$?
+  set -e
+  expect_code 2 "$status" "an explicitly invalid account is still a caller error"
+  pass "cache reads follow the cooldown key policy while rejecting invalid input"
+}
+
+test_cooldown_record_must_match_the_key_it_was_found_under() {
+  local shared file active
+  shared="$TMP_ROOT/shared-key-mismatch"
+  FM_SHARED_STATE_OVERRIDE="$shared" FM_SHARED_QUOTA_NOW_EPOCH=1000 \
+    "$QUOTA" mark --provider github --account "$TEST_ACCOUNT" --route default \
+    --reset-epoch 1799999999 >/dev/null
+  file=$(ls "$shared"/shared-github-quota/cooldowns/*.env)
+  sed 's/^route=default/route=some-other-route/' "$file" > "$file.tmp"
+  mv "$file.tmp" "$file"
+
+  active=$(FM_SHARED_STATE_OVERRIDE="$shared" FM_SHARED_QUOTA_NOW_EPOCH=1000 \
+    "$QUOTA" check --provider github --account "$TEST_ACCOUNT" --route default)
+  assert_contains "$active" "state=allow" "a record whose own identity disagrees must not block this key"
+  assert_contains "$active" "mismatched_record=1" "the mismatch should be reported"
+  [ -f "$file" ] || fail "a mismatched record must be left in place for its real owner"
+  pass "cooldown records are honored only when their own fields match the key"
+}
+
 test_mark_from_text_never_overwrites_remembered_account() {
   local shared out remembered active
   shared="$TMP_ROOT/shared-text-poison"
@@ -288,6 +357,9 @@ test_mark_from_text_records_observed_account_and_reset
 test_mark_from_text_never_overwrites_remembered_account
 test_unresolvable_account_cooldown_is_read_back
 test_reset_without_account_text_still_records_cooldown
+test_live_gh_rate_limit_evidence_records_cooldown
+test_cache_uses_the_same_key_policy_as_cooldowns
+test_cooldown_record_must_match_the_key_it_was_found_under
 test_shared_cooldown_blocks_polling_across_homes
 test_local_status_supervision_continues_during_cooldown
 test_reset_time_is_honored_before_polling_resumes

@@ -93,6 +93,29 @@ test_cooldown_persists_and_expires() {
   pass "cooldown records persist while active and expire at reset_epoch"
 }
 
+test_cooldown_record_must_match_the_route_it_is_found_for() {
+  local state file out status
+  state="$TMP_ROOT/cooldown-key-mismatch/state"
+  mkdir -p "$state"
+
+  FM_STATE_OVERRIDE="$state" FM_CAPACITY_NOW_EPOCH=1000 "$COOLDOWN" mark \
+    --harness codex --profile gpt-5.5/xhigh --account acct-a --reset-epoch 1600 \
+    --class quota --reason codex_usage_limit --source-task task-a >/dev/null
+  file=$(ls "$state"/capacity-cooldowns/*.env)
+  sed 's|^profile=gpt-5.5/xhigh|profile=gpt-5.6/xhigh|' "$file" > "$file.tmp"
+  mv "$file.tmp" "$file"
+
+  set +e
+  out=$(FM_STATE_OVERRIDE="$state" FM_CAPACITY_NOW_EPOCH=1000 "$COOLDOWN" active \
+    --harness codex --profile gpt-5.5/xhigh --account acct-a 2>&1)
+  status=$?
+  set -e
+  expect_code 1 "$status" "a record whose own identity disagrees must not block this route"
+  [ -z "$out" ] || fail "a mismatched record should not be printed as this route's wall: $out"
+  [ -f "$file" ] || fail "a mismatched record must be left in place for its real owner"
+  pass "capacity cooldowns are honored only when their own fields match the route"
+}
+
 test_mark_from_text_never_invents_auth_ttl() {
   local state out status
   state="$TMP_ROOT/no-auth-ttl/state"
@@ -117,6 +140,7 @@ test_classifies_proxy_auth_unavailable
 test_classifies_rate_limit_retry_after
 test_classifies_login_required
 test_cooldown_persists_and_expires
+test_cooldown_record_must_match_the_route_it_is_found_for
 test_mark_from_text_never_invents_auth_ttl
 
 echo "# all fm-capacity tests passed"
