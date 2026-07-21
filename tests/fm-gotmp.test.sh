@@ -105,7 +105,7 @@ test_spawn_contract_and_mkdir_pattern() {
   grep -F 'mkdir -p "$TASK_TMP/gotmp"' "$SPAWN" >/dev/null \
     || fail "fm-spawn missing: mkdir of gotmp under TASK_TMP"
   # shellcheck disable=SC2016  # single quotes are deliberate: literal source string
-  grep -F 'echo "tasktmp=$TASK_TMP"' "$SPAWN" >/dev/null \
+  grep -F '"tasktmp=$TASK_TMP"' "$SPAWN" >/dev/null \
     || fail "fm-spawn missing: tasktmp= line in meta write"
   grep -F 'export GOTMPDIR=' "$SPAWN" >/dev/null \
     || fail "fm-spawn missing: GOTMPDIR export into pane"

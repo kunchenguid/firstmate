@@ -465,6 +465,32 @@ remember_meta_worktree "$ANCHOR_META" >/dev/null
 FIRSTMATE_WSID=$(grep '^herdr_workspace_id=' "$ANCHOR_META" | cut -d= -f2-)
 [ -n "$FIRSTMATE_WSID" ] || fail "anchor metadata did not record the firstmate workspace"
 
+# Herdr 0.7.3 provisions a fresh named session with one focused startup
+# workspace labeled '~'. Remove that exact lab-owned fixture only after the
+# durable firstmate workspace exists, so the ordering assertions start from
+# the documented primary-block plus secondmate shape instead of depending on
+# whether this Herdr version materializes its startup shell.
+STARTUP_LIST=$(lab workspace list) || fail "could not inspect the named lab startup workspace"
+STARTUP_IDS=$(printf '%s' "$STARTUP_LIST" | jq -r --arg firstmate "$FIRSTMATE_WSID" '
+  .result.workspaces[]
+  | select(.workspace_id != $firstmate)
+  | select(.label == "~")
+  | .workspace_id
+')
+OTHER_STARTUP_LABELS=$(printf '%s' "$STARTUP_LIST" | jq -r --arg firstmate "$FIRSTMATE_WSID" '
+  .result.workspaces[]
+  | select(.workspace_id != $firstmate and .label != "~")
+  | .label
+')
+[ -z "$OTHER_STARTUP_LABELS" ] \
+  || fail "fresh named lab contained an unexpected startup workspace: $OTHER_STARTUP_LABELS"
+case "$STARTUP_IDS" in
+  '') ;;
+  *$'\n'*) fail "fresh named lab contained more than one '~' startup workspace" ;;
+  *) lab workspace close "$STARTUP_IDS" >/dev/null \
+    || fail "could not close the exact named-lab '~' startup workspace" ;;
+esac
+
 # The same task id and project run once with the flag absent and once with it
 # present, so Treehouse commands and metadata can be compared directly.
 : > "$TREEHOUSE_CALL_LOG"

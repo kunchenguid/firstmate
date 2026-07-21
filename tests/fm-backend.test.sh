@@ -748,6 +748,7 @@ set -u
 case "\${1:-}" in
   display-message)
     for a in "\$@"; do case "\$a" in *pane_current_path*) printf '%s\\n' "$wt"; exit 0 ;; esac; done
+    for a in "\$@"; do case "\$a" in *pane_current_command*) printf 'claude\\n'; exit 0 ;; esac; done
     printf 'firstmate\\n'; exit 0 ;;
   list-windows) exit 0 ;;
   send-keys)
@@ -824,6 +825,7 @@ case "\${1:-}" in
       fi
       exit 0
     ;; esac; done
+    for a in "\$@"; do case "\$a" in *pane_current_command*) printf 'claude\\n'; exit 0 ;; esac; done
     printf 'firstmate\\n'; exit 0 ;;
   list-windows) exit 0 ;;
   send-keys)
