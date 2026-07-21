@@ -15,7 +15,14 @@ LOCK="$STATE/.lock"
 mkdir -p "$STATE"
 
 # Known harness command names; extend when a new adapter is verified.
-HARNESS_RE='claude|codex|opencode|grok|^pi$'
+# copilot (GitHub Copilot CLI) is recognized for lock/detection only - it is NOT
+# a dispatchable crew/secondmate harness. Verified 2026-07-21 on copilot 1.0.73:
+# its bundled ELF renames the main thread, so `ps -o comm=` reports "MainThread"
+# while `ps -o args=` is exactly "copilot"; recognition therefore rides the args
+# path. The copilot alternative is anchored to a standalone word so unrelated
+# argv such as ".../extensions/copilot --locale" or
+# "@vscode/copilot-typescript-server-plugin" never matches.
+HARNESS_RE='claude|codex|opencode|grok|^pi$|(^| )copilot( |$)'
 
 harness_pid() {
   local pid=$$ comm args
@@ -26,8 +33,9 @@ harness_pid() {
       echo "$pid"; return 0
     fi
     # Bare interpreter (e.g. node): match the harness name in its script path.
+    # MainThread is copilot's comm (see HARNESS_RE note); its args carry the name.
     case "$comm" in
-      *node*|*python*) printf '%s' "$args" | grep -qE "$HARNESS_RE" && { echo "$pid"; return 0; } ;;
+      *node*|*python*|MainThread) printf '%s' "$args" | grep -qE "$HARNESS_RE" && { echo "$pid"; return 0; } ;;
     esac
     pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
     [ -n "$pid" ] && [ "$pid" -gt 1 ] || return 1
