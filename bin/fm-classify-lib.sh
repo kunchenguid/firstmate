@@ -362,11 +362,6 @@ crew_terminal_transition_class() {  # <id>
     esac
     return
   fi
-  if { [ "$src" = pane ] && [ "$state" = working ]; } || \
-     { [ "$src" = status-log ] && [ "$state" = paused ]; }; then
-    printf 'nonterminal'
-    return
-  fi
   printf 'unknown'
 }
 

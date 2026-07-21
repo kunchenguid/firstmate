@@ -277,6 +277,8 @@ test_crew_absorb_class_classifier() {
   [ "$(crew_terminal_transition_class a)" = terminal ] || fail "completed run-step lost terminal identity"
   FM_FAKE_CREW_STATE='state: unknown · source: none · run temporarily unreadable'
   [ "$(crew_terminal_transition_class a)" = unknown ] || fail "unreadable state cleared terminal identity"
+  FM_FAKE_CREW_STATE='state: paused · source: status-log · older sparse pause'
+  [ "$(crew_terminal_transition_class a)" = unknown ] || fail "sparse pause cleared terminal identity"
   FM_FAKE_CREW_STATE='state: working · source: status-log · working: compiling'
   [ "$(crew_absorb_class a)" = none ] || fail "stale working: status-log classed absorbable"
   FM_FAKE_CREW_STATE='state: unknown · source: none · worktree gone'
@@ -770,6 +772,30 @@ test_consumed_working_stale_surfaces_terminal_transition_once() {
   pass "consumed working stale cadence preserves authoritative done and failed transitions exactly once"
 }
 
+test_fresh_pause_cache_revalidates_terminal_run() {
+  local dir state fakebin out capture_file window key pane_hash sig pid
+  dir=$(make_case fresh-pause-cache-terminal); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-fresh-pause-terminal"
+  printf 'idle after completed validation\n' > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=codex\nbackend=tmux\n' "$window" > "$state/fresh.meta"
+  printf 'paused: waiting for an external dependency\n' > "$state/fresh.status"
+  sig=$(seen_sig "$state/fresh.status"); printf '%s' "$sig" > "$state/.seen-fresh_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___'); pane_hash=$(hash_text "idle after completed validation")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"; printf '%s' "$pane_hash" > "$state/.stale-$key"
+  printf 'paused:%s\n' "$pane_hash" > "$state/.stale-class-$key"; printf '1\n' > "$state/.count-$key"
+  : > "$state/.paused-$key"; date +%s > "$state/.paused-rechecked-$key"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=zsh FM_FAKE_CREW_STATE='state: done · source: run-step · checks green' \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=0 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!; wait_for_exit "$pid" 40 || fail "fresh pause cache hid an authoritative terminal run"
+  grep -Fx "stale: $window" "$out" >/dev/null || fail "terminal run behind fresh pause cache did not surface plainly"
+  grep -F "awaiting external" "$out" >/dev/null && fail "terminal run entered pause recheck handling"
+  [ ! -e "$state/.paused-$key" ] || fail "terminal run retained cached pause state"
+  pass "fresh pause cache revalidates and surfaces an authoritative terminal run"
+}
+
 assert_nonpaused_working_surfaces_terminal_transition_once() {  # <label> <crew-state> <captain-relevant-status>
   local label=$1 crew_state=$2 captain_status=$3 dir state fakebin out capture_file window key pane_hash sig pid
   dir=$(make_case "nonpaused-working-to-$label-$captain_status"); state="$dir/state"; fakebin="$dir/fakebin"
@@ -808,7 +834,7 @@ test_nonpaused_working_surfaces_terminal_transitions_once() {
 }
 
 test_terminal_transition_survives_pane_redraw_until_new_run() {
-  local dir state fakebin out capture_file window key first_hash second_hash sig pid wakes i
+  local dir state fakebin out capture_file window key first_hash second_hash sig pid wakes i rechecked
   dir=$(make_case terminal-pane-redraw); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-terminal-redraw"
   printf 'window=%s\nkind=ship\nharness=codex\nbackend=tmux\n' "$window" > "$state/redraw.meta"
@@ -832,10 +858,33 @@ test_terminal_transition_survives_pane_redraw_until_new_run() {
   [ "$wakes" -eq 1 ] || fail "terminal pane redraw emitted $wakes alerts"
   [ "$(cat "$state/.stale-class-$key" 2>/dev/null || true)" = "terminal:$second_hash" ] || fail "redraw was not deduplicated as the same terminal transition"
 
+  touch -t 200001010000 "$state/.terminal-rechecked-$key"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" FM_FAKE_TMUX_CURRENT_COMMAND=codex \
+    FM_FAKE_CREW_STATE='state: paused · source: status-log · older sparse pause' FM_STATE_OVERRIDE="$state" \
+    FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!; wait_live "$pid" 30 || { reap "$pid"; fail "transient run lookup miss repeated the terminal alert"; }; reap "$pid"
+  [ -e "$state/.terminal-transition-$key" ] || fail "transient run lookup miss cleared terminal identity"
+  [ ! -e "$state/.paused-$key" ] || fail "transient run lookup miss routed terminal identity into pause cadence"
+  wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' "$state/.wake-queue")
+  [ "$wakes" -eq 1 ] || fail "transient run lookup miss emitted $wakes terminal alerts"
+
+  rechecked=$(cat "$state/.terminal-rechecked-$key")
   : > "$out"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" FM_FAKE_TMUX_CURRENT_COMMAND=codex \
     FM_FAKE_CREW_STATE='state: working · source: run-step · new validation' FM_STATE_OVERRIDE="$state" \
     FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!; wait_live "$pid" 30 || { reap "$pid"; fail "bounded terminal recheck unexpectedly surfaced"; }; reap "$pid"
+  [ -e "$state/.terminal-transition-$key" ] || fail "terminal identity rechecked before its bounded cadence"
+  [ "$(cat "$state/.terminal-rechecked-$key")" = "$rechecked" ] || fail "terminal identity was queried on every watcher poll"
+
+  touch -t 200001010000 "$state/.terminal-rechecked-$key"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" FM_FAKE_TMUX_CURRENT_COMMAND=codex \
+    FM_FAKE_CREW_STATE='state: working · source: run-step · new validation' FM_STATE_OVERRIDE="$state" \
+    FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
   i=0
@@ -1502,6 +1551,7 @@ test_nonterminal_stale_paused_absorbed_then_resurfaced
 test_completed_run_overrides_paused_status_without_repeated_stale
 test_tracked_paused_stale_surfaces_terminal_transition_once
 test_consumed_working_stale_surfaces_terminal_transition_once
+test_fresh_pause_cache_revalidates_terminal_run
 test_nonpaused_working_surfaces_terminal_transitions_once
 test_terminal_transition_survives_pane_redraw_until_new_run
 test_exited_declared_pause_is_bounded_but_live_gate_surfaces

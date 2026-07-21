@@ -135,6 +135,7 @@ BUSY_REGEX=${FM_BUSY_REGEX:-'esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel'}
 # daemon owns triage, so this watcher reverts to one-shot (enqueue + exit on every
 # wake) and never double-triages - and never runs the costly provably-working read.
 STALE_ESCALATE_SECS=${FM_STALE_ESCALATE_SECS:-240}  # idle secs before a provably-working stale escalates as a possible wedge
+TERMINAL_RECHECK_SECS=$STALE_ESCALATE_SECS
 # A crew that declared a pause is idling on a known external wait, so its stale
 # pane is absorbed rather than wedge-escalated.
 # A captain-held or paused crew whose agent has confidently exited uses the same
@@ -323,13 +324,17 @@ terminal_transition_is_surfaced() {  # <window>
   [ -e "$STATE/.terminal-transition-$key" ]
 }
 
-refresh_terminal_transition() {  # <window> <task>
-  local win=$1 task=$2 key
+refresh_terminal_transition() {  # <window> <task> <force>
+  local win=$1 task=$2 force=$3 key recheck_file class
   key=$(printf '%s' "$win" | tr ':/.' '___')
   [ -e "$STATE/.terminal-transition-$key" ] || return 0
-  if [ "$(crew_terminal_transition_class "$task")" = nonterminal ]; then
+  recheck_file="$STATE/.terminal-rechecked-$key"
+  [ "$force" = 1 ] || [ "$(age_of "$recheck_file")" -ge "$TERMINAL_RECHECK_SECS" ] || return 0
+  class=$(crew_terminal_transition_class "$task")
+  date +%s > "$recheck_file"
+  if [ "$class" = nonterminal ]; then
     rm -f "$STATE/.terminal-transition-$key" "$STATE/.stale-$key" "$STATE/.stale-class-$key" \
-      "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
+      "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key" "$recheck_file"
   fi
 }
 
@@ -393,12 +398,22 @@ pause_state_class() {  # <window> <task>
   key=${key//./_}
   last=$(last_status_line "$STATE/$task.status")
   recheck_file="$STATE/.paused-rechecked-$key"
+  if terminal_transition_is_surfaced "$win"; then
+    printf 'terminal'
+    return
+  fi
   if ! status_is_paused_or_captain_held "$last"; then
     rm -f "$recheck_file"
     crew_absorb_class "$task"
     return
   fi
   if [ -e "$STATE/.paused-$key" ] && [ "$(age_of "$recheck_file")" -lt "$STALE_ESCALATE_SECS" ]; then
+    class=$(crew_absorb_class "$task")
+    if [ "$class" = working ] || [ "$class" = terminal ]; then
+      rm -f "$recheck_file"
+      printf '%s' "$class"
+      return
+    fi
     if [ "$(window_kind "$win")" != secondmate ]; then
       agent_alive=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null) || agent_alive=unknown
       if [ "$agent_alive" != dead ]; then
@@ -438,6 +453,7 @@ surface_terminal_stale() {  # <window> <hash>
   if ! terminal_transition_is_surfaced "$win"; then
     fm_wake_append stale "$win" "stale: $win" || exit 1
     : > "$STATE/.terminal-transition-$key"
+    date +%s > "$STATE/.terminal-rechecked-$key"
     surfaced=1
   fi
   printf '%s' "$h" > "$STATE/.stale-$key"
@@ -931,9 +947,6 @@ EOF
       continue
     fi
     tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null) || continue
-    if ! afk_present && [ "$kind" != secondmate ]; then
-      refresh_terminal_transition "$w" "$task"
-    fi
     h=$(printf '%s' "$tail40" | hash_pane)
     key=$(printf '%s' "$w" | tr ':/.' '___')
     hf="$STATE/.hash-$key"
@@ -944,6 +957,11 @@ EOF
     ewf="$STATE/.wedge-escalations-$key"
     pf="$STATE/.paused-$key"   # flag: this key's stale is using the bounded pause cadence
     prev=$(cat "$hf" 2>/dev/null || true)
+    if ! afk_present && [ "$kind" != secondmate ]; then
+      terminal_refresh_force=0
+      [ "$h" = "$prev" ] || terminal_refresh_force=1
+      refresh_terminal_transition "$w" "$task" "$terminal_refresh_force"
+    fi
     if [ "$h" = "$prev" ]; then
       n=$(( $(cat "$cf" 2>/dev/null || echo 0) + 1 ))
       echo "$n" > "$cf"
@@ -966,6 +984,8 @@ EOF
             printf '%s' "$h" > "$sf"
             wake "stale: $w"
           fi
+        elif terminal_transition_is_surfaced "$w"; then
+          surface_terminal_stale "$w" "$h"
         elif stale_is_terminal "$w" "$STATE"; then
           # The log's last line is captain-relevant - but that alone is not
           # proof the crew is actually done: a crew's own status log gets no
