@@ -88,7 +88,7 @@ Every reader treats `now >= until` as expired and unlinks the file opportunistic
 | `Fast mode disabled · usage credits exhausted` | `credits-exhausted` | none; default interval |
 | `quota exceeded`, `insufficient quota` | `quota-exceeded` | parsed when present |
 
-A reset time is parsed in the timezone the message names, in either 12-hour (`2:20pm`) or 24-hour (`14:20`) form, and rolls to tomorrow when that time has already passed today.
+A reset time is parsed in the timezone the message names (local time when it names none), in either 12-hour (`2:20pm`) or 24-hour (`14:20`) form, and rolls to tomorrow when that time has already passed today.
 Two guards keep a bad parse from doing damage: a reset that resolves to the past or is absent falls back to `cooldown_default_seconds`, and every cooldown is clamped to `FM_POOL_MAX_COOLDOWN_SECONDS` (default 24 hours).
 
 ## Failover for a task already under way
@@ -96,6 +96,7 @@ Two guards keep a bad parse from doing damage: a reset that resolves to the past
 `bin/fm-pool-failover.sh <task-id>` moves a running task to a different account after its current one wedges.
 
 It follows the established recovery convention: committed work stays on the task's branch, a RESUME NOTE is appended to `data/<id>/brief.md` naming the branch and tip commit, and the task is respawned on a healthy account.
+The replacement is preferably an account on the task's own harness; when none is healthy the search widens to every harness, and a cross-harness move drops the recorded model and effort so the new harness runs on its own defaults instead of a foreign model id.
 
 **It refuses to run when the worktree has uncommitted changes.**
 A respawn abandons the old worktree, so uncommitted work would be lost, and that is exactly how work was lost the day this was built.
@@ -117,5 +118,5 @@ Putting that account into cooldown stops new spawns from being sent to it; it do
 ## Verification
 
 `tests/fm-pool.test.sh` covers rotation, cooldown skipping, self-expiry, limit parsing, key-file health, and the all-cooling refusal.
-`tests/fm-pool-failover.test.sh` covers the dirty-worktree refusal, the clean-worktree path, and the RESUME NOTE.
+`tests/fm-pool-failover.test.sh` covers the dirty-worktree refusal (including work appearing during the old agent's shutdown), the clean-worktree path, the RESUME NOTE, and same-harness-first replacement selection with the cross-harness model/effort drop.
 `tests/fm-spawn-pool.test.sh` covers `--pool` metadata, the pooled launch prefix, secret non-disclosure, and the byte-identical unpooled path.
