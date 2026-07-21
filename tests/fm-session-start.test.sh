@@ -166,6 +166,20 @@ SH
   chmod +x "$fakebin/ps"
 }
 
+make_fake_ps_parent_denied() {
+  local fakebin=$1
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *"comm="*) printf '%s\n' '/bin/zsh'; exit 0 ;;
+  *"args="*) printf '%s\n' 'zsh'; exit 0 ;;
+  *"ppid="*) printf '%s\n' 'ps: operation not permitted' >&2; exit 1 ;;
+esac
+exit 1
+SH
+  chmod +x "$fakebin/ps"
+}
+
 test_codex_thread_lock_survives_denied_process_inspection() {
   local rec root home fakebin out
   rec=$(new_world codex-thread-lock)
@@ -183,6 +197,22 @@ EOF
   assert_contains "$out" "lock: held by current Codex session" "Codex session lock was not recognized without ps"
 
   pass "Codex thread session lock works when process inspection is denied"
+}
+
+test_codex_thread_lock_survives_denied_parent_lookup() {
+  local rec root home fakebin out
+  rec=$(new_world codex-thread-parent-denied)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_ps_parent_denied "$fakebin"
+
+  out=$(CODEX_THREAD_ID=thread-under-test FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$fakebin:$BASE_PATH" "$SESSION_START")
+  assert_contains "$out" "lock acquired: Codex session" "Codex session did not acquire a lock when parent lookup was denied"
+  assert_not_contains "$out" "READ-ONLY SESSION" "Codex session was incorrectly downgraded to read-only when parent lookup was denied"
+  assert_contains "$(cat "$home/state/.lock")" "codex-thread:thread-under-test" "Codex lock did not store its stable session owner"
+
+  pass "Codex thread session lock works when parent lookup is denied"
 }
 
 test_foreign_codex_thread_lock_is_not_overwritten() {
@@ -968,6 +998,7 @@ EOF
 
 test_context_digest_absent_empty_present
 test_codex_thread_lock_survives_denied_process_inspection
+test_codex_thread_lock_survives_denied_parent_lookup
 test_foreign_codex_thread_lock_is_not_overwritten
 test_live_pid_lock_is_not_overwritten_when_process_inspection_is_denied
 test_lock_refusal_read_only_path

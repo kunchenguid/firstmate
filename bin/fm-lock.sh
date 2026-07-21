@@ -32,7 +32,7 @@ harness_pid() {
       *node*|*python*) printf '%s' "$args" | grep -qE "$HARNESS_RE" && { echo "$pid"; return 0; } ;;
     esac
     pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
-    [ -n "$pid" ] && [ "$pid" -gt 1 ] || return 1
+    [ -n "$pid" ] && [ "$pid" -gt 1 ] || break
   done
   # Codex exposes this stable session identifier to every tool call. Prefer
   # process ancestry whenever it is readable, but do not make Firstmate's
