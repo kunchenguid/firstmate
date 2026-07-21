@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
 # secondmate in its isolated firstmate home.
-# Usage: fm-spawn.sh <task-id> <project-dir> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--scout]
+# Usage: fm-spawn.sh <task-id> <project-dir> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--pool|--pool-backend <id>] [--scout]
 #        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
 #   --harness <name> is the explicit per-spawn harness/profile adapter. The old
 #   positional harness arg still works for back-compat.
@@ -9,6 +9,21 @@
 #   axes chosen by firstmate at intake. They are only threaded into harnesses whose
 #   installed CLIs were verified to support that axis; unsupported axes are omitted
 #   from that harness's launch rather than guessed.
+#   --pool routes this spawn through the multi-account dispatch pool
+#   (bin/fm-pool.sh): it picks the next healthy ACCOUNT by equal round-robin,
+#   applies that account's env for this launch only, and records
+#   `pool_backend=<id>` in state/<id>.meta so supervision knows which account the
+#   task is on. --pool-backend <id> pins one named account instead of rotating
+#   (used by bin/fm-pool-failover.sh) and implies --pool.
+#   The pool is a DIFFERENT axis from --backend: --backend selects the runtime
+#   session provider (tmux/herdr/...) and is recorded as `backend=`, while the
+#   pool selects which agent account the harness authenticates as and is recorded
+#   as `pool_backend=`. The two keys are deliberately distinct - `backend=` is
+#   already the runtime-backend contract every reader parses
+#   (fm_backend_of_meta), so an account id must never be written there.
+#   With config/dispatch-pool.json absent the pool is inert: --pool warns once and
+#   the spawn proceeds byte-for-byte as it would without the flag. Without --pool
+#   at all, nothing on this path changes.
 #   --backend <name> is the explicit runtime session-provider backend for this
 #   exact task only (docs/configuration.md "Runtime backend" owns when that flag
 #   is authorized). Without it, the script resolves FM_BACKEND, then
@@ -118,7 +133,8 @@
 # a firstmate-owned global hook and registry, and a gitignored per-task pointer.
 # grok uses a firstmate-owned global hook under ${GROK_HOME:-$HOME/.grok}/hooks
 # plus a gitignored .fm-grok-turnend worktree pointer and a state token.
-# On success prints: spawned <id> harness=<name> kind=<ship|scout|secondmate> mode=<mode> yolo=<on|off> window=<backend-target> worktree=<path>
+# On success prints: spawned <id> harness=<name> kind=<ship|scout|secondmate> mode=<mode> yolo=<on|off> [pool_backend=<account>] window=<backend-target> worktree=<path>
+# pool_backend= appears only for a --pool spawn, so unpooled output is unchanged.
 # mode/yolo are resolved per-project from data/projects.md for ship/scout tasks;
 # secondmate spawns record mode=secondmate, yolo=off, home=, and projects=.
 set -eu
@@ -192,6 +208,8 @@ HARNESS_SET=0
 MODEL_SET=0
 EFFORT_SET=0
 BACKEND_SET=0
+POOL=0
+POOL_BACKEND_ARG=
 POS=()
 want_value=
 for a in "$@"; do
@@ -204,6 +222,7 @@ for a in "$@"; do
       model) MODEL=$a; MODEL_SET=1 ;;
       effort) EFFORT=$a; EFFORT_SET=1 ;;
       backend) BACKEND_ARG=$a; BACKEND_SET=1 ;;
+      pool-backend) POOL_BACKEND_ARG=$a; POOL=1 ;;
       *) echo "error: internal parser state for --$want_value" >&2; exit 1 ;;
     esac
     want_value=
@@ -220,6 +239,9 @@ for a in "$@"; do
     --effort=*) EFFORT=${a#--effort=}; EFFORT_SET=1 ;;
     --backend) want_value=backend ;;
     --backend=*) BACKEND_ARG=${a#--backend=}; BACKEND_SET=1 ;;
+    --pool) POOL=1 ;;
+    --pool-backend) want_value=pool-backend ;;
+    --pool-backend=*) POOL_BACKEND_ARG=${a#--pool-backend=}; POOL=1 ;;
     *) POS+=("$a") ;;
   esac
 done
@@ -228,6 +250,7 @@ done
 [ "$MODEL_SET" -eq 0 ] || [ -n "$MODEL" ] || { echo "error: --model requires a non-empty value" >&2; exit 1; }
 [ "$EFFORT_SET" -eq 0 ] || [ -n "$EFFORT" ] || { echo "error: --effort requires a non-empty value" >&2; exit 1; }
 [ "$BACKEND_SET" -eq 0 ] || [ -n "$BACKEND_ARG" ] || { echo "error: --backend requires a non-empty value" >&2; exit 1; }
+[ "$POOL" -eq 0 ] || [ "$KIND" != secondmate ] || { echo "error: --pool does not apply to --secondmate spawns; a secondmate's account is pinned by its own home configuration" >&2; exit 1; }
 case "$EFFORT" in
   ''|low|medium|high|xhigh|max) ;;
   *) echo "error: --effort must be one of low, medium, high, xhigh, max" >&2; exit 1 ;;
@@ -384,7 +407,9 @@ spawn_herdr_presentation_order_lock_release() {
 idpart=${POS[0]:-}
 idpart=${idpart%%=*}
 if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in */*) false ;; *) true ;; esac; then
-  if [ "$KIND" != secondmate ] && [ -z "$HARNESS_ARG" ] && [ -f "$CONFIG/crew-dispatch.json" ]; then
+  # --pool is itself an explicit per-spawn resolution (the pool supplies the
+  # concrete harness), so it satisfies the dispatch-consultation backstop.
+  if [ "$KIND" != secondmate ] && [ -z "$HARNESS_ARG" ] && [ "$POOL" -eq 0 ] && [ -f "$CONFIG/crew-dispatch.json" ]; then
     echo "error: config/crew-dispatch.json is active - pass an explicit harness resolved from the dispatch rules (the consultation backstop, so the rules are never silently skipped)." >&2
     exit 1
   fi
@@ -394,6 +419,13 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
   [ -z "$MODEL" ] || shared_args+=(--model "$MODEL")
   [ -z "$EFFORT" ] || shared_args+=(--effort "$EFFORT")
   [ -z "$BACKEND_ARG" ] || shared_args+=(--backend "$BACKEND_ARG")
+  # Pass --pool down rather than resolving here: each pair must take its OWN
+  # rotation slot, which is the whole point of spreading a batch across accounts.
+  if [ -n "$POOL_BACKEND_ARG" ]; then
+    shared_args+=(--pool-backend "$POOL_BACKEND_ARG")
+  elif [ "$POOL" -eq 1 ]; then
+    shared_args+=(--pool)
+  fi
   for pair in "${POS[@]}"; do
     case "$pair" in
       *=*) : ;;
@@ -419,6 +451,77 @@ if ! fm_lock_try_acquire "$SPAWN_TASK_LOCK"; then
   exit 1
 fi
 SPAWN_TASK_LOCK_HELD=1
+
+# --- multi-account dispatch pool (bin/fm-pool.sh) ---------------------------
+#
+# Resolve WHICH ACCOUNT this spawn launches on, before the harness is resolved,
+# because the chosen account declares its own harness. The pool never touches a
+# running agent and never logs anything out: it only contributes env for this one
+# launch. With no config/dispatch-pool.json the selector exits 3 and this whole
+# block degrades to a single warning, leaving the spawn identical to an unpooled
+# one - that is the backward-compatibility contract.
+POOL_BACKEND=
+POOL_ENV_ASSIGNMENTS=()
+POOL_KEY_ENV=
+POOL_KEY_FILE=
+if [ "$POOL" -eq 1 ]; then
+  pool_args=()
+  if [ -n "$POOL_BACKEND_ARG" ]; then
+    pool_args=(resolve "$POOL_BACKEND_ARG")
+  else
+    pool_args=(select)
+    # An explicit --harness narrows rotation to accounts of that harness, so a
+    # captain's per-task harness override still wins over the pool's own spread.
+    [ -z "$HARNESS_ARG" ] || pool_args+=(--harness "$HARNESS_ARG")
+  fi
+  set +e
+  pool_out=$("$FM_ROOT/bin/fm-pool.sh" "${pool_args[@]}")
+  pool_status=$?
+  set -e
+  case "$pool_status" in
+    0) ;;
+    3)
+      echo "warning: --pool requested but no dispatch pool is configured; spawning exactly as an unpooled task" >&2
+      POOL=0
+      ;;
+    *)
+      echo "error: dispatch pool could not supply a healthy account for $ID (fm-pool.sh exited $pool_status); refusing to launch on an exhausted account" >&2
+      exit 1
+      ;;
+  esac
+  if [ "$POOL" -eq 1 ]; then
+    pool_model=
+    pool_effort=
+    while IFS= read -r pool_line; do
+      case "$pool_line" in
+        backend=*) POOL_BACKEND=${pool_line#backend=} ;;
+        harness=*) pool_harness=${pool_line#harness=} ;;
+        model=*) pool_model=${pool_line#model=} ;;
+        effort=*) pool_effort=${pool_line#effort=} ;;
+        env=*) POOL_ENV_ASSIGNMENTS+=("${pool_line#env=}") ;;
+        key_env=*) POOL_KEY_ENV=${pool_line#key_env=} ;;
+        key_file=*) POOL_KEY_FILE=${pool_line#key_file=} ;;
+      esac
+    done <<EOF
+$pool_out
+EOF
+    [ -n "$POOL_BACKEND" ] && [ -n "${pool_harness:-}" ] || {
+      echo "error: dispatch pool returned no usable account for $ID" >&2
+      exit 1
+    }
+    # The account's harness becomes this spawn's harness unless the caller named
+    # one; --model/--effort from the caller still beat the account's defaults.
+    [ "$HARNESS_SET" -eq 1 ] || HARNESS_ARG=$pool_harness
+    if [ "$MODEL_SET" -eq 0 ] && [ -n "$pool_model" ]; then MODEL=$pool_model; fi
+    if [ "$EFFORT_SET" -eq 0 ] && [ -n "$pool_effort" ]; then
+      case "$pool_effort" in
+        low|medium|high|xhigh|max) EFFORT=$pool_effort ;;
+        *) echo "warning: dispatch pool account $POOL_BACKEND pins effort '$pool_effort', which is not one of low, medium, high, xhigh, max; ignoring" >&2 ;;
+      esac
+    fi
+  fi
+fi
+
 PROJ=
 ARG3=
 FIRSTMATE_HOME=
@@ -1619,6 +1722,10 @@ META_WINDOW=$T
   # default path's meta stays byte-identical (absent backend= means tmux;
   # data/fm-backend-design-d7's P1 compatibility contract).
   [ "$BACKEND" = tmux ] || echo "backend=$BACKEND"
+  # pool_backend= is the ACCOUNT, a different axis from backend= (the runtime
+  # session provider). Written only for a pooled spawn, so an unpooled task's
+  # meta stays byte-identical. Never the key, only the account id.
+  [ -z "$POOL_BACKEND" ] || echo "pool_backend=$POOL_BACKEND"
   if [ "$BACKEND" = herdr ]; then
     echo "herdr_session=$HERDR_SES"
     echo "herdr_workspace_id=$HERDR_WORKSPACE_ID"
@@ -1676,6 +1783,22 @@ if [ "$KIND" = secondmate ]; then
   sq_primary_home=$(shell_quote "$FM_HOME")
   LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_PUBLIC_FOLLOWUP_PRIMARY_HOME=$sq_primary_home FM_HOME=$sq_home $LAUNCH"
 fi
+# Dispatch-pool account env, applied as a prefix to THIS launch only - it never
+# touches the captain's shell, any running agent, or any global config.
+if [ "$POOL" -eq 1 ]; then
+  pool_prefix=
+  for pool_assignment in ${POOL_ENV_ASSIGNMENTS[@]+"${POOL_ENV_ASSIGNMENTS[@]}"}; do
+    pool_prefix="$pool_prefix${pool_assignment%%=*}=$(shell_quote "${pool_assignment#*=}") "
+  done
+  if [ -n "$POOL_KEY_ENV" ]; then
+    # The key's PATH goes on the command line; the key's VALUE is read by the
+    # pane's own shell at launch. So the secret never appears in this script's
+    # arguments, in the pane text firstmate captures, in state/<id>.meta, or in
+    # any error message - only in the launched process's own environment.
+    pool_prefix="$pool_prefix$POOL_KEY_ENV=\"\$(cat $(shell_quote "$POOL_KEY_FILE"))\" "
+  fi
+  LAUNCH="$pool_prefix$LAUNCH"
+fi
 # Export GOTMPDIR into the crewmate's pane shell so the agent and every child
 # process (go build, go test, ...) inherit it. Sent before the launch command so
 # the env is set when the agent starts; the brief sleep lets the export land.
@@ -1722,4 +1845,6 @@ if [ "$KIND" = secondmate ]; then
   fi
 fi
 
-echo "spawned $ID harness=$HARNESS kind=$KIND mode=$MODE yolo=$YOLO window=$META_WINDOW worktree=$WT"
+SPAWNED_POOL=
+[ -z "$POOL_BACKEND" ] || SPAWNED_POOL=" pool_backend=$POOL_BACKEND"
+echo "spawned $ID harness=$HARNESS kind=$KIND mode=$MODE yolo=$YOLO$SPAWNED_POOL window=$META_WINDOW worktree=$WT"

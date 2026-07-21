@@ -9,3 +9,5 @@ __pycache__/
 *.pyc
 .env
 config/
+# Credential material anywhere in the tree, wherever a key file lands.
+*.key
