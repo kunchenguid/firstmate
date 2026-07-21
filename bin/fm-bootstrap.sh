@@ -26,7 +26,11 @@
 #          applied. A successful send prints one BOOTSTRAP_INFO line with the
 #          exact target and message sent; a failed send leaves an idempotent
 #          retry marker under state/.secondmate-nudge-pending/ and prints an
-#          actionable NUDGE_SECONDMATES line.
+#          actionable NUDGE_SECONDMATES line. If that validated home later
+#          safely advances to the primary's exact current instruction head, the
+#          retry supersedes the obsolete marker only by sending the same bound
+#          reread message against that proven descendant; every ambiguous or
+#          failed transition keeps a marker.
 #          Already-current or no-instruction-change homes are silently left alone.
 #          The secondmate sweep also propagates declared inherited local material
 #          into each validated live secondmate home.
@@ -238,6 +242,21 @@ secondmate_sync() {
     mv -f "$tmp" "$marker" || { rm -f "$tmp"; return 1; }
   }
 
+  secondmate_nudge_instructions_valid() {
+    case "$1" in
+      AGENTS.md|bin|.agents/skills|\
+        'AGENTS.md, bin'|'AGENTS.md, .agents/skills'|'bin, .agents/skills'|\
+        'AGENTS.md, bin, .agents/skills') return 0 ;;
+    esac
+    return 1
+  }
+
+  secondmate_nudge_worktree_clean() {
+    local status
+    status=$(git -C "$1" status --porcelain 2>/dev/null) || return 1
+    [ -z "$(printf '%s\n' "$status" | awk -v marker="?? $SUB_HOME_MARKER" '$0 != marker { print; exit }')" ]
+  }
+
   secondmate_send_nudge() {
     local id=$1 home=$2 commit=$3 instr=$4 selector marker out
     selector="fm-$id"
@@ -263,7 +282,7 @@ secondmate_sync() {
   }
 
   secondmate_retry_pending_nudges() {
-    local marker id selector home commit message expected_marker meta meta_home home_real head
+    local marker id selector home commit instructions message expected_marker meta meta_home home_real head recorded_commit current_primary_head
     [ -d "$SECOND_MATE_NUDGE_PENDING_DIR" ] || return 0
     for marker in "$SECOND_MATE_NUDGE_PENDING_DIR"/*.pending; do
       [ -f "$marker" ] || continue
@@ -279,6 +298,7 @@ secondmate_sync() {
       selector=$(fm_meta_get "$marker" selector)
       home=$(fm_meta_get "$marker" home)
       commit=$(fm_meta_get "$marker" commit)
+      instructions=$(fm_meta_get "$marker" instructions)
       message=$(fm_meta_get "$marker" message)
       [ "$selector" = "fm-$id" ] || {
         echo "NUDGE_SECONDMATES: secondmate ${id:-unknown}: send failed: retry marker selector mismatch"
@@ -286,6 +306,10 @@ secondmate_sync() {
       }
       [ "$message" = "$SECOND_MATE_NUDGE_MESSAGE" ] || {
         echo "NUDGE_SECONDMATES: secondmate ${id:-unknown}: send failed: retry marker message mismatch"
+        continue
+      }
+      secondmate_nudge_instructions_valid "$instructions" || {
+        echo "NUDGE_SECONDMATES: secondmate ${id:-unknown}: send failed: retry marker instructions mismatch"
         continue
       }
       meta="$STATE/$id.meta"
@@ -304,11 +328,33 @@ secondmate_sync() {
         echo "NUDGE_SECONDMATES: secondmate $id: send failed: retry target home changed"
         continue
       }
-      head=$(git -C "$home_real" rev-parse HEAD 2>/dev/null || true)
-      [ -n "$head" ] && [ "$head" = "$commit" ] || {
-        echo "NUDGE_SECONDMATES: secondmate $id: send failed: retry target is not at recorded instruction commit"
+      head=$(git -C "$home_real" rev-parse --verify 'HEAD^{commit}' 2>/dev/null || true)
+      recorded_commit=$(git -C "$home_real" rev-parse --verify --quiet "$commit^{commit}" 2>/dev/null || true)
+      [ -n "$recorded_commit" ] && [ "$recorded_commit" = "$commit" ] || {
+        echo "NUDGE_SECONDMATES: secondmate $id: send failed: retry marker recorded commit is invalid"
         continue
       }
+      secondmate_nudge_worktree_clean "$home_real" || {
+        echo "NUDGE_SECONDMATES: secondmate $id: send failed: retry target has ambiguous working tree state"
+        continue
+      }
+      if [ "$head" != "$commit" ]; then
+        [ -n "$head" ] && [ "$head" = "$primary_head" ] || {
+          echo "NUDGE_SECONDMATES: secondmate $id: send failed: retry target current instruction head is unproven"
+          continue
+        }
+        git -C "$home_real" merge-base --is-ancestor "$commit" "$head" 2>/dev/null || {
+          echo "NUDGE_SECONDMATES: secondmate $id: send failed: retry target did not safely advance from recorded instruction commit"
+          continue
+        }
+        current_primary_head=$(primary_head_commit "$FM_ROOT" 2>/dev/null || true)
+        [ -n "$current_primary_head" ] && [ "$current_primary_head" = "$head" ] || {
+          echo "NUDGE_SECONDMATES: secondmate $id: send failed: primary instruction head changed during retry"
+          continue
+        }
+        secondmate_send_nudge "$id" "$home_real" "$head" "$instructions"
+        continue
+      fi
       if out=$(FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-send.sh" "$selector" "$SECOND_MATE_NUDGE_MESSAGE" 2>&1); then
         rm -f "$marker"
         echo "BOOTSTRAP_INFO: nudged $selector with '$SECOND_MATE_NUDGE_MESSAGE'"

@@ -517,6 +517,73 @@ test_bootstrap_nudge_retry_is_idempotent() {
   pass "T8d bootstrap nudge retry is idempotent after success"
 }
 
+test_bootstrap_nudge_retry_supersedes_safely_advanced_commit() {
+  local w c1 c2 current fakebin out marker out2
+  w=$(new_world nudge-retry-advanced)
+  c1=$(head_of "$w/main")
+  add_sm_worktree "$w" sm-instr "$c1"
+  bump_primary "$w" instr
+  c2=$(head_of "$w/main")
+  fakebin=$(make_fake_toolchain "$w")
+
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
+    FM_SEND_SETTLE=0 FM_FAKE_TMUX_FAIL_LITERAL=1 \
+    "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
+  assert_contains "$out" "NUDGE_SECONDMATES: secondmate sm-instr: send failed:" \
+    "precondition: old-commit reread nudge should fail"
+  marker="$w/home/state/.secondmate-nudge-pending/sm-instr.pending"
+  assert_present "$marker" "failed old-commit nudge should leave a retry marker"
+  assert_grep "commit=$c2" "$marker" "retry marker should pin the failed instruction commit"
+
+  bump_primary "$w" instr
+  current=$(head_of "$w/main")
+  git -C "$w/sm-instr" merge --ff-only "$current" >/dev/null
+
+  sed -i.bak 's/^message=.*/message=wrong reread request/' "$marker" 2>/dev/null || \
+    sed -i 's/^message=.*/message=wrong reread request/' "$marker"
+  rm -f "$marker.bak"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
+    FM_SEND_SETTLE=0 "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
+  assert_contains "$out" "retry marker message mismatch" \
+    "advanced retry should reject a message mismatch"
+  assert_present "$marker" "message mismatch should retain the marker"
+
+  sed -i.bak \
+    's/^message=.*/message=firstmate was updated to the latest - please re-read your AGENTS.md to pick up the new instructions./' \
+    "$marker" 2>/dev/null || sed -i \
+    's/^message=.*/message=firstmate was updated to the latest - please re-read your AGENTS.md to pick up the new instructions./' \
+    "$marker"
+  rm -f "$marker.bak"
+  printf 'ambiguous local instruction edit\n' >> "$w/sm-instr/AGENTS.md"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
+    FM_SEND_SETTLE=0 "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
+  assert_contains "$out" "retry target has ambiguous working tree state" \
+    "advanced retry should reject a dirty current instruction surface"
+  assert_present "$marker" "ambiguous working tree should retain the marker"
+  git -C "$w/sm-instr" checkout -- AGENTS.md
+
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
+    FM_SEND_SETTLE=0 FM_FAKE_TMUX_FAIL_LITERAL=1 \
+    "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
+  assert_contains "$out" "NUDGE_SECONDMATES: secondmate sm-instr: send failed:" \
+    "failed advanced retry should remain actionable"
+  assert_grep "commit=$current" "$marker" \
+    "failed advanced retry should retain a superseding current-head marker"
+
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
+    FM_SEND_SETTLE=0 "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
+  assert_contains "$out" "BOOTSTRAP_INFO: nudged fm-sm-instr with" \
+    "current-head marker should use the proven normal retry path"
+  assert_absent "$marker" "successful normal retry should consume the superseding marker"
+  assert_not_contains "$out" "retry target is not at recorded instruction commit" \
+    "safe advance should supersede the obsolete recorded-commit diagnostic"
+
+  out2=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
+    FM_SEND_SETTLE=0 "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
+  [ -z "$out2" ] || fail "superseded advanced retry should stay silent next startup, got: $out2"
+  pass "T8g bootstrap nudge retry safely supersedes or retains an advanced marker"
+}
+
 test_bootstrap_nudge_retry_refuses_changed_home() {
   local w c1 fakebin marker out other
   w=$(new_world nudge-retry-home-change)
@@ -853,6 +920,7 @@ test_bootstrap_nudge_send_uses_state_override
 test_bootstrap_nudge_retry_rejects_malformed_marker_id
 test_bootstrap_nudge_failure_records_retry_marker
 test_bootstrap_nudge_retry_is_idempotent
+test_bootstrap_nudge_retry_supersedes_safely_advanced_commit
 test_bootstrap_nudge_retry_refuses_changed_home
 test_nudge_retry_uses_fresh_herdr_endpoint_after_respawn
 test_bootstrap_sweep_surfaces_skipped_home
