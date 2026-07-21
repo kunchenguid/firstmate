@@ -373,25 +373,25 @@ This confirms the same hazard tmux already mitigates: submitting immediately aft
 
 ## Incident (2026-07-03): a slash command left fully typed but unsubmitted, silently
 
-Two grok/herdr crewmates were each sent `/no-mistakes` via `fm-send.sh`.
+Two herdr crewmates were each sent `/no-mistakes` via `fm-send.sh`.
 In both panes the command sat fully typed in the composer, unsubmitted (footer still read `Enter:send`), for minutes, until a manual `FM_HOME=<home> fm-send.sh <target> --key Enter` landed it instantly.
 `fm-send.sh` had exited 0 both times - no failure surfaced to the caller.
 
-Root cause, reproduced live against real grok 0.2.82 on an isolated herdr session: the send-text-submit verification at the time used the old delta-based strategy and declared success whenever the captured pane content changed AT ALL between before and after an Enter.
+Root cause, reproduced live on an isolated herdr session: the send-text-submit verification at the time used the old delta-based strategy and declared success whenever the captured pane content changed AT ALL between before and after an Enter.
 For an argument-taking slash command, the FIRST Enter does not submit - it closes the completion popup and, for a command like `/compact [context]`, EXPANDS the composer text into an argument-hint placeholder (`/compact` -> `/compact compaction instructions`).
 The popup disappearing and the composer text changing is a real, visible content change, so the old delta check declared "submitted" after exactly one Enter, even though the composer still held real, unsubmitted text and the footer still read `Enter:send`.
 A genuine second Enter was required to actually submit - exactly the manual recovery that worked both times in the incident.
 Plain (non-argument) commands like `/new` did submit on the first Enter in the same live test, so the false-positive was specific to commands whose popup selection fills an argument placeholder rather than submitting outright - `/no-mistakes` (optional task-first argument) is exactly that shape.
 
-The tmux backend was NOT affected by this incident: `fm_tmux_composer_state` reads the actual cursor row and classifies it as pending whenever real text remains, so its retry loop correctly issued the second Enter and landed the same live repro; this was confirmed side-by-side against the same real grok pane.
+The tmux backend was NOT affected by this incident: `fm_tmux_composer_state` reads the actual cursor row and classifies it as pending whenever real text remains, so its retry loop correctly issued the second Enter and landed the same live repro; this was confirmed side-by-side against the same live pane.
 
 **Fix:** `fm_backend_herdr_composer_state` replaced the delta-based check with a structural read of the composer's OWN row, mirroring what the cursor-row read gives tmux.
 Herdr's CLI exposes no cursor-row primitive, so the composer row is located by shape instead of position.
 For bordered composers, the row is the only line in a generous tail capture whose trimmed content both starts and ends with the same border glyph (`│`, `┃`, or a plain `|`) - the box's own top/bottom rows use rounded corners and never match, popup item rows and separator rows carry no border glyph at all, and the footer help line uses `│` only as an interior separator (never as the first/last character), so none of those can be mistaken for the composer.
-For unbordered live composers, added after the 2026-07-07 incident below, the row is a bottom-most trimmed line starting with a verified agent prompt glyph (`❯` for claude or `›` for codex); decorative bordered boxes above it lose to that bottom-most match.
+For unbordered live composers, added after the 2026-07-07 incident below, the row is a bottom-most trimmed line starting with a verified agent prompt glyph (e.g. claude's `❯`); decorative bordered boxes above it lose to that bottom-most match.
 For Pi, added after the 2026-07-14 incident above, the candidate is the content between the bottom-most complete separator pair, admitted only when native Herdr identity reports exactly `pi` with status `idle`, `done`, or `blocked` and the bounded structure is unambiguous.
 A popup-close-with-placeholder-fill still reads as real content on that row, so composer fallback correctly classifies it as pending; on the normal idle-baseline path, the same first Enter also fails to start a turn, so native agent-state confirmation likewise retries instead of stopping early.
-Known ghost/placeholder composer text (`Type a message...`, verified grok 0.2.82's empty-composer hint) is recognized and still reads as empty.
+Known ghost/placeholder composer text (an empty-composer hint such as `Type a message...`) is recognized and still reads as empty.
 When ANSI capture is available, the shared `fm_composer_strip_ghost` extractor removes de-emphasised ghost/placeholder runs before classification while retaining real typed input.
 The full dim/faint and dark-TRUECOLOR contract is recorded in the 2026-07-10 incident below.
 `FM_BACKEND_HERDR_IDLE_RE` extends that placeholder match, `FM_BACKEND_HERDR_BARE_PROMPT_RE` controls the recognized unbordered prompt glyphs, `FM_BACKEND_HERDR_COMPOSER_LINES` controls the tail-window scan depth, and `FM_BACKEND_HERDR_PI_COMPOSER_MAX_LINES` bounds a Pi separator candidate; all four are documented in [`docs/configuration.md`](configuration.md).
@@ -533,7 +533,7 @@ This fix is backend-plumbing, not daemon-specific: it also corrects the same liv
 The "supervisor pane" is a tiny deterministic bash loop, not a real harness binary, that draws a bordered composer row to exercise the bordered branch of `fm_backend_herdr_composer_state`.
 Because submit confirmation now uses native agent-state on idle baselines, the fixture also registers itself as a herdr agent via `herdr pane report-agent` and reports an idle->working->idle cycle around each submitted line.
 A thin `herdr` PATH shim swallows exactly one `pane send-keys <pane> enter` call to simulate the swallowed-Enter scenario, since herdr's real CLI has no built-in way to drop a keystroke.
-Real claude/codex unbordered prompt coverage lives in `tests/fm-backend-herdr.test.sh`'s captured-fixture regression tests described in the 2026-07-07 incident below.
+Real claude unbordered prompt coverage lives in `tests/fm-backend-herdr.test.sh`'s captured-fixture regression tests described in the 2026-07-07 incident below.
 
 Building that test surfaced one more real finding worth recording for anyone writing a similar herdr-driven composer script: `tput cols`, called from WITHIN a script launched into a herdr pane via `pane run`/`send-text`, reported a stale/default `80` regardless of the pane's actual width, while an interactively-typed one-off `tput cols` in the same pane correctly reported its real width (54, in the environment this was verified in).
 A composer redraw that trusts `tput cols` for its own line-wrapping math can therefore silently overflow the pane's real width and wrap across two terminal rows - breaking the structural single-row border classifier's assumption (the digest looked "concatenated with itself" because the guard never fired: the composer read `unknown` instead of `pending`, so the busy/composer guard did not defer a second attempt).
@@ -555,109 +555,12 @@ At the time, `fm_backend_herdr_send_text_submit` treated only a composer `empty`
 At the time, the composer-guard deferred only on `pending` (never `unknown`), so the next housekeeping tick's flush attempt retyped and resubmitted the SAME unmodified buffer content - the redelivery loop.
 That guard has since been hardened to require an affirmatively-`empty` composer (see "Composer-emptiness safety" below), so an `unknown` verdict now defers injection instead of proceeding.
 
-Also discovered while reproducing: real `codex` (0.142.x) has the identical unbordered-live-row shape, using `›` instead of claude's `❯`, confirming this is not claude-specific.
-Codex additionally shows dynamic tip/hint text in its idle composer rather than a blank row.
-The first fix deliberately left that as a conservative `pending` verdict at the composer-guard layer because plain text could not distinguish a ghost suggestion from real typed input.
-The 2026-07-08 follow-up below closes that gap using herdr's ANSI capture, which preserves Codex's faint styling for ghost suggestions.
-
-**Fix:** `fm_backend_herdr_composer_state` now recognizes TWO composer-row shapes in one scan - the existing bordered shape, and a new bare (unbordered) shape: a trimmed line that STARTS with a verified agent-specific prompt glyph (`❯` claude or `›` codex) with no closing border required at all.
+**Fix:** `fm_backend_herdr_composer_state` now recognizes TWO composer-row shapes in one scan - the existing bordered shape, and a new bare (unbordered) shape: a trimmed line that STARTS with a verified agent prompt glyph (e.g. claude's `❯`) with no closing border required at all.
 The bare-row default is deliberately limited to `❯` and `›`, while generic shell-style glyphs (`>`, `$`, `%`, `#`) stay recognized only after the bordered shape has already identified a composer row, so a no-agent shell fallback cannot be misread as a delivered escalation.
 Both shapes are checked in the SAME forward scan, keeping whichever match comes LAST (bottom-most on screen), rather than trying bordered-only first and falling back to bare-only when nothing bordered is found: a bordered decorative box (a welcome banner, an update notice) is always rendered ABOVE the live composer, never below it, in every harness observed, so "last match of either shape wins" always resolves to the genuinely live, bottom-most row instead of a stale decorative box still sitting in the capture window.
-See `fm_backend_herdr_composer_state` in `bin/backends/herdr.sh` for the implementation, and `tests/fm-backend-herdr.test.sh`'s "unbordered (bare) composer rows" section (fixtures captured verbatim from real `claude`/`codex` panes) for the regression coverage - each of those tests read `unknown` before this fix and reads the correct verdict after.
+See `fm_backend_herdr_composer_state` in `bin/backends/herdr.sh` for the implementation, and `tests/fm-backend-herdr.test.sh`'s "unbordered (bare) composer rows" section (fixtures captured verbatim from real `claude` panes) for the regression coverage - each of those tests read `unknown` before this fix and reads the correct verdict after.
 
-## Incident (2026-07-08): away-mode delivery wedged on Codex ghost suggestions
-
-While `state/.afk` was set on a herdr-backed Codex primary, `bin/fm-supervise-daemon.sh` repeatedly logged `inject deferred: supervisor pane has pending input (non-empty composer)` even though the captain had not typed anything.
-The buffered escalations stayed in `state/.subsuper-escalations` until the max-defer alarm wrote `state/.subsuper-inject-wedged`.
-
-**Environment.**
-
-Commands:
-
-```sh
-herdr status --json | jq -c '{client:.client, server:.server}'
-codex --version
-```
-
-Output:
-
-```text
-{"client":{"version":"0.7.3","channel":"stable","protocol":16,"binary":"/etc/profiles/per-user/kunchen/bin/herdr","session":null},"server":{"status":"running","running":true,"version":"0.7.3","protocol":16,"capabilities":{"live_handoff":true,"detached_server_daemon":false},"compatible":true,"socket":"/Users/kunchen/.config/herdr/herdr.sock","session":null,"restart_needed":false}}
-codex-cli 0.142.1
-```
-
-**Failing reproduction, before the fix.**
-
-The reproduction used a throwaway `HERDR_SESSION=fm-afk-codex-ghost-12002`, a scratch `FM_STATE_OVERRIDE`, a real `codex` process in a herdr pane, and the real `bin/fm-supervise-daemon.sh`.
-The supervisor target was `fm-afk-codex-ghost-12002:w1:p2`.
-The pane capture showed an idle Codex composer with ghost suggestion text:
-
-```text
-› Run /review on my current changes
-
-  gpt-5.5 xhigh · Context 100% left · /private/var/fo…
-```
-
-The composer classifier and daemon log showed the false pending-input guard:
-
-```text
-composer_state=pending
-[2026-07-08T09:38:03-0700] daemon starting (pid 12747); target=fm-afk-codex-ghost-12002:w1:p2; target_source=FM_SUPERVISOR_TARGET; backend=herdr; backend_source=FM_SUPERVISOR_BACKEND; afk=on; inject_skip='heartbeat'; stale_escalate=240s; batch=0s
-[2026-07-08T09:38:04-0700] inject deferred: supervisor pane has pending input (non-empty composer)
-[2026-07-08T09:38:05-0700] inject deferred: supervisor pane has pending input (non-empty composer)
-[2026-07-08T09:38:05-0700] ERROR: away-mode escalation undelivered 3s; inject could not confirm a submit (supervisor pane busy or wedged). Buffer + wake-queue preserved; alarm marker written.
-```
-
-The wedge marker preserved the buffered event:
-
-```text
-fm away-mode inject WEDGED: 7s undelivered as of 2026-07-08T09:38:09-0700
-The supervisor pane could not accept an escalation. Buffered items:
-Wheelhouse shipped status: done: PR ready
-```
-
-**Style evidence.**
-
-Herdr's ANSI capture preserves Codex's distinction between ghost suggestion text and real typed text.
-An idle suggestion is faint after the bold prompt:
-
-```text
-\e[0m\e[1m› \e[0m\e[2mRun /review on my current changes\e[0m
-```
-
-Real typed input with the same prompt is not faint:
-
-```text
-\e[0m\e[1m› \e[0mhello captain
-```
-
-**Fix.**
-
-`fm_backend_herdr_composer_state` now prefers `herdr pane read --format ansi` for composer classification.
-It still locates the same bottom-most bordered or bare prompt row, strips ANSI for shape matching, and then treats a bare-prompt tail as empty only when the raw ANSI row shows that tail rendered faint.
-This ignores Codex ghost suggestions such as `Find and fix a bug in @filename`, `Write tests for @filename`, and `Run /review on my current changes` while preserving the `pending` verdict for non-faint real typed text after the same `›` prompt.
-
-**Passing reproduction, after the fix.**
-
-The same real-herdr shape used `HERDR_SESSION=fm-afk-codex-fixed-29849`, target `fm-afk-codex-fixed-29849:w1:p2`, real `codex`, and the real daemon.
-The captured idle composer showed faint ghost suggestion text:
-
-```text
-\e[0m\e[1m› \e[0m\e[2mWrite tests for @filename\e[0m
-```
-
-The fixed classifier and daemon result:
-
-```text
-composer_state=empty
-[2026-07-08T09:42:00-0700] daemon starting (pid 31034); target=fm-afk-codex-fixed-29849:w1:p2; target_source=FM_SUPERVISOR_TARGET; backend=herdr; backend_source=FM_SUPERVISOR_BACKEND; afk=on; inject_skip='heartbeat'; stale_escalate=240s; batch=0s
-[2026-07-08T09:42:11-0700] daemon shutting down
-```
-
-No `inject deferred: supervisor pane has pending input` line was emitted, `state/.subsuper-escalations` was empty afterward, and no wedge marker was written.
-The unit regression coverage is `tests/fm-backend-herdr.test.sh`'s `test_composer_state_codex_faint_suggestion_is_empty`, `test_composer_state_codex_non_faint_same_text_is_pending`, and `test_composer_state_codex_dynamic_idle_tip_reads_empty_when_faint`.
-
-## Native agent-state submit confirmation (fixes the codex idle-tip gap)
+## Native agent-state submit confirmation
 
 `fm_backend_herdr_send_text_submit` now records a pre-Enter native agent-state baseline before choosing the confirmation signal.
 When that baseline is legibly idle or done, it confirms a submit by polling herdr's own semantic agent-state (`agent get`) for a submit-active transition (`working` or `blocked`), via the new `fm_backend_herdr_wait_for_working` helper.
@@ -665,8 +568,8 @@ Composer content (`fm_backend_herdr_composer_state`) is still used for the pre-i
 It is also the conservative fallback for submit attempts whose pre-Enter baseline is already submit-active or unreadable, because a preexisting `working`/`blocked` status cannot prove that this Enter landed.
 This makes the normal idle-baseline confirmation path cross-agent: it no longer depends on what a harness's idle composer happens to display.
 
-This originally fixed the practical submit-confirmation effect of the Codex idle-tip gap left open by the 2026-07-07 incident above.
-The 2026-07-08 follow-up fixed the pre-injection composer guard itself by using herdr's ANSI capture to ignore faint Codex ghost suggestions.
+This originally generalized submit confirmation beyond composer-content rendering, motivated by the incidents above.
+The pre-injection composer guard itself was later generalized by the shared ANSI-aware ghost stripper (see the 2026-07-10 incident below).
 The submit-confirmation path still deliberately uses native agent-state on idle baselines, so it remains independent of composer rendering.
 
 ### Design: two failure directions, both guarded
@@ -686,7 +589,7 @@ Only the latter reports `unknown` and skips further Enter retries - matching the
 
 ### Empirical evidence (2026-07-07, herdr 0.7.1, protocol 14, macOS aarch64)
 
-Verified against real `claude` (2.1.203) and real `codex` (0.142.1) agents in an isolated, throwaway `HERDR_SESSION` (never the default session), using `herdr_safe_stop_and_delete` for cleanup exactly like every other real-herdr test in this document.
+Verified against real `claude` (2.1.203) agents in an isolated, throwaway `HERDR_SESSION` (never the default session), using `herdr_safe_stop_and_delete` for cleanup exactly like every other real-herdr test in this document.
 
 Method: for each agent, with the pane genuinely idle, `herdr pane send-text <pane> "<trivial prompt>"` followed by `herdr pane send-keys <pane> enter`, then `herdr agent get <pane>` polled at roughly 30ms intervals, timestamping the FIRST poll that reports `agent_status: working`.
 
@@ -695,7 +598,6 @@ Ten repeated trials per agent (a fresh trivial prompt each run, e.g. "reply with
 | Agent | First-observed-working latency across 10 runs |
 |---|---|
 | claude 2.1.203 | 0.154s - 0.489s (mean ~0.27s) |
-| codex 0.142.1 | 0.087s - 0.435s (mean ~0.25s) |
 
 Every trial's full turn (working -> idle/done) took at least ~1-3s end to end - orders of magnitude longer than the ~30ms sampling interval used to observe it, which is why an "instant round-trip" miss has not been observed in practice.
 
@@ -703,8 +605,7 @@ Additional scenarios verified directly against the real binaries:
 
 - **Never-submitted text stays idle.** Typing real text into either agent's composer WITHOUT pressing Enter leaves `agent_status` unchanged (idle/`done`) indefinitely across repeated polls - confirming that an absence of a `working` observation is a genuine "not submitted" signal, not noise.
 - **A popup-selection Enter that does not submit never flips to working.** Sending `/compact` to claude and pressing Enter once submitted immediately in this claude version (no placeholder-fill quirk reproduced here), transitioning to `working` right away - a real submission is what triggers the transition, exactly as designed.
-  The 2026-07-03 incident's specific failure shape (an Enter that only fills an argument-hint placeholder without submitting) was not literally reproduced against real claude/codex in this pass (grok, the originally affected harness, was not available), but the fix generalizes on logical grounds that do not depend on which harness is used: filling a composer placeholder is not a submission, so by construction no real turn starts and `agent_status` cannot report `working` for that Enter - see `tests/fm-backend-herdr.test.sh`'s `test_send_text_submit_popup_autocomplete_requires_second_enter` for the corresponding fake-CLI regression coverage.
-- **A codex idle composer's dynamic tip text does not affect idle-baseline confirmation.** With a real, genuinely idle codex pane showing its own rotating suggestion ("Summarize recent commits"), `fm_backend_herdr_send_text_submit` against the pane correctly reports `empty` (confirmed) based on the observed `working` transition alone, and the message is confirmed to have landed in the pane's own transcript.
+  The 2026-07-03 incident's specific failure shape (an Enter that only fills an argument-hint placeholder without submitting) was not literally reproduced in this pass, but the fix generalizes on logical grounds that do not depend on which harness is used: filling a composer placeholder is not a submission, so by construction no real turn starts and `agent_status` cannot report `working` for that Enter - see `tests/fm-backend-herdr.test.sh`'s `test_send_text_submit_popup_autocomplete_requires_second_enter` for the corresponding fake-CLI regression coverage.
 - **Confirmation correctly reports `pending` for a genuinely swallowed Enter.** With `fm_backend_herdr_send_key` overridden to a no-op (simulating a dropped keystroke), `fm_backend_herdr_send_text_submit` against a real claude pane reported `pending` after exhausting its retries, and the typed text was confirmed still sitting, unsubmitted, in the real composer afterward - no duplicate, no false confirmation.
 - **Confirmation correctly reports `unknown` for a target that cannot be read**, and does not retry past it: with `fm_backend_herdr_agent_status_raw` overridden to always fail, a real send against a real claude pane reported `unknown` after exactly one Enter attempt (no further retries).
 - **Submitting to an already submit-active target is not confirmed by preexisting agent-state alone.** A pre-Enter `working` or `blocked` status now falls back to composer-clear confirmation, so a swallowed Enter that leaves the typed message visible reports `pending` instead of falsely accepting the already-active status as proof.
@@ -712,8 +613,8 @@ Additional scenarios verified directly against the real binaries:
 
 ### Regression coverage
 
-`tests/fm-backend-herdr.test.sh`'s "wait_for_working" and "send_text_submit" sections cover both failure directions (a slow transition caught mid-window, an unreadable target that never retries), endpoint-spread timing with no final trailing sleep, the submit-specific `blocked` mapping, the popup-placeholder-fill case using the new mechanism, the already-submit-active baseline fallback, and `test_send_text_submit_confirms_despite_codex_idle_tip_composer`, which asserts a confirmed `empty` verdict AND that `pane read` is never called on an idle baseline.
-The composer-guard regression for the 2026-07-08 AFK delivery bug lives in `test_composer_state_codex_dynamic_idle_tip_reads_empty_when_faint`.
+`tests/fm-backend-herdr.test.sh`'s "wait_for_working" and "send_text_submit" sections cover both failure directions (a slow transition caught mid-window, an unreadable target that never retries), endpoint-spread timing with no final trailing sleep, the submit-specific `blocked` mapping, the popup-placeholder-fill case using the new mechanism, the already-submit-active baseline fallback, and the assertion of a confirmed `empty` verdict with `pane read` never called on an idle baseline.
+The composer-guard regression for faint ghost suggestions lives in the faint-suggestion cases of `tests/fm-backend-herdr.test.sh`'s composer-state section.
 `test_composer_state_guard_still_refuses_real_pending_text_after_submit_confirmation_change` is a regression guard for the pre-injection empty-box guard itself, confirming it still refuses genuine pending composer text after this change.
 
 `tests/fm-afk-inject-herdr-e2e.test.sh`'s synthetic supervisor-pane fixture was updated alongside this fix: since confirmation is no longer composer-content-based, a bash script that only DRAWS composer text without being a registered herdr agent would read `agent_not_found` forever and never confirm a submission - discovered when the pre-existing (composer-only) fixture version of that test regressed against the new confirmation code (Scenario B: 0 digests instead of exactly 1, since the daemon treated every injection as unconfirmed and kept retyping it every housekeeping tick, which is exactly the duplicate-send failure mode this design change exists to prevent).
@@ -732,7 +633,7 @@ Each adapter still owns its own capture and structural row-finding (genuinely di
 
 **The safety rule.** A bare shell prompt glyph is a genuine empty agent composer ONLY inside a bordered composer container (where the harness draws its own prompt glyph, e.g. claude's older `| > ... |`).
 On a bare, unstructured row it is a dead-shell prompt and reads `unknown` (not a safe injection target), never `empty`.
-The agent prompt glyphs `❯` (claude) and `›` (codex) read `empty` either way.
+The agent prompt glyphs (e.g. claude's `❯`) read `empty` either way.
 `inject_msg` was hardened to match: its composer-guard now reads `fm_backend_composer_state` directly and defers on anything that is not affirmatively `empty` (`pending` real text, or `unknown` for a dead shell or an unreadable pane), instead of only deferring on `pending`.
 
 **Regression coverage.** `tests/fm-composer-lib.test.sh` pins the shared owner directly (bare shell glyph -> `unknown`, the same glyph bordered -> `empty`, agent glyphs -> `empty` bordered or bare, idle placeholder, real text -> `pending`).
@@ -755,18 +656,18 @@ $ herdr --session default pane read w1:p3 --source recent --lines 60 --format an
 ```
 
 The ghost is a bare `❯` prompt followed by `\033[0m\033[2m<suggestion>\033[0m` - SGR-2 **dim**, which herdr 0.7.3 preserves in `--format ansi`.
-The tmux composer reader already stripped SGR-2 dim (so tmux read this shape empty), but the herdr classifier did NOT strip dim generically: its only ghost check was a byte-pattern match for codex's shape, `\033[1m❯ \033[0m\033[2m` (a BOLD-wrapped prompt).
+The tmux composer reader already stripped SGR-2 dim (so tmux read this shape empty), but the herdr classifier did NOT strip dim generically: its only ghost check was a byte-pattern match for a bold-wrapped prompt shape (`\033[1m❯ \033[0m\033[2m`).
 claude's prompt is not bold-wrapped (`❯ \033[0m\033[2m`), so the check never matched, the dim suggestion read as real pending text, and the away-mode injector deferred forever.
-Prior herdr delivery fixes (the 2026-07-07 and 2026-07-08 incidents above) did not cover this shape - they addressed submit confirmation and codex's specific bold-wrapped faint suggestion.
+Prior herdr delivery fixes (the 2026-07-07 incident above) did not cover this shape - they addressed submit confirmation and a specific bold-wrapped faint suggestion shape.
 
 **Fix (task afk-herdr-false-pending): one ANSI-aware classification owner.** Per captain direction, the fix consolidates ghost/placeholder stripping into a single fleet-wide owner rather than adding another per-harness special case.
 `bin/fm-composer-lib.sh` now owns `fm_composer_strip_ghost`, the one ANSI-aware extractor of "real typed content", and both ANSI-capable backends route through it: `fm_tmux_composer_state` (`bin/fm-tmux-lib.sh`, via the now-thin `fm_tmux_strip_ghost` adapter) and `fm_backend_herdr_composer_state`.
-It drops every de-emphasised run - dim/faint (SGR 2: claude's suggestion, codex's idle tip) AND a dark/muted TRUECOLOR foreground (grok's placeholder, see below) - and keeps only normal-intensity, normally-coloured text.
-The herdr-only faint byte-pattern check (`fm_backend_herdr_prompt_tail_is_faint`) is removed: the generic dim strip subsumes it, and the codex faint regressions stay green through the shared mechanism.
+It drops every de-emphasised run - dim/faint (SGR 2: claude's suggestion) AND a dark/muted TRUECOLOR foreground (a placeholder hint, see below) - and keeps only normal-intensity, normally-coloured text.
+The herdr-only faint byte-pattern check (`fm_backend_herdr_prompt_tail_is_faint`) is removed: the generic dim strip subsumes it, and the prior faint-suggestion regressions stay green through the shared mechanism.
 
-**Also covered: the grok TRUECOLOR placeholder gap.** The harness-adapters skill documented a separate unfixed gap - grok's placeholder is styled with a dark 24-bit truecolor foreground, not SGR-2 dim, so no adapter stripped it.
+**Also covered: a dark TRUECOLOR placeholder gap.** A placeholder hint can be styled with a dark 24-bit truecolor foreground rather than SGR-2 dim, which no adapter originally stripped.
 The same owner now drops a dark truecolor foreground by perceived luminance (`0.299R + 0.587G + 0.114B` below `FM_COMPOSER_GHOST_LUMA_MAX`, default 128).
-Verified live against grok 0.2.93 in an isolated tmux session (no Herdr lifecycle):
+Verified live in an isolated tmux session (no Herdr lifecycle):
 
 ```
 $ tmux -L <sock> capture-pane -e -p -t g | grep '❯'
@@ -775,10 +676,10 @@ $ tmux -L <sock> capture-pane -e -p -t g | grep '❯'
 \033[38;2;86;82;110m│\033[38;2;224;222;244m ❯ fix the login bug ...
 ```
 
-Real grok input is the bright `38;2;224;222;244` (luminance ~225, kept); grok's de-emphasised UI is dark truecolor (luminance ~51..110, dropped).
+Real input is the bright `38;2;224;222;244` (luminance ~225, kept); the de-emphasised UI is dark truecolor (luminance ~51..110, dropped).
 The luminance rule assumes a dark terminal theme (the fleet reality); the SGR-2 signal stays theme-independent.
 
-**Regression coverage (deterministic, from the exact captured bytes).** `tests/fm-backend-herdr.test.sh` feeds the exact overnight claude ghost shape through the real `fm_backend_herdr_composer_state` and asserts `empty` (`test_composer_state_claude_dim_prompt_suggestion_ghost_is_empty`), with the same row carrying REAL text still `pending` (`test_composer_state_claude_dim_ghost_row_with_real_text_is_pending`), plus the grok truecolor placeholder -> `empty` and grok bright input -> `pending` pair.
+**Regression coverage (deterministic, from the exact captured bytes).** `tests/fm-backend-herdr.test.sh` feeds the exact overnight claude ghost shape through the real `fm_backend_herdr_composer_state` and asserts `empty` (`test_composer_state_claude_dim_prompt_suggestion_ghost_is_empty`), with the same row carrying REAL text still `pending` (`test_composer_state_claude_dim_ghost_row_with_real_text_is_pending`), plus the dark-truecolor placeholder -> `empty` and bright input -> `pending` pair.
 `tests/fm-composer-ghost.test.sh` pins `fm_composer_strip_ghost` directly for both dim and dark-truecolor ghost, and its two prior "keep truecolor" fixtures were corrected from a near-black `38;2;1;2;3` (never a realistic real-input colour; it was only exercising the truecolor payload-skip parser) to a bright `38;2;224;222;244`, which now represents realistic real input while still exercising the same parser path.
 `shellcheck bin/*.sh bin/backends/*.sh tests/*.sh` passes clean.
 
@@ -831,7 +732,7 @@ Dedupe (one wake per `->blocked` edge, marker cleared when the pane returns to `
 ## Away-mode daemon terminal launch (2026-07-12, herdr 0.7.3, protocol 16, macOS aarch64)
 
 `bin/fm-afk-start.sh` execs the supervise daemon in the FOREGROUND of whatever terminal it is already in.
-Harnesses with a native in-pane tracked-background tool (claude, grok) run it there and the daemon inherits the captain pane's env.
+Harnesses with a native in-pane tracked-background tool (claude) run it there and the daemon inherits the captain pane's env.
 A harness with NO native background mechanism (pi) has no place to run it, and manufacturing one by SPLITTING the captain's active pane visibly shrinks it: `herdr pane split <pane> --direction down --ratio 0.20 --no-focus` creates a second pane whose `tab_id` equals the captain pane's, so the two co-tenant one tab's viewport.
 `--no-focus` does not prevent this - it governs focus, not geometry.
 
@@ -881,7 +782,7 @@ Covered by the unit cases in `tests/fm-afk-launch.test.sh` (clear-on-fresh-entry
 - **RESOLVED: a restart's restored-layout husk no longer needs a manual pane close before respawn.** See "Respawn idempotency: a restored task tab is a husk, not a duplicate" above for the fix (`fm_backend_herdr_pane_agent_state`, `fm_backend_herdr_create_task`'s close-and-replace).
   Left over from that fix: the `dead` (`pane_not_found`) husk classification is exercised only at the unit level, never against the real binary - killing a pane's process on a live server was observed to make herdr reap the whole tab immediately (never leaving a dead-but-still-listed pane for the duplicate check to find), and a real session restart was never observed to produce one either.
   It remains a conservative, defensively-coded path for a herdr failure mode (e.g. a restored process that fails to start) nobody has reproduced against the real binary yet.
-- **Ghost/placeholder suggestion handling depends on ANSI style.** See "Incident (2026-07-08)" and "Incident (2026-07-10)" above.
+- **Ghost/placeholder suggestion handling depends on ANSI style.** See "Incident (2026-07-10)" above.
   Herdr 0.7.3 preserves the harness's own de-emphasis style (dim/faint and truecolor foreground) in `pane read --format ansi`, and `fm_backend_herdr_composer_state` extracts real typed content with the shared `fm_composer_strip_ghost` (`bin/fm-composer-lib.sh`), which drops dim/faint AND dark-truecolor runs to distinguish ghost suggestions/placeholders from real typed text.
   If a future herdr build strips ANSI style from `--format ansi`, the classifier loses its ghost signal and falls back to reading the suggestion text as `pending` - the fail-safe direction (it defers rather than risks overwriting a human draft), which the max-defer alarm then surfaces.
 - **RESOLVED: a "paused / awaiting-external" crew state for the stale-wedge escalation.** Raised alongside the 2026-07-07 incident: an in-flight crew intentionally idling on a known external wait (a vendor rate limit, say) still tripped `bin/fm-supervise-daemon.sh`'s "stale persisted ... (possible wedge)" escalation exactly like a genuinely wedged crew, with no way to mark the wait as expected.

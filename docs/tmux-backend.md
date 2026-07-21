@@ -99,7 +99,7 @@ Verified the same session: a persisting parent process running a child command (
 
 The classifier (`fm_backend_tmux_agent_alive`) maps the observed name to `alive`, `dead`, or `unknown`:
 
-- `alive` - the name contains `claude`, `codex`, `opencode`, or `grok`. All four were confirmed to run as their own literal process name (`ps -ef`, 2026-07-07): `claude` and `codex` and `opencode` are each a native compiled binary (`file` reports Mach-O), so their `comm` is their own binary name with no interpreter wrapper to hide behind.
+- `alive` - the name contains `claude` or `opencode`. Both were confirmed to run as their own literal process name (`ps -ef`, 2026-07-07): each is a native compiled binary (`file` reports Mach-O), so its `comm` is its own binary name with no interpreter wrapper to hide behind.
 - `dead` - the name is a bare shell (`zsh`, `bash`, `sh`, `dash`, `ash`, `ksh`, `mksh`, `tcsh`, `csh`, `fish`).
 - `unknown` - anything else, including an unreadable pane.
 

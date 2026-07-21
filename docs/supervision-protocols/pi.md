@@ -34,4 +34,4 @@ Continuity verification on 2026-07-17 used Pi 0.80.10 with the existing shared P
 The isolated live test copied no credential material and created no account.
 The model called `fm_watch_arm_pi` exactly once, an actionable status closed that cycle, the extension ledger-linked a verified successor before the handling turn ended, the turn-end guard never fired, and `/quit` cleaned up both child processes.
 Command: `FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh`.
-Observed output: `ok - Pi 0.80.10 live E2E used shared Codex auth, auto-started one successor before turn end, and cleaned up`.
+Observed output: `ok - Pi 0.80.10 live E2E used the shared openai-codex provider auth, auto-started one successor before turn end, and cleaned up`.
