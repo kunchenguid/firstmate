@@ -50,6 +50,20 @@ wait_live() {
   return 0
 }
 
+# Wait up to <limit> 0.1s ticks for <file> to hold exactly <expected>. wait_live's
+# dwell only proves the watcher stayed alive and silent; on a loaded host its first
+# poll can still be mid-flight when the dwell ends, so an absorb's suppressor write
+# must be waited for rather than assumed. 0 once it matches, 1 on timeout.
+wait_file_content() {  # <file> <expected> [limit]
+  local file=$1 expected=$2 limit=${3:-100} i=0
+  while [ "$i" -lt "$limit" ]; do
+    [ "$(cat "$file" 2>/dev/null || true)" = "$expected" ] && return 0
+    sleep 0.1
+    i=$((i + 1))
+  done
+  return 1
+}
+
 wait_numeric_file() {
   local file=$1 limit=${2:-30} i=0 value
   while [ "$i" -lt "$limit" ]; do
@@ -460,9 +474,9 @@ test_stale_terminal_status_overridden_by_active_run() {
   if ! wait_live "$pid" 30; then
     reap "$pid"; fail "watcher exited for a stale terminal-looking status the run-step overrides (should absorb): $(cat "$out")"
   fi
+  wait_file_content "$state/.stale-$key" "$pane_hash" || { reap "$pid"; fail "stale suppressor not advanced on absorb"; }
   [ ! -s "$out" ] || fail "the overridden stale terminal status printed a wake reason during absorb"
   [ ! -s "$state/.wake-queue" ] || fail "the overridden stale terminal status enqueued a wake during absorb"
-  [ "$(cat "$state/.stale-$key" 2>/dev/null || true)" = "$pane_hash" ] || fail "stale suppressor not advanced on absorb"
   [ -s "$state/.stale-since-$key" ] || fail "stale-since escalation timer was not recorded on absorb"
   [ ! -e "$state/.hb-surfaced-validating" ] || fail "an absorbed wake must not mark the status line as surfaced"
   reap "$pid"
@@ -513,9 +527,9 @@ test_nonterminal_stale_provably_working_absorbed_then_escalated() {
   if ! wait_live "$pid" 30; then
     reap "$pid"; fail "watcher exited for a fresh provably-working non-terminal stale (should absorb): $(cat "$out")"
   fi
+  wait_file_content "$state/.stale-$key" "$pane_hash" || { reap "$pid"; fail "stale suppressor not advanced on absorb"; }
   [ ! -s "$out" ] || fail "fresh provably-working stale printed a wake reason during absorb"
   [ ! -s "$state/.wake-queue" ] || fail "fresh provably-working stale enqueued a wake during absorb"
-  [ "$(cat "$state/.stale-$key" 2>/dev/null || true)" = "$pane_hash" ] || fail "stale suppressor not advanced on absorb"
   [ -s "$state/.stale-since-$key" ] || fail "stale-since escalation timer was not recorded on absorb"
   reap "$pid"
 
@@ -612,9 +626,9 @@ test_nonterminal_stale_paused_absorbed_then_resurfaced() {
   if ! wait_live "$pid" 30; then
     reap "$pid"; fail "watcher exited for a fresh declared pause (should absorb): $(cat "$out")"
   fi
+  wait_file_content "$state/.stale-$key" "$pane_hash" || { reap "$pid"; fail "stale suppressor not advanced on paused absorb"; }
   [ ! -s "$out" ] || fail "fresh paused stale printed a wake reason during absorb"
   [ ! -s "$state/.wake-queue" ] || fail "fresh paused stale enqueued a wake during absorb"
-  [ "$(cat "$state/.stale-$key" 2>/dev/null || true)" = "$pane_hash" ] || fail "stale suppressor not advanced on paused absorb"
   [ -e "$state/.paused-$key" ] || fail "paused flag not recorded on absorb"
   [ ! -e "$state/.stale-since-$key" ] || fail "a paused absorb must not start the wedge timer"
   reap "$pid"
