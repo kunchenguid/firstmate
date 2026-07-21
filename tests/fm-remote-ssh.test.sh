@@ -5,9 +5,10 @@
 # a fake `ssh` that logs every invocation (one line, unit-separated args) and
 # then either EXECUTES the remote command locally with real git (mode "exec",
 # so the actual remote script logic is exercised against real repositories),
-# fails like an unreachable host (mode "fail"), or replays a canned response
-# (mode "canned", for protocol/refusal parsing). No real ssh connection is
-# ever made: the fake shadows ssh on PATH for every case.
+# fails like an unreachable host (mode "fail"), replays a canned response
+# (mode "canned", for protocol/refusal parsing), or blocks like a hung remote
+# command (mode "hang", for the wall-clock deadline). No real ssh connection
+# is ever made: the fake shadows ssh on PATH for every case.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -51,6 +52,9 @@ case "$mode" in
     [ -n "${FM_FAKE_SSH_CANNED:-}" ] && cat "$FM_FAKE_SSH_CANNED"
     exit "${FM_FAKE_SSH_EXIT:-0}"
     ;;
+  hang)
+    exec sleep 30
+    ;;
 esac
 exit 0
 SH
@@ -87,7 +91,8 @@ write_host() {
 
 # run_rs <dir> <mode> <args...>: run fm-remote-ssh.sh with the fake ssh and
 # this case's config; captures OUT and STATUS. Canned-mode tests preset
-# CANNED (a response file) and optionally CANNED_EXIT before calling.
+# CANNED (a response file) and optionally CANNED_EXIT before calling; the
+# deadline test presets DEADLINE (seconds, empty means the script default).
 OUT=
 STATUS=0
 run_rs() {
@@ -100,6 +105,7 @@ run_rs() {
     FM_FAKE_SSH_HOME="$SSH_HOME" \
     FM_FAKE_SSH_CANNED="${CANNED:-}" \
     FM_FAKE_SSH_EXIT="${CANNED_EXIT:-0}" \
+    FM_REMOTE_SSH_DEADLINE="${DEADLINE:-}" \
     "$RS" "$@" 2>&1)
   STATUS=$?
 }
@@ -286,6 +292,18 @@ test_unreachable_host_refuses() {
   [ "$STATUS" -ne 0 ] || fail "an unreachable host must refuse"
   assert_contains "$OUT" "ssh exit 255" "transport failure not reported"
   pass "transport: an unreachable host (ssh exit 255) refuses"
+}
+
+test_deadline_bounds_hung_remote() {
+  local dir
+  dir=$(case_env ssh-hang)
+  write_host "$dir"
+  DEADLINE=1
+  run_rs "$dir" hang preflight vps1 "$dir/remote-proj"
+  DEADLINE=
+  [ "$STATUS" -ne 0 ] || fail "a hung remote command must refuse at the deadline"
+  assert_contains "$OUT" "wall-clock deadline" "deadline expiry not reported"
+  pass "transport: a hung remote command is killed at the wall-clock deadline"
 }
 
 test_garbage_response_refuses() {
@@ -554,6 +572,20 @@ test_remove_out_of_root_refuses() {
   pass "worktree-remove: a path resolving outside the registered task root refuses untouched"
 }
 
+test_remove_dest_equal_to_root_refuses() {
+  local dir dest
+  dir=$(case_env wt-remove-destroot)
+  write_host "$dir"
+  dest="$dir/taskroot/worktrees/remote-proj/task1"
+  mkdir -p "$(dirname "$dest")"
+  ln -s "$dir/taskroot" "$dest"
+  run_rs "$dir" exec worktree-remove vps1 "$dir/remote-proj" task1
+  [ "$STATUS" -ne 0 ] || fail "a task path resolving to the task root itself must refuse"
+  assert_contains "$OUT" "remote refused: out-of-root" "root-equal task path not refused"
+  assert_present "$dir/taskroot" "the task root must be left untouched"
+  pass "worktree-remove: a path resolving to the task root itself refuses untouched"
+}
+
 test_remove_absent_refuses() {
   local dir
   dir=$(case_env wt-remove-absent)
@@ -579,6 +611,7 @@ test_resolve_prints_validated_entry
 test_injection_arguments_refused_before_ssh
 test_ssh_invocation_shape_and_login_shell
 test_unreachable_host_refuses
+test_deadline_bounds_hung_remote
 test_garbage_response_refuses
 test_multiple_protocol_lines_refuse
 test_wrong_verb_refuses
@@ -596,6 +629,7 @@ test_inspect_absent_and_worktree_states
 test_inspect_branch_mismatch_refuses
 test_remove_happy_path_keeps_branch
 test_remove_out_of_root_refuses
+test_remove_dest_equal_to_root_refuses
 test_remove_dirty_refuses
 test_remove_unregistered_refuses
 test_remove_absent_refuses
