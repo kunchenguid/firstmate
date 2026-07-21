@@ -171,6 +171,7 @@ An explicit per-spawn harness or raw launch command does not inherit model or ef
 `config/crew-harness` remains the crewmate harness and is inherited into secondmate homes.
 `config/crew-dispatch.json` is inherited too; secondmates use the same natural-language dispatch profiles when spawning their own crewmates.
 The [`secondmate-provisioning` skill](../.agents/skills/secondmate-provisioning/SKILL.md) owns the complete inherited-local-material allowlist and propagation contract.
+`config/pi-bash-timeout` participates in that owner-defined contract so secondmate Pi workers share the primary's default; [configuration.md](configuration.md) owns its precedence, disable, and invalid-value semantics.
 
 The `data/secondmates.md` line contract is owned by the [`secondmate-provisioning` skill](../.agents/skills/secondmate-provisioning/SKILL.md#routing-table), and the secondmate environment variables are documented in [configuration.md](configuration.md).
 
