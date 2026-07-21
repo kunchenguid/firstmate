@@ -39,7 +39,6 @@ PR_REPO=$FM_PR_REPO
 PR_NUMBER=$FM_PR_NUMBER
 shift 2
 [ "${1:-}" = "--" ] && shift
-GITHUB_ROUTE=${FM_GITHUB_ROUTE:-default}
 
 github_quota_check() {
   "$SCRIPT_DIR/fm-shared-github-quota.sh" check --provider github --route "$GITHUB_ROUTE" 2>/dev/null || true

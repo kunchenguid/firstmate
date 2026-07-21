@@ -117,6 +117,28 @@ EOF
   pass "grok teardown removes pointer and token state"
 }
 
+test_grok_relaunch_retires_prior_auth_token() {
+  local root grok_home state wt id first second
+  root="$TMP_ROOT/relaunch"
+  grok_home="$root/grok"
+  state="$root/state"
+  wt="$root/wt"
+  id=rehome-g1
+  mkdir -p "$grok_home" "$state" "$wt"
+
+  # shellcheck source=bin/fm-harness-launch-lib.sh
+  . "$ROOT/bin/fm-harness-launch-lib.sh"
+  GROK_HOME="$grok_home" fm_launch_install_turn_end_hook grok ship "$wt" "$state" "$id" "$state/$id.turn-ended" "$wt"
+  first=$(cat "$state/$id.grok-turnend-token")
+  GROK_HOME="$grok_home" fm_launch_install_turn_end_hook grok ship "$wt" "$state" "$id" "$state/$id.turn-ended" "$wt"
+  second=$(cat "$state/$id.grok-turnend-token")
+
+  [ "$first" != "$second" ] || fail "relaunch should mint a fresh grok auth token"
+  assert_absent "$grok_home/hooks/fm-turn-end.d/$first" "prior grok auth file orphaned by relaunch"
+  [ -f "$grok_home/hooks/fm-turn-end.d/$second" ] || fail "current grok auth file missing after relaunch"
+  pass "grok relaunch retires the prior auth token file"
+}
+
 test_fm_lock_recognizes_grok_holder() {
   local home fakebin out
   home="$TMP_ROOT/lock-home"
@@ -139,4 +161,5 @@ SH
 
 test_grok_hook_requires_registered_token
 test_grok_teardown_removes_pointer_and_token
+test_grok_relaunch_retires_prior_auth_token
 test_fm_lock_recognizes_grok_holder

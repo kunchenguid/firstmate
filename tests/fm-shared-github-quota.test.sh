@@ -84,6 +84,7 @@ test_mark_from_text_records_observed_account_and_reset() {
   shared="$TMP_ROOT/shared-text"
   out=$(printf 'GitHub user/account %s is rate-limited until 2026-07-13T02:23:23Z.\n' "$TEST_ACCOUNT" \
     | FM_SHARED_STATE_OVERRIDE="$shared" FM_SHARED_QUOTA_NOW_EPOCH=1000 \
+      FM_SHARED_GITHUB_QUOTA_DERIVE_ACCOUNT=0 \
       "$QUOTA" mark-from-text --provider github --route default --source incident)
   assert_contains "$out" "provider=github" "mark-from-text should preserve provider"
   assert_contains "$out" "account=$TEST_ACCOUNT" "mark-from-text should extract the GitHub account"
@@ -94,6 +95,27 @@ test_mark_from_text_records_observed_account_and_reset() {
   assert_contains "$active" "state=defer" "observed GitHub cooldown should be active"
   assert_contains "$active" "reset_at=2026-07-13T02:23:23Z" "active cooldown should report reset evidence"
   pass "observed GitHub account/reset text records a shared cooldown"
+}
+
+test_mark_from_text_never_overwrites_remembered_account() {
+  local shared out remembered active
+  shared="$TMP_ROOT/shared-text-poison"
+  FM_SHARED_STATE_OVERRIDE="$shared" FM_SHARED_QUOTA_NOW_EPOCH=1000 \
+    "$QUOTA" check --provider github --account "$TEST_ACCOUNT" --route default >/dev/null
+
+  out=$(printf 'API rate limit exceeded; x-ratelimit-reset 1799999999 until 2026-07-13T02:23:23Z.\n' \
+    | FM_SHARED_STATE_OVERRIDE="$shared" FM_SHARED_QUOTA_NOW_EPOCH=1000 \
+      FM_SHARED_GITHUB_QUOTA_DERIVE_ACCOUNT=0 \
+      "$QUOTA" mark-from-text --provider github --route default --source incident)
+  assert_contains "$out" "account=$TEST_ACCOUNT" "mark-from-text should prefer the remembered account over scraped digits"
+
+  remembered=$(cat "$shared/shared-github-quota/accounts/github.env")
+  assert_contains "$remembered" "account=$TEST_ACCOUNT" "scraped digits must not replace the remembered account"
+
+  active=$(FM_SHARED_STATE_OVERRIDE="$shared" FM_SHARED_QUOTA_NOW_EPOCH=1000 \
+    "$QUOTA" check --provider github --account "$TEST_ACCOUNT" --route default)
+  assert_contains "$active" "state=defer" "the cooldown should key to the remembered account"
+  pass "text-scraped account digits never poison the remembered GitHub account"
 }
 
 test_shared_cooldown_blocks_polling_across_homes() {
@@ -224,6 +246,7 @@ test_no_cooldown_preserves_existing_polling_semantics() {
 }
 
 test_mark_from_text_records_observed_account_and_reset
+test_mark_from_text_never_overwrites_remembered_account
 test_shared_cooldown_blocks_polling_across_homes
 test_local_status_supervision_continues_during_cooldown
 test_reset_time_is_honored_before_polling_resumes

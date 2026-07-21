@@ -53,6 +53,8 @@ route=<harness>|<account-or-provider>|<profile>|<model>|<effort>
 ```
 
 Selection skips routes with active cooldown or manual auth-exhaustion records.
+A cooldown recorded with a partial key - no account, or a `default`/empty profile - is treated as a wall on the whole harness, so it blocks every route for that harness rather than only the exactly-matching one.
+Record a wall with both `--account` and a concrete `--profile` when only that one route should be skipped.
 It refuses unverified harnesses.
 When `config/crew-dispatch.json` exists, it refuses route selection unless the caller passes `--dispatch-approved` after consulting the dispatch rules.
 

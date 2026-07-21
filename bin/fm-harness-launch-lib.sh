@@ -17,10 +17,21 @@ fm_launch_json_escape() {
   printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
 }
 
+# The verified launch command per adapter. The knowledge half of each adapter
+# (busy signature, exit command, dialogs, quirks) lives in the harness-adapters skill.
 fm_launch_template() {
   local harness=$1 kind=${2:-ship}
-  # shellcheck disable=SC2016
+  # shellcheck disable=SC2016  # single quotes are deliberate: $(cat ...) expands in the crewmate pane, not here
   case "$harness" in
+    # CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false disables claude's interactive
+    # predicted-next-prompt ghost text, which renders as dim/faint text inside an
+    # otherwise-empty composer and would otherwise read like real typed input when
+    # firstmate captures the pane (see the harness-adapters skill). It is a per-launch env
+    # prefix scoped to this firstmate-launched agent; it never touches the captain's
+    # global config. The CLI's --prompt-suggestions flag is print/SDK-mode only and
+    # does NOT suppress the interactive ghost text (verified empirically), so the env
+    # var is the correct control. The dim-aware composer reader in fm-tmux-lib.sh is
+    # the defense-in-depth backstop for any pane this flag cannot reach.
     claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions __MODELFLAG____EFFORTFLAG__"$(cat __BRIEF__)"' ;;
     codex)
       if [ "$kind" = secondmate ]; then
@@ -37,6 +48,14 @@ fm_launch_template() {
         printf '%s' 'pi __MODELFLAG____EFFORTFLAG__-e __PIEXT__ "$(cat __BRIEF__)"'
       fi
       ;;
+    # grok (Grok Build TUI): a positional prompt starts the supervised interactive
+    # session. --always-approve auto-approves every tool execution (verified: the
+    # crewmate runs fully autonomously, no permission gate), which an unattended
+    # crewmate needs; it is the targeted equivalent of claude's
+    # --dangerously-skip-permissions. grok's turn-end signal does NOT ride the
+    # launch command - it is a Stop-event hook installed by
+    # fm_launch_install_turn_end_hook (global hook + per-task pointer), so the
+    # template is identical for ship/scout/secondmate.
     grok) printf '%s' 'grok --always-approve __MODELFLAG____EFFORTFLAG__"$(cat __BRIEF__)"' ;;
     *) return 1 ;;
   esac
@@ -101,7 +120,7 @@ fm_launch_exclude_path() {
 
 fm_launch_install_turn_end_hook() {
   local harness=$1 kind=$2 wt=$3 state=$4 id=$5 turnend=$6 project_abs=$7
-  local grok_hooks_dir grok_auth_dir old_umask auth_file sq_grok_auth_dir hook_command
+  local grok_hooks_dir grok_auth_dir old_umask auth_file sq_grok_auth_dir hook_command prior_token
   [ "$kind" != secondmate ] || return 0
   case "$harness" in
     claude*)
@@ -133,11 +152,33 @@ export default function (pi: any) {
 EOF
       ;;
     codex*)
+      # codex: turn-end rides the launch command via -c notify=[...] and __TURNEND__.
       ;;
     grok*)
+      # grok fires a Stop hook at every turn boundary (verified, grok 0.2.73), the
+      # clean equivalent of codex's notify= and pi's turn_end. But grok only loads
+      # PROJECT hooks (<worktree>/.grok/hooks/, <worktree>/.claude/settings.local.json)
+      # after the folder is granted hook-trust, which is not automatic and which
+      # firstmate cannot establish at launch without editing grok's own managed
+      # trust store (a high-blast-radius write). GLOBAL hooks in ~/.grok/hooks/ are
+      # always trusted and load on first launch with no gate. So the turn-end hook
+      # lives OUTSIDE the worktree as a single firstmate-owned global hook that is a
+      # guarded no-op for every non-firstmate grok session: it fires only when the
+      # current workspace holds a .fm-grok-turnend token pointer that matches the
+      # firstmate-owned hook registry. firstmate then drops that per-task pointer
+      # (gitignored, like the other harnesses' worktree hook files).
+      # Result: the hook is outside the worktree, needs no trust grant, and never
+      # touches grok's managed config - only firstmate-owned files.
       grok_hooks_dir="${GROK_HOME:-$HOME/.grok}/hooks"
       grok_auth_dir="$grok_hooks_dir/fm-turn-end.d"
       mkdir -p "$grok_auth_dir"
+      # A relaunch (rehome) re-mints the token, and teardown only removes the
+      # currently recorded one, so retire the previous auth file here.
+      prior_token=$(cat "$state/$id.grok-turnend-token" 2>/dev/null || true)
+      case "$prior_token" in
+        ''|*[!A-Za-z0-9._-]*) ;;
+        *) rm -f "$grok_auth_dir/$prior_token" ;;
+      esac
       old_umask=$(umask)
       umask 077
       auth_file=$(mktemp "$grok_auth_dir/fm.XXXXXXXXXXXX")

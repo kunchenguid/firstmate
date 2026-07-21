@@ -374,8 +374,15 @@ case "$cmd" in
     fi
     EXTRACTED=$(extract_github_rate_limit "$TEXT") || { echo "error: no GitHub rate-limit reset/account found" >&2; exit 1; }
     EXTRACTED_ACCOUNT=$(printf '%s\n' "$EXTRACTED" | sed -n 's/^account=//p' | tail -1)
-    [ -n "$ACCOUNT" ] || ACCOUNT=$EXTRACTED_ACCOUNT
-    resolve_account "$PROVIDER" || exit $?
+    # The account scraped out of an error body is a heuristic, never durable
+    # identity: an explicit, cached, or derived account always wins, and the
+    # scraped value is used only as a last resort and never remembered.
+    if [ -n "$ACCOUNT" ]; then
+      resolve_account "$PROVIDER" || exit $?
+    elif ! resolve_account "$PROVIDER" 2>/dev/null; then
+      account_valid "$EXTRACTED_ACCOUNT" || { echo "error: --account or FM_GITHUB_ACCOUNT_ID required; could not derive GitHub account id" >&2; exit 2; }
+      ACCOUNT=$EXTRACTED_ACCOUNT
+    fi
     RESET_AT=$(printf '%s\n' "$EXTRACTED" | sed -n 's/^reset_at=//p' | tail -1)
     RESET_EPOCH=$(printf '%s\n' "$EXTRACTED" | sed -n 's/^reset_epoch=//p' | tail -1)
     printf 'provider=%s\naccount=%s\nroute=%s\nreset_at=%s\nreset_epoch=%s\n' "$PROVIDER" "$ACCOUNT" "$ROUTE" "$RESET_AT" "$RESET_EPOCH"
