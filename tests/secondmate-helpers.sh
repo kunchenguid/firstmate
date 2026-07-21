@@ -24,8 +24,24 @@ make_fake_tmux() {
 #!/usr/bin/env bash
 set -u
 case "${1:-}" in
-  has-session|new-session|new-window|send-keys|kill-window)
+  has-session|new-session|new-window|kill-window)
     printf '%s\n' "$*" >> "$FM_FAKE_TMUX_LOG"
+    exit 0
+    ;;
+  send-keys)
+    printf '%s\n' "$*" >> "$FM_FAKE_TMUX_LOG"
+    for a in "$@"; do
+      case "$a" in
+        *": > '"*".launch-cwd' && "*)
+          proof=${a#*": > '"}
+          proof=${proof%%"' && "*}
+          : > "$proof"
+          cwd=${a#*"cd -- '"}
+          cwd=${cwd%%"' && "*}
+          printf '%s\n' "$cwd" > "$FM_FAKE_TMUX_LOG.cwd"
+          ;;
+      esac
+    done
     exit 0
     ;;
   list-windows)
@@ -35,7 +51,16 @@ case "${1:-}" in
     exit 0
     ;;
   display-message)
-    printf 'firstmate\n'
+    case "$*" in
+      *"#{pane_current_path}"*)
+        if [ -f "$FM_FAKE_TMUX_LOG.cwd" ]; then
+          cat "$FM_FAKE_TMUX_LOG.cwd"
+        else
+          printf '%s\n' "${FM_FAKE_TMUX_PATH:-firstmate}"
+        fi
+        ;;
+      *) printf 'firstmate\n' ;;
+    esac
     exit 0
     ;;
   capture-pane)

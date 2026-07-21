@@ -989,6 +989,153 @@ On entry the launcher drops the prior session's artifacts when the daemon is not
 This never drops a genuinely-pending escalation: the durable record is `state/.wake-queue` plus each crew's `state/<id>.status`, and any still-true condition is re-escalated by the daemon's heartbeat catch-all scan.
 Covered by the unit cases in `tests/fm-afk-launch.test.sh` (clear-on-fresh-entry vs refresh, and the stop ordering asserting the daemon saw `state/.afk` present at SIGTERM).
 
+## Incident (2026-07-21): a transient foreground cwd masked a primary-checkout launch
+
+Herdr 0.7.3 reports the cwd of the live foreground process accurately, but that fact did not prove the pane shell would retain the same cwd after the process exited.
+The old `fm-spawn.sh` accepted two equal non-project `foreground_cwd` reads while `treehouse get` was still the foreground process, then published metadata and later submitted an unanchored agent command.
+If that foreground process returned without changing the parent shell, the shell ran the agent from the primary checkout even though spawn reported an isolated worktree.
+
+The diagnosis separates the three causal facts.
+
+- The initiating trigger was submitting `treehouse get` and then relying on its foreground cwd as future launch authority.
+- The masking condition was two stable `foreground_cwd` reads from a temporary process that had changed only its own cwd.
+- The visible symptom was a launched process whose `pwd -P` and Git top-level were the primary checkout while spawn output and metadata named the isolated worktree.
+
+The failure was reproduced in the mandatory named non-default lab on macOS with Herdr 0.7.3 and protocol 16.
+The project and worktree were disposable fake Git repositories under `/tmp/fm-herdr-cwd-race.C20E54`, and no captain project checkout was used.
+The lab helper appended the named session to every Herdr call and armed the default-session fleet-state tripwire.
+
+```sh
+HERDR_LAB_HELPER='/Users/alimohammad/Desktop/firstmate/bin/fm-herdr-lab.sh'
+HERDR_LAB_SESSION=$("$HERDR_LAB_HELPER" name firstmate-herdr-spawn-cwd-race)
+trap '"$HERDR_LAB_HELPER" teardown "$HERDR_LAB_SESSION"' EXIT
+"$HERDR_LAB_HELPER" provision "$HERDR_LAB_SESSION"
+"$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" status --json \
+  | jq -c '{client:.client.version,session:.client.session,running:.server.running}'
+```
+
+```text
+{"client":"0.7.3","session":"fm-lab-firstmate-herdr-81438-24677","running":true}
+```
+
+The deterministic `treehouse` fixture changed only its own process cwd to a real disposable worktree and remained foreground long enough for two polls.
+It then exited, leaving the pane shell in the fake primary checkout.
+
+```sh
+#!/usr/bin/env bash
+set -eu
+[ "${1:-}" = get ] || exit 0
+cd -- "$FM_FAKE_TRANSIENT_WT"
+sleep 5
+```
+
+The pre-fix spawn command and exact observed outputs were:
+
+```sh
+HERDR_SESSION="$HERDR_LAB_SESSION" \
+FM_HOME="$LAB_HOME" FM_STATE_OVERRIDE="$LAB_HOME/state" \
+FM_DATA_OVERRIDE="$LAB_HOME/data" FM_PROJECTS_OVERRIDE="$LAB_HOME/projects" \
+FM_CONFIG_OVERRIDE="$LAB_HOME/config" FM_SPAWN_NO_GUARD=1 \
+./bin/fm-spawn.sh herdr-cwd-mask "$LAB_PROJECT" --scout \
+  --harness "FM_RECORD_FILE=$LAB_TRANSIENT2_RECORD $LAB_TMP/agent-recorder" \
+  --backend herdr
+```
+
+```text
+spawned herdr-cwd-mask harness=agent-recorder kind=scout mode=no-mistakes yolo=off window=fm-lab-firstmate-herdr-81438-24677:w1:p2 worktree=/private/tmp/fm-herdr-cwd-race.C20E54/transient worktree
+meta:   worktree=/private/tmp/fm-herdr-cwd-race.C20E54/transient worktree
+pwd -P: /private/tmp/fm-herdr-cwd-race.C20E54/fake project
+git:    /private/tmp/fm-herdr-cwd-race.C20E54/fake project
+pane:   {"cwd":"/private/tmp/fm-herdr-cwd-race.C20E54/fake project","foreground_cwd":"/private/tmp/fm-herdr-cwd-race.C20E54/fake project"}
+```
+
+The proven persistent path sent an explicit shell `cd` first, verified `foreground_cwd`, and then launched the same recorder.
+Both recorder lines and the live foreground cwd resolved to the disposable worktree.
+The smallest counterfactual started again from the fake primary shell and changed only the submitted launch line to `cd -- '<physical-worktree>' && <same-recorder>`.
+That single change also made both recorder lines and `foreground_cwd` resolve to the worktree, which confirms the launch boundary rather than polling accuracy was causal.
+
+The fix makes the actual launch line begin with a safely single-quoted `cd` to the already-validated physical path, checks `pwd -P` in that same command, and emits a private proof before the harness can start.
+Spawn consumes that proof only after launch submission.
+Herdr then passively requires two matching live `foreground_cwd` reads, and every verified Herdr harness must also appear as a native registered agent before those reads count.
+Metadata is published only after verification.
+Failure closes the exact task pane, preserves the Treehouse worktree, and leaves no new task metadata.
+
+The post-fix success run used the same transient fixture and raw recorder against the same Herdr lab.
+
+```text
+status:  0
+spawned herdr-cwd-fixed harness=agent-recorder kind=scout mode=no-mistakes yolo=off window=fm-lab-firstmate-herdr-81438-24677:w2:p2 worktree=/private/tmp/fm-herdr-cwd-race.C20E54/transient worktree
+pwd -P: /private/tmp/fm-herdr-cwd-race.C20E54/transient worktree
+git:    /private/tmp/fm-herdr-cwd-race.C20E54/transient worktree
+pane:   {"cwd":"/private/tmp/fm-herdr-cwd-race.C20E54/transient worktree","foreground_cwd":"/private/tmp/fm-herdr-cwd-race.C20E54/transient worktree"}
+meta:   worktree=/private/tmp/fm-herdr-cwd-race.C20E54/transient worktree
+```
+
+The exact incident harness profile was then exercised in a fresh generated lab session with the same transient fixture.
+
+```sh
+HERDR_SESSION="$HERDR_LAB_SESSION" \
+FM_HOME="$LAB_HOME" FM_STATE_OVERRIDE="$LAB_HOME/state" \
+FM_DATA_OVERRIDE="$LAB_HOME/data" FM_PROJECTS_OVERRIDE="$LAB_HOME/projects" \
+FM_CONFIG_OVERRIDE="$LAB_HOME/config" FM_SPAWN_NO_GUARD=1 \
+FM_SPAWN_LAUNCH_CWD_POLLS=120 FM_SPAWN_LAUNCH_CWD_INTERVAL=0.1 \
+./bin/fm-spawn.sh herdr-cwd-codex "$LAB_PROJECT" --scout \
+  --harness codex --model gpt-5.6-sol --effort xhigh --backend herdr
+```
+
+```text
+status: 0
+spawned herdr-cwd-codex harness=codex kind=scout mode=no-mistakes yolo=off window=fm-lab-firstmate-herdr-85647-9873:w1:p2 worktree=/private/tmp/fm-herdr-cwd-race.C20E54/transient worktree
+meta: harness=codex model=gpt-5.6-sol effort=xhigh backend=herdr
+pane:  {"cwd":"/private/tmp/fm-herdr-cwd-race.C20E54/transient worktree","foreground_cwd":"/private/tmp/fm-herdr-cwd-race.C20E54/transient worktree","agent_status":"idle"}
+agent: {"agent_status":"idle"}
+```
+
+The Codex screen showed the full anchored `cd`, unchanged model and effort flags, the physical worktree in the startup banner, and the normal directory trust prompt.
+The prompt remained untouched, the exact task pane was closed through the helper, and trap teardown again left `default` running with the generated lab absent.
+
+The fail-closed counter-test deliberately changed cwd back to the fake primary checkout after the launch proof and kept `sleep` in the foreground.
+
+```sh
+LAB_FAIL2_LAUNCH="cd -- '$LAB_PROJECT_PHYSICAL' && exec sleep 300"
+HERDR_SESSION="$HERDR_LAB_SESSION" \
+FM_HOME="$LAB_HOME" FM_STATE_OVERRIDE="$LAB_HOME/state" \
+FM_DATA_OVERRIDE="$LAB_HOME/data" FM_PROJECTS_OVERRIDE="$LAB_HOME/projects" \
+FM_CONFIG_OVERRIDE="$LAB_HOME/config" FM_SPAWN_NO_GUARD=1 \
+FM_SPAWN_LAUNCH_CWD_POLLS=50 FM_SPAWN_LAUNCH_CWD_INTERVAL=0.1 \
+./bin/fm-spawn.sh herdr-cwd-failclosed2 "$LAB_PROJECT" --scout \
+  --harness "$LAB_FAIL2_LAUNCH" --backend herdr
+```
+
+```text
+status: 1
+error: launch cwd verification failed for herdr-cwd-failclosed2: the post-launch foreground process did not stay in the validated worktree (expected '/private/tmp/fm-herdr-cwd-race.C20E54/transient worktree'; observed '/private/tmp/fm-herdr-cwd-race.C20E54/fake project'). The launched endpoint was stopped, the worktree was preserved, and metadata was not published.
+metadata: ABSENT
+worktree: /private/tmp/fm-herdr-cwd-race.C20E54/transient worktree
+matching live task tab after failure: none
+```
+
+The backend integration review found the following applicability boundaries.
+
+- tmux has a passive `pane_current_path`, so it uses the same post-launch two-read verification after the universal launch-side proof.
+- Herdr has passive `foreground_cwd` plus native registered-agent state, so it uses both checks.
+- Zellij and cmux expose only active marker-command cwd probes after a nested `treehouse get`, so running those probes after launch would type into the agent.
+- Orca exposes no passive terminal-cwd primitive.
+- Zellij, cmux, and Orca therefore use the universal same-command physical-cwd assertion as their post-submission proof, which gates agent start and relies on the operating-system cwd inheritance invariant.
+- Secondmates use the same anchored launch and proof against their validated physical home path, without applying the ship or scout distinct-checkout rule.
+- Harness templates, model and effort flags, task-temp export, turn-end hooks, trust prompts, and restored-layout endpoint recovery remain inside the unchanged launch payload after the cwd prefix.
+- `shell_quote` protects worktree and proof paths containing spaces, newlines, and single quotes.
+
+Deterministic regression coverage lives in `tests/fm-spawn-worktree-settle.test.sh`.
+It models two stable transient worktree reads followed by a primary shell, proves the submitted agent line contains the exact physical worktree anchor, and separately proves a post-launch primary cwd closes the endpoint without metadata.
+`tests/fm-backend-herdr.test.sh` pins metadata publication after both verification layers.
+
+After the trap teardown, the helper's post-check showed the generated lab absent and the captain's default session still running and unchanged.
+
+```text
+{"default":[{"name":"default","default":true,"running":true}],"lab":[]}
+```
+
 ## Known gaps and follow-up notes
 
 - **RESOLVED: worktree-discovery isolation guard's symlinked-project-prefix false refusal.** Originally discovered while building the runtime-backend-auto-detection real smoke test (`tests/fm-backend-autodetect-smoke.test.sh`), which needed a scratch project.

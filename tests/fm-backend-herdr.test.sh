@@ -916,6 +916,26 @@ test_projected_spawn_disarms_cleanup_before_ambiguous_launch_submission() {
   pass "fm-spawn: projected cleanup disarms before lock release and ambiguous launch submission"
 }
 
+test_spawn_publishes_metadata_only_after_launch_cwd_verification() {
+  local source proof_pattern passive_pattern meta_pattern proof_line passive_line meta_line
+  source=$(cat "$ROOT/bin/fm-spawn.sh")
+  proof_pattern='the launch-side physical-cwd assertion never completed'
+  passive_pattern='spawn_verify_passive_launch_cwd'
+  # shellcheck disable=SC2016  # source-code pattern, not a runtime expansion
+  meta_pattern='} > "$STATE/$ID.meta"'
+  # shellcheck disable=SC2016  # source-code pattern, not a runtime expansion
+  assert_contains "$source" 'LAUNCH="cd -- $sq_wt && [' \
+    "fm-spawn does not anchor the actual launch to the validated physical worktree"
+  proof_line=$(grep -nF "$proof_pattern" "$ROOT/bin/fm-spawn.sh" | tail -1 | cut -d: -f1)
+  passive_line=$(grep -nF "$passive_pattern" "$ROOT/bin/fm-spawn.sh" | tail -1 | cut -d: -f1)
+  meta_line=$(grep -nF "$meta_pattern" "$ROOT/bin/fm-spawn.sh" | tail -1 | cut -d: -f1)
+  [ -n "$proof_line" ] && [ -n "$passive_line" ] && [ -n "$meta_line" ] \
+    || fail "could not locate launch proof, passive verification, and metadata publication"
+  [ "$proof_line" -lt "$passive_line" ] && [ "$passive_line" -lt "$meta_line" ] \
+    || fail "metadata publication must follow both launch cwd verification layers"
+  pass "fm-spawn: metadata publication follows anchored launch proof and passive cwd verification"
+}
+
 test_projected_abort_cleanup_holds_presentation_lock() {
   local dir lock started proceed function_source owner_pid status
   dir="$TMP_ROOT/projection-abort-lock"; mkdir -p "$dir"
@@ -2462,6 +2482,7 @@ test_projection_order_failure_warns_without_cleanup_or_spawn_failure
 test_projection_order_ambiguous_existing_block_is_read_only
 test_spawn_task_lock_covers_all_backend_creation_and_metadata_publication
 test_projected_spawn_disarms_cleanup_before_ambiguous_launch_submission
+test_spawn_publishes_metadata_only_after_launch_cwd_verification
 test_projected_abort_cleanup_holds_presentation_lock
 test_projection_recovery_is_read_only_and_refuses_live_duplicate_risk
 test_workspace_find_matches_only_this_homes_own_label

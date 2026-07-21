@@ -32,6 +32,13 @@ case "${1:-}" in
       for a in "$@"; do
         if [ "$prev" = "-l" ]; then
           printf '%s\n' "$a" >> "$FM_FAKE_LAUNCH_LOG"
+          case "$a" in
+            *": > '"*".launch-cwd' && "*)
+              proof=${a#*": > '"}
+              proof=${proof%%"' && "*}
+              : > "$proof"
+              ;;
+          esac
         fi
         prev=$a
       done
@@ -81,14 +88,20 @@ make_seeded_secondmate_home() {
 }
 
 run_spawn() {
-  local home=$1 wt=$2 fakebin=$3 launchlog=$4
+  local home=$1 wt=$2 fakebin=$3 launchlog=$4 pane arg
   shift 4
   : > "$launchlog"
+  pane=$wt
+  for arg in "$@"; do
+    [ "$arg" = --secondmate ] && pane=$2
+  done
   FM_ROOT_OVERRIDE='' FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
-    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
-    FM_FAKE_LAUNCH_LOG="$launchlog" GROK_HOME="$home/grok-home" PATH="$fakebin:$PATH" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$pane" TMUX="fake,1,0" \
+    FM_FAKE_LAUNCH_LOG="$launchlog" \
+    FM_SPAWN_LAUNCH_CWD_POLLS=4 FM_SPAWN_LAUNCH_CWD_INTERVAL=0 \
+    GROK_HOME="$home/grok-home" PATH="$fakebin:$PATH" \
     "$SPAWN" "$@" 2>&1
 }
 
@@ -96,6 +109,8 @@ read_case_record() {
   IFS='|' read -r CASE_DIR HOME_DIR PROJ_DIR WT_DIR FAKEBIN_DIR LAUNCH_LOG <<EOF
 $1
 EOF
+  WT_REAL=$(cd "$WT_DIR" && pwd -P)
+  STATE_REAL=$(cd "$HOME_DIR/state" && pwd -P)
 }
 
 assert_meta_profile() {
@@ -118,9 +133,9 @@ test_no_profile_keeps_claude_launch_unchanged() {
   assert_meta_profile "$HOME_DIR/state/$id.meta" claude default default
 
   launch=$(cat "$LAUNCH_LOG")
-  expected="CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$(cat '$HOME_DIR/data/$id/brief.md')\""
+  expected="cd -- '$WT_REAL' && [ \"\$(pwd -P)\" = '$WT_REAL' ] && : > '$STATE_REAL/$id.launch-cwd' && CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$(cat '$HOME_DIR/data/$id/brief.md')\""
   [ "$launch" = "$expected" ] || fail "no-profile claude launch changed"$'\n'"expected: $expected"$'\n'"actual:   $launch"
-  pass "no --model/--effort records defaults and keeps the claude launch byte-identical"
+  pass "no --model/--effort records defaults while the claude launch stays cwd-anchored"
 }
 
 test_active_dispatch_profile_requires_explicit_harness_for_ship() {
@@ -204,7 +219,11 @@ test_active_dispatch_profile_allows_raw_launch_command() {
   assert_contains "$out" "spawned $id harness=custom-agent" "spawn did not report raw command harness"
   assert_meta_profile "$HOME_DIR/state/$id.meta" custom-agent default default
   launch=$(cat "$LAUNCH_LOG")
-  [ "$launch" = "custom-agent --flag" ] || fail "raw launch command changed"$'\n'"actual: $launch"
+  assert_contains "$launch" "cd -- '$WT_REAL'" "raw launch command lost the worktree anchor"
+  case "$launch" in
+    *" && custom-agent --flag") : ;;
+    *) fail "raw launch command payload changed"$'\n'"actual: $launch" ;;
+  esac
   pass "active crew-dispatch profile allows the raw launch-command escape hatch"
 }
 

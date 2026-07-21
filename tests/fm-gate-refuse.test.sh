@@ -147,7 +147,14 @@ esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
   list-windows) exit 0 ;;
-  has-session|new-session|new-window|send-keys|set-window-option) exit 0 ;;
+  send-keys)
+    for a in "$@"; do case "$a" in *": > '"*".launch-cwd' && "*)
+      proof=${a#*": > '"}
+      proof=${proof%%"' && "*}
+      : > "$proof"
+    ;; esac; done
+    exit 0 ;;
+  has-session|new-session|new-window|set-window-option) exit 0 ;;
 esac
 exit 0
 SH

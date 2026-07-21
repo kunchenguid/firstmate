@@ -80,6 +80,15 @@
 #   default-branch commit when safe; skipped syncs warn and launch unchanged.
 #   Ship/scout spawns refuse to launch unless the resolved task path is a real
 #   git worktree root distinct from the primary project checkout.
+#   Every launch line begins with a safely quoted `cd` to that exact validated
+#   physical path and a launch-side physical-cwd proof. The proof is consumed
+#   only after submission and before metadata publication. tmux and herdr also
+#   passively confirm the foreground cwd after launch; herdr waits for a native
+#   registered agent on every verified harness before accepting that read.
+#   A failed proof or passive check closes the exact task endpoint, preserves
+#   the allocated worktree, publishes no new metadata, and exits loudly.
+#   FM_SPAWN_LAUNCH_CWD_POLLS (default 80) and
+#   FM_SPAWN_LAUNCH_CWD_INTERVAL (default 0.25 seconds) bound both waits.
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
@@ -227,6 +236,7 @@ SPAWN_TASK_LOCK=
 SPAWN_TASK_LOCK_HELD=0
 CONFIG_INHERIT_LOCK=
 CONFIG_INHERIT_LOCK_HELD=0
+LAUNCH_CWD_PROOF=
 
 parse_orca_worktree_result() {
   local raw=$1 rest
@@ -247,6 +257,9 @@ parse_orca_worktree_result() {
 
 spawn_abort_cleanup() {
   local status=$?
+  if [ -n "${LAUNCH_CWD_PROOF:-}" ]; then
+    rm -f -- "$LAUNCH_CWD_PROOF" 2>/dev/null || true
+  fi
   if [ "$HERDR_PROJECTION_ABORT_CLEANUP" = 1 ] \
      && [ "$HERDR_PRESENTATION_ORDER_LOCK_HELD" != 1 ]; then
     if ! spawn_herdr_presentation_order_lock_acquire; then
@@ -766,6 +779,10 @@ real_path_or_raw() {  # <path>
   fi
 }
 
+if [ "$KIND" = secondmate ]; then
+  WT=$(real_path_or_raw "$WT")
+fi
+
 # Session-provider container-ensure + task creation. tmux stays exactly as P1
 # left it (same session-name / new-window sequence, see bin/backends/tmux.sh);
 # a herdr spawn goes through the version-gated, workspace-per-HOME,
@@ -790,6 +807,7 @@ validate_spawn_worktree() {  # <source> <inspect-target>
     echo "error: $source did not yield an isolated worktree (resolved '$WT'; worktree root '${wt_top:-none}'; primary '$PROJ_ABS'); refusing to launch to avoid tangling the primary checkout. Inspect target $inspect_target" >&2
     exit 1
   fi
+  WT=$wt_real
 }
 
 # A stale presentation journal never grants launch authority.
@@ -1205,6 +1223,136 @@ fi
 
 META_WINDOW=$T
 [ "$BACKEND" = orca ] && META_WINDOW=$W
+
+sq_brief=$(shell_quote "$BRIEF")
+sq_turnend=$(shell_quote "$TURNEND")
+sq_piext=$(shell_quote "$STATE/$ID.pi-ext.ts")
+sq_piturnend=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-turnend-guard.ts")
+sq_piwatch=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-pi-watch.ts")
+MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
+EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT")
+LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
+LAUNCH=${LAUNCH//__EFFORTFLAG__/$EFFORTFLAG}
+LAUNCH=${LAUNCH//__BRIEF__/$sq_brief}
+LAUNCH=${LAUNCH//__TURNEND__/$sq_turnend}
+LAUNCH=${LAUNCH//__PIEXT__/$sq_piext}
+LAUNCH=${LAUNCH//__PITURNEND__/$sq_piturnend}
+LAUNCH=${LAUNCH//__PIWATCH__/$sq_piwatch}
+if [ "$KIND" = secondmate ]; then
+  sq_home=$(shell_quote "$PROJ_ABS")
+  LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_HOME=$sq_home $LAUNCH"
+fi
+sq_wt=$(shell_quote "$WT")
+LAUNCH_CWD_PROOF="$STATE_REAL/$ID.launch-cwd"
+rm -f -- "$LAUNCH_CWD_PROOF"
+sq_launch_cwd_proof=$(shell_quote "$LAUNCH_CWD_PROOF")
+# This is the launch itself, not a preparatory ambient-pane `cd`. The physical
+# cwd assertion and proof execute in the same shell command immediately before
+# the harness, so the harness can start only after inheriting the validated cwd.
+# shell_quote preserves spaces, newlines, and single quotes in supported paths.
+LAUNCH="cd -- $sq_wt && [ \"\$(pwd -P)\" = $sq_wt ] && : > $sq_launch_cwd_proof && $LAUNCH"
+# Export GOTMPDIR into the crewmate's pane shell so the agent and every child
+# process (go build, go test, ...) inherit it. Sent before the launch command so
+# the env is set when the agent starts; the brief sleep lets the export land.
+spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp"
+sleep 0.3
+spawn_send_literal "$T" "$LAUNCH"
+sleep 0.3
+if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
+  HERDR_PROJECTION_ABORT_CLEANUP=0
+  spawn_herdr_presentation_order_lock_release
+fi
+spawn_stop_unverified_launch() {
+  # Launch verification failures preserve every allocated worktree. Orca's
+  # generic abort trap normally removes an unpublished allocation, so disarm
+  # only that worktree cleanup before closing the failed terminal endpoint.
+  [ "$BACKEND" != orca ] || ORCA_ABORT_CLEANUP=0
+  case "$BACKEND" in
+    zellij) fm_backend_zellij_kill "$T" "$ZELLIJ_TAB_ID" "$W" || true ;;
+    cmux) fm_backend_cmux_kill "$T" "" "$W" || true ;;
+    *) fm_backend_kill "$BACKEND" "$T" || true ;;
+  esac
+}
+
+spawn_launch_cwd_failure() {  # <reason> [observed]
+  local reason=$1 observed=${2:-unreadable}
+  rm -f -- "$LAUNCH_CWD_PROOF" 2>/dev/null || true
+  LAUNCH_CWD_PROOF=
+  spawn_stop_unverified_launch
+  echo "error: launch cwd verification failed for $ID: $reason (expected '$WT'; observed '$observed'). The launched endpoint was stopped, the worktree was preserved, and metadata was not published." >&2
+  exit 1
+}
+
+FM_SPAWN_LAUNCH_CWD_POLLS=${FM_SPAWN_LAUNCH_CWD_POLLS:-80}
+FM_SPAWN_LAUNCH_CWD_INTERVAL=${FM_SPAWN_LAUNCH_CWD_INTERVAL:-0.25}
+case "$FM_SPAWN_LAUNCH_CWD_POLLS" in
+  ''|*[!0-9]*|0) spawn_launch_cwd_failure "FM_SPAWN_LAUNCH_CWD_POLLS must be a positive integer" ;;
+esac
+if ! [[ "$FM_SPAWN_LAUNCH_CWD_INTERVAL" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+  spawn_launch_cwd_failure "FM_SPAWN_LAUNCH_CWD_INTERVAL must be a non-negative number"
+fi
+
+if ! spawn_send_key "$T" Enter; then
+  spawn_launch_cwd_failure "the launch command could not be submitted"
+fi
+
+launch_proved=0
+for _ in $(seq 1 "$FM_SPAWN_LAUNCH_CWD_POLLS"); do
+  if [ -f "$LAUNCH_CWD_PROOF" ]; then
+    launch_proved=1
+    break
+  fi
+  sleep "$FM_SPAWN_LAUNCH_CWD_INTERVAL"
+done
+[ "$launch_proved" -eq 1 ] \
+  || spawn_launch_cwd_failure "the launch-side physical-cwd assertion never completed"
+
+spawn_verify_passive_launch_cwd() {
+  local stable=0 p p_real agent_state=not-applicable
+  case "$BACKEND" in
+    tmux|herdr) ;;
+    # Zellij and cmux expose only an active pwd injection after treehouse get,
+    # which would type into the launched agent. Orca exposes no terminal-cwd
+    # read. Their post-submission proof is the same-command cwd assertion above.
+    zellij|cmux|orca) return 0 ;;
+  esac
+  for _ in $(seq 1 "$FM_SPAWN_LAUNCH_CWD_POLLS"); do
+    p=$(spawn_current_path "$T" || true)
+    p_real=$(real_path_or_raw "$p")
+    if [ "$p_real" = "$WT" ]; then
+      if [ "$BACKEND" = herdr ]; then
+        case "$HARNESS" in
+          claude|codex|opencode|pi|grok)
+            agent_state=$(fm_backend_herdr_pane_agent_state "$HERDR_SES" "$HERDR_PANE_ID")
+            [ "$agent_state" = live ] || {
+              stable=0
+              sleep "$FM_SPAWN_LAUNCH_CWD_INTERVAL"
+              continue
+            }
+            ;;
+        esac
+      fi
+      stable=$((stable + 1))
+      [ "$stable" -ge 2 ] && return 0
+    else
+      stable=0
+    fi
+    sleep "$FM_SPAWN_LAUNCH_CWD_INTERVAL"
+  done
+  SPAWN_OBSERVED_LAUNCH_CWD=${p_real:-unreadable}
+  [ "$agent_state" = not-applicable ] \
+    || SPAWN_OBSERVED_LAUNCH_CWD="$SPAWN_OBSERVED_LAUNCH_CWD; herdr-agent=$agent_state"
+  return 1
+}
+
+SPAWN_OBSERVED_LAUNCH_CWD=unreadable
+spawn_verify_passive_launch_cwd \
+  || spawn_launch_cwd_failure "the post-launch foreground process did not stay in the validated worktree" "$SPAWN_OBSERVED_LAUNCH_CWD"
+rm -f -- "$LAUNCH_CWD_PROOF"
+LAUNCH_CWD_PROOF=
+
+# Metadata is a success publication, never a launch intent. Keep it after both
+# the launch-side proof and every applicable passive foreground-cwd check.
 {
   echo "window=$META_WINDOW"
   echo "worktree=$WT"
@@ -1246,36 +1394,6 @@ META_WINDOW=$T
 } > "$STATE/$ID.meta"
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
 
-sq_brief=$(shell_quote "$BRIEF")
-sq_turnend=$(shell_quote "$TURNEND")
-sq_piext=$(shell_quote "$STATE/$ID.pi-ext.ts")
-sq_piturnend=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-turnend-guard.ts")
-sq_piwatch=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-pi-watch.ts")
-MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
-EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT")
-LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
-LAUNCH=${LAUNCH//__EFFORTFLAG__/$EFFORTFLAG}
-LAUNCH=${LAUNCH//__BRIEF__/$sq_brief}
-LAUNCH=${LAUNCH//__TURNEND__/$sq_turnend}
-LAUNCH=${LAUNCH//__PIEXT__/$sq_piext}
-LAUNCH=${LAUNCH//__PITURNEND__/$sq_piturnend}
-LAUNCH=${LAUNCH//__PIWATCH__/$sq_piwatch}
-if [ "$KIND" = secondmate ]; then
-  sq_home=$(shell_quote "$PROJ_ABS")
-  LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_HOME=$sq_home $LAUNCH"
-fi
-# Export GOTMPDIR into the crewmate's pane shell so the agent and every child
-# process (go build, go test, ...) inherit it. Sent before the launch command so
-# the env is set when the agent starts; the brief sleep lets the export land.
-spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp"
-sleep 0.3
-spawn_send_literal "$T" "$LAUNCH"
-sleep 0.3
-if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
-  HERDR_PROJECTION_ABORT_CLEANUP=0
-  spawn_herdr_presentation_order_lock_release
-fi
-spawn_send_key "$T" Enter
 if [ "$KIND" = secondmate ]; then
   if ! fm_config_reread_discard_pending "$PROJ_ABS" "$ID" "$FM_HOME"; then
     if fm_config_reread_quarantine_pending "$PROJ_ABS" "$ID" "$FM_HOME"; then
@@ -1285,5 +1403,4 @@ if [ "$KIND" = secondmate ]; then
     fi
   fi
 fi
-
 echo "spawned $ID harness=$HARNESS kind=$KIND mode=$MODE yolo=$YOLO window=$META_WINDOW worktree=$WT"

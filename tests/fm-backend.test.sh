@@ -750,6 +750,12 @@ case "\${1:-}" in
     for a in "\$@"; do case "\$a" in *pane_current_path*) printf '%s\\n' "$wt"; exit 0 ;; esac; done
     printf 'firstmate\\n'; exit 0 ;;
   list-windows) exit 0 ;;
+  send-keys)
+    for a in "\$@"; do case "\$a" in *": > '"*".launch-cwd' && "*)
+      proof=\${a#*": > '"}
+      proof=\${proof%%"' && "*}
+      : > "\$proof"
+    ;; esac; done ;;
 esac
 exit 0
 SH
@@ -820,6 +826,12 @@ case "\${1:-}" in
     ;; esac; done
     printf 'firstmate\\n'; exit 0 ;;
   list-windows) exit 0 ;;
+  send-keys)
+    for a in "\$@"; do case "\$a" in *": > '"*".launch-cwd' && "*)
+      proof=\${a#*": > '"}
+      proof=\${proof%%"' && "*}
+      : > "\$proof"
+    ;; esac; done ;;
 esac
 exit 0
 SH
@@ -829,7 +841,7 @@ SH
 }
 
 run_spawn_symlink_case() {  # <label> <physical|logical>
-  local label=$1 first_reply=$2 real_root link_root proj wt id fb data state config log out rc proj_phys initial_path
+  local label=$1 first_reply=$2 real_root link_root proj wt id fb data state config log out rc proj_phys wt_phys initial_path
   real_root="$TMP_ROOT/symlink-real-$label"; link_root="$TMP_ROOT/symlink-link-$label"
   mkdir -p "$real_root"
   ln -s "$real_root" "$link_root"
@@ -843,6 +855,7 @@ run_spawn_symlink_case() {  # <label> <physical|logical>
   # fm-spawn.sh's own PROJ_ABS_REAL computes, including any symlink layers
   # ABOVE this test's own synthetic real_root/link_root pair.
   proj_phys=$(cd "$real_root/proj" && pwd -P)
+  wt_phys=$(cd "$wt" && pwd -P)
   case "$first_reply" in
     physical) initial_path=$proj_phys ;;
     logical) initial_path=$proj ;;
@@ -859,7 +872,7 @@ run_spawn_symlink_case() {  # <label> <physical|logical>
   out=$(run_spawn_case "$ROOT" "$fb" "$log" "$state" "$data" "$config" "$proj" -- "$id" "$proj" claude 2>&1)
   rc=$?
   expect_code 0 "$rc" "fm-spawn.sh should succeed for a project reached through a symlinked prefix when the backend reports $first_reply cwd"$'\n'"$out"
-  assert_contains "$out" "worktree=$wt" \
+  assert_contains "$out" "worktree=$wt_phys" \
     "fm-spawn.sh did not resolve a symlinked-prefix project to its real worktree when the backend reports $first_reply cwd"
 
   rm -rf "/tmp/fm-$id"
