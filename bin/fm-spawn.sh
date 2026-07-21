@@ -1458,7 +1458,13 @@ META_WINDOW=$T
     echo "home=$PROJ_ABS"
     echo "projects=$SECONDMATE_PROJECTS"
   fi
-} > "$STATE/$ID.meta"
+} > "$STATE/$ID.meta" || {
+  # A failed redirection on a `{ ...; } > file` group command does not trip
+  # `set -e` on its own (a bash quirk), so this failure must be caught
+  # explicitly to reach the abort-cleanup trap above.
+  echo "error: failed to write metadata for $ID to $STATE/$ID.meta" >&2
+  exit 1
+}
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
 
 sq_brief=$(shell_quote "$BRIEF")
