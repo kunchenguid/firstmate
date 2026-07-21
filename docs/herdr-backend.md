@@ -916,10 +916,56 @@ Codex hooks review similarly navigates from `Review hooks` to `Trust all and con
 An unknown focus, an unknown blocked dialog, unreadable post-key state, or an exhausted three-attempt key budget fails the spawn with a classified error.
 
 Raw capture text alone is never trusted as proof of a live dialog: the typed launch command carries the shell-quoted brief, harness transcripts can render dialog wording, and the recent source retains dismissed frames inside the capture window.
-Every classified dialog, unknown shape, and dismissal readback is therefore corroborated against `agent get`: only a `working` agent — actively generating, therefore past its startup dialogs — suppresses keys and verifies the spawn while dialog-shaped text is visible.
-`idle`/`done` are trusted only when the capture shows no dialog shape at all, because no recorded observation pins what agent_status reads while a dialog is actually displayed and a harness parked at one is not generating.
+Every classified dialog, unknown shape, and dismissal readback is therefore corroborated against `agent get`: only a `working` agent, actively generating and therefore past its startup dialogs, suppresses keys and verifies the spawn while dialog-shaped text is visible.
+`idle`/`done` are trusted only when the capture shows no dialog shape at all, because the live evidence below records `idle` while Claude's trust dialog is visibly blocking startup.
 An unknown shape fails immediately only when the agent is corroborated blocked, and otherwise keeps polling to the bounded timeout.
-The corroboration paths are exercised by the fake-CLI cases only; a live first-launch dismissal traversal through the lab helper has not yet been recorded.
+The fake-CLI cases exercise every corroboration branch, and the live traversal below establishes the safety-critical reason only `working` may suppress a visible dialog.
+
+### Live Claude trust-dialog traversal (2026-07-21, Claude Code 2.1.216, herdr 0.7.4, protocol 16, macOS aarch64)
+
+Two fresh nested Git repositories produced the real Claude folder-trust dialog inside generated non-default Herdr lab sessions.
+Every Herdr lifecycle and pane command went through `/Users/simonkopp/Documents/AIShared/Varia/firstmate-home/bin/fm-herdr-lab.sh`, and both EXIT teardowns completed without a fleet-state tripwire error.
+The dialog classifier reported `claude-trust accept`, while `herdr agent get` reported `agent_status: idle` at the same visible dialog.
+One Enter dismissed the trust dialog, and subsequent capture classified no startup dialog.
+This proves that `idle` is not evidence that startup dialogs are cleared and empirically justifies the working-only short-circuit.
+
+The core commands were:
+
+```sh
+HERDR_LAB_HELPER=/Users/simonkopp/Documents/AIShared/Varia/firstmate-home/bin/fm-herdr-lab.sh
+HERDR_LAB_SESSION=$("$HERDR_LAB_HELPER" name herdr-dialog-harden-h3-live2)
+LAB_CWD="$PWD/_scratch/$HERDR_LAB_SESSION-project"
+mkdir -p "$LAB_CWD"
+git -C "$LAB_CWD" init -q
+trap '"$HERDR_LAB_HELPER" teardown "$HERDR_LAB_SESSION"' EXIT
+"$HERDR_LAB_HELPER" provision "$HERDR_LAB_SESSION"
+CREATE=$("$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" workspace create --cwd "$LAB_CWD" --label herdr-dialog-live --no-focus)
+PANE_ID=$(printf '%s' "$CREATE" | jq -r '.result.root_pane.pane_id // empty')
+"$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" pane run "$PANE_ID" \
+  'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions "Reply with exactly LAB_DIALOG_OK after carefully considering the request. Do not use tools."'
+CAPTURE=$("$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" pane read "$PANE_ID" --source recent --lines 80)
+bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_dialog_classify claude "$1"' "$PWD" "$CAPTURE"
+"$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" agent get "$PANE_ID"
+"$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" pane send-keys "$PANE_ID" enter
+```
+
+Exact observed states from the first traversal:
+
+```text
+LAB_SESSION=fm-lab-herdr-dialog-har-31734-26471
+PANE_ID=w1:p1
+TRUST_STATE=claude-trust accept
+TRUST_AGENT_STATUS=idle
+AFTER_TRUST_ENTER_STATE=none none
+BYPASS_STATE=not-observed
+```
+
+The second traversal used session `fm-lab-herdr-dialog-har-37005-27635` and added the per-session launch override `--settings '{"skipDangerousModePermissionPrompt":false}'`.
+It reproduced the same `claude-trust accept` plus `agent_status: idle` observation and the same successful trust dismissal.
+
+The real Bypass Permissions warning could not be reproduced because its earlier acceptance persists in Claude's user state on this machine.
+The per-session override did not make Claude re-present the warning, and the task deliberately did not reset or purge persisted Claude user state.
+This is a known evidence limitation for the live traversal, while the real Herdr key-delivery path and the destructive-default bypass sequence remain covered respectively by the live readback reproduction and the raw-terminal synthetic menu below.
 
 The recurring watcher warning was a separate deterministic shell bug rather than proof that Herdr dropped a key.
 `fm_backend_herdr_events_capable` piped the large `api schema` value through `grep -q` twice.
