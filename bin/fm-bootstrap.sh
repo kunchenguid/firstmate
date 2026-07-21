@@ -222,6 +222,13 @@ secondmate_sync() {
     SECOND_MATE_NUDGE_REJECTED_IDS="$SECOND_MATE_NUDGE_REJECTED_IDS $1"
   }
 
+  secondmate_nudge_id_rejected() {
+    case " $SECOND_MATE_NUDGE_REJECTED_IDS " in
+      *" $1 "*) return 0 ;;
+    esac
+    return 1
+  }
+
   secondmate_collect_pending_nudge_ids() {
     local marker marker_id id
     [ -d "$SECOND_MATE_NUDGE_PENDING_DIR" ] || return 0
@@ -255,6 +262,22 @@ secondmate_sync() {
     echo "NUDGE_SECONDMATES: secondmate ${id:-unknown}: send failed: $reason"
     secondmate_reject_nudge_id "$marker_id"
     secondmate_reject_nudge_id "$id"
+  }
+
+  secondmate_prevalidate_pending_nudges() {
+    local marker marker_id id expected_marker
+    [ -d "$SECOND_MATE_NUDGE_PENDING_DIR" ] || return 0
+    for marker in "$SECOND_MATE_NUDGE_PENDING_DIR"/*.pending; do
+      [ -f "$marker" ] || continue
+      marker_id=$(basename "$marker" .pending)
+      id=$(fm_meta_get "$marker" id)
+      if ! expected_marker=$(secondmate_nudge_marker_path "$id"); then
+        secondmate_reject_pending_nudge "$marker_id" "$id" "retry marker has unsafe id"
+        continue
+      fi
+      [ "$expected_marker" = "$marker" ] ||
+        secondmate_reject_pending_nudge "$marker_id" "$id" "retry marker filename mismatch"
+    done
   }
 
   secondmate_consume_nudge_marker() {
@@ -324,6 +347,7 @@ secondmate_sync() {
 
   secondmate_send_nudge() {
     local id=$1 home=$2 commit=$3 instr=$4 selector marker out
+    secondmate_nudge_id_rejected "$id" && return 1
     selector="fm-$id"
     marker=$(secondmate_nudge_marker_path "$id") || {
       secondmate_reject_pending_nudge "$id" "$id" "unsafe id"
@@ -351,10 +375,14 @@ secondmate_sync() {
   secondmate_retry_pending_nudges() {
     local marker marker_id id selector home commit instructions message expected_marker meta meta_home home_real head recorded_commit current_primary_head
     [ -d "$SECOND_MATE_NUDGE_PENDING_DIR" ] || return 0
+    secondmate_prevalidate_pending_nudges
     for marker in "$SECOND_MATE_NUDGE_PENDING_DIR"/*.pending; do
       [ -f "$marker" ] || continue
       marker_id=$(basename "$marker" .pending)
       id=$(fm_meta_get "$marker" id)
+      if secondmate_nudge_id_rejected "$marker_id" || secondmate_nudge_id_rejected "$id"; then
+        continue
+      fi
       if ! expected_marker=$(secondmate_nudge_marker_path "$id"); then
         secondmate_reject_pending_nudge "$marker_id" "$id" "retry marker has unsafe id"
         continue

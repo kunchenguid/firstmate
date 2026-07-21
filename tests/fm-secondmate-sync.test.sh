@@ -479,6 +479,73 @@ test_bootstrap_nudge_retry_rejects_malformed_marker_id() {
   pass "T8f bootstrap nudge retry rejects malformed marker ids"
 }
 
+assert_bootstrap_nudge_marker_conflict_order() {
+  local name=$1 alias=$2 w c1 fakebin out marker_dir canonical conflict unrelated
+  local canonical_before conflict_before sm_head log log_contents
+  w=$(new_world "$name")
+  c1=$(head_of "$w/main")
+  add_sm_worktree "$w" sm "$c1"
+  add_sm_worktree "$w" ok "$c1"
+  bump_primary "$w" instr
+  fakebin=$(make_fake_toolchain "$w")
+
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
+    FM_SEND_SETTLE=0 FM_FAKE_TMUX_FAIL_LITERAL=1 \
+    "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
+  assert_contains "$out" "NUDGE_SECONDMATES: secondmate sm: send failed:" \
+    "precondition: conflicted target should have a retry marker"
+  assert_contains "$out" "NUDGE_SECONDMATES: secondmate ok: send failed:" \
+    "precondition: unrelated target should have a retry marker"
+  marker_dir="$w/home/state/.secondmate-nudge-pending"
+  canonical="$marker_dir/sm.pending"
+  unrelated="$marker_dir/ok.pending"
+  conflict="$marker_dir/$alias.pending"
+  assert_present "$canonical" "precondition: canonical retry marker should exist"
+  assert_present "$unrelated" "precondition: unrelated retry marker should exist"
+  cp "$canonical" "$conflict"
+  canonical_before=$(cat "$canonical")
+  conflict_before=$(cat "$conflict")
+  sm_head=$(head_of "$w/sm")
+  log="$w/conflict-tmux.log"
+
+  out=$(LC_ALL=C PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
+    FM_SEND_SETTLE=0 FM_FAKE_TMUX_LOG="$log" \
+    "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
+
+  assert_contains "$out" "NUDGE_SECONDMATES: secondmate sm: send failed: retry marker filename mismatch" \
+    "filename conflict should reject its target before any retry send"
+  assert_not_contains "$out" "BOOTSTRAP_INFO: nudged fm-sm" \
+    "conflicted target should not send regardless of marker order"
+  assert_contains "$out" "BOOTSTRAP_INFO: nudged fm-ok with" \
+    "unrelated valid retry should still proceed"
+  assert_contains "$out" "SECONDMATE_LIVENESS: secondmate sm: skipped: pending nudge retry rejected during this startup" \
+    "conflicted target should remain isolated from liveness mutation"
+  assert_present "$canonical" "conflict should preserve the canonical marker"
+  assert_present "$conflict" "conflict should preserve the mismatched marker"
+  [ "$(cat "$canonical")" = "$canonical_before" ] \
+    || fail "conflict changed the canonical marker"
+  [ "$(cat "$conflict")" = "$conflict_before" ] \
+    || fail "conflict changed the mismatched marker"
+  assert_absent "$unrelated" "successful unrelated retry should consume its marker"
+  [ "$(head_of "$w/sm")" = "$sm_head" ] \
+    || fail "conflicted target HEAD changed"
+  log_contents=$(cat "$log" 2>/dev/null || true)
+  assert_not_contains "$log_contents" "fm-sm" \
+    "conflicted target should not probe or mutate its endpoint"
+  assert_contains "$log_contents" "fm-ok" \
+    "unrelated valid retry should use its endpoint"
+}
+
+test_bootstrap_nudge_marker_conflict_before_canonical() {
+  assert_bootstrap_nudge_marker_conflict_order nudge-conflict-before a-conflict
+  pass "T8k marker conflict before canonical rejects the complete id set"
+}
+
+test_bootstrap_nudge_marker_conflict_after_canonical() {
+  assert_bootstrap_nudge_marker_conflict_order nudge-conflict-after z-conflict
+  pass "T8l marker conflict after canonical rejects the complete id set"
+}
+
 test_bootstrap_nudge_failure_records_retry_marker() {
   local w c1 fakebin out marker
   w=$(new_world nudge-failure)
@@ -1079,6 +1146,8 @@ test_sweep_nudge_requires_instruction_change
 test_bootstrap_sweep_nudges_only_instruction_change
 test_bootstrap_nudge_send_uses_state_override
 test_bootstrap_nudge_retry_rejects_malformed_marker_id
+test_bootstrap_nudge_marker_conflict_before_canonical
+test_bootstrap_nudge_marker_conflict_after_canonical
 test_bootstrap_nudge_failure_records_retry_marker
 test_bootstrap_nudge_retry_is_idempotent
 test_bootstrap_nudge_retry_requires_marker_consumption
