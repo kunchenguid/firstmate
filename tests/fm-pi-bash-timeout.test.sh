@@ -17,6 +17,26 @@ resolve_for_home() {
   env -u FM_PI_BASH_TIMEOUT_SECS FM_HOME="$home" FM_CONFIG_OVERRIDE="$home/config" "$RESOLVER"
 }
 
+install_fake_pi_package() {
+  local home=$1 package="$1/node_modules/@earendil-works/pi-coding-agent"
+  mkdir -p "$package"
+  cat > "$package/package.json" <<'EOF'
+{"type":"module","main":"./index.js"}
+EOF
+  cat > "$package/index.js" <<'EOF'
+export function createBashToolDefinition(cwd) {
+  return {
+    name: "bash",
+    label: "Bash",
+    description: "Run bash",
+    parameters: {},
+    cwd,
+    async execute() { return { content: [], details: undefined }; },
+  };
+}
+EOF
+}
+
 test_resolver_precedence_disable_and_invalid_fallback() {
   local home out
   home="$TMP_ROOT/resolver-home"
@@ -29,6 +49,18 @@ test_resolver_precedence_disable_and_invalid_fallback() {
   out=$(resolve_for_home "$home")
   [ "$out" = 1200 ] || fail "Pi timeout config should resolve to 1200, got '$out'"
 
+  printf '2147483\n' > "$home/config/pi-bash-timeout"
+  out=$(resolve_for_home "$home")
+  [ "$out" = 2147483 ] || fail "Pi's maximum integer timeout should be accepted, got '$out'"
+
+  printf '2147484\n' > "$home/config/pi-bash-timeout"
+  out=$(resolve_for_home "$home")
+  [ "$out" = 900 ] || fail "timeout above Pi's maximum should fall back to 900, got '$out'"
+
+  printf '999999999999999999999999999999999999999\n' > "$home/config/pi-bash-timeout"
+  out=$(resolve_for_home "$home")
+  [ "$out" = 900 ] || fail "oversized timeout should safely fall back to 900, got '$out'"
+
   printf '0\n' > "$home/config/pi-bash-timeout"
   out=$(resolve_for_home "$home")
   [ -z "$out" ] || fail "config/pi-bash-timeout=0 should disable injection, got '$out'"
@@ -38,8 +70,10 @@ test_resolver_precedence_disable_and_invalid_fallback() {
   [ "$out" = 900 ] || fail "invalid Pi timeout config should safely fall back to 900, got '$out'"
 
   printf '1200\n' > "$home/config/pi-bash-timeout"
-  out=$(FM_HOME="$home" FM_CONFIG_OVERRIDE="$home/config" FM_PI_BASH_TIMEOUT_SECS=none "$RESOLVER")
-  [ -z "$out" ] || fail "FM_PI_BASH_TIMEOUT_SECS=none should override and disable file config, got '$out'"
+  out=$(FM_HOME="$home" FM_CONFIG_OVERRIDE="$home/config" FM_PI_BASH_TIMEOUT_SECS=NoNe "$RESOLVER")
+  [ -z "$out" ] || fail "FM_PI_BASH_TIMEOUT_SECS=NoNe should override and disable file config, got '$out'"
+  out=$(FM_HOME="$home" FM_CONFIG_OVERRIDE="$home/config" FM_PI_BASH_TIMEOUT_SECS=OFF "$RESOLVER")
+  [ -z "$out" ] || fail "FM_PI_BASH_TIMEOUT_SECS=OFF should override and disable file config, got '$out'"
   out=$(FM_HOME="$home" FM_CONFIG_OVERRIDE="$home/config" FM_PI_BASH_TIMEOUT_SECS=2400 "$RESOLVER")
   [ "$out" = 2400 ] || fail "FM_PI_BASH_TIMEOUT_SECS should override file config, got '$out'"
 
@@ -75,6 +109,7 @@ generate_crew_extension() {
   wt="$case_dir/worktree"
   fakebin=$(make_spawn_fakebin "$case_dir/fake")
   mkdir -p "$home/data/$id" "$home/projects" "$home/state" "$home/config"
+  install_fake_pi_package "$home"
   printf '{"type":"module"}\n' > "$home/package.json"
   printf 'pi\n' > "$home/config/crew-harness"
   printf 'Pi timeout test brief.\n' > "$home/data/$id/brief.md"
@@ -105,10 +140,9 @@ EOF
   esac
 
   content=$(cat "$ext")
-  assert_contains "$content" 'pi.on("tool_call"' "generated Pi extension does not handle bash tool calls"
+  assert_contains "$content" 'pi.registerTool' "generated Pi extension does not override the bash tool"
   assert_contains "$content" 'fm-pi-bash-timeout.sh' "generated Pi extension does not use the shared timeout resolver"
-  assert_contains "$content" 'input.timeout !== undefined && input.timeout !== null' "generated Pi extension does not preserve explicit timeouts"
-  assert_contains "$content" 'input.timeout = timeout' "generated Pi extension does not inject a resolved timeout"
+  assert_contains "$content" 'prepareArguments: prepareBashArguments' "generated Pi extension does not prepare raw arguments before validation"
   assert_contains "$content" 'pi.on("turn_end"' "generated Pi extension lost its turn-end signal"
 
   out=$(env -u FM_PI_BASH_TIMEOUT_SECS PLUGIN="$ext" FM_HOME="$home" node --input-type=module 2>&1 <<'EOF'
@@ -116,29 +150,38 @@ import { writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
 const handlers = new Map();
-const pi = { on(event, handler) { handlers.set(event, handler); } };
+let bashTool;
+const pi = {
+  on(event, handler) { handlers.set(event, handler); },
+  registerTool(tool) { if (tool.name === "bash") bashTool = tool; },
+};
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 mod.default(pi);
-const toolCall = handlers.get("tool_call");
-if (!toolCall) throw new Error("generated extension did not register tool_call");
+if (!bashTool?.prepareArguments) throw new Error("generated extension did not register bash argument preparation");
+const prepare = bashTool.prepareArguments;
 const config = `${process.env.FM_HOME}/config/pi-bash-timeout`;
 
-let input = { command: "printf default" };
-await toolCall({ type: "tool_call", toolName: "bash", input });
+let input = prepare({ command: "printf default" });
 if (input.timeout !== 900) throw new Error(`default timeout was ${input.timeout}`);
 
-input = { command: "printf explicit", timeout: 987654 };
-await toolCall({ type: "tool_call", toolName: "bash", input });
-if (input.timeout !== 987654) throw new Error(`explicit timeout was replaced with ${input.timeout}`);
+input = prepare({ command: "printf null", timeout: null });
+if (input.timeout !== 900) throw new Error(`null timeout was ${input.timeout}`);
+
+input = prepare({ command: "printf explicit-zero", timeout: 0 });
+if (input.timeout !== 0) throw new Error(`explicit zero was replaced with ${input.timeout}`);
+
+input = prepare({ command: "printf explicit-valid", timeout: 987654 });
+if (input.timeout !== 987654) throw new Error(`explicit valid timeout was replaced with ${input.timeout}`);
+
+input = prepare({ command: "printf explicit-large", timeout: 4_000_000_000 });
+if (input.timeout !== 4_000_000_000) throw new Error(`explicit large timeout was replaced with ${input.timeout}`);
 
 writeFileSync(config, "0\n");
-input = { command: "printf disabled" };
-await toolCall({ type: "tool_call", toolName: "bash", input });
+input = prepare({ command: "printf disabled" });
 if (Object.hasOwn(input, "timeout")) throw new Error(`disabled config injected ${input.timeout}`);
 
 writeFileSync(config, "invalid\n");
-input = { command: "printf invalid" };
-await toolCall({ type: "tool_call", toolName: "bash", input });
+input = prepare({ command: "printf invalid", timeout: undefined });
 if (input.timeout !== 900) throw new Error(`invalid config resolved to ${input.timeout}`);
 EOF
 )
@@ -152,6 +195,7 @@ make_primary_fixture() {
   local repo=$1 home=$2
   mkdir -p "$repo/.pi/extensions" "$repo/bin" "$home/config" "$home/state"
   printf '{"type":"module"}\n' > "$repo/package.json"
+  install_fake_pi_package "$repo"
   cp "$PRIMARY_EXTENSION" "$repo/.pi/extensions/fm-primary-turnend-guard.ts"
   cp "$RESOLVER" "$repo/bin/fm-pi-bash-timeout.sh"
   cat > "$repo/bin/fm-cd-pretool-check.sh" <<'SH'
@@ -177,39 +221,47 @@ import { chmodSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
 const handlers = new Map();
+let bashTool;
 const pi = {
   on(event, handler) { handlers.set(event, handler); },
+  registerTool(tool) { if (tool.name === "bash") bashTool = tool; },
   sendMessage() {},
 };
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 mod.default(pi);
+if (!bashTool?.prepareArguments) throw new Error("primary extension did not register bash argument preparation");
+const prepare = bashTool.prepareArguments;
 const toolCall = handlers.get("tool_call");
 if (!toolCall) throw new Error("primary extension did not register tool_call");
 const config = `${process.env.FM_HOME}/config/pi-bash-timeout`;
 
-let input = { command: "printf default" };
+let input = prepare({ command: "printf default" });
 let result = await toolCall({ type: "tool_call", toolName: "bash", input });
 if (result?.block) throw new Error("ordinary bash call was blocked");
 if (input.timeout !== 900) throw new Error(`default timeout was ${input.timeout}`);
 
-input = { command: "printf explicit", timeout: 1234567 };
+input = prepare({ command: "printf null", timeout: null });
 await toolCall({ type: "tool_call", toolName: "bash", input });
-if (input.timeout !== 1234567) throw new Error(`explicit timeout was replaced with ${input.timeout}`);
+if (input.timeout !== 900) throw new Error(`null timeout was ${input.timeout}`);
+
+input = prepare({ command: "printf explicit", timeout: 4_000_000_000 });
+await toolCall({ type: "tool_call", toolName: "bash", input });
+if (input.timeout !== 4_000_000_000) throw new Error(`explicit timeout was replaced with ${input.timeout}`);
 
 writeFileSync(config, "0\n");
-input = { command: "printf disabled" };
+input = prepare({ command: "printf disabled" });
 await toolCall({ type: "tool_call", toolName: "bash", input });
 if (Object.hasOwn(input, "timeout")) throw new Error(`disabled config injected ${input.timeout}`);
 
 writeFileSync(config, "bad-value\n");
-input = { command: "printf invalid" };
+input = prepare({ command: "printf invalid" });
 await toolCall({ type: "tool_call", toolName: "bash", input });
 if (input.timeout !== 900) throw new Error(`invalid config resolved to ${input.timeout}`);
 
 const cdCheck = new URL("../../bin/fm-cd-pretool-check.sh", import.meta.resolve(process.env.PLUGIN));
 writeFileSync(cdCheck, "#!/usr/bin/env bash\nprintf 'blocked for test\\n' >&2\nexit 2\n");
 chmodSync(cdCheck, 0o755);
-input = { command: "cd /tmp" };
+input = prepare({ command: "cd /tmp" });
 result = await toolCall({ type: "tool_call", toolName: "bash", input });
 if (!result?.block) throw new Error("existing cd seatbelt no longer blocked");
 if (input.timeout !== 900) throw new Error(`blocked call did not retain injected default: ${input.timeout}`);

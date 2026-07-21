@@ -1135,7 +1135,9 @@ EOF
 // (fires once, only when the whole run exits): the watcher needs a signal at
 // every turn boundary so an idle crewmate is surfaced, not just at shutdown.
 import { execFile, spawnSync } from "node:child_process";
+import { createBashToolDefinition } from "@earendil-works/pi-coding-agent";
 const defaultBashTimeoutSecs = 900;
+const maxBashTimeoutSecs = 2_147_483;
 const timeoutResolver = "$pi_timeout_resolver";
 function resolveDefaultBashTimeout(): number | undefined {
   const result = spawnSync(timeoutResolver, [], { encoding: "utf8" });
@@ -1143,17 +1145,18 @@ function resolveDefaultBashTimeout(): number | undefined {
   const raw = String(result.stdout ?? "").trim();
   if (!raw) return undefined;
   const seconds = Number(raw);
-  return Number.isSafeInteger(seconds) && seconds > 0 ? seconds : defaultBashTimeoutSecs;
+  return Number.isSafeInteger(seconds) && seconds > 0 && seconds <= maxBashTimeoutSecs
+    ? seconds
+    : defaultBashTimeoutSecs;
+}
+function prepareBashArguments(args: any): any {
+  if (!args || typeof args !== "object") return args;
+  if (args.timeout !== undefined && args.timeout !== null) return args;
+  const timeout = resolveDefaultBashTimeout();
+  return timeout === undefined ? args : { ...args, timeout };
 }
 export default function (pi: any) {
-  pi.on("tool_call", (event: any) => {
-    if (event.type !== "tool_call" || event.toolName !== "bash") return {};
-    const input = event.input as { timeout?: unknown };
-    if (input.timeout !== undefined && input.timeout !== null) return {};
-    const timeout = resolveDefaultBashTimeout();
-    if (timeout !== undefined) input.timeout = timeout;
-    return {};
-  });
+  pi.registerTool({ ...createBashToolDefinition(process.cwd()), prepareArguments: prepareBashArguments });
   pi.on("turn_end", () => execFile("touch", ["$TURNEND"]));
 }
 EOF
