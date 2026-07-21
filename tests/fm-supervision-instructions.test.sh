@@ -27,6 +27,18 @@ test_unknown_fallback() {
   pass "renderer falls back to unknown.md for unverified harness names"
 }
 
+test_copilot_detected_but_manual() {
+  local out
+  out=$("$RENDER" --harness copilot)
+  assert_contains "$out" "SUPERVISION OPERATING INSTRUCTIONS - primary harness: copilot" "copilot heading missing or renamed to unknown"
+  assert_contains "$out" "Mode: Unknown harness fallback." "copilot did not get the manual-supervision fallback snippet"
+  assert_contains "$out" "never dispatchable for crew or secondmate work" "copilot harness note missing"
+  assert_not_contains "$out" "Mode: Claude background-notify supervision." "copilot must not claim a wired watcher protocol"
+  out=$("$RENDER" --harness copilot --repair-line)
+  assert_contains "$out" "according to the session-start block for this harness" "copilot repair line should be the generic one"
+  pass "copilot keeps its name but degrades to manual supervision with no wired protocol"
+}
+
 test_conditional_stanzas() {
   local home config out
   home="$TMP_ROOT/conditional-home"
@@ -135,6 +147,7 @@ test_pi_snippet_uses_effective_extension_path() {
 
 test_selected_harness_block_only
 test_unknown_fallback
+test_copilot_detected_but_manual
 test_conditional_stanzas
 test_repair_lines
 test_ordinary_wake_lines_are_distinct_from_repair
