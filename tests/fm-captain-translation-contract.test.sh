@@ -105,7 +105,7 @@ test_outward_facing_skill_points_reference_section_9_owner() {
     "bootstrap diagnostics do not reference section 9 at captain handoff"
   assert_grep "Acknowledge** in \`AGENTS.md\` section 9 language" "$AFK" \
     "afk acknowledgement does not reference section 9"
-  assert_grep "Captain, away mode is active; I will batch routine updates" "$AFK" \
+  assert_grep "Away mode is active; I will batch routine updates" "$AFK" \
     "afk acknowledgement lacks a local plain-English example"
   assert_grep "as decisions from Bearings' Captain's Call section under \`AGENTS.md\` section 9" "$DECISION" \
     "decision relay does not reference section 9"
