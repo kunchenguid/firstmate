@@ -267,8 +267,66 @@ fm_backend_herdr_projection_journal_token() {  # <journal> <task-id>
   printf '%s' "$token"
 }
 
+# fm_backend_herdr_projection_concise_task_label: strip redundant owner
+# prefixes from a task id used only in the presentation workspace label.
+# Removes firstmate/, 2ndmate-<id>/, and a presentation-level fm- owner
+# prefix when present. The ordinary task tab remains fm-<id> and is not
+# built by this helper.
+fm_backend_herdr_projection_concise_task_label() {  # <task-id>
+  local task=$1
+  case "$task" in
+    firstmate/*) task=${task#firstmate/} ;;
+    2ndmate-*/*) task=${task#*/} ;;
+  esac
+  case "$task" in
+    fm-*) task=${task#fm-} ;;
+  esac
+  printf '%s' "$task"
+}
+
+# fm_backend_herdr_projection_workspace_label: presentation-only child label.
+# Format is literal U+2514 BOX DRAWINGS LIGHT UP AND RIGHT, one space, the
+# concise task label, then the unchanged · p:<full-22-char-token> suffix.
+# Labels and tokens remain non-authoritative correlators only.
 fm_backend_herdr_projection_workspace_label() {  # <task-id> <projection-id>
-  printf '%s/%s · p:%s' "$(fm_backend_herdr_workspace_label)" "$1" "$2"
+  printf '└ %s · p:%s' "$(fm_backend_herdr_projection_concise_task_label "$1")" "$2"
+}
+
+# fm_backend_herdr_presentation_session_lock_path: one machine-private lock
+# path per live named Herdr session/socket, shared across every Firstmate home
+# that uses that session.
+# The path is never under any one home's state/ and secondmates never write the
+# primary home. Returns non-zero when the named session's socket cannot be
+# resolved unambiguously.
+fm_backend_herdr_presentation_session_lock_path() {  # <session>
+  local session=$1 sessions socket key dir hash
+  [ -n "$session" ] || return 1
+  sessions=$(fm_backend_herdr_cli "$session" session list --json 2>/dev/null) || return 1
+  socket=$(printf '%s' "$sessions" | jq -r --arg want "$session" '
+    [.sessions[]? | select(.name == $want and .running == true) | .socket_path]
+    | if length == 1 then .[0] else empty end
+  ' 2>/dev/null)
+  [ -n "$socket" ] || return 1
+  if [ -e "$socket" ]; then
+    socket=$(cd "$(dirname "$socket")" 2>/dev/null && printf '%s/%s' "$(pwd -P)" "$(basename "$socket")") || return 1
+  fi
+  if command -v shasum >/dev/null 2>&1; then
+    hash=$(printf '%s\0%s' "$session" "$socket" | shasum -a 256 2>/dev/null | awk '{print $1}')
+  elif command -v sha256sum >/dev/null 2>&1; then
+    hash=$(printf '%s\0%s' "$session" "$socket" | sha256sum 2>/dev/null | awk '{print $1}')
+  else
+    return 1
+  fi
+  [ -n "$hash" ] || return 1
+  key=${hash:0:32}
+  if [ -n "${XDG_RUNTIME_DIR:-}" ] && [ -d "$XDG_RUNTIME_DIR" ] && [ -w "$XDG_RUNTIME_DIR" ]; then
+    dir="$XDG_RUNTIME_DIR/firstmate/herdr-presentation"
+  else
+    dir="${TMPDIR:-/tmp}/firstmate-herdr-presentation"
+  fi
+  mkdir -p "$dir" 2>/dev/null || return 1
+  chmod 700 "$dir" 2>/dev/null || true
+  printf '%s/order-%s.lock' "$dir" "$key"
 }
 
 # fm_backend_herdr_projection_focus_snapshot: print the exact active
@@ -377,44 +435,74 @@ fm_backend_herdr_projection_close_pane_focus_preserving() {  # <session> <pane-i
 }
 
 # fm_backend_herdr_projection_order_best_effort: place the exact workspace id
-# returned by THIS projected create after the existing contiguous primary
-# worker prefix and before every other workspace.
+# returned by THIS projected create immediately after its owning parent's
+# contiguous child block and before the next parent.
+#
+# <parent-label> is the owning FM_HOME label (firstmate or 2ndmate-<id>).
+# New-format └ ... · p:<token> children and, for compatibility only, already
+# adjacent old-format firstmate/... or 2ndmate-<id>/... projections may extend
+# the block read-only; they are never renamed or moved.
 #
 # This is presentation-only and always returns success.
 # Every unavailable, ambiguous, failed, or unverifiable ordering step prints a
 # warning and leaves the safely-created worker running in Herdr's current
 # order.
 # It never looks up a task endpoint, adopts or reuses a workspace, retries an
-# ambiguous move, restores focus, or calls any close/delete primitive.
-# Existing worker and secondmate workspace ids are read only to validate stable
-# relative order; the sole move target is <created-workspace-id>, captured
-# directly from the current workspace-create response.
-fm_backend_herdr_projection_order_best_effort() {  # <session> <created-workspace-id>
-  local session=$1 created=$2 list analysis current desired protocol schema sessions socket mover response move_status focus_before
-  local before_secondmates before_workers after_secondmates after_workers
+# ambiguous move, or calls any close/delete/rename primitive.
+# The sole move target is <created-workspace-id>, captured directly from the
+# current workspace-create response.
+# After a successful move, every pre-existing workspace id sequence excluding
+# the new id must be byte-identical to the pre-move sequence.
+fm_backend_herdr_projection_order_best_effort() {  # <session> <created-workspace-id> <parent-label>
+  local session=$1 created=$2 parent=$3 list analysis current desired protocol schema sessions socket mover response move_status focus_before
+  local before_existing after_existing
+  [ -n "$parent" ] || {
+    echo "warning: herdr presentation ordering missing owning parent label; leaving worker in Herdr's current order" >&2
+    return 0
+  }
   list=$(fm_backend_herdr_cli "$session" workspace list 2>/dev/null) || {
     echo "warning: herdr presentation ordering could not list workspaces; leaving worker in Herdr's current order" >&2
     return 0
   }
-  analysis=$(printf '%s' "$list" | jq -c --arg created "$created" '
-    def primary_worker:
+  analysis=$(printf '%s' "$list" | jq -c --arg created "$created" --arg parent "$parent" '
+    def is_parent:
+      (.label | type) == "string" and .label == $parent;
+    def is_new_child:
       (.label | type) == "string"
-      and (.label | test("^firstmate/.+ · p:[A-Za-z0-9_-]{22}$"));
+      and (.label | test("^└ .+ · p:[A-Za-z0-9_-]{22}$"));
+    def is_legacy_child:
+      (.label | type) == "string"
+      and (.label | startswith($parent + "/"))
+      and (.label | test(" · p:[A-Za-z0-9_-]{22}$"));
+    def is_child:
+      is_new_child or is_legacy_child;
     (.result.workspaces // null) as $spaces
     | select(($spaces | type) == "array" and ($spaces | length) > 0)
     | ([range(0; $spaces | length) | select($spaces[.].workspace_id == $created)]) as $matches
     | select(($matches | length) == 1)
     | ($matches[0]) as $current
     | select($current == (($spaces | length) - 1))
-    | select($spaces[0].label == "firstmate")
-    | ($spaces[1:$current]) as $before
-    | ([range(0; $before | length) | select(($before[.] | primary_worker) | not)] | first // ($before | length)) as $prefix
-    | select(([$before[$prefix:][]? | select(primary_worker)] | length) == 0)
+    | ([range(0; $spaces | length) | select($spaces[.] | is_parent)]) as $parents
+    | select(($parents | length) == 1)
+    | ($parents[0]) as $pidx
+    | select($pidx < $current)
+    | (
+        reduce range($pidx + 1; $current) as $i (
+          0;
+          if ($spaces[$i] | is_child) and (. == ($i - $pidx - 1))
+          then . + 1
+          else .
+          end
+        )
+      ) as $block
+    | select(
+        ([range($pidx + 1 + $block; $current) | select($spaces[.] | is_child)] | length) == 0
+      )
     | {
         current: $current,
-        desired: (1 + $prefix),
-        secondmates: [$spaces[] | select((.label | type) == "string" and (.label | startswith("2ndmate-"))) | .workspace_id],
-        workers: [$spaces[] | select(primary_worker and .workspace_id != $created) | .workspace_id]
+        desired: ($pidx + 1 + $block),
+        parent_index: $pidx,
+        existing: [$spaces[] | select(.workspace_id != $created) | .workspace_id]
       }
   ' 2>/dev/null) || analysis=
   [ -n "$analysis" ] || {
@@ -486,22 +574,24 @@ fm_backend_herdr_projection_order_best_effort() {  # <session> <created-workspac
     echo "warning: herdr presentation workspace move failed or had an ambiguous response; leaving worker running without cleanup" >&2
     return 0
   fi
-  if ! printf '%s' "$response" | jq -e --arg created "$created" --argjson desired "$desired" '
+  if ! printf '%s' "$response" | jq -e --arg created "$created" --arg parent "$parent" --argjson desired "$desired" '
     .result.type == "workspace_list"
     and (.result.workspaces | type) == "array"
     and .result.workspaces[$desired].workspace_id == $created
-    and .result.workspaces[0].label == "firstmate"
+    and ([.result.workspaces[] | select(.label == $parent)] | length) == 1
+    and (
+      [range(0; .result.workspaces | length) as $i
+        | select(.result.workspaces[$i].label == $parent)
+        | $i][0] < $desired
+    )
   ' >/dev/null 2>&1; then
     echo "warning: herdr presentation workspace move returned an unverifiable order; leaving worker running without cleanup" >&2
     return 0
   fi
 
-  before_secondmates=$(printf '%s' "$analysis" | jq -c '.secondmates' 2>/dev/null)
-  before_workers=$(printf '%s' "$analysis" | jq -c '.workers' 2>/dev/null)
-  after_secondmates=$(printf '%s' "$response" | jq -c '[.result.workspaces[] | select((.label | type) == "string" and (.label | startswith("2ndmate-"))) | .workspace_id]' 2>/dev/null)
-  after_workers=$(printf '%s' "$response" | jq -c --arg created "$created" '[.result.workspaces[] | select((.label | type) == "string" and (.label | test("^firstmate/.+ · p:[A-Za-z0-9_-]{22}$")) and .workspace_id != $created) | .workspace_id]' 2>/dev/null)
-  if [ "$after_secondmates" != "$before_secondmates" ] \
-     || [ "$after_workers" != "$before_workers" ]; then
+  before_existing=$(printf '%s' "$analysis" | jq -c '.existing' 2>/dev/null)
+  after_existing=$(printf '%s' "$response" | jq -c --arg created "$created" '[.result.workspaces[] | select(.workspace_id != $created) | .workspace_id]' 2>/dev/null)
+  if [ "$after_existing" != "$before_existing" ]; then
     echo "warning: herdr presentation workspace move did not preserve relative order; leaving worker running without cleanup" >&2
   fi
   return 0
