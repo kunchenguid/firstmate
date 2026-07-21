@@ -1134,29 +1134,37 @@ EOF
 // Use "turn_end" (fires after each turn the agent finishes), not "agent_end"
 // (fires once, only when the whole run exits): the watcher needs a signal at
 // every turn boundary so an idle crewmate is surfaced, not just at shutdown.
-import { execFile, spawnSync } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 const defaultBashTimeoutSecs = 900;
 const timeoutResolver = "$pi_timeout_resolver";
-function resolveDefaultBashTimeout(): number | undefined {
-  const result = spawnSync(timeoutResolver, [], { encoding: "utf8" });
-  if (result.error || result.status === null) return undefined;
-  if (result.status !== 0) return defaultBashTimeoutSecs;
-  const raw = String(result.stdout ?? "").trim();
-  if (!raw) return undefined;
-  const seconds = Number(raw);
-  return Number.isSafeInteger(seconds) && seconds > 0 ? seconds : defaultBashTimeoutSecs;
+function resolveDefaultBashTimeout(): Promise<number | undefined> {
+  return new Promise((resolveResult) => {
+    const child = spawn(timeoutResolver, [], { stdio: ["ignore", "pipe", "ignore"] });
+    let stdout = "";
+    child.stdout.on("data", (chunk: any) => {
+      stdout += chunk.toString();
+    });
+    child.on("error", () => resolveResult(undefined));
+    child.on("close", (code: number | null) => {
+      if (code !== 0) return resolveResult(code === null ? undefined : defaultBashTimeoutSecs);
+      const raw = stdout.trim();
+      if (!raw) return resolveResult(undefined);
+      const seconds = Number(raw);
+      resolveResult(Number.isSafeInteger(seconds) && seconds > 0 ? seconds : defaultBashTimeoutSecs);
+    });
+  });
 }
-function applyDefaultBashTimeout(value: unknown): void {
+async function applyDefaultBashTimeout(value: unknown): Promise<void> {
   if (!value || typeof value !== "object") return;
   const input = value as { timeout?: unknown };
   if (typeof input.timeout === "number" && Number.isFinite(input.timeout) && input.timeout > 0) return;
-  const timeout = resolveDefaultBashTimeout();
+  const timeout = await resolveDefaultBashTimeout();
   if (timeout !== undefined) input.timeout = timeout;
 }
 export default function (pi: any) {
-  pi.on("tool_call", (event: any) => {
+  pi.on("tool_call", async (event: any) => {
     if (event.type !== "tool_call" || event.toolName !== "bash") return {};
-    applyDefaultBashTimeout(event.input);
+    await applyDefaultBashTimeout(event.input);
     return {};
   });
   pi.on("turn_end", () => execFile("touch", ["$TURNEND"]));

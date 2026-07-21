@@ -147,9 +147,9 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("tool_call", async (event) => {
     if (event.type !== "tool_call" || event.toolName !== "bash") return {};
-    await applyDefaultBashTimeout(event.input);
     const command = String(event.input?.command ?? "");
     if (!command) return {};
+    await applyDefaultBashTimeout(event.input);
     const cdResult = await runCdCheck(command);
     if (cdResult.code === 2) {
       return { block: true, reason: cdResult.stderr.trim() || "denied by the cd-guard PreToolUse seatbelt" };
