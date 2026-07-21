@@ -9,6 +9,9 @@
 # working signal is never silently swallowed. A declared external-wait pause is
 # the separate idle absorb case and re-surfaces only on its long bounded cadence,
 # although its initial no-verb status signal still surfaces in normal mode.
+# An authoritative completed or failed no-mistakes run-step outranks an older
+# sparse status event, surfaces exactly once per terminal transition, and retains
+# durable transition identity until authoritative work resumes.
 # While state/.afk exists, the daemon owns triage and this watcher queues and exits
 # on every wake. Printed reason lines:
 #   signal: <file>...      status/turn-end signals, surfaced when a listed status
@@ -1069,16 +1072,16 @@ EOF
           # unmodified terminal-status behavior).
         else
           # Non-terminal stale: a crew gone quiet without a captain-relevant status.
-          # Decided once per distinct stale hash (the costly state reads run only
-          # on first sight, never every poll) via pause_state_class, which returns:
+          # pause_state_class performs authoritative reconciliation when the stale
+          # class changes or its bounded recheck becomes due, and returns:
           #   - working: an actively-running pipeline legitimately sits on a static
           #     pane (e.g. waiting on CI), so absorb and start the wedge timer so a
           #     genuinely frozen run still escalates past STALE_ESCALATE_SECS;
           #   - paused: the crew declared an external wait, or a declared pause or
           #     captain hold is paired with a confidently dead agent, so absorb on
           #     the long PAUSE_RESURFACE_SECS cadence instead of wedge-escalating;
-#           - terminal: the authoritative no-mistakes run is done or failed, so
-#             surface once even when paused: remains the latest sparse event;
+          #   - terminal: the authoritative no-mistakes run is done or failed, so
+          #     surface once even when paused: remains the latest sparse event;
           #   - none: no running pipeline, idle pane, no busy signature, no declared
           #     pause - the crew has STOPPED. Surface immediately so firstmate peeks
           #     (it may be done via an interactive menu that wrote no done: status,

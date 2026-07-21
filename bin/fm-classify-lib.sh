@@ -329,7 +329,8 @@ signal_reason_is_actionable() {  # <file> ...
 # authoritatively (not the status log) is what keeps run-step precedence: a crew
 # that appended paused: but then STARTED a run reports working, never paused.
 # NOT a pure read: fm-crew-state.sh may make a bounded no-mistakes call, so callers
-# run it only on no-verb signal and first-sighting stale paths, never every wake.
+# run it only when a no-verb signal or stale transition needs authoritative
+# reconciliation, never for ordinary wake scanning.
 # FM_CREW_STATE_BIN lets tests stub the verdict.
 crew_absorb_class() {  # <id>
   local id=$1 line state src
