@@ -10,8 +10,8 @@ The shared orchestrator behavior lives in [`AGENTS.md`](../AGENTS.md) - edit it 
 
 This section is the single owner of the top-level operational-home layout; producer script headers and their help own exact child-file fields and mutation contracts.
 The tracked code root contains the shared instruction, skill, documentation, workflow, and `bin/` surfaces, while each effective `FM_HOME` contains private operational directories.
-`data/` holds durable private fleet records such as the project and secondmate registries, captain preferences, optional shared captain preferences, learnings, backlog, briefs, and scout reports.
-`state/` holds volatile runtime records such as task metadata, append-only status events, endpoint signals, watcher and wake-queue coordination, away-mode state, generated X-mode artifacts, and private secondmate config-reread generations with their retry and quarantine state.
+`data/` holds durable private fleet records such as the project and secondmate registries, councils and accepted project decisions, captain preferences, optional shared captain preferences, learnings, backlog, briefs, and scout reports.
+`state/` holds volatile runtime records such as task metadata, council participant endpoints and private answer outboxes, append-only status events, endpoint signals, watcher and wake-queue coordination, away-mode state, generated X-mode artifacts, and private secondmate config-reread generations with their retry and quarantine state.
 `config/` holds local gitignored operating choices, and `projects/` holds the local project clones that Firstmate reads but changes only through the guarded exceptions in `AGENTS.md`.
 
 `bin/fm-spawn.sh` owns the base task-metadata fields it emits, while the runtime-backend section below owns backend-specific fields and selector interpretation.
@@ -22,6 +22,14 @@ Wake, watcher, away-mode, and X-specific state mechanics remain with their named
 `docs/sessionstart-nudge.md` owns the native session-open adapter mechanics that nudge the digest command.
 `AGENTS.md` retains the run-once and read-once operator rules, lock-refusal safety, installation consent, and direct-report recovery boundaries because those facts apply at every session start.
 Ordinary dead-direct-report recovery is owned by `stuck-crewmate-recovery`, while persistent-secondmate recovery is owned by `secondmate-provisioning`.
+
+## Persistent councils (data/councils / state/councils / config/council-provider-consent.json)
+
+Persistent council identity and round metadata live under local `data/councils/`, while exact accepted decision bodies are grouped by canonical project-path hash under local `data/council-projects/`.
+Exact participant endpoint identities, isolated participant homes, raw answer outboxes, and collected raw answers live under volatile `state/councils/`.
+Project-specific Anthropic and OpenAI disclosure approvals live in local `config/council-provider-consent.json`, which is gitignored and created only through the captain-approved command path.
+The `council` skill owns captain-facing semantics, [`docs/council.md`](council.md) is the human reference, and `bin/fm-council.sh --help` owns exact schemas, commands, and mutation mechanics.
+No council file is a backlog item or ordinary task record.
 
 ## Backlog backend (.tasks.toml / config/backlog-backend)
 

@@ -1012,6 +1012,30 @@ On entry the launcher drops the prior session's artifacts when the daemon is not
 This never drops a genuinely-pending escalation: the durable record is `state/.wake-queue` plus each crew's `state/<id>.status`, and any still-true condition is re-escalated by the daemon's heartbeat catch-all scan.
 Covered by the unit cases in `tests/fm-afk-launch.test.sh` (clear-on-fresh-entry vs refresh, and the stop ordering asserting the daemon saw `state/.afk` present at SIGTERM).
 
+## Council read-only lane verification
+
+Verified on 2026-07-21 against Herdr 0.7.4 on Linux 6.8.0-136-generic with Landlock ABI 4 and source commit `59ece454935d9b280864f001c9173fce13e9ed43`.
+The test used only a shell stub and made no model-provider call.
+It provisioned a generated named non-`default` session, created one exact workspace/tab/pane, launched `bin/fm-council-sandbox.py` through that pane, and attempted to read and write the source, write the admitted fixed view, read a sibling answer, and create a Unix-domain socket.
+The fixed view remained readable, all four forbidden boundaries returned permission errors, provider-style TCP remained outside the socket filter, participant-owned output remained writable, the exact response-derived pane closed successfully, and guarded teardown confirmed the default-session fleet tripwire was byte-identical.
+
+Exact command:
+
+```sh
+HERDR_LAB_HELPER='/home/dev/firstmate/bin/fm-herdr-lab.sh' \
+  FM_COUNCIL_HERDR_E2E=1 \
+  bash tests/fm-council-herdr-e2e.test.sh
+```
+
+Exact output:
+
+```text
+ok - real Herdr lab: exact council lane lifecycle enforces read-only source/view, answer isolation, and terminal-socket denial without a provider call
+```
+
+Every Herdr operation in the test goes through `fm-herdr-lab.sh run`, while provisioning and teardown use only that helper's named-session lifecycle commands.
+The test never calls `workspace close`, any server-global operation, or any Herdr command scoped only by ambient `HERDR_SESSION`.
+
 ## Known gaps and follow-up notes
 
 - **RESOLVED: worktree-discovery isolation guard's symlinked-project-prefix false refusal.** Originally discovered while building the runtime-backend-auto-detection real smoke test (`tests/fm-backend-autodetect-smoke.test.sh`), which needed a scratch project.
