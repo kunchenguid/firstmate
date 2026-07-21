@@ -83,6 +83,15 @@ The caller-facing label remains `fm-<id>`, but the actual cmux workspace title i
 Test cleanup must use the guarded path described in [`docs/cmux-backend.md`](cmux-backend.md)'s "Test safety" section, never enumerate-and-close every workspace.
 The `config/backend` file is not inherited by secondmate homes.
 
+## Remote host registry (config/remote-hosts)
+
+The local, gitignored `config/remote-hosts` file registers the SSH hosts approved for phase-4 remote-run task checkouts.
+`bin/fm-remote-ssh.sh` is the single owner of the registry's exact line schema, field validation, remote-run shell mechanics, and safety rules; its header and `--help` are the contract.
+Each entry names the host's ssh_config alias, its `client|non-client` classification, whether remote commands require a login shell, the only remote directory tree task worktrees may be created under, and the git remotes approved for handoff pushes.
+An absent file means no host is registered, and every remote-run helper call refuses.
+No spawn, watcher, or teardown path routes to this helper yet; it is the foundations layer of the phase-4 remote-run series.
+The file is not inherited into secondmate homes.
+
 ## Away-mode supervisor backend (FM_SUPERVISOR_BACKEND / FM_SUPERVISOR_TARGET)
 
 The `/afk` sub-supervisor injects escalation digests into firstmate's own pane independently of where new task endpoints are spawned.
