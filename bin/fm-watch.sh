@@ -317,6 +317,22 @@ stale_class_is() {  # <window> <hash> <class>
   [ "$(cat "$STATE/.stale-class-$key" 2>/dev/null || true)" = "$class:$h" ]
 }
 
+terminal_transition_is_surfaced() {  # <window>
+  local win=$1 key
+  key=$(printf '%s' "$win" | tr ':/.' '___')
+  [ -e "$STATE/.terminal-transition-$key" ]
+}
+
+refresh_terminal_transition() {  # <window> <task>
+  local win=$1 task=$2 key
+  key=$(printf '%s' "$win" | tr ':/.' '___')
+  [ -e "$STATE/.terminal-transition-$key" ] || return 0
+  if [ "$(crew_terminal_transition_class "$task")" = nonterminal ]; then
+    rm -f "$STATE/.terminal-transition-$key" "$STATE/.stale-$key" "$STATE/.stale-class-$key" \
+      "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
+  fi
+}
+
 # Absorb a stale pane under a declared external-wait pause (paused:) or a
 # dead-agent captain-held transfer, and re-surface it once every
 # PAUSE_RESURFACE_SECS for a recheck so it cannot rot invisibly. Called on any
@@ -417,14 +433,18 @@ pause_state_class() {  # <window> <task>
 }
 
 surface_terminal_stale() {  # <window> <hash>
-  local win=$1 h=$2 key
+  local win=$1 h=$2 key surfaced=0
   key=$(printf '%s' "$win" | tr ':/.' '___')
-  fm_wake_append stale "$win" "stale: $win" || exit 1
+  if ! terminal_transition_is_surfaced "$win"; then
+    fm_wake_append stale "$win" "stale: $win" || exit 1
+    : > "$STATE/.terminal-transition-$key"
+    surfaced=1
+  fi
   printf '%s' "$h" > "$STATE/.stale-$key"
   set_stale_class "$win" "$h" terminal
   rm -f "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
   clear_pause_state "$win"
-  wake "stale: $win"
+  [ "$surfaced" -eq 0 ] || wake "stale: $win"
 }
 
 surface_nonterminal_stale() {  # <window> <hash>
@@ -911,6 +931,9 @@ EOF
       continue
     fi
     tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null) || continue
+    if ! afk_present && [ "$kind" != secondmate ]; then
+      refresh_terminal_transition "$w" "$task"
+    fi
     h=$(printf '%s' "$tail40" | hash_pane)
     key=$(printf '%s' "$w" | tr ':/.' '___')
     hf="$STATE/.hash-$key"
@@ -958,20 +981,35 @@ EOF
           # line. On a NEW hash, give an active run/busy pane (the same
           # authoritative source fm-crew-state.sh itself already prioritizes
           # over the log) a chance to override before trusting the log.
-          if [ "$(cat "$sf" 2>/dev/null || true)" != "$h" ]; then
-            if crew_is_provably_working "$(window_to_task "$w" "$STATE")"; then
-              printf '%s' "$h" > "$sf"
-              set_stale_class "$w" "$h" working
-              date +%s > "$ssf"
-              triage_log "absorbed stale (provably working, overriding a stale captain-relevant status): $w"
-            else
+          if [ "$(cat "$sf" 2>/dev/null || true)" != "$h" ] || stale_class_is "$w" "$h" working; then
+            case "$(crew_absorb_class "$task")" in
+              working)
+                if stale_class_is "$w" "$h" working; then
+                  wedge_timer_check "$w" "$ssf" "stale (overridden terminal status)" "$ewf"
+                else
+                  printf '%s' "$h" > "$sf"
+                  set_stale_class "$w" "$h" working
+                  date +%s > "$ssf"
+                  triage_log "absorbed stale (provably working, overriding a stale captain-relevant status): $w"
+                fi
+                ;;
+              terminal)
+                surface_terminal_stale "$w" "$h"
+                ;;
+              paused)
+                handle_paused_stale "$w" "$task" "$h"
+                ;;
+              *)
               fm_wake_append stale "$w" "stale: $w" || exit 1
               printf '%s' "$h" > "$sf"
-              set_stale_class "$w" "$h" terminal
+              set_stale_class "$w" "$h" nonterminal
               rm -f "$ssf"
-              mark_surfaced "$STATE/$(window_to_task "$w" "$STATE").status"
+              mark_surfaced "$STATE/$task.status"
               wake "stale: $w"
-            fi
+                ;;
+            esac
+          elif stale_class_is "$w" "$h" terminal && terminal_transition_is_surfaced "$w"; then
+            rm -f "$ssf" "$ewf"
           elif [ -e "$ssf" ]; then
             # This exact hash was already overridden as provably-working (a
             # wedge timer is running for it) - keep treating it that way
@@ -1036,6 +1074,13 @@ EOF
                             rm -f "$ssf" "$ewf"
                           fi ;;
                 *)       handle_paused_stale "$w" "$task" "$h" ;;
+              esac
+            elif stale_class_is "$w" "$h" working; then
+              case "$(crew_absorb_class "$task")" in
+                terminal) surface_terminal_stale "$w" "$h" ;;
+                paused) handle_paused_stale "$w" "$task" "$h" ;;
+                working) wedge_timer_check "$w" "$ssf" "non-terminal stale" "$ewf" ;;
+                *) surface_nonterminal_stale "$w" "$h" ;;
               esac
             else
               wedge_timer_check "$w" "$ssf" "non-terminal stale" "$ewf"

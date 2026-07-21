@@ -272,6 +272,11 @@ test_crew_absorb_class_classifier() {
   [ "$(crew_absorb_class a)" = terminal ] || fail "failed run-step not classed terminal"
   FM_FAKE_CREW_STATE='state: parked · source: run-step · parked at review'
   [ "$(crew_absorb_class a)" = none ] || fail "parked run-step classed terminal"
+  [ "$(crew_terminal_transition_class a)" = nonterminal ] || fail "parked run-step did not end terminal identity"
+  FM_FAKE_CREW_STATE='state: done · source: run-step · checks green'
+  [ "$(crew_terminal_transition_class a)" = terminal ] || fail "completed run-step lost terminal identity"
+  FM_FAKE_CREW_STATE='state: unknown · source: none · run temporarily unreadable'
+  [ "$(crew_terminal_transition_class a)" = unknown ] || fail "unreadable state cleared terminal identity"
   FM_FAKE_CREW_STATE='state: working · source: status-log · working: compiling'
   [ "$(crew_absorb_class a)" = none ] || fail "stale working: status-log classed absorbable"
   FM_FAKE_CREW_STATE='state: unknown · source: none · worktree gone'
@@ -763,6 +768,89 @@ test_consumed_working_stale_surfaces_terminal_transition_once() {
   assert_tracked_stale_surfaces_terminal_transition_once working 'done' 'state: done · source: run-step · checks green'
   assert_tracked_stale_surfaces_terminal_transition_once working failed 'state: failed · source: run-step · validation failed'
   pass "consumed working stale cadence preserves authoritative done and failed transitions exactly once"
+}
+
+assert_nonpaused_working_surfaces_terminal_transition_once() {  # <label> <crew-state> <captain-relevant-status>
+  local label=$1 crew_state=$2 captain_status=$3 dir state fakebin out capture_file window key pane_hash sig pid
+  dir=$(make_case "nonpaused-working-to-$label-$captain_status"); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-nonpaused-$label-$captain_status"
+  printf 'idle after authoritative transition\n' > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=codex\nbackend=tmux\n' "$window" > "$state/$label.meta"
+  if [ "$captain_status" = yes ]; then
+    printf 'done: implementation ready before validation\n' > "$state/$label.status"
+  else
+    printf 'working: validation under way\n' > "$state/$label.status"
+  fi
+  sig=$(seen_sig "$state/$label.status"); printf '%s' "$sig" > "$state/.seen-${label}_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle after authoritative transition")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '%s' "$pane_hash" > "$state/.stale-$key"
+  printf 'working:%s\n' "$pane_hash" > "$state/.stale-class-$key"
+  printf '1\n' > "$state/.count-$key"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=codex FM_FAKE_CREW_STATE="$crew_state" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "non-paused working provenance did not surface $label with captain status $captain_status"
+  grep -Fx "stale: $window" "$out" >/dev/null || fail "non-paused working provenance suppressed $label"
+  [ -e "$state/.terminal-transition-$key" ] || fail "$label did not retain transition identity"
+}
+
+test_nonpaused_working_surfaces_terminal_transitions_once() {
+  assert_nonpaused_working_surfaces_terminal_transition_once done 'state: done · source: run-step · checks green' no
+  assert_nonpaused_working_surfaces_terminal_transition_once failed 'state: failed · source: run-step · validation failed' no
+  assert_nonpaused_working_surfaces_terminal_transition_once done 'state: done · source: run-step · checks green' yes
+  assert_nonpaused_working_surfaces_terminal_transition_once failed 'state: failed · source: run-step · validation failed' yes
+  pass "non-paused working provenance reclassifies done and failed with sparse working or captain-relevant status"
+}
+
+test_terminal_transition_survives_pane_redraw_until_new_run() {
+  local dir state fakebin out capture_file window key first_hash second_hash sig pid wakes i
+  dir=$(make_case terminal-pane-redraw); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-terminal-redraw"
+  printf 'window=%s\nkind=ship\nharness=codex\nbackend=tmux\n' "$window" > "$state/redraw.meta"
+  printf 'working: validation under way\n' > "$state/redraw.status"
+  sig=$(seen_sig "$state/redraw.status"); printf '%s' "$sig" > "$state/.seen-redraw_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  printf 'first terminal pane\n' > "$capture_file"; first_hash=$(hash_text "first terminal pane")
+  printf '%s' "$first_hash" > "$state/.hash-$key"; printf '1\n' > "$state/.count-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" FM_FAKE_TMUX_CURRENT_COMMAND=codex \
+    FM_FAKE_CREW_STATE='state: done · source: run-step · checks green' FM_STATE_OVERRIDE="$state" \
+    FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!; wait_for_exit "$pid" 40 || fail "initial terminal transition did not surface"
+
+  printf 'redrawn terminal pane\n' > "$capture_file"; second_hash=$(hash_text "redrawn terminal pane")
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" FM_FAKE_TMUX_CURRENT_COMMAND=codex \
+    FM_FAKE_CREW_STATE='state: done · source: run-step · checks green' FM_STATE_OVERRIDE="$state" \
+    FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!; wait_live "$pid" 30 || { reap "$pid"; fail "terminal pane redraw repeated its alert"; }; reap "$pid"
+  wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' "$state/.wake-queue")
+  [ "$wakes" -eq 1 ] || fail "terminal pane redraw emitted $wakes alerts"
+  [ "$(cat "$state/.stale-class-$key" 2>/dev/null || true)" = "terminal:$second_hash" ] || fail "redraw was not deduplicated as the same terminal transition"
+
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" FM_FAKE_TMUX_CURRENT_COMMAND=codex \
+    FM_FAKE_CREW_STATE='state: working · source: run-step · new validation' FM_STATE_OVERRIDE="$state" \
+    FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  i=0
+  while [ "$i" -lt 30 ] && [ -e "$state/.terminal-transition-$key" ]; do sleep 0.1; i=$((i + 1)); done
+  [ ! -e "$state/.terminal-transition-$key" ] || { reap "$pid"; fail "new authoritative run did not clear prior terminal identity"; }
+  reap "$pid"
+
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" FM_FAKE_TMUX_CURRENT_COMMAND=codex \
+    FM_FAKE_CREW_STATE='state: failed · source: run-step · new validation failed' FM_STATE_OVERRIDE="$state" \
+    FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!; wait_for_exit "$pid" 40 || fail "new terminal transition after resumed work did not surface"
+  wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' "$state/.wake-queue")
+  [ "$wakes" -eq 2 ] || fail "new terminal transition emitted $wakes total alerts instead of two"
+  pass "terminal identity survives pane redraw, clears on authoritative work, and allows a new terminal transition"
 }
 
 # A captain-held crew can leave a stable backend endpoint after its agent exits.
@@ -1414,6 +1502,8 @@ test_nonterminal_stale_paused_absorbed_then_resurfaced
 test_completed_run_overrides_paused_status_without_repeated_stale
 test_tracked_paused_stale_surfaces_terminal_transition_once
 test_consumed_working_stale_surfaces_terminal_transition_once
+test_nonpaused_working_surfaces_terminal_transitions_once
+test_terminal_transition_survives_pane_redraw_until_new_run
 test_exited_declared_pause_is_bounded_but_live_gate_surfaces
 test_secondmate_paused_resurfaces_in_normal_mode
 test_secondmate_nonpaused_stale_remains_suppressed
