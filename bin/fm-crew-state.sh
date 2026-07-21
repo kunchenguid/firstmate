@@ -298,7 +298,7 @@ log_reports_ci_ready() {
 
 nm_ci_step_status() {
   local row rest
-  row=$(printf '%s\n' "$RUN_OUT" | grep -E '^[[:space:]]*ci,[[:space:]]*"?[A-Za-z_-]+"?[[:space:]]*,' | head -1)
+  row=$(printf '%s\n' "$RUN_OUT" | grep -E '^[[:space:]]*ci,[[:space:]]*"?(running|fixing|failed)"?[[:space:]]*,' | head -1)
   [ -n "$row" ] || return 0
   row=$(trim "$row")
   rest=${row#*,}
