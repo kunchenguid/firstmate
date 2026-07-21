@@ -24,7 +24,11 @@ if [ "$#" -lt 2 ]; then
 fi
 ID=$1
 RAW_URL=$2
-if ! fm_pr_task_id_valid "$ID" || ! fm_pr_url_parse "$RAW_URL"; then
+# bin/fm-pr-lib.sh parses GitLab merge request URLs so the watcher can follow
+# them, but this path still addresses only GitHub by owner/repository. The
+# provider check holds that refusal exactly as it was until merge parity lands.
+if ! fm_pr_task_id_valid "$ID" || ! fm_pr_url_parse "$RAW_URL" \
+  || [ "$FM_PR_PROVIDER" != github ]; then
   echo "error: invalid PR merge request" >&2
   exit 2
 fi

@@ -777,11 +777,13 @@ while :; do
       else
         id=$(basename "$c" .check.sh)
         if fm_pr_poll_artifacts_valid "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh"; then
+          provider=$FM_PR_DATA_PROVIDER
           url=$FM_PR_DATA_URL
-          owner=$FM_PR_DATA_OWNER
-          repo=$FM_PR_DATA_REPO
+          host=$FM_PR_DATA_HOST
+          path=$FM_PR_DATA_PATH
           number=$FM_PR_DATA_NUMBER
-          run_check_capture "$SCRIPT_DIR/fm-pr-poll.sh" --validated "$url" "$owner" "$repo" "$number" || exit 1
+          run_check_capture "$SCRIPT_DIR/fm-pr-poll.sh" --validated \
+            "$provider" "$url" "$host" "$path" "$number" || exit 1
           out=$FM_CHECK_RESULT
         elif fm_custom_check_snapshot_prepare "$STATE" "$id"; then
           custom_snapshot=$FM_CUSTOM_CHECK_SNAPSHOT
