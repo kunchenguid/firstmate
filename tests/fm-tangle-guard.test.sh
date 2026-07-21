@@ -32,6 +32,15 @@ make_repo() {
   printf '%s\n' "$dir"
 }
 
+add_origin_remote() {
+  local repo=$1 remote=$2 remote_abs
+  git clone --quiet --bare "$repo" "$remote"
+  remote_abs=$(cd "$remote" && pwd)
+  git -C "$repo" remote add origin "file://$remote_abs"
+  git -C "$repo" fetch -q origin
+  git -C "$repo" remote set-head origin main >/dev/null
+}
+
 # --- shared lib: branch classification --------------------------------------
 
 # fm_primary_tangle_branch is the whole scoping decision: a NAMED non-default
@@ -190,6 +199,7 @@ test_spawn_isolation_abort() {
   home="$TMP_ROOT/spawn-home"
   mkdir -p "$home/data"
   proj=$(make_repo "$TMP_ROOT/spawn-proj")
+  add_origin_remote "$proj" "$TMP_ROOT/spawn-origin.git"
   fakebin=$(make_spawn_fakebin "$TMP_ROOT/spawn-fake")
   # A genuine isolated linked worktree of the project, detached on the default.
   git -C "$proj" worktree add -q --detach "$TMP_ROOT/spawn-wt" >/dev/null 2>&1
@@ -212,6 +222,44 @@ test_spawn_isolation_abort() {
   assert_contains "$out" "spawned ok-isolated-ff6" "isolated spawn did not report success"
   assert_not_contains "$out" "did not yield an isolated worktree" "isolated spawn wrongly tripped the guard"
   pass "fm-spawn: aborts unless the resolved worktree is a genuine, isolated worktree"
+}
+
+test_spawn_pool_lease_assertion() {
+  local home proj fakebin clean_wt dirty_wt stale_wt out status
+  home="$TMP_ROOT/spawn-lease-home"
+  mkdir -p "$home/data"
+  proj=$(make_repo "$TMP_ROOT/spawn-lease-proj")
+  add_origin_remote "$proj" "$TMP_ROOT/spawn-lease-origin.git"
+  fakebin=$(make_spawn_fakebin "$TMP_ROOT/spawn-lease-fake")
+
+  clean_wt="$TMP_ROOT/spawn-lease-clean"
+  git -C "$proj" worktree add -q --detach "$clean_wt" main >/dev/null 2>&1
+  printf '%s\n' 'pool config' > "$clean_wt/treehouse.toml"
+  out=$(run_spawn "$home" lease-clean-hh8 "$proj" "$clean_wt" "$fakebin"); status=$?
+  expect_code 0 "$status" "spawn should allow a lone untracked treehouse.toml"
+  assert_contains "$out" "spawned lease-clean-hh8" "treehouse.toml-only lease did not launch"
+
+  dirty_wt="$TMP_ROOT/spawn-lease-dirty"
+  git -C "$proj" worktree add -q --detach "$dirty_wt" main >/dev/null 2>&1
+  printf '%s\n' 'pool config' > "$dirty_wt/treehouse.toml"
+  printf '%s\n' 'real dirt' > "$dirty_wt/real-dirt.txt"
+  out=$(run_spawn "$home" lease-dirty-ii9 "$proj" "$dirty_wt" "$fakebin"); status=$?
+  expect_code 1 "$status" "spawn should refuse real dirty worktree contents"
+  assert_contains "$out" "yielded a dirty pool worktree" "dirty lease refusal did not name the pool cleanliness guard"
+  assert_contains "$out" "?? real-dirt.txt" "dirty lease refusal should show the first real porcelain entry"
+  assert_absent "$home/state/lease-dirty-ii9.meta" "dirty lease refusal must not record meta"
+
+  stale_wt="$TMP_ROOT/spawn-lease-stale"
+  git -C "$proj" worktree add -q --detach "$stale_wt" main >/dev/null 2>&1
+  printf '%s\n' unique > "$stale_wt/unique.txt"
+  git -C "$stale_wt" add unique.txt
+  git -C "$stale_wt" commit -qm "unique detached work"
+  out=$(run_spawn "$home" lease-stale-jj0 "$proj" "$stale_wt" "$fakebin"); status=$?
+  expect_code 1 "$status" "spawn should refuse HEAD not known to be at or before origin/default"
+  assert_contains "$out" "is not an ancestor of origin/main" "stale lease refusal did not name the origin/default ancestry guard"
+  assert_absent "$home/state/lease-stale-jj0.meta" "stale lease refusal must not record meta"
+
+  pass "fm-spawn: treehouse lease assertion allows treehouse.toml but refuses dirt and non-ancestor HEAD"
 }
 
 # --- GUARD 1c: fm-spawn tmux window construction ----------------------------
@@ -270,6 +318,7 @@ test_spawn_tmux_window_construction() {
   home="$TMP_ROOT/spawn-rec-home"
   mkdir -p "$home/data"
   proj=$(make_repo "$TMP_ROOT/spawn-rec-proj")
+  add_origin_remote "$proj" "$TMP_ROOT/spawn-rec-origin.git"
   fakebin=$(make_spawn_record_fakebin "$TMP_ROOT/spawn-rec-fake")
   rec="$TMP_ROOT/spawn-rec.log"
   : > "$rec"
@@ -281,9 +330,9 @@ test_spawn_tmux_window_construction() {
   assert_contains "$out" "spawned rec-win-gg7" "recording spawn did not report success"
 
   # Bug 1 fix: append-form window creation (trailing colon on the session target).
-  assert_grep "new-window -dP -F #{window_id} -t firstmate: -n fm-rec-win-gg7" "$rec" \
+  assert_grep "new-window -dP -F #{window_id} -t fm-spawn-rec-proj: -n fm-rec-win-gg7" "$rec" \
     "new-window must append at the session (trailing colon) and capture the window id"
-  assert_no_grep "new-window -dP -F #{window_id} -t firstmate -n" "$rec" \
+  assert_no_grep "new-window -dP -F #{window_id} -t fm-spawn-rec-proj -n" "$rec" \
     "new-window must not target the bare session name (collides under base-index 1)"
 
   # Bug 2 fix (a): pin the window name against automatic-rename / allow-rename.
@@ -306,4 +355,5 @@ test_guard_banner
 test_bootstrap_line
 test_brief_assertion_precedes_branch
 test_spawn_isolation_abort
+test_spawn_pool_lease_assertion
 test_spawn_tmux_window_construction

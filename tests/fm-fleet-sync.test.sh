@@ -276,20 +276,128 @@ test_dirty_is_stuck_untouched() {
   pass "dirty working tree is reported STUCK and left untouched"
 }
 
-test_non_default_branch_is_stuck_untouched() {
-  local home clone out
+test_treehouse_config_only_is_clean_and_fast_forwards() {
+  local home clone out config_body
+  home=$(new_home)
+  clone=$(build_pair "$home" treehouse-clean)
+  advance_origin "$home" treehouse-clean C1
+  config_body='pool config'
+  printf '%s\n' "$config_body" > "$clone/treehouse.toml"
+
+  out=$(run_sync "$home" "$clone")
+
+  assert_contains "$out" "treehouse-clean: synced" "treehouse.toml-only clone should fast-forward"
+  assert_not_contains "$out" "STUCK" "treehouse.toml-only clone must not be flagged STUCK"
+  [ "$(head_sha "$clone")" = "$(git -C "$clone" rev-parse origin/main)" ] \
+    || fail "treehouse.toml-only clone was not fast-forwarded"
+  [ "$(cat "$clone/treehouse.toml")" = "$config_body" ] \
+    || fail "treehouse.toml was not preserved across fast-forward"
+  pass "a lone untracked treehouse.toml is clean for fleet-sync and survives fast-forward"
+}
+
+test_treehouse_config_plus_real_dirt_is_stuck_untouched() {
+  local home clone out before
+  home=$(new_home)
+  clone=$(build_pair "$home" treehouse-dirty)
+  advance_origin "$home" treehouse-dirty C1
+  before=$(head_sha "$clone")
+  printf '%s\n' 'pool config' > "$clone/treehouse.toml"
+  printf '%s\n' 'real dirt' > "$clone/real-dirt.txt"
+
+  out=$(run_sync "$home" "$clone")
+
+  assert_contains "$out" "treehouse-dirty: STUCK:" "real dirt alongside treehouse.toml should stay STUCK"
+  assert_contains "$out" "uncommitted changes" "STUCK should name the real dirty state"
+  assert_not_contains "$out" "synced" "dirty clone must not fast-forward"
+  [ "$(head_sha "$clone")" = "$before" ] || fail "dirty clone HEAD moved"
+  assert_present "$clone/treehouse.toml" "treehouse.toml was removed"
+  assert_present "$clone/real-dirt.txt" "real dirty file was removed"
+  pass "treehouse.toml is exempt only when it is the lone porcelain entry"
+}
+
+test_published_named_branch_recovers_to_default() {
+  local home clone out config_body before after
   home=$(new_home)
   clone=$(build_pair "$home" delta)
-  git -C "$clone" checkout -q -b feature
+  git -C "$clone" checkout -q -b pr24337-head
+  config_body='pool config'
+  printf '%s\n' "$config_body" > "$clone/treehouse.toml"
+  before=$(head_sha "$clone")
   advance_origin "$home" delta C1
 
   out=$(run_sync "$home" "$clone")
 
-  assert_contains "$out" "delta: STUCK: on branch feature" "non-default branch reports STUCK with branch name"
-  assert_contains "$out" "commits behind origin/main - needs attention" "STUCK is quantified"
-  assert_not_contains "$out" "recovered" "named branch is never auto-changed"
-  [ "$(git -C "$clone" symbolic-ref --short HEAD)" = "feature" ] || fail "named branch checkout was changed"
-  pass "non-default named branch is reported STUCK and left untouched"
+  assert_contains "$out" "delta: recovered: re-attached main, synced" "published named branch should auto-recover"
+  assert_not_contains "$out" "STUCK" "safe named-branch recovery must not report STUCK"
+  [ "$(git -C "$clone" symbolic-ref --short HEAD)" = "main" ] || fail "expected checkout to return to main"
+  after=$(head_sha "$clone")
+  [ "$after" != "$before" ] || fail "expected recovered branch to fast-forward"
+  [ "$after" = "$(git -C "$clone" rev-parse origin/main)" ] \
+    || fail "expected recovered branch at origin/main"
+  [ "$(cat "$clone/treehouse.toml")" = "$config_body" ] \
+    || fail "treehouse.toml was not preserved across named-branch recovery"
+  git -C "$clone" rev-parse --verify --quiet refs/heads/pr24337-head >/dev/null \
+    || fail "source named branch should be retained, not deleted"
+  pass "published clean named branch is re-attached to default and fast-forwarded"
+}
+
+test_named_branch_with_real_dirt_is_stuck_untouched() {
+  local home clone out before
+  home=$(new_home)
+  clone=$(build_pair "$home" delta-dirty)
+  git -C "$clone" checkout -q -b feature
+  printf '%s\n' 'pool config' > "$clone/treehouse.toml"
+  printf '%s\n' 'real dirt' > "$clone/real-dirt.txt"
+  before=$(head_sha "$clone")
+  advance_origin "$home" delta-dirty C1
+
+  out=$(run_sync "$home" "$clone")
+
+  assert_contains "$out" "delta-dirty: STUCK: on branch feature with uncommitted changes" "dirty named branch should report STUCK"
+  assert_not_contains "$out" "recovered" "dirty named branch is never auto-changed"
+  [ "$(git -C "$clone" symbolic-ref --short HEAD)" = "feature" ] || fail "dirty named branch checkout was changed"
+  [ "$(head_sha "$clone")" = "$before" ] || fail "dirty named branch HEAD moved"
+  assert_present "$clone/real-dirt.txt" "real dirty file was removed"
+  pass "named branch recovery refuses real dirty work even when treehouse.toml is present"
+}
+
+test_named_branch_with_unique_commit_is_stuck_untouched() {
+  local home clone out before
+  home=$(new_home)
+  clone=$(build_pair "$home" delta-unique)
+  git -C "$clone" checkout -q -b feature
+  commit_file "$clone" feature.txt unique "local feature commit"
+  printf '%s\n' 'pool config' > "$clone/treehouse.toml"
+  before=$(head_sha "$clone")
+  advance_origin "$home" delta-unique C1
+
+  out=$(run_sync "$home" "$clone")
+
+  assert_contains "$out" "delta-unique: STUCK: on branch feature" "unique named branch should report STUCK"
+  assert_not_contains "$out" "recovered" "unique named branch is never auto-changed"
+  [ "$(git -C "$clone" symbolic-ref --short HEAD)" = "feature" ] || fail "unique named branch checkout was changed"
+  [ "$(head_sha "$clone")" = "$before" ] || fail "unique named branch HEAD moved"
+  pass "named branch recovery refuses unpushed unique commits"
+}
+
+test_named_branch_with_default_checked_out_elsewhere_is_stuck_untouched() {
+  local home clone other out before
+  home=$(new_home)
+  clone=$(build_pair "$home" delta-default-busy)
+  git -C "$clone" checkout -q -b feature
+  other="$home/other-main"
+  git -C "$clone" worktree add -q "$other" main
+  printf '%s\n' 'pool config' > "$clone/treehouse.toml"
+  before=$(head_sha "$clone")
+  advance_origin "$home" delta-default-busy C1
+
+  out=$(run_sync "$home" "$clone")
+
+  assert_contains "$out" "delta-default-busy: STUCK: on branch feature" "busy default branch should keep named branch STUCK"
+  assert_not_contains "$out" "recovered" "named branch is never recovered while default is checked out elsewhere"
+  [ "$(git -C "$clone" symbolic-ref --short HEAD)" = "feature" ] || fail "named branch checkout was changed while default was busy"
+  [ "$(head_sha "$clone")" = "$before" ] || fail "busy-default named branch HEAD moved"
+  pass "named branch recovery refuses when default is checked out elsewhere"
 }
 
 test_diverged_is_stuck_untouched() {
@@ -607,7 +715,12 @@ test_detached_clean_ancestor_recovers
 test_detached_unique_commit_is_stuck_untouched
 test_detached_clean_ancestor_with_diverged_local_default_is_stuck_untouched
 test_dirty_is_stuck_untouched
-test_non_default_branch_is_stuck_untouched
+test_treehouse_config_only_is_clean_and_fast_forwards
+test_treehouse_config_plus_real_dirt_is_stuck_untouched
+test_published_named_branch_recovers_to_default
+test_named_branch_with_real_dirt_is_stuck_untouched
+test_named_branch_with_unique_commit_is_stuck_untouched
+test_named_branch_with_default_checked_out_elsewhere_is_stuck_untouched
 test_diverged_is_stuck_untouched
 test_on_default_clean_behind_fast_forwards
 test_already_current_unchanged

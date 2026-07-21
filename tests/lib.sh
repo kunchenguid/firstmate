@@ -141,6 +141,14 @@ fm_git_add_origin() {
   git -C "$repo" remote add origin "file://$remote_abs"
 }
 
+fm_git_add_origin_head() {
+  local repo=$1 remote=$2 default
+  fm_git_add_origin "$repo" "$remote"
+  git -C "$repo" fetch -q origin
+  default=$(git -C "$repo" symbolic-ref --quiet --short HEAD 2>/dev/null || printf main)
+  git -C "$repo" remote set-head origin "$default" >/dev/null 2>&1 || true
+}
+
 # fm_git_worktree <repo> <worktree> <branch>: init <repo> with one commit, then
 # add a worktree on a fresh branch.
 fm_git_worktree() {

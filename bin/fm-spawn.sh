@@ -147,6 +147,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-ff-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-pool-lib.sh
+. "$SCRIPT_DIR/fm-pool-lib.sh"
 # shellcheck source=bin/fm-config-inherit-lib.sh
 . "$SCRIPT_DIR/fm-config-inherit-lib.sh"
 # shellcheck source=bin/fm-backend.sh
@@ -963,6 +965,29 @@ herdr_projection_existing_meta_allows_flat() {  # <meta>
   esac
 }
 
+validate_spawn_pool_lease() {  # <source> <inspect-target>
+  local source=$1 inspect_target=$2 default base dirty head_short
+  if ! fm_pool_worktree_clean "$WT"; then
+    dirty=$(fm_pool_first_real_porcelain_line "$WT" 2>/dev/null || printf 'unreadable status')
+    echo "error: $source yielded a dirty pool worktree ($dirty; allowed only a lone untracked treehouse.toml); refusing to launch. Inspect target $inspect_target" >&2
+    exit 1
+  fi
+  default=$(default_branch "$WT") || {
+    echo "error: $source yielded a pool worktree whose default branch cannot be determined; refusing to launch. Inspect target $inspect_target" >&2
+    exit 1
+  }
+  base="origin/$default"
+  if ! git -C "$WT" rev-parse --verify --quiet "$base^{commit}" >/dev/null; then
+    echo "error: $source yielded a pool worktree without $base; refusing to launch. Inspect target $inspect_target" >&2
+    exit 1
+  fi
+  if ! git -C "$WT" merge-base --is-ancestor HEAD "$base" 2>/dev/null; then
+    head_short=$(git -C "$WT" rev-parse --short HEAD 2>/dev/null || printf unknown)
+    echo "error: $source yielded a stale or divergent pool worktree (HEAD $head_short is not an ancestor of $base); refusing to launch. Inspect target $inspect_target" >&2
+    exit 1
+  fi
+}
+
 W="fm-$ID"
 case "$BACKEND" in
   tmux)
@@ -1207,6 +1232,7 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   fi
 
   validate_spawn_worktree "treehouse get" "$T"
+  validate_spawn_pool_lease "treehouse get" "$T"
 fi
 
 # Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. Go won't

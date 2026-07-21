@@ -3,14 +3,14 @@
 # origin/<default> when safe, and prune local branches whose upstream tracking
 # branch is gone (the remote branch was deleted, i.e. its PR merged) and that no
 # worktree still needs.
-# Self-heals the one unambiguously safe drift: a clean, detached HEAD that holds
-# no unique commits (it is an ancestor of origin/<default>) and whose <default>
-# branch is free to check out is re-attached and then fast-forwarded ("recovered:").
-# Every other off-default state - a non-default named branch, a detached HEAD with
-# unique commits, a dirty tree, or a diverged default - may hold real work, so it
-# is left untouched and reported as a quantified, loud "STUCK: ... N commits behind
-# ... - needs attention" warning rather than a quiet drift. Nothing is ever forced,
-# stashed, or discarded.
+# Self-heals safe drift: a clean, detached HEAD that holds no unique commits, or
+# a clean named branch with no unpushed unique commits, whose <default> branch is
+# free to check out is re-attached and then fast-forwarded ("recovered:").
+# Every unsafe off-default state - an unpublished or dirty non-default named
+# branch, a detached HEAD with unique commits, a dirty tree, or a diverged default
+# - may hold real work, so it is left untouched and reported as a quantified,
+# loud "STUCK: ... N commits behind ... - needs attention" warning rather than a
+# quiet drift. Nothing is ever forced, stashed, or discarded.
 # Still skips (benignly) local-only/no-origin projects, missing remotes/branches,
 # and fetch failures.
 # Pruning never deletes the checked-out branch or a branch that still has a
@@ -35,6 +35,8 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 # shellcheck source=bin/fm-lock-lib.sh
 . "$SCRIPT_DIR/fm-lock-lib.sh"
+# shellcheck source=bin/fm-pool-lib.sh
+. "$SCRIPT_DIR/fm-pool-lib.sh"
 FM_LOCK_LOG_PREFIX=fleet-sync
 "$FM_ROOT/bin/fm-guard.sh" || true
 
@@ -254,8 +256,19 @@ default_checked_out_elsewhere() {
 }
 
 local_default_safe_for_recovery() {
+  fm_pool_worktree_clean "$PROJ" || return 1
   ! git -C "$PROJ" rev-parse --verify --quiet "$DEFAULT^{commit}" >/dev/null \
     || git -C "$PROJ" merge-base --is-ancestor "$DEFAULT" "$BASE" 2>/dev/null
+}
+
+named_branch_safe_for_recovery() {  # <branch>
+  local branch=$1 unique
+  [ -n "$branch" ] || return 1
+  fm_pool_worktree_clean "$PROJ" || return 1
+  unique=$(git -C "$PROJ" log --format=%H -n 1 "refs/heads/$branch" --not --remotes -- 2>/dev/null) || return 1
+  [ -z "$unique" ] || return 1
+  ! default_checked_out_elsewhere || return 1
+  local_default_safe_for_recovery
 }
 
 # Human-readable name for the unsafe state the clone is in, used in the STUCK
@@ -335,22 +348,27 @@ sync_project() {
 
   cur=$(git -C "$PROJ" symbolic-ref --short HEAD 2>/dev/null || echo "")
   dirty=no
-  [ -z "$(git -C "$PROJ" status --porcelain 2>/dev/null | head -1)" ] || dirty=yes
+  fm_pool_worktree_clean "$PROJ" || dirty=yes
   recovered=no
 
   if [ "$cur" != "$DEFAULT" ]; then
-    # Off the default branch. Auto-recover only the one unambiguously safe drift:
-    # a clean, detached HEAD that holds no unique commits (it is an ancestor of
-    # origin/<default>) and whose <default> branch is free to check out here.
-    # Re-attaching to an already-published commit strands nothing, and the
-    # fast-forward path below then catches the clone up. Anything else - a
-    # non-default named branch, a detached HEAD with unique commits, a dirty tree,
-    # or <default> already checked out elsewhere - may hold real work, so it is
+    # Off the default branch. Auto-recover only safe, published states: either a
+    # clean detached HEAD that is already an ancestor of origin/<default>, or a
+    # clean named branch with no commits missing from remotes. Re-attaching then
+    # fast-forwarding strands nothing. Anything else may hold real work, so it is
     # reported loudly and left untouched.
     if [ -z "$cur" ] && [ "$dirty" = no ] \
         && git -C "$PROJ" merge-base --is-ancestor HEAD "$BASE" 2>/dev/null \
         && ! default_checked_out_elsewhere \
         && local_default_safe_for_recovery; then
+      if ! git -C "$PROJ" checkout --quiet "$DEFAULT" 2>/dev/null; then
+        report_stuck "$(stuck_state)"
+        return 0
+      fi
+      recovered=yes
+      cur=$DEFAULT
+    elif [ -n "$cur" ] && [ "$dirty" = no ] \
+        && named_branch_safe_for_recovery "$cur"; then
       if ! git -C "$PROJ" checkout --quiet "$DEFAULT" 2>/dev/null; then
         report_stuck "$(stuck_state)"
         return 0

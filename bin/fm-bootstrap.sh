@@ -17,6 +17,7 @@
 #                 "NUDGE_SECONDMATES: secondmate <id>: send failed: <reason>",
 #                 "BOOTSTRAP_INFO: nudged fm-<id> with '<message>'",
 #                 "SECONDMATE_LIVENESS: secondmate <id>: skipped: <reason>|respawn failed: <reason>",
+#                 "TREEHOUSE_POOL: dirty idle slot <n> at <path> - inspect before cleanup; no changes made",
 #                 "FMX: X mode on ..." or "FMX: X mode off ...",
 #                 "INTAKE: intake mode on ..." or "INTAKE: intake mode off ...".
 #          When a RUNNING secondmate worktree is fast-forwarded to firstmate's
@@ -73,6 +74,8 @@
 #          refresh relays any completed fm-fleet-sync.sh output before the
 #          aggregate timeout skip line with timeout and elapsed seconds.
 #          Set FM_FLEET_PRUNE=0 to skip branch pruning during that refresh.
+#          The treehouse dirty-idle-slot audit is read-only and reports only
+#          abandoned dirty slots that treehouse will not hand out or prune.
 #          Set FM_BOOTSTRAP_DETECT_ONLY=1 to skip the six MUTATING sweeps
 #          (PR-check migration, secondmate_sync, secondmate_liveness_sweep,
 #          x_mode_setup, intake_mode_setup, fleet_sync) while still printing
@@ -192,6 +195,26 @@ fleet_sync() {
 
   fleet_sync_relay_filtered_output "$tmp"
   rm -f "$tmp"
+}
+
+treehouse_dirty_idle_slot_audit() {
+  command -v treehouse >/dev/null 2>&1 || return 0
+  local out line slot state path rest
+  out=$(cd "$FM_ROOT" && treehouse status 2>/dev/null) || return 0
+  while IFS= read -r line; do
+    read -r slot state path rest <<EOF_SLOT
+$line
+EOF_SLOT
+    [ -n "$rest" ] && rest=" $rest" || rest=
+    case "$slot:$state" in
+      [0-9]*:dirty)
+        [ -n "$path" ] || path="unknown"
+        echo "TREEHOUSE_POOL: dirty idle slot $slot at $path$rest - inspect before cleanup; no changes made"
+        ;;
+    esac
+  done <<EOF
+$out
+EOF
 }
 
 secondmate_sync() {
@@ -886,6 +909,7 @@ if [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ] && [ -n "$crew" ] && [ "$crew" != 
 fi
 crew_dispatch_validate
 secondmate_self_check
+treehouse_dirty_idle_slot_audit
 if [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ] \
   && ! fm_backlog_backend_manual "$CONFIG" && fm_tasks_axi_compatible; then
   echo "BOOTSTRAP_INFO: tasks-axi available"

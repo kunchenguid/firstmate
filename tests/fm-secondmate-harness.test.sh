@@ -663,6 +663,7 @@ test_spawn_fallback_chain_and_crew_scout_unaffected() {
   wt="$w/crew-wt"
   fakebin=$(make_launch_capturing_tmux "$w/tmux-crew")
   fm_git_worktree "$proj" "$wt" "wt-crew"
+  fm_git_add_origin_head "$proj" "$w/crew-origin.git"
   mkdir -p "$home/data/$id" "$home/projects" "$home/state"
   printf 'brief\n' > "$home/data/$id/brief.md"
   : > "$launchlog"

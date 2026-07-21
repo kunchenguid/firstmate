@@ -49,12 +49,17 @@ SH
   chmod +x "$fakebin/gh"
   cat > "$fakebin/treehouse" <<'SH'
 #!/usr/bin/env bash
+[ -z "${FM_FAKE_TREEHOUSE_CALLS:-}" ] || printf '%s\n' "$*" >> "$FM_FAKE_TREEHOUSE_CALLS"
 if [ "${1:-}" = get ] && [ "${2:-}" = --help ]; then
   if [ "${FM_FAKE_TREEHOUSE_LEASE_HELP:-}" = 1 ]; then
     printf '%s\n' 'Usage: treehouse get [--lease] [--lease-holder <holder>]'
   else
     printf '%s\n' 'Usage: treehouse get'
   fi
+  exit 0
+fi
+if [ "${1:-}" = status ]; then
+  [ -z "${FM_FAKE_TREEHOUSE_STATUS_FILE:-}" ] || cat "$FM_FAKE_TREEHOUSE_STATUS_FILE"
   exit 0
 fi
 exit 0
@@ -575,6 +580,41 @@ test_treehouse_lease_check_follows_resolved_backend() {
   pass "bootstrap: the treehouse lease check follows the resolved backend's worktree provider"
 }
 
+test_treehouse_dirty_idle_slot_audit_reports_read_only() {
+  local case_dir root home fakebin status_file calls dirty_slot out
+  case_dir="$TMP_ROOT/treehouse-dirty-audit"
+  root="$case_dir/root"
+  home="$case_dir/home"
+  dirty_slot="$case_dir/dirty-slot"
+  mkdir -p "$root" "$home/config" "$dirty_slot/claude-playground"
+  printf '%s\n' manual > "$home/config/backlog-backend"
+  printf '%s\n' 'unlanded notes' > "$dirty_slot/claude-playground/WIP.md"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  status_file="$case_dir/treehouse-status.txt"
+  calls="$case_dir/treehouse-calls.txt"
+  cat > "$status_file" <<EOF
+1     available    $case_dir/available-slot
+2     dirty        $dirty_slot
+3     in-use       $case_dir/in-use-slot
+                   zsh (12345)
+EOF
+
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$root" \
+    FM_BOOTSTRAP_DETECT_ONLY=1 FM_FAKE_TREEHOUSE_LEASE_HELP=1 \
+    FM_FAKE_TREEHOUSE_STATUS_FILE="$status_file" FM_FAKE_TREEHOUSE_CALLS="$calls" \
+    "$ROOT/bin/fm-bootstrap.sh")
+
+  assert_contains "$out" "TREEHOUSE_POOL: dirty idle slot 2 at $dirty_slot - inspect before cleanup; no changes made" \
+    "bootstrap should surface dirty idle treehouse slots"
+  assert_not_contains "$out" "available-slot" "audit should ignore available slots"
+  assert_not_contains "$out" "in-use-slot" "audit should ignore in-use slots"
+  assert_present "$dirty_slot/claude-playground/WIP.md" "dirty idle audit must not clean slot contents"
+  assert_grep "status" "$calls" "audit should call treehouse status"
+  assert_no_grep "return" "$calls" "audit must not call treehouse return"
+  assert_no_grep "prune" "$calls" "audit must not call treehouse prune"
+  pass "bootstrap: dirty idle treehouse slot audit is read-only and actionable"
+}
+
 test_fleet_sync_timeout_scales_with_origin_backed_project_count() {
   local case_dir home fakebin fake_root out
   case_dir="$TMP_ROOT/fleet-timeout-scaled"
@@ -741,6 +781,7 @@ test_bootstrap_info_is_no_load_and_actionable_lines_trigger() {
   trigger=$(sed -n '/- `bootstrap-diagnostics`/,/- `diagnostic-reasoning`/p' "$ROOT/AGENTS.md")
   assert_contains "$trigger" "actionable diagnostic line" "bootstrap-diagnostics trigger should be action-scoped"
   assert_contains "$trigger" "BOOTSTRAP_INFO:" "bootstrap-diagnostics trigger should classify BOOTSTRAP_INFO as no-load"
+  assert_contains "$trigger" "TREEHOUSE_POOL:" "bootstrap-diagnostics trigger should include dirty idle slot audits"
   assert_not_contains "$trigger" "TASKS_AXI:" "tasks-axi availability must not trigger diagnostics loading"
   assert_not_contains "$trigger" "CREW_HARNESS_OVERRIDE:" "harness override confirmation must not trigger diagnostics loading"
   assert_not_contains "$trigger" "CREW_DISPATCH: active" "active dispatch confirmation must not trigger diagnostics loading"
@@ -823,6 +864,7 @@ test_cmux_bundled_cli_satisfies_dependency
 test_unknown_backend_reports_invalid_configuration
 test_json_backends_require_jq_not_tmux
 test_treehouse_lease_check_follows_resolved_backend
+test_treehouse_dirty_idle_slot_audit_reports_read_only
 test_fleet_sync_timeout_scales_with_origin_backed_project_count
 test_fleet_sync_timeout_floor_preserves_small_fleets
 test_fleet_sync_timeout_explicit_override_wins
