@@ -649,12 +649,15 @@ test_projection_create_uses_exact_response_ids_and_leaves_one_task_pane() {
   printf '{"result":{"tabs":[{"tab_id":"w9:t1","label":"1","workspace_id":"w9"},{"tab_id":"w9:t2","label":"fm-task-p2","workspace_id":"w9"}]}}\n' > "$resp/3.out"
   printf '{"result":{"panes":[{"pane_id":"w9:p1","tab_id":"w9:t1"},{"pane_id":"w9:p2","tab_id":"w9:t2"}]}}\n' > "$resp/4.out"
   printf '{"error":{"code":"agent_not_found"}}\n' > "$resp/5.out"
-  printf '{"result":{"tabs":[{"tab_id":"w9:t2","label":"fm-task-p2","workspace_id":"w9"}]}}\n' > "$resp/7.out"
-  printf '{"result":{"panes":[{"pane_id":"w9:p2","tab_id":"w9:t2"}]}}\n' > "$resp/8.out"
+  printf '{"result":{"pane":{"pane_id":"w9:p1","tab_id":"w9:t1","workspace_id":"w9"}}}\n' > "$resp/6.out"
+  printf '{"result":{"tabs":[{"tab_id":"w9:t2","label":"fm-task-p2","workspace_id":"w9"}]}}\n' > "$resp/8.out"
+  printf '{"result":{"panes":[{"pane_id":"w9:p2","tab_id":"w9:t2"}]}}\n' > "$resp/9.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" HERDR_SESSION=fmtest \
     bash -c '
       . "$0/bin/backends/herdr.sh"
+      fm_backend_herdr_projection_focus_snapshot() { printf "captain-ws\tcaptain-tab"; }
+      fm_backend_herdr_projection_focus_restore() { return 0; }
       token=$(fm_backend_herdr_projection_journal_create "$1" task-p2) || exit 1
       label=$(fm_backend_herdr_projection_workspace_label task-p2 "$token")
       fm_backend_herdr_projection_create_task /tmp/proj "$label" fm-task-p2 || exit 1
@@ -689,11 +692,12 @@ test_projection_create_never_closes_a_concurrent_same_label_tab() {
   printf '{"result":{"tabs":[{"tab_id":"w9:t1","label":"1","workspace_id":"w9"},{"tab_id":"w9:t2","label":"fm-task-p2","workspace_id":"w9"},{"tab_id":"w9:t3","label":"fm-task-p2","workspace_id":"w9"}]}}\n' > "$resp/3.out"
   printf '{"result":{"panes":[{"pane_id":"w9:p1","tab_id":"w9:t1"},{"pane_id":"w9:p2","tab_id":"w9:t2"},{"pane_id":"w9:p3","tab_id":"w9:t3"}]}}\n' > "$resp/4.out"
   printf '{"error":{"code":"agent_not_found"}}\n' > "$resp/5.out"
-  printf '{"result":{"tabs":[{"tab_id":"w9:t2","label":"fm-task-p2","workspace_id":"w9"},{"tab_id":"w9:t3","label":"fm-task-p2","workspace_id":"w9"}]}}\n' > "$resp/7.out"
-  printf '{"result":{"panes":[{"pane_id":"w9:p2","tab_id":"w9:t2"},{"pane_id":"w9:p3","tab_id":"w9:t3"}]}}\n' > "$resp/8.out"
+  printf '{"result":{"pane":{"pane_id":"w9:p1","tab_id":"w9:t1","workspace_id":"w9"}}}\n' > "$resp/6.out"
+  printf '{"result":{"tabs":[{"tab_id":"w9:t2","label":"fm-task-p2","workspace_id":"w9"},{"tab_id":"w9:t3","label":"fm-task-p2","workspace_id":"w9"}]}}\n' > "$resp/8.out"
+  printf '{"result":{"panes":[{"pane_id":"w9:p2","tab_id":"w9:t2"},{"pane_id":"w9:p3","tab_id":"w9:t3"}]}}\n' > "$resp/9.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" HERDR_SESSION=fmtest \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_create_task /tmp/proj label fm-task-p2' "$ROOT" 2>&1)
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_focus_snapshot() { printf "captain-ws\tcaptain-tab"; }; fm_backend_herdr_projection_focus_restore() { return 0; }; fm_backend_herdr_projection_create_task /tmp/proj label fm-task-p2' "$ROOT" 2>&1)
   status=$?
   [ "$status" -ne 0 ] || fail "a concurrent tab should prevent exact one-pane projection convergence"
   assert_contains "$out" "did not converge to exactly one task pane" \
@@ -703,6 +707,171 @@ test_projection_create_never_closes_a_concurrent_same_label_tab() {
   assert_not_contains "$(cat "$log")" $'pane\x1fclose\x1fw9:p3' \
     "projection closed a concurrent same-label pane"
   pass "herdr presentation create: concurrent same-label tabs are never prune targets"
+}
+
+test_projection_focus_snapshot_requires_exact_workspace_and_tab() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/projection-focus-snapshot"; mkdir -p "$dir/responses"
+  log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","active_tab_id":"w1:t1","focused":false},{"workspace_id":"w2","active_tab_id":"w2:t2","focused":true}]}}' > "$resp/1.out"
+  printf '%s\n' '{"result":{"tabs":[{"tab_id":"w2:t1","focused":false},{"tab_id":"w2:t2","focused":true}]}}' > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_focus_snapshot fmtest' "$ROOT") \
+    || fail "an exact active workspace and tab should produce a focus snapshot"
+  [ "$out" = $'w2\tw2:t2' ] || fail "focus snapshot did not preserve exact response IDs: $out"
+  pass "herdr presentation focus: snapshot requires one exact active workspace and tab"
+}
+
+test_projection_close_restores_exact_prior_focus() {
+  local dir log resp fb out status
+  dir="$TMP_ROOT/projection-focus-restore"; mkdir -p "$dir/responses"
+  log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","active_tab_id":"w1:t1","focused":false},{"workspace_id":"w2","active_tab_id":"w2:t2","focused":true},{"workspace_id":"w9","active_tab_id":"w9:t2","focused":false}]}}' > "$resp/1.out"
+  printf '%s\n' '{"result":{"tabs":[{"tab_id":"w2:t1","focused":false},{"tab_id":"w2:t2","focused":true}]}}' > "$resp/2.out"
+  printf '%s\n' '{"result":{"pane":{"pane_id":"w9:p2","tab_id":"w9:t2","workspace_id":"w9"}}}' > "$resp/3.out"
+  printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","active_tab_id":"w1:t1","focused":false},{"workspace_id":"w2","active_tab_id":"w2:t1","focused":false},{"workspace_id":"w3","active_tab_id":"w3:t1","focused":true}]}}' > "$resp/5.out"
+  printf '%s\n' '{"result":{"tabs":[{"tab_id":"w3:t1","focused":true}]}}' > "$resp/6.out"
+  printf '%s\n' '{"result":{"tab":{"tab_id":"w2:t2","workspace_id":"w2"}}}' > "$resp/7.out"
+  printf '%s\n' '{"result":{"tab":{"tab_id":"w2:t2","workspace_id":"w2","focused":true}}}' > "$resp/8.out"
+  printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","active_tab_id":"w1:t1","focused":false},{"workspace_id":"w2","active_tab_id":"w2:t2","focused":true},{"workspace_id":"w3","active_tab_id":"w3:t1","focused":false}]}}' > "$resp/9.out"
+  printf '%s\n' '{"result":{"tabs":[{"tab_id":"w2:t1","focused":false},{"tab_id":"w2:t2","focused":true}]}}' > "$resp/10.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_close_pane_focus_preserving fmtest w9:p2' "$ROOT" 2>&1)
+  status=$?
+  [ "$status" -eq 0 ] || fail "an exact non-active projection close should succeed after restoring focus: $out"
+  assert_contains "$(cat "$log")" $'pane\x1fclose\x1fw9:p2' \
+    "focus-preserving cleanup did not close only the exact projection pane"
+  assert_contains "$(cat "$log")" $'tab\x1ffocus\x1fw2:t2' \
+    "focus-preserving cleanup did not restore the exact prior active tab"
+  assert_not_contains "$(cat "$log")" $'workspace\x1fclose' \
+    "focus-preserving cleanup introduced workspace-close authority"
+  pass "herdr presentation focus: exact pane close restores the exact prior workspace and tab"
+}
+
+test_projection_close_refuses_active_tab() {
+  local dir log resp fb out status
+  dir="$TMP_ROOT/projection-focus-active-refusal"; mkdir -p "$dir/responses"
+  log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w9","active_tab_id":"w9:t2","focused":true}]}}' > "$resp/1.out"
+  printf '%s\n' '{"result":{"tabs":[{"tab_id":"w9:t2","focused":true}]}}' > "$resp/2.out"
+  printf '%s\n' '{"result":{"pane":{"pane_id":"w9:p2","tab_id":"w9:t2","workspace_id":"w9"}}}' > "$resp/3.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_close_pane_focus_preserving fmtest w9:p2' "$ROOT" 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "cleanup must refuse when exact active-tab preservation is impossible"
+  assert_contains "$out" "target is the captain's active tab" \
+    "active-tab cleanup refusal did not explain the focus-safety boundary"
+  assert_not_contains "$(cat "$log")" $'pane\x1fclose' \
+    "active-tab cleanup refusal still closed the pane"
+  pass "herdr presentation focus: cleanup refuses rather than close the captain's active tab"
+}
+
+test_projection_seeded_prune_refuses_active_tab() {
+  local dir log resp fb out status
+  dir="$TMP_ROOT/projection-seeded-focus-active-refusal"; mkdir -p "$dir/responses"
+  log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '%s\n' '{"result":{"tabs":[{"tab_id":"w9:t1","label":"1","workspace_id":"w9","focused":true},{"tab_id":"w9:t2","label":"fm-task","workspace_id":"w9","focused":false}]}}' > "$resp/1.out"
+  printf '%s\n' '{"result":{"panes":[{"pane_id":"w9:p1","tab_id":"w9:t1"},{"pane_id":"w9:p2","tab_id":"w9:t2"}]}}' > "$resp/2.out"
+  printf '%s\n' '{"error":{"code":"agent_not_found"}}' > "$resp/3.out"
+  printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w9","active_tab_id":"w9:t1","focused":true}]}}' > "$resp/4.out"
+  printf '%s\n' '{"result":{"tabs":[{"tab_id":"w9:t1","focused":true},{"tab_id":"w9:t2","focused":false}]}}' > "$resp/5.out"
+  printf '%s\n' '{"result":{"pane":{"pane_id":"w9:p1","tab_id":"w9:t1","workspace_id":"w9"}}}' > "$resp/6.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_workspace_prune_seeded_default_tab fmtest w9 w9:t1 focus-preserving' "$ROOT" 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "projected seeded pruning must refuse the active tab"
+  assert_contains "$out" "target is the captain's active tab" \
+    "projected seeded prune did not explain its active-tab refusal"
+  assert_not_contains "$(cat "$log")" $'pane\x1fclose' \
+    "projected seeded prune closed the captain's active tab"
+  pass "herdr presentation focus: projected seeded pruning refuses the active tab"
+}
+
+test_projection_order_moves_only_exact_new_workspace_and_preserves_relative_order() {
+  local dir log resp fb mover mover_log out status
+  dir="$TMP_ROOT/projection-order"; mkdir -p "$dir/responses"
+  log="$dir/log"; resp="$dir/responses"; mover="$dir/mover"; mover_log="$dir/mover.log"
+  : > "$log"; : > "$mover_log"
+  printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate","focused":false},{"workspace_id":"w2","label":"firstmate/old · p:AbCdEfGhIjKlMnOpQrStUv","focused":false},{"workspace_id":"w3","label":"2ndmate-alpha","focused":false},{"workspace_id":"w4","label":"2ndmate-bravo","focused":true},{"workspace_id":"w5","label":"firstmate/new · p:ZyXwVuTsRqPoNmLkJiHgFe","focused":false}]}}' > "$resp/1.out"
+  printf '%s\n' '{"client":{"version":"0.7.4","protocol":16},"server":{"running":true}}' > "$resp/2.out"
+  # shellcheck disable=SC2016 # $defs is a literal JSON Schema key.
+  printf '%s\n' '{"schemas":{"request":{"oneOf":[{"properties":{"method":{"const":"workspace.move"}}}],"$defs":{"WorkspaceMoveParams":{"required":["workspace_id","insert_index"],"properties":{"insert_index":{"type":"integer"}}}}}}}' > "$resp/3.out"
+  printf '%s\n' '{"sessions":[{"name":"fmtest","running":true,"socket_path":"/tmp/fmtest.sock"}]}' > "$resp/4.out"
+  cat > "$mover" <<'SH'
+#!/usr/bin/env bash
+printf '%s\t%s\t%s\n' "$1" "$2" "$3" >> "$FM_FAKE_MOVER_LOG"
+printf '%s\n' '{"id":"fm-workspace-move","result":{"type":"workspace_list","workspaces":[{"workspace_id":"w1","label":"firstmate","focused":false},{"workspace_id":"w2","label":"firstmate/old · p:AbCdEfGhIjKlMnOpQrStUv","focused":false},{"workspace_id":"w5","label":"firstmate/new · p:ZyXwVuTsRqPoNmLkJiHgFe","focused":false},{"workspace_id":"w3","label":"2ndmate-alpha","focused":false},{"workspace_id":"w4","label":"2ndmate-bravo","focused":true}]}}'
+SH
+  chmod +x "$mover"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_SCRIPT_STATUS=1 \
+    FM_BACKEND_HERDR_WORKSPACE_MOVER="$mover" FM_FAKE_MOVER_LOG="$mover_log" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_focus_snapshot() { printf "w4\tw4:t2"; }; fm_backend_herdr_projection_focus_restore() { return 0; }; fm_backend_herdr_projection_order_best_effort fmtest w5' "$ROOT" 2>&1)
+  status=$?
+  [ "$status" -eq 0 ] || fail "best-effort projection ordering must not fail the spawn"
+  [ -z "$out" ] || fail "successful projection ordering emitted a warning: $out"
+  [ "$(cat "$mover_log")" = $'/tmp/fmtest.sock\tw5\t2' ] \
+    || fail "projection ordering did not move only the exact new response id to the stable append index"
+  assert_not_contains "$(cat "$log")" $'workspace\x1fclose' "projection ordering called workspace close"
+  assert_not_contains "$(cat "$log")" $'session\x1fdelete' "projection ordering called session delete"
+  assert_not_contains "$(cat "$log")" $'workspace\x1frename' "projection ordering called a label-based workspace mutation"
+  pass "herdr presentation ordering: exact new workspace appends to the primary block while focus and relative orders stay stable"
+}
+
+test_projection_order_failure_warns_without_cleanup_or_spawn_failure() {
+  local dir log resp fb mover out status
+  dir="$TMP_ROOT/projection-order-failure"; mkdir -p "$dir/responses"
+  log="$dir/log"; resp="$dir/responses"; mover="$dir/mover"; : > "$log"
+  printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate","focused":true},{"workspace_id":"w2","label":"2ndmate-alpha","focused":false},{"workspace_id":"w3","label":"firstmate/new · p:ZyXwVuTsRqPoNmLkJiHgFe","focused":false}]}}' > "$resp/1.out"
+  printf '%s\n' '{"client":{"version":"0.7.4","protocol":16},"server":{"running":true}}' > "$resp/2.out"
+  # shellcheck disable=SC2016 # $defs is a literal JSON Schema key.
+  printf '%s\n' '{"schemas":{"request":{"oneOf":[{"properties":{"method":{"const":"workspace.move"}}}],"$defs":{"WorkspaceMoveParams":{"required":["workspace_id","insert_index"],"properties":{"insert_index":{"type":"integer"}}}}}}}' > "$resp/3.out"
+  printf '%s\n' '{"sessions":[{"name":"fmtest","running":true,"socket_path":"/tmp/fmtest.sock"}]}' > "$resp/4.out"
+  cat > "$mover" <<'SH'
+#!/usr/bin/env bash
+exit 9
+SH
+  chmod +x "$mover"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_SCRIPT_STATUS=1 \
+    FM_BACKEND_HERDR_WORKSPACE_MOVER="$mover" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_focus_snapshot() { printf "w1\tw1:t1"; }; fm_backend_herdr_projection_focus_restore() { return 0; }; fm_backend_herdr_projection_order_best_effort fmtest w3' "$ROOT" 2>&1)
+  status=$?
+  [ "$status" -eq 0 ] || fail "a workspace.move failure must not fail the projected spawn"
+  assert_contains "$out" "workspace move failed or had an ambiguous response" \
+    "workspace.move failure did not report the best-effort warning"
+  assert_not_contains "$(cat "$log")" $'workspace\x1fclose' "workspace.move failure triggered workspace cleanup"
+  assert_not_contains "$(cat "$log")" $'pane\x1fclose' "workspace.move failure triggered pane cleanup"
+  assert_not_contains "$(cat "$log")" $'session\x1fdelete' "workspace.move failure triggered session cleanup"
+  pass "herdr presentation ordering: move failure warns, returns success, and grants no cleanup authority"
+}
+
+test_projection_order_ambiguous_existing_block_is_read_only() {
+  local dir log resp fb mover out status
+  dir="$TMP_ROOT/projection-order-ambiguous"; mkdir -p "$dir/responses"
+  log="$dir/log"; resp="$dir/responses"; mover="$dir/mover"; : > "$log"
+  printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate","focused":true},{"workspace_id":"w2","label":"2ndmate-alpha","focused":false},{"workspace_id":"w3","label":"firstmate/old · p:AbCdEfGhIjKlMnOpQrStUv","focused":false},{"workspace_id":"w4","label":"firstmate/new · p:ZyXwVuTsRqPoNmLkJiHgFe","focused":false}]}}' > "$resp/1.out"
+  cat > "$mover" <<'SH'
+#!/usr/bin/env bash
+echo called > "$FM_FAKE_MOVER_CALLED"
+exit 0
+SH
+  chmod +x "$mover"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    FM_BACKEND_HERDR_WORKSPACE_MOVER="$mover" FM_FAKE_MOVER_CALLED="$dir/called" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_order_best_effort fmtest w4' "$ROOT" 2>&1)
+  status=$?
+  [ "$status" -eq 0 ] || fail "ambiguous projection ordering must not fail the spawn"
+  assert_contains "$out" "ambiguous workspace layout" "ambiguous projection layout did not warn"
+  [ ! -e "$dir/called" ] || fail "ambiguous projection layout attempted workspace.move"
+  [ "$(wc -l < "$log" | tr -d '[:space:]')" = 1 ] \
+    || fail "ambiguous projection ordering did more than one read-only workspace list"
+  pass "herdr presentation ordering: an ambiguous existing worker block is warning-only and read-only"
 }
 
 test_spawn_task_lock_covers_all_backend_creation_and_metadata_publication() {
@@ -725,22 +894,68 @@ test_spawn_task_lock_covers_all_backend_creation_and_metadata_publication() {
 }
 
 test_projected_spawn_disarms_cleanup_before_ambiguous_launch_submission() {
-  local literal_pattern disarm_pattern enter_pattern literal_line disarm_line enter_line
+  local literal_pattern disarm_pattern release_pattern enter_pattern literal_line disarm_line release_line enter_line
   # These are literal source patterns for grep, so shell expansion would invalidate the assertion.
   # shellcheck disable=SC2016
   literal_pattern='spawn_send_literal "$T" "$LAUNCH"'
   # shellcheck disable=SC2016
-  disarm_pattern='[ "${HERDR_PROJECTED:-0}" -ne 1 ] || HERDR_PROJECTION_ABORT_CLEANUP=0'
+  disarm_pattern='HERDR_PROJECTION_ABORT_CLEANUP=0'
+  release_pattern='spawn_herdr_presentation_order_lock_release'
   # shellcheck disable=SC2016
   enter_pattern='spawn_send_key "$T" Enter'
   literal_line=$(grep -nF "$literal_pattern" "$ROOT/bin/fm-spawn.sh" | tail -1 | cut -d: -f1)
   disarm_line=$(grep -nF "$disarm_pattern" "$ROOT/bin/fm-spawn.sh" | tail -1 | cut -d: -f1)
+  release_line=$(grep -nF "$release_pattern" "$ROOT/bin/fm-spawn.sh" | tail -1 | cut -d: -f1)
   enter_line=$(grep -nF "$enter_pattern" "$ROOT/bin/fm-spawn.sh" | tail -1 | cut -d: -f1)
-  [ -n "$literal_line" ] && [ -n "$disarm_line" ] && [ -n "$enter_line" ] \
+  [ -n "$literal_line" ] && [ -n "$disarm_line" ] && [ -n "$release_line" ] && [ -n "$enter_line" ] \
     || fail "could not locate the projected launch cleanup boundary"
-  [ "$literal_line" -lt "$disarm_line" ] && [ "$disarm_line" -lt "$enter_line" ] \
-    || fail "projected spawn cleanup must be disarmed after launch text and before ambiguous Enter submission"
-  pass "fm-spawn: projected cleanup is disarmed before ambiguous launch submission"
+  [ "$literal_line" -lt "$disarm_line" ] \
+    && [ "$disarm_line" -lt "$release_line" ] \
+    && [ "$release_line" -lt "$enter_line" ] \
+    || fail "projected spawn must disarm cleanup before releasing its lock and submitting ambiguous Enter"
+  pass "fm-spawn: projected cleanup disarms before lock release and ambiguous launch submission"
+}
+
+test_projected_abort_cleanup_holds_presentation_lock() {
+  local dir lock started proceed function_source owner_pid status
+  dir="$TMP_ROOT/projection-abort-lock"; mkdir -p "$dir"
+  lock="$dir/presentation.lock"
+  started="$dir/cleanup-started"
+  proceed="$dir/cleanup-proceed"
+  function_source=$(sed -n '/^spawn_abort_cleanup()/,/^trap spawn_abort_cleanup EXIT/p' "$ROOT/bin/fm-spawn.sh" | sed '$d')
+  ROOT="$ROOT" LOCK="$lock" STARTED="$started" PROCEED="$proceed" FUNCTION_SOURCE="$function_source" bash -c '
+    . "$ROOT/bin/fm-wake-lib.sh"
+    eval "$FUNCTION_SOURCE"
+    fm_backend_herdr_projection_cleanup_exact() {
+      : > "$STARTED"
+      while [ ! -e "$PROCEED" ]; do sleep 0.01; done
+    }
+    fm_lock_try_acquire "$LOCK" || exit 1
+    HERDR_PRESENTATION_ORDER_LOCK_HELD=1
+    HERDR_PRESENTATION_ORDER_LOCK=$LOCK
+    HERDR_PROJECTION_ABORT_CLEANUP=1
+    HERDR_PROJECTION_ABORT_SESSION=fmtest
+    HERDR_PROJECTION_ABORT_TASK_PANE=w9:p2
+    HERDR_PROJECTION_ABORT_SEEDED_PANE=w9:p1
+    ORCA_ABORT_CLEANUP=0
+    SPAWN_TASK_LOCK_HELD=0
+    spawn_abort_cleanup
+  ' &
+  owner_pid=$!
+  while [ ! -e "$started" ] && kill -0 "$owner_pid" 2>/dev/null; do sleep 0.01; done
+  [ -e "$started" ] || fail "projected abort cleanup did not start"
+  if LOCK="$lock" ROOT="$ROOT" bash -c '. "$ROOT/bin/fm-wake-lib.sh"; fm_lock_try_acquire "$LOCK"'; then
+    : > "$proceed"
+    wait "$owner_pid" || true
+    fail "concurrent presentation work acquired the lock during abort cleanup"
+  fi
+  : > "$proceed"
+  wait "$owner_pid"
+  status=$?
+  [ "$status" -eq 0 ] || fail "projected abort cleanup owner failed"
+  LOCK="$lock" ROOT="$ROOT" bash -c '. "$ROOT/bin/fm-wake-lib.sh"; fm_lock_try_acquire "$LOCK"' \
+    || fail "presentation lock remained held after abort cleanup"
+  pass "fm-spawn: projected abort cleanup remains serialized by the presentation lock"
 }
 
 test_projection_recovery_is_read_only_and_refuses_live_duplicate_risk() {
@@ -2238,8 +2453,16 @@ test_create_task_creates_with_no_focus_flag
 test_projection_journal_is_atomic_and_uses_128_bit_token
 test_projection_create_uses_exact_response_ids_and_leaves_one_task_pane
 test_projection_create_never_closes_a_concurrent_same_label_tab
+test_projection_focus_snapshot_requires_exact_workspace_and_tab
+test_projection_close_restores_exact_prior_focus
+test_projection_close_refuses_active_tab
+test_projection_seeded_prune_refuses_active_tab
+test_projection_order_moves_only_exact_new_workspace_and_preserves_relative_order
+test_projection_order_failure_warns_without_cleanup_or_spawn_failure
+test_projection_order_ambiguous_existing_block_is_read_only
 test_spawn_task_lock_covers_all_backend_creation_and_metadata_publication
 test_projected_spawn_disarms_cleanup_before_ambiguous_launch_submission
+test_projected_abort_cleanup_holds_presentation_lock
 test_projection_recovery_is_read_only_and_refuses_live_duplicate_risk
 test_workspace_find_matches_only_this_homes_own_label
 test_list_live_scoped_to_this_homes_workspace_only

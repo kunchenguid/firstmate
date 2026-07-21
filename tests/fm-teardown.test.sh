@@ -1283,7 +1283,20 @@ set -u
 printf '%s\n' "$*" >> "${FM_FAKE_HERDR_LOG:?}"
 case "${1:-} ${2:-}" in
   "workspace list")
-    printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate/task-x1 · p:AbCdEfGhIjKlMnOpQrStUv"}]}}'
+    if [ -e "${FM_FAKE_HERDR_RESTORED:?}" ]; then
+      printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w2","active_tab_id":"w2:t2","label":"2ndmate-bravo","focused":true},{"workspace_id":"w3","active_tab_id":"w3:t1","label":"2ndmate-alpha","focused":false}]}}'
+    elif [ -e "${FM_FAKE_HERDR_CLOSED:?}" ]; then
+      printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w2","active_tab_id":"w2:t2","label":"2ndmate-bravo","focused":false},{"workspace_id":"w3","active_tab_id":"w3:t1","label":"2ndmate-alpha","focused":true}]}}'
+    else
+      printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","active_tab_id":"w1:t2","label":"firstmate/task-x1 · p:AbCdEfGhIjKlMnOpQrStUv","focused":false},{"workspace_id":"w2","active_tab_id":"w2:t2","label":"2ndmate-bravo","focused":true},{"workspace_id":"w3","active_tab_id":"w3:t1","label":"2ndmate-alpha","focused":false}]}}'
+    fi
+    ;;
+  "tab list")
+    case "$*" in
+      *"--workspace w2"*) printf '%s\n' '{"result":{"tabs":[{"tab_id":"w2:t2","focused":true}]}}' ;;
+      *"--workspace w3"*) printf '%s\n' '{"result":{"tabs":[{"tab_id":"w3:t1","focused":true}]}}' ;;
+      *) printf '%s\n' '{"result":{"tabs":[]}}' ;;
+    esac
     ;;
   "status --json")
     printf '%s\n' '{"server":{"running":true}}'
@@ -1299,7 +1312,14 @@ case "${1:-} ${2:-}" in
       printf '%s\n' '{"error":{"code":"pane_not_found"}}' >&2
       exit 1
     fi
-    printf '%s\n' '{"result":{"pane":{"pane_id":"w1:p2"}}}'
+    printf '%s\n' '{"result":{"pane":{"pane_id":"w1:p2","tab_id":"w1:t2","workspace_id":"w1"}}}'
+    ;;
+  "tab get")
+    printf '%s\n' '{"result":{"tab":{"tab_id":"w2:t2","workspace_id":"w2"}}}'
+    ;;
+  "tab focus")
+    : > "${FM_FAKE_HERDR_RESTORED:?}"
+    printf '%s\n' '{"result":{"tab":{"tab_id":"w2:t2","workspace_id":"w2","focused":true}}}'
     ;;
   "agent get")
     printf '%s\n' '{"error":{"code":"agent_not_found"}}' >&2
@@ -1311,30 +1331,32 @@ SH
 }
 
 test_herdr_projection_teardown_retires_journal_only_after_confirmed_close() {
-  local case_dir log closed
+  local case_dir log closed restored
   case_dir=$(make_case herdr-projection-confirmed-close)
   write_meta "$case_dir" local-only ship
   configure_herdr_projection_teardown_case "$case_dir"
-  log="$case_dir/herdr.log"; closed="$case_dir/closed"; : > "$log"
+  log="$case_dir/herdr.log"; closed="$case_dir/closed"; restored="$case_dir/restored"; : > "$log"
 
-  FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" \
+  FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" FM_FAKE_HERDR_RESTORED="$restored" \
     run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" \
     || fail "herdr-projection-confirmed-close: forced teardown failed"
   [ ! -e "$case_dir/state/task-x1.herdr-presentation" ] \
     || fail "confirmed exact-pane close did not retire the presentation journal"
   assert_not_contains "$(cat "$log")" "workspace close" \
     "projected teardown must never call workspace close"
+  assert_contains "$(cat "$log")" "tab focus w2:t2" \
+    "projected teardown did not restore the exact pre-close active tab"
   pass "herdr projection teardown retires its journal only after confirming the exact recorded pane is gone"
 }
 
 test_herdr_projection_teardown_retains_journal_when_close_unconfirmed() {
-  local case_dir log closed
+  local case_dir log closed restored
   case_dir=$(make_case herdr-projection-unconfirmed-close)
   write_meta "$case_dir" local-only ship
   configure_herdr_projection_teardown_case "$case_dir"
-  log="$case_dir/herdr.log"; closed="$case_dir/closed"; : > "$log"
+  log="$case_dir/herdr.log"; closed="$case_dir/closed"; restored="$case_dir/restored"; : > "$log"
 
-  FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" FM_FAKE_HERDR_CLOSE_FAIL=1 \
+  FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" FM_FAKE_HERDR_RESTORED="$restored" FM_FAKE_HERDR_CLOSE_FAIL=1 \
     run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" \
     || fail "herdr-projection-unconfirmed-close: teardown should preserve best-effort endpoint semantics"
   [ -e "$case_dir/state/task-x1.herdr-presentation" ] \

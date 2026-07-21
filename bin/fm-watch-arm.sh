@@ -448,7 +448,9 @@ owned_child_finished() {
 # Verify the outcome: poll until this child is the confirmed healthy watcher, or
 # until some other watcher legitimately holds the singleton (a startup race), or
 # until the child gives up. Only then print the honest line.
-deadline=$(( $(date +%s) + CONFIRM_TIMEOUT ))
+# date(1) exposes whole seconds. Keep the configured confirmation budget from
+# collapsing when startup begins just before the next second boundary.
+deadline=$(( $(date +%s) + CONFIRM_TIMEOUT + 1 ))
 while :; do
   if healthy_watcher; then
     if [ "$HEALTHY_PID" = "$child" ]; then
