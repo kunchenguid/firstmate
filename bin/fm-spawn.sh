@@ -1285,5 +1285,15 @@ if [ "$KIND" = secondmate ]; then
     fi
   fi
 fi
+if [ "$BACKEND" = herdr ]; then
+  case "$HARNESS" in
+    claude*|codex*)
+      fm_backend_herdr_handle_startup_dialog "$T" "$HARNESS" || {
+        echo "error: guarded herdr startup dialog handling failed for $ID; inspect pane $T" >&2
+        exit 1
+      }
+      ;;
+  esac
+fi
 
 echo "spawned $ID harness=$HARNESS kind=$KIND mode=$MODE yolo=$YOLO window=$META_WINDOW worktree=$WT"

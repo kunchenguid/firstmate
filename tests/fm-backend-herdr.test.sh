@@ -1054,8 +1054,108 @@ test_normalize_key() {
     [ "$(fm_backend_herdr_normalize_key Escape)" = escape ] || exit 1
     [ "$(fm_backend_herdr_normalize_key C-c)" = ctrl+c ] || exit 1
     [ "$(fm_backend_herdr_normalize_key ctrl+c)" = ctrl+c ] || exit 1
+    [ "$(fm_backend_herdr_normalize_key Down)" = down ] || exit 1
+    [ "$(fm_backend_herdr_normalize_key Up)" = up ] || exit 1
   ) || fail "fm_backend_herdr_normalize_key did not map firstmate's key vocabulary to herdr's verified names"
-  pass "fm_backend_herdr_normalize_key: Enter/Escape/C-c map to herdr's verified enter/escape/ctrl+c"
+  pass "fm_backend_herdr_normalize_key: Enter/Escape/C-c/Down/Up map to herdr's verified key names"
+}
+
+# --- guarded first-launch dialog handling ----------------------------------
+
+test_dialog_classifies_supported_first_launch_menus() {
+  local out
+  out=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_dialog_classify claude "$1"' "$ROOT" $'Accessing workspace:\nQuick safety check\n❯ 1. Yes, I trust this folder\n  2. No, exit')
+  [ "$out" = $'claude-trust\taccept' ] || fail "claude trust dialog classification was '$out'"
+
+  out=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_dialog_classify claude "$1"' "$ROOT" $'WARNING: Claude Code running in Bypass Permissions mode\n  1. Yes, I accept\n❯ 2. No, exit')
+  [ "$out" = $'claude-bypass\treject' ] || fail "claude bypass dialog classification was '$out'"
+
+  out=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_dialog_classify codex "$1"' "$ROOT" $'> You are in /tmp/project\nDo you trust the contents of this directory?\nYes, continue\nPress enter to continue')
+  [ "$out" = $'codex-trust\taccept' ] || fail "codex trust dialog classification was '$out'"
+
+  out=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_dialog_classify codex "$1"' "$ROOT" $'Hooks need review\n2 hooks are new or changed.\n› Review hooks\n  Trust all and continue\n  Continue without trusting (hooks won\x27t run)')
+  [ "$out" = $'codex-hooks-review\treview' ] || fail "codex hooks-review dialog classification was '$out'"
+  pass "herdr first-launch dialogs: claude trust/bypass and codex trust/hooks-review are classified with focused choice"
+}
+
+test_dialog_navigation_verifies_cursor_move_before_enter() {
+  local dir log resp fb out down_count enter_count
+  dir="$TMP_ROOT/dialog-move"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  # Down succeeds, then the readback proves the safe choice is focused.
+  printf 'WARNING: Claude Code running in Bypass Permissions mode\n  1. No, exit\n❯ 2. Yes, I accept\n' > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_dialog_drive_visible default:w1:p2 claude "$1" 2 0' \
+      "$ROOT" $'WARNING: Claude Code running in Bypass Permissions mode\n❯ 1. No, exit\n  2. Yes, I accept') \
+    || fail "dialog handler should accept a verified cursor move"
+  [ "$out" = $'claude-bypass\taccept' ] || fail "verified move should return the safe focused state, got '$out'"
+  down_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''down' "$log")
+  enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log" || true)
+  [ "$down_count" -eq 1 ] || fail "dialog handler should send exactly one Down before verified movement, sent $down_count"
+  [ "$enter_count" -eq 0 ] || fail "dialog handler must not combine navigation and Enter before readback"
+  pass "herdr first-launch dialogs: navigation sends one key and verifies the cursor reached the safe choice before Enter"
+}
+
+test_dialog_destructive_default_never_receives_blind_enter() {
+  local dir log resp fb rc enter_count down_count
+  dir="$TMP_ROOT/dialog-destructive"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf 'WARNING: Claude Code running in Bypass Permissions mode\n❯ 1. No, exit\n  2. Yes, I accept\n' > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_dialog_drive_visible default:w1:p2 claude "$1" 1 0' \
+      "$ROOT" $'WARNING: Claude Code running in Bypass Permissions mode\n❯ 1. No, exit\n  2. Yes, I accept' >/dev/null 2>&1
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "an unchanged destructive default must fail after its bounded navigation budget"
+  enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log" || true)
+  down_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''down' "$log")
+  [ "$enter_count" -eq 0 ] || fail "destructive default protection failed: handler sent Enter while No, exit remained focused"
+  [ "$down_count" -eq 1 ] || fail "handler should make one bounded navigation attempt, sent $down_count"
+  pass "herdr first-launch dialogs: an unchanged destructive default fails loudly without any blind Enter"
+}
+
+test_dialog_navigation_retry_budget_is_bounded() {
+  local dir log resp fb rc down_count
+  dir="$TMP_ROOT/dialog-retry-budget"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf 'Hooks need review\n› Review hooks\n  Trust all and continue\n  Continue without trusting (hooks won\x27t run)\n' > "$resp/2.out"
+  printf 'Hooks need review\n› Review hooks\n  Trust all and continue\n  Continue without trusting (hooks won\x27t run)\n' > "$resp/4.out"
+  fb=$(make_herdr_fakebin "$dir")
+  PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_dialog_drive_visible default:w1:p2 codex "$1" 2 0' \
+      "$ROOT" $'Hooks need review\n› Review hooks\n  Trust all and continue\n  Continue without trusting (hooks won\x27t run)' >/dev/null 2>&1
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "an unmoved hooks-review cursor must exhaust its retry budget"
+  down_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''down' "$log")
+  [ "$down_count" -eq 2 ] || fail "retry exhaustion should stop after exactly two Down attempts, sent $down_count"
+  pass "herdr first-launch dialogs: cursor-move retry exhaustion is bounded and fails closed"
+}
+
+test_events_capable_large_schema_is_pipefail_safe() {
+  local dir fb schema out
+  dir="$TMP_ROOT/events-pipefail"; mkdir -p "$dir/fakebin"
+  schema="$dir/schema.json"
+  { printf '{\"padding\":\"'; head -c 262144 /dev/zero | tr '\\0' x; printf '\",\"methods\":[\"events.subscribe\",\"pane.agent_status_changed\"]}\n'; } > "$schema"
+  fb="$dir/fakebin"
+  cat > "$fb/herdr" <<'SH'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  "status --json") printf '{"client":{"protocol":16}}\n' ;;
+  "api schema") cat "$FM_FAKE_SCHEMA" ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$fb/herdr"
+  out=$(PATH="$fb:$PATH" FM_FAKE_SCHEMA="$schema" bash -o pipefail -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_events_capable default; printf ok' "$ROOT" 2>&1) \
+    || fail "events capability detection must not SIGPIPE under pipefail: $out"
+  [ "$out" = ok ] || fail "pipe-safe capability probe returned unexpected output: '$out'"
+  pass "fm_backend_herdr_events_capable: a large matching schema is checked without printf SIGPIPE under pipefail"
+}
+
+test_spawn_wires_guarded_herdr_dialog_handler() {
+  local source
+  source=$(cat "$ROOT/bin/fm-spawn.sh")
+  assert_contains "$source" "fm_backend_herdr_handle_startup_dialog \"\$T\" \"\$HARNESS\"" \
+    "fm-spawn must invoke the guarded Herdr dialog handler after launch submission"
+  pass "fm-spawn: herdr launch submission enters the guarded post-spawn dialog handler"
 }
 
 # --- capture / send_key / kill / current_path --------------------------------
@@ -2468,6 +2568,12 @@ test_workspace_find_matches_only_this_homes_own_label
 test_list_live_scoped_to_this_homes_workspace_only
 test_parse_target
 test_normalize_key
+test_dialog_classifies_supported_first_launch_menus
+test_dialog_navigation_verifies_cursor_move_before_enter
+test_dialog_destructive_default_never_receives_blind_enter
+test_dialog_navigation_retry_budget_is_bounded
+test_events_capable_large_schema_is_pipefail_safe
+test_spawn_wires_guarded_herdr_dialog_handler
 test_capture_calls_pane_read
 test_capture_works_around_small_lines_bug
 test_capture_preserves_pane_read_failure
