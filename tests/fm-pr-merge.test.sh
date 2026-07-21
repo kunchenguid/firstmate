@@ -27,6 +27,11 @@
 #   (o) the armed merge poll increments failures before provider lookup
 #   (p) the armed merge poll wakes once after repeated state-lookup failures
 #   (q) one successful lookup resets the poll's consecutive-failure count
+#   (u) a red CI aggregate wakes firstmate once, not every poll, while it stays red
+#   (v) CI leaving the failing state re-arms the one-shot, so a relapse wakes again
+#   (w) a merged PR still wakes even while a CI watch is armed
+#   (x) a CI read failure fails closed (broken diagnostic), never a false "ci-failed"
+#   (y) fm_scm_pr_ci_state classifies a Codebase MR from its check-run counts
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -720,6 +725,199 @@ test_merge_poll_failure_count_resets_on_success() {
   pass "one successful lookup resets the merge poll's consecutive-failure count"
 }
 
+# gh mock driven by files so one poll can be walked through CI red, recovery, a
+# relapse, a merge, and an unreadable CI read without editing the mock. The
+# statusCheckRollup query runs the poll's REAL -q jq program (captured from argv)
+# against a canned rollup, so the GitHub aggregation is exercised, not stubbed.
+add_gh_ci_mock() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/gh" <<SH
+#!/usr/bin/env bash
+want_q=0; qexpr=
+for a in "\$@"; do
+  if [ "\$want_q" = 1 ]; then qexpr=\$a; want_q=0; continue; fi
+  case "\$a" in -q|--jq) want_q=1 ;; esac
+done
+case " \$* " in
+  *"state,headRefOid"*)
+    st=\$(cat '$case_dir/pr-state' 2>/dev/null || echo OPEN)
+    printf '%s\t%s\n' "\$st" '9999999999999999999999999999999999999999'
+    exit 0
+    ;;
+  *statusCheckRollup*)
+    if [ -e '$case_dir/ci-unreadable' ]; then
+      echo "gh: api error" >&2
+      exit 1
+    fi
+    jq -r "\$qexpr" < '$case_dir/ci-rollup.json'
+    exit 0
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/gh"
+}
+
+# A rollup with one failed and one passing check: definitively red.
+CI_ROLLUP_RED='{"statusCheckRollup":[{"__typename":"CheckRun","status":"COMPLETED","conclusion":"FAILURE","name":"Behavior tests"},{"__typename":"CheckRun","status":"COMPLETED","conclusion":"SUCCESS","name":"Lint"}]}'
+# A rollup whose checks all passed: green.
+CI_ROLLUP_GREEN='{"statusCheckRollup":[{"__typename":"CheckRun","status":"COMPLETED","conclusion":"SUCCESS","name":"Behavior tests"}]}'
+
+arm_ci_poll() {
+  local case_dir=$1
+  mkdir -p "$case_dir/wt"
+  add_gh_ci_mock "$case_dir"
+  printf 'OPEN\n' > "$case_dir/pr-state"
+  printf '%s\n' "$CI_ROLLUP_GREEN" > "$case_dir/ci-rollup.json"
+  FM_ROOT_OVERRIDE="$ROOT" \
+  FM_STATE_OVERRIDE="$case_dir/state" \
+  FM_GUARD_GRACE=999999 \
+  PATH="$case_dir/fakebin:$PATH" \
+    "$ROOT/bin/fm-pr-check.sh" task-x1 https://github.com/example/repo/pull/41 >/dev/null 2>&1 \
+    || fail "arm_ci_poll: fm-pr-check failed to arm the poll"
+}
+
+test_ci_red_wakes_once() {
+  local case_dir first second
+  case_dir=$(make_case ci-red-once)
+  arm_ci_poll "$case_dir"
+
+  printf '%s\n' "$CI_ROLLUP_RED" > "$case_dir/ci-rollup.json"
+  first=$(run_poll "$case_dir")
+  second=$(run_poll "$case_dir")
+
+  assert_contains "$first" 'ci-failed' \
+    "ci-red-once: a red CI aggregate must wake firstmate"
+  [ -z "$second" ] || fail "ci-red-once: a still-red PR must not re-wake firstmate every poll (got '$second')"
+  assert_present "$case_dir/state/task-x1.check.ci" \
+    "ci-red-once: no durable one-shot marker was left for the red CI"
+  pass "the poll wakes firstmate once for a red CI aggregate and stays quiet while it stays red"
+}
+
+test_ci_recovery_rearms_the_one_shot() {
+  local case_dir first recovered relapse
+  case_dir=$(make_case ci-recovery)
+  arm_ci_poll "$case_dir"
+
+  printf '%s\n' "$CI_ROLLUP_RED" > "$case_dir/ci-rollup.json"
+  first=$(run_poll "$case_dir")
+  assert_contains "$first" 'ci-failed' "ci-recovery: the first red read should wake firstmate"
+
+  printf '%s\n' "$CI_ROLLUP_GREEN" > "$case_dir/ci-rollup.json"
+  recovered=$(run_poll "$case_dir")
+  [ -z "$recovered" ] || fail "ci-recovery: a recovered CI must not wake firstmate (got '$recovered')"
+  assert_absent "$case_dir/state/task-x1.check.ci" \
+    "ci-recovery: leaving the failing state must clear the one-shot marker"
+
+  printf '%s\n' "$CI_ROLLUP_RED" > "$case_dir/ci-rollup.json"
+  relapse=$(run_poll "$case_dir")
+  assert_contains "$relapse" 'ci-failed' \
+    "ci-recovery: a relapse into red after recovery must wake firstmate again"
+  pass "CI leaving the failing state re-arms the one-shot so a later relapse wakes firstmate again"
+}
+
+test_merged_still_wakes_with_ci_watch_armed() {
+  local case_dir out
+  case_dir=$(make_case ci-merged)
+  arm_ci_poll "$case_dir"
+
+  # Go red and alert first, then merge: merged must still wake and clear the marker.
+  printf '%s\n' "$CI_ROLLUP_RED" > "$case_dir/ci-rollup.json"
+  run_poll "$case_dir" >/dev/null
+  printf 'MERGED\n' > "$case_dir/pr-state"
+  out=$(run_poll "$case_dir")
+
+  [ "$out" = merged ] || fail "ci-merged: a merged PR must still wake firstmate with 'merged' (got '$out')"
+  assert_absent "$case_dir/state/task-x1.check.ci" \
+    "ci-merged: a merged PR must clear the CI one-shot marker"
+  pass "a merged PR still wakes firstmate even with a CI watch armed"
+}
+
+test_ci_read_failure_fails_closed_not_red() {
+  local case_dir first second third
+  case_dir=$(make_case ci-read-failure)
+  arm_ci_poll "$case_dir"
+
+  # State reads fine (OPEN), but the CI read fails on every poll. This must be
+  # treated as a lookup failure that fails closed, never as a red result.
+  : > "$case_dir/ci-unreadable"
+  first=$(run_poll "$case_dir")
+  second=$(run_poll "$case_dir")
+  third=$(run_poll "$case_dir")
+
+  [ -z "$first" ] || fail "ci-read-failure: a single CI read failure must stay quiet (got '$first')"
+  [ -z "$second" ] || fail "ci-read-failure: a second CI read failure must stay quiet (got '$second')"
+  assert_contains "$third" 'poll broken' \
+    "ci-read-failure: a persistent CI read failure must wake firstmate with the broken diagnostic"
+  assert_not_contains "$first$second$third" 'ci-failed' \
+    "ci-read-failure: an unreadable CI status must never be reported as a red build"
+  assert_absent "$case_dir/state/task-x1.check.ci" \
+    "ci-read-failure: a failed CI read must not arm the red one-shot"
+  pass "an unreadable CI status fails closed with the broken diagnostic instead of a false ci-failed"
+}
+
+# bytedcli mock whose MR-status JSON body is read from a file per assertion, so
+# one mock covers red, pending, green, empty, and an outright lookup failure.
+add_bytedcli_ci_status_mock() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/bytedcli" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "\$FM_TEST_BYTEDCLI_LOG"
+case "\$*" in
+  "--json codebase mr status 55 -R platform/team/repo")
+    if [ -e '$case_dir/mr-status-fail' ]; then
+      echo "bytedcli: MR status lookup failed" >&2
+      exit 1
+    fi
+    cat '$case_dir/mr-status.json'
+    exit 0
+    ;;
+esac
+echo "unexpected bytedcli args: \$*" >&2
+exit 1
+SH
+  chmod +x "$case_dir/fakebin/bytedcli"
+}
+
+test_codebase_ci_state_classifies_from_counts() {
+  local case_dir url out rc
+  case_dir=$(make_case codebase-ci-state)
+  add_bytedcli_ci_status_mock "$case_dir"
+  : > "$case_dir/bytedcli.log"
+  url=https://code.byted.org/platform/team/repo/merge_requests/55
+
+  ci_state() {
+    printf '%s\n' "$1" > "$case_dir/mr-status.json"
+    FM_TEST_BYTEDCLI_LOG="$case_dir/bytedcli.log" \
+    PATH="$case_dir/fakebin:$PATH" \
+      bash -c '. "$1/bin/fm-scm-lib.sh"; fm_scm_pr_ci_state "" "$2"' _ "$ROOT" "$url"
+  }
+
+  out=$(ci_state '{"status":"success","data":{"check_runs":{"summary":"has_failure","total_count":3,"passed_count":2,"failed_count":1,"running_count":0}},"error":null}') \
+    || fail "codebase-ci-state: a readable failing status returned non-zero"
+  [ "$out" = FAILING ] || fail "codebase-ci-state: failed_count>0 must be FAILING, got '$out'"
+
+  out=$(ci_state '{"status":"success","data":{"check_runs":{"summary":"running","total_count":3,"passed_count":1,"failed_count":0,"running_count":2}},"error":null}') \
+    || fail "codebase-ci-state: a running status returned non-zero"
+  [ "$out" = PENDING ] || fail "codebase-ci-state: running_count>0 with no failures must be PENDING, got '$out'"
+
+  out=$(ci_state '{"status":"success","data":{"check_runs":{"summary":"all_passed","total_count":3,"passed_count":3,"failed_count":0,"running_count":0}},"error":null}') \
+    || fail "codebase-ci-state: an all-passed status returned non-zero"
+  [ "$out" = PASSING ] || fail "codebase-ci-state: all checks passed must be PASSING, got '$out'"
+
+  out=$(ci_state '{"status":"success","data":{"check_runs":{"summary":"none","total_count":0,"passed_count":0,"failed_count":0,"running_count":0}},"error":null}') \
+    || fail "codebase-ci-state: an empty status returned non-zero"
+  [ "$out" = NONE ] || fail "codebase-ci-state: no checks must be NONE, got '$out'"
+
+  : > "$case_dir/mr-status-fail"
+  set +e
+  out=$(ci_state '{}')
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "codebase-ci-state: an unreadable MR status must fail closed (return non-zero), not classify"
+  pass "fm_scm_pr_ci_state classifies a Codebase MR from failed/running/total check-run counts and fails closed on lookup error"
+}
+
 test_records_pr_and_head_before_merging
 test_merge_failure_propagates_after_recording
 test_extra_merge_args_forwarded
@@ -742,3 +940,8 @@ test_codebase_empty_head_does_not_shift_source_ref
 test_merge_poll_counts_timeout_killed_lookup
 test_merge_poll_wakes_after_repeated_lookup_failures
 test_merge_poll_failure_count_resets_on_success
+test_ci_red_wakes_once
+test_ci_recovery_rearms_the_one_shot
+test_merged_still_wakes_with_ci_watch_armed
+test_ci_read_failure_fails_closed_not_red
+test_codebase_ci_state_classifies_from_counts
