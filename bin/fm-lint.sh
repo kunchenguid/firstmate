@@ -67,10 +67,12 @@ export PATH
 # stderr to keep lint stdout clean.
 if ! command -v shellcheck >/dev/null 2>&1; then
   cache_bin="${XDG_CACHE_HOME:-$HOME/.cache}/firstmate/bin"
-  if ! mkdir -p "$cache_bin" || ! "$ROOT/bin/fm-install-shellcheck.sh" "$cache_bin" >&2; then
-    printf 'fm-lint.sh: failed to install ShellCheck %s for CI parity.\n' \
-      "$REQUIRED_SHELLCHECK" >&2
-    exit 127
+  if [ ! -x "$cache_bin/shellcheck" ]; then
+    if ! mkdir -p "$cache_bin" || ! "$ROOT/bin/fm-install-shellcheck.sh" "$cache_bin" >&2; then
+      printf 'fm-lint.sh: failed to install ShellCheck %s for CI parity.\n' \
+        "$REQUIRED_SHELLCHECK" >&2
+      exit 127
+    fi
   fi
   PATH="$cache_bin:$PATH"
   export PATH
