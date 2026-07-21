@@ -880,6 +880,39 @@ test_same_hash_busy_runs_surface_terminal_transitions_once() {
   pass "same-hash busy runs surface done and failed transitions exactly once"
 }
 
+test_same_hash_busy_resets_prior_wedge_cadence() {
+  local dir state fakebin out capture_file window key pane_hash sig pid
+  dir=$(make_case same-hash-busy-wedge-reset); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-busy-wedge-reset"
+  printf 'unchanged busy pane\n' > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=codex\nbackend=tmux\n' "$window" > "$state/busy-reset.meta"
+  printf 'working: validation under way\n' > "$state/busy-reset.status"
+  sig=$(seen_sig "$state/busy-reset.status"); printf '%s' "$sig" > "$state/.seen-busy-reset_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___'); pane_hash=$(hash_text "unchanged busy pane")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"; printf '2\n' > "$state/.count-$key"
+  printf '%s' "$pane_hash" > "$state/.stale-$key"; printf 'working:%s\n' "$pane_hash" > "$state/.stale-class-$key"
+  printf '%s\n' $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"; printf '2\n' > "$state/.wedge-escalations-$key"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" FM_FAKE_TMUX_CURRENT_COMMAND=codex \
+    FM_FAKE_CREW_STATE='state: working · source: run-step · validation running' FM_BUSY_REGEX='unchanged busy pane' \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!; wait_live "$pid" 5 || { reap "$pid"; fail "same-hash busy period surfaced an aged wedge"; }; reap "$pid"
+  [ ! -e "$state/.stale-since-$key" ] || fail "same-hash busy period retained the prior wedge timer"
+  [ ! -e "$state/.wedge-escalations-$key" ] || fail "same-hash busy period retained wedge escalation state"
+  [ ! -s "$state/.wake-queue" ] || fail "same-hash busy cleanup emitted a stale alert"
+
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" FM_FAKE_TMUX_CURRENT_COMMAND=codex \
+    FM_FAKE_CREW_STATE='state: working · source: run-step · validation running' FM_BUSY_REGEX='never-match-this-pane' \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!; wait_live "$pid" 5 || { reap "$pid"; fail "post-busy idle pane immediately reused the prior wedge timer"; }; reap "$pid"
+  [ -s "$state/.stale-since-$key" ] || fail "post-busy idle pane did not start a fresh wedge timer"
+  [ ! -s "$state/.wake-queue" ] || fail "post-busy idle pane immediately emitted a stale alert"
+  pass "same-hash busy time resets prior wedge cadence before idle resumes"
+}
+
 test_terminal_unknown_provenance_is_transient_then_surfaces() {
   local dir state fakebin out capture_file window key pane_hash sig pid
   dir=$(make_case terminal-persistent-unknown); state="$dir/state"; fakebin="$dir/fakebin"
@@ -1635,6 +1668,7 @@ test_consumed_working_stale_surfaces_terminal_transition_once
 test_fresh_pause_cache_revalidates_terminal_run
 test_nonpaused_working_surfaces_terminal_transitions_once
 test_same_hash_busy_runs_surface_terminal_transitions_once
+test_same_hash_busy_resets_prior_wedge_cadence
 test_terminal_unknown_provenance_is_transient_then_surfaces
 test_terminal_transition_survives_pane_redraw_until_new_run
 test_exited_declared_pause_is_bounded_but_live_gate_surfaces

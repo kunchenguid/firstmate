@@ -993,11 +993,10 @@ EOF
       # else the last 6 non-blank lines only (the TUI footer area, where every
       # verified harness renders its busy indicator) so busy-looking strings
       # in displayed content cannot suppress stale detection.
-      if [ "$n" -ge 2 ]; then
-        if [ "$terminal_busy_checked" = 0 ]; then
-          window_is_busy "$w" "$tail40" && terminal_busy=1
-        fi
-        if [ "$terminal_busy" = 0 ]; then
+      if [ "$n" -ge 2 ] && [ "$terminal_busy_checked" = 0 ]; then
+        window_is_busy "$w" "$tail40" && terminal_busy=1
+      fi
+      if [ "$n" -ge 2 ] && [ "$terminal_busy" = 0 ]; then
         # The pane is idle/stale at hash $h. Triage decides whether this wakes
         # firstmate. Detection itself is unchanged from above.
         if [ "$kind" = secondmate ]; then
@@ -1135,7 +1134,6 @@ EOF
             fi
           fi
         fi
-      fi
       else
         # Pane busy or not yet stably stale: reset pending escalation bookkeeping.
         rm -f "$ssf" "$ewf"
