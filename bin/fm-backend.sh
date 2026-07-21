@@ -694,6 +694,20 @@ fm_backend_target_exists() {  # <backend> <target> [expected-label]
   esac
 }
 
+fm_backend_target_state() {  # <backend> <target>
+  local backend=$1
+  shift
+  fm_backend_source "$backend" || { printf 'unknown'; return 0; }
+  case "$backend" in
+    tmux) fm_backend_tmux_target_state "$@" ;;
+    herdr) fm_backend_herdr_target_state "$@" ;;
+    zellij) fm_backend_zellij_target_state "$@" ;;
+    orca) fm_backend_orca_target_state "$@" ;;
+    cmux) fm_backend_cmux_target_state "$@" ;;
+    *) printf 'unknown' ;;
+  esac
+}
+
 # fm_backend_agent_alive: CONFIDENT liveness of a live harness-agent PROCESS
 # under <target>, distinct from fm_backend_target_exists's pane-PRESENCE-only
 # check above. A secondmate agent that has exited leaves its backend endpoint
@@ -715,11 +729,11 @@ fm_backend_target_exists() {  # <backend> <target> [expected-label]
 # an action from it alone - the secondmate-liveness sweep gates a respawn on
 # `dead` only, precisely so a momentary read glitch can never duplicate a
 # live supervisor.
-fm_backend_agent_alive() {  # <backend> <target>
-  local backend=$1 target=$2
+fm_backend_agent_alive() {  # <backend> <target> [expected-harness]
+  local backend=$1 target=$2 expected=${3:-}
   fm_backend_source "$backend" || { printf 'unknown'; return 0; }
   case "$backend" in
-    tmux) fm_backend_tmux_agent_alive "$target" ;;
+    tmux) fm_backend_tmux_agent_alive "$target" "$expected" ;;
     herdr) fm_backend_herdr_agent_alive "$target" ;;
     *) printf 'unknown' ;;
   esac

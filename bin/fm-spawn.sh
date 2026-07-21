@@ -238,6 +238,7 @@ CONFIG_INHERIT_LOCK=
 CONFIG_INHERIT_LOCK_HELD=0
 LAUNCH_CWD_PROOF=
 META_TMP=
+RECOVERY_META_SNAPSHOT=
 
 parse_orca_worktree_result() {
   local raw=$1 rest
@@ -263,6 +264,9 @@ spawn_abort_cleanup() {
   fi
   if [ -n "${META_TMP:-}" ]; then
     rm -f -- "$META_TMP" 2>/dev/null || true
+  fi
+  if [ -n "${RECOVERY_META_SNAPSHOT:-}" ]; then
+    rm -f -- "$RECOVERY_META_SNAPSHOT" 2>/dev/null || true
   fi
   if [ "$HERDR_PROJECTION_ABORT_CLEANUP" = 1 ] \
      && [ "$HERDR_PRESENTATION_ORDER_LOCK_HELD" != 1 ]; then
@@ -707,6 +711,38 @@ if [ "$KIND" = secondmate ]; then
   if [ -z "$FIRSTMATE_HOME" ]; then
     FIRSTMATE_HOME=$(secondmate_registry_value "$ID" home || true)
   fi
+fi
+
+RECOVERY_META="$STATE/$ID.meta"
+if [ -e "$RECOVERY_META" ] || [ -L "$RECOVERY_META" ]; then
+  if [ ! -f "$RECOVERY_META" ] || [ -L "$RECOVERY_META" ]; then
+    echo "error: existing metadata for $ID is not a regular file; refusing recovery" >&2
+    exit 1
+  fi
+  RECOVERY_BACKEND=$(fm_backend_of_meta "$RECOVERY_META")
+  RECOVERY_TARGET=$(fm_backend_target_of_meta "$RECOVERY_META")
+  [ -n "$RECOVERY_TARGET" ] || {
+    echo "error: existing metadata for $ID has no endpoint; refusing recovery" >&2
+    exit 1
+  }
+  RECOVERY_TARGET_STATE=$(fm_backend_target_state "$RECOVERY_BACKEND" "$RECOVERY_TARGET")
+  case "$RECOVERY_TARGET_STATE" in
+    absent) ;;
+    present)
+      RECOVERY_HARNESS=$(fm_meta_get "$RECOVERY_META" harness)
+      RECOVERY_AGENT_STATE=$(fm_backend_agent_alive "$RECOVERY_BACKEND" "$RECOVERY_TARGET" "$RECOVERY_HARNESS")
+      [ "$RECOVERY_AGENT_STATE" = dead ] || {
+        echo "error: existing $RECOVERY_BACKEND endpoint for $ID is $RECOVERY_AGENT_STATE; refusing recovery" >&2
+        exit 1
+      }
+      ;;
+    *)
+      echo "error: existing $RECOVERY_BACKEND endpoint for $ID could not be inspected conclusively; refusing recovery" >&2
+      exit 1
+      ;;
+  esac
+  RECOVERY_META_SNAPSHOT=$(mktemp "$STATE/.$ID.recovery-meta.XXXXXXXXXXXX") || exit 1
+  cp -p -- "$RECOVERY_META" "$RECOVERY_META_SNAPSHOT" || exit 1
 fi
 
 if [ "$KIND" = secondmate ]; then
@@ -1256,7 +1292,8 @@ sq_launch_cwd_proof=$(shell_quote "$LAUNCH_CWD_PROOF")
 # shell_quote preserves spaces, newlines, and single quotes in supported paths.
 LAUNCH="cd -- $sq_wt && [ \"\$(pwd -P)\" = $sq_wt ] && : > $sq_launch_cwd_proof && $LAUNCH"
 spawn_stop_unverified_launch() {
-  local attempt
+  local attempt endpoint_state
+  SPAWN_ENDPOINT_CLOSE_STATE=unknown
   [ "$BACKEND" != orca ] || ORCA_ABORT_CLEANUP=0
   HERDR_PROJECTION_ABORT_CLEANUP=0
   spawn_herdr_presentation_order_lock_release
@@ -1267,9 +1304,9 @@ spawn_stop_unverified_launch() {
       cmux) fm_backend_cmux_kill "$T" "" "$W" || true ;;
       *) fm_backend_kill "$BACKEND" "$T" || true ;;
     esac
-    if ! fm_backend_target_exists "$BACKEND" "$T" "$W"; then
-      return 0
-    fi
+    endpoint_state=$(fm_backend_target_state "$BACKEND" "$T")
+    SPAWN_ENDPOINT_CLOSE_STATE=$endpoint_state
+    [ "$endpoint_state" = absent ] && return 0
     attempt=$((attempt + 1))
     [ "$attempt" -ge 3 ] || sleep 0.1
   done
@@ -1283,7 +1320,7 @@ spawn_launch_failure() {  # <reason> [observed]
   if spawn_stop_unverified_launch; then
     cleanup_result="The exact endpoint was stopped"
   else
-    cleanup_result="The exact endpoint '$T' is still present after three cleanup attempts"
+    cleanup_result="Exact endpoint closure could not be verified after three cleanup attempts (endpoint '$T'; state '$SPAWN_ENDPOINT_CLOSE_STATE')"
   fi
   echo "error: launch verification failed for $ID: $reason (expected '$WT'; observed '$observed'). $cleanup_result, the worktree was preserved, and metadata was not published." >&2
   exit 1
@@ -1341,8 +1378,8 @@ spawn_verify_passive_launch_cwd() {
     if [ "$p_real" = "$WT" ]; then
       if [ "$BACKEND" = tmux ]; then
         case "$HARNESS" in
-          claude|codex|opencode|grok)
-            agent_state=$(fm_backend_tmux_agent_alive "$T")
+          claude|codex|opencode|pi|grok)
+            agent_state=$(fm_backend_tmux_agent_alive "$T" "$HARNESS")
             [ "$agent_state" = alive ] || {
               stable=0
               sleep "$FM_SPAWN_LAUNCH_CWD_INTERVAL"
@@ -1382,43 +1419,44 @@ rm -f -- "$LAUNCH_CWD_PROOF"
 LAUNCH_CWD_PROOF=
 
 spawn_render_metadata() {
-  echo "window=$META_WINDOW"
-  echo "worktree=$WT"
-  echo "project=$PROJ_ABS"
-  echo "harness=$HARNESS"
-  echo "kind=$KIND"
-  echo "mode=$MODE"
-  echo "yolo=$YOLO"
-  echo "tasktmp=$TASK_TMP"
-  echo "model=${MODEL:-default}"
-  echo "effort=${EFFORT:-default}"
-  # backend= is written only for a non-default (non-tmux) backend, so the
-  # default path's meta stays byte-identical (absent backend= means tmux;
-  # data/fm-backend-design-d7's P1 compatibility contract).
-  [ "$BACKEND" = tmux ] || echo "backend=$BACKEND"
+  local lines=(
+    "window=$META_WINDOW"
+    "worktree=$WT"
+    "project=$PROJ_ABS"
+    "harness=$HARNESS"
+    "kind=$KIND"
+    "mode=$MODE"
+    "yolo=$YOLO"
+    "tasktmp=$TASK_TMP"
+    "model=${MODEL:-default}"
+    "effort=${EFFORT:-default}"
+  )
+  [ "$BACKEND" = tmux ] || lines+=("backend=$BACKEND")
   if [ "$BACKEND" = herdr ]; then
-    echo "herdr_session=$HERDR_SES"
-    echo "herdr_workspace_id=$HERDR_WORKSPACE_ID"
-    echo "herdr_tab_id=$HERDR_TAB_ID"
-    echo "herdr_pane_id=$HERDR_PANE_ID"
+    lines+=(
+      "herdr_session=$HERDR_SES"
+      "herdr_workspace_id=$HERDR_WORKSPACE_ID"
+      "herdr_tab_id=$HERDR_TAB_ID"
+      "herdr_pane_id=$HERDR_PANE_ID"
+    )
   fi
   if [ "$BACKEND" = zellij ]; then
-    echo "zellij_session=$ZELLIJ_SES"
-    echo "zellij_tab_id=$ZELLIJ_TAB_ID"
-    echo "zellij_pane_id=$ZELLIJ_PANE_ID"
+    lines+=(
+      "zellij_session=$ZELLIJ_SES"
+      "zellij_tab_id=$ZELLIJ_TAB_ID"
+      "zellij_pane_id=$ZELLIJ_PANE_ID"
+    )
   fi
   if [ "$BACKEND" = orca ]; then
-    echo "orca_worktree_id=$ORCA_WORKTREE_ID"
-    echo "terminal=$ORCA_TERMINAL"
+    lines+=("orca_worktree_id=$ORCA_WORKTREE_ID" "terminal=$ORCA_TERMINAL")
   fi
   if [ "$BACKEND" = cmux ]; then
-    echo "cmux_workspace_id=$CMUX_WORKSPACE_ID"
-    echo "cmux_surface_id=$CMUX_SURFACE_ID"
+    lines+=("cmux_workspace_id=$CMUX_WORKSPACE_ID" "cmux_surface_id=$CMUX_SURFACE_ID")
   fi
   if [ "$KIND" = secondmate ]; then
-    echo "home=$PROJ_ABS"
-    echo "projects=$SECONDMATE_PROJECTS"
+    lines+=("home=$PROJ_ABS" "projects=$SECONDMATE_PROJECTS")
   fi
+  printf '%s\n' "${lines[@]}"
 }
 
 spawn_publish_metadata() {
@@ -1429,18 +1467,24 @@ spawn_publish_metadata() {
     META_TMP=
     return 1
   fi
-  if [ -e "$meta" ] || [ -L "$meta" ]; then
-    rm -f -- "$META_TMP" 2>/dev/null || true
-    META_TMP=
-    return 1
-  fi
-  if ! ln "$META_TMP" "$meta" 2>/dev/null; then
-    rm -f -- "$META_TMP" 2>/dev/null || true
-    META_TMP=
-    return 1
+  if [ -n "$RECOVERY_META_SNAPSHOT" ]; then
+    if [ ! -f "$meta" ] || [ -L "$meta" ] || ! cmp -s "$RECOVERY_META_SNAPSHOT" "$meta" \
+      || ! mv -f -- "$META_TMP" "$meta"; then
+      rm -f -- "$META_TMP" 2>/dev/null || true
+      META_TMP=
+      return 1
+    fi
+  else
+    if [ -e "$meta" ] || [ -L "$meta" ] || ! ln "$META_TMP" "$meta" 2>/dev/null; then
+      rm -f -- "$META_TMP" 2>/dev/null || true
+      META_TMP=
+      return 1
+    fi
   fi
   rm -f -- "$META_TMP" 2>/dev/null || true
   META_TMP=
+  rm -f -- "$RECOVERY_META_SNAPSHOT" 2>/dev/null || true
+  RECOVERY_META_SNAPSHOT=
 }
 
 if ! spawn_publish_metadata; then

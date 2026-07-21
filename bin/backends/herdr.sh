@@ -1123,6 +1123,19 @@ fm_backend_herdr_target_ready() {  # <target>
   fm_backend_herdr_server_ensure "$FM_BACKEND_HERDR_SESSION" || return 1
 }
 
+fm_backend_herdr_target_state() {  # <target>
+  local out
+  fm_backend_herdr_parse_target "$1" || { printf 'unknown'; return 0; }
+  out=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane get "$FM_BACKEND_HERDR_PANE" 2>/dev/null) || true
+  if printf '%s' "$out" | jq -e '.result.pane' >/dev/null 2>&1; then
+    printf 'present'
+  elif printf '%s' "$out" | jq -e '.error.code == "pane_not_found"' >/dev/null 2>&1; then
+    printf 'absent'
+  else
+    printf 'unknown'
+  fi
+}
+
 # fm_backend_herdr_current_path: the live FOREGROUND process's cwd, or empty on
 # any error. Mirrors tmux's pane_current_path poll used for worktree-path
 # discovery after `treehouse get`.

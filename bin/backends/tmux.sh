@@ -136,6 +136,43 @@ fm_backend_tmux_current_command() {  # <target>
   tmux display-message -p -t "$1" '#{pane_current_command}' 2>/dev/null
 }
 
+fm_backend_tmux_target_state() {  # <target>
+  local target=$1 session window windows sessions status
+  if tmux display-message -p -t "$target" '#{pane_id}' >/dev/null 2>&1; then
+    printf 'present'
+    return 0
+  fi
+  case "$target" in
+    *:*) session=${target%%:*}; window=${target#*:} ;;
+    *) printf 'unknown'; return 0 ;;
+  esac
+  if windows=$(tmux list-windows -t "$session" -F '#{window_id}	#{window_name}' 2>/dev/null); then
+    if printf '%s\n' "$windows" | awk -F '\t' -v want="$window" '$1 == want || $2 == want { found=1 } END { exit !found }'; then
+      printf 'present'
+    else
+      printf 'absent'
+    fi
+    return 0
+  fi
+  if sessions=$(tmux list-sessions -F '#{session_name}' 2>&1); then
+    status=0
+  else
+    status=$?
+  fi
+  if [ "$status" -eq 0 ]; then
+    if printf '%s\n' "$sessions" | grep -qxF "$session"; then
+      printf 'unknown'
+    else
+      printf 'absent'
+    fi
+  else
+    case "$sessions" in
+      *'no server running'*|*'no sessions'*) printf 'absent' ;;
+      *) printf 'unknown' ;;
+    esac
+  fi
+}
+
 # fm_backend_tmux_agent_alive: CONFIDENT liveness of a live harness-agent
 # PROCESS in <target>'s pane, distinct from fm_backend_target_exists's
 # pane-PRESENCE-only check (a pane that still exists but is sitting at a bare
@@ -154,14 +191,29 @@ fm_backend_tmux_current_command() {  # <target>
 #             pane. Callers must never treat unknown as a confirmed-dead
 #             signal (bin/fm-bootstrap.sh's secondmate-liveness sweep gates a
 #             respawn on `dead` only).
-fm_backend_tmux_agent_alive() {  # <target>
-  local target=$1 comm
+fm_backend_tmux_agent_alive() {  # <target> [expected-harness]
+  local target=$1 expected=${2:-} comm pane_pid child args
   comm=$(fm_backend_tmux_current_command "$target") || { printf 'unknown'; return 0; }
   comm=${comm#-}
   case "$comm" in
     '') printf 'unknown' ;;
     *claude*|*codex*|*opencode*|*grok*) printf 'alive' ;;
     zsh|bash|sh|dash|ash|ksh|mksh|tcsh|csh|fish) printf 'dead' ;;
+    node)
+      [ "$expected" = pi ] || { printf 'unknown'; return 0; }
+      pane_pid=$(tmux display-message -p -t "$target" '#{pane_pid}' 2>/dev/null) \
+        || { printf 'unknown'; return 0; }
+      case "$pane_pid" in ''|*[!0-9]*) printf 'unknown'; return 0 ;; esac
+      while IFS= read -r child; do
+        case "$child" in ''|*[!0-9]*) continue ;; esac
+        args=$(ps -o args= -p "$child" 2>/dev/null) || continue
+        if printf '%s\n' "$args" | grep -Eq '(^|[[:space:]])([^[:space:]]*/)?pi([[:space:]]|$)'; then
+          printf 'alive'
+          return 0
+        fi
+      done < <(pgrep -P "$pane_pid" 2>/dev/null || true)
+      printf 'unknown'
+      ;;
     *) printf 'unknown' ;;
   esac
 }

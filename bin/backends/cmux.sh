@@ -403,6 +403,32 @@ fm_backend_cmux_surface_exists() {  # <workspace_id> <surface_id>
     | jq -e --arg s "$sfid" '[.panes[]? | select(.surface_ids // [] | index($s))] | length > 0' >/dev/null 2>&1
 }
 
+fm_backend_cmux_target_state() {  # <target>
+  local workspaces panes
+  fm_backend_cmux_parse_target "$1" || { printf 'unknown'; return 0; }
+  workspaces=$(fm_backend_cmux_cli workspace list --json --id-format uuids 2>/dev/null) \
+    || { printf 'unknown'; return 0; }
+  if ! printf '%s' "$workspaces" | jq -e '.workspaces | type == "array"' >/dev/null 2>&1; then
+    printf 'unknown'
+    return 0
+  fi
+  if ! printf '%s' "$workspaces" | jq -e --arg w "$FM_BACKEND_CMUX_WORKSPACE" \
+    '[.workspaces[]? | select(.id == $w)] | length > 0' >/dev/null 2>&1; then
+    printf 'absent'
+    return 0
+  fi
+  panes=$(fm_backend_cmux_cli list-panes --workspace "$FM_BACKEND_CMUX_WORKSPACE" --json --id-format uuids 2>/dev/null) \
+    || { printf 'unknown'; return 0; }
+  if ! printf '%s' "$panes" | jq -e '.panes | type == "array"' >/dev/null 2>&1; then
+    printf 'unknown'
+  elif printf '%s' "$panes" | jq -e --arg s "$FM_BACKEND_CMUX_SURFACE" \
+    '[.panes[]? | select(.surface_ids // [] | index($s))] | length > 0' >/dev/null 2>&1; then
+    printf 'present'
+  else
+    printf 'absent'
+  fi
+}
+
 # fm_backend_cmux_target_ready: parse the target and verify it is live via
 # fm_backend_cmux_surface_exists (never read-screen - see that function's
 # header for the fresh-surface pitfall this avoids). When the caller knows

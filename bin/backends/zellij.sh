@@ -281,6 +281,27 @@ fm_backend_zellij_pane_exists() {  # <session> <pane_id>
     | jq -e --argjson p "$pane_id" '[.[]? | select(.id == $p and .is_plugin == false)] | length > 0' >/dev/null 2>&1
 }
 
+fm_backend_zellij_target_state() {  # <target>
+  local sessions panes
+  fm_backend_zellij_parse_target "$1" || { printf 'unknown'; return 0; }
+  sessions=$(zellij list-sessions --short --no-formatting 2>/dev/null) \
+    || { printf 'unknown'; return 0; }
+  if ! printf '%s\n' "$sessions" | grep -qxF "$FM_BACKEND_ZELLIJ_SESSION"; then
+    printf 'absent'
+    return 0
+  fi
+  panes=$(fm_backend_zellij_cli "$FM_BACKEND_ZELLIJ_SESSION" action list-panes --json 2>/dev/null) \
+    || { printf 'unknown'; return 0; }
+  if ! printf '%s' "$panes" | jq -e 'type == "array"' >/dev/null 2>&1; then
+    printf 'unknown'
+  elif printf '%s' "$panes" | jq -e --argjson p "$FM_BACKEND_ZELLIJ_PANE" \
+    '[.[]? | select(.id == $p and .is_plugin == false)] | length > 0' >/dev/null 2>&1; then
+    printf 'present'
+  else
+    printf 'absent'
+  fi
+}
+
 # fm_backend_zellij_tab_matches_label: does <tab_id> in <session> carry the
 # tab name firstmate expects for the caller-facing task label <label>?
 # Checks the home-scoped, tagged title first (fm_backend_zellij_scoped_title
