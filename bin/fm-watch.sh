@@ -18,7 +18,12 @@
 #                          timer) regardless of what the status log says - an active
 #                          run-step or busy pane outranks even a captain-relevant log
 #                          line, since the crew's own log gets no new entry once
-#                          firstmate hands it to a no-mistakes validation. A declared
+#                          firstmate hands it to a no-mistakes validation. On a
+#                          terminal status whose last line still matches
+#                          .hb-surfaced-<task> (the durable record of what was
+#                          already surfaced), a pane hash change alone - a
+#                          redraw or reattach blip, not new content - is
+#                          absorbed the same way instead of re-waking. A declared
 #                          external-wait pause is absorbed instead with its own long
 #                          re-surface cadence, never as a wedge. Only when neither
 #                          absorb class applies does the log's last line decide:
