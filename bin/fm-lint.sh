@@ -61,6 +61,21 @@ for nix_bin in "${HOME:-}/.nix-profile/bin" /nix/var/nix/profiles/default/bin; d
 done
 export PATH
 
+# Still missing (e.g. no Nix profile): bootstrap the pinned, checksum-verified
+# build into the user cache and prepend it to PATH. Reuse fm-install-shellcheck.sh
+# so the download/checksum logic stays in one place; its --version line goes to
+# stderr to keep lint stdout clean.
+if ! command -v shellcheck >/dev/null 2>&1; then
+  cache_bin="${XDG_CACHE_HOME:-$HOME/.cache}/firstmate/bin"
+  if ! mkdir -p "$cache_bin" || ! "$ROOT/bin/fm-install-shellcheck.sh" "$cache_bin" >&2; then
+    printf 'fm-lint.sh: failed to install ShellCheck %s for CI parity.\n' \
+      "$REQUIRED_SHELLCHECK" >&2
+    exit 127
+  fi
+  PATH="$cache_bin:$PATH"
+  export PATH
+fi
+
 # Enforce the pin so local and CI resolve the identical rule set.
 if ! command -v shellcheck >/dev/null 2>&1; then
   printf 'fm-lint.sh: ShellCheck not found; install ShellCheck %s for CI parity.\n' \
