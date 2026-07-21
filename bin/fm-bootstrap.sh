@@ -96,6 +96,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-ff-lib.sh"
 # shellcheck source=bin/fm-config-inherit-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-config-inherit-lib.sh"
+# shellcheck source=bin/fm-github-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-github-lib.sh"
 # shellcheck source=bin/fm-x-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-x-lib.sh"
 # shellcheck source=bin/fm-backend.sh disable=SC1091
@@ -107,8 +109,12 @@ fleet_sync_origin_backed_project_count() {
   [ -d "$PROJECTS" ] || { echo 0; return 0; }
   for proj in "$PROJECTS"/*; do
     [ -d "$proj" ] || continue
-    git -C "$proj" rev-parse --git-dir >/dev/null 2>&1 || continue
-    git -C "$proj" remote get-url origin >/dev/null 2>&1 || continue
+    if fm_github_enabled; then
+      fm_github_repository_from_path "$proj" >/dev/null 2>&1 || continue
+    else
+      git -C "$proj" rev-parse --git-dir >/dev/null 2>&1 || continue
+      git -C "$proj" remote get-url origin >/dev/null 2>&1 || continue
+    fi
     count=$((count + 1))
   done
   echo "$count"
@@ -832,7 +838,13 @@ fi
 if command -v tasks-axi >/dev/null 2>&1 && ! fm_tasks_axi_compatible; then
   echo "MISSING: tasks-axi (install: $(install_cmd tasks-axi))"
 fi
-gh auth status >/dev/null 2>&1 || echo "NEEDS_GH_AUTH"
+if fm_github_enabled; then
+  if ! "$SCRIPT_DIR/fm-github-exec.sh" validate-all >/dev/null 2>&1; then
+    echo "NEEDS_GH_AUTH: config/github-accounts.json or a selected project account failed strict validation"
+  fi
+else
+  gh auth status >/dev/null 2>&1 || echo "NEEDS_GH_AUTH"
+fi
 # Worktree-tangle check: the firstmate primary checkout (FM_ROOT) must sit on its
 # default branch, not a feature branch (see fm-tangle-lib.sh). Scoped to the
 # primary only; detached-HEAD worktrees and secondmate homes never trip it.

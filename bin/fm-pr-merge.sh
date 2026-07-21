@@ -17,6 +17,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-github-lib.sh
+. "$SCRIPT_DIR/fm-github-lib.sh"
 
 if [ "$#" -lt 2 ]; then
   echo "error: invalid PR merge request" >&2
@@ -75,10 +77,16 @@ grep -qxF "pr=$URL" "$META" || {
   echo "error: PR metadata recording failed" >&2
   exit 1
 }
+PROJECT=$(grep '^project=' "$META" | tail -1 | cut -d= -f2- || true)
+PROFILE_ID=
+if fm_pr_poll_data_parse "$STATE/$ID.pr-poll"; then
+  PROFILE_ID=$FM_PR_DATA_PROFILE
+fi
 
 merge_args=()
 if ! caller_has_merge_method "$@"; then
   merge_args=(--squash)
 fi
 
-gh-axi pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" "${merge_args[@]+"${merge_args[@]}"}" "$@"
+fm_github_context_command "$(basename "${PROJECT:-$PR_REPO}")" "${PROJECT:-$URL}" "$PROFILE_ID" \
+  gh-axi pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" "${merge_args[@]+"${merge_args[@]}"}" "$@"

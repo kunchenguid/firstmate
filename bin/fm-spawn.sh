@@ -134,6 +134,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-github-lib.sh
+. "$SCRIPT_DIR/fm-github-lib.sh"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
 # a direct report (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
@@ -763,6 +765,43 @@ fi
 # (docs/herdr-backend.md "Known gaps").
 PROJ_ABS_REAL=$(cd "$PROJ_ABS" 2>/dev/null && pwd -P) || PROJ_ABS_REAL="$PROJ_ABS"
 
+# Resolve and validate the project account only after the concrete harness is
+# selected, but before any backend can acquire a worktree or otherwise invoke
+# Git. A secondmate primary remains unbound because it may manage projects from
+# several profiles; its inherited config resolves each child project instead.
+GITHUB_ROUTE_PROJECT=
+GITHUB_ROUTE_MODE=
+if [ "$KIND" != secondmate ]; then
+  GITHUB_ROUTE_PROJECT=$(basename "$PROJ_ABS_REAL")
+  read -r GITHUB_ROUTE_MODE _ <<EOF
+$("$FM_ROOT/bin/fm-project-mode.sh" "$GITHUB_ROUTE_PROJECT")
+EOF
+  if [ "$GITHUB_ROUTE_MODE" = local-only ]; then
+    GITHUB_ROUTE_PROJECT=
+  elif fm_github_enabled; then
+    fm_github_activate "$GITHUB_ROUTE_PROJECT" "$PROJ_ABS_REAL" || exit 1
+    fm_github_validate_local_config "$PROJ_ABS_REAL" || exit 1
+    fm_github_preflight read || exit 1
+  else
+    GITHUB_ROUTE_PROJECT=
+  fi
+fi
+
+routed_pane_command() {  # <command-string>
+  local command_string=$1 home_q root_q project_q repository_q command_q
+  if [ -z "$GITHUB_ROUTE_PROJECT" ]; then
+    printf '%s' "$command_string"
+    return 0
+  fi
+  home_q=$(shell_quote "$FM_HOME")
+  root_q=$(shell_quote "$FM_ROOT")
+  project_q=$(shell_quote "$GITHUB_ROUTE_PROJECT")
+  repository_q=$(shell_quote "$PROJ_ABS_REAL")
+  command_q=$(shell_quote "$command_string")
+  printf 'FM_HOME=%s FM_ROOT_OVERRIDE=%s %s/fm-github-exec.sh exec --project %s --repository %s -- /bin/bash -c %s' \
+    "$home_q" "$root_q" "$SCRIPT_DIR" "$project_q" "$repository_q" "$command_q"
+}
+
 real_path_or_raw() {  # <path>
   local path=$1 real
   if real=$(cd "$path" 2>/dev/null && pwd -P); then
@@ -1033,7 +1072,7 @@ spawn_send_key() {  # <target> <key>
   esac
 }
 if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
-  spawn_send_text_line "$WT_TARGET" 'treehouse get'
+  spawn_send_text_line "$WT_TARGET" "$(routed_pane_command 'treehouse get')"
 
   # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
   # Target the stable window id, not the name: if the name is ever lost (e.g. an
@@ -1269,6 +1308,8 @@ LAUNCH=${LAUNCH//__PIWATCH__/$sq_piwatch}
 if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")
   LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_HOME=$sq_home $LAUNCH"
+else
+  LAUNCH=$(routed_pane_command "$LAUNCH")
 fi
 # Export GOTMPDIR into the crewmate's pane shell so the agent and every child
 # process (go build, go test, ...) inherit it. Sent before the launch command so

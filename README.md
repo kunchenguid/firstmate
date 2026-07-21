@@ -81,6 +81,9 @@ git clone https://github.com/kunchenguid/firstmate
 cd firstmate
 ```
 
+A single-account home needs no further GitHub configuration.
+For concurrent per-project accounts, provision separate GitHub CLI profile directories and add the private strict routing file described in [the configuration reference](docs/configuration.md#per-project-github-accounts-configgithub-accountsjson) before registering or syncing those projects.
+
 Then launch one of the co-primary harnesses; AGENTS.md takes over from there:
 
 **Claude Code**

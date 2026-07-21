@@ -212,6 +212,12 @@ The one real bug this pass caught - the `pane_cwd`-does-not-track-a-subshell gap
 
 The isolated zellij session and the scratch `FM_HOME`/project were fully torn down after this run (`zellij delete-session <isolated> --force`, `rm -rf` on the scratch root); the real `firstmate` session name and the live tmux/herdr fleet were never touched at any point.
 
+## Per-project GitHub context launch evidence (2026-07-21)
+
+GitHub account routing is activated in `bin/fm-spawn.sh` before backend dispatch, so zellij receives the common sanitized project context and does not own account selection.
+`bash tests/fm-backend-zellij.test.sh` ended with every deterministic adapter assertion passing, and `bash tests/fm-spawn-dispatch-profile.test.sh` ended with all shared hostile-environment launch assertions passing.
+`zellij --version` printed nothing because no zellij binary was installed, so this change adds deterministic regression evidence only and does not replace the existing real-CLI evidence above.
+
 ## Known gaps left for a follow-up
 
 - **No event push at all**, not even herdr's semantic busy-state (D5): zellij has no analogue to herdr's `agent.get`, so `fm-watch.sh`'s existing pane-hash + `FM_BUSY_REGEX` poll loop is the ONLY event source for this backend, identical to the tmux path. This is the expected, designed-for outcome (D5 explicitly calls for "the poll-based capture/hash/busy-regex path, same vocabulary as tmux"), not a shortfall relative to the report.

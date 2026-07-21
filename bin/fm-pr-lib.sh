@@ -24,6 +24,7 @@ FM_PR_DATA_URL=
 FM_PR_DATA_HOST=
 FM_PR_DATA_PATH=
 FM_PR_DATA_NUMBER=
+FM_PR_DATA_PROFILE=
 FM_PR_META_PROVIDER=
 FM_PR_META_URL=
 FM_PR_META_HOST=
@@ -35,6 +36,7 @@ FM_PR_REG_URL=
 FM_PR_REG_HOST=
 FM_PR_REG_PATH=
 FM_PR_REG_NUMBER=
+FM_PR_REG_PROFILE=
 FM_PR_REG_DATA_HASH=
 FM_PR_REG_TEMPLATE_HASH=
 FM_PR_REG_DATA_IDENTITY=
@@ -51,6 +53,7 @@ FM_PR_POLL_EXPECT_URL=
 FM_PR_POLL_EXPECT_HOST=
 FM_PR_POLL_EXPECT_PATH=
 FM_PR_POLL_EXPECT_NUMBER=
+FM_PR_POLL_EXPECT_PROFILE=
 FM_PR_POLL_EXPECT_DATA_HASH=
 FM_PR_POLL_EXPECT_TEMPLATE_HASH=
 FM_PR_POLL_EXPECT_DATA_IDENTITY=
@@ -295,24 +298,40 @@ fm_pr_metadata_identity_parse() {
   [ -n "$FM_PR_META_URL" ]
 }
 
-# Sidecar layout: provider, url, host, path, number, one per line. A sidecar
-# written before the provider tag existed has a URL on its first line and one
-# line fewer, so it fails both the field count and the provider comparison and
-# is refused rather than misread as a provider-tagged record.
+# Current sidecars store provider, url, host, path, and number, one per line.
+# Strict GitHub-routing sidecars retain the established url, owner, repository,
+# number, and profile layout so delayed polls remain compatible across the
+# routing upgrade. The first line distinguishes the two layouts deterministically.
 fm_pr_poll_data_parse() {
-  local file=$1 provider url host path number
+  local file=$1 first provider url host path number profile= owner repo
   FM_PR_DATA_PROVIDER=
   FM_PR_DATA_URL=
   FM_PR_DATA_HOST=
   FM_PR_DATA_PATH=
   FM_PR_DATA_NUMBER=
+  FM_PR_DATA_PROFILE=
   [ -f "$file" ] && [ ! -L "$file" ] || return 1
   exec 8< "$file" || return 1
-  IFS= read -r provider <&8 || { exec 8<&-; return 1; }
-  IFS= read -r url <&8 || { exec 8<&-; return 1; }
-  IFS= read -r host <&8 || { exec 8<&-; return 1; }
-  IFS= read -r path <&8 || { exec 8<&-; return 1; }
-  IFS= read -r number <&8 || { exec 8<&-; return 1; }
+  IFS= read -r first <&8 || { exec 8<&-; return 1; }
+  case "$first" in
+    github|gitlab)
+      provider=$first
+      IFS= read -r url <&8 || { exec 8<&-; return 1; }
+      IFS= read -r host <&8 || { exec 8<&-; return 1; }
+      IFS= read -r path <&8 || { exec 8<&-; return 1; }
+      IFS= read -r number <&8 || { exec 8<&-; return 1; }
+      ;;
+    *)
+      provider=github
+      url=$first
+      host=github.com
+      IFS= read -r owner <&8 || { exec 8<&-; return 1; }
+      IFS= read -r repo <&8 || { exec 8<&-; return 1; }
+      IFS= read -r number <&8 || { exec 8<&-; return 1; }
+      path="$owner/$repo"
+      ;;
+  esac
+  IFS= read -r profile <&8 || profile=
   if IFS= read -r _extra <&8; then
     exec 8<&-
     return 1
@@ -323,27 +342,30 @@ fm_pr_poll_data_parse() {
   [ "$host" = "$FM_PR_HOST" ] || return 1
   [ "$path" = "$FM_PR_PATH" ] || return 1
   [ "$number" = "$FM_PR_NUMBER" ] || return 1
+  case "$profile" in ''|[!A-Za-z0-9]*|*[!A-Za-z0-9._-]*) [ -z "$profile" ] || return 1 ;; esac
+  [ "$FM_PR_PROVIDER" = github ] || [ -z "$profile" ] || return 1
   FM_PR_DATA_PROVIDER=$FM_PR_PROVIDER
   FM_PR_DATA_URL=$FM_PR_URL
   FM_PR_DATA_HOST=$FM_PR_HOST
   FM_PR_DATA_PATH=$FM_PR_PATH
   FM_PR_DATA_NUMBER=$FM_PR_NUMBER
+  FM_PR_DATA_PROFILE=$profile
 }
 
-# Registration layout: version tag, task id, then the same provider-tagged
-# identity as the sidecar, then the two hashes and the two file identities.
-# The version tag moved to v2 with the provider tag, so a registration written
-# by the previous release is recognised as old and refused. The non-executing
-# migration in bin/fm-pr-check-migrate.sh then rebuilds that poll from the
-# task's recorded pull request URL.
+# Registrations mirror their sidecar identity after the version and task id.
+# Provider-tagged records use v2, while legacy-compatible GitHub records use v1
+# without routing and v2 with a required profile. The third line distinguishes
+# the two v2 layouts before any remaining fields are interpreted.
 fm_pr_poll_registration_parse() {
-  local file=$1 version id provider url host path number data_hash template_hash data_identity check_identity
+  local file=$1 version id first provider url host path number profile='' owner repo profile_required=0
+  local data_hash template_hash data_identity check_identity
   FM_PR_REG_ID=
   FM_PR_REG_PROVIDER=
   FM_PR_REG_URL=
   FM_PR_REG_HOST=
   FM_PR_REG_PATH=
   FM_PR_REG_NUMBER=
+  FM_PR_REG_PROFILE=
   FM_PR_REG_DATA_HASH=
   FM_PR_REG_TEMPLATE_HASH=
   FM_PR_REG_DATA_IDENTITY=
@@ -352,11 +374,33 @@ fm_pr_poll_registration_parse() {
   exec 7< "$file" || return 1
   IFS= read -r version <&7 || { exec 7<&-; return 1; }
   IFS= read -r id <&7 || { exec 7<&-; return 1; }
-  IFS= read -r provider <&7 || { exec 7<&-; return 1; }
-  IFS= read -r url <&7 || { exec 7<&-; return 1; }
-  IFS= read -r host <&7 || { exec 7<&-; return 1; }
-  IFS= read -r path <&7 || { exec 7<&-; return 1; }
-  IFS= read -r number <&7 || { exec 7<&-; return 1; }
+  IFS= read -r first <&7 || { exec 7<&-; return 1; }
+  case "$first" in
+    github|gitlab)
+      [ "$version" = fm-pr-poll-registration-v2 ] || { exec 7<&-; return 1; }
+      provider=$first
+      IFS= read -r url <&7 || { exec 7<&-; return 1; }
+      IFS= read -r host <&7 || { exec 7<&-; return 1; }
+      IFS= read -r path <&7 || { exec 7<&-; return 1; }
+      IFS= read -r number <&7 || { exec 7<&-; return 1; }
+      ;;
+    *)
+      provider=github
+      url=$first
+      host=github.com
+      IFS= read -r owner <&7 || { exec 7<&-; return 1; }
+      IFS= read -r repo <&7 || { exec 7<&-; return 1; }
+      IFS= read -r number <&7 || { exec 7<&-; return 1; }
+      path="$owner/$repo"
+      if [ "$version" = fm-pr-poll-registration-v2 ]; then
+        IFS= read -r profile <&7 || { exec 7<&-; return 1; }
+        profile_required=1
+      elif [ "$version" != fm-pr-poll-registration-v1 ]; then
+        exec 7<&-
+        return 1
+      fi
+      ;;
+  esac
   IFS= read -r data_hash <&7 || { exec 7<&-; return 1; }
   IFS= read -r template_hash <&7 || { exec 7<&-; return 1; }
   IFS= read -r data_identity <&7 || { exec 7<&-; return 1; }
@@ -366,13 +410,15 @@ fm_pr_poll_registration_parse() {
     return 1
   fi
   exec 7<&-
-  [ "$version" = fm-pr-poll-registration-v2 ] || return 1
+  case "$profile" in ''|[!A-Za-z0-9]*|*[!A-Za-z0-9._-]*) [ -z "$profile" ] || return 1 ;; esac
+  [ "$profile_required" -eq 0 ] || [ -n "$profile" ] || return 1
   fm_pr_task_id_valid "$id" || return 1
   fm_pr_url_parse "$url" || return 1
   [ "$provider" = "$FM_PR_PROVIDER" ] || return 1
   [ "$host" = "$FM_PR_HOST" ] || return 1
   [ "$path" = "$FM_PR_PATH" ] || return 1
   [ "$number" = "$FM_PR_NUMBER" ] || return 1
+  [ "$FM_PR_PROVIDER" = github ] || [ -z "$profile" ] || return 1
   [[ "$data_hash" =~ ^[0-9a-f]{64}$ ]] || return 1
   [[ "$template_hash" =~ ^[0-9a-f]{64}$ ]] || return 1
   [[ "$data_identity" =~ ^[0-9]+:[0-9]+$ ]] || return 1
@@ -383,6 +429,7 @@ fm_pr_poll_registration_parse() {
   FM_PR_REG_HOST=$FM_PR_HOST
   FM_PR_REG_PATH=$FM_PR_PATH
   FM_PR_REG_NUMBER=$FM_PR_NUMBER
+  FM_PR_REG_PROFILE=$profile
   FM_PR_REG_DATA_HASH=$data_hash
   FM_PR_REG_TEMPLATE_HASH=$template_hash
   FM_PR_REG_DATA_IDENTITY=$data_identity
@@ -418,13 +465,44 @@ fm_pr_poll_revoke_final() {
 }
 
 fm_pr_poll_prepare() {
-  local state=$1 id=$2 provider=$3 url=$4 host=$5 path=$6 number=$7 template=$8
+  local state=$1 id=$2 provider url host path number template profile= registration_version
+  local owner repo legacy_layout=0
+  case "$3" in
+    github|gitlab)
+      provider=$3
+      url=$4
+      host=$5
+      path=$6
+      number=$7
+      template=$8
+      profile=${9:-}
+      if [ "$provider" = github ] && [ -n "$profile" ]; then
+        legacy_layout=1
+        owner=${path%%/*}
+        repo=${path#*/}
+      fi
+      ;;
+    *)
+      legacy_layout=1
+      provider=github
+      url=$3
+      owner=$4
+      repo=$5
+      number=$6
+      template=$7
+      profile=${8:-}
+      host=github.com
+      path="$owner/$repo"
+      ;;
+  esac
   fm_pr_task_id_valid "$id" || return 1
   fm_pr_url_parse "$url" || return 1
   [ "$provider" = "$FM_PR_PROVIDER" ] || return 1
   [ "$host" = "$FM_PR_HOST" ] || return 1
   [ "$path" = "$FM_PR_PATH" ] || return 1
   [ "$number" = "$FM_PR_NUMBER" ] || return 1
+  case "$profile" in ''|[!A-Za-z0-9]*|*[!A-Za-z0-9._-]*) [ -z "$profile" ] || return 1 ;; esac
+  [ "$provider" = github ] || [ -z "$profile" ] || return 1
   [ -f "$template" ] || return 1
 
   [ ! -L "$state" ] || return 1
@@ -440,6 +518,7 @@ fm_pr_poll_prepare() {
   FM_PR_POLL_EXPECT_HOST=$host
   FM_PR_POLL_EXPECT_PATH=$path
   FM_PR_POLL_EXPECT_NUMBER=$number
+  FM_PR_POLL_EXPECT_PROFILE=$profile
   FM_PR_POLL_TEMPLATE=$template
   FM_PR_POLL_STATE_DEVICE=$(fm_pr_file_device "$state") || return 1
   [ -n "$FM_PR_POLL_STATE_DEVICE" ] || return 1
@@ -453,7 +532,14 @@ fm_pr_poll_prepare() {
     return 1
   }
 
-  if ! printf '%s\n%s\n%s\n%s\n%s\n' "$provider" "$url" "$host" "$path" "$number" > "$FM_PR_POLL_DATA_TMP" \
+  if ! {
+      if [ "$legacy_layout" -eq 1 ]; then
+        printf '%s\n%s\n%s\n%s\n' "$url" "$owner" "$repo" "$number"
+      else
+        printf '%s\n%s\n%s\n%s\n%s\n' "$provider" "$url" "$host" "$path" "$number"
+      fi
+      [ -z "$profile" ] || printf '%s\n' "$profile"
+    } > "$FM_PR_POLL_DATA_TMP" \
     || ! chmod 0600 "$FM_PR_POLL_DATA_TMP" \
     || ! fm_pr_private_file_valid "$FM_PR_POLL_DATA_TMP" 600 "$FM_PR_POLL_STATE_DEVICE" \
     || ! fm_pr_poll_data_parse "$FM_PR_POLL_DATA_TMP" \
@@ -462,6 +548,7 @@ fm_pr_poll_prepare() {
     || [ "$FM_PR_DATA_HOST" != "$host" ] \
     || [ "$FM_PR_DATA_PATH" != "$path" ] \
     || [ "$FM_PR_DATA_NUMBER" != "$number" ] \
+    || [ "$FM_PR_DATA_PROFILE" != "$profile" ] \
     || ! cp "$template" "$FM_PR_POLL_CHECK_TMP" \
     || ! chmod 0600 "$FM_PR_POLL_CHECK_TMP" \
     || ! fm_pr_private_file_valid "$FM_PR_POLL_CHECK_TMP" 600 "$FM_PR_POLL_STATE_DEVICE" \
@@ -473,15 +560,25 @@ fm_pr_poll_prepare() {
   FM_PR_POLL_EXPECT_TEMPLATE_HASH=$(fm_pr_sha256 "$FM_PR_POLL_CHECK_TMP") || { fm_pr_poll_cleanup; return 1; }
   FM_PR_POLL_EXPECT_DATA_IDENTITY=$(fm_pr_file_identity "$FM_PR_POLL_DATA_TMP") || { fm_pr_poll_cleanup; return 1; }
   FM_PR_POLL_EXPECT_CHECK_IDENTITY=$(fm_pr_file_identity "$FM_PR_POLL_CHECK_TMP") || { fm_pr_poll_cleanup; return 1; }
-  if ! printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n' \
-      fm-pr-poll-registration-v2 "$id" "$provider" "$url" "$host" "$path" "$number" \
-      "$FM_PR_POLL_EXPECT_DATA_HASH" "$FM_PR_POLL_EXPECT_TEMPLATE_HASH" \
-      "$FM_PR_POLL_EXPECT_DATA_IDENTITY" "$FM_PR_POLL_EXPECT_CHECK_IDENTITY" \
-      > "$FM_PR_POLL_REG_TMP" \
+  registration_version=fm-pr-poll-registration-v2
+  if [ "$legacy_layout" -eq 1 ] && [ -z "$profile" ]; then
+    registration_version=fm-pr-poll-registration-v1
+  fi
+  if ! {
+      if [ "$legacy_layout" -eq 1 ]; then
+        printf '%s\n%s\n%s\n%s\n%s\n%s\n' "$registration_version" "$id" "$url" "$owner" "$repo" "$number"
+      else
+        printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n' "$registration_version" "$id" "$provider" "$url" "$host" "$path" "$number"
+      fi
+      [ -z "$profile" ] || printf '%s\n' "$profile"
+      printf '%s\n%s\n%s\n%s\n' "$FM_PR_POLL_EXPECT_DATA_HASH" "$FM_PR_POLL_EXPECT_TEMPLATE_HASH" \
+        "$FM_PR_POLL_EXPECT_DATA_IDENTITY" "$FM_PR_POLL_EXPECT_CHECK_IDENTITY"
+    } > "$FM_PR_POLL_REG_TMP" \
     || ! chmod 0600 "$FM_PR_POLL_REG_TMP" \
     || ! fm_pr_private_file_valid "$FM_PR_POLL_REG_TMP" 600 "$FM_PR_POLL_STATE_DEVICE" \
     || ! fm_pr_poll_registration_parse "$FM_PR_POLL_REG_TMP" \
     || [ "$FM_PR_REG_ID" != "$id" ] \
+    || [ "$FM_PR_REG_PROFILE" != "$profile" ] \
     || [ "$FM_PR_REG_DATA_HASH" != "$FM_PR_POLL_EXPECT_DATA_HASH" ] \
     || [ "$FM_PR_REG_TEMPLATE_HASH" != "$FM_PR_POLL_EXPECT_TEMPLATE_HASH" ]; then
     fm_pr_poll_cleanup
@@ -509,7 +606,8 @@ fm_pr_poll_publish_prepared() {
     || [ "$FM_PR_DATA_URL" != "$FM_PR_POLL_EXPECT_URL" ] \
     || [ "$FM_PR_DATA_HOST" != "$FM_PR_POLL_EXPECT_HOST" ] \
     || [ "$FM_PR_DATA_PATH" != "$FM_PR_POLL_EXPECT_PATH" ] \
-    || [ "$FM_PR_DATA_NUMBER" != "$FM_PR_POLL_EXPECT_NUMBER" ]; then
+    || [ "$FM_PR_DATA_NUMBER" != "$FM_PR_POLL_EXPECT_NUMBER" ] \
+    || [ "$FM_PR_DATA_PROFILE" != "$FM_PR_POLL_EXPECT_PROFILE" ]; then
     fm_pr_poll_revoke_final || true
     return 1
   fi
@@ -527,6 +625,7 @@ fm_pr_poll_publish_prepared() {
     || [ "$FM_PR_REG_HOST" != "$FM_PR_POLL_EXPECT_HOST" ] \
     || [ "$FM_PR_REG_PATH" != "$FM_PR_POLL_EXPECT_PATH" ] \
     || [ "$FM_PR_REG_NUMBER" != "$FM_PR_POLL_EXPECT_NUMBER" ] \
+    || [ "$FM_PR_REG_PROFILE" != "$FM_PR_POLL_EXPECT_PROFILE" ] \
     || [ "$FM_PR_REG_DATA_HASH" != "$FM_PR_POLL_EXPECT_DATA_HASH" ] \
     || [ "$FM_PR_REG_TEMPLATE_HASH" != "$FM_PR_POLL_EXPECT_TEMPLATE_HASH" ] \
     || [ "$FM_PR_REG_DATA_IDENTITY" != "$FM_PR_POLL_EXPECT_DATA_IDENTITY" ] \
@@ -574,6 +673,7 @@ fm_pr_poll_artifacts_valid() {
   [ "$FM_PR_REG_HOST" = "$FM_PR_DATA_HOST" ] || return 1
   [ "$FM_PR_REG_PATH" = "$FM_PR_DATA_PATH" ] || return 1
   [ "$FM_PR_REG_NUMBER" = "$FM_PR_DATA_NUMBER" ] || return 1
+  [ "$FM_PR_REG_PROFILE" = "$FM_PR_DATA_PROFILE" ] || return 1
   [ "$FM_PR_REG_DATA_HASH" = "$data_hash" ] || return 1
   [ "$FM_PR_REG_TEMPLATE_HASH" = "$template_hash" ] || return 1
   [ "$FM_PR_REG_DATA_IDENTITY" = "$data_identity" ] || return 1

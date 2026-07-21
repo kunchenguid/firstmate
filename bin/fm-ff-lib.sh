@@ -25,6 +25,9 @@
 # shared default branch or any other worktree's checkout.
 
 SUB_HOME_MARKER="${SUB_HOME_MARKER:-.fm-secondmate-home}"
+FM_FF_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=bin/fm-github-lib.sh
+. "$FM_FF_LIB_DIR/fm-github-lib.sh"
 
 # --- helpers ---------------------------------------------------------------
 
@@ -194,13 +197,17 @@ validate_secondmate_home() {
 FETCHED=""
 fetch_once() {
   local dir=$1 common
+  if fm_github_enabled; then
+    fm_github_activate "$(basename "$dir")" "$dir" || return 1
+    fm_github_validate_local_config "$dir" || return 1
+  fi
   common=$(git -C "$dir" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)
   if [ -n "$common" ]; then
     case " $FETCHED " in
       *" $common "*) return 0 ;;
     esac
   fi
-  if git -C "$dir" fetch origin --prune --quiet 2>/dev/null; then
+  if fm_github_context_command "$(basename "$dir")" "$dir" "" git -C "$dir" fetch origin --prune --quiet 2>/dev/null; then
     [ -n "$common" ] && FETCHED="$FETCHED $common"
     return 0
   fi

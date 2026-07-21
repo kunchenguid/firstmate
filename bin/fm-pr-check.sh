@@ -15,6 +15,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-github-lib.sh
+. "$SCRIPT_DIR/fm-github-lib.sh"
 
 if [ "$#" -ne 2 ]; then
   echo "error: invalid PR check request" >&2
@@ -37,6 +39,13 @@ META="$STATE/$ID.meta"
 if [ ! -f "$META" ] || [ -L "$META" ] || [ "$(fm_pr_file_link_count "$META")" != 1 ]; then
   echo "error: task metadata is unavailable" >&2
   exit 1
+fi
+PROJECT=$(grep '^project=' "$META" | tail -1 | cut -d= -f2- || true)
+PROFILE_ID=
+if [ "$PROVIDER" = github ] && fm_github_enabled; then
+  [ -n "$PROJECT" ] && [ -d "$PROJECT" ] || { echo "error: task project is unavailable for GitHub account routing" >&2; exit 1; }
+  fm_github_resolve "$(basename "$PROJECT")" "$URL" || exit 1
+  PROFILE_ID=$FM_GITHUB_PROFILE_ID
 fi
 
 # Refuse to arm a GitLab watch with no glab on PATH. The poll is silent on
@@ -63,8 +72,9 @@ fi
 # bin/fm-review-diff.sh resolves the head from the remote when none is recorded.
 WT=$(grep '^worktree=' "$META" | tail -1 | cut -d= -f2- || true)
 PR_HEAD=
-if [ "$PROVIDER" = github ] && [ -n "$WT" ] && [ -d "$WT" ] && command -v gh >/dev/null 2>&1; then
-  if REMOTE_HEAD=$(cd "$WT" && gh pr view "$URL" --json headRefOid -q .headRefOid 2>/dev/null) \
+if [ "$PROVIDER" = github ] && [ -n "$WT" ] && [ -d "$WT" ] \
+  && { fm_github_enabled || command -v gh >/dev/null 2>&1; }; then
+  if REMOTE_HEAD=$(cd "$WT" && fm_github_context_command "$(basename "${PROJECT:-$WT}")" "${PROJECT:-$WT}" "$PROFILE_ID" gh pr view "$URL" --json headRefOid -q .headRefOid 2>/dev/null) \
     && fm_pr_head_valid "$REMOTE_HEAD"; then
     PR_HEAD=$REMOTE_HEAD
   fi
@@ -77,7 +87,7 @@ pr_check_cleanup() {
 }
 trap pr_check_cleanup EXIT
 trap 'exit 1' HUP INT TERM
-fm_pr_poll_prepare "$STATE" "$ID" "$PROVIDER" "$URL" "$HOST" "$PROJECT_PATH" "$NUMBER" "$SCRIPT_DIR/fm-pr-poll.sh" \
+fm_pr_poll_prepare "$STATE" "$ID" "$PROVIDER" "$URL" "$HOST" "$PROJECT_PATH" "$NUMBER" "$SCRIPT_DIR/fm-pr-poll.sh" "$PROFILE_ID" \
   || { echo "error: could not prepare PR poll" >&2; exit 1; }
 
 META_DEVICE=$(fm_pr_file_device "$META") || exit 1

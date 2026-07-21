@@ -98,6 +98,12 @@ Teardown:
 - Orca is explicit-only and is not selected by runtime auto-detection.
 - Orca currently exposes no stable CLI version or protocol marker. Unlike the herdr/zellij/cmux docs, this backend intentionally gates spawn support on runtime reachability from `orca status --json` rather than a version floor.
 
+## Per-project GitHub context launch evidence (2026-07-21)
+
+GitHub account routing is activated in `bin/fm-spawn.sh` before backend dispatch, so Orca receives the common sanitized project context and does not own account selection.
+`bash tests/fm-backend-orca.test.sh` ended with every deterministic adapter and spawn assertion passing, and `bash tests/fm-spawn-dispatch-profile.test.sh` ended with all shared hostile-environment launch assertions passing.
+`orca --version` printed nothing because no Orca CLI was installed, so this change adds deterministic regression evidence only and does not replace the existing real-CLI evidence below.
+
 ## Verification
 
 Real-Orca smoke verification was run against `/usr/local/bin/orca` with `/Applications/Orca.app` reporting bundle version `1.4.116`; `orca status --json` reported `result.runtime.reachable=true` and `result.runtime.state="ready"`.

@@ -174,6 +174,15 @@ The [`secondmate-provisioning` skill](../.agents/skills/secondmate-provisioning/
 
 The `data/secondmates.md` line contract is owned by the [`secondmate-provisioning` skill](../.agents/skills/secondmate-provisioning/SKILL.md#routing-table), and the secondmate environment variables are documented in [configuration.md](configuration.md).
 
+## GitHub identity is project-scoped
+
+When the optional strict routing file is present, FirstMate resolves one profile from project, repository, and owner bindings before every owned GitHub or network Git operation.
+The complete schema and security boundary are owned by [configuration.md](configuration.md#per-project-github-accounts-configgithub-accountsjson).
+The guarded command owner applies exact executable and process-local GitHub/Git context to bootstrap, onboarding, worker and backend launch, PR operations, delayed monitoring, review fetches, clone refreshes, secondmate children, bearings, and repository-aware updates.
+No-mistakes receives its own generic typed repository context at initialization and remains the owner of account isolation inside its shared daemon.
+Stable profile ids, not credentials or profile paths, bind delayed FirstMate checks, and every use re-resolves the current private config.
+A guarded PATH protects ordinary descendants but is not an operating-system sandbox against a deliberately malicious process.
+
 ## Project modes are explicit
 
 `data/projects.md` records each project's delivery mode and optional `+yolo` autonomy flag.

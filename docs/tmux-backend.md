@@ -66,6 +66,12 @@ tmux list-windows -t <session-name>
 Use the current tmux session name for the run-inside-tmux path, or `firstmate` for the detached outside-tmux path.
 You should see a `fm-<id>` window for the task, live and updating as the crewmate works.
 
+## Per-project GitHub context launch evidence (2026-07-21)
+
+GitHub account routing is activated in `bin/fm-spawn.sh` before backend dispatch, so tmux receives the same already-sanitized project context as every other backend rather than implementing account selection itself.
+`bash tests/fm-spawn-dispatch-profile.test.sh` ended with `# all fm-spawn-dispatch-profile tests passed` after hostile ambient tokens and binaries were displaced for all five supported harnesses.
+`bash tests/fm-backend.test.sh` ended with its account-unrelated backend compatibility assertions passing, while `tmux -V` printed nothing because no tmux binary was installed for a live smoke.
+
 ## Agent liveness probe
 
 `fm_backend_target_exists` (`bin/fm-backend.sh`) only checks that a window's pane still exists.

@@ -10,12 +10,14 @@ set -u
 LC_ALL=C
 export LC_ALL
 
-if [ "$#" -eq 6 ] && [ "$1" = --validated ]; then
+profile=
+if { [ "$#" -eq 6 ] || [ "$#" -eq 7 ]; } && [ "$1" = --validated ]; then
   provider=$2
   url=$3
   host=$4
   path=$5
   number=$6
+  [ "$#" -eq 6 ] || profile=$7
 elif [ "$#" -eq 0 ]; then
   case "$0" in
     *.check.sh) data=${0%.check.sh}.pr-poll ;;
@@ -24,11 +26,26 @@ elif [ "$#" -eq 0 ]; then
 
   [ -f "$data" ] && [ ! -L "$data" ] || exit 0
   { exec 3< "$data"; } 2>/dev/null || exit 0
-  IFS= read -r provider <&3 || exit 0
-  IFS= read -r url <&3 || exit 0
-  IFS= read -r host <&3 || exit 0
-  IFS= read -r path <&3 || exit 0
-  IFS= read -r number <&3 || exit 0
+  IFS= read -r first <&3 || exit 0
+  case "$first" in
+    github|gitlab)
+      provider=$first
+      IFS= read -r url <&3 || exit 0
+      IFS= read -r host <&3 || exit 0
+      IFS= read -r path <&3 || exit 0
+      IFS= read -r number <&3 || exit 0
+      ;;
+    *)
+      provider=github
+      url=$first
+      host=github.com
+      IFS= read -r owner <&3 || exit 0
+      IFS= read -r repo <&3 || exit 0
+      IFS= read -r number <&3 || exit 0
+      path="$owner/$repo"
+      ;;
+  esac
+  IFS= read -r profile <&3 || profile=
   if IFS= read -r _extra <&3; then
     exit 0
   fi
@@ -44,7 +61,6 @@ esac
 case "$number" in
   *[!0-9]*) exit 0 ;;
 esac
-
 # Every component is revalidated here rather than trusted from the sidecar, and
 # the stored URL must then be exactly reconstructible from those components, so
 # a doctored sidecar cannot redirect this poll at another host or project.
@@ -62,10 +78,23 @@ case "$provider" in
       .|..|*[!A-Za-z0-9._-]*) exit 0 ;;
     esac
     [ "$url" = "https://github.com/$owner/$repo/pull/$number" ] || exit 0
-    state=$(gh pr view "$url" --json state -q .state 2>/dev/null) || exit 0
+    case "$profile" in ''|[!A-Za-z0-9]*|*[!A-Za-z0-9._-]*) [ -z "$profile" ] || exit 0 ;; esac
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+    FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
+    CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
+    if [ -z "$profile" ] && { [ -e "$CONFIG/github-accounts.json" ] || [ -L "$CONFIG/github-accounts.json" ]; }; then
+      exit 0
+    fi
+    if [ -n "$profile" ]; then
+      state=$("$FM_ROOT/bin/fm-github-exec.sh" exec --profile "$profile" --repository "https://github.com/$owner/$repo" -- gh pr view "$url" --json state -q .state 2>/dev/null) || exit 0
+    else
+      state=$(gh pr view "$url" --json state -q .state 2>/dev/null) || exit 0
+    fi
     [ "$state" = MERGED ] && printf '%s\n' merged
     ;;
   gitlab)
+    [ -z "$profile" ] || exit 0
     [ "${#host}" -ge 1 ] && [ "${#host}" -le 253 ] || exit 0
     [ "$host" != github.com ] || exit 0
     case "$host" in

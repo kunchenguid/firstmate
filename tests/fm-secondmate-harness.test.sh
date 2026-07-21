@@ -14,7 +14,8 @@
 #      explicit per-spawn harness arg still wins.
 #   B) Inheritance. The primary pushes a declared, extensible set of LOCAL
 #      (gitignored) config items - config/crew-dispatch.json, config/crew-harness,
-#      config/backlog-backend, and config/herdr-presentation-spaces - down into
+#      config/backlog-backend, non-secret config/github-accounts.json, and
+#      config/herdr-presentation-spaces - down into
 #      each secondmate home's config/, so the secondmate's OWN crewmates,
 #      dispatch profiles, backlog backend, and Herdr presentation opt-in inherit
 #      the primary's settings. It is primary-authoritative (re-pushed at
@@ -135,6 +136,9 @@ test_propagate_lib() {
   printf 'codex\n' > "$src/crew-harness"
   printf 'manual\n' > "$src/backlog-backend"
   : > "$src/herdr-presentation-spaces"
+  printf '{"version":1,"profiles":{"work":{"gh_config_dir":"/external/profile"}}}\n' > "$src/github-accounts.json"
+  mkdir -p "$src/profile-directory"
+  printf 'oauth_token: credential-sentinel\n' > "$src/profile-directory/hosts.yml"
   stdout="$d/clean-copy.out"
   stderr="$d/clean-copy.err"
   propagate_inheritable_config "$src" "$dest" >"$stdout" 2>"$stderr" || fail "propagate returned non-zero"
@@ -144,6 +148,9 @@ test_propagate_lib() {
   [ "$(cat "$dest/crew-harness")" = codex ] || fail "crew-harness not propagated"
   [ "$(cat "$dest/backlog-backend")" = manual ] || fail "backlog-backend not propagated"
   [ -f "$dest/herdr-presentation-spaces" ] || fail "herdr-presentation-spaces not propagated"
+  [ "$(cat "$dest/github-accounts.json")" = '{"version":1,"profiles":{"work":{"gh_config_dir":"/external/profile"}}}' ] || fail "github-accounts.json not propagated"
+  [ ! -e "$dest/profile-directory" ] || fail "profile directory was copied into a secondmate home"
+  ! grep -R 'credential-sentinel' "$dest" >/dev/null 2>&1 || fail "credential material was copied into a secondmate home"
 
   # 2. idempotent: an unchanged re-run does not churn the mtime
   m1=$(date -r "$dest/crew-harness" +%s 2>/dev/null || stat -c %Y "$dest/crew-harness")
@@ -176,12 +183,13 @@ test_propagate_lib() {
   [ "$(cat "$outside")" = outside ] || fail "destination symlink target was overwritten"
 
   # 4. removing the source mirrors absence downstream (primary-authoritative)
-  rm -f "$src/crew-dispatch.json" "$src/crew-harness" "$src/backlog-backend" "$src/herdr-presentation-spaces"
+  rm -f "$src/crew-dispatch.json" "$src/crew-harness" "$src/backlog-backend" "$src/github-accounts.json" "$src/herdr-presentation-spaces"
   propagate_inheritable_config "$src" "$dest"
   [ -e "$dest/crew-dispatch.json" ] && fail "dispatch profile absence not mirrored downstream"
   [ -e "$dest/crew-harness" ] && fail "absence not mirrored downstream"
   [ -e "$dest/backlog-backend" ] && fail "backlog-backend absence not mirrored downstream"
   [ -e "$dest/herdr-presentation-spaces" ] && fail "herdr-presentation-spaces absence not mirrored downstream"
+  [ -e "$dest/github-accounts.json" ] && fail "github-accounts.json absence not mirrored downstream"
 
   rm -f "$dest/crew-harness"
   ln -s "$d/missing-target" "$dest/crew-harness"

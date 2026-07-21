@@ -19,6 +19,9 @@ make_spawn_fakebin() {
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
+if [ -n "${FM_FAKE_BACKEND_ENV_LOG:-}" ]; then
+  printf '%s\t%s\n' "${FM_GITHUB_PROFILE_ID:-legacy}" "$*" >> "$FM_FAKE_BACKEND_ENV_LOG"
+fi
 case "$*" in
   *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
 esac
@@ -66,6 +69,39 @@ make_spawn_case() {
   printf '%s\n' "$case_dir|$home|$proj|$wt|$fakebin|$launchlog"
 }
 
+enable_account_routing() {
+  local case_dir=$1 home=$2 proj=$3 exact profiles real_git
+  exact="$case_dir/exact"
+  profiles="$case_dir/profiles"
+  real_git=$(command -v git)
+  mkdir -p "$exact" "$profiles/work"
+  git -C "$proj" remote add origin https://github.com/Work-Org/project.git
+  printf '%s\n' '- project no-mistakes - routed project (added 2026-07-21)' > "$home/data/projects.md"
+  cat > "$exact/git" <<SH
+#!/usr/bin/env bash
+printf '%s\t%s\n' "\${FM_GITHUB_PROFILE_ID:-legacy}" "\$*" >> '$case_dir/git-route.log'
+exec '$real_git' "\$@"
+SH
+  cat > "$exact/gh" <<'SH'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  'auth status') printf '%s\n' 'Token: keyring' ;;
+  'api --hostname') printf '%s\n' work-login ;;
+  'repo view') printf '%s\n' WRITE ;;
+  *) printf '%s\n' ok ;;
+esac
+SH
+  cat > "$exact/gh-axi" <<'SH'
+#!/usr/bin/env bash
+exec gh "$@"
+SH
+  chmod +x "$exact/git" "$exact/gh" "$exact/gh-axi"
+  cat > "$home/config/github-accounts.json" <<JSON
+{"version":1,"gh_binary":"$exact/gh","git_binary":"$exact/git","gh_axi_binary":"$exact/gh-axi","require_secure_storage":true,"profiles":{"work":{"host":"github.com","expected_login":"work-login","gh_config_dir":"$profiles/work","git_protocol":"https","commit_identity":{"name":"Work User","email":"work@example.test"}}},"bindings":{"projects":{"project":"work"},"repositories":{"github.com/Work-Org/project":"work"},"owners":{"github.com/Work-Org":"work"}}}
+JSON
+  chmod 0600 "$home/config/github-accounts.json"
+}
+
 enable_dispatch_profile() {
   local home=$1
   printf '%s\n' '{"rules":[{"when":"current events","use":{"harness":"grok","model":"grok-4","effort":"high"}}],"default":{"harness":"codex","model":"gpt-5","effort":"medium"}}' \
@@ -88,7 +124,8 @@ run_spawn() {
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
-    FM_FAKE_LAUNCH_LOG="$launchlog" GROK_HOME="$home/grok-home" PATH="$fakebin:$PATH" \
+    FM_FAKE_LAUNCH_LOG="$launchlog" FM_FAKE_BACKEND_ENV_LOG="${launchlog}.backend-env" \
+    GROK_HOME="$home/grok-home" PATH="$fakebin:$PATH" \
     "$SPAWN" "$@" 2>&1
 }
 
@@ -366,6 +403,27 @@ test_batch_forwards_shared_profile_flags() {
   pass "batch dispatch forwards shared --harness, --model, and --effort to every pair"
 }
 
+test_strict_account_context_wraps_every_primary_harness() {
+  local harness rec id out status launch
+  for harness in claude codex opencode pi grok; do
+    id="account-$harness-z20"
+    rec=$(make_spawn_case "account-$harness" "$harness" "$id")
+    read_case_record "$rec"
+    enable_account_routing "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR"
+    out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+    status=$?
+    expect_code 0 "$status" "strict $harness spawn should succeed"
+    launch=$(tail -1 "$LAUNCH_LOG")
+    assert_contains "$launch" "fm-github-exec.sh exec --project 'project' --repository" \
+      "$harness launch was not wrapped by the guarded command owner"
+    assert_contains "$launch" "/bin/bash -c" "$harness launch did not preserve argv-based guarded shell entry"
+    assert_contains "$launch" "$harness" "$harness launch command was lost inside the route wrapper"
+    assert_grep $'work\t' "$LAUNCH_LOG.backend-env" "$harness backend setup did not inherit the selected profile"
+    assert_grep $'work\t' "$CASE_DIR/git-route.log" "$harness spawn did not use the exact selected Git executable"
+  done
+  pass "strict account context wraps claude, codex, opencode, pi, and grok launches after concrete selection"
+}
+
 test_active_dispatch_profile_does_not_block_secondmate_launch() {
   local rec id sm out status
   id=profile-secondmate-z16
@@ -399,6 +457,7 @@ test_grok_omits_invalid_xhigh_reasoning_effort
 test_opencode_threads_model_and_ignores_effort_axis
 test_pi_threads_model_and_max_effort
 test_batch_forwards_shared_profile_flags
+test_strict_account_context_wraps_every_primary_harness
 test_active_dispatch_profile_does_not_block_secondmate_launch
 
 echo "# all fm-spawn-dispatch-profile tests passed"

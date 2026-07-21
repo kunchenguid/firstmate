@@ -72,6 +72,8 @@ mkdir -p "$STATE"
 . "$SCRIPT_DIR/fm-transition-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-github-lib.sh
+. "$SCRIPT_DIR/fm-github-lib.sh"
 # shellcheck source=bin/fm-x-lib.sh
 . "$SCRIPT_DIR/fm-x-lib.sh"
 # shellcheck source=bin/fm-check-lib.sh
@@ -778,12 +780,22 @@ while :; do
         id=$(basename "$c" .check.sh)
         if fm_pr_poll_artifacts_valid "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh"; then
           provider=$FM_PR_DATA_PROVIDER
+          if [ "$provider" = github ] && fm_github_enabled && [ -z "$FM_PR_DATA_PROFILE" ]; then
+            rejected_checks="$rejected_checks $c"
+            continue
+          fi
           url=$FM_PR_DATA_URL
           host=$FM_PR_DATA_HOST
           path=$FM_PR_DATA_PATH
           number=$FM_PR_DATA_NUMBER
-          run_check_capture "$SCRIPT_DIR/fm-pr-poll.sh" --validated \
-            "$provider" "$url" "$host" "$path" "$number" || exit 1
+          profile=$FM_PR_DATA_PROFILE
+          if [ -n "$profile" ]; then
+            run_check_capture "$SCRIPT_DIR/fm-pr-poll.sh" --validated \
+              "$provider" "$url" "$host" "$path" "$number" "$profile" || exit 1
+          else
+            run_check_capture "$SCRIPT_DIR/fm-pr-poll.sh" --validated \
+              "$provider" "$url" "$host" "$path" "$number" || exit 1
+          fi
           out=$FM_CHECK_RESULT
         elif fm_custom_check_snapshot_prepare "$STATE" "$id"; then
           custom_snapshot=$FM_CUSTOM_CHECK_SNAPSHOT

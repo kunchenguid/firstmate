@@ -162,6 +162,101 @@ The full zellij home label also includes a short hash of the resolved `FM_ROOT` 
 For the cmux backend, `FM_CONFIG_OVERRIDE` overrides where `config/cmux-socket-password` is read from, while `FM_HOME` determines the default config path and readable home prefix embedded in workspace titles.
 The full cmux home label also includes a short hash of the resolved `FM_ROOT` path, and there is no per-home container split.
 
+## Per-project GitHub accounts (config/github-accounts.json)
+
+`config/github-accounts.json` is the single full schema owner for optional per-project GitHub account routing.
+The file is private, gitignored, versioned, mode `0600`, and contains non-secret routing metadata only.
+Its absence preserves the legacy single-account process environment and command behavior.
+Its presence enables strict mode for the whole home with no implicit or fallback profile.
+Every GitHub or network Git operation must resolve exactly one profile before network or write activity.
+A `local-only` project performs no such operation, so bootstrap, worker launch, and fleet sync skip account resolution for it and preserve its local Git behavior.
+Resolution considers a registered project binding first, then the exact canonical repository binding, then the canonical host/owner binding.
+All applicable bindings must name the same profile or the operation is refused as a conflict rather than allowing precedence to hide disagreement.
+An operation with no applicable binding is refused rather than using an ambient account.
+`data/projects.md` remains free of profile data.
+
+Version 1 has this exact shape:
+
+```json
+{
+  "version": 1,
+  "gh_binary": "/absolute/path/to/gh",
+  "git_binary": "/absolute/path/to/git",
+  "gh_axi_binary": "/absolute/path/to/gh-axi",
+  "require_secure_storage": true,
+  "profiles": {
+    "work": {
+      "host": "github.com",
+      "expected_login": "work-login",
+      "gh_config_dir": "/absolute/path/to/account-specific-gh-config",
+      "git_protocol": "https",
+      "fork_owner": "optional-fork-owner",
+      "commit_identity": {
+        "name": "Work Name",
+        "email": "work@example.invalid"
+      }
+    }
+  },
+  "bindings": {
+    "projects": {"client-api": "work"},
+    "repositories": {"github.com/ClientOrg/client-api": "work"},
+    "owners": {"github.com/ClientOrg": "work"}
+  }
+}
+```
+
+Every top-level field shown is required.
+`version` must be the integer `1` and `require_secure_storage` must be the boolean `true`.
+The three binary fields must name existing absolute executable files whose canonical basenames are exactly `gh`, `git`, and `gh-axi`.
+Their resolved targets must stay outside FirstMate-managed homes, project and task copies, `data/`, and `state/`.
+A package-manager symlink is accepted only when its configured path has that canonical basename and its resolved target remains an executable ordinary file.
+`profiles` must contain at least one profile and `bindings` must contain the three shown objects with at least one binding overall.
+Profile ids and project keys use at most 64 and 100 characters respectively from letters, digits, `.`, `_`, and `-`, and must start with a letter or digit.
+`host` is exactly `github.com` and `git_protocol` is exactly `https` in version 1.
+`expected_login` and optional `fork_owner` must be valid GitHub login names.
+`gh_config_dir` must be an existing absolute ordinary directory outside the FirstMate code root, `FM_HOME`, project clones, task copies, `data/`, and `state/`.
+Profile directories are read-only credential inputs owned by GitHub CLI and the operating-system credential store.
+`commit_identity` is optional as a pair, but a strict project without it cannot create commits and cannot initialize a strict no-mistakes repository context because `user.useConfigOnly=true` prevents ambient identity fallback.
+`fork_owner` is optional and never changes profile selection; parent and fork operations remain bound to the one project profile.
+
+Unknown versions and fields are rejected at every schema level.
+Duplicate object keys and duplicate case-normalized profile, project, repository, or owner keys are rejected before ordinary JSON decoding can collapse them.
+All binding values must name a declared profile.
+Repository keys canonicalize case-insensitively as `github.com/<owner>/<repository>`, and owner keys canonicalize as `github.com/<owner>`.
+Version 1 rejects GitHub Enterprise hosts, SSH, URL userinfo, ports, query strings, fragments, malformed owner/repository paths, relative executable or profile paths, unsafe profile locations, and a routing profile whose host disagrees with the target.
+Token, password, refresh-token, authorization-header, credential-response, Keychain export, arbitrary environment map, command, script, and shell-fragment fields are not part of the schema and are rejected as unknown.
+Do not place token values in profile labels, paths, identities, project records, task instructions, status, metadata, delayed-operation records, logs, or no-mistakes context files.
+Interactive `gh auth login` provisioning remains captain-owned and is performed directly against the selected external `GH_CONFIG_DIR`, never through a routed task.
+Routed automation refuses `gh auth login`, `switch`, `logout`, `refresh`, token display, direct credential-helper invocation, global `setup-git`, raw API escape commands, and destructive repository mutations outside the guarded project-creation path.
+
+`bin/fm-github-config.mjs` strictly parses and resolves this schema, `bin/fm-github-lib.sh` owns process policy, and `bin/fm-github-exec.sh` is the guarded command owner.
+For each selected child, the guarded owner removes ambient GitHub token variables and alternate gh selection, then sets the exact `GH_CONFIG_DIR`, `GH_HOST`, disabled prompts, and disabled updates.
+It removes Git config-injection variables, askpass, SSH, author, editor, prompt, proxy, TLS, certificate, cookie, and trace overrides.
+It uses isolated global and system Git configuration, resets credential-helper chains, and installs only the exact selected `gh auth git-credential` helper for HTTPS GitHub credentials.
+It applies the optional commit identity and always sets `user.useConfigOnly=true`.
+Repository-local and per-worktree credential, include, URL rewrite, push URL, proxy, TLS, certificate, cookie, authorization-header, editor, prompt, and transport keys are rejected by key name without printing their values.
+Every routed clone, fetch, pull, push, and `ls-remote` target must canonicalize to the configured HTTPS parent or selected-profile fork before network access, and routed remote mutation or submodule commands are refused.
+Every routed GitHub resource argument must agree with that same parent or fork, while known-owner repository creation validates the selected login before the outward write.
+FirstMate-owned commands invoke exact configured binaries with argv arrays.
+The guarded `git`, `gh`, and `gh-axi` PATH shims protect ordinary descendants, including `gh-axi` resolving `gh`, but are not an operating-system sandbox against a deliberately malicious process that invokes another absolute executable or independently accesses credentials.
+
+Authentication validation never invokes `gh auth token` or Git credential fill.
+It confirms secure credential storage from `gh auth status`, verifies `/user` matches `expected_login`, and probes repository permission through the selected profile.
+Sanitized diagnostics distinguish unauthenticated or expired profiles, HTTP 401, HTTP 403, HTTP 404, and organization SSO authorization without relaying child stderr, response headers, authorization URLs, helper output, or attacker-controlled parser text.
+Profile removal or expiry invalidates descendants and delayed checks at their next use instead of falling back.
+
+The routing file is included in `FM_INHERITABLE_CONFIG` and is copied literally into validated secondmate homes.
+Profile directories, `hosts.yml`, Keychain or keyring material, helper responses, and token values are never copied.
+A secondmate primary remains unbound because it can manage projects from several profiles, while project clone, initialization, child launch, monitoring, and sync operations resolve each project separately.
+Authenticated delayed PR records store only the stable profile id and re-resolve the current file at use time.
+That stable id remains an explicit route when the original project binding is the only applicable binding, while removal of the profile or a conflicting current repository or owner binding still stops the check without fallback.
+Existing profile-less delayed records are rebuilt only when their task project and repository resolve unambiguously; otherwise the non-executing migration quarantines them without executing legacy content.
+
+Strict no-mistakes initialization is owned by `bin/fm-github-exec.sh no-mistakes-init`.
+It emits a temporary mode-`0600` typed context matching no-mistakes' own `--github-context` contract, derives an HTTPS fork URL from the selected `fork_owner` when present, validates the selected write target, invokes the selected no-mistakes binary with those typed arguments, and deletes the temporary file.
+No-mistakes owns its stored typed repository context and daemon subprocess application; it does not parse this FirstMate schema.
+Strict initialization refuses a no-mistakes executable that does not advertise `--github-context` support rather than allowing the shared daemon to use ambient credentials.
+
 ## Harness support
 
 claude, codex, opencode, pi, and grok are all empirically verified; new harnesses get verified through a supervised trial task before joining the set.
@@ -233,7 +328,8 @@ Secondmate homes inherit this file from the primary, so a secondmate's own crewm
 On session start the first mate detects what its required toolchain is missing or too old and lists each problem with either an exact install command or manual instructions.
 It installs automatically supported tools only after you say go; manual-only tools remain for you to install from the printed instructions.
 Required tools come in two parts: a universal toolchain every home needs regardless of backend, and a per-backend delta that follows the runtime backend actually resolved for this home.
-The universal toolchain is node, git, gh with GitHub auth via `gh auth login`, no-mistakes v1.31.2 or newer, gh-axi, chrome-devtools-axi, lavish-axi, compatible tasks-axi per "Backlog backend" above, and quota-axi.
+The universal toolchain is node, git, gh, no-mistakes v1.31.2 or newer, gh-axi, chrome-devtools-axi, lavish-axi, compatible tasks-axi per "Backlog backend" above, and quota-axi.
+A legacy home authenticates gh through `gh auth login`, while a strict multi-account home follows the profile-scoped provisioning contract in "Per-project GitHub accounts" above.
 This section is the single owner of that universal toolchain list; backend guides' prerequisites point here and add only their backend-specific tools.
 In that list, no-mistakes runs the validation pipeline, gh-axi, chrome-devtools-axi, and lavish-axi cover GitHub, browser, and rich-review operations, and tasks-axi plus quota-axi back backlog mutations and quota-balanced dispatch.
 The per-backend delta is required only for the backend resolved from `FM_BACKEND`, then `config/backend`, then runtime auto-detection, then default `tmux`, so a home is never told to install a tool an inactive backend or feature would need.
@@ -262,9 +358,10 @@ When a running home advances and its loaded instruction surface (`AGENTS.md`, `b
 If that send fails, bootstrap keeps an idempotent retry marker and emits `NUDGE_SECONDMATES:` with the failure reason.
 The same bootstrap run emits `SECONDMATE_LIVENESS:` only when a live secondmate endpoint is skipped or respawn fails; already-live and successfully respawned endpoints are handled silently.
 For a mid-session inherited local-material edit where tracked-file sync is not needed, run `bin/fm-config-push.sh`.
-It uses the same live secondmate discovery and propagation helper as bootstrap, prints each live home's `crew-dispatch.json`, `crew-harness`, `backlog-backend`, `herdr-presentation-spaces`, and `data/captain-shared.md` result as `pushed`, `unchanged`, `skipped`, or `error`, and exits non-zero for real propagation errors or config-reread send failures.
+It uses the same live secondmate discovery and propagation helper as bootstrap, prints each live home's `crew-dispatch.json`, `crew-harness`, `backlog-backend`, active-or-cleared `github-accounts.json`, `herdr-presentation-spaces`, and `data/captain-shared.md` result as `pushed`, `unchanged`, `skipped`, or `error`, and exits non-zero for real propagation errors or config-reread send failures.
 When an allowlisted config item changes for an already-running home, it sends the literal-content reread pointer described in [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md); unchanged allowlisted config sends no pointer unless a previous delivery is pending.
 The locked bootstrap inheritance pass uses the same per-home changed-set and reread path for already-running homes; see `secondmate-provisioning` for the single contract owner.
+A routing file absent from both homes emits no extra line, preserving legacy single-account output.
 That live discovery starts from `state/*.meta` records with `kind=secondmate`; `data/secondmates.md` only backfills `home=` for older or incomplete meta records.
 Skipped items, such as a destination checkout that does not yet gitignore the item, are visible warnings but not hard failures.
 

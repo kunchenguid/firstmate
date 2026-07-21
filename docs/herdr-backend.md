@@ -1012,6 +1012,14 @@ On entry the launcher drops the prior session's artifacts when the daemon is not
 This never drops a genuinely-pending escalation: the durable record is `state/.wake-queue` plus each crew's `state/<id>.status`, and any still-true condition is re-escalated by the daemon's heartbeat catch-all scan.
 Covered by the unit cases in `tests/fm-afk-launch.test.sh` (clear-on-fresh-entry vs refresh, and the stop ordering asserting the daemon saw `state/.afk` present at SIGTERM).
 
+## Per-project GitHub context launch evidence (2026-07-21)
+
+GitHub account routing is activated in `bin/fm-spawn.sh` before backend dispatch, so Herdr receives the common sanitized project context and does not own account selection.
+`bash tests/fm-backend-herdr.test.sh` and `bash tests/fm-spawn-dispatch-profile.test.sh` both ended with all assertions passing.
+The live check set `HERDR_LAB_HELPER=bin/fm-herdr-lab.sh`, generated `HERDR_LAB_SESSION=$("$HERDR_LAB_HELPER" name fm-gh-account-routing-scout-a1)`, installed the required teardown trap, and used only `"$HERDR_LAB_HELPER" provision`, `run ... status --json`, `run ... session list --json`, and `teardown` against that name.
+The exact status output reported client and server version `0.7.4`, protocol `16`, server status `running`, `compatible:true`, and the generated non-default session.
+The exact session-list output reported the unchanged live `default` session and the separate generated lab as the only two entries before tripwire-verified teardown.
+
 ## Known gaps and follow-up notes
 
 - **RESOLVED: worktree-discovery isolation guard's symlinked-project-prefix false refusal.** Originally discovered while building the runtime-backend-auto-detection real smoke test (`tests/fm-backend-autodetect-smoke.test.sh`), which needed a scratch project.

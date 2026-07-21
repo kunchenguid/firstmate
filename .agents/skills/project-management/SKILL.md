@@ -41,7 +41,8 @@ Destructive, irreversible, and security-sensitive decisions still require captai
 ## Add or clone an existing project
 
 Confirm the source URL, local project name, delivery mode, and autonomy posture.
-Clone into `projects/<name>` and add the registry entry only after the destination is known to be unused.
+Clone through `bin/fm-github-exec.sh exec --project <name> --repository <https-url> -- git clone <https-url> projects/<name>` and add the registry entry only after the destination is known to be unused.
+When `config/github-accounts.json` is present, the guarded owner resolves the repository or owner route before network access; do not run a bare clone or switch accounts globally.
 A `no-mistakes` project must have an `origin` remote and must complete the initialization procedure below.
 A `direct-PR` project needs an `origin` remote but skips no-mistakes initialization.
 A `local-only` project may have no remote and skips no-mistakes initialization.
@@ -50,7 +51,7 @@ A `local-only` project may have no remote and skips no-mistakes initialization.
 
 Creating a GitHub repository is outward-facing.
 Before making that remote change, propose the repository name, owner or organization, visibility, and delivery mode, defaulting visibility to private and delivery mode to `no-mistakes`, then obtain the captain's explicit consent for those values.
-Use `gh-axi` for the approved GitHub operation and consult its current help rather than relying on remembered flags.
+Use `gh-axi` through `bin/fm-github-exec.sh exec --project <name> --repository github.com/<owner>/<repo> -- gh-axi ...` for the approved GitHub operation and consult its current help rather than relying on remembered flags.
 After remote creation succeeds, clone it locally, add the registry entry, and initialize it according to its delivery mode.
 
 For a purely `local-only` project, create a local Git repository under its unused `projects/<name>` path, add the registry entry, and make no GitHub call.
@@ -61,7 +62,8 @@ The captain's request to create that local project authorizes this local initial
 Run no-mistakes initialization only for `no-mistakes` projects:
 
 ```sh
-cd projects/<name> && no-mistakes init && no-mistakes doctor
+bin/fm-github-exec.sh no-mistakes-init --project <name> --repository projects/<name>
+(cd projects/<name> && no-mistakes doctor)
 ```
 
 Initialization configures the local gate and does not vendor a no-mistakes skill into the project.

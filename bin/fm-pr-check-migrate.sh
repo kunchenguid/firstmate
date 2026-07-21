@@ -38,6 +38,26 @@ fi
 . "$SCRIPT_DIR/fm-x-lib.sh"
 # shellcheck source=bin/fm-check-lib.sh
 . "$SCRIPT_DIR/fm-check-lib.sh"
+# shellcheck source=bin/fm-github-lib.sh
+. "$SCRIPT_DIR/fm-github-lib.sh"
+
+migration_profile_for_task() {
+  local id=$1 url=$2 provider=$3 meta project
+  [ "$provider" = github ] || return 0
+  fm_github_enabled || return 0
+  meta="$STATE/$id.meta"
+  project=$(grep '^project=' "$meta" | tail -1 | cut -d= -f2- || true)
+  [ -n "$project" ] && [ -d "$project" ] || return 1
+  fm_github_resolve "$(basename "$project")" "$url" || return 1
+  printf '%s\n' "$FM_GITHUB_PROFILE_ID"
+}
+
+current_pr_poll_artifacts_valid() {
+  fm_pr_poll_artifacts_valid "$STATE" "$1" "$TEMPLATE" || return 1
+  if [ "$FM_PR_DATA_PROVIDER" = github ] && fm_github_enabled; then
+    [ -n "$FM_PR_DATA_PROFILE" ] || return 1
+  fi
+}
 
 umask 077
 if [ ! -e "$STATE" ] && [ ! -L "$STATE" ]; then
@@ -85,7 +105,7 @@ current_checks_authenticated() {
     fi
     id=$(basename "$check" .check.sh)
     fm_custom_check_registered "$STATE" "$id" && continue
-    fm_pr_poll_artifacts_valid "$STATE" "$id" "$TEMPLATE" || return 1
+    current_pr_poll_artifacts_valid "$id" || return 1
   done
 }
 
@@ -375,7 +395,7 @@ migration_needed() {
     fi
     id=$(basename "$check" .check.sh)
     fm_custom_check_registered "$STATE" "$id" && continue
-    if ! fm_pr_poll_artifacts_valid "$STATE" "$id" "$TEMPLATE"; then
+    if ! current_pr_poll_artifacts_valid "$id"; then
       return 0
     fi
   done
@@ -392,7 +412,7 @@ unsafe_checks_absent() {
     fi
     id=$(basename "$check" .check.sh)
     fm_custom_check_registered "$STATE" "$id" && continue
-    fm_pr_poll_artifacts_valid "$STATE" "$id" "$TEMPLATE" || return 1
+    current_pr_poll_artifacts_valid "$id" || return 1
   done
 }
 
@@ -716,7 +736,7 @@ remove_diagnostic_obligation() {
 
 canonical_terminal_success() {
   local id=$1
-  fm_pr_poll_artifacts_valid "$STATE" "$id" "$TEMPLATE" \
+  current_pr_poll_artifacts_valid "$id" \
     && quarantined_artifact_exists "$id" check
 }
 
@@ -777,7 +797,7 @@ record_ambiguous_failure() {
 }
 
 canonical_repair_from_pending() {
-  local id=$1 meta data registration provider url host path number check
+  local id=$1 meta data registration provider url host path number check profile
   meta="$STATE/$id.meta"
   data="$STATE/$id.pr-poll"
   registration="$STATE/$id.pr-poll-registration"
@@ -790,11 +810,12 @@ canonical_repair_from_pending() {
   host=$MIGRATION_HOST
   path=$MIGRATION_PATH
   number=$MIGRATION_NUMBER
+  profile=$(migration_profile_for_task "$id" "$url" "$provider") || return 1
   quarantine_artifact "$data" "$id" data || return 1
   quarantine_artifact "$registration" "$id" registration || return 1
   [ ! -e "$data" ] && [ ! -L "$data" ] || return 1
   [ ! -e "$registration" ] && [ ! -L "$registration" ] || return 1
-  fm_pr_poll_prepare "$STATE" "$id" "$provider" "$url" "$host" "$path" "$number" "$TEMPLATE" || return 1
+  fm_pr_poll_prepare "$STATE" "$id" "$provider" "$url" "$host" "$path" "$number" "$TEMPLATE" "$profile" || return 1
   fm_pr_poll_publish_prepared || return 1
   canonical_terminal_success "$id"
 }
@@ -1024,7 +1045,7 @@ if migration_needed; then
     fi
     id=$(basename "$check" .check.sh)
     fm_custom_check_registered "$STATE" "$id" && continue
-    fm_pr_poll_artifacts_valid "$STATE" "$id" "$TEMPLATE" && continue
+    current_pr_poll_artifacts_valid "$id" && continue
 
     if fm_pr_task_id_valid "$id"; then
       prefix=$id
@@ -1037,6 +1058,16 @@ if migration_needed; then
         host=$MIGRATION_HOST
         path=$MIGRATION_PATH
         number=$MIGRATION_NUMBER
+        profile=$(migration_profile_for_task "$id" "$url" "$provider" || true)
+        if [ "$provider" = github ] && fm_github_enabled && [ -z "$profile" ]; then
+          message="task $id: strict GitHub profile could not be resolved during non-executing poll migration"
+          ensure_diagnostic_obligation "$prefix" pending-ambiguous "$message" || diagnostics_failed=1
+          quarantine_artifact "$check" "$prefix" check || migration_failed=1
+          quarantine_artifact "$data" "$prefix" data || migration_failed=1
+          quarantine_artifact "$registration" "$prefix" registration || migration_failed=1
+          complete_ambiguous_outcome "$id" || migration_failed=1
+          continue
+        fi
         message="task $id: migration outcome tracking started before legacy poll handling"
         if ! ensure_diagnostic_obligation "$prefix" pending-canonical "$message" \
           || ! process_diagnostic_obligations; then
@@ -1047,7 +1078,7 @@ if migration_needed; then
         if quarantine_artifact "$check" "$prefix" check \
           && quarantine_artifact "$data" "$prefix" data \
           && quarantine_artifact "$registration" "$prefix" registration \
-          && fm_pr_poll_prepare "$STATE" "$id" "$provider" "$url" "$host" "$path" "$number" "$TEMPLATE" \
+          && fm_pr_poll_prepare "$STATE" "$id" "$provider" "$url" "$host" "$path" "$number" "$TEMPLATE" "$profile" \
           && fm_pr_poll_publish_prepared \
           && complete_canonical_outcome "$id"; then
           :

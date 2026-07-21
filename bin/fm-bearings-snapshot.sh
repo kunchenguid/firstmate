@@ -53,6 +53,8 @@ set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FLEET="$SCRIPT_DIR/fm-fleet-snapshot.sh"
+# shellcheck source=bin/fm-github-lib.sh
+. "$SCRIPT_DIR/fm-github-lib.sh"
 
 # Bounds (overridable for tests / large fleets).
 FM_BEARINGS_LANDED=${FM_BEARINGS_LANDED:-6}
@@ -181,49 +183,78 @@ repo_slug() {  # <url>
   printf '%s' "$1" | sed -n 's#.*github\.com[:/]\([^/]*/[^/]*\)#\1#p' | sed 's#\.git$##; s#/pull/.*$##; s#/$##'
 }
 
-# Bounded gh call; prints stdout, non-zero on timeout/failure. gh only.
-gh_bounded() {  # <args...>
+# Bounded gh call; prints stdout, non-zero on timeout/failure. The first two
+# arguments are the canonical repository and optional stable profile route and
+# are not forwarded to gh.
+gh_bounded() {  # <owner/repo> <profile|-> <gh-args...>
+  local repository=$1 profile=$2
+  shift 2
+  local routed=("$SCRIPT_DIR/fm-github-exec.sh" exec --repository "github.com/$repository")
+  [ "$profile" = - ] || routed+=(--profile "$profile")
+  routed+=(-- gh "$@")
   if command -v timeout >/dev/null 2>&1; then
-    GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 timeout "$FM_BEARINGS_PR_TIMEOUT" gh "$@"
+    timeout "$FM_BEARINGS_PR_TIMEOUT" "${routed[@]}"
   elif command -v gtimeout >/dev/null 2>&1; then
-    GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 gtimeout "$FM_BEARINGS_PR_TIMEOUT" gh "$@"
+    gtimeout "$FM_BEARINGS_PR_TIMEOUT" "${routed[@]}"
   elif command -v perl >/dev/null 2>&1; then
-    GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' "$FM_BEARINGS_PR_TIMEOUT" gh "$@"
+    perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' "$FM_BEARINGS_PR_TIMEOUT" "${routed[@]}"
   else
     return 124
   fi
 }
 
 if [ "$INCLUDE_PRS" = 1 ]; then
-  if ! command -v gh >/dev/null 2>&1; then
+  if ! fm_github_enabled && ! command -v gh >/dev/null 2>&1; then
     PR_STATUS='unavailable (gh not found)'
   else
-    # Candidate repos: recorded pr= URLs plus live worktree origins. Deduped.
+    # Candidate repos: recorded PR URLs plus live worktree origins. Deduped with
+    # the stable selected profile so project-only bindings survive aggregation.
     repos=""
-    while IFS= read -r u; do
+    while IFS=$'\t' read -r project u; do
       [ -n "$u" ] || continue
+      profile=-
+      if fm_github_enabled; then
+        project_name=
+        [ -z "$project" ] || project_name=$(basename "$project")
+        fm_github_resolve "$project_name" "$u" || continue
+        u=$FM_GITHUB_REPOSITORY
+        profile=$FM_GITHUB_PROFILE_ID
+      fi
       s=$(repo_slug "$u"); [ -n "$s" ] || continue
-      case " $repos " in *" $s "*) : ;; *) repos="$repos $s" ;; esac
+      route="$s@$profile"
+      case " $repos " in *" $route "*) : ;; *) repos="$repos $route" ;; esac
     done <<EOF
-$(printf '%s' "$SNAP" | jq -r '.tasks[].pr.url // empty')
+$(printf '%s' "$SNAP" | jq -r '.tasks[] | select(.pr.url != null) | [.project, .pr.url] | @tsv')
 EOF
-    while IFS= read -r wt; do
+    while IFS=$'\t' read -r project wt; do
       [ -n "$wt" ] || continue
       [ -d "$wt" ] || continue
-      u=$(git -C "$wt" remote get-url origin 2>/dev/null) || continue
+      profile=-
+      if fm_github_enabled; then
+        project_name=
+        [ -z "$project" ] || project_name=$(basename "$project")
+        fm_github_resolve "$project_name" "$wt" || continue
+        u=$FM_GITHUB_REPOSITORY
+        profile=$FM_GITHUB_PROFILE_ID
+      else
+        u=$(git -C "$wt" remote get-url origin 2>/dev/null) || continue
+      fi
       s=$(repo_slug "$u"); [ -n "$s" ] || continue
-      case " $repos " in *" $s "*) : ;; *) repos="$repos $s" ;; esac
+      route="$s@$profile"
+      case " $repos " in *" $route "*) : ;; *) repos="$repos $route" ;; esac
     done <<EOF
-$(printf '%s' "$SNAP" | jq -r '.tasks[] | select(.kind != "secondmate") | .paths.worktree.path // empty')
+$(printf '%s' "$SNAP" | jq -r '.tasks[] | select(.kind != "secondmate") | [.project, (.paths.worktree.path // "")] | @tsv')
 EOF
 
-    for repo in $repos; do PR_REPOS_TOTAL=$((PR_REPOS_TOTAL + 1)); done
+    for route in $repos; do PR_REPOS_TOTAL=$((PR_REPOS_TOTAL + 1)); done
     nrepos=0; npr=0; nwarn=0; ncapped=0; rows='[]'
     pr_fetch_limit=$((FM_BEARINGS_PR_LIMIT + 1))
-    for repo in $repos; do
+    for route in $repos; do
       if [ "$ALL_PR_REPOS" != 1 ] && [ "$nrepos" -ge "$FM_BEARINGS_PR_REPOS" ]; then break; fi
       nrepos=$((nrepos + 1))
-      out=$(gh_bounded pr list --repo "$repo" --state open --limit "$pr_fetch_limit" \
+      repo=${route%@*}
+      profile=${route##*@}
+      out=$(gh_bounded "$repo" "$profile" pr list --repo "$repo" --state open --limit "$pr_fetch_limit" \
         --json number,title,url,headRefName,reviewDecision,mergeable,statusCheckRollup 2>/dev/null) \
         || { nwarn=$((nwarn + 1)); continue; }
       [ -n "$out" ] || out='[]'
