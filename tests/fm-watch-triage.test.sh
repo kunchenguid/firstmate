@@ -833,6 +833,87 @@ test_nonpaused_working_surfaces_terminal_transitions_once() {
   pass "non-paused working provenance reclassifies done and failed with sparse working or captain-relevant status"
 }
 
+assert_same_hash_busy_run_surfaces_terminal_once() {  # <label> <crew-state>
+  local label=$1 crew_state=$2 dir state fakebin out capture_file window key pane_hash sig pid wakes i
+  dir=$(make_case "same-hash-busy-$label"); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-same-hash-$label"
+  printf 'unchanged native pane\n' > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=codex\nbackend=tmux\n' "$window" > "$state/$label.meta"
+  printf 'working: validation under way\n' > "$state/$label.status"
+  sig=$(seen_sig "$state/$label.status"); printf '%s' "$sig" > "$state/.seen-${label}_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___'); pane_hash=$(hash_text "unchanged native pane")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"; printf '1\n' > "$state/.count-$key"
+  : > "$state/.terminal-transition-$key"; date +%s > "$state/.terminal-rechecked-$key"
+  printf '%s' "$pane_hash" > "$state/.stale-$key"; printf 'terminal:%s\n' "$pane_hash" > "$state/.stale-class-$key"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" FM_FAKE_TMUX_CURRENT_COMMAND=codex \
+    FM_FAKE_CREW_STATE='state: unknown · source: none · run lookup pending' FM_BUSY_REGEX='unchanged native pane' \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!; i=0
+  while [ "$i" -lt 30 ] && [ -e "$state/.terminal-transition-$key" ]; do sleep 0.1; i=$((i + 1)); done
+  [ ! -e "$state/.terminal-transition-$key" ] || { reap "$pid"; fail "same-hash busy state did not clear terminal identity"; }
+  reap "$pid"
+
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" FM_FAKE_TMUX_CURRENT_COMMAND=codex \
+    FM_FAKE_CREW_STATE="$crew_state" FM_BUSY_REGEX='never-match-this-pane' \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!; wait_for_exit "$pid" 40 || fail "same-hash busy run did not surface $label"
+  wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' "$state/.wake-queue")
+  [ "$wakes" -eq 1 ] || fail "same-hash busy run emitted $wakes $label alerts"
+
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" FM_FAKE_TMUX_CURRENT_COMMAND=codex \
+    FM_FAKE_CREW_STATE="$crew_state" FM_BUSY_REGEX='never-match-this-pane' \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!; wait_live "$pid" 5 || { reap "$pid"; fail "same-hash busy run repeated its $label alert"; }; reap "$pid"
+  wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' "$state/.wake-queue")
+  [ "$wakes" -eq 1 ] || fail "same-hash busy run repeated $label across watcher re-arms"
+}
+
+test_same_hash_busy_runs_surface_terminal_transitions_once() {
+  assert_same_hash_busy_run_surfaces_terminal_once done 'state: done · source: run-step · checks green'
+  assert_same_hash_busy_run_surfaces_terminal_once failed 'state: failed · source: run-step · validation failed'
+  pass "same-hash busy runs surface done and failed transitions exactly once"
+}
+
+test_terminal_unknown_provenance_is_transient_then_surfaces() {
+  local dir state fakebin out capture_file window key pane_hash sig pid
+  dir=$(make_case terminal-persistent-unknown); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-terminal-unknown"
+  printf 'unchanged idle pane\n' > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=codex\nbackend=tmux\n' "$window" > "$state/unknown.meta"
+  printf 'working: prior validation\n' > "$state/unknown.status"
+  sig=$(seen_sig "$state/unknown.status"); printf '%s' "$sig" > "$state/.seen-unknown_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___'); pane_hash=$(hash_text "unchanged idle pane")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"; printf '1\n' > "$state/.count-$key"
+  : > "$state/.terminal-transition-$key"; touch -t 200001010000 "$state/.terminal-rechecked-$key"
+  printf '%s' "$pane_hash" > "$state/.stale-$key"; printf 'terminal:%s\n' "$pane_hash" > "$state/.stale-class-$key"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" FM_FAKE_TMUX_CURRENT_COMMAND=codex \
+    FM_FAKE_CREW_STATE='state: unknown · source: none · transient lookup miss' FM_BUSY_REGEX='never-match-this-pane' \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!; wait_live "$pid" 5 || { reap "$pid"; fail "first unknown observation discarded terminal identity"; }; reap "$pid"
+  [ -e "$state/.terminal-transition-$key" ] || fail "transient unknown cleared terminal identity"
+  [ -e "$state/.terminal-unknown-$key" ] || fail "transient unknown provenance was not retained"
+  [ ! -s "$state/.wake-queue" ] || fail "transient unknown surfaced before its bounded confirmation"
+
+  touch -t 200001010000 "$state/.terminal-rechecked-$key" "$state/.terminal-unknown-$key"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" FM_FAKE_TMUX_CURRENT_COMMAND=codex \
+    FM_FAKE_CREW_STATE='state: unknown · source: none · persistent stopped pane' FM_BUSY_REGEX='never-match-this-pane' \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!; wait_for_exit "$pid" 40 || fail "persistent unknown remained hidden behind terminal identity"
+  grep -Fx "stale: $window" "$out" >/dev/null || fail "persistent unknown did not return to ordinary stale surfacing"
+  [ ! -e "$state/.terminal-transition-$key" ] || fail "persistent unknown retained terminal identity"
+  pass "transient unknown preserves terminal identity while persistent unknown surfaces"
+}
+
 test_terminal_transition_survives_pane_redraw_until_new_run() {
   local dir state fakebin out capture_file window key first_hash second_hash sig pid wakes i rechecked
   dir=$(make_case terminal-pane-redraw); state="$dir/state"; fakebin="$dir/fakebin"
@@ -864,7 +945,7 @@ test_terminal_transition_survives_pane_redraw_until_new_run() {
     FM_FAKE_CREW_STATE='state: paused · source: status-log · older sparse pause' FM_STATE_OVERRIDE="$state" \
     FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
-  pid=$!; wait_live "$pid" 30 || { reap "$pid"; fail "transient run lookup miss repeated the terminal alert"; }; reap "$pid"
+  pid=$!; wait_live "$pid" 5 || { reap "$pid"; fail "transient run lookup miss repeated the terminal alert"; }; reap "$pid"
   [ -e "$state/.terminal-transition-$key" ] || fail "transient run lookup miss cleared terminal identity"
   [ ! -e "$state/.paused-$key" ] || fail "transient run lookup miss routed terminal identity into pause cadence"
   wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' "$state/.wake-queue")
@@ -1553,6 +1634,8 @@ test_tracked_paused_stale_surfaces_terminal_transition_once
 test_consumed_working_stale_surfaces_terminal_transition_once
 test_fresh_pause_cache_revalidates_terminal_run
 test_nonpaused_working_surfaces_terminal_transitions_once
+test_same_hash_busy_runs_surface_terminal_transitions_once
+test_terminal_unknown_provenance_is_transient_then_surfaces
 test_terminal_transition_survives_pane_redraw_until_new_run
 test_exited_declared_pause_is_bounded_but_live_gate_surfaces
 test_secondmate_paused_resurfaces_in_normal_mode

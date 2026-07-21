@@ -324,18 +324,38 @@ terminal_transition_is_surfaced() {  # <window>
   [ -e "$STATE/.terminal-transition-$key" ]
 }
 
-refresh_terminal_transition() {  # <window> <task> <force>
-  local win=$1 task=$2 force=$3 key recheck_file class
+clear_terminal_transition() {  # <window>
+  local win=$1 key
+  key=$(printf '%s' "$win" | tr ':/.' '___')
+  rm -f "$STATE/.terminal-transition-$key" "$STATE/.terminal-rechecked-$key" \
+    "$STATE/.terminal-unknown-$key" "$STATE/.stale-$key" "$STATE/.stale-class-$key" \
+    "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
+}
+
+refresh_terminal_transition() {  # <window> <task> <force> <busy>
+  local win=$1 task=$2 force=$3 busy=$4 key recheck_file unknown_file class
   key=$(printf '%s' "$win" | tr ':/.' '___')
   [ -e "$STATE/.terminal-transition-$key" ] || return 0
+  if [ "$busy" = 1 ]; then
+    clear_terminal_transition "$win"
+    return
+  fi
   recheck_file="$STATE/.terminal-rechecked-$key"
+  unknown_file="$STATE/.terminal-unknown-$key"
   [ "$force" = 1 ] || [ "$(age_of "$recheck_file")" -ge "$TERMINAL_RECHECK_SECS" ] || return 0
   class=$(crew_terminal_transition_class "$task")
   date +%s > "$recheck_file"
-  if [ "$class" = nonterminal ]; then
-    rm -f "$STATE/.terminal-transition-$key" "$STATE/.stale-$key" "$STATE/.stale-class-$key" \
-      "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key" "$recheck_file"
-  fi
+  case "$class" in
+    terminal) rm -f "$unknown_file" ;;
+    nonterminal) clear_terminal_transition "$win" ;;
+    unknown)
+      if [ -e "$unknown_file" ] && [ "$(age_of "$unknown_file")" -ge "$TERMINAL_RECHECK_SECS" ]; then
+        clear_terminal_transition "$win"
+      else
+        [ -e "$unknown_file" ] || date +%s > "$unknown_file"
+      fi
+      ;;
+  esac
 }
 
 # Absorb a stale pane under a declared external-wait pause (paused:) or a
@@ -957,10 +977,14 @@ EOF
     ewf="$STATE/.wedge-escalations-$key"
     pf="$STATE/.paused-$key"   # flag: this key's stale is using the bounded pause cadence
     prev=$(cat "$hf" 2>/dev/null || true)
-    if ! afk_present && [ "$kind" != secondmate ]; then
+    terminal_busy_checked=0
+    terminal_busy=0
+    if ! afk_present && [ "$kind" != secondmate ] && terminal_transition_is_surfaced "$w"; then
+      terminal_busy_checked=1
+      window_is_busy "$w" "$tail40" && terminal_busy=1
       terminal_refresh_force=0
-      [ "$h" = "$prev" ] || terminal_refresh_force=1
-      refresh_terminal_transition "$w" "$task" "$terminal_refresh_force"
+      if [ "$h" != "$prev" ] || [ "$terminal_busy" = 1 ]; then terminal_refresh_force=1; fi
+      refresh_terminal_transition "$w" "$task" "$terminal_refresh_force" "$terminal_busy"
     fi
     if [ "$h" = "$prev" ]; then
       n=$(( $(cat "$cf" 2>/dev/null || echo 0) + 1 ))
@@ -969,7 +993,11 @@ EOF
       # else the last 6 non-blank lines only (the TUI footer area, where every
       # verified harness renders its busy indicator) so busy-looking strings
       # in displayed content cannot suppress stale detection.
-      if [ "$n" -ge 2 ] && ! window_is_busy "$w" "$tail40"; then
+      if [ "$n" -ge 2 ]; then
+        if [ "$terminal_busy_checked" = 0 ]; then
+          window_is_busy "$w" "$tail40" && terminal_busy=1
+        fi
+        if [ "$terminal_busy" = 0 ]; then
         # The pane is idle/stale at hash $h. Triage decides whether this wakes
         # firstmate. Detection itself is unchanged from above.
         if [ "$kind" = secondmate ]; then
@@ -1107,6 +1135,7 @@ EOF
             fi
           fi
         fi
+      fi
       else
         # Pane busy or not yet stably stale: reset pending escalation bookkeeping.
         rm -f "$ssf" "$ewf"
