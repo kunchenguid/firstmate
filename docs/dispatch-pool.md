@@ -88,6 +88,8 @@ Every reader treats `now >= until` as expired and unlinks the file opportunistic
 | `Fast mode disabled · usage credits exhausted` | `credits-exhausted` | none; default interval |
 | `quota exceeded`, `insufficient quota` | `quota-exceeded` | parsed when present |
 
+The table shows the observed forms the matcher was built from; `bin/fm-pool.sh`'s classifier owns the exact patterns and also accepts close variants (for example `hit your usage limit`, `rate limit reached`, `credit balance is too low`).
+
 A reset time is parsed in the timezone the message names (local time when it names none), in either 12-hour (`2:20pm`) or 24-hour (`14:20`) form, and rolls to tomorrow when that time has already passed today.
 Two guards keep a bad parse from doing damage: a reset that resolves to the past or is absent falls back to `cooldown_default_seconds`, and every cooldown is clamped to `FM_POOL_MAX_COOLDOWN_SECONDS` (default 24 hours).
 
