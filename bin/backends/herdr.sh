@@ -298,6 +298,35 @@ fm_backend_herdr_projection_workspace_label() {  # <task-id> <projection-id>
 # The path is never under any one home's state/ and secondmates never write the
 # primary home. Returns non-zero when the named session's socket cannot be
 # resolved unambiguously.
+fm_backend_herdr_presentation_lock_namespace() {
+  printf '%s' '/tmp/firstmate-herdr-presentation'
+}
+
+fm_backend_herdr_presentation_lock_namespace_mode() {
+  if [ "$(uname -s 2>/dev/null)" = Darwin ]; then
+    stat -f '%Lp' "$1" 2>/dev/null
+  else
+    stat -c '%a' "$1" 2>/dev/null
+  fi
+}
+
+fm_backend_herdr_presentation_lock_namespace_uid() {
+  if [ "$(uname -s 2>/dev/null)" = Darwin ]; then
+    stat -f '%u' "$1" 2>/dev/null
+  else
+    stat -c '%u' "$1" 2>/dev/null
+  fi
+}
+
+fm_backend_herdr_presentation_lock_namespace_valid() {
+  local dir=$1 expected_uid owner mode
+  [ -d "$dir" ] && [ ! -L "$dir" ] || return 1
+  expected_uid=$(id -u 2>/dev/null) || return 1
+  owner=$(fm_backend_herdr_presentation_lock_namespace_uid "$dir") || return 1
+  mode=$(fm_backend_herdr_presentation_lock_namespace_mode "$dir") || return 1
+  [ "$owner" = "$expected_uid" ] && [ "$mode" = 700 ]
+}
+
 fm_backend_herdr_presentation_session_lock_path() {  # <session>
   local session=$1 sessions socket key dir hash
   [ -n "$session" ] || return 1
@@ -319,13 +348,14 @@ fm_backend_herdr_presentation_session_lock_path() {  # <session>
   fi
   [ -n "$hash" ] || return 1
   key=${hash:0:32}
-  if [ -n "${XDG_RUNTIME_DIR:-}" ] && [ -d "$XDG_RUNTIME_DIR" ] && [ -w "$XDG_RUNTIME_DIR" ]; then
-    dir="$XDG_RUNTIME_DIR/firstmate/herdr-presentation"
-  else
-    dir="${TMPDIR:-/tmp}/firstmate-herdr-presentation"
+  dir=$(fm_backend_herdr_presentation_lock_namespace) || return 1
+  [ -n "$dir" ] || return 1
+  if [ ! -e "$dir" ] && [ ! -L "$dir" ]; then
+    if ! mkdir -m 700 "$dir" 2>/dev/null; then
+      fm_backend_herdr_presentation_lock_namespace_valid "$dir" || return 1
+    fi
   fi
-  mkdir -p "$dir" 2>/dev/null || return 1
-  chmod 700 "$dir" 2>/dev/null || true
+  fm_backend_herdr_presentation_lock_namespace_valid "$dir" || return 1
   printf '%s/order-%s.lock' "$dir" "$key"
 }
 
@@ -470,6 +500,9 @@ fm_backend_herdr_projection_order_best_effort() {  # <session> <created-workspac
     def is_new_child:
       (.label | type) == "string"
       and (.label | test("^└ .+ · p:[A-Za-z0-9_-]{22}$"));
+    def is_explicitly_owned_new_child:
+      is_new_child
+      and (.label | test("^└ (firstmate|2ndmate-[^/]+)/.+ · p:[A-Za-z0-9_-]{22}$"));
     def is_legacy_child:
       (.label | type) == "string"
       and (.label | startswith($parent + "/"))
@@ -486,6 +519,9 @@ fm_backend_herdr_projection_order_best_effort() {  # <session> <created-workspac
     | select(($parents | length) == 1)
     | ($parents[0]) as $pidx
     | select($pidx < $current)
+    | select(
+        ([range($pidx + 1; $current) | select($spaces[.] | is_explicitly_owned_new_child)] | length) == 0
+      )
     | (
         reduce range($pidx + 1; $current) as $i (
           0;

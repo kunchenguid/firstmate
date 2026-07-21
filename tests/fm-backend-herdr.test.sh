@@ -955,6 +955,30 @@ SH
   pass "herdr presentation ordering: an ambiguous existing worker block is warning-only and read-only"
 }
 
+test_projection_order_foreign_new_child_before_parent_is_read_only() {
+  local dir log resp fb mover out status
+  dir="$TMP_ROOT/projection-order-foreign-new"; mkdir -p "$dir/responses"
+  log="$dir/log"; resp="$dir/responses"; mover="$dir/mover"; : > "$log"
+  printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate","focused":true},{"workspace_id":"w2","label":"└ 2ndmate-alpha/foreign · p:AbCdEfGhIjKlMnOpQrStUv","focused":false},{"workspace_id":"w3","label":"2ndmate-alpha","focused":false},{"workspace_id":"w4","label":"└ new · p:ZyXwVuTsRqPoNmLkJiHgFe","focused":false}]}}' > "$resp/1.out"
+  cat > "$mover" <<'SH'
+#!/usr/bin/env bash
+echo called > "$FM_FAKE_MOVER_CALLED"
+exit 0
+SH
+  chmod +x "$mover"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    FM_BACKEND_HERDR_WORKSPACE_MOVER="$mover" FM_FAKE_MOVER_CALLED="$dir/called" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_order_best_effort fmtest w4 firstmate' "$ROOT" 2>&1)
+  status=$?
+  [ "$status" -eq 0 ] || fail "foreign new-child ordering must not fail the spawn"
+  assert_contains "$out" "ambiguous workspace layout" "foreign new child before its parent did not warn"
+  [ ! -e "$dir/called" ] || fail "foreign new child before its parent attempted workspace.move"
+  [ "$(wc -l < "$log" | tr -d '[:space:]')" = 1 ] \
+    || fail "foreign new-child ordering did more than one read-only workspace list"
+  pass "herdr presentation ordering: a foreign new-format child is warning-only and read-only"
+}
+
 test_projection_order_missing_parent_is_read_only() {
   local dir log resp fb mover out status
   dir="$TMP_ROOT/projection-order-missing-parent"; mkdir -p "$dir/responses"
@@ -995,6 +1019,10 @@ test_presentation_session_lock_path_is_shared_across_homes() {
     || fail "session lock path resolution failed for home B"
   [ "$path_a" = "$path_b" ] || fail "same session/socket must resolve one shared lock path"
   case "$path_a" in
+    /tmp/firstmate-herdr-presentation/order-*.lock) ;;
+    *) fail "session lock path must use the shared machine namespace: $path_a" ;;
+  esac
+  case "$path_a" in
     */state/*) fail "session lock path must not live under a home state directory: $path_a" ;;
   esac
   path_other=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
@@ -1002,6 +1030,33 @@ test_presentation_session_lock_path_is_shared_across_homes() {
     || fail "session lock path resolution failed for a different session"
   [ "$path_other" != "$path_a" ] || fail "different sessions must not share one lock path"
   pass "herdr presentation lock: one path per session/socket across homes"
+}
+
+test_presentation_lock_insecure_namespace_falls_back() {
+  local dir log resp fb bad out status lock_source
+  dir="$TMP_ROOT/presentation-insecure-lock"; mkdir -p "$dir/responses" "$dir/sockdir"
+  log="$dir/log"; resp="$dir/responses"; : > "$log"
+  : > "$dir/sockdir/fmtest.sock"
+  bad="$dir/insecure"; mkdir -m 755 "$bad"
+  printf '%s\n' "{\"sessions\":[{\"name\":\"fmtest\",\"running\":true,\"socket_path\":\"$dir/sockdir/fmtest.sock\"}]}" > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  lock_source=$(sed -n '/^spawn_herdr_presentation_order_lock_acquire()/,/^spawn_herdr_presentation_order_lock_release()/p' "$ROOT/bin/fm-spawn.sh" | sed '$d')
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    BAD_NAMESPACE="$bad" LOCK_SOURCE="$lock_source" \
+    bash -c '
+      . "$0/bin/backends/herdr.sh"
+      eval "$LOCK_SOURCE"
+      fm_backend_herdr_presentation_lock_namespace() { printf "%s" "$BAD_NAMESPACE"; }
+      if spawn_herdr_presentation_order_lock_acquire fmtest; then
+        printf "%s" acquired
+      else
+        printf "%s" flat
+      fi
+    ' "$ROOT" 2>&1)
+  status=$?
+  [ "$status" -eq 0 ] || fail "an insecure lock namespace must not fail the spawn path: $out"
+  [ "$out" = flat ] || fail "an insecure lock namespace must fall back flat, got '$out'"
+  pass "herdr presentation lock: insecure shared namespace refuses acquisition for flat fallback"
 }
 
 test_spawn_task_lock_covers_all_backend_creation_and_metadata_publication() {
@@ -2593,8 +2648,10 @@ test_projection_order_secondmate_parent_block
 test_projection_order_human_spaces_never_move_targets
 test_projection_order_failure_warns_without_cleanup_or_spawn_failure
 test_projection_order_ambiguous_existing_block_is_read_only
+test_projection_order_foreign_new_child_before_parent_is_read_only
 test_projection_order_missing_parent_is_read_only
 test_presentation_session_lock_path_is_shared_across_homes
+test_presentation_lock_insecure_namespace_falls_back
 test_spawn_task_lock_covers_all_backend_creation_and_metadata_publication
 test_projected_spawn_disarms_cleanup_before_ambiguous_launch_submission
 test_projected_abort_cleanup_holds_presentation_lock
