@@ -58,7 +58,11 @@ META="$STATE/$ID.meta"
 fm_scm_parse_pr_url "$URL" >/dev/null || exit 1
 fm_scm_reject_url_override_args "$@" || exit 1
 
-"$SCRIPT_DIR/fm-pr-check.sh" "$ID" "$URL"
+# --no-watch: this call exists to record pr= before merging, so a PR monitor
+# armed here would start watching a PR that merges seconds later, and could park
+# on a transient signal from that last poll - a decision thread about a PR that
+# no longer exists. Merge monitoring is armed when the PR becomes ready, not here.
+"$SCRIPT_DIR/fm-pr-check.sh" "$ID" "$URL" --no-watch
 grep -qxF "pr=$URL" "$META" || { echo "error: fm-pr-check did not record pr=$URL in $META; refusing to merge" >&2; exit 1; }
 
 fm_scm_merge_url "$URL" "$@"

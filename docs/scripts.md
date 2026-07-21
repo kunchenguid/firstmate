@@ -67,7 +67,9 @@ The shared no-mistakes gate refusal used by `fm-spawn.sh`, `fm-send.sh`, and `fm
 | `fm-send.sh`             | Send one verified literal line or supported key through the target's recorded backend |
 | `fm-tmux-lib.sh`         | Shared tmux pane primitives for busy detection, composer capture, and verified submit |
 | `fm-peek.sh`             | Print a bounded tail of a crewmate endpoint                                          |
-| `fm-pr-check.sh`         | Record `pr=` and provider `pr_head=` for a PR/MR-ready task, then arm the watcher's merge poll |
+| `fm-pr-check.sh`         | Record `pr=` and provider `pr_head=` for a PR/MR-ready task, then arm the watcher's merge poll and a direct-PR task's no-mistakes watch |
+| `fm-nm-watch.sh`         | Arm a no-mistakes escalate-only watch run on a direct-PR task's PR/MR                |
+| `fm-nm-park-wake.sh`     | Turn a no-mistakes park/unpark notification into one keyed firstmate status wake      |
 | `fm-pr-merge.sh`         | Record PR/MR metadata, then merge through the detected provider seam                 |
 | `fm-promote.sh`          | Promote a scout task in place to a protected ship task                               |
 | `fm-teardown.sh`         | Fail-closed teardown: return landed ship worktrees, require completed scout deliverables, retire secondmate homes, close the task's backlog row |
