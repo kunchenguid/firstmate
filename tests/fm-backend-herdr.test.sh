@@ -1255,6 +1255,60 @@ test_dialog_stale_dismissed_frame_with_running_agent_stops_enters() {
   pass "herdr first-launch dialogs: a stale dismissed frame stops retry Enters once the agent reports running"
 }
 
+test_dialog_focus_reads_only_the_menu_rows_not_the_composer_prompt() {
+  local out
+  out=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_dialog_classify claude "$1"' "$ROOT" \
+    $'Accessing workspace:\n❯ 1. Yes, I trust this folder\n  2. No, exit\n\n❯ ')
+  [ "$out" = $'claude-trust\taccept' ] || fail "a composer prompt row below the menu must not outrank the focused choice, got '$out'"
+
+  out=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_dialog_classify codex "$1"' "$ROOT" \
+    $'Hooks need review\n  Review hooks\n› Trust all and continue\n  Continue without trusting (hooks won\x27t run)\n› ')
+  [ "$out" = $'codex-hooks-review\taccept' ] || fail "codex hooks-review focus must survive a trailing composer glyph row, got '$out'"
+  pass "herdr first-launch dialogs: focus is read from the dialog's own option rows, never a composer prompt glyph"
+}
+
+test_dialog_repainted_frame_after_enter_refuses_a_second_enter() {
+  local dir log resp fb rc enter_count
+  dir="$TMP_ROOT/dialog-repaint-enter"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  # The pane repainted after Enter but still shows an accept-focused frame, and
+  # the agent does not report working: the dismissal is unproven, so no second
+  # Enter may go out (the replacement menu could default to No, exit).
+  printf 'WARNING: Claude Code running in Bypass Permissions mode\n  1. No, exit\n❯ 2. Yes, I accept\nesc to interrupt\n' > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_dialog_drive_visible default:w1:p2 claude "$1" 3 0' \
+      "$ROOT" $'WARNING: Claude Code running in Bypass Permissions mode\n  1. No, exit\n❯ 2. Yes, I accept' >/dev/null 2>&1
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "an unproven dismissal must not be reported as verified"
+  enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
+  [ "$enter_count" -eq 1 ] || fail "a repainted post-Enter frame must never authorize another Enter, sent $enter_count"
+  pass "herdr first-launch dialogs: a repainted but unresolved frame after Enter fails loudly instead of retrying Enter"
+}
+
+test_dialog_known_menu_without_parsable_focus_polls_instead_of_failing_instantly() {
+  local dir log resp fb out rc keys
+  dir="$TMP_ROOT/dialog-unfocused-known"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  # A mid-repaint frame: the options are drawn, the cursor row is not yet.
+  printf 'Accessing workspace:\n  1. Yes, I trust this folder\n  2. No, exit\n' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_DIALOG_POLLS=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_handle_startup_dialog default:w1:p2 claude' "$ROOT" 2>&1)
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "an unfocused known menu must stay unverified"
+  case "$out" in *'was not verifiable'*) ;; *) fail "an unfocused known menu should poll to the bounded timeout, got '$out'" ;; esac
+  keys=$(grep -c $'\x1f''pane'$'\x1f''send-keys' "$log" || true)
+  [ "$keys" -eq 0 ] || fail "a menu whose focus is unparsable must not receive keys, sent $keys"
+  pass "herdr first-launch dialogs: a known menu with no parsable focus keeps polling instead of failing on the first capture"
+}
+
+test_spawn_reports_the_registered_task_when_dialog_handling_fails() {
+  local source
+  source=$(cat "$ROOT/bin/fm-spawn.sh")
+  assert_contains "$source" "bin/fm-teardown.sh \$ID to remove it" \
+    "a failed guarded dialog spawn must name the still-registered task and how to remove it"
+  pass "fm-spawn: a failed guarded dialog spawn reports the registered task instead of claiming nothing was left behind"
+}
+
 test_spawn_wires_guarded_herdr_dialog_handler() {
   local source
   source=$(cat "$ROOT/bin/fm-spawn.sh")
@@ -2684,8 +2738,12 @@ test_dialog_unknown_text_without_agent_polls_to_timeout
 test_dialog_visible_dialog_with_idle_agent_is_still_driven
 test_dialog_clean_capture_with_done_agent_verifies_spawn
 test_dialog_stale_dismissed_frame_with_running_agent_stops_enters
+test_dialog_focus_reads_only_the_menu_rows_not_the_composer_prompt
+test_dialog_repainted_frame_after_enter_refuses_a_second_enter
+test_dialog_known_menu_without_parsable_focus_polls_instead_of_failing_instantly
 test_events_capable_large_schema_is_pipefail_safe
 test_spawn_wires_guarded_herdr_dialog_handler
+test_spawn_reports_the_registered_task_when_dialog_handling_fails
 test_capture_calls_pane_read
 test_capture_works_around_small_lines_bug
 test_capture_preserves_pane_read_failure

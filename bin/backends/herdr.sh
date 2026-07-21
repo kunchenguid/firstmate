@@ -1231,17 +1231,6 @@ FM_BACKEND_HERDR_DIALOG_KEY_SLEEP=${FM_BACKEND_HERDR_DIALOG_KEY_SLEEP:-0.2}
 fm_backend_herdr_dialog_classify() {  # <harness> <pane-capture> -> <kind>\t<focus>
   local harness=$1 capture=$2 plain line trimmed focus="" kind=none choice=none
   plain=$(fm_backend_herdr_strip_ansi "$capture")
-  while IFS= read -r line; do
-    trimmed="${line#"${line%%[![:space:]]*}"}"
-    case "$trimmed" in
-      '❯ '*|'› '*)
-        focus=${trimmed#?}
-        focus="${focus#"${focus%%[![:space:]]*}"}"
-        ;;
-    esac
-  done <<EOF
-$plain
-EOF
 
   case "$harness" in
     claude*)
@@ -1270,18 +1259,35 @@ EOF
       *'Enter to confirm'*|*'Do you trust'*|*'Bypass Permissions mode'*|*'Hooks need review'*|*'No, exit'*) kind=unknown ;;
     esac
   fi
-
-  case "$kind:$focus" in
-    claude-trust:*'Yes, I trust this folder'*|claude-bypass:*'Yes, I accept'*|codex-trust:*'Yes, continue'*|codex-hooks-review:*'Trust all and continue'*) choice=accept ;;
-    claude-trust:*'No, exit'*|claude-bypass:*'No, exit'*|codex-trust:*'No, quit'*) choice=reject ;;
-    codex-hooks-review:*'Review hooks'*) choice=review ;;
-    codex-hooks-review:*'Continue without trusting'*) choice=continue-without ;;
-    codex-trust:)
-      case "$plain" in *'Press enter to continue'*|*'Press Enter to continue'*) choice=accept ;; *) choice=unknown ;; esac
-      ;;
-    none:*) choice=none ;;
-    *) choice=unknown ;;
+  case "$kind" in
+    none) printf '%s\t%s' none none; return 0 ;;
+    unknown) printf '%s\t%s' unknown unknown; return 0 ;;
   esac
+
+  # The cursor glyphs are also the agent composer's own prompt glyphs
+  # (FM_BACKEND_HERDR_BARE_PROMPT_RE), so the last glyph row in the capture is
+  # NOT necessarily the focused menu item: a composer row rendered below the
+  # overlay, or a transcript row quoting one, would outrank it. Only rows whose
+  # text is one of THIS dialog's own known options count as focus, and the last
+  # such row wins so a retained dismissed frame cannot outrank the live one.
+  choice=unknown
+  while IFS= read -r line; do
+    trimmed="${line#"${line%%[![:space:]]*}"}"
+    case "$trimmed" in '❯ '*|'› '*) ;; *) continue ;; esac
+    focus=${trimmed#?}
+    focus="${focus#"${focus%%[![:space:]]*}"}"
+    case "$kind:$focus" in
+      claude-trust:*'Yes, I trust this folder'*|claude-bypass:*'Yes, I accept'*|codex-trust:*'Yes, continue'*|codex-hooks-review:*'Trust all and continue'*) choice=accept ;;
+      claude-trust:*'No, exit'*|claude-bypass:*'No, exit'*|codex-trust:*'No, quit'*) choice=reject ;;
+      codex-hooks-review:*'Review hooks'*) choice=review ;;
+      codex-hooks-review:*'Continue without trusting'*) choice=continue-without ;;
+    esac
+  done <<EOF
+$plain
+EOF
+  if [ "$choice" = unknown ] && [ "$kind" = codex-trust ]; then
+    case "$plain" in *'Press enter to continue'*|*'Press Enter to continue'*) choice=accept ;; esac
+  fi
   printf '%s\t%s' "$kind" "$choice"
 }
 
@@ -1309,7 +1315,7 @@ EOF
 
 fm_backend_herdr_dialog_drive_visible() {  # <target> <harness> <capture> <retries> <sleep>
   local target=$1 harness=$2 before=$3 retries=$4 sleep_s=$5 state kind focus action expected
-  local after after_state after_kind after_focus i=0 send_failed=0
+  local after after_state after_kind after_focus settled i=0 send_failed=0
   state=$(fm_backend_herdr_dialog_classify "$harness" "$before")
   IFS=$'\t' read -r kind focus <<EOF
 $state
@@ -1368,6 +1374,26 @@ EOF
         echo "error: herdr startup dialog '$kind' changed away from its safe choice after Enter; refusing another key" >&2
         return 1
       fi
+      # An unchanged classification is NOT proof that the Enter never landed:
+      # the recent source retains dismissed frames, so this same accept-focused
+      # text can survive a dismissal whose replacement menu (whose default may
+      # be the destructive No/exit choice) has not been captured yet. A repeat
+      # Enter is therefore only allowed when the raw pane bytes stay identical
+      # across a second settling read, which is what a dropped key looks like;
+      # any repaint fails loudly instead.
+      if [ "$after" != "$before" ]; then
+        echo "error: herdr startup dialog '$kind' repainted after Enter without a verifiable outcome; refusing another Enter" >&2
+        return 1
+      fi
+      sleep "$sleep_s"
+      settled=$(fm_backend_herdr_capture "$target" "$FM_BACKEND_HERDR_DIALOG_LINES") || {
+        echo "error: herdr startup dialog '$kind' key '$action' could not be verified because pane readback failed" >&2
+        return 1
+      }
+      if [ "$settled" != "$after" ]; then
+        echo "error: herdr startup dialog '$kind' was still repainting after Enter; refusing another Enter" >&2
+        return 1
+      fi
     fi
     i=$((i + 1))
     [ "$send_failed" -eq 0 ] || echo "warning: herdr startup dialog '$kind' key '$action' returned non-zero and produced no verified movement; retrying" >&2
@@ -1378,6 +1404,7 @@ EOF
 
 fm_backend_herdr_handle_startup_dialog() {  # <target> <harness>
   local target=$1 harness=$2 polls=$FM_BACKEND_HERDR_DIALOG_POLLS i=0 capture state kind focus
+  local last_state='none none'
   case "$polls" in ''|*[!0-9]*|0) polls=40 ;; esac
   case "$harness" in claude*|codex*) ;; *) return 0 ;; esac
   fm_backend_herdr_parse_target "$target" || {
@@ -1393,11 +1420,20 @@ fm_backend_herdr_handle_startup_dialog() {  # <target> <harness>
     IFS=$'\t' read -r kind focus <<EOF
 $state
 EOF
+    last_state="$kind $focus"
     case "$kind" in
       claude-trust|claude-bypass|codex-trust|codex-hooks-review)
         if [ "$(fm_backend_herdr_dialog_agent_state "$harness")" = working ]; then
           return 0
         fi
+        # A known menu whose focus is not (yet) parsable is a mid-repaint frame,
+        # not a new dialog shape: keep polling like an unknown shape does rather
+        # than failing the spawn on the very first capture. Only an actionable
+        # focus authorizes a key.
+        case "$focus" in
+          accept|reject|review|continue-without) ;;
+          *) i=$((i + 1)); [ "$i" -lt "$polls" ] && sleep "$FM_BACKEND_HERDR_DIALOG_POLL_SLEEP"; continue ;;
+        esac
         fm_backend_herdr_dialog_drive_visible "$target" "$harness" "$capture" \
           "$FM_BACKEND_HERDR_DIALOG_KEY_RETRIES" "$FM_BACKEND_HERDR_DIALOG_KEY_SLEEP" >/dev/null || {
           [ "$(fm_backend_herdr_dialog_agent_state "$harness")" = working ] && return 0
@@ -1426,7 +1462,7 @@ EOF
     i=$((i + 1))
     [ "$i" -lt "$polls" ] && sleep "$FM_BACKEND_HERDR_DIALOG_POLL_SLEEP"
   done
-  echo "error: $harness startup in herdr pane '$target' was not verifiable after $polls polls" >&2
+  echo "error: $harness startup in herdr pane '$target' was not verifiable after $polls polls (last classified state: $last_state)" >&2
   return 1
 }
 
