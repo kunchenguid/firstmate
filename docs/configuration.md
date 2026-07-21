@@ -441,9 +441,11 @@ FM_BUSY_REGEX=          # optional global override for every harness-scoped busy
 FM_COMPOSER_IDLE_RE=    # optional empty-composer regex, applied after ghost and border stripping
 FM_COMPOSER_GHOST_LUMA_MAX=128   # fleet-wide: max perceived luminance (0.299R+0.587G+0.114B, 0-255) for a TRUECOLOR foreground to count as de-emphasised ghost/placeholder text and be stripped; dim/faint (SGR 2) is stripped regardless. Assumes a dark terminal theme (bin/fm-composer-lib.sh's fm_composer_strip_ghost, shared by the tmux and herdr composer readers)
 GROK_HOME=              # optional Grok config home for firstmate's global grok turn-end hook; defaults to ~/.grok
-FM_SEND_RETRIES=3       # fm-send Enter-retry attempts after typing the line once
+FM_SEND_RETRIES=3       # fm-send base Enter-retry count after typing the line once; scaled up by message line count (one extra retry per ~10 lines), capped at FM_SEND_MAX_RETRIES
+FM_SEND_MAX_RETRIES=12  # upper bound on fm-send's size-scaled retry count, regardless of message size
 FM_SEND_SLEEP=0.4       # seconds between fm-send submit checks
 FM_SEND_SETTLE=1        # seconds fm-send waits after a successful text submit; 0 disables
+FM_SEND_GRACE=1.5       # seconds bin/fm-tmux-lib.sh's tmux submit core waits for one final grace re-check once the Enter-retry budget and the busy-pane fallback both still read pending, before declaring a genuine swallowed Enter
 FM_PENDING_REPLY_GRACE_SECS=120   # seconds after marked-request delivery before a completed turn without a correlated parent report is eligible for its one recovery repost
 # sub-supervisor (bin/fm-supervise-daemon.sh); presence-gated via /afk
 FM_SUPERVISOR_BACKEND=             # optional supervisor pane backend override; tmux/herdr only, otherwise detects $TMUX_PANE then HERDR_ENV/HERDR_PANE_ID before tmux fallback

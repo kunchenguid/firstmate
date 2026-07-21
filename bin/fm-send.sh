@@ -21,8 +21,9 @@
 # (default 1.5, the tmux submit core's final grace re-check once retries and
 # the busy fallback both still read pending - bin/fm-tmux-lib.sh). The retry
 # count itself scales up with message line count (one extra retry per ~10
-# lines) because a large multi-line paste can arrive in several separate
-# chunks whose delivery time the fixed per-retry sleep does not account for.
+# lines, capped at FM_SEND_MAX_RETRIES total, default 12) because a large
+# multi-line paste can arrive in several separate chunks whose delivery time
+# the fixed per-retry sleep does not account for.
 # Slash commands, and codex `$...` skill invocations resolved through harness
 # meta, get a longer pre-Enter settle so completion popups do not swallow Enter.
 #
@@ -274,9 +275,13 @@ else
   # A large multi-line message can arrive as several separate paste chunks
   # (data/fm-send-false-negative-q4/report.md), so scale the retry budget with
   # its size: one extra retry per ~10 lines. A single-line steer has 0 extra
-  # retries, so the default budget stays byte-identical to before.
+  # retries, so the default budget stays byte-identical to before. Capped at
+  # FM_SEND_MAX_RETRIES so an unusually large paste cannot block the caller
+  # for an unbounded amount of time.
   line_count=$(printf '%s\n' "$MESSAGE" | wc -l | tr -d ' ')
   retries=$(( ${FM_SEND_RETRIES:-3} + line_count / 10 ))
+  max_retries=${FM_SEND_MAX_RETRIES:-12}
+  [ "$retries" -le "$max_retries" ] || retries=$max_retries
   sleep_s=${FM_SEND_SLEEP:-0.4}
   # Type once, submit, verify. Only exact empty confirms delivery; every other
   # verdict preserves the loud refusal boundary.
