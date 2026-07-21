@@ -391,9 +391,64 @@ fm_backend_cmux_surface_id_for_workspace() {  # <workspace_id>
     | jq -r '.panes[0] // {} | .selected_surface_id // (.surface_ids[0] // empty)' 2>/dev/null
 }
 
+fm_backend_cmux_workspace_location_state() {  # <workspace_id_or_ref>
+  local target=$1 wins window_ids wid workspaces matches match_count=0 match_win= match_window_count=
+  wins=$(fm_backend_cmux_cli list-windows --json --id-format uuids 2>/dev/null) \
+    || { printf 'unknown'; return 0; }
+  if ! printf '%s' "$wins" | jq -e 'type == "array" and all(.[]?; ((.id | type) == "string") and ((.id | length) > 0))' >/dev/null 2>&1; then
+    printf 'unknown'
+    return 0
+  fi
+  window_ids=$(printf '%s' "$wins" | jq -r '.[].id')
+  for wid in $window_ids; do
+    workspaces=$(fm_backend_cmux_cli workspace list --json --id-format both --window "$wid" 2>/dev/null) \
+      || { printf 'unknown'; return 0; }
+    if ! printf '%s' "$workspaces" | jq -e \
+      '(.workspaces | type) == "array" and all(.workspaces[]?; ((.id | type) == "string") and ((.id | length) > 0) and ((.ref | type) == "string") and ((.ref | length) > 0))' \
+      >/dev/null 2>&1; then
+      printf 'unknown'
+      return 0
+    fi
+    matches=$(printf '%s' "$workspaces" | jq -r --arg target "$target" '[.workspaces[]? | select(.id == $target or .ref == $target)] | length')
+    if [ "$matches" -gt 0 ]; then
+      match_count=$((match_count + matches))
+      match_win=$wid
+      match_window_count=$(printf '%s' "$workspaces" | jq -r '.workspaces | length')
+    fi
+  done
+  case "$match_count" in
+    0) printf 'absent' ;;
+    1) printf 'present\t%s\t%s' "$match_win" "$match_window_count" ;;
+    *) printf 'unknown' ;;
+  esac
+}
+
 fm_backend_cmux_close_created_workspace() {  # <workspace_id_or_ref>
-  [ -n "$1" ] || return 1
-  fm_backend_cmux_cli close-workspace --workspace "$1" >/dev/null 2>&1
+  local target=$1 attempt=0 location state win count
+  [ -n "$target" ] || return 1
+  while [ "$attempt" -lt 3 ]; do
+    location=$(fm_backend_cmux_workspace_location_state "$target")
+    state=${location%%$'\t'*}
+    case "$state" in
+      absent) return 0 ;;
+      present)
+        win=$(printf '%s' "$location" | cut -f2)
+        count=$(printf '%s' "$location" | cut -f3)
+        if [ "$count" = 1 ]; then
+          fm_backend_cmux_cli new-workspace --window "$win" --focus false --id-format uuids >/dev/null 2>&1 || {
+            attempt=$((attempt + 1))
+            continue
+          }
+        fi
+        fm_backend_cmux_cli close-workspace --workspace "$target" >/dev/null 2>&1 || true
+        ;;
+      unknown) ;;
+      *) return 1 ;;
+    esac
+    attempt=$((attempt + 1))
+  done
+  location=$(fm_backend_cmux_workspace_location_state "$target")
+  [ "$location" = absent ]
 }
 
 # fm_backend_cmux_create_task: create the task's workspace (one surface),

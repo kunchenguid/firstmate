@@ -79,6 +79,20 @@ cmux_workspace_list_response() {  # <dir> <n> <id1> <title1> [<id2> <title2> ...
   printf '%s' "$json" > "$dir/responses/$n.out"
 }
 
+cmux_workspace_list_both_response() {  # <dir> <n> <id1> <ref1> <title1> [<id2> <ref2> <title2> ...]
+  local dir=$1 n=$2 json first=1
+  shift 2
+  json='{"workspaces":['
+  while [ $# -ge 3 ]; do
+    [ "$first" -eq 1 ] || json="$json,"
+    json="$json{\"id\":\"$1\",\"ref\":\"$2\",\"title\":\"$3\"}"
+    first=0
+    shift 3
+  done
+  json="$json]}"
+  printf '%s' "$json" > "$dir/responses/$n.out"
+}
+
 cmux_panes_response() {  # <dir> <n> <surface_id>
   printf '{"panes":[{"selected_surface_id":"%s","surface_ids":["%s"]}]}' "$3" "$3" > "$1/responses/$2.out"
 }
@@ -602,6 +616,13 @@ test_create_task_cleans_exact_workspace_after_inventory_failure() {
   cmux_workspace_list_response "$dir" 2 "ffffffff-0000-0000-0000-000000000000" "other"
   printf 'OK workspace:9\n' > "$dir/responses/3.out"
   printf '1\n' > "$dir/responses/4.exit"
+  cmux_windows_response "$dir" 5 "e1111111-0000-0000-0000-000000000000" 2
+  cmux_workspace_list_both_response "$dir" 6 \
+    "aaaaaaaa-0000-0000-0000-000000000000" "workspace:9" "new-task" \
+    "ffffffff-0000-0000-0000-000000000000" "workspace:1" "other"
+  cmux_windows_response "$dir" 8 "e1111111-0000-0000-0000-000000000000" 1
+  cmux_workspace_list_both_response "$dir" 9 \
+    "ffffffff-0000-0000-0000-000000000000" "workspace:1" "other"
   fb=$(make_cmux_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
     bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_create_task fm-newtask /tmp/proj' "$ROOT" 2>&1 )
@@ -609,7 +630,7 @@ test_create_task_cleans_exact_workspace_after_inventory_failure() {
   [ "$status" -ne 0 ] || fail "create_task should fail when the post-create inventory is unreadable"
   assert_contains "$(cat "$dir/log")" $'\x1f''close-workspace'$'\x1f''--workspace'$'\x1f''workspace:9' \
     "create_task did not close the exact workspace reference after inventory failure"
-  assert_not_contains "$(cat "$dir/log")" $'\x1f''close-workspace'$'\x1f''--workspace'$'\x1f''ffffffff-0000-0000-0000-000000000000' \
+  assert_not_contains "$(cat "$dir/log")" $'\x1f''close-workspace'$'\x1f''--workspace'$'\x1f''workspace:1' \
     "create_task closed a pre-existing workspace after inventory failure"
   pass "fm_backend_cmux_create_task: inventory failure closes only the newly allocated workspace"
 }
@@ -624,6 +645,17 @@ test_create_task_cleans_exact_workspace_after_ambiguous_inventory() {
   cmux_windows_response "$dir" 4 "e1111111-0000-0000-0000-000000000000" 2 "e2222222-0000-0000-0000-000000000000" 1
   cmux_workspace_list_response "$dir" 5 "aaaaaaaa-0000-0000-0000-000000000000" "$title" "ffffffff-0000-0000-0000-000000000000" "other"
   cmux_workspace_list_response "$dir" 6 "dddddddd-0000-0000-0000-000000000000" "$title"
+  cmux_windows_response "$dir" 7 "e1111111-0000-0000-0000-000000000000" 2 "e2222222-0000-0000-0000-000000000000" 1
+  cmux_workspace_list_both_response "$dir" 8 \
+    "aaaaaaaa-0000-0000-0000-000000000000" "workspace:9" "$title" \
+    "ffffffff-0000-0000-0000-000000000000" "workspace:1" "other"
+  cmux_workspace_list_both_response "$dir" 9 \
+    "dddddddd-0000-0000-0000-000000000000" "workspace:10" "$title"
+  cmux_windows_response "$dir" 11 "e1111111-0000-0000-0000-000000000000" 1 "e2222222-0000-0000-0000-000000000000" 1
+  cmux_workspace_list_both_response "$dir" 12 \
+    "ffffffff-0000-0000-0000-000000000000" "workspace:1" "other"
+  cmux_workspace_list_both_response "$dir" 13 \
+    "dddddddd-0000-0000-0000-000000000000" "workspace:10" "$title"
   fb=$(make_cmux_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
     bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_create_task fm-newtask /tmp/proj' "$ROOT" 2>&1 )
@@ -631,7 +663,7 @@ test_create_task_cleans_exact_workspace_after_ambiguous_inventory() {
   [ "$status" -ne 0 ] || fail "create_task should fail when the post-create inventory is ambiguous"
   assert_contains "$(cat "$dir/log")" $'\x1f''close-workspace'$'\x1f''--workspace'$'\x1f''workspace:9' \
     "create_task did not close the exact new workspace after ambiguous inventory"
-  assert_not_contains "$(cat "$dir/log")" $'\x1f''close-workspace'$'\x1f''--workspace'$'\x1f''dddddddd-0000-0000-0000-000000000000' \
+  assert_not_contains "$(cat "$dir/log")" $'\x1f''close-workspace'$'\x1f''--workspace'$'\x1f''workspace:10' \
     "create_task closed an ambiguous title match instead of the exact new workspace"
   pass "fm_backend_cmux_create_task: ambiguous inventory closes only the exact new workspace"
 }
@@ -646,6 +678,13 @@ test_create_task_cleans_exact_workspace_after_surface_failure() {
   cmux_windows_response "$dir" 4 "e1111111-0000-0000-0000-000000000000" 2
   cmux_workspace_list_response "$dir" 5 "aaaaaaaa-0000-0000-0000-000000000000" "$title" "ffffffff-0000-0000-0000-000000000000" "other"
   printf '1\n' > "$dir/responses/6.exit"
+  cmux_windows_response "$dir" 7 "e1111111-0000-0000-0000-000000000000" 2
+  cmux_workspace_list_both_response "$dir" 8 \
+    "aaaaaaaa-0000-0000-0000-000000000000" "workspace:9" "$title" \
+    "ffffffff-0000-0000-0000-000000000000" "workspace:1" "other"
+  cmux_windows_response "$dir" 10 "e1111111-0000-0000-0000-000000000000" 1
+  cmux_workspace_list_both_response "$dir" 11 \
+    "ffffffff-0000-0000-0000-000000000000" "workspace:1" "other"
   fb=$(make_cmux_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
     bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_create_task fm-newtask /tmp/proj' "$ROOT" 2>&1 )
@@ -653,9 +692,72 @@ test_create_task_cleans_exact_workspace_after_surface_failure() {
   [ "$status" -ne 0 ] || fail "create_task should fail when the new workspace surface cannot be resolved"
   assert_contains "$(cat "$dir/log")" $'\x1f''close-workspace'$'\x1f''--workspace'$'\x1f''workspace:9' \
     "create_task did not close the exact new workspace after surface resolution failure"
-  assert_not_contains "$(cat "$dir/log")" $'\x1f''close-workspace'$'\x1f''--workspace'$'\x1f''ffffffff-0000-0000-0000-000000000000' \
+  assert_not_contains "$(cat "$dir/log")" $'\x1f''close-workspace'$'\x1f''--workspace'$'\x1f''workspace:1' \
     "create_task closed a pre-existing workspace after surface resolution failure"
   pass "fm_backend_cmux_create_task: surface failure closes only the exact new workspace"
+}
+
+test_close_created_workspace_retries_success_but_still_live() {
+  local dir fb status closes
+  dir="$TMP_ROOT/close-created-retry"; mkdir -p "$dir/responses"
+  cmux_windows_response "$dir" 1 "e1111111-0000-0000-0000-000000000000" 2
+  cmux_workspace_list_both_response "$dir" 2 \
+    "aaaaaaaa-0000-0000-0000-000000000000" "workspace:9" "new-task" \
+    "ffffffff-0000-0000-0000-000000000000" "workspace:1" "other"
+  cmux_windows_response "$dir" 4 "e1111111-0000-0000-0000-000000000000" 2
+  cmux_workspace_list_both_response "$dir" 5 \
+    "aaaaaaaa-0000-0000-0000-000000000000" "workspace:9" "new-task" \
+    "ffffffff-0000-0000-0000-000000000000" "workspace:1" "other"
+  cmux_windows_response "$dir" 7 "e1111111-0000-0000-0000-000000000000" 1
+  cmux_workspace_list_both_response "$dir" 8 \
+    "ffffffff-0000-0000-0000-000000000000" "workspace:1" "other"
+  fb=$(make_cmux_fakebin "$dir")
+  PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_close_created_workspace workspace:9' "$ROOT"
+  status=$?
+  [ "$status" -eq 0 ] || fail "close_created_workspace should succeed only after the exact workspace is absent"
+  closes=$(grep -Fc $'\x1f''close-workspace'$'\x1f''--workspace'$'\x1f''workspace:9' "$dir/log")
+  [ "$closes" -eq 2 ] || fail "close_created_workspace should retry a success-shaped close while the target remains live, got $closes closes"
+  pass "fm_backend_cmux_close_created_workspace: retries until exact absence is confirmed"
+}
+
+test_close_created_workspace_adds_sibling_for_last_workspace() {
+  local dir fb status
+  dir="$TMP_ROOT/close-created-last"; mkdir -p "$dir/responses"
+  cmux_windows_response "$dir" 1 "e1111111-0000-0000-0000-000000000000" 1
+  cmux_workspace_list_both_response "$dir" 2 \
+    "aaaaaaaa-0000-0000-0000-000000000000" "workspace:9" "new-task"
+  printf 'OK workspace:10\n' > "$dir/responses/3.out"
+  cmux_windows_response "$dir" 5 "e1111111-0000-0000-0000-000000000000" 1
+  cmux_workspace_list_both_response "$dir" 6 \
+    "ffffffff-0000-0000-0000-000000000000" "workspace:10" "default"
+  fb=$(make_cmux_fakebin "$dir")
+  PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_close_created_workspace workspace:9' "$ROOT"
+  status=$?
+  [ "$status" -eq 0 ] || fail "close_created_workspace should close a last workspace after adding a sibling"
+  assert_contains "$(cat "$dir/log")" $'\x1f''new-workspace'$'\x1f''--window'$'\x1f''e1111111-0000-0000-0000-000000000000' \
+    "close_created_workspace did not add a sibling for the last workspace"
+  cmux_assert_call_order "$dir/log" $'\x1f''new-workspace'$'\x1f''--window' $'\x1f''close-workspace'$'\x1f''--workspace'$'\x1f''workspace:9' \
+    "close_created_workspace must add the sibling before closing the last workspace"
+  pass "fm_backend_cmux_close_created_workspace: handles the last-workspace no-op"
+}
+
+test_close_created_workspace_fails_on_unknown_inspection() {
+  local dir fb status
+  dir="$TMP_ROOT/close-created-unknown"; mkdir -p "$dir/responses"
+  printf '1\n' > "$dir/responses/1.exit"
+  printf '1\n' > "$dir/responses/2.exit"
+  printf '1\n' > "$dir/responses/3.exit"
+  printf '1\n' > "$dir/responses/4.exit"
+  fb=$(make_cmux_fakebin "$dir")
+  PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_close_created_workspace workspace:9' "$ROOT"
+  status=$?
+  [ "$status" -ne 0 ] || fail "close_created_workspace should fail when exact absence cannot be inspected"
+  assert_not_contains "$(cat "$dir/log")" $'\x1f''close-workspace' \
+    "close_created_workspace should not close any workspace after unknown inspection"
+  pass "fm_backend_cmux_close_created_workspace: unknown inspection fails without collateral closure"
 }
 
 # --- target_ready / capture ---------------------------------------------------
@@ -1202,6 +1304,9 @@ test_create_task_creates_and_parses_ids
 test_create_task_cleans_exact_workspace_after_inventory_failure
 test_create_task_cleans_exact_workspace_after_ambiguous_inventory
 test_create_task_cleans_exact_workspace_after_surface_failure
+test_close_created_workspace_retries_success_but_still_live
+test_close_created_workspace_adds_sibling_for_last_workspace
+test_close_created_workspace_fails_on_unknown_inspection
 test_target_ready_fails_when_target_absent
 test_target_ready_checks_expected_label
 test_target_ready_rejects_label_mismatch
