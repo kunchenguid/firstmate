@@ -343,7 +343,7 @@ fm_backend_cmux_global_workspace_state() {  # <title>
 
 fm_backend_cmux_global_workspace_identity_state() {  # <title> [workspace_id]
   local title=$1 exact_id=${2:-} wins window_ids wid workspaces ids id
-  local title_count=0 title_match= exact_count=0 exact_title_count=0
+  local title_count=0 title_match='' exact_count=0 exact_title_count=0
   wins=$(fm_backend_cmux_cli list-windows --json --id-format uuids 2>/dev/null) \
     || { printf 'unknown'; return 0; }
   if ! printf '%s' "$wins" | jq -e 'type == "array" and all(.[]?; ((.id | type) == "string") and ((.id | length) > 0))' >/dev/null 2>&1; then
@@ -392,7 +392,7 @@ fm_backend_cmux_surface_id_for_workspace() {  # <workspace_id>
 }
 
 fm_backend_cmux_workspace_location_state() {  # <workspace_id_or_ref>
-  local target=$1 wins window_ids wid workspaces matches match_count=0 match_win= match_window_count=
+  local target=$1 wins window_ids wid workspaces matches match_count=0 match_win='' match_window_count=''
   wins=$(fm_backend_cmux_cli list-windows --json --id-format uuids 2>/dev/null) \
     || { printf 'unknown'; return 0; }
   if ! printf '%s' "$wins" | jq -e 'type == "array" and all(.[]?; ((.id | type) == "string") and ((.id | length) > 0))' >/dev/null 2>&1; then
@@ -461,7 +461,7 @@ fm_backend_cmux_close_created_workspace() {  # <workspace_id_or_ref>
 # focus-restore dance is needed, unlike zellij. Echoes "<workspace_id>
 # <surface_id>" on success.
 fm_backend_cmux_create_task() {  # <label> <cwd>
-  local label=$1 cwd=$2 title lookup state out created_ref= wsid sfid cleanup_id
+  local label=$1 cwd=$2 title lookup state out created_ref='' wsid sfid cleanup_id
   title=$(fm_backend_cmux_scoped_title "$label")
   lookup=$(fm_backend_cmux_global_workspace_state "$title")
   state=${lookup%%$'\t'*}
