@@ -50,6 +50,18 @@ test_scout_remains_allowed_house_vocabulary() {
   pass "scout remains allowed in private captain chat"
 }
 
+test_plain_register_has_no_forced_address_or_nautical_voice() {
+  assert_grep "Address the user plainly and professionally, with no forced form of address or nautical flavor." "$AGENTS" \
+    "firstmate identity does not require a plain professional register"
+  if grep -Fq "Address the user as \"captain\"" "$AGENTS"; then
+    fail "firstmate identity still mandates captain as a form of address"
+  fi
+  if grep -Fq "Light nautical seasoning" "$FMX"; then
+    fail "X reply voice still encourages nautical seasoning"
+  fi
+  pass "firstmate uses a plain register without forced address or nautical voice"
+}
+
 test_compressed_safety_labels_have_plain_renderings() {
   local contract
   contract=$(section_9)
@@ -105,7 +117,7 @@ test_outward_facing_skill_points_reference_section_9_owner() {
     "bootstrap diagnostics do not reference section 9 at captain handoff"
   assert_grep "Acknowledge** in \`AGENTS.md\` section 9 language" "$AFK" \
     "afk acknowledgement does not reference section 9"
-  assert_grep "Captain, away mode is active; I will batch routine updates" "$AFK" \
+  assert_grep "Away mode is active; I will batch routine updates" "$AFK" \
     "afk acknowledgement lacks a local plain-English example"
   assert_grep "as decisions from Bearings' Captain's Call section under \`AGENTS.md\` section 9" "$DECISION" \
     "decision relay does not reference section 9"
@@ -140,6 +152,7 @@ test_section_9_owner_is_not_duplicated_into_skills() {
 
 test_section_9_owns_positive_translation_contract
 test_scout_remains_allowed_house_vocabulary
+test_plain_register_has_no_forced_address_or_nautical_voice
 test_compressed_safety_labels_have_plain_renderings
 test_mapping_list_covers_high_risk_internal_families
 test_verbatim_internal_evidence_is_rejected_from_chat
