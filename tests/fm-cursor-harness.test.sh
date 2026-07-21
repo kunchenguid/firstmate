@@ -177,6 +177,8 @@ test_cursor_refuses_without_a_key() {
   read_case "$rec"
   set +e
   # No pool account and no CURSOR_API_KEY: cursor would park on a login prompt.
+  # The $1..$6 below deliberately expand in the child bash from its positional args.
+  # shellcheck disable=SC2016
   out=$(env -u CURSOR_API_KEY bash -c '
     FM_ROOT_OVERRIDE="" FM_HOME="$1" FM_STATE_OVERRIDE="$1/state" FM_DATA_OVERRIDE="$1/data" \
     FM_PROJECTS_OVERRIDE="$1/projects" FM_CONFIG_OVERRIDE="$1/config" \
