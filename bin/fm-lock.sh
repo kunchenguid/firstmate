@@ -47,7 +47,17 @@ holder_alive() {  # true if $1 is a live process that looks like a harness
   local pid=$1 comm
   kill -0 "$pid" 2>/dev/null || return 1
   comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
-  printf '%s' "$(basename "$comm") $(ps -o args= -p "$pid" 2>/dev/null)" | grep -qE "$HARNESS_RE"
+  if printf '%s' "$(basename "$comm")" | grep -qE "$HARNESS_RE"; then
+    return 0
+  fi
+  # Only trust args when comm is a bare interpreter or copilot's MainThread,
+  # mirroring harness_pid; otherwise a recycled pid whose argv merely mentions
+  # a harness name (e.g. "gh copilot suggest") would look like a live holder.
+  case "$comm" in
+    *node*|*python*|MainThread)
+      printf '%s' "$(ps -o args= -p "$pid" 2>/dev/null)" | grep -qE "$HARNESS_RE" ;;
+    *) return 1 ;;
+  esac
 }
 
 if [ "${1:-}" = "status" ]; then

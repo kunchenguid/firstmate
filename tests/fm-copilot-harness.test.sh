@@ -101,6 +101,43 @@ SH
   pass "anchored copilot match ignores vscode plugin paths in unrelated argv"
 }
 
+test_fm_lock_holder_argv_only_matters_for_interpreters() {
+  local home fakebin out
+  home="$TMP_ROOT/recycled-home"
+  fakebin=$(fm_fakebin "$TMP_ROOT/recycled-fake")
+  mkdir -p "$home/state"
+  printf '%s\n' "$$" > "$home/state/.lock"
+  # Recycled pid: comm gh, argv merely containing the word copilot must not
+  # read as a live harness holder.
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *"ppid="*) exit 1 ;;
+  *"comm="*) printf '%s\n' 'gh'; exit 0 ;;
+  *"args="*) printf '%s\n' 'gh copilot suggest fix my code'; exit 0 ;;
+esac
+exit 1
+SH
+  chmod +x "$fakebin/ps"
+  out=$(FM_HOME="$home" PATH="$fakebin:$PATH" "$LOCK" status)
+  assert_contains "$out" "lock: stale" "gh-comm holder with copilot argv should read as stale"
+
+  # comm-only path still recognizes a real harness comm.
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *"ppid="*) exit 1 ;;
+  *"comm="*) printf '%s\n' 'claude'; exit 0 ;;
+  *"args="*) printf '%s\n' 'claude'; exit 0 ;;
+esac
+exit 1
+SH
+  chmod +x "$fakebin/ps"
+  out=$(FM_HOME="$home" PATH="$fakebin:$PATH" "$LOCK" status)
+  assert_contains "$out" "lock: held by live harness pid" "claude comm holder should still read as live"
+  pass "holder argv is only trusted for interpreter/MainThread comms"
+}
+
 test_fm_lock_acquires_under_renamed_copilot_wrapper() {
   local home wrapper out status
   home="$TMP_ROOT/wrapper-home"
@@ -204,6 +241,7 @@ test_fm_lock_acquires_under_copilot_ancestor
 test_fm_lock_overwrites_stale_dead_copilot_holder
 test_fm_lock_recognizes_copilot_holder
 test_fm_lock_ignores_unrelated_copilot_argv
+test_fm_lock_holder_argv_only_matters_for_interpreters
 test_fm_lock_acquires_under_renamed_copilot_wrapper
 test_fm_harness_reports_copilot
 test_fm_harness_existing_detection_unchanged
