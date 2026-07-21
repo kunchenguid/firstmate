@@ -145,30 +145,27 @@ test_codex_mcp_fresh_launch_stall_detector() {
   pass "codex MCP startup detector is codex-only, fresh-launch-only, and thresholded"
 }
 
-test_codex_mcp_fresh_launch_auto_recover_relaunches_nomcp() {
-  local case_dir home state proj wt fakebin launchlog source_home wrapper killlog tail window status launch codex_home
-  case_dir="$TMP_ROOT/codex-mcp-recover"
-  home="$case_dir/home"
-  state="$home/state"
-  proj="$case_dir/project"
-  wt="$case_dir/wt"
-  launchlog="$case_dir/launch.log"
-  source_home="$case_dir/source-codex"
-  wrapper="$case_dir/spawn-wrapper.sh"
-  killlog="$case_dir/kill.log"
-  fakebin="$case_dir/fakebin"
-  mkdir -p "$home/data/codex-recover" "$home/projects" "$state" "$home/config" "$source_home" "$fakebin"
-  printf 'brief\n' > "$home/data/codex-recover/brief.md"
-  printf 'codex\n' > "$home/config/crew-harness"
-  fm_git_worktree "$proj" "$wt" "wt-codex-mcp-recover"
-  cat > "$source_home/config.toml" <<'EOF'
-model = "gpt-5"
-
-[mcp_servers.blackhole]
-url = "http://127.0.0.1:9999/mcp"
-EOF
-  printf '{"tokens":"fresh"}\n' > "$source_home/auth.json"
-  cat > "$fakebin/tmux" <<'SH'
+setup_codex_mcp_recover_case() {  # <case-name> [task-id]
+  local name=$1 task=${2:-codex-recover}
+  CODEX_CASE_DIR="$TMP_ROOT/$name"
+  CODEX_HOME_DIR="$CODEX_CASE_DIR/home"
+  CODEX_STATE="$CODEX_HOME_DIR/state"
+  CODEX_PROJ="$CODEX_CASE_DIR/project"
+  CODEX_WT="$CODEX_CASE_DIR/wt"
+  CODEX_LAUNCHLOG="$CODEX_CASE_DIR/launch.log"
+  CODEX_WRAPPER="$CODEX_CASE_DIR/spawn-wrapper.sh"
+  CODEX_KILLLOG="$CODEX_CASE_DIR/kill.log"
+  CODEX_WAKELOG="$CODEX_CASE_DIR/wake.log"
+  CODEX_FAKEBIN="$CODEX_CASE_DIR/fakebin"
+  CODEX_WINDOW="sess:fm-$task"
+  CODEX_TAIL=$'Starting MCP servers (9/10): blackhole (16s - esc to interrupt)\n'
+  mkdir -p "$CODEX_HOME_DIR/data/$task" "$CODEX_HOME_DIR/projects" "$CODEX_STATE" "$CODEX_HOME_DIR/config" "$CODEX_FAKEBIN"
+  : > "$CODEX_KILLLOG"
+  : > "$CODEX_WAKELOG"
+  printf 'brief\n' > "$CODEX_HOME_DIR/data/$task/brief.md"
+  printf 'codex\n' > "$CODEX_HOME_DIR/config/crew-harness"
+  fm_git_worktree "$CODEX_PROJ" "$CODEX_WT" "wt-$task"
+  cat > "$CODEX_FAKEBIN/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
 case "$*" in
@@ -193,53 +190,199 @@ case "${1:-}" in
 esac
 exit 0
 SH
-  chmod +x "$fakebin/tmux"
-  fm_fake_exit0 "$fakebin" treehouse
-  cat > "$wrapper" <<SH
+  chmod +x "$CODEX_FAKEBIN/tmux"
+  fm_fake_exit0 "$CODEX_FAKEBIN" treehouse
+  cat > "$CODEX_WRAPPER" <<SH
 #!/usr/bin/env bash
-PATH="$fakebin:\$PATH" \\
+PATH="$CODEX_FAKEBIN:\$PATH" \\
 FM_ROOT_OVERRIDE='' \\
-FM_HOME="$home" \\
-FM_STATE_OVERRIDE="$state" \\
-FM_DATA_OVERRIDE="$home/data" \\
-FM_PROJECTS_OVERRIDE="$home/projects" \\
-FM_CONFIG_OVERRIDE="$home/config" \\
-FM_CODEX_SOURCE_HOME="$source_home" \\
+FM_HOME="$CODEX_HOME_DIR" \\
+FM_STATE_OVERRIDE="$CODEX_STATE" \\
+FM_DATA_OVERRIDE="$CODEX_HOME_DIR/data" \\
+FM_PROJECTS_OVERRIDE="$CODEX_HOME_DIR/projects" \\
+FM_CONFIG_OVERRIDE="$CODEX_HOME_DIR/config" \\
 FM_SPAWN_NO_GUARD=1 \\
-FM_FAKE_PANE_PATH="$wt" \\
-FM_FAKE_LAUNCH_LOG="$launchlog" \\
+FM_FAKE_PANE_PATH="$CODEX_WT" \\
+FM_FAKE_LAUNCH_LOG="$CODEX_LAUNCHLOG" \\
 TMUX="fake,1,0" \\
 "$ROOT/bin/fm-spawn.sh" "\$@"
 SH
-  chmod +x "$wrapper"
-  window="sess:fm-codex-recover"
-  fm_write_meta "$state/codex-recover.meta" \
-    "window=$window" \
-    "project=$proj" \
+  chmod +x "$CODEX_WRAPPER"
+  FM_HOME="$CODEX_HOME_DIR"
+  STATE="$CODEX_STATE"
+  DATA="$CODEX_HOME_DIR/data"
+  PROJECTS="$CODEX_HOME_DIR/projects"
+  CONFIG="$CODEX_HOME_DIR/config"
+  TRIAGE_LOG="$CODEX_STATE/.watch-triage.log"
+  FM_SPAWN_BIN="$CODEX_WRAPPER"
+}
+
+write_codex_recover_meta() {  # <task-id> [extra key=val...]
+  local task=$1
+  shift
+  fm_write_meta "$CODEX_STATE/$task.meta" \
+    "window=$CODEX_WINDOW" \
+    "worktree=$CODEX_WT" \
+    "project=$CODEX_PROJ" \
+    "harness=codex" \
+    "kind=scout" \
+    "model=gpt-5" \
+    "effort=high" \
+    "$@"
+}
+
+prime_codex_recover_observation() {
+  PATH="$CODEX_FAKEBIN:$PATH" codex_fresh_launch_auto_recover "$CODEX_WINDOW" "$CODEX_TAIL" >/dev/null || true
+}
+
+test_codex_mcp_fresh_launch_single_observation_does_not_recycle() {
+  local status
+  setup_codex_mcp_recover_case codex-mcp-single codex-single
+  write_codex_recover_meta codex-single
+  fm_backend_kill() {
+    printf '%s\n' "$*" >> "$CODEX_KILLLOG"
+    return 0
+  }
+
+  PATH="$CODEX_FAKEBIN:$PATH" codex_fresh_launch_auto_recover "$CODEX_WINDOW" "$CODEX_TAIL" >/dev/null
+  status=$?
+  expect_code 1 "$status" "a single codex MCP startup observation should only prime corroboration"
+  [ ! -s "$CODEX_KILLLOG" ] || fail "single observation killed the codex endpoint"
+  [ ! -s "$CODEX_LAUNCHLOG" ] || fail "single observation respawned the codex endpoint"
+  assert_present "$CODEX_STATE/.codex-mcp-stall-codex-single" "single observation did not record corroboration state"
+  pass "codex MCP fresh-launch recovery requires two corroborating observations"
+}
+
+test_codex_mcp_fresh_launch_dirty_lane_escalates_without_recycle() {
+  local status wake
+  setup_codex_mcp_recover_case codex-mcp-dirty codex-dirty
+  write_codex_recover_meta codex-dirty
+  fm_backend_kill() {
+    printf '%s\n' "$*" >> "$CODEX_KILLLOG"
+    return 0
+  }
+  prime_codex_recover_observation
+  printf 'uncommitted\n' > "$CODEX_WT/dirty.txt"
+
+  (
+    # shellcheck disable=SC2329  # invoked indirectly by codex_fresh_launch_recover_failed
+    wake() { printf '%s\n' "$1" >> "$CODEX_WAKELOG"; return 0; }
+    PATH="$CODEX_FAKEBIN:$PATH" codex_fresh_launch_auto_recover "$CODEX_WINDOW" "$CODEX_TAIL" >/dev/null
+  )
+  status=$?
+  expect_code 1 "$status" "dirty codex MCP lane should escalate instead of recycling"
+  [ ! -s "$CODEX_KILLLOG" ] || fail "dirty codex lane was killed"
+  [ ! -s "$CODEX_LAUNCHLOG" ] || fail "dirty codex lane was respawned"
+  wake=$(cat "$CODEX_WAKELOG")
+  assert_contains "$wake" "dirty or untracked" "dirty codex lane escalation did not name the dirty-worktree proof failure"
+  pass "dirty codex MCP fresh-launch lane escalates without kill or respawn"
+}
+
+test_codex_mcp_fresh_launch_auto_recover_relaunches_nomcp_and_preserves_meta() {
+  local status launch
+  setup_codex_mcp_recover_case codex-mcp-recover codex-recover
+  write_codex_recover_meta codex-recover "x_request=req-123" "x_request_ts=123456" "x_followups=1" "x_platform=x"
+  fm_backend_kill() {
+    printf '%s\n' "$*" >> "$CODEX_KILLLOG"
+    return 0
+  }
+  prime_codex_recover_observation
+
+  PATH="$CODEX_FAKEBIN:$PATH" codex_fresh_launch_auto_recover "$CODEX_WINDOW" "$CODEX_TAIL"
+  status=$?
+  expect_code 0 "$status" "codex MCP fresh-launch auto-recover should succeed"
+  assert_contains "$(cat "$CODEX_KILLLOG")" "$CODEX_WINDOW" "auto-recover did not kill the stalled codex endpoint"
+  launch=$(cat "$CODEX_LAUNCHLOG")
+  assert_contains "$launch" "codex --model 'gpt-5' -c 'model_reasoning_effort=\"high\"' -c 'mcp_servers={}' --dangerously-bypass-approvals-and-sandbox -c \"notify=" \
+    "auto-recover did not relaunch codex with the launch-time no-MCP override"
+  assert_not_contains "$launch" "CODEX_HOME=" "auto-recover relaunch must keep the user's real Codex home"
+  assert_present "$CODEX_STATE/.codex-mcp-recovered-codex-recover" "auto-recover did not leave a retry guard marker"
+  assert_grep "kind=scout" "$CODEX_STATE/codex-recover.meta" "auto-recover did not preserve scout kind on respawn"
+  assert_grep "x_request=req-123" "$CODEX_STATE/codex-recover.meta" "auto-recover did not preserve x_request sidecar metadata"
+  pass "codex MCP fresh-launch auto-recover relaunches with no-MCP override and preserves X-mode metadata"
+}
+
+test_codex_mcp_fresh_launch_marker_present_escalates_without_fallthrough() {
+  local status wake
+  setup_codex_mcp_recover_case codex-mcp-marker codex-marker
+  write_codex_recover_meta codex-marker
+  : > "$CODEX_STATE/.codex-mcp-recovered-codex-marker"
+  fm_backend_kill() {
+    printf '%s\n' "$*" >> "$CODEX_KILLLOG"
+    return 0
+  }
+
+  (
+    # shellcheck disable=SC2329  # invoked indirectly by codex_fresh_launch_recover_failed
+    wake() { printf '%s\n' "$1" >> "$CODEX_WAKELOG"; return 0; }
+    PATH="$CODEX_FAKEBIN:$PATH" codex_fresh_launch_auto_recover "$CODEX_WINDOW" "$CODEX_TAIL" >/dev/null
+  )
+  status=$?
+  expect_code 1 "$status" "marker-present recovery path should escalate"
+  [ ! -s "$CODEX_KILLLOG" ] || fail "marker-present path killed the codex endpoint"
+  [ ! -s "$CODEX_LAUNCHLOG" ] || fail "marker-present path respawned the codex endpoint"
+  wake=$(cat "$CODEX_WAKELOG")
+  assert_contains "$wake" "persisted after one recovery attempt" "marker-present escalation did not name the retry guard"
+  pass "codex MCP marker-present escalation returns without kill or respawn fall-through"
+}
+
+test_codex_mcp_fresh_launch_missing_project_escalates_without_fallthrough() {
+  local status wake
+  setup_codex_mcp_recover_case codex-mcp-missing-project codex-missing-project
+  fm_write_meta "$CODEX_STATE/codex-missing-project.meta" \
+    "window=$CODEX_WINDOW" \
+    "worktree=$CODEX_WT" \
     "harness=codex" \
     "kind=scout" \
     "model=gpt-5" \
     "effort=high"
-  STATE="$state"
-  TRIAGE_LOG="$state/.watch-triage.log"
-  FM_SPAWN_BIN="$wrapper"
   fm_backend_kill() {
-    printf '%s\n' "$*" >> "$killlog"
+    printf '%s\n' "$*" >> "$CODEX_KILLLOG"
     return 0
   }
-  tail=$'Starting MCP servers (9/10): blackhole (16s - esc to interrupt)\n'
-  codex_fresh_launch_auto_recover "$window" "$tail"
+  prime_codex_recover_observation
+
+  (
+    # shellcheck disable=SC2329  # invoked indirectly by codex_fresh_launch_recover_failed
+    wake() { printf '%s\n' "$1" >> "$CODEX_WAKELOG"; return 0; }
+    PATH="$CODEX_FAKEBIN:$PATH" codex_fresh_launch_auto_recover "$CODEX_WINDOW" "$CODEX_TAIL" >/dev/null
+  )
   status=$?
-  expect_code 0 "$status" "codex MCP fresh-launch auto-recover should succeed"
-  assert_contains "$(cat "$killlog")" "$window" "auto-recover did not kill the stalled codex endpoint"
-  launch=$(cat "$launchlog")
-  codex_home="$(cd "$state" && pwd -P)/codex-home"
-  assert_contains "$launch" "CODEX_HOME='$codex_home' codex --model 'gpt-5' -c 'model_reasoning_effort=\"high\"' --dangerously-bypass-approvals-and-sandbox -c \"notify=" \
-    "auto-recover did not relaunch codex through the no-MCP CODEX_HOME path"
-  assert_no_grep '[mcp_servers.' "$codex_home/config.toml" "auto-recover relaunch copied the black-hole MCP server"
-  assert_present "$state/.codex-mcp-recovered-codex-recover" "auto-recover did not leave a retry guard marker"
-  assert_grep "kind=scout" "$state/codex-recover.meta" "auto-recover did not preserve scout kind on respawn"
-  pass "codex MCP fresh-launch auto-recover kills the stalled lane and relaunches through the no-MCP Codex home"
+  expect_code 1 "$status" "missing-project recovery path should escalate"
+  [ ! -s "$CODEX_KILLLOG" ] || fail "missing-project path killed the codex endpoint"
+  [ ! -s "$CODEX_LAUNCHLOG" ] || fail "missing-project path respawned the codex endpoint"
+  wake=$(cat "$CODEX_WAKELOG")
+  assert_contains "$wake" "missing project" "missing-project escalation did not name the missing project"
+  pass "codex MCP missing-project escalation returns without kill or respawn fall-through"
+}
+
+test_codex_mcp_fresh_launch_spawn_failure_escalates_without_second_recycle() {
+  local status wake
+  setup_codex_mcp_recover_case codex-mcp-spawn-failure codex-spawn-failure
+  write_codex_recover_meta codex-spawn-failure
+  cat > "$CODEX_WRAPPER" <<'SH'
+#!/usr/bin/env bash
+echo "spawn failed intentionally"
+exit 42
+SH
+  chmod +x "$CODEX_WRAPPER"
+  fm_backend_kill() {
+    printf '%s\n' "$*" >> "$CODEX_KILLLOG"
+    return 0
+  }
+  prime_codex_recover_observation
+
+  (
+    # shellcheck disable=SC2329  # invoked indirectly by codex_fresh_launch_recover_failed
+    wake() { printf '%s\n' "$1" >> "$CODEX_WAKELOG"; return 0; }
+    PATH="$CODEX_FAKEBIN:$PATH" codex_fresh_launch_auto_recover "$CODEX_WINDOW" "$CODEX_TAIL" >/dev/null
+  )
+  status=$?
+  expect_code 1 "$status" "spawn-failure recovery path should escalate"
+  [ "$(wc -l < "$CODEX_KILLLOG" | tr -d '[:space:]')" = 1 ] || fail "spawn-failure path did not kill exactly once"
+  wake=$(cat "$CODEX_WAKELOG")
+  assert_contains "$wake" "spawn failed intentionally" "spawn-failure escalation did not include the spawn failure"
+  pass "codex MCP spawn-failure escalation returns without a second recycle"
 }
 
 test_scan_captain_relevant_statuses_classifier() {
@@ -1407,7 +1550,12 @@ test_afk_paused_changed_pane_hands_off_plain_stale() {
 test_signal_reason_is_actionable_classifier
 test_stale_is_terminal_classifier
 test_codex_mcp_fresh_launch_stall_detector
-test_codex_mcp_fresh_launch_auto_recover_relaunches_nomcp
+test_codex_mcp_fresh_launch_single_observation_does_not_recycle
+test_codex_mcp_fresh_launch_dirty_lane_escalates_without_recycle
+test_codex_mcp_fresh_launch_auto_recover_relaunches_nomcp_and_preserves_meta
+test_codex_mcp_fresh_launch_marker_present_escalates_without_fallthrough
+test_codex_mcp_fresh_launch_missing_project_escalates_without_fallthrough
+test_codex_mcp_fresh_launch_spawn_failure_escalates_without_second_recycle
 test_scan_captain_relevant_statuses_classifier
 test_classifier_primitives
 test_crew_is_provably_working_classifier

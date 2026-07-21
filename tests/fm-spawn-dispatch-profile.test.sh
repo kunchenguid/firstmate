@@ -88,7 +88,6 @@ run_spawn() {
   FM_ROOT_OVERRIDE='' FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
-    FM_CODEX_SOURCE_HOME="${FM_CODEX_SOURCE_HOME:-}" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
     FM_FAKE_LAUNCH_LOG="$launchlog" GROK_HOME="$home/grok-home" PATH="$fakebin:$PATH" \
     "$SPAWN" "$@" 2>&1
@@ -147,9 +146,9 @@ test_capacity_failover_absent_keeps_spawn_unchanged() {
 
   state_real=$(cd "$HOME_DIR/state" && pwd -P)
   launch=$(cat "$LAUNCH_LOG")
-  expected="codex --dangerously-bypass-approvals-and-sandbox -c \"notify=[\\\"bash\\\",\\\"-c\\\",\\\"touch '$state_real/$id.turn-ended'\\\"]\" \"\$(cat '$HOME_DIR/data/$id/brief.md')\""
-  [ "$launch" = "$expected" ] || fail "capacity-off codex launch changed"$'\n'"expected: $expected"$'\n'"actual:   $launch"
-  pass "absent config/capacity-failover keeps spawn behavior byte-identical even with cooldown records present"
+  expected="codex -c 'mcp_servers={}' --dangerously-bypass-approvals-and-sandbox -c \"notify=[\\\"bash\\\",\\\"-c\\\",\\\"touch '$state_real/$id.turn-ended'\\\"]\" \"\$(cat '$HOME_DIR/data/$id/brief.md')\""
+  [ "$launch" = "$expected" ] || fail "capacity-off codex launch did not match the non-capacity codex launch"$'\n'"expected: $expected"$'\n'"actual:   $launch"
+  pass "absent config/capacity-failover preserves the codex MCP override even with cooldown records present"
 }
 
 test_capacity_failover_host_pressure_opt_in_refuses_spawn() {
@@ -228,8 +227,8 @@ test_active_dispatch_profile_allows_explicit_harness() {
   assert_contains "$out" "spawned $id harness=codex" "spawn did not report explicit codex harness"
   assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5 high
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "codex --model 'gpt-5' -c 'model_reasoning_effort=\"high\"' --dangerously-bypass-approvals-and-sandbox" \
-    "explicit harness launch did not thread model and effort"
+  assert_contains "$launch" "codex --model 'gpt-5' -c 'model_reasoning_effort=\"high\"' -c 'mcp_servers={}' --dangerously-bypass-approvals-and-sandbox" \
+    "explicit harness launch did not thread model, effort, and MCP override"
   pass "active crew-dispatch profile allows an explicit resolved harness"
 }
 
@@ -294,52 +293,45 @@ test_codex_threads_model_and_effort() {
   expect_code 0 "$status" "codex spawn with profile flags should succeed"
   assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5 high
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "codex --model 'gpt-5' -c 'model_reasoning_effort=\"high\"' --dangerously-bypass-approvals-and-sandbox" \
-    "codex launch did not thread model and reasoning effort config"
+  assert_contains "$launch" "codex --model 'gpt-5' -c 'model_reasoning_effort=\"high\"' -c 'mcp_servers={}' --dangerously-bypass-approvals-and-sandbox" \
+    "codex launch did not thread model, reasoning effort, and MCP override config"
   pass "codex receives --model and model_reasoning_effort profile flags"
 }
 
-test_codex_crewmate_uses_managed_nomcp_home() {
-  local rec id out status launch source_home codex_home config auth
-  id=profile-codex-home-z3b
-  rec=$(make_spawn_case profile-codex-home codex "$id")
+test_codex_crewmate_disables_mcp_with_launch_override() {
+  local rec id out status launch
+  id=profile-codex-mcp-z3b
+  rec=$(make_spawn_case profile-codex-mcp codex "$id")
   read_case_record "$rec"
-  source_home="$CASE_DIR/source-codex"
-  mkdir -p "$source_home"
-  cat > "$source_home/config.toml" <<'EOF'
-model = "gpt-5"
-model_reasoning_effort = "medium"
 
-[mcp_servers.linear]
-url = "https://mcp.linear.app/mcp"
-
-[mcp_servers.node_repl]
-command = "/tmp/node_repl"
-startup_timeout_sec = 120
-EOF
-  printf '{"tokens":"fresh"}\n' > "$source_home/auth.json"
-
-  out=$(FM_CODEX_SOURCE_HOME="$source_home" run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
     "$id" "$PROJ_DIR" --harness codex --model gpt-5 --effort high)
   status=$?
-  expect_code 0 "$status" "codex crewmate spawn should succeed with managed CODEX_HOME"
+  expect_code 0 "$status" "codex crewmate spawn should succeed with launch-time MCP override"
   launch=$(cat "$LAUNCH_LOG")
-  codex_home="$(cd "$HOME_DIR/state" && pwd -P)/codex-home"
-  config="$codex_home/config.toml"
-  auth="$codex_home/auth.json"
-  assert_contains "$launch" "CODEX_HOME='$codex_home' codex --model 'gpt-5' -c 'model_reasoning_effort=\"high\"' --dangerously-bypass-approvals-and-sandbox -c \"notify=" \
-    "codex launch did not preserve CODEX_HOME plus model, effort, sandbox bypass, and notify flags"
-  assert_present "$config" "managed Codex config was not created"
-  assert_grep 'model = "gpt-5"' "$config" "managed Codex config did not preserve the top-level model"
-  assert_grep 'model_reasoning_effort = "medium"' "$config" "managed Codex config did not preserve top-level reasoning effort"
-  assert_grep '[mcp_servers]' "$config" "managed Codex config should contain an empty MCP table"
-  assert_no_grep '[mcp_servers.' "$config" "managed Codex config must not copy MCP server definitions"
-  assert_no_grep 'url =' "$config" "managed Codex config must not contain remote MCP urls"
-  assert_no_grep 'command =' "$config" "managed Codex config must not contain local MCP commands"
-  [ -L "$auth" ] || fail "managed Codex auth is not a symlink"
-  [ "$(readlink "$auth")" = "$(cd "$source_home" && pwd -P)/auth.json" ] \
-    || fail "managed Codex auth symlink did not point at the source auth"
-  pass "codex crewmates use a firstmate-managed CODEX_HOME with no MCP servers and inherited auth"
+  assert_contains "$launch" "codex --model 'gpt-5' -c 'model_reasoning_effort=\"high\"' -c 'mcp_servers={}' --dangerously-bypass-approvals-and-sandbox -c \"notify=" \
+    "codex launch did not preserve model, effort, MCP override, sandbox bypass, and notify flags"
+  assert_not_contains "$launch" "CODEX_HOME=" "codex crew launch must keep the user's real Codex home"
+  [ ! -e "$HOME_DIR/state/codex-home" ] || fail "codex crew launch created a managed Codex home"
+  pass "codex crewmates disable MCP servers with a launch-time override while keeping the real Codex home"
+}
+
+test_codex_crewmate_mcp_opt_out_keeps_config() {
+  local rec id out status launch
+  id=profile-codex-mcp-optout-z3c
+  rec=$(make_spawn_case profile-codex-mcp-optout codex "$id")
+  read_case_record "$rec"
+  printf 'enabled\n' > "$HOME_DIR/config/crew-codex-mcp"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --harness codex --model gpt-5 --effort high)
+  status=$?
+  expect_code 0 "$status" "codex crewmate spawn should allow local MCP opt-out"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "codex --model 'gpt-5' -c 'model_reasoning_effort=\"high\"' --dangerously-bypass-approvals-and-sandbox -c \"notify=" \
+    "codex MCP opt-out did not preserve the rest of the launch flags"
+  assert_not_contains "$launch" "mcp_servers={}" "codex MCP opt-out should not inject the no-MCP override"
+  pass "config/crew-codex-mcp can keep configured Codex MCP servers for crew launches"
 }
 
 test_codex_omits_invalid_max_effort() {
@@ -353,8 +345,8 @@ test_codex_omits_invalid_max_effort() {
   expect_code 0 "$status" "codex spawn with unsupported max effort should omit the effort flag"
   assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5 max
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "codex --model 'gpt-5' --dangerously-bypass-approvals-and-sandbox" \
-    "codex launch did not preserve the model flag when max effort was omitted"
+  assert_contains "$launch" "codex --model 'gpt-5' -c 'mcp_servers={}' --dangerously-bypass-approvals-and-sandbox" \
+    "codex launch did not preserve the model and MCP override flags when max effort was omitted"
   assert_not_contains "$launch" "model_reasoning_effort" "codex launch must omit unsupported max reasoning effort"
   pass "codex omits unsupported max effort instead of passing a bad config value"
 }
@@ -584,7 +576,7 @@ test_batch_forwards_shared_profile_flags() {
 }
 
 test_active_dispatch_profile_does_not_block_secondmate_launch() {
-  local rec id sm out status
+  local rec id sm out status launch
   id=profile-secondmate-z16
   rec=$(make_spawn_case profile-secondmate codex "$id")
   read_case_record "$rec"
@@ -598,7 +590,9 @@ test_active_dispatch_profile_does_not_block_secondmate_launch() {
   assert_contains "$out" "spawned $id harness=codex kind=secondmate" "secondmate launch did not use secondmate harness resolution"
   assert_grep "kind=secondmate" "$HOME_DIR/state/$id.meta" "secondmate meta missing kind=secondmate"
   assert_meta_profile "$HOME_DIR/state/$id.meta" codex default default
-  assert_not_contains "$(cat "$LAUNCH_LOG")" "CODEX_HOME=" "secondmate codex launch must not use the crewmate CODEX_HOME"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_not_contains "$launch" "CODEX_HOME=" "secondmate codex launch must keep the real Codex home"
+  assert_not_contains "$launch" "mcp_servers={}" "secondmate codex launch must not inherit the crew MCP override"
   pass "active crew-dispatch profile does not block secondmate launches"
 }
 
@@ -638,7 +632,8 @@ test_active_dispatch_profile_allows_positional_harness
 test_active_dispatch_profile_allows_raw_launch_command
 test_claude_threads_model_and_effort
 test_codex_threads_model_and_effort
-test_codex_crewmate_uses_managed_nomcp_home
+test_codex_crewmate_disables_mcp_with_launch_override
+test_codex_crewmate_mcp_opt_out_keeps_config
 test_codex_omits_invalid_max_effort
 test_grok_threads_model_and_reasoning_effort
 test_grok_omits_invalid_max_reasoning_effort
