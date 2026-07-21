@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Static regression tests for the captain-facing plain-English translation
+# Static regression tests for the Jay-facing plain-English translation
 # contract owned by AGENTS.md section 9.
 set -u
 
@@ -18,22 +18,34 @@ UPDATE="$ROOT/.agents/skills/updatefirstmate/SKILL.md"
 
 section_9() {
   awk '
-    /^## 9\. Escalation and captain etiquette$/ { found = 1 }
+    /^## 9\. Escalation and communication with Jay$/ { found = 1 }
     found && /^## 10\. / { exit }
     found { print }
   ' "$AGENTS"
 }
 
+test_identity_and_natural_address_contract() {
+  assert_grep "Navi is Jay's helper and guide through the digital world." "$AGENTS" \
+    "AGENTS.md does not establish Navi's identity"
+  assert_grep 'Refer to the user as Jay whenever a direct name or form of address is useful, and never call Jay "captain."' "$AGENTS" \
+    "AGENTS.md does not establish the natural-address rule"
+  assert_grep "Do not force Jay's name into every message." "$AGENTS" \
+    "AGENTS.md does not prohibit forced direct address"
+  assert_not_contains "$(cat "$AGENTS")" 'Address the user as "captain"' \
+    "AGENTS.md retains the old mandatory captain address"
+  pass "AGENTS.md establishes Navi's identity and Jay's natural-address rule"
+}
+
 test_section_9_owns_positive_translation_contract() {
   local contract
   contract=$(section_9)
-  assert_contains "$contract" "Every captain-facing message must translate internal state into the project outcome, consequence, and next decision." \
-    "section 9 does not own the positive captain-facing translation contract"
-  assert_contains "$contract" "Use the captain's nouns:" \
-    "section 9 does not require captain-owned nouns"
+  assert_contains "$contract" "Every message to Jay must translate internal state into the project outcome, consequence, and next decision." \
+    "section 9 does not own the positive Jay-facing translation contract"
+  assert_contains "$contract" "Use plain-language nouns Jay will recognize:" \
+    "section 9 does not require familiar plain-language nouns"
   assert_contains "$contract" "When evidence uses an internal label, rewrite it before sending:" \
     "section 9 does not own the rewrite mapping list"
-  pass "section 9 owns the positive captain-facing translation contract"
+  pass "section 9 owns the positive Jay-facing translation contract"
 }
 
 test_scout_remains_allowed_house_vocabulary() {
@@ -47,7 +59,7 @@ test_scout_remains_allowed_house_vocabulary() {
     "section 9 must not add scout to the internal-vocabulary ban"
   assert_not_contains "$contract" "secondmate -> domain supervisor" \
     "section 9 must not map secondmate to domain supervisor"
-  pass "scout remains allowed in private captain chat"
+  pass "scout remains allowed in private chat with Jay"
 }
 
 test_compressed_safety_labels_have_plain_renderings() {
@@ -91,13 +103,13 @@ test_mapping_list_covers_high_risk_internal_families() {
 test_verbatim_internal_evidence_is_rejected_from_chat() {
   local contract
   contract=$(section_9)
-  assert_contains "$contract" "Never relay worker reports, status lines, tool output, validation-state labels, or decision records verbatim into captain chat." \
-    "section 9 does not reject verbatim internal evidence in captain chat"
+  assert_contains "$contract" "Never relay worker reports, status lines, tool output, validation-state labels, or decision records verbatim into messages to Jay." \
+    "section 9 does not reject verbatim internal evidence in messages to Jay"
   assert_contains "$contract" "Private evidence reports may retain exact identifiers, paths, status lines, validation labels, and internal terms" \
     "section 9 does not preserve private evidence precision"
-  assert_contains "$contract" "the captain-facing chat summary that points to the report still follows this translation rule" \
+  assert_contains "$contract" "the summary for Jay that points to the report still follows this translation rule" \
     "section 9 does not keep chat summaries plain English"
-  pass "captain chat rejects verbatim internal evidence while private reports stay precise"
+  pass "messages to Jay reject verbatim internal evidence while private reports stay precise"
 }
 
 test_outward_facing_skill_points_reference_section_9_owner() {
@@ -138,6 +150,7 @@ test_section_9_owner_is_not_duplicated_into_skills() {
   pass "skills cross-reference section 9 instead of duplicating the mapping list"
 }
 
+test_identity_and_natural_address_contract
 test_section_9_owns_positive_translation_contract
 test_scout_remains_allowed_house_vocabulary
 test_compressed_safety_labels_have_plain_renderings
