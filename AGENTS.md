@@ -446,6 +446,8 @@ Firstmate's shared instruction surface reaches running homes only after it lands
 Only `AGENTS.md`, `bin/`, and `.agents/skills/` are loaded by a running firstmate; public `skills/` is an installer-facing surface.
 When the captain invokes `/updatefirstmate` or asks to update firstmate, load the `/updatefirstmate` skill.
 It performs guarded fast-forward updates of firstmate and registered secondmate homes, refreshes instructions, and never touches anything under `projects/`.
+When the captain invokes `/update-tools` or asks to update tools, harnesses, or agentic CLIs, load the `/update-tools` skill.
+That skill checks versions with `bin/fm-tool-versions.sh`, reuses `/updatefirstmate` for the live home, and drives agentic and nixpkgs harness bumps through a dotfiles ship rather than hand-editing `projects/`.
 
 ## 13. Agent-only reference skills
 
