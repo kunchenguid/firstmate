@@ -8,8 +8,9 @@
 # or blocked and the crew resumes (responds to the gate, the pipeline fixes, it
 # re-validates), the log's last line stays stale. This helper never infers the
 # current state from a tail of the log: it reads the authoritative source (a
-# no-mistakes run-step attributed to this crew's branch, else the pane
-# busy-signature) and reconciles the possibly-stale log against it.
+# no-mistakes run-step attributed to this crew's branch and current code
+# identity, else the pane busy-signature) and reconciles the possibly-stale log
+# against it.
 #
 # The determinism lives entirely here - only run-step / pane / log reads plus
 # fixed mapping logic, no heuristics and no LLM. Output is one stable, parseable,
@@ -19,8 +20,14 @@
 #
 # Logic, in order:
 #   1. Resolve worktree + backend target + kind from state/<id>.meta.
-#   2. Matching no-mistakes run for this crew's branch, active or terminal
-#      (from `axi status`, or the coarse `no-mistakes runs` fallback)?
+#   2. Matching no-mistakes run for this crew's branch AND current code identity,
+#      active or terminal (from `axi status`, or the coarse `no-mistakes runs`
+#      fallback)? Branch name alone is not enough: a historical run on a reused
+#      branch whose head was rewritten or diverged must not be attributed.
+#      A run matches when its head equals the worktree HEAD, or the worktree HEAD
+#      is an ancestor of the run head (pipeline fix commits advanced the run on
+#      the same line of history). Local work that advanced past the run head, or
+#      diverged from it, invalidates attribution.
 #      The run-step is AUTHORITATIVE: running/fixing -> working, ci -> working,
 #      awaiting_approval/fix_review -> parked (with gate findings), terminal
 #      passed/checks-passed -> done, failed/cancelled -> failed. EXCEPT: while
@@ -371,7 +378,7 @@ nm_ci_checks_state() {
 # matching row's status word (running/completed/cancelled/failed), or empty
 # when the branch has no run within FM_CREW_STATE_RUNS_LIMIT rows.
 nm_runs_status_for_branch() {  # <branch>
-  local branch=$1 out row st rest br
+  local branch=$1 out row st rest br sha
   out=$(nm_run runs --limit "$FM_CREW_STATE_RUNS_LIMIT")
   [ -n "$out" ] || return 0
   while IFS= read -r row; do
@@ -381,7 +388,15 @@ nm_runs_status_for_branch() {  # <branch>
     rest=${row#* }
     rest=$(trim "$rest")
     br=${rest%% *}
+    rest=${rest#* }
+    rest=$(trim "$rest")
+    sha=${rest%% *}
     if [ "$br" = "$branch" ]; then
+      # Same code-identity rule as axi status: skip a same-branch row whose
+      # short-sha does not match this worktree (rewritten or advanced tip).
+      if ! nm_coarse_head_matches_worktree "$sha"; then
+        continue
+      fi
       printf '%s' "$st"
       return 0
     fi
@@ -392,6 +407,43 @@ nm_runs_status_for_branch() {  # <branch>
 # CREW_BRANCH is empty at detached HEAD (a just-spawned crew, or a scout's
 # scratch worktree); with no branch there is no run to attribute to this crew.
 CREW_BRANCH=$(git -C "$WT" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
+
+# 0 if the active axi-status run's head field matches this worktree's code
+# identity. Branch match is a precondition (caller). Rules:
+#   - missing/empty head field: cannot bind; reject the run
+#   - equal commits (short or full SHA): match
+#   - worktree HEAD is an ancestor of run head: match (pipeline fix commits on
+#     the same history advanced the run tip)
+#   - run head is a strict ancestor of worktree HEAD: no match (local work
+#     advanced outside the run)
+#   - diverged / run head not in this worktree: no match (rewritten branch tip)
+nm_run_head_matches_worktree() {
+  local run_head local_full run_full
+  run_head=$(strip_quotes "$(nm_field head)")
+  [ -n "$run_head" ] || return 1
+  local_full=$(git -C "$WT" rev-parse HEAD 2>/dev/null) || return 1
+  run_full=$(git -C "$WT" rev-parse --verify "${run_head}^{commit}" 2>/dev/null) || return 1
+  [ "$run_full" = "$local_full" ] && return 0
+  if git -C "$WT" merge-base --is-ancestor "$local_full" "$run_full" 2>/dev/null; then
+    return 0
+  fi
+  return 1
+}
+
+# Coarse runs-list rows are "<status> <branch> <short-sha> ...". 0 if the short
+# sha for this branch row matches the worktree head under the same rules as
+# nm_run_head_matches_worktree (equal, or local is ancestor of run tip).
+nm_coarse_head_matches_worktree() {  # <short-sha>
+  local run_head=$1 local_full run_full
+  [ -n "$run_head" ] || return 1
+  local_full=$(git -C "$WT" rev-parse HEAD 2>/dev/null) || return 1
+  run_full=$(git -C "$WT" rev-parse --verify "${run_head}^{commit}" 2>/dev/null) || return 1
+  [ "$run_full" = "$local_full" ] && return 0
+  if git -C "$WT" merge-base --is-ancestor "$local_full" "$run_full" 2>/dev/null; then
+    return 0
+  fi
+  return 1
+}
 
 HAVE_RUN=0
 # RUN_SOURCE distinguishes the two ways HAVE_RUN=1 can happen: "full" means
@@ -406,11 +458,12 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
   RUN_OUT=$(nm_run axi status)
   if [ -n "$RUN_OUT" ]; then
     run_branch=$(strip_quotes "$(nm_field branch)")
-    if [ -n "$run_branch" ] && [ "$run_branch" = "$CREW_BRANCH" ]; then
+    if [ -n "$run_branch" ] && [ "$run_branch" = "$CREW_BRANCH" ] && nm_run_head_matches_worktree; then
       HAVE_RUN=1
     else
-      # The active-or-most-recent run is for another branch (the CLI is alive
-      # and answered; only the attribution missed) - try the coarse fallback.
+      # The active-or-most-recent run is for another branch, or same branch with
+      # a rewritten/diverged head (the CLI is alive and answered; only the
+      # attribution missed) - try the coarse fallback.
       # Deliberately nested inside `[ -n "$RUN_OUT" ]`: an empty/timed-out
       # primary call means the CLI itself did not respond, so retrying it
       # immediately with a second bounded call would just double the wait
