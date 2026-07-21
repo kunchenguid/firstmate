@@ -179,18 +179,16 @@ fm_backend_tmux_target_state() {  # <target>
 # idle shell passes THAT check as "alive" - the secondmate-liveness gap
 # AGENTS.md's session-start guarantee closes). See docs/tmux-backend.md
 # "Agent liveness probe" for the empirical basis. Prints one of:
-#   alive   - the foreground command is one of the verified harness binaries
-#             (claude, codex, opencode, grok - each confirmed to run as its
-#             own process name, never wrapped by a generic interpreter).
+#   alive   - the foreground command is one of the verified native harness
+#             binaries (claude, codex, opencode, grok), or the caller expects
+#             pi and a child of the pane shell has a pi launch in its args.
 #   dead    - the foreground command is a bare shell: nothing is running in
 #             the pane, so a prior agent process has exited.
-#   unknown - anything else, INCLUDING a bare "node"/"python" interpreter
-#             name (pi's own launcher execs into a generic "node" process
-#             with no reliable way to attribute it back to pi from outside
-#             the pane - docs/tmux-backend.md "Known gaps"), or an unreadable
-#             pane. Callers must never treat unknown as a confirmed-dead
-#             signal (bin/fm-bootstrap.sh's secondmate-liveness sweep gates a
-#             respawn on `dead` only).
+#   unknown - anything else, including a bare "node" without an expected pi
+#             harness and positive child-argument match, a "python"
+#             interpreter, or an unreadable pane. Callers must never treat
+#             unknown as a confirmed-dead signal (bin/fm-bootstrap.sh's
+#             secondmate-liveness sweep gates a respawn on `dead` only).
 fm_backend_tmux_agent_alive() {  # <target> [expected-harness]
   local target=$1 expected=${2:-} comm pane_pid child args
   comm=$(fm_backend_tmux_current_command "$target") || { printf 'unknown'; return 0; }

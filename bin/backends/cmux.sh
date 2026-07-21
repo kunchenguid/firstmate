@@ -325,10 +325,10 @@ fm_backend_cmux_scoped_title() {  # <fm-task-label>
   printf 'fm-%s-%s' "$home" "$rest"
 }
 
-# fm_backend_cmux_workspace_id_for_label: the live workspace id whose title
-# equals <label>, or empty. cmux enforces no title uniqueness (finding #6),
-# so this adopts the FIRST match `jq` returns, mirroring herdr's/zellij's own
-# duplicate-check posture.
+# fm_backend_cmux_workspace_id_for_label: the unique live workspace id whose
+# title equals <label> across every cmux window, or empty when absent,
+# ambiguous, or unreadable. cmux enforces no title uniqueness (finding #6),
+# so ambiguity must never select the first match.
 fm_backend_cmux_workspace_id_for_label() {  # <label>
   local lookup state
   lookup=$(fm_backend_cmux_global_workspace_state "$1")
