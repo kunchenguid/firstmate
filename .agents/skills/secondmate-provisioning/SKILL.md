@@ -92,9 +92,9 @@ Never copy any secondmate `data/captain-shared.md` back into the primary.
 Keep each home's `data/captain.md` domain-local.
 After first propagation to an existing home, trim that home's local `data/captain.md` by hand to domain-specific content plus pointers to `data/captain-shared.md`; do not automate or silently delete private content.
 Keep every `data/learnings.md` fully local by captain decision; route fleet-general machinery facts into tracked documentation through the normal firstmate repo path rather than inventing shared learnings propagation.
-No reread nudge is needed at spawn or respawn because the agent reads `AGENTS.md` fresh on launch; only the bootstrap sweep's running-home instruction-surface advance needs one.
-Bootstrap reports successful sends as `BOOTSTRAP_INFO:` and only emits `NUDGE_SECONDMATES:` when that send fails and needs retry.
-`bin/fm-bootstrap.sh`'s header owns guarded retry-marker supersession after a home advances again.
+No reread nudge is needed at spawn or respawn because the agent reads `AGENTS.md` fresh on launch; only a running home's bootstrap instruction-surface advance or its bound retry needs one.
+Bootstrap reports completion as `BOOTSTRAP_INFO:` only after its guarded owner path completes, and emits `NUDGE_SECONDMATES:` while the required re-read request remains incomplete.
+`bin/fm-bootstrap.sh`'s header owns the exact guarded retry and current-head supersession contract.
 For already-live secondmates, use `bin/fm-config-push.sh` to push a mid-session inherited local-material change without running the tracked-file fast-forward or nudging the agents.
 It uses the same live-home discovery and propagation helper as bootstrap and reports each item as `pushed`, `unchanged`, `skipped`, or `error`.
 `bin/fm-home-seed.sh` refuses to copy a missing or placeholder charter.

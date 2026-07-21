@@ -26,13 +26,19 @@
 #          applied. A successful send prints one BOOTSTRAP_INFO line with the
 #          exact target and message sent; a failed send leaves an idempotent
 #          retry marker under state/.secondmate-nudge-pending/ and prints an
-#          actionable NUDGE_SECONDMATES line. If that validated home later
-#          safely advances to the primary's exact current instruction head, the
-#          retry supersedes the obsolete marker only by sending the same bound
-#          reread message against that proven descendant; every ambiguous or
-#          failed transition keeps a marker and blocks that id's tracked sync and
+#          actionable NUDGE_SECONDMATES line. A retry proves the marker filename
+#          and id, stable fm-<id> selector, exact reread message, an allowed
+#          instruction-path set, live secondmate metadata, canonical seeded home,
+#          and an eligible clean checkout with exact current HEAD before sending.
+#          If that HEAD advanced,
+#          the marker's exact commit must still resolve, be its ancestor, and the
+#          new HEAD must equal the primary default-branch head before and after
+#          validation. Only a successful send followed by marker consumption
+#          completes the retry; every rejected proof, failed send, or failed
+#          consumption preserves the marker and blocks that id's tracked sync and
 #          liveness mutation for this startup.
-#          Already-current or no-instruction-change homes are silently left alone.
+#          Unmarked already-current or no-instruction-change homes are silently
+#          left alone.
 #          The secondmate sweep also propagates declared inherited local material
 #          into each validated live secondmate home.
 #          SECONDMATE_SYNC lines report actionable skipped local-HEAD syncs or
@@ -194,13 +200,9 @@ secondmate_sync() {
   # to the primary checkout's current default-branch commit. Purely LOCAL - no
   # fetch, no origin dependency: a linked-worktree home already holds the primary's
   # commit (fm-ff-lib.sh), while a standalone clone without it is skipped until
-  # /updatefirstmate refreshes it from origin. Startup sends reread nudges only
-  # for RUNNING secondmates whose instruction surface (AGENTS.md, bin/, or
-  # .agents/skills/) actually changed, so a secondmate already on the primary's
-  # version is never disturbed (AGENTS.md bootstrap + supervision). Unlike
-  # /updatefirstmate, startup owns the live-convergence send itself because it is
-  # a deterministic locked sweep and can report success as BOOTSTRAP_INFO while
-  # preserving failed sends as NUDGE_SECONDMATES retry markers.
+  # /updatefirstmate refreshes it from origin. The script header owns the locked
+  # startup path's running-home reread, pending-marker retry, and diagnostic
+  # contract.
   SECOND_MATE_NUDGE_REJECTED_IDS=""
   [ -d "$STATE" ] || return 0
   SECOND_MATE_NUDGE_PENDING_DIR="$STATE/.secondmate-nudge-pending"
@@ -485,9 +487,10 @@ secondmate_liveness_sweep() {
   # secondmates from stale-pane detection (an idle secondmate pane is healthy
   # by design). Evidence 2026-07-07: every secondmate in this fleet was found
   # as a dead zsh shell, invisible to every existing check. This sweep closes
-  # the gap deterministically: for every LIVE secondmate meta (kind=secondmate
-  # with a recorded window=), run the deeper fm_backend_agent_alive probe
-  # (bin/fm-backend.sh) and act only on a CONFIDENT verdict:
+  # the gap deterministically: for every eligible LIVE secondmate meta
+  # (kind=secondmate with a recorded window=), run the deeper
+  # fm_backend_agent_alive probe (bin/fm-backend.sh) and act only on a CONFIDENT
+  # verdict:
   #   alive   - no-op.
   #   dead    - kill the stale endpoint first (best-effort; the tmux adapter
   #             refuses to create a same-named window over a live one) then
@@ -498,6 +501,9 @@ secondmate_liveness_sweep() {
   #             merely leaves today's bug unfixed for one more sweep. The
   #             worse direction is guarded by never treating anything less
   #             than a confident dead reading as license to respawn.
+  # A nudge retry rejected earlier in this startup makes that id ineligible so
+  # recovery cannot mutate its endpoint while the reread target is unresolved;
+  # the script header owns that blocked-mutation contract.
   # A meta with no recorded window= at all is left to the existing "meta with
   # no window" recovery path (AGENTS.md section 5 / secondmate-provisioning);
   # there is no endpoint here for this probe to read.
