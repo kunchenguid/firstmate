@@ -60,6 +60,17 @@
 #   (w) index.lock mtime read failure                         -> lock kept, REFUSE
 #   (x) transient lock cleared after first failed return      -> retry ALLOW
 #   (y) persistent lock (never clears, not provably stale)    -> REFUSE loudly
+#
+# Also covers the live no-mistakes run teardown must not orphan: deleting the
+# meta deletes nm_watch_run=, the only record attributing a run to a task, so a
+# run left alive at teardown has no owner and keeps re-notifying forever.
+#   (n1) recorded nm_watch_run= still running        -> REFUSE, meta preserved
+#   (n2) active run on the task's own branch         -> REFUSE
+#   (n3) active run on ANOTHER branch of same repo   -> ALLOW, never inspected
+#   (n4) same, under --force                         -> never aborted
+#   (n5) recorded run already completed              -> ALLOW, never aborted
+#   (n6) run state undeterminable                    -> WARN with the id, ALLOW
+#   (n7) live own run under --force                  -> aborted, then ALLOW
 set -u
 
 # shellcheck source=tests/lib.sh disable=SC1091
@@ -139,6 +150,11 @@ exit 1
 SH
   chmod +x "$fakebin/treehouse" "$fakebin/tmux" "$fakebin/gh-axi" "$fakebin/gh" "$fakebin/bytedcli"
 
+  # Every case gets a no-mistakes stub, so no test can reach the captain's real
+  # daemon. Its default answers are "no active run in this repository" and "no
+  # such run id", which is the state every pre-existing case is in.
+  add_nm_stub "$case_dir"
+
   # Bare origin so the clone has an `origin` remote and origin/HEAD.
   git init -q --bare "$case_dir/origin.git"
   git -C "$case_dir/origin.git" symbolic-ref HEAD refs/heads/main
@@ -171,6 +187,74 @@ done_keep = 10
 TOML
 
   printf '%s\n' "$case_dir"
+}
+
+# A fixture-driven no-mistakes stub: it logs every argv line and answers `axi
+# status` from files under <case_dir>/nm, so a case declares run state as data
+# rather than by rewriting the binary. Args: case_dir
+add_nm_stub() {
+  local case_dir=$1
+  mkdir -p "$case_dir/nm"
+  cat > "$case_dir/fakebin/no-mistakes" <<SH
+#!/usr/bin/env bash
+nm="$case_dir/nm"
+printf '%s\n' "\$*" >> "\$nm/argv.log"
+case "\${1:-} \${2:-}" in
+  "axi status")
+    if [ "\${3:-}" = --run ]; then
+      if [ -f "\$nm/run-\${4:-}.toon" ]; then cat "\$nm/run-\${4:-}.toon"; exit 0; fi
+      printf 'error: "run \\\\"%s\\\\" not found"\n' "\${4:-}" >&2
+      exit 1
+    fi
+    [ -f "\$nm/active.toon" ] || { echo 'error: no active run' >&2; exit 1; }
+    cat "\$nm/active.toon"
+    exit 0
+    ;;
+  "axi abort")
+    if [ "\${3:-}" = --run ] && [ -f "\$nm/run-\${4:-}.toon" ]; then
+      printf 'aborted: true\nrun: "%s"\n' "\${4:-}"
+      exit 0
+    fi
+    printf 'aborted: false\nrun: "%s"\ndetail: no active run with that id (no-op)\n' "\${4:-}"
+    exit 0
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/no-mistakes"
+}
+
+# Declare a run the stub can resolve by id. The payload mirrors the real TOON,
+# including the `gate:` block's own `status:`, which the parser must not read as
+# the run's. Args: case_dir run-id status branch
+nm_declare_run() {
+  local case_dir=$1 id=$2 status=$3 branch=$4
+  cat > "$case_dir/nm/run-$id.toon" <<TOON
+run:
+  id: "$id"
+  branch: $branch
+  status: $status
+  head: "abc1234"
+  steps[2]{step,status,findings,duration_ms}:
+    intent,completed,0,1
+    review,fix_review,2,643259
+gate:
+  step: review
+  status: fix_review
+TOON
+}
+
+# Make that run the repository's active run, which is what `axi status` with no
+# --run returns. Args: case_dir run-id
+nm_set_active_run() {
+  local case_dir=$1 id=$2
+  cp "$case_dir/nm/run-$id.toon" "$case_dir/nm/active.toon"
+}
+
+# Every argv line the no-mistakes stub was called with. Args: case_dir
+nm_argv_log() {
+  local case_dir=$1
+  cat "$case_dir/nm/argv.log" 2>/dev/null || true
 }
 
 # Seed the case home's backlog with the task in flight, so teardown has a row to
@@ -1521,7 +1605,161 @@ SH
   pass "herdr teardown removes pane-owned escalation dedupe state"
 }
 
+# --- live no-mistakes runs owned by the task --------------------------------
+
+test_recorded_live_watch_run_refuses() {
+  local case_dir rc
+  case_dir=$(make_case nm-recorded-live)
+  write_meta "$case_dir" direct-PR ship
+  printf '%s\n' 'nm_watch_run=01KRUNLIVE0001' >> "$case_dir/state/task-x1.meta"
+  nm_declare_run "$case_dir" 01KRUNLIVE0001 running fm/task-x1
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "nm-recorded-live: teardown should refuse while the recorded run is alive"
+  assert_grep "no-mistakes run 01KRUNLIVE0001 is still running" "$case_dir/stderr" \
+    "nm-recorded-live: the refusal did not name the run and its status"
+  assert_grep "axi abort --run 01KRUNLIVE0001" "$case_dir/stderr" \
+    "nm-recorded-live: the refusal did not say how to end the run"
+  assert_not_contains "$(nm_argv_log "$case_dir")" "axi abort" \
+    "nm-recorded-live: teardown aborted a run it was only supposed to refuse over"
+  [ -f "$case_dir/state/task-x1.meta" ] \
+    || fail "nm-recorded-live: teardown deleted the record that attributes the run"
+  pass "a live no-mistakes run recorded for the task refuses teardown instead of being orphaned"
+}
+
+test_branch_matched_live_run_refuses() {
+  local case_dir rc
+  case_dir=$(make_case nm-branch-live)
+  write_meta "$case_dir" no-mistakes ship
+  nm_declare_run "$case_dir" 01KRUNLIVE0002 running fm/task-x1
+  nm_set_active_run "$case_dir" 01KRUNLIVE0002
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "nm-branch-live: teardown should refuse over the branch's own live run"
+  assert_grep "01KRUNLIVE0002 is still running on fm/task-x1" "$case_dir/stderr" \
+    "nm-branch-live: the refusal did not identify the branch-matched run"
+  pass "a live gate run on the task's own branch refuses teardown even with no recorded run id"
+}
+
+# The negative case that makes the branch comparison load-bearing: `axi status`
+# with no --run resolves the ACTIVE RUN OF THE REPOSITORY, not of the branch, so
+# a run the captain started on another branch of the same clone is exactly what
+# comes back when the task's branch has none. Verified against the real CLI:
+# from a worktree on fm/fm-teardown-reap-run-r2, `no-mistakes axi status`
+# returned a run on fm/traex-gate-e2e-probe.
+test_other_branch_live_run_is_not_this_tasks() {
+  local case_dir rc
+  case_dir=$(make_case nm-other-branch)
+  write_meta "$case_dir" no-mistakes ship
+  nm_declare_run "$case_dir" 01KCAPTAINRUN01 running fm/captains-own-work
+  nm_set_active_run "$case_dir" 01KCAPTAINRUN01
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "nm-other-branch: a stranger's run must not refuse this task's teardown"
+  assert_not_contains "$(cat "$case_dir/stderr")" "01KCAPTAINRUN01" \
+    "nm-other-branch: teardown claimed a run belonging to another branch"
+  assert_not_contains "$(nm_argv_log "$case_dir")" "axi abort" \
+    "nm-other-branch: teardown aborted a run that was never this task's"
+  assert_not_contains "$(nm_argv_log "$case_dir")" "--run 01KCAPTAINRUN01" \
+    "nm-other-branch: teardown even inspected a run belonging to another branch"
+  pass "a live run on another branch of the same repository is never treated as this task's"
+}
+
+test_forced_teardown_never_aborts_another_branchs_run() {
+  local case_dir
+  case_dir=$(make_case nm-other-branch-force)
+  write_meta "$case_dir" no-mistakes ship
+  nm_declare_run "$case_dir" 01KCAPTAINRUN02 running fm/captains-own-work
+  nm_set_active_run "$case_dir" 01KCAPTAINRUN02
+
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "nm-other-branch-force: forced teardown failed"
+
+  assert_not_contains "$(nm_argv_log "$case_dir")" "axi abort" \
+    "nm-other-branch-force: --force reaped a run belonging to another branch"
+  pass "--force reaps only the task's own runs, never another branch's"
+}
+
+test_terminal_recorded_run_allows_teardown() {
+  local case_dir
+  case_dir=$(make_case nm-terminal)
+  write_meta "$case_dir" direct-PR ship
+  printf '%s\n' 'nm_watch_run=01KRUNDONE0001' >> "$case_dir/state/task-x1.meta"
+  nm_declare_run "$case_dir" 01KRUNDONE0001 completed fm/task-x1
+
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "nm-terminal: teardown refused over a finished run: $(cat "$case_dir/stderr")"
+
+  assert_not_contains "$(nm_argv_log "$case_dir")" "axi abort" \
+    "nm-terminal: teardown aborted a run that had already finished"
+  [ ! -f "$case_dir/state/task-x1.meta" ] || fail "nm-terminal: teardown did not complete"
+  pass "a recorded run that already finished lets teardown proceed untouched"
+}
+
+test_undeterminable_run_warns_without_refusing() {
+  local case_dir
+  case_dir=$(make_case nm-unknown)
+  write_meta "$case_dir" direct-PR ship
+  printf '%s\n' 'nm_watch_run=01KRUNUNKNOWN1' >> "$case_dir/state/task-x1.meta"
+  # A no-mistakes that answers nothing: the state of the run is undeterminable,
+  # which must not refuse - a false refusal pushes the operator to --force, and
+  # --force also skips the dirty and unlanded-work checks.
+  cat > "$case_dir/fakebin/no-mistakes" <<'SH'
+#!/usr/bin/env bash
+echo "error: cannot reach the no-mistakes daemon" >&2
+exit 7
+SH
+  chmod +x "$case_dir/fakebin/no-mistakes"
+
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "nm-unknown: an undeterminable run state must not refuse teardown"
+
+  assert_grep "cannot determine the state of no-mistakes run 01KRUNUNKNOWN1" "$case_dir/stderr" \
+    "nm-unknown: teardown dropped the run id silently"
+  assert_grep "axi abort --run 01KRUNUNKNOWN1" "$case_dir/stderr" \
+    "nm-unknown: the warning did not carry the command that reaps the run"
+  pass "an undeterminable run state warns with the run id and still tears down"
+}
+
+test_force_reaps_the_tasks_live_run() {
+  local case_dir
+  case_dir=$(make_case nm-force-reap)
+  write_meta "$case_dir" direct-PR ship
+  printf '%s\n' 'nm_watch_run=01KRUNLIVE0003' >> "$case_dir/state/task-x1.meta"
+  nm_declare_run "$case_dir" 01KRUNLIVE0003 running fm/task-x1
+  wt_commit "$case_dir" "work the captain approved discarding"
+
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "nm-force-reap: forced teardown failed: $(cat "$case_dir/stderr")"
+
+  assert_contains "$(nm_argv_log "$case_dir")" "axi abort --run 01KRUNLIVE0003" \
+    "nm-force-reap: forced teardown left the task's live run behind as an orphan"
+  assert_grep "aborted no-mistakes run 01KRUNLIVE0003" "$case_dir/stdout" \
+    "nm-force-reap: the reap was not reported"
+  [ ! -f "$case_dir/state/task-x1.meta" ] || fail "nm-force-reap: teardown did not complete"
+  pass "--force reaps the task's own live run instead of orphaning it"
+}
+
 test_local_only_fork_remote_allows
+test_recorded_live_watch_run_refuses
+test_branch_matched_live_run_refuses
+test_other_branch_live_run_is_not_this_tasks
+test_forced_teardown_never_aborts_another_branchs_run
+test_terminal_recorded_run_allows_teardown
+test_undeterminable_run_warns_without_refusing
+test_force_reaps_the_tasks_live_run
 test_teardown_moves_github_pr_row_to_done
 test_teardown_records_codebase_mr_via_note
 test_teardown_reports_backlog_write_failure_loudly

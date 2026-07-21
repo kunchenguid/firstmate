@@ -45,10 +45,32 @@
 # leased home releases its durable treehouse lease so the pool slot is freed,
 # never left leased forever. If the treehouse return fails, teardown leaves the
 # leased home and state in place instead of hiding a still-held lease.
+# ALSO REFUSES while a no-mistakes run this task owns is still alive, because
+# teardown deletes state/<id>.meta - the only record that attributes a run to a
+# task (nm_watch_run=, written by bin/fm-nm-watch.sh) - and the backlog row with
+# it. A run left behind at that point has no owner: it keeps re-notifying on the
+# park reminder cascade forever with nobody able to say whose it is, and holds a
+# daemon slot while it waits. Two such runs sat parked for over a day here,
+# re-notified 33 and 27 times, one of them belonging to a task already torn down.
+# Refusing rather than reaping is deliberate: aborting a run that may still be
+# doing useful work is irreversible, and teardown already refuses rather than
+# discard work it cannot prove is finished.
+# A run counts as this task's from exactly two sources - the recorded
+# nm_watch_run= id, and the repository's active run when it reports the task
+# worktree's own branch - so a run the captain started elsewhere is never
+# touched; nm_task_run_ids below owns why the branch comparison is load-bearing.
+# A run whose state cannot be determined (no-mistakes absent, query failure or
+# timeout, a status this build does not know) is reported as a warning naming the
+# run id and does NOT refuse: a false refusal would push the operator to --force,
+# which also skips the dirty and unlanded-work checks.
+# --force reaps instead of refusing (`no-mistakes axi abort --run <id>`), since
+# forced teardown is the one path that both has explicit discard authority and
+# would otherwise be the surest way to create an orphan.
 # Usage: fm-teardown.sh <task-id> [--force]
 #   --force skips ordinary-task dirty and landed-work checks, skips scout report
-#   checks, and discards secondmate child work for kind=secondmate. Only use it
-#   when the captain has explicitly said to discard the work.
+#   checks, discards secondmate child work for kind=secondmate, and aborts the
+#   task's own live no-mistakes runs. Only use it when the captain has explicitly
+#   said to discard the work.
 #
 # Transient / stale worktree git lock recovery (teardown-lock-race): a crew process
 # killed mid-git-operation can leave a .git/worktrees/<wt>/index.lock (or, for a
@@ -671,6 +693,180 @@ validate_worktree_teardown_safety() {
   fi
 }
 
+# --- no-mistakes runs this task owns ---------------------------------------
+# See the script header for why teardown refuses over a live run and reaps only
+# under --force. Everything below decides two things: which runs are THIS task's,
+# and whether each of them is still alive.
+NM_BIN="${FM_NM_BIN:-no-mistakes}"
+NM_QUERY_TIMEOUT_SECS="${FM_NM_QUERY_TIMEOUT_SECS:-20}"
+case "$NM_QUERY_TIMEOUT_SECS" in ''|0|*[!0-9]*) NM_QUERY_TIMEOUT_SECS=20 ;; esac
+NM_RUN_ALIVE=0
+NM_RUN_TERMINAL=1
+NM_RUN_UNKNOWN=2
+
+# Any git checkout will do: `axi status --run <id>` and `axi abort --run <id>`
+# resolve the run by id across repositories, and only refuse to run at all when
+# the working directory is not a git repository.
+nm_query_dir() {
+  local candidate
+  for candidate in "$WT" "$PROJ" "$FM_ROOT"; do
+    [ -n "$candidate" ] || continue
+    [ -d "$candidate" ] || continue
+    git -C "$candidate" rev-parse --is-inside-work-tree >/dev/null 2>&1 || continue
+    printf '%s\n' "$candidate"
+    return 0
+  done
+  return 1
+}
+
+# A wedged daemon must not be able to hold teardown open forever, so the query is
+# bounded where a timeout binary exists; a timeout reads as an undeterminable run
+# state, which never refuses.
+nm_axi() {  # <axi args...>
+  local dir runner=
+  dir=$(nm_query_dir) || return 1
+  if command -v timeout >/dev/null 2>&1; then
+    runner=timeout
+  elif command -v gtimeout >/dev/null 2>&1; then
+    runner=gtimeout
+  fi
+  if [ -n "$runner" ]; then
+    (cd "$dir" && "$runner" "$NM_QUERY_TIMEOUT_SECS" "$NM_BIN" axi "$@" 2>&1)
+  else
+    (cd "$dir" && "$NM_BIN" axi "$@" 2>&1)
+  fi
+}
+
+# One field of the `run:` block of an `axi status` TOON payload. Scoped to that
+# block because the `gate:` block carries its own `status:`, which describes the
+# gate rather than the run.
+nm_run_field() {  # <toon> <field>
+  printf '%s\n' "$1" | awk -v want="$2:" '
+    /^[^[:space:]]/ { inrun = ($0 == "run:"); next }
+    inrun && $1 == want {
+      sub(/^[[:space:]]*[A-Za-z_]+:[[:space:]]*/, "")
+      gsub(/^"|"$/, "")
+      print
+      exit
+    }
+  '
+}
+
+# Is one run still alive? Prints "<status>|<branch>" for the caller's message and
+# returns NM_RUN_ALIVE, NM_RUN_TERMINAL, or NM_RUN_UNKNOWN.
+# pending and running are alive because they are exactly the two statuses
+# no-mistakes itself treats as the repository's active run; completed, failed,
+# cancelled, and interrupted are the terminal statuses its run records carry.
+# Anything else - a status this build does not know, a query that failed, a
+# missing binary - is undeterminable rather than terminal, so a future status
+# name cannot silently become "already finished".
+nm_run_liveness() {  # <run-id>
+  local id=$1 out rc=0 status branch
+  command -v "$NM_BIN" >/dev/null 2>&1 || return "$NM_RUN_UNKNOWN"
+  out=$(nm_axi status --run "$id") || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    case "$out" in
+      *'not found'*) return "$NM_RUN_TERMINAL" ;;
+    esac
+    return "$NM_RUN_UNKNOWN"
+  fi
+  status=$(nm_run_field "$out" status)
+  branch=$(nm_run_field "$out" branch)
+  printf '%s|%s\n' "$status" "$branch"
+  case "$status" in
+    pending|running) return "$NM_RUN_ALIVE" ;;
+    completed|failed|cancelled|interrupted) return "$NM_RUN_TERMINAL" ;;
+  esac
+  return "$NM_RUN_UNKNOWN"
+}
+
+# Run ids attributable to THIS task, one per line. Exactly two sources:
+#   1. nm_watch_run=<id> in the meta - the PR watch bin/fm-nm-watch.sh armed for
+#      this task, recorded by id, so it needs no inference at all.
+#   2. the repository's active run, read from the task worktree, and kept ONLY
+#      when the run reports this worktree's branch.
+# That branch comparison is the whole safety of source 2: a bare `axi status`
+# answers for the REPOSITORY, so a run the captain started on another branch of
+# the same clone is what comes back whenever the task's own branch has none.
+# bin/fm-crew-state.sh's nm_runs_status_for_branch header owns the verified
+# record of that CLI behavior. Without the comparison teardown would refuse over
+# - and under --force abort - a run that was never its own.
+nm_task_run_ids() {
+  local recorded out branch run_branch run_id
+  recorded=$(meta_value "$META" nm_watch_run)
+  [ -z "$recorded" ] || printf '%s\n' "$recorded"
+
+  [ -n "$WT" ] && [ -d "$WT" ] || return 0
+  command -v "$NM_BIN" >/dev/null 2>&1 || return 0
+  branch=$(git -C "$WT" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
+  [ -n "$branch" ] || return 0
+  out=$(nm_axi status) || return 0
+  run_branch=$(nm_run_field "$out" branch)
+  [ "$run_branch" = "$branch" ] || return 0
+  run_id=$(nm_run_field "$out" id)
+  case "$run_id" in
+    ''|*[!A-Za-z0-9]*) return 0 ;;
+  esac
+  [ "$run_id" = "$recorded" ] || printf '%s\n' "$run_id"
+}
+
+# Refuse (or, under --force, reap) the runs this task still owns, so its record
+# is never deleted while a run that only this record could attribute is alive.
+nm_settle_task_runs() {
+  local ids id state rc live_status live_branch out refused=0
+  case "$KIND" in
+    secondmate) return 0 ;;
+  esac
+  ids=$(nm_task_run_ids)
+  [ -n "$ids" ] || return 0
+
+  while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    rc=0
+    state=$(nm_run_liveness "$id") || rc=$?
+    live_status=${state%%|*}
+    live_branch=${state#*|}
+    [ "$live_branch" != "$state" ] || live_branch=
+    case "$rc" in
+      "$NM_RUN_TERMINAL") continue ;;
+      "$NM_RUN_UNKNOWN")
+        # Not a refusal: teardown must stay possible where no-mistakes is absent
+        # or unreachable, and a false refusal would push the operator to --force,
+        # which also skips the dirty and unlanded-work checks. Printing the id is
+        # what keeps the run attributable after the meta that named it is gone.
+        echo "teardown: WARNING: cannot determine the state of no-mistakes run $id owned by task $ID; if it is still alive, reap it with: $NM_BIN axi abort --run $id" >&2
+        continue
+        ;;
+    esac
+
+    if [ "$FORCE" = "--force" ]; then
+      # --force is the captain's explicit discard authority, and forced teardown
+      # is exactly where an orphan is otherwise born: the record naming the run
+      # is about to be deleted along with the work it was validating.
+      out=$(nm_axi abort --run "$id")
+      case "$out" in
+        *'aborted: true'*)
+          echo "teardown: aborted no-mistakes run $id (${live_status:-alive}${live_branch:+ on $live_branch}) owned by task $ID"
+          ;;
+        *)
+          echo "teardown: WARNING: could not abort no-mistakes run $id owned by task $ID; reap it with: $NM_BIN axi abort --run $id" >&2
+          ;;
+      esac
+      continue
+    fi
+
+    echo "REFUSED: no-mistakes run $id is still ${live_status:-alive}${live_branch:+ on $live_branch} and belongs to task $ID." >&2
+    echo "Tearing down now would delete the only record naming it, leaving a run nobody can attribute." >&2
+    echo "Read it with '$NM_BIN axi status --run $id' (or '$NM_BIN parked'), answer its gate, or end it with '$NM_BIN axi abort --run $id', then tear down again." >&2
+    echo "Do not reach for --force to get past this: --force also skips the dirty and unlanded-work checks." >&2
+    refused=1
+  done <<EOF
+$ids
+EOF
+
+  [ "$refused" -eq 0 ] || return 1
+}
+
 require_orca_worktree_path_match() {
   local worktree_id=$1 inspected=$2 resolved inspected_abs resolved_abs
   resolved=$(fm_backend_worktree_path orca "$worktree_id") || {
@@ -1046,6 +1242,11 @@ if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
     fi
   fi
 fi
+
+# After the work checks and before anything destructive: the worktree and its
+# branch must still exist for a branch-matched run to be recognized as this
+# task's, and the refusal has to land before the meta that names the run is gone.
+nm_settle_task_runs || exit 1
 
 # Best-effort: drop the local task branch so the shared repo does not accumulate refs.
 if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
