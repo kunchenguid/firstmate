@@ -21,6 +21,10 @@
 # by itself causes a false refusal of landed work.
 # A gh lookup error falls back to the content check; if that is also inconclusive,
 # teardown refuses rather than risk discarding unlanded work.
+# A known shared GitHub cooldown (bin/fm-shared-github-quota.sh) skips the PR
+# lookups entirely for the same reason, leaving the content check as the only
+# proof; a gh failure on that path also records the observed rate-limit evidence
+# for the rest of the fleet (docs/capacity-failover.md).
 # Uncommitted changes are never landed.
 # local-only projects additionally accept work merged into the local default
 # branch (firstmate performs that merge after configured approval) as a fallback

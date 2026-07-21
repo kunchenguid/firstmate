@@ -9,7 +9,7 @@ firstmate's always-loaded operating contract and routing index for conditional p
 ## Event-driven supervision
 
 A zero-token bash watcher (`bin/fm-watch.sh`) sleeps on the fleet, classifies detected wakes in bash, and wakes the first mate only when something is actionable.
-Actionable wakes include captain-relevant status signals, no-verb signals whose crew is not provably working, authenticated check output such as PR merge polling or an X-mode mention, stale panes whose crew is not provably working whether their status log looks terminal or non-terminal, provably-working stale panes that persist past `FM_STALE_ESCALATE_SECS`, declared external waits that remain paused past `FM_PAUSE_RESURFACE_SECS`, and heartbeat backstop hits.
+Actionable wakes include captain-relevant status signals, no-verb signals whose crew is not provably working, authenticated check output such as PR merge polling, an X-mode mention, or an opt-in host-pressure alert, stale panes whose crew is not provably working whether their status log looks terminal or non-terminal, provably-working stale panes that persist past `FM_STALE_ESCALATE_SECS`, declared external waits that remain paused past `FM_PAUSE_RESURFACE_SECS`, and heartbeat backstop hits.
 Repeated provably-working stale escalations on the same unchanged pane add an escalation count to the wake reason and, at `FM_WEDGE_DEMAND_INSPECT_COUNT`, a `demand-deep-inspection` marker.
 Those actionable wakes are written to a durable local queue (`state/.wake-queue`) before detector state advances, so a missed process exit can be recovered by draining the queue.
 No-verb wakes, such as `working:` notes and bare turn-ended signals, are benign only when `bin/fm-crew-state.sh` reports positive evidence that the crew is still working: an actively running no-mistakes step attributed to that crew's current code or a backend busy signature.
@@ -139,6 +139,16 @@ When the file exists, `fm-spawn.sh` refuses crewmate and scout launches without 
 Secondmate launches are exempt because they resolve the secondmate harness and any optional secondmate model or effort tokens instead.
 Unsupported effort values are still recorded in task meta when passed to `fm-spawn.sh`, but the launch template omits any effort flag that the selected harness does not accept.
 That keeps spawn launch compatible across claude, codex, grok, pi, and opencode while preserving the requested profile for later audit.
+The verified launch templates themselves live in `bin/fm-harness-launch-lib.sh`, shared by `fm-spawn.sh` and the manual rehome helper so both launch a harness exactly the same way.
+
+## Optional capacity failover
+
+Quota walls, auth exhaustion, and host pressure have a passive substrate that changes nothing until a home opts in with `config/capacity-failover`.
+`bin/fm-capacity-classify.sh` turns observed wall text into `quota`, `auth`, or `other` with an observed reset when the text carries one, `bin/fm-capacity-cooldown.sh` records the resulting per-harness cooldowns under `state/capacity-cooldowns/`, and `bin/fm-capacity-route.sh` selects a verified route that is not cooling down or prints the exact escalation evidence instead.
+`bin/fm-rehome-quota-wall.sh` is the manual same-worktree relaunch path for a wedged tmux task: it never picks a harness itself, refuses to relaunch while the old agent may still be alive, and preserves the task id, worktree, branch, and recorded PR metadata.
+With `host-pressure=on`, `fm-spawn.sh` runs a bounded memory/disk/active-task preflight and refuses only critical pressure, and the watcher surfaces a bounded disk-pressure alert as an ordinary check wake.
+Independently of any home, `bin/fm-shared-github-quota.sh` records fleet-wide GitHub cooldowns so the PR pollers, merge helper, teardown proofs, and bearings PR view defer to cached reads or a structured refusal instead of hammering a rate-limited account.
+[`docs/capacity-failover.md`](capacity-failover.md) owns the signatures, record formats, thresholds, and the opposite-harness constraint that keeps cross-harness review lanes from collapsing onto one harness.
 
 ## Optional secondmates
 

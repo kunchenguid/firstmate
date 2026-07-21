@@ -7,6 +7,10 @@
 # Merge method defaults to --squash when the caller passes none of --squash,
 # --merge, --rebase, or --method after the optional -- separator. Extra args
 # must not include --repo or -R because the repository comes only from the URL.
+#
+# A known shared GitHub cooldown (bin/fm-shared-github-quota.sh) refuses the merge
+# with structured escalation evidence instead of calling gh; a gh rate-limit
+# failure records that cooldown for the rest of the fleet (docs/capacity-failover.md).
 # Usage: fm-pr-merge.sh <task-id> <pr-url> [-- <extra gh-axi pr merge args>]
 set -eu
 

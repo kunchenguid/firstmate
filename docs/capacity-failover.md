@@ -100,6 +100,8 @@ The file supports these optional thresholds:
 host-pressure=on
 min_memory_available_mb=2048
 warn_memory_available_mb=4096
+min_disk_available_mb=10240
+warn_disk_available_mb=20480
 disk_floor_mb=10240
 disk_clear_mb=20480
 disk_alert_cooldown_secs=900
@@ -107,6 +109,7 @@ max_running_tasks=30
 ```
 
 The default thresholds above apply only after `host-pressure=on`.
+`disk_floor_mb` defaults to `min_disk_available_mb`, and `disk_clear_mb` defaults to `warn_disk_available_mb` raised to at least the floor, so setting only the `min_`/`warn_` pair still yields a coherent floor and clear point.
 `disk_floor_mb` is the hard floor.
 Once entered, disk pressure remains active until free space reaches `disk_clear_mb`; this hysteresis prevents repeated enter/exit flapping.
 Absent `config/capacity-failover`, or with `host-pressure` off, spawn behavior is unchanged.
@@ -115,7 +118,9 @@ The helper never deletes those candidates.
 `classify-shed --command <line>` only marks restartable validation/test/lint commands as eligible restartable compute.
 It does not kill those processes; callers own any stop/retry policy.
 `periodic-alert` emits a bounded disk-pressure alert for supervision and applies its own cooldown marker.
-A refused (malformed) `config/capacity-failover` is reported as `alert=host_pressure_config_invalid` under its own marker with a fixed one-hour cooldown, so a broken threshold is surfaced once per window instead of on every watcher cycle; a changed refusal message re-alerts immediately.
+`bin/fm-watch.sh` runs it every `FM_HOST_PRESSURE_INTERVAL` seconds (default 300) whenever `config/capacity-failover` exists, and any printed alert becomes one `check: host-pressure: ...` wake; the watcher never kills work or touches task ownership metadata on that path.
+With `host-pressure` off, the helper reports `state=off` without evaluating any threshold and the watcher stays silent.
+While the opt-in is on, a refused (malformed) `config/capacity-failover` is reported as `alert=host_pressure_config_invalid` under its own marker with a fixed one-hour cooldown, so a broken threshold is surfaced once per window instead of on every watcher cycle; a changed refusal message re-alerts immediately.
 
 ## Shared GitHub Quota
 

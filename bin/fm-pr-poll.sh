@@ -6,6 +6,10 @@
 # interpolated into this source: these bytes are identical for every task.
 # Each provider is read through its own standard CLI, gh for GitHub and glab
 # for GitLab, so an upstream checkout needs no extra tooling to follow either.
+# During a known shared GitHub cooldown (bin/fm-shared-github-quota.sh) the
+# GitHub read makes no gh call and answers only from the small cached PR state;
+# a successful live read refreshes that cache and a rate-limit failure records
+# the cooldown for the rest of the fleet (docs/capacity-failover.md).
 set -u
 LC_ALL=C
 export LC_ALL

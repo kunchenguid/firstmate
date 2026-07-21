@@ -13,6 +13,7 @@ The tracked code root contains the shared instruction, skill, documentation, wor
 `data/` holds durable private fleet records such as the project and secondmate registries, captain preferences, optional shared captain preferences, learnings, backlog, briefs, and scout reports.
 `state/` holds volatile runtime records such as task metadata, append-only status events, endpoint signals, watcher and wake-queue coordination, away-mode state, generated X-mode artifacts, private secondmate config-reread generations with their retry and quarantine state, and parent-owned secondmate pending-reply records under `state/pending-replies/` (`bin/fm-pending-reply-lib.sh`).
 `config/` holds local gitignored operating choices, and `projects/` holds the local project clones that Firstmate reads but changes only through the guarded exceptions in `AGENTS.md`.
+The one deliberate exception to that per-home layout is the shared GitHub quota state, which is fleet-wide by design and lives under `${XDG_STATE_HOME:-$HOME/.local/state}/firstmate/shared-github-quota/` instead of any `FM_HOME` ([`docs/capacity-failover.md`](capacity-failover.md)).
 
 `bin/fm-spawn.sh` owns the base task-metadata fields it emits, while the runtime-backend section below owns backend-specific fields and selector interpretation.
 The producing PR and X helpers own the fields they append, `bin/fm-classify-lib.sh` owns status-event vocabulary, and `bin/fm-crew-state.sh` owns current-state reconciliation.
@@ -390,6 +391,14 @@ FM_HEARTBEAT=600        # base seconds between heartbeat scans; no-change heartb
 FM_HEARTBEAT_MAX=7200   # heartbeat backoff cap
 FM_CHECK_INTERVAL=300   # seconds between slow checks (authenticated merge polls, custom checks, or X-mode dispatch)
 FM_CHECK_TIMEOUT=30     # seconds allowed per slow check script
+FM_HOST_PRESSURE_INTERVAL=300   # seconds between opt-in host-pressure alert runs; only alerts when config/capacity-failover exists (docs/capacity-failover.md)
+FM_GITHUB_ROUTE=default   # shared GitHub quota route label used by the PR, teardown, and bearings guard calls
+FM_GITHUB_ACCOUNT_ID=     # explicit GitHub account key for shared quota records; otherwise a cached or derived account is used
+FM_SHARED_GITHUB_QUOTA_DERIVE_ACCOUNT=1   # set to 0 to forbid the guard from spending a `gh api user` call to derive the account; firstmate's own guard calls always set 0
+FM_GITHUB_QUOTA_DEFER_CACHE_MAX_AGE_SECS=86400   # max age of a cached PR state the merge poll may trust during a shared GitHub cooldown
+FM_SHARED_STATE_OVERRIDE=   # alternate home-independent shared-quota state root (FM_SHARED_STATE is consulted next when it is unset), mainly for tests
+FM_REHOME_EXIT_POLLS=20   # liveness polls fm-rehome-quota-wall.sh makes after sending /exit before refusing to relaunch
+FM_REHOME_EXIT_SLEEP=0.5  # seconds between those polls
 FM_CODEX_WATCH_CHECKPOINT=180   # seconds per foreground watcher checkpoint in Codex primary supervision
 FM_CREW_STATE_NM_TIMEOUT=10   # seconds allowed per no-mistakes query inside fm-crew-state.sh
 FM_CREW_STATE_RUNS_LIMIT=200  # recent no-mistakes run rows scanned when axi status cannot be attributed to the current code
