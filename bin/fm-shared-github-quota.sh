@@ -283,7 +283,7 @@ observed_account=$(one_line "$observed")"
   printf '%s\n' "$file"
 }
 
-record_matches_key() {  # <file> <provider> <account> <route>
+record_matches_key() {  # <file> <provider> <account> <route> [key]
   local file=$1 provider=$2 account=$3 route=$4 rec
   rec=$(field_value "$file" provider)
   [ "$rec" = "$provider" ] || return 1
@@ -291,6 +291,10 @@ record_matches_key() {  # <file> <provider> <account> <route>
   [ "$rec" = "$account" ] || return 1
   rec=$(field_value "$file" route)
   [ "$rec" = "$route" ] || return 1
+  if [ "$#" -ge 5 ]; then
+    rec=$(field_value "$file" key)
+    [ "$rec" = "$(one_line "$5")" ] || return 1
+  fi
   return 0
 }
 
@@ -353,6 +357,11 @@ cache_get() {
   meta="$dir/meta.env"
   body="$dir/body"
   [ -f "$meta" ] && [ -f "$body" ] || return 1
+  # The directory name only encodes a CRC32 of the key, so the entry's own
+  # identity fields must agree before its body is served as this key's value.
+  # A mismatched entry is a miss, not an error: it may legitimately belong to
+  # another key, and the caller's fallback key must still be tried.
+  record_matches_key "$meta" "$provider" "$account" "$route" "$key" || return 1
   created=$(field_value "$meta" created_epoch)
   case "$created" in ''|*[!0-9]*) rm -rf "$dir"; return 1 ;; esac
   now=$(now_epoch)
@@ -467,11 +476,7 @@ case "$cmd" in
     # An account read out of an error body is evidence, never the cooldown key:
     # only an explicit, cached, or derived account keys the record, and any
     # other case keys the account-agnostic record that check also consults.
-    if [ -n "$ACCOUNT" ]; then
-      resolve_account "$PROVIDER" || exit $?
-    else
-      resolve_account_or_agnostic "$PROVIDER"
-    fi
+    resolve_account_or_agnostic "$PROVIDER" || exit $?
     RESET_AT=$(printf '%s\n' "$EXTRACTED" | sed -n 's/^reset_at=//p' | tail -1)
     RESET_EPOCH=$(printf '%s\n' "$EXTRACTED" | sed -n 's/^reset_epoch=//p' | tail -1)
     printf 'provider=%s\naccount=%s\nroute=%s\nreset_at=%s\nreset_epoch=%s\n' "$PROVIDER" "$ACCOUNT" "$ROUTE" "$RESET_AT" "$RESET_EPOCH"

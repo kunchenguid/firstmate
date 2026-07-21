@@ -51,6 +51,12 @@ export FM_GATE_REFUSE_BYPASS=1
 # The dedicated regression is
 # tests/fm-backend.test.sh:test_spawn_symlinked_project_prefix_avoids_false_refusal.
 TMP_ROOT=$(mktemp -d "$(cd "${TMPDIR:-/tmp}" && pwd -P)/fm-backend-autodetect-smoke.XXXXXX")
+# This suite drives the real bin/fm-teardown.sh, which consults the shared
+# GitHub quota store. That store is deliberately FM_HOME-independent, so
+# without this it would prune the operator's real state and take its result
+# from the developer's live GitHub quota. tests/lib.sh does the same for the
+# suites that source it; this one does not.
+export FM_SHARED_STATE_OVERRIDE="$TMP_ROOT/fm-shared-quota"
 HERDR_LAB_HELPER="$ROOT/bin/fm-herdr-lab.sh"
 HERDR_LAB_SESSION=$("$HERDR_LAB_HELPER" name fm-autodetect-smoke-concurrency-h3) || {
   rm -rf "$TMP_ROOT"

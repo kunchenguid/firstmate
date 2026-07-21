@@ -61,6 +61,12 @@ command -v treehouse >/dev/null 2>&1 || { echo "skip: treehouse not found (requi
 # canonicalized project and backend cwd comparisons in the worktree-discovery
 # poll.
 TMP_ROOT=$(mktemp -d "$(cd "${TMPDIR:-/tmp}" && pwd -P)/fm-herdr-e2e.XXXXXX")
+# This suite drives the real bin/fm-teardown.sh, which consults the shared
+# GitHub quota store. That store is deliberately FM_HOME-independent, so
+# without this it would prune the operator's real state and take its result
+# from the developer's live GitHub quota. tests/lib.sh does the same for the
+# suites that source it; this one does not.
+export FM_SHARED_STATE_OVERRIDE="$TMP_ROOT/fm-shared-quota"
 SESSION="fm-lab-herdr-e2e-$$"
 export HERDR_SESSION="$SESSION"
 WT1=; WT2=

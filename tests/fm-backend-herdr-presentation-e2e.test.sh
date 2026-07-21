@@ -21,6 +21,12 @@ REAL_HERDR=$(command -v herdr)
 REAL_TREEHOUSE=$(command -v treehouse)
 HERDR_ORIGINAL_PATH=$PATH
 TMP_ROOT=$(mktemp -d "$(cd "${TMPDIR:-/tmp}" && pwd -P)/fm-herdr-presentation.XXXXXX")
+# This suite drives the real bin/fm-teardown.sh, which consults the shared
+# GitHub quota store. That store is deliberately FM_HOME-independent, so
+# without this it would prune the operator's real state and take its result
+# from the developer's live GitHub quota. tests/lib.sh does the same for the
+# suites that source it; this one does not.
+export FM_SHARED_STATE_OVERRIDE="$TMP_ROOT/fm-shared-quota"
 FAKEBIN="$TMP_ROOT/fakebin"
 HERDR_CALL_LOG="$TMP_ROOT/herdr-calls.log"
 TREEHOUSE_CALL_LOG="$TMP_ROOT/treehouse-calls.log"
