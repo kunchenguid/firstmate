@@ -127,6 +127,10 @@ test_rehome_reuses_task_identity_and_worktree() {
   meta="$HOME_DIR/state/task-x1.meta"
   assert_grep "worktree=$WT_DIR" "$meta" "rehome must preserve the same worktree"
   assert_grep "pr=https://github.com/example/repo/pull/7" "$meta" "rehome must preserve recorded PR URL"
+  bash -c '. "$1/bin/fm-pr-lib.sh" && fm_pr_metadata_identity_parse "$2"' _ "$ROOT" "$meta" \
+    || fail "rehome must leave meta parseable as canonical PR identity for the armed merge poll"
+  [ "$(sed -n '$p' "$meta" | cut -d= -f1)" = pr_head ] \
+    || fail "rehome must re-append PR identity after every rewritten key"
   assert_grep "harness=claude" "$meta" "meta should record new harness"
   assert_grep "model=sonnet" "$meta" "meta should record new model"
   assert_grep "effort=high" "$meta" "meta should record new effort"

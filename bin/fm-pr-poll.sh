@@ -87,10 +87,12 @@ case "$provider" in
     if quota_bin=$(find_quota_bin 2>/dev/null); then
       github_route=${FM_GITHUB_ROUTE:-default}
       cache_key="pr-state:$url"
-      quota_out=$("$quota_bin" check --provider github --route "$github_route" 2>/dev/null || true)
+      quota_out=$(FM_SHARED_GITHUB_QUOTA_DERIVE_ACCOUNT=0 \
+        "$quota_bin" check --provider github --route "$github_route" 2>/dev/null || true)
       quota_state=$(printf '%s\n' "$quota_out" | sed -n 's/^state=//p' | tail -1)
       if [ "$quota_state" = defer ]; then
-        state=$("$quota_bin" cache-get --provider github --route "$github_route" --key "$cache_key" \
+        state=$(FM_SHARED_GITHUB_QUOTA_DERIVE_ACCOUNT=0 \
+          "$quota_bin" cache-get --provider github --route "$github_route" --key "$cache_key" \
           --max-age-secs "${FM_GITHUB_QUOTA_DEFER_CACHE_MAX_AGE_SECS:-86400}" 2>/dev/null || true)
       else
         gh_err=$(mktemp "${TMPDIR:-/tmp}/fm-gh-pr.XXXXXXXX") || exit 0

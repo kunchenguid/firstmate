@@ -148,6 +148,9 @@ handle_wall() {
   local blocked_reset_epoch blocked_requires_action
   [ -n "$TASK_ID" ] || { echo "error: handle-wall requires --task" >&2; exit 2; }
   [ -n "$HARNESS" ] || { echo "error: handle-wall requires --harness" >&2; exit 2; }
+  # Refuse before any cooldown record is written; select_route runs inside a
+  # command substitution, where its own backstop could only abort that subshell.
+  dispatch_backstop
   if [ -n "$FILE" ]; then
     text=$(cat "$FILE")
   else

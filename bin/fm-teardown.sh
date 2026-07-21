@@ -269,7 +269,8 @@ remove_pr_poll_artifacts() {
 
 github_quota_deferred() {
   local out state
-  out=$("$SCRIPT_DIR/fm-shared-github-quota.sh" check --provider github --route "$GITHUB_ROUTE" 2>/dev/null || true)
+  out=$(FM_SHARED_GITHUB_QUOTA_DERIVE_ACCOUNT=0 \
+    "$SCRIPT_DIR/fm-shared-github-quota.sh" check --provider github --route "$GITHUB_ROUTE" 2>/dev/null || true)
   state=$(printf '%s\n' "$out" | sed -n 's/^state=//p' | tail -1)
   [ "$state" = defer ]
 }

@@ -155,6 +155,14 @@ resolve_account() {  # <provider>
   return 2
 }
 
+# Cooldowns must stay readable by every later reader, so an unresolvable
+# account falls back to one account-agnostic key instead of an unverified
+# identity that no other call would ever reconstruct.
+resolve_account_or_agnostic() {  # <provider>
+  local provider=$1
+  resolve_account "$provider" 2>/dev/null || ACCOUNT=
+}
+
 parse_reset_epoch() {  # <reset-at-or-epoch>
   RESET_RAW=$1 node <<'NODE'
 const raw = (process.env.RESET_RAW || "").trim();
@@ -185,13 +193,13 @@ extract_github_rate_limit() {  # <text>
   FM_GITHUB_QUOTA_TEXT=$1 node <<'NODE'
 const text = process.env.FM_GITHUB_QUOTA_TEXT || "";
 if (!/rate[- ]?limit/i.test(text)) process.exit(1);
+// Only a clearly labeled account id is reported, and it is evidence rather
+// than identity: an unlabeled long number in a rate-limit body is far more
+// often a reset epoch or a repository id than an account.
 let account = "";
-for (const re of [
-  /(?:user|account)(?:\s+id)?\s*[:#]?\s*([0-9]{4,})/i,
-  /\b([0-9]{6,})\b/,
-]) {
-  const m = text.match(re);
-  if (m) { account = m[1]; break; }
+{
+  const m = text.match(/(?:user|account)(?:\s+id)?\s*[:#]?\s*([0-9]{4,})/i);
+  if (m) account = m[1];
 }
 let resetAt = "";
 for (const re of [
@@ -201,21 +209,21 @@ for (const re of [
   const m = text.match(re);
   if (m) { resetAt = m[1]; break; }
 }
-if (!account || !resetAt) process.exit(1);
+if (!resetAt) process.exit(1);
 let ms = Date.parse(resetAt);
 if (!Number.isFinite(ms)) {
   const m = resetAt.match(/^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}:\d{2})\s+UTC$/i);
   if (m) ms = Date.parse(`${m[1]}T${m[2]}Z`);
 }
 if (!Number.isFinite(ms)) process.exit(1);
-console.log(`account=${account}`);
+if (account) console.log(`observed_account=${account}`);
 console.log(`reset_at=${new Date(ms).toISOString().replace(/\.000Z$/, "Z")}`);
 console.log(`reset_epoch=${Math.floor(ms / 1000)}`);
 NODE
 }
 
 mark_quota() {
-  local provider=$1 account=$2 route=$3 reset_epoch=$4 reset_at=$5 source=$6 file now content
+  local provider=$1 account=$2 route=$3 reset_epoch=$4 reset_at=$5 source=$6 observed=${7:-} file now content
   case "$reset_epoch" in ''|*[!0-9]*) echo "error: reset epoch must be numeric" >&2; return 2 ;; esac
   now=$(now_epoch)
   if [ "$reset_epoch" -le "$now" ]; then
@@ -237,6 +245,8 @@ reset_epoch=$reset_epoch
 source=$(one_line "$source")
 EOF
 )
+  [ -z "$observed" ] || content="$content
+observed_account=$(one_line "$observed")"
   write_atomic "$file" "$content"
   printf '%s\n' "$file"
 }
@@ -266,6 +276,23 @@ check_quota() {
   printf 'state=defer\n'
   cat "$file"
   printf 'remaining_secs=%s\n' "$remaining"
+}
+
+check_quota_resolved() {  # <provider> <account> <route>
+  local provider=$1 account=$2 route=$3 keyed agnostic
+  if [ -z "$account" ]; then
+    check_quota "$provider" "" "$route"
+    return 0
+  fi
+  keyed=$(check_quota "$provider" "$account" "$route")
+  case "$keyed" in
+    state=defer*) printf '%s\n' "$keyed"; return 0 ;;
+  esac
+  agnostic=$(check_quota "$provider" "" "$route")
+  case "$agnostic" in
+    state=defer*) printf '%s\n' "$agnostic"; return 0 ;;
+  esac
+  printf '%s\n' "$keyed"
 }
 
 cache_get() {
@@ -354,8 +381,8 @@ done
 
 case "$cmd" in
   check)
-    resolve_account "$PROVIDER" || exit $?
-    check_quota "$PROVIDER" "$ACCOUNT" "$ROUTE"
+    resolve_account_or_agnostic "$PROVIDER"
+    check_quota_resolved "$PROVIDER" "$ACCOUNT" "$ROUTE"
     ;;
   mark)
     resolve_account "$PROVIDER" || exit $?
@@ -372,21 +399,21 @@ case "$cmd" in
     else
       TEXT=$(cat)
     fi
-    EXTRACTED=$(extract_github_rate_limit "$TEXT") || { echo "error: no GitHub rate-limit reset/account found" >&2; exit 1; }
-    EXTRACTED_ACCOUNT=$(printf '%s\n' "$EXTRACTED" | sed -n 's/^account=//p' | tail -1)
-    # The account scraped out of an error body is a heuristic, never durable
-    # identity: an explicit, cached, or derived account always wins, and the
-    # scraped value is used only as a last resort and never remembered.
+    EXTRACTED=$(extract_github_rate_limit "$TEXT") || { echo "error: no GitHub rate-limit reset found" >&2; exit 1; }
+    OBSERVED_ACCOUNT=$(printf '%s\n' "$EXTRACTED" | sed -n 's/^observed_account=//p' | tail -1)
+    # An account read out of an error body is evidence, never the cooldown key:
+    # only an explicit, cached, or derived account keys the record, and any
+    # other case keys the account-agnostic record that check also consults.
     if [ -n "$ACCOUNT" ]; then
       resolve_account "$PROVIDER" || exit $?
-    elif ! resolve_account "$PROVIDER" 2>/dev/null; then
-      account_valid "$EXTRACTED_ACCOUNT" || { echo "error: --account or FM_GITHUB_ACCOUNT_ID required; could not derive GitHub account id" >&2; exit 2; }
-      ACCOUNT=$EXTRACTED_ACCOUNT
+    else
+      resolve_account_or_agnostic "$PROVIDER"
     fi
     RESET_AT=$(printf '%s\n' "$EXTRACTED" | sed -n 's/^reset_at=//p' | tail -1)
     RESET_EPOCH=$(printf '%s\n' "$EXTRACTED" | sed -n 's/^reset_epoch=//p' | tail -1)
     printf 'provider=%s\naccount=%s\nroute=%s\nreset_at=%s\nreset_epoch=%s\n' "$PROVIDER" "$ACCOUNT" "$ROUTE" "$RESET_AT" "$RESET_EPOCH"
-    mark_quota "$PROVIDER" "$ACCOUNT" "$ROUTE" "$RESET_EPOCH" "$RESET_AT" "$SOURCE" >/dev/null
+    [ -z "$OBSERVED_ACCOUNT" ] || printf 'observed_account=%s\n' "$OBSERVED_ACCOUNT"
+    mark_quota "$PROVIDER" "$ACCOUNT" "$ROUTE" "$RESET_EPOCH" "$RESET_AT" "$SOURCE" "$OBSERVED_ACCOUNT" >/dev/null
     ;;
   cache-get)
     [ -n "$KEY" ] || { echo "error: cache-get requires --key" >&2; exit 2; }

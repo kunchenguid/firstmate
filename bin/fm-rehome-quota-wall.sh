@@ -121,6 +121,7 @@ fi
 HEAD=$(git -C "$WT" rev-parse HEAD)
 BRANCH=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || printf 'HEAD')
 PR_URL=$(fm_meta_get "$META" pr)
+PR_HEAD=$(fm_meta_get "$META" pr_head)
 
 if [ -n "$OLD_TARGET" ] && fm_backend_target_exists "$OLD_BACKEND" "$OLD_TARGET"; then
   ALIVE=$(fm_backend_agent_alive "$OLD_BACKEND" "$OLD_TARGET")
@@ -193,6 +194,7 @@ awk -F= '
     skip["terminal"]=1; skip["herdr_session"]=1; skip["herdr_workspace_id"]=1; skip["herdr_tab_id"]=1; skip["herdr_pane_id"]=1;
     skip["zellij_session"]=1; skip["zellij_tab_id"]=1; skip["zellij_pane_id"]=1;
     skip["orca_worktree_id"]=1; skip["cmux_workspace_id"]=1; skip["cmux_surface_id"]=1;
+    skip["pr"]=1; skip["pr_head"]=1;
   }
   /^[A-Za-z_][A-Za-z0-9_]*=/ {
     if (skip[$1]) next;
@@ -210,6 +212,12 @@ awk -F= '
   printf 'rehome_from_window=%s\n' "${OLD_TARGET:-none}"
   printf 'rehome_continuation=%s\n' "$CONT_BRIEF"
 } >> "$META_TMP"
+# The armed merge poll only accepts metadata whose pr=/pr_head= lines are last,
+# so recorded PR identity is re-appended after every rehome key.
+if [ -n "$PR_URL" ]; then
+  printf 'pr=%s\n' "$PR_URL" >> "$META_TMP"
+  [ -z "$PR_HEAD" ] || printf 'pr_head=%s\n' "$PR_HEAD" >> "$META_TMP"
+fi
 mv "$META_TMP" "$META"
 
 SQ_BRIEF=$(fm_launch_shell_quote "$CONT_BRIEF")

@@ -87,7 +87,7 @@ test_mark_from_text_records_observed_account_and_reset() {
       FM_SHARED_GITHUB_QUOTA_DERIVE_ACCOUNT=0 \
       "$QUOTA" mark-from-text --provider github --route default --source incident)
   assert_contains "$out" "provider=github" "mark-from-text should preserve provider"
-  assert_contains "$out" "account=$TEST_ACCOUNT" "mark-from-text should extract the GitHub account"
+  assert_contains "$out" "observed_account=$TEST_ACCOUNT" "mark-from-text should report the observed GitHub account"
   assert_contains "$out" "reset_at=2026-07-13T02:23:23Z" "mark-from-text should preserve observed reset time"
 
   active=$(FM_SHARED_STATE_OVERRIDE="$shared" FM_SHARED_QUOTA_NOW_EPOCH=1000 \
@@ -95,6 +95,45 @@ test_mark_from_text_records_observed_account_and_reset() {
   assert_contains "$active" "state=defer" "observed GitHub cooldown should be active"
   assert_contains "$active" "reset_at=2026-07-13T02:23:23Z" "active cooldown should report reset evidence"
   pass "observed GitHub account/reset text records a shared cooldown"
+}
+
+test_unresolvable_account_cooldown_is_read_back() {
+  local shared out active resolved
+  shared="$TMP_ROOT/shared-agnostic"
+  out=$(printf 'API rate limit exceeded; x-ratelimit-reset 1799999999 until 2026-07-13T02:23:23Z.\n' \
+    | FM_SHARED_STATE_OVERRIDE="$shared" FM_SHARED_QUOTA_NOW_EPOCH=1000 \
+      FM_SHARED_GITHUB_QUOTA_DERIVE_ACCOUNT=0 \
+      "$QUOTA" mark-from-text --provider github --route default --source incident)
+  printf '%s\n' "$out" | grep -qx 'account=' \
+    || fail "an unresolvable account should key the account-agnostic record: $out"
+  case "$out" in
+    *observed_account=*) fail "unlabeled digits must not be reported as an observed account" ;;
+  esac
+
+  active=$(FM_SHARED_STATE_OVERRIDE="$shared" FM_SHARED_QUOTA_NOW_EPOCH=1000 \
+    FM_SHARED_GITHUB_QUOTA_DERIVE_ACCOUNT=0 "$QUOTA" check --provider github --route default)
+  assert_contains "$active" "state=defer" "an unresolvable check should read back its own cooldown"
+
+  resolved=$(FM_SHARED_STATE_OVERRIDE="$shared" FM_SHARED_QUOTA_NOW_EPOCH=1000 \
+    "$QUOTA" check --provider github --account "$TEST_ACCOUNT" --route default)
+  assert_contains "$resolved" "state=defer" "a later resolved check should still see the account-agnostic cooldown"
+  pass "cooldowns recorded without a resolvable account are read back by later checks"
+}
+
+test_reset_without_account_text_still_records_cooldown() {
+  local shared out active
+  shared="$TMP_ROOT/shared-no-account-text"
+  out=$(printf 'HTTP 403: API rate limit exceeded; resets at 2026-07-13T02:23:23Z\n' \
+    | FM_SHARED_STATE_OVERRIDE="$shared" FM_SHARED_QUOTA_NOW_EPOCH=1000 \
+      FM_GITHUB_ACCOUNT_ID="$TEST_ACCOUNT" \
+      "$QUOTA" mark-from-text --provider github --route default --source incident)
+  assert_contains "$out" "account=$TEST_ACCOUNT" "a resolved account should key the record without account text"
+  assert_contains "$out" "reset_at=2026-07-13T02:23:23Z" "reset extraction should not require account text"
+
+  active=$(FM_SHARED_STATE_OVERRIDE="$shared" FM_SHARED_QUOTA_NOW_EPOCH=1000 \
+    "$QUOTA" check --provider github --account "$TEST_ACCOUNT" --route default)
+  assert_contains "$active" "state=defer" "account-free rate-limit text should still record a cooldown"
+  pass "rate-limit text without an account still records a keyed cooldown"
 }
 
 test_mark_from_text_never_overwrites_remembered_account() {
@@ -247,6 +286,8 @@ test_no_cooldown_preserves_existing_polling_semantics() {
 
 test_mark_from_text_records_observed_account_and_reset
 test_mark_from_text_never_overwrites_remembered_account
+test_unresolvable_account_cooldown_is_read_back
+test_reset_without_account_text_still_records_cooldown
 test_shared_cooldown_blocks_polling_across_homes
 test_local_status_supervision_continues_during_cooldown
 test_reset_time_is_honored_before_polling_resumes

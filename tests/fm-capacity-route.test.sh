@@ -209,6 +209,28 @@ test_dispatch_profile_backstop_blocks_unapproved_selection() {
   pass "route selection never bypasses active dispatch rules without approval"
 }
 
+test_dispatch_profile_backstop_blocks_wall_before_recording() {
+  local home routes out status records
+  home="$TMP_ROOT/dispatch-wall/home"
+  routes="$home/config/capacity-failover"
+  mkdir -p "$home/state" "$home/config"
+  write_routes "$routes" "route=pi|acct-b|default|default|high"
+  printf '{"rules":[{"when":"anything","use":{"harness":"codex"}}]}\n' > "$home/config/crew-dispatch.json"
+
+  set +e
+  out=$(printf 'You have hit your usage limit. Try again after 2026-07-13T02:23:23Z.\n' \
+    | FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_CONFIG_OVERRIDE="$home/config" \
+      "$ROUTE" handle-wall --task task-x1 --harness codex --routes-file "$routes" 2>&1)
+  status=$?
+  set +e
+
+  expect_code 1 "$status" "handle-wall should refuse an unapproved dispatch profile"
+  assert_contains "$out" "consult it first" "handle-wall refusal should name the dispatch approval requirement"
+  records=$(find "$home/state/capacity-cooldowns" -name '*.env' -print 2>/dev/null | wc -l | tr -d ' ')
+  [ "$records" = 0 ] || fail "handle-wall must refuse before writing any cooldown record"
+  pass "handle-wall refuses unapproved dispatch rules before recording a wall"
+}
+
 test_quota_wall_records_cooldown_and_selects_alternate_route
 test_partial_wall_key_blocks_every_route_for_same_harness
 test_expired_cooldown_route_becomes_selectable
@@ -216,5 +238,6 @@ test_auth_wall_records_manual_block_and_escalates_without_route
 test_login_required_records_provider_action_and_escalates_without_route
 test_every_route_exhausted_reports_reset_and_login_action
 test_dispatch_profile_backstop_blocks_unapproved_selection
+test_dispatch_profile_backstop_blocks_wall_before_recording
 
 echo "# all fm-capacity-route tests passed"

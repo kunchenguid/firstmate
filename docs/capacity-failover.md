@@ -123,12 +123,15 @@ Its state is intentionally independent of any one `FM_HOME`.
 By default it uses `${XDG_STATE_HOME:-$HOME/.local/state}/firstmate/shared-github-quota/`; tests and unusual deployments can set `FM_SHARED_STATE_OVERRIDE`.
 
 Cooldown records are keyed by `(provider, account, route)`.
-The account comes from `--account`, `FM_GITHUB_ACCOUNT_ID`, a locally cached account learned from prior rate-limit evidence, or a best-effort `gh api user` derivation.
+The account comes from `--account`, `FM_GITHUB_ACCOUNT_ID`, a locally cached account, or a best-effort `gh api user` derivation.
+An account id read out of a rate-limit body is evidence only: it is recorded as `observed_account=` and never keys a record or replaces the cached account.
+When no account resolves, `mark-from-text` writes one account-agnostic record, and `check` consults that record in addition to the keyed one, so a cooldown observed before any account is known is still read back.
 `mark` and `mark-from-text` write the cooldown.
 `check` prints `state=allow` or `state=defer` with provider, account, route, reset time, and remaining seconds.
 Expired records are removed by `check`, so polling resumes only at or after the recorded reset time.
 
 `fm-pr-check.sh` uses this guard when it records PR metadata and in the static `fm-pr-poll.sh` poller.
+Those read-only guard checks, and the one in `fm-teardown.sh`, set `FM_SHARED_GITHUB_QUOTA_DERIVE_ACCOUNT=0` so the guard never spends a GitHub API call of its own.
 During a shared cooldown, PR pollers do not call `gh`.
 They return silence unless a cached PR state already proves `MERGED`; that preserves local ownership and avoids repeated wake spam while GitHub is cooling down.
 When no cooldown is active, the poller keeps the existing live `gh pr view` behavior and refreshes the small cache after a successful read.
