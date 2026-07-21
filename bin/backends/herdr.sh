@@ -1160,10 +1160,12 @@ fm_backend_herdr_send_literal() {  # <target> <text>
 }
 
 # fm_backend_herdr_normalize_key: map firstmate's key vocabulary (Enter,
-# Escape, C-c, as used by fm-send.sh --key and stuck-crewmate-recovery) onto
-# herdr's `pane send-keys` names. Verified empirically: enter, escape/esc, and
-# both ctrl+c/C-c all work (case-insensitive on herdr's side, but normalize
-# explicitly rather than relying on that).
+# Escape, C-c, as used by fm-send.sh --key and stuck-crewmate-recovery, plus the
+# Down/Up the startup-dialog handler navigates menus with) onto herdr's
+# `pane send-keys` names. Verified empirically: enter, escape/esc, both
+# ctrl+c/C-c, and down all work (case-insensitive on herdr's side, but normalize
+# explicitly rather than relying on that); up is normalized for symmetry but is
+# only unit-covered - see docs/herdr-backend.md "Verified CLI facts".
 fm_backend_herdr_normalize_key() {  # <key>
   case "$1" in
     Enter|enter) printf 'enter' ;;
@@ -1301,10 +1303,11 @@ EOF
 # typed launch command carries the shell-quoted brief, the harness transcript
 # can render dialog wording, and herdr's recent source retains dismissed
 # frames. Only 'working' proves the harness is actively generating and
-# therefore past every startup dialog; no verified fact records what
-# agent_status reads while a dialog is actually displayed (a harness parked at
-# one is not generating and could plausibly read idle), so idle/done
-# ('settled') may only be trusted when the capture shows no dialog shape.
+# therefore past every startup dialog; a harness parked at a dialog is not
+# generating, and live evidence records agent_status 'idle' at a real displayed
+# Claude trust dialog (docs/herdr-backend.md "Live Claude trust-dialog
+# traversal"), so idle/done ('settled') may only be trusted when the capture
+# shows no dialog shape.
 fm_backend_herdr_dialog_agent_state() {  # <harness> -> working|settled|blocked|absent
   local harness=$1 identity agent status
   identity=$(fm_backend_herdr_agent_identity_raw "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" 2>/dev/null || true)
@@ -2056,6 +2059,11 @@ fm_backend_herdr_events_capable() {  # <session>
   case "$protocol" in ''|*[!0-9]*) return 1 ;; esac
   [ "$protocol" -ge "$FM_BACKEND_HERDR_MIN_EVENTS_PROTOCOL" ] || return 1
   schema=$(herdr api schema --json 2>/dev/null) || return 1
+  # Pattern-match in the shell, never `printf ... | grep -q`: grep exits at its
+  # early match, the producer takes SIGPIPE, and under a caller's pipefail the
+  # pipeline returns 141 and bash prints `printf: write error: Broken pipe` -
+  # the recurring watcher warning diagnosed in docs/herdr-backend.md's
+  # "Guarded first-launch dialog handling" evidence.
   case "$schema" in *events.subscribe*) ;; *) return 1 ;; esac
   case "$schema" in *pane.agent_status_changed*) ;; *) return 1 ;; esac
   return 0
