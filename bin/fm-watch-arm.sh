@@ -262,8 +262,8 @@ attach_and_wait() {
       if [ "$HEALTHY_PID" != "$attached_pid" ]; then
         cycle_log_append unknown unknown lock-replaced "attached:$HEALTHY_PID"
         attached_pid=$HEALTHY_PID
-        report_attached
         cycle_begin "$attached_pid" attached
+        report_attached
       fi
       sleep "$ATTACH_POLL"
       continue
@@ -271,8 +271,8 @@ attach_and_wait() {
     if wait_for_healthy_successor; then
       cycle_log_append unknown unknown attached-cycle-ended "attached:$HEALTHY_PID"
       attached_pid=$HEALTHY_PID
-      report_attached
       cycle_begin "$attached_pid" attached
+      report_attached
       continue
     fi
     cycle_log_append unknown unknown attached-cycle-ended none
@@ -348,8 +348,8 @@ fi
 # this home's watcher and wants a fresh one.)
 if [ "$mode" = arm ] && healthy_watcher; then
   cycle_mark_predecessor_successor "attached:$HEALTHY_PID"
-  report_attached
   cycle_begin "$HEALTHY_PID" attached
+  report_attached
   attach_and_wait "$HEALTHY_PID"
   exit $?
 fi
@@ -448,7 +448,9 @@ owned_child_finished() {
 # Verify the outcome: poll until this child is the confirmed healthy watcher, or
 # until some other watcher legitimately holds the singleton (a startup race), or
 # until the child gives up. Only then print the honest line.
-deadline=$(( $(date +%s) + CONFIRM_TIMEOUT ))
+# date(1) exposes whole seconds. Keep the configured confirmation budget from
+# collapsing when startup begins just before the next second boundary.
+deadline=$(( $(date +%s) + CONFIRM_TIMEOUT + 1 ))
 while :; do
   if healthy_watcher; then
     if [ "$HEALTHY_PID" = "$child" ]; then

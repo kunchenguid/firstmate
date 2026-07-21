@@ -481,12 +481,18 @@ test_watcher_self_evicts_on_lock_takeover() {
   PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=0.2 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
   i=0
-  while [ "$i" -lt 50 ]; do
-    [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$pid" ] && break
+  while [ "$i" -lt 80 ]; do
+    [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$pid" ] \
+      && [ -s "$state/.watch.lock/pid-identity" ] \
+      && [ -e "$state/.last-watcher-beat" ] \
+      && break
     sleep 0.1
     i=$((i + 1))
   done
-  [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$pid" ] || fail "watcher did not record its own pid in the lock"
+  [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$pid" ] \
+    && [ -s "$state/.watch.lock/pid-identity" ] \
+    && [ -e "$state/.last-watcher-beat" ] \
+    || fail "watcher did not finish publishing its lock ownership"
   # Simulate a second watcher taking over the singleton lock. $$ (the test
   # runner) is a live pid that is not the watcher.
   printf '%s\n' "$$" > "$state/.watch.lock/pid"
@@ -887,20 +893,20 @@ test_stopped_watcher_is_live_but_stale_then_exit_is_classified() {
 }
 
 test_pid_identity_is_locale_invariant() {
-  # The watcher records its process identity under one locale; arm/guard/turn-end
-  # re-read it under the machine's ambient locale. ps's lstart date format follows
-  # LC_TIME, so an unpinned read on a non-C locale (e.g. ko_KR) would differ only
-  # in the date portion and reject a genuinely live watcher. The fix pins LC_ALL=C
-  # inside fm_pid_identity, so its output must be byte-identical regardless of the
-  # caller's exported LC_ALL/LC_TIME. That invariant holds on any host because the
-  # pin is internal, so this stays deterministic on CI even where an alternate
+  # The portable fallback records its process identity under one locale, then
+  # arm/guard/turn-end re-read it under the machine's ambient locale. ps's lstart
+  # date format follows LC_TIME, so an unpinned read on a non-C locale (e.g. ko_KR)
+  # would reject a genuinely live watcher. The fallback pins LC_ALL=C inside
+  # fm_pid_identity, so its output must be byte-identical regardless of the caller's
+  # exported LC_ALL/LC_TIME. This stays deterministic on CI even where an alternate
   # locale like ko_KR.UTF-8 is not installed (the equality then holds trivially).
-  local live baseline via_lc_all via_lc_time
+  local live no_proc baseline via_lc_all via_lc_time
   sleep 300 &
   live=$!
-  baseline=$(LC_ALL=C bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$live" 2>/dev/null)
-  via_lc_all=$(LC_ALL=ko_KR.UTF-8 bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$live" 2>/dev/null)
-  via_lc_time=$(LC_TIME=ko_KR.UTF-8 bash -c 'unset LC_ALL; . "$1"; fm_pid_identity "$2"' _ "$LIB" "$live" 2>/dev/null)
+  no_proc="$TMP_ROOT/no-proc"
+  baseline=$(FM_PROC_ROOT_OVERRIDE="$no_proc" LC_ALL=C bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$live" 2>/dev/null)
+  via_lc_all=$(FM_PROC_ROOT_OVERRIDE="$no_proc" LC_ALL=ko_KR.UTF-8 bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$live" 2>/dev/null)
+  via_lc_time=$(FM_PROC_ROOT_OVERRIDE="$no_proc" LC_TIME=ko_KR.UTF-8 bash -c 'unset LC_ALL; . "$1"; fm_pid_identity "$2"' _ "$LIB" "$live" 2>/dev/null)
   kill "$live" 2>/dev/null || true
   wait "$live" 2>/dev/null || true
   [ -n "$baseline" ] || fail "fm_pid_identity produced no baseline identity under LC_ALL=C"
@@ -909,8 +915,49 @@ test_pid_identity_is_locale_invariant() {
   pass "fm_pid_identity is locale-invariant across LC_ALL/LC_TIME"
 }
 
+write_fake_proc_identity() {
+  local proc_root=$1 pid=$2 starttime=$3
+  mkdir -p "$proc_root/$pid"
+  printf '%s\n' "$pid (watcher ) with spaces) S 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 $starttime 20 21 22" > "$proc_root/$pid/stat"
+  printf 'bash\0/path with spaces/fm-watch.sh\0--flag\0' > "$proc_root/$pid/cmdline"
+}
+
+test_linux_pid_identity_ignores_wall_clock_and_detects_pid_reuse() {
+  local dir state proc_root pid before after_time_jump after_pid_reuse
+  [ "$(uname)" = Linux ] || {
+    pass "Linux process identity clock-step regression skipped on non-Linux host"
+    return
+  }
+  dir=$(make_case linux-pid-identity)
+  state="$dir/state"
+  proc_root="$dir/proc"
+  pid=4242
+  mkdir -p "$proc_root"
+  printf 'btime 1784094040\n' > "$proc_root/stat"
+  write_fake_proc_identity "$proc_root" "$pid" 987654
+
+  before=$(FM_PROC_ROOT_OVERRIDE="$proc_root" FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$pid") \
+    || fail "could not read initial fake Linux process identity"
+  printf 'btime 1784094016\n' > "$proc_root/stat"
+  after_time_jump=$(FM_PROC_ROOT_OVERRIDE="$proc_root" FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$pid") \
+    || fail "could not re-read fake Linux process identity after btime change"
+
+  [ "$after_time_jump" = "$before" ] \
+    || fail "Linux process identity changed with btime (before '$before', after '$after_time_jump')"
+  [ "$before" = 'linux-starttime=987654 cmdline-hex=62617368002f706174682077697468207370616365732f666d2d77617463682e7368002d2d666c616700' ] \
+    || fail "Linux process identity did not combine parsed starttime field 22 with the full cmdline ('$before')"
+  pass "Linux process identity ignores simulated btime changes"
+
+  write_fake_proc_identity "$proc_root" "$pid" 987655
+  after_pid_reuse=$(FM_PROC_ROOT_OVERRIDE="$proc_root" FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$pid") \
+    || fail "could not read reused fake Linux pid identity"
+  [ "$after_pid_reuse" != "$before" ] || fail "Linux process identity missed changed starttime for reused pid"
+  pass "Linux process identity detects pid reuse"
+}
+
 test_singleton_start
 test_pid_identity_is_locale_invariant
+test_linux_pid_identity_ignores_wall_clock_and_detects_pid_reuse
 test_stale_watch_lock_reclaimed
 test_live_stale_watch_lock_is_actionable
 test_guard_warnings
