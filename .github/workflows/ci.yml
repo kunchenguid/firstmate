@@ -323,17 +323,30 @@ jobs:
           /bin/bash --version | head -1
           command -v jq >/dev/null || { echo "::error::jq is required"; exit 1; }
 
+          # bin/fm-lint.sh is the single owner of firstmate's shell-script file
+          # set, so this sweep consumes its --list output rather than spelling
+          # its own, and must parse every entry that list publishes.
+          canonical_scripts=$(bin/fm-lint.sh --list)
+          expected_scripts=$(printf '%s\n' "$canonical_scripts" | grep -c '[^[:space:]]')
+          [ "$expected_scripts" -gt 0 ] || {
+            echo "::error::bin/fm-lint.sh --list published no shell scripts"
+            exit 1
+          }
           parsed_scripts=0
           while IFS= read -r script; do
             [ -n "$script" ] || continue
+            [ -f "$script" ] || {
+              echo "::error::canonical shell script $script does not exist"
+              exit 1
+            }
             /bin/bash -n "$script"
             parsed_scripts=$((parsed_scripts + 1))
-          done < <(find bin -type f -name '*.sh' -print | LC_ALL=C sort)
-          [ "$parsed_scripts" -gt 0 ] || {
-            echo "::error::no bin shell scripts found for Bash 3.2 syntax validation"
+          done <<< "$canonical_scripts"
+          [ "$parsed_scripts" -eq "$expected_scripts" ] || {
+            echo "::error::Bash 3.2 parsed $parsed_scripts of $expected_scripts canonical shell scripts"
             exit 1
           }
-          printf 'Bash 3.2 parsed %s bin shell scripts\n' "$parsed_scripts"
+          printf 'Bash 3.2 parsed %s canonical shell scripts\n' "$parsed_scripts"
 
           snapshot_output=$(/bin/bash tests/fm-fleet-snapshot-view.test.sh)
           printf '%s\n' "$snapshot_output"

@@ -10,6 +10,10 @@
 # All hermetic over temp dirs; no real agent session is invoked.
 set -u
 
+# Keep every guard invocation inside its explicit fixture home even when the
+# surrounding firstmate session exports operational path overrides.
+unset FM_HOME FM_STATE_OVERRIDE FM_ROOT_OVERRIDE FM_CONFIG_OVERRIDE
+
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 

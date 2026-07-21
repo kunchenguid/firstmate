@@ -18,6 +18,7 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 LINT="$ROOT/bin/fm-lint.sh"
+CI="$ROOT/.github/workflows/ci.yml"
 INSTALLER="$ROOT/bin/fm-install-shellcheck.sh"
 # The pinned version, read from the single source (the one owner itself).
 REQUIRED=$("$LINT" --required-version)
@@ -29,13 +30,33 @@ pinned_ready() {
   [ "$(shellcheck --version | awk '/^version:/ {print $2; exit}')" = "$REQUIRED" ]
 }
 
-test_list_files_reports_the_shell_inventory() {
-  local listed expected
-  listed=$("$LINT" --list-files)
-  expected=$(find bin bin/backends tests -maxdepth 1 -type f -name '*.sh' -print | LC_ALL=C sort)
-  [ "$(printf '%s\n' "$listed" | LC_ALL=C sort)" = "$expected" ] \
-    || fail "fm-lint.sh --list-files did not return the complete shell inventory"
-  pass "fm-lint.sh --list-files reports the complete shell inventory"
+test_list_mode_publishes_the_canonical_set() {
+  # --list is what other gates consume, so it must expand to exactly the set the
+  # lint run itself executes. Derive the expectation from the canonical ROOTS
+  # definition rather than re-spelling the globs here.
+  local globs expected actual inventory
+  globs=$(sed -n 's/^ *ROOTS=(\(.*\))$/\1/p' "$LINT" | grep -v '"\$@"')
+  [ -n "$globs" ] || fail "could not read the canonical globs from fm-lint.sh"
+  expected=$(cd "$ROOT" && eval "printf '%s\n' $globs")
+  actual=$("$LINT" --list)
+  [ "$actual" = "$expected" ] || fail "fm-lint.sh --list does not match the canonical lint file set"
+  printf '%s\n' "$actual" | grep -q '^bin/' || fail "fm-lint.sh --list published no bin shell scripts"
+  # Independent of the globs themselves: the published set must be the complete
+  # on-disk shell inventory, so a glob that silently stops covering a directory
+  # fails here instead of shrinking every gate that consumes --list.
+  inventory=$(cd "$ROOT" && find bin bin/backends tests -maxdepth 1 -type f -name '*.sh' -print | LC_ALL=C sort)
+  [ "$(printf '%s\n' "$actual" | LC_ALL=C sort)" = "$inventory" ] \
+    || fail "fm-lint.sh --list did not return the complete canonical shell inventory"
+  pass "fm-lint.sh --list publishes the canonical file set for other gates"
+}
+
+test_ci_bash32_sweep_consumes_the_list() {
+  # The stock macOS Bash 3.2 parse sweep must iterate the owner's list and fail
+  # on any shortfall, never its own find spelling or a merely non-zero count.
+  assert_grep 'bin/fm-lint.sh --list' "$CI" "the Bash 3.2 sweep must consume the one owner's file list"
+  assert_no_grep "find bin -type f -name '*.sh'" "$CI" "CI must not re-spell the shell-script file set"
+  assert_grep '"$parsed_scripts" -eq "$expected_scripts"' "$CI" "the Bash 3.2 sweep must assert an exact parsed-count match"
+  pass "CI's Bash 3.2 sweep is driven by the canonical file list"
 }
 
 test_pins_an_explicit_version() {
@@ -426,7 +447,8 @@ SH
   pass "seeded dispatcher, adapter, production-owner, and test-local diagnostics preserve parity"
 }
 
-test_list_files_reports_the_shell_inventory
+test_list_mode_publishes_the_canonical_set
+test_ci_bash32_sweep_consumes_the_list
 test_pins_an_explicit_version
 test_installer_retries_transient_download_failure
 test_rejects_wrong_shellcheck_version

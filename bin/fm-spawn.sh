@@ -1647,14 +1647,14 @@ write_spawn_metadata() {
   fi
 }
 # Bash 3.2 does not reliably apply `set -e` when a brace-group redirection
-# fails. Call a function in an explicit conditional so metadata publication
-# failure always aborts the spawn and preserves the resource-cleanup path.
-if write_spawn_metadata > "$STATE/$ID.meta"; then
-  :
-else
+# fails. Render the metadata first, then publish it with a single write whose
+# status covers both a failed open and a failed (short) write, so metadata
+# publication failure always aborts the spawn and preserves the cleanup path.
+META_BODY=$(write_spawn_metadata)
+printf '%s\n' "$META_BODY" > "$STATE/$ID.meta" || {
   echo "error: could not publish task metadata at $STATE/$ID.meta" >&2
   exit 1
-fi
+}
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
 
 sq_brief=$(shell_quote "$BRIEF")
