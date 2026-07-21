@@ -1267,6 +1267,22 @@ SH
   pass "herdr teardown removes pane-owned escalation dedupe state"
 }
 
+test_codex_mcp_teardown_clears_recovery_markers() {
+  local case_dir recovered stall
+  case_dir=$(make_case codex-mcp-marker-cleanup)
+  write_meta "$case_dir" local-only ship
+  recovered="$case_dir/state/.codex-mcp-recovered-task-x1"
+  stall="$case_dir/state/.codex-mcp-stall-task-x1"
+  : > "$recovered"
+  : > "$stall"
+
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "codex-mcp-marker-cleanup: forced teardown failed"
+  [ ! -e "$recovered" ] || fail "codex-mcp-marker-cleanup: teardown left the recovery marker behind"
+  [ ! -e "$stall" ] || fail "codex-mcp-marker-cleanup: teardown left the corroboration marker behind"
+  pass "teardown removes Codex MCP fresh-launch recovery markers"
+}
+
 configure_herdr_projection_teardown_case() {  # <case-dir>
   local case_dir=$1 token=AbCdEfGhIjKlMnOpQrStUv
   sed -i.bak 's/^window=.*/window=fmtest:w1:p2/' "$case_dir/state/task-x1.meta"
@@ -1384,6 +1400,7 @@ test_no_mistakes_origin_remote_allows
 test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed
 test_herdr_teardown_clears_escalation_marker
+test_codex_mcp_teardown_clears_recovery_markers
 test_herdr_projection_teardown_retires_journal_only_after_confirmed_close
 test_herdr_projection_teardown_retains_journal_when_close_unconfirmed
 test_squash_merged_branch_deleted_allows

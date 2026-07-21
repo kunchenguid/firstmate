@@ -230,9 +230,18 @@ When the harness token is absent or `default`, secondmate launch falls back thro
 An explicit harness argument to `fm-spawn.sh` still overrides either config file for that spawn only.
 An explicit `--model` or `--effort` overrides the matching token from `config/secondmate-harness`; an explicit harness or raw launch command starts with clean model and effort defaults unless those flags are also passed.
 When `config/crew-dispatch.json` exists, crewmate and scout spawns require an explicit resolved harness instead of automatically falling back to `config/crew-harness`.
-The inherited-local-material contract is owned by [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md); its harness-relevant consequence is that a secondmate's own crewmates use the primary's dispatch profiles and static harness value.
+The inherited-local-material contract is owned by [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md); its harness-relevant consequence is that a secondmate's own crewmates use the primary's dispatch profiles, static harness value, and Codex MCP posture.
 Those inherited values are defaults and rules only; `fm-spawn` still permits a consciously chosen explicit runtime outside the config.
 `config/secondmate-harness` is not inherited because secondmates do not launch secondmates.
+For Codex crewmates and scouts, `fm-spawn.sh` disables configured MCP servers by default with launch-time `-c 'mcp_servers={}'` while keeping the user's single real Codex home.
+This avoids fresh-launch stalls from remote MCP server startup without copying or filtering `~/.codex/config.toml` or `~/.codex/auth.json`.
+The trade-off is that Codex crew lanes cannot use MCP tools unless a home opts out.
+Set the local, gitignored `config/crew-codex-mcp` first non-empty line to `enabled`, `keep`, `on`, `true`, or `1` to keep configured MCP servers for Codex crewmate and scout launches.
+Use that opt-out only for homes whose needed MCP servers are local and reliable enough to be worth the fresh-launch startup risk.
+`config/crew-codex-mcp` is inherited by secondmate homes with the other crew config items.
+If a fresh Codex crew still shows `Starting MCP servers ...`, `fm-watch.sh` requires two corroborating polls, refuses dirty or ahead worktrees, returns the recorded clean worktree, preserves non-spawn `state/<id>.meta` sidecar fields, writes `.codex-mcp-stall-<id>` and `.codex-mcp-recovered-<id>` markers, and respawns once.
+`FM_CODEX_MCP_STALL_SECS` and `FM_CODEX_FRESH_LAUNCH_WINDOW_SECS` tune that detector.
+`FM_SPAWN_BIN` is a test and recovery seam for the respawn command; production should leave it unset.
 For grok, `fm-spawn.sh` installs one firstmate-owned global turn-end hook under `$GROK_HOME/hooks/`, or `~/.grok/hooks/` when `GROK_HOME` is unset, and drops a per-task `.fm-grok-turnend` pointer in the worktree, with teardown removing the task token and pointer.
 For omp, `fm-spawn.sh` writes a firstmate-owned per-task extension under `state/<id>.omp-ext.ts` and passes it with `--hook` for crewmate and scout launches, with teardown removing the state extension.
 For Pi secondmate launches, `fm-spawn.sh` starts Pi with `-e` pointed at the secondmate home's own tracked `.pi/extensions/fm-primary-pi-watch.ts` and `.pi/extensions/fm-primary-turnend-guard.ts`, both already present from the secondmate home's git worktree.
@@ -326,7 +335,7 @@ If that send fails, bootstrap keeps an idempotent retry marker and emits `NUDGE_
 The same bootstrap run emits `SECONDMATE_LIVENESS:` only when a live secondmate endpoint is skipped or respawn fails; already-live and successfully respawned endpoints are handled silently.
 In a home marked with `.fm-secondmate-home`, bootstrap also emits `SECONDMATE_SELF_CHECK:` when routed-work prerequisites are missing, unauthenticated, or too old; firstmate treats that secondmate as unavailable for routed work until the line disappears.
 For a mid-session inherited local-material edit where tracked-file sync is not needed, run `bin/fm-config-push.sh`.
-It uses the same live secondmate discovery and propagation helper as bootstrap, prints each live home's `crew-dispatch.json`, `crew-harness`, `backlog-backend`, `herdr-presentation-spaces`, and `data/captain-shared.md` result as `pushed`, `unchanged`, `skipped`, or `error`, and exits non-zero for real propagation errors or config-reread send failures.
+It uses the same live secondmate discovery and propagation helper as bootstrap, prints each live home's `crew-dispatch.json`, `crew-harness`, `crew-codex-mcp`, `backlog-backend`, `herdr-presentation-spaces`, and `data/captain-shared.md` result as `pushed`, `unchanged`, `skipped`, or `error`, and exits non-zero for real propagation errors or config-reread send failures.
 When an allowlisted config item changes for an already-running home, it sends the literal-content reread pointer described in [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md); unchanged allowlisted config sends no pointer unless a previous delivery is pending.
 The locked bootstrap inheritance pass uses the same per-home changed-set and reread path for already-running homes; see `secondmate-provisioning` for the single contract owner.
 That live discovery starts from `state/*.meta` records with `kind=secondmate`; `data/secondmates.md` only backfills `home=` for older or incomplete meta records.
@@ -442,6 +451,9 @@ FM_HEARTBEAT_MAX=7200   # heartbeat backoff cap
 FM_CHECK_INTERVAL=300   # seconds between slow checks (authenticated merge polls, custom checks, or X-mode dispatch)
 FM_CHECK_TIMEOUT=30     # seconds allowed per slow check script
 FM_CODEX_WATCH_CHECKPOINT=180   # seconds per foreground watcher checkpoint in Codex primary supervision
+FM_CODEX_MCP_STALL_SECS=15      # seconds in a Codex "Starting MCP servers ..." line before the fresh-launch recovery detector considers it stalled
+FM_CODEX_FRESH_LAUNCH_WINDOW_SECS=300   # seconds after task meta creation during which the Codex MCP fresh-launch recovery detector may act
+FM_SPAWN_BIN=bin/fm-spawn.sh    # test/recovery seam for watcher-initiated respawns; production should leave it unset
 FM_CREW_STATE_NM_TIMEOUT=10   # seconds allowed per no-mistakes query inside fm-crew-state.sh
 FM_CREW_STATE_RUNS_LIMIT=200  # recent no-mistakes run rows scanned when axi status cannot be attributed to the current code
 FM_CREW_STATE_BIN=bin/fm-crew-state.sh   # test override for the current-state reader used by working/paused watcher triage
