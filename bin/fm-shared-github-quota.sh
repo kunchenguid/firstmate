@@ -160,6 +160,13 @@ resolve_account() {  # <provider>
 # identity that no other call would ever reconstruct.
 resolve_account_or_agnostic() {  # <provider>
   local provider=$1
+  # An explicitly supplied account is caller input: a malformed one is an error
+  # every command reports the same way, never a silent fall back to a different
+  # key. Only a genuinely unresolvable account becomes account-agnostic.
+  if [ -n "$ACCOUNT" ]; then
+    resolve_account "$provider" || return $?
+    return 0
+  fi
   resolve_account "$provider" 2>/dev/null || ACCOUNT=
 }
 

@@ -142,9 +142,14 @@ EOF
       fm_launch_exclude_path "$wt" '.opencode/plugins/fm-turn-end.js'
       ;;
     pi*)
+      # Written OUTSIDE the worktree: pi's project-trust gate fires on any extension
+      # loaded from inside the project (verified live), but an explicit -e path
+      # elsewhere loads without a dialog. Lives in state/, cleaned by teardown.
       cat > "$state/$id.pi-ext.ts" <<EOF
 // Firstmate turn-end signal; written by fm-spawn/fm-rehome-quota-wall.
-// Use "turn_end" so the watcher sees every completed agent turn.
+// Use "turn_end" (fires after each turn the agent finishes), not "agent_end"
+// (fires once, only when the whole run exits): the watcher needs a signal at
+// every turn boundary so an idle crewmate is surfaced, not just at shutdown.
 import { execFile } from "node:child_process";
 export default function (pi: any) {
   pi.on("turn_end", () => execFile("touch", ["$turnend"]));

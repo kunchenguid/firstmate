@@ -76,6 +76,17 @@ fm_test_tmproot() {
   printf '%s\n' "$root"
 }
 
+# The shared GitHub quota store (bin/fm-shared-github-quota.sh) is deliberately
+# FM_HOME-independent, so it resolves to the operator's real
+# ${XDG_STATE_HOME:-$HOME/.local/state}/firstmate tree unless redirected. That
+# store is now read and pruned from fm-pr-check, fm-pr-poll, fm-pr-merge,
+# fm-teardown and fm-bearings-snapshot, so any test driving those scripts would
+# mutate real state and take its result from the developer's live GitHub quota.
+# Redirect it once here so no test can regress by omission; a test that wants
+# its own store still overrides this per invocation.
+FM_SHARED_STATE_OVERRIDE=$(fm_test_tmproot fm-shared-quota)
+export FM_SHARED_STATE_OVERRIDE
+
 # --- fakebin / PATH shims ---------------------------------------------------
 #
 # fm_fakebin <dir> creates <dir>/fakebin and echoes it; prepend it to PATH to

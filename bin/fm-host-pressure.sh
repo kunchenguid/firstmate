@@ -193,11 +193,22 @@ emit_check() {
 }
 
 periodic_alert() {
-  local out status state reason available floor clear cooldown marker now last
+  local out status state reason available floor clear cooldown marker now last detail
   if out=$(emit_check); then
     status=0
   else
     status=$?
+  fi
+  # A malformed config/capacity-failover makes emit_check exit 2 with its
+  # message on stderr and nothing on stdout. The watcher reads this command's
+  # stdout and discards its stderr, so surface the refusal as an alert record
+  # rather than letting a broken threshold read as "nothing to alert".
+  if [ "$status" -eq 2 ]; then
+    detail=$(emit_check 2>&1 >/dev/null | tail -1)
+    printf 'alert=host_pressure_config_invalid\n'
+    printf 'state=error\n'
+    printf 'reason=%s\n' "${detail:-invalid capacity-failover configuration}"
+    return 2
   fi
   state=$(printf '%s\n' "$out" | sed -n 's/^state=//p' | tail -1)
   case "$state" in
