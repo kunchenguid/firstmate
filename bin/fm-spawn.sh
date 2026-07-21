@@ -1093,7 +1093,13 @@ META_WINDOW=$T
     echo "home=$PROJ_ABS"
     echo "projects=$SECONDMATE_PROJECTS"
   fi
-} > "$STATE/$ID.meta"
+} > "$STATE/$ID.meta" || {
+  # Checked explicitly: stock macOS bash 3.2 does not honor `set -e` for a
+  # redirection failure on a compound command, so an unwritable meta path would
+  # otherwise silently continue into launch with no durable task record.
+  echo "error: failed to write task metadata $STATE/$ID.meta" >&2
+  exit 1
+}
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
 
 sq_brief=$(fm_launch_shell_quote "$BRIEF")
