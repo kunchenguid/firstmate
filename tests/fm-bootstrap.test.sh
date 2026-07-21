@@ -59,18 +59,44 @@ fi
 exit 0
 SH
   chmod +x "$fakebin/treehouse"
+  # firstmate treats no-mistakes as a plain present/executable required tool; it
+  # does not probe its version or subcommands, so the stub only needs to exist.
   cat > "$fakebin/no-mistakes" <<'SH'
 #!/usr/bin/env bash
-if [ "${1:-}" = --version ]; then
-  printf '%s\n' "${FM_FAKE_NO_MISTAKES_VERSION:-no-mistakes version v1.31.2 (fake) 2026-06-27T00:02:18Z}"
-  exit 0
-fi
 exit 0
 SH
   chmod +x "$fakebin/no-mistakes"
   add_tasks_axi "$fakebin" "0.1.1"
   add_quota_axi "$fakebin"
   printf '%s\n' "$fakebin"
+}
+
+# git stub for the Codebase-detection test: answers `git [-C <dir>] remote
+# get-url origin` from <dir>/.origin-url and fails every other invocation, so
+# `command -v git` still succeeds, the worktree-tangle check stays inert (its
+# first call, rev-parse --is-inside-work-tree, gets a non-zero and bails), and
+# codebase detection is deterministic without depending on live git repos.
+add_fake_git_origin_reader() {
+  local fakebin=$1
+  cat > "$fakebin/git" <<'SH'
+#!/usr/bin/env bash
+dir=.
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -C) dir=$2; shift 2 ;;
+    remote)
+      if [ "${2:-}" = get-url ] && [ "${3:-}" = origin ]; then
+        [ -f "$dir/.origin-url" ] || exit 1
+        cat "$dir/.origin-url"
+        exit 0
+      fi
+      exit 1 ;;
+    *) shift ;;
+  esac
+done
+exit 1
+SH
+  chmod +x "$fakebin/git"
 }
 
 add_quota_axi() {
@@ -303,35 +329,69 @@ ROWS
   pass "bootstrap reports treehouse lease + tasks-axi/quota-axi bootstrap contracts"
 }
 
-test_no_mistakes_min_version() {
-  local label version mode case_dir fakebin out missing n
-  missing='MISSING: no-mistakes (install: curl -fsSL https://raw.githubusercontent.com/kunchenguid/no-mistakes/main/docs/install.sh | sh)'
-  n=0
-  while IFS='^' read -r label version mode; do
-    [ -n "$label" ] || continue
-    n=$((n + 1))
-    case_dir="$TMP_ROOT/no-mistakes-$n"
-    mkdir -p "$case_dir/home"
-    mkdir -p "$case_dir/home/config"
-    printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
-    fakebin=$(make_fake_toolchain "$case_dir")
-    add_tasks_axi "$fakebin" "0.1.1"
-    out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
-      FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_FAKE_NO_MISTAKES_VERSION="$version" "$ROOT/bin/fm-bootstrap.sh")
-    case "$mode" in
-      empty)
-        [ -z "$out" ] || fail "$label: expected silence, got: $out" ;;
-      missing)
-        [ "$out" = "$missing" ] || fail "$label: expected '$missing', got: $out" ;;
-    esac
-  done <<'ROWS'
-minimum no-mistakes version is accepted^no-mistakes version v1.31.2 (fake)^empty
-newer no-mistakes minor is accepted^no-mistakes version v1.32.0 (fake)^empty
-newer no-mistakes major is accepted^no-mistakes version v2.0.0 (fake)^empty
-older no-mistakes patch reports an upgrade^no-mistakes version v1.31.1 (fake)^missing
-unparseable no-mistakes version reports an upgrade^no-mistakes development build^missing
-ROWS
-  pass "bootstrap enforces no-mistakes minimum version"
+test_no_mistakes_present_or_internal_source() {
+  local case_dir fakebin out missing
+  missing='MISSING: no-mistakes (install: git clone https://code.byted.org/obric/no-mistakes.git && cd no-mistakes && make install  # requires Go 1.25+)'
+  case_dir="$TMP_ROOT/no-mistakes"
+  mkdir -p "$case_dir/home/config"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  fakebin=$(make_fake_toolchain "$case_dir")
+
+  # Present and executable: no-mistakes is a plain required tool, so a present
+  # binary draws no MISSING line regardless of its version or subcommands.
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ -z "$out" ] || fail "present no-mistakes: expected silence, got: $out"
+
+  # Absent: the MISSING line carries the internal Codebase source, never a public
+  # upstream install script.
+  rm -f "$fakebin/no-mistakes"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ "$out" = "$missing" ] || fail "absent no-mistakes: expected '$missing', got: $out"
+  pass "bootstrap requires no-mistakes present and installs it from the internal source"
+}
+
+test_bytedcli_required_for_codebase_fleet() {
+  local case_dir fakebin out
+  # Detection is exercised through a git stub that answers only
+  # `git -C <dir> remote get-url origin` from a per-directory .origin-url marker
+  # and returns non-zero for every other subcommand. This keeps the test
+  # hermetic: it does not depend on live git reads of throwaway repos, which
+  # behave differently under CI's non-root, hermetic (GIT_CONFIG_GLOBAL=/dev/null)
+  # environment, where the live read came back empty and silently disabled
+  # detection. Non-zero for other subcommands leaves the worktree-tangle check
+  # inert exactly as a non-git home does. The URL->provider parsing
+  # (fm_scm_parse_remote_url) is still exercised for real.
+
+  # Codebase fleet: a registered project clone points at code.byted.org and
+  # bytedcli is absent, so bootstrap must surface the missing tool at startup.
+  case_dir="$TMP_ROOT/bytedcli-codebase"
+  mkdir -p "$case_dir/home/config" "$case_dir/home/projects/foo"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  printf '%s\n' 'https://code.byted.org/obric/foo.git' > "$case_dir/home/projects/foo/.origin-url"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  add_fake_git_origin_reader "$fakebin"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_BOOTSTRAP_DETECT_ONLY=1 FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  case "$out" in
+    *'MISSING: bytedcli (install: NPM_CONFIG_REGISTRY=http://bnpm.byted.org npm install -g @bytedance-dev/bytedcli@latest)'*) ;;
+    *) fail "codebase fleet without bytedcli: expected MISSING: bytedcli, got: $out" ;;
+  esac
+
+  # GitHub-only fleet: no Codebase remote anywhere, so bytedcli must not appear.
+  case_dir="$TMP_ROOT/bytedcli-github"
+  mkdir -p "$case_dir/home/config" "$case_dir/home/projects/bar"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  printf '%s\n' 'https://github.com/owner/bar.git' > "$case_dir/home/projects/bar/.origin-url"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  add_fake_git_origin_reader "$fakebin"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_BOOTSTRAP_DETECT_ONLY=1 FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  case "$out" in
+    *bytedcli*) fail "github-only fleet: expected no bytedcli line, got: $out" ;;
+  esac
+  pass "bootstrap requires bytedcli only for Codebase-provider fleets"
 }
 
 test_git_is_required_with_supported_install_instruction() {
@@ -822,7 +882,8 @@ test_crew_dispatch_launch_cross_file_check() {
 }
 
 test_bootstrap_reporting
-test_no_mistakes_min_version
+test_no_mistakes_present_or_internal_source
+test_bytedcli_required_for_codebase_fleet
 test_git_is_required_with_supported_install_instruction
 test_orca_backend_gates_orca_tool_only_when_selected
 test_session_provider_backends_do_not_require_tmux
