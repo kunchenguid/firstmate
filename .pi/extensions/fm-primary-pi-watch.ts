@@ -378,9 +378,8 @@ export default function (pi: ExtensionAPI) {
     return { ok: true, message: `watcher: started Pi extension arm child ${id}` };
   }
 
-  pi.on?.("session_start", (event) => {
-    const reason = sessionReplacementReason(event.reason);
-    if (reason && pendingSessionStart === reason) {
+  pi.on?.("session_start", () => {
+    if (pendingSessionStart !== null) {
       pendingSessionStart = null;
       stopping = false;
       retryFailures = 0;

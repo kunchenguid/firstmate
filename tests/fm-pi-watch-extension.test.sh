@@ -835,8 +835,13 @@ if (process.listenerCount("exit") !== before + 1) {
 await handlers.get("session_start")?.({ type: "session_start", reason: "startup" }, {});
 await arm(1);
 
+const replacementReasons = [
+  { shutdown: "reload", start: "resume" },
+  { shutdown: "fork", start: "reload" },
+];
 for (let expectedCount = 2; expectedCount <= 3; expectedCount += 1) {
-  await handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "new" }, {});
+  const reasons = replacementReasons[expectedCount - 2];
+  await handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: reasons.shutdown }, {});
   if (process.listenerCount("exit") !== before) {
     throw new Error("replaced logical session left its process-exit fallback installed");
   }
@@ -844,7 +849,7 @@ for (let expectedCount = 2; expectedCount <= 3; expectedCount += 1) {
   if (process.listenerCount("exit") !== before + 1) {
     throw new Error("replacement extension runtime did not reinstall one process-exit fallback");
   }
-  await handlers.get("session_start")?.({ type: "session_start", reason: "new" }, {});
+  await handlers.get("session_start")?.({ type: "session_start", reason: reasons.start }, {});
   if (process.listenerCount("exit") !== before + 1) {
     throw new Error("replacement logical session duplicated or removed its process-exit fallback");
   }
