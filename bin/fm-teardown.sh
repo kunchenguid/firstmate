@@ -42,6 +42,9 @@
 # `workspace close`. It retires the non-authoritative journal only when a
 # read-only token correlation agrees with that endpoint and pane closure is
 # confirmed. Otherwise the journal stays quarantined for manual inspection.
+# Projected closes share the presentation-order lock, refuse to close the
+# captain's active tab, and restore the exact response-derived pre-close tab
+# if Herdr's last-pane cleanup focuses an unrelated neighboring workspace.
 # Secondmates (kind=secondmate in meta) are retired explicitly. Normal
 # teardown refuses while their home has in-flight crewmate meta files; --force
 # is the approved discard path that prevalidates child removal targets, discards
@@ -1148,7 +1151,29 @@ if [ "$BACKEND" = herdr ] \
   fi
 fi
 
-if [ "$BACKEND" != orca ]; then
+if [ "$HERDR_PRESENTATION_RETIRE_CANDIDATE" = 1 ]; then
+  # shellcheck source=bin/fm-wake-lib.sh
+  . "$SCRIPT_DIR/fm-wake-lib.sh"
+  HERDR_PRESENTATION_FOCUS_LOCK="$STATE/.herdr-presentation-order.lock"
+  HERDR_PRESENTATION_FOCUS_LOCK_HELD=0
+  HERDR_PRESENTATION_FOCUS_LOCK_ATTEMPT=0
+  while [ "$HERDR_PRESENTATION_FOCUS_LOCK_ATTEMPT" -lt 50 ]; do
+    if fm_lock_try_acquire "$HERDR_PRESENTATION_FOCUS_LOCK"; then
+      HERDR_PRESENTATION_FOCUS_LOCK_HELD=1
+      break
+    fi
+    sleep 0.1
+    HERDR_PRESENTATION_FOCUS_LOCK_ATTEMPT=$((HERDR_PRESENTATION_FOCUS_LOCK_ATTEMPT + 1))
+  done
+  if [ "$HERDR_PRESENTATION_FOCUS_LOCK_HELD" = 1 ]; then
+    fm_backend_herdr_projection_close_pane_focus_preserving \
+      "$HERDR_PRESENTATION_SESSION" "$HERDR_PRESENTATION_PANE" 2>/dev/null || true
+    HERDR_PRESENTATION_FOCUS_LOCK_HELD=0
+    fm_lock_release "$HERDR_PRESENTATION_FOCUS_LOCK" || true
+  else
+    echo "warning: herdr presentation focus lock stayed busy; refusing a concurrent focus-unsafe pane close" >&2
+  fi
+elif [ "$BACKEND" != orca ]; then
   fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" 2>/dev/null || true
 fi
 if [ "$HERDR_PRESENTATION_RETIRE_CANDIDATE" = 1 ]; then
