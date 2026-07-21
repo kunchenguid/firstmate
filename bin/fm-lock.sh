@@ -3,9 +3,16 @@
 # Writes the harness (agent) process PID found by walking the shell's ancestry,
 # which lives as long as the firstmate session - unlike the transient subshell
 # PID of any one tool call, which is dead moments after it is written.
-# Usage: fm-lock.sh                   acquire; exit 1 if another live session holds it
+# Usage: fm-lock.sh                   acquire; exit 1 if another live session holds it or the lock cannot be taken
 #        fm-lock.sh status            print holder and liveness; always exits 0
 #        fm-lock.sh release [--force] release this session or a stale lock; force takes any lock
+# Liveness needs process inspection (ps + kill -0 on our own PID). When a harness
+# shell sandbox blocks it (e.g. Codex Seatbelt, CODEX_SANDBOX=seatbelt), every
+# path fails closed with the truthful cause and relaunch remedy: acquire and
+# non-forced release refuse and preserve any existing lock, status reports that
+# liveness cannot be evaluated and never calls a lock stale, and release --force
+# remains the explicit override. Lock write and removal failures also fail
+# closed instead of reporting success.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

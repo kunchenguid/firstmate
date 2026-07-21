@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Watcher liveness and worktree-tangle guard, called by supervision scripts, by
 # fm-wake-drain.sh after it empties queued wakes, and by fm-session-start.sh in
-# read-only advisory mode when another session holds the fleet lock.
+# read-only advisory mode when this session did not acquire the fleet lock.
 # First, always warn if the firstmate primary checkout (FM_ROOT) is on a named
 # non-default branch, because that means firstmate-on-itself work landed in the
 # primary instead of an isolated worktree.
