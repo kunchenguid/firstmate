@@ -538,6 +538,18 @@ launch_template() {
         printf '%s' 'pi __MODELFLAG____EFFORTFLAG__-e __PIEXT__ "$(cat __BRIEF__)"'
       fi
       ;;
+    # cursor (Cursor Agent TUI): a positional prompt starts the supervised
+    # interactive session, verified 2026-07-21 on cursor-agent 2026.07.17-3e2a980.
+    # --force (alias --yolo) is the autonomy flag - it force-allows every command
+    # unless explicitly denied, the equivalent of claude's
+    # --dangerously-skip-permissions. Cursor's own --trust flag is NOT usable
+    # here: it is rejected outside --print/headless mode, so a fresh worktree
+    # shows an interactive Workspace Trust menu that firstmate accepts with the
+    # `a` key after launch (see the harness-adapters skill). Turn-end does NOT
+    # ride the launch command - it is a project `stop` hook installed below.
+    # Cursor is a CREWMATE/SCOUT adapter only; it is refused for --secondmate
+    # above because it has no verified primary turn-end guard or watcher protocol.
+    cursor) printf '%s' 'cursor agent --force __MODELFLAG__"$(cat __BRIEF__)"' ;;
     # grok (Grok Build TUI): a positional prompt starts the supervised interactive
     # session. --always-approve auto-approves every tool execution (verified: the
     # crewmate runs fully autonomously, no permission gate), which an unattended
@@ -586,6 +598,23 @@ case "$ARG3" in
     ;;
 esac
 
+# cursor is verified as a CREWMATE/SCOUT adapter only. It has no verified primary
+# turn-end guard, PreToolUse seatbelt, or watcher protocol, all of which a
+# secondmate needs because a secondmate runs a full firstmate session.
+if [ "$KIND" = secondmate ] && [ "$HARNESS" = cursor ]; then
+  echo "error: harness 'cursor' is verified for crewmate and scout spawns only; a secondmate needs a primary-capable harness (claude, codex, opencode, pi, or grok)" >&2
+  exit 1
+fi
+
+# cursor authenticates per invocation from CURSOR_API_KEY. With no key it does not
+# fail loudly - the TUI parks on "Press any key to log in..." forever, which reads
+# to supervision as a live-but-silent pane. Refuse up front instead, naming both
+# fixes, rather than launching an agent that can never start work.
+if [ "$HARNESS" = cursor ] && [ -z "${POOL_KEY_ENV:-}" ] && [ -z "${CURSOR_API_KEY:-}" ]; then
+  echo "error: harness 'cursor' needs an API key: spawn with --pool (a dispatch-pool account supplies one from its key file) or export CURSOR_API_KEY. Without it the agent parks on a login prompt instead of starting the task." >&2
+  exit 1
+fi
+
 # config/secondmate-harness may carry optional model/effort tokens alongside the
 # harness ("<harness> [<model>] [<effort>]"). They apply only when this is a
 # --secondmate spawn and no explicit per-spawn harness/raw launch was supplied, so
@@ -633,7 +662,10 @@ model_flag_for_harness() {
   local harness=$1 model=$2
   [ -n "$model" ] && [ "$model" != default ] || return 0
   case "$harness" in
-    claude|codex|opencode|pi|grok)
+    # cursor bakes reasoning effort INTO the model id (claude-opus-4-8-thinking-xhigh,
+    # gpt-5.6-sol-medium, ...) and exposes no separate effort flag, so it appears
+    # here but deliberately not in effort_flag_for_harness.
+    claude|codex|opencode|pi|grok|cursor)
       printf -- '--model %s ' "$(shell_quote "$model")"
       ;;
   esac
@@ -1240,6 +1272,21 @@ export default function (pi: any) {
   pi.on("turn_end", () => execFile("touch", ["$TURNEND"]));
 }
 EOF
+      ;;
+    cursor*)
+      # cursor fires a project `stop` hook at every turn boundary, including
+      # after a Ctrl+C-interrupted turn (verified 2026-07-21, cursor-agent
+      # 2026.07.17-3e2a980). Unlike grok, cursor needs no separate hook-trust
+      # grant: ordinary Workspace Trust is enough, and a hook added to an
+      # already-trusted workspace fires on the next launch. A bare `touch` that
+      # reads no stdin and writes no stdout is accepted with no warning and no
+      # stray pane output, despite the documented JSON hook protocol.
+      # NOTE: the headless `-p` path does NOT fire this hook, but firstmate only
+      # ever launches the interactive TUI, where it does.
+      mkdir -p "$WT/.cursor"
+      printf '{"version":1,"hooks":{"stop":[{"type":"command","command":"touch %s"}]}}\n' \
+        "$(json_escape "$(shell_quote "$TURNEND")")" > "$WT/.cursor/hooks.json"
+      exclude_path '.cursor/hooks.json'
       ;;
     codex*)
       # codex: turn-end rides the launch command via -c notify=[...] and __TURNEND__.
