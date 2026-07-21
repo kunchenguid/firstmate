@@ -500,9 +500,6 @@ fm_backend_herdr_projection_order_best_effort() {  # <session> <created-workspac
     def is_new_child:
       (.label | type) == "string"
       and (.label | test("^└ .+ · p:[A-Za-z0-9_-]{22}$"));
-    def is_explicitly_owned_new_child:
-      is_new_child
-      and (.label | test("^└ (firstmate|2ndmate-[^/]+)/.+ · p:[A-Za-z0-9_-]{22}$"));
     def is_legacy_child:
       (.label | type) == "string"
       and (.label | startswith($parent + "/"))
@@ -519,9 +516,6 @@ fm_backend_herdr_projection_order_best_effort() {  # <session> <created-workspac
     | select(($parents | length) == 1)
     | ($parents[0]) as $pidx
     | select($pidx < $current)
-    | select(
-        ([range($pidx + 1; $current) | select($spaces[.] | is_explicitly_owned_new_child)] | length) == 0
-      )
     | (
         reduce range($pidx + 1; $current) as $i (
           0;
