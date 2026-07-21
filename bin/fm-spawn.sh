@@ -960,11 +960,34 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   # Compare against PROJ_ABS_REAL (physical), not PROJ_ABS: a symlinked project
   # prefix would otherwise make the pane's OS-level cwd read differ from
   # PROJ_ABS on the very first poll, before the pane has actually moved.
+  #
+  # A single read that already differs from PROJ_ABS_REAL is not proof the pane
+  # settled there: on some tmux/WSL setups a brand-new window's pane_current_path
+  # transiently reports an unrelated stale path (seen live as another real git
+  # checkout entirely) before the shell catches up with treehouse get's cd. That
+  # stale path still passes the PROJ_ABS_REAL comparison and validate_spawn_worktree
+  # below (it resolves to a real, distinct worktree top-level too), so accepting it
+  # on one read alone silently records the wrong worktree= in state/<id>.meta. Require
+  # two consecutive reads to agree on the same non-project path before accepting it;
+  # a mismatch just becomes the new candidate rather than resetting the wait, so a
+  # pane that is already settled by the first real read only costs the one existing
+  # inter-poll sleep as confirmation, not a whole extra cycle on top.
+  candidate=""
   for _ in $(seq 1 60); do
     p=$(spawn_current_path "$WT_TARGET" || true)
-    if [ -n "$p" ] && [ "$(real_path_or_raw "$p")" != "$PROJ_ABS_REAL" ]; then
-      WT="$p"
-      break
+    if [ -n "$p" ]; then
+      p_real=$(real_path_or_raw "$p")
+      if [ "$p_real" != "$PROJ_ABS_REAL" ]; then
+        if [ -n "$candidate" ] && [ "$p_real" = "$candidate" ]; then
+          WT="$p"
+          break
+        fi
+        candidate="$p_real"
+      else
+        candidate=""
+      fi
+    else
+      candidate=""
     fi
     sleep 1
   done
