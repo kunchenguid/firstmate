@@ -61,21 +61,48 @@ for nix_bin in "${HOME:-}/.nix-profile/bin" /nix/var/nix/profiles/default/bin; d
 done
 export PATH
 
-# Still missing (e.g. no Nix profile): bootstrap the pinned, checksum-verified
-# build into the user cache and prepend it to PATH. Reuse fm-install-shellcheck.sh
-# so the download/checksum logic stays in one place; its --version line goes to
-# stderr to keep lint stdout clean.
+host_os=$(uname -s 2>/dev/null || printf 'unknown')
+host_arch=$(uname -m 2>/dev/null || printf 'unknown')
+can_bootstrap=0
+if [ "$host_os" = Linux ] && [ "$host_arch" = x86_64 ]; then
+  can_bootstrap=1
+fi
+
+cache_bin="${XDG_CACHE_HOME:-$HOME/.cache}/firstmate/bin"
+cache_shellcheck="$cache_bin/shellcheck"
+cache_selected=0
+
+install_cached_shellcheck() {
+  if ! mkdir -p "$cache_bin" || ! "$ROOT/bin/fm-install-shellcheck.sh" "$cache_bin" >&2; then
+    printf 'fm-lint.sh: failed to install ShellCheck %s for CI parity.\n' \
+      "$REQUIRED_SHELLCHECK" >&2
+    return 1
+  fi
+}
+
+shellcheck_version() {
+  local version_output
+  version_output=$(shellcheck --version 2>/dev/null) || return 1
+  printf '%s\n' "$version_output" | awk '/^version:/ {print $2; exit}'
+}
+
 if ! command -v shellcheck >/dev/null 2>&1; then
-  cache_bin="${XDG_CACHE_HOME:-$HOME/.cache}/firstmate/bin"
-  if [ ! -x "$cache_bin/shellcheck" ]; then
-    if ! mkdir -p "$cache_bin" || ! "$ROOT/bin/fm-install-shellcheck.sh" "$cache_bin" >&2; then
-      printf 'fm-lint.sh: failed to install ShellCheck %s for CI parity.\n' \
-        "$REQUIRED_SHELLCHECK" >&2
+  if [ -x "$cache_shellcheck" ]; then
+    PATH="$cache_bin:$PATH"
+    export PATH
+    cache_selected=1
+  elif [ "$can_bootstrap" -eq 1 ]; then
+    if ! install_cached_shellcheck; then
       exit 127
     fi
+    PATH="$cache_bin:$PATH"
+    export PATH
+    cache_selected=1
+  else
+    printf 'fm-lint.sh: ShellCheck is missing on %s/%s; automatic bootstrap supports Linux x86_64 only. Install ShellCheck %s for CI parity.\n' \
+      "$host_os" "$host_arch" "$REQUIRED_SHELLCHECK" >&2
+    exit 127
   fi
-  PATH="$cache_bin:$PATH"
-  export PATH
 fi
 
 # Enforce the pin so local and CI resolve the identical rule set.
@@ -85,12 +112,47 @@ if ! command -v shellcheck >/dev/null 2>&1; then
   exit 127
 fi
 unset SHELLCHECK_OPTS
-resolved=$(shellcheck --version | awk '/^version:/ {print $2; exit}')
+resolved=""
+if ! resolved=$(shellcheck_version); then
+  resolved=""
+fi
+if [ -z "$resolved" ] && [ "$cache_selected" -eq 1 ]; then
+  if [ "$can_bootstrap" -eq 1 ]; then
+    if ! install_cached_shellcheck; then
+      exit 127
+    fi
+    if ! resolved=$(shellcheck_version); then
+      resolved=""
+    fi
+  else
+    printf 'fm-lint.sh: cached ShellCheck could not run on %s/%s; automatic bootstrap supports Linux x86_64 only. Install ShellCheck %s for CI parity.\n' \
+      "$host_os" "$host_arch" "$REQUIRED_SHELLCHECK" >&2
+    exit 127
+  fi
+fi
 # Log the resolved version to stderr so both CI and local runs record it.
 printf 'fm-lint.sh: ShellCheck %s (pinned %s)\n' "$resolved" "$REQUIRED_SHELLCHECK" >&2
 if [ "$resolved" != "$REQUIRED_SHELLCHECK" ]; then
-  printf 'fm-lint.sh: ShellCheck %s required for CI parity, found %s. Install %s.\n' \
-    "$REQUIRED_SHELLCHECK" "$resolved" "$REQUIRED_SHELLCHECK" >&2
+  if [ "$cache_selected" -eq 1 ] && [ "$can_bootstrap" -eq 1 ]; then
+    if ! install_cached_shellcheck; then
+      exit 127
+    fi
+    if ! resolved=$(shellcheck_version); then
+      resolved=""
+    fi
+    if [ "$resolved" = "$REQUIRED_SHELLCHECK" ]; then
+      printf 'fm-lint.sh: ShellCheck %s (pinned %s)\n' "$resolved" "$REQUIRED_SHELLCHECK" >&2
+    fi
+  fi
+fi
+if [ "$resolved" != "$REQUIRED_SHELLCHECK" ]; then
+  if [ "$cache_selected" -eq 1 ] && [ "$can_bootstrap" -eq 0 ]; then
+    printf 'fm-lint.sh: cached ShellCheck %s is not pinned to %s on %s/%s; automatic bootstrap supports Linux x86_64 only. Install ShellCheck %s for CI parity.\n' \
+      "$resolved" "$REQUIRED_SHELLCHECK" "$host_os" "$host_arch" "$REQUIRED_SHELLCHECK" >&2
+  else
+    printf 'fm-lint.sh: ShellCheck %s required for CI parity, found %s. Install %s.\n' \
+      "$REQUIRED_SHELLCHECK" "$resolved" "$REQUIRED_SHELLCHECK" >&2
+  fi
   exit 1
 fi
 

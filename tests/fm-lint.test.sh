@@ -103,6 +103,106 @@ SH
   pass "fm-lint.sh refuses to lint under a non-pinned ShellCheck version"
 }
 
+test_reuses_cached_shellcheck_on_supported_version() {
+  local tmp fakebin cache out rc marker
+  tmp=$(fm_test_tmproot fm-lint-cache)
+  fakebin=$(fm_fakebin "$tmp")
+  cache="$tmp/cache/firstmate/bin"
+  marker="$tmp/curl"
+  mkdir -p "$cache"
+  cat > "$fakebin/uname" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = "-s" ]; then
+  printf 'Darwin\n'
+else
+  printf 'arm64\n'
+fi
+SH
+  cat > "$fakebin/curl" <<'SH'
+#!/usr/bin/env bash
+: > "$CURL_MARKER"
+exit 1
+SH
+  cat > "$cache/shellcheck" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = "--version" ]; then
+  printf 'ShellCheck - shell script analysis tool\nversion: 0.11.0\n'
+  exit 0
+fi
+exit 0
+SH
+  chmod +x "$fakebin/uname" "$fakebin/curl" "$cache/shellcheck"
+  rc=0
+  out=$(PATH="$fakebin:/bin" HOME="$tmp/home" XDG_CACHE_HOME="$tmp/cache" CURL_MARKER="$marker" \
+    "$LINT" "$LINT" 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "fm-lint.sh did not reuse the pinned cache binary"$'\n'"$out"
+  [ ! -e "$marker" ] || fail "fm-lint.sh attempted a download for a valid cache binary"
+  pass "fm-lint.sh reuses a valid cached ShellCheck"
+}
+
+test_unsupported_platform_does_not_bootstrap() {
+  local tmp fakebin out rc marker
+  tmp=$(fm_test_tmproot fm-lint-platform)
+  fakebin=$(fm_fakebin "$tmp")
+  marker="$tmp/curl"
+  cat > "$fakebin/uname" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = "-s" ]; then
+  printf 'Darwin\n'
+else
+  printf 'x86_64\n'
+fi
+SH
+  cat > "$fakebin/curl" <<'SH'
+#!/usr/bin/env bash
+: > "$CURL_MARKER"
+exit 1
+SH
+  chmod +x "$fakebin/uname" "$fakebin/curl"
+  rc=0
+  out=$(PATH="$fakebin:/bin" HOME="$tmp/home" XDG_CACHE_HOME="$tmp/cache" CURL_MARKER="$marker" \
+    "$LINT" "$LINT" 2>&1) || rc=$?
+  [ "$rc" -eq 127 ] || fail "fm-lint.sh did not reject unsupported bootstrap platform"$'\n'"$out"
+  assert_contains "$out" "automatic bootstrap supports Linux x86_64 only" \
+    "unsupported platform message"
+  [ ! -e "$marker" ] || fail "fm-lint.sh attempted a download on an unsupported platform"
+  [ ! -e "$tmp/cache/firstmate/bin/shellcheck" ] || \
+    fail "fm-lint.sh cached a ShellCheck binary on an unsupported platform"
+  pass "fm-lint.sh does not bootstrap ShellCheck off Linux x86_64"
+}
+
+test_cached_wrong_version_fails_clearly_off_platform() {
+  local tmp fakebin cache out rc
+  tmp=$(fm_test_tmproot fm-lint-cache-mismatch)
+  fakebin=$(fm_fakebin "$tmp")
+  cache="$tmp/cache/firstmate/bin"
+  mkdir -p "$cache"
+  cat > "$fakebin/uname" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = "-s" ]; then
+  printf 'Darwin\n'
+else
+  printf 'x86_64\n'
+fi
+SH
+  cat > "$cache/shellcheck" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = "--version" ]; then
+  printf 'ShellCheck - shell script analysis tool\nversion: 0.9.9\n'
+  exit 0
+fi
+exit 0
+SH
+  chmod +x "$fakebin/uname" "$cache/shellcheck"
+  rc=0
+  out=$(PATH="$fakebin:/bin" HOME="$tmp/home" XDG_CACHE_HOME="$tmp/cache" \
+    "$LINT" "$LINT" 2>&1) || rc=$?
+  [ "$rc" -eq 1 ] || fail "fm-lint.sh accepted an unpinned cached ShellCheck"$'\n'"$out"
+  assert_contains "$out" "cached ShellCheck 0.9.9 is not pinned" \
+    "cached mismatch message"
+  pass "fm-lint.sh reports an unpinned cached ShellCheck clearly"
+}
+
 test_catches_a_real_lint_defect() {
   if ! pinned_ready; then
     pass "SKIP (ShellCheck $REQUIRED not resolved): lint-defect regression check"
@@ -187,6 +287,9 @@ test_nomistakes_invokes_the_owner
 test_pins_an_explicit_version
 test_ci_installs_and_logs_the_pinned_version
 test_rejects_wrong_shellcheck_version
+test_reuses_cached_shellcheck_on_supported_version
+test_unsupported_platform_does_not_bootstrap
+test_cached_wrong_version_fails_clearly_off_platform
 test_catches_a_real_lint_defect
 test_ignores_ambient_shellcheck_opts
 test_clean_fixture_passes

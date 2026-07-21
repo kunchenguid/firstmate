@@ -320,6 +320,105 @@ SH
   pass "matching installed and upstream exits 0"
 }
 
+test_unreadable_lock_is_error() {
+  local w fakebin npm gh nix map_gh map_nix out ec df
+  w="$TMP_ROOT/unreadable-lock"
+  mkdir -p "$w"
+  fakebin=$(fm_fakebin "$w")
+  setup_fake_harness "$fakebin" 2.1.216 0.144.6 0.2.93 1.18.4 0.80.10 1.40.1
+  df="$w/dotfiles"
+  make_dotfiles "$df"
+  printf '{broken\n' > "$df/flake.lock"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$df/scripts/agentic-tools-check-updates.sh"
+  chmod +x "$df/scripts/agentic-tools-check-updates.sh"
+  npm="$w/npm"; gh="$w/gh"; nix="$w/nix"
+  map_gh="$w/gh.map"; map_nix="$w/nix.map"
+  printf 'openai/codex=0.144.6\nanomalyco/opencode=1.18.4\nbadlogic/pi-mono=0.80.10\n' > "$map_gh"
+  printf '%s\n' \
+    'claude-code=2.1.216' \
+    'codex=0.144.6' \
+    'opencode=1.18.4' \
+    'pi-coding-agent=0.80.10' \
+    'grok-build=0.2.93' > "$map_nix"
+  write_npm_stub "$npm" 2.1.216
+  write_gh_stub "$gh" "$map_gh"
+  write_nix_stub "$nix" "$map_nix"
+  set +e
+  out=$(run_tool "$fakebin" "$npm" "$gh" "$nix" "$df" 2>&1)
+  ec=$?
+  set -e
+  expect_code 3 "$ec" "unreadable lock exits 3"
+  assert_contains "$out" "nixpkgs lock: (unreadable)" "unreadable lock marker"
+  assert_contains "$out" "claude       2.1.216        (error)" "unreadable lock row error"
+  assert_contains "$out" "Summary: behind=0 errors=5" "unreadable lock counts errors"
+  pass "unreadable nixpkgs lock is a hard inventory error"
+}
+
+test_locked_probe_error_is_error() {
+  local w fakebin npm gh nix map_gh map_nix out ec df
+  w="$TMP_ROOT/locked-probe-error"
+  mkdir -p "$w"
+  fakebin=$(fm_fakebin "$w")
+  setup_fake_harness "$fakebin" 2.1.216 0.144.6 0.2.93 1.18.4 0.80.10 1.40.1
+  df="$w/dotfiles"
+  make_dotfiles "$df"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$df/scripts/agentic-tools-check-updates.sh"
+  chmod +x "$df/scripts/agentic-tools-check-updates.sh"
+  npm="$w/npm"; gh="$w/gh"; nix="$w/nix"
+  map_gh="$w/gh.map"; map_nix="$w/nix.map"
+  printf 'openai/codex=0.144.6\nanomalyco/opencode=1.18.4\nbadlogic/pi-mono=0.80.10\n' > "$map_gh"
+  printf '%s\n' \
+    'claude-code=2.1.216' \
+    'codex=0.144.6' \
+    'opencode=1.18.4' \
+    'pi-coding-agent=0.80.10' \
+    'grok-build=0.2.93' > "$map_nix"
+  write_npm_stub "$npm" 2.1.216
+  write_gh_stub "$gh" "$map_gh"
+  write_nix_stub "$nix" "$map_nix" fail
+  set +e
+  out=$(run_tool "$fakebin" "$npm" "$gh" "$nix" "$df" 2>&1)
+  ec=$?
+  set -e
+  expect_code 3 "$ec" "locked probe failure exits 3"
+  assert_contains "$out" "claude       2.1.216        (error)" "locked probe row error"
+  assert_contains "$out" "Summary: behind=0 errors=5" "locked probe errors are counted"
+  pass "locked nixpkgs probe failures cannot appear current"
+}
+
+test_empty_upstream_parse_is_error() {
+  local w fakebin npm gh nix map_gh map_nix out ec df
+  w="$TMP_ROOT/empty-upstream"
+  mkdir -p "$w"
+  fakebin=$(fm_fakebin "$w")
+  setup_fake_harness "$fakebin" 2.1.216 0.144.6 0.2.93 1.18.4 0.80.10 1.40.1
+  df="$w/dotfiles"
+  make_dotfiles "$df"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$df/scripts/agentic-tools-check-updates.sh"
+  chmod +x "$df/scripts/agentic-tools-check-updates.sh"
+  npm="$w/npm"; gh="$w/gh"; nix="$w/nix"
+  map_gh="$w/gh.map"; map_nix="$w/nix.map"
+  printf 'openai/codex=0.144.6\nanomalyco/opencode=1.18.4\nbadlogic/pi-mono=0.80.10\n' > "$map_gh"
+  printf '%s\n' \
+    'claude-code=2.1.216' \
+    'codex=0.144.6' \
+    'opencode=1.18.4' \
+    'pi-coding-agent=0.80.10' \
+    'grok-build=0.2.93' > "$map_nix"
+  write_npm_stub "$npm" ""
+  write_gh_stub "$gh" "$map_gh"
+  write_nix_stub "$nix" "$map_nix"
+  set +e
+  out=$(run_tool "$fakebin" "$npm" "$gh" "$nix" "$df" 2>&1)
+  ec=$?
+  set -e
+  expect_code 3 "$ec" "empty upstream parse exits 3"
+  assert_contains "$out" "claude       2.1.216        2.1.216        (unreachable)" \
+    "empty upstream parse is not accepted"
+  assert_contains "$out" "Summary: behind=0 errors=1" "empty upstream parse counts an error"
+  pass "empty upstream versions are hard parse errors"
+}
+
 test_upstream_error_exit_3() {
   local w fakebin npm gh nix map_gh map_nix out ec df
   w="$TMP_ROOT/offline"
@@ -510,6 +609,9 @@ test_help_and_usage
 test_installed_only_exit_0_soft_unknown
 test_behind_exit_1
 test_current_exit_0
+test_unreadable_lock_is_error
+test_locked_probe_error_is_error
+test_empty_upstream_parse_is_error
 test_upstream_error_exit_3
 test_agentic_behind_counts
 test_agentic_error_takes_precedence

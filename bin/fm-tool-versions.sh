@@ -168,14 +168,20 @@ resolve_dotfiles() {
 
 # Strip common noise into a bare version-ish token (digits/dots, optional pre).
 normalize_version() {
-  local raw=$1
+  local raw=$1 normalized
   raw=$(printf '%s' "$raw" | tr -d '\r')
   # Prefer the first semver-looking token in the string.
-  if printf '%s' "$raw" | grep -Eo '[0-9]+(\.[0-9]+)+([.-][A-Za-z0-9.]+)?' >/dev/null 2>&1; then
-    printf '%s' "$raw" | grep -Eo '[0-9]+(\.[0-9]+)+([.-][A-Za-z0-9.]+)?' | head -1
+  if normalized=$(printf '%s' "$raw" | grep -Eo '[0-9]+(\.[0-9]+)+([.-][A-Za-z0-9]+([.-][A-Za-z0-9]+)*)?' | head -1) \
+    && [ -n "$normalized" ]; then
+    printf '%s\n' "$normalized"
     return 0
   fi
-  printf '%s' "$raw" | sed -E 's/^[^0-9]*//; s/[[:space:]].*$//; s/^v//; s/^rust-v//'
+  normalized=$(printf '%s' "$raw" | sed -E 's/^[^0-9]*//; s/[[:space:]].*$//; s/^v//; s/^rust-v//')
+  if printf '%s' "$normalized" | grep -Eq '^[0-9]+(\.[0-9]+)+([.-][A-Za-z0-9]+([.-][A-Za-z0-9]+)*)?$'; then
+    printf '%s\n' "$normalized"
+    return 0
+  fi
+  return 1
 }
 
 # Compare two version tokens. Echo -1 / 0 / 1 (a<b / equal / a>b).
@@ -321,7 +327,7 @@ nixpkgs_locked_rev() {
   [ -f "$lock" ] || return 1
   # Prefer python for robust JSON; fall back to sed/grep for minimal envs.
   if command -v python3 >/dev/null 2>&1; then
-    python3 -c '
+    if python3 -c '
 import json, sys
 lock = json.load(open(sys.argv[1]))
 node = lock.get("nodes", {}).get("nixpkgs", {})
@@ -329,11 +335,16 @@ rev = node.get("locked", {}).get("rev")
 if not rev:
     sys.exit(1)
 print(rev)
-' "$lock"
-    return 0
+' "$lock"; then
+      return 0
+    fi
+    return 1
   fi
   # Fallback: crude extraction of the nixpkgs locked rev near its node.
-  grep -A20 '"nixpkgs"' "$lock" | grep -m1 '"rev"' | sed -E 's/.*"rev": *"([^"]+)".*/\1/'
+  local rev
+  rev=$(grep -A20 '"nixpkgs"' "$lock" | grep -m1 '"rev"' | sed -E 's/.*"rev": *"([^"]+)".*/\1/') || return 1
+  [ -n "$rev" ] || return 1
+  printf '%s\n' "$rev"
 }
 
 locked_pkg_version() {
@@ -406,6 +417,7 @@ BEHIND=0
 ERRORS=0
 DOTFILES=""
 NIXPKGS_REV=""
+NIXPKGS_LOCK_FAILED=0
 
 if [ "$INSTALLED_ONLY" -eq 0 ]; then
   if DOTFILES=$(resolve_dotfiles); then
@@ -416,7 +428,9 @@ if [ "$INSTALLED_ONLY" -eq 0 ]; then
 fi
 
 if [ -n "$DOTFILES" ] && [ "$SKIP_NIX" -eq 0 ]; then
-  NIXPKGS_REV=$(nixpkgs_locked_rev "$DOTFILES" 2>/dev/null || true)
+  if ! NIXPKGS_REV=$(nixpkgs_locked_rev "$DOTFILES" 2>/dev/null); then
+    NIXPKGS_LOCK_FAILED=1
+  fi
 fi
 
 printf 'Fleet tool versions (read-only; never mutates)\n'
@@ -474,8 +488,13 @@ for row in "${HARNESS_ROWS[@]}"; do
       locked='(error)'
       lock_failed=1
     fi
-  elif [ -n "$pkg" ] && [ "$SKIP_NIX" -eq 0 ] && [ -z "$NIXPKGS_REV" ]; then
-    locked='(no lock)'
+  elif [ -n "$pkg" ] && [ "$SKIP_NIX" -eq 0 ]; then
+    if [ "$NIXPKGS_LOCK_FAILED" -eq 1 ]; then
+      locked='(error)'
+      lock_failed=1
+    else
+      locked='(no lock)'
+    fi
   fi
 
   if [ "$NO_NETWORK" -eq 0 ]; then
@@ -494,17 +513,15 @@ for row in "${HARNESS_ROWS[@]}"; do
     upstream='(skipped)'
   fi
 
-  # Status prioritizes: missing install / unreachable tip -> error; else
-  # compare installed vs a real upstream tip; else soft unknown.
+  # Status prioritizes missing installs, probe failures, and unreadable locks.
   if [ "$install_missing" -eq 1 ]; then
     status=error
   elif [ "$tip_failed" -eq 1 ]; then
     status=error
+  elif [ "$lock_failed" -eq 1 ]; then
+    status=error
   elif [ "$upstream" != '(unknown)' ] && [ "$upstream" != '(skipped)' ] && [ "$upstream" != '-' ] && [ "$upstream" != '(unreachable)' ]; then
     status=$(classify_pair "$installed" "$upstream")
-  elif [ "$lock_failed" -eq 1 ]; then
-    # No tip to compare; a hard lock eval failure still surfaces as error.
-    status=error
   else
     status=unknown
   fi
