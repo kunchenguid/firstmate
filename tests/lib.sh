@@ -34,6 +34,28 @@ FM_TEST_LIB_SOURCED=1
 # strips this to verify real refusal.
 export FM_GATE_REFUSE_BYPASS=1
 
+# Pin a UTF-8 character locale for the whole suite. The composer classifiers
+# match multibyte glyphs as CHARACTERS - bin/fm-composer-lib.sh strips a leading
+# prompt glyph with ${content#?}, and bin/backends/herdr.sh finds its bare
+# composer row with the bracket expression '^[❯›]' - and both only behave that
+# way under a UTF-8 LC_CTYPE. Under an ambient C/POSIX locale (LANG unset, the
+# default for a non-interactive shell) they operate on single BYTES instead: the
+# glyph strip leaves a dangling continuation byte, and the bracket expression
+# matches any row starting with 0xE2 (every box-drawing border), so
+# tests/fm-composer-lib, fm-backend-cmux and fm-backend-herdr read an idle
+# composer as 'pending'. CI runs UTF-8, so without this pin the suite's verdict
+# depends on the developer's ambient locale. C.UTF-8 keeps C collation and only
+# changes the charmap (verified: `sort` order is byte-identical to C); en_US is
+# the fallback where C.UTF-8 is absent. Both spellings of each name are probed
+# because `locale -a` prints them as C.UTF-8 on BSD/macOS and C.utf8 on glibc.
+for _fm_test_locale in C.UTF-8 C.utf8 en_US.UTF-8 en_US.utf8; do
+  if locale -a 2>/dev/null | grep -qx "$_fm_test_locale"; then
+    export LC_ALL="$_fm_test_locale" LANG="$_fm_test_locale"
+    break
+  fi
+done
+unset _fm_test_locale
+
 # Resolve the repo root from this library's own location. Consumed by sourcing
 # test files, not by this library, so it reads as "unused" here.
 # shellcheck disable=SC2034
@@ -98,6 +120,41 @@ exit 0
 SH
     chmod +x "$fakebin/$tool"
   done
+}
+
+# fm_fake_tasks_axi <fakebin>: drop a stub that satisfies both compatibility
+# probes the real bin/ entry points run - fm_tasks_axi_compatible
+# (bin/fm-tasks-axi-lib.sh: version >= 0.1.1, `update --help` exposing
+# --archive-body, `mv --help` exposing [<id>...]) and bin/fm-decision-hold.sh's
+# `hold --help` captain-hold contract - and exits 0 for everything else. Any
+# test driving a real entry point that consults tasks-axi (e.g. fm-teardown's
+# scout unresolved-decision gate, which shells out to fm-decision-hold.sh
+# verify) needs this, otherwise the case silently depends on a compatible
+# tasks-axi being installed on the host.
+fm_fake_tasks_axi() {
+  local fakebin=$1
+  cat > "$fakebin/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --version ]; then
+  printf '%s\n' '0.1.1'
+  exit 0
+fi
+if [ "${1:-}" = update ] && [ "${2:-}" = --help ]; then
+  printf '%s\n' 'usage: tasks-axi update <id> [flags]'
+  printf '%s\n' '  --archive-body'
+  exit 0
+fi
+if [ "${1:-}" = mv ] && [ "${2:-}" = --help ]; then
+  printf '%s\n' 'usage: tasks-axi mv <id> [<id>...] --to <path-or-dir>'
+  exit 0
+fi
+if [ "${1:-}" = hold ] && [ "${2:-}" = --help ]; then
+  printf '%s\n' 'usage: tasks-axi hold <id> --kind captain [flags]'
+  exit 0
+fi
+exit 0
+SH
+  chmod +x "$fakebin/tasks-axi"
 }
 
 # --- deterministic git identity and fixtures --------------------------------

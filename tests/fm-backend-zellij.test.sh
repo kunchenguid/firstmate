@@ -64,6 +64,10 @@ fi
 exit 0
 SH
   chmod +x "$fb/zellij"
+  # The teardown case below drives fm-teardown's scout unresolved-decision gate,
+  # which shells out to bin/fm-decision-hold.sh verify and refuses without a
+  # compatible tasks-axi. Stub it so the case does not depend on the host.
+  fm_fake_tasks_axi "$fb"
   printf '%s\n' "$fb"
 }
 
