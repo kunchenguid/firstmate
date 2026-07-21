@@ -916,7 +916,9 @@ Codex hooks review similarly navigates from `Review hooks` to `Trust all and con
 An unknown focus, an unknown blocked dialog, unreadable post-key state, or an exhausted three-attempt key budget fails the spawn with a classified error.
 
 Raw capture text alone is never trusted as proof of a live dialog: the typed launch command carries the shell-quoted brief, harness transcripts can render dialog wording, and the recent source retains dismissed frames inside the capture window.
-Every classified dialog, unknown shape, and dismissal readback is therefore corroborated against `agent get`: an agent already reporting working/idle/done is past its startup dialogs, so the handler sends no key and the spawn verifies clean; an unknown shape fails immediately only when the agent is corroborated blocked, and otherwise keeps polling to the bounded timeout.
+Every classified dialog, unknown shape, and dismissal readback is therefore corroborated against `agent get`: only a `working` agent — actively generating, therefore past its startup dialogs — suppresses keys and verifies the spawn while dialog-shaped text is visible.
+`idle`/`done` are trusted only when the capture shows no dialog shape at all, because no recorded observation pins what agent_status reads while a dialog is actually displayed and a harness parked at one is not generating.
+An unknown shape fails immediately only when the agent is corroborated blocked, and otherwise keeps polling to the bounded timeout.
 The corroboration paths are exercised by the fake-CLI cases only; a live first-launch dismissal traversal through the lab helper has not yet been recorded.
 
 The recurring watcher warning was a separate deterministic shell bug rather than proof that Herdr dropped a key.

@@ -1209,6 +1209,37 @@ test_dialog_unknown_text_without_agent_polls_to_timeout() {
   pass "herdr first-launch dialogs: dialog-shaped text without an agent polls to the bounded timeout instead of instant failure"
 }
 
+test_dialog_visible_dialog_with_idle_agent_is_still_driven() {
+  local dir log resp fb down_count enter_count
+  dir="$TMP_ROOT/dialog-idle-drive"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf 'WARNING: Claude Code running in Bypass Permissions mode\n❯ 1. No, exit\n  2. Yes, I accept\n' > "$resp/1.out"
+  printf '{"result":{"agent":{"agent":"claude","agent_status":"idle"}}}\n' > "$resp/2.out"
+  printf 'WARNING: Claude Code running in Bypass Permissions mode\n  1. No, exit\n❯ 2. Yes, I accept\n' > "$resp/4.out"
+  fb=$(make_herdr_fakebin "$dir")
+  PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    FM_BACKEND_HERDR_DIALOG_POLLS=1 FM_BACKEND_HERDR_DIALOG_KEY_RETRIES=1 FM_BACKEND_HERDR_DIALOG_KEY_SLEEP=0 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_handle_startup_dialog default:w1:p2 claude' "$ROOT" >/dev/null 2>&1
+  down_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''down' "$log" || true)
+  enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log" || true)
+  [ "$down_count" -eq 1 ] || fail "an idle agent must not short-circuit a classified visible dialog; the handler must still drive it, sent $down_count Downs"
+  [ "$enter_count" -eq 0 ] || fail "driving a visible dialog under an idle agent must still verify movement before Enter, sent $enter_count Enters"
+  pass "herdr first-launch dialogs: idle/done never short-circuits a classified visible dialog; only a working agent does"
+}
+
+test_dialog_clean_capture_with_done_agent_verifies_spawn() {
+  local dir log resp fb keys
+  dir="$TMP_ROOT/dialog-none-done"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf 'harness banner, no dialog anywhere\n' > "$resp/1.out"
+  printf '{"result":{"agent":{"agent":"claude","agent_status":"done"}}}\n' > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_DIALOG_POLLS=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_handle_startup_dialog default:w1:p2 claude' "$ROOT" >/dev/null 2>&1 \
+    || fail "a dialog-free capture with a done agent must verify the spawn"
+  keys=$(grep -c $'\x1f''pane'$'\x1f''send-keys' "$log" || true)
+  [ "$keys" -eq 0 ] || fail "a dialog-free done agent must not receive keys, sent $keys"
+  pass "herdr first-launch dialogs: idle/done still verifies the spawn when the capture shows no dialog shape"
+}
+
 test_dialog_stale_dismissed_frame_with_running_agent_stops_enters() {
   local dir log resp fb enter_count
   dir="$TMP_ROOT/dialog-stale-dismiss"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
@@ -2650,6 +2681,8 @@ test_dialog_phantom_known_dialog_text_with_running_agent_is_not_driven
 test_dialog_unknown_text_with_running_agent_spawns_clean
 test_dialog_unknown_text_with_blocked_agent_fails_closed
 test_dialog_unknown_text_without_agent_polls_to_timeout
+test_dialog_visible_dialog_with_idle_agent_is_still_driven
+test_dialog_clean_capture_with_done_agent_verifies_spawn
 test_dialog_stale_dismissed_frame_with_running_agent_stops_enters
 test_events_capable_large_schema_is_pipefail_safe
 test_spawn_wires_guarded_herdr_dialog_handler

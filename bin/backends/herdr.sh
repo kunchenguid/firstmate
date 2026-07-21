@@ -1288,18 +1288,20 @@ EOF
 # Dialog-shaped text in the capture window is not proof of a live dialog: the
 # typed launch command carries the shell-quoted brief, the harness transcript
 # can render dialog wording, and herdr's recent source retains dismissed
-# frames. A harness whose registered agent already reports working/idle/done
-# is past every startup dialog, so its pane must never receive dialog keys and
-# must not fail the spawn over leftover dialog-shaped text.
-fm_backend_herdr_dialog_agent_state() {  # <harness> -> running|blocked|absent
+# frames. Only 'working' proves the harness is actively generating and
+# therefore past every startup dialog; no verified fact records what
+# agent_status reads while a dialog is actually displayed (a harness parked at
+# one is not generating and could plausibly read idle), so idle/done
+# ('settled') may only be trusted when the capture shows no dialog shape.
+fm_backend_herdr_dialog_agent_state() {  # <harness> -> working|settled|blocked|absent
   local harness=$1 identity agent status
   identity=$(fm_backend_herdr_agent_identity_raw "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" 2>/dev/null || true)
   IFS=$'\t' read -r agent status <<EOF
 $identity
 EOF
   case "$harness:$agent:$status" in
-    claude*:claude*:working|claude*:claude*:idle|claude*:claude*:done) printf 'running' ;;
-    codex*:codex*:working|codex*:codex*:idle|codex*:codex*:done) printf 'running' ;;
+    claude*:claude*:working|codex*:codex*:working) printf 'working' ;;
+    claude*:claude*:idle|claude*:claude*:done|codex*:codex*:idle|codex*:codex*:done) printf 'settled' ;;
     *:*:blocked) printf 'blocked' ;;
     *) printf 'absent' ;;
   esac
@@ -1358,7 +1360,7 @@ EOF
         printf '%s' "$after_state"
         return 0
       fi
-      if [ "$(fm_backend_herdr_dialog_agent_state "$harness")" = running ]; then
+      if [ "$(fm_backend_herdr_dialog_agent_state "$harness")" = working ]; then
         printf '%s' "$after_state"
         return 0
       fi
@@ -1393,18 +1395,18 @@ $state
 EOF
     case "$kind" in
       claude-trust|claude-bypass|codex-trust|codex-hooks-review)
-        if [ "$(fm_backend_herdr_dialog_agent_state "$harness")" = running ]; then
+        if [ "$(fm_backend_herdr_dialog_agent_state "$harness")" = working ]; then
           return 0
         fi
         fm_backend_herdr_dialog_drive_visible "$target" "$harness" "$capture" \
           "$FM_BACKEND_HERDR_DIALOG_KEY_RETRIES" "$FM_BACKEND_HERDR_DIALOG_KEY_SLEEP" >/dev/null || {
-          [ "$(fm_backend_herdr_dialog_agent_state "$harness")" = running ] && return 0
+          [ "$(fm_backend_herdr_dialog_agent_state "$harness")" = working ] && return 0
           return 1
         }
         ;;
       unknown)
         case "$(fm_backend_herdr_dialog_agent_state "$harness")" in
-          running) return 0 ;;
+          working) return 0 ;;
           blocked)
             echo "error: unrecognized $harness startup dialog in herdr pane '$target'; refusing to guess a key" >&2
             return 1
@@ -1413,7 +1415,7 @@ EOF
         ;;
       none)
         case "$(fm_backend_herdr_dialog_agent_state "$harness")" in
-          running) return 0 ;;
+          working|settled) return 0 ;;
           blocked)
             echo "error: $harness is blocked in herdr pane '$target', but the visible dialog shape is unknown; refusing to guess a key" >&2
             return 1
