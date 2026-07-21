@@ -215,6 +215,7 @@ Profile ids and project keys use at most 64 and 100 characters respectively from
 `host` is exactly `github.com` and `git_protocol` is exactly `https` in version 1.
 `expected_login` and optional `fork_owner` must be valid GitHub login names.
 `gh_config_dir` must be an existing absolute ordinary directory outside the FirstMate code root, `FM_HOME`, project clones, task copies, `data/`, and `state/`.
+Every profile must resolve to a different `gh_config_dir`; sharing one directory across profile ids is rejected.
 Profile directories are read-only credential inputs owned by GitHub CLI and the operating-system credential store.
 `commit_identity` is optional as a pair, but a strict project without it cannot create commits and cannot initialize a strict no-mistakes repository context because `user.useConfigOnly=true` prevents ambient identity fallback.
 `fork_owner` is optional and never changes profile selection; parent and fork operations remain bound to the one project profile.
@@ -231,12 +232,15 @@ Routed automation refuses `gh auth login`, `switch`, `logout`, `refresh`, token 
 
 `bin/fm-github-config.mjs` strictly parses and resolves this schema, `bin/fm-github-lib.sh` owns process policy, and `bin/fm-github-exec.sh` is the guarded command owner.
 For each selected child, the guarded owner removes ambient GitHub token variables and alternate gh selection, then sets the exact `GH_CONFIG_DIR`, `GH_HOST`, disabled prompts, and disabled updates.
+It pins the validated routing-file path for descendants and removes ambient `FM_GITHUB_CONFIG` and `FM_CONFIG_OVERRIDE`, so a delayed child cannot replace the selected profile definition.
 It removes Git config-injection variables, askpass, SSH, author, editor, prompt, proxy, TLS, certificate, cookie, and trace overrides.
 It uses isolated global and system Git configuration, resets credential-helper chains, and installs only the exact selected `gh auth git-credential` helper for HTTPS GitHub credentials.
 It applies the optional commit identity and always sets `user.useConfigOnly=true`.
 Repository-local and per-worktree credential, include, URL rewrite, push URL, proxy, TLS, certificate, cookie, authorization-header, editor, prompt, and transport keys are rejected by key name without printing their values.
+The guarded owner inspects the actual descendant working tree and an explicit Git `-C` target, including effective per-worktree origin values, rather than trusting the primary clone path inherited at launch.
 Every routed clone, fetch, pull, push, and `ls-remote` target must canonicalize to the configured HTTPS parent or selected-profile fork before network access, and routed remote mutation or submodule commands are refused.
-Every routed GitHub resource argument must agree with that same parent or fork, while known-owner repository creation validates the selected login before the outward write.
+Unknown Git commands and unknown GitHub CLI command families or subcommands are refused, so network plumbing, aliases, extensions, authentication state, SSH keys, and future mutators cannot inherit read-only treatment accidentally.
+Every routed GitHub resource argument, regardless of flag ordering, must agree with that same parent or fork, while known-owner repository creation validates the selected login before the outward write.
 FirstMate-owned commands invoke exact configured binaries with argv arrays.
 The guarded `git`, `gh`, and `gh-axi` PATH shims protect ordinary descendants, including `gh-axi` resolving `gh`, but are not an operating-system sandbox against a deliberately malicious process that invokes another absolute executable or independently accesses credentials.
 
@@ -256,6 +260,12 @@ Strict no-mistakes initialization is owned by `bin/fm-github-exec.sh no-mistakes
 It emits a temporary mode-`0600` typed context matching no-mistakes' own `--github-context` contract, derives an HTTPS fork URL from the selected `fork_owner` when present, validates the selected write target, invokes the selected no-mistakes binary with those typed arguments, and deletes the temporary file.
 No-mistakes owns its stored typed repository context and daemon subprocess application; it does not parse this FirstMate schema.
 Strict initialization refuses a no-mistakes executable that does not advertise `--github-context` support rather than allowing the shared daemon to use ambient credentials.
+
+### Real-account acceptance status (2026-07-21)
+
+A read-only local probe used GitHub CLI 2.96.0, enumerated candidate `hosts.yml` profile directories without printing their paths, required `gh auth status --hostname github.com --active` to report Keychain or keyring storage, queried only `/user`, and compared SHA-256 login digests without retaining them.
+The sanitized exact result was `authenticated_profiles=3`, `secure_storage_confirmed=3`, `readonly_user_queries=3`, and `distinct_logins=1`.
+This proves the probe does not have two distinct currently authenticated accounts available in this isolated worktree environment, so real two-account read-only, remote-write, PR, delayed-monitoring, secondmate, and fleet-sync acceptance remains outstanding and both upstream changes must remain draft.
 
 ## Harness support
 

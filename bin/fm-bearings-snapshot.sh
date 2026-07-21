@@ -189,6 +189,18 @@ repo_slug() {  # <url>
 gh_bounded() {  # <owner/repo> <profile|-> <gh-args...>
   local repository=$1 profile=$2
   shift 2
+  if ! fm_github_enabled; then
+    if command -v timeout >/dev/null 2>&1; then
+      GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 timeout "$FM_BEARINGS_PR_TIMEOUT" gh "$@"
+    elif command -v gtimeout >/dev/null 2>&1; then
+      GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 gtimeout "$FM_BEARINGS_PR_TIMEOUT" gh "$@"
+    elif command -v perl >/dev/null 2>&1; then
+      GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' "$FM_BEARINGS_PR_TIMEOUT" gh "$@"
+    else
+      return 124
+    fi
+    return
+  fi
   local routed=("$SCRIPT_DIR/fm-github-exec.sh" exec --repository "github.com/$repository")
   [ "$profile" = - ] || routed+=(--profile "$profile")
   routed+=(-- gh "$@")

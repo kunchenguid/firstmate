@@ -1016,9 +1016,9 @@ Covered by the unit cases in `tests/fm-afk-launch.test.sh` (clear-on-fresh-entry
 
 GitHub account routing is activated in `bin/fm-spawn.sh` before backend dispatch, so Herdr receives the common sanitized project context and does not own account selection.
 `bash tests/fm-backend-herdr.test.sh` and `bash tests/fm-spawn-dispatch-profile.test.sh` both ended with all assertions passing.
-The live check set `HERDR_LAB_HELPER=bin/fm-herdr-lab.sh`, generated `HERDR_LAB_SESSION=$("$HERDR_LAB_HELPER" name fm-gh-account-routing-scout-a1)`, installed the required teardown trap, and used only `"$HERDR_LAB_HELPER" provision`, `run ... status --json`, `run ... session list --json`, and `teardown` against that name.
-The exact status output reported client and server version `0.7.4`, protocol `16`, server status `running`, `compatible:true`, and the generated non-default session.
-The exact session-list output reported the unchanged live `default` session and the separate generated lab as the only two entries before tripwire-verified teardown.
+The earlier live check only provisioned and inspected a generated non-default lab; it did not launch a routed worker and is not worker-launch acceptance evidence.
+This isolated review worktree forbids changes to application state outside the worktree, so a replacement real Herdr session and pane were not created during the finding-fix round.
+A real routed `fm-spawn.sh` worker launch in the named non-default Herdr lab remains required before this draft can be considered ready.
 
 ## Known gaps and follow-up notes
 

@@ -12,7 +12,7 @@ const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const codeRoot = path.resolve(scriptDir, "..");
 const fmHome = path.resolve(process.env.FM_HOME || process.env.FM_ROOT_OVERRIDE || codeRoot);
 const configDir = path.resolve(process.env.FM_CONFIG_OVERRIDE || path.join(fmHome, "config"));
-const configPath = path.resolve(process.env.FM_GITHUB_CONFIG || path.join(configDir, "github-accounts.json"));
+const configPath = path.resolve(process.env.FM_GITHUB_CONFIG_PATH || path.join(configDir, "github-accounts.json"));
 const projectsFile = path.resolve(process.env.FM_DATA_OVERRIDE || path.join(fmHome, "data"), "projects.md");
 
 function fail(message = GENERIC_ERROR, code = 2) {
@@ -266,6 +266,7 @@ function load() {
 
   if (!object(parsed.profiles) || Object.keys(parsed.profiles).length === 0) throw new Error("missing profiles");
   const profiles = new Map();
+  const profileDirectories = new Set();
   for (const [id, value] of Object.entries(parsed.profiles)) {
     if (!profileID(id)) throw new Error("invalid profile id");
     const normalized = id.toLowerCase();
@@ -275,11 +276,14 @@ function load() {
     if (!login(value.expected_login) || value.git_protocol !== "https") throw new Error("invalid profile");
     if (Object.hasOwn(value, "fork_owner") && !login(value.fork_owner)) throw new Error("invalid fork owner");
     if (Object.hasOwn(value, "commit_identity")) identity(value.commit_identity);
+    const ghConfigDir = safeProfileDir(value.gh_config_dir);
+    if (profileDirectories.has(ghConfigDir)) throw new Error("shared profile directory");
+    profileDirectories.add(ghConfigDir);
     profiles.set(normalized, {
       id,
       host: "github.com",
       expectedLogin: value.expected_login,
-      ghConfigDir: safeProfileDir(value.gh_config_dir),
+      ghConfigDir,
       forkOwner: value.fork_owner || "",
       commitName: value.commit_identity?.name || "",
       commitEmail: value.commit_identity?.email || "",

@@ -39,8 +39,9 @@ case "${1:-}" in
 esac
 exit 0
 SH
-  cat > "$fb/gh" <<'SH'
+cat > "$fb/gh" <<'SH'
 #!/usr/bin/env bash
+echo "gh-env ${GH_PROMPT_DISABLED:-unset} ${GH_NO_UPDATE_NOTIFIER:-unset}" >> "$NET_LOG"
 echo "gh $*" >> "$NET_LOG"
 if [ "${FAKE_GH_FAIL:-0}" = 1 ]; then exit 1; fi
 if [ "${FAKE_GH_SLEEP:-0}" = 1 ]; then sleep 30; fi
@@ -916,6 +917,7 @@ test_include_prs_is_the_only_fetch_path() {
   json=$(run "$home" "$fakebin" --include-prs --json)
   # Now gh WAS called, exactly for pr list.
   grep -q '^gh pr list ' "$home/net.log" || fail "--include-prs must call gh pr list"
+  grep -q '^gh-env 1 1$' "$home/net.log" || fail "legacy --include-prs must disable gh prompts and update notices"
   printf '%s' "$json" | jq -e '
     .prs | startswith("checked")
   ' >/dev/null || fail "--include-prs must report checked PR state"

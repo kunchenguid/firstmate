@@ -414,8 +414,10 @@ test_strict_account_context_wraps_every_primary_harness() {
     status=$?
     expect_code 0 "$status" "strict $harness spawn should succeed"
     launch=$(tail -1 "$LAUNCH_LOG")
-    assert_contains "$launch" "fm-github-exec.sh exec --project 'project' --repository" \
+    assert_contains "$launch" "fm-github-exec.sh child-exec --" \
       "$harness launch was not wrapped by the guarded command owner"
+    assert_contains "$launch" "FM_GITHUB_CONFIG_PATH=" \
+      "$harness launch did not pin the selected routing configuration"
     assert_contains "$launch" "/bin/bash -c" "$harness launch did not preserve argv-based guarded shell entry"
     assert_contains "$launch" "$harness" "$harness launch command was lost inside the route wrapper"
     assert_grep $'work\t' "$LAUNCH_LOG.backend-env" "$harness backend setup did not inherit the selected profile"

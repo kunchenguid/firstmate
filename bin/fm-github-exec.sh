@@ -14,6 +14,11 @@
 # absolute executable.
 set -eu
 
+case "${1:-}" in
+  child-*) ;;
+  *) unset FM_GITHUB_ACTIVE FM_GITHUB_CONFIG_PATH FM_GITHUB_CONFIG ;;
+esac
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
@@ -102,6 +107,7 @@ validate_all() {
 }
 
 child_context() {
+  local actual_repository
   [ "${FM_GITHUB_ACTIVE:-}" = 1 ] && [ -n "${FM_GITHUB_PROFILE_ID:-}" ] && [ -n "${FM_GITHUB_REPOSITORY:-}" ] || {
     echo "error: guarded GitHub child has no selected project context" >&2
     return 1
@@ -109,6 +115,12 @@ child_context() {
   project=${FM_GITHUB_PROJECT:-}
   repository=$FM_GITHUB_REPOSITORY
   profile=$FM_GITHUB_PROFILE_ID
+  if [ -n "${FM_GITHUB_PROJECT_PATH:-}" ] \
+    && actual_repository=$(fm_github_repository_toplevel "$PWD" 2>/dev/null) \
+    && fm_github_same_repository_copy "$actual_repository" "$FM_GITHUB_PROJECT_PATH"; then
+    FM_GITHUB_PROJECT_PATH=$actual_repository
+    export FM_GITHUB_PROJECT_PATH
+  fi
 }
 
 run_no_mistakes_init() {
@@ -206,6 +218,13 @@ case "$action" in
     child_context
     [ "$#" -gt 0 ] || github_exec_usage
     fm_github_context_command "$project" "$repository" "$profile" gh-axi "$@"
+    ;;
+  child-exec)
+    [ "${1:-}" = -- ] || github_exec_usage
+    shift
+    child_context
+    [ "$#" -gt 0 ] || github_exec_usage
+    fm_github_context_command "$project" "$repository" "$profile" "$@"
     ;;
   *) github_exec_usage ;;
 esac
