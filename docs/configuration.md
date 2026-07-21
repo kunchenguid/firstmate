@@ -232,6 +232,17 @@ Malformed JSON, an empty or malformed rule/default array, an unverified harness,
 Because the spawn backstop is gated by file presence, any fallback path after a missing match, validation error, or missing `jq` still passes a resolved harness explicitly until the file is fixed or removed.
 Secondmate homes inherit this file from the primary, so a secondmate's own crewmates apply the same dispatch profile behavior.
 
+## Multi-account dispatch pool (config/dispatch-pool.json)
+
+`config/dispatch-pool.json` is an optional local, gitignored file declaring the agent ACCOUNTS that new spawns rotate across, so one account's session limit cannot wedge the whole fleet at once.
+
+[`docs/dispatch-pool.md`](dispatch-pool.md) owns the schema, rotation contract, key handling, limit-signature catalogue, and failover procedure in full.
+[`docs/examples/dispatch-pool.json`](examples/dispatch-pool.json) is a starting point to copy into local `config/dispatch-pool.json`.
+
+Two facts belong here because they interact with the rest of this document.
+The pool is a different axis from the runtime backend above: `config/backend` selects the session provider and is recorded as `backend=`, while the pool selects the agent account and is recorded as `pool_backend=`.
+The pool is inert while the file is absent, so every path documented elsewhere in this file behaves identically until the captain opts in.
+
 ## Toolchain
 
 On session start the first mate detects what its required toolchain is missing or too old and lists each problem with either an exact install command or manual instructions.
@@ -372,6 +383,10 @@ FM_ZELLIJ_SESSION=firstmate  # zellij-only: named session for normal backend ops
 FM_BACKEND_CMUX_COMPOSER_LINES=20  # cmux-only: tail lines scanned to locate the composer row for submit verification
 FM_BACKEND_CMUX_IDLE_RE='^Type a message\.\.\.$'  # cmux-only: empty-composer placeholder regex after border/prompt stripping
 CMUX_SOCKET_PASSWORD=   # cmux-only: socket password fallback when config/cmux-socket-password is absent (docs/cmux-backend.md)
+FM_POOL_CONFIG=          # dispatch-pool config path override, mainly for tests (default config/dispatch-pool.json)
+FM_POOL_KEY_DIR=         # dispatch-pool key directory override, mainly for tests (default ~/.config/firstmate/keys)
+FM_POOL_NOW=             # epoch seconds the pool treats as "now", mainly for cooldown-expiry tests
+FM_POOL_MAX_COOLDOWN_SECONDS=86400  # ceiling on any single account cooldown, so a misparsed reset cannot strand an account
 FM_SESSION_START_STATUS_TAIL=5   # state/*.status lines printed per task in the session-start digest
 FM_BOOTSTRAP_DETECT_ONLY=0   # internal/read-only session-start mode: skip bootstrap's mutating sweeps and print advisory TANGLE wording
 FM_GUARD_READ_ONLY=0    # internal/read-only guard mode: keep alarms but suppress drain, supervision repair, and checkout repair commands

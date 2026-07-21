@@ -1,0 +1,34 @@
+{
+  "cooldown_default_seconds": 10800,
+  "backends": [
+    {
+      "id": "claude-1",
+      "harness": "claude",
+      "enabled": true,
+      "env": { "CLAUDE_CONFIG_DIR": "~/.claude" },
+      "note": "First Claude account. CLAUDE_CONFIG_DIR selects which stored login the claude CLI resolves."
+    },
+    {
+      "id": "claude-2",
+      "harness": "claude",
+      "enabled": true,
+      "env": { "CLAUDE_CONFIG_DIR": "~/.claude-2" },
+      "note": "Second Claude account. This is also the account the interactive router session runs on; the pool only ever influences NEW spawns and never logs out or kills an interactive session."
+    },
+    {
+      "id": "cursor-1",
+      "harness": "cursor",
+      "enabled": true,
+      "key_env": "CURSOR_API_KEY",
+      "key_file": "~/.config/firstmate/keys/cursor-1.key",
+      "note": "Per-invocation API key, so two Cursor accounts run concurrently without any logout/login cycling. key_file defaults to ~/.config/firstmate/keys/<id>.key and may be omitted."
+    },
+    {
+      "id": "cursor-2",
+      "harness": "cursor",
+      "enabled": true,
+      "key_env": "CURSOR_API_KEY",
+      "note": "key_file omitted, so it defaults to ~/.config/firstmate/keys/cursor-2.key. A missing or empty key file disables this backend with a stated reason instead of failing a spawn."
+    }
+  ]
+}
