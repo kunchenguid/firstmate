@@ -258,6 +258,24 @@ So Hermes delivers `.tool_input.command`, matching the "Harness wiring" table ab
 Hermes reported `exit=2`, stdout `{"action":"block","message":"[watcher-background] a protected watcher command cannot run in an asynchronous shell list or through nohup/disown"}`, and parsed wire shape `{"action": "block", "message": "[watcher-background] a protected watcher command cannot run in an asynchronous shell list or through nohup/disown"}`.
 This verifies the exact Hermes payload field, matcher, output shape, and native block parsing without executing the denied command.
 
+### Hermes v0.19.0 two-hook `pre_tool_call` validation, 2026-07-21
+
+The Firstmate primary home registers **two** entries under `pre_tool_call`, both with `matcher: terminal`: the watcher-arm seatbelt and the cd-guard.
+That both entries actually run was validated live in an isolated `HERMES_HOME`, with each hook appending its name to a shared log so execution is observable independently of the reported directive.
+
+`hermes hooks list` reported `Configured shell hooks (2 total)` with both entries listed under a single `[pre_tool_call]` heading.
+Three `hermes hooks test pre_tool_call --for-tool terminal` runs all printed `Firing 2 hook(s)` and all logged both hook names:
+
+| Case | arm hook | cd hook | Result |
+| --- | --- | --- | --- |
+| A | exit 0 | exit 0 | Both fired, no directive, tool allowed. |
+| B | exit 2 `action=block` | exit 0 | Both fired, `{"action": "block", "message": "[watcher-background] ARM BLOCK"}` parsed. |
+| C | exit 0 | exit 2 `action=block` | Both fired, `{"action": "block", "message": "[persistent-cd] CD BLOCK"}` parsed. |
+
+Neither entry shadows the other in either order.
+This matches the owner in `hermes_cli/plugins.py`: `_get_pre_tool_call_directive_details` calls `invoke_hook("pre_tool_call", ...)`, which fans out to every matching hook and returns a list, then scans that list so "the first valid directive wins" - a block from any position is honored, and hooks with no directive are ignored rather than terminating the scan.
+So registering the cd-guard beside the watcher-arm seatbelt neither disables the cd-guard nor regresses watcher-arm safety.
+
 ## Automated validation
 
 `tests/fm-arm-pretool-check.test.sh` owns the adversarial acceptance matrix.

@@ -166,6 +166,18 @@ run_matrix_entry() {
       printf '%s' "$payload" | "$CHECK" >"$out_file" 2>"$err_file"
       rc=$?
       ;;
+    hermes)
+      payload=$(jq -cn --arg command "$cmd" '{
+        hook_event_name:"pre_tool_call",
+        tool_name:"terminal",
+        tool_input:{command:$command},
+        session_id:"20260721_235227_db6f0a",
+        cwd:"/tmp/fm-hermes",
+        extra:{task_id:"test-task",tool_call_id:"test-call"}
+      }')
+      printf '%s' "$payload" | "$CHECK" --hermes >"$out_file" 2>"$err_file"
+      rc=$?
+      ;;
     opencode|pi)
       "$CHECK" --command "$cmd" >"$out_file" 2>"$err_file"
       rc=$?
@@ -190,17 +202,20 @@ run_matrix_entry() {
   elif [ "$entry" = grok ]; then
     jq -e '.decision == "deny"' "$out_file" >/dev/null 2>&1 \
       || fail "$id via grok deny must carry decision=deny on stdout: $(cat "$out_file")"
+  elif [ "$entry" = hermes ]; then
+    jq -e '.action == "block" and (.message | test("\\[persistent-cd\\]"))' "$out_file" >/dev/null 2>&1 \
+      || fail "$id via hermes deny must carry the native action=block object on stdout: $(cat "$out_file")"
   fi
 }
 
 test_full_acceptance_matrix() {
   local i entry
   for ((i = 0; i < ${#MATRIX_IDS[@]}; i++)); do
-    for entry in codex claude grok opencode pi; do
+    for entry in codex claude grok hermes opencode pi; do
       run_matrix_entry "${MATRIX_IDS[$i]}" "${MATRIX_EXPECTED[$i]}" "$entry" "${MATRIX_COMMANDS[$i]}"
     done
   done
-  pass "cd-guard acceptance matrix: ${#MATRIX_IDS[@]} cases x 5 harness entry forms, block/allow all correct"
+  pass "cd-guard acceptance matrix: ${#MATRIX_IDS[@]} cases x 6 harness entry forms, block/allow all correct"
 }
 
 # --- primary-checkout scoping ----------------------------------------------
@@ -410,6 +425,18 @@ test_grok_wiring() {
   pass ".grok primary cd hook: PreToolUse invokes the cd-guard"
 }
 
+test_hermes_wiring() {
+  local home config
+  home="$TMP_ROOT/hermes-home"
+  HERMES_SOURCE_HOME="$TMP_ROOT/hermes-absent-source" \
+    "$ROOT/bin/fm-hermes-home.sh" primary "$home" "$ROOT" >/dev/null
+  config=$(cat "$home/config.yaml")
+  assert_contains "$config" 'fm-cd-pretool-check.sh --hermes' "hermes primary home must register the cd-guard with native output shaping"
+  assert_contains "$config" 'fm-arm-pretool-check.sh --hermes' "hermes cd hook must not displace the watcher-arm hook"
+  assert_contains "$config" 'matcher: terminal' "hermes cd hook must be terminal-scoped"
+  pass "fm-hermes-home.sh primary: pre_tool_call invokes the cd-guard alongside the arm guard"
+}
+
 test_opencode_wiring() {
   local plugin content
   plugin="$ROOT/.opencode/plugins/fm-primary-cd-check.js"
@@ -456,6 +483,7 @@ test_policy_cli_direct
 test_claude_wiring
 test_codex_wiring
 test_grok_wiring
+test_hermes_wiring
 test_opencode_wiring
 test_pi_wiring
 test_scripts_are_shellcheck_clean

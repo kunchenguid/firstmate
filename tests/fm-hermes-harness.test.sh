@@ -18,6 +18,15 @@ file_mode() {
   if [ "$(uname)" = Darwin ]; then stat -f %Lp "$1"; else stat -c %a "$1"; fi
 }
 
+# A real YAML loader proves the generated config still parses; the leak
+# assertions themselves run everywhere.
+YAML_LOADER=none
+if command -v python3 >/dev/null 2>&1 && python3 -c 'import yaml' >/dev/null 2>&1; then
+  YAML_LOADER=python3
+elif command -v ruby >/dev/null 2>&1 && ruby -ryaml -e '' >/dev/null 2>&1; then
+  YAML_LOADER=ruby
+fi
+
 # Build a fake ps that reports one harness as the immediate parent and then
 # stops the ancestry walk, so marker overlap is resolved against known ancestry.
 fake_ancestry() {
@@ -133,16 +142,75 @@ test_usage_states_the_isolation_guarantee() {
   pass "Hermes home usage renders its complete header"
 }
 
-test_cd_guard_renders_hermes_block_shape() {
-  local out rc
-  out=$("$ROOT/bin/fm-cd-pretool-check.sh" --hermes --command 'cd projects/foo' 2>/dev/null)
-  rc=$?
-  if [ "$rc" -eq 2 ]; then
-    assert_contains "$out" '"action":"block"' "Hermes cd-guard deny must use the native action object"
-  else
-    [ -z "$out" ] || fail "Hermes cd-guard allow must leave stdout empty, got: $out"
-  fi
-  pass "cd-guard speaks the Hermes native block shape"
+# The operator's hooks block must never leak into the Firstmate-owned config,
+# and what survives must stay loadable YAML. Each fixture ends the hooks block
+# with a column-0 shape that a line-oriented stripper can mistake for the end of
+# that block: a comment, a document marker, and a quoted key.
+test_preserved_config_never_leaks_operator_hooks() {
+  local case_dir source target n=0 fixture
+  for fixture in comment marker quoted; do
+    n=$((n + 1))
+    case_dir="$TMP_ROOT/leak-$fixture"
+    source="$case_dir/source"
+    target="$case_dir/home"
+    mkdir -p "$source"
+    case "$fixture" in
+      comment)
+        cat > "$source/config.yaml" <<'YAML'
+hooks:
+# operator's own note pinned at column 0
+  on_session_end:
+    - command: '/captain/leak.sh'
+      timeout: 10
+model:
+  default: gpt-5.6-sol
+YAML
+        ;;
+      marker)
+        cat > "$source/config.yaml" <<'YAML'
+model:
+  default: gpt-5.6-sol
+hooks:
+---
+  on_session_start:
+    - command: '/captain/leak.sh'
+YAML
+        ;;
+      quoted)
+        cat > "$source/config.yaml" <<'YAML'
+model:
+  default: gpt-5.6-sol
+"hooks":
+  on_session_start:
+    - command: '/captain/leak.sh'
+hooks_auto_accept: false
+YAML
+        ;;
+    esac
+    HERMES_SOURCE_HOME="$source" "$HOME_HELPER" primary "$target" "$ROOT" >/dev/null
+    assert_no_grep '/captain/leak.sh' "$target/config.yaml" \
+      "operator hook leaked through the $fixture fixture into the isolated config"
+    assert_grep 'fm-turnend-guard-hermes.sh' "$target/config.yaml" \
+      "$fixture fixture lost Firstmate's own turn-end hook"
+    if [ "$YAML_LOADER" = python3 ]; then
+      python3 -c 'import sys,yaml; yaml.safe_load(open(sys.argv[1]))' "$target/config.yaml" \
+        || fail "$fixture fixture produced a config Hermes cannot parse"
+    elif [ "$YAML_LOADER" = ruby ]; then
+      ruby -ryaml -e 'YAML.safe_load(File.read(ARGV[0]))' "$target/config.yaml" \
+        || fail "$fixture fixture produced a config Hermes cannot parse"
+    fi
+  done
+  pass "preserved config strips whole hook blocks across $n column-0 boundary shapes"
+}
+
+test_home_and_config_are_private_from_creation() {
+  local source="$TMP_ROOT/perm-source" target="$TMP_ROOT/perm-home"
+  mkdir -p "$source"
+  printf 'model:\n  provider: openai-codex\n' > "$source/config.yaml"
+  HERMES_SOURCE_HOME="$source" "$HOME_HELPER" primary "$target" "$ROOT" >/dev/null
+  [ "$(file_mode "$target")" = 700 ] || fail "isolated Hermes home must be mode 0700, got $(file_mode "$target")"
+  [ "$(file_mode "$target/config.yaml")" = 600 ] || fail "isolated Hermes config must be mode 0600"
+  pass "isolated Hermes home and config are private"
 }
 
 test_busy_and_idle_classification() {
@@ -203,7 +271,8 @@ test_env_detection
 test_task_home_isolated_and_resumable
 test_primary_home_has_all_hooks
 test_usage_states_the_isolation_guarantee
-test_cd_guard_renders_hermes_block_shape
+test_preserved_config_never_leaks_operator_hooks
+test_home_and_config_are_private_from_creation
 test_busy_and_idle_classification
 test_passive_guard_forces_one_resume
 test_fm_lock_recognizes_hermes_holder

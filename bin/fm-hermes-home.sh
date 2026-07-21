@@ -17,7 +17,10 @@
 # $HOME/.hermes (in that order) is copied with mode 0600 when present; absence
 # is allowed because providers may use ambient credentials.
 # The source Hermes home is never changed.
+# Everything Firstmate writes into the home is created private (umask 077),
+# because the preserved config can carry provider credentials.
 set -eu
+umask 077
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MODE=${1:-}
@@ -37,6 +40,7 @@ esac
 case "$TARGET" in /*) ;; *) echo "error: Hermes target home must be absolute: $TARGET" >&2; exit 2 ;; esac
 [ ! -L "$TARGET" ] || { echo "error: Hermes target home cannot be a symlink: $TARGET" >&2; exit 1; }
 mkdir -p "$TARGET"
+chmod 700 "$TARGET"
 TARGET=$(cd "$TARGET" && pwd -P)
 SOURCE=${HERMES_SOURCE_HOME:-${HERMES_HOME:-$HOME/.hermes}}
 SOURCE_CONFIG=
@@ -51,20 +55,40 @@ fi
 
 # Echo the source config with the two top-level keys Firstmate owns removed, so
 # the operator's provider, model, and MCP settings survive into the isolated
-# home while Firstmate's own hooks are the only ones Hermes ever loads. A
-# top-level key is a line starting in column 0; its block is every following
-# indented, list, or blank line. The source file is only ever read.
+# home while Firstmate's own hooks are the only ones Hermes ever loads.
+# A top-level key is any column-0 bare, "double-quoted", or 'single-quoted' key.
+# A stripped block runs until the NEXT top-level key, so a column-0 comment, a
+# --- document marker, or a list item inside the operator's hooks block can
+# never resume emission mid-block and leak the rest of it. The source file is
+# only ever read.
 emit_preserved_config() {
   [ -n "$SOURCE_CONFIG" ] || return 0
   awk '
-    /^[A-Za-z_][A-Za-z0-9_.-]*[[:space:]]*:/ {
-      key = $0
-      sub(/[[:space:]]*:.*/, "", key)
-      skip = (key == "hooks" || key == "hooks_auto_accept")
-      if (skip) next
+    function keyname(line,   s) {
+      s = line
+      if (s ~ /^"[^"]*"[[:space:]]*:/) {
+        sub(/^"/, "", s); sub(/"[[:space:]]*:.*$/, "", s); return s
+      }
+      if (s ~ /^\047[^\047]*\047[[:space:]]*:/) {
+        sub(/^\047/, "", s); sub(/\047[[:space:]]*:.*$/, "", s); return s
+      }
+      if (s ~ /^[A-Za-z_][A-Za-z0-9_.-]*[[:space:]]*:/) {
+        sub(/[[:space:]]*:.*$/, "", s); return s
+      }
+      return ""
     }
-    skip && (/^[[:space:]]/ || /^-/ || /^$/) { next }
-    { skip = 0; print }
+    {
+      if ($0 ~ /^[^[:space:]]/) {
+        k = keyname($0)
+        if (k != "") {
+          skip = (k == "hooks" || k == "hooks_auto_accept")
+          if (skip) next
+          print; next
+        }
+      }
+      if (skip) next
+      print
+    }
   ' "$SOURCE_CONFIG"
 }
 
