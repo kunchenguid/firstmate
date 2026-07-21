@@ -440,6 +440,34 @@ EOF
   pass "snapshot includes durable scout reports after teardown"
 }
 
+test_registry_byte_truncation_discards_partial_line() {
+  local home first second limit out
+  home=$(make_home registry-byte-truncation)
+  first="- first (home: $home/first; scope: alpha)"
+  second="- second (home: $home/second; scope: beta)"
+  printf '%s\n%s\n' "$first" "$second" > "$home/data/secondmates.md"
+  limit=$((${#first} + 1 + 7))
+
+  out=$(FM_HOME="$home" FM_SNAPSHOT_REGISTRY_BYTES="$limit" "$SNAPSHOT" --json)
+  printf '%s' "$out" | jq -e '
+    .secondmate_current.registry.input_truncated == true
+      and .secondmate_current.registry.complete == false
+      and .secondmate_current.registry.reasons == ["byte_limit"]
+      and (.secondmate_current.registry.records | map(.id)) == ["first"]
+  ' >/dev/null || fail "registry byte truncation must keep only complete lines: $out"
+
+  printf '%s' "$first" > "$home/data/secondmates.md"
+  out=$(FM_HOME="$home" FM_SNAPSHOT_REGISTRY_BYTES=7 "$SNAPSHOT" --json)
+  printf '%s' "$out" | jq -e '
+    .secondmate_current.registry.input_truncated == true
+      and .secondmate_current.registry.complete == false
+      and .secondmate_current.registry.reasons == ["byte_limit"]
+      and (.secondmate_current.registry.records | length) == 0
+  ' >/dev/null || fail "registry truncation before the first newline must discard all content: $out"
+
+  pass "registry byte truncation discards the partial final line and content without a newline"
+}
+
 test_backlog_tasks_axi_forms_and_overrides() {
   local home data projects fakebin out view
   home=$(make_home overrides)
@@ -791,6 +819,7 @@ test_open_decision_clears_on_keyed_resolution
 test_completed_scout_report_is_pointer_not_pending
 test_parked_scout_decision_stays_pending
 test_scout_reports_include_teardown_reports
+test_registry_byte_truncation_discards_partial_line
 test_backlog_tasks_axi_forms_and_overrides
 test_view_renders_snapshot
 test_view_renders_dead_secondmate_agent_status

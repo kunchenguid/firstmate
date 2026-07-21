@@ -50,6 +50,18 @@ pass() {
   printf 'ok - %s\n' "$1"
 }
 
+# Enable direct imports of tracked TypeScript fixtures on Node releases that
+# expose type stripping behind a flag. Newer releases strip types by default.
+fm_test_enable_node_typescript_imports() {
+  if node --help 2>&1 | grep -q -- '--experimental-strip-types'; then
+    case " ${NODE_OPTIONS:-} " in
+      *" --experimental-strip-types "*) ;;
+      *) NODE_OPTIONS="${NODE_OPTIONS:+$NODE_OPTIONS }--experimental-strip-types" ;;
+    esac
+    export NODE_OPTIONS
+  fi
+}
+
 # --- self-cleaning temp root ------------------------------------------------
 #
 # fm_test_tmproot <prefix> echoes a fresh temp dir and registers it for removal

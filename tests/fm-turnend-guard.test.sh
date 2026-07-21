@@ -18,6 +18,10 @@ set -u
 
 TMP_ROOT=$(fm_test_tmproot fm-turnend-guard)
 fm_git_identity fmtest fmtest@example.invalid
+# These tests dynamically import the tracked Pi TypeScript extension under
+# plain Node, outside Pi's own loader.
+export NODE_NO_WARNINGS=1
+fm_test_enable_node_typescript_imports
 
 REQUIRED_REASON='repair missing watcher supervision with bin/fm-watch-arm.sh as its own Claude Code background task'
 

@@ -687,6 +687,8 @@ test_spawn_releases_orca_resources_when_metadata_write_fails() {
   status=$?
   [ "$status" -ne 0 ] || fail "Orca spawn should fail when metadata cannot be written"
   assert_contains "$out" "Is a directory" "spawn should fail at metadata publication"
+  assert_contains "$out" "could not publish task metadata" "spawn should report the failed metadata publication"
+  assert_not_contains "$out" "spawned $id" "spawn must not report success after metadata publication fails"
   assert_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''close'$'\x1f''--terminal'$'\x1f''term-meta-fail'$'\x1f''--json' \
     "Orca spawn should close the recorded terminal when a later abort occurs"
   assert_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''rm'$'\x1f''--worktree'$'\x1f''id:wt-meta-fail'$'\x1f''--force'$'\x1f''--json' \

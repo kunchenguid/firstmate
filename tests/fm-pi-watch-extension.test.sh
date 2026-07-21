@@ -7,10 +7,14 @@ set -u
 
 TMP_ROOT=$(fm_test_tmproot fm-pi-watch-extension)
 EXT="$ROOT/.pi/extensions/fm-primary-pi-watch.ts"
+# Keep every extension process inside its explicit fixture home even when the
+# surrounding firstmate session exports operational path overrides.
+unset FM_HOME FM_STATE_OVERRIDE FM_ROOT_OVERRIDE FM_CONFIG_OVERRIDE
 # Node 24 warns when these test-only dynamic imports load tracked ESM plugins
 # from a clean checkout with no tracked .opencode/package.json. The warning is
 # unrelated to plugin output, which the assertions intentionally require empty.
 export NODE_NO_WARNINGS=1
+fm_test_enable_node_typescript_imports
 
 install_pi_watch_extension_fixture() {
   local repo=$1

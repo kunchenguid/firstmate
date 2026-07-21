@@ -1605,7 +1605,7 @@ fi
 
 META_WINDOW=$T
 [ "$BACKEND" = orca ] && META_WINDOW=$W
-{
+write_spawn_metadata() {
   echo "window=$META_WINDOW"
   echo "endpoint_task_id=$ID"
   echo "worktree=$WT"
@@ -1645,7 +1645,16 @@ META_WINDOW=$T
     echo "home=$PROJ_ABS"
     echo "projects=$SECONDMATE_PROJECTS"
   fi
-} > "$STATE/$ID.meta"
+}
+# Bash 3.2 does not reliably apply `set -e` when a brace-group redirection
+# fails. Call a function in an explicit conditional so metadata publication
+# failure always aborts the spawn and preserves the resource-cleanup path.
+if write_spawn_metadata > "$STATE/$ID.meta"; then
+  :
+else
+  echo "error: could not publish task metadata at $STATE/$ID.meta" >&2
+  exit 1
+fi
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
 
 sq_brief=$(shell_quote "$BRIEF")
