@@ -1250,7 +1250,12 @@ META_WINDOW=$T
     echo "home=$PROJ_ABS"
     echo "projects=$SECONDMATE_PROJECTS"
   fi
-} > "$STATE/$ID.meta"
+# Explicit || exit: stock macOS Bash 3.2 does NOT honor `set -e` for a
+# redirection failure on a compound command, so without this a failed metadata
+# publication (unwritable state dir, a directory in the meta file's place) would
+# be reported on stderr and then silently walked past - launching an untracked
+# task and skipping the abort cleanup the EXIT trap owes it.
+} > "$STATE/$ID.meta" || exit 1
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
 
 sq_brief=$(shell_quote "$BRIEF")
