@@ -35,6 +35,15 @@
 # That bounds this to at most one forced continuation per turn - never a wedged,
 # un-endable session - while still nagging again on a later turn if the problem
 # persists.
+#
+# When state/.wake-queue holds undrained records at block time, the banner says
+# so and the repair line leads with drain-first: a freshly armed watcher that
+# finds actionable state can fire and exit within seconds, before the turn ends,
+# and a background arm task that completes in that end-of-turn window gets NO
+# completion notification (measured 152/152 on Claude, 2026-07; see
+# docs/turnend-guard.md "2026-07-21"). This block is then the wake's only
+# delivery path, so the forced continuation must drain and handle, not just
+# re-arm.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -120,13 +129,21 @@ afk=0
 [ -e "$STATE/.afk" ] && afk=1
 x_mode=0
 [ -f "$CONFIG/x-mode.env" ] && x_mode=1
-REASON=$("$SCRIPT_DIR/fm-supervision-instructions.sh" --afk "$afk" --x-mode "$x_mode" --repair-line 2>/dev/null \
+queue_pending=0
+[ "$FM_SUP_QUEUE_PENDING" = true ] && queue_pending=1
+REASON=$("$SCRIPT_DIR/fm-supervision-instructions.sh" --afk "$afk" --x-mode "$x_mode" --queue-pending "$queue_pending" --repair-line 2>/dev/null \
   || printf '%s\n' 'tasks in flight, no live watcher - resume supervision according to the session-start operating block before ending the turn')
 rule='━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'
 {
   printf '●%s\n' "$rule"
   printf '●  TURN WOULD END BLIND - SUPERVISION IS OFF\n'
   printf '●  %s task(s) in flight, but no live watcher holds this home lock (last beat: %s).\n' "$FM_SUP_IN_FLIGHT" "$FM_SUP_BEACON_DESC"
+  if [ "$queue_pending" -eq 1 ]; then
+    queued=$(wc -l < "$STATE/.wake-queue" 2>/dev/null | tr -d '[:space:]')
+    case "$queued" in ''|*[!0-9]*) queued=some ;; esac
+    printf '●  %s undrained wake record(s) sit in state/.wake-queue: the watcher you armed already fired and exited, and its background task will NOT deliver a completion notification for this turn.\n' "$queued"
+    printf '●  This block is that wake'\''s delivery path - in this continuation, drain, act on every record, then re-arm; do not only re-arm.\n'
+  fi
   printf '●  %s\n' "$REASON"
   printf '●%s\n' "$rule"
 } >&2

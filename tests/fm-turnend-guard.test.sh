@@ -228,6 +228,44 @@ test_hook_blocks_when_dead_lock_has_fresh_beacon() {
   pass "fm-turnend-guard: blocks on a dead watcher lock even when the beacon is fresh"
 }
 
+# The armed-then-fired handoff: a fresh watcher can find actionable state, queue
+# a wake, and exit seconds after arming, and the arm task completing in the
+# end-of-turn window delivers no completion notification (docs/turnend-guard.md
+# "2026-07-21"). The block must then carry the delivery instructions: report the
+# undrained records and lead the repair line with drain-first.
+test_hook_block_reports_pending_queue() {
+  local dir dead out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-queue-pending")
+  dead=$(nonexistent_pid)
+  : > "$dir/state/task1.meta"
+  record_watcher_lock "$dir" "$dead" "dead watcher identity"
+  touch "$dir/state/.last-watcher-beat"
+  printf '1\t1\tstale\tw1\tstale: w1\n2\t2\tsignal\ts1\tsignal: s1\n' > "$dir/state/.wake-queue"
+  out=$(run_hook "$dir" false); status=$?
+  expect_code 2 "$status" "hook must still block when undrained wake records are pending"
+  assert_contains "$out" "2 undrained wake record" "block banner must report the pending queue records"
+  assert_contains "$out" "After draining queued wakes" "repair line must lead with drain-first when the queue is pending"
+  assert_contains "$out" "$REQUIRED_REASON" "block reason must still contain the exact required instruction"
+  pass "fm-turnend-guard: a pending wake queue keeps the block and adds drain-first delivery instructions"
+}
+
+test_hook_block_empty_queue_stays_plain() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-queue-empty")
+  : > "$dir/state/task1.meta"
+  touch "$dir/state/.last-watcher-beat"
+  out=$(run_hook "$dir" false); status=$?
+  expect_code 2 "$status" "hook must block with an empty queue exactly as before"
+  case "$out" in
+    *"undrained wake record"*) fail "banner must not mention queue records when the queue is empty" ;;
+  esac
+  case "$out" in
+    *"After draining queued wakes"*) fail "repair line must not lead with drain-first when the queue is empty" ;;
+  esac
+  assert_contains "$out" "$REQUIRED_REASON" "block reason must contain the exact required instruction"
+  pass "fm-turnend-guard: an empty queue keeps the plain block message"
+}
+
 test_hook_silent_with_live_lock_and_fresh_beacon() {
   local dir pid identity out status
   dir=$(make_primary_dir "$TMP_ROOT/hook-live-lock-fresh")
@@ -893,6 +931,8 @@ test_predicate_queue_pending_flag
 test_hook_silent_when_no_work_in_flight
 test_hook_blocks_when_fresh_beacon_has_no_live_lock
 test_hook_blocks_when_dead_lock_has_fresh_beacon
+test_hook_block_reports_pending_queue
+test_hook_block_empty_queue_stays_plain
 test_hook_silent_with_live_lock_and_fresh_beacon
 test_hook_blocks_with_live_lock_and_stale_beacon
 test_hook_blocks_when_unhealthy_in_primary
