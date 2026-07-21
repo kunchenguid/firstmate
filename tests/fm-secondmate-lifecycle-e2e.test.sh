@@ -194,17 +194,37 @@ EOF
   pass "handoff: in-scope items move verbatim, out-of-scope stays, idempotent"
 }
 
-phase_recovery() {
-  # Simulate a restart: drop the live meta, then respawn from the registry +
-  # persistent home (no explicit home argument).
-  rm -f "$HOME_DIR/state/design.meta"
-  PATH="$FAKEBIN:$PATH" FM_HOME="$HOME_DIR" FM_FAKE_TMUX_LOG="$LOG" FM_FAKE_TMUX_CAPTURE="$PANE" \
-    "$ROOT/bin/fm-spawn.sh" design "echo relaunch" --secondmate >/dev/null 2>&1 \
-    || fail "recovery respawn failed"
-  local meta="$HOME_DIR/state/design.meta"
+phase_windowless_recovery() {
+  local meta out status
+  cat > "$HOME_DIR/state/design.meta" <<EOF
+kind=secondmate
+home=$SUB_ABS
+projects=alpha, beta, gamma
+model=old-model
+EOF
+  out=$(PATH="$FAKEBIN:$PATH" FM_HOME="$HOME_DIR" FM_FAKE_TMUX_LOG="$LOG" FM_FAKE_TMUX_CAPTURE="$PANE" \
+    "$ROOT/bin/fm-spawn.sh" design "echo relaunch" --secondmate 2>&1)
+  status=$?
+  [ "$status" -eq 0 ] || fail "windowless recovery respawn failed: $out"
+  meta="$HOME_DIR/state/design.meta"
   assert_grep "home=$SUB_ABS" "$meta" "respawn did not preserve the persistent home from the registry"
   assert_grep 'projects=alpha, beta, gamma' "$meta" "respawn did not preserve the project list from the registry"
   assert_grep 'window=firstmate:fm-design' "$meta" "respawn did not reconstruct the direct-report window"
+  assert_no_grep 'model=old-model' "$meta" "respawn retained the windowless recovery record"
+  pass "recovery: atomically replaces windowless secondmate metadata after respawn"
+}
+
+phase_recovery() {
+  local meta out status
+  rm -f "$HOME_DIR/state/design.meta"
+  out=$(PATH="$FAKEBIN:$PATH" FM_HOME="$HOME_DIR" FM_FAKE_TMUX_LOG="$LOG" FM_FAKE_TMUX_CAPTURE="$PANE" \
+    "$ROOT/bin/fm-spawn.sh" design "echo relaunch" --secondmate 2>&1)
+  status=$?
+  [ "$status" -eq 0 ] || fail "registry recovery respawn failed: $out"
+  meta="$HOME_DIR/state/design.meta"
+  assert_grep "home=$SUB_ABS" "$meta" "registry respawn did not preserve the persistent home"
+  assert_grep 'projects=alpha, beta, gamma' "$meta" "registry respawn did not preserve the project list"
+  assert_grep 'window=firstmate:fm-design' "$meta" "registry respawn did not reconstruct the direct-report window"
   pass "recovery: respawns from the durable registry and persistent home"
 }
 
@@ -229,5 +249,6 @@ phase_seed
 phase_spawn
 phase_send
 phase_handoff
+phase_windowless_recovery
 phase_recovery
 phase_teardown

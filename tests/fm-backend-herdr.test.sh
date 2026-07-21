@@ -47,8 +47,10 @@ fi
 n=$next
 echo "$n" > "$COUNT_FILE"
 if [ -f "$RESP/$n.exit" ]; then
+  [ ! -f "$RESP/$n.err" ] || cat "$RESP/$n.err" >&2
   exit "$(cat "$RESP/$n.exit")"
 fi
+[ ! -f "$RESP/$n.err" ] || cat "$RESP/$n.err" >&2
 [ -f "$RESP/$n.out" ] && cat "$RESP/$n.out"
 exit 0
 SH
@@ -880,7 +882,7 @@ test_spawn_task_lock_covers_all_backend_creation_and_metadata_publication() {
   wake_source=". \"\$SCRIPT_DIR/fm-wake-lib.sh\""
   acquire_pattern="fm_lock_try_acquire \"\$SPAWN_TASK_LOCK\""
   backend_pattern="^case \"\$BACKEND\" in"
-  meta_pattern="} > \"\$STATE/\$ID.meta\""
+  meta_pattern="^if ! spawn_publish_metadata; then"
   assert_contains "$source" "$wake_source" \
     "fm-spawn does not load the shared lock implementation"
   acquire_line=$(grep -n "$acquire_pattern" "$ROOT/bin/fm-spawn.sh" | head -1 | cut -d: -f1)
@@ -921,8 +923,7 @@ test_spawn_publishes_metadata_only_after_launch_cwd_verification() {
   source=$(cat "$ROOT/bin/fm-spawn.sh")
   proof_pattern='the launch-side physical-cwd assertion never completed'
   passive_pattern='spawn_verify_passive_launch_cwd'
-  # shellcheck disable=SC2016  # source-code pattern, not a runtime expansion
-  meta_pattern='} > "$STATE/$ID.meta"'
+  meta_pattern='if ! spawn_publish_metadata; then'
   # shellcheck disable=SC2016  # source-code pattern, not a runtime expansion
   assert_contains "$source" 'LAUNCH="cd -- $sq_wt && [' \
     "fm-spawn does not anchor the actual launch to the validated physical worktree"
@@ -1066,6 +1067,21 @@ test_parse_target() {
     [ "$FM_BACKEND_HERDR_PANE" = "w1:p2" ] || { echo "pane mismatch: $FM_BACKEND_HERDR_PANE" >&2; exit 1; }
   ) || fail "fm_backend_herdr_parse_target did not split session:pane on the first colon only"
   pass "fm_backend_herdr_parse_target: splits '<session>:<pane_id>' on the FIRST colon (pane_id itself contains one)"
+}
+
+test_target_state_classifies_typed_stderr_only() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/target-state-stderr"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"error":{"code":"pane_not_found","message":"pane w1:p2 not found"}}\n' > "$resp/1.err"
+  printf '1\n' > "$resp/1.exit"
+  printf '{"error":{"code":"internal_error","message":"transport failed"}}\n' > "$resp/2.err"
+  printf '1\n' > "$resp/2.exit"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; printf "%s " "$(fm_backend_herdr_target_state fmtest:w1:p2)"; fm_backend_herdr_target_state fmtest:w1:p3' "$ROOT" )
+  [ "$out" = 'absent unknown' ] \
+    || fail "target_state should classify stderr pane_not_found as absent and unrelated errors as unknown, got '$out'"
+  pass "fm_backend_herdr_target_state: preserves typed stderr for conservative absence classification"
 }
 
 test_normalize_key() {
@@ -2488,6 +2504,7 @@ test_projection_recovery_is_read_only_and_refuses_live_duplicate_risk
 test_workspace_find_matches_only_this_homes_own_label
 test_list_live_scoped_to_this_homes_workspace_only
 test_parse_target
+test_target_state_classifies_typed_stderr_only
 test_normalize_key
 test_capture_calls_pane_read
 test_capture_works_around_small_lines_bug

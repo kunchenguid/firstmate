@@ -721,11 +721,17 @@ if [ -e "$RECOVERY_META" ] || [ -L "$RECOVERY_META" ]; then
   fi
   RECOVERY_BACKEND=$(fm_backend_of_meta "$RECOVERY_META")
   RECOVERY_TARGET=$(fm_backend_target_of_meta "$RECOVERY_META")
-  [ -n "$RECOVERY_TARGET" ] || {
-    echo "error: existing metadata for $ID has no endpoint; refusing recovery" >&2
-    exit 1
-  }
-  RECOVERY_TARGET_STATE=$(fm_backend_target_state "$RECOVERY_BACKEND" "$RECOVERY_TARGET")
+  RECOVERY_KIND=$(fm_meta_get "$RECOVERY_META" kind)
+  if [ -z "$RECOVERY_TARGET" ]; then
+    if [ "$KIND" = secondmate ] && [ "$RECOVERY_KIND" = secondmate ]; then
+      RECOVERY_TARGET_STATE=absent
+    else
+      echo "error: existing metadata for $ID has no endpoint; refusing recovery" >&2
+      exit 1
+    fi
+  else
+    RECOVERY_TARGET_STATE=$(fm_backend_target_state "$RECOVERY_BACKEND" "$RECOVERY_TARGET")
+  fi
   case "$RECOVERY_TARGET_STATE" in
     absent) ;;
     present)

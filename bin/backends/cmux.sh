@@ -404,16 +404,29 @@ fm_backend_cmux_surface_exists() {  # <workspace_id> <surface_id>
 }
 
 fm_backend_cmux_target_state() {  # <target>
-  local workspaces panes
+  local wins window_ids wid workspaces panes found=0
   fm_backend_cmux_parse_target "$1" || { printf 'unknown'; return 0; }
-  workspaces=$(fm_backend_cmux_cli workspace list --json --id-format uuids 2>/dev/null) \
+  wins=$(fm_backend_cmux_cli list-windows --json --id-format uuids 2>/dev/null) \
     || { printf 'unknown'; return 0; }
-  if ! printf '%s' "$workspaces" | jq -e '.workspaces | type == "array"' >/dev/null 2>&1; then
+  if ! printf '%s' "$wins" | jq -e 'type == "array" and all(.[]?; ((.id | type) == "string") and ((.id | length) > 0))' >/dev/null 2>&1; then
     printf 'unknown'
     return 0
   fi
-  if ! printf '%s' "$workspaces" | jq -e --arg w "$FM_BACKEND_CMUX_WORKSPACE" \
-    '[.workspaces[]? | select(.id == $w)] | length > 0' >/dev/null 2>&1; then
+  window_ids=$(printf '%s' "$wins" | jq -r '.[].id')
+  for wid in $window_ids; do
+    workspaces=$(fm_backend_cmux_cli workspace list --json --id-format uuids --window "$wid" 2>/dev/null) \
+      || { printf 'unknown'; return 0; }
+    if ! printf '%s' "$workspaces" | jq -e '.workspaces | type == "array"' >/dev/null 2>&1; then
+      printf 'unknown'
+      return 0
+    fi
+    if printf '%s' "$workspaces" | jq -e --arg w "$FM_BACKEND_CMUX_WORKSPACE" \
+      '[.workspaces[]? | select(.id == $w)] | length > 0' >/dev/null 2>&1; then
+      found=1
+      break
+    fi
+  done
+  if [ "$found" -ne 1 ]; then
     printf 'absent'
     return 0
   fi

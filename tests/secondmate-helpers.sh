@@ -59,6 +59,7 @@ case "${1:-}" in
           printf '%s\n' "${FM_FAKE_TMUX_PATH:-firstmate}"
         fi
         ;;
+      *"#{pane_current_command}"*) printf '%s\n' "${FM_FAKE_TMUX_COMMAND:-codex}" ;;
       *) printf 'firstmate\n' ;;
     esac
     exit 0

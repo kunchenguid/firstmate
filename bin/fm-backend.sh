@@ -358,6 +358,7 @@ fm_backend_target_of_meta() {  # <meta-file>
   fi
   window=$(fm_meta_get "$meta" window)
   [ -n "$window" ] && printf '%s' "$window"
+  return 0
 }
 
 fm_backend_meta_for_window() {  # <target> <state-dir>

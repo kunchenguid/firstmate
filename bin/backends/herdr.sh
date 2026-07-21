@@ -1126,7 +1126,7 @@ fm_backend_herdr_target_ready() {  # <target>
 fm_backend_herdr_target_state() {  # <target>
   local out
   fm_backend_herdr_parse_target "$1" || { printf 'unknown'; return 0; }
-  out=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane get "$FM_BACKEND_HERDR_PANE" 2>/dev/null) || true
+  out=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane get "$FM_BACKEND_HERDR_PANE" 2>&1) || true
   if printf '%s' "$out" | jq -e '.result.pane' >/dev/null 2>&1; then
     printf 'present'
   elif printf '%s' "$out" | jq -e '.error.code == "pane_not_found"' >/dev/null 2>&1; then

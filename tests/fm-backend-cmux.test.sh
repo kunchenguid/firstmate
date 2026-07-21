@@ -265,6 +265,22 @@ test_parse_target() {
   pass "fm_backend_cmux_parse_target: splits '<workspace_uuid>:<surface_uuid>' on the first colon"
 }
 
+test_target_state_walks_all_windows() {
+  local dir fb out
+  dir="$TMP_ROOT/target-state-all-windows"; mkdir -p "$dir/responses"
+  cmux_windows_response "$dir" 1 "e1111111-0000-0000-0000-000000000000" 1 "e2222222-0000-0000-0000-000000000000" 1
+  cmux_workspace_list_response "$dir" 2 "ffffffff-0000-0000-0000-000000000000" "other"
+  cmux_workspace_list_response "$dir" 3 "aaaaaaaa-0000-0000-0000-000000000000" "task"
+  cmux_panes_response "$dir" 4 "bbbbbbbb-1111-1111-1111-111111111111"
+  fb=$(make_cmux_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_target_state "aaaaaaaa-0000-0000-0000-000000000000:bbbbbbbb-1111-1111-1111-111111111111"' "$ROOT" )
+  [ "$out" = present ] || fail "target_state should find a target outside the current cmux window, got '$out'"
+  assert_contains "$(cat "$dir/log")" $'\x1f''--window'$'\x1f''e2222222-0000-0000-0000-000000000000' \
+    "target_state did not inspect the second cmux window"
+  pass "fm_backend_cmux_target_state: walks every cmux window before declaring absence"
+}
+
 test_normalize_key() {
   ( . "$ROOT/bin/backends/cmux.sh"
     [ "$(fm_backend_cmux_normalize_key Enter)" = enter ] || { echo "Enter failed" >&2; exit 1; }
@@ -1016,6 +1032,7 @@ test_password_respects_config_override
 test_password_empty_when_config_absent
 test_cli_exports_password_only_when_configured
 test_parse_target
+test_target_state_walks_all_windows
 test_normalize_key
 test_scoped_title_uses_primary_home_label
 test_scoped_title_uses_secondmate_home_label
