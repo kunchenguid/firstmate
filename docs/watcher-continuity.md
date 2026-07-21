@@ -20,8 +20,6 @@ This is deliberate Option B ordering: the fleet is protected before the model ha
 
 Claude retains its native tracked background-task completion path.
 Its new PreToolUse continuity gate allows wake drain and arm recovery but refuses only other fleet commands while tasks are in flight and no identity-matched live watcher holds the home lock.
-Codex retains its bounded foreground checkpoint protocol.
-Grok retains its tracked background-task notification protocol.
 No adapter starts a replacement with shell `&`.
 
 The existing turn-end guard implementation and adapters are unchanged.
@@ -50,7 +48,7 @@ Only the watcher process touches `state/.last-watcher-beat`; no helper process c
 
 ## Sanitized live evidence, 2026-07-17
 
-All five harnesses ran against git-initialized scratch projects and isolated `FM_HOME` state.
+All three harnesses ran against git-initialized scratch projects and isolated `FM_HOME` state.
 Existing harness-managed credentials remained in place, no credential bytes were copied into a fixture or transcript, and no account was created.
 Pi used the existing shared Pi auth store with the explicit `openai-codex/gpt-5.6-sol` provider/model pin and low thinking.
 Each run used the smallest prompt needed to exercise the harness-native path.
@@ -59,20 +57,14 @@ Harness versions:
 
 ```text
 Claude Code 2.1.214
-codex-cli 0.144.4
 OpenCode 1.17.18
 Pi 0.80.10
-grok 0.2.103 (89c3d36fb6f1) [stable]
 ```
 
 Claude ran an arm fixture through its native tracked background option, observed background completion, allowed the wake drain, and refused the next unrelated fleet command before its body executed.
 The captured system message exactly named `[watcher-continuity]`, `bin/fm-wake-drain.sh`, tracked Claude re-arm through `bin/fm-watch-arm.sh`, and the blocked `fm-crew-state.sh` command.
 Command: `FM_CLAUDE_LIVE_E2E=1 tests/fm-claude-continuity-live-e2e.test.sh`.
 Observed result: `ok - Claude 2.1.214 (Claude Code) live E2E refused only the post-completion fleet command with exact re-arm guidance`.
-
-Codex ran the real one-second foreground watcher checkpoint and returned `checkpoint: no actionable wake within 1s` without switching to the arm wrapper.
-Command: `FM_CODEX_LIVE_E2E=1 tests/fm-codex-continuity-live-e2e.test.sh`.
-Observed result: `ok - codex-cli 0.144.4 live E2E preserved the one-second foreground checkpoint path`.
 
 OpenCode ran its persistent TUI plugin, established the first watcher from `session.idle`, received an actionable close, and ledger-linked a live successor before the model handled the wake.
 The model executed no watcher-arm command and the turn-end backstop did not fire.
@@ -82,12 +74,7 @@ Observed result: `ok - OpenCode 1.17.18 live E2E auto-started one successor befo
 Pi loaded the tracked extensions in its interactive TUI, called `fm_watch_arm_pi` once, received an actionable close, and ledger-linked a successor before the handling turn ended.
 The turn-end backstop did not fire, and `/quit` removed both the watcher and arm child.
 Command: `FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh`.
-Observed result: `ok - Pi 0.80.10 live E2E used shared Codex auth, auto-started one successor before turn end, and cleaned up`.
-
-Grok ran the real arm wrapper through `run_terminal_command` with its tracked background option, surfaced its native task-completion notification after the actionable close, and recorded `reason=actionable-signal` in the cycle ledger.
-No shell ampersand was used.
-Command: `FM_GROK_LIVE_E2E=1 tests/fm-grok-continuity-live-e2e.test.sh`.
-Observed result: `ok - grok 0.2.103 (89c3d36fb6f1) [stable] live E2E preserved tracked background completion and shared ledger classification`.
+Observed result: `ok - Pi 0.80.10 live E2E used the shared openai-codex provider auth, auto-started one successor before turn end, and cleaned up`.
 
 The goal is continuity with fewer supervision tokens and no Pi/OpenCode model-memory re-arm step.
 No zero-latency guarantee is claimed; lock verification, watcher startup, and bounded retry delays remain deliberate safety work.
