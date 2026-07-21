@@ -371,6 +371,15 @@ INVALID_GITLAB_URLS=(
   "https://gitlab.com/a/'b'/-/merge_requests/1"
 )
 
+# These parse successfully (see test_parser_matrix) but must still be refused
+# by the merge entrypoint: bin/fm-pr-merge.sh keeps its GitHub-only refusal
+# until merge parity lands, per the provider guard at the top of that file.
+VALID_GITLAB_URLS=(
+  'https://gitlab.com/group/project/-/merge_requests/1'
+  'https://gitlab.example.co.uk/g/sub/deeper/project/-/merge_requests/42'
+  'https://git-host.internal/a/b/c/d/e/f/-/merge_requests/123456'
+)
+
 # shellcheck disable=SC2016 # Literal shell syntax is task-ID test data.
 INVALID_IDS=(
   '../escape'
@@ -487,6 +496,19 @@ test_invalid_entrypoints_have_zero_side_effects() {
     [ "$after" = "$before" ] || fail "merge invalid URL changed prior state"
   done
 
+  for value in "${VALID_GITLAB_URLS[@]}"; do
+    before=$(state_snapshot "$dir/home/state")
+    set +e
+    run_merge_entry "$dir" task-a "$value" > "$dir/stdout" 2> "$dir/stderr"
+    rc=$?
+    set -e
+    [ "$rc" -ne 0 ] || fail "merge entrypoint accepted a syntactically valid GitLab MR URL"
+    [ "$(cat "$dir/stderr")" = 'error: invalid PR merge request' ] \
+      || fail "merge GitLab URL diagnostic was not the clean refusal"
+    after=$(state_snapshot "$dir/home/state")
+    [ "$after" = "$before" ] || fail "merge GitLab URL changed prior state"
+  done
+
   for value in "${INVALID_IDS[@]}"; do
     before=$(state_snapshot "$dir/home/state")
     set +e
@@ -527,6 +549,7 @@ test_invalid_entrypoints_have_zero_side_effects() {
 
   [ ! -s "$dir/gh.log" ] || fail "invalid direct or merge data called gh"
   [ ! -s "$dir/gh-axi.log" ] || fail "invalid direct or merge data called gh-axi"
+  [ ! -s "$dir/glab-axi.log" ] || fail "invalid direct or merge data called glab-axi"
   [ ! -s "$dir/guard.log" ] || fail "invalid direct or merge data called the guard"
   [ ! -e "$TMP_ROOT/escape.check.sh" ] || fail "task traversal wrote outside state"
   pass "PR and teardown entrypoints reject invalid arguments before every side effect"
