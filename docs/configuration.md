@@ -194,6 +194,8 @@ The full cmux home label also includes a short hash of the resolved `FM_ROOT` pa
 ## Harness support
 
 claude, codex, opencode, pi, pi-signed, grok, and kimi are empirically verified for crewmate and secondmate launches; [README requirements](../README.md#requirements) own the set supported for the primary session.
+cursor is empirically verified for crewmate and scout spawns only - it has no verified primary turn-end guard, PreToolUse seatbelt, or watcher protocol, so `fm-spawn.sh` refuses it for `--secondmate`.
+cursor also authenticates per invocation from `CURSOR_API_KEY`, and because a keyless launch parks silently on a login prompt rather than failing, `fm-spawn.sh` refuses a cursor spawn unless a dispatch-pool account supplies a key or one is already exported.
 New harnesses get verified through a supervised trial task before joining the set.
 The verified adapter knowledge - each harness's busy-state source, interrupt and exit commands, skill-invocation syntax, and per-harness quirks - lives in [`.agents/skills/harness-adapters/SKILL.md`](../.agents/skills/harness-adapters/SKILL.md).
 Launch mechanics, including the verified command templates, live in [`bin/fm-spawn.sh`](../bin/fm-spawn.sh).
