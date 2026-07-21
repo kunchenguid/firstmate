@@ -80,7 +80,7 @@ SKIP_NIX=0
 INCLUDE_PRERELEASE=0
 
 usage() {
-  sed -n '2,70p' "$0" | sed 's/^# \?//'
+  sed -n '2,64p' "$0" | sed 's/^# \?//'
 }
 
 while [ "$#" -gt 0 ]; do
