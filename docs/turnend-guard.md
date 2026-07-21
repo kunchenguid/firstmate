@@ -14,7 +14,7 @@ The primary can otherwise end a turn after handling wakes without resuming super
 On 2026-07-04, that exact gap left a parked no-mistakes gate unwatched for about nine hours.
 
 `bin/fm-turnend-guard.sh` closes the gap by checking the primary's own turn-end path.
-When tasks are in flight and there is no live identity-matched watcher with a fresh beacon, a harness hook must either block the turn end or force a bounded follow-up turn that tells the primary to repair the missing or failed watcher cycle using the recovery instruction in its emitted session-start protocol.
+When tasks or messaging polls require supervision and there is no live identity-matched watcher with a fresh beacon, a harness hook must either block the turn end or force a bounded follow-up turn that tells the primary to repair the missing or failed watcher cycle using the recovery instruction in its emitted session-start protocol.
 
 ## Shared Predicate
 

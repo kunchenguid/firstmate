@@ -13,8 +13,8 @@ When this session owns supervision and away mode is not active:
 8. Failure or missing cycle only: treat any `watcher: FAILED ...` result as an alarm and repair it before ending the turn.
 9. Ordinary wake: when the background task completes with `signal:`, `stale:`, `check:`, or `heartbeat`, drain queued wakes, then start exactly one fresh background task before running other fleet commands to handle the wake.
    Do not invent a wake from an attach-status line alone; drain and act only on real wake records or a real watcher reason line.
-10. The continuity PreToolUse gate allows wake drain, watcher arm recovery, and fail-closed teardown, and refuses only other `bin/fm-*.sh` fleet commands while tasks or portal messaging polling are in flight and no identity-matched live watcher holds the home lock.
-11. The existing turn-end guard remains unchanged as the final backstop and is not replaced by this command gate.
+10. The continuity PreToolUse gate allows wake drain, watcher arm recovery, and fail-closed teardown, and refuses only other `bin/fm-*.sh` fleet commands while tasks or messaging polling require supervision and no identity-matched live watcher holds the home lock.
+11. The turn-end guard remains the final backstop and is not replaced by this command gate.
 12. Recovery only: if a forced restart is genuinely needed, run `bin/fm-watch-arm.sh --restart` through the same Claude background task mechanism.
 13. Do not send idle progress while the watcher is parked.
 

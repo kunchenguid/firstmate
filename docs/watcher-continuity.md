@@ -19,14 +19,13 @@ After the configured retry bound is exhausted, it delivers the original wake wit
 This is deliberate Option B ordering: the fleet is protected before the model handles the wake whenever restoration succeeds, but the model is never left blind when it does not.
 
 Claude retains its native tracked background-task completion path.
-Its new PreToolUse continuity gate allows wake drain, arm recovery, and independently fail-closed teardown, but refuses other fleet commands while tasks are in flight and no identity-matched live watcher holds the home lock.
-Allowing an ordinary literal teardown prevents a terminal wake from creating a recovery circle: forced or dynamically constructed teardown remains blocked, ordinary teardown itself still refuses dirty, unlanded, incomplete-scout, and unresolved-decision cases, and the turn-end guard continues to require supervision for any tasks left in flight.
+Its PreToolUse continuity gate allows wake drain, arm recovery, and independently fail-closed teardown, but refuses other fleet commands while tasks or messaging polling require supervision and no identity-matched live watcher holds the home lock.
+Allowing an ordinary literal teardown prevents a terminal wake from creating a recovery circle: forced or dynamically constructed teardown remains blocked, ordinary teardown itself still refuses dirty, unlanded, incomplete-scout, and unresolved-decision cases, and the turn-end guard continues to require supervision for any tasks or messaging connectors left active.
 Codex retains its bounded foreground checkpoint protocol.
 Grok retains its tracked background-task notification protocol.
 No adapter starts a replacement with shell `&`.
 
-The existing turn-end guard implementation and adapters are unchanged.
-They remain the final backstop rather than the normal continuity mechanism.
+The turn-end guard and its adapters remain the final backstop rather than the normal continuity mechanism.
 
 ## Arm-layer cycle contract
 
