@@ -93,8 +93,9 @@
 #     __BRIEF__    absolute path to data/<task-id>/brief.md
 #     __TURNEND__  absolute path to state/<task-id>.turn-ended (for harnesses whose
 #                  turn-end signal rides the launch command, e.g. codex -c notify=[...])
-#     __PIEXT__    absolute path to state/<task-id>.pi-ext.ts (pi turn-end extension,
-#                  written by this script; outside the worktree to avoid pi's trust gate)
+#     __PIEXT__    absolute path to state/<task-id>.pi-ext.ts (Pi turn-end and
+#                  default bash-timeout extension, written outside the worktree
+#                  to avoid Pi's trust gate)
 #     __PITURNEND__ absolute path to .pi/extensions/fm-primary-turnend-guard.ts in a pi secondmate home
 #     __PIWATCH__   absolute path to .pi/extensions/fm-primary-pi-watch.ts in a pi secondmate home
 # Per-harness turn-end hooks are installed automatically; some live outside the worktree.
@@ -1127,13 +1128,32 @@ EOF
       # Written OUTSIDE the worktree: pi's project-trust gate fires on any extension
       # loaded from inside the project (verified live), but an explicit -e path
       # elsewhere loads without a dialog. Lives in state/, cleaned by teardown.
+      pi_timeout_resolver=$(json_escape "$SCRIPT_DIR/fm-pi-bash-timeout.sh")
       cat > "$STATE/$ID.pi-ext.ts" <<EOF
-// Firstmate turn-end signal; written by fm-spawn.
+// Firstmate Pi controls; written by fm-spawn.
 // Use "turn_end" (fires after each turn the agent finishes), not "agent_end"
 // (fires once, only when the whole run exits): the watcher needs a signal at
 // every turn boundary so an idle crewmate is surfaced, not just at shutdown.
-import { execFile } from "node:child_process";
+import { execFile, spawnSync } from "node:child_process";
+const defaultBashTimeoutSecs = 900;
+const timeoutResolver = "$pi_timeout_resolver";
+function resolveDefaultBashTimeout(): number | undefined {
+  const result = spawnSync(timeoutResolver, [], { encoding: "utf8" });
+  if (result.status !== 0) return defaultBashTimeoutSecs;
+  const raw = String(result.stdout ?? "").trim();
+  if (!raw) return undefined;
+  const seconds = Number(raw);
+  return Number.isSafeInteger(seconds) && seconds > 0 ? seconds : defaultBashTimeoutSecs;
+}
 export default function (pi: any) {
+  pi.on("tool_call", (event: any) => {
+    if (event.type !== "tool_call" || event.toolName !== "bash") return {};
+    const input = event.input as { timeout?: unknown };
+    if (input.timeout !== undefined && input.timeout !== null) return {};
+    const timeout = resolveDefaultBashTimeout();
+    if (timeout !== undefined) input.timeout = timeout;
+    return {};
+  });
   pi.on("turn_end", () => execFile("touch", ["$TURNEND"]));
 }
 EOF

@@ -518,7 +518,8 @@ test_pi_extension_carries_pretool_check() {
   content=$(cat "$ext")
   assert_contains "$content" 'tool_call' "pi extension must hook tool_call for the pretool seatbelt"
   assert_contains "$content" 'fm-arm-pretool-check.sh' "pi extension must invoke the shared checker"
-  assert_contains "$content" 'String((event.input as { command?: unknown })?.command ?? "")' "pi must extract and string-coerce event.input.command exactly"
+  assert_contains "$content" 'String(input?.command ?? "")' "pi must extract and string-coerce event.input.command exactly"
+  assert_contains "$content" 'applyDefaultBashTimeout(input)' "pi must apply the default timeout in the shared bash tool_call handler"
   assert_contains "$content" 'const result = await runPretoolCheck(command);' "pi must forward the exact command to the checker"
   assert_contains "$content" 'if (result.code !== 2) return {};' "pi must block only for checker exit 2"
   assert_contains "$content" 'block: true' "pi extension must return block:true to deny"

@@ -772,7 +772,8 @@ test_pi_extension_forces_followup() {
   assert_not_contains "$content" 'Resume supervision according to the session-start operating block' "pi extension must not route a blind turn through ordinary continuity"
   assert_contains "$content" '.pi-turnend-extension-loaded' "pi extension must write its loaded marker for session-start diagnostics"
   assert_contains "$content" 'lockOwnership' "pi extension loaded marker must respect the session lock"
-  assert_contains "$content" 'const command = String((event.input as { command?: unknown })?.command ?? "")' "pi extension changed bash command extraction for the PreToolUse contract"
+  assert_contains "$content" 'const command = String(input?.command ?? "")' "pi extension changed bash command extraction for the PreToolUse contract"
+  assert_contains "$content" 'applyDefaultBashTimeout(input)' "pi extension no longer applies the default bash timeout before its seatbelts"
   assert_contains "$content" 'runPretoolCheck(command)' "pi extension changed the PreToolUse checker invocation"
   assert_contains "$content" 'return { block: true, reason:' "pi extension changed the checker exit-2 block result"
   assert_not_contains "$content" 'Run bin/fm-watch-arm.sh as a background task' "pi extension must not hardcode the old watcher-arm instruction"
@@ -786,6 +787,7 @@ test_pi_extension_injects_once_per_logical_agent_run() {
   ext="$repo/.pi/extensions/fm-primary-turnend-guard.ts"
   log="$TMP_ROOT/pi-logical-run-guard.log"
   mkdir -p "$repo/.pi/extensions" "$repo/bin" "$home/state"
+  printf '{"type":"module"}\n' > "$repo/package.json"
   cp "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$ext"
   cat > "$repo/bin/fm-turnend-guard.sh" <<'SH'
 #!/usr/bin/env bash
@@ -849,6 +851,7 @@ test_pi_extension_retries_after_followup_delivery_failure() {
   home="$TMP_ROOT/pi-delivery-failure-home"
   ext="$repo/.pi/extensions/fm-primary-turnend-guard.ts"
   mkdir -p "$repo/.pi/extensions" "$repo/bin" "$home/state"
+  printf '{"type":"module"}\n' > "$repo/package.json"
   cp "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$ext"
   cat > "$repo/bin/fm-turnend-guard.sh" <<'SH'
 #!/usr/bin/env bash

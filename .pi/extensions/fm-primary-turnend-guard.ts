@@ -16,6 +16,24 @@ const fmHome = process.env.FM_HOME || process.env.FM_ROOT_OVERRIDE || root;
 const state = process.env.FM_STATE_OVERRIDE || `${fmHome}/state`;
 const marker = `${state}/.pi-turnend-extension-loaded`;
 const extensionVersion = `sha256:${createHash("sha256").update(readFileSync(extensionFile)).digest("hex")}`;
+const defaultBashTimeoutSecs = 900;
+
+type BashInput = { command?: unknown; timeout?: unknown };
+
+function resolveDefaultBashTimeout(): number | undefined {
+  const result = spawnSync(`${root}/bin/fm-pi-bash-timeout.sh`, [], { encoding: "utf8" });
+  if (result.status !== 0) return defaultBashTimeoutSecs;
+  const raw = String(result.stdout ?? "").trim();
+  if (!raw) return undefined;
+  const seconds = Number(raw);
+  return Number.isSafeInteger(seconds) && seconds > 0 ? seconds : defaultBashTimeoutSecs;
+}
+
+function applyDefaultBashTimeout(input: BashInput): void {
+  if (input.timeout !== undefined && input.timeout !== null) return;
+  const timeout = resolveDefaultBashTimeout();
+  if (timeout !== undefined) input.timeout = timeout;
+}
 
 function parentPid(pid: string): string {
   const result = spawnSync("ps", ["-o", "ppid=", "-p", pid], { encoding: "utf8" });
@@ -76,8 +94,10 @@ function runGuard(): Promise<{ code: number; stderr: string }> {
 }
 
 // PreToolUse seatbelts (bin/fm-arm-pretool-check.sh, docs/arm-pretool-check.md;
-// bin/fm-cd-pretool-check.sh, docs/cd-guard.md). Both piggyback on this same
-// extension file rather than separate ones so no extra Pi -e flag is needed at
+// bin/fm-cd-pretool-check.sh, docs/cd-guard.md). This bash tool_call hook also
+// injects Firstmate's default timeout when the model omitted one; the resolver
+// script owns local config, disable, precedence, and invalid-value semantics.
+// These behaviors piggyback on this same extension file so no extra Pi -e flag is needed at
 // launch - the primary already loads this file for the turn-end guard, and
 // pi.on("tool_call", ...) can block (verified 2026-07-09 against pi 0.80.5:
 // returning {block: true} prevents the bash command from running). Each owner
@@ -118,7 +138,9 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("tool_call", async (event) => {
     if (event.type !== "tool_call" || event.toolName !== "bash") return {};
-    const command = String((event.input as { command?: unknown })?.command ?? "");
+    const input = event.input as BashInput;
+    applyDefaultBashTimeout(input);
+    const command = String(input?.command ?? "");
     if (!command) return {};
     const cdResult = await runCdCheck(command);
     if (cdResult.code === 2) {
