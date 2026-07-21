@@ -143,7 +143,7 @@ EOF
 }
 
 test_tracked_harness_registration() {
-  local command pi_plugin opencode_plugin
+  local command pi_plugin opencode_plugin hermes_home
   jq -e '.hooks.SessionStart | length == 1' "$ROOT/.claude/settings.json" >/dev/null \
     || fail "Claude SessionStart hook is not registered exactly once"
   jq -e '.hooks.SessionStart[0].matcher == "startup|resume|clear"' "$ROOT/.claude/settings.json" >/dev/null \
@@ -176,7 +176,12 @@ test_tracked_harness_registration() {
   assert_contains "$opencode_plugin" 'fm-sessionstart-nudge.sh' "OpenCode plugin does not invoke the wrapper"
   assert_contains "$opencode_plugin" 'promptAsync' "OpenCode plugin does not prompt the nudge turn"
 
-  pass "all five verified harnesses register the shared session-start nudge"
+  hermes_home="$TMP_ROOT/hermes-primary-home"
+  HERMES_SOURCE_HOME="$TMP_ROOT/no-hermes-source" "$ROOT/bin/fm-hermes-home.sh" primary "$hermes_home" "$ROOT" >/dev/null
+  assert_grep 'on_session_start:' "$hermes_home/config.yaml" "Hermes primary config does not register on_session_start"
+  assert_grep 'fm-sessionstart-nudge.sh' "$hermes_home/config.yaml" "Hermes on_session_start does not invoke the wrapper"
+
+  pass "all six verified harnesses register the shared session-start nudge"
 }
 
 test_genuine_primary_nudges

@@ -88,7 +88,8 @@ run_spawn() {
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
-    FM_FAKE_LAUNCH_LOG="$launchlog" GROK_HOME="$home/grok-home" PATH="$fakebin:$PATH" \
+    FM_FAKE_LAUNCH_LOG="$launchlog" GROK_HOME="$home/grok-home" \
+    HERMES_SOURCE_HOME="$home/hermes-source" PATH="$fakebin:$PATH" \
     "$SPAWN" "$@" 2>&1
 }
 
@@ -330,6 +331,29 @@ test_opencode_threads_model_and_ignores_effort_axis() {
   pass "opencode receives --model and omits the unsupported effort axis"
 }
 
+test_hermes_threads_model_and_omits_effort() {
+  local rec id out status launch hermes_home
+  id=profile-hermes-z17
+  rec=$(make_spawn_case profile-hermes claude "$id")
+  read_case_record "$rec"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --harness hermes --model gpt-5.6-sol --effort high)
+  status=$?
+  expect_code 0 "$status" "Hermes spawn with model and unsupported effort should succeed"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" hermes gpt-5.6-sol high
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "HERMES_HOME='$HOME_DIR/state/$id.hermes' hermes chat --yolo --accept-hooks --cli -m 'gpt-5.6-sol'" \
+    "Hermes launch did not use the isolated home, classic CLI, autonomy flags, and model override"
+  assert_not_contains "$launch" "--effort" "Hermes launch emitted an unsupported effort flag"
+  assert_not_contains "$launch" "reasoning_effort" "Hermes launch emitted an unsupported reasoning effort override"
+  hermes_home="$HOME_DIR/state/$id.hermes"
+  assert_grep 'on_session_end:' "$hermes_home/config.yaml" "Hermes task home lacks the turn-end hook"
+  "$hermes_home/fm-on-session-end.sh"
+  assert_present "$HOME_DIR/state/$id.turn-ended" "Hermes turn-end hook did not touch the task marker"
+  pass "Hermes receives model override, omits effort, and wires per-turn notification"
+}
+
 test_pi_threads_model_and_max_effort() {
   local rec id out status launch
   id=profile-pi-z8
@@ -397,6 +421,7 @@ test_grok_threads_model_and_reasoning_effort
 test_grok_omits_invalid_max_reasoning_effort
 test_grok_omits_invalid_xhigh_reasoning_effort
 test_opencode_threads_model_and_ignores_effort_axis
+test_hermes_threads_model_and_omits_effort
 test_pi_threads_model_and_max_effort
 test_batch_forwards_shared_profile_flags
 test_active_dispatch_profile_does_not_block_secondmate_launch

@@ -11,11 +11,11 @@
 # See docs/arm-pretool-check.md for the complete contract and validation record.
 #
 # Usage:
-#   <PreToolUse JSON on stdin> | bin/fm-arm-pretool-check.sh
+#   <PreToolUse JSON on stdin> | bin/fm-arm-pretool-check.sh [--claude|--hermes]
 #   bin/fm-arm-pretool-check.sh --command '<cmd>' [--background true|false]
 #
 # Stdin mode extracts .toolInput.command for Grok or .tool_input.command for
-# Claude and Codex.
+# Claude, Codex, and Hermes.
 # CLI mode is used by OpenCode and Pi after their adapters extract the exact
 # command string.
 # --background remains accepted for compatibility, but harness-native tracked
@@ -23,14 +23,16 @@
 #
 # Exit/output contract:
 #   ALLOW - exit 0 and no output.
-#   DENY - exit 2, a Claude-shaped deny object on stderr, and a Grok-shaped
-#          deny object on stdout unless --claude was supplied.
+#   DENY - exit 2, a Claude-shaped deny object on stderr, plus either a
+#          Grok-shaped stdout object by default, a Hermes action object with
+#          --hermes, or no stdout with --claude.
 #   FAIL OPEN - malformed or empty stdin, missing jq for stdin transport,
 #               missing Node or policy owner, or an invalid policy response.
 #
 # Claude requires stdout to remain empty on deny.
 # Codex blocks on exit 2 and displays stderr.
 # Grok consumes the stdout decision object.
+# Hermes consumes the stdout action object.
 # OpenCode and Pi consume exit 2 plus stderr.
 set -u
 
@@ -38,16 +40,17 @@ CMD=""
 CMD_SET=0
 BACKGROUND=""
 CLAUDE_MODE=0
+HERMES_MODE=0
 
 usage() {
   cat <<'EOF'
-Usage: fm-arm-pretool-check.sh [--command <cmd>] [--background true|false] [--claude]
+Usage: fm-arm-pretool-check.sh [--command <cmd>] [--background true|false] [--claude|--hermes]
 
 With no --command, reads a PreToolUse-style JSON payload on stdin (Grok
-toolInput.command, or Claude/Codex tool_input.command).
+toolInput.command, or Claude/Codex/Hermes tool_input.command).
 Exits 0 to allow and 2 to deny.
-The deny reason is written to stderr, with a Grok decision object on stdout
-unless --claude is supplied.
+The deny reason is written to stderr, with a Grok decision object on stdout by
+default, a Hermes action object under --hermes, or no stdout under --claude.
 Malformed transport and an unavailable classifier runtime fail open.
 EOF
 }
@@ -76,6 +79,10 @@ while [ "$#" -gt 0 ]; do
       ;;
     --claude)
       CLAUDE_MODE=1
+      shift
+      ;;
+    --hermes)
+      HERMES_MODE=1
       shift
       ;;
     -h|--help)
@@ -169,5 +176,11 @@ json_escape() {
 DETAIL="[$CODE] $REASON"
 ESCAPED=$(json_escape "$DETAIL")
 printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny"},"systemMessage":"%s"}\n' "$ESCAPED" >&2
-[ "$CLAUDE_MODE" -eq 1 ] || printf '{"decision":"deny","reason":"%s"}\n' "$ESCAPED"
+if [ "$CLAUDE_MODE" -eq 0 ]; then
+  if [ "$HERMES_MODE" -eq 1 ]; then
+    printf '{"action":"block","message":"%s"}\n' "$ESCAPED"
+  else
+    printf '{"decision":"deny","reason":"%s"}\n' "$ESCAPED"
+  fi
+fi
 exit 2

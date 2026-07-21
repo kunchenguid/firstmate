@@ -1,6 +1,6 @@
 ---
 name: harness-adapters
-description: Agent-only reference for firstmate harness operations. Use before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter. Contains verified facts for claude, codex, opencode, pi, and grok.
+description: Agent-only reference for firstmate harness operations. Use before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter. Contains verified facts for claude, codex, opencode, pi, grok, and hermes.
 user-invocable: false
 metadata:
   internal: true
@@ -52,7 +52,7 @@ Use that value for interrupt, exit, resume, and skill-invocation facts.
 
 Every verified primary harness has an empirically validated hook path for the "no turn ends blind" guard.
 `claude` and `codex` block directly through Stop hooks that preserve exit status 2 and stderr from `bin/fm-turnend-guard.sh`.
-`opencode`, `pi`, and `grok` expose passive lifecycle callbacks for this purpose, so their tracked primary adapters force one bounded follow-up or resume when the shared predicate blocks.
+`opencode`, `pi`, `grok`, and `hermes` expose passive lifecycle callbacks for this purpose, so their tracked primary adapters force one bounded follow-up or resume when the shared predicate blocks.
 The exact hook files, commands, validation transcripts, scoping rules, and fail-open tradeoffs are owned by `docs/turnend-guard.md`.
 When changing any primary turn-end hook, validate the real harness behavior in a scratch project or throwaway home before trusting it, then update that doc and the relevant concise fact below.
 
@@ -61,6 +61,7 @@ When changing any primary turn-end hook, validate the real harness behavior in a
 Every verified primary harness also has a wired PreToolUse-equivalent hook that denies a watcher-arm anti-pattern (shell `&`, truncating pipe, bundling, broad `pkill -f fm-watch`) before it runs.
 `claude` and `codex` block directly through PreToolUse hooks; `grok` blocks the same way but requires every `$VAR` reference in its hook `command` string to carry an inline `:-default` or it fails to launch the hook entirely.
 `opencode` and `pi` block by throwing from `tool.execute.before` / returning `{block: true}` from `tool_call`.
+`hermes` blocks from its isolated home's `pre_tool_call` hook by returning the native `{"action":"block","message":"..."}` stdout shape.
 The exact hook files, commands, output-shaping quirks (Claude Code only honors the deny when stdout is empty), and validation transcripts are owned by `docs/arm-pretool-check.md`.
 When changing any primary PreToolUse hook, validate the real harness behavior in a scratch project before trusting it, then update that doc.
 
@@ -75,6 +76,7 @@ Full mechanics, scoping, dated commands, payloads, and fail-open evidence live i
 - `opencode`: verified on 1.17.18; `session.created` plus `client.session.promptAsync` starts the nudge turn in the TUI, while `opencode run` remains fail-open headless.
 - `pi`: verified native `session_start`; the existing primary extension handles `startup`, `new`, and `resume` and uses `pi.sendMessage` to inject context without racing a positional launch prompt.
 - `grok`: the 0.2.103 project `SessionStart` event fires with `source=new`, but stdout does not reach model context; the tracked project hook remains fail-open, and a global token-guarded fallback requires a captain decision.
+- `hermes`: the isolated primary home's `on_session_start` hook invokes `bin/fm-sessionstart-nudge.sh`; Hermes v0.19.0 shell-hook stdout is not a model-context channel, so this is fail-open and the initial Firstmate instructions remain authoritative.
 
 ## Primary watcher supervision
 
@@ -84,6 +86,7 @@ Claude and Grok use tracked background-notify cycles around `bin/fm-watch-arm.sh
 Codex uses bounded foreground checkpoints through `bin/fm-watch-checkpoint.sh` because Codex cannot reason while a foreground tool call is running.
 OpenCode uses `.opencode/plugins/fm-primary-watch-arm.js`, which coordinates with the turn-end guard plugin and wakes the TUI with `client.session.promptAsync`.
 Pi uses the tracked `.pi/extensions/fm-primary-turnend-guard.ts` plus the tracked `.pi/extensions/fm-primary-pi-watch.ts`, both project-local extensions Pi auto-discovers once trusted.
+Hermes uses bounded foreground checkpoints through `bin/fm-watch-checkpoint.sh`; its isolated primary home installs the turn-end and pre-tool safety hooks.
 When changing any primary watcher adapter, update `docs/supervision-protocols/`, `docs/turnend-guard.md` if a shared idle or turn-end hook changed, and the relevant concise fact below.
 
 ## Launch profile axes
@@ -108,6 +111,7 @@ The supported launch-profile flags below are verified locally; each row records 
 | grok | `--model <model>` | `--reasoning-effort <low\|medium\|high>` | Verified on grok 0.2.99 (2026-07-13). `--effort` is an alias, but firstmate's profile axis is reasoning effort. As of 0.2.99 the ceiling is `high`; both `xhigh` and `max` are rejected with `use one of: high, medium, low`, so firstmate omits them. |
 | pi | `--model <model>` | `--thinking <low\|medium\|high\|xhigh\|max>` | Verified 2026-07-13 on Pi 0.80.6. `pi --help` advertises `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`; `pi --print --model openai-codex/gpt-5.6-sol --thinking max 'Reply with exactly OK.'` completed successfully. |
 | opencode | `--model <provider/model>` | none for firstmate's interactive launch | Verified on opencode 1.17.6. `opencode run` has `--variant`, but firstmate launches the interactive `opencode --prompt` path, which has no verified effort flag. |
+| hermes | `-m <model>` / `--model <model>` | none; omit | Verified on Hermes Agent v0.19.0 (2026-07-21). Active config supports `agent.reasoning_effort` but the launch CLI has no per-invocation effort flag. |
 
 When a requested effort value is outside the harness-specific accepted set, `fm-spawn` records the requested `effort=` in meta but emits no effort flag for that harness.
 This preserves launch success instead of passing a known-bad value.
@@ -122,6 +126,7 @@ Natural language is acceptable if uncertain.
 - opencode: no separate verified skill invocation beyond normal slash-command behavior; use natural language if the exact skill command is uncertain.
 - pi: no separate verified skill invocation beyond normal command behavior; use natural language if the exact skill command is uncertain.
 - grok: `/<skill>`, for example `/no-mistakes` (same form as claude). Verified end to end: grok discovers the user-level `no-mistakes` skill, `/no-mistakes` invokes it, and grok drives a real `no-mistakes axi run`. Like codex's `$`/`/` popups, typing `/<skill>` opens grok's slash-autocomplete, so a too-fast Enter selects the popup entry instead of sending, and for an argument-taking command (like `/no-mistakes`'s optional task-first argument) that first Enter only expands the popup selection into an argument-hint placeholder rather than submitting - a genuine second Enter is required (see the grok section below for the 2026-07-03 incident and fix). `fm_tmux_submit_core`'s retried Enter (used by `fm-send` on the tmux backend) already handles this correctly by reading the cursor row; the herdr backend needed a dedicated fix (`fm_backend_herdr_composer_state`, docs/herdr-backend.md) because its prior delta-based verification false-positived on that same popup-close content change.
+- hermes: `/<skill>`, for example `/no-mistakes`. Verified on Hermes Agent v0.19.0 by invoking `/hermes-agent` with an inline instruction and receiving the requested `SKILL_OK` response.
 
 ## claude (VERIFIED)
 
@@ -305,3 +310,33 @@ The adapter therefore runs the shared predicate and, when it returns 2, forces o
 It does not pass `--permission-mode`, so the passive hook cannot escalate the primary session's tool permissions.
 Project-local Grok hooks require folder trust, verified with launch-time `--trust`; if the primary firstmate checkout is not trusted for Grok hooks, this primary guard fails open and `fm-guard.sh` remains the next-command alarm.
 Grok's primary watcher protocol is Claude-shaped background-notify around `bin/fm-watch-arm.sh`; the passive Stop hook is only a backstop for blind turn ends.
+
+## hermes (VERIFIED 2026-07-21, Hermes Agent v0.19.0)
+
+Launch with a positional prompt: `HERMES_HOME=<isolated-dir> hermes chat --yolo --accept-hooks --cli "$(cat <brief>)"`.
+Hermes's `--yolo` bypasses dangerous-command approvals and `--accept-hooks` auto-approves configured shell hooks.
+`--cli` forces the classic prompt_toolkit REPL.
+
+| Fact | Value |
+|---|---|
+| Busy-pane signature | `Ctrl+C cancel` (shown in the running composer footer when a turn is running; idle shows bare `❯` prompt glyph) |
+| Exit command | `/quit` (`/exit` alias) |
+| Interrupt | single `Ctrl+C` (interrupts the current turn; a second `Ctrl+C` within 2 seconds force-exits) |
+| Skill invocation | `/<skill>` (e.g. `/no-mistakes`) |
+| Autonomy | `--yolo` (auto-approves tool execution without TTY prompt) |
+| Env marker | `HERMES_INTERACTIVE=1` (set for tool/child processes); session-specific `HERMES_SESSION_ID=<id>` |
+| Resume | `hermes --resume <session-id>` (id printed on exit) |
+
+Firstmate allocates an isolated per-task `HERMES_HOME` through `bin/fm-hermes-home.sh`, so the captain's real `~/.hermes/config.yaml` is never modified.
+Auth is copied opaquely from the configured source Hermes home when available, while existing isolated session data is preserved for resume.
+A crewmate home registers an `on_session_end` hook that touches the task's turn-end file.
+A Hermes secondmate receives the full primary hook set described below.
+
+**Primary-session guard fact (wired 2026-07-21).**
+Prepare a main primary's isolated home with `HERMES_PRIMARY_HOME=$(bin/fm-hermes-home.sh primary "${FM_HOME:-$PWD}/state/.hermes-primary")` and launch with `HERMES_HOME="$HERMES_PRIMARY_HOME" hermes chat --yolo --accept-hooks --cli` plus any model override.
+Hermes fires an `on_session_end` shell hook at every turn boundary (verified, v0.19.0, 2026-07-21).
+The event fires for every `run_conversation` turn and includes `session_id`, `task_id`, `turn_id`, `completed`, and `interrupted`.
+The callback is passive, so `bin/fm-turnend-guard-hermes.sh` runs the shared predicate and forces at most one follow-up with `hermes --resume <session-id> -z <guard-reason>` when supervision is missing.
+`HERMES_TURNEND_GUARD_ACTIVE=1` prevents recursion in the resumed turn.
+The isolated primary config also registers the session-start nudge on `on_session_start` and the watcher-arm seatbelt on terminal `pre_tool_call`.
+Hermes's primary watcher protocol uses bounded foreground `bin/fm-watch-checkpoint.sh` calls because background-task wake semantics are unverified.

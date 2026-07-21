@@ -107,6 +107,19 @@ test_grok_is_background_notify() {
   pass "grok supervision is Claude-shaped background notify with passive Stop-hook backstop"
 }
 
+test_hermes_is_foreground_checkpoint() {
+  local out
+  out=$(FM_CODEX_WATCH_CHECKPOINT=23 "$RENDER" --harness hermes)
+  assert_contains "$out" "SUPERVISION OPERATING INSTRUCTIONS - primary harness: hermes" "Hermes heading missing"
+  assert_contains "$out" "Mode: Hermes foreground checkpoint." "Hermes snippet missing foreground mode"
+  assert_contains "$out" "bin/fm-watch-checkpoint.sh --seconds 180" "Hermes snippet missing bounded checkpoint"
+  assert_contains "$out" "pre_tool_call" "Hermes snippet missing watcher-arm seatbelt"
+  assert_not_contains "$out" "background-notify" "Hermes snippet must not claim unverified background wake semantics"
+  out=$(FM_CODEX_WATCH_CHECKPOINT=23 "$RENDER" --harness hermes --repair-line)
+  assert_contains "$out" "bin/fm-watch-checkpoint.sh --seconds 23" "Hermes repair line did not use checkpoint helper and env override"
+  pass "Hermes supervision uses bounded foreground checkpoints"
+}
+
 test_grok_command_sources_effective_config() {
   local home config out
   home="$TMP_ROOT/grok-home"
@@ -139,5 +152,6 @@ test_conditional_stanzas
 test_repair_lines
 test_ordinary_wake_lines_are_distinct_from_repair
 test_grok_is_background_notify
+test_hermes_is_foreground_checkpoint
 test_grok_command_sources_effective_config
 test_pi_snippet_uses_effective_extension_path

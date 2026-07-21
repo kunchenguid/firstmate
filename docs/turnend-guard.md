@@ -47,16 +47,21 @@ All verified primary harnesses have a tracked integration:
 - `grok`: `.grok/hooks/fm-primary-turnend-guard.json` registers a `Stop` hook that invokes `bin/fm-turnend-guard-grok.sh`.
   The adapter runs the shared guard and, when it returns 2, invokes `grok --resume <sessionId> -p <guard-reason>` with `GROK_TURNEND_GUARD_ACTIVE=1`.
   It does not pass `--permission-mode`, so the passive Stop hook cannot grant stronger tool permissions than Grok's resumed-session default.
+- `hermes`: `bin/fm-hermes-home.sh primary` registers `bin/fm-turnend-guard-hermes.sh` as an `on_session_end` hook in a Firstmate-owned isolated Hermes home.
+  Hermes Agent v0.19.0 fires this passive callback at every completed or interrupted turn and includes `session_id`, `turn_id`, `completed`, and `interrupted` (verified 2026-07-21).
+  The adapter runs the shared guard and, when it returns 2, invokes `hermes --resume <session-id> -z <guard-reason>` with `HERMES_TURNEND_GUARD_ACTIVE=1`.
+  `fm-spawn.sh` provisions the same primary hook set for Hermes secondmates, while a main primary prepares its isolated home with the helper before launch.
+  No path modifies the captain's real `~/.hermes/config.yaml`.
 
 Claude and Codex support a direct blocking Stop hook.
 For those harnesses, exit status 2 plus stderr from `bin/fm-turnend-guard.sh` blocks the stop and feeds the reason back into the model.
 Both payloads include `stop_hook_active`; when it is true, the shared guard exits 0 so the harness can end after one forced continuation.
 
-OpenCode, Pi, and Grok expose passive lifecycle callbacks for this purpose.
+OpenCode, Pi, Grok, and Hermes expose passive lifecycle callbacks for this purpose.
 Their adapters fail open at the hook boundary to avoid corrupting a user session, but they force one follow-up turn when the shared predicate blocks.
 Each adapter carries its own in-process or environment loop guard so the forced follow-up does not recursively schedule another follow-up.
 Pi keeps that latch active across every internal tool turn and clears it only when the generated guard follow-up reaches `agent_settled`, or immediately when follow-up delivery fails.
-If a passive adapter cannot call its SDK method, cannot find `grok`, or cannot recover the Grok session id, it fails open and relies on the pull-based `fm-guard.sh` warning at the next fleet command.
+If a passive adapter cannot call its SDK method, cannot find its resume binary, or cannot recover the session id, it fails open and relies on the pull-based `fm-guard.sh` warning at the next fleet command.
 That warning uses `bin/fm-supervision-instructions.sh --repair-line`, so it points back to the active harness protocol instead of hardcoding one background-arm command.
 
 ## Empirical Validation
@@ -113,6 +118,15 @@ Project-local Grok hooks did not fire in scratch single mode without a trust gra
 The primary integration therefore requires the primary firstmate checkout to be trusted for Grok hooks, which can be done with `/hooks-trust` or launch-time `--trust`.
 If Grok declines to load project hooks, this primary guard fails open and `fm-guard.sh` remains the next-command alarm.
 
+Hermes Agent v0.19.0 was validated on 2026-07-21 with an isolated `HERMES_HOME` under `/tmp/fm-hermes-harness-scout-k7`; the captain's real Hermes config was not changed.
+The isolated config registered an executable marker script under `hooks.on_session_end` with timeout 10 and `hooks_auto_accept: true`.
+The launch command was `HERMES_HOME=/tmp/fm-hermes-harness-scout-k7 hermes chat --yolo --accept-hooks --cli -m gpt-5.6-sol --provider openai-codex`.
+One normal turn wrote `{"completed": true, "event": "on_session_end", "interrupted": false, "session_id": "20260721_215506_081d4f", "turn_id": "20260721_215506_081d4f:20260721_215506_081d4f:eb9710de"}`.
+One turn interrupted with a single `Ctrl+C` wrote `{"completed": false, "event": "on_session_end", "interrupted": true, "session_id": "20260721_215506_081d4f", "turn_id": "20260721_215506_081d4f:20260721_215506_081d4f:3f25d8cf"}`.
+`/quit` wrote no third marker.
+This proves one callback per completed or interrupted turn and no callback for ordinary session exit.
+The tracked passive adapter additionally uses the live-help `-z/--oneshot` prompt option with the separately verified `hermes --resume <session-id>` path to force one bounded guard follow-up.
+
 **2026-07-09 update:** grok 0.2.93 broke the `.grok/hooks/fm-primary-turnend-guard.json` Stop hook with `hook not executed: required env var(s) not set: ${root}`, because grok's own `${VAR}` expansion over the raw `command` string does not tolerate a bare local variable assigned earlier in the same `bash -lc` script.
 The hook command was fixed to reference `${GROK_WORKSPACE_ROOT:-}` directly everywhere instead of assigning it to `$root` first, and re-validated against grok 0.2.93 to fire and complete cleanly.
 See `docs/arm-pretool-check.md`'s "Harness wiring" section for the same Grok expansion requirement; that document's Grok hook shares the same fix.
@@ -148,6 +162,7 @@ No Herdr command was issued and no fleet state was touched; the experiment wrote
 
 ## Tests
 
-`tests/fm-turnend-guard.test.sh` covers the shared predicate, primary scoping (including a secondmate's own home being guarded like the main primary while its child worktrees stay exempt), `FM_HOME` and `FM_STATE_OVERRIDE` precedence, Pi logical-run latch behavior for no-tool and multi-tool runs, fail-open behavior without `jq`, tracked hook registration for all five harnesses, and the Grok adapter's forced-resume loop guard and permission-mode regression.
+`tests/fm-turnend-guard.test.sh` covers the shared predicate, primary scoping (including a secondmate's own home being guarded like the main primary while its child worktrees stay exempt), `FM_HOME` and `FM_STATE_OVERRIDE` precedence, Pi logical-run latch behavior for no-tool and multi-tool runs, fail-open behavior without `jq`, the original tracked hook registrations, and the Grok adapter's forced-resume loop guard and permission-mode regression.
+`tests/fm-hermes-harness.test.sh` covers the isolated Hermes primary hook set, passive forced-resume loop guard, task notification, busy/idle classification, detection, and liveness.
 The default behavior suite does not invoke live language-model harnesses.
 `FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh` opts into the isolated interactive Pi regression recorded above.

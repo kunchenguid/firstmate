@@ -55,7 +55,7 @@
 #   profile consultation. A --secondmate spawn is exempt and resolves the SECONDMATE
 #   harness (config/secondmate-harness -> config/crew-harness -> own), so the
 #   secondmate-vs-crewmate split is DURABLE across every respawn (recovery,
-#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|grok)
+#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|grok|hermes)
 #   overrides it for this spawn (either kind). A non-flag string containing
 #   whitespace is treated as a RAW launch command - the escape hatch for verifying
 #   new adapters.
@@ -96,9 +96,12 @@
 #                  written by this script; outside the worktree to avoid pi's trust gate)
 #     __PITURNEND__ absolute path to .pi/extensions/fm-primary-turnend-guard.ts in a pi secondmate home
 #     __PIWATCH__   absolute path to .pi/extensions/fm-primary-pi-watch.ts in a pi secondmate home
+#     __HERMES_HOME__ absolute path to the Firstmate-owned isolated Hermes home
 # Per-harness turn-end hooks are installed automatically; some live outside the worktree.
 # grok uses a firstmate-owned global hook under ${GROK_HOME:-$HOME/.grok}/hooks
 # plus a gitignored .fm-grok-turnend worktree pointer and a state token.
+# hermes uses bin/fm-hermes-home.sh to build an isolated HERMES_HOME under
+# state/<id>.hermes, so the captain's real ~/.hermes/config.yaml is never modified.
 # On success prints: spawned <id> harness=<name> kind=<ship|scout|secondmate> mode=<mode> yolo=<on|off> window=<backend-target> worktree=<path>
 # mode/yolo are resolved per-project from data/projects.md for ship/scout tasks;
 # secondmate spawns record mode=secondmate, yolo=off, home=, and projects=.
@@ -376,7 +379,7 @@ FIRSTMATE_HOME=
 
 if [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
-    ''|claude|codex|opencode|pi|grok)
+    ''|claude|codex|opencode|pi|grok|hermes)
       ARG3=${POS[1]:-}
       ;;
     *' '*)
@@ -437,6 +440,12 @@ launch_template() {
     # launch command - it is a Stop-event hook installed below (global hook +
     # per-task pointer), so the template is identical for ship/scout/secondmate.
     grok) printf '%s' 'grok --always-approve __MODELFLAG____EFFORTFLAG__"$(cat __BRIEF__)"' ;;
+    # hermes (Hermes Agent v0.19.0): classic CLI with --yolo for autonomous
+    # operation and --accept-hooks to auto-approve configured shell hooks.
+    # --cli forces the classic prompt_toolkit REPL (verified, 2026-07-21).
+    # The isolated HERMES_HOME carries either the task turn-end notification or
+    # the secondmate primary hooks, so the captain's real config is never modified.
+    hermes) printf '%s' 'HERMES_HOME=__HERMES_HOME__ hermes chat --yolo --accept-hooks --cli __MODELFLAG__"$(cat __BRIEF__)"' ;;
     *) return 1 ;;
   esac
 }
@@ -527,6 +536,9 @@ model_flag_for_harness() {
     claude|codex|opencode|pi|grok)
       printf -- '--model %s ' "$(shell_quote "$model")"
       ;;
+    hermes)
+      printf -- '-m %s ' "$(shell_quote "$model")"
+      ;;
   esac
 }
 
@@ -566,6 +578,9 @@ effort_flag_for_harness() {
     # opencode's interactive `opencode --prompt` launch has a verified --model
     # flag but no verified effort flag. Its `opencode run --variant` flag belongs
     # to a different, non-interactive launch mode, so fm-spawn does not pass it.
+    # hermes: no per-invocation effort flag (verified, Hermes v0.19.0, 2026-07-21).
+    # The active config supports agent.reasoning_effort, but there is no
+    # launch-flag equivalent, so effort is always omitted for this harness.
   esac
 }
 
@@ -1187,6 +1202,15 @@ EOF
   esac
 fi
 
+HERMES_TASK_HOME="$STATE_REAL/$ID.hermes"
+if [ "$HARNESS" = hermes ]; then
+  if [ "$KIND" = secondmate ]; then
+    "$SCRIPT_DIR/fm-hermes-home.sh" primary "$HERMES_TASK_HOME" "$PROJ_ABS" >/dev/null
+  else
+    "$SCRIPT_DIR/fm-hermes-home.sh" task "$HERMES_TASK_HOME" "$TURNEND" >/dev/null
+  fi
+fi
+
 # Per-project delivery mode + yolo flag (bin/fm-project-mode.sh; the project-management skill and AGENTS.md task lifecycle).
 # Recorded in meta so fm-teardown's safety check and the validate/merge stages can
 # branch on them. Mode governs ship tasks; a scout's deliverable is a report, not a
@@ -1260,6 +1284,8 @@ LAUNCH=${LAUNCH//__TURNEND__/$sq_turnend}
 LAUNCH=${LAUNCH//__PIEXT__/$sq_piext}
 LAUNCH=${LAUNCH//__PITURNEND__/$sq_piturnend}
 LAUNCH=${LAUNCH//__PIWATCH__/$sq_piwatch}
+sq_hermes_home=$(shell_quote "$HERMES_TASK_HOME")
+LAUNCH=${LAUNCH//__HERMES_HOME__/$sq_hermes_home}
 if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")
   LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_HOME=$sq_home $LAUNCH"

@@ -33,11 +33,12 @@ It tokenizes the bytes and classifies lexical execution positions only.
 
 `bin/fm-arm-pretool-check.sh` supports these entry forms:
 
-- Stdin JSON at `.tool_input.command` for Claude and Codex.
+- Stdin JSON at `.tool_input.command` for Claude, Codex, and Hermes.
 - Stdin JSON at `.toolInput.command` for Grok.
 - `--command <exact string>` for OpenCode and Pi.
 - `--background` as a compatibility-only field that never changes the decision.
 - `--claude` to preserve Claude's stderr-only deny requirement.
+- `--hermes` to emit Hermes's native stdout `{"action":"block","message":"..."}` shape.
 
 The wrapper discovers the code root from its own location.
 The active firstmate home is `${FM_HOME:-<code-root>}`.
@@ -159,8 +160,10 @@ Prose may improve without changing adapter behavior.
 - Allow returns exit 0 with both streams empty.
 - Deny returns exit 2 and writes `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny"},"systemMessage":"[code] reason"}` to stderr.
 - Default deny mode also writes `{"decision":"deny","reason":"[code] reason"}` to stdout for Grok.
+- `--hermes` instead writes `{"action":"block","message":"[code] reason"}` to stdout for Hermes.
 - `--claude` suppresses stdout completely because Claude ignores a PreToolUse deny when stdout is nonempty.
 - Codex blocks on exit 2 and displays stderr.
+- Hermes consumes the `action=block` stdout object; its shell-hook bridge logs but does not rely on the nonzero exit.
 - OpenCode throws only when the checker exits 2.
 - Pi returns `{block: true}` only when the checker exits 2.
 
@@ -173,6 +176,7 @@ Prose may improve without changing adapter behavior.
 | Grok | `.toolInput.command` | `.grok/hooks/fm-primary-pretool-check.json` forwards stdin and Grok consumes the stdout `decision=deny` object. |
 | OpenCode | `output.args.command` | `.opencode/plugins/fm-primary-pretool-check.js` passes one `--command` argument and throws only for exit 2. |
 | Pi | `event.input.command` | `.pi/extensions/fm-primary-turnend-guard.ts` passes one `--command` argument and returns `{block: true}` only for exit 2. |
+| Hermes | `.tool_input.command` | `bin/fm-hermes-home.sh primary` registers the wrapper with `--hermes` for terminal `pre_tool_call`; Hermes v0.19.0 consumes the stdout `{"action":"block","message":"..."}` shape as a native block directive. |
 
 Grok project hooks require folder trust.
 Every shell variable reference in a Grok hook command must carry an inline default such as `${GROK_WORKSPACE_ROOT:-}` because Grok expands the raw hook command before `bash -lc` runs it.
@@ -237,10 +241,18 @@ Native supervision paths were also validated in the same scratch project:
 
 Every native-path automatic marker was present and every deny sentinel remained absent.
 
+### Hermes v0.19.0 isolated-hook validation, 2026-07-21
+
+The Firstmate-owned home was generated under `/tmp/fm-hermes-adapter.<random>/home`; the captain's real Hermes config was not changed.
+The command was `HERMES_HOME="$tmp/home" hermes hooks test pre_tool_call --for-tool terminal --payload-file "$tmp/payload.json"`.
+The payload file contained `{"tool_name":"terminal","args":{"command":"bin/fm-watch-arm.sh &"}}`.
+Hermes reported `exit=2`, stdout `{"action":"block","message":"[watcher-background] a protected watcher command cannot run in an asynchronous shell list or through nohup/disown"}`, and parsed wire shape `{"action": "block", "message": "[watcher-background] a protected watcher command cannot run in an asynchronous shell list or through nohup/disown"}`.
+This verifies the exact Hermes payload field, matcher, output shape, and native block parsing without executing the denied command.
+
 ## Automated validation
 
 `tests/fm-arm-pretool-check.test.sh` owns the adversarial acceptance matrix.
-Every row runs through Codex-shaped stdin, Claude-shaped stdin, Grok-shaped stdin, OpenCode-shaped CLI, and Pi-shaped CLI entry forms.
+Every row runs through Codex-shaped stdin, Claude-shaped stdin, Grok-shaped stdin, Hermes-shaped stdin, OpenCode-shaped CLI, and Pi-shaped CLI entry forms.
 The suite also verifies real newline bytes, direct classifier reason codes, comments, heredoc data, malformed and unsupported protected syntax, constructed dynamic payloads, malformed transport fail-open behavior, missing runtime fail-open behavior, output shapes, and exact adapter field forwarding plus exit-2 mapping.
 
 Run:

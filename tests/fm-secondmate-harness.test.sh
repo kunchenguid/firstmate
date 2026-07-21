@@ -466,6 +466,31 @@ spawn_secondmate_capture() {
     "$ROOT/bin/fm-spawn.sh" "$id" "$home" "$@" --secondmate
 }
 
+test_spawn_hermes_secondmate_gets_primary_hooks() {
+  local w sm launchlog launch config
+  w="$TMP_ROOT/spawn-hermes-primary-hooks"
+  sm="$w/sm"
+  launchlog="$w/launch.log"
+  mkdir -p "$w/home/config"
+  make_seeded_home "$sm" sm
+  cp "$ROOT/bin/fm-sessionstart-nudge.sh" "$ROOT/bin/fm-turnend-guard-hermes.sh" \
+    "$ROOT/bin/fm-arm-pretool-check.sh" "$sm/bin/"
+  chmod +x "$sm/bin/"*.sh
+
+  HERMES_SOURCE_HOME="$w/no-hermes-source" \
+    spawn_secondmate_capture "$w" sm "$sm" "$launchlog" --harness hermes --model gpt-5.6-sol --effort high >/dev/null 2>&1
+  launch=$(cat "$launchlog")
+  assert_contains "$launch" "HERMES_HOME='$w/home/state/sm.hermes' hermes chat --yolo --accept-hooks --cli -m 'gpt-5.6-sol'" \
+    "Hermes secondmate launch lacks isolated home, autonomy flags, or model override"
+  assert_not_contains "$launch" "--effort" "Hermes secondmate launch emitted an unsupported effort flag"
+  config=$(cat "$w/home/state/sm.hermes/config.yaml")
+  assert_contains "$config" 'on_session_start:' "Hermes secondmate lacks session-start hook"
+  assert_contains "$config" "$sm/bin/fm-sessionstart-nudge.sh" "Hermes secondmate session-start hook points outside its home"
+  assert_contains "$config" "$sm/bin/fm-turnend-guard-hermes.sh" "Hermes secondmate turn-end hook points outside its home"
+  assert_contains "$config" "$sm/bin/fm-arm-pretool-check.sh --hermes" "Hermes secondmate pre-tool hook points outside its home"
+  pass "Hermes secondmate spawn installs the isolated primary hook set and omits effort"
+}
+
 # A bare "<harness>" secondmate-harness file (today's format) must launch with
 # NO --model/--effort flag at all, and meta must keep recording model=default,
 # effort=default - the core backward-compat requirement of the new format.
@@ -2052,6 +2077,7 @@ test_spawn_backward_compat_crew_fallback
 test_spawn_bare_backward_compat
 test_spawn_explicit_harness_wins
 test_spawn_unverified_secondmate_harness_refused
+test_spawn_hermes_secondmate_gets_primary_hooks
 test_spawn_bare_harness_no_model_effort_flag
 test_spawn_secondmate_harness_model_token
 test_spawn_secondmate_harness_model_and_effort_tokens

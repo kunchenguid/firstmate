@@ -166,6 +166,11 @@ run_matrix_entry() {
       printf '%s' "$payload" | "$CHECK" >"$out_file" 2>"$err_file"
       rc=$?
       ;;
+    hermes)
+      payload=$(jq -cn --arg command "$cmd" '{tool_name:"terminal",tool_input:{command:$command}}')
+      printf '%s' "$payload" | "$CHECK" --hermes >"$out_file" 2>"$err_file"
+      rc=$?
+      ;;
     opencode|pi)
       "$CHECK" --command "$cmd" >"$out_file" 2>"$err_file"
       rc=$?
@@ -190,16 +195,19 @@ run_matrix_entry() {
   elif [ "$entry" = grok ]; then
     jq -e '.decision == "deny"' "$out_file" >/dev/null 2>&1 \
       || fail "$id via grok deny must carry decision=deny on stdout: $(cat "$out_file")"
+  elif [ "$entry" = hermes ]; then
+    jq -e '.action == "block" and (.message | length > 0)' "$out_file" >/dev/null 2>&1 \
+      || fail "$id via hermes deny must carry action=block on stdout: $(cat "$out_file")"
   fi
 }
 
 test_full_acceptance_matrix() {
   local i entry
   for ((i = 0; i < ${#MATRIX_IDS[@]}; i++)); do
-    for entry in codex claude grok opencode pi; do
+    for entry in codex claude grok hermes opencode pi; do
       run_matrix_entry "${MATRIX_IDS[$i]}" "${MATRIX_EXPECTED[$i]}" "$entry" "${MATRIX_COMMANDS[$i]}"
     done
-    pass "matrix ${MATRIX_IDS[$i]}: ${MATRIX_EXPECTED[$i]} through all five entry forms"
+    pass "matrix ${MATRIX_IDS[$i]}: ${MATRIX_EXPECTED[$i]} through all six entry forms"
   done
 }
 
@@ -425,13 +433,25 @@ test_default_mode_stdout_has_grok_json_on_deny() {
   pass "default mode: stdout carries Grok-shaped decision JSON on deny"
 }
 
-test_allow_is_silent_both_modes() {
-  local out1 out2
+test_hermes_mode_stdout_has_action_block_on_deny() {
+  local out rc
+  out=$("$CHECK" --hermes --command 'bin/fm-watch-arm.sh &' 2>/dev/null)
+  rc=$?
+  [ "$rc" -eq 2 ] || fail "--hermes deny must exit 2, got $rc"
+  printf '%s' "$out" | jq -e '.action == "block" and (.message | test("\\[watcher-background\\]"))' >/dev/null 2>&1 \
+    || fail "--hermes deny must put Hermes action=block JSON on stdout: $out"
+  pass "--hermes: stdout carries native action=block JSON on deny"
+}
+
+test_allow_is_silent_all_modes() {
+  local out1 out2 out3
   out1=$("$CHECK" --command 'exec bin/fm-watch-arm.sh' 2>&1)
   out2=$("$CHECK" --claude --command 'exec bin/fm-watch-arm.sh' 2>&1)
+  out3=$("$CHECK" --hermes --command 'exec bin/fm-watch-arm.sh' 2>&1)
   [ -z "$out1" ] || fail "default allow must be silent, got: $out1"
   [ -z "$out2" ] || fail "--claude allow must be silent, got: $out2"
-  pass "allow is silent on both stdout and stderr in default and --claude mode"
+  [ -z "$out3" ] || fail "--hermes allow must be silent, got: $out3"
+  pass "allow is silent in default, --claude, and --hermes modes"
 }
 
 # --- harness wiring: each adapter invokes the shared checker -----------------
@@ -451,6 +471,16 @@ test_grok_pretool_hook_wired() {
   matcher=$(jq -r '.hooks.PreToolUse[0].matcher // empty' "$settings")
   [ "$matcher" = "Bash" ] || fail "grok pretool hook must matcher-scope to Bash, got: $matcher"
   pass ".grok primary hook: PreToolUse hook invokes the shared checker"
+}
+
+test_hermes_pretool_hook_wired() {
+  local home="$MATRIX_TMP/hermes-primary" config
+  HERMES_SOURCE_HOME="$MATRIX_TMP/no-hermes-source" "$ROOT/bin/fm-hermes-home.sh" primary "$home" "$ROOT" >/dev/null
+  config=$(cat "$home/config.yaml")
+  assert_contains "$config" 'pre_tool_call:' "Hermes primary config does not register pre_tool_call"
+  assert_contains "$config" 'matcher: terminal' "Hermes pretool hook is not terminal-scoped"
+  assert_contains "$config" 'fm-arm-pretool-check.sh --hermes' "Hermes pretool hook does not invoke the checker in Hermes mode"
+  pass "Hermes primary config wires terminal pre_tool_call to the shared checker"
 }
 
 test_grok_turnend_hook_uses_safe_var_pattern() {
@@ -549,8 +579,10 @@ test_failopen_missing_jq
 test_failopen_missing_node
 test_claude_mode_stdout_empty_on_deny
 test_default_mode_stdout_has_grok_json_on_deny
-test_allow_is_silent_both_modes
+test_hermes_mode_stdout_has_action_block_on_deny
+test_allow_is_silent_all_modes
 test_grok_pretool_hook_wired
+test_hermes_pretool_hook_wired
 test_grok_turnend_hook_uses_safe_var_pattern
 test_claude_settings_pretool_hook_wired
 test_codex_hooks_pretool_wired

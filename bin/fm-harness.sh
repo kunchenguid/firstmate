@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Detect the agent harness this process tree runs on.
-# Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|grok|unknown
+# Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|grok|hermes|unknown
 #        fm-harness.sh crew             print the effective CREWMATE harness
 #                                        (config/crew-harness; "default" resolves to own)
 #        fm-harness.sh secondmate       print the harness the PRIMARY uses to launch
@@ -19,7 +19,8 @@
 # Model/effort come ONLY from this file - config/crew-harness stays a bare adapter
 # name and is never parsed for a model.
 # Detection layers: verified environment markers first, then process ancestry.
-# Record each newly verified env marker here.
+# Record each newly verified env marker here. New harnesses add both an env-marker
+# check in detect_own Layer 1 and a process-name match in Layer 2.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -29,6 +30,10 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 
 detect_own() {
   # Layer 1: environment markers for verified harnesses.
+  # Hermes v0.19.0 sets HERMES_INTERACTIVE=1 (verified 2026-07-21) and is
+  # checked first because a Firstmate-launched Hermes worker can inherit its
+  # primary's marker.
+  [ "${HERMES_INTERACTIVE:-}" = "1" ] && { echo hermes; return; }
   [ "${CLAUDECODE:-}" = "1" ] && { echo claude; return; }
   [ "${PI_CODING_AGENT:-}" = "true" ] && { echo pi; return; }
   # grok sets GROK_AGENT=1 for its child/tool processes (verified, grok 0.2.73).
@@ -44,6 +49,7 @@ detect_own() {
       *codex*) echo codex; return ;;
       *opencode*) echo opencode; return ;;
       *grok*) echo grok; return ;;
+      *hermes*) echo hermes; return ;;
       pi) echo pi; return ;;
       node*|python*)
         # Bare interpreter: match the harness name in its script path.
@@ -53,6 +59,7 @@ detect_own() {
           *codex*) echo codex; return ;;
           *opencode*) echo opencode; return ;;
           *grok*) echo grok; return ;;
+          *hermes*) echo hermes; return ;;
           *" pi "*|*/pi) echo pi; return ;;
         esac ;;
     esac

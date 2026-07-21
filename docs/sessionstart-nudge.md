@@ -24,6 +24,7 @@ Every path exits 0, including malformed state and adapter errors, because Claude
 | OpenCode | `.opencode/plugins/fm-primary-sessionstart-nudge.js` listens for `session.created`, runs the wrapper once per session id, and calls `client.session.promptAsync` only when the wrapper prints a nudge. | Verified in the interactive TUI on OpenCode 1.17.18 and intentionally fail-open in headless `opencode run`. |
 | Pi | `.pi/extensions/fm-primary-turnend-guard.ts` handles `session_start` reasons `startup`, `new`, and `resume`, then injects the wrapper output with `pi.sendMessage`. | The custom message enters model context without racing an initial positional prompt, and the changed extension passes strict TypeScript checking on Pi 0.80.10. |
 | Grok | `.grok/hooks/fm-primary-sessionstart-nudge.json` registers a project `SessionStart` hook and invokes the wrapper through inline-defaulted `${GROK_WORKSPACE_ROOT:-}`. | The project event fires on Grok 0.2.103, but hook stdout does not reach model context, so this path is documented fail-open. |
+| Hermes | `bin/fm-hermes-home.sh primary` registers the wrapper as an `on_session_start` shell hook in a Firstmate-owned isolated Hermes home. | Hermes v0.19.0 fires the hook, but its shell-hook return protocol does not inject ordinary stdout into model context, so this path is fail-open and the initial Firstmate instructions remain authoritative. |
 
 The OpenCode nudge runs only on `session.created`.
 The watcher-arm and turn-end guard plugins run later on `session.idle`, and the turn-end guard continues to let the watcher coordinator act first, so the three plugins do not race for one lifecycle event.
@@ -72,6 +73,15 @@ Without folder hook trust it does not load, and with trust its stdout is current
 The known guaranteed-loading alternative is the global token-guarded hook pattern in `bin/fm-spawn.sh`, but installing files under `~/.grok/hooks/` expands trust and writes outside the repository.
 Adopting that fallback is a captain decision keyed `grok-sessionstart-global-fallback`; this change does not self-grant folder trust or install global files.
 
+### Hermes Agent v0.19.0
+
+Validation used Firstmate-owned isolated homes under `/tmp`; the captain's real Hermes config was not changed.
+`HERMES_HOME="$tmp/home" hermes hooks list` reported three configured hooks, including `on_session_start` pointing at `bin/fm-sessionstart-nudge.sh` with timeout 10.
+A second isolated config registered a mode-0700 nudge script that printed `Run bin/fm-session-start.sh now.`.
+`HERMES_HOME="$tmp" hermes hooks test on_session_start` reported `exit=0`, `stdout: Run bin/fm-session-start.sh now.`, and `parsed: <none>`.
+This verifies native event registration and execution while confirming that ordinary hook stdout is not injected through Hermes's shell-hook response protocol.
+The transport is therefore a fail-open nudge; AGENTS.md remains the session-start authority.
+
 ### OpenCode 1.17.18
 
 Headless command run:
@@ -107,5 +117,5 @@ The underlying Claude SessionStart stdout injection and Pi `session_start` event
 
 `tests/fm-sessionstart-nudge.test.sh` proves wrapper silence for both gate signals, an unmarked linked worktree, a missing state directory, and an already-owned lock.
 It proves exact one-line output for a plain primary and a marked linked secondmate primary.
-It also verifies tracked wrapper registration for Claude, Codex, OpenCode, Pi, and Grok.
+It also verifies tracked wrapper registration for Claude, Codex, OpenCode, Pi, Grok, and Hermes.
 `tests/fm-turnend-guard.test.sh` continues to cover the same shared primary scope through the turn-end path.
