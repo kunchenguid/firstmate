@@ -48,8 +48,7 @@ holder_alive() {  # true if $1 is a live process that looks like a harness
   local pid=$1 comm
   case "$pid" in
     codex-thread:*)
-      [ "${CODEX_THREAD_ID:-}" = "${pid#codex-thread:}" ]
-      return
+      return 0
       ;;
   esac
   kill -0 "$pid" 2>/dev/null || return 1
@@ -62,7 +61,8 @@ if [ "${1:-}" = "status" ]; then
   old=$(cat "$LOCK")
   if holder_alive "$old"; then
     case "$old" in
-      codex-thread:*) echo "lock: held by current Codex session" ;;
+      "codex-thread:${CODEX_THREAD_ID:-}") echo "lock: held by current Codex session" ;;
+      codex-thread:*) echo "lock: held by another or unknown Codex session" ;;
       *) echo "lock: held by live harness pid $old" ;;
     esac
   else

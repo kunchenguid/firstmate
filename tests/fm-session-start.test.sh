@@ -185,6 +185,23 @@ EOF
   pass "Codex thread session lock works when process inspection is denied"
 }
 
+test_foreign_codex_thread_lock_is_not_overwritten() {
+  local rec root home fakebin out status=0
+  rec=$(new_world foreign-codex-thread-lock)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_ps_denied "$fakebin"
+
+  CODEX_THREAD_ID=owner-thread FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-lock.sh" >/dev/null
+  out=$(CODEX_THREAD_ID=other-thread FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-lock.sh" 2>&1) || status=$?
+  expect_code 1 "$status" "foreign Codex thread lock acquisition"
+  assert_contains "$out" "another live firstmate session holds the lock" "foreign Codex thread was allowed to replace the lock"
+  [ "$(cat "$home/state/.lock")" = "codex-thread:owner-thread" ] || fail "foreign Codex thread overwrote the existing lock"
+
+  pass "foreign Codex thread locks remain held when process inspection is denied"
+}
+
 make_fake_ps_pi_holder() {
   local fakebin=$1 holder_pid=$2
   cat > "$fakebin/ps" <<SH
@@ -934,6 +951,7 @@ EOF
 
 test_context_digest_absent_empty_present
 test_codex_thread_lock_survives_denied_process_inspection
+test_foreign_codex_thread_lock_is_not_overwritten
 test_lock_refusal_read_only_path
 test_output_ordering_diagnostics_lead
 test_herdr_backend_diagnostics_follow_real_session_start

@@ -23,6 +23,10 @@ lock_is_in_ancestry() {
   [ -f "$STATE/.lock" ] || return 1
   IFS= read -r lock_pid < "$STATE/.lock" 2>/dev/null || return 1
   case "$lock_pid" in
+    "codex-thread:${CODEX_THREAD_ID:-}")
+      [ -n "${CODEX_THREAD_ID:-}" ] && return 0
+      return 1
+      ;;
     ''|*[!0-9]*|1) return 1 ;;
   esac
   kill -0 "$lock_pid" 2>/dev/null || return 1
