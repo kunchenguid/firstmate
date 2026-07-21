@@ -1229,7 +1229,7 @@ FM_BACKEND_HERDR_DIALOG_POLL_SLEEP=${FM_BACKEND_HERDR_DIALOG_POLL_SLEEP:-0.5}
 FM_BACKEND_HERDR_DIALOG_KEY_SLEEP=${FM_BACKEND_HERDR_DIALOG_KEY_SLEEP:-0.2}
 
 fm_backend_herdr_dialog_classify() {  # <harness> <pane-capture> -> <kind>\t<focus>
-  local harness=$1 capture=$2 plain line trimmed focus="" kind=none choice=none
+  local harness=$1 capture=$2 plain line trimmed focus="" kind=none choice=none glyph_seen=0
   plain=$(fm_backend_herdr_strip_ansi "$capture")
 
   case "$harness" in
@@ -1274,6 +1274,7 @@ fm_backend_herdr_dialog_classify() {  # <harness> <pane-capture> -> <kind>\t<foc
   while IFS= read -r line; do
     trimmed="${line#"${line%%[![:space:]]*}"}"
     case "$trimmed" in '❯ '*|'› '*) ;; *) continue ;; esac
+    glyph_seen=1
     focus=${trimmed#?}
     focus="${focus#"${focus%%[![:space:]]*}"}"
     case "$kind:$focus" in
@@ -1285,7 +1286,12 @@ fm_backend_herdr_dialog_classify() {  # <harness> <pane-capture> -> <kind>\t<foc
   done <<EOF
 $plain
 EOF
-  if [ "$choice" = unknown ] && [ "$kind" = codex-trust ]; then
+  # Codex's trust screen confirms with a bare Enter and renders no cursor at
+  # all, so its "Press enter to continue" fallback is only admissible when the
+  # capture holds NO selection glyph anywhere. A glyph that simply matched none
+  # of the recognized options is an unrecognized selection - possibly a
+  # destructive one - and must stay unknown rather than be read as accept.
+  if [ "$choice" = unknown ] && [ "$glyph_seen" -eq 0 ] && [ "$kind" = codex-trust ]; then
     case "$plain" in *'Press enter to continue'*|*'Press Enter to continue'*) choice=accept ;; esac
   fi
   printf '%s\t%s' "$kind" "$choice"

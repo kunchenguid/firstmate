@@ -1267,6 +1267,18 @@ test_dialog_focus_reads_only_the_menu_rows_not_the_composer_prompt() {
   pass "herdr first-launch dialogs: focus is read from the dialog's own option rows, never a composer prompt glyph"
 }
 
+test_dialog_codex_trust_enter_fallback_needs_a_cursorless_screen() {
+  local out
+  out=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_dialog_classify codex "$1"' "$ROOT" \
+    $'Do you trust the contents of this directory?\n  Yes, continue\n❯ 2. No, exit and choose another folder\nPress enter to continue')
+  [ "$out" = $'codex-trust\tunknown' ] || fail "an unrecognized selection glyph must not fall back to accept, got '$out'"
+
+  out=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_dialog_classify codex "$1"' "$ROOT" \
+    $'Do you trust the contents of this directory?\nYes, continue\nPress enter to continue')
+  [ "$out" = $'codex-trust\taccept' ] || fail "a cursorless codex trust screen must still accept on Enter, got '$out'"
+  pass "herdr first-launch dialogs: codex trust's Enter fallback applies only when no selection cursor is rendered at all"
+}
+
 test_dialog_repainted_frame_after_enter_refuses_a_second_enter() {
   local dir log resp fb rc enter_count
   dir="$TMP_ROOT/dialog-repaint-enter"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
@@ -2739,6 +2751,7 @@ test_dialog_visible_dialog_with_idle_agent_is_still_driven
 test_dialog_clean_capture_with_done_agent_verifies_spawn
 test_dialog_stale_dismissed_frame_with_running_agent_stops_enters
 test_dialog_focus_reads_only_the_menu_rows_not_the_composer_prompt
+test_dialog_codex_trust_enter_fallback_needs_a_cursorless_screen
 test_dialog_repainted_frame_after_enter_refuses_a_second_enter
 test_dialog_known_menu_without_parsable_focus_polls_instead_of_failing_instantly
 test_events_capable_large_schema_is_pipefail_safe
