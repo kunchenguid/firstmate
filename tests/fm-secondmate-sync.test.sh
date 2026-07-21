@@ -72,6 +72,7 @@ add_sm_worktree() {
   {
     printf 'window=firstmate:fm-%s\n' "$id"
     printf 'kind=secondmate\n'
+    printf 'harness=codex\n'
     printf 'home=%s/%s\n' "$w" "$id"
   } > "$w/home/state/$id.meta"
 }
@@ -287,7 +288,7 @@ test_sweep_nudge_requires_instruction_change() {
 
 # --- T8: bootstrap sweeps live homes, nudges only the real instruction change -
 make_fake_toolchain() {
-  local dir=$1 fakebin
+  local dir=$1 fakebin real_rm
   fakebin="$dir/fakebin"
   mkdir -p "$fakebin"
   fm_fake_exit0 "$fakebin" node gh-axi chrome-devtools-axi lavish-axi
@@ -297,7 +298,7 @@ if [ -n "${FM_FAKE_TMUX_LOG:-}" ]; then
   printf '%s\n' "$*" >> "$FM_FAKE_TMUX_LOG"
 fi
 case "$*" in
-  *display-message*'#{pane_current_command}'*) printf '%s\n' codex; exit 0 ;;
+  *display-message*'#{pane_current_command}'*) printf '%s\n' "${FM_FAKE_TMUX_PANE_COMMAND:-codex}"; exit 0 ;;
   *display-message*'#{pane_id}'*) printf '%s\n' '%1'; exit 0 ;;
   *display-message*'#{cursor_y}'*) printf '%s\n' 0; exit 0 ;;
   *'send-keys'*' -l '*)
@@ -308,6 +309,17 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
+  real_rm=$(command -v rm)
+  cat > "$fakebin/rm" <<SH
+#!/usr/bin/env bash
+for arg in "\$@"; do
+  if [ -n "\${FM_FAKE_RM_FAIL_PATH:-}" ] && [ "\$arg" = "\$FM_FAKE_RM_FAIL_PATH" ]; then
+    exit 1
+  fi
+done
+exec "$real_rm" "\$@"
+SH
+  chmod +x "$fakebin/rm"
   cat > "$fakebin/gh" <<'SH'
 #!/usr/bin/env bash
 exit 0
@@ -517,8 +529,43 @@ test_bootstrap_nudge_retry_is_idempotent() {
   pass "T8d bootstrap nudge retry is idempotent after success"
 }
 
+test_bootstrap_nudge_retry_requires_marker_consumption() {
+  local w c1 fakebin out marker out2
+  w=$(new_world nudge-retry-consume)
+  c1=$(head_of "$w/main")
+  add_sm_worktree "$w" sm-instr "$c1"
+  bump_primary "$w" instr
+  fakebin=$(make_fake_toolchain "$w")
+
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
+    FM_SEND_SETTLE=0 FM_FAKE_TMUX_FAIL_LITERAL=1 \
+    "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
+  marker="$w/home/state/.secondmate-nudge-pending/sm-instr.pending"
+  assert_present "$marker" "precondition: failed nudge should leave marker"
+
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
+    FM_SEND_SETTLE=0 FM_FAKE_RM_FAIL_PATH="$marker" \
+    "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
+  assert_contains "$out" "NUDGE_SECONDMATES: secondmate sm-instr: send failed: retry marker removal failed" \
+    "successful send must remain actionable when marker consumption fails"
+  assert_not_contains "$out" "BOOTSTRAP_INFO: nudged fm-sm-instr" \
+    "marker removal failure must not report a completed nudge"
+  assert_present "$marker" "marker removal failure should retain the retry marker"
+
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
+    FM_SEND_SETTLE=0 "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
+  assert_contains "$out" "BOOTSTRAP_INFO: nudged fm-sm-instr with" \
+    "retry should complete after marker consumption recovers"
+  assert_absent "$marker" "successful retry should prove marker consumption"
+
+  out2=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
+    FM_SEND_SETTLE=0 "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
+  [ -z "$out2" ] || fail "consumed marker should keep the next startup silent, got: $out2"
+  pass "T8h bootstrap reports success only after consuming the retry marker"
+}
+
 test_bootstrap_nudge_retry_supersedes_safely_advanced_commit() {
-  local w c1 c2 current fakebin out marker marker_before out2
+  local w c1 c2 current fakebin out marker marker_before log out2
   w=$(new_world nudge-retry-advanced)
   c1=$(head_of "$w/main")
   add_sm_worktree "$w" sm-instr "$c1"
@@ -537,13 +584,17 @@ test_bootstrap_nudge_retry_supersedes_safely_advanced_commit() {
 
   bump_primary "$w" instr
   current=$(head_of "$w/main")
+  mkdir -p "$w/home/config"
+  printf 'pi\n' > "$w/home/config/crew-harness"
 
   sed -i.bak 's/^message=.*/message=wrong reread request/' "$marker" 2>/dev/null || \
     sed -i 's/^message=.*/message=wrong reread request/' "$marker"
   rm -f "$marker.bak"
   marker_before=$(cat "$marker")
+  log="$w/rejected-tmux.log"
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
-    FM_SEND_SETTLE=0 "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
+    FM_SEND_SETTLE=0 FM_FAKE_TMUX_PANE_COMMAND=zsh FM_FAKE_TMUX_LOG="$log" \
+    "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
   assert_contains "$out" "retry marker message mismatch" \
     "behind-home retry should reject a message mismatch"
   assert_not_contains "$out" "BOOTSTRAP_INFO: nudged fm-sm-instr" \
@@ -553,6 +604,11 @@ test_bootstrap_nudge_retry_supersedes_safely_advanced_commit() {
   assert_present "$marker" "message mismatch should retain the marker"
   [ "$(cat "$marker")" = "$marker_before" ] \
     || fail "rejected retry marker was overwritten during the same sweep"
+  assert_contains "$out" "SECONDMATE_LIVENESS: secondmate sm-instr: skipped: pending nudge retry rejected during this startup" \
+    "rejected retry must suppress the same startup's liveness recovery"
+  assert_absent "$log" "rejected retry must not probe, kill, or respawn the endpoint"
+  [ "$(cat "$w/sm-instr/config/crew-harness" 2>/dev/null)" = pi ] \
+    || fail "rejected tracked sync suppressed independent inheritance propagation"
 
   sed -i.bak \
     's/^message=.*/message=firstmate was updated to the latest - please re-read your AGENTS.md to pick up the new instructions./' \
@@ -624,9 +680,8 @@ test_bootstrap_nudge_retry_refuses_changed_home() {
 
 # --- T8b: stale herdr nudge failures retry through current fm-<id> metadata ---
 # Reproduces the 2026-07-07 session-start bug: secondmate_sync used to print raw
-# backend targets (default:w9:pY) that liveness respawn immediately replaced
-# (default:wA:p2), so fm-send with the printed target fell back to tmux and failed
-# while fm-<id> resolved through current meta.
+# backend targets, so fm-send with a stale target fell back to tmux and failed
+# while fm-<id> resolved through current metadata after endpoint recovery.
 make_nudge_herdr_fake() {
   local dir=$1 stale=$2 fresh=$3 fakebin
   fakebin=$(fm_fakebin "$dir")
@@ -652,15 +707,26 @@ case "\$cmd \$sub" in
     if [ "\$arg" = "${stale#*:}" ]; then
       printf '{"error":{"code":"agent_not_found","message":"gone"}}\n' >&2
     elif [ "\$arg" = "${fresh#*:}" ]; then
-      printf '{"result":{"agent":{"agent_status":"idle"}}}\n'
+      if [ -e "$dir/submitted" ]; then
+        printf '{"result":{"agent":{"agent_status":"working"}}}\n'
+      else
+        printf '{"result":{"agent":{"agent_status":"idle"}}}\n'
+      fi
     else
       printf '{"error":{"code":"agent_not_found","message":"gone"}}\n' >&2
     fi
     ;;
-  "pane send-text"|"pane run"|"pane send-keys")
+  "pane send-text"|"pane run")
     if [ "\$arg" = "${stale#*:}" ]; then
       exit 1
     fi
+    exit 0
+    ;;
+  "pane send-keys")
+    if [ "\$arg" = "${stale#*:}" ]; then
+      exit 1
+    fi
+    : > "$dir/submitted"
     exit 0
     ;;
 esac
@@ -670,8 +736,8 @@ SH
   printf '%s\n' "$fakebin"
 }
 
-test_nudge_retry_uses_fresh_herdr_endpoint_after_respawn() {
-  local w c1 stale fresh fakebin herdrfb toolchain out meta window resolved stale_send fresh_send spawn_stub marker
+test_nudge_retry_uses_fresh_herdr_endpoint_after_recovery() {
+  local w c1 stale fresh herdrfb toolchain out out2 meta window resolved stale_send fresh_send marker
   stale=default:w9:pY
   fresh=default:wA:p2
   w=$(new_world nudge-herdr-rotate)
@@ -688,25 +754,10 @@ test_nudge_retry_uses_fresh_herdr_endpoint_after_respawn() {
     printf 'home=%s/sm-instr\n' "$w"
   } > "$meta"
 
-  spawn_stub="$w/spawn-stub.sh"
-  cat > "$spawn_stub" <<SH
-#!/usr/bin/env bash
-set -u
-id=\${1:-}
-meta="\$FM_HOME/state/\$id.meta"
-[ -f "\$meta" ] || exit 1
-sed -i.bak "s/^window=.*/window=$fresh/" "\$meta" 2>/dev/null || \
-  sed -i "s/^window=.*/window=$fresh/" "\$meta"
-rm -f "\$meta.bak"
-exit 0
-SH
-  chmod +x "$spawn_stub"
-  cp "$spawn_stub" "$w/main/bin/fm-spawn.sh"
-
   herdrfb=$(make_nudge_herdr_fake "$w/herdr" "$stale" "$fresh")
   toolchain=$(make_fake_toolchain "$w")
   if ! add_real_jq "$toolchain"; then
-    pass "T8b nudge selector herdr respawn skipped without jq"
+    pass "T8b nudge selector herdr recovery skipped without jq"
     return
   fi
   out=$(PATH="$herdrfb:$toolchain:$BASE_PATH" HERDR_ENV=1 FM_BACKEND=herdr \
@@ -716,15 +767,28 @@ SH
 
   assert_contains "$out" "NUDGE_SECONDMATES: secondmate sm-instr: send failed:" \
     "stale herdr endpoint should surface a failed immediate nudge"
+  assert_contains "$out" "SECONDMATE_LIVENESS: secondmate sm-instr: skipped: pending nudge retry rejected during this startup" \
+    "failed herdr nudge must suppress same-startup liveness recovery"
 
   window=$(grep '^window=' "$meta" | tail -1 | cut -d= -f2-)
-  [ "$window" = "$fresh" ] || fail "respawn stub did not rotate meta window to '$fresh' (got '$window')"
+  [ "$window" = "$stale" ] || fail "rejected startup mutated stale herdr metadata to '$window'"
   marker="$w/home/state/.secondmate-nudge-pending/sm-instr.pending"
   assert_present "$marker" "failed stale herdr nudge should leave a retry marker"
 
+  sed -i.bak "s/^window=.*/window=$fresh/" "$meta" 2>/dev/null || \
+    sed -i "s/^window=.*/window=$fresh/" "$meta"
+  rm -f "$meta.bak"
+  out2=$(PATH="$herdrfb:$toolchain:$BASE_PATH" HERDR_ENV=1 FM_BACKEND=herdr \
+    FM_SEND_SETTLE=0 \
+    FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
+    "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
+  assert_contains "$out2" "BOOTSTRAP_INFO: nudged fm-sm-instr with" \
+    "recovered herdr endpoint should consume the retry through the stable selector"
+  assert_absent "$marker" "successful recovered-endpoint retry should consume its marker"
+
   # shellcheck disable=SC2016  # $0/$1 belong to the inner bash -c process.
   resolved=$(bash -c '. "$0/bin/fm-backend.sh"; fm_backend_resolve_selector fm-sm-instr "$1"' "$ROOT" "$w/home/state")
-  [ "$resolved" = "$fresh" ] || fail "fm-<id> should resolve through post-respawn meta, got '$resolved'"
+  [ "$resolved" = "$fresh" ] || fail "fm-<id> should resolve through recovered metadata, got '$resolved'"
 
   # shellcheck disable=SC2016  # $0/$1 belong to the inner bash -c process.
   stale_send=$(PATH="$herdrfb:$toolchain:$BASE_PATH" bash -c \
@@ -736,7 +800,7 @@ SH
     '. "$0/bin/fm-backend.sh"; fm_backend_source herdr; fm_backend_herdr_send_literal "$1" "nudge"' "$ROOT" "$fresh" 2>/dev/null; printf '%s' "$?")
   [ "$fresh_send" = 0 ] || fail "send through fm-<id>-resolved fresh endpoint should succeed"
 
-  pass "T8b stale herdr nudge failures leave a retry marker after respawn rotates fm-<id> metadata"
+  pass "T8b stale herdr nudge failures stay closed until fm-<id> resolves a recovered endpoint"
 }
 
 # --- T9: bootstrap surfaces a skipped dirty live secondmate home --------------
@@ -927,9 +991,10 @@ test_bootstrap_nudge_send_uses_state_override
 test_bootstrap_nudge_retry_rejects_malformed_marker_id
 test_bootstrap_nudge_failure_records_retry_marker
 test_bootstrap_nudge_retry_is_idempotent
+test_bootstrap_nudge_retry_requires_marker_consumption
 test_bootstrap_nudge_retry_supersedes_safely_advanced_commit
 test_bootstrap_nudge_retry_refuses_changed_home
-test_nudge_retry_uses_fresh_herdr_endpoint_after_respawn
+test_nudge_retry_uses_fresh_herdr_endpoint_after_recovery
 test_bootstrap_sweep_surfaces_skipped_home
 test_spawn_fast_forwards_before_launch
 test_spawn_warns_when_sync_skipped_before_launch
