@@ -26,7 +26,8 @@ github_quota_deferred() {
 
 mark_github_quota_from_file() {
   local source=$1 file=$2
-  "$SCRIPT_DIR/fm-shared-github-quota.sh" mark-from-text --provider github --route "$GITHUB_ROUTE" \
+  FM_SHARED_GITHUB_QUOTA_DERIVE_ACCOUNT=0 \
+    "$SCRIPT_DIR/fm-shared-github-quota.sh" mark-from-text --provider github --route "$GITHUB_ROUTE" \
     --source "$source" --file "$file" >/dev/null 2>&1 || true
 }
 

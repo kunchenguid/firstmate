@@ -210,34 +210,43 @@ let account = "";
 }
 // Live gh stderr rarely carries a timestamp: a primary limit reports the reset
 // only through the x-ratelimit-reset header epoch, and a secondary limit only
-// through retry-after seconds. Both labels are accepted, but a bare number
-// never is, so an unlabeled id or epoch still cannot become reset evidence.
+// through retry-after seconds. Both labels are accepted, and the header
+// separator is required so prose like "retry after 15 minutes" - whose number
+// is not seconds - can never be read as a reset. A bare number is never reset
+// evidence, so an unlabeled id or epoch cannot create a cooldown.
 const nowEpoch = Number(process.env.FM_SHARED_QUOTA_NOW || 0) ||
   Math.floor(Date.now() / 1000);
-let ms = NaN;
-let resetAt = "";
-for (const re of [
-  /(20\d\d-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?Z)/i,
-  /(20\d\d-\d\d-\d\d[ T]\d\d:\d\d:\d\d\s+UTC)/i,
-]) {
-  const m = text.match(re);
-  if (m) { resetAt = m[1]; break; }
-}
-if (resetAt) {
-  ms = Date.parse(resetAt);
+function scrapedTimestampMs() {
+  let resetAt = "";
+  for (const re of [
+    /(20\d\d-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?Z)/i,
+    /(20\d\d-\d\d-\d\d[ T]\d\d:\d\d:\d\d\s+UTC)/i,
+  ]) {
+    const m = text.match(re);
+    if (m) { resetAt = m[1]; break; }
+  }
+  if (!resetAt) return NaN;
+  let ms = Date.parse(resetAt);
   if (!Number.isFinite(ms)) {
     const m = resetAt.match(/^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}:\d{2})\s+UTC$/i);
     if (m) ms = Date.parse(`${m[1]}T${m[2]}Z`);
   }
+  return ms;
 }
-if (!Number.isFinite(ms)) {
-  const m = text.match(/\bx-rate-?limit-reset\s*[:=]\s*([0-9]{9,})\b/i);
-  if (m) ms = Number(m[1]) * 1000;
+function labeledHeaderMs() {
+  let m = text.match(/\bx-rate-?limit-reset\s*[:=]\s*([0-9]{9,})\b/i);
+  if (m) return Number(m[1]) * 1000;
+  m = text.match(/\bretry[- ]after\s*[:=]\s*([0-9]{1,7})\b/i);
+  if (m) return (nowEpoch + Number(m[1])) * 1000;
+  return NaN;
 }
-if (!Number.isFinite(ms)) {
-  const m = text.match(/\bretry[- ]after\s*[:=]?\s*([0-9]{1,7})\b/i);
-  if (m) ms = (nowEpoch + Number(m[1])) * 1000;
-}
+// A labeled header is the limit's own statement of its reset, while an
+// unlabeled timestamp anywhere in the body is often just a log prefix. Prefer
+// whichever candidate is actually in the future, labeled first, so a stale log
+// timestamp cannot shadow usable header evidence.
+const candidates = [labeledHeaderMs(), scrapedTimestampMs()].filter(Number.isFinite);
+let ms = candidates.find((c) => Math.floor(c / 1000) > nowEpoch);
+if (ms === undefined) ms = candidates.length ? candidates[0] : NaN;
 if (!Number.isFinite(ms)) process.exit(1);
 if (account) console.log(`observed_account=${account}`);
 console.log(`reset_at=${new Date(ms).toISOString().replace(/\.000Z$/, "Z")}`);
@@ -355,6 +364,18 @@ cache_get() {
   cat "$body"
 }
 
+# The deferred read must stay reachable under every key a cooldown for it could
+# have been written under, exactly like check_quota_resolved: an entry cached
+# before any account resolved lives under the account-agnostic key.
+cache_get_resolved() {  # <provider> <account> <route> <key> <max-age>
+  local provider=$1 account=$2 route=$3 key=$4 max_age=$5 status
+  cache_get "$provider" "$account" "$route" "$key" "$max_age" && return 0
+  status=$?
+  [ "$status" = 1 ] || return "$status"
+  [ -n "$account" ] || return 1
+  cache_get "$provider" "" "$route" "$key" "$max_age"
+}
+
 cache_put() {
   local provider=$1 account=$2 route=$3 key=$4 dir now meta_content
   dir=$(cache_dir "$provider" "$account" "$route" "$key")
@@ -463,7 +484,7 @@ case "$cmd" in
     # reachable under exactly the key the cooldown that deferred it was
     # written under, including the account-agnostic one.
     resolve_account_or_agnostic "$PROVIDER" || exit $?
-    cache_get "$PROVIDER" "$ACCOUNT" "$ROUTE" "$KEY" "$MAX_AGE_SECS"
+    cache_get_resolved "$PROVIDER" "$ACCOUNT" "$ROUTE" "$KEY" "$MAX_AGE_SECS"
     ;;
   cache-put)
     [ -n "$KEY" ] || { echo "error: cache-put requires --key" >&2; exit 2; }

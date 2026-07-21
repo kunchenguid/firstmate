@@ -97,10 +97,12 @@ case "$provider" in
       else
         gh_err=$(mktemp "${TMPDIR:-/tmp}/fm-gh-pr.XXXXXXXX") || exit 0
         if state=$(gh pr view "$url" --json state -q .state 2>"$gh_err"); then
-          printf '%s\n' "$state" | "$quota_bin" cache-put --provider github --route "$github_route" \
+          printf '%s\n' "$state" | FM_SHARED_GITHUB_QUOTA_DERIVE_ACCOUNT=0 \
+            "$quota_bin" cache-put --provider github --route "$github_route" \
             --key "$cache_key" >/dev/null 2>&1 || true
         else
-          "$quota_bin" mark-from-text --provider github --route "$github_route" \
+          FM_SHARED_GITHUB_QUOTA_DERIVE_ACCOUNT=0 \
+            "$quota_bin" mark-from-text --provider github --route "$github_route" \
             --source "fm-pr-poll:$url" --file "$gh_err" >/dev/null 2>&1 || true
           state=
         fi

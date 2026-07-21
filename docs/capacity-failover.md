@@ -126,16 +126,17 @@ Cooldown records are keyed by `(provider, account, route)`.
 The account comes from `--account`, `FM_GITHUB_ACCOUNT_ID`, a locally cached account, or a best-effort `gh api user` derivation.
 An account id read out of a rate-limit body is evidence only: it is recorded as `observed_account=` and never keys a record or replaces the cached account.
 When no account resolves, `mark-from-text` writes one account-agnostic record, and `check` consults that record in addition to the keyed one, so a cooldown observed before any account is known is still read back.
-`cache-get` and `cache-put` follow the same key policy, so a cached read stays reachable under the key its cooldown was written under.
+`cache-put` writes under the resolved key, and `cache-get` consults the account-agnostic entry in addition to the keyed one exactly as `check` does, so a read cached before any account was known stays reachable afterwards.
 `mark` and `mark-from-text` write the cooldown.
 `mark-from-text` accepts the reset forms real `gh` stderr carries: an ISO-8601 or `UTC` timestamp, a labeled `x-ratelimit-reset: <epoch>` header from a primary limit, or a labeled `Retry-After: <seconds>` from a secondary limit.
+The labeled header separator is required, so prose such as `retry after 15 minutes` is not read as seconds, and a labeled header is preferred over an unlabeled timestamp that is already in the past, so a log-line timestamp cannot shadow real header evidence.
 A bare number is never reset evidence, so an unlabeled id or epoch in an error body cannot create a cooldown.
 `check` prints `state=allow` or `state=defer` with provider, account, route, reset time, and remaining seconds.
 Because a record's path only encodes a hash of its key, a record whose own `provider=`/`account=`/`route=` fields disagree with the key it was found under is reported as `state=allow` with `mismatched_record=1` and left in place; capacity cooldowns apply the same rule to `harness=`/`account=`/`profile=`.
 Expired records are removed by `check`, so polling resumes only at or after the recorded reset time.
 
 `fm-pr-check.sh` uses this guard when it records PR metadata and in the static `fm-pr-poll.sh` poller.
-Those read-only guard checks, and the one in `fm-teardown.sh`, set `FM_SHARED_GITHUB_QUOTA_DERIVE_ACCOUNT=0` so the guard never spends a GitHub API call of its own.
+Every guard call on those paths - the checks, the cached reads and writes, and the `mark-from-text` handlers in `fm-pr-check.sh`, `fm-pr-poll.sh`, `fm-pr-merge.sh`, and `fm-teardown.sh` - sets `FM_SHARED_GITHUB_QUOTA_DERIVE_ACCOUNT=0`, so the guard never spends a GitHub API call of its own and one key policy holds across the whole path.
 During a shared cooldown, PR pollers do not call `gh`.
 They return silence unless a cached PR state already proves `MERGED`; that preserves local ownership and avoids repeated wake spam while GitHub is cooling down.
 When no cooldown is active, the poller keeps the existing live `gh pr view` behavior and refreshes the small cache after a successful read.

@@ -167,6 +167,42 @@ test_live_gh_rate_limit_evidence_records_cooldown() {
   pass "real gh rate-limit evidence records cooldowns without trusting bare numbers"
 }
 
+test_labeled_header_wins_over_stale_scraped_timestamp() {
+  local shared out status
+  shared="$TMP_ROOT/shared-live-shadowed"
+  out=$(printf '2026-07-13T02:23:23Z gh: HTTP 403: API rate limit exceeded for user ID 55.\nX-RateLimit-Reset: 1799999999\n' \
+    | FM_SHARED_STATE_OVERRIDE="$shared" FM_SHARED_QUOTA_NOW_EPOCH=1799000000 \
+      FM_GITHUB_ACCOUNT_ID="$TEST_ACCOUNT" \
+      "$QUOTA" mark-from-text --provider github --route default --source incident)
+  assert_contains "$out" "reset_epoch=1799999999" \
+    "a past log timestamp must not shadow labeled header evidence"
+
+  shared="$TMP_ROOT/shared-live-prose"
+  set +e
+  printf 'You have exceeded a secondary rate limit; please retry after 15 minutes.\n' \
+    | FM_SHARED_STATE_OVERRIDE="$shared" FM_SHARED_QUOTA_NOW_EPOCH=1000 \
+      FM_GITHUB_ACCOUNT_ID="$TEST_ACCOUNT" \
+      "$QUOTA" mark-from-text --provider github --route default >/dev/null 2>&1
+  status=$?
+  set -e
+  expect_code 1 "$status" "unlabeled retry-after prose must not be read as seconds"
+  pass "labeled reset evidence is preferred and prose retry-after is refused"
+}
+
+test_cache_written_before_an_account_resolves_is_read_back() {
+  local shared body
+  shared="$TMP_ROOT/shared-cache-agnostic"
+  printf 'MERGED\n' | FM_SHARED_STATE_OVERRIDE="$shared" FM_SHARED_QUOTA_NOW_EPOCH=1000 \
+    FM_SHARED_GITHUB_QUOTA_DERIVE_ACCOUNT=0 \
+    "$QUOTA" cache-put --provider github --route default --key pr-state
+  body=$(FM_SHARED_STATE_OVERRIDE="$shared" FM_SHARED_QUOTA_NOW_EPOCH=1000 \
+    "$QUOTA" cache-get --provider github --account "$TEST_ACCOUNT" --route default \
+    --key pr-state --max-age-secs 600)
+  assert_contains "$body" "MERGED" \
+    "a later resolved read should still reach the account-agnostic cache entry"
+  pass "cached reads survive an account resolving after the entry was written"
+}
+
 test_cache_uses_the_same_key_policy_as_cooldowns() {
   local shared body
   shared="$TMP_ROOT/shared-cache-key"
@@ -358,7 +394,9 @@ test_mark_from_text_never_overwrites_remembered_account
 test_unresolvable_account_cooldown_is_read_back
 test_reset_without_account_text_still_records_cooldown
 test_live_gh_rate_limit_evidence_records_cooldown
+test_labeled_header_wins_over_stale_scraped_timestamp
 test_cache_uses_the_same_key_policy_as_cooldowns
+test_cache_written_before_an_account_resolves_is_read_back
 test_cooldown_record_must_match_the_key_it_was_found_under
 test_shared_cooldown_blocks_polling_across_homes
 test_local_status_supervision_continues_during_cooldown

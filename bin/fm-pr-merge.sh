@@ -41,12 +41,14 @@ shift 2
 [ "${1:-}" = "--" ] && shift
 
 github_quota_check() {
-  "$SCRIPT_DIR/fm-shared-github-quota.sh" check --provider github --route "$GITHUB_ROUTE" 2>/dev/null || true
+  FM_SHARED_GITHUB_QUOTA_DERIVE_ACCOUNT=0 \
+    "$SCRIPT_DIR/fm-shared-github-quota.sh" check --provider github --route "$GITHUB_ROUTE" 2>/dev/null || true
 }
 
 mark_github_quota_from_file() {
   local source=$1 file=$2
-  "$SCRIPT_DIR/fm-shared-github-quota.sh" mark-from-text --provider github --route "$GITHUB_ROUTE" \
+  FM_SHARED_GITHUB_QUOTA_DERIVE_ACCOUNT=0 \
+    "$SCRIPT_DIR/fm-shared-github-quota.sh" mark-from-text --provider github --route "$GITHUB_ROUTE" \
     --source "$source" --file "$file" >/dev/null 2>&1 || true
 }
 
