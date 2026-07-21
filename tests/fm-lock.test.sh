@@ -17,6 +17,7 @@ LOCK_FILE="$STATE_DIR/.lock"
 SENTINEL_LOCK="$TMP_ROOT/sentinel.lock"
 SENTINEL_PID=424242
 FAKEBIN=$(fm_fakebin "$TMP_ROOT")
+BLOCKED_FAKEBIN=$(fm_fakebin "$TMP_ROOT/blocked")
 BACKGROUND_PIDS=()
 
 cleanup() {
@@ -60,11 +61,25 @@ esac
 SH
 chmod +x "$FAKEBIN/ps"
 
+cat > "$BLOCKED_FAKEBIN/ps" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' 'ps: Operation not permitted' >&2
+exit 1
+SH
+chmod +x "$BLOCKED_FAKEBIN/ps"
+
 run_lock() {
   FM_HOME="$HOME_DIR" \
     FM_TEST_HARNESS_PID="$$" \
     FM_TEST_OTHER_PID="${FM_TEST_OTHER_PID:-}" \
     PATH="$FAKEBIN:$PATH" \
+    "$LOCK_SCRIPT" "$@"
+}
+
+run_blocked_lock() {
+  FM_HOME="$HOME_DIR" \
+    CODEX_SANDBOX=seatbelt \
+    PATH="$BLOCKED_FAKEBIN:$PATH" \
     "$LOCK_SCRIPT" "$@"
 }
 
@@ -188,6 +203,66 @@ test_force_release_live_other() {
   pass "release --force clears a different live harness lock"
 }
 
+test_blocked_inspection_refuses_acquire() {
+  local out status
+  rm -f "$LOCK_FILE"
+  out=$(run_blocked_lock 2>&1)
+  status=$?
+  expect_code 1 "$status" "blocked-inspection acquire"
+  assert_contains "$out" "process inspection is blocked" "blocked acquire hid the shell sandbox cause"
+  assert_contains "$out" "CODEX_SANDBOX=seatbelt" "blocked acquire omitted the present Codex sandbox marker"
+  assert_contains "$out" "codex --dangerously-bypass-approvals-and-sandbox" "blocked acquire omitted the actionable Codex remedy"
+  assert_absent "$LOCK_FILE" "blocked acquire created a session lock"
+  pass "acquire refuses with the actionable Codex sandbox cause when process inspection is blocked"
+}
+
+test_blocked_inspection_status_never_reports_stale() {
+  local out status
+  printf '%s\n' "$SENTINEL_PID" > "$LOCK_FILE"
+  out=$(run_blocked_lock status 2>&1)
+  status=$?
+  expect_code 0 "$status" "blocked-inspection status"
+  assert_contains "$out" "liveness cannot be evaluated from this session" "blocked status did not report unknown liveness"
+  assert_not_contains "$out" "stale" "blocked status falsely classified the lock as stale"
+  [ "$(cat "$LOCK_FILE")" = "$SENTINEL_PID" ] || fail "blocked status changed the lock"
+  pass "status reports unknown liveness and never stale when process inspection is blocked"
+}
+
+test_blocked_inspection_refuses_nonforced_release() {
+  local out status snapshot
+  snapshot="$TMP_ROOT/blocked-release.lock"
+  printf '%s\n' "$SENTINEL_PID" > "$LOCK_FILE"
+  cp "$LOCK_FILE" "$snapshot"
+  out=$(run_blocked_lock release 2>&1)
+  status=$?
+  expect_code 1 "$status" "blocked-inspection release"
+  assert_contains "$out" "process inspection is blocked" "blocked release hid the shell sandbox cause"
+  assert_contains "$out" "codex --dangerously-bypass-approvals-and-sandbox" "blocked release omitted the actionable Codex remedy"
+  cmp -s "$snapshot" "$LOCK_FILE" || fail "blocked non-forced release changed the lock file bytes"
+  pass "non-forced release preserves the lock when process inspection is blocked"
+}
+
+test_blocked_inspection_force_release_still_works() {
+  local out status
+  printf '%s\n' "$SENTINEL_PID" > "$LOCK_FILE"
+  out=$(run_blocked_lock release --force 2>&1)
+  status=$?
+  expect_code 0 "$status" "blocked-inspection forced release"
+  assert_contains "$out" "forced" "blocked forced release did not report the explicit override"
+  assert_absent "$LOCK_FILE" "blocked forced release left the lock file behind"
+  pass "release --force remains an explicit override when process inspection is blocked"
+}
+
+test_working_inspection_status_remains_live() {
+  local out status
+  printf '%s\n' "$$" > "$LOCK_FILE"
+  out=$(run_lock status 2>&1)
+  status=$?
+  expect_code 0 "$status" "working-inspection status"
+  assert_contains "$out" "held by live harness pid $$" "working process inspection no longer reports a live holder"
+  pass "working process inspection keeps the existing live-holder behavior"
+}
+
 test_unknown_subcommand_rejected() {
   local out status
   rm -f "$LOCK_FILE"
@@ -215,5 +290,10 @@ test_release_stale_lock
 test_release_dead_pid_lock
 test_release_refuses_live_other
 test_force_release_live_other
+test_blocked_inspection_refuses_acquire
+test_blocked_inspection_status_never_reports_stale
+test_blocked_inspection_refuses_nonforced_release
+test_blocked_inspection_force_release_still_works
+test_working_inspection_status_remains_live
 test_unknown_subcommand_rejected
 test_invalid_argument_shapes_rejected

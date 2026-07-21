@@ -191,6 +191,12 @@ The tracked hook anchors to `pwd -P`, verifies that root is firstmate-shaped and
 Codex's primary watcher protocol is `bin/fm-watch-checkpoint.sh --seconds "${FM_CODEX_WATCH_CHECKPOINT:-180}"`, not `bin/fm-watch-arm.sh`.
 The checkpoint is deliberately foreground and bounded so Codex regains control regularly to process user messages and queued wakes.
 
+**Primary shell-sandbox fact (verified 2026-07-21, codex-cli 0.144.6).**
+Under both `codex exec --sandbox read-only` and `codex exec --sandbox workspace-write`, `/bin/ps -o comm= -p $$` failed with `Operation not permitted` for the shell's own PID, so ancestry walking was impossible from its first hop.
+`kill -0 <pid>` was also blocked for every probed PID, including the parent and PID 1.
+The sandbox exported `CODEX_SANDBOX=seatbelt`, `CODEX_SANDBOX_NETWORK_DISABLED=1`, and a UUID-valued `CODEX_THREAD_ID`.
+A codex primary must therefore be launched sandbox-less with `codex --dangerously-bypass-approvals-and-sandbox`; otherwise it cannot acquire the session lock or run fleet operations.
+
 ## opencode (VERIFIED 2026-06-11, v1.15.7-1.17.6; 1.18.4 busy-queue re-verified 2026-07-20)
 
 | Fact | Value |

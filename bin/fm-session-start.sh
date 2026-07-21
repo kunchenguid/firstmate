@@ -249,9 +249,15 @@ READ_ONLY=0
 if [ "$LOCK_RC" -ne 0 ]; then
   READ_ONLY=1
   BAR='●━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'
+  LOCK_BANNER='READ-ONLY SESSION - FLEET LOCK NOT ACQUIRED'
+  case "$LOCK_OUT" in
+    *"another live firstmate session holds the lock"*)
+      LOCK_BANNER='READ-ONLY SESSION - ANOTHER LIVE FIRSTMATE SESSION HOLDS THE FLEET LOCK'
+      ;;
+  esac
   {
     printf '%s\n' "$BAR"
-    printf '●  READ-ONLY SESSION - ANOTHER LIVE FIRSTMATE SESSION HOLDS THE FLEET LOCK\n'
+    printf '●  %s\n' "$LOCK_BANNER"
     printf '●  %s\n' "$LOCK_OUT"
     printf '●  Skipping every mutating step: PR-check migration, secondmate sync,\n'
     printf '●  X-mode artifacts, fleet sync, and wake-queue drain. Detect-only bootstrap\n'

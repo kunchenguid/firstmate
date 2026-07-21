@@ -140,6 +140,16 @@ make_fake_ps_claude() {
   make_fake_ps_harness "$fakebin" claude
 }
 
+make_fake_ps_blocked() {
+  local fakebin=$1
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' 'ps: Operation not permitted' >&2
+exit 1
+SH
+  chmod +x "$fakebin/ps"
+}
+
 make_fake_ps_harness() {
   local fakebin=$1 harness=$2
   cat > "$fakebin/ps" <<'SH'
@@ -389,6 +399,28 @@ EOF
   assert_contains "$out" "NEXT STEP" "closing reminder missing on the read-only path"
 
   pass "a lock refusal prints a loud read-only banner, skips every mutating step, and still completes the digest"
+}
+
+test_sandbox_lock_refusal_reports_truthful_cause() {
+  local rec root home fakebin out status
+  rec=$(new_world sandbox-lock-refusal)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_blocked "$fakebin"
+
+  status=0
+  out=$(CODEX_SANDBOX=seatbelt run_session_start "$home" "$root" "$fakebin:$BASE_PATH") || status=$?
+
+  expect_code 0 "$status" "sandboxed fm-session-start.sh lock refusal"
+  assert_contains "$out" "READ-ONLY SESSION - FLEET LOCK NOT ACQUIRED" "sandbox refusal did not use the generic lock-failure banner"
+  assert_contains "$out" "process inspection is blocked" "sandbox refusal hid fm-lock.sh's actual cause"
+  assert_contains "$out" "CODEX_SANDBOX=seatbelt" "sandbox refusal omitted the present Codex sandbox marker"
+  assert_contains "$out" "codex --dangerously-bypass-approvals-and-sandbox" "sandbox refusal omitted the actionable Codex remedy"
+  assert_not_contains "$out" "READ-ONLY SESSION - ANOTHER LIVE FIRSTMATE SESSION" "sandbox refusal falsely claimed another live session held the lock"
+
+  pass "session start relays the sandbox cause without falsely claiming another live lock holder"
 }
 
 # --- output ordering ----------------------------------------------------------
@@ -905,6 +937,7 @@ EOF
 
 test_context_digest_absent_empty_present
 test_lock_refusal_read_only_path
+test_sandbox_lock_refusal_reports_truthful_cause
 test_output_ordering_diagnostics_lead
 test_herdr_backend_diagnostics_follow_real_session_start
 test_status_tail_bounding
