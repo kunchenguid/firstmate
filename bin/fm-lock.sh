@@ -52,8 +52,9 @@ holder_alive() {  # true if $1 is a live process that looks like a harness
       ;;
   esac
   kill -0 "$pid" 2>/dev/null || return 1
-  comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
-  printf '%s' "$(basename "$comm") $(ps -o args= -p "$pid" 2>/dev/null)" | grep -qE "$HARNESS_RE"
+  comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 0
+  args=$(ps -o args= -p "$pid" 2>/dev/null) || return 0
+  printf '%s' "$(basename "$comm") $args" | grep -qE "$HARNESS_RE"
 }
 
 if [ "${1:-}" = "status" ]; then
