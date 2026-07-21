@@ -28,7 +28,7 @@ TMP_ROOT=$(fm_test_tmproot fm-agy-harness)
 
 test_harness_detects_antigravity_env_marker() {
   local result
-  result=$(ANTIGRAVITY_AGENT=1 CLAUDECODE= PI_CODING_AGENT= GROK_AGENT= \
+  result=$(ANTIGRAVITY_AGENT=1 CLAUDECODE='' PI_CODING_AGENT='' GROK_AGENT='' \
     FM_ROOT_OVERRIDE="$TMP_ROOT/marker-home" \
     bash "$HARNESS" 2>/dev/null)
   [ "$result" = agy ] || fail "env marker ANTIGRAVITY_AGENT=1 should detect agy, got '$result'"
@@ -50,7 +50,7 @@ test_harness_no_false_positive_without_marker() {
     pass "fm-harness.sh no-false-positive check skipped (running inside agy runtime)"
     return 0
   fi
-  result=$(ANTIGRAVITY_AGENT= CLAUDECODE= PI_CODING_AGENT= GROK_AGENT= \
+  result=$(ANTIGRAVITY_AGENT='' CLAUDECODE='' PI_CODING_AGENT='' GROK_AGENT='' \
     FM_ROOT_OVERRIDE="$TMP_ROOT/no-marker-home" \
     bash "$HARNESS" 2>/dev/null)
   [ "$result" != agy ] || \
@@ -136,7 +136,7 @@ run_agy_spawn() {
 }
 
 test_agy_spawn_succeeds() {
-  local rec case_dir home proj wt fakebin id out status launch_line
+  local rec case_dir home proj wt fakebin id out status
   rec=$(make_agy_spawn_case crewmate)
   IFS='|' read -r case_dir home proj wt fakebin id << EOF
 $rec
@@ -149,7 +149,7 @@ EOF
 }
 
 test_agy_spawn_includes_new_project_flag() {
-  local rec case_dir home proj wt fakebin id launch_line
+  local rec case_dir home proj wt fakebin id
   rec=$(make_agy_spawn_case newproject)
   IFS='|' read -r case_dir home proj wt fakebin id << EOF
 $rec
