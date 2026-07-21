@@ -51,6 +51,16 @@ if [ "${1:-}" = "--required-version" ]; then
   exit 0
 fi
 
+# Make the Nix-provided ShellCheck discoverable when the caller's PATH is bare
+# (e.g. the gate runs with PATH=/usr/bin:/bin). Only prepend the two standard
+# Nix profile bin dirs, when present; no broader PATH rewrite.
+for nix_bin in "${HOME:-}/.nix-profile/bin" /nix/var/nix/profiles/default/bin; do
+  if [ -n "$nix_bin" ] && [ -d "$nix_bin" ]; then
+    PATH="$nix_bin:$PATH"
+  fi
+done
+export PATH
+
 # Enforce the pin so local and CI resolve the identical rule set.
 if ! command -v shellcheck >/dev/null 2>&1; then
   printf 'fm-lint.sh: ShellCheck not found; install ShellCheck %s for CI parity.\n' \
