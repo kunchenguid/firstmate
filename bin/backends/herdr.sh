@@ -1285,6 +1285,26 @@ EOF
   printf '%s\t%s' "$kind" "$choice"
 }
 
+# Dialog-shaped text in the capture window is not proof of a live dialog: the
+# typed launch command carries the shell-quoted brief, the harness transcript
+# can render dialog wording, and herdr's recent source retains dismissed
+# frames. A harness whose registered agent already reports working/idle/done
+# is past every startup dialog, so its pane must never receive dialog keys and
+# must not fail the spawn over leftover dialog-shaped text.
+fm_backend_herdr_dialog_agent_state() {  # <harness> -> running|blocked|absent
+  local harness=$1 identity agent status
+  identity=$(fm_backend_herdr_agent_identity_raw "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" 2>/dev/null || true)
+  IFS=$'\t' read -r agent status <<EOF
+$identity
+EOF
+  case "$harness:$agent:$status" in
+    claude*:claude*:working|claude*:claude*:idle|claude*:claude*:done) printf 'running' ;;
+    codex*:codex*:working|codex*:codex*:idle|codex*:codex*:done) printf 'running' ;;
+    *:*:blocked) printf 'blocked' ;;
+    *) printf 'absent' ;;
+  esac
+}
+
 fm_backend_herdr_dialog_drive_visible() {  # <target> <harness> <capture> <retries> <sleep>
   local target=$1 harness=$2 before=$3 retries=$4 sleep_s=$5 state kind focus action expected
   local after after_state after_kind after_focus i=0 send_failed=0
@@ -1338,6 +1358,10 @@ EOF
         printf '%s' "$after_state"
         return 0
       fi
+      if [ "$(fm_backend_herdr_dialog_agent_state "$harness")" = running ]; then
+        printf '%s' "$after_state"
+        return 0
+      fi
       if [ "$after_focus" != accept ]; then
         echo "error: herdr startup dialog '$kind' changed away from its safe choice after Enter; refusing another key" >&2
         return 1
@@ -1351,7 +1375,7 @@ EOF
 }
 
 fm_backend_herdr_handle_startup_dialog() {  # <target> <harness>
-  local target=$1 harness=$2 polls=$FM_BACKEND_HERDR_DIALOG_POLLS i=0 capture state kind focus identity agent status
+  local target=$1 harness=$2 polls=$FM_BACKEND_HERDR_DIALOG_POLLS i=0 capture state kind focus
   case "$polls" in ''|*[!0-9]*|0) polls=40 ;; esac
   case "$harness" in claude*|codex*) ;; *) return 0 ;; esac
   fm_backend_herdr_parse_target "$target" || {
@@ -1369,21 +1393,28 @@ $state
 EOF
     case "$kind" in
       claude-trust|claude-bypass|codex-trust|codex-hooks-review)
+        if [ "$(fm_backend_herdr_dialog_agent_state "$harness")" = running ]; then
+          return 0
+        fi
         fm_backend_herdr_dialog_drive_visible "$target" "$harness" "$capture" \
-          "$FM_BACKEND_HERDR_DIALOG_KEY_RETRIES" "$FM_BACKEND_HERDR_DIALOG_KEY_SLEEP" >/dev/null || return 1
+          "$FM_BACKEND_HERDR_DIALOG_KEY_RETRIES" "$FM_BACKEND_HERDR_DIALOG_KEY_SLEEP" >/dev/null || {
+          [ "$(fm_backend_herdr_dialog_agent_state "$harness")" = running ] && return 0
+          return 1
+        }
         ;;
       unknown)
-        echo "error: unrecognized $harness startup dialog in herdr pane '$target'; refusing to guess a key" >&2
-        return 1
+        case "$(fm_backend_herdr_dialog_agent_state "$harness")" in
+          running) return 0 ;;
+          blocked)
+            echo "error: unrecognized $harness startup dialog in herdr pane '$target'; refusing to guess a key" >&2
+            return 1
+            ;;
+        esac
         ;;
       none)
-        identity=$(fm_backend_herdr_agent_identity_raw "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" 2>/dev/null || true)
-        IFS=$'\t' read -r agent status <<EOF
-$identity
-EOF
-        case "$agent:$status" in
-          claude*:working|claude*:idle|claude*:done|codex*:working|codex*:idle|codex*:done) return 0 ;;
-          *:blocked)
+        case "$(fm_backend_herdr_dialog_agent_state "$harness")" in
+          running) return 0 ;;
+          blocked)
             echo "error: $harness is blocked in herdr pane '$target', but the visible dialog shape is unknown; refusing to guess a key" >&2
             return 1
             ;;

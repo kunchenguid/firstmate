@@ -915,6 +915,10 @@ Claude's Bypass Permissions warning starts on destructive `No, exit`, so the onl
 Codex hooks review similarly navigates from `Review hooks` to `Trust all and continue` and verifies the move before Enter.
 An unknown focus, an unknown blocked dialog, unreadable post-key state, or an exhausted three-attempt key budget fails the spawn with a classified error.
 
+Raw capture text alone is never trusted as proof of a live dialog: the typed launch command carries the shell-quoted brief, harness transcripts can render dialog wording, and the recent source retains dismissed frames inside the capture window.
+Every classified dialog, unknown shape, and dismissal readback is therefore corroborated against `agent get`: an agent already reporting working/idle/done is past its startup dialogs, so the handler sends no key and the spawn verifies clean; an unknown shape fails immediately only when the agent is corroborated blocked, and otherwise keeps polling to the bounded timeout.
+The corroboration paths are exercised by the fake-CLI cases only; a live first-launch dismissal traversal through the lab helper has not yet been recorded.
+
 The recurring watcher warning was a separate deterministic shell bug rather than proof that Herdr dropped a key.
 `fm_backend_herdr_events_capable` piped the large `api schema` value through `grep -q` twice.
 With a caller's `pipefail` enabled, `grep -q` exited as soon as it found its early match, `printf` received SIGPIPE, the pipeline returned 141, and Bash printed `printf: write error: Broken pipe` at the two reported lines.
@@ -977,7 +981,7 @@ DIALOG_AFTER_DOWN=claude-bypass accept
 DIALOG_FINAL=DIALOG_ACCEPTED
 ```
 
-The fake-CLI regression cases in `tests/fm-backend-herdr.test.sh` cover all four menu classifications, verified cursor movement, destructive-default protection, bounded retry exhaustion, the large-schema pipefail case, and the `fm-spawn` post-launch wiring.
+The fake-CLI regression cases in `tests/fm-backend-herdr.test.sh` cover all four menu classifications, verified cursor movement, destructive-default protection, bounded retry exhaustion, agent-status corroboration (phantom quoted dialog text, blocked unknown shapes, uncorroborated timeout, stale dismissed frames), the large-schema pipefail case, and the `fm-spawn` post-launch wiring.
 
 ## Native `pane.agent_status_changed` push escalation (immediate blocked wake)
 
