@@ -77,6 +77,13 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-check-lib.sh`        | Validate custom-check registrations and prepare private execution snapshots          |
 | `fm-pr-lib.sh`           | Own canonical task and PR validation plus private atomic PR-poll and provenance publication |
 | `fm-pr-poll.sh`          | Provide the byte-static watcher program for validated PR/MR-poll sidecars           |
+| `fm-portal-lib.sh`       | Own private portal config, state, transport, idempotency, and retention              |
+| `fm-portal-config.sh`    | Install, rotate, inspect, or disable local mode-0600 portal configuration            |
+| `fm-portal-poll.sh`      | Validate, stash, cursor, recover, and notify authenticated portal requests           |
+| `fm-portal-request.sh`   | List, claim, queue-mark, and recover private portal inbox records                    |
+| `fm-portal-reply.sh`     | Post one idempotent portal response, validate identity, then acknowledge its request |
+| `fm-portal-link.sh`      | Bind a longer-running task to one portal request without copying its body            |
+| `fm-portal-followup.sh`  | Complete one task-linked portal outcome after durable acknowledgement                |
 | `fm-pr-check-migrate.sh` | Quarantine older task polls without execution and rebuild only canonical polls       |
 | `fm-pr-check.sh`         | Record validated `pr=` and `pr_head=` values, then atomically arm a static merge poll |
 | `fm-pr-merge.sh`         | Record PR metadata, then merge a task's canonical full GitHub URL                    |

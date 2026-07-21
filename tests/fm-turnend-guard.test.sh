@@ -66,6 +66,18 @@ test_predicate_healthy_fresh_beacon() {
   pass "fm_supervision_unhealthy: false with in-flight task and a fresh beacon"
 }
 
+test_predicate_portal_only_requires_supervision() {
+  local base="$TMP_ROOT/pred-portal" state config
+  state="$base/state"; config="$base/config"
+  mkdir -p "$state" "$config"
+  : > "$config/portal-mode.env"
+  fm_supervision_unhealthy "$state" 300 "$config" \
+    || fail "predicate did not fire for a portal-only home without a watcher"
+  [ "$FM_SUP_IN_FLIGHT" -eq 0 ] || fail "portal-only monitoring must not fabricate task metadata"
+  [ "$FM_SUP_CONNECTOR_ACTIVE" = true ] || fail "portal cadence was not recognized"
+  pass "fm_supervision_unhealthy: portal-only homes still require one watcher"
+}
+
 test_predicate_queue_pending_flag() {
   local state="$TMP_ROOT/pred-queue/state"
   mkdir -p "$state"
@@ -905,6 +917,7 @@ test_predicate_healthy_no_inflight
 test_predicate_unhealthy_no_beacon
 test_predicate_unhealthy_stale_beacon
 test_predicate_healthy_fresh_beacon
+test_predicate_portal_only_requires_supervision
 test_predicate_queue_pending_flag
 test_hook_silent_when_no_work_in_flight
 test_hook_blocks_when_fresh_beacon_has_no_live_lock

@@ -11,7 +11,7 @@ The shared orchestrator behavior lives in [`AGENTS.md`](../AGENTS.md) - edit it 
 This section is the single owner of the top-level operational-home layout; producer script headers and their help own exact child-file fields and mutation contracts.
 The tracked code root contains the shared instruction, skill, documentation, workflow, and `bin/` surfaces, while each effective `FM_HOME` contains private operational directories.
 `data/` holds durable private fleet records such as the project and secondmate registries, captain preferences, optional shared captain preferences, learnings, backlog, briefs, and scout reports.
-`state/` holds volatile runtime records such as task metadata, append-only status events, endpoint signals, watcher and wake-queue coordination, away-mode state, generated X-mode artifacts, private secondmate config-reread generations with their retry and quarantine state, and parent-owned secondmate pending-reply records under `state/pending-replies/` (`bin/fm-pending-reply-lib.sh`).
+`state/` holds volatile runtime records such as task metadata, append-only status events, endpoint signals, watcher and wake-queue coordination, away-mode state, generated messaging-connector artifacts, private secondmate config-reread generations with their retry and quarantine state, and parent-owned secondmate pending-reply records under `state/pending-replies/` (`bin/fm-pending-reply-lib.sh`).
 `config/` holds local gitignored operating choices, and `projects/` holds the local project clones that Firstmate reads but changes only through the guarded exceptions in `AGENTS.md`.
 
 `bin/fm-spawn.sh` owns the base task-metadata fields it emits, while the runtime-backend section below owns backend-specific fields and selector interpretation.
@@ -270,6 +270,94 @@ The locked bootstrap inheritance pass uses the same per-home changed-set and rer
 That live discovery starts from `state/*.meta` records with `kind=secondmate`; `data/secondmates.md` only backfills `home=` for older or incomplete meta records.
 Skipped items, such as a destination checkout that does not yet gitignore the item, are visible warnings but not hard failures.
 
+## Private portal connector (config/portal-connector.json)
+
+The private portal connector carries authenticated captain messages between one Firstmate home and the AI Department portal.
+It is completely inert until that home has a valid local `config/portal-connector.json`.
+`bin/fm-portal-lib.sh` owns the exact JSON schema, URL grammar, size limits, private record schemas, state transitions, and HTTP mechanics.
+The reference shape is `{"base_url":"http://127.0.0.1:8201","bearer_token":"..."}` in an ordinary single-link mode-`0600` file.
+The helper defaults to loopback `http://127.0.0.1:8201`; plain HTTP is accepted only for loopback, while an explicitly selected remote endpoint must use HTTPS and `--allow-remote`.
+The public portal URL is for the captain's browser and is not the connector default.
+
+Install without placing the token in shell history or a process argument:
+
+```sh
+bin/fm-portal-config.sh install
+```
+
+The helper reads the token silently from the terminal.
+For a secret manager or other noninteractive producer, pipe it to `bin/fm-portal-config.sh install --token-stdin`; the helper still never accepts a token argument.
+Use `--base-url <url>` only when the portal is not at the loopback default.
+The helper writes through owner-only temporary files, atomically publishes the final mode-`0600` JSON, and prints only the non-secret base URL.
+It does not run bootstrap or activate a live connection as a side effect.
+
+Rotate only the token with `bin/fm-portal-config.sh rotate`; it preserves the current base URL and durable cursor by default.
+Changing the base URL requires an explicit `--base-url` and, for a remote HTTPS URL, `--allow-remote`.
+The cursor is bound to the exact base URL, so an uncoordinated endpoint change is rejected as `cursor-invalid` rather than silently skipping or replaying another portal's messages.
+Before an intentional endpoint replacement, finish or explicitly reconcile every pending request, move the complete `state/portal/` directory aside for private audit, then activate the new endpoint with a fresh connector state directory.
+Never reset a cursor merely to clear an error because that can replay already handled captain requests.
+
+Disable with `bin/fm-portal-config.sh disable`.
+The helper removes only a validated ordinary configuration file and refuses an unsafe link or path.
+The next locked session start removes `state/portal-watch.check.sh`, its byte-hash trust record, and `config/portal-mode.env`.
+Private cursor, inbox, and outbox records remain for bounded recovery and are never sent elsewhere.
+Disabled or absent configuration makes the poll client a hard no-op with no network request, output, or new state.
+
+The locked session-start bootstrap validates the configuration and dependencies before activation.
+It publishes `state/portal-watch.check.sh` as a byte-static mode-`0700` shim whose only data are shell-quoted home and tracked-script paths, then binds its bytes through the existing custom-check trust registry.
+Portal text and credentials never become runnable check bytes.
+It also writes `config/portal-mode.env`, which exports `FM_CHECK_INTERVAL=30` for the active supervision protocol.
+The watcher has the same 30-second portal backstop when away mode launches it directly, so away-mode ownership changes cadence but never creates a second watcher.
+Configuration changes take effect on the next locked session start; a running watcher applies an activation or disable cadence transition only through its emitted harness-specific repair path.
+
+The connector uses the existing watcher and durable wake queue on all five primary harnesses.
+Claude and Grok use their tracked background-notify wait, Codex uses foreground checkpoints, Pi uses its extension-owned child, and OpenCode uses its TUI plugin-owned child.
+Pi and OpenCode source both optional connector cadence files before the same watcher process, while the rendered protocols do the equivalent for the other harnesses.
+Portal-only homes are monitoring-active even with no task metadata, so the guard and turn-end protection still require one live watcher.
+The connector is independent of the task runtime backend because authenticated checks run before task-window capture or backend event waiting.
+The same path therefore applies under tmux, herdr, zellij, Orca, and cmux; herdr's native task-event fast path remains an optional terminal wait inside that one watcher.
+Away mode still owns the watcher whenever `state/.afk` exists, and every portal `check:` result is escalated through the daemon's existing fail-safe check classification.
+
+`bin/fm-portal-poll.sh` calls `GET /api/integration/messages?after_id=<cursor>&limit=<bounded>` with the bearer credential in an owner-only curl header file.
+The tracked client defaults to batches of 20, accepts at most 20, bounds connection and total time, bounds the response to 256 KiB, and validates the complete JSON shape before publishing anything.
+Each captain message must have a strictly increasing positive safe-integer id, a non-empty body of at most 4,000 characters, and a bounded creation timestamp.
+Message text is always data: it is never executed, sourced, interpolated into shell, written to logs or wake payloads, or published as a check.
+A successful poll atomically publishes the canonical message to `state/portal/inbox/<id>.json`, creates one body-free processing record, and advances `state/portal/cursor.json` only after every message through that id is durable.
+Duplicate polls validate existing bytes instead of replacing them.
+A crash before the cursor update safely fetches the same id again, while a crash after it is recoverable from the durable inbox.
+The watcher queues only `portal-message <id>...`, then marks those records queued after the durable append; a crash before that mark may replay the same stable check key, which queue drain coalesces without duplicating the request record.
+Queued or claimed requests that never progress are re-offered after a bounded lease and at locked session-start recovery.
+Because the acknowledgement API is cumulative through `last_id`, the connector offers and completes requests strictly oldest-first; later fetched messages remain durable but cannot be handled or acknowledged past an earlier unfinished request.
+
+The `portal-respond` agent-only skill is loaded on a `portal-message` or `portal-error` check notification.
+It reads requests only through `bin/fm-portal-request.sh`, treats the direct body as authenticated captain communication, applies normal project intake and approval boundaries, and writes a response only through the portal reply helpers.
+The portal's sole-account bootstrap and direction-filtered integration endpoint establish captain origin; the bearer token itself grants only message poll, reply, and acknowledgement operations.
+Destructive, irreversible, production, credential, and security-sensitive requests retain every existing approval boundary.
+No Claude, Codex, OpenCode, Pi, Grok, X, Discord, or other chat message is automatically copied to the portal, and no portal reply is copied elsewhere.
+
+`bin/fm-portal-reply.sh` creates `state/portal/outbox/<id>.json` before network I/O.
+That private record contains the normalized response and one random stable idempotency key; every retry uses those same bytes and key.
+The portal contract requires `POST /api/integration/messages` with `Idempotency-Key`: a new key/body returns 201, the same key and normalized body returns the original message with 200, and the same key with a different body returns 409 without an insert.
+The client accepts only a validated stored-message identity, records it durably, and only then calls `POST /api/integration/ack` for the originating captain id.
+The acknowledgement is idempotent, so a lost acknowledgement response is retried and `acknowledged:0` is valid after a prior success.
+A crash before posting, after the portal commit, after local post confirmation, after acknowledgement, or before final local completion converges by replaying the same key or acknowledgement in that order.
+A 409 marks the local request conflicted and requires operator recovery; the client never generates a replacement key for that body.
+
+A request completed in the handling turn receives its one portal response immediately.
+Longer-running work is linked with `bin/fm-portal-link.sh <task-id> <captain-message-id>` and receives no placeholder second message.
+Its terminal notification loads `portal-respond`, and `bin/fm-portal-followup.sh` posts the one final outcome, acknowledges the request, then clears `portal_request=` only after durable completion.
+Task cleanup must not remove a live portal link before that succeeds.
+
+Connection, authentication, validation, and local-state failures emit one concise `portal-error <code>` until the condition changes or a successful cycle clears it.
+Neither token nor message body appears in that code, watcher output, wake records, status events, or connector logs.
+Transient reads retry on later polls.
+Transient reply and acknowledgement failures resume automatically from the private outbox with the stable key.
+Use `bin/fm-portal-config.sh status` for configuration validity, inspect only body-free record states during recovery, and never print or copy `bearer_token` for diagnosis.
+
+Completed inbox, processing, and outbox triplets are retained for seven days by default and capped at 256, with hard upper bounds of 30 days and 1,024 records for local tuning.
+Pending, linked, replying, and conflicted records are never automatically pruned.
+`FM_PORTAL_BATCH_SIZE`, `FM_PORTAL_RETENTION_SECS`, `FM_PORTAL_RETENTION_COUNT`, and `FM_PORTAL_CLAIM_LEASE_SECS` are bounded test/operator tuning seams; defaults are below.
+
 ## X mode (.env)
 
 X mode lets a firstmate instance answer public `@myfirstmate` mentions and act on normal reversible mention requests through firstmate's normal lifecycle.
@@ -377,7 +465,11 @@ FM_GUARD_CONTINUE_LINE='This is a supervision warning only; the guarded operatio
 FM_POLL=15              # seconds between watcher poll cycles
 FM_HEARTBEAT=600        # base seconds between heartbeat scans; no-change heartbeats are absorbed while idle
 FM_HEARTBEAT_MAX=7200   # heartbeat backoff cap
-FM_CHECK_INTERVAL=300   # seconds between slow checks (authenticated merge polls, custom checks, or X-mode dispatch)
+FM_CHECK_INTERVAL=300   # seconds between slow checks (authenticated merge polls, custom checks, X mode, or portal dispatch); generated connector cadence files set 30
+FM_PORTAL_BATCH_SIZE=20  # portal messages accepted per poll; values above 20 clamp to 20
+FM_PORTAL_RETENTION_SECS=604800  # completed private portal record retention; hard cap 2592000
+FM_PORTAL_RETENTION_COUNT=256  # completed private portal record cap; hard cap 1024
+FM_PORTAL_CLAIM_LEASE_SECS=600  # queued/claimed portal request re-offer window; hard cap 86400
 FM_CHECK_TIMEOUT=30     # seconds allowed per slow check script
 FM_CODEX_WATCH_CHECKPOINT=180   # seconds per foreground watcher checkpoint in Codex primary supervision
 FM_CREW_STATE_NM_TIMEOUT=10   # seconds allowed per no-mistakes query inside fm-crew-state.sh

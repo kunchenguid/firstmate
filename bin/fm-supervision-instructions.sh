@@ -14,12 +14,13 @@ HARNESS=
 READ_ONLY=0
 AFK=0
 X_MODE=0
+PORTAL_MODE=0
 REPAIR_LINE=0
 QUEUE_PENDING=0
 
 usage() {
   cat <<'EOF'
-Usage: fm-supervision-instructions.sh [--harness <name>] [--read-only 0|1] [--afk 0|1] [--x-mode 0|1] [--repair-line] [--queue-pending 0|1]
+Usage: fm-supervision-instructions.sh [--harness <name>] [--read-only 0|1] [--afk 0|1] [--x-mode 0|1] [--portal-mode 0|1] [--repair-line] [--queue-pending 0|1]
 
 Print the current primary harness's supervision operating instructions.
 With --repair-line, print one concise repair instruction for guard and hook messages.
@@ -53,6 +54,11 @@ while [ "$#" -gt 0 ]; do
     --x-mode)
       [ "$#" -gt 1 ] || { echo "error: --x-mode requires 0 or 1" >&2; exit 2; }
       X_MODE=$(bool_value "$2")
+      shift 2
+      ;;
+    --portal-mode)
+      [ "$#" -gt 1 ] || { echo "error: --portal-mode requires 0 or 1" >&2; exit 2; }
+      PORTAL_MODE=$(bool_value "$2")
       shift 2
       ;;
     --queue-pending)
@@ -90,6 +96,7 @@ checkpoint_seconds=${FM_CODEX_WATCH_CHECKPOINT:-180}
 pi_ext="$FM_ROOT/.pi/extensions/fm-primary-pi-watch.ts"
 pi_turnend_ext="$FM_ROOT/.pi/extensions/fm-primary-turnend-guard.ts"
 x_mode_env="$CONFIG/x-mode.env"
+portal_mode_env="$CONFIG/portal-mode.env"
 
 shell_quote() {
   printf "'"
@@ -98,9 +105,13 @@ shell_quote() {
 }
 
 x_mode_env_sh=$(shell_quote "$x_mode_env")
+portal_mode_env_sh=$(shell_quote "$portal_mode_env")
 
 if [ "$X_MODE" -eq 0 ] && [ -f "$x_mode_env" ]; then
   X_MODE=1
+fi
+if [ "$PORTAL_MODE" -eq 0 ] && [ -f "$portal_mode_env" ]; then
+  PORTAL_MODE=1
 fi
 
 render_snippet() {
@@ -110,6 +121,8 @@ render_snippet() {
     line=${line//__FM_PI_TURNEND_EXT__/$pi_turnend_ext}
     line=${line//__FM_X_MODE_ENV_SH__/$x_mode_env_sh}
     line=${line//__FM_X_MODE_ENV__/$x_mode_env}
+    line=${line//__FM_PORTAL_MODE_ENV_SH__/$portal_mode_env_sh}
+    line=${line//__FM_PORTAL_MODE_ENV__/$portal_mode_env}
     printf '%s\n' "$line"
   done < "$SNIPPET"
 }
@@ -130,6 +143,9 @@ repair_line() {
   fi
   if [ "$X_MODE" -eq 1 ]; then
     prefix="${prefix}source ${x_mode_env_sh} first, then "
+  fi
+  if [ "$PORTAL_MODE" -eq 1 ]; then
+    prefix="${prefix}source ${portal_mode_env_sh} first, then "
   fi
 
   case "$HARNESS" in
@@ -200,7 +216,15 @@ fi
 if [ "$X_MODE" -eq 1 ]; then
   printf '%s%s%s\n' '- X mode: active; source ' "$x_mode_env" ' before launching any watcher process so the 30s cadence is inherited.'
 else
-  printf '%s\n' '- X mode: inactive; use the default watcher cadence.'
+  printf '%s\n' '- X mode: inactive.'
+fi
+if [ "$PORTAL_MODE" -eq 1 ]; then
+  printf '%s%s%s\n' '- Portal connector: active; source ' "$portal_mode_env" ' before launching any watcher process so the 30s cadence is inherited.'
+else
+  printf '%s\n' '- Portal connector: inactive.'
+fi
+if [ "$X_MODE" -eq 0 ] && [ "$PORTAL_MODE" -eq 0 ]; then
+  printf '%s\n' '- Messaging connectors: inactive; use the default watcher cadence.'
 fi
 ordinary_wake_line
 printf '\n'

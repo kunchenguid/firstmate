@@ -5,7 +5,7 @@
 # First, always warn if the firstmate primary checkout (FM_ROOT) is on a named
 # non-default branch, because that means firstmate-on-itself work landed in the
 # primary instead of an isolated worktree.
-# Then, if any task is in flight (a state/<id>.meta exists) and the watcher's
+# Then, if any task is in flight or a messaging connector requires polling and the watcher's
 # liveness beacon (state/.last-watcher-beat, touched every poll cycle) is
 # missing or older than FM_GUARD_GRACE seconds, prints a loud, clearly delimited
 # banner so the agent cannot skim past it in the tool output of whatever it was
@@ -140,16 +140,15 @@ if [ -n "$tangle_branch" ]; then
   } >&2
 fi
 
-# Compute in-flight count and watcher-beacon freshness via the shared
-# grace-based predicate (bin/fm-supervision-lib.sh). Only act with tasks in
-# flight; count them so the banner can say how much is riding on an absent
-# watcher.
-fm_supervision_status "$STATE" "$GRACE"
+# Compute in-flight count, connector monitoring need, and watcher-beacon
+# freshness via the shared grace-based predicate (bin/fm-supervision-lib.sh).
+# Act only when work or messaging is riding on an absent watcher.
+fm_supervision_status "$STATE" "$GRACE" "$CONFIG"
 in_flight=$FM_SUP_IN_FLIGHT
 watcher_fresh=$FM_SUP_WATCHER_FRESH
 beacon_desc=$FM_SUP_BEACON_DESC
-if [ "$in_flight" -eq 0 ]; then
-  # Leave the unhealthy state (no work riding on the watcher): clear so a later
+if [ "$FM_SUP_MONITORING_REQUIRED" != true ]; then
+  # Leave the unhealthy state (no work or connector riding on the watcher): clear so a later
   # in-flight + stale combination is a fresh episode even if the beacon is still
   # absent with the same key string.
   [ "$READ_ONLY" -eq 1 ] || fm_guard_clear_stale_banner
@@ -177,17 +176,24 @@ if [ "$watcher_fresh" = false ]; then
     "$queue_pending" && queue_arg=1
     x_mode=0
     [ -f "$CONFIG/x-mode.env" ] && x_mode=1
+    portal_mode=0
+    [ -f "$CONFIG/portal-mode.env" ] && portal_mode=1
     fix=$("$SCRIPT_DIR/fm-supervision-instructions.sh" \
       --read-only "$READ_ONLY" \
       --afk "$afk" \
       --x-mode "$x_mode" \
+      --portal-mode "$portal_mode" \
       --queue-pending "$queue_arg" \
       --repair-line 2>/dev/null || printf '%s\n' 'Repair missing watcher supervision according to the session-start operating block.')
     rule='━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'
     {
       printf '●%s\n' "$rule"
       printf '●  WATCHER DOWN - SUPERVISION IS OFF\n'
-      printf '●  %s task(s) in flight, but no watcher has a fresh beacon (last beat: %s, grace %ss).\n' "$in_flight" "$beacon_desc" "$GRACE"
+      if [ "$in_flight" -gt 0 ]; then
+        printf '●  %s task(s) in flight, but no watcher has a fresh beacon (last beat: %s, grace %ss).\n' "$in_flight" "$beacon_desc" "$GRACE"
+      else
+        printf '●  Messaging is active, but no watcher has a fresh beacon (last beat: %s, grace %ss).\n' "$beacon_desc" "$GRACE"
+      fi
       if [ "$READ_ONLY" -eq 1 ]; then
         printf '●  This read-only session should report the lapse, not repair it.\n'
       else

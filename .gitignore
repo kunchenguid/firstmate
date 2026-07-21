@@ -14,6 +14,8 @@ config/secondmate-harness
 config/backlog-backend
 config/backend
 config/x-mode.env
+config/portal-connector.json
+config/portal-mode.env
 config/cmux-socket-password
 config/wedge-alarm
 config/herdr-presentation-spaces

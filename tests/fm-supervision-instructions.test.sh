@@ -113,7 +113,8 @@ test_grok_command_sources_effective_config() {
   config="$TMP_ROOT/grok-config"
   mkdir -p "$home/state" "$config"
   out=$(FM_HOME="$home" FM_CONFIG_OVERRIDE="$config" "$RENDER" --harness grok --x-mode 1)
-  assert_contains "$out" "[ -f '$config/x-mode.env' ] && . '$config/x-mode.env'; exec bin/fm-watch-arm.sh" "grok arm command did not use the effective x-mode config path"
+  assert_contains "$out" "[ -f '$config/x-mode.env' ] && . '$config/x-mode.env';" "grok arm command did not use the effective x-mode config path"
+  assert_contains "$out" "[ -f '$config/portal-mode.env' ] && . '$config/portal-mode.env'; exec bin/fm-watch-arm.sh" "grok arm command did not include the effective portal config path"
   pass "grok rendered command sources the effective x-mode config"
 }
 

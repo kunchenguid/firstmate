@@ -97,7 +97,7 @@ async function isPrimaryRoot(root, home) {
 
 function shouldArm(paths) {
   if (existsSync(`${paths.state}/.afk`)) return false;
-  if (existsSync(`${paths.config}/x-mode.env`)) return true;
+  if (existsSync(`${paths.config}/x-mode.env`) || existsSync(`${paths.config}/portal-mode.env`)) return true;
   try {
     return readdirSync(paths.state).some((name) => name.endsWith(".meta"));
   } catch {
@@ -289,7 +289,7 @@ function spawnArm(paths, sessionID, client, predecessorArmPid = "") {
     FM_CONFIG_OVERRIDE: paths.config,
     FM_WATCH_PREDECESSOR_ARM_PID: predecessorArmPid,
   };
-  const armChild = spawn("bash", ["-lc", 'config_dir="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"; [ -f "$config_dir/x-mode.env" ] && . "$config_dir/x-mode.env"; exec "$FM_ROOT_OVERRIDE/bin/fm-watch-arm.sh" --restart'], {
+  const armChild = spawn("bash", ["-lc", 'config_dir="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"; [ -f "$config_dir/x-mode.env" ] && . "$config_dir/x-mode.env"; [ -f "$config_dir/portal-mode.env" ] && . "$config_dir/portal-mode.env"; exec "$FM_ROOT_OVERRIDE/bin/fm-watch-arm.sh" --restart'], {
     cwd: paths.root,
     env,
     stdio: ["ignore", "pipe", "pipe"],
@@ -402,6 +402,12 @@ async function ensureArm(paths, sessionID, client, predecessorArmPid = "", inclu
     }
   } else {
     launchResult = await launchInFlight;
+    // A session.idle edge can arrive while an earlier ownership probe is still
+    // resolving. If the earlier edge saw read-only but this session acquired
+    // the lock meanwhile, retry once instead of dropping the first owned edge.
+    if (launchResult.status === "read-only" && (await sessionOwnsLock(paths))) {
+      launchResult = await beginArm(paths, sessionID, client, predecessorArmPid);
+    }
   }
   const armChild = launchResult.armChild;
   if (!armChild) {

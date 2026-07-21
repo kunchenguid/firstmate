@@ -16,7 +16,8 @@
 #                 "NUDGE_SECONDMATES: secondmate <id>: send failed: <reason>",
 #                 "BOOTSTRAP_INFO: nudged fm-<id> with '<message>'",
 #                 "SECONDMATE_LIVENESS: secondmate <id>: skipped: <reason>|respawn failed: <reason>",
-#                 "FMX: X mode on ..." or "FMX: X mode off ...".
+#                 "FMX: X mode on ..." or "FMX: X mode off ...",
+#                 "PORTAL: connector on ..." or "PORTAL: connector off ...".
 #          When a RUNNING secondmate worktree is fast-forwarded to firstmate's
 #          own current default-branch commit (a purely LOCAL fast-forward, never
 #          an origin fetch) AND its loaded instruction surface (AGENTS.md, bin/,
@@ -57,6 +58,10 @@
 #          X mode is OPTIONAL and inert unless FM_HOME/.env has a non-empty
 #          FMX_PAIRING_TOKEN. When opted in, bootstrap requires curl+jq, writes
 #          the relay poll shim and 30s cadence config, and prints an FMX line.
+#          The private portal connector is independently OPTIONAL and inert unless
+#          config/portal-connector.json exists. Bootstrap validates its 0600
+#          config, writes a hash-registered portal poll shim plus its own 30s
+#          cadence file, recovers unclaimed durable requests, and prints PORTAL.
 #          Fleet sync fetches, fast-forwards safe default-branch states, reports
 #          recovered and STUCK clone drift, and prunes gone local branches; it is
 #          bounded by FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT when it is a non-empty
@@ -66,14 +71,14 @@
 #          refresh relays any completed fm-fleet-sync.sh output before the
 #          aggregate timeout skip line with timeout and elapsed seconds.
 #          Set FM_FLEET_PRUNE=0 to skip branch pruning during that refresh.
-#          Set FM_BOOTSTRAP_DETECT_ONLY=1 to skip the five MUTATING sweeps
+#          Set FM_BOOTSTRAP_DETECT_ONLY=1 to skip the six MUTATING sweeps
 #          (PR-check migration, secondmate_sync, secondmate_liveness_sweep,
-#          x_mode_setup, fleet_sync) while still printing every read-only detect line
+#          x_mode_setup, portal_mode_setup, fleet_sync) while still printing every read-only detect line
 #          above; the TANGLE line switches to advisory-only wording with no
 #          checkout command. Used by
 #          fm-session-start.sh's read-only path when another live session holds
 #          the fleet lock, so a second concurrent session never race-mutates
-#          PR-check artifacts, secondmate homes, X-mode artifacts, project
+#          PR-check artifacts, secondmate homes, X-mode or portal artifacts, project
 #          clones, or repair instructions.
 #          Unset/0 (the default) runs every sweep exactly as before - this flag
 #          is purely additive.
@@ -98,6 +103,10 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-config-inherit-lib.sh"
 # shellcheck source=bin/fm-x-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-x-lib.sh"
+# shellcheck source=bin/fm-portal-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-portal-lib.sh"
+# shellcheck source=bin/fm-check-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-check-lib.sh"
 # shellcheck source=bin/fm-backend.sh disable=SC1091
 . "$SCRIPT_DIR/fm-backend.sh"
 
@@ -698,6 +707,96 @@ EOF
   echo "FMX: X mode on - relay poll armed via state/x-watch.check.sh; 30s watcher cadence in config/x-mode.env"
 }
 
+# Private portal connector (opt-in): a valid mode-0600
+# config/portal-connector.json publishes one byte-static generated check, binds
+# it through the existing custom-check hash registry, and writes a separate 30s
+# cadence file. Portal text never enters either runnable artifact. Absent config
+# is inert except for idempotent cleanup of artifacts left by an explicit disable.
+portal_mode_setup() {
+  local config_file shim trust cadence shim_body cadence_body missing tool had_artifacts=0
+  config_file="$CONFIG/portal-connector.json"
+  shim="$STATE/portal-watch.check.sh"
+  trust="$STATE/portal-watch.check-trust"
+  cadence="$CONFIG/portal-mode.env"
+
+  portal_artifacts_present() {
+    x_mode_artifact_present "$shim" || x_mode_artifact_present "$trust" || x_mode_artifact_present "$cadence"
+  }
+
+  portal_remove_artifacts() {
+    local failed=0
+    x_mode_remove_artifact "$shim" || failed=1
+    x_mode_remove_artifact "$trust" || failed=1
+    x_mode_remove_artifact "$cadence" || failed=1
+    [ "$failed" -eq 0 ]
+  }
+
+  portal_arm_failed() {
+    if portal_remove_artifacts; then
+      echo "PORTAL: connector off - failed to arm authenticated poll or 30s cadence"
+    else
+      echo "PORTAL: connector off - failed to arm authenticated poll or 30s cadence; stale artifacts remain"
+    fi
+  }
+
+  if [ ! -e "$config_file" ] && [ ! -L "$config_file" ]; then
+    if portal_artifacts_present; then
+      if portal_remove_artifacts; then
+        echo "PORTAL: connector off - removed poll and cadence artifacts after disable"
+      else
+        echo "PORTAL: connector off - failed to remove poll or cadence artifacts after disable"
+      fi
+    fi
+    return 0
+  fi
+
+  if ! fmp_load_config "$config_file"; then
+    portal_artifacts_present && had_artifacts=1
+    portal_remove_artifacts || true
+    echo "PORTAL: connector off - invalid config/portal-connector.json ($FMP_CONFIG_ERROR); repair it with bin/fm-portal-config.sh"
+    [ "$had_artifacts" -eq 0 ] || return 0
+    return 0
+  fi
+
+  missing=0
+  for tool in curl jq; do
+    if ! command -v "$tool" >/dev/null 2>&1; then
+      echo "MISSING: $tool (install: $(install_cmd "$tool"))"
+      missing=1
+    fi
+  done
+  if [ "$missing" -ne 0 ]; then
+    portal_remove_artifacts || true
+    echo "PORTAL: connector off - missing connector dependencies"
+    return 0
+  fi
+
+  mkdir -p "$STATE" "$CONFIG" 2>/dev/null || { portal_arm_failed; return 0; }
+  shim_body=$(fmp_poll_shim_content "$FM_HOME" "$FM_ROOT")
+  x_mode_write_if_changed "$shim" "$shim_body" 700 || { portal_arm_failed; return 0; }
+  fmp_poll_shim_valid "$shim" "$FM_HOME" "$FM_ROOT" || { portal_arm_failed; return 0; }
+  if ! FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$STATE" \
+    "$SCRIPT_DIR/fm-check-register.sh" portal-watch >/dev/null 2>&1; then
+    portal_arm_failed
+    return 0
+  fi
+  fm_custom_check_registered "$STATE" portal-watch || { portal_arm_failed; return 0; }
+
+  cadence_body=$(cat <<'EOF'
+# Auto-generated by fm-bootstrap.sh - private portal connector cadence.
+# Source this before the active harness protocol starts a watcher process so
+# fm-watch.sh polls the authenticated portal check every 30s.
+export FM_CHECK_INTERVAL=30
+EOF
+)
+  x_mode_write_if_changed "$cadence" "$cadence_body" 600 || { portal_arm_failed; return 0; }
+  if ! "$SCRIPT_DIR/fm-portal-request.sh" recover-unclaimed >/dev/null 2>&1; then
+    portal_arm_failed
+    return 0
+  fi
+  echo "PORTAL: connector on - authenticated poll armed; 30s watcher cadence in config/portal-mode.env"
+}
+
 crew_dispatch_validate() {
   local file err
   file="$CONFIG/crew-dispatch.json"
@@ -859,6 +958,7 @@ if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
   secondmate_liveness_sweep
   secondmate_sync
   x_mode_setup
+  portal_mode_setup
   fleet_sync
 fi
 exit 0

@@ -854,10 +854,13 @@ function analyzeProgram(command, context, depth = 0) {
   return { error: "", protectedFound, directProtected, nestedProtected, broadKill: broadKillFound, pgrepWatcher, watcherPids: activeContext.watcherPids, program, nodeInfos };
 }
 
-function xModePathAllowed(value, home) {
-  if (value === "config/x-mode.env" || value === "./config/x-mode.env") return true;
+function connectorModePathAllowed(value, home) {
+  if (["config/x-mode.env", "./config/x-mode.env", "config/portal-mode.env", "./config/portal-mode.env"].includes(value)) return true;
   if (!path.isAbsolute(value)) return false;
-  return path.normalize(value) === path.join(path.normalize(home), "config/x-mode.env");
+  const normalized = path.normalize(value);
+  return ["x-mode.env", "portal-mode.env"].some(
+    (name) => normalized === path.join(path.normalize(home), "config", name),
+  );
 }
 
 function ordinaryWordsOnly(tokens) {
@@ -870,8 +873,8 @@ function setupKind(info, context) {
   const values = position.words.map((word) => word.value);
   if (values[0] === "cd" && values.length === 2) return "cd";
   if (values[0] === "export" && values.length === 2 && isAssignment(values[1])) return "export";
-  if ((values[0] === "source" || values[0] === ".") && values.length === 2 && xModePathAllowed(values[1], context.home)) return "source";
-  if (values[0] === "[" && values[1] === "-f" && values[3] === "]" && values.length === 4 && xModePathAllowed(values[2], context.home)) return "test-source";
+  if ((values[0] === "source" || values[0] === ".") && values.length === 2 && connectorModePathAllowed(values[1], context.home)) return "source";
+  if (values[0] === "[" && values[1] === "-f" && values[3] === "]" && values.length === 4 && connectorModePathAllowed(values[2], context.home)) return "test-source";
   return "";
 }
 

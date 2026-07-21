@@ -45,6 +45,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 mkdir -p "$STATE"
 
 # shellcheck source=bin/fm-wake-lib.sh
@@ -110,7 +111,16 @@ fi
 POLL=${FM_POLL:-15}                   # seconds between cycles
 HEARTBEAT=${FM_HEARTBEAT:-600}        # base seconds between heartbeat scans
 HEARTBEAT_MAX=${FM_HEARTBEAT_MAX:-7200}  # heartbeat backoff cap
-CHECK_INTERVAL=${FM_CHECK_INTERVAL:-300}  # seconds between *.check.sh sweeps
+if [ -n "${FM_CHECK_INTERVAL:-}" ]; then
+  CHECK_INTERVAL=$FM_CHECK_INTERVAL
+elif [ -f "$CONFIG/portal-mode.env" ] && [ ! -L "$CONFIG/portal-mode.env" ]; then
+  # Away mode launches this watcher as a child without harness shell setup.
+  # A bootstrap-generated portal cadence therefore has one runtime backstop
+  # here, keeping prompt polling on the single watcher in every ownership mode.
+  CHECK_INTERVAL=30
+else
+  CHECK_INTERVAL=300
+fi
 CHECK_TIMEOUT=${FM_CHECK_TIMEOUT:-30}     # seconds allowed per *.check.sh
 SIGNAL_GRACE=${FM_SIGNAL_GRACE:-30}   # seconds to linger after a signal so trailing
                                       # signals (a status write, then the same turn's
@@ -810,6 +820,25 @@ while :; do
       if [ -n "$out" ]; then
         reason="check: $c: $out"
         fm_wake_append check "$c" "$reason" || exit 1
+        # The portal poll keeps a pending record until this durable queue append
+        # succeeds. Commit only a strictly validated body-free ID list, and only
+        # for the hash-registered portal-watch check. A crash before this call
+        # re-offers the same record; queue drain dedupes the stable check key.
+        if [ "$id" = portal-watch ]; then
+          case "$out" in
+            portal-message\ *)
+              portal_ids=${out#portal-message }
+              portal_ids_valid=1
+              for portal_id in $portal_ids; do
+                case "$portal_id" in ''|0|*[!0-9]*) portal_ids_valid=0 ;; esac
+              done
+              if [ "$portal_ids_valid" -eq 1 ]; then
+                # shellcheck disable=SC2086 # Decimal tokens were validated above.
+                FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-portal-request.sh" mark-queued $portal_ids >/dev/null 2>&1 || true
+              fi
+              ;;
+          esac
+        fi
         touch "$STATE/.last-check"
         wake "$reason"
       fi
