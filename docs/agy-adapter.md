@@ -101,7 +101,7 @@ Primary session guard: not wired.
 
 ## Known gaps
 
-- The residual tmux cursor-row quirk documented in `docs/agy-adapter.md` (this file) for grok's pristine-placeholder state may apply to agy as well if its composer also renders a placeholder before any real typing starts.
+- The residual tmux cursor-row quirk documented in the grok section of `.agents/skills/harness-adapters/SKILL.md` for grok's pristine-placeholder state may apply to agy as well if its composer also renders a placeholder before any real typing starts.
   Agy's `--prompt-interactive` always delivers the initial brief before the interactive pane becomes visible to firstmate, so in practice a live task's composer is never observed in this pristine pre-typing state.
   The gap is theoretical for the current launch path.
 - `agy models` returned empty output in the scout probe (possibly auth-gated for listing); the default model name is not surfaceable from `agy --version` or `agy --help` alone.

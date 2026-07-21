@@ -397,8 +397,8 @@ launch_template() {
     # installed: agy has no verified stop-hook mechanism analogous to claude/codex
     # Stop hooks or grok's global hook. Stale-pane detection is the fall-back.
     # agy is CREWMATE/SCOUT only: no verified primary or secondmate hook contract
-    # exists, so secondmate spawns are refused by the verification gate in the
-    # secondmate arg-list above.
+    # exists, so secondmate spawns are refused by the agy secondmate guard in the
+    # harness dispatch below.
     agy) printf '%s' 'agy --dangerously-skip-permissions --new-project __MODELFLAG__--prompt-interactive "$(cat __BRIEF__)"' ;;
     *) return 1 ;;
   esac
@@ -437,16 +437,24 @@ case "$ARG3" in
   *)
     HARNESS=$ARG3
     LAUNCH=$(launch_template "$HARNESS" "$KIND") || { echo "error: unknown harness '$HARNESS'; pass a raw launch command to use an unverified adapter" >&2; exit 1; }
-    # agy supports crewmate/scout spawns but not secondmate: it has no verified
-    # primary or secondmate turn-end hook contract. Refuse secondmate spawns here
-    # (after the template succeeds) to give a targeted error rather than a silent
-    # no-turn-end situation.
-    if [ "$HARNESS" = agy ] && [ "$KIND" = secondmate ]; then
-      echo "error: harness 'agy' does not support --secondmate spawns: no verified primary or secondmate turn-end hook contract exists" >&2
-      exit 1
-    fi
     ;;
 esac
+
+# agy supports crewmate/scout spawns but not secondmate: it has no verified
+# primary or secondmate turn-end hook contract. Refuse secondmate spawns on
+# both the explicit-harness and config-resolved paths (after the template
+# lookup succeeds) to give a targeted error rather than a silent no-turn-end
+# situation. A raw launch command (the unverified-adapter escape hatch) stays
+# exempt.
+if [ "$HARNESS" = agy ] && [ "$KIND" = secondmate ]; then
+  case "$ARG3" in
+    *' '*) : ;;
+    *)
+      echo "error: harness 'agy' does not support --secondmate spawns: no verified primary or secondmate turn-end hook contract exists" >&2
+      exit 1
+      ;;
+  esac
+fi
 
 # config/secondmate-harness may carry optional model/effort tokens alongside the
 # harness ("<harness> [<model>] [<effort>]"). They apply only when this is a

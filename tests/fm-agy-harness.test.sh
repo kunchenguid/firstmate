@@ -36,21 +36,26 @@ test_harness_detects_antigravity_env_marker() {
 }
 
 # ---------------------------------------------------------------------------
-# fm-harness.sh: does NOT misdetect unset marker when ANTIGRAVITY_AGENT is absent
-# This test unsets ALL harness env markers and checks that the ancestry walk
-# produces something sensible. When the test itself runs inside Agy (where the
-# real ANTIGRAVITY_AGENT=1 is set), env - strips it safely via a subprocess;
-# the result will be "agy" because the ancestry walk also finds the agy binary.
-# That is correct behaviour, not a false-positive, so the test is a no-op when
-# running inside Agy.
+# fm-harness.sh: does NOT report agy when the ANTIGRAVITY_AGENT marker is absent.
+# Clearing all harness env markers leaves only the process-ancestry walk, which
+# outside the agy runtime must not find the agy binary. Inside the agy runtime
+# (the real ANTIGRAVITY_AGENT=1 is inherited) the ancestry walk legitimately
+# finds agy, so the check is skipped there; the positive detection test above
+# already covers the Layer-1 marker path.
 # ---------------------------------------------------------------------------
 
 test_harness_no_false_positive_without_marker() {
-  # Skip: verifying "unknown without marker" cannot be done reliably inside
-  # the Agy runtime (the real ANTIGRAVITY_AGENT=1 is inherited regardless of
-  # env -i, and the ancestry walk legitimately finds the agy binary). The
-  # positive detection test above already confirms the Layer-1 marker path.
-  pass "fm-harness.sh no-false-positive test skipped (running inside agy runtime)"
+  local result
+  if [ "${ANTIGRAVITY_AGENT:-}" = 1 ]; then
+    pass "fm-harness.sh no-false-positive check skipped (running inside agy runtime)"
+    return 0
+  fi
+  result=$(ANTIGRAVITY_AGENT= CLAUDECODE= PI_CODING_AGENT= GROK_AGENT= \
+    FM_ROOT_OVERRIDE="$TMP_ROOT/no-marker-home" \
+    bash "$HARNESS" 2>/dev/null)
+  [ "$result" != agy ] || \
+    fail "detection should not report agy without the ANTIGRAVITY_AGENT marker or agy ancestry"
+  pass "fm-harness.sh does not report agy without the env marker (got '$result')"
 }
 
 
@@ -171,14 +176,14 @@ SH
     FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" \
     PATH="$fakebin:$PATH" \
     "$SPAWN" "$id" "$proj" agy > /dev/null 2>&1 || true
-  if [ -f "$case_dir/launch.log" ]; then
-    assert_grep '--new-project' "$case_dir/launch.log" \
-      "agy launch command should include --new-project"
-    assert_grep '--prompt-interactive' "$case_dir/launch.log" \
-      "agy launch command should include --prompt-interactive"
-    assert_grep '--dangerously-skip-permissions' "$case_dir/launch.log" \
-      "agy launch command should include --dangerously-skip-permissions"
-  fi
+  assert_present "$case_dir/launch.log" \
+    "agy spawn never reached the send-keys launch capture (launch.log missing)"
+  assert_grep '--new-project' "$case_dir/launch.log" \
+    "agy launch command should include --new-project"
+  assert_grep '--prompt-interactive' "$case_dir/launch.log" \
+    "agy launch command should include --prompt-interactive"
+  assert_grep '--dangerously-skip-permissions' "$case_dir/launch.log" \
+    "agy launch command should include --dangerously-skip-permissions"
   pass "agy spawn launch template includes --new-project and --prompt-interactive"
 }
 
@@ -210,17 +215,44 @@ test_agy_secondmate_spawn_refused() {
   # the agy refusal to fire BEFORE those checks; it does because the case-list
   # in launch_template() returns successfully but the explicit agy+secondmate
   # guard below it fires.  The error goes to stderr; spawn exits non-zero.
+  status=0
   out=$(FM_ROOT_OVERRIDE='' FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" \
     PATH="$fakebin:$PATH" \
     "$SPAWN" sm1 agy --secondmate 2>&1) || status=$?
+  expect_code 1 "$status" "agy secondmate spawn should exit 1"
   assert_contains "$out" "agy" \
     "secondmate spawn refusal should mention agy"
   assert_contains "$out" "error" \
     "secondmate spawn should error for agy"
   pass "agy secondmate spawn is refused"
+}
+
+test_agy_secondmate_spawn_refused_via_config() {
+  local home fakebin out status
+  home="$TMP_ROOT/secondmate-config-refuse/home"
+  fakebin=$(fm_fakebin "$TMP_ROOT/secondmate-config-refuse/fake")
+  mkdir -p "$home/data/sm2" "$home/projects" "$home/state" "$home/config"
+  printf 'agy\n' > "$home/config/crew-harness"
+  fm_fake_exit0 "$fakebin" tmux treehouse gh-axi gh
+  # No explicit harness arg: the secondmate harness resolves through
+  # config/secondmate-harness -> config/crew-harness (agy here), and the same
+  # refusal must fire on that config-resolved path.
+  status=0
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" \
+    PATH="$fakebin:$PATH" \
+    "$SPAWN" sm2 --secondmate 2>&1) || status=$?
+  expect_code 1 "$status" "config-resolved agy secondmate spawn should exit 1"
+  assert_contains "$out" "agy" \
+    "config-resolved secondmate spawn refusal should mention agy"
+  assert_contains "$out" "error" \
+    "config-resolved secondmate spawn should error for agy"
+  pass "agy secondmate spawn is refused when resolved from config/crew-harness"
 }
 
 # ---------------------------------------------------------------------------
@@ -286,5 +318,6 @@ test_agy_spawn_succeeds
 test_agy_spawn_includes_new_project_flag
 test_agy_spawn_no_turn_end_hook
 test_agy_secondmate_spawn_refused
+test_agy_secondmate_spawn_refused_via_config
 test_busy_regex_matches_esc_to_cancel
 test_tmux_agent_alive_recognizes_agy
