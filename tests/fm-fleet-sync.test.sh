@@ -94,12 +94,21 @@ bump_origin() {
 run_sync() {
   local w=$1
   shift
+  run_sync_from "$w" "$ROOT" "$@"
+}
+
+run_sync_from() {
+  local w=$1 cwd=$2
+  shift 2
   : > "$w/git-c.log"
-  PATH="$w/fakebin:$PATH" \
-  FM_TEST_REAL_GIT="$REAL_GIT" \
-  FM_TEST_GIT_C_LOG="$w/git-c.log" \
-  FM_HOME="$w/home" \
-    "$SYNC" "$@" 2>/dev/null
+  (
+    cd "$cwd" || exit 1
+    PATH="$w/fakebin:$PATH" \
+    FM_TEST_REAL_GIT="$REAL_GIT" \
+    FM_TEST_GIT_C_LOG="$w/git-c.log" \
+    FM_HOME="$w/home" \
+      "$SYNC" "$@" 2>/dev/null
+  )
 }
 
 assert_canonical_git_target() {
@@ -129,14 +138,45 @@ test_symlink_target_fast_forwards_during_fleet_iteration() {
   pass "fleet iteration resolves and fast-forwards a symlink target"
 }
 
-test_dirty_symlink_target_is_skipped() {
+test_symlink_target_fast_forwards_by_project_name() {
+  local w out
+  w=$(new_world named-fast-forward)
+  bump_origin "$w" remote-ahead
+
+  out=$(run_sync "$w" linked) || fail "named symlink sync failed: $out"
+
+  assert_contains "$out" "linked: synced " "named symlink sync was not reported"
+  [ "$(git -C "$w/canonical target" rev-parse HEAD)" = "$(git -C "$w/canonical target" rev-parse origin/main)" ] \
+    || fail "named sync did not fast-forward the canonical target to origin/main"
+  [ -L "$w/home/projects/linked" ] || fail "named sync replaced the project symlink"
+  assert_canonical_git_target "$w"
+  pass "named sync resolves and fast-forwards a symlink target"
+}
+
+test_existing_bare_relative_symlink_target_fast_forwards() {
+  local w out
+  w=$(new_world bare-relative)
+  ln -s "$w/canonical target" "$w/bare-linked"
+  bump_origin "$w" remote-ahead
+
+  out=$(run_sync_from "$w" "$w" bare-linked) || fail "bare relative symlink sync failed: $out"
+
+  assert_contains "$out" "bare-linked: synced " "bare relative symlink sync was not reported"
+  [ "$(git -C "$w/canonical target" rev-parse HEAD)" = "$(git -C "$w/canonical target" rev-parse origin/main)" ] \
+    || fail "bare relative symlink did not fast-forward the canonical target"
+  [ -L "$w/bare-linked" ] || fail "bare relative project symlink was replaced"
+  assert_canonical_git_target "$w"
+  pass "existing bare relative symlink paths remain supported"
+}
+
+test_dirty_symlink_target_is_skipped_by_project_name() {
   local w out before
   w=$(new_world dirty)
   bump_origin "$w" remote-ahead
   before=$(git -C "$w/canonical target" rev-parse HEAD)
   printf 'local edit\n' >> "$w/canonical target/tracked.txt"
 
-  out=$(run_sync "$w" "$w/home/projects/linked") || fail "explicit dirty sync failed: $out"
+  out=$(run_sync "$w" linked) || fail "named dirty sync failed: $out"
 
   assert_contains "$out" "linked: skipped: dirty working tree" "dirty target skip was not reported"
   [ "$(git -C "$w/canonical target" rev-parse HEAD)" = "$before" ] \
@@ -144,7 +184,7 @@ test_dirty_symlink_target_is_skipped() {
   grep -F 'local edit' "$w/canonical target/tracked.txt" >/dev/null \
     || fail "dirty target edit was discarded"
   assert_canonical_git_target "$w"
-  pass "explicit sync safely skips a dirty symlink target"
+  pass "named sync safely skips a dirty symlink target"
 }
 
 test_diverged_symlink_target_is_skipped() {
@@ -233,7 +273,9 @@ test_symlink_target_pruning_respects_live_worktrees() {
 }
 
 test_symlink_target_fast_forwards_during_fleet_iteration
-test_dirty_symlink_target_is_skipped
+test_symlink_target_fast_forwards_by_project_name
+test_existing_bare_relative_symlink_target_fast_forwards
+test_dirty_symlink_target_is_skipped_by_project_name
 test_diverged_symlink_target_is_skipped
 test_off_default_symlink_target_is_skipped
 test_offline_symlink_target_fails_require_current

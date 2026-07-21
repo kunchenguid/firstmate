@@ -12,7 +12,7 @@
 # matching bootstrap/fleet refresh behavior. --require-current is the fail-closed
 # single-project form: it exits non-zero after any reported skip, so callers can
 # refuse to use a clone whose currency could not be proven by this fetch.
-# Usage: fm-fleet-sync.sh [--require-current] [<project-dir>]
+# Usage: fm-fleet-sync.sh [--require-current] [<project-name-or-dir>]
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -22,7 +22,7 @@ PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 "$FM_ROOT/bin/fm-guard.sh" || true
 
 usage() {
-  echo "usage: fm-fleet-sync.sh [--require-current] [<project-dir>]" >&2
+  echo "usage: fm-fleet-sync.sh [--require-current] [<project-name-or-dir>]" >&2
 }
 
 if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
@@ -43,6 +43,23 @@ project_label() {
     "$PROJECTS"/*) basename "$PROJ" ;;
     projects/*) basename "$PROJ" ;;
     *) printf '%s\n' "$PROJ" ;;
+  esac
+}
+
+resolve_project_arg() {
+  local path=$1
+  # Bare arguments name entries under this firstmate home's projects directory.
+  # sync_project then resolves a symlinked entry before any directory/git guard.
+  case "$path" in
+    projects/*) printf '%s/%s\n' "$PROJECTS" "${path#projects/}" ;;
+    */*|.|..) printf '%s\n' "$path" ;;
+    *)
+      if [ -e "$path" ] || [ -L "$path" ]; then
+        printf '%s\n' "$path"
+      else
+        printf '%s/%s\n' "$PROJECTS" "$path"
+      fi
+      ;;
   esac
 }
 
@@ -309,7 +326,7 @@ sync_project() {
 }
 
 if [ $# -eq 1 ]; then
-  sync_project "$1"
+  sync_project "$(resolve_project_arg "$1")"
   if [ "$REQUIRE_CURRENT" = 1 ] && [ "$SYNC_CURRENT" != 1 ]; then
     exit 1
   fi
