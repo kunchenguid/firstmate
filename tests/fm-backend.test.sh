@@ -802,11 +802,13 @@ run_spawn_case() {  # <bin-root> <fakebin> <log> <state> <data> <config> <proj> 
 # worktree-discovery poll used to mistake an UNMOVED pane for one that had
 # already left the project, handing validate_spawn_worktree the project's own
 # directory as "the worktree" and tripping its false isolation refusal.
-# make_spawn_symlink_fakebin's tmux stub returns an unmoved project path on the
-# first pane_current_path poll, then the real worktree path from the second poll
-# onward, so this test fails loudly if the PROJ_ABS/PROJ_ABS_REAL
-# canonicalization in bin/fm-spawn.sh ever regresses.
-make_spawn_symlink_fakebin() {  # <dir> <initial-project-path> <worktree-path> -> echoes fakebin dir
+# make_spawn_pane_seq_fakebin's tmux stub returns <first-path> on the first
+# pane_current_path poll, then <rest-path> from the second poll onward, so this
+# test fails loudly if the PROJ_ABS/PROJ_ABS_REAL canonicalization in
+# bin/fm-spawn.sh ever regresses. The pane-path-pollution tests below reuse the
+# same stub to model a pane whose cwd read reports something other than the
+# task worktree.
+make_spawn_pane_seq_fakebin() {  # <dir> <first-path> <rest-path> -> echoes fakebin dir
   local dir=$1 initial_path=$2 wt=$3 fb="$1/fakebin" counter="$1/poll-count"
   mkdir -p "$fb"
   : > "$counter"
@@ -855,7 +857,7 @@ run_spawn_symlink_case() {  # <label> <physical|logical>
     logical) initial_path=$proj ;;
     *) fail "unknown symlink first-reply mode: $first_reply" ;;
   esac
-  fb=$(make_spawn_symlink_fakebin "$TMP_ROOT/symlink-fake-$label" "$initial_path" "$wt")
+  fb=$(make_spawn_pane_seq_fakebin "$TMP_ROOT/symlink-fake-$label" "$initial_path" "$wt")
   data="$TMP_ROOT/symlink-data-$label"
   mkdir -p "$data/$id"
   printf 'test brief content\n' > "$data/$id/brief.md"
@@ -876,6 +878,74 @@ test_spawn_symlinked_project_prefix_avoids_false_refusal() {
   run_spawn_symlink_case physical physical
   run_spawn_symlink_case logical logical
   pass "fm-spawn.sh: a project reached through a symlinked prefix (e.g. macOS /tmp -> /private/tmp) does not trip the isolation guard's false refusal"
+}
+
+# --- pane-path pollution must not defeat the isolation guard -----------------
+#
+# Incident (2026-07-21): an oh-my-zsh update prompt in the fresh task pane
+# consumed the leading character of `treehouse get`, and a later poll read the
+# pane's foreground cwd as ~/.oh-my-zsh - an unrelated git clone. The old guard
+# accepted any git toplevel other than the primary checkout, so the spawn was
+# reported successful with worktree=~/.oh-my-zsh. These tests pin the tightened
+# contract: a candidate pane path is adopted only when it is a worktree of the
+# project's OWN repository (equal physical git common dirs), a polluted read
+# keeps the poll alive instead of latching, and exhaustion refuses loudly
+# instead of adopting whatever directory the pane happens to sit in.
+
+spawn_pollution_fixture() {  # <label> -> sets PPROJ PWT PUNRELATED PDATA PSTATE PCONFIG PLOG PID_
+  local label=$1
+  PPROJ="$TMP_ROOT/pollute-proj-$label"
+  PWT="$TMP_ROOT/pollute-wt-$label"
+  PUNRELATED="$TMP_ROOT/pollute-unrelated-$label"
+  PID_="spawnpollute$label"
+  fm_git_worktree "$PPROJ" "$PWT" "fm/$PID_"
+  fm_git_init_commit "$PUNRELATED"
+  PDATA="$TMP_ROOT/pollute-data-$label"
+  mkdir -p "$PDATA/$PID_"
+  printf 'test brief content\n' > "$PDATA/$PID_/brief.md"
+  PSTATE="$TMP_ROOT/pollute-state-$label"
+  PCONFIG="$TMP_ROOT/pollute-config-$label"
+  mkdir -p "$PSTATE" "$PCONFIG"
+  PLOG="$TMP_ROOT/pollute-spawn-$label.log"
+}
+
+test_spawn_refuses_unrelated_repo_pane_path() {
+  local fb out rc
+  spawn_pollution_fixture omz
+  fb=$(make_spawn_pane_seq_fakebin "$TMP_ROOT/pollute-fake-omz" "$PUNRELATED" "$PUNRELATED")
+  out=$(FM_SPAWN_WT_TIMEOUT=2 run_spawn_case "$ROOT" "$fb" "$PLOG" "$PSTATE" "$PDATA" "$PCONFIG" "$PPROJ" -- "$PID_" "$PPROJ" claude 2>&1)
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "fm-spawn.sh accepted an unrelated git repo as the task worktree: $out"
+  assert_contains "$out" "$PUNRELATED" "refusal does not name the polluted pane path"$'\n'"$out"
+  assert_contains "$out" "not a worktree of the project repository" "refusal does not state the same-repository violation"$'\n'"$out"
+  [ ! -f "$PSTATE/$PID_.meta" ] || fail "fm-spawn.sh recorded meta for a refused spawn"
+  rm -rf "/tmp/fm-$PID_"
+  pass "fm-spawn.sh: a pane sitting in an unrelated git repo (polluted treehouse get) is refused, not adopted as the task worktree"
+}
+
+test_spawn_times_out_when_pane_never_leaves_project() {
+  local fb out rc
+  spawn_pollution_fixture eaten
+  fb=$(make_spawn_pane_seq_fakebin "$TMP_ROOT/pollute-fake-eaten" "$PPROJ" "$PPROJ")
+  out=$(FM_SPAWN_WT_TIMEOUT=2 run_spawn_case "$ROOT" "$fb" "$PLOG" "$PSTATE" "$PDATA" "$PCONFIG" "$PPROJ" -- "$PID_" "$PPROJ" claude 2>&1)
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "fm-spawn.sh reported success although the pane never entered a worktree: $out"
+  assert_contains "$out" "did not enter a worktree" "timeout refusal lost its diagnostic"$'\n'"$out"
+  [ ! -f "$PSTATE/$PID_.meta" ] || fail "fm-spawn.sh recorded meta for a timed-out spawn"
+  rm -rf "/tmp/fm-$PID_"
+  pass "fm-spawn.sh: a pane that never leaves the project (e.g. the command was eaten by a prompt) times out and refuses"
+}
+
+test_spawn_recovers_when_pane_transits_unrelated_repo() {
+  local fb out rc
+  spawn_pollution_fixture transit
+  fb=$(make_spawn_pane_seq_fakebin "$TMP_ROOT/pollute-fake-transit" "$PUNRELATED" "$PWT")
+  out=$(run_spawn_case "$ROOT" "$fb" "$PLOG" "$PSTATE" "$PDATA" "$PCONFIG" "$PPROJ" -- "$PID_" "$PPROJ" claude 2>&1)
+  rc=$?
+  expect_code 0 "$rc" "fm-spawn.sh should keep polling past a transient polluted pane path and accept the real worktree"$'\n'"$out"
+  assert_contains "$out" "worktree=$PWT" "spawn did not adopt the real worktree after the transient polluted read"
+  rm -rf "/tmp/fm-$PID_"
+  pass "fm-spawn.sh: a transient polluted pane read keeps the poll alive and the real worktree is still adopted"
 }
 
 # --- old vs new: fm-teardown.sh ----------------------------------------------
@@ -1091,6 +1161,9 @@ test_backend_of_selector_matches_explicit_target_meta
 test_send_conformance_old_vs_new
 test_peek_conformance_old_vs_new
 test_spawn_symlinked_project_prefix_avoids_false_refusal
+test_spawn_refuses_unrelated_repo_pane_path
+test_spawn_times_out_when_pane_never_leaves_project
+test_spawn_recovers_when_pane_transits_unrelated_repo
 test_teardown_conformance_old_vs_new
 test_spawn_refuses_unknown_backend_flag
 test_spawn_refuses_codex_app_backend_flag
