@@ -24,6 +24,7 @@ command -v python3 >/dev/null 2>&1 || { echo "skip: python3 not found (required 
 
 # shellcheck source=tests/herdr-test-safety.sh
 . "$ROOT/tests/herdr-test-safety.sh"
+herdr_default_session_live || { echo "skip: no running default Herdr session (fleet-state tripwire precondition)"; exit 0; }
 
 # This suite runs against its own isolated lab session, so a Herdr pane
 # inherited from the terminal it was launched in must not follow spawn into it

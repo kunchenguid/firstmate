@@ -40,6 +40,12 @@ assert_contains_local() {  # <haystack> <needle> <msg>
 command -v herdr >/dev/null 2>&1 || { echo "skip: herdr not found"; exit 0; }
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (required by the herdr adapter)"; exit 0; }
 command -v treehouse >/dev/null 2>&1 || { echo "skip: treehouse not found (required by fm-spawn.sh)"; exit 0; }
+# herdr may be installed with no active captain session (fresh machine or CI
+# image); the fleet-state tripwire in bin/fm-herdr-lab.sh then refuses to
+# provision, so skip cleanly rather than report it as a test defect.
+herdr session list --json 2>/dev/null | jq -e '
+  [.sessions[]? | select(.default == true and .running == true and .name == "default")] | length == 1
+' >/dev/null 2>&1 || { echo "skip: no running default Herdr session (fleet-state tripwire precondition)"; exit 0; }
 
 export FM_GATE_REFUSE_BYPASS=1
 

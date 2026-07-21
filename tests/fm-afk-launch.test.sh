@@ -830,6 +830,7 @@ e2e_herdr() {
   command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (herdr e2e)"; return 0; }
   # shellcheck source=tests/herdr-test-safety.sh
   . "$ROOT/tests/herdr-test-safety.sh"
+  herdr_default_session_live || { echo "skip: no running default Herdr session (herdr e2e)"; return 0; }
   # shellcheck source=/dev/null
   . "$ROOT/bin/fm-backend.sh"
 

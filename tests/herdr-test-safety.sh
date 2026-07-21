@@ -40,3 +40,12 @@ herdr_refuse_if_default() { # <session>
 herdr_safe_stop_and_delete() { # <session>
   fm_herdr_lab_teardown "$1"
 }
+
+# True only when the fleet-state tripwire (bin/fm-herdr-lab.sh) can see a
+# single running "default" Herdr session. herdr may be installed with no
+# active captain session (e.g. a fresh machine or CI image with the binary
+# present but nothing started); provisioning refuses in that case, and callers
+# should skip cleanly rather than report it as a test defect.
+herdr_default_session_live() {
+  fm_herdr_lab_fleet_state "fm-lab-tripwire-precheck-$$" >/dev/null 2>&1
+}
