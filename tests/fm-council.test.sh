@@ -202,6 +202,8 @@ if [ "$(uname -s)-$(uname -m)" = Linux-x86_64 ]; then
         if echo mutate > "$3/code"; then echo source-write-bad >> "$2/source-status"; else echo source-write-denied >> "$2/source-status"; fi
         if cat "$4/answer" > "$2/other-answer"; then echo answer-read-bad > "$2/answer-status"; else echo answer-read-denied > "$2/answer-status"; fi
         if /usr/bin/python3 -c "import socket; socket.socket(socket.AF_UNIX)"; then echo unix-socket-bad > "$2/socket-status"; else echo unix-socket-denied > "$2/socket-status"; fi
+        if /usr/bin/python3 -c "import socket; socket.socketpair()"; then echo socketpair-bad > "$2/socketpair-status"; else echo socketpair-denied > "$2/socketpair-status"; fi
+        if /usr/bin/python3 -c "import ctypes, sys; libc = ctypes.CDLL(None, use_errno=True); rc = libc.syscall(425, 4, 0); sys.exit(0 if rc < 0 and ctypes.get_errno() == 13 else 1)"; then echo io-uring-denied > "$2/iouring-status"; else echo io-uring-bad > "$2/iouring-status"; fi
         if /usr/bin/python3 -c "import socket; socket.socket(socket.AF_INET).close()"; then echo tcp-socket-allowed > "$2/tcp-status"; else echo tcp-socket-bad > "$2/tcp-status"; fi
         if /bin/ls / > /dev/null; then echo exec-bad > "$2/exec-status"; else echo exec-denied > "$2/exec-status"; fi
       } 2> "$2/denials"
@@ -213,6 +215,8 @@ if [ "$(uname -s)-$(uname -m)" = Linux-x86_64 ]; then
   assert_grep source-write-denied "$sandbox/home/source-status" "sandbox wrote the source project"
   [ "$(cat "$sandbox/home/answer-status")" = answer-read-denied ] || fail "sandbox exposed a competing participant answer"
   [ "$(cat "$sandbox/home/socket-status")" = unix-socket-denied ] || fail "sandbox allowed a terminal-control socket channel"
+  [ "$(cat "$sandbox/home/socketpair-status")" = socketpair-denied ] || fail "sandbox allowed a Unix socketpair channel"
+  [ "$(cat "$sandbox/home/iouring-status")" = io-uring-denied ] || fail "sandbox allowed an io_uring socket bypass"
   [ "$(cat "$sandbox/home/tcp-status")" = tcp-socket-allowed ] || fail "sandbox blocked provider-style TCP sockets"
   [ "$(cat "$sandbox/source/code")" = source-private ] || fail "sandbox changed the source bytes"
   pass "council sandbox: Landlock enforces read-only fixed views, the exact exec allowlist, and answer isolation"
@@ -422,3 +426,67 @@ council "$HOME5" close Deferral >/dev/null
 [ "$(grep -c "^close.$ID5" "$STUB/events")" = 2 ] || fail "close retry did not close each participant exactly once"
 [ "$(jq -r .status "$HOME5/data/councils/$ID5/council.json")" = closed ] || fail "close retry did not complete the council closure"
 pass "council close retry: journal-confirmed closures are skipped and remaining endpoints close exactly once"
+
+# Stale unpublished round/snapshot leftovers from a crashed ask are recovered
+# deterministically instead of blocking every later ask.
+IFS=$'\t' read -r HOME6 PROJECT6 < <(new_home stale)
+CREATE6=$(create_pair "$HOME6" "$PROJECT6" Stale)
+ID6=$(json_id "$CREATE6")
+consent_pair "$HOME6" "$PROJECT6"
+mkdir -p "$HOME6/data/councils/$ID6/rounds/R0001"
+printf 'leftover\n' > "$HOME6/data/councils/$ID6/rounds/R0001/common.md"
+mkdir -p "$HOME6/data/councils/$ID6/snapshots/R0001/project"
+printf 'leftover\n' > "$HOME6/data/councils/$ID6/snapshots/R0001/project/file"
+chmod 555 "$HOME6/data/councils/$ID6/snapshots/R0001/project"
+ASK6=$(council "$HOME6" ask Stale "Task after a crashed ask") || fail "stale unpublished leftovers blocked the next ask"
+[ "$(jq -r .round <<<"$ASK6")" = R0001 ] || fail "stale leftovers changed the deterministic round identity"
+if grep -q leftover "$HOME6/data/councils/$ID6/rounds/R0001/common.md"; then
+  fail "stale round leftovers were adopted as a valid round"
+fi
+assert_absent "$HOME6/data/councils/$ID6/snapshots/R0001/project/file" "stale snapshot leftovers were adopted as a valid view"
+pass "council stale recovery: unpublished crash leftovers are cleared, never adopted"
+
+# A corrupt participant runtime during dispatch becomes an honest unavailable
+# roster entry in a complete frozen roster instead of aborting the fan-out.
+IFS=$'\t' read -r HOME7 PROJECT7 < <(new_home dispatch)
+CREATE7=$(create_pair "$HOME7" "$PROJECT7" Dispatch)
+ID7=$(json_id "$CREATE7")
+consent_pair "$HOME7" "$PROJECT7"
+CODEX7=$(jq -r '.members[] | select(startswith("codex-"))' <<<"$CREATE7")
+codex_runtime7="$HOME7/state/councils/$ID7/members/$CODEX7/runtime.json"
+cp "$codex_runtime7" "$codex_runtime7.saved"
+printf 'not-json\n' > "$codex_runtime7"
+ASK7=$(council "$HOME7" ask Dispatch "Pick a linter.") || fail "a corrupt runtime aborted the round fan-out"
+ROUND7=$(jq -r .round <<<"$ASK7")
+[ "$(jq -r --arg member "$CODEX7" '.roster[$member].dispatch' <<<"$ASK7")" = unavailable ] || fail "corrupt runtime was not an honest unavailable roster entry"
+[ "$(jq '.roster | length' <<<"$ASK7")" = 2 ] || fail "dispatch failure left an incomplete frozen roster"
+[ "$(jq -r .status "$HOME7/data/councils/$ID7/rounds/$ROUND7/round.json")" = collecting ] || fail "round did not finish dispatch after a member failure"
+grep -q '"event": "round_dispatched"' "$HOME7/data/councils/$ID7/events.jsonl" || fail "dispatch failure suppressed the round_dispatched event"
+mv "$codex_runtime7.saved" "$codex_runtime7"
+pass "council dispatch: a per-member runtime failure defers honestly and still freezes a complete roster"
+
+# A non-UTF-8 presentation is refused before any state mutates.
+submit_all "$HOME7" Dispatch "$ASK7" dispatch
+council "$HOME7" collect Dispatch >/dev/null
+printf '\xff\xfe broken bytes' > "$TMP_ROOT/bad-utf8.md"
+status=0
+council "$HOME7" present Dispatch --file "$TMP_ROOT/bad-utf8.md" --kind only >/dev/null 2>&1 || status=$?
+expect_code 1 "$status" "non-UTF-8 presentation must be refused"
+[ "$(jq -r .phase "$HOME7/data/councils/$ID7/council.json")" = awaiting_presentation ] || fail "invalid presentation mutated the council phase"
+assert_absent "$HOME7/data/councils/$ID7/rounds/$ROUND7/presented.md" "invalid presentation bytes were saved"
+printf 'Valid decision.\n' > "$TMP_ROOT/good-utf8.md"
+council "$HOME7" present Dispatch --file "$TMP_ROOT/good-utf8.md" --kind only >/dev/null
+pass "council present: non-UTF-8 canonical bytes are refused before any state mutation"
+
+# One corrupt council record neither bricks other councils nor hides itself
+# from a direct request.
+mkdir -p "$HOME7/data/councils/corrupt-1234"
+printf 'not-json\n' > "$HOME7/data/councils/corrupt-1234/council.json"
+council "$HOME7" status Dispatch >/dev/null || fail "a corrupt unrelated record broke healthy council status"
+council "$HOME7" reject Dispatch --reason cleanup >/dev/null || fail "a corrupt unrelated record broke healthy council mutation"
+status=0
+council "$HOME7" status corrupt-1234 >/dev/null 2>&1 || status=$?
+expect_code 1 "$status" "a direct request for the corrupt identity must report the corruption"
+[ "$(council "$HOME7" status | jq -r '.[] | select(.id == "corrupt-1234") | .status')" = unreadable ] || fail "the status listing did not surface the corrupt record"
+rm -rf "$HOME7/data/councils/corrupt-1234"
+pass "council isolation: corrupt records are skipped for other councils and reported when requested directly"

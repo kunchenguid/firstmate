@@ -5,8 +5,9 @@ This helper is intentionally not a general sandbox.  Landlock denies filesystem
 reads, writes, and executable launches by default, admits read-only system
 paths, grants execute only on the exact allowlisted binaries, and grants writes
 only below explicit participant-owned directories.  A seccomp filter also
-denies new Unix-domain sockets so terminal-control sockets cannot be reached by
-path guessing.  Both policies are inherited by every child before exec.
+denies new Unix-domain sockets (socket and socketpair) and io_uring setup so
+terminal-control sockets cannot be reached by path guessing or by ring-submitted
+socket operations.  Both policies are inherited by every child before exec.
 """
 
 from __future__ import annotations
@@ -35,6 +36,8 @@ BPF_JMP_JEQ_K = 0x15
 BPF_JMP_JGE_K = 0x35
 BPF_RET_K = 0x06
 SYS_SOCKET_X86_64 = 41
+SYS_SOCKETPAIR_X86_64 = 53
+SYS_IO_URING_SETUP_X86_64 = 425
 AF_UNIX = 1
 AUDIT_ARCH_X86_64 = 0xC000003E
 X32_SYSCALL_BIT = 0x40000000
@@ -138,12 +141,14 @@ def add_path_rule(ruleset_fd: int, path: Path, access: int) -> None:
 def deny_new_unix_sockets() -> None:
     if os.uname().machine != "x86_64":
         raise RuntimeError("the council Unix-socket filter is verified only on Linux x86_64")
-    filters = (SockFilter * 9)(
+    filters = (SockFilter * 11)(
         SockFilter(BPF_LD_W_ABS, 0, 0, 4),
-        SockFilter(BPF_JMP_JEQ_K, 0, 5, AUDIT_ARCH_X86_64),
+        SockFilter(BPF_JMP_JEQ_K, 0, 7, AUDIT_ARCH_X86_64),
         SockFilter(BPF_LD_W_ABS, 0, 0, 0),
-        SockFilter(BPF_JMP_JGE_K, 3, 0, X32_SYSCALL_BIT),
-        SockFilter(BPF_JMP_JEQ_K, 0, 3, SYS_SOCKET_X86_64),
+        SockFilter(BPF_JMP_JGE_K, 5, 0, X32_SYSCALL_BIT),
+        SockFilter(BPF_JMP_JEQ_K, 4, 0, SYS_IO_URING_SETUP_X86_64),
+        SockFilter(BPF_JMP_JEQ_K, 1, 0, SYS_SOCKET_X86_64),
+        SockFilter(BPF_JMP_JEQ_K, 0, 3, SYS_SOCKETPAIR_X86_64),
         SockFilter(BPF_LD_W_ABS, 0, 0, 16),
         SockFilter(BPF_JMP_JEQ_K, 0, 1, AF_UNIX),
         SockFilter(BPF_RET_K, 0, 0, SECCOMP_RET_ERRNO | errno.EACCES),

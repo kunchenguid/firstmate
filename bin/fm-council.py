@@ -197,13 +197,23 @@ def lock(path: Path, blocking: bool = True) -> Iterator[None]:
         os.close(descriptor)
 
 
+def read_council_record(record_path: Path) -> dict[str, Any]:
+    record = load_json(record_path)
+    if not isinstance(record, dict) or record.get("schema") != SCHEMA:
+        raise CouncilError(f"unsupported council schema in {record_path}")
+    return record
+
+
 def find_council(name: str, include_closed: bool = True) -> tuple[Path, dict[str, Any]]:
     wanted = name.casefold()
     matches: list[tuple[Path, dict[str, Any]]] = []
     for record_path in PATHS.councils.glob("*/council.json"):
-        record = load_json(record_path)
-        if record.get("schema") != SCHEMA:
-            raise CouncilError(f"unsupported council schema in {record_path}")
+        try:
+            record = read_council_record(record_path)
+        except CouncilError:
+            if record_path.parent.name == name:
+                raise
+            continue
         if record.get("id") == name or str(record.get("name", "")).casefold() == wanted:
             if include_closed or record.get("status") == "open":
                 matches.append((record_path.parent, record))
@@ -217,6 +227,13 @@ def find_council(name: str, include_closed: bool = True) -> tuple[Path, dict[str
 def save_council(directory: Path, council: dict[str, Any]) -> None:
     council["updated_at"] = now()
     atomic_json(directory / "council.json", council)
+
+
+def reload_open_council(directory: Path) -> dict[str, Any]:
+    council = read_council_record(directory / "council.json")
+    if council.get("status") != "open":
+        raise CouncilError("council is closed")
+    return council
 
 
 def project_key(project: Path) -> str:
@@ -660,7 +677,10 @@ def command_create(arguments: argparse.Namespace) -> None:
     council_id = slug(name)
     with lock(PATHS.councils / ".registry.lock"):
         for record_path in PATHS.councils.glob("*/council.json"):
-            record = load_json(record_path)
+            try:
+                record = read_council_record(record_path)
+            except CouncilError:
+                continue
             if str(record.get("name", "")).casefold() == name.casefold():
                 raise CouncilError(f"council name already exists: {name}")
         directory = PATHS.council_dir(council_id)
@@ -838,6 +858,9 @@ def start_round(directory: Path, council: dict[str, Any], task: str) -> dict[str
         )
     round_id = next_round_id(council)
     round_directory = directory / "rounds" / round_id
+    if round_directory.exists():
+        shutil.rmtree(round_directory)
+    remove_snapshot(directory, round_id)
     round_directory.mkdir(parents=True, mode=0o700)
     try:
         snapshot, view_hash, excluded = build_snapshot(directory, project, round_id)
@@ -880,37 +903,40 @@ def start_round(directory: Path, council: dict[str, Any], task: str) -> dict[str
     append_event(directory / "events.jsonl", {"event": "round_started", "round": round_id, "common_hash": common_hash})
 
     for member in council["members"]:
-        if not catch_up_member(directory, council, member):
-            roster[member["id"]] = {"dispatch": "unavailable", "answer": None}
-            continue
-        runtime_file, runtime = load_runtime(council, member)
-        outbox = Path(runtime["home"]) / "outbox"
-        outbox.mkdir(parents=True, exist_ok=True, mode=0o700)
-        answer_path = outbox / f"{round_id}.md"
-        nonce = secrets.token_hex(16)
-        envelope = {
-            "schema": "fm-council-envelope.v1",
-            "council_id": council["id"],
-            "round_id": round_id,
-            "member_id": member["id"],
-            "common_hash": common_hash,
-            "view_hash": view_hash,
-            "answer_path": str(answer_path),
-            "nonce": nonce,
-        }
-        envelope_path = Path(runtime["home"]) / "inbox" / f"{round_id}.json"
-        atomic_json(envelope_path, envelope)
-        message = (
-            common
-            + "\nWrite your complete answer atomically to this participant-private path before finishing your turn:\n"
-            + f"`{answer_path}`\n"
-            + "Use a temporary file in the same directory and rename it into place. Do not only leave the answer on screen.\n"
-        )
-        if send_member(council, member, "round", message, common_path):
-            roster[member["id"]] = {"dispatch": "sent", "answer": str(answer_path), "nonce": nonce}
-            runtime["active_round"] = round_id
-            update_runtime(runtime_file, runtime)
-        else:
+        try:
+            if not catch_up_member(directory, council, member):
+                roster[member["id"]] = {"dispatch": "unavailable", "answer": None}
+                continue
+            runtime_file, runtime = load_runtime(council, member)
+            outbox = Path(runtime["home"]) / "outbox"
+            outbox.mkdir(parents=True, exist_ok=True, mode=0o700)
+            answer_path = outbox / f"{round_id}.md"
+            nonce = secrets.token_hex(16)
+            envelope = {
+                "schema": "fm-council-envelope.v1",
+                "council_id": council["id"],
+                "round_id": round_id,
+                "member_id": member["id"],
+                "common_hash": common_hash,
+                "view_hash": view_hash,
+                "answer_path": str(answer_path),
+                "nonce": nonce,
+            }
+            envelope_path = Path(runtime["home"]) / "inbox" / f"{round_id}.json"
+            atomic_json(envelope_path, envelope)
+            message = (
+                common
+                + "\nWrite your complete answer atomically to this participant-private path before finishing your turn:\n"
+                + f"`{answer_path}`\n"
+                + "Use a temporary file in the same directory and rename it into place. Do not only leave the answer on screen.\n"
+            )
+            if send_member(council, member, "round", message, common_path):
+                roster[member["id"]] = {"dispatch": "sent", "answer": str(answer_path), "nonce": nonce}
+                runtime["active_round"] = round_id
+                update_runtime(runtime_file, runtime)
+            else:
+                roster[member["id"]] = {"dispatch": "unavailable", "answer": None}
+        except CouncilError:
             roster[member["id"]] = {"dispatch": "unavailable", "answer": None}
     round_value["status"] = "collecting"
     save_round(directory, round_value)
@@ -929,6 +955,7 @@ def start_round(directory: Path, council: dict[str, Any], task: str) -> dict[str
 def command_ask(arguments: argparse.Namespace) -> None:
     directory, council = find_council(arguments.name, include_closed=False)
     with lock(PATHS.runtime_dir(council["id"]) / ".lock", blocking=False):
+        council = reload_open_council(directory)
         round_value = start_round(directory, council, arguments.task)
     print(json.dumps({"council": council["name"], "round": round_value["id"], "common_hash": round_value["common_hash"], "view_hash": round_value["view_hash"], "roster": round_value["roster"]}, ensure_ascii=False))
 
@@ -936,6 +963,7 @@ def command_ask(arguments: argparse.Namespace) -> None:
 def command_submit(arguments: argparse.Namespace) -> None:
     directory, council = find_council(arguments.name, include_closed=False)
     with lock(PATHS.runtime_dir(council["id"]) / ".lock"):
+        council = reload_open_council(directory)
         if council.get("active_round") != arguments.round_id or council.get("phase") != "collecting":
             raise CouncilError("submission does not match the active collecting round")
         round_value = load_round(directory, arguments.round_id)
@@ -1003,6 +1031,7 @@ def command_wait(arguments: argparse.Namespace) -> None:
 def command_collect(arguments: argparse.Namespace) -> None:
     directory, council = find_council(arguments.name, include_closed=False)
     with lock(PATHS.runtime_dir(council["id"]) / ".lock"):
+        council = reload_open_council(directory)
         if council.get("phase") != "collecting" or not council.get("active_round"):
             raise CouncilError("council has no collecting round")
         round_value = load_round(directory, council["active_round"])
@@ -1044,6 +1073,7 @@ def command_collect(arguments: argparse.Namespace) -> None:
 def command_present(arguments: argparse.Namespace) -> None:
     directory, council = find_council(arguments.name, include_closed=False)
     with lock(PATHS.runtime_dir(council["id"]) / ".lock"):
+        council = reload_open_council(directory)
         if council.get("phase") != "awaiting_presentation" or not council.get("active_round"):
             raise CouncilError("collect available answers before presenting a canonical decision")
         round_value = load_round(directory, council["active_round"])
@@ -1056,6 +1086,10 @@ def command_present(arguments: argparse.Namespace) -> None:
         content = source.read_bytes()
         if not content.strip():
             raise CouncilError("presented canonical decision is empty")
+        try:
+            text = content.decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise CouncilError("presented canonical decision must be valid UTF-8") from error
         presented = round_record_path(directory, round_value["id"]).parent / "presented.md"
         atomic_bytes(presented, content)
         round_value["status"] = "awaiting_acceptance"
@@ -1065,7 +1099,7 @@ def command_present(arguments: argparse.Namespace) -> None:
         council["phase"] = "awaiting_acceptance"
         save_council(directory, council)
         append_event(directory / "events.jsonl", {"event": "canonical_presented", "round": round_value["id"], "sha256": round_value["presented_sha256"], "kind": arguments.kind})
-    print(content.decode(), end="" if content.endswith(b"\n") else "\n")
+    print(text, end="" if text.endswith("\n") else "\n")
 
 
 def remove_snapshot(directory: Path, round_id: str) -> None:
@@ -1176,6 +1210,7 @@ def accept_round(directory: Path, council: dict[str, Any]) -> tuple[str, Path, l
 def command_accept(arguments: argparse.Namespace) -> None:
     directory, council = find_council(arguments.name, include_closed=False)
     with lock(PATHS.runtime_dir(council["id"]) / ".lock"):
+        council = reload_open_council(directory)
         decision_id, destination, deferred = accept_round(directory, council)
     result: dict[str, Any] = {"accepted": decision_id, "canonical": str(destination), "deferred_members": deferred}
     if arguments.implement:
@@ -1212,6 +1247,7 @@ def reject_active(directory: Path, council: dict[str, Any], reason: str) -> str:
 def command_reject(arguments: argparse.Namespace) -> None:
     directory, council = find_council(arguments.name, include_closed=False)
     with lock(PATHS.runtime_dir(council["id"]) / ".lock"):
+        council = reload_open_council(directory)
         round_id = reject_active(directory, council, arguments.reason)
     print(f"rejected: {round_id}; no rejected result was retained")
 
@@ -1219,6 +1255,7 @@ def command_reject(arguments: argparse.Namespace) -> None:
 def command_rerun(arguments: argparse.Namespace) -> None:
     directory, council = find_council(arguments.name, include_closed=False)
     with lock(PATHS.runtime_dir(council["id"]) / ".lock"):
+        council = reload_open_council(directory)
         if not council.get("active_round"):
             raise CouncilError("council has no active round to rerun")
         old = load_round(directory, council["active_round"])
@@ -1233,6 +1270,7 @@ def command_rerun(arguments: argparse.Namespace) -> None:
 def command_recover(arguments: argparse.Namespace) -> None:
     directory, council = find_council(arguments.name, include_closed=False)
     with lock(PATHS.runtime_dir(council["id"]) / ".lock"):
+        council = reload_open_council(directory)
         if council.get("phase") != "collecting" or not council.get("active_round"):
             raise CouncilError("only an interrupted collecting round can be marked for explicit retry")
         round_value = load_round(directory, council["active_round"])
@@ -1247,6 +1285,7 @@ def command_recover(arguments: argparse.Namespace) -> None:
 def command_retry(arguments: argparse.Namespace) -> None:
     directory, council = find_council(arguments.name, include_closed=False)
     with lock(PATHS.runtime_dir(council["id"]) / ".lock"):
+        council = reload_open_council(directory)
         if council.get("phase") != "interrupted" or not council.get("active_round"):
             raise CouncilError("council has no interrupted round to retry")
         old = load_round(directory, council["active_round"])
@@ -1310,6 +1349,7 @@ def load_close_journal(directory: Path, council: dict[str, Any]) -> tuple[Path, 
 def command_close(arguments: argparse.Namespace) -> None:
     directory, council = find_council(arguments.name, include_closed=False)
     with lock(PATHS.runtime_dir(council["id"]) / ".lock"):
+        council = reload_open_council(directory)
         journal_path, journal = load_close_journal(directory, council)
         pending = [member for member in council["members"] if member["id"] not in journal["closed"]]
         runtimes = [(member, close_preflight(council, member)) for member in pending]
@@ -1337,7 +1377,12 @@ def command_status(arguments: argparse.Namespace) -> None:
         _, council = find_council(arguments.name)
         output = [council]
     else:
-        output = [load_json(path) for path in sorted(PATHS.councils.glob("*/council.json"))]
+        output = []
+        for path in sorted(PATHS.councils.glob("*/council.json")):
+            try:
+                output.append(read_council_record(path))
+            except CouncilError as error:
+                output.append({"id": path.parent.name, "status": "unreadable", "error": str(error)})
     print(json.dumps(output, ensure_ascii=False, indent=2))
 
 

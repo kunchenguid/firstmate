@@ -61,6 +61,8 @@ printf -v command '%q ' \
       if echo mutate > "$3/code"; then echo source-write-bad >> "$2/source-status"; else echo source-write-denied >> "$2/source-status"; fi
       if cat "$4/answer" > "$2/other-answer"; then echo answer-read-bad > "$2/answer-status"; else echo answer-read-denied > "$2/answer-status"; fi
       if /usr/bin/python3 -c "import socket; socket.socket(socket.AF_UNIX)"; then echo unix-socket-bad > "$2/socket-status"; else echo unix-socket-denied > "$2/socket-status"; fi
+      if /usr/bin/python3 -c "import socket; socket.socketpair()"; then echo socketpair-bad > "$2/socketpair-status"; else echo socketpair-denied > "$2/socketpair-status"; fi
+      if /usr/bin/python3 -c "import ctypes, sys; libc = ctypes.CDLL(None, use_errno=True); rc = libc.syscall(425, 4, 0); sys.exit(0 if rc < 0 and ctypes.get_errno() == 13 else 1)"; then echo io-uring-denied > "$2/iouring-status"; else echo io-uring-bad > "$2/iouring-status"; fi
       if /usr/bin/python3 -c "import socket; socket.socket(socket.AF_INET).close()"; then echo tcp-socket-allowed > "$2/tcp-status"; else echo tcp-socket-bad > "$2/tcp-status"; fi
       printf ready > "$2/ready"
     } 2> "$2/denials"
@@ -79,6 +81,8 @@ assert_grep source-read-denied "$LANE/source-status" "real Herdr lane read the s
 assert_grep source-write-denied "$LANE/source-status" "real Herdr lane wrote the source project"
 [ "$(cat "$LANE/answer-status")" = answer-read-denied ] || fail "real Herdr lane read a competing answer"
 [ "$(cat "$LANE/socket-status")" = unix-socket-denied ] || fail "real Herdr lane could open a terminal-control socket channel"
+[ "$(cat "$LANE/socketpair-status")" = socketpair-denied ] || fail "real Herdr lane could open a Unix socketpair channel"
+[ "$(cat "$LANE/iouring-status")" = io-uring-denied ] || fail "real Herdr lane could set up an io_uring socket bypass"
 [ "$(cat "$LANE/tcp-status")" = tcp-socket-allowed ] || fail "real Herdr lane blocked provider-style TCP sockets"
 [ "$(cat "$SOURCE/code")" = source-private ] || fail "real Herdr lane changed source bytes"
 
