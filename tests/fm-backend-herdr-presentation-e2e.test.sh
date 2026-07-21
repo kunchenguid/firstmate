@@ -388,6 +388,12 @@ spawn_task() {  # <id> <home> <project>
     "$ROOT/bin/fm-spawn.sh" "$id" "$project" "sh -c 'sleep 120'" --backend herdr
 }
 
+spawn_secondmate_task() {
+  local id=$1 home=$2
+  FM_GATE_REFUSE_BYPASS=1 FM_SPAWN_NO_GUARD=1 FM_HOME="$HOME_DIR" FM_ROOT_OVERRIDE="$ROOT" \
+    "$ROOT/bin/fm-spawn.sh" "$id" "$home" "sh -c 'sleep 120'" --secondmate --backend herdr
+}
+
 teardown_task() {  # <id> <home>
   local id=$1 home=$2
   FM_GATE_REFUSE_BYPASS=1 FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
@@ -865,6 +871,9 @@ git -C "$SECOND_HOME_A" add .gitignore
 git -C "$SECOND_HOME_B" add .gitignore
 git -C "$SECOND_HOME_A" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm init
 git -C "$SECOND_HOME_B" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm init
+mkdir -p "$SECOND_HOME_A/bin"
+printf '# Firstmate secondmate fixture\n' > "$SECOND_HOME_A/AGENTS.md"
+printf 'Secondmate alpha charter.\n' > "$SECOND_HOME_A/data/charter.md"
 
 # Primary flag only; real inheritance must push presence into both secondmate homes.
 [ -f "$HOME_DIR/config/herdr-presentation-spaces" ] \
@@ -873,6 +882,26 @@ git -C "$SECOND_HOME_B" -c user.name='Firstmate Tests' -c user.email='tests@exam
   || fail "secondmate A unexpectedly had the presentation flag before inheritance"
 [ ! -e "$SECOND_HOME_B/config/herdr-presentation-spaces" ] \
   || fail "secondmate B unexpectedly had the presentation flag before inheritance"
+SECOND_SPAWN_LOG_START=$(log_line_count)
+spawn_secondmate_task alpha "$SECOND_HOME_A" > "$TMP_ROOT/alpha.out" 2> "$TMP_ROOT/alpha.err" \
+  || fail "secondmate alpha spawn failed: $(cat "$TMP_ROOT/alpha.err")"
+[ -f "$SECOND_HOME_A/config/herdr-presentation-spaces" ] \
+  || fail "secondmate spawn did not inherit the presentation flag"
+[ ! -e "$HOME_DIR/state/alpha.herdr-presentation" ] \
+  || fail "secondmate spawn published a presentation journal"
+SECOND_META="$HOME_DIR/state/alpha.meta"
+[ "$(grep '^kind=' "$SECOND_META" | cut -d= -f2-)" = secondmate ] \
+  || fail "secondmate spawn did not record kind=secondmate"
+SECOND_WSID=$(grep '^herdr_workspace_id=' "$SECOND_META" | cut -d= -f2-)
+SECOND_LABEL=$(lab workspace get "$SECOND_WSID" | jq -r '.result.workspace.label')
+[ "$SECOND_LABEL" = 2ndmate-alpha ] \
+  || fail "secondmate spawn did not use its flat parent workspace: $SECOND_LABEL"
+[ -z "$(projection_labels_from_log "$SECOND_SPAWN_LOG_START")" ] \
+  || fail "secondmate spawn created a corner projection workspace"
+if sed -n "$((SECOND_SPAWN_LOG_START + 1)),\$p" "$HERDR_CALL_LOG" \
+  | grep -E $'^(workspace\tmove|session\tlist)' >/dev/null 2>&1; then
+  fail "secondmate spawn attempted presentation ordering"
+fi
 # shellcheck source=bin/fm-config-inherit-lib.sh
 . "$ROOT/bin/fm-config-inherit-lib.sh"
 propagate_inheritable_config "$HOME_DIR/config" "$SECOND_HOME_A/config" \
@@ -984,10 +1013,10 @@ printf '%s' "$CROSS_LIST" | jq -e '
 PCW_LABEL=$(lab workspace get "$(grep '^herdr_workspace_id=' "$HOME_DIR/state/pcw.meta" | cut -d= -f2-)" | jq -r '.result.workspace.label')
 ACW_LABEL=$(lab workspace get "$(grep '^herdr_workspace_id=' "$SECOND_HOME_A/state/acw.meta" | cut -d= -f2-)" | jq -r '.result.workspace.label')
 BCW_LABEL=$(lab workspace get "$(grep '^herdr_workspace_id=' "$SECOND_HOME_B/state/bcw.meta" | cut -d= -f2-)" | jq -r '.result.workspace.label')
-case "$PCW_LABEL" in $'└ pcw · p:'*) ;; *) fail "cross-home primary label wrong: $PCW_LABEL" ;; esac
-case "$ACW_LABEL" in $'└ acw · p:'*) ;; *) fail "cross-home A label wrong: $ACW_LABEL" ;; esac
-case "$BCW_LABEL" in $'└ bcw · p:'*) ;; *) fail "cross-home B label wrong: $BCW_LABEL" ;; esac
-pass "real Herdr lab: concurrent primary/A/B spawns stay session-locked with zero focus drift"
+case "$PCW_LABEL" in $'└ pcw · p:'*|firstmate) ;; *) fail "cross-home primary label wrong: $PCW_LABEL" ;; esac
+case "$ACW_LABEL" in $'└ acw · p:'*|2ndmate-alpha) ;; *) fail "cross-home A label wrong: $ACW_LABEL" ;; esac
+case "$BCW_LABEL" in $'└ bcw · p:'*|2ndmate-bravo) ;; *) fail "cross-home B label wrong: $BCW_LABEL" ;; esac
+pass "real Herdr lab: concurrent primary/A/B spawns preserve parent order and exact focus"
 
 # Hold the shared session lock from a different home and force flat fallback.
 CROSS_LOCK_READY="$TMP_ROOT/cross-lock-ready"
@@ -1052,6 +1081,7 @@ pass "real Herdr lab: legacy projection labels and flat secondmate tabs are left
 for META_HOME_PAIR in \
   "p1:$HOME_DIR" "p2:$HOME_DIR" "pcw:$HOME_DIR" "post-legacy:$HOME_DIR" \
   "a1:$SECOND_HOME_A" "a2:$SECOND_HOME_A" "acw:$SECOND_HOME_A" \
+  "alpha:$HOME_DIR" \
   "b1:$SECOND_HOME_B" "b2:$SECOND_HOME_B" "bcw:$SECOND_HOME_B"
 do
   TASK_ID=${META_HOME_PAIR%%:*}
