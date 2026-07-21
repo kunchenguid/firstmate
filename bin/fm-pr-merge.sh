@@ -32,7 +32,11 @@ if [ "$#" -lt 2 ]; then
 fi
 ID=$1
 RAW_URL=$2
-if ! fm_pr_task_id_valid "$ID" || ! fm_pr_url_parse "$RAW_URL"; then
+# bin/fm-pr-lib.sh parses GitLab merge request URLs so the watcher can follow
+# them, but this merge path addresses only GitHub and Bitbucket Data Center.
+# A GitLab merge request URL is refused rather than sent to the wrong forge.
+if ! fm_pr_task_id_valid "$ID" || ! fm_pr_url_parse "$RAW_URL" \
+  || { [ "$FM_PR_PROVIDER" != github ] && [ "$FM_PR_PROVIDER" != bitbucket-dc ]; }; then
   echo "error: invalid PR merge request" >&2
   exit 2
 fi
@@ -78,8 +82,8 @@ reject_dc_merge_args() {
 }
 
 # Reject provider-unsupported extra args before any state mutation, mirroring the
-# GitHub repo-override guard. fm_pr_url_parse only emits github or bitbucket-dc,
-# so the else branch is the GitHub path.
+# GitHub repo-override guard. The earlier guard refused every other provider, so
+# here PR_PROVIDER is github or bitbucket-dc and the else branch is the GitHub path.
 if [ "$PR_PROVIDER" = bitbucket-dc ]; then
   reject_dc_merge_args "$@" || exit 1
 else
