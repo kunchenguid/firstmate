@@ -7,9 +7,15 @@ set -u
 
 LOCK_SCRIPT="$ROOT/bin/fm-lock.sh"
 TMP_ROOT=$(fm_test_tmproot fm-lock)
+# fm_test_tmproot ran in a command substitution, so its registration and EXIT
+# trap died with that subshell. Re-register here so the trap below can hand
+# teardown to fm_test_cleanup, which owns every registered dir.
+FM_TEST_CLEANUP_DIRS+=("$TMP_ROOT")
 HOME_DIR="$TMP_ROOT/home"
 STATE_DIR="$HOME_DIR/state"
 LOCK_FILE="$STATE_DIR/.lock"
+SENTINEL_LOCK="$TMP_ROOT/sentinel.lock"
+SENTINEL_PID=424242
 FAKEBIN=$(fm_fakebin "$TMP_ROOT")
 BACKGROUND_PIDS=()
 
@@ -21,7 +27,7 @@ cleanup() {
       wait "$pid" 2>/dev/null || true
     fi
   done
-  rm -rf "$TMP_ROOT"
+  fm_test_cleanup
   return 0
 }
 trap cleanup EXIT
@@ -68,6 +74,31 @@ start_sleeper() {
   BACKGROUND_PIDS+=("$STARTED_PID")
 }
 
+# Reap a background child so its pid is genuinely gone: the `kill -0` half of
+# holder_alive must fail, not just the harness-name half start_sleeper exercises.
+# The child must exit on its own - signalling a just-forked job can land before
+# it execs, and the still-bash child then runs this file's inherited EXIT trap.
+start_reaped() {
+  sleep 0 &
+  STARTED_PID=$!
+  wait "$STARTED_PID" 2>/dev/null || true
+}
+
+# Drive one malformed argument shape against a pre-seeded foreign lock and
+# assert the parser refuses it before any lock file byte moves.
+assert_rejected_without_mutation() {
+  local label=$1 out status
+  shift
+  printf '%s\n' "$SENTINEL_PID" > "$LOCK_FILE"
+  cp "$LOCK_FILE" "$SENTINEL_LOCK"
+  out=$(run_lock "$@" 2>&1)
+  status=$?
+  expect_code 2 "$status" "$label"
+  assert_contains "$out" "invalid fm-lock arguments" "$label did not report invalid arguments"
+  assert_contains "$out" "Usage: fm-lock.sh" "$label did not print usage"
+  cmp -s "$SENTINEL_LOCK" "$LOCK_FILE" || fail "$label mutated the session lock file"
+}
+
 test_release_absent_lock() {
   local out status
   rm -f "$LOCK_FILE"
@@ -105,6 +136,22 @@ test_release_stale_lock() {
   assert_contains "$out" "$stale_pid" "stale lock release did not name the cleared pid"
   assert_absent "$LOCK_FILE" "stale lock release left the lock file behind"
   pass "release clears a live non-harness pid as stale"
+}
+
+# The reaped pid is presented to the fake ps as a harness, so the name half of
+# holder_alive passes and only its `kill -0` liveness half can call this stale.
+test_release_dead_pid_lock() {
+  local out status dead_pid
+  start_reaped
+  dead_pid=$STARTED_PID
+  printf '%s\n' "$dead_pid" > "$LOCK_FILE"
+  out=$(FM_TEST_OTHER_PID="$dead_pid" run_lock release 2>&1)
+  status=$?
+  expect_code 0 "$status" "dead-pid lock release"
+  assert_contains "$out" "stale lock" "dead-pid release did not identify the stale lock"
+  assert_contains "$out" "$dead_pid" "dead-pid release did not name the cleared pid"
+  assert_absent "$LOCK_FILE" "dead-pid release left the lock file behind"
+  pass "release clears a reaped dead pid as stale"
 }
 
 test_release_refuses_live_other() {
@@ -153,9 +200,20 @@ test_unknown_subcommand_rejected() {
   pass "unknown subcommands fail loudly without acquiring the lock"
 }
 
+test_invalid_argument_shapes_rejected() {
+  assert_rejected_without_mutation "status with a stray flag" status --force
+  assert_rejected_without_mutation "release with a misspelled flag" release --frce
+  assert_rejected_without_mutation "flag before the subcommand" --force release
+  assert_rejected_without_mutation "too many arguments" release --force extra
+  rm -f "$LOCK_FILE"
+  pass "invalid argument shapes exit 2 with usage and leave the lock untouched"
+}
+
 test_release_absent_lock
 test_release_own_lock
 test_release_stale_lock
+test_release_dead_pid_lock
 test_release_refuses_live_other
 test_force_release_live_other
 test_unknown_subcommand_rejected
+test_invalid_argument_shapes_rejected
