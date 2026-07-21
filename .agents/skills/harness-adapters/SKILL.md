@@ -137,6 +137,7 @@ After every spawn, peek the pane within about 20 seconds.
 On the herdr backend, `fm-spawn` automatically handles the known trust and bypass-permissions dialogs through `fm_backend_herdr_handle_startup_dialog` in `bin/backends/herdr.sh`.
 The bypass warning starts on destructive `No, exit`, so the handler navigates to `Yes, I accept`, verifies that the cursor actually moved, and only then sends Enter.
 Every key is followed by pane readback, retries are bounded, and an unknown or unreadable dialog fails the spawn instead of guessing.
+Dialog-shaped text alone is never trusted: the handler corroborates with herdr's `agent get`, so a brief or transcript that merely quotes dialog wording sends no keys once the agent reports working/idle/done.
 On other backends, if such a dialog is showing, accept it from an active firstmate session using `FM_HOME=<this-firstmate-home> bin/fm-send.sh <window> --key Enter`, or the choice the dialog requires, unless `FM_HOME` is already set to the active firstmate home; verify the brief started processing.
 
 Claude renders a predicted-next-prompt suggestion as dim/faint text inside an otherwise-empty composer after a turn completes.
