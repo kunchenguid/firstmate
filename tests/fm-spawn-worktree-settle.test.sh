@@ -41,6 +41,7 @@ set -u
 }
 case "$*" in
   *"#{pane_current_path}"*)
+    [ -e "${FM_FAKE_ENDPOINT_ALIVE:?}" ] || exit 1
     countfile="${FM_FAKE_PANE_COUNTFILE:?FM_FAKE_PANE_COUNTFILE unset}"
     n=0
     [ -f "$countfile" ] && n=$(cat "$countfile")
@@ -67,12 +68,35 @@ case "$*" in
     fi
     exit 0
     ;;
+  *"#{pane_current_command}"*)
+    [ -e "${FM_FAKE_ENDPOINT_ALIVE:?}" ] || exit 1
+    printf '%s\n' "${FM_FAKE_FOREGROUND_COMMAND:-codex}"
+    exit 0
+    ;;
+  *"#{pane_id}"*)
+    [ -e "${FM_FAKE_ENDPOINT_ALIVE:?}" ]
+    exit
+    ;;
 esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
   list-windows) exit 0 ;;
-  has-session|new-session|new-window|kill-window) exit 0 ;;
+  has-session|new-session) exit 0 ;;
+  new-window) : > "${FM_FAKE_ENDPOINT_ALIVE:?}"; exit 0 ;;
+  kill-window)
+    [ "${FM_FAKE_KILL_STICKS:-0}" = 1 ] || rm -f -- "${FM_FAKE_ENDPOINT_ALIVE:?}"
+    exit 0
+    ;;
   send-keys)
+    if [ "${FM_FAKE_SEND_FAIL:-}" = export ] && case "$*" in *"export GOTMPDIR="*) true ;; *) false ;; esac; then
+      exit 1
+    fi
+    if [ "${FM_FAKE_SEND_FAIL:-}" = literal ] && case "$*" in *"${FM_FAKE_LAUNCH_PROOF:-/nonexistent}"*) true ;; *) false ;; esac; then
+      exit 1
+    fi
+    if [ "${FM_FAKE_SEND_FAIL:-}" = enter ] && [ -e "${FM_FAKE_LAUNCH_PENDING:-/nonexistent}" ] && case "$*" in *Enter*) true ;; *) false ;; esac; then
+      exit 1
+    fi
     if [ -n "${FM_FAKE_LAUNCH_PROOF:-}" ] && case "$*" in *"$FM_FAKE_LAUNCH_PROOF"*) true ;; *) false ;; esac; then
       : > "${FM_FAKE_LAUNCH_PENDING:?}"
       anchor="cd -- '${FM_FAKE_PANE_PATH}'"
@@ -127,11 +151,13 @@ EOF
 }
 
 run_settle_spawn() {
-  local id=$1 mode=${2:-settled} force_wrong=${3:-0} tmux_log launch_pending launch_seen launch_anchored
+  local id=$1 mode=${2:-settled} force_wrong=${3:-0} send_fail=${4:-} kill_sticks=${5:-0}
+  local tmux_log launch_pending launch_seen launch_anchored endpoint_alive
   tmux_log="$HOME_DIR/$id.tmux.log"
   launch_pending="$HOME_DIR/$id.launch-pending"
   launch_seen="$HOME_DIR/$id.launch-seen"
   launch_anchored="$HOME_DIR/$id.launch-anchored"
+  endpoint_alive="$HOME_DIR/$id.endpoint-alive"
   : > "$tmux_log"
   FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
     FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
@@ -143,7 +169,9 @@ run_settle_spawn() {
     FM_FAKE_TRANSIENT_READS=2 FM_FAKE_FORCE_WRONG_AFTER_LAUNCH="$force_wrong" \
     FM_FAKE_TMUX_LOG="$tmux_log" FM_FAKE_LAUNCH_PROOF="$STATE_REAL/$id.launch-cwd" \
     FM_FAKE_LAUNCH_PENDING="$launch_pending" FM_FAKE_LAUNCH_SEEN="$launch_seen" \
-    FM_FAKE_LAUNCH_ANCHORED="$launch_anchored" FM_SPAWN_LAUNCH_CWD_POLLS=4 FM_SPAWN_LAUNCH_CWD_INTERVAL=0 \
+    FM_FAKE_LAUNCH_ANCHORED="$launch_anchored" FM_FAKE_ENDPOINT_ALIVE="$endpoint_alive" \
+    FM_FAKE_SEND_FAIL="$send_fail" FM_FAKE_KILL_STICKS="$kill_sticks" \
+    FM_SPAWN_LAUNCH_CWD_POLLS=4 FM_SPAWN_LAUNCH_CWD_INTERVAL=0 \
     PATH="$FAKEBIN_DIR:$PATH" \
     "$SPAWN" "$id" "$PROJ_DIR" 2>&1
 }
@@ -219,7 +247,7 @@ test_post_launch_wrong_cwd_stops_endpoint_without_metadata() {
   out=$(run_settle_spawn "$id" transient 1)
   status=$?
   [ "$status" -ne 0 ] || fail "spawn must fail when the launched foreground cwd resolves to the primary checkout"
-  assert_contains "$out" "launch cwd verification failed" \
+  assert_contains "$out" "launch verification failed" \
     "post-launch wrong-cwd refusal was not loud"
   assert_contains "$out" "metadata was not published" \
     "post-launch wrong-cwd refusal did not state the metadata boundary"
@@ -230,9 +258,78 @@ test_post_launch_wrong_cwd_stops_endpoint_without_metadata() {
   pass "a post-launch primary-checkout cwd stops the endpoint and publishes no metadata"
 }
 
+test_post_allocation_send_failures_stop_endpoint_without_metadata() {
+  local send_stage rec id out status
+  for send_stage in export literal enter; do
+    id="settle-send-fail-$send_stage"
+    rec=$(make_settle_case "send-fail-$send_stage" "$id" 0)
+    read_settle_record "$rec"
+    out=$(run_settle_spawn "$id" settled 0 "$send_stage")
+    status=$?
+    [ "$status" -ne 0 ] || fail "spawn must fail when the $send_stage send fails"
+    assert_contains "$out" "launch verification failed" "$send_stage send failure was not routed through launch cleanup"
+    assert_contains "$out" "The exact endpoint was stopped" "$send_stage send failure did not verify endpoint closure"
+    assert_absent "$HOME_DIR/state/$id.meta" "$send_stage send failure published metadata"
+    assert_absent "$HOME_DIR/$id.endpoint-alive" "$send_stage send failure left the endpoint alive"
+  done
+  pass "every post-allocation send failure stops the exact endpoint without metadata"
+}
+
+test_cleanup_failure_reports_live_endpoint_explicitly() {
+  local rec id out status
+  id=settle-cleanup-sticks-z5
+  rec=$(make_settle_case cleanup-sticks "$id" 0)
+  read_settle_record "$rec"
+  out=$(run_settle_spawn "$id" settled 0 literal 1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn must fail when launch send and endpoint cleanup fail"
+  assert_contains "$out" "is still present after three cleanup attempts" \
+    "cleanup failure did not report the still-live exact endpoint"
+  assert_present "$HOME_DIR/$id.endpoint-alive" "cleanup failure fixture did not retain the endpoint"
+  assert_absent "$HOME_DIR/state/$id.meta" "cleanup failure published metadata"
+  pass "an unclosed endpoint is reported explicitly after bounded cleanup retries"
+}
+
+test_bare_shell_cwd_never_publishes_metadata() {
+  local rec id out status
+  id=settle-bare-shell-z6
+  rec=$(make_settle_case bare-shell "$id" 0)
+  read_settle_record "$rec"
+  out=$(FM_FAKE_FOREGROUND_COMMAND=zsh run_settle_spawn "$id")
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn must reject a bare shell at the expected cwd"
+  assert_contains "$out" "agent=dead" "bare-shell failure did not include the tmux liveness verdict"
+  assert_absent "$HOME_DIR/state/$id.meta" "bare-shell cwd check published metadata"
+  assert_absent "$HOME_DIR/$id.endpoint-alive" "bare-shell cwd check left the endpoint alive"
+  pass "tmux cwd verification requires a live verified harness process"
+}
+
+test_metadata_publication_is_atomic_and_preserves_worktree() {
+  local rec id out status
+  id=settle-meta-fail-z7
+  rec=$(make_settle_case meta-fail "$id" 0)
+  read_settle_record "$rec"
+  mkdir -p "$HOME_DIR/state/$id.meta"
+  out=$(run_settle_spawn "$id")
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn must fail when metadata cannot be published"
+  assert_contains "$out" "metadata could not be published atomically" \
+    "metadata failure did not use the preserving launch cleanup path"
+  assert_absent "$HOME_DIR/$id.endpoint-alive" "metadata failure left the endpoint alive"
+  assert_present "$WT_REAL/.git" "metadata failure did not preserve the allocated worktree"
+  find "$HOME_DIR/state" -maxdepth 1 -name ".$id.meta.*" -print -quit | grep . >/dev/null \
+    && fail "metadata failure left a temporary publication file"
+  [ -d "$HOME_DIR/state/$id.meta" ] || fail "metadata failure replaced the pre-existing destination"
+  pass "metadata publication is atomic and failure preserves the worktree"
+}
+
 test_single_stale_first_read_is_not_accepted
 test_already_settled_pane_costs_one_confirm_sleep
 test_transient_foreground_cwd_cannot_mask_primary_launch
 test_post_launch_wrong_cwd_stops_endpoint_without_metadata
+test_post_allocation_send_failures_stop_endpoint_without_metadata
+test_cleanup_failure_reports_live_endpoint_explicitly
+test_bare_shell_cwd_never_publishes_metadata
+test_metadata_publication_is_atomic_and_preserves_worktree
 
 echo "# all fm-spawn-worktree-settle tests passed"

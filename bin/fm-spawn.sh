@@ -237,6 +237,7 @@ SPAWN_TASK_LOCK_HELD=0
 CONFIG_INHERIT_LOCK=
 CONFIG_INHERIT_LOCK_HELD=0
 LAUNCH_CWD_PROOF=
+META_TMP=
 
 parse_orca_worktree_result() {
   local raw=$1 rest
@@ -259,6 +260,9 @@ spawn_abort_cleanup() {
   local status=$?
   if [ -n "${LAUNCH_CWD_PROOF:-}" ]; then
     rm -f -- "$LAUNCH_CWD_PROOF" 2>/dev/null || true
+  fi
+  if [ -n "${META_TMP:-}" ]; then
+    rm -f -- "$META_TMP" 2>/dev/null || true
   fi
   if [ "$HERDR_PROJECTION_ABORT_CLEANUP" = 1 ] \
      && [ "$HERDR_PRESENTATION_ORDER_LOCK_HELD" != 1 ]; then
@@ -1251,49 +1255,64 @@ sq_launch_cwd_proof=$(shell_quote "$LAUNCH_CWD_PROOF")
 # the harness, so the harness can start only after inheriting the validated cwd.
 # shell_quote preserves spaces, newlines, and single quotes in supported paths.
 LAUNCH="cd -- $sq_wt && [ \"\$(pwd -P)\" = $sq_wt ] && : > $sq_launch_cwd_proof && $LAUNCH"
-# Export GOTMPDIR into the crewmate's pane shell so the agent and every child
-# process (go build, go test, ...) inherit it. Sent before the launch command so
-# the env is set when the agent starts; the brief sleep lets the export land.
-spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp"
-sleep 0.3
-spawn_send_literal "$T" "$LAUNCH"
-sleep 0.3
-if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
+spawn_stop_unverified_launch() {
+  local attempt
+  [ "$BACKEND" != orca ] || ORCA_ABORT_CLEANUP=0
   HERDR_PROJECTION_ABORT_CLEANUP=0
   spawn_herdr_presentation_order_lock_release
-fi
-spawn_stop_unverified_launch() {
-  # Launch verification failures preserve every allocated worktree. Orca's
-  # generic abort trap normally removes an unpublished allocation, so disarm
-  # only that worktree cleanup before closing the failed terminal endpoint.
-  [ "$BACKEND" != orca ] || ORCA_ABORT_CLEANUP=0
-  case "$BACKEND" in
-    zellij) fm_backend_zellij_kill "$T" "$ZELLIJ_TAB_ID" "$W" || true ;;
-    cmux) fm_backend_cmux_kill "$T" "" "$W" || true ;;
-    *) fm_backend_kill "$BACKEND" "$T" || true ;;
-  esac
+  attempt=0
+  while [ "$attempt" -lt 3 ]; do
+    case "$BACKEND" in
+      zellij) fm_backend_zellij_kill "$T" "$ZELLIJ_TAB_ID" "$W" || true ;;
+      cmux) fm_backend_cmux_kill "$T" "" "$W" || true ;;
+      *) fm_backend_kill "$BACKEND" "$T" || true ;;
+    esac
+    if ! fm_backend_target_exists "$BACKEND" "$T" "$W"; then
+      return 0
+    fi
+    attempt=$((attempt + 1))
+    [ "$attempt" -ge 3 ] || sleep 0.1
+  done
+  return 1
 }
 
-spawn_launch_cwd_failure() {  # <reason> [observed]
-  local reason=$1 observed=${2:-unreadable}
+spawn_launch_failure() {  # <reason> [observed]
+  local reason=$1 observed=${2:-unreadable} cleanup_result
   rm -f -- "$LAUNCH_CWD_PROOF" 2>/dev/null || true
   LAUNCH_CWD_PROOF=
-  spawn_stop_unverified_launch
-  echo "error: launch cwd verification failed for $ID: $reason (expected '$WT'; observed '$observed'). The launched endpoint was stopped, the worktree was preserved, and metadata was not published." >&2
+  if spawn_stop_unverified_launch; then
+    cleanup_result="The exact endpoint was stopped"
+  else
+    cleanup_result="The exact endpoint '$T' is still present after three cleanup attempts"
+  fi
+  echo "error: launch verification failed for $ID: $reason (expected '$WT'; observed '$observed'). $cleanup_result, the worktree was preserved, and metadata was not published." >&2
   exit 1
 }
 
 FM_SPAWN_LAUNCH_CWD_POLLS=${FM_SPAWN_LAUNCH_CWD_POLLS:-80}
 FM_SPAWN_LAUNCH_CWD_INTERVAL=${FM_SPAWN_LAUNCH_CWD_INTERVAL:-0.25}
 case "$FM_SPAWN_LAUNCH_CWD_POLLS" in
-  ''|*[!0-9]*|0) spawn_launch_cwd_failure "FM_SPAWN_LAUNCH_CWD_POLLS must be a positive integer" ;;
+  ''|*[!0-9]*|0) spawn_launch_failure "FM_SPAWN_LAUNCH_CWD_POLLS must be a positive integer" ;;
 esac
 if ! [[ "$FM_SPAWN_LAUNCH_CWD_INTERVAL" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
-  spawn_launch_cwd_failure "FM_SPAWN_LAUNCH_CWD_INTERVAL must be a non-negative number"
+  spawn_launch_failure "FM_SPAWN_LAUNCH_CWD_INTERVAL must be a non-negative number"
+fi
+
+if ! spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp"; then
+  spawn_launch_failure "the task-temp export could not be sent"
+fi
+sleep 0.3
+if ! spawn_send_literal "$T" "$LAUNCH"; then
+  spawn_launch_failure "the launch command could not be sent"
+fi
+sleep 0.3
+if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
+  HERDR_PROJECTION_ABORT_CLEANUP=0
+  spawn_herdr_presentation_order_lock_release
 fi
 
 if ! spawn_send_key "$T" Enter; then
-  spawn_launch_cwd_failure "the launch command could not be submitted"
+  spawn_launch_failure "the launch command could not be submitted"
 fi
 
 launch_proved=0
@@ -1305,7 +1324,7 @@ for _ in $(seq 1 "$FM_SPAWN_LAUNCH_CWD_POLLS"); do
   sleep "$FM_SPAWN_LAUNCH_CWD_INTERVAL"
 done
 [ "$launch_proved" -eq 1 ] \
-  || spawn_launch_cwd_failure "the launch-side physical-cwd assertion never completed"
+  || spawn_launch_failure "the launch-side physical-cwd assertion never completed"
 
 spawn_verify_passive_launch_cwd() {
   local stable=0 p p_real agent_state=not-applicable
@@ -1320,7 +1339,18 @@ spawn_verify_passive_launch_cwd() {
     p=$(spawn_current_path "$T" || true)
     p_real=$(real_path_or_raw "$p")
     if [ "$p_real" = "$WT" ]; then
-      if [ "$BACKEND" = herdr ]; then
+      if [ "$BACKEND" = tmux ]; then
+        case "$HARNESS" in
+          claude|codex|opencode|grok)
+            agent_state=$(fm_backend_tmux_agent_alive "$T")
+            [ "$agent_state" = alive ] || {
+              stable=0
+              sleep "$FM_SPAWN_LAUNCH_CWD_INTERVAL"
+              continue
+            }
+            ;;
+        esac
+      elif [ "$BACKEND" = herdr ]; then
         case "$HARNESS" in
           claude|codex|opencode|pi|grok)
             agent_state=$(fm_backend_herdr_pane_agent_state "$HERDR_SES" "$HERDR_PANE_ID")
@@ -1341,19 +1371,17 @@ spawn_verify_passive_launch_cwd() {
   done
   SPAWN_OBSERVED_LAUNCH_CWD=${p_real:-unreadable}
   [ "$agent_state" = not-applicable ] \
-    || SPAWN_OBSERVED_LAUNCH_CWD="$SPAWN_OBSERVED_LAUNCH_CWD; herdr-agent=$agent_state"
+    || SPAWN_OBSERVED_LAUNCH_CWD="$SPAWN_OBSERVED_LAUNCH_CWD; agent=$agent_state"
   return 1
 }
 
 SPAWN_OBSERVED_LAUNCH_CWD=unreadable
 spawn_verify_passive_launch_cwd \
-  || spawn_launch_cwd_failure "the post-launch foreground process did not stay in the validated worktree" "$SPAWN_OBSERVED_LAUNCH_CWD"
+  || spawn_launch_failure "the post-launch foreground process did not stay in the validated worktree" "$SPAWN_OBSERVED_LAUNCH_CWD"
 rm -f -- "$LAUNCH_CWD_PROOF"
 LAUNCH_CWD_PROOF=
 
-# Metadata is a success publication, never a launch intent. Keep it after both
-# the launch-side proof and every applicable passive foreground-cwd check.
-{
+spawn_render_metadata() {
   echo "window=$META_WINDOW"
   echo "worktree=$WT"
   echo "project=$PROJ_ABS"
@@ -1391,7 +1419,33 @@ LAUNCH_CWD_PROOF=
     echo "home=$PROJ_ABS"
     echo "projects=$SECONDMATE_PROJECTS"
   fi
-} > "$STATE/$ID.meta"
+}
+
+spawn_publish_metadata() {
+  local meta=$STATE/$ID.meta
+  META_TMP=$(mktemp "$STATE/.$ID.meta.XXXXXXXXXXXX") || return 1
+  if ! spawn_render_metadata > "$META_TMP"; then
+    rm -f -- "$META_TMP" 2>/dev/null || true
+    META_TMP=
+    return 1
+  fi
+  if [ -e "$meta" ] || [ -L "$meta" ]; then
+    rm -f -- "$META_TMP" 2>/dev/null || true
+    META_TMP=
+    return 1
+  fi
+  if ! ln "$META_TMP" "$meta" 2>/dev/null; then
+    rm -f -- "$META_TMP" 2>/dev/null || true
+    META_TMP=
+    return 1
+  fi
+  rm -f -- "$META_TMP" 2>/dev/null || true
+  META_TMP=
+}
+
+if ! spawn_publish_metadata; then
+  spawn_launch_failure "metadata could not be published atomically"
+fi
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
 
 if [ "$KIND" = secondmate ]; then
