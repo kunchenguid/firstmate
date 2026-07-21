@@ -826,9 +826,9 @@ assert_nonpaused_working_surfaces_terminal_transition_once() {  # <label> <crew-
 }
 
 test_nonpaused_working_surfaces_terminal_transitions_once() {
-  assert_nonpaused_working_surfaces_terminal_transition_once done 'state: done · source: run-step · checks green' no
+  assert_nonpaused_working_surfaces_terminal_transition_once 'done' 'state: done · source: run-step · checks green' no
   assert_nonpaused_working_surfaces_terminal_transition_once failed 'state: failed · source: run-step · validation failed' no
-  assert_nonpaused_working_surfaces_terminal_transition_once done 'state: done · source: run-step · checks green' yes
+  assert_nonpaused_working_surfaces_terminal_transition_once 'done' 'state: done · source: run-step · checks green' yes
   assert_nonpaused_working_surfaces_terminal_transition_once failed 'state: failed · source: run-step · validation failed' yes
   pass "non-paused working provenance reclassifies done and failed with sparse working or captain-relevant status"
 }
@@ -875,7 +875,7 @@ assert_same_hash_busy_run_surfaces_terminal_once() {  # <label> <crew-state>
 }
 
 test_same_hash_busy_runs_surface_terminal_transitions_once() {
-  assert_same_hash_busy_run_surfaces_terminal_once done 'state: done · source: run-step · checks green'
+  assert_same_hash_busy_run_surfaces_terminal_once 'done' 'state: done · source: run-step · checks green'
   assert_same_hash_busy_run_surfaces_terminal_once failed 'state: failed · source: run-step · validation failed'
   pass "same-hash busy runs surface done and failed transitions exactly once"
 }
