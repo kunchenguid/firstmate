@@ -93,6 +93,25 @@ case "${1:-}" in
 esac
 exit 0
 SH
+  cat > "$fb/gh" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-} ${2:-}" in
+  "pr view")
+    [ -n "${FM_FAKE_GH_PR_HEAD:-}" ] || exit 1
+    printf 'OPEN\t%s\n' "$FM_FAKE_GH_PR_HEAD"
+    ;;
+  "api --paginate")
+    case "${3:-}" in
+      */status\?*) printf '%s\n' "${FM_FAKE_GH_STATUS_ROWS:-}" ;;
+      */check-runs\?*) printf '%s\n' "${FM_FAKE_GH_CHECK_ROWS:-}" ;;
+      */deployments\?*) printf '%s\n' "${FM_FAKE_GH_DEPLOYMENT_ROWS:-}" ;;
+      *) exit 1 ;;
+    esac
+    ;;
+  *) exit 1 ;;
+esac
+SH
   cat > "$fb/herdr" <<'SH'
 #!/usr/bin/env bash
 set -u
@@ -122,7 +141,7 @@ case "${1:-}" in
 esac
 exit 0
 SH
-  chmod +x "$fb/no-mistakes" "$fb/tmux" "$fb/herdr"
+  chmod +x "$fb/no-mistakes" "$fb/tmux" "$fb/gh" "$fb/herdr"
   printf '%s\n' "$fb"
 }
 
@@ -162,8 +181,13 @@ reset_fakes() {
   FM_FAKE_HERDR_MISSING=0
   FM_FAKE_HERDR_AGENT_STATUS=""
   FM_FAKE_CI_LOGS=""
+  FM_FAKE_GH_PR_HEAD=""
+  FM_FAKE_GH_STATUS_ROWS=""
+  FM_FAKE_GH_CHECK_ROWS=""
+  FM_FAKE_GH_DEPLOYMENT_ROWS=""
   export FM_FAKE_AXI_STATUS FM_FAKE_AXI_STATUS_RUN FM_FAKE_RUNS_LIST FM_FAKE_BUSY FM_FAKE_TMUX_MISSING
   export FM_FAKE_HERDR_BUSY FM_FAKE_HERDR_MISSING FM_FAKE_HERDR_AGENT_STATUS FM_FAKE_CI_LOGS
+  export FM_FAKE_GH_PR_HEAD FM_FAKE_GH_STATUS_ROWS FM_FAKE_GH_CHECK_ROWS FM_FAKE_GH_DEPLOYMENT_ROWS
 }
 
 # --- run-object fixtures (TOON, as `no-mistakes axi status` emits) -----------
@@ -331,6 +355,24 @@ run:
     review,completed,0,0
     push,completed,0,0
     ci,fixing,0,0
+EOF
+}
+
+run_ci_failed() {  # <branch>
+  cat <<EOF
+run:
+  id: "01RUN"
+  branch: $1
+  status: completed
+  head: "abc1234"
+  pr: "https://github.com/o/r/pull/2"
+  findings: none
+  steps[4]{step,status,findings,duration_ms}:
+    intent,completed,0,0
+    review,completed,0,0
+    push,completed,0,0
+    ci,failed,0,0
+outcome: failed
 EOF
 }
 
@@ -556,6 +598,51 @@ test_ci_monitoring_still_waiting_stays_working() {
   assert_contains "$out" "state: working" "ci step still red -> working"
   assert_not_contains "$out" "checks green" "no green marker present -> no checks-green detail"
   pass "ci-monitoring run with checks not yet green stays working"
+}
+
+# Firstmate independently recognizes the exact GitHub representation observed
+# on stacker-scan PR 657 even while no-mistakes' unmodified ci monitor still
+# reports the Vercel commit status as running or failed.
+test_ci_monitoring_only_vercel_preview_surfaces_done() {
+  reset_fakes
+  local d head short out
+  d=$(new_case ci-vercel-preview)
+  make_repo_on_branch "$d/wt" fm/feat-civercel
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-civercel.meta" "window=fm:fm-feat-civercel" "worktree=$d/wt" "kind=ship"
+  head=$(git -C "$d/wt" rev-parse HEAD)
+  short=$(printf '%s' "$head" | cut -c1-7)
+  FM_FAKE_AXI_STATUS=$(run_ci_monitoring fm/feat-civercel | sed "s/abc1234/$short/")
+  FM_FAKE_CI_LOGS="CI checks running, waiting for results..."
+  FM_FAKE_GH_PR_HEAD=$head
+  FM_FAKE_GH_STATUS_ROWS=$'Vercel\tpending'
+  FM_FAKE_GH_DEPLOYMENT_ROWS="$head"$'\tPreview\tfalse\tvercel[bot]'
+  out=$(run_crew_state "$d" feat-civercel)
+  assert_contains "$out" "state: done" "only Vercel Preview -> done"
+  assert_contains "$out" "source: run-step" "Vercel Preview readiness remains run-step sourced"
+  assert_contains "$out" "Vercel Preview deployments do not block" "detail explains the readiness exception"
+  pass "ci monitoring recognizes an exact-head Vercel Preview as non-blocking"
+}
+
+test_ci_failed_only_vercel_preview_surfaces_done() {
+  reset_fakes
+  local d head short out
+  d=$(new_case ci-vercel-preview-failed)
+  make_repo_on_branch "$d/wt" fm/feat-civercelfailed
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-civercelfailed.meta" "window=fm:fm-feat-civercelfailed" "worktree=$d/wt" "kind=ship"
+  head=$(git -C "$d/wt" rev-parse HEAD)
+  short=$(printf '%s' "$head" | cut -c1-7)
+  FM_FAKE_AXI_STATUS=$(run_ci_failed fm/feat-civercelfailed | sed "s/abc1234/$short/")
+  FM_FAKE_GH_PR_HEAD=$head
+  FM_FAKE_GH_STATUS_ROWS=$'Vercel\tfailure'
+  FM_FAKE_GH_DEPLOYMENT_ROWS="$head"$'\tPreview\tfalse\tvercel[bot]'
+  out=$(run_crew_state "$d" feat-civercelfailed)
+  assert_contains "$out" "state: done" "failed Vercel Preview alone -> done"
+  assert_contains "$out" "failed Vercel Preview deployment does not block" \
+    "failed-preview detail explains the narrow override"
+  assert_not_contains "$out" "state: failed" "failed Preview must not keep the PR failed"
+  pass "a ci failure caused only by Vercel Preview is non-blocking"
 }
 
 # A later merge-conflict auto-fix round after an earlier green reading must
@@ -1245,6 +1332,8 @@ test_ci_monitoring_no_checks_terminal_surfaces_done
 test_ci_monitoring_green_then_rearm_stays_working
 test_ci_monitoring_no_checks_yet_stays_working
 test_ci_monitoring_still_waiting_stays_working
+test_ci_monitoring_only_vercel_preview_surfaces_done
+test_ci_failed_only_vercel_preview_surfaces_done
 test_ci_monitoring_green_then_new_issue_stays_working
 test_ci_ready_done_log_relapse_stays_working
 test_ci_fixing_after_green_stays_working

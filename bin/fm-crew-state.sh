@@ -33,8 +33,10 @@
 #      passed/checks-passed -> done, failed/cancelled -> failed. EXCEPT: while
 #      the active step is ci, `axi status` alone cannot tell "still waiting on
 #      checks" from "checks green, waiting on merge" (see nm_ci_checks_state) -
-#      a ci-step log-tail check overrides working -> done once checks read
-#      green, so a green PR is never silently read as still-validating.
+#      a ci-step log-tail check or bin/fm-pr-ready.sh's exact-head GitHub read
+#      overrides working -> done once checks read ready, so a PR whose only
+#      non-success context is a classified Vercel Preview deployment is not
+#      silently read as still-validating.
 #   3. Reconcile the status log: if its last line says needs-decision/blocked but
 #      the run-step shows the run moved on, the log is deterministically stale and
 #      is flagged superseded. A genuinely parked run plus a needs-decision log
@@ -62,6 +64,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-classify-lib.sh
 . "$SCRIPT_DIR/fm-classify-lib.sh"
+# shellcheck source=bin/fm-pr-lib.sh
+. "$SCRIPT_DIR/fm-pr-lib.sh"
 
 ID=${1:-}
 [ -n "$ID" ] || { echo "usage: fm-crew-state.sh <id>" >&2; exit 2; }
@@ -294,7 +298,7 @@ log_reports_ci_ready() {
 
 nm_ci_step_status() {
   local row rest
-  row=$(printf '%s\n' "$RUN_OUT" | grep -E '^[[:space:]]*ci,[[:space:]]*"?(running|fixing)"?[[:space:]]*,' | head -1)
+  row=$(printf '%s\n' "$RUN_OUT" | grep -E '^[[:space:]]*ci,[[:space:]]*"?[A-Za-z_-]+"?[[:space:]]*,' | head -1)
   [ -n "$row" ] || return 0
   row=$(trim "$row")
   rest=${row#*,}
@@ -346,6 +350,25 @@ nm_ci_checks_state() {
     *"no CI checks reported yet"*|*"checks failed"*|*"issues detected"*|*"CI checks running"*|*"base branch advanced"*"re-arming CI monitor timeout"*) printf 'not-ready' ;;
     *) printf 'unknown' ;;
   esac
+}
+
+# no-mistakes intentionally remains unmodified and may keep monitoring a
+# non-success Vercel status.  fm-pr-ready.sh is the single owner of the narrow
+# Preview-deployment exception and every ordinary GitHub readiness rule.  Bind
+# that read to both this run's recorded head prefix and the worktree's exact
+# current head before allowing it to override the coarse ci/log state.
+nm_github_pr_ready() {
+  local pr_url run_head expected_head
+  pr_url=$(strip_quotes "$(nm_field pr)")
+  run_head=$(strip_quotes "$(nm_field head)")
+  [ -n "$pr_url" ] && [[ "$run_head" =~ ^[0-9a-f]{7,64}$ ]] || return 1
+  expected_head=$(git -C "$WT" rev-parse HEAD 2>/dev/null) || return 1
+  fm_pr_head_valid "$expected_head" || return 1
+  case "$expected_head" in
+    "$run_head"*) ;;
+    *) return 1 ;;
+  esac
+  "$SCRIPT_DIR/fm-pr-ready.sh" "$pr_url" "$expected_head" >/dev/null 2>&1
 }
 # Coarse fallback for cross-branch attribution. `no-mistakes axi status` (bare)
 # reports the active-or-most-recent run for the CURRENT branch when one
@@ -550,12 +573,28 @@ if [ "$HAVE_RUN" = 1 ]; then
             if [ "$CI_LOG_STATE" = green ]; then
               RUN_STATE="done"
               RUN_DETAIL="checks green: PR ready for review (still monitoring for merge/close)"
+            elif nm_github_pr_ready; then
+              CI_LOG_STATE=green
+              RUN_STATE="done"
+              RUN_DETAIL="checks ready: Vercel Preview deployments do not block review"
             fi
             ;;
           fixing)
             CI_LOG_STATE=not-ready
             ;;
         esac
+      fi
+    fi
+
+    # A failed no-mistakes outcome is overridden only when its own ci row
+    # failed and an exact-head GitHub read proves every ordinary context ready.
+    # Failures from review, test, lint, push, or an unclassified deployment keep
+    # their existing terminal result.
+    if [ "$RUN_STATE" = failed ]; then
+      CI_STEP_STATUS=$(nm_ci_step_status)
+      if [ "$CI_STEP_STATUS" = failed ] && nm_github_pr_ready; then
+        RUN_STATE="done"
+        RUN_DETAIL="checks ready: failed Vercel Preview deployment does not block review"
       fi
     fi
   fi
