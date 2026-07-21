@@ -515,6 +515,19 @@ treehouse_return_is_index_lock_error() {
   printf '%s\n' "$text" | grep -Eq "Unable to create ['\"].*index\\.lock['\"]: File exists"
 }
 
+# A treehouse return that failed inside its own `git checkout` step, but which a
+# second return clears, is the same class of transient as the index.lock case:
+# treehouse terminates the visible worktree processes, then immediately checks
+# out the pool base, but the backend can respawn a shell (with a git-aware
+# prompt) into the just-vacated worktree in that window, racing the checkout.
+# Re-terminating on retry catches the respawn. (verified: fm-teardown herdr e2e
+# smokes, where the first return's checkout races the pane's respawned shell.)
+treehouse_return_is_retryable_transient() {
+  local text=$1
+  treehouse_return_is_index_lock_error "$text" && return 0
+  printf '%s\n' "$text" | grep -Eq "failed to return worktree: git checkout"
+}
+
 # Absolute path to the git index lock for a worktree/repo dir, or empty when it
 # cannot be resolved (dir missing or not a git worktree at all).
 worktree_git_lock_path() {
@@ -581,7 +594,7 @@ teardown_treehouse_return() {
   fi
   [ -n "$out" ] && printf '%s\n' "$out" >&2
 
-  if ! treehouse_return_is_index_lock_error "$out"; then
+  if ! treehouse_return_is_retryable_transient "$out"; then
     return 1
   fi
 
@@ -597,18 +610,18 @@ teardown_treehouse_return() {
 
   while [ "$attempt" -lt "$max_retries" ]; do
     attempt=$(( attempt + 1 ))
-    echo "teardown: $label return failed with transient git lock ($lock_desc); waiting ${TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS}s and retrying ($attempt/${max_retries})" >&2
+    echo "teardown: $label return failed with a transient condition ($lock_desc / process race); waiting ${TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS}s and retrying ($attempt/${max_retries})" >&2
     sleep "$TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS"
 
     if out=$( ( cd "$cd_dir" && treehouse return --force "$dir" ) 2>&1 ); then
       [ -n "$out" ] && printf '%s\n' "$out"
-      echo "teardown: $label return succeeded on retry; lock cleared on its own" >&2
+      echo "teardown: $label return succeeded on retry; transient condition cleared" >&2
       return 0
     fi
     [ -n "$out" ] && printf '%s\n' "$out" >&2
 
-    if ! treehouse_return_is_index_lock_error "$out"; then
-      echo "teardown: $label return failed with a non-lock error after retry; aborting" >&2
+    if ! treehouse_return_is_retryable_transient "$out"; then
+      echo "teardown: $label return failed with a non-transient error after retry; aborting" >&2
       return 1
     fi
   done

@@ -1223,7 +1223,13 @@ META_WINDOW=$T
     echo "home=$PROJ_ABS"
     echo "projects=$SECONDMATE_PROJECTS"
   fi
-} > "$STATE/$ID.meta"
+} > "$STATE/$ID.meta" || {
+  # A redirection failure on this group command does not trip set -e (bash
+  # quirk), so fail closed explicitly. Exiting here keeps ORCA_ABORT_CLEANUP
+  # armed so the EXIT trap releases the orphaned terminal and worktree.
+  echo "fm-spawn: failed to write task metadata to $STATE/$ID.meta" >&2
+  exit 1
+}
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
 
 sq_brief=$(shell_quote "$BRIEF")
