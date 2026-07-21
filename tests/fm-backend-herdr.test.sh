@@ -1085,6 +1085,77 @@ test_presentation_session_lock_path_is_shared_across_homes() {
   pass "herdr presentation lock: one path per session/socket across homes"
 }
 
+test_presentation_session_lock_path_rejects_malformed_socket() {
+  local dir log resp fb path status
+  dir="$TMP_ROOT/presentation-malformed-socket"; mkdir -p "$dir/responses"
+  log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '%s\n' '{"sessions":[{"name":"fmtest","running":true,"socket_path":null}]}' > "$resp/1.out"
+  printf '%s\n' '{"sessions":[{"name":"fmtest","running":true}]}' > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  path=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_presentation_session_lock_path fmtest' "$ROOT" 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "null socket_path must refuse the presentation lock path"
+  [ -z "$path" ] || fail "null socket_path returned a lock path: $path"
+  case "$path" in *null*) fail "null socket_path leaked into a lock path: $path" ;; esac
+  path=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_presentation_session_lock_path fmtest' "$ROOT" 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "missing socket_path must refuse the presentation lock path"
+  [ -z "$path" ] || fail "missing socket_path returned a lock path: $path"
+  pass "herdr presentation lock: null and missing socket paths fail closed"
+}
+
+test_presentation_lock_malformed_socket_falls_back() {
+  local dir log resp fb out status lock_source
+  dir="$TMP_ROOT/presentation-malformed-socket-fallback"; mkdir -p "$dir/responses"
+  log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '%s\n' '{"sessions":[{"name":"fmtest","running":true,"socket_path":null}]}' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  lock_source=$(sed -n '/^spawn_herdr_presentation_order_lock_acquire()/,/^spawn_herdr_presentation_order_lock_release()/p' "$ROOT/bin/fm-spawn.sh" | sed '$d')
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    LOCK_SOURCE="$lock_source" \
+    bash -c '
+      . "$0/bin/backends/herdr.sh"
+      eval "$LOCK_SOURCE"
+      if spawn_herdr_presentation_order_lock_acquire fmtest; then
+        printf "%s" acquired
+      else
+        printf "%s" flat
+      fi
+    ' "$ROOT" 2>&1)
+  status=$?
+  [ "$status" -eq 0 ] || fail "malformed socket fallback must not fail the spawn path: $out"
+  [ "$out" = flat ] || fail "malformed socket_path must fall back flat, got '$out'"
+  pass "herdr presentation lock: malformed socket metadata degrades to flat"
+}
+
+test_projection_order_rejects_malformed_socket() {
+  local dir log resp fb mover out status
+  dir="$TMP_ROOT/projection-order-malformed-socket"; mkdir -p "$dir/responses"
+  log="$dir/log"; resp="$dir/responses"; mover="$dir/mover"; : > "$log"
+  printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate"},{"workspace_id":"wH","label":"2ndmate-alpha"},{"workspace_id":"w2","label":"└ new · p:ZyXwVuTsRqPoNmLkJiHgFe"}]}}' > "$resp/1.out"
+  printf '%s\n' '{"client":{"version":"0.7.4","protocol":16},"server":{"running":true}}' > "$resp/2.out"
+  # shellcheck disable=SC2016
+  printf '%s\n' '{"schemas":{"request":{"oneOf":[{"properties":{"method":{"const":"workspace.move"}}}],"$defs":{"WorkspaceMoveParams":{"required":["workspace_id","insert_index"],"properties":{"insert_index":{"type":"integer"}}}}}}}' > "$resp/3.out"
+  printf '%s\n' '{"sessions":[{"name":"fmtest","running":true,"socket_path":null}]}' > "$resp/4.out"
+  cat > "$mover" <<'SH'
+#!/usr/bin/env bash
+echo called > "$FM_FAKE_MOVER_CALLED"
+exit 0
+SH
+  chmod +x "$mover"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_SCRIPT_STATUS=1 \
+    FM_BACKEND_HERDR_WORKSPACE_MOVER="$mover" FM_FAKE_MOVER_CALLED="$dir/called" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_order_best_effort fmtest w2 firstmate' "$ROOT" 2>&1)
+  status=$?
+  [ "$status" -eq 0 ] || fail "malformed ordering socket must not fail the spawn"
+  assert_contains "$out" "ambiguous named session socket" "malformed ordering socket did not warn"
+  [ ! -e "$dir/called" ] || fail "malformed ordering socket attempted workspace.move"
+  pass "herdr presentation ordering: malformed socket metadata is warning-only and read-only"
+}
+
 test_presentation_lock_insecure_namespace_falls_back() {
   local dir log resp fb bad out status lock_source
   dir="$TMP_ROOT/presentation-insecure-lock"; mkdir -p "$dir/responses" "$dir/sockdir"
@@ -2706,6 +2777,9 @@ test_projection_order_ambiguous_existing_block_is_read_only
 test_projection_order_foreign_new_child_before_parent_is_read_only
 test_projection_order_missing_parent_is_read_only
 test_presentation_session_lock_path_is_shared_across_homes
+test_presentation_session_lock_path_rejects_malformed_socket
+test_presentation_lock_malformed_socket_falls_back
+test_projection_order_rejects_malformed_socket
 test_presentation_lock_insecure_namespace_falls_back
 test_spawn_task_lock_covers_all_backend_creation_and_metadata_publication
 test_projected_spawn_disarms_cleanup_before_ambiguous_launch_submission

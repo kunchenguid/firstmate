@@ -327,15 +327,24 @@ fm_backend_herdr_presentation_lock_namespace_valid() {
   [ "$owner" = "$expected_uid" ] && [ "$mode" = 700 ]
 }
 
-fm_backend_herdr_presentation_session_lock_path() {  # <session>
-  local session=$1 sessions socket key dir hash
+fm_backend_herdr_presentation_session_socket_path() {  # <session>
+  local session=$1 sessions
   [ -n "$session" ] || return 1
   sessions=$(fm_backend_herdr_cli "$session" session list --json 2>/dev/null) || return 1
-  socket=$(printf '%s' "$sessions" | jq -r --arg want "$session" '
-    [.sessions[]? | select(.name == $want and .running == true) | .socket_path]
+  printf '%s' "$sessions" | jq -er --arg want "$session" '
+    [.sessions[]?
+      | select(.name == $want and .running == true)
+      | select((.socket_path | type) == "string")
+      | select((.socket_path | length) > 0)
+      | .socket_path]
     | if length == 1 then .[0] else empty end
-  ' 2>/dev/null)
-  [ -n "$socket" ] || return 1
+  ' 2>/dev/null
+}
+
+fm_backend_herdr_presentation_session_lock_path() {  # <session>
+  local session=$1 socket key dir hash
+  [ -n "$session" ] || return 1
+  socket=$(fm_backend_herdr_presentation_session_socket_path "$session") || return 1
   if [ -e "$socket" ]; then
     socket=$(cd "$(dirname "$socket")" 2>/dev/null && printf '%s/%s' "$(pwd -P)" "$(basename "$socket")") || return 1
   fi
@@ -484,7 +493,7 @@ fm_backend_herdr_projection_close_pane_focus_preserving() {  # <session> <pane-i
 # After a successful move, every pre-existing workspace id sequence excluding
 # the new id must be byte-identical to the pre-move sequence.
 fm_backend_herdr_projection_order_best_effort() {  # <session> <created-workspace-id> <parent-label>
-  local session=$1 created=$2 parent=$3 list analysis current desired protocol schema sessions socket mover response move_status focus_before
+  local session=$1 created=$2 parent=$3 list analysis current desired protocol schema socket mover response move_status focus_before
   local before_existing after_existing
   [ -n "$parent" ] || {
     echo "warning: herdr presentation ordering missing owning parent label; leaving worker in Herdr's current order" >&2
@@ -598,15 +607,7 @@ fm_backend_herdr_projection_order_best_effort() {  # <session> <created-workspac
     echo "warning: herdr presentation ordering API support is unavailable or ambiguous; leaving worker in Herdr's current order" >&2
     return 0
   fi
-  sessions=$(fm_backend_herdr_cli "$session" session list --json 2>/dev/null) || {
-    echo "warning: herdr presentation ordering could not resolve the named session socket; leaving worker in Herdr's current order" >&2
-    return 0
-  }
-  socket=$(printf '%s' "$sessions" | jq -r --arg want "$session" '
-    [.sessions[]? | select(.name == $want and .running == true) | .socket_path]
-    | if length == 1 then .[0] else empty end
-  ' 2>/dev/null)
-  [ -n "$socket" ] || {
+  socket=$(fm_backend_herdr_presentation_session_socket_path "$session") || {
     echo "warning: herdr presentation ordering found an ambiguous named session socket; leaving worker in Herdr's current order" >&2
     return 0
   }
