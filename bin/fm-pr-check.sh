@@ -3,6 +3,13 @@
 # to state/<id>.meta when available, then arms the watcher's poll by writing
 # state/<id>.check.sh, which prints one line when firstmate must wake
 # (the watcher's check contract: output = wake firstmate, silence = keep sleeping).
+# For a direct-PR task it also arms the richer no-mistakes watch run through
+# bin/fm-nm-watch.sh (CI, unresolved review threads, approval, mergeability),
+# which that script's header owns. Every ready PR already passes through here, so
+# this is the one deterministic place to arm it; the poll below stays armed
+# regardless as the daemon-independent backstop, and a watch that cannot be armed
+# is reported on its own line and never fails the PR record. --no-watch is for the
+# pre-merge caller, which needs the pr= record without a monitor.
 # The poll wakes on two signals:
 #   - the PR/MR has merged  -> prints "merged"
 #   - its CI aggregate is definitively red -> prints "ci-failed", so a red build
@@ -21,7 +28,10 @@
 # row before it wakes, so a transient gh/bytedcli network error stays quiet, and
 # any single success resets the count. A CI read that fails is a lookup failure,
 # never a red result, so an unreadable status never masquerades as a red build.
-# Usage: fm-pr-check.sh <task-id> <pr-url>
+# Usage: fm-pr-check.sh <task-id> <pr-url> [--no-watch]
+#   --no-watch  record and arm the poll only, never the no-mistakes watch run.
+#               For a caller that is about to merge (bin/fm-pr-merge.sh), where a
+#               monitor would outlive its subject by seconds.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -31,6 +41,12 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 "$FM_ROOT/bin/fm-guard.sh" || true
 ID=$1
 URL=$2
+ARM_WATCH=yes
+case "${3:-}" in
+  '') ;;
+  --no-watch) ARM_WATCH=no ;;
+  *) echo "fm-pr-check.sh: unknown argument: $3" >&2; exit 2 ;;
+esac
 # shellcheck source=bin/fm-scm-lib.sh
 . "$SCRIPT_DIR/fm-scm-lib.sh"
 
@@ -120,3 +136,13 @@ if [ "\$fails" -ge "\$fm_scm_wake_after" ]; then
 fi
 EOF
 echo "armed: state/$ID.check.sh polls $URL"
+
+# The no-mistakes watch is arming a second, richer watcher on the same PR, so it
+# must not be able to take the poll (or the PR record) down with it: it runs last
+# and its outcome line is informational either way. fm-nm-watch.sh refuses any
+# mode but direct-PR, so a no-mistakes-mode task's own pipeline watcher is never
+# replaced by an escalate-only external one.
+if [ "$ARM_WATCH" = yes ] && [ -f "$META" ] &&
+  [ "$(grep '^mode=' "$META" | tail -1 | cut -d= -f2- || true)" = direct-PR ]; then
+  "$FM_ROOT/bin/fm-nm-watch.sh" "$ID" "$URL" || true
+fi

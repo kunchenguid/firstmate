@@ -111,6 +111,27 @@ That evidence policy is specific to the firstmate repo: target projects may legi
 That command requires `tmux` on `PATH`, prints `tmux -V`, runs every `tests/*.test.sh` with `bash`, and fails if any script exits non-zero.
 It intentionally mirrors the behavior-test baseline in [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) instead of delegating the test step to an agent.
 
+## Park wake hook (~/.no-mistakes/config.yaml)
+
+A no-mistakes run that parks announces itself three ways, and only one of them reaches out: the `notify.on_park` / `notify.on_unpark` edge hook in the global config.
+The other two are the durable record (`no-mistakes parked`, which reads it without the daemon) and the reminder cascade, and both wait to be read.
+With no hook configured, a parked run is found only by someone who thinks to poll: the reminders keep firing into a file nobody is reading, so a run can sit parked for days while its lane looks quiet rather than blocked.
+`bin/fm-nm-park-wake.sh` is the hook that closes that gap, and it covers every lane rather than only direct-PR.
+
+Install it once per machine by adding this block to `~/.no-mistakes/config.yaml` (or `$NM_HOME/config.yaml`), replacing `<firstmate-repo>` with the absolute path of this repo:
+
+```yaml
+notify:
+  on_park: '<firstmate-repo>/bin/fm-nm-park-wake.sh'
+  on_unpark: '<firstmate-repo>/bin/fm-nm-park-wake.sh'
+  reminder_interval: "10m"
+```
+
+The hook is global-only by design in no-mistakes, because a repo-settable shell hook would hand any contributor a command on the daemon host, so one block covers every repo and every lane on that machine.
+The daemon runs it with the wait in the environment and a 30 second bound, and a failing hook is logged without affecting the run.
+Firstmate is not the daemon's owner, so this file is edited by hand rather than by any script here; `bin/fm-bootstrap.sh` only reports the missing hook as `NM_NOTIFY:` at session start, and any uncommented `on_park` counts as configured.
+The script's `--help` owns which task a park is mapped to, when a wake is emitted or rate-limited, and the `FM_HOME`, `FM_NM_PARK_REWAKE_SECS`, and `FM_NM_PARK_CREW_REMINDERS` knobs.
+
 ## Captain preferences (data/captain.md)
 
 Personal preferences for one captain's fleet live locally in `data/captain.md`; it is gitignored and printed in the session-start context digest after `data/projects.md` and optional `data/secondmates.md`.
@@ -448,6 +469,10 @@ FM_CODEX_WATCH_CHECKPOINT=180   # seconds per foreground watcher checkpoint in C
 FM_CREW_STATE_NM_TIMEOUT=10   # seconds allowed per no-mistakes query inside fm-crew-state.sh
 FM_CREW_STATE_RUNS_LIMIT=200  # recent no-mistakes runs rows scanned when cross-branch attribution falls back from axi status
 FM_CREW_STATE_BIN=bin/fm-crew-state.sh   # test override for the current-state reader used by working/paused watcher triage
+FM_NM_BIN=no-mistakes   # no-mistakes binary fm-nm-watch.sh arms the PR watch with; mainly a test override
+FM_NM_CONFIG=           # no-mistakes global config read by bootstrap's park-wake-hook probe; defaults to ${NM_HOME:-~/.no-mistakes}/config.yaml, and the test suite points it at a sandbox
+FM_NM_PARK_REWAKE_SECS=3600   # minimum seconds between park wakes for one no-mistakes run (bin/fm-nm-park-wake.sh)
+FM_NM_PARK_CREW_REMINDERS=2   # reminders a crew-driven gate park must survive before it is reported unanswered
 FMX_PAIRING_TOKEN=      # X mode pairing token; .env opt-in authorizes replies and eligible lifecycle actions
 FMX_RELAY_URL=https://myfirstmate.io   # optional X relay override, mainly for local relay development
 FMX_ENV_FILE=           # optional alternate .env file for direct X client invocations; bootstrap still checks $FM_HOME/.env

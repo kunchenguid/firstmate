@@ -2,7 +2,7 @@
 name: bootstrap-diagnostics
 description: >-
   Agent-only handling playbook for session-start bootstrap diagnostics.
-  Use whenever the session-start digest's bootstrap section prints any diagnostic or capability line - MISSING, MISSING_MANUAL, BACKEND_INVALID, NEEDS_GH_AUTH, TANGLE, BACKLOG_ORPHAN, CREW_HARNESS_OVERRIDE, CREW_DISPATCH, HARNESS_OVERRIDES, FLEET_SYNC, SECONDMATE_SYNC, SECONDMATE_LIVENESS, TASKS_AXI, NUDGE_SECONDMATES, or FMX - or when a standalone bin/fm-bootstrap.sh run prints one.
+  Use whenever the session-start digest's bootstrap section prints any diagnostic or capability line - MISSING, MISSING_MANUAL, BACKEND_INVALID, NEEDS_GH_AUTH, TANGLE, BACKLOG_ORPHAN, CREW_HARNESS_OVERRIDE, CREW_DISPATCH, HARNESS_OVERRIDES, FLEET_SYNC, SECONDMATE_SYNC, SECONDMATE_LIVENESS, TASKS_AXI, NM_NOTIFY, NUDGE_SECONDMATES, or FMX - or when a standalone bin/fm-bootstrap.sh run prints one.
   A silent bootstrap section means all good and needs no skill load.
 user-invocable: false
 metadata:
@@ -46,6 +46,9 @@ The inline rules in `AGENTS.md` section 3 still bind: detect, then consent, then
   It prints only when `config/backlog-backend` is absent or set to `tasks-axi` and the shared compatibility probe passes (`docs/configuration.md` "Backlog backend").
   If the backend is not opted out and `tasks-axi` is missing or incompatible, bootstrap reports the `MISSING: tasks-axi` line but firstmate still hand-edits routine backlog updates and never blocks work.
   If `config/backlog-backend=manual`, firstmate hand-edits routine backlog updates and bootstrap does not suggest installing `tasks-axi`.
+- `NM_NOTIFY: no park wake hook in <path> - ...` - no-mistakes is installed on this machine but its global config has no `notify.on_park`, so a parked run announces itself only into files nobody reads: the wake never arrives, and the reminder cascade re-sends into the same silence.
+  This is one hand edit of a file firstmate does not own (the daemon's global config, outside every home), so give the captain the exact block from `docs/configuration.md` "Park wake hook" and let them install it; do not script around it or treat it as blocking dispatch.
+  Until it is installed, treat parked runs as invisible: check `no-mistakes parked` directly when a lane goes quiet, rather than assuming silence means progress.
 - `NUDGE_SECONDMATES: fm-<id>...` - the secondmate sweep fast-forwarded one or more *running* secondmate homes to firstmate's current version and their instruction surface (`AGENTS.md`, `bin/`, or `.agents/skills/`) actually changed; send a one-line re-read nudge with `FM_HOME=<this-firstmate-home> bin/fm-send.sh <id> 'firstmate was updated to the latest - please re-read your AGENTS.md to pick up the new instructions.'` unless `FM_HOME` is already set to the active firstmate home.
   This mirrors `/updatefirstmate`'s `nudge-secondmates:` report: it is a gentle steer, never an interruption, and the fast-forward already landed safely.
   A secondmate that was skipped, already current, or whose advance changed no instructions is not listed and must not be disturbed.
