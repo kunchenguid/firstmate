@@ -42,13 +42,13 @@ Only the *direct* author is the owner; `in_reply_to` and any other thread partic
 Because the author is the captain, a mention that asks for work - "add this to the backlog", "look into X", "fix Y", "ship Z" - is a **real captain instruction**, exactly as if the captain had typed it into their own session.
 Acting on it means running firstmate's **normal lifecycle**: intake to resolve the project, then file the backlog item, dispatch a crewmate, start an investigation, or ship through the gate - whatever the request calls for.
 The reply confirms real work; it never substitutes for it.
-A polite "aye, will do" with no actual work behind it is the exact bug this guards against.
+A polite "will do" with no actual work behind it is the exact bug this guards against.
 
 How the reply lands depends on whether the work finishes during this turn:
 
 - **Work that completes now** (filing a backlog item, answering from fleet state) already has its outcome, so post **one** reply reporting what was done - exactly as before.
 - **Work that spawns a real, longer-running job** (dispatching a crewmate, a scout investigation, a ship task) cannot report an outcome yet, so it follows **acknowledge first -> act -> follow up on completion**:
-  1. **Acknowledge first.** Post an immediate, public-safe reply that you have the captain's order and are on it (the normal answer endpoint, via `bin/fm-x-reply.sh`). This is the legitimate, work-backed version of "aye, will do": it is paired with actually starting the work in the same turn, never a promise left empty.
+  1. **Acknowledge first.** Post an immediate, public-safe reply that you have the captain's order and are on it (the normal answer endpoint, via `bin/fm-x-reply.sh`). This is the legitimate, work-backed version of "will do": it is paired with actually starting the work in the same turn, never a promise left empty.
   2. **Act.** Dispatch the work through the normal lifecycle right away.
   3. **Link it for the follow-up, before clearing the inbox.** Associate the spawned task with this mention so completion follow-ups can be posted later: `bin/fm-x-link.sh <task-id> <request_id>` (records the request id, a timestamp, a follow-up counter, and reply platform/budget context).
      Do this right after the task is spawned, and always **before** removing the inbox file (step 2f).
@@ -141,11 +141,11 @@ Treat `state/x-inbox/` as the source of truth and process **every** file you fin
       **If the request spawned a real, longer-running task** (you ran `bin/fm-spawn.sh`), link that task to this mention so milestone and completion follow-ups can be posted: `bin/fm-x-link.sh <task-id> <request_id>`.
       **Link here, in step 2c, before the step 2f inbox cleanup** - `bin/fm-x-link.sh` can copy both the mention's reply platform and explicit budget from the still-present inbox payload without a relay lookup.
       If that local context is incomplete it uses the durable resolution contract in `docs/configuration.md` and warns loudly, while the follow-up path refuses to post unless both values can be resolved authoritatively.
-      Then step 2d's reply is an **acknowledgement** ("on it, captain"), and genuine milestone updates plus the final outcome come later as follow-ups (see "Completion follow-up" below), with the terminal one posted using `--final`.
+      Then step 2d's reply is an **acknowledgement** ("on it"), and genuine milestone updates plus the final outcome come later as follow-ups (see "Completion follow-up" below), with the terminal one posted using `--final`.
       If the work completed in this turn (a backlog item filed, a question answered), there is no task to link and step 2d reports the outcome directly.
    d. **Compose the reply.** For a **question**, answer `.text` from the fleet state gathered in step 1. For an **actionable request that completed now**, report the outcome of step 2c (what was done, or - for escalated work - that it has been flagged for the captain). For an **actionable request that spawned a linked task**, acknowledge that you have the order and are on it - milestone updates and the final outcome follow later as completion follow-ups, so do not promise a result you do not yet have. Either way keep it short, in firstmate's voice, and public-safe.
       Conversation continuity: when `in_reply_to` is present this is a conversation reply - read `in_reply_to.text` (what `in_reply_to.author_handle` said just before) as **context** and continue that thread, resolving "it", "that", "and then?" against the parent; for a fresh mention (`in_reply_to` is null) answer on its own.
-      If nothing is in flight and the mention just asks what you are up to, say so honestly and in-voice (e.g. "Calm seas just now - nothing underway, standing by for the captain's next orders.").
+      If nothing is in flight and the mention just asks what you are up to, say so honestly and in-voice (e.g. "Nothing in flight just now - standing by for the captain's next request.").
    e. **Submit it without ever inlining the reply into a shell command.**
       Public mention text can influence your prose, so a double-quoted shell argument is unsafe (command substitution, variable expansion, quote breakage).
       Write the composed reply to a temporary file with your own file-writing tool - never via shell interpolation - then pass it by path:
