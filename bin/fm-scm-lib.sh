@@ -269,6 +269,15 @@ fm_scm_codebase_commit_json() {
     --json codebase commit get -r "$sha" -R "$repo"
 }
 
+# Aggregated mergeability/review/check-run status for an MR. Its
+# .data.check_runs carries the numeric CI aggregate (total_count, passed_count,
+# failed_count, running_count) that fm_scm_pr_ci_state classifies from.
+fm_scm_codebase_mr_status_json() {
+  local number=$1 repo=$2
+  fm_scm_codebase_json "MR status lookup" "$repo" "$number" \
+    --json codebase mr status "$number" -R "$repo"
+}
+
 # Echo the MR's internal Id, unit-separated from the head commit of its latest
 # version. `bytedcli codebase mr merge` takes neither the MR URL nor the
 # user-visible Number: --mr-id is its only selector and it wants this internal
@@ -369,6 +378,68 @@ $info
 EOF
   [ -n "$provider" ] && [ -n "$state" ] && [ -n "$head" ] || return 1
   printf '%s\n' "$head"
+}
+
+# Echo the PR/MR's aggregate CI conclusion as one canonical token - FAILING,
+# PENDING, PASSING, or NONE - and return 0 on a successful provider read.
+# A provider lookup that fails (missing gh/bytedcli, revoked auth, network,
+# unparseable JSON) returns non-zero so callers fail closed and never mistake an
+# unreadable status for a red one. FAILING requires a definitively failed check:
+# for GitHub a failing/errored/cancelled/timed-out conclusion in the status-check
+# rollup, for Codebase a non-zero failed_count. A still-running or absent check is
+# PENDING or NONE, never FAILING.
+fm_scm_pr_ci_state() {
+  local worktree=$1 target=$2 parsed provider repo number json out gh_jq
+  if parsed=$(fm_scm_parse_pr_url "$target" 2>/dev/null); then
+    IFS=$'\t' read -r provider repo number <<EOF
+$parsed
+EOF
+  else
+    case "$target" in
+      [0-9]*) ;;
+      *) return 1 ;;
+    esac
+    parsed=$(fm_scm_remote_info "$worktree") || return 1
+    IFS=$'\t' read -r provider repo <<EOF
+$parsed
+EOF
+    number=${target%%[!0-9]*}
+  fi
+
+  case "$provider" in
+    github)
+      # gh embeds its own jq for -q, so this path needs no separate jq. A check
+      # run in flight has a null conclusion and no state, so it defaults to
+      # PENDING and a failing conclusion never hides behind a still-running one.
+      # shellcheck disable=SC2016  # jq program text: $r/$st/$bad are jq bindings, not shell vars
+      gh_jq='(.statusCheckRollup // []) as $r
+        | [ $r[] | (.conclusion // .state // "PENDING") ] as $st
+        | ($st | map(select(. == "FAILURE" or . == "ERROR" or . == "TIMED_OUT" or . == "CANCELLED" or . == "STARTUP_FAILURE" or . == "ACTION_REQUIRED")) | length) as $bad
+        | if $bad > 0 then "FAILING"
+          elif ($st | length) == 0 then "NONE"
+          elif ($st | map(select(. == "PENDING" or . == "EXPECTED" or . == "QUEUED" or . == "IN_PROGRESS")) | length) > 0 then "PENDING"
+          else "PASSING" end'
+      if [ -n "$worktree" ] && [ -d "$worktree" ]; then
+        out=$(cd "$worktree" && gh pr view "$target" --json statusCheckRollup -q "$gh_jq" 2>/dev/null) || return 1
+      else
+        out=$(gh pr view "$target" --json statusCheckRollup -q "$gh_jq" 2>/dev/null) || return 1
+      fi
+      [ -n "$out" ] || return 1
+      printf '%s\n' "$out"
+      ;;
+    codebase)
+      json=$(fm_scm_codebase_mr_status_json "$number" "$repo") || return 1
+      out=$(printf '%s\n' "$json" | jq -r '
+        .data.check_runs as $c
+        | if (($c.failed_count // 0) | tonumber) > 0 then "FAILING"
+          elif (($c.running_count // 0) | tonumber) > 0 then "PENDING"
+          elif (($c.total_count // 0) | tonumber) == 0 then "NONE"
+          else "PASSING" end') || return 1
+      [ -n "$out" ] || return 1
+      printf '%s\n' "$out"
+      ;;
+    *) return 1 ;;
+  esac
 }
 
 fm_scm_target_from_branch() {
