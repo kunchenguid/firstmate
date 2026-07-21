@@ -7,18 +7,28 @@
     },
     {
       "when": "The task is a trivial mechanical edit such as a rote rename, formatting sweep, targeted typo fix, or simple file gathering.",
-      "use": { "harness": "claude", "model": "haiku", "effort": "low" },
+      "use": { "harness": "claude", "model": "claude-haiku-4-5", "effort": "low" },
       "why": "Use the cheapest fast profile when the task is narrow and low ambiguity."
     },
     {
-      "when": "The task is a big or ambiguous multi-file feature, a risky refactor, or work that requires holding many moving parts in mind.",
+      "when": "The task is big-brain work: a big or ambiguous multi-file feature, a risky refactor, deep design, or work that requires holding many moving parts in mind.",
       "use": [
-        { "harness": "claude", "model": "claude-sonnet-5", "effort": "high" },
-        { "harness": "codex", "model": "gpt-5.5", "effort": "high" }
+        { "harness": "claude", "model": "claude-fable-5[1m]", "effort": "high" },
+        { "harness": "codex", "model": "gpt-5.6-sol", "effort": "high" }
       ],
       "select": "quota-balanced",
-      "why": "Use a strong coding profile for broad design and implementation work."
+      "why": "Big-brain work mixes the strongest hosted profiles at high effort and normal speed; Fable never runs fast mode or above high."
+    },
+    {
+      "when": "The task is ordinary implementation, debugging, review, or test work - standard coding capacity, not merely lightweight chores.",
+      "use": [
+        { "harness": "pi", "model": "ollama/kimi-k2.7-code", "effort": "high" },
+        { "harness": "codex", "model": "gpt-5.6-terra", "effort": "medium" },
+        { "harness": "claude", "model": "claude-sonnet-5", "effort": "medium" }
+      ],
+      "select": "quota-balanced",
+      "why": "Kimi K2.7 Code is a strong coding model for standard implementation work; mixing it with hosted models preserves subscription capacity."
     }
   ],
-  "default": { "harness": "codex", "model": "gpt-5.5", "effort": "medium" }
+  "default": { "harness": "codex", "model": "gpt-5.6-luna", "effort": "medium" }
 }

@@ -76,6 +76,11 @@ mkdir -p "$STATE"
 . "$SCRIPT_DIR/fm-x-lib.sh"
 # shellcheck source=bin/fm-check-lib.sh
 . "$SCRIPT_DIR/fm-check-lib.sh"
+# Provider-outage classification for OpenAI/Codex-routed workers (route and
+# quota/rate-limit evidence predicates); the failover mechanics live in
+# bin/fm-failover.sh, never in this watcher.
+# shellcheck source=bin/fm-failover-lib.sh
+. "$SCRIPT_DIR/fm-failover-lib.sh"
 
 WATCH_LOCK="$STATE/.watch.lock"
 WATCH_PATH="$SCRIPT_DIR/fm-watch.sh"
@@ -400,6 +405,43 @@ pause_state_class() {  # <window> <task>
     *) rm -f "$recheck_file" ;;
   esac
   printf '%s' "$class"
+}
+
+# Provider-outage fast path: an OpenAI/Codex-routed crew showing verified
+# quota/rate-limit exhaustion - in its pane tail or its last status line
+# (including a self-declared `paused: rate limit ...`) - must surface as an
+# immediate actionable wake. It runs BEFORE the busy/stale/pause triage and is
+# never absorbed by any of them, because a provider reset must never be waited
+# out silently: a busy-looking retry loop, a provably-working run, and a
+# declared pause all lose to this evidence. Deduped once per normalized
+# evidence text (digits stripped, so a ticking retry countdown cannot re-fire
+# every poll) via .provider-outage-<key>; the marker clears when the route
+# stops being OpenAI (e.g. after a provider failover) or the evidence clears.
+provider_outage_scan() {  # <window> <task> <tail40> <last-status-line> <key>
+  local win=$1 task=$2 tail40=$3 last=$4 key=$5 meta evidence norm marker reason
+  meta="$STATE/$task.meta"
+  marker="$STATE/.provider-outage-$key"
+  [ -f "$meta" ] || { rm -f "$marker"; return 0; }
+  if ! fm_failover_route_is_openai "$meta"; then
+    rm -f "$marker"
+    return 0
+  fi
+  evidence=$(fm_failover_outage_evidence "$tail40" || true)
+  [ -n "$evidence" ] || evidence=$(fm_failover_outage_evidence "$last" || true)
+  if [ -z "$evidence" ]; then
+    rm -f "$marker"
+    return 0
+  fi
+  norm=$(fm_failover_outage_dedupe_key "$evidence")
+  if [ "$(cat "$marker" 2>/dev/null || true)" = "$norm" ]; then
+    triage_log "absorbed provider-outage (already surfaced): $win"
+    return 0
+  fi
+  reason="stale: $win (provider-outage: $(printf '%s' "$evidence" | cut -c1-120) - openai-routed worker shows quota/rate-limit exhaustion; do not wait for a vendor reset, load provider-failover)"
+  fm_wake_append stale "$win" "$reason" || exit 1
+  printf '%s' "$norm" > "$marker"
+  mark_surfaced "$STATE/$task.status"
+  wake "$reason"
 }
 
 surface_nonterminal_stale() {  # <window> <hash>
@@ -889,6 +931,9 @@ EOF
     tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null) || continue
     h=$(printf '%s' "$tail40" | hash_pane)
     key=$(printf '%s' "$w" | tr ':/.' '___')
+    if [ "$kind" != secondmate ]; then
+      provider_outage_scan "$w" "$task" "$tail40" "$last" "$key"
+    fi
     hf="$STATE/.hash-$key"
     cf="$STATE/.count-$key"
     sf="$STATE/.stale-$key"

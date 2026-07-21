@@ -81,6 +81,7 @@ data/                personal fleet records; LOCAL, gitignored as a whole
   secondmates.md      secondmate routing table; firstmate-private, maintained by fm-home-seed.sh (section 6)
   <id>/brief.md      per-task crewmate brief, or per-secondmate charter brief when kind=secondmate
   <id>/report.md     scout task deliverable, written by the crewmate; survives teardown
+  <id>/failover/     per-task provider-failover receipts, resume prompts, and append-only history; written by bin/fm-failover.sh
 projects/            cloned repos; gitignored; READ-ONLY for you
 state/               volatile runtime signals; gitignored
   <id>.status        appended by crewmates: "<state>: <note>" wake-event lines, not current-state truth
@@ -103,7 +104,9 @@ state/               volatile runtime signals; gitignored
   .wake-queue        durable queued wakes: epoch<TAB>seq<TAB>kind<TAB>key<TAB>payload
   .afk               durable away-mode flag; present = sub-supervisor may inject escalations (set by /afk, cleared on user return)
   .watch.lock .wake-queue.lock watcher singleton and queue serialization locks
-  .hash-* .count-* .stale-* .stale-since-* .paused-* .wedge-escalations-* .seen-* .hb-surfaced-* .last-* .heartbeat-streak   watcher internals; never touch
+  .hash-* .count-* .stale-* .stale-since-* .paused-* .wedge-escalations-* .provider-outage-* .seen-* .hb-surfaced-* .last-* .heartbeat-streak   watcher internals; never touch
+  .provider-hold-*   durable verified-exhaustion launch holds; owned by bin/fm-provider-hold.sh
+  .provider-usage-*  provider usage-telemetry snapshots with freshness and source; owned by bin/fm-provider-usage.sh, never hold authority
   .watch-triage.log  watcher's absorbed-wake debug log (size-capped); never relied on, safe to delete
   .last-watcher-beat watcher liveness beacon, touched every poll (including while absorbing benign wakes); guard scripts read it
   .subsuper-* .supervise-daemon.*   sub-supervisor internals; never touch
@@ -328,7 +331,7 @@ A declared `paused:` event means a bounded external wait expected to clear on it
 Handle actionable wakes as follows:
 
 1. For `signal:`, read the listed event lines first, then reconcile current state only where action depends on it.
-2. For `stale:`, inspect the recorded endpoint and load `stuck-crewmate-recovery` for a stopped, looping, confused, or unresponsive worker; a deep-inspection reason also requires current-state and validation-log inspection.
+2. For `stale:`, inspect the recorded endpoint and load `stuck-crewmate-recovery` for a stopped, looping, confused, or unresponsive worker; a deep-inspection reason also requires current-state and validation-log inspection, and a `provider-outage` reason loads `provider-failover` instead.
 3. For `check:`, act on the named poll result, including merges and X-mode events.
 4. For `heartbeat:`, review the whole fleet from the structured fleet view, reconcile suspicious tasks and PR state, update the backlog, and never report an unchanged fleet as progress.
 
@@ -457,6 +460,7 @@ These skills are not captain-invocable; load them only at their precise triggers
 - `firstmate-orca` - load before switching to Orca, spawning or supervising Orca-backed work, smoke-testing Orca backend behavior, debugging Orca task state, or reconciling Orca-backed task metadata.
 - `project-management` - load before adding, creating, removing, or initializing a project.
 - `stuck-crewmate-recovery` - load when the session-start digest reports an ordinary direct report's endpoint dead or its metadata has no window, or after a stale wake, looping pane, repeated confusion, an answered-by-brief question, an unresponsive crewmate, or a failed steer.
+- `provider-failover` - load on a `provider-outage` wake, before switching an active worker's provider after verified exhaustion, a dead agent, or genuine wedge escalation, when a provider-exhaustion hold blocks a launch, and before acting on a provider-failover blocker.
 - `secondmate-provisioning` - load before creating, seeding, validating, launching, handing backlog to, recovering, pushing inherited local material into, or retiring a secondmate home, and before editing `data/secondmates.md`.
 - `decision-hold-lifecycle` - load before treating an investigation or visual review as complete, before ending a visual review that exposed a decision, and when recording or routing the captain's answer.
 - `fmx-respond` - load on an `x-mention <request_id>` `check:` wake to handle the mention, on an `x-mode-error ...` `check:` wake to report the X-mode configuration blocker, and on any milestone or terminal wake for an X-mode-linked task before posting its completion follow-up; relevant only when X mode is on.

@@ -29,7 +29,28 @@
 # quota-balanced uses quota-axi --json unless --quota-json supplies a fixture.
 # FM_DISPATCH_QUOTA_AXI overrides the quota command.
 # FM_DISPATCH_STALE_CLEAR_MARGIN overrides the default 20 point stale margin.
+#
+# Hold/pressure eligibility pre-filter (before ANY strategy, including the
+# first-element default): a candidate whose resolved provider
+# (fm_failover_provider_of_route) has an active verified-exhaustion hold
+# (bin/fm-provider-hold.sh) or fresh usage pressure at avoid/handoff
+# (bin/fm-provider-usage.sh snapshots) is excluded, with the exclusion logged
+# to stderr, and selection proceeds deterministically among the REMAINING
+# explicit candidates - one excluded candidate never turns into a needless
+# launch failure while an eligible candidate remains, and no unlisted model is
+# ever invented. When EVERY candidate is excluded, a structured retry object
+# {"error":"all-candidates-excluded","excluded":[{profile,reason}...]} is
+# printed and the exit status is 3, so the caller re-selects from another rule
+# or the default instead of launching a profile fm-spawn.sh would refuse.
 set -u
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
+STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+
+# shellcheck source=bin/fm-failover-lib.sh
+. "$SCRIPT_DIR/fm-failover-lib.sh"
 
 STALE_CLEAR_MARGIN=${FM_DISPATCH_STALE_CLEAR_MARGIN:-20}
 SELECT_OVERRIDE=
@@ -109,6 +130,42 @@ profiles_json=$(printf '%s\n' "$SPEC_JSON" | jq -ec '
 
 profile_count=$(printf '%s\n' "$profiles_json" | jq 'length')
 [ "$profile_count" -gt 0 ] || { echo "error: dispatch profile array must not be empty" >&2; exit 2; }
+
+# Hold/pressure eligibility pre-filter (see header). Runs against this home's
+# state; a home with no holds and no usage snapshots filters nothing.
+eligible_profiles=()
+excluded_entries=()
+i=0
+while [ "$i" -lt "$profile_count" ]; do
+  profile=$(printf '%s\n' "$profiles_json" | jq -c ".[$i]")
+  p_harness=$(printf '%s\n' "$profile" | jq -r '.harness // ""')
+  p_model=$(printf '%s\n' "$profile" | jq -r '.model // ""')
+  p_provider=$(fm_failover_provider_of_route "$p_harness" "$p_model")
+  exclusion=
+  if fm_failover_provider_held "$STATE" "$p_provider"; then
+    exclusion="provider $p_provider held after verified exhaustion"
+  else
+    pressure_line=$(fm_failover_provider_pressure "$STATE" "$p_provider" "$p_model")
+    case "${pressure_line%% *}" in
+      avoid|handoff) exclusion="provider $p_provider under quota pressure ($pressure_line)" ;;
+    esac
+  fi
+  if [ -n "$exclusion" ]; then
+    log "excluded candidate $p_harness/${p_model:-default}: $exclusion"
+    excluded_entries+=("$(jq -cn --argjson profile "$profile" --arg reason "$exclusion" '{profile: $profile, reason: $reason}')")
+  else
+    eligible_profiles+=("$profile")
+  fi
+  i=$((i + 1))
+done
+if [ "${#eligible_profiles[@]}" -eq 0 ]; then
+  printf '%s\n' "${excluded_entries[@]}" | jq -cs '{error: "all-candidates-excluded", excluded: .}'
+  exit 3
+fi
+if [ "${#eligible_profiles[@]}" -lt "$profile_count" ]; then
+  profiles_json=$(printf '%s\n' "${eligible_profiles[@]}" | jq -cs '.')
+  profile_count=${#eligible_profiles[@]}
+fi
 
 first_profile() {
   printf '%s\n' "$profiles_json" | jq -c '
