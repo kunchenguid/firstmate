@@ -301,7 +301,7 @@ Herdr tasks additionally record:
 | Duplicate task check | `herdr tab list --workspace <id>`, match by `.label` | Herdr does NOT enforce tab-label uniqueness itself; two tabs can share a label. The adapter's own duplicate check is required. |
 | Send literal (unsubmitted) | `herdr pane send-text <pane> <text>` | Does NOT auto-submit, contrary to the original design addendum's guess. Verified directly: a unique marker sent this way sits unexecuted in the composer until a separate Enter. Behaves exactly like tmux's `send-keys -l`. |
 | Send + submit atomically | `herdr pane run <pane> <command>` | Runs and submits a command in one call; used for the two fixed spawn-time commands (`treehouse get`, the `GOTMPDIR` export) exactly where tmux used one `send-keys ... Enter` call. |
-| Send key | `herdr pane send-keys <pane> <key>` | Verified names: `enter`, `escape` (alias `esc`), `ctrl+c` (aliases `C-c`, `c-c`). `ctrl+c` verified to interrupt a running foreground process immediately. |
+| Send key | `herdr pane send-keys <pane> <key>` | Verified names: `enter`, `escape` (alias `esc`), `ctrl+c` (aliases `C-c`, `c-c`), `down` (alias `Down`), `up` (alias `Up`). `ctrl+c` verified to interrupt a running foreground process immediately. `down` verified live moving the focused choice in a real Claude bypass-permissions menu (see "Guarded first-launch dialog handling" below); `up` is normalized for the same handler's upward navigation but is covered only at the key-normalization unit level. |
 | Submit confirmation (idle baseline) | `herdr agent get <pane>` -> `.result.agent.agent_status` after Enter | `fm_backend_herdr_send_text_submit` records the pre-Enter status and, when it is idle/done, confirms delivery by polling for `working`/`blocked` across the Enter attempt's confirmation budget. Composer-state reads remain the affirmative-empty pre-injection guard and the conservative fallback for preexisting submit-active or unreadable baselines; see "Native agent-state submit confirmation". |
 | Bounded capture | `herdr pane read <pane> --source recent --lines N` | See "Verified bug" below - N is never passed through directly. |
 | ANSI capture | `herdr pane read <pane> --source recent --lines N --format ansi` | Herdr 0.7.3 preserves composer de-emphasis styling, letting the shared `fm_composer_strip_ghost` extractor treat dim/faint and dark-TRUECOLOR ghost/placeholder text as empty while retaining real typed input. The same small-`--lines` workaround applies. |
@@ -906,6 +906,141 @@ The luminance rule assumes a dark terminal theme (the fleet reality); the SGR-2 
 **Resolved: backend-independent wedge alarm.** The max-defer wedge alarm (`inject_wedge_alarm`, `bin/fm-supervise-daemon.sh`) formerly alarmed into the void because its only active signal was a tmux client status-line flash, skipped for herdr, leaving only the passive `state/.subsuper-inject-wedged` marker.
 It now also attempts a configurable active alert independent of the supervisor backend; [`wedge-alarm.md`](wedge-alarm.md) owns its channels and verification evidence.
 
+## Guarded first-launch dialog handling (2026-07-21, herdr 0.7.4, protocol 16, macOS aarch64)
+
+Claude and Codex can block before their initial brief starts on trust, full-access, or hook-review menus.
+`fm_backend_herdr_handle_startup_dialog` in `bin/backends/herdr.sh` now classifies only four verified menu families: Claude folder trust, Claude Bypass Permissions, Codex directory trust, and Codex hooks review.
+It sends exactly one key, reads the pane again, and requires the expected cursor or dialog transition before another key is possible.
+Claude's Bypass Permissions warning starts on destructive `No, exit`, so the only allowed first action is navigation to `Yes, I accept`; Enter is forbidden until readback shows that safe choice focused.
+Codex hooks review similarly navigates from `Review hooks` to `Trust all and continue` and verifies the move before Enter.
+The focused choice is read only from menu rows whose text is one of that dialog's own known options, because the cursor glyphs `❯`/`›` are also the agent composer's prompt glyphs (`FM_BACKEND_HERDR_BARE_PROMPT_RE`) and a composer or transcript row rendered below the overlay would otherwise be mistaken for the focus.
+A known menu whose focus is not parsable is treated as a mid-repaint frame and keeps polling like an unknown shape, so a half-drawn first capture cannot fail a spawn instantly.
+Codex's trust screen is the one dialog confirmed by a bare Enter with no cursor drawn, so its `Press enter to continue` reading requires the capture to hold no selection glyph at all; a glyph matching none of the recognized options stays unknown rather than being read as accept.
+An unknown blocked dialog, unreadable post-key state, or an exhausted key budget fails the spawn with a classified error.
+
+A repeat Enter is the one retry that can be destructive, because a dismissal can be followed by another menu whose default is `No, exit`, and the recent source retains the dismissed frame.
+So an unchanged classification never authorizes a second Enter by itself: the raw pane bytes must stay identical to the pre-key capture across a further settling read (what a dropped key looks like), and any repaint without a verifiable outcome fails loudly instead.
+Navigation keys keep the plain bounded retry, since a repeated `up`/`down` cannot accept anything.
+
+The harness is already launched when this runs, so a failed spawn exits non-zero without the `spawned` line while the task stays registered.
+The error names the id, window and worktree: the pane can be answered by hand to continue the crewmate, or the task removed with `bin/fm-teardown.sh <id>`.
+
+Raw capture text alone is never trusted as proof of a live dialog: the typed launch command carries the shell-quoted brief, harness transcripts can render dialog wording, and the recent source retains dismissed frames inside the capture window.
+Every classified dialog, unknown shape, and dismissal readback is therefore corroborated against `agent get`: only a `working` agent, actively generating and therefore past its startup dialogs, suppresses keys and verifies the spawn while dialog-shaped text is visible.
+`idle`/`done` are trusted only when the capture shows no dialog shape at all, because the live evidence below records `idle` while Claude's trust dialog is visibly blocking startup.
+An unknown shape fails immediately only when the agent is corroborated blocked, and otherwise keeps polling to the bounded timeout.
+The fake-CLI cases exercise every corroboration branch, and the live traversal below establishes the safety-critical reason only `working` may suppress a visible dialog.
+
+### Live Claude trust-dialog traversal (2026-07-21, Claude Code 2.1.216, herdr 0.7.4, protocol 16, macOS aarch64)
+
+Two fresh nested Git repositories produced the real Claude folder-trust dialog inside generated non-default Herdr lab sessions.
+Every Herdr lifecycle and pane command went through `/Users/simonkopp/Documents/AIShared/Varia/firstmate-home/bin/fm-herdr-lab.sh`, and both EXIT teardowns completed without a fleet-state tripwire error.
+The dialog classifier reported `claude-trust accept`, while `herdr agent get` reported `agent_status: idle` at the same visible dialog.
+One Enter dismissed the trust dialog, and subsequent capture classified no startup dialog.
+This proves that `idle` is not evidence that startup dialogs are cleared and empirically justifies the working-only short-circuit.
+
+The core commands were:
+
+```sh
+HERDR_LAB_HELPER=/Users/simonkopp/Documents/AIShared/Varia/firstmate-home/bin/fm-herdr-lab.sh
+HERDR_LAB_SESSION=$("$HERDR_LAB_HELPER" name herdr-dialog-harden-h3-live2)
+LAB_CWD="$PWD/_scratch/$HERDR_LAB_SESSION-project"
+mkdir -p "$LAB_CWD"
+git -C "$LAB_CWD" init -q
+trap '"$HERDR_LAB_HELPER" teardown "$HERDR_LAB_SESSION"' EXIT
+"$HERDR_LAB_HELPER" provision "$HERDR_LAB_SESSION"
+CREATE=$("$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" workspace create --cwd "$LAB_CWD" --label herdr-dialog-live --no-focus)
+PANE_ID=$(printf '%s' "$CREATE" | jq -r '.result.root_pane.pane_id // empty')
+"$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" pane run "$PANE_ID" \
+  'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions "Reply with exactly LAB_DIALOG_OK after carefully considering the request. Do not use tools."'
+CAPTURE=$("$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" pane read "$PANE_ID" --source recent --lines 80)
+bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_dialog_classify claude "$1"' "$PWD" "$CAPTURE"
+"$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" agent get "$PANE_ID"
+"$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" pane send-keys "$PANE_ID" enter
+```
+
+Exact observed states from the first traversal:
+
+```text
+LAB_SESSION=fm-lab-herdr-dialog-har-31734-26471
+PANE_ID=w1:p1
+TRUST_STATE=claude-trust accept
+TRUST_AGENT_STATUS=idle
+AFTER_TRUST_ENTER_STATE=none none
+BYPASS_STATE=not-observed
+```
+
+The second traversal used session `fm-lab-herdr-dialog-har-37005-27635` and added the per-session launch override `--settings '{"skipDangerousModePermissionPrompt":false}'`.
+It reproduced the same `claude-trust accept` plus `agent_status: idle` observation and the same successful trust dismissal.
+
+The real Bypass Permissions warning could not be reproduced because its earlier acceptance persists in Claude's user state on this machine.
+The per-session override did not make Claude re-present the warning, and the task deliberately did not reset or purge persisted Claude user state.
+This is a known evidence limitation for the live traversal, while the real Herdr key-delivery path and the destructive-default bypass sequence remain covered respectively by the live readback reproduction and the raw-terminal synthetic menu below.
+
+The recurring watcher warning was a separate deterministic shell bug rather than proof that Herdr dropped a key.
+`fm_backend_herdr_events_capable` piped the large `api schema` value through `grep -q` twice.
+With a caller's `pipefail` enabled, `grep -q` exited as soon as it found its early match, `printf` received SIGPIPE, the pipeline returned 141, and Bash printed `printf: write error: Broken pipe` at the two reported lines.
+The capability check now uses pipe-free shell pattern matching, so the matching schema returns success without a producer process that can receive SIGPIPE.
+
+All live commands below ran in the generated non-default session `fm-lab-herdr-dialog-har-58384-27897` through `bin/fm-herdr-lab.sh` with its EXIT teardown trap.
+The helper's final default-session fleet-state comparison passed unchanged.
+
+```sh
+HERDR_LAB_HELPER=/Users/simonkopp/Documents/AIShared/Varia/firstmate-home/bin/fm-herdr-lab.sh
+HERDR_LAB_SESSION=$("$HERDR_LAB_HELPER" name herdr-dialog-harden-h3-final)
+trap '"$HERDR_LAB_HELPER" teardown "$HERDR_LAB_SESSION"' EXIT
+"$HERDR_LAB_HELPER" provision "$HERDR_LAB_SESSION"
+"$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" status --json
+SCHEMA=$("$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" api schema --json)
+(set +e; set -o pipefail; printf '%s' "$SCHEMA" | grep -Fq events.subscribe; printf 'rc=%s\n' "$?")
+(set +e; set -o pipefail; printf '%s' "$SCHEMA" | grep -Fq pane.agent_status_changed; printf 'rc=%s\n' "$?")
+case "$SCHEMA" in *events.subscribe*) echo match ;; *) echo missing ;; esac
+case "$SCHEMA" in *pane.agent_status_changed*) echo match ;; *) echo missing ;; esac
+```
+
+Exact capability output:
+
+```text
+STATUS={"client":{"version":"0.7.4","channel":"stable","protocol":16,"binary":"/opt/homebrew/bin/herdr","session":"fm-lab-herdr-dialog-har-58384-27897"},"server":{"status":"running","running":true,"version":"0.7.4","protocol":16,"capabilities":{"live_handoff":true,"detached_server_daemon":false},"compatible":true,"socket":"/Users/simonkopp/.config/herdr/sessions/fm-lab-herdr-dialog-har-58384-27897/herdr.sock","session":"fm-lab-herdr-dialog-har-58384-27897","restart_needed":false},"update":{"restart_needed":false}}
+OLD_PIPE_EVENTS=rc=141
+OLD_PIPE_AGENT=rc=141
+NEW_CASE_EVENTS=match
+NEW_CASE_AGENT=match
+```
+
+The webssh report's separate `send-text` plus `send-keys` reproduction was rerun immediately after workspace creation.
+Herdr 0.7.4 delivered it and pane readback contained the sentinel, so the current build satisfied the acceptance branch "delivers text with verified readback" rather than the alternative classified failure.
+
+```sh
+"$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" pane send-text "$PANE_ID" "printf '%s\\n' fm-herdr-dialog-readback-ok"
+"$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" pane send-keys "$PANE_ID" enter
+sleep 1
+"$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" pane read "$PANE_ID" --source recent-unwrapped --lines 20
+```
+
+```text
+fm-herdr-dialog-readback-ok
+```
+
+A raw-terminal synthetic Claude bypass menu then exercised the safety-critical two-key sequence against the real Herdr pane.
+The fixture started with `No, exit` focused, Herdr received one `down`, readback classified `Yes, I accept` as focused, and only then did Herdr receive one `enter`.
+
+```sh
+"$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" pane send-keys "$PANE_ID" down
+sleep 0.3
+MOVED=$("$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" pane read "$PANE_ID" --source recent-unwrapped --lines 40)
+bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_dialog_classify claude "$1"' "$PWD" "$MOVED"
+"$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" pane send-keys "$PANE_ID" enter
+```
+
+```text
+DIALOG_BEFORE=claude-bypass reject
+DIALOG_AFTER_DOWN=claude-bypass accept
+DIALOG_FINAL=DIALOG_ACCEPTED
+```
+
+The fake-CLI regression cases in `tests/fm-backend-herdr.test.sh` cover all four menu classifications, verified cursor movement, destructive-default protection, bounded retry exhaustion, agent-status corroboration (phantom quoted dialog text, blocked unknown shapes, uncorroborated timeout, stale dismissed frames), the large-schema pipefail case, and the `fm-spawn` post-launch wiring.
+
 ## Native `pane.agent_status_changed` push escalation (immediate blocked wake)
 
 Herdr exposes a native, push-based agent-state event stream, and firstmate folds it into the watcher so a crew entering `blocked` (waiting on the human at a permission/trust dialog, an interactive menu, or a wedged prompt) wakes its supervisor sub-second instead of after the ~240s stale-pane wedge timer.
@@ -920,6 +1055,7 @@ There is no second watcher process: the reader is a short-lived subprocess of th
 **Polling is the permanent fail-closed backstop.**
 The watcher's poll loop runs every cycle regardless, so the event path only ever shortens latency and can never drop an escalation.
 Three documented triggers fall back to pure polling (`fm_backend_herdr_events_capable` and the watcher's runtime-disable counter): a build below protocol 16 or missing the events surface in `herdr api schema`; a connect/subscribe failure; and repeated runtime failures, which disable the fast path for the rest of that watcher process (a restart re-probes).
+That schema probe matches with shell patterns rather than a `printf | grep -q` pipe; the pipe form emitted a recurring `printf: write error: Broken pipe` under a caller's `pipefail`, diagnosed in "Guarded first-launch dialog handling" above.
 
 **Empirical evidence (2026-07-11, herdr 0.7.3, protocol 16, macOS aarch64 Darwin 25.5.0, python3 3.13, jq present).**
 Capability, verified read-only:
