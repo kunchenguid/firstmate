@@ -212,7 +212,7 @@ test_primary_extension_injects_without_breaking_blocks() {
   assert_not_contains "$content" 'createBashToolDefinition' "primary Pi extension creates a replacement bash tool"
 
   out=$(env -u FM_PI_BASH_TIMEOUT_SECS PLUGIN="$ext" FM_HOME="$home" node --input-type=module 2>&1 <<'EOF'
-import { chmodSync, writeFileSync } from "node:fs";
+import { chmodSync, unlinkSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
 const handlers = new Map();
@@ -261,6 +261,12 @@ input = { command: "cd /tmp", timeout: 0 };
 result = await toolCall({ type: "tool_call", toolName: "bash", input });
 if (!result?.block) throw new Error("existing cd seatbelt no longer blocked");
 if (input.timeout !== 900) throw new Error(`blocked call did not retain injected default: ${input.timeout}`);
+
+const resolver = new URL("../../bin/fm-pi-bash-timeout.sh", import.meta.resolve(process.env.PLUGIN));
+unlinkSync(resolver);
+input = { command: "printf missing-resolver" };
+await toolCall({ type: "tool_call", toolName: "bash", input });
+if (Object.hasOwn(input, "timeout")) throw new Error(`missing resolver injected ${input.timeout}`);
 EOF
 )
   status=$?

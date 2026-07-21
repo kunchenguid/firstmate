@@ -18,20 +18,31 @@ const marker = `${state}/.pi-turnend-extension-loaded`;
 const extensionVersion = `sha256:${createHash("sha256").update(readFileSync(extensionFile)).digest("hex")}`;
 const defaultBashTimeoutSecs = 900;
 
-function resolveDefaultBashTimeout(): number | undefined {
-  const result = spawnSync(`${root}/bin/fm-pi-bash-timeout.sh`, [], { encoding: "utf8" });
-  if (result.status !== 0) return defaultBashTimeoutSecs;
-  const raw = String(result.stdout ?? "").trim();
-  if (!raw) return undefined;
-  const seconds = Number(raw);
-  return Number.isSafeInteger(seconds) && seconds > 0 ? seconds : defaultBashTimeoutSecs;
+function resolveDefaultBashTimeout(): Promise<number | undefined> {
+  return new Promise((resolveResult) => {
+    const child = spawn(`${root}/bin/fm-pi-bash-timeout.sh`, [], {
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    let stdout = "";
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk.toString();
+    });
+    child.on("error", () => resolveResult(undefined));
+    child.on("close", (code) => {
+      if (code !== 0) return resolveResult(code === null ? undefined : defaultBashTimeoutSecs);
+      const raw = stdout.trim();
+      if (!raw) return resolveResult(undefined);
+      const seconds = Number(raw);
+      resolveResult(Number.isSafeInteger(seconds) && seconds > 0 ? seconds : defaultBashTimeoutSecs);
+    });
+  });
 }
 
-function applyDefaultBashTimeout(value: unknown): void {
+async function applyDefaultBashTimeout(value: unknown): Promise<void> {
   if (!value || typeof value !== "object") return;
   const input = value as { timeout?: unknown };
   if (typeof input.timeout === "number" && Number.isFinite(input.timeout) && input.timeout > 0) return;
-  const timeout = resolveDefaultBashTimeout();
+  const timeout = await resolveDefaultBashTimeout();
   if (timeout !== undefined) input.timeout = timeout;
 }
 
@@ -136,7 +147,7 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("tool_call", async (event) => {
     if (event.type !== "tool_call" || event.toolName !== "bash") return {};
-    applyDefaultBashTimeout(event.input);
+    await applyDefaultBashTimeout(event.input);
     const command = String(event.input?.command ?? "");
     if (!command) return {};
     const cdResult = await runCdCheck(command);

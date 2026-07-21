@@ -1139,6 +1139,7 @@ const defaultBashTimeoutSecs = 900;
 const timeoutResolver = "$pi_timeout_resolver";
 function resolveDefaultBashTimeout(): number | undefined {
   const result = spawnSync(timeoutResolver, [], { encoding: "utf8" });
+  if (result.error || result.status === null) return undefined;
   if (result.status !== 0) return defaultBashTimeoutSecs;
   const raw = String(result.stdout ?? "").trim();
   if (!raw) return undefined;
