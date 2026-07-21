@@ -19,6 +19,7 @@ Two hosts, because they establish different things and neither is redundant.
 
 `gitlab.com` proves the result is reproducible by anyone.
 Every gitlab.com command here reads a public merge request and needs no credential, so a reader can rerun it and see the same output.
+That project exists only to be this evidence: it holds one deliberately merged merge request and one deliberately open one, and its README asks that the open one be left open.
 
 A self-hosted instance proves the property that makes this a schema change rather than a pattern edit.
 GitLab runs mostly on self-hosted instances, and a merge request there lives under a host that is not `gitlab.com` and under a project namespace that no owner-and-repository pair can address.
@@ -32,11 +33,11 @@ It is carried in the stored record next to the namespace and the merge request n
 ## The underlying read, unauthenticated
 
 ```
-$ glab-axi mr view "https://gitlab.com/gitlab-org/gitlab-runner/-/merge_requests/4000" --jq .state
+$ glab-axi mr view "https://gitlab.com/KarotKris/gitlab-merge-watch-fixture/-/merge_requests/1" --jq .state
 merged
 
-$ glab-axi mr view "https://gitlab.com/gitlab-org/gitlab-runner/-/merge_requests/6477" --jq .state
-closed
+$ glab-axi mr view "https://gitlab.com/KarotKris/gitlab-merge-watch-fixture/-/merge_requests/2" --jq .state
+opened
 
 $ glab-axi mr view "https://selfhosted.example/group/subgroup/project/-/merge_requests/101" --jq .state
 merged
@@ -53,9 +54,9 @@ No change was needed in `glab-axi` for any of this.
 Four tasks were armed against the two hosts, then each published poll was run.
 
 ```
-$ fm-pr-check.sh e1 https://gitlab.com/gitlab-org/gitlab-runner/-/merge_requests/4000
+$ fm-pr-check.sh e1 https://gitlab.com/KarotKris/gitlab-merge-watch-fixture/-/merge_requests/1
 armed: state/e1.check.sh
-$ fm-pr-check.sh e2 https://gitlab.com/gitlab-org/gitlab-runner/-/merge_requests/6477
+$ fm-pr-check.sh e2 https://gitlab.com/KarotKris/gitlab-merge-watch-fixture/-/merge_requests/2
 armed: state/e2.check.sh
 $ fm-pr-check.sh e3 https://selfhosted.example/group/subgroup/project/-/merge_requests/101
 armed: state/e3.check.sh
@@ -68,10 +69,10 @@ The stored record for each, showing the host and the full project namespace as d
 ```
 $ cat state/e1.pr-poll
 gitlab
-https://gitlab.com/gitlab-org/gitlab-runner/-/merge_requests/4000
+https://gitlab.com/KarotKris/gitlab-merge-watch-fixture/-/merge_requests/1
 gitlab.com
-gitlab-org/gitlab-runner
-4000
+KarotKris/gitlab-merge-watch-fixture
+1
 
 $ cat state/e3.pr-poll
 gitlab
@@ -107,14 +108,15 @@ e3 -> [merged]
 e4 -> []
 ```
 
-A merged merge request produces exactly one `merged` line on both hosts, and a merge request that was closed without merging produces nothing.
+A merged merge request produces exactly one `merged` line on both hosts.
+A merge request that is not merged produces nothing, shown here with one that is still open and one that was closed without merging.
 
 The optional head commit was captured on both hosts through `glab-axi mr view <url> --jq .sha`:
 
 ```
 $ grep '^pr' state/e1.meta state/e3.meta
-pr=https://gitlab.com/gitlab-org/gitlab-runner/-/merge_requests/4000
-pr_head=774f65356725770b1df233ba88d5cceeaf540e31
+pr=https://gitlab.com/KarotKris/gitlab-merge-watch-fixture/-/merge_requests/1
+pr_head=33762fcf6777c8d993220d25fb541e56c48081b9
 pr=https://selfhosted.example/group/subgroup/project/-/merge_requests/101
 pr_head=9cf455325eadee70a6326338094398ddb7baf951
 ```
@@ -220,7 +222,7 @@ This is the property that matters most, because the failure mode to avoid is a l
 Tested adversarially rather than on the happy path.
 
 ```
-nonexistent merge request (iid 999999999, a real 404)    -> []
+nonexistent merge request (iid 999999, a real 404)       -> []
 host that does not resolve (no-such-host.invalid)        -> []
 glab-axi absent from PATH entirely                       -> []
 no network at all (run in an isolated network namespace) -> []
@@ -230,7 +232,7 @@ Every one of these is silent.
 For reference, the underlying tool does report the failure; the poll simply declines to turn a failure into a signal.
 
 ```
-$ glab-axi mr view "https://gitlab.com/gitlab-org/gitlab-runner/-/merge_requests/999999999" --jq .state
+$ glab-axi mr view "https://gitlab.com/KarotKris/gitlab-merge-watch-fixture/-/merge_requests/999999" --jq .state
 error: 404 Not found
 code: NOT_FOUND
 $ echo $?
