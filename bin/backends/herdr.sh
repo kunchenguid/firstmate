@@ -497,15 +497,19 @@ fm_backend_herdr_projection_order_best_effort() {  # <session> <created-workspac
   analysis=$(printf '%s' "$list" | jq -c --arg created "$created" --arg parent "$parent" '
     def is_parent:
       (.label | type) == "string" and .label == $parent;
+    def is_top_level_parent:
+      (.label | type) == "string"
+      and ((.label == "firstmate") or (.label | test("^2ndmate-[^/]+$")));
     def is_new_child:
       (.label | type) == "string"
       and (.label | test("^└ .+ · p:[A-Za-z0-9_-]{22}$"));
     def is_legacy_child:
       (.label | type) == "string"
-      and (.label | startswith($parent + "/"))
-      and (.label | test(" · p:[A-Za-z0-9_-]{22}$"));
-    def is_child:
-      is_new_child or is_legacy_child;
+      and (.label | test("^(firstmate|2ndmate-[^/]+)/.+ · p:[A-Za-z0-9_-]{22}$"));
+    def is_legacy_child_for($owner):
+      is_legacy_child and (.label | startswith($owner + "/"));
+    def is_child_for($owner):
+      is_new_child or is_legacy_child_for($owner);
     (.result.workspaces // null) as $spaces
     | select(($spaces | type) == "array" and ($spaces | length) > 0)
     | ([range(0; $spaces | length) | select($spaces[.].workspace_id == $created)]) as $matches
@@ -519,15 +523,33 @@ fm_backend_herdr_projection_order_best_effort() {  # <session> <created-workspac
     | (
         reduce range($pidx + 1; $current) as $i (
           0;
-          if ($spaces[$i] | is_child) and (. == ($i - $pidx - 1))
+          if ($spaces[$i] | is_child_for($parent)) and (. == ($i - $pidx - 1))
           then . + 1
           else .
           end
         )
       ) as $block
-    | select(
-        ([range($pidx + 1 + $block; $current) | select($spaces[.] | is_child)] | length) == 0
-      )
+    | (reduce range($pidx + 1 + $block; $current) as $i (
+        {valid: true, active_parent: null};
+        if .valid == false then .
+        elif ($spaces[$i] | is_top_level_parent) then
+          .active_parent = $spaces[$i].label
+        elif ($spaces[$i] | is_new_child) then
+          if .active_parent == null then .valid = false else . end
+        elif ($spaces[$i] | is_legacy_child) then
+          .active_parent as $owner
+          | if $owner == null then
+              .valid = false
+            elif (($spaces[$i] | is_legacy_child_for($owner)) | not) then
+              .valid = false
+            else
+              .
+            end
+        else
+          .active_parent = null
+        end
+      )) as $remainder
+    | select($remainder.valid == true)
     | {
         current: $current,
         desired: ($pidx + 1 + $block),
