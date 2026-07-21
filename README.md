@@ -38,6 +38,8 @@ firstmate is an agent distro for running a crew of agents.
 An agent distro is a portable directory of instructions, skills, tooling, policies, and state conventions that turns a general-purpose agent into a specialized one.
 There is no app to install: the cloned repo is the distro - `AGENTS.md`, bundled firstmate skills, and helper scripts that any terminal coding agent can follow.
 Launching a supported harness inside it instantiates your first mate - and makes you the captain.
+The current visible product is terminal-native.
+A dedicated captain-facing visual frontend is planned in [`docs/visual-frontend.md`](docs/visual-frontend.md), but is not shipped yet.
 
 ## Features
 
@@ -155,6 +157,7 @@ Optional secondmates extend this to persistent second mates, dispatch profiles l
 `codex-app` is not a runtime backend yet; [docs/codex-app-backend.md](docs/codex-app-backend.md) owns the Codex App boundary.
 
 Full architecture - the supervision engine, worktree isolation, secondmates, dispatch profiles, project modes, optional X mode, fleet sync, and self-update - is in [docs/architecture.md](docs/architecture.md).
+The planned visual observer/control surface is defined separately in [docs/visual-frontend.md](docs/visual-frontend.md).
 
 ## Built-in skills
 
@@ -191,6 +194,7 @@ Firstmate's skills live in two separate places with different audiences:
 - [docs/orca-backend.md](docs/orca-backend.md) - setup guide for the experimental Orca backend, plus its lifecycle notes and known gaps.
 - [docs/cmux-backend.md](docs/cmux-backend.md) - setup guide for the experimental cmux backend, plus its verification notes and known gaps.
 - [docs/codex-app-backend.md](docs/codex-app-backend.md) - Codex App backend boundary, evidence, and rollout contract.
+- [docs/visual-frontend.md](docs/visual-frontend.md) - planned captain-facing visual frontend contract and rollout.
 - [docs/turnend-guard.md](docs/turnend-guard.md) - the primary session's structural "no turn ends blind" backstop: verified per-harness hook mechanisms, scoping, loop safety, and fail-open tradeoffs.
 - [docs/supervision-protocols/](docs/supervision-protocols/) - rendered primary-harness watcher protocols for Claude, Codex, OpenCode, Pi, Grok, and unknown harness fallback.
 - [docs/scripts.md](docs/scripts.md) - the `bin/` toolbelt reference.
