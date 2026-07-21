@@ -295,6 +295,18 @@ test_target_state_resolves_stale_uuid_by_cross_window_title() {
   pass "fm_backend_cmux_target_state: stale UUID recovery resolves the stable title across windows"
 }
 
+test_target_state_refuses_renamed_live_uuid() {
+  local dir fb out
+  dir="$TMP_ROOT/target-state-renamed-live"; mkdir -p "$dir/responses"
+  cmux_windows_response "$dir" 1 "e1111111-0000-0000-0000-000000000000" 1
+  cmux_workspace_list_response "$dir" 2 "aaaaaaaa-0000-0000-0000-000000000000" "renamed-task"
+  fb=$(make_cmux_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_target_state "aaaaaaaa-0000-0000-0000-000000000000:bbbbbbbb-1111-1111-1111-111111111111" fm-task1' "$ROOT" )
+  [ "$out" = unknown ] || fail "target_state should fail closed when the exact live UUID has a different title, got '$out'"
+  pass "fm_backend_cmux_target_state: a renamed live UUID remains unknown"
+}
+
 test_target_state_refuses_ambiguous_title() {
   local dir fb out title
   dir="$TMP_ROOT/target-state-ambiguous-title"; mkdir -p "$dir/responses"
@@ -567,6 +579,7 @@ test_create_task_creates_and_parses_ids() {
   title=$(cmux_expected_scoped_title fm-newtask)
   cmux_windows_response "$dir" 1 "e1111111-0000-0000-0000-000000000000" 1
   printf '{"workspaces":[]}' > "$dir/responses/2.out"
+  printf 'OK workspace:9\n' > "$dir/responses/3.out"
   cmux_windows_response "$dir" 4 "e1111111-0000-0000-0000-000000000000" 2
   cmux_workspace_list_response "$dir" 5 "bbbbbbbb-1111-1111-1111-111111111111" "$title"
   cmux_panes_response "$dir" 6 "cccccccc-2222-2222-2222-222222222222"
@@ -580,6 +593,69 @@ test_create_task_creates_and_parses_ids() {
   assert_contains "$(cat "$dir/log")" $'\x1f''--focus'$'\x1f''false' \
     "create_task did not pass --focus false"
   pass "fm_backend_cmux_create_task: creates a workspace and parses workspace_id/surface_id from list responses"
+}
+
+test_create_task_cleans_exact_workspace_after_inventory_failure() {
+  local dir fb out status
+  dir="$TMP_ROOT/create-post-inventory-fail"; mkdir -p "$dir/responses"
+  cmux_windows_response "$dir" 1 "e1111111-0000-0000-0000-000000000000" 1
+  cmux_workspace_list_response "$dir" 2 "ffffffff-0000-0000-0000-000000000000" "other"
+  printf 'OK workspace:9\n' > "$dir/responses/3.out"
+  printf '1\n' > "$dir/responses/4.exit"
+  fb=$(make_cmux_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_create_task fm-newtask /tmp/proj' "$ROOT" 2>&1 )
+  status=$?
+  [ "$status" -ne 0 ] || fail "create_task should fail when the post-create inventory is unreadable"
+  assert_contains "$(cat "$dir/log")" $'\x1f''close-workspace'$'\x1f''--workspace'$'\x1f''workspace:9' \
+    "create_task did not close the exact workspace reference after inventory failure"
+  assert_not_contains "$(cat "$dir/log")" $'\x1f''close-workspace'$'\x1f''--workspace'$'\x1f''ffffffff-0000-0000-0000-000000000000' \
+    "create_task closed a pre-existing workspace after inventory failure"
+  pass "fm_backend_cmux_create_task: inventory failure closes only the newly allocated workspace"
+}
+
+test_create_task_cleans_exact_workspace_after_ambiguous_inventory() {
+  local dir fb out status title
+  dir="$TMP_ROOT/create-post-ambiguous"; mkdir -p "$dir/responses"
+  title=$(cmux_expected_scoped_title fm-newtask)
+  cmux_windows_response "$dir" 1 "e1111111-0000-0000-0000-000000000000" 1
+  cmux_workspace_list_response "$dir" 2 "ffffffff-0000-0000-0000-000000000000" "other"
+  printf 'OK workspace:9\n' > "$dir/responses/3.out"
+  cmux_windows_response "$dir" 4 "e1111111-0000-0000-0000-000000000000" 2 "e2222222-0000-0000-0000-000000000000" 1
+  cmux_workspace_list_response "$dir" 5 "aaaaaaaa-0000-0000-0000-000000000000" "$title" "ffffffff-0000-0000-0000-000000000000" "other"
+  cmux_workspace_list_response "$dir" 6 "dddddddd-0000-0000-0000-000000000000" "$title"
+  fb=$(make_cmux_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_create_task fm-newtask /tmp/proj' "$ROOT" 2>&1 )
+  status=$?
+  [ "$status" -ne 0 ] || fail "create_task should fail when the post-create inventory is ambiguous"
+  assert_contains "$(cat "$dir/log")" $'\x1f''close-workspace'$'\x1f''--workspace'$'\x1f''workspace:9' \
+    "create_task did not close the exact new workspace after ambiguous inventory"
+  assert_not_contains "$(cat "$dir/log")" $'\x1f''close-workspace'$'\x1f''--workspace'$'\x1f''dddddddd-0000-0000-0000-000000000000' \
+    "create_task closed an ambiguous title match instead of the exact new workspace"
+  pass "fm_backend_cmux_create_task: ambiguous inventory closes only the exact new workspace"
+}
+
+test_create_task_cleans_exact_workspace_after_surface_failure() {
+  local dir fb out status title
+  dir="$TMP_ROOT/create-surface-fail"; mkdir -p "$dir/responses"
+  title=$(cmux_expected_scoped_title fm-newtask)
+  cmux_windows_response "$dir" 1 "e1111111-0000-0000-0000-000000000000" 1
+  cmux_workspace_list_response "$dir" 2 "ffffffff-0000-0000-0000-000000000000" "other"
+  printf 'OK workspace:9\n' > "$dir/responses/3.out"
+  cmux_windows_response "$dir" 4 "e1111111-0000-0000-0000-000000000000" 2
+  cmux_workspace_list_response "$dir" 5 "aaaaaaaa-0000-0000-0000-000000000000" "$title" "ffffffff-0000-0000-0000-000000000000" "other"
+  printf '1\n' > "$dir/responses/6.exit"
+  fb=$(make_cmux_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_create_task fm-newtask /tmp/proj' "$ROOT" 2>&1 )
+  status=$?
+  [ "$status" -ne 0 ] || fail "create_task should fail when the new workspace surface cannot be resolved"
+  assert_contains "$(cat "$dir/log")" $'\x1f''close-workspace'$'\x1f''--workspace'$'\x1f''workspace:9' \
+    "create_task did not close the exact new workspace after surface resolution failure"
+  assert_not_contains "$(cat "$dir/log")" $'\x1f''close-workspace'$'\x1f''--workspace'$'\x1f''ffffffff-0000-0000-0000-000000000000' \
+    "create_task closed a pre-existing workspace after surface resolution failure"
+  pass "fm_backend_cmux_create_task: surface failure closes only the exact new workspace"
 }
 
 # --- target_ready / capture ---------------------------------------------------
@@ -601,9 +677,9 @@ test_target_ready_checks_expected_label() {
   local dir fb title
   dir="$TMP_ROOT/ready-label-ok"; mkdir -p "$dir/responses"
   title=$(cmux_expected_scoped_title fm-label)
-  cmux_workspace_list_response "$dir" 1 "aaaaaaaa-0000-0000-0000-000000000000" "$title"
-  # 2: list-panes --json --id-format uuids -> matching surface
-  cmux_panes_response "$dir" 2 "bbbbbbbb-1111-1111-1111-111111111111"
+  cmux_windows_response "$dir" 1 "e1111111-0000-0000-0000-000000000000" 1
+  cmux_workspace_list_response "$dir" 2 "aaaaaaaa-0000-0000-0000-000000000000" "$title"
+  cmux_panes_response "$dir" 3 "bbbbbbbb-1111-1111-1111-111111111111"
   fb=$(make_cmux_fakebin "$dir")
   PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
     bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_target_ready "aaaaaaaa-0000-0000-0000-000000000000:bbbbbbbb-1111-1111-1111-111111111111" fm-label' "$ROOT"
@@ -616,7 +692,8 @@ test_target_ready_checks_expected_label() {
 test_target_ready_rejects_label_mismatch() {
   local dir fb status
   dir="$TMP_ROOT/ready-label-mismatch"; mkdir -p "$dir/responses"
-  cmux_workspace_list_response "$dir" 1 "aaaaaaaa-0000-0000-0000-000000000000" "not-the-task"
+  cmux_windows_response "$dir" 1 "e1111111-0000-0000-0000-000000000000" 1
+  cmux_workspace_list_response "$dir" 2 "aaaaaaaa-0000-0000-0000-000000000000" "not-the-task"
   fb=$(make_cmux_fakebin "$dir")
   PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
     bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_target_ready "aaaaaaaa-0000-0000-0000-000000000000:bbbbbbbb-1111-1111-1111-111111111111" fm-label' "$ROOT"
@@ -695,10 +772,9 @@ test_send_key_recovers_stale_target_by_label() {
   local dir fb title
   dir="$TMP_ROOT/sendkey-stale-target"; mkdir -p "$dir/responses"
   title=$(cmux_expected_scoped_title fm-label)
-  cmux_workspace_list_response "$dir" 1 "cccccccc-2222-2222-2222-222222222222" "$title"
-  cmux_windows_response "$dir" 2 "eeeeeeee-0000-0000-0000-000000000000" 1
-  cmux_workspace_list_response "$dir" 3 "cccccccc-2222-2222-2222-222222222222" "$title"
-  cmux_panes_response "$dir" 4 "dddddddd-3333-3333-3333-333333333333"
+  cmux_windows_response "$dir" 1 "eeeeeeee-0000-0000-0000-000000000000" 1
+  cmux_workspace_list_response "$dir" 2 "cccccccc-2222-2222-2222-222222222222" "$title"
+  cmux_panes_response "$dir" 3 "dddddddd-3333-3333-3333-333333333333"
   fb=$(make_cmux_fakebin "$dir")
   PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
     bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_send_key "aaaaaaaa-0000-0000-0000-000000000000:bbbbbbbb-1111-1111-1111-111111111111" Enter fm-label' "$ROOT"
@@ -1032,12 +1108,11 @@ test_kill_recovers_stale_target_by_label() {
   local dir fb title
   dir="$TMP_ROOT/kill-stale-target"; mkdir -p "$dir/responses"
   title=$(cmux_expected_scoped_title fm-label)
-  cmux_workspace_list_response "$dir" 1 "cccccccc-2222-2222-2222-222222222222" "$title"
-  cmux_windows_response "$dir" 2 "eeeeeeee-0000-0000-0000-000000000000" 2
-  cmux_workspace_list_response "$dir" 3 "cccccccc-2222-2222-2222-222222222222" "$title" "ffffffff-0000-0000-0000-000000000000" "other"
-  cmux_panes_response "$dir" 4 "dddddddd-3333-3333-3333-333333333333"
-  cmux_windows_response "$dir" 5 "eeeeeeee-0000-0000-0000-000000000000" 2
-  cmux_workspace_list_response "$dir" 6 "cccccccc-2222-2222-2222-222222222222" "$title" "ffffffff-0000-0000-0000-000000000000" "other"
+  cmux_windows_response "$dir" 1 "eeeeeeee-0000-0000-0000-000000000000" 2
+  cmux_workspace_list_response "$dir" 2 "cccccccc-2222-2222-2222-222222222222" "$title" "ffffffff-0000-0000-0000-000000000000" "other"
+  cmux_panes_response "$dir" 3 "dddddddd-3333-3333-3333-333333333333"
+  cmux_windows_response "$dir" 4 "eeeeeeee-0000-0000-0000-000000000000" 2
+  cmux_workspace_list_response "$dir" 5 "cccccccc-2222-2222-2222-222222222222" "$title" "ffffffff-0000-0000-0000-000000000000" "other"
   fb=$(make_cmux_fakebin "$dir")
   PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
     bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_kill "aaaaaaaa-0000-0000-0000-000000000000:bbbbbbbb-1111-1111-1111-111111111111" "" fm-label' "$ROOT"
@@ -1103,6 +1178,7 @@ test_cli_exports_password_only_when_configured
 test_parse_target
 test_target_state_walks_all_windows
 test_target_state_resolves_stale_uuid_by_cross_window_title
+test_target_state_refuses_renamed_live_uuid
 test_target_state_refuses_ambiguous_title
 test_target_state_refuses_global_inspection_failure
 test_normalize_key
@@ -1123,6 +1199,9 @@ test_ensure_running_fails_fast_on_unauth_without_launching
 test_create_task_refuses_duplicate_label
 test_create_task_refuses_ambiguous_or_unreadable_lookup
 test_create_task_creates_and_parses_ids
+test_create_task_cleans_exact_workspace_after_inventory_failure
+test_create_task_cleans_exact_workspace_after_ambiguous_inventory
+test_create_task_cleans_exact_workspace_after_surface_failure
 test_target_ready_fails_when_target_absent
 test_target_ready_checks_expected_label
 test_target_ready_rejects_label_mismatch

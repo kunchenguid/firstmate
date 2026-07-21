@@ -338,7 +338,12 @@ fm_backend_cmux_workspace_id_for_label() {  # <label>
 }
 
 fm_backend_cmux_global_workspace_state() {  # <title>
-  local title=$1 wins window_ids wid workspaces ids id count=0 match=
+  fm_backend_cmux_global_workspace_identity_state "$1"
+}
+
+fm_backend_cmux_global_workspace_identity_state() {  # <title> [workspace_id]
+  local title=$1 exact_id=${2:-} wins window_ids wid workspaces ids id
+  local title_count=0 title_match= exact_count=0 exact_title_count=0
   wins=$(fm_backend_cmux_cli list-windows --json --id-format uuids 2>/dev/null) \
     || { printf 'unknown'; return 0; }
   if ! printf '%s' "$wins" | jq -e 'type == "array" and all(.[]?; ((.id | type) == "string") and ((.id | length) > 0))' >/dev/null 2>&1; then
@@ -357,13 +362,25 @@ fm_backend_cmux_global_workspace_state() {  # <title>
     fi
     ids=$(printf '%s' "$workspaces" | jq -r --arg want "$title" '.workspaces[]? | select(.title == $want) | .id')
     for id in $ids; do
-      count=$((count + 1))
-      match=$id
+      title_count=$((title_count + 1))
+      title_match=$id
     done
+    if [ -n "$exact_id" ]; then
+      exact_count=$((exact_count + $(printf '%s' "$workspaces" | jq -r --arg id "$exact_id" '[.workspaces[]? | select(.id == $id)] | length')))
+      exact_title_count=$((exact_title_count + $(printf '%s' "$workspaces" | jq -r --arg id "$exact_id" --arg want "$title" '[.workspaces[]? | select(.id == $id and .title == $want)] | length')))
+    fi
   done
-  case "$count" in
+  if [ -n "$exact_id" ] && [ "$exact_count" -ne 0 ]; then
+    if [ "$exact_count" -eq 1 ] && [ "$exact_title_count" -eq 1 ] && [ "$title_count" -eq 1 ]; then
+      printf 'present\t%s' "$exact_id"
+    else
+      printf 'unknown'
+    fi
+    return 0
+  fi
+  case "$title_count" in
     0) printf 'absent' ;;
-    1) printf 'present\t%s' "$match" ;;
+    1) printf 'present\t%s' "$title_match" ;;
     *) printf 'ambiguous' ;;
   esac
 }
@@ -372,6 +389,11 @@ fm_backend_cmux_surface_id_for_workspace() {  # <workspace_id>
   local wsid=$1
   fm_backend_cmux_cli list-panes --workspace "$wsid" --json --id-format uuids 2>/dev/null \
     | jq -r '.panes[0] // {} | .selected_surface_id // (.surface_ids[0] // empty)' 2>/dev/null
+}
+
+fm_backend_cmux_close_created_workspace() {  # <workspace_id_or_ref>
+  [ -n "$1" ] || return 1
+  fm_backend_cmux_cli close-workspace --workspace "$1" >/dev/null 2>&1
 }
 
 # fm_backend_cmux_create_task: create the task's workspace (one surface),
@@ -384,7 +406,7 @@ fm_backend_cmux_surface_id_for_workspace() {  # <workspace_id>
 # focus-restore dance is needed, unlike zellij. Echoes "<workspace_id>
 # <surface_id>" on success.
 fm_backend_cmux_create_task() {  # <label> <cwd>
-  local label=$1 cwd=$2 title lookup state out wsid sfid
+  local label=$1 cwd=$2 title lookup state out created_ref= wsid sfid cleanup_id
   title=$(fm_backend_cmux_scoped_title "$label")
   lookup=$(fm_backend_cmux_global_workspace_state "$title")
   state=${lookup%%$'\t'*}
@@ -407,12 +429,28 @@ fm_backend_cmux_create_task() {  # <label> <cwd>
     echo "error: cmux new-workspace failed for '$title': $out" >&2
     return 1
   }
+  if [[ $out =~ (^|[[:space:]])(workspace:[0-9]+)($|[[:space:]]) ]]; then
+    created_ref=${BASH_REMATCH[2]}
+  fi
   lookup=$(fm_backend_cmux_global_workspace_state "$title")
   state=${lookup%%$'\t'*}
-  [ "$state" = present ] || { echo "error: could not resolve one cmux workspace id for '$title' after creation" >&2; return 1; }
+  if [ "$state" != present ]; then
+    if ! fm_backend_cmux_close_created_workspace "$created_ref"; then
+      echo "error: could not stop the newly created cmux workspace for '$title'" >&2
+    fi
+    echo "error: could not resolve one cmux workspace id for '$title' after creation" >&2
+    return 1
+  fi
   wsid=${lookup#*$'\t'}
   sfid=$(fm_backend_cmux_surface_id_for_workspace "$wsid")
-  [ -n "$sfid" ] || { echo "error: could not resolve the default surface for cmux workspace '$title' ($wsid)" >&2; return 1; }
+  if [ -z "$sfid" ]; then
+    cleanup_id=${created_ref:-$wsid}
+    if ! fm_backend_cmux_close_created_workspace "$cleanup_id"; then
+      echo "error: could not stop the newly created cmux workspace '$cleanup_id'" >&2
+    fi
+    echo "error: could not resolve the default surface for cmux workspace '$title' ($wsid)" >&2
+    return 1
+  fi
   printf '%s %s' "$wsid" "$sfid"
 }
 
@@ -455,7 +493,7 @@ fm_backend_cmux_target_state() {  # <target> [expected-label]
   fm_backend_cmux_parse_target "$1" || { printf 'unknown'; return 0; }
   if [ -n "$expected_label" ]; then
     expected_title=$(fm_backend_cmux_scoped_title "$expected_label")
-    lookup=$(fm_backend_cmux_global_workspace_state "$expected_title")
+    lookup=$(fm_backend_cmux_global_workspace_identity_state "$expected_title" "$FM_BACKEND_CMUX_WORKSPACE")
     lookup_state=${lookup%%$'\t'*}
     case "$lookup_state" in
       present) printf 'present' ;;
@@ -505,19 +543,16 @@ fm_backend_cmux_target_state() {  # <target> [expected-label]
 # header for the fresh-surface pitfall this avoids). When the caller knows
 # the owning firstmate task label, refresh stale workspace/surface ids by label.
 fm_backend_cmux_target_ready() {  # <target> [expected-label]
-  local expected_label=${2:-} expected_title title wsid sfid
+  local expected_label=${2:-} expected_title lookup state wsid sfid
   fm_backend_cmux_parse_target "$1" || return 1
   if [ -n "$expected_label" ]; then
     expected_title=$(fm_backend_cmux_scoped_title "$expected_label")
-    title=$(fm_backend_cmux_cli workspace list --json --id-format uuids 2>/dev/null | jq -r --arg id "$FM_BACKEND_CMUX_WORKSPACE" '.workspaces[]? | select(.id == $id) | .title' 2>/dev/null)
-    if [ "$title" = "$expected_title" ]; then
+    lookup=$(fm_backend_cmux_global_workspace_identity_state "$expected_title" "$FM_BACKEND_CMUX_WORKSPACE")
+    state=${lookup%%$'\t'*}
+    [ "$state" = present ] || return 1
+    wsid=${lookup#*$'\t'}
+    if [ "$wsid" = "$FM_BACKEND_CMUX_WORKSPACE" ]; then
       fm_backend_cmux_surface_exists "$FM_BACKEND_CMUX_WORKSPACE" "$FM_BACKEND_CMUX_SURFACE" && return 0
-      wsid=$FM_BACKEND_CMUX_WORKSPACE
-    elif [ -n "$title" ]; then
-      return 1
-    else
-      wsid=$(fm_backend_cmux_workspace_id_for_label "$expected_title")
-      [ -n "$wsid" ] || return 1
     fi
     sfid=$(fm_backend_cmux_surface_id_for_workspace "$wsid")
     [ -n "$sfid" ] || return 1
