@@ -92,7 +92,7 @@ It is passive unless `config/capacity-failover` contains `host-pressure=on`.
 When that opt-in is present, `fm-spawn.sh` runs the check before creating task ownership metadata.
 Warnings are surfaced and the spawn continues.
 Critical pressure refuses the new spawn and leaves existing task ownership untouched.
-`bin/fm-host-pressure.sh gate --kind test` gives the same disk-floor decision to validation/test launch wrappers.
+`bin/fm-host-pressure.sh gate --kind test` returns that same full memory, disk, and active-task verdict, available to future validation/test launch wrappers; the kind is recorded as `gate_kind=` and never narrows the decision.
 
 The file supports these optional thresholds:
 

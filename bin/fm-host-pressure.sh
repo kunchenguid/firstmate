@@ -116,11 +116,6 @@ emit_check() {
   MIN_DISK=$(fm_pressure_config_value "$CFG" min_disk_available_mb 10240)
   WARN_DISK=$(fm_pressure_config_value "$CFG" warn_disk_available_mb 20480)
   disk_floor=$(fm_pressure_config_value "$CFG" disk_floor_mb "$MIN_DISK")
-  disk_default_clear=$WARN_DISK
-  if [ -n "$disk_floor" ] && [ -n "$disk_default_clear" ] && [ "$disk_default_clear" -lt "$disk_floor" ]; then
-    disk_default_clear=$disk_floor
-  fi
-  disk_clear=$(fm_pressure_config_value "$CFG" disk_clear_mb "$disk_default_clear")
   MAX_RUNNING=$(fm_pressure_config_value "$CFG" max_running_tasks 30)
 
   fm_pressure_numeric_or_empty "$MIN_MEM" min_memory_available_mb || return 2
@@ -128,8 +123,14 @@ emit_check() {
   fm_pressure_numeric_or_empty "$MIN_DISK" min_disk_available_mb || return 2
   fm_pressure_numeric_or_empty "$WARN_DISK" warn_disk_available_mb || return 2
   fm_pressure_numeric_or_empty "$disk_floor" disk_floor_mb || return 2
-  fm_pressure_numeric_or_empty "$disk_clear" disk_clear_mb || return 2
   fm_pressure_numeric_or_empty "$MAX_RUNNING" max_running_tasks || return 2
+
+  disk_default_clear=$WARN_DISK
+  if [ -n "$disk_floor" ] && [ -n "$disk_default_clear" ] && [ "$disk_default_clear" -lt "$disk_floor" ]; then
+    disk_default_clear=$disk_floor
+  fi
+  disk_clear=$(fm_pressure_config_value "$CFG" disk_clear_mb "$disk_default_clear")
+  fm_pressure_numeric_or_empty "$disk_clear" disk_clear_mb || return 2
 
   MEM_AVAILABLE=$(fm_pressure_memory_available_mb)
   DISK_AVAILABLE=$(fm_pressure_disk_available_mb "$HOME_PATH")
