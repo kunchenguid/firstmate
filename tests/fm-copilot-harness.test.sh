@@ -98,6 +98,21 @@ SH
   printf '%s\n' "$$" > "$home/state/.lock"
   out=$(FM_HOME="$home" PATH="$fakebin:$PATH" "$LOCK" status)
   assert_contains "$out" "lock: stale" "holder with only plugin-path copilot argv should read as stale"
+
+  # MainThread comm with copilot as a mid-argv word (not at argv start) must
+  # not match either - lock recognition aligns with fm-harness.sh detection.
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *"ppid="*) exit 1 ;;
+  *"comm="*) printf '%s\n' 'MainThread'; exit 0 ;;
+  *"args="*) printf '%s\n' 'node runner.js copilot'; exit 0 ;;
+esac
+exit 1
+SH
+  chmod +x "$fakebin/ps"
+  out=$(FM_HOME="$home" PATH="$fakebin:$PATH" "$LOCK" status)
+  assert_contains "$out" "lock: stale" "MainThread holder with mid-argv copilot should read as stale"
   pass "anchored copilot match ignores vscode plugin paths in unrelated argv"
 }
 
