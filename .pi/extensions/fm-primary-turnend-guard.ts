@@ -3,11 +3,7 @@ import { createHash } from "node:crypto";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import {
-  createBashToolDefinition,
-  type BashToolInput,
-  type ExtensionAPI,
-} from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 let guardFollowupActive = false;
 
@@ -22,8 +18,6 @@ const marker = `${state}/.pi-turnend-extension-loaded`;
 const extensionVersion = `sha256:${createHash("sha256").update(readFileSync(extensionFile)).digest("hex")}`;
 const defaultBashTimeoutSecs = 900;
 
-type RawBashInput = Omit<BashToolInput, "timeout"> & { timeout?: number | null };
-
 function resolveDefaultBashTimeout(): number | undefined {
   const result = spawnSync(`${root}/bin/fm-pi-bash-timeout.sh`, [], { encoding: "utf8" });
   if (result.status !== 0) return defaultBashTimeoutSecs;
@@ -33,12 +27,12 @@ function resolveDefaultBashTimeout(): number | undefined {
   return Number.isSafeInteger(seconds) && seconds > 0 ? seconds : defaultBashTimeoutSecs;
 }
 
-function prepareBashArguments(args: unknown): BashToolInput {
-  if (!args || typeof args !== "object") return args as BashToolInput;
-  const input = args as RawBashInput;
-  if (input.timeout !== undefined && input.timeout !== null) return input as BashToolInput;
+function applyDefaultBashTimeout(value: unknown): void {
+  if (!value || typeof value !== "object") return;
+  const input = value as { timeout?: unknown };
+  if (typeof input.timeout === "number" && Number.isFinite(input.timeout) && input.timeout > 0) return;
   const timeout = resolveDefaultBashTimeout();
-  return timeout === undefined ? (input as BashToolInput) : ({ ...input, timeout } as BashToolInput);
+  if (timeout !== undefined) input.timeout = timeout;
 }
 
 function parentPid(pid: string): string {
@@ -129,8 +123,6 @@ function runCdCheck(command: string): Promise<{ code: number; stderr: string }> 
 }
 
 export default function (pi: ExtensionAPI) {
-  pi.registerTool({ ...createBashToolDefinition(process.cwd()), prepareArguments: prepareBashArguments });
-
   pi.on?.("session_start", (event) => {
     const reason = String((event as { reason?: unknown }).reason ?? "");
     const nudge = ["startup", "new", "resume"].includes(reason) ? runSessionstartNudge() : "";
@@ -144,6 +136,7 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("tool_call", async (event) => {
     if (event.type !== "tool_call" || event.toolName !== "bash") return {};
+    applyDefaultBashTimeout(event.input);
     const command = String(event.input?.command ?? "");
     if (!command) return {};
     const cdResult = await runCdCheck(command);

@@ -21,17 +21,6 @@ fm_git_identity fmtest fmtest@example.invalid
 
 REQUIRED_REASON='repair missing watcher supervision with bin/fm-watch-arm.sh as its own Claude Code background task'
 
-install_fake_pi_package() {
-  local root=$1 package="$1/node_modules/@earendil-works/pi-coding-agent"
-  mkdir -p "$package"
-  printf '%s\n' '{"type":"module","main":"./index.js"}' > "$package/package.json"
-  cat > "$package/index.js" <<'EOF'
-export function createBashToolDefinition() {
-  return { name: "bash", label: "Bash", description: "Run bash", parameters: {}, async execute() {} };
-}
-EOF
-}
-
 # --- PREDICATE: bin/fm-supervision-lib.sh -----------------------------------
 
 test_predicate_healthy_no_inflight() {
@@ -784,7 +773,8 @@ test_pi_extension_forces_followup() {
   assert_contains "$content" '.pi-turnend-extension-loaded' "pi extension must write its loaded marker for session-start diagnostics"
   assert_contains "$content" 'lockOwnership' "pi extension loaded marker must respect the session lock"
   assert_contains "$content" 'const command = String(event.input?.command ?? "")' "pi extension changed bash command extraction for the PreToolUse contract"
-  assert_contains "$content" 'prepareArguments: prepareBashArguments' "pi extension no longer applies the default bash timeout before validation"
+  assert_contains "$content" 'applyDefaultBashTimeout(event.input)' "pi extension no longer applies the default bash timeout to validated calls"
+  assert_not_contains "$content" 'pi.registerTool' "pi extension must not replace the active bash tool"
   assert_contains "$content" 'runPretoolCheck(command)' "pi extension changed the PreToolUse checker invocation"
   assert_contains "$content" 'return { block: true, reason:' "pi extension changed the checker exit-2 block result"
   assert_not_contains "$content" 'Run bin/fm-watch-arm.sh as a background task' "pi extension must not hardcode the old watcher-arm instruction"
@@ -799,7 +789,6 @@ test_pi_extension_injects_once_per_logical_agent_run() {
   log="$TMP_ROOT/pi-logical-run-guard.log"
   mkdir -p "$repo/.pi/extensions" "$repo/bin" "$home/state"
   printf '{"type":"module"}\n' > "$repo/package.json"
-  install_fake_pi_package "$repo"
   cp "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$ext"
   cat > "$repo/bin/fm-turnend-guard.sh" <<'SH'
 #!/usr/bin/env bash
@@ -820,7 +809,6 @@ import { pathToFileURL } from "node:url";
 const handlers = new Map();
 let prompts = 0;
 const pi = {
-  registerTool() {},
   on(event, handler) {
     handlers.set(event, handler);
   },
@@ -865,7 +853,6 @@ test_pi_extension_retries_after_followup_delivery_failure() {
   ext="$repo/.pi/extensions/fm-primary-turnend-guard.ts"
   mkdir -p "$repo/.pi/extensions" "$repo/bin" "$home/state"
   printf '{"type":"module"}\n' > "$repo/package.json"
-  install_fake_pi_package "$repo"
   cp "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$ext"
   cat > "$repo/bin/fm-turnend-guard.sh" <<'SH'
 #!/usr/bin/env bash
@@ -884,7 +871,6 @@ import { pathToFileURL } from "node:url";
 const handlers = new Map();
 let attempts = 0;
 const pi = {
-  registerTool() {},
   on(event, handler) {
     handlers.set(event, handler);
   },

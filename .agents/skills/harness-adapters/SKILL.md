@@ -239,7 +239,7 @@ The decision persists per path in `~/.pi/agent/trust.json`, so later spawns in t
 
 `fm-spawn` keeps the turn-end extension in `state/`, outside the worktree, because project-local extension files make the trust gate strictly worse and pollute the project.
 The extension must listen for pi's `turn_end` event, not `agent_end`, so the watcher wakes after each completed turn instead of only when the whole agent run exits.
-Firstmate's Pi extensions fill an omitted bash timeout with 900 seconds while preserving every explicit model timeout; `bin/fm-pi-bash-timeout.sh` owns the local override, precedence, disable, and invalid-value semantics.
+Firstmate's Pi extensions fill a missing or non-positive validated bash timeout with 900 seconds while preserving valid explicit timeouts; `bin/fm-pi-bash-timeout.sh` owns the local override, precedence, disable, and invalid-value semantics.
 Pi sets `PI_CODING_AGENT=true` for its children; this is its harness-detection env marker.
 
 **Primary-session guard fact (verified 2026-07-09, Pi 0.80.5).**
