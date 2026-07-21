@@ -518,7 +518,7 @@ test_bootstrap_nudge_retry_is_idempotent() {
 }
 
 test_bootstrap_nudge_retry_supersedes_safely_advanced_commit() {
-  local w c1 c2 current fakebin out marker out2
+  local w c1 c2 current fakebin out marker marker_before out2
   w=$(new_world nudge-retry-advanced)
   c1=$(head_of "$w/main")
   add_sm_worktree "$w" sm-instr "$c1"
@@ -537,16 +537,22 @@ test_bootstrap_nudge_retry_supersedes_safely_advanced_commit() {
 
   bump_primary "$w" instr
   current=$(head_of "$w/main")
-  git -C "$w/sm-instr" merge --ff-only "$current" >/dev/null
 
   sed -i.bak 's/^message=.*/message=wrong reread request/' "$marker" 2>/dev/null || \
     sed -i 's/^message=.*/message=wrong reread request/' "$marker"
   rm -f "$marker.bak"
+  marker_before=$(cat "$marker")
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
     FM_SEND_SETTLE=0 "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
   assert_contains "$out" "retry marker message mismatch" \
-    "advanced retry should reject a message mismatch"
+    "behind-home retry should reject a message mismatch"
+  assert_not_contains "$out" "BOOTSTRAP_INFO: nudged fm-sm-instr" \
+    "rejected retry must suppress the same sweep's replacement nudge"
+  [ "$(head_of "$w/sm-instr")" = "$c2" ] \
+    || fail "rejected retry allowed the same sweep to fast-forward the behind home"
   assert_present "$marker" "message mismatch should retain the marker"
+  [ "$(cat "$marker")" = "$marker_before" ] \
+    || fail "rejected retry marker was overwritten during the same sweep"
 
   sed -i.bak \
     's/^message=.*/message=firstmate was updated to the latest - please re-read your AGENTS.md to pick up the new instructions./' \
@@ -554,6 +560,7 @@ test_bootstrap_nudge_retry_supersedes_safely_advanced_commit() {
     's/^message=.*/message=firstmate was updated to the latest - please re-read your AGENTS.md to pick up the new instructions./' \
     "$marker"
   rm -f "$marker.bak"
+  git -C "$w/sm-instr" merge --ff-only "$current" >/dev/null
   printf 'ambiguous local instruction edit\n' >> "$w/sm-instr/AGENTS.md"
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
     FM_SEND_SETTLE=0 "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)

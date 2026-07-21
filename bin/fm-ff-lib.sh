@@ -423,9 +423,12 @@ process_secondmate() {
 # FF_NUDGE_WINDOWS / FF_SEEN_HOMES, which the caller resets before and reads after.
 # The registry argument is only for home= fallback on older or incomplete meta records.
 sweep_live_secondmate_metas() {
-  local state=$1 base_mode=$2 nudge_requires_instr=${3:-no} registry=${4:-$FM_HOME/data/secondmates.md} id home window meta
+  local state=$1 base_mode=$2 nudge_requires_instr=${3:-no} registry=${4:-$FM_HOME/data/secondmates.md} rejected_ids=${5:-} id home window meta
   [ -d "$state" ] || return 0
   while IFS='|' read -r id home window meta; do
+    case " $rejected_ids " in
+      *" $id "*) continue ;;
+    esac
     process_secondmate "$id" "$home" "$window" "$base_mode" "$nudge_requires_instr"
   done < <(live_secondmate_meta_records "$state" "$registry")
 }
