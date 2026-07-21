@@ -369,6 +369,16 @@ clear_pause_tracking() {  # <window>
 # Reconcile a declared pause or captain-held status with authoritative crew state.
 # Only a confidently dead ordinary crew may recover paused classification after
 # fm-crew-state has fallen back to stopped or unknown.
+# Prints working/paused/none/unreadable as crew_absorb_class does, plus one token
+# of its own:
+#   hold - the declared pause or captain hold is NOT disproven (either the read
+#          was skipped inside the bounded recheck window, or it still reported
+#          paused) while the agent process is not confidently dead. Not a verdict
+#          that the crew stopped: a fresh stale surfaces it once, but a repeat on
+#          an unchanged pane keeps the bounded pause cadence instead.
+# Keeping hold distinct from none/unreadable is what lets a live external-decision
+# gate retain that cadence while a pause the authoritative state SUPERSEDES (none)
+# is surfaced once and cached, and an unreadable read is surfaced without caching.
 pause_state_class() {  # <window> <task>
   local win=$1 task=$2 key last recheck_file class agent_alive
   key=${win//:/_}
@@ -385,8 +395,10 @@ pause_state_class() {  # <window> <task>
     if [ "$(window_kind "$win")" != secondmate ]; then
       agent_alive=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null) || agent_alive=unknown
       if [ "$agent_alive" != dead ]; then
-        rm -f "$recheck_file"
-        printf 'none'
+        # A hold keeps the recheck stamp: like paused, it is still on the bounded
+        # cadence, so dropping the stamp would re-run the costly crew-state read
+        # on every poll of an unchanged pane.
+        printf 'hold'
         return
       fi
     fi
@@ -402,8 +414,15 @@ pause_state_class() {  # <window> <task>
   if [ "$(window_kind "$win")" != secondmate ]; then
     agent_alive=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null) || agent_alive=unknown
     if [ "$agent_alive" != dead ]; then
-      rm -f "$recheck_file"
-      printf 'none'
+      # A still-paused authoritative read on a live agent is a hold, not a
+      # verdict that the crew stopped; none/unreadable stay themselves so the
+      # superseded-pause cache and the no-verdict path can tell them apart.
+      # A hold stamps the recheck like paused does, so the bounded cadence -
+      # not every poll - owns the next costly read.
+      case "$class" in
+        paused) date +%s > "$recheck_file"; printf 'hold' ;;
+        *)      rm -f "$recheck_file"; printf '%s' "$class" ;;
+      esac
       return
     fi
   fi
@@ -1013,7 +1032,10 @@ EOF
           #     pause - the crew has STOPPED. Surface immediately so firstmate peeks
           #     (it may be done via an interactive menu that wrote no done: status,
           #     waiting on a decision, or wedged) instead of leaving the finish to
-          #     wait out the timer.
+          #     wait out the timer;
+          #   - hold (or an unreadable read): no verdict either way, so a FRESH
+          #     stale surfaces here exactly as none does; only the unchanged-hash
+          #     re-entry below distinguishes them.
           if [ "$(cat "$sf" 2>/dev/null || true)" != "$h" ]; then
             task=$(window_to_task "$w" "$STATE")
             case "$(pause_state_class "$w" "$task")" in
@@ -1046,6 +1068,10 @@ EOF
             # verdict at all, so it surfaces conservatively but leaves the
             # recheck cadence armed for the next poll instead of freezing a
             # possibly-genuine pause behind a transient read failure.
+            # A hold - the pause still undisproven on a not-confidently-dead
+            # agent - is likewise no verdict, but here it keeps the bounded
+            # PAUSE_RESURFACE_SECS cadence rather than re-surfacing, so a live
+            # external-decision gate that already surfaced once stays parked.
             if [ -e "$pf" ] || { status_is_paused_or_captain_held "$(last_status_line "$statusf")" \
                 && [ "$(stat_sig "$statusf")" != "$(cat "$pnf" 2>/dev/null)" ]; }; then
               case "$(pause_state_class "$w" "$task")" in
@@ -1058,6 +1084,8 @@ EOF
                          triage_log "absorbed non-terminal stale (provably working): $w" ;;
                 none)    stat_sig "$statusf" > "$pnf" || : > "$pnf"
                          surface_nonterminal_stale "$w" "$h" ;;
+                hold)    rm -f "$pnf"
+                         handle_paused_stale "$w" "$task" "$h" ;;
                 *)       surface_nonterminal_stale "$w" "$h" ;;
               esac
             elif [ -e "$ssf" ] || [ ! -e "$sitf" ]; then
