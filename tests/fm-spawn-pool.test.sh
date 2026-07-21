@@ -66,6 +66,8 @@ make_spawn_case() {
 }
 
 read_case_record() {
+  # CASE_DIR is part of the shared record layout; this file does not consume it.
+  # shellcheck disable=SC2034
   IFS='|' read -r CASE_DIR HOME_DIR PROJ_DIR WT_DIR FAKEBIN_DIR LAUNCH_LOG <<EOF
 $1
 EOF
