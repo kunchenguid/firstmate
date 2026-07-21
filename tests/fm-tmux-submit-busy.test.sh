@@ -88,6 +88,7 @@ test_idle_pane_pending_returns_pending() {
   touch "$dir/.swallow"
   PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$composer" FM_FAKE_SENT="$sent" \
     FM_FAKE_SWALLOW="$dir/.swallow" FM_FAKE_PERSIST_SWALLOW=1 FM_FAKE_PANE_BUSY=0 \
+    FM_SEND_GRACE=0.05 \
     fm_tmux_submit_enter_core "win" 3 0.05 > "$vfile" 2>/dev/null
   [ "$(cat "$vfile")" = pending ] || fail "idle-pane pending should return pending, got '$(cat "$vfile")'"
   pass "fm_tmux_submit_enter_core: idle pane + pending composer stays pending (genuine swallow preserved)"

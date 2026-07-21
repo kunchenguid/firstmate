@@ -385,7 +385,23 @@ fm_pane_is_busy() {  # <target> [harness]
 # `fm_pane_is_busy`: a busy pane means the Enter was accepted and queued (report
 # `empty` so the caller does not re-send), while an idle pane keeps `pending` as
 # a genuine swallow. Pending-unproven receives the same Enter retry budget but
-# never reaches this exception.
+# never reaches this exception. This is the only place that exception lives, so
+# the daemon's strict and fm-send's lenient success policies both treat a
+# busy-queued Enter as delivered.
+#
+# Grace re-check (task fm-send-grace-fix-e6, data/fm-send-false-negative-q4/
+# report.md): the retry budget above is fixed (~1.2-2.7s including settle)
+# but real delivery/redraw latency is not - a large multi-line message can
+# split into several separate bracketed-paste chunks, and under real fleet
+# load either chunked delivery or tmux's own redraw can still be catching up
+# after the budget and the busy-fallback above both come up empty. Neither
+# the composer nor the busy footer has to be stale for that to happen; it is
+# simply still in flight. One bounded grace sleep, then a single final read
+# (composer first, busy second) gives that in-flight delivery one last
+# chance to land before the hard "pending" (genuine swallow) verdict ships.
+# A truly swallowed Enter does not change on its own, so this cannot turn a
+# real swallow into a false "empty" - it only rescues the case where the
+# pane was still updating.
 fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep>
   local target=$1 retries=$2 sleep_s=$3 i=0 state
   while :; do
@@ -407,8 +423,17 @@ fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep>
   # If the pane is busy (agent mid-turn), the harness accepted the Enter
   # and queued the message for processing when the current turn ends.
   # Treat it as submitted so the caller does not re-send.
-  # On an idle pane, keep reporting pending - a genuine swallow.
   if fm_pane_is_busy "$target"; then
+    printf 'empty'; return 0
+  fi
+  # Neither the composer nor the busy footer has caught up yet. Wait one
+  # grace window, then take a single final read before declaring a genuine
+  # swallow.
+  sleep "${FM_SEND_GRACE:-1.5}"
+  state=$(fm_tmux_composer_state "$target")
+  if [ "$state" != pending ]; then
+    printf '%s' "$state"
+  elif fm_pane_is_busy "$target"; then
     printf 'empty'
   else
     printf 'pending'

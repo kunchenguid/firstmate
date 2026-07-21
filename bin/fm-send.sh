@@ -17,7 +17,12 @@
 # instead of silently leaving an unsubmitted instruction.
 # Submission dispatches through the target's recorded backend; the tmux adapter
 # shares its composer/submit core with the away-mode daemon via bin/fm-tmux-lib.sh.
-# Tune with FM_SEND_RETRIES (default 3) / FM_SEND_SLEEP (0.4).
+# Tune with FM_SEND_RETRIES (default 3) / FM_SEND_SLEEP (0.4) / FM_SEND_GRACE
+# (default 1.5, the tmux submit core's final grace re-check once retries and
+# the busy fallback both still read pending - bin/fm-tmux-lib.sh). The retry
+# count itself scales up with message line count (one extra retry per ~10
+# lines) because a large multi-line paste can arrive in several separate
+# chunks whose delivery time the fixed per-retry sleep does not account for.
 # Slash commands, and codex `$...` skill invocations resolved through harness
 # meta, get a longer pre-Enter settle so completion popups do not swallow Enter.
 #
@@ -266,7 +271,12 @@ else
       ;;
     *) settle=0.3 ;;
   esac
-  retries=${FM_SEND_RETRIES:-3}
+  # A large multi-line message can arrive as several separate paste chunks
+  # (data/fm-send-false-negative-q4/report.md), so scale the retry budget with
+  # its size: one extra retry per ~10 lines. A single-line steer has 0 extra
+  # retries, so the default budget stays byte-identical to before.
+  line_count=$(printf '%s\n' "$MESSAGE" | wc -l | tr -d ' ')
+  retries=$(( ${FM_SEND_RETRIES:-3} + line_count / 10 ))
   sleep_s=${FM_SEND_SLEEP:-0.4}
   # Type once, submit, verify. Only exact empty confirms delivery; every other
   # verdict preserves the loud refusal boundary.
