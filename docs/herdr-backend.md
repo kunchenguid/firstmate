@@ -915,6 +915,7 @@ Claude's Bypass Permissions warning starts on destructive `No, exit`, so the onl
 Codex hooks review similarly navigates from `Review hooks` to `Trust all and continue` and verifies the move before Enter.
 The focused choice is read only from menu rows whose text is one of that dialog's own known options, because the cursor glyphs `❯`/`›` are also the agent composer's prompt glyphs (`FM_BACKEND_HERDR_BARE_PROMPT_RE`) and a composer or transcript row rendered below the overlay would otherwise be mistaken for the focus.
 A known menu whose focus is not parsable is treated as a mid-repaint frame and keeps polling like an unknown shape, so a half-drawn first capture cannot fail a spawn instantly.
+Codex's trust screen is the one dialog confirmed by a bare Enter with no cursor drawn, so its `Press enter to continue` reading requires the capture to hold no selection glyph at all; a glyph matching none of the recognized options stays unknown rather than being read as accept.
 An unknown blocked dialog, unreadable post-key state, or an exhausted key budget fails the spawn with a classified error.
 
 A repeat Enter is the one retry that can be destructive, because a dismissal can be followed by another menu whose default is `No, exit`, and the recent source retains the dismissed frame.
