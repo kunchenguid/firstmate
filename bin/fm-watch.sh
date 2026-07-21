@@ -875,6 +875,10 @@ EOF
       continue
     fi
     tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null) || continue
+    # Trailing whitespace is stripped before hashing as secondary hardening: a
+    # redraw/reattach blip that only pads or trims trailing blanks then never
+    # produces a new hash in the first place, on top of the .hb-surfaced-<task>
+    # marker check below that absorbs a changed hash on unchanged content.
     h=$(printf '%s' "$tail40" | sed 's/[[:space:]]*$//' | hash_pane)
     key=$(printf '%s' "$w" | tr ':/.' '___')
     hf="$STATE/.hash-$key"
