@@ -99,6 +99,13 @@
 # Per-harness turn-end hooks are installed automatically; some live outside the worktree.
 # grok uses a firstmate-owned global hook under ${GROK_HOME:-$HOME/.grok}/hooks
 # plus a gitignored .fm-grok-turnend worktree pointer and a state token.
+# After launch on the herdr backend, a claude/codex spawn hands the pane to the
+# adapter's guarded first-launch dialog handler rather than reporting a crewmate
+# whose harness may still be parked on an unverified trust/permission/hooks menu;
+# see docs/herdr-backend.md "Guarded first-launch dialog handling". The harness is
+# already launched by then, so an unverified pane exits non-zero WITHOUT the
+# spawned line while the task stays registered: the error names the id, window and
+# worktree so it can be finished by hand or removed with bin/fm-teardown.sh.
 # On success prints: spawned <id> harness=<name> kind=<ship|scout|secondmate> mode=<mode> yolo=<on|off> window=<backend-target> worktree=<path>
 # mode/yolo are resolved per-project from data/projects.md for ship/scout tasks;
 # secondmate spawns record mode=secondmate, yolo=off, home=, and projects=.
@@ -1284,6 +1291,17 @@ if [ "$KIND" = secondmate ]; then
       echo "CONFIG_REREAD: secondmate $ID: cleanup failed; pre-relaunch generations were force-cleared where possible (destination=$PROJ_ABS source=$FM_HOME)" >&2
     fi
   fi
+fi
+if [ "$BACKEND" = herdr ]; then
+  case "$HARNESS" in
+    claude*|codex*)
+      fm_backend_herdr_handle_startup_dialog "$T" "$HARNESS" || {
+        echo "error: guarded herdr startup dialog handling failed for $ID; inspect pane $T" >&2
+        echo "error: $ID stays registered (window=$META_WINDOW worktree=$WT) because the harness may be running: answer the pane by hand to continue it, or run bin/fm-teardown.sh $ID to remove it" >&2
+        exit 1
+      }
+      ;;
+  esac
 fi
 
 echo "spawned $ID harness=$HARNESS kind=$KIND mode=$MODE yolo=$YOLO window=$META_WINDOW worktree=$WT"

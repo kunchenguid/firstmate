@@ -1054,8 +1054,279 @@ test_normalize_key() {
     [ "$(fm_backend_herdr_normalize_key Escape)" = escape ] || exit 1
     [ "$(fm_backend_herdr_normalize_key C-c)" = ctrl+c ] || exit 1
     [ "$(fm_backend_herdr_normalize_key ctrl+c)" = ctrl+c ] || exit 1
+    [ "$(fm_backend_herdr_normalize_key Down)" = down ] || exit 1
+    [ "$(fm_backend_herdr_normalize_key Up)" = up ] || exit 1
   ) || fail "fm_backend_herdr_normalize_key did not map firstmate's key vocabulary to herdr's verified names"
-  pass "fm_backend_herdr_normalize_key: Enter/Escape/C-c map to herdr's verified enter/escape/ctrl+c"
+  pass "fm_backend_herdr_normalize_key: Enter/Escape/C-c/Down/Up map to herdr's verified key names"
+}
+
+# --- guarded first-launch dialog handling ----------------------------------
+
+test_dialog_classifies_supported_first_launch_menus() {
+  local out
+  out=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_dialog_classify claude "$1"' "$ROOT" $'Accessing workspace:\nQuick safety check\n❯ 1. Yes, I trust this folder\n  2. No, exit')
+  [ "$out" = $'claude-trust\taccept' ] || fail "claude trust dialog classification was '$out'"
+
+  out=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_dialog_classify claude "$1"' "$ROOT" $'WARNING: Claude Code running in Bypass Permissions mode\n  1. Yes, I accept\n❯ 2. No, exit')
+  [ "$out" = $'claude-bypass\treject' ] || fail "claude bypass dialog classification was '$out'"
+
+  out=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_dialog_classify codex "$1"' "$ROOT" $'> You are in /tmp/project\nDo you trust the contents of this directory?\nYes, continue\nPress enter to continue')
+  [ "$out" = $'codex-trust\taccept' ] || fail "codex trust dialog classification was '$out'"
+
+  out=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_dialog_classify codex "$1"' "$ROOT" $'Hooks need review\n2 hooks are new or changed.\n› Review hooks\n  Trust all and continue\n  Continue without trusting (hooks won\x27t run)')
+  [ "$out" = $'codex-hooks-review\treview' ] || fail "codex hooks-review dialog classification was '$out'"
+  pass "herdr first-launch dialogs: claude trust/bypass and codex trust/hooks-review are classified with focused choice"
+}
+
+test_dialog_navigation_verifies_cursor_move_before_enter() {
+  local dir log resp fb out down_count enter_count
+  dir="$TMP_ROOT/dialog-move"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  # Down succeeds, then the readback proves the safe choice is focused.
+  printf 'WARNING: Claude Code running in Bypass Permissions mode\n  1. No, exit\n❯ 2. Yes, I accept\n' > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_dialog_drive_visible default:w1:p2 claude "$1" 2 0' \
+      "$ROOT" $'WARNING: Claude Code running in Bypass Permissions mode\n❯ 1. No, exit\n  2. Yes, I accept') \
+    || fail "dialog handler should accept a verified cursor move"
+  [ "$out" = $'claude-bypass\taccept' ] || fail "verified move should return the safe focused state, got '$out'"
+  down_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''down' "$log")
+  enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log" || true)
+  [ "$down_count" -eq 1 ] || fail "dialog handler should send exactly one Down before verified movement, sent $down_count"
+  [ "$enter_count" -eq 0 ] || fail "dialog handler must not combine navigation and Enter before readback"
+  pass "herdr first-launch dialogs: navigation sends one key and verifies the cursor reached the safe choice before Enter"
+}
+
+test_dialog_destructive_default_never_receives_blind_enter() {
+  local dir log resp fb rc enter_count down_count
+  dir="$TMP_ROOT/dialog-destructive"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf 'WARNING: Claude Code running in Bypass Permissions mode\n❯ 1. No, exit\n  2. Yes, I accept\n' > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_dialog_drive_visible default:w1:p2 claude "$1" 1 0' \
+      "$ROOT" $'WARNING: Claude Code running in Bypass Permissions mode\n❯ 1. No, exit\n  2. Yes, I accept' >/dev/null 2>&1
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "an unchanged destructive default must fail after its bounded navigation budget"
+  enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log" || true)
+  down_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''down' "$log")
+  [ "$enter_count" -eq 0 ] || fail "destructive default protection failed: handler sent Enter while No, exit remained focused"
+  [ "$down_count" -eq 1 ] || fail "handler should make one bounded navigation attempt, sent $down_count"
+  pass "herdr first-launch dialogs: an unchanged destructive default fails loudly without any blind Enter"
+}
+
+test_dialog_navigation_retry_budget_is_bounded() {
+  local dir log resp fb rc down_count
+  dir="$TMP_ROOT/dialog-retry-budget"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf 'Hooks need review\n› Review hooks\n  Trust all and continue\n  Continue without trusting (hooks won\x27t run)\n' > "$resp/2.out"
+  printf 'Hooks need review\n› Review hooks\n  Trust all and continue\n  Continue without trusting (hooks won\x27t run)\n' > "$resp/4.out"
+  fb=$(make_herdr_fakebin "$dir")
+  PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_dialog_drive_visible default:w1:p2 codex "$1" 2 0' \
+      "$ROOT" $'Hooks need review\n› Review hooks\n  Trust all and continue\n  Continue without trusting (hooks won\x27t run)' >/dev/null 2>&1
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "an unmoved hooks-review cursor must exhaust its retry budget"
+  down_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''down' "$log")
+  [ "$down_count" -eq 2 ] || fail "retry exhaustion should stop after exactly two Down attempts, sent $down_count"
+  pass "herdr first-launch dialogs: cursor-move retry exhaustion is bounded and fails closed"
+}
+
+test_events_capable_large_schema_is_pipefail_safe() {
+  local dir fb schema out
+  dir="$TMP_ROOT/events-pipefail"; mkdir -p "$dir/fakebin"
+  schema="$dir/schema.json"
+  { printf '{\"methods\":[\"events.subscribe\",\"pane.agent_status_changed\"],\n\"padding\":\"'; head -c 262144 /dev/zero | tr '\0' x | fold -w 100; printf '\"}\n'; } > "$schema"
+  fb="$dir/fakebin"
+  cat > "$fb/herdr" <<'SH'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  "status --json") printf '{"client":{"protocol":16}}\n' ;;
+  "api schema") cat "$FM_FAKE_SCHEMA" ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$fb/herdr"
+  out=$(PATH="$fb:$PATH" FM_FAKE_SCHEMA="$schema" bash -o pipefail -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_events_capable default && printf ok' "$ROOT" 2>&1) \
+    || fail "events capability detection must succeed without SIGPIPE under pipefail: $out"
+  [ "$out" = ok ] || fail "pipe-safe capability probe returned unexpected output: '$out'"
+  pass "fm_backend_herdr_events_capable: a large matching schema is checked without printf SIGPIPE under pipefail"
+}
+
+test_dialog_phantom_known_dialog_text_with_running_agent_is_not_driven() {
+  local dir log resp fb keys
+  dir="$TMP_ROOT/dialog-phantom-known"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf 'claude "brief: handle WARNING: Claude Code running in Bypass Permissions mode via Yes, I accept over No, exit"\n' > "$resp/1.out"
+  printf '{"result":{"agent":{"agent":"claude","agent_status":"working"}}}\n' > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_DIALOG_POLLS=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_handle_startup_dialog default:w1:p2 claude' "$ROOT" >/dev/null 2>&1 \
+    || fail "quoted dialog text must not fail a spawn whose agent already reports working"
+  keys=$(grep -c $'\x1f''pane'$'\x1f''send-keys' "$log" || true)
+  [ "$keys" -eq 0 ] || fail "no dialog keys may be sent while the agent reports working, sent $keys"
+  pass "herdr first-launch dialogs: dialog-shaped quoted text with a running agent sends no keys and spawns clean"
+}
+
+test_dialog_unknown_text_with_running_agent_spawns_clean() {
+  local dir log resp fb keys
+  dir="$TMP_ROOT/dialog-unknown-running"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf 'transcript quotes the No, exit choice from the brief\n' > "$resp/1.out"
+  printf '{"result":{"agent":{"agent":"claude","agent_status":"working"}}}\n' > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_DIALOG_POLLS=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_handle_startup_dialog default:w1:p2 claude' "$ROOT" >/dev/null 2>&1 \
+    || fail "unrecognized quoted dialog text must not fail a spawn whose agent already reports working"
+  keys=$(grep -c $'\x1f''pane'$'\x1f''send-keys' "$log" || true)
+  [ "$keys" -eq 0 ] || fail "unknown dialog text with a running agent must not produce keys, sent $keys"
+  pass "herdr first-launch dialogs: unknown dialog-shaped text with a running agent spawns clean"
+}
+
+test_dialog_unknown_text_with_blocked_agent_fails_closed() {
+  local dir log resp fb out rc keys
+  dir="$TMP_ROOT/dialog-unknown-blocked"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf 'A brand new menu shape Enter to confirm\n' > "$resp/1.out"
+  printf '{"result":{"agent":{"agent":"claude","agent_status":"blocked"}}}\n' > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_DIALOG_POLLS=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_handle_startup_dialog default:w1:p2 claude' "$ROOT" 2>&1)
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "an unknown dialog with a corroborated blocked agent must fail the spawn"
+  case "$out" in *'refusing to guess a key'*) ;; *) fail "blocked unknown dialog should fail with the refusal message, got '$out'" ;; esac
+  keys=$(grep -c $'\x1f''pane'$'\x1f''send-keys' "$log" || true)
+  [ "$keys" -eq 0 ] || fail "an unknown blocked dialog must never receive keys, sent $keys"
+  pass "herdr first-launch dialogs: an unknown dialog corroborated blocked fails closed without keys"
+}
+
+test_dialog_unknown_text_without_agent_polls_to_timeout() {
+  local dir log resp fb out rc keys
+  dir="$TMP_ROOT/dialog-unknown-absent"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf 'launch command still visible, brief quotes No, exit\n' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_DIALOG_POLLS=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_handle_startup_dialog default:w1:p2 claude' "$ROOT" 2>&1)
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "dialog-shaped text without a corroborating agent must stay unverified"
+  case "$out" in *'was not verifiable'*) ;; *) fail "uncorroborated dialog text should poll to the bounded timeout, got '$out'" ;; esac
+  keys=$(grep -c $'\x1f''pane'$'\x1f''send-keys' "$log" || true)
+  [ "$keys" -eq 0 ] || fail "uncorroborated dialog text must not receive keys, sent $keys"
+  pass "herdr first-launch dialogs: dialog-shaped text without an agent polls to the bounded timeout instead of instant failure"
+}
+
+test_dialog_visible_dialog_with_idle_agent_is_still_driven() {
+  local dir log resp fb down_count enter_count
+  dir="$TMP_ROOT/dialog-idle-drive"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf 'WARNING: Claude Code running in Bypass Permissions mode\n❯ 1. No, exit\n  2. Yes, I accept\n' > "$resp/1.out"
+  printf '{"result":{"agent":{"agent":"claude","agent_status":"idle"}}}\n' > "$resp/2.out"
+  printf 'WARNING: Claude Code running in Bypass Permissions mode\n  1. No, exit\n❯ 2. Yes, I accept\n' > "$resp/4.out"
+  fb=$(make_herdr_fakebin "$dir")
+  PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    FM_BACKEND_HERDR_DIALOG_POLLS=1 FM_BACKEND_HERDR_DIALOG_KEY_RETRIES=1 FM_BACKEND_HERDR_DIALOG_KEY_SLEEP=0 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_handle_startup_dialog default:w1:p2 claude' "$ROOT" >/dev/null 2>&1
+  down_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''down' "$log" || true)
+  enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log" || true)
+  [ "$down_count" -eq 1 ] || fail "an idle agent must not short-circuit a classified visible dialog; the handler must still drive it, sent $down_count Downs"
+  [ "$enter_count" -eq 0 ] || fail "driving a visible dialog under an idle agent must still verify movement before Enter, sent $enter_count Enters"
+  pass "herdr first-launch dialogs: idle/done never short-circuits a classified visible dialog; only a working agent does"
+}
+
+test_dialog_clean_capture_with_done_agent_verifies_spawn() {
+  local dir log resp fb keys
+  dir="$TMP_ROOT/dialog-none-done"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf 'harness banner, no dialog anywhere\n' > "$resp/1.out"
+  printf '{"result":{"agent":{"agent":"claude","agent_status":"done"}}}\n' > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_DIALOG_POLLS=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_handle_startup_dialog default:w1:p2 claude' "$ROOT" >/dev/null 2>&1 \
+    || fail "a dialog-free capture with a done agent must verify the spawn"
+  keys=$(grep -c $'\x1f''pane'$'\x1f''send-keys' "$log" || true)
+  [ "$keys" -eq 0 ] || fail "a dialog-free done agent must not receive keys, sent $keys"
+  pass "herdr first-launch dialogs: idle/done still verifies the spawn when the capture shows no dialog shape"
+}
+
+test_dialog_stale_dismissed_frame_with_running_agent_stops_enters() {
+  local dir log resp fb enter_count
+  dir="$TMP_ROOT/dialog-stale-dismiss"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf 'WARNING: Claude Code running in Bypass Permissions mode\n  1. No, exit\n❯ 2. Yes, I accept\n' > "$resp/2.out"
+  printf '{"result":{"agent":{"agent":"claude","agent_status":"working"}}}\n' > "$resp/3.out"
+  fb=$(make_herdr_fakebin "$dir")
+  PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_dialog_drive_visible default:w1:p2 claude "$1" 3 0' \
+      "$ROOT" $'WARNING: Claude Code running in Bypass Permissions mode\n  1. No, exit\n❯ 2. Yes, I accept' >/dev/null 2>&1 \
+    || fail "a stale dismissed frame with a running agent must count as a verified dismissal"
+  enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
+  [ "$enter_count" -eq 1 ] || fail "stale-frame dismissal must stop after one Enter once the agent reports running, sent $enter_count"
+  pass "herdr first-launch dialogs: a stale dismissed frame stops retry Enters once the agent reports running"
+}
+
+test_dialog_focus_reads_only_the_menu_rows_not_the_composer_prompt() {
+  local out
+  out=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_dialog_classify claude "$1"' "$ROOT" \
+    $'Accessing workspace:\n❯ 1. Yes, I trust this folder\n  2. No, exit\n\n❯ ')
+  [ "$out" = $'claude-trust\taccept' ] || fail "a composer prompt row below the menu must not outrank the focused choice, got '$out'"
+
+  out=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_dialog_classify codex "$1"' "$ROOT" \
+    $'Hooks need review\n  Review hooks\n› Trust all and continue\n  Continue without trusting (hooks won\x27t run)\n› ')
+  [ "$out" = $'codex-hooks-review\taccept' ] || fail "codex hooks-review focus must survive a trailing composer glyph row, got '$out'"
+  pass "herdr first-launch dialogs: focus is read from the dialog's own option rows, never a composer prompt glyph"
+}
+
+test_dialog_codex_trust_enter_fallback_needs_a_cursorless_screen() {
+  local out
+  out=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_dialog_classify codex "$1"' "$ROOT" \
+    $'Do you trust the contents of this directory?\n  Yes, continue\n❯ 2. No, exit and choose another folder\nPress enter to continue')
+  [ "$out" = $'codex-trust\tunknown' ] || fail "an unrecognized selection glyph must not fall back to accept, got '$out'"
+
+  out=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_dialog_classify codex "$1"' "$ROOT" \
+    $'Do you trust the contents of this directory?\nYes, continue\nPress enter to continue')
+  [ "$out" = $'codex-trust\taccept' ] || fail "a cursorless codex trust screen must still accept on Enter, got '$out'"
+  pass "herdr first-launch dialogs: codex trust's Enter fallback applies only when no selection cursor is rendered at all"
+}
+
+test_dialog_repainted_frame_after_enter_refuses_a_second_enter() {
+  local dir log resp fb rc enter_count
+  dir="$TMP_ROOT/dialog-repaint-enter"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  # The pane repainted after Enter but still shows an accept-focused frame, and
+  # the agent does not report working: the dismissal is unproven, so no second
+  # Enter may go out (the replacement menu could default to No, exit).
+  printf 'WARNING: Claude Code running in Bypass Permissions mode\n  1. No, exit\n❯ 2. Yes, I accept\nesc to interrupt\n' > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_dialog_drive_visible default:w1:p2 claude "$1" 3 0' \
+      "$ROOT" $'WARNING: Claude Code running in Bypass Permissions mode\n  1. No, exit\n❯ 2. Yes, I accept' >/dev/null 2>&1
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "an unproven dismissal must not be reported as verified"
+  enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
+  [ "$enter_count" -eq 1 ] || fail "a repainted post-Enter frame must never authorize another Enter, sent $enter_count"
+  pass "herdr first-launch dialogs: a repainted but unresolved frame after Enter fails loudly instead of retrying Enter"
+}
+
+test_dialog_known_menu_without_parsable_focus_polls_instead_of_failing_instantly() {
+  local dir log resp fb out rc keys
+  dir="$TMP_ROOT/dialog-unfocused-known"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  # A mid-repaint frame: the options are drawn, the cursor row is not yet.
+  printf 'Accessing workspace:\n  1. Yes, I trust this folder\n  2. No, exit\n' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_DIALOG_POLLS=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_handle_startup_dialog default:w1:p2 claude' "$ROOT" 2>&1)
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "an unfocused known menu must stay unverified"
+  case "$out" in *'was not verifiable'*) ;; *) fail "an unfocused known menu should poll to the bounded timeout, got '$out'" ;; esac
+  keys=$(grep -c $'\x1f''pane'$'\x1f''send-keys' "$log" || true)
+  [ "$keys" -eq 0 ] || fail "a menu whose focus is unparsable must not receive keys, sent $keys"
+  pass "herdr first-launch dialogs: a known menu with no parsable focus keeps polling instead of failing on the first capture"
+}
+
+test_spawn_reports_the_registered_task_when_dialog_handling_fails() {
+  local source
+  source=$(cat "$ROOT/bin/fm-spawn.sh")
+  assert_contains "$source" "bin/fm-teardown.sh \$ID to remove it" \
+    "a failed guarded dialog spawn must name the still-registered task and how to remove it"
+  pass "fm-spawn: a failed guarded dialog spawn reports the registered task instead of claiming nothing was left behind"
+}
+
+test_spawn_wires_guarded_herdr_dialog_handler() {
+  local source
+  source=$(cat "$ROOT/bin/fm-spawn.sh")
+  assert_contains "$source" "fm_backend_herdr_handle_startup_dialog \"\$T\" \"\$HARNESS\"" \
+    "fm-spawn must invoke the guarded Herdr dialog handler after launch submission"
+  pass "fm-spawn: herdr launch submission enters the guarded post-spawn dialog handler"
 }
 
 # --- capture / send_key / kill / current_path --------------------------------
@@ -2468,6 +2739,24 @@ test_workspace_find_matches_only_this_homes_own_label
 test_list_live_scoped_to_this_homes_workspace_only
 test_parse_target
 test_normalize_key
+test_dialog_classifies_supported_first_launch_menus
+test_dialog_navigation_verifies_cursor_move_before_enter
+test_dialog_destructive_default_never_receives_blind_enter
+test_dialog_navigation_retry_budget_is_bounded
+test_dialog_phantom_known_dialog_text_with_running_agent_is_not_driven
+test_dialog_unknown_text_with_running_agent_spawns_clean
+test_dialog_unknown_text_with_blocked_agent_fails_closed
+test_dialog_unknown_text_without_agent_polls_to_timeout
+test_dialog_visible_dialog_with_idle_agent_is_still_driven
+test_dialog_clean_capture_with_done_agent_verifies_spawn
+test_dialog_stale_dismissed_frame_with_running_agent_stops_enters
+test_dialog_focus_reads_only_the_menu_rows_not_the_composer_prompt
+test_dialog_codex_trust_enter_fallback_needs_a_cursorless_screen
+test_dialog_repainted_frame_after_enter_refuses_a_second_enter
+test_dialog_known_menu_without_parsable_focus_polls_instead_of_failing_instantly
+test_events_capable_large_schema_is_pipefail_safe
+test_spawn_wires_guarded_herdr_dialog_handler
+test_spawn_reports_the_registered_task_when_dialog_handling_fails
 test_capture_calls_pane_read
 test_capture_works_around_small_lines_bug
 test_capture_preserves_pane_read_failure
