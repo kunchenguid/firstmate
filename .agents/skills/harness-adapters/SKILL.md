@@ -184,7 +184,7 @@ The tracked hook anchors to `pwd -P`, verifies that root is firstmate-shaped and
 Codex's primary watcher protocol is `bin/fm-watch-checkpoint.sh --seconds "${FM_CODEX_WATCH_CHECKPOINT:-180}"`, not `bin/fm-watch-arm.sh`.
 The checkpoint is deliberately foreground and bounded so Codex regains control regularly to process user messages and queued wakes.
 
-## opencode (VERIFIED 2026-06-11, v1.15.7-1.17.6)
+## opencode (VERIFIED 2026-06-11, v1.15.7-1.17.6; 1.18.4 busy-queue re-verified 2026-07-20)
 
 | Fact | Value |
 |---|---|
@@ -196,6 +196,24 @@ No trust dialog.
 Opencode can auto-upgrade itself in the background and the running TUI can exit mid-task, observed live from 1.15.7 to 1.17.3.
 If a pane shows the exit banner, relaunch with `--continue` to resume the session.
 `--prompt` does not auto-submit alongside `--continue`, so send the next instruction via `fm-send` once the TUI is up.
+
+**Busy-queued Enter (opencode 1.18.4, tmux backend fix, herdr known gap).**
+While opencode is mid-turn, the composer accepts Enter as a "send when the turn
+ends" keystroke but does not clear the typed text from the composer until the
+turn actually finishes.
+Without a fix, every `fm-send` to a busy opencode pane exits non-zero on a
+false "Enter swallowed", and every daemon escalation that lands while the
+primary is mid-turn is treated as wedged.
+The shared `fm_tmux_submit_enter_core` (`bin/fm-tmux-lib.sh`) now falls back
+to `fm_pane_is_busy` once the Enter-retry budget is spent: a busy pane means
+the Enter was accepted and queued (reported as `empty` so the caller does not
+re-send), while an idle pane keeps `pending` as a genuine swallow. The herdr
+adapter observes the same opencode behavior but needs a separate fix; it is
+recorded as a known gap in `docs/herdr-backend.md` rather than patched here,
+so the tmux adapter does not paper over a herdr-specific shape.
+Regression coverage: `tests/fm-tmux-submit-busy.test.sh` covers the four
+scenarios (busy + pending -> `empty`, idle + pending -> `pending`, busy +
+cleared -> `empty`, idle + cleared -> `empty`).
 
 **Primary-session guard fact (verified 2026-07-08, OpenCode 1.17.6).**
 The firstmate PRIMARY's own `.opencode/plugins/fm-primary-turnend-guard.js` listens for `session.idle`.
