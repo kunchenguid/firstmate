@@ -105,6 +105,10 @@ duplicate line, an unexpected verb, or an unknown field is a local refusal.
 
 Environment:
   FM_REMOTE_SSH_CONNECT_TIMEOUT  ssh ConnectTimeout seconds (default 10).
+  FM_REMOTE_SSH_DEADLINE         overall wall-clock deadline in seconds for
+                                 each remote call (default 120); a remote
+                                 command still running at the deadline is
+                                 killed and the call refuses.
   FM_CONFIG_OVERRIDE             alternate config directory (testing).
 
 Exit codes: 0 success; 1 registry, transport, protocol, or remote refusal;
@@ -266,15 +270,37 @@ parse_registry() {
 
 REMOTE_OUT=
 
+# run_with_deadline <seconds> <command...>: enforce an overall wall-clock
+# bound on one remote call, via timeout/gtimeout when available and a perl
+# alarm watchdog otherwise; every path exits 124 when the deadline expires,
+# matching timeout(1).
+run_with_deadline() {
+  local secs=$1
+  shift
+  if command -v timeout >/dev/null 2>&1; then
+    timeout "$secs" "$@"
+  elif command -v gtimeout >/dev/null 2>&1; then
+    gtimeout "$secs" "$@"
+  else
+    # shellcheck disable=SC2016  # single quotes are deliberate: Perl expands its own variables.
+    perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV or exit 127 } my $stop = sub { $SIG{HUP} = $SIG{INT} = $SIG{TERM} = "IGNORE"; kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; waitpid $pid, 0; exit 124 }; local $SIG{ALRM} = $stop; local $SIG{HUP} = $stop; local $SIG{INT} = $stop; local $SIG{TERM} = $stop; alarm $t; waitpid $pid, 0; exit(($? & 127) ? 128 + ($? & 127) : $? >> 8)' "$secs" "$@"
+  fi
+}
+
 # remote_run <script>: run <script> on HOST_ALIAS through bash -lc/-c per
 # HOST_LOGIN_SHELL, with BatchMode (never an interactive prompt), a bounded
-# connect timeout, keepalive bounds, and a fixed stdout byte cap. The script
-# text is embedded via printf %q so it crosses ssh as one argument.
+# connect timeout, keepalive bounds, an overall wall-clock deadline, and a
+# fixed stdout byte cap. The script text is embedded via printf %q so it
+# crosses ssh as one argument.
 remote_run() {
-  local script=$1 flags rc
+  local script=$1 flags rc deadline
+  deadline=${FM_REMOTE_SSH_DEADLINE:-120}
+  case "$deadline" in ''|0*|*[!0-9]*)
+    refuse "FM_REMOTE_SSH_DEADLINE must be a positive integer (seconds)" ;;
+  esac
   if [ "$HOST_LOGIN_SHELL" = yes ]; then flags='-lc'; else flags='-c'; fi
   REMOTE_OUT=$(
-    ssh -o BatchMode=yes \
+    run_with_deadline "$deadline" ssh -o BatchMode=yes \
       -o ConnectTimeout="${FM_REMOTE_SSH_CONNECT_TIMEOUT:-10}" \
       -o ServerAliveInterval=15 -o ServerAliveCountMax=4 \
       -- "$HOST_ALIAS" "bash $flags $(printf '%q' "$script")" \
@@ -282,6 +308,8 @@ remote_run() {
     exit "${PIPESTATUS[0]}"
   )
   rc=$?
+  [ "$rc" -ne 124 ] \
+    || refuse "remote host '$HOST_ID' hit the ${deadline}s wall-clock deadline (FM_REMOTE_SSH_DEADLINE)"
   [ "$rc" -eq 0 ] \
     || refuse "remote host '$HOST_ID' unreachable or remote command failed (ssh exit $rc)"
 }
@@ -381,14 +409,14 @@ top_phys=$(cd "$top" && pwd -P) || { printf "fm-remote-v1 refuse reason=not-a-re
 [ "$top_phys" = "$proj_phys" ] || { printf "fm-remote-v1 refuse reason=project-not-toplevel\n"; exit 0; }
 '
 
-# Shared: resolve $dest physically and prove containment below $root plus
-# that it is a worktree whose top level is $dest itself.
+# Shared: resolve $dest physically and prove containment strictly below
+# $root plus that it is a worktree whose top level is $dest itself.
 # shellcheck disable=SC2016
 REMOTE_DEST_CHECK='
 [ -d "$dest" ] || { printf "fm-remote-v1 refuse reason=path-not-dir\n"; exit 0; }
 dest_phys=$(cd "$dest" && pwd -P) || { printf "fm-remote-v1 refuse reason=path-unreadable\n"; exit 0; }
 root_phys=$(cd "$root" && pwd -P) || { printf "fm-remote-v1 refuse reason=task-root-unreadable\n"; exit 0; }
-case "$dest_phys/" in "$root_phys"/*) : ;; *) printf "fm-remote-v1 refuse reason=out-of-root\n"; exit 0 ;; esac
+case "$dest_phys/" in "$root_phys"/?*) : ;; *) printf "fm-remote-v1 refuse reason=out-of-root\n"; exit 0 ;; esac
 [ "$dest_phys" != "$proj_phys" ] || { printf "fm-remote-v1 refuse reason=path-is-project\n"; exit 0; }
 wt_top=$(git -C "$dest" rev-parse --show-toplevel 2>/dev/null) || { printf "fm-remote-v1 refuse reason=not-a-worktree\n"; exit 0; }
 wt_top_phys=$(cd "$wt_top" && pwd -P) || { printf "fm-remote-v1 refuse reason=not-a-worktree\n"; exit 0; }
