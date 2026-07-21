@@ -71,7 +71,8 @@
 #   A --secondmate spawn also propagates the primary's declared inherited local
 #   material, so the secondmate's OWN crewmates inherit primary config and the
 #   secondmate receives the primary's read-only shared captain-preference file
-#   (fm-config-inherit-lib.sh).
+#   (fm-config-inherit-lib.sh). A successful launch clears pending inherited
+#   config reread generations because the new agent reads the converged files.
 #   --scout records kind=scout in the task's meta (report deliverable, scratch worktree;
 #   see AGENTS.md task lifecycle); --secondmate records kind=secondmate and launches in a
 #   provisioned firstmate home; the default is kind=ship.
@@ -224,6 +225,8 @@ HERDR_PRESENTATION_ORDER_LOCK=
 HERDR_PRESENTATION_ORDER_LOCK_HELD=0
 SPAWN_TASK_LOCK=
 SPAWN_TASK_LOCK_HELD=0
+CONFIG_INHERIT_LOCK=
+CONFIG_INHERIT_LOCK_HELD=0
 
 parse_orca_worktree_result() {
   local raw=$1 rest
@@ -293,6 +296,10 @@ spawn_abort_cleanup() {
   if [ "$SPAWN_TASK_LOCK_HELD" = 1 ]; then
     SPAWN_TASK_LOCK_HELD=0
     fm_lock_release "$SPAWN_TASK_LOCK" || true
+  fi
+  if [ "$CONFIG_INHERIT_LOCK_HELD" = 1 ]; then
+    CONFIG_INHERIT_LOCK_HELD=0
+    fm_lock_release "$CONFIG_INHERIT_LOCK" || true
   fi
   return "$status"
 }
@@ -709,6 +716,19 @@ if [ "$KIND" = secondmate ]; then
   else
     echo "warning: secondmate $ID sync skipped before launch: primary default-branch commit cannot be resolved" >&2
   fi
+  mkdir -p "$PROJ_ABS/state" || {
+    echo "error: could not create secondmate state directory for $PROJ_ABS" >&2
+    exit 1
+  }
+  CONFIG_INHERIT_LOCK=$(fm_config_inherit_lock_path "$PROJ_ABS") || {
+    echo "error: could not resolve secondmate inheritance lock for $PROJ_ABS" >&2
+    exit 1
+  }
+  if ! fm_lock_acquire_wait "$CONFIG_INHERIT_LOCK"; then
+    echo "error: could not acquire secondmate inheritance lock for $PROJ_ABS" >&2
+    exit 1
+  fi
+  CONFIG_INHERIT_LOCK_HELD=1
   # Inheritance propagation: push the primary-authoritative local inheritance
   # surface into this secondmate home (fm-config-inherit-lib.sh).
   propagate_secondmate_inheritance "$FM_HOME" "$PROJ_ABS" "$CONFIG" "$DATA" \
@@ -1256,5 +1276,14 @@ if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
   spawn_herdr_presentation_order_lock_release
 fi
 spawn_send_key "$T" Enter
+if [ "$KIND" = secondmate ]; then
+  if ! fm_config_reread_discard_pending "$PROJ_ABS" "$ID" "$FM_HOME"; then
+    if fm_config_reread_quarantine_pending "$PROJ_ABS" "$ID" "$FM_HOME"; then
+      echo "CONFIG_REREAD: secondmate $ID: quarantined pre-relaunch generations after cleanup failure (destination=$PROJ_ABS/state/.fm-inherited-config-reread-quarantine source=$FM_HOME/state/.fm-inherited-config-reread-quarantine)" >&2
+    else
+      echo "CONFIG_REREAD: secondmate $ID: cleanup failed; pre-relaunch generations were force-cleared where possible (destination=$PROJ_ABS source=$FM_HOME)" >&2
+    fi
+  fi
+fi
 
 echo "spawned $ID harness=$HARNESS kind=$KIND mode=$MODE yolo=$YOLO window=$META_WINDOW worktree=$WT"

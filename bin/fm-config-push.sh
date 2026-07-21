@@ -7,8 +7,14 @@
 # discovers live secondmate homes from state/*.meta, backfills
 # home= from data/secondmates.md for older meta records, and reuses the same
 # propagation machinery as bootstrap, but deliberately does not
-# fast-forward tracked files and does not nudge running secondmates.
-# Warnings-only skips exit 0; real propagation errors exit non-zero.
+# fast-forward tracked files.
+# After a successful per-home propagation that changes any allowlisted config/*
+# item, writes a generation-specific literal-content reread instruction and
+# sends its pointer to that live secondmate via fm-config-inherit-lib.sh
+# (fm_config_send_reread_nudge).
+# Unchanged config and data/captain-shared.md-only updates send no reread
+# message unless a previous send failure is pending for that home.
+# Warnings-only skips exit 0; real propagation or reread-send errors exit non-zero.
 set -u
 
 usage() {
@@ -20,10 +26,12 @@ live secondmate home.
 
 This is local-material-only:
   - does not fast-forward tracked files
-  - does not nudge secondmates
+  - after successful config/* changes, writes a generation-specific
+    literal-content reread instruction and sends its pointer to that live secondmate
+    (no message when config is unchanged unless a previous send failure is pending)
   - reports each live home and each inheritable item as pushed, unchanged,
     skipped, or error
-  - exits non-zero only for real propagation errors
+  - exits non-zero for real propagation errors or reread-send failures
 
 Live homes come from state/*.meta records with kind=secondmate.
 data/secondmates.md is only a fallback for missing home= fields in older or
@@ -63,6 +71,8 @@ SECONDMATES_MD="$DATA/secondmates.md"
 
 # shellcheck source=bin/fm-ff-lib.sh
 . "$SCRIPT_DIR/fm-ff-lib.sh"
+# shellcheck source=bin/fm-wake-lib.sh
+. "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-config-inherit-lib.sh
 . "$SCRIPT_DIR/fm-config-inherit-lib.sh"
 
@@ -125,18 +135,64 @@ while IFS='|' read -r id home _window meta; do
     echo "  home: dirty working tree - local-material push continuing"
   fi
 
+  mkdir -p "$home_real/state" || {
+    echo "  config-reread: error - could not create state directory"
+    errors=1
+    continue
+  }
+  home_lock=$(fm_config_inherit_lock_path "$home_real") || {
+    echo "  config-reread: error - could not resolve per-home lock"
+    errors=1
+    continue
+  }
+  fm_lock_acquire_wait "$home_lock" || {
+    echo "  config-reread: error - could not acquire per-home lock"
+    errors=1
+    continue
+  }
+  if fm_config_reread_retry_queue_is_full "$FM_HOME" "$id"; then
+    fm_config_reread_retry_pending "$id" "$home_real" || true
+    if fm_config_reread_retry_queue_is_full "$FM_HOME" "$id"; then
+      echo "  config-reread: error - retry instruction queue is full"
+      errors=1
+      fm_lock_release "$home_lock" || true
+      continue
+    fi
+  fi
+
   report=$(mktemp "${TMPDIR:-/tmp}/fm-config-push-report.XXXXXX" 2>/dev/null) || {
     echo "  home: error - could not create report file"
     errors=1
+    fm_lock_release "$home_lock" || true
     continue
   }
   reports="$reports $report"
   if FM_CONFIG_INHERIT_REPORT="$report" propagate_secondmate_inheritance "$FM_HOME" "$home_real" "$CONFIG" "$DATA"; then
-    print_item_report "$report"
+    :
   else
     errors=1
-    print_item_report "$report"
   fi
+  print_item_report "$report"
+  reread_pending=0
+  if fm_config_reread_has_pending "$home_real" || fm_config_reread_has_staged "$FM_HOME" "$id"; then
+    reread_pending=1
+  fi
+  if reread_out=$(FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" \
+    FM_STATE_OVERRIDE="$STATE" \
+    fm_config_send_reread_nudge "$id" "$home_real" "$report" 2>&1); then
+    if [ -n "$(fm_config_reread_changed_items "$report")" ] || [ "$reread_pending" -eq 1 ]; then
+      printf '  config-reread: sent\n'
+    fi
+    [ -z "$reread_out" ] || printf '%s\n' "$reread_out"
+  else
+    errors=1
+    if [ -n "$reread_out" ]; then
+      printf '%s\n' "$reread_out"
+    else
+      printf '  config-reread: send failed\n'
+    fi
+  fi
+  fm_lock_release "$home_lock" || true
 done < "$records"
 
 [ "$errors" -eq 0 ] || exit 1

@@ -92,10 +92,23 @@ Never copy any secondmate `data/captain-shared.md` back into the primary.
 Keep each home's `data/captain.md` domain-local.
 After first propagation to an existing home, trim that home's local `data/captain.md` by hand to domain-specific content plus pointers to `data/captain-shared.md`; do not automate or silently delete private content.
 Keep every `data/learnings.md` fully local by captain decision; route fleet-general machinery facts into tracked documentation through the normal firstmate repo path rather than inventing shared learnings propagation.
-No reread nudge is needed at spawn or respawn because the agent reads `AGENTS.md` fresh on launch; only the bootstrap sweep's running-home instruction-surface advance needs one.
-Bootstrap reports successful sends as `BOOTSTRAP_INFO:` and only emits `NUDGE_SECONDMATES:` when that send fails and needs retry.
-For already-live secondmates, use `bin/fm-config-push.sh` to push a mid-session inherited local-material change without running the tracked-file fast-forward or nudging the agents.
-It uses the same live-home discovery and propagation helper as bootstrap and reports each item as `pushed`, `unchanged`, `skipped`, or `error`.
+No AGENTS.md reread nudge is needed at spawn or respawn because the agent reads instructions fresh on launch; only the bootstrap sweep's running-home instruction-surface advance needs that AGENTS.md re-read.
+Bootstrap reports successful AGENTS.md re-read sends as `BOOTSTRAP_INFO:` and only emits `NUDGE_SECONDMATES:` when that send fails and needs retry.
+A separate, literal-content config reread is required whenever inherited `config/*` material changes under an already-running secondmate.
+After each successful allowlisted config write, both the locked bootstrap convergence path and mid-session `bin/fm-config-push.sh` use the shared propagation report to build one per-home generation-specific private instruction file from the validated destination post-write bytes for only the allowlisted config items that actually changed for that home (`config/crew-dispatch.json`, `config/crew-harness`, `config/backlog-backend`), in deterministic allowlist order.
+Each changed path is printed with clear begin/end delimiters and the destination file's full exact new bytes unparsed, or the explicit token `ABSENT` when propagation removed the destination copy.
+The instruction uses only minimal framing that these are defaults/rules and do not remove judgment; it never includes SHA values, selected profiles, parsed summaries, or any other generated interpretation.
+`data/captain-shared.md` is not a config file and is never inlined into this instruction file or message.
+Homes whose allowlisted config files were all unchanged receive no config-reread message when no retry is pending.
+Different homes may receive different changed-file sets based on their pre-push destination bytes.
+Delivery uses the existing routed secondmate path (`fm-send`) with only a single-line `CONFIG_REREAD: <absolute generation-specific instruction path>` pointer; a failed instruction publication retains the generated exact bytes in a bounded private retry queue when possible, legacy retry reports remain recoverable, a failed publication or retry-marker write retains the exact generation until it can be delivered, a failed send records a per-generation durable retry marker when possible, and all failures surface a concrete `CONFIG_REREAD:` diagnostic without claiming the live agent already re-read the values.
+The propagation, generation publication, and pointer-delivery sequence holds one per-home inheritance lock, so concurrent mid-session pushes cannot deliver an older generation after a newer one.
+A newly launched or relaunched secondmate already reads its files at launch, so its pending config-reread generations are discarded or quarantined after cleanup failure and it needs no redundant live-agent config nudge unless propagation changes files after launch.
+Quarantined pre-relaunch generations are retained in bounded private history, and cleanup skips creating an empty quarantine generation.
+Successfully delivered generations are retained only within a bounded per-home state history, while pending generations remain until delivery succeeds or a launch supersedes them.
+These config values remain defaults and rules only; they must not harden `fm-spawn` to reject a deliberate runtime choice that differs from the configured defaults.
+For already-live secondmates, use `bin/fm-config-push.sh` to push a mid-session inherited local-material change without running the tracked-file fast-forward.
+It uses the same live-home discovery and propagation helper as bootstrap, reports each item as `pushed`, `unchanged`, `skipped`, or `error`, and follows the config-reread contract above for changed or pending generations.
 `bin/fm-home-seed.sh` refuses to copy a missing or placeholder charter.
 
 Direct seed without a preexisting brief requires `FM_SECONDMATE_CHARTER`.

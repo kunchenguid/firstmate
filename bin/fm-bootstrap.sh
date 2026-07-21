@@ -185,6 +185,8 @@ fleet_sync() {
 }
 
 secondmate_sync() {
+  # shellcheck source=bin/fm-wake-lib.sh disable=SC1091
+  . "$SCRIPT_DIR/fm-wake-lib.sh"
   # Local-HEAD secondmate sync: fast-forward every LIVE secondmate home
   # to the primary checkout's current default-branch commit. Purely LOCAL - no
   # fetch, no origin dependency: a linked-worktree home already holds the primary's
@@ -335,8 +337,13 @@ secondmate_sync() {
   # surface into every VALIDATED live secondmate home swept above.
   # FF_SEEN_HOMES is exactly that set, and fm-config-inherit-lib.sh owns the
   # declared config items plus data/captain-shared.md.
-  local id home home_real propagated_homes
+  # After a successful push that changes allowlisted config/* for an already-
+  # running home, send its literal-content reread instruction pointer so the
+  # live agent does not keep applying stale defaults. Spawn/respawn already
+  # re-reads at launch and needs no redundant nudge unless files changed after launch.
+  local id home home_real home_lock propagated_homes report reread_out reread_skip_pending
   propagated_homes=""
+  SECONDMATE_RESPAWNED_IDS=${SECONDMATE_RESPAWNED_IDS:-}
   while IFS='|' read -r id home _window _meta; do
     validate_secondmate_home "$id" "$home" || continue
     home_real="$VALIDATED_HOME"
@@ -348,9 +355,56 @@ secondmate_sync() {
       *" $home_real "*) continue ;;
     esac
     propagated_homes="$propagated_homes $home_real"
-    if ! propagate_secondmate_inheritance "$FM_HOME" "$home_real" "$CONFIG" "$DATA"; then
+    mkdir -p "$home_real/state" || {
+      echo "CONFIG_REREAD: secondmate $id: send failed: could not create state directory"
+      continue
+    }
+    home_lock=$(fm_config_inherit_lock_path "$home_real") || {
+      echo "CONFIG_REREAD: secondmate $id: send failed: could not resolve per-home lock"
+      continue
+    }
+    fm_lock_acquire_wait "$home_lock" || {
+      echo "CONFIG_REREAD: secondmate $id: send failed: could not acquire per-home lock"
+      continue
+    }
+    reread_skip_pending=0
+    case " $SECONDMATE_RESPAWNED_IDS " in
+      *" $id "*) reread_skip_pending=1 ;;
+    esac
+    if [ "$reread_skip_pending" -eq 0 ] \
+      && fm_config_reread_retry_queue_is_full "$FM_HOME" "$id"; then
+      fm_config_reread_retry_pending "$id" "$home_real" || true
+      if fm_config_reread_retry_queue_is_full "$FM_HOME" "$id"; then
+        echo "CONFIG_REREAD: secondmate $id: send failed: retry instruction queue is full"
+        fm_lock_release "$home_lock" || true
+        continue
+      fi
+    fi
+    report=$(mktemp "${TMPDIR:-/tmp}/fm-bootstrap-inherit.XXXXXX" 2>/dev/null) || {
+      echo "SECONDMATE_SYNC: secondmate $id: skipped: inheritance failed"
+      fm_lock_release "$home_lock" || true
+      continue
+    }
+    if FM_CONFIG_INHERIT_REPORT="$report" \
+      propagate_secondmate_inheritance "$FM_HOME" "$home_real" "$CONFIG" "$DATA"; then
+      :
+    else
       echo "SECONDMATE_SYNC: secondmate $id: skipped: inheritance failed"
     fi
+    if ! reread_out=$(FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" \
+      FM_STATE_OVERRIDE="$STATE" \
+      FM_CONFIG_REREAD_SKIP_PENDING="$reread_skip_pending" \
+      fm_config_send_reread_nudge "$id" "$home_real" "$report" 2>&1); then
+      if [ -n "$reread_out" ]; then
+        printf '%s\n' "$reread_out"
+      else
+        echo "CONFIG_REREAD: secondmate $id: send failed: unknown error"
+      fi
+    elif [ -n "$reread_out" ]; then
+      printf '%s\n' "$reread_out"
+    fi
+    rm -f "$report"
+    fm_lock_release "$home_lock" || true
   done < <(live_secondmate_meta_records "$STATE" "$DATA/secondmates.md")
   return 0
 }
@@ -388,6 +442,7 @@ secondmate_liveness_sweep() {
   # explicitly out of scope here.
   [ -d "$STATE" ] || return 0
   local meta id window harness backend target verdict out
+  SECONDMATE_RESPAWNED_IDS=""
   for meta in "$STATE"/*.meta; do
     [ -f "$meta" ] || continue
     grep -q '^kind=secondmate$' "$meta" 2>/dev/null || continue
@@ -409,6 +464,7 @@ secondmate_liveness_sweep() {
       dead)
         fm_backend_kill "$backend" "$target" 2>/dev/null || true
         if out=$(FM_SPAWN_NO_GUARD=1 "$FM_ROOT/bin/fm-spawn.sh" "$id" --secondmate 2>&1); then
+          SECONDMATE_RESPAWNED_IDS="$SECONDMATE_RESPAWNED_IDS $id"
           :
         else
           echo "SECONDMATE_LIVENESS: secondmate $id: respawn failed: $(first_line "$out")"
@@ -800,8 +856,8 @@ if [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ] \
   echo "BOOTSTRAP_INFO: tasks-axi available"
 fi
 if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
-  secondmate_sync
   secondmate_liveness_sweep
+  secondmate_sync
   x_mode_setup
   fleet_sync
 fi
