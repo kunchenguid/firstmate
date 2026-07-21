@@ -7,6 +7,7 @@
 # back to Codex's stable per-thread session id.
 # Usage: fm-lock.sh           acquire; exit 1 if another live session holds it
 #        fm-lock.sh status    print holder and liveness; always exits 0
+#        fm-lock.sh clear     remove the current lock
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -57,6 +58,12 @@ holder_alive() {  # true if $1 is a live process that looks like a harness
   printf '%s' "$(basename "$comm") $args" | grep -qE "$HARNESS_RE"
 }
 
+if [ "${1:-}" = "clear" ]; then
+  rm -f "$LOCK"
+  echo "lock cleared"
+  exit 0
+fi
+
 if [ "${1:-}" = "status" ]; then
   if [ ! -f "$LOCK" ]; then echo "lock: free"; exit 0; fi
   old=$(cat "$LOCK")
@@ -79,7 +86,10 @@ me=$(harness_pid) || { echo "error: cannot locate harness process in ancestry" >
 if [ -f "$LOCK" ]; then
   old=$(cat "$LOCK")
   if [ "$old" != "$me" ] && holder_alive "$old"; then
-    echo "error: another live firstmate session holds the lock (pid $old); operate read-only until resolved" >&2
+    case "$old" in
+      codex-thread:*) echo "error: another live firstmate session holds the lock (Codex session $old); if the previous Codex session is known dead, run bin/fm-lock.sh clear; otherwise operate read-only until resolved" >&2 ;;
+      *) echo "error: another live firstmate session holds the lock (pid $old); operate read-only until resolved" >&2 ;;
+    esac
     exit 1
   fi
 fi

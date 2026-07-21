@@ -227,9 +227,17 @@ EOF
   out=$(CODEX_THREAD_ID=other-thread FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-lock.sh" 2>&1) || status=$?
   expect_code 1 "$status" "foreign Codex thread lock acquisition"
   assert_contains "$out" "another live firstmate session holds the lock" "foreign Codex thread was allowed to replace the lock"
+  assert_contains "$out" "bin/fm-lock.sh clear" "foreign Codex thread lock did not explain manual recovery"
   [ "$(cat "$home/state/.lock")" = "codex-thread:owner-thread" ] || fail "foreign Codex thread overwrote the existing lock"
 
-  pass "foreign Codex thread locks remain held when process inspection is denied"
+  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$root" "$ROOT/bin/fm-lock.sh" clear)
+  assert_contains "$out" "lock cleared" "manual lock clear did not report success"
+  [ ! -e "$home/state/.lock" ] || fail "manual lock clear did not remove the lock"
+
+  CODEX_THREAD_ID=other-thread FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-lock.sh" >/dev/null
+  [ "$(cat "$home/state/.lock")" = "codex-thread:other-thread" ] || fail "Codex session could not acquire after manual lock clear"
+
+  pass "foreign Codex thread locks support explicit manual recovery"
 }
 
 test_live_pid_lock_is_not_overwritten_when_process_inspection_is_denied() {
