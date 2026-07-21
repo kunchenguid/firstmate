@@ -126,6 +126,7 @@ cached_account() {  # <provider>
 derive_account() {  # <provider>
   local provider=$1 account
   [ "$provider" = github ] || return 1
+  [ "${FM_SHARED_GITHUB_QUOTA_DERIVE_ACCOUNT:-1}" != 0 ] || return 1
   command -v gh >/dev/null 2>&1 || return 1
   account=$(GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 gh api user --jq .id 2>/dev/null) || return 1
   account_valid "$account" || return 1

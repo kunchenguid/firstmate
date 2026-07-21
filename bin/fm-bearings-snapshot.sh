@@ -203,7 +203,8 @@ gh_bounded() {  # <args...>
 
 github_quota_deferred_status() {
   local out state account reset_at reset_epoch
-  out=$("$SCRIPT_DIR/fm-shared-github-quota.sh" check --provider github --route "$GITHUB_ROUTE" 2>/dev/null || true)
+  out=$(FM_SHARED_GITHUB_QUOTA_DERIVE_ACCOUNT=0 \
+    "$SCRIPT_DIR/fm-shared-github-quota.sh" check --provider github --route "$GITHUB_ROUTE" 2>/dev/null || true)
   state=$(printf '%s\n' "$out" | sed -n 's/^state=//p' | tail -1)
   [ "$state" = defer ] || return 1
   account=$(printf '%s\n' "$out" | sed -n 's/^account=//p' | tail -1)
