@@ -1,5 +1,6 @@
 {
   "claude": {
+    "_comment": "Proxy wrapper: for a claude that must reach the API through a proxy, point command at a launcher/wrapper script (this cc) that exports the proxy - and any auth - inside itself before exec'ing claude. NEVER put a real token or credential in this file: it is copied into a gitignored local config, but secrets belong only in the launcher script, never here. The codex entry below shows the alternative of injecting the proxy via env; keep those values secret-free too.",
     "command": "cc",
     "args": ["--dangerously-skip-permissions"],
     "default_variant": "subscription",

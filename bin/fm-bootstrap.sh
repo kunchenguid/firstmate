@@ -51,12 +51,14 @@
 #          landed in the primary instead of its own worktree; restore it per the line.
 #          treehouse is also MISSING when its installed version lacks
 #          "treehouse get --lease" support.
-#          no-mistakes is also MISSING when its installed version is older than
-#          1.31.2.
+#          bytedcli is MISSING only when this fleet actually uses the Codebase
+#          (code.byted.org) provider - detected from the firstmate home's own
+#          origin or any registered project clone - so a GitHub-only home is
+#          never told it is missing.
 #          tasks-axi and quota-axi are required bootstrap tools (same class as
 #          lavish-axi). tasks-axi is also version and feature gated (0.1.1+
 #          with update --archive-body and mv [<id>...]); an installed but incompatible build
-#          reports MISSING like no-mistakes. When
+#          is reported MISSING. When
 #          config/backlog-backend is not manual and tasks-axi is compatible,
 #          bootstrap prints TASKS_AXI: available. quota-axi is required because
 #          crew-dispatch quota-balanced may call it; fm-dispatch-select.sh still
@@ -106,6 +108,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-x-lib.sh"
 # shellcheck source=bin/fm-backend.sh disable=SC1091
 . "$SCRIPT_DIR/fm-backend.sh"
+# shellcheck source=bin/fm-scm-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-scm-lib.sh"
 
 fleet_sync_origin_backed_project_count() {
   local count proj
@@ -325,7 +329,8 @@ install_cmd() {
     tmux|node|git|gh|curl|jq|orca|zellij) echo "brew install $1  # or the platform's package manager" ;;
     cmux) echo "brew install --cask cmux  # or see https://cmux.com" ;;
     treehouse) echo "curl -fsSL https://kunchenguid.github.io/treehouse/install.sh | sh" ;;
-    no-mistakes) echo "curl -fsSL https://raw.githubusercontent.com/kunchenguid/no-mistakes/main/docs/install.sh | sh" ;;
+    no-mistakes) echo "git clone https://code.byted.org/obric/no-mistakes.git && cd no-mistakes && make install  # requires Go 1.25+" ;;
+    bytedcli) echo "NPM_CONFIG_REGISTRY=http://bnpm.byted.org npm install -g @bytedance-dev/bytedcli@latest" ;;
     gh-axi|chrome-devtools-axi|lavish-axi) echo "npm install -g $1 && $1 setup hooks" ;;
     tasks-axi|quota-axi) echo "npm install -g $1" ;;
     *) return 1 ;;
@@ -365,31 +370,36 @@ if ! BACKEND_TOOLS=$(fm_backend_required_tools "$BACKEND"); then
   BACKEND_TOOLS=""
 fi
 TOOLS="$BACKEND_TOOLS $COMMON_TOOLS"
-NO_MISTAKES_MIN_MAJOR=1
-NO_MISTAKES_MIN_MINOR=31
-NO_MISTAKES_MIN_PATCH=2
 
 treehouse_supports_lease() {
   treehouse get --help 2>&1 | grep -Eq '(^|[^[:alnum:]_-])--lease([^[:alnum:]_-]|$)'
 }
 
-no_mistakes_version_parts() {
-  local output
-  command -v no-mistakes >/dev/null 2>&1 || return 1
-  output=$(no-mistakes --version 2>/dev/null) || return 1
-  printf '%s\n' "$output" | sed -nE 's/.*[vV]?([0-9]+)\.([0-9]+)\.([0-9]+).*/\1 \2 \3/p' | head -n 1
+# bytedcli is required only when this fleet actually uses the Codebase
+# (code.byted.org) provider. Detect that from the firstmate home's own origin
+# and from any registered project clone; fm-scm-lib.sh owns the host set, so a
+# GitHub-only home is never told bytedcli is missing, while an internal home
+# surfaces it at session start instead of at its first Codebase MR
+# (fm-scm-lib.sh's fm_scm_require_bytedcli, docs/codebase-scm.md).
+remote_is_codebase() {
+  local remote=$1 parsed provider
+  parsed=$(fm_scm_parse_remote_url "$remote" 2>/dev/null) || return 1
+  provider=${parsed%%$'\t'*}
+  [ "$provider" = codebase ]
 }
 
-no_mistakes_compatible() {
-  local parts major minor patch extra
-  parts=$(no_mistakes_version_parts) || return 1
-  IFS=' ' read -r major minor patch extra <<< "$parts"
-  [ -n "$major" ] && [ -n "$minor" ] && [ -n "$patch" ] && [ -z "$extra" ] || return 1
-  [ "$major" -gt "$NO_MISTAKES_MIN_MAJOR" ] && return 0
-  [ "$major" -eq "$NO_MISTAKES_MIN_MAJOR" ] || return 1
-  [ "$minor" -gt "$NO_MISTAKES_MIN_MINOR" ] && return 0
-  [ "$minor" -eq "$NO_MISTAKES_MIN_MINOR" ] || return 1
-  [ "$patch" -ge "$NO_MISTAKES_MIN_PATCH" ]
+fleet_uses_codebase() {
+  local url proj
+  if url=$(git -C "$FM_ROOT" remote get-url origin 2>/dev/null); then
+    remote_is_codebase "$url" && return 0
+  fi
+  [ -d "$PROJECTS" ] || return 1
+  for proj in "$PROJECTS"/*; do
+    [ -d "$proj" ] || continue
+    url=$(git -C "$proj" remote get-url origin 2>/dev/null) || continue
+    remote_is_codebase "$url" && return 0
+  done
+  return 1
 }
 
 # Write CONTENT to DEST only when it differs, so re-running bootstrap does not
@@ -726,8 +736,8 @@ if fm_backend_list_contains "$TOOLS" treehouse \
   && command -v treehouse >/dev/null 2>&1 && ! treehouse_supports_lease; then
   echo "MISSING: treehouse (install: $(install_cmd treehouse))"
 fi
-if command -v no-mistakes >/dev/null 2>&1 && ! no_mistakes_compatible; then
-  echo "MISSING: no-mistakes (install: $(install_cmd no-mistakes))"
+if fleet_uses_codebase && ! command -v bytedcli >/dev/null 2>&1; then
+  missing_tool_diagnostic bytedcli
 fi
 if command -v tasks-axi >/dev/null 2>&1 && ! fm_tasks_axi_compatible; then
   echo "MISSING: tasks-axi (install: $(install_cmd tasks-axi))"
