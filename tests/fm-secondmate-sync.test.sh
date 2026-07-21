@@ -565,7 +565,7 @@ test_bootstrap_nudge_retry_requires_marker_consumption() {
 }
 
 test_bootstrap_nudge_retry_supersedes_safely_advanced_commit() {
-  local w c1 c2 current fakebin out marker marker_before log out2
+  local w c1 c2 current fakebin out marker marker_before log out2 real_git sm_real
   w=$(new_world nudge-retry-advanced)
   c1=$(head_of "$w/main")
   add_sm_worktree "$w" sm-instr "$c1"
@@ -625,6 +625,35 @@ test_bootstrap_nudge_retry_supersedes_safely_advanced_commit() {
   assert_present "$marker" "ambiguous working tree should retain the marker"
   git -C "$w/sm-instr" checkout -- AGENTS.md
 
+  real_git=$(command -v git)
+  sm_real=$(cd "$w/sm-instr" && pwd -P)
+  cat > "$fakebin/git" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = -C ] && [ "\${2:-}" = "$sm_real" ] && [ "\${3:-}" = merge-base ]; then
+  "$real_git" "\$@"
+  rc=\$?
+  if [ "\$rc" -eq 0 ]; then
+    "$real_git" -C "$sm_real" reset --hard "$c2" >/dev/null
+  fi
+  exit "\$rc"
+fi
+exec "$real_git" "\$@"
+SH
+  chmod +x "$fakebin/git"
+  log="$w/changed-head-tmux.log"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
+    FM_SEND_SETTLE=0 FM_FAKE_TMUX_LOG="$log" \
+    "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
+  rm -f "$fakebin/git"
+  assert_contains "$out" "retry target instruction head changed during retry" \
+    "advanced retry should reject a target HEAD changed during validation"
+  assert_not_contains "$out" "BOOTSTRAP_INFO: nudged fm-sm-instr" \
+    "changed target HEAD must not report or send a completed nudge"
+  assert_grep "commit=$c2" "$marker" \
+    "changed target HEAD should retain the original retry marker"
+  assert_absent "$log" "changed target HEAD must suppress send and liveness mutation"
+  git -C "$w/sm-instr" merge --ff-only "$current" >/dev/null
+
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
     FM_SEND_SETTLE=0 FM_FAKE_TMUX_FAIL_LITERAL=1 \
     "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
@@ -645,6 +674,67 @@ test_bootstrap_nudge_retry_supersedes_safely_advanced_commit() {
     FM_SEND_SETTLE=0 "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
   [ -z "$out2" ] || fail "superseded advanced retry should stay silent next startup, got: $out2"
   pass "T8g bootstrap nudge retry safely supersedes or retains an advanced marker"
+}
+
+test_bootstrap_nudge_retry_rejects_feature_branch() {
+  local w c1 fakebin out marker log
+  w=$(new_world nudge-retry-feature-branch)
+  c1=$(head_of "$w/main")
+  add_sm_worktree "$w" sm-instr "$c1"
+  bump_primary "$w" instr
+  fakebin=$(make_fake_toolchain "$w")
+
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
+    FM_SEND_SETTLE=0 FM_FAKE_TMUX_FAIL_LITERAL=1 \
+    "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
+  marker="$w/home/state/.secondmate-nudge-pending/sm-instr.pending"
+  assert_present "$marker" "precondition: failed nudge should leave marker"
+  git -C "$w/sm-instr" switch -q -c feature/retry
+
+  log="$w/feature-branch-tmux.log"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
+    FM_SEND_SETTLE=0 FM_FAKE_TMUX_PANE_COMMAND=zsh FM_FAKE_TMUX_LOG="$log" \
+    "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
+
+  assert_contains "$out" "retry target has ambiguous branch state" \
+    "retry should reject a clean target on an in-flight feature branch"
+  assert_not_contains "$out" "BOOTSTRAP_INFO: nudged fm-sm-instr" \
+    "feature-branch retry must not report a completed nudge"
+  assert_present "$marker" "feature-branch retry should retain its marker"
+  assert_absent "$log" "feature-branch rejection must suppress send and liveness mutation"
+  pass "T8i bootstrap nudge retry rejects an in-flight feature branch"
+}
+
+test_bootstrap_unresolved_primary_quarantines_pending_ids() {
+  local w c1 fakebin out marker log before
+  w=$(new_world nudge-unresolved-primary)
+  c1=$(head_of "$w/main")
+  add_sm_worktree "$w" sm-instr "$c1"
+  bump_primary "$w" instr
+  fakebin=$(make_fake_toolchain "$w")
+
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
+    FM_SEND_SETTLE=0 FM_FAKE_TMUX_FAIL_LITERAL=1 \
+    "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
+  marker="$w/home/state/.secondmate-nudge-pending/sm-instr.pending"
+  assert_present "$marker" "precondition: failed nudge should leave marker"
+  before=$(head_of "$w/sm-instr")
+  git -C "$w/main" branch -m feature/unresolved-primary
+
+  log="$w/unresolved-primary-tmux.log"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
+    FM_SEND_SETTLE=0 FM_FAKE_TMUX_PANE_COMMAND=zsh FM_FAKE_TMUX_LOG="$log" \
+    "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
+
+  assert_contains "$out" "primary default-branch commit cannot be resolved" \
+    "unresolved primary should surface the failed sync proof"
+  assert_contains "$out" "SECONDMATE_LIVENESS: secondmate sm-instr: skipped: pending nudge retry rejected during this startup" \
+    "unresolved primary should quarantine pending ids before liveness"
+  assert_present "$marker" "unresolved primary should retain the pending marker"
+  [ "$(head_of "$w/sm-instr")" = "$before" ] \
+    || fail "unresolved primary allowed pending target HEAD mutation"
+  assert_absent "$log" "unresolved primary must suppress liveness mutation for pending ids"
+  pass "T8j unresolved primary quarantines pending nudge ids"
 }
 
 test_bootstrap_nudge_retry_refuses_changed_home() {
@@ -993,6 +1083,8 @@ test_bootstrap_nudge_failure_records_retry_marker
 test_bootstrap_nudge_retry_is_idempotent
 test_bootstrap_nudge_retry_requires_marker_consumption
 test_bootstrap_nudge_retry_supersedes_safely_advanced_commit
+test_bootstrap_nudge_retry_rejects_feature_branch
+test_bootstrap_unresolved_primary_quarantines_pending_ids
 test_bootstrap_nudge_retry_refuses_changed_home
 test_nudge_retry_uses_fresh_herdr_endpoint_after_recovery
 test_bootstrap_sweep_surfaces_skipped_home

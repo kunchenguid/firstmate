@@ -231,6 +231,24 @@ dirty_status() {
   fi
 }
 
+FF_DEFAULT_BRANCH=""
+FF_CURRENT_BRANCH=""
+ff_branch_eligible() {
+  local dir=$1 allow_detached=${2:-no} default=${3:-}
+  FF_DEFAULT_BRANCH=""
+  FF_CURRENT_BRANCH=""
+  if [ -z "$default" ]; then
+    default=$(default_branch "$dir") || return 1
+  fi
+  FF_DEFAULT_BRANCH=$default
+  FF_CURRENT_BRANCH=$(git -C "$dir" symbolic-ref --short HEAD 2>/dev/null || echo "")
+  if [ -z "$FF_CURRENT_BRANCH" ]; then
+    [ "$allow_detached" = yes ]
+    return
+  fi
+  [ "$FF_CURRENT_BRANCH" = "$FF_DEFAULT_BRANCH" ]
+}
+
 secondmate_registry_field() {
   local reg=$1 id=$2 key=$3 line value
   [ -f "$reg" ] || return 1
@@ -296,7 +314,7 @@ ff_target() {
     return 0
   fi
 
-  local default base cur instr local_rev base_rev before after out
+  local default base instr local_rev base_rev before after out
   default=$(default_branch "$dir") || {
     echo "$label: skipped: cannot determine default branch"
     return 0
@@ -322,16 +340,14 @@ ff_target() {
     return 0
   fi
 
-  cur=$(git -C "$dir" symbolic-ref --short HEAD 2>/dev/null || echo "")
-  if [ -z "$cur" ] && [ "$allow_detached" != yes ]; then
-    echo "$label: skipped: detached HEAD, expected $default"
+  if ! ff_branch_eligible "$dir" "$allow_detached" "$default"; then
+    if [ -z "$FF_CURRENT_BRANCH" ]; then
+      echo "$label: skipped: detached HEAD, expected $FF_DEFAULT_BRANCH"
+    else
+      echo "$label: skipped: on $FF_CURRENT_BRANCH, expected $FF_DEFAULT_BRANCH"
+    fi
     return 0
   fi
-  if [ -n "$cur" ] && [ "$cur" != "$default" ]; then
-    echo "$label: skipped: on $cur, expected $default"
-    return 0
-  fi
-
   if [ -n "$(dirty_status "$dir" "$ignore_seed_marker")" ]; then
     echo "$label: skipped: dirty working tree"
     return 0
