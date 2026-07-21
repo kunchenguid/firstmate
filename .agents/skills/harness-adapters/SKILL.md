@@ -108,6 +108,7 @@ The supported launch-profile flags below are verified locally; each row records 
 | grok | `--model <model>` | `--reasoning-effort <low\|medium\|high>` | Verified on grok 0.2.99 (2026-07-13). `--effort` is an alias, but firstmate's profile axis is reasoning effort. As of 0.2.99 the ceiling is `high`; both `xhigh` and `max` are rejected with `use one of: high, medium, low`, so firstmate omits them. |
 | pi | `--model <model>` | `--thinking <low\|medium\|high\|xhigh\|max>` | Verified 2026-07-13 on Pi 0.80.6. `pi --help` advertises `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`; `pi --print --model openai-codex/gpt-5.6-sol --thinking max 'Reply with exactly OK.'` completed successfully. |
 | opencode | `--model <provider/model>` | none for firstmate's interactive launch | Verified on opencode 1.17.6. `opencode run` has `--variant`, but firstmate launches the interactive `opencode --prompt` path, which has no verified effort flag. |
+| agy | `--model <model>` | none | Verified on Agy CLI 1.1.4 (2026-07-21). `agy --help` shows `--model` for the session model; no reasoning-effort or thinking flag has been verified for the interactive `--prompt-interactive` launch path. |
 
 When a requested effort value is outside the harness-specific accepted set, `fm-spawn` records the requested `effort=` in meta but emits no effort flag for that harness.
 This preserves launch success instead of passing a known-bad value.
@@ -122,6 +123,7 @@ Natural language is acceptable if uncertain.
 - opencode: no separate verified skill invocation beyond normal slash-command behavior; use natural language if the exact skill command is uncertain.
 - pi: no separate verified skill invocation beyond normal command behavior; use natural language if the exact skill command is uncertain.
 - grok: `/<skill>`, for example `/no-mistakes` (same form as claude). Verified end to end: grok discovers the user-level `no-mistakes` skill, `/no-mistakes` invokes it, and grok drives a real `no-mistakes axi run`. Like codex's `$`/`/` popups, typing `/<skill>` opens grok's slash-autocomplete, so a too-fast Enter selects the popup entry instead of sending, and for an argument-taking command (like `/no-mistakes`'s optional task-first argument) that first Enter only expands the popup selection into an argument-hint placeholder rather than submitting - a genuine second Enter is required (see the grok section below for the 2026-07-03 incident and fix). `fm_tmux_submit_core`'s retried Enter (used by `fm-send` on the tmux backend) already handles this correctly by reading the cursor row; the herdr backend needed a dedicated fix (`fm_backend_herdr_composer_state`, docs/herdr-backend.md) because its prior delta-based verification false-positived on that same popup-close content change.
+- agy: `/<skill>`, for example `/no-mistakes` (same form as claude). Not independently verified end to end; the slash-settle (1.2 s) in `fm-send.sh` is already universal, so the popup-handling path is the same. Use natural language if uncertain.
 
 ## claude (VERIFIED)
 
@@ -287,3 +289,44 @@ The adapter therefore runs the shared predicate and, when it returns 2, forces o
 It does not pass `--permission-mode`, so the passive hook cannot escalate the primary session's tool permissions.
 Project-local Grok hooks require folder trust, verified with launch-time `--trust`; if the primary firstmate checkout is not trusted for Grok hooks, this primary guard fails open and `fm-guard.sh` remains the next-command alarm.
 Grok's primary watcher protocol is Claude-shaped background-notify around `bin/fm-watch-arm.sh`; the passive Stop hook is only a backstop for blind turn ends.
+
+## agy (VERIFIED 2026-07-21, Agy CLI 1.1.4)
+
+Antigravity CLI (`agy`), Google Deepmind's coding agent.
+Launch with `--new-project` (mandatory for correct worktree cwd), `--dangerously-skip-permissions`, and `--prompt-interactive` for the initial brief:
+
+```
+agy --dangerously-skip-permissions --new-project --prompt-interactive "$(cat <brief>)"
+```
+
+Crewmate and scout spawns only.
+`--secondmate` spawns are refused: no verified primary or secondmate turn-end hook contract exists.
+See `docs/agy-adapter.md` for the full empirical verification record.
+
+| Fact | Value |
+|---|---|
+| Busy-pane signature | `esc to cancel` (mid-turn cancel hint; present while a tool call or agent turn is running) |
+| Exit command | `/exit`; prints `Resume with -c` plus `agy --conversation=<id>` |
+| Interrupt | one Escape |
+| Autonomy flag | `--dangerously-skip-permissions` (auto-approves all tool calls; verified, Agy CLI 1.1.4) |
+| Env marker | `ANTIGRAVITY_AGENT=1` (set for child/tool processes; verified, Agy CLI 1.1.4) |
+| Resume | `agy --dangerously-skip-permissions --conversation=<id>` |
+| Skill invocation | `/<skill>` (same form as claude; slash-settle (1.2 s) in `fm-send.sh` is universal) |
+
+Startup trust prompt: first launch in a fresh worktree shows "Yes, I trust this folder".
+Accept with Enter.
+Decision persists per project root; later launches in the same worktree skip it.
+
+`--new-project` is mandatory: without it Agy's tool cwd falls back to `~/.gemini/antigravity-cli/scratch` instead of the worktree.
+`fm-spawn`'s launch template already includes it for every agy crewmate/scout launch.
+
+**Turn-end hook: none.**
+Agy CLI 1.1.4 has no verified stop-hook mechanism (no documented Stop event, global hook dir, or plugin extension point analogous to claude/codex Stop hooks, grok's global hook, opencode's `session.idle`, or pi's `turn_end`).
+`fm-spawn` installs no turn-end hook for `agy*` spawns.
+Stale-pane detection in `fm-watch.sh` is the supervision fall-back path.
+If a future Agy release exposes a hook API, verify it empirically and record the findings in `docs/agy-adapter.md` before wiring.
+
+**Primary-session guard: not wired.**
+Without a verified turn-end hook, agy cannot meet the "no turn ends blind" contract.
+`bin/fm-spawn.sh` refuses `--secondmate` spawns with a targeted error.
+No `.agy/` hook file is tracked in this repo.

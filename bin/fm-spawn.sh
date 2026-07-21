@@ -44,10 +44,14 @@
 #   profile consultation. A --secondmate spawn is exempt and resolves the SECONDMATE
 #   harness (config/secondmate-harness -> config/crew-harness -> own), so the
 #   secondmate-vs-crewmate split is DURABLE across every respawn (recovery,
-#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|grok)
+#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|grok|agy)
 #   overrides it for this spawn (either kind). A non-flag string containing
 #   whitespace is treated as a RAW launch command - the escape hatch for verifying
 #   new adapters.
+#   agy (Antigravity CLI) supports crewmate/scout spawns ONLY: no verified primary
+#   or secondmate turn-end hook contract exists, so --secondmate spawns with harness
+#   agy are refused at the template lookup stage (the agy entry in the secondmate
+#   case list IS present for forward-compat but the dispatch refuses below).
 #   config/secondmate-harness may also carry an optional model and effort as extra
 #   whitespace-separated tokens ("<harness> [<model>] [<effort>]"). For a
 #   --secondmate spawn, those tokens apply only when this spawn also resolves its
@@ -324,7 +328,7 @@ FIRSTMATE_HOME=
 
 if [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
-    ''|claude|codex|opencode|pi|grok)
+    ''|claude|codex|opencode|pi|grok|agy)
       ARG3=${POS[1]:-}
       ;;
     *' '*)
@@ -385,6 +389,17 @@ launch_template() {
     # launch command - it is a Stop-event hook installed below (global hook +
     # per-task pointer), so the template is identical for ship/scout/secondmate.
     grok) printf '%s' 'grok --always-approve __MODELFLAG____EFFORTFLAG__"$(cat __BRIEF__)"' ;;
+    # agy (Antigravity CLI): --new-project is mandatory - without it the tool cwd
+    # falls back to ~/.gemini/antigravity-cli/scratch instead of the worktree.
+    # --dangerously-skip-permissions auto-approves all tool calls (verified,
+    # Agy CLI 1.1.4, 2026-07-21). --prompt-interactive delivers the initial brief
+    # and keeps the interactive session live. No crewmate turn-end hook is
+    # installed: agy has no verified stop-hook mechanism analogous to claude/codex
+    # Stop hooks or grok's global hook. Stale-pane detection is the fall-back.
+    # agy is CREWMATE/SCOUT only: no verified primary or secondmate hook contract
+    # exists, so secondmate spawns are refused by the verification gate in the
+    # secondmate arg-list above.
+    agy) printf '%s' 'agy --dangerously-skip-permissions --new-project __MODELFLAG__--prompt-interactive "$(cat __BRIEF__)"' ;;
     *) return 1 ;;
   esac
 }
@@ -422,6 +437,14 @@ case "$ARG3" in
   *)
     HARNESS=$ARG3
     LAUNCH=$(launch_template "$HARNESS" "$KIND") || { echo "error: unknown harness '$HARNESS'; pass a raw launch command to use an unverified adapter" >&2; exit 1; }
+    # agy supports crewmate/scout spawns but not secondmate: it has no verified
+    # primary or secondmate turn-end hook contract. Refuse secondmate spawns here
+    # (after the template succeeds) to give a targeted error rather than a silent
+    # no-turn-end situation.
+    if [ "$HARNESS" = agy ] && [ "$KIND" = secondmate ]; then
+      echo "error: harness 'agy' does not support --secondmate spawns: no verified primary or secondmate turn-end hook contract exists" >&2
+      exit 1
+    fi
     ;;
 esac
 
@@ -472,7 +495,7 @@ model_flag_for_harness() {
   local harness=$1 model=$2
   [ -n "$model" ] && [ "$model" != default ] || return 0
   case "$harness" in
-    claude|codex|opencode|pi|grok)
+    claude|codex|opencode|pi|grok|agy)
       printf -- '--model %s ' "$(shell_quote "$model")"
       ;;
   esac
@@ -1083,6 +1106,11 @@ EOF
       printf '{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"%s"}]}]}}\n' "$hook_command" > "$GROK_HOOKS_DIR/fm-turn-end.json"
       printf 'token=%s\n' "${auth_file##*/}" > "$WT/.fm-grok-turnend"
       exclude_path '.fm-grok-turnend'
+      ;;
+    agy*)
+      # agy has no verified turn-end hook mechanism analogous to claude/codex Stop
+      # hooks or grok's global hook (verified, Agy CLI 1.1.4, 2026-07-21).
+      # Stale-pane detection in fm-watch.sh is the supervision fall-back path.
       ;;
   esac
 fi
