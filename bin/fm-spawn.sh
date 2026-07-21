@@ -1137,7 +1137,6 @@ EOF
 import { execFile, spawnSync } from "node:child_process";
 import { createBashToolDefinition } from "@earendil-works/pi-coding-agent";
 const defaultBashTimeoutSecs = 900;
-const maxBashTimeoutSecs = 2_147_483;
 const timeoutResolver = "$pi_timeout_resolver";
 function resolveDefaultBashTimeout(): number | undefined {
   const result = spawnSync(timeoutResolver, [], { encoding: "utf8" });
@@ -1145,9 +1144,7 @@ function resolveDefaultBashTimeout(): number | undefined {
   const raw = String(result.stdout ?? "").trim();
   if (!raw) return undefined;
   const seconds = Number(raw);
-  return Number.isSafeInteger(seconds) && seconds > 0 && seconds <= maxBashTimeoutSecs
-    ? seconds
-    : defaultBashTimeoutSecs;
+  return Number.isSafeInteger(seconds) && seconds > 0 ? seconds : defaultBashTimeoutSecs;
 }
 function prepareBashArguments(args: any): any {
   if (!args || typeof args !== "object") return args;

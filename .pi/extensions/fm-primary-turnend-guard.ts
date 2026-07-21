@@ -21,7 +21,6 @@ const state = process.env.FM_STATE_OVERRIDE || `${fmHome}/state`;
 const marker = `${state}/.pi-turnend-extension-loaded`;
 const extensionVersion = `sha256:${createHash("sha256").update(readFileSync(extensionFile)).digest("hex")}`;
 const defaultBashTimeoutSecs = 900;
-const maxBashTimeoutSecs = 2_147_483;
 
 type RawBashInput = Omit<BashToolInput, "timeout"> & { timeout?: number | null };
 
@@ -31,9 +30,7 @@ function resolveDefaultBashTimeout(): number | undefined {
   const raw = String(result.stdout ?? "").trim();
   if (!raw) return undefined;
   const seconds = Number(raw);
-  return Number.isSafeInteger(seconds) && seconds > 0 && seconds <= maxBashTimeoutSecs
-    ? seconds
-    : defaultBashTimeoutSecs;
+  return Number.isSafeInteger(seconds) && seconds > 0 ? seconds : defaultBashTimeoutSecs;
 }
 
 function prepareBashArguments(args: unknown): BashToolInput {
