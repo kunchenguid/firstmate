@@ -870,7 +870,7 @@ EOF
       continue
     fi
     tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null) || continue
-    h=$(printf '%s' "$tail40" | hash_pane)
+    h=$(printf '%s' "$tail40" | sed 's/[[:space:]]*$//' | hash_pane)
     key=$(printf '%s' "$w" | tr ':/.' '___')
     hf="$STATE/.hash-$key"
     cf="$STATE/.count-$key"
@@ -919,7 +919,14 @@ EOF
           # authoritative source fm-crew-state.sh itself already prioritizes
           # over the log) a chance to override before trusting the log.
           if [ "$(cat "$sf" 2>/dev/null || true)" != "$h" ]; then
-            if crew_is_provably_working "$(window_to_task "$w" "$STATE")"; then
+            if [ "$(cat "$(_hb_surfaced_path "$task")" 2>/dev/null || true)" = "$last" ]; then
+              # This exact captain-relevant status was already surfaced to
+              # firstmate under a different pane hash - a redraw/reattach blip
+              # must not reclassify unchanged information as brand new.
+              printf '%s' "$h" > "$sf"
+              rm -f "$ssf"
+              triage_log "absorbed stale (status already surfaced, pane redraw only): $w"
+            elif crew_is_provably_working "$task"; then
               printf '%s' "$h" > "$sf"
               date +%s > "$ssf"
               triage_log "absorbed stale (provably working, overriding a stale captain-relevant status): $w"
@@ -927,7 +934,7 @@ EOF
               fm_wake_append stale "$w" "stale: $w" || exit 1
               printf '%s' "$h" > "$sf"
               rm -f "$ssf"
-              mark_surfaced "$STATE/$(window_to_task "$w" "$STATE").status"
+              mark_surfaced "$STATE/$task.status"
               wake "stale: $w"
             fi
           elif [ -e "$ssf" ]; then

@@ -456,6 +456,82 @@ test_terminal_stale_surfaced() {
   pass "a stale pane sitting on a terminal status is surfaced (queue + exit)"
 }
 
+# --- stale pane, terminal status ALREADY surfaced, only the pane redrew: absorbed ---
+# Regression for the g2 stale-rewake bug: a transient, semantically-inert pane
+# redraw (a reattach blip, a trailing-whitespace difference) must not reclassify
+# an already-surfaced terminal status as a brand-new stale event. The durable
+# .hb-surfaced-<task> marker records the last captain-relevant status line
+# actually surfaced; when it still matches the task's current last status line,
+# a hash mismatch on the pane must absorb, not re-wake.
+test_terminal_stale_absorbed_when_status_already_surfaced_by_redraw() {
+  local dir state fakebin out drain_out capture_file window key old_hash new_hash sig pid
+  dir=$(make_case terminal-stale-redraw-absorbed); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"
+  window="test:fm-done3"
+  printf 'finished,  awaiting review' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/done3.meta"
+  printf 'done: PR https://example.test/pr/9\n' > "$state/done3.status"
+  sig=$(seen_sig "$state/done3.status"); printf '%s' "$sig" > "$state/.seen-done3_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  # A double space mid-line is a plausible redraw byte-difference that the
+  # trailing-whitespace hardening at fm-watch.sh:888 does not normalize away,
+  # so this test exercises the marker-keying fix independent of that hardening.
+  old_hash=$(hash_text "finished, awaiting review")
+  new_hash=$(hash_text "finished,  awaiting review")
+  # Prior poll already surfaced this exact status under old_hash: .stale-<key>
+  # and .hb-surfaced-<task> both record that fact.
+  printf '%s' "$old_hash" > "$state/.stale-$key"
+  printf 'done: PR https://example.test/pr/9' > "$state/.hb-surfaced-done3"
+  # This poll's capture is the redraw variant (trailing space) so its hash
+  # differs from the recorded .stale-<key>, and it is already stable for 2
+  # consecutive polls (n >= 2 gate).
+  printf '%s' "$new_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; fail "watcher exited for a pane redraw of an already-surfaced terminal status: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || fail "an absorbed redraw printed a wake reason"
+  [ ! -s "$state/.wake-queue" ] || fail "an absorbed redraw enqueued a wake"
+  [ "$(cat "$state/.stale-$key" 2>/dev/null || true)" = "$new_hash" ] || fail "stale suppressor was not refreshed to the redraw hash"
+  reap "$pid"
+  pass "a pane redraw of an already-surfaced terminal status is absorbed, not re-woken"
+}
+
+# A genuinely NEW captain-relevant status (a second needs-decision after the
+# first was already surfaced) must still wake firstmate even though its pane
+# hash is also new - the fix must not blanket-suppress every hash mismatch.
+test_terminal_stale_new_status_still_surfaces() {
+  local dir state fakebin out drain_out capture_file window key old_hash new_hash sig pid
+  dir=$(make_case terminal-stale-new-status-fires); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"
+  window="test:fm-decide2"
+  printf 'awaiting a second decision' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/decide2.meta"
+  printf 'needs-decision: pick option A or B\n' > "$state/decide2.status"
+  sig=$(seen_sig "$state/decide2.status"); printf '%s' "$sig" > "$state/.seen-decide2_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  old_hash=$(hash_text "already surfaced content")
+  new_hash=$(hash_text "awaiting a second decision")
+  # A prior, DIFFERENT decision was already surfaced and recorded.
+  printf '%s' "$old_hash" > "$state/.stale-$key"
+  printf 'needs-decision: pick option X or Y\n' > "$state/.hb-surfaced-decide2"
+  printf '%s' "$new_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "watcher did not exit for a genuinely new captain-relevant status"
+  grep -Fx "stale: $window" "$out" >/dev/null || fail "watcher did not print the stale wake for the new status"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the new-status stale failed"
+  grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null || fail "new-status stale was not queued"
+  [ "$(cat "$state/.hb-surfaced-decide2" 2>/dev/null || true)" = "needs-decision: pick option A or B" ] \
+    || fail "surfaced marker was not advanced to the new status line"
+  pass "a genuinely new captain-relevant status still surfaces despite a prior already-surfaced marker"
+}
+
 # --- stale pane, STALE terminal status overridden by an active run: absorbed ---
 # Regression for the 2026-07 herdr false-surface incidents: a crew's own status
 # log gets no new entry once firstmate hands it to a no-mistakes validation
@@ -1566,6 +1642,8 @@ test_turn_ended_not_working_surfaced
 test_working_note_not_working_surfaced
 test_actionable_signal_surfaced
 test_terminal_stale_surfaced
+test_terminal_stale_absorbed_when_status_already_surfaced_by_redraw
+test_terminal_stale_new_status_still_surfaces
 test_stale_terminal_status_overridden_by_active_run
 test_nonterminal_stale_provably_working_absorbed_then_escalated
 test_wedge_escalation_marks_demand_deep_inspection_after_threshold
