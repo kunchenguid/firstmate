@@ -134,7 +134,10 @@ Natural language is acceptable if uncertain.
 
 First launch in a fresh worktree, or first ever on a machine, may show a trust or bypass-permissions confirmation.
 After every spawn, peek the pane within about 20 seconds.
-If such a dialog is showing, accept it from an active firstmate session using `FM_HOME=<this-firstmate-home> bin/fm-send.sh <window> --key Enter`, or the choice the dialog requires, unless `FM_HOME` is already set to the active firstmate home; verify the brief started processing.
+On the herdr backend, `fm-spawn` automatically handles the known trust and bypass-permissions dialogs through `fm_backend_herdr_handle_startup_dialog` in `bin/backends/herdr.sh`.
+The bypass warning starts on destructive `No, exit`, so the handler navigates to `Yes, I accept`, verifies that the cursor actually moved, and only then sends Enter.
+Every key is followed by pane readback, retries are bounded, and an unknown or unreadable dialog fails the spawn instead of guessing.
+On other backends, if such a dialog is showing, accept it from an active firstmate session using `FM_HOME=<this-firstmate-home> bin/fm-send.sh <window> --key Enter`, or the choice the dialog requires, unless `FM_HOME` is already set to the active firstmate home; verify the brief started processing.
 
 Claude renders a predicted-next-prompt suggestion as dim/faint text inside an otherwise-empty composer after a turn completes.
 A plain `tmux capture-pane` cannot tell that ghost text apart from typed text.
@@ -171,6 +174,9 @@ This is why the validation trigger (`$no-mistakes`) to a codex crew now lands on
 Directory trust dialog on first run per repo root: "Do you trust the contents of this directory?"
 Accept with Enter.
 The decision persists for the repo, so later worktrees of the same project skip it.
+Codex can also show a startup "Hooks need review" menu when project hooks are new or changed.
+The correct crew choice is "Trust all and continue" so project hooks can run.
+On the herdr backend, `fm-spawn` handles both menus through the same guarded one-key, re-peek, bounded-retry mechanism described in the claude section; unknown menu shapes fail closed.
 
 Resume after exit with `codex resume <session-id>`.
 The session id is printed on quit.

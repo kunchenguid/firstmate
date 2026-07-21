@@ -1276,6 +1276,16 @@ if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
   spawn_herdr_presentation_order_lock_release
 fi
 spawn_send_key "$T" Enter
+if [ "$BACKEND" = herdr ]; then
+  case "$HARNESS" in
+    claude*|codex*)
+      fm_backend_herdr_handle_startup_dialog "$T" "$HARNESS" || {
+        echo "error: guarded herdr startup dialog handling failed for $ID; inspect pane $T" >&2
+        exit 1
+      }
+      ;;
+  esac
+fi
 if [ "$KIND" = secondmate ]; then
   if ! fm_config_reread_discard_pending "$PROJ_ABS" "$ID" "$FM_HOME"; then
     if fm_config_reread_quarantine_pending "$PROJ_ABS" "$ID" "$FM_HOME"; then
