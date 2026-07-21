@@ -1015,10 +1015,11 @@ Covered by the unit cases in `tests/fm-afk-launch.test.sh` (clear-on-fresh-entry
 ## Per-project GitHub context launch evidence (2026-07-21)
 
 GitHub account routing is activated in `bin/fm-spawn.sh` before backend dispatch, so Herdr receives the common sanitized project context and does not own account selection.
-`bash tests/fm-backend-herdr.test.sh` and `bash tests/fm-spawn-dispatch-profile.test.sh` both ended with all assertions passing.
-The earlier live check only provisioned and inspected a generated non-default lab; it did not launch a routed worker and is not worker-launch acceptance evidence.
-This isolated review worktree forbids changes to application state outside the worktree, so a replacement real Herdr session and pane were not created during the finding-fix round.
-A real routed `fm-spawn.sh` worker launch in the named non-default Herdr lab remains required before this draft can be considered ready.
+A current empirical check used Herdr 0.7.4 (protocol 16), a generated non-`default` session from `bin/fm-herdr-lab.sh`, an isolated disposable `FM_HOME`, a disposable local project, and a strict profile with a non-secret stable id.
+The helper provisioned the lab, `fm-spawn.sh --backend herdr --scout` launched one routed worker, the worker printed the selected stable id and completed one routed read-only repository query, and helper-scoped `pane read` observed both markers.
+`fm-teardown.sh --force` then removed the exact worker endpoint and returned its disposable worktree; the helper deleted the named lab and verified its recorded default-session fleet state was unchanged.
+The sanitized result was `route_profile_reached_child=1`, `readonly_operation=1`, `worker_teardown=1`, `lab_teardown=1`, and `default_fleet_unchanged=1`.
+No remote branch, commit, push, pull request, organization mutation, or external GitHub resource was created.
 
 ## Known gaps and follow-up notes
 

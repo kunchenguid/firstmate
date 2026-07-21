@@ -21,7 +21,6 @@ FM_GITHUB_COMMIT_EMAIL=${FM_GITHUB_COMMIT_EMAIL:-}
 FM_GITHUB_REPOSITORY=${FM_GITHUB_REPOSITORY:-}
 FM_GITHUB_PROJECT=${FM_GITHUB_PROJECT:-}
 FM_GITHUB_PROJECT_PATH=${FM_GITHUB_PROJECT_PATH:-}
-FM_GITHUB_CONFIG_PATH=${FM_GITHUB_CONFIG_PATH:-}
 
 fm_github_lib_dir() {
   cd "$(dirname "${BASH_SOURCE[0]}")" && pwd
@@ -40,11 +39,11 @@ fm_github_home() {
 }
 
 fm_github_default_config_path() {
-  printf '%s\n' "${FM_CONFIG_OVERRIDE:-$(fm_github_home)/config}/github-accounts.json"
+  printf '%s\n' "$(fm_github_home)/config/github-accounts.json"
 }
 
 fm_github_config_path() {
-  printf '%s\n' "${FM_GITHUB_CONFIG_PATH:-$(fm_github_default_config_path)}"
+  fm_github_default_config_path
 }
 
 fm_github_enabled() {
@@ -94,11 +93,10 @@ fm_github_parse_fields() {
 }
 
 fm_github_node() {
-  local node_binary config_path
+  local node_binary
   node_binary=$(command -v node) || return 1
-  config_path=$(fm_github_config_path) || return 1
-  env -u NODE_OPTIONS -u NODE_PATH -u FM_CONFIG_OVERRIDE -u FM_GITHUB_CONFIG \
-    FM_GITHUB_CONFIG_PATH="$config_path" "$node_binary" "$@"
+  env -u NODE_OPTIONS -u NODE_PATH -u FM_CONFIG_OVERRIDE -u FM_GITHUB_CONFIG -u FM_GITHUB_CONFIG_PATH \
+    "$node_binary" "$@"
 }
 
 fm_github_validate_config() {
@@ -243,7 +241,7 @@ fm_github_unset_ambient() {
   unset CURL_CA_BUNDLE CURL_SSL_BACKEND SSL_CERT_FILE SSL_CERT_DIR OPENSSL_CONF OPENSSL_MODULES
   unset GIT_TERMINAL_PROMPT GCM_INTERACTIVE GIT_EDITOR GIT_SEQUENCE_EDITOR GIT_MERGE_AUTOEDIT EDITOR VISUAL GIT_PAGER PAGER
   unset BASH_ENV ENV CDPATH NODE_OPTIONS NODE_PATH RUBYOPT PERL5OPT PYTHONPATH PYTHONHOME
-  unset FM_GITHUB_CONFIG FM_CONFIG_OVERRIDE
+  unset FM_GITHUB_CONFIG FM_GITHUB_CONFIG_PATH FM_CONFIG_OVERRIDE
   while IFS= read -r name; do
     case "$name" in
       GIT_CONFIG_KEY_*|GIT_CONFIG_VALUE_*|GIT_TRACE*) unset "$name" ;;
@@ -259,11 +257,8 @@ fm_github_add_git_config() {
 }
 
 fm_github_activate() {
-  local project=${1:-} repository=${2:-} required_profile=${3:-} old_path helper shim_dir selected_path inherited_project_path config_path
+  local project=${1:-} repository=${2:-} required_profile=${3:-} old_path helper shim_dir selected_path inherited_project_path
   inherited_project_path=${FM_GITHUB_PROJECT_PATH:-}
-  config_path=$(fm_github_config_path) || return 1
-  FM_GITHUB_CONFIG_PATH=$config_path
-  export FM_GITHUB_CONFIG_PATH
   fm_github_resolve "$project" "$repository" "$required_profile" || return 1
   [ "$FM_GITHUB_MODE" = strict ] || return 0
   old_path=${PATH:-/usr/bin:/bin}
@@ -298,7 +293,7 @@ fm_github_activate() {
     FM_GITHUB_PROJECT_PATH=$inherited_project_path
   fi
   export FM_GITHUB_ACTIVE=1 FM_GITHUB_PROFILE_ID FM_GITHUB_GH_BINARY FM_GITHUB_GIT_BINARY FM_GITHUB_GH_AXI_BINARY
-  export FM_GITHUB_GH_CONFIG_DIR FM_GITHUB_HOST FM_GITHUB_EXPECTED_LOGIN FM_GITHUB_FORK_OWNER FM_GITHUB_REPOSITORY FM_GITHUB_PROJECT FM_GITHUB_PROJECT_PATH FM_GITHUB_CONFIG_PATH
+  export FM_GITHUB_GH_CONFIG_DIR FM_GITHUB_HOST FM_GITHUB_EXPECTED_LOGIN FM_GITHUB_FORK_OWNER FM_GITHUB_REPOSITORY FM_GITHUB_PROJECT FM_GITHUB_PROJECT_PATH
 }
 
 fm_github_unsafe_git_key() {
@@ -308,7 +303,7 @@ fm_github_unsafe_git_key() {
     credential.*|http.*|include.*|includeif.*|url.*|protocol.*|ssh.*|alias.*|core.sshcommand|core.askpass|core.gitproxy|core.editor|core.hookspath|core.fsmonitor|core.pager|pager.*|sequence.editor|interactive.difffilter|diff.external|difftool.*.cmd|filter.*|merge.*.driver|gpg.*|remote.*.pushurl|remote.*.proxy|remote.*.proxyauthmethod|remote.*.uploadpack|remote.*.receivepack)
       return 0
       ;;
-    user.name|user.email|user.useconfigonly)
+    remote.*.url|remote.pushdefault|branch.*.remote|branch.*.pushremote|user.name|user.email|user.useconfigonly)
       [ "$context" = command ] && return 0
       ;;
   esac
@@ -493,7 +488,10 @@ fm_github_git_operation() {
       ;;
     push) printf push ;;
     clone|fetch|pull|ls-remote) printf network ;;
-    am|cherry-pick|commit|commit-tree|merge|notes|rebase|revert|stash) printf identity ;;
+    commit)
+      if fm_github_git_commit_identity_args_allowed "$@"; then printf identity; else printf forbidden; fi
+      ;;
+    am|cherry-pick|commit-tree|merge|notes|rebase|revert|stash) printf identity ;;
     archive)
       for arg in "$@"; do case "$arg" in --remote|--remote=*|--exec|--exec=*) printf forbidden; return ;; esac; done
       printf local
@@ -501,6 +499,17 @@ fm_github_git_operation() {
     add|annotate|apply|bisect|blame|branch|bundle|cat-file|check-attr|check-ignore|check-mailmap|check-ref-format|checkout|clean|column|commit-graph|count-objects|describe|diff|diff-files|diff-index|diff-tree|difftool|fast-export|for-each-ref|format-patch|fsck|gc|grep|hash-object|help|index-pack|init|log|ls-files|ls-tree|merge-base|merge-file|merge-index|merge-one-file|merge-tree|mktag|mktree|multi-pack-index|mv|name-rev|pack-objects|patch-id|range-diff|read-tree|reflog|replace|reset|restore|rev-list|rev-parse|rm|show|show-branch|show-index|show-ref|sparse-checkout|stage|status|stripspace|switch|symbolic-ref|tag|unpack-file|unpack-objects|update-index|update-ref|var|verify-commit|verify-pack|verify-tag|whatchanged|worktree|write-tree) printf local ;;
     *) printf forbidden ;;
   esac
+}
+
+fm_github_git_commit_identity_args_allowed() {
+  local arg command_seen=0
+  for arg in "$@"; do
+    if [ "$command_seen" -eq 0 ]; then
+      [ "$arg" != commit ] || command_seen=1
+      continue
+    fi
+    case "$arg" in --author|--author=*|--reset-author) return 1 ;; esac
+  done
 }
 
 fm_github_git_effective_cwd() {
@@ -542,6 +551,16 @@ fm_github_same_repository_copy() {
   [ "$first_common" = "$second_common" ]
 }
 
+fm_github_actual_repository_path() {
+  local configured=${1:-} actual
+  if [ -n "$configured" ] && actual=$(fm_github_repository_toplevel "$PWD" 2>/dev/null) \
+    && fm_github_same_repository_copy "$actual" "$configured"; then
+    printf '%s\n' "$actual"
+  else
+    printf '%s\n' "$configured"
+  fi
+}
+
 fm_github_validate_repository_path() {
   local repo_path=$1 urls raw
   [ -n "$repo_path" ] && [ -d "$repo_path" ] || return 0
@@ -556,8 +575,36 @@ fm_github_validate_repository_path() {
   done <<< "$urls"
 }
 
+fm_github_git_config_value() {
+  local cwd=$1 key=$2 value
+  value=$("$FM_GITHUB_GIT_BINARY" -C "$cwd" config --get "$key" 2>/dev/null) || return 1
+  value=${value%%$'\n'*}
+  [ -n "$value" ] || return 1
+  printf '%s\n' "$value"
+}
+
+fm_github_git_default_remote() {
+  local cwd=$1 command=$2 branch remote
+  branch=$("$FM_GITHUB_GIT_BINARY" -C "$cwd" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
+  if [ "$command" = push ]; then
+    if [ -n "$branch" ] && remote=$(fm_github_git_config_value "$cwd" "branch.$branch.pushRemote"); then
+      printf '%s\n' "$remote"
+      return
+    fi
+    if remote=$(fm_github_git_config_value "$cwd" remote.pushDefault); then
+      printf '%s\n' "$remote"
+      return
+    fi
+  fi
+  if [ -n "$branch" ] && remote=$(fm_github_git_config_value "$cwd" "branch.$branch.remote"); then
+    printf '%s\n' "$remote"
+    return
+  fi
+  printf '%s\n' origin
+}
+
 fm_github_git_network_repository() {
-  local cwd command='' command_seen=0 expect_cwd=0 expect_global_value=0 expect_option_value=0 expect_clone_config=0 arg target='' raw urls canonical selected=''
+  local cwd command='' command_seen=0 expect_cwd=0 expect_global_value=0 expect_option_value=0 expect_clone_config=0 positionals=0 arg target='' raw urls canonical selected=''
   cwd=$(fm_github_git_effective_cwd "$@") || return 1
   for arg in "$@"; do
     if [ "$expect_cwd" -eq 1 ]; then expect_cwd=0; continue; fi
@@ -577,9 +624,25 @@ fm_github_git_network_repository() {
       continue
     fi
     if [ "$expect_option_value" -eq 1 ]; then expect_option_value=0; continue; fi
+    if [ "$expect_option_value" -eq 2 ]; then
+      [ -z "$target" ] || return 1
+      target=$arg
+      expect_option_value=0
+      continue
+    fi
     case "$command" in
       push)
-        case "$arg" in -o|--push-option|--repo) expect_option_value=1 ;; -*) ;; *) target=$arg; break ;; esac
+        case "$arg" in
+          --repo) expect_option_value=2 ;;
+          --repo=*) [ -z "$target" ] || return 1; target=${arg#--repo=} ;;
+          -o|--push-option) expect_option_value=1 ;;
+          --receive-pack|--exec|--receive-pack=*|--exec=*) return 1 ;;
+          -*) ;;
+          *)
+            positionals=$((positionals + 1))
+            if [ "$positionals" -eq 1 ] && [ -z "$target" ]; then target=$arg; fi
+            ;;
+        esac
         ;;
       clone)
         case "$arg" in
@@ -588,23 +651,36 @@ fm_github_git_network_repository() {
             raw=${arg#--config=}
             fm_github_unsafe_git_key "${raw%%=*}" && return 1
             ;;
-          -b|--branch|--depth|--shallow-since|--shallow-exclude|--reference|--reference-if-able|--separate-git-dir|--origin|-o|--upload-pack|-u|--template|--filter|--server-option|--revision|--bundle-uri) expect_option_value=1 ;;
+          --bundle-uri|--bundle-uri=*|--upload-pack|--upload-pack=*|-u|--recurse-submodules|--recurse-submodules=*|--recursive|--remote-submodules|--shallow-submodules|--also-filter-submodules) return 1 ;;
+          -b|--branch|--depth|--shallow-since|--shallow-exclude|--reference|--reference-if-able|--separate-git-dir|--origin|-o|--template|--filter|--server-option|--revision) expect_option_value=1 ;;
           -*) ;;
-          *) target=$arg; break ;;
+          *)
+            positionals=$((positionals + 1))
+            if [ "$positionals" -eq 1 ]; then target=$arg; fi
+            ;;
         esac
         ;;
       fetch|pull|ls-remote)
         case "$arg" in
-          --depth|--deepen|--shallow-since|--shallow-exclude|--upload-pack|--server-option|--negotiation-tip|--jobs|-j|--filter|--sort) expect_option_value=1 ;;
+          --upload-pack|--upload-pack=*|--recurse-submodules|--recurse-submodules=*) return 1 ;;
+          --depth|--deepen|--shallow-since|--shallow-exclude|--server-option|--negotiation-tip|--jobs|-j|--filter|--sort) expect_option_value=1 ;;
           --all|--multiple) return 1 ;;
           -*) ;;
-          *) target=$arg; break ;;
+          *)
+            positionals=$((positionals + 1))
+            if [ "$positionals" -eq 1 ]; then target=$arg; fi
+            ;;
         esac
         ;;
     esac
   done
   [ -n "$command" ] || return 1
-  [ -n "$target" ] || target=origin
+  if [ "$expect_option_value" -eq 2 ]; then return 1; fi
+  if [ "$expect_option_value" -eq 1 ] || [ "$expect_clone_config" -eq 1 ]; then return 1; fi
+  if [ -z "$target" ]; then
+    [ "$command" != clone ] && [ "$command" != ls-remote ] || return 1
+    target=$(fm_github_git_default_remote "$cwd" "$command") || return 1
+  fi
   case "$target" in
     https://*) raw=$target ;;
     *://*|*@*|*:*|/*) return 1 ;;
@@ -657,21 +733,33 @@ fm_github_gh_repo_option_kind() {
 }
 
 fm_github_validate_gh_repo_positionals() {
-  local command=$2 arg kind expect_value=0 positional=0 canonical
+  local command=$2 arg kind expect_value='' positional=0 canonical candidate
   shift 2
   for arg in "$@"; do
-    if [ "$expect_value" -eq 1 ]; then expect_value=0; continue; fi
+    if [ -n "$expect_value" ]; then
+      if [ "$expect_value" = --template ]; then
+        canonical=$(fm_github_repository_allowed "$arg") || return 1
+        fm_github_set_gh_target_repository "$canonical" || return 1
+      fi
+      expect_value=
+      continue
+    fi
     case "$arg" in
       --repo=*|-R?*) continue ;;
       --*=*)
         kind=$(fm_github_gh_repo_option_kind "$command" "${arg%%=*}")
         [ "$kind" != unknown ] || return 1
+        if [ "${arg%%=*}" = --template ]; then
+          candidate=${arg#*=}
+          canonical=$(fm_github_repository_allowed "$candidate") || return 1
+          fm_github_set_gh_target_repository "$canonical" || return 1
+        fi
         continue
         ;;
     esac
     kind=$(fm_github_gh_repo_option_kind "$command" "$arg")
     case "$kind" in
-      value) expect_value=1 ;;
+      value) expect_value=$arg ;;
       flag) ;;
       unknown) return 1 ;;
       positional)
@@ -686,12 +774,52 @@ fm_github_validate_gh_repo_positionals() {
         ;;
     esac
   done
-  [ "$expect_value" -eq 0 ] || return 1
+  [ -z "$expect_value" ] || return 1
   case "$command" in create|clone) [ "$positional" -eq 1 ] ;; *) return 0 ;; esac
 }
 
+fm_github_validate_gh_issue_transfer() {
+  local arg expect_value=0 positional=0 canonical
+  shift 2
+  for arg in "$@"; do
+    if [ "$expect_value" -eq 1 ]; then expect_value=0; continue; fi
+    case "$arg" in
+      --repo|-R) expect_value=1 ;;
+      --repo=*|-R?*|--confirm) ;;
+      -*) return 1 ;;
+      *)
+        positional=$((positional + 1))
+        if [ "$positional" -eq 2 ]; then
+          canonical=$(fm_github_repository_allowed "$arg") || return 1
+          fm_github_set_gh_target_repository "$canonical" || return 1
+        fi
+        ;;
+    esac
+  done
+  [ "$expect_value" -eq 0 ] && [ "$positional" -eq 2 ]
+}
+
+fm_github_validate_gh_label_clone() {
+  local arg expect_value=0 canonical
+  shift 2
+  for arg in "$@"; do
+    if [ "$expect_value" -eq 1 ]; then expect_value=0; continue; fi
+    case "$arg" in
+      --repo|-R) expect_value=1 ;;
+      --repo=*|-R?*|--force) ;;
+      -*) return 1 ;;
+      *)
+        canonical=$(fm_github_repository_allowed "$arg") || return 1
+        fm_github_set_gh_target_repository "$canonical" || return 1
+        return 0
+        ;;
+    esac
+  done
+  return 1
+}
+
 fm_github_validate_gh_resource() {
-  local first=${1:-} second=${2:-} arg expect_repo=0 expect_head=0 candidate canonical owner
+  local first=${1:-} second=${2:-} arg expect_repo=0 expect_head=0 expect_owner=0 candidate canonical owner
   FM_GITHUB_GH_TARGET_REPOSITORY=
   [ "$first" != api ] || return 1
   for arg in "$@"; do
@@ -704,8 +832,13 @@ fm_github_validate_gh_resource() {
       esac
       expect_head=0
       continue
+    elif [ "$expect_owner" -eq 1 ]; then
+      fm_github_owner_allowed "$arg" || return 1
+      expect_owner=0
+      continue
     else
       case "$arg" in
+        --org|--org=*|--user|--user=*|--env|--env=*) return 1 ;;
         --repo|-R) expect_repo=1; continue ;;
         --repo=*) candidate=${arg#--repo=} ;;
         -R?*) candidate=${arg#-R} ;;
@@ -716,6 +849,9 @@ fm_github_validate_gh_resource() {
           case "$candidate" in *:*) owner=${candidate%%:*}; fm_github_owner_allowed "$owner" || return 1 ;; esac
           continue
           ;;
+        --owner) expect_owner=1; continue ;;
+        --owner=*) fm_github_owner_allowed "${arg#--owner=}" || return 1; continue ;;
+        oci://*) return 1 ;;
         https://github.com/*)
           canonical=$(fm_github_repository_allowed "$arg") || return 1
           fm_github_set_gh_target_repository "$canonical" || return 1
@@ -727,8 +863,14 @@ fm_github_validate_gh_resource() {
     canonical=$(fm_github_repository_allowed "$candidate") || return 1
     fm_github_set_gh_target_repository "$canonical" || return 1
   done
-  [ "$expect_repo" -eq 0 ] && [ "$expect_head" -eq 0 ] || return 1
-  [ "$first" != repo ] || fm_github_validate_gh_repo_positionals "$@"
+  [ "$expect_repo" -eq 0 ] && [ "$expect_head" -eq 0 ] && [ "$expect_owner" -eq 0 ] || return 1
+  if [ "$first" = repo ]; then
+    fm_github_validate_gh_repo_positionals "$@" || return 1
+  elif [ "$first" = issue ] && [ "$second" = transfer ]; then
+    fm_github_validate_gh_issue_transfer "$@" || return 1
+  elif [ "$first" = label ] && [ "$second" = clone ]; then
+    fm_github_validate_gh_label_clone "$@" || return 1
+  fi
 }
 
 fm_github_gh_operation() {
@@ -791,17 +933,22 @@ fm_github_gh_operation() {
 fm_github_context_command() {
   local project=$1 repository=$2 required_profile=$3 tool=$4
   shift 4
-  fm_github_activate "$project" "$repository" "$required_profile" || return 1
-  if [ "$FM_GITHUB_MODE" = legacy ]; then
+  if ! fm_github_enabled; then
+    if [ -n "$required_profile" ]; then
+      echo "error: the recorded GitHub account profile cannot be used because strict routing is no longer configured" >&2
+      return 1
+    fi
     command "$tool" "$@"
     return
   fi
+  fm_github_activate "$project" "$repository" "$required_profile" || return 1
   local repo_path='' operation target_repository github_binary command_cwd command_repo
   if [ -d "$repository" ]; then
     repo_path=$repository
   elif [ -n "${FM_GITHUB_PROJECT_PATH:-}" ] && [ -d "$FM_GITHUB_PROJECT_PATH" ]; then
     repo_path=$FM_GITHUB_PROJECT_PATH
   fi
+  repo_path=$(fm_github_actual_repository_path "$repo_path") || return 1
   fm_github_validate_repository_path "${repo_path:-}" || return 1
   case "${tool##*/}" in
     git)

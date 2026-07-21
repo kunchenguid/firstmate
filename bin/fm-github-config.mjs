@@ -11,8 +11,7 @@ const GENERIC_ERROR = "invalid GitHub account routing configuration";
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const codeRoot = path.resolve(scriptDir, "..");
 const fmHome = path.resolve(process.env.FM_HOME || process.env.FM_ROOT_OVERRIDE || codeRoot);
-const configDir = path.resolve(process.env.FM_CONFIG_OVERRIDE || path.join(fmHome, "config"));
-const configPath = path.resolve(process.env.FM_GITHUB_CONFIG_PATH || path.join(configDir, "github-accounts.json"));
+const configPath = path.join(fmHome, "config", "github-accounts.json");
 const projectsFile = path.resolve(process.env.FM_DATA_OVERRIDE || path.join(fmHome, "data"), "projects.md");
 
 function fail(message = GENERIC_ERROR, code = 2) {
@@ -252,8 +251,13 @@ function normalizedMap(raw, keyValidator, valueValidator) {
 }
 
 function load() {
-  if (!fs.existsSync(configPath)) return null;
-  const lstat = fs.lstatSync(configPath);
+  let lstat;
+  try {
+    lstat = fs.lstatSync(configPath);
+  } catch (error) {
+    if (error?.code === "ENOENT") return null;
+    throw error;
+  }
   if (!lstat.isFile() || lstat.isSymbolicLink() || (process.platform !== "win32" && (lstat.mode & 0o777) !== 0o600) || lstat.size > 64 * 1024) {
     throw new Error("unsafe config file");
   }

@@ -166,6 +166,7 @@ The full cmux home label also includes a short hash of the resolved `FM_ROOT` pa
 
 `config/github-accounts.json` is the single full schema owner for optional per-project GitHub account routing.
 The file is private, gitignored, versioned, mode `0600`, and contains non-secret routing metadata only.
+Its authoritative location is always `$FM_HOME/config/github-accounts.json`; routing ignores `FM_CONFIG_OVERRIDE`, `FM_GITHUB_CONFIG`, and `FM_GITHUB_CONFIG_PATH`, and rejects ordinary, dangling, or otherwise unsafe symlinks instead of treating them as absence.
 Its absence preserves the legacy single-account process environment and command behavior.
 Its presence enables strict mode for the whole home with no implicit or fallback profile.
 Every GitHub or network Git operation must resolve exactly one profile before network or write activity.
@@ -232,15 +233,18 @@ Routed automation refuses `gh auth login`, `switch`, `logout`, `refresh`, token 
 
 `bin/fm-github-config.mjs` strictly parses and resolves this schema, `bin/fm-github-lib.sh` owns process policy, and `bin/fm-github-exec.sh` is the guarded command owner.
 For each selected child, the guarded owner removes ambient GitHub token variables and alternate gh selection, then sets the exact `GH_CONFIG_DIR`, `GH_HOST`, disabled prompts, and disabled updates.
-It pins the validated routing-file path for descendants and removes ambient `FM_GITHUB_CONFIG` and `FM_CONFIG_OVERRIDE`, so a delayed child cannot replace the selected profile definition.
+Every descendant re-resolves the stable profile id from the authoritative home location and removes ambient routing-path overrides, so a delayed child cannot replace the selected profile definition.
 It removes Git config-injection variables, askpass, SSH, author, editor, prompt, proxy, TLS, certificate, cookie, and trace overrides.
 It uses isolated global and system Git configuration, resets credential-helper chains, and installs only the exact selected `gh auth git-credential` helper for HTTPS GitHub credentials.
-It applies the optional commit identity and always sets `user.useConfigOnly=true`.
+It applies the optional commit identity, always sets `user.useConfigOnly=true`, and rejects command-scoped identity keys plus `git commit --author` and `--reset-author` overrides.
 Repository-local and per-worktree credential, include, URL rewrite, push URL, proxy, TLS, certificate, cookie, authorization-header, editor, prompt, and transport keys are rejected by key name without printing their values.
 The guarded owner inspects the actual descendant working tree and an explicit Git `-C` target, including effective per-worktree origin values, rather than trusting the primary clone path inherited at launch.
-Every routed clone, fetch, pull, push, and `ls-remote` target must canonicalize to the configured HTTPS parent or selected-profile fork before network access, and routed remote mutation or submodule commands are refused.
+Every routed clone, fetch, pull, push, and `ls-remote` target must canonicalize to the configured HTTPS parent or selected-profile fork before network access.
+Push resolves `--repo`, `branch.<name>.pushRemote`, `remote.pushDefault`, and `branch.<name>.remote` before falling back to `origin`; command-scoped remote selection is rejected.
+Clone bundle URIs, custom upload/receive programs, recursive submodule network paths, routed remote mutation, and submodule commands are refused.
 Unknown Git commands and unknown GitHub CLI command families or subcommands are refused, so network plumbing, aliases, extensions, authentication state, SSH keys, and future mutators cannot inherit read-only treatment accidentally.
-Every routed GitHub resource argument, regardless of flag ordering, must agree with that same parent or fork, while known-owner repository creation validates the selected login before the outward write.
+Every routed GitHub resource argument, regardless of flag ordering, must agree with that same parent or fork, including repository templates, issue-transfer destinations, label-clone sources, owner options, and URL operands.
+Organization-, user-, and environment-scoped secret or variable targets and arbitrary OCI operands are refused, while known-owner repository creation validates the selected login before the outward write.
 FirstMate-owned commands invoke exact configured binaries with argv arrays.
 The guarded `git`, `gh`, and `gh-axi` PATH shims protect ordinary descendants, including `gh-axi` resolving `gh`, but are not an operating-system sandbox against a deliberately malicious process that invokes another absolute executable or independently accesses credentials.
 
@@ -263,9 +267,11 @@ Strict initialization refuses a no-mistakes executable that does not advertise `
 
 ### Real-account acceptance status (2026-07-21)
 
-A read-only local probe used GitHub CLI 2.96.0, enumerated candidate `hosts.yml` profile directories without printing their paths, required `gh auth status --hostname github.com --active` to report Keychain or keyring storage, queried only `/user`, and compared SHA-256 login digests without retaining them.
-The sanitized exact result was `authenticated_profiles=3`, `secure_storage_confirmed=3`, `readonly_user_queries=3`, and `distinct_logins=1`.
-This proves the probe does not have two distinct currently authenticated accounts available in this isolated worktree environment, so real two-account read-only, remote-write, PR, delayed-monitoring, secondmate, and fleet-sync acceptance remains outstanding and both upstream changes must remain draft.
+A current read-only probe used exact GitHub CLI 2.96.0 and Apple Git 2.50.1 with two independently configured profiles.
+For each profile it ran `gh auth status --hostname github.com --active`, queried only `/user`, read one profile-bound repository, and ran HTTPS `git ls-remote ... HEAD` through the exact selected `gh auth git-credential` helper; it also required each profile to deny the other profile's repository.
+The probe did not request credential fill directly, inspect token values, retain login output, print profile paths or repositories, or perform a remote write.
+The sanitized result was `distinct_identities=2`, `secure_storage=2`, `gh_read_successes=2`, `cross_profile_denials=2`, `keychain_https_reads=2`, and `plaintext_token_fields=0`.
+Real two-account read-only and Keychain-backed HTTPS acceptance is complete; remote-write, PR, delayed-monitoring, secondmate, and fleet-sync acceptance remains outstanding, so both upstream changes must remain draft.
 
 ## Harness support
 
