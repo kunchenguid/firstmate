@@ -1,32 +1,32 @@
 # Contributing
 
 Thanks for wanting to contribute.
-One rule up front:
-
-**Human-authored pull requests targeting `main` must be raised through [`no-mistakes`](https://github.com/kunchenguid/no-mistakes).**
-We require this to reduce the maintainer's burden of reviewing and merging contributions.
-
-`no-mistakes` puts a local git proxy in front of your real remote.
-Pushing through it runs an AI-driven review/test/lint pipeline in an isolated worktree, forwards the push upstream only after every check passes, and opens a clean PR automatically.
-
-A GitHub Actions check (`Require no-mistakes`) runs on PRs targeting `main` and fails if the body is missing the deterministic signature that no-mistakes writes.
-Dependency bots are exempt so their automation keeps working, but regular contributor PRs without the signature will not be reviewed or merged.
+Pull requests targeting `main` must come from a feature branch and wait for explicit approval of that specific PR before merge.
+Direct PR is the standard path: run the repository checks, push the feature branch, and open the PR.
+[`no-mistakes`](https://github.com/kunchenguid/no-mistakes) remains available as an explicit opt-in when a contributor or maintainer wants its full review, test, lint, fix, push, PR, and CI pipeline.
 
 ## Workflow
 
 1. Fork the repo, then clone the parent repo or set your local `origin` back to the parent (`git@github.com:kunchenguid/firstmate.git`).
-2. Create a branch and make your changes.
-3. Initialize the gate with your fork as the push target: `no-mistakes init --fork-url git@github.com:<you>/firstmate.git` (firstmate expects **no-mistakes v1.31.2+**; without a fork, plain `no-mistakes init` still works for maintainers with push access).
-4. Commit your changes.
-5. Push through the gate instead of pushing to `origin`:
+2. Create a feature branch and make your changes.
+3. Run the syntax, lint, test, and symlink checks in the Development section below.
+4. Push only the feature branch to your fork or approved push target.
+5. Open a PR against `main` with the checks you ran and their outcomes.
+6. Wait for explicit approval of that PR before merge.
 
-   ```sh
-   git push no-mistakes
-   ```
+### Optional no-mistakes path
 
-6. Run `no-mistakes` to attach to the pipeline, watch findings, authorize auto-fixes, and review ask-user findings as needed.
-   Follow the installed no-mistakes version's SKILL.md and live `axi` help for gate mechanics.
-7. Once the pipeline passes, it pushes the branch to your fork and opens the PR against the parent repo for you.
+Initialize the gate with your fork as the push target when you deliberately select no-mistakes: `no-mistakes init --fork-url git@github.com:<you>/firstmate.git`.
+Firstmate expects no-mistakes v1.31.2 or newer; without a fork, plain `no-mistakes init` still works for maintainers with push access.
+Commit the changes, then push through the gate instead of pushing to `origin`:
+
+```sh
+git push no-mistakes
+```
+
+Run `no-mistakes` to attach to the pipeline, watch findings, authorize auto-fixes, and review ask-user findings as needed.
+Follow the installed version's `SKILL.md` and live `axi` help for gate mechanics.
+Once the pipeline passes, it pushes the branch to your fork and opens the PR against the parent repo.
 
 See the [no-mistakes quick start](https://kunchenguid.github.io/no-mistakes/start-here/quick-start/) for the full first-run walkthrough.
 
@@ -54,14 +54,16 @@ See the [no-mistakes quick start](https://kunchenguid.github.io/no-mistakes/star
 
 ## Development
 
-Tracked changes to firstmate itself - `AGENTS.md`, `README.md`, `CONTRIBUTING.md`, `.tasks.toml`, `.github/workflows/`, `bin/`, `.agents/skills/`, and `skills/` - ship through the `no-mistakes` pipeline on a feature branch and require an explicit merge approval.
+Tracked changes to firstmate itself - `AGENTS.md`, `README.md`, `CONTRIBUTING.md`, `.tasks.toml`, `.github/workflows/`, `bin/`, `.agents/skills/`, and `skills/` - use direct-PR by default on a feature branch and require explicit approval of that specific PR before merge.
+No-mistakes remains an explicit opt-in delivery mode for these changes.
 Before making any such change, load the agent-only `firstmate-coding-guidelines` skill (`.agents/skills/firstmate-coding-guidelines/SKILL.md`).
 It has the knowledge-placement rules that keep `AGENTS.md` from regrowing after each diet pass.
 There is no reliable way for `bin/fm-brief.sh`'s scaffold to detect that a task's repo is firstmate itself, so firstmate adds this skill's load line to firstmate-repo briefs by hand.
 A crewmate picking up such a brief should load the skill even if the brief predates this instruction.
 When supervising live crewmates, keep firstmate's own long validation or build commands in the background so watcher wakes can still be handled.
-Crewmate validation follows the installed no-mistakes version's SKILL.md and live `axi` help instead of duplicating gate mechanics in firstmate docs.
-Firstmate's wrapper still matters: `ask-user` findings route to the captain through firstmate, and crewmates avoid `--yes` because it silently resolves captain-owned decisions without escalation.
+Direct-PR crewmates run the checks below themselves and report any check they cannot run before opening the PR.
+When no-mistakes is explicitly selected, crewmate validation follows the installed version's `SKILL.md` and live `axi` help instead of duplicating gate mechanics here.
+Firstmate's wrapper still matters on that opt-in path: `ask-user` findings route to the captain through firstmate, and crewmates avoid `--yes` because it silently resolves captain-owned decisions without escalation.
 Local `.no-mistakes/` state and test evidence stay out of this repo; `.no-mistakes.yaml` keeps evidence in a temp directory and pins the gate's lint and portable behavior commands to the Linux CI jobs, while `.github/workflows/ci.yml` owns additional platform-specific compatibility lanes.
 That is firstmate-specific; do not commit `.no-mistakes/evidence/` here even when another no-mistakes-managed target project keeps committed PR evidence.
 

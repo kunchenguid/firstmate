@@ -116,11 +116,30 @@ test_no_profile_keeps_claude_launch_unchanged() {
   expect_code 0 "$status" "claude spawn without profile flags should succeed"
   assert_contains "$out" "spawned $id harness=claude" "spawn did not report claude"
   assert_meta_profile "$HOME_DIR/state/$id.meta" claude default default
+  assert_grep "mode=direct-PR" "$HOME_DIR/state/$id.meta" \
+    "unregistered project spawn did not record the direct-PR default"
 
   launch=$(cat "$LAUNCH_LOG")
   expected="CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$(cat '$HOME_DIR/data/$id/brief.md')\""
   [ "$launch" = "$expected" ] || fail "no-profile claude launch changed"$'\n'"expected: $expected"$'\n'"actual:   $launch"
   pass "no --model/--effort records defaults and keeps the claude launch byte-identical"
+}
+
+test_explicit_task_mode_reaches_spawn_metadata() {
+  local rec id out status
+  id=profile-task-mode-z17
+  rec=$(make_spawn_case profile-task-mode claude "$id")
+  read_case_record "$rec"
+  printf '%s\n' no-mistakes > "$HOME_DIR/data/$id/delivery-mode"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "spawn with an explicit task mode should succeed"
+  assert_contains "$out" "kind=ship mode=no-mistakes yolo=off" \
+    "spawn output did not report the explicit task mode"
+  assert_grep "mode=no-mistakes" "$HOME_DIR/state/$id.meta" \
+    "spawn metadata did not preserve the task mode used by the brief"
+  pass "fm-spawn.sh: explicit task delivery mode reaches durable metadata"
 }
 
 test_active_dispatch_profile_requires_explicit_harness_for_ship() {
@@ -385,6 +404,7 @@ test_active_dispatch_profile_does_not_block_secondmate_launch() {
 }
 
 test_no_profile_keeps_claude_launch_unchanged
+test_explicit_task_mode_reaches_spawn_metadata
 test_active_dispatch_profile_requires_explicit_harness_for_ship
 test_active_dispatch_profile_requires_explicit_harness_for_scout
 test_active_dispatch_profile_allows_explicit_harness

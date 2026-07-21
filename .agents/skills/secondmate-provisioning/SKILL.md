@@ -13,7 +13,7 @@ metadata:
 
 Use this reference before creating, seeding, validating, launching, handing backlog to, recovering, pushing inherited local material into, or retiring a persistent secondmate, and before editing `data/secondmates.md`.
 
-Keep the always-inline routing rules in `AGENTS.md` authoritative: route by natural-language `scope:`, local-only projects stay with the main firstmate, and secondmates are idle by default.
+Keep the always-inline routing rules in `AGENTS.md` authoritative: normal remote-backed work requires a fitting natural-language `scope:`, local-only projects stay with the main firstmate, and secondmates are idle by default.
 
 ## Routing table
 
@@ -106,6 +106,7 @@ If validation, cloning, no-mistakes initialization, or registry update fails, ge
 
 Secondmate project lists may include `no-mistakes` and `direct-PR` projects only.
 `local-only` projects stay with the main firstmate.
+Unannotated project entries use the standard `direct-PR` path; only explicit `no-mistakes` entries trigger no-mistakes initialization.
 For `no-mistakes` projects, seeding initializes only projects newly cloned into a secondmate home and refuses to mutate a preexisting clone that is not already initialized.
 
 ## Backlog handoff
@@ -120,6 +121,7 @@ bin/fm-backlog-handoff.sh <secondmate-id> <item-key>...
 ```
 
 After seeding, run this handoff for the new secondmate's in-scope queued items.
+The secondmate then delegates each handed-off implementation, investigation, plan, reproduction, or audit to an isolated worker under its generated charter.
 The helper resolves and validates the secondmate home from `data/secondmates.md`, then delegates the item move to `tasks-axi mv` (the single owner of the backlog format), which moves each named item - and a whole connected set, blocker plus dependents, atomically - from the main `data/backlog.md` into the secondmate home's `data/backlog.md`.
 This delegated route remains required when `config/backlog-backend=manual`, which controls only routine firstmate backlog edits.
 It moves each queued item's whole block - the `- [ ] <id> ...` header plus every following two-or-more-space-indented body line and blank separator, up to the next item or column-0 section heading - byte-exact under the same section, treating an indented `## ...` line as body rather than a section boundary, so neither the header nor its body is duplicated or orphaned.

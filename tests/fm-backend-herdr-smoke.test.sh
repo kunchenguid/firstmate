@@ -29,9 +29,14 @@ command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (required by the her
 
 SESSION="fm-lab-backend-smoke-$$"
 export HERDR_SESSION="$SESSION"
-SM_SCRATCH=
+SCRATCH=$(mktemp -d "${TMPDIR:-/tmp}/fm-herdr-smoke.XXXXXX")
+# This fixture models a primary home even when the suite runs from a persistent
+# secondmate worktree carrying its own .fm-secondmate-home marker.
+PRIMARY_HOME="$SCRATCH/primary-home"
+mkdir -p "$PRIMARY_HOME"
+export FM_HOME="$PRIMARY_HOME"
 cleanup_all() {
-  [ -n "$SM_SCRATCH" ] && rm -rf "$SM_SCRATCH"
+  rm -rf "$SCRATCH"
   herdr_safe_stop_and_delete "$SESSION"
 }
 trap cleanup_all EXIT
@@ -60,6 +65,8 @@ case "$CONTAINER" in
   *) fail "container_ensure returned an unexpected shape: $CONTAINER" ;;
 esac
 [ -n "$SEEDED_TAB_ID" ] || fail "the first container_ensure in a brand-new isolated session must CREATE the workspace and report its seeded default tab id"
+PRIMARY_LABEL_REAL=$(herdr workspace list --session "$SESSION" 2>&1 | jq -r --arg id "${CONTAINER#*:}" '.result.workspaces[]? | select(.workspace_id == $id) | .label')
+[ "$PRIMARY_LABEL_REAL" = "firstmate" ] || fail "the primary fixture must use a marker-free home and get the firstmate label, got '$PRIMARY_LABEL_REAL'"
 pass "real herdr: container_ensure starts the isolated session's server, creates the firstmate workspace ($CONTAINER), and reports its seeded default tab id ($SEEDED_TAB_ID)"
 
 # A second container_ensure must reuse (ADOPT) the same workspace (idempotent)
@@ -172,8 +179,7 @@ fm_backend_herdr_kill "$SESSION:$NEW_HUSK_PANE_ID"
 # right after it exercises the true multi-workspace shape, not a
 # possibly-emptied-and-auto-closed primary workspace.
 
-SM_SCRATCH=$(mktemp -d "${TMPDIR:-/tmp}/fm-herdr-smoke-sm.XXXXXX")
-SM_HOME="$SM_SCRATCH/secondmate-home"
+SM_HOME="$SCRATCH/secondmate-home"
 mkdir -p "$SM_HOME"
 printf 'smoketest-sm1\n' > "$SM_HOME/.fm-secondmate-home"
 

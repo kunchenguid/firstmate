@@ -221,6 +221,33 @@ test_compressed_agents_retains_authority_and_supervision_safety() {
   pass "compressed AGENTS.md retains authority, supervision, AFK, and X safety"
 }
 
+test_three_layer_route_and_direct_pr_default_are_consistent() {
+  for phrase in \
+    'Route normal remote-backed project work to a persistent secondmate whose registered scope fits.' \
+    'The secondmate delegates coding, investigation, planning, bug reproduction, and audits to isolated crewmates and returns their evidence.' \
+    'Delegate every change to shared tracked material through the normal secondmate and isolated-worker route' \
+    'Direct-PR is the standard path for unspecified projects and tasks' \
+    'explicit approval of that specific PR' \
+    'pass `--mode <mode>` to the ship scaffold or promotion helper'; do
+    assert_grep "$phrase" "$AGENTS" "AGENTS.md lost three-layer or direct-PR contract '$phrase'"
+  done
+  for phrase in \
+    'Every implementation, investigation, plan, reproduction, and audit is worker work.' \
+    'Delegate each routed project task to an isolated crewmate' \
+    'one worker unless genuinely independent subtasks justify more' \
+    'Your delegated crewmate role comes from this brief' \
+    'do not run `bin/fm-session-start.sh`'; do
+    assert_grep "$phrase" "$BRIEF" "brief scaffold lost routing or worker-identity contract '$phrase'"
+  done
+  assert_grep 'default when the captain does not specify a mode' "$PROJECT" \
+    "project-management lost the direct-PR initialization default"
+  assert_grep 'only explicit `no-mistakes` entries trigger no-mistakes initialization' "$SECONDMATE" \
+    "secondmate provisioning still treated unannotated projects as no-mistakes"
+  assert_absent "$ROOT/.github/workflows/no-mistakes-required.yml" \
+    "repository CI still rejects the standard direct-PR path"
+  pass "three-layer responsibility and direct-PR defaults agree across instruction owners"
+}
+
 test_new_skill_metadata_and_triggers
 test_diagnostic_owner_covers_causal_procedure
 test_project_management_owner_covers_guarded_operations
@@ -230,3 +257,4 @@ test_secondmate_registry_contract_stays_concise
 test_state_startup_and_ordinary_recovery_placement
 test_compressed_agents_owner_map
 test_compressed_agents_retains_authority_and_supervision_safety
+test_three_layer_route_and_direct_pr_default_are_consistent

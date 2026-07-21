@@ -23,6 +23,7 @@ Keep each registry description useful for identifying the project, but keep deli
 Do not turn the registry into project documentation.
 
 Resolve the project name, destination, delivery mode, and autonomy posture before changing local or remote state.
+For normal remote-backed work, also ensure a persistent secondmate scope fits the project or domain before dispatch; `secondmate-provisioning` owns creation and seeding when one is needed.
 Keep a newly added clone and its registry entry consistent, and roll back only artifacts created by the incomplete operation when a later initialization step fails and that rollback is safe.
 Do not overwrite or repurpose an existing path.
 
@@ -30,8 +31,8 @@ Do not overwrite or repurpose an existing path.
 
 Choose the delivery mode when adding or creating the project:
 
-- `no-mistakes` runs the full validation pipeline before a PR and is the default when the captain does not specify a mode.
-- `direct-PR` pushes and opens a PR without the no-mistakes pipeline.
+- `direct-PR` runs relevant project checks, pushes, and opens a PR without the no-mistakes pipeline, and is the default when the captain does not specify a mode.
+- `no-mistakes` is an explicit opt-in that runs the full validation pipeline before a PR.
 - `local-only` has no required remote or PR and lands only through the approved local fast-forward path.
 
 The optional `+yolo` posture changes routine approval authority but does not change the delivery mode.
@@ -49,7 +50,7 @@ A `local-only` project may have no remote and skips no-mistakes initialization.
 ## Create a project
 
 Creating a GitHub repository is outward-facing.
-Before making that remote change, propose the repository name, owner or organization, visibility, and delivery mode, defaulting visibility to private and delivery mode to `no-mistakes`, then obtain the captain's explicit consent for those values.
+Before making that remote change, propose the repository name, owner or organization, visibility, and delivery mode, defaulting visibility to private and delivery mode to `direct-PR`, then obtain the captain's explicit consent for those values.
 Use `gh-axi` for the approved GitHub operation and consult its current help rather than relying on remembered flags.
 After remote creation succeeds, clone it locally, add the registry entry, and initialize it according to its delivery mode.
 

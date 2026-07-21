@@ -6,10 +6,13 @@
 # description, acceptance criteria, and context, and may adjust other sections
 # when the task genuinely deviates (e.g. working an existing external PR instead
 # of shipping a new one).
-# Usage: fm-brief.sh <task-id> <repo-name> [--scout] [--herdr-lab]
+# Usage: fm-brief.sh <task-id> <repo-name> [--mode <mode>] [--scout] [--herdr-lab]
 #        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
 #   --scout writes the scout contract instead: the deliverable is a report at
 #   data/<task-id>/report.md (no branch, no push, no PR) and the worktree is scratch.
+#   --mode records an explicit task delivery-mode override for a ship task at
+#   data/<task-id>/delivery-mode. It accepts no-mistakes, direct-PR, or local-only;
+#   fm-project-mode.sh applies it above the project registry when fm-spawn records meta.
 #   --secondmate writes a persistent secondmate charter. The project list
 #   is cloned into the secondmate home, while the natural-language scope
 #   tells the main firstmate when to route work there; routine churn stays in its own home;
@@ -29,8 +32,8 @@
 # For ship tasks, the definition of done is shaped by the project's delivery mode
 # (data/projects.md via fm-project-mode.sh; see the project-management skill
 # and AGENTS.md task lifecycle):
-#   no-mistakes  implement -> /no-mistakes pipeline -> PR -> captain merge (default)
-#   direct-PR    implement -> push + open PR via gh-axi (no pipeline) -> captain merge
+#   direct-PR    implement + project tests -> push + open PR via gh-axi -> captain merge (default)
+#   no-mistakes  explicit opt-in -> /no-mistakes pipeline -> PR -> captain merge
 #   local-only   implement on branch, stop and report "ready in branch" (no push/PR);
 #                captain approves, firstmate merges to local main
 # Ship briefs begin with a worktree-isolation assertion before the branch step.
@@ -73,15 +76,23 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 KIND=ship
 HERDR_LAB=0
 NO_PROJECTS=0
+DELIVERY_MODE_OVERRIDE=
 POS=()
-for a in "$@"; do
-  case "$a" in
+while [ "$#" -gt 0 ]; do
+  case "$1" in
     --scout) KIND=scout ;;
     --secondmate) KIND=secondmate ;;
     --herdr-lab) HERDR_LAB=1 ;;
     --no-projects) NO_PROJECTS=1 ;;
-    *) POS+=("$a") ;;
+    --mode)
+      [ "$#" -gt 1 ] || { echo "error: --mode requires a delivery mode" >&2; exit 1; }
+      shift
+      DELIVERY_MODE_OVERRIDE=$1
+      ;;
+    --mode=*) DELIVERY_MODE_OVERRIDE=${1#--mode=} ;;
+    *) POS+=("$1") ;;
   esac
+  shift
 done
 ID=${POS[0]}
 
@@ -95,8 +106,20 @@ if [ "$NO_PROJECTS" -eq 1 ] && [ "$KIND" != secondmate ]; then
   exit 1
 fi
 
+if [ -n "$DELIVERY_MODE_OVERRIDE" ]; then
+  [ "$KIND" = ship ] || { echo "error: --mode applies only to ship briefs" >&2; exit 1; }
+  case "$DELIVERY_MODE_OVERRIDE" in
+    no-mistakes|direct-PR|local-only) ;;
+    *) echo "error: unknown delivery mode '$DELIVERY_MODE_OVERRIDE'" >&2; exit 1 ;;
+  esac
+fi
+
 BRIEF="$DATA/$ID/brief.md"
-[ -e "$BRIEF" ] && { echo "error: $BRIEF already exists" >&2; exit 1; }
+MODE_FILE="$DATA/$ID/delivery-mode"
+if [ -e "$BRIEF" ] || [ -e "$MODE_FILE" ] || [ -L "$MODE_FILE" ]; then
+  echo "error: brief or delivery-mode state already exists for $ID" >&2
+  exit 1
+fi
 mkdir -p "$DATA/$ID"
 
 shell_quote() {
@@ -143,7 +166,11 @@ $PROJECT_CLONES_BODY
 # Operating model
 You are in an isolated firstmate home. The local \`AGENTS.md\` is your job description, and your local \`data/\`, \`state/\`, \`config/\`, and \`projects/\` dirs are yours to operate.
 $PROJECT_CLONES_NOTE
-Delegate project work to your own crewmates with the normal firstmate lifecycle: brief, spawn, status, watcher, steer, teardown, and recovery.
+Every implementation, investigation, plan, reproduction, and audit is worker work.
+Delegate each routed project task to an isolated crewmate with the normal firstmate lifecycle: brief, spawn, status, watcher, steer, teardown, and recovery.
+Do not perform that project work in this secondmate session.
+Use the smallest effective crew: one worker unless genuinely independent subtasks justify more, and never duplicate work merely to exercise multiple harness or model families.
+Apply this home's inherited dispatch profiles to each worker by task fit and use their configured selector before passing concrete harness, model, and effort axes to spawn.
 Do not invent a second delegation system.
 You do not generate your own work.
 Act only on tasks the main firstmate routes to you.
@@ -221,6 +248,12 @@ EOF
 )
 fi
 
+WORKER_IDENTITY=$(cat <<'EOF'
+Your delegated crewmate role comes from this brief, even when the target repository's `AGENTS.md` describes a firstmate or secondmate session.
+Use repository instructions for codebase rules, but do not adopt a Firstmate session identity and do not run `bin/fm-session-start.sh`, watcher, spawn, send, teardown, or other fleet-orchestration commands.
+EOF
+)
+
 if [ "$KIND" = scout ]; then
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
@@ -232,6 +265,7 @@ $HERDR_SECTION
 
 # Setup
 You are in a disposable git worktree of $REPO, at a detached HEAD on a clean default branch.
+$WORKER_IDENTITY
 This is a SCOUT task: the deliverable is a written report, not a PR.
 The worktree is your laboratory - install, run, edit, and make scratch commits freely; all of it is discarded at teardown.
 The report is the only thing that survives, so anything worth keeping must be in it.
@@ -271,9 +305,11 @@ fi
 
 # Ship task: shape Setup / Rule 1 / Definition of done by the project's delivery mode.
 # yolo does not affect the brief (it governs firstmate's approval behaviour), so discard it.
+MODE_LINE=$("$FM_ROOT/bin/fm-project-mode.sh" "$REPO")
 read -r MODE _ <<EOF
-$("$FM_ROOT/bin/fm-project-mode.sh" "$REPO")
+$MODE_LINE
 EOF
+[ -z "$DELIVERY_MODE_OVERRIDE" ] || MODE=$DELIVERY_MODE_OVERRIDE
 
 case "$MODE" in
   direct-PR)
@@ -282,9 +318,10 @@ case "$MODE" in
     DOD=$(cat <<EOF
 # Definition of done
 This project ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
-The task is complete only when committed on your branch.
+The task is complete only when committed on your branch and the relevant project tests pass.
+Run the project's relevant test, lint, and build commands before pushing, and report any check that cannot run.
 When it is implemented and committed, push your branch and open a PR with \`gh-axi\`, then append \`done: PR {url}\` to the status file and stop.
-Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
+Do NOT run /no-mistakes. The configured merge authority must explicitly approve this specific PR before firstmate merges it.
 EOF
 )
     ;;
@@ -301,12 +338,13 @@ The configured merge authority approves the ready branch, then firstmate merges 
 EOF
 )
     ;;
-  *)  # no-mistakes (default)
+  *)  # explicit no-mistakes
     SETUP2="
 2. Run \`no-mistakes doctor\`; if it reports the repo is not initialized here, run \`no-mistakes init\`."
     RULE1='1. Never push to the default branch. Never merge a PR.'
     DOD=$(cat <<EOF
 # Definition of done
+This task ships through the explicit **no-mistakes** pipeline.
 The task is complete only when committed on your branch.
 When you believe it is complete, append \`done: {summary}\` to the status file and stop.
 Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
@@ -336,6 +374,7 @@ $HERDR_SECTION
 
 # Setup
 You are in a disposable git worktree of $REPO, at a detached HEAD on a clean default branch.
+$WORKER_IDENTITY
 
 **Verify isolation before anything else.** Run \`pwd -P\` and \`git rev-parse --show-toplevel\`; both must resolve to the disposable task worktree you were launched in, such as a treehouse pool path or an Orca-managed worktree, not the primary checkout firstmate operates from.
 The path check is authoritative: \`git rev-parse --git-dir\` and \`git rev-parse --git-common-dir\` can help inspect the repo, but they do not prove you are outside the primary checkout.
@@ -377,4 +416,5 @@ Keep it proportionate: skip \`AGENTS.md\` edits for trivial tasks that produced 
 
 $DOD
 EOF
+[ -z "$DELIVERY_MODE_OVERRIDE" ] || printf '%s\n' "$DELIVERY_MODE_OVERRIDE" > "$MODE_FILE"
 echo "scaffolded: $BRIEF (ship, mode=$MODE; replace {TASK})"

@@ -116,6 +116,7 @@ Only a named non-default branch checked out in `FM_ROOT` is a worktree tangle.
 `fm-guard.sh` prints the repair command on the next mutable fleet action, while `bin/fm-session-start.sh` reports the same condition through bootstrap as a `TANGLE:` line at session start.
 If another live session holds the fleet lock, both surfaces keep the alarm but switch to read-only wording with no repair command.
 Ship briefs also tell the crewmate to verify `pwd -P` and `git rev-parse --show-toplevel` before creating `fm/<id>`, then stop with a blocked status if it landed in the primary checkout.
+They also state that a delegated worker remains a crewmate when the target is the firstmate repo: `AGENTS.md` still supplies repository rules, but its Firstmate session identity and `fm-session-start.sh` procedure do not apply to that worker.
 
 ## No-mistakes gate authority boundary
 
@@ -139,10 +140,16 @@ When the file exists, `fm-spawn.sh` refuses crewmate and scout launches without 
 Secondmate launches are exempt because they resolve the secondmate harness and any optional secondmate model or effort tokens instead.
 Unsupported effort values are still recorded in task meta when passed to `fm-spawn.sh`, but the launch template omits any effort flag that the selected harness does not accept.
 That keeps spawn launch compatible across claude, codex, grok, pi, and opencode while preserving the requested profile for later audit.
+On 2026-07-21, the direct-PR default audit verified that `fm-spawn.sh` resolves and records delivery mode before its backend and harness launch branches, so claude, codex, opencode, pi, and grok receive the same generated brief and mode metadata on tmux, herdr, zellij, cmux, and Orca.
+`fm-crew-state.sh` also consults no-mistakes run state only for an explicit `mode=no-mistakes`; direct-PR and local-only status reconciliation never invokes the optional pipeline CLI.
+The evidence is the common-path assertions in `tests/fm-spawn-dispatch-profile.test.sh`, the mode-specific CLI-call assertion in `tests/fm-crew-state.test.sh`, the backend launch suites, and the full `tests/*.test.sh` run; no adapter-specific skill invocation or status-return branch assumes no-mistakes is selected.
 
-## Optional secondmates
+## Persistent secondmate layer
 
 `data/secondmates.md` records persistent secondmates with natural-language scopes, project clone lists, and home paths.
+Normal remote-backed project work routes primary firstmate -> fitting persistent secondmate -> isolated task worker, then returns worker evidence through the secondmate to the primary.
+The primary owns intake, routing, supervision, decisions, and captain-facing reporting; the secondmate owns domain coordination but delegates every implementation, investigation, plan, reproduction, and audit instead of performing it in its own session.
+One worker is the normal task crew, and additional workers are justified only by genuinely independent subtasks rather than model-family duplication.
 `fm-home-seed.sh` provisions the isolated home, clones the listed PR-based projects into it, initializes newly cloned `no-mistakes` projects, copies the charter to `data/charter.md`, and `fm-spawn.sh --secondmate` launches it through the same session-provider and status-file path as any direct report.
 For a domain whose subject is the firstmate repo itself, a deliberate `--no-projects` seed creates a project-less home whose crews take pooled worktrees of that repo instead of separate clones.
 The signal cannot be mixed with project names or omitted accidentally, and a populated home cannot be converted in place; the full seed contract is in [configuration.md](configuration.md#secondmate-routes-datasecondmatesmd).
@@ -162,6 +169,153 @@ Idle secondmate panes are healthy; teardown is explicit and refuses while the se
 Secondmate homes converge conservatively to the primary's version and declared inherited local material at launch and during locked session start.
 The [`secondmate-provisioning` skill](../.agents/skills/secondmate-provisioning/SKILL.md) owns the full guarded sync, propagation, nudge, and mid-session local-material push contract.
 
+### Live three-layer routing verification (2026-07-21)
+
+The 2026-07-21 verification used this branch's live `bin/fm-home-seed.sh`, `bin/fm-spawn.sh`, and `bin/fm-teardown.sh` code with tmux, Claude, and real Treehouse worktrees rather than test doubles.
+The delegated verifier was exceptionally authorized to invoke those orchestration scripts for this bounded proof; ordinary workers remain prohibited from doing so by generated briefs.
+The first `home=-` seed attempt acquired a pooled home still marked for `qwen-product-s3`, so `fm-home-seed.sh` refused adoption and transactionally returned it.
+The successful run used an explicit disposable clone path instead of weakening that ownership check.
+
+The secondmate charter and seed commands were:
+
+```sh
+FM_ROOT_OVERRIDE="$PWD" FM_HOME="$PWD" \
+  FM_SECONDMATE_CHARTER='Coordinate only the disposable Claude-layer hierarchy proof and delegate all artifact work to one isolated worker.' \
+  FM_SECONDMATE_SCOPE='Disposable hierarchy proof tasks only.' \
+  bin/fm-brief.sh proof-hierarchy-sm-0721 --secondmate --no-projects
+FM_ROOT_OVERRIDE="$PWD" FM_HOME="$PWD" \
+  bin/fm-home-seed.sh proof-hierarchy-sm-0721 \
+  /Users/jacksonloh/.treehouse/firstmate-7bab20/1/fm-hierarchy-proof-home-20260721 \
+  --no-projects
+```
+
+The exact seed result and registry record were:
+
+```text
+scaffolded: /Users/jacksonloh/.treehouse/firstmate-7bab20/1/firstmate/data/proof-hierarchy-sm-0721/brief.md (secondmate charter)
+home=/Users/jacksonloh/.treehouse/firstmate-7bab20/1/fm-hierarchy-proof-home-20260721
+- proof-hierarchy-sm-0721 - Coordinate only the disposable Claude-layer hierarchy proof and delegate all artifact work to one isolated worker. (home: /Users/jacksonloh/.treehouse/firstmate-7bab20/1/fm-hierarchy-proof-home-20260721; scope: Disposable hierarchy proof tasks only.; projects: ; added 2026-07-21)
+```
+
+The primary launched the disposable secondmate layer with:
+
+```sh
+FM_ROOT_OVERRIDE="$PWD" FM_HOME="$PWD" \
+  bin/fm-spawn.sh proof-hierarchy-sm-0721 \
+  /Users/jacksonloh/.treehouse/firstmate-7bab20/1/fm-hierarchy-proof-home-20260721 \
+  --harness claude --model claude-sonnet-5 --effort high --backend tmux --secondmate
+```
+
+The exact success line and metadata were:
+
+```text
+spawned proof-hierarchy-sm-0721 harness=claude kind=secondmate mode=secondmate yolo=off window=firstmate:fm-proof-hierarchy-sm-0721 worktree=/Users/jacksonloh/.treehouse/firstmate-7bab20/1/fm-hierarchy-proof-home-20260721
+window=firstmate:fm-proof-hierarchy-sm-0721
+worktree=/Users/jacksonloh/.treehouse/firstmate-7bab20/1/fm-hierarchy-proof-home-20260721
+project=/Users/jacksonloh/.treehouse/firstmate-7bab20/1/fm-hierarchy-proof-home-20260721
+harness=claude
+kind=secondmate
+mode=secondmate
+yolo=off
+tasktmp=/tmp/fm-proof-hierarchy-sm-0721
+model=claude-sonnet-5
+effort=high
+home=/Users/jacksonloh/.treehouse/firstmate-7bab20/1/fm-hierarchy-proof-home-20260721
+projects=
+crew-harness bytes: identical
+crew-dispatch bytes: identical
+```
+
+The secondmate-owned context scaffolded a scout brief, matched the inherited mechanical-work rule, and selected its one Claude profile with:
+
+```sh
+proof_home=/Users/jacksonloh/.treehouse/firstmate-7bab20/1/fm-hierarchy-proof-home-20260721
+FM_ROOT_OVERRIDE="$PWD" FM_HOME="$proof_home" \
+  bin/fm-brief.sh proof-worker-0721 firstmate --scout
+proof_rule=$(jq -c '.rules[3]' "$proof_home/config/crew-dispatch.json")
+printf '%s\n' "$proof_rule" | bin/fm-dispatch-select.sh
+```
+
+The exact selection was:
+
+```text
+matched rule: {"when":"mechanical cleanup, formatting, straightforward documentation edits, routine test maintenance, simple repository chores, or other precise low-risk work","use":{"harness":"claude","model":"claude-haiku-4-5-20251001","effort":"low"},"why":"cheapest fast profile for narrow, low-ambiguity work"}
+selected profile: {"harness":"claude","model":"claude-haiku-4-5-20251001","effort":"low"}
+```
+
+The secondmate-owned context then spawned exactly one isolated worker with:
+
+```sh
+FM_ROOT_OVERRIDE="$PWD" FM_HOME="$proof_home" \
+  bin/fm-spawn.sh proof-worker-0721 "$proof_home" \
+  --harness claude --model claude-haiku-4-5-20251001 --effort low --backend tmux --scout
+```
+
+The exact worker launch result and secondmate-owned metadata were:
+
+```text
+warn: project "fm-hierarchy-proof-home-20260721" not in registry; defaulting to direct-PR off
+spawned proof-worker-0721 harness=claude kind=scout mode=direct-PR yolo=off window=firstmate:fm-proof-worker-0721 worktree=/Users/jacksonloh/.treehouse/fm-hierarchy-proof-home-20260721-cf8261/1/fm-hierarchy-proof-home-20260721
+window=firstmate:fm-proof-worker-0721
+worktree=/Users/jacksonloh/.treehouse/fm-hierarchy-proof-home-20260721-cf8261/1/fm-hierarchy-proof-home-20260721
+project=/Users/jacksonloh/.treehouse/firstmate-7bab20/1/fm-hierarchy-proof-home-20260721
+harness=claude
+kind=scout
+mode=direct-PR
+yolo=off
+tasktmp=/tmp/fm-proof-worker-0721
+model=claude-haiku-4-5-20251001
+effort=low
+```
+
+Claude displayed its standard trust prompt for the isolated worktree, and the verifier confirmed it with `tmux send-keys -t firstmate:fm-proof-worker-0721 Enter`.
+The worker then created the artifact and returned its evidence through the secondmate home's `state/proof-worker-0721.status` and `data/proof-worker-0721/report.md` channels.
+The exact status and artifact evidence were:
+
+```text
+done: proof.txt contains done
+path=/Users/jacksonloh/.treehouse/fm-hierarchy-proof-home-20260721-cf8261/1/fm-hierarchy-proof-home-20260721/proof.txt
+content=done
+bytes=646f6e650a
+git-status=?? proof.txt
+primary worker status/report: absent
+primary/secondmate proof.txt: absent
+all proof.txt paths under scoped roots:
+/Users/jacksonloh/.treehouse/fm-hierarchy-proof-home-20260721-cf8261/1/fm-hierarchy-proof-home-20260721/proof.txt
+```
+
+The worker's report independently recorded the same worktree, `done` content, and `?? proof.txt` status, with no other project-file changes.
+This proves that the primary coordinated the route, the Claude secondmate context selected and launched one inherited-profile worker, and only that isolated worker performed the delegated file change.
+
+The verifier semantically inventoried the report as containing no unresolved captain decision, then retired the worker and secondmate through their owning homes:
+
+```sh
+FM_ROOT_OVERRIDE="$PWD" FM_HOME="$proof_home" \
+  bin/fm-decision-hold.sh complete proof-worker-0721 --none
+FM_ROOT_OVERRIDE="$PWD" FM_HOME="$proof_home" \
+  bin/fm-teardown.sh proof-worker-0721
+FM_ROOT_OVERRIDE="$PWD" FM_HOME="$PWD" \
+  bin/fm-teardown.sh proof-hierarchy-sm-0721
+```
+
+The exact terminal results were:
+
+```text
+complete: proof-worker-0721 decision inventory reviewed
+teardown proof-worker-0721 complete (window firstmate:fm-proof-worker-0721, worktree /Users/jacksonloh/.treehouse/fm-hierarchy-proof-home-20260721-cf8261/1/fm-hierarchy-proof-home-20260721)
+teardown proof-hierarchy-sm-0721 complete (window firstmate:fm-proof-hierarchy-sm-0721, worktree /Users/jacksonloh/.treehouse/firstmate-7bab20/1/fm-hierarchy-proof-home-20260721)
+```
+
+Because retiring the explicit parent clone made the already-returned child pool entry unverified, the verifier destroyed that one exact throwaway worktree with `treehouse destroy /Users/jacksonloh/.treehouse/fm-hierarchy-proof-home-20260721-cf8261/1/fm-hierarchy-proof-home-20260721 --include-unlanded --yes`.
+The final cleanup proof was:
+
+```text
+secondmate home: removed
+worker worktree: destroyed
+primary proof records: removed
+tmux proof endpoints: removed
+```
+
 Secondmate agents can run on a different verified harness than crewmates.
 `config/secondmate-harness` controls the primary's secondmate launch harness and may also carry optional model and effort tokens as `<harness> [<model>] [<effort>]` on the first non-empty, non-comment line.
 A bare harness line remains harness-only, so existing `config/secondmate-harness` files keep their previous behavior.
@@ -177,6 +331,7 @@ The `data/secondmates.md` line contract is owned by the [`secondmate-provisionin
 ## Project modes are explicit
 
 `data/projects.md` records each project's delivery mode and optional `+yolo` autonomy flag.
+`direct-PR` is the standard for missing, unregistered, and unannotated project modes; `no-mistakes` is an explicit project or task opt-in, and malformed explicit modes fail closed.
 `no-mistakes` projects run the full validation pipeline, `direct-PR` projects open PRs without that pipeline, and `local-only` projects stay local until firstmate performs an approved fast-forward merge.
 When a selected delivery path calls for a diff, `bin/fm-review-diff.sh` refreshes the authoritative base and, when task meta records `pr=`, always fetches and compares against `refs/pull/<n>/head` by default (recorded `pr_head=` is only an offline fallback) before falling back to the local branch with a warning.
 For target project repos shipped through their own no-mistakes pipeline, commits under `.no-mistakes/evidence/` are the pipeline's PR-viewable validation evidence and are expected to stay in the crew branch until the evidence-hosting design changes.

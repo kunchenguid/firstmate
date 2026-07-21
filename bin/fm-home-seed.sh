@@ -534,13 +534,14 @@ EOF
 }
 
 clone_project() {
-  local project=$1 home=$2 src dst url dst_url mode
+  local project=$1 home=$2 src dst url dst_url mode mode_line
   src="$PROJECTS/$project"
   dst=$(validate_project_destination "$home" "$project") || return 1
   [ -d "$src" ] || { echo "error: project $project not found at $src" >&2; return 1; }
   git -C "$src" rev-parse --is-inside-work-tree >/dev/null 2>&1 || { echo "error: project $project is not a git repo" >&2; return 1; }
+  mode_line=$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" "$FM_ROOT/bin/fm-project-mode.sh" "$project") || return 1
   read -r mode _ <<EOF
-$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" "$FM_ROOT/bin/fm-project-mode.sh" "$project")
+$mode_line
 EOF
   if [ "$mode" = local-only ]; then
     echo "error: project $project is local-only; secondmate routes support only no-mistakes and direct-PR projects" >&2
@@ -562,12 +563,13 @@ EOF
 }
 
 validate_seed_project() {
-  local project=$1 src mode url
+  local project=$1 src mode mode_line url
   src="$PROJECTS/$project"
   [ -d "$src" ] || { echo "error: project $project not found at $src" >&2; return 1; }
   git -C "$src" rev-parse --is-inside-work-tree >/dev/null 2>&1 || { echo "error: project $project is not a git repo" >&2; return 1; }
+  mode_line=$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" "$FM_ROOT/bin/fm-project-mode.sh" "$project") || return 1
   read -r mode _ <<EOF
-$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" "$FM_ROOT/bin/fm-project-mode.sh" "$project")
+$mode_line
 EOF
   if [ "$mode" = local-only ]; then
     echo "error: project $project is local-only; secondmate routes support only no-mistakes and direct-PR projects" >&2
@@ -732,9 +734,10 @@ registry_line_for_project() {
 }
 
 project_mode_in_home() {
-  local home=$1 project=$2 mode
+  local home=$1 project=$2 mode mode_line
+  mode_line=$(FM_ROOT_OVERRIDE='' FM_STATE_OVERRIDE='' FM_DATA_OVERRIDE='' FM_PROJECTS_OVERRIDE='' FM_CONFIG_OVERRIDE='' FM_HOME="$home" "$FM_ROOT/bin/fm-project-mode.sh" "$project") || return 1
   read -r mode _ <<EOF
-$(FM_ROOT_OVERRIDE='' FM_STATE_OVERRIDE='' FM_DATA_OVERRIDE='' FM_PROJECTS_OVERRIDE='' FM_CONFIG_OVERRIDE='' FM_HOME="$home" "$FM_ROOT/bin/fm-project-mode.sh" "$project")
+$mode_line
 EOF
   printf '%s\n' "$mode"
 }

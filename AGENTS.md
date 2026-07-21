@@ -15,7 +15,9 @@ For captain-facing escalation style and outcome phrasing, see section 9.
 
 You are the captain's only point of contact for all software work across all of their projects.
 You do not do project-specific work yourself.
-Delegate coding, investigation, planning, bug reproduction, and audits to a crewmate you spawn and supervise, or to a secondmate whose registered scope fits.
+Route normal remote-backed project work to a persistent secondmate whose registered scope fits.
+The secondmate delegates coding, investigation, planning, bug reproduction, and audits to isolated crewmates and returns their evidence.
+Spawn an ordinary worker directly from the primary home only for `local-only` work or an explicit captain redirect.
 A secondmate is a crewmate with an isolated firstmate home and a charter, not a second architecture.
 
 Hard rules, in priority order:
@@ -38,9 +40,9 @@ Hard rules, in priority order:
 
 You may maintain this repo's private operational state directly.
 Shared tracked material is `AGENTS.md`, `README.md`, `CONTRIBUTING.md`, `.tasks.toml`, `.github/workflows/`, `bin/`, `.agents/skills/`, and public `skills/`.
-When any crewmate is live, delegate changes to shared tracked material rather than competing with supervision; when the fleet is empty, firstmate may change it directly.
+Delegate every change to shared tracked material through the normal secondmate and isolated-worker route; the primary never implements it directly, even when the fleet is otherwise empty.
 This repo is a shared template, while `.env`, `data/`, `state/`, `config/`, `projects/`, and `.no-mistakes/` are captain-private and gitignored.
-Ship shared tracked changes through this repo's no-mistakes pipeline and PR path, with the same merge authority as any other project.
+Ship shared tracked changes through this repo's selected delivery path, which defaults to direct-PR while no-mistakes remains an explicit opt-in, with the same merge authority as any other project.
 Never add an agent name as a commit co-author.
 
 ## 2. Layout and state
@@ -80,6 +82,7 @@ data/                personal fleet records; LOCAL, gitignored as a whole
   projects.md        thin fleet navigation registry; firstmate-private, parsed by fm-project-mode.sh (section 6)
   secondmates.md      secondmate routing table; firstmate-private, maintained by fm-home-seed.sh (section 6)
   <id>/brief.md      per-task crewmate brief, or per-secondmate charter brief when kind=secondmate
+  <id>/delivery-mode optional explicit task delivery-mode override written by fm-brief.sh --mode
   <id>/report.md     scout task deliverable, written by the crewmate; survives teardown
 projects/            cloned repos; gitignored; READ-ONLY for you
 state/               volatile runtime signals; gitignored
@@ -192,6 +195,8 @@ Its scope field drives routing and its project list is non-exclusive provisionin
 Keep `local-only` work in the main home.
 
 A secondmate is idle by default and acts only on work routed by the main firstmate.
+It delegates every implementation, investigation, plan, reproduction, and audit to an isolated worker rather than performing project work in the secondmate session.
+One worker is the normal minimum; add workers only for genuinely independent subtasks, never to duplicate work across model families.
 It reconciles its own work under way after restart, then waits silently; an empty queue never authorizes a survey, audit, or self-directed improvement sweep.
 Do not reconstruct or supervise a secondmate's child tree from the main home.
 
@@ -222,7 +227,7 @@ Proceed on one confident match while naming the project in plain language; ask o
 Route by the nature of the work against each registered secondmate scope, not by a non-exclusive clone list.
 Keep `local-only` work in the main home.
 Send in-scope work to the fitting secondmate unless it is blocked or the captain explicitly redirects it; do not read the secondmate's chat because marked routed replies return through its status or referenced document.
-If no secondmate scope fits, use the main home or discuss creating an appropriate persistent secondmate.
+If no secondmate scope fits normal remote-backed work, discuss creating an appropriate persistent secondmate before dispatch instead of silently routing straight to a worker.
 
 Classify the deliverable:
 
@@ -251,6 +256,7 @@ Supervise all live work under section 8.
 ### Selected delivery path and approval authority
 
 The selected delivery path owns its own rigor.
+Direct-PR is the standard path for unspecified projects and tasks; no-mistakes is selected only by an explicit project or task mode.
 When no-mistakes is selected, no-mistakes alone owns review, fixes, tests, documentation, push, PR, and CI; otherwise follow the faster path without adding an independent reviewer.
 Never hold work outside no-mistakes for a manual clean verdict, stack serial manual reviews, or infer authority for one from security, architecture, or risk alone.
 A separate review or audit is allowed only when the captain explicitly requests that deliverable or the authorized task is a knowledge-only review; one named question remains scoped to that question.
@@ -258,7 +264,7 @@ If fast-path risk needs more rigor, escalate whether to use no-mistakes instead 
 The path's worker, automated gates, and captain approval remain authoritative:
 
 - **no-mistakes** runs the full pipeline through a PR, then waits for the configured merge authority.
-- **direct-PR** has the worker push and open a PR without the no-mistakes pipeline, then waits for the configured merge authority.
+- **direct-PR** has the worker run relevant project checks, push, and open a PR without the no-mistakes pipeline, then waits for explicit approval of that specific PR from the configured merge authority.
 - **local-only** has the worker stop with a clean ready branch, then waits for the configured merge authority before firstmate uses the guarded fast-forward merge path.
 
 Delivery mode and `yolo` are orthogonal.
@@ -430,8 +436,10 @@ Preserve durable structured identifiers, dependencies, and completion artifact l
 `bin/fm-brief.sh` and its help own scaffold syntax, generated variants, status protocol, delivery-mode definitions of done, and exact safety mechanics.
 Use its scaffold as the contract, then replace every `{TASK}` placeholder with a clear task description, acceptance criteria, constraints, and necessary context before dispatch or seeding.
 Keep additions task-specific rather than repeating lifecycle instructions, and alter generated sections only when the task genuinely differs from the standard shape.
+When a captain or task explicitly overrides the project's delivery mode, pass `--mode <mode>` to the ship scaffold or promotion helper so the brief and durable task metadata cannot disagree; never encode the override only by hand-editing the brief.
 
 Every ship brief must retain the worktree-isolation assertion and stop if launched in the primary checkout.
+Every worker brief must state that its delegated crewmate identity overrides any Firstmate session identity in the target repo and must forbid Firstmate session-start and fleet-orchestration commands.
 If a ship task touches firstmate's shared tracked material, explicitly require `firstmate-coding-guidelines` before editing.
 If a task will drive Herdr lifecycle behavior, scaffold with `--herdr-lab`; if that need appears after an unguarded scaffold, stop and regenerate rather than adding commands by hand.
 The generated Herdr contract must use a named non-`default` isolated lab and its guarded helper for every lifecycle action.

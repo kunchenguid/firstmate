@@ -99,7 +99,7 @@
 # grok uses a firstmate-owned global hook under ${GROK_HOME:-$HOME/.grok}/hooks
 # plus a gitignored .fm-grok-turnend worktree pointer and a state token.
 # On success prints: spawned <id> harness=<name> kind=<ship|scout|secondmate> mode=<mode> yolo=<on|off> window=<backend-target> worktree=<path>
-# mode/yolo are resolved per-project from data/projects.md for ship/scout tasks;
+# mode/yolo are resolved from the optional task override then data/projects.md for ship/scout tasks;
 # secondmate spawns record mode=secondmate, yolo=off, home=, and projects=.
 set -eu
 
@@ -277,7 +277,7 @@ spawn_abort_cleanup() {
             echo "project=$PROJ_ABS"
             echo "harness=$HARNESS"
             echo "kind=$KIND"
-            echo "mode=${MODE:-no-mistakes}"
+            echo "mode=${MODE:-direct-PR}"
             echo "yolo=${YOLO:-off}"
             echo "tasktmp=${TASK_TMP:-}"
             echo "model=${MODEL:-default}"
@@ -754,19 +754,18 @@ real_path_or_raw() {  # <path>
 # herdr-sm-spaces-k4). Both branches converge on the same $T ("target") string
 # that every downstream operation (send/capture/kill) already treats as opaque
 # per-backend routing (fm_backend_resolve_selector).
+spawn_worktree_isolated() {  # <candidate>
+  local candidate=$1 candidate_real candidate_top candidate_top_real
+  candidate_real=$(cd "$candidate" 2>/dev/null && pwd -P) || return 1
+  candidate_top=$(git -C "$candidate" rev-parse --show-toplevel 2>/dev/null) || return 1
+  candidate_top_real=$(cd "$candidate_top" 2>/dev/null && pwd -P) || return 1
+  [ "$candidate_real" = "$candidate_top_real" ] && [ "$candidate_real" != "$PROJ_ABS_REAL" ]
+}
+
 validate_spawn_worktree() {  # <source> <inspect-target>
-  local source=$1 inspect_target=$2 wt_real proj_real wt_top wt_top_real
-  wt_real=
-  if ! wt_real=$(cd "$WT" 2>/dev/null && pwd -P); then
-    wt_real=
-  fi
-  proj_real=$PROJ_ABS_REAL
+  local source=$1 inspect_target=$2 wt_top
   wt_top=$(git -C "$WT" rev-parse --show-toplevel 2>/dev/null || true)
-  wt_top_real=
-  if ! wt_top_real=$(cd "$wt_top" 2>/dev/null && pwd -P); then
-    wt_top_real=
-  fi
-  if [ -z "$wt_real" ] || [ -z "$wt_top_real" ] || [ "$wt_real" != "$wt_top_real" ] || [ "$wt_real" = "$proj_real" ]; then
+  if ! spawn_worktree_isolated "$WT"; then
     echo "error: $source did not yield an isolated worktree (resolved '$WT'; worktree root '${wt_top:-none}'; primary '$PROJ_ABS'); refusing to launch to avoid tangling the primary checkout. Inspect target $inspect_target" >&2
     exit 1
   fi
@@ -1021,14 +1020,12 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   # A single read that already differs from PROJ_ABS_REAL is not proof the pane
   # settled there: on some tmux/WSL setups a brand-new window's pane_current_path
   # transiently reports an unrelated stale path (seen live as another real git
-  # checkout entirely) before the shell catches up with treehouse get's cd. That
-  # stale path still passes the PROJ_ABS_REAL comparison and validate_spawn_worktree
-  # below (it resolves to a real, distinct worktree top-level too), so accepting it
-  # on one read alone silently records the wrong worktree= in state/<id>.meta. Require
-  # two consecutive reads to agree on the same non-project path before accepting it;
-  # a mismatch just becomes the new candidate rather than resetting the wait, so a
-  # pane that is already settled by the first real read only costs the one existing
-  # inter-poll sleep as confirmation, not a whole extra cycle on top.
+  # checkout entirely), while a backend handoff can briefly expose a non-worktree
+  # cwd such as /. Require two consecutive non-project reads to agree, then apply
+  # the isolated-worktree validation below. A mismatch becomes the new candidate
+  # rather than resetting the wait, so a pane already settled by the first valid
+  # read costs only the existing inter-poll sleep as confirmation rather than a
+  # whole extra cycle.
   candidate=""
   for _ in $(seq 1 60); do
     p=$(spawn_current_path "$WT_TARGET" || true)
@@ -1178,8 +1175,9 @@ if [ "$KIND" = secondmate ]; then
   SECONDMATE_PROJECTS=$(secondmate_registry_value "$ID" projects || true)
 else
   PROJ_NAME=$(basename "$PROJ_ABS")
+  MODE_LINE=$("$FM_ROOT/bin/fm-project-mode.sh" "$PROJ_NAME" --task "$ID")
   read -r MODE YOLO <<EOF
-$("$FM_ROOT/bin/fm-project-mode.sh" "$PROJ_NAME")
+$MODE_LINE
 EOF
 fi
 

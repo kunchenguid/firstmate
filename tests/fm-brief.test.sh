@@ -36,13 +36,14 @@ test_help_includes_entire_header() {
   pass "fm-brief.sh: --help renders the complete header"
 }
 
-# Registry with one project per delivery mode, so each ship-mode DOD branch is
-# exercised. A project absent from the registry defaults to no-mistakes.
+# Registry with one project per explicit delivery mode, so each ship-mode DOD
+# branch is exercised. A project absent from the registry defaults to direct-PR.
 write_registry() {
   local home=$1
   mkdir -p "$home/data"
   cat > "$home/data/projects.md" <<'EOF'
 - direct-proj [direct-PR] - fixture for direct-PR mode (added 2026-07-01)
+- nm-proj [no-mistakes] - fixture for no-mistakes mode (added 2026-07-01)
 - local-proj [local-only] - fixture for local-only mode (added 2026-07-01)
 EOF
 }
@@ -57,7 +58,7 @@ test_ship_modes_generate_clean_briefs() {
   home="$TMP_ROOT/ship-home"
   write_registry "$home"
 
-  for id_proj in "brief-nomistakes-a1:no-registry-proj" "brief-directpr-a2:direct-proj" "brief-localonly-a3:local-proj"; do
+  for id_proj in "brief-default-a0:no-registry-proj" "brief-nomistakes-a1:nm-proj" "brief-directpr-a2:direct-proj" "brief-localonly-a3:local-proj"; do
     id=${id_proj%%:*}
     proj=${id_proj##*:}
     FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" "$proj" >/dev/null 2>&1; status=$?
@@ -80,8 +81,8 @@ test_faster_paths_use_configured_authority_without_stacked_review() {
   id="brief-direct-authority-a4"
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" direct-proj >/dev/null 2>&1
   brief="$home/data/$id/brief.md"
-  assert_grep "The configured merge authority decides whether to merge the PR; firstmate relays the outcome." "$brief" \
-    "direct-PR brief lost configured merge authority"
+  assert_grep "The configured merge authority must explicitly approve this specific PR before firstmate merges it." "$brief" \
+    "direct-PR brief lost explicit configured merge authority"
   assert_no_grep "The captain reviews and merges the PR" "$brief" \
     "direct-PR brief hard-coded captain-only authority"
   id="brief-local-authority-a4"
@@ -101,9 +102,9 @@ test_faster_paths_use_configured_authority_without_stacked_review() {
 test_no_mistakes_dod_wording() {
   local home id brief
   home="$TMP_ROOT/wording-home"
-  mkdir -p "$home/data"
+  write_registry "$home"
   id="brief-wording-b1"
-  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj >/dev/null 2>&1
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" nm-proj >/dev/null 2>&1
   brief="$home/data/$id/brief.md"
   assert_present "$brief" "brief was not scaffolded"
   assert_grep "no-mistakes itself provides for the mechanics" "$brief" \
@@ -117,6 +118,40 @@ test_no_mistakes_dod_wording() {
   assert_no_grep "no-mistakes' own guidance" "$brief" \
     "no-mistakes DOD regressed to the apostrophe form that breaks bash -n"
   pass "fm-brief.sh: no-mistakes DOD wording avoids the apostrophe regression"
+}
+
+test_standard_direct_pr_and_explicit_task_override() {
+  local home brief mode_file out rc
+  home="$TMP_ROOT/default-and-override-home"
+  write_registry "$home"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" default-direct unregistered >/dev/null 2>&1
+  brief="$home/data/default-direct/brief.md"
+  assert_grep 'This project ships **direct-PR**' "$brief" \
+    "unregistered project brief did not use the direct-PR default"
+  assert_grep "Run the project's relevant test, lint, and build commands before pushing" "$brief" \
+    "direct-PR default lost project check requirements"
+  assert_grep "must explicitly approve this specific PR" "$brief" \
+    "direct-PR default lost specific-PR approval"
+  assert_no_grep 'no-mistakes doctor' "$brief" \
+    "direct-PR default still invoked no-mistakes"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" task-gated direct-proj --mode no-mistakes >/dev/null 2>&1
+  brief="$home/data/task-gated/brief.md"
+  mode_file="$home/data/task-gated/delivery-mode"
+  assert_grep 'This task ships through the explicit **no-mistakes** pipeline.' "$brief" \
+    "explicit task override did not scaffold the no-mistakes path"
+  [ "$(cat "$mode_file")" = no-mistakes ] \
+    || fail "explicit task mode was not recorded for spawn metadata"
+  [ "$(FM_HOME="$home" "$ROOT/bin/fm-project-mode.sh" direct-proj --task task-gated)" = "no-mistakes off" ] \
+    || fail "task override did not resolve through fm-project-mode"
+
+  rc=0
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" invalid-mode direct-proj --mode mystery 2>&1) || rc=$?
+  expect_code 1 "$rc" "unknown task mode must be rejected"
+  assert_contains "$out" "unknown delivery mode 'mystery'" \
+    "unknown task mode refusal was not explicit"
+  pass "fm-brief.sh: direct-PR is standard and task-level no-mistakes stays explicit"
 }
 
 test_ship_project_memory_wording() {
@@ -230,6 +265,14 @@ test_secondmate_no_projects_charter() {
     "secondmate charter did not close a quietly ended routed-work phase"
   assert_grep 'use the same key on its later' "$brief" \
     "secondmate charter did not supersede working phases with later states"
+  assert_grep 'Every implementation, investigation, plan, reproduction, and audit is worker work.' "$brief" \
+    "secondmate charter did not reserve project work for workers"
+  assert_grep 'Delegate each routed project task to an isolated crewmate' "$brief" \
+    "secondmate charter did not require an isolated worker"
+  assert_grep 'one worker unless genuinely independent subtasks justify more' "$brief" \
+    "secondmate charter did not preserve the smallest-effective-crew rule"
+  assert_grep 'inherited dispatch profiles to each worker by task fit' "$brief" \
+    "secondmate charter did not propagate configured worker routing"
   if grep -nE '^-[[:space:]]*$' "$brief" >/dev/null; then
     fail "project-less charter left a stray empty project bullet"
   fi
@@ -330,6 +373,10 @@ test_scout_and_secondmate_scaffold() {
   assert_present "$brief" "scout brief was not scaffolded"
   assert_grep "SCOUT task" "$brief" "scout brief must declare itself a scout task"
   assert_grep "report.md" "$brief" "scout brief must point at the report deliverable"
+  assert_grep "Your delegated crewmate role comes from this brief" "$brief" \
+    "scout brief did not protect delegated worker identity"
+  assert_grep "do not adopt a Firstmate session identity" "$brief" \
+    "scout brief did not forbid Firstmate session orchestration"
 
   FM_SECONDMATE_CHARTER='Supervise the alpha domain.' \
     FM_HOME="$BRIEF_HOME" "$ROOT/bin/fm-brief.sh" brief-sm-q6 --secondmate alpha >/dev/null 2>&1 \
@@ -341,11 +388,27 @@ test_scout_and_secondmate_scaffold() {
   pass "fm-brief: scout and secondmate code paths still scaffold well-formed briefs"
 }
 
+test_ship_worker_identity_is_not_replaced_by_target_agents() {
+  local home brief
+  home="$TMP_ROOT/worker-identity-home"
+  mkdir -p "$home/data"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" worker-identity firstmate >/dev/null 2>&1
+  brief="$home/data/worker-identity/brief.md"
+  assert_grep "even when the target repository's \`AGENTS.md\` describes a firstmate or secondmate session" "$brief" \
+    "ship brief did not cover the Firstmate-repo identity collision"
+  assert_grep "do not run \`bin/fm-session-start.sh\`" "$brief" \
+    "ship brief did not forbid primary session startup"
+  assert_grep "other fleet-orchestration commands" "$brief" \
+    "ship brief did not preserve the worker/primary orchestration boundary"
+  pass "fm-brief.sh: target AGENTS.md cannot replace the delegated worker identity"
+}
+
 test_script_parses
 test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
 test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
+test_standard_direct_pr_and_explicit_task_override
 test_ship_project_memory_wording
 test_herdr_lab_contract_is_explicit_and_complete
 test_herdr_lab_contract_quotes_foreign_firstmate_path
@@ -355,3 +418,4 @@ test_secondmate_no_projects_charter
 test_pause_verb_override_renders_all_brief_scaffolds
 test_scout_and_secondmate_load_decision_hold_policy
 test_scout_and_secondmate_scaffold
+test_ship_worker_identity_is_not_replaced_by_target_agents

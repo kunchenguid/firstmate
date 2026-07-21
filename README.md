@@ -30,8 +30,8 @@ You can run one coding agent easily.
 But the moment you want three project tasks done in parallel - fixes, investigations, plans, audits - you become a tab-juggler: babysitting sessions, copy-pasting context between repos, forgetting which terminal had the failing test.
 
 firstmate flips the model.
-You talk to a single agent - the first mate - and it runs the crew for you: spawning autonomous agents in a visible session backend, giving each a clean git worktree, supervising them to completion, and handing you finished PRs, approved local merges, or standalone investigation reports.
-For larger fleets, you can opt in to persistent secondmates: second mates that are still ordinary direct reports, but run from their own isolated firstmate homes.
+You talk to a single agent - the first mate - and it routes normal project work through persistent secondmates, which spawn isolated workers in a visible session backend and return their evidence for captain-facing decisions and reporting.
+One secondmate can cover a broad domain; add more only when durable scopes genuinely differ.
 
 firstmate is not a model, not a harness, not a skill, not an MCP server, and not a CLI.
 firstmate is an agent distro for running a crew of agents.
@@ -45,8 +45,8 @@ Launching a supported harness inside it instantiates your first mate - and makes
 - **A visible crew** - every crewmate works in its own tmux window, experimental herdr/zellij tab, cmux workspace, or Orca terminal you can watch or type into; the first mate reconciles.
 - **Disposable worktrees** - each task runs in a clean [treehouse](https://github.com/kunchenguid/treehouse) git worktree, or an Orca-managed worktree when `backend=orca`, so parallel work on one repo never collides.
 - **Two task shapes** - ship tasks deliver a change; scout tasks investigate, plan, reproduce, or audit and leave a report.
-- **Explicit project modes** - each project ships via `no-mistakes`, `direct-PR`, or `local-only`, with an optional `+yolo` autonomy flag.
-- **Optional secondmates** - opt in to persistent second mates that run from isolated firstmate homes with their own `FM_HOME`, state, projects, and session lock, supervising project clones or a project-less firstmate-repo domain, kept on the primary firstmate version by guarded local fast-forwards and checked for live agent processes at session start.
+- **Explicit project modes** - `direct-PR` is the standard path, `no-mistakes` remains an explicit full-pipeline opt-in, and `local-only` keeps work local, with an optional `+yolo` autonomy flag.
+- **Three responsibility layers** - the primary coordinates intake and captain-facing decisions, a fitting persistent secondmate coordinates the domain, and the smallest effective isolated worker crew performs each task.
 - **Event-driven, zero-token supervision** - a bash watcher sleeps on the fleet and wakes the first mate only when something needs you; verified primary harnesses also get a turn-end backstop that blocks or follows up on a blind stop when work is under way and supervision is not live.
 - **Optional X mode** - opt in with one local `.env` token so firstmate can answer your public `@myfirstmate` mentions, act on normal reversible mention requests through the same lifecycle as chat requests, acknowledge spawned work, and post up to three public-safe completion follow-ups within seven days for genuine milestones and the final outcome without changing non-X behavior; dry-run preview records would-be replies and dismissals locally before go-live.
 - **Guarded by construction** - the first mate is read-only over your projects except for the guarded paths authorized by [hard rule 1](AGENTS.md#1-identity-and-prime-directives), with fleet sync's safe branch pruning remaining part of the fleet-sync exception; crewmates make every project change behind the configured merge authority.
@@ -110,7 +110,7 @@ For Pi, approve the project trust prompt once per clone on first launch so both 
 > ahoy! look at my github project xyz, then fix the flaky login test and add dark mode
 
 # firstmate checks its toolchain (asking your consent before installing anything),
-# clones the project under projects/, and spawns two crewmates in the active backend
+# clones the project, routes it to a fitting secondmate, and that secondmate spawns two independent workers
 # fm-fix-login-k3 and fm-dark-mode-p7.
 # Minutes later:
 
@@ -131,18 +131,23 @@ Setup guides for tmux (the default) and every other supported backend (herdr, ze
                   │  chat: requests, decisions, "merge it"
                   ▼
  ┌─────────────────────────────────────┐
- │ firstmate            (this repo)    │
- │ reads projects/ + firstmate routes  │
- │ writes guarded backlog/briefs/state │
+ │ primary firstmate                   │
+ │ intake, routing, decisions, reports │
+ └─────────────────┬───────────────────┘
+                   │ marked route / status return
+                   ▼
+ ┌─────────────────────────────────────┐
+ │ persistent secondmate               │
+ │ domain coordination and supervision │
  └──┬──────────────┬───────────────┬───┘
-    │ backend sends / status files │
+    │ isolated delegated workers   │
     ▼              ▼               ▼
  ┌────────┐   ┌────────┐      ┌────────┐
- │fm-task1│   │fm-task2│  ... │fm-taskN│   tmux windows, herdr/zellij tabs, cmux workspaces, or Orca terminals
- │crewmate│   │crewmate│      │crewmate│   one autonomous agent each
+ │fm-task1│   │fm-task2│  ... │fm-taskN│
+ │ worker │   │ worker │      │ worker │
  └───┬────┘   └───┬────┘      └───┬────┘
      ▼            ▼               ▼
-  treehouse worktree, Orca worktree, or isolated secondmate home
+  treehouse or Orca task worktrees
      │
      ├─ ship: project mode ► PR/local merge ► teardown
      │
@@ -150,8 +155,8 @@ Setup guides for tmux (the default) and every other supported backend (herdr, ze
 ```
 
 You chat with the first mate.
-It routes each request to a crewmate in its own session endpoint and git worktree, supervises the fleet with a zero-token event-driven watcher, and brings you finished PRs, approved local merges, or investigation reports.
-Optional secondmates extend this to persistent second mates, dispatch profiles let you steer which harness handles which task, and an opt-in X mode lets the same fleet answer public mentions.
+It routes normal project requests through a fitting persistent second mate to isolated workers, supervises the responsibility chain with a zero-token event-driven watcher, and brings you finished PRs, approved local merges, or investigation reports.
+Dispatch profiles let you steer which harness handles each worker task, and an opt-in X mode lets the same fleet answer public mentions.
 `codex-app` is not a runtime backend yet; [docs/codex-app-backend.md](docs/codex-app-backend.md) owns the Codex App boundary.
 
 Full architecture - the supervision engine, worktree isolation, secondmates, dispatch profiles, project modes, optional X mode, fleet sync, and self-update - is in [docs/architecture.md](docs/architecture.md).

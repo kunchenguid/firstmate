@@ -36,6 +36,11 @@ command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (required by the her
 SESSION="fm-lab-prune-safety-e2e-$$"
 export HERDR_SESSION="$SESSION"
 SCRATCH=$(mktemp -d "${TMPDIR:-/tmp}/fm-herdr-prune-safety.XXXXXX")
+# This fixture models a primary home even when the suite runs from a persistent
+# secondmate worktree carrying its own .fm-secondmate-home marker.
+PRIMARY_HOME="$SCRATCH/primary-home"
+mkdir -p "$PRIMARY_HOME"
+export FM_HOME="$PRIMARY_HOME"
 cleanup_all() {
   herdr_safe_stop_and_delete "$SESSION"
   rm -rf "$SCRATCH"

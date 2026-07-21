@@ -14,16 +14,19 @@ set -u
 
 SPAWN="$ROOT/bin/fm-spawn.sh"
 TMP_ROOT=$(fm_test_tmproot fm-spawn-batch)
+NEUTRAL_CONFIG="$TMP_ROOT/config"
+mkdir -p "$NEUTRAL_CONFIG"
 export FM_BACKEND=tmux
 
-# Clear ambient firstmate overrides so the behavior test owns its environment.
+# Point configuration at an empty fixture so a real home's inherited dispatch
+# profiles cannot intercept the parser behavior this test owns.
 run_spawn() {
   FM_ROOT_OVERRIDE='' \
     FM_HOME='' \
     FM_STATE_OVERRIDE='' \
     FM_DATA_OVERRIDE='' \
     FM_PROJECTS_OVERRIDE='' \
-    FM_CONFIG_OVERRIDE='' \
+    FM_CONFIG_OVERRIDE="$NEUTRAL_CONFIG" \
     FM_SPAWN_NO_GUARD=1 \
     "$SPAWN" "$@" 2>&1
 }
@@ -79,12 +82,12 @@ test_projects_path_scoping() {
     projects="$TMP_ROOT/$id projects"
     mkdir -p "$home/data" "$projects/alpha"
     if [ "$use_override" = yes ]; then
-      out=$(FM_ROOT_OVERRIDE='' FM_STATE_OVERRIDE='' FM_DATA_OVERRIDE='' FM_CONFIG_OVERRIDE='' \
+      out=$(FM_ROOT_OVERRIDE='' FM_STATE_OVERRIDE='' FM_DATA_OVERRIDE='' FM_CONFIG_OVERRIDE="$NEUTRAL_CONFIG" \
         FM_HOME="$home" FM_PROJECTS_OVERRIDE="$projects" FM_SPAWN_NO_GUARD=1 \
         "$SPAWN" "$id" projects/alpha codex 2>&1)
     else
       mkdir -p "$home/projects/alpha"
-      out=$(FM_ROOT_OVERRIDE='' FM_STATE_OVERRIDE='' FM_DATA_OVERRIDE='' FM_PROJECTS_OVERRIDE='' FM_CONFIG_OVERRIDE='' \
+      out=$(FM_ROOT_OVERRIDE='' FM_STATE_OVERRIDE='' FM_DATA_OVERRIDE='' FM_PROJECTS_OVERRIDE='' FM_CONFIG_OVERRIDE="$NEUTRAL_CONFIG" \
         FM_HOME="$home" FM_SPAWN_NO_GUARD=1 \
         "$SPAWN" "$id" projects/alpha codex 2>&1)
     fi

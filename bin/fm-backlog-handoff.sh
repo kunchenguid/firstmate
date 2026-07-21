@@ -4,6 +4,8 @@
 # created (or whenever an existing queued item should become its domain's work)
 # so the secondmate owns its queue from day one instead of the item staying
 # stranded in the main backlog.
+# Moving ownership does not authorize the secondmate agent to perform the item;
+# its generated charter requires delegation to an isolated task worker.
 #
 # Scope-matching is firstmate's JUDGMENT: you pass the task-id keys you have
 # already judged in-scope for the secondmate. This script performs only the

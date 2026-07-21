@@ -16,6 +16,11 @@ set -u
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (required by the herdr adapter)"; exit 0; }
 
 TMP_ROOT=$(fm_test_tmproot fm-backend-herdr-tests)
+# Default cases model a primary home and must not inherit a persistent
+# secondmate worktree's .fm-secondmate-home marker through the repo root.
+PRIMARY_HOME="$TMP_ROOT/primary-home"
+mkdir -p "$PRIMARY_HOME"
+export FM_HOME="$PRIMARY_HOME"
 export FM_BACKEND_HERDR_SUBMIT_MIN_SLEEP=0
 
 # make_herdr_fakebin: a `herdr` stub that logs every invocation (one line,

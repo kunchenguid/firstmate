@@ -299,8 +299,8 @@ test_no_mistakes_min_version() {
     [ -n "$label" ] || continue
     n=$((n + 1))
     case_dir="$TMP_ROOT/no-mistakes-$n"
-    mkdir -p "$case_dir/home"
-    mkdir -p "$case_dir/home/config"
+    mkdir -p "$case_dir/home/data" "$case_dir/home/config"
+    printf '%s\n' '- gated [no-mistakes] - gated fixture (added 2026-07-21)' > "$case_dir/home/data/projects.md"
     printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
     fakebin=$(make_fake_toolchain "$case_dir")
     add_tasks_axi "$fakebin" "0.1.1"
@@ -319,7 +319,35 @@ newer no-mistakes major is accepted^no-mistakes version v2.0.0 (fake)^empty
 older no-mistakes patch reports an upgrade^no-mistakes version v1.31.1 (fake)^missing
 unparseable no-mistakes version reports an upgrade^no-mistakes development build^missing
 ROWS
-  pass "bootstrap enforces no-mistakes minimum version"
+  pass "bootstrap enforces the no-mistakes minimum version when explicitly selected"
+}
+
+test_no_mistakes_dependency_is_conditional() {
+  local direct_dir direct_fake direct_out task_dir task_fake task_out missing
+  missing='MISSING: no-mistakes (install: curl -fsSL https://raw.githubusercontent.com/kunchenguid/no-mistakes/main/docs/install.sh | sh)'
+
+  direct_dir="$TMP_ROOT/no-mistakes-direct-only"
+  mkdir -p "$direct_dir/home/config"
+  printf '%s\n' manual > "$direct_dir/home/config/backlog-backend"
+  direct_fake=$(make_fake_toolchain "$direct_dir")
+  add_tasks_axi "$direct_fake" "0.1.1"
+  direct_out=$(PATH="$direct_fake:$BASE_PATH" FM_HOME="$direct_dir/home" FM_ROOT_OVERRIDE="$direct_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_FAKE_NO_MISTAKES_VERSION='no-mistakes version v1.0.0 (fake)' \
+    "$ROOT/bin/fm-bootstrap.sh")
+  [ -z "$direct_out" ] || fail "direct-PR-only home should not require no-mistakes, got: $direct_out"
+
+  task_dir="$TMP_ROOT/no-mistakes-task-override"
+  mkdir -p "$task_dir/home/config" "$task_dir/home/data/task-gated"
+  printf '%s\n' manual > "$task_dir/home/config/backlog-backend"
+  printf '%s\n' no-mistakes > "$task_dir/home/data/task-gated/delivery-mode"
+  task_fake=$(make_fake_toolchain "$task_dir")
+  add_tasks_axi "$task_fake" "0.1.1"
+  task_out=$(PATH="$task_fake:$BASE_PATH" FM_HOME="$task_dir/home" FM_ROOT_OVERRIDE="$task_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_FAKE_NO_MISTAKES_VERSION='no-mistakes version v1.0.0 (fake)' \
+    "$ROOT/bin/fm-bootstrap.sh")
+  [ "$task_out" = "$missing" ] \
+    || fail "explicit task override should require a compatible no-mistakes tool, got: $task_out"
+  pass "bootstrap requires no-mistakes only for an explicit project or task selection"
 }
 
 test_git_is_required_with_supported_install_instruction() {
@@ -788,6 +816,7 @@ ROWS
 
 test_bootstrap_reporting
 test_no_mistakes_min_version
+test_no_mistakes_dependency_is_conditional
 test_git_is_required_with_supported_install_instruction
 test_orca_backend_gates_orca_tool_only_when_selected
 test_session_provider_backends_do_not_require_tmux

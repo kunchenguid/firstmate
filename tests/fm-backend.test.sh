@@ -795,11 +795,11 @@ run_spawn_case() {  # <bin-root> <fakebin> <log> <state> <data> <config> <proj> 
 # worktree-discovery poll used to mistake an UNMOVED pane for one that had
 # already left the project, handing validate_spawn_worktree the project's own
 # directory as "the worktree" and tripping its false isolation refusal.
-# make_spawn_symlink_fakebin's tmux stub returns an unmoved project path on the
+# make_spawn_poll_fakebin's tmux stub returns an unmoved project path on the
 # first pane_current_path poll, then the real worktree path from the second poll
 # onward, so this test fails loudly if the PROJ_ABS/PROJ_ABS_REAL
 # canonicalization in bin/fm-spawn.sh ever regresses.
-make_spawn_symlink_fakebin() {  # <dir> <initial-project-path> <worktree-path> -> echoes fakebin dir
+make_spawn_poll_fakebin() {  # <dir> <initial-path> <worktree-path> -> echoes fakebin dir
   local dir=$1 initial_path=$2 wt=$3 fb="$1/fakebin" counter="$1/poll-count"
   mkdir -p "$fb"
   : > "$counter"
@@ -848,7 +848,7 @@ run_spawn_symlink_case() {  # <label> <physical|logical>
     logical) initial_path=$proj ;;
     *) fail "unknown symlink first-reply mode: $first_reply" ;;
   esac
-  fb=$(make_spawn_symlink_fakebin "$TMP_ROOT/symlink-fake-$label" "$initial_path" "$wt")
+  fb=$(make_spawn_poll_fakebin "$TMP_ROOT/symlink-fake-$label" "$initial_path" "$wt")
   data="$TMP_ROOT/symlink-data-$label"
   mkdir -p "$data/$id"
   printf 'test brief content\n' > "$data/$id/brief.md"
@@ -869,6 +869,62 @@ test_spawn_symlinked_project_prefix_avoids_false_refusal() {
   run_spawn_symlink_case physical physical
   run_spawn_symlink_case logical logical
   pass "fm-spawn.sh: a project reached through a symlinked prefix (e.g. macOS /tmp -> /private/tmp) does not trip the isolation guard's false refusal"
+}
+
+test_spawn_ignores_transient_non_worktree_cwd() {
+  local proj wt id fb data state config log out rc
+  proj="$TMP_ROOT/transient-project"
+  wt="$TMP_ROOT/transient-worktree"
+  id=spawntransientcwd
+  fm_git_worktree "$proj" "$wt" "fm/$id"
+  fb=$(make_spawn_poll_fakebin "$TMP_ROOT/transient-fake" / "$wt")
+  data="$TMP_ROOT/transient-data"
+  mkdir -p "$data/$id"
+  printf 'test brief content\n' > "$data/$id/brief.md"
+  state="$TMP_ROOT/transient-state"
+  config="$TMP_ROOT/transient-config"
+  mkdir -p "$state" "$config"
+  log="$TMP_ROOT/transient-spawn.log"
+
+  out=$(run_spawn_case "$ROOT" "$fb" "$log" "$state" "$data" "$config" "$proj" -- "$id" "$proj" claude 2>&1)
+  rc=$?
+  expect_code 0 "$rc" "fm-spawn.sh should keep polling after a transient non-worktree cwd"$'\n'"$out"
+  assert_contains "$out" "worktree=$wt" \
+    "fm-spawn.sh did not continue from the transient non-worktree cwd to the valid isolated worktree"
+  [ "$(wc -c < "$TMP_ROOT/transient-fake/poll-count" | tr -d '[:space:]')" -ge 3 ] \
+    || fail "fm-spawn.sh accepted the transient non-worktree cwd without two stable valid reads"
+
+  rm -rf "/tmp/fm-$id"
+  pass "fm-spawn.sh: a transient non-worktree cwd is ignored until the bounded poll sees a valid isolated worktree"
+}
+
+test_spawn_requires_stable_isolated_worktree_cwd() {
+  local proj stale_wt expected_wt id fb data state config log out rc
+  proj="$TMP_ROOT/settle-project"
+  stale_wt="$TMP_ROOT/settle-stale-worktree"
+  expected_wt="$TMP_ROOT/settle-expected-worktree"
+  id=spawnstablecwd
+  fm_git_worktree "$proj" "$expected_wt" "fm/$id"
+  git -C "$proj" worktree add -q --detach "$stale_wt" >/dev/null 2>&1
+  fb=$(make_spawn_poll_fakebin "$TMP_ROOT/settle-fake" "$stale_wt" "$expected_wt")
+  data="$TMP_ROOT/settle-data"
+  mkdir -p "$data/$id"
+  printf 'test brief content\n' > "$data/$id/brief.md"
+  state="$TMP_ROOT/settle-state"
+  config="$TMP_ROOT/settle-config"
+  mkdir -p "$state" "$config"
+  log="$TMP_ROOT/settle-spawn.log"
+
+  out=$(run_spawn_case "$ROOT" "$fb" "$log" "$state" "$data" "$config" "$proj" -- "$id" "$proj" claude 2>&1)
+  rc=$?
+  expect_code 0 "$rc" "fm-spawn.sh should wait past a stale but valid worktree cwd"$'\n'"$out"
+  assert_contains "$out" "worktree=$expected_wt" \
+    "fm-spawn.sh accepted the first stale worktree instead of the stable expected worktree"
+  [ "$(wc -c < "$TMP_ROOT/settle-fake/poll-count" | tr -d '[:space:]')" -ge 3 ] \
+    || fail "fm-spawn.sh accepted a valid worktree cwd without two stable reads"
+
+  rm -rf "/tmp/fm-$id"
+  pass "fm-spawn.sh: a valid but stale worktree cwd is ignored until two consecutive reads settle on the task worktree"
 }
 
 # --- old vs new: fm-teardown.sh ----------------------------------------------
@@ -925,10 +981,10 @@ test_teardown_conformance_old_vs_new() {
   mkdir -p "$state_old" "$state_new" "$config_old" "$config_new"
 
   fm_write_meta "$state_old/$id.meta" \
-    "window=firstmate:fm-$id" "worktree=$wt" "project=$proj" "harness=claude" "kind=scout" "mode=no-mistakes" "yolo=off" \
+    "window=firstmate:fm-$id" "worktree=$wt" "project=$proj" "harness=claude" "kind=scout" "mode=direct-PR" "yolo=off" \
     "decisions_reviewed=1" "decision_keys="
   fm_write_meta "$state_new/$id.meta" \
-    "window=firstmate:fm-$id" "worktree=$wt" "project=$proj" "harness=claude" "kind=scout" "mode=no-mistakes" "yolo=off" \
+    "window=firstmate:fm-$id" "worktree=$wt" "project=$proj" "harness=claude" "kind=scout" "mode=direct-PR" "yolo=off" \
     "decisions_reviewed=1" "decision_keys="
   touch "$state_old/.last-watcher-beat" "$state_new/.last-watcher-beat"
 
@@ -1084,6 +1140,8 @@ test_backend_of_selector_matches_explicit_target_meta
 test_send_conformance_old_vs_new
 test_peek_conformance_old_vs_new
 test_spawn_symlinked_project_prefix_avoids_false_refusal
+test_spawn_ignores_transient_non_worktree_cwd
+test_spawn_requires_stable_isolated_worktree_cwd
 test_teardown_conformance_old_vs_new
 test_spawn_refuses_unknown_backend_flag
 test_spawn_refuses_codex_app_backend_flag

@@ -51,7 +51,7 @@ setup_world() {
   cat > "$HOME_DIR/data/projects.md" <<EOF
 - alpha [direct-PR +yolo] - alpha project (added 2026-06-22)
 - beta [direct-PR] - beta project (added 2026-06-22)
-- gamma - gamma project (added 2026-06-22)
+- gamma [no-mistakes] - gamma project (added 2026-06-22)
 EOF
   ALPHA_ORIGIN=$(git -C "$HOME_DIR/projects/alpha" remote get-url origin)
   BETA_ORIGIN=$(git -C "$HOME_DIR/projects/beta" remote get-url origin)
@@ -79,6 +79,10 @@ phase_seed() {
   assert_present "$SUB/.fm-secondmate-home" "seed did not mark the subhome"
   assert_present "$SUB/data/charter.md" "seed did not copy the charter into the subhome"
   assert_grep 'customer onboarding charter' "$SUB/data/charter.md" "charter body was not copied verbatim"
+  assert_grep 'Every implementation, investigation, plan, reproduction, and audit is worker work.' "$SUB/data/charter.md" \
+    "seeded charter did not preserve the three-layer responsibility boundary"
+  assert_grep 'Delegate each routed project task to an isolated crewmate' "$SUB/data/charter.md" \
+    "seeded charter did not require worker delegation"
 
   # Projects cloned; remote-backed origins preserved.
   assert_present "$SUB/projects/alpha/.git" "alpha was not cloned"

@@ -45,8 +45,9 @@
 #          landed in the primary instead of its own worktree; restore it per the line.
 #          treehouse is also MISSING when its installed version lacks
 #          "treehouse get --lease" support.
-#          no-mistakes is also MISSING when its installed version is older than
-#          1.31.2.
+#          no-mistakes is required only when this home has an explicit
+#          no-mistakes project or task override, and is also MISSING then when
+#          its installed version is older than 1.31.2.
 #          tasks-axi and quota-axi are required bootstrap tools (same class as
 #          lavish-axi). tasks-axi is also version and feature gated (0.1.1+
 #          with update --archive-body and mv [<id>...]); an installed but
@@ -455,7 +456,7 @@ missing_tool_diagnostic() {
 # fm_backend_required_tools (bin/fm-backend.sh). So a herdr/zellij/cmux home is
 # never told tmux is missing, and only orca drops treehouse. A backend value with
 # no verified dependency set is reported before the universal checks continue.
-COMMON_TOOLS="node git gh no-mistakes gh-axi chrome-devtools-axi lavish-axi tasks-axi quota-axi"
+COMMON_TOOLS="node git gh gh-axi chrome-devtools-axi lavish-axi tasks-axi quota-axi"
 BACKEND=$(fm_backend_name)
 BACKEND_VALID=1
 if ! BACKEND_TOOLS=$(fm_backend_required_tools "$BACKEND"); then
@@ -488,6 +489,21 @@ no_mistakes_compatible() {
   [ "$minor" -gt "$NO_MISTAKES_MIN_MINOR" ] && return 0
   [ "$minor" -eq "$NO_MISTAKES_MIN_MINOR" ] || return 1
   [ "$patch" -ge "$NO_MISTAKES_MIN_PATCH" ]
+}
+
+home_requires_no_mistakes() {
+  local override
+  if [ -f "$DATA/projects.md" ] && awk '
+    $1=="-" && ($3=="[no-mistakes]" || $3=="[no-mistakes") { found=1; exit }
+    END { exit(found ? 0 : 1) }
+  ' "$DATA/projects.md"; then
+    return 0
+  fi
+  for override in "$DATA"/*/delivery-mode; do
+    [ -f "$override" ] && [ ! -L "$override" ] || continue
+    [ "$(sed -n '1p' "$override")" = no-mistakes ] && return 0
+  done
+  return 1
 }
 
 x_mode_write_if_changed() {
@@ -770,8 +786,10 @@ if fm_backend_list_contains "$TOOLS" treehouse \
   && command -v treehouse >/dev/null 2>&1 && ! treehouse_supports_lease; then
   echo "MISSING: treehouse (install: $(install_cmd treehouse))"
 fi
-if command -v no-mistakes >/dev/null 2>&1 && ! no_mistakes_compatible; then
-  echo "MISSING: no-mistakes (install: $(install_cmd no-mistakes))"
+if home_requires_no_mistakes; then
+  if ! command -v no-mistakes >/dev/null 2>&1 || ! no_mistakes_compatible; then
+    echo "MISSING: no-mistakes (install: $(install_cmd no-mistakes))"
+  fi
 fi
 if command -v tasks-axi >/dev/null 2>&1 && ! fm_tasks_axi_compatible; then
   echo "MISSING: tasks-axi (install: $(install_cmd tasks-axi))"

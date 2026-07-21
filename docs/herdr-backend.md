@@ -562,6 +562,10 @@ What does NOT survive is the underlying shell/agent process inside each pane (a 
 
 P2 verified this in the single-workspace shape only.
 Re-verified here in the MULTI-workspace shape (P3, workspace-per-home): with two coexisting workspaces (a `firstmate` and a `2ndmate-<secondmate-id>`, each with its own tab/pane) in one isolated session, a `session stop` + fresh server restart preserved BOTH workspaces' ids and labels, and BOTH tasks' pane ids, exactly - automated in `tests/fm-backend-herdr-smoke.test.sh`'s restart-stability section.
+On 2026-07-21, an apparent empty-primary-inventory failure was reproduced with the server running and both original workspace ids already restored on the first inspected list.
+The first workspace was labeled `2ndmate-product-design-s2`, not `firstmate`, because the live smoke fixture inherited the delegated worker worktree's `.fm-secondmate-home` marker while asserting a primary-home label.
+The smoke fixture now supplies its own marker-free primary `FM_HOME`, asserts that its initial label is `firstmate`, and checks the restored inventory immediately after `fm_backend_herdr_server_ensure` rather than encoding an unobserved eventual-consistency delay.
+Two targeted live runs and the subsequent full repository suite passed that immediate post-readiness assertion on Herdr 0.7.4 under the same shared host load.
 
 Practical consequence: a stored `herdr_pane_id=` remains a valid, fast-path operational target across an ordinary server restart within the same named session, regardless of how many other homes' workspaces coexist in that session.
 The adapter still implements label-based recovery (`fm_backend_herdr_list_live`), both for a differently-configured or freshly-created session where old ids would not exist at all, and as the more defensive default in general.
@@ -991,6 +995,13 @@ Covered by the unit cases in `tests/fm-afk-launch.test.sh` (clear-on-fresh-entry
 
 ## Known gaps and follow-up notes
 
+- **RESOLVED: a transient foreground cwd no longer causes a false worktree-isolation refusal.**
+  On 2026-07-21, `bash tests/fm-backend-herdr-presentation-e2e.test.sh` inside the fresh full-suite run failed on Herdr 0.7.4 with `treehouse get did not yield an isolated worktree (resolved '/'; worktree root 'none')`.
+  An immediate targeted rerun of the same real guarded-lab route passed, which separated the transient cwd sample from the stable worktree path and disproved a persistently malformed Treehouse acquisition.
+  The production poll in `bin/fm-spawn.sh` had accepted the first non-project cwd before proving that it was an isolated Git worktree, so a short-lived `/` sample ended the bounded wait prematurely and handed an invalid candidate to the fail-closed validation.
+  The poll now accepts a candidate only when its physical path equals its Git top-level, differs from the primary checkout, and remains identical for two consecutive reads, while retaining the existing 60-second bound and final fail-closed validation.
+  `bash tests/fm-backend.test.sh` now drives both the exact `/` then valid-worktree sequence and an upstream-aligned stale-valid-worktree then task-worktree sequence.
+  Two consecutive post-fix runs of `bash tests/fm-backend-herdr-presentation-e2e.test.sh` completed with `ok - real Herdr lab validation completed on Herdr 0.7.4 with the default-session tripwire intact`.
 - **RESOLVED: worktree-discovery isolation guard's symlinked-project-prefix false refusal.** Originally discovered while building the runtime-backend-auto-detection real smoke test (`tests/fm-backend-autodetect-smoke.test.sh`), which needed a scratch project.
   `fm-spawn.sh`'s `PROJ_ABS` was a LOGICAL `cd && pwd` (symlink components kept), while herdr's `foreground_cwd` (and real tmux's `pane_current_path`, on the same OS-level cwd primitive) report the PHYSICALLY resolved path.
   When the project itself lived under a symlinked directory (e.g. macOS's `/tmp` -> `/private/tmp`), the very first worktree-discovery poll saw two different strings for the identical starting directory and the isolation guard false-refused the spawn as "not isolated" before `treehouse get` ever moved the pane - backend-agnostic, not specific to herdr.
