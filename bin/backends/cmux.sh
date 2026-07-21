@@ -330,9 +330,42 @@ fm_backend_cmux_scoped_title() {  # <fm-task-label>
 # so this adopts the FIRST match `jq` returns, mirroring herdr's/zellij's own
 # duplicate-check posture.
 fm_backend_cmux_workspace_id_for_label() {  # <label>
-  local label=$1
-  fm_backend_cmux_cli workspace list --json --id-format uuids 2>/dev/null \
-    | jq -r --arg want "$label" '.workspaces[]? | select(.title == $want) | .id' 2>/dev/null | head -1
+  local lookup state
+  lookup=$(fm_backend_cmux_global_workspace_state "$1")
+  state=${lookup%%$'\t'*}
+  [ "$state" = present ] && printf '%s' "${lookup#*$'\t'}"
+  return 0
+}
+
+fm_backend_cmux_global_workspace_state() {  # <title>
+  local title=$1 wins window_ids wid workspaces ids id count=0 match=
+  wins=$(fm_backend_cmux_cli list-windows --json --id-format uuids 2>/dev/null) \
+    || { printf 'unknown'; return 0; }
+  if ! printf '%s' "$wins" | jq -e 'type == "array" and all(.[]?; ((.id | type) == "string") and ((.id | length) > 0))' >/dev/null 2>&1; then
+    printf 'unknown'
+    return 0
+  fi
+  window_ids=$(printf '%s' "$wins" | jq -r '.[].id')
+  for wid in $window_ids; do
+    workspaces=$(fm_backend_cmux_cli workspace list --json --id-format uuids --window "$wid" 2>/dev/null) \
+      || { printf 'unknown'; return 0; }
+    if ! printf '%s' "$workspaces" | jq -e \
+      '(.workspaces | type) == "array" and all(.workspaces[]?; ((.id | type) == "string") and ((.id | length) > 0) and ((.title | type) == "string"))' \
+      >/dev/null 2>&1; then
+      printf 'unknown'
+      return 0
+    fi
+    ids=$(printf '%s' "$workspaces" | jq -r --arg want "$title" '.workspaces[]? | select(.title == $want) | .id')
+    for id in $ids; do
+      count=$((count + 1))
+      match=$id
+    done
+  done
+  case "$count" in
+    0) printf 'absent' ;;
+    1) printf 'present\t%s' "$match" ;;
+    *) printf 'ambiguous' ;;
+  esac
 }
 
 fm_backend_cmux_surface_id_for_workspace() {  # <workspace_id>
@@ -351,19 +384,33 @@ fm_backend_cmux_surface_id_for_workspace() {  # <workspace_id>
 # focus-restore dance is needed, unlike zellij. Echoes "<workspace_id>
 # <surface_id>" on success.
 fm_backend_cmux_create_task() {  # <label> <cwd>
-  local label=$1 cwd=$2 title dup out wsid sfid
+  local label=$1 cwd=$2 title lookup state out wsid sfid
   title=$(fm_backend_cmux_scoped_title "$label")
-  dup=$(fm_backend_cmux_workspace_id_for_label "$title")
-  if [ -n "$dup" ]; then
-    echo "error: cmux workspace '$title' already exists" >&2
-    return 1
-  fi
+  lookup=$(fm_backend_cmux_global_workspace_state "$title")
+  state=${lookup%%$'\t'*}
+  case "$state" in
+    present)
+      echo "error: cmux workspace '$title' already exists" >&2
+      return 1
+      ;;
+    absent) ;;
+    ambiguous)
+      echo "error: multiple cmux workspaces named '$title' already exist" >&2
+      return 1
+      ;;
+    *)
+      echo "error: cmux workspaces could not be inspected conclusively before creating '$title'" >&2
+      return 1
+      ;;
+  esac
   out=$(fm_backend_cmux_cli new-workspace --name "$title" --cwd "$cwd" --focus false --id-format uuids 2>&1) || {
     echo "error: cmux new-workspace failed for '$title': $out" >&2
     return 1
   }
-  wsid=$(fm_backend_cmux_workspace_id_for_label "$title")
-  [ -n "$wsid" ] || { echo "error: could not resolve a cmux workspace id for '$title' after creation" >&2; return 1; }
+  lookup=$(fm_backend_cmux_global_workspace_state "$title")
+  state=${lookup%%$'\t'*}
+  [ "$state" = present ] || { echo "error: could not resolve one cmux workspace id for '$title' after creation" >&2; return 1; }
+  wsid=${lookup#*$'\t'}
   sfid=$(fm_backend_cmux_surface_id_for_workspace "$wsid")
   [ -n "$sfid" ] || { echo "error: could not resolve the default surface for cmux workspace '$title' ($wsid)" >&2; return 1; }
   printf '%s %s' "$wsid" "$sfid"
@@ -403,9 +450,20 @@ fm_backend_cmux_surface_exists() {  # <workspace_id> <surface_id>
     | jq -e --arg s "$sfid" '[.panes[]? | select(.surface_ids // [] | index($s))] | length > 0' >/dev/null 2>&1
 }
 
-fm_backend_cmux_target_state() {  # <target>
-  local wins window_ids wid workspaces panes found=0
+fm_backend_cmux_target_state() {  # <target> [expected-label]
+  local expected_label=${2:-} expected_title lookup lookup_state wins window_ids wid workspaces panes found=0
   fm_backend_cmux_parse_target "$1" || { printf 'unknown'; return 0; }
+  if [ -n "$expected_label" ]; then
+    expected_title=$(fm_backend_cmux_scoped_title "$expected_label")
+    lookup=$(fm_backend_cmux_global_workspace_state "$expected_title")
+    lookup_state=${lookup%%$'\t'*}
+    case "$lookup_state" in
+      present) printf 'present' ;;
+      absent) printf 'absent' ;;
+      *) printf 'unknown' ;;
+    esac
+    return 0
+  fi
   wins=$(fm_backend_cmux_cli list-windows --json --id-format uuids 2>/dev/null) \
     || { printf 'unknown'; return 0; }
   if ! printf '%s' "$wins" | jq -e 'type == "array" and all(.[]?; ((.id | type) == "string") and ((.id | length) > 0))' >/dev/null 2>&1; then

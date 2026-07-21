@@ -730,7 +730,7 @@ if [ -e "$RECOVERY_META" ] || [ -L "$RECOVERY_META" ]; then
       exit 1
     fi
   else
-    RECOVERY_TARGET_STATE=$(fm_backend_target_state "$RECOVERY_BACKEND" "$RECOVERY_TARGET")
+    RECOVERY_TARGET_STATE=$(fm_backend_target_state "$RECOVERY_BACKEND" "$RECOVERY_TARGET" "fm-$ID")
   fi
   case "$RECOVERY_TARGET_STATE" in
     absent) ;;
@@ -1310,7 +1310,7 @@ spawn_stop_unverified_launch() {
       cmux) fm_backend_cmux_kill "$T" "" "$W" || true ;;
       *) fm_backend_kill "$BACKEND" "$T" || true ;;
     esac
-    endpoint_state=$(fm_backend_target_state "$BACKEND" "$T")
+    endpoint_state=$(fm_backend_target_state "$BACKEND" "$T" "$W")
     SPAWN_ENDPOINT_CLOSE_STATE=$endpoint_state
     [ "$endpoint_state" = absent ] && return 0
     attempt=$((attempt + 1))

@@ -695,7 +695,7 @@ fm_backend_target_exists() {  # <backend> <target> [expected-label]
   esac
 }
 
-fm_backend_target_state() {  # <backend> <target>
+fm_backend_target_state() {  # <backend> <target> [expected-label]
   local backend=$1
   shift
   fm_backend_source "$backend" || { printf 'unknown'; return 0; }
