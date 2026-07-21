@@ -354,8 +354,13 @@ clear_pause_tracking() {  # <window>
 }
 
 # Reconcile a declared pause or captain-held status with authoritative crew state.
-# Only a confidently dead ordinary crew may recover paused classification after
-# fm-crew-state has fallen back to stopped or unknown.
+# A declared pause is honored (absorb) when the authoritative state itself confirms
+# it (crew_absorb_class == paused), regardless of agent aliveness - fm-crew-state
+# only reports paused once no captain decision is open, so a live idle paused crew
+# absorbs rather than storming. As an additional route, a confidently DEAD ordinary
+# crew recovers paused classification even after fm-crew-state has fallen back to
+# stopped or unknown. Only a `none` verdict on a LIVE agent (the authoritative state
+# does not confirm the pause, so a real gate may be masked) surfaces.
 pause_state_class() {  # <window> <task>
   local win=$1 task=$2 key last recheck_file class agent_alive
   key=${win//:/_}
@@ -369,14 +374,13 @@ pause_state_class() {  # <window> <task>
     return
   fi
   if [ -e "$STATE/.paused-$key" ] && [ "$(age_of "$recheck_file")" -lt "$STALE_ESCALATE_SECS" ]; then
-    if [ "$(window_kind "$win")" != secondmate ]; then
-      agent_alive=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null) || agent_alive=unknown
-      if [ "$agent_alive" != dead ]; then
-        rm -f "$recheck_file"
-        printf 'none'
-        return
-      fi
-    fi
+    # This key was authoritatively classified paused within the last
+    # STALE_ESCALATE_SECS, so trust that verdict without the costly re-read - and
+    # regardless of agent aliveness, since a legitimately idle-but-alive paused crew
+    # must absorb, not surface. The verdict is re-verified against authoritative
+    # state once the recheck marker ages past STALE_ESCALATE_SECS (below), and a
+    # transition off the pause changes the last status line, which the callers
+    # reclassify.
     printf 'paused'
     return
   fi
@@ -384,6 +388,17 @@ pause_state_class() {  # <window> <task>
   if [ "$class" = working ]; then
     rm -f "$recheck_file"
     printf 'working'
+    return
+  fi
+  # The authoritative state itself confirms the declared pause (fm-crew-state honors
+  # the crew's current paused:/captain-held intent, having verified no captain
+  # decision is open). Honor it BEFORE the agent-alive gate so a live idle paused
+  # crew absorbs instead of surfacing. Only a `none` verdict (authoritative state
+  # does NOT confirm the pause, so a live gate may be masked) falls through to the
+  # alive-agent wedge path, which keeps the dead-agent none->paused recovery.
+  if [ "$class" = paused ]; then
+    date +%s > "$recheck_file"
+    printf 'paused'
     return
   fi
   if [ "$(window_kind "$win")" != secondmate ]; then
