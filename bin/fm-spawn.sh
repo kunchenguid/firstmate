@@ -76,11 +76,10 @@
 #   config reread generations because the new agent reads the converged files.
 #   --scout records kind=scout in the task's meta (report deliverable, scratch worktree;
 #   see AGENTS.md task lifecycle); --secondmate records kind=secondmate and launches in a
-#   provisioned firstmate home; the default is kind=ship.
+#   provisioned firstmate home; the default is kind=ship. Ship/scout spawns wait for a
+#   filesystem-distinct git worktree root and record that resolved top-level path.
 #   Before a secondmate launch, the home is locally fast-forwarded to the primary
 #   default-branch commit when safe; skipped syncs warn and launch unchanged.
-#   Ship/scout spawns refuse to launch unless the resolved task path is a real
-#   git worktree root distinct from the primary project checkout.
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
@@ -751,25 +750,16 @@ else
 fi
 [ -f "$BRIEF" ] || { echo "error: no brief at $BRIEF" >&2; exit 1; }
 
-# PROJ_ABS can still carry a symlinked path component (e.g. macOS's /tmp ->
-# /private/tmp) when it came from the ship/scout branch's logical `pwd` above.
-# Every backend's own current-path read (tmux's pane_current_path, herdr's
-# foreground_cwd, zellij/cmux's active pwd probe against the live shell) can
-# report the OS-level, physically-resolved cwd, so comparing it against a
-# still-symlinked PROJ_ABS can misfire both ways: false-negative (the poll
-# below never notices the pane left the project) or false-positive (the
-# isolation guard refuses a spawn that never actually tangled). Canonicalize
-# once here so every downstream comparison uses the same physical form
-# (docs/herdr-backend.md "Known gaps").
-PROJ_ABS_REAL=$(cd "$PROJ_ABS" 2>/dev/null && pwd -P) || PROJ_ABS_REAL="$PROJ_ABS"
+# Backend current-path reads and PROJ_ABS can spell the same directory through
+# different symlink aliases or letter casing. String canonicalization is not an
+# identity proof on every supported filesystem, so all isolation decisions use
+# Bash's device-and-inode-aware -ef predicate instead.
+same_filesystem_object() {  # <left-path> <right-path>
+  [ -e "$1" ] && [ -e "$2" ] && [ "$1" -ef "$2" ]
+}
 
-real_path_or_raw() {  # <path>
-  local path=$1 real
-  if real=$(cd "$path" 2>/dev/null && pwd -P); then
-    printf '%s\n' "$real"
-  else
-    printf '%s\n' "$path"
-  fi
+git_worktree_root() {  # <path>
+  git -C "$1" rev-parse --show-toplevel 2>/dev/null
 }
 
 # Session-provider container-ensure + task creation. tmux stays exactly as P1
@@ -781,18 +771,10 @@ real_path_or_raw() {  # <path>
 # that every downstream operation (send/capture/kill) already treats as opaque
 # per-backend routing (fm_backend_resolve_selector).
 validate_spawn_worktree() {  # <source> <inspect-target>
-  local source=$1 inspect_target=$2 wt_real proj_real wt_top wt_top_real
-  wt_real=
-  if ! wt_real=$(cd "$WT" 2>/dev/null && pwd -P); then
-    wt_real=
-  fi
-  proj_real=$PROJ_ABS_REAL
+  local source=$1 inspect_target=$2 wt_top
   wt_top=$(git -C "$WT" rev-parse --show-toplevel 2>/dev/null || true)
-  wt_top_real=
-  if ! wt_top_real=$(cd "$wt_top" 2>/dev/null && pwd -P); then
-    wt_top_real=
-  fi
-  if [ -z "$wt_real" ] || [ -z "$wt_top_real" ] || [ "$wt_real" != "$wt_top_real" ] || [ "$wt_real" = "$proj_real" ]; then
+  if [ -z "$wt_top" ] || ! same_filesystem_object "$WT" "$wt_top" \
+     || same_filesystem_object "$wt_top" "$PROJ_ABS"; then
     echo "error: $source did not yield an isolated worktree (resolved '$WT'; worktree root '${wt_top:-none}'; primary '$PROJ_ABS'); refusing to launch to avoid tangling the primary checkout. Inspect target $inspect_target" >&2
     exit 1
   fi
@@ -1040,32 +1022,35 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   # automatic-rename slips through), display-message -t <bad-name> falls back to the
   # active client's window, which would misread firstmate's OWN pane path as the
   # worktree and tangle a hook into the primary checkout. The window id never lies.
-  # Compare against PROJ_ABS_REAL (physical), not PROJ_ABS: a symlinked project
-  # prefix would otherwise make the pane's OS-level cwd read differ from
-  # PROJ_ABS on the very first poll, before the pane has actually moved.
+  # Compare directory identity, not path spelling. `pwd -P` removes symlinks but
+  # can retain caller-supplied letter casing on a case-insensitive filesystem,
+  # so string comparison can still mistake the unchanged primary directory for
+  # a worktree. Bash's -ef follows aliases and asks the filesystem whether both
+  # names identify the same object.
   #
-  # A single read that already differs from PROJ_ABS_REAL is not proof the pane
+  # A single read that is filesystem-distinct from the project is not proof the pane
   # settled there: on some tmux/WSL setups a brand-new window's pane_current_path
   # transiently reports an unrelated stale path (seen live as another real git
   # checkout entirely) before the shell catches up with treehouse get's cd. That
-  # stale path still passes the PROJ_ABS_REAL comparison and validate_spawn_worktree
-  # below (it resolves to a real, distinct worktree top-level too), so accepting it
+  # stale path can still pass validate_spawn_worktree below because it resolves
+  # to a real, distinct worktree top-level too, so accepting it
   # on one read alone silently records the wrong worktree= in state/<id>.meta. Require
-  # two consecutive reads to agree on the same non-project path before accepting it;
+  # two consecutive reads to identify the same non-project git root before accepting it;
   # a mismatch just becomes the new candidate rather than resetting the wait, so a
   # pane that is already settled by the first real read only costs the one existing
   # inter-poll sleep as confirmation, not a whole extra cycle on top.
   candidate=""
   for _ in $(seq 1 60); do
     p=$(spawn_current_path "$WT_TARGET" || true)
-    if [ -n "$p" ]; then
-      p_real=$(real_path_or_raw "$p")
-      if [ "$p_real" != "$PROJ_ABS_REAL" ]; then
-        if [ -n "$candidate" ] && [ "$p_real" = "$candidate" ]; then
-          WT="$p"
+    if [ -n "$p" ] && ! same_filesystem_object "$p" "$PROJ_ABS"; then
+      p_top=$(git_worktree_root "$p" || true)
+      if [ -n "$p_top" ] && same_filesystem_object "$p" "$p_top" \
+         && ! same_filesystem_object "$p_top" "$PROJ_ABS"; then
+        if [ -n "$candidate" ] && same_filesystem_object "$p_top" "$candidate"; then
+          WT="$p_top"
           break
         fi
-        candidate="$p_real"
+        candidate="$p_top"
       else
         candidate=""
       fi

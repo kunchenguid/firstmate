@@ -1023,14 +1023,37 @@ Covered by the unit cases in `tests/fm-afk-launch.test.sh` (clear-on-fresh-entry
 
 ## Known gaps and follow-up notes
 
-- **RESOLVED: worktree-discovery isolation guard's symlinked-project-prefix false refusal.** Originally discovered while building the runtime-backend-auto-detection real smoke test (`tests/fm-backend-autodetect-smoke.test.sh`), which needed a scratch project.
-  `fm-spawn.sh`'s `PROJ_ABS` was a LOGICAL `cd && pwd` (symlink components kept), while herdr's `foreground_cwd` (and real tmux's `pane_current_path`, on the same OS-level cwd primitive) report the PHYSICALLY resolved path.
-  When the project itself lived under a symlinked directory (e.g. macOS's `/tmp` -> `/private/tmp`), the very first worktree-discovery poll saw two different strings for the identical starting directory and the isolation guard false-refused the spawn as "not isolated" before `treehouse get` ever moved the pane - backend-agnostic, not specific to herdr.
-  Fixed 2026-07-06 (backlog `fm-spawn-symlink-guard-s8`): `bin/fm-spawn.sh` now canonicalizes once into `PROJ_ABS_REAL` (`cd "$PROJ_ABS" && pwd -P`) right after `PROJ_ABS` is resolved, canonicalizes each observed pane cwd for the worktree-discovery comparison, and uses `PROJ_ABS_REAL` in `validate_spawn_worktree`'s own primary-vs-worktree comparison instead of recomputing from the still-symlinked `PROJ_ABS`.
-  This removes both failure directions: a symlinked prefix can no longer false-refuse an isolated spawn, and, since both sides are physically resolved for comparison, a genuinely tangled spawn (worktree resolves to the same physical directory as the project) still correctly refuses.
-  Verified with GNU bash 5.3.9(1)-release (aarch64-apple-darwin25.3.0) and git 2.53.0 on macOS (Darwin 25.5.0): added `tests/fm-backend.test.sh:test_spawn_symlinked_project_prefix_avoids_false_refusal`, which drives the real `bin/fm-spawn.sh` against fake-tmux panes whose first `pane_current_path` poll returns both the project's `pwd -P`-resolved physical path and its logical symlink-preserving path while `PROJ_ABS` is reached through a synthetic symlinked prefix (`ln -s <real> <link>`, project passed as `<link>/proj`).
-  Confirmed the test reproduces the original bug against the pre-fix script (`git stash` the `bin/fm-spawn.sh` change and rerun: `not ok - fm-spawn.sh should succeed for a project reached through a symlinked prefix` / `error: treehouse get did not yield an isolated worktree ...`), and passes against the fix (`bash tests/fm-backend.test.sh` reports `ok - fm-spawn.sh: a project reached through a symlinked prefix (e.g. macOS /tmp -> /private/tmp) does not trip the isolation guard's false refusal`, with the rest of that suite's assertions unaffected).
-  `shellcheck bin/*.sh bin/backends/*.sh tests/*.sh` passes clean on the changed scripts.
+- **RESOLVED: worktree discovery now compares filesystem identity across symlink and case aliases.**
+  The 2026-07-06 symlink-prefix fix physically resolved path strings before comparison after a backend current-path read and `PROJ_ABS` used different symlink spellings.
+  The 2026-07-21 Herdr incident proved that string canonicalization was still insufficient on case-insensitive macOS filesystems.
+  Herdr 0.7.3 could return the unchanged primary project directory with different letter casing, two stable reads accepted that spelling as the worktree before `treehouse get` finished, and the string-based final validator could accept it too.
+  The shell later entered the correct Treehouse worktree, but `worktree=` metadata, printed output, and teardown's Treehouse return target retained the primary path alias.
+  `bin/fm-spawn.sh` now uses Bash's filesystem-aware `-ef` predicate for project-vs-current-path, consecutive-candidate, candidate-vs-git-root, and final primary-vs-worktree identity checks.
+  Each acceptable current path must resolve to its own `git rev-parse --show-toplevel`, identify that exact root, remain filesystem-distinct from the primary, and repeat on the next poll before `WT` records the git top-level rather than the backend's current-path spelling.
+  `validate_spawn_worktree` independently repeats the root and primary identity checks, so Orca's direct worktree result receives the same refusal even though Orca bypasses the Treehouse settle loop.
+  Tmux, Herdr, Zellij, and cmux retain their existing current-path adapters and share the corrected Treehouse loop, while Orca retains its provider path and uses the corrected shared validator.
+  Deterministic coverage in `tests/fm-spawn-worktree-settle.test.sh` uses native case aliasing on case-insensitive filesystems and an equivalent differently-cased symlink on case-sensitive CI.
+  The regression returns a case-variant primary alias twice before the real worktree, asserts at least four polls, verifies the isolated git root in metadata, runs scout teardown, and verifies `treehouse return --force` receives only that isolated root.
+  A fake-Orca case separately proves that the final validator rejects a case-variant primary alias and cleans up the response-derived terminal and worktree IDs.
+  The existing symlink-prefix regression in `tests/fm-backend.test.sh` continues to cover physical and logical initial current-path spellings and now expects the resolved git top-level in spawn output.
+  Verification ran on 2026-07-21 with GNU bash 3.2.57(1)-release, git 2.50.1 (Apple Git-155), and Darwin 25.3.0 on arm64 macOS.
+  Exact commands and results were:
+
+  ```text
+  $ bash tests/fm-spawn-worktree-settle.test.sh
+  ok - a single transient stale pane_current_path read is not accepted as the worktree
+  ok - an already-settled pane confirms via the existing inter-poll sleep, not an extra full cycle
+  ok - case-variant primary cwd aliases cannot win the settle race or become metadata/cleanup targets
+  ok - validate_spawn_worktree independently rejects a case-variant primary alias by filesystem identity
+  # all fm-spawn-worktree-settle tests passed
+
+  $ bash tests/fm-backend.test.sh
+  ok - fm-spawn.sh: a project reached through a symlinked prefix (e.g. macOS /tmp -> /private/tmp) does not trip the isolation guard's false refusal
+  [... all remaining assertions passed ...]
+
+  $ bin/fm-lint.sh
+  fm-lint.sh: ShellCheck 0.11.0 (pinned 0.11.0)
+  ```
 - **RESOLVED: a restart's restored-layout husk no longer needs a manual pane close before respawn.** See "Respawn idempotency: a restored task tab is a husk, not a duplicate" above for the fix (`fm_backend_herdr_pane_agent_state`, `fm_backend_herdr_create_task`'s close-and-replace).
   Left over from that fix: the `dead` (`pane_not_found`) husk classification is exercised only at the unit level, never against the real binary - killing a pane's process on a live server was observed to make herdr reap the whole tab immediately (never leaving a dead-but-still-listed pane for the duplicate check to find), and a real session restart was never observed to produce one either.
   It remains a conservative, defensively-coded path for a herdr failure mode (e.g. a restored process that fails to start) nobody has reproduced against the real binary yet.
