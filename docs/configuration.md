@@ -258,7 +258,7 @@ It never removes a live lock, leaves any other failure shape untouched, and prin
 The locked session-start bootstrap step also runs the guarded local secondmate sync for recorded live secondmate homes, then propagates declared inherited local material into each validated live home.
 It emits `SECONDMATE_SYNC:` only when a home was skipped for an actionable sync reason, inheritance failed, or a divergent shared captain-preference copy was quarantined.
 When a running home advances and its loaded instruction surface (`AGENTS.md`, `bin/`, or `.agents/skills/`) changed, bootstrap sends the re-read nudge itself through the stable `fm-<id>` selector and reports the exact completed send as `BOOTSTRAP_INFO:`.
-Any incomplete re-read request emits `NUDGE_SECONDMATES:`; `bin/fm-bootstrap.sh`'s header owns retry-marker retention and supersession, validation, send, and marker-consumption mechanics.
+`bin/fm-bootstrap.sh`'s header owns the actionable diagnostics and exact retry-marker retention and supersession, validation, send, marker-consumption, and same-startup mutation-blocking mechanics.
 The same bootstrap run emits `SECONDMATE_LIVENESS:` only when a live secondmate endpoint is skipped or respawn fails; already-live and successfully respawned endpoints are handled silently.
 For a mid-session inherited local-material edit where tracked-file sync and reread nudges are not needed, run `bin/fm-config-push.sh`.
 It uses the same live secondmate discovery and propagation helper as bootstrap, prints each live home's `crew-dispatch.json`, `crew-harness`, `backlog-backend`, and `data/captain-shared.md` result as `pushed`, `unchanged`, `skipped`, or `error`, and exits non-zero only for real propagation errors.

@@ -35,8 +35,11 @@
 #          new HEAD must equal the primary default-branch head before and after
 #          validation. Only a successful send followed by marker consumption
 #          completes the retry; every rejected proof, failed send, or failed
-#          consumption preserves the marker and blocks that id's tracked sync and
-#          liveness mutation for this startup.
+#          consumption preserves the active marker and blocks that id from any
+#          remaining tracked sync or liveness mutation in this startup. If the
+#          primary default-branch head cannot be resolved, pending marker ids are
+#          retained and rejected before both sweeps, while SECONDMATE_SYNC reports
+#          the owner-level resolution failure.
 #          Unmarked already-current or no-instruction-change homes are silently
 #          left alone.
 #          The secondmate sweep also propagates declared inherited local material

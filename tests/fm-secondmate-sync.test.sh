@@ -18,6 +18,9 @@
 #     failed send is reported as NUDGE_SECONDMATES:, an already-current or
 #     readme-only home is never nudged, a skipped home is reported as
 #     SECONDMATE_SYNC:, and a home with no live metadata is never swept.
+#   - Pending-nudge regressions follow bin/fm-bootstrap.sh's guarded owner
+#     contract, including safe current-head supersession and fail-closed
+#     exclusion from later tracked sync and liveness mutation in that startup.
 #   - Spawning a secondmate fast-forwards its worktree to the primary's HEAD
 #     before launch, or warns and launches unchanged when the sync is skipped.
 set -u

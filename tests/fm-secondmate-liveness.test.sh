@@ -26,6 +26,9 @@
 #     adapter refuses to create a same-named window over a live one), keeps
 #     handled DEAD and ALIVE results silent, and never acts on an inconclusive
 #     (UNKNOWN) reading.
+#   - An id rejected by bootstrap's pending-nudge owner path is excluded before
+#     liveness probing or endpoint mutation; fm-secondmate-sync.test.sh owns the
+#     cross-sweep regression coverage.
 #   - The sweep converges: once a secondmate reads alive, a later run never
 #     re-touches it (idempotent by construction, not by remembering what it
 #     already did).
