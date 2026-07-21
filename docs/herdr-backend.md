@@ -913,7 +913,16 @@ Claude and Codex can block before their initial brief starts on trust, full-acce
 It sends exactly one key, reads the pane again, and requires the expected cursor or dialog transition before another key is possible.
 Claude's Bypass Permissions warning starts on destructive `No, exit`, so the only allowed first action is navigation to `Yes, I accept`; Enter is forbidden until readback shows that safe choice focused.
 Codex hooks review similarly navigates from `Review hooks` to `Trust all and continue` and verifies the move before Enter.
-An unknown focus, an unknown blocked dialog, unreadable post-key state, or an exhausted three-attempt key budget fails the spawn with a classified error.
+The focused choice is read only from menu rows whose text is one of that dialog's own known options, because the cursor glyphs `❯`/`›` are also the agent composer's prompt glyphs (`FM_BACKEND_HERDR_BARE_PROMPT_RE`) and a composer or transcript row rendered below the overlay would otherwise be mistaken for the focus.
+A known menu whose focus is not parsable is treated as a mid-repaint frame and keeps polling like an unknown shape, so a half-drawn first capture cannot fail a spawn instantly.
+An unknown blocked dialog, unreadable post-key state, or an exhausted key budget fails the spawn with a classified error.
+
+A repeat Enter is the one retry that can be destructive, because a dismissal can be followed by another menu whose default is `No, exit`, and the recent source retains the dismissed frame.
+So an unchanged classification never authorizes a second Enter by itself: the raw pane bytes must stay identical to the pre-key capture across a further settling read (what a dropped key looks like), and any repaint without a verifiable outcome fails loudly instead.
+Navigation keys keep the plain bounded retry, since a repeated `up`/`down` cannot accept anything.
+
+The harness is already launched when this runs, so a failed spawn exits non-zero without the `spawned` line while the task stays registered.
+The error names the id, window and worktree: the pane can be answered by hand to continue the crewmate, or the task removed with `bin/fm-teardown.sh <id>`.
 
 Raw capture text alone is never trusted as proof of a live dialog: the typed launch command carries the shell-quoted brief, harness transcripts can render dialog wording, and the recent source retains dismissed frames inside the capture window.
 Every classified dialog, unknown shape, and dismissal readback is therefore corroborated against `agent get`: only a `working` agent, actively generating and therefore past its startup dialogs, suppresses keys and verifies the spawn while dialog-shaped text is visible.
