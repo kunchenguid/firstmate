@@ -80,11 +80,16 @@ fm_task_id_creation_valid() {
 # GitLab serves self-hosted instances, so the host is part of the identity
 # rather than a constant. It is accepted only as a lowercase DNS name with no
 # userinfo, port, or trailing dot, which keeps one canonical spelling per MR.
+# github.com is refused here even though its shape is otherwise valid: it is
+# GitHub's own host and never a GitLab instance, so a URL like
+# https://github.com/o/r/-/merge_requests/1 (a typo'd or spoofed GitHub URL)
+# would otherwise be armed as a GitLab watch that can never succeed.
 fm_pr_gitlab_host_valid() {
   local host=${1-} label
   local LC_ALL=C
   local -a labels
   [ "${#host}" -ge 1 ] && [ "${#host}" -le 253 ] || return 1
+  [ "$host" != github.com ] || return 1
   case "$host" in
     .*|*.|*..*|*[!a-z0-9.-]*) return 1 ;;
   esac
