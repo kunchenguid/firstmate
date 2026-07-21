@@ -19,8 +19,11 @@
 # Model/effort come ONLY from this file - config/crew-harness stays a bare adapter
 # name and is never parsed for a model.
 # Detection layers: verified environment markers first, then process ancestry.
+# Env markers are exported and therefore inherited, so a nested worker can carry
+# its primary's marker alongside the one its own harness sets. A single marker is
+# conclusive; overlapping markers are resolved by process ancestry.
 # Record each newly verified env marker here. New harnesses add both an env-marker
-# check in detect_own Layer 1 and a process-name match in Layer 2.
+# check in detect_own Layer 1 and a process-name match in detect_by_ancestry.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -28,19 +31,8 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 
-detect_own() {
-  # Layer 1: environment markers for verified harnesses.
-  # Hermes v0.19.0 sets HERMES_INTERACTIVE=1 (verified 2026-07-21) and is
-  # checked first because a Firstmate-launched Hermes worker can inherit its
-  # primary's marker.
-  [ "${HERMES_INTERACTIVE:-}" = "1" ] && { echo hermes; return; }
-  [ "${CLAUDECODE:-}" = "1" ] && { echo claude; return; }
-  [ "${PI_CODING_AGENT:-}" = "true" ] && { echo pi; return; }
-  # grok sets GROK_AGENT=1 for its child/tool processes (verified, grok 0.2.73).
-  # It does NOT set CLAUDECODE despite being Claude-Code-compatible, so this marker
-  # is unambiguous when firstmate runs natively on grok.
-  [ "${GROK_AGENT:-}" = "1" ] && { echo grok; return; }
-  # Layer 2: walk the parent chain and match the command name.
+# Layer 2: walk the parent chain and match the command name.
+detect_by_ancestry() {
   local pid=$$ comm args
   for _ in 1 2 3 4 5 6 7 8; do
     comm=$(ps -o comm= -p "$pid" 2>/dev/null) || break
@@ -69,6 +61,44 @@ detect_own() {
     fi
   done
   echo unknown
+}
+
+detect_own() {
+  # Layer 1: environment markers for verified harnesses.
+  # Hermes v0.19.0 sets HERMES_INTERACTIVE=1 (verified 2026-07-21).
+  # grok sets GROK_AGENT=1 for its child/tool processes (verified, grok 0.2.73).
+  # It does NOT set CLAUDECODE despite being Claude-Code-compatible, so this
+  # marker is unambiguous when firstmate runs natively on grok.
+  local marked='' count=0 own harness
+  if [ "${HERMES_INTERACTIVE:-}" = "1" ]; then marked="$marked hermes"; count=$((count + 1)); fi
+  if [ "${CLAUDECODE:-}" = "1" ]; then marked="$marked claude"; count=$((count + 1)); fi
+  if [ "${PI_CODING_AGENT:-}" = "true" ]; then marked="$marked pi"; count=$((count + 1)); fi
+  if [ "${GROK_AGENT:-}" = "1" ]; then marked="$marked grok"; count=$((count + 1)); fi
+
+  # Exactly one marker is conclusive, and no marker leaves ancestry as the only
+  # evidence. Both keep the pre-Hermes behavior byte for byte.
+  if [ "$count" -eq 1 ]; then
+    printf '%s\n' "${marked# }"
+    return
+  fi
+  own=$(detect_by_ancestry)
+  if [ "$count" -eq 0 ]; then
+    printf '%s\n' "$own"
+    return
+  fi
+  # Overlapping markers mean a nested worker inherited its primary's marker in
+  # one direction or the other. Process ancestry names the harness that actually
+  # owns this process tree, so it breaks the tie whenever it names a marked
+  # harness; a fixed order is the last resort when ancestry is inconclusive.
+  case " $marked " in
+    *" $own "*) printf '%s\n' "$own"; return ;;
+  esac
+  for harness in hermes claude pi grok; do
+    case " $marked " in
+      *" $harness "*) printf '%s\n' "$harness"; return ;;
+    esac
+  done
+  printf '%s\n' "$own"
 }
 
 # Resolve the effective crewmate harness: config/crew-harness (a bare adapter

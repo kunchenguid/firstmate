@@ -246,6 +246,15 @@ Every native-path automatic marker was present and every deny sentinel remained 
 The Firstmate-owned home was generated under `/tmp/fm-hermes-adapter.<random>/home`; the captain's real Hermes config was not changed.
 The command was `HERMES_HOME="$tmp/home" hermes hooks test pre_tool_call --for-tool terminal --payload-file "$tmp/payload.json"`.
 The payload file contained `{"tool_name":"terminal","args":{"command":"bin/fm-watch-arm.sh &"}}`.
+
+That file supplies the internal hook **kwargs**, not the wire payload. `hermes hooks test` routes it through the same `_serialize_payload` the live hook sites use (`agent/shell_hooks.py`), which renames the `args` kwarg to the `tool_input` field. Re-captured live on 2026-07-21 with a probe hook that dumped its stdin, the bytes Hermes actually pipes to the hook are:
+
+```json
+{"hook_event_name":"pre_tool_call","tool_name":"terminal","tool_input":{"command":"bin/fm-watch-arm.sh &"},"session_id":"test-session","cwd":"...","extra":{"task_id":"test-task","tool_call_id":"test-call"}}
+```
+
+So Hermes delivers `.tool_input.command`, matching the "Harness wiring" table above and the `jq` extraction in `bin/fm-arm-pretool-check.sh`; `args` never appears on the wire. `tests/fm-arm-pretool-check.test.sh` replays this full envelope rather than a reduced synthetic one.
+
 Hermes reported `exit=2`, stdout `{"action":"block","message":"[watcher-background] a protected watcher command cannot run in an asynchronous shell list or through nohup/disown"}`, and parsed wire shape `{"action": "block", "message": "[watcher-background] a protected watcher command cannot run in an asynchronous shell list or through nohup/disown"}`.
 This verifies the exact Hermes payload field, matcher, output shape, and native block parsing without executing the denied command.
 

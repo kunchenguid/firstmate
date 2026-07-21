@@ -3,8 +3,10 @@
 # Behavior tests for the watcher-arm PreToolUse seatbelt (docs/arm-pretool-check.md).
 #
 # bin/fm-arm-command-policy.mjs is the single owner of command classification.
-# This suite drives the stable shell transport through all five harness entry
+# This suite drives the stable shell transport through all six harness entry
 # forms and asserts the per-harness wiring contract without spawning a harness.
+# The Hermes row replays the exact wire payload Hermes v0.19.0 pipes to a
+# pre_tool_call hook, captured live and recorded in docs/arm-pretool-check.md.
 # Empirical harness evidence lives in docs/arm-pretool-check.md.
 set -u
 
@@ -167,7 +169,17 @@ run_matrix_entry() {
       rc=$?
       ;;
     hermes)
-      payload=$(jq -cn --arg command "$cmd" '{tool_name:"terminal",tool_input:{command:$command}}')
+      # Full Hermes v0.19.0 wire envelope: agent/shell_hooks.py serializes the
+      # internal `args` kwarg to the `tool_input` field, and adds hook_event_name,
+      # session_id, cwd, and extra alongside it.
+      payload=$(jq -cn --arg command "$cmd" '{
+        hook_event_name:"pre_tool_call",
+        tool_name:"terminal",
+        tool_input:{command:$command},
+        session_id:"20260721_235227_db6f0a",
+        cwd:"/tmp/fm-hermes",
+        extra:{task_id:"test-task",tool_call_id:"test-call"}
+      }')
       printf '%s' "$payload" | "$CHECK" --hermes >"$out_file" 2>"$err_file"
       rc=$?
       ;;

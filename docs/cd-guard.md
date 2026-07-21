@@ -74,11 +74,12 @@ It does not permit `cd /home/project`, because an absolute-path `cd` remains a p
 
 ## Transport and fail-open behavior
 
-`bin/fm-cd-pretool-check.sh` supports all five harness entry shapes used by the tracked adapters:
+`bin/fm-cd-pretool-check.sh` supports all six harness entry shapes used by the tracked adapters:
 
 - Claude sends stdin JSON at `.tool_input.command` and adds `--claude` to preserve Claude's stderr-only deny requirement.
 - Codex sends stdin JSON at `.tool_input.command` without `--claude`.
 - Grok sends stdin JSON at `.toolInput.command`.
+- Hermes sends stdin JSON at `.tool_input.command` and adds `--hermes` so the deny renders as the native `{"action":"block","message":"..."}` object; `bin/fm-hermes-home.sh primary` registers it as a second terminal `pre_tool_call` hook beside the watcher-arm seatbelt.
 - OpenCode sends the exact command string through `--command <exact string>`.
 - Pi sends the exact command string through `--command <exact string>`.
 

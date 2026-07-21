@@ -125,7 +125,12 @@ One normal turn wrote `{"completed": true, "event": "on_session_end", "interrupt
 One turn interrupted with a single `Ctrl+C` wrote `{"completed": false, "event": "on_session_end", "interrupted": true, "session_id": "20260721_215506_081d4f", "turn_id": "20260721_215506_081d4f:20260721_215506_081d4f:3f25d8cf"}`.
 `/quit` wrote no third marker.
 This proves one callback per completed or interrupted turn and no callback for ordinary session exit.
-The tracked passive adapter additionally uses the live-help `-z/--oneshot` prompt option with the separately verified `hermes --resume <session-id>` path to force one bounded guard follow-up.
+The `on_session_end` payload carries the session id at top-level `.session_id`, which is the field `bin/fm-turnend-guard-hermes.sh` reads.
+
+The forced-resume composition was then validated end to end on 2026-07-21 against Hermes Agent v0.19.0, in an isolated `HERMES_HOME` under `/tmp` with the captain's real Hermes config unchanged.
+`--resume` and `-z` are both top-level `hermes` options, not `hermes chat` options, so the adapter correctly omits the `chat` subcommand; `hermes --help` lists `hermes [-h] [--version] [-z PROMPT] ... [--resume SESSION]`.
+A first turn ran `hermes -z 'Reply with exactly the word HERMESONE and nothing else.' --yolo --accept-hooks --cli` and printed `HERMESONE`; `hermes sessions list` recorded session `20260721_235227_db6f0a`.
+The exact adapter composition `hermes --resume 20260721_235227_db6f0a --yolo --accept-hooks -z '<prompt>'` then exited 0 and printed `RESUMED-HERMESONE`, proving the flags parse, the process terminates rather than blocking, and the prior turn's context was genuinely restored into the same session.
 
 **2026-07-09 update:** grok 0.2.93 broke the `.grok/hooks/fm-primary-turnend-guard.json` Stop hook with `hook not executed: required env var(s) not set: ${root}`, because grok's own `${VAR}` expansion over the raw `command` string does not tolerate a bare local variable assigned earlier in the same `bash -lc` script.
 The hook command was fixed to reference `${GROK_WORKSPACE_ROOT:-}` directly everywhere instead of assigning it to `$root` first, and re-validated against grok 0.2.93 to fire and complete cleanly.
