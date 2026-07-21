@@ -2,7 +2,9 @@
 # Acquire or inspect the per-home firstmate session lock.
 # Writes the harness (agent) process PID found by walking the shell's ancestry,
 # which lives as long as the firstmate session - unlike the transient subshell
-# PID of any one tool call, which is dead moments after it is written.
+# PID of any one tool call, which is dead moments after it is written. In
+# sandboxed Codex tool calls where process inspection is unavailable, it falls
+# back to Codex's stable per-thread session id.
 # Usage: fm-lock.sh           acquire; exit 1 if another live session holds it
 #        fm-lock.sh status    print holder and liveness; always exits 0
 set -u
@@ -20,7 +22,7 @@ HARNESS_RE='claude|codex|opencode|grok|^pi$'
 harness_pid() {
   local pid=$$ comm args
   for _ in 1 2 3 4 5 6 7 8; do
-    comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
+    comm=$(ps -o comm= -p "$pid" 2>/dev/null) || break
     args=$(ps -o args= -p "$pid" 2>/dev/null)
     if printf '%s' "$(basename "$comm")" | grep -qE "$HARNESS_RE"; then
       echo "$pid"; return 0
@@ -32,11 +34,24 @@ harness_pid() {
     pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
     [ -n "$pid" ] && [ "$pid" -gt 1 ] || return 1
   done
+  # Codex exposes this stable session identifier to every tool call. Prefer
+  # process ancestry whenever it is readable, but do not make Firstmate's
+  # session lock depend on ps permission in a sandboxed Codex session.
+  if [ -n "${CODEX_THREAD_ID:-}" ]; then
+    printf 'codex-thread:%s\n' "$CODEX_THREAD_ID"
+    return 0
+  fi
   return 1
 }
 
 holder_alive() {  # true if $1 is a live process that looks like a harness
   local pid=$1 comm
+  case "$pid" in
+    codex-thread:*)
+      [ "${CODEX_THREAD_ID:-}" = "${pid#codex-thread:}" ]
+      return
+      ;;
+  esac
   kill -0 "$pid" 2>/dev/null || return 1
   comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
   printf '%s' "$(basename "$comm") $(ps -o args= -p "$pid" 2>/dev/null)" | grep -qE "$HARNESS_RE"
@@ -45,7 +60,17 @@ holder_alive() {  # true if $1 is a live process that looks like a harness
 if [ "${1:-}" = "status" ]; then
   if [ ! -f "$LOCK" ]; then echo "lock: free"; exit 0; fi
   old=$(cat "$LOCK")
-  if holder_alive "$old"; then echo "lock: held by live harness pid $old"; else echo "lock: stale (pid $old dead or not a harness)"; fi
+  if holder_alive "$old"; then
+    case "$old" in
+      codex-thread:*) echo "lock: held by current Codex session" ;;
+      *) echo "lock: held by live harness pid $old" ;;
+    esac
+  else
+    case "$old" in
+      codex-thread:*) echo "lock: stale (Codex session is no longer current)" ;;
+      *) echo "lock: stale (pid $old dead or not a harness)" ;;
+    esac
+  fi
   exit 0
 fi
 
@@ -58,4 +83,7 @@ if [ -f "$LOCK" ]; then
   fi
 fi
 echo "$me" > "$LOCK"
-echo "lock acquired: harness pid $me"
+case "$me" in
+  codex-thread:*) echo "lock acquired: Codex session" ;;
+  *) echo "lock acquired: harness pid $me" ;;
+esac

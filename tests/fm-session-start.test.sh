@@ -156,6 +156,35 @@ SH
   printf '%s\n' "$harness" > "$fakebin/.harness-name"
 }
 
+make_fake_ps_denied() {
+  local fakebin=$1
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' 'ps: operation not permitted' >&2
+exit 1
+SH
+  chmod +x "$fakebin/ps"
+}
+
+test_codex_thread_lock_survives_denied_process_inspection() {
+  local rec root home fakebin out
+  rec=$(new_world codex-thread-lock)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_ps_denied "$fakebin"
+
+  out=$(CODEX_THREAD_ID=thread-under-test FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$fakebin:$BASE_PATH" "$SESSION_START")
+  assert_contains "$out" "lock acquired: Codex session" "Codex session did not acquire a lock when ps was denied"
+  assert_not_contains "$out" "READ-ONLY SESSION" "Codex session was incorrectly downgraded to read-only when ps was denied"
+  assert_contains "$(cat "$home/state/.lock")" "codex-thread:thread-under-test" "Codex lock did not store its stable session owner"
+
+  out=$(CODEX_THREAD_ID=thread-under-test FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-lock.sh" status)
+  assert_contains "$out" "lock: held by current Codex session" "Codex session lock was not recognized without ps"
+
+  pass "Codex thread session lock works when process inspection is denied"
+}
+
 make_fake_ps_pi_holder() {
   local fakebin=$1 holder_pid=$2
   cat > "$fakebin/ps" <<SH
@@ -904,6 +933,7 @@ EOF
 }
 
 test_context_digest_absent_empty_present
+test_codex_thread_lock_survives_denied_process_inspection
 test_lock_refusal_read_only_path
 test_output_ordering_diagnostics_lead
 test_herdr_backend_diagnostics_follow_real_session_start
