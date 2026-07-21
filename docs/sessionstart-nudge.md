@@ -12,7 +12,7 @@ It shares `bin/fm-primary-scope-lib.sh` with `bin/fm-turnend-guard.sh`, so the t
 The Shared Predicate section of `docs/turnend-guard.md` remains authoritative for marker validation, plain-checkout detection, and the required firstmate-shaped paths.
 
 Before printing, the wrapper reads `state/.lock` and walks at most eight parents from its own pid, matching `bin/fm-lock.sh` and Pi's `lockOwnership()` ancestry depth.
-If the lock names a live pid in that ancestry, session-start already ran in this harness session and the wrapper stays silent.
+If the lock names a live pid in that ancestry, or a `codex-thread:` value matching the current nonempty `CODEX_THREAD_ID`, session-start already ran in this harness session and the wrapper stays silent.
 Every path exits 0, including malformed state and adapter errors, because Claude SessionStart exit 2 blocks session initialization.
 
 ## Harness transports
@@ -105,7 +105,7 @@ The underlying Claude SessionStart stdout injection and Pi `session_start` event
 
 ## Regression coverage
 
-`tests/fm-sessionstart-nudge.test.sh` proves wrapper silence for both gate signals, an unmarked linked worktree, a missing state directory, and an already-owned lock.
+`tests/fm-sessionstart-nudge.test.sh` proves wrapper silence for both gate signals, an unmarked linked worktree, a missing state directory, an already-owned PID lock, and an already-owned Codex thread lock.
 It proves exact one-line output for a plain primary and a marked linked secondmate primary.
 It also verifies tracked wrapper registration for Claude, Codex, OpenCode, Pi, and Grok.
 `tests/fm-turnend-guard.test.sh` continues to cover the same shared primary scope through the turn-end path.
