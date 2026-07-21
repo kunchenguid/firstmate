@@ -98,6 +98,10 @@
 # Per-harness turn-end hooks are installed automatically; some live outside the worktree.
 # grok uses a firstmate-owned global hook under ${GROK_HOME:-$HOME/.grok}/hooks
 # plus a gitignored .fm-grok-turnend worktree pointer and a state token.
+# After launch on the herdr backend, a claude/codex spawn hands the pane to the
+# adapter's guarded first-launch dialog handler and fails the spawn rather than
+# leaving a crewmate parked on an unverified trust/permission/hooks menu; see
+# docs/herdr-backend.md "Guarded first-launch dialog handling".
 # On success prints: spawned <id> harness=<name> kind=<ship|scout|secondmate> mode=<mode> yolo=<on|off> window=<backend-target> worktree=<path>
 # mode/yolo are resolved per-project from data/projects.md for ship/scout tasks;
 # secondmate spawns record mode=secondmate, yolo=off, home=, and projects=.
