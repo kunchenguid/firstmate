@@ -7,7 +7,8 @@
 # back to Codex's stable per-thread session id.
 # Usage: fm-lock.sh           acquire; exit 1 if another live session holds it
 #        fm-lock.sh status    print holder and liveness; always exits 0
-#        fm-lock.sh clear     remove the current lock
+#        fm-lock.sh clear     remove the current lock; for a codex-thread owner,
+#                             only after the captain confirms that session is dead
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
