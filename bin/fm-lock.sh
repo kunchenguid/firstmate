@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
-# Acquire or inspect the per-home firstmate session lock.
+# Acquire, inspect, or manually release the per-home firstmate session lock.
 # Writes the harness (agent) process PID found by walking the shell's ancestry,
 # which lives as long as the firstmate session - unlike the transient subshell
 # PID of any one tool call, which is dead moments after it is written.
-# Usage: fm-lock.sh           acquire; exit 1 if another live session holds it
-#        fm-lock.sh status    print holder and liveness; always exits 0
+# Usage: fm-lock.sh                   acquire; exit 1 if another live session holds it
+#        fm-lock.sh status            print holder and liveness; always exits 0
+#        fm-lock.sh release [--force] release this session or a stale lock; force takes any lock
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -12,7 +13,46 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 LOCK="$STATE/.lock"
-mkdir -p "$STATE"
+
+usage() {
+  cat <<'USAGE'
+Usage: fm-lock.sh
+       fm-lock.sh status
+       fm-lock.sh release [--force]
+USAGE
+}
+
+command=acquire
+force=0
+case $# in
+  0) ;;
+  1)
+    case "$1" in
+      status) command=status ;;
+      release) command=release ;;
+      *)
+        echo "error: unknown fm-lock command '$1'" >&2
+        usage >&2
+        exit 2
+        ;;
+    esac
+    ;;
+  2)
+    if [ "$1" = "release" ] && [ "$2" = "--force" ]; then
+      command=release
+      force=1
+    else
+      echo "error: invalid fm-lock arguments: $*" >&2
+      usage >&2
+      exit 2
+    fi
+    ;;
+  *)
+    echo "error: invalid fm-lock arguments: $*" >&2
+    usage >&2
+    exit 2
+    ;;
+esac
 
 # Known harness command names; extend when a new adapter is verified.
 HARNESS_RE='claude|codex|opencode|grok|^pi$'
@@ -42,13 +82,40 @@ holder_alive() {  # true if $1 is a live process that looks like a harness
   printf '%s' "$(basename "$comm") $(ps -o args= -p "$pid" 2>/dev/null)" | grep -qE "$HARNESS_RE"
 }
 
-if [ "${1:-}" = "status" ]; then
+if [ "$command" = "status" ]; then
   if [ ! -f "$LOCK" ]; then echo "lock: free"; exit 0; fi
   old=$(cat "$LOCK")
   if holder_alive "$old"; then echo "lock: held by live harness pid $old"; else echo "lock: stale (pid $old dead or not a harness)"; fi
   exit 0
 fi
 
+if [ "$command" = "release" ]; then
+  if [ ! -f "$LOCK" ]; then
+    echo "lock already free"
+    exit 0
+  fi
+  old=$(cat "$LOCK")
+  if [ "$force" -eq 1 ]; then
+    rm -f "$LOCK"
+    echo "WARNING: forced session lock release; took lock from pid $old" >&2
+    exit 0
+  fi
+  me=$(harness_pid 2>/dev/null || true)
+  if [ -n "$me" ] && [ "$old" = "$me" ]; then
+    rm -f "$LOCK"
+    echo "lock released: harness pid $old"
+    exit 0
+  fi
+  if ! holder_alive "$old"; then
+    rm -f "$LOCK"
+    echo "stale lock cleared: pid $old dead or not a harness"
+    exit 0
+  fi
+  echo "error: session lock held by different live harness pid $old; use 'fm-lock.sh release --force' to take it" >&2
+  exit 1
+fi
+
+mkdir -p "$STATE"
 me=$(harness_pid) || { echo "error: cannot locate harness process in ancestry" >&2; exit 1; }
 if [ -f "$LOCK" ]; then
   old=$(cat "$LOCK")
