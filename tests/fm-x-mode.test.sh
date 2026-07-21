@@ -700,6 +700,23 @@ test_bootstrap_activates_on_env_token() {
   pass "bootstrap activates X mode from an .env token, idempotently"
 }
 
+test_watcher_handles_nonempty_x_poll_under_nounset() {
+  local home fakebin out rc
+  home="$TMP_ROOT/watcher-nounset"; mkdir -p "$home"
+  fakebin=$(make_fake_curl "$home")
+  printf 'FMX_PAIRING_TOKEN=tok-watcher\n' > "$home/.env"
+  FM_HOME="$home" "$ROOT/bin/fm-bootstrap.sh" >/dev/null 2>&1
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_RELAY_URL="https://relay.test" \
+    FAKE_POLL_CODE=200 \
+    FAKE_POLL_BODY='{"request_id":"req-watcher","platform":"x","reply_max_chars":280,"text":"wake safely"}' \
+    FM_POLL=0 FM_CHECK_INTERVAL=0 FM_SIGNAL_GRACE=0 FM_HEARTBEAT=999999 \
+    "$ROOT/bin/fm-watch.sh" 2>"$home/watch.err"); rc=$?
+  expect_code 0 "$rc" "watcher non-empty X poll exit"
+  assert_contains "$out" "x-mention req-watcher" "watcher did not surface the X mention"
+  assert_no_grep "unbound variable" "$home/watch.err" "watcher read an unset check identity"
+  pass "watcher preserves non-empty X polling under nounset"
+}
+
 test_bootstrap_reports_missing_x_dependency() {
   local home fakebin out tool tool_path
   home="$TMP_ROOT/boot-missing-x"; mkdir -p "$home"
@@ -2862,6 +2879,7 @@ test_followup_post_dry_run_increments_counter_keeps_link
 test_followup_post_dry_run_final_clears_link
 test_followup_usage_errors
 test_bootstrap_activates_on_env_token
+test_watcher_handles_nonempty_x_poll_under_nounset
 test_bootstrap_reports_missing_x_dependency
 test_bootstrap_does_not_announce_when_arm_fails
 test_bootstrap_does_not_follow_x_artifact_symlinks

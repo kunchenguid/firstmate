@@ -786,7 +786,8 @@ while :; do
     rejected_checks=
     for c in "$STATE"/*.check.sh; do
       [ -e "$c" ] || continue
-      if [ "$(basename "$c")" = x-watch.check.sh ]; then
+      id=$(basename "$c" .check.sh)
+      if [ "$id" = x-watch ]; then
         if fmx_poll_shim_valid "$c" "$FM_HOME" "$FM_ROOT" \
           && [ -f "$FM_ROOT/bin/fm-x-poll.sh" ] && [ ! -L "$FM_ROOT/bin/fm-x-poll.sh" ]; then
           FM_HOME="$FM_HOME" run_check_capture "$FM_ROOT/bin/fm-x-poll.sh" || exit 1
@@ -796,7 +797,6 @@ while :; do
           continue
         fi
       else
-        id=$(basename "$c" .check.sh)
         if fm_pr_poll_artifacts_valid "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh"; then
           provider=$FM_PR_DATA_PROVIDER
           url=$FM_PR_DATA_URL
