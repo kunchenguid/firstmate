@@ -22,7 +22,8 @@ Every gitlab.com command here reads a public merge request and needs no credenti
 
 A self-hosted instance proves the property that makes this a schema change rather than a pattern edit.
 GitLab runs mostly on self-hosted instances, and a merge request there lives under a host that is not `gitlab.com` and under a project namespace that no owner-and-repository pair can address.
-The self-hosted evidence below comes from `dev.egov.gy`, which a reader cannot reach; it is included so the non-default-host path is shown working against a real instance rather than only asserted.
+The self-hosted evidence below comes from `selfhosted.example`, which a reader cannot reach; it is included so the non-default-host path is shown working against a real instance rather than only asserted.
+The host, namespace, and merge request numbers for that instance have been replaced with placeholders because the real instance is private; the properties being demonstrated, a host that is not `gitlab.com` and a project namespace nested below the top level, hold regardless of the exact values.
 
 The host is never a constant in the implementation.
 It is carried in the stored record next to the namespace and the merge request number, and the anti-tamper cross-check rebuilds the URL from that stored host.
@@ -37,10 +38,10 @@ merged
 $ glab-axi mr view "https://gitlab.com/gitlab-org/gitlab-runner/-/merge_requests/6477" --jq .state
 closed
 
-$ glab-axi mr view "https://dev.egov.gy/department-of-citizenship/visa/-/merge_requests/670" --jq .state
+$ glab-axi mr view "https://selfhosted.example/group/subgroup/project/-/merge_requests/101" --jq .state
 merged
 
-$ glab-axi mr view "https://dev.egov.gy/department-of-citizenship/visa/-/merge_requests/661" --jq .state
+$ glab-axi mr view "https://selfhosted.example/group/subgroup/project/-/merge_requests/102" --jq .state
 closed
 ```
 
@@ -56,9 +57,9 @@ $ fm-pr-check.sh e1 https://gitlab.com/gitlab-org/gitlab-runner/-/merge_requests
 armed: state/e1.check.sh
 $ fm-pr-check.sh e2 https://gitlab.com/gitlab-org/gitlab-runner/-/merge_requests/6477
 armed: state/e2.check.sh
-$ fm-pr-check.sh e3 https://dev.egov.gy/department-of-citizenship/visa/-/merge_requests/670
+$ fm-pr-check.sh e3 https://selfhosted.example/group/subgroup/project/-/merge_requests/101
 armed: state/e3.check.sh
-$ fm-pr-check.sh e4 https://dev.egov.gy/department-of-citizenship/visa/-/merge_requests/661
+$ fm-pr-check.sh e4 https://selfhosted.example/group/subgroup/project/-/merge_requests/102
 armed: state/e4.check.sh
 ```
 
@@ -74,10 +75,10 @@ gitlab-org/gitlab-runner
 
 $ cat state/e3.pr-poll
 gitlab
-https://dev.egov.gy/department-of-citizenship/visa/-/merge_requests/670
-dev.egov.gy
-department-of-citizenship/visa
-670
+https://selfhosted.example/group/subgroup/project/-/merge_requests/101
+selfhosted.example
+group/subgroup/project
+101
 ```
 
 The provenance record, showing the bumped version tag:
@@ -87,10 +88,10 @@ $ cat state/e3.pr-poll-registration
 fm-pr-poll-registration-v2
 e3
 gitlab
-https://dev.egov.gy/department-of-citizenship/visa/-/merge_requests/670
-dev.egov.gy
-department-of-citizenship/visa
-670
+https://selfhosted.example/group/subgroup/project/-/merge_requests/101
+selfhosted.example
+group/subgroup/project
+101
 58b97281dea32dd991c7411b1c0f0150fbafbc6c5c82836186b6606d47297c3d
 2df494a308eb6f0c2e2d07de87fd45a5049b6c528b675318d6a0d39865327268
 70:100711
@@ -114,7 +115,7 @@ The optional head commit was captured on both hosts through `glab-axi mr view <u
 $ grep '^pr' state/e1.meta state/e3.meta
 pr=https://gitlab.com/gitlab-org/gitlab-runner/-/merge_requests/4000
 pr_head=774f65356725770b1df233ba88d5cceeaf540e31
-pr=https://dev.egov.gy/department-of-citizenship/visa/-/merge_requests/670
+pr=https://selfhosted.example/group/subgroup/project/-/merge_requests/101
 pr_head=9cf455325eadee70a6326338094398ddb7baf951
 ```
 
