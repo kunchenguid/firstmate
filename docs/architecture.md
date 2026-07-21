@@ -54,7 +54,7 @@ That block owns the live wait shape for the running primary harness: Claude and 
 On `attached` it stays live across identity-matched successors, and an unexplained clean child close either attaches to a verified healthy successor or becomes the typed nonzero `watcher: FAILED - cycle ended without an actionable reason` result.
 The arm layer records one bounded lifecycle row per observed cycle in `state/.watch-cycle-exits.log`; `state/.watch-triage.log` remains exclusively the absorbed-wake debug log.
 Pi and OpenCode verify session-lock ownership and launch one singleton successor from their child-close handlers before delivering an actionable wake prompt, with bounded exponential retry for failed restoration.
-Claude keeps its tracked background-task protocol and adds a narrow PreToolUse continuity gate that allows drain and arm recovery while refusing only other fleet commands when tasks are in flight and no identity-matched live watcher holds the home lock.
+Claude keeps its tracked background-task protocol and adds a narrow PreToolUse continuity gate that allows drain, arm recovery, and fail-closed teardown while refusing only other fleet commands when tasks are in flight and no identity-matched live watcher holds the home lock.
 The existing turn-end guard is unchanged and remains the final backstop for all five harness protocols.
 Its `--restart` mode signals only the watcher recorded in the current home's `state/.watch.lock`, so restarting one home cannot kill sibling secondmate watchers.
 A pull-based guard (`bin/fm-guard.sh`) warns through supervision tool output if the primary checkout is tangled, or if tasks are in flight and that watcher stops running or queued wakes are waiting to be drained.

@@ -35,13 +35,13 @@ expect_allow() {
 }
 
 expect_deny() {
-  local label=$1 command=$2 blocked=$3 rc=0 expected actual
+  local label=$1 command=$2 blocked=$3 expected=${4:-} rc=0 actual
   run_command "$command" || rc=$?
   [ "$rc" -eq 2 ] || fail "$label must deny with exit 2, got $rc"
   [ ! -s "$OUT" ] || fail "$label deny wrote stdout: $(cat "$OUT")"
   jq -e '.hookSpecificOutput.hookEventName == "PreToolUse" and .hookSpecificOutput.permissionDecision == "deny"' "$ERR" >/dev/null 2>&1 \
     || fail "$label deny omitted Claude's permission decision: $(cat "$ERR")"
-  expected="[watcher-continuity] tasks are in flight and no live watcher holds this home lock; run bin/fm-wake-drain.sh, then re-arm with bin/fm-watch-arm.sh as a tracked Claude background task before running other fleet commands (blocked: $blocked)"
+  [ -n "$expected" ] || expected="[watcher-continuity] tasks are in flight and no live watcher holds this home lock; drain wakes with bin/fm-wake-drain.sh, use fail-closed bin/fm-teardown.sh for completed tasks when needed, then re-arm with bin/fm-watch-arm.sh as a tracked Claude background task before running other fleet commands (blocked: $blocked)"
   actual=$(jq -r '.systemMessage' "$ERR")
   [ "$actual" = "$expected" ] || fail "$label recovery guidance changed: $actual"
 }
@@ -55,6 +55,12 @@ test_gate_scope_and_recovery_exceptions() {
   expect_allow "wake drain recovery" 'bin/fm-wake-drain.sh'
   expect_allow "watch arm recovery" 'bin/fm-watch-arm.sh'
   expect_allow "drain then arm recovery" 'bin/fm-wake-drain.sh; bin/fm-watch-arm.sh'
+  expect_allow "fail-closed teardown recovery" 'bin/fm-teardown.sh task'
+  unsafe_teardown_reason='[watcher-continuity] tasks are in flight and no live watcher holds this home lock; during recovery only the ordinary literal bin/fm-teardown.sh is allowed, so drop --force and any shell-expanded arguments and retry the literal invocation (blocked: fm-teardown.sh)'
+  expect_deny "forced teardown is not recovery" 'bin/fm-teardown.sh task --force' 'fm-teardown.sh' "$unsafe_teardown_reason"
+  expect_deny "nested forced teardown is not recovery" "bash -lc 'bin/fm-teardown.sh task --force'" 'fm-teardown.sh' "$unsafe_teardown_reason"
+  # shellcheck disable=SC2016  # single quotes are deliberate: "$TEARDOWN_MODE" is literal test data (an unsafe shell-expanded arg the gate must deny), not an expansion here
+  expect_deny "dynamic teardown mode is not recovery" 'bin/fm-teardown.sh task "$TEARDOWN_MODE"' 'fm-teardown.sh' "$unsafe_teardown_reason"
   expect_deny "unrelated fleet command" 'bin/fm-crew-state.sh task' 'fm-crew-state.sh'
   expect_deny "recovery bundled with unrelated fleet command" 'bin/fm-wake-drain.sh; bin/fm-send.sh task hi' 'fm-send.sh'
   expect_deny "literal nested fleet command" "bash -lc 'bin/fm-bootstrap.sh'" 'fm-bootstrap.sh'
