@@ -1,42 +1,39 @@
 #!/usr/bin/env bash
-# fm-provider-usage.sh - provider subscription-usage snapshots with freshness
-# and source identity.
+# fm-provider-usage.sh - provider advisory usage snapshots and ready receipts.
 #
-# Snapshots inform the NEW-launch pressure gate in fm-spawn.sh and the planned
-# safe-checkpoint handoff in fm-failover.sh --planned. They NEVER release a
-# verified provider hold: a hold recorded by bin/fm-provider-hold.sh is
-# authoritative over any quota telemetry, fresh or stale, and clears only
-# through that script's probe-verified release.
+# No supported machine-readable consumer-quota API exists across Claude, Codex,
+# or Ollama that firstmate can treat as authoritative. This script therefore
+# records only two kinds of durable evidence:
+#   - advisory snapshots from quota-axi or external UI readings (freshness evidence
+#     only, never a quota-confirmed ready verdict);
+#   - ready receipts produced by a successful non-token native operation probe.
+# Provider-error holds remain the only authoritative exhaustion signal.
 #
 # Usage:
 #   fm-provider-usage.sh refresh [--providers <quota-axi list>]
-#       Non-interactive machine-readable refresh via `quota-axi --json --full`
-#       (default providers claude,codex; NEVER passes
-#       --allow-keychain-prompt, so routine monitoring cannot pop an
-#       interactive prompt). Requires jq. Each returned provider whose
-#       telemetry is not marked stale is recorded under its fleet provider
-#       name (claude -> anthropic, codex -> openai, grok -> xai); a failed,
-#       stale, or missing read records NOTHING for that provider, so its
-#       telemetry ages into `unknown` instead of masquerading as fresh.
+#       Non-interactive refresh via `quota-axi --json --full` when installed. The
+#       result is recorded as source=quota-axi-advisory; it NEVER passes
+#       --allow-keychain-prompt, and it never sets status=ready. A failed,
+#       stale, or missing read records NOTHING so the provider ages into unknown.
 #   fm-provider-usage.sh record <provider> [--session-pct N] [--week-pct N]
 #       [--model-pct <model>=<N>]... [--source <name>] [--reset <text>]
-#       Record a snapshot by hand or from an external source with no quota
-#       API (e.g. the captain's authenticated Ollama usage page read through
-#       the persistent provider browser profile). Optional and explicit:
-#       absent or expired external telemetry never blocks work - error-based
-#       supervision and holds remain the backstop.
+#       Record an advisory snapshot by hand or from an external source (for
+#       example the captain's authenticated usage page). Absent or expired
+#       advisory telemetry never blocks work - error-based supervision and holds
+#       remain the backstop.
+#   fm-provider-usage.sh ready <provider>
+#       Run the non-token native readiness probe for <provider> and record a
+#       status=ready receipt when it succeeds. This is the only way to make a
+#       provider strictly ready without a successful task already on it.
 #   fm-provider-usage.sh status [<provider>] [--model <model>]
-#       Print each snapshot's age, source, values, and the pressure verdict
-#       (fm_failover_provider_pressure; ok|avoid|handoff|unknown).
+#       Print each snapshot's age, source, advisory values, readiness state, and
+#       advisory pressure verdict.
 #
 # Snapshot format (state/.provider-usage-<provider>): recorded_at=<epoch>,
-# source=<name>, session_pct=<n>, week_pct=<n>, reset=<text>, and repeated
-# model_pct=<model>=<n> lines. Thresholds and freshness are owned by
-# bin/fm-failover-lib.sh (FM_PROVIDER_SESSION_AVOID_PCT 70,
-# FM_PROVIDER_SESSION_HANDOFF_PCT 85, FM_PROVIDER_WEEK_AVOID_PCT 90,
-# FM_PROVIDER_USAGE_MAX_AGE_SECS 1800). quota-axi schemaVersion 2 parsing was
-# verified against the installed quota-axi 0.1.7 on 2026-07-22
-# (docs/provider-failover.md "Usage telemetry").
+# source=<name>, status=<ready|advisory>, plus optional session_pct=<n>,
+# week_pct=<n>, reset=<text>, and repeated model_pct=<model>=<n> lines. Freshness
+# window and thresholds are owned by bin/fm-failover-lib.sh
+# (FM_PROVIDER_USAGE_MAX_AGE_SECS 1800).
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -51,8 +48,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
 usage() { awk 'NR == 1 {next} !/^#/ {exit} {sub(/^# ?/, ""); print}' "$0"; }
 
-write_snapshot() {  # <provider> <source> <session> <week> <reset> <model-pct-lines>
-  local provider=$1 source=$2 session=$3 week=$4 reset=$5 model_lines=$6 tmp path
+write_snapshot() {  # <provider> <source> <status> <session> <week> <reset> <model-pct-lines>
+  local provider=$1 source=$2 status=$3 session=$4 week=$5 reset=$6 model_lines=$7 tmp path
   fm_failover_provider_name_valid "$provider" || { echo "error: invalid provider name '$provider'" >&2; return 1; }
   mkdir -p "$STATE"
   path=$(fm_failover_usage_path "$STATE" "$provider")
@@ -60,13 +57,14 @@ write_snapshot() {  # <provider> <source> <session> <week> <reset> <model-pct-li
   {
     printf 'recorded_at=%s\n' "$(date +%s)"
     printf 'source=%s\n' "${source:-manual}"
+    printf 'status=%s\n' "${status:-advisory}"
     [ -z "$session" ] || printf 'session_pct=%s\n' "$session"
     [ -z "$week" ] || printf 'week_pct=%s\n' "$week"
     [ -z "$reset" ] || printf 'reset=%s\n' "$reset"
     [ -z "$model_lines" ] || printf '%s\n' "$model_lines"
   } > "$tmp" || { rm -f "$tmp"; return 1; }
   mv "$tmp" "$path" || { rm -f "$tmp"; return 1; }
-  echo "recorded: provider $provider source=${source:-manual} session=${session:-unknown}% week=${week:-unknown}%"
+  echo "recorded: provider $provider source=${source:-manual} status=${status:-advisory} session=${session:-unknown}% week=${week:-unknown}%"
 }
 
 CMD=${1:-}
@@ -117,7 +115,7 @@ case "$CMD" in
       if [ -n "$qa_models" ]; then
         model_lines=$(printf '%s\n' "$qa_models" | tr ';' '\n' | sed -n 's/^\(..*\)/model_pct=\1/p')
       fi
-      write_snapshot "$provider" quota-axi "${qa_session:-}" "${qa_week:-}" "" "$model_lines" || continue
+      write_snapshot "$provider" quota-axi-advisory advisory "${qa_session:-}" "${qa_week:-}" "" "$model_lines" || continue
       recorded_any=1
     done <<EOF
 $(printf '%s' "$OUT" | jq -r '
@@ -139,6 +137,7 @@ EOF
     SESSION=
     WEEK=
     SOURCE=manual
+    STATUS=advisory
     RESET=
     MODEL_LINES=
     while [ "$#" -gt 0 ]; do
@@ -146,6 +145,7 @@ EOF
         --session-pct) shift; SESSION=${1:-} ;;
         --week-pct) shift; WEEK=${1:-} ;;
         --source) shift; SOURCE=${1:-manual} ;;
+        --status) shift; STATUS=${1:-advisory} ;;
         --reset) shift; RESET=${1:-} ;;
         --model-pct)
           shift
@@ -161,8 +161,23 @@ EOF
     done
     case "$SESSION" in *[!0-9]*) echo "error: --session-pct must be a whole percentage" >&2; exit 2 ;; esac
     case "$WEEK" in *[!0-9]*) echo "error: --week-pct must be a whole percentage" >&2; exit 2 ;; esac
-    write_snapshot "$PROVIDER" "$SOURCE" "$SESSION" "$WEEK" "$RESET" "$MODEL_LINES" || exit 1
+    write_snapshot "$PROVIDER" "$SOURCE" "$STATUS" "$SESSION" "$WEEK" "$RESET" "$MODEL_LINES" || exit 1
     exit 0
+    ;;
+  ready)
+    PROVIDER=${1:-}
+    [ -n "$PROVIDER" ] || { echo "error: ready requires a provider name" >&2; exit 2; }
+    fm_failover_provider_name_valid "$PROVIDER" || { echo "error: invalid provider name '$PROVIDER'" >&2; exit 2; }
+    code=0
+    OUT=$(fm_failover_provider_ready_probe "$PROVIDER") || code=$?
+    VERDICT=$(fm_failover_probe_classify "$code" "$OUT")
+    if [ "$VERDICT" = available ]; then
+      write_snapshot "$PROVIDER" "ready-probe" ready "" "" "" "" || exit 1
+      echo "ready: provider $PROVIDER (non-token native probe succeeded)"
+      exit 0
+    fi
+    echo "error: provider $PROVIDER ready probe failed (exit $code, verdict $VERDICT: $(printf '%s' "$OUT" | head -1 | cut -c1-200))" >&2
+    exit 1
     ;;
   status)
     ONLY=
@@ -184,16 +199,18 @@ EOF
       recorded=$(sed -n 's/^recorded_at=//p' "$usage_file" | head -1)
       age=unknown
       case "$recorded" in *[!0-9]*|'') : ;; *) age=$(( $(date +%s) - recorded )) ;; esac
-      printf '%s age=%ss source=%s session=%s%% week=%s%% pressure: %s\n' \
+      printf '%s age=%ss source=%s status=%s session=%s%% week=%s%% readiness: %s pressure: %s\n' \
         "$provider" "$age" \
         "$(sed -n 's/^source=//p' "$usage_file" | head -1)" \
+        "$(sed -n 's/^status=//p' "$usage_file" | head -1)" \
         "$(sed -n 's/^session_pct=//p' "$usage_file" | head -1)" \
         "$(sed -n 's/^week_pct=//p' "$usage_file" | head -1)" \
+        "$(fm_failover_provider_readiness "$STATE" "$provider")" \
         "$(fm_failover_provider_pressure "$STATE" "$provider" "$MODEL")"
     done
     if [ "$found" = 0 ]; then
       if [ -n "$ONLY" ]; then
-        printf '%s pressure: %s\n' "$ONLY" "$(fm_failover_provider_pressure "$STATE" "$ONLY" "$MODEL")"
+        printf '%s readiness: %s pressure: %s\n' "$ONLY" "$(fm_failover_provider_readiness "$STATE" "$ONLY" "$MODEL")" "$(fm_failover_provider_pressure "$STATE" "$ONLY" "$MODEL")"
       else
         echo "no provider usage snapshots recorded"
       fi

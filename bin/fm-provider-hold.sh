@@ -16,18 +16,21 @@
 #   fm-provider-hold.sh set <provider> [--task <id>] [--evidence <text>]
 #       Record a hold (idempotent; refreshes the detail).
 #   fm-provider-hold.sh release <provider> [--force]
-#       Verify recovery with a live bounded probe of the provider and remove
+#       Verify recovery with a non-token native readiness probe and remove
 #       the hold ONLY when the probe succeeds. A failed probe keeps the hold
 #       and exits non-zero. --force skips the probe and requires explicit
 #       captain authority; never use it on your own judgment.
 #
-# Providers and their release probes (each a bounded, task-free model call in
-# a scratch directory; FM_FAILOVER_PROBE_TIMEOUT bounds it, default 90s):
-#   openai     codex exec 'Reply with exactly OK.'
-#   anthropic  claude -p 'Reply with exactly OK.'
-#   ollama     pi --print --model "$FM_PROVIDER_PROBE_MODEL_OLLAMA" (default
-#              ollama/glm-5.2) 'Reply with exactly OK.'
+# Release probes are non-token native operations (not model calls), matching the
+# candidate readiness probes in bin/fm-failover.sh:
+#   anthropic  claude auth status
+#   openai     codex login status
+#   ollama     pi --list-models "$FM_PROVIDER_PROBE_MODEL_OLLAMA" (default
+#              ollama/glm-5.2)
 # Any other provider has no verified probe; release requires --force.
+#
+# A successful probe also records a fresh provider-ready receipt, so the recovered
+# provider can be selected without another probe until the receipt ages out.
 #
 # Hold files live at state/.provider-hold-<provider>; docs/provider-failover.md
 # owns the surrounding mechanism narrative.
@@ -50,18 +53,6 @@ case "$CMD" in
   -h|--help|'') usage; [ -n "$CMD" ] && exit 0 || exit 2 ;;
 esac
 shift
-
-PROBE_TIMEOUT=${FM_FAILOVER_PROBE_TIMEOUT:-90}
-case "$PROBE_TIMEOUT" in ''|*[!0-9]*) PROBE_TIMEOUT=90 ;; esac
-
-bounded_run() {  # <seconds> <cmd...>
-  local secs=$1
-  shift
-  if command -v timeout >/dev/null 2>&1; then timeout "$secs" "$@"
-  elif command -v gtimeout >/dev/null 2>&1; then gtimeout "$secs" "$@"
-  else "$@"
-  fi
-}
 
 case "$CMD" in
   list)
@@ -114,33 +105,19 @@ case "$CMD" in
       echo "released: provider $PROVIDER (FORCED - recovery was NOT verified; captain authority required for this path)"
       exit 0
     fi
-    PROBE_DIR=$(mktemp -d "${TMPDIR:-/tmp}/fm-provider-probe.XXXXXX") || exit 1
-    trap '[ -z "${PROBE_DIR:-}" ] || rm -rf "$PROBE_DIR"' EXIT
     code=0
-    case "$PROVIDER" in
-      openai)
-        command -v codex >/dev/null 2>&1 || { echo "error: codex CLI not installed; cannot verify openai recovery" >&2; exit 1; }
-        OUT=$( (cd "$PROBE_DIR" && bounded_run "$PROBE_TIMEOUT" codex exec 'Reply with exactly OK.') 2>&1 ) || code=$?
-        ;;
-      anthropic)
-        command -v claude >/dev/null 2>&1 || { echo "error: claude CLI not installed; cannot verify anthropic recovery" >&2; exit 1; }
-        OUT=$( (cd "$PROBE_DIR" && bounded_run "$PROBE_TIMEOUT" claude -p 'Reply with exactly OK.') 2>&1 ) || code=$?
-        ;;
-      ollama)
-        command -v pi >/dev/null 2>&1 || { echo "error: pi CLI not installed; cannot verify ollama recovery" >&2; exit 1; }
-        OUT=$( (cd "$PROBE_DIR" && bounded_run "$PROBE_TIMEOUT" pi --print --model "${FM_PROVIDER_PROBE_MODEL_OLLAMA:-ollama/glm-5.2}" 'Reply with exactly OK.') 2>&1 ) || code=$?
-        ;;
-      *)
-        echo "error: no verified recovery probe for provider '$PROVIDER'; release requires --force with explicit captain authority" >&2
-        exit 1
-        ;;
-    esac
-    if [ "$code" = 0 ]; then
+    OUT=$(fm_failover_provider_ready_probe "$PROVIDER") || code=$?
+    VERDICT=$(fm_failover_probe_classify "$code" "$OUT")
+    if [ "$VERDICT" = available ]; then
       rm -f "$HOLD"
-      echo "released: provider $PROVIDER (recovery verified by live probe)"
+      usage=$(fm_failover_usage_path "$STATE" "$PROVIDER")
+      tmp=$(mktemp "$STATE/.provider-usage-tmp.XXXXXX") || exit 1
+      printf 'recorded_at=%s\nstatus=ready\nsource=fm-provider-hold.sh release\n' "$(date +%s)" > "$tmp" || { rm -f "$tmp"; exit 1; }
+      mv "$tmp" "$usage" || { rm -f "$tmp"; exit 1; }
+      echo "released: provider $PROVIDER (recovery verified by non-token native probe)"
       exit 0
     fi
-    echo "error: provider $PROVIDER recovery probe failed (exit $code: $(printf '%s' "$OUT" | head -1 | cut -c1-200)); hold kept" >&2
+    echo "error: provider $PROVIDER recovery probe failed (exit $code, verdict $VERDICT: $(printf '%s' "$OUT" | head -1 | cut -c1-200)); hold kept" >&2
     exit 1
     ;;
   *)

@@ -189,6 +189,8 @@ For Pi secondmate launches, `fm-spawn.sh` starts Pi with `-e` pointed at the sec
 ## Crew dispatch profiles (config/crew-dispatch.json)
 
 `config/crew-dispatch.json` is an optional local, gitignored file containing natural-language rules that firstmate reads before dispatching a crewmate or scout.
+Provider-routing and quota policy live in this file and in the canonical example at `docs/examples/crew-dispatch.json`; Dotfiles owns their persistence and installs them idempotently.
+The file must contain only stable, machine-independent policy - no runtime state, no secrets, and no per-machine paths.
 The shell scripts do not match those rules; firstmate chooses the best matching rule with judgment, resolves that rule directly or through a supported selector, and passes only concrete `--harness`, `--model`, and `--effort` flags to `fm-spawn.sh`.
 When the file exists, `fm-spawn.sh` enforces that contract by refusing crewmate and scout spawns that lack an explicit harness (`--harness`, a positional adapter, or a raw launch command).
 Batch spawns satisfy the same requirement with a shared `--harness`.
@@ -219,7 +221,8 @@ Absent `select` means use the first array element, or the only object in the sin
 `default` is optional.
 An omitted model or effort means the selected harness uses its own default for that axis.
 If a selected profile carries an effort value the chosen harness does not accept, `fm-spawn.sh` records the requested `effort=` in task meta for traceability but omits the launch flag, and bootstrap reports the invalid harness/effort pair as a `CREW_DISPATCH` diagnostic when it is visible in the file.
-`quota-balanced` selection is deterministic and implemented by `bin/fm-dispatch-select.sh`, whose header owns the general-window rules, the 20 point stale-clear freshness margin, vendor-availability handling, and the degrade-to-first-element fallbacks; quota trouble never blocks dispatch.
+`quota-balanced` selection is deterministic and implemented by `bin/fm-dispatch-select.sh`, whose header owns the general-window rules, the 20 point stale-clear freshness margin, vendor-availability handling, and the degrade-to-first-element fallbacks.
+Quota-axi readings are advisory freshness evidence only; verified provider holds are authoritative and excluded first, and quota trouble never blocks dispatch.
 See [`docs/examples/crew-dispatch.json`](examples/crew-dispatch.json) for a starting point to copy into local `config/crew-dispatch.json`.
 When the file exists, bootstrap validates it with `jq`.
 Valid files stay silent by default; with `FM_BOOTSTRAP_VERBOSE_FACTS=1`, bootstrap emits `BOOTSTRAP_INFO: crew dispatch active config/crew-dispatch.json` plus one `BOOTSTRAP_INFO:` fact per rule and default profile.
@@ -384,15 +387,19 @@ FM_CREW_STATE_BIN=bin/fm-crew-state.sh   # test override for the current-state r
 FM_FAILOVER_OUTAGE_RE=   # override the provider quota/rate-limit evidence signatures (bin/fm-failover-lib.sh)
 FM_FAILOVER_OUTAGE_TAIL_LINES=25   # trailing non-blank pane lines scanned for provider-outage evidence
 FM_FAILOVER_CANDIDATES=  # override the failover destination ladder as "harness:model" tokens; OpenAI entries are refused
-FM_FAILOVER_PROBE_TIMEOUT=90   # seconds per candidate availability or hold-release recovery probe
+FM_FAILOVER_PROBE_TIMEOUT=90   # seconds per non-token native readiness probe in failover and hold release
 FM_FAILOVER_EXIT_TIMEOUT=30    # seconds fm-failover.sh waits for the old agent to exit in place
 FM_FAILOVER_VERIFY_TIMEOUT=45  # seconds fm-failover.sh waits to verify the destination's live process command/model
-FM_PROVIDER_PROBE_MODEL_OLLAMA=ollama/glm-5.2   # model used by fm-provider-hold.sh's ollama recovery probe
-FM_PROVIDER_SESSION_AVOID_PCT=70   # fresh session-use percentage at which a provider is excluded from NEW launches
-FM_PROVIDER_SESSION_HANDOFF_PCT=85 # fresh session-use percentage at which planned safe-checkpoint handoffs are prepared
-FM_PROVIDER_WEEK_AVOID_PCT=90      # weekly or matching model-window percentage that also excludes NEW launches
-FM_PROVIDER_USAGE_MAX_AGE_SECS=1800   # snapshot age beyond which usage telemetry reads unknown and never gates anything
-FM_PROVIDER_USAGE_REFRESH_TIMEOUT=60  # seconds allowed for fm-provider-usage.sh's non-interactive quota-axi refresh
+FM_PROVIDER_READY_PROBE_ANTHROPIC_CMD='claude auth status'   # non-token native readiness probe for Anthropic (failover + hold release)
+FM_PROVIDER_READY_PROBE_OPENAI_CMD='codex login status'      # non-token native readiness probe for OpenAI/Codex (failover + hold release)
+FM_PROVIDER_READY_PROBE_OLLAMA_CMD=  # non-token native readiness probe for Ollama (default: pi --list-models $FM_PROVIDER_PROBE_MODEL_OLLAMA)
+FM_PROVIDER_PROBE_MODEL_OLLAMA=ollama/glm-5.2   # model used by the default Ollama readiness probe
+FM_PROVIDER_SESSION_AVOID_PCT=70   # advisory session-use percentage; never treated as quota-confirmed readiness
+FM_PROVIDER_SESSION_HANDOFF_PCT=85 # advisory session-use percentage that triggers a planned safe-checkpoint handoff review
+FM_PROVIDER_WEEK_AVOID_PCT=90      # advisory weekly/model-window percentage; still advisory, never a hard gate
+FM_PROVIDER_WEEK_AVOID_PCT_OPENAI=50 # advisory weekly percentage for the OpenAI provider specifically; allows a lower reserve floor for auto-routing while holds stay authoritative
+FM_PROVIDER_USAGE_MAX_AGE_SECS=1800   # age beyond which a ready/advisory receipt ages into unknown
+FM_PROVIDER_USAGE_REFRESH_TIMEOUT=60  # seconds allowed for fm-provider-usage.sh's non-interactive quota-axi advisory refresh
 FMX_PAIRING_TOKEN=      # X mode pairing token; .env opt-in authorizes replies and eligible lifecycle actions
 FMX_RELAY_URL=https://myfirstmate.io   # optional X relay override, mainly for local relay development
 FMX_ENV_FILE=           # optional alternate .env file for direct X client invocations; bootstrap still checks $FM_HOME/.env

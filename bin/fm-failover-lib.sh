@@ -3,7 +3,8 @@
 # failover (bin/fm-failover.sh) and the watcher's provider-outage fast path
 # (bin/fm-watch.sh).
 #
-# Pure, side-effect-free predicates only; the mutation mechanics live in
+# Mostly pure predicates; the lightweight non-token readiness probes run an
+# external CLI but do not mutate durable state. The mutation mechanics live in
 # bin/fm-failover.sh. Callers must have sourced bin/fm-backend.sh first
 # (fm_meta_get). docs/provider-failover.md owns the mechanism narrative and the
 # backend-support evidence record.
@@ -17,7 +18,7 @@
 # bounded pane tail and against a task's last status line. FM_FAILOVER_OUTAGE_RE
 # overrides the whole set. The bare-429 form requires an error-ish neighbor so a
 # diff or doc line merely containing "429" does not fire.
-FM_FAILOVER_OUTAGE_RE_DEFAULT='usage limit|rate limit|rate.limit_exceeded|too many requests|insufficient._quota|quota exceeded|exceeded your current quota|out of credits|(error|status|http)[^0-9]*429|429[^0-9]*(rate|quota|too many)'
+FM_FAILOVER_OUTAGE_RE_DEFAULT='usage limit|rate limit|rate.limit_exceeded|too many requests|insufficient[[:space:]_]quota|quota exceeded|exceeded your current quota|out of credits|(error|status|http)[^0-9]*429|429[^0-9]*(rate|quota|too many)'
 
 # How many trailing non-blank pane lines are scanned for outage evidence. Wide
 # enough to catch an error block above a composer, bounded so old scrollback
@@ -121,6 +122,26 @@ FM_PROVIDER_SESSION_HANDOFF_PCT_DEFAULT=85
 FM_PROVIDER_WEEK_AVOID_PCT_DEFAULT=90
 FM_PROVIDER_USAGE_MAX_AGE_SECS_DEFAULT=1800
 
+# fm_failover_provider_threshold: resolve a provider-specific threshold env var
+# (e.g. FM_PROVIDER_WEEK_AVOID_PCT_OPENAI) with fallback to the generic env var
+# (e.g. FM_PROVIDER_WEEK_AVOID_PCT) and then to the default constant. Provider
+# names are lower-case slugs; the provider-specific suffix is the uppercase form.
+fm_failover_provider_threshold() {  # <provider> <base-env-name> <default-value>
+  local provider=$1 base=$2 default=$3 specific_var specific generic
+  specific_var=$(printf '%s_%s' "$base" "$(printf '%s' "$provider" | tr '[:lower:]' '[:upper:]')")
+  specific=${!specific_var:-}
+  [ -n "$specific" ] && { printf '%s' "$specific"; return 0; }
+  generic=${!base:-}
+  [ -n "$generic" ] && { printf '%s' "$generic"; return 0; }
+  # Canonical provider-specific hard defaults (overridable by the env vars above).
+  if [ "$provider" = openai ]; then
+    case "$base" in
+      FM_PROVIDER_WEEK_AVOID_PCT) printf '50'; return 0 ;;
+    esac
+  fi
+  printf '%s' "$default"
+}
+
 fm_failover_usage_path() {  # <state-dir> <provider>
   printf '%s/.provider-usage-%s' "$1" "$2"
 }
@@ -139,10 +160,11 @@ fm_failover_usage_path() {  # <state-dir> <provider>
 fm_failover_provider_pressure() {  # <state-dir> <provider> [<model>]
   local state=$1 provider=$2 model=${3:-} usage now recorded age line
   local session_pct='' week_pct='' model_hit='' model_name model_val
-  local avoid=${FM_PROVIDER_SESSION_AVOID_PCT:-$FM_PROVIDER_SESSION_AVOID_PCT_DEFAULT}
-  local handoff=${FM_PROVIDER_SESSION_HANDOFF_PCT:-$FM_PROVIDER_SESSION_HANDOFF_PCT_DEFAULT}
-  local week_avoid=${FM_PROVIDER_WEEK_AVOID_PCT:-$FM_PROVIDER_WEEK_AVOID_PCT_DEFAULT}
-  local max_age=${FM_PROVIDER_USAGE_MAX_AGE_SECS:-$FM_PROVIDER_USAGE_MAX_AGE_SECS_DEFAULT}
+  local avoid handoff week_avoid max_age
+  avoid=$(fm_failover_provider_threshold "$provider" FM_PROVIDER_SESSION_AVOID_PCT "$FM_PROVIDER_SESSION_AVOID_PCT_DEFAULT")
+  handoff=$(fm_failover_provider_threshold "$provider" FM_PROVIDER_SESSION_HANDOFF_PCT "$FM_PROVIDER_SESSION_HANDOFF_PCT_DEFAULT")
+  week_avoid=$(fm_failover_provider_threshold "$provider" FM_PROVIDER_WEEK_AVOID_PCT "$FM_PROVIDER_WEEK_AVOID_PCT_DEFAULT")
+  max_age=${FM_PROVIDER_USAGE_MAX_AGE_SECS:-$FM_PROVIDER_USAGE_MAX_AGE_SECS_DEFAULT}
   usage=$(fm_failover_usage_path "$state" "$provider")
   [ -f "$usage" ] || { printf 'unknown no usage snapshot for %s\n' "$provider"; return 0; }
   recorded=$(sed -n 's/^recorded_at=//p' "$usage" | head -1)
@@ -251,8 +273,11 @@ fm_failover_candidates() {
 # exit code and combined output. Prints one of:
 #   available     - the probe completed (exit 0)
 #   unavailable   - the provider itself is not usable right now: auth missing,
-#                   quota/rate exhaustion, unknown/unpulled model, connection
-#                   failure, or a probe timeout (exit 124)
+#                   connection failure, provider-side not-available signal,
+#                   unknown model, or a probe timeout (exit 124). Quota/rate
+#                   exhaustion is detected upstream by provider holds and the
+#                   watcher's provider-outage path; the probe itself does not
+#                   spend tokens trying to distinguish them.
 #   inconclusive  - the probe failed some other way; the caller must STOP and
 #                   report rather than silently advancing past a provider that
 #                   may be fine (distinguishing provider unavailability from an
@@ -267,11 +292,82 @@ fm_failover_probe_classify() {  # <exit-code> <output>
     printf 'unavailable'
     return 0
   fi
-  if printf '%s' "$out" | grep -qiE 'not logged in|log ?in|authentication|unauthorized|api key|credential|usage limit|rate limit|rate.limit|too many requests|quota|out of credits|model.*not (found|available|installed)|unknown model|invalid model|no such model|connection refused|could not connect|connect(ion)? (error|failed)|network error|ollama.*(not running|unreachable)'; then
+  if printf '%s' "$out" | grep -qiE 'not logged in|not authenticated|log ?in|authentication|unauthorized|no valid credentials|api key|credential|usage limit|rate limit|rate.limit|too many requests|quota|out of credits|model.*not (found|available|installed)|unknown model|invalid model|no such model|connection refused|could not connect|connect(ion)? (error|failed)|network error|ollama.*(not running|unreachable)|provider.*(unavailable|not available)|service unavailable'; then
     printf 'unavailable'
     return 0
   fi
   printf 'inconclusive'
+}
+
+# --- provider readiness without an authoritative quota API -----------------
+#
+# No supported machine-readable consumer-quota API exists across Claude, Codex,
+# or Ollama. The failover path therefore treats provider-error holds as the only
+# authoritative exhaustion signal, and models every other provider as either
+# ready (a recent successful non-token native operation and no hold) or unknown.
+# Advisory quota/UI readings are kept for freshness evidence but never allowed to
+# claim quota-confirmed readiness.
+
+# fm_failover_provider_ready_probe: run a bounded non-token native operation
+# that proves the provider's CLI can operate without spending model tokens or
+# routing through a paid fallback. Prints combined stdout/stderr and returns the
+# exit code. Auth, connection, not-available, and timeout outcomes all classify
+# as unavailable; any other failure is inconclusive.
+fm_failover_provider_ready_probe() {  # <provider> [<model>]
+  local provider=$1 model=${2:-} cmd timeout_val runner
+  case "$provider" in
+    anthropic) cmd=${FM_PROVIDER_READY_PROBE_ANTHROPIC_CMD:-'claude auth status'} ;;
+    openai)    cmd=${FM_PROVIDER_READY_PROBE_OPENAI_CMD:-'codex login status'} ;;
+    ollama)
+      [ -n "$model" ] || model=${FM_PROVIDER_PROBE_MODEL_OLLAMA:-ollama/glm-5.2}
+      cmd=${FM_PROVIDER_READY_PROBE_OLLAMA_CMD:-"pi --list-models $model"}
+      ;;
+    *)
+      printf 'error: no verified readiness probe for provider %s\n' "$provider" >&2
+      return 2
+      ;;
+  esac
+  timeout_val=${FM_FAILOVER_PROBE_TIMEOUT:-90}
+  if command -v timeout >/dev/null 2>&1; then runner=timeout
+  elif command -v gtimeout >/dev/null 2>&1; then runner=gtimeout
+  fi
+  if [ -n "${runner:-}" ]; then
+    "$runner" "$timeout_val" bash -c "$cmd" 2>&1
+  else
+    bash -c "$cmd" 2>&1
+  fi
+}
+
+# fm_failover_provider_readiness: print one of:
+#   limited <provider> held after verified exhaustion
+#   ready   <provider> recent successful native operation ...
+#   unknown <provider> no fresh readiness receipt
+# A provider hold is authoritative. A status=ready receipt written by a recent
+# successful native operation (probe, release, or explicit record) is the only
+# non-hold path to ready. Everything else is unknown.
+fm_failover_provider_readiness() {  # <state-dir> <provider>
+  local state=$1 provider=$2 usage recorded status age max_age
+  if fm_failover_provider_held "$state" "$provider"; then
+    printf 'limited %s held after verified exhaustion\n' "$provider"
+    return 0
+  fi
+  usage=$(fm_failover_usage_path "$state" "$provider")
+  if [ -f "$usage" ]; then
+    recorded=$(sed -n 's/^recorded_at=//p' "$usage" | head -1)
+    status=$(sed -n 's/^status=//p' "$usage" | head -1)
+    case "$recorded" in
+      ''|*[!0-9]*) recorded= ;;
+    esac
+    if [ "$status" = ready ] && [ -n "$recorded" ]; then
+      max_age=${FM_PROVIDER_USAGE_MAX_AGE_SECS:-1800}
+      age=$(( $(date +%s) - recorded ))
+      if [ "$age" -le "$max_age" ]; then
+        printf 'ready %s recent successful native operation (age %ss)\n' "$provider" "$age"
+        return 0
+      fi
+    fi
+  fi
+  printf 'unknown %s no fresh readiness receipt\n' "$provider"
 }
 
 # fm_failover_backend_supported: 0 when <backend> carries every proof the

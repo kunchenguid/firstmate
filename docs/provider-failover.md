@@ -33,12 +33,14 @@ Before any switch work, the script atomically writes `data/<id>/failover/receipt
 It then proves the isolated copy is a real worktree root distinct from the primary checkout (the same isolation shape `fm-spawn.sh` enforces), that no other recorded task with a live or ambiguous agent claims the same copy, and - after the old agent exits - that the endpoint shell still sits in the preserved copy.
 After the destination is live, the HEAD and dirty digest are compared against the receipt again; a mismatch is a loud blocker and the route metadata stays unchanged.
 
-## Destination ladder and probing
+## Destination ladder and readiness probing
 
 Default ladder: Anthropic Claude Code `claude-fable-5[1m]`, then Pi `ollama/kimi-k2.7-code`, then Pi `ollama/glm-5.2`.
 OpenAI is never a destination: `fm_failover_candidates` refuses any OpenAI-backed entry, including through the `FM_FAILOVER_CANDIDATES` override.
-Each candidate is probed with a bounded, task-free model call in a scratch directory (`claude --model <m> -p ...`, `pi --print --model <m> ...`).
-Probe outcomes are classified deterministically (`fm_failover_probe_classify`): success selects the candidate; auth, quota, rate-limit, unknown-model, connection, and timeout failures mean genuinely unavailable and advance the ladder; any other failure is inconclusive and stops the whole failover rather than advancing past a provider that may be fine.
+Each candidate is checked with a bounded, non-token native readiness probe in a scratch directory.
+The probe runs a lightweight provider operation that proves the CLI can talk to its backend without spending model tokens or routing through a paid fallback:
+`claude auth status` for Anthropic, `codex login status` for OpenAI, and `pi --list-models <model>` for Pi/Ollama.
+Probe outcomes are classified deterministically (`fm_failover_probe_classify`): success records a fresh provider-ready receipt and selects the candidate; auth, connection, timeout, or a provider-side not-available signal means genuinely unavailable and advances the ladder; any other failure is inconclusive and stops the whole failover rather than advancing past a provider that may be fine.
 A candidate whose provider has an active exhaustion hold is skipped without probing.
 If every allowed destination is unavailable, the script exits 4 with the task, its records, and the current worker fully intact.
 
@@ -59,24 +61,33 @@ Every Claude Fable launch - ordinary spawn or failover relaunch - runs at normal
 ## Exhaustion holds
 
 Verified provider exhaustion (`outage` evidence) immediately records `state/.provider-hold-<provider>` through `bin/fm-provider-hold.sh set`, before any switch work.
-While a hold exists, `fm-spawn.sh` refuses every new launch whose resolved route (`fm_failover_provider_of_route`) lands on that provider - fail closed and deliberately independent of quota-cache or dispatch-selection data, so a stale quota read can never re-open a held provider - and `fm-failover.sh` skips held destination candidates.
-Eligibility is restored only by `bin/fm-provider-hold.sh release <provider>`, which verifies recovery with a live bounded probe and keeps the hold when the probe fails; `--force` skips verification and requires explicit captain authority.
+While a hold exists, `fm-spawn.sh` refuses every new launch whose resolved route (`fm_failover_provider_of_route`) lands on that provider - fail closed and deliberately independent of any advisory quota reading, so a stale or absent telemetry snapshot can never re-open a held provider - and `fm-failover.sh` skips held destination candidates.
+Eligibility is restored only by `bin/fm-provider-hold.sh release <provider>`, which verifies recovery with the same non-token native readiness probe and keeps the hold when the probe fails; `--force` skips verification and requires explicit captain authority.
 
-## Usage telemetry and pressure
+## Provider readiness and advisory telemetry
 
-`bin/fm-provider-usage.sh` records provider subscription-usage snapshots (`state/.provider-usage-<provider>`) with an epoch, source identity, session/weekly percentages, and optional model-window percentages.
-`refresh` reads Claude and Codex machine-readably through `quota-axi --json --full` with NO interactive keychain prompt; parsing was verified 2026-07-22 against the installed quota-axi 0.1.7 (schemaVersion 2: `providers[].windows[]` with `kind` session/weekly/model, `percentUsed`, and `state.stale`; command `quota-axi --provider claude --json` returned that shape live).
-A failed, stale, or missing read records nothing, so that provider's telemetry ages into `unknown` instead of masquerading as fresh.
-Providers with no documented quota API (Ollama today) are optional and explicit: an external reading - for example the captain's authenticated usage page in the persistent provider browser profile - is fed in through `record`; absent or expired external telemetry never blocks work, because error-based supervision and holds remain the backstop.
+There is no supported machine-readable consumer-quota API across Claude, Codex, or Ollama that firstmate can treat as authoritative.
+`bin/fm-provider-usage.sh` therefore records only two kinds of evidence:
 
-Pressure (`fm_failover_provider_pressure`) is consulted from fresh snapshots only: session use at `FM_PROVIDER_SESSION_AVOID_PCT` (70) or any weekly/matching model window at `FM_PROVIDER_WEEK_AVOID_PCT` (90) excludes the provider from NEW launches in `fm-spawn.sh`; session use at `FM_PROVIDER_SESSION_HANDOFF_PCT` (85) additionally calls for a planned safe-checkpoint handoff of active workers on that provider.
-Snapshots older than `FM_PROVIDER_USAGE_MAX_AGE_SECS` (1800s) read `unknown` and gate nothing.
-Telemetry never releases a hold: a verified provider hold is authoritative over any quota result, fresh or stale - the observed failure mode is a generic quota read reporting low use while the provider's real per-model limit is exhausted - and only `bin/fm-provider-hold.sh release`'s live probe restores eligibility.
+- `record` writes an **advisory** snapshot from an external source (for example a provider's authenticated usage page read through the persistent browser profile, or a `quota-axi` result interpreted as freshness evidence only).
+  A failed, stale, or missing advisory read records nothing, so the provider's telemetry ages into `unknown` rather than masquerading as fresh.
+- `ready` runs the same non-token native readiness probe used by the failover path and writes a `status=ready` receipt with a timestamp.
+  This is a *recent successful native operation*, not a quota confirmation.
+
+Strict readiness is modeled in three states:
+
+- `ready` - a recent successful native operation was recorded, the provider has no active hold, and the advisory telemetry does not contradict it.
+- `limited` - the provider has an active verified-exhaustion hold (the reset time may be parsed from the hold file or advisory telemetry).
+- `unknown` - no fresh ready receipt exists and no hold is recorded.
+
+A provider in `unknown` state is **not** treated as quota-confirmed ready.
+`fm-spawn.sh` and `fm-dispatch-select.sh` refuse only `limited` providers (verified exhaustion); for `unknown` providers they prefer a `ready` route if one exists, otherwise they surface unconfirmed availability rather than inventing a quota verdict.
+The watcher's provider-outage path and `bin/fm-provider-hold.sh` remain the authoritative exhaustion signals, and a hold outranks every advisory reading.
 
 ## Planned safe-checkpoint handoff
 
-`fm-failover.sh <id> --planned` performs the same preservation-first switch when fresh telemetry for the worker's provider reaches the handoff threshold, with two extra guards: the worker must be at a safe checkpoint - no actively-working pipeline step and no busy pane - or the script defers with exit 6 and leaves everything intact for a later retry, and destination candidates under `avoid`/`handoff` pressure are skipped so rebalancing never piles onto a nearly-exhausted provider.
-Emergency recovery (outage, dead agent, wedge) ignores destination pressure and uses any non-held available candidate: a preserved task beats a perfectly balanced ladder.
+`fm-failover.sh <id> --planned` performs the same preservation-first switch when the worker's provider has only an advisory handoff signal, with two extra guards: the worker must be at a safe checkpoint - no actively-working pipeline step and no busy pane - or the script defers with exit 6 and leaves everything intact for a later retry, and destination candidates whose readiness is `unknown` are skipped so rebalancing never piles onto an unconfirmed provider.
+Emergency recovery (outage, dead agent, wedge) ignores destination readiness uncertainty and uses any non-held available candidate: a preserved task beats a perfectly balanced ladder.
 
 ## Nested pipeline agents
 

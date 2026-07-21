@@ -131,8 +131,9 @@ profiles_json=$(printf '%s\n' "$SPEC_JSON" | jq -ec '
 profile_count=$(printf '%s\n' "$profiles_json" | jq 'length')
 [ "$profile_count" -gt 0 ] || { echo "error: dispatch profile array must not be empty" >&2; exit 2; }
 
-# Hold/pressure eligibility pre-filter (see header). Runs against this home's
-# state; a home with no holds and no usage snapshots filters nothing.
+# Hold/readiness eligibility pre-filter (see header). Only active
+# verified-exhaustion holds exclude a candidate here; advisory quota/UI
+# pressure does not, because no official consumer-quota API is authoritative.
 eligible_profiles=()
 excluded_entries=()
 i=0
@@ -144,10 +145,13 @@ while [ "$i" -lt "$profile_count" ]; do
   exclusion=
   if fm_failover_provider_held "$STATE" "$p_provider"; then
     exclusion="provider $p_provider held after verified exhaustion"
-  else
-    pressure_line=$(fm_failover_provider_pressure "$STATE" "$p_provider" "$p_model")
-    case "${pressure_line%% *}" in
-      avoid|handoff) exclusion="provider $p_provider under quota pressure ($pressure_line)" ;;
+  fi
+  if [ -z "$exclusion" ]; then
+    pressure=$(fm_failover_provider_pressure "$STATE" "$p_provider" "$p_model")
+    case "${pressure%% *}" in
+      avoid|handoff)
+        exclusion="provider $p_provider pressure: $pressure"
+        ;;
     esac
   fi
   if [ -n "$exclusion" ]; then

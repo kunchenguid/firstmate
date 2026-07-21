@@ -483,15 +483,34 @@ if fm_failover_provider_held "$STATE" "$SPAWN_PROVIDER"; then
   exit 1
 fi
 
-# Usage-pressure gate (bin/fm-provider-usage.sh snapshots): fresh telemetry
-# at/above the avoid or handoff thresholds excludes the provider from NEW
-# launches. Unknown or stale telemetry never blocks - error-based supervision
-# and the hold above remain the backstop.
+# Usage-pressure advisory (bin/fm-provider-usage.sh snapshots): advisory
+# quota/UI readings are never treated as quota-confirmed readiness. A provider
+# under advisory pressure is logged but not hard-blocked here; the authoritative
+# block is the verified-exhaustion hold above. This keeps the launch path from
+# inventing a quota verdict from telemetry that has no official consumer API.
 SPAWN_PRESSURE_LINE=$(fm_failover_provider_pressure "$STATE" "$SPAWN_PROVIDER" "${MODEL:-}")
 case "${SPAWN_PRESSURE_LINE%% *}" in
   avoid|handoff)
-    echo "error: provider $SPAWN_PROVIDER is under quota pressure ($SPAWN_PRESSURE_LINE); refusing this NEW launch - pick a lower-pressure route or wait for the window to reset (bin/fm-provider-usage.sh status)" >&2
+    echo "warning: provider $SPAWN_PROVIDER shows advisory quota pressure ($SPAWN_PRESSURE_LINE); launching anyway because no verified hold is recorded" >&2
+    ;;
+esac
+
+# Provider readiness advisory: if a recent successful native operation has been
+# recorded, the launch is strictly ready for that provider. If not, the launch
+# proceeds on the generic dispatch decision and error-based supervision remains
+# the backstop - firstmate never claims an unconfirmed provider is quota-ready.
+SPAWN_READINESS=$(fm_failover_provider_readiness "$STATE" "$SPAWN_PROVIDER")
+case "${SPAWN_READINESS%% *}" in
+  ready)
+    : # confirmed ready, proceed silently
+    ;;
+  limited)
+    # This should have been caught by the hold gate above; keep a loud fallback.
+    echo "error: provider $SPAWN_PROVIDER is limited ($SPAWN_READINESS); refusing this launch" >&2
     exit 1
+    ;;
+  *)
+    echo "warning: provider $SPAWN_PROVIDER readiness is unconfirmed ($SPAWN_READINESS); proceeding on dispatch preference, not on a quota check" >&2
     ;;
 esac
 

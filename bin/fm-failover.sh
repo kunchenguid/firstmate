@@ -35,10 +35,11 @@
 #   4. Prove the recorded isolated copy still exists, is a real worktree
 #      distinct from the primary checkout, that no other recorded task's live
 #      agent owns it, and that the endpoint shell sits in it.
-#   5. Probe the destination ladder (claude claude-fable-5[1m], then pi
-#      ollama/kimi-k2.7-code, then pi ollama/glm-5.2; OpenAI never) without
-#      touching the preserved task; advance only past a genuinely unavailable
-#      candidate, stop on an inconclusive probe.
+#   5. Run a non-token native readiness probe on the destination ladder
+#      (claude auth status, then pi --list-models <m>, then codex login status;
+#      OpenAI is never a destination). Advance only past a genuinely unavailable
+#      candidate, stop on an inconclusive probe, and record a fresh ready receipt
+#      for the selected provider.
 #   6. Exit the old agent in place, write a resume prompt bound to the receipt
 #      that instructs the new worker to inspect and continue the existing
 #      no-mistakes run (never start or replace it), install the destination
@@ -414,29 +415,29 @@ for other_meta in "$STATE"/*.meta; do
   fi
 done
 
-# --- candidate probing ------------------------------------------------------
+# --- candidate readiness probing --------------------------------------------
 
-PROBE_TIMEOUT=${FM_FAILOVER_PROBE_TIMEOUT:-90}
-case "$PROBE_TIMEOUT" in ''|*[!0-9]*) PROBE_TIMEOUT=90 ;; esac
-PROBE_DIR=$(mktemp -d "${TMPDIR:-/tmp}/fm-failover-probe.XXXXXX") || exit 1
+# Each candidate is verified with a bounded non-token native operation (not a
+# model call), so no tokens are spent and no paid/router fallback is used.
+# A successful probe records a fresh provider-ready receipt; auth, connection,
+# not-available, and timeout failures advance the ladder; any other outcome is
+# inconclusive and stops the failover.
+
+record_provider_ready() {  # <provider> <source>
+  local provider=$1 source=$2 usage tmp
+  usage=$(fm_failover_usage_path "$STATE" "$provider")
+  tmp=$(mktemp "$STATE/.provider-usage-tmp.XXXXXX") || return 1
+  printf 'recorded_at=%s\nstatus=ready\nsource=%s\n' "$(date +%s)" "$source" > "$tmp" || { rm -f "$tmp"; return 1; }
+  mv "$tmp" "$usage" || { rm -f "$tmp"; return 1; }
+}
+
 PROBE_OUT=
 PROBE_VERDICT=
-probe_candidate() {  # <harness> <model> -> sets PROBE_VERDICT and PROBE_OUT
-  local harness=$1 model=$2 code=0
+probe_candidate() {  # <provider> <model> -> sets PROBE_VERDICT and PROBE_OUT
+  local provider=$1 model=$2 code=0
   PROBE_OUT=
   PROBE_VERDICT=
-  case "$harness" in
-    claude)
-      PROBE_OUT=$( (cd "$PROBE_DIR" && bounded_run "$PROBE_TIMEOUT" claude --model "$model" -p 'Reply with exactly OK.') 2>&1 ) || code=$?
-      ;;
-    pi)
-      PROBE_OUT=$( (cd "$PROBE_DIR" && bounded_run "$PROBE_TIMEOUT" pi --print --model "$model" 'Reply with exactly OK.') 2>&1 ) || code=$?
-      ;;
-    *)
-      echo "error: no verified availability probe for harness '$harness'" >&2
-      return 1
-      ;;
-  esac
+  PROBE_OUT=$( (cd "${TMPDIR:-/tmp}" && fm_failover_provider_ready_probe "$provider" "$model") 2>&1 ) || code=$?
   PROBE_VERDICT=$(fm_failover_probe_classify "$code" "$PROBE_OUT")
 }
 
@@ -452,25 +453,24 @@ while IFS= read -r candidate; do
     echo "candidate $candidate: provider $c_provider is held after verified exhaustion; advancing" >&2
     continue
   fi
-  # A PLANNED handoff also respects destination quota pressure (rebalancing
-  # must not pile onto a nearly-exhausted provider); emergency recovery from
-  # outage/dead/wedge evidence uses any non-held available candidate.
+  # A PLANNED handoff also skips destination providers whose readiness is
+  # unconfirmed (unknown), so rebalancing never piles onto a provider that has
+  # not recently completed a successful native operation. Emergency recovery
+  # from outage/dead/wedge evidence ignores readiness uncertainty and uses any
+  # non-held candidate.
   if [ "$EVIDENCE" = pressure ]; then
-    c_pressure=$(fm_failover_provider_pressure "$STATE" "$c_provider" "$c_model")
-    case "${c_pressure%% *}" in
-      avoid|handoff)
-        echo "candidate $candidate: provider $c_provider under quota pressure ($c_pressure); advancing" >&2
+    c_readiness=$(fm_failover_provider_readiness "$STATE" "$c_provider")
+    case "${c_readiness%% *}" in
+      unknown|limited)
+        echo "candidate $candidate: provider $c_provider readiness unconfirmed ($c_readiness); advancing" >&2
         continue
         ;;
     esac
   fi
-  if ! command -v "$c_harness" >/dev/null 2>&1; then
-    echo "candidate $candidate: CLI not installed; advancing" >&2
-    continue
-  fi
-  probe_candidate "$c_harness" "$c_model" || exit 1
+  probe_candidate "$c_provider" "$c_model" || exit 1
   case "$PROBE_VERDICT" in
     available)
+      record_provider_ready "$c_provider" "$candidate" || echo "warning: could not record ready receipt for $c_provider" >&2
       TO_HARNESS=$c_harness
       TO_MODEL=$c_model
       break
@@ -486,8 +486,6 @@ while IFS= read -r candidate; do
 done <<EOF
 $CANDIDATES
 EOF
-rm -rf "$PROBE_DIR"
-PROBE_DIR=
 
 if [ -z "$TO_HARNESS" ]; then
   echo "error: every allowed failover destination is unavailable; task $ID, its isolated copy, records, and current worker are left intact - captain decision needed (candidates tried: $(printf '%s' "$CANDIDATES" | tr '\n' ' '))" >&2
