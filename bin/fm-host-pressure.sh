@@ -39,6 +39,7 @@ HOME_PATH="$FM_HOME"
 STATE_PATH="$STATE"
 GATE_KIND=
 COMMAND_LINE=
+CONFIG_ALERT_COOLDOWN_SECS=3600
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -193,7 +194,7 @@ emit_check() {
 }
 
 periodic_alert() {
-  local out status state reason available floor clear cooldown marker now last detail errfile
+  local out status state reason available floor clear cooldown marker now last detail errfile last_detail
   # emit_check rewrites the disk-hysteresis marker, so it is evaluated exactly
   # once and its stderr is captured alongside its stdout instead of being
   # recovered by a second run.
@@ -207,14 +208,34 @@ periodic_alert() {
   # message on stderr and nothing on stdout. The watcher reads this command's
   # stdout and discards its stderr, so surface the refusal as an alert record
   # rather than letting a broken threshold read as "nothing to alert".
+  # A broken threshold is only fixed by a human editing the file, so the alert
+  # is bounded by its own marker with a fixed cooldown - the configured cooldown
+  # cannot be trusted while the config is refused - and re-alerts immediately
+  # when the refusal message itself changes.
   if [ "$status" -eq 2 ]; then
     detail=$(tail -1 "$errfile")
     rm -f "$errfile"
+    detail=${detail:-invalid capacity-failover configuration}
+    marker="$STATE_PATH/.host-pressure-config-alert"
+    now=$(fm_pressure_now_epoch)
+    last=$(sed -n 's/^last_alert_epoch=//p' "$marker" 2>/dev/null | tail -1)
+    last_detail=$(sed -n 's/^reason=//p' "$marker" 2>/dev/null | tail -1)
+    if [ -n "$last" ] && [ "$last_detail" = "$detail" ] &&
+      [ "$((now - last))" -lt "$CONFIG_ALERT_COOLDOWN_SECS" ] 2>/dev/null; then
+      return 0
+    fi
+    mkdir -p "$STATE_PATH"
+    {
+      printf 'last_alert_epoch=%s\n' "$now"
+      printf 'reason=%s\n' "$detail"
+    } > "$marker"
     printf 'alert=host_pressure_config_invalid\n'
     printf 'state=error\n'
-    printf 'reason=%s\n' "${detail:-invalid capacity-failover configuration}"
+    printf 'reason=%s\n' "$detail"
+    printf 'cooldown_secs=%s\n' "$CONFIG_ALERT_COOLDOWN_SECS"
     return 2
   fi
+  rm -f "$STATE_PATH/.host-pressure-config-alert"
   cat "$errfile" >&2
   rm -f "$errfile"
   state=$(printf '%s\n' "$out" | sed -n 's/^state=//p' | tail -1)

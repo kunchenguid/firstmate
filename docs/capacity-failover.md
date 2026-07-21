@@ -115,6 +115,7 @@ The helper never deletes those candidates.
 `classify-shed --command <line>` only marks restartable validation/test/lint commands as eligible restartable compute.
 It does not kill those processes; callers own any stop/retry policy.
 `periodic-alert` emits a bounded disk-pressure alert for supervision and applies its own cooldown marker.
+A refused (malformed) `config/capacity-failover` is reported as `alert=host_pressure_config_invalid` under its own marker with a fixed one-hour cooldown, so a broken threshold is surfaced once per window instead of on every watcher cycle; a changed refusal message re-alerts immediately.
 
 ## Shared GitHub Quota
 

@@ -190,6 +190,52 @@ test_periodic_disk_alert_is_bounded_by_cooldown() {
   pass "periodic disk-pressure alert emits bounded signals with cooldown"
 }
 
+test_periodic_config_error_alert_is_bounded_by_cooldown() {
+  local home state cfg out status
+  home="$TMP_ROOT/cfgalert/home"
+  state="$home/state"
+  cfg="$home/config/capacity-failover"
+  mkdir -p "$state"
+  write_pressure_config "$cfg" \
+    "host-pressure=on" \
+    "disk_floor_mb=10G"
+
+  out=$(FM_PRESSURE_NOW_EPOCH=1000 FM_PRESSURE_MEMORY_AVAILABLE_MB=5000 FM_PRESSURE_DISK_AVAILABLE_MB=50000 FM_PRESSURE_RUNNING_TASKS=0 \
+    "$PRESSURE" periodic-alert --config "$cfg" --home "$home" --state "$state" 2>/dev/null)
+  status=$?
+  expect_code 2 "$status" "invalid config should be reported as a refusal"
+  assert_contains "$out" "alert=host_pressure_config_invalid" "config refusal should surface as an alert record"
+  assert_contains "$out" "disk_floor_mb" "config refusal should name the offending key"
+
+  out=$(FM_PRESSURE_NOW_EPOCH=1600 FM_PRESSURE_MEMORY_AVAILABLE_MB=5000 FM_PRESSURE_DISK_AVAILABLE_MB=50000 FM_PRESSURE_RUNNING_TASKS=0 \
+    "$PRESSURE" periodic-alert --config "$cfg" --home "$home" --state "$state" 2>/dev/null)
+  status=$?
+  expect_code 0 "$status" "cooldown-suppressed config alert should return zero"
+  [ -z "$out" ] || fail "repeated config refusal should be suppressed during cooldown: $out"
+
+  write_pressure_config "$cfg" \
+    "host-pressure=on" \
+    "max_running_tasks=lots"
+  out=$(FM_PRESSURE_NOW_EPOCH=1700 FM_PRESSURE_MEMORY_AVAILABLE_MB=5000 FM_PRESSURE_DISK_AVAILABLE_MB=50000 FM_PRESSURE_RUNNING_TASKS=0 \
+    "$PRESSURE" periodic-alert --config "$cfg" --home "$home" --state "$state" 2>/dev/null)
+  status=$?
+  expect_code 2 "$status" "a different config refusal should re-alert inside the cooldown"
+  assert_contains "$out" "max_running_tasks" "changed refusal should report the new offending key"
+
+  write_pressure_config "$cfg" \
+    "host-pressure=on" \
+    "disk_floor_mb=9000" \
+    "disk_clear_mb=12000" \
+    "max_running_tasks=99"
+  out=$(FM_PRESSURE_NOW_EPOCH=1800 FM_PRESSURE_MEMORY_AVAILABLE_MB=5000 FM_PRESSURE_DISK_AVAILABLE_MB=50000 FM_PRESSURE_RUNNING_TASKS=0 \
+    "$PRESSURE" periodic-alert --config "$cfg" --home "$home" --state "$state" 2>/dev/null)
+  status=$?
+  expect_code 0 "$status" "repaired config should stop alerting"
+  [ -z "$out" ] || fail "healthy config should emit no alert: $out"
+  [ ! -f "$state/.host-pressure-config-alert" ] || fail "repaired config should clear the config-alert marker"
+  pass "periodic config-refusal alert is cooldown-bounded and re-alerts on a changed refusal"
+}
+
 test_shed_classifier_allows_only_restartable_compute() {
   local out
   out=$("$PRESSURE" classify-shed --command "bash tests/fm-capacity.test.sh")
@@ -209,6 +255,7 @@ test_active_task_count_reads_meta_records
 test_disk_floor_gate_blocks_heavy_test_launch
 test_disk_floor_hysteresis_holds_until_clear_threshold
 test_periodic_disk_alert_is_bounded_by_cooldown
+test_periodic_config_error_alert_is_bounded_by_cooldown
 test_shed_classifier_allows_only_restartable_compute
 
 echo "# all fm-host-pressure tests passed"
