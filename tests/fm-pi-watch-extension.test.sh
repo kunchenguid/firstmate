@@ -762,6 +762,133 @@ EOF
   pass "Pi watcher arm distinguishes all session lock ownership states"
 }
 
+test_pi_session_replacement_restarts_runtime_without_process_restart() {
+  local repo home plugin log out status
+  repo="$TMP_ROOT/pi-session-replacement-root"
+  home="$TMP_ROOT/pi-session-replacement-home"
+  log="$TMP_ROOT/pi-session-replacement.log"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+trap 'exit 0' TERM INT
+while :; do sleep 0.02; done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_WATCH_REARM_RETRY_BASE_MS=250 FM_WATCH_REARM_RETRY_MAX_MS=250 node --input-type=module 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const handlers = new Map();
+let armCommand = null;
+let notification = "";
+const pi = {
+  on(event, handler) {
+    handlers.set(event, handler);
+  },
+  registerCommand(name, options) {
+    if (name === "fm-watch-arm-pi") armCommand = options.handler;
+  },
+  registerTool() {},
+  sendUserMessage: async () => {},
+};
+const armRows = () => existsSync(process.env.FM_ARM_LOG)
+  ? readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n").filter(Boolean)
+  : [];
+async function waitForArmCount(expected) {
+  for (let i = 0; i < 250; i += 1) {
+    if (armRows().length >= expected) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`expected ${expected} arm children, got ${armRows().length}`);
+}
+async function arm(expectedCount) {
+  notification = "";
+  await armCommand("", {
+    ui: {
+      notify(message) {
+        notification = message;
+      },
+    },
+  });
+  if (!notification.includes("started Pi extension arm child")) {
+    throw new Error(`logical session ${expectedCount} did not arm: ${notification}`);
+  }
+  await waitForArmCount(expectedCount);
+  await new Promise((resolve) => setTimeout(resolve, 80));
+  if (armRows().length !== expectedCount) {
+    throw new Error(`stale logical session launched an extra arm: ${armRows().join(" | ")}`);
+  }
+}
+
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const before = process.listenerCount("exit");
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+if (!armCommand) throw new Error("Pi watch command was not registered");
+if (process.listenerCount("exit") !== before + 1) {
+  throw new Error("initial logical session did not install one process-exit fallback");
+}
+await handlers.get("session_start")?.({ type: "session_start", reason: "startup" }, {});
+await arm(1);
+
+for (let expectedCount = 2; expectedCount <= 3; expectedCount += 1) {
+  await handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "new" }, {});
+  if (process.listenerCount("exit") !== before) {
+    throw new Error("replaced logical session left its process-exit fallback installed");
+  }
+  mod.default(pi);
+  if (process.listenerCount("exit") !== before + 1) {
+    throw new Error("replacement extension runtime did not reinstall one process-exit fallback");
+  }
+  await handlers.get("session_start")?.({ type: "session_start", reason: "new" }, {});
+  if (process.listenerCount("exit") !== before + 1) {
+    throw new Error("replacement logical session duplicated or removed its process-exit fallback");
+  }
+  await arm(expectedCount);
+  if (expectedCount === 2) {
+    const armPid = Number(armRows().at(-1)?.match(/^arm=([0-9]+)$/)?.[1] ?? 0);
+    if (!armPid) throw new Error(`could not read arm pid before retry-timer test: ${armRows().join(" | ")}`);
+    process.kill(armPid, "SIGTERM");
+    await new Promise((resolve) => setTimeout(resolve, 60));
+  }
+}
+await new Promise((resolve) => setTimeout(resolve, 300));
+if (armRows().length !== 3) {
+  throw new Error(`replaced logical session retry timer launched a stale arm: ${armRows().join(" | ")}`);
+}
+
+await handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "quit" }, {});
+if (process.listenerCount("exit") !== before) {
+  throw new Error("real shutdown left its process-exit fallback installed");
+}
+await handlers.get("session_start")?.({ type: "session_start", reason: "new" }, {});
+notification = "";
+await armCommand("", {
+  ui: {
+    notify(message) {
+      notification = message;
+    },
+  },
+});
+if (!notification.includes("Pi session is shutting down")) {
+  throw new Error(`real shutdown was resurrected by a later session_start: ${notification}`);
+}
+await new Promise((resolve) => setTimeout(resolve, 100));
+if (armRows().length !== 3) {
+  throw new Error(`real shutdown launched another arm: ${armRows().join(" | ")}`);
+}
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "Pi session replacement must restart supervision state without resurrecting after real shutdown"
+  [ -z "$out" ] || fail "Pi session-replacement test printed output: $out"
+  pass "Pi session replacement resets supervision while real shutdown stays terminal"
+}
+
 test_pi_process_exit_cleanup_listener_lifecycle() {
   local repo home plugin out status
   repo="$TMP_ROOT/pi-exit-listener-root"
@@ -1836,6 +1963,7 @@ test_pi_empty_close_retries_instead_of_disappearing
 test_pi_established_empty_close_honors_retry_limit
 test_pi_actionable_close_rechecks_session_lock
 test_pi_arm_distinguishes_session_lock_ownership
+test_pi_session_replacement_restarts_runtime_without_process_restart
 test_pi_process_exit_cleanup_listener_lifecycle
 test_pi_process_exit_cleanup_stops_arm_child
 test_opencode_primary_watch_plugin_static_wiring

@@ -19,6 +19,13 @@ type CloseClassification = {
   message: string;
 };
 
+type SessionReplacementReason = "reload" | "new" | "resume" | "fork";
+
+type ActiveRestoration = {
+  generation: number;
+  token: number;
+};
+
 const extensionFile = fileURLToPath(import.meta.url);
 const extensionDir = dirname(extensionFile);
 const root = resolve(extensionDir, "../..");
@@ -40,7 +47,10 @@ let retryTimer: ReturnType<typeof setTimeout> | null = null;
 let retryFailures = 0;
 let stopping = false;
 let seq = 0;
-let restoring = false;
+let sessionGeneration = 0;
+let pendingSessionStart: SessionReplacementReason | null = null;
+let restorationSequence = 0;
+let activeRestoration: ActiveRestoration | null = null;
 const armReadiness = new WeakMap<ChildProcess, Promise<boolean>>();
 const armClose = new WeakMap<ChildProcess, Promise<void>>();
 
@@ -48,6 +58,11 @@ function positiveInteger(name: string, fallback: number): number {
   const value = Number(process.env[name]);
   if (!Number.isFinite(value) || value <= 0) return fallback;
   return Math.floor(value);
+}
+
+function sessionReplacementReason(reason: unknown): SessionReplacementReason | null {
+  if (reason === "reload" || reason === "new" || reason === "resume" || reason === "fork") return reason;
+  return null;
 }
 
 function parentPid(pid: string): string {
@@ -125,28 +140,47 @@ function classifyClose(stdout: string, stderr: string, code: number | null, sign
 }
 
 export default function (pi: ExtensionAPI) {
+  function sessionIsActive(generation: number): boolean {
+    return !stopping && generation === sessionGeneration;
+  }
+
   function stopArm(): void {
+    if (!stopping) sessionGeneration += 1;
     stopping = true;
+    activeRestoration = null;
     if (retryTimer) clearTimeout(retryTimer);
     retryTimer = null;
     if (child) child.kill("SIGTERM");
     child = null;
   }
 
+  let processExitCleanupRegistered = false;
   const cleanupOnProcessExit = () => {
+    pendingSessionStart = null;
     stopArm();
   };
-  process.once("exit", cleanupOnProcessExit);
+  const installProcessExitCleanup = (): void => {
+    if (processExitCleanupRegistered) return;
+    process.once("exit", cleanupOnProcessExit);
+    processExitCleanupRegistered = true;
+  };
+  const removeProcessExitCleanup = (): void => {
+    if (!processExitCleanupRegistered) return;
+    process.off("exit", cleanupOnProcessExit);
+    processExitCleanupRegistered = false;
+  };
+  installProcessExitCleanup();
 
-  async function sendWake(message: string): Promise<void> {
+  async function sendWake(message: string, generation: number): Promise<void> {
+    if (!sessionIsActive(generation)) return;
     await pi.sendUserMessage(
       `FIRSTMATE WATCHER WAKE: ${message}\n\nRun bin/fm-wake-drain.sh first and handle the queued wake. Watcher continuity is extension-owned.`,
       { deliverAs: "followUp" },
     );
   }
 
-  function surfaceFailure(message: string): void {
-    void sendWake(message).catch(() => {
+  function surfaceFailure(message: string, generation: number): void {
+    void sendWake(message, generation).catch(() => {
       // Pi owns delivery errors; continuity restoration never waits on prompting.
     });
   }
@@ -190,10 +224,10 @@ export default function (pi: ExtensionAPI) {
     });
   }
 
-  async function restoreAfterActionableClose(predecessorArmPid: string): Promise<string> {
+  async function restoreAfterActionableClose(predecessorArmPid: string, generation: number): Promise<string> {
     let failure = "";
     for (let attempt = 0; attempt <= retryLimit; attempt += 1) {
-      if (stopping) return "";
+      if (!sessionIsActive(generation)) return "";
       const replacement = startArm(predecessorArmPid);
       const successorChild = child;
       if (replacement.ok && successorChild && await waitForReadiness(successorChild)) return "";
@@ -214,23 +248,24 @@ export default function (pi: ExtensionAPI) {
     return `${failure}\nwatcher: FAILED - Pi extension could not restore watcher continuity after ${retryLimit} retries`;
   }
 
-  function scheduleRetry(message: string, predecessorArmPid: string): void {
-    if (stopping || child || retryTimer) return;
+  function scheduleRetry(message: string, predecessorArmPid: string, generation: number): void {
+    if (!sessionIsActive(generation) || child || retryTimer) return;
     const ownership = lockOwnership();
     if (ownership !== "owned") {
-      surfaceFailure(`watcher: FAILED - Pi extension cannot restore continuity because this session no longer owns the lock\n${message}`);
+      surfaceFailure(`watcher: FAILED - Pi extension cannot restore continuity because this session no longer owns the lock\n${message}`, generation);
       return;
     }
     retryFailures += 1;
     if (retryFailures > retryLimit) {
-      surfaceFailure(`watcher: FAILED - Pi extension could not restore watcher continuity after ${retryLimit} retries\n${message}`);
+      surfaceFailure(`watcher: FAILED - Pi extension could not restore watcher continuity after ${retryLimit} retries\n${message}`, generation);
       return;
     }
     const timer = setTimeout(() => {
       if (retryTimer === timer) retryTimer = null;
+      if (!sessionIsActive(generation)) return;
       const result = startArm(predecessorArmPid);
       if (!result.ok) {
-        surfaceFailure(`watcher: FAILED - Pi extension could not launch a continuity retry\n${result.message}`);
+        surfaceFailure(`watcher: FAILED - Pi extension could not launch a continuity retry\n${result.message}`, generation);
       }
     }, retryDelay(retryFailures));
     timer.unref();
@@ -251,6 +286,7 @@ export default function (pi: ExtensionAPI) {
     if (child) return { ok: true, message: "watcher: healthy - Pi extension already has an arm child" };
     if (retryTimer) return { ok: true, message: "watcher: continuity retry already scheduled by the Pi extension" };
     const id = ++seq;
+    const generation = sessionGeneration;
     const env = {
       ...process.env,
       FM_HOME: fmHome,
@@ -306,24 +342,28 @@ export default function (pi: ExtensionAPI) {
       resolveClosed();
       settleReadiness(false);
       releaseChild();
-      if (stopping) return;
+      if (!sessionIsActive(generation)) return;
       const classification = classifyClose(stdout, stderr, code, signal);
       const predecessor = String(armChild.pid ?? "");
       if (classification.kind === "actionable") {
         retryFailures = 0;
-        restoring = true;
+        const restoration: ActiveRestoration = { generation, token: ++restorationSequence };
+        activeRestoration = restoration;
         void (async () => {
-          const failure = await restoreAfterActionableClose(predecessor);
-          restoring = false;
-          if (stopping) return;
-          const message = failure ? `${classification.message}\n\n${failure}` : classification.message;
-          await sendWake(message);
+          try {
+            const failure = await restoreAfterActionableClose(predecessor, generation);
+            if (!sessionIsActive(generation)) return;
+            const message = failure ? `${classification.message}\n\n${failure}` : classification.message;
+            await sendWake(message, generation);
+          } finally {
+            if (activeRestoration?.token === restoration.token) activeRestoration = null;
+          }
         })().catch(() => {
         });
         return;
       }
-      if (restoring) return;
-      scheduleRetry(classification.message, predecessor);
+      if (activeRestoration?.generation === generation) return;
+      scheduleRetry(classification.message, predecessor, generation);
     });
     armChild.on("error", (error: Error) => {
       if (settled) return;
@@ -331,19 +371,28 @@ export default function (pi: ExtensionAPI) {
       resolveClosed();
       settleReadiness(false);
       releaseChild();
-      if (stopping) return;
-      if (restoring) return;
-      scheduleRetry(`watcher: FAILED - Pi extension arm child ${id} failed: ${error.message}`, String(armChild.pid ?? ""));
+      if (!sessionIsActive(generation)) return;
+      if (activeRestoration?.generation === generation) return;
+      scheduleRetry(`watcher: FAILED - Pi extension arm child ${id} failed: ${error.message}`, String(armChild.pid ?? ""), generation);
     });
     return { ok: true, message: `watcher: started Pi extension arm child ${id}` };
   }
 
-  pi.on?.("session_start", () => {
+  pi.on?.("session_start", (event) => {
+    const reason = sessionReplacementReason(event.reason);
+    if (reason && pendingSessionStart === reason) {
+      pendingSessionStart = null;
+      stopping = false;
+      retryFailures = 0;
+      activeRestoration = null;
+      installProcessExitCleanup();
+    }
     markLoaded();
   });
-  pi.on?.("session_shutdown", () => {
+  pi.on?.("session_shutdown", (event) => {
+    pendingSessionStart = sessionReplacementReason(event.reason);
     stopArm();
-    process.off("exit", cleanupOnProcessExit);
+    removeProcessExitCleanup();
   });
 
   pi.registerCommand?.("fm-watch-arm-pi", {
