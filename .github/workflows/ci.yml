@@ -327,7 +327,7 @@ jobs:
           # set, so this sweep consumes its --list output rather than spelling
           # its own, and must parse every entry that list publishes.
           canonical_scripts=$(bin/fm-lint.sh --list)
-          expected_scripts=$(printf '%s\n' "$canonical_scripts" | grep -c '[^[:space:]]')
+          expected_scripts=$(printf '%s\n' "$canonical_scripts" | grep -c '[^[:space:]]' || true)
           [ "$expected_scripts" -gt 0 ] || {
             echo "::error::bin/fm-lint.sh --list published no shell scripts"
             exit 1
