@@ -78,7 +78,20 @@ SH
 printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
 exit "${FM_TEST_GH_AXI_RC:-0}"
 SH
-  chmod +x "$fakebin/gh" "$fakebin/gh-axi"
+  cat > "$fakebin/glab-axi" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_TEST_GLAB_AXI_LOG"
+case " $* " in
+  *" .sha "*) printf '%s\n' "${FM_TEST_GLAB_HEAD:-0123456789abcdef0123456789abcdef01234567}" ;;
+  *" .state "*)
+    [ "${FM_TEST_GLAB_FAIL:-0}" = 0 ] || exit 1
+    [ "${FM_TEST_GLAB_SLEEP:-0}" = 0 ] || sleep "$FM_TEST_GLAB_SLEEP"
+    printf '%s\n' "${FM_TEST_GLAB_STATE:-opened}"
+    ;;
+esac
+SH
+  chmod +x "$fakebin/gh" "$fakebin/gh-axi" "$fakebin/glab-axi"
+  : > "$dir/glab-axi.log"
   : > "$dir/gh.log"
   : > "$dir/gh-axi.log"
   : > "$dir/guard.log"
@@ -117,13 +130,14 @@ write_v1_x_shim() {
 }
 
 write_manual_poll_pair() {
-  local state=$1 url=${2:-https://github.com/o/r/pull/10} owner repo number
+  local state=$1 url=${2:-https://github.com/o/r/pull/10} provider host path number
   fm_pr_url_parse "$url" || fail "manual poll fixture URL was invalid"
-  owner=$FM_PR_OWNER
-  repo=$FM_PR_REPO
+  provider=$FM_PR_PROVIDER
+  host=$FM_PR_HOST
+  path=$FM_PR_PATH
   number=$FM_PR_NUMBER
   cp "$POLL" "$state/task-a.check.sh"
-  printf '%s\n%s\n%s\n%s\n' "$url" "$owner" "$repo" "$number" > "$state/task-a.pr-poll"
+  printf '%s\n%s\n%s\n%s\n%s\n' "$provider" "$url" "$host" "$path" "$number" > "$state/task-a.pr-poll"
   chmod 0600 "$state/task-a.check.sh" "$state/task-a.pr-poll"
 }
 
@@ -225,7 +239,8 @@ run_check_entry() {
   shift
   FM_ROOT_OVERRIDE="$dir/root" FM_HOME="$dir/home" \
     FM_TEST_GUARD_LOG="$dir/guard.log" FM_TEST_GH_LOG="$dir/gh.log" \
-    FM_TEST_GH_AXI_LOG="$dir/gh-axi.log" PATH="$dir/fakebin:$BASE_PATH" \
+    FM_TEST_GH_AXI_LOG="$dir/gh-axi.log" FM_TEST_GLAB_AXI_LOG="$dir/glab-axi.log" \
+    PATH="$dir/fakebin:$BASE_PATH" \
     "$PR_CHECK" "$@"
 }
 
@@ -234,7 +249,8 @@ run_merge_entry() {
   shift
   FM_ROOT_OVERRIDE="$dir/root" FM_HOME="$dir/home" \
     FM_TEST_GUARD_LOG="$dir/guard.log" FM_TEST_GH_LOG="$dir/gh.log" \
-    FM_TEST_GH_AXI_LOG="$dir/gh-axi.log" PATH="$dir/fakebin:$BASE_PATH" \
+    FM_TEST_GH_AXI_LOG="$dir/gh-axi.log" FM_TEST_GLAB_AXI_LOG="$dir/glab-axi.log" \
+    PATH="$dir/fakebin:$BASE_PATH" \
     "$PR_MERGE" "$@"
 }
 
@@ -312,6 +328,49 @@ INVALID_URLS=(
   'https://github.com/o/r/pull/1"'
 )
 
+# GitLab namespace rules are their own, not a loosened GitHub rule: the strict
+# GitHub classes above stay rejected, and these MR-shaped URLs are rejected too.
+# shellcheck disable=SC2016 # Literal rejected URL bytes are parser test data.
+INVALID_GITLAB_URLS=(
+  'https://gitlab.com/onlyproject/-/merge_requests/1'
+  'https://gitlab.com/a/-/b/-/merge_requests/1'
+  'https://gitlab.com/a/b/-/merge_requests/0'
+  'https://gitlab.com/a/b/-/merge_requests/01'
+  'https://gitlab.com/a/b/-/merge_requests/'
+  'https://gitlab.com/a/b/-/merge_requests/1/'
+  'https://gitlab.com/a/b/-/merge_requests/1/diffs'
+  'https://gitlab.com/a/b/-/merge_requests/1?q=x'
+  'https://gitlab.com/a/b/-/merge_requests/1#note'
+  'https://gitlab.com/-lead/b/-/merge_requests/1'
+  'https://gitlab.com/a/b.git/-/merge_requests/1'
+  'https://gitlab.com/a/b.atom/-/merge_requests/1'
+  'https://gitlab.com/a/./-/merge_requests/1'
+  'https://gitlab.com/a/../-/merge_requests/1'
+  'https://gitlab.com//b/-/merge_requests/1'
+  'https://gitlab.com/a//-/merge_requests/1'
+  'https://gitlab.com/a/b c/-/merge_requests/1'
+  'https://gitlab.com/a/b%2Fc/-/merge_requests/1'
+  'https://gitlab.com/a/b/-/issues/1'
+  'https://gitlab.com/a/b/merge_requests/1'
+  'https://GitLab.com/a/b/-/merge_requests/1'
+  'https://user@gitlab.com/a/b/-/merge_requests/1'
+  'https://user:pass@gitlab.com/a/b/-/merge_requests/1'
+  'https://gitlab.com:443/a/b/-/merge_requests/1'
+  'https://gitlab..com/a/b/-/merge_requests/1'
+  'https://.gitlab.com/a/b/-/merge_requests/1'
+  'https://gitlab.com./a/b/-/merge_requests/1'
+  'https://-gitlab.com/a/b/-/merge_requests/1'
+  'http://gitlab.com/a/b/-/merge_requests/1'
+  'ssh://gitlab.com/a/b/-/merge_requests/1'
+  $'https://gitlab.com/a/b/-/merge_requests/1\nnext'
+  $'https://gitlab.com/a/b/-/merge_requests/1\r'
+  ' https://gitlab.com/a/b/-/merge_requests/1'
+  'https://gitlab.com/a/b/-/merge_requests/1 '
+  'https://gitlab.com/a/$b/-/merge_requests/1'
+  'https://gitlab.com/a/`b`/-/merge_requests/1'
+  "https://gitlab.com/a/'b'/-/merge_requests/1"
+)
+
 # shellcheck disable=SC2016 # Literal shell syntax is task-ID test data.
 INVALID_IDS=(
   '../escape'
@@ -347,19 +406,30 @@ UNSAFE_LIFECYCLE_IDS=(
 )
 
 test_parser_matrix() {
-  local id row url owner repo number
-  while IFS='|' read -r url owner repo number; do
+  local id row url provider host path number
+  while IFS='|' read -r url provider host path number; do
     [ -n "$url" ] || continue
     fm_pr_url_parse "$url" || fail "parser rejected canonical URL"
     [ "$FM_PR_URL" = "$url" ] || fail "parser changed canonical URL"
-    [ "$FM_PR_OWNER" = "$owner" ] || fail "parser returned wrong owner"
-    [ "$FM_PR_REPO" = "$repo" ] || fail "parser returned wrong repository"
+    [ "$FM_PR_PROVIDER" = "$provider" ] || fail "parser returned wrong provider"
+    [ "$FM_PR_HOST" = "$host" ] || fail "parser returned wrong host"
+    [ "$FM_PR_PATH" = "$path" ] || fail "parser returned wrong project path"
     [ "$FM_PR_NUMBER" = "$number" ] || fail "parser returned wrong PR number"
   done <<'EOF'
-https://github.com/a/b/pull/1|a|b|1
-https://github.com/my-org/repo/pull/42|my-org|repo|42
-https://github.com/Owner/repo-name_with.parts/pull/123456|Owner|repo-name_with.parts|123456
+https://github.com/a/b/pull/1|github|github.com|a/b|1
+https://github.com/my-org/repo/pull/42|github|github.com|my-org/repo|42
+https://github.com/Owner/repo-name_with.parts/pull/123456|github|github.com|Owner/repo-name_with.parts|123456
+https://gitlab.com/group/project/-/merge_requests/1|gitlab|gitlab.com|group/project|1
+https://gitlab.example.co.uk/g/sub/deeper/project/-/merge_requests/42|gitlab|gitlab.example.co.uk|g/sub/deeper/project|42
+https://git-host.internal/a/b/c/d/e/f/-/merge_requests/123456|gitlab|git-host.internal|a/b/c/d/e/f|123456
 EOF
+  # The host is data, never a constant: two unrelated hosts must reach the same
+  # identity shape, and neither may be spelled anywhere in the implementation.
+  ! grep -qF gitlab.com "$ROOT/bin/fm-pr-lib.sh" "$ROOT/bin/fm-pr-poll.sh" \
+    || fail "implementation pinned a GitLab host instead of carrying it as data"
+  for row in "${INVALID_GITLAB_URLS[@]}"; do
+    ! fm_pr_url_parse "$row" || fail "parser accepted a rejected merge request URL class"
+  done
   for row in "${INVALID_URLS[@]}"; do
     ! fm_pr_url_parse "$row" || fail "parser accepted a rejected raw-byte URL class"
   done
@@ -485,7 +555,7 @@ test_valid_recording_and_merge_derivation() {
   fm_pr_poll_artifacts_valid "$dir/home/state" task-a "$POLL" \
     || fail "published poll provenance or metadata binding was invalid"
   sidecar=$(cat "$dir/home/state/task-a.pr-poll")
-  [ "$sidecar" = $'https://github.com/my-org/repo_name.with-dots/pull/37\nmy-org\nrepo_name.with-dots\n37' ] \
+  [ "$sidecar" = $'github\nhttps://github.com/my-org/repo_name.with-dots/pull/37\ngithub.com\nmy-org/repo_name.with-dots\n37' ] \
     || fail "published sidecar bytes were not exact"
 
   FM_TEST_GH_HEAD=$expected run_check_entry "$dir" task-a https://github.com/my-org/repo_name.with-dots/pull/37 \
@@ -592,7 +662,7 @@ test_rejected_metacharacter_bytes_are_inert() {
   dir=$(make_case rejected-metacharacters)
   write_task_meta "$dir"
   write_poll_meta "$dir/home/state" safe-check https://github.com/o/r/pull/99
-  fm_pr_poll_prepare "$dir/home/state" safe-check https://github.com/o/r/pull/99 o r 99 "$POLL" \
+  fm_pr_poll_prepare "$dir/home/state" safe-check github https://github.com/o/r/pull/99 github.com o/r 99 "$POLL" \
     || fail "could not prepare bounded watcher poll"
   fm_pr_poll_publish_prepared || fail "could not publish bounded watcher poll"
   families=(
@@ -635,8 +705,8 @@ test_rejected_metacharacter_bytes_are_inert() {
 make_poll_fixture() {
   local dir=$1
   cp "$POLL" "$dir/home/state/task-a.check.sh"
-  printf '%s\n%s\n%s\n%s\n' \
-    https://github.com/o/r/pull/1 o r 1 > "$dir/home/state/task-a.pr-poll"
+  printf '%s\n%s\n%s\n%s\n%s\n' \
+    github https://github.com/o/r/pull/1 github.com o/r 1 > "$dir/home/state/task-a.pr-poll"
   chmod 0600 "$dir/home/state/task-a.check.sh" "$dir/home/state/task-a.pr-poll"
 }
 
@@ -669,10 +739,10 @@ test_static_poll_contract() {
   out=$(run_poll "$dir")
   [ -z "$out" ] || fail "static poll emitted with missing sidecar"
   mv "$dir/home/state/task-a.pr-poll.missing" "$dir/home/state/task-a.pr-poll"
-  printf '%s\n%s\n%s\n%s\n%s\n' https://github.com/o/r/pull/1 o r 1 extra > "$dir/home/state/task-a.pr-poll"
+  printf '%s\n%s\n%s\n%s\n%s\n%s\n' github https://github.com/o/r/pull/1 github.com o/r 1 extra > "$dir/home/state/task-a.pr-poll"
   out=$(FM_TEST_GH_STATE=MERGED run_poll "$dir")
   [ -z "$out" ] || fail "static poll emitted with multiline sidecar"
-  printf '%s\n%s\n%s\n%s\n' https://github.com/o/r/pull/1x o r 1x > "$dir/home/state/task-a.pr-poll"
+  printf '%s\n%s\n%s\n%s\n%s\n' github https://github.com/o/r/pull/1x github.com o/r 1x > "$dir/home/state/task-a.pr-poll"
   out=$(FM_TEST_GH_STATE=MERGED run_poll "$dir")
   [ -z "$out" ] || fail "static poll emitted with malformed numeric data"
 
@@ -687,7 +757,7 @@ test_static_poll_contract() {
   [ -z "$out" ] || fail "timed-out static poll emitted output"
 
   write_poll_meta "$dir/home/state" task-a https://github.com/o/r/pull/1
-  fm_pr_poll_prepare "$dir/home/state" task-a https://github.com/o/r/pull/1 o r 1 "$POLL" \
+  fm_pr_poll_prepare "$dir/home/state" task-a github https://github.com/o/r/pull/1 github.com o/r 1 "$POLL" \
     || fail "could not prepare authenticated watcher poll"
   fm_pr_poll_publish_prepared || fail "could not publish authenticated watcher poll"
   rm -f "$dir/home/state/.last-check"
@@ -698,6 +768,106 @@ test_static_poll_contract() {
   [ "$rc" -eq 0 ] || fail "watcher did not surface merged poll"
   [ "$(grep -c '^check: .*: merged$' "$dir/watch.out")" -eq 1 ] || fail "watcher did not convert merged output into exactly one wake"
   pass "static poll is silent except for one merged line and remains watcher-bounded"
+}
+
+# Two unrelated hosts, one nested under subgroups, both through the same code
+# path. GITLAB_HOST is a self-hosted instance name here, never a default.
+GITLAB_HOST=git.example.internal
+GITLAB_PATH=dept/team/sub/project
+GITLAB_URL="https://$GITLAB_HOST/$GITLAB_PATH/-/merge_requests/670"
+GITLAB_DOTCOM_URL='https://gitlab.com/group/runner/-/merge_requests/4000'
+
+run_gitlab_poll() {
+  local dir=$1
+  FM_TEST_GLAB_AXI_LOG="$dir/glab-axi.log" PATH="$dir/fakebin:$BASE_PATH" \
+    bash "$dir/home/state/task-a.check.sh"
+}
+
+test_gitlab_poll_contract() {
+  local dir state out url
+  dir=$(make_case gitlab-poll)
+
+  for url in "$GITLAB_URL" "$GITLAB_DOTCOM_URL"; do
+    write_task_meta "$dir"
+    rm -f "$dir/home/state/task-a.check.sh" "$dir/home/state/task-a.pr-poll" \
+      "$dir/home/state/task-a.pr-poll-registration"
+    run_check_entry "$dir" task-a "$url" >/dev/null 2>/dev/null \
+      || fail "arming refused a canonical merge request URL"
+    fm_pr_poll_artifacts_valid "$dir/home/state" task-a "$POLL" \
+      || fail "armed merge request poll failed its own provenance validation"
+    cmp -s "$POLL" "$dir/home/state/task-a.check.sh" \
+      || fail "published merge request poll was not byte-identical to the tracked script"
+    ! grep -qF "$url" "$dir/home/state/task-a.check.sh" \
+      || fail "merge request URL was interpolated into executable poll source"
+
+    for state in opened closed locked '' not-a-state MERGED Merged; do
+      out=$(FM_TEST_GLAB_STATE="$state" run_gitlab_poll "$dir")
+      [ -z "$out" ] || fail "merge request poll emitted for non-merged state"
+    done
+    out=$(FM_TEST_GLAB_STATE=merged run_gitlab_poll "$dir")
+    [ "$out" = merged ] || fail "merge request poll did not emit exactly one merged line"
+    out=$(FM_TEST_GLAB_FAIL=1 FM_TEST_GLAB_STATE=merged run_gitlab_poll "$dir")
+    [ -z "$out" ] || fail "merge request poll emitted after a failed lookup"
+    grep -qF -- "--jq .state" "$dir/glab-axi.log" \
+      || fail "merge request poll did not read state through --jq"
+  done
+
+  # A doctored sidecar must not redirect the poll: each component is revalidated
+  # and the stored URL must reconstruct exactly from the stored host and path.
+  printf '%s\n%s\n%s\n%s\n%s\n' gitlab "$GITLAB_URL" attacker.example "$GITLAB_PATH" 670 \
+    > "$dir/home/state/task-a.pr-poll"
+  out=$(FM_TEST_GLAB_STATE=merged run_gitlab_poll "$dir")
+  [ -z "$out" ] || fail "merge request poll emitted with a substituted host"
+  printf '%s\n%s\n%s\n%s\n%s\n' gitlab "$GITLAB_URL" "$GITLAB_HOST" other/project 670 \
+    > "$dir/home/state/task-a.pr-poll"
+  out=$(FM_TEST_GLAB_STATE=merged run_gitlab_poll "$dir")
+  [ -z "$out" ] || fail "merge request poll emitted with a substituted project path"
+  printf '%s\n%s\n%s\n%s\n%s\n' github "$GITLAB_URL" "$GITLAB_HOST" "$GITLAB_PATH" 670 \
+    > "$dir/home/state/task-a.pr-poll"
+  out=$(FM_TEST_GLAB_STATE=merged run_gitlab_poll "$dir")
+  [ -z "$out" ] || fail "merge request poll emitted with a substituted provider"
+  printf '%s\n%s\n%s\n%s\n' "$GITLAB_URL" "$GITLAB_HOST" "$GITLAB_PATH" 670 \
+    > "$dir/home/state/task-a.pr-poll"
+  out=$(FM_TEST_GLAB_STATE=merged run_gitlab_poll "$dir")
+  [ -z "$out" ] || fail "merge request poll emitted for a sidecar without a provider tag"
+
+  pass "merge request poll is host-agnostic, tamper-resistant, and silent except for one merged line"
+}
+
+# A poll armed by the previous release carries a four-field sidecar and a v1
+# registration. It must be recognised as old rather than misparsed, and the
+# non-executing migration must rebuild it from task metadata.
+test_legacy_v1_poll_is_recognised_and_rebuilt() {
+  local dir state out
+  dir=$(make_case legacy-v1-poll)
+  state="$dir/home/state"
+  write_poll_meta "$state" task-a https://github.com/o/r/pull/10
+  cp "$POLL" "$state/task-a.check.sh"
+  printf '%s\n%s\n%s\n%s\n' https://github.com/o/r/pull/10 o r 10 > "$state/task-a.pr-poll"
+  printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n' \
+    fm-pr-poll-registration-v1 task-a https://github.com/o/r/pull/10 o r 10 \
+    "$(fm_pr_sha256 "$state/task-a.pr-poll")" "$(fm_pr_sha256 "$state/task-a.check.sh")" \
+    "$(fm_pr_file_identity "$state/task-a.pr-poll")" \
+    "$(fm_pr_file_identity "$state/task-a.check.sh")" > "$state/task-a.pr-poll-registration"
+  chmod 0600 "$state/task-a.check.sh" "$state/task-a.pr-poll" \
+    "$state/task-a.pr-poll-registration"
+
+  ! fm_pr_poll_registration_parse "$state/task-a.pr-poll-registration" \
+    || fail "a previous-release registration was accepted by the current parser"
+  ! fm_pr_poll_data_parse "$state/task-a.pr-poll" \
+    || fail "a previous-release sidecar was accepted by the current parser"
+  out=$(FM_TEST_GLAB_AXI_LOG="$dir/glab-axi.log" FM_TEST_GH_LOG="$dir/gh.log" \
+    FM_TEST_GH_STATE=MERGED PATH="$dir/fakebin:$BASE_PATH" bash "$state/task-a.check.sh")
+  [ -z "$out" ] || fail "a previous-release sidecar produced a merge signal"
+
+  FM_HOME="$dir/home" PATH="$dir/fakebin:$BASE_PATH" "$MIGRATE" >/dev/null 2>/dev/null \
+    || fail "migration did not complete for a previous-release poll"
+  fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+    || fail "migration did not rebuild a previous-release poll into a valid one"
+  [ "$FM_PR_DATA_URL" = https://github.com/o/r/pull/10 ] \
+    || fail "rebuilt poll lost its recorded pull request URL"
+  [ "$FM_PR_DATA_PROVIDER" = github ] || fail "rebuilt poll lost its provider tag"
+  pass "a poll armed by the previous release is recognised as old and rebuilt, never misparsed"
 }
 
 test_atomic_interruption_leaves_no_partial_artifact() {
@@ -849,7 +1019,7 @@ test_private_artifact_paths_refuse_symlinks_and_directories() {
     for kind in regular dangling directory; do
       dir=$(make_case "poll-path-${artifact//./-}-$kind")
       state="$dir/home/state"
-      fm_pr_poll_prepare "$state" task-a https://github.com/o/r/pull/1 o r 1 "$POLL" \
+      fm_pr_poll_prepare "$state" task-a github https://github.com/o/r/pull/1 github.com o/r 1 "$POLL" \
         || fail "could not stage poll symlink refusal fixture"
       destination="$state/$artifact"
       make_private_symlink "$dir" "$destination" "$kind"
@@ -864,7 +1034,7 @@ test_private_artifact_paths_refuse_symlinks_and_directories() {
 
     dir=$(make_case "poll-path-${artifact//./-}-direct-directory")
     state="$dir/home/state"
-    fm_pr_poll_prepare "$state" task-a https://github.com/o/r/pull/1 o r 1 "$POLL" \
+    fm_pr_poll_prepare "$state" task-a github https://github.com/o/r/pull/1 github.com o/r 1 "$POLL" \
       || fail "could not stage poll directory refusal fixture"
     destination="$state/$artifact"
     mkdir "$destination"
@@ -975,11 +1145,11 @@ test_postrename_poll_validation_revokes_and_retries() {
       dir=$(make_case "poll-final-$artifact-$action")
       state="$dir/home/state"
       write_poll_meta "$state" task-a https://github.com/o/r/pull/1
-      fm_pr_poll_prepare "$state" task-a https://github.com/o/r/pull/1 o r 1 "$POLL" \
+      fm_pr_poll_prepare "$state" task-a github https://github.com/o/r/pull/1 github.com o/r 1 "$POLL" \
         || fail "could not prepare prior poll"
       fm_pr_poll_publish_prepared || fail "could not publish prior poll"
       write_poll_meta "$state" task-a https://github.com/o/r/pull/2
-      fm_pr_poll_prepare "$state" task-a https://github.com/o/r/pull/2 o r 2 "$POLL" \
+      fm_pr_poll_prepare "$state" task-a github https://github.com/o/r/pull/2 github.com o/r 2 "$POLL" \
         || fail "could not stage replacement poll"
       case "$artifact" in
         data) destination="$state/task-a.pr-poll" ;;
@@ -1002,7 +1172,7 @@ test_postrename_poll_validation_revokes_and_retries() {
       [ "$(cat "$link_target")" = 'external sentinel' ] || fail "poll type fault changed an external target"
       [ "$(file_mode "$link_target")" = 644 ] || fail "poll type fault changed an external target mode"
 
-      fm_pr_poll_prepare "$state" task-a https://github.com/o/r/pull/2 o r 2 "$POLL" \
+      fm_pr_poll_prepare "$state" task-a github https://github.com/o/r/pull/2 github.com o/r 2 "$POLL" \
         || fail "could not prepare poll retry"
       PATH="$BASE_PATH" fm_pr_poll_publish_prepared || fail "poll retry did not recover after final validation fault"
       fm_pr_poll_artifacts_valid "$state" task-a "$POLL" || fail "poll retry did not publish a valid pair"
@@ -1419,7 +1589,7 @@ test_replacement_provenance_negative_matrix() {
         donor="$dir/donor"
         mkdir -p "$donor"
         write_poll_meta "$donor" task-a https://github.com/o/r/pull/10
-        fm_pr_poll_prepare "$donor" task-a https://github.com/o/r/pull/10 o r 10 "$POLL" \
+        fm_pr_poll_prepare "$donor" task-a github https://github.com/o/r/pull/10 github.com o/r 10 "$POLL" \
           || fail "could not prepare donor registration fixture"
         fm_pr_poll_publish_prepared || fail "could not publish donor registration fixture"
         cp "$donor/task-a.check.sh" "$state/task-a.check.sh"
@@ -1428,13 +1598,13 @@ test_replacement_provenance_negative_matrix() {
         chmod 0600 "$state/task-a.check.sh" "$state/task-a.pr-poll" "$state/task-a.pr-poll-registration"
         ;;
       metadata-mismatch)
-        fm_pr_poll_prepare "$state" task-a https://github.com/o/r/pull/10 o r 10 "$POLL" \
+        fm_pr_poll_prepare "$state" task-a github https://github.com/o/r/pull/10 github.com o/r 10 "$POLL" \
           || fail "could not prepare metadata-mismatch fixture"
         fm_pr_poll_publish_prepared || fail "could not publish metadata-mismatch fixture"
         write_poll_meta "$state" task-a https://github.com/o/r/pull/11
         ;;
       task-mismatch)
-        fm_pr_poll_prepare "$state" task-a https://github.com/o/r/pull/10 o r 10 "$POLL" \
+        fm_pr_poll_prepare "$state" task-a github https://github.com/o/r/pull/10 github.com o/r 10 "$POLL" \
           || fail "could not prepare task-mismatch fixture"
         fm_pr_poll_publish_prepared || fail "could not publish task-mismatch fixture"
         { head -n 1 "$state/task-a.pr-poll-registration"; printf '%s\n' task-b; tail -n +3 "$state/task-a.pr-poll-registration"; } \
@@ -2255,7 +2425,7 @@ test_bootstrap_isolates_incomplete_poll_migration() {
   printf 'legacy bytes\n' > "$state/task-a.check.sh"
   mkdir "$state/task-a.pr-poll"
   write_poll_meta "$state" z-healthy https://github.com/o/r/pull/13
-  fm_pr_poll_prepare "$state" z-healthy https://github.com/o/r/pull/13 o r 13 "$POLL" \
+  fm_pr_poll_prepare "$state" z-healthy github https://github.com/o/r/pull/13 github.com o/r 13 "$POLL" \
     || fail "could not prepare healthy poll for migration isolation"
   fm_pr_poll_publish_prepared || fail "could not publish healthy poll for migration isolation"
   fm_write_meta "$state/secondmate-a.meta" \
@@ -2683,6 +2853,8 @@ test_invalid_entrypoints_have_zero_side_effects
 test_valid_recording_and_merge_derivation
 test_rejected_metacharacter_bytes_are_inert
 test_static_poll_contract
+test_gitlab_poll_contract
+test_legacy_v1_poll_is_recognised_and_rebuilt
 test_atomic_interruption_leaves_no_partial_artifact
 test_concurrent_watcher_sees_only_complete_publication
 test_postrename_poll_validation_revokes_and_retries
