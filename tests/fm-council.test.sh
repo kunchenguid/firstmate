@@ -65,6 +65,11 @@ case "$op" in
     ;;
   close)
     council=$1 member=$2 owner=$3 runtime=$4
+    failclose="$state/fail-close-once-$council--$member"
+    if [ -f "$failclose" ]; then
+      rm -f "$failclose"
+      exit 37
+    fi
     marker="$state/endpoints/$council--$member.json"
     [ -f "$marker" ] || exit 34
     [ "$(jq -r .owner_token "$marker")" = "$owner" ] || exit 35
@@ -198,9 +203,11 @@ if [ "$(uname -s)-$(uname -m)" = Linux-x86_64 ]; then
         if cat "$4/answer" > "$2/other-answer"; then echo answer-read-bad > "$2/answer-status"; else echo answer-read-denied > "$2/answer-status"; fi
         if /usr/bin/python3 -c "import socket; socket.socket(socket.AF_UNIX)"; then echo unix-socket-bad > "$2/socket-status"; else echo unix-socket-denied > "$2/socket-status"; fi
         if /usr/bin/python3 -c "import socket; socket.socket(socket.AF_INET).close()"; then echo tcp-socket-allowed > "$2/tcp-status"; else echo tcp-socket-bad > "$2/tcp-status"; fi
+        if /bin/ls / > /dev/null; then echo exec-bad > "$2/exec-status"; else echo exec-denied > "$2/exec-status"; fi
       } 2> "$2/denials"
     ' sh "$sandbox/view" "$sandbox/home" "$sandbox/source" "$sandbox/other"
   [ "$(cat "$sandbox/home/read-view")" = fixed-view ] || fail "sandbox could not read the fixed project view"
+  [ "$(cat "$sandbox/home/exec-status")" = exec-denied ] || fail "sandbox executed a binary outside the exact allowlist"
   [ "$(cat "$sandbox/home/view-write")" = view-write-denied ] || fail "sandbox wrote the fixed project view"
   assert_grep source-read-denied "$sandbox/home/source-status" "sandbox read the source project outside the fixed view"
   assert_grep source-write-denied "$sandbox/home/source-status" "sandbox wrote the source project"
@@ -208,7 +215,22 @@ if [ "$(uname -s)-$(uname -m)" = Linux-x86_64 ]; then
   [ "$(cat "$sandbox/home/socket-status")" = unix-socket-denied ] || fail "sandbox allowed a terminal-control socket channel"
   [ "$(cat "$sandbox/home/tcp-status")" = tcp-socket-allowed ] || fail "sandbox blocked provider-style TCP sockets"
   [ "$(cat "$sandbox/source/code")" = source-private ] || fail "sandbox changed the source bytes"
-  pass "council sandbox: Landlock enforces read-only fixed views and hides source and competing answers"
+  pass "council sandbox: Landlock enforces read-only fixed views, the exact exec allowlist, and answer isolation"
+
+  env_probe='import json, os, sys; json.dump({key: os.environ.get(key) for key in ("ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "OPENAI_API_KEY") if key in os.environ}, open(sys.argv[1], "w"))'
+  ANTHROPIC_API_KEY=anthropic-secret CLAUDE_CODE_OAUTH_TOKEN=claude-oauth OPENAI_API_KEY=openai-secret \
+    "$ROOT/bin/fm-council-sandbox.py" --home "$sandbox/home" --harness claude \
+    -- /usr/bin/python3 -c "$env_probe" "$sandbox/home/env-claude.json"
+  ANTHROPIC_API_KEY=anthropic-secret CLAUDE_CODE_OAUTH_TOKEN=claude-oauth OPENAI_API_KEY=openai-secret \
+    "$ROOT/bin/fm-council-sandbox.py" --home "$sandbox/home" --harness codex \
+    -- /usr/bin/python3 -c "$env_probe" "$sandbox/home/env-codex.json"
+  [ "$(jq -r '.ANTHROPIC_API_KEY // "-"' "$sandbox/home/env-claude.json")" = anthropic-secret ] || fail "claude lane lost its own provider key"
+  [ "$(jq -r '.CLAUDE_CODE_OAUTH_TOKEN // "-"' "$sandbox/home/env-claude.json")" = claude-oauth ] || fail "claude lane lost its own oauth token"
+  [ "$(jq -r '.OPENAI_API_KEY // "-"' "$sandbox/home/env-claude.json")" = - ] || fail "claude lane leaked the OpenAI key"
+  [ "$(jq -r '.OPENAI_API_KEY // "-"' "$sandbox/home/env-codex.json")" = openai-secret ] || fail "codex lane lost its own provider key"
+  [ "$(jq -r '.ANTHROPIC_API_KEY // "-"' "$sandbox/home/env-codex.json")" = - ] || fail "codex lane leaked the Anthropic key"
+  [ "$(jq -r '.CLAUDE_CODE_OAUTH_TOKEN // "-"' "$sandbox/home/env-codex.json")" = - ] || fail "codex lane leaked the Claude oauth token"
+  pass "council sandbox: each lane receives only its own harness provider credentials"
 fi
 
 # Different councils use independent locks and can dispatch concurrently.
@@ -339,3 +361,64 @@ expect_code 1 "$status" "close must refuse a changed endpoint identity"
 mv "$clean_runtime.saved" "$clean_runtime"
 council "$HOME1" close AtlasClean >/dev/null
 pass "council close: only exact owned sessions terminate, ambiguity refuses, and conversation context is cleared"
+
+# Failed round setup rolls back its unpublished round directory and keeps the
+# durable counter retryable.
+if [ "$(id -u)" != 0 ]; then
+  IFS=$'\t' read -r HOME4 PROJECT4 < <(new_home rollback)
+  CREATE4=$(create_pair "$HOME4" "$PROJECT4" Rollback)
+  ID4=$(json_id "$CREATE4")
+  consent_pair "$HOME4" "$PROJECT4"
+  mkdir -p "$PROJECT4/blocked"
+  printf 'x\n' > "$PROJECT4/blocked/file"
+  chmod 000 "$PROJECT4/blocked"
+  status=0
+  council "$HOME4" ask Rollback "Task while the project is unreadable" >/dev/null 2>&1 || status=$?
+  chmod 700 "$PROJECT4/blocked"
+  expect_code 1 "$status" "unreadable project must fail the round setup"
+  [ ! -d "$HOME4/data/councils/$ID4/rounds/R0001" ] || fail "failed round setup left a stale round directory"
+  [ ! -d "$HOME4/data/councils/$ID4/snapshots/R0001" ] || fail "failed round setup left a stale snapshot"
+  [ "$(jq -r .round_counter "$HOME4/data/councils/$ID4/council.json")" = 0 ] || fail "failed round setup burned the durable round counter"
+  ASK4=$(council "$HOME4" ask Rollback "Task after the project stabilizes")
+  [ "$(jq -r .round <<<"$ASK4")" = R0001 ] || fail "retry after a failed setup did not reuse the rolled-back round identity"
+  pass "council round rollback: failed snapshot setup is retryable without a stale round directory"
+fi
+
+# A corrupt participant runtime defers decision delivery instead of aborting an
+# acceptance whose canonical decision is already saved, without duplicating it.
+IFS=$'\t' read -r HOME5 PROJECT5 < <(new_home deferral)
+CREATE5=$(create_pair "$HOME5" "$PROJECT5" Deferral)
+ID5=$(json_id "$CREATE5")
+consent_pair "$HOME5" "$PROJECT5"
+ASK5=$(council "$HOME5" ask Deferral "Pick a queue.")
+submit_all "$HOME5" Deferral "$ASK5" deferral
+council "$HOME5" collect Deferral >/dev/null
+printf 'Queue decision.\n' > "$TMP_ROOT/deferral-canonical.md"
+council "$HOME5" present Deferral --file "$TMP_ROOT/deferral-canonical.md" --kind synthesis >/dev/null
+CODEX5=$(jq -r '.members[] | select(startswith("codex-"))' <<<"$CREATE5")
+codex_runtime="$HOME5/state/councils/$ID5/members/$CODEX5/runtime.json"
+cp "$codex_runtime" "$codex_runtime.saved"
+printf 'not-json\n' > "$codex_runtime"
+ACCEPT5=$(council "$HOME5" accept Deferral)
+[ "$(jq -r '.deferred_members[0]' <<<"$ACCEPT5")" = "$CODEX5" ] || fail "a corrupt runtime aborted acceptance instead of deferring delivery"
+[ "$(jq -r .phase "$HOME5/data/councils/$ID5/council.json")" = idle ] || fail "acceptance with a corrupt runtime did not complete"
+index5=$(find "$HOME5/data/council-projects" -name index.json)
+[ "$(jq '.decisions | length' "$index5")" = 1 ] || fail "acceptance duplicated the saved decision entry"
+mv "$codex_runtime.saved" "$codex_runtime"
+council "$HOME5" ask Deferral "Follow-up task." >/dev/null
+codex_events5=$(grep -F $'send\t' "$STUB/events" | grep -F "$ID5" | grep -F "$CODEX5" | tail -2 | awk -F '\t' '{print $4}' | paste -sd, -)
+[ "$codex_events5" = decision,round ] || fail "deferred member did not catch up before its next round"
+pass "council acceptance deferral: canonical save survives a corrupt runtime and is never duplicated"
+
+# A close that fails partway is retryable; retries skip only journal-confirmed
+# closures and close each remaining exact endpoint once.
+: > "$STUB/fail-close-once-$ID5--$CODEX5"
+status=0
+council "$HOME5" close Deferral >/dev/null 2>&1 || status=$?
+expect_code 1 "$status" "a partial close failure must be reported"
+[ "$(jq -r .status "$HOME5/data/councils/$ID5/council.json")" = open ] || fail "a partially closed council must remain open"
+[ "$(jq '.closed | length' "$HOME5/data/councils/$ID5/close-journal.json")" = 1 ] || fail "close journal did not record exactly the confirmed closure"
+council "$HOME5" close Deferral >/dev/null
+[ "$(grep -c "^close.$ID5" "$STUB/events")" = 2 ] || fail "close retry did not close each participant exactly once"
+[ "$(jq -r .status "$HOME5/data/councils/$ID5/council.json")" = closed ] || fail "close retry did not complete the council closure"
+pass "council close retry: journal-confirmed closures are skipped and remaining endpoints close exactly once"

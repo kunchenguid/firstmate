@@ -48,7 +48,7 @@ After Firstmate restarts during collection, use `recover` once and tell the capt
 Never respawn a participant merely because Firstmate restarted.
 
 Close only on an explicit captain command.
-Run `close` exactly once and treat an endpoint-identity refusal as a blocker requiring inspection, never as permission to guess a pane or broaden cleanup.
+Run `close` and, if it fails partway, rerun it: journal-confirmed members are skipped, while an endpoint-identity refusal remains a blocker requiring inspection, never permission to guess a pane or broaden cleanup.
 Closing clears only that council's participant conversations and does not affect another council or create an implementation task.
 
 ## Outcome phrasing

@@ -17,8 +17,9 @@ An interrupted collecting round is marked for explicit retry instead of being si
 Before fan-out, Firstmate builds one stable filtered project view and makes its files read-only.
 The Linux participant process installs a Landlock policy before the model starts, so the source project and other participant homes are unreadable and unwritable while the fixed view is readable but unwritable.
 Persistent filesystem writes are limited to the participant's own private home and answer outbox, with only its terminal and `/dev/null` admitted as device sinks.
-A seccomp filter denies new Unix-domain sockets while retaining provider TCP access, so a participant cannot reach Herdr or another terminal-control service by guessing its socket path.
-Home-local control clients and socket metadata are also outside the admitted filesystem and absent from the sanitized environment.
+Execution is granted only on the exact controller-supplied binary allowlist, never on the whole system tree.
+A seccomp filter denies new Unix-domain sockets while retaining provider TCP access, so a participant cannot reach Herdr or another terminal-control service by guessing its socket path; it verifies the x86_64 audit architecture and denies alternate syscall ABIs outright.
+Home-local control clients and socket metadata are also outside the admitted filesystem and absent from the sanitized environment, which passes through only the participant's own provider credentials.
 
 The filter excludes version-control metadata, common dependency and cache directories, symlinks, special files, oversized files, `.env` variants, private keys, and common credential files.
 `.env.example` remains visible.
@@ -37,6 +38,7 @@ A failed notification remains pending and is delivered before that participant r
 
 Close is explicit and exact.
 It verifies each response-derived session, workspace, tab, pane, owner token, and machine label before closing only those participant panes, then removes their conversation homes.
+A close that fails partway can simply be rerun: members recorded in the durable close journal are skipped, while an absent or ambiguous pane is never inferred to be council-owned.
 It never searches by a friendly title and never closes a Herdr workspace directly.
 
 ## Short example

@@ -408,7 +408,7 @@ def copy_auth(profile_value: dict[str, str], lane_home: Path) -> None:
 
 
 def executable_paths(harness: str) -> list[str]:
-    names = ["bash", "sh", "cat", "rg", "grep", "find", "sed", "awk", "head", "tail", "wc", "sort", "uniq", "cut", "tr", "ls", "stat", "mktemp", "mv"]
+    names = ["bash", "sh", "cat", "rg", "grep", "find", "sed", "awk", "head", "tail", "wc", "sort", "uniq", "cut", "tr", "ls", "stat", "mktemp", "mv", "env", "node"]
     result: list[str] = []
     for name in [harness, *names]:
         resolved = shutil.which(name)
@@ -417,10 +417,6 @@ def executable_paths(harness: str) -> list[str]:
             if real not in result:
                 result.append(real)
     if harness == "codex":
-        for name in ("env", "node"):
-            resolved = shutil.which(name)
-            if resolved:
-                result.append(str(Path(resolved).resolve()))
         codex_root = Path("/usr/lib/node_modules/@openai/codex")
         if codex_root.exists():
             for path in codex_root.glob("node_modules/@openai/codex-linux-*/vendor/*/bin/codex"):
@@ -460,6 +456,8 @@ def sandbox_command(profile_value: dict[str, str], lane_home: Path, snapshots: P
         str(lane_home),
         "--readable",
         str(snapshots),
+        "--harness",
+        profile_value["harness"],
     ]
     for executable in executable_paths(profile_value["harness"]):
         command.extend(("--allow-exec", executable))
@@ -841,36 +839,44 @@ def start_round(directory: Path, council: dict[str, Any], task: str) -> dict[str
     round_id = next_round_id(council)
     round_directory = directory / "rounds" / round_id
     round_directory.mkdir(parents=True, mode=0o700)
-    snapshot, view_hash, excluded = build_snapshot(directory, project, round_id)
-    common = (
-        f"# Council round {round_id}\n\n"
-        f"Project view: `{snapshot}`\n\n"
-        f"View hash: `{view_hash}`\n\n"
-        f"## Task\n\n{task}\n\n"
-        f"## Accepted project decisions\n\n{accepted_context(council)}\n\n"
-        "Analyze independently. Do not inspect other participants, terminal-control state, or any source path outside the fixed project view. "
-        "Do not edit or implement the source project. Give a concise, project-grounded answer.\n"
-    )
-    common_path = round_directory / "common.md"
-    atomic_text(common_path, common)
-    common_hash = hashlib.sha256(common.encode()).hexdigest()
-    roster: dict[str, Any] = {}
-    round_value = {
-        "schema": "fm-council-round.v1",
-        "id": round_id,
-        "status": "dispatching",
-        "task": task,
-        "view": str(snapshot),
-        "view_hash": view_hash,
-        "common_hash": common_hash,
-        "excluded": excluded,
-        "roster": roster,
-        "created_at": now(),
-    }
-    save_round(directory, round_value)
-    council["phase"] = "collecting"
-    council["active_round"] = round_id
-    save_council(directory, council)
+    try:
+        snapshot, view_hash, excluded = build_snapshot(directory, project, round_id)
+        common = (
+            f"# Council round {round_id}\n\n"
+            f"Project view: `{snapshot}`\n\n"
+            f"View hash: `{view_hash}`\n\n"
+            f"## Task\n\n{task}\n\n"
+            f"## Accepted project decisions\n\n{accepted_context(council)}\n\n"
+            "Analyze independently. Do not inspect other participants, terminal-control state, or any source path outside the fixed project view. "
+            "Do not edit or implement the source project. Give a concise, project-grounded answer.\n"
+        )
+        common_path = round_directory / "common.md"
+        atomic_text(common_path, common)
+        common_hash = hashlib.sha256(common.encode()).hexdigest()
+        roster: dict[str, Any] = {}
+        round_value = {
+            "schema": "fm-council-round.v1",
+            "id": round_id,
+            "status": "dispatching",
+            "task": task,
+            "view": str(snapshot),
+            "view_hash": view_hash,
+            "common_hash": common_hash,
+            "excluded": excluded,
+            "roster": roster,
+            "created_at": now(),
+        }
+        save_round(directory, round_value)
+        council["phase"] = "collecting"
+        council["active_round"] = round_id
+        save_council(directory, council)
+    except Exception:
+        council["round_counter"] = int(council["round_counter"]) - 1
+        council["phase"] = "idle"
+        council["active_round"] = None
+        shutil.rmtree(round_directory, ignore_errors=True)
+        remove_snapshot(directory, round_id)
+        raise
     append_event(directory / "events.jsonl", {"event": "round_started", "round": round_id, "common_hash": common_hash})
 
     for member in council["members"]:
@@ -1062,6 +1068,17 @@ def command_present(arguments: argparse.Namespace) -> None:
     print(content.decode(), end="" if content.endswith(b"\n") else "\n")
 
 
+def remove_snapshot(directory: Path, round_id: str) -> None:
+    snapshot = directory / "snapshots" / round_id
+    if snapshot.exists():
+        for path in sorted(snapshot.rglob("*"), reverse=True):
+            with contextlib.suppress(OSError):
+                os.chmod(path, 0o700 if path.is_dir() else 0o600)
+        with contextlib.suppress(OSError):
+            os.chmod(snapshot, 0o700)
+        shutil.rmtree(snapshot, ignore_errors=True)
+
+
 def cleanup_round_payloads(directory: Path, council: dict[str, Any], round_value: dict[str, Any], keep_presentation: bool) -> None:
     for roster_value in round_value.get("roster", {}).values():
         answer = roster_value.get("answer")
@@ -1073,14 +1090,7 @@ def cleanup_round_payloads(directory: Path, council: dict[str, Any], round_value
     if not keep_presentation:
         with contextlib.suppress(FileNotFoundError):
             (round_record_path(directory, round_value["id"]).parent / "presented.md").unlink()
-    snapshot = directory / "snapshots" / round_value["id"]
-    if snapshot.exists():
-        for path in sorted(snapshot.rglob("*"), reverse=True):
-            with contextlib.suppress(OSError):
-                os.chmod(path, 0o700 if path.is_dir() else 0o600)
-        with contextlib.suppress(OSError):
-            os.chmod(snapshot, 0o700)
-        shutil.rmtree(snapshot, ignore_errors=True)
+    remove_snapshot(directory, round_value["id"])
 
 
 def accept_round(directory: Path, council: dict[str, Any]) -> tuple[str, Path, list[str]]:
@@ -1094,34 +1104,56 @@ def accept_round(directory: Path, council: dict[str, Any]) -> tuple[str, Path, l
     project = Path(council["project"])
     decisions = project_decision_dir(project)
     decisions.mkdir(parents=True, exist_ok=True, mode=0o700)
+    digest = hashlib.sha256(content).hexdigest()
     with lock(decisions / ".lock"):
         index = decision_index(project)
-        sequence = len(index["decisions"]) + 1
-        decision_id = f"D{sequence:04d}"
-        destination = decision_path(project, decision_id)
-        if destination.exists():
-            raise CouncilError(f"decision destination already exists: {destination}")
-        atomic_bytes(destination, content)
-        index["decisions"].append(
-            {
-                "id": decision_id,
-                "active": True,
-                "council_id": council["id"],
-                "round_id": round_value["id"],
-                "sha256": hashlib.sha256(content).hexdigest(),
-                "accepted_at": now(),
-            }
+        existing = next(
+            (
+                item
+                for item in index["decisions"]
+                if item.get("council_id") == council["id"] and item.get("round_id") == round_value["id"]
+            ),
+            None,
         )
-        atomic_json(decisions / "index.json", index)
-    append_event(directory / "events.jsonl", {"event": "decision_saved", "decision": decision_id, "round": round_value["id"], "sha256": hashlib.sha256(content).hexdigest()})
+        if existing is not None:
+            if existing.get("sha256") != digest:
+                raise CouncilError(f"round {round_value['id']} already saved a different decision: {existing.get('id')}")
+            decision_id = str(existing["id"])
+            destination = decision_path(project, decision_id)
+            if not destination.is_file():
+                raise CouncilError(f"accepted decision body is missing: {destination}")
+        else:
+            sequence = len(index["decisions"]) + 1
+            decision_id = f"D{sequence:04d}"
+            destination = decision_path(project, decision_id)
+            if destination.exists():
+                raise CouncilError(f"decision destination already exists: {destination}")
+            atomic_bytes(destination, content)
+            index["decisions"].append(
+                {
+                    "id": decision_id,
+                    "active": True,
+                    "council_id": council["id"],
+                    "round_id": round_value["id"],
+                    "sha256": digest,
+                    "accepted_at": now(),
+                }
+            )
+            atomic_json(decisions / "index.json", index)
+            append_event(directory / "events.jsonl", {"event": "decision_saved", "decision": decision_id, "round": round_value["id"], "sha256": digest})
     if decision_id not in council["decision_ids"]:
         council["decision_ids"].append(decision_id)
     deferred: list[str] = []
     body = content.decode()
     for member in council["members"]:
-        runtime_file, runtime = load_runtime(council, member)
-        if send_member(council, member, "decision", body):
+        delivered: list[str] = []
+        try:
+            runtime_file, runtime = load_runtime(council, member)
             delivered = list(runtime.get("delivered_decisions", []))
+            sent = decision_id in delivered or send_member(council, member, "decision", body)
+        except CouncilError:
+            sent = False
+        if sent:
             if decision_id not in delivered:
                 delivered.append(decision_id)
             runtime["delivered_decisions"] = delivered
@@ -1261,12 +1293,31 @@ def close_member(council: dict[str, Any], member: dict[str, Any], runtime: dict[
             raise CouncilError(f"failed to close exact participant endpoint for {member['id']}")
 
 
+def load_close_journal(directory: Path, council: dict[str, Any]) -> tuple[Path, dict[str, Any]]:
+    path = directory / "close-journal.json"
+    if not path.exists():
+        return path, {"schema": "fm-council-close.v1", "council_id": council["id"], "closed": {}}
+    journal = load_json(path)
+    if (
+        journal.get("schema") != "fm-council-close.v1"
+        or journal.get("council_id") != council["id"]
+        or not isinstance(journal.get("closed"), dict)
+    ):
+        raise CouncilError(f"invalid council close journal: {path}")
+    return path, journal
+
+
 def command_close(arguments: argparse.Namespace) -> None:
     directory, council = find_council(arguments.name, include_closed=False)
     with lock(PATHS.runtime_dir(council["id"]) / ".lock"):
-        runtimes = [(member, close_preflight(council, member)) for member in council["members"]]
+        journal_path, journal = load_close_journal(directory, council)
+        pending = [member for member in council["members"] if member["id"] not in journal["closed"]]
+        runtimes = [(member, close_preflight(council, member)) for member in pending]
         for member, runtime in runtimes:
             close_member(council, member, runtime)
+            journal["closed"][member["id"]] = now()
+            atomic_json(journal_path, journal)
+            append_event(directory / "events.jsonl", {"event": "member_closed", "member": member["id"]})
         runtime_root = PATHS.runtime_dir(council["id"])
         shutil.rmtree(runtime_root / "members", ignore_errors=True)
         shutil.rmtree(runtime_root / "rounds", ignore_errors=True)

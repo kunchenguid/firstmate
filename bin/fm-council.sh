@@ -45,6 +45,8 @@
 #   duplicates or silently resumes participant endpoints.
 # - `close` is the only participant termination command. It verifies every exact
 #   response-derived endpoint before closing only those panes and deleting lane homes.
+#   A partially failed close is retryable: only members recorded in the durable
+#   close journal are skipped, and an absent or ambiguous pane is never assumed owned.
 #
 # State ownership:
 # - data/councils/<id>/council.json owns council identity and phase.

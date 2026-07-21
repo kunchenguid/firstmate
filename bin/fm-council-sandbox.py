@@ -2,11 +2,11 @@
 """Launch one council participant under a Linux Landlock policy.
 
 This helper is intentionally not a general sandbox.  Landlock denies filesystem
-reads, writes, and executable launches by default, admits the system executable
-tree, and grants writes only below explicit participant-owned directories.  A
-seccomp filter also denies new Unix-domain sockets so terminal-control sockets
-cannot be reached by path guessing.  Both policies are inherited by every child
-before exec.
+reads, writes, and executable launches by default, admits read-only system
+paths, grants execute only on the exact allowlisted binaries, and grants writes
+only below explicit participant-owned directories.  A seccomp filter also
+denies new Unix-domain sockets so terminal-control sockets cannot be reached by
+path guessing.  Both policies are inherited by every child before exec.
 """
 
 from __future__ import annotations
@@ -32,9 +32,12 @@ SECCOMP_RET_ALLOW = 0x7FFF0000
 SECCOMP_RET_ERRNO = 0x00050000
 BPF_LD_W_ABS = 0x20
 BPF_JMP_JEQ_K = 0x15
+BPF_JMP_JGE_K = 0x35
 BPF_RET_K = 0x06
 SYS_SOCKET_X86_64 = 41
 AF_UNIX = 1
+AUDIT_ARCH_X86_64 = 0xC000003E
+X32_SYSCALL_BIT = 0x40000000
 
 EXECUTE = 1 << 0
 WRITE_FILE = 1 << 1
@@ -135,8 +138,11 @@ def add_path_rule(ruleset_fd: int, path: Path, access: int) -> None:
 def deny_new_unix_sockets() -> None:
     if os.uname().machine != "x86_64":
         raise RuntimeError("the council Unix-socket filter is verified only on Linux x86_64")
-    filters = (SockFilter * 6)(
+    filters = (SockFilter * 9)(
+        SockFilter(BPF_LD_W_ABS, 0, 0, 4),
+        SockFilter(BPF_JMP_JEQ_K, 0, 5, AUDIT_ARCH_X86_64),
         SockFilter(BPF_LD_W_ABS, 0, 0, 0),
+        SockFilter(BPF_JMP_JGE_K, 3, 0, X32_SYSCALL_BIT),
         SockFilter(BPF_JMP_JEQ_K, 0, 3, SYS_SOCKET_X86_64),
         SockFilter(BPF_LD_W_ABS, 0, 0, 16),
         SockFilter(BPF_JMP_JEQ_K, 0, 1, AF_UNIX),
@@ -189,11 +195,14 @@ def install_policy(readable: list[Path], writable: list[Path], executables: list
     return abi
 
 
-def safe_environment(home: Path) -> dict[str, str]:
+PROVIDER_KEYS = {
+    "claude": ("ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"),
+    "codex": ("OPENAI_API_KEY",),
+}
+
+
+def safe_environment(home: Path, harness: str | None) -> dict[str, str]:
     keep = {
-        "ANTHROPIC_API_KEY",
-        "CLAUDE_CODE_OAUTH_TOKEN",
-        "OPENAI_API_KEY",
         "SSL_CERT_DIR",
         "SSL_CERT_FILE",
         "TERM",
@@ -202,6 +211,7 @@ def safe_environment(home: Path) -> dict[str, str]:
         "LC_ALL",
         "TZ",
     }
+    keep.update(PROVIDER_KEYS.get(harness or "", ()))
     environment = {key: value for key, value in os.environ.items() if key in keep}
     environment.update(
         {
@@ -227,6 +237,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--readable", action="append", default=[], help="additional readable path")
     parser.add_argument("--writable", action="append", default=[], help="additional writable path")
     parser.add_argument("--allow-exec", action="append", default=[], help="exact executable path")
+    parser.add_argument("--harness", choices=("claude", "codex"), help="harness whose own provider credentials pass through")
     parser.add_argument("command", nargs=argparse.REMAINDER)
     arguments = parser.parse_args()
     if arguments.command and arguments.command[0] == "--":
@@ -286,17 +297,18 @@ def main() -> int:
         command_path.relative_to(usr)
     except ValueError as error:
         raise RuntimeError(f"council command must resolve below the verified system executable tree {usr}: {command_path}") from error
-    # Landlock rights cannot be regained below a parent rule that omitted them.
-    # /usr is already the system read rule, so executable permission is added at
-    # that same boundary.  Home-local Herdr and multiplexer clients remain
-    # unreadable and unexecutable because /home is never admitted.
-    executables = [usr]
+    executables = [command_path]
+    loader = Path("/lib64/ld-linux-x86-64.so.2")
+    if loader.exists():
+        executables.append(loader.resolve())
     for requested in arguments.allow_exec:
         executable = canonical_existing(requested)
         try:
             executable.relative_to(usr)
         except ValueError as error:
             raise RuntimeError(f"allowed executable is outside {usr}: {executable}") from error
+        if executable not in executables:
+            executables.append(executable)
 
     try:
         install_policy(readable, writable, executables)
@@ -304,7 +316,7 @@ def main() -> int:
         print(f"fm-council-sandbox: {error}", file=sys.stderr)
         return 1
 
-    environment = safe_environment(home)
+    environment = safe_environment(home, arguments.harness)
     os.chdir(home)
     os.execve(command_path, [arguments.command[0], *arguments.command[1:]], environment)
     return 127
