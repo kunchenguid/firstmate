@@ -56,6 +56,9 @@ test_plain_register_has_no_forced_address_or_nautical_voice() {
   if grep -Fq "Address the user as \"captain\"" "$AGENTS"; then
     fail "firstmate identity still mandates captain as a form of address"
   fi
+  if grep -Fqi "nautical seasoning" "$AGENTS"; then
+    fail "firstmate identity still permits nautical seasoning"
+  fi
   if grep -Fq "Light nautical seasoning" "$FMX"; then
     fail "X reply voice still encourages nautical seasoning"
   fi
