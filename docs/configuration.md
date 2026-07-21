@@ -166,7 +166,7 @@ The full cmux home label also includes a short hash of the resolved `FM_ROOT` pa
 
 `config/github-accounts.json` is the single full schema owner for optional per-project GitHub account routing.
 The file is private, gitignored, versioned, mode `0600`, and contains non-secret routing metadata only.
-Its authoritative location is always `$FM_HOME/config/github-accounts.json`; routing ignores `FM_CONFIG_OVERRIDE`, `FM_GITHUB_CONFIG`, and `FM_GITHUB_CONFIG_PATH`, and rejects ordinary, dangling, or otherwise unsafe symlinks instead of treating them as absence.
+Its authoritative location is always the canonical `$FM_HOME/config/github-accounts.json`; routing ignores `FM_CONFIG_OVERRIDE`, `FM_GITHUB_CONFIG`, and `FM_GITHUB_CONFIG_PATH`, and rejects a symlink at either config path component instead of treating it as absence.
 Its absence preserves the legacy single-account process environment and command behavior.
 Its presence enables strict mode for the whole home with no implicit or fallback profile.
 Every GitHub or network Git operation must resolve exactly one profile before network or write activity.
@@ -233,17 +233,18 @@ Routed automation refuses `gh auth login`, `switch`, `logout`, `refresh`, token 
 
 `bin/fm-github-config.mjs` strictly parses and resolves this schema, `bin/fm-github-lib.sh` owns process policy, and `bin/fm-github-exec.sh` is the guarded command owner.
 For each selected child, the guarded owner removes ambient GitHub token variables and alternate gh selection, then sets the exact `GH_CONFIG_DIR`, `GH_HOST`, disabled prompts, and disabled updates.
-Every descendant re-resolves the stable profile id from the authoritative home location and removes ambient routing-path overrides, so a delayed child cannot replace the selected profile definition.
+Every descendant re-resolves the stable profile id through a process-local PATH shim containing the canonical launch home, so changing descendant `FM_HOME` or ambient routing-path overrides cannot replace the selected profile definition.
 It removes Git config-injection variables, askpass, SSH, author, editor, prompt, proxy, TLS, certificate, cookie, and trace overrides.
 It uses isolated global and system Git configuration, resets credential-helper chains, and installs only the exact selected `gh auth git-credential` helper for HTTPS GitHub credentials.
-It applies the optional commit identity, always sets `user.useConfigOnly=true`, and rejects command-scoped identity keys plus `git commit --author` and `--reset-author` overrides.
-Repository-local and per-worktree credential, include, URL rewrite, push URL, proxy, TLS, certificate, cookie, authorization-header, editor, prompt, and transport keys are rejected by key name without printing their values.
-The guarded owner inspects the actual descendant working tree and an explicit Git `-C` target, including effective per-worktree origin values, rather than trusting the primary clone path inherited at launch.
+It applies the optional commit identity, always sets `user.useConfigOnly=true`, and rejects command-scoped identity keys plus every `git commit` author override, reset, amend, and message-reuse mode that can preserve another author.
+Repository-local and per-worktree credential, include, URL rewrite, remote URL, push URL, gh-resolved remote, proxy, TLS, certificate, cookie, authorization-header, editor, prompt, and transport keys are rejected or validated by key name without printing their values.
+The guarded owner inspects the actual descendant working tree and an explicit Git `-C` target, rejects a discovered unrelated repository, and validates every gh-selectable remote rather than trusting the primary clone or only its origin.
 Every routed clone, fetch, pull, push, and `ls-remote` target must canonicalize to the configured HTTPS parent or selected-profile fork before network access.
 Push resolves `--repo`, `branch.<name>.pushRemote`, `remote.pushDefault`, and `branch.<name>.remote` before falling back to `origin`; command-scoped remote selection is rejected.
 Clone bundle URIs, custom upload/receive programs, recursive submodule network paths, routed remote mutation, and submodule commands are refused.
 Unknown Git commands and unknown GitHub CLI command families or subcommands are refused, so network plumbing, aliases, extensions, authentication state, SSH keys, and future mutators cannot inherit read-only treatment accidentally.
-Every routed GitHub resource argument, regardless of flag ordering, must agree with that same parent or fork, including repository templates, issue-transfer destinations, label-clone sources, owner options, and URL operands.
+One typed, command-specific grammar distinguishes repository, owner, head, issue, host, body, title, template-data, and other data fields for every allowlisted GitHub CLI command regardless of flag ordering.
+Every resource-bearing field must agree with the configured parent or selected-profile fork, including repository templates, linked-branch repositories, issue relations and transfers, label-clone sources, owner options, and selector URLs, while URLs in body, title, and formatting data remain ordinary text.
 Organization-, user-, and environment-scoped secret or variable targets and arbitrary OCI operands are refused, while known-owner repository creation validates the selected login before the outward write.
 FirstMate-owned commands invoke exact configured binaries with argv arrays.
 The guarded `git`, `gh`, and `gh-axi` PATH shims protect ordinary descendants, including `gh-axi` resolving `gh`, but are not an operating-system sandbox against a deliberately malicious process that invokes another absolute executable or independently accesses credentials.

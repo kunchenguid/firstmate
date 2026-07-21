@@ -131,13 +131,27 @@ JSON
 }
 
 run_exec() {
-  local d=$1
+  local d=$1 cwd=$PWD arg expect_repository=0
   shift
-  FM_HOME="$d/home" FM_ROOT_OVERRIDE="$ROOT" FM_TEST_ROUTE_LOG="$d/routes.log" FM_TEST_SENTINEL="$SENTINEL" \
-    GH_TOKEN="$SENTINEL" GITHUB_TOKEN="$SENTINEL" GIT_ASKPASS="$d/$SENTINEL-askpass" \
-    GIT_SSL_NO_VERIFY=1 HTTPS_PROXY="https://$SENTINEL@proxy.invalid" \
-    GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.extraHeader GIT_CONFIG_VALUE_0="Authorization: $SENTINEL" \
-    PATH="$d/hostile:$PATH" "$EXEC" "$@"
+  for arg in "$@"; do
+    if [ "$expect_repository" -eq 1 ]; then
+      [ ! -d "$arg" ] || cwd=$arg
+      expect_repository=0
+      continue
+    fi
+    case "$arg" in
+      --repository) expect_repository=1 ;;
+      --repository=*) [ ! -d "${arg#--repository=}" ] || cwd=${arg#--repository=} ;;
+    esac
+  done
+  (
+    cd "$cwd" || exit 1
+    FM_HOME="$d/home" FM_ROOT_OVERRIDE="$ROOT" FM_TEST_ROUTE_LOG="$d/routes.log" FM_TEST_SENTINEL="$SENTINEL" \
+      GH_TOKEN="$SENTINEL" GITHUB_TOKEN="$SENTINEL" GIT_ASKPASS="$d/$SENTINEL-askpass" \
+      GIT_SSL_NO_VERIFY=1 HTTPS_PROXY="https://$SENTINEL@proxy.invalid" \
+      GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.extraHeader GIT_CONFIG_VALUE_0="Authorization: $SENTINEL" \
+      PATH="$d/hostile:$PATH" "$EXEC" "$@"
+  )
 }
 
 test_legacy_absence_is_byte_compatible() {
@@ -198,6 +212,27 @@ test_schema_and_resolution_strictness() {
   expect_code 1 "$rc" "dangling config symlink"
   rm "$d/home/config/github-accounts.json"
   mv "$d/home/config/github-accounts.saved" "$d/home/config/github-accounts.json"
+
+  mv "$d/home/config" "$d/home/config.saved"
+  ln -s config.saved "$d/home/config"
+  set +e; run_exec "$d" validate >/dev/null 2>&1; rc=$?; set -e
+  expect_code 1 "$rc" "config directory symlink"
+  rm "$d/home/config"
+  mv "$d/home/config.saved" "$d/home/config"
+
+  mv "$d/home/config" "$d/home/config.saved"
+  ln -s missing-config "$d/home/config"
+  set +e; run_exec "$d" validate >/dev/null 2>&1; rc=$?; set -e
+  expect_code 1 "$rc" "dangling config directory symlink"
+  rm "$d/home/config"
+  mv "$d/home/config.saved" "$d/home/config"
+
+  mv "$d/home/config" "$d/home/config.saved"
+  : > "$d/home/config"
+  set +e; run_exec "$d" validate >/dev/null 2>&1; rc=$?; set -e
+  expect_code 1 "$rc" "non-directory config path"
+  rm "$d/home/config"
+  mv "$d/home/config.saved" "$d/home/config"
 
   write_config "$d"
   node -e 'const fs=require("fs"); const p=process.argv[1]; const v=JSON.parse(fs.readFileSync(p)); v.version=2; fs.writeFileSync(p,JSON.stringify(v)); fs.chmodSync(p,0o600)' "$d/home/config/github-accounts.json"
@@ -365,6 +400,8 @@ test_forbidden_commands_and_access_diagnostics() {
   for command in \
     'gh repo create Owner-A/new --template Other/template' \
     'gh issue transfer 1 Other/repo-a' \
+    'gh issue develop 1 --branch-repo Other/repo-a' \
+    'gh repo list --source OtherOwner' \
     'gh secret set NAME --org Other'; do
     read -r -a command_args <<< "$command"
     set +e
@@ -373,6 +410,11 @@ test_forbidden_commands_and_access_diagnostics() {
     set -e
     expect_code 1 "$rc" "command-specific GitHub target: $command"
   done
+  run_exec "$d" exec --project repo-a --repository "$d/home/projects/repo-a" -- \
+    gh pr comment 1 --body https://github.com/Other/repo-a >/dev/null \
+    || fail "GitHub URL body text was mistaken for a repository target"
+  assert_grep $'gh\tprofile-a\tpr comment 1 --body https://github.com/Other/repo-a' "$d/routes.log" \
+    "typed GitHub grammar did not preserve body data"
   run_exec "$d" exec --repository github.com/Owner-A/new-repository -- gh-axi repo create Owner-A/new-repository --private >/dev/null \
     || fail "known-owner repository creation did not route through selected login"
   assert_grep $'gh-axi\tprofile-a\trepo create Owner-A/new-repository --private' "$d/routes.log" \
@@ -386,6 +428,33 @@ test_forbidden_commands_and_access_diagnostics() {
   assert_not_contains "$err" "$SENTINEL" "repository-controlled header value leaked"
   git -C "$d/home/projects/repo-a" config --local --unset-all http.extraHeader
 
+  git -C "$d/home/projects/repo-a" remote add foreign https://github.com/Other/repo-a.git
+  set +e
+  err=$(run_exec "$d" exec --project repo-a --repository "$d/home/projects/repo-a" -- gh pr view 1 2>&1); rc=$?
+  set -e
+  expect_code 1 "$rc" "foreign selectable gh remote"
+  assert_contains "$err" 'repository remote is not the configured HTTPS parent' "gh selectable remote was not rejected"
+  git -C "$d/home/projects/repo-a" remote remove foreign
+
+  git -C "$d/home/projects/repo-a" config --local remote.origin.gh-resolved base
+  set +e
+  run_exec "$d" exec --project repo-a --repository "$d/home/projects/repo-a" -- gh pr view 1 >/dev/null 2>&1
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "gh-resolved remote override"
+  git -C "$d/home/projects/repo-a" config --local --unset remote.origin.gh-resolved
+
+  fm_git_init_commit "$d/unrelated"
+  git -C "$d/unrelated" remote add origin https://github.com/Other/unrelated.git
+  set +e
+  err=$(FM_HOME="$d/home" FM_ROOT_OVERRIDE="$ROOT" FM_TEST_ROUTE_LOG="$d/routes.log" FM_TEST_SENTINEL="$SENTINEL" \
+    PATH="$d/hostile:$PATH" bash -c 'cd "$1" && "$2" exec --project repo-a --repository "$3" -- gh pr view 1' \
+    _ "$d/unrelated" "$EXEC" "$d/home/projects/repo-a" 2>&1)
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "unrelated cwd repository"
+  assert_contains "$err" 'not the configured project or task copy' "unrelated cwd repository fell back to the primary clone"
+
   git -C "$d/home/projects/repo-a" config extensions.worktreeConfig true
   git -C "$d/home/projects/repo-a" worktree add -q -b task-copy "$d/task-copy"
   git -C "$d/task-copy" config --worktree remote.origin.url https://github.com/Other/repo-a.git
@@ -394,11 +463,11 @@ test_forbidden_commands_and_access_diagnostics() {
     FM_GITHUB_ACTIVE=1 FM_GITHUB_PROFILE_ID=profile-a \
     FM_GITHUB_REPOSITORY=github.com/Owner-A/repo-a FM_GITHUB_PROJECT=repo-a FM_GITHUB_PROJECT_PATH="$d/home/projects/repo-a" \
     FM_GITHUB_GIT_BINARY="$d/exact/git" PATH="$d/hostile:$PATH" \
-    bash -c 'cd "$1" && "$2" child-gh -- pr view 1' _ "$d/task-copy" "$EXEC" 2>&1)
+    bash -c 'cd "$1" && "$2" child-gh --home "$3" -- pr view 1' _ "$d/task-copy" "$EXEC" "$d/home" 2>&1)
   rc=$?
   set -e
   expect_code 1 "$rc" "worktree-scoped origin"
-  assert_contains "$err" 'repository origin is not the configured HTTPS parent' "actual task worktree route did not fail closed"
+  assert_contains "$err" 'repository remote is not the configured HTTPS parent' "actual task worktree route did not fail closed"
   set +e
   err=$(FM_HOME="$d/home" FM_ROOT_OVERRIDE="$ROOT" FM_TEST_ROUTE_LOG="$d/routes.log" FM_TEST_SENTINEL="$SENTINEL" \
     PATH="$d/hostile:$PATH" bash -c 'cd "$1" && "$2" exec --project repo-a --repository "$3" -- gh pr view 1' \
@@ -406,7 +475,7 @@ test_forbidden_commands_and_access_diagnostics() {
   rc=$?
   set -e
   expect_code 1 "$rc" "direct gh from worktree-scoped origin"
-  assert_contains "$err" 'repository origin is not the configured HTTPS parent' "direct gh validated the primary clone instead of the task worktree"
+  assert_contains "$err" 'repository remote is not the configured HTTPS parent' "direct gh validated the primary clone instead of the task worktree"
 
   node -e 'const fs=require("fs"); const p=process.argv[1]; const v=JSON.parse(fs.readFileSync(p)); v.profiles["profile-a"].expected_login="wrong-login"; fs.writeFileSync(p,JSON.stringify(v)); fs.chmodSync(p,0o600)' "$d/home/config/github-accounts.json"
   set +e
@@ -429,7 +498,8 @@ test_forbidden_commands_and_access_diagnostics() {
 }
 
 test_commit_identity_and_removed_profile() {
-  local d author rc err
+  local d author rc err mode
+  local mode_args=()
   d=$(make_fixture identity)
   printf '%s\n' routed > "$d/home/projects/repo-a/routed.txt"
   run_exec "$d" exec --project repo-a --repository "$d/home/projects/repo-a" -- git -C "$d/home/projects/repo-a" add routed.txt >/dev/null
@@ -443,6 +513,15 @@ test_commit_identity_and_removed_profile() {
     git -C "$d/home/projects/repo-a" commit --author='Other <other@example.test>' -m routed 2>&1); rc=$?
   set -e
   expect_code 1 "$rc" "commit --author identity override"
+  for mode in '-C HEAD' '-c HEAD' '--reuse-message=HEAD' '--reedit-message=HEAD' '--amend'; do
+    read -r -a mode_args <<< "$mode"
+    set +e
+    run_exec "$d" exec --project repo-a --repository "$d/home/projects/repo-a" -- \
+      git -C "$d/home/projects/repo-a" commit "${mode_args[@]}" -m routed >/dev/null 2>&1
+    rc=$?
+    set -e
+    expect_code 1 "$rc" "commit authorship mode $mode"
+  done
   run_exec "$d" exec --project repo-a --repository "$d/home/projects/repo-a" -- git -C "$d/home/projects/repo-a" commit -m routed >/dev/null
   author=$(git -C "$d/home/projects/repo-a" show -s --format='%an <%ae>' HEAD)
   [ "$author" = 'Account A <account-a@example.test>' ] || fail "selected commit identity was not applied: $author"
@@ -461,7 +540,7 @@ test_commit_identity_and_removed_profile() {
   node -e 'const fs=require("fs"); const p=process.argv[1]; const v=JSON.parse(fs.readFileSync(p)); delete v.profiles["profile-a"]; delete v.bindings.projects["repo-a"]; delete v.bindings.repositories["github.com/Owner-A/repo-a"]; delete v.bindings.owners["github.com/Owner-A"]; fs.writeFileSync(p,JSON.stringify(v)); fs.chmodSync(p,0o600)' "$d/home/config/github-accounts.json"
   set +e
   err=$(FM_HOME="$d/home" FM_ROOT_OVERRIDE="$ROOT" FM_GITHUB_ACTIVE=1 FM_GITHUB_PROFILE_ID=profile-a \
-    FM_GITHUB_REPOSITORY=github.com/Owner-A/repo-a FM_GITHUB_PROJECT=repo-a "$EXEC" child-gh -- pr view 1 2>&1)
+    FM_GITHUB_REPOSITORY=github.com/Owner-A/repo-a FM_GITHUB_PROJECT=repo-a "$EXEC" child-gh --home "$d/home" -- pr view 1 2>&1)
   rc=$?
   set -e
   [ "$rc" -ne 0 ] || fail "removed profile fell back"
@@ -470,7 +549,7 @@ test_commit_identity_and_removed_profile() {
 }
 
 test_pinned_config_and_fork_bindings() {
-  local d hostile_config rc err
+  local d hostile_config alternate_home rc err
   d=$(make_fixture pinned)
   hostile_config="$d/hostile-config"
   mkdir -p "$hostile_config"
@@ -480,8 +559,16 @@ test_pinned_config_and_fork_bindings() {
     FM_GITHUB_ACTIVE=1 FM_GITHUB_CONFIG_PATH="$hostile_config/github-accounts.json" FM_GITHUB_CONFIG="$hostile_config/github-accounts.json" FM_CONFIG_OVERRIDE="$hostile_config" \
     FM_GITHUB_PROFILE_ID=profile-a FM_GITHUB_REPOSITORY=github.com/Owner-A/repo-a FM_GITHUB_PROJECT=repo-a FM_GITHUB_PROJECT_PATH="$d/home/projects/repo-a" \
     FM_GITHUB_GIT_BINARY="$d/exact/git" PATH="$d/hostile:$PATH" \
-    bash -c 'cd "$1" && "$2" child-gh -- pr view 1' _ "$d/home/projects/repo-a" "$EXEC" >/dev/null \
+    bash -c 'cd "$1" && "$2" child-gh --home "$3" -- pr view 1' _ "$d/home/projects/repo-a" "$EXEC" "$d/home" >/dev/null \
     || fail "descendant routing context did not use its authoritative home config"
+
+  alternate_home="$d/alternate-home"
+  mkdir -p "$alternate_home/config"
+  cp "$d/home/config/github-accounts.json" "$alternate_home/config/github-accounts.json"
+  node -e 'const fs=require("fs"); const p=process.argv[1]; const v=JSON.parse(fs.readFileSync(p)); v.profiles["profile-a"].expected_login="wrong-login"; fs.writeFileSync(p,JSON.stringify(v)); fs.chmodSync(p,0o600)' "$alternate_home/config/github-accounts.json"
+  run_exec "$d" exec --project repo-a --repository "$d/home/projects/repo-a" -- \
+    bash -c 'FM_HOME="$1" gh pr view 1' _ "$alternate_home" >/dev/null \
+    || fail "descendant FM_HOME redirected the authoritative routing context"
 
   git -C "$d/home/projects/repo-a" remote add fork https://github.com/account-a/repo-a.git
   node -e 'const fs=require("fs"); const p=process.argv[1]; const v=JSON.parse(fs.readFileSync(p)); v.bindings.owners["github.com/account-a"]="profile-b"; fs.writeFileSync(p,JSON.stringify(v)); fs.chmodSync(p,0o600)' "$d/home/config/github-accounts.json"
@@ -522,9 +609,9 @@ test_direct_pr_fork_fleet_sync_and_secondmate_child() {
   FM_INHERITABLE_CONFIG=github-accounts.json bash -c '. "$1/bin/fm-config-inherit-lib.sh"; propagate_inheritable_config "$2" "$3"' \
     _ "$ROOT" "$d/home/config" "$child/config" || fail "secondmate routing inheritance failed"
   FM_HOME="$child" FM_ROOT_OVERRIDE="$ROOT" FM_TEST_ROUTE_LOG="$d/routes.log" FM_TEST_SENTINEL="$SENTINEL" \
-    PATH="$d/hostile:$PATH" "$EXEC" exec --project repo-b --repository github.com/Owner-B/repo-b -- gh pr view 3 >/dev/null \
+    PATH="$d/hostile:$PATH" "$EXEC" exec --project repo-b --repository github.com/Owner-B/repo-b -- gh pr view 3 --repo Owner-B/repo-b >/dev/null \
     || fail "secondmate child did not resolve inherited routing"
-  assert_grep $'gh\tprofile-b\tpr view 3' "$d/routes.log" "secondmate child did not use profile-b"
+  assert_grep $'gh\tprofile-b\tpr view 3 --repo Owner-B/repo-b' "$d/routes.log" "secondmate child did not use profile-b"
   assert_no_grep "$SENTINEL" "$d/routes.log" "integration routes persisted a credential sentinel"
   pass "direct PR, fork push, concurrent fleet sync, and secondmate child paths stay project-scoped"
 }

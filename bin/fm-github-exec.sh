@@ -16,7 +16,17 @@ set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
-FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
+case "${1:-}" in
+  child-*)
+    [ "${2:-}" = --home ] && [ -n "${3:-}" ] && [ "${4:-}" = -- ] || {
+      sed -n '2,12p' "$0" >&2
+      exit 2
+    }
+    FM_HOME=$3
+    ;;
+  *) FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}" ;;
+esac
+export FM_HOME
 
 # shellcheck source=bin/fm-github-lib.sh
 . "$SCRIPT_DIR/fm-github-lib.sh"
@@ -194,29 +204,29 @@ case "$action" in
     run_no_mistakes_init
     ;;
   child-git)
-    [ "${1:-}" = -- ] || github_exec_usage
-    shift
+    [ "${1:-}" = --home ] && [ -n "${2:-}" ] && [ "${3:-}" = -- ] || github_exec_usage
+    shift 3
     child_context
     [ "$#" -gt 0 ] || github_exec_usage
     fm_github_context_command "$project" "$repository" "$profile" git "$@"
     ;;
   child-gh)
-    [ "${1:-}" = -- ] || github_exec_usage
-    shift
+    [ "${1:-}" = --home ] && [ -n "${2:-}" ] && [ "${3:-}" = -- ] || github_exec_usage
+    shift 3
     child_context
     [ "$#" -gt 0 ] || github_exec_usage
     fm_github_context_command "$project" "$repository" "$profile" gh "$@"
     ;;
   child-gh-axi)
-    [ "${1:-}" = -- ] || github_exec_usage
-    shift
+    [ "${1:-}" = --home ] && [ -n "${2:-}" ] && [ "${3:-}" = -- ] || github_exec_usage
+    shift 3
     child_context
     [ "$#" -gt 0 ] || github_exec_usage
     fm_github_context_command "$project" "$repository" "$profile" gh-axi "$@"
     ;;
   child-exec)
-    [ "${1:-}" = -- ] || github_exec_usage
-    shift
+    [ "${1:-}" = --home ] && [ -n "${2:-}" ] && [ "${3:-}" = -- ] || github_exec_usage
+    shift 3
     child_context
     [ "$#" -gt 0 ] || github_exec_usage
     fm_github_context_command "$project" "$repository" "$profile" "$@"

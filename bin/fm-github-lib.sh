@@ -47,7 +47,10 @@ fm_github_config_path() {
 }
 
 fm_github_enabled() {
-  [ -e "$(fm_github_config_path)" ] || [ -L "$(fm_github_config_path)" ]
+  local config_path config_dir
+  config_path=$(fm_github_config_path)
+  config_dir=${config_path%/*}
+  [ -e "$config_path" ] || [ -L "$config_path" ] || [ -L "$config_dir" ] || { [ -e "$config_dir" ] && [ ! -d "$config_dir" ]; }
 }
 
 fm_github_reset_context() {
@@ -256,6 +259,32 @@ fm_github_add_git_config() {
   export GIT_CONFIG_COUNT=$((index + 1))
 }
 
+fm_github_install_path_shims() {
+  local home state base directory executable quoted_home quoted_executable name action
+  home=$(cd "$(fm_github_home)" 2>/dev/null && pwd -P) || return 1
+  state="$home/state"
+  if [ ! -e "$state" ]; then
+    mkdir -m 0700 "$state" 2>/dev/null || [ -d "$state" ] || return 1
+  fi
+  [ -d "$state" ] && [ ! -L "$state" ] || return 1
+  base="$state/.github-routing-path"
+  if [ ! -e "$base" ]; then
+    mkdir -m 0700 "$base" 2>/dev/null || [ -d "$base" ] || return 1
+  fi
+  [ -d "$base" ] && [ ! -L "$base" ] || return 1
+  directory=$(mktemp -d "$base/context.XXXXXX") || return 1
+  executable="$(fm_github_lib_dir)/fm-github-exec.sh"
+  quoted_home=$(fm_github_shell_quote "$home")
+  quoted_executable=$(fm_github_shell_quote "$executable")
+  for name in git gh gh-axi; do
+    case "$name" in git) action=child-git ;; gh) action=child-gh ;; gh-axi) action=child-gh-axi ;; esac
+    printf '#!/usr/bin/env bash\nset -eu\nexec %s %s --home %s -- "$@"\n' \
+      "$quoted_executable" "$action" "$quoted_home" > "$directory/$name" || return 1
+    chmod 0700 "$directory/$name" || return 1
+  done
+  printf '%s\n' "$directory"
+}
+
 fm_github_activate() {
   local project=${1:-} repository=${2:-} required_profile=${3:-} old_path helper shim_dir selected_path inherited_project_path
   inherited_project_path=${FM_GITHUB_PROJECT_PATH:-}
@@ -263,7 +292,10 @@ fm_github_activate() {
   [ "$FM_GITHUB_MODE" = strict ] || return 0
   old_path=${PATH:-/usr/bin:/bin}
   fm_github_unset_ambient
-  shim_dir="$(fm_github_lib_dir)/github-path"
+  shim_dir=$(fm_github_install_path_shims) || {
+    echo "error: cannot install authoritative GitHub routing context" >&2
+    return 1
+  }
   selected_path="$shim_dir:$(dirname "$FM_GITHUB_GH_AXI_BINARY"):$old_path"
   helper="!$(fm_github_shell_quote "$FM_GITHUB_GH_BINARY") auth git-credential"
   export PATH=$selected_path
@@ -300,7 +332,7 @@ fm_github_unsafe_git_key() {
   local key context=${2:-command}
   key=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
   case "$key" in
-    credential.*|http.*|include.*|includeif.*|url.*|protocol.*|ssh.*|alias.*|core.sshcommand|core.askpass|core.gitproxy|core.editor|core.hookspath|core.fsmonitor|core.pager|pager.*|sequence.editor|interactive.difffilter|diff.external|difftool.*.cmd|filter.*|merge.*.driver|gpg.*|remote.*.pushurl|remote.*.proxy|remote.*.proxyauthmethod|remote.*.uploadpack|remote.*.receivepack)
+    credential.*|http.*|include.*|includeif.*|url.*|protocol.*|ssh.*|alias.*|core.sshcommand|core.askpass|core.gitproxy|core.editor|core.hookspath|core.fsmonitor|core.pager|pager.*|sequence.editor|interactive.difffilter|diff.external|difftool.*.cmd|filter.*|merge.*.driver|gpg.*|remote.*.pushurl|remote.*.gh-resolved|remote.*.proxy|remote.*.proxyauthmethod|remote.*.uploadpack|remote.*.receivepack)
       return 0
       ;;
     remote.*.url|remote.pushdefault|branch.*.remote|branch.*.pushremote|user.name|user.email|user.useconfigonly)
@@ -501,6 +533,20 @@ fm_github_git_operation() {
   esac
 }
 
+fm_github_git_command_name() {
+  local arg expect_value=0
+  for arg in "$@"; do
+    if [ "$expect_value" -eq 1 ]; then expect_value=0; continue; fi
+    case "$arg" in
+      -C|-c) expect_value=1 ;;
+      -c*|--no-pager|--paginate|-p|--literal-pathspecs|--glob-pathspecs|--noglob-pathspecs|--icase-pathspecs) ;;
+      -*) return 1 ;;
+      *) printf '%s\n' "$arg"; return ;;
+    esac
+  done
+  return 1
+}
+
 fm_github_git_commit_identity_args_allowed() {
   local arg command_seen=0
   for arg in "$@"; do
@@ -508,7 +554,9 @@ fm_github_git_commit_identity_args_allowed() {
       [ "$arg" != commit ] || command_seen=1
       continue
     fi
-    case "$arg" in --author|--author=*|--reset-author) return 1 ;; esac
+    case "$arg" in
+      --author|--author=*|--reset-author|--amend|-C|-C?*|-c|-c?*|--reuse-message|--reuse-message=*|--reedit-message|--reedit-message=*) return 1 ;;
+    esac
   done
 }
 
@@ -553,26 +601,30 @@ fm_github_same_repository_copy() {
 
 fm_github_actual_repository_path() {
   local configured=${1:-} actual
-  if [ -n "$configured" ] && actual=$(fm_github_repository_toplevel "$PWD" 2>/dev/null) \
-    && fm_github_same_repository_copy "$actual" "$configured"; then
+  if actual=$(fm_github_repository_toplevel "$PWD" 2>/dev/null); then
+    [ -n "$configured" ] && fm_github_same_repository_copy "$actual" "$configured" || return 1
     printf '%s\n' "$actual"
-  else
-    printf '%s\n' "$configured"
+    return
   fi
+  printf '%s\n' "$configured"
 }
 
 fm_github_validate_repository_path() {
-  local repo_path=$1 urls raw
+  local repo_path=$1 keys key urls raw
   [ -n "$repo_path" ] && [ -d "$repo_path" ] || return 0
   fm_github_validate_local_config "$repo_path" || return 1
-  urls=$("$FM_GITHUB_GIT_BINARY" -C "$repo_path" config --get-all remote.origin.url 2>/dev/null || true)
-  while IFS= read -r raw || [ -n "$raw" ]; do
-    [ -n "$raw" ] || continue
-    fm_github_repository_allowed "$raw" >/dev/null || {
-      echo "error: repository origin is not the configured HTTPS parent or selected-profile fork" >&2
-      return 1
-    }
-  done <<< "$urls"
+  keys=$("$FM_GITHUB_GIT_BINARY" -C "$repo_path" config --name-only --get-regexp '^remote\..*\.url$' 2>/dev/null || true)
+  while IFS= read -r key || [ -n "$key" ]; do
+    [ -n "$key" ] || continue
+    urls=$("$FM_GITHUB_GIT_BINARY" -C "$repo_path" config --get-all "$key" 2>/dev/null || true)
+    while IFS= read -r raw || [ -n "$raw" ]; do
+      [ -n "$raw" ] || continue
+      fm_github_repository_allowed "$raw" >/dev/null || {
+        echo "error: repository remote is not the configured HTTPS parent or selected-profile fork" >&2
+        return 1
+      }
+    done <<< "$urls"
+  done <<< "$keys"
 }
 
 fm_github_git_config_value() {
@@ -712,165 +764,247 @@ fm_github_set_gh_target_repository() {
   FM_GITHUB_GH_TARGET_REPOSITORY=$canonical
 }
 
-fm_github_gh_repo_option_kind() {
-  local command=$1 option=$2
+fm_github_gh_option_kind() {
+  local family=$1 subcommand=$2 option=$3
   case "$option" in
-    --repo|-R|--branch|-b|--description|-d|--gitignore|-g|--homepage|-h|--jq|-q|--json|--language|-l|--license|-c|--limit|-L|--order|--remote|-r|--size|--sort|--source|-s|--team|-t|--template|--topic|--visibility)
-      printf value
+    --repo|-R) printf repo; return ;;
+    --org|--user|--env|--repos)
+      case "$family" in secret|variable|ruleset) printf reject; return ;; esac
       ;;
-    --add-readme|--archived|--clone|--disable-issues|--disable-wiki|--fork|--include-all-branches|--internal|--private|--public|--push|--web|-w|--no-archived|--no-forks|--no-source)
-      printf flag
-      ;;
-    --*)
-      case "$command" in
-        view) case "$option" in --show-security-settings) printf flag; return ;; esac ;;
+    --owner|-o)
+      case "$family" in
+        attestation) printf owner; return ;;
+        secret|variable|ruleset) printf reject; return ;;
       esac
-      printf unknown
       ;;
-    -*) printf unknown ;;
-    *) printf positional ;;
+    --hostname)
+      case "$family" in attestation) printf host; return ;; esac
+      ;;
+    --template|-p)
+      case "$family:$subcommand" in
+        repo:create) printf repo ;;
+        ruleset:list|ruleset:view|release:create) printf flag ;;
+        *) printf data ;;
+      esac
+      return
+      ;;
+    --source)
+      if [ "$family" = repo ] && [ "$subcommand" = list ]; then printf flag; else printf data; fi
+      return
+      ;;
+    --branch-repo)
+      if [ "$family" = issue ] && [ "$subcommand" = develop ]; then printf repo; else printf unknown; fi
+      return
+      ;;
+    --head|-H)
+      if [ "$family" = pr ] && [ "$subcommand" = create ]; then printf head; else printf data; fi
+      return
+      ;;
+    --add-blocked-by|--add-blocking|--add-sub-issue|--parent|--remove-blocked-by|--remove-blocking|--remove-sub-issue)
+      if [ "$family" = issue ] && [ "$subcommand" = edit ]; then printf issue; else printf unknown; fi
+      return
+      ;;
+    --blocked-by|--blocking)
+      if [ "$family" = issue ] && [ "$subcommand" = create ]; then printf issue; else printf unknown; fi
+      return
+      ;;
+    --duplicate-of)
+      if [ "$family" = issue ] && [ "$subcommand" = close ]; then printf issue; else printf unknown; fi
+      return
+      ;;
+    --signer-repo)
+      if [ "$family" = attestation ] && [ "$subcommand" = verify ]; then printf repo; else printf unknown; fi
+      return
+      ;;
+    --signer-workflow|--tuf-url)
+      if [ "$family" = attestation ]; then printf reject; else printf unknown; fi
+      return
+      ;;
+    --app|--archive|--assignee|--attempt|--author|--author-email|--base|--body|--body-file|--branch|--bundle|--cert-identity|--cert-identity-regex|--cert-oidc-issuer|--color|--comment|--commit|--created|--custom-trusted-root|--description|--digest-alg|--dir|--discussion-category|--env-file|--event|--exclude|--field|--format|--gitignore|--homepage|--interval|--job|--jq|--key|--label|--language|--license|--limit|--lock-reason|--match-head-commit|--mention|--milestone|--name|--notes|--notes-file|--notes-start-tag|--order|--output|--pattern|--predicate-type|--project|--raw-field|--reason|--recover|--ref|--remote|--remove-assignee|--remove-label|--remove-project|--remove-reviewer|--reviewer|--search|--signer-digest|--source-digest|--source-ref|--state|--status|--subject|--tag|--target|--team|--title|--topic|--tuf-root|--type|--upstream-remote-name|--visibility|--workflow|--add-assignee|--add-label|--add-project|--add-reviewer|--size|--sort)
+      printf data; return
+      ;;
+    --json)
+      if [ "$family" = workflow ] && [ "$subcommand" = run ]; then printf flag; else printf data; fi
+      return
+      ;;
+    --admin|--all|--approve|--archived|--auto|--bundle-from-oci|--checkout|--cleanup-tag|--clobber|--clone|--comments|--compact|--confirm|--conflict-status|--create-if-none|--debug|--default|--delete-branch|--delete-last|--deny-self-hosted-runners|--detach|--disable-auto|--disable-issues|--disable-wiki|--draft|--dry-run|--edit-last|--editor|--exclude-drafts|--exclude-pre-releases|--exit-status|--fail-fast|--fail-on-no-commits|--failed|--fill|--fill-first|--fill-verbose|--force|--fork|--generate-notes|--help|--include-all-branches|--internal|--latest|--list|--log|--log-failed|--merge|--name-only|--no-archived|--no-forks|--no-maintainer-edit|--no-public-good|--no-repos-selected|--no-source|--no-store|--no-upstream|--notes-from-tag|--parents|--patch|--prerelease|--private|--public|--push|--rebase|--recurse-submodules|--remove-milestone|--remove-parent|--remove-type|--required|--request-changes|--show-security-settings|--skip-existing|--squash|--succeed-on-no-caches|--undo|--verbose|--verify-only|--verify-tag|--watch|--web|--yaml|--yes)
+      printf flag; return
+      ;;
+    -A|-B|-D|-F|-L|-O|-S|-T|-g|-h|-i|-j|-k|-n|-q|-t) printf data; return ;;
+    -a)
+      case "$family:$subcommand" in pr:review|workflow:list|run:list|cache:delete) printf flag ;; *) printf data ;; esac
+      return
+      ;;
+    -b) printf data; return ;;
+    -c)
+      case "$family:$subcommand" in pr:status|pr:view|pr:review|issue:view|issue:develop|repo:create) printf flag ;; *) printf data ;; esac
+      return
+      ;;
+    -d)
+      case "$family:$subcommand" in pr:list|pr:close|pr:create|pr:merge|pr:revert|run:rerun|release:create) printf flag ;; *) printf data ;; esac
+      return
+      ;;
+    -e)
+      case "$family" in secret|variable) printf reject ;; *) case "$family:$subcommand" in pr:comment|pr:create|issue:comment|issue:create) printf flag ;; *) printf data ;; esac ;; esac
+      return
+      ;;
+    -f)
+      case "$family:$subcommand" in pr:checkout|pr:create|label:clone|label:create) printf flag ;; *) printf data ;; esac
+      return
+      ;;
+    -l)
+      case "$family:$subcommand" in issue:develop) printf flag ;; *) printf data ;; esac
+      return
+      ;;
+    -m)
+      case "$family:$subcommand" in pr:merge) printf flag ;; *) printf data ;; esac
+      return
+      ;;
+    -r)
+      case "$family" in secret|variable) printf reject ;; *) case "$family:$subcommand" in pr:merge|pr:review) printf flag ;; *) printf data ;; esac ;; esac
+      return
+      ;;
+    -s)
+      case "$family:$subcommand" in pr:merge) printf flag ;; *) printf data ;; esac
+      return
+      ;;
+    -u)
+      case "$family" in secret) printf reject ;; *) printf data ;; esac
+      return
+      ;;
+    -v)
+      case "$family:$subcommand" in run:view) printf flag ;; *) printf data ;; esac
+      return
+      ;;
+    -w)
+      case "$family:$subcommand" in run:list) printf data ;; *) printf flag ;; esac
+      return
+      ;;
+    -y) printf flag; return ;;
+  esac
+  printf unknown
+}
+
+fm_github_validate_gh_value() {
+  local kind=$1 value=$2 canonical owner
+  case "$kind" in
+    data|flag) return 0 ;;
+    repo)
+      canonical=$(fm_github_repository_allowed "$value") || return 1
+      fm_github_set_gh_target_repository "$canonical" || return 1
+      FM_GITHUB_GH_EXPLICIT_REPOSITORY=1
+      ;;
+    owner)
+      fm_github_owner_allowed "$value" || return 1
+      FM_GITHUB_GH_EXPLICIT_REPOSITORY=1
+      ;;
+    head)
+      case "$value" in
+        *:*) owner=${value%%:*}; fm_github_owner_allowed "$owner" ;;
+        *) return 0 ;;
+      esac
+      ;;
+    issue)
+      case "$value" in
+        https://github.com/*)
+          canonical=$(fm_github_repository_allowed "$value") || return 1
+          fm_github_set_gh_target_repository "$canonical"
+          ;;
+        *) return 0 ;;
+      esac
+      ;;
+    host) [ "$(printf '%s' "$value" | tr '[:upper:]' '[:lower:]')" = github.com ] ;;
+    *) return 1 ;;
   esac
 }
 
-fm_github_validate_gh_repo_positionals() {
-  local command=$2 arg kind expect_value='' positional=0 canonical candidate
-  shift 2
-  for arg in "$@"; do
-    if [ -n "$expect_value" ]; then
-      if [ "$expect_value" = --template ]; then
-        canonical=$(fm_github_repository_allowed "$arg") || return 1
-        fm_github_set_gh_target_repository "$canonical" || return 1
-      fi
-      expect_value=
-      continue
-    fi
-    case "$arg" in
-      --repo=*|-R?*) continue ;;
-      --*=*)
-        kind=$(fm_github_gh_repo_option_kind "$command" "${arg%%=*}")
-        [ "$kind" != unknown ] || return 1
-        if [ "${arg%%=*}" = --template ]; then
-          candidate=${arg#*=}
-          canonical=$(fm_github_repository_allowed "$candidate") || return 1
+fm_github_validate_gh_positional() {
+  local family=$1 subcommand=$2 position=$3 value=$4 canonical
+  case "$family:$subcommand:$position" in
+    repo:create:1|repo:clone:1|repo:view:1|label:clone:1|issue:transfer:2)
+      canonical=$(fm_github_repository_allowed "$value") || return 1
+      fm_github_set_gh_target_repository "$canonical" || return 1
+      FM_GITHUB_GH_EXPLICIT_REPOSITORY=1
+      ;;
+    repo:list:1)
+      fm_github_owner_allowed "$value" || return 1
+      FM_GITHUB_GH_EXPLICIT_REPOSITORY=1
+      ;;
+    attestation:download:1|attestation:verify:1)
+      case "$value" in oci://*) return 1 ;; esac
+      ;;
+  esac
+  case "$family:$subcommand" in
+    pr:checks|pr:checkout|pr:close|pr:comment|pr:diff|pr:edit|pr:lock|pr:merge|pr:ready|pr:reopen|pr:review|pr:revert|pr:unlock|pr:update-branch|pr:view|issue:close|issue:comment|issue:delete|issue:develop|issue:edit|issue:lock|issue:pin|issue:reopen|issue:transfer|issue:unlock|issue:unpin|issue:view)
+      case "$value" in
+        https://github.com/*)
+          canonical=$(fm_github_repository_allowed "$value") || return 1
           fm_github_set_gh_target_repository "$canonical" || return 1
-        fi
-        continue
-        ;;
-    esac
-    kind=$(fm_github_gh_repo_option_kind "$command" "$arg")
-    case "$kind" in
-      value) expect_value=$arg ;;
-      flag) ;;
-      unknown) return 1 ;;
-      positional)
-        positional=$((positional + 1))
-        [ "$positional" -eq 1 ] || continue
-        if [ "$command" = list ]; then
-          fm_github_owner_allowed "$arg" || return 1
-        else
-          canonical=$(fm_github_repository_allowed "$arg") || return 1
-          fm_github_set_gh_target_repository "$canonical" || return 1
-        fi
-        ;;
-    esac
-  done
-  [ -z "$expect_value" ] || return 1
-  case "$command" in create|clone) [ "$positional" -eq 1 ] ;; *) return 0 ;; esac
+          FM_GITHUB_GH_EXPLICIT_REPOSITORY=1
+          ;;
+      esac
+      ;;
+  esac
 }
 
-fm_github_validate_gh_issue_transfer() {
-  local arg expect_value=0 positional=0 canonical
-  shift 2
-  for arg in "$@"; do
-    if [ "$expect_value" -eq 1 ]; then expect_value=0; continue; fi
-    case "$arg" in
-      --repo|-R) expect_value=1 ;;
-      --repo=*|-R?*|--confirm) ;;
-      -*) return 1 ;;
-      *)
-        positional=$((positional + 1))
-        if [ "$positional" -eq 2 ]; then
-          canonical=$(fm_github_repository_allowed "$arg") || return 1
-          fm_github_set_gh_target_repository "$canonical" || return 1
-        fi
-        ;;
-    esac
-  done
-  [ "$expect_value" -eq 0 ] && [ "$positional" -eq 2 ]
-}
-
-fm_github_validate_gh_label_clone() {
-  local arg expect_value=0 canonical
-  shift 2
-  for arg in "$@"; do
-    if [ "$expect_value" -eq 1 ]; then expect_value=0; continue; fi
-    case "$arg" in
-      --repo|-R) expect_value=1 ;;
-      --repo=*|-R?*|--force) ;;
-      -*) return 1 ;;
-      *)
-        canonical=$(fm_github_repository_allowed "$arg") || return 1
-        fm_github_set_gh_target_repository "$canonical" || return 1
-        return 0
-        ;;
-    esac
-  done
-  return 1
+fm_github_validate_gh_positionals_complete() {
+  local family=$1 subcommand=$2 count=$3
+  case "$family:$subcommand" in
+    repo:create|label:clone|attestation:download|attestation:verify) [ "$count" -eq 1 ] ;;
+    repo:clone) [ "$count" -ge 1 ] && [ "$count" -le 2 ] ;;
+    repo:view|repo:list) [ "$count" -le 1 ] ;;
+    pr:checks|pr:checkout|pr:close|pr:comment|pr:diff|pr:edit|pr:lock|pr:merge|pr:ready|pr:reopen|pr:review|pr:revert|pr:unlock|pr:update-branch|pr:view) [ "$count" -le 1 ] ;;
+    issue:transfer) [ "$count" -eq 2 ] ;;
+    *) return 0 ;;
+  esac
 }
 
 fm_github_validate_gh_resource() {
-  local first=${1:-} second=${2:-} arg expect_repo=0 expect_head=0 expect_owner=0 candidate canonical owner
+  local family=${1:-} subcommand=${2:-} arg option value kind pending='' position=0
   FM_GITHUB_GH_TARGET_REPOSITORY=
-  [ "$first" != api ] || return 1
+  FM_GITHUB_GH_EXPLICIT_REPOSITORY=0
+  [ -n "$family" ] && [ -n "$subcommand" ] && [ "$family" != api ] || return 1
+  shift 2
   for arg in "$@"; do
-    if [ "$expect_repo" -eq 1 ]; then
-      candidate=$arg
-      expect_repo=0
-    elif [ "$expect_head" -eq 1 ]; then
-      case "$arg" in
-        *:*) owner=${arg%%:*}; fm_github_owner_allowed "$owner" || return 1 ;;
-      esac
-      expect_head=0
+    if [ -n "$pending" ]; then
+      fm_github_validate_gh_value "$pending" "$arg" || return 1
+      pending=
       continue
-    elif [ "$expect_owner" -eq 1 ]; then
-      fm_github_owner_allowed "$arg" || return 1
-      expect_owner=0
-      continue
-    else
-      case "$arg" in
-        --org|--org=*|--user|--user=*|--env|--env=*) return 1 ;;
-        --repo|-R) expect_repo=1; continue ;;
-        --repo=*) candidate=${arg#--repo=} ;;
-        -R?*) candidate=${arg#-R} ;;
-        --head|-H) expect_head=1; continue ;;
-        --head=*|-H?*)
-          candidate=${arg#*=}
-          [ "$candidate" != "$arg" ] || candidate=${arg#-H}
-          case "$candidate" in *:*) owner=${candidate%%:*}; fm_github_owner_allowed "$owner" || return 1 ;; esac
-          continue
-          ;;
-        --owner) expect_owner=1; continue ;;
-        --owner=*) fm_github_owner_allowed "${arg#--owner=}" || return 1; continue ;;
-        oci://*) return 1 ;;
-        https://github.com/*)
-          canonical=$(fm_github_repository_allowed "$arg") || return 1
-          fm_github_set_gh_target_repository "$canonical" || return 1
-          continue
-          ;;
-        *) continue ;;
-      esac
     fi
-    canonical=$(fm_github_repository_allowed "$candidate") || return 1
-    fm_github_set_gh_target_repository "$canonical" || return 1
+    case "$arg" in
+      --) return 1 ;;
+      --*=*)
+        option=${arg%%=*}
+        value=${arg#*=}
+        kind=$(fm_github_gh_option_kind "$family" "$subcommand" "$option")
+        case "$kind" in
+          flag) case "$value" in true|false) ;; *) return 1 ;; esac ;;
+          unknown|reject) return 1 ;;
+          *) fm_github_validate_gh_value "$kind" "$value" || return 1 ;;
+        esac
+        ;;
+      -R?*) fm_github_validate_gh_value repo "${arg#-R}" || return 1 ;;
+      -H?*)
+        kind=$(fm_github_gh_option_kind "$family" "$subcommand" -H)
+        [ "$kind" != unknown ] && fm_github_validate_gh_value "$kind" "${arg#-H}" || return 1
+        ;;
+      -q?*|-L?*|-t?*|-b?*|-B?*|-F?*|-T?*|-D?*|-O?*|-S?*|-n?*) ;;
+      -*)
+        kind=$(fm_github_gh_option_kind "$family" "$subcommand" "$arg")
+        case "$kind" in
+          flag) ;;
+          data|repo|owner|head|issue|host) pending=$kind ;;
+          *) return 1 ;;
+        esac
+        ;;
+      *)
+        position=$((position + 1))
+        fm_github_validate_gh_positional "$family" "$subcommand" "$position" "$arg" || return 1
+        ;;
+    esac
   done
-  [ "$expect_repo" -eq 0 ] && [ "$expect_head" -eq 0 ] && [ "$expect_owner" -eq 0 ] || return 1
-  if [ "$first" = repo ]; then
-    fm_github_validate_gh_repo_positionals "$@" || return 1
-  elif [ "$first" = issue ] && [ "$second" = transfer ]; then
-    fm_github_validate_gh_issue_transfer "$@" || return 1
-  elif [ "$first" = label ] && [ "$second" = clone ]; then
-    fm_github_validate_gh_label_clone "$@" || return 1
-  fi
+  [ -z "$pending" ] || return 1
+  fm_github_validate_gh_positionals_complete "$family" "$subcommand" "$position"
 }
 
 fm_github_gh_operation() {
@@ -942,24 +1076,34 @@ fm_github_context_command() {
     return
   fi
   fm_github_activate "$project" "$repository" "$required_profile" || return 1
-  local repo_path='' operation target_repository github_binary command_cwd command_repo
+  local repo_path='' operation target_repository github_binary command_cwd command_repo command_name
   if [ -d "$repository" ]; then
     repo_path=$repository
   elif [ -n "${FM_GITHUB_PROJECT_PATH:-}" ] && [ -d "$FM_GITHUB_PROJECT_PATH" ]; then
     repo_path=$FM_GITHUB_PROJECT_PATH
   fi
-  repo_path=$(fm_github_actual_repository_path "$repo_path") || return 1
-  fm_github_validate_repository_path "${repo_path:-}" || return 1
   case "${tool##*/}" in
     git)
       operation=$(fm_github_git_operation "$@")
       [ "$operation" != forbidden ] || { echo "error: routed Git command is unsupported or contains a forbidden credential, identity, or transport override" >&2; return 1; }
+      command_name=$(fm_github_git_command_name "$@") || return 1
       command_cwd=$(fm_github_git_effective_cwd "$@") || {
         echo "error: routed Git command has an invalid working directory" >&2
         return 1
       }
       if command_repo=$(fm_github_repository_toplevel "$command_cwd" 2>/dev/null); then
-        fm_github_validate_repository_path "$command_repo" || return 1
+        case "$command_name" in
+          clone|ls-remote) fm_github_validate_repository_path "${repo_path:-}" || return 1 ;;
+          *)
+            if [ -n "$repo_path" ] && ! fm_github_same_repository_copy "$command_repo" "$repo_path"; then
+              echo "error: current repository is not the configured project or task copy" >&2
+              return 1
+            fi
+            fm_github_validate_repository_path "$command_repo" || return 1
+            ;;
+        esac
+      else
+        fm_github_validate_repository_path "${repo_path:-}" || return 1
       fi
       if [ "$operation" = identity ]; then
         [ -n "$FM_GITHUB_COMMIT_NAME" ] && [ -n "$FM_GITHUB_COMMIT_EMAIL" ] || {
@@ -986,10 +1130,29 @@ fm_github_context_command() {
     gh|gh-axi)
       operation=$(fm_github_gh_operation "$@")
       [ "$operation" != forbidden ] || { echo "error: routed GitHub authentication mutation, unsafe repository mutation, API escape, or token display is forbidden" >&2; return 1; }
-      fm_github_validate_gh_resource "$@" || {
-        echo "error: routed GitHub command targets a repository outside the configured parent or selected-profile fork" >&2
-        return 1
-      }
+      case "$operation" in
+        local|helper) ;;
+        *)
+          fm_github_validate_gh_resource "$@" || {
+            echo "error: routed GitHub command has an unsupported target grammar or targets outside the configured parent or selected-profile fork" >&2
+            return 1
+          }
+          ;;
+      esac
+      case "$operation" in
+        local|helper) ;;
+        *)
+          if [ "${FM_GITHUB_GH_EXPLICIT_REPOSITORY:-0}" -eq 1 ]; then
+            fm_github_validate_repository_path "${repo_path:-}" || return 1
+          else
+            repo_path=$(fm_github_actual_repository_path "$repo_path") || {
+              echo "error: current repository is not the configured project or task copy" >&2
+              return 1
+            }
+            fm_github_validate_repository_path "${repo_path:-}" || return 1
+          fi
+          ;;
+      esac
       case "$operation" in
         local|helper) ;;
         create) fm_github_preflight_login || return 1 ;;
@@ -1011,6 +1174,7 @@ fm_github_context_command() {
       fi
       ;;
     *)
+      fm_github_validate_repository_path "${repo_path:-}" || return 1
       fm_github_preflight read || return 1
       command "$tool" "$@"
       ;;

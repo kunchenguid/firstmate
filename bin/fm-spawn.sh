@@ -800,8 +800,8 @@ routed_pane_command() {  # <command-string>
   command_q=$(shell_quote "$command_string")
   profile_q=$(shell_quote "$FM_GITHUB_PROFILE_ID")
   git_q=$(shell_quote "$FM_GITHUB_GIT_BINARY")
-  printf 'FM_HOME=%s FM_ROOT_OVERRIDE=%s FM_GITHUB_ACTIVE=1 FM_GITHUB_PROFILE_ID=%s FM_GITHUB_REPOSITORY=%s FM_GITHUB_PROJECT=%s FM_GITHUB_GIT_BINARY=%s %s/fm-github-exec.sh child-exec -- /bin/bash -c %s' \
-    "$home_q" "$root_q" "$profile_q" "$repository_q" "$project_q" "$git_q" "$SCRIPT_DIR" "$command_q"
+  printf 'FM_HOME=%s FM_ROOT_OVERRIDE=%s FM_GITHUB_ACTIVE=1 FM_GITHUB_PROFILE_ID=%s FM_GITHUB_REPOSITORY=%s FM_GITHUB_PROJECT=%s FM_GITHUB_GIT_BINARY=%s %s/fm-github-exec.sh child-exec --home %s -- /bin/bash -c %s' \
+    "$home_q" "$root_q" "$profile_q" "$repository_q" "$project_q" "$git_q" "$SCRIPT_DIR" "$home_q" "$command_q"
 }
 
 real_path_or_raw() {  # <path>

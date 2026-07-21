@@ -414,7 +414,7 @@ test_strict_account_context_wraps_every_primary_harness() {
     status=$?
     expect_code 0 "$status" "strict $harness spawn should succeed"
     launch=$(tail -1 "$LAUNCH_LOG")
-    assert_contains "$launch" "fm-github-exec.sh child-exec --" \
+    assert_contains "$launch" "fm-github-exec.sh child-exec --home " \
       "$harness launch was not wrapped by the guarded command owner"
     assert_not_contains "$launch" "FM_GITHUB_CONFIG_PATH=" \
       "$harness launch exposed a mutable routing configuration path"

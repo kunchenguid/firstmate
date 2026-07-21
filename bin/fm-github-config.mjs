@@ -10,7 +10,13 @@ import { fileURLToPath } from "node:url";
 const GENERIC_ERROR = "invalid GitHub account routing configuration";
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const codeRoot = path.resolve(scriptDir, "..");
-const fmHome = path.resolve(process.env.FM_HOME || process.env.FM_ROOT_OVERRIDE || codeRoot);
+const fmHomeInput = path.resolve(process.env.FM_HOME || process.env.FM_ROOT_OVERRIDE || codeRoot);
+let fmHome = fmHomeInput;
+try {
+  fmHome = fs.realpathSync.native(fmHomeInput);
+} catch (error) {
+  if (error?.code !== "ENOENT") throw error;
+}
 const configPath = path.join(fmHome, "config", "github-accounts.json");
 const projectsFile = path.resolve(process.env.FM_DATA_OVERRIDE || path.join(fmHome, "data"), "projects.md");
 
@@ -251,12 +257,27 @@ function normalizedMap(raw, keyValidator, valueValidator) {
 }
 
 function load() {
-  let lstat;
+  const parts = path.relative(fmHome, configPath).split(path.sep).filter(Boolean);
+  let current = fmHome;
+  let lstat = null;
   try {
-    lstat = fs.lstatSync(configPath);
+    const homeStat = fs.lstatSync(current);
+    if (!homeStat.isDirectory() || homeStat.isSymbolicLink()) throw new Error("unsafe config file");
   } catch (error) {
     if (error?.code === "ENOENT") return null;
     throw error;
+  }
+  for (const part of parts) {
+    current = path.join(current, part);
+    try {
+      lstat = fs.lstatSync(current);
+    } catch (error) {
+      if (error?.code === "ENOENT") return null;
+      throw error;
+    }
+    if (lstat.isSymbolicLink() || (current !== configPath && !lstat.isDirectory())) {
+      throw new Error("unsafe config file");
+    }
   }
   if (!lstat.isFile() || lstat.isSymbolicLink() || (process.platform !== "win32" && (lstat.mode & 0o777) !== 0o600) || lstat.size > 64 * 1024) {
     throw new Error("unsafe config file");
