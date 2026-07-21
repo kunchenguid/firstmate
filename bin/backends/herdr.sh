@@ -327,27 +327,42 @@ fm_backend_herdr_presentation_lock_namespace_valid() {
   [ "$owner" = "$expected_uid" ] && [ "$mode" = 700 ]
 }
 
+# Resolve the one verified running named-session socket path as an absolute
+# string. Requires JSON string type and non-empty length (jq -r is never used:
+# it would turn JSON null into the literal string "null"). Canonicalizes the
+# parent directory when that directory exists so symlink parents such as /tmp
+# -> /private/tmp cannot yield two lock identities for the same socket.
 fm_backend_herdr_presentation_session_socket_path() {  # <session>
-  local session=$1 sessions
+  local session=$1 sessions socket sock_dir sock_base
   [ -n "$session" ] || return 1
   sessions=$(fm_backend_herdr_cli "$session" session list --json 2>/dev/null) || return 1
-  printf '%s' "$sessions" | jq -er --arg want "$session" '
+  socket=$(printf '%s' "$sessions" | jq -er --arg want "$session" '
     [.sessions[]?
       | select(.name == $want and .running == true)
       | select((.socket_path | type) == "string")
       | select((.socket_path | length) > 0)
       | .socket_path]
     | if length == 1 then .[0] else empty end
-  ' 2>/dev/null
+  ' 2>/dev/null) || return 1
+  [ -n "$socket" ] || return 1
+  case "$socket" in
+    /*) ;;
+    *) return 1 ;;
+  esac
+  sock_dir=$(dirname "$socket")
+  sock_base=$(basename "$socket")
+  [ -n "$sock_dir" ] && [ -n "$sock_base" ] || return 1
+  if [ -d "$sock_dir" ]; then
+    sock_dir=$(cd "$sock_dir" 2>/dev/null && pwd -P) || return 1
+    socket="$sock_dir/$sock_base"
+  fi
+  printf '%s' "$socket"
 }
 
 fm_backend_herdr_presentation_session_lock_path() {  # <session>
   local session=$1 socket key dir hash
   [ -n "$session" ] || return 1
   socket=$(fm_backend_herdr_presentation_session_socket_path "$session") || return 1
-  if [ -e "$socket" ]; then
-    socket=$(cd "$(dirname "$socket")" 2>/dev/null && printf '%s/%s' "$(pwd -P)" "$(basename "$socket")") || return 1
-  fi
   if command -v shasum >/dev/null 2>&1; then
     hash=$(printf '%s\0%s' "$session" "$socket" | shasum -a 256 2>/dev/null | awk '{print $1}')
   elif command -v sha256sum >/dev/null 2>&1; then
