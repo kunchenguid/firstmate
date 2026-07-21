@@ -263,6 +263,35 @@ test_working_inspection_status_remains_live() {
   pass "working process inspection keeps the existing live-holder behavior"
 }
 
+test_acquire_fails_closed_on_unwritable_state() {
+  local out status
+  rm -f "$LOCK_FILE"
+  chmod u-w "$STATE_DIR"
+  out=$(run_lock 2>&1)
+  status=$?
+  chmod u+w "$STATE_DIR"
+  expect_code 1 "$status" "unwritable-state acquire"
+  assert_contains "$out" "cannot write session lock" "failed lock write did not report the cause"
+  assert_not_contains "$out" "lock acquired" "failed lock write still reported success"
+  assert_absent "$LOCK_FILE" "failed lock write left a lock file behind"
+  pass "acquire fails closed when the lock file cannot be written"
+}
+
+test_release_fails_closed_on_unremovable_lock() {
+  local out status
+  printf '%s\n' "$$" > "$LOCK_FILE"
+  chmod u-w "$STATE_DIR"
+  out=$(run_lock release 2>&1)
+  status=$?
+  chmod u+w "$STATE_DIR"
+  expect_code 1 "$status" "unremovable-lock release"
+  assert_contains "$out" "cannot remove session lock" "failed lock removal did not report the cause"
+  assert_not_contains "$out" "lock released" "failed lock removal still reported success"
+  assert_present "$LOCK_FILE" "failed lock removal deleted the lock anyway"
+  rm -f "$LOCK_FILE"
+  pass "release fails closed when the lock file cannot be removed"
+}
+
 test_unknown_subcommand_rejected() {
   local out status
   rm -f "$LOCK_FILE"
@@ -295,5 +324,7 @@ test_blocked_inspection_status_never_reports_stale
 test_blocked_inspection_refuses_nonforced_release
 test_blocked_inspection_force_release_still_works
 test_working_inspection_status_remains_live
+test_acquire_fails_closed_on_unwritable_state
+test_release_fails_closed_on_unremovable_lock
 test_unknown_subcommand_rejected
 test_invalid_argument_shapes_rejected

@@ -116,18 +116,18 @@ if [ "$command" = "release" ]; then
   fi
   old=$(cat "$LOCK")
   if [ "$force" -eq 1 ]; then
-    rm -f "$LOCK"
+    rm -f "$LOCK" || { echo "error: cannot remove session lock $LOCK" >&2; exit 1; }
     echo "WARNING: forced session lock release; took lock from pid $old" >&2
     exit 0
   fi
   me=$(harness_pid 2>/dev/null || true)
   if [ -n "$me" ] && [ "$old" = "$me" ]; then
-    rm -f "$LOCK"
+    rm -f "$LOCK" || { echo "error: cannot remove session lock $LOCK" >&2; exit 1; }
     echo "lock released: harness pid $old"
     exit 0
   fi
   if ! holder_alive "$old"; then
-    rm -f "$LOCK"
+    rm -f "$LOCK" || { echo "error: cannot remove session lock $LOCK" >&2; exit 1; }
     echo "stale lock cleared: pid $old dead or not a harness"
     exit 0
   fi
@@ -139,7 +139,7 @@ if ! process_inspection_available; then
   printf 'error: %s\n' "$(process_inspection_failure)" >&2
   exit 1
 fi
-mkdir -p "$STATE"
+mkdir -p "$STATE" || { echo "error: cannot create state dir $STATE" >&2; exit 1; }
 me=$(harness_pid) || { echo "error: cannot locate harness process in ancestry" >&2; exit 1; }
 if [ -f "$LOCK" ]; then
   old=$(cat "$LOCK")
@@ -148,5 +148,5 @@ if [ -f "$LOCK" ]; then
     exit 1
   fi
 fi
-echo "$me" > "$LOCK"
+echo "$me" > "$LOCK" || { echo "error: cannot write session lock $LOCK" >&2; exit 1; }
 echo "lock acquired: harness pid $me"
