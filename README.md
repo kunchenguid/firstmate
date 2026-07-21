@@ -199,6 +199,7 @@ Firstmate's skills live in two separate places with different audiences:
 - [docs/architecture.md](docs/architecture.md) - maintainer architecture for the crew, supervision, worktrees, secondmates, and project modes.
 - [docs/configuration.md](docs/configuration.md) - environment variables, `FM_HOME`, runtime backend selection, optional X mode, the files you set, and harness support.
 - [docs/calm.md](docs/calm.md) - current Pi `/calm` behavior and supported presentation limits.
+- [docs/dispatch-pool.md](docs/dispatch-pool.md) - the opt-in multi-account dispatch pool: rotate new crewmate spawns across several agent accounts and fail over when one hits its usage limit.
 - [docs/wedge-alarm.md](docs/wedge-alarm.md) - configure the active alert for an away-mode escalation delivery that gets stuck.
 - [docs/tmux-backend.md](docs/tmux-backend.md) - current setup and limits for the tmux reference backend.
 - [docs/herdr-backend.md](docs/herdr-backend.md) - current setup, safety boundaries, and limits for the experimental Herdr backend.
