@@ -78,9 +78,11 @@ jobs:
           command -v jq >/dev/null || { echo "::error::jq is required"; exit 1; }
           /bin/bash -n bin/fm-fleet-snapshot.sh
 
-          pi_timeout_output=$(/bin/bash tests/fm-pi-bash-timeout.test.sh)
+          # Resolver only: this lane must stay free of Node/TypeScript. The Pi
+          # extension runtime coverage runs in the Node-capable tests job.
+          pi_timeout_output=$(/bin/bash tests/fm-pi-bash-timeout-resolver.test.sh)
           printf '%s\n' "$pi_timeout_output"
-          printf '%s\n' "$pi_timeout_output" | grep -q '^# all fm-pi-bash-timeout tests passed$'
+          printf '%s\n' "$pi_timeout_output" | grep -q '^# all fm-pi-bash-timeout-resolver tests passed$'
 
           snapshot_output=$(/bin/bash tests/fm-fleet-snapshot-view.test.sh)
           printf '%s\n' "$snapshot_output"
