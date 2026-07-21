@@ -303,16 +303,25 @@ parse_reset_epoch() {
     am) [ "$hh" -le 12 ] || return 1; [ "$hh" -ne 12 ] || hh=0 ;;
     pm) [ "$hh" -le 12 ] || return 1; [ "$hh" -eq 12 ] || hh=$((hh + 12)) ;;
   esac
-  [ -n "$tz" ] || tz=$(date +%Z)
-  day=$(TZ="$tz" date +%Y-%m-%d 2>/dev/null) || return 1
   # Pin :00 seconds explicitly - BSD `date -j -f` leaves the CURRENT seconds in
   # place for any field the format string omits, which would make an otherwise
   # exact reset time drift by up to 59 seconds.
   local hhmm
   hhmm=$(printf '%02d:%02d:00' "$hh" "$mm")
-  epoch=$(TZ="$tz" date -j -f '%Y-%m-%d %H:%M:%S' "$day $hhmm" +%s 2>/dev/null) \
-    || epoch=$(TZ="$tz" date -d "$day $hhmm" +%s 2>/dev/null) \
-    || return 1
+  # A message that names no timezone means local time: TZ stays untouched. A bare
+  # abbreviation like PST is not a valid POSIX TZ value - both GNU and BSD date
+  # silently read it as UTC, which would skew the reset by the local UTC offset.
+  if [ -n "$tz" ]; then
+    day=$(TZ="$tz" date +%Y-%m-%d 2>/dev/null) || return 1
+    epoch=$(TZ="$tz" date -j -f '%Y-%m-%d %H:%M:%S' "$day $hhmm" +%s 2>/dev/null) \
+      || epoch=$(TZ="$tz" date -d "$day $hhmm" +%s 2>/dev/null) \
+      || return 1
+  else
+    day=$(date +%Y-%m-%d 2>/dev/null) || return 1
+    epoch=$(date -j -f '%Y-%m-%d %H:%M:%S' "$day $hhmm" +%s 2>/dev/null) \
+      || epoch=$(date -d "$day $hhmm" +%s 2>/dev/null) \
+      || return 1
+  fi
   now=$(now_epoch)
   # A reset that already passed today is tomorrow's reset.
   while [ "$epoch" -le "$now" ]; do

@@ -31,8 +31,13 @@
 #      poolable ship/scout task.
 #   2. Refuses a dirty worktree; records the task's branch and tip commit.
 #   3. Cools the OLD account down so rotation stops handing it work.
-#   4. Selects a healthy replacement account, excluding the old one.
-#   5. Kills the old agent endpoint and returns its worktree to the pool.
+#   4. Selects a healthy replacement account, excluding the old one. Accounts on
+#      the task's own harness are preferred; when none is healthy the search
+#      widens to every harness, and a cross-harness move drops the recorded
+#      model/effort so the new harness runs on its own defaults.
+#   5. Kills the old agent endpoint, re-checks that the worktree is still clean
+#      (the agent may have written while being shut down), and only then returns
+#      the worktree to the pool.
 #   6. Appends a RESUME NOTE to data/<id>/brief.md naming the branch and tip.
 #   7. Respawns the task on the replacement account via fm-spawn.sh --pool-backend.
 #
@@ -64,6 +69,16 @@ log() {
 die() {
   log "$*"
   exit 1
+}
+
+# Print the worktree's uncommitted changes, minus firstmate's own launch-time
+# hook files (the same exclusion list fm-teardown uses: untracked artifacts
+# firstmate wrote itself, not the crewmate's work). Fails only when git status
+# itself cannot be read.
+worktree_dirty() {
+  local wt=$1 raw
+  raw=$(git -C "$wt" status --porcelain 2>/dev/null) || return 1
+  printf '%s\n' "$raw" | grep -vE '^\?\? (\.claude/|\.fm-grok-turnend$)' | grep -v '^[[:space:]]*$' || true
 }
 
 case "${1:-}" in
@@ -132,13 +147,9 @@ esac
 [ -f "$DATA/$ID/brief.md" ] || die "task '$ID' has no brief at $DATA/$ID/brief.md"
 
 # --- the refusal that protects unlanded work --------------------------------
-#
-# Same exclusion list fm-teardown uses: firstmate's own launch-time hook files
-# are untracked artifacts it wrote itself, not the crewmate's work.
 git -C "$WT" rev-parse --git-dir >/dev/null 2>&1 || die "recorded worktree for '$ID' is not a git worktree ($WT)"
-DIRTY_RAW=$(git -C "$WT" status --porcelain 2>/dev/null) \
+DIRTY=$(worktree_dirty "$WT") \
   || die "cannot read git status in $WT; refusing to abandon a worktree whose state is unknown"
-DIRTY=$(printf '%s\n' "$DIRTY_RAW" | grep -vE '^\?\? (\.claude/|\.fm-grok-turnend$)' | grep -v '^[[:space:]]*$' || true)
 if [ -n "$DIRTY" ]; then
   log "REFUSED: worktree $WT has uncommitted changes."
   printf '%s\n' "$DIRTY" >&2
@@ -160,14 +171,17 @@ pool_call() {
   FM_ROOT_OVERRIDE="${FM_ROOT_OVERRIDE:-}" "$FM_ROOT/bin/fm-pool.sh" "$@"
 }
 
-set +e
+POOL_STATUS=0
 if [ -n "$TO" ]; then
-  POOL_OUT=$(pool_call resolve "$TO")
+  POOL_OUT=$(pool_call resolve "$TO") || POOL_STATUS=$?
 else
-  POOL_OUT=$(pool_call select ${OLD_POOL:+--exclude "$OLD_POOL"} --peek)
+  POOL_OUT=$(pool_call select ${HARNESS:+--harness "$HARNESS"} ${OLD_POOL:+--exclude "$OLD_POOL"} --peek) || POOL_STATUS=$?
+  if [ "$POOL_STATUS" = 4 ] && [ -n "$HARNESS" ]; then
+    log "no healthy $HARNESS account is available; widening the search to every harness"
+    POOL_STATUS=0
+    POOL_OUT=$(pool_call select ${OLD_POOL:+--exclude "$OLD_POOL"} --peek) || POOL_STATUS=$?
+  fi
 fi
-POOL_STATUS=$?
-set -e
 case "$POOL_STATUS" in
   0) ;;
   3) die "no dispatch pool is configured, so there is no other account to fail over to" ;;
@@ -176,11 +190,18 @@ esac
 NEW_POOL=$(printf '%s\n' "$POOL_OUT" | sed -n 's/^backend=//p' | head -1)
 [ -n "$NEW_POOL" ] || die "dispatch pool returned no replacement account"
 [ "$NEW_POOL" != "$OLD_POOL" ] || die "the dispatch pool offered the same account ($NEW_POOL); nothing to fail over to"
+NEW_HARNESS=$(printf '%s\n' "$POOL_OUT" | sed -n 's/^harness=//p' | head -1)
+CROSS_HARNESS=0
+if [ -n "$HARNESS" ] && [ -n "$NEW_HARNESS" ] && [ "$NEW_HARNESS" != "$HARNESS" ]; then
+  CROSS_HARNESS=1
+fi
 
 printf 'task      %s (%s, harness=%s)\n' "$ID" "$KIND" "$HARNESS"
 printf 'branch    %s at %s\n' "$BRANCH" "$TIP"
 printf 'worktree  %s (clean, will be abandoned)\n' "$WT"
 printf 'account   %s -> %s\n' "${OLD_POOL:-<unpooled>}" "$NEW_POOL"
+[ "$CROSS_HARNESS" = 0 ] || printf 'harness   %s -> %s (recorded model/effort dropped; %s uses its own defaults)\n' \
+  "$HARNESS" "$NEW_HARNESS" "$NEW_HARNESS"
 
 if [ "$DRY_RUN" = 1 ]; then
   log "dry run: nothing changed"
@@ -237,6 +258,13 @@ if [ -n "$TARGET" ]; then
   fm_backend_kill "$RUNTIME_BACKEND" "$TARGET" 2>/dev/null \
     || log "could not kill the old endpoint $TARGET; continuing"
 fi
+DIRTY=$(worktree_dirty "$WT") \
+  || die "cannot re-read git status in $WT after killing the old agent; the worktree was NOT abandoned"
+if [ -n "$DIRTY" ]; then
+  log "REFUSED: worktree $WT gained uncommitted changes between the first check and the old agent's shutdown."
+  printf '%s\n' "$DIRTY" >&2
+  die "the worktree was NOT abandoned so that work is preserved; commit it on '$BRANCH', then re-run"
+fi
 if command -v treehouse >/dev/null 2>&1; then
   if ! ( cd "$FM_ROOT" && treehouse return --force "$WT" ) >/dev/null 2>&1; then
     log "could not return the old worktree $WT to the pool; the replacement may need to wait for the branch"
@@ -254,6 +282,8 @@ fi
 spawn_args=("$ID" "$PROJECT" --pool-backend "$NEW_POOL")
 [ "$KIND" != scout ] || spawn_args+=(--scout)
 [ "$RUNTIME_BACKEND" = tmux ] || spawn_args+=(--backend "$RUNTIME_BACKEND")
-[ -z "$MODEL" ] || [ "$MODEL" = default ] || spawn_args+=(--model "$MODEL")
-[ -z "$EFFORT" ] || [ "$EFFORT" = default ] || spawn_args+=(--effort "$EFFORT")
+if [ "$CROSS_HARNESS" = 0 ]; then
+  [ -z "$MODEL" ] || [ "$MODEL" = default ] || spawn_args+=(--model "$MODEL")
+  [ -z "$EFFORT" ] || [ "$EFFORT" = default ] || spawn_args+=(--effort "$EFFORT")
+fi
 exec "$FM_ROOT/bin/fm-spawn.sh" "${spawn_args[@]}"

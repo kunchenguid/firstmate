@@ -65,6 +65,64 @@ failover() {
     "$FAILOVER" "$@" 2>&1
 }
 
+# Like failover(), but with a fake FM_ROOT whose bin/fm-spawn.sh records its
+# argv instead of launching, so respawn flag assertions can run end to end.
+# fm-pool.sh is forwarded to the real one; everything else resolves as usual.
+make_fakeroot() {
+  local case_dir=$1 fakeroot="$1/fakeroot"
+  mkdir -p "$fakeroot/bin"
+  cat > "$fakeroot/bin/fm-pool.sh" <<SH
+#!/usr/bin/env bash
+exec "$ROOT/bin/fm-pool.sh" "\$@"
+SH
+  cat > "$fakeroot/bin/fm-spawn.sh" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$@" > "$case_dir/spawn.args"
+SH
+  chmod +x "$fakeroot/bin/fm-pool.sh" "$fakeroot/bin/fm-spawn.sh"
+  printf '%s\n' "$fakeroot"
+}
+
+failover_rooted() {
+  local root=$1 home=$2 fakebin=$3
+  shift 3
+  FM_ROOT_OVERRIDE="$root" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_POOL_KEY_DIR="$home/keys" PATH="$fakebin:$PATH" \
+    "$FAILOVER" "$@" 2>&1
+}
+
+# Rewrite a case's meta and pool config for the harness-selection tests: a
+# claude task with a pinned model/effort, in a pool that mixes claude and
+# cursor accounts, with the rotation cursor parked on the old account so a
+# harness-blind selection would offer cursor-1 next.
+mixed_harness_case() {
+  local home=$1 wt=$2 proj=$3 id=$4
+  fm_write_meta "$home/state/$id.meta" \
+    "window=firstmate:fm-$id" \
+    "worktree=$wt" \
+    "project=$proj" \
+    "harness=claude" \
+    "kind=ship" \
+    "mode=no-mistakes" \
+    "yolo=off" \
+    "tasktmp=/tmp/fm-$id" \
+    "model=sonnet" \
+    "effort=high" \
+    "pool_backend=claude-1"
+  cat > "$home/config/dispatch-pool.json" <<'JSON'
+{
+  "backends": [
+    { "id": "claude-1", "harness": "claude" },
+    { "id": "cursor-1", "harness": "cursor" },
+    { "id": "claude-2", "harness": "claude" }
+  ]
+}
+JSON
+  printf 'claude-1\n' > "$home/state/.pool-cursor"
+}
+
 # Commit something on a task branch so the worktree looks like real work in flight.
 commit_work() {
   local wt=$1
@@ -225,8 +283,97 @@ test_dry_run_changes_nothing() {
   pass "--dry-run reports the planned move and changes nothing"
 }
 
+test_prefers_a_same_harness_account() {
+  local rec id out status fakeroot args
+  id=failover-samehar-g1
+  rec=$(make_case failover-samehar "$id")
+  read_case "$rec"
+  commit_work "$WT_DIR"
+  mixed_harness_case "$HOME_DIR" "$WT_DIR" "$PROJ_DIR" "$id"
+  fakeroot=$(make_fakeroot "$CASE_DIR")
+
+  set +e
+  out=$(failover_rooted "$fakeroot" "$HOME_DIR" "$FAKEBIN_DIR" "$id")
+  status=$?
+  set -e
+  expect_code 0 "$status" "a same-harness failover should succeed: $out"
+  assert_contains "$out" "account   claude-1 -> claude-2" \
+    "the healthy same-harness account should win over the rotation-next cursor account"
+  assert_present "$CASE_DIR/spawn.args" "the respawn should have been invoked"
+  args=$(cat "$CASE_DIR/spawn.args")
+  assert_contains "$args" "claude-2" "the respawn should target the same-harness account"
+  assert_contains "$args" "--model" "a same-harness move keeps the recorded model"
+  assert_contains "$args" "sonnet" "the recorded model should be forwarded verbatim"
+  assert_contains "$args" "--effort" "a same-harness move keeps the recorded effort"
+  pass "failover prefers a healthy account on the task's own harness and keeps model/effort"
+}
+
+test_falls_back_across_harnesses_and_drops_model() {
+  local rec id out status fakeroot args
+  id=failover-crosshar-h1
+  rec=$(make_case failover-crosshar "$id")
+  read_case "$rec"
+  commit_work "$WT_DIR"
+  mixed_harness_case "$HOME_DIR" "$WT_DIR" "$PROJ_DIR" "$id"
+  FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$HOME_DIR/state" \
+    FM_CONFIG_OVERRIDE="$HOME_DIR/config" FM_POOL_KEY_DIR="$HOME_DIR/keys" \
+    "$ROOT/bin/fm-pool.sh" cooldown claude-2 --seconds 900 >/dev/null
+  fakeroot=$(make_fakeroot "$CASE_DIR")
+
+  set +e
+  out=$(failover_rooted "$fakeroot" "$HOME_DIR" "$FAKEBIN_DIR" "$id")
+  status=$?
+  set -e
+  expect_code 0 "$status" "a cross-harness fallback failover should succeed: $out"
+  assert_contains "$out" "widening the search to every harness" \
+    "the fallback past the harness filter should be announced"
+  assert_contains "$out" "account   claude-1 -> cursor-1" \
+    "with no healthy claude account the task should move to the cursor account"
+  assert_contains "$out" "harness   claude -> cursor" \
+    "a cross-harness move should be called out in the plan"
+  assert_present "$CASE_DIR/spawn.args" "the respawn should have been invoked"
+  args=$(cat "$CASE_DIR/spawn.args")
+  assert_contains "$args" "cursor-1" "the respawn should target the fallback account"
+  assert_not_contains "$args" "--model" \
+    "a cross-harness move must not hand the new harness a foreign model id"
+  assert_not_contains "$args" "--effort" \
+    "a cross-harness move must not hand the new harness a foreign effort"
+  pass "failover widens to another harness only when its own has no healthy account, dropping model/effort"
+}
+
+test_recheck_after_kill_preserves_late_work() {
+  local rec id out status
+  id=failover-late-i1
+  rec=$(make_case failover-late "$id")
+  read_case "$rec"
+  commit_work "$WT_DIR"
+  # A still-running agent can write between the first cleanliness check and its
+  # own shutdown; this fake tmux plays that agent by dirtying the worktree the
+  # moment the old endpoint is killed.
+  cat > "$FAKEBIN_DIR/tmux" <<SH
+#!/usr/bin/env bash
+printf 'written during shutdown\n' > "$WT_DIR/late-work.txt"
+SH
+  chmod +x "$FAKEBIN_DIR/tmux"
+
+  set +e
+  out=$(failover "$HOME_DIR" "$FAKEBIN_DIR" "$id" --no-respawn)
+  status=$?
+  set -e
+  [ "$status" -ne 0 ] || fail "work written during the old agent's shutdown must abort the abandonment"
+  assert_contains "$out" "NOT abandoned" \
+    "the refusal should state the worktree was kept"
+  assert_contains "$out" "late-work.txt" \
+    "the refusal should show WHAT appeared since the first check"
+  [ -f "$WT_DIR/late-work.txt" ] || fail "the late work must survive a refused abandonment"
+  pass "a worktree dirtied between the first check and the kill is refused, not abandoned"
+}
+
 test_refuses_a_dirty_worktree
 test_succeeds_on_a_clean_worktree
+test_prefers_a_same_harness_account
+test_falls_back_across_harnesses_and_drops_model
+test_recheck_after_kill_preserves_late_work
 test_refuses_a_detached_head
 test_refuses_a_default_branch
 test_refuses_when_no_other_account_is_healthy
