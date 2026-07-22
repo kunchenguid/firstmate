@@ -1277,14 +1277,11 @@ else
     work="$RUN_TMP/w$idx"
     rc=$(cat "$work/exit" 2>/dev/null || echo 1)
     duration=$(cat "$work/duration_ms" 2>/dev/null || echo 0)
-    out="$work/stdout"
+    out="$work/output"
     end_iso=$(now_iso)
     # Replay captured output after the worker finishes so markers stay ordered.
     if [ -s "$out" ]; then
       cat "$out"
-    fi
-    if [ -s "$work/stderr" ]; then
-      cat "$work/stderr" >&2 || true
     fi
     mode=$(stat -f %Lp "$work" 2>/dev/null || stat -c %a "$work" 2>/dev/null || echo unknown)
     case "$mode" in
@@ -1340,7 +1337,7 @@ else
         FM_PROJECTS_OVERRIDE FM_CONFIG_OVERRIDE FM_BACKEND 2>/dev/null || true
       cd "$ROOT" || exit 1
       begin_ms=$(now_ms)
-      bash "$script" >"$work/stdout" 2>"$work/stderr"
+      bash "$script" >"$work/output" 2>&1
       rc=$?
       end_ms=$(now_ms)
       duration=$((end_ms - begin_ms))

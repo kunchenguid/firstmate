@@ -475,7 +475,7 @@ test_jobs_requires_proven_isolated() {
 }
 
 test_jobs_parallel_scheduler_and_failure_propagation() {
-  local tmp repo runner evidence a b c rc begin_n end_n
+  local tmp repo runner evidence a b c d rc begin_n end_n
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-jobs-sched.XXXXXX")
   repo="$tmp/repo"
   runner="$repo/bin/fm-test-run.sh"
@@ -483,6 +483,7 @@ test_jobs_parallel_scheduler_and_failure_propagation() {
   a=tests/fm-no-mistakes-ownership.test.sh
   b=tests/fm-stow-contract.test.sh
   c=tests/fm-lint.test.sh
+  d=tests/fm-supervision-instructions.test.sh
   mkdir -p "$repo/bin" "$repo/tests" "$evidence"
   cp "$RUNNER" "$runner"
   cat >"$repo/$a" <<'SH'
@@ -553,6 +554,27 @@ SH
   [ "$rc" -ne 0 ] || { rm -rf "$tmp"; fail "jobs aggregate must be non-zero when a proven worker fails"; }
   grep -q 'FM_TEST_SUMMARY total=2 failed=1' "$tmp/out4" \
     || { rm -rf "$tmp"; fail "jobs failure summary wrong: $(grep FM_TEST_SUMMARY "$tmp/out4")"; }
+
+  cat >"$repo/$d" <<'SH'
+#!/usr/bin/env bash
+echo "skip: herdr not found" >&2
+exit 0
+SH
+  chmod +x "$repo/$d"
+  set +e
+  "$runner" --jobs 2 --fail-on-gate-skip 'herdr not found' "$d" >"$tmp/out5" 2>"$tmp/err5"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || { rm -rf "$tmp"; fail "parallel stderr gate skip must hard-fail"; }
+  grep -q 'FM_TEST_SUMMARY total=1 failed=1' "$tmp/out5" \
+    || { rm -rf "$tmp"; fail "parallel stderr hard-fail summary wrong: $(grep FM_TEST_SUMMARY "$tmp/out5")"; }
+
+  "$runner" --jobs 2 "$d" >"$tmp/out6" 2>"$tmp/err6" \
+    || { rm -rf "$tmp"; fail "ordinary parallel stderr gate skip must remain successful"; }
+  grep -Eq '^FM_TEST_END .+ exit=0 duration_ms=[0-9]+ gate_skip=true$' "$tmp/out6" \
+    || { rm -rf "$tmp"; fail "parallel stderr gate skip was not recorded"; }
+  grep -q 'FM_TEST_SUMMARY total=1 failed=0 skipped_gate=1' "$tmp/out6" \
+    || { rm -rf "$tmp"; fail "parallel stderr skip summary wrong: $(grep FM_TEST_SUMMARY "$tmp/out6")"; }
 
   rm -rf "$tmp"
   pass "jobs scheduler runs proven scripts; failure propagates; non-proven refused"
