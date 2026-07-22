@@ -147,6 +147,7 @@ test_spawn_uses_cursor_agent_oneshot() {
   assert_grep 'kind=ship' "$home/state/$id.meta" \
     "spawn meta should record a crew ship task"
   launch=$(cat "$launchlog")
+  # shellcheck disable=SC2016
   assert_contains "$launch" 'cursor-agent -p --force --trust --workspace "$(pwd)"' \
     "spawn launch command missing cursor-agent oneshot flags"
   assert_contains "$launch" "\"\$(cat '$home/data/$id/brief.md')\"" \
