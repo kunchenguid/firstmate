@@ -78,7 +78,7 @@
 #          Unset/0 (the default) runs every sweep exactly as before - this flag
 #          is purely additive.
 #        fm-bootstrap.sh install <tool>...
-#          Install the named tools (only ones the captain approved).
+#          Install the named tools (only ones Jay approved).
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

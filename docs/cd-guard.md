@@ -141,7 +141,7 @@ tests/fm-arm-pretool-check.test.sh
 ## Live validation record, 2026-07-11
 
 Each harness ran against a scratch primary-shaped firstmate checkout: a plain git repo with `AGENTS.md`, `bin/` holding the real `fm-cd-pretool-check.sh`, `fm-cd-command-policy.mjs`, and `fm-arm-command-policy.mjs` plus a no-op dummy `fm-arm-pretool-check.sh`, a `projects/foo/` stand-in clone, and the tracked harness hook config.
-No live watcher, fleet state, or the captain's real primary checkout was involved.
+No live watcher, fleet state, or Jay's real primary checkout was involved.
 Each harness was told to run, as separate tool calls, a top-level `cd projects/foo && touch <abs>/BLOCKED` (must be denied) and a subshell `(cd projects/foo && touch <abs>/ALLOWED)` (must run), with the sentinel files as the observable.
 
 Harness versions and outcomes:

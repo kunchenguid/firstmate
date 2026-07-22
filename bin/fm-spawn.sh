@@ -414,7 +414,7 @@ launch_template() {
     # predicted-next-prompt ghost text, which renders as dim/faint text inside an
     # otherwise-empty composer and would otherwise read like real typed input when
     # firstmate captures the pane (see the harness-adapters skill). It is a per-launch env
-    # prefix scoped to this firstmate-launched agent; it never touches the captain's
+    # prefix scoped to this firstmate-launched agent; it never touches Jay's
     # global config. The CLI's --prompt-suggestions flag is print/SDK-mode only and
     # does NOT suppress the interactive ghost text (verified empirically), so the env
     # var is the correct control. The dim-aware composer reader in fm-tmux-lib.sh is
@@ -846,7 +846,7 @@ case "$BACKEND" in
     SES=$(fm_backend_tmux_container_ensure)
     T="$SES:$W"
     # #134 robustness (tmux): fm_backend_tmux_create_task captures a stable window
-    # id and pins the window name (automatic-rename/allow-rename off) so a captain's
+    # id and pins the window name (automatic-rename/allow-rename off) so Jay's
     # non-default tmux config cannot rename the window away from fm-<id> once
     # treehouse cd's into the worktree. WT_TARGET carries that stable id for the
     # rename-critical worktree-detection steps below; the persisted window= handle

@@ -9,11 +9,11 @@
 #   - <name> [<mode> +yolo] - <desc> (added <date>)    -> <mode> on
 #
 # mode = how a finished change reaches main:
-#   no-mistakes  full pipeline -> PR -> captain merge (default)
-#   direct-PR    push + PR via gh-axi, no pipeline -> captain merge
-#   local-only   local branch, no remote/PR -> captain approve -> guarded local merge
+#   no-mistakes  full pipeline -> PR -> merge approval from Jay (default)
+#   direct-PR    push + PR via gh-axi, no pipeline -> merge approval from Jay
+#   local-only   local branch, no remote/PR -> Jay approval -> guarded local merge
 # yolo (orthogonal) = when on, firstmate makes approval decisions itself (PR merges,
-#   ask-user findings, local-only merge approval) without checking the captain - except
+#   ask-user findings, local-only merge approval) without checking Jay - except
 #   anything destructive/irreversible/security-sensitive, which still escalates.
 #
 # An unknown/missing project or unknown mode falls back to "no-mistakes off" and warns

@@ -453,7 +453,7 @@ fm_backend_herdr_projection_focus_restore() {  # <session> <snapshot> <operation
 }
 
 # fm_backend_herdr_projection_close_pane_focus_preserving: close one exact
-# response-derived projection pane without leaving the captain focused
+# response-derived projection pane without leaving Jay focused
 # anywhere else.
 # If the target belongs to the active tab, exact tab preservation is
 # impossible, so cleanup refuses instead of changing focus.
@@ -723,7 +723,7 @@ fm_backend_herdr_workspace_find() {  # <session>
 # by label alone, to firstmate's own auto-created container - one tab, label
 # "1". workspace_find adopted that pre-existing (captain-owned, LIVE) workspace
 # by the label match, the heuristic matched too, and the very next spawn
-# closed the captain's own live pane 27ms after creating its task tab. The
+# closed Jay's own live pane 27ms after creating its task tab. The
 # fix is structural, not another heuristic: only a workspace THIS SAME
 # fm_backend_herdr_workspace_ensure call just created carries a non-empty
 # seeded_tab_id at all (see FM_BACKEND_HERDR_WS_SEEDED_TAB_ID below); an

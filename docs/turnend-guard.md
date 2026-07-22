@@ -61,7 +61,7 @@ That warning uses `bin/fm-supervision-instructions.sh --repair-line`, so it poin
 
 ## Empirical Validation
 
-All harnesses were validated on 2026-07-08 in scratch repos or throwaway homes, not against the captain's live primary fleet state.
+All harnesses were validated on 2026-07-08 in scratch repos or throwaway homes, not against Jay's live primary fleet state.
 
 Claude Code 2.1.204 preserved the existing behavior.
 Hook file used: `.claude/settings.json`.

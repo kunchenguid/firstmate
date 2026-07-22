@@ -11,15 +11,15 @@
 # chat-only reply therefore strands, unseen.
 #
 # The marker lets the secondmate tell its supervisor's request apart from a
-# message the captain typed directly into its pane:
+# message Jay typed directly into its pane:
 #
 #   - marked   -> a from-firstmate request. Do the work, then respond via the
 #                 STATUS/ESCALATION path (a status line for a terse result, or a
 #                 doc plus a status pointer - the scout-report pattern - for a
 #                 detailed one) so it surfaces to the main firstmate via the
 #                 watcher signal. It MUST NOT respond only in chat.
-#   - unmarked -> the captain typing directly. Stay conversational, exactly as
-#                 before: authoritative captain intervention.
+#   - unmarked -> Jay typing directly. Stay conversational, exactly as
+#                 before: authoritative Jay's intervention.
 #
 # This contract lives in the generated secondmate charter (bin/fm-brief.sh) so it
 # travels with the live secondmate, and is summarized in AGENTS.md.

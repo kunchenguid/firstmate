@@ -85,13 +85,13 @@ An auto-detected cmux spawn prints the same loud stderr `NOTICE` herdr's auto-de
 
 Auto-detection selects the SESSION provider only.
 It has no bearing on the one-time socket-access setup ("Setup" above): a viable `automation.socketControlMode` is still required for the very first cmux-backed spawn to succeed, auto-detected or explicit, and the existing loud spawn refusal (`fm_backend_cmux_ensure_running`) still fires when it is missing.
-That refusal message names the viable modes and the `config/backend`/`--backend tmux` opt-out, so a captain who never explicitly chose cmux - and only landed on it because firstmate happened to be launched from inside a cmux terminal - gets a self-contained answer either way: finish the socket setup to actually use cmux, or opt out back to tmux.
+That refusal message names the viable modes and the `config/backend`/`--backend tmux` opt-out, so a user who never explicitly chose cmux - and only landed on it because firstmate happened to be launched from inside a cmux terminal - gets a self-contained answer either way: finish the socket setup to actually use cmux, or opt out back to tmux.
 
 The original build's env-injection finding rested on the source read above alone; it has since been corroborated live (2026-07-04, cmux 0.64.17 build 97): the inherited environment of a tmux server started from a cmux tab on the reference machine carries `CMUX_WORKSPACE_ID`, `CMUX_TAB_ID`, `CMUX_SOCKET_PATH`, `CMUX_BUNDLE_ID`, and `__CFBundleIdentifier=com.cmuxterm.app` into every pane, and firstmate separately confirmed the full injected set on a live tab shell via `ps eww`.
 
 ### The bundled claude wrapper strips `CMUX_*` (unanticipated, load-bearing finding)
 
-Verified live 2026-07-04 against the installed cmux 0.64.17 (build 97), macOS aarch64; the captain's app was not modified, relaunched, or reconfigured for any of this.
+Verified live 2026-07-04 against the installed cmux 0.64.17 (build 97), macOS aarch64; Jay's app was not modified, relaunched, or reconfigured for any of this.
 
 `claude` typed in a cmux tab does not run the real binary: cmux prepends a per-surface shim directory (`$CMUX_CLAUDE_WRAPPER_SHIM_ROOT`) to `PATH`, resolving `claude` to `/Applications/cmux.app/Contents/Resources/bin/cmux-claude-wrapper`, a readable bash script.
 Read from that shipped script, the wrapper has three exec paths:
@@ -129,7 +129,7 @@ Which signal is authoritative when:
   `tests/fm-backend.test.sh` pins this exact case (`test_backend_detect_cmux_fallback_tmux_nested_false_positive`), alongside the bundle-id, ancestry (pid and comm), non-Darwin-guard, and launchd-stop paths.
 - **SSH sessions, cron, launchd agents**: neither signal fires - sshd/cron reset the environment (no bundle id) and their ancestry ends at launchd.
 
-The positive ancestry walk itself is exercised by fake `ps`/`lsappinfo` unit tests rather than live (running a probe process genuinely parented under the captain's live cmux tabs was judged too intrusive, the same posture as this document's screenshot note); every negative live fact above - the strip, the wrapper ping failure, the tmux reparenting, the bundle-id inheritance, the lsappinfo resolution shapes - was verified against the real machine on 2026-07-04.
+The positive ancestry walk itself is exercised by fake `ps`/`lsappinfo` unit tests rather than live (running a probe process genuinely parented under Jay's live cmux tabs was judged too intrusive, the same posture as this document's screenshot note); every negative live fact above - the strip, the wrapper ping failure, the tmux reparenting, the bundle-id inheritance, the lsappinfo resolution shapes - was verified against the real machine on 2026-07-04.
 
 ## Worktree provider stays treehouse
 
@@ -145,7 +145,7 @@ firstmate uses **one cmux workspace per task**, keyed by the caller-facing `fm-<
 The caller-facing task label stays `fm-<id>`, but the visible cmux workspace title is `fm-<home-label>-<id>`.
 The home label keeps the same readable identity as herdr's workspace split - `firstmate` for the primary home, or `2ndmate-<id>` when `$FM_HOME/.fm-secondmate-home` contains a secondmate id - and appends a short stable hash of the resolved `FM_ROOT` path.
 That yields labels like `firstmate-<8hex>` or `2ndmate-<id>-<8hex>`, making the visible workspace title `fm-firstmate-<8hex>-<id>` or `fm-2ndmate-<id>-<8hex>-<task>`.
-This was hardened in two captain-directed no-mistakes review gate follow-ups: first by adding the home tag for primary-vs-secondmate collisions, then by adding the `FM_ROOT` hash so two distinct primary installations cannot collide either.
+This was hardened in two Jay-directed no-mistakes review gate follow-ups: first by adding the home tag for primary-vs-secondmate collisions, then by adding the `FM_ROOT` hash so two distinct primary installations cannot collide either.
 Physically moving or relocating a firstmate installation changes its tag, so workspaces titled under the old tag stop matching after a move.
 That is acceptable because a task's own recorded worktree path in `state/<id>.meta` does not survive a repo relocation either, so this is consistent with an existing, already accepted limitation, not a new one.
 There is still no per-home cmux container split (unlike herdr's later refinement); the home tag is a title discriminator only.
@@ -190,7 +190,7 @@ Verified live (2026-07-03 pass): running any socket-backed CLI command (`cmux pi
 
 The setting is `automation.socketControlMode` in cmux's settings (`~/.config/cmux/cmux.json` or Settings > Automation), with values `off`, `cmuxOnly` (the default), `automation`, `password`, and `allowAll` (three more legacy aliases - `openAccess`, `fullOpenAccess`, `full` - normalize onto `allowAll`; `notifications` normalizes onto `automation`).
 
-The per-mode enforcement was traced through the shipped source on 2026-07-04 (`github.com/manaflow-ai/cmux` at commit `9c91710e3f58`, cloned read-only as scratch; verified from source, not live, except where noted - the reference machine's live app is the captain's own, in Password mode, and was not reconfigured to exercise the other modes).
+The per-mode enforcement was traced through the shipped source on 2026-07-04 (`github.com/manaflow-ai/cmux` at commit `9c91710e3f58`, cloned read-only as scratch; verified from source, not live, except where noted - the reference machine's live app is Jay's own, in Password mode, and was not reconfigured to exercise the other modes).
 There are exactly four enforcement points, and NO per-command/verb restrictions by mode - a mode either admits a client fully or not at all:
 
 - **Listener start** (`Sources/AppDelegate.swift`, `socketListenerConfigurationIfEnabled`): `off` means the listener is never started; every other mode starts it.
@@ -242,7 +242,7 @@ The next section ("Closing the last workspace in a window") owns the last-in-win
 
 ## Closing the last workspace in a window (the selected-workspace teardown fix)
 
-Verified live 2026-07-10 against the installed cmux 0.64.17 (build 97), macOS aarch64, socket in `automation` mode; the captain's app was not modified, relaunched, or reconfigured, and only `fm-test-` task workspaces and throwaway default workspaces were touched.
+Verified live 2026-07-10 against the installed cmux 0.64.17 (build 97), macOS aarch64, socket in `automation` mode; Jay's app was not modified, relaunched, or reconfigured, and only `fm-test-` task workspaces and throwaway default workspaces were touched.
 
 The incident this fixes: a cmux-backed task's teardown left its workspace open because it was the currently selected workspace, and the crew closed it by hand.
 `close-workspace` cleanly removes a workspace ONLY when that workspace is not the last one in its window.
@@ -305,7 +305,7 @@ That is correct for the selected-workspace teardown case (a selected workspace i
 
 ## Workspace ids do not survive a relaunch (verified from source, not a live restart)
 
-Per this task's explicit instruction NOT to relaunch the captain's app just to test this, this was verified by reading the actual shipped Swift source instead (`Sources/Workspace.swift`, cloned read-only from `github.com/manaflow-ai/cmux` at the commit current on 2026-07-04):
+Per this task's explicit instruction NOT to relaunch Jay's app just to test this, this was verified by reading the actual shipped Swift source instead (`Sources/Workspace.swift`, cloned read-only from `github.com/manaflow-ai/cmux` at the commit current on 2026-07-04):
 `Workspace`'s only initializer unconditionally sets `self.id = UUID()`, with no restored-id parameter at all.
 This differs from surfaces, whose analogous initializer DOES accept `restoredSurfaceId: UUID? = nil` and use `restoredSurfaceId ?? UUID()` - but tracing every call site of that parameter showed it is used only for same-run object-identity reuse (e.g. moving/splitting an already-live surface within the current app session), never threaded through any session-restore/relaunch code path.
 No `Workspace(...)` construction anywhere in the source passes a persisted id back in.
@@ -313,7 +313,7 @@ No `Workspace(...)` construction anywhere in the source passes a persisted id ba
 Conclusion: workspace ids should be treated as NOT surviving an app relaunch or session restore, the same posture as herdr's/zellij's own id-instability caveats (for different underlying reasons in each case).
 `fm_backend_cmux_list_live` therefore does recovery/orphan discovery strictly by **title**, never by trusting a stored uuid, mirroring both prior adapters' recovery posture.
 Because cmux has one shared app namespace, the title lookup is scoped to this firstmate installation's `fm-<home-label>-` prefix and reported back to firstmate as the plain `fm-<id>` label.
-No live app restart was performed to empirically confirm this beyond the source read - the two live app restarts that did occur during this build (documented in the "Socket control modes" section above) were solely to apply the one-time `socketControlMode`/password configuration change, not to test id persistence, and the app held no captain-owned workspaces at either restart (verified: it had just been freshly launched moments before, with only the default auto-created workspace present).
+No live app restart was performed to empirically confirm this beyond the source read - the two live app restarts that did occur during this build (documented in the "Socket control modes" section above) were solely to apply the one-time `socketControlMode`/password configuration change, not to test id persistence, and the app held no Jay-owned workspaces at either restart (verified: it had just been freshly launched moments before, with only the default auto-created workspace present).
 
 ## CLI is not on PATH by default (unanticipated finding)
 
@@ -338,19 +338,19 @@ All implemented submit-verifying backends expose the identical caller-facing ver
 
 ## Test safety
 
-Unlike herdr/zellij, cmux has no isolated, throwaway SESSION a test can spin up and tear down on its own - there is just "the app", the same real running instance a captain uses day to day.
+Unlike herdr/zellij, cmux has no isolated, throwaway SESSION a test can spin up and tear down on its own - there is just "the app", the same real running instance Jay uses day to day.
 `tests/cmux-test-safety.sh`'s guard is adapted to this shape: `cmux_refuse_if_unsafe` requires a non-empty workspace id, a caller-facing label carrying the `fm-test-` prefix, and that the workspace is CURRENTLY LISTED with the scoped title derived from that label, before `cmux_safe_close_workspace` is allowed to close it.
 Every real-cmux test in this document and its accompanying test files creates only `fm-test-`-prefixed task labels, never enumerates-and-closes, and never quits or relaunches the app.
 
 ## End-to-end verification (spawn -> steer -> peek -> done -> merge -> teardown)
 
-Beyond the fake-CLI unit tests (`tests/fm-backend-cmux.test.sh`) and the real-CLI smoke test (`tests/fm-backend-cmux-smoke.test.sh`), the full firstmate lifecycle was driven end to end against a real `claude` crewmate through this branch's own scripts, in a scratch `FM_HOME`, a scratch `local-only` git project, and the same captain-owned real cmux app instance (there is no isolated session to spin up for cmux, unlike herdr/zellij; only firstmate-created `fm-` task workspaces were ever touched):
+Beyond the fake-CLI unit tests (`tests/fm-backend-cmux.test.sh`) and the real-CLI smoke test (`tests/fm-backend-cmux-smoke.test.sh`), the full firstmate lifecycle was driven end to end against a real `claude` crewmate through this branch's own scripts, in a scratch `FM_HOME`, a scratch `local-only` git project, and the same Jay-owned real cmux app instance (there is no isolated session to spin up for cmux, unlike herdr/zellij; only firstmate-created `fm-` task workspaces were ever touched):
 
 1. `FM_HOME=<scratch> bin/fm-spawn.sh cmux-e2e-t1 projects/scratch-e2e-project --backend cmux claude` - spawned successfully, printing `window=<workspace_uuid>:<surface_uuid>` in the summary and writing `backend=cmux`, `cmux_workspace_id=`, `cmux_surface_id=` to the task's meta. The worktree-discovery poll correctly resolved the real treehouse worktree path using the active `pwd`-marker-probe workaround (finding #2), exactly as designed.
 2. `bin/fm-peek.sh fm-cmux-e2e-t1` - showed the live claude trust dialog ("Quick safety check: Is this a project you created or one you trust?").
 3. `FM_HOME=<scratch> bin/fm-send.sh fm-cmux-e2e-t1 --key Enter` - accepted the trust dialog; `send_key`'s Escape/Enter path confirmed live against the real claude TUI, not just a plain shell.
 4. `bin/fm-peek.sh fm-cmux-e2e-t1` again - showed claude actively working through the brief (confirming worktree isolation, writing `hello.txt`, committing).
-5. `FM_HOME=<scratch> bin/fm-send.sh fm-cmux-e2e-t1 "captain says: proceed as planned, this is a trivial verification task"` - a plain-text steer sent after the crewmate had already finished and stopped; `fm-send` reported no `pending`/`send-failed` error, and the message was confirmed landed and acknowledged in the next peek. This is the first live proof of `fm_backend_cmux_composer_state`'s structural border-row classifier against a REAL claude TUI composer box (every Phase 1 empirical test used a plain shell prompt, which has no bordered composer at all).
+5. `FM_HOME=<scratch> bin/fm-send.sh fm-cmux-e2e-t1 "Jay says: proceed as planned, this is a trivial verification task"` - a plain-text steer sent after the crewmate had already finished and stopped; `fm-send` reported no `pending`/`send-failed` error, and the message was confirmed landed and acknowledged in the next peek. This is the first live proof of `fm_backend_cmux_composer_state`'s structural border-row classifier against a REAL claude TUI composer box (every Phase 1 empirical test used a plain shell prompt, which has no bordered composer at all).
 6. `FM_HOME=<scratch> bin/fm-send.sh fm-cmux-e2e-t1 "/compact"` - the popup-placeholder/second-Enter regression class, tested live: `fm-send` reported success with no error, and the next peek confirmed `/compact` had genuinely EXECUTED ("Compacting conversation... 25%", later "Compacted"), not merely sat typed-but-unsubmitted in the composer. This directly confirms `fm_backend_cmux_send_text_submit` correctly retries past a popup-closing first Enter and lands a genuine second Enter against the real app, the same incident class herdr hit on 2026-07-03.
 7. The crewmate's commit (`add hello.txt`, message `add hello.txt`) was confirmed present on branch `fm/cmux-e2e-t1` in the scratch project's git history, with `hello.txt` containing exactly the expected line, and the status file ending in `done: ready in branch fm/cmux-e2e-t1`.
 8. `bin/fm-teardown.sh cmux-e2e-t1` **REFUSED**, exactly as required: `REFUSED: local-only worktree ... has work not yet merged into main and not on any remote.`
@@ -360,7 +360,7 @@ Beyond the fake-CLI unit tests (`tests/fm-backend-cmux.test.sh`) and the real-CL
 
 All three tasks' cmux workspaces and worktrees were confirmed fully cleaned up afterward (`workspace list` showing only the pre-existing default workspace; `treehouse destroy --all --yes` freeing the scratch project's pool); the scratch `FM_HOME` and project were removed entirely.
 
-**Screenshot request (best-effort, explicitly skippable):** the captain separately asked for a screenshot of the cmux window while multiple concurrent tasks were running, to be kept only if it showed a genuinely healthy fleet with no visible errors. One `screencapture -x` (full-screen) attempt was made while all three tasks above were live. It did NOT capture cmux at all: because every firstmate cmux workspace is created with `--focus false` (finding: focus verified to default off), cmux is never the frontmost/active application, so a full-screen capture on this shared machine captured a completely different, unrelated live terminal session's frontmost window instead - one that turned out to show real, sensitive operational content (a different active firstmate/herdr fleet with real secondmate names and conversation). That file was deleted immediately without being viewed further or retained anywhere. No second attempt was made: bringing cmux to the foreground to make it capturable would mean actively focusing/raising its window, which would yank focus away from whatever the captain or another live session currently has in the foreground - the exact disruption `--focus false` exists to avoid - and enumerating other windows to target a background-window capture of just cmux risks the same kind of unrelated-content exposure. Per the captain's explicit allowance, this request was skipped rather than risk either disruption or another accidental capture.
+**Screenshot request (best-effort, explicitly skippable):** Jay separately asked for a screenshot of the cmux window while multiple concurrent tasks were running, to be kept only if it showed a genuinely healthy fleet with no visible errors. One `screencapture -x` (full-screen) attempt was made while all three tasks above were live. It did NOT capture cmux at all: because every firstmate cmux workspace is created with `--focus false` (finding: focus verified to default off), cmux is never the frontmost/active application, so a full-screen capture on this shared machine captured a completely different, unrelated live terminal session's frontmost window instead - one that turned out to show real, sensitive operational content (a different active firstmate/herdr fleet with real secondmate names and conversation). That file was deleted immediately without being viewed further or retained anywhere. No second attempt was made: bringing cmux to the foreground to make it capturable would mean actively focusing/raising its window, which would yank focus away from whatever Jay or another live session currently has in the foreground - the exact disruption `--focus false` exists to avoid - and enumerating other windows to target a background-window capture of just cmux risks the same kind of unrelated-content exposure. Per Jay's explicit allowance, this request was skipped rather than risk either disruption or another accidental capture.
 
 ## Known gaps left for a follow-up
 
@@ -369,6 +369,6 @@ All three tasks' cmux workspaces and worktrees were confirmed fully cleaned up a
   Never a candidate for a headless/CI firstmate instance, because runtime auto-detection (cmux runtime signals; see "Runtime auto-detection" above) can only fire from inside a live cmux terminal in the first place.
   The one-time socket-access setup remains an unavoidable manual step regardless of how the backend was selected.
 - **`--secondmate` spawns are refused** (mirrors Orca's refusal) - no per-home container design (a herdr-style workspace-per-home split, or similar) has been designed or verified for cmux yet.
-- **The one-time socket-access setup is a real, undocumented-by-upstream onboarding step.** A captain who selects `backend=cmux` without first switching `automation.socketControlMode` away from its `cmuxOnly` default to a viable mode (Automation mode recommended; see "Setup") will see every spawn fail with an actionable error naming the viable modes and pointing back to this document, but there is no way for firstmate to complete that GUI-only setup step on the captain's behalf.
+- **The one-time socket-access setup is a real, undocumented-by-upstream onboarding step.** a user who selects `backend=cmux` without first switching `automation.socketControlMode` away from its `cmuxOnly` default to a viable mode (Automation mode recommended; see "Setup") will see every spawn fail with an actionable error naming the viable modes and pointing back to this document, but there is no way for firstmate to complete that GUI-only setup step on Jay's behalf.
 - **A surface can still die in the brief window between `target_ready` succeeding and the operation's own call running.** That remaining race degrades to "the operation quietly did nothing" - the same class of gap firstmate already tolerates for an unverified send on any backend, caught downstream by `fm-spawn.sh`'s worktree-discovery poll timing out, `fm_backend_cmux_send_text_submit`'s retry loop (which reports `send-failed`/`pending`/`unknown` rather than a false "sent"), or the watcher's stale-pane detection.
 - **Windows cannot be closed over the control socket, and label lookup is current-window scoped** - both owned by "Closing the last workspace in a window" above. Teardown of a last-in-window task workspace therefore leaves that window a fresh default workspace rather than closing it, and `fm_backend_cmux_workspace_id_for_label`/`fm_backend_cmux_list_live` only see the current window, so a task workspace parked in a non-current window is a known blind spot for label-based recovery.

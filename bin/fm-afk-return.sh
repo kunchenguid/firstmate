@@ -10,7 +10,7 @@
 # `blocked:` is the crewmate protocol's firstmate-actionable verb. A live task's
 # open blocked event must be remediated and closed with `resolved [key=...]`, or
 # explicitly reclassified in the status stream with a durable reason, before an
-# ordinary captain request may proceed. `needs-decision:` is captain-owned and
+# ordinary request from Jay may proceed. `needs-decision:` is Jay-owned and
 # is deliberately not part of this gate; normal reporting surfaces it.
 #
 # The durable state/.afk-return-catchup file is written BEFORE daemon shutdown,

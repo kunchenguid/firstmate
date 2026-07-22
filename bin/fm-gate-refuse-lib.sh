@@ -4,7 +4,7 @@
 #
 # The hazard (data/nm-gate-ambient-authority-containment-c3/report.md): a
 # no-mistakes gate agent runs inside a firstmate checkout with a free shell, so
-# it auto-loads firstmate's AGENTS.md, adopts the captain identity, and - seeing
+# it auto-loads firstmate's AGENTS.md, adopts Jay identity, and - seeing
 # crew "in flight" - reaches for fm-spawn.sh/fm-send.sh/fm-teardown.sh to
 # "delegate" and "reconcile" the shared worktree. It has real capability because
 # those entrypoints self-locate their home and never knew a gate context existed.

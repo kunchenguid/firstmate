@@ -37,7 +37,7 @@
 # showing the typed text the whole time. The plain "empty iff composer cleared"
 # acknowledgement above false-positives on a swallowed Enter for every steer
 # sent to a busy opencode pane, and `fm-send` exits non-zero on a normal
-# captain instruction. The submit core now falls back to `fm_pane_is_busy` once
+# instruction from Jay. The submit core now falls back to `fm_pane_is_busy` once
 # the Enter-retry budget is spent: a busy pane means the harness accepted and
 # queued the Enter (report `empty` so the caller does not re-send), while an
 # idle pane keeps the `pending` verdict (a genuine swallow). The herdr backend

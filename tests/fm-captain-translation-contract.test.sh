@@ -77,6 +77,33 @@ test_user_facing_identity_surfaces_use_jay_language() {
   pass "user-facing identity surfaces consistently use Jay language"
 }
 
+test_complete_instruction_and_document_surface_uses_jay_language() {
+  local residue
+  residue=$(
+    git grep -n -i -E '\bcaptain\b' -- \
+      AGENTS.md README.md CONTRIBUTING.md .agents/skills skills docs 2>/dev/null \
+      | sed \
+        -e 's/captain-shared\.md//Ig' \
+        -e 's/captain\.md//Ig' \
+        -e 's/shared-captain//Ig' \
+        -e 's/captain-held//Ig' \
+        -e 's/captain_decision//Ig' \
+        -e 's/captain-hold//Ig' \
+        -e 's/captain-relevant//Ig' \
+        -e 's/FM_CAPTAIN_RE//g' \
+        -e 's/--kind captain//Ig' \
+        -e 's/kind `captain`//Ig' \
+        -e 's/kind captain//Ig' \
+        -e 's/hold-kind: `captain`//Ig' \
+        -e 's/hold-kind: captain//Ig' \
+        -e 's/`captain` file//Ig' \
+        -e 's/call Jay "captain"//Ig' \
+      | grep -i -E '\bcaptain\b' || true
+  )
+  [ -z "$residue" ] || fail "user-facing instruction or documentation prose still calls Jay captain: $residue"
+  pass "complete instruction and documentation surface uses Jay language"
+}
+
 test_section_9_owns_positive_translation_contract() {
   local contract
   contract=$(section_9)
@@ -193,6 +220,7 @@ test_section_9_owner_is_not_duplicated_into_skills() {
 
 test_identity_and_natural_address_contract
 test_user_facing_identity_surfaces_use_jay_language
+test_complete_instruction_and_document_surface_uses_jay_language
 test_section_9_owns_positive_translation_contract
 test_scout_remains_allowed_house_vocabulary
 test_compressed_safety_labels_have_plain_renderings

@@ -70,7 +70,7 @@ This verifies that the trusted project hook fires while disproving stdout contex
 The tracked project hook remains the requested default and inherits Grok's existing folder-trust fail-open posture.
 Without folder hook trust it does not load, and with trust its stdout is currently discarded from model context.
 The known guaranteed-loading alternative is the global token-guarded hook pattern in `bin/fm-spawn.sh`, but installing files under `~/.grok/hooks/` expands trust and writes outside the repository.
-Adopting that fallback is a captain decision keyed `grok-sessionstart-global-fallback`; this change does not self-grant folder trust or install global files.
+Adopting that fallback is a decision from Jay keyed `grok-sessionstart-global-fallback`; this change does not self-grant folder trust or install global files.
 
 ### OpenCode 1.17.18
 

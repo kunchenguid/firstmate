@@ -4,10 +4,10 @@
 # The away-mode daemon (bin/fm-supervise-daemon.sh) must know which pane runs
 # firstmate itself, both to inject escalations into it and, for the daemon, to
 # validate that target at startup. The script-owned away launcher
-# (bin/fm-afk-launch.sh) must resolve the SAME captain pane BEFORE it creates a
+# (bin/fm-afk-launch.sh) must resolve the SAME Jay's pane BEFORE it creates a
 # separate, non-visible terminal for the daemon, so it can pass that pane in as
 # FM_SUPERVISOR_TARGET (otherwise the daemon, running in its own terminal, would
-# auto-discover its OWN pane and inject there instead of into the captain's).
+# auto-discover its OWN pane and inject there instead of into Jay's).
 #
 # Because both callers need the identical resolution, it lives here once. The
 # function names and precedence are unchanged from when this logic lived inline

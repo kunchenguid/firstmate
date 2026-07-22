@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# fm-decision-hold.sh - deterministic mechanics for durable captain decisions.
+# fm-decision-hold.sh - deterministic mechanics for durable decisions from Jay.
 #
 # The semantic policy is owned once by
 # .agents/skills/decision-hold-lifecycle/SKILL.md. This script never reads report,
@@ -27,14 +27,14 @@
 #
 # `complete` is the shared investigation and visual-review completion gate.
 # `--none` is an explicit semantic attestation that the just-reviewed surface has
-# no unresolved captain decision. Later review passes may add keys; a live task's
+# no unresolved decision from Jay. Later review passes may add keys; a live task's
 # metadata inventory is unioned idempotently. A post-teardown visual review can
 # complete against the surviving report and holds without recreating task state.
 # `verify` is read-only and is called by scout teardown so teardown cannot erase a
 # source before this gate has succeeded.
 #
 # `resolve` requires every --routed-to task to exist and to be blocked by the hold.
-# It writes the captain decision and routed identities into the hold body, clears
+# It writes the decision from Jay and routed identities into the hold body, clears
 # those dependency edges, and only then marks the hold Done. A failure before the
 # final step leaves the captain hold open.
 set -eu
@@ -186,7 +186,7 @@ verify_hold_resolved() {  # <hold-id>
 
 verify_hold_durable() {  # <hold-id>
   local id=$1 show state held kind hold_kind body
-  show=$(task_show "$id") || fail "captain decision $id is absent from $FM_HOME/data/backlog.md"
+  show=$(task_show "$id") || fail "decision from Jay $id is absent from $FM_HOME/data/backlog.md"
   state=$(show_field "$show" state)
   held=$(show_field "$show" held)
   kind=$(show_field "$show" kind)
@@ -200,7 +200,7 @@ verify_hold_durable() {  # <hold-id>
       *"Resolution recorded by fm-decision-hold."*"Routed work:"*) return 0 ;;
     esac
   fi
-  fail "captain decision $id is neither actively held nor durably resolved"
+  fail "decision from Jay $id is neither actively held nor durably resolved"
 }
 
 verify_resolution_identity() {
@@ -218,7 +218,7 @@ verify_resolution_identity() {
   resolution_fields=${resolution_fields#*\\nRouted identities: }
   recorded_routes=${resolution_fields%%\\n*}
   [ "$recorded_digest" = "$decision_digest" ] \
-    || fail "captain hold $id records a different captain decision"
+    || fail "captain hold $id records a different decision from Jay"
   [ "$recorded_routes" = "$routed_csv" ] \
     || fail "captain hold $id records different routed work"
 }
@@ -253,7 +253,7 @@ command_hold() {
     state=$(show_field "$show" state)
     kind=$(show_field "$show" kind)
     existing_title=$(show_field "$show" title)
-    [ "$state" != "done" ] || fail "captain decision $id is already durably resolved; use a new decision key for a new decision"
+    [ "$state" != "done" ] || fail "decision from Jay $id is already durably resolved; use a new decision key for a new decision"
     [ "$kind" = captain ] || fail "existing backlog identity $id is not kind captain"
     [ "$existing_title" = "$title" ] || fail "existing captain hold $id has a different title"
   else
@@ -264,9 +264,9 @@ command_hold() {
     fi
     [ -n "$repo" ] || repo=firstmate
     validate_one_line repo "$repo"
-    body=$(printf 'Origin: %s\nDecision key: %s\nState: awaiting captain decision.' "$origin" "$key")
+    body=$(printf 'Origin: %s\nDecision key: %s\nState: awaiting decision from Jay.' "$origin" "$key")
     tasks_axi add "$id" "$title" --kind captain --repo "$repo" --body "$body" >/dev/null \
-      || fail "could not create captain decision item $id"
+      || fail "could not create decision from Jay item $id"
   fi
   tasks_axi hold "$id" --reason "$reason" --kind captain >/dev/null \
     || fail "could not activate captain hold $id"
@@ -323,7 +323,7 @@ EOF
     fi
 
     # Transfer any still-open status decision to its durable backlog owner so the
-    # live status fold does not duplicate the same Captain's Call item.
+    # live status fold does not duplicate the same Jay's Call item.
     while IFS=$'\t' read -r key _verb _summary; do
       [ -n "$key" ] || continue
       list_has_key "$keys" "$key" || continue
@@ -437,7 +437,7 @@ command_resolve() {
     body="${body}- ${dep}"$'\n'
   done
   tasks_axi update "$id" --body "$body" >/dev/null \
-    || fail "could not record the captain decision on $id"
+    || fail "could not record the decision from Jay on $id"
   for dep in $routed; do
     show=$(task_show "$dep") || fail "routed task $dep disappeared before routing"
     blocked=$(show_field "$show" blocked_by | tr -d '[:space:]')

@@ -72,7 +72,7 @@
 #      (`Sources/Workspace.swift`'s only initializer unconditionally sets
 #      `self.id = UUID()`, with no restored-id parameter, unlike surfaces'
 #      `restoredSurfaceId ?? UUID()` path scoped to same-run object reuse).
-#      No live app restart of the captain's own content was performed to
+#      No live app restart of Jay's own content was performed to
 #      confirm this; see docs/cmux-backend.md for the reasoning. Recovery
 #      therefore uses scoped-title matching from the caller-facing fm-<id>
 #      label, never a stored uuid, mirroring herdr's/zellij's own recovery

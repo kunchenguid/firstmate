@@ -8,19 +8,19 @@
 # terminal it is already in. Harnesses with a native in-pane tracked-background
 # tool (claude, grok) run it there directly and it is fine. A harness with NO
 # native background mechanism (pi) has to manufacture a terminal, and doing that
-# by SPLITTING the captain's active pane visibly shrinks it - the regression this
+# by SPLITTING Jay's active pane visibly shrinks it - the regression this
 # script fixes. Instead this creates a non-visible tracked terminal (a herdr tab/
 # workspace with --no-focus, or a detached tmux session) that never touches the
-# captain's active tab, and NEVER uses shell `&` (which herdr/codex can reap).
+# Jay's active tab, and NEVER uses shell `&` (which herdr/codex can reap).
 #
-# Correct supervisor targeting: the daemon finds the captain pane to inject into
+# Correct supervisor targeting: the daemon finds Jay's pane to inject into
 # from its OWN inherited env (discover_supervisor_target). Running it in a
 # separate terminal would make it discover its OWN pane, so this captures the
-# captain pane FIRST (from the pane this script runs in) and passes it in as
+# Jay's pane FIRST (from the pane this script runs in) and passes it in as
 # FM_SUPERVISOR_TARGET/FM_SUPERVISOR_BACKEND explicitly.
 #
 # Usage:
-#   fm-afk-launch.sh start     Capture the captain pane, then (unless the daemon
+#   fm-afk-launch.sh start     Capture Jay's pane, then (unless the daemon
 #                              is already running) launch the daemon in a fresh
 #                              non-visible terminal for the detected backend and
 #                              record it. Idempotent: an already-running daemon
@@ -42,7 +42,7 @@
 # Test seam: FM_AFK_LAUNCH_ENTRY overrides the command run in the created
 # terminal (default bin/fm-afk-start.sh), so a topology test can run a harmless
 # placeholder instead of a real daemon. FM_SUPERVISOR_TARGET/FM_SUPERVISOR_BACKEND
-# override the captured captain pane/backend (an isolated lab pane in tests).
+# override the captured Jay's pane/backend (an isolated lab pane in tests).
 set -u
 
 FM_AFK_LAUNCH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -354,10 +354,10 @@ fm_afk_launch_restore_backup() {  # <backup> <had-afk>
   return "$result"
 }
 
-# Launch the daemon in a non-visible herdr terminal in the CAPTAIN's session
-# (so the daemon can inject into the captain pane, which lives there). A
+# Launch the daemon in a non-visible herdr terminal in the Jay's session
+# (so the daemon can inject into Jay's pane, which lives there). A
 # dedicated background workspace (--no-focus) holds exactly one tab/pane; it
-# never touches the captain's active tab. Prints the record line on success.
+# never touches Jay's active tab. Prints the record line on success.
 fm_afk_launch_create_herdr() {  # <captain-target> <captain-backend>
   local captain_target=$1 captain_backend=$2 session out wsid pane entry cmd label recovered create_result
   session=${captain_target%%:*}
@@ -410,8 +410,8 @@ fm_afk_launch_create_herdr() {  # <captain-target> <captain-backend>
 }
 
 # Launch the daemon in a detached tmux session (never a split-window in the
-# captain's window). tmux pane ids are server-global, so the daemon reaches the
-# captain pane by its %id from this separate session.
+# Jay's window). tmux pane ids are server-global, so the daemon reaches the
+# Jay's pane by its %id from this separate session.
 fm_afk_launch_create_tmux() {  # <captain-target> <captain-backend>
   local captain_target=$1 captain_backend=$2 session entry cmd hash nonce
   hash=$(printf '%s' "$FM_HOME" | cksum | cut -d' ' -f1)
@@ -441,7 +441,7 @@ fm_afk_launch_start() {
     fm_afk_launch_log "return catch-up is still pending; run bin/fm-afk-return.sh check before re-entering away mode"
     return 1
   fi
-  # Capture the captain pane FIRST, before creating anything.
+  # Capture Jay's pane FIRST, before creating anything.
   captain_target=$(discover_supervisor_target) || {
     fm_afk_launch_log "could not resolve Jay's supervisor pane (set FM_SUPERVISOR_TARGET)"; return 1; }
   captain_backend=$(discover_supervisor_backend) || {

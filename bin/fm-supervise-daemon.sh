@@ -24,7 +24,7 @@
 # FM_INJECT_MARK (U+2063 INVISIBLE SEPARATOR), a character a human cannot type
 # from a normal keyboard at the start of a message and Herdr transports as text.
 # Firstmate's contract: a message that starts with the marker is an internal
-# escalation (stay afk); a message without it means the captain is back (exit
+# escalation (stay afk); a message without it means Jay is back (exit
 # afk, flush catch-up, resume per-wake responsiveness). The marker and the
 # busy-guard solve the same problem - the daemon and the human share one input
 # channel - so they live together under /afk.
@@ -156,7 +156,7 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 
 # Shared wake classifier (last_status_line, status_is_captain_relevant,
 # window_to_task, scan_captain_relevant_statuses). The SAME library backs the
-# always-on watcher's triage, so the captain-relevant verb set and the
+# always-on watcher's triage, so Jay-relevant verb set and the
 # classification predicates have exactly one definition.
 # shellcheck source=bin/fm-classify-lib.sh
 . "$FM_DAEMON_DIR/fm-classify-lib.sh"
@@ -164,7 +164,7 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 # Supervisor-pane discovery (FM_SUPERVISOR_TARGET_DEFAULT,
 # FM_SUPERVISOR_BACKEND_DEFAULT, discover_supervisor_target,
 # discover_supervisor_backend). Shared with the script-owned away launcher
-# (bin/fm-afk-launch.sh) so the captain-pane resolution has exactly one owner.
+# (bin/fm-afk-launch.sh) so Jay-pane resolution has exactly one owner.
 # shellcheck source=bin/fm-supervisor-target-lib.sh
 . "$FM_DAEMON_DIR/fm-supervisor-target-lib.sh"
 
@@ -189,7 +189,7 @@ MAX_DEFER_SECS_DEFAULT=300
 WEDGE_ALARM_TIMEOUT_SECS_DEFAULT=10
 WEDGE_ALARM_LAST_EPOCH=0
 WEDGE_ALARM_NOTIFIER_PID=
-# The captain-relevant verb set and the status classifiers (last_status_line,
+# Jay-relevant verb set and the status classifiers (last_status_line,
 # status_is_captain_relevant, window_to_task, scan_captain_relevant_statuses) now
 # live in bin/fm-classify-lib.sh, shared with the always-on watcher.
 # Composer-empty detection and the tmux busy-footer fallback live in
@@ -264,7 +264,7 @@ afk_exit() {  # <state>
 #   message is /afk command -> 1 (re-entering/extending afk; stay afk)
 #   anything else           -> 0 (captain is back; exit afk)
 # Bias toward exit: only the marker and an explicit /afk invocation keep afk
-# alive. A false exit is self-correcting (the captain re-runs /afk).
+# alive. A false exit is self-correcting (Jay re-runs /afk).
 should_exit_afk() {  # <state> <message-text>
   local state=$1 msg=$2
   afk_active "$state" || return 1
@@ -291,7 +291,7 @@ message_is_injection() {  # <message-text>
 # strip_injection_marker: remove the leading sentinel marker (if present) so the
 # digest text is clean for classification/relay. The afk-exit contract keys off
 # the marker's PRESENCE; once detected, the marker byte should not appear in the
-# distilled content firstmate relays to the captain or feeds back to classifiers.
+# distilled content firstmate relays to Jay or feeds back to classifiers.
 strip_injection_marker() {  # <message-text>
   local msg=$1
   printf '%s' "${msg#"$FM_INJECT_MARK"}"
@@ -309,7 +309,7 @@ _collapse_newlines() {  # <text>
 # discover_supervisor_target / discover_supervisor_backend are owned by
 # bin/fm-supervisor-target-lib.sh (sourced above). fm_super_main below calls
 # them exactly as before; the away launcher reuses the identical resolution to
-# pass the captain pane in as FM_SUPERVISOR_TARGET.
+# pass Jay's pane in as FM_SUPERVISOR_TARGET.
 
 # --- classification helpers (PURE: no side effects, testable) ---------------
 # last_status_line, status_is_captain_relevant, window_to_task, and
@@ -680,7 +680,7 @@ wedge_alarm_configured_channels() {
 
 # Resolve the platform's default OS-level channel for `auto`. macOS reaches the
 # captain via an osascript Notification Center banner; other platforms have no
-# built-in OS channel (the captain wires a command: directive), so this prints
+# built-in OS channel (Jay wires a command: directive), so this prints
 # nothing and wedge_alarm_notify logs that the marker is the only signal.
 wedge_alarm_platform_default() {
   case "$(uname)" in
@@ -796,7 +796,7 @@ wedge_alarm_via_herdr() {  # <summary>
 }
 
 # Run a captain-supplied command with the summary on $1 and on stdin, so an
-# alert can reach a phone/pager (ntfy, Slack, SMS) even when the captain is away
+# alert can reach a phone/pager (ntfy, Slack, SMS) even when Jay is away
 # from the machine entirely. Best-effort: logs and returns 1 on failure.
 wedge_alarm_via_command() {  # <cmd> <summary>
   local cmd=$1 summary=$2 rc
@@ -897,7 +897,7 @@ inject_wedge_alarm() {  # <state> <age-seconds>
     tmux display-message -t "$target" "fm: away-mode escalations WEDGED ${age}s — see $marker" 2>/dev/null || true
   fi
   # Backend-independent active alert. Unlike the tmux flash above (skipped on
-  # every non-tmux backend), this can reach the captain even when every pane and
+  # every non-tmux backend), this can reach Jay even when every pane and
   # its backend status-line is unreadable - the gap the 2026-07-10 overnight
   # incident fell through. Configurable and best-effort; the marker above stays
   # the durable record whether or not any channel fires.

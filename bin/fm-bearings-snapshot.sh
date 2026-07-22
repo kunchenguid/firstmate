@@ -157,7 +157,7 @@ done
 command -v jq >/dev/null 2>&1 || { echo "fm-bearings-snapshot: jq not found" >&2; exit 1; }
 
 # The deterministic return-catch-up owner must clear before this or any other
-# ordinary captain request proceeds. Bearings does not reproduce that policy;
+# ordinary request from Jay proceeds. Bearings does not reproduce that policy;
 # it only consults the shared read-only gate.
 "$SCRIPT_DIR/fm-afk-return.sh" guard || exit $?
 
@@ -384,7 +384,7 @@ MODEL=$(printf '%s' "$SNAP" | jq \
      + [ (.secondmate_current.records // [])[] as $m | $m.decisions_open[]?
          | select(.source == "backlog" and .verb == "captain-hold")
          | {id:($m.id + "/" + .id),key,verb,
-            summary:(((.summary // .id) + ": " + (.reason // "captain decision pending")) | trunc(90)),owner:$m.id} ]) as $decisions_all
+            summary:(((.summary // .id) + ": " + (.reason // "decision from Jay pending")) | trunc(90)),owner:$m.id} ]) as $decisions_all
   | ((if (.main_inventory.valid == false) then
         [{id:"(main-inventory)",
           title:((.main_inventory.reason // "main inventory invalid") | trunc(60)),
