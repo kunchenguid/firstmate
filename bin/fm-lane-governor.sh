@@ -12,7 +12,7 @@
 # or available RAM crosses the configured lines, or when a likely orphaned
 # harness process belonging to this home is still alive under a launchd-reparented zsh.
 # Available RAM means reclaimable memory, not just the free list: on Linux it is
-# MemAvailable, and on macOS it is free + speculative + inactive + purgeable pages,
+# MemAvailable, and on macOS it is free + speculative + inactive pages,
 # so the same threshold means the same thing on both platforms.
 # A harness process is never called an orphan when it is an ancestor of this
 # governor run or when it sits in a worktree or home recorded for a live task.
@@ -285,7 +285,8 @@ meminfo_path() {
 
 # Reclaimable memory on macOS, in MB, comparable in intent to Linux MemAvailable:
 # the free list alone is routinely a few hundred MB on a healthy Mac because the
-# kernel parks reclaimable memory on the inactive, speculative, and purgeable lists.
+# kernel parks reclaimable memory on the inactive and speculative lists. Purgeable
+# pages are already counted inside those lists, so they are never added again.
 darwin_available_mb() {  # reads vm_stat output on stdin
   awk '
     function pages(v) { gsub(/[^0-9]/, "", v); return v + 0 }
@@ -298,27 +299,35 @@ darwin_available_mb() {  # reads vm_stat output on stdin
     /^Pages free:/ { free = pages($NF) }
     /^Pages speculative:/ { speculative = pages($NF) }
     /^Pages inactive:/ { inactive = pages($NF) }
-    /^Pages purgeable:/ { purgeable = pages($NF) }
     END {
       if (page_size <= 0) exit 1
-      printf "%.0f\n", (free + speculative + inactive + purgeable) * page_size / 1048576
+      printf "%.0f\n", (free + speculative + inactive) * page_size / 1048576
     }'
 }
 
 MEMORY_AVAILABLE_MB=
 SWAP_USED_MB=
 memory_snapshot() {
-  local vm_text swap_line meminfo mem_avail swap_total swap_free available used
   MEMORY_AVAILABLE_MB=
   SWAP_USED_MB=
 
-  if [ -n "${FM_LANE_MEMORY_AVAILABLE_MB:-}" ] || [ -n "${FM_LANE_SWAP_USED_MB:-}" ]; then
-    MEMORY_AVAILABLE_MB=${FM_LANE_MEMORY_AVAILABLE_MB:-}
-    SWAP_USED_MB=${FM_LANE_SWAP_USED_MB:-}
-    is_uint "$MEMORY_AVAILABLE_MB" || MEMORY_AVAILABLE_MB=
-    is_uint "$SWAP_USED_MB" || SWAP_USED_MB=
-    return 0
+  if [ -z "${FM_LANE_MEMORY_AVAILABLE_MB:-}" ] || [ -z "${FM_LANE_SWAP_USED_MB:-}" ]; then
+    memory_read
   fi
+  # A pinned metric overrides only itself; the other keeps its real reading so a
+  # partial override never silently disables the threshold it did not name.
+  if [ -n "${FM_LANE_MEMORY_AVAILABLE_MB:-}" ]; then
+    MEMORY_AVAILABLE_MB=$FM_LANE_MEMORY_AVAILABLE_MB
+    is_uint "$MEMORY_AVAILABLE_MB" || MEMORY_AVAILABLE_MB=
+  fi
+  if [ -n "${FM_LANE_SWAP_USED_MB:-}" ]; then
+    SWAP_USED_MB=$FM_LANE_SWAP_USED_MB
+    is_uint "$SWAP_USED_MB" || SWAP_USED_MB=
+  fi
+}
+
+memory_read() {
+  local vm_text swap_line meminfo mem_avail swap_total swap_free available used
 
   if [ "$(platform_name)" = Darwin ]; then
     vm_text=$(vm_stat_text)
@@ -373,20 +382,30 @@ harness_from_process() {  # <comm> <args>
   return 1
 }
 
+# A process cwd always comes back symlink-resolved, while recorded worktree and
+# home paths are raw strings, so every side of a path comparison is resolved here
+# first. An unresolvable path keeps its raw string rather than becoming empty.
+resolve_path() {  # <path>
+  local path=$1 resolved
+  [ -n "$path" ] || return 0
+  if [ -d "$path" ]; then
+    resolved=$(cd -P -- "$path" 2>/dev/null && pwd -P)
+    [ -n "$resolved" ] && path=$resolved
+  fi
+  printf '%s\n' "$path"
+}
+
 process_cwd() {  # <pid>
-  local pid=$1
+  local pid=$1 raw=
   case "$pid" in ''|*[!0-9]*) return 0 ;; esac
   if [ -n "${FM_LANE_PROCESS_CWD_FILE:-}" ] && [ -f "$FM_LANE_PROCESS_CWD_FILE" ]; then
-    grep "^$pid=" "$FM_LANE_PROCESS_CWD_FILE" 2>/dev/null | tail -1 | cut -d= -f2- || true
-    return 0
+    raw=$(grep "^$pid=" "$FM_LANE_PROCESS_CWD_FILE" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+  elif [ -r "/proc/$pid/cwd" ]; then
+    raw=$(readlink "/proc/$pid/cwd" 2>/dev/null || true)
+  elif command -v lsof >/dev/null 2>&1; then
+    raw=$(lsof -a -p "$pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -1 || true)
   fi
-  if [ -r "/proc/$pid/cwd" ]; then
-    readlink "/proc/$pid/cwd" 2>/dev/null || true
-    return 0
-  fi
-  if command -v lsof >/dev/null 2>&1; then
-    lsof -a -p "$pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -1 || true
-  fi
+  resolve_path "$raw"
 }
 
 home_worktree_paths() {
@@ -405,20 +424,10 @@ home_worktree_paths() {
 }
 
 orphan_belongs_to_home() {  # <cwd>
-  local cwd=$1 wt
+  local cwd=$1 roots
   [ -n "$cwd" ] || return 1
-  case "$cwd/" in
-    "$FM_HOME"/*) return 0 ;;
-  esac
-  while IFS= read -r wt; do
-    [ -n "$wt" ] || continue
-    case "$cwd/" in
-      "$wt"/*) return 0 ;;
-    esac
-  done <<EOF
-$(home_worktree_paths)
-EOF
-  return 1
+  roots=$(printf '%s\n%s\n' "$FM_HOME" "$(home_worktree_paths)")
+  path_under_any "$cwd" "$roots"
 }
 
 # The governor runs under the very agent it is guarding: a firstmate launched
@@ -453,11 +462,15 @@ live_task_paths() {
   done
 }
 
-path_under_any() {  # <path> <newline-separated-roots>
+path_under_any() {  # <resolved-path> <newline-separated-roots>
   local path=$1 roots=$2 root
   [ -n "$path" ] || return 1
   while IFS= read -r root; do
     [ -n "$root" ] || continue
+    case "$path/" in
+      "$root"/*) return 0 ;;
+    esac
+    root=$(resolve_path "$root")
     case "$path/" in
       "$root"/*) return 0 ;;
     esac

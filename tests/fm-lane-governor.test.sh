@@ -145,6 +145,47 @@ test_live_task_worker_is_not_an_orphan() {
   pass "lane governor never calls a live task's own worker an orphan"
 }
 
+test_live_task_worker_matches_through_symlinked_paths() {
+  local home fakebin out status
+  home=$(make_home orphan-symlink)
+  fakebin=$(fm_fakebin "$home")
+  write_orphan_ps "$fakebin"
+  mkdir -p "$home/real/live"
+  ln -s "$home/real" "$home/link"
+  fm_write_meta "$home/state/live.meta" "kind=ship" "worktree=$home/link/live"
+  printf 'live=working\n' > "$home/states"
+  printf '200=%s\n' "$home/link/live" > "$home/cwds"
+
+  out=$(PATH="$fakebin:$BASE_PATH" FM_LANE_ORPHAN_CHECK=1 \
+    FM_LANE_CREW_STATE_FILE="$home/states" FM_LANE_PROCESS_CWD_FILE="$home/cwds" \
+    run_governor "$home" memwatch)
+  status=$?
+
+  [ "$status" -eq 0 ] || fail "a symlinked worktree path must still match its live worker, got: $out"
+  assert_not_contains "$out" "orphaned harness" \
+    "a resolved cwd must match a recorded path that reaches it through a symlink"
+  pass "lane governor matches live task paths through symlinks"
+}
+
+test_partial_memory_pin_keeps_the_other_reading() {
+  local home out status
+  home=$(make_home memory-partial-pin)
+  cat > "$home/meminfo" <<'TXT'
+MemAvailable:     131072 kB
+SwapTotal:      16777216 kB
+SwapFree:       16777216 kB
+TXT
+
+  out=$(FM_LANE_MEMINFO_FILE="$home/meminfo" FM_LANE_MIN_AVAILABLE_RAM_GB=1 \
+    FM_LANE_SWAP_USED_MB=0 run_governor_memory "$home" Linux memwatch)
+  status=$?
+
+  [ "$status" -ne 0 ] || fail "pinning only swap must leave the available-RAM gate live, got: $out"
+  assert_contains "$out" "available RAM 0.1GB is below minimum 1.0GB" \
+    "an unpinned metric must keep its real reading instead of being blanked"
+  pass "lane governor keeps the unpinned memory metric's real reading"
+}
+
 test_governor_ancestor_is_not_an_orphan() {
   local home fakebin out status
   home=$(make_home orphan-ancestor)
@@ -447,6 +488,8 @@ test_darwin_memory_snapshot_counts_reclaimable_pages
 test_linux_memory_snapshot_reads_memavailable
 test_memory_snapshot_survives_truncated_fields
 test_live_task_worker_is_not_an_orphan
+test_live_task_worker_matches_through_symlinked_paths
+test_partial_memory_pin_keeps_the_other_reading
 test_governor_ancestor_is_not_an_orphan
 test_spawn_leases_reserve_capacity_until_released
 test_secondmate_metas_excluded_from_capacity

@@ -27,7 +27,8 @@ test_dashboard_renders_required_surfaces() {
       {"state":"in_flight","structured":true,"id":"lane-a","title":"Merge the thing","repo":"example-app","kind":"ship","since":"2026-07-18","blocked_by":"base-pr","blocked_reason":"depends on base PR","pr_url":"https://github.com/example-org/example-app/pull/1","completion":{"verb":null,"date":null}},
       {"state":"queued","structured":true,"id":"lane-b","title":"Queue cleanup","repo":"example-app","kind":"ship","since":"2026-07-10","blocked_reason":"MQ serialization was avoidable","completion":{"verb":null,"date":null}},
       {"state":"queued","structured":true,"id":"captain-call","title":"Pick rollout","repo":"example-app","kind":"captain","hold_kind":"captain","hold_reason":"choose staged or full rollout","since":"2026-07-20","completion":{"verb":null,"date":null}},
-      {"state":"done","structured":true,"id":"landed-a","title":"Finished fix","repo":"example-app","kind":"ship","pr_url":"https://github.com/example-org/example-app/pull/2","completion":{"verb":"merged","date":"2026-07-19"}}
+      {"state":"done","structured":true,"id":"landed-a","title":"Finished fix","repo":"example-app","kind":"ship","pr_url":"https://github.com/example-org/example-app/pull/2","completion":{"verb":"merged","date":"2026-07-19"}},
+      {"state":"done","structured":true,"id":"landed-b","title":"Hostile pr url","repo":"example-app","kind":"ship","pr_url":"javascript:alert(1)","completion":{"verb":"merged","date":"2026-07-19"}}
     ]
   },
   "tasks": [
@@ -59,6 +60,11 @@ JSON
   assert_grep "dependency-forced" "$html" "dashboard HTML lost dependency-forced MQ classification"
   assert_grep "avoidable" "$html" "dashboard HTML lost avoidable MQ classification"
   assert_grep "SLA And Rot Clocks" "$markdown" "dashboard Markdown lost the SLA/rot section"
+  assert_grep "example-app/pull/2" "$html" "dashboard HTML lost its real PR links"
+  assert_no_grep "href=\"javascript:" "$html" \
+    "a worker-reported PR url with a non-web scheme must never become a clickable link"
+  assert_no_grep "](javascript:" "$markdown" \
+    "a worker-reported PR url with a non-web scheme must never become a Markdown link"
   assert_grep "This file is a pointer, not the dashboard source of truth." "$pointer" \
     "data/dashboard.md should be a pointer, not a duplicate dashboard"
   assert_grep "bin/fm-fleet-dashboard-refresh.sh" "$pointer" \

@@ -82,11 +82,18 @@ def pill(value: Any) -> str:
     return f'<span class="pill {badge_class(label)}">{esc(label)}</span>'
 
 
+def is_web_url(target: str) -> bool:
+    """PR urls come from worker-reported text, so only http(s) may become a link."""
+    return target.lower().startswith(("http://", "https://"))
+
+
 def link(url: Any, label: str | None = None) -> str:
     if not url:
         return "-"
     target = str(url)
     text = label or target
+    if not is_web_url(target):
+        return esc(text)
     return f'<a href="{esc(target)}">{esc(text)}</a>'
 
 
@@ -95,6 +102,8 @@ def md_link(url: Any, label: str | None = None) -> str:
         return "-"
     target = str(url)
     text = label or target
+    if not is_web_url(target):
+        return text
     return f"[{text}]({target})"
 
 

@@ -551,6 +551,16 @@ no_mistakes_compatible() {
   [ "$patch" -ge "$NO_MISTAKES_MIN_PATCH" ]
 }
 
+# One authentication probe per run: it is a network round trip, and both the
+# generic check and the secondmate self-check want the same answer.
+GH_AUTH_OK=
+gh_authenticated() {
+  if [ -z "$GH_AUTH_OK" ]; then
+    if gh auth status >/dev/null 2>&1; then GH_AUTH_OK=1; else GH_AUTH_OK=0; fi
+  fi
+  [ "$GH_AUTH_OK" = 1 ]
+}
+
 secondmate_self_check() {
   local problems=""
   [ -f "$FM_HOME/$SUB_HOME_MARKER" ] || return 0
@@ -560,7 +570,7 @@ secondmate_self_check() {
     || problems="$problems quota-axi"
   if ! command -v gh >/dev/null 2>&1; then
     problems="$problems gh"
-  elif ! gh auth status >/dev/null 2>&1; then
+  elif ! gh_authenticated; then
     problems="$problems gh-auth"
   fi
   command -v no-mistakes >/dev/null 2>&1 && no_mistakes_compatible \
@@ -858,7 +868,7 @@ fi
 if command -v tasks-axi >/dev/null 2>&1 && ! fm_tasks_axi_compatible; then
   echo "MISSING: tasks-axi (install: $(install_cmd tasks-axi))"
 fi
-gh auth status >/dev/null 2>&1 || echo "NEEDS_GH_AUTH"
+gh_authenticated || echo "NEEDS_GH_AUTH"
 # Worktree-tangle check: the firstmate primary checkout (FM_ROOT) must sit on its
 # default branch, not a feature branch (see fm-tangle-lib.sh). Scoped to the
 # primary only; detached-HEAD worktrees and secondmate homes never trip it.
