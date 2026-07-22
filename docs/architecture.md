@@ -35,6 +35,11 @@ For herdr, that pane fallback trusts a native `busy` verdict outright, but corro
 For whole-fleet read-only review, `bin/fm-fleet-snapshot.sh --json` emits schema `fm-fleet-snapshot.v1` from the backlog, task metadata, current crew state, endpoint probes, PR/report pointers, scout reports, bounded current summaries from registered secondmate homes, and secondmate return-channel guidance.
 `bin/fm-fleet-view.sh` renders that snapshot as Markdown for humans, while `bin/fm-bearings-snapshot.sh` provides the bounded bearings projection, so both views consume one structured contract instead of reparsing raw fleet files.
 The script header owns the exact JSON schema.
+`bin/fm-control-plane.sh` adds explicit source registration, durable native-session identity, outcome proof stages, deterministic invariant checks, and one captain-facing orientation over that snapshot plus registered git and transcript metadata.
+It uses the existing watcher heartbeat and durable wake queue only for changed attention fingerprints, so it does not create another task store or supervision cycle.
+[`control-plane.md`](control-plane.md) owns the guarantee, data, recovery, authority, and trust-domain contracts.
+`bin/fm-repository-intake.sh` adds a durable once-per-Kolkata-day discovery pass for every registered project's open GitHub issues and pull requests, then feeds changed attention into that same watcher and wake queue.
+[`repository-intake.md`](repository-intake.md) owns its source, checkpoint, verification, authority, and recovery contracts.
 
 ### Registered secondmate current state
 
