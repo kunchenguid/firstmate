@@ -439,6 +439,35 @@ test_allow_is_silent_both_modes() {
 
 # --- harness wiring: each adapter invokes the shared checker -----------------
 
+test_grok_pretool_hook_wired() {
+  local settings command
+  settings="$ROOT/.grok/hooks/fm-primary-pretool-check.json"
+  [ -f "$settings" ] || fail "tracked grok primary PreToolUse hook config is missing"
+  command=$(jq -r '.hooks.PreToolUse[0].hooks[0].command // empty' "$settings")
+  [ -n "$command" ] || fail "PreToolUse hook command is missing from grok primary hook config"
+  assert_contains "$command" 'GROK_WORKSPACE_ROOT' "grok pretool hook must anchor from GROK_WORKSPACE_ROOT"
+  assert_contains "$command" 'fm-arm-pretool-check.sh' "grok pretool hook must invoke the shared checker"
+  assert_contains "$command" 'exec "${GROK_WORKSPACE_ROOT:-}/bin/fm-arm-pretool-check.sh"' "grok pretool hook must forward its stdin payload unchanged to the checker"
+  # shellcheck disable=SC2016  # single quotes are deliberate: a literal needle string, not an expansion
+  assert_not_contains "$command" 'root=${GROK_WORKSPACE_ROOT' "grok pretool hook must not assign a bare \$root var (breaks grok's own \${VAR} pre-substitution; see docs/arm-pretool-check.md)"
+  local matcher
+  matcher=$(jq -r '.hooks.PreToolUse[0].matcher // empty' "$settings")
+  [ "$matcher" = "Bash" ] || fail "grok pretool hook must matcher-scope to Bash, got: $matcher"
+  pass ".grok primary hook: PreToolUse hook invokes the shared checker"
+}
+
+test_grok_turnend_hook_uses_safe_var_pattern() {
+  local settings command
+  settings="$ROOT/.grok/hooks/fm-primary-turnend-guard.json"
+  [ -f "$settings" ] || fail "tracked grok primary Stop hook config is missing"
+  command=$(jq -r '.hooks.Stop[0].hooks[0].command // empty' "$settings")
+  # shellcheck disable=SC2016  # single quotes are deliberate: literal needle strings, not expansions
+  assert_not_contains "$command" 'root=${GROK_WORKSPACE_ROOT' "grok Stop hook must not assign a bare \$root var either (regression fixed 2026-07-09, docs/arm-pretool-check.md)"
+  # shellcheck disable=SC2016
+  assert_contains "$command" '${GROK_WORKSPACE_ROOT:-}' "grok Stop hook must reference GROK_WORKSPACE_ROOT with an inline default every time"
+  pass ".grok primary hook: Stop hook uses the \${VAR:-} pattern throughout (no bare \$root)"
+}
+
 test_claude_settings_pretool_hook_wired() {
   local settings command
   settings="$ROOT/.claude/settings.json"
@@ -454,6 +483,21 @@ test_claude_settings_pretool_hook_wired() {
   matcher=$(jq -r '.hooks.PreToolUse[0].matcher // empty' "$settings")
   [ "$matcher" = "Bash" ] || fail "claude pretool hook must matcher-scope to Bash, got: $matcher"
   pass ".claude/settings.json: PreToolUse hook invokes the shared checker with --claude"
+}
+
+test_codex_hooks_pretool_wired() {
+  local settings command
+  settings="$ROOT/.codex/hooks.json"
+  [ -f "$settings" ] || fail "tracked codex primary hooks are missing"
+  command=$(jq -r '.hooks.PreToolUse[0].hooks[0].command // empty' "$settings")
+  [ -n "$command" ] || fail "PreToolUse hook command is missing from codex primary hooks"
+  assert_contains "$command" 'fm-arm-pretool-check.sh' "codex pretool hook must invoke the shared checker"
+  assert_contains "$command" 'pwd -P' "codex pretool hook must anchor to the hook process root like the Stop hook does"
+  assert_contains "$command" 'printf "%s" "$payload" | "$root/bin/fm-arm-pretool-check.sh"' "codex pretool hook must forward the exact captured payload to the checker"
+  local matcher
+  matcher=$(jq -r '.hooks.PreToolUse[0].matcher // empty' "$settings")
+  [ "$matcher" = "Bash" ] || fail "codex pretool hook must matcher-scope to Bash, got: $matcher"
+  pass ".codex/hooks.json: PreToolUse hook invokes the shared checker"
 }
 
 test_opencode_pretool_plugin_wired() {
@@ -509,7 +553,10 @@ test_failopen_missing_node
 test_claude_mode_stdout_empty_on_deny
 test_default_mode_stdout_has_grok_json_on_deny
 test_allow_is_silent_both_modes
+test_grok_pretool_hook_wired
+test_grok_turnend_hook_uses_safe_var_pattern
 test_claude_settings_pretool_hook_wired
+test_codex_hooks_pretool_wired
 test_opencode_pretool_plugin_wired
 test_pi_extension_carries_pretool_check
 test_shellcheck_clean
