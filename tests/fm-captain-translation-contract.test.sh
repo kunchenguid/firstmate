@@ -79,12 +79,14 @@ test_user_facing_identity_surfaces_use_jay_language() {
 
 test_complete_instruction_and_document_surface_uses_jay_language() {
   local residue
+  # shellcheck disable=SC2016
   residue=$(
     git grep -n -i captain -- \
       AGENTS.md README.md CONTRIBUTING.md .agents/skills skills docs bin 2>/dev/null \
       | awk -F: '{
           text = $0
           sub(/^[^:]*:[0-9]+:/, "", text)
+          if ($1 == "bin/fm-decision-hold.sh" && text ~ /Jay decision.*Captain decision/) next
           if ($1 !~ /^bin\// || text !~ /^[[:space:]]*#/) print
         }' \
       | sed \

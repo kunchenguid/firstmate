@@ -229,6 +229,8 @@ EOF
   fi
   show=$(tasks_in "$home" show "$route_hold" --full)
   assert_contains "$show" "state: queued" "partial routing failure closed the hold"
+  sed 's/Jay decision:/Captain decision:/' "$home/data/backlog.md" > "$home/data/backlog.md.tmp"
+  mv "$home/data/backlog.md.tmp" "$home/data/backlog.md"
   show=$(tasks_in "$home" show sample-route-followup --full)
   assert_contains "$show" "blocked: no" "partial routing fixture did not release its first dependent"
   show=$(tasks_in "$home" show sample-route-implementation --full)
@@ -247,7 +249,7 @@ EOF
     || fail "could not complete already-routed dependent work"
   run_decisions "$home" resolve "$id" route --decision-file "$home/route-decision.txt" \
     --routed-to sample-route-implementation --routed-to sample-route-followup >/dev/null \
-    || fail "could not resume and complete partial decision routing"
+    || fail "could not resume and complete legacy partial decision routing"
   run_decisions "$home" resolve "$id" route --decision-file "$home/route-decision.txt" \
     --routed-to sample-route-implementation --routed-to sample-route-followup >/dev/null \
     || fail "identical resolution retry was not idempotent"

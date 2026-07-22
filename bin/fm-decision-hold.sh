@@ -211,7 +211,7 @@ verify_resolution_identity() {
     *) fail "decision hold $id has no retry identity record" ;;
   esac
   case "$resolution_fields" in
-    *'\nRouted identities: '*'\n\nJay decision:'*) : ;;
+    *'\nRouted identities: '*'\n\nJay decision:'*|*'\nRouted identities: '*'\n\nCaptain decision:'*) : ;;
     *) fail "decision hold $id has an invalid retry identity record" ;;
   esac
   recorded_digest=${resolution_fields%%\\n*}
