@@ -30,6 +30,9 @@ make_case() {
   cp "$LAUNCH" "$home/bin/fm-primary-launch.sh"
   cp "$ROOT/bin/fm-lock.sh" "$home/bin/fm-lock.sh"
   chmod +x "$home/bin/"*.sh
+  cat > "$home/bin/pi" <<'JS'
+setInterval(() => {}, 300000)
+JS
   printf '%s\n' "$socket" > "$dir/socket-name"
   cat > "$fakebin/no-mistakes" <<'SH'
 #!/usr/bin/env bash
@@ -272,6 +275,30 @@ EOF
   pass "fm-lock live-pid recognizes supported harnesses without mutation"
 }
 
+test_tracked_scripts_are_executable() {
+  [ -x "$ROOT/bin/fm-primary-launch.sh" ] || fail "primary launcher is not executable"
+  [ -x "$ROOT/bin/fm-lock.sh" ] || fail "session lock helper is not executable"
+  pass "tracked primary launcher and lock helper are executable"
+}
+
+test_node_hosted_pi_process_identity() {
+  local rec dir home fakebin socket out pane_pid
+  rec=$(make_case node-pi)
+  IFS='|' read -r dir home fakebin socket <<EOF
+$rec
+EOF
+  tmux -L "$socket" new-session -d -s firstmate "exec node '$home/bin/pi' --model openai-codex/gpt-5.6-sol"
+  tmux -L "$socket" set-option -q -t firstmate @firstmate_home "$home"
+  tmux -L "$socket" set-option -q -t firstmate @firstmate_harness pi
+  pane_pid=$(tmux -L "$socket" display-message -p -t firstmate:0.0 '#{pane_pid}')
+  printf '%s\n' "$pane_pid" > "$home/state/.lock"
+  out=$(run_launch "$home" "$fakebin" "$socket" "$dir/unused.log" --pi)
+  assert_contains "$out" 'harness=pi' "Node-hosted Pi with Codex model was misclassified"
+  [ ! -e "$dir/unused.log" ] || fail "Node-hosted Pi attach launched another harness"
+  kill_case "$socket"
+  pass "Node-hosted Pi identity ignores model argument substrings"
+}
+
 test_existing_session_requires_positive_identity() {
   local rec dir home fakebin socket out status log pane_pid holder
   rec=$(make_case session-identity)
@@ -309,10 +336,12 @@ EOF
   pass "existing sessions require matching home, lock, metadata, and live process"
 }
 
+test_tracked_scripts_are_executable
 test_parsing_rejections
 test_harness_argv_and_invariants
 test_bare_and_matching_attach_divergent_refusal
 test_live_and_stale_lock_behavior
 test_concurrent_launch_serialization
 test_lock_live_pid_query_is_read_only
+test_node_hosted_pi_process_identity
 test_existing_session_requires_positive_identity

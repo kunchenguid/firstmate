@@ -83,22 +83,33 @@ ensure_daemon() {
   fi
 }
 
+process_harness() {
+  local pid=$1 comm name
+  local -a argv=()
+  comm=$(ps -o comm= -p "$pid" 2>/dev/null || true)
+  mapfile -d '' -t argv < "/proc/$pid/cmdline" 2>/dev/null || return 1
+  name=$(basename "${argv[0]:-$comm}")
+  case "$name" in codex|pi|grok|claude|opencode) printf '%s\n' "$name"; return 0 ;; esac
+  name=$(basename "$comm")
+  case "$name" in codex|pi|grok|claude|opencode) printf '%s\n' "$name"; return 0 ;; esac
+  case "$(basename "${argv[0]:-}")" in
+    node|nodejs|python|python[0-9]|python[0-9].*)
+      name=$(basename "${argv[1]:-}")
+      case "$name" in codex|pi|grok|claude|opencode) printf '%s\n' "$name"; return 0 ;; esac
+      ;;
+  esac
+  return 1
+}
+
 pid_harness() {
-  local root_pid=$1 pid ppid comm args candidates
+  local root_pid=$1 pid ppid live candidates
   local -i depth=0
   candidates=$root_pid
   while [ "$depth" -lt 8 ]; do
     depth=$((depth + 1))
     for pid in $candidates; do
-      comm=$(ps -o comm= -p "$pid" 2>/dev/null || true)
-      args=$(ps -o args= -p "$pid" 2>/dev/null || true)
-      case "$(basename "$comm") $args" in
-        *opencode*) printf 'opencode\n'; return 0 ;;
-        *claude*) printf 'claude\n'; return 0 ;;
-        *codex*) printf 'codex\n'; return 0 ;;
-        *grok*) printf 'grok\n'; return 0 ;;
-        *'/pi '*|*' pi '*|pi\ *) printf 'pi\n'; return 0 ;;
-      esac
+      live=$(process_harness "$pid" || true)
+      [ -z "$live" ] || { printf '%s\n' "$live"; return 0; }
     done
     candidates=
     while read -r pid ppid; do

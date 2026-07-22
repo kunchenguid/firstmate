@@ -18,40 +18,39 @@ MODE=${1:-acquire}
 case "$MODE" in acquire|status|live-pid) ;; *) echo "error: usage: fm-lock.sh [status|live-pid]" >&2; exit 2 ;; esac
 [ "$MODE" != acquire ] || mkdir -p "$STATE"
 
-# Known harness command names; extend when a new adapter is verified.
-HARNESS_RE='claude|codex|opencode|grok|^pi$'
+process_harness() {
+  local pid=$1 comm name
+  local -a argv=()
+  comm=$(ps -o comm= -p "$pid" 2>/dev/null || true)
+  mapfile -d '' -t argv < "/proc/$pid/cmdline" 2>/dev/null || return 1
+  name=$(basename "${argv[0]:-$comm}")
+  case "$name" in codex|pi|grok|claude|opencode) return 0 ;; esac
+  name=$(basename "$comm")
+  case "$name" in codex|pi|grok|claude|opencode) return 0 ;; esac
+  case "$(basename "${argv[0]:-}")" in
+    node|nodejs|python|python[0-9]|python[0-9].*)
+      name=$(basename "${argv[1]:-}")
+      case "$name" in codex|pi|grok|claude|opencode) return 0 ;; esac
+      ;;
+  esac
+  return 1
+}
 
 harness_pid() {
-  local pid=$$ comm args
+  local pid=$$
   for _ in 1 2 3 4 5 6 7 8; do
-    comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
-    args=$(ps -o args= -p "$pid" 2>/dev/null)
-    if printf '%s' "$(basename "$comm")" | grep -qE "$HARNESS_RE"; then
-      echo "$pid"; return 0
-    fi
-    # Bare interpreter (e.g. node): match the harness name in its script path.
-    case "$comm" in
-      *node*|*python*) printf '%s' "$args" | grep -qE "$HARNESS_RE" && { echo "$pid"; return 0; } ;;
-    esac
+    process_harness "$pid" && { echo "$pid"; return 0; }
     pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
     [ -n "$pid" ] && [ "$pid" -gt 1 ] || return 1
   done
   return 1
 }
 
-holder_alive() {  # true if $1 is a live process that looks like a harness
-  local pid=$1 comm args
+holder_alive() {
+  local pid=$1
   case "$pid" in ''|*[!0-9]*|1) return 1 ;; esac
   kill -0 "$pid" 2>/dev/null || return 1
-  comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
-  args=$(ps -o args= -p "$pid" 2>/dev/null) || return 1
-  if printf '%s' "$(basename "$comm")" | grep -qE "$HARNESS_RE"; then
-    return 0
-  fi
-  case "$comm" in
-    *node*|*python*|*sleep*) printf '%s' "$args" | grep -qE '(^|[ /])(claude|codex|opencode|grok|pi)([ /]|$)' ;;
-    *) return 1 ;;
-  esac
+  process_harness "$pid"
 }
 
 if [ "$MODE" = status ]; then
