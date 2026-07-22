@@ -347,6 +347,40 @@ test_pi_threads_model_and_max_effort() {
   pass "pi receives --model and --thinking max profile flags"
 }
 
+test_quota_selected_default_array_reaches_spawn() {
+  local rec id quota random selected diagnostic harness model effort out status launch
+  id=profile-selected-default-z17
+  rec=$(make_spawn_case profile-selected-default claude "$id")
+  read_case_record "$rec"
+  cat > "$HOME_DIR/config/crew-dispatch.json" <<'JSON'
+{"default":[{"harness":"claude","model":"claude-sonnet-5","effort":"low"},{"harness":"codex","model":"gpt-5.5","effort":"high"}]}
+JSON
+  quota="$CASE_DIR/quota.json"
+  random="$CASE_DIR/random"
+  printf '\000\000\000\000' > "$random"
+  cat > "$quota" <<'JSON'
+{"schemaVersion":2,"providers":[{"provider":"claude","state":{"status":"fresh"},"windows":[{"id":"five_hour","kind":"session","percentRemaining":10}]},{"provider":"codex","state":{"status":"fresh"},"windows":[{"id":"five_hour","kind":"session","percentRemaining":90}]}]}
+JSON
+
+  selected=$(FM_DISPATCH_RANDOM_SOURCE="$random" "$ROOT/bin/fm-dispatch-select.sh" --quota-json "$quota" \
+    "$(jq -c .default "$HOME_DIR/config/crew-dispatch.json")" 2>"$CASE_DIR/selection.err")
+  diagnostic=$(cat "$CASE_DIR/selection.err")
+  harness=$(printf '%s\n' "$selected" | jq -r .harness)
+  model=$(printf '%s\n' "$selected" | jq -r .model)
+  effort=$(printf '%s\n' "$selected" | jq -r .effort)
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --harness "$harness" --model "$model" --effort "$effort")
+  status=$?
+
+  expect_code 0 "$status" "quota-selected default-array profile should reach spawn"
+  assert_contains "$diagnostic" "selection basis: quota-selected" "selection did not expose its quota basis"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5.5 high
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "codex --model 'gpt-5.5' -c 'model_reasoning_effort=\"high\"'" \
+    "quota-selected default profile did not reach the concrete launch"
+  pass "top-level default array resolves through quota selection into the real spawn path"
+}
+
 test_batch_forwards_shared_profile_flags() {
   local rec id1 id2 out status
   id1=profile-batch-a-z9
@@ -398,6 +432,7 @@ test_grok_omits_invalid_max_reasoning_effort
 test_grok_omits_invalid_xhigh_reasoning_effort
 test_opencode_threads_model_and_ignores_effort_axis
 test_pi_threads_model_and_max_effort
+test_quota_selected_default_array_reaches_spawn
 test_batch_forwards_shared_profile_flags
 test_active_dispatch_profile_does_not_block_secondmate_launch
 
