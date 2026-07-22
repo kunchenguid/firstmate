@@ -377,6 +377,89 @@ function validateRepositoryGraphQL(query, nameVariable, suppliedOwner, suppliedN
   return {owner, name, kind};
 }
 
+function validateInternalApi(args, selectedRepository) {
+  if (!Array.isArray(args) || args[0] !== "api" || args.length > 128) throw new Error("invalid API request");
+  const selected = parseRepository(selectedRepository);
+  let endpoint = "";
+  let method = "";
+  let query = "";
+  let owner = "";
+  let name = "";
+  let nameVariable = "name";
+  let nodeId = "";
+  let typeId = "";
+  let pending = "";
+  const setField = (field) => {
+    const separator = field.indexOf("=");
+    if (separator < 1) throw new Error("invalid API request");
+    const key = field.slice(0, separator);
+    const value = field.slice(separator + 1);
+    if (!singleLine(value, 16 * 1024)) throw new Error("invalid API request");
+    if (key === "query") query = value;
+    else if (key === "owner") owner = value;
+    else if (key === "name" || key === "repo") {
+      name = value;
+      nameVariable = key;
+    } else if (key === "id") nodeId = value;
+    else if (key === "typeId") typeId = value;
+    else if (!["first", "last", "after", "before", "endCursor", "cursor"].includes(key) || value.length > 1024) {
+      throw new Error("invalid API request");
+    }
+  };
+  for (let index = 1; index < args.length; index += 1) {
+    const arg = args[index];
+    if (!singleLine(arg, 20 * 1024)) throw new Error("invalid API request");
+    if (pending) {
+      if (pending === "method") method = arg;
+      else if (pending === "host") {
+        if (arg !== "github.com") throw new Error("invalid API request");
+      } else if (pending === "field") setField(arg);
+      pending = "";
+      continue;
+    }
+    if (arg === "--method" || arg === "-X") pending = "method";
+    else if (arg.startsWith("--method=")) method = arg.slice(9);
+    else if (arg.startsWith("-X") && arg.length > 2) method = arg.slice(2);
+    else if (arg === "--hostname") pending = "host";
+    else if (arg === "--hostname=github.com") continue;
+    else if (["-f", "-F", "--field", "--raw-field"].includes(arg)) pending = "field";
+    else if ((arg.startsWith("-f") || arg.startsWith("-F")) && arg.length > 2) setField(arg.slice(2));
+    else if (arg.startsWith("--field=") || arg.startsWith("--raw-field=")) setField(arg.slice(arg.indexOf("=") + 1));
+    else if (["--jq", "--template", "--cache"].includes(arg)) pending = "ignored";
+    else if (arg.startsWith("--jq=") || arg.startsWith("--template=") || arg.startsWith("--cache=") || arg === "--paginate" || arg === "--slurp") continue;
+    else if (arg.startsWith("-") || endpoint) throw new Error("invalid API request");
+    else endpoint = arg;
+  }
+  if (pending || !endpoint) throw new Error("invalid API request");
+  if (endpoint === "graphql") {
+    if (method && method !== "POST") throw new Error("invalid API request");
+    const result = validateRepositoryGraphQL(query, nameVariable, owner, name);
+    if (result.kind === "issue-type-write") {
+      if (result.mode !== "set" || !singleLine(nodeId, 256) || !singleLine(typeId, 256)
+        || /[^A-Za-z0-9_=-]/u.test(nodeId) || /[^A-Za-z0-9_=-]/u.test(typeId) || owner || name) {
+        throw new Error("invalid API request");
+      }
+      return {kind: result.kind, repository: selected, nodeId, typeId};
+    }
+    if (nodeId || typeId || !result.owner || !result.name) throw new Error("invalid API request");
+    const repository = parseRepository(`github.com/${result.owner}/${result.name}`);
+    if (repository.toLowerCase() !== selected.toLowerCase()) throw new Error("invalid API request");
+    return {kind: result.kind, repository, nodeId: "", typeId: ""};
+  }
+  if (method && method !== "GET" || query || owner || name || nodeId || typeId) throw new Error("invalid API request");
+  const pathValue = endpoint.replace(/^\//u, "").split("?", 1)[0];
+  if (pathValue.includes("%") || pathValue.includes("//") || pathValue.includes("/../") || pathValue.includes("/./")) {
+    throw new Error("invalid API request");
+  }
+  const match = pathValue.match(/^repos\/([^/]+)\/([^/]+)\/pulls\/([1-9][0-9]*)\/(reviews|comments)$/u);
+  if (!match) throw new Error("invalid API request");
+  const repository = match[1] === "{owner}" && match[2] === "{repo}"
+    ? selected
+    : parseRepository(`github.com/${match[1]}/${match[2]}`);
+  if (repository.toLowerCase() !== selected.toLowerCase()) throw new Error("invalid API request");
+  return {kind: "read", repository, nodeId: "", typeId: ""};
+}
+
 function within(candidate, root) {
   const relative = path.relative(root, candidate);
   return relative === "" || (!relative.startsWith(`..${path.sep}`) && relative !== "..");
@@ -617,6 +700,18 @@ try {
     emit("name", result.name);
     emit("kind", result.kind);
     emit("mode", result.mode || "");
+    process.exit(0);
+  }
+  if (action === "validate-internal-api") {
+    const encoded = option("--request");
+    if (!/^[A-Za-z0-9_-]+$/u.test(encoded) || encoded.length > 128 * 1024) throw new Error("invalid API request");
+    const request = JSON.parse(Buffer.from(encoded, "base64url").toString("utf8"));
+    exactKeys(request, ["args", "repository"]);
+    const result = validateInternalApi(request.args, request.repository);
+    emit("kind", result.kind);
+    emit("repository", result.repository);
+    emit("node_id", result.nodeId);
+    emit("type_id", result.typeId);
     process.exit(0);
   }
   if (action === "resolve") {

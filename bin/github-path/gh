@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
 set -eu
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-exec "$ROOT/fm-github-exec.sh" child-gh -- "$@"
+: "${FM_GITHUB_PROJECT:?}" "${FM_GITHUB_REPOSITORY:?}" "${FM_GITHUB_PROFILE_ID:?}"
+exec "$ROOT/fm-github-exec.sh" exec --project "$FM_GITHUB_PROJECT" \
+  --repository "${FM_GITHUB_PROJECT_PATH:-$FM_GITHUB_REPOSITORY}" --profile "$FM_GITHUB_PROFILE_ID" -- gh "$@"

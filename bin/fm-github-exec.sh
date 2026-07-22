@@ -7,30 +7,16 @@
 #   fm-github-exec.sh exec --project <name> --repository <path-or-url> [--profile <id>] [--pre-register-project] -- <command> [args...]
 #   fm-github-exec.sh no-mistakes-init --project <name> --repository <path> [--fork-url <https-url>]
 #
-# Internal PATH shims use child-git, child-gh, and child-gh-axi. They re-resolve
-# the stable profile id against current private config before every ordinary
-# descendant invocation. This protects generated FirstMate paths, but is not an
-# operating-system sandbox against a process that deliberately invokes another
-# absolute executable.
+# Internal PATH shims re-enter the public guarded exec action and re-resolve the
+# stable profile id against current private config before every descendant
+# invocation.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
-case "${1:-}" in
-  child-*)
-    [ "${2:-}" = --home ] && [ -n "${3:-}" ] && [ "${4:-}" = -- ] || {
-      sed -n '2,12p' "$0" >&2
-      exit 2
-    }
-    FM_HOME=$3
-    unset FM_GITHUB_ALLOW_UNREGISTERED_PROJECT FM_GITHUB_CLONE_CAPABILITY FM_GITHUB_CLONE_ROOT
-    ;;
-  *)
-    FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
-    unset FM_GITHUB_ACTIVE FM_GITHUB_ALLOW_UNREGISTERED_PROJECT FM_GITHUB_CLONE_CAPABILITY FM_GITHUB_CLONE_ROOT
-    unset FM_GITHUB_INVOCATION_ENDPOINT FM_GITHUB_INVOCATION_BROKER_PID FM_GITHUB_INVOCATION_BROKER_IDENTITY FM_GITHUB_INVOCATION_TOKEN
-    ;;
-esac
+FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
+unset FM_GITHUB_ACTIVE FM_GITHUB_ALLOW_UNREGISTERED_PROJECT FM_GITHUB_CLONE_CAPABILITY FM_GITHUB_CLONE_ROOT
+unset FM_GITHUB_BROKER_ENDPOINT FM_GITHUB_BROKER_TOKEN
 export FM_HOME
 
 # shellcheck source=bin/fm-github-lib.sh
@@ -116,23 +102,6 @@ validate_all() {
     fi
   done < "$projects_file"
   return "$failed"
-}
-
-child_context() {
-  local actual_repository
-  [ "${FM_GITHUB_ACTIVE:-}" = 1 ] && [ -n "${FM_GITHUB_PROFILE_ID:-}" ] && [ -n "${FM_GITHUB_REPOSITORY:-}" ] || {
-    echo "error: guarded GitHub child has no selected project context" >&2
-    return 1
-  }
-  project=${FM_GITHUB_PROJECT:-}
-  repository=$FM_GITHUB_REPOSITORY
-  profile=$FM_GITHUB_PROFILE_ID
-  if [ -n "${FM_GITHUB_PROJECT_PATH:-}" ] \
-    && actual_repository=$(fm_github_repository_toplevel "$PWD" 2>/dev/null) \
-    && fm_github_same_repository_copy "$actual_repository" "$FM_GITHUB_PROJECT_PATH"; then
-    FM_GITHUB_PROJECT_PATH=$actual_repository
-    export FM_GITHUB_PROJECT_PATH
-  fi
 }
 
 no_mistakes_context_marker_path() {
@@ -249,40 +218,10 @@ no_mistakes_head_matches() {
     || command "$FM_GITHUB_GIT_BINARY" -C "$repository" merge-base --is-ancestor "$current_head" "$run_head" 2>/dev/null
 }
 
-no_mistakes_prove_run_absent() {
-  local binary=$1 current_branch=$2 current_head=$3 output parsed rows count status branch head
-  output=$(cd "$repository" && LC_ALL=C command "$binary" runs --limit 101 2>/dev/null) || return 1
-  parsed=$(printf '%s\n' "$output" | fm_github_node -e '
-let input = "";
-process.stdin.setEncoding("utf8");
-process.stdin.on("data", (chunk) => { input += chunk; });
-process.stdin.on("end", () => {
-  const lines = input.split(/\r?\n/u).filter((line) => line.trim() !== "");
-  process.stdout.write(`count\t${lines.length}\n`);
-  for (const line of lines) {
-    const match = line.trim().match(/^(running|fixing|ci|awaiting_approval|fix_review|completed|failed|cancelled)\s+(\S+)\s+([0-9a-fA-F]{7,40})\s+\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}(?::\d{2})?(?:Z|[+-]\d{2}:?\d{2})?(?:\s+https:\/\/github\.com\/\S+)?$/u);
-    if (!match) process.exit(1);
-    process.stdout.write(`${match[1]}\t${match[2]}\t${match[3]}\n`);
-  }
-});
-') || return 1
-  count=$(printf '%s\n' "$parsed" | sed -n $'s/^count\t//p')
-  case "$count" in ''|*[!0-9]*) return 1 ;; esac
-  rows=$(printf '%s\n' "$parsed" | sed '1d')
-  while IFS=$'\t' read -r status branch head; do
-    [ -n "$status" ] || continue
-    if [ "$branch" = "$current_branch" ]; then
-      case "$status" in
-        running|fixing|ci|awaiting_approval|fix_review) return 1 ;;
-        completed|failed|cancelled)
-          no_mistakes_head_matches "$head" "$current_head" && return 1
-          ;;
-        *) return 1 ;;
-      esac
-    fi
-  done <<< "$rows"
-  [ "$count" -lt 101 ] || return 1
-  return 0
+no_mistakes_head_is_exact() {
+  local candidate=$1 current_head=$2 run_head
+  run_head=$(command "$FM_GITHUB_GIT_BINARY" -C "$repository" rev-parse "$candidate^{commit}" 2>/dev/null) || return 1
+  [ "$current_head" = "$run_head" ]
 }
 
 no_mistakes_run_details() {
@@ -290,10 +229,7 @@ no_mistakes_run_details() {
   NM_RUN_ID= NM_RUN_BRANCH= NM_RUN_STATUS= NM_RUN_HEAD= NM_RUN_STATE=inactive
   current_branch=$(command "$FM_GITHUB_GIT_BINARY" -C "$repository" symbolic-ref --quiet --short HEAD 2>/dev/null) || return 1
   current_head=$(command "$FM_GITHUB_GIT_BINARY" -C "$repository" rev-parse HEAD 2>/dev/null) || return 1
-  if ! output=$(cd "$repository" && LC_ALL=C command "$binary" axi status 2>/dev/null); then
-    no_mistakes_prove_run_absent "$binary" "$current_branch" "$current_head" || return 1
-    return 2
-  fi
+  output=$(cd "$repository" && LC_ALL=C command "$binary" axi status 2>/dev/null) || return 1
   NM_RUN_ID=$(printf '%s\n' "$output" | sed -n 's/^  id: //p' | head -1)
   NM_RUN_BRANCH=$(printf '%s\n' "$output" | sed -n 's/^  branch: //p' | head -1)
   NM_RUN_STATUS=$(printf '%s\n' "$output" | sed -n 's/^  status: //p' | head -1)
@@ -308,13 +244,13 @@ no_mistakes_run_details() {
     completed|failed|cancelled) NM_RUN_STATE=inactive ;;
     *) return 1 ;;
   esac
-  if [ "$NM_RUN_BRANCH" = "$current_branch" ] && no_mistakes_head_matches "$NM_RUN_HEAD" "$current_head"; then
-    return 0
+  if [ "$NM_RUN_BRANCH" = "$current_branch" ]; then
+    if [ "$NM_RUN_STATE" = active ]; then
+      no_mistakes_head_is_exact "$NM_RUN_HEAD" "$current_head" || return 1
+      return 0
+    fi
+    no_mistakes_head_matches "$NM_RUN_HEAD" "$current_head" && return 0
   fi
-  if [ "$NM_RUN_BRANCH" = "$current_branch" ] && [ "$NM_RUN_STATE" = active ]; then
-    return 1
-  fi
-  no_mistakes_prove_run_absent "$binary" "$current_branch" "$current_head" || return 1
   return 2
 }
 
@@ -434,60 +370,18 @@ case "$action" in
       FM_GITHUB_CLONE_CAPABILITY=project
       export FM_GITHUB_ALLOW_UNREGISTERED_PROJECT FM_GITHUB_CLONE_CAPABILITY
     fi
-    fm_github_context_command "$project" "$repository" "$profile" "${CONTEXT_REST[@]}"
+    if [ "${CONTEXT_REST[0]##*/}" = no-mistakes ] && fm_github_enabled; then
+      fm_github_activate "$project" "$repository" "$profile" || exit 1
+      CONTEXT_REST=("${CONTEXT_REST[@]:1}")
+      run_no_mistakes_command "${CONTEXT_REST[@]}"
+    else
+      fm_github_context_command "$project" "$repository" "$profile" "${CONTEXT_REST[@]}"
+    fi
     ;;
   no-mistakes-init)
     parse_context_args "$@"
     [ "${#CONTEXT_REST[@]}" -eq 0 ] && [ "$pre_register_project" -eq 0 ] || github_exec_usage
     run_no_mistakes_init initialize
-    ;;
-  child-git)
-    [ "${1:-}" = --home ] && [ -n "${2:-}" ] && [ "${3:-}" = -- ] || github_exec_usage
-    shift 3
-    child_context
-    [ "$#" -gt 0 ] || github_exec_usage
-    if fm_github_validate_capability gh-repo-clone "$FM_GITHUB_GH_BINARY"; then
-      FM_GITHUB_CLONE_CAPABILITY=gh-project
-      FM_GITHUB_CLONE_ROOT="$FM_HOME/projects"
-      export FM_GITHUB_CLONE_CAPABILITY FM_GITHUB_CLONE_ROOT
-    fi
-    fm_github_context_command "$project" "$repository" "$profile" git "$@"
-    ;;
-  child-gh)
-    [ "${1:-}" = --home ] && [ -n "${2:-}" ] && [ "${3:-}" = -- ] || github_exec_usage
-    shift 3
-    child_context
-    [ "$#" -gt 0 ] || github_exec_usage
-    if fm_github_validate_capability gh-axi-preregister "$FM_GITHUB_GH_AXI_BINARY"; then
-      FM_GITHUB_ALLOW_UNREGISTERED_PROJECT=1
-      export FM_GITHUB_ALLOW_UNREGISTERED_PROJECT
-    fi
-    if [ "${1:-}" = api ]; then
-      fm_github_internal_gh_api_command "$project" "$repository" "$profile" "$@"
-    else
-      fm_github_context_command "$project" "$repository" "$profile" gh "$@"
-    fi
-    ;;
-  child-gh-axi)
-    [ "${1:-}" = --home ] && [ -n "${2:-}" ] && [ "${3:-}" = -- ] || github_exec_usage
-    shift 3
-    child_context
-    [ "$#" -gt 0 ] || github_exec_usage
-    fm_github_context_command "$project" "$repository" "$profile" gh-axi "$@"
-    ;;
-  child-no-mistakes)
-    [ "${1:-}" = --home ] && [ -n "${2:-}" ] && [ "${3:-}" = -- ] || github_exec_usage
-    shift 3
-    child_context
-    [ "$#" -gt 0 ] || github_exec_usage
-    run_no_mistakes_command "$@"
-    ;;
-  child-exec)
-    [ "${1:-}" = --home ] && [ -n "${2:-}" ] && [ "${3:-}" = -- ] || github_exec_usage
-    shift 3
-    child_context
-    [ "$#" -gt 0 ] || github_exec_usage
-    fm_github_context_command "$project" "$repository" "$profile" "$@"
     ;;
   *) github_exec_usage ;;
 esac

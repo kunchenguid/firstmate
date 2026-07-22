@@ -77,6 +77,16 @@ if [ -n "${GH_TOKEN+x}" ] || [ -n "${GITHUB_TOKEN+x}" ] || [ -n "${GIT_ASKPASS+x
 fi
 profile=${FM_GITHUB_PROFILE_ID:-unselected}
 printf 'gh\t%s\t%s\n' "$profile" "$*" >> "${FM_TEST_ROUTE_LOG:-/dev/null}"
+case "$*" in
+  *'issueTypes(first:25)'*)
+    printf '%s\n' '{"data":{"repository":{"issueTypes":{"nodes":[{"id":"TYPE_node_bug","name":"Bug"}]}}}}'
+    exit 0
+    ;;
+  *' updateIssue(input:'*)
+    printf '%s\n' '{"data":{"updateIssue":{"issue":{"id":"ISSUE_node_17"}}}}'
+    exit 0
+    ;;
+esac
 case "${1:-} ${2:-}" in
   "auth status")
     printf '%s\n' 'Token: keyring'
@@ -99,6 +109,14 @@ case "${1:-} ${2:-}" in
   "repo clone")
     git clone -- "https://github.com/${3}.git" "${4:-${3##*/}}"
     exit
+    ;;
+  "issue create")
+    printf '%s\n' 'https://github.com/Owner-A/repo-a/issues/17'
+    exit 0
+    ;;
+  "issue view")
+    printf '%s\n' '{"number":17,"title":"typed","state":"OPEN","url":"https://github.com/Owner-A/repo-a/issues/17","id":"ISSUE_node_17"}'
+    exit 0
     ;;
   "pr view")
     printf '%s\n' "${FM_TEST_PR_STATE:-ok}"
@@ -135,7 +153,33 @@ case "${FM_TEST_GH_AXI_TYPED_API:-}" in
   issue-type)
     gh api graphql -f owner=Owner-A -f name=repo-a \
       -f 'query=query($owner:String!,$name:String!){repository(owner:$owner,name:$name){issueTypes(first:25){nodes{id name}}}}'
+    if [ "${2:-}" = create ]; then gh issue create --title typed; fi
+    gh issue view 17 --json number,title,state,url,id
     gh api graphql -f id=ISSUE_node_17 -f typeId=TYPE_node_bug \
+      -f 'query=mutation($id:ID!,$typeId:ID!){updateIssue(input:{id:$id,issueTypeId:$typeId}){issue{id}}}'
+    exit
+    ;;
+  issue-type-fork)
+    gh api graphql -f owner=account-a -f name=repo-a \
+      -f 'query=query($owner:String!,$name:String!){repository(owner:$owner,name:$name){issueTypes(first:25){nodes{id name}}}}'
+    gh issue view 17 --json number,title,state,url,id --repo account-a/repo-a
+    gh api graphql -f id=ISSUE_node_17 -f typeId=TYPE_node_bug \
+      -f 'query=mutation($id:ID!,$typeId:ID!){updateIssue(input:{id:$id,issueTypeId:$typeId}){issue{id}}}'
+    exit
+    ;;
+  wrong-issue-id)
+    gh api graphql -f owner=Owner-A -f name=repo-a \
+      -f 'query=query($owner:String!,$name:String!){repository(owner:$owner,name:$name){issueTypes(first:25){nodes{id name}}}}'
+    gh issue view 17 --json number,title,state,url,id
+    gh api graphql -f id=ISSUE_node_other -f typeId=TYPE_node_bug \
+      -f 'query=mutation($id:ID!,$typeId:ID!){updateIssue(input:{id:$id,issueTypeId:$typeId}){issue{id}}}'
+    exit
+    ;;
+  wrong-type-id)
+    gh api graphql -f owner=Owner-A -f name=repo-a \
+      -f 'query=query($owner:String!,$name:String!){repository(owner:$owner,name:$name){issueTypes(first:25){nodes{id name}}}}'
+    gh issue view 17 --json number,title,state,url,id
+    gh api graphql -f id=ISSUE_node_17 -f typeId=TYPE_node_other \
       -f 'query=mutation($id:ID!,$typeId:ID!){updateIssue(input:{id:$id,issueTypeId:$typeId}){issue{id}}}'
     exit
     ;;
@@ -514,7 +558,7 @@ test_concurrent_profiles_and_exact_children() {
   assert_no_grep "$SENTINEL" "$d/routes.log" "credential sentinel reached route log"
   contexts=$(find "$d/home/state/.github-routing-path" -maxdepth 1 -type d -name 'context*' | wc -l | tr -d ' ')
   [ "$contexts" -eq 1 ] || fail "routing commands created $contexts persistent shim contexts"
-  [ "$(routing_file_mode "$d/home/state/.github-routing-path/context-v1")" = 500 ] || fail "routing shim context is writable"
+  [ "$(routing_file_mode "$d/home/state/.github-routing-path/context-v2")" = 500 ] || fail "routing shim context is writable"
   [ ! -e "$d/home/state/.github-routing-path/.install.lock" ] || fail "stale routing shim lock was not recovered"
   printf '%s\n' unproven > "$d/home/state/.github-routing-path/.install.lock"
   chmod 0600 "$d/home/state/.github-routing-path/.install.lock"
@@ -532,7 +576,7 @@ test_concurrent_profiles_and_exact_children() {
     [ "$(sed -n "2p" "$lock")" = "$$" ]
     fm_github_lock_release
   ' || fail "routing lock did not record the actual owning shell"
-  chmod 0700 "$d/home/state/.github-routing-path/context-v1/gh"
+  chmod 0700 "$d/home/state/.github-routing-path/context-v2/gh"
   set +e
   run_exec "$d" exec --project repo-a --repository "$d/home/projects/repo-a" -- gh pr view 12 >/dev/null 2>&1
   rc=$?
@@ -678,6 +722,9 @@ test_forbidden_commands_and_access_diagnostics() {
   FM_TEST_GH_AXI_TYPED_API=issue-type run_exec "$d" exec --project repo-a --repository "$d/home/projects/repo-a" -- \
     gh-axi issue edit 17 --type Bug >/dev/null \
     || fail "verified gh-axi descendant could not edit a scoped issue type"
+  FM_TEST_GH_AXI_TYPED_API=issue-type-fork run_exec "$d" exec --project repo-a --repository "$d/home/projects/repo-a" -- \
+    gh-axi issue edit 17 --type Bug --repo account-a/repo-a >/dev/null \
+    || fail "verified gh-axi descendant could not edit a selected-fork issue type"
   assert_grep $'gh\tprofile-a\tapi graphql --hostname github.com' "$d/routes.log" \
     "typed gh-axi internal API call did not retain the selected profile"
   for kind in foreign forks mutation traversal head-repository; do
@@ -694,6 +741,14 @@ test_forbidden_commands_and_access_diagnostics() {
   rc=$?
   set -e
   expect_code 1 "$rc" "gh-axi non-typed mutation under issue-type grant"
+  for kind in wrong-issue-id wrong-type-id; do
+    set +e
+    FM_TEST_GH_AXI_TYPED_API=$kind run_exec "$d" exec --project repo-a --repository "$d/home/projects/repo-a" -- \
+      gh-axi issue edit 17 --type Bug >/dev/null 2>&1
+    rc=$?
+    set -e
+    expect_code 1 "$rc" "gh-axi repository-bound $kind mutation"
+  done
   (cd "$d/home/projects" && FM_TEST_FAKE_NETWORK=1 FM_TEST_CLONE_SOURCE="$d/home/projects/repo-a" \
     run_exec "$d" exec --project clone-project --repository github.com/Owner-A/clone-project -- \
       gh repo clone Owner-A/clone-project clone-project >/dev/null) \
@@ -773,10 +828,9 @@ test_forbidden_commands_and_access_diagnostics() {
   git -C "$d/task-copy" config --worktree remote.origin.url https://github.com/Other/repo-a.git
   set +e
   err=$(FM_HOME="$d/home" FM_ROOT_OVERRIDE="$ROOT" FM_TEST_ROUTE_LOG="$d/routes.log" FM_TEST_SENTINEL="$SENTINEL" \
-    FM_GITHUB_ACTIVE=1 FM_GITHUB_PROFILE_ID=profile-a \
-    FM_GITHUB_REPOSITORY=github.com/Owner-A/repo-a FM_GITHUB_PROJECT=repo-a FM_GITHUB_PROJECT_PATH="$d/home/projects/repo-a" \
-    FM_GITHUB_GIT_BINARY="$d/exact/git" PATH="$d/hostile:$PATH" \
-    bash -c 'cd "$1" && "$2" child-gh --home "$3" -- pr view 1' _ "$d/task-copy" "$EXEC" "$d/home" 2>&1)
+    PATH="$d/hostile:$d/exact:$PATH" \
+    bash -c 'cd "$1" && "$2" exec --project repo-a --repository "$1" --profile profile-a -- gh pr view 1' \
+    _ "$d/task-copy" "$EXEC" 2>&1)
   rc=$?
   set -e
   expect_code 1 "$rc" "worktree-scoped origin"
@@ -789,7 +843,7 @@ test_forbidden_commands_and_access_diagnostics() {
     PATH="$d/hostile:$d/exact:$PATH" "$EXEC" child-gh --home "$d/home" -- api repos/Owner-A/repo-a >/dev/null 2>&1)
   rc=$?
   set -e
-  expect_code 1 "$rc" "forged gh-axi API descendant"
+  expect_code 2 "$rc" "removed child gh entrypoint"
   set +e
   (cd "$d/home/projects" && FM_HOME="$d/home" FM_ROOT_OVERRIDE="$ROOT" \
     FM_GITHUB_ACTIVE=1 FM_GITHUB_PROFILE_ID=profile-a FM_GITHUB_REPOSITORY=github.com/Owner-A/forged \
@@ -799,7 +853,7 @@ test_forbidden_commands_and_access_diagnostics() {
     "$EXEC" child-git --home "$d/home" -- clone -- https://github.com/Owner-A/forged.git forged >/dev/null 2>&1)
   rc=$?
   set -e
-  expect_code 1 "$rc" "forged descendant clone capability"
+  expect_code 2 "$rc" "removed child git entrypoint"
   set +e
   err=$(FM_HOME="$d/home" FM_ROOT_OVERRIDE="$ROOT" FM_TEST_ROUTE_LOG="$d/routes.log" FM_TEST_SENTINEL="$SENTINEL" \
     PATH="$d/hostile:$PATH" bash -c 'cd "$1" && "$2" exec --project repo-a --repository "$3" -- gh pr view 1' \
@@ -871,8 +925,8 @@ test_commit_identity_and_removed_profile() {
 
   node -e 'const fs=require("fs"); const p=process.argv[1]; const v=JSON.parse(fs.readFileSync(p)); delete v.profiles["profile-a"]; delete v.bindings.projects["repo-a"]; delete v.bindings.repositories["github.com/Owner-A/repo-a"]; delete v.bindings.owners["github.com/Owner-A"]; fs.writeFileSync(p,JSON.stringify(v)); fs.chmodSync(p,0o600)' "$d/home/config/github-accounts.json"
   set +e
-  err=$(FM_HOME="$d/home" FM_ROOT_OVERRIDE="$ROOT" FM_GITHUB_ACTIVE=1 FM_GITHUB_PROFILE_ID=profile-a \
-    FM_GITHUB_REPOSITORY=github.com/Owner-A/repo-a FM_GITHUB_PROJECT=repo-a "$EXEC" child-gh --home "$d/home" -- pr view 1 2>&1)
+  err=$(FM_HOME="$d/home" FM_ROOT_OVERRIDE="$ROOT" "$EXEC" exec --project repo-a \
+    --repository "$d/home/projects/repo-a" --profile profile-a -- gh pr view 1 2>&1)
   rc=$?
   set -e
   [ "$rc" -ne 0 ] || fail "removed profile fell back"
@@ -889,9 +943,9 @@ test_pinned_config_and_fork_bindings() {
   node -e 'const fs=require("fs"); const p=process.argv[1]; const v=JSON.parse(fs.readFileSync(p)); v.profiles["profile-a"].expected_login="wrong-login"; fs.writeFileSync(p,JSON.stringify(v)); fs.chmodSync(p,0o600)' "$hostile_config/github-accounts.json"
   FM_HOME="$d/home" FM_ROOT_OVERRIDE="$ROOT" FM_TEST_ROUTE_LOG="$d/routes.log" FM_TEST_SENTINEL="$SENTINEL" \
     FM_GITHUB_ACTIVE=1 FM_GITHUB_CONFIG_PATH="$hostile_config/github-accounts.json" FM_GITHUB_CONFIG="$hostile_config/github-accounts.json" FM_CONFIG_OVERRIDE="$hostile_config" \
-    FM_GITHUB_PROFILE_ID=profile-a FM_GITHUB_REPOSITORY=github.com/Owner-A/repo-a FM_GITHUB_PROJECT=repo-a FM_GITHUB_PROJECT_PATH="$d/home/projects/repo-a" \
-    FM_GITHUB_GIT_BINARY="$d/exact/git" PATH="$d/hostile:$PATH" \
-    bash -c 'cd "$1" && "$2" child-gh --home "$3" -- pr view 1' _ "$d/home/projects/repo-a" "$EXEC" "$d/home" >/dev/null \
+    PATH="$d/hostile:$d/exact:$PATH" \
+    bash -c 'cd "$1" && "$2" exec --project repo-a --repository "$1" --profile profile-a -- gh pr view 1' \
+      _ "$d/home/projects/repo-a" "$EXEC" >/dev/null \
     || fail "descendant routing context did not use its authoritative home config"
 
   alternate_home="$d/alternate-home"
@@ -1084,7 +1138,7 @@ SH
 }
 
 test_no_mistakes_context_handoff_is_typed_and_secret_free() {
-  local d fake_nm captured log refresh_count rc err expected_pwd marker marker_before override_marker p1 p2 status current_branch
+  local d fake_nm captured log refresh_count rc err expected_pwd marker marker_before override_marker p1 p2 status current_branch current_head descendant_head mature_runs= n
   d=$(make_fixture no-mistakes)
   fake_nm="$d/exact/no-mistakes"
   captured="$d/nm-context.json"
@@ -1106,6 +1160,10 @@ fi
 if [ "${1:-}" = axi ] && [ "${2:-}" = status ]; then
   [ -z "${FM_TEST_NM_STATUS_FAIL:-}" ] || exit 73
   branch=${FM_TEST_NM_BRANCH:-$(git symbolic-ref --quiet --short HEAD)}
+  if [ -n "${FM_TEST_NM_CROSS_BRANCH_ONCE:-}" ] && [ ! -e "$FM_TEST_NM_CAPTURE.status-probed" ]; then
+    branch=other-branch
+    touch "$FM_TEST_NM_CAPTURE.status-probed"
+  fi
   head=${FM_TEST_NM_HEAD:-$(git rev-parse HEAD)}
   run_id=run-0
   [ ! -e "$FM_TEST_NM_CAPTURE.run-id" ] || run_id=$(cat "$FM_TEST_NM_CAPTURE.run-id")
@@ -1166,15 +1224,22 @@ SH
   wait "$p2" || fail "second concurrent no-mistakes initialization failed"
   : > "$log"
   fm_git_init_commit "$d/unrelated-no-mistakes"
+  n=1
+  while [ "$n" -le 101 ]; do
+    mature_runs+="completed other-$n deadbee 2026-07-22 12:34:56"$'\n'
+    n=$((n + 1))
+  done
   (cd "$d/unrelated-no-mistakes" && FM_HOME="$d/home" FM_ROOT_OVERRIDE="$ROOT" \
     FM_TEST_NM_CAPTURE="$captured" FM_TEST_NM_LOG="$log" FM_TEST_ROUTE_LOG="$d/routes.log" \
     FM_TEST_NM_MUTATE_CONFIG="$d/home/config/github-accounts.json" \
+    FM_TEST_NM_CROSS_BRANCH_ONCE=1 FM_TEST_NM_RUNS="$mature_runs" \
     FM_TEST_SENTINEL="$SENTINEL" PATH="$d/hostile:$d/exact:$PATH" \
     "$EXEC" exec --project repo-a --repository "$d/home/projects/repo-a" -- \
       no-mistakes axi run --intent initial >/dev/null) \
     || fail "strict no-mistakes run from another checkout failed"
   expected_pwd=$(cd "$d/home/projects/repo-a" && pwd -P)
   [ "$(cat "$captured.pwd")" = "$expected_pwd" ] || fail "strict no-mistakes run used the caller working directory"
+  assert_no_grep 'runs --limit' "$log" "strict no-mistakes run guessed absence from bounded history"
   marker=$(find "$d/home/state/.github-routing-no-mistakes" -maxdepth 1 -type f -print | head -1)
   [ -n "$marker" ] && [ "$(routing_file_mode "$marker")" = 600 ] || fail "successful strict run did not record its typed routing marker"
   assert_grep '"name": "Account A"' "$marker" "new run marker recomputed routing after executor launch"
@@ -1190,9 +1255,13 @@ SH
   set -e
   expect_code 1 "$rc" "cross-branch no-mistakes continuation"
   [ "$(cat "$marker")" = "$marker_before" ] || fail "cross-branch continuation changed the active no-mistakes binding marker"
-  assert_grep 'runs --limit 101' "$log" "cross-branch no-mistakes lookup was not authoritatively bounded"
+  assert_no_grep 'runs --limit' "$log" "cross-branch no-mistakes continuation scanned repository history"
+  current_head=$(git -C "$d/home/projects/repo-a" rev-parse HEAD)
+  descendant_head=$(printf '%s\n' descendant | git -C "$d/home/projects/repo-a" \
+    -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit-tree "$(git -C "$d/home/projects/repo-a" rev-parse 'HEAD^{tree}')" -p "$current_head")
   set +e
-  FM_TEST_NM_HEAD=deadbee FM_TEST_NM_CAPTURE="$captured" FM_TEST_NM_LOG="$log" \
+  FM_TEST_NM_HEAD="$descendant_head" FM_TEST_NM_CAPTURE="$captured" FM_TEST_NM_LOG="$log" \
     run_exec "$d" exec --project repo-a --repository "$d/home/projects/repo-a" -- no-mistakes axi respond accepted >/dev/null 2>&1
   rc=$?
   set -e
