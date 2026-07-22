@@ -15,20 +15,15 @@ Load this skill before:
 
 ## Core rules
 
-1. A ship task is complete only when `data/<id>/delivery-receipt.json` exists and
-   passes `bin/fm-delivery-receipt.sh validate <id> receipt`.
-2. Phases advance monotonically through `bin/fm-delivery-phase.sh`. A blocked
-   phase records a reason and a later `resume` clears it.
+1. A ship task is complete only when the absolute receipt path passes `bin/fm-delivery-receipt.sh validate <id> receipt` with the expected mode and exact candidate SHA where available.
+2. Phases advance contiguously through `bin/fm-delivery-phase.sh`, and a failed or blocked phase cannot advance.
+   A blocked phase records a reason and a later `resume` clears it.
 3. Evidence is write-once and hashed via `bin/fm-evidence-run.sh`. Never re-run
    an evidence step that already produced a manifest hash; reference the
    existing manifest instead.
-4. Receipts and in-flight records are redacted for volatile provider fields
-   before validation or hashing.
-5. `bin/fm-teardown.sh` refuses to tear down a results-first task without a
-   finalized receipt, unless `--force` is explicitly authorized.
-6. Crew state for delivery tasks is authoritative from
-   `state/<id>.delivery.json`; do not infer state from pane liveness or the
-   last status line alone.
+4. Evidence bytes are never silently redacted; recognized volatile quota fields and obvious secret assignments are refused before atomic publication.
+5. `bin/fm-teardown.sh` refuses teardown without a trusted, evidence-valid, mode-matched, exact-identity receipt unless `--force` is explicitly authorized.
+6. A finalized receipt or explicit delivery block is authoritative, but an in-flight phase is context only and must not fabricate worker liveness.
 
 ## Delivery modes
 
@@ -52,10 +47,9 @@ Load this skill before:
 
 ## Failover checkpoint
 
-The provider-failover checkpoint SHA
-`6815f216a8d24bce20a2c2fe6245fe3d270c64da` is preserved in
-`bin/fm-dispatch-select.sh`. It gates TTL expiry, launch-pressure refusal, and
-paused-worker stale suppression.
+Checkpoint `6815f216a8d24bce20a2c2fe6245fe3d270c64da` is an exact ancestor of the recovered cutover branch.
+Its content-equivalent pipeline replay is `b61bb2251005a36a8693e6b7c4369c6442776f16`.
+TTL expiry and launch-pressure refusal are owned by `bin/fm-failover-lib.sh`, `bin/fm-spawn.sh`, and `bin/fm-dispatch-select.sh`; paused-worker stale suppression and immediate provider-outage surfacing are owned by `bin/fm-watch.sh`.
 
 ## Test contract
 

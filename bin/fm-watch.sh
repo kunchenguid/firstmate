@@ -76,6 +76,9 @@ mkdir -p "$STATE"
 . "$SCRIPT_DIR/fm-x-lib.sh"
 # shellcheck source=bin/fm-check-lib.sh
 . "$SCRIPT_DIR/fm-check-lib.sh"
+# Provider-outage classification for OpenAI-routed workers.
+# shellcheck source=bin/fm-failover-lib.sh
+. "$SCRIPT_DIR/fm-failover-lib.sh"
 
 WATCH_LOCK="$STATE/.watch.lock"
 WATCH_PATH="$SCRIPT_DIR/fm-watch.sh"
@@ -342,6 +345,35 @@ clear_pause_state() {  # <window>
   key=${key//\//_}
   key=${key//./_}
   rm -f "$STATE/.paused-$key" "$STATE/.paused-rechecked-$key" "$STATE/.paused-resurfaced-$key"
+}
+
+# Surface verified quota or rate-limit exhaustion before busy/stale triage can
+# absorb a retry loop or a declared pause. Deduplicate normalized evidence.
+provider_outage_scan() {  # <window> <task> <tail40> <last-status-line> <key>
+  local win=$1 task=$2 tail40=$3 last=$4 key=$5 meta evidence norm marker reason
+  meta="$STATE/$task.meta"
+  marker="$STATE/.provider-outage-$key"
+  [ -f "$meta" ] || { rm -f "$marker"; return 0; }
+  if ! fm_failover_route_is_openai "$meta"; then
+    rm -f "$marker"
+    return 0
+  fi
+  evidence=$(fm_failover_outage_evidence "$tail40" || true)
+  [ -n "$evidence" ] || evidence=$(fm_failover_outage_evidence "$last" || true)
+  if [ -z "$evidence" ]; then
+    rm -f "$marker"
+    return 0
+  fi
+  norm=$(fm_failover_outage_dedupe_key "$evidence")
+  if [ "$(cat "$marker" 2>/dev/null || true)" = "$norm" ]; then
+    triage_log "absorbed provider-outage (already surfaced): $win"
+    return 0
+  fi
+  reason="stale: $win (provider-outage: $(printf '%s' "$evidence" | cut -c1-120) - openai-routed worker shows quota/rate-limit exhaustion; load provider-failover)"
+  fm_wake_append stale "$win" "$reason" || exit 1
+  printf '%s' "$norm" > "$marker"
+  mark_surfaced "$STATE/$task.status"
+  wake "$reason"
 }
 
 clear_pause_tracking() {  # <window>
@@ -904,6 +936,7 @@ EOF
       continue
     fi
     tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null) || continue
+    provider_outage_scan "$w" "$task" "$tail40" "$last" "$key"
     h=$(printf '%s' "$tail40" | hash_pane)
     key=$(printf '%s' "$w" | tr ':/.' '___')
     hf="$STATE/.hash-$key"

@@ -396,6 +396,14 @@ test_provider_specific_weekly_avoid() {
   pass "provider-specific weekly avoid threshold defaults openai to 50 and leaves others at 90"
 }
 
+test_hyphenated_provider_threshold_env() {
+  local value
+  value=$(FM_PROVIDER_SESSION_AVOID_PCT_FIREWORKS_AI=77 \
+    fm_failover_provider_threshold fireworks-ai FM_PROVIDER_SESSION_AVOID_PCT 70)
+  [ "$value" = 77 ] || fail "hyphenated provider threshold did not resolve safely: $value"
+  pass "hyphenated provider names resolve safe threshold variables"
+}
+
 test_outage_evidence_hits_and_misses
 test_route_and_provider_classification
 test_candidate_ladder_never_opens_openai
@@ -417,6 +425,7 @@ test_advisory_snapshot_stale_expires_by_ttl() {
 
 test_provider_readiness_states
 test_provider_specific_weekly_avoid
+test_hyphenated_provider_threshold_env
 test_advisory_snapshot_stale_expires_by_ttl
 
 # --- script-level eligibility and preservation -----------------------------

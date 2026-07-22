@@ -174,6 +174,18 @@ SH
   pass "single-object use and no-select arrays preserve first-profile selection"
 }
 
+test_default_state_root_honors_firstmate_root() {
+  local home out
+  home="$TMP_ROOT/state-root"
+  mkdir -p "$home/state"
+  touch "$home/state/.provider-hold-openai"
+  out=$(env -u FM_HOME -u FM_STATE_OVERRIDE FM_ROOT_OVERRIDE="$home" \
+    "$ROOT/bin/fm-dispatch-select.sh" "$profiles")
+  [ "$out" = '{"harness":"claude","model":"claude-sonnet-5","effort":"high"}' ] \
+    || fail "dispatch ignored Firstmate state root hold: $out"
+  pass "dispatch failover filtering uses the Firstmate state root"
+}
+
 test_higher_min_vendor_wins
 test_exact_tie_uses_first_profile
 test_quota_missing_falls_back_to_first
@@ -182,5 +194,6 @@ test_bad_quota_json_falls_back_to_first
 test_stale_with_cache_needs_clear_margin_to_beat_fresh
 test_vendor_absent_or_unusable_falls_back_conservatively
 test_backward_compatible_first_selection
+test_default_state_root_honors_firstmate_root
 
 echo "# all fm-dispatch-select tests passed"

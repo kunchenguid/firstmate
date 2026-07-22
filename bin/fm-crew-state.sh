@@ -16,7 +16,7 @@
 # fixed mapping logic, no heuristics and no LLM. Output is one stable, parseable,
 # token-tight line firstmate can read every heartbeat:
 #
-#   state: <working|parked|done|blocked|paused|failed|unknown> · source: <run-step|pane|status-log|none> · <detail>
+#   state: <working|parked|done|blocked|paused|failed|unknown> · source: <run-step|pane|status-log|delivery-record|delivery-receipt|delivery-trust|none> · <detail>
 #
 # Logic, in order:
 #   1. Resolve worktree + backend target + kind from state/<id>.meta.
@@ -90,11 +90,14 @@ emit() {  # <state> <source> [detail]
 
 [ -f "$META" ] || emit unknown none "no metadata for $ID"
 
-# Results-first delivery tasks: authoritative state comes from the delivery record.
-# Legacy No Mistakes tasks fall through to the existing run-step/pane logic below.
+# A delivery receipt or explicit delivery block is authoritative. An in-flight
+# phase is context only: actual liveness still comes from a run-step or live pane.
 DELIVERY_RECORD="$STATE/$ID.delivery.json"
+DELIVERY_PHASE=
 if [ -f "$DELIVERY_RECORD" ]; then
-  delivery_poll=$("$FM_ROOT/bin/fm-delivery-poll.sh" "$ID" 2>/dev/null || true)
+  if ! delivery_poll=$("$FM_ROOT/bin/fm-delivery-poll.sh" "$ID" 2>&1); then
+    emit failed delivery-trust "$delivery_poll"
+  fi
   case "$delivery_poll" in
     delivery:*receipt:delivered)
       emit "done" delivery-receipt "receipt finalized"
@@ -104,8 +107,7 @@ if [ -f "$DELIVERY_RECORD" ]; then
       emit blocked delivery-record "$reason"
       ;;
     delivery:*phase:*)
-      phase=${delivery_poll#delivery:*phase:}
-      emit working delivery-record "phase $phase"
+      DELIVERY_PHASE=${delivery_poll#delivery:*phase:}
       ;;
   esac
 fi
@@ -612,6 +614,7 @@ if [ "$HAVE_RUN" = 1 ]; then
       ;;
   esac
 
+  [ -z "$DELIVERY_PHASE" ] || RUN_DETAIL="$RUN_DETAIL${SEP}delivery phase $DELIVERY_PHASE"
   emit "$RUN_STATE" run-step "$RUN_DETAIL"
 fi
 
@@ -626,7 +629,9 @@ pane_readable "$BACKEND_TARGET" || emit unknown none "backend target gone: $BACK
 # Secondmates idle on their own watcher (idle pane = healthy), so the busy
 # signature is not meaningful for them; read their state from the status log only.
 if [ "$KIND" != secondmate ] && crew_pane_is_busy "$BACKEND_TARGET"; then
-  emit working pane "harness busy"
+  detail="harness busy"
+  [ -z "$DELIVERY_PHASE" ] || detail="$detail${SEP}delivery phase $DELIVERY_PHASE"
+  emit working pane "$detail"
 fi
 
 # Fall back to the status log's last line, but ONLY when its verb maps to a real

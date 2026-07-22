@@ -127,8 +127,9 @@ FM_PROVIDER_USAGE_MAX_AGE_SECS_DEFAULT=1800
 # (e.g. FM_PROVIDER_WEEK_AVOID_PCT) and then to the default constant. Provider
 # names are lower-case slugs; the provider-specific suffix is the uppercase form.
 fm_failover_provider_threshold() {  # <provider> <base-env-name> <default-value>
-  local provider=$1 base=$2 default=$3 specific_var specific generic
-  specific_var=$(printf '%s_%s' "$base" "$(printf '%s' "$provider" | tr '[:lower:]' '[:upper:]')")
+  local provider=$1 base=$2 default=$3 specific_var specific generic suffix
+  suffix=$(printf '%s' "$provider" | tr '[:lower:]' '[:upper:]' | sed 's/[^A-Z0-9_]/_/g')
+  specific_var=$(printf '%s_%s' "$base" "$suffix")
   specific=${!specific_var:-}
   [ -n "$specific" ] && { printf '%s' "$specific"; return 0; }
   generic=${!base:-}

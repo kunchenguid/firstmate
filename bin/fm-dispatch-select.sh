@@ -32,6 +32,7 @@
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 # shellcheck source=bin/fm-failover-lib.sh
 . "$SCRIPT_DIR/fm-failover-lib.sh"
 
@@ -114,10 +115,11 @@ profiles_json=$(printf '%s\n' "$SPEC_JSON" | jq -ec '
 profile_count=$(printf '%s\n' "$profiles_json" | jq 'length')
 [ "$profile_count" -gt 0 ] || { echo "error: dispatch profile array must not be empty" >&2; exit 2; }
 
-FM_STATE_DIR=${FM_STATE_OVERRIDE:-${FM_HOME:-$HOME}/state}
+FM_HOME=${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}
+FM_STATE_DIR=${FM_STATE_OVERRIDE:-$FM_HOME/state}
 filter_profiles_by_failover() {
   local tmpdir filtered_file excluded_file idx p harness model provider held pressure
-  tmpdir=$(mktemp -d)
+  tmpdir=$(mktemp -d) || { echo "error: could not create dispatch scratch directory" >&2; return 1; }
   filtered_file="$tmpdir/filtered"
   excluded_file="$tmpdir/excluded"
   touch "$filtered_file" "$excluded_file"
@@ -144,7 +146,11 @@ filter_profiles_by_failover() {
     if [ "$held" -eq 0 ]; then
       printf '%s\n' "$p" >> "$filtered_file"
     else
-      printf '%s\n' "{\"index\":$idx,\"profile\":$p,\"provider\":\"$provider\"}" >> "$excluded_file"
+      jq -cn --argjson index "$idx" --argjson profile "$p" --arg provider "$provider" \
+        '{index:$index,profile:$profile,provider:$provider}' >> "$excluded_file" || {
+          rm -rf "$tmpdir"
+          return 1
+        }
     fi
     idx=$((idx + 1))
   done

@@ -54,8 +54,18 @@ receipt_ok='{
   "task": {"id": "t1", "project": "firstmate", "kind": "ship", "lane": "primary", "supports": null, "deliveryMode": "direct-PR", "yolo": true},
   "capability": {"summary": "x", "acceptanceCriteria": ["a"], "authorityClass": "routine"},
   "source": {"branch": "fm/t1", "candidateSha": "6815f216a8d24bce20a2c2fe6245fe3d270c64da", "mergeSha": "6815f216a8d24bce20a2c2fe6245fe3d270c64da"},
-  "phases": [],
-  "validation": {"commands": [], "ci": {"requiredChecks": [], "headSha": "6815f216a8d24bce20a2c2fe6245fe3d270c64da", "result": "green"}, "security": {"result": "passed", "evidence": []}},
+  "phases": [
+    {"name":"accepted","startedAt":"x","completedAt":"x","result":"passed","evidence":[]},
+    {"name":"implementing","startedAt":"x","completedAt":"x","result":"passed","evidence":[]},
+    {"name":"validating","startedAt":"x","completedAt":"x","result":"passed","evidence":["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]},
+    {"name":"landing","startedAt":"x","completedAt":"x","result":"passed","evidence":[]},
+    {"name":"landed","startedAt":"x","completedAt":"x","result":"passed","evidence":[]},
+    {"name":"released","startedAt":"x","completedAt":"x","result":"not_applicable","evidence":[]},
+    {"name":"deployed","startedAt":"x","completedAt":"x","result":"not_applicable","evidence":[]},
+    {"name":"smoke_verified","startedAt":"x","completedAt":"x","result":"not_applicable","evidence":[]},
+    {"name":"receipt_finalized","startedAt":"x","completedAt":"x","result":"passed","evidence":[]}
+  ],
+  "validation": {"commands": [], "ci": {"requiredChecks": [], "headSha": "6815f216a8d24bce20a2c2fe6245fe3d270c64da", "result": "passed"}, "security": {"result": "not_assessed", "evidence": []}},
   "release": {"applicability": "not_applicable", "mode": "none", "version": null, "artifact": {"uri": null, "digest": null, "sourceSha": "6815f216a8d24bce20a2c2fe6245fe3d270c64da"}, "receipt": null},
   "deployment": {"applicability": "not_applicable", "environment": null, "target": null, "artifactDigest": null, "receipt": null},
   "smoke": {"command": [], "result": "not_applicable", "observations": []},
@@ -74,9 +84,10 @@ pass "receipt validation enforces landed identity and delivered outcome"
 
 fm_delivery_validate_phase_transition accepted implementing || fail "forward transition rejected"
 fm_delivery_validate_phase_transition implementing accepted && fail "backward transition accepted"
-fm_delivery_validate_phase_transition landed landed || fail "same-phase transition rejected"
+fm_delivery_validate_phase_transition landed landed && fail "same-phase transition accepted"
+fm_delivery_validate_phase_transition accepted validating && fail "phase skip accepted"
 fm_delivery_validate_phase_transition bogus landed && fail "unknown phase accepted"
-pass "phase transitions are monotonic and phase-aware"
+pass "phase transitions are contiguous and phase-aware"
 
 echo "session_pct=50" > "$TMP/volatile"
 fm_delivery_redact_volatile_provider_fields "$TMP/volatile" && fail "volatile percentage allowed"

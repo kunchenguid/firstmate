@@ -20,6 +20,10 @@ out=$(run_poll)
 [ "$out" = "delivery:t1 none" ] || fail "no record: $out"
 pass "poll reports none when no delivery record exists"
 
+FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" "$POLL" .. 2>/dev/null \
+  && fail "poll accepted path-traversing task id"
+pass "poll rejects unsafe task ids"
+
 cat > "$HOME_DIR/state/t1.delivery.json" <<'EOF'
 {"schemaVersion":"firstmate.delivery-receipt.v1","task":{"id":"t1"},"phase":"implementing","phases":[],"updatedAt":"2026-07-22T00:00:00Z"}
 EOF

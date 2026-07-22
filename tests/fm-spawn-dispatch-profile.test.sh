@@ -116,6 +116,9 @@ test_no_profile_keeps_claude_launch_unchanged() {
   expect_code 0 "$status" "claude spawn without profile flags should succeed"
   assert_contains "$out" "spawned $id harness=claude" "spawn did not report claude"
   assert_meta_profile "$HOME_DIR/state/$id.meta" claude default default
+  assert_present "$HOME_DIR/state/$id.delivery.json" "ship spawn did not create mandatory delivery record"
+  assert_grep '"phase": "accepted"' "$HOME_DIR/state/$id.delivery.json" "delivery record did not start accepted"
+  assert_grep '"deliveryMode": "direct-PR"' "$HOME_DIR/state/$id.delivery.json" "delivery record mode did not match routing"
 
   launch=$(cat "$LAUNCH_LOG")
   expected="CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$(cat '$HOME_DIR/data/$id/brief.md')\""

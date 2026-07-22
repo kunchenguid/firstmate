@@ -646,7 +646,7 @@ teardown_treehouse_return() {
 }
 
 require_results_first_receipt() {
-  local inflight receipt
+  local inflight receipt candidate args
   [ "$FORCE" != "--force" ] || return 0
   case "$KIND" in secondmate|scout) return 0 ;; esac
   inflight="${FM_STATE_OVERRIDE:-$FM_HOME/state}/$ID.delivery.json"
@@ -655,6 +655,17 @@ require_results_first_receipt() {
   if [ ! -f "$receipt" ]; then
     echo "REFUSED: results-first task $ID has an in-flight delivery record but no finalized receipt at $receipt." >&2
     echo "Finalize the delivery receipt before teardown, or use --force after explicit discard approval." >&2
+    return 1
+  fi
+  args=(validate "$ID" receipt --expected-mode "$MODE")
+  if [ -n "$WT" ] && [ -d "$WT" ]; then
+    candidate=$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null || true)
+    [ -z "$candidate" ] || args+=(--expected-candidate-sha "$candidate")
+  fi
+  if ! FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
+      "$SCRIPT_DIR/fm-delivery-receipt.sh" "${args[@]}" >/dev/null; then
+    echo "REFUSED: results-first task $ID does not have a valid exact-identity receipt." >&2
+    echo "Repair or finalize the receipt before teardown, or use --force after explicit discard approval." >&2
     return 1
   fi
 }

@@ -19,10 +19,8 @@ exact landed source.
 - **Lane** — exactly one `primary` lease per firstmate home; optional `support`
   leases linked to a primary. Prevents resuming parked GLX initiatives during a
   cutover.
-- **Phase** — monotonic lifecycle state: `accepted` → `implementing` →
-  `validating` → `landing` → `landed` → `released` → `deployed` →
-  `smoke_verified` → `receipt_finalized`. A task can become `blocked` with a
-  recorded reason and resolved timestamp.
+- **Phase** - contiguous lifecycle state: `accepted` -> `implementing` -> `validating` -> `landing` -> `landed` -> `released` -> `deployed` -> `smoke_verified` -> `receipt_finalized` -> `cleanup_eligible`.
+  A task can become `blocked` with a recorded reason and resolved timestamp.
 - **Evidence** — write-once, hashed, deterministic command output captured by
   `bin/fm-evidence-run.sh`.
 - **Receipt** — the immutable, validated JSON record that closes the task.
@@ -38,18 +36,16 @@ exact landed source.
 | `bin/fm-delivery-phase.sh` | Start, complete, block, resume, and finalize phases. |
 | `bin/fm-evidence-run.sh` | Run a command deterministically and capture hashed evidence. |
 | `bin/fm-delivery-receipt.sh` | Validate and finalize a delivery receipt. |
-| `bin/fm-delivery-poll.sh` | Byte-static trusted poll for delivery state changes. |
+| `bin/fm-delivery-poll.sh` | Byte-static trusted poll for current delivery state. |
 
 ## Entry points in existing scripts
 
 - `bin/fm-project-mode.sh` — new projects default to `direct-PR +yolo`; unknown,
   absent, or malformed entries fall back to `direct-PR off`.
-- `bin/fm-brief.sh` — ship definition of done now stops only at a finalized
-  receipt.
-- `bin/fm-teardown.sh` — refuses to tear down a results-first task without a
-  finalized receipt.
-- `bin/fm-crew-state.sh` — authoritative state for delivery tasks comes from
-  `state/<id>.delivery.json`.
+- `bin/fm-spawn.sh` - every new ship dispatch creates a private accepted delivery record before launching the worker.
+- `bin/fm-brief.sh` - generated ship instructions use absolute Firstmate-owned command and receipt paths.
+- `bin/fm-teardown.sh` - refuses teardown unless the receipt is trusted, schema-valid, evidence-valid, mode-matched, and bound to the exact task head when the worktree remains inspectable.
+- `bin/fm-crew-state.sh` - finalized receipts and explicit blocks are authoritative, while an in-flight phase is context and worker liveness still requires a run-step or live pane.
 
 ## Receipt schema
 
@@ -62,21 +58,19 @@ Receipts use schema `firstmate.delivery-receipt.v1` and are validated by
 - `phases`: ordered phase transitions with evidence references.
 - `validation`, `release`, `deployment`, `smoke`, `rollback`, `provider`:
   applicability-aware sections that may be `not_applicable`.
-- `outcome`: status (`delivered` / `blocked` / `failed`) and timestamp.
+- `outcome`: terminal status `delivered` and timestamp.
 
-Receipts and in-flight records are redacted for volatile provider fields
-(`api_key`, `token`, `password`, etc.) before hashing or validation.
+Receipts and in-flight records are never claimed to be redacted.
+Evidence publication refuses recognized volatile quota fields and obvious secret assignments instead of silently rewriting retained bytes.
 
 ## Deterministic evidence
 
-`bin/fm-evidence-run.sh` executes a command through a Python subprocess with a
-fresh environment, writes stdout/stderr/exit code, builds a manifest, and
-SHA-256 hashes the bundle. It refuses to run commands whose arguments contain
-volatile provider tokens.
+`bin/fm-evidence-run.sh` decodes one non-empty JSON argv array and executes it directly through a Python subprocess without implicit shell evaluation.
+The subprocess inherits the caller environment so project-owned validation and deployment commands retain their explicit runtime authority.
+Known shell interpreters are refused as the executable, stdout/stderr/exit code and immutable metadata are staged privately, and the complete bundle is atomically published with a deterministic `MANIFEST.sha256`.
+The manifest digest recorded in a phase hashes the exact manifest bytes; receipt validation re-hashes every listed file and checks the evidence candidate SHA.
 
 ## Rollout embargo
 
-During a cutover, `bin/fm-rollout-embargo.sh` can forbid resumption of parked
-GLX initiatives while permitting the cutover primary and its support work. A
-new generation is write-once; permits and forbids append to the active
-generation.
+During a cutover, `bin/fm-rollout-embargo.sh` is a standalone operator control for permitted and forbidden task ids.
+Dispatch integration and stronger concurrent lease or embargo mutation guarantees remain post-canary follow-up and are not claimed by this bounded repair.

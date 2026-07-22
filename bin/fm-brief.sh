@@ -283,8 +283,8 @@ case "$MODE" in
 # Definition of done
 This project ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
 The task is complete only when a validated delivery receipt exists, not when the PR opens or merges.
-Run the project-owned validation, release/deploy or install, smoke, and rollback/repair commands from the exact landed source, capture evidence with \`bin/fm-evidence-run.sh\`, advance phases with \`bin/fm-delivery-phase.sh\`, and finalize the receipt with \`bin/fm-delivery-receipt.sh\`.
-When the receipt is finalized at \`data/$ID/delivery-receipt.json\`, append \`done: receipt finalized\` to the status file and stop.
+Run the project-owned validation, release/deploy or install, smoke, and rollback/repair commands from the exact landed source, capture evidence with \`$FM_ROOT/bin/fm-evidence-run.sh\`, advance phases with \`$FM_ROOT/bin/fm-delivery-phase.sh\`, and finalize the receipt with \`$FM_ROOT/bin/fm-delivery-receipt.sh\`.
+When the receipt is finalized at \`$DATA/$ID/delivery-receipt.json\`, append \`done: receipt finalized\` to the status file and stop.
 Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
 EOF
 )
@@ -296,8 +296,8 @@ EOF
 # Definition of done
 This project ships **local-only**: no remote, no PR, no pipeline.
 The task is complete only when a validated delivery receipt exists, not when the branch is ready or merged.
-Run the project-owned validation, install or release, smoke, and rollback/repair commands from the exact landed source, capture evidence with \`bin/fm-evidence-run.sh\`, advance phases with \`bin/fm-delivery-phase.sh\`, and finalize the receipt with \`bin/fm-delivery-receipt.sh\`.
-When the receipt is finalized at \`data/$ID/delivery-receipt.json\`, append \`done: receipt finalized\` to the status file and stop.
+Run the project-owned validation, install or release, smoke, and rollback/repair commands from the exact landed source, capture evidence with \`$FM_ROOT/bin/fm-evidence-run.sh\`, advance phases with \`$FM_ROOT/bin/fm-delivery-phase.sh\`, and finalize the receipt with \`$FM_ROOT/bin/fm-delivery-receipt.sh\`.
+When the receipt is finalized at \`$DATA/$ID/delivery-receipt.json\`, append \`done: receipt finalized\` to the status file and stop.
 The configured merge authority approves the ready branch, then firstmate merges it into local \`main\` through the guarded fast-forward path.
 EOF
 )
@@ -308,11 +308,11 @@ EOF
     RULE1='1. Never push to the default branch. Never merge a PR.'
     DOD=$(cat <<EOF
 # Definition of done
-The task is complete only when a validated delivery receipt exists at \`data/$ID/delivery-receipt.json\`.
+The task is complete only when a validated delivery receipt exists at \`$DATA/$ID/delivery-receipt.json\`.
 When you believe the implementation is committed on your branch, append \`done: implementation committed\` to the status file and stop.
 Firstmate will then instruct you to run /no-mistakes to validate and ship a PR for this one bounded legacy run.
 
-After the legacy run returns custody, continue the results-first path: run deterministic validation, release/deploy or install, smoke, and rollback/repair commands from the exact landed source, capture evidence with \`bin/fm-evidence-run.sh\`, advance phases with \`bin/fm-delivery-phase.sh\`, and finalize the receipt with \`bin/fm-delivery-receipt.sh\`.
+After the legacy run returns custody, continue the results-first path: run deterministic validation, release/deploy or install, smoke, and rollback/repair commands from the exact landed source, capture evidence with \`$FM_ROOT/bin/fm-evidence-run.sh\`, advance phases with \`$FM_ROOT/bin/fm-delivery-phase.sh\`, and finalize the receipt with \`$FM_ROOT/bin/fm-delivery-receipt.sh\`.
 You drive no-mistakes by responding to its gates, not by implementing fixes.
 Follow the guidance no-mistakes itself provides for the mechanics: it loads when you invoke /no-mistakes, and \`no-mistakes axi run --help\` plus the \`help\` lines in each \`axi\` response are authoritative and version-matched to the installed binary.
 Do not hand-edit, commit, or fix findings yourself while a run is active - the pipeline applies every fix.
@@ -347,7 +347,7 @@ If the top-level path is the primary checkout or not the worktree you were launc
 
 # Rules
 $RULE1
-2. Stay inside this worktree; modify nothing outside it.
+2. Stay inside this worktree except for the status file and delivery records written through the absolute Firstmate commands named below.
 3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
 4. Report status by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`

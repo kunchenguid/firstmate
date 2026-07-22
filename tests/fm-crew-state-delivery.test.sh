@@ -28,8 +28,14 @@ EOF
 chmod 600 "$HOME_DIR/state/t1.delivery.json"
 
 out=$(FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" "$ST" t1)
-echo "$out" | grep -q "source: delivery-record" || fail "expected source delivery-record: $out"
-echo "$out" | grep -q "phase implementing" || fail "expected phase implementing: $out"
-pass "crew-state reads delivery phase"
+echo "$out" | grep -q "state: unknown" || fail "stale delivery record masked dead worker: $out"
+echo "$out" | grep -q "source: none" || fail "dead worker should have no liveness source: $out"
+pass "delivery record does not fabricate worker liveness"
+
+chmod 644 "$HOME_DIR/state/t1.delivery.json"
+out=$(FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" "$ST" t1)
+echo "$out" | grep -q "state: failed" || fail "unsafe delivery record did not fail closed: $out"
+echo "$out" | grep -q "source: delivery-trust" || fail "unsafe delivery record did not surface trust source: $out"
+pass "delivery trust failures surface instead of degrading"
 
 pass "all fm-crew-state-delivery tests passed"

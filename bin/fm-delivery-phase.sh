@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Manage the results-first delivery phase lifecycle for a ship task.
 # Usage:
+#   fm-delivery-phase.sh init <task-id> --project <name> --delivery-mode <mode> --yolo <on|off>
 #   fm-delivery-phase.sh start <task-id> <phase> [--budget <seconds>]
 #   fm-delivery-phase.sh complete <task-id> <phase> --result <passed|blocked|failed|not_applicable> [--evidence <manifest-sha>]
 #   fm-delivery-phase.sh block <task-id> <reason>
@@ -36,7 +37,7 @@ CMD=$1
 ID=$2
 shift 2
 
-if ! printf '%s' "$ID" | grep -qxE '[A-Za-z0-9._-]+'; then
+if ! fm_delivery_validate_id "$ID"; then
   echo "error: invalid task id: $ID" >&2
   exit 2
 fi
@@ -44,6 +45,7 @@ fi
 INFLIGHT="$STATE/$ID.delivery.json"
 RECEIPT_DIR="$DATA/$ID"
 RECEIPT="$RECEIPT_DIR/delivery-receipt.json"
+LOCK="$STATE/$ID.delivery.lock"
 
 # Default phase budgets (seconds). These are escalation/reroute thresholds, never
 # safety bypasses.
@@ -78,9 +80,10 @@ read_inflight() {
 write_inflight() {
   local content=$1
   local tmp
-  mkdir -p "$STATE"
-  tmp=$(mktemp "$INFLIGHT.tmp.XXXXXX")
-  printf '%s\n' "$content" > "$tmp"
+  mkdir -p "$STATE" || return 1
+  chmod 700 "$STATE" || return 1
+  tmp=$(mktemp "$INFLIGHT.tmp.XXXXXX") || return 1
+  printf '%s\n' "$content" > "$tmp" || { rm -f "$tmp"; return 1; }
   fm_delivery_atomic_replace "$tmp" "$INFLIGHT" 0600 || return 1
 }
 
@@ -88,23 +91,69 @@ write_inflight() {
 write_receipt() {
   local content=$1
   local tmp
-  mkdir -p "$RECEIPT_DIR"
-  chmod 700 "$RECEIPT_DIR" 2>/dev/null || true
-  tmp=$(mktemp "$RECEIPT.tmp.XXXXXX")
-  printf '%s\n' "$content" > "$tmp"
-  fm_delivery_atomic_replace "$tmp" "$RECEIPT" 0600 || return 1
+  mkdir -p "$RECEIPT_DIR" || return 1
+  chmod 700 "$RECEIPT_DIR" || return 1
+  tmp=$(mktemp "$RECEIPT.tmp.XXXXXX") || return 1
+  printf '%s\n' "$content" > "$tmp" || { rm -f "$tmp"; return 1; }
+  chmod 600 "$tmp" || { rm -f "$tmp"; return 1; }
+  if ! ln "$tmp" "$RECEIPT" 2>/dev/null; then
+    rm -f "$tmp"
+    echo "error: receipt already finalized for $ID" >&2
+    return 1
+  fi
+  rm -f "$tmp"
 }
 
-# Update the in-flight record via python3.
-# Args: python_code input_json
-py_update() {
-  python3 -c "$1" "$2"
+acquire_mutation_lock() {
+  local attempt=0
+  mkdir -p "$STATE" || return 1
+  chmod 700 "$STATE" || return 1
+  while [ "$attempt" -lt 50 ]; do
+    if mkdir "$LOCK" 2>/dev/null; then
+      trap 'rmdir "$LOCK" 2>/dev/null || true' EXIT HUP INT TERM
+      return 0
+    fi
+    sleep 0.1
+    attempt=$((attempt + 1))
+  done
+  echo "error: delivery record busy for $ID" >&2
+  return 1
+}
+
+release_mutation_lock() {
+  rmdir "$LOCK" 2>/dev/null || true
+  trap - EXIT HUP INT TERM
+}
+
+init_delivery() {
+  local project=$1 mode=$2 yolo=$3 now doc
+  [ ! -e "$INFLIGHT" ] || { echo "error: delivery record already exists for $ID" >&2; return 1; }
+  case "$mode" in direct-PR|no-mistakes|local-only) ;; *) echo "error: invalid delivery mode: $mode" >&2; return 1 ;; esac
+  case "$yolo" in on|off) ;; *) echo "error: invalid yolo value: $yolo" >&2; return 1 ;; esac
+  now=$(fm_delivery_timestamp)
+  doc=$(python3 - "$ID" "$project" "$mode" "$yolo" "$now" <<'PYEOF'
+import json, sys
+id, project, mode, yolo, now = sys.argv[1:6]
+print(json.dumps({
+    "schemaVersion": "firstmate.delivery-receipt.v1",
+    "task": {"id": id, "project": project, "kind": "ship", "lane": "primary", "supports": None, "deliveryMode": mode, "yolo": yolo == "on"},
+    "capability": {"summary": "", "acceptanceCriteria": [], "authorityClass": "routine"},
+    "phase": "accepted",
+    "phases": [{"name": "accepted", "startedAt": now, "completedAt": now, "budgetSeconds": 0, "result": "passed", "evidence": []}],
+    "updatedAt": now
+}))
+PYEOF
+) || return 1
+  write_inflight "$doc" || return 1
+  echo "phase: accepted recorded for $ID"
 }
 
 start_phase() {
   local phase=$1 budget=${2:-}
   [ -n "$budget" ] || budget=$(phase_budget_seconds "$phase")
   local ts now doc
+  case "$budget" in ''|*[!0-9]*) echo "error: budget must be a non-negative integer" >&2; return 1 ;; esac
+  [ -f "$INFLIGHT" ] || { echo "error: no accepted delivery record for $ID" >&2; return 1; }
   now=$(fm_delivery_timestamp)
   doc=$(read_inflight)
   ts=$(python3 - "$phase" "$budget" "$now" "$doc" <<'PYEOF'
@@ -115,17 +164,17 @@ phases = ["accepted", "implementing", "validating", "landing", "landed", "releas
 if phase not in phases:
     print(f"error: unknown phase {phase}", file=sys.stderr)
     sys.exit(1)
-if current and phases.index(phase) < phases.index(current):
-    print(f"error: cannot move backwards from {current} to {phase}", file=sys.stderr)
+if current not in phases or phases.index(phase) != phases.index(current) + 1:
+    print(f"error: next phase after {current or 'none'} is not {phase}", file=sys.stderr)
+    sys.exit(1)
+entries = doc.get("phases", [])
+if not entries or entries[-1].get("name") != current or entries[-1].get("completedAt") is None:
+    print(f"error: current phase {current} is not completed", file=sys.stderr)
+    sys.exit(1)
+if entries[-1].get("result") not in {"passed", "not_applicable"}:
+    print(f"error: current phase {current} did not succeed", file=sys.stderr)
     sys.exit(1)
 doc["phase"] = phase
-if "phases" not in doc:
-    doc["phases"] = []
-# Close any already-open entry for this phase.
-for p in doc["phases"]:
-    if p.get("name") == phase and p.get("completedAt") is None:
-        p["completedAt"] = now
-        p["result"] = "superseded"
 entry = {"name": phase, "startedAt": now, "completedAt": None, "budgetSeconds": budget, "result": None, "evidence": []}
 doc["phases"].append(entry)
 doc["updatedAt"] = now
@@ -139,6 +188,17 @@ PYEOF
 complete_phase() {
   local phase=$1 result=$2 evidence=${3:-}
   local now doc
+  if [ -n "$evidence" ]; then
+    if [ "${#evidence}" -ne 64 ] || printf '%s' "$evidence" | grep -q '[^0-9a-f]'; then
+      echo "error: --evidence must be a lowercase SHA-256 digest" >&2
+      return 1
+    fi
+  fi
+  case "$phase:$result" in
+    validating:passed|released:passed|deployed:passed|smoke_verified:passed)
+      [ -n "$evidence" ] || { echo "error: passed $phase requires --evidence" >&2; return 1; }
+      ;;
+  esac
   now=$(fm_delivery_timestamp)
   doc=$(read_inflight)
   doc=$(python3 - "$phase" "$result" "$evidence" "$now" "$doc" <<'PYEOF'
@@ -150,6 +210,9 @@ if result not in valid_results:
     sys.exit(1)
 if doc.get("phase") != phase:
     print(f"error: current phase is {doc.get('phase')}, cannot complete {phase}", file=sys.stderr)
+    sys.exit(1)
+if phase == "validating" and result != "passed":
+    print("error: validating must pass", file=sys.stderr)
     sys.exit(1)
 matched = False
 for p in reversed(doc.get("phases", [])):
@@ -194,9 +257,14 @@ resume_phase() {
   doc=$(python3 - "$phase" "$now" "$doc" <<'PYEOF'
 import json, sys
 phase, now, doc = sys.argv[1], sys.argv[2], json.loads(sys.argv[3])
-if doc.get("block"):
-    doc["block"]["resolvedAt"] = now
-    doc["block"]["resumedPhase"] = phase
+if doc.get("phase") != phase:
+    print(f"error: cannot resume {phase} while current phase is {doc.get('phase')}", file=sys.stderr)
+    sys.exit(1)
+if not doc.get("block") or doc["block"].get("resolvedAt"):
+    print("error: delivery is not blocked", file=sys.stderr)
+    sys.exit(1)
+doc["block"]["resolvedAt"] = now
+doc["block"]["resumedPhase"] = phase
 doc["updatedAt"] = now
 print(json.dumps(doc))
 PYEOF
@@ -223,66 +291,30 @@ PYEOF
 }
 
 finalize_phase() {
-  local branch=$1 candidate=$2 landed=$3
-  local doc receipt
-  doc=$(read_inflight)
-  if [ ! -f "$INFLIGHT" ]; then
-    echo "error: no in-flight record for $ID" >&2
-    return 1
-  fi
-  if [ -f "$RECEIPT" ]; then
-    echo "error: receipt already finalized for $ID" >&2
-    return 1
-  fi
-  if ! fm_delivery_validate_sha "$candidate"; then
-    echo "error: invalid candidate SHA: $candidate" >&2
-    return 1
-  fi
-  if [ -n "$landed" ] && ! fm_delivery_validate_sha "$landed"; then
-    echo "error: invalid landed SHA: $landed" >&2
-    return 1
-  fi
-  candidate=$(fm_delivery_sha_lower "$candidate")
-  landed=$(fm_delivery_sha_lower "$landed")
-  # The receipt is built from the in-flight record plus required identity fields.
-  # A richer receipt builder lives in fm-delivery-receipt.sh.
-  receipt=$(python3 - "$ID" "$branch" "$candidate" "$landed" "$doc" <<'PYEOF'
-import json, sys
-id, branch, candidate, landed, doc = sys.argv[1:6]
-doc = json.loads(doc)
-if doc.get("phase") != "receipt_finalized":
-    print(f"error: cannot finalize from phase {doc.get('phase')}", file=sys.stderr)
-    sys.exit(1)
-source = {"branch": branch, "candidateSha": candidate, "prUrl": None, "prHeadSha": None, "mergeSha": None, "localCandidateSha": None, "localLandedSha": None}
-if landed:
-    source["mergeSha"] = landed
-receipt = {
-    "schemaVersion": "firstmate.delivery-receipt.v1",
-    "task": {"id": id, "project": "", "kind": "ship", "lane": "primary", "supports": None, "deliveryMode": "direct-PR", "yolo": True},
-    "capability": {"summary": "", "acceptanceCriteria": [], "authorityClass": "routine"},
-    "source": source,
-    "phases": doc.get("phases", []),
-    "validation": {"commands": [], "ci": {"requiredChecks": [], "headSha": candidate, "result": "green"}, "security": {"result": "passed", "evidence": []}},
-    "release": {"applicability": "not_applicable", "mode": "none", "version": None, "artifact": {"uri": None, "digest": None, "sourceSha": candidate}, "receipt": None},
-    "deployment": {"applicability": "not_applicable", "environment": None, "target": None, "artifactDigest": None, "receipt": None},
-    "smoke": {"command": [], "result": "not_applicable", "observations": []},
-    "rollback": {"mode": "not_applicable", "previewCommand": [], "result": "not_applicable", "receipt": None},
-    "provider": {"applicability": "not_used", "receipt": None},
-    "outcome": {"status": "delivered", "completedAt": doc.get("updatedAt", "")}
-}
-print(json.dumps(receipt))
-PYEOF
-) || return 1
-  if ! fm_delivery_validate_receipt "$receipt"; then
-    echo "error: receipt validation failed for $ID" >&2
-    return 1
-  fi
-  write_receipt "$receipt" || return 1
-  echo "receipt finalized for $ID"
+  "$SCRIPT_DIR/fm-delivery-receipt.sh" finalize "$ID" "$@"
 }
 
 # Argument parsing -----------------------------------------------------------
 case "$CMD" in
+  init)
+    PROJECT=
+    MODE=
+    YOLO=
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --project) PROJECT=$2; shift 2 ;;
+        --delivery-mode) MODE=$2; shift 2 ;;
+        --yolo) YOLO=$2; shift 2 ;;
+        *) echo "error: unknown option $1" >&2; exit 2 ;;
+      esac
+    done
+    [ -n "$PROJECT" ] || { echo "error: --project required for init" >&2; exit 2; }
+    [ -n "$MODE" ] || { echo "error: --delivery-mode required for init" >&2; exit 2; }
+    [ -n "$YOLO" ] || { echo "error: --yolo required for init" >&2; exit 2; }
+    acquire_mutation_lock || exit 1
+    init_delivery "$PROJECT" "$MODE" "$YOLO"
+    release_mutation_lock
+    ;;
   start)
     [ "$#" -ge 1 ] || { usage >&2; exit 2; }
     PHASE=$1
@@ -294,7 +326,9 @@ case "$CMD" in
         *) echo "error: unknown option $1" >&2; exit 2 ;;
       esac
     done
+    acquire_mutation_lock || exit 1
     start_phase "$PHASE" "$BUDGET"
+    release_mutation_lock
     ;;
   complete)
     [ "$#" -ge 1 ] || { usage >&2; exit 2; }
@@ -310,36 +344,29 @@ case "$CMD" in
       esac
     done
     [ -n "$RESULT" ] || { echo "error: --result required" >&2; exit 2; }
+    acquire_mutation_lock || exit 1
     complete_phase "$PHASE" "$RESULT" "$EVIDENCE"
+    release_mutation_lock
     ;;
   block)
     [ "$#" -ge 1 ] || { usage >&2; exit 2; }
     REASON=$*
+    acquire_mutation_lock || exit 1
     block_phase "$REASON"
+    release_mutation_lock
     ;;
   resume)
     [ "$#" -ge 1 ] || { usage >&2; exit 2; }
     PHASE=$1
+    acquire_mutation_lock || exit 1
     resume_phase "$PHASE"
+    release_mutation_lock
     ;;
   status)
     status_phase
     ;;
   finalize)
-    BRANCH=
-    CANDIDATE=
-    LANDED=
-    while [ "$#" -gt 0 ]; do
-      case "$1" in
-        --branch) BRANCH=$2; shift 2 ;;
-        --candidate-sha) CANDIDATE=$2; shift 2 ;;
-        --merge-sha|--local-landed-sha) LANDED=$2; shift 2 ;;
-        *) echo "error: unknown option $1" >&2; exit 2 ;;
-      esac
-    done
-    [ -n "$BRANCH" ] || { echo "error: --branch required for finalize" >&2; exit 2; }
-    [ -n "$CANDIDATE" ] || { echo "error: --candidate-sha required for finalize" >&2; exit 2; }
-    finalize_phase "$BRANCH" "$CANDIDATE" "$LANDED"
+    finalize_phase "$@"
     ;;
   *)
     echo "error: unknown command $CMD" >&2

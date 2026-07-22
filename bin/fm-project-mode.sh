@@ -38,14 +38,22 @@ fi
 # awk emits "<mode> <yolo>" (one line) or nothing if the project is absent.
 parsed=$(awk -v n="$NAME" '
   $1=="-" && $2==n {
-    mode="no-mistakes"; yolo="off";
-    if ($3 ~ /^\[/) {
-      s="";
-      for (i=3; i<=NF; i++) { s = s (s==""?"":" ") $i; if ($i ~ /\]$/) break }
-      gsub(/^\[|\]$/, "", s);           # strip the surrounding brackets
-      k = split(s, a, " ");
-      if (a[1] != "" && a[1] != "+yolo") mode = a[1];
-      for (j=1; j<=k; j++) if (a[j]=="+yolo") yolo="on";
+    if ($3 !~ /^\[/) {
+      print "direct-PR", "on"; exit
+    }
+    mode=""; yolo="off"; s=""; closed=0;
+    for (i=3; i<=NF; i++) {
+      s = s (s==""?"":" ") $i
+      if ($i ~ /\]$/) { closed=1; break }
+    }
+    if (!closed) { print "malformed", "off"; exit }
+    gsub(/^\[|\]$/, "", s);
+    k = split(s, a, " ");
+    if (k < 1 || a[1] == "" || a[1] == "+yolo") { print "malformed", "off"; exit }
+    mode=a[1]
+    for (j=2; j<=k; j++) {
+      if (a[j] == "+yolo") yolo="on"
+      else { print "malformed", "off"; exit }
     }
     print mode, yolo; exit
   }

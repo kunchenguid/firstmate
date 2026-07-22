@@ -30,6 +30,10 @@ out=$(FM_HOME="$HOME_DIR" "$PM" unknown-project 2>/dev/null)
 [ "$out" = "direct-PR off" ] || fail "unknown project default: $out"
 pass "unknown project defaults to direct-PR off"
 
+out=$(FM_HOME="$HOME_DIR" "$PM" firstmate 2>/dev/null)
+[ "$out" = "direct-PR on" ] || fail "legacy registry migration: $out"
+pass "legacy registry entries migrate to direct-PR on"
+
 # --- explicit modes preserved ---
 out=$(FM_HOME="$HOME_DIR" "$PM" covenant 2>/dev/null)
 [ "$out" = "direct-PR on" ] || fail "explicit direct-PR+yolo: $out"
@@ -46,5 +50,12 @@ EOF
 out=$(FM_HOME="$HOME_DIR" "$PM" badproj 2>/dev/null)
 [ "$out" = "direct-PR off" ] || fail "malformed mode default: $out"
 pass "malformed mode defaults to direct-PR off"
+
+cat > "$HOME_DIR/data/projects.md" <<'EOF'
+- badproj [+yolo] - missing mode (added 2026-07-22)
+EOF
+out=$(FM_HOME="$HOME_DIR" "$PM" badproj 2>/dev/null)
+[ "$out" = "direct-PR off" ] || fail "missing mode granted authority: $out"
+pass "mode-less yolo entry fails closed"
 
 pass "all fm-project-mode tests passed"

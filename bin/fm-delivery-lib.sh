@@ -45,6 +45,14 @@ fm_delivery_landing_substates() {
   esac
 }
 
+# Validate an identifier used as one path component.
+fm_delivery_validate_id() {
+  local value=$1
+  [ -n "$value" ] || return 1
+  [ "$value" != . ] && [ "$value" != .. ] || return 1
+  printf '%s' "$value" | grep -qxE '[A-Za-z0-9][A-Za-z0-9._-]*'
+}
+
 # Validate a 40-hex SHA. Returns 0 for valid, 1 otherwise.
 fm_delivery_validate_sha() {
   local sha=$1
@@ -83,19 +91,38 @@ fm_delivery_atomic_replace() {  # <src-tmp> <dst> [<mode>]
   return 0
 }
 
-# Compute SHA-256 manifest of a directory: one line per file
-# "sha256  relative/path" sorted by path. Prints the hex digest of the manifest.
-fm_delivery_manifest_hash() {  # <dir>
-  local dir=$1
+# Write a deterministic manifest for every regular file except the manifest
+# itself, then print the digest of the exact manifest bytes.
+fm_delivery_write_manifest() {  # <dir> <manifest-path>
+  local dir=$1 manifest=$2
   [ -d "$dir" ] || { echo "error: manifest dir missing: $dir" >&2; return 1; }
-  local manifest
-  manifest=$(cd "$dir" && find . -type f | sort | while IFS= read -r rel; do
-    rel=${rel#./}
-    [ -n "$rel" ] || continue
-    printf '%s  %s\n' "$(fm_delivery_file_hash "$dir/$rel")" "$rel"
-  done) || return 1
-  [ -n "$manifest" ] || { echo "error: empty manifest for $dir" >&2; return 1; }
-  printf '%s\n' "$manifest" | sha256sum | awk '{print $1}'
+  python3 - "$dir" "$manifest" <<'PYEOF'
+import hashlib, pathlib, sys
+root = pathlib.Path(sys.argv[1]).resolve()
+manifest = pathlib.Path(sys.argv[2]).resolve()
+files = [path for path in root.rglob("*") if path.is_file() and path.resolve() != manifest]
+files.sort(key=lambda path: path.relative_to(root).as_posix().encode())
+if not files:
+    print(f"error: empty manifest for {root}", file=sys.stderr)
+    sys.exit(1)
+lines = []
+for path in files:
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    lines.append(f"{digest}  {path.relative_to(root).as_posix()}\n")
+data = "".join(lines).encode()
+manifest.write_bytes(data)
+print(hashlib.sha256(data).hexdigest())
+PYEOF
+}
+
+# Compute the digest of the canonical manifest without retaining it.
+fm_delivery_manifest_hash() {  # <dir>
+  local dir=$1 tmp digest
+  [ -d "$dir" ] || { echo "error: manifest dir missing: $dir" >&2; return 1; }
+  tmp=$(mktemp "$dir/.manifest.XXXXXX") || return 1
+  digest=$(fm_delivery_write_manifest "$dir" "$tmp") || { rm -f "$tmp"; return 1; }
+  rm -f "$tmp"
+  printf '%s\n' "$digest"
 }
 
 fm_delivery_file_hash() {  # <file>
@@ -110,46 +137,139 @@ fm_delivery_file_hash() {  # <file>
 # Lightweight JSON validation using python3 (a system tool, not a project
 # dependency). Validates that the document is valid JSON and satisfies the
 # firstmate.delivery-receipt.v1 required-field contract.
-fm_delivery_validate_receipt() {  # <receipt-json>
-  local input_json=$1
-  python3 - "$input_json" <<'PYEOF'
+fm_delivery_validate_receipt() {  # <receipt-json> [<expected-task-id> <expected-mode> <expected-candidate-sha>]
+  local input_json=$1 expected_id=${2:-} expected_mode=${3:-} expected_candidate=${4:-}
+  python3 - "$input_json" "$expected_id" "$expected_mode" "$expected_candidate" <<'PYEOF'
 import json, sys
 try:
     if not sys.argv[1]:
-        print("error: empty receipt", file=sys.stderr)
-        sys.exit(1)
+        raise ValueError("empty receipt")
     doc = json.loads(sys.argv[1])
-except Exception as e:
-    print(f"error: invalid JSON: {e}", file=sys.stderr)
+except Exception as error:
+    print(f"error: invalid JSON: {error}", file=sys.stderr)
     sys.exit(1)
 required_top = ["schemaVersion", "task", "capability", "source", "phases", "validation", "release", "deployment", "smoke", "rollback", "outcome"]
-for k in required_top:
-    if k not in doc:
-        print(f"error: missing required receipt field: {k}", file=sys.stderr)
+for key in required_top:
+    if key not in doc:
+        print(f"error: missing required receipt field: {key}", file=sys.stderr)
         sys.exit(1)
 if doc.get("schemaVersion") != "firstmate.delivery-receipt.v1":
     print("error: unsupported schema version", file=sys.stderr)
     sys.exit(1)
 task = doc["task"]
-for k in ["id", "project", "kind", "lane", "deliveryMode", "yolo"]:
-    if k not in task:
-        print(f"error: missing task field: {k}", file=sys.stderr)
+for key in ["id", "project", "kind", "lane", "deliveryMode", "yolo"]:
+    if key not in task:
+        print(f"error: missing task field: {key}", file=sys.stderr)
         sys.exit(1)
-src = doc["source"]
-for k in ["branch", "candidateSha"]:
-    if k not in src or not src[k]:
-        print(f"error: missing/empty source field: {k}", file=sys.stderr)
-        sys.exit(1)
-# At least one landed identity must be present.
-if not (src.get("mergeSha") or src.get("localLandedSha")):
-    print("error: receipt lacks mergeSha or localLandedSha", file=sys.stderr)
+expected_id, expected_mode, expected_candidate = sys.argv[2:5]
+if expected_id and task.get("id") != expected_id:
+    print("error: receipt task id does not match expected task", file=sys.stderr)
     sys.exit(1)
-outcome = doc["outcome"]
-if outcome.get("status") != "delivered":
+if expected_mode and task.get("deliveryMode") != expected_mode:
+    print("error: receipt delivery mode does not match task metadata", file=sys.stderr)
+    sys.exit(1)
+source = doc["source"]
+for key in ["branch", "candidateSha"]:
+    if key not in source or not source[key]:
+        print(f"error: missing/empty source field: {key}", file=sys.stderr)
+        sys.exit(1)
+def valid_sha(value):
+    return isinstance(value, str) and len(value) == 40 and all(char in "0123456789abcdef" for char in value)
+if not valid_sha(source.get("candidateSha")):
+    print("error: invalid candidateSha", file=sys.stderr)
+    sys.exit(1)
+if expected_candidate and source.get("candidateSha") != expected_candidate.lower():
+    print("error: receipt candidateSha does not match exact task head", file=sys.stderr)
+    sys.exit(1)
+mode = task.get("deliveryMode")
+if mode in {"direct-PR", "no-mistakes"}:
+    if not valid_sha(source.get("mergeSha")) or source.get("localLandedSha"):
+        print("error: PR delivery requires only a valid mergeSha", file=sys.stderr)
+        sys.exit(1)
+elif mode == "local-only":
+    if not valid_sha(source.get("localLandedSha")) or source.get("mergeSha"):
+        print("error: local-only delivery requires only a valid localLandedSha", file=sys.stderr)
+        sys.exit(1)
+else:
+    print("error: unsupported delivery mode", file=sys.stderr)
+    sys.exit(1)
+required_phases = ["accepted", "implementing", "validating", "landing", "landed", "released", "deployed", "smoke_verified", "receipt_finalized"]
+phases = doc.get("phases")
+if not isinstance(phases, list) or [phase.get("name") for phase in phases] != required_phases:
+    print("error: receipt phases are not contiguous through receipt_finalized", file=sys.stderr)
+    sys.exit(1)
+for phase in phases:
+    name = phase.get("name")
+    if not phase.get("startedAt") or not phase.get("completedAt"):
+        print(f"error: incomplete phase {name}", file=sys.stderr)
+        sys.exit(1)
+    if phase.get("result") not in {"passed", "not_applicable"}:
+        print(f"error: unsuccessful phase {name}", file=sys.stderr)
+        sys.exit(1)
+    evidence = phase.get("evidence")
+    if not isinstance(evidence, list) or any(not isinstance(value, str) or len(value) != 64 or any(char not in "0123456789abcdef" for char in value) for value in evidence):
+        print(f"error: invalid evidence digest for {name}", file=sys.stderr)
+        sys.exit(1)
+    if name in {"validating", "released", "deployed", "smoke_verified"} and phase.get("result") == "passed" and not evidence:
+        print(f"error: passed phase {name} lacks evidence", file=sys.stderr)
+        sys.exit(1)
+if next(phase for phase in phases if phase.get("name") == "validating").get("result") != "passed":
+    print("error: validating phase must pass", file=sys.stderr)
+    sys.exit(1)
+if doc.get("outcome", {}).get("status") != "delivered":
     print("error: outcome.status must be delivered", file=sys.stderr)
     sys.exit(1)
-# Phase monotonicity and required evidence are enforced by the caller/phase tool.
-sys.exit(0)
+PYEOF
+}
+
+# Verify every evidence digest against one contained bundle, including the exact
+# manifest bytes, every listed file, and the candidate identity in meta.json.
+fm_delivery_verify_receipt_evidence() {  # <receipt-json> <data-root> <task-id>
+  local input_json=$1 data_root=$2 task_id=$3
+  python3 - "$input_json" "$data_root" "$task_id" <<'PYEOF'
+import hashlib, json, pathlib, re, sys
+doc = json.loads(sys.argv[1])
+root = pathlib.Path(sys.argv[2]) / sys.argv[3] / "evidence"
+candidate = doc.get("source", {}).get("candidateSha")
+digests = []
+for phase in doc.get("phases", []):
+    digests.extend(phase.get("evidence", []))
+rollback = doc.get("rollback", {}).get("receipt")
+if rollback:
+    digests.append(rollback)
+for expected in sorted(set(digests)):
+    matched = False
+    manifests = root.glob("*/MANIFEST.sha256") if root.is_dir() else []
+    for manifest in manifests:
+        raw = manifest.read_bytes()
+        if hashlib.sha256(raw).hexdigest() != expected:
+            continue
+        bundle = manifest.parent.resolve()
+        listed = set()
+        for line in raw.decode().splitlines():
+            match = re.fullmatch(r"([0-9a-f]{64})  (.+)", line)
+            if not match:
+                raise SystemExit(f"error: malformed evidence manifest {manifest}")
+            digest, rel = match.groups()
+            rel_path = pathlib.PurePosixPath(rel)
+            if rel_path.is_absolute() or ".." in rel_path.parts or rel in listed:
+                raise SystemExit(f"error: unsafe evidence manifest path {rel}")
+            path = (bundle / rel).resolve()
+            if bundle not in path.parents or not path.is_file():
+                raise SystemExit(f"error: missing evidence file {rel}")
+            if hashlib.sha256(path.read_bytes()).hexdigest() != digest:
+                raise SystemExit(f"error: evidence hash mismatch for {rel}")
+            listed.add(rel)
+        actual = {path.relative_to(bundle).as_posix() for path in bundle.rglob("*") if path.is_file() and path.name != "MANIFEST.sha256"}
+        if listed != actual:
+            raise SystemExit(f"error: evidence manifest file set mismatch in {bundle}")
+        meta = json.loads((bundle / "meta.json").read_text())
+        if meta.get("candidateSha") != candidate:
+            raise SystemExit("error: evidence candidateSha does not match receipt")
+        matched = True
+        break
+    if not matched:
+        raise SystemExit(f"error: receipt evidence digest not found: {expected}")
 PYEOF
 }
 
@@ -198,7 +318,7 @@ fm_delivery_validate_phase_transition() {  # <current-phase> <next-phase>
     echo "error: unknown phase in transition: $current -> $next" >&2
     return 1
   fi
-  [ "$idx_next" -ge "$idx_current" ]
+  [ "$idx_next" -eq $((idx_current + 1)) ]
 }
 
 # Redact volatile provider fields from evidence before publication. Refuses if
@@ -206,8 +326,12 @@ fm_delivery_validate_phase_transition() {  # <current-phase> <next-phase>
 fm_delivery_redact_volatile_provider_fields() {  # <file>
   local f=$1
   [ -f "$f" ] || return 0
-  if grep -qiE 'percent(Used|Remaining)|reset_time|balance|quota_pct|session_pct|week_pct' "$f"; then
+  if grep -qiE 'percent(Used|Remaining)|reset_time|(^|[^[:alnum:]_])(balance|quota_pct|session_pct|week_pct)([^[:alnum:]_]|$)' "$f"; then
     echo "error: volatile provider percentage/reset/balance fields present in $f" >&2
+    return 1
+  fi
+  if grep -qiE '(^|[^[:alnum:]_])(api[_-]?key|access[_-]?token|password|secret)[[:space:]]*[:=]' "$f"; then
+    echo "error: secret assignment present in $f" >&2
     return 1
   fi
   return 0

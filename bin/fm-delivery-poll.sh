@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Byte-static trusted poll for delivery records.
 # Mirrors the PR-poll trust model: reads only validated sidecar data and prints
-# one actionable event line if the delivery state changed.
+# one current-state line.
 # Usage:
 #   fm-delivery-poll.sh <task-id>
 #
@@ -20,9 +20,12 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-delivery-lib.sh
+. "$SCRIPT_DIR/fm-delivery-lib.sh"
 
 [ "$#" -ge 1 ] || { echo "usage: fm-delivery-poll.sh <task-id>" >&2; exit 2; }
 ID=$1
+fm_delivery_validate_id "$ID" || { echo "error: invalid task id: $ID" >&2; exit 2; }
 
 INFLIGHT="$STATE/$ID.delivery.json"
 RECEIPT="$DATA/$ID/delivery-receipt.json"
@@ -31,10 +34,14 @@ state_device=$(fm_pr_file_device "$STATE") || {
   echo "error: cannot determine state device" >&2
   exit 1
 }
+data_device=$(fm_pr_file_device "$DATA") || {
+  echo "error: cannot determine data device" >&2
+  exit 1
+}
 
 validate_private_file() {
-  local f=$1
-  fm_pr_private_file_valid "$f" 600 "$state_device" || return 1
+  local f=$1 device=$2
+  fm_pr_private_file_valid "$f" 600 "$device" || return 1
 }
 
 # Read the current phase and any block from a trusted in-flight record.
@@ -43,7 +50,7 @@ current_state() {
     printf 'none\n'
     return 0
   fi
-  validate_private_file "$INFLIGHT" || {
+  validate_private_file "$INFLIGHT" "$state_device" || {
     echo "error: unsafe delivery record $INFLIGHT" >&2
     exit 1
   }
@@ -66,7 +73,7 @@ receipt_state() {
     printf 'none\n'
     return 0
   fi
-  validate_private_file "$RECEIPT" || {
+  validate_private_file "$RECEIPT" "$data_device" || {
     echo "error: unsafe receipt $RECEIPT" >&2
     exit 1
   }

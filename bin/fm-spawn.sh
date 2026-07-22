@@ -1044,6 +1044,7 @@ mkdir -p "$TASK_TMP/gotmp"
 # install mechanics live in bin/fm-launch-lib.sh (fm_launch_install_turnend_hook),
 # shared with the guarded provider-failover relaunch path.
 mkdir -p "$STATE"
+chmod 700 "$STATE"
 STATE_REAL=$(cd "$STATE" && pwd -P)
 TURNEND="$STATE_REAL/$ID.turn-ended"
 if [ "$KIND" != secondmate ]; then
@@ -1107,6 +1108,15 @@ META_WINDOW=$T
     echo "projects=$SECONDMATE_PROJECTS"
   fi
 } > "$STATE/$ID.meta"
+chmod 600 "$STATE/$ID.meta"
+if [ "$KIND" = ship ]; then
+  FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
+    "$FM_ROOT/bin/fm-delivery-phase.sh" init "$ID" \
+      --project "$PROJ_NAME" --delivery-mode "$MODE" --yolo "$YOLO" >/dev/null || {
+        echo "error: could not create mandatory accepted delivery record for $ID" >&2
+        exit 1
+      }
+fi
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
 
 LAUNCH=$(fm_launch_render "$LAUNCH" "$HARNESS" "$MODEL" "$EFFORT" \

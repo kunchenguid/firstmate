@@ -27,13 +27,15 @@ run_brief testtask firstmate >/dev/null || fail "direct-PR brief failed"
 grep -q "validated delivery receipt" "$HOME_DIR/data/testtask/brief.md" || fail "direct-PR brief missing receipt DOD"
 grep -q "fm-evidence-run.sh" "$HOME_DIR/data/testtask/brief.md" || fail "direct-PR brief missing evidence runner"
 grep -q "fm-delivery-phase.sh" "$HOME_DIR/data/testtask/brief.md" || fail "direct-PR brief missing phase tool"
+grep -Fq "$ROOT/bin/fm-evidence-run.sh" "$HOME_DIR/data/testtask/brief.md" || fail "direct-PR brief command is not Firstmate-owned and absolute"
+grep -Fq "$HOME_DIR/data/testtask/delivery-receipt.json" "$HOME_DIR/data/testtask/brief.md" || fail "direct-PR receipt path is not absolute"
 rm "$HOME_DIR/data/testtask/brief.md"
 pass "direct-PR brief includes results-first tools"
 
 # --- local-only brief includes results-first path ---
 run_brief testtask dotfiles >/dev/null || fail "local-only brief failed"
 grep -q "validated delivery receipt" "$HOME_DIR/data/testtask/brief.md" || fail "local-only brief missing receipt DOD"
-grep -q "data/testtask/delivery-receipt.json" "$HOME_DIR/data/testtask/brief.md" || fail "local-only brief missing receipt path"
+grep -Fq "$HOME_DIR/data/testtask/delivery-receipt.json" "$HOME_DIR/data/testtask/brief.md" || fail "local-only brief missing absolute receipt path"
 rm "$HOME_DIR/data/testtask/brief.md"
 pass "local-only brief includes results-first path"
 

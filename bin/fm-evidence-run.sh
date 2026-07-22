@@ -33,19 +33,42 @@ SEQ=$4
 ADAPTER=$5
 ARGV_JSON=$6
 
-if ! printf '%s' "$ID" | grep -qxE '[A-Za-z0-9._-]+'; then
+if ! fm_delivery_validate_id "$ID"; then
   echo "error: invalid task id: $ID" >&2
   exit 2
 fi
 case "$SEQ" in ''|*[!0-9]*) echo "error: seq must be a non-negative integer" >&2; exit 2 ;; esac
+if ! fm_delivery_validate_id "$ADAPTER"; then
+  echo "error: invalid evidence adapter: $ADAPTER" >&2
+  exit 2
+fi
+case " $(fm_delivery_phase_list) " in
+  *" $PHASE "*) ;;
+  *) echo "error: invalid delivery phase: $PHASE" >&2; exit 2 ;;
+esac
 
-EV_DIR="$DATA/$ID/evidence/$SEQ-$ADAPTER"
-[ -e "$EV_DIR" ] && { echo "error: evidence sequence $SEQ-$ADAPTER already exists for $ID" >&2; exit 1; }
+EV_PARENT="$DATA/$ID/evidence"
+EV_DIR="$EV_PARENT/$SEQ-$ADAPTER"
+EV_LOCK="$EV_PARENT/.$SEQ-$ADAPTER.lock"
+EV_STAGE=
+
+cleanup_evidence_stage() {
+  [ -z "$EV_STAGE" ] || rm -rf "$EV_STAGE"
+  rmdir "$EV_LOCK" 2>/dev/null || true
+}
 
 run_evidence() {
-  local start_at end_at exit_code meta tmp_stdout tmp_stderr
-  mkdir -p "$EV_DIR"
-  chmod 700 "$EV_DIR"
+  local start_at end_at exit_code meta tmp_stdout tmp_stderr candidate_sha manifest_hash
+  mkdir -p "$EV_PARENT" || return 1
+  chmod 700 "$DATA/$ID" "$EV_PARENT" || return 1
+  if ! mkdir "$EV_LOCK" 2>/dev/null; then
+    echo "error: evidence sequence $SEQ-$ADAPTER is busy or already publishing for $ID" >&2
+    return 1
+  fi
+  trap cleanup_evidence_stage EXIT HUP INT TERM
+  [ ! -e "$EV_DIR" ] || { echo "error: evidence sequence $SEQ-$ADAPTER already exists for $ID" >&2; return 1; }
+  EV_STAGE=$(mktemp -d "$EV_PARENT/.tmp.$SEQ-$ADAPTER.XXXXXX") || return 1
+  chmod 700 "$EV_STAGE" || return 1
 
   # Decode JSON argv with python3 and execute via python3 subprocess to avoid
   # shell evaluation entirely. The command runs in the task worktree if one can
@@ -56,23 +79,25 @@ run_evidence() {
   fi
   [ -n "$wt" ] && [ -d "$wt" ] || wt=$PWD
 
-  tmp_stdout=$(mktemp)
-  tmp_stderr=$(mktemp)
+  tmp_stdout="$EV_STAGE/stdout.txt"
+  tmp_stderr="$EV_STAGE/stderr.txt"
   start_at=$(fm_delivery_timestamp)
   exit_code=$(python3 - "$wt" "$tmp_stdout" "$tmp_stderr" "$ARGV_JSON" <<'PYEOF'
 import json, sys, subprocess, os
 wt, out_path, err_path, argv_json = sys.argv[1:5]
 try:
     argv = json.loads(argv_json)
-    if not isinstance(argv, list) or not all(isinstance(a, str) for a in argv):
-        raise ValueError("argv must be a JSON array of strings")
+    if not isinstance(argv, list) or not argv or not all(isinstance(a, str) for a in argv):
+        raise ValueError("argv must be a non-empty JSON array of strings")
+    if os.path.basename(argv[0]) in {"sh", "bash", "dash", "zsh", "fish"}:
+        raise ValueError("shell interpreters are not valid deterministic evidence commands")
 except Exception as e:
     print(f"error: invalid argv JSON: {e}", file=sys.stderr)
     sys.exit(2)
 with open(out_path, "w") as out_f, open(err_path, "w") as err_f:
     try:
         result = subprocess.run(argv, cwd=wt, stdout=out_f, stderr=err_f, text=True, check=False)
-        print(result.returncode)
+        print(result.returncode if result.returncode >= 0 else 128 + (-result.returncode))
     except FileNotFoundError:
         print(127)
     except Exception as e:
@@ -84,19 +109,21 @@ PYEOF
 
   # Refuse volatile provider fields before publication.
   if ! fm_delivery_redact_volatile_provider_fields "$tmp_stdout"; then
-    rm -f "$tmp_stdout" "$tmp_stderr"
     return 1
   fi
   if ! fm_delivery_redact_volatile_provider_fields "$tmp_stderr"; then
-    rm -f "$tmp_stdout" "$tmp_stderr"
     return 1
   fi
 
-  mv "$tmp_stdout" "$EV_DIR/stdout.txt"
-  mv "$tmp_stderr" "$EV_DIR/stderr.txt"
-
   candidate_sha=$(grep '^candidateSha=' "${FM_STATE_OVERRIDE:-$FM_HOME/state}/$ID.meta" 2>/dev/null | cut -d= -f2- || true)
-  candidate_sha=${candidate_sha:-unknown}
+  if [ -z "$candidate_sha" ] && { [ -d "$wt/.git" ] || [ -f "$wt/.git" ]; }; then
+    candidate_sha=$(git -C "$wt" rev-parse --verify HEAD 2>/dev/null || true)
+  fi
+  if ! fm_delivery_validate_sha "$candidate_sha"; then
+    echo "error: evidence requires an exact candidate SHA from task metadata or worktree HEAD" >&2
+    return 1
+  fi
+  candidate_sha=$(fm_delivery_sha_lower "$candidate_sha")
 
   meta=$(python3 - "$ID" "$PHASE" "$SEQ" "$ADAPTER" "$ARGV_JSON" "$start_at" "$end_at" "$exit_code" "$candidate_sha" <<'PYEOF'
 import json, sys
@@ -116,41 +143,18 @@ doc = {
     "completedAt": completed,
     "exitCode": int(exit_code),
     "candidateSha": candidate_sha,
-    "files": []
+    "files": ["stdout.txt", "stderr.txt"]
 }
 print(json.dumps(doc, indent=2))
 PYEOF
 )
-  printf '%s\n' "$meta" > "$EV_DIR/meta.json"
-
-  # Hash every file and append to meta.json.
-  local manifest
-  manifest=$(cd "$EV_DIR" && find . -type f | sort | while IFS= read -r rel; do
-    rel=${rel#./}
-    [ -n "$rel" ] || continue
-    printf '%s  %s\n' "$(fm_delivery_file_hash "$EV_DIR/$rel")" "$rel"
-  done)
-  printf '%s\n' "$manifest" > "$EV_DIR/MANIFEST.sha256"
-  local manifest_hash
-  manifest_hash=$(printf '%s\n' "$manifest" | sha256sum | awk '{print $1}')
-
-  # Update meta.json with manifest hash.
-  local tmp_meta
-  tmp_meta=$(mktemp)
-  printf '%s\n' "$meta" > "$tmp_meta"
-  meta=$(python3 - "$manifest_hash" "$tmp_meta" <<'PYEOF'
-import json, sys
-manifest_hash, meta_path = sys.argv[1:3]
-with open(meta_path) as f:
-    meta = json.loads(f.read())
-meta["manifestSha256"] = manifest_hash
-print(json.dumps(meta, indent=2))
-PYEOF
-)
-  rm -f "$tmp_meta"
-  printf '%s\n' "$meta" > "$EV_DIR/meta.json"
-
-  chmod 400 "$EV_DIR/stdout.txt" "$EV_DIR/stderr.txt" "$EV_DIR/meta.json" "$EV_DIR/MANIFEST.sha256"
+  printf '%s\n' "$meta" > "$EV_STAGE/meta.json" || return 1
+  manifest_hash=$(fm_delivery_write_manifest "$EV_STAGE" "$EV_STAGE/MANIFEST.sha256") || return 1
+  chmod 400 "$EV_STAGE/stdout.txt" "$EV_STAGE/stderr.txt" "$EV_STAGE/meta.json" "$EV_STAGE/MANIFEST.sha256" || return 1
+  mv "$EV_STAGE" "$EV_DIR" || return 1
+  EV_STAGE=
+  rmdir "$EV_LOCK" || return 1
+  trap - EXIT HUP INT TERM
 
   echo "$EV_DIR"
   echo "manifestSha256=$manifest_hash"
