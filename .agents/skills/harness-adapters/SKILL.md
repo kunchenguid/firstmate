@@ -12,8 +12,8 @@ Use this reference before any harness-specific firstmate operation: spawn, recov
 
 Crewmates default to the same harness firstmate is running on unless `config/crew-harness` records an adapter name.
 Optional dispatch profiles in `config/crew-dispatch.json` can override that static default for one crewmate or scout dispatch by selecting concrete harness, model, and effort axes at intake.
-When `config/pi-delegated-profile` exists, `fm-spawn.sh` validates its exact Pi model, medium effort, and 60 percent compaction boundary before every Pi endpoint launch; the complete schema and compatibility impact live in `docs/configuration.md`.
-The captain may override that file at session start or later; a per-task instruction such as "run this one on codex" overrides it for that dispatch only.
+The captain may override the dispatch file at session start or later; a per-task instruction such as "run this one on codex" overrides it for that dispatch only.
+When `config/pi-delegated-profile` exists, `fm-spawn.sh` validates its exact Pi model, medium effort, and 60 percent compaction boundary before every Pi endpoint launch; the complete schema, raw-launch refusal, and compatibility impact live in `docs/configuration.md`.
 `default` means mirror firstmate's own harness.
 
 Secondmates have their own harness knob, so a secondmate can run on a different adapter than crewmates.
@@ -34,7 +34,7 @@ The supervision knowledge lives here: busy signature, exit command, interrupt, d
 Never dispatch a crewmate or secondmate on an unverified adapter.
 If `config/crew-harness` or `config/secondmate-harness` names an unverified adapter, tell the captain under `AGENTS.md` section 9 that the requested worker runtime is not verified yet, use firstmate's own verified runtime for current work, and ask only whether to verify the requested runtime before future use.
 Do not pause current work for that future-verification choice, and never launch an unverified adapter.
-If the captain asks for a new harness, propose verifying it first: spawn a trivial supervised task using `fm-spawn`'s raw-launch-command escape hatch, confirm every fact empirically, then record the mechanics in `fm-spawn`, the busy signature in `fm-watch.sh` and `fm-tmux-lib.sh` defaults, any needed `FM_COMPOSER_IDLE_RE` empty-composer override plus any novel bare agent prompt glyph in `bin/fm-composer-lib.sh`'s shared composer classifier (the one fleet-wide owner of the empty/dead-shell/pending decision, so a new harness's own idle composer is not misread as a dead shell), the tmux agent-process liveness classification in `bin/backends/tmux.sh` when the harness can launch a secondmate, and the verified knowledge here.
+If the captain asks for a new harness, propose verifying it first: with `config/pi-delegated-profile` absent, spawn a trivial supervised task using `fm-spawn`'s raw-launch-command escape hatch, confirm every fact empirically, then record the mechanics in `fm-spawn`, the busy signature in `fm-watch.sh` and `fm-tmux-lib.sh` defaults, any needed `FM_COMPOSER_IDLE_RE` empty-composer override plus any novel bare agent prompt glyph in `bin/fm-composer-lib.sh`'s shared composer classifier (the one fleet-wide owner of the empty/dead-shell/pending decision, so a new harness's own idle composer is not misread as a dead shell), the tmux agent-process liveness classification in `bin/backends/tmux.sh` when the harness can launch a secondmate, and the verified knowledge here.
 
 ## Detection
 
@@ -106,6 +106,7 @@ Do not make the shell scripts parse or match natural-language dispatch rules.
 Effort precedence is an explicit per-task captain instruction first, then any applicable standing dispatch profile or secondmate pin, then the generic fallback below.
 Never replace an effort value supplied by either higher-precedence source.
 Use the fallback only when neither the captain nor applicable standing configuration specifies effort.
+An active delegated Pi profile is a fail-closed launch policy rather than a fallback and accepts only medium for Pi; see `docs/configuration.md` for its complete compatibility impact.
 Use `low` for well-understood work with an explicit bounded path and `xhigh` for ambiguous investigation or design.
 Choose intermediate levels proportionally as complexity, uncertainty, blast radius, or open-ended reasoning increases.
 When a verified adapter lacks `xhigh`, cap the choice at its highest supported non-`max` level rather than omitting the intended effort silently.

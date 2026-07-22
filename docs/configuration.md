@@ -187,10 +187,12 @@ A bare `<harness>` preserves the previous behavior: harness only, with no model 
 When the harness token is absent or `default`, secondmate launch falls back through `config/crew-harness` and then the primary's own harness, and no model or effort is read from that file.
 `fm-harness.sh secondmate-model` and `fm-harness.sh secondmate-effort` expose only the optional tokens from `config/secondmate-harness`; `config/crew-harness` remains a bare adapter-name file.
 An explicit harness argument to `fm-spawn.sh` still overrides either config file for that spawn only.
-An explicit `--model` or `--effort` overrides the matching token from `config/secondmate-harness`; an explicit harness or raw launch command starts with clean model and effort defaults unless those flags are also passed.
+An explicit `--model` or `--effort` overrides the matching token from `config/secondmate-harness`.
+An explicit harness starts with clean model and effort defaults unless those flags are also passed; a raw launch does the same only when no delegated Pi profile is active.
 When `config/crew-dispatch.json` exists, crewmate and scout spawns require an explicit resolved harness instead of automatically falling back to `config/crew-harness`.
 The inherited-local-material contract is owned by [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md); its harness-relevant consequence is that a secondmate's own crewmates use the primary's dispatch profiles and static harness value.
 Those inherited values are defaults and rules only; `fm-spawn` still permits a consciously chosen explicit runtime outside the config.
+An active delegated Pi profile is the exception: its fail-closed model, effort, and raw-launch constraints are described below.
 `config/secondmate-harness` is not inherited because secondmates do not launch secondmates.
 For grok, `fm-spawn.sh` installs one firstmate-owned global turn-end hook under `$GROK_HOME/hooks/`, or `~/.grok/hooks/` when `GROK_HOME` is unset, and drops a per-task `.fm-grok-turnend` pointer in the worktree, with teardown removing the task token and pointer.
 For Pi secondmate launches, `fm-spawn.sh` starts Pi with `-e` pointed at the secondmate home's own tracked `.pi/extensions/fm-primary-pi-watch.ts` and `.pi/extensions/fm-primary-turnend-guard.ts`, both already present from the secondmate home's git worktree.
@@ -205,6 +207,9 @@ When present, `bin/fm-pi-profile.sh` validates every field and Pi 0.81.1's effec
 The file uses one `key=value` per line and requires `pi_command`, `pi_version`, `agent_dir`, `model`, `context_window`, `effort`, `boundary_percent`, and `keep_recent_tokens` exactly as documented in that script's header.
 The configured `agent_dir` is operator-owned and may retain authentication, skills, prompts, and themes, but its `settings.json` must already contain enabled compaction with `reserveTokens = context_window - floor(0.60 * context_window)` and the configured keep-recent value.
 FirstMate validates that directory without editing it, clears `NODE_OPTIONS`, `NODE_PATH`, and `PI_PACKAGE_DIR` during validation and launch, and passes the absolute directory through the real `PI_CODING_AGENT_DIR` variable, so ambient Node preload/search injection, package metadata, `HOME`, `PI_CODING_AGENT_DIR`, and the ineffective `PI_CONFIG_DIR` cannot redirect the worker.
+The policy covers Pi ships, scouts, batches, and recovery launches on tmux, Herdr, Zellij, Orca, and cmux, plus secondmates on their supported routes; the existing Orca and cmux secondmate refusals remain unchanged.
+While the profile exists, every raw launch command is refused before endpoint creation because FirstMate cannot prove its runtime, even when the selected raw command is not Pi; a concrete verified non-Pi harness remains selectable.
+For a Pi launch, omitted model and effort axes resolve to the pinned values, matching explicit values are accepted, and conflicting explicit values are refused before endpoint creation.
 Delegated launches pass `--no-approve` and `--no-extensions`, which deliberately disables project-local Pi settings/resources and all discovered extensions so neither can alter compaction.
 FirstMate then explicitly loads its required task or secondmate hooks and the tracked profile guard, so turn-end supervision remains available while model cycling, model substitution, and thinking-level changes stop the delegated session.
 This compatibility choice means project-local Pi extensions, skills, prompts, themes, packages, and `.pi/settings.json` are ignored for delegated workers, so operators must not depend on those capabilities until they are deliberately reviewed and added to FirstMate's explicit launch surface.
@@ -213,7 +218,7 @@ This compatibility choice means project-local Pi extensions, skills, prompts, th
 
 `config/crew-dispatch.json` is an optional local, gitignored file containing natural-language rules that firstmate reads before dispatching a crewmate or scout.
 The shell scripts do not match those rules; firstmate chooses the best matching rule with judgment, resolves that rule directly or through a supported selector, and passes only concrete `--harness`, `--model`, and `--effort` flags to `fm-spawn.sh`.
-When the file exists, `fm-spawn.sh` enforces that contract by refusing crewmate and scout spawns that lack an explicit harness (`--harness`, a positional adapter, or a raw launch command).
+When the file exists, `fm-spawn.sh` enforces that contract by refusing crewmate and scout spawns that lack an explicit harness (`--harness`, a positional adapter, or, when no delegated Pi profile is active, a raw launch command).
 Batch spawns satisfy the same requirement with a shared `--harness`.
 Secondmate spawns are exempt and still resolve through `config/secondmate-harness` and its optional model and effort tokens.
 This section is the single owner of the canonical schema and its per-field semantics; `AGENTS.md` section 4 keeps only the dispatch procedure and points here.
