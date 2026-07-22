@@ -236,7 +236,7 @@ no_mistakes_status_is_absent() {
     'no runs yet. Push through the gate to start a pipeline:'|'No active run. Push through the gate to start a pipeline:') ;;
     *) return 1 ;;
   esac
-  [ -z "$rest" ] || [ "$rest" = "  git push no-mistakes $current_branch" ]
+  [ "$rest" = "  git push no-mistakes $current_branch" ]
 }
 
 no_mistakes_run_details() {
@@ -249,8 +249,8 @@ no_mistakes_run_details() {
   else
     status=$?
   fi
-  no_mistakes_status_is_absent "$output" "$current_branch" && return 2
   [ "$status" -eq 0 ] || return 1
+  no_mistakes_status_is_absent "$output" "$current_branch" && return 2
   NM_RUN_ID=$(printf '%s\n' "$output" | sed -n 's/^  id: //p' | head -1)
   NM_RUN_BRANCH=$(printf '%s\n' "$output" | sed -n 's/^  branch: //p' | head -1)
   NM_RUN_STATUS=$(printf '%s\n' "$output" | sed -n 's/^  status: //p' | head -1)

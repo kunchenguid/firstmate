@@ -158,7 +158,7 @@ case "${FM_TEST_GH_AXI_TYPED_API:-}" in
     gh api graphql -f owner=Owner-A -f name=repo-a \
       -f 'query=query($owner:String!,$name:String!){repository(owner:$owner,name:$name){issueTypes(first:25){nodes{id name}}}}'
     if [ "${2:-}" = create ]; then gh issue create --title typed; fi
-    gh issue view 17 --json number,title,state,url,id
+    gh issue view 17 --json number,title,state,labels,assignees,id
     gh api graphql -f id=ISSUE_node_17 -f typeId=TYPE_node_bug \
       -f 'query=mutation($id:ID!,$typeId:ID!){updateIssue(input:{id:$id,issueTypeId:$typeId}){issue{id}}}'
     exit
@@ -166,7 +166,7 @@ case "${FM_TEST_GH_AXI_TYPED_API:-}" in
   issue-type-fork)
     gh api graphql -f owner=account-a -f name=repo-a \
       -f 'query=query($owner:String!,$name:String!){repository(owner:$owner,name:$name){issueTypes(first:25){nodes{id name}}}}'
-    gh issue view 17 --json number,title,state,url,id --repo account-a/repo-a
+    gh issue view 17 --json number,title,state,labels,assignees,id --repo account-a/repo-a
     gh api graphql -f id=ISSUE_node_17 -f typeId=TYPE_node_bug \
       -f 'query=mutation($id:ID!,$typeId:ID!){updateIssue(input:{id:$id,issueTypeId:$typeId}){issue{id}}}'
     exit
@@ -174,7 +174,7 @@ case "${FM_TEST_GH_AXI_TYPED_API:-}" in
   wrong-issue-id)
     gh api graphql -f owner=Owner-A -f name=repo-a \
       -f 'query=query($owner:String!,$name:String!){repository(owner:$owner,name:$name){issueTypes(first:25){nodes{id name}}}}'
-    gh issue view 17 --json number,title,state,url,id
+    gh issue view 17 --json number,title,state,labels,assignees,id
     gh api graphql -f id=ISSUE_node_other -f typeId=TYPE_node_bug \
       -f 'query=mutation($id:ID!,$typeId:ID!){updateIssue(input:{id:$id,issueTypeId:$typeId}){issue{id}}}'
     exit
@@ -182,7 +182,7 @@ case "${FM_TEST_GH_AXI_TYPED_API:-}" in
   wrong-type-id)
     gh api graphql -f owner=Owner-A -f name=repo-a \
       -f 'query=query($owner:String!,$name:String!){repository(owner:$owner,name:$name){issueTypes(first:25){nodes{id name}}}}'
-    gh issue view 17 --json number,title,state,url,id
+    gh issue view 17 --json number,title,state,labels,assignees,id
     gh api graphql -f id=ISSUE_node_17 -f typeId=TYPE_node_other \
       -f 'query=mutation($id:ID!,$typeId:ID!){updateIssue(input:{id:$id,issueTypeId:$typeId}){issue{id}}}'
     exit
@@ -192,6 +192,8 @@ case "${FM_TEST_GH_AXI_TYPED_API:-}" in
   global) gh repo list; exit ;;
   cross-command) gh issue view 17 --json id --repo Other/repo-a; exit ;;
   unbound-create) gh issue create --title hijack; exit ;;
+  normalized-pr) gh pr view 17 --json number,title,state,url; exit ;;
+  conflicting-selectors) gh issue view https://github.com/Other/repo-a/issues/17 --json number,id --repo Owner-A/repo-a; exit ;;
   foreign) gh api repos/Other/repo-a; exit ;;
   forks) gh api repos/Owner-A/repo-a/forks; exit ;;
   mutation)
@@ -725,6 +727,9 @@ test_forbidden_commands_and_access_diagnostics() {
   FM_TEST_GH_AXI_TYPED_API=relationships run_exec "$d" exec --project repo-a --repository "$d/home/projects/repo-a" -- \
     gh-axi issue view 17 >/dev/null \
     || fail "verified gh-axi descendant could not read typed issue relationships"
+  FM_TEST_GH_AXI_TYPED_API=normalized-pr run_exec "$d" exec --project repo-a --repository "$d/home/projects/repo-a" -- \
+    gh-axi pr view 17 >/dev/null \
+    || fail "normalized gh-axi PR view descendant was rejected"
   FM_TEST_GH_AXI_TYPED_API=issue-type run_exec "$d" exec --project repo-a --repository "$d/home/projects/repo-a" -- \
     gh-axi issue create --title typed --type Bug >/dev/null \
     || fail "verified gh-axi descendant could not apply a scoped issue type"
@@ -740,6 +745,8 @@ test_forbidden_commands_and_access_diagnostics() {
   FM_TEST_GH_AXI_TYPED_API=issue-type run_exec "$d" exec --project repo-a --repository "$d/home/projects/repo-a" -- \
     gh-axi issue edit https://github.com/Owner-A/repo-a/issues/17 --type Bug >/dev/null \
     || fail "verified gh-axi descendant could not parse a canonical issue URL"
+  assert_grep $'gh-axi\tprofile-a\tissue edit 17 --type Bug --repo Owner-A/repo-a' "$d/routes.log" \
+    "canonical issue URL was not normalized before gh-axi execution"
   assert_grep $'gh\tprofile-a\tapi graphql --hostname github.com' "$d/routes.log" \
     "typed gh-axi internal API call did not retain the selected profile"
   for kind in foreign forks mutation traversal head-repository; do
@@ -772,6 +779,12 @@ test_forbidden_commands_and_access_diagnostics() {
     set -e
     expect_code 1 "$rc" "gh-axi non-API broker $kind command"
   done
+  set +e
+  FM_TEST_GH_AXI_TYPED_API=conflicting-selectors run_exec "$d" exec --project repo-a --repository "$d/home/projects/repo-a" -- \
+    gh-axi issue edit 17 --type Bug >/dev/null 2>&1
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "gh-axi conflicting repository selectors"
   (cd "$d/home/projects" && FM_TEST_FAKE_NETWORK=1 FM_TEST_CLONE_SOURCE="$d/home/projects/repo-a" \
     run_exec "$d" exec --project clone-project --repository github.com/Owner-A/clone-project -- \
       gh repo clone Owner-A/clone-project clone-project >/dev/null) \
@@ -1180,13 +1193,18 @@ if [ "${1:-}" = init ]; then
   done
   exit 0
 fi
-if [ "${1:-}" = axi ] && [ "${2:-}" = status ]; then
+  if [ "${1:-}" = axi ] && [ "${2:-}" = status ]; then
   [ -z "${FM_TEST_NM_STATUS_FAIL:-}" ] || exit 73
   branch=${FM_TEST_NM_BRANCH:-$(git symbolic-ref --quiet --short HEAD)}
+  if [ -n "${FM_TEST_NM_ABSENCE_MODE:-}" ]; then
+    printf '%s\n' 'no runs yet. Push through the gate to start a pipeline:'
+    [ "$FM_TEST_NM_ABSENCE_MODE" != complete ] || printf '  git push no-mistakes %s\n' "$branch"
+    exit "${FM_TEST_NM_NO_RUNS_STATUS:-0}"
+  fi
   if [ -n "${FM_TEST_NM_NO_RUNS_ONCE:-}" ] && [ ! -e "$FM_TEST_NM_CAPTURE.no-runs-probed" ]; then
     touch "$FM_TEST_NM_CAPTURE.no-runs-probed"
     printf 'no runs yet. Push through the gate to start a pipeline:\n  git push no-mistakes %s\n' "$branch"
-    exit "${FM_TEST_NM_NO_RUNS_STATUS:-1}"
+    exit "${FM_TEST_NM_NO_RUNS_STATUS:-0}"
   fi
   if [ -n "${FM_TEST_NM_MALFORMED_STATUS:-}" ]; then
     printf '%s\n' 'no runs yet but status is malformed'
@@ -1331,6 +1349,18 @@ SH
   set -e
   expect_code 1 "$rc" "malformed no-mistakes absence status"
   [ "$(cat "$marker")" = "$marker_before" ] || fail "malformed status changed the active no-mistakes binding marker"
+  set +e
+  FM_TEST_NM_ABSENCE_MODE=partial FM_TEST_NM_CAPTURE="$captured" FM_TEST_NM_LOG="$log" \
+    run_exec "$d" exec --project repo-a --repository "$d/home/projects/repo-a" -- no-mistakes axi respond accepted >/dev/null 2>&1
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "partial no-mistakes absence status"
+  set +e
+  FM_TEST_NM_ABSENCE_MODE=complete FM_TEST_NM_NO_RUNS_STATUS=73 FM_TEST_NM_CAPTURE="$captured" FM_TEST_NM_LOG="$log" \
+    run_exec "$d" exec --project repo-a --repository "$d/home/projects/repo-a" -- no-mistakes axi respond accepted >/dev/null 2>&1
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "nonzero no-mistakes absence status"
   FM_TEST_NM_CAPTURE="$captured" FM_TEST_NM_LOG="$log" \
     run_exec "$d" exec --project repo-a --repository "$d/home/projects/repo-a" -- no-mistakes axi respond accepted >/dev/null \
     || fail "matching no-mistakes continuation did not revalidate its typed context"
