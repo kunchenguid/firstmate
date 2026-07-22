@@ -72,7 +72,7 @@ The shared no-mistakes gate refusal used by `fm-spawn.sh`, `fm-send.sh`, and `fm
 | `fm-nm-park-wake.sh`     | Turn a no-mistakes park/unpark notification into one keyed firstmate status wake      |
 | `fm-pr-merge.sh`         | Record PR/MR metadata, then merge through the detected provider seam                 |
 | `fm-promote.sh`          | Promote a scout task in place to a protected ship task                               |
-| `fm-teardown.sh`         | Fail-closed teardown: return landed ship worktrees, require completed scout deliverables, retire secondmate homes, close the task's backlog row |
+| `fm-teardown.sh`         | Fail-closed teardown: return landed ship worktrees, require completed scout deliverables, refuse while the task's own no-mistakes run is alive, retire secondmate homes, close the task's backlog row |
 | `fm-harness.sh`          | Detect the running harness and resolve crew or secondmate harness, model, and effort |
 | `fm-lock.sh`             | Per-home firstmate session lock                                                      |
 | `fm-x-lib.sh`            | Shared X-mode config, relay, and reply-threading helpers                             |
