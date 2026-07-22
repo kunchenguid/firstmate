@@ -6,12 +6,12 @@
     "--fields": {"pr:list": "data", "issue:list": "data", "run:list": "data", "default": "unknown"},
     "--full": {"pr:view": "flag", "pr:diff": "flag", "issue:view": "flag", "release:view": "flag", "default": "unknown"},
     "--method": {"default": "data"},
-    "--no-type": {"default": "flag"},
-    "--remove-type": {"issue:edit": "flag", "default": "unknown"},
+    "--no-type": {"issue:edit": "flag", "default": "unknown"},
+    "--remove-type": {"issue:edit": "reject", "default": "unknown"},
     "--repo": {"default": "repo"},
     "--reviews": {"pr:view": "flag", "default": "unknown"},
     "--to-repo": {"issue:transfer": "destination_repo", "default": "unknown"},
-    "--type": {"default": "data"},
+    "--type": {"issue:create": "data", "issue:edit": "data", "default": "unknown"},
     "-F": {"default": "data"},
     "-R": {"default": "repo"},
     "-b": {"default": "data"},
@@ -82,7 +82,16 @@
   "flagTransforms": [
     {"command": "pr:merge", "outer": "--method", "values": {"merge": "--merge", "squash": "--squash", "rebase": "--rebase"}}
   ],
-  "ignoredOuterFlags": ["--comments", "--conclusion", "--fields", "--full", "--no-type", "--remove-type", "--reviews", "--type"],
+  "ignoredOuterFlags": {
+    "issue:list": ["--fields"],
+    "issue:view": ["--comments", "--full"],
+    "pr:diff": ["--full"],
+    "pr:list": ["--fields"],
+    "pr:view": ["--comments", "--full", "--reviews"],
+    "release:view": ["--full"],
+    "run:list": ["--fields"],
+    "run:view": ["--conclusion"]
+  },
   "childCommands": {
     "pr:checks": [{"repository": "source", "argv": ["pr", "view", "$target", "--json", "statusCheckRollup"]}],
     "pr:close": [{"repository": "source", "argv": ["pr", "view", "$target", "--json", "state"]}],

@@ -19,8 +19,9 @@ function classifyArgv(command, args) {
   const seen = new Set();
   for (const arg of args) {
     const option = arg.startsWith("--") && arg.includes("=") ? arg.slice(0, arg.indexOf("=")) : arg;
+    if (!Object.hasOwn(schema.publicOptions, option)) continue;
     const kind = optionKind(command, option);
-    if (kind === "unknown" || seen.has(option)) continue;
+    if (seen.has(option)) continue;
     seen.add(option);
     classifications.push(`${option}\t${kind}`);
   }
@@ -57,13 +58,38 @@ function clearTypeValid(args) {
 
 function validate() {
   if (schema.version !== 1 || !schema.publicOptions || !schema.aliases || !schema.generatedFlags
-    || !schema.childCommands || !schema.issueTypes || !Array.isArray(schema.stdinOperations)) return false;
+    || !schema.childCommands || !schema.issueTypes || !schema.ignoredOuterFlags
+    || Array.isArray(schema.ignoredOuterFlags) || !Array.isArray(schema.stdinOperations)) return false;
   const optionKinds = new Set(["data", "destination_repo", "flag", "head", "host", "issue", "owner", "reject", "repo", "unknown"]);
   for (const selections of Object.values(schema.publicOptions)) {
     if (!selections || typeof selections !== "object"
       || Object.values(selections).some((kind) => !optionKinds.has(kind))) return false;
   }
-  if (schema.ignoredOuterFlags.some((option) => !schema.publicOptions[option])) return false;
+  const issueTypeOptions = new Map();
+  const addIssueTypeOption = (option, command, kind) => {
+    if (!option) return;
+    const commands = issueTypeOptions.get(option) || new Map();
+    commands.set(command, kind);
+    issueTypeOptions.set(option, commands);
+  };
+  for (const [command, contract] of Object.entries(schema.issueTypes)) {
+    addIssueTypeOption(contract.set, command, "data");
+    addIssueTypeOption(contract.clear, command, "flag");
+    for (const option of contract.forbidden || []) addIssueTypeOption(option, command, "reject");
+  }
+  for (const [option, commands] of issueTypeOptions) {
+    const selections = schema.publicOptions[option];
+    if (!selections || selections.default !== "unknown") return false;
+    const scoped = Object.entries(selections).filter(([command]) => command !== "default");
+    if (scoped.length !== commands.size
+      || scoped.some(([command, kind]) => commands.get(command) !== kind)) return false;
+  }
+  for (const [command, options] of Object.entries(schema.ignoredOuterFlags)) {
+    if (!command.includes(":") || !Array.isArray(options) || new Set(options).size !== options.length
+      || options.some((option) => !schema.publicOptions[option]
+        || ["unknown", "reject"].includes(optionKind(command, option)))) return false;
+    if (options.some((option) => issueTypeOptions.has(option))) return false;
+  }
   for (const [alias, selections] of Object.entries(schema.aliases)) {
     if (!schema.publicOptions[alias]) return false;
     for (const [command, target] of Object.entries(selections)) {
@@ -80,7 +106,7 @@ function validate() {
   for (const [command, contract] of Object.entries(schema.issueTypes)) {
     if (!Array.isArray(contract.observe) || contract.observe.length === 0 || !command.includes(":")) return false;
     if (contract.set && optionKind(command, contract.set) !== "data") return false;
-    if ((contract.forbidden || []).some((option) => optionKind(command, option) !== "flag")) return false;
+    if ((contract.forbidden || []).some((option) => optionKind(command, option) !== "reject")) return false;
     if (contract.clear && (optionKind(command, contract.clear) !== "flag"
       || contract.clearOptions?.[contract.clear] !== "flag" || contract.clearPositionals !== 1
       || Object.values(contract.clearOptions).some((kind) => !["flag", "value"].includes(kind)))) return false;

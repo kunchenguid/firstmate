@@ -449,6 +449,12 @@ EOF
     pr view 17 --reviews --full --repo=Owner-A/repo-a)
   [ "$classifications" = $'--reviews\tflag\n--full\tflag\n--repo\trepo' ] \
     || fail "complete argv classification did not preserve operation-specific option kinds"
+  classifications=$(node "$ROOT/bin/fm-github-operation-schema.mjs" classify-argv release:delete \
+    release delete v1 --comments --no-type --remove-type --type Bug)
+  [ "$classifications" = $'--comments\tunknown\n--no-type\tunknown\n--remove-type\tunknown\n--type\tunknown' ] \
+    || fail "explicit operation-specific schema denials fell through to legacy option classification"
+  [ "$(node "$ROOT/bin/fm-github-operation-schema.mjs" option-kind issue:edit --remove-type)" = reject ] \
+    || fail "forbidden issue type alias was not rejected by its typed contract"
   node "$ROOT/bin/fm-github-operation-schema.mjs" validate-clear-type issue edit 17 --no-type --repo Owner-A/repo-a \
     || fail "clear-type variant was rejected by the typed operation schema"
   node "$ROOT/bin/fm-github-operation-schema.mjs" has-issue-type-variant issue edit 17 --no-type \
@@ -747,8 +753,8 @@ test_concurrent_profiles_and_exact_children() {
 }
 
 test_forbidden_commands_and_access_diagnostics() {
-  local d rc err kind expected command branch
-  local command_args=()
+  local d rc err kind expected command branch attack
+  local command_args=() attack_args=()
   d=$(make_fixture forbidden)
   set +e
   err=$(run_exec "$d" exec --project repo-a --repository "$d/home/projects/repo-a" -- gh auth token 2>&1); rc=$?
@@ -823,6 +829,19 @@ test_forbidden_commands_and_access_diagnostics() {
     rc=$?
     set -e
     expect_code 1 "$rc" "unknown gh mutator $command"
+  done
+
+  for attack in 'release delete v1 --comments' 'release delete v1 --no-type' \
+    'release delete v1 --remove-type' 'release delete v1 --type Bug' 'issue delete 17 --type Bug'; do
+    read -r -a attack_args <<< "$attack"
+    set +e
+    run_exec "$d" exec --project repo-a --repository "$d/home/projects/repo-a" -- \
+      gh-axi "${attack_args[@]}" >/dev/null 2>&1
+    rc=$?
+    set -e
+    expect_code 1 "$rc" "mis-scoped mutating option $attack"
+    assert_no_grep $'gh-axi\tprofile-a\t'"$attack" "$d/routes.log" \
+      "mis-scoped mutating option reached gh-axi: $attack"
   done
 
   set +e

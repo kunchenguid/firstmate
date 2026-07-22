@@ -651,7 +651,9 @@ const generatedFlagAllowed = (request, outer, name, values) => {
   }
   return false;
 };
-const ignoredOuterFlags = new Set(operationSchema.ignoredOuterFlags);
+const ignoredOuterFlags = new Set(schemaSelection(operationSchema.ignoredOuterFlags, operation) || []);
+if (setTypeOperation) ignoredOuterFlags.add(typeContract.set);
+if (clearTypeOperation) ignoredOuterFlags.add(typeContract.clear);
 const outerFlagConsumed = (request, name, values) => {
   if (operationSchema.payloadTransforms.some((transform) => transformApplies(transform, request.command)
     && transform.outer === name && request.flags.has(transform.child))) return true;
