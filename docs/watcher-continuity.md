@@ -18,6 +18,14 @@ When that retained arm later closes, its actual close is classified as a new sup
 After the configured retry bound is exhausted, it delivers the original wake with a typed continuity-restoration failure even if every successor arm hung without reporting readiness.
 This is deliberate Option B ordering: the fleet is protected before the model handles the wake whenever restoration succeeds, but the model is never left blind when it does not.
 
+Pi additionally captures a receipt for the matching durable queue rows and their current home-local sources before successor restoration.
+When Pi is already running a turn, the extension retains that receipt itself instead of entering Pi's irrevocable `followUp` queue.
+At the next idle boundary, `bin/fm-wake-actionable.sh` revalidates the unread queue row and its source immediately before the extension starts a new captain-visible turn.
+The helper takes a bounded queue lock, reads only the selected home's queue and source records, and never executes a task check.
+A reason becomes obsolete only when none of its bound rows retain a current source, so cleanup or drain never consumes another queue record or suppresses a still-current member of a coalesced signal.
+Distinct still-current reasons may share one immediate Pi message, while restoration and validation failures remain visible.
+OpenCode's prompt handoff is unchanged because it does not use Pi's busy-turn follow-up queue.
+
 Claude retains its native tracked background-task completion path.
 Its new PreToolUse continuity gate allows wake drain, arm recovery, and independently fail-closed teardown, but refuses other fleet commands while tasks are in flight and no identity-matched live watcher holds the home lock.
 Allowing an ordinary literal teardown prevents a terminal wake from creating a recovery circle: forced or dynamically constructed teardown remains blocked, ordinary teardown itself still refuses dirty, unlanded, incomplete-scout, and unresolved-decision cases, and the turn-end guard continues to require supervision for any tasks left in flight.
@@ -46,8 +54,21 @@ Only the watcher process touches `state/.last-watcher-beat`; no helper process c
 ## Regression coverage
 
 `tests/fm-pi-watch-extension.test.sh` simulates actionable and empty child closes against the actual Pi and OpenCode close handlers, blocks prompt delivery to prove the successor launches first, verifies single-flight behavior, changes the session lock before close to prove ownership is rechecked, and hangs each successor arm to prove bounded fallback delivery includes the typed restoration failure.
+It also removes task records during successor restoration, drains a captured event before delivery, checks stale-endpoint reuse, and proves current signal, stale, check, heartbeat, and X wakes each reach Pi exactly once without mutating the queue.
 `tests/fm-watcher-lock.test.sh` covers verified-successor attach, the typed self-eviction failure, bounded and successor-linked lifecycle rows, and a SIGSTOP counterfactual that distinguishes a live PID from a stale beacon before classifying termination.
 `tests/fm-continuity-pretool-check.test.sh` proves the Claude gate rejects only non-recovery fleet execution in the precise unhealthy state and preserves the existing Stop registration.
+
+## Delayed-delivery invalidation evidence, 2026-07-22
+
+Pi 0.80.10's complete `docs/extensions.md` contract and linked session, session-format, and compaction references were checked against the installed implementation and extension examples.
+During an active run, `sendUserMessage(..., { deliverAs: "followUp" })` queues plain user text without exposing a cancellation handle to the extension.
+At `agent_settled`, the extension context reports the idle boundary and an optionless `sendUserMessage(...)` starts the next turn immediately.
+The deterministic extension suite reproduced cleanup during successor restoration before the fix, then passed source removal, durable drain, endpoint reuse, repeated obsolete wake, current wake-kind, and queue-preservation regressions after the fix.
+Command: `tests/fm-pi-watch-extension.test.sh`.
+Observed result: all Pi and unchanged OpenCode watcher-extension cases passed.
+The isolated credentialed Pi regression also passed with the receipt helper present in its disposable clone.
+Command: `FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh`.
+Observed result: `ok - Pi 0.80.10 live E2E used shared Codex auth, auto-started one successor before turn end, and cleaned up`.
 
 ## Sanitized live evidence, 2026-07-17
 

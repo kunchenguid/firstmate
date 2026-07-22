@@ -108,6 +108,7 @@ git clone -q "$ROOT" "$PROJECT"
 cp "$ROOT/.pi/extensions/fm-primary-pi-watch.ts" "$PROJECT/.pi/extensions/fm-primary-pi-watch.ts"
 cp "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$PROJECT/.pi/extensions/fm-primary-turnend-guard.ts"
 cp "$ROOT/bin/fm-watch-arm.sh" "$PROJECT/bin/fm-watch-arm.sh"
+cp "$ROOT/bin/fm-wake-actionable.sh" "$PROJECT/bin/fm-wake-actionable.sh"
 cp "$ROOT/bin/fm-supervision-instructions.sh" "$PROJECT/bin/fm-supervision-instructions.sh"
 mkdir -p "$HOME_DIR/state" "$HOME_DIR/config"
 
@@ -122,7 +123,7 @@ while [ "$i" -lt 120 ]; do
 done
 [ -f "$HOME_DIR/state/.pi-turnend-extension-loaded" ] || fail "Pi turn-end extension did not load"
 [ -f "$HOME_DIR/state/.pi-watch-extension-loaded" ] || fail "Pi watcher extension did not load"
-wait_for_text "(openai-codex)" 120 || fail "Pi did not reach its ready composer"
+wait_for_text "gpt-5.6-sol" 120 || fail "Pi did not reach its ready composer"
 sleep 1
 
 : > "$HOME_DIR/state/pi-e2e.meta"

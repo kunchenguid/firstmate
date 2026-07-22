@@ -7,6 +7,7 @@ set -u
 
 TMP_ROOT=$(fm_test_tmproot fm-pi-watch-extension)
 EXT="$ROOT/.pi/extensions/fm-primary-pi-watch.ts"
+ACTIONABLE="$ROOT/bin/fm-wake-actionable.sh"
 # Node 24 warns when these test-only dynamic imports load tracked ESM plugins
 # from a clean checkout with no tracked .opencode/package.json. The warning is
 # unrelated to plugin output, which the assertions intentionally require empty.
@@ -14,8 +15,17 @@ export NODE_NO_WARNINGS=1
 
 install_pi_watch_extension_fixture() {
   local repo=$1
-  mkdir -p "$repo/.pi/extensions" "$repo/node_modules/typebox"
+  mkdir -p "$repo/.pi/extensions" "$repo/bin" "$repo/node_modules/typebox"
   cp "$EXT" "$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-wake-actionable.sh" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  capture) printf '1:1:1\n' ;;
+  validate) exit 0 ;;
+  *) exit 2 ;;
+esac
+SH
+  chmod +x "$repo/bin/fm-wake-actionable.sh"
   cat > "$repo/node_modules/typebox/package.json" <<'JSON'
 {"name":"typebox","type":"module","exports":"./index.js"}
 JSON
@@ -28,6 +38,12 @@ export const Type = {
 JS
 }
 
+install_pi_real_actionability_fixture() {
+  local repo=$1
+  cp "$ACTIONABLE" "$repo/bin/fm-wake-actionable.sh"
+  cp "$ROOT/bin/fm-wake-lib.sh" "$repo/bin/fm-wake-lib.sh"
+}
+
 test_tracked_extension_present_and_self_hashing() {
   local text expected_config_source
   expected_config_source="config_dir=\\\"\${FM_CONFIG_OVERRIDE:-\$FM_HOME/config}\\\""
@@ -37,7 +53,9 @@ test_tracked_extension_present_and_self_hashing() {
   assert_contains "$text" "fm-watch-arm-pi" "tracked extension missing command name"
   assert_contains "$text" "fm-watch-arm.sh" "tracked extension missing watcher arm"
   assert_contains "$text" "sendUserMessage" "tracked extension missing Pi wake API"
-  assert_contains "$text" "deliverAs: \"followUp\"" "tracked extension missing followUp delivery"
+  assert_not_contains "$text" "deliverAs: \"followUp\"" "tracked extension still queues an irrevocable Pi follow-up before final validation"
+  assert_contains "$text" 'pi.on?.("agent_settled"' "tracked extension does not defer busy-turn delivery to Pi's idle boundary"
+  assert_contains "$text" "fm-wake-actionable.sh" "tracked extension does not use the repository actionability owner"
   assert_contains "$text" ".pi-watch-extension-loaded" "tracked extension missing loaded marker"
   assert_contains "$text" 'createHash("sha256").update(readFileSync(extensionFile)).digest("hex")' "tracked extension does not self-hash its own content for extensionVersion"
   assert_contains "$text" 'fileURLToPath(import.meta.url)' "tracked extension does not self-locate via import.meta.url"
@@ -856,6 +874,307 @@ EOF
     fail "Pi arm child $pid survived process-exit cleanup"
   fi
   pass "Pi process-exit cleanup stops the attached arm child"
+}
+
+test_pi_cleanup_during_successor_restore_suppresses_stale_wakes() {
+  local repo home plugin log successor_ready release stop out status
+  repo="$TMP_ROOT/pi-cleanup-during-restore-root"
+  home="$TMP_ROOT/pi-cleanup-during-restore-home"
+  log="$TMP_ROOT/pi-cleanup-during-restore.log"
+  successor_ready="$TMP_ROOT/pi-cleanup-during-restore.ready"
+  release="$TMP_ROOT/pi-cleanup-during-restore.release"
+  stop="$TMP_ROOT/pi-cleanup-during-restore.stop"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  install_pi_real_actionability_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+count=$(wc -l < "$FM_ARM_LOG" | tr -d '[:space:]')
+if [ "$count" -eq 1 ]; then
+  printf '%s\t1\tstale\tdefault:w1:p1B\tstale: default:w1:p1B\n' "$(date +%s)" > "$FM_HOME/state/.wake-queue"
+  printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+  printf 'stale: default:w1:p1B\n'
+  exit 0
+fi
+if [ "$count" -eq 2 ]; then
+  : > "$FM_SUCCESSOR_READY_FILE"
+  while [ ! -e "$FM_RELEASE_FILE" ]; do sleep 0.02; done
+  printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+  printf '%s\t2\tstale\tdefault:w1:p1C\tstale: default:w1:p1C\n' "$(date +%s)" >> "$FM_HOME/state/.wake-queue"
+  printf 'stale: default:w1:p1C\n'
+  exit 0
+fi
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+trap 'exit 0' TERM INT
+while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  cat > "$home/state/task-cleaned.meta" <<'EOF'
+window=default:w1:p1B
+kind=ship
+EOF
+  printf 'done: handled and ready for cleanup\n' > "$home/state/task-cleaned.status"
+  cat > "$home/state/task-also-cleaned.meta" <<'EOF'
+window=default:w1:p1C
+kind=ship
+EOF
+  printf 'done: also handled and ready for cleanup\n' > "$home/state/task-also-cleaned.status"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_SUCCESSOR_READY_FILE="$successor_ready" FM_RELEASE_FILE="$release" FM_STOP_FILE="$stop" node --input-type=module 2>&1 <<'EOF'
+import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+let tool = null;
+const prompts = [];
+const handlers = new Map();
+let idle = false;
+const pi = {
+  on(event, handler) {
+    handlers.set(event, handler);
+  },
+  registerCommand() {},
+  registerTool(candidate) {
+    if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+  },
+  sendUserMessage(message) {
+    prompts.push(message);
+  },
+};
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+const context = { isIdle: () => idle };
+await handlers.get("session_start")?.({}, context);
+await tool.execute("tool-call-cleanup-race", {}, undefined, undefined, context);
+for (let i = 0; i < 250 && !existsSync(process.env.FM_SUCCESSOR_READY_FILE); i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+if (!existsSync(process.env.FM_SUCCESSOR_READY_FILE)) throw new Error("successor restoration did not enter the test seam");
+rmSync(`${process.env.FM_HOME}/state/task-cleaned.meta`);
+rmSync(`${process.env.FM_HOME}/state/task-cleaned.status`);
+writeFileSync(process.env.FM_RELEASE_FILE, "release\n");
+for (let i = 0; i < 250; i += 1) {
+  const rows = readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n");
+  if (rows.length >= 3) break;
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+rmSync(`${process.env.FM_HOME}/state/task-also-cleaned.meta`);
+rmSync(`${process.env.FM_HOME}/state/task-also-cleaned.status`);
+idle = true;
+await handlers.get("agent_settled")?.({}, context);
+await new Promise((resolve) => setTimeout(resolve, 150));
+if (prompts.length !== 0) throw new Error(`obsolete stale wakes were injected: ${prompts.join(" | ")}`);
+writeFileSync(process.env.FM_STOP_FILE, "stop\n");
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "Pi must suppress repeated stale wakes whose tasks are cleaned during successor restoration and before idle delivery"
+  [ -z "$out" ] || fail "Pi cleanup-during-restore test printed output: $out"
+  pass "Pi suppresses multiple stale wakes invalidated during successor restoration and before idle delivery"
+}
+
+test_wake_actionability_helper_source_and_queue_matrix() {
+  local home state reason receipt before after check xcheck
+  home="$TMP_ROOT/wake-actionability-home"
+  state="$home/state"
+  mkdir -p "$state"
+
+  printf 'window=default:w1:p-signal\n' > "$state/task-signal.meta"
+  printf 'done: signal remains current\n' > "$state/task-signal.status"
+  reason="signal: $state/task-signal.status"
+  printf '%s\t1\tsignal\ttask-signal.status\t%s\n' "$(date +%s)" "$reason" > "$state/.wake-queue"
+  before=$(cat "$state/.wake-queue")
+  receipt=$(FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$ACTIONABLE" capture "$reason") \
+    || fail "current signal did not produce an actionability receipt"
+  FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$ACTIONABLE" validate "$receipt" \
+    || fail "current signal receipt did not validate"
+  after=$(cat "$state/.wake-queue")
+  [ "$after" = "$before" ] || fail "actionability validation mutated the durable queue"
+  rm -f "$state/task-signal.status"
+  if FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$ACTIONABLE" validate "$receipt"; then
+    fail "signal receipt survived removal of its source record"
+  fi
+
+  printf 'window=default:w1:p-batch-a\n' > "$state/task-batch-a.meta"
+  printf 'done: first batched signal\n' > "$state/task-batch-a.status"
+  printf 'window=default:w1:p-batch-b\n' > "$state/task-batch-b.meta"
+  printf 'done: second batched signal\n' > "$state/task-batch-b.status"
+  reason="signal: $state/task-batch-a.status $state/task-batch-b.status"
+  {
+    printf '%s\t2\tsignal\ttask-batch-a.status\t%s\n' "$(date +%s)" "$reason"
+    printf '%s\t3\tsignal\ttask-batch-b.status\t%s\n' "$(date +%s)" "$reason"
+  } > "$state/.wake-queue"
+  receipt=$(FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$ACTIONABLE" capture "$reason") \
+    || fail "batched signal did not produce a composite actionability receipt"
+  rm -f "$state/task-batch-b.meta" "$state/task-batch-b.status"
+  FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$ACTIONABLE" validate "$receipt" \
+    || fail "batched signal lost a still-current task when one coalesced source was cleaned"
+  rm -f "$state/task-batch-a.meta" "$state/task-batch-a.status"
+  if FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$ACTIONABLE" validate "$receipt"; then
+    fail "batched signal receipt survived cleanup of every bound source"
+  fi
+
+  printf 'window=default:w1:p-stale\n' > "$state/task-stale.meta"
+  printf 'working: active stale counterexample\n' > "$state/task-stale.status"
+  reason='stale: default:w1:p-stale'
+  printf '%s\t2\tstale\tdefault:w1:p-stale\t%s\n' "$(date +%s)" "$reason" > "$state/.wake-queue"
+  receipt=$(FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$ACTIONABLE" capture "$reason") \
+    || fail "active stale worker did not produce an actionability receipt"
+  FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$ACTIONABLE" validate "$receipt" \
+    || fail "active stale worker receipt did not validate"
+  rm -f "$state/task-stale.meta"
+  printf 'window=default:w1:p-stale\n' > "$state/reused-endpoint.meta"
+  if FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$ACTIONABLE" validate "$receipt"; then
+    fail "stale receipt followed an endpoint reused by a different task"
+  fi
+
+  check="$state/task-check.check.sh"
+  printf '#!/usr/bin/env bash\nprintf current-check\\n\n' > "$check"
+  chmod 0700 "$check"
+  reason="check: $check: current-check"
+  printf '%s\t3\tcheck\t%s\t%s\n' "$(date +%s)" "$check" "$reason" > "$state/.wake-queue"
+  receipt=$(FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$ACTIONABLE" capture "$reason") \
+    || fail "current check did not produce an actionability receipt"
+  FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$ACTIONABLE" validate "$receipt" \
+    || fail "current check receipt did not validate"
+  rm -f "$check"
+  if FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$ACTIONABLE" validate "$receipt"; then
+    fail "check receipt survived removal of its source record"
+  fi
+
+  xcheck="$state/x-watch.check.sh"
+  printf '#!/usr/bin/env bash\nprintf x-event\\n\n' > "$xcheck"
+  chmod 0700 "$xcheck"
+  reason="check: $xcheck: x-event"
+  printf '%s\t4\tcheck\t%s\t%s\n' "$(date +%s)" "$xcheck" "$reason" > "$state/.wake-queue"
+  receipt=$(FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$ACTIONABLE" capture "$reason") \
+    || fail "current X check did not produce an actionability receipt"
+  FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$ACTIONABLE" validate "$receipt" \
+    || fail "current X check receipt did not validate"
+
+  printf 'window=default:w1:p-heartbeat\n' > "$state/task-heartbeat.meta"
+  reason=heartbeat
+  printf '%s\t5\theartbeat\theartbeat\theartbeat\n' "$(date +%s)" > "$state/.wake-queue"
+  receipt=$(FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$ACTIONABLE" capture "$reason") \
+    || fail "current heartbeat did not produce an actionability receipt"
+  FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$ACTIONABLE" validate "$receipt" \
+    || fail "current heartbeat receipt did not validate"
+  : > "$state/.wake-queue"
+  if FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$ACTIONABLE" validate "$receipt"; then
+    fail "heartbeat receipt survived durable queue drain"
+  fi
+  pass "wake actionability receipts bind queue rows and home-local signal, stale, check, X, and heartbeat sources"
+}
+
+test_pi_current_wake_kinds_deliver_once_at_idle() {
+  local kind repo home plugin log stop key reason queue_kind out status
+  for kind in stale signal check x heartbeat; do
+    repo="$TMP_ROOT/pi-current-$kind-root"
+    home="$TMP_ROOT/pi-current-$kind-home"
+    log="$TMP_ROOT/pi-current-$kind.log"
+    stop="$TMP_ROOT/pi-current-$kind.stop"
+    mkdir -p "$repo/bin" "$home/state" "$home/config"
+    install_pi_watch_extension_fixture "$repo"
+    install_pi_real_actionability_fixture "$repo"
+    plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+    case "$kind" in
+      stale)
+        key='default:w1:p15'
+        reason="stale: $key"
+        printf 'window=%s\n' "$key" > "$home/state/task-current.meta"
+        ;;
+      signal)
+        key='task-current.status'
+        reason="signal: $home/state/$key"
+        printf 'window=default:w1:p-signal\n' > "$home/state/task-current.meta"
+        printf 'done: current signal\n' > "$home/state/$key"
+        ;;
+      check)
+        key="$home/state/task-current.check.sh"
+        reason="check: $key: current check"
+        printf '#!/usr/bin/env bash\n' > "$key"
+        chmod 0700 "$key"
+        ;;
+      x)
+        key="$home/state/x-watch.check.sh"
+        reason="check: $key: x event"
+        printf '#!/usr/bin/env bash\n' > "$key"
+        chmod 0700 "$key"
+        ;;
+      heartbeat)
+        key=heartbeat
+        reason=heartbeat
+        printf 'window=default:w1:p-heartbeat\n' > "$home/state/task-current.meta"
+        ;;
+    esac
+    cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+count=$(wc -l < "$FM_ARM_LOG" | tr -d '[:space:]')
+if [ "$count" -eq 1 ]; then
+  printf '%s\t1\t%s\t%s\t%s\n' "$(date +%s)" "$FM_QUEUE_KIND" "$FM_QUEUE_KEY" "$FM_QUEUE_REASON" > "$FM_HOME/state/.wake-queue"
+  printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+  printf '%s\n' "$FM_QUEUE_REASON"
+  exit 0
+fi
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+trap 'exit 0' TERM INT
+while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+SH
+    chmod +x "$repo/bin/fm-watch-arm.sh"
+    queue_kind=$kind
+    [ "$queue_kind" = x ] && queue_kind=check
+    out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" FM_QUEUE_KIND="$queue_kind" FM_QUEUE_KEY="$key" FM_QUEUE_REASON="$reason" node --input-type=module 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+let tool = null;
+let idle = false;
+const prompts = [];
+const options = [];
+const handlers = new Map();
+const pi = {
+  on(event, handler) { handlers.set(event, handler); },
+  registerCommand() {},
+  registerTool(candidate) { if (candidate.name === "fm_watch_arm_pi") tool = candidate; },
+  sendUserMessage(message, deliveryOptions) {
+    prompts.push(message);
+    options.push(deliveryOptions);
+  },
+};
+const context = { isIdle: () => idle };
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+await handlers.get("session_start")?.({}, context);
+await tool.execute("tool-call-current-kind", {}, undefined, undefined, context);
+for (let i = 0; i < 250; i += 1) {
+  const rows = existsSync(process.env.FM_ARM_LOG) ? readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n") : [];
+  if (rows.length >= 2) break;
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+if (prompts.length !== 0) throw new Error(`busy Pi received a premature wake: ${prompts.join(" | ")}`);
+const queueBefore = readFileSync(`${process.env.FM_HOME}/state/.wake-queue`, "utf8");
+idle = true;
+await handlers.get("agent_settled")?.({}, context);
+for (let i = 0; i < 250 && prompts.length === 0; i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+await handlers.get("agent_settled")?.({}, context);
+if (prompts.length !== 1) throw new Error(`expected one idle-boundary wake, got ${prompts.length}: ${prompts.join(" | ")}`);
+if (!prompts[0].includes(process.env.FM_QUEUE_REASON)) throw new Error(`wake lost its current reason: ${prompts[0]}`);
+if (options[0] !== undefined) throw new Error(`wake used queued delivery instead of immediate idle delivery: ${JSON.stringify(options[0])}`);
+const queueAfter = readFileSync(`${process.env.FM_HOME}/state/.wake-queue`, "utf8");
+if (queueAfter !== queueBefore) throw new Error("Pi validation mutated the durable queue");
+writeFileSync(process.env.FM_STOP_FILE, "stop\n");
+EOF
+)
+    status=$?
+    expect_code 0 "$status" "Pi must deliver one still-current $kind wake at the idle boundary"
+    [ -z "$out" ] || fail "Pi current-$kind test printed output: $out"
+  done
+  pass "Pi delivers current stale, signal, check, heartbeat, and X wakes exactly once at the idle boundary"
 }
 
 test_opencode_primary_watch_plugin_static_wiring() {
@@ -1838,6 +2157,9 @@ test_pi_actionable_close_rechecks_session_lock
 test_pi_arm_distinguishes_session_lock_ownership
 test_pi_process_exit_cleanup_listener_lifecycle
 test_pi_process_exit_cleanup_stops_arm_child
+test_pi_cleanup_during_successor_restore_suppresses_stale_wakes
+test_wake_actionability_helper_source_and_queue_matrix
+test_pi_current_wake_kinds_deliver_once_at_idle
 test_opencode_primary_watch_plugin_static_wiring
 test_opencode_plugin_package_boundary_is_explicit_esm
 test_opencode_primary_watch_plugin_uses_effective_state_home

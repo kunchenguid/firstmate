@@ -1,10 +1,13 @@
 // Firstmate primary watcher bridge for Pi.
+// Actionable child output is receipt-bound to the home-local durable wake queue
+// before successor restoration, then revalidated by fm-wake-actionable.sh at the
+// last idle boundary before captain-visible delivery.
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
 type ArmResult = {
@@ -19,6 +22,17 @@ type CloseClassification = {
   message: string;
 };
 
+type PendingWake = {
+  message: string;
+  receipt?: string;
+};
+
+type ActionabilityResult = {
+  receipt?: string;
+  obsolete?: boolean;
+  failure?: string;
+};
+
 const extensionFile = fileURLToPath(import.meta.url);
 const extensionDir = dirname(extensionFile);
 const root = resolve(extensionDir, "../..");
@@ -27,6 +41,7 @@ const fmRoot = process.env.FM_ROOT_OVERRIDE || root;
 const state = process.env.FM_STATE_OVERRIDE || `${fmHome}/state`;
 const config = process.env.FM_CONFIG_OVERRIDE || `${fmHome}/config`;
 const armScript = `${fmRoot}/bin/fm-watch-arm.sh`;
+const actionableScript = `${fmRoot}/bin/fm-wake-actionable.sh`;
 const marker = `${state}/.pi-watch-extension-loaded`;
 const extensionVersion = `sha256:${createHash("sha256").update(readFileSync(extensionFile)).digest("hex")}`;
 const retryBaseMs = positiveInteger("FM_WATCH_REARM_RETRY_BASE_MS", 250);
@@ -34,6 +49,7 @@ const retryMaxMs = positiveInteger("FM_WATCH_REARM_RETRY_MAX_MS", 4000);
 const retryLimit = positiveInteger("FM_WATCH_REARM_RETRY_LIMIT", 5);
 const armReadyTimeoutMs = positiveInteger("FM_PI_ARM_READY_TIMEOUT_MS", 12000);
 const armRetireTimeoutMs = positiveInteger("FM_WATCH_ARM_RETIRE_TIMEOUT_MS", 1000);
+const actionableTimeoutMs = positiveInteger("FM_WAKE_ACTIONABLE_TIMEOUT_MS", 3000);
 
 let child: ChildProcess | null = null;
 let retryTimer: ReturnType<typeof setTimeout> | null = null;
@@ -41,6 +57,10 @@ let retryFailures = 0;
 let stopping = false;
 let seq = 0;
 let restoring = false;
+let activeContext: ExtensionContext | null = null;
+let deliveryStarting = false;
+let flushingWakes = false;
+const pendingWakes: PendingWake[] = [];
 const armReadiness = new WeakMap<ChildProcess, Promise<boolean>>();
 const armClose = new WeakMap<ChildProcess, Promise<void>>();
 
@@ -138,17 +158,68 @@ export default function (pi: ExtensionAPI) {
   };
   process.once("exit", cleanupOnProcessExit);
 
-  async function sendWake(message: string): Promise<void> {
-    await pi.sendUserMessage(
-      `FIRSTMATE WATCHER WAKE: ${message}\n\nRun bin/fm-wake-drain.sh first and handle the queued wake. Watcher continuity is extension-owned.`,
-      { deliverAs: "followUp" },
+  function actionability(action: "capture" | "validate", value: string): ActionabilityResult {
+    const result = spawnSync(actionableScript, [action, value], {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        FM_HOME: fmHome,
+        FM_ROOT_OVERRIDE: fmRoot,
+        FM_STATE_OVERRIDE: state,
+      },
+      timeout: actionableTimeoutMs,
+      maxBuffer: 64 * 1024,
+    });
+    if (result.status === 0) {
+      const receipt = result.stdout.trim();
+      if (action === "capture" && receipt) return { receipt };
+      if (action === "validate") return {};
+    }
+    if (result.status === 1) return { obsolete: true };
+    const detail = result.error?.message || result.stderr.trim() || `validator exited ${String(result.status)}`;
+    return {
+      failure: `watcher: FAILED - Pi extension could not ${action} wake actionability within ${actionableTimeoutMs}ms\n${detail}`,
+    };
+  }
+
+  function flushPendingWakes(): void {
+    if (stopping || flushingWakes || deliveryStarting || pendingWakes.length === 0) return;
+    if (activeContext && typeof activeContext.isIdle === "function" && !activeContext.isIdle()) return;
+    flushingWakes = true;
+    const batch = pendingWakes.splice(0);
+    const messages: string[] = [];
+    for (const pending of batch) {
+      if (pending.receipt) {
+        const current = actionability("validate", pending.receipt);
+        if (current.failure) messages.push(current.failure);
+        if (current.obsolete || current.failure) continue;
+      }
+      if (!messages.includes(pending.message)) messages.push(pending.message);
+    }
+    flushingWakes = false;
+    if (messages.length === 0) {
+      if (pendingWakes.length > 0) flushPendingWakes();
+      return;
+    }
+    deliveryStarting = true;
+    pi.sendUserMessage(
+      `FIRSTMATE WATCHER WAKE: ${messages.join("\n\n---\n\n")}\n\nRun bin/fm-wake-drain.sh first and handle the queued wake. Watcher continuity is extension-owned.`,
     );
+    if (!activeContext || typeof activeContext.isIdle !== "function") deliveryStarting = false;
+  }
+
+  function enqueueWake(message: string, receipt?: string): void {
+    if (pendingWakes.some((pending) => pending.message === message && pending.receipt === receipt)) return;
+    pendingWakes.push({ message, receipt });
+  }
+
+  function queueWake(message: string, receipt?: string): void {
+    enqueueWake(message, receipt);
+    flushPendingWakes();
   }
 
   function surfaceFailure(message: string): void {
-    void sendWake(message).catch(() => {
-      // Pi owns delivery errors; continuity restoration never waits on prompting.
-    });
+    queueWake(message);
   }
 
   function retryDelay(attempt: number): number {
@@ -312,12 +383,15 @@ export default function (pi: ExtensionAPI) {
       if (classification.kind === "actionable") {
         retryFailures = 0;
         restoring = true;
+        const captured = actionability("capture", classification.message);
         void (async () => {
           const failure = await restoreAfterActionableClose(predecessor);
           restoring = false;
           if (stopping) return;
-          const message = failure ? `${classification.message}\n\n${failure}` : classification.message;
-          await sendWake(message);
+          if (captured.failure) enqueueWake(captured.failure);
+          if (failure) enqueueWake(failure);
+          if (captured.receipt) enqueueWake(classification.message, captured.receipt);
+          flushPendingWakes();
         })().catch(() => {
         });
         return;
@@ -338,17 +412,30 @@ export default function (pi: ExtensionAPI) {
     return { ok: true, message: `watcher: started Pi extension arm child ${id}` };
   }
 
-  pi.on?.("session_start", () => {
+  pi.on?.("session_start", (_event, ctx) => {
+    activeContext = ctx;
     markLoaded();
+  });
+  pi.on?.("agent_start", (_event, ctx) => {
+    activeContext = ctx;
+    deliveryStarting = false;
+  });
+  pi.on?.("agent_settled", (_event, ctx) => {
+    activeContext = ctx;
+    deliveryStarting = false;
+    flushPendingWakes();
   });
   pi.on?.("session_shutdown", () => {
     stopArm();
+    activeContext = null;
+    pendingWakes.length = 0;
     process.off("exit", cleanupOnProcessExit);
   });
 
   pi.registerCommand?.("fm-watch-arm-pi", {
     description: "Arm firstmate watcher supervision through the Pi extension instead of foreground bash.",
     handler: async (_args, ctx) => {
+      activeContext = ctx;
       const result = startArm();
       ctx.ui.notify(result.message, result.ok ? "info" : "warning");
     },
@@ -363,7 +450,8 @@ export default function (pi: ExtensionAPI) {
       "For Pi watcher supervision, call fm_watch_arm_pi instead of running bin/fm-watch-arm.sh through bash.",
     ],
     parameters: Type.Object({}),
-    execute: async () => {
+    execute: async (_toolCallId, _params, _signal, _onUpdate, ctx) => {
+      activeContext = ctx;
       const result = startArm();
       return {
         content: [{ type: "text", text: result.message }],
