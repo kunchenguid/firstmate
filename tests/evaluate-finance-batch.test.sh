@@ -123,7 +123,7 @@ test_resolved_path_contract() {
 }
 
 test_revision_and_side_effect_contract() {
-  local dir project expected
+  local abbreviated dir malformed project expected
   dir=$(make_case tracked)
   project="$dir/project"
   printf 'changed\n' >> "$project/README.md"
@@ -136,6 +136,18 @@ test_revision_and_side_effect_contract() {
   git -C "$project" -c user.name=fixture -c user.email=fixture@example.invalid commit --allow-empty -qm workload
   cp "$project/inputs/artifact.json" "$project/out/result.json"
   expect_rejected "changed HEAD" evaluate_case "$dir" "$expected"
+
+  dir=$(make_case revision-format)
+  project="$dir/project"
+  expected=$(git -C "$project" rev-parse HEAD)
+  abbreviated=${expected:0:12}
+  malformed=${expected:0:39}
+  cp "$project/inputs/artifact.json" "$project/out/result.json"
+  expect_rejected "symbolic revision" evaluate_case "$dir" HEAD
+  expect_rejected "abbreviated revision" evaluate_case "$dir" "$abbreviated"
+  expect_rejected "malformed revision length" evaluate_case "$dir" "$malformed"
+  evaluate_case "$dir" "$expected" | grep -Fqx 'verdict=success' \
+    || fail "full commit OID did not pass"
 
   dir=$(make_case untracked)
   project="$dir/project"
