@@ -412,7 +412,7 @@ write_pi_delegated_profile() {
 }
 
 test_pi_delegated_profile_pins_command_model_effort_and_resources() {
-  local rec id out status launch pi_real
+  local rec id out status launch pi_real preload preload_marker
   id=profile-pi-delegated-z81
   rec=$(make_spawn_case profile-pi-delegated pi "$id")
   read_case_record "$rec"
@@ -420,14 +420,21 @@ test_pi_delegated_profile_pins_command_model_effort_and_resources() {
     echo "skip: Pi coding-agent command not found for delegated profile dispatch checks"
     return
   fi
+  preload="$CASE_DIR/hostile-preload.cjs"
+  preload_marker="$CASE_DIR/hostile-preload-ran"
+  printf '%s\n' 'require("node:fs").writeFileSync(process.env.FM_HOSTILE_PRELOAD_MARKER, "ran\n");' > "$preload"
 
-  out=$(PI_PACKAGE_DIR="$CASE_DIR/hostile-package" PI_CODING_AGENT_DIR="$CASE_DIR/hostile-agent" HOME="$CASE_DIR/hostile-home" \
+  out=$(NODE_OPTIONS="--require=$preload" NODE_PATH="$CASE_DIR/hostile-node-path" \
+    FM_HOSTILE_PRELOAD_MARKER="$preload_marker" \
+    PI_PACKAGE_DIR="$CASE_DIR/hostile-package" PI_CODING_AGENT_DIR="$CASE_DIR/hostile-agent" HOME="$CASE_DIR/hostile-home" \
     run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
   status=$?
   expect_code 0 "$status" "configured delegated Pi spawn should succeed"
   assert_meta_profile "$HOME_DIR/state/$id.meta" pi openai-codex/gpt-5.6-sol medium
   launch=$(cat "$LAUNCH_LOG")
   pi_real=$(node -e 'process.stdout.write(require("node:fs").realpathSync(process.argv[1]))' "$PI_TEST_COMMAND")
+  assert_absent "$preload_marker" "hostile Node preload executed during delegated Pi validation"
+  assert_contains "$launch" "NODE_OPTIONS= NODE_PATH=" "Pi launch did not clear hostile Node runtime injection"
   assert_contains "$launch" "PI_PACKAGE_DIR=" "Pi launch did not clear hostile package resolution"
   assert_contains "$launch" "PI_CODING_AGENT_DIR='$HOME_DIR/pi-agent'" "Pi launch did not override hostile ambient agent-dir resolution"
   assert_contains "$launch" "'$pi_real' --model 'openai-codex/gpt-5.6-sol' --thinking 'medium'" "Pi launch did not pin the exact model and explicit medium thinking"
