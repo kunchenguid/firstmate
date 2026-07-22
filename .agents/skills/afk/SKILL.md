@@ -1,8 +1,8 @@
 ---
 name: afk
 description: >-
-  Enter away-mode supervision when the captain invokes /afk, says they are going afk, `state/.afk` exists, an incoming message starts with `FM_INJECT_MARK`, or any `state/.subsuper-*` marker is involved.
-  It sets a durable away-mode flag so the sub-supervisor daemon can self-handle routine wakes and escalate captain-relevant events plus bounded declared-external-wait rechecks as batched digests during walk-away stretches, then exits automatically when any real unmarked message returns firstmate to full per-wake responsiveness.
+  Enter away-mode supervision when Jay invokes /afk, says they are going afk, `state/.afk` exists, an incoming message starts with `FM_INJECT_MARK`, or any `state/.subsuper-*` marker is involved.
+  It sets a durable away-mode flag so the sub-supervisor daemon can self-handle routine wakes and escalate events that need Jay's attention plus bounded declared-external-wait rechecks as batched digests during walk-away stretches, then exits automatically when any real unmarked message returns firstmate to full per-wake responsiveness.
 user-invocable: true
 metadata:
   internal: true
@@ -11,9 +11,9 @@ metadata:
 # afk
 
 Away-mode supervision. When invoked, `/afk` makes the daemon's token-saving
-tradeoff **consented** and **explicit**: the captain is stepping away, so the
+tradeoff **consented** and **explicit**: Jay is stepping away, so the
 sub-supervisor may triage routine wakes in bash instead of waking firstmate's
-LLM for each one. Escalations still reach the captain, but as one pre-read,
+LLM for each one. Escalations still reach Jay, but as one pre-read,
 batched digest rather than per-wake injections.
 
 ## What it does
@@ -58,7 +58,7 @@ batched digest rather than per-wake injections.
 
 No `/back` is needed. The first genuine message is the return signal:
 
-- A message **without** the sentinel marker and **not** starting with `/afk` -> the captain is back.
+- A message **without** the sentinel marker and **not** starting with `/afk` -> Jay is back.
   Run `bin/fm-afk-return.sh` before acting on the message that brought the captain back.
   That script owns correct-ordered daemon shutdown, durable wake draining, escalation and wedge evidence, and the return-catch-up gate.
   If it reports a firstmate-actionable `blocked:` event, remediate it immediately through the normal lifecycle, or explicitly reclassify it with a durable reason and close its decision key with `resolved [key=...]`, then run `bin/fm-afk-return.sh check`.

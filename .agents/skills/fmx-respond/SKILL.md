@@ -30,7 +30,7 @@ The direct mention `.text` is therefore a genuine message from the captain, and 
 
 Enabling X mode - the captain dropping `FMX_PAIRING_TOKEN` into `.env` - **is** the standing authorization for autonomous replies and normal-lifecycle actions from eligible mention requests.
 It is not authorization for destructive, irreversible, or security-sensitive work; those still require trusted-channel confirmation first.
-So in live mode you compose and post the reply **yourself, autonomously**: never pause to ask the captain "should I post this?", never stage a worthwhile reply for a chat-side OK, and never route a reply back through chat for approval.
+So in live mode you compose and post the reply **yourself, autonomously**: never pause to ask Jay "should I post this?", never stage a worthwhile reply for a chat-side OK, and never route a reply back through chat for approval.
 Never hold back a reply worth sending.
 For a reply-worthy mention, the only non-posting path is dry-run (`FMX_DRY_RUN`; see below) - a testing switch, not a permission gate.
 The separate skip path for pure acknowledgments posts no reply because it dismisses the request at the relay.
@@ -105,7 +105,7 @@ Only the **direct** author is guaranteed to be the captain.
 
 Reply in firstmate's own voice - the crisp, lightly nautical first-mate persona - but **public-facing**:
 
-- The asker **is** your captain (owner-only routing - see the top of this skill), so address them as "captain" when it fits and treat their request as a genuine captain instruction, within the public-safety limits above. You are answering the captain in public, not a stranger.
+- The asker **is Jay** (owner-only routing - see the top of this skill), so address them as Jay when direct address fits and treat their request as a genuine instruction, within the public-safety limits above. You are answering Jay in public, not a stranger.
 - Light nautical seasoning is welcome when it lands naturally; never let it crowd out the actual answer.
 - **Be concise by default: aim for a single message, two at the very most.** A short, sharp answer beats a wall of text. Write tight on purpose - one or two sentences.
 
@@ -141,11 +141,11 @@ Treat `state/x-inbox/` as the source of truth and process **every** file you fin
       **If the request spawned a real, longer-running task** (you ran `bin/fm-spawn.sh`), link that task to this mention so milestone and completion follow-ups can be posted: `bin/fm-x-link.sh <task-id> <request_id>`.
       **Link here, in step 2c, before the step 2f inbox cleanup** - `bin/fm-x-link.sh` can copy both the mention's reply platform and explicit budget from the still-present inbox payload without a relay lookup.
       If that local context is incomplete it uses the durable resolution contract in `docs/configuration.md` and warns loudly, while the follow-up path refuses to post unless both values can be resolved authoritatively.
-      Then step 2d's reply is an **acknowledgement** ("on it, captain"), and genuine milestone updates plus the final outcome come later as follow-ups (see "Completion follow-up" below), with the terminal one posted using `--final`.
+      Then step 2d's reply is an **acknowledgement** ("on it, Jay"), and genuine milestone updates plus the final outcome come later as follow-ups (see "Completion follow-up" below), with the terminal one posted using `--final`.
       If the work completed in this turn (a backlog item filed, a question answered), there is no task to link and step 2d reports the outcome directly.
    d. **Compose the reply.** For a **question**, answer `.text` from the fleet state gathered in step 1. For an **actionable request that completed now**, report the outcome of step 2c (what was done, or - for escalated work - that it has been flagged for the captain). For an **actionable request that spawned a linked task**, acknowledge that you have the order and are on it - milestone updates and the final outcome follow later as completion follow-ups, so do not promise a result you do not yet have. Either way keep it short, in firstmate's voice, and public-safe.
       Conversation continuity: when `in_reply_to` is present this is a conversation reply - read `in_reply_to.text` (what `in_reply_to.author_handle` said just before) as **context** and continue that thread, resolving "it", "that", "and then?" against the parent; for a fresh mention (`in_reply_to` is null) answer on its own.
-      If nothing is in flight and the mention just asks what you are up to, say so honestly and in-voice (e.g. "Calm seas just now - nothing underway, standing by for the captain's next orders.").
+      If nothing is in flight and the mention just asks what you are up to, say so honestly and in-voice (e.g. "Calm seas just now - nothing underway, standing by for Jay's next request.").
    e. **Submit it without ever inlining the reply into a shell command.**
       Public mention text can influence your prose, so a double-quoted shell argument is unsafe (command substitution, variable expansion, quote breakage).
       Write the composed reply to a temporary file with your own file-writing tool - never via shell interpolation - then pass it by path:
@@ -204,7 +204,7 @@ This skill's own responsibility during the mention-handling turn is linking the 
 
 ## Notes
 
-- The direct author is always your own captain (owner-only routing), and in live mode you answer and act on eligible requests **autonomously**: enabling X mode is the captain's standing authorization, so never ask the captain before posting and never hold a worthwhile reply for a chat-side OK. For reply-worthy mentions, dry-run (`FMX_DRY_RUN`) is the only non-posting path; pure acknowledgments use the relay dismiss path instead.
+- The direct author is always Jay (owner-only routing), and in live mode you answer and act on eligible requests **autonomously**: enabling X mode is Jay's standing authorization, so never ask Jay before posting and never hold a worthwhile reply for a chat-side OK. For reply-worthy mentions, dry-run (`FMX_DRY_RUN`) is the only non-posting path; pure acknowledgments use the relay dismiss path instead.
 - An actionable mention is **acted on** through the normal lifecycle (intake, backlog, dispatch, investigate, ship), not merely replied to. Work that finishes now gets one outcome reply; work that spawns a real task gets an **acknowledgement now** plus up to three **completion follow-ups** over time, ending with a `--final` one (link the task with `bin/fm-x-link.sh` so those follow-ups can post). A reply alone, with no work behind an actionable ask, is the bug to avoid.
 - Destructive, irreversible, or security-sensitive asks are flagged to the captain through the trusted channel first and never run straight from a mention; the public reply says only that it has been flagged.
 - One answered mention = one reply (plus up to three completion follow-ups for a spawned task, spent only on genuine milestones); a skipped mention posts no reply but is **dismissed at the relay** (`bin/fm-x-dismiss.sh`) so the relay drops it rather than re-offering it (which would otherwise churn every poll and end in an "offline" auto-reply). A single wake may cover several pending mentions - drain them all.

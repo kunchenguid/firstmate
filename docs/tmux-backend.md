@@ -52,7 +52,7 @@ tmux select-window -t <session-name>:fm-<id> # jump to one, or use ctrl-b <n>
 ```
 
 Use the current tmux session name when firstmate was launched inside tmux; use `firstmate` only for the detached outside-tmux path.
-Typing directly into an attached window is authoritative direct intervention - the first mate treats it the same as any other captain instruction and reconciles at the next heartbeat.
+Typing directly into an attached window is authoritative direct intervention - Navi treats it the same as any other instruction from Jay and reconciles at the next heartbeat.
 You do not need to attach at all for routine supervision: from an active firstmate session, the first mate reads crew windows itself with `bin/fm-peek.sh fm-<id>` (a bounded, read-only capture) and steers a crew with `FM_HOME=<this-firstmate-home> bin/fm-send.sh fm-<id> "<text>"` unless `FM_HOME` is already set to the active firstmate home.
 
 ## Verifying it works
@@ -81,7 +81,7 @@ During away-mode escalation delivery, `fm_tmux_composer_state` sends a bare shel
 
 The shared `fm_tmux_submit_enter_core` (`bin/fm-tmux-lib.sh`) types the message once, then retries Enter (Enter only, never a retype) until the composer clears.
 The submit is reported `empty` iff the composer cleared, which is the same corrected, border-aware detector the composer guard uses, so a bordered-but-empty composer is correctly seen as the positive acknowledgement of a delivered submit.
-A genuine swallowed Enter leaves the typed text in the composer and the function reports `pending`; `fm-send` fails on `pending` so the captain learns the steer did not land instead of leaving it unsubmitted.
+A genuine swallowed Enter leaves the typed text in the composer and the function reports `pending`; `fm-send` fails on `pending` so Jay learns the steer did not land instead of leaving it unsubmitted.
 
 **Exception (opencode 1.18.4, on the tmux backend):** while the agent is mid-turn, opencode accepts Enter as a "send when the turn ends" keystroke but does not clear the composer until then, so the typed text stays visible the whole time.
 After the Enter-retry budget is spent and the composer still reads `pending`, the submit core falls back to `fm_pane_is_busy`:
