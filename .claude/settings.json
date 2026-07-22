@@ -28,6 +28,15 @@
             "command": "\"$CLAUDE_PROJECT_DIR\"/bin/fm-continuity-pretool-check.sh"
           }
         ]
+      },
+      {
+        "matcher": ".*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/bin/fm-subagent-pretool-check.sh --claude"
+          }
+        ]
       }
     ],
     "Stop": [
