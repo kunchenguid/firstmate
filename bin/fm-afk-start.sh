@@ -89,7 +89,7 @@ daemon_pid_matches() {
     [ "$current" = "$identity" ]
     return
   fi
-  command=$(ps -p "$pid" -o command= 2>/dev/null || true)
+  command=$(ps -ww -p "$pid" -o command= 2>/dev/null || true)
   case "$command" in
     *"$FM_AFK_DAEMON"*|*"fm-supervise-daemon.sh"*) return 0 ;;
   esac
