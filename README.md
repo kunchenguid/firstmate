@@ -103,6 +103,7 @@ pi
 
 For Grok, `--trust` is needed once per clone so project hooks and the turn-end guard load; `/hooks-trust` inside Grok works too.
 For Pi, approve the project trust prompt once per clone on first launch so both tracked `.pi/extensions/*.ts` files auto-load.
+For Claude Code, launching through `bin/fm-main.sh` (or an alias to it) instead of bare `claude` also names the session `FM Main` so remote-control apps can tell it apart; that script's header owns the mechanics.
 
 ### Talk to it
 
