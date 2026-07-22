@@ -637,7 +637,7 @@ strip_send_preflight() {  # <log>
 }
 
 test_send_conformance_old_vs_new() {
-  local old_bin fb log_old log_new home rc_old rc_new filtered_old filtered_new
+  local old_bin fb log_old log_new home rc_new filtered_old filtered_new
   old_bin=$(build_old_bin send-old)
   fb=$(make_send_fakebin "$TMP_ROOT/send-fake")
   home="$TMP_ROOT/send-home"; mkdir -p "$home/state"
@@ -645,11 +645,14 @@ test_send_conformance_old_vs_new() {
   filtered_old="$TMP_ROOT/send-old.filtered.log"; filtered_new="$TMP_ROOT/send-new.filtered.log"
 
   # Case 1: --key path.
+  # The extracted script deliberately runs against current shared helpers, so
+  # only its tmux command log is a stable historical parity oracle. Assert the
+  # current script's exit status independently instead of coupling it to the
+  # synthetic old-script/current-helper process status.
   run_send_case "$old_bin" "$fb" "$log_old" "$home" -- "sess:win" --key Escape
-  rc_old=$?
   run_send_case "$ROOT" "$fb" "$log_new" "$home" -- "sess:win" --key Escape
   rc_new=$?
-  expect_code "$rc_old" "$rc_new" "fm-send --key: old vs new exit code"
+  expect_code 0 "$rc_new" "fm-send --key: current exit code"
   assert_contains "$(cat "$log_new")" $'\x1f''display-message'$'\x1f''-p'$'\x1f''-t'$'\x1f''sess:win'$'\x1f''#{pane_id}' \
     "fm-send --key did not verify the explicit tmux target before sending"
   strip_send_preflight "$log_old" > "$filtered_old"
@@ -660,10 +663,9 @@ test_send_conformance_old_vs_new() {
 
   # Case 2: plain text (0.3s settle, no popup).
   run_send_case "$old_bin" "$fb" "$log_old" "$home" -- "sess:win" hello captain
-  rc_old=$?
   run_send_case "$ROOT" "$fb" "$log_new" "$home" -- "sess:win" hello captain
   rc_new=$?
-  expect_code "$rc_old" "$rc_new" "fm-send plain text: old vs new exit code"
+  expect_code 0 "$rc_new" "fm-send plain text: current exit code"
   strip_send_preflight "$log_old" > "$filtered_old"
   strip_send_preflight "$log_new" > "$filtered_new"
   diff -u "$filtered_old" "$filtered_new" > "$TMP_ROOT/send-diff-plain.txt" 2>&1 \
@@ -676,10 +678,9 @@ test_send_conformance_old_vs_new() {
   # elsewhere in tests/fm-send-popup-settle.test.sh) and still ends in the
   # same tmux command shape: send-keys -l, then a retried Enter.
   run_send_case "$old_bin" "$fb" "$log_old" "$home" -- "sess:win" /some-skill
-  rc_old=$?
   run_send_case "$ROOT" "$fb" "$log_new" "$home" -- "sess:win" /some-skill
   rc_new=$?
-  expect_code "$rc_old" "$rc_new" "fm-send /skill: old vs new exit code"
+  expect_code 0 "$rc_new" "fm-send /skill: current exit code"
   strip_send_preflight "$log_old" > "$filtered_old"
   strip_send_preflight "$log_new" > "$filtered_new"
   diff -u "$filtered_old" "$filtered_new" > "$TMP_ROOT/send-diff-slash.txt" 2>&1 \
