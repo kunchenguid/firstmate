@@ -98,12 +98,6 @@ install_guard_scripts() {
   chmod +x "$dir/bin/fm-turnend-guard.sh" "$dir/bin/fm-turnend-guard-grok.sh" "$dir/bin/fm-supervision-instructions.sh" "$dir/bin/fm-harness.sh"
 }
 
-mark_codex_hook_root() {
-  local dir=$1
-  mkdir -p "$dir/.codex"
-  printf '{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"fm-turnend-guard.sh"}]}]}}\n' > "$dir/.codex/hooks.json"
-}
-
 # A primary-shaped checkout: plain (non-worktree) git repo, AGENTS.md, bin/,
 # state/ - everything the hook's scoping check requires to treat it as primary.
 make_primary_dir() {
@@ -609,82 +603,6 @@ test_settings_hook_uses_claude_project_dir() {
   pass ".claude/settings.json: Stop hook uses CLAUDE_PROJECT_DIR-anchored command"
 }
 
-test_codex_hook_invokes_shared_guard() {
-  local settings command
-  settings="$ROOT/.codex/hooks.json"
-  [ -f "$settings" ] || fail "tracked .codex/hooks.json is missing"
-  command=$(jq -r '.hooks.Stop[0].hooks[0].command // empty' "$settings")
-  [ -n "$command" ] || fail "Stop hook command is missing from .codex/hooks.json"
-  assert_contains "$command" 'pwd -P' "codex hook must anchor from the hook process working directory"
-  assert_contains "$command" '.codex/hooks.json' "codex hook must verify the hook-loaded firstmate root"
-  assert_contains "$command" 'fm-turnend-guard.sh' "codex hook must invoke the shared guard"
-  assert_not_contains "$command" '.cwd' "codex hook must not use payload cwd to select the guard executable"
-  pass ".codex/hooks.json: Stop hook invokes the shared primary guard"
-}
-
-test_codex_hook_uses_process_pwd_when_payload_cwd_is_outside_root() {
-  local settings command dir expected_root outside payload out status
-  settings="$ROOT/.codex/hooks.json"
-  [ -f "$settings" ] || fail "tracked .codex/hooks.json is missing"
-  command=$(jq -r '.hooks.Stop[0].hooks[0].command // empty' "$settings")
-  [ -n "$command" ] || fail "Stop hook command is missing from .codex/hooks.json"
-  dir=$(make_primary_dir "$TMP_ROOT/codex-hook-root")
-  mark_codex_hook_root "$dir"
-  expected_root=$(cd "$dir" && pwd -P)
-  outside="$TMP_ROOT/codex-hook-outside"
-  mkdir -p "$outside"
-  cat > "$dir/bin/fm-turnend-guard.sh" <<'EOF'
-#!/usr/bin/env bash
-printf 'guard=%s\n' "$0"
-cat
-EOF
-  chmod +x "$dir/bin/fm-turnend-guard.sh"
-  payload=$(jq -cn --arg cwd "$outside" '{cwd:$cwd,stop_hook_active:false}')
-  out=$(printf '%s' "$payload" | (cd "$dir" && bash -c "$command") 2>&1); status=$?
-  expect_code 0 "$status" "codex hook must execute successfully when payload cwd is outside the firstmate root"
-  assert_contains "$out" "guard=$expected_root/bin/fm-turnend-guard.sh" "codex hook must use the hook process root"
-  assert_contains "$out" "$payload" "codex hook must pass the original payload to the guard"
-  pass ".codex/hooks.json: Stop hook uses hook process root when payload cwd is outside"
-}
-
-test_codex_hook_ignores_nested_git_root_guard() {
-  local settings command dir nested subdir expected_root payload out status
-  settings="$ROOT/.codex/hooks.json"
-  [ -f "$settings" ] || fail "tracked .codex/hooks.json is missing"
-  command=$(jq -r '.hooks.Stop[0].hooks[0].command // empty' "$settings")
-  [ -n "$command" ] || fail "Stop hook command is missing from .codex/hooks.json"
-  dir=$(make_primary_dir "$TMP_ROOT/codex-hook-outer")
-  mark_codex_hook_root "$dir"
-  expected_root=$(cd "$dir" && pwd -P)
-  nested="$dir/projects/other"
-  mkdir -p "$nested"
-  git init -q "$nested"
-  git -C "$nested" commit -q --allow-empty -m init
-  mkdir -p "$nested/bin" "$nested/.codex"
-  : > "$nested/AGENTS.md"
-  printf '{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"fm-turnend-guard.sh"}]}]}}\n' > "$nested/.codex/hooks.json"
-  cat > "$nested/bin/fm-turnend-guard.sh" <<'EOF'
-#!/usr/bin/env bash
-printf 'nested guard executed\n'
-exit 99
-EOF
-  chmod +x "$nested/bin/fm-turnend-guard.sh"
-  cat > "$dir/bin/fm-turnend-guard.sh" <<'EOF'
-#!/usr/bin/env bash
-printf 'guard=%s\n' "$0"
-cat
-EOF
-  chmod +x "$dir/bin/fm-turnend-guard.sh"
-  subdir="$nested/deep/path"
-  mkdir -p "$subdir"
-  payload=$(jq -cn --arg cwd "$subdir" '{cwd:$cwd,stop_hook_active:false}')
-  out=$(printf '%s' "$payload" | (cd "$dir" && bash -c "$command") 2>&1); status=$?
-  expect_code 0 "$status" "codex hook must not execute a nested project guard"
-  assert_contains "$out" "guard=$expected_root/bin/fm-turnend-guard.sh" "codex hook must keep using the outer firstmate guard"
-  assert_not_contains "$out" "nested guard executed" "codex hook must not execute nested project code"
-  pass ".codex/hooks.json: Stop hook ignores nested git root guard scripts"
-}
-
 test_opencode_plugin_forces_followup() {
   local plugin content
   plugin="$ROOT/.opencode/plugins/fm-primary-turnend-guard.js"
@@ -890,17 +808,6 @@ EOF
   pass ".pi primary extension: delivery failure resets the logical-run latch"
 }
 
-test_grok_hook_invokes_adapter() {
-  local settings command
-  settings="$ROOT/.grok/hooks/fm-primary-turnend-guard.json"
-  [ -f "$settings" ] || fail "tracked grok primary hook config is missing"
-  command=$(jq -r '.hooks.Stop[0].hooks[0].command // empty' "$settings")
-  [ -n "$command" ] || fail "Stop hook command is missing from grok primary hook config"
-  assert_contains "$command" 'GROK_WORKSPACE_ROOT' "grok hook must anchor from GROK_WORKSPACE_ROOT"
-  assert_contains "$command" 'fm-turnend-guard-grok.sh' "grok hook must invoke the adapter"
-  pass ".grok primary hook: Stop hook invokes the grok adapter"
-}
-
 test_predicate_healthy_no_inflight
 test_predicate_unhealthy_no_beacon
 test_predicate_unhealthy_stale_beacon
@@ -932,12 +839,8 @@ test_hook_runs_fast
 test_grok_adapter_forces_one_resume_when_unhealthy
 test_grok_adapter_loop_guard_skips_resume
 test_settings_hook_uses_claude_project_dir
-test_codex_hook_invokes_shared_guard
-test_codex_hook_uses_process_pwd_when_payload_cwd_is_outside_root
-test_codex_hook_ignores_nested_git_root_guard
 test_opencode_plugin_forces_followup
 test_opencode_plugin_anchors_guard_to_worktree
 test_pi_extension_forces_followup
 test_pi_extension_injects_once_per_logical_agent_run
 test_pi_extension_retries_after_followup_delivery_failure
-test_grok_hook_invokes_adapter

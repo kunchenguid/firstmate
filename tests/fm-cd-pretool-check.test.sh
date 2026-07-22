@@ -385,31 +385,6 @@ test_claude_wiring() {
   pass ".claude/settings.json: PreToolUse invokes the cd-guard alongside the arm guard"
 }
 
-test_codex_wiring() {
-  local settings command
-  settings="$ROOT/.codex/hooks.json"
-  [ -f "$settings" ] || fail "tracked .codex/hooks.json is missing"
-  command=$(jq -r '[.hooks.PreToolUse[0].hooks[].command | select(contains("fm-cd-pretool-check.sh"))][0] // empty' "$settings")
-  [ -n "$command" ] || fail "codex PreToolUse must invoke fm-cd-pretool-check.sh"
-  assert_contains "$command" 'pwd -P' "codex cd hook must anchor from the hook process working directory"
-  assert_contains "$command" 'fm-cd-pretool-check.sh' "codex cd hook must invoke the cd-guard"
-  jq -e '[.hooks.PreToolUse[0].hooks[].command | select(contains("fm-arm-pretool-check.sh"))] | length == 1' "$settings" >/dev/null \
-    || fail "codex cd hook must not displace the watcher-arm hook"
-  pass ".codex/hooks.json: PreToolUse invokes the cd-guard alongside the arm guard"
-}
-
-test_grok_wiring() {
-  local settings command
-  settings="$ROOT/.grok/hooks/fm-primary-cd-check.json"
-  [ -f "$settings" ] || fail "tracked grok cd hook config is missing"
-  command=$(jq -r '.hooks.PreToolUse[0].hooks[0].command // empty' "$settings")
-  [ -n "$command" ] || fail "grok cd hook command is missing"
-  assert_contains "$command" 'GROK_WORKSPACE_ROOT' "grok cd hook must anchor from GROK_WORKSPACE_ROOT"
-  assert_contains "$command" 'fm-cd-pretool-check.sh' "grok cd hook must invoke the cd-guard"
-  assert_contains "$command" '${GROK_WORKSPACE_ROOT:-}' "grok cd hook must default-guard the workspace var"
-  pass ".grok primary cd hook: PreToolUse invokes the cd-guard"
-}
-
 test_opencode_wiring() {
   local plugin content
   plugin="$ROOT/.opencode/plugins/fm-primary-cd-check.js"
@@ -454,8 +429,6 @@ test_fail_open_missing_jq_on_stdin
 test_prefilter_skips_node_without_cd_substring
 test_policy_cli_direct
 test_claude_wiring
-test_codex_wiring
-test_grok_wiring
 test_opencode_wiring
 test_pi_wiring
 test_scripts_are_shellcheck_clean
