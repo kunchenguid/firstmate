@@ -124,7 +124,7 @@ PYEOF
   printf '%s\n' "$meta" > "$EV_DIR/meta.json"
 
   # Hash every file and append to meta.json.
-  local manifest hash
+  local manifest
   manifest=$(cd "$EV_DIR" && find . -type f | sort | while IFS= read -r rel; do
     rel=${rel#./}
     [ -n "$rel" ] || continue

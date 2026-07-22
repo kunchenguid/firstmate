@@ -57,7 +57,7 @@ validate_receipt() {
 }
 
 finalize_receipt() {
-  local branch= candidate= merge= local_landed=
+  local branch='' candidate='' merge='' local_landed=''
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --branch) branch=$2; shift 2 ;;
