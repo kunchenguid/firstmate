@@ -38,6 +38,11 @@ if [ "$scenario" = failure ] || { [ "$scenario" = partial ] && [[ "$args" == *na
   exit 1
 fi
 
+if [ "$scenario" = pr_failure ] && [[ "$args" == *name=alpha* ]] && [[ "$args" == *pullRequests* ]]; then
+  echo 'simulated unavailable response with ghp_abcdefghijklmnopqrstuvwxyz' >&2
+  exit 1
+fi
+
 page=false
 case "$args" in *cursor=CURSOR_ONE*) page=true ;; esac
 
@@ -266,6 +271,18 @@ test_api_failure_fails_closed() {
   pass "source failure preserves prior evidence and fails closed as stale critical attention"
 }
 
+test_pr_failure_retains_issue_observations() {
+  local home fakebin out
+  home=$(make_home pr-failure 'no-mistakes')
+  fakebin=$(make_fake_gh "$home")
+  out=$(run_intake "$home" "$fakebin" pr_failure '2026-07-22T00:00:00Z' --json) || fail "PR-side failure should still emit structured state"
+  printf '%s' "$out" | jq -e '
+    .checkpoint.last_attempt.status == "failed"
+    and ([.categories.newly_discovered[] | select(.type == "issue")] | length == 1)
+  ' >/dev/null || fail "issue observations were dropped when the PR request failed"
+  pass "issue observations survive PR-side GraphQL failure"
+}
+
 test_one_repository_failure_does_not_hide_the_rest() {
   local home fakebin out project repo
   home="$TMP_ROOT/multi-home"
@@ -378,6 +395,7 @@ test_existing_watcher_wake_is_restart_safe() {
 test_kolkata_rollover_and_restart_dedup
 test_pagination_and_changed_issue_pr
 test_api_failure_fails_closed
+test_pr_failure_retains_issue_observations
 test_one_repository_failure_does_not_hide_the_rest
 test_untrusted_content_is_data_and_secrets_are_redacted
 test_yolo_is_routine_only

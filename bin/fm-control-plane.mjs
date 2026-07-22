@@ -305,7 +305,7 @@ function gitProject(source, args, nowIso) {
   if (fs.existsSync(statePath)) {
     const head = fs.readFileSync(statePath, "utf8").slice(0, 65_536);
     const match = head.match(/^updated:\s*(.+)$/im) || head.match(/^[-*]\s*Updated:\s*(.+)$/im);
-    positionUpdated = match ? epochOf(match[1].trim()) : fs.statSync(statePath).mtimeMs;
+    positionUpdated = match ? (epochOf(match[1].trim()) ?? fs.statSync(statePath).mtimeMs) : fs.statSync(statePath).mtimeMs;
   }
   let handoff = null;
   if (fs.existsSync(handoffDir)) {
@@ -844,8 +844,8 @@ async function main() {
     if (project) {
       const positionEpoch = epochOf(project.continuity.position.observed_at);
       const handoffEpoch = epochOf(project.continuity.handoff.observed_at);
-      if (positionEpoch && session.observed_epoch > positionEpoch) violations.push(violation("TRANSCRIPT_NEWER_THAN_POSITION", session.id, `${session.provider} transcript is newer than ${project.name} Position state`, "high", [...session.source_ids, project.source_id]));
-      if (handoffEpoch && session.observed_epoch > handoffEpoch) violations.push(violation("TRANSCRIPT_NEWER_THAN_HANDOFF", session.id, `${session.provider} transcript is newer than ${project.name} handoff state`, "high", [...session.source_ids, project.source_id]));
+      if (positionEpoch !== null && session.observed_epoch > positionEpoch) violations.push(violation("TRANSCRIPT_NEWER_THAN_POSITION", session.id, `${session.provider} transcript is newer than ${project.name} Position state`, "high", [...session.source_ids, project.source_id]));
+      if (handoffEpoch !== null && session.observed_epoch > handoffEpoch) violations.push(violation("TRANSCRIPT_NEWER_THAN_HANDOFF", session.id, `${session.provider} transcript is newer than ${project.name} handoff state`, "high", [...session.source_ids, project.source_id]));
     }
     const linked = session.work_item_id ? workItemByTask.get(session.work_item_id) : null;
     if (session.runtime.state === "idle" && linked && linked.outcome.furthest_proved_stage !== "revenue" && linked.backlog_state !== "done") violations.push(violation("SESSION_IDLE_INCOMPLETE", session.id, `${session.provider} session is idle while ${linked.task_id} remains incomplete`, "high", session.source_ids));

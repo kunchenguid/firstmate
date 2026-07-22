@@ -171,6 +171,20 @@ test_freshness_conflict_and_invariants() {
   pass "freshness, conflicts, incomplete idle work, missing contracts, unknown outcomes, and discovery gaps fail closed"
 }
 
+test_malformed_position_marker_still_triggers_freshness() {
+  local out codes
+  cat > "$PROJECT/state.md" <<'EOF'
+## Position
+updated: definitely-not-a-timestamp
+EOF
+  touch -t 202607200800 "$PROJECT/state.md"
+  write_registry pane-new
+  out=$(control_json "$REGISTRY") || fail "reconciliation with malformed position marker failed"
+  codes=$(printf '%s' "$out" | jq -r '[.invariants.violations[].code] | unique | join(",")')
+  assert_contains "$codes" TRANSCRIPT_NEWER_THAN_POSITION "malformed position marker failed open"
+  pass "malformed position markers no longer suppress transcript freshness checks"
+}
+
 test_secret_registry_rejected() {
   local bad err status=0
   bad="$TMP_ROOT/secret-sources.json"
@@ -276,6 +290,7 @@ test_documented_examples_are_valid() {
 
 test_stable_identity_and_reconciliation
 test_freshness_conflict_and_invariants
+test_malformed_position_marker_still_triggers_freshness
 test_secret_registry_rejected
 test_metadata_only_snapshot
 test_attention_wake_restart_deduplication

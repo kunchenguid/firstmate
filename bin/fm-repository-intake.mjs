@@ -503,6 +503,7 @@ function refreshState(state, args, now) {
     try {
       const issues = fetchConnection(project, "issue", settings);
       remaining = issues.rateLimit.remaining;
+      observations.push(...issues.items.map((item) => normalizedItem(project, "issue", item, observedAt)));
       if (Number.isInteger(remaining) && remaining <= settings.reserve) {
         const error = new Error("GitHub rate-limit reserve reached");
         error.rateLimit = issues.rateLimit;
@@ -510,7 +511,6 @@ function refreshState(state, args, now) {
       }
       const prs = fetchConnection(project, "pr", settings);
       remaining = prs.rateLimit.remaining;
-      observations.push(...issues.items.map((item) => normalizedItem(project, "issue", item, observedAt)));
       observations.push(...prs.items.map((item) => normalizedItem(project, "pr", item, observedAt)));
       fullyObservedRepos.add(project.repo.key);
       project.status = "observed";
