@@ -129,6 +129,19 @@ EOF
   assert_grep '; label: SM CNC)' "$home/data/secondmates.md" "registry line missing trailing label field"
   FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" validate >/dev/null \
     || fail "registry validation rejected the label field"
+  # A reseed without FM_SECONDMATE_LABEL preserves the pinned label; setting it
+  # explicitly still replaces the prior value.
+  FM_HOME="$home" FM_SECONDMATE_CHARTER='cnc work for alpha' \
+    FM_SECONDMATE_SCOPE='cnc work for alpha' \
+    "$ROOT/bin/fm-home-seed.sh" sm-cnc "$sm" alpha >/dev/null \
+    || fail "reseed without FM_SECONDMATE_LABEL failed"
+  assert_grep '; label: SM CNC)' "$home/data/secondmates.md" "reseed dropped the pinned label"
+  FM_HOME="$home" FM_SECONDMATE_CHARTER='cnc work for alpha' \
+    FM_SECONDMATE_SCOPE='cnc work for alpha' FM_SECONDMATE_LABEL='SM Mill' \
+    "$ROOT/bin/fm-home-seed.sh" sm-cnc "$sm" alpha >/dev/null \
+    || fail "reseed with an explicit FM_SECONDMATE_LABEL failed"
+  assert_grep '; label: SM Mill)' "$home/data/secondmates.md" "explicit reseed label did not replace the prior value"
+  assert_no_grep '; label: SM CNC)' "$home/data/secondmates.md" "replaced label still present in the registry"
   if FM_HOME="$home" FM_SECONDMATE_CHARTER='bad label seed' \
     FM_SECONDMATE_SCOPE='bad label seed' FM_SECONDMATE_LABEL='SM (bad)' \
     "$ROOT/bin/fm-home-seed.sh" sm-bad "$TMP_ROOT/label-bad" alpha >/dev/null 2>&1; then

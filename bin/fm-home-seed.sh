@@ -32,6 +32,8 @@
 #       derives "SM <Title-cased id suffix>" (sm-portal -> "SM Portal"), so set
 #       the label whenever the derived form is wrong (acronyms, house names).
 #       The label must be a single line without ";", "(", or ")".
+#       Reseeding without FM_SECONDMATE_LABEL preserves an already-registered
+#       label; setting it explicitly still wins.
 #   fm-home-seed.sh validate
 #       Refuse duplicate ids, duplicate homes, and nested or overlapping homes in
 #       data/secondmates.md.
@@ -795,23 +797,34 @@ initialize_no_mistakes_project() {
   }
 }
 
+validate_secondmate_label() {
+  case "$1" in
+    *';'*|*'('*|*')'*|*$'\n'*)
+      echo "error: FM_SECONDMATE_LABEL must be a single line without ';', '(', or ')'" >&2
+      return 1
+      ;;
+  esac
+}
+
 write_registry() {
-  local id=$1 home=$2 projects_csv=$3 brief=$4 scope summary tmp today label_suffix
+  local id=$1 home=$2 projects_csv=$3 brief=$4 scope summary tmp today label label_suffix prior_line
   mkdir -p "$DATA"
   scope=$(registry_scope_for_brief "$brief")
   summary=$(registry_summary_for_brief "$brief")
   today=$(date +%F)
   # Optional explicit session display name; a trailing field keeps the strict
   # positional home/scope/projects parsers in fm-spawn.sh unchanged.
+  # A reseed without FM_SECONDMATE_LABEL preserves the prior line's label so a
+  # pinned name never silently degrades to the derived form.
+  label="${FM_SECONDMATE_LABEL:-}"
+  if [ -z "$label" ] && [ -f "$REG" ]; then
+    prior_line=$(grep -E "^- $id( |$)" "$REG" | tail -1 || true)
+    [ -z "$prior_line" ] || label=$(printf '%s\n' "$prior_line" | sed -n 's/.*; label: \([^;)]*\).*/\1/p')
+  fi
   label_suffix=
-  if [ -n "${FM_SECONDMATE_LABEL:-}" ]; then
-    case "$FM_SECONDMATE_LABEL" in
-      *';'*|*'('*|*')'*|*$'\n'*)
-        echo "error: FM_SECONDMATE_LABEL must be a single line without ';', '(', or ')'" >&2
-        return 1
-        ;;
-    esac
-    label_suffix="; label: $FM_SECONDMATE_LABEL"
+  if [ -n "$label" ]; then
+    validate_secondmate_label "$label" || return 1
+    label_suffix="; label: $label"
   fi
   tmp="$REG.tmp.$$"
   if [ -f "$REG" ]; then
@@ -903,6 +916,9 @@ seed_home() {
   fi
 
   validate_registry
+  if [ -n "${FM_SECONDMATE_LABEL:-}" ]; then
+    validate_secondmate_label "$FM_SECONDMATE_LABEL" || return 1
+  fi
   for project in "$@"; do
     validate_seed_project "$project"
   done
