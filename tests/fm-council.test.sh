@@ -92,6 +92,9 @@ new_home() {
   printf 'TOP_SECRET\n' > "$project/.env"
   printf 'PRIVATE\n' > "$project/id_rsa"
   printf 'example=yes\n' > "$project/.env.example"
+  printf 'db_password: hunter2\n' > "$project/secrets.yaml"
+  printf 'tok\n' > "$project/token.txt"
+  printf 'import secrets\n' > "$project/secrets.py"
   printf '%s\t%s\n' "$home" "$project"
 }
 
@@ -169,8 +172,13 @@ round_log=$(grep -F $'send\t' "$STUB/events" | grep -F $'\tround\t' | grep -F "$
 manifest="$HOME1/data/councils/$ID1/snapshots/$ROUND1/manifest.json"
 assert_grep '"path": ".env"' "$manifest" "snapshot manifest did not list .env exclusion"
 assert_grep '"path": "id_rsa"' "$manifest" "snapshot manifest did not list private-key exclusion"
+assert_grep '"path": "secrets.yaml"' "$manifest" "snapshot manifest did not list the secrets.yaml exclusion"
+assert_grep '"path": "token.txt"' "$manifest" "snapshot manifest did not list the token.txt exclusion"
 assert_present "$HOME1/data/councils/$ID1/snapshots/$ROUND1/project/.env.example" ".env.example should remain visible"
+assert_present "$HOME1/data/councils/$ID1/snapshots/$ROUND1/project/secrets.py" "ordinary source module secrets.py must remain visible"
 assert_absent "$HOME1/data/councils/$ID1/snapshots/$ROUND1/project/.env" ".env leaked into the project view"
+assert_absent "$HOME1/data/councils/$ID1/snapshots/$ROUND1/project/secrets.yaml" "secrets.yaml leaked into the project view"
+assert_absent "$HOME1/data/councils/$ID1/snapshots/$ROUND1/project/token.txt" "token.txt leaked into the project view"
 for answer_path in $(jq -r '.roster[].answer' <<<"$ASK1"); do
   assert_absent "$answer_path" "fan-out exposed an answer before that participant submitted it"
 done
@@ -490,3 +498,212 @@ expect_code 1 "$status" "a direct request for the corrupt identity must report t
 [ "$(council "$HOME7" status | jq -r '.[] | select(.id == "corrupt-1234") | .status')" = unreadable ] || fail "the status listing did not surface the corrupt record"
 rm -rf "$HOME7/data/councils/corrupt-1234"
 pass "council isolation: corrupt records are skipped for other councils and reported when requested directly"
+
+# Symlinked or hard-linked answer files are never ingested; they degrade to
+# honest unavailability instead of exfiltrating controller-readable bytes.
+IFS=$'\t' read -r HOME8 PROJECT8 < <(new_home ingest)
+CREATE8=$(create_pair "$HOME8" "$PROJECT8" Ingest)
+consent_pair "$HOME8" "$PROJECT8"
+ASK8=$(council "$HOME8" ask Ingest "Pick a database.")
+CLAUDE8=$(jq -r '.members[] | select(startswith("claude-"))' <<<"$CREATE8")
+CODEX8=$(jq -r '.members[] | select(startswith("codex-"))' <<<"$CREATE8")
+claude_answer8=$(jq -r --arg member "$CLAUDE8" '.roster[$member].answer' <<<"$ASK8")
+codex_answer8=$(jq -r --arg member "$CODEX8" '.roster[$member].answer' <<<"$ASK8")
+printf 'INGEST-LOOT\n' > "$HOME8/loot"
+ln -s "$HOME8/loot" "$claude_answer8"
+ln "$HOME8/loot" "$codex_answer8"
+READY8=$(council "$HOME8" ready Ingest) || fail "unsafe answer files crashed readiness"
+[ "$(jq '.answered | length' <<<"$READY8")" = 0 ] || fail "a symlinked or hard-linked answer was counted as answered"
+status=0
+council "$HOME8" collect Ingest >/dev/null 2>&1 || status=$?
+expect_code 1 "$status" "symlinked and hard-linked answers must not be ingested"
+rm "$codex_answer8"
+printf 'honest ingest answer\n' > "$codex_answer8"
+chmod 600 "$codex_answer8"
+COLLECT8=$(council "$HOME8" collect Ingest)
+[ "$(jq -r .comparison <<<"$COLLECT8")" = only-available ] || fail "the honest regular answer was not collected"
+[ "$(jq -r '.unavailable[0]' <<<"$COLLECT8")" = "$CLAUDE8" ] || fail "the symlinked answer was not degraded to unavailable"
+assert_not_contains "$COLLECT8" INGEST-LOOT "a symlinked answer exfiltrated controller-readable bytes"
+pass "council answer ingest: only exact private regular single-link outbox files are read"
+
+# A corrupt member runtime during ready/wait degrades that member to honest
+# unavailability instead of crashing every readiness poll.
+IFS=$'\t' read -r HOME9 PROJECT9 < <(new_home readyprobe)
+CREATE9=$(create_pair "$HOME9" "$PROJECT9" ReadyProbe)
+ID9=$(json_id "$CREATE9")
+consent_pair "$HOME9" "$PROJECT9"
+council "$HOME9" ask ReadyProbe "Pick a formatter." >/dev/null
+CODEX9=$(jq -r '.members[] | select(startswith("codex-"))' <<<"$CREATE9")
+codex_runtime9="$HOME9/state/councils/$ID9/members/$CODEX9/runtime.json"
+cp "$codex_runtime9" "$codex_runtime9.saved"
+printf 'not-json\n' > "$codex_runtime9"
+READY9=$(council "$HOME9" ready ReadyProbe) || fail "a corrupt member runtime crashed readiness"
+[ "$(jq -r --arg member "$CODEX9" '.unavailable | index($member) != null' <<<"$READY9")" = true ] || fail "a corrupt member runtime was not honestly unavailable in ready"
+mv "$codex_runtime9.saved" "$codex_runtime9"
+pass "council readiness: a corrupt runtime degrades to unavailable instead of failing ready and wait"
+
+# A project directory without owner write permission still snapshots because
+# subtree modes are applied only after the subtree is populated.
+IFS=$'\t' read -r HOME10 PROJECT10 < <(new_home readonlydir)
+CREATE10=$(create_pair "$HOME10" "$PROJECT10" ReadonlyDir)
+ID10=$(json_id "$CREATE10")
+consent_pair "$HOME10" "$PROJECT10"
+mkdir -p "$PROJECT10/vendored"
+printf 'pinned\n' > "$PROJECT10/vendored/lib"
+chmod 555 "$PROJECT10/vendored"
+ASK10=$(council "$HOME10" ask ReadonlyDir "Task with a read-only vendored tree") || fail "a read-only project directory failed the round snapshot"
+ROUND10=$(jq -r .round <<<"$ASK10")
+assert_present "$HOME10/data/councils/$ID10/snapshots/$ROUND10/project/vendored/lib" "read-only directory content is missing from the fixed view"
+chmod 755 "$PROJECT10/vendored"
+pass "council snapshot: read-only project directories are populated before their modes apply"
+
+# The real Herdr lane sends only bounded pointer instructions over argv: a
+# leading-dash canonical decision far beyond MAX_ARG_STRLEN is delivered
+# through each member's own hashed inbox payload file without a provider call.
+if [ "$(uname -s)-$(uname -m)" = Linux-x86_64 ]; then
+  FAKE_HERDR="$TMP_ROOT/fake-herdr"
+  FAKE_HERDR_STATE="$TMP_ROOT/fake-herdr-state"
+  mkdir -p "$FAKE_HERDR_STATE"
+  cat > "$FAKE_HERDR" <<'SH'
+#!/usr/bin/env bash
+set -eu
+[ "$1" = run ] || { echo "unsupported helper mode: $1" >&2; exit 40; }
+shift 2
+state=$FAKE_HERDR_DIR
+for argument in "$@"; do
+  [ "${#argument}" -le 131071 ] || { echo "E2BIG: argument exceeds MAX_ARG_STRLEN" >&2; exit 41; }
+done
+next_id() {
+  local n
+  n=$(cat "$state/counter" 2>/dev/null || printf 0)
+  n=$((n + 1))
+  printf '%s' "$n" > "$state/counter"
+  printf '%s' "$n"
+}
+case "$1 $2" in
+  "workspace create")
+    shift 2
+    label=
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --cwd) shift ;;
+        --label) label=$2; shift ;;
+        --no-focus) ;;
+        *) echo "unknown workspace create flag: $1" >&2; exit 42 ;;
+      esac
+      shift
+    done
+    n=$(next_id)
+    printf 'ws-%s\n' "$n" > "$state/tab-$n.workspace"
+    printf '%s\n' "$label" > "$state/tab-$n.label"
+    printf 'tab-%s ws-%s\n' "$n" "$n" > "$state/pane-$n"
+    jq -nc --arg w "ws-$n" --arg t "tab-$n" --arg p "pane-$n" \
+      '{result:{workspace:{workspace_id:$w},tab:{tab_id:$t},root_pane:{pane_id:$p}}}'
+    ;;
+  "tab create")
+    shift 2
+    workspace= label=
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --workspace) workspace=$2; shift ;;
+        --cwd) shift ;;
+        --label) label=$2; shift ;;
+        --no-focus) ;;
+        *) echo "unknown tab create flag: $1" >&2; exit 43 ;;
+      esac
+      shift
+    done
+    n=$(next_id)
+    printf '%s\n' "$workspace" > "$state/tab-$n.workspace"
+    printf '%s\n' "$label" > "$state/tab-$n.label"
+    printf 'tab-%s %s\n' "$n" "$workspace" > "$state/pane-$n"
+    jq -nc --arg w "$workspace" --arg t "tab-$n" --arg p "pane-$n" \
+      '{result:{tab:{tab_id:$t,workspace_id:$w},root_pane:{pane_id:$p}}}'
+    ;;
+  "tab rename")
+    [ -f "$state/$3.label" ] || exit 44
+    printf '%s\n' "$4" > "$state/$3.label"
+    ;;
+  "tab get")
+    [ -f "$state/$3.label" ] || exit 45
+    jq -nc --arg t "$3" --arg w "$(cat "$state/$3.workspace")" --arg l "$(cat "$state/$3.label")" \
+      '{result:{tab:{tab_id:$t,workspace_id:$w,label:$l}}}'
+    ;;
+  "pane get")
+    [ -f "$state/$3" ] || exit 46
+    read -r tab workspace < "$state/$3"
+    jq -nc --arg p "$3" --arg t "$tab" --arg w "$workspace" \
+      '{result:{pane:{pane_id:$p,tab_id:$t,workspace_id:$w}}}'
+    ;;
+  "pane run")
+    [ -f "$state/$3" ] || exit 47
+    ;;
+  "agent send")
+    [ -f "$state/$3" ] || exit 48
+    case "$4" in
+      -*) echo "unknown flag: the message was parsed as an option" >&2; exit 49 ;;
+    esac
+    [ "${#4}" -le 4096 ] || { echo "agent send message is not a bounded pointer" >&2; exit 50; }
+    n=$(next_id)
+    printf '%s' "$4" > "$state/agent-send-$n-$3"
+    ;;
+  "pane close")
+    rm -f "$state/$3"
+    ;;
+  *)
+    echo "unsupported fake herdr command: $1 $2" >&2
+    exit 51
+    ;;
+esac
+SH
+  chmod +x "$FAKE_HERDR"
+  LAB_CAPTAIN_HOME="$TMP_ROOT/lab-captain-home"
+  mkdir -p "$LAB_CAPTAIN_HOME"
+  IFS=$'\t' read -r HOMEL PROJECTL < <(new_home herdrlab)
+  lab_council() {
+    local home=$1
+    shift
+    HOME="$LAB_CAPTAIN_HOME" FM_HOME="$home" FM_COUNCIL_HERDR_LAB_HELPER="$FAKE_HERDR" \
+      FAKE_HERDR_DIR="$FAKE_HERDR_STATE" FM_COUNCIL_HERDR_SESSION=lab \
+      "$ROOT/bin/fm-council.sh" "$@"
+  }
+  lab_council "$HOMEL" create Lab --project "$PROJECTL" \
+    --participant claude/claude-fable-5/xhigh \
+    --participant codex/gpt-5.6-sol/xhigh >/dev/null
+  lab_council "$HOMEL" provider-consent anthropic --project "$PROJECTL" --acknowledge-project-disclosure >/dev/null
+  lab_council "$HOMEL" provider-consent openai --project "$PROJECTL" --acknowledge-project-disclosure >/dev/null
+  ASKL=$(lab_council "$HOMEL" ask Lab "Choose a strategy.")
+  [ "$(jq -r '.roster[].dispatch' <<<"$ASKL" | sort -u)" = sent ] || fail "bounded pointer dispatch did not reach both real-lane members"
+  round_sends=$(grep -l "Council round message" "$FAKE_HERDR_STATE"/agent-send-*)
+  [ "$(printf '%s\n' "$round_sends" | wc -l | tr -d ' ')" = 2 ] || fail "the real-lane round did not send exactly two pointer instructions"
+  round_payload_hashes=""
+  while IFS= read -r send_file; do
+    [ "$(wc -c < "$send_file")" -le 4096 ] || fail "a round instruction exceeded the bounded pointer size"
+    assert_grep 'Write your complete answer atomically' "$send_file" "the round pointer omitted the private answer path"
+    payload_file=$(sed -n 's/^Payload file: //p' "$send_file")
+    payload_hash=$(sed -n 's/^Payload sha256: //p' "$send_file")
+    [ -f "$payload_file" ] || fail "a round pointer referenced a missing inbox payload file"
+    [ "$(sha256sum "$payload_file" | awk '{print $1}')" = "$payload_hash" ] || fail "a round pointer hash did not match its inbox payload bytes"
+    round_payload_hashes="$round_payload_hashes$payload_hash"$'\n'
+  done <<<"$round_sends"
+  [ "$(printf '%s' "$round_payload_hashes" | sort -u | wc -l | tr -d ' ')" = 1 ] || fail "round payload bytes differed across members"
+  while IFS=$'\t' read -r member answer; do
+    [ -n "$member" ] || continue
+    printf 'lab answer from %s\n' "$member" > "$answer"
+    chmod 600 "$answer"
+  done < <(jq -r '.roster | to_entries[] | [.key, .value.answer] | @tsv' <<<"$ASKL")
+  COLLECTL=$(lab_council "$HOMEL" collect Lab)
+  [ "$(jq '.answers | length' <<<"$COLLECTL")" = 2 ] || fail "real-lane answers were not collected from private outboxes"
+  { printf -- '--dash-led canonical decision\n'; head -c 200000 /dev/zero | tr '\0' x; printf '\n'; } > "$TMP_ROOT/lab-canonical.md"
+  lab_council "$HOMEL" present Lab --file "$TMP_ROOT/lab-canonical.md" --kind synthesis >/dev/null
+  ACCEPTL=$(lab_council "$HOMEL" accept Lab)
+  [ "$(jq '.deferred_members | length' <<<"$ACCEPTL")" = 0 ] || fail "a leading-dash decision beyond MAX_ARG_STRLEN was not delivered through bounded pointers"
+  decision_sends=$(grep -l "Council decision message" "$FAKE_HERDR_STATE"/agent-send-*)
+  [ "$(printf '%s\n' "$decision_sends" | wc -l | tr -d ' ')" = 2 ] || fail "the accepted decision was not pointer-delivered to both members"
+  while IFS= read -r send_file; do
+    payload_file=$(sed -n 's/^Payload file: //p' "$send_file")
+    cmp -s "$TMP_ROOT/lab-canonical.md" "$payload_file" || fail "a decision payload file did not match the presented canonical bytes"
+  done <<<"$decision_sends"
+  lab_council "$HOMEL" close Lab >/dev/null
+  pass "council herdr argv: oversized and leading-dash payloads travel as exact hashed inbox files behind bounded pointer instructions"
+fi

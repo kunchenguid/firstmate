@@ -20,14 +20,16 @@ Persistent filesystem writes are limited to the participant's own private home a
 Execution is granted only on the exact controller-supplied binary allowlist, never on the whole system tree.
 A seccomp filter denies new Unix-domain sockets (from `socket` and `socketpair` alike) and io_uring setup while retaining provider TCP access, so a participant cannot reach Herdr or another terminal-control service by guessing its socket path or through ring-submitted socket operations; it verifies the x86_64 audit architecture and denies alternate syscall ABIs outright.
 Home-local control clients and socket metadata are also outside the admitted filesystem and absent from the sanitized environment, which passes through only the participant's own provider credentials.
+Round and decision content is written into each participant's own inbox as a payload file whose bytes are identical across members, and the terminal receives only a short pointer naming that exact file, its hash, and the private answer path, never the full body as a command argument.
 
-The filter excludes version-control metadata, common dependency and cache directories, symlinks, special files, oversized files, `.env` variants, private keys, and common credential files.
+The filter excludes version-control metadata, common dependency and cache directories, symlinks, special files, oversized files, `.env` variants, private keys, common credential files, and exact secret- and token-named data files such as `secrets.yaml` or `token.txt` (ordinary source modules like `secrets.py` stay visible).
 `.env.example` remains visible.
 The manifest names every exclusion so an answer cannot imply that the participant reviewed omitted material.
 This is a local filesystem boundary, not permission to disclose code to a remote model provider.
 Project-specific durable consent is required separately for Anthropic and OpenAI before the first round can be sent.
 
 Available answers remain in participant-private outboxes until collection.
+An answer is ingested only as a private regular single-link file at the exact recorded outbox path; a symlinked, hard-linked, group-writable, oversized, or otherwise unsafe answer file is honestly treated as unavailable rather than followed.
 Firstmate then presents either one best answer or a short synthesis without adding a separate judge model or numeric scorecard.
 One available answer is labeled only as the available answer.
 Raw answers and rejected presentations are removed when a round is accepted, rejected, or rerun; accepted canonical decision bodies remain durable.

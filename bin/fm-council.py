@@ -45,9 +45,12 @@ SECRET_NAMES = {
     "service-account.json",
 }
 SECRET_SUFFIXES = (".pem", ".key", ".p12", ".pfx", ".jks", ".keystore")
+SECRET_STEMS = {"secret", "secrets", "token", "tokens"}
+SECRET_STEM_SUFFIXES = ("", ".yaml", ".yml", ".json", ".txt", ".toml", ".ini")
 SKIP_DIRS = {".git", ".hg", ".svn", "node_modules", "__pycache__", ".cache", ".venv", "venv"}
 SECRET_DIRS = {".ssh", ".gnupg", ".aws", ".azure", ".kube", ".docker"}
 MAX_FILE_BYTES = 20 * 1024 * 1024
+MAX_ANSWER_BYTES = 1024 * 1024
 
 
 class CouncilError(RuntimeError):
@@ -312,6 +315,10 @@ def excluded_reason(relative: Path, entry: os.DirEntry[str]) -> str | None:
         return "secret-default"
     if name in SECRET_NAMES or name.endswith(SECRET_SUFFIXES) or "credential" in name or "private-key" in name:
         return "credential-default"
+    if not entry.is_dir(follow_symlinks=False) and any(
+        name == stem + suffix for stem in SECRET_STEMS for suffix in SECRET_STEM_SUFFIXES
+    ):
+        return "secret-default"
     return None
 
 
@@ -361,6 +368,17 @@ def inventory(source: Path) -> tuple[list[dict[str, Any]], list[dict[str, str]]]
     return entries, excluded
 
 
+def remove_readonly_tree(root: Path) -> None:
+    if not root.exists():
+        return
+    for path in sorted(root.rglob("*"), reverse=True):
+        with contextlib.suppress(OSError):
+            os.chmod(path, 0o700 if path.is_dir() else 0o600)
+    with contextlib.suppress(OSError):
+        os.chmod(root, 0o700)
+    shutil.rmtree(root, ignore_errors=True)
+
+
 def build_snapshot(council_dir: Path, source: Path, round_id: str) -> tuple[Path, str, list[dict[str, str]]]:
     snapshots = council_dir / "snapshots"
     snapshots.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -370,19 +388,24 @@ def build_snapshot(council_dir: Path, source: Path, round_id: str) -> tuple[Path
         tree = staging / "project"
         tree.mkdir(mode=0o700)
         try:
-            for entry in before:
-                target = tree / entry["path"]
-                if entry["type"] == "dir":
-                    target.mkdir(parents=True, exist_ok=True, mode=0o700)
-                    os.chmod(target, entry["mode"])
-                else:
-                    target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-                    shutil.copyfile(source / entry["path"], target, follow_symlinks=False)
-                    os.chmod(target, entry["mode"])
+            try:
+                for entry in before:
+                    target = tree / entry["path"]
+                    if entry["type"] == "dir":
+                        target.mkdir(parents=True, exist_ok=True, mode=0o700)
+                    else:
+                        target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+                        shutil.copyfile(source / entry["path"], target, follow_symlinks=False)
+                        os.chmod(target, entry["mode"])
+                for entry in before:
+                    if entry["type"] == "dir":
+                        os.chmod(tree / entry["path"], entry["mode"])
+            except OSError as error:
+                raise CouncilError(f"cannot copy the project into its fixed read-only view: {error}") from error
             after, excluded_after = inventory(source)
             copied, copied_excluded = inventory(tree)
             if before != after or excluded_before != excluded_after or before != copied or copied_excluded:
-                shutil.rmtree(staging)
+                remove_readonly_tree(staging)
                 if attempt == 0:
                     continue
                 raise CouncilError("project changed while the fixed read-only view was being built; retry after it stabilizes")
@@ -405,7 +428,7 @@ def build_snapshot(council_dir: Path, source: Path, round_id: str) -> tuple[Path
             os.replace(staging, final)
             return final / "project", view_hash, excluded_before
         except Exception:
-            shutil.rmtree(staging, ignore_errors=True)
+            remove_readonly_tree(staging)
             raise
     raise CouncilError("could not build a stable project view")
 
@@ -562,7 +585,8 @@ def launch_test_members(council: dict[str, Any], directory: Path) -> None:
 def launch_herdr_members(council: dict[str, Any], directory: Path, arguments: argparse.Namespace) -> None:
     if sys.platform != "linux" or os.uname().machine != "x86_64":
         raise CouncilError("the MVP participant lane is verified only on Linux x86_64")
-    if shutil.which("herdr") is None or shutil.which("python3") is None:
+    has_herdr = shutil.which("herdr") is not None or os.environ.get("FM_COUNCIL_HERDR_LAB_HELPER")
+    if not has_herdr or shutil.which("python3") is None:
         raise CouncilError("Herdr and python3 are required for council participants")
     runtime_root = PATHS.runtime_dir(council["id"])
     session = herdr_session(arguments)
@@ -759,7 +783,14 @@ def write_payload(runtime: dict[str, Any], kind: str, payload: str) -> Path:
     return path
 
 
-def send_member(council: dict[str, Any], member: dict[str, Any], kind: str, payload: str, common_path: Path | None = None) -> bool:
+def send_member(
+    council: dict[str, Any],
+    member: dict[str, Any],
+    kind: str,
+    payload: str,
+    answer_path: Path | None = None,
+    common_path: Path | None = None,
+) -> bool:
     state, runtime = probe_member(council, member)
     if state != "available":
         return False
@@ -780,12 +811,105 @@ def send_member(council: dict[str, Any], member: dict[str, Any], kind: str, payl
             return True
         except CouncilError:
             return False
-    result = herdr_run(runtime["session"], ["agent", "send", runtime["pane_id"], payload], check=False)
+    digest = hashlib.sha256(payload.encode()).hexdigest()
+    lines = [
+        f"Council {kind} message. Your complete instructions are in your own private inbox payload file.",
+        f"Payload file: {payload_path}",
+        f"Payload sha256: {digest}",
+    ]
+    if answer_path is not None:
+        lines.append(f"Write your complete answer atomically to this participant-private path before finishing your turn: {answer_path}")
+        lines.append("Use a temporary file in the same directory and rename it into place. Do not only leave the answer on screen.")
+    lines.append("Read the payload file, verify its exact sha256, then follow it fully.")
+    instruction = "\n".join(lines) + "\n"
+    result = herdr_run(runtime["session"], ["agent", "send", runtime["pane_id"], instruction], check=False)
     return result.returncode == 0
 
 
 def update_runtime(path: Path, runtime: dict[str, Any]) -> None:
     atomic_json(path, runtime)
+
+
+def open_outbox_dir(home: Path) -> int | None:
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    try:
+        descriptor = os.open(str(home.parent), flags)
+    except OSError:
+        return None
+    for component in ("home", "outbox"):
+        try:
+            child = os.open(component, flags, dir_fd=descriptor)
+        except OSError:
+            os.close(descriptor)
+            return None
+        os.close(descriptor)
+        descriptor = child
+    return descriptor
+
+
+def expected_answer_path(runtime: dict[str, Any], round_id: str) -> Path:
+    return Path(str(runtime["home"])) / "outbox" / f"{round_id}.md"
+
+
+def read_member_answer(council: dict[str, Any], member: dict[str, Any], round_id: str, answer_value: Any) -> str | None:
+    try:
+        _, runtime = load_runtime(council, member)
+    except CouncilError:
+        return None
+    if not answer_value or Path(str(answer_value)) != expected_answer_path(runtime, round_id):
+        return None
+    directory_fd = open_outbox_dir(Path(str(runtime["home"])))
+    if directory_fd is None:
+        return None
+    try:
+        answer_fd = os.open(f"{round_id}.md", os.O_RDONLY | os.O_NOFOLLOW | os.O_NOCTTY | os.O_CLOEXEC, dir_fd=directory_fd)
+    except OSError:
+        return None
+    finally:
+        os.close(directory_fd)
+    try:
+        info = os.fstat(answer_fd)
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_nlink != 1
+            or info.st_uid != os.getuid()
+            or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH | stat.S_ISUID | stat.S_ISGID)
+            or not 0 < info.st_size <= MAX_ANSWER_BYTES
+        ):
+            return None
+        chunks: list[bytes] = []
+        total = 0
+        while True:
+            chunk = os.read(answer_fd, 1 << 16)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+            if total > MAX_ANSWER_BYTES:
+                return None
+    finally:
+        os.close(answer_fd)
+    try:
+        return b"".join(chunks).decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+
+
+def remove_member_answer(council: dict[str, Any], member: dict[str, Any], round_id: str, answer_value: Any) -> None:
+    try:
+        _, runtime = load_runtime(council, member)
+    except CouncilError:
+        return
+    if not answer_value or Path(str(answer_value)) != expected_answer_path(runtime, round_id):
+        return
+    directory_fd = open_outbox_dir(Path(str(runtime["home"])))
+    if directory_fd is None:
+        return
+    try:
+        with contextlib.suppress(OSError):
+            os.unlink(f"{round_id}.md", dir_fd=directory_fd)
+    finally:
+        os.close(directory_fd)
 
 
 def catch_up_member(directory: Path, council: dict[str, Any], member: dict[str, Any]) -> bool:
@@ -924,13 +1048,7 @@ def start_round(directory: Path, council: dict[str, Any], task: str) -> dict[str
             }
             envelope_path = Path(runtime["home"]) / "inbox" / f"{round_id}.json"
             atomic_json(envelope_path, envelope)
-            message = (
-                common
-                + "\nWrite your complete answer atomically to this participant-private path before finishing your turn:\n"
-                + f"`{answer_path}`\n"
-                + "Use a temporary file in the same directory and rename it into place. Do not only leave the answer on screen.\n"
-            )
-            if send_member(council, member, "round", message, common_path):
+            if send_member(council, member, "round", common, answer_path=answer_path, common_path=common_path):
                 roster[member["id"]] = {"dispatch": "sent", "answer": str(answer_path), "nonce": nonce}
                 runtime["active_round"] = round_id
                 update_runtime(runtime_file, runtime)
@@ -969,15 +1087,23 @@ def command_submit(arguments: argparse.Namespace) -> None:
         round_value = load_round(directory, arguments.round_id)
         roster = round_value.get("roster", {})
         member_value = roster.get(arguments.member)
-        if not member_value or member_value.get("dispatch") != "sent" or member_value.get("nonce") != arguments.nonce:
+        member_record = next((item for item in council["members"] if item["id"] == arguments.member), None)
+        if not member_value or not member_record or member_value.get("dispatch") != "sent" or member_value.get("nonce") != arguments.nonce:
             raise CouncilError("submission identity or nonce does not match the frozen round roster")
         destination = Path(member_value["answer"])
-        if destination.exists():
+        _, runtime = load_runtime(council, member_record)
+        if destination != expected_answer_path(runtime, arguments.round_id):
+            raise CouncilError("submission destination escaped the member's recorded outbox")
+        if destination.exists() or destination.is_symlink():
             raise CouncilError("participant already submitted an answer for this round")
         source = Path(arguments.file)
         content = source.read_bytes()
         if not content.strip():
             raise CouncilError("participant answer is empty")
+        directory_fd = open_outbox_dir(Path(str(runtime["home"])))
+        if directory_fd is None:
+            raise CouncilError("participant outbox is not a private directory")
+        os.close(directory_fd)
         atomic_bytes(destination, content)
     print(f"submitted: {arguments.member} {arguments.round_id}")
 
@@ -991,13 +1117,16 @@ def readiness(directory: Path, council: dict[str, Any]) -> dict[str, Any]:
     unavailable: list[str] = []
     for member in council["members"]:
         roster_value = round_value.get("roster", {}).get(member["id"], {})
-        answer = roster_value.get("answer")
-        if answer and Path(answer).is_file() and Path(answer).stat().st_size > 0:
+        answer_text = read_member_answer(council, member, round_value["id"], roster_value.get("answer"))
+        if answer_text is not None and answer_text.strip():
             answered.append(member["id"])
         elif roster_value.get("dispatch") != "sent":
             unavailable.append(member["id"])
         else:
-            state, _ = probe_member(council, member)
+            try:
+                state, _ = probe_member(council, member)
+            except CouncilError:
+                state = "unavailable"
             (pending if state == "available" else unavailable).append(member["id"])
     return {
         "council": council["id"],
@@ -1039,10 +1168,7 @@ def command_collect(arguments: argparse.Namespace) -> None:
         unavailable: list[str] = []
         for member in council["members"]:
             roster_value = round_value["roster"].get(member["id"], {})
-            answer_text = ""
-            answer_path_value = roster_value.get("answer")
-            if answer_path_value and Path(answer_path_value).is_file():
-                answer_text = Path(answer_path_value).read_text(encoding="utf-8").strip()
+            answer_text = (read_member_answer(council, member, round_value["id"], roster_value.get("answer")) or "").strip()
             if answer_text:
                 answers.append({"member": member["id"], "profile": f"{member['harness']}/{member['model']}/{member['effort']}", "answer": answer_text})
             else:
@@ -1103,22 +1229,16 @@ def command_present(arguments: argparse.Namespace) -> None:
 
 
 def remove_snapshot(directory: Path, round_id: str) -> None:
-    snapshot = directory / "snapshots" / round_id
-    if snapshot.exists():
-        for path in sorted(snapshot.rglob("*"), reverse=True):
-            with contextlib.suppress(OSError):
-                os.chmod(path, 0o700 if path.is_dir() else 0o600)
-        with contextlib.suppress(OSError):
-            os.chmod(snapshot, 0o700)
-        shutil.rmtree(snapshot, ignore_errors=True)
+    remove_readonly_tree(directory / "snapshots" / round_id)
 
 
 def cleanup_round_payloads(directory: Path, council: dict[str, Any], round_value: dict[str, Any], keep_presentation: bool) -> None:
-    for roster_value in round_value.get("roster", {}).values():
+    members = {member["id"]: member for member in council["members"]}
+    for member_id, roster_value in round_value.get("roster", {}).items():
+        member = members.get(member_id)
         answer = roster_value.get("answer")
-        if answer:
-            with contextlib.suppress(FileNotFoundError):
-                Path(answer).unlink()
+        if member and answer:
+            remove_member_answer(council, member, round_value["id"], answer)
     runtime_round = PATHS.runtime_dir(council["id"]) / "rounds" / round_value["id"]
     shutil.rmtree(runtime_round, ignore_errors=True)
     if not keep_presentation:
