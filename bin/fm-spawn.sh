@@ -145,6 +145,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 fm_refuse_if_gate_agent
 # Skip the watcher guard when re-exec'd for one pair of a batch (FM_SPAWN_NO_GUARD is
 # set by the batch loop below), so the guard runs once for the batch, not once per pair.
+# That same variable also skips the lane governor for each pair, because the batch parent
+# already reserved capacity for the whole batch before re-exec'ing.
 if [ -z "${FM_SPAWN_NO_GUARD:-}" ] && [ -z "${FM_SPAWN_NO_WATCHER_GUARD:-}" ]; then
   "$FM_ROOT/bin/fm-guard.sh" || true
 fi
