@@ -102,6 +102,10 @@ write_receipt() {
     return 1
   fi
   rm -f "$tmp"
+  # Re-assert the mode explicitly rather than trusting ln/mktemp+umask
+  # interaction across platforms: the receipt must be 0600 regardless of the
+  # process umask in effect at write time.
+  chmod 600 "$RECEIPT" || return 1
 }
 
 acquire_mutation_lock() {

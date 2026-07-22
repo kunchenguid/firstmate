@@ -85,6 +85,14 @@ fm_delivery_atomic_replace() {  # <src-tmp> <dst> [<mode>]
   chmod "$mode" "$src" || { rm -f "$src"; return 1; }
   # fsync the directory so the rename is durable.
   mv "$src" "$dst" || { rm -f "$src"; return 1; }
+  # Re-assert the mode on the destination explicitly: when src and dst are on
+  # different filesystems (common in containerized CI where TMPDIR is a
+  # separate tmpfs mount from the destination tree), `mv` falls back to a
+  # copy + unlink instead of a same-device rename(2). That fallback is not
+  # guaranteed to preserve the exact mode bits set on src (the umask in
+  # effect at copy time can leak in), so make the destination mode explicit
+  # here too rather than relying on rename semantics alone.
+  chmod "$mode" "$dst" || return 1
   local dir
   dir=$(dirname "$dst")
   [ -d "$dir" ] && { command -v sync >/dev/null 2>&1 && sync "$dir" || true; }

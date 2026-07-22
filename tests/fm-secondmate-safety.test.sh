@@ -978,7 +978,7 @@ test_home_seed_skips_initialized_existing_no_mistakes_projects() {
   origin=$(git -C "$home/projects/alpha" remote get-url origin)
   git clone --quiet "$origin" "$subhome/projects/alpha"
   git -C "$subhome/projects/alpha" remote add no-mistakes "$TMP_ROOT/no-mistakes-alpha.git"
-  printf '%s\n' '- alpha - alpha project (added 2026-06-22)' '- beta - beta project (added 2026-06-22)' > "$home/data/projects.md"
+  printf '%s\n' '- alpha [no-mistakes] - alpha project (added 2026-06-22)' '- beta [no-mistakes] - beta project (added 2026-06-22)' > "$home/data/projects.md"
   fakebin=$(make_recording_no_mistakes "$TMP_ROOT/existing-initialized-fake")
   : > "$log"
 
@@ -1010,7 +1010,7 @@ test_home_seed_refuses_uninitialized_existing_no_mistakes_project() {
   mkdir -p "$subhome/projects"
   origin=$(git -C "$home/projects/alpha" remote get-url origin)
   git clone --quiet "$origin" "$subhome/projects/alpha"
-  printf '%s\n' '- alpha - alpha project (added 2026-06-22)' > "$home/data/projects.md"
+  printf '%s\n' '- alpha [no-mistakes] - alpha project (added 2026-06-22)' > "$home/data/projects.md"
   fakebin=$(make_recording_no_mistakes "$TMP_ROOT/existing-uninitialized-fake")
   : > "$log"
 
