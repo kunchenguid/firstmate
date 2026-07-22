@@ -36,6 +36,27 @@ test_identity_and_natural_address_contract() {
   pass "AGENTS.md establishes Navi's identity and Jay's natural-address rule"
 }
 
+test_user_facing_identity_surfaces_use_jay_language() {
+  local bearings decision fmx afk_return
+  bearings=$(cat "$ROOT/.agents/skills/bearings/SKILL.md")
+  decision=$(sed 's/captain-held//g' "$DECISION")
+  fmx=$(cat "$FMX")
+  afk_return=$(cat "$ROOT/bin/fm-afk-return.sh")
+  assert_not_contains "$bearings" "Captain's Call" \
+    "Bearings retains the old user-facing heading"
+  assert_contains "$bearings" "**Your Call**" \
+    "Bearings lacks the Jay-facing decision heading"
+  assert_not_contains "$decision" "captain" \
+    "decision lifecycle prose still calls Jay captain"
+  assert_not_contains "$fmx" "captain" \
+    "X-mode prose still calls Jay captain"
+  assert_not_contains "$afk_return" "ordinary captain work" \
+    "away-return output still calls Jay captain"
+  assert_not_contains "$afk_return" "the captain request" \
+    "away-return output still calls Jay captain"
+  pass "user-facing identity surfaces consistently use Jay language"
+}
+
 test_section_9_owns_positive_translation_contract() {
   local contract
   contract=$(section_9)
@@ -113,13 +134,13 @@ test_verbatim_internal_evidence_is_rejected_from_chat() {
 }
 
 test_outward_facing_skill_points_reference_section_9_owner() {
-  assert_grep "using \`AGENTS.md\` section 9's captain-facing translation contract" "$BOOTSTRAP" \
-    "bootstrap diagnostics do not reference section 9 at captain handoff"
+  assert_grep "using \`AGENTS.md\` section 9's communication contract" "$BOOTSTRAP" \
+    "bootstrap diagnostics do not reference section 9 at Jay handoff"
   assert_grep "Acknowledge** in \`AGENTS.md\` section 9 language" "$AFK" \
     "afk acknowledgement does not reference section 9"
   assert_grep "Jay, away mode is active; I will batch routine updates" "$AFK" \
     "afk acknowledgement lacks a local plain-English example"
-  assert_grep "as decisions from Bearings' Captain's Call section under \`AGENTS.md\` section 9" "$DECISION" \
+  assert_grep "as decisions from Bearings' Your Call section under \`AGENTS.md\` section 9" "$DECISION" \
     "decision relay does not reference section 9"
   assert_grep "using \`AGENTS.md\` section 9; do not mention metadata, harness, window, or worktree" "$RECOVERY" \
     "stuck-worker failure does not reference section 9"
@@ -151,6 +172,7 @@ test_section_9_owner_is_not_duplicated_into_skills() {
 }
 
 test_identity_and_natural_address_contract
+test_user_facing_identity_surfaces_use_jay_language
 test_section_9_owns_positive_translation_contract
 test_scout_remains_allowed_house_vocabulary
 test_compressed_safety_labels_have_plain_renderings

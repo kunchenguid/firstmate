@@ -59,23 +59,23 @@ batched digest rather than per-wake injections.
 No `/back` is needed. The first genuine message is the return signal:
 
 - A message **without** the sentinel marker and **not** starting with `/afk` -> Jay is back.
-  Run `bin/fm-afk-return.sh` before acting on the message that brought the captain back.
+  Run `bin/fm-afk-return.sh` before acting on the message that brought Jay back.
   That script owns correct-ordered daemon shutdown, durable wake draining, escalation and wedge evidence, and the return-catch-up gate.
   If it reports a firstmate-actionable `blocked:` event, remediate it immediately through the normal lifecycle, or explicitly reclassify it with a durable reason and close its decision key with `resolved [key=...]`, then run `bin/fm-afk-return.sh check`.
   Once the daemon stops, resume full per-wake responsiveness through the emitted primary-harness supervision protocol while blocker handling proceeds, so the gate never creates a blind wait.
-  Do not answer a Bearings request or perform any other ordinary captain work until the check exits successfully.
+  Do not answer a Bearings request or perform any other ordinary work for Jay until the check exits successfully.
 - A message **with** the sentinel marker (`FM_INJECT_MARK`, U+2063 INVISIBLE SEPARATOR) -> it is a daemon escalation; stay afk and process it.
 - Re-invoking `/afk` while already away -> stay afk (refresh the flag); this
   does **not** trigger an exit.
 
-Bias ambiguous cases toward exit: a present captain beats token savings, and
-a false exit is self-correcting (the captain re-runs `/afk`).
+Bias ambiguous cases toward exit: Jay's presence beats token savings, and
+a false exit is self-correcting (Jay re-runs `/afk`).
 
 ## Orthogonal to approval authority
 
 afk changes how aggressively firstmate surfaces things, **not who approves
 what**. "Away" never means "approves more." A PR ready for merge, a
-needs-decision finding, or anything destructive still waits for the captain's
+needs-decision finding, or anything destructive still waits for Jay's
 explicit word - the daemon just batches the notification.
 
 ## Sentinel marker contract
@@ -98,7 +98,7 @@ backend (tmux or herdr; see "Auto-discovered supervisor pane" below):
   `pane_input_pending` remains the tested predicate for callers that only need to know whether real unsubmitted text is present, but it is insufficient for an injection-safety decision because it cannot distinguish `empty` from `unknown`.
 
 Either condition, or any composer verdict other than `empty`, defers the injection; the buffered escalation survives in `state/.subsuper-escalations` and is retried on the next housekeeping tick.
-In afk mode the composer guard is belt-and-suspenders (no human is typing), but it protects against the race window between the captain returning and their message landing, a dead shell, and the daemon's own previous injection sitting unsent.
+In afk mode the composer guard is belt-and-suspenders (no human is typing), but it protects against the race window between Jay returning and the message landing, a dead shell, and the daemon's own previous injection sitting unsent.
 
 **Max-defer escape (the daemon must never silently wedge).**
 If anything stays buffered past `FM_MAX_DEFER_SECS` (default 300), the daemon
@@ -146,7 +146,7 @@ behavior but needs a separate fix; the gap is recorded in
 The daemon wraps `fm-watch.sh`, runs the watcher as a child, classifies each
 wake reason in bash, and self-handles the routine majority without consuming a
 firstmate turn.
-Captain-relevant events, plus a bounded recheck of a declared external wait that remains idle, escalate to firstmate's context as one pre-read, single-line, batched digest.
+Events that need Jay's attention, plus a bounded recheck of a declared external wait that remains idle, escalate to firstmate's context as one pre-read, single-line, batched digest.
 The classification predicates (the captain-relevant verb set, declared-pause vocabulary, signal/stale tests, and fleet-scan) live in the shared `bin/fm-classify-lib.sh`, the same library the always-on watcher uses for its own triage when afk is off, so the two modes apply one identical policy.
 While `state/.afk` exists the daemon owns the watcher, so the watcher reverts to one-shot and lets the daemon do the triage - the two never run their triage at the same time.
 
@@ -172,7 +172,7 @@ Escalations are buffered up to `FM_ESCALATE_BATCH_SECS` (default 90s; 0 =
 immediate) and flushed as one single-line digest prefixed with the sentinel
 marker, carrying pre-read status summaries and a recommended action.
 The single-line format makes the submission unambiguous across harnesses, and
-the marker lets firstmate distinguish it from a real captain message.
+the marker lets firstmate distinguish it from a real message from Jay.
 
 ## Injection hardening
 
@@ -181,7 +181,7 @@ the marker lets firstmate distinguish it from a real captain message.
   harness.
 - **Composer guard on the supervisor pane** - before injecting, the daemon checks `pane_is_busy` (harness busy footer means agent mid-turn) and reads `fm_backend_composer_state` directly.
   Only `empty` permits injection; `pending` protects half-typed or swallowed input, and `unknown` protects unreadable panes and bare dead-shell prompts.
-  Every other result preserves the buffer for retry, so the daemon never merges its digest into the captain's half-typed line or types it into a shell.
+  Every other result preserves the buffer for retry, so the daemon never merges its digest into Jay's half-typed line or types it into a shell.
 - The shared composer classifier receives a candidate row only after the active backend performs its own capture and structural row recognition.
   tmux and herdr route their raw styled candidate rows through the shared `fm_composer_strip_ghost` extractor, which removes dim/faint and dark-TRUECOLOR ghost/placeholder text before classification.
   They read the composer shape from a separately ANSI-stripped plain row because a dark TRUECOLOR border can be stripped with ghost content.

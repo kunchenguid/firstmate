@@ -128,7 +128,7 @@ clear_delivery_artifacts() {
 
 return_guard() {
   if [ -e "$STATE/.afk" ]; then
-    printf 'fm-afk-return: away mode is still active; run bin/fm-afk-return.sh before ordinary captain work\n' >&2
+    printf 'fm-afk-return: away mode is still active; run bin/fm-afk-return.sh before ordinary work for Jay\n' >&2
     return 3
   fi
   if [ -e "$GATE" ]; then
@@ -171,7 +171,7 @@ return_reconcile() {
   scan_open_blockers > "$blockers"
   if [ "$lifecycle_ok" -ne 1 ] || [ -s "$blockers" ]; then
     write_gate "$evidence" "$blockers" || { rm -f "$evidence" "$blockers"; return 1; }
-    printf 'fm-afk-return: catch-up must finish before the captain request\n' >&2
+    printf 'fm-afk-return: catch-up must finish before Jay\047s request\n' >&2
     print_evidence "$GATE" >&2
     print_blockers "$GATE" >&2
     printf 'fm-afk-return: handle each blocker now, or close it with resolved [key=...] and append a durable reclassification reason, then run bin/fm-afk-return.sh check\n' >&2
@@ -183,7 +183,7 @@ return_reconcile() {
   rm -f "$GATE"
   clear_delivery_artifacts
   rm -f "$evidence" "$blockers"
-  printf 'fm-afk-return: catch-up clear; ordinary captain work may proceed\n'
+  printf 'fm-afk-return: catch-up clear; Jay\047s request may proceed\n'
   return 0
 }
 

@@ -67,7 +67,7 @@ ok - snapshot parses tasks-axi rows and respects operational overrides
 
 $ bash tests/fm-bearings-snapshot.test.sh
 ok - a completed scout with decision-like report prose is a pointer, not pending
-ok - action-free items (working/done/queued/landed) do not leak into Captain's Call
+ok - action-free items (working/done/queued/landed) do not leak into Your Call
 
 $ bash tests/fm-brief.test.sh
 ok - fm-brief.sh: investigation and visual-review completions load the shared decision policy
