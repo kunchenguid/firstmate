@@ -2371,6 +2371,37 @@ test_wait_transition_stream_absorb_clears_then_timeout() {
   pass "fm_backend_herdr_wait_transition: streamed working clears the marker, idle/done are deferred (clean timeout)"
 }
 
+test_wait_transition_event_flood_skips_forkheavy_path() {
+  # Regression: a busy crew (e.g. tsc -b) floods the transition stream with
+  # non-actionable `working` events. The drain must triage each by the
+  # single-owner status->action table BEFORE the fork-heavy normalize/apply
+  # round-trip, or the watcher pegs ~100% CPU per event (the observed busy loop).
+  # normalize/apply are stubbed here to COUNT calls: they must fire only for the
+  # one reconcile level-check and the one real `blocked` edge - never per flood
+  # event - while the blocked edge is still returned and the working flood still
+  # clears the escalation marker (absorb side effect preserved).
+  local dir state agent fb reader lines cnt out rc marker acount i
+  dir="$TMP_ROOT/wt-flood"; state="$dir/state"; agent="$dir/agents"; mkdir -p "$state" "$agent"
+  fb=$(make_herdr_eventfake "$dir")
+  set_fake_agent "$agent" "wG:pQ" idle   # reconcile sees idle -> proceeds to stream
+  reader=$(make_fake_reader "$dir"); lines="$dir/lines"; cnt="$dir/calls"; : > "$cnt"
+  marker="$state/.herdr-escalated-sess_wG_pQ"
+  : > "$marker"   # previously escalated; the working flood must clear it
+  { for i in $(seq 800); do printf 'wG:pQ\t\tworking\tclaude\n'; done; printf 'wG:pQ\t\tblocked\tclaude\n'; } > "$lines"
+  out=$(PATH="$fb:$PATH" FM_BACKEND_HERDR_EVENTS_FORCE=1 FM_FAKE_SESSION_NAME=sess FM_FAKE_SOCKET="$dir/x.sock" FM_FAKE_AGENT_DIR="$agent" \
+    FM_BACKEND_HERDR_EVENT_READER="$reader" FM_FAKE_READER_LINES="$lines" FM_FLOOD_CNT="$cnt" \
+    bash -c '. "$0/bin/backends/herdr.sh"
+      fm_backend_herdr_normalize_event() { printf n >> "$FM_FLOOD_CNT"; printf "%s\t\t%s\t%s" "$1" "$3" "$4"; }
+      fm_backend_herdr_apply_transition() { printf a >> "$FM_FLOOD_CNT"; case "$3" in *blocked*) printf "%s" "$3"; return 0 ;; *) return 1 ;; esac; }
+      fm_backend_herdr_wait_transition sess 5 "$1" sess:wG:pQ' "$ROOT" "$state"); rc=$?
+  [ "$rc" = 0 ] || fail "the blocked edge after a working flood must still return 0, got $rc"
+  case "$out" in *blocked*) : ;; *) fail "the blocked edge must still be returned after the flood, got '$out'" ;; esac
+  [ ! -e "$marker" ] || fail "the working flood must still clear the escalation marker (absorb preserved)"
+  acount=$(tr -dc a < "$cnt" | wc -c | tr -d ' ')
+  [ "$acount" -lt 100 ] || fail "fork-heavy apply must NOT run per flood event (busy-loop regression); apply ran $acount times for an 800-event flood"
+  pass "fm_backend_herdr_wait_transition: a working-event flood is triaged cheaply, not one normalize/apply per event"
+}
+
 test_wait_transition_reader_failure_returns_2() {
   local dir state agent temp fb reader lines rc
   dir="$TMP_ROOT/wt-reader-fail"; state="$dir/state"; agent="$dir/agents"; temp="$dir/temp"; mkdir -p "$state" "$agent" "$temp"
@@ -2532,6 +2563,7 @@ test_wait_transition_subscribes_before_reconcile
 test_wait_transition_reconcile_dedupes_when_marked
 test_wait_transition_stream_blocked_returns_record
 test_wait_transition_stream_absorb_clears_then_timeout
+test_wait_transition_event_flood_skips_forkheavy_path
 test_wait_transition_reader_failure_returns_2
 test_wait_transition_bad_ack_returns_2_and_cleans_up
 test_wait_transition_clean_timeout_returns_1

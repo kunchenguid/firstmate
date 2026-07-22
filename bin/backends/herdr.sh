@@ -1927,7 +1927,7 @@ fm_backend_herdr_wait_transition() {  # <session> <timeout_secs> <state_dir> <pa
   done < <(fm_backend_herdr_event_reader_cmd)
   [ "${#reader[@]}" -gt 0 ] || return 2
 
-  local fifo_dir fifo reader_pid line ws status agent raw record hit rc=1 reader_rc=0
+  local fifo_dir fifo reader_pid line ws status agent raw record hit rc=1 reader_rc=0 rest marker
   fifo_dir=$(mktemp -d "${TMPDIR:-/tmp}/fm-herdr-eventwait.XXXXXX") || return 2
   fifo="$fifo_dir/events"
   if ! mkfifo "$fifo" 2>/dev/null; then
@@ -1976,17 +1976,37 @@ fm_backend_herdr_wait_transition() {  # <session> <timeout_secs> <state_dir> <pa
   # status into the wrong column. `cut` preserves empty fields.
   while [ "$rc" -eq 1 ] && IFS= read -r line <&9; do
     [ -n "$line" ] || continue
-    pane_id=$(printf '%s' "$line" | cut -f1)
-    ws=$(printf '%s' "$line" | cut -f2)
-    status=$(printf '%s' "$line" | cut -f3)
-    agent=$(printf '%s' "$line" | cut -f4)
+    # Zero-fork tab split preserving empty fields. A tab is IFS-whitespace, so
+    # `cut -f` per field (or `IFS=$'\t' read`) would fork per event and collapse
+    # an empty workspace_id; parameter expansion keeps columns aligned with no
+    # subprocess per line.
+    rest=$line
+    pane_id=${rest%%$'\t'*}; rest=${rest#*$'\t'}
+    ws=${rest%%$'\t'*};      rest=${rest#*$'\t'}
+    status=${rest%%$'\t'*};  agent=${rest#*$'\t'}
     [ -n "$pane_id" ] || continue
-    record=$(fm_backend_herdr_normalize_event "$pane_id" "$ws" "$status" "$agent")
-    if hit=$(fm_backend_herdr_apply_transition "$state" "$session" "$record"); then
-      printf '%s' "$hit"
-      rc=0
-      break
-    fi
+    # Triage by the single-owner status->action table BEFORE the fork-heavy
+    # normalize/apply round-trip. Only a `blocked` edge is ever actionable, so a
+    # busy crew's flood of `working`/`idle`/`done` events must not each pay a full
+    # record round-trip (about a dozen subprocesses per event) - that is the
+    # watcher busy-loop that pegs this process near 100% CPU under a chatty pane.
+    case "$(fm_transition_policy "$status")" in
+      actionable)
+        record=$(fm_backend_herdr_normalize_event "$pane_id" "$ws" "$status" "$agent")
+        if hit=$(fm_backend_herdr_apply_transition "$state" "$session" "$record"); then
+          printf '%s' "$hit"
+          rc=0
+          break
+        fi
+        ;;
+      absorb)
+        # `working` clears this pane's escalation dedupe marker so a later
+        # ->blocked re-escalates - the only side effect apply_transition has for a
+        # non-blocked status, done here without the record round-trip.
+        marker=$(fm_backend_herdr_escalation_marker "$state" "$session:$pane_id")
+        rm -f "$marker" 2>/dev/null || true
+        ;;
+    esac
   done
   if [ "$rc" -eq 0 ]; then
     kill "$reader_pid" 2>/dev/null || true
