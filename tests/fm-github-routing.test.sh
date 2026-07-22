@@ -96,6 +96,10 @@ case "${1:-} ${2:-}" in
     printf '%s\n' WRITE
     exit 0
     ;;
+  "repo clone")
+    git clone -- "https://github.com/${3}.git" "${4:-${3##*/}}"
+    exit
+    ;;
   "pr view")
     printf '%s\n' "${FM_TEST_PR_STATE:-ok}"
     exit 0
@@ -118,6 +122,12 @@ case "${FM_TEST_GH_AXI_TYPED_API:-}" in
   mutation)
     gh api graphql --hostname github.com \
       -f 'query=mutation($owner:String!,$name:String!){deleteRepository(input:{repositoryId:"x"}){clientMutationId}}' \
+      -f owner=Owner-A -f name=repo-a
+    exit
+    ;;
+  traversal)
+    gh api graphql --hostname github.com \
+      -f 'query=query($owner:String!,$name:String!){repository(owner:$owner,name:$name){owner{repositories{nodes{name}}}}}' \
       -f owner=Owner-A -f name=repo-a
     exit
     ;;
@@ -231,9 +241,20 @@ test_legacy_absence_is_byte_compatible() {
 printf '%s|%s|%s|%s\n' "${GH_TOKEN:-}" "${FM_GITHUB_CONFIG_PATH:-}" "${FM_CONFIG_OVERRIDE:-}" "$*"
 SH
   chmod +x "$d/fake/gh"
+  cat > "$d/fake/no-mistakes" <<'SH'
+#!/usr/bin/env bash
+printf '%s|%s|%s\n' "${GH_TOKEN:-}" "${FM_CONFIG_OVERRIDE:-}" "$*"
+SH
+  chmod +x "$d/fake/no-mistakes"
   out=$(FM_HOME="$d/home" FM_ROOT_OVERRIDE="$ROOT" GH_TOKEN=legacy-token FM_GITHUB_CONFIG_PATH=legacy-pin FM_CONFIG_OVERRIDE=legacy-config PATH="$d/fake:$PATH" \
     "$EXEC" exec --repository github.com/owner/repo -- gh pr view 7)
   [ "$out" = 'legacy-token|legacy-pin|legacy-config|pr view 7' ] || fail "legacy absence changed ambient command bytes: $out"
+  mkdir -p "$d/repository"
+  out=$(FM_HOME="$d/home" FM_ROOT_OVERRIDE="$ROOT" GH_TOKEN=legacy-token FM_CONFIG_OVERRIDE=legacy-config \
+    FM_NO_MISTAKES_BINARY="$d/fake/no-mistakes" PATH="$d/fake:$PATH" \
+    "$EXEC" no-mistakes-init --repository "$d/repository" --fork-url https://github.com/owner/repo.git)
+  [ "$out" = 'legacy-token|legacy-config|init --fork-url https://github.com/owner/repo.git' ] \
+    || fail "legacy no-mistakes initialization changed ambient command bytes: $out"
   pass "github routing absence preserves legacy ambient command behavior"
 }
 
@@ -446,8 +467,10 @@ test_concurrent_profiles_and_exact_children() {
   local d p1 p2 contexts rc
   d=$(make_fixture concurrent)
   : > "$d/routes.log"
-  mkdir -p "$d/home/state/.github-routing-path/.install.lock"
-  touch -t 202001010000 "$d/home/state/.github-routing-path/.install.lock"
+  mkdir -p "$d/home/state/.github-routing-path"
+  printf '%s\n%s\n%s\n%s\n' fm-github-lock-v1 999999 'dead process' \
+    "$(cd "$d/home/state/.github-routing-path" && pwd -P)/.lock-owner.stale" > "$d/home/state/.github-routing-path/.install.lock"
+  chmod 0600 "$d/home/state/.github-routing-path/.install.lock"
   (run_exec "$d" exec --project repo-a --repository "$d/home/projects/repo-a" -- gh pr view 11 >/dev/null) & p1=$!
   (run_exec "$d" exec --project repo-b --repository "$d/home/projects/repo-b" -- gh-axi pr list --repo Owner-B/repo-b >/dev/null) & p2=$!
   wait "$p1" || fail "profile-a concurrent operation failed"
@@ -460,6 +483,15 @@ test_concurrent_profiles_and_exact_children() {
   [ "$contexts" -eq 1 ] || fail "routing commands created $contexts persistent shim contexts"
   [ "$(routing_file_mode "$d/home/state/.github-routing-path/context-v1")" = 500 ] || fail "routing shim context is writable"
   [ ! -e "$d/home/state/.github-routing-path/.install.lock" ] || fail "stale routing shim lock was not recovered"
+  printf '%s\n' unproven > "$d/home/state/.github-routing-path/.install.lock"
+  chmod 0600 "$d/home/state/.github-routing-path/.install.lock"
+  set +e
+  FM_HOME="$d/home" FM_ROOT_OVERRIDE="$ROOT" bash -c '. "$FM_ROOT_OVERRIDE/bin/fm-github-lib.sh"; fm_github_lock_acquire "$FM_HOME/state/.github-routing-path/.install.lock" 1' >/dev/null 2>&1
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "unproven routing lock"
+  [ -f "$d/home/state/.github-routing-path/.install.lock" ] || fail "unproven routing lock was evicted"
+  rm -f "$d/home/state/.github-routing-path/.install.lock"
   chmod 0700 "$d/home/state/.github-routing-path/context-v1/gh"
   set +e
   run_exec "$d" exec --project repo-a --repository "$d/home/projects/repo-a" -- gh pr view 12 >/dev/null 2>&1
@@ -594,7 +626,7 @@ test_forbidden_commands_and_access_diagnostics() {
     || fail "verified gh-axi descendant could not perform its typed internal API operation"
   assert_grep $'gh\tprofile-a\tapi graphql --hostname github.com' "$d/routes.log" \
     "typed gh-axi internal API call did not retain the selected profile"
-  for kind in foreign mutation; do
+  for kind in foreign mutation traversal; do
     set +e
     FM_TEST_GH_AXI_TYPED_API=$kind run_exec "$d" exec --project repo-a --repository "$d/home/projects/repo-a" -- \
       gh-axi pr view 1 >/dev/null 2>&1
@@ -602,6 +634,11 @@ test_forbidden_commands_and_access_diagnostics() {
     set -e
     expect_code 1 "$rc" "gh-axi internal API broker $kind request"
   done
+  (cd "$d/home/projects" && FM_TEST_FAKE_NETWORK=1 FM_TEST_CLONE_SOURCE="$d/home/projects/repo-a" \
+    run_exec "$d" exec --project clone-project --repository github.com/Owner-A/clone-project -- \
+      gh repo clone Owner-A/clone-project clone-project >/dev/null) \
+    || fail "guarded gh repo clone did not use its canonical project capability"
+  [ -d "$d/home/projects/clone-project/.git" ] || fail "guarded gh repo clone did not create its canonical destination"
   set +e
   err=$(run_exec "$d" exec --repository github.com/Owner-A/new -- gh repo create --private Other/new 2>&1); rc=$?
   set -e
@@ -693,6 +730,16 @@ test_forbidden_commands_and_access_diagnostics() {
   rc=$?
   set -e
   expect_code 1 "$rc" "forged gh-axi API descendant"
+  set +e
+  (cd "$d/home/projects" && FM_HOME="$d/home" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_GITHUB_ACTIVE=1 FM_GITHUB_PROFILE_ID=profile-a FM_GITHUB_REPOSITORY=github.com/Owner-A/forged \
+    FM_GITHUB_PROJECT=forged FM_GITHUB_CLONE_CAPABILITY=gh-project FM_GITHUB_CLONE_ROOT="$d/home/projects" \
+    FM_GITHUB_PROJECT_PATH="$d/home/projects/forged" FM_GITHUB_GIT_BINARY="$d/exact/git" \
+    FM_TEST_FAKE_NETWORK=1 PATH="$d/hostile:$d/exact:$PATH" \
+    "$EXEC" child-git --home "$d/home" -- clone -- https://github.com/Owner-A/forged.git forged >/dev/null 2>&1)
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "forged descendant clone capability"
   set +e
   err=$(FM_HOME="$d/home" FM_ROOT_OVERRIDE="$ROOT" FM_TEST_ROUTE_LOG="$d/routes.log" FM_TEST_SENTINEL="$SENTINEL" \
     PATH="$d/hostile:$PATH" bash -c 'cd "$1" && "$2" exec --project repo-a --repository "$3" -- gh pr view 1' \
@@ -956,6 +1003,17 @@ SH
     fm_pr_poll_publish_prepared
   ' _ "$malicious" || fail "could not prepare legacy migration fixture"
   [ "$(sed -n '1p' "$state/task-poll.pr-poll-registration")" = fm-pr-poll-registration-v1 ] || fail "legacy fixture was not v1"
+  mkdir -p "$d/empty-config" "$d/ambient"
+  cat > "$d/ambient/gh" <<SH
+#!/usr/bin/env bash
+touch '$marker'
+printf '%s\n' MERGED
+SH
+  chmod +x "$d/ambient/gh"
+  out=$(FM_HOME="$d/home" FM_ROOT_OVERRIDE="$ROOT" FM_CONFIG_OVERRIDE="$d/empty-config" \
+    PATH="$d/ambient:$PATH" bash "$ROOT/bin/fm-pr-poll.sh" --validated github \
+      https://github.com/Owner-A/repo-a/pull/17 github.com Owner-A/repo-a 17)
+  [ -z "$out" ] && [ ! -e "$marker" ] || fail "profile-less delayed poll hid canonical strict routing behind a config override"
   FM_HOME="$d/home" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" \
     FM_TEST_ROUTE_LOG="$d/routes.log" FM_TEST_SENTINEL="$SENTINEL" PATH="$d/hostile:$PATH" \
     "$ROOT/bin/fm-pr-check-migrate.sh" >/dev/null 2>&1 || fail "strict delayed poll migration failed"
@@ -966,7 +1024,7 @@ SH
 }
 
 test_no_mistakes_context_handoff_is_typed_and_secret_free() {
-  local d fake_nm captured log refresh_count rc err expected_pwd marker marker_before override_marker p1 p2
+  local d fake_nm captured log refresh_count rc err expected_pwd marker marker_before override_marker p1 p2 status
   d=$(make_fixture no-mistakes)
   fake_nm="$d/exact/no-mistakes"
   captured="$d/nm-context.json"
@@ -986,10 +1044,20 @@ if [ "${1:-}" = init ]; then
   exit 0
 fi
 if [ "${1:-}" = axi ] && [ "${2:-}" = status ]; then
-  if [ -e "$FM_TEST_NM_CAPTURE.active" ]; then printf '%s\n' '  status: running'; else printf '%s\n' '  status: completed'; fi
+  branch=${FM_TEST_NM_BRANCH:-$(git symbolic-ref --quiet --short HEAD)}
+  head=$(git rev-parse HEAD)
+  run_id=run-0
+  [ ! -e "$FM_TEST_NM_CAPTURE.run-id" ] || run_id=$(cat "$FM_TEST_NM_CAPTURE.run-id")
+  status=completed
+  [ ! -e "$FM_TEST_NM_CAPTURE.active" ] || status=${FM_TEST_NM_STATUS:-running}
+  printf '  id: %s\n  branch: %s\n  status: %s\n  head: %s\n' "$run_id" "$branch" "$status" "$head"
   exit 0
 fi
 if [ "${1:-}" = axi ] && { [ "${2:-}" = run ] || [ "${2:-}" = respond ]; }; then
+  if [ "${2:-}" = run ] && [ ! -e "$FM_TEST_NM_CAPTURE.active" ]; then printf '%s\n' run-1 > "$FM_TEST_NM_CAPTURE.run-id"; fi
+  if [ "${2:-}" = run ] && [ -n "${FM_TEST_NM_MUTATE_CONFIG:-}" ]; then
+    node -e 'const fs=require("fs"); const p=process.argv[1]; const v=JSON.parse(fs.readFileSync(p)); v.profiles["profile-a"].commit_identity.name="Changed During Run"; fs.writeFileSync(p,JSON.stringify(v)); fs.chmodSync(p,0o600)' "$FM_TEST_NM_MUTATE_CONFIG"
+  fi
   touch "$FM_TEST_NM_CAPTURE.active"
   printf '%s\n' "$PWD" > "$FM_TEST_NM_CAPTURE.pwd"
   exit 0
@@ -1030,6 +1098,7 @@ SH
   fm_git_init_commit "$d/unrelated-no-mistakes"
   (cd "$d/unrelated-no-mistakes" && FM_HOME="$d/home" FM_ROOT_OVERRIDE="$ROOT" \
     FM_TEST_NM_CAPTURE="$captured" FM_TEST_NM_LOG="$log" FM_TEST_ROUTE_LOG="$d/routes.log" \
+    FM_TEST_NM_MUTATE_CONFIG="$d/home/config/github-accounts.json" \
     FM_TEST_SENTINEL="$SENTINEL" PATH="$d/hostile:$d/exact:$PATH" \
     "$EXEC" exec --project repo-a --repository "$d/home/projects/repo-a" -- \
       no-mistakes axi run --intent initial >/dev/null) \
@@ -1038,7 +1107,16 @@ SH
   [ "$(cat "$captured.pwd")" = "$expected_pwd" ] || fail "strict no-mistakes run used the caller working directory"
   marker=$(find "$d/home/state/.github-routing-no-mistakes" -maxdepth 1 -type f -print | head -1)
   [ -n "$marker" ] && [ "$(routing_file_mode "$marker")" = 600 ] || fail "successful strict run did not record its typed routing marker"
+  assert_grep '"name": "Account A"' "$marker" "new run marker recomputed routing after executor launch"
+  node -e 'const fs=require("fs"); const p=process.argv[1]; const v=JSON.parse(fs.readFileSync(p)); v.profiles["profile-a"].commit_identity.name="Account A"; fs.writeFileSync(p,JSON.stringify(v)); fs.chmodSync(p,0o600)' "$d/home/config/github-accounts.json"
   marker_before=$(cat "$marker")
+  set +e
+  FM_TEST_NM_BRANCH=other-branch FM_TEST_NM_CAPTURE="$captured" FM_TEST_NM_LOG="$log" \
+    run_exec "$d" exec --project repo-a --repository "$d/home/projects/repo-a" -- no-mistakes axi respond accepted >/dev/null 2>&1
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "cross-branch no-mistakes continuation"
+  [ "$(cat "$marker")" = "$marker_before" ] || fail "cross-branch continuation changed the active no-mistakes binding marker"
   node -e 'const fs=require("fs"); const p=process.argv[1]; const v=JSON.parse(fs.readFileSync(p)); v.profiles["profile-a"].commit_identity.name="Refreshed Account A"; fs.writeFileSync(p,JSON.stringify(v)); fs.chmodSync(p,0o600)' "$d/home/config/github-accounts.json"
   set +e
   err=$(FM_TEST_NM_CAPTURE="$captured" FM_TEST_NM_LOG="$log" \
@@ -1059,8 +1137,13 @@ SH
   FM_TEST_NM_CAPTURE="$captured" FM_TEST_NM_LOG="$log" \
     run_exec "$d" exec --project repo-a --repository "$d/home/projects/repo-a" -- no-mistakes axi respond accepted >/dev/null \
     || fail "matching no-mistakes continuation did not revalidate its typed context"
+  for status in fixing ci awaiting_approval fix_review; do
+    FM_TEST_NM_STATUS=$status FM_TEST_NM_CAPTURE="$captured" FM_TEST_NM_LOG="$log" \
+      run_exec "$d" exec --project repo-a --repository "$d/home/projects/repo-a" -- no-mistakes axi respond accepted >/dev/null \
+      || fail "documented active no-mistakes status $status was not accepted"
+  done
   refresh_count=$(grep -c '^init --github-context ' "$log")
-  [ "$refresh_count" -eq 2 ] || fail "strict run and continuation refreshed no-mistakes context $refresh_count times instead of twice"
+  [ "$refresh_count" -eq 6 ] || fail "strict run and continuations refreshed no-mistakes context $refresh_count times instead of six times"
   pass "no-mistakes receives secret-free context and revalidates every strict run and continuation"
 }
 

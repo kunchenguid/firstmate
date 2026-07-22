@@ -25,6 +25,7 @@ FM_GITHUB_ALLOW_UNREGISTERED_PROJECT=${FM_GITHUB_ALLOW_UNREGISTERED_PROJECT:-0}
 FM_GITHUB_CLONE_CAPABILITY=${FM_GITHUB_CLONE_CAPABILITY:-}
 FM_GITHUB_CLONE_ROOT=${FM_GITHUB_CLONE_ROOT:-}
 FM_GITHUB_NO_MISTAKES_BINARY=${FM_GITHUB_NO_MISTAKES_BINARY:-}
+FM_GITHUB_INVOCATION_CAPABILITY=${FM_GITHUB_INVOCATION_CAPABILITY:-}
 
 fm_github_lib_dir() {
   cd "$(dirname "${BASH_SOURCE[0]}")" && pwd
@@ -323,30 +324,154 @@ fm_github_process_identity() {
   ps -o lstart= -p "$pid" 2>/dev/null | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//'
 }
 
-fm_github_path_mtime() {
+fm_github_current_pid() {
+  fm_github_node -e 'const {execFileSync}=require("node:child_process"); process.stdout.write(execFileSync("/bin/ps", ["-o", "ppid=", "-p", String(process.ppid)], {encoding:"utf8"}).trim())'
+}
+
+fm_github_path_identity() {
   if [ "$(uname)" = Darwin ]; then
-    stat -f %m "$1" 2>/dev/null
+    stat -f '%d:%i' "$1" 2>/dev/null
   else
-    stat -c %Y "$1" 2>/dev/null
+    stat -c '%d:%i' "$1" 2>/dev/null
   fi
 }
 
-fm_github_install_lock_stale() {
-  local lock=$1 pid recorded current modified now
-  [ -d "$lock" ] && [ ! -L "$lock" ] || return 1
-  if [ ! -f "$lock/owner" ] || [ -L "$lock/owner" ] || ! IFS=$'\t' read -r pid recorded < "$lock/owner" \
-    || [[ "$pid" = *[!0-9]* ]] || [ -z "$pid" ] || [ -z "$recorded" ]; then
-    modified=$(fm_github_path_mtime "$lock") || return 1
-    now=$(date +%s) || return 1
-    [ $((now - modified)) -ge 2 ]
-    return
-  fi
+fm_github_lock_stale() {
+  local lock=$1 version pid recorded owner_tmp extra current lock_dir
+  [ -f "$lock" ] && [ ! -L "$lock" ] && [ "$(fm_github_file_mode "$lock")" = 600 ] || return 1
+  {
+    IFS= read -r version
+    IFS= read -r pid
+    IFS= read -r recorded
+    IFS= read -r owner_tmp
+    ! IFS= read -r extra
+  } < "$lock" || return 1
+  [ "$version" = fm-github-lock-v1 ] || return 1
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  [ -n "$recorded" ] || return 1
+  lock_dir=${lock%/*}
+  case "$owner_tmp" in "$lock_dir"/.lock-owner.*) ;; *) return 1 ;; esac
   current=$(fm_github_process_identity "$pid" || true)
-  [ -z "$current" ] || [ "$current" != "$recorded" ]
+  if [ -z "$current" ] || [ "$current" != "$recorded" ]; then
+    FM_GITHUB_STALE_LOCK_OWNER_TMP=$owner_tmp
+    return 0
+  fi
+  return 1
+}
+
+fm_github_lock_acquire() {
+  local lock=$1 attempts=${2:-100} owner_tmp identity pid count=0 lock_identity stale_identity stale_tmp
+  owner_tmp=$(mktemp "${lock%/*}/.lock-owner.XXXXXX") || return 1
+  pid=$(fm_github_current_pid) || { rm -f "$owner_tmp" 2>/dev/null || true; return 1; }
+  identity=$(fm_github_process_identity "$pid") || { rm -f "$owner_tmp" 2>/dev/null || true; return 1; }
+  printf '%s\n%s\n%s\n%s\n' fm-github-lock-v1 "$pid" "$identity" "$owner_tmp" > "$owner_tmp" \
+    || { rm -f "$owner_tmp" 2>/dev/null || true; return 1; }
+  chmod 0600 "$owner_tmp" || { rm -f "$owner_tmp" 2>/dev/null || true; return 1; }
+  while [ "$count" -lt "$attempts" ]; do
+    if ln "$owner_tmp" "$lock" 2>/dev/null; then
+      lock_identity=$(fm_github_path_identity "$lock") || { rm -f "$lock" "$owner_tmp" 2>/dev/null || true; return 1; }
+      rm -f "$owner_tmp" || { rm -f "$lock" 2>/dev/null || true; return 1; }
+      FM_GITHUB_LOCK_PATH=$lock
+      FM_GITHUB_LOCK_IDENTITY=$lock_identity
+      export FM_GITHUB_LOCK_PATH FM_GITHUB_LOCK_IDENTITY
+      return 0
+    fi
+    FM_GITHUB_STALE_LOCK_OWNER_TMP=
+    if fm_github_lock_stale "$lock"; then
+      stale_identity=$(fm_github_path_identity "$lock") || { rm -f "$owner_tmp" 2>/dev/null || true; return 1; }
+      stale_tmp=$FM_GITHUB_STALE_LOCK_OWNER_TMP
+      [ "$(fm_github_path_identity "$lock" 2>/dev/null || true)" = "$stale_identity" ] || continue
+      rm -f "$lock" 2>/dev/null || continue
+      if [ -f "$stale_tmp" ] && [ ! -L "$stale_tmp" ] \
+        && [ "$(fm_github_path_identity "$stale_tmp" 2>/dev/null || true)" = "$stale_identity" ]; then
+        rm -f "$stale_tmp" 2>/dev/null || true
+      fi
+      continue
+    fi
+    count=$((count + 1))
+    sleep 0.05
+  done
+  rm -f "$owner_tmp" 2>/dev/null || true
+  return 1
+}
+
+fm_github_lock_release() {
+  [ -n "${FM_GITHUB_LOCK_PATH:-}" ] && [ -n "${FM_GITHUB_LOCK_IDENTITY:-}" ] || return 1
+  [ "$(fm_github_path_identity "$FM_GITHUB_LOCK_PATH" 2>/dev/null || true)" = "$FM_GITHUB_LOCK_IDENTITY" ] || return 1
+  rm -f "$FM_GITHUB_LOCK_PATH" || return 1
+  FM_GITHUB_LOCK_PATH=
+  FM_GITHUB_LOCK_IDENTITY=
+  export FM_GITHUB_LOCK_PATH FM_GITHUB_LOCK_IDENTITY
+}
+
+fm_github_capability_dir() {
+  local directory
+  directory="$(fm_github_home)/state/.github-routing-capabilities"
+  if [ ! -e "$directory" ]; then
+    mkdir -m 0700 "$directory" 2>/dev/null || [ -d "$directory" ] || return 1
+  fi
+  [ -d "$directory" ] && [ ! -L "$directory" ] && [ "$(fm_github_file_mode "$directory")" = 700 ] || return 1
+  (cd "$directory" 2>/dev/null && pwd -P)
+}
+
+fm_github_run_with_capability() {
+  local operation=$1 binary=$2 directory capability status
+  shift 2
+  directory=$(fm_github_capability_dir) || return 1
+  capability=$(mktemp "$directory/.cap.XXXXXX") || return 1
+  chmod 0600 "$capability" || { rm -f "$capability"; return 1; }
+  if fm_github_node - "$capability" "$operation" "$binary" "$FM_GITHUB_REPOSITORY" "$@" <<'NODE'
+const fs = require("node:fs");
+const {spawnSync} = require("node:child_process");
+const [capability, operation, binary, repository, ...args] = process.argv.slice(2);
+const identity = spawnSync("/bin/ps", ["-o", "lstart=", "-p", String(process.pid)], {encoding: "utf8"}).stdout.trim();
+if (!identity) process.exit(1);
+fs.writeFileSync(capability, ["fm-github-capability-v1", operation, String(process.pid), identity, binary, repository, ""].join("\n"), {mode: 0o600});
+const child = spawnSync(binary, args, {stdio: "inherit", env: {...process.env, FM_GITHUB_INVOCATION_CAPABILITY: capability}});
+if (child.error) process.exit(1);
+process.exit(child.status ?? 1);
+NODE
+  then
+    status=0
+  else
+    status=$?
+  fi
+  rm -f "$capability" 2>/dev/null || true
+  return "$status"
+}
+
+fm_github_validate_capability() {
+  local operation=$1 expected_binary=$2 capability=${FM_GITHUB_INVOCATION_CAPABILITY:-} directory
+  local version recorded_operation pid identity binary repository extra current current_pid ancestor found=0 count=0
+  directory=$(fm_github_capability_dir) || return 1
+  case "$capability" in "$directory"/.cap.*) ;; *) return 1 ;; esac
+  [ -f "$capability" ] && [ ! -L "$capability" ] && [ "$(fm_github_file_mode "$capability")" = 600 ] || return 1
+  {
+    IFS= read -r version
+    IFS= read -r recorded_operation
+    IFS= read -r pid
+    IFS= read -r identity
+    IFS= read -r binary
+    IFS= read -r repository
+    ! IFS= read -r extra
+  } < "$capability" || return 1
+  [ "$version" = fm-github-capability-v1 ] && [ "$recorded_operation" = "$operation" ] || return 1
+  [ "$binary" = "$expected_binary" ] && [ "$repository" = "$FM_GITHUB_REPOSITORY" ] || return 1
+  current_pid=$(fm_github_current_pid) || return 1
+  ancestor=$current_pid
+  while [ "$count" -lt 8 ]; do
+    ancestor=$(ps -o ppid= -p "$ancestor" 2>/dev/null | tr -d '[:space:]') || return 1
+    [ -n "$ancestor" ] || break
+    if [ "$ancestor" = "$pid" ]; then found=1; break; fi
+    count=$((count + 1))
+  done
+  [ "$found" -eq 1 ] || return 1
+  current=$(fm_github_process_identity "$pid" || true)
+  [ -n "$current" ] && [ "$current" = "$identity" ] || return 1
 }
 
 fm_github_install_path_shims() {
-  local home state base directory executable lock owner=0 attempts=0 tmp= name action identity owner_tmp
+  local home state base directory executable lock tmp= name action
   home=$(cd "$(fm_github_home)" 2>/dev/null && pwd -P) || return 1
   state="$home/state"
   if [ ! -e "$state" ]; then
@@ -366,41 +491,14 @@ fm_github_install_path_shims() {
   fi
   [ ! -e "$directory" ] && [ ! -L "$directory" ] || return 1
   lock="$base/.install.lock"
-  while [ "$attempts" -lt 100 ]; do
-    if mkdir -m 0700 "$lock" 2>/dev/null; then
-      identity=$(fm_github_process_identity "$$") || { rmdir "$lock" 2>/dev/null || true; return 1; }
-      owner_tmp="$lock/.owner.$$"
-      printf '%s\t%s\n' "$$" "$identity" > "$owner_tmp" || { rm -f "$owner_tmp" 2>/dev/null || true; rmdir "$lock" 2>/dev/null || true; return 1; }
-      chmod 0600 "$owner_tmp" || { rm -f "$owner_tmp" 2>/dev/null || true; rmdir "$lock" 2>/dev/null || true; return 1; }
-      mv "$owner_tmp" "$lock/owner" || { rm -f "$owner_tmp" 2>/dev/null || true; rmdir "$lock" 2>/dev/null || true; return 1; }
-      owner=1
-      break
-    fi
-    if fm_github_path_shims_valid "$directory" "$home" "$executable"; then
-      printf '%s\n' "$directory"
-      return 0
-    fi
-    if fm_github_install_lock_stale "$lock"; then
-      for tmp in "$lock"/.owner.*; do
-        [ -f "$tmp" ] && [ ! -L "$tmp" ] || continue
-        rm -f "$tmp" 2>/dev/null || true
-      done
-      rm -f "$lock/owner" 2>/dev/null || true
-      rmdir "$lock" 2>/dev/null || true
-      continue
-    fi
-    attempts=$((attempts + 1))
-    sleep 0.05
-  done
-  [ "$owner" -eq 1 ] || return 1
+  fm_github_lock_acquire "$lock" 100 || return 1
   if fm_github_path_shims_valid "$directory" "$home" "$executable"; then
-    rm -f "$lock/owner" 2>/dev/null || return 1
-    rmdir "$lock" 2>/dev/null || return 1
+    fm_github_lock_release || return 1
     printf '%s\n' "$directory"
     return 0
   fi
-  tmp=$(mktemp -d "$base/.context-v1.XXXXXX") || { rm -f "$lock/owner" 2>/dev/null || true; rmdir "$lock" 2>/dev/null || true; return 1; }
-  trap '[ -z "${tmp:-}" ] || { chmod 0700 "$tmp" 2>/dev/null || true; rm -rf -- "$tmp" 2>/dev/null || true; }; [ -z "${lock:-}" ] || { rm -f "$lock/owner" 2>/dev/null || true; rmdir "$lock" 2>/dev/null || true; }' EXIT HUP INT TERM
+  tmp=$(mktemp -d "$base/.context-v1.XXXXXX") || { fm_github_lock_release 2>/dev/null || true; return 1; }
+  trap '[ -z "${tmp:-}" ] || { chmod 0700 "$tmp" 2>/dev/null || true; rm -rf -- "$tmp" 2>/dev/null || true; }; fm_github_lock_release 2>/dev/null || true' EXIT HUP INT TERM
   for name in git gh gh-axi no-mistakes; do
     case "$name" in
       git) action=child-git ;;
@@ -414,8 +512,7 @@ fm_github_install_path_shims() {
   mv "$tmp" "$directory" || return 1
   tmp=
   chmod 0500 "$directory" || return 1
-  rm -f "$lock/owner" 2>/dev/null || return 1
-  rmdir "$lock" 2>/dev/null || return 1
+  fm_github_lock_release || return 1
   trap - EXIT HUP INT TERM
   fm_github_path_shims_valid "$directory" "$home" "$executable" || return 1
   printf '%s\n' "$directory"
@@ -1226,18 +1323,20 @@ fm_github_validate_preregistration_command() {
           [ "$FM_GITHUB_ALLOW_UNREGISTERED_PROJECT" != 1 ] || return 1
           expected_parent=$(cd "$FM_GITHUB_CLONE_ROOT" 2>/dev/null && pwd -P) || return 1
           ;;
+        gh-project)
+          [ "$FM_GITHUB_ALLOW_UNREGISTERED_PROJECT" != 1 ] || return 1
+          expected_parent=$(cd "$(fm_github_home)/projects" 2>/dev/null && pwd -P) || return 1
+          ;;
         *) return 1 ;;
       esac
       [ -n "$FM_GITHUB_PROJECT" ] && [ ! -d "$repository" ] || return 1
-      if [ "$#" -eq 3 ] && [ "$1" = clone ]; then
-        source=$2
-        destination=$3
-      elif [ "$#" -eq 4 ] && [ "$1" = clone ] && [ "$2" = --quiet ]; then
-        source=$3
-        destination=$4
-      else
-        return 1
-      fi
+      [ "${1:-}" = clone ] || return 1
+      shift
+      [ "${1:-}" != --quiet ] || shift
+      [ "${1:-}" != -- ] || shift
+      [ "$#" -eq 2 ] || return 1
+      source=$1
+      destination=$2
       canonical=$(fm_github_repository_allowed "$source") || return 1
       [ "$(printf '%s' "$canonical" | tr '[:upper:]' '[:lower:]')" = "$(printf '%s' "$FM_GITHUB_REPOSITORY" | tr '[:upper:]' '[:lower:]')" ] || return 1
       [ ! -e "$destination" ] && [ ! -L "$destination" ] || return 1
@@ -1259,33 +1358,25 @@ fm_github_validate_preregistration_command() {
   esac
 }
 
+fm_github_validate_gh_clone_command() {
+  local repository=$1 source=${2:-} destination=${3:-} expected_parent parent canonical
+  [ "$#" -eq 3 ] && [ -n "$FM_GITHUB_PROJECT" ] && [ ! -d "$repository" ] || return 1
+  fm_github_projects_cwd || return 1
+  canonical=$(fm_github_repository_allowed "$source") || return 1
+  [ "$(printf '%s' "$canonical" | tr '[:upper:]' '[:lower:]')" = "$(printf '%s' "$FM_GITHUB_REPOSITORY" | tr '[:upper:]' '[:lower:]')" ] || return 1
+  expected_parent=$(cd "$(fm_github_home)/projects" 2>/dev/null && pwd -P) || return 1
+  [ ! -e "$destination" ] && [ ! -L "$destination" ] || return 1
+  parent=${destination%/*}
+  [ "$parent" != "$destination" ] || parent=.
+  parent=$(cd "$parent" 2>/dev/null && pwd -P) || return 1
+  [ "$parent" = "$expected_parent" ] && [ "${destination##*/}" = "$FM_GITHUB_PROJECT" ]
+}
+
 fm_github_projects_cwd() {
   local projects cwd
   projects=$(cd "$(fm_github_home)/projects" 2>/dev/null && pwd -P) || return 1
   cwd=$(pwd -P) || return 1
   [ "$cwd" = "$projects" ]
-}
-
-fm_github_parent_is_exact_gh_axi() {
-  local parent_args parent_executable binary=$FM_GITHUB_GH_AXI_BINARY
-  parent_args=$(ps -ww -o command= -p "$PPID" 2>/dev/null) || return 1
-  parent_args=${parent_args#${parent_args%%[![:space:]]*}}
-  if [ -e "/proc/$PPID/exe" ]; then
-    parent_executable=$(readlink "/proc/$PPID/exe" 2>/dev/null || true)
-  else
-    parent_executable=$(ps -o comm= -p "$PPID" 2>/dev/null | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
-  fi
-  case "$parent_args" in
-    "$binary"|"$binary "*)
-      [ "$parent_executable" = "$binary" ] || [ "${parent_executable##*/}" = gh-axi ]
-      return
-      ;;
-    bash\ "$binary"|bash\ "$binary "*|/bin/bash\ "$binary"|/bin/bash\ "$binary "*|/usr/bin/env\ bash\ "$binary"|/usr/bin/env\ bash\ "$binary "*)
-      [ "${parent_executable##*/}" = bash ]
-      return
-      ;;
-  esac
-  return 1
 }
 
 fm_github_validate_internal_api() {
@@ -1362,7 +1453,7 @@ fm_github_internal_gh_api_command() {
   shift 3
   [ "${1:-}" = api ] || return 1
   fm_github_activate "$project" "$repository" "$required_profile" || return 1
-  fm_github_parent_is_exact_gh_axi || return 1
+  fm_github_validate_capability gh-axi-api "$FM_GITHUB_GH_AXI_BINARY" || return 1
   target_repository=$(fm_github_validate_internal_api "$@") || return 1
   repo_path=$(fm_github_actual_repository_path "${FM_GITHUB_PROJECT_PATH:-}") || {
     echo "error: current repository is not the configured project or task copy" >&2
@@ -1459,7 +1550,15 @@ fm_github_context_command() {
           }
           ;;
       esac
-      case "$operation" in
+      case "$operation:${1:-}:${2:-}" in
+        read:repo:clone)
+          fm_github_validate_gh_clone_command "$repository" "${3:-}" "${4:-}" || {
+            echo "error: routed GitHub clone requires the canonical project destination" >&2
+            return 1
+          }
+          ;;
+        *)
+          case "$operation" in
         local|helper) ;;
         *)
           if [ "$operation" != create ] || ! fm_github_projects_cwd; then
@@ -1469,6 +1568,8 @@ fm_github_context_command() {
             }
           fi
           fm_github_validate_repository_path "${repo_path:-}" || return 1
+          ;;
+          esac
           ;;
       esac
       case "$operation" in
@@ -1486,7 +1587,24 @@ fm_github_context_command() {
       esac
       github_binary=$FM_GITHUB_GH_BINARY
       [ "${tool##*/}" != gh-axi ] || github_binary=$FM_GITHUB_GH_AXI_BINARY
-      if ! command "$github_binary" "$@" 2>/dev/null; then
+      if [ "${tool##*/}" = gh-axi ]; then
+        if [ "$operation" = create ] && [ "${FM_GITHUB_ALLOW_UNREGISTERED_PROJECT:-}" = 1 ]; then
+          fm_github_run_with_capability gh-axi-preregister "$github_binary" "$@" 2>/dev/null || {
+            echo "error: routed GitHub command failed for profile $FM_GITHUB_PROFILE_ID" >&2
+            return 1
+          }
+        else
+          fm_github_run_with_capability gh-axi-api "$github_binary" "$@" 2>/dev/null || {
+            echo "error: routed GitHub command failed for profile $FM_GITHUB_PROFILE_ID" >&2
+            return 1
+          }
+        fi
+      elif [ "${1:-}" = repo ] && [ "${2:-}" = clone ]; then
+        fm_github_run_with_capability gh-repo-clone "$github_binary" "$@" 2>/dev/null || {
+          echo "error: routed GitHub command failed for profile $FM_GITHUB_PROFILE_ID" >&2
+          return 1
+        }
+      elif ! command "$github_binary" "$@" 2>/dev/null; then
         echo "error: routed GitHub command failed for profile $FM_GITHUB_PROFILE_ID" >&2
         return 1
       fi

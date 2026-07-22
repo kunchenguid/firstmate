@@ -16,7 +16,6 @@ set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
-unset FM_NO_MISTAKES_BINARY
 case "${1:-}" in
   child-*)
     [ "${2:-}" = --home ] && [ -n "${3:-}" ] && [ "${4:-}" = -- ] || {
@@ -24,11 +23,12 @@ case "${1:-}" in
       exit 2
     }
     FM_HOME=$3
+    unset FM_GITHUB_ALLOW_UNREGISTERED_PROJECT FM_GITHUB_CLONE_CAPABILITY FM_GITHUB_CLONE_ROOT
     ;;
   *)
     FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
     unset FM_GITHUB_ACTIVE FM_GITHUB_ALLOW_UNREGISTERED_PROJECT FM_GITHUB_CLONE_CAPABILITY FM_GITHUB_CLONE_ROOT
-    unset FM_GITHUB_NO_MISTAKES_BINARY
+    unset FM_GITHUB_INVOCATION_CAPABILITY
     ;;
 esac
 export FM_HOME
@@ -151,18 +151,22 @@ NODE
 }
 
 run_no_mistakes_init() {
-  local match_existing=${1:-refresh} binary context_file binding_file context_dir marker marker_tmp parent fork_repository args=()
+  local match_existing=${1:-initialize} captured_binding=${2:-} run_id=${3:-} run_branch=${4:-}
+  local binary context_file binding_file context_dir marker parent fork_repository args=()
   [ -n "$repository" ] || github_exec_usage
+  if ! fm_github_enabled; then
+    binary=${FM_NO_MISTAKES_BINARY:-${FM_GITHUB_NO_MISTAKES_BINARY:-}}
+    [ -n "$binary" ] || binary=$(command -v no-mistakes 2>/dev/null || true)
+    [ -n "$binary" ] && [ -x "$binary" ] || { echo "error: no-mistakes command not found" >&2; return 1; }
+    [ -z "$fork_url" ] || args+=(--fork-url "$fork_url")
+    (cd "$repository" && command "$binary" init "${args[@]+"${args[@]}"}")
+    return
+  fi
   binary=$(fm_github_resolve_no_mistakes_binary 2>/dev/null || true)
   [ -n "$binary" ] && [ -f "$binary" ] && [ -x "$binary" ] || {
     echo "error: no-mistakes command not found" >&2
     return 1
   }
-  if ! fm_github_enabled; then
-    [ -z "$fork_url" ] || args+=(--fork-url "$fork_url")
-    (cd "$repository" && command "$binary" init "${args[@]+"${args[@]}"}")
-    return
-  fi
   fm_github_activate "$project" "$repository" "$profile" || return 1
   fm_github_validate_local_config "$repository" || return 1
   fm_github_preflight read || return 1
@@ -203,41 +207,75 @@ NODE
   [ -s "$binding_file" ] || return 1
   marker=$(no_mistakes_context_marker_path) || return 1
   if [ "$match_existing" = match ]; then
-    [ -f "$marker" ] && [ ! -L "$marker" ] && [ "$(fm_github_file_mode "$marker")" = 600 ] && cmp -s "$binding_file" "$marker" || {
+    if ! { [ -n "$run_id" ] && [ -n "$run_branch" ] \
+      && [ -f "$marker" ] && [ ! -L "$marker" ] && [ "$(fm_github_file_mode "$marker")" = 600 ] \
+      && fm_github_node - "$marker" "$binding_file" "$run_id" "$run_branch" <<'NODE'
+const fs = require("node:fs");
+const [markerFile, bindingFile, runId, branch] = process.argv.slice(2);
+const marker = JSON.parse(fs.readFileSync(markerFile, "utf8"));
+const binding = JSON.parse(fs.readFileSync(bindingFile, "utf8"));
+if (marker.version !== 1 || marker.run_id !== runId || marker.branch !== branch
+  || JSON.stringify(marker.binding) !== JSON.stringify(binding)) process.exit(1);
+NODE
+    }; then
       echo "error: active no-mistakes run is bound to a stale GitHub routing context" >&2
       return 1
-    }
-  fi
-  if [ "$match_existing" != record ]; then
-    args=(--github-context "$context_file")
-    [ -z "$fork_url" ] || args+=(--fork-url "$fork_url")
-    (cd "$repository" && command "$binary" init "${args[@]}") || return 1
-  fi
-  if [ "$match_existing" = record ]; then
-    { [ ! -e "$marker" ] && [ ! -L "$marker" ]; } || { [ -f "$marker" ] && [ ! -L "$marker" ]; } || return 1
-    marker_tmp=$(mktemp "${marker%/*}/.context.XXXXXX") || return 1
-    if ! cp "$binding_file" "$marker_tmp" || ! chmod 0600 "$marker_tmp" || ! mv -f "$marker_tmp" "$marker"; then
-      rm -f "$marker_tmp" 2>/dev/null || true
-      return 1
     fi
+  fi
+  args=(--github-context "$context_file")
+  [ -z "$fork_url" ] || args+=(--fork-url "$fork_url")
+  (cd "$repository" && command "$binary" init "${args[@]}") || return 1
+  if [ -n "$captured_binding" ]; then
+    cp "$binding_file" "$captured_binding" && chmod 0600 "$captured_binding" || return 1
   fi
   rm -f -- "$context_file" "$binding_file"
   trap - EXIT HUP INT TERM
 }
 
-no_mistakes_run_status() {
-  local binary=$1 output status
-  output=$(cd "$repository" && LC_ALL=C command "$binary" axi status 2>/dev/null) || return 1
-  status=$(printf '%s\n' "$output" | sed -n 's/^  status: //p' | head -1)
-  case "$status" in
-    running) printf '%s\n' active ;;
-    ''|completed|failed|cancelled) printf '%s\n' inactive ;;
+no_mistakes_run_details() {
+  local binary=$1 output current_branch current_head run_head
+  NM_RUN_ID= NM_RUN_BRANCH= NM_RUN_STATUS= NM_RUN_HEAD= NM_RUN_STATE=inactive
+  output=$(cd "$repository" && LC_ALL=C command "$binary" axi status 2>/dev/null) || return 2
+  NM_RUN_ID=$(printf '%s\n' "$output" | sed -n 's/^  id: //p' | head -1)
+  NM_RUN_BRANCH=$(printf '%s\n' "$output" | sed -n 's/^  branch: //p' | head -1)
+  NM_RUN_STATUS=$(printf '%s\n' "$output" | sed -n 's/^  status: //p' | head -1)
+  NM_RUN_HEAD=$(printf '%s\n' "$output" | sed -n 's/^  head: //p' | head -1)
+  [ -n "$NM_RUN_ID" ] && [ -n "$NM_RUN_BRANCH" ] && [ -n "$NM_RUN_STATUS" ] && [ -n "$NM_RUN_HEAD" ] || return 1
+  current_branch=$(command "$FM_GITHUB_GIT_BINARY" -C "$repository" symbolic-ref --quiet --short HEAD 2>/dev/null) || return 1
+  current_head=$(command "$FM_GITHUB_GIT_BINARY" -C "$repository" rev-parse HEAD 2>/dev/null) || return 1
+  [ "$NM_RUN_BRANCH" = "$current_branch" ] || return 2
+  run_head=$(command "$FM_GITHUB_GIT_BINARY" -C "$repository" rev-parse "$NM_RUN_HEAD^{commit}" 2>/dev/null) || return 2
+  [ "$current_head" = "$run_head" ] \
+    || command "$FM_GITHUB_GIT_BINARY" -C "$repository" merge-base --is-ancestor "$current_head" "$run_head" 2>/dev/null \
+    || return 2
+  case "$NM_RUN_STATUS" in
+    running|fixing|ci|awaiting_approval|fix_review) NM_RUN_STATE=active ;;
+    completed|failed|cancelled) NM_RUN_STATE=inactive ;;
     *) return 1 ;;
   esac
+  return 0
+}
+
+record_no_mistakes_binding() {
+  local binding=$1 run_id=$2 branch=$3 marker marker_tmp
+  marker=$(no_mistakes_context_marker_path) || return 1
+  { [ ! -e "$marker" ] && [ ! -L "$marker" ]; } || { [ -f "$marker" ] && [ ! -L "$marker" ]; } || return 1
+  marker_tmp=$(mktemp "${marker%/*}/.context.XXXXXX") || return 1
+  if ! fm_github_node - "$binding" "$marker_tmp" "$run_id" "$branch" <<'NODE'
+const fs = require("node:fs");
+const [bindingFile, markerFile, runId, branch] = process.argv.slice(2);
+const marker = {version: 1, run_id: runId, branch, binding: JSON.parse(fs.readFileSync(bindingFile, "utf8"))};
+fs.writeFileSync(markerFile, `${JSON.stringify(marker, null, 2)}\n`, {mode: 0o600});
+NODE
+  then
+    rm -f "$marker_tmp" 2>/dev/null || true
+    return 1
+  fi
+  chmod 0600 "$marker_tmp" && mv -f "$marker_tmp" "$marker"
 }
 
 run_no_mistakes_command() {
-  local marker had_marker=0 arg has_intent=0 run_status
+  local marker lock capture= arg has_intent=0 prior_id= command_status=0 detail_status
   FM_GITHUB_NO_MISTAKES_BINARY=$(fm_github_resolve_no_mistakes_binary 2>/dev/null || true)
   [ -n "$FM_GITHUB_NO_MISTAKES_BINARY" ] && [ -f "$FM_GITHUB_NO_MISTAKES_BINARY" ] && [ -x "$FM_GITHUB_NO_MISTAKES_BINARY" ] || {
     echo "error: no-mistakes command not found" >&2
@@ -249,37 +287,56 @@ run_no_mistakes_command() {
       return 1
     }
     repository=$FM_GITHUB_PROJECT_PATH
-    if [ "${2:-}" = respond ]; then
-      run_no_mistakes_init match || return 1
-    else
-      marker=$(no_mistakes_context_marker_path) || return 1
-      run_status=$(no_mistakes_run_status "$FM_GITHUB_NO_MISTAKES_BINARY") || {
-        echo "error: cannot determine whether no-mistakes would start or reattach a run" >&2
+    marker=$(no_mistakes_context_marker_path) || return 1
+    lock="${marker%.json}.lock"
+    fm_github_lock_acquire "$lock" 100 || { echo "error: no-mistakes routing operation is already in progress" >&2; return 1; }
+    if no_mistakes_run_details "$FM_GITHUB_NO_MISTAKES_BINARY"; then detail_status=0; else detail_status=$?; fi
+    if [ "$detail_status" -eq 1 ]; then
+      fm_github_lock_release || true
+      echo "error: cannot determine the current no-mistakes run identity" >&2
+      return 1
+    fi
+    if [ "$detail_status" -eq 0 ]; then prior_id=$NM_RUN_ID; fi
+    if [ "${2:-}" = respond ] || { [ "$detail_status" -eq 0 ] && [ "$NM_RUN_STATE" = active ]; }; then
+      [ "$detail_status" -eq 0 ] && [ "$NM_RUN_STATE" = active ] || {
+        fm_github_lock_release || true
+        echo "error: no active current-branch no-mistakes run is available" >&2
         return 1
       }
-      if [ "$run_status" = active ]; then
-        [ -f "$marker" ] && [ ! -L "$marker" ] || {
-          echo "error: active no-mistakes run has no authenticated GitHub routing marker" >&2
-          return 1
-        }
-        had_marker=1
-        run_no_mistakes_init match || return 1
-      else
+      run_no_mistakes_init match "" "$NM_RUN_ID" "$NM_RUN_BRANCH" || { fm_github_lock_release || true; return 1; }
+    else
+      if [ "${2:-}" = run ]; then
         for arg in "$@"; do
           case "$arg" in --intent|--intent=*) has_intent=1 ;; esac
         done
         [ "$has_intent" -eq 1 ] || {
           echo "error: first strict no-mistakes run requires a new-run intent before binding GitHub routing" >&2
+          fm_github_lock_release || true
           return 1
         }
-        run_no_mistakes_init initialize || return 1
+        mkdir -p "$FM_HOME/state/.github-routing-tmp" || { fm_github_lock_release || true; return 1; }
+        capture=$(mktemp "$FM_HOME/state/.github-routing-tmp/no-mistakes-captured.XXXXXX") || { fm_github_lock_release || true; return 1; }
+        run_no_mistakes_init initialize "$capture" || { rm -f "$capture"; fm_github_lock_release || true; return 1; }
       fi
     fi
-    (cd "$repository" && command "$FM_GITHUB_NO_MISTAKES_BINARY" "$@") || return 1
-    if [ "${2:-}" = run ] && [ "$had_marker" -eq 0 ]; then
-      run_no_mistakes_init record || return 1
+    if (cd "$repository" && command "$FM_GITHUB_NO_MISTAKES_BINARY" "$@"); then
+      command_status=0
+    else
+      command_status=$?
     fi
-    return
+    if [ -n "$capture" ]; then
+      if no_mistakes_run_details "$FM_GITHUB_NO_MISTAKES_BINARY"; then detail_status=0; else detail_status=$?; fi
+      if [ "$detail_status" -ne 0 ] || [ "$NM_RUN_ID" = "$prior_id" ]; then
+        rm -f "$capture"
+        fm_github_lock_release || true
+        echo "error: no-mistakes did not establish an attributable new current-branch run" >&2
+        return 1
+      fi
+      record_no_mistakes_binding "$capture" "$NM_RUN_ID" "$NM_RUN_BRANCH" || { rm -f "$capture"; fm_github_lock_release || true; return 1; }
+      rm -f "$capture"
+    fi
+    fm_github_lock_release || return 1
+    return "$command_status"
   fi
   command "$FM_GITHUB_NO_MISTAKES_BINARY" "$@"
 }
@@ -327,6 +384,11 @@ case "$action" in
     shift 3
     child_context
     [ "$#" -gt 0 ] || github_exec_usage
+    if fm_github_validate_capability gh-repo-clone "$FM_GITHUB_GH_BINARY"; then
+      FM_GITHUB_CLONE_CAPABILITY=gh-project
+      FM_GITHUB_CLONE_ROOT="$FM_HOME/projects"
+      export FM_GITHUB_CLONE_CAPABILITY FM_GITHUB_CLONE_ROOT
+    fi
     fm_github_context_command "$project" "$repository" "$profile" git "$@"
     ;;
   child-gh)
@@ -334,6 +396,10 @@ case "$action" in
     shift 3
     child_context
     [ "$#" -gt 0 ] || github_exec_usage
+    if fm_github_validate_capability gh-axi-preregister "$FM_GITHUB_GH_AXI_BINARY"; then
+      FM_GITHUB_ALLOW_UNREGISTERED_PROJECT=1
+      export FM_GITHUB_ALLOW_UNREGISTERED_PROJECT
+    fi
     if [ "${1:-}" = api ]; then
       fm_github_internal_gh_api_command "$project" "$repository" "$profile" "$@"
     else

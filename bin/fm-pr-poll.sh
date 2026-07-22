@@ -82,7 +82,7 @@ case "$provider" in
     SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
     FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
     FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
-    CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
+    CONFIG="$FM_HOME/config"
     if [ -z "$profile" ] && { [ -e "$CONFIG/github-accounts.json" ] || [ -L "$CONFIG/github-accounts.json" ]; }; then
       exit 0
     fi

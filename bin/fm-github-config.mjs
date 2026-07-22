@@ -244,7 +244,17 @@ function validateRepositoryGraphQL(query, nameVariable) {
   take(":");
   take(`$${nameVariable}`);
   take(")");
-  balanced("{", "}");
+  take("{");
+  let depth = 1;
+  const forbiddenTraversal = new Set(["owner", "parent", "forks", "repositories", "repository", "templateRepository", "submodules"]);
+  while (depth > 0 && index < tokens.length) {
+    const token = tokens[index];
+    if (token === "{") depth += 1;
+    else if (token === "}") depth -= 1;
+    else if (forbiddenTraversal.has(token)) throw new Error("invalid GraphQL request");
+    index += 1;
+  }
+  if (depth !== 0) throw new Error("invalid GraphQL request");
   take("}");
   if (index !== tokens.length) throw new Error("invalid GraphQL request");
 }
