@@ -487,64 +487,199 @@ const repositoryMatches = (requestArgs, targetRepository = "") => {
   const selected = [targetRepository, ...explicit].filter(Boolean);
   return selected.every((value) => value.toLowerCase() === repository.toLowerCase());
 };
-const withoutType = [];
-for (let index = 2; index < args.length; index += 1) {
-  const arg = args[index];
-  if (arg === "--type") {
-    index += 1;
-  } else if (!arg.startsWith("--type=")) {
-    withoutType.push(arg);
-  }
-}
-const normalizedChildren = new Map([
-  ["pr:checks", ["pr:view"]],
-  ["pr:close", ["pr:view"]],
-  ["pr:merge", ["pr:view"]],
-  ["pr:ready", ["pr:view"]],
-  ["pr:update-branch", ["pr:view"]],
-  ["issue:create", ["issue:view"]],
-  ["issue:edit", ["issue:view"]],
-  ["issue:close", ["issue:view"]],
-  ["issue:reopen", ["issue:view"]],
-  ["issue:comment", ["issue:view"]],
-  ["issue:lock", ["issue:view"]],
-  ["issue:unlock", ["issue:view"]],
-  ["issue:pin", ["issue:view"]],
-  ["issue:unpin", ["issue:view"]],
-  ["issue:transfer", ["issue:view"]],
-  ["label:create", ["label:list"]],
+const booleanFlags = new Set([
+  "--admin", "--all", "--approve", "--archived", "--auto", "--clone", "--comments", "--debug",
+  "--delete-branch", "--draft", "--exclude-drafts", "--exclude-pre-releases", "--exit-status",
+  "--failed", "--full", "--generate-notes", "--internal", "--latest", "--log", "--log-failed",
+  "--merge", "--no-type", "--prerelease", "--private", "--public", "--rebase", "--remove-type",
+  "--request-changes", "--reviews", "--squash", "--verify-tag", "--verbose", "--yes",
 ]);
-const targetedCommands = new Set([
-  "pr:checks", "pr:checkout", "pr:close", "pr:comment", "pr:diff", "pr:edit", "pr:lock",
-  "pr:merge", "pr:ready", "pr:reopen", "pr:review", "pr:revert", "pr:unlock",
-  "pr:update-branch", "pr:view", "issue:close", "issue:comment", "issue:delete", "issue:develop",
-  "issue:edit", "issue:lock", "issue:pin", "issue:reopen", "issue:transfer", "issue:unlock",
-  "issue:unpin", "issue:view",
-]);
-const normalizedPairAllowed = (requestArgs) => {
-  if (requestArgs.length < 2 || requestArgs[0] !== args[0]) return false;
-  const outer = `${args[0]}:${args[1]}`;
-  const child = `${requestArgs[0]}:${requestArgs[1]}`;
-  return child === outer || (normalizedChildren.get(outer) || []).includes(child);
+const canonicalFlag = (flag, command) => {
+  if (flag === "-R") return "--repo";
+  if (flag === "-b") return "--body";
+  if (flag === "-t") return "--title";
+  if (flag === "-F") return command.startsWith("release:") ? "--notes-file" : "--body-file";
+  if (flag === "-n") return "--notes";
+  if (flag === "-s" && command === "pr:merge") return "--squash";
+  if (flag === "-m" && command === "pr:merge") return "--merge";
+  if (flag === "-r" && command === "pr:merge") return "--rebase";
+  return flag;
 };
-const normalizedTargetAllowed = (requestArgs) => {
-  const command = `${requestArgs[0]}:${requestArgs[1]}`;
-  if (targetedCommands.has(command)) {
-    const target = issueTarget(requestArgs[2] || "");
-    if (!target || !resourceNumbers.has(target.number) || !repositoryMatches(requestArgs, target.repository)) return false;
+const addFlag = (flags, name, value) => {
+  const values = flags.get(name) || [];
+  values.push(value);
+  flags.set(name, values);
+};
+const parseCommand = (commandArgs) => {
+  if (commandArgs.length < 2) return null;
+  const command = `${commandArgs[0]}:${commandArgs[1]}`;
+  const flags = new Map();
+  const positionals = [];
+  for (let index = 2; index < commandArgs.length; index += 1) {
+    const arg = commandArgs[index];
+    if (arg.startsWith("-R") && arg.length > 2) {
+      addFlag(flags, "--repo", arg.slice(2));
+      continue;
+    }
+    if (!arg.startsWith("-")) {
+      positionals.push(arg);
+      continue;
+    }
+    const separator = arg.indexOf("=");
+    const rawName = separator > 0 ? arg.slice(0, separator) : arg;
+    const name = canonicalFlag(rawName, command);
+    if (separator > 0) {
+      addFlag(flags, name, arg.slice(separator + 1));
+    } else if (booleanFlags.has(name)) {
+      addFlag(flags, name, null);
+    } else {
+      const value = commandArgs[index + 1];
+      if (typeof value !== "string" || value.startsWith("-")) return null;
+      addFlag(flags, name, value);
+      index += 1;
+    }
   }
-  if (command === "repo:view" && requestArgs[2] && !requestArgs[2].startsWith("-")) {
-    if (repositoryValue(requestArgs[2]).toLowerCase() !== repository.toLowerCase()) return false;
+  return {command, flags, positionals};
+};
+const sameValues = (first, second) => JSON.stringify(first || []) === JSON.stringify(second || []);
+const jsonFieldsAllowed = (command, value) => {
+  const exact = new Map([
+    ["repo:view", ["name,description,defaultBranchRef,stargazerCount,forkCount,issues,pullRequests,visibility,primaryLanguage"]],
+    ["repo:list", ["name,description,visibility,primaryLanguage,stargazerCount,updatedAt"]],
+    ["pr:view", ["number,title,state,author,isDraft,mergedAt,statusCheckRollup,body,comments,reviews"]],
+    ["issue:view", [
+      "number,title,state,author,createdAt,body", "number,title,state,author,createdAt,body,comments",
+      "number,title,state,author,createdAt,body,issueType", "number,title,state,author,createdAt,body,comments,issueType",
+    ]],
+    ["label:list", ["name"]],
+    ["workflow:list", ["id,name,state,path"]],
+    ["run:view", ["databaseId", "databaseId,displayTitle,status,conclusion,workflowName,headBranch,createdAt,jobs"]],
+    ["release:list", ["tagName,name,isDraft,isPrerelease,publishedAt"]],
+    ["release:view", ["tagName,name,publishedAt,author,body"]],
+    ["secret:list", ["name,updatedAt"]],
+    ["variable:list", ["name,value,updatedAt"]],
+  ]);
+  if ((exact.get(command) || []).includes(value)) return true;
+  const extensible = new Map([
+    ["pr:list", ["number,title,state,author,isDraft,reviewDecision", ["body", "createdAt", "labels", "milestone", "mergedAt", "url"]]],
+    ["issue:list", ["number,title,state,author,createdAt", ["body", "closedAt", "labels", "milestone", "updatedAt", "url"]]],
+    ["run:list", ["databaseId,displayTitle,status,conclusion,workflowName,headBranch,event,createdAt", ["headSha", "number", "url", "updatedAt"]]],
+  ]);
+  const contract = extensible.get(command);
+  if (!contract) return false;
+  const base = contract[0].split(",");
+  const fields = value.split(",");
+  const extras = fields.slice(base.length);
+  return JSON.stringify(fields.slice(0, base.length)) === JSON.stringify(base)
+    && new Set(extras).size === extras.length && extras.every((field) => contract[1].includes(field));
+};
+const defaultLimits = new Map([
+  ["repo:list", "30"], ["pr:list", "30"], ["issue:list", "30"], ["label:list", "500"],
+  ["workflow:list", "20"], ["run:list", "10"], ["release:list", "10"],
+]);
+const generatedFlagAllowed = (request, outer, name, values) => {
+  if (name === "--repo") return true;
+  if (name === "--json") return values.length === 1 && jsonFieldsAllowed(request.command, values[0]);
+  if (name === "--limit") {
+    const expected = outer.flags.get("--limit") || [defaultLimits.get(request.command)];
+    return expected[0] !== undefined && sameValues(values, expected);
+  }
+  if (name === "--state" && request.command === "pr:list" && !outer.flags.has("--state")) {
+    return sameValues(values, ["open"]);
+  }
+  if (name === "--yes" && ["issue:delete", "label:delete", "release:delete"].includes(request.command)) {
+    return sameValues(values, [null]);
+  }
+  if (name === "--exit-status" && request.command === "run:watch") return sameValues(values, [null]);
+  if (name === "--log" && request.command === "run:view" && outer.flags.has("--verbose")) return sameValues(values, [null]);
+  if (name === "--body" && outer.flags.has("--body-file")) return values.length === 1;
+  if (name === "--notes" && (outer.flags.has("--body") || outer.flags.has("--body-file"))) return values.length === 1;
+  if (name === "--search" && request.command === "issue:list" && outer.flags.has("--sort")) {
+    return sameValues(values, [`sort:${outer.flags.get("--sort")[0]}-desc`]);
+  }
+  return false;
+};
+const ignoredOuterFlags = new Set([
+  "--comments", "--conclusion", "--fields", "--full", "--no-type", "--remove-type", "--reviews", "--type",
+]);
+const sameOperationAllowed = (requestArgs) => {
+  const outer = parseCommand(args);
+  const request = parseCommand(requestArgs);
+  if (!outer || !request || outer.command !== request.command || !repositoryMatches(requestArgs)) return false;
+  let expectedPositionals = outer.positionals;
+  if (outer.command === "issue:transfer") {
+    const destination = outer.flags.get("--to-repo");
+    if (!destination || destination.length !== 1) return false;
+    expectedPositionals = [...outer.positionals, destination[0]];
+  } else if (outer.command === "repo:view" && expectedPositionals.length === 0 && request.positionals.length === 1) {
+    expectedPositionals = [repository.slice("github.com/".length)];
+  }
+  if (JSON.stringify(request.positionals) !== JSON.stringify(expectedPositionals)) return false;
+  for (const [name, values] of request.flags) {
+    if (name === "--type" || name === "--no-type" || name === "--remove-type") return false;
+    if (!sameValues(values, outer.flags.get(name)) && !generatedFlagAllowed(request, outer, name, values)) return false;
+  }
+  for (const [name, values] of outer.flags) {
+    if (name === "--repo" || ignoredOuterFlags.has(name) || (name === "--to-repo" && outer.command === "issue:transfer")) continue;
+    if (name === "--body-file" && request.flags.has("--body")) continue;
+    if (name === "--body" && request.command.startsWith("release:") && request.flags.has("--notes")) continue;
+    if (name === "--sort" && request.command === "issue:list" && request.flags.has("--search")) continue;
+    if (name === "--verbose" && request.command === "run:view" && request.flags.has("--log")) continue;
+    if (!sameValues(values, request.flags.get(name))) return false;
   }
   return true;
 };
-const validateNonApi = (requestArgs) => {
-  if (JSON.stringify(requestArgs) === JSON.stringify(args) && repositoryMatches(requestArgs)) return {kind: "outer", number: ""};
-  if (typeOperation && args[1] === "create" && requestArgs[1] === "create"
-    && JSON.stringify(requestArgs.slice(2)) === JSON.stringify(withoutType)
-    && repositoryMatches(requestArgs)) {
-    return {kind: "issue-create", number: ""};
+const withoutRepository = (commandArgs) => {
+  const result = [];
+  for (let index = 0; index < commandArgs.length; index += 1) {
+    const arg = commandArgs[index];
+    if (arg === "--repo" || arg === "-R") index += 1;
+    else if (!arg.startsWith("--repo=") && !(arg.startsWith("-R") && arg.length > 2)) result.push(arg);
   }
+  return result;
+};
+const exactChildAllowed = (requestArgs) => {
+  if (!repositoryMatches(requestArgs)) return false;
+  const outer = parseCommand(args);
+  if (!outer) return false;
+  const child = withoutRepository(requestArgs);
+  const target = outer.positionals[0] || "";
+  const exact = (...values) => values.some((value) => JSON.stringify(child) === JSON.stringify(value));
+  switch (outer.command) {
+    case "pr:checks": return exact(["pr", "view", target, "--json", "statusCheckRollup"]);
+    case "pr:close": return exact(["pr", "view", target, "--json", "state"]);
+    case "pr:merge": return exact(["pr", "view", target, "--json", "state,mergedBy,mergedAt"]);
+    case "pr:ready": return exact(["pr", "view", target, "--json", "isDraft"]);
+    case "pr:reopen": return exact(["pr", "view", target, "--json", "state"]);
+    case "issue:create":
+      return [...resourceNumbers].some((number) => exact(["issue", "view", number, "--json", "number,title,state,url,id"]));
+    case "issue:edit": return exact(["issue", "view", target, "--json", "number,title,state,labels,assignees,id"]);
+    case "issue:close": return exact(
+      ["issue", "view", target, "--json", "state"], ["issue", "view", target, "--json", "number,state"]);
+    case "issue:reopen": return exact(
+      ["issue", "view", target, "--json", "state"], ["issue", "view", target, "--json", "number,state"]);
+    case "issue:comment": return exact(["issue", "view", target, "--json", "comments"]);
+    case "issue:lock":
+    case "issue:unlock": return exact(
+      ["issue", "view", target, "--json", "state,locked"], ["issue", "view", target, "--json", "number,state,locked"]);
+    case "issue:pin":
+    case "issue:unpin": return exact(
+      ["issue", "view", target, "--json", "state,isPinned"], ["issue", "view", target, "--json", "number,state,isPinned"]);
+    case "issue:transfer": return exact(["issue", "view", target, "--json", "number,url"]);
+    case "label:create": return exact(["label", "list", "--json", "name"]);
+    case "run:cancel": return exact(["run", "view", target, "--json", "status,conclusion"]);
+    case "workflow:view":
+    case "workflow:enable":
+    case "workflow:disable": return exact(["workflow", "list", "--json", "id,name,state,path", "--all"]);
+    case "release:delete": return exact(["release", "view", target, "--json", "tagName"]);
+    default: return false;
+  }
+};
+const validateNonApi = (requestArgs) => {
+  const exactOuter = JSON.stringify(requestArgs) === JSON.stringify(args) && repositoryMatches(requestArgs);
+  if (exactOuter && args[0] === "issue" && requestArgs.some((arg) => arg === "--type" || arg.startsWith("--type=")
+    || arg === "--no-type" || arg === "--remove-type")) return null;
+  if (exactOuter) return {kind: args[0] === "issue" && args[1] === "create" ? "issue-create" : "outer", number: ""};
   if (typeOperation && requestArgs[0] === "issue" && requestArgs[1] === "view") {
   let target = null;
   let json = "";
@@ -583,10 +718,11 @@ const validateNonApi = (requestArgs) => {
   if (!issueNumbers.has(target.number)) return null;
   return {kind: "issue-view", number: target.number};
   }
-  if (!normalizedPairAllowed(requestArgs) || !repositoryMatches(requestArgs)
-    || !normalizedTargetAllowed(requestArgs)
-    || requestArgs.some((arg) => arg === "--show-token" || arg.startsWith("--show-token="))) return null;
-  return {kind: "normalized", number: ""};
+  if (requestArgs.some((arg) => arg === "--show-token" || arg.startsWith("--show-token="))) return null;
+  if (sameOperationAllowed(requestArgs)) {
+    return {kind: args[0] === "issue" && args[1] === "create" ? "issue-create" : "normalized", number: ""};
+  }
+  return exactChildAllowed(requestArgs) ? {kind: "normalized", number: ""} : null;
 };
 const parseValidation = (requestArgs) => {
   const request = Buffer.from(JSON.stringify({args: requestArgs, repository})).toString("base64url");
@@ -1259,6 +1395,10 @@ fm_github_gh_option_kind() {
       if [ "$family" = issue ] && [ "$subcommand" = develop ]; then printf repo; else printf unknown; fi
       return
       ;;
+    --to-repo)
+      if [ "$family" = issue ] && [ "$subcommand" = transfer ]; then printf repo; else printf unknown; fi
+      return
+      ;;
     --head|-H)
       if [ "$family" = pr ] && [ "$subcommand" = create ]; then printf head; else printf data; fi
       return
@@ -1385,7 +1525,7 @@ fm_github_validate_gh_positional() {
   local family=$1 subcommand=$2 position=$3 value=$4 canonical path_value owner repo number
   FM_GITHUB_GH_POSITIONAL_NORMALIZED=$value
   case "$family:$subcommand:$position" in
-    repo:create:1|repo:clone:1|repo:view:1|label:clone:1|issue:transfer:2)
+    repo:create:1|repo:clone:1|repo:view:1|label:clone:1)
       canonical=$(fm_github_repository_allowed "$value") || return 1
       fm_github_set_gh_target_repository "$canonical" || return 1
       FM_GITHUB_GH_EXPLICIT_REPOSITORY=1
@@ -1458,7 +1598,7 @@ fm_github_validate_gh_positionals_complete() {
     repo:view|repo:list) [ "$count" -le 1 ] ;;
     pr:checks|pr:checkout|pr:close|pr:comment|pr:diff|pr:edit|pr:lock|pr:merge|pr:ready|pr:reopen|pr:review|pr:revert|pr:unlock|pr:update-branch|pr:view) [ "$count" -le 1 ] ;;
     issue:edit) [ "$count" -ge 1 ] ;;
-    issue:transfer) [ "$count" -eq 2 ] ;;
+    issue:transfer) [ "$count" -eq 1 ] ;;
     *) return 0 ;;
   esac
 }
@@ -1733,6 +1873,11 @@ fm_github_context_command() {
     gh|gh-axi)
       operation=$(fm_github_gh_operation "$@")
       [ "$operation" != forbidden ] || { echo "error: routed GitHub authentication mutation, unsafe repository mutation, API escape, or token display is forbidden" >&2; return 1; }
+      if [ "${tool##*/}" = gh ] && [ "${1:-}:${2:-}" = issue:create ] || [ "${tool##*/}" = gh ] && [ "${1:-}:${2:-}" = issue:edit ]; then
+        for command_name in "$@"; do
+          case "$command_name" in --type|--type=*|--no-type|--remove-type) echo "error: native issue type mutation is only available through routed gh-axi" >&2; return 1 ;; esac
+        done
+      fi
       if [ "$operation" = create ] && [ "${FM_GITHUB_ALLOW_UNREGISTERED_PROJECT:-}" != 1 ]; then
         echo "error: repository creation requires an authorized pre-registration project route" >&2
         return 1

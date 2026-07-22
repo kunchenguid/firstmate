@@ -192,7 +192,39 @@ case "${FM_TEST_GH_AXI_TYPED_API:-}" in
   global) gh repo list; exit ;;
   cross-command) gh issue view 17 --json id --repo Other/repo-a; exit ;;
   unbound-create) gh issue create --title hijack; exit ;;
-  normalized-pr) gh pr view 17 --json number,title,state,url; exit ;;
+  normalized-pr) gh pr view 17 --json number,title,state,author,isDraft,mergedAt,statusCheckRollup,body,comments,reviews; exit ;;
+  escalated-merge) gh pr merge 17 --admin --delete-branch; exit ;;
+  changed-release) gh release delete other --yes; exit ;;
+  untyped-create)
+    gh issue create --title plain
+    gh issue view 17 --json number,title,state,url,id
+    exit
+    ;;
+  pr-reopen)
+    gh pr view 17 --json state
+    gh pr reopen 17
+    exit
+    ;;
+  run-cancel)
+    gh run view 44 --json status,conclusion
+    gh run cancel 44
+    exit
+    ;;
+  workflow-enable)
+    gh workflow list --json id,name,state,path --all
+    gh workflow enable ci.yml
+    exit
+    ;;
+  release-delete)
+    gh release view v1 --json tagName
+    gh release delete v1 --yes
+    exit
+    ;;
+  issue-transfer)
+    gh issue transfer 17 account-a/repo-a
+    gh issue view 17 --json number,url --repo account-a/repo-a
+    exit
+    ;;
   conflicting-selectors) gh issue view https://github.com/Other/repo-a/issues/17 --json number,id --repo Owner-A/repo-a; exit ;;
   foreign) gh api repos/Other/repo-a; exit ;;
   forks) gh api repos/Owner-A/repo-a/forks; exit ;;
@@ -730,6 +762,19 @@ test_forbidden_commands_and_access_diagnostics() {
   FM_TEST_GH_AXI_TYPED_API=normalized-pr run_exec "$d" exec --project repo-a --repository "$d/home/projects/repo-a" -- \
     gh-axi pr view 17 >/dev/null \
     || fail "normalized gh-axi PR view descendant was rejected"
+  FM_TEST_GH_AXI_TYPED_API=untyped-create run_exec "$d" exec --project repo-a --repository "$d/home/projects/repo-a" -- \
+    gh-axi issue create --title plain >/dev/null \
+    || fail "untyped issue create did not bind its follow-up view"
+  for child_contract in 'pr-reopen pr reopen 17' 'run-cancel run cancel 44' \
+    'workflow-enable workflow enable ci.yml' 'release-delete release delete v1'; do
+    read -r mode family subcommand target <<< "$child_contract"
+    FM_TEST_GH_AXI_TYPED_API=$mode run_exec "$d" exec --project repo-a --repository "$d/home/projects/repo-a" -- \
+      gh-axi "$family" "$subcommand" "$target" >/dev/null \
+      || fail "normalized $family $subcommand child contract was rejected"
+  done
+  FM_TEST_GH_AXI_TYPED_API=issue-transfer run_exec "$d" exec --project repo-a --repository "$d/home/projects/repo-a" -- \
+    gh-axi issue transfer 17 --to-repo account-a/repo-a >/dev/null \
+    || fail "typed issue transfer grammar or child contract was rejected"
   FM_TEST_GH_AXI_TYPED_API=issue-type run_exec "$d" exec --project repo-a --repository "$d/home/projects/repo-a" -- \
     gh-axi issue create --title typed --type Bug >/dev/null \
     || fail "verified gh-axi descendant could not apply a scoped issue type"
@@ -785,6 +830,21 @@ test_forbidden_commands_and_access_diagnostics() {
   rc=$?
   set -e
   expect_code 1 "$rc" "gh-axi conflicting repository selectors"
+  for attack in 'escalated-merge pr merge 17 --squash' 'changed-release release delete v1'; do
+    read -r mode family subcommand target flag <<< "$attack"
+    set +e
+    FM_TEST_GH_AXI_TYPED_API=$mode run_exec "$d" exec --project repo-a --repository "$d/home/projects/repo-a" -- \
+      gh-axi "$family" "$subcommand" "$target" ${flag:+"$flag"} >/dev/null 2>&1
+    rc=$?
+    set -e
+    expect_code 1 "$rc" "gh-axi complete child schema $mode"
+  done
+  set +e
+  run_exec "$d" exec --project repo-a --repository "$d/home/projects/repo-a" -- \
+    gh issue edit 17 --type Bug >/dev/null 2>&1
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "native issue type mutation"
   (cd "$d/home/projects" && FM_TEST_FAKE_NETWORK=1 FM_TEST_CLONE_SOURCE="$d/home/projects/repo-a" \
     run_exec "$d" exec --project clone-project --repository github.com/Owner-A/clone-project -- \
       gh repo clone Owner-A/clone-project clone-project >/dev/null) \
