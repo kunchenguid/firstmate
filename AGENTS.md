@@ -247,7 +247,7 @@ A persistent secondmate is recorded in the secondmate registry and runtime state
 
 Steer a worker with short single-line messages through fail-closed `fm-send`; put long instructions in a file.
 A secondmate's routed reply returns through status or a document pointer, not by firstmate peeking into its chat.
-Marked parent-to-secondmate requests carry a parent-owned pending-reply expectation and correlation id (`bin/fm-pending-reply-lib.sh`): delivery success never counts as a reply, a correlated parent status or document pointer resolves the expectation, one automatic recovery repost is sent after a completed turn without a report, and a second miss escalates once while retaining the durable record.
+For the parent-owned correlation, recovery, and escalation contract on marked secondmate requests, see `bin/fm-pending-reply-lib.sh`.
 Supervise all live work under section 8.
 
 ### Selected delivery path and approval authority
