@@ -46,6 +46,12 @@ if [ "\${FM_TEST_ASSERT_SUBMODULE_DISABLED:-}" = 1 ] && [[ " \$* " = *' fetch '*
   done
   [ "\$fetch_recurse" = false ] && [ "\$submodule_recurse" = false ] || exit 92
 fi
+if [ "\${FM_TEST_SPOOF_UNSANITIZED_ORIGIN:-}" = 1 ] \
+  && [[ " \$* " = *" -C \${FM_TEST_SPOOF_PATH_PREFIX}/"*' remote get-url origin '* ]] \
+  && [ "\${GIT_CONFIG_COUNT:-0}" = 1 ]; then
+  printf '%s\n' "\${GIT_CONFIG_VALUE_0}"
+  exit 0
+fi
 printf 'git\t%s\t%s\n' "\${FM_GITHUB_PROFILE_ID:-unselected}" "\$*" >> "\${FM_TEST_ROUTE_LOG:-/dev/null}"
 if [ "\${FM_TEST_FAKE_NETWORK:-}" = 1 ]; then
   case " \$* " in
@@ -101,9 +107,21 @@ SH
 #!/usr/bin/env bash
 set -eu
 printf 'gh-axi\t%s\t%s\n' "${FM_GITHUB_PROFILE_ID:-unselected}" "$*" >> "${FM_TEST_ROUTE_LOG:-/dev/null}"
-if [ "${FM_TEST_GH_AXI_TYPED_API:-}" = 1 ]; then
-  exec gh api graphql --hostname github.com -f query=typed-operation
-fi
+case "${FM_TEST_GH_AXI_TYPED_API:-}" in
+  read)
+    gh api graphql --hostname github.com \
+      -f 'query=query($owner:String!,$name:String!){repository(owner:$owner,name:$name){id}}' \
+      -f owner=Owner-A -f name=repo-a
+    exit
+    ;;
+  foreign) gh api repos/Other/repo-a; exit ;;
+  mutation)
+    gh api graphql --hostname github.com \
+      -f 'query=mutation($owner:String!,$name:String!){deleteRepository(input:{repositoryId:"x"}){clientMutationId}}' \
+      -f owner=Owner-A -f name=repo-a
+    exit
+    ;;
+esac
 exec gh "$@"
 SH
   cat > "$d/exact/no-mistakes" <<'SH'
@@ -198,11 +216,10 @@ run_exec() {
   (
     cd "$cwd" || exit 1
     FM_HOME="$d/home" FM_ROOT_OVERRIDE="$ROOT" FM_TEST_ROUTE_LOG="$d/routes.log" FM_TEST_SENTINEL="$SENTINEL" \
-      FM_NO_MISTAKES_BINARY="$d/exact/no-mistakes" \
       GH_TOKEN="$SENTINEL" GITHUB_TOKEN="$SENTINEL" GIT_ASKPASS="$d/$SENTINEL-askpass" \
       GIT_SSL_NO_VERIFY=1 HTTPS_PROXY="https://$SENTINEL@proxy.invalid" \
       GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.extraHeader GIT_CONFIG_VALUE_0="Authorization: $SENTINEL" \
-      PATH="$d/hostile:$PATH" "$EXEC" "$@"
+      PATH="$d/hostile:$d/exact:$PATH" "$EXEC" "$@"
   )
 }
 
@@ -366,6 +383,23 @@ test_preregistration_project_bindings_are_narrow() {
   set -e
   expect_code 1 "$rc" "unregistered project binding without authorization"
 
+  write_config "$d"
+  set +e
+  (cd "$d/home/projects" && FM_GITHUB_ALLOW_UNREGISTERED_PROJECT=1 FM_TEST_FAKE_NETWORK=1 \
+    run_exec "$d" exec --project owner-clone --repository github.com/Owner-A/owner-clone -- \
+      git clone https://github.com/Owner-A/owner-clone.git "$d/arbitrary-clone" >/dev/null 2>&1)
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "ambient onboarding authority and arbitrary clone destination"
+  [ ! -e "$d/arbitrary-clone" ] || fail "ambient onboarding authority created an arbitrary clone destination"
+
+  node -e '
+    const fs=require("fs"); const p=process.argv[1]; const v=JSON.parse(fs.readFileSync(p));
+    v.bindings.projects={"new-project":"profile-a","created-project":"profile-a"};
+    v.bindings.repositories={}; v.bindings.owners={};
+    fs.writeFileSync(p,JSON.stringify(v)); fs.chmodSync(p,0o600);
+  ' "$d/home/config/github-accounts.json"
+
   (cd "$d/home/projects" && FM_TEST_FAKE_NETWORK=1 FM_TEST_CLONE_SOURCE="$d/home/projects/repo-a" \
     run_exec "$d" exec --project new-project --repository github.com/Owner-A/new-project --pre-register-project -- \
       git clone https://github.com/Owner-A/new-project.git new-project >/dev/null) \
@@ -413,8 +447,7 @@ test_concurrent_profiles_and_exact_children() {
   d=$(make_fixture concurrent)
   : > "$d/routes.log"
   mkdir -p "$d/home/state/.github-routing-path/.install.lock"
-  printf '%s\t%s\n' 999999 'stale owner' > "$d/home/state/.github-routing-path/.install.lock/owner"
-  chmod 0600 "$d/home/state/.github-routing-path/.install.lock/owner"
+  touch -t 202001010000 "$d/home/state/.github-routing-path/.install.lock"
   (run_exec "$d" exec --project repo-a --repository "$d/home/projects/repo-a" -- gh pr view 11 >/dev/null) & p1=$!
   (run_exec "$d" exec --project repo-b --repository "$d/home/projects/repo-b" -- gh-axi pr list --repo Owner-B/repo-b >/dev/null) & p2=$!
   wait "$p1" || fail "profile-a concurrent operation failed"
@@ -556,11 +589,19 @@ test_forbidden_commands_and_access_diagnostics() {
   rc=$?
   set -e
   expect_code 1 "$rc" "raw API escape"
-  FM_TEST_GH_AXI_TYPED_API=1 run_exec "$d" exec --project repo-a --repository "$d/home/projects/repo-a" -- \
+  FM_TEST_GH_AXI_TYPED_API=read run_exec "$d" exec --project repo-a --repository "$d/home/projects/repo-a" -- \
     gh-axi pr view 1 >/dev/null \
     || fail "verified gh-axi descendant could not perform its typed internal API operation"
-  assert_grep $'gh\tprofile-a\tapi graphql --hostname github.com -f query=typed-operation' "$d/routes.log" \
+  assert_grep $'gh\tprofile-a\tapi graphql --hostname github.com' "$d/routes.log" \
     "typed gh-axi internal API call did not retain the selected profile"
+  for kind in foreign mutation; do
+    set +e
+    FM_TEST_GH_AXI_TYPED_API=$kind run_exec "$d" exec --project repo-a --repository "$d/home/projects/repo-a" -- \
+      gh-axi pr view 1 >/dev/null 2>&1
+    rc=$?
+    set -e
+    expect_code 1 "$rc" "gh-axi internal API broker $kind request"
+  done
   set +e
   err=$(run_exec "$d" exec --repository github.com/Owner-A/new -- gh repo create --private Other/new 2>&1); rc=$?
   set -e
@@ -590,6 +631,10 @@ test_forbidden_commands_and_access_diagnostics() {
   rc=$?
   set -e
   expect_code 1 "$rc" "repository creation without pre-registration capability"
+  (cd "$d/home/projects" && run_exec "$d" exec --project new-repository \
+    --repository github.com/Owner-A/new-repository --pre-register-project -- \
+    gh-axi repo create Owner-A/new-repository --private >/dev/null) \
+    || fail "known-owner repository creation did not use its guarded owner binding"
 
   git -C "$d/home/projects/repo-a" config --local http.extraHeader "Authorization: $SENTINEL"
   set +e
@@ -619,7 +664,7 @@ test_forbidden_commands_and_access_diagnostics() {
   git -C "$d/unrelated" remote add origin https://github.com/Other/unrelated.git
   set +e
   err=$(FM_HOME="$d/home" FM_ROOT_OVERRIDE="$ROOT" FM_TEST_ROUTE_LOG="$d/routes.log" FM_TEST_SENTINEL="$SENTINEL" \
-    FM_NO_MISTAKES_BINARY="$d/exact/no-mistakes" PATH="$d/hostile:$PATH" bash -c 'cd "$1" && "$2" exec --project repo-a --repository "$3" -- gh pr view 1 --repo Owner-A/repo-a' \
+    PATH="$d/hostile:$d/exact:$PATH" bash -c 'cd "$1" && "$2" exec --project repo-a --repository "$3" -- gh pr view 1 --repo Owner-A/repo-a' \
     _ "$d/unrelated" "$EXEC" "$d/home/projects/repo-a" 2>&1)
   rc=$?
   set -e
@@ -639,6 +684,15 @@ test_forbidden_commands_and_access_diagnostics() {
   set -e
   expect_code 1 "$rc" "worktree-scoped origin"
   assert_contains "$err" 'repository remote is not the configured HTTPS parent' "actual task worktree route did not fail closed"
+
+  set +e
+  (cd "$d/home/projects/repo-a" && FM_HOME="$d/home" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_GITHUB_ACTIVE=1 FM_GITHUB_PROFILE_ID=profile-a FM_GITHUB_REPOSITORY=github.com/Owner-A/repo-a \
+    FM_GITHUB_PROJECT=repo-a FM_GITHUB_PROJECT_PATH="$d/home/projects/repo-a" \
+    PATH="$d/hostile:$d/exact:$PATH" "$EXEC" child-gh --home "$d/home" -- api repos/Owner-A/repo-a >/dev/null 2>&1)
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "forged gh-axi API descendant"
   set +e
   err=$(FM_HOME="$d/home" FM_ROOT_OVERRIDE="$ROOT" FM_TEST_ROUTE_LOG="$d/routes.log" FM_TEST_SENTINEL="$SENTINEL" \
     PATH="$d/hostile:$PATH" bash -c 'cd "$1" && "$2" exec --project repo-a --repository "$3" -- gh pr view 1' \
@@ -850,7 +904,7 @@ test_direct_pr_fork_fleet_sync_and_secondmate_child() {
   FM_INHERITABLE_CONFIG=github-accounts.json bash -c '. "$1/bin/fm-config-inherit-lib.sh"; propagate_inheritable_config "$2" "$3" "$4"' \
     _ "$ROOT" "$d/home/config" "$child/config" "$d/home" || fail "secondmate routing inheritance failed"
   (cd "$child" && FM_HOME="$child" FM_ROOT_OVERRIDE="$ROOT" FM_TEST_ROUTE_LOG="$d/routes.log" FM_TEST_SENTINEL="$SENTINEL" \
-    FM_NO_MISTAKES_BINARY="$d/exact/no-mistakes" PATH="$d/hostile:$PATH" \
+    PATH="$d/hostile:$d/exact:$PATH" \
     "$EXEC" exec --project repo-b --repository github.com/Owner-B/repo-b -- gh pr view 3 --repo Owner-B/repo-b >/dev/null) \
     || fail "secondmate child did not resolve inherited routing"
   assert_grep $'gh\tprofile-b\tpr view 3 --repo Owner-B/repo-b' "$d/routes.log" "secondmate child did not use profile-b"
@@ -912,7 +966,7 @@ SH
 }
 
 test_no_mistakes_context_handoff_is_typed_and_secret_free() {
-  local d fake_nm captured log refresh_count rc err expected_pwd
+  local d fake_nm captured log refresh_count rc err expected_pwd marker marker_before override_marker p1 p2
   d=$(make_fixture no-mistakes)
   fake_nm="$d/exact/no-mistakes"
   captured="$d/nm-context.json"
@@ -931,17 +985,32 @@ if [ "${1:-}" = init ]; then
   done
   exit 0
 fi
+if [ "${1:-}" = axi ] && [ "${2:-}" = status ]; then
+  if [ -e "$FM_TEST_NM_CAPTURE.active" ]; then printf '%s\n' '  status: running'; else printf '%s\n' '  status: completed'; fi
+  exit 0
+fi
 if [ "${1:-}" = axi ] && { [ "${2:-}" = run ] || [ "${2:-}" = respond ]; }; then
+  touch "$FM_TEST_NM_CAPTURE.active"
   printf '%s\n' "$PWD" > "$FM_TEST_NM_CAPTURE.pwd"
   exit 0
 fi
 exit 91
 SH
   chmod +x "$fake_nm"
+  mkdir -p "$d/override"
+  override_marker="$d/hostile-no-mistakes-executed"
+  cat > "$d/override/no-mistakes" <<SH
+#!/usr/bin/env bash
+touch '$override_marker'
+exit 97
+SH
+  chmod +x "$d/override/no-mistakes"
   : > "$log"
-  FM_NO_MISTAKES_BINARY="$fake_nm" FM_TEST_NM_CAPTURE="$captured" FM_TEST_NM_LOG="$log" \
+  FM_NO_MISTAKES_BINARY="$d/override/no-mistakes" FM_GITHUB_NO_MISTAKES_BINARY="$d/override/no-mistakes" \
+    FM_TEST_NM_CAPTURE="$captured" FM_TEST_NM_LOG="$log" \
     run_exec "$d" no-mistakes-init --project repo-a --repository "$d/home/projects/repo-a" \
     || fail "typed no-mistakes init failed"
+  [ ! -e "$override_marker" ] || fail "strict routing executed a caller-selected no-mistakes binary"
   assert_grep '"expected_login": "account-a"' "$captured" "no-mistakes context missed selected login"
   assert_grep '"credential_helper": "gh"' "$captured" "no-mistakes context missed typed helper"
   assert_grep '--fork-url https://github.com/account-a/repo-a.git' "$captured.args" \
@@ -949,47 +1018,72 @@ SH
   assert_no_grep "$SENTINEL" "$captured" "no-mistakes context persisted sentinel"
   assert_no_grep "$SENTINEL" "$captured.args" "no-mistakes argv persisted sentinel"
   assert_no_grep 'token' "$captured" "no-mistakes context persisted a token field"
+  rmdir "$d/home/state/.github-routing-no-mistakes" || fail "typed initialization left unexpected marker state"
+  : > "$log"
+  (FM_TEST_NM_CAPTURE="$captured" FM_TEST_NM_LOG="$log" \
+    run_exec "$d" no-mistakes-init --project repo-a --repository "$d/home/projects/repo-a" >/dev/null) & p1=$!
+  (FM_TEST_NM_CAPTURE="$captured" FM_TEST_NM_LOG="$log" \
+    run_exec "$d" no-mistakes-init --project repo-a --repository "$d/home/projects/repo-a" >/dev/null) & p2=$!
+  wait "$p1" || fail "first concurrent no-mistakes initialization failed"
+  wait "$p2" || fail "second concurrent no-mistakes initialization failed"
   : > "$log"
   fm_git_init_commit "$d/unrelated-no-mistakes"
   (cd "$d/unrelated-no-mistakes" && FM_HOME="$d/home" FM_ROOT_OVERRIDE="$ROOT" \
-    FM_NO_MISTAKES_BINARY="$fake_nm" FM_TEST_NM_CAPTURE="$captured" FM_TEST_NM_LOG="$log" \
-    FM_TEST_ROUTE_LOG="$d/routes.log" FM_TEST_SENTINEL="$SENTINEL" PATH="$d/hostile:$PATH" \
-    "$EXEC" exec --project repo-a --repository "$d/home/projects/repo-a" -- no-mistakes axi run >/dev/null) \
-    || fail "strict no-mistakes run did not refresh its typed context"
+    FM_TEST_NM_CAPTURE="$captured" FM_TEST_NM_LOG="$log" FM_TEST_ROUTE_LOG="$d/routes.log" \
+    FM_TEST_SENTINEL="$SENTINEL" PATH="$d/hostile:$d/exact:$PATH" \
+    "$EXEC" exec --project repo-a --repository "$d/home/projects/repo-a" -- \
+      no-mistakes axi run --intent initial >/dev/null) \
+    || fail "strict no-mistakes run from another checkout failed"
   expected_pwd=$(cd "$d/home/projects/repo-a" && pwd -P)
   [ "$(cat "$captured.pwd")" = "$expected_pwd" ] || fail "strict no-mistakes run used the caller working directory"
+  marker=$(find "$d/home/state/.github-routing-no-mistakes" -maxdepth 1 -type f -print | head -1)
+  [ -n "$marker" ] && [ "$(routing_file_mode "$marker")" = 600 ] || fail "successful strict run did not record its typed routing marker"
+  marker_before=$(cat "$marker")
   node -e 'const fs=require("fs"); const p=process.argv[1]; const v=JSON.parse(fs.readFileSync(p)); v.profiles["profile-a"].commit_identity.name="Refreshed Account A"; fs.writeFileSync(p,JSON.stringify(v)); fs.chmodSync(p,0o600)' "$d/home/config/github-accounts.json"
   set +e
-  err=$(FM_NO_MISTAKES_BINARY="$fake_nm" FM_TEST_NM_CAPTURE="$captured" FM_TEST_NM_LOG="$log" \
+  err=$(FM_TEST_NM_CAPTURE="$captured" FM_TEST_NM_LOG="$log" \
     run_exec "$d" exec --project repo-a --repository "$d/home/projects/repo-a" -- no-mistakes axi respond accepted 2>&1)
   rc=$?
   set -e
   expect_code 1 "$rc" "stale no-mistakes continuation context"
   assert_contains "$err" 'stale GitHub routing context' "stale no-mistakes continuation did not fail closed"
-  FM_NO_MISTAKES_BINARY="$fake_nm" FM_TEST_NM_CAPTURE="$captured" FM_TEST_NM_LOG="$log" \
-    run_exec "$d" exec --project repo-a --repository "$d/home/projects/repo-a" -- no-mistakes axi run >/dev/null \
-    || fail "second strict no-mistakes run did not refresh its typed context"
-  assert_grep '"name": "Refreshed Account A"' "$captured" "strict run preserved stale no-mistakes context"
-  FM_NO_MISTAKES_BINARY="$fake_nm" FM_TEST_NM_CAPTURE="$captured" FM_TEST_NM_LOG="$log" \
+  set +e
+  FM_TEST_NM_CAPTURE="$captured" FM_TEST_NM_LOG="$log" \
+    run_exec "$d" exec --project repo-a --repository "$d/home/projects/repo-a" -- \
+      no-mistakes axi run --intent refreshed >/dev/null 2>&1
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "changed routing while reattaching no-mistakes"
+  [ "$(cat "$marker")" = "$marker_before" ] || fail "failed reattachment overwrote the active no-mistakes binding marker"
+  node -e 'const fs=require("fs"); const p=process.argv[1]; const v=JSON.parse(fs.readFileSync(p)); v.profiles["profile-a"].commit_identity.name="Account A"; fs.writeFileSync(p,JSON.stringify(v)); fs.chmodSync(p,0o600)' "$d/home/config/github-accounts.json"
+  FM_TEST_NM_CAPTURE="$captured" FM_TEST_NM_LOG="$log" \
     run_exec "$d" exec --project repo-a --repository "$d/home/projects/repo-a" -- no-mistakes axi respond accepted >/dev/null \
     || fail "matching no-mistakes continuation did not revalidate its typed context"
   refresh_count=$(grep -c '^init --github-context ' "$log")
-  [ "$refresh_count" -eq 3 ] || fail "strict runs and continuations refreshed no-mistakes context $refresh_count times instead of three times"
+  [ "$refresh_count" -eq 2 ] || fail "strict run and continuation refreshed no-mistakes context $refresh_count times instead of twice"
   pass "no-mistakes receives secret-free context and revalidates every strict run and continuation"
 }
 
 test_secondmate_seed_does_not_leak_project_context() {
-  local d secondhome
+  local d secondhome seed_path
   d=$(make_fixture seed-context)
   secondhome="$d/seeded-secondmate"
+  seed_path="$d/seed-path"
+  mkdir -p "$seed_path"
+  ln -s "$REAL_GIT" "$seed_path/git"
+  ln -s "$d/exact/no-mistakes" "$seed_path/no-mistakes"
   printf '%s\n' '- repo-a [no-mistakes] +yolo - A (added 2026-07-21)' \
     '- repo-b [direct-PR] +yolo - B (added 2026-07-21)' > "$d/home/data/projects.md"
   FM_HOME="$d/home" FM_SECONDMATE_CHARTER='routing seed context' FM_SECONDMATE_SCOPE='routing seed context' \
     "$ROOT/bin/fm-brief.sh" routing-sm --secondmate repo-a repo-b >/dev/null \
     || fail "could not scaffold strict secondmate seed fixture"
-  FM_HOME="$d/home" FM_NO_MISTAKES_BINARY="$d/exact/no-mistakes" FM_TEST_FAKE_NETWORK=1 \
+  env -u GH_TOKEN -u GITHUB_TOKEN -u GIT_ASKPASS -u GIT_SSH_COMMAND -u GIT_SSL_NO_VERIFY -u HTTPS_PROXY \
+    FM_HOME="$d/home" FM_TEST_FAKE_NETWORK=1 \
     FM_TEST_NO_MISTAKES_CONTEXT="$d/seed-no-mistakes-context.json" \
     FM_TEST_CLONE_SOURCE="$d/home/projects/repo-b" FM_TEST_ROUTE_LOG="$d/routes.log" FM_TEST_SENTINEL="$SENTINEL" \
+    FM_TEST_SPOOF_UNSANITIZED_ORIGIN=1 FM_TEST_SPOOF_PATH_PREFIX="$d/home/projects" \
+    GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=remote.origin.url GIT_CONFIG_VALUE_0=https://github.com/Other/spoofed.git \
+    PATH="$seed_path:$PATH" \
     "$ROOT/bin/fm-home-seed.sh" routing-sm "$secondhome" repo-a repo-b >/dev/null \
     || fail "strict secondmate seed leaked its project context into local home creation"
   [ -d "$secondhome/projects/repo-a/.git" ] || fail "strict secondmate seed did not clone its first routed project"

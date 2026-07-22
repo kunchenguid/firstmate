@@ -204,6 +204,51 @@ function canonicalExecutable(value, basename) {
   return path.resolve(value);
 }
 
+function canonicalNamedExecutable(value, basename) {
+  const executable = canonicalExecutable(value, basename);
+  const resolved = fs.realpathSync.native(executable);
+  if (path.basename(resolved) !== basename) throw new Error("invalid executable");
+  return resolved;
+}
+
+function validateRepositoryGraphQL(query, nameVariable) {
+  if (typeof query !== "string" || Buffer.byteLength(query, "utf8") > 16 * 1024 || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u.test(query)
+    || !["name", "repo"].includes(nameVariable)) throw new Error("invalid GraphQL request");
+  const tokens = query.match(/\$[A-Za-z_][A-Za-z0-9_]*|[A-Za-z_][A-Za-z0-9_]*|[!$():=@\[\]{|},]|\d+/gu);
+  if (!tokens || tokens.join("") !== query.replace(/[ \t\r\n]/gu, "")) throw new Error("invalid GraphQL request");
+  let index = 0;
+  const take = (expected) => {
+    if (tokens[index] !== expected) throw new Error("invalid GraphQL request");
+    index += 1;
+  };
+  const balanced = (open, close) => {
+    take(open);
+    let depth = 1;
+    while (depth > 0 && index < tokens.length) {
+      if (tokens[index] === open) depth += 1;
+      if (tokens[index] === close) depth -= 1;
+      index += 1;
+    }
+    if (depth !== 0) throw new Error("invalid GraphQL request");
+  };
+  take("query");
+  if (tokens[index] === "(") balanced("(", ")");
+  take("{");
+  take("repository");
+  take("(");
+  take("owner");
+  take(":");
+  take("$owner");
+  take(",");
+  take("name");
+  take(":");
+  take(`$${nameVariable}`);
+  take(")");
+  balanced("{", "}");
+  take("}");
+  if (index !== tokens.length) throw new Error("invalid GraphQL request");
+}
+
 function within(candidate, root) {
   const relative = path.relative(root, candidate);
   return relative === "" || (!relative.startsWith(`..${path.sep}`) && relative !== "..");
@@ -383,13 +428,14 @@ function resolve(config) {
   const repositoryKey = repository.toLowerCase();
   const ownerKey = repository.split("/").slice(0, 2).join("/").toLowerCase();
   const registered = project ? registeredProjects().has(project) : false;
-  if (allowUnregisteredProject && (!project || registered || !config.projects.has(project))) {
+  if (allowUnregisteredProject && (!project || registered)) {
     throw new Error("invalid preregistration");
   }
   const candidates = [];
   if (project && (registered || allowUnregisteredProject) && config.projects.has(project)) candidates.push(config.projects.get(project).value);
   if (config.repositories.has(repositoryKey)) candidates.push(config.repositories.get(repositoryKey).value);
   if (config.owners.has(ownerKey)) candidates.push(config.owners.get(ownerKey).value);
+  if (allowUnregisteredProject && candidates.length === 0) throw new Error("invalid preregistration");
   if (candidates.length === 0 && !requiredProfile) throw new Error("unknown route");
   if (requiredProfile && !profileID(requiredProfile)) throw new Error("profile route mismatch");
   const selectedNames = new Set(candidates.map((value) => value.toLowerCase()));
@@ -429,6 +475,16 @@ try {
   }
   if (action === "sanitize") {
     process.stdout.write(`${JSON.stringify(config.serialized, null, 2)}\n`);
+    process.exit(0);
+  }
+  if (action === "canonicalize-executable") {
+    const basename = option("--basename");
+    if (basename !== "no-mistakes") throw new Error("invalid executable request");
+    emit("executable", canonicalNamedExecutable(option("--path"), basename));
+    process.exit(0);
+  }
+  if (action === "validate-graphql-read") {
+    validateRepositoryGraphQL(option("--query"), option("--name-variable"));
     process.exit(0);
   }
   if (action === "resolve") {

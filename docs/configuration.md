@@ -172,7 +172,7 @@ Its presence enables strict mode for the whole home with no implicit or fallback
 Every GitHub or network Git operation must resolve exactly one profile before network or write activity.
 A `local-only` project performs no such operation, so bootstrap, worker launch, and fleet sync skip account resolution for it and preserve its local Git behavior.
 Resolution considers a registered project binding first, then the exact canonical repository binding, then the canonical host/owner binding.
-A guarded `--pre-register-project` operation may consider an unregistered project binding only for the conventional clone destination or approved repository creation, and rejects every other command or already-registered project.
+A guarded `--pre-register-project` operation may resolve an unregistered project through its project, exact repository, or owner binding only for the conventional clone destination or approved repository creation, and rejects every other command or already-registered project.
 All applicable bindings must name the same profile or the operation is refused as a conflict rather than allowing precedence to hide disagreement.
 An operation with no applicable binding is refused rather than using an ambient account.
 `data/projects.md` remains free of profile data.
@@ -241,6 +241,7 @@ It applies the optional commit identity, always sets `user.useConfigOnly=true`, 
 Repository-local and per-worktree credential, include, URL rewrite, remote URL, push URL, gh-resolved remote, proxy, TLS, certificate, cookie, authorization-header, editor, prompt, recursive-submodule, and transport keys are rejected or validated by key name without printing their values.
 The guarded owner inspects the actual descendant working tree and an explicit Git `-C` target, rejects a discovered unrelated repository, and validates every gh-selectable remote rather than trusting the primary clone or only its origin.
 Every routed clone, fetch, pull, push, and `ls-remote` target must canonicalize to the configured HTTPS parent or selected-profile fork before network access.
+Every routed clone also requires an operation-specific capability and an exact conventional destination under either the active home's `projects/` directory or the selected secondmate home's `projects/` directory.
 Push resolves `--repo`, `branch.<name>.pushRemote`, `remote.pushDefault`, and `branch.<name>.remote` before falling back to `origin`; command-scoped remote selection is rejected.
 Clone bundle URIs, custom upload/receive programs, recursive submodule network paths, routed remote mutation, and submodule commands are refused.
 Unknown Git commands and unknown GitHub CLI command families or subcommands are refused, so network plumbing, aliases, extensions, authentication state, SSH keys, and future mutators cannot inherit read-only treatment accidentally.
@@ -249,6 +250,7 @@ Every resource-bearing field must agree with the configured parent or selected-p
 Organization-, user-, and environment-scoped secret or variable targets and arbitrary OCI operands are refused, while known-owner repository creation validates the selected login before the outward write.
 FirstMate-owned commands invoke exact configured binaries with argv arrays.
 The guarded `git`, `gh`, and `gh-axi` PATH shims protect ordinary descendants, including `gh-axi` resolving `gh`, but are not an operating-system sandbox against a deliberately malicious process that invokes another absolute executable or independently accesses credentials.
+Raw `gh api` remains unavailable, while an exact configured `gh-axi` parent may broker only read-only REST or single-repository GraphQL requests whose repository matches the selected route.
 
 Authentication validation never invokes `gh auth token` or Git credential fill.
 It confirms secure credential storage from `gh auth status`, verifies `/user` matches `expected_login`, and probes repository permission through the selected profile.
@@ -265,8 +267,8 @@ Existing profile-less delayed records are rebuilt only when their task project a
 Strict no-mistakes initialization is owned by `bin/fm-github-exec.sh no-mistakes-init`.
 It emits a temporary mode-`0600` typed context matching no-mistakes' own `--github-context` contract, derives an HTTPS fork URL from the selected `fork_owner` when present, validates the selected write target, invokes the selected no-mistakes binary with those typed arguments, and deletes the temporary file.
 No-mistakes owns its stored typed repository context and daemon subprocess application; it does not parse this FirstMate schema.
-Strict initialization refuses a no-mistakes executable that does not advertise `--github-context` support rather than allowing the shared daemon to use ambient credentials.
-The strict process PATH also wraps each `no-mistakes axi run` invocation and refreshes the stored typed context through the same helper immediately before the run; legacy homes retain their previous command path and initialization behavior.
+Strict initialization resolves one canonical basename-checked no-mistakes executable from `PATH`, ignores caller executable overrides, and refuses an executable that does not advertise `--github-context` support rather than allowing the shared daemon to use ambient credentials.
+The strict process PATH also wraps each `no-mistakes axi run` and `axi respond` invocation, requires an existing active-run marker to match current typed routing, and records a first-run marker only after a successful new-run invocation; legacy homes retain their previous command path and initialization behavior.
 Each home reuses one byte-validated, non-writable routing shim directory instead of creating invocation-scoped copies.
 
 ### Real-account acceptance status (2026-07-21)

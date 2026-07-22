@@ -466,6 +466,31 @@ seeded_origin_url() {
   normalize_origin_url "$dst" "$url"
 }
 
+scoped_source_origin_url() {
+  local project=$1 mode=$2 src=$3 git_binary
+  (
+    fm_github_activate "$project" "$src" || exit 1
+    fm_github_validate_local_config "$src" || exit 1
+    git_binary=$FM_GITHUB_GIT_BINARY
+    "$git_binary" -C "$src" rev-parse --is-inside-work-tree >/dev/null 2>&1 \
+      || { echo "error: project $project is not a git repo" >&2; exit 1; }
+    source_origin_url "$project" "$mode" "$src" "$git_binary"
+  )
+}
+
+scoped_seeded_origin_url() {
+  local project=$1 src=$2 dst=$3 expected=$4 git_binary
+  (
+    fm_github_activate "$project" "$src" || exit 1
+    fm_github_validate_local_config "$src" || exit 1
+    fm_github_validate_local_config "$dst" || exit 1
+    git_binary=$FM_GITHUB_GIT_BINARY
+    "$git_binary" -C "$dst" rev-parse --is-inside-work-tree >/dev/null 2>&1 \
+      || { echo "error: seeded project $project at $dst is not a git repo" >&2; exit 1; }
+    seeded_origin_url "$project" "$dst" "$expected" "$git_binary"
+  )
+}
+
 acquire_treehouse_home() {
   local id=$1 home
   # Durably lease a firstmate worktree from the pool. The lease persists with no
@@ -548,23 +573,33 @@ EOF
     return 1
   fi
   if fm_github_enabled; then
-    git_binary=$(fm_github_configured_git) || return 1
-    ( fm_github_activate "$project" "$src" && fm_github_validate_local_config "$src" ) || return 1
-  fi
-  "$git_binary" -C "$src" rev-parse --is-inside-work-tree >/dev/null 2>&1 || { echo "error: project $project is not a git repo" >&2; return 1; }
-  if [ -e "$dst" ]; then
-    [ -d "$dst" ] || { echo "error: seeded project $project exists at $dst but is not a directory" >&2; return 1; }
-    "$git_binary" -C "$dst" rev-parse --is-inside-work-tree >/dev/null 2>&1 || { echo "error: seeded project $project at $dst is not a git repo" >&2; return 1; }
+    url=$(scoped_source_origin_url "$project" "$mode" "$src") || return 1
+    if [ -e "$dst" ]; then
+      [ -d "$dst" ] || { echo "error: seeded project $project exists at $dst but is not a directory" >&2; return 1; }
+      dst_url=$(scoped_seeded_origin_url "$project" "$src" "$dst" "$url") || return 1
+    fi
+  else
+    "$git_binary" -C "$src" rev-parse --is-inside-work-tree >/dev/null 2>&1 || { echo "error: project $project is not a git repo" >&2; return 1; }
     url=$(source_origin_url "$project" "$mode" "$src" "$git_binary") || return 1
-    dst_url=$(seeded_origin_url "$project" "$dst" "$url" "$git_binary") || return 1
+    if [ -e "$dst" ]; then
+      [ -d "$dst" ] || { echo "error: seeded project $project exists at $dst but is not a directory" >&2; return 1; }
+      "$git_binary" -C "$dst" rev-parse --is-inside-work-tree >/dev/null 2>&1 || { echo "error: seeded project $project at $dst is not a git repo" >&2; return 1; }
+      dst_url=$(seeded_origin_url "$project" "$dst" "$url" "$git_binary") || return 1
+    fi
+  fi
+  if [ -e "$dst" ]; then
     [ "$dst_url" = "$url" ] || {
       echo "error: seeded project $project at $dst has origin $dst_url; expected $url" >&2
       return 1
     }
     return 0
   fi
-  url=$(source_origin_url "$project" "$mode" "$src" "$git_binary") || return 1
-  ( fm_github_context_command "$project" "$url" "" git clone --quiet "$url" "$dst" )
+  (
+    FM_GITHUB_CLONE_CAPABILITY=secondmate
+    FM_GITHUB_CLONE_ROOT="$home/projects"
+    export FM_GITHUB_CLONE_CAPABILITY FM_GITHUB_CLONE_ROOT
+    fm_github_context_command "$project" "$url" "" git clone --quiet "$url" "$dst"
+  )
 }
 
 validate_seed_project() {
@@ -579,8 +614,8 @@ EOF
     return 1
   fi
   if fm_github_enabled; then
-    git_binary=$(fm_github_configured_git) || return 1
-    ( fm_github_activate "$project" "$src" && fm_github_validate_local_config "$src" ) || return 1
+    scoped_source_origin_url "$project" "$mode" "$src" >/dev/null
+    return
   fi
   "$git_binary" -C "$src" rev-parse --is-inside-work-tree >/dev/null 2>&1 || { echo "error: project $project is not a git repo" >&2; return 1; }
   url=$("$git_binary" -C "$src" remote get-url origin 2>/dev/null || true)

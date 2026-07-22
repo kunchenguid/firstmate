@@ -22,6 +22,8 @@ FM_GITHUB_REPOSITORY=${FM_GITHUB_REPOSITORY:-}
 FM_GITHUB_PROJECT=${FM_GITHUB_PROJECT:-}
 FM_GITHUB_PROJECT_PATH=${FM_GITHUB_PROJECT_PATH:-}
 FM_GITHUB_ALLOW_UNREGISTERED_PROJECT=${FM_GITHUB_ALLOW_UNREGISTERED_PROJECT:-0}
+FM_GITHUB_CLONE_CAPABILITY=${FM_GITHUB_CLONE_CAPABILITY:-}
+FM_GITHUB_CLONE_ROOT=${FM_GITHUB_CLONE_ROOT:-}
 FM_GITHUB_NO_MISTAKES_BINARY=${FM_GITHUB_NO_MISTAKES_BINARY:-}
 
 fm_github_lib_dir() {
@@ -127,6 +129,27 @@ fm_github_configured_git() {
     value=${line#*$'\t'}
     [ "$key" != git_binary ] || { printf '%s\n' "$value"; return 0; }
   done <<< "$output"
+  return 1
+}
+
+fm_github_resolve_no_mistakes_binary() {
+  local candidate output line key value
+  while IFS= read -r candidate; do
+    [ -n "$candidate" ] || continue
+    case "$candidate" in
+      "$(fm_github_home)/state/.github-routing-path/"*) continue ;;
+    esac
+    output=$(fm_github_node "$(fm_github_lib_dir)/fm-github-config.mjs" canonicalize-executable \
+      --basename no-mistakes --path "$candidate" 2>/dev/null) || continue
+    while IFS= read -r line || [ -n "$line" ]; do
+      key=${line%%$'\t'*}
+      value=${line#*$'\t'}
+      if [ "$key" = executable ] && [ "$line" != "$key" ]; then
+        printf '%s\n' "$value"
+        return 0
+      fi
+    done <<< "$output"
+  done < <(type -a -p no-mistakes 2>/dev/null | awk '!seen[$0]++')
   return 1
 }
 
@@ -300,19 +323,30 @@ fm_github_process_identity() {
   ps -o lstart= -p "$pid" 2>/dev/null | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//'
 }
 
+fm_github_path_mtime() {
+  if [ "$(uname)" = Darwin ]; then
+    stat -f %m "$1" 2>/dev/null
+  else
+    stat -c %Y "$1" 2>/dev/null
+  fi
+}
+
 fm_github_install_lock_stale() {
-  local lock=$1 pid recorded current
+  local lock=$1 pid recorded current modified now
   [ -d "$lock" ] && [ ! -L "$lock" ] || return 1
-  [ -f "$lock/owner" ] && [ ! -L "$lock/owner" ] || return 1
-  IFS=$'\t' read -r pid recorded < "$lock/owner" || return 1
-  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
-  [ -n "$recorded" ] || return 1
+  if [ ! -f "$lock/owner" ] || [ -L "$lock/owner" ] || ! IFS=$'\t' read -r pid recorded < "$lock/owner" \
+    || [[ "$pid" = *[!0-9]* ]] || [ -z "$pid" ] || [ -z "$recorded" ]; then
+    modified=$(fm_github_path_mtime "$lock") || return 1
+    now=$(date +%s) || return 1
+    [ $((now - modified)) -ge 2 ]
+    return
+  fi
   current=$(fm_github_process_identity "$pid" || true)
   [ -z "$current" ] || [ "$current" != "$recorded" ]
 }
 
 fm_github_install_path_shims() {
-  local home state base directory executable lock owner=0 attempts=0 tmp= name action identity
+  local home state base directory executable lock owner=0 attempts=0 tmp= name action identity owner_tmp
   home=$(cd "$(fm_github_home)" 2>/dev/null && pwd -P) || return 1
   state="$home/state"
   if [ ! -e "$state" ]; then
@@ -332,11 +366,13 @@ fm_github_install_path_shims() {
   fi
   [ ! -e "$directory" ] && [ ! -L "$directory" ] || return 1
   lock="$base/.install.lock"
-  while [ "$attempts" -lt 50 ]; do
+  while [ "$attempts" -lt 100 ]; do
     if mkdir -m 0700 "$lock" 2>/dev/null; then
       identity=$(fm_github_process_identity "$$") || { rmdir "$lock" 2>/dev/null || true; return 1; }
-      printf '%s\t%s\n' "$$" "$identity" > "$lock/owner" || { rm -f "$lock/owner" 2>/dev/null || true; rmdir "$lock" 2>/dev/null || true; return 1; }
-      chmod 0600 "$lock/owner" || { rm -f "$lock/owner" 2>/dev/null || true; rmdir "$lock" 2>/dev/null || true; return 1; }
+      owner_tmp="$lock/.owner.$$"
+      printf '%s\t%s\n' "$$" "$identity" > "$owner_tmp" || { rm -f "$owner_tmp" 2>/dev/null || true; rmdir "$lock" 2>/dev/null || true; return 1; }
+      chmod 0600 "$owner_tmp" || { rm -f "$owner_tmp" 2>/dev/null || true; rmdir "$lock" 2>/dev/null || true; return 1; }
+      mv "$owner_tmp" "$lock/owner" || { rm -f "$owner_tmp" 2>/dev/null || true; rmdir "$lock" 2>/dev/null || true; return 1; }
       owner=1
       break
     fi
@@ -345,6 +381,10 @@ fm_github_install_path_shims() {
       return 0
     fi
     if fm_github_install_lock_stale "$lock"; then
+      for tmp in "$lock"/.owner.*; do
+        [ -f "$tmp" ] && [ ! -L "$tmp" ] || continue
+        rm -f "$tmp" 2>/dev/null || true
+      done
       rm -f "$lock/owner" 2>/dev/null || true
       rmdir "$lock" 2>/dev/null || true
       continue
@@ -387,15 +427,10 @@ fm_github_activate() {
   fm_github_resolve "$project" "$repository" "$required_profile" || return 1
   [ "$FM_GITHUB_MODE" = strict ] || return 0
   old_path=${PATH:-/usr/bin:/bin}
-  if [ -z "$FM_GITHUB_NO_MISTAKES_BINARY" ]; then
-    FM_GITHUB_NO_MISTAKES_BINARY=${FM_NO_MISTAKES_BINARY:-$(command -v no-mistakes 2>/dev/null || true)}
-  fi
-  if [ -n "$FM_GITHUB_NO_MISTAKES_BINARY" ]; then
-    [ -x "$FM_GITHUB_NO_MISTAKES_BINARY" ] && [ -f "$FM_GITHUB_NO_MISTAKES_BINARY" ] || {
-      echo "error: configured no-mistakes command is unavailable for strict GitHub routing" >&2
-      return 1
-    }
-  fi
+  FM_GITHUB_NO_MISTAKES_BINARY=$(fm_github_resolve_no_mistakes_binary) || {
+    echo "error: canonical no-mistakes command is unavailable for strict GitHub routing" >&2
+    return 1
+  }
   fm_github_unset_ambient
   shim_dir=$(fm_github_install_path_shims) || {
     echo "error: cannot install authoritative GitHub routing context" >&2
@@ -1173,32 +1208,54 @@ fm_github_gh_operation() {
 }
 
 fm_github_validate_preregistration_command() {
-  local tool=$1 repository=$2 expected_parent source destination parent canonical arg
+  local tool=$1 repository=$2 expected_parent source destination parent canonical arg command_name
   shift 2
-  [ "$FM_GITHUB_ALLOW_UNREGISTERED_PROJECT" = 1 ] || return 0
-  [ -n "$FM_GITHUB_PROJECT" ] && [ ! -d "$repository" ] || return 1
   case "${tool##*/}" in
     git)
-      [ "$#" -eq 3 ] && [ "$1" = clone ] || return 1
-      source=$2
-      destination=$3
+      command_name=$(fm_github_git_command_name "$@") || return 1
+      if [ "$command_name" != clone ]; then
+        [ "$FM_GITHUB_ALLOW_UNREGISTERED_PROJECT" != 1 ]
+        return
+      fi
+      case "$FM_GITHUB_CLONE_CAPABILITY" in
+        project)
+          [ "$FM_GITHUB_ALLOW_UNREGISTERED_PROJECT" = 1 ] || return 1
+          expected_parent=$(cd "$(fm_github_home)/projects" 2>/dev/null && pwd -P) || return 1
+          ;;
+        secondmate)
+          [ "$FM_GITHUB_ALLOW_UNREGISTERED_PROJECT" != 1 ] || return 1
+          expected_parent=$(cd "$FM_GITHUB_CLONE_ROOT" 2>/dev/null && pwd -P) || return 1
+          ;;
+        *) return 1 ;;
+      esac
+      [ -n "$FM_GITHUB_PROJECT" ] && [ ! -d "$repository" ] || return 1
+      if [ "$#" -eq 3 ] && [ "$1" = clone ]; then
+        source=$2
+        destination=$3
+      elif [ "$#" -eq 4 ] && [ "$1" = clone ] && [ "$2" = --quiet ]; then
+        source=$3
+        destination=$4
+      else
+        return 1
+      fi
       canonical=$(fm_github_repository_allowed "$source") || return 1
       [ "$(printf '%s' "$canonical" | tr '[:upper:]' '[:lower:]')" = "$(printf '%s' "$FM_GITHUB_REPOSITORY" | tr '[:upper:]' '[:lower:]')" ] || return 1
       [ ! -e "$destination" ] && [ ! -L "$destination" ] || return 1
       parent=${destination%/*}
       [ "$parent" != "$destination" ] || parent=.
       parent=$(cd "$parent" 2>/dev/null && pwd -P) || return 1
-      expected_parent=$(cd "$(fm_github_home)/projects" 2>/dev/null && pwd -P) || return 1
       [ "$parent" = "$expected_parent" ] && [ "${destination##*/}" = "$FM_GITHUB_PROJECT" ]
       ;;
     gh|gh-axi)
+      [ "$FM_GITHUB_ALLOW_UNREGISTERED_PROJECT" = 1 ] || return 0
+      [ -n "$FM_GITHUB_PROJECT" ] && [ ! -d "$repository" ] || return 1
       [ "${1:-}" = repo ] && [ "${2:-}" = create ] || return 1
       fm_github_projects_cwd || return 1
       for arg in "$@"; do
         case "$arg" in --clone|--clone=*|--source|--source=*|--push|--push=*) return 1 ;; esac
       done
       ;;
-    *) return 1 ;;
+    *) [ "$FM_GITHUB_ALLOW_UNREGISTERED_PROJECT" != 1 ] ;;
   esac
 }
 
@@ -1209,21 +1266,110 @@ fm_github_projects_cwd() {
   [ "$cwd" = "$projects" ]
 }
 
+fm_github_parent_is_exact_gh_axi() {
+  local parent_args parent_executable binary=$FM_GITHUB_GH_AXI_BINARY
+  parent_args=$(ps -ww -o command= -p "$PPID" 2>/dev/null) || return 1
+  parent_args=${parent_args#${parent_args%%[![:space:]]*}}
+  if [ -e "/proc/$PPID/exe" ]; then
+    parent_executable=$(readlink "/proc/$PPID/exe" 2>/dev/null || true)
+  else
+    parent_executable=$(ps -o comm= -p "$PPID" 2>/dev/null | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+  fi
+  case "$parent_args" in
+    "$binary"|"$binary "*)
+      [ "$parent_executable" = "$binary" ] || [ "${parent_executable##*/}" = gh-axi ]
+      return
+      ;;
+    bash\ "$binary"|bash\ "$binary "*|/bin/bash\ "$binary"|/bin/bash\ "$binary "*|/usr/bin/env\ bash\ "$binary"|/usr/bin/env\ bash\ "$binary "*)
+      [ "${parent_executable##*/}" = bash ]
+      return
+      ;;
+  esac
+  return 1
+}
+
+fm_github_validate_internal_api() {
+  local endpoint= method= field= query= owner= name= name_variable= pending= arg value key path canonical
+  shift
+  while [ "$#" -gt 0 ]; do
+    arg=$1
+    shift
+    if [ -n "$pending" ]; then
+      case "$pending" in
+        method) method=$arg ;;
+        host) [ "$arg" = github.com ] || return 1 ;;
+        field) field=$arg ;;
+        data) ;;
+      esac
+      pending=
+      if [ -n "$field" ]; then
+        key=${field%%=*}
+        value=${field#*=}
+        [ "$field" != "$key" ] || return 1
+        case "$key" in
+          query) query=$value ;;
+          owner) owner=$value ;;
+          name|repo) name=$value; name_variable=$key ;;
+          first|last|after|before|endCursor|cursor) [ ${#value} -le 1024 ] || return 1 ;;
+          *) return 1 ;;
+        esac
+        field=
+      fi
+      continue
+    fi
+    case "$arg" in
+      --method|-X) pending=method ;;
+      --method=*|-X?*) method=${arg#*=}; [ "$method" != "$arg" ] || method=${arg#-X} ;;
+      --hostname) pending=host ;;
+      --hostname=github.com) ;;
+      -f|-F|--field|--raw-field) pending=field ;;
+      -f?*|-F?*) field=${arg#??}; pending=field; set -- "$field" "$@" ;;
+      --field=*|--raw-field=*) field=${arg#*=}; pending=field; set -- "$field" "$@" ;;
+      --jq|--template|--cache) pending=data ;;
+      --jq=*|--template=*|--cache=*) ;;
+      --paginate|--slurp) ;;
+      --) return 1 ;;
+      -*) return 1 ;;
+      *) [ -z "$endpoint" ] || return 1; endpoint=$arg ;;
+    esac
+  done
+  [ -z "$pending" ] && [ -n "$endpoint" ] || return 1
+  if [ "$endpoint" = graphql ]; then
+    [ -z "$method" ] || [ "$method" = POST ] || return 1
+    [ -n "$query" ] && [ -n "$owner" ] && [ -n "$name" ] || return 1
+    fm_github_node "$(fm_github_lib_dir)/fm-github-config.mjs" validate-graphql-read \
+      --query "$query" --name-variable "$name_variable" >/dev/null 2>&1 || return 1
+    canonical=$(fm_github_repository_allowed "github.com/$owner/$name") || return 1
+    printf '%s\n' "$canonical"
+    return
+  fi
+  [ -z "$query$owner$name" ] || return 1
+  [ -z "$method" ] || [ "$method" = GET ] || return 1
+  path=${endpoint#/}
+  path=${path%%\?*}
+  case "$path" in *%*|*//*|*/../*|*/./*) return 1 ;; esac
+  case "$path" in repos/*/*|repos/*/*/*) ;; *) return 1 ;; esac
+  owner=${path#repos/}
+  owner=${owner%%/*}
+  name=${path#repos/$owner/}
+  name=${name%%/*}
+  canonical=$(fm_github_repository_allowed "github.com/$owner/$name") || return 1
+  printf '%s\n' "$canonical"
+}
+
 fm_github_internal_gh_api_command() {
-  local project=$1 repository=$2 required_profile=$3 permission=$4 target_repository=$5
-  shift 5
-  [ "${FM_GITHUB_GH_AXI_INTERNAL_API:-}" = 1 ] || return 1
-  case "$permission" in read|write) ;; *) return 1 ;; esac
+  local project=$1 repository=$2 required_profile=$3 target_repository repo_path
+  shift 3
   [ "${1:-}" = api ] || return 1
   fm_github_activate "$project" "$repository" "$required_profile" || return 1
-  target_repository=$(fm_github_repository_allowed "$target_repository") || return 1
-  local repo_path
+  fm_github_parent_is_exact_gh_axi || return 1
+  target_repository=$(fm_github_validate_internal_api "$@") || return 1
   repo_path=$(fm_github_actual_repository_path "${FM_GITHUB_PROJECT_PATH:-}") || {
     echo "error: current repository is not the configured project or task copy" >&2
     return 1
   }
   fm_github_validate_repository_path "$repo_path" || return 1
-  fm_github_preflight "$permission" "$target_repository" || return 1
+  fm_github_preflight read "$target_repository" || return 1
   if ! command "$FM_GITHUB_GH_BINARY" "$@" 2>/dev/null; then
     echo "error: routed GitHub command failed for profile $FM_GITHUB_PROFILE_ID" >&2
     return 1
@@ -1340,15 +1486,7 @@ fm_github_context_command() {
       esac
       github_binary=$FM_GITHUB_GH_BINARY
       [ "${tool##*/}" != gh-axi ] || github_binary=$FM_GITHUB_GH_AXI_BINARY
-      if [ "${tool##*/}" = gh-axi ] && { [ "$operation" = read ] || [ "$operation" = write ]; }; then
-        if ! (export FM_GITHUB_GH_AXI_INTERNAL_API=1
-          export FM_GITHUB_GH_AXI_INTERNAL_PERMISSION=$operation
-          export FM_GITHUB_GH_AXI_INTERNAL_REPOSITORY=${FM_GITHUB_GH_TARGET_REPOSITORY:-$FM_GITHUB_REPOSITORY}
-          command "$github_binary" "$@") 2>/dev/null; then
-          echo "error: routed GitHub command failed for profile $FM_GITHUB_PROFILE_ID" >&2
-          return 1
-        fi
-      elif ! command "$github_binary" "$@" 2>/dev/null; then
+      if ! command "$github_binary" "$@" 2>/dev/null; then
         echo "error: routed GitHub command failed for profile $FM_GITHUB_PROFILE_ID" >&2
         return 1
       fi
