@@ -607,22 +607,67 @@ def collect_no_mistakes(
     project = canonical(str(run.get("project_ref") or ""))
     try:
         source.create_function("fm_canonical", 1, canonical, deterministic=True)
-        query = """SELECT r.id,r.status,r.pr_url,r.pr_state,r.created_at,r.updated_at,
-                          p.working_path
-                     FROM runs r JOIN repos p ON p.id=r.repo_id
-                    WHERE r.branch=? AND r.created_at>=?"""
+        where = "r.branch=? AND r.created_at>=?"
         parameters: list[Any] = [branch, int(run["started_at"]) - 300]
         if project:
-            query += " AND fm_canonical(p.working_path)=?"
+            where += " AND fm_canonical(p.working_path)=?"
             parameters.append(project)
+        query = f"""SELECT r.id,r.status,r.pr_url,r.pr_state,r.created_at,r.updated_at,
+                           p.working_path
+                      FROM runs r JOIN repos p ON p.id=r.repo_id
+                     WHERE {where}"""
         query += " ORDER BY r.created_at DESC,r.id DESC LIMIT ?"
-        parameters.append(MAX_NM_RUNS)
-        rows = list(reversed(source.execute(query, parameters).fetchall()))
+        rows = list(reversed(source.execute(
+            query, [*parameters, MAX_NM_RUNS]
+        ).fetchall()))
+        first_row = source.execute(
+            f"""SELECT r.id
+                  FROM runs r JOIN repos p ON p.id=r.repo_id
+                 WHERE {where}
+                   AND EXISTS (
+                     SELECT 1 FROM step_results s
+                     JOIN step_rounds q ON q.step_result_id=s.id
+                     WHERE s.run_id=r.id AND q.trigger_type='initial'
+                       AND s.step_name IN ('review','test','lint'))
+                 ORDER BY r.created_at,r.id LIMIT 1""",
+            parameters,
+        ).fetchone()
     except sqlite3.Error:
         source.close()
         return 0, None, None, None, None, None
     matched = [row for row in rows if not project or canonical(row["working_path"]) == project]
     first_pass: Optional[int] = None
+    if first_row:
+        try:
+            initial_rounds = source.execute(
+                """SELECT q.findings_json,q.user_findings_json
+                     FROM step_rounds q JOIN step_results s ON s.id=q.step_result_id
+                    WHERE s.run_id=? AND q.trigger_type='initial'
+                      AND s.step_name IN ('review','test','lint')
+                    ORDER BY s.step_name,q.round LIMIT 500""",
+                (first_row["id"],),
+            ).fetchall()
+        except sqlite3.Error:
+            initial_rounds = []
+        if initial_rounds:
+            initial_findings = 0
+            for initial_round in initial_rounds:
+                combined = findings(initial_round["findings_json"])
+                existing = {item[0] for item in combined}
+                combined.extend(
+                    item for item in findings(initial_round["user_findings_json"])
+                    if item[0] not in existing
+                )
+                initial_findings += len(combined)
+            first_pass = 1 if initial_findings == 0 else 0
+    connection.execute(
+        "DELETE FROM sessions WHERE run_id=? AND source='no-mistakes'",
+        (run["run_id"],),
+    )
+    connection.execute(
+        "DELETE FROM quality_findings WHERE run_id=? AND source LIKE 'no-mistakes:%'",
+        (run["run_id"],),
+    )
     for nm_run in matched:
         nm_id = safe_identifier(nm_run["id"], "nm") or stable_key(nm_run["id"])
         nm_ref = f"no-mistakes://run/{nm_id}"
@@ -677,7 +722,6 @@ def collect_no_mistakes(
         except sqlite3.Error:
             rounds = []
         by_step: dict[str, list[tuple[int, list[tuple[str, Optional[str]]], Optional[str], str]]] = collections.defaultdict(list)
-        initial_counts: list[int] = []
         for round_row in rounds:
             combined = findings(round_row["findings_json"])
             user_rows = findings(round_row["user_findings_json"])
@@ -685,10 +729,6 @@ def collect_no_mistakes(
             combined.extend(item for item in user_rows if item[0] not in existing)
             step = safe_identifier(round_row["step_name"], "step") or "step"
             by_step[step].append((integer(round_row["round"]), combined, round_row["log_path"], str(round_row["trigger_type"])))
-            if round_row["trigger_type"] == "initial" and step in {"review", "test", "lint"}:
-                initial_counts.append(len(combined))
-        if first_pass is None and initial_counts:
-            first_pass = 1 if sum(initial_counts) == 0 else 0
         for step, step_rounds in by_step.items():
             final_ids = {item[0] for item in step_rounds[-1][1]}
             first_seen: dict[str, tuple[Optional[str], Optional[str], int]] = {}

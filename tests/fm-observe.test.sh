@@ -208,15 +208,20 @@ run_collect >/dev/null || fail "newest no-mistakes collection failed"
 python3 - "$DATA/observability.sqlite3" <<'PY'
 import sqlite3, sys
 c = sqlite3.connect(sys.argv[1])
-r = c.execute("SELECT no_mistakes_runs,outcome FROM runs WHERE task_id='observe-feature'").fetchone()
-assert r == (50, 'completed'), r
+r = c.execute("""SELECT no_mistakes_runs,outcome,first_pass_quality,
+                        tokens_input,tokens_output,quality_findings
+                   FROM runs WHERE task_id='observe-feature'""").fetchone()
+assert r == (50, 'completed', 0, 10, 5, 0), r
+assert c.execute("SELECT COUNT(*) FROM sessions WHERE source='no-mistakes'").fetchone()[0] == 0
+assert c.execute("SELECT COUNT(*) FROM quality_findings").fetchone()[0] == 0
 refs = [row[0] for row in c.execute("SELECT ref FROM evidence WHERE kind='no-mistakes-run'")]
+assert 'no-mistakes://run/01NMOBSERVE' in refs
 assert 'no-mistakes://run/01NMNEW59' in refs
 assert 'no-mistakes://run/01NMNEW09' not in refs
 assert not any('OTHER' in ref for ref in refs)
 PY
 [ "$?" -eq 0 ] || fail "newest no-mistakes ordering and limit assertions failed"
-pass "fm-observe: no-mistakes selection uses the newest project runs deterministically"
+pass "fm-observe: no-mistakes window preserves first pass and reconciles derived detail"
 
 for secret in SECRET_PROMPT_MUST_NOT_ENTER_DB SECRET_RESPONSE_MUST_NOT_ENTER_DB SECRET_COMMAND_OUTPUT_MUST_NOT_ENTER_DB SECRET_FINDING_DESCRIPTION; do
   if grep -aF "$secret" "$DATA/observability.sqlite3" >/dev/null; then
