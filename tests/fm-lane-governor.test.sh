@@ -484,6 +484,36 @@ test_unresolvable_cwd_orphan_labeled_honestly() {
   pass "lane governor labels unresolvable-cwd orphans honestly without blocking"
 }
 
+test_acquire_refuses_to_clobber_a_live_lease_for_the_same_id() {
+  local home out status lease_dir other
+  home=$(make_home lease-clobber)
+  lease_dir="$home/state/.lane-governor/leases"
+
+  sleep 30 &
+  other=$!
+
+  out=$(FM_LANE_MAX_CONCURRENT=4 run_governor "$home" acquire dup --holder-pid "$other")
+  status=$?
+  [ "$status" -eq 0 ] || { kill "$other" 2>/dev/null; fail "first lease should acquire, got: $out"; }
+
+  out=$(FM_LANE_MAX_CONCURRENT=4 run_governor "$home" acquire dup --holder-pid "$$")
+  status=$?
+  [ "$status" -ne 0 ] || { kill "$other" 2>/dev/null; fail "a second acquire of a live lease id should be refused, got: $out"; }
+  assert_contains "$out" "lease dup is already held by live pid $other" \
+    "refusal should name the live holder of the existing lease"
+  assert_contains "$(cat "$lease_dir/dup.lease")" "holder_pid=$other" \
+    "the first holder's lease must survive the refused acquire"
+
+  out=$(run_governor "$home" release dup --holder-pid "$$")
+  status=$?
+  [ "$status" -eq 0 ] || { kill "$other" 2>/dev/null; fail "release by a non-holder should be a no-op, got: $out"; }
+  [ -f "$lease_dir/dup.lease" ] || { kill "$other" 2>/dev/null; fail "release by a non-holder must not delete the lease"; }
+
+  kill "$other" 2>/dev/null
+  wait "$other" 2>/dev/null
+  pass "lane governor refuses to overwrite a live lease held by another spawn"
+}
+
 test_lease_ttl_reaps_stale_live_lease() {
   local home out status lease_dir
   home=$(make_home lease-ttl)
@@ -523,6 +553,7 @@ test_secondmate_spawn_bypasses_capacity_gate
 test_secondmate_spawn_still_honors_memory_and_orphan
 test_unresolvable_cwd_orphan_labeled_honestly
 test_lease_ttl_reaps_stale_live_lease
+test_acquire_refuses_to_clobber_a_live_lease_for_the_same_id
 test_memory_thresholds_refuse_spawn
 test_completed_workers_surface_cleanup_without_blocking
 test_orphaned_harness_detector_matches_reparented_zsh

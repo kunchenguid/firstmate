@@ -44,6 +44,11 @@ export FM_GATE_REFUSE_BYPASS=1
 # fm-lane-governor.test.sh) sets these per invocation, which overrides the export.
 export FM_LANE_MEMORY_AVAILABLE_MB=${FM_LANE_MEMORY_AVAILABLE_MB:-4096}
 export FM_LANE_SWAP_USED_MB=${FM_LANE_SWAP_USED_MB:-0}
+# Orphan detection is likewise pinned off suite-wide: it sweeps the developer's
+# real process table with ps/lsof once per spawn, which is both slow and coupled
+# to whatever else happens to be running. fm-lane-governor.test.sh turns it back
+# on per invocation where the detector itself is under test.
+export FM_LANE_ORPHAN_CHECK=${FM_LANE_ORPHAN_CHECK:-0}
 
 # Resolve the repo root from this library's own location. Consumed by sourcing
 # test files, not by this library, so it reads as "unused" here.

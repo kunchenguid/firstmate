@@ -24,6 +24,8 @@
 # Completed workers are reported for cleanup but do not consume lane capacity,
 # because PR-ready and report-ready work may legitimately wait on approval.
 # Leases held past FM_LANE_LEASE_TTL_SECONDS, or whose holder pid is dead, are reaped.
+# An acquire refuses rather than overwriting a lease for the same id whose recorded
+# holder pid is still alive and is not this caller.
 # Orphaned harnesses under another home are reported but never block this home's spawns.
 #
 # Runtime state lives under state/.lane-governor/ and is volatile.
@@ -57,7 +59,7 @@ lane_governor_cleanup() {
 trap lane_governor_cleanup EXIT
 
 usage() {
-  sed -n '2,36p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,39p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 case "${1:-}" in
@@ -608,6 +610,16 @@ capacity_check() {  # <requested-count> [<exclude-id>]
   fi
 }
 
+live_lease_holder() {  # <lease-id> - prints the recorded holder pid when it is still alive
+  local id=$1 path recorded
+  path=$(lease_path "$id") || return 1
+  [ -f "$path" ] || return 1
+  recorded=$(lease_field "$path" holder_pid)
+  case "$recorded" in ''|*[!0-9]*) return 1 ;; esac
+  fm_pid_alive "$recorded" || return 1
+  printf '%s\n' "$recorded"
+}
+
 write_lease() {  # <lease-id> <kind> <count> <holder-pid>
   local id=$1 kind=$2 count=$3 holder_pid=$4 path tmp
   path=$(lease_path "$id") || { err "unsafe lease id: $id"; exit 2; }
@@ -728,6 +740,10 @@ case "$MODE" in
     LANE_LOCK_HELD=1
     memory_and_orphan_check
     capacity_check "$COUNT" "$LEASE_ID"
+    LEASE_HOLDER=$(live_lease_holder "$LEASE_ID") || LEASE_HOLDER=
+    if [ -n "$LEASE_HOLDER" ] && [ "$LEASE_HOLDER" != "$HOLDER_PID" ]; then
+      die "refusing spawn: lease $LEASE_ID is already held by live pid $LEASE_HOLDER for home $FM_HOME"
+    fi
     write_lease "$LEASE_ID" "$KIND" "$COUNT" "$HOLDER_PID"
     fm_lock_release "$LOCK"
     LANE_LOCK_HELD=0
