@@ -23,6 +23,23 @@ Wake, watcher, away-mode, and X-specific state mechanics remain with their named
 `AGENTS.md` retains the run-once and read-once operator rules, lock-refusal safety, installation consent, and direct-report recovery boundaries because those facts apply at every session start.
 Ordinary dead-direct-report recovery is owned by `stuck-crewmate-recovery`, while persistent-secondmate recovery is owned by `secondmate-provisioning`.
 
+## Pi direct-OpenAI retention (config/pi-direct-openai-retention)
+
+The tracked `.pi/extensions/fm-openai-retention-guard.ts` extension keeps the installed OpenAI server-compaction package enabled for `openai-codex/*` models without changing its automatic compaction threshold or normal interaction flow.
+For direct `openai/*` models, the guard defaults the package's stored-response continuation setting off and removes `store:true`, `previous_response_id`, and retaining context-management fields from provider requests.
+This default prevents an accidental model-picker change from enabling OpenAI server-side conversation retention.
+
+Direct-OpenAI retention requires a local, gitignored opt-in file under the effective `FM_HOME` containing exactly `allow-store`:
+
+```sh
+mkdir -p config
+printf '%s\n' allow-store > config/pi-direct-openai-retention
+```
+
+Run `/reload` in Pi after changing the file so the complete extension and transport state are refreshed before the next request.
+The opt-in affects direct `openai/*` requests only; `openai-codex/*` compaction remains automatic whether the file is present or absent.
+To roll back the opt-in, remove `config/pi-direct-openai-retention` and run `/reload`; the default denial is restored.
+
 ## Backlog backend (.tasks.toml / config/backlog-backend)
 
 The tracked `.tasks.toml` pins the default `tasks-axi` markdown backend to `data/backlog.md`, with `done_keep = 10` and an archive at `data/done-archive.md`.
