@@ -31,6 +31,10 @@
 # FM_DISPATCH_STALE_CLEAR_MARGIN overrides the default 20 point stale margin.
 set -u
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=bin/fm-failover-lib.sh
+. "$SCRIPT_DIR/fm-failover-lib.sh"
+
 STALE_CLEAR_MARGIN=${FM_DISPATCH_STALE_CLEAR_MARGIN:-20}
 SELECT_OVERRIDE=
 QUOTA_JSON_FILE=
@@ -109,6 +113,57 @@ profiles_json=$(printf '%s\n' "$SPEC_JSON" | jq -ec '
 
 profile_count=$(printf '%s\n' "$profiles_json" | jq 'length')
 [ "$profile_count" -gt 0 ] || { echo "error: dispatch profile array must not be empty" >&2; exit 2; }
+
+FM_STATE_DIR=${FM_STATE_OVERRIDE:-${FM_HOME:-$HOME}/state}
+filter_profiles_by_failover() {
+  local tmpdir filtered_file excluded_file idx p harness model provider held pressure
+  tmpdir=$(mktemp -d)
+  filtered_file="$tmpdir/filtered"
+  excluded_file="$tmpdir/excluded"
+  touch "$filtered_file" "$excluded_file"
+  idx=0
+  while [ "$idx" -lt "$profile_count" ]; do
+    p=$(printf '%s\n' "$profiles_json" | jq -c ".[$idx]")
+    harness=$(printf '%s\n' "$p" | jq -r '.harness // ""')
+    model=$(printf '%s\n' "$p" | jq -r '.model // ""')
+    provider=$(fm_failover_provider_of_route "$harness" "$model")
+    held=0
+    if fm_failover_provider_held "$FM_STATE_DIR" "$provider"; then
+      held=1
+      log "provider $provider held; excluding $harness/$model"
+    fi
+    pressure=$(fm_failover_provider_pressure "$FM_STATE_DIR" "$provider" "$model")
+    case "${pressure%% *}" in
+      avoid|handoff)
+        if [ "$held" -eq 0 ]; then
+          log "provider $provider pressure: ${pressure%% *}; excluding $harness/$model"
+        fi
+        held=1
+        ;;
+    esac
+    if [ "$held" -eq 0 ]; then
+      printf '%s\n' "$p" >> "$filtered_file"
+    else
+      printf '%s\n' "{\"index\":$idx,\"profile\":$p,\"provider\":\"$provider\"}" >> "$excluded_file"
+    fi
+    idx=$((idx + 1))
+  done
+  if [ ! -s "$filtered_file" ]; then
+    printf '%s\n' "{\"excluded\":$(jq -s '.' "$excluded_file" 2>/dev/null || echo '[]'),\"reason\":\"all-candidates-excluded\"}"
+    rm -rf "$tmpdir"
+    return 3
+  fi
+  jq -s '.' "$filtered_file" 2>/dev/null || echo '[]'
+  rm -rf "$tmpdir"
+}
+
+filtered_profiles=$(filter_profiles_by_failover) || {
+  code=$?
+  printf '%s\n' "$filtered_profiles"
+  exit "$code"
+}
+profiles_json=$filtered_profiles
+profile_count=$(printf '%s\n' "$profiles_json" | jq 'length')
 
 first_profile() {
   printf '%s\n' "$profiles_json" | jq -c '
