@@ -122,6 +122,11 @@ case "${1:-} ${2:-}" in
     printf '{"number":17,"title":"typed","state":"OPEN","url":"https://github.com/%s/issues/17","id":"ISSUE_node_17"}\n' "$repo"
     exit 0
     ;;
+  "secret set"|"variable set")
+    input=$(cat)
+    printf 'stdin\t%s\t%s\t%s\n' "$profile" "$1 $2" "${#input}" >> "${FM_TEST_ROUTE_LOG:-/dev/null}"
+    exit 0
+    ;;
   "pr view")
     printf '%s\n' "${FM_TEST_PR_STATE:-ok}"
     exit 0
@@ -169,6 +174,12 @@ case "${FM_TEST_GH_AXI_TYPED_API:-}" in
     gh issue view 17 --json number,title,state,labels,assignees,id --repo account-a/repo-a
     gh api graphql -f id=ISSUE_node_17 -f typeId=TYPE_node_bug \
       -f 'query=mutation($id:ID!,$typeId:ID!){updateIssue(input:{id:$id,issueTypeId:$typeId}){issue{id}}}'
+    exit
+    ;;
+  issue-clear-type)
+    gh issue view 17 --json number,title,state,labels,assignees,id
+    gh api graphql -f id=ISSUE_node_17 \
+      -f 'query=mutation($id:ID!){updateIssue(input:{id:$id,issueTypeId:null}){issue{id}}}'
     exit
     ;;
   wrong-issue-id)
@@ -220,8 +231,39 @@ case "${FM_TEST_GH_AXI_TYPED_API:-}" in
     gh release delete v1 --yes
     exit
     ;;
+  stdin-secret)
+    input=$(cat)
+    printf '%s' "$input" | gh secret set ROUTED_VALUE
+    exit
+    ;;
+  stdin-changed)
+    cat >/dev/null
+    printf '%s' substituted | gh secret set ROUTED_VALUE
+    exit
+    ;;
+  stdin-variable)
+    printf '%s' "${5:-}" | gh variable set ROUTED_VALUE
+    exit
+    ;;
+  approved-body)
+    gh pr comment 17 --body "$(cat "$5")"
+    exit
+    ;;
+  changed-body)
+    gh pr comment 17 --body substituted
+    exit
+    ;;
+  merge-method)
+    gh pr view 17 --json state,mergedBy,mergedAt
+    gh pr merge 17 --squash
+    exit
+    ;;
+  release-aliases)
+    gh release create v2 --notes "$(cat "$7")" --draft --prerelease
+    exit
+    ;;
   issue-transfer)
-    gh issue transfer 17 account-a/repo-a
+    gh issue transfer 17 account-a/repo-a --repo Owner-A/repo-a
     gh issue view 17 --json number,url --repo account-a/repo-a
     exit
     ;;
@@ -765,6 +807,36 @@ test_forbidden_commands_and_access_diagnostics() {
   FM_TEST_GH_AXI_TYPED_API=untyped-create run_exec "$d" exec --project repo-a --repository "$d/home/projects/repo-a" -- \
     gh-axi issue create --title plain >/dev/null \
     || fail "untyped issue create did not bind its follow-up view"
+  printf '%s' 'routed-value' | FM_TEST_GH_AXI_TYPED_API=stdin-secret run_exec "$d" exec --project repo-a \
+    --repository "$d/home/projects/repo-a" -- gh-axi secret set ROUTED_VALUE >/dev/null \
+    || fail "routed secret stdin was not carried through the broker"
+  FM_TEST_GH_AXI_TYPED_API=stdin-variable run_exec "$d" exec --project repo-a --repository "$d/home/projects/repo-a" -- \
+    gh-axi variable set ROUTED_VALUE --body routed-value >/dev/null \
+    || fail "routed inline variable value was not bound to broker stdin"
+  assert_grep $'stdin\tprofile-a\tsecret set\t12' "$d/routes.log" "secret stdin length was not preserved"
+  assert_grep $'stdin\tprofile-a\tvariable set\t12' "$d/routes.log" "variable stdin length was not preserved"
+  set +e
+  printf '%s' 'routed-value' | FM_TEST_GH_AXI_TYPED_API=stdin-changed run_exec "$d" exec --project repo-a \
+    --repository "$d/home/projects/repo-a" -- gh-axi secret set ROUTED_VALUE >/dev/null 2>&1
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "substituted routed stdin"
+  printf '%s' 'approved body' > "$d/approved-body.md"
+  FM_TEST_GH_AXI_TYPED_API=approved-body run_exec "$d" exec --project repo-a --repository "$d/home/projects/repo-a" -- \
+    gh-axi pr comment 17 --body-file "$d/approved-body.md" >/dev/null \
+    || fail "approved generated body was rejected"
+  set +e
+  FM_TEST_GH_AXI_TYPED_API=changed-body run_exec "$d" exec --project repo-a --repository "$d/home/projects/repo-a" -- \
+    gh-axi pr comment 17 --body-file "$d/approved-body.md" >/dev/null 2>&1
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "substituted generated body"
+  FM_TEST_GH_AXI_TYPED_API=merge-method run_exec "$d" exec --project repo-a --repository "$d/home/projects/repo-a" -- \
+    gh-axi pr merge 17 --method squash >/dev/null \
+    || fail "typed merge method translation was rejected"
+  FM_TEST_GH_AXI_TYPED_API=release-aliases run_exec "$d" exec --project repo-a --repository "$d/home/projects/repo-a" -- \
+    gh-axi release create v2 -d -p --body-file "$d/approved-body.md" >/dev/null \
+    || fail "typed release alias translation was rejected"
   for child_contract in 'pr-reopen pr reopen 17' 'run-cancel run cancel 44' \
     'workflow-enable workflow enable ci.yml' 'release-delete release delete v1'; do
     read -r mode family subcommand target <<< "$child_contract"
@@ -773,7 +845,7 @@ test_forbidden_commands_and_access_diagnostics() {
       || fail "normalized $family $subcommand child contract was rejected"
   done
   FM_TEST_GH_AXI_TYPED_API=issue-transfer run_exec "$d" exec --project repo-a --repository "$d/home/projects/repo-a" -- \
-    gh-axi issue transfer 17 --to-repo account-a/repo-a >/dev/null \
+    gh-axi issue transfer 17 -R Owner-A/repo-a --to-repo account-a/repo-a >/dev/null \
     || fail "typed issue transfer grammar or child contract was rejected"
   FM_TEST_GH_AXI_TYPED_API=issue-type run_exec "$d" exec --project repo-a --repository "$d/home/projects/repo-a" -- \
     gh-axi issue create --title typed --type Bug >/dev/null \
@@ -781,6 +853,18 @@ test_forbidden_commands_and_access_diagnostics() {
   FM_TEST_GH_AXI_TYPED_API=issue-type run_exec "$d" exec --project repo-a --repository "$d/home/projects/repo-a" -- \
     gh-axi issue edit 17 --type Bug >/dev/null \
     || fail "verified gh-axi descendant could not edit a scoped issue type"
+  FM_TEST_GH_AXI_TYPED_API=issue-clear-type run_exec "$d" exec --project repo-a --repository "$d/home/projects/repo-a" -- \
+    gh-axi issue edit 17 --no-type >/dev/null \
+    || fail "verified gh-axi descendant could not clear a scoped issue type"
+  set +e
+  FM_TEST_GH_AXI_TYPED_API=issue-clear-type run_exec "$d" exec --project repo-a --repository "$d/home/projects/repo-a" -- \
+    gh-axi issue edit 17 --no-type --title changed >/dev/null 2>&1
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "non-atomic issue type clear"
+  if grep -F $'gh-axi\tprofile-a\tissue edit 17 --no-type --title changed' "$d/routes.log" >/dev/null; then
+    fail "non-atomic issue type clear reached a routed mutation"
+  fi
   FM_TEST_GH_AXI_TYPED_API=issue-type-fork run_exec "$d" exec --project repo-a --repository "$d/home/projects/repo-a" -- \
     gh-axi issue edit 17 --type Bug --repo account-a/repo-a >/dev/null \
     || fail "verified gh-axi descendant could not edit a selected-fork issue type"

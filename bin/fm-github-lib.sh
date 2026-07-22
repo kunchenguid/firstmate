@@ -396,8 +396,8 @@ fm_github_lock_release() {
 }
 
 fm_github_run_gh_axi() {
-  local binary=$1 target_repository=$2 issue_numbers=$3 resource_numbers=$4 context_dir shim_dir client status
-  shift 4
+  local binary=$1 target_repository=$2 destination_repository=$3 issue_numbers=$4 resource_numbers=$5 context_dir shim_dir client status
+  shift 5
   context_dir="$FM_HOME/state/.github-routing-tmp"
   umask 077
   mkdir -p "$context_dir" || return 1
@@ -410,46 +410,67 @@ fs.writeFileSync(destination, `#!/usr/bin/env node
 const net = require("node:net");
 const endpoint = process.env.FM_GITHUB_BROKER_ENDPOINT || "";
 const token = process.env.FM_GITHUB_BROKER_TOKEN || "";
+const stdinEnabled = process.env.FM_GITHUB_BROKER_STDIN === "1";
 const match = endpoint.match(/^127\\.0\\.0\\.1:([1-9][0-9]{0,4})$/u);
 if (!match || !/^[A-Za-z0-9_-]{43}$/u.test(token)) process.exit(1);
 let output = "";
-const client = net.createConnection({host: "127.0.0.1", port: Number(match[1])}, () => {
-  client.end(JSON.stringify({version: 1, token, args: process.argv.slice(2)}));
-});
-client.setEncoding("utf8");
-client.setTimeout(120000, () => client.destroy());
-client.on("data", (chunk) => { output += chunk; if (Buffer.byteLength(output, "utf8") > 24 * 1024 * 1024) client.destroy(); });
-client.on("error", () => process.exit(1));
-client.on("close", () => {
-  let response;
-  try { response = JSON.parse(output); } catch { process.exit(1); }
-  if (!Number.isSafeInteger(response?.status) || response.status < 0 || response.status > 255
-    || typeof response.stdout !== "string" || typeof response.stderr !== "string") process.exit(1);
-  process.stdout.write(response.stdout);
-  process.stderr.write(response.stderr);
-  process.exit(response.status);
-});
+const invoke = (stdin) => {
+  const client = net.createConnection({host: "127.0.0.1", port: Number(match[1])}, () => {
+    const request = {version: 1, token, args: process.argv.slice(2)};
+    if (stdinEnabled) request.stdin = stdin.toString("base64");
+    client.end(JSON.stringify(request));
+  });
+  client.setEncoding("utf8");
+  client.setTimeout(120000, () => client.destroy());
+  client.on("data", (chunk) => { output += chunk; if (Buffer.byteLength(output, "utf8") > 24 * 1024 * 1024) client.destroy(); });
+  client.on("error", () => process.exit(1));
+  client.on("close", () => {
+    let response;
+    try { response = JSON.parse(output); } catch { process.exit(1); }
+    if (!Number.isSafeInteger(response?.status) || response.status < 0 || response.status > 255
+      || typeof response.stdout !== "string" || typeof response.stderr !== "string") process.exit(1);
+    process.stdout.write(response.stdout);
+    process.stderr.write(response.stderr);
+    process.exit(response.status);
+  });
+};
+if (!stdinEnabled) invoke(Buffer.alloc(0));
+else {
+  const chunks = [];
+  let size = 0;
+  process.stdin.on("data", (chunk) => {
+    size += chunk.length;
+    if (size > 1024 * 1024) process.exit(1);
+    chunks.push(chunk);
+  });
+  process.stdin.on("end", () => invoke(Buffer.concat(chunks)));
+  process.stdin.resume();
+}
 `, {mode: 0o500});
 NODE
   chmod 0500 "$client" || { rm -rf "$shim_dir" 2>/dev/null || true; return 1; }
   trap "chmod -R u+rwx -- $(fm_github_shell_quote "$shim_dir") 2>/dev/null || true; rm -rf -- $(fm_github_shell_quote "$shim_dir") 2>/dev/null || true" EXIT HUP INT TERM
   if fm_github_node - "$binary" "$FM_GITHUB_GH_BINARY" "$(fm_github_lib_dir)/fm-github-config.mjs" \
-    "$target_repository" "$FM_GITHUB_REPOSITORY" "$shim_dir" "$issue_numbers" "$resource_numbers" "$@" <<'NODE'
+    "$target_repository" "$destination_repository" "$FM_GITHUB_REPOSITORY" "$shim_dir" "$issue_numbers" "$resource_numbers" "$@" 9<&0 <<'NODE'
+const fs = require("node:fs");
 const net = require("node:net");
 const crypto = require("node:crypto");
 const {spawn, spawnSync} = require("node:child_process");
-const [binary, ghBinary, validator, repository, baseRepository, shimDir, issueNumbersText, resourceNumbersText, ...args] = process.argv.slice(2);
+const [binary, ghBinary, validator, repository, destinationRepository, baseRepository, shimDir, issueNumbersText, resourceNumbersText, ...args] = process.argv.slice(2);
 const token = crypto.randomBytes(32).toString("base64url");
-const typeOperation = args[0] === "issue"
+const setTypeOperation = args[0] === "issue"
   && ((args[1] === "create" && args.some((arg) => arg === "--type" || arg.startsWith("--type=")))
     || (args[1] === "edit" && args.some((arg) => arg === "--type" || arg.startsWith("--type="))));
+const clearTypeOperation = args[0] === "issue" && args[1] === "edit" && args.includes("--no-type");
+const typeOperation = setTypeOperation || clearTypeOperation;
+const stdinOperation = ["secret:set", "variable:set"].includes(`${args[0]}:${args[1]}`);
 const flagValue = (name) => {
   const inline = args.find((arg) => arg.startsWith(`${name}=`));
   if (inline) return inline.slice(name.length + 1);
   const index = args.indexOf(name);
   return index >= 0 ? args[index + 1] : "";
 };
-const typeName = typeOperation ? flagValue("--type") : "";
+const typeName = setTypeOperation ? flagValue("--type") : "";
 const issueNumbers = new Set(issueNumbersText ? issueNumbersText.split("\n") : []);
 const resourceNumbers = new Set(resourceNumbersText ? resourceNumbersText.split("\n") : []);
 const issueIds = new Set();
@@ -481,11 +502,11 @@ const issueTarget = (value) => {
   const match = value.match(/^https:\/\/github\.com\/([^/]+)\/([^/]+)\/issues\/([1-9][0-9]*)$/iu);
   return match ? {number: match[3], repository: `github.com/${match[1]}/${match[2]}`} : null;
 };
-const repositoryMatches = (requestArgs, targetRepository = "") => {
+const repositoryMatches = (requestArgs, selectorRepository = "", expectedRepository = repository) => {
   const explicit = explicitRepositories(requestArgs);
   if (!explicit) return false;
-  const selected = [targetRepository, ...explicit].filter(Boolean);
-  return selected.every((value) => value.toLowerCase() === repository.toLowerCase());
+  const selected = [selectorRepository, ...explicit].filter(Boolean);
+  return selected.every((value) => value.toLowerCase() === expectedRepository.toLowerCase());
 };
 const booleanFlags = new Set([
   "--admin", "--all", "--approve", "--archived", "--auto", "--clone", "--comments", "--debug",
@@ -500,6 +521,8 @@ const canonicalFlag = (flag, command) => {
   if (flag === "-t") return "--title";
   if (flag === "-F") return command.startsWith("release:") ? "--notes-file" : "--body-file";
   if (flag === "-n") return "--notes";
+  if (flag === "-d" && ["pr:create", "release:create"].includes(command)) return "--draft";
+  if (flag === "-p" && command === "release:create") return "--prerelease";
   if (flag === "-s" && command === "pr:merge") return "--squash";
   if (flag === "-m" && command === "pr:merge") return "--merge";
   if (flag === "-r" && command === "pr:merge") return "--rebase";
@@ -577,6 +600,60 @@ const defaultLimits = new Map([
   ["repo:list", "30"], ["pr:list", "30"], ["issue:list", "30"], ["label:list", "500"],
   ["workflow:list", "20"], ["run:list", "10"], ["release:list", "10"],
 ]);
+const outerCommand = parseCommand(args);
+const readApprovedFile = (path) => {
+  const descriptor = fs.openSync(path, "r");
+  try {
+    const info = fs.fstatSync(descriptor);
+    if (!info.isFile() || info.size > 1024 * 1024) throw new Error("invalid generated payload");
+    const value = Buffer.alloc(1024 * 1024 + 1);
+    let size = 0;
+    while (size < value.length) {
+      const count = fs.readSync(descriptor, value, size, value.length - size, null);
+      if (count === 0) break;
+      size += count;
+    }
+    if (size > 1024 * 1024) throw new Error("invalid generated payload");
+    return value.subarray(0, size).toString("utf8");
+  } finally {
+    fs.closeSync(descriptor);
+  }
+};
+const approvedGeneratedValues = (() => {
+  const values = new Map();
+  if (!outerCommand) return values;
+  const file = outerCommand.flags.get("--body-file");
+  if (file?.length === 1) {
+    values.set(outerCommand.command.startsWith("release:") ? "--notes" : "--body", readApprovedFile(file[0]));
+  }
+  const body = outerCommand.flags.get("--body");
+  if (body?.length === 1 && outerCommand.command.startsWith("release:")) values.set("--notes", body[0]);
+  return values;
+})();
+const readInvocationStdin = () => {
+  if (require("node:tty").isatty(9)) return Buffer.alloc(0);
+  const chunks = [];
+  let size = 0;
+  while (true) {
+    const chunk = Buffer.alloc(64 * 1024);
+    const count = fs.readSync(9, chunk, 0, chunk.length, null);
+    if (count === 0) break;
+    size += count;
+    if (size > 1024 * 1024) throw new Error("invalid stdin");
+    chunks.push(chunk.subarray(0, count));
+  }
+  return Buffer.concat(chunks);
+};
+const approvedStdin = (() => {
+  if (!stdinOperation) return null;
+  const body = outerCommand?.flags.get("--body");
+  if (outerCommand?.command === "variable:set" && body?.length === 1) {
+    const value = Buffer.from(body[0], "utf8");
+    if (value.length > 1024 * 1024) throw new Error("invalid stdin");
+    return value;
+  }
+  return readInvocationStdin();
+})();
 const generatedFlagAllowed = (request, outer, name, values) => {
   if (name === "--repo") return true;
   if (name === "--json") return values.length === 1 && jsonFieldsAllowed(request.command, values[0]);
@@ -592,8 +669,12 @@ const generatedFlagAllowed = (request, outer, name, values) => {
   }
   if (name === "--exit-status" && request.command === "run:watch") return sameValues(values, [null]);
   if (name === "--log" && request.command === "run:view" && outer.flags.has("--verbose")) return sameValues(values, [null]);
-  if (name === "--body" && outer.flags.has("--body-file")) return values.length === 1;
-  if (name === "--notes" && (outer.flags.has("--body") || outer.flags.has("--body-file"))) return values.length === 1;
+  if (["--body", "--notes"].includes(name) && approvedGeneratedValues.has(name)) {
+    return sameValues(values, [approvedGeneratedValues.get(name)]);
+  }
+  if (["--merge", "--squash", "--rebase"].includes(name) && request.command === "pr:merge") {
+    return sameValues(values, [null]) && sameValues(outer.flags.get("--method"), [name.slice(2)]);
+  }
   if (name === "--search" && request.command === "issue:list" && outer.flags.has("--sort")) {
     return sameValues(values, [`sort:${outer.flags.get("--sort")[0]}-desc`]);
   }
@@ -621,8 +702,12 @@ const sameOperationAllowed = (requestArgs) => {
   }
   for (const [name, values] of outer.flags) {
     if (name === "--repo" || ignoredOuterFlags.has(name) || (name === "--to-repo" && outer.command === "issue:transfer")) continue;
-    if (name === "--body-file" && request.flags.has("--body")) continue;
+    if (name === "--body-file" && (request.flags.has("--body")
+      || (request.command.startsWith("release:") && request.flags.has("--notes")))) continue;
     if (name === "--body" && request.command.startsWith("release:") && request.flags.has("--notes")) continue;
+    if (name === "--body" && request.command === "variable:set" && stdinOperation) continue;
+    if (name === "--method" && request.command === "pr:merge"
+      && request.flags.has(`--${values[0] || ""}`)) continue;
     if (name === "--sort" && request.command === "issue:list" && request.flags.has("--search")) continue;
     if (name === "--verbose" && request.command === "run:view" && request.flags.has("--log")) continue;
     if (!sameValues(values, request.flags.get(name))) return false;
@@ -639,12 +724,15 @@ const withoutRepository = (commandArgs) => {
   return result;
 };
 const exactChildAllowed = (requestArgs) => {
-  if (!repositoryMatches(requestArgs)) return false;
   const outer = parseCommand(args);
   if (!outer) return false;
   const child = withoutRepository(requestArgs);
   const target = outer.positionals[0] || "";
   const exact = (...values) => values.some((value) => JSON.stringify(child) === JSON.stringify(value));
+  if (outer.command === "issue:transfer" && exact(["issue", "view", target, "--json", "number,url"])) {
+    return destinationRepository && repositoryMatches(requestArgs, "", destinationRepository);
+  }
+  if (!repositoryMatches(requestArgs)) return false;
   switch (outer.command) {
     case "pr:checks": return exact(["pr", "view", target, "--json", "statusCheckRollup"]);
     case "pr:close": return exact(["pr", "view", target, "--json", "state"]);
@@ -665,7 +753,7 @@ const exactChildAllowed = (requestArgs) => {
     case "issue:pin":
     case "issue:unpin": return exact(
       ["issue", "view", target, "--json", "state,isPinned"], ["issue", "view", target, "--json", "number,state,isPinned"]);
-    case "issue:transfer": return exact(["issue", "view", target, "--json", "number,url"]);
+    case "issue:transfer": return false;
     case "label:create": return exact(["label", "list", "--json", "name"]);
     case "run:cancel": return exact(["run", "view", target, "--json", "status,conclusion"]);
     case "workflow:view":
@@ -766,7 +854,7 @@ const server = net.createServer((connection) => {
   connection.setEncoding("utf8");
   connection.on("data", (chunk) => {
     input += chunk;
-    if (Buffer.byteLength(input, "utf8") > 128 * 1024) connection.destroy();
+    if (Buffer.byteLength(input, "utf8") > 1536 * 1024) connection.destroy();
   });
   connection.on("end", () => {
     let request;
@@ -790,7 +878,9 @@ const server = net.createServer((connection) => {
         return;
       }
       if (validation.kind === "issue-type-write"
-        && (!issueIds.has(validation.node_id) || validation.type_id !== typeId || !typeId)) {
+        && (!issueIds.has(validation.node_id)
+          || (setTypeOperation && (validation.mode !== "set" || validation.type_id !== typeId || !typeId))
+          || (clearTypeOperation && (validation.mode !== "clear" || validation.type_id || typeId)))) {
         connection.end(JSON.stringify({status: 1, stdout: "", stderr: ""}));
         return;
       }
@@ -801,7 +891,23 @@ const server = net.createServer((connection) => {
         return;
       }
     }
-    const result = spawnSync(ghBinary, request.args, {encoding: "utf8", env: process.env, maxBuffer: 10 * 1024 * 1024});
+    let stdin;
+    if (stdinOperation) {
+      if (typeof request.stdin !== "string" || request.stdin.length > 1398104 || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u.test(request.stdin)) {
+        connection.end(JSON.stringify({status: 1, stdout: "", stderr: ""}));
+        return;
+      }
+      stdin = Buffer.from(request.stdin, "base64");
+      if (stdin.length > 1024 * 1024 || stdin.toString("base64") !== request.stdin
+        || stdin.length !== approvedStdin.length || !crypto.timingSafeEqual(stdin, approvedStdin)) {
+        connection.end(JSON.stringify({status: 1, stdout: "", stderr: ""}));
+        return;
+      }
+    } else if (request.stdin !== undefined) {
+      connection.end(JSON.stringify({status: 1, stdout: "", stderr: ""}));
+      return;
+    }
+    const result = spawnSync(ghBinary, request.args, {encoding: "utf8", env: process.env, input: stdin, maxBuffer: 10 * 1024 * 1024});
     const response = {status: Number.isSafeInteger(result.status) ? result.status : 1, stdout: result.stdout || "", stderr: result.stderr || ""};
     observe(request.args, validation, nonApi, response);
     connection.end(JSON.stringify(response));
@@ -818,8 +924,10 @@ server.listen({host: "127.0.0.1", port: 0, exclusive: true}, () => {
   const env = {...process.env,
     PATH: `${shimDir}:${process.env.PATH || "/usr/bin:/bin"}`,
     FM_GITHUB_BROKER_ENDPOINT: `127.0.0.1:${address.port}`,
-    FM_GITHUB_BROKER_TOKEN: token};
-  const child = spawn(binary, args, {stdio: "inherit", env});
+    FM_GITHUB_BROKER_TOKEN: token,
+    FM_GITHUB_BROKER_STDIN: stdinOperation ? "1" : "0"};
+  const child = spawn(binary, args, {stdio: stdinOperation ? ["pipe", "inherit", "inherit"] : "inherit", env});
+  if (stdinOperation) child.stdin.end(approvedStdin);
   child.on("error", () => finish(1));
   child.on("exit", (code, signal) => finish(signal ? 1 : (code ?? 1)));
 });
@@ -1363,6 +1471,15 @@ fm_github_set_gh_target_repository() {
   FM_GITHUB_GH_TARGET_REPOSITORY=$canonical
 }
 
+fm_github_set_gh_destination_repository() {
+  local canonical=$1
+  if [ -n "${FM_GITHUB_GH_DESTINATION_REPOSITORY:-}" ] \
+    && [ "$(printf '%s' "$FM_GITHUB_GH_DESTINATION_REPOSITORY" | tr '[:upper:]' '[:lower:]')" != "$(printf '%s' "$canonical" | tr '[:upper:]' '[:lower:]')" ]; then
+    return 1
+  fi
+  FM_GITHUB_GH_DESTINATION_REPOSITORY=$canonical
+}
+
 fm_github_gh_option_kind() {
   local family=$1 subcommand=$2 option=$3
   case "$option" in
@@ -1396,7 +1513,7 @@ fm_github_gh_option_kind() {
       return
       ;;
     --to-repo)
-      if [ "$family" = issue ] && [ "$subcommand" = transfer ]; then printf repo; else printf unknown; fi
+      if [ "$family" = issue ] && [ "$subcommand" = transfer ]; then printf destination_repo; else printf unknown; fi
       return
       ;;
     --head|-H)
@@ -1423,14 +1540,14 @@ fm_github_gh_option_kind() {
       if [ "$family" = attestation ]; then printf reject; else printf unknown; fi
       return
       ;;
-    --app|--archive|--assignee|--attempt|--author|--author-email|--base|--body|--body-file|--branch|--bundle|--cert-identity|--cert-identity-regex|--cert-oidc-issuer|--color|--comment|--commit|--created|--custom-trusted-root|--description|--digest-alg|--dir|--discussion-category|--env-file|--event|--exclude|--field|--format|--gitignore|--homepage|--interval|--job|--jq|--key|--label|--language|--license|--limit|--lock-reason|--match-head-commit|--mention|--milestone|--name|--notes|--notes-file|--notes-start-tag|--order|--output|--pattern|--predicate-type|--project|--raw-field|--reason|--recover|--ref|--remote|--remove-assignee|--remove-label|--remove-project|--remove-reviewer|--reviewer|--search|--signer-digest|--source-digest|--source-ref|--state|--status|--subject|--tag|--target|--team|--title|--topic|--tuf-root|--type|--upstream-remote-name|--visibility|--workflow|--add-assignee|--add-label|--add-project|--add-reviewer|--size|--sort)
+    --app|--archive|--assignee|--attempt|--author|--author-email|--base|--body|--body-file|--branch|--bundle|--cert-identity|--cert-identity-regex|--cert-oidc-issuer|--color|--comment|--commit|--created|--custom-trusted-root|--description|--digest-alg|--dir|--discussion-category|--env-file|--event|--exclude|--field|--format|--gitignore|--homepage|--interval|--job|--jq|--key|--label|--language|--license|--limit|--lock-reason|--match-head-commit|--mention|--method|--milestone|--name|--notes|--notes-file|--notes-start-tag|--order|--output|--pattern|--predicate-type|--project|--raw-field|--reason|--recover|--ref|--remote|--remove-assignee|--remove-label|--remove-project|--remove-reviewer|--reviewer|--search|--signer-digest|--source-digest|--source-ref|--state|--status|--subject|--tag|--target|--team|--title|--topic|--tuf-root|--type|--upstream-remote-name|--visibility|--workflow|--add-assignee|--add-label|--add-project|--add-reviewer|--size|--sort)
       printf data; return
       ;;
     --json)
       if [ "$family" = workflow ] && [ "$subcommand" = run ]; then printf flag; else printf data; fi
       return
       ;;
-    --admin|--all|--approve|--archived|--auto|--bundle-from-oci|--checkout|--cleanup-tag|--clobber|--clone|--comments|--compact|--confirm|--conflict-status|--create-if-none|--debug|--default|--delete-branch|--delete-last|--deny-self-hosted-runners|--detach|--disable-auto|--disable-issues|--disable-wiki|--draft|--dry-run|--edit-last|--editor|--exclude-drafts|--exclude-pre-releases|--exit-status|--fail-fast|--fail-on-no-commits|--failed|--fill|--fill-first|--fill-verbose|--force|--fork|--generate-notes|--help|--include-all-branches|--internal|--latest|--list|--log|--log-failed|--merge|--name-only|--no-archived|--no-forks|--no-maintainer-edit|--no-public-good|--no-repos-selected|--no-source|--no-store|--no-upstream|--notes-from-tag|--parents|--patch|--prerelease|--private|--public|--push|--rebase|--recurse-submodules|--remove-milestone|--remove-parent|--remove-type|--required|--request-changes|--show-security-settings|--skip-existing|--squash|--succeed-on-no-caches|--undo|--verbose|--verify-only|--verify-tag|--watch|--web|--yaml|--yes)
+    --admin|--all|--approve|--archived|--auto|--bundle-from-oci|--checkout|--cleanup-tag|--clobber|--clone|--comments|--compact|--confirm|--conflict-status|--create-if-none|--debug|--default|--delete-branch|--delete-last|--deny-self-hosted-runners|--detach|--disable-auto|--disable-issues|--disable-wiki|--draft|--dry-run|--edit-last|--editor|--exclude-drafts|--exclude-pre-releases|--exit-status|--fail-fast|--fail-on-no-commits|--failed|--fill|--fill-first|--fill-verbose|--force|--fork|--generate-notes|--help|--include-all-branches|--internal|--latest|--list|--log|--log-failed|--merge|--name-only|--no-archived|--no-forks|--no-maintainer-edit|--no-public-good|--no-repos-selected|--no-source|--no-store|--no-type|--no-upstream|--notes-from-tag|--parents|--patch|--prerelease|--private|--public|--push|--rebase|--recurse-submodules|--remove-milestone|--remove-parent|--remove-type|--required|--request-changes|--show-security-settings|--skip-existing|--squash|--succeed-on-no-caches|--undo|--verbose|--verify-only|--verify-tag|--watch|--web|--yaml|--yes)
       printf flag; return
       ;;
     -A|-B|-D|-F|-L|-O|-S|-T|-g|-h|-i|-j|-k|-n|-q|-t) printf data; return ;;
@@ -1496,6 +1613,10 @@ fm_github_validate_gh_value() {
       canonical=$(fm_github_repository_allowed "$value") || return 1
       fm_github_set_gh_target_repository "$canonical" || return 1
       FM_GITHUB_GH_EXPLICIT_REPOSITORY=1
+      ;;
+    destination_repo)
+      canonical=$(fm_github_repository_allowed "$value") || return 1
+      fm_github_set_gh_destination_repository "$canonical" || return 1
       ;;
     owner)
       fm_github_owner_allowed "$value" || return 1
@@ -1603,9 +1724,33 @@ fm_github_validate_gh_positionals_complete() {
   esac
 }
 
+fm_github_validate_clear_type_command() {
+  local arg pending=0 target=0 clear=0
+  shift 2
+  while [ "$#" -gt 0 ]; do
+    arg=$1
+    shift
+    if [ "$pending" -eq 1 ]; then
+      [ -n "$arg" ] || return 1
+      pending=0
+      continue
+    fi
+    case "$arg" in
+      --no-type) clear=$((clear + 1)) ;;
+      --repo|-R) pending=1 ;;
+      --repo=*|-R?*) ;;
+      -*) return 1 ;;
+      *) target=$((target + 1)) ;;
+    esac
+  done
+  [ "$pending" -eq 0 ] && [ "$target" -eq 1 ] && [ "$clear" -eq 1 ]
+}
+
 fm_github_validate_gh_resource() {
   local family=${1:-} subcommand=${2:-} arg option value kind pending='' position=0
   FM_GITHUB_GH_TARGET_REPOSITORY=
+  FM_GITHUB_GH_SOURCE_REPOSITORY=
+  FM_GITHUB_GH_DESTINATION_REPOSITORY=
   FM_GITHUB_GH_EXPLICIT_REPOSITORY=0
   FM_GITHUB_GH_ISSUE_NUMBERS=
   FM_GITHUB_GH_RESOURCE_NUMBERS=
@@ -1628,6 +1773,7 @@ fm_github_validate_gh_resource() {
         FM_GITHUB_GH_NORMALIZED_ARGS+=("$arg")
         option=${arg%%=*}
         value=${arg#*=}
+        [ "$option" != --no-type ] || return 1
         kind=$(fm_github_gh_option_kind "$family" "$subcommand" "$option")
         [ "$kind" != repo ] || FM_GITHUB_GH_REPO_OPTION_SEEN=1
         case "$kind" in
@@ -1649,7 +1795,7 @@ fm_github_validate_gh_resource() {
         [ "$kind" != repo ] || FM_GITHUB_GH_REPO_OPTION_SEEN=1
         case "$kind" in
           flag) ;;
-          data|repo|owner|head|issue|host) pending=$kind ;;
+          data|repo|destination_repo|owner|head|issue|host) pending=$kind ;;
           *) return 1 ;;
         esac
         ;;
@@ -1662,8 +1808,22 @@ fm_github_validate_gh_resource() {
   done
   [ -z "$pending" ] || return 1
   fm_github_validate_gh_positionals_complete "$family" "$subcommand" "$position" || return 1
+  if [ "$family:$subcommand" = issue:transfer ]; then
+    [ -n "$FM_GITHUB_GH_DESTINATION_REPOSITORY" ] || return 1
+    FM_GITHUB_GH_SOURCE_REPOSITORY=${FM_GITHUB_GH_TARGET_REPOSITORY:-$FM_GITHUB_REPOSITORY}
+    FM_GITHUB_GH_TARGET_REPOSITORY=$FM_GITHUB_GH_SOURCE_REPOSITORY
+    if [ "$FM_GITHUB_GH_REPO_OPTION_SEEN" -eq 0 ]; then
+      FM_GITHUB_GH_NORMALIZED_ARGS+=(--repo "${FM_GITHUB_GH_SOURCE_REPOSITORY#github.com/}")
+      FM_GITHUB_GH_REPO_OPTION_SEEN=1
+    fi
+  fi
   if [ -n "$FM_GITHUB_GH_URL_NORMALIZED_REPOSITORY" ] && [ "$FM_GITHUB_GH_REPO_OPTION_SEEN" -eq 0 ]; then
     FM_GITHUB_GH_NORMALIZED_ARGS+=(--repo "$FM_GITHUB_GH_URL_NORMALIZED_REPOSITORY")
+  fi
+  if [ "$family:$subcommand" = issue:edit ]; then
+    case " ${FM_GITHUB_GH_NORMALIZED_ARGS[*]} " in
+      *' --no-type '*) fm_github_validate_clear_type_command "${FM_GITHUB_GH_NORMALIZED_ARGS[@]}" || return 1 ;;
+    esac
   fi
 }
 
@@ -1920,6 +2080,9 @@ fm_github_context_command() {
           if [ "${1:-}" = pr ] && [ "${2:-}" = create ] && [ -n "$FM_GITHUB_FORK_OWNER" ]; then
             fm_github_preflight read || return 1
             fm_github_preflight write "github.com/$FM_GITHUB_FORK_OWNER/${FM_GITHUB_REPOSITORY##*/}" || return 1
+          elif [ "${1:-}:${2:-}" = issue:transfer ]; then
+            fm_github_preflight write "$FM_GITHUB_GH_SOURCE_REPOSITORY" || return 1
+            fm_github_preflight write "$FM_GITHUB_GH_DESTINATION_REPOSITORY" || return 1
           else
             fm_github_preflight write "${FM_GITHUB_GH_TARGET_REPOSITORY:-$FM_GITHUB_REPOSITORY}" || return 1
           fi
@@ -1933,7 +2096,8 @@ fm_github_context_command() {
           set -- "${FM_GITHUB_GH_NORMALIZED_ARGS[@]}"
         fi
         fm_github_run_gh_axi "$github_binary" "${FM_GITHUB_GH_TARGET_REPOSITORY:-$FM_GITHUB_REPOSITORY}" \
-          "${FM_GITHUB_GH_ISSUE_NUMBERS:-}" "${FM_GITHUB_GH_RESOURCE_NUMBERS:-}" "$@" 2>/dev/null || {
+          "${FM_GITHUB_GH_DESTINATION_REPOSITORY:-}" "${FM_GITHUB_GH_ISSUE_NUMBERS:-}" \
+          "${FM_GITHUB_GH_RESOURCE_NUMBERS:-}" "$@" 2>/dev/null || {
           echo "error: routed GitHub command failed for profile $FM_GITHUB_PROFILE_ID" >&2
           return 1
         }

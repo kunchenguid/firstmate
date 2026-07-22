@@ -218,6 +218,9 @@ function validateRepositoryGraphQL(query, nameVariable, suppliedOwner, suppliedN
   if (compact === "mutation($id:ID!,$typeId:ID!){updateIssue(input:{id:$id,issueTypeId:$typeId}){issue{id}}}") {
     return {owner: "", name: "", kind: "issue-type-write", mode: "set"};
   }
+  if (compact === "mutation($id:ID!){updateIssue(input:{id:$id,issueTypeId:null}){issue{id}}}") {
+    return {owner: "", name: "", kind: "issue-type-write", mode: "clear"};
+  }
   const tokens = query.match(/"(?:\\["\\/bfnrt]|\\u[0-9A-Fa-f]{4}|[^"\\\u0000-\u001f])*"|\$[A-Za-z_][A-Za-z0-9_]*|[A-Za-z_][A-Za-z0-9_]*|[!$():=@\[\]{|},]|\d+/gu);
   if (!tokens || tokens.join("") !== compact) throw new Error("invalid GraphQL request");
   let index = 0;
@@ -435,11 +438,12 @@ function validateInternalApi(args, selectedRepository) {
     if (method && method !== "POST") throw new Error("invalid API request");
     const result = validateRepositoryGraphQL(query, nameVariable, owner, name);
     if (result.kind === "issue-type-write") {
-      if (result.mode !== "set" || !singleLine(nodeId, 256) || !singleLine(typeId, 256)
-        || /[^A-Za-z0-9_=-]/u.test(nodeId) || /[^A-Za-z0-9_=-]/u.test(typeId) || owner || name) {
+      if (!singleLine(nodeId, 256) || /[^A-Za-z0-9_=-]/u.test(nodeId) || owner || name
+        || (result.mode === "set" && (!singleLine(typeId, 256) || /[^A-Za-z0-9_=-]/u.test(typeId)))
+        || (result.mode === "clear" && typeId) || !["clear", "set"].includes(result.mode)) {
         throw new Error("invalid API request");
       }
-      return {kind: result.kind, repository: selected, nodeId, typeId};
+      return {kind: result.kind, mode: result.mode, repository: selected, nodeId, typeId};
     }
     if (nodeId || typeId || !result.owner || !result.name) throw new Error("invalid API request");
     const repository = parseRepository(`github.com/${result.owner}/${result.name}`);
@@ -712,6 +716,7 @@ try {
     emit("repository", result.repository);
     emit("node_id", result.nodeId);
     emit("type_id", result.typeId);
+    emit("mode", result.mode || "");
     process.exit(0);
   }
   if (action === "resolve") {
