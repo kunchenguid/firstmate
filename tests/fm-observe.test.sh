@@ -237,7 +237,8 @@ assert 'no-mistakes://run/01NMOBSERVE' not in refs
 assert 'no-mistakes://run/01NMNEW59' in refs
 assert 'no-mistakes://run/01NMNEW09' not in refs
 assert not any('OTHER' in ref for ref in refs)
-assert c.execute("SELECT COUNT(*) FROM evidence WHERE kind IN ('no-mistakes-pr','quality-log')").fetchone()[0] == 0
+assert c.execute("SELECT COUNT(*) FROM evidence WHERE kind LIKE 'no-mistakes-%' OR kind='quality-log'").fetchone()[0] == 50
+assert c.execute("SELECT COUNT(*) FROM evidence WHERE kind='no-mistakes-session'").fetchone()[0] == 0
 PY
 then
   fail "newest no-mistakes ordering and limit assertions failed"

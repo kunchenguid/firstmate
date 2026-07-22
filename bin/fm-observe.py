@@ -692,7 +692,7 @@ def collect_no_mistakes(
         (run["run_id"],),
     )
     connection.execute(
-        "DELETE FROM evidence WHERE run_id=? AND kind IN ('no-mistakes-run','no-mistakes-pr','quality-log')",
+        "DELETE FROM evidence WHERE run_id=? AND (kind LIKE 'no-mistakes-%' OR kind='quality-log')",
         (run["run_id"],),
     )
     for nm_run in matched:
