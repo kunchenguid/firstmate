@@ -58,6 +58,11 @@ FM_PR_POLL_EXPECT_CHECK_IDENTITY=
 FM_PR_POLL_TEMPLATE=
 FM_PR_POLL_STATE_DEVICE=
 FM_PR_POLL_LOCK=
+FM_PR_RETIRE_ID=
+FM_PR_RETIRE_URL=
+FM_PR_RETIRE_DATA_IDENTITY=
+FM_PR_RETIRE_CHECK_IDENTITY=
+FM_PR_RETIRE_REG_IDENTITY=
 
 fm_task_id_path_safe() {
   local id=${1-}
@@ -399,9 +404,10 @@ fm_pr_poll_cleanup() {
   FM_PR_POLL_REG_TMP=
 }
 
-# Publication and terminal retirement share one task-scoped lock so the
-# generation validated by a watcher cannot be replaced between its identity
-# check and removal. The canonical wake-lock helper owns stale-owner recovery.
+# Publication and terminal handling share one task-scoped lock so the
+# generation validated by a watcher cannot be replaced between durable wake
+# publication and receipt-backed removal. The canonical wake-lock helper owns
+# stale-owner recovery.
 fm_pr_poll_lock_acquire() {
   local state=$1 id=$2 attempt=0 lock
   fm_pr_task_id_valid "$id" || return 1
@@ -517,11 +523,15 @@ fm_pr_poll_prepare() {
 }
 
 fm_pr_poll_publish_prepared() {
+  local retirement
   [ -n "$FM_PR_POLL_DATA_TMP" ] && [ -n "$FM_PR_POLL_CHECK_TMP" ] \
     && [ -n "$FM_PR_POLL_REG_TMP" ] || return 1
   fm_pr_regular_destination_on_device_or_absent "$FM_PR_POLL_DATA_DEST" "$FM_PR_POLL_STATE_DEVICE" || return 1
   fm_pr_regular_destination_on_device_or_absent "$FM_PR_POLL_REG_DEST" "$FM_PR_POLL_STATE_DEVICE" || return 1
   fm_pr_regular_destination_on_device_or_absent "$FM_PR_POLL_CHECK_DEST" "$FM_PR_POLL_STATE_DEVICE" || return 1
+  retirement="${FM_PR_POLL_CHECK_DEST%.check.sh}.pr-poll-retired"
+  fm_pr_regular_destination_on_device_or_absent "$retirement" "$FM_PR_POLL_STATE_DEVICE" || return 1
+  rm -f -- "$retirement" || return 1
 
   if ! mv -f -- "$FM_PR_POLL_DATA_TMP" "$FM_PR_POLL_DATA_DEST"; then
     fm_pr_poll_revoke_final || true
@@ -574,6 +584,55 @@ fm_pr_poll_publish_prepared() {
   fi
 }
 
+fm_pr_poll_retirement_parse() {
+  local file=$1 version id url data_identity check_identity registration_identity extra
+  FM_PR_RETIRE_ID=
+  FM_PR_RETIRE_URL=
+  FM_PR_RETIRE_DATA_IDENTITY=
+  FM_PR_RETIRE_CHECK_IDENTITY=
+  FM_PR_RETIRE_REG_IDENTITY=
+  {
+    IFS= read -r version
+    IFS= read -r id
+    IFS= read -r url
+    IFS= read -r data_identity
+    IFS= read -r check_identity
+    IFS= read -r registration_identity
+    IFS= read -r extra || true
+  } < "$file" || return 1
+  [ "$version" = fm-pr-poll-retirement-v1 ] && [ -z "$extra" ] || return 1
+  fm_pr_task_id_valid "$id" || return 1
+  fm_pr_url_parse "$url" || return 1
+  [[ "$data_identity" =~ ^[0-9]+:[0-9]+$ ]] || return 1
+  [[ "$check_identity" =~ ^[0-9]+:[0-9]+$ ]] || return 1
+  [[ "$registration_identity" =~ ^[0-9]+:[0-9]+$ ]] || return 1
+  FM_PR_RETIRE_ID=$id
+  FM_PR_RETIRE_URL=$url
+  FM_PR_RETIRE_DATA_IDENTITY=$data_identity
+  FM_PR_RETIRE_CHECK_IDENTITY=$check_identity
+  FM_PR_RETIRE_REG_IDENTITY=$registration_identity
+}
+
+fm_pr_poll_generation_matches() {
+  local state=$1 id=$2 template=$3 expected_url=$4 expected_data_identity=$5
+  local expected_check_identity=$6 expected_registration_identity=$7 data_identity check_identity registration_identity
+  if ! fm_pr_poll_artifacts_valid "$state" "$id" "$template"; then
+    if fm_pr_metadata_identity_parse "$state/$id.meta" && [ "$FM_PR_META_URL" != "$expected_url" ]; then
+      return 2
+    fi
+    return 1
+  fi
+  data_identity=$(fm_pr_file_identity "$state/$id.pr-poll") || return 1
+  check_identity=$(fm_pr_file_identity "$state/$id.check.sh") || return 1
+  registration_identity=$(fm_pr_file_identity "$state/$id.pr-poll-registration") || return 1
+  if [ "$FM_PR_DATA_URL" != "$expected_url" ] \
+    || [ "$data_identity" != "$expected_data_identity" ] \
+    || [ "$check_identity" != "$expected_check_identity" ] \
+    || [ "$registration_identity" != "$expected_registration_identity" ]; then
+    return 2
+  fi
+}
+
 fm_pr_poll_artifacts_valid() {
   local state=$1 id=$2 template=$3 state_device check data registration meta data_hash template_hash data_identity check_identity
   fm_pr_task_id_valid "$id" || return 1
@@ -613,44 +672,61 @@ fm_pr_poll_artifacts_valid() {
   [ "$FM_PR_META_NUMBER" = "$FM_PR_DATA_NUMBER" ]
 }
 
-# Retire one exact authenticated poll generation after it reports a terminal
-# result. The caller supplies the identities captured before running the poll,
-# so a follow-up PR published concurrently is never mistaken for the completed
-# generation. Return 2 when that generation has already been replaced, and 1
-# when its current artifacts cannot be validated or neutralized safely.
+# Retire one exact authenticated poll generation after its terminal wake is
+# durable. A receipt published before removal makes every partial cleanup
+# retryable, while captured identities keep a replacement generation safe.
+# Return 2 when the generation was replaced, and 1 when current artifacts
+# cannot be validated or neutralized safely.
 fm_pr_poll_retire_validated() {
   local state=$1 id=$2 template=$3 expected_url=$4 expected_data_identity=$5 expected_check_identity=$6
-  local check data registration state_device current_data_identity current_check_identity
+  local expected_registration_identity=$7 check data registration retirement retirement_tmp state_device artifact expected_identity
   fm_pr_task_id_valid "$id" || return 1
   [ -d "$state" ] && [ ! -L "$state" ] || return 1
   state_device=$(fm_pr_file_device "$state") || return 1
   check="$state/$id.check.sh"
   data="$state/$id.pr-poll"
   registration="$state/$id.pr-poll-registration"
+  retirement="$state/$id.pr-poll-retired"
 
-  if ! fm_pr_poll_artifacts_valid "$state" "$id" "$template"; then
-    if fm_pr_metadata_identity_parse "$state/$id.meta" && [ "$FM_PR_META_URL" != "$expected_url" ]; then
-      return 2
+  if [ -e "$retirement" ] || [ -L "$retirement" ]; then
+    fm_pr_private_file_valid "$retirement" 600 "$state_device" || return 1
+    fm_pr_poll_retirement_parse "$retirement" || return 1
+    [ "$FM_PR_RETIRE_ID" = "$id" ] \
+      && [ "$FM_PR_RETIRE_URL" = "$expected_url" ] \
+      && [ "$FM_PR_RETIRE_DATA_IDENTITY" = "$expected_data_identity" ] \
+      && [ "$FM_PR_RETIRE_CHECK_IDENTITY" = "$expected_check_identity" ] \
+      && [ "$FM_PR_RETIRE_REG_IDENTITY" = "$expected_registration_identity" ] || return 2
+  else
+    fm_pr_poll_generation_matches "$state" "$id" "$template" "$expected_url" \
+      "$expected_data_identity" "$expected_check_identity" "$expected_registration_identity" || return $?
+    retirement_tmp=$(mktemp "$state/.fm-pr-poll-retirement.XXXXXX") || return 1
+    if ! printf '%s\n%s\n%s\n%s\n%s\n%s\n' fm-pr-poll-retirement-v1 "$id" "$expected_url" \
+        "$expected_data_identity" "$expected_check_identity" "$expected_registration_identity" > "$retirement_tmp" \
+      || ! chmod 0600 "$retirement_tmp" \
+      || ! fm_pr_private_file_valid "$retirement_tmp" 600 "$state_device" \
+      || ! fm_pr_regular_destination_on_device_or_absent "$retirement" "$state_device" \
+      || ! mv -f -- "$retirement_tmp" "$retirement"; then
+      rm -f -- "$retirement_tmp"
+      return 1
     fi
-    return 1
   fi
-  current_data_identity=$(fm_pr_file_identity "$data") || return 1
-  current_check_identity=$(fm_pr_file_identity "$check") || return 1
-  if [ "$FM_PR_DATA_URL" != "$expected_url" ] \
-    || [ "$current_data_identity" != "$expected_data_identity" ] \
-    || [ "$current_check_identity" != "$expected_check_identity" ]; then
+
+  if fm_pr_metadata_identity_parse "$state/$id.meta" && [ "$FM_PR_META_URL" != "$expected_url" ]; then
     return 2
   fi
-
-  # Remove the runnable name first. Any later failure leaves the poll inert and
-  # makes a subsequent fm-pr-check publication replace the remnants normally.
-  fm_pr_private_file_valid "$check" 600 "$state_device" || return 1
-  rm -f -- "$check" || return 1
-  [ ! -e "$check" ] && [ ! -L "$check" ] || return 1
-  fm_pr_private_file_valid "$registration" 600 "$state_device" || return 1
-  rm -f -- "$registration" || return 1
-  [ ! -e "$registration" ] && [ ! -L "$registration" ] || return 1
-  fm_pr_private_file_valid "$data" 600 "$state_device" || return 1
-  rm -f -- "$data" || return 1
-  [ ! -e "$data" ] && [ ! -L "$data" ]
+  for artifact in "$check" "$registration" "$data"; do
+    case "$artifact" in
+      "$check") expected_identity=$expected_check_identity ;;
+      "$registration") expected_identity=$expected_registration_identity ;;
+      *) expected_identity=$expected_data_identity ;;
+    esac
+    [ -e "$artifact" ] || [ -L "$artifact" ] || continue
+    fm_pr_private_file_valid "$artifact" 600 "$state_device" || return 1
+    [ "$(fm_pr_file_identity "$artifact")" = "$expected_identity" ] || return 2
+    rm -f -- "$artifact" || return 1
+    [ ! -e "$artifact" ] && [ ! -L "$artifact" ] || return 1
+  done
+  fm_pr_private_file_valid "$retirement" 600 "$state_device" || return 1
+  rm -f -- "$retirement" || return 1
+  [ ! -e "$retirement" ] && [ ! -L "$retirement" ]
 }

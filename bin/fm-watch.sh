@@ -764,6 +764,24 @@ while :; do
   # CHECK_INTERVAL, so most cycles skip this block and fall straight through.
   if [ "$(age_of "$STATE/.last-check")" -ge "$CHECK_INTERVAL" ]; then
     rejected_checks=
+    for retirement in "$STATE"/*.pr-poll-retired; do
+      [ -e "$retirement" ] || continue
+      id=$(basename "$retirement" .pr-poll-retired)
+      fm_pr_poll_lock_acquire "$STATE" "$id" || exit 1
+      state_device=$(fm_pr_file_device "$STATE") || { fm_pr_poll_lock_release; exit 1; }
+      if ! fm_pr_private_file_valid "$retirement" 600 "$state_device" \
+        || ! fm_pr_poll_retirement_parse "$retirement" \
+        || [ "$FM_PR_RETIRE_ID" != "$id" ]; then
+        fm_pr_poll_lock_release
+        exit 1
+      fi
+      fm_pr_poll_retire_validated "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh" \
+        "$FM_PR_RETIRE_URL" "$FM_PR_RETIRE_DATA_IDENTITY" "$FM_PR_RETIRE_CHECK_IDENTITY" \
+        "$FM_PR_RETIRE_REG_IDENTITY"
+      retire_rc=$?
+      fm_pr_poll_lock_release
+      [ "$retire_rc" -eq 0 ] || [ "$retire_rc" -eq 2 ] || exit 1
+    done
     for c in "$STATE"/*.check.sh; do
       [ -e "$c" ] || continue
       if [ "$(basename "$c")" = x-watch.check.sh ]; then
@@ -785,21 +803,29 @@ while :; do
           number=$FM_PR_DATA_NUMBER
           poll_data_identity=$(fm_pr_file_identity "$STATE/$id.pr-poll") || exit 1
           poll_check_identity=$(fm_pr_file_identity "$c") || exit 1
+          poll_registration_identity=$(fm_pr_file_identity "$STATE/$id.pr-poll-registration") || exit 1
           run_check_capture "$SCRIPT_DIR/fm-pr-poll.sh" --validated \
             "$provider" "$url" "$host" "$path" "$number" || exit 1
           out=$FM_CHECK_RESULT
           if [ "$out" = merged ]; then
             fm_pr_poll_lock_acquire "$STATE" "$id" || exit 1
-            fm_pr_poll_retire_validated "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh" \
-              "$url" "$poll_data_identity" "$poll_check_identity"
-            retire_rc=$?
-            fm_pr_poll_lock_release
-            if [ "$retire_rc" -eq 2 ]; then
-              # A newer PR poll won the race. Its generation remains armed and
-              # the obsolete merged result is not actionable anymore.
+            fm_pr_poll_generation_matches "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh" \
+              "$url" "$poll_data_identity" "$poll_check_identity" "$poll_registration_identity"
+            generation_rc=$?
+            if [ "$generation_rc" -eq 2 ]; then
+              fm_pr_poll_lock_release
               continue
             fi
+            [ "$generation_rc" -eq 0 ] || { fm_pr_poll_lock_release; exit 1; }
+            reason="check: $c: $out"
+            fm_wake_append check "$c" "$reason" || { fm_pr_poll_lock_release; exit 1; }
+            fm_pr_poll_retire_validated "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh" \
+              "$url" "$poll_data_identity" "$poll_check_identity" "$poll_registration_identity"
+            retire_rc=$?
+            fm_pr_poll_lock_release
             [ "$retire_rc" -eq 0 ] || exit 1
+            touch "$STATE/.last-check"
+            wake "$reason"
           fi
         elif fm_custom_check_snapshot_prepare "$STATE" "$id"; then
           custom_snapshot=$FM_CUSTOM_CHECK_SNAPSHOT

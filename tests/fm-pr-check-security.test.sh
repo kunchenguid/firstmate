@@ -25,6 +25,7 @@ TMP_ROOT=$(fm_test_tmproot fm-pr-check-security)
 BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
 REAL_CP=$(command -v cp)
 REAL_MV=$(command -v mv)
+REAL_RM=$(command -v rm)
 REAL_STAT=$(command -v stat)
 REAL_CHMOD=$(command -v chmod)
 REAL_BASENAME=$(command -v basename)
@@ -754,7 +755,7 @@ test_static_poll_contract() {
 }
 
 test_terminal_poll_retirement_and_replacement() {
-  local dir state rc old_data_identity old_check_identity
+  local dir state rc old_data_identity old_check_identity old_registration_identity
   dir=$(make_case terminal-retirement)
   state="$dir/home/state"
   write_task_meta "$dir"
@@ -781,11 +782,12 @@ test_terminal_poll_retirement_and_replacement() {
     || fail "follow-up PR poll was not authenticated"
   old_data_identity=$(fm_pr_file_identity "$state/task-a.pr-poll")
   old_check_identity=$(fm_pr_file_identity "$state/task-a.check.sh")
+  old_registration_identity=$(fm_pr_file_identity "$state/task-a.pr-poll-registration")
   run_check_entry "$dir" task-a https://github.com/o/r/pull/3 >/dev/null 2>/dev/null \
     || fail "could not replace the follow-up PR poll"
   set +e
   fm_pr_poll_retire_validated "$state" task-a "$POLL" \
-    https://github.com/o/r/pull/2 "$old_data_identity" "$old_check_identity"
+    https://github.com/o/r/pull/2 "$old_data_identity" "$old_check_identity" "$old_registration_identity"
   rc=$?
   set -e
   [ "$rc" -eq 2 ] || fail "obsolete poll retirement did not identify its replacement"
@@ -806,6 +808,55 @@ test_terminal_poll_retirement_and_replacement() {
     && [ ! -e "$state/task-a.pr-poll-registration" ] \
     || fail "replacement PR poll was not retired after merging"
   pass "terminal PR polls wake once and exact-generation retirement preserves replacements"
+}
+
+test_published_wake_survives_interrupted_retirement() {
+  local dir state rc deduped
+  dir=$(make_case interrupted-retirement)
+  state="$dir/home/state"
+  write_task_meta "$dir"
+  run_check_entry "$dir" task-a https://github.com/o/r/pull/1 >/dev/null 2>/dev/null \
+    || fail "could not arm the interrupted-retirement poll"
+
+  cat > "$dir/fakebin/rm" <<SH
+#!/usr/bin/env bash
+for argument in "\$@"; do
+  if [ "\$argument" = '$state/task-a.check.sh' ] && [ ! -e '$dir/retirement-failed-once' ]; then
+    touch '$dir/retirement-failed-once'
+    exit 1
+  fi
+done
+exec '$REAL_RM' "\$@"
+SH
+  chmod +x "$dir/fakebin/rm"
+
+  set +e
+  FM_TEST_GH_STATE=MERGED run_watcher_bounded "$dir/home" "$dir/fakebin" \
+    > "$dir/failed-watch.out" 2> "$dir/failed-watch.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "injected post-publication retirement failure was ignored"
+  [ -f "$state/task-a.pr-poll-retired" ] \
+    || fail "retirement failure did not preserve its durable generation receipt"
+  [ -f "$state/task-a.check.sh" ] \
+    || fail "injected retirement failure did not leave the poll recoverable"
+  [ "$(grep -c "$(printf '\tcheck\t')" "$state/.wake-queue")" -eq 1 ] \
+    || fail "retirement failure lost or duplicated the published merged wake"
+
+  write_task_meta "$dir" task-b
+  printf 'done: recovery trigger\n' > "$state/task-b.status"
+  FM_TEST_GH_STATE=OPEN run_watcher_bounded "$dir/home" "$dir/fakebin" \
+    > "$dir/recovery-watch.out" 2> "$dir/recovery-watch.err" \
+    || fail "watcher did not recover the interrupted retirement"
+  [ ! -e "$state/task-a.check.sh" ] && [ ! -e "$state/task-a.pr-poll" ] \
+    && [ ! -e "$state/task-a.pr-poll-registration" ] \
+    || fail "recovery did not finish exact-generation retirement"
+  [ ! -e "$state/task-a.pr-poll-retired" ] \
+    || fail "recovery did not retire the completed generation receipt"
+  deduped=$(fm_wake_print_deduped "$state/.wake-queue")
+  [ "$(printf '%s\n' "$deduped" | grep -c "$(printf '\tcheck\t')")" -eq 1 ] \
+    || fail "recovery exposed more than one actionable merged wake"
+  pass "published merged wakes survive and recover from interrupted retirement"
 }
 
 test_atomic_interruption_leaves_no_partial_artifact() {
@@ -2652,6 +2703,7 @@ test_teardown_removes_poll_artifacts() {
   printf 'check\n' > "$dir/home/state/task-a.check.sh"
   printf 'data\n' > "$dir/home/state/task-a.pr-poll"
   printf 'registration\n' > "$dir/home/state/task-a.pr-poll-registration"
+  printf 'retirement\n' > "$dir/home/state/task-a.pr-poll-retired"
   printf 'trust\n' > "$dir/home/state/task-a.check-trust"
   mkdir -p "$dir/home/state/.pr-check-quarantine"
   chmod 0700 "$dir/home/state/.pr-check-quarantine"
@@ -2670,6 +2722,7 @@ SH
   [ ! -e "$dir/home/state/task-a.check.sh" ] || fail "teardown left the runnable check"
   [ ! -e "$dir/home/state/task-a.pr-poll" ] || fail "teardown left the sidecar"
   [ ! -e "$dir/home/state/task-a.pr-poll-registration" ] || fail "teardown left the PR poll registration"
+  [ ! -e "$dir/home/state/task-a.pr-poll-retired" ] || fail "teardown left the PR poll retirement receipt"
   [ ! -e "$dir/home/state/task-a.check-trust" ] || fail "teardown left the custom check registration"
   ! find "$dir/home/state/.pr-check-quarantine" -name 'task-a.*' -print 2>/dev/null | grep . >/dev/null \
     || fail "teardown left task quarantine artifacts"
@@ -2902,6 +2955,7 @@ test_valid_recording_and_merge_derivation
 test_rejected_metacharacter_bytes_are_inert
 test_static_poll_contract
 test_terminal_poll_retirement_and_replacement
+test_published_wake_survives_interrupted_retirement
 test_atomic_interruption_leaves_no_partial_artifact
 test_concurrent_watcher_sees_only_complete_publication
 test_postrename_poll_validation_revokes_and_retries
