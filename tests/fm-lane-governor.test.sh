@@ -43,33 +43,43 @@ run_governor_memory() {  # <home> <platform> <args...>
     "$GOV" "$@" 2>&1
 }
 
-test_darwin_memory_snapshot_counts_reclaimable_pages() {
+test_darwin_memory_snapshot_reads_pressure_level() {
   local home out status
   home=$(make_home darwin-memory)
-  cat > "$home/vm_stat" <<'TXT'
-Mach Virtual Memory Statistics: (page size of 16384 bytes)
-Pages free:                                4544.
-Pages active:                            348455.
-Pages inactive:                          339908.
-Pages speculative:                         7112.
-Pages throttled:                              0.
-Pages wired down:                        327009.
-Pages purgeable:                             14.
-File-backed pages:                       166071.
-Anonymous pages:                         529404.
-TXT
+  printf '62\n' > "$home/memorystatus"
+  printf '25769803776\n' > "$home/memsize"
   printf 'total = 17408.00M  used = 2048.00M  free = 15360.00M  (encrypted)\n' > "$home/swapusage"
 
-  out=$(FM_LANE_VM_STAT_FILE="$home/vm_stat" FM_LANE_SWAPUSAGE_FILE="$home/swapusage" \
+  out=$(FM_LANE_MEMORYSTATUS_FILE="$home/memorystatus" FM_LANE_MEMSIZE_FILE="$home/memsize" \
+    FM_LANE_SWAPUSAGE_FILE="$home/swapusage" \
     FM_LANE_MIN_AVAILABLE_RAM_GB=1 FM_LANE_MAX_SWAP_GB=24 \
     run_governor_memory "$home" Darwin memwatch)
   status=$?
 
-  [ "$status" -eq 0 ] || fail "macOS available RAM must count reclaimable pages, not just the free list, got: $out"
-  assert_contains "$out" "available_ram=5.4GB" \
-    "macOS available RAM should include inactive, speculative, and purgeable pages"
+  [ "$status" -eq 0 ] || fail "macOS available RAM must come from the kernel's free percentage, got: $out"
+  assert_contains "$out" "available_ram=14.9GB" \
+    "macOS available RAM should be kern.memorystatus_level applied to hw.memsize"
   assert_contains "$out" "swap_used=2.0GB" "macOS swap used should parse vm.swapusage"
-  pass "lane governor reads macOS available RAM as reclaimable memory"
+  pass "lane governor reads macOS available RAM from the kernel pressure level"
+}
+
+test_darwin_memory_snapshot_falls_back_to_memory_pressure() {
+  local home out status
+  home=$(make_home darwin-memory-fallback)
+  : > "$home/memorystatus"
+  printf '25769803776\n' > "$home/memsize"
+  printf 'Pages active: 462306 \nSystem-wide memory free percentage: 25%%\n' > "$home/pressure"
+
+  out=$(FM_LANE_MEMORYSTATUS_FILE="$home/memorystatus" FM_LANE_MEMSIZE_FILE="$home/memsize" \
+    FM_LANE_MEMORY_PRESSURE_FILE="$home/pressure" \
+    FM_LANE_MIN_AVAILABLE_RAM_GB=1 \
+    run_governor_memory "$home" Darwin memwatch)
+  status=$?
+
+  [ "$status" -eq 0 ] || fail "the memory_pressure fallback should still pass the threshold, got: $out"
+  assert_contains "$out" "available_ram=6.0GB" \
+    "an unavailable sysctl should fall back to the memory_pressure free percentage"
+  pass "lane governor falls back to memory_pressure when the sysctl is unavailable"
 }
 
 test_linux_memory_snapshot_reads_memavailable() {
@@ -96,16 +106,19 @@ TXT
 test_memory_snapshot_survives_truncated_fields() {
   local home out status
   home=$(make_home memory-truncated)
-  printf 'Mach Virtual Memory Statistics: (page size of  bytes)\nPages free: 4544.\n' > "$home/vm_stat"
+  printf 'unavailable\n' > "$home/memorystatus"
+  : > "$home/pressure"
+  : > "$home/memsize"
   printf 'total = 17408.00M  free = 15360.00M\n' > "$home/swapusage"
 
-  out=$(FM_LANE_VM_STAT_FILE="$home/vm_stat" FM_LANE_SWAPUSAGE_FILE="$home/swapusage" \
+  out=$(FM_LANE_MEMORYSTATUS_FILE="$home/memorystatus" FM_LANE_MEMSIZE_FILE="$home/memsize" \
+    FM_LANE_MEMORY_PRESSURE_FILE="$home/pressure" FM_LANE_SWAPUSAGE_FILE="$home/swapusage" \
     run_governor_memory "$home" Darwin memwatch)
   status=$?
 
   [ "$status" -eq 0 ] || fail "an unreadable memory snapshot must not refuse or error, got: $out"
   assert_not_contains "$out" "operand expected" "empty numeric fields must never reach arithmetic"
-  assert_not_contains "$out" "available_ram" "an unparseable page size should report no available RAM"
+  assert_not_contains "$out" "available_ram" "an unreadable pressure level should report no available RAM"
   pass "lane governor skips memory thresholds it cannot measure instead of erroring"
 }
 
@@ -172,17 +185,29 @@ test_partial_memory_pin_keeps_the_other_reading() {
   home=$(make_home memory-partial-pin)
   cat > "$home/meminfo" <<'TXT'
 MemAvailable:     131072 kB
-SwapTotal:      16777216 kB
-SwapFree:       16777216 kB
+SwapTotal:      33554432 kB
+SwapFree:              0 kB
 TXT
 
-  out=$(FM_LANE_MEMINFO_FILE="$home/meminfo" FM_LANE_MIN_AVAILABLE_RAM_GB=1 \
-    FM_LANE_SWAP_USED_MB=0 run_governor_memory "$home" Linux memwatch)
+  # Only the swap pin is dropped here, so the pinned available-RAM value really
+  # reaches the governor while swap still has to come from the fixture.
+  out=$(env -u FM_LANE_SWAP_USED_MB \
+    FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" \
+    FM_ROOT_OVERRIDE="$ROOT" \
+    FM_LANE_PLATFORM=Linux \
+    FM_LANE_ORPHAN_CHECK=0 \
+    FM_LANE_MEMINFO_FILE="$home/meminfo" \
+    FM_LANE_MEMORY_AVAILABLE_MB=8192 \
+    FM_LANE_MIN_AVAILABLE_RAM_GB=1 \
+    FM_LANE_MAX_SWAP_GB=24 \
+    "$GOV" memwatch 2>&1)
   status=$?
 
-  [ "$status" -ne 0 ] || fail "pinning only swap must leave the available-RAM gate live, got: $out"
-  assert_contains "$out" "available RAM 0.1GB is below minimum 1.0GB" \
+  [ "$status" -ne 0 ] || fail "pinning only available RAM must leave the swap gate live, got: $out"
+  assert_contains "$out" "swap used 32.0GB exceeds limit 24.0GB" \
     "an unpinned metric must keep its real reading instead of being blanked"
+  assert_not_contains "$out" "available RAM" "the pinned metric must still override its own reading"
   pass "lane governor keeps the unpinned memory metric's real reading"
 }
 
@@ -484,7 +509,8 @@ test_lease_ttl_reaps_stale_live_lease() {
 
 test_capacity_counts_active_workers
 test_capacity_excludes_the_relaunch_target
-test_darwin_memory_snapshot_counts_reclaimable_pages
+test_darwin_memory_snapshot_reads_pressure_level
+test_darwin_memory_snapshot_falls_back_to_memory_pressure
 test_linux_memory_snapshot_reads_memavailable
 test_memory_snapshot_survives_truncated_fields
 test_live_task_worker_is_not_an_orphan

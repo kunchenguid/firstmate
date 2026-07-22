@@ -12,7 +12,8 @@
 # or available RAM crosses the configured lines, or when a likely orphaned
 # harness process belonging to this home is still alive under a launchd-reparented zsh.
 # Available RAM means reclaimable memory, not just the free list: on Linux it is
-# MemAvailable, and on macOS it is free + speculative + inactive pages,
+# MemAvailable, and on macOS it is the kernel's own free percentage
+# (kern.memorystatus_level, or memory_pressure as a fallback) applied to hw.memsize,
 # so the same threshold means the same thing on both platforms.
 # A harness process is never called an orphan when it is an ancestor of this
 # governor run or when it sits in a worktree or home recorded for a live task.
@@ -262,13 +263,29 @@ platform_name() {
   printf '%s\n' "${FM_LANE_PLATFORM:-$(uname)}"
 }
 
-vm_stat_text() {
-  if [ -n "${FM_LANE_VM_STAT_FILE:-}" ]; then
-    cat "$FM_LANE_VM_STAT_FILE" 2>/dev/null || true
+memorystatus_level_text() {
+  if [ -n "${FM_LANE_MEMORYSTATUS_FILE:-}" ]; then
+    cat "$FM_LANE_MEMORYSTATUS_FILE" 2>/dev/null || true
     return 0
   fi
-  command -v vm_stat >/dev/null 2>&1 || return 0
-  vm_stat 2>/dev/null || true
+  sysctl -n kern.memorystatus_level 2>/dev/null || true
+}
+
+memory_pressure_text() {
+  if [ -n "${FM_LANE_MEMORY_PRESSURE_FILE:-}" ]; then
+    cat "$FM_LANE_MEMORY_PRESSURE_FILE" 2>/dev/null || true
+    return 0
+  fi
+  command -v memory_pressure >/dev/null 2>&1 || return 0
+  memory_pressure 2>/dev/null || true
+}
+
+memsize_text() {
+  if [ -n "${FM_LANE_MEMSIZE_FILE:-}" ]; then
+    cat "$FM_LANE_MEMSIZE_FILE" 2>/dev/null || true
+    return 0
+  fi
+  sysctl -n hw.memsize 2>/dev/null || true
 }
 
 swapusage_text() {
@@ -283,26 +300,35 @@ meminfo_path() {
   printf '%s\n' "${FM_LANE_MEMINFO_FILE:-/proc/meminfo}"
 }
 
-# Reclaimable memory on macOS, in MB, comparable in intent to Linux MemAvailable:
-# the free list alone is routinely a few hundred MB on a healthy Mac because the
-# kernel parks reclaimable memory on the inactive and speculative lists. Purgeable
-# pages are already counted inside those lists, so they are never added again.
-darwin_available_mb() {  # reads vm_stat output on stdin
-  awk '
-    function pages(v) { gsub(/[^0-9]/, "", v); return v + 0 }
-    /page size of/ {
-      line = $0
-      sub(/.*page size of[[:space:]]*/, "", line)
-      sub(/[^0-9].*$/, "", line)
-      if (line != "") page_size = line + 0
-    }
-    /^Pages free:/ { free = pages($NF) }
-    /^Pages speculative:/ { speculative = pages($NF) }
-    /^Pages inactive:/ { inactive = pages($NF) }
-    END {
-      if (page_size <= 0) exit 1
-      printf "%.0f\n", (free + speculative + inactive) * page_size / 1048576
-    }'
+# Available memory on macOS comes from the kernel's own pressure accounting rather
+# than a hand-summed page tally: on-host validation showed vm_stat's
+# free + speculative + inactive pages reading 8.0GB on a 24GiB Mac while
+# kern.memorystatus_level reported 62% free (14.9GB), so the sum is not the same
+# quantity the kernel acts on. memory_pressure prints the same percentage and is the
+# fallback when the sysctl is unavailable.
+darwin_free_percent() {
+  local level
+
+  level=$(memorystatus_level_text | tr -d '[:space:]')
+  if ! is_uint "$level" || [ "$level" -gt 100 ]; then
+    level=$(memory_pressure_text \
+      | sed -nE 's/.*memory free percentage:[[:space:]]*([0-9]+)%.*/\1/p' \
+      | head -1)
+  fi
+  is_uint "$level" || return 1
+  [ "$level" -le 100 ] || return 1
+  printf '%s\n' "$level"
+}
+
+darwin_available_mb() {
+  local percent bytes total_mb
+
+  percent=$(darwin_free_percent) || return 1
+  bytes=$(memsize_text | tr -d '[:space:]')
+  is_uint "$bytes" || return 1
+  total_mb=$((bytes / 1048576))
+  [ "$total_mb" -gt 0 ] || return 1
+  printf '%s\n' $((total_mb * percent / 100))
 }
 
 MEMORY_AVAILABLE_MB=
@@ -327,14 +353,11 @@ memory_snapshot() {
 }
 
 memory_read() {
-  local vm_text swap_line meminfo mem_avail swap_total swap_free available used
+  local swap_line meminfo mem_avail swap_total swap_free available used
 
   if [ "$(platform_name)" = Darwin ]; then
-    vm_text=$(vm_stat_text)
-    if [ -n "$vm_text" ]; then
-      available=$(printf '%s\n' "$vm_text" | darwin_available_mb || true)
-      is_uint "$available" && MEMORY_AVAILABLE_MB=$available
-    fi
+    available=$(darwin_available_mb || true)
+    is_uint "$available" && MEMORY_AVAILABLE_MB=$available
     swap_line=$(swapusage_text)
     if [ -n "$swap_line" ]; then
       used=$(printf '%s\n' "$swap_line" \

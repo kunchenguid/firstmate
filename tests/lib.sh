@@ -36,7 +36,7 @@ export FM_GATE_REFUSE_BYPASS=1
 
 # Pin the lane governor's memory snapshot to deterministic, safe values for the
 # whole suite. fm-spawn.sh consults bin/fm-lane-governor.sh before every launch,
-# and its default path reads the live host RAM/swap (sysctl/vm_stat). Tests that
+# and its default path reads the live host RAM/swap (sysctl/meminfo). Tests that
 # drive the real fm-spawn - the secondmate lifecycle/safety flows especially -
 # would otherwise be refused whenever the host momentarily dips below the minimum
 # available-RAM line, an entirely host-dependent flake unrelated to what they

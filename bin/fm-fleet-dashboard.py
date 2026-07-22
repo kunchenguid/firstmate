@@ -495,7 +495,7 @@ def build_render_data(snapshot: dict[str, Any]) -> dict[str, Any]:
     html_mq = [[esc(r["id"]), pill(r["class"]), esc(r["blocked_by"]), esc(r["reason"])] for r in mq]
     md_mq = [[r["id"], r["class"], r["blocked_by"], r["reason"]] for r in mq]
     html_landed = [
-        [esc(r["id"]), esc(r["home"]), esc(r["title"]), link(r["artifact"]) if str(r["artifact"]).startswith("http") else esc(r["artifact"]), esc(r["date"])]
+        [esc(r["id"]), esc(r["home"]), esc(r["title"]), link(r["artifact"]), esc(r["date"])]
         for r in landed
     ]
     md_landed = [[r["id"], r["home"], r["title"], r["artifact"], r["date"]] for r in landed]
