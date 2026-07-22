@@ -47,9 +47,9 @@
 #   session's exact active workspace and tab. A detected focus change restores
 #   only that exact tab id; an ambiguous pre-operation snapshot refuses the
 #   focus-sensitive presentation mutation.
-#   Every single-task invocation holds one task-id-scoped lock across backend
-#   creation through metadata publication, so concurrent same-id spawns serialize
-#   even when they select different backends.
+#   Every single-task invocation holds one task-id-scoped lock from backend creation through metadata publication.
+#   This serializes same-id spawns even when they select different backends.
+#   A metadata publication failure stops before the agent command is sent, so no worker starts with undiscoverable state.
 #   With no harness arg, a crewmate/scout spawn resolves the CREW harness only when
 #   config/crew-dispatch.json is absent. When that file exists, crewmate/scout
 #   spawns require an explicit harness so firstmate cannot silently skip dispatch
