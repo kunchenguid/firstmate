@@ -427,8 +427,8 @@ fm_pending_reply_fallback_idle_eligible() {  # <record-path>
   [ "$age" -ge "$grace" ]
 }
 
-fm_pending_reply_backend_busy_state() {  # <record-path> <backend> <target> [expected-label]
-  local rec=$1 backend=$2 target=$3 expected_label=${4-} native tail40
+fm_pending_reply_backend_observation() {  # <backend> <target> [expected-label]
+  local backend=$1 target=$2 expected_label=${3-} native tail40
   native=$(fm_backend_busy_state "$backend" "$target" 2>/dev/null || printf 'unknown')
   case "$native" in
     busy|idle) printf '%s' "$native"; return 0 ;;
@@ -438,11 +438,24 @@ fm_pending_reply_backend_busy_state() {  # <record-path> <backend> <target> [exp
   if printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -6 \
     | grep -qiE "${FM_BUSY_REGEX:-$FM_TMUX_BUSY_REGEX_DEFAULT}"; then
     printf 'busy'
-  elif fm_pending_reply_fallback_idle_eligible "$rec"; then
-    printf 'idle'
   else
-    printf 'unknown'
+    printf 'fallback-idle'
   fi
+}
+
+fm_pending_reply_busy_state_from_observation() {  # <record-path> <observation>
+  local rec=$1 observation=$2
+  case "$observation" in
+    busy|idle|unknown) printf '%s' "$observation" ;;
+    fallback-idle)
+      if fm_pending_reply_fallback_idle_eligible "$rec"; then
+        printf 'idle'
+      else
+        printf 'unknown'
+      fi
+      ;;
+    *) printf 'unknown' ;;
+  esac
 }
 
 # Explicit turn-completion proof (for tests and turn-end backends that surface
@@ -643,7 +656,9 @@ fm_pending_reply_tick_one() {  # <state-dir> <corr_id> <busy_state> [secondmate-
 # Never scrapes secondmate conversation; uses only parent status, backend busy
 # state, and optional secondmate-home wrong-home path checks.
 fm_pending_reply_tick() {  # <state-dir>
-  local state=$1 dir rec corr task_id meta backend target label busy sm_home
+  local state=$1 dir rec corr task_id phase meta backend target label busy sm_home
+  local observation observation_task found i
+  local -a observation_tasks=() observation_values=()
   dir=$(fm_pending_reply_dir "$state")
   [ -d "$dir" ] || return 0
   for rec in "$dir"/*; do
@@ -653,8 +668,25 @@ fm_pending_reply_tick() {  # <state-dir>
     esac
     corr=$(fm_pending_reply_get "$rec" corr_id)
     [ -n "$corr" ] || corr=$(basename "$rec")
+    if fm_pending_reply_try_resolve "$state" "$corr"; then
+      continue
+    fi
     task_id=$(fm_pending_reply_get "$rec" task_id)
+    phase=$(fm_pending_reply_get "$rec" phase)
     meta="$state/${task_id}.meta"
+    if [ "$phase" = escalated ]; then
+      if [ -f "$meta" ]; then
+        sm_home=$(fm_meta_get "$meta" home)
+        if [ -n "$sm_home" ]; then
+          fm_pending_reply_detect_wrong_home "$state" "$corr" "$sm_home" || true
+        fi
+      fi
+      continue
+    fi
+    case "$phase" in
+      awaiting_report|recovery_sent) ;;
+      *) continue ;;
+    esac
     backend=tmux
     target=
     busy=unknown
@@ -665,7 +697,21 @@ fm_pending_reply_tick() {  # <state-dir>
       sm_home=$(fm_meta_get "$meta" home)
       if [ -n "$target" ]; then
         label="fm-$task_id"
-        busy=$(fm_pending_reply_backend_busy_state "$rec" "$backend" "$target" "$label")
+        observation=
+        found=0
+        for ((i = 0; i < ${#observation_tasks[@]}; i++)); do
+          observation_task=${observation_tasks[$i]}
+          [ "$observation_task" = "$task_id" ] || continue
+          observation=${observation_values[$i]}
+          found=1
+          break
+        done
+        if [ "$found" = 0 ]; then
+          observation=$(fm_pending_reply_backend_observation "$backend" "$target" "$label")
+          observation_tasks+=("$task_id")
+          observation_values+=("$observation")
+        fi
+        busy=$(fm_pending_reply_busy_state_from_observation "$rec" "$observation")
       fi
     fi
     fm_pending_reply_tick_one "$state" "$corr" "$busy" "$sm_home" || true

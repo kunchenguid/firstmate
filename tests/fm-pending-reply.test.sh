@@ -493,6 +493,47 @@ test_unknown_backend_state_uses_capture_fallback() {
   pass "tmux and zellij unknown states use bounded capture fallback"
 }
 
+test_tick_skips_terminal_and_reuses_target_observation() {
+  (
+    local home state open1 open2 resolved escalated rec probe_log probes
+    home=$(setup_parent observation-cache)
+    state="$home/state"
+    probe_log="$home/backend-probes.log"
+    : > "$probe_log"
+    export FM_PENDING_REPLY_NOW=10100
+    open1=$(fm_pending_reply_create "$home" "$state" hibit "first open request")
+    open2=$(fm_pending_reply_create "$home" "$state" hibit "second open request")
+    fm_pending_reply_mark_delivered "$state" "$open1"
+    fm_pending_reply_mark_delivered "$state" "$open2"
+    resolved=$(fm_pending_reply_create "$home" "$state" resolved "resolved request")
+    fm_pending_reply_mark_delivered "$state" "$resolved"
+    printf 'done [corr=%s]: complete\n' "$resolved" > "$state/resolved.status"
+    fm_pending_reply_try_resolve "$state" "$resolved" || fail "resolved fixture should resolve"
+    escalated=$(fm_pending_reply_create "$home" "$state" escalated "escalated request")
+    fm_pending_reply_mark_delivered "$state" "$escalated"
+    rec=$(fm_pending_reply_path "$state" "$escalated")
+    fm_pending_reply_set "$rec" phase escalated || fail "escalated fixture should transition"
+    fm_write_secondmate_meta "$state/hibit.meta" "$home/hibit" "sess:fm-hibit"
+    fm_write_secondmate_meta "$state/resolved.meta" "$home/resolved" "sess:fm-resolved"
+    fm_write_secondmate_meta "$state/escalated.meta" "$home/escalated" "sess:fm-escalated"
+    fm_backend_busy_state() {
+      printf '%s\t%s\n' "$1" "$2" >> "$probe_log"
+      printf 'busy'
+    }
+    fm_backend_capture() { fail "native busy observations should not capture"; }
+    fm_pending_reply_tick "$state"
+    probes=$(wc -l < "$probe_log" | tr -d ' ')
+    [ "$probes" = 1 ] || fail "two open records for one target should use one probe, got $probes"
+    rec=$(fm_pending_reply_path "$state" "$open1")
+    [ "$(fm_pending_reply_get "$rec" turn_seen_busy)" = 1 ] \
+      || fail "cached observation should update the first open record"
+    rec=$(fm_pending_reply_path "$state" "$open2")
+    [ "$(fm_pending_reply_get "$rec" turn_seen_busy)" = 1 ] \
+      || fail "cached observation should update the second open record"
+  ) || fail "terminal-skip and observation-cache regression failed"
+  pass "tick skips terminal records and reuses target observations"
+}
+
 test_correlations_reuse_only_for_matching_open_task() {
   local dir fb log home state got corr1 corr2 corr3 rec
   dir="$TMP_ROOT/corr-reuse"; mkdir -p "$dir"
@@ -599,6 +640,7 @@ test_document_pointer_resolves
 test_helper_report_resolves
 test_busy_idle_observation_via_backend_abstraction
 test_unknown_backend_state_uses_capture_fallback
+test_tick_skips_terminal_and_reuses_target_observation
 test_correlations_reuse_only_for_matching_open_task
 test_tick_end_to_end_missed_then_escalate
 test_failed_send_discards_undelivered_expectation
