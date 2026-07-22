@@ -139,7 +139,7 @@ meta_has_endpoint() {  # <meta> <endpoint>
 }
 
 source_manifest() {  # <kind> <key>
-  local kind=$1 key=$2 task source meta identity count=0 base candidate candidate_base status
+  local kind=$1 key=$2 task source meta identity count=0 base encoded candidate candidate_encoded status
   case "$kind" in
     signal)
       fm_wake_status_key_map "$key" || return 1
@@ -179,19 +179,27 @@ source_manifest() {  # <kind> <key>
         unauthenticated-state-checks:*)
           base=${key#unauthenticated-state-checks:}
           case "$base" in
-            ''|*/*|.*|*[![:print:]]*) return 1 ;;
-            *.check.sh) ;;
+            hex:*)
+              encoded=${base#hex:}
+              case "$encoded" in ''|*[!0-9a-f]*) return 1 ;; esac
+              [ $(( ${#encoded} % 2 )) -eq 0 ] || return 1
+              [ "${#encoded}" -le 510 ] || return 1
+              source=
+              for candidate in "$STATE"/*.check.sh; do
+                { [ -f "$candidate" ] || [ -L "$candidate" ]; } || continue
+                candidate_encoded=$(fm_wake_hex_encode "${candidate##*/}") || return 2
+                [ "$candidate_encoded" = "$encoded" ] || continue
+                source=$candidate
+                break
+              done
+              ;;
+            ''|.*|*[!A-Za-z0-9._-]*|*/*) return 1 ;;
+            *.check.sh)
+              [ "${#base}" -le 255 ] || return 1
+              source="$STATE/$base"
+              ;;
             *) return 1 ;;
           esac
-          [ "${#base}" -le 255 ] || return 1
-          source=
-          for candidate in "$STATE"/*.check.sh; do
-            { [ -f "$candidate" ] || [ -L "$candidate" ]; } || continue
-            candidate_base=$(printf '%s' "${candidate##*/}" | fm_wake_clean_field)
-            [ "$candidate_base" = "$base" ] || continue
-            [ -z "$source" ] || return 1
-            source=$candidate
-          done
           [ -n "$source" ] || return 1
           if identity=$(entry_identity "$source"); then :; else status=$?; return "$status"; fi
           printf 'rejected-check\t%s\t%s\n' "$base" "$identity"
@@ -250,8 +258,8 @@ EOF
 capture() {
   local reason=$1 rows row item receipt='' status saw_error=false
   [ -n "$reason" ] || return 1
-  rows=$(LC_ALL=C awk -F '\t' -v reason="$reason" '
-    NF >= 5 && $5 == reason { print }
+  rows=$(FM_WAKE_CAPTURE_REASON="$reason" LC_ALL=C awk -F '\t' '
+    NF >= 5 && $5 == ENVIRON["FM_WAKE_CAPTURE_REASON"] { print }
   ' "$FM_WAKE_QUEUE" 2>/dev/null) || return 2
   [ -n "$rows" ] || return 1
   while IFS= read -r row; do

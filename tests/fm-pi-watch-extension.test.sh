@@ -1073,7 +1073,7 @@ EOF
 }
 
 test_wake_actionability_helper_source_and_queue_matrix() {
-  local home state reason receipt before after check xcheck rejected unrelated status fakebin drain_input drain_output count mixed_output batch_output
+  local home state reason receipt before after check xcheck rejected rejected_key unrelated status fakebin drain_input drain_output count mixed_output batch_output
   home="$TMP_ROOT/wake-actionability-home"
   state="$home/state"
   mkdir -p "$state"
@@ -1169,8 +1169,9 @@ test_wake_actionability_helper_source_and_queue_matrix() {
   rejected="$state/rejected$(printf '\t')control.check.sh"
   ln -s "$state/missing-control-check-target" "$rejected"
   reason="check: rejected unauthenticated state checks: $rejected"
+  rejected_key=$(bash -c '. "$1"; fm_wake_hex_encode "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "${rejected##*/}")
   FM_HOME="$home" FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_wake_append check "$2" "$3"' \
-    _ "$ROOT/bin/fm-wake-lib.sh" "unauthenticated-state-checks:$(basename "$rejected")" "$reason"
+    _ "$ROOT/bin/fm-wake-lib.sh" "unauthenticated-state-checks:hex:$rejected_key" "$reason"
   reason=$(printf '%s' "$reason" | tr '\t\r\n' '   ')
   receipt=$(FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$ACTIONABLE" capture "$reason") \
     || fail "normalized rejected check did not produce an actionability receipt"

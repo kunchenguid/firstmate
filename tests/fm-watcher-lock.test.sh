@@ -12,6 +12,7 @@ WATCH="$ROOT/bin/fm-watch.sh"
 WATCH_ARM="$ROOT/bin/fm-watch-arm.sh"
 DRAIN="$ROOT/bin/fm-wake-drain.sh"
 LIB="$ROOT/bin/fm-wake-lib.sh"
+ACTIONABLE="$ROOT/bin/fm-wake-actionable.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-watcher-lock-tests)
 
@@ -693,7 +694,7 @@ test_arm_hup_cleans_child_and_temp_output() {
 }
 
 test_arm_propagates_immediate_wake_before_confirmation() {
-  local dir state fakebin armout drain_out check_file expected rc
+  local dir state fakebin armout drain_out check_file expected receipt rc
   dir=$(make_case arm-immediate-wake)
   state="$dir/state"
   fakebin="$dir/fakebin"
@@ -705,7 +706,7 @@ test_arm_propagates_immediate_wake_before_confirmation() {
   chmod 0600 "$state/.pr-check-migration-scan-v1" "$state/.pr-check-migration-v1"
   cat > "$check_file" <<'SH'
 #!/usr/bin/env bash
-printf 'merged: https://example.test/pr/7\nsecond\tline\rthird\n'
+printf 'merged: https://example.test/pr/7\nsecond\tline\rthird literal \\n and \\t\n'
 SH
   chmod 0700 "$check_file"
   FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-check-register.sh" task >/dev/null \
@@ -713,13 +714,72 @@ SH
   rc=0
   PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=0 FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=0 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$armout" || rc=$?
   [ "$rc" -eq 0 ] || fail "arm returned non-zero for an immediate wake (status $rc): $(cat "$armout")"
-  expected="check: $check_file: merged: https://example.test/pr/7 second line third"
+  expected="check: $check_file: merged: https://example.test/pr/7 second line third literal \\n and \\t"
   grep -Fx "$expected" "$armout" >/dev/null || fail "arm did not propagate the canonical immediate check wake"
   ! grep -qF 'watcher: FAILED' "$armout" || fail "arm printed FAILED after a valid immediate wake"
+  receipt=$(FM_HOME="$dir" FM_STATE_OVERRIDE="$state" "$ACTIONABLE" capture "$expected") \
+    || fail "literal-backslash check wake did not produce an actionability receipt"
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" "$ACTIONABLE" validate "$receipt" \
+    || fail "literal-backslash check receipt did not validate"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" || fail "drain after immediate arm wake failed"
-  awk -F '\t' -v expected="$expected" '$3 == "check" && $5 == expected { found = 1 } END { exit !found }' "$drain_out" \
+  EXPECTED_WAKE="$expected" awk -F '\t' '$3 == "check" && $5 == ENVIRON["EXPECTED_WAKE"] { found = 1 } END { exit !found }' "$drain_out" \
     || fail "canonical immediate check wake did not match its queued payload"
   pass "arm propagates an immediate watcher wake before confirmation"
+}
+
+test_rejected_check_keys_are_lossless_and_coalesced() {
+  local dir state fakebin armout target tab_check space_check newline_check reason receipt drain_input count unique armpid i rc
+  dir=$(make_case rejected-check-identities)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout="$dir/arm.out"
+  target="$dir/rejected-target"
+  tab_check="$state/collision$(printf '\t')name.check.sh"
+  space_check="$state/collision name.check.sh"
+  newline_check="${state}/line"$'\n'"break.check.sh"
+  mark_pr_check_migration_complete "$state"
+  touch "$state/.last-check"
+  printf '#!/usr/bin/env bash\n' > "$target"
+  chmod 0700 "$target"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=0 FM_POLL=0.1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=1 FM_HEARTBEAT=999999 "$WATCH" > "$armout" &
+  armpid=$!
+  i=0
+  while [ "$i" -lt 80 ]; do
+    [ -e "$state/.last-watcher-beat" ] && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  if [ ! -e "$state/.last-watcher-beat" ]; then
+    kill "$armpid" 2>/dev/null || true
+    wait "$armpid" 2>/dev/null || true
+    fail "watcher did not publish its readiness beacon before rejected checks were created"
+  fi
+  ln -s "$target" "$tab_check"
+  ln -s "$target" "$space_check"
+  ln -s "$target" "$newline_check"
+  touch -t 200001010000 "$state/.last-check"
+  rc=0
+  wait "$armpid" || rc=$?
+  [ "$rc" -eq 0 ] || fail "arm returned non-zero for rejected checks (status $rc): $(cat "$armout")"
+  reason=$(awk '/^check: rejected unauthenticated state checks:/ { print; exit }' "$armout")
+  [ -n "$reason" ] || fail "arm did not propagate the combined rejected-check wake"
+  count=$(awk -F '\t' '$3 == "check" && $4 ~ /^unauthenticated-state-checks:hex:[0-9a-f]+$/ { count++ } END { print count + 0 }' "$state/.wake-queue")
+  unique=$(awk -F '\t' '$3 == "check" { seen[$4] = 1 } END { for (key in seen) count++; print count + 0 }' "$state/.wake-queue")
+  [ "$count" -eq 3 ] && [ "$unique" -eq 3 ] || fail "rejected checks did not receive three unique encoded queue identities"
+  receipt=$(FM_HOME="$dir" FM_STATE_OVERRIDE="$state" "$ACTIONABLE" capture "$reason") \
+    || fail "combined rejected-check wake did not produce an actionability receipt"
+  drain_input="$dir/rejected-drain-input"
+  cp "$state/.wake-queue" "$drain_input"
+  count=$(FM_HOME="$dir" FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_wake_print_deduped "$2"' _ "$LIB" "$drain_input" | awk 'NF { count++ } END { print count + 0 }')
+  [ "$count" -eq 1 ] || fail "shared drain exposed the combined rejection as $count rows"
+  rm -f "$tab_check" "$space_check"
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" "$ACTIONABLE" validate "$receipt" \
+    || fail "combined rejected-check receipt lost its remaining source"
+  rm -f "$newline_check"
+  if FM_HOME="$dir" FM_STATE_OVERRIDE="$state" "$ACTIONABLE" validate "$receipt"; then
+    fail "combined rejected-check receipt survived removal of every source"
+  fi
+  pass "rejected check queue identities are lossless, unique, and drain-coalesced"
 }
 
 test_arm_waits_for_peer_beacon_after_child_stands_down() {
@@ -987,6 +1047,7 @@ test_attached_arm_signal_is_recorded_in_cycle_ledger
 test_arm_starts_and_self_heals
 test_arm_hup_cleans_child_and_temp_output
 test_arm_propagates_immediate_wake_before_confirmation
+test_rejected_check_keys_are_lossless_and_coalesced
 test_arm_waits_for_peer_beacon_after_child_stands_down
 test_arm_fails_loud_when_no_fresh_watcher_confirmable
 test_cycle_exit_ledger_links_successor_and_stays_bounded

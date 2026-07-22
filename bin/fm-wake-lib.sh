@@ -371,6 +371,10 @@ fm_wake_clean_field() {
   LC_ALL=C tr '\t\r\n' '   '
 }
 
+fm_wake_hex_encode() {
+  printf '%s' "$1" | LC_ALL=C od -An -v -tx1 | tr -d '[:space:]'
+}
+
 fm_wake_append() {
   local kind=$1 key=$2 payload=$3 clean_key clean_payload epoch seq seq_file status
   case "$kind" in

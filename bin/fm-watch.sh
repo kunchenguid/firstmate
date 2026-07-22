@@ -788,7 +788,8 @@ while :; do
           out=$FM_CHECK_RESULT
         else
           rejected_checks="$rejected_checks $c"
-          rejected_check_keys="${rejected_check_keys}$(basename "$c")
+          rejected_check_key=$(fm_wake_hex_encode "${c##*/}") || exit 1
+          rejected_check_keys="${rejected_check_keys}hex:$rejected_check_key
 "
           continue
         fi
@@ -811,7 +812,8 @@ while :; do
         else
           fm_custom_check_snapshot_cleanup
           rejected_checks="$rejected_checks $c"
-          rejected_check_keys="${rejected_check_keys}${id}.check.sh
+          rejected_check_key=$(fm_wake_hex_encode "${c##*/}") || exit 1
+          rejected_check_keys="${rejected_check_keys}hex:$rejected_check_key
 "
           continue
         fi
