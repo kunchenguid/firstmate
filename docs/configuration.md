@@ -104,6 +104,16 @@ An absent file means `auto`, i.e. default-on on macOS: the alarm exists precisel
 A missing or failing channel logs and falls through to the next, never crashing the daemon.
 See [`wedge-alarm.md`](wedge-alarm.md) for the channel reference and macOS verification evidence, and [`examples/wedge-alarm`](examples/wedge-alarm) for a copyable config.
 
+## Local task observability (config/observability)
+
+`bin/fm-observe.py collect` explicitly builds the local task-observability pilot from existing lifecycle records and writes its SQLite store plus static dashboard under the effective `data/` directory by default.
+The script header and `--help` output are the single owner of the schema, privacy allowlist, input bounds, retention, idempotence, and deletion-based reversal contract.
+Collection has no network path and does not treat its database as a task registry; task identity, lifecycle, and outcomes continue to come from `state/<id>.meta`, `state/<id>.status`, git, and no-mistakes records.
+Entire remains an optional complementary session-to-commit evidence source and never becomes the task or outcome authority.
+Collection is inactive unless the command is invoked.
+Creating the local, gitignored `config/observability` presence flag additionally schedules one bounded best-effort collection during approved task cleanup, after all safety checks pass and before the existing task evidence is removed.
+Remove that flag to disable scheduled collection, and delete `data/observability.sqlite3` plus `data/observability.html` to remove the pilot data and dashboard.
+
 ## Gate defaults (.no-mistakes.yaml)
 
 The tracked `.no-mistakes.yaml` keeps test evidence outside the repo and pins `commands.lint` to `bin/fm-lint.sh` so local lint matches CI.

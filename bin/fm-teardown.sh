@@ -56,6 +56,10 @@
 #   --force skips ordinary-task dirty and landed-work checks, skips scout report
 #   checks, and discards secondmate child work for kind=secondmate. Only use it
 #   when the captain has explicitly said to discard the work.
+# A local config/observability presence flag schedules one bounded, best-effort
+# fm-observe.py collection after all safety checks pass and before task evidence
+# or the isolated worktree is removed. Collection failure warns but never weakens
+# or bypasses teardown's safety decisions.
 #
 # Transient / stale worktree git lock recovery (teardown-lock-race): a crew process
 # killed mid-git-operation can leave a .git/worktrees/<wt>/index.lock (or, for a
@@ -1087,6 +1091,13 @@ if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
     else
       exit 1
     fi
+  fi
+fi
+
+if [ -f "$CONFIG/observability" ]; then
+  if ! FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
+      "$SCRIPT_DIR/fm-observe.py" collect --task "$ID" >/dev/null; then
+    echo "warning: task observability collection failed for $ID; teardown will continue" >&2
   fi
 fi
 

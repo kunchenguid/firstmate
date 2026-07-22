@@ -68,21 +68,23 @@ if [ ! -d "$(dirname "$STATUS_FILE")" ]; then
 fi
 
 token=$(fm_pending_reply_corr_token "$CORR")
+case "$token" in corr=*) : ;; *) echo "error: could not format corr token" >&2; exit 1 ;; esac
 if [ "$DOC_MODE" = 1 ]; then
   [ $# -ge 1 ] || usage
   DOC_PATH=$1
   shift
   NOTE=$*
   if [ -n "$NOTE" ]; then
-    printf '%s [%s]: %s (%s via-helper)\n' "$VERB" "$token" "$NOTE" "$DOC_PATH" >> "$STATUS_FILE"
+    NOTE="$NOTE ($DOC_PATH via-helper)"
   else
-    printf '%s [%s]: %s (via-helper)\n' "$VERB" "$token" "$DOC_PATH" >> "$STATUS_FILE"
+    NOTE="$DOC_PATH (via-helper)"
   fi
 else
   NOTE=$*
   if [ -n "$NOTE" ]; then
-    printf '%s [%s]: %s (via-helper)\n' "$VERB" "$token" "$NOTE" >> "$STATUS_FILE"
+    NOTE="$NOTE (via-helper)"
   else
-    printf '%s [%s]: (via-helper)\n' "$VERB" "$token" >> "$STATUS_FILE"
+    NOTE="(via-helper)"
   fi
 fi
+"$SCRIPT_DIR/fm-status.sh" --file "$STATUS_FILE" "$VERB" --corr "$CORR" -- "$NOTE"

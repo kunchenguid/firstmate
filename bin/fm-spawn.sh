@@ -81,6 +81,10 @@
 #   default-branch commit when safe; skipped syncs warn and launch unchanged.
 #   Ship/scout spawns refuse to launch unless the resolved task path is a real
 #   git worktree root distinct from the primary project checkout.
+#   Every successful spawn records task_id=, a unique run_id=, one assigned
+#   session_id=, started_at=, status_start_line=, and the worktree's base_commit=.
+#   The same task/run/session identifiers are exported into the launched agent,
+#   so bin/fm-status.sh can correlate later events without changing their verbs.
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
@@ -276,6 +280,12 @@ spawn_abort_cleanup() {
         mkdir -p "$STATE" 2>/dev/null || true
         if [ -d "$STATE" ]; then
           {
+            echo "task_id=$ID"
+            echo "run_id=$RUN_ID"
+            echo "session_id=$SESSION_ID"
+            echo "started_at=$STARTED_AT"
+            echo "status_start_line=$STATUS_START_LINE"
+            [ -z "$BASE_COMMIT" ] || echo "base_commit=$BASE_COMMIT"
             echo "window=$W"
             echo "worktree=${WT:-}"
             echo "project=$PROJ_ABS"
@@ -370,6 +380,12 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
 fi
 ID=${POS[0]}
 fm_task_id_creation_valid "$ID" || { echo "error: invalid task id" >&2; exit 2; }
+STARTED_AT=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+RUN_STAMP=$(date -u '+%Y%m%dT%H%M%SZ')
+RUN_ID="$ID-$RUN_STAMP-$$-$RANDOM"
+SESSION_ID="$RUN_ID-s1"
+BASE_COMMIT=
+STATUS_START_LINE=0
 SPAWN_TASK_LOCK="$STATE/.spawn-$ID.lock"
 if ! fm_lock_try_acquire "$SPAWN_TASK_LOCK"; then
   echo "error: another spawn is already creating task $ID" >&2
@@ -1209,9 +1225,20 @@ $("$FM_ROOT/bin/fm-project-mode.sh" "$PROJ_NAME")
 EOF
 fi
 
+BASE_COMMIT=$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null || true)
+if [ -f "$STATE/$ID.status" ]; then
+  STATUS_START_LINE=$(wc -l < "$STATE/$ID.status" | tr -d '[:space:]')
+  case "$STATUS_START_LINE" in ''|*[!0-9]*) STATUS_START_LINE=0 ;; esac
+fi
 META_WINDOW=$T
 [ "$BACKEND" = orca ] && META_WINDOW=$W
 {
+  echo "task_id=$ID"
+  echo "run_id=$RUN_ID"
+  echo "session_id=$SESSION_ID"
+  echo "started_at=$STARTED_AT"
+  echo "status_start_line=$STATUS_START_LINE"
+  [ -z "$BASE_COMMIT" ] || echo "base_commit=$BASE_COMMIT"
   echo "window=$META_WINDOW"
   echo "worktree=$WT"
   echo "project=$PROJ_ABS"
@@ -1274,6 +1301,8 @@ fi
 # process (go build, go test, ...) inherit it. Sent before the launch command so
 # the env is set when the agent starts; the brief sleep lets the export land.
 spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp"
+sleep 0.3
+spawn_send_text_line "$T" "export FM_TASK_ID=$(shell_quote "$ID") FM_RUN_ID=$(shell_quote "$RUN_ID") FM_SESSION_ID=$(shell_quote "$SESSION_ID")"
 sleep 0.3
 spawn_send_literal "$T" "$LAUNCH"
 sleep 0.3
