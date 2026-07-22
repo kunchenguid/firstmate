@@ -109,7 +109,8 @@ See [`wedge-alarm.md`](wedge-alarm.md) for the channel reference and macOS verif
 The tracked `.no-mistakes.yaml` keeps test evidence outside the repo and pins `commands.lint` to `bin/fm-lint.sh` so local lint matches CI.
 That evidence policy is specific to the firstmate repo: target projects may legitimately commit `.no-mistakes/evidence/` from their own no-mistakes pipeline, but firstmate keeps `.no-mistakes/` local and CI rejects tracked entries under that path.
 It does not set `commands.test` to a complete `tests/*.test.sh` walk.
-Local no-mistakes Test stays intent-targeted; broad regression (including the portable behavior suite) lives in [`.github/workflows/ci.yml`](../.github/workflows/ci.yml).
+Local no-mistakes Test stays intent-targeted; broad regression (including the portable behavior suite) lives in [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) via `bin/fm-test-run.sh --all`.
+See [CONTRIBUTING.md](../CONTRIBUTING.md) for one-script, family, changed-file, and intentional complete-suite entry points.
 
 ## Captain Preferences (data/captain.md / data/captain-shared.md)
 

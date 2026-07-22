@@ -1,0 +1,233 @@
+#!/usr/bin/env bash
+# Contract tests for bin/fm-test-run.sh - the single owner of serial behavior
+# suite selection, timing markers, JSON artifacts, and aggregate exit status.
+#
+# These tests intentionally exercise the runner with fixtures and --list, not
+# the complete Firstmate suite.
+set -u
+
+# shellcheck source=tests/lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+
+RUNNER="$ROOT/bin/fm-test-run.sh"
+CI="$ROOT/.github/workflows/ci.yml"
+CONTRIB="$ROOT/CONTRIBUTING.md"
+
+assert_present "$RUNNER" "bin/fm-test-run.sh is missing"
+[ -x "$RUNNER" ] || fail "bin/fm-test-run.sh must be executable"
+
+test_list_all_exact_suite_coverage() {
+  local listed expected missing extra f
+  listed=$("$RUNNER" --list --all | LC_ALL=C sort)
+  expected=$(
+    for f in "$ROOT"/tests/*.test.sh; do
+      [ -f "$f" ] || continue
+      printf 'tests/%s\n' "$(basename "$f")"
+    done | LC_ALL=C sort
+  )
+  [ -n "$listed" ] || fail "--list --all printed nothing"
+  missing=$(comm -23 <(printf '%s\n' "$expected") <(printf '%s\n' "$listed") || true)
+  extra=$(comm -13 <(printf '%s\n' "$expected") <(printf '%s\n' "$listed") || true)
+  [ -z "$missing" ] || fail "--list --all missing scripts: $missing"
+  [ -z "$extra" ] || fail "--list --all unexpected scripts: $extra"
+  # No duplicates.
+  [ "$(printf '%s\n' "$listed" | uniq | wc -l | tr -d ' ')" = \
+    "$(printf '%s\n' "$listed" | wc -l | tr -d ' ')" ] \
+    || fail "--list --all must not duplicate scripts"
+  pass "exact suite coverage: --all lists every tests/*.test.sh once"
+}
+
+test_family_selection() {
+  local listed line
+  listed=$("$RUNNER" --list --family pure-contract-unit)
+  [ -n "$listed" ] || fail "--family pure-contract-unit selected nothing"
+  printf '%s\n' "$listed" | grep -Fq 'tests/fm-test-run.test.sh' \
+    || fail "pure-contract-unit must include fm-test-run.test.sh"
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    case "$line" in
+      tests/*.test.sh) ;;
+      *) fail "family selection produced non-test path: $line" ;;
+    esac
+  done <<<"$listed"
+  # Family mode must not equal the complete suite for a narrow family.
+  local all_count fam_count
+  all_count=$("$RUNNER" --list --all | wc -l | tr -d ' ')
+  fam_count=$(printf '%s\n' "$listed" | wc -l | tr -d ' ')
+  [ "$fam_count" -lt "$all_count" ] \
+    || fail "pure-contract-unit must be a proper subset of --all"
+  pass "family selection returns a proper subset of the suite"
+}
+
+test_single_script_selection() {
+  local listed
+  listed=$("$RUNNER" --list tests/fm-lint.test.sh)
+  [ "$listed" = "tests/fm-lint.test.sh" ] \
+    || fail "single-script list expected tests/fm-lint.test.sh, got: $listed"
+  pass "single-script selection lists exactly that path"
+}
+
+test_changed_file_selection_is_conservative() {
+  local listed all_count fam_count listed_count
+  # A path-mapped pure unit should not expand to --all.
+  listed=$("$RUNNER" --list --family pure-contract-unit)
+  all_count=$("$RUNNER" --list --all | wc -l | tr -d ' ')
+  fam_count=$(printf '%s\n' "$listed" | wc -l | tr -d ' ')
+  [ "$fam_count" -lt "$all_count" ] || fail "changed-informed pure family still full suite"
+  # Directly exercise --changed: empty or partial selection is ok; must not
+  # exceed the suite and must never silently become --all by accident.
+  listed=$("$RUNNER" --list --changed --base HEAD 2>/dev/null || true)
+  if [ -n "$listed" ]; then
+    listed_count=$(printf '%s\n' "$listed" | wc -l | tr -d ' ')
+    [ "$listed_count" -le "$all_count" ] || fail "changed selection larger than suite"
+  fi
+  # A single test path selects only that script (same contract as a
+  # tests/*.test.sh change entry in the map).
+  listed=$("$RUNNER" --list tests/fm-brief.test.sh)
+  [ "$listed" = "tests/fm-brief.test.sh" ] \
+    || fail "test-file-only change contract should select one script"
+  pass "changed-file selection stays conservative (never silent full suite)"
+}
+
+test_timing_markers_and_json() {
+  local tmp fixture out json begin_n end_n summary
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-timing.XXXXXX")
+  fixture="$tmp/ok.test.sh"
+  out="$tmp/out.txt"
+  json="$tmp/timing.json"
+  cat >"$fixture" <<'SH'
+#!/usr/bin/env bash
+echo "ok - fixture"
+exit 0
+SH
+  chmod +x "$fixture"
+  "$RUNNER" --json "$json" "$fixture" >"$out" 2>"$tmp/err.txt" \
+    || { rm -rf "$tmp"; fail "runner should pass on a green fixture"; }
+  begin_n=$(grep -c '^FM_TEST_BEGIN ' "$out" || true)
+  end_n=$(grep -c '^FM_TEST_END ' "$out" || true)
+  [ "$begin_n" -eq 1 ] || fail "expected one FM_TEST_BEGIN, got $begin_n"
+  [ "$end_n" -eq 1 ] || fail "expected one FM_TEST_END, got $end_n"
+  grep -Eq '^FM_TEST_BEGIN .+ family=unclassified expected_gate_skip=none$' "$out" \
+    || fail "BEGIN line missing family/expected_gate_skip: $(grep '^FM_TEST_BEGIN' "$out")"
+  grep -Eq '^FM_TEST_END .+ exit=0 duration_ms=[0-9]+ gate_skip=false$' "$out" \
+    || fail "END line missing exit/duration/gate_skip: $(grep '^FM_TEST_END' "$out")"
+  summary=$(grep '^FM_TEST_SUMMARY ' "$out" || true)
+  assert_contains "$summary" "total=1" "summary total"
+  assert_contains "$summary" "failed=0" "summary failed"
+  assert_contains "$summary" "skipped_gate=0" "summary skipped_gate"
+  grep -q '^FM_TEST_SLOWEST rank=1 ' "$out" \
+    || fail "expected FM_TEST_SLOWEST rank=1"
+  [ -f "$json" ] || fail "JSON timing artifact was not written"
+  python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$json" \
+    || fail "JSON timing artifact is not valid JSON"
+  python3 -c '
+import json, sys
+doc = json.load(open(sys.argv[1]))
+assert "scripts" in doc and len(doc["scripts"]) == 1, doc
+assert doc["scripts"][0]["exit"] == 0
+assert doc["scripts"][0]["gate_skip"] is False
+assert doc["summary"]["total"] == 1
+assert doc["summary"]["failed"] == 0
+assert "duration_ms" in doc["scripts"][0]
+assert "family" in doc["scripts"][0]
+' "$json" || { rm -rf "$tmp"; fail "JSON timing artifact missing required fields"; }
+  rm -rf "$tmp"
+  pass "timing markers and JSON artifact are valid"
+}
+
+test_aggregate_exit_behavior() {
+  local tmp pass_f fail_f rc
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-agg.XXXXXX")
+  pass_f="$tmp/pass.test.sh"
+  fail_f="$tmp/fail.test.sh"
+  cat >"$pass_f" <<'SH'
+#!/usr/bin/env bash
+echo "ok - pass"
+exit 0
+SH
+  cat >"$fail_f" <<'SH'
+#!/usr/bin/env bash
+echo "not ok - fail"
+exit 1
+SH
+  chmod +x "$pass_f" "$fail_f"
+  set +e
+  "$RUNNER" "$pass_f" "$fail_f" >"$tmp/out.txt" 2>"$tmp/err.txt"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "aggregate exit must be non-zero when any script fails"
+  grep -q 'FM_TEST_SUMMARY total=2 failed=1' "$tmp/out.txt" \
+    || fail "summary should report total=2 failed=1: $(grep FM_TEST_SUMMARY "$tmp/out.txt")"
+  # All-green stays 0.
+  set +e
+  "$RUNNER" "$pass_f" >"$tmp/out2.txt" 2>"$tmp/err2.txt"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || { rm -rf "$tmp"; fail "aggregate exit must be 0 when every script passes"; }
+  rm -rf "$tmp"
+  pass "aggregate exit reflects any script failure"
+}
+
+test_gate_skip_accounting() {
+  local tmp skip_f out json
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-skip.XXXXXX")
+  skip_f="$tmp/skip.test.sh"
+  out="$tmp/out.txt"
+  json="$tmp/timing.json"
+  cat >"$skip_f" <<'SH'
+#!/usr/bin/env bash
+echo "skip: herdr not found"
+exit 0
+SH
+  chmod +x "$skip_f"
+  "$RUNNER" --json "$json" "$skip_f" >"$out" 2>"$tmp/err.txt" \
+    || fail "gate-skip fixture must exit 0 from the runner"
+  grep -Eq '^FM_TEST_END .+ exit=0 duration_ms=[0-9]+ gate_skip=true$' "$out" \
+    || fail "END must mark gate_skip=true: $(grep '^FM_TEST_END' "$out")"
+  grep -q 'FM_TEST_SUMMARY total=1 failed=0 skipped_gate=1' "$out" \
+    || fail "summary must count skipped_gate=1: $(grep FM_TEST_SUMMARY "$out")"
+  python3 -c '
+import json, sys
+doc = json.load(open(sys.argv[1]))
+assert doc["scripts"][0]["gate_skip"] is True
+assert doc["summary"]["skipped_gate"] == 1
+assert doc["summary"]["failed"] == 0
+' "$json" || { rm -rf "$tmp"; fail "JSON gate_skip accounting is wrong"; }
+  rm -rf "$tmp"
+  pass "gate-skip accounting is honest and non-failing"
+}
+
+test_ci_and_docs_call_the_owner() {
+  assert_present "$CI" "ci.yml missing"
+  assert_present "$CONTRIB" "CONTRIBUTING.md missing"
+  grep -Fq 'bin/fm-test-run.sh --all' "$CI" \
+    || fail "CI Behavior must invoke bin/fm-test-run.sh --all"
+  grep -Fq 'timeout-minutes: 25' "$CI" \
+    || fail "CI Behavior timeout-minutes must be 25 (hang tripwire)"
+  # Stale "~2-3 minutes" claim must not remain.
+  if grep -Eq '2-3 minutes' "$CI"; then
+    fail "CI workflow still claims the suite finishes in ~2-3 minutes"
+  fi
+  grep -Fq 'fm-test-timing' "$CI" \
+    || fail "CI must upload the timing artifact"
+  grep -Fq 'bin/fm-test-run.sh --all' "$CONTRIB" \
+    || fail "CONTRIBUTING must document bin/fm-test-run.sh --all"
+  grep -Fq 'bin/fm-test-run.sh --family' "$CONTRIB" \
+    || fail "CONTRIBUTING must document family selection"
+  grep -Fq 'bin/fm-test-run.sh --changed' "$CONTRIB" \
+    || fail "CONTRIBUTING must document changed-file selection"
+  # Do not restore a complete-suite commands.test.
+  if grep -E '^[[:space:]]*test:[[:space:]].*tests/\*\.test\.sh' "$ROOT/.no-mistakes.yaml" >/dev/null 2>&1; then
+    fail ".no-mistakes.yaml must not set a full-suite commands.test"
+  fi
+  pass "CI and CONTRIBUTING call the one-owner runner; no full-suite local Test"
+}
+
+test_list_all_exact_suite_coverage
+test_family_selection
+test_single_script_selection
+test_changed_file_selection_is_conservative
+test_timing_markers_and_json
+test_aggregate_exit_behavior
+test_gate_skip_accounting
+test_ci_and_docs_call_the_owner
