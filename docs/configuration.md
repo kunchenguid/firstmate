@@ -199,12 +199,12 @@ For Pi secondmate launches, `fm-spawn.sh` starts Pi with `-e` pointed at the sec
 
 `config/pi-delegated-profile` is an optional local profile that makes every delegated Pi endpoint launched through `fm-spawn.sh` use one exact provider/model, explicit medium thinking, and automatic compaction once token usage is strictly greater than 60 percent of the resolved context window.
 It does not change the primary Pi path or its xhigh thinking level.
-The file is in the primary-authoritative secondmate inheritance allowlist, whose safety guard copies it only when the destination checkout gitignores `config/pi-delegated-profile`.
+The file is in the primary-authoritative secondmate inheritance allowlist, whose safety guard copies it only when the destination checkout gitignores `config/pi-delegated-profile`; a launch or recovery stops before creating an endpoint unless that item reports verified convergence.
 When absent, Pi launch behavior remains backward-compatible.
 When present, `bin/fm-pi-profile.sh` validates every field and Pi 0.81.1's effective model metadata before any endpoint is created.
 The file uses one `key=value` per line and requires `pi_command`, `pi_version`, `agent_dir`, `model`, `context_window`, `effort`, `boundary_percent`, and `keep_recent_tokens` exactly as documented in that script's header.
 The configured `agent_dir` is operator-owned and may retain authentication, skills, prompts, and themes, but its `settings.json` must already contain enabled compaction with `reserveTokens = context_window - floor(0.60 * context_window)` and the configured keep-recent value.
-FirstMate validates that directory without editing it and passes its absolute path through the real `PI_CODING_AGENT_DIR` variable, so ambient `HOME`, `PI_CODING_AGENT_DIR`, and the ineffective `PI_CONFIG_DIR` cannot redirect the worker.
+FirstMate validates that directory without editing it, clears `PI_PACKAGE_DIR` during validation and launch, and passes the absolute directory through the real `PI_CODING_AGENT_DIR` variable, so ambient package metadata, `HOME`, `PI_CODING_AGENT_DIR`, and the ineffective `PI_CONFIG_DIR` cannot redirect the worker.
 Delegated launches pass `--no-approve` and `--no-extensions`, which deliberately disables project-local Pi settings/resources and all discovered extensions so neither can alter compaction.
 FirstMate then explicitly loads its required task or secondmate hooks and the tracked profile guard, so turn-end supervision remains available while model cycling, model substitution, and thinking-level changes stop the delegated session.
 This compatibility choice means project-local Pi extensions, skills, prompts, themes, packages, and `.pi/settings.json` are ignored for delegated workers, so operators must not depend on those capabilities until they are deliberately reviewed and added to FirstMate's explicit launch surface.

@@ -482,6 +482,16 @@ fm_config_reread_changed_items() {
   done
 }
 
+fm_config_inherit_item_converged() {
+  local report=$1 item=$2 status
+  [ -n "$report" ] && [ -f "$report" ] || return 1
+  status=$(awk -F '\t' -v item="$item" '$1 == item { print $2; exit }' "$report" 2>/dev/null) || return 1
+  case "$status" in
+    pushed|unchanged) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 fm_config_inherit_lock_path() {
   local dest_home=$1
   [ -n "$dest_home" ] || return 1

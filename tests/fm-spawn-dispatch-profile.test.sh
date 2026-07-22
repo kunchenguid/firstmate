@@ -421,13 +421,14 @@ test_pi_delegated_profile_pins_command_model_effort_and_resources() {
     return
   fi
 
-  out=$(PI_CODING_AGENT_DIR="$CASE_DIR/hostile-agent" HOME="$CASE_DIR/hostile-home" \
+  out=$(PI_PACKAGE_DIR="$CASE_DIR/hostile-package" PI_CODING_AGENT_DIR="$CASE_DIR/hostile-agent" HOME="$CASE_DIR/hostile-home" \
     run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
   status=$?
   expect_code 0 "$status" "configured delegated Pi spawn should succeed"
   assert_meta_profile "$HOME_DIR/state/$id.meta" pi openai-codex/gpt-5.6-sol medium
   launch=$(cat "$LAUNCH_LOG")
   pi_real=$(node -e 'process.stdout.write(require("node:fs").realpathSync(process.argv[1]))' "$PI_TEST_COMMAND")
+  assert_contains "$launch" "PI_PACKAGE_DIR=" "Pi launch did not clear hostile package resolution"
   assert_contains "$launch" "PI_CODING_AGENT_DIR='$HOME_DIR/pi-agent'" "Pi launch did not override hostile ambient agent-dir resolution"
   assert_contains "$launch" "'$pi_real' --model 'openai-codex/gpt-5.6-sol' --thinking 'medium'" "Pi launch did not pin the exact model and explicit medium thinking"
   assert_contains "$launch" "--no-approve --no-extensions --models 'openai-codex/gpt-5.6-sol'" "Pi launch did not neutralize project settings, extension discovery, and cycling"
@@ -546,6 +547,36 @@ test_active_dispatch_profile_does_not_block_secondmate_launch() {
   pass "active crew-dispatch profile does not block secondmate launches"
 }
 
+test_active_pi_profile_requires_secondmate_convergence() {
+  local rec id sm out status
+  id=profile-secondmate-pi-z85
+  rec=$(make_spawn_case profile-secondmate-pi codex "$id")
+  read_case_record "$rec"
+  printf '%s\n' 'delegated profile bytes' > "$HOME_DIR/config/pi-delegated-profile"
+  sm="$CASE_DIR/secondmate-home"
+  make_seeded_secondmate_home "$sm" "$id"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate)
+  status=$?
+  expect_code 0 "$status" "secondmate spawn should continue after delegated Pi profile convergence"
+  cmp -s "$HOME_DIR/config/pi-delegated-profile" "$sm/config/pi-delegated-profile" \
+    || fail "secondmate did not receive exact delegated Pi profile bytes"
+
+  rm -f "$HOME_DIR/state/$id.meta" "$sm/config/pi-delegated-profile"
+  : > "$LAUNCH_LOG"
+  git -C "$sm" init -q
+  fm_git_identity fmtest fmtest@example.invalid "$sm"
+  git -C "$sm" add AGENTS.md .fm-secondmate-home data/charter.md
+  git -C "$sm" commit -qm seed
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate)
+  status=$?
+  expect_code 1 "$status" "secondmate spawn should stop when delegated Pi profile inheritance is skipped"
+  assert_contains "$out" "delegated Pi profile did not converge" "profile inheritance refusal was not actionable"
+  assert_absent "$HOME_DIR/state/$id.meta" "profile inheritance refusal happened after endpoint/meta creation"
+  [ ! -s "$LAUNCH_LOG" ] || fail "profile inheritance refusal reached the backend command handoff"
+  pass "active delegated Pi profile must converge before secondmate launch or recovery"
+}
+
 test_no_profile_keeps_claude_profile_defaults
 test_active_dispatch_profile_requires_explicit_harness_for_ship
 test_active_dispatch_profile_requires_explicit_harness_for_scout
@@ -567,5 +598,6 @@ test_pi_delegated_profile_refuses_every_raw_launch_shape
 test_pi_delegated_profile_refuses_malformed_profile_paths
 test_batch_forwards_shared_profile_flags
 test_active_dispatch_profile_does_not_block_secondmate_launch
+test_active_pi_profile_requires_secondmate_convergence
 
 echo "# all fm-spawn-dispatch-profile tests passed"
