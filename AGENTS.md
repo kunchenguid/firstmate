@@ -163,6 +163,14 @@ Routing precedence is an explicit per-task captain override, then the best-fit c
 The generic effort fallback and its precedence are owned by `harness-adapters`: explicit captain and standing configured effort win; otherwise use low for well-understood explicit work, xhigh for ambiguous investigation or design, intermediate levels proportionally, and never max without explicit captain preference.
 Do not add model-specific versions of that policy.
 
+### Codex native child model authorization
+
+`gpt-5.6-sol` is denied by default for every new Codex native child or subagent spawn, including spawns made by nested workflows.
+Only an explicit current-task captain instruction authorizes Sol; historical configuration, earlier task instructions, a workflow model table, and quota balancing do not.
+When Sol is not explicitly authorized, select an allowed profile rather than silently falling back to Sol.
+Prefer `gpt-5.6-luna` over `gpt-5.4` for review, QA, verification, and retry spawns when both are available.
+Existing Sol children may finish, but this rule applies to every new spawn.
+
 `secondmate-provisioning` owns secondmate harness pins and inherited local material, while `harness-adapters` owns the harness consequences.
 Dispatch only on a backend that `fm-spawn` validates as spawn-capable.
 A missing dependency, authentication failure, unsupported backend, or version refusal is a blocker; never silently retry on another backend.

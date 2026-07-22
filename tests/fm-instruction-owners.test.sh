@@ -102,6 +102,30 @@ test_generic_effort_fallback_respects_precedence() {
   pass "generic effort fallback applies only below captain and standing configuration"
 }
 
+test_codex_native_child_model_authorization() {
+  local section
+  section=$(awk '
+    /^### Codex native child model authorization$/ { found = 1 }
+    found && /^`secondmate-provisioning` owns/ { exit }
+    found { print }
+  ' "$AGENTS")
+  assert_contains "$section" '`gpt-5.6-sol` is denied by default' \
+    "Codex native child policy must deny Sol by default"
+  assert_contains "$section" 'every new Codex native child or subagent spawn, including spawns made by nested workflows' \
+    "Codex native child policy must cover nested workflow spawns"
+  assert_contains "$section" 'Only an explicit current-task captain instruction authorizes Sol' \
+    "Codex native child policy must require current-task captain authorization"
+  assert_contains "$section" 'historical configuration, earlier task instructions, a workflow model table, and quota balancing do not' \
+    "Codex native child policy must reject stale and workflow-derived Sol authorization"
+  assert_contains "$section" 'select an allowed profile rather than silently falling back to Sol' \
+    "Codex native child policy must fail closed away from Sol"
+  assert_contains "$section" 'Prefer `gpt-5.6-luna` over `gpt-5.4` for review, QA, verification, and retry spawns' \
+    "Codex native child policy must prefer Luna on review lanes"
+  assert_contains "$section" 'Existing Sol children may finish, but this rule applies to every new spawn' \
+    "Codex native child policy must preserve already-running children while covering new spawns"
+  pass "AGENTS.md owns the deny-by-default Codex native child Sol policy"
+}
+
 test_shared_authoring_requirements_are_owned() {
   assert_grep "review every affected supported primary harness and runtime backend" "$CODING" \
     "coding guidance lost the supported compatibility matrix review"
@@ -225,6 +249,7 @@ test_new_skill_metadata_and_triggers
 test_diagnostic_owner_covers_causal_procedure
 test_project_management_owner_covers_guarded_operations
 test_generic_effort_fallback_respects_precedence
+test_codex_native_child_model_authorization
 test_shared_authoring_requirements_are_owned
 test_secondmate_registry_contract_stays_concise
 test_state_startup_and_ordinary_recovery_placement
