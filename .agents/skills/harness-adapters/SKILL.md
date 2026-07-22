@@ -12,6 +12,7 @@ Use this reference before any harness-specific firstmate operation: spawn, recov
 
 Crewmates default to the same harness firstmate is running on unless `config/crew-harness` records an adapter name.
 Optional dispatch profiles in `config/crew-dispatch.json` can override that static default for one crewmate or scout dispatch by selecting concrete harness, model, and effort axes at intake.
+When `config/pi-delegated-profile` exists, `fm-spawn.sh` validates its exact Pi model, medium effort, and 60 percent compaction boundary before every Pi endpoint launch; the complete schema and compatibility impact live in `docs/configuration.md`.
 The captain may override that file at session start or later; a per-task instruction such as "run this one on codex" overrides it for that dispatch only.
 `default` means mirror firstmate's own harness.
 
