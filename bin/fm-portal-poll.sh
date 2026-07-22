@@ -53,25 +53,27 @@ trap cleanup EXIT HUP INT TERM
 
 # Resume any crash-interrupted response/ack transaction using its already
 # durable body and stable idempotency key. Do not hold the portal record lock
-# while the reply helper performs bounded network I/O.
+# while the reply helper performs bounded network I/O. The whole directory is
+# validated in one pass; per-record work below runs only for the rare states.
 resume_ids=
 fm_lock_acquire_wait "$FMP_LOCK"
 now=$(fmp_now) || now=0
-for record in "$FMP_RECORDS"/*.json; do
-  [ -e "$record" ] || continue
-  id=${record##*/}; id=${id%.json}
-  if ! fmp_id_valid "$id" || ! fmp_record_load "$id"; then
-    fm_lock_release "$FMP_LOCK"
-    fmp_error_emit_once record-invalid
-    exit 0
-  fi
-  case "$FMP_RECORD_STATE" in
+records=$(fmp_records_scan) || {
+  fm_lock_release "$FMP_LOCK"
+  fmp_error_emit_once record-invalid
+  exit 0
+}
+oldest_state=
+while IFS=$'\t' read -r id state claimed_at record_task; do
+  [ -n "$id" ] || continue
+  effective=$state
+  case "$state" in
     replying)
       if fmp_outbox_load "$id"; then
         case "$FMP_OUTBOX_STATE" in
           pending|posted) ;;
-          complete) fmp_record_set_state "$id" complete "" 0 || true ;;
-          conflict) fmp_record_set_state "$id" conflict "" 0 || true ;;
+          complete) fmp_record_set_state "$id" complete "" 0 && effective=complete || true ;;
+          conflict) fmp_record_set_state "$id" conflict "" 0 && effective=conflict || true ;;
         esac
       else
         fm_lock_release "$FMP_LOCK"
@@ -79,8 +81,9 @@ for record in "$FMP_RECORDS"/*.json; do
         exit 0
       fi
       ;;
-    claimed|queued)
-      claimed_at=$FMP_RECORD_WAKE
+    queued)
+      # A queued record is only a durable watcher notification that no agent
+      # has picked up; re-offering it after the lease cannot duplicate work.
       case "$claimed_at" in ''|*[!0-9]*) claimed_at=0 ;; esac
       if [ "$now" -ge "$claimed_at" ] && [ $((now - claimed_at)) -ge "$lease" ]; then
         fmp_record_set_state "$id" pending "" 0 || {
@@ -88,16 +91,23 @@ for record in "$FMP_RECORDS"/*.json; do
           fmp_error_emit_once record-write-failed
           exit 0
         }
+        effective=pending
       fi
+      ;;
+    claimed)
+      # Claimed work is being actively handled; elapsed time alone is no proof
+      # the handler died, and re-offering it would execute the request twice.
+      # Only the locked session-start recover-unclaimed step may reclaim it.
       ;;
     linked)
       task=$(fmp_task_for_request "$id" 2>/dev/null) || task=
-      if [ -z "$task" ] || [ "$task" != "$FMP_RECORD_TASK" ]; then
+      if [ -z "$task" ] || [ "$task" != "$record_task" ]; then
         fmp_record_set_state "$id" pending "" 0 || {
           fm_lock_release "$FMP_LOCK"
           fmp_error_emit_once record-write-failed
           exit 0
         }
+        effective=pending
       fi
       ;;
     conflict)
@@ -106,11 +116,11 @@ for record in "$FMP_RECORDS"/*.json; do
       exit 0
       ;;
   esac
-done
-oldest=$(fmp_oldest_open_id 2>/dev/null) || oldest=
-if [ -n "$oldest" ] && fmp_record_load "$oldest" && [ "$FMP_RECORD_STATE" = replying ]; then
-  resume_ids=$oldest
-fi
+  if [ -z "$oldest_state" ] && [ "$effective" != complete ]; then
+    oldest_state=$effective
+    [ "$effective" = replying ] && resume_ids=$id
+  fi
+done <<< "$records"
 fm_lock_release "$FMP_LOCK"
 
 resume_failed=

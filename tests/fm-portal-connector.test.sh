@@ -436,8 +436,38 @@ test_away_harness_and_backend_contracts() {
   pass "portal wake integration is shared across all harnesses, backends, and away mode"
 }
 
+test_lease_recovery_reoffers_queued_never_claimed() {
+  local home="$TMP_ROOT/lease-claimed" id out
+  server_reset
+  id=$(prepare_request "$home" 'Slow claimed work must never be executed twice.')
+  out=$(FM_HOME="$home" FM_PORTAL_CLAIM_LEASE_SECS=0 "$ROOT/bin/fm-portal-poll.sh")
+  [ -z "$out" ] || fail "periodic poll re-offered actively claimed work (got: $out)"
+  [ "$(jq -r .state "$home/state/portal/records/$id.json")" = claimed ] \
+    || fail "periodic poll reclaimed claimed work on elapsed time alone"
+  FM_HOME="$home" "$ROOT/bin/fm-portal-request.sh" recover-unclaimed
+  [ "$(jq -r .state "$home/state/portal/records/$id.json")" = pending ] \
+    || fail "locked session-start recovery did not reclaim abandoned claimed work"
+  out=$(poll_home "$home")
+  [ "$out" = "portal-message $id" ] || fail "session-start-recovered request was not offered again"
+
+  server_reset
+  home="$TMP_ROOT/lease-queued"
+  install_home "$home"
+  id=$(inject_text 'A stale queued notification must be re-offered.')
+  out=$(poll_home "$home")
+  [ "$out" = "portal-message $id" ] || fail "poll did not offer the queued-recovery request"
+  FM_HOME="$home" "$ROOT/bin/fm-portal-request.sh" mark-queued "$id"
+  out=$(poll_home "$home")
+  [ -z "$out" ] || fail "fresh queued request was re-offered before its lease expired"
+  out=$(FM_HOME="$home" FM_PORTAL_CLAIM_LEASE_SECS=0 "$ROOT/bin/fm-portal-poll.sh")
+  [ "$out" = "portal-message $id" ] || fail "stale queued request was not re-offered after its lease"
+  [ "$(jq -r .state "$home/state/portal/records/$id.json")" = pending ] \
+    || fail "stale queued request did not return to pending"
+  pass "expired leases re-offer stale queued notifications but never claimed work"
+}
+
 test_disable_and_retention() {
-  local home="$TMP_ROOT/disable" id reply old out
+  local home="$TMP_ROOT/disable" id first reply old out
   server_reset
   id=$(prepare_request "$home" 'Complete then retain privately.')
   reply="$TMP_ROOT/disable-reply.txt"
@@ -447,6 +477,18 @@ test_disable_and_retention() {
   if [ "$(uname)" = Darwin ]; then touch -t "$(date -r "$old" +%Y%m%d%H%M.%S)" "$home/state/portal/records/$id.json"; else touch -d "@$old" "$home/state/portal/records/$id.json"; fi
   FM_HOME="$home" FM_PORTAL_RETENTION_SECS=10 "$ROOT/bin/fm-portal-poll.sh" >/dev/null
   assert_absent "$home/state/portal/records/$id.json" "expired completed record was not pruned"
+  first=$(inject_text 'Oldest completed record beyond the retention cap.')
+  poll_home "$home" >/dev/null
+  FM_HOME="$home" "$ROOT/bin/fm-portal-request.sh" read "$first" >/dev/null
+  FM_HOME="$home" "$ROOT/bin/fm-portal-reply.sh" "$first" --text-file "$reply" >/dev/null
+  id=$(inject_text 'Newest completed record within the retention cap.')
+  poll_home "$home" >/dev/null
+  FM_HOME="$home" "$ROOT/bin/fm-portal-request.sh" read "$id" >/dev/null
+  FM_HOME="$home" "$ROOT/bin/fm-portal-reply.sh" "$id" --text-file "$reply" >/dev/null
+  if [ "$(uname)" = Darwin ]; then touch -t "$(date -r "$old" +%Y%m%d%H%M.%S)" "$home/state/portal/records/$first.json"; else touch -d "@$old" "$home/state/portal/records/$first.json"; fi
+  FM_HOME="$home" FM_PORTAL_RETENTION_COUNT=1 "$ROOT/bin/fm-portal-poll.sh" >/dev/null
+  assert_absent "$home/state/portal/records/$first.json" "retention cap kept the oldest completed record"
+  [ -e "$home/state/portal/records/$id.json" ] || fail "retention cap pruned the newest completed record"
   FM_HOME="$home" "$ROOT/bin/fm-portal-config.sh" disable >/dev/null
   out=$(poll_home "$home")
   [ -z "$out" ] || fail "disabled connector poll was not inert"
@@ -467,4 +509,5 @@ test_response_conflict_is_terminal
 test_task_link_and_channel_binding
 test_token_and_body_redaction
 test_away_harness_and_backend_contracts
+test_lease_recovery_reoffers_queued_never_claimed
 test_disable_and_retention

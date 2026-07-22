@@ -326,7 +326,7 @@ A successful poll atomically publishes the canonical message to `state/portal/in
 Duplicate polls validate existing bytes instead of replacing them.
 A crash before the cursor update safely fetches the same id again, while a crash after it is recoverable from the durable inbox.
 The watcher queues only `portal-message <id>...`, then marks those records queued after the durable append; a crash before that mark may replay the same stable check key, which queue drain coalesces without duplicating the request record.
-Queued or claimed requests that never progress are re-offered after a bounded lease and at locked session-start recovery.
+Queued requests whose notification never progresses are re-offered after a bounded lease; claimed requests are being actively handled and are reclaimed only by locked session-start recovery, never on elapsed time alone.
 Because the acknowledgement API is cumulative through `last_id`, the connector offers and completes requests strictly oldest-first; later fetched messages remain durable but cannot be handled or acknowledged past an earlier unfinished request.
 
 The `portal-respond` agent-only skill is loaded on a `portal-message` or `portal-error` check notification.
@@ -469,7 +469,7 @@ FM_CHECK_INTERVAL=300   # seconds between slow checks (authenticated merge polls
 FM_PORTAL_BATCH_SIZE=20  # portal messages accepted per poll; values above 20 clamp to 20
 FM_PORTAL_RETENTION_SECS=604800  # completed private portal record retention; hard cap 2592000
 FM_PORTAL_RETENTION_COUNT=256  # completed private portal record cap; hard cap 1024
-FM_PORTAL_CLAIM_LEASE_SECS=600  # queued/claimed portal request re-offer window; hard cap 86400
+FM_PORTAL_CLAIM_LEASE_SECS=600  # stale queued portal notification re-offer window; hard cap 86400
 FM_CHECK_TIMEOUT=30     # seconds allowed per slow check script
 FM_CODEX_WATCH_CHECKPOINT=180   # seconds per foreground watcher checkpoint in Codex primary supervision
 FM_CREW_STATE_NM_TIMEOUT=10   # seconds allowed per no-mistakes query inside fm-crew-state.sh

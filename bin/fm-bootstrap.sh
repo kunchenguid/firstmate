@@ -713,7 +713,7 @@ EOF
 # cadence file. Portal text never enters either runnable artifact. Absent config
 # is inert except for idempotent cleanup of artifacts left by an explicit disable.
 portal_mode_setup() {
-  local config_file shim trust cadence shim_body cadence_body missing tool had_artifacts=0
+  local config_file shim trust cadence shim_body cadence_body missing tool
   config_file="$CONFIG/portal-connector.json"
   shim="$STATE/portal-watch.check.sh"
   trust="$STATE/portal-watch.check-trust"
@@ -751,10 +751,8 @@ portal_mode_setup() {
   fi
 
   if ! fmp_load_config "$config_file"; then
-    portal_artifacts_present && had_artifacts=1
     portal_remove_artifacts || true
     echo "PORTAL: connector off - invalid config/portal-connector.json ($FMP_CONFIG_ERROR); repair it with bin/fm-portal-config.sh"
-    [ "$had_artifacts" -eq 0 ] || return 0
     return 0
   fi
 

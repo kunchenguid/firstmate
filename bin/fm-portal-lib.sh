@@ -304,11 +304,7 @@ fmp_cursor_store() {
     | fmp_publish "$FMP_PORTAL_DIR" cursor.json
 }
 
-fmp_record_validate_file() {
-  local file=$1 id=$2
-  fmp_id_valid "$id" || return 1
-  fmp_file_valid "$FMP_RECORDS" "$id.json" || return 1
-  jq -e --arg schema fm-portal-record.v1 --argjson id "$id" '
+FMP_RECORD_SCHEMA_JQ='
     type == "object"
     and ((keys - ["schema","request_id","request_sha256","state","task_id","received_at","updated_at","claimed_at"]) | length == 0)
     and .schema == $schema and .request_id == $id
@@ -317,8 +313,42 @@ fmp_record_validate_file() {
     and ((.task_id // "") | type == "string" and length <= 64)
     and (.received_at | type == "number" and floor == . and . >= 0)
     and (.updated_at | type == "number" and floor == . and . >= 0)
-    and ((.claimed_at // 0) | type == "number" and floor == . and . >= 0)
-  ' "$file" >/dev/null 2>&1
+    and ((.claimed_at // 0) | type == "number" and floor == . and . >= 0)'
+
+fmp_record_validate_file() {
+  local file=$1 id=$2
+  fmp_id_valid "$id" || return 1
+  fmp_file_valid "$FMP_RECORDS" "$id.json" || return 1
+  jq -e --arg schema fm-portal-record.v1 --argjson id "$id" \
+    "$FMP_RECORD_SCHEMA_JQ" "$file" >/dev/null 2>&1
+}
+
+# One validated pass over records/. Every file gets the same per-file name and
+# private-identity checks as fmp_record_validate_file, then a single jq
+# invocation schema-validates all of them and emits one
+# "id<TAB>state<TAB>claimed_at<TAB>task_id" line per record, sorted by id
+# ascending. Any invalid name, identity, schema, or short/extra payload fails
+# the whole scan so callers never act on a partially valid directory.
+fmp_records_scan() {
+  local file id files=() out lines
+  for file in "$FMP_RECORDS"/*.json; do
+    [ -e "$file" ] || continue
+    id=${file##*/}; id=${id%.json}
+    fmp_id_valid "$id" || return 1
+    fmp_file_valid "$FMP_RECORDS" "$id.json" || return 1
+    files+=("$file")
+  done
+  [ "${#files[@]}" -gt 0 ] || return 0
+  out=$(jq -r --arg schema fm-portal-record.v1 '
+    (input_filename | split("/") | last | rtrimstr(".json") | tonumber) as $id
+    | if '"$FMP_RECORD_SCHEMA_JQ"'
+      then [($id | tostring), .state, ((.claimed_at // 0) | tostring), (.task_id // "")] | join("\t")
+      else error("invalid record") end
+  ' "${files[@]}" 2>/dev/null) || return 1
+  [ -n "$out" ] || return 1
+  lines=$(printf '%s\n' "$out" | wc -l | tr -d '[:space:]')
+  [ "$lines" -eq "${#files[@]}" ] || return 1
+  printf '%s\n' "$out" | sort -n
 }
 
 fmp_record_load() {
@@ -475,27 +505,29 @@ fmp_meta_link_clear() {
 # client-side backstop that prevents a later response from acknowledging an
 # earlier request before its own durable response exists.
 fmp_oldest_open_id() {
-  local id
-  while IFS= read -r id; do
-    fmp_id_valid "$id" || continue
-    fmp_record_load "$id" || return 2
-    [ "$FMP_RECORD_STATE" = complete ] && continue
+  local scan id state _rest
+  scan=$(fmp_records_scan) || return 2
+  [ -n "$scan" ] || return 1
+  while IFS=$'\t' read -r id state _rest; do
+    [ -n "$id" ] || continue
+    [ "$state" = complete ] && continue
     printf '%s\n' "$id"
     return 0
-  done < <(find "$FMP_RECORDS" -maxdepth 1 -type f -name '[0-9]*.json' -exec basename {} .json \; 2>/dev/null | sort -n)
+  done <<< "$scan"
   return 1
 }
 
 # Exit 0 when any lower-id durable request has not completed.
 fmp_prior_request_incomplete() {
-  local target=$1 id
+  local target=$1 scan id state _rest
   fmp_id_valid "$target" || return 0
-  while IFS= read -r id; do
-    fmp_id_valid "$id" || continue
+  scan=$(fmp_records_scan) || return 0
+  [ -n "$scan" ] || return 1
+  while IFS=$'\t' read -r id state _rest; do
+    [ -n "$id" ] || continue
     [ "$id" -lt "$target" ] 2>/dev/null || continue
-    fmp_record_load "$id" || return 0
-    [ "$FMP_RECORD_STATE" = complete ] || return 0
-  done < <(find "$FMP_RECORDS" -maxdepth 1 -type f -name '[0-9]*.json' -exec basename {} .json \; 2>/dev/null | sort -n)
+    [ "$state" = complete ] || return 0
+  done <<< "$scan"
   return 1
 }
 
@@ -529,42 +561,28 @@ fmp_file_mtime() {
 # then cap the remaining completed records oldest-first. Pending work is never
 # pruned automatically.
 fmp_prune_completed() {
-  local now file id state m age count remove_n
+  local scan now file id state _claimed _task m age count remove_n keep=()
   fmp_retention_values
   now=$(fmp_now) || return 0
-  for file in "$FMP_RECORDS"/*.json; do
-    [ -e "$file" ] || continue
-    id=${file##*/}; id=${id%.json}
-    fmp_id_valid "$id" || continue
-    fmp_record_validate_file "$file" "$id" || continue
-    state=$(jq -r '.state' "$file" 2>/dev/null) || continue
+  scan=$(fmp_records_scan) || return 0
+  [ -n "$scan" ] || return 0
+  while IFS=$'\t' read -r id state _claimed _task; do
+    [ -n "$id" ] || continue
     [ "$state" = complete ] || continue
+    file="$FMP_RECORDS/$id.json"
     m=$(fmp_file_mtime "$file") || continue
     age=$((now - m))
     if [ "$age" -gt "$FMP_RETENTION_SECS" ]; then
       rm -f "$file" "$FMP_INBOX/$id.json" "$FMP_OUTBOX/$id.json" 2>/dev/null || true
+    else
+      keep+=("$m"$'\t'"$id")
     fi
-  done
-  count=$(find "$FMP_RECORDS" -type f -name '*.json' -print 2>/dev/null \
-    | while IFS= read -r file; do
-        id=${file##*/}; id=${id%.json}
-        fmp_id_valid "$id" || continue
-        fmp_record_validate_file "$file" "$id" || continue
-        [ "$(jq -r '.state' "$file" 2>/dev/null)" = complete ] || continue
-        printf '%s\t%s\n' "$(fmp_file_mtime "$file")" "$id"
-      done | sort -n | wc -l | tr -d '[:space:]')
-  case "$count" in ''|*[!0-9]*) return 0 ;; esac
+  done <<< "$scan"
+  count=${#keep[@]}
   [ "$count" -gt "$FMP_RETENTION_COUNT" ] || return 0
   remove_n=$((count - FMP_RETENTION_COUNT))
-  find "$FMP_RECORDS" -type f -name '*.json' -print 2>/dev/null \
-    | while IFS= read -r file; do
-        id=${file##*/}; id=${id%.json}
-        fmp_id_valid "$id" || continue
-        fmp_record_validate_file "$file" "$id" || continue
-        [ "$(jq -r '.state' "$file" 2>/dev/null)" = complete ] || continue
-        printf '%s\t%s\n' "$(fmp_file_mtime "$file")" "$id"
-      done | sort -n | head -n "$remove_n" \
-    | while IFS=$(printf '\t') read -r _mtime id; do
+  printf '%s\n' "${keep[@]}" | sort -n | head -n "$remove_n" \
+    | while IFS=$'\t' read -r _mtime id; do
         rm -f "$FMP_RECORDS/$id.json" "$FMP_INBOX/$id.json" "$FMP_OUTBOX/$id.json" 2>/dev/null || true
       done
 }
