@@ -366,6 +366,18 @@ test_ci_and_docs_call_the_owner() {
     || fail "CI shard 1 must invoke --lane portable-parallel-1"
   grep -Fq 'bin/fm-test-run.sh --lane portable-parallel-2' "$CI" \
     || fail "CI shard 2 must invoke --lane portable-parallel-2"
+  local shard job_body
+  for shard in 1 2; do
+    job_body=$(awk -v job="  tests-portable-parallel-$shard:" '
+      $0 == job { in_job=1; next }
+      in_job && /^  [a-zA-Z0-9_-]+:/ { exit }
+      in_job { print }
+    ' "$CI")
+    printf '%s\n' "$job_body" | grep -Fq 'npm install -g tasks-axi' \
+      || fail "CI portable parallel shard $shard must install tasks-axi"
+    printf '%s\n' "$job_body" | grep -Fq 'tasks-axi --version' \
+      || fail "CI portable parallel shard $shard must verify tasks-axi"
+  done
   grep -Fq 'bin/fm-test-run.sh --lane portable-serial' "$CI" \
     || fail "CI portable serial must invoke --lane portable-serial"
   grep -Fq 'bin/fm-test-run.sh --check-coverage' "$CI" \
