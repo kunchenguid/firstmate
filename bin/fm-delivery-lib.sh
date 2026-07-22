@@ -39,23 +39,10 @@ fm_delivery_phase_list() {
 
 # Print landing substates for a mode, or empty when the mode is unknown.
 fm_delivery_landing_substates() {
-  local mode=$1 var idx len first
-  var="FM_DELIVERY_LANDING_SUBSTATES_${mode//-/_}"
-  # Portable array indirect read: use name[@] expansion when bash supports it.
-  if [ -n "${!var+x}" ]; then
-    len=$(eval "echo \${#${var}[@]}")
-    first=1
-    for ((idx=0; idx<len; idx++)); do
-      val=$(eval "echo \${${var}[$idx]}")
-      if [ "$first" -eq 1 ]; then
-        first=0
-      else
-        printf ' '
-      fi
-      printf '%s' "$val"
-    done
-    printf '\n'
-  fi
+  case "$1" in
+    direct-PR|no-mistakes) printf '%s\n' 'pr_open ci_green merged' ;;
+    local-only) printf '%s\n' 'branch_ready landing_approved fast_forwarded' ;;
+  esac
 }
 
 # Validate a 40-hex SHA. Returns 0 for valid, 1 otherwise.
@@ -186,6 +173,13 @@ for k in required:
         sys.exit(1)
 if doc.get("schemaVersion") != "firstmate.delivery-receipt.v1":
     print("error: unsupported in-flight schema version", file=sys.stderr)
+    sys.exit(1)
+phases = ["accepted", "implementing", "validating", "landing", "landed", "released", "deployed", "smoke_verified", "receipt_finalized", "cleanup_eligible"]
+if doc.get("phase") not in phases:
+    print("error: unknown delivery phase", file=sys.stderr)
+    sys.exit(1)
+if not isinstance(doc.get("phases"), list):
+    print("error: phases must be an array", file=sys.stderr)
     sys.exit(1)
 sys.exit(0)
 PYEOF
