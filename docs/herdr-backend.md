@@ -24,12 +24,11 @@ Prerequisites:
 
 ### CI pin and required real-Herdr lane
 
-The required GitHub Actions Herdr Behavior job does not use a floating package-manager latest.
-It installs exactly Herdr **v0.7.4** (protocol 16), the suite-verified protocol-16 release, through `bin/fm-install-herdr.sh`: official GitHub Releases URL for `ogulcancelik/herdr`, exact per-arch asset, pinned SHA-256, bounded download, and post-install version plus protocol checks.
-Scripts that need treehouse for real spawn worktrees install Treehouse **v2.0.1** the same way through `bin/fm-install-treehouse.sh`.
-The lane runs only the `real-herdr-gated` family serially via `bin/fm-test-run.sh --family real-herdr-gated --fail-on-gate-skip 'herdr not found'`, so a missing pin cannot pass as a silent skip.
+The required GitHub Actions Herdr Behavior job uses the suite-verified releases pinned by `bin/fm-install-herdr.sh` and `bin/fm-install-treehouse.sh`, never a floating package-manager latest.
+Those installer headers own the exact versions, release assets, checksums, download bounds, and post-install gates.
+The workflow owns lane composition, while `bin/fm-test-run.sh --help` owns the exact family-selection and required gate-skip mechanics that prevent a missing Herdr binary from passing silently.
 Live harness credential tests stay outside that family and outside default CI.
-Lab sessions remain `fm-lab-*` only with refuse-default and default-session tripwires intact; `bin/fm-herdr-ci-cleanup.sh` may remove only sessions proven to belong to that CI job (snapshot delta of non-default `fm-lab-*` names).
+CI cleanup stays inside the guarded, non-default Herdr lab contract and preserves the default-session tripwire; `bin/fm-herdr-ci-cleanup.sh` owns the exact snapshot and teardown rules.
 The first required lane targets Linux x86_64; if a genuine unsupported platform invariant appears (focus, cleanup, or default-session tripwire), keep the failure evidence and move the job to macOS rather than skip or weaken the assertion.
 
 Select herdr by putting `herdr` in a local `config/backend` file - the durable way to pick it - or by exporting `FM_BACKEND=herdr` when you launch your harness for a one-off session; telling the first mate in chat to use herdr also works.

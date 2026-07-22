@@ -3,8 +3,8 @@
 #
 # Firstmate must not configure commands.test as a complete tests/*.test.sh walk
 # (that duplicated CI and burned local pipeline time). Lint stays pinned to
-# bin/fm-lint.sh. Remote CI Behavior must keep running the complete portable
-# suite through bin/fm-test-run.sh --all (exact tests/*.test.sh coverage).
+# bin/fm-lint.sh. Remote CI owns broad regression through separate portable and
+# required real-Herdr Behavior lanes composed around bin/fm-test-run.sh.
 set -u
 
 # shellcheck source=tests/lib.sh

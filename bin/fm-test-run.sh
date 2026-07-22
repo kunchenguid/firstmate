@@ -40,9 +40,9 @@
 #   FM_TEST_SUMMARY_FAMILY family=<name> count=<n> duration_ms=<n> failed=<n>
 #   FM_TEST_SLOWEST rank=<k> script=<path> duration_ms=<n>
 #
-# Exit status is the aggregate of script exits: non-zero if any selected script
-# exits non-zero. Gate skips (first meaningful line matching ^skip:) still exit
-# 0 from the script and are counted as skipped_gate, not failures.
+# Exit status is non-zero if any selected script exits non-zero or a configured
+# --fail-on-gate-skip token appears. Other gate skips (first meaningful line
+# matching ^skip:) remain successful and are counted as skipped_gate.
 #
 # Family labels and the changed-file map live in this script only (one owner).
 # --changed is conservative: it over-selects related families rather than
