@@ -24,7 +24,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-primary-scope-lib.sh` | Shared marker-or-plain-checkout primary-home predicate for tracked hooks             |
 | `fm-turnend-guard.sh`    | Shared primary turn-end guard predicate so no turn ends blind (docs/turnend-guard.md) |
 | `fm-turnend-guard-grok.sh` | Grok Stop-hook adapter for the primary turn-end guard                              |
-| `fm-turnend-guard-hermes.sh` | Hermes `on_session_end` adapter that forces one bounded same-session resume    |
+| `fm-turnend-guard-hermes.sh` | Hermes `on_session_end` adapter that forces one bounded isolated follow-up     |
 | `fm-hermes-home.sh`      | Provision a Firstmate-owned isolated Hermes home and hooks, never touching `~/.hermes` |
 | `fm-arm-pretool-check.sh` | Stable PreToolUse transport for the watcher-arm command policy (docs/arm-pretool-check.md) |
 | `fm-arm-command-policy.mjs` | Semantic owner of the watcher-arm PreToolUse policy (docs/arm-pretool-check.md)   |

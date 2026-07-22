@@ -431,8 +431,8 @@ test_hermes_wiring() {
   HERMES_SOURCE_HOME="$TMP_ROOT/hermes-absent-source" \
     "$ROOT/bin/fm-hermes-home.sh" primary "$home" "$ROOT" >/dev/null
   config=$(cat "$home/config.yaml")
-  assert_contains "$config" 'fm-cd-pretool-check.sh --hermes' "hermes primary home must register the cd-guard with native output shaping"
-  assert_contains "$config" 'fm-arm-pretool-check.sh --hermes' "hermes cd hook must not displace the watcher-arm hook"
+  assert_contains "$config" "fm-cd-pretool-check.sh'' --hermes" "hermes primary home must register the cd-guard with native output shaping"
+  assert_contains "$config" "fm-arm-pretool-check.sh'' --hermes" "hermes cd hook must not displace the watcher-arm hook"
   assert_contains "$config" 'matcher: terminal' "hermes cd hook must be terminal-scoped"
   pass "fm-hermes-home.sh primary: pre_tool_call invokes the cd-guard alongside the arm guard"
 }

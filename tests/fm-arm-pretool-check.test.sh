@@ -491,7 +491,7 @@ test_hermes_pretool_hook_wired() {
   config=$(cat "$home/config.yaml")
   assert_contains "$config" 'pre_tool_call:' "Hermes primary config does not register pre_tool_call"
   assert_contains "$config" 'matcher: terminal' "Hermes pretool hook is not terminal-scoped"
-  assert_contains "$config" 'fm-arm-pretool-check.sh --hermes' "Hermes pretool hook does not invoke the checker in Hermes mode"
+  assert_contains "$config" "fm-arm-pretool-check.sh'' --hermes" "Hermes pretool hook does not invoke the checker in Hermes mode"
   pass "Hermes primary config wires terminal pre_tool_call to the shared checker"
 }
 

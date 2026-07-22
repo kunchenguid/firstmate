@@ -136,7 +136,7 @@ repair_line() {
     claude)
       printf '%s%s\n' "$prefix" 'repair missing watcher supervision with bin/fm-watch-arm.sh as its own Claude Code background task, never shell &.'
       ;;
-    codex)
+    codex|hermes)
       printf '%s%s%s%s\n' "$prefix" 'repair missing watcher supervision with a foreground checkpoint: bin/fm-watch-checkpoint.sh --seconds ' "$checkpoint_seconds" '.'
       ;;
     pi)
@@ -147,9 +147,6 @@ repair_line() {
       ;;
     grok)
       printf '%s%s\n' "$prefix" 'repair missing watcher supervision with bin/fm-watch-arm.sh as its own Grok tracked background task, never shell &.'
-      ;;
-    hermes)
-      printf '%s%s%s%s\n' "$prefix" 'repair missing watcher supervision with a foreground checkpoint: bin/fm-watch-checkpoint.sh --seconds ' "$checkpoint_seconds" '.'
       ;;
     *)
       printf '%s%s\n' "$prefix" 'repair missing watcher supervision according to the session-start block for this harness; do not use shell &.'
@@ -162,7 +159,7 @@ ordinary_wake_line() {
     claude)
       printf '%s\n' '- Ordinary wake: re-arm exactly one bin/fm-watch-arm.sh Claude Code background task as directed below.'
       ;;
-    codex)
+    codex|hermes)
       printf '%s\n' '- Ordinary wake: take the next foreground bin/fm-watch-checkpoint.sh checkpoint as directed below.'
       ;;
     pi)
@@ -173,9 +170,6 @@ ordinary_wake_line() {
       ;;
     grok)
       printf '%s\n' '- Ordinary wake: re-arm exactly one bin/fm-watch-arm.sh Grok tracked background task as directed below.'
-      ;;
-    hermes)
-      printf '%s\n' '- Ordinary wake: take the next foreground bin/fm-watch-checkpoint.sh checkpoint as directed below.'
       ;;
     *)
       printf '%s\n' '- Ordinary wake: follow the continuation in the harness protocol below; do not use shell &.'

@@ -81,7 +81,7 @@ test_env_detection() {
 }
 
 test_task_home_isolated_and_resumable() {
-  local source="$TMP_ROOT/source" target="$TMP_ROOT/task-home" turnend="$TMP_ROOT/task.turn-ended"
+  local source="$TMP_ROOT/source" target="$TMP_ROOT/task home" turnend="$TMP_ROOT/task.turn-ended"
   mkdir -p "$source"
   printf '%s\n' 'opaque-auth' > "$source/auth.json"
   cat > "$source/config.yaml" <<'YAML'
@@ -107,6 +107,8 @@ YAML
   [ "$(file_mode "$target/auth.json")" = 600 ] || fail "copied Hermes auth must be mode 0600"
   [ "$(file_mode "$target/config.yaml")" = 600 ] || fail "isolated Hermes config must be mode 0600"
   assert_grep 'on_session_end:' "$target/config.yaml" "task home lacks on_session_end"
+  assert_grep "command: '''$target/fm-on-session-end.sh'''" "$target/config.yaml" \
+    "task hook command must survive a Hermes home containing spaces"
   "$target/fm-on-session-end.sh"
   assert_present "$turnend" "task on_session_end hook did not touch its marker"
 
@@ -130,9 +132,52 @@ test_primary_home_has_all_hooks() {
   assert_contains "$config" 'fm-turnend-guard-hermes.sh' "Hermes primary turn-end hook misses its adapter"
   assert_contains "$config" 'pre_tool_call:' "Hermes primary home lacks watcher-arm safety protection"
   assert_contains "$config" 'matcher: terminal' "Hermes pre-tool hook is not terminal-scoped"
-  assert_contains "$config" 'fm-arm-pretool-check.sh --hermes' "Hermes pre-tool hook misses native output shaping"
-  assert_contains "$config" 'fm-cd-pretool-check.sh --hermes' "Hermes primary home lacks cd-guard parity with every other harness"
+  assert_contains "$config" "fm-arm-pretool-check.sh'' --hermes" "Hermes pre-tool hook misses native output shaping"
+  assert_contains "$config" "fm-cd-pretool-check.sh'' --hermes" "Hermes primary home lacks cd-guard parity with every other harness"
   pass "Hermes isolated primary home wires session start, turn end, and pre-tool safety"
+}
+
+test_primary_hook_commands_support_spaces() {
+  local source="$TMP_ROOT/spaced-source" target="$TMP_ROOT/spaced-home" root="$TMP_ROOT/first mate" script
+  mkdir -p "$source" "$root/bin"
+  printf 'model:\n  provider: openai-codex\n' > "$source/config.yaml"
+  for script in fm-sessionstart-nudge.sh fm-turnend-guard-hermes.sh fm-arm-pretool-check.sh fm-cd-pretool-check.sh; do
+    printf '#!/usr/bin/env bash\nexit 0\n' > "$root/bin/$script"
+    chmod +x "$root/bin/$script"
+  done
+
+  HERMES_SOURCE_HOME="$source" "$HOME_HELPER" primary "$target" "$root" >/dev/null
+  assert_grep "command: '''$root/bin/fm-sessionstart-nudge.sh'''" "$target/config.yaml" \
+    "session-start hook path is not shell-quoted"
+  assert_grep "command: '''$root/bin/fm-turnend-guard-hermes.sh'''" "$target/config.yaml" \
+    "turn-end hook path is not shell-quoted"
+  assert_grep "command: '''$root/bin/fm-arm-pretool-check.sh'' --hermes'" "$target/config.yaml" \
+    "watcher-arm hook path is not shell-quoted"
+  assert_grep "command: '''$root/bin/fm-cd-pretool-check.sh'' --hermes'" "$target/config.yaml" \
+    "cd-guard hook path is not shell-quoted"
+  pass "Hermes primary hook commands shell-quote roots containing spaces"
+}
+
+test_primary_home_requires_every_safety_script() {
+  local source="$TMP_ROOT/required-source" missing root target script out rc
+  mkdir -p "$source"
+  printf 'model:\n  provider: openai-codex\n' > "$source/config.yaml"
+  for missing in fm-sessionstart-nudge.sh fm-turnend-guard-hermes.sh fm-arm-pretool-check.sh fm-cd-pretool-check.sh; do
+    root="$TMP_ROOT/missing-$missing"
+    target="$TMP_ROOT/missing-$missing-home"
+    mkdir -p "$root/bin"
+    for script in fm-sessionstart-nudge.sh fm-turnend-guard-hermes.sh fm-arm-pretool-check.sh fm-cd-pretool-check.sh; do
+      printf '#!/usr/bin/env bash\nexit 0\n' > "$root/bin/$script"
+      chmod +x "$root/bin/$script"
+    done
+    rm "$root/bin/$missing"
+    out=$(HERMES_SOURCE_HOME="$source" "$HOME_HELPER" primary "$target" "$root" 2>&1)
+    rc=$?
+    expect_code 1 "$rc" "Hermes primary home missing $missing"
+    assert_contains "$out" "$missing" "missing-script error did not identify $missing"
+    assert_absent "$target/config.yaml" "Hermes published hooks before validating $missing"
+  done
+  pass "Hermes primary home requires every safety hook script"
 }
 
 test_usage_states_the_isolation_guarantee() {
@@ -222,30 +267,42 @@ test_busy_and_idle_classification() {
   pass "Hermes busy footer and bare idle composer classify correctly"
 }
 
-test_passive_guard_forces_one_resume() {
-  local primary="$TMP_ROOT/primary" fakebin log payload out rc
+test_passive_guard_forces_one_safe_followup() {
+  local primary="$TMP_ROOT/primary" source_home="$TMP_ROOT/current-hermes-home" fakebin followup_home log payload out rc
   fakebin=$(fm_fakebin "$TMP_ROOT/fake")
   log="$TMP_ROOT/hermes-resume.log"
-  mkdir -p "$primary/bin" "$primary/state" "$primary/config"
+  mkdir -p "$primary/bin" "$primary/state" "$primary/config" "$source_home"
+  printf 'model:\n  provider: openai-codex\n' > "$source_home/config.yaml"
   : > "$primary/AGENTS.md"
   git init -q "$primary"
   git -C "$primary" commit -q --allow-empty -m init
   printf '%s\n' 'window=fake' > "$primary/state/inflight.meta"
   cat > "$fakebin/hermes" <<'SH'
 #!/usr/bin/env bash
-printf 'active=%s args=%s\n' "${HERMES_TURNEND_GUARD_ACTIVE:-}" "$*" >> "$FM_HERMES_TEST_LOG"
+printf 'home=%s active=%s args=%s\n' "${HERMES_HOME:-}" "${HERMES_TURNEND_GUARD_ACTIVE:-}" "$*" >> "$FM_HERMES_TEST_LOG"
 exit 0
 SH
   chmod +x "$fakebin/hermes"
   payload='{"session_id":"20260721_214600_e8ae23","extra":{"completed":true,"interrupted":false}}'
-  out=$(printf '%s' "$payload" | FM_ROOT_OVERRIDE="$primary" FM_HOME="$primary" \
+  out=$(printf '%s' "$payload" | FM_ROOT_OVERRIDE="$primary" FM_HOME="$primary" HERMES_HOME="$source_home" \
     FM_HERMES_TEST_LOG="$log" PATH="$fakebin:$PATH" "$GUARD" 2>&1)
   rc=$?
   expect_code 0 "$rc" "Hermes passive guard adapter"
   [ -z "$out" ] || fail "Hermes passive guard adapter must be silent, got: $out"
-  assert_grep 'active=1 args=--resume 20260721_214600_e8ae23 --yolo --accept-hooks -z TURN WOULD END BLIND' "$log" \
-    "Hermes guard did not force a loop-guarded same-session resume"
-  pass "Hermes passive turn-end guard forces one bounded resumed follow-up"
+  assert_grep 'active=1 args=--yolo --accept-hooks -z TURN WOULD END BLIND' "$log" \
+    "Hermes guard did not force a loop-guarded independent follow-up"
+  assert_no_grep --resume "$log" "Hermes guard must not resume a session that is still live"
+  assert_no_grep "home=$source_home " "$log" "Hermes guard must not share the live session store"
+  followup_home=$(sed -n 's/^home=\([^ ]*\) active=.*/\1/p' "$log")
+  [ -n "$followup_home" ] || fail "Hermes guard did not select an isolated follow-up home"
+  assert_absent "$followup_home" "Hermes guard left its isolated follow-up home behind"
+
+  : > "$log"
+  payload='{"session_id":"20260721_214600_e8ae23","completed":false,"interrupted":true}'
+  printf '%s' "$payload" | FM_ROOT_OVERRIDE="$primary" FM_HOME="$primary" HERMES_HOME="$source_home" \
+    FM_HERMES_TEST_LOG="$log" PATH="$fakebin:$PATH" "$GUARD" >/dev/null 2>&1
+  [ ! -s "$log" ] || fail "Hermes turn-end guard must respect an operator interrupt"
+  pass "Hermes passive turn-end guard starts a safe follow-up but respects interrupts"
 }
 
 test_fm_lock_recognizes_hermes_holder() {
@@ -270,9 +327,11 @@ SH
 test_env_detection
 test_task_home_isolated_and_resumable
 test_primary_home_has_all_hooks
+test_primary_hook_commands_support_spaces
+test_primary_home_requires_every_safety_script
 test_usage_states_the_isolation_guarantee
 test_preserved_config_never_leaks_operator_hooks
 test_home_and_config_are_private_from_creation
 test_busy_and_idle_classification
-test_passive_guard_forces_one_resume
+test_passive_guard_forces_one_safe_followup
 test_fm_lock_recognizes_hermes_holder

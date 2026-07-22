@@ -112,7 +112,7 @@ test_hermes_is_foreground_checkpoint() {
   out=$(FM_CODEX_WATCH_CHECKPOINT=23 "$RENDER" --harness hermes)
   assert_contains "$out" "SUPERVISION OPERATING INSTRUCTIONS - primary harness: hermes" "Hermes heading missing"
   assert_contains "$out" "Mode: Hermes foreground checkpoint." "Hermes snippet missing foreground mode"
-  assert_contains "$out" 'bin/fm-watch-checkpoint.sh --seconds "${FM_CODEX_WATCH_CHECKPOINT:-180}"' "Hermes snippet must honor the operator checkpoint override like codex"
+  assert_contains "$out" "bin/fm-watch-checkpoint.sh --seconds \"\${FM_CODEX_WATCH_CHECKPOINT:-180}\"" "Hermes snippet must honor the operator checkpoint override like codex"
   assert_contains "$out" "pre_tool_call" "Hermes snippet missing watcher-arm seatbelt"
   assert_contains "$out" "bin/fm-cd-pretool-check.sh" "Hermes snippet missing cd-guard seatbelt"
   assert_not_contains "$out" "background-notify" "Hermes snippet must not claim unverified background wake semantics"

@@ -115,7 +115,7 @@ touch $turnend_q 2>/dev/null || true
 exit 0
 EOF
   chmod 700 "$TARGET/fm-on-session-end.sh"
-  hook_q=$(yaml_quote "$TARGET/fm-on-session-end.sh")
+  hook_q=$(yaml_quote "$(shell_quote "$TARGET/fm-on-session-end.sh")")
   {
     emit_preserved_config
     cat <<EOF
@@ -130,11 +130,13 @@ else
   ROOT=${ARG3:-$(cd "$SCRIPT_DIR/.." && pwd)}
   case "$ROOT" in /*) ;; *) echo "error: Firstmate root must be absolute: $ROOT" >&2; exit 2 ;; esac
   ROOT=$(cd "$ROOT" && pwd -P)
-  [ -x "$ROOT/bin/fm-sessionstart-nudge.sh" ] || { echo "error: not a Firstmate root: $ROOT" >&2; exit 1; }
-  start_q=$(yaml_quote "$ROOT/bin/fm-sessionstart-nudge.sh")
-  end_q=$(yaml_quote "$ROOT/bin/fm-turnend-guard-hermes.sh")
-  arm_q=$(yaml_quote "$ROOT/bin/fm-arm-pretool-check.sh --hermes")
-  cd_q=$(yaml_quote "$ROOT/bin/fm-cd-pretool-check.sh --hermes")
+  for script in fm-sessionstart-nudge.sh fm-turnend-guard-hermes.sh fm-arm-pretool-check.sh fm-cd-pretool-check.sh; do
+    [ -x "$ROOT/bin/$script" ] || { echo "error: missing required Hermes hook: $ROOT/bin/$script" >&2; exit 1; }
+  done
+  start_q=$(yaml_quote "$(shell_quote "$ROOT/bin/fm-sessionstart-nudge.sh")")
+  end_q=$(yaml_quote "$(shell_quote "$ROOT/bin/fm-turnend-guard-hermes.sh")")
+  arm_q=$(yaml_quote "$(shell_quote "$ROOT/bin/fm-arm-pretool-check.sh") --hermes")
+  cd_q=$(yaml_quote "$(shell_quote "$ROOT/bin/fm-cd-pretool-check.sh") --hermes")
   {
     emit_preserved_config
     cat <<EOF

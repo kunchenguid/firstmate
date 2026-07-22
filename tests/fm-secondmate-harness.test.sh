@@ -474,7 +474,7 @@ test_spawn_hermes_secondmate_gets_primary_hooks() {
   mkdir -p "$w/home/config"
   make_seeded_home "$sm" sm
   cp "$ROOT/bin/fm-sessionstart-nudge.sh" "$ROOT/bin/fm-turnend-guard-hermes.sh" \
-    "$ROOT/bin/fm-arm-pretool-check.sh" "$sm/bin/"
+    "$ROOT/bin/fm-arm-pretool-check.sh" "$ROOT/bin/fm-cd-pretool-check.sh" "$sm/bin/"
   chmod +x "$sm/bin/"*.sh
 
   HERMES_SOURCE_HOME="$w/no-hermes-source" \
@@ -487,7 +487,8 @@ test_spawn_hermes_secondmate_gets_primary_hooks() {
   assert_contains "$config" 'on_session_start:' "Hermes secondmate lacks session-start hook"
   assert_contains "$config" "$sm/bin/fm-sessionstart-nudge.sh" "Hermes secondmate session-start hook points outside its home"
   assert_contains "$config" "$sm/bin/fm-turnend-guard-hermes.sh" "Hermes secondmate turn-end hook points outside its home"
-  assert_contains "$config" "$sm/bin/fm-arm-pretool-check.sh --hermes" "Hermes secondmate pre-tool hook points outside its home"
+  assert_contains "$config" "$sm/bin/fm-arm-pretool-check.sh'' --hermes" "Hermes secondmate pre-tool hook points outside its home"
+  assert_contains "$config" "$sm/bin/fm-cd-pretool-check.sh'' --hermes" "Hermes secondmate cd-guard hook points outside its home"
   pass "Hermes secondmate spawn installs the isolated primary hook set and omits effort"
 }
 
