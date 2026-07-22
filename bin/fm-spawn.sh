@@ -697,6 +697,18 @@ if [ "$KIND" = secondmate ]; then
   fi
 fi
 
+filesystem_object_identity() {  # <path>
+  local identity
+  if [ "$(uname)" = Darwin ]; then
+    identity=$(stat -f '%d:%i' "$1" 2>/dev/null) || return 1
+  else
+    identity=$(stat -c '%d:%i' "$1" 2>/dev/null) || return 1
+  fi
+  [ -n "$identity" ] || return 1
+  printf '%s\n' "$identity"
+}
+
+PROJ_IDENTITY=
 if [ "$KIND" = secondmate ]; then
   [ -n "$FIRSTMATE_HOME" ] || { echo "error: no firstmate home supplied or registered for $ID" >&2; exit 1; }
   PROJ_ABS=$(validate_firstmate_home_for_spawn "$ID" "$FIRSTMATE_HOME")
@@ -744,7 +756,16 @@ if [ "$KIND" = secondmate ]; then
     BRIEF="$DATA/$ID/brief.md"
   fi
 else
-  PROJ_ABS="$(cd "$(resolve_project_dir_arg "$PROJ")" && pwd)"
+  project_record=$(
+    cd "$(resolve_project_dir_arg "$PROJ")"
+    printf '%s\x1f' "$(pwd)"
+    filesystem_object_identity .
+  ) || {
+    echo "error: could not resolve primary project filesystem identity for $PROJ" >&2
+    exit 1
+  }
+  PROJ_ABS=${project_record%%$'\x1f'*}
+  PROJ_IDENTITY=${project_record#*$'\x1f'}
   WT=""
   BRIEF="$DATA/$ID/brief.md"
 fi
@@ -753,13 +774,18 @@ fi
 # Backend current-path reads and PROJ_ABS can spell the same directory through
 # different symlink aliases or letter casing. String canonicalization is not an
 # identity proof on every supported filesystem, so all isolation decisions use
-# Bash's device-and-inode-aware -ef predicate instead.
+# device-and-inode identity instead.
 same_filesystem_object() {  # <left-path> <right-path>
-  [ -e "$1" ] && [ -e "$2" ] && [ "$1" -ef "$2" ]
+  local left_identity right_identity
+  left_identity=$(filesystem_object_identity "$1") || return 1
+  right_identity=$(filesystem_object_identity "$2") || return 1
+  [ "$left_identity" = "$right_identity" ]
 }
 
-distinct_filesystem_objects() {  # <left-path> <right-path>
-  [ -e "$1" ] && [ -e "$2" ] && ! [ "$1" -ef "$2" ]
+distinct_from_primary() {  # <path>
+  local identity
+  identity=$(filesystem_object_identity "$1") || return 1
+  [ "$identity" != "$PROJ_IDENTITY" ]
 }
 
 git_worktree_root() {  # <path>
@@ -778,7 +804,7 @@ validate_spawn_worktree() {  # <source> <inspect-target>
   local source=$1 inspect_target=$2 wt_top
   wt_top=$(git -C "$WT" rev-parse --show-toplevel 2>/dev/null || true)
   if [ -z "$wt_top" ] || ! same_filesystem_object "$WT" "$wt_top" \
-     || ! distinct_filesystem_objects "$wt_top" "$PROJ_ABS"; then
+     || ! distinct_from_primary "$wt_top"; then
     echo "error: $source did not yield an isolated worktree (resolved '$WT'; worktree root '${wt_top:-none}'; primary '$PROJ_ABS'); refusing to launch to avoid tangling the primary checkout. Inspect target $inspect_target" >&2
     exit 1
   fi
@@ -1030,8 +1056,8 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   # Compare directory identity, not path spelling. `pwd -P` removes symlinks but
   # can retain caller-supplied letter casing on a case-insensitive filesystem,
   # so string comparison can still mistake the unchanged primary directory for
-  # a worktree. Bash's -ef follows aliases and asks the filesystem whether both
-  # names identify the same object.
+  # a worktree. Device-and-inode identity follows aliases without depending on
+  # the primary pathname remaining stable during the spawn.
   #
   # A single read that is filesystem-distinct from the project is not proof the pane
   # settled there: on some tmux/WSL setups a brand-new window's pane_current_path
@@ -1047,10 +1073,10 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   candidate=""
   for _ in $(seq 1 60); do
     p=$(spawn_current_path "$WT_TARGET" || true)
-    if [ -n "$p" ] && distinct_filesystem_objects "$p" "$PROJ_ABS"; then
+    if [ -n "$p" ] && distinct_from_primary "$p"; then
       p_top=$(git_worktree_root "$p" || true)
       if [ -n "$p_top" ] && same_filesystem_object "$p" "$p_top" \
-         && distinct_filesystem_objects "$p_top" "$PROJ_ABS"; then
+         && distinct_from_primary "$p_top"; then
         if [ -n "$candidate" ] && same_filesystem_object "$p_top" "$candidate"; then
           WT="$p_top"
           break
