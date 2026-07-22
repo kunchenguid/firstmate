@@ -22,6 +22,15 @@ Prerequisites:
 - `jq`, required to parse herdr's JSON output: `brew install jq` (or your platform's package manager).
 - The universal firstmate prerequisites - a verified crew harness plus the required toolchain, owned by [`docs/configuration.md`](configuration.md) ("Harness support", "Toolchain"); treehouse still provides the worktree, herdr only provides the session.
 
+### CI pin and required real-Herdr lane
+
+The required GitHub Actions Herdr Behavior job uses the suite-verified releases pinned by `bin/fm-install-herdr.sh` and `bin/fm-install-treehouse.sh`, never a floating package-manager latest.
+Those installer headers own the exact versions, release assets, checksums, download bounds, and post-install gates.
+The workflow owns lane composition, while `bin/fm-test-run.sh --help` owns the exact family-selection and required gate-skip mechanics that prevent a missing Herdr binary from passing silently.
+Live harness credential tests stay outside that family and outside default CI.
+CI cleanup stays inside the guarded, non-default Herdr lab contract and preserves the default-session tripwire; `bin/fm-herdr-ci-cleanup.sh` owns the exact snapshot and teardown rules.
+The first required lane targets Linux x86_64; if a genuine unsupported platform invariant appears (focus, cleanup, or default-session tripwire), keep the failure evidence and move the job to macOS rather than skip or weaken the assertion.
+
 Select herdr by putting `herdr` in a local `config/backend` file - the durable way to pick it - or by exporting `FM_BACKEND=herdr` when you launch your harness for a one-off session; telling the first mate in chat to use herdr also works.
 It can also be auto-detected: when firstmate itself is running natively inside herdr (`HERDR_ENV=1`) and no explicit backend is set, firstmate auto-selects herdr and prints a one-time opt-out notice; running inside tmux nested in herdr always resolves to tmux instead.
 A herdr spawn refuses loudly before creating a session container or acquiring a ship/scout worktree if `herdr` or `jq` is missing or the installed herdr's protocol is older than verified.

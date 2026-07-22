@@ -20,6 +20,15 @@
 #   --json <path>   write a deterministic timing artifact after the run
 #   --list          print selected script paths (one per line) and exit 0
 #   --base <ref>    with --changed, compare against this ref (default: origin/main)
+#   --exclude-family <name>
+#                   drop scripts whose primary family matches <name> after selection
+#                   (repeatable; used by the portable CI job to leave real Herdr
+#                   coverage to the dedicated required lane)
+#   --fail-on-gate-skip <token>
+#                   after each script, fail the run if any output line contains
+#                   "skip: <token>" (e.g. --fail-on-gate-skip 'herdr not found').
+#                   The required Herdr CI lane uses this so a missing pin cannot
+#                   silently pass as a gate skip.
 #   -h, --help      print this header
 #
 # Per-script machine-parseable markers (stdout):
@@ -31,9 +40,9 @@
 #   FM_TEST_SUMMARY_FAMILY family=<name> count=<n> duration_ms=<n> failed=<n>
 #   FM_TEST_SLOWEST rank=<k> script=<path> duration_ms=<n>
 #
-# Exit status is the aggregate of script exits: non-zero if any selected script
-# exits non-zero. Gate skips (first meaningful line matching ^skip:) still exit
-# 0 from the script and are counted as skipped_gate, not failures.
+# Exit status is non-zero if any selected script exits non-zero or a configured
+# --fail-on-gate-skip token appears. Other gate skips (first meaningful line
+# matching ^skip:) remain successful and are counted as skipped_gate.
 #
 # Family labels and the changed-file map live in this script only (one owner).
 # --changed is conservative: it over-selects related families rather than
@@ -50,6 +59,8 @@ FAMILY=
 BASE_REF=origin/main
 JSON_PATH=
 SCRIPTS=()
+EXCLUDE_FAMILIES=()
+FAIL_ON_GATE_SKIP=
 
 usage() {
   awk '
@@ -90,7 +101,8 @@ family_for_basename() {
     fm-continuity-pretool-check.test.sh|fm-crew-state.test.sh|fm-decision-hold-lifecycle.test.sh|\
     fm-dispatch-select.test.sh|fm-ensure-agents-md.test.sh|fm-grok-harness.test.sh|\
     fm-herdr-lab.test.sh|fm-instruction-owners.test.sh|fm-lint.test.sh|\
-    fm-nm-test-contract.test.sh|fm-no-mistakes-ownership.test.sh|fm-pi-primary-types.test.sh|\
+    fm-install-herdr.test.sh|fm-nm-test-contract.test.sh|fm-no-mistakes-ownership.test.sh|\
+    fm-pi-primary-types.test.sh|\
     fm-send-popup-settle.test.sh|fm-send-settle.test.sh|fm-stow-contract.test.sh|\
     fm-supervision-instructions.test.sh|fm-tmux-submit-busy.test.sh|fm-transition-lib.test.sh|\
     fm-test-run.test.sh|fm-test-isolation-proof.test.sh)
@@ -277,7 +289,7 @@ families_for_changed_path() {
       # resolution in the caller; emit a marker family of __script__
       printf '%s\n' "__script__:$(basename "$path")"
       ;;
-    bin/fm-test-run.sh)
+    bin/fm-test-run.sh|bin/fm-test-isolation-proof.sh)
       printf '%s\n' pure-contract-unit
       ;;
     bin/backends/herdr*|bin/fm-herdr-lab.sh|tests/herdr-test-safety.sh)
@@ -336,6 +348,12 @@ families_for_changed_path() {
     bin/fm-bearings-snapshot.sh|bin/fm-fleet-snapshot.sh|bin/fm-fleet-view.sh)
       printf '%s\n' snapshot-bearings
       ;;
+    bin/fm-install-herdr.sh|bin/fm-install-treehouse.sh|bin/fm-herdr-ci-cleanup.sh)
+      printf '%s\n' pure-contract-unit
+      # Pin or cleanup changes also select the real-Herdr family so the required
+      # lane's contract coverage re-runs.
+      printf '%s\n' real-herdr-gated
+      ;;
     bin/fm-lint.sh|bin/fm-install-shellcheck.sh|\
     bin/fm-brief.sh|bin/fm-ensure-agents-md.sh|bin/fm-crew-state.sh|\
     bin/fm-decision-hold.sh|bin/fm-supervision*|bin/fm-transition-lib.sh|\
@@ -346,6 +364,7 @@ families_for_changed_path() {
       ;;
     .github/workflows/ci.yml|.no-mistakes.yaml)
       printf '%s\n' pure-contract-unit
+      printf '%s\n' real-herdr-gated
       ;;
     .github/*|.tasks.toml|AGENTS.md|CLAUDE.md|CONTRIBUTING.md|\
     docs/configuration.md|docs/supervision-protocols/*)
@@ -440,6 +459,31 @@ detect_gate_skip() {
     skip:*) return 0 ;;
     *) return 1 ;;
   esac
+}
+
+# True when any output line contains "skip: <token>" (token may contain spaces).
+detect_gate_skip_token() {
+  local file=$1 token=$2
+  [ -n "$token" ] || return 1
+  grep -F -q "skip: $token" "$file" 2>/dev/null
+}
+
+apply_exclude_families() {
+  local s fam keep ex
+  local -a kept=()
+  [ "${#EXCLUDE_FAMILIES[@]}" -gt 0 ] || return 0
+  for s in "${SCRIPTS[@]+"${SCRIPTS[@]}"}"; do
+    fam=$(family_for_basename "$(basename "$s")")
+    keep=1
+    for ex in "${EXCLUDE_FAMILIES[@]}"; do
+      if [ "$fam" = "$ex" ]; then
+        keep=0
+        break
+      fi
+    done
+    [ "$keep" -eq 1 ] && kept+=("$s")
+  done
+  SCRIPTS=("${kept[@]+"${kept[@]}"}")
 }
 
 write_json_artifact() {
@@ -565,6 +609,24 @@ while [ "$#" -gt 0 ]; do
       LIST_FAMILIES=1
       shift
       ;;
+    --exclude-family)
+      [ "$#" -gt 1 ] || die "--exclude-family requires a name"
+      EXCLUDE_FAMILIES+=("$2")
+      shift 2
+      ;;
+    --exclude-family=*)
+      EXCLUDE_FAMILIES+=("${1#--exclude-family=}")
+      shift
+      ;;
+    --fail-on-gate-skip)
+      [ "$#" -gt 1 ] || die "--fail-on-gate-skip requires a token (e.g. 'herdr not found')"
+      FAIL_ON_GATE_SKIP=$2
+      shift 2
+      ;;
+    --fail-on-gate-skip=*)
+      FAIL_ON_GATE_SKIP=${1#--fail-on-gate-skip=}
+      shift
+      ;;
     -h|--help)
       usage
       exit 0
@@ -622,6 +684,14 @@ case "${MODE:-}" in
     die "select with --all, --family <name>, --changed, or one or more script paths (see --help)"
     ;;
 esac
+
+apply_exclude_families
+if [ "${#EXCLUDE_FAMILIES[@]}" -gt 0 ]; then
+  SELECTION_DESC="${SELECTION_DESC};exclude-family=$(IFS=,; printf '%s' "${EXCLUDE_FAMILIES[*]}")"
+fi
+if [ -n "$FAIL_ON_GATE_SKIP" ]; then
+  SELECTION_DESC="${SELECTION_DESC};fail-on-gate-skip=$FAIL_ON_GATE_SKIP"
+fi
 
 if [ "$LIST_ONLY" -eq 1 ]; then
   for s in "${SCRIPTS[@]+"${SCRIPTS[@]}"}"; do
@@ -721,6 +791,14 @@ for script in "${SCRIPTS[@]}"; do
   duration=$((end_ms - begin_ms))
   if [ "$duration" -lt 0 ]; then
     duration=0
+  fi
+
+  # Required-lane hard fail: a configured skip token anywhere in the output is
+  # a failure even when the script itself exited 0 (classic "skip: herdr not
+  # found" gate). Retries are not used as a green strategy.
+  if [ -n "$FAIL_ON_GATE_SKIP" ] && detect_gate_skip_token "$out" "$FAIL_ON_GATE_SKIP"; then
+    log "required gate skip token seen in $script: skip: $FAIL_ON_GATE_SKIP"
+    rc=1
   fi
 
   gate_skip=false
