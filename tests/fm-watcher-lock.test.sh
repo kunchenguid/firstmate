@@ -1017,7 +1017,7 @@ test_lock_match_accepts_same_dir_different_spelling() {
   # the same directory reproduces the string-mismatch/same-file shape portably
   # on case-sensitive filesystems too. Genuine mismatches must still refuse:
   # a different existing directory and a missing recorded path both fail -ef.
-  local dir state home_real home_alias watch_real watch_alias lockdir pid identity other
+  local dir state home_real home_alias watch_real watch_alias lockdir pid identity other alias_rc other_rc missing_rc
   dir=$(make_case lock-spelling)
   state="$dir/state"
   home_real="$dir/home-real"
@@ -1038,21 +1038,22 @@ test_lock_match_accepts_same_dir_different_spelling() {
   printf '%s\n' "$watch_real" > "$lockdir/watcher-path"
   printf '%s\n' "$identity" > "$lockdir/pid-identity"
   FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_watcher_lock_matches_pid "$2" "$3" "$4" "$5"' \
-    _ "$LIB" "$state" "$watch_alias" "$pid" "$home_alias" \
-    || fail "a different spelling of the same home and watcher path evicted a live watcher"
-  kill "$pid" 2>/dev/null || true
-  wait "$pid" 2>/dev/null || true
+    _ "$LIB" "$state" "$watch_alias" "$pid" "$home_alias"
+  alias_rc=$?
   other="$dir/genuinely-other-home"
   mkdir -p "$other"
-  if FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_watcher_lock_matches_pid "$2" "$3" "$4" "$5"' \
-    _ "$LIB" "$state" "$watch_real" "$pid" "$other"; then
-    fail "a genuinely different home directory was accepted"
-  fi
+  FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_watcher_lock_matches_pid "$2" "$3" "$4" "$5"' \
+    _ "$LIB" "$state" "$watch_real" "$pid" "$other"
+  other_rc=$?
   printf '%s\n' "$dir/recorded-home-that-no-longer-exists" > "$lockdir/fm-home"
-  if FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_watcher_lock_matches_pid "$2" "$3" "$4" "$5"' \
-    _ "$LIB" "$state" "$watch_real" "$pid" "$home_real"; then
-    fail "a missing recorded home directory was accepted"
-  fi
+  FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_watcher_lock_matches_pid "$2" "$3" "$4" "$5"' \
+    _ "$LIB" "$state" "$watch_real" "$pid" "$home_real"
+  missing_rc=$?
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  [ "$alias_rc" -eq 0 ] || fail "a different spelling of the same home and watcher path evicted a live watcher"
+  [ "$other_rc" -ne 0 ] || fail "a genuinely different home directory was accepted"
+  [ "$missing_rc" -ne 0 ] || fail "a missing recorded home directory was accepted"
   pass "lock match tolerates same-directory spelling differences and still refuses real mismatches"
 }
 
