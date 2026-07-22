@@ -13,7 +13,7 @@
 # mark-queued is called by the watcher only after its durable queue append.
 # recover-unclaimed is a locked session-start recovery step: queued/claimed work
 # without an outbox or live task link becomes pending so a restarted watcher
-# offers it again.
+# offers it again, and stale task links to completed requests are cleared.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -124,6 +124,11 @@ case "$command" in
           if [ -z "$task" ] || [ "$task" != "$FMP_RECORD_TASK" ]; then
             fmp_record_set_state "$id" pending "" 0 || { fm_lock_release "$FMP_LOCK"; exit 1; }
           fi
+          ;;
+        complete)
+          # Convergence for a crash between durable completion and link
+          # cleanup: a completed request must not keep any task bound to it.
+          fmp_task_links_clear_for_request "$id" || { fm_lock_release "$FMP_LOCK"; exit 1; }
           ;;
       esac
     done

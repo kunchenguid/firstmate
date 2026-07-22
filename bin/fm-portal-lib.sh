@@ -545,6 +545,23 @@ fmp_task_for_request() {
   printf '%s\n' "$found"
 }
 
+# Clear every task metadata link that still points at request <id>. Called only
+# under FMP_LOCK and only once <id> is durably complete, so a link stranded by a
+# deferred acknowledgement (fm-portal-reply.sh exit 5) that the poller later
+# resumes cannot keep the task bound forever. Only matching portal_request=
+# values are removed; all other metadata lines and links are preserved.
+fmp_task_links_clear_for_request() {
+  local id=$1 meta linked
+  fmp_id_valid "$id" || return 1
+  for meta in "$FMP_STATE"/*.meta; do
+    [ -f "$meta" ] && [ ! -L "$meta" ] || continue
+    linked=$(fmp_meta_get "$meta" portal_request)
+    [ "$linked" = "$id" ] || continue
+    fmp_meta_link_clear "$meta" || return 1
+  done
+  return 0
+}
+
 fmp_retention_values() {
   FMP_RETENTION_SECS=${FM_PORTAL_RETENTION_SECS:-$FMP_DEFAULT_RETENTION_SECS}
   FMP_RETENTION_COUNT=${FM_PORTAL_RETENTION_COUNT:-$FMP_DEFAULT_RETENTION_COUNT}

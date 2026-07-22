@@ -5,6 +5,8 @@
 #   fm-portal-followup.sh <task-id> -
 # Success clears the task link only after the response and originating-message
 # acknowledgement are durably complete. Retrying after any crash is idempotent.
+# A deferred acknowledgement (exit 5) keeps the link; the poller resumes the
+# reply after the earlier request completes and clears the link itself.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

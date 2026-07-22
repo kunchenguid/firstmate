@@ -87,12 +87,22 @@ if [ "$resume" -eq 0 ]; then
   fi
 fi
 
+# A durably complete request must not keep any task bound to it; a deferred
+# acknowledgement (exit 5) skips fm-portal-followup.sh's cleanup, so every
+# completion path here clears the matching link itself, under the held lock.
+clear_completed_task_link() {
+  fmp_task_links_clear_for_request "$id" || {
+    echo 'fm-portal-reply: response completed but task link cleanup failed' >&2
+    exit 1
+  }
+}
+
 fm_lock_acquire_wait "$FMP_LOCK"
 if ! fmp_record_load "$id" || ! fmp_inbox_validate_file "$FMP_INBOX/$id.json" "$id"; then
   echo 'fm-portal-reply: originating request is unavailable or invalid' >&2
   exit 1
 fi
-case "$FMP_RECORD_STATE" in complete) printf '%s\n' "$id"; exit 0 ;; conflict) echo 'fm-portal-reply: idempotency conflict requires operator recovery' >&2; exit 4 ;; esac
+case "$FMP_RECORD_STATE" in complete) clear_completed_task_link; printf '%s\n' "$id"; exit 0 ;; conflict) echo 'fm-portal-reply: idempotency conflict requires operator recovery' >&2; exit 4 ;; esac
 
 if [ "$resume" -eq 0 ]; then
   fmp_outbox_create_once "$id" "$normalized"
@@ -109,6 +119,7 @@ fi
 case "$FMP_OUTBOX_STATE" in
   complete)
     fmp_record_set_state "$id" complete "" 0 || exit 1
+    clear_completed_task_link
     printf '%s\n' "$id"
     exit 0
     ;;
@@ -209,4 +220,5 @@ fmp_record_set_state "$id" complete "" 0 || {
   echo 'fm-portal-reply: could not complete the local request record' >&2
   exit 1
 }
+clear_completed_task_link
 printf '%s\n' "$id"

@@ -376,6 +376,61 @@ test_task_link_and_channel_binding() {
   pass "long-running work returns exactly once to its originating portal channel"
 }
 
+test_deferred_ack_poller_resume_clears_task_link() {
+  local home="$TMP_ROOT/deferred-link" first second third meta reply rc out
+  server_reset
+  install_home "$home"
+  first=$(inject_text 'Earlier request that defers the later acknowledgement.')
+  second=$(inject_text 'Linked long-running request completed by the poller.')
+  poll_home "$home" >/dev/null
+  mkdir -p "$home/state"
+  meta="$home/state/task-late.meta"
+  printf 'window=test:fm-task-late\nkind=ship\n' > "$meta"
+  FM_HOME="$home" "$ROOT/bin/fm-portal-link.sh" task-late "$second" >/dev/null
+
+  # The linked reply posts durably but must defer its cumulative
+  # acknowledgement behind the earlier open request, keeping the link.
+  reply="$TMP_ROOT/deferred-link-reply.txt"
+  printf 'Linked work finished while an earlier request was still open.' > "$reply"
+  set +e
+  FM_HOME="$home" "$ROOT/bin/fm-portal-followup.sh" task-late --text-file "$reply" >/dev/null 2>/dev/null
+  rc=$?
+  set -e
+  [ "$rc" = 5 ] || fail "followup behind an earlier open request did not defer acknowledgement (rc=$rc)"
+  [ "$(jq -r .state "$home/state/portal/outbox/$second.json")" = posted ] \
+    || fail "deferred reply was not durably posted"
+  assert_stats '.acknowledged_ids|length' 0 "deferred reply acknowledged past an earlier open request"
+  assert_grep "portal_request=$second" "$meta" "deferred followup dropped the link before durable completion"
+
+  # Completing the earlier request lets the next poll resume the posted reply
+  # to durable completion, which must release the stale task link.
+  FM_HOME="$home" "$ROOT/bin/fm-portal-request.sh" read "$first" >/dev/null
+  printf 'Earlier request completed.' > "$TMP_ROOT/deferred-link-first.txt"
+  FM_HOME="$home" "$ROOT/bin/fm-portal-reply.sh" "$first" --text-file "$TMP_ROOT/deferred-link-first.txt" >/dev/null
+  assert_grep "portal_request=$second" "$meta" "earlier completion cleared an unrelated task link"
+  poll_home "$home" >/dev/null
+  [ "$(jq -r .state "$home/state/portal/records/$second.json")" = complete ] \
+    || fail "poller did not resume the deferred reply to completion"
+  assert_stats '.reply_count' 2 "poller resume duplicated the deferred reply"
+  assert_stats '.acknowledged_ids|length' 2 "poller resume did not acknowledge the deferred request"
+  assert_no_grep 'portal_request=' "$meta" "poller-resumed completion left a stale task link"
+  assert_grep 'kind=ship' "$meta" "task link cleanup dropped unrelated metadata"
+
+  # A crash between durable completion and cleanup converges at session start.
+  printf 'portal_request=%s\n' "$second" >> "$meta"
+  FM_HOME="$home" "$ROOT/bin/fm-portal-request.sh" recover-unclaimed
+  assert_no_grep 'portal_request=' "$meta" "session-start recovery left a link to a completed request"
+  assert_grep 'window=test:fm-task-late' "$meta" "session-start cleanup dropped unrelated metadata"
+
+  # The released task can link a later request.
+  third=$(inject_text 'A later request can reuse the same task.')
+  out=$(poll_home "$home")
+  [ "$out" = "portal-message $third" ] || fail "later request was not offered after completion (got: $out)"
+  FM_HOME="$home" "$ROOT/bin/fm-portal-link.sh" task-late "$third" >/dev/null
+  assert_grep "portal_request=$third" "$meta" "released task could not link a new portal request"
+  pass "a poller-resumed deferred acknowledgement releases the task link for reuse"
+}
+
 test_token_and_body_redaction() {
   local home="$TMP_ROOT/redaction" id reply out err findings
   server_reset
@@ -507,6 +562,7 @@ test_reply_crash_windows_and_idempotency
 test_cumulative_ack_order_is_serialized
 test_response_conflict_is_terminal
 test_task_link_and_channel_binding
+test_deferred_ack_poller_resume_clears_task_link
 test_token_and_body_redaction
 test_away_harness_and_backend_contracts
 test_lease_recovery_reoffers_queued_never_claimed

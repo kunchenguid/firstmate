@@ -72,7 +72,12 @@ while IFS=$'\t' read -r id state claimed_at record_task; do
       if fmp_outbox_load "$id"; then
         case "$FMP_OUTBOX_STATE" in
           pending|posted) ;;
-          complete) fmp_record_set_state "$id" complete "" 0 && effective=complete || true ;;
+          complete)
+            # A completed reply must also release its task link; a failure here
+            # is repaired by the locked session-start recovery.
+            { fmp_record_set_state "$id" complete "" 0 && effective=complete \
+              && fmp_task_links_clear_for_request "$id"; } || true
+            ;;
           conflict) fmp_record_set_state "$id" conflict "" 0 && effective=conflict || true ;;
         esac
       else

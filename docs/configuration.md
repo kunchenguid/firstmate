@@ -346,6 +346,7 @@ A 409 marks the local request conflicted and requires operator recovery; the cli
 A request completed in the handling turn receives its one portal response immediately.
 Longer-running work is linked with `bin/fm-portal-link.sh <task-id> <captain-message-id>` and receives no placeholder second message.
 Its terminal notification loads `portal-respond`, and `bin/fm-portal-followup.sh` posts the one final outcome, acknowledges the request, then clears `portal_request=` only after durable completion.
+If the acknowledgement must wait for an earlier open request, the follow-up exits 5 with the link intact; the poller resumes the posted reply once the earlier request completes and clears the matching link itself, and locked session-start recovery clears any link still pointing at a completed request.
 Task cleanup must not remove a live portal link before that succeeds.
 
 Connection, authentication, validation, and local-state failures emit one concise `portal-error <code>` until the condition changes or a successful cycle clears it.
