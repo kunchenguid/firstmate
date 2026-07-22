@@ -78,18 +78,16 @@ Measured serial remainder wall (from the same Phase 1 artifacts, excluding Herdr
 
 CI runs that guard as a required job (`test-coverage`).
 
+## Timing artifacts
+
+Every portable shard, the portable serial lane, and the Herdr lane upload their runner-generated timing JSON even when the behavior run reports failures.
+The dependent aggregate job runs after all four lanes, combines every available lane JSON through `bin/fm-test-run.sh --aggregate-json`, and uploads one summary artifact for critical-path review.
+The workflow in `.github/workflows/ci.yml` owns the exact artifact names and aggregation wiring.
+
 ## Local entry points
 
-| Command | Role |
-|---|---|
-| `bin/fm-test-run.sh tests/<name>.test.sh` | Primary local focus path |
-| `bin/fm-test-run.sh --family <name>` | Ordinary family-scoped local path |
-| `bin/fm-test-run.sh --proven-isolated --jobs N` | Explicit local parallel of the proven set only (default stays serial; N capped at 8) |
-| `bin/fm-test-run.sh --lane portable-serial` | Local portable serial remainder |
-| `bin/fm-test-run.sh --all` | Deliberate complete regression (optional local full walk) |
-
-Normal no-mistakes Test stays intent-targeted and must not wire `commands.test` to `--all` or a full `tests/*.test.sh` walk.
-CI owns broad regression across the required portable shards, portable serial lane, Herdr lane, lint, invariants, coverage guard, and macOS snapshot job.
+[CONTRIBUTING.md](../CONTRIBUTING.md) owns the local test policy and common entry points.
+`bin/fm-test-run.sh --help` owns exact lane names, selection flags, and bounded `--jobs` mechanics.
 
 ## Timeouts
 
