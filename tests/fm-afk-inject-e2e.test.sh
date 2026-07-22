@@ -169,6 +169,7 @@ start_daemon() {
   FM_INJECT_CONFIRM_SLEEP=0.3 \
   FM_INJECT_CONFIRM_RETRIES=5 \
   FM_STALE_ESCALATE_SECS=999999 \
+  FM_SUPERVISOR_ALLOW_DEAD_TARGET=1 \
   nohup "$DAEMON" >"$STATE_DIR/daemon.out" 2>"$STATE_DIR/daemon.err" &
   DAEMON_PID=$!
   # Wait for the daemon to start and acquire the lock.

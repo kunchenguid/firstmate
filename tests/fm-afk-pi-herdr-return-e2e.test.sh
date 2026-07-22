@@ -124,6 +124,7 @@ export FM_CHECK_INTERVAL=999999
 export FM_MAX_DEFER_SECS=3
 export FM_STALE_ESCALATE_SECS=999999
 export FM_WEDGE_ALARM_EXEC='$TMP_ROOT/wedge-recorder'
+export FM_SUPERVISOR_ALLOW_DEAD_TARGET=1
 exec '$ROOT/bin/fm-afk-start.sh'
 EOF
 chmod +x "$TMP_ROOT/daemon-entry"

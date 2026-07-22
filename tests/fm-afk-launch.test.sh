@@ -860,6 +860,62 @@ e2e_tmux() {
   rm -rf "$home_tmp" 2>/dev/null || true
 }
 
+# E2E tmux: daemon stop completes inside fm-afk-launch stop's budget even when
+# the watcher child is mid poll-sleep (task afk-daemon-reliability-scout,
+# defect 2). fm-watch.sh blocks in an external `sleep $FM_POLL` and bash defers a
+# trapped SIGTERM until that sleep finishes, so without a bounded cleanup wait the
+# daemon could block ~FM_POLL (15s) and exceed stop's 10s SIGTERM budget. Uses the
+# REAL daemon (no FM_AFK_LAUNCH_ENTRY sleeper) so a watcher child actually exists;
+# the existing stop tests use a sleeper that has no watcher and so cannot catch
+# this. The supervised pane runs `sleep` (agent_alive=unknown) so it passes the
+# daemon's bare-shell startup guard but is never injected into.
+e2e_tmux_daemon_stop_bounded_inside_budget() {
+  command -v tmux >/dev/null 2>&1 || { echo "skip: tmux not found (stop-budget e2e)"; return 0; }
+  local sup_session home_tmp sup_pane rec t0 t1 elapsed out i pid ready=0
+  sup_session="fm-afk-stop-budget-$$"
+  home_tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-stop-budget-home.XXXXXX")
+  tmux new-session -d -s "$sup_session" "exec sleep 600" 2>/dev/null || { fail "stop-budget e2e: could not create supervisor session"; rm -rf "$home_tmp"; return 0; }
+  TRACK_TMUX_SESSIONS="$TRACK_TMUX_SESSIONS $sup_session"
+  sup_pane=$(tmux display-message -p -t "$sup_session" '#{pane_id}' 2>/dev/null)
+
+  # REAL daemon (no FM_AFK_LAUNCH_ENTRY override) so it spawns a watcher child.
+  FM_HOME="$home_tmp" FM_STATE_OVERRIDE="$home_tmp/state" \
+    FM_SUPERVISOR_TARGET="$sup_pane" FM_SUPERVISOR_BACKEND=tmux \
+    "$LAUNCH" start >/dev/null 2>&1
+  # Wait for the daemon process to be live (pidfile pid alive = past startup).
+  for i in $(seq 1 50); do
+    pid=$(cat "$home_tmp/state/.supervise-daemon.pid" 2>/dev/null || true)
+    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then ready=1; break; fi
+    sleep 0.1
+  done
+  rec=$(cut -f2 "$home_tmp/state/.afk-daemon-terminal" 2>/dev/null || true)
+  TRACK_TMUX_SESSIONS="$TRACK_TMUX_SESSIONS $rec"
+  if [ "$ready" -ne 1 ]; then
+    fail "stop-budget e2e: real daemon did not become ready (start failed)"
+    FM_HOME="$home_tmp" FM_STATE_OVERRIDE="$home_tmp/state" "$LAUNCH" stop >/dev/null 2>&1 || true
+    tmux kill-session -t "$sup_session" 2>/dev/null || true
+    [ -n "$rec" ] && tmux kill-session -t "$rec" 2>/dev/null || true
+    rm -rf "$home_tmp"; return 0
+  fi
+
+  t0=$(date +%s.%N)
+  out=$(FM_HOME="$home_tmp" FM_STATE_OVERRIDE="$home_tmp/state" "$LAUNCH" stop 2>&1)
+  t1=$(date +%s.%N)
+  elapsed=$(awk -v a="$t0" -v b="$t1" 'BEGIN{printf "%.2f", b-a}')
+  # Fix B: stop must complete well inside the 10s SIGTERM budget and report a
+  # normal stop, NOT "did not exit after SIGTERM". Without the fix this took
+  # ~10.4s and printed the timeout message (the watcher's deferred SIGTERM kept
+  # the daemon's cleanup wait past the budget).
+  if awk -v e="$elapsed" 'BEGIN{exit !(e < 9)}' && printf '%s' "$out" | grep -q 'away mode stopped'; then
+    pass "stop-budget e2e: daemon stop completed in ${elapsed}s inside the budget (watcher shutdown bounded)"
+  else
+    fail "stop-budget e2e: stop exceeded budget or did not report stopped (elapsed=${elapsed}s out=$(printf '%s' "$out"))"
+  fi
+  tmux kill-session -t "$sup_session" 2>/dev/null || true
+  [ -n "$rec" ] && tmux kill-session -t "$rec" 2>/dev/null || true
+  rm -rf "$home_tmp" 2>/dev/null || true
+}
+
 unit_clear_stale
 unit_fresh_vs_refresh
 unit_stop_ordering
@@ -893,5 +949,6 @@ unit_incomplete_restore_retains_backup
 unit_flag_write_failure_aborts
 e2e_herdr
 e2e_tmux
+e2e_tmux_daemon_stop_bounded_inside_budget
 
 [ "$FAILED" -eq 0 ] || exit 1

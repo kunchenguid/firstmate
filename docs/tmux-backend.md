@@ -77,6 +77,13 @@ It reads tmux's own `#{pane_current_command}`, which reports the pane's live for
 Agent liveness and composer safety are separate checks.
 During away-mode escalation delivery, `fm_tmux_composer_state` sends a bare shell glyph on an unbordered row to the shared composer classifier as `unknown`, and the daemon injects only into an affirmatively `empty` composer; see [Composer-emptiness safety](herdr-backend.md#composer-emptiness-safety-2026-07-10-fleet-wide-across-all-four-backends).
 
+**Away-mode daemon startup refuses a bare-shell supervisor target (2026-07-22).**
+`fm_backend_target_exists` only proves a pane is present, so an explicit `FM_SUPERVISOR_TARGET` that resolved to the wrong tmux window (a bash shell, not the agent's window) passed the daemon's startup validation; the composer guard then read that shell as `pending`/`unknown` and deferred every escalation until the max-defer wedge.
+The daemon's startup now also calls this probe and refuses a confidently `dead` target (logs `startup failed: ... bare shell`, exits 1, releases the lock and pidfile), mirroring the secondmate-liveness policy of gating on `dead` only.
+`unknown` (pi's generic `node`, or an unreadable pane) warns and continues, so a real primary is never falsely refused.
+A process named like a shell that an isolated E2E test uses to SIMULATE an agent pane also reads `dead` (no external signal can tell it apart from a real bare shell), so `FM_SUPERVISOR_ALLOW_DEAD_TARGET=1` downgrades the refusal to a warn for that test-scoped case; it is never set in production, and the composer guard still prevents any injection into a shell regardless.
+Regression: `tests/fm-daemon.test.sh::test_daemon_refuses_bare_shell_supervisor_target`, `::test_daemon_does_not_refuse_unknown_supervisor_target`, and `::test_daemon_allow_dead_opt_out_permits_simulated_pane` (real tmux, real daemon executed directly).
+
 ## Submit acknowledgement: "landed" is empty (with one busy-queue exception)
 
 The shared `fm_tmux_submit_enter_core` (`bin/fm-tmux-lib.sh`) types the message once, then retries Enter (Enter only, never a retype) until the composer clears.

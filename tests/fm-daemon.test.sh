@@ -849,6 +849,133 @@ test_tmux_composer_state_bordered_and_agent_rows_are_empty() {
   pass "fm_tmux_composer_state: a bordered composer box and bare agent glyphs (❯/›) still read empty"
 }
 
+# Startup fail-fast for a bare-shell supervisor target (task
+# afk-daemon-reliability-scout, defect 1). fm_backend_target_exists only proves
+# the pane is PRESENT; a bare shell (a wrong tmux window, or an agent that exited
+# to its login shell) is present but never an injectable agent composer, so
+# before this fix every escalation deferred until the max-defer wedge. The daemon
+# must now refuse a confidently-dead target at startup. Real tmux (gated), real
+# daemon executed directly so the assertion is the actual startup decision.
+test_daemon_refuses_bare_shell_supervisor_target() {
+  command -v tmux >/dev/null 2>&1 || { echo "skip: tmux not found (daemon bare-shell refusal)"; return 0; }
+  local sess home pane rc log verdict=""
+  sess="fm-daemon-bareshell-$$"
+  home=$(mktemp -d "${TMPDIR:-/tmp}/fm-daemon-bareshell.XXXXXX")
+  log="$home/state/.supervise-daemon.log"
+  # lib.sh's fail() exits the process, so capture a verdict, clean up
+  # unconditionally, then pass/fail last (no unreachable cleanup).
+  if tmux new-session -d -s "$sess" 2>/dev/null; then
+    pane=$(tmux display-message -p -t "$sess" '#{pane_id}' 2>/dev/null)
+    sleep 0.5  # let the login shell render so pane_current_command reads as a shell
+    # A fresh pane runs the login shell -> fm_backend_agent_alive returns dead.
+    FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+      FM_SUPERVISOR_TARGET="$pane" FM_SUPERVISOR_BACKEND=tmux \
+      timeout 10 "$DAEMON" >/dev/null 2>&1
+    rc=$?
+    if [ "$rc" -eq 1 ] && grep -q 'bare shell' "$log" 2>/dev/null \
+       && [ ! -e "$home/state/.supervise-daemon.pid" ]; then
+      verdict="daemon refuses a bare-shell supervisor target at startup (fail fast, no wedge)"
+    else
+      verdict="FAIL|daemon did not refuse a bare-shell target (rc=$rc log=$(cat "$log" 2>/dev/null))"
+    fi
+  else
+    verdict="FAIL|bare-shell refusal: could not create tmux session"
+  fi
+  tmux kill-session -t "$sess" 2>/dev/null || true
+  rm -rf "$home"
+  case "$verdict" in
+    FAIL\|*) fail "${verdict#FAIL|}" ;;
+    *) pass "$verdict" ;;
+  esac
+}
+
+# The other side of defect 1's fix: an `unknown` agent_alive verdict (pi's generic
+# node process, an unreadable pane, or any non-shell command) must NOT be refused,
+# so a real primary is never falsely blocked. The daemon passes startup (logs
+# "daemon starting", which is emitted only AFTER the bare-shell check) and does
+# not log a bare-shell refusal. Real tmux; the pane runs `sleep` (not a shell) so
+# pane_current_command is unknown.
+test_daemon_does_not_refuse_unknown_supervisor_target() {
+  command -v tmux >/dev/null 2>&1 || { echo "skip: tmux not found (daemon unknown-target policy)"; return 0; }
+  local sess home pane log dpid i watcher verdict=""
+  sess="fm-daemon-unknown-$$"
+  home=$(mktemp -d "${TMPDIR:-/tmp}/fm-daemon-unknown.XXXXXX")
+  log="$home/state/.supervise-daemon.log"
+  if tmux new-session -d -s "$sess" "exec sleep 300" 2>/dev/null; then
+    pane=$(tmux display-message -p -t "$sess" '#{pane_id}' 2>/dev/null)
+    FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+      FM_SUPERVISOR_TARGET="$pane" FM_SUPERVISOR_BACKEND=tmux \
+      "$DAEMON" >/dev/null 2>&1 &
+    dpid=$!
+    for i in $(seq 1 50); do
+      grep -q 'daemon starting' "$log" 2>/dev/null && break
+      kill -0 "$dpid" 2>/dev/null || break
+      sleep 0.1
+    done
+    if grep -q 'daemon starting' "$log" 2>/dev/null \
+       && ! grep -q 'bare shell' "$log" 2>/dev/null; then
+      verdict="daemon does not refuse an unknown supervisor target (warns only; pi/node primaries are not blocked)"
+    else
+      verdict="FAIL|daemon refused or did not start against an unknown target (log=$(cat "$log" 2>/dev/null))"
+    fi
+    # Cleanup: SIGTERM the daemon; Fix B bounds its watcher shutdown. Capture the
+    # watcher child first so a regression cannot orphan it.
+    watcher=$(pgrep -P "$dpid" 2>/dev/null | head -1 || true)
+    kill -TERM "$dpid" 2>/dev/null || true
+    for i in $(seq 1 60); do kill -0 "$dpid" 2>/dev/null || break; sleep 0.1; done
+    kill -KILL "$dpid" 2>/dev/null || true
+    [ -n "$watcher" ] && kill -KILL "$watcher" 2>/dev/null || true
+    wait "$dpid" 2>/dev/null || true
+  else
+    verdict="FAIL|unknown-target: could not create tmux session"
+  fi
+  tmux kill-session -t "$sess" 2>/dev/null || true
+  rm -rf "$home"
+  case "$verdict" in
+    FAIL\|*) fail "${verdict#FAIL|}" ;;
+    *) pass "$verdict" ;;
+  esac
+}
+
+# The test seam for defect 1's startup refusal: FM_SUPERVISOR_ALLOW_DEAD_TARGET=1
+# downgrades a confident `dead` refusal to a warn, so an isolated E2E test can
+# point the daemon at a shell-named process that SIMULATES an agent pane (no
+# external signal can tell that apart from a real bare shell). The daemon must
+# pass startup (log "daemon starting") and not log a bare-shell refusal. Real
+# tmux; the pane is the login shell (dead), the opt-out is set.
+test_daemon_allow_dead_opt_out_permits_simulated_pane() {
+  command -v tmux >/dev/null 2>&1 || { echo "skip: tmux not found (daemon allow-dead opt-out)"; return 0; }
+  local sess home pane rc log verdict=""
+  sess="fm-daemon-allowdead-$$"
+  home=$(mktemp -d "${TMPDIR:-/tmp}/fm-daemon-allowdead.XXXXXX")
+  log="$home/state/.supervise-daemon.log"
+  if tmux new-session -d -s "$sess" 2>/dev/null; then
+    pane=$(tmux display-message -p -t "$sess" '#{pane_id}' 2>/dev/null)
+    sleep 0.5
+    # timeout returns 124 when the daemon ran past the budget (i.e. it did NOT
+    # refuse at startup and entered the loop); a refusal would be exit 1.
+    FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+      FM_SUPERVISOR_TARGET="$pane" FM_SUPERVISOR_BACKEND=tmux \
+      FM_SUPERVISOR_ALLOW_DEAD_TARGET=1 \
+      timeout 4 "$DAEMON" >/dev/null 2>&1
+    rc=$?
+    if [ "$rc" -eq 124 ] && grep -q 'daemon starting' "$log" 2>/dev/null \
+       && ! grep -q 'startup failed:.*bare shell' "$log" 2>/dev/null; then
+      verdict="daemon allows a dead target with FM_SUPERVISOR_ALLOW_DEAD_TARGET=1 (simulated-pane test seam)"
+    else
+      verdict="FAIL|allow-dead opt-out did not permit a dead target (rc=$rc log=$(cat "$log" 2>/dev/null))"
+    fi
+  else
+    verdict="FAIL|allow-dead: could not create tmux session"
+  fi
+  tmux kill-session -t "$sess" 2>/dev/null || true
+  rm -rf "$home"
+  case "$verdict" in
+    FAIL\|*) fail "${verdict#FAIL|}" ;;
+    *) pass "$verdict" ;;
+  esac
+}
+
 test_tmux_composer_state_requires_matching_box_borders() {
   local dir fakebin capture line out
   dir=$(make_supercase composer-decorated-shell)
@@ -1807,3 +1934,6 @@ test_inject_msg_herdr_composer_guard_defers
 test_inject_msg_herdr_pane_gone_defers
 test_inject_msg_herdr_submits_through_backend_dispatch
 test_inject_msg_defers_on_dead_shell_unknown
+test_daemon_refuses_bare_shell_supervisor_target
+test_daemon_does_not_refuse_unknown_supervisor_target
+test_daemon_allow_dead_opt_out_permits_simulated_pane

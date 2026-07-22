@@ -1021,6 +1021,14 @@ On entry the launcher drops the prior session's artifacts when the daemon is not
 This never drops a genuinely-pending escalation: the durable record is `state/.wake-queue` plus each crew's `state/<id>.status`, and any still-true condition is re-escalated by the daemon's heartbeat catch-all scan.
 Covered by the unit cases in `tests/fm-afk-launch.test.sh` (clear-on-fresh-entry vs refresh, and the stop ordering asserting the daemon saw `state/.afk` present at SIGTERM).
 
+### Daemon shutdown bounds the watcher wait (2026-07-22, backend-independent)
+
+`bin/fm-watch.sh` blocks each supervision cycle in an external `sleep $FM_POLL` (default 15) and traps SIGTERM with `trap 'exit 1'`, but bash defers a trapped signal until the currently-running external command finishes, so SIGTERM to the watcher is not acted on for up to `FM_POLL` seconds.
+The daemon's cleanup `wait`ed that watcher child without a bound, so on `bin/fm-afk-launch.sh stop` the daemon could block roughly `FM_POLL` (15s) and exceed stop's 10s SIGTERM budget, surfacing as `away-mode daemon did not exit after SIGTERM; preserving lifecycle state` (the daemon did exit shortly after; a later `stop` then found it absent).
+The daemon's cleanup now SIGKILLs the watcher after a short grace (`FM_WATCHER_SHUTDOWN_GRACE_SECS`, default 5), well inside the 10s budget; the watcher's durable state is the on-disk wake queue and suppression markers, so a forced kill never loses work.
+Verified with GNU bash 5.3.15(1)-release and tmux 3.7b on macOS (Darwin): a minimal `trap 'exit' TERM; sleep 15` fired its trap only once the external sleep completed (~14s after SIGTERM), and a real-daemon `fm-afk-launch.sh stop` completed in 6.35s (it was ~10.4s with the timeout message before the fix).
+Regression: `tests/fm-afk-launch.test.sh::e2e_tmux_daemon_stop_bounded_inside_budget`, which uses the real daemon (not the sleeper placeholder) so a watcher child actually exists.
+
 ## Known gaps and follow-up notes
 
 - **RESOLVED: worktree-discovery isolation guard's symlinked-project-prefix false refusal.** Originally discovered while building the runtime-backend-auto-detection real smoke test (`tests/fm-backend-autodetect-smoke.test.sh`), which needed a scratch project.

@@ -79,6 +79,12 @@
 #                                   supported as supervisor backends; the daemon
 #                                   refuses loudly at startup rather than trying
 #                                   tmux primitives against a non-tmux pane.
+#          FM_SUPERVISOR_ALLOW_DEAD_TARGET
+#                                   test seam: when 1, a supervisor target that
+#                                   reads agent_alive=dead (a bare shell) downgrades
+#                                   from a startup refusal to a warn. For isolated
+#                                   E2E tests that simulate an agent pane with a
+#                                   shell-named process; never set in production.
 #          FM_INJECT_SKIP           |-prefixes force-self-handle bypassing
 #                                   classification (default "heartbeat"); empty
 #                                   disables. Use sparingly: it overrides the
@@ -94,6 +100,12 @@
 #                                   (default 300)
 #          FM_HOUSEKEEPING_TICK     seconds between housekeeping passes while
 #                                   the watcher is mid-cycle (default 15)
+#          FM_WATCHER_SHUTDOWN_GRACE_SECS
+#                                   seconds cleanup waits for the watcher child to
+#                                   exit on SIGTERM before SIGKILL (default 5).
+#                                   Bounds daemon shutdown inside fm-afk-launch
+#                                   stop's budget; the watcher cannot act on
+#                                   SIGTERM while in its external poll sleep.
 #          FM_BUSY_REGEX            OR-ed busy signatures (mirrors fm-watch.sh)
 #          FM_COMPOSER_IDLE_RE      empty-composer regex applied after dim-ghost
 #                                   and structural border stripping (default:
@@ -196,6 +208,15 @@ WEDGE_ALARM_NOTIFIER_PID=
 # bin/fm-tmux-lib.sh (FM_TMUX_BUSY_REGEX_DEFAULT / fm_tmux_composer_state);
 # FM_BUSY_REGEX still overrides the fallback busy set here, as before.
 INJECT_FAIL_SLEEP_DEFAULT=30
+# Seconds the daemon's cleanup waits for the watcher child to exit on SIGTERM
+# before escalating to SIGKILL. fm-watch.sh blocks its supervision cycle in an
+# external `sleep $FM_POLL`, and bash defers a trapped signal until that sleep
+# finishes, so SIGTERM can take up to FM_POLL (default 15) to act. Bounding this
+# wait keeps daemon shutdown well inside fm-afk-launch stop's 10s budget; the
+# watcher's durable state is the on-disk wake queue and suppression markers, so a
+# forced kill never loses work. FM_WATCHER_SHUTDOWN_GRACE_SECS=0 still forces one
+# final SIGKILL after the loop.
+WATCHER_SHUTDOWN_GRACE_SECS_DEFAULT=5
 INJECT_CONFIRM_RETRIES_DEFAULT=3
 INJECT_CONFIRM_SLEEP_DEFAULT=0.5
 CRASH_THRESHOLD_DEFAULT=10
@@ -1376,6 +1397,43 @@ fm_super_main() {
     exit 1
   fi
 
+  # --- reject a bare-shell supervisor target (wrong pane, or agent exited) ---
+  # fm_backend_target_exists only proves the pane is PRESENT. A bare shell - a
+  # wrong tmux window such as "firstmate:0.0" instead of the agent's window, or
+  # an agent that has exited to its login shell - is present but is never an
+  # injectable agent composer: its composer reads pending/unknown, never empty,
+  # so inject_msg would defer every escalation until the max-defer wedge. Fail
+  # fast instead. fm_backend_agent_alive returns a CONFIDENT `dead` for a bare
+  # shell; refuse on that, mirroring fm-backend.sh's secondmate-liveness policy
+  # that gates on `dead` only. `unknown` (pi's generic node process, or an
+  # unreadable pane) only warns, so a real primary is never falsely refused.
+  # Test seam: FM_SUPERVISOR_ALLOW_DEAD_TARGET=1 downgrades the refusal to a warn,
+  # for isolated E2E tests that deliberately point the daemon at a process named
+  # like a shell to SIMULATE an agent composer (no external signal can tell that
+  # simulated pane apart from a real bare shell, so the opt-out is explicit). It
+  # is never set in production; the composer guard still prevents any injection
+  # into a shell regardless. See docs/tmux-backend.md "Agent liveness probe".
+  local supervisor_alive
+  supervisor_alive=$(fm_backend_agent_alive "$BACKEND" "$TARGET")
+  case "$supervisor_alive" in
+    dead)
+      if [ "${FM_SUPERVISOR_ALLOW_DEAD_TARGET:-0}" = 1 ]; then
+        echo "warn: supervisor target '$TARGET' agent_alive=dead but FM_SUPERVISOR_ALLOW_DEAD_TARGET=1 (a simulated pane); continuing" >&2
+        log "startup warn: target '$TARGET' agent_alive=dead but allow-dead opt-out set (backend=$BACKEND, target_source=$target_source)"
+      else
+        echo "error: supervisor target '$TARGET' is a bare shell, not an agent composer (agent_alive=dead); set FM_SUPERVISOR_TARGET to firstmate's own pane (auto-discovery via \$TMUX_PANE is preferred)" >&2
+        log "startup failed: target '$TARGET' is a bare shell (backend=$BACKEND, agent_alive=dead, target_source=$target_source)"
+        fm_lock_release "$LOCK" 2>/dev/null || true
+        rm -f "$PIDFILE" 2>/dev/null || true
+        exit 1
+      fi
+      ;;
+    unknown)
+      echo "warn: supervisor target '$TARGET' agent_alive=unknown (unreadable pane, or an agent whose process name is not confirmed); continuing - verify this is firstmate's own pane" >&2
+      log "startup warn: target '$TARGET' agent_alive=unknown (backend=$BACKEND, target_source=$target_source)"
+      ;;
+  esac
+
   local afk_status="off"
   afk_active "$STATE" && afk_status="on"
   log "daemon starting (pid $$); target=$TARGET; target_source=$target_source; backend=$BACKEND; backend_source=$backend_source; afk=$afk_status; inject_skip='${FM_INJECT_SKIP:-$INJECT_SKIP_DEFAULT}'; stale_escalate=${FM_STALE_ESCALATE_SECS:-$STALE_ESCALATE_SECS_DEFAULT}s; batch=${FM_ESCALATE_BATCH_SECS:-$ESCALATE_BATCH_SECS_DEFAULT}s"
@@ -1388,7 +1446,23 @@ fm_super_main() {
     wedge_alarm_stop_active_notifier
     escalate_flush "$STATE" 2>/dev/null || true
     if [ -n "${WATCHER_PID:-}" ]; then
-      kill "$WATCHER_PID" 2>/dev/null || true
+      # SIGTERM the watcher, then BOUND its shutdown so the daemon never blocks
+      # on the watcher's deferred SIGTERM-during-sleep latency (the watcher
+      # sleeps FM_POLL in an external `sleep`, and bash defers a trapped signal
+      # until that sleep finishes - without this bound the daemon's cleanup could
+      # wait the full poll, exceeding fm-afk-launch stop's budget and surfacing
+      # as "away-mode daemon did not exit after SIGTERM"). Short SIGTERM grace,
+      # then SIGKILL; the watcher is stateless from the daemon's view (durable
+      # state is the on-disk wake queue and suppression markers), so a forced
+      # kill never loses work. Bounded well inside stop's 10s budget.
+      kill -TERM "$WATCHER_PID" 2>/dev/null || true
+      local _w _grace="${FM_WATCHER_SHUTDOWN_GRACE_SECS:-$WATCHER_SHUTDOWN_GRACE_SECS_DEFAULT}"
+      case "$_grace" in ''|*[!0-9]*) _grace="$WATCHER_SHUTDOWN_GRACE_SECS_DEFAULT" ;; esac
+      for _w in $(seq 1 $((_grace * 4))); do
+        kill -0 "$WATCHER_PID" 2>/dev/null || break
+        sleep 0.25
+      done
+      kill -KILL "$WATCHER_PID" 2>/dev/null || true
       wait "$WATCHER_PID" 2>/dev/null || true
     fi
     if [ -n "${CUR_TMP:-}" ]; then
