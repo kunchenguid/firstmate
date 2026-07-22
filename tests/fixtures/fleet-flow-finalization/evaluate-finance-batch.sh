@@ -73,10 +73,21 @@ GIT_WORKTREE_REAL=$(canonical_dir "$(git -C "$PROJECT_REAL" rev-parse --show-top
   || fail_usage "output must resolve to PROJECT/out/result.json"
 [ ! "$INPUT_REAL" -ef "$OUTPUT_REAL" ] \
   || fail_usage "input and output must not alias the same file"
-[[ "$EXPECTED_REVISION" =~ ^([0-9a-fA-F]{40}|[0-9a-fA-F]{64})$ ]] \
+OBJECT_FORMAT=$(git -C "$PROJECT_REAL" rev-parse --show-object-format) \
+  || fail_usage "could not determine repository object format"
+case "$OBJECT_FORMAT" in
+  sha1) OID_LENGTH=40 ;;
+  sha256) OID_LENGTH=64 ;;
+  *) fail_usage "unsupported repository object format: $OBJECT_FORMAT" ;;
+esac
+[[ "$EXPECTED_REVISION" =~ ^[0-9a-fA-F]+$ ]] \
+  && [ "${#EXPECTED_REVISION}" -eq "$OID_LENGTH" ] \
   || fail_usage "expected revision must be a full commit OID"
+EXPECTED_REVISION=$(printf '%s' "$EXPECTED_REVISION" | tr '[:upper:]' '[:lower:]')
 EXPECTED_REVISION_REAL=$(git -C "$PROJECT_REAL" rev-parse --verify "${EXPECTED_REVISION}^{commit}") \
   || fail_usage "expected revision does not resolve to a commit"
+[ "$EXPECTED_REVISION" = "$EXPECTED_REVISION_REAL" ] \
+  || fail_usage "expected revision must name the resolved commit directly"
 
 FINANCE_HARNESS_HOME=${FINANCE_HARNESS_HOME:-}
 [ -n "$FINANCE_HARNESS_HOME" ] || fail_usage "FINANCE_HARNESS_HOME is required"

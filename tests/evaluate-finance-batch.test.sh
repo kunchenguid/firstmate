@@ -123,7 +123,7 @@ test_resolved_path_contract() {
 }
 
 test_revision_and_side_effect_contract() {
-  local abbreviated dir malformed project expected
+  local abbreviated dir malformed project expected uppercase wrong_format_ref
   dir=$(make_case tracked)
   project="$dir/project"
   printf 'changed\n' >> "$project/README.md"
@@ -148,6 +148,12 @@ test_revision_and_side_effect_contract() {
   expect_rejected "malformed revision length" evaluate_case "$dir" "$malformed"
   evaluate_case "$dir" "$expected" | grep -Fqx 'verdict=success' \
     || fail "full commit OID did not pass"
+  uppercase=$(printf '%s' "$expected" | tr '[:lower:]' '[:upper:]')
+  evaluate_case "$dir" "$uppercase" | grep -Fqx 'verdict=success' \
+    || fail "uppercase full commit OID did not pass"
+  wrong_format_ref=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  git -C "$project" update-ref "refs/heads/$wrong_format_ref" "$expected"
+  expect_rejected "cross-format all-hex ref" evaluate_case "$dir" "$wrong_format_ref"
 
   dir=$(make_case untracked)
   project="$dir/project"
