@@ -44,8 +44,9 @@ SH
     cat > "$fakebin/$harness" <<'SH'
 #!/usr/bin/env bash
 set -u
+harness=$(basename "$0")
 {
-  printf 'harness=%s\n' "$(basename "$0")"
+  printf 'harness=%s\n' "$harness"
   printf 'user=%s\n' "$(id -un)"
   printf 'cwd=%s\n' "$(pwd -P)"
   printf 'home=%s\n' "${FM_HOME:-}"
@@ -56,7 +57,8 @@ set -u
     i=$((i + 1))
   done
 } > "${FM_PRIMARY_TEST_LOG:?}"
-exec sleep 300
+printf '%s\n' "$$" > "${FM_HOME:?}/state/.lock"
+exec -a "$harness" sleep 300
 SH
     chmod +x "$fakebin/$harness"
   done
@@ -211,8 +213,8 @@ EOF
   printf '999999\n' > "$home/state/.lock"
   out=$(run_launch "$home" "$fakebin" "$socket" "$log" --pi)
   assert_contains "$out" 'harness=pi' "stale lock did not hand off to normal session start"
-  [ "$(cat "$home/state/.lock")" = 999999 ] || fail "launcher removed or rewrote a stale lock"
   wait_for_file "$log" || fail "Pi did not launch after stale lock"
+  [ "$(cat "$home/state/.lock")" != 999999 ] || fail "Pi did not acquire the stale session lock"
   kill_case "$socket"
   pass "live locks refuse and stale locks remain for session-start authority"
 }
@@ -260,7 +262,51 @@ EOF
   [ "$out" = "$holder" ] || fail "live-pid did not return the holder PID"
   kill "$holder" 2>/dev/null || true
   wait "$holder" 2>/dev/null || true
-  pass "fm-lock live-pid is stable and read-only"
+
+  bash -c 'exec -a pi sleep 300' & holder=$!
+  printf '%s\n' "$holder" > "$home/state/.lock"
+  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$home" "$home/bin/fm-lock.sh" live-pid)
+  [ "$out" = "$holder" ] || fail "live-pid did not recognize a Pi holder"
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  pass "fm-lock live-pid recognizes supported harnesses without mutation"
+}
+
+test_existing_session_requires_positive_identity() {
+  local rec dir home fakebin socket out status log pane_pid holder
+  rec=$(make_case session-identity)
+  IFS='|' read -r dir home fakebin socket <<EOF
+$rec
+EOF
+  tmux -L "$socket" new-session -d -s firstmate 'sleep 300'
+  out=$(run_launch "$home" "$fakebin" "$socket" "$dir/untagged.log" 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "untagged generic session was adopted"
+  assert_contains "$out" 'not verified' "untagged session rejection was unclear"
+  kill_case "$socket"
+
+  log="$dir/codex.log"
+  run_launch "$home" "$fakebin" "$socket" "$log" --codex >/dev/null
+  wait_for_file "$log" || fail "Codex fixture did not start"
+  tmux -L "$socket" respawn-pane -k -t firstmate:0.0 'exec -a pi sleep 300'
+  pane_pid=$(tmux -L "$socket" display-message -p -t firstmate:0.0 '#{pane_pid}')
+  printf '%s\n' "$pane_pid" > "$home/state/.lock"
+  out=$(run_launch "$home" "$fakebin" "$socket" "$dir/replaced.log" --codex 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "stale Codex metadata authorized a replacement Pi process"
+  assert_contains "$out" 'already running on Pi' "replacement-process refusal did not use live harness identity"
+
+  tmux -L "$socket" set-option -q -t firstmate @firstmate_harness pi
+  bash -c 'exec -a codex sleep 300' & holder=$!
+  printf '%s\n' "$holder" > "$home/state/.lock"
+  out=$(run_launch "$home" "$fakebin" "$socket" "$dir/masked.log" --pi 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "tmux session masked a different live same-home lock"
+  assert_contains "$out" 'does not own the authoritative live lock' "different-lock refusal was unclear"
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  kill_case "$socket"
+  pass "existing sessions require matching home, lock, metadata, and live process"
 }
 
 test_parsing_rejections
@@ -269,3 +315,4 @@ test_bare_and_matching_attach_divergent_refusal
 test_live_and_stale_lock_behavior
 test_concurrent_launch_serialization
 test_lock_live_pid_query_is_read_only
+test_existing_session_requires_positive_identity

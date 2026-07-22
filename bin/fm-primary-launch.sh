@@ -112,18 +112,53 @@ pid_harness() {
   return 1
 }
 
-session_harness() {
-  local recorded pane_pid
-  recorded=$(session_option '@firstmate_harness')
-  if [ -n "$recorded" ]; then
-    printf '%s\n' "$recorded"
-    return 0
-  fi
+session_pane_pid() {
+  local pane_pid
   pane_pid=$(tmux_cmd display-message -p -t "$SESSION":0.0 '#{pane_pid}' 2>/dev/null || true)
   case "$pane_pid" in
     ''|*[!0-9]*) return 1 ;;
   esac
-  pid_harness "$pane_pid"
+  printf '%s\n' "$pane_pid"
+}
+
+pid_belongs_to_pane() {
+  local pid=$1 pane_pid=$2 ppid
+  while [ "$pid" -gt 1 ]; do
+    [ "$pid" = "$pane_pid" ] && return 0
+    ppid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ') || return 1
+    case "$ppid" in ''|*[!0-9]*) return 1 ;; esac
+    pid=$ppid
+  done
+  return 1
+}
+
+verify_session() {
+  local recorded_home recorded_harness lock_pid pane_pid live lock_harness
+  recorded_home=$(session_option '@firstmate_home')
+  [ "$recorded_home" = "$FM_HOME_FIXED" ] || fail "tmux session '$SESSION' is not verified for $FM_HOME_FIXED; no state was changed"
+  recorded_harness=$(session_option '@firstmate_harness')
+  case "$recorded_harness" in codex|pi|grok|claude|opencode) ;; *) fail "tmux session '$SESSION' has no verified harness routing metadata; no state was changed" ;; esac
+  [ "$recorded_harness" = "$HARNESS" ] || refuse_running "$recorded_harness" "$HARNESS"
+  lock_pid=$(live_lock_pid || true)
+  [ -n "$lock_pid" ] || fail "tmux session '$SESSION' has no authoritative live lock for $FM_HOME_FIXED; no state was changed"
+  pane_pid=$(session_pane_pid || true)
+  [ -n "$pane_pid" ] || fail "cannot verify the live harness in tmux session '$SESSION'; no state was changed"
+  live=$(pid_harness "$pane_pid" || true)
+  [ -n "$live" ] || fail "cannot verify the live harness in tmux session '$SESSION'; no state was changed"
+  [ "$live" = "$HARNESS" ] || refuse_running "$live" "$HARNESS"
+  pid_belongs_to_pane "$lock_pid" "$pane_pid" || fail "tmux session '$SESSION' does not own the authoritative live lock for $FM_HOME_FIXED; no state was changed"
+  lock_harness=$(pid_harness "$lock_pid" || true)
+  [ "$lock_harness" = "$HARNESS" ] || fail "the authoritative live lock does not match $(harness_label "$HARNESS"); no state was changed"
+}
+
+wait_for_session_lock() {
+  local -i attempt=0
+  while [ "$attempt" -lt 250 ]; do
+    live_lock_pid >/dev/null && return 0
+    attempt=$((attempt + 1))
+    sleep 0.02
+  done
+  return 1
 }
 
 refuse_running() {
@@ -262,16 +297,7 @@ exec 9>"$launch_lock"
 flock 9
 
 if tmux_cmd has-session -t "$SESSION" 2>/dev/null; then
-  recorded_home=$(session_option '@firstmate_home')
-  if [ -n "$recorded_home" ] && [ "$recorded_home" != "$FM_HOME_FIXED" ]; then
-    fail "tmux session '$SESSION' belongs to another Firstmate home ($recorded_home)"
-  fi
-  live=$(session_harness || true)
-  if [ -n "$live" ]; then
-    [ "$live" = "$HARNESS" ] || refuse_running "$live" "$HARNESS"
-  elif [ "$EXPLICIT" -eq 1 ]; then
-    fail "cannot verify which harness owns the existing '$SESSION' session; no state was changed"
-  fi
+  verify_session
   ensure_daemon
   flock -u 9
   attach_session
@@ -311,5 +337,10 @@ fi
 tmux_cmd new-session -d -s "$SESSION" -c "$FM_ROOT" "${TMUX_ENV[@]}" "exec '$FM_ROOT/bin/fm-primary-launch.sh' __run"
 tmux_cmd set-option -q -t "$SESSION" @firstmate_home "$FM_HOME_FIXED"
 tmux_cmd set-option -q -t "$SESSION" @firstmate_harness "$HARNESS"
+if ! wait_for_session_lock; then
+  tmux_cmd kill-session -t "$SESSION" 2>/dev/null || true
+  fail "new '$SESSION' session did not acquire the authoritative live lock"
+fi
+verify_session
 flock -u 9
 attach_session

@@ -40,11 +40,18 @@ harness_pid() {
 }
 
 holder_alive() {  # true if $1 is a live process that looks like a harness
-  local pid=$1 comm
+  local pid=$1 comm args
   case "$pid" in ''|*[!0-9]*|1) return 1 ;; esac
   kill -0 "$pid" 2>/dev/null || return 1
   comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
-  printf '%s' "$(basename "$comm") $(ps -o args= -p "$pid" 2>/dev/null)" | grep -qE "$HARNESS_RE"
+  args=$(ps -o args= -p "$pid" 2>/dev/null) || return 1
+  if printf '%s' "$(basename "$comm")" | grep -qE "$HARNESS_RE"; then
+    return 0
+  fi
+  case "$comm" in
+    *node*|*python*|*sleep*) printf '%s' "$args" | grep -qE '(^|[ /])(claude|codex|opencode|grok|pi)([ /]|$)' ;;
+    *) return 1 ;;
+  esac
 }
 
 if [ "$MODE" = status ]; then
