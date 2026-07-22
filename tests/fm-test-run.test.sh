@@ -314,16 +314,72 @@ assert doc["summary"]["failed"] == 0
   pass "gate-skip accounting is honest and non-failing"
 }
 
+test_fail_on_gate_skip_token() {
+  local tmp skip_f out rc
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-fail-skip.XXXXXX")
+  skip_f="$tmp/skip.test.sh"
+  out="$tmp/out.txt"
+  cat >"$skip_f" <<'SH'
+#!/usr/bin/env bash
+echo "skip: herdr not found"
+exit 0
+SH
+  chmod +x "$skip_f"
+  set +e
+  "$RUNNER" --fail-on-gate-skip 'herdr not found' "$skip_f" >"$out" 2>"$tmp/err.txt"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "fail-on-gate-skip must make herdr-not-found a hard failure"
+  grep -q 'FM_TEST_SUMMARY total=1 failed=1' "$out" \
+    || fail "summary must report failed=1 under fail-on-gate-skip: $(grep FM_TEST_SUMMARY "$out")"
+  grep -q 'required gate skip token' "$tmp/err.txt" \
+    || fail "runner must log the required gate skip token"
+  rm -rf "$tmp"
+  pass "fail-on-gate-skip converts herdr-not-found into a hard failure"
+}
+
+test_exclude_family() {
+  local listed
+  listed=$("$RUNNER" --list --all --exclude-family real-herdr-gated)
+  printf '%s\n' "$listed" | grep -Fq 'tests/fm-backend-herdr-smoke.test.sh' \
+    && fail "exclude-family real-herdr-gated left a real-herdr script"
+  printf '%s\n' "$listed" | grep -Fq 'tests/fm-lint.test.sh' \
+    || fail "exclude-family must retain pure-contract-unit scripts"
+  # Explicit family mode still works; exclude of a different family is a no-op.
+  listed=$("$RUNNER" --list --family real-herdr-gated)
+  printf '%s\n' "$listed" | grep -Fq 'tests/fm-backend-herdr-smoke.test.sh' \
+    || fail "family real-herdr-gated must list smoke test"
+  pass "exclude-family drops the named primary family after selection"
+}
+
 test_ci_and_docs_call_the_owner() {
   assert_present "$CI" "ci.yml missing"
   assert_present "$CONTRIB" "CONTRIBUTING.md missing"
   grep -Fq 'bin/fm-test-run.sh --all' "$CI" \
     || fail "CI Behavior must invoke bin/fm-test-run.sh --all"
+  grep -Fq -- '--exclude-family real-herdr-gated' "$CI" \
+    || fail "portable CI Behavior must exclude real-herdr-gated"
+  grep -Fq 'tests-herdr:' "$CI" \
+    || fail "CI must define the required tests-herdr job"
+  grep -Fq 'bin/fm-test-run.sh --family real-herdr-gated' "$CI" \
+    || fail "Herdr CI job must run the real-herdr-gated family via fm-test-run"
+  grep -Fq -- "--fail-on-gate-skip 'herdr not found'" "$CI" \
+    || fail "Herdr CI job must fail on herdr-not-found skips"
+  grep -Fq 'bin/fm-install-herdr.sh' "$CI" \
+    || fail "Herdr CI job must install via bin/fm-install-herdr.sh"
+  grep -Fq 'bin/fm-install-treehouse.sh' "$CI" \
+    || fail "Herdr CI job must install via bin/fm-install-treehouse.sh"
+  grep -Fq 'bin/fm-herdr-ci-cleanup.sh' "$CI" \
+    || fail "Herdr CI job must use bounded lab cleanup"
   grep -Fq 'timeout-minutes: 25' "$CI" \
     || fail "CI Behavior timeout-minutes must be 25 (hang tripwire)"
   # Stale "~2-3 minutes" claim must not remain.
   if grep -Eq '2-3 minutes' "$CI"; then
     fail "CI workflow still claims the suite finishes in ~2-3 minutes"
+  fi
+  # No retry-green strategy on either Behavior lane.
+  if grep -Eqi 'retry:|max-attempts:|continue-on-error:\s*true' "$CI"; then
+    fail "CI must not use retries or continue-on-error as a green strategy"
   fi
   grep -Fq 'fm-test-timing' "$CI" \
     || fail "CI must upload the timing artifact"
@@ -349,4 +405,6 @@ test_empty_selection_emits_summary
 test_timing_markers_and_json
 test_aggregate_exit_behavior
 test_gate_skip_accounting
+test_fail_on_gate_skip_token
+test_exclude_family
 test_ci_and_docs_call_the_owner
