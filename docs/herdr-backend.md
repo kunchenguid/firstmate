@@ -51,7 +51,7 @@ See "Optional disposable single-task presentation spaces" below before enabling 
 Verify it works by spawning a trivial task with `--backend herdr` and confirming the task's meta records `backend=herdr` plus `herdr_session=`, `herdr_workspace_id=`, `herdr_tab_id=`, and `herdr_pane_id=`; the selected Herdr workspace should show the new `fm-<id>` tab.
 
 Limitations: herdr is experimental and still carries the open gaps documented below.
-Resolved backend evidence, including the 2026-07-06 symlinked-project-prefix isolation fix, is kept in the same follow-up log for auditability.
+Resolved backend evidence, including the 2026-07-21 filesystem-identity isolation fix that superseded the earlier symlink-prefix path normalization, is kept in the same follow-up log for auditability.
 
 ## Status: experimental
 

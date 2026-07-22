@@ -74,10 +74,8 @@
 #   secondmate receives the primary's read-only shared captain-preference file
 #   (fm-config-inherit-lib.sh). A successful launch clears pending inherited
 #   config reread generations because the new agent reads the converged files.
-#   --scout records kind=scout in the task's meta (report deliverable, scratch worktree;
-#   see AGENTS.md task lifecycle); --secondmate records kind=secondmate and launches in a
-#   provisioned firstmate home; the default is kind=ship. Ship/scout spawns wait for a
-#   filesystem-distinct git worktree root and record that resolved top-level path.
+#   --scout records kind=scout for a report-producing scratch worktree; --secondmate records
+#   kind=secondmate in its isolated home. Default ship/scout spawns wait for and record a filesystem-distinct Git worktree top-level (see AGENTS.md task lifecycle).
 #   Before a secondmate launch, the home is locally fast-forwarded to the primary
 #   default-branch commit when safe; skipped syncs warn and launch unchanged.
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.

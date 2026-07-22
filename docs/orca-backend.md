@@ -55,7 +55,7 @@ backend=orca
 window=fm-<id>
 terminal=<orca terminal handle>
 orca_worktree_id=<orca worktree id>
-worktree=<absolute path to the Orca-created git worktree>
+worktree=<verified Git top-level of the Orca-created worktree>
 ```
 
 `window=` remains the shared firstmate alias used by selector-driven supervision tools after a task selector has resolved through metadata.
@@ -69,9 +69,10 @@ Spawn:
 
 1. Ensure the project repo is registered in Orca, adding it with `orca repo add --path` when needed.
 2. Create an independent Orca worktree with `orca worktree create --repo id:<repo> --name fm-<id> --no-parent --setup skip`.
-3. Reuse the terminal returned by Orca worktree creation only when it appears in the verified `result.terminal.handle` shape, or create a titled terminal in that worktree when Orca returns only the worktree.
-4. Install firstmate's per-harness turn-end hooks in the Orca worktree.
-5. Write metadata, then send `GOTMPDIR` export and the selected harness launch through the recorded Orca terminal.
+3. Resolve Orca's returned worktree path to its actual Git top-level and refuse the spawn unless filesystem identity proves that root is distinct from the primary checkout.
+4. Reuse the terminal returned by Orca worktree creation only when it appears in the verified `result.terminal.handle` shape, or create a titled terminal in that verified worktree when Orca returns only the worktree.
+5. Install firstmate's per-harness turn-end hooks in the verified worktree.
+6. Write the verified Git top-level to metadata, then send `GOTMPDIR` export and the selected harness launch through the recorded Orca terminal.
 
 Operation routing:
 
@@ -109,7 +110,8 @@ Fake-Orca tests cover:
 - helper parsing for repo registration, worktree creation, verified implicit-terminal reuse, terminal creation, terminal sends, and worktree removal;
 - rejection of undocumented terminal-handle result shapes;
 - runtime readiness gating through `orca status --json`;
-- `fm-spawn.sh --backend orca` metadata creation and harness launch;
+- `fm-spawn.sh --backend orca` normalization of an aliased worktree path to its verified Git top-level in output and metadata before harness launch;
+- independent rejection of primary-checkout filesystem aliases by the shared final worktree validator;
 - `fm-peek.sh`, `fm-send.sh`, and `fm-crew-state.sh` routing through recorded Orca metadata;
 - slash-command popup placeholder handling that requires a second Enter before `fm-send.sh` reports submission;
 - scout teardown releasing an Orca worktree through `orca worktree rm`;

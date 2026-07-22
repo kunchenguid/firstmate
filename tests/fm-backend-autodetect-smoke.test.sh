@@ -46,8 +46,8 @@ export FM_GATE_REFUSE_BYPASS=1
 # TMP_ROOT is physically resolved (mktemp -d "$(pwd -P)"-relative) to keep this
 # real-herdr smoke fixture free of unrelated OS symlink noise.
 # The old fm-spawn bug that originally motivated this fixture shape was fixed in
-# fm-spawn-symlink-guard-s8: fm-spawn.sh now normalizes PROJ_ABS and observed
-# backend cwd reads before the worktree-discovery comparison.
+# fm-spawn-symlink-guard-s8; fm-spawn now compares dereferenced filesystem
+# identity rather than path spellings during worktree discovery.
 # The dedicated regression is
 # tests/fm-backend.test.sh:test_spawn_symlinked_project_prefix_avoids_false_refusal.
 TMP_ROOT=$(mktemp -d "$(cd "${TMPDIR:-/tmp}" && pwd -P)/fm-backend-autodetect-smoke.XXXXXX")
