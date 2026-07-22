@@ -1016,6 +1016,7 @@ Covered by the unit cases in `tests/fm-afk-launch.test.sh` (clear-on-fresh-entry
 
 Verified on 2026-07-22 against Herdr 0.7.4 on Linux 6.8.0-136-generic with Landlock ABI 4 and source commit `d0f9062c6a1c2aad189b24dc3ce461e30e2cbf68`.
 The test used only a shell stub and made no model-provider call.
+The proof executes only `bin/fm-council-sandbox.py` through the lab helper, never `bin/fm-council.py`; the shipped council change hardened only `bin/fm-council.py` after this run, leaving `bin/fm-council-sandbox.py`, `bin/fm-herdr-lab.sh`, and `tests/fm-council-herdr-e2e.test.sh` byte-identical to the verified state.
 It provisioned a generated named non-`default` session, created one exact workspace/tab/pane, launched `bin/fm-council-sandbox.py` through that pane, and attempted to read and write the source, write the admitted fixed view, read a sibling answer, create a Unix-domain socket with `socket` and with `socketpair`, and set up an io_uring ring.
 The fixed view remained readable, every forbidden boundary returned a permission error, provider-style TCP remained outside the socket filter, participant-owned output remained writable, the exact response-derived pane closed successfully, and guarded teardown confirmed the default-session fleet tripwire was byte-identical.
 
