@@ -111,6 +111,7 @@ That evidence policy is specific to the firstmate repo: target projects may legi
 It does not set `commands.test` to a complete `tests/*.test.sh` walk.
 Local no-mistakes Test stays intent-targeted; broad regression (including the portable behavior suite) lives in [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) via `bin/fm-test-run.sh --all`.
 See [CONTRIBUTING.md](../CONTRIBUTING.md) for one-script, family, changed-file, and intentional complete-suite entry points.
+The Phase 2 concurrent isolation proof for the portable parallel candidate set is owned by `bin/fm-test-isolation-proof.sh` and archived in [fm-test-isolation-proof.md](fm-test-isolation-proof.md); it does not enable production CI sharding.
 
 ## Captain Preferences (data/captain.md / data/captain-shared.md)
 
