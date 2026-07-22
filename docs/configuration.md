@@ -189,8 +189,9 @@ For Pi secondmate launches, `fm-spawn.sh` starts Pi with `-e` pointed at the sec
 
 ## Delegated Pi profile (config/pi-delegated-profile)
 
-`config/pi-delegated-profile` is an optional local, gitignored profile that makes every Pi worker launched by that home use one exact provider/model, explicit medium thinking, and automatic compaction immediately after 60 percent of the resolved context window.
-The primary-authoritative file is inherited into secondmate homes, so their own Pi workers use the same profile after every normal inheritance convergence.
+`config/pi-delegated-profile` is an optional local profile that makes every delegated Pi endpoint launched through `fm-spawn.sh` use one exact provider/model, explicit medium thinking, and automatic compaction once token usage is strictly greater than 60 percent of the resolved context window.
+It does not change the primary Pi path or its xhigh thinking level.
+The file is in the primary-authoritative secondmate inheritance allowlist, whose safety guard copies it only when the destination checkout gitignores `config/pi-delegated-profile`.
 When absent, Pi launch behavior remains backward-compatible.
 When present, `bin/fm-pi-profile.sh` validates every field and Pi 0.81.1's effective model metadata before any endpoint is created.
 The file uses one `key=value` per line and requires `pi_command`, `pi_version`, `agent_dir`, `model`, `context_window`, `effort`, `boundary_percent`, and `keep_recent_tokens` exactly as documented in that script's header.
