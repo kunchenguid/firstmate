@@ -107,10 +107,11 @@ For Pi, approve the project trust prompt once per clone on first launch so both 
 ### Fixed-home Windows and WSL launcher
 
 The tracked [`windows/firstmate.ps1`](windows/firstmate.ps1) template delegates to [`bin/fm-primary-launch.sh`](bin/fm-primary-launch.sh), which is the single owner of selector validation and harness launch mechanics.
-Copy the PowerShell template into a directory on `PATH` during a separate local rollout, then use `firstmate`, `firstmate --pi`, `firstmate --grok`, `firstmate --claude`, `firstmate --opencode`, or `firstmate --codex` from PowerShell.
+Copy both Windows templates into the same directory on `PATH` during a separate local rollout, then use `firstmate`, `firstmate --pi`, `firstmate --grok`, `firstmate --claude`, `firstmate --opencode`, or `firstmate --codex` from PowerShell.
 The tracked [`windows/firstmate.cmd`](windows/firstmate.cmd) always refuses every invocation because `cmd.exe` batch expansion cannot preserve arbitrary model values as opaque arguments.
 Every supported launch form is PowerShell-only and must resolve to the colocated `firstmate.ps1` or invoke `firstmate.ps1` directly so PowerShell preserves each argument as one opaque value through WSL.
-Bare `firstmate` remains unrestricted Codex for compatibility.
+Bare `firstmate` and explicit `firstmate --codex` launch unrestricted Codex for compatibility.
+The alternate selectors retain their normal permission posture, except that Grok receives its documented `--trust` flag so the tracked hooks load.
 
 This launcher is intentionally fixed to WSL distribution `Ubuntu`, Linux user `firstmate`, and `/home/firstmate/firstmate` as both repository root and `FM_HOME`.
 Changing selectors therefore preserves Firstmate's durable operational memory, but it does not share harness-native transcripts, resume history, credentials, or global model settings.
