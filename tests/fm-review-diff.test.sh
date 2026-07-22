@@ -8,6 +8,7 @@
 #   (b) pr= without pr_head= -> fetch refs/pull/<n>/head and diff that
 #   (c) pr= absent -> unchanged worktree-branch diff
 #   (d) pr= present but PR head unreachable -> fallback to local branch + warning
+#   (e) GitLab MR URL -> fallback uses the worktree's current branch
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -141,7 +142,24 @@ test_unreachable_pr_head_falls_back_with_warning() {
   pass "fm-review-diff falls back to local branch with a warning when PR head is unreachable"
 }
 
+test_gitlab_mr_fallback_uses_current_branch() {
+  local case_dir out
+  case_dir=$(make_case gitlab-current-branch)
+  stale_and_pr_commits "$case_dir"
+  git -C "$case_dir/wt" checkout -q pr-head-tmp
+  write_task_meta "$case_dir" "pr=https://gitlab.com/example/repo/-/merge_requests/9"
+
+  out=$(run_review_diff "$case_dir" task-x1 2> "$case_dir/stderr")
+
+  assert_contains "$out" '+pr-fixed' "gitlab-current-branch: diff should use the current worktree branch"
+  assert_not_contains "$out" '+stale-local' "gitlab-current-branch: diff must not use the stale fm/task-x1 branch"
+  assert_contains "$(cat "$case_dir/stderr")" 'warning: PR head unavailable' \
+    "gitlab-current-branch: unsupported MR ref should retain the fallback warning"
+  pass "fm-review-diff GitLab fallback uses the current worktree branch"
+}
+
 test_pr_meta_uses_pr_head_not_stale_local
 test_pr_meta_fetches_pull_head_without_recorded_sha
 test_no_pr_meta_uses_local_branch
 test_unreachable_pr_head_falls_back_with_warning
+test_gitlab_mr_fallback_uses_current_branch

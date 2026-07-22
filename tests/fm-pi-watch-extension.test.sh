@@ -737,10 +737,6 @@ EOF
 
 test_tracked_extension_present_and_self_hashing
 test_spawn_template_mentions_pi_watch_placeholder
-test_pi_extension_reports_external_healthy_watcher
-test_pi_tool_returns_agent_tool_result
-test_pi_process_exit_cleanup_listener_lifecycle
-test_pi_process_exit_cleanup_stops_arm_child
 test_opencode_primary_watch_plugin_static_wiring
 test_opencode_plugin_package_boundary_is_explicit_esm
 test_opencode_primary_watch_plugin_uses_effective_state_home
@@ -750,3 +746,11 @@ test_opencode_watch_arm_coordinator_respects_primary_scope
 test_opencode_primary_watch_plugin_rearms_after_wake
 test_opencode_watch_arm_coordinates_with_turnend_guard
 test_opencode_healthy_arm_output_does_not_suppress_guard
+if [ "$(node -p 'Number(process.versions.node.split(".")[0])')" -lt 22 ]; then
+  printf 'skip: Node.js 22+ is required for direct TypeScript extension runtime tests\n'
+  exit 0
+fi
+test_pi_extension_reports_external_healthy_watcher
+test_pi_tool_returns_agent_tool_result
+test_pi_process_exit_cleanup_listener_lifecycle
+test_pi_process_exit_cleanup_stops_arm_child
