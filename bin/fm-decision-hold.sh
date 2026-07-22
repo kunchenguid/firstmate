@@ -323,7 +323,7 @@ EOF
     fi
 
     # Transfer any still-open status decision to its durable backlog owner so the
-    # live status fold does not duplicate the same Jay's Call item.
+    # live status fold does not duplicate the same Your Call item.
     while IFS=$'\t' read -r key _verb _summary; do
       [ -n "$key" ] || continue
       list_has_key "$keys" "$key" || continue

@@ -159,7 +159,7 @@ Optional helper: \`bin/fm-secondmate-report.sh\` can append a correlated status 
 For a terse result, a status line is the whole answer.
 For a detailed answer (an investigation, a plan, an audit), write it to a doc under your home's \`data/\` and append a status line that points to that doc - the scout-report pattern - so the main firstmate is woken and can read it.
 Before treating an investigation or visual review as complete, load \`decision-hold-lifecycle\` from this home's \`.agents/skills/\` and pass its shared completion gate.
-A message with NO marker is Jay typing directly into your pane: treat it as authoritative Jay's intervention and stay conversational exactly as you would for any message from Jay; do not force it onto the status path.
+A message with NO marker is Jay typing directly into your pane: treat it as authoritative intervention from Jay and stay conversational exactly as you would for any message from Jay; do not force it onto the status path.
 
 # Escalation to main firstmate
 Handle routine work yourself.
@@ -212,7 +212,7 @@ HERDR_SECTION=$(printf '%s\n' \
 '   A missing, stopped, or changed default session is a hard tripwire failure, never a cleanup warning to ignore.' \
 '' \
 'Never bypass the helper, even for a read-only lifecycle probe or cleanup after failure.' \
-'Jay fleet uses the running `default` session.')
+'The fleet uses the running `default` session.')
 else
 HERDR_SECTION=$(cat <<'EOF'
 # Herdr lifecycle declaration - NOT ENABLED

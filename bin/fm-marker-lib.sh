@@ -19,7 +19,7 @@
 #                 detailed one) so it surfaces to the main firstmate via the
 #                 watcher signal. It MUST NOT respond only in chat.
 #   - unmarked -> Jay typing directly. Stay conversational, exactly as
-#                 before: authoritative Jay's intervention.
+#                 before: authoritative intervention from Jay.
 #
 # This contract lives in the generated secondmate charter (bin/fm-brief.sh) so it
 # travels with the live secondmate, and is summarized in AGENTS.md.

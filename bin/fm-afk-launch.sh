@@ -354,7 +354,7 @@ fm_afk_launch_restore_backup() {  # <backup> <had-afk>
   return "$result"
 }
 
-# Launch the daemon in a non-visible herdr terminal in the Jay's session
+# Launch the daemon in a non-visible herdr terminal in Jay's session
 # (so the daemon can inject into Jay's pane, which lives there). A
 # dedicated background workspace (--no-focus) holds exactly one tab/pane; it
 # never touches Jay's active tab. Prints the record line on success.
