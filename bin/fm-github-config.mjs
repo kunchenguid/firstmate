@@ -211,52 +211,101 @@ function canonicalNamedExecutable(value, basename) {
   return resolved;
 }
 
-function validateRepositoryGraphQL(query, nameVariable) {
+function validateRepositoryGraphQL(query, nameVariable, suppliedOwner, suppliedName) {
   if (typeof query !== "string" || Buffer.byteLength(query, "utf8") > 16 * 1024 || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u.test(query)
     || !["name", "repo"].includes(nameVariable)) throw new Error("invalid GraphQL request");
-  const tokens = query.match(/\$[A-Za-z_][A-Za-z0-9_]*|[A-Za-z_][A-Za-z0-9_]*|[!$():=@\[\]{|},]|\d+/gu);
+  const tokens = query.match(/"(?:\\["\\/bfnrt]|\\u[0-9A-Fa-f]{4}|[^"\\\u0000-\u001f])*"|\$[A-Za-z_][A-Za-z0-9_]*|[A-Za-z_][A-Za-z0-9_]*|[!$():=@\[\]{|},]|\d+/gu);
   if (!tokens || tokens.join("") !== query.replace(/[ \t\r\n]/gu, "")) throw new Error("invalid GraphQL request");
   let index = 0;
   const take = (expected) => {
     if (tokens[index] !== expected) throw new Error("invalid GraphQL request");
     index += 1;
   };
-  const balanced = (open, close) => {
-    take(open);
-    let depth = 1;
-    while (depth > 0 && index < tokens.length) {
-      if (tokens[index] === open) depth += 1;
-      if (tokens[index] === close) depth -= 1;
+  const readRepositoryValue = (variable, validator) => {
+    const token = tokens[index];
+    if (token === `$${variable}`) {
       index += 1;
+      return null;
     }
-    if (depth !== 0) throw new Error("invalid GraphQL request");
+    if (!token?.startsWith('"')) throw new Error("invalid GraphQL request");
+    index += 1;
+    const value = JSON.parse(token);
+    if (!validator(value)) throw new Error("invalid GraphQL request");
+    return value;
   };
-  take("query");
-  if (tokens[index] === "(") balanced("(", ")");
+  if (tokens[index] === "query") {
+    take("query");
+    if (tokens[index] === "(") {
+      take("(");
+      take("$owner");
+      take(":");
+      take("String");
+      take("!");
+      take(",");
+      take(`$${nameVariable}`);
+      take(":");
+      take("String");
+      take("!");
+      take(")");
+    }
+  }
   take("{");
   take("repository");
   take("(");
   take("owner");
   take(":");
-  take("$owner");
+  const inlineOwner = readRepositoryValue("owner", login);
   take(",");
   take("name");
   take(":");
-  take(`$${nameVariable}`);
+  const inlineName = readRepositoryValue(nameVariable, projectName);
   take(")");
   take("{");
-  let depth = 1;
-  const forbiddenTraversal = new Set(["owner", "parent", "forks", "repositories", "repository", "templateRepository", "submodules"]);
-  while (depth > 0 && index < tokens.length) {
-    const token = tokens[index];
-    if (token === "{") depth += 1;
-    else if (token === "}") depth -= 1;
-    else if (forbiddenTraversal.has(token)) throw new Error("invalid GraphQL request");
-    index += 1;
+  let selections = 0;
+  while (tokens[index] !== "}") {
+    const field = tokens[index];
+    if (field === "id") {
+      index += 1;
+    } else if (field === "issues" || field === "pullRequests") {
+      index += 1;
+      if (tokens[index] === "(") {
+        take("(");
+        if (tokens[index] !== ")") {
+          take("states");
+          take(":");
+          take("[");
+          let states = 0;
+          while (tokens[index] !== "]") {
+            const state = tokens[index];
+            const allowed = field === "issues" ? ["OPEN", "CLOSED"] : ["OPEN", "CLOSED", "MERGED"];
+            if (!allowed.includes(state)) throw new Error("invalid GraphQL request");
+            index += 1;
+            states += 1;
+            if (tokens[index] === ",") take(",");
+            else if (tokens[index] !== "]") throw new Error("invalid GraphQL request");
+          }
+          if (states === 0) throw new Error("invalid GraphQL request");
+          take("]");
+        }
+        take(")");
+      }
+      take("{");
+      take("totalCount");
+      take("}");
+    } else {
+      throw new Error("invalid GraphQL request");
+    }
+    selections += 1;
   }
-  if (depth !== 0) throw new Error("invalid GraphQL request");
+  if (selections === 0) throw new Error("invalid GraphQL request");
+  take("}");
   take("}");
   if (index !== tokens.length) throw new Error("invalid GraphQL request");
+  const owner = inlineOwner ?? suppliedOwner;
+  const name = inlineName ?? suppliedName;
+  if (!login(owner) || !projectName(name)) throw new Error("invalid GraphQL request");
+  if ((inlineOwner === null) !== (inlineName === null)) throw new Error("invalid GraphQL request");
+  return {owner, name};
 }
 
 function within(candidate, root) {
@@ -494,7 +543,9 @@ try {
     process.exit(0);
   }
   if (action === "validate-graphql-read") {
-    validateRepositoryGraphQL(option("--query"), option("--name-variable"));
+    const result = validateRepositoryGraphQL(option("--query"), option("--name-variable"), option("--owner"), option("--name"));
+    emit("owner", result.owner);
+    emit("name", result.name);
     process.exit(0);
   }
   if (action === "resolve") {

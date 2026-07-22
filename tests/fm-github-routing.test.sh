@@ -118,7 +118,13 @@ case "${FM_TEST_GH_AXI_TYPED_API:-}" in
       -f owner=Owner-A -f name=repo-a
     exit
     ;;
+  inline)
+    gh api graphql -f 'query={repository(owner:"Owner-A",name:"repo-a"){pullRequests(states:[OPEN,MERGED]){totalCount}}}'
+    exit
+    ;;
+  reviews) gh api repos/Owner-A/repo-a/pulls/17/reviews --paginate --slurp; exit ;;
   foreign) gh api repos/Other/repo-a; exit ;;
+  forks) gh api repos/Owner-A/repo-a/forks; exit ;;
   mutation)
     gh api graphql --hostname github.com \
       -f 'query=mutation($owner:String!,$name:String!){deleteRepository(input:{repositoryId:"x"}){clientMutationId}}' \
@@ -128,6 +134,12 @@ case "${FM_TEST_GH_AXI_TYPED_API:-}" in
   traversal)
     gh api graphql --hostname github.com \
       -f 'query=query($owner:String!,$name:String!){repository(owner:$owner,name:$name){owner{repositories{nodes{name}}}}}' \
+      -f owner=Owner-A -f name=repo-a
+    exit
+    ;;
+  head-repository)
+    gh api graphql --hostname github.com \
+      -f 'query=query($owner:String!,$name:String!){repository(owner:$owner,name:$name){pullRequest(number:1){headRepository{id}}}}' \
       -f owner=Owner-A -f name=repo-a
     exit
     ;;
@@ -492,6 +504,13 @@ test_concurrent_profiles_and_exact_children() {
   expect_code 1 "$rc" "unproven routing lock"
   [ -f "$d/home/state/.github-routing-path/.install.lock" ] || fail "unproven routing lock was evicted"
   rm -f "$d/home/state/.github-routing-path/.install.lock"
+  FM_HOME="$d/home" FM_ROOT_OVERRIDE="$ROOT" bash -c '
+    . "$FM_ROOT_OVERRIDE/bin/fm-github-lib.sh"
+    lock="$FM_HOME/state/.github-routing-path/.owner-test.lock"
+    fm_github_lock_acquire "$lock" 1
+    [ "$(sed -n "2p" "$lock")" = "$$" ]
+    fm_github_lock_release
+  ' || fail "routing lock did not record the actual owning shell"
   chmod 0700 "$d/home/state/.github-routing-path/context-v1/gh"
   set +e
   run_exec "$d" exec --project repo-a --repository "$d/home/projects/repo-a" -- gh pr view 12 >/dev/null 2>&1
@@ -624,9 +643,14 @@ test_forbidden_commands_and_access_diagnostics() {
   FM_TEST_GH_AXI_TYPED_API=read run_exec "$d" exec --project repo-a --repository "$d/home/projects/repo-a" -- \
     gh-axi pr view 1 >/dev/null \
     || fail "verified gh-axi descendant could not perform its typed internal API operation"
+  for kind in inline reviews; do
+    FM_TEST_GH_AXI_TYPED_API=$kind run_exec "$d" exec --project repo-a --repository "$d/home/projects/repo-a" -- \
+      gh-axi pr view 1 >/dev/null \
+      || fail "verified gh-axi descendant could not perform its typed $kind operation"
+  done
   assert_grep $'gh\tprofile-a\tapi graphql --hostname github.com' "$d/routes.log" \
     "typed gh-axi internal API call did not retain the selected profile"
-  for kind in foreign mutation traversal; do
+  for kind in foreign forks mutation traversal head-repository; do
     set +e
     FM_TEST_GH_AXI_TYPED_API=$kind run_exec "$d" exec --project repo-a --repository "$d/home/projects/repo-a" -- \
       gh-axi pr view 1 >/dev/null 2>&1
@@ -1024,7 +1048,7 @@ SH
 }
 
 test_no_mistakes_context_handoff_is_typed_and_secret_free() {
-  local d fake_nm captured log refresh_count rc err expected_pwd marker marker_before override_marker p1 p2 status
+  local d fake_nm captured log refresh_count rc err expected_pwd marker marker_before override_marker p1 p2 status current_branch current_head
   d=$(make_fixture no-mistakes)
   fake_nm="$d/exact/no-mistakes"
   captured="$d/nm-context.json"
@@ -1044,13 +1068,23 @@ if [ "${1:-}" = init ]; then
   exit 0
 fi
 if [ "${1:-}" = axi ] && [ "${2:-}" = status ]; then
+  [ -z "${FM_TEST_NM_STATUS_FAIL:-}" ] || exit 73
   branch=${FM_TEST_NM_BRANCH:-$(git symbolic-ref --quiet --short HEAD)}
   head=$(git rev-parse HEAD)
   run_id=run-0
   [ ! -e "$FM_TEST_NM_CAPTURE.run-id" ] || run_id=$(cat "$FM_TEST_NM_CAPTURE.run-id")
   status=completed
   [ ! -e "$FM_TEST_NM_CAPTURE.active" ] || status=${FM_TEST_NM_STATUS:-running}
-  printf '  id: %s\n  branch: %s\n  status: %s\n  head: %s\n' "$run_id" "$branch" "$status" "$head"
+  if [ -n "${FM_TEST_NM_QUOTED:-}" ]; then
+    printf '  id: "%s"\n  branch: "%s"\n  status: "%s"\n  head: "%s"\n' "$run_id" "$branch" "$status" "$head"
+  else
+    printf '  id: %s\n  branch: %s\n  status: %s\n  head: %s\n' "$run_id" "$branch" "$status" "$head"
+  fi
+  exit 0
+fi
+if [ "${1:-}" = runs ]; then
+  [ -z "${FM_TEST_NM_RUNS_FAIL:-}" ] || exit 74
+  printf '%s' "${FM_TEST_NM_RUNS:-}"
   exit 0
 fi
 if [ "${1:-}" = axi ] && { [ "${2:-}" = run ] || [ "${2:-}" = respond ]; }; then
@@ -1110,8 +1144,11 @@ SH
   assert_grep '"name": "Account A"' "$marker" "new run marker recomputed routing after executor launch"
   node -e 'const fs=require("fs"); const p=process.argv[1]; const v=JSON.parse(fs.readFileSync(p)); v.profiles["profile-a"].commit_identity.name="Account A"; fs.writeFileSync(p,JSON.stringify(v)); fs.chmodSync(p,0o600)' "$d/home/config/github-accounts.json"
   marker_before=$(cat "$marker")
+  current_branch=$(git -C "$d/home/projects/repo-a" symbolic-ref --quiet --short HEAD)
+  current_head=$(git -C "$d/home/projects/repo-a" rev-parse --short HEAD)
   set +e
-  FM_TEST_NM_BRANCH=other-branch FM_TEST_NM_CAPTURE="$captured" FM_TEST_NM_LOG="$log" \
+  FM_TEST_NM_BRANCH=other-branch FM_TEST_NM_RUNS="running $current_branch $current_head 2026-07-22" \
+    FM_TEST_NM_CAPTURE="$captured" FM_TEST_NM_LOG="$log" \
     run_exec "$d" exec --project repo-a --repository "$d/home/projects/repo-a" -- no-mistakes axi respond accepted >/dev/null 2>&1
   rc=$?
   set -e
@@ -1134,16 +1171,26 @@ SH
   expect_code 1 "$rc" "changed routing while reattaching no-mistakes"
   [ "$(cat "$marker")" = "$marker_before" ] || fail "failed reattachment overwrote the active no-mistakes binding marker"
   node -e 'const fs=require("fs"); const p=process.argv[1]; const v=JSON.parse(fs.readFileSync(p)); v.profiles["profile-a"].commit_identity.name="Account A"; fs.writeFileSync(p,JSON.stringify(v)); fs.chmodSync(p,0o600)' "$d/home/config/github-accounts.json"
+  set +e
+  FM_TEST_NM_STATUS_FAIL=1 FM_TEST_NM_RUNS_FAIL=1 FM_TEST_NM_CAPTURE="$captured" FM_TEST_NM_LOG="$log" \
+    run_exec "$d" exec --project repo-a --repository "$d/home/projects/repo-a" -- no-mistakes axi respond accepted >/dev/null 2>&1
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "transient no-mistakes status failure"
+  [ "$(cat "$marker")" = "$marker_before" ] || fail "status failure changed the active no-mistakes binding marker"
   FM_TEST_NM_CAPTURE="$captured" FM_TEST_NM_LOG="$log" \
     run_exec "$d" exec --project repo-a --repository "$d/home/projects/repo-a" -- no-mistakes axi respond accepted >/dev/null \
     || fail "matching no-mistakes continuation did not revalidate its typed context"
+  FM_TEST_NM_QUOTED=1 FM_TEST_NM_CAPTURE="$captured" FM_TEST_NM_LOG="$log" \
+    run_exec "$d" exec --project repo-a --repository "$d/home/projects/repo-a" -- no-mistakes axi respond accepted >/dev/null \
+    || fail "quoted TOON no-mistakes identity was not decoded"
   for status in fixing ci awaiting_approval fix_review; do
     FM_TEST_NM_STATUS=$status FM_TEST_NM_CAPTURE="$captured" FM_TEST_NM_LOG="$log" \
       run_exec "$d" exec --project repo-a --repository "$d/home/projects/repo-a" -- no-mistakes axi respond accepted >/dev/null \
       || fail "documented active no-mistakes status $status was not accepted"
   done
   refresh_count=$(grep -c '^init --github-context ' "$log")
-  [ "$refresh_count" -eq 6 ] || fail "strict run and continuations refreshed no-mistakes context $refresh_count times instead of six times"
+  [ "$refresh_count" -eq 7 ] || fail "strict run and continuations refreshed no-mistakes context $refresh_count times instead of seven times"
   pass "no-mistakes receives secret-free context and revalidates every strict run and continuation"
 }
 

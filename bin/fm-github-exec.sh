@@ -28,7 +28,7 @@ case "${1:-}" in
   *)
     FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
     unset FM_GITHUB_ACTIVE FM_GITHUB_ALLOW_UNREGISTERED_PROJECT FM_GITHUB_CLONE_CAPABILITY FM_GITHUB_CLONE_ROOT
-    unset FM_GITHUB_INVOCATION_CAPABILITY
+    unset FM_GITHUB_INVOCATION_ENDPOINT FM_GITHUB_INVOCATION_BROKER_PID FM_GITHUB_INVOCATION_BROKER_IDENTITY
     ;;
 esac
 export FM_HOME
@@ -232,28 +232,76 @@ NODE
   trap - EXIT HUP INT TERM
 }
 
+no_mistakes_decode_toon_scalar() {
+  fm_github_node -e '
+const value = process.argv[1];
+let decoded = value;
+if (value.startsWith("\"") && value.endsWith("\"")) decoded = JSON.parse(value);
+if (typeof decoded !== "string" || decoded.length === 0 || /[\u0000-\u001f\u007f]/u.test(decoded)) process.exit(1);
+process.stdout.write(decoded);
+' "$1"
+}
+
+no_mistakes_head_matches() {
+  local candidate=$1 current_head=$2 run_head
+  run_head=$(command "$FM_GITHUB_GIT_BINARY" -C "$repository" rev-parse "$candidate^{commit}" 2>/dev/null) || return 1
+  [ "$current_head" = "$run_head" ] \
+    || command "$FM_GITHUB_GIT_BINARY" -C "$repository" merge-base --is-ancestor "$current_head" "$run_head" 2>/dev/null
+}
+
+no_mistakes_prove_run_absent() {
+  local binary=$1 current_branch=$2 current_head=$3 output rows status branch head
+  output=$(cd "$repository" && LC_ALL=C command "$binary" runs --limit 2147483647 2>/dev/null) || return 1
+  rows=$(printf '%s\n' "$output" | fm_github_node -e '
+let input = "";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", (chunk) => { input += chunk; });
+process.stdin.on("end", () => {
+  const lines = input.split(/\r?\n/u).filter((line) => line.trim() !== "");
+  for (const line of lines) {
+    const match = line.trim().match(/^(running|fixing|ci|awaiting_approval|fix_review|completed|failed|cancelled)\s+(\S+)\s+([0-9a-fA-F]{7,40})\s+\S+(?:\s+\S+)?$/u);
+    if (!match) process.exit(1);
+    process.stdout.write(`${match[1]}\t${match[2]}\t${match[3]}\n`);
+  }
+});
+') || return 1
+  while IFS=$'\t' read -r status branch head; do
+    [ -n "$status" ] || continue
+    if [ "$branch" = "$current_branch" ] && no_mistakes_head_matches "$head" "$current_head"; then
+      return 1
+    fi
+  done <<< "$rows"
+  return 0
+}
+
 no_mistakes_run_details() {
-  local binary=$1 output current_branch current_head run_head
+  local binary=$1 output current_branch current_head
   NM_RUN_ID= NM_RUN_BRANCH= NM_RUN_STATUS= NM_RUN_HEAD= NM_RUN_STATE=inactive
-  output=$(cd "$repository" && LC_ALL=C command "$binary" axi status 2>/dev/null) || return 2
+  current_branch=$(command "$FM_GITHUB_GIT_BINARY" -C "$repository" symbolic-ref --quiet --short HEAD 2>/dev/null) || return 1
+  current_head=$(command "$FM_GITHUB_GIT_BINARY" -C "$repository" rev-parse HEAD 2>/dev/null) || return 1
+  if ! output=$(cd "$repository" && LC_ALL=C command "$binary" axi status 2>/dev/null); then
+    no_mistakes_prove_run_absent "$binary" "$current_branch" "$current_head" || return 1
+    return 2
+  fi
   NM_RUN_ID=$(printf '%s\n' "$output" | sed -n 's/^  id: //p' | head -1)
   NM_RUN_BRANCH=$(printf '%s\n' "$output" | sed -n 's/^  branch: //p' | head -1)
   NM_RUN_STATUS=$(printf '%s\n' "$output" | sed -n 's/^  status: //p' | head -1)
   NM_RUN_HEAD=$(printf '%s\n' "$output" | sed -n 's/^  head: //p' | head -1)
   [ -n "$NM_RUN_ID" ] && [ -n "$NM_RUN_BRANCH" ] && [ -n "$NM_RUN_STATUS" ] && [ -n "$NM_RUN_HEAD" ] || return 1
-  current_branch=$(command "$FM_GITHUB_GIT_BINARY" -C "$repository" symbolic-ref --quiet --short HEAD 2>/dev/null) || return 1
-  current_head=$(command "$FM_GITHUB_GIT_BINARY" -C "$repository" rev-parse HEAD 2>/dev/null) || return 1
-  [ "$NM_RUN_BRANCH" = "$current_branch" ] || return 2
-  run_head=$(command "$FM_GITHUB_GIT_BINARY" -C "$repository" rev-parse "$NM_RUN_HEAD^{commit}" 2>/dev/null) || return 2
-  [ "$current_head" = "$run_head" ] \
-    || command "$FM_GITHUB_GIT_BINARY" -C "$repository" merge-base --is-ancestor "$current_head" "$run_head" 2>/dev/null \
-    || return 2
+  NM_RUN_ID=$(no_mistakes_decode_toon_scalar "$NM_RUN_ID") || return 1
+  NM_RUN_BRANCH=$(no_mistakes_decode_toon_scalar "$NM_RUN_BRANCH") || return 1
+  NM_RUN_STATUS=$(no_mistakes_decode_toon_scalar "$NM_RUN_STATUS") || return 1
+  NM_RUN_HEAD=$(no_mistakes_decode_toon_scalar "$NM_RUN_HEAD") || return 1
   case "$NM_RUN_STATUS" in
     running|fixing|ci|awaiting_approval|fix_review) NM_RUN_STATE=active ;;
     completed|failed|cancelled) NM_RUN_STATE=inactive ;;
     *) return 1 ;;
   esac
-  return 0
+  if [ "$NM_RUN_BRANCH" = "$current_branch" ] && no_mistakes_head_matches "$NM_RUN_HEAD" "$current_head"; then
+    return 0
+  fi
+  no_mistakes_prove_run_absent "$binary" "$current_branch" "$current_head" || return 1
+  return 2
 }
 
 record_no_mistakes_binding() {
