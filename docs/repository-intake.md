@@ -29,7 +29,7 @@ The scope is inspectable and deliberately narrow.
 | GitHub GraphQL through `gh-axi` | Repository plus issue/PR number | List every open issue and PR with bounded pagination | Title, labels, URL, update time; PR draft, head SHA, base, review decision | None |
 | Trusted outcome record | Item id plus current source fingerprint | Attach a verified judgment | Status, exact evidence pointers, task/group links, next action, risk | Private checkpoint only |
 
-An absent registry leaves this optional capability inert.
+An absent registry leaves the intake source map unavailable; if `data/repository-intake/checkpoint.json` already exists, the watcher still surfaces that intake surface so the missing registry stays explicit rather than silent.
 Once the registry exists, an unavailable clone, unsupported non-GitHub origin, API failure, pagination-bound failure, or rate-limit stop is explicit critical attention.
 No other forge, issue tracker, mailbox, drive, calendar, or business system is implied by this source map.
 

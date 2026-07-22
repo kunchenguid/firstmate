@@ -32,7 +32,7 @@ The tracked registration example is [`examples/control-plane-sources.json`](exam
 
 ## Daily repository intake (data/projects.md)
 
-When `data/projects.md` exists, the existing watcher runs `bin/fm-repository-intake.sh` on its bounded heartbeat.
+When `data/projects.md` exists, or when a prior private intake checkpoint at `data/repository-intake/checkpoint.json` already exists, the existing watcher runs `bin/fm-repository-intake.sh` on its bounded heartbeat.
 The command attempts one complete GitHub issue and PR discovery per Asia/Kolkata calendar day through `gh-axi`, stores its private checkpoint under `data/repository-intake/`, and wakes only for changed attention.
 [`repository-intake.md`](repository-intake.md) owns the source map, checkpoint, freshness, rate-limit, privacy, recovery, outcome, and authority contracts.
 
