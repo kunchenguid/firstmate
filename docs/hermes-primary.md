@@ -3,6 +3,10 @@
 Date: 2026-07-23.
 Hermes Agent version under test: v0.19.0 (2026.7.20), install method git, Python 3.11.15.
 
+This document records how firstmate treats **Hermes Agent** as a primary and crew harness.
+Isolated-home spawn/teardown/turn-end follow-up patterns were absorbed from upstream PR #853;
+this fleet keeps **background-notify** primary supervision (proven live) rather than #853's foreground-checkpoint default.
+
 This document records how firstmate treats **Hermes Agent** as a *primary* session harness: detection, session lock, supervision wake, optional shell hooks, residual gaps, and the exact commands used to verify them.
 
 It does **not** claim Hermes is a verified *crewmate spawn* adapter.
@@ -20,7 +24,7 @@ When the primary is Hermes, set `config/crew-harness` to a verified spawn adapte
 | Continuity seatbelt | verified (transport) | same bridge calls `bin/fm-continuity-pretool-check.sh` |
 | Session-start nudge | verified (transport) | Hermes `pre_llm_call` with `extra.is_first_turn` → `{"context": ...}` from `bin/fm-sessionstart-nudge.sh` |
 | Turn-end force-continue | **not available** | Hermes has no general Claude/Codex Stop block; `pre_verify` only covers coding verify loops. Passive `post_llm_call` observer runs the shared predicate and records a durable, rate-limited `state/.hermes-turnend-alarm` marker on a blind end; it cannot force a same-session follow-up. |
-| Crewmate spawn on hermes | **not verified** | out of scope for this primary pass |
+| Crewmate spawn on hermes | verified (isolated home) | `fm-spawn` + `fm-hermes-home.sh` (PR #853 pattern); smoke on herdr+pi still the default crew here unless captain sets crew-harness=hermes |
 
 ## Install primary hooks
 
@@ -95,7 +99,7 @@ printf '%s' '{"hook_event_name":"pre_tool_call","tool_name":"terminal","tool_inp
 
 1. **No same-session turn-end force-continue.** Claude/Codex can block Stop with exit 2; Hermes `post_llm_call` / `on_session_end` are observer-only. The observer records a durable, rate-limited `state/.hermes-turnend-alarm` marker when a turn ends blind, but cannot re-prompt the session. Fleet safety depends on the background-notify supervision cycle plus `bin/fm-guard.sh` pull alarms.
 2. **Hooks are user-global.** Unlike `.claude/settings.json`, Hermes shell hooks live in `~/.hermes/config.yaml`. The bridge fails open outside firstmate-shaped homes, but install is a deliberate captain/machine step.
-3. **Crew spawn on Hermes is not verified.** Keep `config/crew-harness` on a verified spawn adapter while the primary is Hermes.
+3. **Crew spawn on Hermes is available** via isolated homes; default fleet crew-harness may still be `pi` by captain preference.
 4. **Busy-pane regex** still relies on the shared default set; Hermes TUI busy text was not re-fingerprinted as a crew target in this pass because spawn is out of scope.
 
 ## Promotion checklist (future)
