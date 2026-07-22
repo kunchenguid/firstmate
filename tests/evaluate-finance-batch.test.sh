@@ -20,6 +20,17 @@ make_case() {
   git -C "$project" -c user.name=fixture -c user.email=fixture@example.invalid commit -qm initial
   cat > "$dir/finance/bin/finance-axi" <<'SH'
 #!/usr/bin/env bash
+artifact=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --artifact) artifact=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "${FAKE_FINANCE_MUTATION:-}" in
+  rewrite-output) printf '{"approved":false}\n' > "$artifact" ;;
+  tracked-file) printf 'changed\n' >> "$(dirname "$(dirname "$artifact")")/README.md" ;;
+esac
 if [ -n "${FAKE_VALIDATION+x}" ]; then
   printf '%s\n' "$FAKE_VALIDATION"
 else
@@ -30,21 +41,16 @@ SH
   printf '%s\n' "$dir"
 }
 
-snapshot_case() {
-  local dir=$1 project="$1/project"
-  "$EVALUATOR" snapshot "$project" "$project/out/result.json" "$dir/baseline" > "$dir/baseline.sha256"
-}
-
 evaluate_case() {
-  local dir=$1 project="$1/project"
-  FINANCE_HARNESS_HOME="$dir/finance" "$EVALUATOR" evaluate \
+  local dir=$1 project="$1/project" expected_revision
+  expected_revision=${2:-$(git -C "$project" rev-parse HEAD)}
+  FINANCE_HARNESS_HOME="$dir/finance" "$EVALUATOR" \
     "$project" \
     "$project/inputs/artifact.json" \
     "$project/out/result.json" \
     "$project/inputs/trusted.json" \
     "$project/inputs/market.json" \
-    "$dir/baseline" \
-    "$(< "$dir/baseline.sha256")"
+    "$expected_revision"
 }
 
 evaluate_case_with_validation() {
@@ -61,163 +67,132 @@ expect_rejected() {
   pass "$label is rejected"
 }
 
-test_valid_control() {
-  local dir
+test_valid_and_bounded_control() {
+  local dir project
   dir=$(make_case valid)
-  snapshot_case "$dir"
-  cp "$dir/project/inputs/artifact.json" "$dir/project/out/result.json"
+  project="$dir/project"
+  cp "$project/inputs/artifact.json" "$project/out/result.json"
   evaluate_case "$dir" | grep -Fqx 'verdict=success' \
     || fail "valid copied artifact did not pass"
-  pass "trusted snapshot accepts the one canonical copied artifact"
-}
 
-test_noncanonical_output_bypass() {
-  local dir project
-  dir=$(make_case noncanonical)
+  dir=$(make_case ignored)
   project="$dir/project"
-  snapshot_case "$dir"
   cp "$project/inputs/artifact.json" "$project/out/result.json"
-  expect_rejected "noncanonical output bypass" env FINANCE_HARNESS_HOME="$dir/finance" \
-    "$EVALUATOR" evaluate "$project" \
-    "$project/inputs/artifact.json" "$project/inputs/artifact.json" \
-    "$project/inputs/trusted.json" "$project/inputs/market.json" "$dir/baseline" \
-    "$(< "$dir/baseline.sha256")"
+  printf 'accepted blind spot\n' > "$project/ignored-workload"
+  evaluate_case "$dir" | grep -Fqx 'verdict=success' \
+    || fail "bounded ignored-path blind spot did not remain accepted"
+  pass "canonical copied artifact passes the bounded evaluator"
 }
 
-test_snapshot_contract_bypasses() {
-  local dir project
-  dir=$(make_case snapshot-contract)
-  project="$dir/project"
-  expect_rejected "noncanonical snapshot output bypass" \
-    "$EVALUATOR" snapshot "$project" "$project/out/other.json" "$dir/baseline"
-  expect_rejected "in-project baseline bypass" \
-    "$EVALUATOR" snapshot "$project" "$project/out/result.json" "$project/baseline"
-  expect_rejected "evaluation without a trusted snapshot bypass" env \
-    FINANCE_HARNESS_HOME="$dir/finance" "$EVALUATOR" evaluate \
-    "$project" "$project/inputs/artifact.json" "$project/out/result.json" \
-    "$project/inputs/trusted.json" "$project/inputs/market.json" \
-    "$dir/missing-baseline" "$(printf '0%.0s' {1..64})"
-
-  snapshot_case "$dir"
-  expect_rejected "existing baseline replacement bypass" \
-    "$EVALUATOR" snapshot "$project" "$project/out/result.json" "$dir/baseline"
-}
-
-test_symlink_and_alias_bypasses() {
+test_resolved_path_contract() {
   local dir project external
-  dir=$(make_case symlink)
+  dir=$(make_case local-symlink)
+  project="$dir/project"
+  mv "$project/inputs/artifact.json" "$project/inputs/artifact-target.json"
+  ln -s artifact-target.json "$project/inputs/artifact.json"
+  git -C "$project" add -A
+  git -C "$project" -c user.name=fixture -c user.email=fixture@example.invalid commit -qm symlink
+  cp "$project/inputs/artifact-target.json" "$project/out/result.json"
+  evaluate_case "$dir" | grep -Fqx 'verdict=success' \
+    || fail "fixture-local input symlink did not pass"
+
+  dir=$(make_case external-symlink)
   project="$dir/project"
   external="$dir/external-artifact.json"
   cp "$project/inputs/artifact.json" "$external"
   rm "$project/inputs/artifact.json"
   ln -s "$external" "$project/inputs/artifact.json"
-  snapshot_case "$dir"
+  git -C "$project" add -A
+  git -C "$project" -c user.name=fixture -c user.email=fixture@example.invalid commit -qm symlink
   cp "$external" "$project/out/result.json"
-  expect_rejected "fixture input symlink bypass" evaluate_case "$dir"
+  expect_rejected "external fixture symlink" evaluate_case "$dir"
 
-  dir=$(make_case trusted-symlink)
+  dir=$(make_case noncanonical-output)
   project="$dir/project"
-  external="$dir/external-trusted.json"
-  cp "$project/inputs/trusted.json" "$external"
-  rm "$project/inputs/trusted.json"
-  ln -s "$external" "$project/inputs/trusted.json"
-  snapshot_case "$dir"
   cp "$project/inputs/artifact.json" "$project/out/result.json"
-  expect_rejected "trusted-sources symlink bypass" evaluate_case "$dir"
-
-  dir=$(make_case market-symlink)
-  project="$dir/project"
-  external="$dir/external-market.json"
-  cp "$project/inputs/market.json" "$external"
-  rm "$project/inputs/market.json"
-  ln -s "$external" "$project/inputs/market.json"
-  snapshot_case "$dir"
-  cp "$project/inputs/artifact.json" "$project/out/result.json"
-  expect_rejected "market-mark symlink bypass" evaluate_case "$dir"
-
-  dir=$(make_case output-symlink)
-  project="$dir/project"
-  external="$dir/external-output.json"
-  cp "$project/inputs/artifact.json" "$external"
-  snapshot_case "$dir"
-  ln -s "$external" "$project/out/result.json"
-  expect_rejected "output symlink bypass" evaluate_case "$dir"
+  expect_rejected "noncanonical output" env FINANCE_HARNESS_HOME="$dir/finance" \
+    "$EVALUATOR" "$project" "$project/inputs/artifact.json" \
+    "$project/inputs/artifact.json" "$project/inputs/trusted.json" \
+    "$project/inputs/market.json" "$(git -C "$project" rev-parse HEAD)"
 
   dir=$(make_case alias)
   project="$dir/project"
-  snapshot_case "$dir"
   ln "$project/inputs/artifact.json" "$project/out/result.json"
-  expect_rejected "input-output alias bypass" evaluate_case "$dir"
+  expect_rejected "input-output alias" evaluate_case "$dir"
+  pass "resolved fixture paths allow local symlinks and reject escapes"
 }
 
-test_unapproved_side_effect_bypasses() {
-  local dir project
-  dir=$(make_case ignored)
-  project="$dir/project"
-  snapshot_case "$dir"
-  cp "$project/inputs/artifact.json" "$project/out/result.json"
-  printf 'hidden\n' > "$project/ignored-workload"
-  expect_rejected "ignored side effect bypass" evaluate_case "$dir"
-
+test_revision_and_side_effect_contract() {
+  local dir project expected
   dir=$(make_case tracked)
   project="$dir/project"
-  snapshot_case "$dir"
   printf 'changed\n' >> "$project/README.md"
   cp "$project/inputs/artifact.json" "$project/out/result.json"
-  expect_rejected "tracked side effect bypass" evaluate_case "$dir"
+  expect_rejected "tracked side effect" evaluate_case "$dir"
 
-  dir=$(make_case commit)
+  dir=$(make_case revision)
   project="$dir/project"
-  snapshot_case "$dir"
+  expected=$(git -C "$project" rev-parse HEAD)
   git -C "$project" -c user.name=fixture -c user.email=fixture@example.invalid commit --allow-empty -qm workload
   cp "$project/inputs/artifact.json" "$project/out/result.json"
-  expect_rejected "post-snapshot commit bypass" evaluate_case "$dir"
+  expect_rejected "changed HEAD" evaluate_case "$dir" "$expected"
 
-  dir=$(make_case metadata)
+  dir=$(make_case untracked)
   project="$dir/project"
-  snapshot_case "$dir"
-  printf 'changed\n' >> "$project/.git/config"
   cp "$project/inputs/artifact.json" "$project/out/result.json"
-  expect_rejected "Git metadata bypass" evaluate_case "$dir"
+  printf 'extra\n' > "$project/extra-output"
+  expect_rejected "extra untracked side effect" evaluate_case "$dir"
 
-  dir=$(make_case baseline-tamper)
+  dir=$(make_case nested)
   project="$dir/project"
-  snapshot_case "$dir"
-  printf 'manifest=%064d\n' 0 >> "$dir/baseline"
-  cp "$project/inputs/artifact.json" "$project/out/result.json"
-  expect_rejected "baseline tamper bypass" evaluate_case "$dir"
+  mkdir -p "$project/nested/inputs" "$project/nested/out"
+  cp "$project/inputs/"*.json "$project/nested/inputs/"
+  cp "$project/nested/inputs/artifact.json" "$project/nested/out/result.json"
+  expect_rejected "nested project root" env FINANCE_HARNESS_HOME="$dir/finance" \
+    "$EVALUATOR" "$project/nested" "$project/nested/inputs/artifact.json" \
+    "$project/nested/out/result.json" "$project/nested/inputs/trusted.json" \
+    "$project/nested/inputs/market.json" "$(git -C "$project" rev-parse HEAD)"
 }
 
-test_permissive_json_bypasses() {
+test_finance_validator_mutations() {
   local dir project
-  dir=$(make_case missing-diagnostics)
+  dir=$(make_case finance-output-mutation)
   project="$dir/project"
-  snapshot_case "$dir"
   cp "$project/inputs/artifact.json" "$project/out/result.json"
-  expect_rejected "missing diagnostics bypass" evaluate_case_with_validation "$dir" \
+  expect_rejected "finance output mutation" env FAKE_FINANCE_MUTATION=rewrite-output \
+    FINANCE_HARNESS_HOME="$dir/finance" "$EVALUATOR" "$project" \
+    "$project/inputs/artifact.json" "$project/out/result.json" \
+    "$project/inputs/trusted.json" "$project/inputs/market.json" \
+    "$(git -C "$project" rev-parse HEAD)"
+
+  dir=$(make_case finance-tracked-mutation)
+  project="$dir/project"
+  cp "$project/inputs/artifact.json" "$project/out/result.json"
+  expect_rejected "finance tracked-file mutation" env FAKE_FINANCE_MUTATION=tracked-file \
+    FINANCE_HARNESS_HOME="$dir/finance" "$EVALUATOR" "$project" \
+    "$project/inputs/artifact.json" "$project/out/result.json" \
+    "$project/inputs/trusted.json" "$project/inputs/market.json" \
+    "$(git -C "$project" rev-parse HEAD)"
+}
+
+test_strict_finance_json_contract() {
+  local dir project
+  dir=$(make_case finance-json)
+  project="$dir/project"
+  cp "$project/inputs/artifact.json" "$project/out/result.json"
+  expect_rejected "missing diagnostics" evaluate_case_with_validation "$dir" \
     '{"ok":true,"profile":"valuation-extract","summary":{"errors":0,"warnings":0}}'
-  expect_rejected "non-object validation bypass" evaluate_case_with_validation "$dir" '[]'
-  expect_rejected "non-boolean ok bypass" evaluate_case_with_validation "$dir" \
-    '{"ok":1,"profile":"valuation-extract","summary":{"errors":0,"warnings":0},"diagnostics":[]}'
-  expect_rejected "wrong profile bypass" evaluate_case_with_validation "$dir" \
-    '{"ok":true,"profile":1,"summary":{"errors":0,"warnings":0},"diagnostics":[]}'
-  expect_rejected "non-object summary bypass" evaluate_case_with_validation "$dir" \
-    '{"ok":true,"profile":"valuation-extract","summary":[],"diagnostics":[]}'
-  expect_rejected "non-numeric errors bypass" evaluate_case_with_validation "$dir" \
-    '{"ok":true,"profile":"valuation-extract","summary":{"errors":"0","warnings":0},"diagnostics":[]}'
-  expect_rejected "non-numeric warnings bypass" evaluate_case_with_validation "$dir" \
-    '{"ok":true,"profile":"valuation-extract","summary":{"errors":0,"warnings":"0"},"diagnostics":[]}'
-  expect_rejected "non-array diagnostics bypass" evaluate_case_with_validation "$dir" \
-    '{"ok":true,"profile":"valuation-extract","summary":{"errors":0,"warnings":0},"diagnostics":{}}'
-  expect_rejected "nonempty diagnostics bypass" evaluate_case_with_validation "$dir" \
-    '{"ok":true,"profile":"valuation-extract","summary":{"errors":0,"warnings":0},"diagnostics":[{"message":"failure"}]}'
-  expect_rejected "multiple validation documents bypass" evaluate_case_with_validation "$dir" \
+  expect_rejected "non-object validation" evaluate_case_with_validation "$dir" '[]'
+  expect_rejected "wrong field types" evaluate_case_with_validation "$dir" \
+    '{"ok":1,"profile":"valuation-extract","summary":{"errors":"0","warnings":0},"diagnostics":{}}'
+  expect_rejected "nonempty diagnostics" evaluate_case_with_validation "$dir" \
+    '{"ok":true,"profile":"valuation-extract","summary":{"errors":0,"warnings":0},"diagnostics":[{}]}'
+  expect_rejected "multiple validation documents" evaluate_case_with_validation "$dir" \
     $'{"ok":false}\n{"ok":true,"profile":"valuation-extract","summary":{"errors":0,"warnings":0},"diagnostics":[]}'
 }
 
-test_valid_control
-test_noncanonical_output_bypass
-test_snapshot_contract_bypasses
-test_symlink_and_alias_bypasses
-test_unapproved_side_effect_bypasses
-test_permissive_json_bypasses
+test_valid_and_bounded_control
+test_resolved_path_contract
+test_revision_and_side_effect_contract
+test_finance_validator_mutations
+test_strict_finance_json_contract
