@@ -139,7 +139,7 @@ meta_has_endpoint() {  # <meta> <endpoint>
 }
 
 source_manifest() {  # <kind> <key>
-  local kind=$1 key=$2 task source meta identity count=0 base status
+  local kind=$1 key=$2 task source meta identity count=0 base candidate candidate_base status
   case "$kind" in
     signal)
       fm_wake_status_key_map "$key" || return 1
@@ -184,7 +184,15 @@ source_manifest() {  # <kind> <key>
             *) return 1 ;;
           esac
           [ "${#base}" -le 255 ] || return 1
-          source="$STATE/$base"
+          source=
+          for candidate in "$STATE"/*.check.sh; do
+            { [ -f "$candidate" ] || [ -L "$candidate" ]; } || continue
+            candidate_base=$(printf '%s' "${candidate##*/}" | fm_wake_clean_field)
+            [ "$candidate_base" = "$base" ] || continue
+            [ -z "$source" ] || return 1
+            source=$candidate
+          done
+          [ -n "$source" ] || return 1
           if identity=$(entry_identity "$source"); then :; else status=$?; return "$status"; fi
           printf 'rejected-check\t%s\t%s\n' "$base" "$identity"
           return 0

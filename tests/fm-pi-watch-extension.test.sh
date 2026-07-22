@@ -1166,6 +1166,21 @@ test_wake_actionability_helper_source_and_queue_matrix() {
     fail "rejected-check receipt survived removal of its bound source"
   fi
 
+  rejected="$state/rejected$(printf '\t')control.check.sh"
+  ln -s "$state/missing-control-check-target" "$rejected"
+  reason="check: rejected unauthenticated state checks: $rejected"
+  FM_HOME="$home" FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_wake_append check "$2" "$3"' \
+    _ "$ROOT/bin/fm-wake-lib.sh" "unauthenticated-state-checks:$(basename "$rejected")" "$reason"
+  reason=$(printf '%s' "$reason" | tr '\t\r\n' '   ')
+  receipt=$(FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$ACTIONABLE" capture "$reason") \
+    || fail "normalized rejected check did not produce an actionability receipt"
+  FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$ACTIONABLE" validate "$receipt" \
+    || fail "normalized rejected check receipt did not validate"
+  rm -f "$rejected"
+  if FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$ACTIONABLE" validate "$receipt"; then
+    fail "normalized rejected-check receipt survived removal of its bound source"
+  fi
+
   printf 'window=default:w1:p-heartbeat\n' > "$state/task-heartbeat.meta"
   printf 'done: heartbeat source remains current\n' > "$state/task-heartbeat.status"
   reason=heartbeat

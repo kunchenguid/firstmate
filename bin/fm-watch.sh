@@ -261,7 +261,8 @@ wake() {
     heartbeat*) echo $(( $(cat "$STATE/.heartbeat-streak" 2>/dev/null || echo 0) + 1 )) > "$STATE/.heartbeat-streak" ;;
     *) echo 0 > "$STATE/.heartbeat-streak" ;;
   esac
-  echo "$1"
+  printf '%s' "$1" | fm_wake_clean_field
+  printf '\n'
   exit 0
 }
 

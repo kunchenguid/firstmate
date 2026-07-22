@@ -693,7 +693,7 @@ test_arm_hup_cleans_child_and_temp_output() {
 }
 
 test_arm_propagates_immediate_wake_before_confirmation() {
-  local dir state fakebin armout drain_out check_file rc
+  local dir state fakebin armout drain_out check_file expected rc
   dir=$(make_case arm-immediate-wake)
   state="$dir/state"
   fakebin="$dir/fakebin"
@@ -705,7 +705,7 @@ test_arm_propagates_immediate_wake_before_confirmation() {
   chmod 0600 "$state/.pr-check-migration-scan-v1" "$state/.pr-check-migration-v1"
   cat > "$check_file" <<'SH'
 #!/usr/bin/env bash
-printf 'merged: https://example.test/pr/7\n'
+printf 'merged: https://example.test/pr/7\nsecond\tline\rthird\n'
 SH
   chmod 0700 "$check_file"
   FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-check-register.sh" task >/dev/null \
@@ -713,10 +713,12 @@ SH
   rc=0
   PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=0 FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=0 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$armout" || rc=$?
   [ "$rc" -eq 0 ] || fail "arm returned non-zero for an immediate wake (status $rc): $(cat "$armout")"
-  grep -F "check: $check_file: merged: https://example.test/pr/7" "$armout" >/dev/null || fail "arm did not propagate the immediate check wake"
+  expected="check: $check_file: merged: https://example.test/pr/7 second line third"
+  grep -Fx "$expected" "$armout" >/dev/null || fail "arm did not propagate the canonical immediate check wake"
   ! grep -qF 'watcher: FAILED' "$armout" || fail "arm printed FAILED after a valid immediate wake"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" || fail "drain after immediate arm wake failed"
-  grep "$(printf '\tcheck\t')" "$drain_out" | grep -F "$check_file" | grep -F 'merged: https://example.test/pr/7' >/dev/null || fail "immediate check wake was not queued"
+  awk -F '\t' -v expected="$expected" '$3 == "check" && $5 == expected { found = 1 } END { exit !found }' "$drain_out" \
+    || fail "canonical immediate check wake did not match its queued payload"
   pass "arm propagates an immediate watcher wake before confirmation"
 }
 
