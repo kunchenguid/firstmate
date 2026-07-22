@@ -443,10 +443,12 @@ launch_template() {
     # launch command - it is a Stop-event hook installed below (global hook +
     # per-task pointer), so the template is identical for ship/scout/secondmate.
     grok) printf '%s' 'grok --always-approve __MODELFLAG____EFFORTFLAG__"$(cat __BRIEF__)"' ;;
-    # hermes (Hermes Agent v0.19.0): classic CLI with --yolo + --accept-hooks + --cli.
+    # hermes (Hermes Agent v0.19.0): top-level -z seeds the first turn; --cli keeps
+    # the classic REPL for multi-turn crew work. chat's positional prompt is
+    # rejected ("unrecognized arguments"); use -z (or chat -q for one-shot).
     # Isolated HERMES_HOME (bin/fm-hermes-home.sh) owns hooks; never touches ~/.hermes.
-    # Pattern absorbed from upstream PR #853; keep primary bg-notify separate.
-    hermes) printf '%s' 'HERMES_HOME=__HERMES_HOME__ hermes chat --yolo --accept-hooks --cli __MODELFLAG__"$(cat __BRIEF__)"' ;;
+    # Home isolation absorbed from PR #853; launch flag corrected for current CLI.
+    hermes) printf '%s' 'HERMES_HOME=__HERMES_HOME__ hermes --yolo --accept-hooks --cli __MODELFLAG__-z "$(cat __BRIEF__)"' ;;
     *) return 1 ;;
   esac
 }
