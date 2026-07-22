@@ -205,10 +205,22 @@ fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [
   if fm_composer_idle_matches "$content" "$idle_re" "$idle_case"; then
     printf 'empty'; return 0
   fi
-  # Strip a leading prompt glyph, then re-judge the remainder.
+  # Strip a leading prompt glyph, then re-judge the remainder. The glyph is
+  # removed by its LITERAL value, never by character count: `❯` and `›` are
+  # 3-byte UTF-8 sequences and bash's `?` matches a single BYTE under a C/POSIX
+  # locale (the fleet daemon's own environment), so a `${content#??}` slice left
+  # a dangling continuation byte glued to the remainder - "❯ Type a message..."
+  # became "\xafType a message..." and no idle-placeholder pattern could ever
+  # match it, so an idle composer read `pending` and every away-mode escalation
+  # deferred forever. Any separating whitespace is removed by the trim below,
+  # which is why one arm per glyph is enough.
   case "$content" in
-    '❯ '*|'› '*|'> '*|'$ '*|'% '*|'# '*) content=${content#??} ;;
-    '❯'*|'›'*|'>'*|'$'*|'%'*|'#'*) content=${content#?} ;;
+    '❯'*) content=${content#'❯'} ;;
+    '›'*) content=${content#'›'} ;;
+    '>'*) content=${content#'>'} ;;
+    '$'*) content=${content#'$'} ;;
+    '%'*) content=${content#'%'} ;;
+    '#'*) content=${content#'#'} ;;
   esac
   content="${content#"${content%%[![:space:]]*}"}"
   content="${content%"${content##*[![:space:]]}"}"

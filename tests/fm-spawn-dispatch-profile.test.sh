@@ -218,6 +218,37 @@ test_claude_turnend_hook_writes_nothing_into_a_clean_worktree() {
   pass "claude turn-end hook adds no worktree artifact for a project without settings"
 }
 
+# The claude arm of launch_template became kind-aware to add --settings, so the
+# secondmate form needs the same pin codex's and pi's already have. A secondmate
+# has no per-task turn-end hook and so no state/<id>.claude-settings.json is ever
+# written for it; emitting --settings here anyway would point claude at a file
+# that does not exist, and claude refuses to start at all in that case
+# ("Error: Settings file not found", verified on 2.1.217) - so the regression
+# would break every claude secondmate launch outright, not degrade it.
+test_claude_secondmate_launch_carries_no_settings_flag() {
+  local rec id sm out status launch
+  id=turnend-claude-secondmate-z26
+  rec=$(make_spawn_case turnend-claude-secondmate claude "$id")
+  read_case_record "$rec"
+  sm="$CASE_DIR/secondmate-home"
+  make_seeded_secondmate_home "$sm" "$id"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate)
+  status=$?
+  expect_code 0 "$status" "claude secondmate spawn should succeed"
+  assert_contains "$out" "spawned $id harness=claude kind=secondmate" \
+    "spawn did not report a claude secondmate"
+  assert_absent "$HOME_DIR/state/$id.claude-settings.json" \
+    "no per-task claude settings file should be written for a secondmate"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "claude --dangerously-skip-permissions \"\$(cat " \
+    "claude secondmate did not keep the plain launch form"
+  case "$launch" in
+    *--settings*) fail "claude secondmate launch carries --settings but no settings file is written"$'\n'"$launch" ;;
+  esac
+  pass "a claude secondmate keeps the plain launch form with no --settings flag"
+}
+
 test_worktree_resident_hook_refuses_a_tracked_collision() {
   local rec id out status
   id=turnend-opencode-tracked-z19
@@ -245,6 +276,14 @@ test_worktree_resident_hook_refusal_releases_what_it_allocated() {
   rec=$(make_spawn_case turnend-opencode-unwind opencode "$id")
   read_case_record "$rec"
   track_worktree_file "$WT_DIR" .opencode/plugins/fm-turn-end.js 'export const Project = {}'
+  # /tmp/fm-<id> is global and keyed only on the task id, and the suite's own
+  # SUCCESSFUL spawns deliberately leave theirs behind (a live task's temp root
+  # belongs to teardown). So this case must establish its precondition rather
+  # than inherit it: spawn only removes a temp root it created itself, so a
+  # leftover from an earlier run would make the assertion below fail for a
+  # reason that is not the behavior under test. The sibling
+  # test_refusal_keeps_a_temp_root_it_did_not_create owns the opposite case.
+  rm -rf "/tmp/fm-$id"
 
   out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
   status=$?
@@ -704,6 +743,7 @@ test_batch_forwards_shared_profile_flags
 test_active_dispatch_profile_does_not_block_secondmate_launch
 test_claude_turnend_hook_preserves_tracked_project_settings
 test_claude_turnend_hook_writes_nothing_into_a_clean_worktree
+test_claude_secondmate_launch_carries_no_settings_flag
 test_worktree_resident_hook_refuses_a_tracked_collision
 test_worktree_resident_hook_refusal_releases_what_it_allocated
 test_refusal_never_returns_a_worktree_holding_uncommitted_work
