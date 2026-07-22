@@ -307,7 +307,20 @@ test_wrong_home_detected_not_acknowledged() {
     || fail "wrong-home detect should succeed"
   rec=$(fm_pending_reply_path "$state" "$corr")
   hits=$(fm_pending_reply_get "$rec" wrong_home_hits)
-  [ "$hits" -ge 1 ] || fail "wrong_home_hits should increment, got $hits"
+  [ "$hits" = 1 ] || fail "first wrong-home sighting should count once, got $hits"
+  fm_pending_reply_detect_wrong_home "$state" "$corr" "$sm_home" \
+    || fail "repeated wrong-home detect should succeed"
+  hits=$(fm_pending_reply_get "$rec" wrong_home_hits)
+  [ "$hits" = 1 ] || fail "unchanged wrong-home history should remain one hit, got $hits"
+  printf 'done [corr=%s]: second stranded report\n' "$corr" >> "$sm_home/state/hibit.status"
+  fm_pending_reply_detect_wrong_home "$state" "$corr" "$sm_home" \
+    || fail "new wrong-home sighting detect should succeed"
+  hits=$(fm_pending_reply_get "$rec" wrong_home_hits)
+  [ "$hits" = 2 ] || fail "distinct wrong-home reports should each count once, got $hits"
+  fm_pending_reply_detect_wrong_home "$state" "$corr" "$sm_home" \
+    || fail "repeated distinct wrong-home detect should succeed"
+  hits=$(fm_pending_reply_get "$rec" wrong_home_hits)
+  [ "$hits" = 2 ] || fail "repeated polling should preserve two distinct hits, got $hits"
   [ "$(phase_of "$state" "$corr")" = awaiting_report ] \
     || fail "wrong-home must not silently acknowledge (phase=$(phase_of "$state" "$corr"))"
   if fm_pending_reply_try_resolve "$state" "$corr"; then

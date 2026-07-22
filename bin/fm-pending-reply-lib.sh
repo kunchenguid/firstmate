@@ -39,6 +39,7 @@
 #   resolved_epoch=
 #   resolved_via=           status | document | helper | empty
 #   wrong_home_hits=        count of corr sightings under the secondmate home
+#   wrong_home_sightings=   comma-separated identities of counted sightings
 #   grace_secs=             bounded grace before recovery is eligible
 #
 # Sourced by bin/fm-send.sh, bin/fm-watch.sh, bin/fm-secondmate-report.sh, and
@@ -238,6 +239,7 @@ escalated_epoch=
 resolved_epoch=
 resolved_via=
 wrong_home_hits=0
+wrong_home_sightings=
 grace_secs=$(fm_pending_reply_grace_secs)
 EOF
   chmod 600 "$tmp" 2>/dev/null || true
@@ -516,27 +518,39 @@ fm_pending_reply_maybe_escalate() {  # <state-dir> <corr_id>
 # without treating it as acknowledgement.
 fm_pending_reply_detect_wrong_home() {  # <state-dir> <corr_id> <secondmate-home>
   local state=$1 corr=$2 sm_home=$3
-  local rec hits status_file line found=0 phase
+  local rec hits sightings status_file line line_no sighting_id phase changed=0
   rec=$(fm_pending_reply_path "$state" "$corr")
   [ -f "$rec" ] || return 1
   [ -n "$sm_home" ] && [ -d "$sm_home" ] || return 0
   phase=$(fm_pending_reply_get "$rec" phase)
   [ "$phase" != resolved ] || return 0
+  hits=$(fm_pending_reply_get "$rec" wrong_home_hits)
+  case "$hits" in ''|*[!0-9]*) hits=0 ;; esac
+  sightings=$(fm_pending_reply_get "$rec" wrong_home_sightings)
   for status_file in "$sm_home"/state/*.status; do
     [ -e "$status_file" ] || continue
-    line=$(fm_pending_reply_find_resolve_line "$status_file" "$corr")
-    if [ -n "$line" ]; then
-      found=1
-      break
-    fi
+    line_no=0
+    while IFS= read -r line || [ -n "$line" ]; do
+      line_no=$((line_no + 1))
+      fm_pending_reply_line_resolves "$line" "$corr" || continue
+      sighting_id=$(printf '%s:%s:%s:%s' "${#status_file}" "$status_file" "$line_no" "$line" \
+        | cksum 2>/dev/null | awk '{printf "%s-%s", $1, $2}')
+      [ -n "$sighting_id" ] || continue
+      case ",$sightings," in
+        *",$sighting_id,"*) continue ;;
+      esac
+      if [ -n "$sightings" ]; then
+        sightings="$sightings,$sighting_id"
+      else
+        sightings=$sighting_id
+      fi
+      hits=$((hits + 1))
+      changed=1
+    done < "$status_file"
   done
-  if [ "$found" = 1 ]; then
-    hits=$(fm_pending_reply_get "$rec" wrong_home_hits)
-    case "$hits" in ''|*[!0-9]*) hits=0 ;; esac
-    hits=$((hits + 1))
+  if [ "$changed" = 1 ]; then
+    fm_pending_reply_set "$rec" wrong_home_sightings "$sightings" || return 1
     fm_pending_reply_set "$rec" wrong_home_hits "$hits" || return 1
-    # Supporting evidence only - never resolve.
-    return 0
   fi
   return 0
 }
