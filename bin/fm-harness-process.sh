@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# Identify a verified harness process without matching unrelated argv values.
+# Usage: fm-harness-process.sh <pid>
+# Prints claude|codex|opencode|pi|grok and exits 0 when the PID is a supported
+# native executable or an interpreter-hosted package entrypoint; exits 1 otherwise.
 set -u
 
 pid=${1:-}

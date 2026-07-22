@@ -15,9 +15,7 @@ $forwarded = @($hostile)
 for ($i = 0; $i -lt $hostile.Count; $i++) {
     if ($forwarded[$i] -cne $hostile[$i]) { throw "PowerShell array forwarding changed hostile argument $i" }
 }
-if ($cmdText -match '%\*') { throw "CMD wrapper still reparses percent-star arguments" }
-foreach ($token in @("--codex", "--pi", "--grok", "--claude", "--opencode")) {
-    if ($cmdText -notmatch [regex]::Escape($token)) { throw "CMD wrapper omitted $token compatibility" }
-}
-if ($cmdText -notmatch 'accepts only one harness selector') { throw "CMD wrapper does not reject value passthrough" }
-Write-Output "ok - Windows wrappers use opaque arrays and narrow CMD passthrough"
+if ($cmdText -match '%\*|%~[0-9]') { throw "CMD refusal shim expands untrusted arguments" }
+if ($cmdText -notmatch 'run firstmate from PowerShell') { throw "CMD refusal does not name the safe entrypoint" }
+if ($cmdText -match '^\s*(powershell(?:\.exe)?|wsl\.exe)\b') { throw "CMD refusal shim unexpectedly delegates arguments" }
+Write-Output "ok - PowerShell preserves opaque argv and CMD refuses without parsing it"

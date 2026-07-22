@@ -184,6 +184,11 @@ EOF
   assert_contains "$out" 'attached:' "matching selector did not attach"
   [ ! -e "$dir/ignored.log" ] || fail "matching attach launched a second harness"
 
+  out=$(run_launch "$home" "$fakebin" "$socket" "$dir/model-mismatch.log" --codex --model another-model 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "different explicit model attached to the existing Codex session"
+  assert_contains "$out" 'different model profile' "model-profile refusal was unclear"
+
   out=$(run_launch "$home" "$fakebin" "$socket" "$dir/divergent.log" --pi 2>&1)
   status=$?
   [ "$status" -ne 0 ] || fail "divergent selector attached to Codex"
@@ -306,6 +311,25 @@ EOF
   pass "interpreter-hosted package entrypoints preserve all harness identities"
 }
 
+test_native_harness_rejects_windows_symlink() {
+  local rec dir home fakebin socket out status windows_target
+  rec=$(make_case native-symlink)
+  IFS='|' read -r dir home fakebin socket <<EOF
+$rec
+EOF
+  windows_target="/mnt/c/Users/user/AppData/Local/Temp/fm-fake-codex.exe"
+  rm -f "$fakebin/codex"
+  printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$windows_target"
+  chmod +x "$windows_target"
+  ln -s "$windows_target" "$fakebin/codex"
+  out=$(run_launch "$home" "$fakebin" "$socket" "$dir/unused.log" --codex 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "Windows executable hidden behind a Linux symlink was accepted"
+  assert_contains "$out" 'native WSL/Linux' "Windows-symlink rejection was unclear"
+  rm -f "$windows_target"
+  pass "native harness validation follows symlinks before rejecting Windows targets"
+}
+
 test_existing_session_requires_positive_identity() {
   local rec dir home fakebin socket out status log pane_pid holder
   rec=$(make_case session-identity)
@@ -351,4 +375,5 @@ test_live_and_stale_lock_behavior
 test_concurrent_launch_serialization
 test_lock_live_pid_query_is_read_only
 test_interpreter_hosted_process_identity
+test_native_harness_rejects_windows_symlink
 test_existing_session_requires_positive_identity

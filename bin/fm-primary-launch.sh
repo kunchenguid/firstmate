@@ -130,12 +130,20 @@ pid_belongs_to_pane() {
 }
 
 verify_session() {
-  local recorded_home recorded_harness lock_pid pane_pid live lock_harness
+  local recorded_home recorded_harness recorded_model recorded_effort lock_pid pane_pid live lock_harness
   recorded_home=$(session_option '@firstmate_home')
   [ "$recorded_home" = "$FM_HOME_FIXED" ] || fail "tmux session '$SESSION' is not verified for $FM_HOME_FIXED; no state was changed"
   recorded_harness=$(session_option '@firstmate_harness')
   case "$recorded_harness" in codex|pi|grok|claude|opencode) ;; *) fail "tmux session '$SESSION' has no verified harness routing metadata; no state was changed" ;; esac
   [ "$recorded_harness" = "$HARNESS" ] || refuse_running "$recorded_harness" "$HARNESS"
+  recorded_model=$(session_option '@firstmate_model')
+  recorded_effort=$(session_option '@firstmate_effort')
+  if [ "$MODEL_SET" -eq 1 ] && [ "$recorded_model" != "$MODEL" ]; then
+    fail "Firstmate is already running on $(harness_label "$HARNESS") with a different model profile; no state was changed"
+  fi
+  if [ "$EFFORT_SET" -eq 1 ] && [ "$recorded_effort" != "$EFFORT" ]; then
+    fail "Firstmate is already running on $(harness_label "$HARNESS") with a different effort profile; no state was changed"
+  fi
   lock_pid=$(live_lock_pid || true)
   [ -n "$lock_pid" ] || fail "tmux session '$SESSION' has no authoritative live lock for $FM_HOME_FIXED; no state was changed"
   pane_pid=$(session_pane_pid || true)
@@ -177,11 +185,16 @@ attach_session() {
 }
 
 require_native_harness() {
-  local executable
+  local executable resolved executable_lower resolved_lower
   executable=$(command -v "$HARNESS" 2>/dev/null || true)
   [ -n "$executable" ] || fail "native WSL/Linux harness '$HARNESS' is not installed"
-  case "$executable" in
-    /mnt/[a-zA-Z]/*|*.exe) fail "'$HARNESS' resolves to a Windows executable ($executable); install a native WSL/Linux build" ;;
+  resolved=$(readlink -f "$executable" 2>/dev/null) || fail "cannot resolve harness executable: $executable"
+  executable_lower=$(printf '%s' "$executable" | tr '[:upper:]' '[:lower:]')
+  resolved_lower=$(printf '%s' "$resolved" | tr '[:upper:]' '[:lower:]')
+  case "$executable_lower|$resolved_lower" in
+    /mnt/[a-z]/*|*\|/mnt/[a-z]/*|*.exe\|*|*\|*.exe)
+      fail "'$HARNESS' resolves to a Windows executable ($resolved); install a native WSL/Linux build"
+      ;;
   esac
 }
 
@@ -334,6 +347,8 @@ fi
 tmux_cmd new-session -d -s "$SESSION" -c "$FM_ROOT" "${TMUX_ENV[@]}" "exec '$FM_ROOT/bin/fm-primary-launch.sh' __run"
 tmux_cmd set-option -q -t "$SESSION" @firstmate_home "$FM_HOME_FIXED"
 tmux_cmd set-option -q -t "$SESSION" @firstmate_harness "$HARNESS"
+tmux_cmd set-option -q -t "$SESSION" @firstmate_model "$MODEL"
+tmux_cmd set-option -q -t "$SESSION" @firstmate_effort "$EFFORT"
 if ! wait_for_session_lock; then
   tmux_cmd kill-session -t "$SESSION" 2>/dev/null || true
   fail "new '$SESSION' session did not acquire the authoritative live lock"
