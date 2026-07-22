@@ -74,6 +74,10 @@ Mark an axis not applicable only after inspecting its integration surface, and u
 For critical safety, routing, startup, and supervision infrastructure, prefer deterministic and idempotent enforcement over relying on agent memory alone.
 Keep instructions as the authority and discovery layer, but make repeated execution converge safely and make invalid or unsafe states fail closed wherever the runtime can enforce them.
 
+Logic written into a generated file under `state/` is frozen at the moment it was generated, because nothing rewrites it afterwards.
+Keep such a file to its per-task parameters plus one call into a tracked library it sources on every run, so a fix reaches the instances already armed instead of only the ones armed after the fix.
+`bin/fm-pr-check.sh` and `bin/fm-poll-lib.sh` are the worked example: a poll armed in July kept asking July's question until its judgement moved into the library.
+
 ## Repo style rules
 
 - Put one full sentence per line in tracked Markdown.

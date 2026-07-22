@@ -11,9 +11,11 @@
 # What the watch run buys over bin/fm-pr-check.sh's poll: the daemon polls the
 # PR's CI checks, UNRESOLVED REVIEW THREADS, approval state, and mergeability
 # until it merges or closes, and parks (escalates) on anything that needs a
-# person. fm-pr-check.sh's poll stays armed as the independent backstop - it
-# sees merge and a red CI aggregate through gh/bytedcli with no daemon in the
-# path - so a dead daemon still cannot blind firstmate to those two signals.
+# person. The poll does none of that reviewing; it stays armed as the
+# orchestration-layer backstop and asks, for this task's run id only, whether
+# the PR merged, whether the run parked, and whether the run is still alive - so
+# a watch that dies takes firstmate's attention with it instead of going quiet.
+# bin/fm-poll-lib.sh's header owns that contract.
 #
 # Ownership: the watch run belongs to the DAEMON, not to whoever armed it and
 # not to a worktree. It uses no worktree and calls no agent, so it survives crew
