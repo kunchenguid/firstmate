@@ -603,10 +603,14 @@ fm_afk_launch_stop() {
 
 fm_afk_launch_main() {
   local result
-  fm_afk_launch_lock_acquire || return 1
+  # Arm the traps before acquiring: a signal landing between the lock's creation
+  # and the trap installation used to kill the launcher outright and leave the
+  # lifecycle lock behind. Release is ownership-scoped, so running it after a
+  # failed or not-yet-taken acquisition is a no-op.
   trap fm_afk_launch_lock_release EXIT
   trap 'exit 130' INT
   trap 'exit 143' TERM
+  fm_afk_launch_lock_acquire || { trap - EXIT INT TERM; return 1; }
   case "${1:-start}" in
     start) fm_afk_launch_start ;;
     start-native) fm_afk_launch_start_native ;;

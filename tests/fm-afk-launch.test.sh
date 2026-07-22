@@ -262,6 +262,53 @@ unit_signal_exits_with_lock_cleanup() {
   rm -rf "$st"
 }
 
+# A signal that lands DURING acquisition, after the lock directory and its pid
+# file exist but before acquire returns, must still release the lock. The window
+# is microseconds in real use, so widen it deterministically: acquire's identity
+# probe shells out to `ps`, and a PATH shim stalls exactly that call.
+unit_signal_during_lock_acquire_cleans_up() {
+  local st shim child
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-acquire-signal.XXXXXX")
+  shim=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-acquire-shim.XXXXXX")
+  cat > "$shim/ps" <<'SHIM'
+#!/usr/bin/env bash
+# Stall exactly the identity probe fm_afk_launch_lock_acquire makes after it has
+# created the lock directory and written its pid, so the signal below lands
+# inside the acquire window instead of racing it.
+case " $* " in
+  *" -o lstart= "*) sleep 2 ;;
+esac
+exec /bin/ps "$@"
+SHIM
+  chmod +x "$shim/ps"
+  mkdir -p "$st/state"
+  PATH="$shim:$PATH" FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" bash -c '
+    . "$1"
+    fm_afk_launch_start() { sleep 30; }
+    fm_afk_launch_main start
+  ' _ "$LAUNCH" &
+  child=$!
+  for _ in $(seq 1 100); do
+    [ -s "$st/state/.afk-launch.lock/pid" ] && break
+    sleep 0.05
+  done
+  if [ ! -s "$st/state/.afk-launch.lock/pid" ]; then
+    fail "launcher acquire signal: the launcher never reached the acquire window"
+    kill -TERM "$child" 2>/dev/null || true
+    wait "$child" 2>/dev/null || true
+    rm -rf "$st" "$shim"
+    return 0
+  fi
+  kill -TERM "$child" 2>/dev/null || true
+  wait "$child" 2>/dev/null || true
+  if [ ! -e "$st/state/.afk-launch.lock" ]; then
+    pass "launcher signal: TERM inside the acquire window releases the lifecycle lock"
+  else
+    fail "launcher signal: TERM inside the acquire window stranded the lifecycle lock"
+  fi
+  rm -rf "$st" "$shim"
+}
+
 unit_herdr_partial_create_recovery() {
   local st recorded
   st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-herdr-partial.XXXXXX")
@@ -868,6 +915,7 @@ unit_failed_start_rolls_back_state
 unit_concurrent_start_serialized
 unit_lock_initialization_grace
 unit_signal_exits_with_lock_cleanup
+unit_signal_during_lock_acquire_cleans_up
 unit_herdr_partial_create_recovery
 unit_herdr_error_with_exact_ids_closes_exact
 unit_herdr_run_failure_preserves_unconfirmed_record
