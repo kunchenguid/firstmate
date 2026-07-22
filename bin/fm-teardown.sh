@@ -840,9 +840,17 @@ validate_firstmate_operational_dirs_for_removal() {
 # .claude/settings.local.json stays listed for tasks spawned before the hook moved
 # out of the worktree; current claude spawns write nothing here at all.
 remove_worktree_hook_artifacts() {
-  local wt=$1 rel
+  local wt=$1 rel status
   for rel in .claude/settings.local.json .opencode/plugins/fm-turn-end.js .fm-grok-turnend; do
-    if git -C "$wt" ls-files --error-unmatch -- "$rel" >/dev/null 2>&1; then
+    status=0
+    git -C "$wt" ls-files --error-unmatch -- "$rel" >/dev/null 2>&1 || status=$?
+    # Exit 1 is git's "this path is not tracked", the only answer that makes the
+    # delete safe. Exit 0 means the project owns it; anything else (128 for an
+    # unreadable or half-removed pool worktree) means git could not answer, and
+    # deleting on a non-answer would destroy the very file this guard protects.
+    if [ "$status" -ne 1 ]; then
+      [ "$status" -eq 0 ] ||
+        echo "warning: could not determine whether $wt tracks $rel (git ls-files exited $status); leaving it in place" >&2
       continue
     fi
     rm -f "$wt/$rel"

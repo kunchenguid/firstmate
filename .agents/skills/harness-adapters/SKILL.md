@@ -147,6 +147,8 @@ Turn-end hook: `fm-spawn` keeps the crewmate turn-end `Stop` hook in `state/<id>
 `--settings` merges an additional settings file with the project's own `.claude/settings.local.json` instead of replacing it, verified on Claude Code 2.1.217: both the external hook and a project `Stop` hook fire, and the project file stays byte-identical.
 Writing the hook into `<worktree>/.claude/settings.local.json` was the earlier shape and destroyed data, because projects such as `meshery/meshery` track that file and the write was an unconditional truncate.
 A `.git/info/exclude` entry cannot mask that: it suppresses untracked paths only, so a tracked collision still reads as a modification and blocks teardown.
+Because the settings file now lives outside the worktree, it is NOT picked up automatically when claude restarts there: any manual relaunch of a crewmate pane, such as a plain `claude --continue` during stuck-crewmate recovery, must repeat `--settings <the task's state/<id>.claude-settings.json>`.
+Omitting it silently drops turn-end wakes for that task and degrades it to watcher polling with no visible error.
 
 First launch in a fresh worktree, or first ever on a machine, may show a trust or bypass-permissions confirmation.
 After every spawn, peek the pane within about 20 seconds.
@@ -309,7 +311,9 @@ GLOBAL hooks in `~/.grok/hooks/` are always trusted and load on first launch.
 So `fm-spawn` installs ONE firstmate-owned global hook, `~/.grok/hooks/fm-turn-end.json`, plus the companion `~/.grok/hooks/fm-turn-end.sh`, guarded as a no-op for every non-firstmate grok session.
 Its `Stop` command fires only when the current workspace holds a `.fm-grok-turnend` token pointer that matches the firstmate-owned hook registry under `~/.grok/hooks/fm-turn-end.d/`.
 `fm-spawn` writes that per-task pointer (`<worktree>/.fm-grok-turnend`, gitignored via git info/exclude) and a matching registry entry naming this task's `state/<id>.turn-ended`.
-That pointer and opencode's `.opencode/plugins/fm-turn-end.js` are the only turn-end artifacts still written inside a worktree; `fm-spawn` refuses the spawn outright if the project tracks either path, because an exclude entry cannot mask a tracked file and overwriting it would destroy project content.
+That pointer and opencode's `.opencode/plugins/fm-turn-end.js` are the only turn-end artifacts still written inside a worktree; `fm-spawn` refuses the spawn outright if the project tracks either path, or if git cannot answer whether it does, because an exclude entry cannot mask a tracked file and overwriting it would destroy project content.
+A refusal is a full unwind: `spawn_abort_cleanup` returns the pool worktree, kills the backend window, and removes `/tmp/fm-<id>`, since the refusal happens before `state/<id>.meta` exists and `fm-teardown` cannot reclaim a task that has no meta.
+The exclude entries themselves land in the repo's SHARED `.git/info/exclude` (a linked worktree resolves `git rev-parse --git-path info/exclude` to the common dir), which the captain's primary checkout reads too, so every spawn also prunes the obsolete `.claude/settings.local.json` entry firstmate no longer owns and leaves every other line untouched.
 The hook reads `$GROK_WORKSPACE_ROOT`, which is always set for hooks and equals the worktree.
 This keeps the hook outside the worktree, needs no trust grant, and writes only firstmate-owned files.
 `fm-teardown` removes the worktree pointer before returning a pooled worktree.

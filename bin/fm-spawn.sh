@@ -104,6 +104,9 @@
 # claude, codex, and pi carry theirs on the launch command and write nothing into the
 # worktree at all. grok uses a firstmate-owned global hook under ${GROK_HOME:-$HOME/.grok}/hooks
 # plus a gitignored .fm-grok-turnend worktree pointer and a state token.
+# A worktree-resident hook whose path the project TRACKS (or that git cannot answer
+# for) refuses the spawn instead of overwriting it; spawn_abort_cleanup then unwinds
+# everything this spawn allocated before state/<id>.meta existed.
 # On success prints: spawned <id> harness=<name> kind=<ship|scout|secondmate> mode=<mode> yolo=<on|off> window=<backend-target> worktree=<path>
 # mode/yolo are resolved per-project from data/projects.md for ship/scout tasks;
 # secondmate spawns record mode=secondmate, yolo=off, home=, and projects=.
@@ -232,6 +235,16 @@ SPAWN_TASK_LOCK=
 SPAWN_TASK_LOCK_HELD=0
 CONFIG_INHERIT_LOCK=
 CONFIG_INHERIT_LOCK_HELD=0
+# Everything a spawn allocates BEFORE state/<id>.meta exists has no other owner:
+# fm-teardown resolves a task from its meta, so a task that never got one cannot
+# be reclaimed by it at all. Each flag below is raised at its own allocation point
+# and lowered once meta hands ownership over (or once another cleanup path takes
+# the resource), which keeps spawn_abort_cleanup the single unwinder for every
+# abort path in this script - the refuse-if-tracked exit, the treehouse timeout,
+# and a worktree that fails validate_spawn_worktree alike.
+SPAWN_WINDOW_ABORT_CLEANUP=0
+SPAWN_WORKTREE_ABORT_CLEANUP=0
+SPAWN_TASK_TMP_ABORT_CLEANUP=0
 
 parse_orca_worktree_result() {
   local raw=$1 rest
@@ -247,6 +260,28 @@ parse_orca_worktree_result() {
     ORCA_TERMINAL=${rest#*$'\t'}
   else
     ORCA_TERMINAL=
+  fi
+}
+
+# Return a pooled worktree this spawn allocated (treehouse get) but never handed
+# to fm-teardown. Best effort by design - an abort must not become a second
+# failure - so every step is tolerant and any residue is reported with the exact
+# manual command. Runs from the project because treehouse resolves the pool from
+# the working directory, the same way fm-teardown's return does.
+spawn_abort_release_worktree() {
+  local wt=${WT:-} proj=${PROJ_ABS:-}
+  [ -n "$wt" ] && [ -n "$proj" ] || return 0
+  [ -d "$wt" ] || return 0
+  # Defense in depth for the one case that must never be returned to a pool: a
+  # secondmate's WT is its HOME, not an allocated worktree. Its caller never
+  # raises the flag, and this keeps that true even if a future path does.
+  [ "$wt" != "$proj" ] || return 0
+  if ! command -v treehouse >/dev/null 2>&1; then
+    echo "warning: treehouse is unavailable; worktree $wt stays checked out - return it with: (cd $proj && treehouse return --force $wt)" >&2
+    return 0
+  fi
+  if ! ( cd "$proj" && treehouse return --force "$wt" ) >/dev/null 2>&1; then
+    echo "warning: could not return worktree $wt to the pool - return it with: (cd $proj && treehouse return --force $wt)" >&2
   fi
 }
 
@@ -297,6 +332,25 @@ spawn_abort_cleanup() {
         fi
       fi
     fi
+  fi
+  # Non-orca unwind, in the order fm-teardown uses: return the pool worktree
+  # first (its return also clears whatever the pane left running in it), then
+  # drop the backend window, then the per-task temp root.
+  if [ "$SPAWN_WORKTREE_ABORT_CLEANUP" = 1 ]; then
+    SPAWN_WORKTREE_ABORT_CLEANUP=0
+    spawn_abort_release_worktree || true
+  fi
+  if [ "$SPAWN_WINDOW_ABORT_CLEANUP" = 1 ]; then
+    SPAWN_WINDOW_ABORT_CLEANUP=0
+    # A projected herdr pane is owned by the exact projection cleanup above,
+    # which is focus- and lock-aware; never close it twice from here.
+    if [ "${HERDR_PROJECTED:-0}" != 1 ]; then
+      fm_backend_kill "$BACKEND" "${T:-}" "${ZELLIJ_TAB_ID:-}" "${W:-}" 2>/dev/null || true
+    fi
+  fi
+  if [ "$SPAWN_TASK_TMP_ABORT_CLEANUP" = 1 ]; then
+    SPAWN_TASK_TMP_ABORT_CLEANUP=0
+    [ -z "${TASK_TMP:-}" ] || rm -rf "$TASK_TMP"
   fi
   if [ "$SPAWN_TASK_LOCK_HELD" = 1 ]; then
     SPAWN_TASK_LOCK_HELD=0
@@ -1008,6 +1062,10 @@ EOF
     T="$ORCA_TERMINAL"
     ;;
 esac
+# The backend window/pane exists now and no meta records it yet, so
+# spawn_abort_cleanup owns it until the meta write below. orca is excluded
+# because ORCA_ABORT_CLEANUP already unwinds its terminal with its worktree.
+[ "$BACKEND" = orca ] || SPAWN_WINDOW_ABORT_CLEANUP=1
 # #134 robustness: only tmux needs a worktree-detection target distinct from $T -
 # its rename-safe stable window id, set as WT_TARGET=$WID in the tmux branch above.
 # Every other backend addresses its pane/surface by the id already in $T, so default
@@ -1097,6 +1155,10 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   fi
 
   validate_spawn_worktree "treehouse get" "$T"
+  # Provably an isolated pool worktree now, and this spawn's to release until
+  # meta records it. Raised only AFTER validation: a worktree that failed it may
+  # be the primary checkout, which must never be returned to a pool.
+  SPAWN_WORKTREE_ABORT_CLEANUP=1
 fi
 
 # Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. Go won't
@@ -1106,6 +1168,7 @@ fi
 # targeted knob: TMPDIR is too broad (affects every program's temp, not just Go's).
 TASK_TMP="/tmp/fm-$ID"
 mkdir -p "$TASK_TMP/gotmp"
+SPAWN_TASK_TMP_ABORT_CLEANUP=1
 
 # Per-harness turn-end hook: a file that touches state/<id>.turn-ended when the
 # agent finishes a turn. Worktree-resident hooks are kept out of git's view so
@@ -1113,17 +1176,73 @@ mkdir -p "$TASK_TMP/gotmp"
 mkdir -p "$STATE"
 STATE_REAL=$(cd "$STATE" && pwd -P)
 TURNEND="$STATE_REAL/$ID.turn-ended"
-# exclude_path suppresses an UNTRACKED path only. git still reports a TRACKED
-# file as modified, so an entry here is no protection whatsoever once the project
-# commits that path - which is exactly when overwriting it does damage.
-# refuse_if_tracked below is the guard for that case; exclude_path is only the
-# tidiness half.
+# exclude_path has two limits, and both bite the same way.
+#
+# One: it suppresses an UNTRACKED path only. git still reports a TRACKED file as
+# modified, so an entry here is no protection whatsoever once the project commits
+# that path - which is exactly when overwriting it does damage. refuse_if_tracked
+# below is the guard for that case; exclude_path is only the tidiness half.
+#
+# Two: `git rev-parse --git-path info/exclude` resolves to the repo's COMMON dir,
+# so from a linked worktree every entry lands in the SHARED .git/info/exclude that
+# the captain's primary checkout reads too, permanently, with nothing removing it
+# at teardown. That is why prune_obsolete_exclude_entries exists: firstmate no
+# longer writes .claude/settings.local.json anywhere, but the entry it used to add
+# still hides a developer's own settings file from `git status` and `git add .`
+# in every project a claude crewmate was ever spawned into.
 exclude_path() {
   local rel=$1 EXCL
   EXCL=$(git -C "$WT" rev-parse --git-path info/exclude 2>/dev/null || true)
   [ -n "$EXCL" ] || return 0
+  # A LINKED worktree gets an absolute common-dir path back, but a plain checkout
+  # gets one relative to the queried repo, which would otherwise resolve against
+  # THIS process's cwd and write a stray .git/info/exclude there.
+  case "$EXCL" in
+    /*) ;;
+    *) EXCL="$WT/$EXCL" ;;
+  esac
   mkdir -p "$(dirname "$EXCL")"
   grep -qxF "$rel" "$EXCL" 2>/dev/null || echo "$rel" >> "$EXCL"
+}
+# Entries firstmate used to add and no longer owns. Pruned from the shared
+# exclude on every spawn, so repos firstmate already touches heal over time
+# without anyone running a manual cleanup. Deliberately exact-match only: the
+# still-current .opencode/plugins/fm-turn-end.js and .fm-grok-turnend entries,
+# and anything a human or another tool added, are copied through byte for byte.
+# An identical line a human happened to add themselves is indistinguishable from
+# firstmate's and goes too; the only effect is that their own file stops being
+# hidden from git, which is visible and one `echo >>` to undo.
+OBSOLETE_EXCLUDE_ENTRIES=('.claude/settings.local.json')
+prune_obsolete_exclude_entries() {
+  local excl entry tmp rc
+  excl=$(git -C "$WT" rev-parse --git-path info/exclude 2>/dev/null) || return 0
+  [ -n "$excl" ] || return 0
+  case "$excl" in
+    /*) ;;
+    *) excl="$WT/$excl" ;;
+  esac
+  # A missing, unreadable, or unwritable exclude file is a no-op, never a spawn
+  # failure: this is opportunistic hygiene, not part of the task's contract.
+  [ -f "$excl" ] && [ -r "$excl" ] && [ -w "$excl" ] || return 0
+  for entry in "${OBSOLETE_EXCLUDE_ENTRIES[@]}"; do
+    grep -qxF "$entry" "$excl" 2>/dev/null || continue
+    # Copy first (so the rewrite inherits the original's mode in a shared repo),
+    # filter into the copy, then rename. A concurrent reader sees either the old
+    # file or the new one, never a half-written one, and a failed write leaves
+    # the original untouched. Concurrent prunes compute identical content, so
+    # whichever rename lands last is still correct.
+    tmp="$excl.fm-prune.$$"
+    cp -p "$excl" "$tmp" 2>/dev/null || { rm -f "$tmp"; return 0; }
+    rc=0
+    grep -vxF "$entry" "$excl" > "$tmp" 2>/dev/null || rc=$?
+    # grep exits 1 when it selects no lines at all (the exclude held only this
+    # entry), which is a legitimate empty result; only 2+ is a real failure.
+    if [ "$rc" -gt 1 ]; then
+      rm -f "$tmp"
+      return 0
+    fi
+    mv -f "$tmp" "$excl" 2>/dev/null || rm -f "$tmp"
+  done
 }
 # Guard every worktree-RESIDENT hook write. Overwriting a path the project tracks
 # destroys committed project content, rides along in any `git add -A` the crewmate
@@ -1131,15 +1250,30 @@ exclude_path() {
 # real work. Refuse the spawn instead: silently clobbering a project's own file is
 # never the safe default, and the operator can pick a harness whose hook lives
 # outside the worktree. Runs before state/<id>.meta is written, so a refusal
-# leaves no half-recorded task.
+# leaves no half-recorded task - and because nothing without meta can be torn
+# down later, the EXIT trap's spawn_abort_cleanup reclaims the window, the pool
+# worktree and the temp root this spawn had already taken.
 refuse_if_tracked() {
-  local rel=$1
-  git -C "$WT" ls-files --error-unmatch -- "$rel" >/dev/null 2>&1 || return 0
-  echo "REFUSED: $rel is tracked by the project, and the $HARNESS turn-end hook would overwrite it." >&2
+  local rel=$1 status=0
+  git -C "$WT" ls-files --error-unmatch -- "$rel" >/dev/null 2>&1 || status=$?
+  # Exit 1 is git's "this path is not tracked", the only answer that makes the
+  # write safe. Exit 0 means tracked; anything else (128 for an unreadable or
+  # half-removed worktree) means git could not answer at all, and treating a
+  # non-answer as untracked is the fail-destructive shape this guard removes.
+  if [ "$status" -eq 1 ]; then
+    return 0
+  fi
+  if [ "$status" -eq 0 ]; then
+    echo "REFUSED: $rel is tracked by the project, and the $HARNESS turn-end hook would overwrite it." >&2
+  else
+    echo "REFUSED: could not determine whether the project tracks $rel (git ls-files exited $status), and the $HARNESS turn-end hook would overwrite it." >&2
+  fi
+  echo "Reclaiming this spawn's own allocations (backend target $T, worktree $WT); no task metadata was written." >&2
   echo "Untrack or relocate that file in $WT, or dispatch this task on a harness whose turn-end hook lives outside the worktree (claude, codex, pi)." >&2
   exit 1
 }
 if [ "$KIND" != secondmate ]; then
+  prune_obsolete_exclude_entries
   case "$HARNESS" in
     claude*)
       # Written OUTSIDE the worktree and loaded with --settings (see launch_template).
@@ -1292,6 +1426,11 @@ META_WINDOW=$T
   fi
 } > "$STATE/$ID.meta"
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
+# meta records the window, the worktree and the temp root from here on, so
+# fm-teardown owns them and spawn_abort_cleanup must unwind nothing.
+SPAWN_WINDOW_ABORT_CLEANUP=0
+SPAWN_WORKTREE_ABORT_CLEANUP=0
+SPAWN_TASK_TMP_ABORT_CLEANUP=0
 
 sq_brief=$(shell_quote "$BRIEF")
 sq_turnend=$(shell_quote "$TURNEND")

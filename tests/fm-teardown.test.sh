@@ -487,6 +487,24 @@ SH
   chmod +x "$case_dir/fakebin/git"
 }
 
+# Fail only `git ls-files --error-unmatch` (exit 128, as an unreadable or
+# half-removed worktree does); every other git call passes through untouched.
+add_git_ls_files_failure() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/git" <<'SH'
+#!/usr/bin/env bash
+real=${REAL_GIT_FOR_TEST:?}
+for a in "$@"; do
+  if [ "$a" = --error-unmatch ]; then
+    echo "fatal: not a git repository (fake)" >&2
+    exit 128
+  fi
+done
+exec "$real" "$@"
+SH
+  chmod +x "$case_dir/fakebin/git"
+}
+
 # Run teardown with PATH mocking. Args: case_dir [extra args...]
 run_teardown() {
   local case_dir=$1; shift
@@ -620,6 +638,31 @@ test_teardown_removes_only_untracked_hook_artifacts() {
   dirty=$(git -C "$case_dir/wt" status --porcelain)
   [ -z "$dirty" ] || fail "hook-artifacts: cleanup left the worktree dirty"$'\n'"$dirty"
   pass "teardown removes untracked turn-end artifacts and preserves tracked project files"
+}
+
+# git exiting non-zero for a reason OTHER than "not tracked" (128 for an
+# unreadable or half-removed pool worktree) is not permission to delete: the
+# guard must fail safe, or a transient git failure destroys the project's file.
+test_teardown_keeps_hook_artifacts_when_tracked_state_is_unknown() {
+  local case_dir rc wt_head
+  case_dir=$(make_case hook-artifacts-gitfail)
+  write_meta "$case_dir" local-only ship
+  printf 'token=fm.abcdefghijkl\n' > "$case_dir/wt/.fm-grok-turnend"
+  wt_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  git -C "$case_dir/project" update-ref refs/heads/main "$wt_head"
+  add_git_ls_files_failure "$case_dir"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "hook-artifacts-gitfail: teardown should still succeed"
+  assert_present "$case_dir/wt/.fm-grok-turnend" \
+    "hook-artifacts-gitfail: cleanup deleted a file it could not prove was untracked"
+  grep -q "could not determine whether" "$case_dir/stderr" ||
+    fail "hook-artifacts-gitfail: cleanup skipped the file silently"
+  pass "teardown keeps hook artifacts when git cannot say whether the project tracks them"
 }
 
 test_no_mistakes_origin_remote_allows() {
@@ -1412,6 +1455,7 @@ test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
 test_no_mistakes_origin_remote_allows
 test_teardown_removes_only_untracked_hook_artifacts
+test_teardown_keeps_hook_artifacts_when_tracked_state_is_unknown
 test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed
 test_herdr_teardown_clears_escalation_marker

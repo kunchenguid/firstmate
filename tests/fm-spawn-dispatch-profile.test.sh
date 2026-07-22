@@ -32,7 +32,13 @@ esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
   list-windows) exit 0 ;;
-  has-session|new-session|new-window|kill-window) exit 0 ;;
+  kill-window)
+    if [ -n "${FM_FAKE_KILL_LOG:-}" ]; then
+      printf '%s\n' "$*" >> "$FM_FAKE_KILL_LOG"
+    fi
+    exit 0
+    ;;
+  has-session|new-session|new-window) exit 0 ;;
   send-keys)
     if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
       prev=
@@ -49,8 +55,39 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
-  fm_fake_exit0 "$fakebin" treehouse
+  # `treehouse get` runs inside the pane (never through this fake); the calls the
+  # fake does see are the spawn-abort `treehouse return --force <wt>`, which the
+  # refusal-unwind case asserts on.
+  cat > "$fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ -n "${FM_FAKE_TREEHOUSE_LOG:-}" ]; then
+  printf '%s\n' "$*" >> "$FM_FAKE_TREEHOUSE_LOG"
+fi
+exit 0
+SH
+  chmod +x "$fakebin/treehouse"
   printf '%s\n' "$fakebin"
+}
+
+# Make `git ls-files --error-unmatch` fail the way an unreadable or half-removed
+# worktree does (exit 128), while every other git call passes through untouched.
+# "git could not answer" must never be read as "the path is untracked".
+install_lsfiles_failing_git() {
+  local fakebin=$1 real_git
+  real_git=$(command -v git)
+  cat > "$fakebin/git" <<SH
+#!/usr/bin/env bash
+set -u
+for a in "\$@"; do
+  if [ "\$a" = --error-unmatch ]; then
+    echo "fatal: not a git repository (fake)" >&2
+    exit 128
+  fi
+done
+exec "$real_git" "\$@"
+SH
+  chmod +x "$fakebin/git"
 }
 
 make_spawn_case() {
@@ -96,6 +133,7 @@ run_spawn() {
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
     FM_FAKE_LAUNCH_LOG="$launchlog" GROK_HOME="$home/grok-home" PATH="$fakebin:$PATH" \
+    FM_FAKE_TREEHOUSE_LOG="$CASE_DIR/treehouse.log" FM_FAKE_KILL_LOG="$CASE_DIR/kill.log" \
     "$SPAWN" "$@" 2>&1
 }
 
@@ -196,6 +234,94 @@ test_worktree_resident_hook_refuses_a_tracked_collision() {
   assert_worktree_pristine "$WT_DIR" "$CASE_DIR/plugin.baseline" .opencode/plugins/fm-turn-end.js \
     "tracked project plugin"
   pass "a worktree-resident turn-end hook refuses to overwrite a tracked project file"
+}
+
+# A refusal happens after the window, the pool worktree and /tmp/fm-<id> are
+# allocated but BEFORE state/<id>.meta exists, so fm-teardown could never reclaim
+# any of it. spawn_abort_cleanup owns that unwind.
+test_worktree_resident_hook_refusal_releases_what_it_allocated() {
+  local rec id out status
+  id=turnend-opencode-unwind-z20
+  rec=$(make_spawn_case turnend-opencode-unwind opencode "$id")
+  read_case_record "$rec"
+  track_worktree_file "$WT_DIR" .opencode/plugins/fm-turn-end.js 'export const Project = {}'
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 1 "$status" "a tracked turn-end hook path must refuse the spawn"
+  assert_absent "$HOME_DIR/state/$id.meta" "refusal must happen before meta is written"
+  assert_contains "$out" "backend target " "refusal did not name the backend target it reclaimed"
+  assert_contains "$out" "worktree $WT_DIR" "refusal did not name the worktree it reclaimed"
+  assert_grep "return --force $WT_DIR" "$CASE_DIR/treehouse.log" \
+    "refusal did not return the pool worktree it allocated"
+  assert_grep "fm-$id" "$CASE_DIR/kill.log" \
+    "refusal did not kill the backend window it created"
+  assert_absent "/tmp/fm-$id" "refusal left the per-task temp root behind"
+  pass "a refused spawn returns its worktree, kills its window, and removes its temp root"
+}
+
+# git exiting non-zero for a reason OTHER than "not tracked" (128 for an
+# unreadable or half-removed worktree) is not permission to overwrite.
+test_worktree_resident_hook_refuses_when_tracked_state_is_unknown() {
+  local rec id out status
+  id=turnend-opencode-gitfail-z21
+  rec=$(make_spawn_case turnend-opencode-gitfail opencode "$id")
+  read_case_record "$rec"
+  install_lsfiles_failing_git "$FAKEBIN_DIR"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 1 "$status" "spawn must refuse when git cannot say whether the hook path is tracked"
+  assert_contains "$out" "could not determine whether the project tracks .opencode/plugins/fm-turn-end.js" \
+    "spawn did not explain the undeterminable tracked state"
+  assert_absent "$WT_DIR/.opencode/plugins/fm-turn-end.js" \
+    "spawn wrote its hook despite being unable to prove the path was untracked"
+  assert_absent "$HOME_DIR/state/$id.meta" "undeterminable refusal must happen before meta is written"
+  pass "an undeterminable tracked state refuses the spawn instead of overwriting"
+}
+
+# exclude_path writes into the repo's SHARED .git/info/exclude, which the
+# captain's primary checkout reads too and which nothing removes at teardown.
+# The .claude/settings.local.json entry firstmate used to add now hides a
+# developer's own settings file from git, so every spawn prunes exactly it.
+test_spawn_prunes_only_the_obsolete_shared_exclude_entry() {
+  local rec id1 id2 excl out status before
+  id1=exclude-prune-z22
+  id2=exclude-prune-z23
+  rec=$(make_spawn_case exclude-prune claude "$id1" "$id2")
+  read_case_record "$rec"
+  excl="$PROJ_DIR/.git/info/exclude"
+  mkdir -p "$(dirname "$excl")"
+  printf '%s\n' \
+    '# git ls-files --others --exclude-from=.git/info/exclude' \
+    '.claude/settings.local.json' \
+    '.opencode/plugins/fm-turn-end.js' \
+    '.fm-grok-turnend' \
+    'captains-scratch-notes.txt' > "$excl"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id1" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "spawn should succeed while pruning the obsolete exclude entry"
+  assert_contains "$out" "spawned $id1 harness=claude" "spawn did not report claude"
+  ! grep -qxF '.claude/settings.local.json' "$excl" ||
+    fail "the obsolete .claude/settings.local.json exclude entry was not pruned"
+  grep -qxF '.opencode/plugins/fm-turn-end.js' "$excl" ||
+    fail "the prune removed opencode's still-current exclude entry"
+  grep -qxF '.fm-grok-turnend' "$excl" ||
+    fail "the prune removed grok's still-current exclude entry"
+  grep -qxF 'captains-scratch-notes.txt' "$excl" ||
+    fail "the prune removed a human-added exclude entry"
+  assert_grep '# git ls-files' "$excl" "the prune removed the exclude file's own header comment"
+
+  # Idempotent and safe to repeat: a second spawn finds nothing to prune and
+  # leaves the shared file byte-identical.
+  before=$(cat "$excl")
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id2" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "a second spawn should succeed with nothing left to prune"
+  [ "$(cat "$excl")" = "$before" ] ||
+    fail "a repeated prune rewrote the shared exclude"$'\n'"$(cat "$excl")"
+  pass "spawn prunes only the obsolete shared exclude entry and repeats safely"
 }
 
 test_no_profile_keeps_claude_launch_unchanged() {
@@ -531,5 +657,8 @@ test_active_dispatch_profile_does_not_block_secondmate_launch
 test_claude_turnend_hook_preserves_tracked_project_settings
 test_claude_turnend_hook_writes_nothing_into_a_clean_worktree
 test_worktree_resident_hook_refuses_a_tracked_collision
+test_worktree_resident_hook_refusal_releases_what_it_allocated
+test_worktree_resident_hook_refuses_when_tracked_state_is_unknown
+test_spawn_prunes_only_the_obsolete_shared_exclude_entry
 
 echo "# all fm-spawn-dispatch-profile tests passed"
