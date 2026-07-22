@@ -73,6 +73,27 @@ if fm_backend_tmux_create_task "$SESSION" "$WINDOW" "$HOME" 2>/dev/null; then
 fi
 pass "real tmux: fm_backend_tmux_create_task creates a window and refuses a duplicate"
 
+# --- WSL/Windows worktree-leakage guard --------------------------------------
+# A non-WSL start dir (a /mnt mount, a UNC path, a drive-letter path, or empty)
+# must be refused BEFORE a window opens, so a Windows-launched session can never
+# let `treehouse get` build the worktree under /mnt/c (the leakage fm-spawn
+# refuses only after the fact, stranding queued work).
+for bad in "/mnt/c/Users/tiger" "//wsl.localhost/x" "C:/Users/tiger" ""; do
+  if fm_backend_tmux_create_task "$SESSION" "fm-guard-$RANDOM" "$bad" 2>/dev/null; then
+    fail "create_task must refuse a non-WSL start dir: '${bad:-<empty>}'"
+  fi
+done
+if tmux list-windows -t "$SESSION" -F '#{window_name}' | grep -q '^fm-guard-'; then
+  fail "a refused non-WSL start dir must not leave a window behind"
+fi
+# The session anchor must resolve to a real WSL dir, never a /mnt or UNC path.
+anchor=$(fm_backend_tmux_wsl_start_dir)
+[ -d "$anchor" ] || fail "wsl_start_dir must be an existing directory (got '$anchor')"
+case "$anchor" in
+  /mnt/*|//*|[A-Za-z]:/*) fail "wsl_start_dir must not be a Windows mount/UNC path (got '$anchor')" ;;
+esac
+pass "real tmux: create_task refuses a Windows/UNC start dir and the session anchor is a WSL dir"
+
 # --- send text + Enter -------------------------------------------------------
 
 # A newly-created interactive shell can exist before its startup files and line

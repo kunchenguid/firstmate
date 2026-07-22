@@ -58,11 +58,34 @@ fm_backend_tmux_send_text_submit() {  # <target> <text> <retries> <enter-sleep> 
 # firstmate itself runs inside tmux, else ensure a dedicated detached
 # "firstmate" session exists. Mirrors fm-spawn.sh's container-ensure block;
 # prints the resolved session name.
+# fm_backend_tmux_wsl_start_dir: a real WSL directory to anchor the firstmate
+# session's default cwd on, so a pane whose per-window start dir cannot apply
+# never falls back to the launcher's Windows mount (e.g. /mnt/c/Users/... when
+# firstmate drives WSL tmux from the Windows side) and builds a worktree there -
+# the leakage that makes `treehouse get` land under /mnt/c and fm-spawn refuse.
+# Prefers the firstmate home, then this adapter's own repo (guaranteed WSL since
+# these scripts run from it), then /tmp - skipping any /mnt, UNC, or drive-letter
+# candidate.
+fm_backend_tmux_wsl_start_dir() {
+  local c
+  for c in "${FM_HOME:-}" "$(dirname "$FM_BACKEND_LIB_DIR")" "$FM_BACKEND_LIB_DIR" "${TMPDIR:-/tmp}"; do
+    [ -n "$c" ] && [ -d "$c" ] || continue
+    case "$c" in
+      /mnt/*|//*|[A-Za-z]:/*|[A-Za-z]:\\*) continue ;;
+    esac
+    printf '%s\n' "$c"
+    return 0
+  done
+  printf '/\n'
+}
+
 fm_backend_tmux_container_ensure() {
   if [ -n "${TMUX:-}" ]; then
     tmux display-message -p '#S'
   else
-    tmux has-session -t firstmate 2>/dev/null || tmux new-session -d -s firstmate
+    # Anchor to a real WSL dir so the session never inherits /mnt/c as its default.
+    tmux has-session -t firstmate 2>/dev/null \
+      || tmux new-session -d -s firstmate -c "$(fm_backend_tmux_wsl_start_dir)"
     printf 'firstmate'
   fi
 }
@@ -84,6 +107,15 @@ fm_backend_tmux_container_ensure() {
 # lost, so worktree discovery cannot fall back to the active client's window.
 fm_backend_tmux_create_task() {  # <session> <window-name> <proj-abs> -> prints window id
   local ses=$1 wname=$2 proj_abs=$3 wid
+  # Fail closed on a non-WSL start dir: an empty, /mnt, UNC, or drive-letter path
+  # would make the pane fall back to the session default and `treehouse get` build
+  # the worktree under a Windows mount (the leakage fm-spawn then refuses). Refuse
+  # here with a pointed diagnostic instead of opening a doomed window.
+  case "$proj_abs" in
+    ''|/mnt/*|//*|[A-Za-z]:/*|[A-Za-z]:\\*)
+      echo "error: refusing to open task window '$wname' at a non-WSL start dir '${proj_abs:-<empty>}' (Windows/UNC worktree leakage); resolve the project inside WSL before spawning" >&2
+      return 1 ;;
+  esac
   if tmux list-windows -t "$ses" -F '#{window_name}' | grep -qx "$wname"; then
     echo "error: window $ses:$wname already exists" >&2
     return 1
