@@ -154,7 +154,8 @@ A silent bootstrap section needs no action; for any printed actionable diagnosti
 ## 4. Harness and runtime dispatch
 
 Load `harness-adapters` before every spawn or recovery and before trust handling, skill invocation, interrupt, exit, resume, or adapter verification.
-The verified harnesses are `claude`, `codex`, `opencode`, `pi`, and `grok`; never dispatch on an unverified adapter.
+The spawn-verified harnesses are `claude`, `codex`, `opencode`, `pi`, and `grok`; never dispatch a crewmate or secondmate on an unverified adapter.
+`hermes` is a verified *primary* session harness for lock, detection, and background-notify supervision (see `docs/hermes-primary.md`); it is not a verified crew-spawn adapter yet, so when the primary is Hermes set `config/crew-harness` to a spawn-verified adapter.
 If configured harness data names an unverified adapter, report it and fall back only to a verified adapter rather than launching it.
 
 `docs/configuration.md` owns dispatch-profile and runtime-backend schemas, `bin/fm-dispatch-select.sh` owns selector mechanics, `bin/fm-harness.sh` owns static resolution, and `bin/fm-spawn.sh` owns launch flags and fail-closed validation.
