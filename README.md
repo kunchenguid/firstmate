@@ -104,6 +104,19 @@ pi
 For Grok, `--trust` is needed once per clone so project hooks and the turn-end guard load; `/hooks-trust` inside Grok works too.
 For Pi, approve the project trust prompt once per clone on first launch so both tracked `.pi/extensions/*.ts` files auto-load.
 
+### Fixed-home Windows and WSL launcher
+
+The tracked [`windows/firstmate.cmd`](windows/firstmate.cmd) and [`windows/firstmate.ps1`](windows/firstmate.ps1) templates delegate to [`bin/fm-primary-launch.sh`](bin/fm-primary-launch.sh), which is the single owner of selector validation and harness launch mechanics.
+Copy both Windows templates into one directory on `PATH` during a separate local rollout, then use `firstmate`, `firstmate --pi`, `firstmate --grok`, `firstmate --claude`, `firstmate --opencode`, or `firstmate --codex`.
+An explicit selector also accepts `--model <model>` and the effort levels supported by that harness.
+Bare `firstmate` remains unrestricted Codex for compatibility.
+
+This launcher is intentionally fixed to WSL distribution `Ubuntu`, Linux user `firstmate`, and `/home/firstmate/firstmate` as both repository root and `FM_HOME`.
+Changing selectors therefore preserves Firstmate's durable operational memory, but it does not share harness-native transcripts, resume history, credentials, or global model settings.
+Install each selected harness as a native WSL/Linux executable first; Windows `.exe` and `/mnt/c` shims are rejected because their path, hook, and tool-execution semantics differ.
+The launcher attaches to a compatible existing primary and refuses a divergent selector or live same-home session instead of creating a second identity.
+Run `bin/fm-primary-launch.sh --help` for the exact argument and effort contract.
+
 ### Talk to it
 
 ```sh
