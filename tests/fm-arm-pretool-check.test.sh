@@ -403,11 +403,14 @@ test_failopen_missing_node() {
 # --- --claude output shaping ---------------------------------------------------
 
 test_claude_mode_stdout_empty_on_deny() {
-  local out err rc
-  out=$("$CHECK" --claude --command 'bin/fm-watch-arm.sh &' 2>/tmp/fm-arm-pretool-check-claude-stderr.$$)
+  local out err rc stderr_file
+  # Keep stderr capture under TMPDIR so concurrent isolation-proof workers do
+  # not share a fixed global /tmp path.
+  stderr_file=$(mktemp "${TMPDIR:-/tmp}/fm-arm-pretool-check-claude-stderr.XXXXXX")
+  out=$("$CHECK" --claude --command 'bin/fm-watch-arm.sh &' 2>"$stderr_file")
   rc=$?
-  err=$(cat "/tmp/fm-arm-pretool-check-claude-stderr.$$" 2>/dev/null)
-  rm -f "/tmp/fm-arm-pretool-check-claude-stderr.$$"
+  err=$(cat "$stderr_file" 2>/dev/null)
+  rm -f "$stderr_file"
   [ "$rc" -eq 2 ] || fail "--claude deny must still exit 2, got $rc"
   [ -z "$out" ] || fail "--claude deny must leave stdout EMPTY (Claude Code only honors a stderr-only deny), got: $out"
   printf '%s' "$err" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' >/dev/null 2>&1 \

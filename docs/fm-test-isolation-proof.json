@@ -1,0 +1,196 @@
+{
+  "concurrency": 4,
+  "finished_at": "2026-07-22T04:08:06Z",
+  "fm_test_run_jobs_enabled": false,
+  "kind": "isolation-proof",
+  "production_sharding_enabled": false,
+  "run_id": "fm-isolation-1784693155237-99474",
+  "scripts": [
+    {
+      "duration_ms": 29102,
+      "exit": 0,
+      "path": "tests/fm-arm-pretool-check.test.sh",
+      "worker": 1
+    },
+    {
+      "duration_ms": 35417,
+      "exit": 0,
+      "path": "tests/fm-backend-herdr.test.sh",
+      "worker": 2
+    },
+    {
+      "duration_ms": 897,
+      "exit": 0,
+      "path": "tests/fm-brief.test.sh",
+      "worker": 3
+    },
+    {
+      "duration_ms": 90,
+      "exit": 0,
+      "path": "tests/fm-captain-translation-contract.test.sh",
+      "worker": 4
+    },
+    {
+      "duration_ms": 18610,
+      "exit": 0,
+      "path": "tests/fm-cd-pretool-check.test.sh",
+      "worker": 5
+    },
+    {
+      "duration_ms": 2803,
+      "exit": 0,
+      "path": "tests/fm-composer-ghost.test.sh",
+      "worker": 6
+    },
+    {
+      "duration_ms": 68,
+      "exit": 0,
+      "path": "tests/fm-composer-lib.test.sh",
+      "worker": 7
+    },
+    {
+      "duration_ms": 19896,
+      "exit": 0,
+      "path": "tests/fm-crew-state.test.sh",
+      "worker": 8
+    },
+    {
+      "duration_ms": 21133,
+      "exit": 0,
+      "path": "tests/fm-decision-hold-lifecycle.test.sh",
+      "worker": 9
+    },
+    {
+      "duration_ms": 874,
+      "exit": 0,
+      "path": "tests/fm-dispatch-select.test.sh",
+      "worker": 10
+    },
+    {
+      "duration_ms": 348,
+      "exit": 0,
+      "path": "tests/fm-ensure-agents-md.test.sh",
+      "worker": 11
+    },
+    {
+      "duration_ms": 5963,
+      "exit": 0,
+      "path": "tests/fm-grok-harness.test.sh",
+      "worker": 12
+    },
+    {
+      "duration_ms": 12517,
+      "exit": 0,
+      "path": "tests/fm-herdr-lab.test.sh",
+      "worker": 13
+    },
+    {
+      "duration_ms": 232,
+      "exit": 0,
+      "path": "tests/fm-instruction-owners.test.sh",
+      "worker": 14
+    },
+    {
+      "duration_ms": 1274,
+      "exit": 0,
+      "path": "tests/fm-lint.test.sh",
+      "worker": 15
+    },
+    {
+      "duration_ms": 201,
+      "exit": 0,
+      "path": "tests/fm-nm-test-contract.test.sh",
+      "worker": 16
+    },
+    {
+      "duration_ms": 36,
+      "exit": 0,
+      "path": "tests/fm-no-mistakes-ownership.test.sh",
+      "worker": 17
+    },
+    {
+      "duration_ms": 1056,
+      "exit": 0,
+      "path": "tests/fm-pi-primary-types.test.sh",
+      "worker": 18
+    },
+    {
+      "duration_ms": 8939,
+      "exit": 0,
+      "path": "tests/fm-pr-merge.test.sh",
+      "worker": 19
+    },
+    {
+      "duration_ms": 2549,
+      "exit": 0,
+      "path": "tests/fm-review-diff.test.sh",
+      "worker": 20
+    },
+    {
+      "duration_ms": 6953,
+      "exit": 0,
+      "path": "tests/fm-send-popup-settle.test.sh",
+      "worker": 21
+    },
+    {
+      "duration_ms": 3524,
+      "exit": 0,
+      "path": "tests/fm-send-settle.test.sh",
+      "worker": 22
+    },
+    {
+      "duration_ms": 1551,
+      "exit": 0,
+      "path": "tests/fm-send-strict.test.sh",
+      "worker": 23
+    },
+    {
+      "duration_ms": 684,
+      "exit": 0,
+      "path": "tests/fm-spawn-batch.test.sh",
+      "worker": 24
+    },
+    {
+      "duration_ms": 57,
+      "exit": 0,
+      "path": "tests/fm-stow-contract.test.sh",
+      "worker": 25
+    },
+    {
+      "duration_ms": 283,
+      "exit": 0,
+      "path": "tests/fm-supervision-instructions.test.sh",
+      "worker": 26
+    },
+    {
+      "duration_ms": 4645,
+      "exit": 0,
+      "path": "tests/fm-test-run.test.sh",
+      "worker": 27
+    },
+    {
+      "duration_ms": 2552,
+      "exit": 0,
+      "path": "tests/fm-tmux-submit-busy.test.sh",
+      "worker": 28
+    },
+    {
+      "duration_ms": 104,
+      "exit": 0,
+      "path": "tests/fm-transition-lib.test.sh",
+      "worker": 29
+    },
+    {
+      "duration_ms": 38449,
+      "exit": 0,
+      "path": "tests/fm-x-mode.test.sh",
+      "worker": 30
+    }
+  ],
+  "started_at": "2026-07-22T04:05:55Z",
+  "summary": {
+    "duration_ms": 131001,
+    "failed": 0,
+    "total": 30
+  }
+}

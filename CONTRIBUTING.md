@@ -75,6 +75,8 @@ bin/fm-test-run.sh tests/<subject>.test.sh   # one script (primary local focus p
 bin/fm-test-run.sh --family pure-contract-unit   # one declared family (serial, timed)
 bin/fm-test-run.sh --changed   # conservative changed-file-informed set (never silent full suite)
 bin/fm-test-run.sh --all   # intentional complete portable suite (CI Behavior; optional local full run)
+bin/fm-test-isolation-proof.sh --list   # proven parallel candidate set (Phase 2; not production sharding)
+bin/fm-test-isolation-proof.sh --jobs 4 --json /tmp/fm-isolation-proof.json   # concurrent isolation proof only
 [ "$(readlink CLAUDE.md)" = "AGENTS.md" ]
 [ "$(readlink .claude/skills)" = "../.agents/skills" ]
 tmp=$(mktemp -d) && printf 'done: smoke\n' > "$tmp/smoke.status" && FM_STATE_OVERRIDE="$tmp" FM_SIGNAL_GRACE=1 FM_POLL=1 FM_HEARTBEAT=999999 bin/fm-watch-arm.sh  # watcher re-arm smoke test (prints arm status, then an actionable signal)
@@ -82,6 +84,8 @@ tmp=$(mktemp -d) && printf 'done: smoke\n' > "$tmp/smoke.status" && FM_STATE_OVE
 
 `bin/fm-test-run.sh` is the single owner of serial behavior-suite selection, per-script timing markers, family totals, and the optional JSON timing artifact.
 Its header and `--help` own the flags, family labels, and changed-file map; this section only documents the entry points.
+`bin/fm-test-isolation-proof.sh` is the single owner of the Phase 2 concurrent isolation proof for a bounded, audited portable candidate set.
+It does not enable production CI sharding or general local `--jobs` on the serial runner; see `docs/fm-test-isolation-proof.md` for the archived candidate set, concurrency, and results.
 Local no-mistakes Test stays intent-targeted and must not wire `commands.test` to `--all` or a `tests/*.test.sh` walk; CI Behavior calls `bin/fm-test-run.sh --all` for broad regression.
 Discover tests by listing `tests/*.test.sh`: each is a self-contained bash script named `<subject>.test.sh`, and its header comment describes what it covers, so pass one to `bin/fm-test-run.sh` to focus on a subject with canonical timing output.
 Tests that need a real optional backend or an explicit opt-in (real herdr/zellij/cmux smoke tests, the live Pi regression) skip themselves and print the tool or environment gate needed to enable them, so `--all` remains safe on machines without those tools.
