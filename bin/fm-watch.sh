@@ -577,14 +577,17 @@ mark_all_captain_relevant_surfaced() {
 # surfaces only a captain-relevant status the per-wake path absorbed by mistake -
 # the fail-safe backstop.
 heartbeat_scan_finds_actionable() {
+  [ -n "$(heartbeat_unsurfaced_sources)" ]
+}
+
+heartbeat_unsurfaced_sources() {
   local f task last surfaced
   while IFS=$(printf '\t') read -r f task last; do
     [ -n "$f" ] || continue
     surfaced=$(cat "$(_hb_surfaced_path "$task")" 2>/dev/null || true)
     [ "$surfaced" = "$last" ] && continue
-    return 0
+    printf '%s.status\n' "$task"
   done < <(scan_captain_relevant_statuses "$STATE")
-  return 1
 }
 
 # event_wait_or_sleep: the terminal wait of each supervision cycle. For a home
@@ -774,6 +777,7 @@ while :; do
   # CHECK_INTERVAL, so most cycles skip this block and fall straight through.
   if [ "$(age_of "$STATE/.last-check")" -ge "$CHECK_INTERVAL" ]; then
     rejected_checks=
+    rejected_check_keys=
     for c in "$STATE"/*.check.sh; do
       [ -e "$c" ] || continue
       if [ "$(basename "$c")" = x-watch.check.sh ]; then
@@ -783,6 +787,8 @@ while :; do
           out=$FM_CHECK_RESULT
         else
           rejected_checks="$rejected_checks $c"
+          rejected_check_keys="${rejected_check_keys}$(basename "$c")
+"
           continue
         fi
       else
@@ -804,6 +810,8 @@ while :; do
         else
           fm_custom_check_snapshot_cleanup
           rejected_checks="$rejected_checks $c"
+          rejected_check_keys="${rejected_check_keys}${id}.check.sh
+"
           continue
         fi
       fi
@@ -816,7 +824,12 @@ while :; do
     done
     if [ -n "$rejected_checks" ]; then
       reason="check: rejected unauthenticated state checks:$rejected_checks"
-      fm_wake_append check unauthenticated-state-checks "$reason" || exit 1
+      while IFS= read -r rejected_check_key; do
+        [ -n "$rejected_check_key" ] || continue
+        fm_wake_append check "unauthenticated-state-checks:$rejected_check_key" "$reason" || exit 1
+      done <<EOF
+$rejected_check_keys
+EOF
       touch "$STATE/.last-check"
       wake "$reason"
     fi
@@ -1054,18 +1067,26 @@ EOF
       fm_wake_append heartbeat heartbeat heartbeat || exit 1
       touch "$STATE/.last-heartbeat"
       wake "heartbeat"
-    elif heartbeat_scan_finds_actionable; then
-      # Backstop: a captain-relevant status the per-wake path absorbed by mistake.
-      # Enqueue first, then mark every captain-relevant status surfaced so the next
-      # heartbeat does not re-fire them (enqueue-before-suppress preserved).
-      fm_wake_append heartbeat heartbeat heartbeat || exit 1
-      touch "$STATE/.last-heartbeat"
-      mark_all_captain_relevant_surfaced
-      wake "heartbeat"
     else
-      touch "$STATE/.last-heartbeat"
-      echo $(( $(cat "$STATE/.heartbeat-streak" 2>/dev/null || echo 0) + 1 )) > "$STATE/.heartbeat-streak"
-      triage_log "absorbed heartbeat (no captain-relevant change)"
+      heartbeat_sources=$(heartbeat_unsurfaced_sources)
+      if [ -n "$heartbeat_sources" ]; then
+        # Backstop: a captain-relevant status the per-wake path absorbed by mistake.
+        # Enqueue first, then mark every captain-relevant status surfaced so the next
+        # heartbeat does not re-fire them (enqueue-before-suppress preserved).
+        while IFS= read -r heartbeat_source; do
+          [ -n "$heartbeat_source" ] || continue
+          fm_wake_append heartbeat "heartbeat:$heartbeat_source" heartbeat || exit 1
+        done <<EOF
+$heartbeat_sources
+EOF
+        touch "$STATE/.last-heartbeat"
+        mark_all_captain_relevant_surfaced
+        wake "heartbeat"
+      else
+        touch "$STATE/.last-heartbeat"
+        echo $(( $(cat "$STATE/.heartbeat-streak" 2>/dev/null || echo 0) + 1 )) > "$STATE/.heartbeat-streak"
+        triage_log "absorbed heartbeat (no captain-relevant change)"
+      fi
     fi
   fi
 

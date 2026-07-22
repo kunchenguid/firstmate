@@ -62,6 +62,31 @@ path_identity() {  # <regular-nonsymlink-path>
   fi
 }
 
+entry_identity() {  # <regular-or-symlink-path>
+  local path=$1
+  { [ -f "$path" ] || [ -L "$path" ]; } || return 1
+  if [ "$(uname)" = Darwin ]; then
+    stat -f '%d:%i' "$path" 2>/dev/null
+  else
+    stat -c '%d:%i' "$path" 2>/dev/null
+  fi
+}
+
+status_identity() {  # <regular-nonsymlink-status>
+  local path=$1 identity size digest checksum bytes
+  identity=$(path_identity "$path") || return 1
+  if [ "$(uname)" = Darwin ]; then
+    size=$(stat -f '%z' "$path" 2>/dev/null) || return 1
+  else
+    size=$(stat -c '%s' "$path" 2>/dev/null) || return 1
+  fi
+  digest=$(tail -c 65536 "$path" 2>/dev/null | cksum) || return 1
+  read -r checksum bytes <<EOF
+$digest
+EOF
+  printf '%s:%s:%s:%s\n' "$identity" "$size" "$checksum" "$bytes"
+}
+
 valid_task_id() {
   case "$1" in
     ''|.*|*[!A-Za-z0-9._-]*) return 1 ;;
@@ -106,16 +131,24 @@ source_manifest() {  # <kind> <key>
       ;;
     check)
       if [ "$key" = unauthenticated-state-checks ]; then
-        for source in "$STATE"/*.check.sh; do
-          [ -f "$source" ] && [ ! -L "$source" ] || continue
-          base=$(basename "$source")
-          identity=$(path_identity "$source") || return 1
-          printf 'check\t%s\t%s\n' "$base" "$identity"
-          count=$((count + 1))
-        done
-        [ "$count" -gt 0 ] || return 1
+        printf 'queue-only\tunauthenticated-state-checks\n'
         return 0
       fi
+      case "$key" in
+        unauthenticated-state-checks:*)
+          base=${key#unauthenticated-state-checks:}
+          case "$base" in
+            ''|*/*|.*|*[![:print:]]*) return 1 ;;
+            *.check.sh) ;;
+            *) return 1 ;;
+          esac
+          [ "${#base}" -le 255 ] || return 1
+          source="$STATE/$base"
+          identity=$(entry_identity "$source") || return 1
+          printf 'rejected-check\t%s\t%s\n' "$base" "$identity"
+          return 0
+          ;;
+      esac
       base=${key#"$STATE"/}
       [ "$key" = "$STATE/$base" ] || return 1
       case "$base" in
@@ -128,15 +161,21 @@ source_manifest() {  # <kind> <key>
       printf 'check\t%s\t%s\n' "$base" "$identity"
       ;;
     heartbeat)
-      for meta in "$STATE"/*.meta; do
-        [ -f "$meta" ] && [ ! -L "$meta" ] || continue
-        task=$(basename "$meta" .meta)
-        valid_task_id "$task" || continue
-        identity=$(path_identity "$meta") || return 1
-        printf 'meta\t%s.meta\t%s\n' "$task" "$identity"
-        count=$((count + 1))
-      done
-      [ "$count" -gt 0 ] || return 1
+      if [ "$key" = heartbeat ]; then
+        printf 'queue-only\theartbeat\n'
+        return 0
+      fi
+      case "$key" in heartbeat:*.status) ;; *) return 1 ;; esac
+      base=${key#heartbeat:}
+      fm_wake_status_key_map "$base" || return 1
+      source="$STATE/$base"
+      task=${FM_WAKE_STATUS_KEY%.status}
+      valid_task_id "$task" || return 1
+      meta="$STATE/$task.meta"
+      identity=$(status_identity "$source") || return 1
+      printf 'status\t%s\t%s\n' "$base" "$identity"
+      identity=$(path_identity "$meta") || return 1
+      printf 'meta\t%s.meta\t%s\n' "$task" "$identity"
       ;;
     *) return 1 ;;
   esac
@@ -190,13 +229,19 @@ EOF
 }
 
 validate() {
-  local receipt=$1 item
+  local receipt=$1 item status saw_error=false
   while IFS= read -r item; do
     [ -n "$item" ] || continue
-    validate_one "$item" && return 0
+    if validate_one "$item"; then
+      return 0
+    else
+      status=$?
+      [ "$status" -ne 2 ] || saw_error=true
+    fi
   done <<EOF
 $(printf '%s' "$receipt" | tr ',' '\n')
 EOF
+  [ "$saw_error" = false ] || return 2
   return 1
 }
 

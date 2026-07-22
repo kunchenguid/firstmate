@@ -975,7 +975,7 @@ EOF
 }
 
 test_wake_actionability_helper_source_and_queue_matrix() {
-  local home state reason receipt before after check xcheck
+  local home state reason receipt before after check xcheck rejected unrelated status
   home="$TMP_ROOT/wake-actionability-home"
   state="$home/state"
   mkdir -p "$state"
@@ -1053,17 +1053,65 @@ test_wake_actionability_helper_source_and_queue_matrix() {
   FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$ACTIONABLE" validate "$receipt" \
     || fail "current X check receipt did not validate"
 
+  rejected="$state/rejected.check.sh"
+  unrelated="$state/unrelated.check.sh"
+  ln -s "$state/missing-check-target" "$rejected"
+  reason="check: rejected unauthenticated state checks: $rejected"
+  printf '%s\t5\tcheck\tunauthenticated-state-checks:rejected.check.sh\t%s\n' "$(date +%s)" "$reason" > "$state/.wake-queue"
+  receipt=$(FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$ACTIONABLE" capture "$reason") \
+    || fail "rejected check did not produce an actionability receipt"
+  printf '#!/usr/bin/env bash\n' > "$unrelated"
+  FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$ACTIONABLE" validate "$receipt" \
+    || fail "unrelated check creation invalidated a rejected-check receipt"
+  rm -f "$rejected"
+  if FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$ACTIONABLE" validate "$receipt"; then
+    fail "rejected-check receipt survived removal of its bound source"
+  fi
+
   printf 'window=default:w1:p-heartbeat\n' > "$state/task-heartbeat.meta"
+  printf 'done: heartbeat source remains current\n' > "$state/task-heartbeat.status"
   reason=heartbeat
-  printf '%s\t5\theartbeat\theartbeat\theartbeat\n' "$(date +%s)" > "$state/.wake-queue"
+  printf '%s\t6\theartbeat\theartbeat:task-heartbeat.status\theartbeat\n' "$(date +%s)" > "$state/.wake-queue"
   receipt=$(FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$ACTIONABLE" capture "$reason") \
     || fail "current heartbeat did not produce an actionability receipt"
+  printf 'window=default:w1:p-unrelated\n' > "$state/unrelated.meta"
   FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$ACTIONABLE" validate "$receipt" \
-    || fail "current heartbeat receipt did not validate"
-  : > "$state/.wake-queue"
+    || fail "unrelated task creation invalidated a heartbeat receipt"
+  printf 'working: heartbeat source is no longer actionable\n' >> "$state/task-heartbeat.status"
   if FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$ACTIONABLE" validate "$receipt"; then
-    fail "heartbeat receipt survived durable queue drain"
+    fail "heartbeat receipt survived a change to its bound status"
   fi
+
+  printf 'window=default:w1:p-heartbeat-a\n' > "$state/task-heartbeat-a.meta"
+  printf 'done: heartbeat source A\n' > "$state/task-heartbeat-a.status"
+  printf 'window=default:w1:p-heartbeat-b\n' > "$state/task-heartbeat-b.meta"
+  printf 'done: heartbeat source B\n' > "$state/task-heartbeat-b.status"
+  {
+    printf '%s\t7\theartbeat\theartbeat:task-heartbeat-a.status\theartbeat\n' "$(date +%s)"
+    printf '%s\t8\theartbeat\theartbeat:task-heartbeat-b.status\theartbeat\n' "$(date +%s)"
+  } > "$state/.wake-queue"
+  receipt=$(FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$ACTIONABLE" capture "$reason") \
+    || fail "coalesced heartbeat did not produce a composite receipt"
+  rm -f "$state/task-heartbeat-b.meta" "$state/task-heartbeat-b.status"
+  FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$ACTIONABLE" validate "$receipt" \
+    || fail "coalesced heartbeat lost a still-current source"
+  rm -f "$state/task-heartbeat-a.meta" "$state/task-heartbeat-a.status"
+  if FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$ACTIONABLE" validate "$receipt"; then
+    fail "coalesced heartbeat survived cleanup of every bound source"
+  fi
+
+  printf 'window=default:w1:p-error\n' > "$state/task-error.meta"
+  printf 'done: validation error remains visible\n' > "$state/task-error.status"
+  printf '%s\t9\tsignal\ttask-error.status\tsignal-error\n' "$(date +%s)" > "$state/.wake-queue"
+  receipt=$(FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$ACTIONABLE" capture signal-error) \
+    || fail "validation-error fixture did not produce a receipt"
+  if FM_HOME="$home" FM_STATE_OVERRIDE="$state" FM_WAKE_QUEUE="$state/missing/.wake-queue" \
+    "$ACTIONABLE" validate "$receipt" 2>/dev/null; then
+    fail "unreadable queue validated as current"
+  else
+    status=$?
+  fi
+  [ "$status" -eq 2 ] || fail "unreadable queue collapsed to obsolete status $status"
   pass "wake actionability receipts bind queue rows and home-local signal, stale, check, X, and heartbeat sources"
 }
 
