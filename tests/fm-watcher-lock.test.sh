@@ -956,9 +956,101 @@ test_linux_pid_identity_ignores_wall_clock_and_detects_pid_reuse() {
   pass "Linux process identity detects pid reuse"
 }
 
+test_pid_identity_unlimited_width_under_narrow_terminal() {
+  # A PreToolUse hook context inherits the UI's narrow terminal width (observed
+  # live 2026-07-21: COLUMNS=77), and a width-honoring ps then truncates
+  # command=, so the recomputed identity mismatches the recorded one and a live
+  # watcher is judged dead. Whether the system ps applies a width to non-tty
+  # output varies by platform and version, so a width-sensitive ps stand-in
+  # makes the regression deterministic: it truncates like a width-honoring ps
+  # unless -ww requests unlimited width. The missing proc root forces the ps
+  # fallback even on Linux, mirroring test_pid_identity_is_locale_invariant.
+  local dir fakebin real_ps no_proc pid identity
+  dir=$(make_case narrow-terminal-identity)
+  fakebin="$dir/fakebin"
+  real_ps=$(command -v ps) || fail "no real ps on PATH"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+# Width-sensitive ps stand-in: truncate output to FM_TEST_PS_WIDTH columns
+# unless -ww requests unlimited width, regardless of whether stdout is a tty.
+ww=false
+for arg in "$@"; do [ "$arg" = -ww ] && ww=true; done
+out=$("$FM_TEST_REAL_PS" "$@") || exit $?
+if $ww || [ -z "${FM_TEST_PS_WIDTH:-}" ]; then
+  printf '%s\n' "$out"
+else
+  printf '%s\n' "$out" | cut -c1-"$FM_TEST_PS_WIDTH"
+fi
+SH
+  chmod +x "$fakebin/ps"
+  bash -c 'sleep 300 # this-deliberately-long-trailer-pushes-the-command-line-well-past-a-narrow-terminal-width
+true' &
+  pid=$!
+  no_proc="$TMP_ROOT/no-proc"
+  identity=$(PATH="$fakebin:$PATH" FM_TEST_REAL_PS="$real_ps" FM_TEST_PS_WIDTH=40 FM_PROC_ROOT_OVERRIDE="$no_proc" \
+    bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$pid" 2>/dev/null)
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  [ -n "$identity" ] || fail "fm_pid_identity produced no identity through the width-sensitive ps"
+  case "$identity" in
+    *this-deliberately-long-trailer-pushes-the-command-line-well-past-a-narrow-terminal-width*) ;;
+    *) fail "fm_pid_identity truncated the command at a narrow width (got '$identity')" ;;
+  esac
+  pass "fm_pid_identity forces unlimited ps width in a narrow-terminal context"
+}
+
+test_lock_match_accepts_same_dir_different_spelling() {
+  # On a case-insensitive filesystem getcwd() is not case-stable across
+  # processes (observed live 2026-07-21: a hook context resolved the home as
+  # .../Sc/firstmate while the watcher lock recorded .../sc/firstmate), and the
+  # pure string comparison then evicted a live watcher. A symlinked spelling of
+  # the same directory reproduces the string-mismatch/same-file shape portably
+  # on case-sensitive filesystems too. Genuine mismatches must still refuse:
+  # a different existing directory and a missing recorded path both fail -ef.
+  local dir state home_real home_alias watch_real watch_alias lockdir pid identity other
+  dir=$(make_case lock-spelling)
+  state="$dir/state"
+  home_real="$dir/home-real"
+  mkdir -p "$home_real"
+  ln -s home-real "$dir/home-alias"
+  home_alias="$dir/home-alias"
+  watch_real="$home_real/fm-watch.sh"
+  : > "$watch_real"
+  watch_alias="$home_alias/fm-watch.sh"
+  sleep 300 &
+  pid=$!
+  identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$pid") \
+    || fail "could not identify live helper pid"
+  lockdir="$state/.watch.lock"
+  mkdir -p "$lockdir"
+  printf '%s\n' "$pid" > "$lockdir/pid"
+  printf '%s\n' "$home_real" > "$lockdir/fm-home"
+  printf '%s\n' "$watch_real" > "$lockdir/watcher-path"
+  printf '%s\n' "$identity" > "$lockdir/pid-identity"
+  FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_watcher_lock_matches_pid "$2" "$3" "$4" "$5"' \
+    _ "$LIB" "$state" "$watch_alias" "$pid" "$home_alias" \
+    || fail "a different spelling of the same home and watcher path evicted a live watcher"
+  other="$dir/genuinely-other-home"
+  mkdir -p "$other"
+  if FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_watcher_lock_matches_pid "$2" "$3" "$4" "$5"' \
+    _ "$LIB" "$state" "$watch_real" "$pid" "$other"; then
+    fail "a genuinely different home directory was accepted"
+  fi
+  printf '%s\n' "$dir/recorded-home-that-no-longer-exists" > "$lockdir/fm-home"
+  if FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_watcher_lock_matches_pid "$2" "$3" "$4" "$5"' \
+    _ "$LIB" "$state" "$watch_real" "$pid" "$home_real"; then
+    fail "a missing recorded home directory was accepted"
+  fi
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  pass "lock match tolerates same-directory spelling differences and still refuses real mismatches"
+}
+
 test_singleton_start
 test_pid_identity_is_locale_invariant
 test_linux_pid_identity_ignores_wall_clock_and_detects_pid_reuse
+test_pid_identity_unlimited_width_under_narrow_terminal
+test_lock_match_accepts_same_dir_different_spelling
 test_stale_watch_lock_reclaimed
 test_live_stale_watch_lock_is_actionable
 test_guard_warnings

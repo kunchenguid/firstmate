@@ -51,7 +51,10 @@ fm_pid_identity() {
   # Pin LC_ALL=C so lstart's date format is locale-invariant: the identity is
   # written under one locale but re-read under the machine's ambient locale, which
   # would otherwise mismatch on a non-C locale (e.g. ko_KR) and reject a live watcher.
-  out=$(LC_ALL=C ps -p "$pid" -o lstart= -o command= 2>/dev/null) || return 1
+  # -ww forces unlimited width: a narrow-COLUMNS context (e.g. a PreToolUse hook
+  # running under the UI's terminal width) otherwise truncates command= and the
+  # recomputed identity no longer matches the recorded one, evicting a live watcher.
+  out=$(LC_ALL=C ps -ww -p "$pid" -o lstart= -o command= 2>/dev/null) || return 1
   [ -n "$out" ] || return 1
   printf '%s\n' "$out" | sed 's/^[[:space:]]*//'
 }
@@ -76,8 +79,13 @@ fm_watcher_lock_matches_pid() {
   lock_home=$(cat "$lockdir/fm-home" 2>/dev/null || true)
   lock_path=$(cat "$lockdir/watcher-path" 2>/dev/null || true)
   lock_identity=$(cat "$lockdir/pid-identity" 2>/dev/null || true)
-  [ "$lock_home" = "$home" ] || return 1
-  [ "$lock_path" = "$watch_path" ] || return 1
+  # Paths compare by string first, then by same-file identity (-ef): on a
+  # case-insensitive filesystem getcwd() is not case-stable across processes
+  # (observed: a hook context resolved the same home with different case than
+  # the watcher recorded), and a spelling difference must not evict a live
+  # watcher. A missing path keeps -ef false, so a genuine mismatch still fails.
+  { [ "$lock_home" = "$home" ] || [ "$lock_home" -ef "$home" ]; } || return 1
+  { [ "$lock_path" = "$watch_path" ] || [ "$lock_path" -ef "$watch_path" ]; } || return 1
   [ -n "$lock_identity" ] || return 1
   current_identity=$(fm_pid_identity "$pid") || return 1
   [ "$current_identity" = "$lock_identity" ]
