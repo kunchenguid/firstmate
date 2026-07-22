@@ -1680,6 +1680,28 @@ EOF
   sed '/ordinary-orphan/d' "$sshhip/data/backlog.md" > "$sshhip/data/backlog.next"
   mv "$sshhip/data/backlog.next" "$sshhip/data/backlog.md"
 
+  sed '/unreadable-child/d' "$sshhip/data/backlog.md" > "$sshhip/data/backlog.next"
+  mv "$sshhip/data/backlog.next" "$sshhip/data/backlog.md"
+  canonical=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --json)
+  printf '%s' "$canonical" | jq -e '
+    .secondmate_current.records[] | select(.id == "sshhip")
+    | .current.state == "unknown"
+      and (.current.reason | contains("live child state has no in-flight backlog item: unreadable-child=unknown"))
+      and .provenance.selected != "structured-home"
+      and .invalidity == null
+      and .active_children == []
+      and .decisions_open == []
+      and .holds == []
+      and .queued == []
+      and .landed == []
+      and .endpoints == []
+  ' >/dev/null || fail "an unowned unknown child received partial structured projection: $canonical"
+  sed '/## In flight/a\
+- [ ] unreadable-child - Submit App Store build (repo: sshhip) (kind: ship)' \
+    "$sshhip/data/backlog.md" > "$sshhip/data/backlog.next"
+  mv "$sshhip/data/backlog.next" "$sshhip/data/backlog.md"
+
   fm_write_meta "$wheel/state/production-observation.meta" \
     "window=firstmate:fm-production-observation" "worktree=$wheel/projects/worker" "project=wheelhouse" \
     "harness=codex" "kind=scout" "mode=scout"

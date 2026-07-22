@@ -628,12 +628,8 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
          | select(.requires_child_metadata)
          | select(.id as $id | [$tasks[].id] | index($id) | not) ]) as $orphan_in_flight
     | ([ $tasks[]
-         | select(.current_state.state == "working"
-                  or .current_state.state == "parked"
-                  or .current_state.state == "paused"
-                  or .current_state.state == "blocked")
          | select(.id as $id | [$owned_in_flight[].id] | index($id) | not)
-         | {id,state:.current_state.state} ]) as $unowned_current
+         | {id,state:.current_state.state} ]) as $unowned_children
     | ([ $owned_in_flight[] as $work
          | $tasks[]
          | select(.id == $work.id and (.current_state.state == "done" or .current_state.state == "failed"))
@@ -648,10 +644,10 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
           {kind:"orphan_in_flight",ids:($orphan_in_flight | map(.id)),
            reason:("in-flight backlog item has no child metadata: " + ($orphan_in_flight | map(.id) | join(", ")))}
         else empty end,
-        if ($unowned_current | length) > 0 then
-          {kind:"unowned_current",ids:($unowned_current | map(.id)),
+        if ($unowned_children | length) > 0 then
+          {kind:"unowned_current",ids:($unowned_children | map(.id)),
            reason:("live child state has no in-flight backlog item: " +
-                   ($unowned_current | map(.id + "=" + .state) | join(", ")))}
+                   ($unowned_children | map(.id + "=" + .state) | join(", ")))}
         else empty end,
         if ($terminal_in_flight | length) > 0 then
           {kind:"terminal_in_flight",ids:($terminal_in_flight | map(.id)),
@@ -685,7 +681,7 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
        and ($unstructured_current | length) == 0
        and ($unknown_children | length) == 0
        and ($orphan_in_flight | length) == 0
-       and ($unowned_current | length) == 0
+       and ($unowned_children | length) == 0
        and ($terminal_in_flight | length) == 0) as $valid
     | (if ($strict_invalidities | length) > 0 then $strict_invalidities[0].reason
        elif ($unknown_children | length) > 0 then
