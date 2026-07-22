@@ -99,14 +99,16 @@ BASE_REF=$(resolve_base_ref) \
 #
 # build_old_bin echoes a directory whose bin/ subdir holds the PRE-REFACTOR
 # fm-send.sh, fm-peek.sh, fm-watch.sh, fm-spawn.sh, and fm-teardown.sh
-# (extracted from BASE_REF), plus symlinks to every OTHER sibling script those
-# five source - all unchanged by this task, so the real files are exactly
-# what BASE_REF would have used too. FM_ROOT_OVERRIDE pointed at this dir's
+# (extracted from BASE_REF), plus copies of every OTHER sibling script those
+# five source - all unchanged by this task, so the copied files are exactly
+# what BASE_REF would have used too. Copies keep BASH_SOURCE-based sibling
+# resolution inside the synthetic tree on both macOS and Linux; symlinks make
+# that resolution shell/platform-dependent. FM_ROOT_OVERRIDE pointed at this dir's
 # root makes "$FM_ROOT/bin/fm-project-mode.sh" (etc.) resolve correctly.
 # fm-backend.sh (and its bin/backends/ adapters) is the dispatcher every one
 # of the five REFACTORED scripts sources; it must be a real, reachable file in
 # the old bin/ too or `. "$SCRIPT_DIR/fm-backend.sh"` aborts under set -eu -
-# hence it is a symlinked sibling, not an extracted-from-BASE_REF file: for a
+# hence it is a copied sibling, not an extracted-from-BASE_REF file: for a
 # tmux-only conformance run the tmux adapter's behavior is what is under test,
 # and that is unchanged by any later (e.g. non-tmux backend) addition to
 # fm-backend.sh's own dispatch surface.
@@ -119,9 +121,9 @@ build_old_bin() {  # <name> -> echoes root dir (root/bin/<script> is the entry p
   bin="$root/bin"
   mkdir -p "$bin"
   for f in $OLD_BIN_UNCHANGED_SIBLINGS; do
-    ln -s "$ROOT/bin/$f" "$bin/$f"
+    cp "$ROOT/bin/$f" "$bin/$f"
   done
-  ln -s "$ROOT/bin/backends" "$bin/backends"
+  cp -R "$ROOT/bin/backends" "$bin/backends"
   for f in $OLD_BIN_REFACTORED; do
     git -C "$ROOT" show "$BASE_REF:bin/$f" > "$bin/$f"
     chmod +x "$bin/$f"
@@ -637,7 +639,7 @@ strip_send_preflight() {  # <log>
 }
 
 test_send_conformance_old_vs_new() {
-  local old_bin fb log_old log_new home rc_new filtered_old filtered_new
+  local old_bin fb log_old log_new home rc_old rc_new filtered_old filtered_new
   old_bin=$(build_old_bin send-old)
   fb=$(make_send_fakebin "$TMP_ROOT/send-fake")
   home="$TMP_ROOT/send-home"; mkdir -p "$home/state"
@@ -645,14 +647,11 @@ test_send_conformance_old_vs_new() {
   filtered_old="$TMP_ROOT/send-old.filtered.log"; filtered_new="$TMP_ROOT/send-new.filtered.log"
 
   # Case 1: --key path.
-  # The extracted script deliberately runs against current shared helpers, so
-  # only its tmux command log is a stable historical parity oracle. Assert the
-  # current script's exit status independently instead of coupling it to the
-  # synthetic old-script/current-helper process status.
   run_send_case "$old_bin" "$fb" "$log_old" "$home" -- "sess:win" --key Escape
+  rc_old=$?
   run_send_case "$ROOT" "$fb" "$log_new" "$home" -- "sess:win" --key Escape
   rc_new=$?
-  expect_code 0 "$rc_new" "fm-send --key: current exit code"
+  expect_code "$rc_old" "$rc_new" "fm-send --key: old vs new exit code"
   assert_contains "$(cat "$log_new")" $'\x1f''display-message'$'\x1f''-p'$'\x1f''-t'$'\x1f''sess:win'$'\x1f''#{pane_id}' \
     "fm-send --key did not verify the explicit tmux target before sending"
   strip_send_preflight "$log_old" > "$filtered_old"
@@ -663,9 +662,10 @@ test_send_conformance_old_vs_new() {
 
   # Case 2: plain text (0.3s settle, no popup).
   run_send_case "$old_bin" "$fb" "$log_old" "$home" -- "sess:win" hello captain
+  rc_old=$?
   run_send_case "$ROOT" "$fb" "$log_new" "$home" -- "sess:win" hello captain
   rc_new=$?
-  expect_code 0 "$rc_new" "fm-send plain text: current exit code"
+  expect_code "$rc_old" "$rc_new" "fm-send plain text: old vs new exit code"
   strip_send_preflight "$log_old" > "$filtered_old"
   strip_send_preflight "$log_new" > "$filtered_new"
   diff -u "$filtered_old" "$filtered_new" > "$TMP_ROOT/send-diff-plain.txt" 2>&1 \
@@ -678,9 +678,10 @@ test_send_conformance_old_vs_new() {
   # elsewhere in tests/fm-send-popup-settle.test.sh) and still ends in the
   # same tmux command shape: send-keys -l, then a retried Enter.
   run_send_case "$old_bin" "$fb" "$log_old" "$home" -- "sess:win" /some-skill
+  rc_old=$?
   run_send_case "$ROOT" "$fb" "$log_new" "$home" -- "sess:win" /some-skill
   rc_new=$?
-  expect_code 0 "$rc_new" "fm-send /skill: current exit code"
+  expect_code "$rc_old" "$rc_new" "fm-send /skill: old vs new exit code"
   strip_send_preflight "$log_old" > "$filtered_old"
   strip_send_preflight "$log_new" > "$filtered_new"
   diff -u "$filtered_old" "$filtered_new" > "$TMP_ROOT/send-diff-slash.txt" 2>&1 \
