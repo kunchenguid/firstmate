@@ -97,7 +97,7 @@ test_ci_still_runs_broad_behavior_suite() {
   # Behavior job still iterates every portable behavior script.
   grep -Fq 'for test_script in tests/*.test.sh' "$CI" \
     || fail "CI Behavior job must still loop over tests/*.test.sh"
-  grep -Fq '"$test_script"' "$CI" \
+  grep -Fq "\"\$test_script\"" "$CI" \
     || fail "CI Behavior job must still execute each tests/*.test.sh script"
   # Preserve other CI lanes this task must not shrink.
   grep -Eq 'name:[[:space:]]*Lint shell scripts' "$CI" \
