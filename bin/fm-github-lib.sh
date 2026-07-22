@@ -396,8 +396,8 @@ fm_github_lock_release() {
 }
 
 fm_github_run_gh_axi() {
-  local binary=$1 target_repository=$2 context_dir shim_dir client status
-  shift 2
+  local binary=$1 target_repository=$2 issue_numbers=$3 context_dir shim_dir client status
+  shift 3
   context_dir="$FM_HOME/state/.github-routing-tmp"
   umask 077
   mkdir -p "$context_dir" || return 1
@@ -434,11 +434,11 @@ NODE
   chmod 0500 "$client" || { rm -rf "$shim_dir" 2>/dev/null || true; return 1; }
   trap "chmod -R u+rwx -- $(fm_github_shell_quote "$shim_dir") 2>/dev/null || true; rm -rf -- $(fm_github_shell_quote "$shim_dir") 2>/dev/null || true" EXIT HUP INT TERM
   if fm_github_node - "$binary" "$FM_GITHUB_GH_BINARY" "$(fm_github_lib_dir)/fm-github-config.mjs" \
-    "$target_repository" "$FM_GITHUB_REPOSITORY" "$shim_dir" "$@" <<'NODE'
+    "$target_repository" "$FM_GITHUB_REPOSITORY" "$shim_dir" "$issue_numbers" "$@" <<'NODE'
 const net = require("node:net");
 const crypto = require("node:crypto");
 const {spawn, spawnSync} = require("node:child_process");
-const [binary, ghBinary, validator, repository, baseRepository, shimDir, ...args] = process.argv.slice(2);
+const [binary, ghBinary, validator, repository, baseRepository, shimDir, issueNumbersText, ...args] = process.argv.slice(2);
 const token = crypto.randomBytes(32).toString("base64url");
 const typeOperation = args[0] === "issue"
   && ((args[1] === "create" && args.some((arg) => arg === "--type" || arg.startsWith("--type=")))
@@ -450,10 +450,18 @@ const flagValue = (name) => {
   return index >= 0 ? args[index + 1] : "";
 };
 const typeName = typeOperation ? flagValue("--type") : "";
-let issueNumber = typeOperation && args[1] === "edit" && /^[1-9][0-9]*$/u.test(args[2] || "") ? args[2] : "";
-let issueId = "";
+const issueNumbers = new Set(issueNumbersText ? issueNumbersText.split("\n") : []);
+const issueIds = new Set();
 let typeId = "";
-const commandRepositoryMatches = (requestArgs) => {
+const repositoryValue = (value) => {
+  const parts = value.replace(/\.git$/iu, "").split("/");
+  if (parts.length === 2 && parts.every(Boolean)) return `github.com/${parts[0]}/${parts[1]}`;
+  if (parts.length === 3 && parts[0].toLowerCase() === "github.com" && parts[1] && parts[2]) {
+    return `github.com/${parts[1]}/${parts[2]}`;
+  }
+  return "";
+};
+const explicitRepository = (requestArgs) => {
   let explicit = "";
   for (let index = 0; index < requestArgs.length; index += 1) {
     const arg = requestArgs[index];
@@ -461,8 +469,72 @@ const commandRepositoryMatches = (requestArgs) => {
     else if (arg.startsWith("--repo=")) explicit = arg.slice(7);
     else if (arg.startsWith("-R") && arg.length > 2) explicit = arg.slice(2);
   }
-  if (!explicit) return repository.toLowerCase() === baseRepository.toLowerCase();
-  return `github.com/${explicit.replace(/\.git$/iu, "")}`.toLowerCase() === repository.toLowerCase();
+  return explicit ? repositoryValue(explicit) : "";
+};
+const issueTarget = (value) => {
+  if (/^[1-9][0-9]*$/u.test(value)) return {number: value, repository: ""};
+  const match = value.match(/^https:\/\/github\.com\/([^/]+)\/([^/]+)\/issues\/([1-9][0-9]*)$/iu);
+  return match ? {number: match[3], repository: `github.com/${match[1]}/${match[2]}`} : null;
+};
+const repositoryMatches = (requestArgs, targetRepository = "") => {
+  const explicit = explicitRepository(requestArgs);
+  const selected = explicit || targetRepository || baseRepository;
+  return selected.toLowerCase() === repository.toLowerCase();
+};
+const withoutType = [];
+for (let index = 2; index < args.length; index += 1) {
+  const arg = args[index];
+  if (arg === "--type") {
+    index += 1;
+  } else if (!arg.startsWith("--type=")) {
+    withoutType.push(arg);
+  }
+}
+const validateNonApi = (requestArgs) => {
+  if (JSON.stringify(requestArgs) === JSON.stringify(args)) return {kind: "outer", number: ""};
+  if (!typeOperation || requestArgs.length < 2 || requestArgs[0] !== "issue") return null;
+  if (args[1] === "create" && requestArgs[1] === "create"
+    && JSON.stringify(requestArgs.slice(2)) === JSON.stringify(withoutType)
+    && repositoryMatches(requestArgs)) {
+    return {kind: "issue-create", number: ""};
+  }
+  if (requestArgs[1] !== "view") return null;
+  let target = null;
+  let json = "";
+  let jsonSeen = false;
+  let repositorySeen = false;
+  for (let index = 2; index < requestArgs.length; index += 1) {
+    const arg = requestArgs[index];
+    if (arg === "--repo" || arg === "-R" || arg === "--json") {
+      const value = requestArgs[index + 1] || "";
+      if (arg === "--json") {
+        if (jsonSeen) return null;
+        jsonSeen = true;
+        json = value;
+      } else {
+        if (repositorySeen) return null;
+        repositorySeen = true;
+      }
+      index += 1;
+    } else if (arg.startsWith("--repo=") || (arg.startsWith("-R") && arg.length > 2)) {
+      if (repositorySeen) return null;
+      repositorySeen = true;
+    } else if (arg.startsWith("--json=")) {
+      if (jsonSeen) return null;
+      jsonSeen = true;
+      json = arg.slice(7);
+    } else if (!arg.startsWith("-") && !target) {
+      target = issueTarget(arg);
+    } else {
+      return null;
+    }
+  }
+  if (!target || !repositoryMatches(requestArgs, target.repository)) return null;
+  const fields = json.split(",");
+  if (!fields.includes("id") || fields.length === 0 || new Set(fields).size !== fields.length
+    || fields.some((field) => !["id", "number", "state", "title", "url"].includes(field))) return null;
+  if (!issueNumbers.has(target.number)) return null;
+  return {kind: "issue-view", number: target.number};
 };
 const parseValidation = (requestArgs) => {
   const request = Buffer.from(JSON.stringify({args: requestArgs, repository})).toString("base64url");
@@ -476,7 +548,7 @@ const parseValidation = (requestArgs) => {
   }));
   return fields.kind && fields.repository?.toLowerCase() === repository.toLowerCase() ? fields : null;
 };
-const observe = (requestArgs, validation, result) => {
+const observe = (requestArgs, validation, nonApi, result) => {
   if (result.status !== 0) return;
   if (validation?.kind === "issue-type-read" && typeOperation) {
     try {
@@ -486,16 +558,17 @@ const observe = (requestArgs, validation, result) => {
     } catch {}
     return;
   }
-  if (requestArgs[0] === "issue" && requestArgs[1] === "create" && typeOperation && args[1] === "create") {
+  if (nonApi?.kind === "issue-create") {
     const escaped = repository.slice("github.com/".length).replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
     const match = result.stdout.match(new RegExp(`https://github\\.com/${escaped}/issues/([1-9][0-9]*)`, "iu"));
-    if (match) issueNumber = match[1];
+    if (match) issueNumbers.add(match[1]);
   }
-  if (requestArgs[0] === "issue" && requestArgs[1] === "view" && requestArgs[2] === issueNumber
-    && requestArgs.includes("--json") && commandRepositoryMatches(requestArgs)) {
+  if (nonApi?.kind === "issue-view") {
     try {
       const value = JSON.parse(result.stdout);
-      if (typeof value?.id === "string") issueId = value.id;
+      const expectedUrl = `https://${repository}/issues/${nonApi.number}`;
+      if (value?.number === Number(nonApi.number) && value?.url?.toLowerCase() === expectedUrl.toLowerCase()
+        && typeof value?.id === "string") issueIds.add(value.id);
     } catch {}
   }
 };
@@ -520,6 +593,7 @@ const server = net.createServer((connection) => {
       return;
     }
     let validation = null;
+    let nonApi = null;
     if (request.args[0] === "api") {
       validation = parseValidation(request.args);
       if (!validation || (validation.kind !== "read" && !(typeOperation && ["issue-type-read", "issue-type-write"].includes(validation.kind)))) {
@@ -527,14 +601,20 @@ const server = net.createServer((connection) => {
         return;
       }
       if (validation.kind === "issue-type-write"
-        && (validation.node_id !== issueId || validation.type_id !== typeId || !issueId || !typeId)) {
+        && (!issueIds.has(validation.node_id) || validation.type_id !== typeId || !typeId)) {
+        connection.end(JSON.stringify({status: 1, stdout: "", stderr: ""}));
+        return;
+      }
+    } else {
+      nonApi = validateNonApi(request.args);
+      if (!nonApi) {
         connection.end(JSON.stringify({status: 1, stdout: "", stderr: ""}));
         return;
       }
     }
     const result = spawnSync(ghBinary, request.args, {encoding: "utf8", env: process.env, maxBuffer: 10 * 1024 * 1024});
     const response = {status: Number.isSafeInteger(result.status) ? result.status : 1, stdout: result.stdout || "", stderr: result.stderr || ""};
-    observe(request.args, validation, response);
+    observe(request.args, validation, nonApi, response);
     connection.end(JSON.stringify(response));
   });
 });
@@ -1249,7 +1329,7 @@ fm_github_validate_gh_value() {
 }
 
 fm_github_validate_gh_positional() {
-  local family=$1 subcommand=$2 position=$3 value=$4 canonical
+  local family=$1 subcommand=$2 position=$3 value=$4 canonical path_value owner repo number
   case "$family:$subcommand:$position" in
     repo:create:1|repo:clone:1|repo:view:1|label:clone:1|issue:transfer:2)
       canonical=$(fm_github_repository_allowed "$value") || return 1
@@ -1275,6 +1355,29 @@ fm_github_validate_gh_positional() {
       esac
       ;;
   esac
+  if [ "$family:$subcommand" = issue:edit ]; then
+    case "$value" in
+      [1-9]|[1-9][0-9]*) number=$value ;;
+      https://github.com/*/*/issues/*)
+        path_value=${value#https://github.com/}
+        owner=${path_value%%/*}
+        path_value=${path_value#*/}
+        repo=${path_value%%/*}
+        path_value=${path_value#*/}
+        [ "${path_value%%/*}" = issues ] || return 1
+        number=${path_value#*/}
+        [ "$value" = "https://github.com/$owner/$repo/issues/$number" ] || return 1
+        case "$number" in [1-9]|[1-9][0-9]*) ;; *) return 1 ;; esac
+        ;;
+      *) return 1 ;;
+    esac
+    case "$number" in *[!0-9]*) return 1 ;; esac
+    if [ -n "${FM_GITHUB_GH_ISSUE_NUMBERS:-}" ]; then
+      FM_GITHUB_GH_ISSUE_NUMBERS="$FM_GITHUB_GH_ISSUE_NUMBERS"$'\n'"$number"
+    else
+      FM_GITHUB_GH_ISSUE_NUMBERS=$number
+    fi
+  fi
 }
 
 fm_github_validate_gh_positionals_complete() {
@@ -1284,6 +1387,7 @@ fm_github_validate_gh_positionals_complete() {
     repo:clone) [ "$count" -ge 1 ] && [ "$count" -le 2 ] ;;
     repo:view|repo:list) [ "$count" -le 1 ] ;;
     pr:checks|pr:checkout|pr:close|pr:comment|pr:diff|pr:edit|pr:lock|pr:merge|pr:ready|pr:reopen|pr:review|pr:revert|pr:unlock|pr:update-branch|pr:view) [ "$count" -le 1 ] ;;
+    issue:edit) [ "$count" -ge 1 ] ;;
     issue:transfer) [ "$count" -eq 2 ] ;;
     *) return 0 ;;
   esac
@@ -1293,6 +1397,7 @@ fm_github_validate_gh_resource() {
   local family=${1:-} subcommand=${2:-} arg option value kind pending='' position=0
   FM_GITHUB_GH_TARGET_REPOSITORY=
   FM_GITHUB_GH_EXPLICIT_REPOSITORY=0
+  FM_GITHUB_GH_ISSUE_NUMBERS=
   [ -n "$family" ] && [ -n "$subcommand" ] && [ "$family" != api ] || return 1
   shift 2
   for arg in "$@"; do
@@ -1594,7 +1699,8 @@ fm_github_context_command() {
       github_binary=$FM_GITHUB_GH_BINARY
       [ "${tool##*/}" != gh-axi ] || github_binary=$FM_GITHUB_GH_AXI_BINARY
       if [ "${tool##*/}" = gh-axi ]; then
-        fm_github_run_gh_axi "$github_binary" "${FM_GITHUB_GH_TARGET_REPOSITORY:-$FM_GITHUB_REPOSITORY}" "$@" 2>/dev/null || {
+        fm_github_run_gh_axi "$github_binary" "${FM_GITHUB_GH_TARGET_REPOSITORY:-$FM_GITHUB_REPOSITORY}" \
+          "${FM_GITHUB_GH_ISSUE_NUMBERS:-}" "$@" 2>/dev/null || {
           echo "error: routed GitHub command failed for profile $FM_GITHUB_PROFILE_ID" >&2
           return 1
         }

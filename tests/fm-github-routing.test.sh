@@ -111,11 +111,15 @@ case "${1:-} ${2:-}" in
     exit
     ;;
   "issue create")
-    printf '%s\n' 'https://github.com/Owner-A/repo-a/issues/17'
+    repo=Owner-A/repo-a
+    case " $* " in *' --repo account-a/repo-a '*) repo=account-a/repo-a ;; esac
+    printf 'https://github.com/%s/issues/17\n' "$repo"
     exit 0
     ;;
   "issue view")
-    printf '%s\n' '{"number":17,"title":"typed","state":"OPEN","url":"https://github.com/Owner-A/repo-a/issues/17","id":"ISSUE_node_17"}'
+    repo=Owner-A/repo-a
+    case " $* " in *' --repo account-a/repo-a '*) repo=account-a/repo-a ;; esac
+    printf '{"number":17,"title":"typed","state":"OPEN","url":"https://github.com/%s/issues/17","id":"ISSUE_node_17"}\n' "$repo"
     exit 0
     ;;
   "pr view")
@@ -183,6 +187,11 @@ case "${FM_TEST_GH_AXI_TYPED_API:-}" in
       -f 'query=mutation($id:ID!,$typeId:ID!){updateIssue(input:{id:$id,issueTypeId:$typeId}){issue{id}}}'
     exit
     ;;
+  credential) gh auth token; exit ;;
+  destructive) gh issue delete 17 --yes; exit ;;
+  global) gh repo list; exit ;;
+  cross-command) gh issue view 17 --json id --repo Other/repo-a; exit ;;
+  unbound-create) gh issue create --title hijack; exit ;;
   foreign) gh api repos/Other/repo-a; exit ;;
   forks) gh api repos/Owner-A/repo-a/forks; exit ;;
   mutation)
@@ -725,6 +734,12 @@ test_forbidden_commands_and_access_diagnostics() {
   FM_TEST_GH_AXI_TYPED_API=issue-type-fork run_exec "$d" exec --project repo-a --repository "$d/home/projects/repo-a" -- \
     gh-axi issue edit 17 --type Bug --repo account-a/repo-a >/dev/null \
     || fail "verified gh-axi descendant could not edit a selected-fork issue type"
+  FM_TEST_GH_AXI_TYPED_API=issue-type-fork run_exec "$d" exec --project repo-a --repository "$d/home/projects/repo-a" -- \
+    gh-axi issue edit --repo account-a/repo-a 17 --type Bug >/dev/null \
+    || fail "verified gh-axi descendant could not parse flags before an issue target"
+  FM_TEST_GH_AXI_TYPED_API=issue-type run_exec "$d" exec --project repo-a --repository "$d/home/projects/repo-a" -- \
+    gh-axi issue edit https://github.com/Owner-A/repo-a/issues/17 --type Bug >/dev/null \
+    || fail "verified gh-axi descendant could not parse a canonical issue URL"
   assert_grep $'gh\tprofile-a\tapi graphql --hostname github.com' "$d/routes.log" \
     "typed gh-axi internal API call did not retain the selected profile"
   for kind in foreign forks mutation traversal head-repository; do
@@ -748,6 +763,14 @@ test_forbidden_commands_and_access_diagnostics() {
     rc=$?
     set -e
     expect_code 1 "$rc" "gh-axi repository-bound $kind mutation"
+  done
+  for kind in credential destructive global cross-command unbound-create; do
+    set +e
+    FM_TEST_GH_AXI_TYPED_API=$kind run_exec "$d" exec --project repo-a --repository "$d/home/projects/repo-a" -- \
+      gh-axi issue edit 17 --type Bug >/dev/null 2>&1
+    rc=$?
+    set -e
+    expect_code 1 "$rc" "gh-axi non-API broker $kind command"
   done
   (cd "$d/home/projects" && FM_TEST_FAKE_NETWORK=1 FM_TEST_CLONE_SOURCE="$d/home/projects/repo-a" \
     run_exec "$d" exec --project clone-project --repository github.com/Owner-A/clone-project -- \
@@ -1160,6 +1183,15 @@ fi
 if [ "${1:-}" = axi ] && [ "${2:-}" = status ]; then
   [ -z "${FM_TEST_NM_STATUS_FAIL:-}" ] || exit 73
   branch=${FM_TEST_NM_BRANCH:-$(git symbolic-ref --quiet --short HEAD)}
+  if [ -n "${FM_TEST_NM_NO_RUNS_ONCE:-}" ] && [ ! -e "$FM_TEST_NM_CAPTURE.no-runs-probed" ]; then
+    touch "$FM_TEST_NM_CAPTURE.no-runs-probed"
+    printf 'no runs yet. Push through the gate to start a pipeline:\n  git push no-mistakes %s\n' "$branch"
+    exit "${FM_TEST_NM_NO_RUNS_STATUS:-1}"
+  fi
+  if [ -n "${FM_TEST_NM_MALFORMED_STATUS:-}" ]; then
+    printf '%s\n' 'no runs yet but status is malformed'
+    exit 0
+  fi
   if [ -n "${FM_TEST_NM_CROSS_BRANCH_ONCE:-}" ] && [ ! -e "$FM_TEST_NM_CAPTURE.status-probed" ]; then
     branch=other-branch
     touch "$FM_TEST_NM_CAPTURE.status-probed"
@@ -1232,11 +1264,12 @@ SH
   (cd "$d/unrelated-no-mistakes" && FM_HOME="$d/home" FM_ROOT_OVERRIDE="$ROOT" \
     FM_TEST_NM_CAPTURE="$captured" FM_TEST_NM_LOG="$log" FM_TEST_ROUTE_LOG="$d/routes.log" \
     FM_TEST_NM_MUTATE_CONFIG="$d/home/config/github-accounts.json" \
-    FM_TEST_NM_CROSS_BRANCH_ONCE=1 FM_TEST_NM_RUNS="$mature_runs" \
+    FM_TEST_NM_NO_RUNS_ONCE=1 FM_TEST_NM_RUNS="$mature_runs" \
     FM_TEST_SENTINEL="$SENTINEL" PATH="$d/hostile:$d/exact:$PATH" \
     "$EXEC" exec --project repo-a --repository "$d/home/projects/repo-a" -- \
       no-mistakes axi run --intent initial >/dev/null) \
     || fail "strict no-mistakes run from another checkout failed"
+  [ -e "$captured.no-runs-probed" ] || fail "strict no-mistakes run did not exercise explicit current-checkout absence"
   expected_pwd=$(cd "$d/home/projects/repo-a" && pwd -P)
   [ "$(cat "$captured.pwd")" = "$expected_pwd" ] || fail "strict no-mistakes run used the caller working directory"
   assert_no_grep 'runs --limit' "$log" "strict no-mistakes run guessed absence from bounded history"
@@ -1291,6 +1324,13 @@ SH
   set -e
   expect_code 1 "$rc" "transient no-mistakes status failure"
   [ "$(cat "$marker")" = "$marker_before" ] || fail "status failure changed the active no-mistakes binding marker"
+  set +e
+  FM_TEST_NM_MALFORMED_STATUS=1 FM_TEST_NM_CAPTURE="$captured" FM_TEST_NM_LOG="$log" \
+    run_exec "$d" exec --project repo-a --repository "$d/home/projects/repo-a" -- no-mistakes axi respond accepted >/dev/null 2>&1
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "malformed no-mistakes absence status"
+  [ "$(cat "$marker")" = "$marker_before" ] || fail "malformed status changed the active no-mistakes binding marker"
   FM_TEST_NM_CAPTURE="$captured" FM_TEST_NM_LOG="$log" \
     run_exec "$d" exec --project repo-a --repository "$d/home/projects/repo-a" -- no-mistakes axi respond accepted >/dev/null \
     || fail "matching no-mistakes continuation did not revalidate its typed context"

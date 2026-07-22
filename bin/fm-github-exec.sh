@@ -224,12 +224,33 @@ no_mistakes_head_is_exact() {
   [ "$current_head" = "$run_head" ]
 }
 
+no_mistakes_status_is_absent() {
+  local output=$1 current_branch=$2 first rest
+  first=${output%%$'\n'*}
+  if [ "$output" = "$first" ]; then
+    rest=
+  else
+    rest=${output#*$'\n'}
+  fi
+  case "$first" in
+    'no runs yet. Push through the gate to start a pipeline:'|'No active run. Push through the gate to start a pipeline:') ;;
+    *) return 1 ;;
+  esac
+  [ -z "$rest" ] || [ "$rest" = "  git push no-mistakes $current_branch" ]
+}
+
 no_mistakes_run_details() {
-  local binary=$1 output current_branch current_head
+  local binary=$1 output current_branch current_head status
   NM_RUN_ID= NM_RUN_BRANCH= NM_RUN_STATUS= NM_RUN_HEAD= NM_RUN_STATE=inactive
   current_branch=$(command "$FM_GITHUB_GIT_BINARY" -C "$repository" symbolic-ref --quiet --short HEAD 2>/dev/null) || return 1
   current_head=$(command "$FM_GITHUB_GIT_BINARY" -C "$repository" rev-parse HEAD 2>/dev/null) || return 1
-  output=$(cd "$repository" && LC_ALL=C command "$binary" axi status 2>/dev/null) || return 1
+  if output=$(cd "$repository" && LC_ALL=C command "$binary" axi status 2>&1); then
+    status=0
+  else
+    status=$?
+  fi
+  no_mistakes_status_is_absent "$output" "$current_branch" && return 2
+  [ "$status" -eq 0 ] || return 1
   NM_RUN_ID=$(printf '%s\n' "$output" | sed -n 's/^  id: //p' | head -1)
   NM_RUN_BRANCH=$(printf '%s\n' "$output" | sed -n 's/^  branch: //p' | head -1)
   NM_RUN_STATUS=$(printf '%s\n' "$output" | sed -n 's/^  status: //p' | head -1)

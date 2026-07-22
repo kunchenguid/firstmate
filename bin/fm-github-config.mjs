@@ -496,7 +496,7 @@ function parseRepository(raw) {
     throw new Error("invalid repository");
   }
   const parts = parsed.pathname.replace(/^\/+|\/+$/gu, "").replace(/\.git$/u, "").split("/");
-  if (parts.length === 4 && parts[2] === "pull" && /^[1-9][0-9]*$/u.test(parts[3])) parts.splice(2);
+  if (parts.length === 4 && ["issues", "pull"].includes(parts[2]) && /^[1-9][0-9]*$/u.test(parts[3])) parts.splice(2);
   if (parts.length !== 2 || !parts.every((part) => /^[A-Za-z0-9._-]+$/u.test(part) && part !== "." && part !== "..")) {
     throw new Error("invalid repository");
   }
