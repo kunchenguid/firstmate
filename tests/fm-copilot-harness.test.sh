@@ -20,7 +20,13 @@ esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
   list-windows) exit 0 ;;
-  has-session|new-session|new-window|send-keys|kill-window) exit 0 ;;
+  send-keys)
+    if [ -n "${FM_FAKE_TMUX_LOG:-}" ]; then
+      printf '%s\n' "$*" >> "$FM_FAKE_TMUX_LOG"
+    fi
+    exit 0
+    ;;
+  has-session|new-session|new-window|kill-window) exit 0 ;;
 esac
 exit 0
 SH
@@ -130,6 +136,44 @@ EOF
   pass "copilot spawn threads model and effort into meta"
 }
 
+test_copilot_spawn_accepts_none_effort() {
+  local rec case_dir home proj wt fakebin id out status meta
+  rec=$(make_spawn_case none-effort)
+  IFS='|' read -r case_dir home proj wt fakebin id <<EOF
+$rec
+EOF
+  out=$(run_copilot_spawn "$home" "$proj" "$wt" "$fakebin" "$id" --harness copilot --model gpt-5.5 --effort none)
+  status=$?
+  expect_code 0 "$status" "copilot spawn with none effort should succeed"
+  assert_contains "$out" "harness=copilot" "copilot spawn did not record harness in output"
+  meta="$home/state/$id.meta"
+  assert_present "$meta" "copilot spawn did not write meta for none effort"
+  assert_grep 'model=gpt-5.5' "$meta" "copilot spawn did not record the requested model for none effort"
+  assert_grep 'effort=none' "$meta" "copilot spawn did not record effort=none"
+  pass "copilot spawn accepts and records none effort"
+}
+
+test_copilot_spawn_uses_brief_path_pointer_prompt() {
+  local rec case_dir home proj wt fakebin id out status log brief_token
+  rec=$(make_spawn_case argv-pointer)
+  IFS='|' read -r case_dir home proj wt fakebin id <<EOF
+$rec
+EOF
+  brief_token="INLINE_BRIEF_TOKEN_SHOULD_NOT_APPEAR"
+  printf '%s\n' "$brief_token" > "$home/data/$id/brief.md"
+  log="$case_dir/tmux-send-keys.log"
+  out=$(FM_FAKE_TMUX_LOG="$log" run_copilot_spawn "$home" "$proj" "$wt" "$fakebin" "$id" copilot)
+  status=$?
+  expect_code 0 "$status" "copilot spawn should succeed with pointer prompt launch"
+  assert_contains "$out" "harness=copilot" "copilot spawn did not report harness in output"
+  assert_present "$log" "fake tmux send-keys log was not captured"
+  assert_grep 'Read and follow the instructions in this file exactly:' "$log" "copilot launch did not use the brief-path pointer prompt"
+  if grep -q "$brief_token" "$log"; then
+    fail "copilot launch inlined brief content into argv instead of using a brief-path pointer prompt"
+  fi
+  pass "copilot spawn uses a brief-path pointer prompt and does not inline brief content"
+}
+
 test_fm_harness_detects_copilot_env_marker() {
   local out
   out=$(COPILOT_CLI=1 CLAUDECODE='' PI_CODING_AGENT='' GROK_AGENT='' "$HARNESS")
@@ -204,6 +248,8 @@ test_copilot_spawn_installs_worktree_hook
 test_copilot_spawn_does_not_clobber_existing_hook_file
 test_copilot_spawn_hook_command_handles_single_quote_paths
 test_copilot_spawn_threads_model_and_effort
+test_copilot_spawn_accepts_none_effort
+test_copilot_spawn_uses_brief_path_pointer_prompt
 test_fm_harness_detects_copilot_env_marker
 test_fm_harness_detects_copilot_mainthread_ancestry
 test_fm_lock_recognizes_copilot_mainthread_holder

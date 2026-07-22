@@ -86,7 +86,7 @@ The supported launch-profile flags below are verified locally; each row records 
 | grok | `--model <model>` | `--reasoning-effort <low\|medium\|high>` | Verified on grok 0.2.99 (2026-07-13). `--effort` is an alias, but firstmate's profile axis is reasoning effort. As of 0.2.99 the ceiling is `high`; both `xhigh` and `max` are rejected with `use one of: high, medium, low`, so firstmate omits them. |
 | pi | `--model <model>` | `--thinking <low\|medium\|high\|xhigh>` | Verified on pi 0.80.2. `max` prints an invalid-thinking warning, so firstmate omits Pi effort when the requested effort is `max`. |
 | opencode | `--model <provider/model>` | none for firstmate's interactive launch | Verified on opencode 1.17.6. `opencode run` has `--variant`, but firstmate launches the interactive `opencode --prompt` path, which has no verified effort flag. |
-| copilot | `--model <model>` | `--effort <low\|medium\|high\|xhigh\|max>` | Verified on GitHub Copilot CLI 1.0.68. `--effort`/`--reasoning-effort` are aliases; the installed CLI's help advertises the full shared vocabulary. |
+| copilot | `--model <model>` | `--effort <none\|low\|medium\|high\|xhigh\|max>` | Verified on GitHub Copilot CLI 1.0.68. `--effort`/`--reasoning-effort` are aliases; the installed CLI's help advertises the full shared vocabulary, so no value is omitted. |
 
 When a requested effort value is outside the harness-specific accepted set, `fm-spawn` records the requested `effort=` in meta but emits no effort flag for that harness.
 This preserves launch success instead of passing a known-bad value.

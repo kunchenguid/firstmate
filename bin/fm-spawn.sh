@@ -160,8 +160,8 @@ done
 [ "$EFFORT_SET" -eq 0 ] || [ -n "$EFFORT" ] || { echo "error: --effort requires a non-empty value" >&2; exit 1; }
 [ "$BACKEND_SET" -eq 0 ] || [ -n "$BACKEND_ARG" ] || { echo "error: --backend requires a non-empty value" >&2; exit 1; }
 case "$EFFORT" in
-  ''|low|medium|high|xhigh|max) ;;
-  *) echo "error: --effort must be one of low, medium, high, xhigh, max" >&2; exit 1 ;;
+  ''|none|low|medium|high|xhigh|max) ;;
+  *) echo "error: --effort must be one of none, low, medium, high, xhigh, max" >&2; exit 1 ;;
 esac
 
 # Backend selection (data/fm-backend-design-d7): explicit --backend, else
@@ -350,12 +350,14 @@ launch_template() {
     # copilot (GitHub Copilot CLI): -i/--interactive starts an interactive session
     # and automatically executes the given prompt, the positional-prompt equivalent
     # of claude/pi/grok's launch pattern (copilot has no bare positional prompt
-    # arg). --allow-all is the targeted equivalent of claude's
+    # arg). Use a short pointer prompt to the brief path rather than inlining the
+    # full brief text into argv, which can exceed exec argument limits on large
+    # instructions. --allow-all is the targeted equivalent of claude's
     # --dangerously-skip-permissions (enables all tool/path/URL permissions so the
     # crewmate runs unattended). copilot's turn-end signal does NOT ride the launch
     # command - it is an agentStop hook installed below as a worktree-resident
     # .github/hooks/ file, identical in shape to claude's Stop hook.
-    copilot) printf '%s' 'copilot --allow-all __MODELFLAG____EFFORTFLAG__-i "$(cat __BRIEF__)"' ;;
+    copilot) printf '%s' 'copilot --allow-all __MODELFLAG____EFFORTFLAG__-i "Read and follow the instructions in this file exactly: __BRIEF__"' ;;
     *) return 1 ;;
   esac
 }
@@ -411,8 +413,8 @@ if [ "$KIND" = secondmate ] && [ -z "$ARG3" ]; then
     SM_EFFORT=$("$SCRIPT_DIR/fm-harness.sh" secondmate-effort)
     if [ -n "$SM_EFFORT" ]; then
       case "$SM_EFFORT" in
-        low|medium|high|xhigh|max) EFFORT=$SM_EFFORT ;;
-        *) echo "warning: config/secondmate-harness effort token '$SM_EFFORT' is not one of low, medium, high, xhigh, max; ignoring" >&2 ;;
+        none|low|medium|high|xhigh|max) EFFORT=$SM_EFFORT ;;
+        *) echo "warning: config/secondmate-harness effort token '$SM_EFFORT' is not one of none, low, medium, high, xhigh, max; ignoring" >&2 ;;
       esac
     fi
   fi
