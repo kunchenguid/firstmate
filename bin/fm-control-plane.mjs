@@ -130,6 +130,14 @@ function epochOf(value) {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
+function strictIsoTimestamp(value) {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/.test(trimmed)) return null;
+  const parsed = Date.parse(trimmed);
+  return Number.isFinite(parsed) && iso(parsed) === trimmed ? parsed : null;
+}
+
 function statSafe(target) {
   try {
     const stat = fs.statSync(target);
@@ -457,7 +465,7 @@ function normalizeSnapshotTasks(snapshot, source, nowIso) {
 function validateControl(control, taskId) {
   if (control.schema !== CONTROL_SCHEMA) throw new Error(`control record for ${taskId} has unsupported schema`);
   if (control.id !== taskId) throw new Error(`control record id ${control.id || "<missing>"} does not match ${taskId}`);
-  if (control.updated_at != null && (typeof control.updated_at !== "string" || !Number.isFinite(Date.parse(control.updated_at)))) {
+  if (control.updated_at != null && strictIsoTimestamp(control.updated_at) === null) {
     throw new Error(`control record for ${taskId} has invalid updated_at`);
   }
   const secret = hasSecret(control);
