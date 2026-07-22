@@ -128,6 +128,8 @@ test_completed_turn_no_report_triggers_one_recovery() {
   export FM_PENDING_REPLY_NOW=2000
   export FM_PENDING_REPLY_SEND_HOOK='printf "%s\t%s\n" >>"'"$hook_log"'"'
   # The hook above is wrong for eval form - use a function.
+  # Invoked indirectly through FM_PENDING_REPLY_SEND_HOOK.
+  # shellcheck disable=SC2329
   recovery_hook() {
     printf '%s\t%s\n' "$1" "$2" >> "$hook_log"
   }
@@ -236,6 +238,8 @@ test_recovery_reply_resolves_original() {
   state="$home/state"
   hook_log="$TMP_ROOT/recovery-resolve-hook.log"
   : > "$hook_log"
+  # Invoked indirectly through FM_PENDING_REPLY_SEND_HOOK.
+  # shellcheck disable=SC2329
   recovery_hook() { printf '%s\n' "$2" >> "$hook_log"; }
   export -f recovery_hook
   export FM_PENDING_REPLY_SEND_HOOK='recovery_hook'
@@ -257,6 +261,8 @@ test_second_missed_turn_escalates_once_and_stays_durable() {
   state="$home/state"
   hook_log="$TMP_ROOT/escalate-hook.log"
   : > "$hook_log"
+  # Invoked indirectly through FM_PENDING_REPLY_SEND_HOOK.
+  # shellcheck disable=SC2329
   recovery_hook() { printf '%s\n' ok >> "$hook_log"; }
   export -f recovery_hook
   export FM_PENDING_REPLY_SEND_HOOK='recovery_hook'
@@ -350,6 +356,8 @@ test_undelivered_records_are_scan_immutable() {
     state="$home/state"
     sm_home="$home/sm"
     mkdir -p "$sm_home/state"
+    # This fixture clock is intentionally scoped to the isolated subshell.
+    # shellcheck disable=SC2030,SC2031
     export FM_PENDING_REPLY_NOW=5500
     corr=$(fm_pending_reply_create "$home" "$state" hibit "not delivered yet")
     rec=$(fm_pending_reply_path "$state" "$corr")
@@ -384,6 +392,8 @@ test_delivery_confirmation_fallback_reconciles() {
     local reported_corr reported_rec reported_marker
     home=$(setup_parent delivery-confirmation)
     state="$home/state"
+    # This fixture clock is intentionally scoped to the isolated subshell.
+    # shellcheck disable=SC2030,SC2031
     export FM_PENDING_REPLY_NOW=5750
     corr=$(fm_pending_reply_create "$home" "$state" hibit "confirmed delivery")
     rec=$(fm_pending_reply_path "$state" "$corr")
@@ -474,6 +484,8 @@ test_unrelated_and_stale_corr_cannot_resolve() {
   local home state corr other
   home=$(setup_parent stale-corr)
   state="$home/state"
+  # Reset the fixture clock after isolated subshell tests.
+  # shellcheck disable=SC2031
   export FM_PENDING_REPLY_NOW=6000
   corr=$(fm_pending_reply_create "$home" "$state" "hibit" "need answer")
   fm_pending_reply_mark_delivered "$state" "$corr"
@@ -660,6 +672,8 @@ test_unknown_backend_state_uses_capture_fallback() {
       sm_home="$home/sm"
       mkdir -p "$sm_home/state"
       export FM_PENDING_REPLY_GRACE_SECS=10
+      # These fixture overrides are intentionally scoped to the isolated subshell.
+      # shellcheck disable=SC2030,SC2031
       export FM_PENDING_REPLY_NOW=10000
       corr=$(fm_pending_reply_create "$home" "$state" "hibit" "$backend fallback")
       fm_pending_reply_mark_delivered "$state" "$corr"
@@ -667,13 +681,19 @@ test_unknown_backend_state_uses_capture_fallback() {
       [ "$backend" = tmux ] || printf 'backend=%s\n' "$backend" >> "$state/hibit.meta"
       fm_backend_busy_state() { printf 'unknown'; }
       fm_backend_capture() { printf '%s' "$FM_PENDING_TEST_CAPTURE"; }
+      # Invoked indirectly through FM_PENDING_REPLY_SEND_HOOK.
+      # shellcheck disable=SC2329
       recovery_hook() { :; }
+      # This hook override is intentionally scoped to the isolated subshell.
+      # shellcheck disable=SC2030,SC2031
       export FM_PENDING_REPLY_SEND_HOOK=recovery_hook
       export FM_PENDING_TEST_CAPTURE='idle footer'
       fm_pending_reply_tick "$state"
       rec=$(fm_pending_reply_path "$state" "$corr")
       [ -z "$(fm_pending_reply_get "$rec" request_turn_completed_epoch)" ] \
         || fail "$backend fallback must not accept stale idle before grace"
+      # Continue advancing the subshell-local fixture clock.
+      # shellcheck disable=SC2030,SC2031
       export FM_PENDING_REPLY_NOW=10010
       fm_pending_reply_tick "$state"
       [ "$(phase_of "$state" "$corr")" = recovery_sent ] \
@@ -700,6 +720,8 @@ test_tick_skips_terminal_and_reuses_target_observation() {
     scan_log="$home/status-scans.log"
     : > "$probe_log"
     : > "$scan_log"
+    # This fixture clock is intentionally scoped to the isolated subshell.
+    # shellcheck disable=SC2030,SC2031
     export FM_PENDING_REPLY_NOW=10100
     open1=$(fm_pending_reply_create "$home" "$state" hibit "first open request")
     open2=$(fm_pending_reply_create "$home" "$state" hibit "second open request")
@@ -799,7 +821,10 @@ test_tick_end_to_end_missed_then_escalate() {
   : > "$hook_log"
   recovery_hook() { printf 'recovered\n' >> "$hook_log"; }
   export -f recovery_hook
+  # Reset hook and clock fixtures after isolated subshell tests.
+  # shellcheck disable=SC2031
   export FM_PENDING_REPLY_SEND_HOOK='recovery_hook'
+  # shellcheck disable=SC2031
   export FM_PENDING_REPLY_NOW=9300
 
   corr=$(fm_pending_reply_create "$home" "$state" "hibit" "e2e miss")
