@@ -1154,24 +1154,26 @@ fi
 if [ "$HERDR_PRESENTATION_RETIRE_CANDIDATE" = 1 ]; then
   # shellcheck source=bin/fm-wake-lib.sh
   . "$SCRIPT_DIR/fm-wake-lib.sh"
-  HERDR_PRESENTATION_FOCUS_LOCK="$STATE/.herdr-presentation-order.lock"
+  HERDR_PRESENTATION_FOCUS_LOCK=
   HERDR_PRESENTATION_FOCUS_LOCK_HELD=0
   HERDR_PRESENTATION_FOCUS_LOCK_ATTEMPT=0
-  while [ "$HERDR_PRESENTATION_FOCUS_LOCK_ATTEMPT" -lt 50 ]; do
-    if fm_lock_try_acquire "$HERDR_PRESENTATION_FOCUS_LOCK"; then
-      HERDR_PRESENTATION_FOCUS_LOCK_HELD=1
-      break
-    fi
-    sleep 0.1
-    HERDR_PRESENTATION_FOCUS_LOCK_ATTEMPT=$((HERDR_PRESENTATION_FOCUS_LOCK_ATTEMPT + 1))
-  done
+  if HERDR_PRESENTATION_FOCUS_LOCK=$(fm_backend_herdr_presentation_session_lock_path "$HERDR_PRESENTATION_SESSION"); then
+    while [ "$HERDR_PRESENTATION_FOCUS_LOCK_ATTEMPT" -lt 50 ]; do
+      if fm_lock_try_acquire "$HERDR_PRESENTATION_FOCUS_LOCK"; then
+        HERDR_PRESENTATION_FOCUS_LOCK_HELD=1
+        break
+      fi
+      sleep 0.1
+      HERDR_PRESENTATION_FOCUS_LOCK_ATTEMPT=$((HERDR_PRESENTATION_FOCUS_LOCK_ATTEMPT + 1))
+    done
+  fi
   if [ "$HERDR_PRESENTATION_FOCUS_LOCK_HELD" = 1 ]; then
     fm_backend_herdr_projection_close_pane_focus_preserving \
       "$HERDR_PRESENTATION_SESSION" "$HERDR_PRESENTATION_PANE" 2>/dev/null || true
     HERDR_PRESENTATION_FOCUS_LOCK_HELD=0
     fm_lock_release "$HERDR_PRESENTATION_FOCUS_LOCK" || true
   else
-    echo "warning: herdr presentation focus lock stayed busy; refusing a concurrent focus-unsafe pane close" >&2
+    echo "warning: herdr presentation focus lock unavailable; refusing a concurrent focus-unsafe pane close" >&2
   fi
 elif [ "$BACKEND" != orca ]; then
   fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" 2>/dev/null || true

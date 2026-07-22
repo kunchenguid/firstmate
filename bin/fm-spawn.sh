@@ -35,13 +35,14 @@
 #   or recovered state is never adopted, reused, closed, or deleted through that
 #   presentation path; a flat launch is allowed only after duplicate-agent risk
 #   is independently absent. Treehouse allocation and task metadata are unchanged.
-#   A clean projected create makes one bounded attempt to hold the shared
-#   presentation-order lock through launch handoff. Lock contention warns and
-#   falls back to the ordinary flat layout before any projection mutation. A
-#   primary home's exact response-derived new workspace is appended to the stable
-#   primary-worker block immediately after firstmate. Ordering never authorizes
-#   lifecycle cleanup, and any unavailable, ambiguous, or failed move warns while
-#   the spawn continues.
+#   A clean projected create makes one bounded attempt to hold the one
+#   session-scoped presentation-order lock (keyed by named session plus
+#   canonical socket, outside any home's state/) through launch handoff. Lock
+#   contention warns and falls back to the ordinary flat layout before any
+#   projection mutation. The exact response-derived new workspace is inserted
+#   immediately after its owning parent (firstmate or 2ndmate-<id>) contiguous
+#   child block. Ordering never authorizes lifecycle cleanup, and any
+#   unavailable, ambiguous, or failed move warns while the spawn continues.
 #   Every projected create, prune, and move captures and verifies the named
 #   session's exact active workspace and tab. A detected focus change restores
 #   only that exact tab id; an ambiguous pre-operation snapshot refuses the
@@ -249,8 +250,8 @@ spawn_abort_cleanup() {
   local status=$?
   if [ "$HERDR_PROJECTION_ABORT_CLEANUP" = 1 ] \
      && [ "$HERDR_PRESENTATION_ORDER_LOCK_HELD" != 1 ]; then
-    if ! spawn_herdr_presentation_order_lock_acquire; then
-      echo "warning: herdr presentation focus lock stayed busy; retaining the projection journal and refusing concurrent abort cleanup" >&2
+    if ! spawn_herdr_presentation_order_lock_acquire "${HERDR_PROJECTION_ABORT_SESSION:-}"; then
+      echo "warning: herdr presentation focus lock unavailable; retaining the projection journal and refusing concurrent abort cleanup" >&2
       HERDR_PROJECTION_ABORT_CLEANUP=0
     fi
   fi
@@ -305,9 +306,14 @@ spawn_abort_cleanup() {
 }
 trap spawn_abort_cleanup EXIT
 
+# One bounded lock per live Herdr session/socket, shared across all homes.
+# <session> is required so secondmate and primary spawns serialize against the
+# same session without writing any other home's state directory.
 spawn_herdr_presentation_order_lock_acquire() {
-  local attempt
-  HERDR_PRESENTATION_ORDER_LOCK="$STATE/.herdr-presentation-order.lock"
+  local session=${1:-} attempt lock_path
+  [ -n "$session" ] || session=$(fm_backend_herdr_session)
+  lock_path=$(fm_backend_herdr_presentation_session_lock_path "$session") || return 1
+  HERDR_PRESENTATION_ORDER_LOCK="$lock_path"
   attempt=0
   while [ "$attempt" -lt 50 ]; do
     if fm_lock_try_acquire "$HERDR_PRESENTATION_ORDER_LOCK"; then
@@ -866,8 +872,7 @@ case "$BACKEND" in
     fi
     HERDR_PRESENTATION_JOURNAL=$(fm_backend_herdr_projection_journal_path "$STATE" "$ID")
     HERDR_PROJECTED=0
-    if [ -f "$CONFIG/herdr-presentation-spaces" ]; then
-      HERDR_PRESENTATION_ORDER_LOCK="$STATE/.herdr-presentation-order.lock"
+    if [ "$KIND" != secondmate ] && [ -f "$CONFIG/herdr-presentation-spaces" ]; then
       if [ -e "$HERDR_PRESENTATION_JOURNAL" ] || [ -L "$HERDR_PRESENTATION_JOURNAL" ]; then
         if [ -e "$STATE/$ID.meta" ] || [ -L "$STATE/$ID.meta" ]; then
           herdr_projection_existing_meta_allows_flat "$STATE/$ID.meta" || exit 1
@@ -876,14 +881,16 @@ case "$BACKEND" in
         fm_backend_herdr_projection_recovery_allows_flat \
           "$HERDR_RECOVERY_SESSION" "$HERDR_PRESENTATION_JOURNAL" "$ID" || exit 1
       elif [ ! -e "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ]; then
-        HERDR_PRESENTATION_ORDERING=0
-        if spawn_herdr_presentation_order_lock_acquire; then
-          if [ "$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_workspace_label)" = firstmate ]; then
-            HERDR_PRESENTATION_ORDERING=1
-          fi
+        HERDR_SES=$(fm_backend_herdr_session)
+        HERDR_PARENT_LABEL=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_workspace_label)
+        # Session lock path resolution needs a live named-session socket.
+        # Ensure the server before journal publication so lock failure degrades
+        # to flat without ever creating an unlocked projection.
+        if ! fm_backend_herdr_server_ensure "$HERDR_SES"; then
+          echo "warning: herdr presentation could not ensure its session server; using the ordinary flat layout without projection" >&2
+        elif spawn_herdr_presentation_order_lock_acquire "$HERDR_SES"; then
           HERDR_PROJECTION_ID=$(fm_backend_herdr_projection_journal_create "$STATE" "$ID") || exit 1
-          HERDR_PROJECTION_LABEL=$(FM_HOME="$HERDR_LABEL_HOME" \
-            fm_backend_herdr_projection_workspace_label "$ID" "$HERDR_PROJECTION_ID")
+          HERDR_PROJECTION_LABEL=$(fm_backend_herdr_projection_workspace_label "$ID" "$HERDR_PROJECTION_ID")
           if ! FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_projection_create_task \
             "$PROJ_ABS" "$HERDR_PROJECTION_LABEL" "$W"; then
             if [ "${FM_BACKEND_HERDR_PROJECTION_CLEANUP_SAFE:-0}" = 1 ]; then
@@ -904,11 +911,10 @@ case "$BACKEND" in
           HERDR_PROJECTION_ABORT_SESSION=$HERDR_SES
           HERDR_PROJECTION_ABORT_TASK_PANE=$HERDR_PANE_ID
           HERDR_PROJECTION_ABORT_SEEDED_PANE=$FM_BACKEND_HERDR_PROJECTION_SEEDED_PANE_ID
-          if [ "$HERDR_PRESENTATION_ORDERING" = 1 ]; then
-            fm_backend_herdr_projection_order_best_effort "$HERDR_SES" "$HERDR_WORKSPACE_ID"
-          fi
+          fm_backend_herdr_projection_order_best_effort \
+            "$HERDR_SES" "$HERDR_WORKSPACE_ID" "$HERDR_PARENT_LABEL"
         else
-          echo "warning: herdr presentation focus lock stayed busy; using the ordinary flat layout without projection" >&2
+          echo "warning: herdr presentation focus lock unavailable; using the ordinary flat layout without projection" >&2
         fi
       fi
     fi

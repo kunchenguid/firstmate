@@ -1301,6 +1301,9 @@ case "${1:-} ${2:-}" in
   "status --json")
     printf '%s\n' '{"server":{"running":true}}'
     ;;
+  "session list")
+    printf '%s\n' '{"sessions":[{"name":"fmtest","running":true,"socket_path":"/tmp/fmtest.sock"}]}'
+    ;;
   "pane close")
     if [ "${FM_FAKE_HERDR_CLOSE_FAIL:-0}" = 1 ]; then
       exit 1

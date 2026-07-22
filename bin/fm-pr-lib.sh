@@ -162,7 +162,7 @@ fm_pr_url_parse() {
   # The path class contains "/" and "-", so this match is greedy to the last
   # "/-/merge_requests/". Any earlier separator therefore lands inside the
   # captured path, where the reserved "-" segment is refused.
-  pattern='^https://([a-z0-9.-]{1,253})/([A-Za-z0-9._/-]{3,1024})/-/merge_requests/([1-9][0-9]*)$'
+  pattern='^https://([a-z0-9.-]{1,253})/([A-Za-z0-9._/-]+)/-/merge_requests/([1-9][0-9]*)$'
   [[ "$raw" =~ $pattern ]] || return 1
   host=${BASH_REMATCH[1]}
   path=${BASH_REMATCH[2]}
