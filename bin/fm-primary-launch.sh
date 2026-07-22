@@ -84,21 +84,7 @@ ensure_daemon() {
 }
 
 process_harness() {
-  local pid=$1 comm name
-  local -a argv=()
-  comm=$(ps -o comm= -p "$pid" 2>/dev/null || true)
-  mapfile -d '' -t argv < "/proc/$pid/cmdline" 2>/dev/null || return 1
-  name=$(basename "${argv[0]:-$comm}")
-  case "$name" in codex|pi|grok|claude|opencode) printf '%s\n' "$name"; return 0 ;; esac
-  name=$(basename "$comm")
-  case "$name" in codex|pi|grok|claude|opencode) printf '%s\n' "$name"; return 0 ;; esac
-  case "$(basename "${argv[0]:-}")" in
-    node|nodejs|python|python[0-9]|python[0-9].*)
-      name=$(basename "${argv[1]:-}")
-      case "$name" in codex|pi|grok|claude|opencode) printf '%s\n' "$name"; return 0 ;; esac
-      ;;
-  esac
-  return 1
+  "$FM_ROOT/bin/fm-harness-process.sh" "$1"
 }
 
 pid_harness() {

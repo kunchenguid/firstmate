@@ -19,27 +19,13 @@ case "$MODE" in acquire|status|live-pid) ;; *) echo "error: usage: fm-lock.sh [s
 [ "$MODE" != acquire ] || mkdir -p "$STATE"
 
 process_harness() {
-  local pid=$1 comm name
-  local -a argv=()
-  comm=$(ps -o comm= -p "$pid" 2>/dev/null || true)
-  mapfile -d '' -t argv < "/proc/$pid/cmdline" 2>/dev/null || return 1
-  name=$(basename "${argv[0]:-$comm}")
-  case "$name" in codex|pi|grok|claude|opencode) return 0 ;; esac
-  name=$(basename "$comm")
-  case "$name" in codex|pi|grok|claude|opencode) return 0 ;; esac
-  case "$(basename "${argv[0]:-}")" in
-    node|nodejs|python|python[0-9]|python[0-9].*)
-      name=$(basename "${argv[1]:-}")
-      case "$name" in codex|pi|grok|claude|opencode) return 0 ;; esac
-      ;;
-  esac
-  return 1
+  "$FM_ROOT/bin/fm-harness-process.sh" "$1"
 }
 
 harness_pid() {
   local pid=$$
   for _ in 1 2 3 4 5 6 7 8; do
-    process_harness "$pid" && { echo "$pid"; return 0; }
+    process_harness "$pid" >/dev/null && { echo "$pid"; return 0; }
     pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
     [ -n "$pid" ] && [ "$pid" -gt 1 ] || return 1
   done
@@ -50,7 +36,7 @@ holder_alive() {
   local pid=$1
   case "$pid" in ''|*[!0-9]*|1) return 1 ;; esac
   kill -0 "$pid" 2>/dev/null || return 1
-  process_harness "$pid"
+  process_harness "$pid" >/dev/null
 }
 
 if [ "$MODE" = status ]; then

@@ -29,10 +29,8 @@ make_case() {
   mkdir -p "$home/bin" "$home/state" "$fakebin"
   cp "$LAUNCH" "$home/bin/fm-primary-launch.sh"
   cp "$ROOT/bin/fm-lock.sh" "$home/bin/fm-lock.sh"
+  cp "$ROOT/bin/fm-harness-process.sh" "$home/bin/fm-harness-process.sh"
   chmod +x "$home/bin/"*.sh
-  cat > "$home/bin/pi" <<'JS'
-setInterval(() => {}, 300000)
-JS
   printf '%s\n' "$socket" > "$dir/socket-name"
   cat > "$fakebin/no-mistakes" <<'SH'
 #!/usr/bin/env bash
@@ -278,25 +276,34 @@ EOF
 test_tracked_scripts_are_executable() {
   [ -x "$ROOT/bin/fm-primary-launch.sh" ] || fail "primary launcher is not executable"
   [ -x "$ROOT/bin/fm-lock.sh" ] || fail "session lock helper is not executable"
-  pass "tracked primary launcher and lock helper are executable"
+  [ -x "$ROOT/bin/fm-harness-process.sh" ] || fail "harness process helper is not executable"
+  pass "tracked primary launcher and ownership helpers are executable"
 }
 
-test_node_hosted_pi_process_identity() {
-  local rec dir home fakebin socket out pane_pid
-  rec=$(make_case node-pi)
-  IFS='|' read -r dir home fakebin socket <<EOF
+test_interpreter_hosted_process_identity() {
+  local harness rec dir home fakebin socket out pane_pid package entrypoint extra
+  for harness in codex pi grok claude opencode; do
+    rec=$(make_case "node-$harness")
+    IFS='|' read -r dir home fakebin socket <<EOF
 $rec
 EOF
-  tmux -L "$socket" new-session -d -s firstmate "exec node '$home/bin/pi' --model openai-codex/gpt-5.6-sol"
-  tmux -L "$socket" set-option -q -t firstmate @firstmate_home "$home"
-  tmux -L "$socket" set-option -q -t firstmate @firstmate_harness pi
-  pane_pid=$(tmux -L "$socket" display-message -p -t firstmate:0.0 '#{pane_pid}')
-  printf '%s\n' "$pane_pid" > "$home/state/.lock"
-  out=$(run_launch "$home" "$fakebin" "$socket" "$dir/unused.log" --pi)
-  assert_contains "$out" 'harness=pi' "Node-hosted Pi with Codex model was misclassified"
-  [ ! -e "$dir/unused.log" ] || fail "Node-hosted Pi attach launched another harness"
-  kill_case "$socket"
-  pass "Node-hosted Pi identity ignores model argument substrings"
+    package="$home/packages/$harness-client/dist"
+    entrypoint="$package/cli.js"
+    mkdir -p "$package"
+    printf '%s\n' 'setInterval(() => {}, 300000)' > "$entrypoint"
+    extra=
+    [ "$harness" != pi ] || extra='--model openai-codex/gpt-5.6-sol'
+    tmux -L "$socket" new-session -d -s firstmate "exec node '$entrypoint' $extra"
+    tmux -L "$socket" set-option -q -t firstmate @firstmate_home "$home"
+    tmux -L "$socket" set-option -q -t firstmate @firstmate_harness "$harness"
+    pane_pid=$(tmux -L "$socket" display-message -p -t firstmate:0.0 '#{pane_pid}')
+    printf '%s\n' "$pane_pid" > "$home/state/.lock"
+    out=$(run_launch "$home" "$fakebin" "$socket" "$dir/unused.log" "--$harness")
+    assert_contains "$out" "harness=$harness" "Node-hosted $harness package entrypoint was misclassified"
+    [ ! -e "$dir/unused.log" ] || fail "Node-hosted $harness attach launched another harness"
+    kill_case "$socket"
+  done
+  pass "interpreter-hosted package entrypoints preserve all harness identities"
 }
 
 test_existing_session_requires_positive_identity() {
@@ -343,5 +350,5 @@ test_bare_and_matching_attach_divergent_refusal
 test_live_and_stale_lock_behavior
 test_concurrent_launch_serialization
 test_lock_live_pid_query_is_read_only
-test_node_hosted_pi_process_identity
+test_interpreter_hosted_process_identity
 test_existing_session_requires_positive_identity

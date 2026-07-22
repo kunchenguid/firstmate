@@ -108,7 +108,7 @@ For Pi, approve the project trust prompt once per clone on first launch so both 
 
 The tracked [`windows/firstmate.cmd`](windows/firstmate.cmd) and [`windows/firstmate.ps1`](windows/firstmate.ps1) templates delegate to [`bin/fm-primary-launch.sh`](bin/fm-primary-launch.sh), which is the single owner of selector validation and harness launch mechanics.
 Copy both Windows templates into one directory on `PATH` during a separate local rollout, then use `firstmate`, `firstmate --pi`, `firstmate --grok`, `firstmate --claude`, `firstmate --opencode`, or `firstmate --codex`.
-An explicit selector also accepts `--model <model>` and the effort levels supported by that harness.
+The CMD entrypoint intentionally accepts only those zero- or one-selector forms. Invoke `firstmate.ps1` directly for `--model <model>` and supported effort levels so PowerShell preserves each value as one opaque argument through WSL.
 Bare `firstmate` remains unrestricted Codex for compatibility.
 
 This launcher is intentionally fixed to WSL distribution `Ubuntu`, Linux user `firstmate`, and `/home/firstmate/firstmate` as both repository root and `FM_HOME`.
