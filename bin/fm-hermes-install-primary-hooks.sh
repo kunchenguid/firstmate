@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Install (or refresh) firstmate primary shell hooks into ~/.hermes/config.yaml.
 #
-# Hermes shell hooks are user-global. This installer merges a firstmate-owned
-# hooks: block that points at this checkout's bin/fm-hermes-primary-hook.sh and
-# leaves every other config key untouched.
+# Hermes shell hooks are user-global. This installer surgically rewrites only the
+# top-level hooks: block that points at this checkout's bin/fm-hermes-primary-hook.sh
+# and leaves every other config key - including its comments, blank lines, and
+# layout - byte-for-byte untouched. Only the hooks: block itself is re-serialized.
 #
 # Usage:
 #   bin/fm-hermes-install-primary-hooks.sh           # install/refresh
@@ -44,6 +45,7 @@ if [ ! -x "$HOOK" ]; then
 fi
 
 python3 - "$CFG" "$HOOK" "$STATUS" "$REMOVE" <<'PY'
+import re
 import sys
 from pathlib import Path
 
@@ -128,18 +130,67 @@ if not remove:
             cur = []
         hooks[event] = cur + entries
 
-if hooks:
-    data["hooks"] = hooks
-else:
-    data.pop("hooks", None)
+def splice_hooks_block(raw, hooks):
+    """Return raw config text with ONLY the top-level hooks: block rewritten,
+    leaving every other line byte-stable so comments/blank lines/layout of
+    unrelated keys survive. An empty hooks mapping removes the block entirely.
+    Only the hooks: block itself is re-serialized (comments inside it are not
+    preserved - firstmate owns those entries)."""
+    new_block = (
+        yaml.safe_dump({"hooks": hooks}, sort_keys=False, allow_unicode=True)
+        if hooks
+        else ""
+    )
+    lines = raw.splitlines(keepends=True)
+
+    start = None
+    for i, ln in enumerate(lines):
+        if re.match(r"^hooks[ \t]*:", ln):
+            start = i
+            break
+
+    if start is None:
+        if not hooks:
+            return raw
+        if raw and not raw.endswith("\n"):
+            raw += "\n"
+        return raw + new_block
+
+    # The block runs to the next top-level construct (a column-0 key or a
+    # document marker). Trailing blank lines and column-0 comments belong to
+    # whatever follows, so they are excluded from the rewritten span.
+    end = len(lines)
+    for j in range(start + 1, len(lines)):
+        ln = lines[j]
+        if ln[:1] in (" ", "\t") or ln.strip() == "" or ln.lstrip().startswith("#"):
+            continue
+        if re.match(r"^([^\s#][^:]*:([ \t]|$)|---|\.\.\.)", ln):
+            end = j
+            break
+    tail = end
+    while tail - 1 > start:
+        prev = lines[tail - 1]
+        s = prev.strip()
+        if s == "" or (s.startswith("#") and prev[:1] not in (" ", "\t")):
+            tail -= 1
+        else:
+            break
+
+    before = "".join(lines[:start])
+    after = "".join(lines[tail:])
+    if hooks:
+        return before + new_block + after
+    return before + after
+
+raw = cfg_path.read_text() if cfg_path.exists() else ""
 
 cfg_path.parent.mkdir(parents=True, exist_ok=True)
 # Preserve a simple backup beside the live file.
 if cfg_path.exists():
     bak = cfg_path.with_suffix(cfg_path.suffix + ".bak-firstmate")
-    bak.write_text(cfg_path.read_text())
+    bak.write_text(raw)
 
-cfg_path.write_text(yaml.safe_dump(data, sort_keys=False, allow_unicode=True))
+cfg_path.write_text(splice_hooks_block(raw, hooks))
 print(("removed" if remove else "installed") + f": {cfg_path}")
 print(f"hook bridge: {hook}")
 if not remove:

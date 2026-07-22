@@ -19,7 +19,7 @@ When the primary is Hermes, set `config/crew-harness` to a verified spawn adapte
 | Pre-tool arm seatbelt | verified (transport) | Hermes shell hook `pre_tool_call` → `bin/fm-hermes-primary-hook.sh` → `bin/fm-arm-pretool-check.sh` |
 | Continuity seatbelt | verified (transport) | same bridge calls `bin/fm-continuity-pretool-check.sh` |
 | Session-start nudge | verified (transport) | Hermes `pre_llm_call` with `extra.is_first_turn` → `{"context": ...}` from `bin/fm-sessionstart-nudge.sh` |
-| Turn-end force-continue | **not available** | Hermes has no general Claude/Codex Stop block; `pre_verify` only covers coding verify loops. Passive `post_llm_call` observer runs the shared predicate for logging only. |
+| Turn-end force-continue | **not available** | Hermes has no general Claude/Codex Stop block; `pre_verify` only covers coding verify loops. Passive `post_llm_call` observer runs the shared predicate and records a durable, rate-limited `state/.hermes-turnend-alarm` marker on a blind end; it cannot force a same-session follow-up. |
 | Crewmate spawn on hermes | **not verified** | out of scope for this primary pass |
 
 ## Install primary hooks
@@ -93,7 +93,7 @@ printf '%s' '{"hook_event_name":"pre_tool_call","tool_name":"terminal","tool_inp
 
 ## Residual gaps (honest)
 
-1. **No same-session turn-end force-continue.** Claude/Codex can block Stop with exit 2; Hermes `post_llm_call` / `on_session_end` are observer-only. Fleet safety depends on the background-notify supervision cycle plus `bin/fm-guard.sh` pull alarms.
+1. **No same-session turn-end force-continue.** Claude/Codex can block Stop with exit 2; Hermes `post_llm_call` / `on_session_end` are observer-only. The observer records a durable, rate-limited `state/.hermes-turnend-alarm` marker when a turn ends blind, but cannot re-prompt the session. Fleet safety depends on the background-notify supervision cycle plus `bin/fm-guard.sh` pull alarms.
 2. **Hooks are user-global.** Unlike `.claude/settings.json`, Hermes shell hooks live in `~/.hermes/config.yaml`. The bridge fails open outside firstmate-shaped homes, but install is a deliberate captain/machine step.
 3. **Crew spawn on Hermes is not verified.** Keep `config/crew-harness` on a verified spawn adapter while the primary is Hermes.
 4. **Busy-pane regex** still relies on the shared default set; Hermes TUI busy text was not re-fingerprinted as a crew target in this pass because spawn is out of scope.

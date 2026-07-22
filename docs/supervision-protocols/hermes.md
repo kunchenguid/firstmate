@@ -15,7 +15,7 @@ When this session owns supervision and away mode is not active:
 9. The continuity PreToolUse gate allows wake drain, watcher arm recovery, and fail-closed teardown, and refuses only other `bin/fm-*.sh` fleet commands while tasks are in flight and no identity-matched live watcher holds the home lock.
 10. Hermes has no general Claude-style Stop block for every turn end.
     Rely on background-notify as the live wake path.
-    Install the optional passive turn-end observer from `bin/fm-hermes-install-primary-hooks.sh` so a blind end still leaves a durable alarm via `bin/fm-guard.sh`; it does not force a same-session follow-up the way Claude or Codex Stop hooks do.
+    Install the optional passive turn-end observer from `bin/fm-hermes-install-primary-hooks.sh` so a blind end (tasks in flight, no live watcher) writes a durable, rate-limited marker at `state/.hermes-turnend-alarm`; the next fleet command still trips `bin/fm-guard.sh`'s independent watcher-down banner. The observer does not force a same-session follow-up the way Claude or Codex Stop hooks do.
 11. Recovery only: if a forced restart is genuinely needed, run `bin/fm-watch-arm.sh --restart` through the same Hermes background-notify mechanism.
 12. Do not send idle progress while the watcher is parked.
 

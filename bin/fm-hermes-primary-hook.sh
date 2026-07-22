@@ -126,12 +126,32 @@ case "$EVENT" in
 
   post_llm_call|on_session_end)
     # Passive observer only: Hermes cannot force a same-session follow-up from
-    # these events the way Claude/Codex Stop hooks can. Run the shared
-    # predicate for logging/side effects; discard block status.
+    # these events the way Claude/Codex Stop hooks can. Feed the shared predicate
+    # the real turn-end payload so it actually evaluates (an empty stdin makes it
+    # fail open immediately); when it would block - a blind turn end, tasks in
+    # flight with no live watcher - record a durable, rate-limited marker under
+    # this primary's state dir so the lapse outlives the discarded stderr banner.
     if [ -x "$FM_ROOT/bin/fm-turnend-guard.sh" ]; then
-      # stop_hook_active is absent on Hermes; leave stdin empty so the guard
-      # uses its default allow/block decision without a loop-guard signal.
-      (cd "$FM_ROOT" && FM_HOME="$SCOPE_ROOT" bin/fm-turnend-guard.sh </dev/null >/dev/null 2>&1) || true
+      if ! (cd "$FM_ROOT" && FM_HOME="$SCOPE_ROOT" bin/fm-turnend-guard.sh >/dev/null 2>&1 <<PAYLOAD
+$payload
+PAYLOAD
+      ); then
+        state_dir="$SCOPE_ROOT/state"
+        alarm="$state_dir/.hermes-turnend-alarm"
+        if [ -d "$state_dir" ]; then
+          grace=${FM_GUARD_GRACE:-300}
+          now=$(date +%s 2>/dev/null || echo 0)
+          last=0
+          [ -f "$alarm" ] && last=$(cut -d' ' -f1 "$alarm" 2>/dev/null || echo 0)
+          case "$last" in ''|*[!0-9]*) last=0 ;; esac
+          # Rate-limit: refresh at most once per grace window (single-line
+          # overwrite) so a persistently blind session never spams the marker.
+          if [ "$now" -eq 0 ] || [ "$last" -eq 0 ] || [ "$((now - last))" -ge "$grace" ]; then
+            printf '%s blind-turn-end: tasks in flight, no live watcher (hermes post_llm_call observer)\n' \
+              "$now" > "$alarm" 2>/dev/null || true
+          fi
+        fi
+      fi
     fi
     exit 0
     ;;
