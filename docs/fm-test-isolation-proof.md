@@ -108,8 +108,11 @@ Sorted paths as selected by `bin/fm-test-isolation-proof.sh --list` at proof tim
 
 Source families from the Phase 1 manifest and scout report §3.1:
 
-1. **pure-contract-unit** (from `bin/fm-test-run.sh --list --family pure-contract-unit`), minus deliberate serial exclusions
+1. **pure-contract-unit** candidates audited from the Phase 1 family manifest, minus deliberate serial exclusions
 2. **Extra hermetic candidates** after static audit: fake backend, private git fixtures, stubbed network
+
+The harness pins this exact archived set and does not automatically admit later family additions.
+A candidate-set change requires a new audit and concurrent proof archive.
 
 ### Included extras (beyond pure-contract-unit)
 
@@ -167,4 +170,3 @@ bin/fm-test-isolation-proof.sh --list
 bin/fm-test-isolation-proof.sh --jobs 4 --json /tmp/fm-isolation-proof.json
 bash tests/fm-test-isolation-proof.test.sh
 ```
-

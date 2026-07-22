@@ -18,6 +18,7 @@ RUNNER="$ROOT/bin/fm-test-run.sh"
 CI="$ROOT/.github/workflows/ci.yml"
 CONTRIB="$ROOT/CONTRIBUTING.md"
 PROOF_DOC="$ROOT/docs/fm-test-isolation-proof.md"
+PROOF_JSON="$ROOT/docs/fm-test-isolation-proof.json"
 
 assert_present "$PROOF" "bin/fm-test-isolation-proof.sh is missing"
 [ -x "$PROOF" ] || fail "bin/fm-test-isolation-proof.sh must be executable"
@@ -68,23 +69,14 @@ test_candidates_exclude_serial_classes() {
   pass "serial classes remain excluded from the parallel candidate set"
 }
 
-test_pure_family_minus_exclusions_is_included() {
-  local pure listed base missing=0
-  pure=$("$RUNNER" --list --family pure-contract-unit)
+test_candidates_match_archived_proof() {
+  local listed archived
+  assert_present "$PROOF_JSON" "docs/fm-test-isolation-proof.json missing"
   listed=$("$PROOF" --list)
-  while IFS= read -r line; do
-    [ -n "$line" ] || continue
-    base=$(basename "$line")
-    case "$base" in
-      fm-continuity-pretool-check.test.sh|fm-test-isolation-proof.test.sh)
-        continue
-        ;;
-    esac
-    printf '%s\n' "$listed" | grep -Fxq "$line" \
-      || { printf 'missing pure candidate: %s\n' "$line" >&2; missing=1; }
-  done <<<"$pure"
-  [ "$missing" -eq 0 ] || fail "proven pure-contract-unit scripts missing from isolation candidates"
-  pass "pure-contract-unit (minus deliberate exclusions) is in the candidate set"
+  archived=$(jq -r '.scripts[].path' "$PROOF_JSON" | LC_ALL=C sort)
+  [ "$listed" = "$archived" ] \
+    || fail "candidate set must exactly match the archived isolation proof"
+  pass "candidate set exactly matches the archived isolation proof"
 }
 
 test_extra_hermetic_candidates_present() {
@@ -225,7 +217,7 @@ test_docs_record_proof_owner() {
 
 test_list_candidates_nonempty_and_stable
 test_candidates_exclude_serial_classes
-test_pure_family_minus_exclusions_is_included
+test_candidates_match_archived_proof
 test_extra_hermetic_candidates_present
 test_list_exclusions_documents_reasons
 test_family_map_labels_this_contract

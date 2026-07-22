@@ -145,45 +145,41 @@ exclusion_reason() {
   esac
 }
 
-# Extra proven hermetic candidates outside pure-contract-unit (fake backend,
-# private git fixtures, stubbed network). Each passed static audit for private
-# temps / fakebin and is re-proven by the concurrent matrix.
-extra_parallel_candidates() {
+# Exact candidate set from the archived concurrent proof. Adding or removing a
+# path requires a new audit and proof archive.
+list_parallel_candidates() {
   cat <<'EOF'
+tests/fm-arm-pretool-check.test.sh
 tests/fm-backend-herdr.test.sh
-tests/fm-send-strict.test.sh
-tests/fm-spawn-batch.test.sh
+tests/fm-brief.test.sh
+tests/fm-captain-translation-contract.test.sh
+tests/fm-cd-pretool-check.test.sh
+tests/fm-composer-ghost.test.sh
+tests/fm-composer-lib.test.sh
+tests/fm-crew-state.test.sh
+tests/fm-decision-hold-lifecycle.test.sh
+tests/fm-dispatch-select.test.sh
+tests/fm-ensure-agents-md.test.sh
+tests/fm-grok-harness.test.sh
+tests/fm-herdr-lab.test.sh
+tests/fm-instruction-owners.test.sh
+tests/fm-lint.test.sh
+tests/fm-nm-test-contract.test.sh
+tests/fm-no-mistakes-ownership.test.sh
+tests/fm-pi-primary-types.test.sh
 tests/fm-pr-merge.test.sh
 tests/fm-review-diff.test.sh
+tests/fm-send-popup-settle.test.sh
+tests/fm-send-settle.test.sh
+tests/fm-send-strict.test.sh
+tests/fm-spawn-batch.test.sh
+tests/fm-stow-contract.test.sh
+tests/fm-supervision-instructions.test.sh
+tests/fm-test-run.test.sh
+tests/fm-tmux-submit-busy.test.sh
+tests/fm-transition-lib.test.sh
 tests/fm-x-mode.test.sh
 EOF
-}
-
-list_parallel_candidates() {
-  local s base
-  # Primary pool: pure-contract-unit from the Phase 1 family manifest, minus
-  # explicit exclusions. Family ownership stays in bin/fm-test-run.sh.
-  # Extra hermetic candidates append after that. Deduplicate and sort for a
-  # stable concurrent matrix.
-  {
-    while IFS= read -r s; do
-      [ -n "$s" ] || continue
-      base=$(basename "$s")
-      if exclusion_reason "$base" >/dev/null 2>&1; then
-        continue
-      fi
-      printf '%s\n' "$s"
-    done < <("$ROOT/bin/fm-test-run.sh" --list --family pure-contract-unit)
-
-    while IFS= read -r s; do
-      [ -n "$s" ] || continue
-      base=$(basename "$s")
-      if exclusion_reason "$base" >/dev/null 2>&1; then
-        continue
-      fi
-      printf '%s\n' "$s"
-    done < <(extra_parallel_candidates)
-  } | LC_ALL=C sort -u
 }
 
 list_exclusions_for_report() {
