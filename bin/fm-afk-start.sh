@@ -89,6 +89,7 @@ daemon_pid_matches() {
     [ "$current" = "$identity" ]
     return
   fi
+  # -ww so a narrow COLUMNS cannot truncate the daemon script name before the match below.
   command=$(ps -ww -p "$pid" -o command= 2>/dev/null || true)
   case "$command" in
     *"$FM_AFK_DAEMON"*|*"fm-supervise-daemon.sh"*) return 0 ;;
