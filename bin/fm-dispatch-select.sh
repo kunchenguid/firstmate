@@ -260,17 +260,24 @@ selection=$(printf '%s\n' "$quota_json" | jq -ec \
     (($window.percentRemaining? | type) == "number")
     and ($window.percentRemaining >= 0)
     and ($window.percentRemaining <= 100);
+  def general_window_matches($window; $provider):
+    if $provider == "claude" then ["five_hour", "seven_day"] | index($window.id? // "") != null
+    elif $provider == "codex" then ["five_hour", "weekly"] | index($window.id? // "") != null
+    else false
+    end;
   def relevant_windows($provider; $route):
-    (($provider.windows // []) | map(select(usable_percent(.)))) as $windows
+    ($provider.windows // []) as $all_windows
+    | ($all_windows | map(select(usable_percent(.)))) as $windows
     | if $route.provider == "grok" then
         ($windows | map(select(.id == ("product:" + $route.product)))) as $product_windows
         | if ($product_windows | length) > 0 then $product_windows
-          else ($windows | map(select(.id == "credits")))
+          elif ($all_windows | map(select((.id? // "") | startswith("product:"))) | length) == 0 then
+            ($windows | map(select(.id == "credits")))
+          else []
           end
       else
         $windows | map(select(
-          ((.kind? // "") == "session")
-          or ((.kind? // "") == "weekly")
+          general_window_matches(.; $route.provider)
           or model_window_matches(.; $route.model)
         ))
       end;

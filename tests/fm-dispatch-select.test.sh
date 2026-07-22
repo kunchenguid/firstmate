@@ -171,6 +171,8 @@ test_most_constrained_relevant_window_scores_candidate() {
   {"provider":"codex","state":{"status":"fresh"},"windows":[
     {"id":"five_hour","kind":"session","percentRemaining":30},
     {"id":"weekly","kind":"weekly","percentRemaining":30},
+    {"id":"code_review_five_hour","label":"code review session","kind":"session","percentRemaining":1},
+    {"id":"code_review_weekly","label":"code review week","kind":"weekly","percentRemaining":1},
     {"id":"model:other:5h","label":"Unrelated preview session","kind":"model","percentRemaining":1}
   ]}
 ]}
@@ -179,6 +181,27 @@ JSON
     '[{"harness":"claude","model":"claude-fable-5"},{"harness":"codex","model":"gpt-5.5"}]' 2>/dev/null)
   assert_profile "$out" '{"harness":"codex","model":"gpt-5.5"}' "matching model window was not included or unrelated model window was included"
   pass "candidate score uses its most constrained general or matching model quota window"
+}
+
+test_grok_aggregate_fallback_requires_no_product_windows() {
+  local quota out
+  quota="$TMP_ROOT/grok-partial-products.json"
+  cat > "$quota" <<'JSON'
+{"schemaVersion":2,"providers":[
+  {"provider":"grok","state":{"status":"fresh"},"windows":[
+    {"id":"credits","kind":"credits","percentRemaining":100},
+    {"id":"product:grok_build","kind":"credits","percentRemaining":90}
+  ]},
+  {"provider":"claude","state":{"status":"fresh"},"windows":[
+    {"id":"five_hour","kind":"session","percentRemaining":5},
+    {"id":"seven_day","kind":"weekly","percentRemaining":5}
+  ]}
+]}
+JSON
+  out=$(FM_DISPATCH_RANDOM_SOURCE="$RANDOM_ZERO" "$ROOT/bin/fm-dispatch-select.sh" --quota-json "$quota" \
+    '[{"harness":"pi","model":"xai/grok-4.5"},{"harness":"claude"}]' 2>/dev/null)
+  assert_profile "$out" '{"harness":"claude"}' "xAI API route used aggregate credits despite exposed product windows"
+  pass "Grok aggregate credits are used only when product windows are absent"
 }
 
 test_stale_cache_needs_clear_margin_to_beat_fresh() {
@@ -294,6 +317,7 @@ test_legacy_explicit_selector_stays_compatible
 test_equal_winners_use_os_random_tie_break
 test_provider_and_product_mapping_through_wrappers
 test_most_constrained_relevant_window_scores_candidate
+test_grok_aggregate_fallback_requires_no_product_windows
 test_stale_cache_needs_clear_margin_to_beat_fresh
 test_partial_quota_data_prefers_scorable_candidate
 test_operational_quota_failures_use_uniform_random_fallback
