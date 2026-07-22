@@ -4,6 +4,7 @@
 # Usage:
 #   fm-wake-actionable.sh capture <watcher-reason>
 #   fm-wake-actionable.sh validate <receipt>
+#   fm-wake-actionable.sh validate-batch < receipts
 #
 # `capture` binds every matching durable queue row to the identity of its current
 # home-local source and prints one opaque numeric receipt.
@@ -29,7 +30,7 @@ LOCK_HELD=false
 case "$LOCK_ATTEMPTS" in ''|*[!0-9]*|0) LOCK_ATTEMPTS=200 ;; esac
 
 usage() {
-  echo "usage: $(basename "$0") <capture watcher-reason | validate receipt>" >&2
+  echo "usage: $(basename "$0") <capture watcher-reason | validate receipt | validate-batch>" >&2
   exit 2
 }
 
@@ -295,13 +296,35 @@ EOF
   return 1
 }
 
+validate_batch() {
+  local receipt status count=0 saw_error=false
+  while IFS= read -r receipt; do
+    [ -n "$receipt" ] || continue
+    count=$((count + 1))
+    if validate "$receipt"; then
+      printf 'current\n'
+    else
+      status=$?
+      case "$status" in
+        1) printf 'obsolete\n' ;;
+        *) printf 'error\n'; saw_error=true ;;
+      esac
+    fi
+  done
+  [ "$count" -gt 0 ] || return 1
+  [ "$saw_error" = false ] || return 2
+}
+
 case "$ACTION" in
-  capture|validate) ;;
+  capture|validate) [ -n "$VALUE" ] || usage ;;
+  validate-batch) [ "$#" -eq 1 ] || usage ;;
   *) usage ;;
 esac
-[ -n "$VALUE" ] || usage
 acquire_queue_lock || {
   echo "fm-wake-actionable: queue lock remained busy beyond the validation bound" >&2
   exit 2
 }
-"$ACTION" "$VALUE"
+case "$ACTION" in
+  validate-batch) validate_batch ;;
+  *) "$ACTION" "$VALUE" ;;
+esac

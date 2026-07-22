@@ -33,6 +33,13 @@ type ActionabilityResult = {
   failure?: string;
 };
 
+type ValidationState = "current" | "obsolete" | "error";
+
+type BatchActionabilityResult = {
+  states?: ValidationState[];
+  failure?: string;
+};
+
 const extensionFile = fileURLToPath(import.meta.url);
 const extensionDir = dirname(extensionFile);
 const root = resolve(extensionDir, "../..");
@@ -50,7 +57,6 @@ const retryLimit = positiveInteger("FM_WATCH_REARM_RETRY_LIMIT", 5);
 const armReadyTimeoutMs = positiveInteger("FM_PI_ARM_READY_TIMEOUT_MS", 12000);
 const armRetireTimeoutMs = positiveInteger("FM_WATCH_ARM_RETIRE_TIMEOUT_MS", 1000);
 const actionableTimeoutMs = positiveInteger("FM_WAKE_ACTIONABLE_TIMEOUT_MS", 3000);
-const pendingFlushLimit = 64;
 
 let child: ChildProcess | null = null;
 let retryTimer: ReturnType<typeof setTimeout> | null = null;
@@ -61,7 +67,6 @@ let restoring = false;
 let activeContext: ExtensionContext | null = null;
 let deliveryStarting = false;
 let flushingWakes = false;
-let pendingFlushTimer: ReturnType<typeof setTimeout> | null = null;
 const pendingWakes: PendingWake[] = [];
 const armReadiness = new WeakMap<ChildProcess, Promise<boolean>>();
 const armClose = new WeakMap<ChildProcess, Promise<void>>();
@@ -151,8 +156,6 @@ export default function (pi: ExtensionAPI) {
     stopping = true;
     if (retryTimer) clearTimeout(retryTimer);
     retryTimer = null;
-    if (pendingFlushTimer) clearTimeout(pendingFlushTimer);
-    pendingFlushTimer = null;
     if (child) child.kill("SIGTERM");
     child = null;
   }
@@ -187,43 +190,57 @@ export default function (pi: ExtensionAPI) {
     };
   }
 
-  function schedulePendingFlush(): void {
-    if (stopping || pendingFlushTimer || pendingWakes.length === 0) return;
-    pendingFlushTimer = setTimeout(() => {
-      pendingFlushTimer = null;
-      flushPendingWakes();
-    }, 0);
-    pendingFlushTimer.unref();
+  function validateActionabilityBatch(receipts: string[]): BatchActionabilityResult {
+    if (receipts.length === 0) return { states: [] };
+    const result = spawnSync(actionableScript, ["validate-batch"], {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        FM_HOME: fmHome,
+        FM_ROOT_OVERRIDE: fmRoot,
+        FM_STATE_OVERRIDE: state,
+      },
+      input: `${receipts.join("\n")}\n`,
+      timeout: actionableTimeoutMs,
+      maxBuffer: 64 * 1024,
+    });
+    const states = result.stdout.trim().split(/\r?\n/).filter(Boolean);
+    const complete = states.length === receipts.length
+      && states.every((state): state is ValidationState => /^(?:current|obsolete|error)$/.test(state));
+    if ((result.status === 0 || result.status === 2) && complete) {
+      if (result.status === 0) return { states };
+      return {
+        states,
+        failure: `watcher: FAILED - Pi extension could not validate all wake actionability within ${actionableTimeoutMs}ms\nvalidator reported indeterminate source state`,
+      };
+    }
+    const detail = result.error?.message || result.stderr.trim() || `validator exited ${String(result.status)}`;
+    return {
+      failure: `watcher: FAILED - Pi extension could not validate wake actionability batch within ${actionableTimeoutMs}ms\n${detail}`,
+    };
   }
 
   function flushPendingWakes(): void {
     if (stopping || flushingWakes || deliveryStarting || pendingWakes.length === 0) return;
     if (activeContext && typeof activeContext.isIdle === "function" && !activeContext.isIdle()) return;
     flushingWakes = true;
-    const batch = pendingWakes.splice(0, pendingFlushLimit);
-    const deferred: PendingWake[] = [];
+    const batch = pendingWakes.splice(0);
     const messages: string[] = [];
-    let receiptValidated = false;
-    for (let index = 0; index < batch.length; index += 1) {
-      const pending = batch[index];
+    const validation = validateActionabilityBatch(
+      batch.flatMap((pending) => pending.receipt ? [pending.receipt] : []),
+    );
+    if (validation.failure) messages.push(validation.failure);
+    let receiptIndex = 0;
+    for (const pending of batch) {
       if (pending.receipt) {
-        if (receiptValidated) {
-          deferred.push(...batch.slice(index));
-          break;
-        }
-        receiptValidated = true;
-        const current = actionability("validate", pending.receipt);
-        if (current.failure) messages.push(current.failure);
-        if (current.obsolete || current.failure) continue;
+        const state = validation.states?.[receiptIndex];
+        receiptIndex += 1;
+        if (state !== "current") continue;
       }
       if (!messages.includes(pending.message)) messages.push(pending.message);
     }
-    pendingWakes.unshift(...deferred);
     flushingWakes = false;
-    if (messages.length === 0) {
-      schedulePendingFlush();
-      return;
-    }
+    if (messages.length === 0) return;
     deliveryStarting = true;
     pi.sendUserMessage(
       `FIRSTMATE WATCHER WAKE: ${messages.join("\n\n---\n\n")}\n\nRun bin/fm-wake-drain.sh first and handle the queued wake. Watcher continuity is extension-owned.`,

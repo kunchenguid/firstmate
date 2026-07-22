@@ -22,6 +22,7 @@ install_pi_watch_extension_fixture() {
 case "${1:-}" in
   capture) printf '1:1:1\n' ;;
   validate) exit 0 ;;
+  validate-batch) while IFS= read -r receipt; do [ -n "$receipt" ] && printf 'current\n'; done ;;
   *) exit 2 ;;
 esac
 SH
@@ -57,8 +58,8 @@ test_tracked_extension_present_and_self_hashing() {
   assert_contains "$text" 'pi.on?.("agent_settled"' "tracked extension does not defer busy-turn delivery to Pi's idle boundary"
   assert_contains "$text" "fm-wake-actionable.sh" "tracked extension does not use the repository actionability owner"
   assert_contains "$text" "receipt: action === \"capture\" && receipt ? receipt : undefined" "tracked extension discards valid receipts returned with capture failures"
-  assert_contains "$text" "pendingFlushLimit" "tracked extension leaves idle-boundary receipt validation unbounded"
-  assert_contains "$text" "receiptValidated" "tracked extension can launch multiple bounded validators in one idle flush"
+  assert_contains "$text" 'spawnSync(actionableScript, ["validate-batch"]' "tracked extension does not validate pending receipts under one total bound"
+  assert_contains "$text" 'const batch = pendingWakes.splice(0)' "tracked extension defers distinct pending reasons past the drain-first delivery"
   assert_contains "$text" ".pi-watch-extension-loaded" "tracked extension missing loaded marker"
   assert_contains "$text" 'createHash("sha256").update(readFileSync(extensionFile)).digest("hex")' "tracked extension does not self-hash its own content for extensionVersion"
   assert_contains "$text" 'fileURLToPath(import.meta.url)' "tracked extension does not self-locate via import.meta.url"
@@ -315,7 +316,10 @@ case "${1:-}" in
     printf '1:1:1\n'
     case "${2:-}" in *bounded-1) printf 'partial capture\n' >&2; exit 2 ;; esac
     ;;
-  validate) sleep 0.2 ;;
+  validate-batch)
+    sleep 0.2
+    while IFS= read -r receipt; do [ -n "$receipt" ] && printf 'current\n'; done
+    ;;
   *) exit 2 ;;
 esac
 SH
@@ -363,14 +367,11 @@ const rows = readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n");
 if (rows.length !== 4) throw new Error(`expected three queued wakes and one successor, got ${rows.length}`);
 if (prompts.length !== 0) throw new Error(`busy Pi received a premature wake: ${prompts.join(" | ")}`);
 idle = true;
-for (let expected = 1; expected <= 3; expected += 1) {
-  const started = Date.now();
-  await handlers.get("agent_settled")?.({}, context);
-  const elapsed = Date.now() - started;
-  if (elapsed >= 450) throw new Error(`idle flush ${expected} exceeded its bound: ${elapsed}ms`);
-  if (prompts.length !== expected) throw new Error(`idle flush ${expected} delivered ${prompts.length} prompts`);
-  await handlers.get("agent_start")?.({}, context);
-}
+const started = Date.now();
+await handlers.get("agent_settled")?.({}, context);
+const elapsed = Date.now() - started;
+if (elapsed >= 450) throw new Error(`idle batch validation exceeded its bound: ${elapsed}ms`);
+if (prompts.length !== 1) throw new Error(`idle batch delivered ${prompts.length} prompts`);
 const combined = prompts.join("\n");
 for (let expected = 1; expected <= 3; expected += 1) {
   if (!combined.includes(`signal: bounded-${expected}`)) throw new Error(`lost bounded wake ${expected}: ${combined}`);
@@ -381,9 +382,9 @@ await handlers.get("session_shutdown")?.();
 EOF
 )
   status=$?
-  expect_code 0 "$status" "Pi must retain valid partial captures and bound each idle validation flush"
+  expect_code 0 "$status" "Pi must retain valid partial captures and batch every current reason before delivery"
   [ -z "$out" ] || fail "Pi bounded-validation test printed output: $out"
-  pass "Pi retains partial captures and bounds each idle validation flush"
+  pass "Pi validates every pending reason in one bounded pre-delivery batch"
 }
 
 test_pi_hung_successor_falls_back_to_typed_wake() {
