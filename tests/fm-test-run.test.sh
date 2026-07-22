@@ -475,27 +475,52 @@ test_jobs_requires_proven_isolated() {
 }
 
 test_jobs_parallel_scheduler_and_failure_propagation() {
-  local tmp a b rc begin_n end_n
+  local tmp repo runner evidence a b c rc begin_n end_n
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-jobs-sched.XXXXXX")
-  # Two of the fastest proven-isolated scripts (Phase 1 averages < 50ms each).
+  repo="$tmp/repo"
+  runner="$repo/bin/fm-test-run.sh"
+  evidence="$tmp/evidence"
   a=tests/fm-no-mistakes-ownership.test.sh
   b=tests/fm-stow-contract.test.sh
-  [ -f "$ROOT/$a" ] && [ -f "$ROOT/$b" ] || { rm -rf "$tmp"; fail "fast proven fixtures missing"; }
+  c=tests/fm-lint.test.sh
+  mkdir -p "$repo/bin" "$repo/tests" "$evidence"
+  cp "$RUNNER" "$runner"
+  cat >"$repo/$a" <<'SH'
+#!/usr/bin/env bash
+sleep 0.5
+touch "$SCHED_EVIDENCE/slow-done"
+echo "ok - slow fixture"
+SH
+  cat >"$repo/$b" <<'SH'
+#!/usr/bin/env bash
+sleep 0.05
+echo "ok - fast fixture"
+SH
+  cat >"$repo/$c" <<'SH'
+#!/usr/bin/env bash
+if [ -e "$SCHED_EVIDENCE/slow-done" ]; then
+  echo "not ok - scheduler waited for oldest worker"
+  exit 1
+fi
+echo "ok - replacement fixture started before slow fixture finished"
+SH
+  chmod +x "$runner" "$repo/$a" "$repo/$b" "$repo/$c"
   set +e
-  "$RUNNER" --jobs 2 --json "$tmp/timing.json" "$a" "$b" >"$tmp/out" 2>"$tmp/err"
+  SCHED_EVIDENCE="$evidence" "$runner" --jobs 2 --json "$tmp/timing.json" \
+    "$a" "$b" "$c" >"$tmp/out" 2>"$tmp/err"
   rc=$?
   set -e
-  [ "$rc" -eq 0 ] || { cat "$tmp/out" "$tmp/err"; rm -rf "$tmp"; fail "jobs=2 on two proven scripts should pass"; }
+  [ "$rc" -eq 0 ] || { cat "$tmp/out" "$tmp/err"; rm -rf "$tmp"; fail "jobs=2 must refill the first completed slot"; }
   begin_n=$(grep -c '^FM_TEST_BEGIN ' "$tmp/out" || true)
   end_n=$(grep -c '^FM_TEST_END ' "$tmp/out" || true)
-  [ "$begin_n" -eq 2 ] || fail "expected 2 BEGIN markers, got $begin_n"
-  [ "$end_n" -eq 2 ] || fail "expected 2 END markers, got $end_n"
-  grep -q 'FM_TEST_SUMMARY total=2 failed=0' "$tmp/out" \
+  [ "$begin_n" -eq 3 ] || fail "expected 3 BEGIN markers, got $begin_n"
+  [ "$end_n" -eq 3 ] || fail "expected 3 END markers, got $end_n"
+  grep -q 'FM_TEST_SUMMARY total=3 failed=0' "$tmp/out" \
     || fail "summary missing for jobs run: $(grep FM_TEST_SUMMARY "$tmp/out")"
   python3 -c '
 import json,sys
 doc=json.load(open(sys.argv[1]))
-assert doc["summary"]["total"]==2
+assert doc["summary"]["total"]==3
 assert doc["summary"]["failed"]==0
 assert "jobs=2" in doc["selection"]
 ' "$tmp/timing.json" || { rm -rf "$tmp"; fail "jobs JSON artifact wrong"; }
@@ -508,28 +533,23 @@ exit 1
 SH
   chmod +x "$tmp/fail.test.sh"
   set +e
-  "$RUNNER" --jobs 2 "$a" "$tmp/fail.test.sh" >"$tmp/out3" 2>"$tmp/err3"
+  "$runner" --jobs 2 "$a" "$tmp/fail.test.sh" >"$tmp/out3" 2>"$tmp/err3"
   rc=$?
   set -e
   [ "$rc" -eq 2 ] || fail "jobs with non-proven fail fixture must refuse before run, got $rc"
 
-  # Parallel failure propagation among proven paths: replace one proven script
-  # temporarily with a failing body, run jobs=2, always restore.
-  cp "$ROOT/$b" "$tmp/backup-b"
-  # shellcheck disable=SC2064
-  trap 'mv "$tmp/backup-b" "$ROOT/$b" 2>/dev/null || true; rm -rf "$tmp"' RETURN
-  cat >"$ROOT/$b" <<'SH'
+  # Parallel failure propagation stays inside the private runner fixture.
+  cat >"$repo/$b" <<'SH'
 #!/usr/bin/env bash
 echo "not ok - deliberate proven-set fail"
 exit 1
 SH
-  chmod +x "$ROOT/$b"
+  chmod +x "$repo/$b"
+  rm -f "$evidence/slow-done"
   set +e
-  "$RUNNER" --jobs 2 "$a" "$b" >"$tmp/out4" 2>"$tmp/err4"
+  SCHED_EVIDENCE="$evidence" "$runner" --jobs 2 "$a" "$b" >"$tmp/out4" 2>"$tmp/err4"
   rc=$?
   set -e
-  mv "$tmp/backup-b" "$ROOT/$b"
-  trap - RETURN
   [ "$rc" -ne 0 ] || { rm -rf "$tmp"; fail "jobs aggregate must be non-zero when a proven worker fails"; }
   grep -q 'FM_TEST_SUMMARY total=2 failed=1' "$tmp/out4" \
     || { rm -rf "$tmp"; fail "jobs failure summary wrong: $(grep FM_TEST_SUMMARY "$tmp/out4")"; }

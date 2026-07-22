@@ -1260,15 +1260,17 @@ else
   declare -a WORKER_IDX=()
   declare -a WORKER_SCRIPTS=()
   worker_n=0
+  active_workers=0
 
   wait_one_job_worker() {
-    local pid idx work script rc duration mode out end_iso
-    pid=${WORKER_PIDS[0]}
-    idx=${WORKER_IDX[0]}
-    script=${WORKER_SCRIPTS[0]}
-    WORKER_PIDS=("${WORKER_PIDS[@]:1}")
-    WORKER_IDX=("${WORKER_IDX[@]:1}")
-    WORKER_SCRIPTS=("${WORKER_SCRIPTS[@]:1}")
+    local slot=$1 pid idx work script rc duration mode out end_iso
+    pid=${WORKER_PIDS[$slot]}
+    idx=${WORKER_IDX[$slot]}
+    script=${WORKER_SCRIPTS[$slot]}
+    unset 'WORKER_PIDS[slot]'
+    unset 'WORKER_IDX[slot]'
+    unset 'WORKER_SCRIPTS[slot]'
+    active_workers=$((active_workers - 1))
     set +e
     wait "$pid"
     set -e
@@ -1295,9 +1297,31 @@ else
     record_script_result "$script" "$rc" "$duration" "$out" "$end_iso"
   }
 
+  worker_pid_is_running() {
+    local want=$1 running
+    while IFS= read -r running; do
+      [ "$running" = "$want" ] && return 0
+    done < <(jobs -r -p)
+    return 1
+  }
+
+  wait_one_completed_job_worker() {
+    local slot work
+    while :; do
+      for slot in "${!WORKER_PIDS[@]}"; do
+        work="$RUN_TMP/w${WORKER_IDX[$slot]}"
+        if [ -f "$work/exit" ] || ! worker_pid_is_running "${WORKER_PIDS[$slot]}"; then
+          wait_one_job_worker "$slot"
+          return
+        fi
+      done
+      sleep 0.01
+    done
+  }
+
   for script in "${SCRIPTS[@]}"; do
-    while [ "${#WORKER_PIDS[@]}" -ge "$JOBS" ]; do
-      wait_one_job_worker
+    while [ "$active_workers" -ge "$JOBS" ]; do
+      wait_one_completed_job_worker
     done
     worker_n=$((worker_n + 1))
     work="$RUN_TMP/w$worker_n"
@@ -1323,16 +1347,17 @@ else
       if [ "$duration" -lt 0 ]; then
         duration=0
       fi
-      printf '%s\n' "$rc" >"$work/exit"
       printf '%s\n' "$duration" >"$work/duration_ms"
+      printf '%s\n' "$rc" >"$work/exit"
       exit 0
     ) &
-    WORKER_PIDS+=("$!")
-    WORKER_IDX+=("$worker_n")
-    WORKER_SCRIPTS+=("$script")
+    WORKER_PIDS[worker_n]=$!
+    WORKER_IDX[worker_n]=$worker_n
+    WORKER_SCRIPTS[worker_n]=$script
+    active_workers=$((active_workers + 1))
   done
-  while [ "${#WORKER_PIDS[@]}" -gt 0 ]; do
-    wait_one_job_worker
+  while [ "$active_workers" -gt 0 ]; do
+    wait_one_completed_job_worker
   done
 fi
 
