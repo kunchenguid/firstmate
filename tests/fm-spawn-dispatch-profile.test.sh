@@ -384,6 +384,33 @@ test_active_dispatch_profile_does_not_block_secondmate_launch() {
   pass "active crew-dispatch profile does not block secondmate launches"
 }
 
+test_claude_turnend_hook_is_durable() {
+  # Regression: the crew's Stop hook fires from its own launch environment, and a
+  # bare `touch <state>/<id>.turn-ended` dies with "No such file or directory" if
+  # that parent is momentarily absent (a fresh/rebuilt home or a Windows/WSL
+  # launch that must re-materialize the dir), silently losing the turn-end signal
+  # so the watcher only sees the crew via the late stale timer. The hook must be
+  # self-healing: re-create the state dir and still land the marker.
+  local rec id out status cmd marker dir
+  id=turnend-durable-z1
+  rec=$(make_spawn_case turnend-durable claude "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "claude spawn should succeed ($out)"
+  cmd=$(jq -r '.hooks.Stop[0].hooks[0].command' "$WT_DIR/.claude/settings.local.json") \
+    || fail "could not read the Stop hook command"
+  case "$cmd" in *"mkdir -p "*"&& touch "*) : ;; *) fail "Stop hook is not self-healing: $cmd" ;; esac
+  # Exact path the hook touches, so a symlinked TMPDIR cannot skew the assertion.
+  marker=${cmd##*touch \'}; marker=${marker%\'*}
+  dir=$(dirname "$marker")
+  rm -rf "$dir"   # simulate the missing-parent condition the crew hit
+  sh -c "$cmd" || fail "self-healing Stop hook exited non-zero with the state dir absent"
+  assert_present "$marker" "durable Stop hook must re-create the state dir and land the turn-ended marker"
+  pass "claude Stop hook re-creates a missing state dir and still signals turn-end"
+}
+
+test_claude_turnend_hook_is_durable
 test_no_profile_keeps_claude_launch_unchanged
 test_active_dispatch_profile_requires_explicit_harness_for_ship
 test_active_dispatch_profile_requires_explicit_harness_for_scout

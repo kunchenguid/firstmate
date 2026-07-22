@@ -1101,8 +1101,15 @@ if [ "$KIND" != secondmate ]; then
   case "$HARNESS" in
     claude*)
       mkdir -p "$WT/.claude"
+      # `mkdir -p` the state dir before `touch` so the turn-end signal is durable:
+      # the Stop hook fires from the crew's own launch environment, and if that
+      # path's parent is momentarily absent (a fresh/rebuilt home, a not-yet-created
+      # state dir, or a Windows/WSL launch where the dir must be re-materialized) a
+      # bare `touch` dies with "No such file or directory" and the turn-end signal is
+      # silently lost - the watcher then only sees the crew via the late stale-pane
+      # timer instead of an immediate wake.
       cat > "$WT/.claude/settings.local.json" <<EOF
-{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"touch '$TURNEND'"}]}]}}
+{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"mkdir -p '$STATE_REAL' && touch '$TURNEND'"}]}]}}
 EOF
       exclude_path '.claude/settings.local.json'
       ;;
