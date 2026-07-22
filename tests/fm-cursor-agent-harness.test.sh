@@ -27,8 +27,12 @@ test_launch_template_cursor_agent() {
   got=$(launch_template cursor-agent) || fail "launch_template cursor-agent returned non-zero"
   assert_contains "$got" 'cursor-agent -p --force --trust' \
     "launch template missing oneshot flags"
+  # Intentional literals: template must contain the characters $(pwd) / $(cat …),
+  # not their expansions. shellcheck SC2016 would otherwise false-positive.
+  # shellcheck disable=SC2016
   assert_contains "$got" '--workspace "$(pwd)"' \
     "launch template missing --workspace"
+  # shellcheck disable=SC2016
   assert_contains "$got" '"$(cat __BRIEF__)"' \
     "launch template missing brief cat"
   if launch_template cursor >/dev/null 2>&1; then
