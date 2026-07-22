@@ -381,6 +381,7 @@ test_undelivered_records_are_scan_immutable() {
 test_delivery_confirmation_fallback_reconciles() {
   (
     local home state corr rec marker rc prepared_corr prepared_rec prepared_marker escalations
+    local reported_corr reported_rec reported_marker
     home=$(setup_parent delivery-confirmation)
     state="$home/state"
     export FM_PENDING_REPLY_NOW=5750
@@ -435,6 +436,25 @@ test_delivery_confirmation_fallback_reconciles() {
     escalations=$(grep -Fc "pending-reply-id=$prepared_corr" "$state/hibit.status")
     [ "$escalations" = 1 ] \
       || fail "delivery-unknown escalation should publish once, got $escalations"
+    export FM_PENDING_REPLY_NOW=5800
+    reported_corr=$(fm_pending_reply_create "$home" "$state" hibit "reported delivery")
+    reported_rec=$(fm_pending_reply_path "$state" "$reported_corr")
+    fm_pending_reply_prepare_delivery "$state" "$reported_corr" \
+      || fail "reported delivery attempt should persist"
+    reported_marker=$(fm_pending_reply_delivery_confirmation_path "$state" "$reported_corr")
+    printf 'done [corr=%s]: report proves delivery\n' "$reported_corr" >> "$state/hibit.status"
+    fm_pending_reply_try_resolve "$state" "$reported_corr" \
+      || fail "attempted delivery with a report should resolve directly"
+    [ "$(phase_of "$state" "$reported_corr")" = resolved ] \
+      || fail "correlated report should resolve attempted delivery"
+    [ "$(fm_pending_reply_get "$reported_rec" delivered_epoch)" = 5800 ] \
+      || fail "correlated report should provide delivery evidence"
+    [ ! -e "$reported_marker" ] || fail "resolved delivery marker should be removed"
+    fm_pending_reply_tick_one "$state" "$reported_corr" unknown \
+      || fail "resolved attempted delivery should remain inert in watcher"
+    if grep -Fq "pending-reply-id=$reported_corr" "$state/hibit.status"; then
+      fail "reported attempted delivery must not escalate as delivery-unknown"
+    fi
   ) || fail "delivery confirmation fallback regression failed"
   pass "delivery confirmation fallback reconciles durably"
 }

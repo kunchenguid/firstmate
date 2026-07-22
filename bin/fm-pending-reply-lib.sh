@@ -459,7 +459,8 @@ fm_pending_reply_resolve_via_of_line() {  # <line>
 # Returns 0 when the record is resolved after the call (already or newly).
 fm_pending_reply_try_resolve() {  # <state-dir> <corr_id> [status-file-override]
   local state=$1 corr=$2 status_override=${3-}
-  local rec phase delivered status_file signature previous line via now
+  local rec phase delivered marker delivery_entry delivery_state status_file signature previous line via now
+  local unconfirmed=0
   rec=$(fm_pending_reply_path "$state" "$corr")
   [ -f "$rec" ] || return 1
   phase=$(fm_pending_reply_get "$rec" phase)
@@ -467,16 +468,23 @@ fm_pending_reply_try_resolve() {  # <state-dir> <corr_id> [status-file-override]
     return 0
   fi
   delivered=$(fm_pending_reply_get "$rec" delivered_epoch)
-  [ -n "$delivered" ] || return 1
+  if [ -z "$delivered" ]; then
+    marker=$(fm_pending_reply_delivery_confirmation_path "$state" "$corr")
+    [ -f "$marker" ] || return 1
+    delivery_entry=$(cat "$marker" 2>/dev/null || true)
+    delivery_state=${delivery_entry%%=*}
+    case "$delivery_state" in attempted|confirmed) ;; *) return 1 ;; esac
+    unconfirmed=1
+  fi
   status_file=${status_override:-$(fm_pending_reply_get "$rec" parent_status)}
-  if [ -z "$status_override" ]; then
+  if [ -z "$status_override" ] && [ "$unconfirmed" = 0 ]; then
     signature=$(fm_pending_reply_file_signature "$status_file")
     previous=$(fm_pending_reply_get "$rec" parent_status_scan_signature)
     [ "$signature" != "$previous" ] || return 1
   fi
   line=$(fm_pending_reply_find_resolve_line "$status_file" "$corr")
   if [ -z "$line" ]; then
-    if [ -z "$status_override" ]; then
+    if [ -z "$status_override" ] && [ "$unconfirmed" = 0 ]; then
       fm_pending_reply_set "$rec" parent_status_scan_signature "$signature" || return 1
     fi
     return 1
@@ -484,6 +492,10 @@ fm_pending_reply_try_resolve() {  # <state-dir> <corr_id> [status-file-override]
   via=$(fm_pending_reply_resolve_via_of_line "$line")
   now=$(fm_pending_reply_now)
   fm_pending_reply_set "$rec" phase resolved || return 1
+  if [ -z "$delivered" ]; then
+    fm_pending_reply_mark_delivered "$state" "$corr" "$now" || return 1
+    rm -f "$marker" 2>/dev/null || true
+  fi
   fm_pending_reply_set "$rec" resolved_epoch "$now" || return 1
   fm_pending_reply_set "$rec" resolved_via "$via" || return 1
   return 0
