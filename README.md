@@ -45,7 +45,8 @@ Launching a supported harness inside it instantiates your first mate - and makes
 - **A visible crew** - every crewmate works in its own tmux window, experimental herdr/zellij tab, cmux workspace, or Orca terminal you can watch or type into; the first mate reconciles.
 - **Disposable worktrees** - each task runs in a clean [treehouse](https://github.com/kunchenguid/treehouse) git worktree, or an Orca-managed worktree when `backend=orca`, so parallel work on one repo never collides.
 - **Two task shapes** - ship tasks deliver a change; scout tasks investigate, plan, reproduce, or audit and leave a report.
-- **Explicit project modes** - each project ships via `no-mistakes`, `direct-PR`, or `local-only`, with an optional `+yolo` autonomy flag.
+- **Results-first delivery** - ship tasks are done only when a validated delivery receipt exists, proving the change landed and post-landing validation, smoke, and rollback/repair were run from the exact source. See [docs/delivery-lifecycle.md](docs/delivery-lifecycle.md).
+- **Explicit project modes** - each project ships via `direct-PR`, `local-only`, or the legacy `no-mistakes` path, with an optional `+yolo` autonomy flag. New projects default to `direct-PR +yolo`.
 - **Optional secondmates** - opt in to persistent second mates that run from isolated firstmate homes with their own `FM_HOME`, state, projects, and session lock, supervising project clones or a project-less firstmate-repo domain, kept on the primary firstmate version by guarded local fast-forwards and checked for live agent processes at session start.
 - **Event-driven, zero-token supervision** - a bash watcher sleeps on the fleet and wakes the first mate only when something needs you; verified primary harnesses also get a turn-end backstop that blocks or follows up on a blind stop when work is under way and supervision is not live.
 - **Optional X mode** - opt in with one local `.env` token so firstmate can answer your public `@myfirstmate` mentions, act on normal reversible mention requests through the same lifecycle as chat requests, acknowledge spawned work, and post up to three public-safe completion follow-ups within seven days for genuine milestones and the final outcome without changing non-X behavior; dry-run preview records would-be replies and dismissals locally before go-live.
@@ -144,7 +145,7 @@ Setup guides for tmux (the default) and every other supported backend (herdr, ze
      ▼            ▼               ▼
   treehouse worktree, Orca worktree, or isolated secondmate home
      │
-     ├─ ship: project mode ► PR/local merge ► teardown
+     ├─ ship: project mode ► PR/local merge ► validation/release/smoke/rollback proof ► delivery receipt ► teardown
      │
      └─ scout: report at data/<id>/report.md ► decision inventory ► relay findings ► teardown
 ```
@@ -192,6 +193,7 @@ Firstmate's skills live in two separate places with different audiences:
 - [docs/cmux-backend.md](docs/cmux-backend.md) - setup guide for the experimental cmux backend, plus its verification notes and known gaps.
 - [docs/codex-app-backend.md](docs/codex-app-backend.md) - Codex App backend boundary, evidence, and rollout contract.
 - [docs/gitlab-merge-watch.md](docs/gitlab-merge-watch.md) - how the merge watch follows a GitLab merge request on any instance, and the evidence behind it.
+- [docs/delivery-lifecycle.md](docs/delivery-lifecycle.md) - the results-first delivery path, tools, receipt schema, and rollout embargo.
 - [docs/turnend-guard.md](docs/turnend-guard.md) - the primary session's structural "no turn ends blind" backstop: verified per-harness hook mechanisms, scoping, loop safety, and fail-open tradeoffs.
 - [docs/supervision-protocols/](docs/supervision-protocols/) - rendered primary-harness watcher protocols for Claude, Codex, OpenCode, Pi, Grok, and unknown harness fallback.
 - [docs/scripts.md](docs/scripts.md) - the `bin/` toolbelt reference.
