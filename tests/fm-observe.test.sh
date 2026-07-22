@@ -114,7 +114,7 @@ fi
 [ "$db_mode" = 600 ] && [ "$html_mode" = 600 ] \
   || fail "observability outputs must be private (db=$db_mode html=$html_mode)"
 
-python3 - "$DATA/observability.sqlite3" "$BASE" "$HEAD" <<'PY'
+if ! python3 - "$DATA/observability.sqlite3" "$BASE" "$HEAD" <<'PY'
 import sqlite3, sys
 path, base, head = sys.argv[1:]
 c = sqlite3.connect(path)
@@ -143,11 +143,13 @@ assert set(row[0] for row in c.execute("SELECT name FROM sqlite_master WHERE typ
   'runs','events','sessions','quality_findings','evidence'}
 assert c.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name LIKE '%entire%'").fetchone()[0] == 0
 PY
-[ "$?" -eq 0 ] || fail "collector database assertions failed"
+then
+  fail "collector database assertions failed"
+fi
 pass "fm-observe: correlates task, run, session, commits, lifecycle, quality, and usage"
 
 run_collect >/dev/null || fail "idempotent second collection failed"
-python3 - "$DATA/observability.sqlite3" <<'PY'
+if ! python3 - "$DATA/observability.sqlite3" <<'PY'
 import sqlite3, sys
 c=sqlite3.connect(sys.argv[1])
 assert c.execute('SELECT COUNT(*) FROM runs').fetchone()[0] == 1
@@ -155,7 +157,9 @@ assert c.execute('SELECT COUNT(*) FROM events').fetchone()[0] == 4
 assert c.execute('SELECT COUNT(*) FROM sessions').fetchone()[0] == 2
 assert c.execute('SELECT COUNT(*) FROM quality_findings').fetchone()[0] == 1
 PY
-[ "$?" -eq 0 ] || fail "idempotent database assertions failed"
+then
+  fail "idempotent database assertions failed"
+fi
 pass "fm-observe: repeated collection is idempotent"
 
 python3 - "$STATE/observe-feature.status" <<'PY'
@@ -178,13 +182,15 @@ PY
 ) || fail "truncated status boundary assertions failed"
 printf 'done: appended [run=observe-feature-20260101T000000Z-42] [at=2026-01-01T00:07:00Z]\n' >> "$STATE/observe-feature.status"
 run_collect >/dev/null || fail "growing truncated status collection failed"
-python3 - "$DATA/observability.sqlite3" "$events_after_tail" <<'PY'
+if ! python3 - "$DATA/observability.sqlite3" "$events_after_tail" <<'PY'
 import sqlite3, sys
 c = sqlite3.connect(sys.argv[1])
 before = int(sys.argv[2])
 assert c.execute('SELECT COUNT(*) FROM events').fetchone()[0] == before + 1
 PY
-[ "$?" -eq 0 ] || fail "truncated status append duplicated existing events"
+then
+  fail "truncated status append duplicated existing events"
+fi
 pass "fm-observe: truncated status tails remain bounded, correlated, and idempotent"
 
 python3 - "$NM_DB" "$WT" <<'PY'
@@ -205,7 +211,7 @@ for index in range(60):
 c.commit()
 PY
 run_collect >/dev/null || fail "newest no-mistakes collection failed"
-python3 - "$DATA/observability.sqlite3" <<'PY'
+if ! python3 - "$DATA/observability.sqlite3" <<'PY'
 import sqlite3, sys
 c = sqlite3.connect(sys.argv[1])
 r = c.execute("""SELECT no_mistakes_runs,outcome,first_pass_quality,
@@ -220,7 +226,9 @@ assert 'no-mistakes://run/01NMNEW59' in refs
 assert 'no-mistakes://run/01NMNEW09' not in refs
 assert not any('OTHER' in ref for ref in refs)
 PY
-[ "$?" -eq 0 ] || fail "newest no-mistakes ordering and limit assertions failed"
+then
+  fail "newest no-mistakes ordering and limit assertions failed"
+fi
 pass "fm-observe: no-mistakes window preserves first pass and reconciles derived detail"
 
 for secret in SECRET_PROMPT_MUST_NOT_ENTER_DB SECRET_RESPONSE_MUST_NOT_ENTER_DB SECRET_COMMAND_OUTPUT_MUST_NOT_ENTER_DB SECRET_FINDING_DESCRIPTION; do
@@ -250,8 +258,10 @@ remaining=$(python3 -c 'import sqlite3,sys; print(sqlite3.connect(sys.argv[1]).e
 [ "$remaining" = 0 ] || fail "retention did not delete an expired terminal run"
 pass "fm-observe: retention is bounded and explicit prune is reversible local maintenance"
 
+# shellcheck disable=SC2016 # The grep pattern must preserve the literal variable reference.
 assert_grep '[ -f "$CONFIG/observability" ]' "$ROOT/bin/fm-teardown.sh" \
   "teardown did not keep scheduled collection behind the explicit local presence flag"
+# shellcheck disable=SC2016 # The grep pattern must preserve the literal variable reference.
 assert_grep 'fm-observe.py" collect --task "$ID"' "$ROOT/bin/fm-teardown.sh" \
   "teardown did not collect the exact task before cleanup"
 assert_grep 'config/observability' "$ROOT/.gitignore" \
