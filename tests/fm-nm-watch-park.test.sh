@@ -29,6 +29,17 @@ set -u
 . "$ROOT/bin/fm-classify-lib.sh"
 fm_git_identity fmtest fmtest@example.invalid
 
+# Every park-hook case supplies its own NM_* wait explicitly. When this suite
+# itself runs inside a no-mistakes run, that run exports its own NM_* (NM_HOME,
+# NM_RUN_ID, ...) into the test process, so an inherited NM_RUN_ID would satisfy
+# the very input the missing-run-id case removes. Scrub the ambient set once.
+while IFS= read -r _nm_var; do
+  unset "$_nm_var"
+done <<EOF
+$(env | sed -n 's/^\(NM_[A-Za-z0-9_]*\)=.*/\1/p')
+EOF
+unset _nm_var
+
 NM_WATCH="$ROOT/bin/fm-nm-watch.sh"
 PARK_WAKE="$ROOT/bin/fm-nm-park-wake.sh"
 PR_CHECK="$ROOT/bin/fm-pr-check.sh"
