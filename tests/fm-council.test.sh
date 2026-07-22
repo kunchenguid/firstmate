@@ -514,6 +514,9 @@ ln -s "$HOME8/loot" "$claude_answer8"
 ln "$HOME8/loot" "$codex_answer8"
 READY8=$(council "$HOME8" ready Ingest) || fail "unsafe answer files crashed readiness"
 [ "$(jq '.answered | length' <<<"$READY8")" = 0 ] || fail "a symlinked or hard-linked answer was counted as answered"
+[ "$(jq -r --arg member "$CLAUDE8" '.refusals[$member]' <<<"$READY8")" = symlink ] || fail "the symlinked answer refusal reason was not surfaced in ready"
+[ "$(jq -r --arg member "$CODEX8" '.refusals[$member]' <<<"$READY8")" = hard-linked ] || fail "the hard-linked answer refusal reason was not surfaced in ready"
+[ "$(jq '.pending | length' <<<"$READY8")" = 0 ] || fail "refused answers left members pending forever"
 status=0
 council "$HOME8" collect Ingest >/dev/null 2>&1 || status=$?
 expect_code 1 "$status" "symlinked and hard-linked answers must not be ingested"
@@ -524,7 +527,12 @@ COLLECT8=$(council "$HOME8" collect Ingest)
 [ "$(jq -r .comparison <<<"$COLLECT8")" = only-available ] || fail "the honest regular answer was not collected"
 [ "$(jq -r '.unavailable[0]' <<<"$COLLECT8")" = "$CLAUDE8" ] || fail "the symlinked answer was not degraded to unavailable"
 assert_not_contains "$COLLECT8" INGEST-LOOT "a symlinked answer exfiltrated controller-readable bytes"
-pass "council answer ingest: only exact private regular single-link outbox files are read"
+ID8=$(json_id "$CREATE8")
+ROUND8=$(jq -r .round <<<"$ASK8")
+[ "$(jq -r --arg member "$CLAUDE8" '.roster[$member].refusal' "$HOME8/data/councils/$ID8/rounds/$ROUND8/round.json")" = symlink ] || fail "the refusal reason was not recorded in the round evidence"
+[ "$(jq -r --arg member "$CODEX8" '.roster[$member].refusal // "-"' "$HOME8/data/councils/$ID8/rounds/$ROUND8/round.json")" = - ] || fail "a stale refusal survived the member's honest answer"
+[ "$(grep -cF "\"member\": \"$CLAUDE8\", \"reason\": \"symlink\"" "$HOME8/data/councils/$ID8/events.jsonl")" = 1 ] || fail "the answer refusal event was missing or duplicated across collects"
+pass "council answer ingest: only exact private regular single-link outbox files are read, with bounded refusal reasons recorded once"
 
 # A corrupt member runtime during ready/wait degrades that member to honest
 # unavailability instead of crashing every readiness poll.
@@ -532,7 +540,7 @@ IFS=$'\t' read -r HOME9 PROJECT9 < <(new_home readyprobe)
 CREATE9=$(create_pair "$HOME9" "$PROJECT9" ReadyProbe)
 ID9=$(json_id "$CREATE9")
 consent_pair "$HOME9" "$PROJECT9"
-council "$HOME9" ask ReadyProbe "Pick a formatter." >/dev/null
+ASK9=$(council "$HOME9" ask ReadyProbe "Pick a formatter.")
 CODEX9=$(jq -r '.members[] | select(startswith("codex-"))' <<<"$CREATE9")
 codex_runtime9="$HOME9/state/councils/$ID9/members/$CODEX9/runtime.json"
 cp "$codex_runtime9" "$codex_runtime9.saved"
@@ -541,6 +549,34 @@ READY9=$(council "$HOME9" ready ReadyProbe) || fail "a corrupt member runtime cr
 [ "$(jq -r --arg member "$CODEX9" '.unavailable | index($member) != null' <<<"$READY9")" = true ] || fail "a corrupt member runtime was not honestly unavailable in ready"
 mv "$codex_runtime9.saved" "$codex_runtime9"
 pass "council readiness: a corrupt runtime degrades to unavailable instead of failing ready and wait"
+
+# Submission publishes the answer through the pinned verified outbox descriptor,
+# so an outbox replaced by a symlink cannot redirect the controller's write.
+CLAUDE9=$(jq -r '.members[] | select(startswith("claude-"))' <<<"$CREATE9")
+ROUND9=$(jq -r .round <<<"$ASK9")
+claude_nonce9=$(jq -r --arg member "$CLAUDE9" '.roster[$member].nonce' <<<"$ASK9")
+claude_answer9=$(jq -r --arg member "$CLAUDE9" '.roster[$member].answer' <<<"$ASK9")
+outbox9=$(dirname "$claude_answer9")
+redirect9="$TMP_ROOT/redirect9"
+mkdir -p "$redirect9"
+printf 'submitted through the pinned descriptor\n' > "$TMP_ROOT/answer9.md"
+rmdir "$outbox9"
+ln -s "$redirect9" "$outbox9"
+status=0
+council "$HOME9" submit ReadyProbe "$CLAUDE9" --round "$ROUND9" --nonce "$claude_nonce9" --file "$TMP_ROOT/answer9.md" >/dev/null 2>&1 || status=$?
+expect_code 1 "$status" "submit through a symlink-replaced outbox must refuse"
+assert_absent "$redirect9/$ROUND9.md" "submit redirected an answer write outside the private outbox"
+rm "$outbox9"
+mkdir -m 700 "$outbox9"
+council "$HOME9" submit ReadyProbe "$CLAUDE9" --round "$ROUND9" --nonce "$claude_nonce9" --file "$TMP_ROOT/answer9.md" >/dev/null
+[ "$(stat -c %a "$claude_answer9")" = 600 ] || fail "the submitted answer is not private 0600"
+[ "$(stat -c %h "$claude_answer9")" = 1 ] || fail "the submitted answer is not a single-link regular file"
+status=0
+council "$HOME9" submit ReadyProbe "$CLAUDE9" --round "$ROUND9" --nonce "$claude_nonce9" --file "$TMP_ROOT/answer9.md" >/dev/null 2>&1 || status=$?
+expect_code 1 "$status" "a duplicate submission must be refused create-exclusively"
+READY9B=$(council "$HOME9" ready ReadyProbe)
+[ "$(jq -r --arg member "$CLAUDE9" '.answered | index($member) != null' <<<"$READY9B")" = true ] || fail "the pinned-descriptor submission was not ingested"
+pass "council submit: answer publication stays pinned to the verified private outbox descriptor"
 
 # A project directory without owner write permission still snapshots because
 # subtree modes are applied only after the subtree is populated.

@@ -29,7 +29,7 @@ This is a local filesystem boundary, not permission to disclose code to a remote
 Project-specific durable consent is required separately for Anthropic and OpenAI before the first round can be sent.
 
 Available answers remain in participant-private outboxes until collection.
-An answer is ingested only as a private regular single-link file at the exact recorded outbox path; a symlinked, hard-linked, group-writable, oversized, or otherwise unsafe answer file is honestly treated as unavailable rather than followed.
+An answer is ingested only as a private regular single-link file at the exact recorded outbox path; a symlinked, hard-linked, group-writable, oversized, or otherwise unsafe answer file is honestly treated as unavailable rather than followed, with one bounded refusal reason surfaced by `ready` and recorded durably in the round evidence at collection.
 Firstmate then presents either one best answer or a short synthesis without adding a separate judge model or numeric scorecard.
 One available answer is labeled only as the available answer.
 Raw answers and rejected presentations are removed when a round is accepted, rejected, or rerun; accepted canonical decision bodies remain durable.

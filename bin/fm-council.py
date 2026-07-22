@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import datetime as dt
+import errno
 import fcntl
 import hashlib
 import json
@@ -851,32 +852,40 @@ def expected_answer_path(runtime: dict[str, Any], round_id: str) -> Path:
     return Path(str(runtime["home"])) / "outbox" / f"{round_id}.md"
 
 
-def read_member_answer(council: dict[str, Any], member: dict[str, Any], round_id: str, answer_value: Any) -> str | None:
+def inspect_member_answer(council: dict[str, Any], member: dict[str, Any], round_id: str, answer_value: Any) -> tuple[str | None, str | None]:
     try:
         _, runtime = load_runtime(council, member)
     except CouncilError:
-        return None
-    if not answer_value or Path(str(answer_value)) != expected_answer_path(runtime, round_id):
-        return None
+        return None, None
+    if not answer_value:
+        return None, None
+    if Path(str(answer_value)) != expected_answer_path(runtime, round_id):
+        return None, "answer-path-mismatch"
     directory_fd = open_outbox_dir(Path(str(runtime["home"])))
     if directory_fd is None:
-        return None
+        return None, "outbox-not-private"
     try:
         answer_fd = os.open(f"{round_id}.md", os.O_RDONLY | os.O_NOFOLLOW | os.O_NOCTTY | os.O_CLOEXEC, dir_fd=directory_fd)
-    except OSError:
-        return None
+    except FileNotFoundError:
+        return None, None
+    except OSError as error:
+        return None, "symlink" if error.errno == errno.ELOOP else "unreadable"
     finally:
         os.close(directory_fd)
     try:
         info = os.fstat(answer_fd)
-        if (
-            not stat.S_ISREG(info.st_mode)
-            or info.st_nlink != 1
-            or info.st_uid != os.getuid()
-            or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH | stat.S_ISUID | stat.S_ISGID)
-            or not 0 < info.st_size <= MAX_ANSWER_BYTES
-        ):
-            return None
+        if not stat.S_ISREG(info.st_mode):
+            return None, "not-regular"
+        if info.st_nlink != 1:
+            return None, "hard-linked"
+        if info.st_uid != os.getuid():
+            return None, "foreign-owner"
+        if info.st_mode & (stat.S_IWGRP | stat.S_IWOTH | stat.S_ISUID | stat.S_ISGID):
+            return None, "unsafe-mode"
+        if info.st_size > MAX_ANSWER_BYTES:
+            return None, "oversized"
+        if info.st_size == 0:
+            return None, "empty"
         chunks: list[bytes] = []
         total = 0
         while True:
@@ -886,13 +895,16 @@ def read_member_answer(council: dict[str, Any], member: dict[str, Any], round_id
             chunks.append(chunk)
             total += len(chunk)
             if total > MAX_ANSWER_BYTES:
-                return None
+                return None, "oversized"
     finally:
         os.close(answer_fd)
     try:
-        return b"".join(chunks).decode("utf-8")
+        text = b"".join(chunks).decode("utf-8")
     except UnicodeDecodeError:
-        return None
+        return None, "not-utf8"
+    if not text.strip():
+        return None, "empty"
+    return text, None
 
 
 def remove_member_answer(council: dict[str, Any], member: dict[str, Any], round_id: str, answer_value: Any) -> None:
@@ -1094,8 +1106,6 @@ def command_submit(arguments: argparse.Namespace) -> None:
         _, runtime = load_runtime(council, member_record)
         if destination != expected_answer_path(runtime, arguments.round_id):
             raise CouncilError("submission destination escaped the member's recorded outbox")
-        if destination.exists() or destination.is_symlink():
-            raise CouncilError("participant already submitted an answer for this round")
         source = Path(arguments.file)
         content = source.read_bytes()
         if not content.strip():
@@ -1103,8 +1113,28 @@ def command_submit(arguments: argparse.Namespace) -> None:
         directory_fd = open_outbox_dir(Path(str(runtime["home"])))
         if directory_fd is None:
             raise CouncilError("participant outbox is not a private directory")
-        os.close(directory_fd)
-        atomic_bytes(destination, content)
+        try:
+            name = f"{arguments.round_id}.md"
+            temporary = f".{name}.{secrets.token_hex(8)}"
+            temporary_fd = os.open(
+                temporary,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+                mode=0o600,
+                dir_fd=directory_fd,
+            )
+            try:
+                with os.fdopen(temporary_fd, "wb") as stream:
+                    stream.write(content)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                os.link(temporary, name, src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
+            except FileExistsError as error:
+                raise CouncilError("participant already submitted an answer for this round") from error
+            finally:
+                with contextlib.suppress(OSError):
+                    os.unlink(temporary, dir_fd=directory_fd)
+        finally:
+            os.close(directory_fd)
     print(f"submitted: {arguments.member} {arguments.round_id}")
 
 
@@ -1115,11 +1145,15 @@ def readiness(directory: Path, council: dict[str, Any]) -> dict[str, Any]:
     answered: list[str] = []
     pending: list[str] = []
     unavailable: list[str] = []
+    refusals: dict[str, str] = {}
     for member in council["members"]:
         roster_value = round_value.get("roster", {}).get(member["id"], {})
-        answer_text = read_member_answer(council, member, round_value["id"], roster_value.get("answer"))
-        if answer_text is not None and answer_text.strip():
+        answer_text, refusal = inspect_member_answer(council, member, round_value["id"], roster_value.get("answer"))
+        if answer_text is not None:
             answered.append(member["id"])
+        elif refusal:
+            unavailable.append(member["id"])
+            refusals[member["id"]] = refusal
         elif roster_value.get("dispatch") != "sent":
             unavailable.append(member["id"])
         else:
@@ -1135,6 +1169,7 @@ def readiness(directory: Path, council: dict[str, Any]) -> dict[str, Any]:
         "answered": answered,
         "pending": pending,
         "unavailable": unavailable,
+        "refusals": refusals,
     }
 
 
@@ -1166,13 +1201,25 @@ def command_collect(arguments: argparse.Namespace) -> None:
         round_value = load_round(directory, council["active_round"])
         answers: list[dict[str, str]] = []
         unavailable: list[str] = []
+        refusal_recorded = False
         for member in council["members"]:
             roster_value = round_value["roster"].get(member["id"], {})
-            answer_text = (read_member_answer(council, member, round_value["id"], roster_value.get("answer")) or "").strip()
-            if answer_text:
-                answers.append({"member": member["id"], "profile": f"{member['harness']}/{member['model']}/{member['effort']}", "answer": answer_text})
+            answer_text, refusal = inspect_member_answer(council, member, round_value["id"], roster_value.get("answer"))
+            if answer_text is not None:
+                answers.append({"member": member["id"], "profile": f"{member['harness']}/{member['model']}/{member['effort']}", "answer": answer_text.strip()})
+                if roster_value.pop("refusal", None) is not None:
+                    refusal_recorded = True
             else:
                 unavailable.append(member["id"])
+                if refusal and roster_value.get("refusal") != refusal:
+                    roster_value["refusal"] = refusal
+                    refusal_recorded = True
+                    append_event(
+                        directory / "events.jsonl",
+                        {"event": "answer_refused", "round": round_value["id"], "member": member["id"], "reason": refusal},
+                    )
+        if refusal_recorded:
+            save_round(directory, round_value)
         if not answers:
             raise CouncilError("no participant answer is available; retry or wait rather than inventing a council result")
         collection = {
