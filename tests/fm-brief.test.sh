@@ -102,6 +102,7 @@ test_no_mistakes_dod_wording() {
   local home id brief
   home="$TMP_ROOT/wording-home"
   mkdir -p "$home/data"
+  printf -- '- some-proj [no-mistakes] - test project (added 2026-07-22)\n' > "$home/data/projects.md"
   id="brief-wording-b1"
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj >/dev/null 2>&1
   brief="$home/data/$id/brief.md"
