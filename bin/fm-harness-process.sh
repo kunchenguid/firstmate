@@ -9,11 +9,7 @@ pid=${1:-}
 case "$pid" in ''|*[!0-9]*|1) exit 1 ;; esac
 [ -r "/proc/$pid/cmdline" ] || exit 1
 
-executable=$(python3 - "$pid" 2>/dev/null <<'PY'
-import os, sys
-print(os.readlink(f"/proc/{sys.argv[1]}/exe"))
-PY
-) || exit 1
+executable=$(readlink "/proc/$pid/exe" 2>/dev/null) || exit 1
 case "$executable" in
   */claude) printf '%s\n' claude; exit 0 ;;
   */codex) printf '%s\n' codex; exit 0 ;;
