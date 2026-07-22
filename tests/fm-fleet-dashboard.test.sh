@@ -24,14 +24,14 @@ test_dashboard_renders_required_surfaces() {
   "fm_home": "/tmp/fm-home",
   "backlog": {
     "records": [
-      {"state":"in_flight","structured":true,"id":"lane-a","title":"Merge the thing","repo":"lindy","kind":"ship","since":"2026-07-18","blocked_by":"base-pr","blocked_reason":"depends on base PR","pr_url":"https://github.com/lindy-ai/lindy/pull/1","completion":{"verb":null,"date":null}},
-      {"state":"queued","structured":true,"id":"lane-b","title":"Queue cleanup","repo":"lindy","kind":"ship","since":"2026-07-10","blocked_reason":"MQ serialization was avoidable","completion":{"verb":null,"date":null}},
-      {"state":"queued","structured":true,"id":"captain-call","title":"Pick rollout","repo":"lindy","kind":"captain","hold_kind":"captain","hold_reason":"choose staged or full rollout","since":"2026-07-20","completion":{"verb":null,"date":null}},
-      {"state":"done","structured":true,"id":"landed-a","title":"Finished fix","repo":"lindy","kind":"ship","pr_url":"https://github.com/lindy-ai/lindy/pull/2","completion":{"verb":"merged","date":"2026-07-19"}}
+      {"state":"in_flight","structured":true,"id":"lane-a","title":"Merge the thing","repo":"example-app","kind":"ship","since":"2026-07-18","blocked_by":"base-pr","blocked_reason":"depends on base PR","pr_url":"https://github.com/example-org/example-app/pull/1","completion":{"verb":null,"date":null}},
+      {"state":"queued","structured":true,"id":"lane-b","title":"Queue cleanup","repo":"example-app","kind":"ship","since":"2026-07-10","blocked_reason":"MQ serialization was avoidable","completion":{"verb":null,"date":null}},
+      {"state":"queued","structured":true,"id":"captain-call","title":"Pick rollout","repo":"example-app","kind":"captain","hold_kind":"captain","hold_reason":"choose staged or full rollout","since":"2026-07-20","completion":{"verb":null,"date":null}},
+      {"state":"done","structured":true,"id":"landed-a","title":"Finished fix","repo":"example-app","kind":"ship","pr_url":"https://github.com/example-org/example-app/pull/2","completion":{"verb":"merged","date":"2026-07-19"}}
     ]
   },
   "tasks": [
-    {"id":"lane-a","kind":"ship","project":"lindy","current_state":{"state":"working","detail":"ci running"},"hints":{"open_decisions":[{"key":"rollout","verb":"needs-decision","summary":"choose rollout size"}],"last_event_text":"working"},"pr":{"url":"https://github.com/lindy-ai/lindy/pull/1"}},
+    {"id":"lane-a","kind":"ship","project":"example-app","current_state":{"state":"working","detail":"ci running"},"hints":{"open_decisions":[{"key":"rollout","verb":"needs-decision","summary":"choose rollout size"}],"last_event_text":"working"},"pr":{"url":"https://github.com/example-org/example-app/pull/1"}},
     {"id":"lane-c","kind":"scout","project":"firstmate","current_state":{"state":"blocked","detail":"needs credential"},"hints":{"open_decisions":[],"last_event_text":"blocked"},"pr":{"url":null}}
   ],
   "secondmate_current": {
@@ -41,7 +41,7 @@ test_dashboard_renders_required_surfaces() {
   },
   "secondmate_landed": {
     "records": [
-      {"id":"sm-landed","title":"Secondmate done","home_id":"domain","pr_url":"https://github.com/lindy-ai/lindy/pull/3","completion":{"date":"2026-07-18"}}
+      {"id":"sm-landed","title":"Secondmate done","home_id":"domain","pr_url":"https://github.com/example-org/example-app/pull/3","completion":{"date":"2026-07-18"}}
     ]
   }
 }

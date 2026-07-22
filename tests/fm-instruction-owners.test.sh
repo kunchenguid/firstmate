@@ -13,7 +13,6 @@ HARNESS="$ROOT/.agents/skills/harness-adapters/SKILL.md"
 CODING="$ROOT/.agents/skills/firstmate-coding-guidelines/SKILL.md"
 RECOVERY="$ROOT/.agents/skills/stuck-crewmate-recovery/SKILL.md"
 SECONDMATE="$ROOT/.agents/skills/secondmate-provisioning/SKILL.md"
-LINDY="$ROOT/.agents/skills/lindy-ship-pipeline/SKILL.md"
 CONFIG="$ROOT/docs/configuration.md"
 AGENTS="$ROOT/AGENTS.md"
 BRIEF="$ROOT/bin/fm-brief.sh"
@@ -111,29 +110,6 @@ test_shared_authoring_requirements_are_owned() {
   assert_grep "critical safety, routing, startup, and supervision infrastructure" "$CODING" \
     "coding guidance lost the critical infrastructure scope"
   pass "firstmate-coding-guidelines owns compatibility review and deterministic enforcement"
-}
-
-test_lindy_ship_pipeline_wrapper_keeps_captain_rulings() {
-  assert_present "$LINDY" "lindy ship pipeline skill is missing"
-  assert_grep "name: lindy-ship-pipeline" "$LINDY" "lindy skill metadata has the wrong name"
-  assert_grep "user-invocable: false" "$LINDY" "lindy skill must not be user-invocable"
-  assert_grep "  internal: true" "$LINDY" "lindy skill must be internal"
-  assert_grep '`lindy-ship-pipeline` - load before supervising, validating, merging, deploying, rolling back, or mirroring state for a Lindy PR or Linear ticket.' "$AGENTS" \
-    "AGENTS.md lost the lindy ship pipeline trigger"
-  for phrase in \
-    "This is a wrapper only." \
-    "Do not copy or reimplement Lindy's review, CI, Graphite, deploy, rollback, or Linear mechanics in Firstmate." \
-    "Approvals survive force-push" \
-    "Do not revert on-call Done states" \
-    "Write exactly one final evidence comment per ticket" \
-    "Merge only through Graphite MQ with \`gt merge\`" \
-    "\`gh pr merge\` is forbidden" \
-    "Run the Lindy-owned \`watch-ci-review\` workflow" \
-    "Use a fast-fail rollback posture" \
-    "Mirror the final state into Linear"; do
-    assert_grep "$phrase" "$LINDY" "lindy ship pipeline wrapper lost '$phrase'"
-  done
-  pass "lindy-ship-pipeline owns the captain-approved wrapper sequence and hard stops"
 }
 
 test_secondmate_registry_contract_stays_concise() {
@@ -250,7 +226,6 @@ test_diagnostic_owner_covers_causal_procedure
 test_project_management_owner_covers_guarded_operations
 test_generic_effort_fallback_respects_precedence
 test_shared_authoring_requirements_are_owned
-test_lindy_ship_pipeline_wrapper_keeps_captain_rulings
 test_secondmate_registry_contract_stays_concise
 test_state_startup_and_ordinary_recovery_placement
 test_compressed_agents_owner_map
