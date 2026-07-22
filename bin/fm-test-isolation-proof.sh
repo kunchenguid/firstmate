@@ -3,12 +3,12 @@
 # behavior-test candidates (Phase 2 pre-shard gate).
 #
 # This is the single owner of the proven parallel candidate set, the concurrent
-# proof run, and the isolation checks that must pass before any production CI
-# sharding or general local --jobs land (those are a later phase).
+# proof run, and the isolation checks that admitted that set. Production
+# portable CI shards and bounded local fm-test-run.sh --jobs for this exact set
+# are owned by bin/fm-test-run.sh (docs/fm-test-portable-shards.md).
 #
 # It does NOT:
-#   - change CI Behavior sharding
-#   - add --jobs to bin/fm-test-run.sh
+#   - compose production CI shard membership (fm-test-run.sh owns that partition)
 #   - run real Herdr, real default-server tmux, watcher lock races, AFK, live
 #     harnesses, or GUI backends
 #
