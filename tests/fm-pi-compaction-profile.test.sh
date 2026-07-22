@@ -79,6 +79,30 @@ fi
 mv "$HOME_DIR/config/pi-delegated-profile.good" "$HOME_DIR/config/pi-delegated-profile"
 pass "unknown models and effective context mismatches are refused before launch"
 
+cp "$HOME_DIR/config/pi-delegated-profile" "$HOME_DIR/config/pi-delegated-profile.good"
+sed -e 's#model=openai-codex/gpt-5.6-sol#model=openai/gpt-4o#' \
+  -e 's/context_window=272000/context_window=128000/' \
+  "$HOME_DIR/config/pi-delegated-profile.good" > "$HOME_DIR/config/pi-delegated-profile"
+if fm_pi_profile_load "$HOME_DIR/config" "$PROJECT_DIR" >/dev/null 2>&1; then
+  fail "model without effective medium thinking support was accepted"
+fi
+mv "$HOME_DIR/config/pi-delegated-profile.good" "$HOME_DIR/config/pi-delegated-profile"
+pass "models without effective medium thinking support are refused before launch"
+
+WRAPPER_MARKER="$TMP_ROOT/wrapper-ran"
+WRAPPER_COMMAND="$TMP_ROOT/pi-wrapper"
+printf '#!/usr/bin/env bash\ntouch %q\nexec %q "$@"\n' "$WRAPPER_MARKER" "$PI_COMMAND" > "$WRAPPER_COMMAND"
+chmod +x "$WRAPPER_COMMAND"
+cp "$HOME_DIR/config/pi-delegated-profile" "$HOME_DIR/config/pi-delegated-profile.good"
+sed "s#pi_command=$PI_COMMAND#pi_command=$WRAPPER_COMMAND#" \
+  "$HOME_DIR/config/pi-delegated-profile.good" > "$HOME_DIR/config/pi-delegated-profile"
+if fm_pi_profile_load "$HOME_DIR/config" "$PROJECT_DIR" >/dev/null 2>&1; then
+  fail "raw Pi launch wrapper was accepted"
+fi
+assert_absent "$WRAPPER_MARKER" "raw Pi launch wrapper executed before validation"
+mv "$HOME_DIR/config/pi-delegated-profile.good" "$HOME_DIR/config/pi-delegated-profile"
+pass "raw Pi launch wrappers are rejected without execution"
+
 node --input-type=module - "$PI_PACKAGE_DIR" 272000 108800 <<'NODE' \
   || fail "Pi shouldCompact strict-boundary proof failed"
 import { pathToFileURL } from "node:url";
@@ -102,6 +126,36 @@ session.appendThinkingLevelChange("medium");
 if (session.buildSessionContext().thinkingLevel !== "medium") process.exit(1);
 NODE
 pass "an explicit delegated medium change remains the restored session thinking state"
+
+GUARD_RUNTIME_DIR="$TMP_ROOT/guard-runtime"
+mkdir -p "$GUARD_RUNTIME_DIR/node_modules/@earendil-works"
+cp "$ROOT/bin/fm-pi-profile-guard.ts" "$GUARD_RUNTIME_DIR/guard.ts"
+ln -s "$PI_PACKAGE_DIR" "$GUARD_RUNTIME_DIR/node_modules/@earendil-works/pi-coding-agent"
+printf '%s\n' '{"type":"module"}' > "$GUARD_RUNTIME_DIR/package.json"
+FM_PI_DELEGATED_MODEL=openai-codex/gpt-5.6-sol \
+FM_PI_DELEGATED_CONTEXT_WINDOW=272000 \
+FM_PI_DELEGATED_AGENT_DIR="$AGENT_DIR" \
+FM_PI_DELEGATED_RESERVE_TOKENS=108800 \
+FM_PI_DELEGATED_KEEP_RECENT_TOKENS=20000 \
+node --experimental-strip-types --no-warnings --input-type=module - "$GUARD_RUNTIME_DIR/guard.ts" "$AGENT_DIR" "$PROJECT_DIR" <<'NODE' \
+  || fail "delegated profile runtime compaction guard proof failed"
+import { writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+const [guardPath, agentDir, cwd] = process.argv.slice(2);
+const { default: loadGuard } = await import(pathToFileURL(guardPath));
+const handlers = new Map();
+loadGuard({ on(name, handler) { handlers.set(name, handler); } });
+let shutdowns = 0;
+const ctx = { cwd, ui: { notify() {} }, shutdown() { shutdowns += 1; } };
+await handlers.get("session_start")({}, ctx);
+if (shutdowns !== 0) process.exit(1);
+writeFileSync(`${agentDir}/settings.json`, '{"compaction":{"enabled":false,"reserveTokens":108800,"keepRecentTokens":20000}}\n');
+const inputResult = await handlers.get("input")({}, ctx);
+const compactResult = await handlers.get("session_before_compact")({}, ctx);
+if (inputResult?.action !== "handled" || compactResult?.cancel !== true || shutdowns !== 2) process.exit(1);
+NODE
+printf '%s\n' '{"compaction":{"enabled":true,"reserveTokens":108800,"keepRecentTokens":20000},"defaultThinkingLevel":"xhigh"}' > "$AGENT_DIR/settings.json"
+pass "runtime compaction changes block turns and compaction"
 
 TSC_COMMAND=${FM_TSC_COMMAND:-}
 if [ -z "$TSC_COMMAND" ]; then
@@ -137,6 +191,7 @@ assert_grep 'no-extensions' "$ROOT/bin/fm-spawn.sh" "delegated Pi command does n
 assert_grep 'fm-pi-profile-guard.ts' "$ROOT/bin/fm-spawn.sh" "delegated Pi command does not preserve the explicit profile guard"
 assert_grep 'event.level !== "medium"' "$ROOT/bin/fm-pi-profile-guard.ts" "profile guard does not keep medium stable on resume"
 assert_grep 'selected !== expectedModel' "$ROOT/bin/fm-pi-profile-guard.ts" "profile guard does not refuse model cycling"
+assert_grep 'session_before_compact' "$ROOT/bin/fm-pi-profile-guard.ts" "profile guard does not validate runtime compaction"
 assert_grep 'pi-delegated-profile' "$ROOT/bin/fm-config-inherit-lib.sh" "secondmate homes do not inherit the delegated Pi profile"
 pass "hostile project and extension surfaces are neutralized while explicit FirstMate extensions remain supported"
 
