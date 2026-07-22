@@ -246,6 +246,99 @@ EOF
   pass "main_inventory discloses orphan/unstructured and clears when inventory is consistent"
 }
 
+test_normalized_roles_and_plural_blocker_readiness() {
+  local home fakebin out
+  home=$(make_home normalized-records)
+  mkdir -p "$home/projects/worker"
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+- [ ] program - Aggregate program (repo: alpha) (kind: program)
+- [ ] observation - Held observation (repo: alpha) (kind: scout) (hold: watch production) (hold-kind: external)
+- [ ] worker - Real worker (repo: alpha) (kind: ship)
+- [ ] orphan - Ordinary missing worker (repo: alpha) (kind: ship)
+
+## Queued
+- [ ] review - Security review (repo: alpha) (kind: ship)
+- [ ] captain-run - Run canary blocked-by: worker blocked-by: review (repo: alpha) (kind: captain) (hold: captain runs canary) (hold-kind: captain)
+
+## Done
+EOF
+  fm_write_meta "$home/state/worker.meta" \
+    "window=firstmate:fm-worker" "worktree=$home/projects/worker" "project=alpha" \
+    "harness=codex" "kind=ship" "mode=ship"
+  printf 'working: preparing canary\n' > "$home/state/worker.status"
+  fakebin=$(make_fakebin "$home")
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json)
+  printf '%s' "$out" | jq -e '
+    .main_inventory.orphan_in_flight == ["orphan"]
+      and (.backlog.records[] | select(.id == "program")
+        | .current_role == "program" and .requires_child_metadata == false)
+      and (.backlog.records[] | select(.id == "observation")
+        | .current_role == "held" and .requires_child_metadata == false)
+      and (.backlog.records[] | select(.id == "orphan")
+        | .current_role == "worker" and .requires_child_metadata == true)
+      and (.backlog.records[] | select(.id == "captain-run")
+        | .blocked_by == "review"
+          and .blocked_by_ids == ["worker", "review"]
+          and .unresolved_blocker_ids == ["worker", "review"]
+          and .captain_actionable == false)
+  ' >/dev/null || fail "normalized role or plural blocker fields were wrong: $out"
+
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+- [ ] program - Aggregate program (repo: alpha) (kind: program)
+- [ ] observation - Held observation (repo: alpha) (kind: scout) (hold: watch production) (hold-kind: external)
+
+## Queued
+- [ ] review - Security review (repo: alpha) (kind: ship)
+- [ ] captain-run - Run canary blocked-by: worker blocked-by: review (repo: alpha) (kind: captain) (hold: captain runs canary) (hold-kind: captain)
+
+## Done
+- [x] worker - Real worker (repo: alpha) (kind: ship) (done 2026-07-22)
+EOF
+  rm "$home/state/worker.meta" "$home/state/worker.status"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json)
+  printf '%s' "$out" | jq -e '
+    .backlog.records[] | select(.id == "captain-run")
+    | .blocked_by == "review"
+      and .blocked_by_ids == ["worker", "review"]
+      and .unresolved_blocker_ids == ["review"]
+      and .captain_actionable == false
+  ' >/dev/null || fail "one completed blocker did not leave exactly one unresolved id: $out"
+
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+- [ ] program - Aggregate program (repo: alpha) (kind: program)
+- [ ] observation - Held observation (repo: alpha) (kind: scout) (hold: watch production) (hold-kind: external)
+
+## Queued
+- [ ] captain-run - Run canary blocked-by: worker blocked-by: review (repo: alpha) (kind: captain) (hold: captain runs canary) (hold-kind: captain)
+
+## Done
+- [x] worker - Real worker (repo: alpha) (kind: ship) (done 2026-07-22)
+- [x] review - Security review (repo: alpha) (kind: ship) (done 2026-07-22)
+EOF
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json)
+  printf '%s' "$out" | jq -e '
+    .backlog.records[] | select(.id == "captain-run")
+    | .blocked_by == "review"
+      and .blocked_by_ids == ["worker", "review"]
+      and .unresolved_blocker_ids == []
+      and .captain_actionable == true
+  ' >/dev/null || fail "completed blockers did not make the captain hold actionable: $out"
+
+  sed 's/blocked-by: review/blocked-by: missing/' "$home/data/backlog.md" > "$home/data/backlog.next"
+  mv "$home/data/backlog.next" "$home/data/backlog.md"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json)
+  printf '%s' "$out" | jq -e '
+    .backlog.records[] | select(.id == "captain-run")
+    | .blocked_by_ids == ["worker", "missing"]
+      and .unresolved_blocker_ids == ["missing"]
+      and .captain_actionable == false
+  ' >/dev/null || fail "a missing blocker was incorrectly treated as resolved: $out"
+  pass "backlog normalization preserves strict roles and resolves every blocker compatibly"
+}
+
 test_event_hints_follow_reconciled_current_state() {
   local home fakebin out
   home=$(make_home event-hints)
@@ -662,6 +755,7 @@ test_parked_scout_decision_stays_pending() {
 test_empty_fleet_json
 test_fixture_snapshot_json
 test_main_inventory_orphan_and_unstructured_disclosure
+test_normalized_roles_and_plural_blocker_readiness
 test_event_hints_follow_reconciled_current_state
 test_open_decision_survives_later_unrelated_event
 test_secondmate_open_decision_survives_live_endpoint
