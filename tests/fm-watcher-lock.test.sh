@@ -217,6 +217,64 @@ test_lock_steals_dead_pid_lock() {
   pass "dead-pid stale lock is reclaimed by a single acquirer"
 }
 
+test_lock_refuses_unproven_symlink_owners() {
+  local dir state lockdir owner dead rc
+  dir=$(make_case lock-unproven-owner)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  dead=$(dead_pid)
+
+  owner="$dir/outside-owner"
+  mkdir -m 0700 "$owner"
+  printf '%s\n' "$dead" > "$owner/pid"
+  printf 'must remain\n' > "$owner/fm-home"
+  ln -s "$owner" "$lockdir"
+  rc=0
+  FM_LOCK_STALE_AFTER=0 FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_try_acquire "$2"
+  ' _ "$LIB" "$lockdir" || rc=$?
+  [ "$rc" -ne 0 ] || fail "lock helper acquired an out-of-namespace symlink owner"
+  [ -L "$lockdir" ] && [ "$(readlink "$lockdir")" = "$owner" ] \
+    || fail "lock helper changed the out-of-namespace symlink"
+  [ "$(cat "$owner/pid")" = "$dead" ] && [ "$(cat "$owner/fm-home")" = 'must remain' ] \
+    || fail "lock helper touched the out-of-namespace owner"
+
+  rm -f "$lockdir"
+  owner="$lockdir.owner.ABC123"
+  mkdir -m 0755 "$owner"
+  printf '%s\n' "$dead" > "$owner/pid"
+  printf 'must remain\n' > "$owner/fm-home"
+  ln -s "$owner" "$lockdir"
+  rc=0
+  FM_LOCK_STALE_AFTER=0 FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_try_acquire "$2"
+  ' _ "$LIB" "$lockdir" || rc=$?
+  [ "$rc" -ne 0 ] || fail "lock helper acquired an owner with unproven mode"
+  [ -L "$lockdir" ] && [ "$(readlink "$lockdir")" = "$owner" ] \
+    || fail "lock helper changed the owner with unproven mode"
+  [ "$(cat "$owner/pid")" = "$dead" ] && [ "$(cat "$owner/fm-home")" = 'must remain' ] \
+    || fail "lock helper touched the owner with unproven mode"
+
+  rm -f "$lockdir"
+  owner="$lockdir.owner.DEF456"
+  ln -s "$dir/outside-owner" "$owner"
+  ln -s "$owner" "$lockdir"
+  rc=0
+  FM_LOCK_STALE_AFTER=0 FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_try_acquire "$2"
+  ' _ "$LIB" "$lockdir" || rc=$?
+  [ "$rc" -ne 0 ] || fail "lock helper acquired a symlinked owner directory"
+  [ -L "$lockdir" ] && [ "$(readlink "$lockdir")" = "$owner" ] && [ -L "$owner" ] \
+    || fail "lock helper changed the symlinked owner fixture"
+  [ "$(cat "$dir/outside-owner/pid")" = "$dead" ] \
+    && [ "$(cat "$dir/outside-owner/fm-home")" = 'must remain' ] \
+    || fail "lock helper touched the symlinked owner target"
+  pass "lock helper preserves out-of-namespace and unproven symlink owners"
+}
+
 test_lock_stale_steal_single_winner_under_concurrency() {
   local dir state lockdir dead marker i pids pid wins
   dir=$(make_case lock-stale-concurrency)
@@ -963,6 +1021,7 @@ test_live_stale_watch_lock_is_actionable
 test_guard_warnings
 test_lock_single_winner_under_concurrency
 test_lock_steals_dead_pid_lock
+test_lock_refuses_unproven_symlink_owners
 test_lock_stale_steal_single_winner_under_concurrency
 test_lock_live_steal_mutex_is_not_reclaimed
 test_lock_does_not_steal_live_lock

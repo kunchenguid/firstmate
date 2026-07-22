@@ -2912,6 +2912,50 @@ SH
   pass "teardown removes safe poll artifacts and refuses quarantine-directory symlinks without traversal"
 }
 
+test_teardown_refuses_unproven_poll_lock_owner() {
+  local dir state fakebin owner lock target_before rc
+  dir=$(make_case teardown-unproven-poll-lock)
+  state="$dir/home/state"
+  fakebin="$dir/fakebin"
+  fm_write_meta "$state/task-a.meta" \
+    'window=fm-task-a' \
+    "worktree=$dir/missing-worktree" \
+    "project=$dir/project" \
+    'kind=ship' \
+    'mode=local-only'
+  printf 'temporary sentinel\n' > "$state/.task-a.fm-pr-poll-retirement.crash"
+  chmod 0600 "$state/.task-a.fm-pr-poll-retirement.crash"
+  owner="$dir/outside-owner"
+  mkdir -m 0700 "$owner"
+  printf '99999999\n' > "$owner/pid"
+  printf 'must remain\n' > "$owner/fm-home"
+  printf 'unrelated sentinel\n' > "$owner/unrelated"
+  lock="$state/.task-a.pr-poll.lock"
+  ln -s "$owner" "$lock"
+  target_before=$(readlink "$lock")
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$fakebin/tmux"
+  touch "$state/.last-watcher-beat"
+
+  rc=0
+  FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" PATH="$fakebin:$BASE_PATH" \
+    "$TEARDOWN" task-a --force > "$dir/teardown.out" 2> "$dir/teardown.err" || rc=$?
+  [ "$rc" -ne 0 ] || fail "teardown accepted an out-of-namespace poll lock owner"
+  [ -L "$lock" ] && [ "$(readlink "$lock")" = "$target_before" ] \
+    || fail "teardown changed the unproven poll lock symlink"
+  [ "$(cat "$owner/pid")" = 99999999 ] \
+    && [ "$(cat "$owner/fm-home")" = 'must remain' ] \
+    && [ "$(cat "$owner/unrelated")" = 'unrelated sentinel' ] \
+    || fail "teardown touched the unproven poll lock owner"
+  [ -f "$state/.task-a.fm-pr-poll-retirement.crash" ] \
+    || fail "teardown removed task state before refusing the unproven lock owner"
+  [ -f "$state/task-a.meta" ] || fail "teardown removed metadata before refusing the unproven lock owner"
+  pass "teardown preserves and refuses out-of-namespace poll lock owners"
+}
+
 # The GitLab watch must follow a merge request exactly as the GitHub watch
 # follows a pull request, on any instance, and must never turn an unreadable
 # merge request into a merge. Its evidence against the public fixture project
@@ -3054,3 +3098,4 @@ test_bootstrap_isolates_incomplete_poll_migration
 test_custom_snapshot_cleanup_on_signal
 test_returned_custom_check_descendants_are_drained
 test_teardown_removes_poll_artifacts
+test_teardown_refuses_unproven_poll_lock_owner
