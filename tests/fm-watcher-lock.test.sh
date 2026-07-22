@@ -447,7 +447,7 @@ test_watch_restart_attaches_to_healthy_peer() {
   # --restart TERMs a matching live holder, so the peer must be TERM-resistant
   # BEFORE the arm launches: wait for node to report its handler installed, or
   # a loaded host can deliver the TERM during node startup and kill the peer.
-  node -e 'process.on("SIGTERM", () => {}); require("fs").writeFileSync(process.argv[1], "ready"); setTimeout(() => {}, 300000)' "$dir/peer-ready" &
+  node -e 'process.on("SIGTERM", () => {}); require("fs").writeFileSync(process.argv[1], "ready"); setTimeout(() => {}, 300000)' "$dir/peer-ready" >/dev/null 2>&1 &
   peer=$!
   i=0
   while [ "$i" -lt 80 ] && [ ! -e "$dir/peer-ready" ]; do
@@ -1040,6 +1040,8 @@ test_lock_match_accepts_same_dir_different_spelling() {
   FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_watcher_lock_matches_pid "$2" "$3" "$4" "$5"' \
     _ "$LIB" "$state" "$watch_alias" "$pid" "$home_alias" \
     || fail "a different spelling of the same home and watcher path evicted a live watcher"
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
   other="$dir/genuinely-other-home"
   mkdir -p "$other"
   if FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_watcher_lock_matches_pid "$2" "$3" "$4" "$5"' \
@@ -1051,8 +1053,6 @@ test_lock_match_accepts_same_dir_different_spelling() {
     _ "$LIB" "$state" "$watch_real" "$pid" "$home_real"; then
     fail "a missing recorded home directory was accepted"
   fi
-  kill "$pid" 2>/dev/null || true
-  wait "$pid" 2>/dev/null || true
   pass "lock match tolerates same-directory spelling differences and still refuses real mismatches"
 }
 

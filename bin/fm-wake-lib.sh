@@ -73,19 +73,23 @@ fm_path_age() {
   echo $(( $(date +%s) - m ))
 }
 
+# Paths compare by string first, then by same-file identity (-ef): on a
+# case-insensitive filesystem getcwd() is not case-stable across processes
+# (observed: a hook context resolved the same home with different case than
+# the watcher recorded), and a spelling difference must not evict a live
+# watcher. A missing path keeps -ef false, so a genuine mismatch still fails.
+fm_same_path() {
+  [ "$1" = "$2" ] || [ "$1" -ef "$2" ]
+}
+
 fm_watcher_lock_matches_pid() {
   local state=$1 watch_path=$2 pid=$3 home=${4:-$FM_HOME} lockdir lock_home lock_path lock_identity current_identity
   lockdir="$state/.watch.lock"
   lock_home=$(cat "$lockdir/fm-home" 2>/dev/null || true)
   lock_path=$(cat "$lockdir/watcher-path" 2>/dev/null || true)
   lock_identity=$(cat "$lockdir/pid-identity" 2>/dev/null || true)
-  # Paths compare by string first, then by same-file identity (-ef): on a
-  # case-insensitive filesystem getcwd() is not case-stable across processes
-  # (observed: a hook context resolved the same home with different case than
-  # the watcher recorded), and a spelling difference must not evict a live
-  # watcher. A missing path keeps -ef false, so a genuine mismatch still fails.
-  { [ "$lock_home" = "$home" ] || [ "$lock_home" -ef "$home" ]; } || return 1
-  { [ "$lock_path" = "$watch_path" ] || [ "$lock_path" -ef "$watch_path" ]; } || return 1
+  fm_same_path "$lock_home" "$home" || return 1
+  fm_same_path "$lock_path" "$watch_path" || return 1
   [ -n "$lock_identity" ] || return 1
   current_identity=$(fm_pid_identity "$pid") || return 1
   [ "$current_identity" = "$lock_identity" ]
