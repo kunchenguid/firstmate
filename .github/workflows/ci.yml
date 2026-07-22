@@ -55,17 +55,139 @@ jobs:
           tasks-axi --version
       # Single owner of serial suite selection, timing markers, and aggregate
       # failure. Do not re-spell a for-loop over tests/*.test.sh here.
+      # Real Herdr coverage lives in the dedicated required herdr job below;
+      # exclude that family here so portable green is never claimed as Herdr.
       - name: Run portable behavior suite
         run: |
           set -eu
           mkdir -p "$RUNNER_TEMP/fm-test"
-          bin/fm-test-run.sh --all --json "$RUNNER_TEMP/fm-test/fm-test-timing.json"
+          bin/fm-test-run.sh --all \
+            --exclude-family real-herdr-gated \
+            --json "$RUNNER_TEMP/fm-test/fm-test-timing.json"
       - name: Upload behavior timing artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: fm-test-timing
           path: ${{ runner.temp }}/fm-test/fm-test-timing.json
+          if-no-files-found: warn
+
+  # Required real-Herdr lane: pinned install, serial real-herdr-gated family,
+  # hard-fail on "skip: herdr not found". Starts on Linux x86_64; if a genuine
+  # platform invariant fails (focus, cleanup, default-session tripwire), keep
+  # the failure evidence and move the job to macOS rather than skip assertions.
+  tests-herdr:
+    name: Behavior tests (Herdr)
+    runs-on: ubuntu-latest
+    # Real Herdr is slower than the portable suite; this is a hang tripwire,
+    # not the expected healthy end of the lane (estimate 15-40 min first cut).
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Require tools for real Herdr
+        run: |
+          set -eu
+          command -v jq >/dev/null || { echo "::error::jq is required"; exit 1; }
+          command -v python3 >/dev/null || { echo "::error::python3 is required"; exit 1; }
+          command -v curl >/dev/null || { echo "::error::curl is required"; exit 1; }
+          command -v tar >/dev/null || { echo "::error::tar is required"; exit 1; }
+          jq --version
+          python3 --version
+      - name: Install pinned Herdr
+        run: |
+          set -eu
+          bin/fm-install-herdr.sh "$RUNNER_TEMP/bin"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - name: Install pinned Treehouse
+        run: |
+          set -eu
+          # Several real-herdr-gated E2E scripts require treehouse for spawn
+          # worktree acquisition (presentation, workspace-per-home, autodetect).
+          bin/fm-install-treehouse.sh "$RUNNER_TEMP/bin"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - name: Assert Herdr pin and protocol floor
+        run: |
+          set -eu
+          command -v herdr >/dev/null || { echo "::error::herdr not on PATH after install"; exit 1; }
+          command -v treehouse >/dev/null || { echo "::error::treehouse not on PATH after install"; exit 1; }
+          herdr --version
+          treehouse --version
+          status=$(herdr status --json)
+          printf '%s\n' "$status"
+          version=$(printf '%s' "$status" | jq -r '.client.version // empty')
+          protocol=$(printf '%s' "$status" | jq -r '.client.protocol // empty')
+          [ "$version" = "0.7.4" ] || {
+            echo "::error::expected exact Herdr pin 0.7.4, got ${version:-<empty>}"
+            exit 1
+          }
+          case "$protocol" in
+            ''|*[!0-9]*) echo "::error::could not read client protocol"; exit 1 ;;
+          esac
+          [ "$protocol" -ge 16 ] || {
+            echo "::error::herdr protocol $protocol is below the required floor 16"
+            exit 1
+          }
+      - name: Start default Herdr session for fleet-state tripwire
+        run: |
+          set -eu
+          # Lab provision requires exactly one running default session so the
+          # default-session tripwire can arm. Start it headless; never use it
+          # for lab work (tests still refuse default and use fm-lab-* only).
+          mkdir -p "$RUNNER_TEMP/fm-herdr"
+          nohup herdr server >"$RUNNER_TEMP/fm-herdr/default-server.log" 2>&1 &
+          echo $! >"$RUNNER_TEMP/fm-herdr/default-server.pid"
+          attempt=0
+          while [ "$attempt" -lt 150 ]; do
+            running=$(herdr status --json 2>/dev/null | jq -r '.server.running // false' || echo false)
+            if [ "$running" = true ]; then
+              herdr session list --json | jq -e '
+                [.sessions[]? | select(.default == true and .name == "default" and .running == true)]
+                | length == 1
+              ' >/dev/null
+              echo "default Herdr session is running"
+              exit 0
+            fi
+            sleep 0.2
+            attempt=$((attempt + 1))
+          done
+          echo "::error::default Herdr server did not become ready"
+          cat "$RUNNER_TEMP/fm-herdr/default-server.log" || true
+          exit 1
+      - name: Snapshot pre-suite Herdr sessions
+        run: |
+          set -eu
+          mkdir -p "$RUNNER_TEMP/fm-herdr"
+          bin/fm-herdr-ci-cleanup.sh snapshot "$RUNNER_TEMP/fm-herdr/sessions-before.json"
+      - name: Run real-Herdr family (serial, required)
+        run: |
+          set -eu
+          mkdir -p "$RUNNER_TEMP/fm-test"
+          # Serial only. Fail if any script reports herdr not found. Live
+          # harness credential tests stay outside this family (opt-in env only).
+          bin/fm-test-run.sh --family real-herdr-gated \
+            --fail-on-gate-skip 'herdr not found' \
+            --json "$RUNNER_TEMP/fm-test/fm-test-timing-herdr.json"
+      - name: Cleanup job-owned Herdr lab sessions
+        if: always()
+        run: |
+          set -eu
+          bin/fm-herdr-ci-cleanup.sh teardown "$RUNNER_TEMP/fm-herdr/sessions-before.json" || {
+            echo "::warning::lab session cleanup reported a problem; see logs"
+            # Surface diagnostics without weakening the suite result above.
+            herdr session list --json || true
+            exit 1
+          }
+      - name: Upload Herdr timing and diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fm-test-timing-herdr
+          path: |
+            ${{ runner.temp }}/fm-test/fm-test-timing-herdr.json
+            ${{ runner.temp }}/fm-herdr/sessions-before.json
+            ${{ runner.temp }}/fm-herdr/default-server.log
           if-no-files-found: warn
 
   macos-stock-bash:

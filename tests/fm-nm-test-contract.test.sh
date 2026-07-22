@@ -109,6 +109,8 @@ test_ci_still_runs_broad_behavior_suite() {
     || fail "CI must retain the macOS stock Bash compatibility job"
   grep -Eq 'name:[[:space:]]*Repo invariants' "$CI" \
     || fail "CI must retain the repo invariants job"
+  grep -Fq 'tests-herdr:' "$CI" \
+    || fail "CI must retain the required Herdr Behavior job"
   pass "CI still owns the broad behavior suite and companion jobs"
 }
 

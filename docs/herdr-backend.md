@@ -22,6 +22,16 @@ Prerequisites:
 - `jq`, required to parse herdr's JSON output: `brew install jq` (or your platform's package manager).
 - The universal firstmate prerequisites - a verified crew harness plus the required toolchain, owned by [`docs/configuration.md`](configuration.md) ("Harness support", "Toolchain"); treehouse still provides the worktree, herdr only provides the session.
 
+### CI pin and required real-Herdr lane
+
+The required GitHub Actions Herdr Behavior job does not use a floating package-manager latest.
+It installs exactly Herdr **v0.7.4** (protocol 16), the suite-verified protocol-16 release, through `bin/fm-install-herdr.sh`: official GitHub Releases URL for `ogulcancelik/herdr`, exact per-arch asset, pinned SHA-256, bounded download, and post-install version plus protocol checks.
+Scripts that need treehouse for real spawn worktrees install Treehouse **v2.0.1** the same way through `bin/fm-install-treehouse.sh`.
+The lane runs only the `real-herdr-gated` family serially via `bin/fm-test-run.sh --family real-herdr-gated --fail-on-gate-skip 'herdr not found'`, so a missing pin cannot pass as a silent skip.
+Live harness credential tests stay outside that family and outside default CI.
+Lab sessions remain `fm-lab-*` only with refuse-default and default-session tripwires intact; `bin/fm-herdr-ci-cleanup.sh` may remove only sessions proven to belong to that CI job (snapshot delta of non-default `fm-lab-*` names).
+The first required lane targets Linux x86_64; if a genuine unsupported platform invariant appears (focus, cleanup, or default-session tripwire), keep the failure evidence and move the job to macOS rather than skip or weaken the assertion.
+
 Select herdr by putting `herdr` in a local `config/backend` file - the durable way to pick it - or by exporting `FM_BACKEND=herdr` when you launch your harness for a one-off session; telling the first mate in chat to use herdr also works.
 It can also be auto-detected: when firstmate itself is running natively inside herdr (`HERDR_ENV=1`) and no explicit backend is set, firstmate auto-selects herdr and prints a one-time opt-out notice; running inside tmux nested in herdr always resolves to tmux instead.
 A herdr spawn refuses loudly before creating a session container or acquiring a ship/scout worktree if `herdr` or `jq` is missing or the installed herdr's protocol is older than verified.
