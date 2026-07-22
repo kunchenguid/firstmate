@@ -30,9 +30,11 @@
 #   created_epoch=          when the expectation was created
 #   delivered_epoch=        when the marked request was confirmed delivered
 #                           (empty until delivery; delivery never resolves)
-#   phase=                  awaiting_report | recovery_sent | escalated | resolved
+#   phase=                  awaiting_report | recovery_sending | recovery_sent |
+#                           escalated | resolved
 #   turn_seen_busy=         0|1 after delivery for the original request turn
 #   request_turn_completed_epoch=
+#   recovery_attempted_epoch=
 #   recovery_sent_epoch=
 #   recovery_turn_seen_busy=
 #   recovery_turn_completed_epoch=
@@ -158,7 +160,7 @@ fm_pending_reply_corr_reusable() {  # <state-dir> <corr_id> <task_id>
   [ "$(fm_pending_reply_get "$rec" task_id)" = "$task_id" ] || return 1
   phase=$(fm_pending_reply_get "$rec" phase)
   case "$phase" in
-    awaiting_report|recovery_sent) return 0 ;;
+    awaiting_report|recovery_sending|recovery_sent) return 0 ;;
   esac
   return 1
 }
@@ -248,6 +250,7 @@ delivered_epoch=
 phase=awaiting_report
 turn_seen_busy=0
 request_turn_completed_epoch=
+recovery_attempted_epoch=
 recovery_sent_epoch=
 recovery_turn_seen_busy=0
 recovery_turn_completed_epoch=
@@ -265,31 +268,105 @@ EOF
 }
 
 # Mark delivery success for an existing expectation. Never resolves.
-fm_pending_reply_mark_delivered() {  # <state-dir> <corr_id>
-  local state=$1 corr=$2 rec phase delivered now
+fm_pending_reply_mark_delivered() {  # <state-dir> <corr_id> [confirmed-epoch]
+  local state=$1 corr=$2 confirmed_epoch=${3-} rec phase delivered now
   rec=$(fm_pending_reply_path "$state" "$corr")
   [ -f "$rec" ] || return 1
   phase=$(fm_pending_reply_get "$rec" phase)
   case "$phase" in
-    awaiting_report|recovery_sent|escalated|resolved) ;;
+    awaiting_report|recovery_sending|recovery_sent|escalated|resolved) ;;
     *) return 1 ;;
   esac
   delivered=$(fm_pending_reply_get "$rec" delivered_epoch)
   if [ -z "$delivered" ]; then
-    now=$(fm_pending_reply_now)
+    now=${confirmed_epoch:-$(fm_pending_reply_now)}
     fm_pending_reply_set "$rec" delivered_epoch "$now" || return 1
   fi
+  return 0
+}
+
+fm_pending_reply_delivery_confirmation_path() {  # <state-dir> <corr_id>
+  printf '%s/.delivery-confirmed-%s' "$(fm_pending_reply_dir "$1")" "$2"
+}
+
+fm_pending_reply_write_delivery_confirmation() {  # <state-dir> <corr_id> <state> <epoch>
+  local pending_state=$1 corr=$2 delivery_state=$3 epoch=$4 marker dir tmp
+  marker=$(fm_pending_reply_delivery_confirmation_path "$pending_state" "$corr")
+  dir=$(dirname "$marker")
+  mkdir -p "$dir" || return 1
+  tmp="$marker.tmp.$$"
+  printf '%s=%s\n' "$delivery_state" "$epoch" > "$tmp" || return 1
+  chmod 600 "$tmp" 2>/dev/null || true
+  mv -f "$tmp" "$marker"
+}
+
+fm_pending_reply_prepare_delivery() {  # <state-dir> <corr_id>
+  local state=$1 corr=$2 rec delivered marker now
+  rec=$(fm_pending_reply_path "$state" "$corr")
+  [ -f "$rec" ] || return 1
+  delivered=$(fm_pending_reply_get "$rec" delivered_epoch)
+  [ -z "$delivered" ] || return 0
+  marker=$(fm_pending_reply_delivery_confirmation_path "$state" "$corr")
+  [ -f "$marker" ] && return 0
+  now=$(fm_pending_reply_now)
+  fm_pending_reply_write_delivery_confirmation "$state" "$corr" attempted "$now"
+}
+
+fm_pending_reply_confirm_delivery() {  # <state-dir> <corr_id>
+  local state=$1 corr=$2 now marker
+  marker=$(fm_pending_reply_delivery_confirmation_path "$state" "$corr")
+  if ! fm_pending_reply_prepare_delivery "$state" "$corr"; then
+    return 1
+  fi
+  now=$(fm_pending_reply_now)
+  fm_pending_reply_write_delivery_confirmation "$state" "$corr" confirmed "$now" || return 1
+  if fm_pending_reply_mark_delivered "$state" "$corr" "$now"; then
+    rm -f "$marker" 2>/dev/null || true
+    return 0
+  fi
+  return 2
+}
+
+fm_pending_reply_reconcile_delivery() {  # <state-dir> <corr_id>
+  local state=$1 corr=$2 rec delivered marker entry delivery_state epoch now grace age
+  rec=$(fm_pending_reply_path "$state" "$corr")
+  [ -f "$rec" ] || return 1
+  marker=$(fm_pending_reply_delivery_confirmation_path "$state" "$corr")
+  delivered=$(fm_pending_reply_get "$rec" delivered_epoch)
+  if [ -n "$delivered" ]; then
+    rm -f "$marker" 2>/dev/null || true
+    return 0
+  fi
+  [ -f "$marker" ] || return 1
+  entry=$(cat "$marker" 2>/dev/null || true)
+  delivery_state=${entry%%=*}
+  epoch=${entry#*=}
+  case "$epoch" in ''|*[!0-9]*) return 1 ;; esac
+  case "$delivery_state" in
+    confirmed) ;;
+    attempted)
+      now=$(fm_pending_reply_now)
+      grace=$(fm_pending_reply_grace_secs)
+      age=$((now - epoch))
+      [ "$age" -ge "$grace" ] || return 1
+      ;;
+    *) return 1 ;;
+  esac
+  fm_pending_reply_mark_delivered "$state" "$corr" "$epoch" || return 1
+  rm -f "$marker" 2>/dev/null || true
   return 0
 }
 
 # Drop an undelivered expectation after a failed send so transport failure does
 # not masquerade as a missed report later.
 fm_pending_reply_discard_undelivered() {  # <state-dir> <corr_id>
-  local state=$1 corr=$2 rec delivered
+  local state=$1 corr=$2 rec delivered marker
   rec=$(fm_pending_reply_path "$state" "$corr")
   [ -f "$rec" ] || return 0
   delivered=$(fm_pending_reply_get "$rec" delivered_epoch)
   [ -z "$delivered" ] || return 1
+  marker=$(fm_pending_reply_delivery_confirmation_path "$state" "$corr")
+  rm -f "$marker" 2>/dev/null || true
   rm -f "$rec"
 }
 
@@ -534,11 +611,16 @@ fm_pending_reply_recovery_message() {  # <record-path>
 # second expectation is not created.
 fm_pending_reply_send_recovery() {  # <state-dir> <corr_id>
   local state=$1 corr=$2
-  local rec phase completed delivered grace now age task_id msg parent_home
+  local rec phase completed delivered attempted grace now age task_id msg parent_home send_status=0
   rec=$(fm_pending_reply_path "$state" "$corr")
   [ -f "$rec" ] || return 1
   phase=$(fm_pending_reply_get "$rec" phase)
   [ "$phase" = awaiting_report ] || return 1
+  attempted=$(fm_pending_reply_get "$rec" recovery_attempted_epoch)
+  if [ -n "$attempted" ]; then
+    fm_pending_reply_reconcile_recovery "$state" "$corr" || true
+    return 1
+  fi
   completed=$(fm_pending_reply_get "$rec" request_turn_completed_epoch)
   [ -n "$completed" ] || return 1
   delivered=$(fm_pending_reply_get "$rec" delivered_epoch)
@@ -551,26 +633,49 @@ fm_pending_reply_send_recovery() {  # <state-dir> <corr_id>
   task_id=$(fm_pending_reply_get "$rec" task_id)
   parent_home=$(fm_pending_reply_get "$rec" parent_home)
   msg=$(fm_pending_reply_recovery_message "$rec")
+  fm_pending_reply_set "$rec" recovery_attempted_epoch "$now" || return 1
+  fm_pending_reply_set "$rec" phase recovery_sending || return 1
   if [ -n "${FM_PENDING_REPLY_SEND_HOOK:-}" ]; then
     # Hook receives: task_id message
     # shellcheck disable=SC2086
     if ! eval "$FM_PENDING_REPLY_SEND_HOOK" "$(printf '%q' "$task_id")" "$(printf '%q' "$msg")"; then
-      return 1
+      send_status=1
     fi
   else
     if [ -z "$parent_home" ] || [ ! -d "$parent_home" ]; then
-      return 1
-    fi
-    if ! env FM_HOME="$parent_home" FM_PENDING_REPLY_EXISTING_CORR="$corr" \
+      send_status=1
+    elif ! env FM_HOME="$parent_home" FM_PENDING_REPLY_EXISTING_CORR="$corr" \
       "$_FM_PENDING_REPLY_LIB_DIR/fm-send.sh" "$task_id" "$msg"; then
-      return 1
+      send_status=1
     fi
   fi
-  now=$(fm_pending_reply_now)
-  fm_pending_reply_set "$rec" phase recovery_sent || return 1
-  fm_pending_reply_set "$rec" recovery_sent_epoch "$now" || return 1
+  fm_pending_reply_reconcile_recovery "$state" "$corr" || return 1
+  [ "$send_status" = 0 ]
+}
+
+fm_pending_reply_reconcile_recovery() {  # <state-dir> <corr_id>
+  local state=$1 corr=$2 rec phase attempted sent
+  rec=$(fm_pending_reply_path "$state" "$corr")
+  [ -f "$rec" ] || return 1
+  phase=$(fm_pending_reply_get "$rec" phase)
+  attempted=$(fm_pending_reply_get "$rec" recovery_attempted_epoch)
+  [ -n "$attempted" ] || return 1
+  case "$attempted" in *[!0-9]*) return 1 ;; esac
+  case "$phase" in
+    awaiting_report)
+      fm_pending_reply_set "$rec" phase recovery_sending || return 1
+      ;;
+    recovery_sending) ;;
+    recovery_sent|escalated|resolved) return 0 ;;
+    *) return 1 ;;
+  esac
+  sent=$(fm_pending_reply_get "$rec" recovery_sent_epoch)
+  if [ -z "$sent" ]; then
+    fm_pending_reply_set "$rec" recovery_sent_epoch "$attempted" || return 1
+  fi
   fm_pending_reply_set "$rec" recovery_turn_seen_busy 0 || return 1
   fm_pending_reply_set "$rec" recovery_turn_completed_epoch "" || return 1
+  fm_pending_reply_set "$rec" phase recovery_sent || return 1
   return 0
 }
 
@@ -661,6 +766,7 @@ fm_pending_reply_tick_one() {  # <state-dir> <corr_id> <busy_state> [secondmate-
   local rec phase delivered
   rec=$(fm_pending_reply_path "$state" "$corr")
   [ -f "$rec" ] || return 1
+  fm_pending_reply_reconcile_delivery "$state" "$corr" || true
   delivered=$(fm_pending_reply_get "$rec" delivered_epoch)
   [ -n "$delivered" ] || return 0
   # Correlated parent report always wins and is idempotent.
@@ -668,6 +774,14 @@ fm_pending_reply_tick_one() {  # <state-dir> <corr_id> <busy_state> [secondmate-
     return 0
   fi
   phase=$(fm_pending_reply_get "$rec" phase)
+  case "$phase" in
+    awaiting_report|recovery_sending)
+      if [ -n "$(fm_pending_reply_get "$rec" recovery_attempted_epoch)" ]; then
+        fm_pending_reply_reconcile_recovery "$state" "$corr" || true
+        phase=$(fm_pending_reply_get "$rec" phase)
+      fi
+      ;;
+  esac
   case "$phase" in
     resolved) return 0 ;;
     escalated)
@@ -716,8 +830,17 @@ fm_pending_reply_tick() {  # <state-dir>
     task_id=$(fm_pending_reply_get "$rec" task_id)
     phase=$(fm_pending_reply_get "$rec" phase)
     [ "$phase" != resolved ] || continue
+    fm_pending_reply_reconcile_delivery "$state" "$corr" || true
     delivered=$(fm_pending_reply_get "$rec" delivered_epoch)
     [ -n "$delivered" ] || continue
+    case "$phase" in
+      awaiting_report|recovery_sending)
+        if [ -n "$(fm_pending_reply_get "$rec" recovery_attempted_epoch)" ]; then
+          fm_pending_reply_reconcile_recovery "$state" "$corr" || true
+          phase=$(fm_pending_reply_get "$rec" phase)
+        fi
+        ;;
+    esac
     meta="$state/${task_id}.meta"
     if [ "$phase" = escalated ]; then
       if fm_pending_reply_try_resolve "$state" "$corr"; then

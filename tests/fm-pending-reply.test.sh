@@ -162,6 +162,47 @@ test_completed_turn_no_report_triggers_one_recovery() {
   pass "completed turn with no report triggers exactly one recovery"
 }
 
+test_recovery_attempt_is_never_reinjected() {
+  local home state corr rec hook_log lines
+  home=$(setup_parent recovery-at-most-once)
+  state="$home/state"
+  hook_log="$TMP_ROOT/recovery-at-most-once.log"
+  : > "$hook_log"
+  export FM_PENDING_REPLY_NOW=2500
+  recovery_fail_hook() {
+    printf 'attempted\n' >> "$hook_log"
+    return 1
+  }
+  export -f recovery_fail_hook
+  export FM_PENDING_REPLY_SEND_HOOK=recovery_fail_hook
+  corr=$(fm_pending_reply_create "$home" "$state" hibit "at most once")
+  fm_pending_reply_mark_delivered "$state" "$corr"
+  fm_pending_reply_mark_turn_completed "$state" "$corr" request
+  if fm_pending_reply_send_recovery "$state" "$corr"; then
+    fail "failed recovery transport should report failure"
+  fi
+  [ "$(phase_of "$state" "$corr")" = recovery_sent ] \
+    || fail "failed recovery attempt should remain non-retryable"
+  if fm_pending_reply_send_recovery "$state" "$corr" 2>/dev/null; then
+    fail "committed recovery attempt must refuse reinjection"
+  fi
+  lines=$(wc -l < "$hook_log" | tr -d ' ')
+  [ "$lines" = 1 ] || fail "recovery transport should be attempted once, got $lines"
+  corr=$(fm_pending_reply_create "$home" "$state" hibit "crashed recovery")
+  fm_pending_reply_mark_delivered "$state" "$corr"
+  fm_pending_reply_mark_turn_completed "$state" "$corr" request
+  rec=$(fm_pending_reply_path "$state" "$corr")
+  fm_pending_reply_set "$rec" recovery_attempted_epoch 2500 || fail "attempt precommit failed"
+  fm_pending_reply_set "$rec" phase recovery_sending || fail "sending phase precommit failed"
+  fm_pending_reply_tick_one "$state" "$corr" unknown || fail "recovery reconciliation failed"
+  [ "$(phase_of "$state" "$corr")" = recovery_sent ] \
+    || fail "interrupted recovery attempt should reconcile without reinjection"
+  lines=$(wc -l < "$hook_log" | tr -d ' ')
+  [ "$lines" = 1 ] || fail "reconciliation must not call recovery transport, got $lines attempts"
+  unset FM_PENDING_REPLY_SEND_HOOK
+  pass "recovery attempts reconcile without reinjection"
+}
+
 test_recovery_reply_resolves_original() {
   local home state corr hook_log
   home=$(setup_parent recovery-resolve)
@@ -308,6 +349,49 @@ test_undelivered_records_are_scan_immutable() {
       || fail "correlated parent status should resolve after delivery"
   ) || fail "undelivered scan immutability regression failed"
   pass "undelivered records remain immutable across scan paths"
+}
+
+test_delivery_confirmation_fallback_reconciles() {
+  (
+    local home state corr rec marker rc prepared_corr prepared_rec prepared_marker
+    home=$(setup_parent delivery-confirmation)
+    state="$home/state"
+    export FM_PENDING_REPLY_NOW=5750
+    corr=$(fm_pending_reply_create "$home" "$state" hibit "confirmed delivery")
+    rec=$(fm_pending_reply_path "$state" "$corr")
+    fm_pending_reply_mark_delivered() { return 1; }
+    if fm_pending_reply_confirm_delivery "$state" "$corr"; then
+      fail "primary delivery commit failure should be reported"
+    else
+      rc=$?
+    fi
+    [ "$rc" = 2 ] || fail "durable fallback should return status 2, got $rc"
+    marker=$(fm_pending_reply_delivery_confirmation_path "$state" "$corr")
+    [ -f "$marker" ] || fail "delivery confirmation fallback marker should persist"
+    [ -z "$(fm_pending_reply_get "$rec" delivered_epoch)" ] \
+      || fail "failed primary commit should leave delivered_epoch empty"
+    . "$ROOT/bin/fm-pending-reply-lib.sh"
+    fm_pending_reply_tick_one "$state" "$corr" unknown \
+      || fail "watcher should reconcile the delivery marker"
+    [ "$(fm_pending_reply_get "$rec" delivered_epoch)" = 5750 ] \
+      || fail "watcher should restore the confirmed delivery epoch"
+    [ ! -e "$marker" ] || fail "reconciled delivery marker should be removed"
+    prepared_corr=$(fm_pending_reply_create "$home" "$state" hibit "prepared delivery")
+    prepared_rec=$(fm_pending_reply_path "$state" "$prepared_corr")
+    fm_pending_reply_prepare_delivery "$state" "$prepared_corr" \
+      || fail "delivery preparation should persist before transport"
+    prepared_marker=$(fm_pending_reply_delivery_confirmation_path "$state" "$prepared_corr")
+    [ -f "$prepared_marker" ] || fail "prepared delivery marker should persist"
+    export FM_PENDING_REPLY_GRACE_SECS=10
+    export FM_PENDING_REPLY_NOW=5760
+    fm_pending_reply_tick_one "$state" "$prepared_corr" unknown \
+      || fail "watcher should reconcile a delivery interrupted after preparation"
+    [ "$(fm_pending_reply_get "$prepared_rec" delivered_epoch)" = 5750 ] \
+      || fail "prepared delivery should remain guarded after sender exit"
+    [ ! -e "$prepared_marker" ] || fail "prepared marker should clear after reconciliation"
+    export FM_PENDING_REPLY_GRACE_SECS=0
+  ) || fail "delivery confirmation fallback regression failed"
+  pass "delivery confirmation fallback reconciles durably"
 }
 
 test_unrelated_and_stale_corr_cannot_resolve() {
@@ -689,11 +773,13 @@ test_failed_send_discards_undelivered_expectation() {
 
 test_normal_correlated_reply_resolves_once
 test_completed_turn_no_report_triggers_one_recovery
+test_recovery_attempt_is_never_reinjected
 test_recovery_reply_resolves_original
 test_second_missed_turn_escalates_once_and_stays_durable
 test_escalation_publication_failure_retries
 test_transport_success_is_not_reply_success
 test_undelivered_records_are_scan_immutable
+test_delivery_confirmation_fallback_reconciles
 test_unrelated_and_stale_corr_cannot_resolve
 test_restart_preserves_expectation_and_parent_destination
 test_wrong_home_detected_not_acknowledged

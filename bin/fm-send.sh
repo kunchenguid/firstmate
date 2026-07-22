@@ -243,6 +243,12 @@ else
       PENDING_REPLY_CREATED=1
     fi
     fm_pending_reply_embed_corr "$MESSAGE" "$PENDING_REPLY_CORR" MESSAGE
+    if [ "$PENDING_REPLY_CREATED" = 1 ] \
+      && ! fm_pending_reply_prepare_delivery "$STATE" "$PENDING_REPLY_CORR"; then
+      fm_pending_reply_discard_undelivered "$STATE" "$PENDING_REPLY_CORR" || true
+      echo "error: failed to durably prepare pending-reply delivery for $TARGET_TASK_ID" >&2
+      exit 1
+    fi
   fi
   # Slash commands open a completion popup in some TUIs (verified on codex);
   # submitting too fast selects nothing, so give the popup time to settle before
@@ -289,7 +295,17 @@ else
   # Delivery confirmed. Mark the pending expectation delivered without resolving
   # it: only a correlated parent report acknowledges the request.
   if [ -n "$PENDING_REPLY_CORR" ]; then
-    fm_pending_reply_mark_delivered "$STATE" "$PENDING_REPLY_CORR" || true
+    if fm_pending_reply_confirm_delivery "$STATE" "$PENDING_REPLY_CORR"; then
+      :
+    else
+      delivery_commit_status=$?
+      if [ "$delivery_commit_status" = 2 ]; then
+        echo "error: text was delivered to $T, but its pending-reply delivery commit failed; a durable recovery marker was stored and the watcher will reconcile it. Do not resend." >&2
+      else
+        echo "error: text was delivered to $T, but its pending-reply delivery commit and recovery marker both failed. Do not resend; inspect $STATE manually." >&2
+      fi
+      exit 1
+    fi
   fi
   # Submit landed (verdict was not pending/send-failed). Confirmation only proves
   # the text was accepted; the harness still needs a beat to spin up the
