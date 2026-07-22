@@ -49,15 +49,17 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 usage() { awk 'NR == 1 {next} !/^#/ {exit} {sub(/^# ?/, ""); print}' "$0"; }
 
 write_snapshot() {  # <provider> <source> <status> <session> <week> <reset> <model-pct-lines>
-  local provider=$1 source=$2 status=$3 session=$4 week=$5 reset=$6 model_lines=$7 tmp path
+  local provider=$1 source=$2 status=$3 session=$4 week=$5 reset=$6 model_lines=$7 tmp path max_age
   fm_failover_provider_name_valid "$provider" || { echo "error: invalid provider name '$provider'" >&2; return 1; }
   mkdir -p "$STATE"
   path=$(fm_failover_usage_path "$STATE" "$provider")
   tmp=$(mktemp "$STATE/.provider-usage-tmp.XXXXXX") || return 1
+  max_age=${FM_PROVIDER_USAGE_MAX_AGE_SECS:-1800}
   {
     printf 'recorded_at=%s\n' "$(date +%s)"
     printf 'source=%s\n' "${source:-manual}"
     printf 'status=%s\n' "${status:-advisory}"
+    printf 'max_age_secs=%s\n' "$max_age"
     [ -z "$session" ] || printf 'session_pct=%s\n' "$session"
     [ -z "$week" ] || printf 'week_pct=%s\n' "$week"
     [ -z "$reset" ] || printf 'reset=%s\n' "$reset"

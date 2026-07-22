@@ -401,8 +401,23 @@ test_route_and_provider_classification
 test_candidate_ladder_never_opens_openai
 test_probe_classification
 test_backend_support_matrix
+test_advisory_snapshot_stale_expires_by_ttl() {
+  local home state line
+  home=$(make_home stale-expire)
+  state="$home/state"
+  # Snapshot with its own TTL of 5s, recorded 10s ago -> expired.
+  fm_write_meta "$(fm_failover_usage_path "$state" openai)" \
+    "recorded_at=$(($(date +%s) - 10))" "source=test" "status=advisory" \
+    "session_pct=90" "week_pct=95" "max_age_secs=5"
+  line=$(fm_failover_provider_pressure "$state" openai)
+  [ "${line%% *}" = unknown ] || fail "expired advisory snapshot should be unknown: $line"
+  [ "$(fm_failover_provider_readiness "$state" openai)" = "unknown openai no fresh readiness receipt" ] || fail "expired advisory snapshot should not count as ready"
+  pass "advisory snapshots expire by their recorded TTL"
+}
+
 test_provider_readiness_states
 test_provider_specific_weekly_avoid
+test_advisory_snapshot_stale_expires_by_ttl
 
 # --- script-level eligibility and preservation -----------------------------
 
@@ -834,7 +849,7 @@ test_provider_hold_lifecycle
 # --- spawn/dispatch/usage integration ---------------------------------------
 
 test_spawn_refuses_held_provider_and_warns_on_pressure() {
-  local home fakebin wt out code out_text
+  local home fakebin wt out code
   home=$(make_home spawn-hold)
   fakebin=$(make_fakebin "$home")
   wt=$(make_task "$home" ship14 codex 'gpt-5.6-sol' high)
@@ -851,10 +866,16 @@ test_spawn_refuses_held_provider_and_warns_on_pressure() {
   out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_ROOT_OVERRIDE="$FAKE_ROOT" PATH="$fakebin:$BASE_PATH" \
     "$ROOT/bin/fm-spawn.sh" ship14 "$wt" --harness codex --model gpt-5.6-sol 2>&1); code=$?
-  expect_code 1 "$code" "spawn should still exit (no brief)"
-  assert_contains "$out" "advisory quota pressure" "advisory pressure warning missing"
-  assert_not_contains "$out" "refusing this NEW launch" "spawn hard-blocked on advisory pressure"
-  pass "spawn refuses held providers and warns on advisory pressure"
+  expect_code 1 "$code" "spawn should refuse fresh advisory pressure"
+  assert_contains "$out" "provider openai is at fresh advisory quota pressure" "pressure refusal message missing"
+  assert_contains "$out" "FM_SPAWN_OVERRIDE_PRESSURE=1" "override hint missing"
+
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_ROOT_OVERRIDE="$FAKE_ROOT" PATH="$fakebin:$BASE_PATH" FM_SPAWN_OVERRIDE_PRESSURE=1 \
+    "$ROOT/bin/fm-spawn.sh" ship14 "$wt" --harness codex --model gpt-5.6-sol 2>&1); code=$?
+  assert_contains "$out" "FM_SPAWN_OVERRIDE_PRESSURE=1 was set explicitly" "override notice missing"
+  assert_not_contains "$out" "is at fresh advisory quota pressure" "pressure refusal should not appear when overridden"
+  pass "spawn refuses held providers, refuses fresh pressure, and allows an explicit override"
 }
 
 test_dispatch_select_excludes_held_candidates() {

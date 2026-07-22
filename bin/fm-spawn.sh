@@ -483,15 +483,22 @@ if fm_failover_provider_held "$STATE" "$SPAWN_PROVIDER"; then
   exit 1
 fi
 
-# Usage-pressure advisory (bin/fm-provider-usage.sh snapshots): advisory
-# quota/UI readings are never treated as quota-confirmed readiness. A provider
-# under advisory pressure is logged but not hard-blocked here; the authoritative
-# block is the verified-exhaustion hold above. This keeps the launch path from
-# inventing a quota verdict from telemetry that has no official consumer API.
+# Usage-pressure enforcement (bin/fm-provider-usage.sh snapshots): a fresh
+# advisory snapshot at avoid/handoff pressure is a hard refusal for normal and
+# automatic launches. Unknown or stale snapshots are explicitly unconfirmed
+# and proceed on dispatch preference, not on a quota verdict. An exceptional
+# launch through known pressure requires the deliberate named override
+# FM_SPAWN_OVERRIDE_PRESSURE=1 and is logged as clear evidence. The
+# verified-exhaustion hold above remains the stronger authoritative refusal.
 SPAWN_PRESSURE_LINE=$(fm_failover_provider_pressure "$STATE" "$SPAWN_PROVIDER" "${MODEL:-}")
 case "${SPAWN_PRESSURE_LINE%% *}" in
   avoid|handoff)
-    echo "warning: provider $SPAWN_PROVIDER shows advisory quota pressure ($SPAWN_PRESSURE_LINE); launching anyway because no verified hold is recorded" >&2
+    if [ "${FM_SPAWN_OVERRIDE_PRESSURE:-}" = 1 ]; then
+      echo "notice: provider $SPAWN_PROVIDER shows advisory quota pressure ($SPAWN_PRESSURE_LINE); proceeding because FM_SPAWN_OVERRIDE_PRESSURE=1 was set explicitly" >&2
+    else
+      echo "error: provider $SPAWN_PROVIDER is at fresh advisory quota pressure ($SPAWN_PRESSURE_LINE); refusing this normal launch. Set FM_SPAWN_OVERRIDE_PRESSURE=1 to force an exceptional launch, or resolve the pressure with fm-provider-usage.sh ready/refresh/release" >&2
+      exit 1
+    fi
     ;;
 esac
 

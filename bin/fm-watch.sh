@@ -359,8 +359,12 @@ clear_pause_tracking() {  # <window>
 }
 
 # Reconcile a declared pause or captain-held status with authoritative crew state.
-# Only a confidently dead ordinary crew may recover paused classification after
-# fm-crew-state has fallen back to stopped or unknown.
+# A declared external-wait pause (paused:) is expected to idle even when the
+# agent process is still present, so its stale pane is absorbed on the long
+# pause cadence. A captain-held transfer uses the same cadence only when the
+# agent is confidently dead (or a secondmate), so a live decision gate is not
+# silenced. If authoritative crew state has since moved to working, the pause is
+# superseded and the pane is treated as provably-working.
 pause_state_class() {  # <window> <task>
   local win=$1 task=$2 key last recheck_file class agent_alive
   key=${win//:/_}
@@ -373,7 +377,13 @@ pause_state_class() {  # <window> <task>
     crew_absorb_class "$task"
     return
   fi
+  # Fast path: a recent recheck for the same declared pause is still valid.
   if [ -e "$STATE/.paused-$key" ] && [ "$(age_of "$recheck_file")" -lt "$STALE_ESCALATE_SECS" ]; then
+    if status_is_paused "$last"; then
+      printf 'paused'
+      return
+    fi
+    # captain-held: still require a dead agent (or secondmate) on recheck.
     if [ "$(window_kind "$win")" != secondmate ]; then
       agent_alive=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null) || agent_alive=unknown
       if [ "$agent_alive" != dead ]; then
@@ -385,26 +395,33 @@ pause_state_class() {  # <window> <task>
     printf 'paused'
     return
   fi
+  # Fresh classification: consult authoritative crew state once per recheck window.
   class=$(crew_absorb_class "$task")
   if [ "$class" = working ]; then
     rm -f "$recheck_file"
     printf 'working'
     return
   fi
+  if status_is_paused "$last"; then
+    date +%s > "$recheck_file"
+    printf 'paused'
+    return
+  fi
+  # captain-held: absorb only with a confidently dead agent.
   if [ "$(window_kind "$win")" != secondmate ]; then
     agent_alive=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null) || agent_alive=unknown
-    if [ "$agent_alive" != dead ]; then
-      rm -f "$recheck_file"
-      printf 'none'
+    if [ "$agent_alive" = dead ]; then
+      date +%s > "$recheck_file"
+      printf 'paused'
       return
     fi
+  else
+    date +%s > "$recheck_file"
+    printf 'paused'
+    return
   fi
-  [ "$class" = none ] && [ "${agent_alive:-unknown}" = dead ] && class=paused
-  case "$class" in
-    paused) date +%s > "$recheck_file" ;;
-    *) rm -f "$recheck_file" ;;
-  esac
-  printf '%s' "$class"
+  rm -f "$recheck_file"
+  printf 'none'
 }
 
 # Provider-outage fast path: an OpenAI/Codex-routed crew showing verified

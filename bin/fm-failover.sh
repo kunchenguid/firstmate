@@ -424,10 +424,11 @@ done
 # inconclusive and stops the failover.
 
 record_provider_ready() {  # <provider> <source>
-  local provider=$1 source=$2 usage tmp
+  local provider=$1 source=$2 usage tmp max_age
   usage=$(fm_failover_usage_path "$STATE" "$provider")
+  max_age=${FM_PROVIDER_USAGE_MAX_AGE_SECS:-1800}
   tmp=$(mktemp "$STATE/.provider-usage-tmp.XXXXXX") || return 1
-  printf 'recorded_at=%s\nstatus=ready\nsource=%s\n' "$(date +%s)" "$source" > "$tmp" || { rm -f "$tmp"; return 1; }
+  printf 'recorded_at=%s\nstatus=ready\nsource=%s\nmax_age_secs=%s\n' "$(date +%s)" "$source" "$max_age" > "$tmp" || { rm -f "$tmp"; return 1; }
   mv "$tmp" "$usage" || { rm -f "$tmp"; return 1; }
 }
 

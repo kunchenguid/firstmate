@@ -112,7 +112,8 @@ case "$CMD" in
       rm -f "$HOLD"
       usage=$(fm_failover_usage_path "$STATE" "$PROVIDER")
       tmp=$(mktemp "$STATE/.provider-usage-tmp.XXXXXX") || exit 1
-      printf 'recorded_at=%s\nstatus=ready\nsource=fm-provider-hold.sh release\n' "$(date +%s)" > "$tmp" || { rm -f "$tmp"; exit 1; }
+      max_age=${FM_PROVIDER_USAGE_MAX_AGE_SECS:-1800}
+      printf 'recorded_at=%s\nstatus=ready\nsource=fm-provider-hold.sh release\nmax_age_secs=%s\n' "$(date +%s)" "$max_age" > "$tmp" || { rm -f "$tmp"; exit 1; }
       mv "$tmp" "$usage" || { rm -f "$tmp"; exit 1; }
       echo "released: provider $PROVIDER (recovery verified by non-token native probe)"
       exit 0

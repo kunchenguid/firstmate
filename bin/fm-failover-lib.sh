@@ -146,11 +146,22 @@ fm_failover_usage_path() {  # <state-dir> <provider>
   printf '%s/.provider-usage-%s' "$1" "$2"
 }
 
+# fm_failover_usage_max_age: read the TTL written into a snapshot, if any,
+# so the observation expires by its own recorded TTL rather than by whatever
+# env value happens to be current. Falls back to the supplied default.
+fm_failover_usage_max_age() {  # <usage-file> <default>
+  local usage=$1 default=$2 val
+  val=$(sed -n 's/^max_age_secs=//p' "$usage" | head -1)
+  case "$val" in ''|*[!0-9]*) printf '%s' "$default"; return 0 ;; esac
+  printf '%s' "$val"
+}
+
 # fm_failover_provider_pressure: print one line "<verdict> <detail>", verdict
 # one of:
-#   unknown - no snapshot, unreadable values, or older than
-#             FM_PROVIDER_USAGE_MAX_AGE_SECS. Unknown telemetry never blocks a
-#             launch (error-based supervision and holds remain the backstop).
+#   unknown - no snapshot, unreadable values, or older than the snapshot's own
+#             TTL (or FM_PROVIDER_USAGE_MAX_AGE_SECS when absent). Unknown
+#             telemetry never blocks a launch (error-based supervision and
+#             holds remain the backstop).
 #   handoff - session use at/above the handoff threshold: prepare a
 #             safe-checkpoint provider handoff for active workers.
 #   avoid   - session use at/above the avoid threshold, or a weekly or
@@ -169,6 +180,7 @@ fm_failover_provider_pressure() {  # <state-dir> <provider> [<model>]
   [ -f "$usage" ] || { printf 'unknown no usage snapshot for %s\n' "$provider"; return 0; }
   recorded=$(sed -n 's/^recorded_at=//p' "$usage" | head -1)
   case "$recorded" in ''|*[!0-9]*) printf 'unknown unreadable snapshot for %s\n' "$provider"; return 0 ;; esac
+  max_age=$(fm_failover_usage_max_age "$usage" "$max_age")
   now=$(date +%s)
   age=$((now - recorded))
   if [ "$age" -gt "$max_age" ]; then
@@ -355,11 +367,12 @@ fm_failover_provider_readiness() {  # <state-dir> <provider>
   if [ -f "$usage" ]; then
     recorded=$(sed -n 's/^recorded_at=//p' "$usage" | head -1)
     status=$(sed -n 's/^status=//p' "$usage" | head -1)
+    max_age=${FM_PROVIDER_USAGE_MAX_AGE_SECS:-$FM_PROVIDER_USAGE_MAX_AGE_SECS_DEFAULT}
+    max_age=$(fm_failover_usage_max_age "$usage" "$max_age")
     case "$recorded" in
       ''|*[!0-9]*) recorded= ;;
     esac
     if [ "$status" = ready ] && [ -n "$recorded" ]; then
-      max_age=${FM_PROVIDER_USAGE_MAX_AGE_SECS:-1800}
       age=$(( $(date +%s) - recorded ))
       if [ "$age" -le "$max_age" ]; then
         printf 'ready %s recent successful native operation (age %ss)\n' "$provider" "$age"
