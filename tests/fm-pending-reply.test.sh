@@ -380,7 +380,7 @@ test_undelivered_records_are_scan_immutable() {
 
 test_delivery_confirmation_fallback_reconciles() {
   (
-    local home state corr rec marker rc prepared_corr prepared_rec prepared_marker
+    local home state corr rec marker rc prepared_corr prepared_rec prepared_marker escalations
     home=$(setup_parent delivery-confirmation)
     state="$home/state"
     export FM_PENDING_REPLY_NOW=5750
@@ -407,13 +407,34 @@ test_delivery_confirmation_fallback_reconciles() {
     prepared_rec=$(fm_pending_reply_path "$state" "$prepared_corr")
     fm_pending_reply_prepare_delivery "$state" "$prepared_corr" \
       || fail "delivery preparation should persist before transport"
+    fm_pending_reply_set "$prepared_rec" grace_secs 10 \
+      || fail "delivery-unknown grace fixture should persist"
     prepared_marker=$(fm_pending_reply_delivery_confirmation_path "$state" "$prepared_corr")
     [ -f "$prepared_marker" ] || fail "prepared delivery marker should persist"
     fm_pending_reply_tick_one "$state" "$prepared_corr" unknown \
       || fail "watcher should preserve interrupted delivery state"
+    [ "$(phase_of "$state" "$prepared_corr")" = awaiting_report ] \
+      || fail "attempted delivery should remain pending during bounded grace"
     [ -z "$(fm_pending_reply_get "$prepared_rec" delivered_epoch)" ] \
       || fail "attempted delivery must never be promoted without confirmation"
     [ -e "$prepared_marker" ] || fail "unknown delivery marker should remain durable"
+    export FM_PENDING_REPLY_NOW=5760
+    fm_pending_reply_write_delivery_confirmation \
+      "$state" "$prepared_corr" attempted 5750 \
+      || fail "orphaned attempt fixture should persist"
+    fm_pending_reply_tick_one "$state" "$prepared_corr" unknown \
+      || fail "orphaned delivery attempt should escalate"
+    [ "$(phase_of "$state" "$prepared_corr")" = escalated ] \
+      || fail "orphaned delivery attempt should become one durable escalation"
+    [ -z "$(fm_pending_reply_get "$prepared_rec" delivered_epoch)" ] \
+      || fail "delivery-unknown escalation must not manufacture delivery"
+    grep -Fq "pending-reply-delivery-unknown:" "$state/hibit.status" \
+      || fail "delivery uncertainty should use its distinct escalation"
+    fm_pending_reply_tick_one "$state" "$prepared_corr" unknown \
+      || fail "repeated delivery-unknown tick should be inert"
+    escalations=$(grep -Fc "pending-reply-id=$prepared_corr" "$state/hibit.status")
+    [ "$escalations" = 1 ] \
+      || fail "delivery-unknown escalation should publish once, got $escalations"
   ) || fail "delivery confirmation fallback regression failed"
   pass "delivery confirmation fallback reconciles durably"
 }
