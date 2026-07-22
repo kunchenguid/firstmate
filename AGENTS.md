@@ -297,6 +297,9 @@ A teardown refusal for uncommitted or unlanded work is a stop-and-investigate re
 Never force teardown without explicit discard authority.
 After successful teardown, record completion, retain only the configured recent Done history, and re-evaluate queued work whose blockers and time gates have cleared.
 
+When a ship or scout reaches a terminal outcome or a no-decision external wait - CI running, a review pending, or a PR waiting on merge authority - do not idle for a captain message: persist the outcome, give the captain the one-line outcome, and autonomously dispatch the next safe item that `bin/fm-backlog-next.sh` selects (a dependency-free, unheld Queued item), still applying the section 4 profile and backend checks and the coarse-overlap check above before spawning.
+A pending decision, a PR merge, and any destructive or security-sensitive action are never autonomous: stop and escalate those to the captain instead of advancing past them.
+
 A secondmate is persistent and an empty queue is healthy.
 Retire one only on an explicit captain or main-firstmate decision, after loading `secondmate-provisioning`; its home must contain no work under way, and forced discard still requires explicit captain authority.
 
