@@ -87,7 +87,7 @@ case "$provider" in
       exit 0
     fi
     if [ -n "$profile" ]; then
-      state=$("$FM_ROOT/bin/fm-github-exec.sh" exec --profile "$profile" --repository "https://github.com/$owner/$repo" -- gh pr view "$url" --json state -q .state 2>/dev/null) || exit 0
+      state=$(cd / && "$FM_ROOT/bin/fm-github-exec.sh" exec --profile "$profile" --repository "https://github.com/$owner/$repo" -- gh pr view "$url" --json state -q .state 2>/dev/null) || exit 0
     else
       state=$(gh pr view "$url" --json state -q .state 2>/dev/null) || exit 0
     fi

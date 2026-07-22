@@ -172,6 +172,7 @@ Its presence enables strict mode for the whole home with no implicit or fallback
 Every GitHub or network Git operation must resolve exactly one profile before network or write activity.
 A `local-only` project performs no such operation, so bootstrap, worker launch, and fleet sync skip account resolution for it and preserve its local Git behavior.
 Resolution considers a registered project binding first, then the exact canonical repository binding, then the canonical host/owner binding.
+A guarded `--pre-register-project` operation may consider an unregistered project binding only for the conventional clone destination or approved repository creation, and rejects every other command or already-registered project.
 All applicable bindings must name the same profile or the operation is refused as a conflict rather than allowing precedence to hide disagreement.
 An operation with no applicable binding is refused rather than using an ambient account.
 `data/projects.md` remains free of profile data.
@@ -237,7 +238,7 @@ Every descendant re-resolves the stable profile id through a process-local PATH 
 It removes Git config-injection variables, askpass, SSH, author, editor, prompt, proxy, TLS, certificate, cookie, and trace overrides.
 It uses isolated global and system Git configuration, resets credential-helper chains, and installs only the exact selected `gh auth git-credential` helper for HTTPS GitHub credentials.
 It applies the optional commit identity, always sets `user.useConfigOnly=true`, and rejects command-scoped identity keys plus every `git commit` author override, reset, amend, and message-reuse mode that can preserve another author.
-Repository-local and per-worktree credential, include, URL rewrite, remote URL, push URL, gh-resolved remote, proxy, TLS, certificate, cookie, authorization-header, editor, prompt, and transport keys are rejected or validated by key name without printing their values.
+Repository-local and per-worktree credential, include, URL rewrite, remote URL, push URL, gh-resolved remote, proxy, TLS, certificate, cookie, authorization-header, editor, prompt, recursive-submodule, and transport keys are rejected or validated by key name without printing their values.
 The guarded owner inspects the actual descendant working tree and an explicit Git `-C` target, rejects a discovered unrelated repository, and validates every gh-selectable remote rather than trusting the primary clone or only its origin.
 Every routed clone, fetch, pull, push, and `ls-remote` target must canonicalize to the configured HTTPS parent or selected-profile fork before network access.
 Push resolves `--repo`, `branch.<name>.pushRemote`, `remote.pushDefault`, and `branch.<name>.remote` before falling back to `origin`; command-scoped remote selection is rejected.
@@ -254,7 +255,7 @@ It confirms secure credential storage from `gh auth status`, verifies `/user` ma
 Sanitized diagnostics distinguish unauthenticated or expired profiles, HTTP 401, HTTP 403, HTTP 404, and organization SSO authorization without relaying child stderr, response headers, authorization URLs, helper output, or attacker-controlled parser text.
 Profile removal or expiry invalidates descendants and delayed checks at their next use instead of falling back.
 
-The routing file is included in `FM_INHERITABLE_CONFIG` and is copied literally into validated secondmate homes.
+The routing file is included in `FM_INHERITABLE_CONFIG`, is revalidated and serialized into a mode-`0600` destination file for each secondmate home, and is never copied from a symlink or embedded in an agent reread instruction.
 Profile directories, `hosts.yml`, Keychain or keyring material, helper responses, and token values are never copied.
 A secondmate primary remains unbound because it can manage projects from several profiles, while project clone, initialization, child launch, monitoring, and sync operations resolve each project separately.
 Authenticated delayed PR records store only the stable profile id and re-resolve the current file at use time.
@@ -265,6 +266,8 @@ Strict no-mistakes initialization is owned by `bin/fm-github-exec.sh no-mistakes
 It emits a temporary mode-`0600` typed context matching no-mistakes' own `--github-context` contract, derives an HTTPS fork URL from the selected `fork_owner` when present, validates the selected write target, invokes the selected no-mistakes binary with those typed arguments, and deletes the temporary file.
 No-mistakes owns its stored typed repository context and daemon subprocess application; it does not parse this FirstMate schema.
 Strict initialization refuses a no-mistakes executable that does not advertise `--github-context` support rather than allowing the shared daemon to use ambient credentials.
+The strict process PATH also wraps each `no-mistakes axi run` invocation and refreshes the stored typed context through the same helper immediately before the run; legacy homes retain their previous command path and initialization behavior.
+Each home reuses one byte-validated, non-writable routing shim directory instead of creating invocation-scoped copies.
 
 ### Real-account acceptance status (2026-07-21)
 
@@ -376,7 +379,7 @@ If that send fails, bootstrap keeps an idempotent retry marker and emits `NUDGE_
 The same bootstrap run emits `SECONDMATE_LIVENESS:` only when a live secondmate endpoint is skipped or respawn fails; already-live and successfully respawned endpoints are handled silently.
 For a mid-session inherited local-material edit where tracked-file sync is not needed, run `bin/fm-config-push.sh`.
 It uses the same live secondmate discovery and propagation helper as bootstrap, prints each live home's `crew-dispatch.json`, `crew-harness`, `backlog-backend`, active-or-cleared `github-accounts.json`, `herdr-presentation-spaces`, and `data/captain-shared.md` result as `pushed`, `unchanged`, `skipped`, or `error`, and exits non-zero for real propagation errors or config-reread send failures.
-When an allowlisted config item changes for an already-running home, it sends the literal-content reread pointer described in [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md); unchanged allowlisted config sends no pointer unless a previous delivery is pending.
+When an agent-readable allowlisted config item changes for an already-running home, it sends the literal-content reread pointer described in [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md); the operational routing config is never inlined, and unchanged agent-readable config sends no pointer unless a previous delivery is pending.
 The locked bootstrap inheritance pass uses the same per-home changed-set and reread path for already-running homes; see `secondmate-provisioning` for the single contract owner.
 A routing file absent from both homes emits no extra line, preserving legacy single-account output.
 That live discovery starts from `state/*.meta` records with `kind=secondmate`; `data/secondmates.md` only backfills `home=` for older or incomplete meta records.

@@ -21,6 +21,8 @@ FM_GITHUB_COMMIT_EMAIL=${FM_GITHUB_COMMIT_EMAIL:-}
 FM_GITHUB_REPOSITORY=${FM_GITHUB_REPOSITORY:-}
 FM_GITHUB_PROJECT=${FM_GITHUB_PROJECT:-}
 FM_GITHUB_PROJECT_PATH=${FM_GITHUB_PROJECT_PATH:-}
+FM_GITHUB_ALLOW_UNREGISTERED_PROJECT=${FM_GITHUB_ALLOW_UNREGISTERED_PROJECT:-0}
+FM_GITHUB_NO_MISTAKES_BINARY=${FM_GITHUB_NO_MISTAKES_BINARY:-}
 
 fm_github_lib_dir() {
   cd "$(dirname "${BASH_SOURCE[0]}")" && pwd
@@ -166,6 +168,7 @@ fm_github_resolve() {
   local args=(resolve --repository "$repository")
   [ -z "$project" ] || args+=(--project "$project")
   [ -z "$required_profile" ] || args+=(--profile "$required_profile")
+  [ "$FM_GITHUB_ALLOW_UNREGISTERED_PROJECT" != 1 ] || args+=(--allow-unregistered-project)
   output=$(fm_github_node "$(fm_github_lib_dir)/fm-github-config.mjs" "${args[@]}") || return 1
   fm_github_parse_fields "$output" || {
     echo "error: invalid GitHub account routing result" >&2
@@ -259,8 +262,41 @@ fm_github_add_git_config() {
   export GIT_CONFIG_COUNT=$((index + 1))
 }
 
+fm_github_file_mode() {
+  if [ "$(uname)" = Darwin ]; then
+    stat -f %Lp "$1" 2>/dev/null
+  else
+    stat -c %a "$1" 2>/dev/null
+  fi
+}
+
+fm_github_path_shim_body() {
+  local action=$1 home=$2 executable=$3 quoted_home quoted_executable
+  quoted_home=$(fm_github_shell_quote "$home")
+  quoted_executable=$(fm_github_shell_quote "$executable")
+  printf '#!/usr/bin/env bash\nset -eu\nexec %s %s --home %s -- "$@"\n' \
+    "$quoted_executable" "$action" "$quoted_home"
+}
+
+fm_github_path_shims_valid() {
+  local directory=$1 home=$2 executable=$3 name action expected
+  [ -d "$directory" ] && [ ! -L "$directory" ] && [ "$(fm_github_file_mode "$directory")" = 500 ] || return 1
+  for name in git gh gh-axi no-mistakes; do
+    case "$name" in
+      git) action=child-git ;;
+      gh) action=child-gh ;;
+      gh-axi) action=child-gh-axi ;;
+      no-mistakes) action=child-no-mistakes ;;
+    esac
+    [ -f "$directory/$name" ] && [ ! -L "$directory/$name" ] \
+      && [ "$(fm_github_file_mode "$directory/$name")" = 500 ] || return 1
+    expected=$(fm_github_path_shim_body "$action" "$home" "$executable") || return 1
+    printf '%s\n' "$expected" | cmp -s - "$directory/$name" || return 1
+  done
+}
+
 fm_github_install_path_shims() {
-  local home state base directory executable quoted_home quoted_executable name action
+  local home state base directory executable lock owner=0 attempts=0 tmp= name action
   home=$(cd "$(fm_github_home)" 2>/dev/null && pwd -P) || return 1
   state="$home/state"
   if [ ! -e "$state" ]; then
@@ -272,16 +308,44 @@ fm_github_install_path_shims() {
     mkdir -m 0700 "$base" 2>/dev/null || [ -d "$base" ] || return 1
   fi
   [ -d "$base" ] && [ ! -L "$base" ] || return 1
-  directory=$(mktemp -d "$base/context.XXXXXX") || return 1
+  directory="$base/context-v1"
   executable="$(fm_github_lib_dir)/fm-github-exec.sh"
-  quoted_home=$(fm_github_shell_quote "$home")
-  quoted_executable=$(fm_github_shell_quote "$executable")
-  for name in git gh gh-axi; do
-    case "$name" in git) action=child-git ;; gh) action=child-gh ;; gh-axi) action=child-gh-axi ;; esac
-    printf '#!/usr/bin/env bash\nset -eu\nexec %s %s --home %s -- "$@"\n' \
-      "$quoted_executable" "$action" "$quoted_home" > "$directory/$name" || return 1
-    chmod 0700 "$directory/$name" || return 1
+  if fm_github_path_shims_valid "$directory" "$home" "$executable"; then
+    printf '%s\n' "$directory"
+    return 0
+  fi
+  [ ! -e "$directory" ] && [ ! -L "$directory" ] || return 1
+  lock="$base/.install.lock"
+  while [ "$attempts" -lt 1000 ]; do
+    if mkdir -m 0700 "$lock" 2>/dev/null; then
+      owner=1
+      break
+    fi
+    if fm_github_path_shims_valid "$directory" "$home" "$executable"; then
+      printf '%s\n' "$directory"
+      return 0
+    fi
+    attempts=$((attempts + 1))
   done
+  [ "$owner" -eq 1 ] || return 1
+  tmp=$(mktemp -d "$base/.context-v1.XXXXXX") || { rmdir "$lock" 2>/dev/null || true; return 1; }
+  trap '[ -z "${tmp:-}" ] || { chmod 0700 "$tmp" 2>/dev/null || true; rm -rf -- "$tmp" 2>/dev/null || true; }; [ -z "${lock:-}" ] || rmdir "$lock" 2>/dev/null || true' EXIT HUP INT TERM
+  for name in git gh gh-axi no-mistakes; do
+    case "$name" in
+      git) action=child-git ;;
+      gh) action=child-gh ;;
+      gh-axi) action=child-gh-axi ;;
+      no-mistakes) action=child-no-mistakes ;;
+    esac
+    fm_github_path_shim_body "$action" "$home" "$executable" > "$tmp/$name" || return 1
+    chmod 0500 "$tmp/$name" || return 1
+  done
+  mv "$tmp" "$directory" || return 1
+  tmp=
+  chmod 0500 "$directory" || return 1
+  rmdir "$lock" 2>/dev/null || return 1
+  trap - EXIT HUP INT TERM
+  fm_github_path_shims_valid "$directory" "$home" "$executable" || return 1
   printf '%s\n' "$directory"
 }
 
@@ -291,6 +355,15 @@ fm_github_activate() {
   fm_github_resolve "$project" "$repository" "$required_profile" || return 1
   [ "$FM_GITHUB_MODE" = strict ] || return 0
   old_path=${PATH:-/usr/bin:/bin}
+  if [ -z "$FM_GITHUB_NO_MISTAKES_BINARY" ]; then
+    FM_GITHUB_NO_MISTAKES_BINARY=${FM_NO_MISTAKES_BINARY:-$(command -v no-mistakes 2>/dev/null || true)}
+  fi
+  if [ -n "$FM_GITHUB_NO_MISTAKES_BINARY" ]; then
+    [ -x "$FM_GITHUB_NO_MISTAKES_BINARY" ] && [ -f "$FM_GITHUB_NO_MISTAKES_BINARY" ] || {
+      echo "error: configured no-mistakes command is unavailable for strict GitHub routing" >&2
+      return 1
+    }
+  fi
   fm_github_unset_ambient
   shim_dir=$(fm_github_install_path_shims) || {
     echo "error: cannot install authoritative GitHub routing context" >&2
@@ -326,13 +399,14 @@ fm_github_activate() {
   fi
   export FM_GITHUB_ACTIVE=1 FM_GITHUB_PROFILE_ID FM_GITHUB_GH_BINARY FM_GITHUB_GIT_BINARY FM_GITHUB_GH_AXI_BINARY
   export FM_GITHUB_GH_CONFIG_DIR FM_GITHUB_HOST FM_GITHUB_EXPECTED_LOGIN FM_GITHUB_FORK_OWNER FM_GITHUB_REPOSITORY FM_GITHUB_PROJECT FM_GITHUB_PROJECT_PATH
+  export FM_GITHUB_ALLOW_UNREGISTERED_PROJECT FM_GITHUB_NO_MISTAKES_BINARY
 }
 
 fm_github_unsafe_git_key() {
   local key context=${2:-command}
   key=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
   case "$key" in
-    credential.*|http.*|include.*|includeif.*|url.*|protocol.*|ssh.*|alias.*|core.sshcommand|core.askpass|core.gitproxy|core.editor|core.hookspath|core.fsmonitor|core.pager|pager.*|sequence.editor|interactive.difffilter|diff.external|difftool.*.cmd|filter.*|merge.*.driver|gpg.*|remote.*.pushurl|remote.*.gh-resolved|remote.*.proxy|remote.*.proxyauthmethod|remote.*.uploadpack|remote.*.receivepack)
+    credential.*|http.*|include.*|includeif.*|url.*|protocol.*|ssh.*|alias.*|core.sshcommand|core.askpass|core.gitproxy|core.editor|core.hookspath|core.fsmonitor|core.pager|pager.*|sequence.editor|interactive.difffilter|diff.external|difftool.*.cmd|filter.*|merge.*.driver|gpg.*|fetch.recursesubmodules|submodule.recurse|submodule.*.url|submodule.*.update|remote.*.pushurl|remote.*.gh-resolved|remote.*.proxy|remote.*.proxyauthmethod|remote.*.uploadpack|remote.*.receivepack)
       return 0
       ;;
     remote.*.url|remote.pushdefault|branch.*.remote|branch.*.pushremote|user.name|user.email|user.useconfigonly)
@@ -1064,6 +1138,39 @@ fm_github_gh_operation() {
   esac
 }
 
+fm_github_validate_preregistration_command() {
+  local tool=$1 repository=$2 expected_parent source destination parent canonical
+  shift 2
+  [ "$FM_GITHUB_ALLOW_UNREGISTERED_PROJECT" = 1 ] || return 0
+  [ -n "$FM_GITHUB_PROJECT" ] && [ ! -d "$repository" ] || return 1
+  case "${tool##*/}" in
+    git)
+      [ "$#" -eq 3 ] && [ "$1" = clone ] || return 1
+      source=$2
+      destination=$3
+      canonical=$(fm_github_repository_allowed "$source") || return 1
+      [ "$(printf '%s' "$canonical" | tr '[:upper:]' '[:lower:]')" = "$(printf '%s' "$FM_GITHUB_REPOSITORY" | tr '[:upper:]' '[:lower:]')" ] || return 1
+      [ ! -e "$destination" ] && [ ! -L "$destination" ] || return 1
+      parent=${destination%/*}
+      [ "$parent" != "$destination" ] || parent=.
+      parent=$(cd "$parent" 2>/dev/null && pwd -P) || return 1
+      expected_parent=$(cd "$(fm_github_home)/projects" 2>/dev/null && pwd -P) || return 1
+      [ "$parent" = "$expected_parent" ] && [ "${destination##*/}" = "$FM_GITHUB_PROJECT" ]
+      ;;
+    gh|gh-axi)
+      [ "${1:-}" = repo ] && [ "${2:-}" = create ]
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+fm_github_projects_cwd() {
+  local projects cwd
+  projects=$(cd "$(fm_github_home)/projects" 2>/dev/null && pwd -P) || return 1
+  cwd=$(pwd -P) || return 1
+  [ "$cwd" = "$projects" ]
+}
+
 fm_github_context_command() {
   local project=$1 repository=$2 required_profile=$3 tool=$4
   shift 4
@@ -1076,6 +1183,10 @@ fm_github_context_command() {
     return
   fi
   fm_github_activate "$project" "$repository" "$required_profile" || return 1
+  fm_github_validate_preregistration_command "$tool" "$repository" "$@" || {
+    echo "error: pre-registration GitHub routing is limited to the configured project clone or repository creation" >&2
+    return 1
+  }
   local repo_path='' operation target_repository github_binary command_cwd command_repo command_name
   if [ -d "$repository" ]; then
     repo_path=$repository
@@ -1142,15 +1253,13 @@ fm_github_context_command() {
       case "$operation" in
         local|helper) ;;
         *)
-          if [ "${FM_GITHUB_GH_EXPLICIT_REPOSITORY:-0}" -eq 1 ]; then
-            fm_github_validate_repository_path "${repo_path:-}" || return 1
-          else
+          if [ "$operation" != create ] || ! fm_github_projects_cwd; then
             repo_path=$(fm_github_actual_repository_path "$repo_path") || {
               echo "error: current repository is not the configured project or task copy" >&2
               return 1
             }
-            fm_github_validate_repository_path "${repo_path:-}" || return 1
           fi
+          fm_github_validate_repository_path "${repo_path:-}" || return 1
           ;;
       esac
       case "$operation" in

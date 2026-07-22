@@ -4,7 +4,7 @@
 #   fm-github-exec.sh validate
 #   fm-github-exec.sh validate-all
 #   fm-github-exec.sh profile-id --project <name> --repository <path-or-url> [--profile <id>]
-#   fm-github-exec.sh exec --project <name> --repository <path-or-url> [--profile <id>] -- <command> [args...]
+#   fm-github-exec.sh exec --project <name> --repository <path-or-url> [--profile <id>] [--pre-register-project] -- <command> [args...]
 #   fm-github-exec.sh no-mistakes-init --project <name> --repository <path> [--fork-url <https-url>]
 #
 # Internal PATH shims use child-git, child-gh, and child-gh-axi. They re-resolve
@@ -40,6 +40,7 @@ project=
 repository=
 profile=
 fork_url=
+pre_register_project=0
 
 parse_context_args() {
   local want=
@@ -64,6 +65,7 @@ parse_context_args() {
       --profile=*) profile=${1#--profile=} ;;
       --fork-url) want=fork ;;
       --fork-url=*) fork_url=${1#--fork-url=} ;;
+      --pre-register-project) pre_register_project=1 ;;
       --)
         shift
         CONTEXT_REST=("$@")
@@ -131,9 +133,14 @@ child_context() {
 run_no_mistakes_init() {
   local binary context_file context_dir parent fork_repository args=()
   [ -n "$repository" ] || github_exec_usage
+  binary=${FM_NO_MISTAKES_BINARY:-${FM_GITHUB_NO_MISTAKES_BINARY:-$(command -v no-mistakes 2>/dev/null || true)}}
+  [ -n "$binary" ] && [ -f "$binary" ] && [ -x "$binary" ] || {
+    echo "error: no-mistakes command not found" >&2
+    return 1
+  }
   if ! fm_github_enabled; then
     [ -z "$fork_url" ] || args+=(--fork-url "$fork_url")
-    (cd "$repository" && command "${FM_NO_MISTAKES_BINARY:-no-mistakes}" init "${args[@]+"${args[@]}"}")
+    (cd "$repository" && command "$binary" init "${args[@]+"${args[@]}"}")
     return
   fi
   fm_github_activate "$project" "$repository" "$profile" || return 1
@@ -156,7 +163,6 @@ run_no_mistakes_init() {
     echo "error: profile $FM_GITHUB_PROFILE_ID needs commit_identity before no-mistakes initialization" >&2
     return 1
   }
-  binary=${FM_NO_MISTAKES_BINARY:-no-mistakes}
   command "$binary" init --help 2>&1 | grep -q -- '--github-context' || {
     echo "error: installed no-mistakes does not support strict per-repository GitHub contexts" >&2
     return 1
@@ -174,6 +180,22 @@ run_no_mistakes_init() {
   trap - EXIT HUP INT TERM
 }
 
+run_no_mistakes_command() {
+  [ -n "$FM_GITHUB_NO_MISTAKES_BINARY" ] && [ -f "$FM_GITHUB_NO_MISTAKES_BINARY" ] && [ -x "$FM_GITHUB_NO_MISTAKES_BINARY" ] || {
+    echo "error: no-mistakes command not found" >&2
+    return 1
+  }
+  if [ "${1:-}" = axi ] && [ "${2:-}" = run ]; then
+    [ -n "${FM_GITHUB_PROJECT_PATH:-}" ] && [ -d "$FM_GITHUB_PROJECT_PATH" ] || {
+      echo "error: strict no-mistakes refresh requires the configured project or task copy" >&2
+      return 1
+    }
+    repository=$FM_GITHUB_PROJECT_PATH
+    run_no_mistakes_init || return 1
+  fi
+  command "$FM_GITHUB_NO_MISTAKES_BINARY" "$@"
+}
+
 action=${1:-}
 [ "$#" -gt 0 ] || github_exec_usage
 shift
@@ -188,7 +210,7 @@ case "$action" in
     ;;
   profile-id)
     parse_context_args "$@"
-    [ "${#CONTEXT_REST[@]}" -eq 0 ] || github_exec_usage
+    [ "${#CONTEXT_REST[@]}" -eq 0 ] && [ "$pre_register_project" -eq 0 ] || github_exec_usage
     fm_github_resolve "$project" "$repository" "$profile"
     [ "$FM_GITHUB_MODE" = strict ] || exit 3
     printf '%s\n' "$FM_GITHUB_PROFILE_ID"
@@ -196,11 +218,15 @@ case "$action" in
   exec)
     parse_context_args "$@"
     [ "${#CONTEXT_REST[@]}" -gt 0 ] || github_exec_usage
+    if [ "$pre_register_project" -eq 1 ]; then
+      FM_GITHUB_ALLOW_UNREGISTERED_PROJECT=1
+      export FM_GITHUB_ALLOW_UNREGISTERED_PROJECT
+    fi
     fm_github_context_command "$project" "$repository" "$profile" "${CONTEXT_REST[@]}"
     ;;
   no-mistakes-init)
     parse_context_args "$@"
-    [ "${#CONTEXT_REST[@]}" -eq 0 ] || github_exec_usage
+    [ "${#CONTEXT_REST[@]}" -eq 0 ] && [ "$pre_register_project" -eq 0 ] || github_exec_usage
     run_no_mistakes_init
     ;;
   child-git)
@@ -223,6 +249,13 @@ case "$action" in
     child_context
     [ "$#" -gt 0 ] || github_exec_usage
     fm_github_context_command "$project" "$repository" "$profile" gh-axi "$@"
+    ;;
+  child-no-mistakes)
+    [ "${1:-}" = --home ] && [ -n "${2:-}" ] && [ "${3:-}" = -- ] || github_exec_usage
+    shift 3
+    child_context
+    [ "$#" -gt 0 ] || github_exec_usage
+    run_no_mistakes_command "$@"
     ;;
   child-exec)
     [ "${1:-}" = --home ] && [ -n "${2:-}" ] && [ "${3:-}" = -- ] || github_exec_usage

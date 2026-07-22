@@ -453,15 +453,15 @@ normalize_origin_url() {
 }
 
 source_origin_url() {
-  local project=$1 mode=$2 src=$3 url
-  url=$(git -C "$src" remote get-url origin 2>/dev/null || true)
+  local project=$1 mode=$2 src=$3 git_binary=${4:-git} url
+  url=$("$git_binary" -C "$src" remote get-url origin 2>/dev/null || true)
   [ -n "$url" ] || { echo "error: project $project is $mode but has no origin remote" >&2; return 1; }
   normalize_origin_url "$src" "$url"
 }
 
 seeded_origin_url() {
-  local project=$1 dst=$2 expected=$3 url
-  url=$(git -C "$dst" remote get-url origin 2>/dev/null || true)
+  local project=$1 dst=$2 expected=$3 git_binary=${4:-git} url
+  url=$("$git_binary" -C "$dst" remote get-url origin 2>/dev/null || true)
   [ -n "$url" ] || { echo "error: seeded project $project at $dst has no origin remote; expected $expected" >&2; return 1; }
   normalize_origin_url "$dst" "$url"
 }
@@ -536,7 +536,7 @@ EOF
 }
 
 clone_project() {
-  local project=$1 home=$2 src dst url dst_url mode
+  local project=$1 home=$2 src dst url dst_url mode git_binary=git
   src="$PROJECTS/$project"
   dst=$(validate_project_destination "$home" "$project") || return 1
   [ -d "$src" ] || { echo "error: project $project not found at $src" >&2; return 1; }
@@ -548,27 +548,27 @@ EOF
     return 1
   fi
   if fm_github_enabled; then
-    fm_github_activate "$project" "$src" || return 1
-    fm_github_validate_local_config "$src" || return 1
+    git_binary=$(fm_github_configured_git) || return 1
+    ( fm_github_activate "$project" "$src" && fm_github_validate_local_config "$src" ) || return 1
   fi
-  git -C "$src" rev-parse --is-inside-work-tree >/dev/null 2>&1 || { echo "error: project $project is not a git repo" >&2; return 1; }
+  "$git_binary" -C "$src" rev-parse --is-inside-work-tree >/dev/null 2>&1 || { echo "error: project $project is not a git repo" >&2; return 1; }
   if [ -e "$dst" ]; then
     [ -d "$dst" ] || { echo "error: seeded project $project exists at $dst but is not a directory" >&2; return 1; }
-    git -C "$dst" rev-parse --is-inside-work-tree >/dev/null 2>&1 || { echo "error: seeded project $project at $dst is not a git repo" >&2; return 1; }
-    url=$(source_origin_url "$project" "$mode" "$src") || return 1
-    dst_url=$(seeded_origin_url "$project" "$dst" "$url") || return 1
+    "$git_binary" -C "$dst" rev-parse --is-inside-work-tree >/dev/null 2>&1 || { echo "error: seeded project $project at $dst is not a git repo" >&2; return 1; }
+    url=$(source_origin_url "$project" "$mode" "$src" "$git_binary") || return 1
+    dst_url=$(seeded_origin_url "$project" "$dst" "$url" "$git_binary") || return 1
     [ "$dst_url" = "$url" ] || {
       echo "error: seeded project $project at $dst has origin $dst_url; expected $url" >&2
       return 1
     }
     return 0
   fi
-  url=$(source_origin_url "$project" "$mode" "$src") || return 1
+  url=$(source_origin_url "$project" "$mode" "$src" "$git_binary") || return 1
   fm_github_context_command "$project" "$url" "" git clone --quiet "$url" "$dst"
 }
 
 validate_seed_project() {
-  local project=$1 src mode url
+  local project=$1 src mode url git_binary=git
   src="$PROJECTS/$project"
   [ -d "$src" ] || { echo "error: project $project not found at $src" >&2; return 1; }
   read -r mode _ <<EOF
@@ -579,11 +579,11 @@ EOF
     return 1
   fi
   if fm_github_enabled; then
-    fm_github_activate "$project" "$src" || return 1
-    fm_github_validate_local_config "$src" || return 1
+    git_binary=$(fm_github_configured_git) || return 1
+    ( fm_github_activate "$project" "$src" && fm_github_validate_local_config "$src" ) || return 1
   fi
-  git -C "$src" rev-parse --is-inside-work-tree >/dev/null 2>&1 || { echo "error: project $project is not a git repo" >&2; return 1; }
-  url=$(git -C "$src" remote get-url origin 2>/dev/null || true)
+  "$git_binary" -C "$src" rev-parse --is-inside-work-tree >/dev/null 2>&1 || { echo "error: project $project is not a git repo" >&2; return 1; }
+  url=$("$git_binary" -C "$src" remote get-url origin 2>/dev/null || true)
   [ -n "$url" ] || { echo "error: project $project is $mode but has no origin remote" >&2; return 1; }
 }
 

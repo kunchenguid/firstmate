@@ -22,9 +22,10 @@
 # (bin/fm-config-push.sh). It is PRIMARY-AUTHORITATIVE: the primary's value wins
 # and is re-pushed on every convergence, so the fleet stays converged on the
 # primary; an item the primary does not set is mirrored as absence downstream.
-# After successful config/* changes under an already-running secondmate, callers
-# invoke fm_config_send_reread_nudge so the live agent re-reads exact post-write
-# bytes (spawn/respawn already re-reads at launch and needs no redundant nudge).
+# After successful agent-readable config/* changes under an already-running
+# secondmate, callers invoke fm_config_send_reread_nudge so the live agent
+# re-reads exact post-write bytes (spawn/respawn already re-reads at launch and
+# needs no redundant nudge). Operational routing config is never inlined.
 #
 # Extensible by design: FM_INHERITABLE_CONFIG is the single declared list of
 # config-dir-relative items the primary propagates. Add an item there and every
@@ -100,6 +101,39 @@ copy_inheritable_file() {
   fi
   rm -f "$tmp" 2>/dev/null || true
   return 1
+}
+
+github_accounts_config_command() {
+  local src_config=$1 action=$2 source_home code_root node_binary
+  [ "${src_config##*/}" = config ] || return 1
+  source_home=${src_config%/config}
+  [ -n "$source_home" ] && [ "$source_home" != "$src_config" ] || return 1
+  code_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd -P) || return 1
+  node_binary=$(command -v node) || return 1
+  FM_HOME="$source_home" FM_ROOT_OVERRIDE="$code_root" \
+    env -u NODE_OPTIONS -u NODE_PATH -u FM_CONFIG_OVERRIDE -u FM_GITHUB_CONFIG -u FM_GITHUB_CONFIG_PATH \
+    "$node_binary" "$code_root/bin/fm-github-config.mjs" "$action"
+}
+
+validate_github_accounts_config_source() {
+  github_accounts_config_command "$1" validate >/dev/null
+}
+
+sanitize_github_accounts_config() {
+  github_accounts_config_command "$1" sanitize > "$2"
+}
+
+prepare_github_accounts_transfer() {
+  local src_config=$1 dest=$2 dest_parent tmp
+  dest_parent=${dest%/*}
+  [ -n "$dest_parent" ] && [ "$dest_parent" != "$dest" ] || return 1
+  mkdir -p "$dest_parent" 2>/dev/null || return 1
+  tmp=$(umask 077; mktemp "$dest_parent/.fm-github-accounts.XXXXXX" 2>/dev/null) || return 1
+  if ! sanitize_github_accounts_config "$src_config" "$tmp" || ! chmod 0600 "$tmp" 2>/dev/null; then
+    rm -f "$tmp" 2>/dev/null || true
+    return 1
+  fi
+  printf '%s\n' "$tmp"
 }
 
 destination_allows_inherited_item() {
@@ -391,7 +425,7 @@ propagate_secondmate_inheritance() {
 }
 
 propagate_inheritable_config() {
-  local src_config=$1 dest_config=$2 item src dest reason rc
+  local src_config=$1 dest_config=$2 item src dest transfer_source reason rc
   [ -n "$src_config" ] || return 1
   [ -n "$dest_config" ] || return 1
   rc=0
@@ -401,15 +435,40 @@ propagate_inheritable_config() {
     esac
     src="$src_config/$item"
     dest="$dest_config/$item"
-    if [ -f "$src" ]; then
+    if [ -e "$src" ] || [ -L "$src" ]; then
+      if [ "$item" = github-accounts.json ] && ! validate_github_accounts_config_source "$src_config"; then
+        reason="unsafe or invalid primary source"
+        warn_inheritable_config_error "$item" "$src" "$reason"
+        record_inheritable_config_result "$item" error "$reason"
+        rc=1
+        continue
+      fi
       if ! destination_allows_inherited_item "$dest_config" "$item"; then
         reason=$(inheritable_config_skip_reason)
         warn_inheritable_config_skip "$item" "$dest_config" "$reason"
         record_inheritable_config_result "$item" skipped "$reason"
         continue
       fi
-      if [ -L "$dest" ] || [ ! -f "$dest" ] || ! cmp -s "$src" "$dest"; then
-        if copy_inheritable_file "$src" "$dest"; then
+      transfer_source=$src
+      if [ "$item" = github-accounts.json ]; then
+        if ! transfer_source=$(prepare_github_accounts_transfer "$src_config" "$dest"); then
+          reason="unsafe or invalid primary source"
+          warn_inheritable_config_error "$item" "$src" "$reason"
+          record_inheritable_config_result "$item" error "$reason"
+          rc=1
+          continue
+        fi
+      elif [ ! -f "$src" ] || [ -L "$src" ]; then
+        reason="unsafe primary source"
+        warn_inheritable_config_error "$item" "$src" "$reason"
+        record_inheritable_config_result "$item" error "$reason"
+        rc=1
+        continue
+      fi
+      if [ -L "$dest" ] || [ ! -f "$dest" ] \
+        || { [ "$item" = github-accounts.json ] && [ "$(fm_inherit_file_mode "$dest")" != 600 ]; } \
+        || ! cmp -s "$transfer_source" "$dest"; then
+        if copy_inheritable_file "$transfer_source" "$dest"; then
           record_inheritable_config_result "$item" pushed ""
         else
           reason="failed to copy"
@@ -420,6 +479,7 @@ propagate_inheritable_config() {
       else
         record_inheritable_config_result "$item" unchanged ""
       fi
+      [ "$item" != github-accounts.json ] || rm -f "$transfer_source" 2>/dev/null || true
     elif [ -e "$dest" ] || [ -L "$dest" ]; then
       if ! destination_allows_inherited_item "$dest_config" "$item"; then
         reason=$(inheritable_config_skip_reason)
@@ -460,11 +520,12 @@ FM_CONFIG_INHERIT_LOCK_REL="state/.fm-inherited-config.lock"
 FM_CONFIG_REREAD_FRAMING='These inherited config files changed. Re-read and apply their exact contents at every future intake. They are defaults/rules and do not remove your judgment to choose differently when warranted.'
 
 # fm_config_reread_is_allowlisted_item <item>
-# True only for the declared inheritable config allowlist (bare item name as
-# recorded in FM_CONFIG_INHERIT_REPORT). data/captain-shared.md is never
-# allowlisted here and must never be inlined into a reread instruction.
+# True only for agent-readable entries in the declared inheritable config
+# allowlist (bare item name as recorded in FM_CONFIG_INHERIT_REPORT).
+# data/captain-shared.md and github-accounts.json must never be inlined.
 fm_config_reread_is_allowlisted_item() {
   local item=$1 candidate
+  [ "$item" != github-accounts.json ] || return 1
   for candidate in $FM_INHERITABLE_CONFIG; do
     [ "$candidate" = "$item" ] && return 0
   done
@@ -478,6 +539,7 @@ fm_config_reread_changed_items() {
   local report=$1 item status
   [ -n "$report" ] && [ -f "$report" ] || return 0
   for item in $FM_INHERITABLE_CONFIG; do
+    fm_config_reread_is_allowlisted_item "$item" || continue
     status=$(awk -F '\t' -v item="$item" '$1 == item { print $2; exit }' "$report" 2>/dev/null) || status=""
     [ "$status" = pushed ] || continue
     printf '%s\n' "$item"

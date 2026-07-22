@@ -126,6 +126,7 @@ ROWS
 # ===========================================================================
 test_propagate_lib() {
   local d src dest m1 m2 outside stdout stderr guard_repo err_text
+  local FM_INHERITABLE_CONFIG="crew-dispatch.json crew-harness backlog-backend herdr-presentation-spaces"
   d="$TMP_ROOT/prop-lib"
   src="$d/src"
   dest="$d/dest"
@@ -136,7 +137,6 @@ test_propagate_lib() {
   printf 'codex\n' > "$src/crew-harness"
   printf 'manual\n' > "$src/backlog-backend"
   : > "$src/herdr-presentation-spaces"
-  printf '{"version":1,"profiles":{"work":{"gh_config_dir":"/external/profile"}}}\n' > "$src/github-accounts.json"
   mkdir -p "$src/profile-directory"
   printf 'oauth_token: credential-sentinel\n' > "$src/profile-directory/hosts.yml"
   stdout="$d/clean-copy.out"
@@ -148,7 +148,6 @@ test_propagate_lib() {
   [ "$(cat "$dest/crew-harness")" = codex ] || fail "crew-harness not propagated"
   [ "$(cat "$dest/backlog-backend")" = manual ] || fail "backlog-backend not propagated"
   [ -f "$dest/herdr-presentation-spaces" ] || fail "herdr-presentation-spaces not propagated"
-  [ "$(cat "$dest/github-accounts.json")" = '{"version":1,"profiles":{"work":{"gh_config_dir":"/external/profile"}}}' ] || fail "github-accounts.json not propagated"
   [ ! -e "$dest/profile-directory" ] || fail "profile directory was copied into a secondmate home"
   ! grep -R 'credential-sentinel' "$dest" >/dev/null 2>&1 || fail "credential material was copied into a secondmate home"
 
@@ -183,13 +182,12 @@ test_propagate_lib() {
   [ "$(cat "$outside")" = outside ] || fail "destination symlink target was overwritten"
 
   # 4. removing the source mirrors absence downstream (primary-authoritative)
-  rm -f "$src/crew-dispatch.json" "$src/crew-harness" "$src/backlog-backend" "$src/github-accounts.json" "$src/herdr-presentation-spaces"
+  rm -f "$src/crew-dispatch.json" "$src/crew-harness" "$src/backlog-backend" "$src/herdr-presentation-spaces"
   propagate_inheritable_config "$src" "$dest"
   [ -e "$dest/crew-dispatch.json" ] && fail "dispatch profile absence not mirrored downstream"
   [ -e "$dest/crew-harness" ] && fail "absence not mirrored downstream"
   [ -e "$dest/backlog-backend" ] && fail "backlog-backend absence not mirrored downstream"
   [ -e "$dest/herdr-presentation-spaces" ] && fail "herdr-presentation-spaces absence not mirrored downstream"
-  [ -e "$dest/github-accounts.json" ] && fail "github-accounts.json absence not mirrored downstream"
 
   rm -f "$dest/crew-harness"
   ln -s "$d/missing-target" "$dest/crew-harness"

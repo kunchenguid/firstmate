@@ -327,7 +327,7 @@ function load() {
   const owners = normalizedMap(parsed.bindings.owners, parseOwner, profileReference);
   if (projects.size + repositories.size + owners.size === 0) throw new Error("missing bindings");
 
-  return { ghBinary, gitBinary, ghAxiBinary, profiles, projects, repositories, owners };
+  return { ghBinary, gitBinary, ghAxiBinary, profiles, projects, repositories, owners, serialized: parsed };
 }
 
 function registeredProjects() {
@@ -357,14 +357,19 @@ function resolve(config) {
   const rawProject = option("--project");
   const rawRepository = option("--repository");
   const requiredProfile = option("--profile");
+  const allowUnregisteredProject = process.argv.includes("--allow-unregistered-project");
   const project = rawProject ? rawProject.toLowerCase() : "";
   if (rawProject && !projectName(rawProject)) throw new Error("invalid project");
   const repository = rawRepository ? parseRepository(rawRepository) : "";
   if (!repository) throw new Error("missing repository");
   const repositoryKey = repository.toLowerCase();
   const ownerKey = repository.split("/").slice(0, 2).join("/").toLowerCase();
+  const registered = project ? registeredProjects().has(project) : false;
+  if (allowUnregisteredProject && (!project || registered || !config.projects.has(project))) {
+    throw new Error("invalid preregistration");
+  }
   const candidates = [];
-  if (project && registeredProjects().has(project) && config.projects.has(project)) candidates.push(config.projects.get(project).value);
+  if (project && (registered || allowUnregisteredProject) && config.projects.has(project)) candidates.push(config.projects.get(project).value);
   if (config.repositories.has(repositoryKey)) candidates.push(config.repositories.get(repositoryKey).value);
   if (config.owners.has(ownerKey)) candidates.push(config.owners.get(ownerKey).value);
   if (candidates.length === 0 && !requiredProfile) throw new Error("unknown route");
@@ -404,6 +409,10 @@ try {
     emit("gh_axi_binary", config.ghAxiBinary);
     process.exit(0);
   }
+  if (action === "sanitize") {
+    process.stdout.write(`${JSON.stringify(config.serialized, null, 2)}\n`);
+    process.exit(0);
+  }
   if (action === "resolve") {
     resolve(config);
     process.exit(0);
@@ -420,5 +429,6 @@ try {
   if (error?.message === "conflicting route") fail("GitHub account bindings conflict for this project and repository");
   if (error?.message === "removed profile") fail("the recorded GitHub account profile no longer exists");
   if (error?.message === "profile route mismatch") fail("the recorded GitHub account profile no longer matches this project");
+  if (error?.message === "invalid preregistration") fail("the pre-registration GitHub project route is unavailable");
   fail();
 }
