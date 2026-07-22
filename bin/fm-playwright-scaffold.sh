@@ -72,6 +72,7 @@ DIR=$(cd "$DIR" && pwd -P)
 # Validate and normalize the viewport list before writing anything.
 PROJECT_LINES=""
 VIEWPORT_ROWS=""
+SEEN_NAMES=""
 OLD_IFS="$IFS"
 IFS=','
 for entry in $VIEWPORTS; do
@@ -96,13 +97,28 @@ for entry in $VIEWPORTS; do
       exit 2
       ;;
   esac
-  case "$width$height" in
+  case "$width" in
     ''|*[!0-9]*)
       echo "error: bad viewport size: '$size' in '$entry'" >&2
       echo "help: size is WIDTHxHEIGHT in pixels, e.g. 1440x900" >&2
       exit 2
       ;;
   esac
+  case "$height" in
+    ''|*[!0-9]*)
+      echo "error: bad viewport size: '$size' in '$entry'" >&2
+      echo "help: size is WIDTHxHEIGHT in pixels, e.g. 1440x900" >&2
+      exit 2
+      ;;
+  esac
+  case " $SEEN_NAMES " in
+    *" $name "*)
+      echo "error: duplicate viewport name: '$name' in '$entry'" >&2
+      echo "help: each viewport name must be unique" >&2
+      exit 2
+      ;;
+  esac
+  SEEN_NAMES="${SEEN_NAMES} ${name}"
   PROJECT_LINES="${PROJECT_LINES}    { name: '${name}', use: { ...devices['Desktop Chrome'], viewport: { width: ${width}, height: ${height} } } },"$'\n'
   VIEWPORT_ROWS="${VIEWPORT_ROWS}  ${name},${width}x${height}"$'\n'
   IFS=','
