@@ -318,7 +318,12 @@ case "${1:-}" in
     ;;
   validate-batch)
     sleep 0.2
-    while IFS= read -r receipt; do [ -n "$receipt" ] && printf 'current\n'; done
+    first=true
+    while IFS= read -r receipt; do
+      [ -n "$receipt" ] || continue
+      if [ "$first" = true ]; then printf 'current-error\n'; first=false; else printf 'current\n'; fi
+    done
+    exit 2
     ;;
   *) exit 2 ;;
 esac
@@ -365,6 +370,7 @@ for (let i = 0; i < 500; i += 1) {
 }
 const rows = readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n");
 if (rows.length !== 4) throw new Error(`expected three queued wakes and one successor, got ${rows.length}`);
+await new Promise((resolve) => setTimeout(resolve, 100));
 if (prompts.length !== 0) throw new Error(`busy Pi received a premature wake: ${prompts.join(" | ")}`);
 idle = true;
 const started = Date.now();
@@ -377,12 +383,13 @@ for (let expected = 1; expected <= 3; expected += 1) {
   if (!combined.includes(`signal: bounded-${expected}`)) throw new Error(`lost bounded wake ${expected}: ${combined}`);
 }
 if (!combined.includes("partial capture")) throw new Error(`capture failure was not delivered beside its valid receipt: ${combined}`);
+if (!combined.includes("indeterminate source state")) throw new Error(`validation failure was not delivered beside its current receipt: ${combined}`);
 writeFileSync(process.env.FM_STOP_FILE, "stop\n");
 await handlers.get("session_shutdown")?.();
 EOF
-)
+  )
   status=$?
-  expect_code 0 "$status" "Pi must retain valid partial captures and batch every current reason before delivery"
+  [ "$status" -eq 0 ] || fail "Pi partial-capture batch test failed: $out"
   [ -z "$out" ] || fail "Pi bounded-validation test printed output: $out"
   pass "Pi validates every pending reason in one bounded pre-delivery batch"
 }
@@ -1066,7 +1073,7 @@ EOF
 }
 
 test_wake_actionability_helper_source_and_queue_matrix() {
-  local home state reason receipt before after check xcheck rejected unrelated status fakebin drain_input drain_output count mixed_output
+  local home state reason receipt before after check xcheck rejected unrelated status fakebin drain_input drain_output count mixed_output batch_output
   home="$TMP_ROOT/wake-actionability-home"
   state="$home/state"
   mkdir -p "$state"
@@ -1207,6 +1214,14 @@ SH
   [ -n "$mixed_output" ] || fail "mixed coalesced capture discarded its valid receipt"
   FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$ACTIONABLE" validate "$mixed_output" \
     || fail "receipt retained beside a capture failure did not validate"
+  receipt=$(FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$ACTIONABLE" capture mixed-heartbeat) \
+    || fail "mixed validation fixture did not capture both source receipts"
+  batch_output=$(printf '%s\n' "$receipt" | PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    "$ACTIONABLE" validate-batch 2>/dev/null)
+  status=$?
+  [ "$status" -eq 2 ] || fail "mixed composite validation did not surface its source failure"
+  [ "$batch_output" = current-error ] \
+    || fail "mixed composite validation lost current-plus-error state: $batch_output"
 
   printf '%s\n' "$after" > "$state/.wake-queue"
   printf 'working: heartbeat source is no longer actionable\n' >> "$state/task-heartbeat.status"

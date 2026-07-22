@@ -33,7 +33,7 @@ type ActionabilityResult = {
   failure?: string;
 };
 
-type ValidationState = "current" | "obsolete" | "error";
+type ValidationState = "current" | "obsolete" | "error" | "current-error";
 
 type BatchActionabilityResult = {
   states?: ValidationState[];
@@ -206,7 +206,7 @@ export default function (pi: ExtensionAPI) {
     });
     const states = result.stdout.trim().split(/\r?\n/).filter(Boolean);
     const complete = states.length === receipts.length
-      && states.every((state): state is ValidationState => /^(?:current|obsolete|error)$/.test(state));
+      && states.every((state): state is ValidationState => /^(?:current|obsolete|error|current-error)$/.test(state));
     if ((result.status === 0 || result.status === 2) && complete) {
       if (result.status === 0) return { states };
       return {
@@ -235,7 +235,7 @@ export default function (pi: ExtensionAPI) {
       if (pending.receipt) {
         const state = validation.states?.[receiptIndex];
         receiptIndex += 1;
-        if (state !== "current") continue;
+        if (state !== "current" && state !== "current-error") continue;
       }
       if (!messages.includes(pending.message)) messages.push(pending.message);
     }

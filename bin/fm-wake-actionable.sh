@@ -279,12 +279,12 @@ EOF
   [ "$actual" = "$item" ]
 }
 
-validate() {
-  local receipt=$1 item status saw_error=false
+validate_state() {
+  local receipt=$1 item status saw_current=false saw_error=false
   while IFS= read -r item; do
     [ -n "$item" ] || continue
     if validate_one "$item"; then
-      return 0
+      saw_current=true
     else
       status=$?
       [ "$status" -ne 2 ] || saw_error=true
@@ -292,24 +292,33 @@ validate() {
   done <<EOF
 $(printf '%s' "$receipt" | tr ',' '\n')
 EOF
-  [ "$saw_error" = false ] || return 2
-  return 1
+  if [ "$saw_current" = true ] && [ "$saw_error" = true ]; then
+    printf 'current-error\n'
+  elif [ "$saw_current" = true ]; then
+    printf 'current\n'
+  elif [ "$saw_error" = true ]; then
+    printf 'error\n'
+  else
+    printf 'obsolete\n'
+  fi
+}
+
+validate() {
+  case "$(validate_state "$1")" in
+    current) return 0 ;;
+    obsolete) return 1 ;;
+    *) return 2 ;;
+  esac
 }
 
 validate_batch() {
-  local receipt status count=0 saw_error=false
+  local receipt state count=0 saw_error=false
   while IFS= read -r receipt; do
     [ -n "$receipt" ] || continue
     count=$((count + 1))
-    if validate "$receipt"; then
-      printf 'current\n'
-    else
-      status=$?
-      case "$status" in
-        1) printf 'obsolete\n' ;;
-        *) printf 'error\n'; saw_error=true ;;
-      esac
-    fi
+    state=$(validate_state "$receipt") || state=error
+    printf '%s\n' "$state"
+    case "$state" in error|current-error) saw_error=true ;; esac
   done
   [ "$count" -gt 0 ] || return 1
   [ "$saw_error" = false ] || return 2
