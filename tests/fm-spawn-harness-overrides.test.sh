@@ -362,6 +362,48 @@ test_launch_variant_layers_over_harness_level() {
   pass "a variant layers over the harness-level entry per axis instead of replacing it"
 }
 
+test_empty_variant_inherits_base_axes() {
+  local rec id out status launch expected state_real sq_te sq_br
+  id=ovr-variant-empty-b3
+  rec=$(make_spawn_case ovr-variant-empty codex "$id")
+  read_case_record "$rec"
+  # `{}` is a declared, no-op launch identity. It must inherit every base axis.
+  write_overrides "$HOME_DIR" '{"codex":{"command":"codex-base","args":["--base-arg"],"env":{"BASE_ENV":"base"},"default_variant":"api","variants":{"api":{}}}}'
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "an empty default launch variant should succeed"
+  assert_contains "$out" "spawned $id harness=codex launch=api" \
+    "empty default variant should be selected and reported"
+  launch=$(cat "$LAUNCH_LOG")
+  state_real=$(cd "$HOME_DIR/state" && pwd -P)
+  sq_te="'$state_real/$id.turn-ended'"
+  sq_br="'$HOME_DIR/data/$id/brief.md'"
+  # shellcheck disable=SC2016
+  expected='BASE_ENV='"'base'"' codex-base '"'--base-arg'"' -c "notify=[\"bash\",\"-c\",\"touch '"$sq_te"'\"]" "$(cat '"$sq_br"')"'
+  [ "$launch" = "$expected" ] || fail "empty variant did not inherit the harness-level launch axes"$'\n'"expected: $expected"$'\n'"actual:   $launch"
+  pass "an empty variant is declared and inherits command, args, and env from its harness"
+}
+
+test_variant_explicitly_overrides_all_launch_axes() {
+  local rec id out status launch
+  id=ovr-variant-all-axes-b4
+  rec=$(make_spawn_case ovr-variant-all-axes claude "$id")
+  read_case_record "$rec"
+  write_overrides "$HOME_DIR" '{"claude":{"command":"base-command","args":["--base-arg"],"env":{"BASE_ENV":"base","SHARED":"base"},"variants":{"gateway":{"command":"variant-command","args":["--variant-arg"],"env":{"VARIANT_ENV":"variant","SHARED":"variant"}}}}}'
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --launch gateway)
+  status=$?
+  expect_code 0 "$status" "a variant overriding every launch axis should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "BASE_ENV='base' SHARED='variant' VARIANT_ENV='variant' variant-command '--variant-arg'" \
+    "variant command, args, and env should override their harness-level counterparts"
+  assert_not_contains "$launch" "base-command" "variant command must replace the harness-level command"
+  assert_not_contains "$launch" "--base-arg" "variant args must replace the harness-level args"
+  assert_not_contains "$launch" "SHARED='base'" "variant env must win over the harness-level env"
+  pass "a variant's explicit command, args, and env overrides retain their existing behavior"
+}
+
 test_default_variant_applies_without_flag() {
   local rec id out status launch
   id=ovr-variant-default-b3
@@ -407,6 +449,10 @@ test_undeclared_variant_refuses_spawn() {
   [ "$status" -ne 0 ] || fail "an undeclared launch variant must refuse the spawn, not fall back"
   assert_contains "$out" "not declared" "refusal should name the undeclared variant problem"
   assert_contains "$out" "gateway" "refusal should list the variants that ARE declared"
+  assert_contains "$out" "declared variants for claude: gateway" \
+    "refusal should list only the actually declared variant names"
+  assert_not_contains "$out" "declared variants for claude: typo" \
+    "refusal must not contradict itself by listing the requested missing variant as declared"
   # Silently falling back would launch on the WRONG billing account; nothing may start.
   [ ! -s "$LAUNCH_LOG" ] || fail "a refused variant must not launch anything"
   assert_absent "$HOME_DIR/state/$id.meta" "a refused variant must not leave task state behind"
@@ -490,6 +536,8 @@ test_propagate_carries_harness_overrides
 test_launch_variant_selects_variant_command
 test_launch_variant_keeps_harness_identity
 test_launch_variant_layers_over_harness_level
+test_empty_variant_inherits_base_axes
+test_variant_explicitly_overrides_all_launch_axes
 test_default_variant_applies_without_flag
 test_explicit_launch_beats_default_variant
 test_undeclared_variant_refuses_spawn

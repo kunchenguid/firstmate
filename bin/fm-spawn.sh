@@ -625,7 +625,7 @@ harness_overrides_usable() {
 # not accurate enough to route on (see docs/configuration.md). A named variant that
 # the resolved harness does not declare is a hard refusal from both sources, so a
 # typo or a stale name can never silently fall back to a different account.
-# shellcheck disable=SC2016  # jq program text: $h0/$v0 are jq bindings, not shell vars
+# shellcheck disable=SC2016  # jq program text: $h0/$v are jq bindings, not shell vars
 resolve_launch_variant() {  # <harness>
   local harness=$1 variant='' source=''
   if [ -n "$LAUNCH_VARIANT" ]; then
@@ -643,7 +643,9 @@ resolve_launch_variant() {  # <harness>
     echo "error: launch variant '$variant' requested via $source but config/harness-overrides.json is absent, unreadable, or jq is missing" >&2
     return 1
   fi
-  if [ "$(ov_jq "$harness" "$variant" 'if ($v0 | length) > 0 then "yes" else "no" end')" != yes ]; then
+  # Declaration is key membership, not the resolved value's content: `{}` is a
+  # valid no-op variant that inherits the harness-level command, args, and env.
+  if [ "$(ov_jq "$harness" "$variant" 'if (($h0.variants? | type) == "object") and ($h0.variants | has($v)) then "yes" else "no" end')" != yes ]; then
     echo "error: launch variant '$variant' (from $source) is not declared under config/harness-overrides.json .$harness.variants" >&2
     echo "       declared variants for $harness: $(ov_jq "$harness" "" 'if ($h0.variants? | type) == "object" then ($h0.variants | keys_unsorted | join(", ")) else "" end' | sed 's/^$/(none)/')" >&2
     return 1
