@@ -230,6 +230,8 @@ Classify the deliverable:
 - **Ship** is the default and produces a project change through the selected delivery mode.
 - **Scout** produces knowledge in `data/<id>/report.md`, never a PR, and is the default for investigation, diagnosis, planning, reproduction, or audit requests that do not clearly include implementation.
 
+When the captain's phrasing signals a named request shape - opinion, plan/fusion, review, or team/milestone - load `pattern-triggers` before dispatching; it decides how many agents and what shape on top of the Ship/Scout classification above, not instead of it.
+
 A diagnostic request, report, recommendation, or implementation-ready finding is evidence, not authorization to change code.
 Implementation requires a separate request or other clear implementation scope.
 Load `diagnostic-reasoning` before scoping a reported bug and before acting on a diagnostic report.
@@ -289,6 +291,7 @@ The worker reports the PR when CI first becomes green rather than waiting for me
 ### PR ready, landing, and teardown
 
 For PR-based ship tasks, the ready signal depends on mode: `no-mistakes` reports `done: PR <url> checks green` after CI is green, while `direct-PR` reports `done: PR <url>` after opening the PR.
+When a milestone has 2 or more of its own PRs individually reaching `done`, load `milestone-integration-review` before reporting the milestone ready - a PR's own "checks green" never proves it composes with the milestone's other PRs.
 Run `bin/fm-pr-check.sh <id> <PR url>` - it records `pr=` and the forge's `pr_head=` when available in the task's meta and arms the watcher's merge poll.
 Tell the captain the PR's full URL, always the complete `https://...` link rather than a bare `#number`, a concise outcome summary, and the no-mistakes risk level when applicable.
 A captain instruction to merge is explicit authority; `yolo` is the only standing routine authority.
@@ -464,6 +467,8 @@ These skills are not captain-invocable; load them only at their precise triggers
 - `fmx-respond` - load on an `x-mention <request_id>` `check:` wake to handle the mention, on an `x-mode-error ...` `check:` wake to report the X-mode configuration blocker, and on any milestone or terminal wake for an X-mode-linked task before posting its completion follow-up; relevant only when X mode is on.
 - `firstmate-codexapp` - load before coordinating a visible Codex Desktop thread, evaluating a Codex App backend request, or reconciling Codex Desktop host-tool smoke evidence for Firstmate work.
 - `firstmate-coding-guidelines` - load before changing firstmate's shared, tracked material, as defined by section 1's list, whether editing directly or briefing a crewmate for a firstmate-repo task.
+- `pattern-triggers` - load during intake when the captain's phrasing signals opinion, plan/fusion, review, or team/milestone rather than a plain ship or scout request.
+- `milestone-integration-review` - load before reporting a multi-PR milestone (2+ open PRs) ready for the captain's merge decision.
 
 ## 14. X mode
 
