@@ -51,6 +51,10 @@ fm_pid_identity() {
   # Pin LC_ALL=C so lstart's date format is locale-invariant: the identity is
   # written under one locale but re-read under the machine's ambient locale, which
   # would otherwise mismatch on a non-C locale (e.g. ko_KR) and reject a live watcher.
+  # Pass -ww for the same write-then-re-read reason in the width dimension: ps honors
+  # an inherited COLUMNS even when writing to a pipe, so a narrow pane or hook context
+  # would otherwise record a truncated command that a wider re-read can never match.
+  # Every process command/args read in bin/ passes -ww for this reason.
   out=$(LC_ALL=C ps -ww -p "$pid" -o lstart= -o command= 2>/dev/null) || return 1
   [ -n "$out" ] || return 1
   printf '%s\n' "$out" | sed 's/^[[:space:]]*//'
