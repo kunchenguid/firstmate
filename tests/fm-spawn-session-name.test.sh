@@ -177,6 +177,25 @@ test_meta_label_backfills_missing_registry_label() {
   pass "a prior meta label= backfills a registry line without a label field"
 }
 
+test_ampersand_label_survives_launch_substitution() {
+  local rec id sm out status launch
+  id='sm-rnd'
+  rec=$(make_spawn_case ampersand-label claude "$id")
+  read_case_record "$rec"
+  sm="$CASE_DIR/secondmate-home"
+  make_seeded_secondmate_home "$sm" "$id"
+  register_secondmate "$HOME_DIR" "$id" "$sm" 'SM R&D'
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate)
+  status=$?
+  expect_code 0 "$status" "secondmate spawn with an ampersand label should succeed"
+  assert_grep "label=SM R&D" "$HOME_DIR/state/$id.meta" "meta missing label=SM R&D"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "--name 'SM R&D'" "ampersand label was mangled in the launch command"
+  assert_not_contains "$launch" "__NAMEFLAG__" "patsub replacement must not re-expand & into the placeholder"
+  pass "an ampersand-bearing label survives launch substitution intact"
+}
+
 test_codex_secondmate_records_label_but_omits_name_flag() {
   local rec id sm out status launch
   id='sm-cnc-codex'
@@ -218,6 +237,7 @@ test_registry_label_threads_claude_name_flag
 test_derived_label_when_registry_has_no_label
 test_derived_label_title_cases_multiword_suffix
 test_meta_label_backfills_missing_registry_label
+test_ampersand_label_survives_launch_substitution
 test_codex_secondmate_records_label_but_omits_name_flag
 test_ship_spawn_carries_no_label_or_name_flag
 
