@@ -39,12 +39,14 @@ test_section_9_owns_positive_translation_contract() {
 test_scout_remains_allowed_house_vocabulary() {
   local contract
   contract=$(section_9)
-  assert_contains "$contract" "Scout is accepted Firstmate nautical house vocabulary and does not need translation" \
+  assert_contains "$contract" "Scout and second mate are accepted Firstmate nautical house vocabulary and do not need translation" \
     "section 9 does not preserve scout as allowed Firstmate vocabulary"
   assert_not_contains "$contract" "scout -> investigation" \
     "section 9 must not map scout to investigation"
   assert_not_contains "$contract" "scout, ship" \
     "section 9 must not add scout to the internal-vocabulary ban"
+  assert_not_contains "$contract" "secondmate -> domain supervisor" \
+    "section 9 must not map secondmate to domain supervisor"
   pass "scout remains allowed in private captain chat"
 }
 
@@ -78,7 +80,7 @@ test_mapping_list_covers_high_risk_internal_families() {
     "hold, gate, ask-user, needs-decision, blocked, or paused -> the concrete decision" \
     "done, failed, fix-review, checks-passed, cancelled, validation step, or pipeline state -> the concrete result" \
     "brief -> instructions" \
-    "crewmate or secondmate -> worker or domain supervisor" \
+    "crewmate -> worker" \
     "harness, backend, runtime, or adapter -> worker runtime or tool" \
     "status file, metadata, state, task id, or raw path -> durable record"; do
     assert_contains "$contract" "$phrase" "section 9 mapping list is missing '$phrase'"

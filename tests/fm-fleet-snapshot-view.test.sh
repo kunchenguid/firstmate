@@ -120,7 +120,15 @@ test_empty_fleet_json() {
   local home out view
   home=$(make_home empty)
   out=$(FM_HOME="$home" "$SNAPSHOT" --json)
-  printf '%s' "$out" | jq -e '.schema == "fm-fleet-snapshot.v1" and .backlog.present == false and (.tasks|length == 0)' >/dev/null \
+  printf '%s' "$out" | jq -e '
+    .schema == "fm-fleet-snapshot.v1"
+      and .backlog.present == false
+      and (.tasks|length == 0)
+      and .main_inventory.valid == true
+      and .main_inventory.reason == null
+      and (.main_inventory.orphan_in_flight | length) == 0
+      and .main_inventory.unstructured_current_count == 0
+  ' >/dev/null \
     || fail "empty snapshot schema or absence markers wrong: $out"
   view=$(FM_HOME="$home" "$VIEW")
   assert_contains "$view" "No live task metadata found." "empty fleet view should say no live metadata"
@@ -171,6 +179,71 @@ test_fixture_snapshot_json() {
     | .state == "done" and .pr_url == "https://github.com/kunchenguid/firstmate/pull/7"
   ' >/dev/null || fail "done backlog PR row missing"
   pass "fixture snapshot covers task rows, backlog rows, pointers, and stable ordering"
+}
+
+# R1 owner contract: main_inventory discloses orphan in-flight and unstructured
+# current rows without inventing task rows.
+test_main_inventory_orphan_and_unstructured_disclosure() {
+  local home fakebin out
+  home=$(make_home main-inventory)
+  mkdir -p "$home/projects/visible"
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+free-form current note
+- [ ] orphan-ship - Structured without meta (repo: alpha) (kind: ship) (since 2026-07-11)
+- [ ] visible-ship - Structured with meta (repo: alpha) (kind: ship) (since 2026-07-11)
+
+## Queued
+another free-form queued note
+- [ ] queued-ship - Structured queued (repo: alpha) (kind: ship)
+
+## Done
+EOF
+  fm_write_meta "$home/state/visible-ship.meta" \
+    "window=firstmate:fm-visible-ship" \
+    "worktree=$home/projects/visible" \
+    "project=alpha" \
+    "harness=codex" \
+    "kind=ship" \
+    "mode=ship"
+  printf 'working: visible\n' > "$home/state/visible-ship.status"
+  fakebin=$(make_fakebin "$home")
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json)
+  printf '%s' "$out" | jq -e '
+    .main_inventory.valid == false
+      and .main_inventory.reason == "unstructured current backlog row"
+      and .main_inventory.unstructured_current_count == 2
+      and (.main_inventory.orphan_in_flight == ["orphan-ship"])
+      and ([.tasks[].id] == ["visible-ship"])
+  ' >/dev/null || fail "main_inventory did not disclose orphan/unstructured: $out"
+  # Counterfactual: add meta for the orphan and strip free-form current lines.
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+- [ ] orphan-ship - Structured without meta (repo: alpha) (kind: ship) (since 2026-07-11)
+- [ ] visible-ship - Structured with meta (repo: alpha) (kind: ship) (since 2026-07-11)
+
+## Queued
+- [ ] queued-ship - Structured queued (repo: alpha) (kind: ship)
+
+## Done
+EOF
+  fm_write_meta "$home/state/orphan-ship.meta" \
+    "window=firstmate:fm-orphan-ship" \
+    "worktree=$home/projects/visible" \
+    "project=alpha" \
+    "harness=codex" \
+    "kind=ship" \
+    "mode=ship"
+  printf 'working: orphan now live\n' > "$home/state/orphan-ship.status"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json)
+  printf '%s' "$out" | jq -e '
+    .main_inventory.valid == true
+      and .main_inventory.reason == null
+      and .main_inventory.unstructured_current_count == 0
+      and (.main_inventory.orphan_in_flight | length) == 0
+      and (([.tasks[].id] | sort) == ["orphan-ship", "visible-ship"])
+  ' >/dev/null || fail "main_inventory stayed invalid after meta + structured cleanup: $out"
+  pass "main_inventory discloses orphan/unstructured and clears when inventory is consistent"
 }
 
 test_event_hints_follow_reconciled_current_state() {
@@ -588,6 +661,7 @@ test_parked_scout_decision_stays_pending() {
 
 test_empty_fleet_json
 test_fixture_snapshot_json
+test_main_inventory_orphan_and_unstructured_disclosure
 test_event_hints_follow_reconciled_current_state
 test_open_decision_survives_later_unrelated_event
 test_secondmate_open_decision_survives_live_endpoint

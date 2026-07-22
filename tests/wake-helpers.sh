@@ -79,6 +79,11 @@ if [ "${1:-}" = "capture-pane" ]; then
   fi
   exit 0
 fi
+if [ "${1:-}" = "display-message" ]; then
+  case "$*" in
+    *pane_current_command*) printf '%s\n' "${FM_FAKE_TMUX_CURRENT_COMMAND:-}"; exit 0 ;;
+  esac
+fi
 exit 1
 SH
   chmod +x "$fakebin/tmux"

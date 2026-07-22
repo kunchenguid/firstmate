@@ -30,6 +30,12 @@
 #     endpoint.agent_alive is populated for secondmates only, where it is useful
 #     return-channel supervision data; other tasks use "not_checked".
 #   scout_reports[]: present data/<id>/report.md pointers.
+#   main_inventory: {valid,reason,orphan_in_flight[],unstructured_current_count} -
+#     main-home current-inventory checks shared with secondmate_home_summary_json
+#     (orphan structured in-flight ids with no state/<id>.meta, and unstructured
+#     current backlog rows). Does not invent live tasks; meta remains truth for
+#     workers. Bearings maps failures into omitted[] disclosure (and a Charted
+#     Next gate line) rather than silent empty Underway.
 #   secondmate_current: {records[],total,shown,truncated} - bounded current summaries
 #     for registered secondmates, selected from validated structured state inside
 #     each home with explicit provenance, freshness, endpoint evidence, and unknown
@@ -518,6 +524,33 @@ task_json_lines() {
           end)
       }'
   done | jq -s 'sort_by(.id)'
+}
+
+# Main-home current-inventory validity: same orphan / unstructured-current checks
+# used by secondmate_home_summary_json, without inventing live task rows.
+# Meta inventory remains the sole source of live workers; this object only
+# discloses backlog↔task inconsistency for renderers (Bearings omitted/gates).
+main_inventory_json() {  # <backlog-json> <tasks-json>
+  jq -n \
+    --argjson backlog "$1" \
+    --argjson tasks "$2" '
+    ([ $backlog.records[]?
+       | select((.state == "in_flight" or .state == "queued") and (.structured | not)) ]) as $unstructured_current
+    | ([ $backlog.records[]? | select(.state == "in_flight" and .structured) ]) as $owned_in_flight
+    | ([ $owned_in_flight[]
+         | select(.id as $id | [$tasks[].id] | index($id) | not)
+         | .id ]) as $orphan_in_flight
+    | (($unstructured_current | length) == 0
+       and ($orphan_in_flight | length) == 0) as $valid
+    | (if ($unstructured_current | length) > 0 then "unstructured current backlog row"
+       elif ($orphan_in_flight | length) > 0 then "in-flight backlog item has no child metadata"
+       else null end) as $reason
+    | {
+        valid:$valid,
+        reason:$reason,
+        orphan_in_flight:$orphan_in_flight,
+        unstructured_current_count:($unstructured_current | length)
+      }'
 }
 
 # Project one home's canonical structured inventory into the bounded shape a
@@ -1100,7 +1133,7 @@ secondmate_current_json() {  # <parent-tasks-json>
          terminal_evidence:$terminal,contradiction:$contradiction}')
     else
       if [ -n "$event_raw" ]; then
-        provenance=parent-event-fallback
+        provenance='parent-event-fallback'
         freshness=historical-event
       else
         provenance=unknown
@@ -1179,6 +1212,8 @@ if [ "$OUTPUT_MODE" = secondmate-home-summary ]; then
 fi
 
 SCOUT_REPORTS_JSON=$(scout_report_lines)
+MAIN_INVENTORY_JSON=$(main_inventory_json "$BACKLOG_JSON" "$TASKS_JSON") \
+  || { echo "fm-fleet-snapshot: main inventory summary failed" >&2; exit 1; }
 SECONDMATE_CURRENT_JSON=$(secondmate_current_json "$TASKS_JSON") \
   || { echo "fm-fleet-snapshot: registered secondmate aggregation failed" >&2; exit 1; }
 SECONDMATE_LANDED_JSON=$(secondmate_landed_from_current_json "$SECONDMATE_CURRENT_JSON") \
@@ -1194,6 +1229,7 @@ jq -n \
   --arg projects "$PROJECTS" \
   --argjson backlog "$BACKLOG_JSON" \
   --argjson tasks "$TASKS_JSON" \
+  --argjson main_inventory "$MAIN_INVENTORY_JSON" \
   --argjson scout_reports "$SCOUT_REPORTS_JSON" \
   --argjson secondmate_current "$SECONDMATE_CURRENT_JSON" \
   --argjson secondmate_landed "$SECONDMATE_LANDED_JSON" \
@@ -1207,6 +1243,7 @@ jq -n \
      roots:{fm_root:$fm_root,state:$state,data:$data,config:$config,projects:$projects},
      backlog:$backlog,
      tasks:($tasks | map(. + {backlog:backlog_by_id(.id)})),
+     main_inventory:$main_inventory,
      scout_reports:($scout_reports | map(. + {kind:report_kind(.id)})),
      secondmate_current:$secondmate_current,
      secondmate_landed:$secondmate_landed,

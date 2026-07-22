@@ -24,12 +24,83 @@ jobs:
       # re-spell the shellcheck command here; keep CI and the pre-push gate on it.
       - run: bin/fm-lint.sh
 
-  tests:
-    name: Behavior tests
+  # Deterministic proof that portable parallel shards + portable serial + Herdr
+  # equal the complete tests/*.test.sh inventory with no missing or duplicates.
+  test-coverage:
+    name: Test coverage guard
     runs-on: ubuntu-latest
-    # The suite should finish in ~2-3 minutes; this generous cap fails loudly on a
-    # hung watcher or tmux test instead of riding GitHub's 360-minute default.
-    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+      - name: Prove complete regression partition
+        run: bin/fm-test-run.sh --check-coverage
+
+  # Two duration-balanced portable parallel shards of the Phase 2 proven-isolated
+  # set only. Composition owner: bin/fm-test-run.sh (docs/fm-test-portable-shards.md).
+  tests-portable-parallel-1:
+    name: Behavior portable parallel 1
+    runs-on: ubuntu-latest
+    # Measured shard wall is ~1 min of serial sum on proven scripts; this cap is
+    # a hang tripwire with margin, not the expected healthy end of the lane.
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Install pinned ShellCheck
+        run: |
+          set -eu
+          bin/fm-install-shellcheck.sh "$RUNNER_TEMP/bin"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - name: Run portable parallel shard 1
+        run: |
+          set -eu
+          mkdir -p "$RUNNER_TEMP/fm-test"
+          bin/fm-test-run.sh --lane portable-parallel-1 \
+            --json "$RUNNER_TEMP/fm-test/fm-test-timing-portable-parallel-1.json"
+      - name: Upload shard 1 timing artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fm-test-timing-portable-parallel-1
+          path: ${{ runner.temp }}/fm-test/fm-test-timing-portable-parallel-1.json
+          if-no-files-found: warn
+
+  tests-portable-parallel-2:
+    name: Behavior portable parallel 2
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Install pinned ShellCheck
+        run: |
+          set -eu
+          bin/fm-install-shellcheck.sh "$RUNNER_TEMP/bin"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - name: Run portable parallel shard 2
+        run: |
+          set -eu
+          mkdir -p "$RUNNER_TEMP/fm-test"
+          bin/fm-test-run.sh --lane portable-parallel-2 \
+            --json "$RUNNER_TEMP/fm-test/fm-test-timing-portable-parallel-2.json"
+      - name: Upload shard 2 timing artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fm-test-timing-portable-parallel-2
+          path: ${{ runner.temp }}/fm-test/fm-test-timing-portable-parallel-2.json
+          if-no-files-found: warn
+
+  # Required portable serial remainder: watcher, lock, AFK, tmux, daemon,
+  # ambiguous, and other stateful tests. Real Herdr stays in tests-herdr.
+  tests-portable-serial:
+    name: Behavior portable serial
+    runs-on: ubuntu-latest
+    # Measured serial remainder is ~13 min wall without Herdr. Cap is a hang
+    # tripwire above observed p99 script cost and suite wall, not the expected
+    # healthy end (interim 25m full-suite slack reduced after sharding).
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v6
         with:
@@ -52,11 +123,176 @@ jobs:
           set -eu
           npm install -g tasks-axi
           tasks-axi --version
-      - run: |
+      - name: Run portable serial remainder
+        run: |
           set -eu
-          for test_script in tests/*.test.sh; do
-            "$test_script"
+          mkdir -p "$RUNNER_TEMP/fm-test"
+          bin/fm-test-run.sh --lane portable-serial \
+            --json "$RUNNER_TEMP/fm-test/fm-test-timing-portable-serial.json"
+      - name: Upload portable serial timing artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fm-test-timing-portable-serial
+          path: ${{ runner.temp }}/fm-test/fm-test-timing-portable-serial.json
+          if-no-files-found: warn
+
+  # Required real-Herdr lane: pinned install, serial real-herdr-gated family,
+  # hard-fail on "skip: herdr not found". Starts on Linux x86_64; if a genuine
+  # platform invariant fails (focus, cleanup, default-session tripwire), keep
+  # the failure evidence and move the job to macOS rather than skip assertions.
+  tests-herdr:
+    name: Behavior tests (Herdr)
+    runs-on: ubuntu-latest
+    # Real Herdr is slower than the portable suite; this is a hang tripwire,
+    # not the expected healthy end of the lane (estimate 15-40 min first cut).
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Require tools for real Herdr
+        run: |
+          set -eu
+          command -v jq >/dev/null || { echo "::error::jq is required"; exit 1; }
+          command -v python3 >/dev/null || { echo "::error::python3 is required"; exit 1; }
+          command -v curl >/dev/null || { echo "::error::curl is required"; exit 1; }
+          command -v tar >/dev/null || { echo "::error::tar is required"; exit 1; }
+          jq --version
+          python3 --version
+      - name: Install pinned Herdr
+        run: |
+          set -eu
+          bin/fm-install-herdr.sh "$RUNNER_TEMP/bin"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - name: Install pinned Treehouse
+        run: |
+          set -eu
+          # Several real-herdr-gated E2E scripts require treehouse for spawn
+          # worktree acquisition (presentation, workspace-per-home, autodetect).
+          bin/fm-install-treehouse.sh "$RUNNER_TEMP/bin"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - name: Assert Herdr pin and protocol floor
+        run: |
+          set -eu
+          command -v herdr >/dev/null || { echo "::error::herdr not on PATH after install"; exit 1; }
+          command -v treehouse >/dev/null || { echo "::error::treehouse not on PATH after install"; exit 1; }
+          herdr --version
+          treehouse --version
+          status=$(herdr status --json)
+          printf '%s\n' "$status"
+          version=$(printf '%s' "$status" | jq -r '.client.version // empty')
+          protocol=$(printf '%s' "$status" | jq -r '.client.protocol // empty')
+          [ "$version" = "0.7.4" ] || {
+            echo "::error::expected exact Herdr pin 0.7.4, got ${version:-<empty>}"
+            exit 1
+          }
+          case "$protocol" in
+            ''|*[!0-9]*) echo "::error::could not read client protocol"; exit 1 ;;
+          esac
+          [ "$protocol" -ge 16 ] || {
+            echo "::error::herdr protocol $protocol is below the required floor 16"
+            exit 1
+          }
+      - name: Start default Herdr session for fleet-state tripwire
+        run: |
+          set -eu
+          # Lab provision requires exactly one running default session so the
+          # default-session tripwire can arm. Start it headless; never use it
+          # for lab work (tests still refuse default and use fm-lab-* only).
+          mkdir -p "$RUNNER_TEMP/fm-herdr"
+          nohup herdr server >"$RUNNER_TEMP/fm-herdr/default-server.log" 2>&1 &
+          echo $! >"$RUNNER_TEMP/fm-herdr/default-server.pid"
+          attempt=0
+          while [ "$attempt" -lt 150 ]; do
+            running=$(herdr status --json 2>/dev/null | jq -r '.server.running // false' || echo false)
+            if [ "$running" = true ]; then
+              herdr session list --json | jq -e '
+                [.sessions[]? | select(.default == true and .name == "default" and .running == true)]
+                | length == 1
+              ' >/dev/null
+              echo "default Herdr session is running"
+              exit 0
+            fi
+            sleep 0.2
+            attempt=$((attempt + 1))
           done
+          echo "::error::default Herdr server did not become ready"
+          cat "$RUNNER_TEMP/fm-herdr/default-server.log" || true
+          exit 1
+      - name: Snapshot pre-suite Herdr sessions
+        run: |
+          set -eu
+          mkdir -p "$RUNNER_TEMP/fm-herdr"
+          bin/fm-herdr-ci-cleanup.sh snapshot "$RUNNER_TEMP/fm-herdr/sessions-before.json"
+      - name: Run real-Herdr family (serial, required)
+        run: |
+          set -eu
+          mkdir -p "$RUNNER_TEMP/fm-test"
+          # Serial only. Fail if any script reports herdr not found. Live
+          # harness credential tests stay outside this family (opt-in env only).
+          bin/fm-test-run.sh --family real-herdr-gated \
+            --fail-on-gate-skip 'herdr not found' \
+            --json "$RUNNER_TEMP/fm-test/fm-test-timing-herdr.json"
+      - name: Cleanup job-owned Herdr lab sessions
+        if: always()
+        run: |
+          set -eu
+          bin/fm-herdr-ci-cleanup.sh teardown "$RUNNER_TEMP/fm-herdr/sessions-before.json" || {
+            echo "::warning::lab session cleanup reported a problem; see logs"
+            # Surface diagnostics without weakening the suite result above.
+            herdr session list --json || true
+            exit 1
+          }
+      - name: Upload Herdr timing and diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fm-test-timing-herdr
+          path: |
+            ${{ runner.temp }}/fm-test/fm-test-timing-herdr.json
+            ${{ runner.temp }}/fm-herdr/sessions-before.json
+            ${{ runner.temp }}/fm-herdr/default-server.log
+          if-no-files-found: warn
+
+  # Aggregate per-lane timing into one summary artifact for critical-path review.
+  tests-timing-aggregate:
+    name: Behavior timing aggregate
+    runs-on: ubuntu-latest
+    needs:
+      - tests-portable-parallel-1
+      - tests-portable-parallel-2
+      - tests-portable-serial
+      - tests-herdr
+    if: always()
+    steps:
+      - uses: actions/checkout@v6
+      - name: Download lane timing artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: fm-test-timing-*
+          path: ${{ runner.temp }}/fm-test-aggregate
+          merge-multiple: true
+      - name: Build aggregate timing summary
+        run: |
+          set -eu
+          mkdir -p "$RUNNER_TEMP/fm-test"
+          shopt -s nullglob
+          inputs=("$RUNNER_TEMP"/fm-test-aggregate/fm-test-timing-*.json)
+          if [ "${#inputs[@]}" -eq 0 ]; then
+            echo "::warning::no per-lane timing JSON found to aggregate"
+            exit 0
+          fi
+          bin/fm-test-run.sh --aggregate-json \
+            "$RUNNER_TEMP/fm-test/fm-test-timing-aggregate.json" \
+            "${inputs[@]}"
+      - name: Upload aggregate timing artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fm-test-timing-aggregate
+          path: ${{ runner.temp }}/fm-test/fm-test-timing-aggregate.json
+          if-no-files-found: warn
 
   macos-stock-bash:
     name: Stock macOS Bash snapshot compatibility
@@ -81,16 +317,16 @@ jobs:
           snapshot_output=$(/bin/bash tests/fm-fleet-snapshot-view.test.sh)
           printf '%s\n' "$snapshot_output"
           snapshot_count=$(printf '%s\n' "$snapshot_output" | grep -c '^ok - ')
-          [ "$snapshot_count" -eq 13 ] || {
-            echo "::error::expected 13 snapshot/fleet-view tests, got $snapshot_count"
+          [ "$snapshot_count" -eq 14 ] || {
+            echo "::error::expected 14 snapshot/fleet-view tests, got $snapshot_count"
             exit 1
           }
 
           bearings_output=$(/bin/bash tests/fm-bearings-snapshot.test.sh)
           printf '%s\n' "$bearings_output"
           bearings_count=$(printf '%s\n' "$bearings_output" | grep -c '^ok - ')
-          [ "$bearings_count" -eq 36 ] || {
-            echo "::error::expected 36 Bearings tests, got $bearings_count"
+          [ "$bearings_count" -eq 39 ] || {
+            echo "::error::expected 39 Bearings tests, got $bearings_count"
             exit 1
           }
 

@@ -913,6 +913,63 @@ test_classify_stale_dedup_against_signal() {
   pass "classify_stale dedupes against the signal path seen marker"
 }
 
+# AFK incident regression: a nonterminal working: line that was already surfaced
+# (seen marker matches, including free-text "merged") must keep possible-wedge
+# aging. handle_wake must record the stale marker; housekeeping re-escalates
+# once at the configured bound.
+test_afk_nonterminal_working_merged_keeps_wedge_aging() {
+  local dir state key out win pane incident fakebin
+  dir=$(make_supercase afk-working-merged-wedge)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  win="sess:fm-wishlist-w1"
+  pane="$dir/pane.txt"
+  incident='working: stage 2 setup complete on PR #74 exact source branch rebased onto merged #76; task dates preserved'
+  printf '%s\n' "$incident" > "$state/wishlist-w1.status"
+  printf 'idle prompt $\n' > "$pane"
+  key=$(printf '%s' "wishlist-w1" | tr ':/.' '___')
+  # Simulate an earlier false-positive escalate that wrote the seen marker.
+  printf '%s' "$incident" > "$state/.subsuper-seen-status-$key"
+  out=$(FM_STATE_OVERRIDE="$state" classify_stale "$win" "$state")
+  case "$out" in
+    self\|*transient*) ;;
+    escalate\|*) fail "nonterminal working: escalated as terminal stale: $out" ;;
+    *)
+      case "$out" in
+        *already\ escalated*) fail "nonterminal working: treated as already-escalated terminal: $out" ;;
+        *) fail "nonterminal working: unexpected classify_stale: $out" ;;
+      esac
+      ;;
+  esac
+  FM_STATE_OVERRIDE="$state" handle_wake "stale: $win" "$state"
+  [ -e "$state/.subsuper-stale-$key" ] \
+    || fail "wedge stale marker was not recorded for already-seen nonterminal working:"
+  [ ! -s "$state/.subsuper-escalations" ] \
+    || fail "nonterminal working: stale incorrectly escalated immediately"
+  # Age the marker past the escalate bound (marker stores first-seen epoch).
+  echo $(( $(date +%s) - 500 )) > "$state/.subsuper-stale-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 housekeeping "$state"
+  [ -s "$state/.subsuper-escalations" ] \
+    || fail "housekeeping did not re-escalate aged nonterminal working: wedge"
+  grep -q 'possible wedge' "$state/.subsuper-escalations" \
+    || fail "housekeeping escalate was not a possible-wedge: $(cat "$state/.subsuper-escalations")"
+  pass "AFK nonterminal working:+merged keeps wedge aging and re-escalates at bound"
+}
+
+test_afk_genuine_done_still_terminal_stale() {
+  local dir state out
+  dir=$(make_supercase afk-genuine-done-stale)
+  state="$dir/state"
+  printf 'done: PR https://example.com/pull/76 checks green; stage 1 of 4 ready for firstmate merge\n' \
+    > "$state/stage1-w2.status"
+  out=$(FM_STATE_OVERRIDE="$state" classify_stale "sess:fm-stage1-w2" "$state")
+  case "$out" in escalate\|*) ;; *) fail "genuine done: stale did not escalate: $out" ;; esac
+  out=$(classify_check "check: /s/t.check.sh: merged")
+  case "$out" in escalate\|*) ;; *) fail "validated merge-check did not escalate: $out" ;; esac
+  pass "genuine done: and merge-check events still escalate"
+}
+
 test_pane_input_pending_bordered_idle_not_pending() {
   # THE regression: an idle claude composer is a bordered box ("│ > … │"). The
   # old idle regex only matched a BARE prompt, so every idle claude pane read as
@@ -1704,6 +1761,8 @@ test_tmux_composer_state_requires_matching_box_borders
 test_pane_input_pending_honors_idle_override_after_border_strip
 test_classify_signal_dedup_against_scan
 test_classify_stale_dedup_against_signal
+test_afk_nonterminal_working_merged_keeps_wedge_aging
+test_afk_genuine_done_still_terminal_stale
 test_pane_input_pending_bordered_idle_not_pending
 test_pane_input_pending_bordered_with_text_is_pending
 test_submit_ack_confirms_on_bordered_empty_composer

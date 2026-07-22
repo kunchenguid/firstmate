@@ -9,23 +9,22 @@
 # HEAD-continuity guard; see docs/architecture.md "No-mistakes gate authority boundary."
 disable_project_settings: true
 
-# Pin lint and the portable behavior suite to the same deterministic commands
-# the Linux CI jobs run, instead of leaving them to no-mistakes' default handling.
-# CI separately owns platform-specific compatibility lanes, including the stock
-# macOS Bash snapshot checks. Without a configured
-# commands.lint, the gate's lint step never ran the deterministic
+# Pin lint to the same deterministic command CI runs, instead of leaving it to
+# no-mistakes' default handling. Without a configured commands.lint, the gate's
+# lint step never ran the deterministic
 # `shellcheck bin/*.sh bin/backends/*.sh tests/*.sh` that CI runs, so info-level
 # ShellCheck findings (e.g. SC2015) were not surfaced locally before CI rejected
 # them. commands.lint delegates to bin/fm-lint.sh, the single owner of the lint
 # definition that .github/workflows/ci.yml also invokes, so local can never
 # diverge from CI again (parity asserted by tests/fm-lint.test.sh).
-# The test command mirrors the Linux behavior job in .github/workflows/ci.yml:
-# iterate every tests/*.test.sh, run each, and fail the step if any one exits
-# non-zero (an agent-driven test step has crashed the daemon). The e2e tests need
-# tmux on PATH, which the firstmate environment provides.
+#
+# Do not set commands.test to a complete tests/*.test.sh walk. Local no-mistakes
+# Test is intent-targeted validation of whether the change meets its brief;
+# .github/workflows/ci.yml owns broad regression (behavior suite, platform,
+# security, Herdr, tmux, and lifecycle coverage). A full-suite override here
+# would duplicate CI and defeat the targeted Test contract.
 commands:
   lint: 'bin/fm-lint.sh'
-  test: 'command -v tmux >/dev/null || { echo "tmux is required for e2e tests" >&2; exit 1; }; tmux -V; rc=0; for t in tests/*.test.sh; do echo "== $t =="; bash "$t" || rc=1; done; exit "$rc"'
 
 # Keep test evidence out of this repo; it stays in a temp dir instead.
 test:

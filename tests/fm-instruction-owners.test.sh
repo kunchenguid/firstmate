@@ -171,9 +171,9 @@ test_state_startup_and_ordinary_recovery_placement() {
 }
 
 test_compressed_agents_owner_map() {
-  assert_grep '`docs/configuration.md` is the single owner of the operational-home layout' "$AGENTS" \
+  assert_grep '`docs/configuration.md` is the single owner of the top-level operational-home layout' "$AGENTS" \
     "AGENTS.md lost the state-layout owner pointer"
-  assert_grep 'header is the single owner of composed commands, ordering, digest contents' "$AGENTS" \
+  assert_grep 'header is the single owner of composed commands, ordering, and digest contents' "$AGENTS" \
     "AGENTS.md lost the session-start owner pointer"
   assert_grep '`docs/configuration.md` owns dispatch-profile and runtime-backend schemas' "$AGENTS" \
     "AGENTS.md lost the dispatch-schema owner pointer"

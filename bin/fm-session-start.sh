@@ -114,10 +114,10 @@ subsection() { printf '\n%s\n%s\n' "$1" "$SUBRULE"; }
 
 # print_file_or_absent <path> <label>: full contents under a labeled
 # subsection, or an explicit ABSENT marker. Absence is semantically
-# meaningful for every one of these files (captain.md absent = template
-# defaults, projects.md absent = rebuild from clones, etc. - AGENTS.md
-# section 3) and must never be confused with an empty-but-present file, so
-# the two cases print differently.
+# meaningful for every one of these files (captain.md absent = firstmate
+# repo built-in defaults, projects.md absent = rebuild from clones, etc. -
+# AGENTS.md section 3) and must never be confused with an empty-but-present
+# file, so the two cases print differently.
 print_file_or_absent() {
   local path=$1 label=$2
   subsection "$label"

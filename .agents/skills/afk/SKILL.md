@@ -1,6 +1,8 @@
 ---
 name: afk
-description: Enter away-mode supervision. Use when the user invokes /afk (e.g. "/afk", "/afk back in an hour", "going afk"). Sets a durable away-mode flag so the sub-supervisor daemon can self-handle routine wakes and escalate captain-relevant events plus bounded declared-external-wait rechecks as batched digests, cutting supervision token cost during walk-away stretches. Exit is automatic; any real (unmarked) message returns to full per-wake responsiveness.
+description: >-
+  Enter away-mode supervision when the captain invokes /afk, says they are going afk, `state/.afk` exists, an incoming message starts with `FM_INJECT_MARK`, or any `state/.subsuper-*` marker is involved.
+  It sets a durable away-mode flag so the sub-supervisor daemon can self-handle routine wakes and escalate captain-relevant events plus bounded declared-external-wait rechecks as batched digests during walk-away stretches, then exits automatically when any real unmarked message returns firstmate to full per-wake responsiveness.
 user-invocable: true
 metadata:
   internal: true
@@ -124,6 +126,21 @@ A bordered-empty or ghost-only composer is recognized as empty where that backen
 when a steer's Enter is positively swallowed, so firstmate learns an instruction
 did not land instead of leaving it unsubmitted.
 
+**Busy-queued Enter exception (tmux backend, opencode 1.18.4).** While opencode
+is mid-turn, Enter is accepted and queued for after the current turn but the
+composer keeps showing the typed text the whole time, so the cleared-composer
+check alone false-positives on a swallowed Enter for every steer sent to a
+busy opencode pane. The shared `fm_tmux_submit_enter_core` falls back to
+`fm_pane_is_busy` once the Enter-retry budget is spent: a busy pane means the
+Enter was accepted and queued (reported as `empty` so the caller does not
+re-send), while an idle pane keeps `pending` as a genuine swallow. The
+strict-buffer-clears-only-on-`empty` policy above still holds for the daemon
+and the lenient-`pending`-fails-for-`fm-send` policy still holds for steer
+verification - this exception is a busy-queue is treated as a delivered
+Enter, not a swallowed one. The herdr adapter observes the same opencode
+behavior but needs a separate fix; the gap is recorded in
+`docs/herdr-backend.md` rather than papered over here.
+
 ## Classification policy
 
 The daemon wraps `fm-watch.sh`, runs the watcher as a child, classifies each
@@ -135,18 +152,17 @@ While `state/.afk` exists the daemon owns the watcher, so the watcher reverts to
 
 Classify each wake this way:
 
-- `signal` whose status content has no captain-relevant verb
-  (`done:|needs-decision:|blocked:|failed:|PR ready|checks green|ready in branch|merged`)
-  -> self-handle. Captain-relevant verb -> escalate.
+- `signal` with a terminal captain verb (`done:`, `needs-decision:`, `blocked:`, or `failed:`) -> escalate.
+  A nonterminal progress verb remains nonterminal even when its prose contains a legacy free-text token such as `PR ready`, `checks green`, `ready in branch`, or `merged`; only a bare legacy line with such a token escalates.
+  Other signals with no captain-relevant status -> self-handle.
 - `signal` or `stale` for a declared `paused:` external wait -> self-handle and track the pause rather than a wedge.
   If it remains declared and idle past `FM_PAUSE_RESURFACE_SECS` (default 3600s), housekeeping sends one awaiting-external recheck and resets the pause window.
 - `check` -> always escalate. Check scripts print only when firstmate should wake.
-- `stale` with a terminal status -> escalate. Non-terminal stale is transient:
-  record a marker and self-handle. If the pane is still idle past
-  `FM_STALE_ESCALATE_SECS` (default 240s), housekeeping escalates it as a
-  possible wedge. This bounds wedge-detection latency to the threshold plus a
-  tick: a delay, never a loss. Healthy crewmates are autonomous and do not wait
-  on firstmate mid-task.
+- `stale` with a terminal status or bare legacy captain-relevant line -> escalate.
+  Nonterminal progress remains transient even when its prose contains a legacy free-text token or its seen-status marker already matches, so record a marker and self-handle.
+  If the pane is still idle past `FM_STALE_ESCALATE_SECS` (default 240s), housekeeping escalates it as a possible wedge.
+  This bounds wedge-detection latency to the threshold plus a tick: a delay, never a loss.
+  Healthy crewmates are autonomous and do not wait on firstmate mid-task.
 - `heartbeat` -> self-handle. The daemon runs its own cheap bash fleet scan
   every `FM_HEARTBEAT_SCAN_SECS` (default 300s) as the catch-all for a
   captain-relevant status line the per-wake classifier might miss.
@@ -191,9 +207,8 @@ the marker lets firstmate distinguish it from a real captain message.
   classification or relay, so the digest text firstmate sees is clean.
 - **Portable singleton lock** - the daemon uses the repo's portable lock helper
   (`fm-wake-lib.sh`) instead of `flock`, which is absent on macOS.
-- **Dedupe across signal/stale/scan** - `classify_signal` and `classify_stale`
-  both check the seen-status marker before escalating, so a status escalated by
-  one path is not re-escalated by another in the same digest.
+- **Dedupe across signal/stale/scan** - `classify_signal` and terminal `classify_stale` paths check the seen-status marker before escalating, so a captain-relevant status escalated by one path is not re-escalated by another in the same digest.
+  The marker does not clear or suppress possible-wedge aging for a nonterminal progress line.
 - **Auto-discovered supervisor pane** - the daemon resolves its own BACKEND
   (tmux vs herdr) and TARGET independently, mirroring
   `bin/fm-backend.sh`'s own runtime auto-detection. Backend: `FM_SUPERVISOR_BACKEND`
