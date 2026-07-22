@@ -542,6 +542,7 @@ def collect_harness_sessions(
     run: dict[str, Any],
     max_files: int,
     max_bytes: int,
+    ended_at: Optional[int],
 ) -> None:
     harness = str(run.get("harness") or "").lower()
     source = next((name for name in SESSION_PARSERS if harness.startswith(name)), None)
@@ -554,6 +555,15 @@ def collect_harness_sessions(
     }
     worktree = canonical(str(run["worktree_ref"]))
     parser = SESSION_PARSERS[source]
+    connection.execute(
+        "DELETE FROM sessions WHERE run_id=? AND source=?",
+        (run["run_id"], source),
+    )
+    connection.execute(
+        "DELETE FROM evidence WHERE run_id=? AND kind=?",
+        (run["run_id"], f"{source}-session"),
+    )
+    candidates: list[dict[str, Any]] = []
     for path in candidate_files(roots[source], int(run["started_at"]), max_files):
         metrics = parser(path, max_bytes)
         if not metrics.get("cwd") or canonical(str(metrics["cwd"])) != worktree:
@@ -561,7 +571,20 @@ def collect_harness_sessions(
         session_start = metrics.get("started_at")
         if session_start is not None and session_start < int(run["started_at"]) - 300:
             continue
-        upsert_session(connection, str(run["run_id"]), metrics)
+        if ended_at is not None and (session_start is None or session_start > ended_at):
+            continue
+        if ended_at is not None and metrics.get("ended_at") is not None and metrics["ended_at"] > ended_at:
+            continue
+        candidates.append(metrics)
+    if candidates:
+        selected = min(
+            candidates,
+            key=lambda item: (
+                abs(int(item.get("started_at") or run["started_at"]) - int(run["started_at"])),
+                str(item["evidence_ref"]),
+            ),
+        )
+        upsert_session(connection, str(run["run_id"]), selected)
 
 
 def findings(value: Any) -> list[tuple[str, Optional[str]]]:
@@ -604,7 +627,7 @@ def collect_no_mistakes(
     if source is None:
         return 0, None, None, None, None, None
     branch = run.get("branch_ref") or f"fm/{run['task_id']}"
-    project = canonical(str(run.get("project_ref") or ""))
+    project = canonical(str(run.get("worktree_ref") or ""))
     try:
         source.create_function("fm_canonical", 1, canonical, deterministic=True)
         where = "r.branch=? AND r.created_at>=?"
@@ -668,12 +691,16 @@ def collect_no_mistakes(
         "DELETE FROM quality_findings WHERE run_id=? AND source LIKE 'no-mistakes:%'",
         (run["run_id"],),
     )
+    connection.execute(
+        "DELETE FROM evidence WHERE run_id=? AND kind IN ('no-mistakes-run','no-mistakes-pr','quality-log')",
+        (run["run_id"],),
+    )
     for nm_run in matched:
         nm_id = safe_identifier(nm_run["id"], "nm") or stable_key(nm_run["id"])
         nm_ref = f"no-mistakes://run/{nm_id}"
         evidence(connection, str(run["run_id"]), "no-mistakes-run", nm_ref)
         if nm_run["pr_url"]:
-            evidence(connection, str(run["run_id"]), "pr", str(nm_run["pr_url"]))
+            evidence(connection, str(run["run_id"]), "no-mistakes-pr", str(nm_run["pr_url"]))
         try:
             aggregate = source.execute(
                 """SELECT COALESCE(SUM(input_tokens),0) AS input_tokens,
@@ -979,7 +1006,6 @@ def collect_one(
     status_start = integer(meta.get("status_start_line"))
     insert_status_events(connection, run, state / f"{task_id}.status", status_start)
     outcome, ended, first_activity, interventions, waits = outcome_and_interventions(connection, run_id, now)
-    collect_harness_sessions(connection, run, max_files, max_bytes)
     nm_runs, first_pass, nm_status, nm_pr_state, nm_pr, nm_ended = collect_no_mistakes(
         connection, run, no_mistakes_db
     )
@@ -991,6 +1017,7 @@ def collect_one(
     elif nm_status == "completed" and outcome == "active":
         outcome = "done-verified"
         ended = nm_ended or ended
+    collect_harness_sessions(connection, run, max_files, max_bytes, ended)
     summarize_run(connection, run_id, first_pass, nm_runs)
     connection.execute(
         """UPDATE runs SET first_activity_at=?,last_seen_at=?,ended_at=?,outcome=?,

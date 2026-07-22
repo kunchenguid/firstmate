@@ -10,11 +10,13 @@ HOME_DIR="$TMP_ROOT/home"
 STATE="$HOME_DIR/state"
 DATA="$HOME_DIR/data"
 WT="$TMP_ROOT/worktree"
+PROJECT="$TMP_ROOT/project"
 PI_SESSIONS="$TMP_ROOT/pi-sessions"
 NM_DB="$TMP_ROOT/no-mistakes.sqlite"
 COLLECTOR="$ROOT/bin/fm-observe.py"
 STATUS="$ROOT/bin/fm-status.sh"
 mkdir -p "$STATE" "$DATA" "$PI_SESSIONS/session-dir"
+mkdir -p "$PROJECT"
 
 fm_git_init_commit "$WT"
 BASE=$(git -C "$WT" rev-parse HEAD)
@@ -34,13 +36,23 @@ status_start_line=1
 base_commit=$BASE
 window=firstmate:fm-observe-feature
 worktree=$WT
-project=$WT
+project=$PROJECT
 harness=pi
 kind=ship
 mode=no-mistakes
 yolo=off
 model=openai-codex/test-model
 effort=high
+EOF
+
+mkdir -p "$PI_SESSIONS/no-mistakes" "$PI_SESSIONS/reused-worktree"
+cat > "$PI_SESSIONS/no-mistakes/session.jsonl" <<EOF
+{"type":"session","version":3,"id":"pi-no-mistakes","timestamp":"2026-01-01T00:02:00Z","cwd":"$WT"}
+{"type":"message","timestamp":"2026-01-01T00:02:01Z","message":{"role":"assistant","usage":{"input":999,"output":999,"totalTokens":1998}}}
+EOF
+cat > "$PI_SESSIONS/reused-worktree/session.jsonl" <<EOF
+{"type":"session","version":3,"id":"pi-later-run","timestamp":"2026-01-01T00:10:00Z","cwd":"$WT"}
+{"type":"message","timestamp":"2026-01-01T00:10:01Z","message":{"role":"assistant","usage":{"input":777,"output":777,"totalTokens":1554}}}
 EOF
 printf 'done: old run must not be attributed\n' > "$STATE/observe-feature.status"
 for spec in \
@@ -221,10 +233,11 @@ assert r == (50, 'completed', 0, 10, 5, 0), r
 assert c.execute("SELECT COUNT(*) FROM sessions WHERE source='no-mistakes'").fetchone()[0] == 0
 assert c.execute("SELECT COUNT(*) FROM quality_findings").fetchone()[0] == 0
 refs = [row[0] for row in c.execute("SELECT ref FROM evidence WHERE kind='no-mistakes-run'")]
-assert 'no-mistakes://run/01NMOBSERVE' in refs
+assert 'no-mistakes://run/01NMOBSERVE' not in refs
 assert 'no-mistakes://run/01NMNEW59' in refs
 assert 'no-mistakes://run/01NMNEW09' not in refs
 assert not any('OTHER' in ref for ref in refs)
+assert c.execute("SELECT COUNT(*) FROM evidence WHERE kind IN ('no-mistakes-pr','quality-log')").fetchone()[0] == 0
 PY
 then
   fail "newest no-mistakes ordering and limit assertions failed"
