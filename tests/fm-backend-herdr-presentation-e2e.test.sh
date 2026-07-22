@@ -36,6 +36,7 @@ mkdir -p "$FAKEBIN"
 REAL_MOVER="$ROOT/bin/backends/herdr-workspace-move.py"
 export REAL_HERDR REAL_TREEHOUSE REAL_MOVER HERDR_CALL_LOG TREEHOUSE_CALL_LOG MOVE_CALL_LOG FOCUS_AUDIT_LOG HERDR_ORIGINAL_PATH HERDR_LAB_HELPER
 export ACTIVE_SEEDED_CONTROL POST_CREATE_ABORT_CONTROL TMP_ROOT
+export POST_CREATE_ABORT_STATE POST_CREATE_ABORT_A_WT POST_CREATE_ABORT_B_WT
 
 # Log every production-adapter call, remove its already-validated trailing
 # session flag, and send the operation through the lab helper so that helper
@@ -179,7 +180,14 @@ if [ "$status" -eq 0 ] && [ "${1:-} ${2:-}" = "pane get" ] && [ -d "$POST_CREATE
   for task_dir in "$POST_CREATE_ABORT_CONTROL"/abort-*; do
     [ -d "$task_dir" ] || continue
     [ "${3:-}" = "$(cat "$task_dir/task-pane" 2>/dev/null || true)" ] || continue
-    out=$(printf '%s' "$out" | jq --arg cwd "$POST_CREATE_ABORT_CONTROL/not-a-worktree" '.result.pane.foreground_cwd = $cwd')
+    task=${task_dir##*/}
+    case "$task" in
+      abort-a) abort_wt=$POST_CREATE_ABORT_A_WT ;;
+      abort-b) abort_wt=$POST_CREATE_ABORT_B_WT ;;
+      *) exit 1 ;;
+    esac
+    out=$(printf '%s' "$out" | jq --arg cwd "$abort_wt" '.result.pane.foreground_cwd = $cwd')
+    mkdir -p "$POST_CREATE_ABORT_STATE/$task.meta"
     break
   done
 fi
@@ -469,6 +477,12 @@ printf 'Projection abort fixture A.\n' > "$HOME_DIR/data/abort-a/brief.md"
 printf 'Projection abort fixture B.\n' > "$HOME_DIR/data/abort-b/brief.md"
 printf 'Projection lock contention fixture.\n' > "$HOME_DIR/data/lock-contended/brief.md"
 make_project "$PROJECT_DIR"
+POST_CREATE_ABORT_STATE="$HOME_DIR/state"
+POST_CREATE_ABORT_A_WT="$TMP_ROOT/abort-a-worktree"
+POST_CREATE_ABORT_B_WT="$TMP_ROOT/abort-b-worktree"
+git -C "$PROJECT_DIR" worktree add -q -b abort-a-fixture "$POST_CREATE_ABORT_A_WT"
+git -C "$PROJECT_DIR" worktree add -q -b abort-b-fixture "$POST_CREATE_ABORT_B_WT"
+export POST_CREATE_ABORT_STATE POST_CREATE_ABORT_A_WT POST_CREATE_ABORT_B_WT
 
 # Keep one ordinary primary task live so the durable firstmate workspace is
 # first and remains present while disposable workers are projected around it.
@@ -746,10 +760,10 @@ spawn_task abort-b "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/abort-b.out" 2> "$TMP
 ABORT_B_PID=$!
 if wait "$ABORT_A_PID"; then fail "post-create abort fixture A unexpectedly succeeded"; fi
 if wait "$ABORT_B_PID"; then fail "post-create abort fixture B unexpectedly succeeded"; fi
-grep -F "did not yield an isolated worktree" "$TMP_ROOT/abort-a.err" >/dev/null 2>&1 \
-  || fail "post-create abort fixture A did not reach the armed validation failure"
-grep -F "did not yield an isolated worktree" "$TMP_ROOT/abort-b.err" >/dev/null 2>&1 \
-  || fail "post-create abort fixture B did not reach the armed validation failure"
+grep -F "Is a directory" "$TMP_ROOT/abort-a.err" >/dev/null 2>&1 \
+  || fail "post-create abort fixture A did not reach the armed metadata failure"
+grep -F "Is a directory" "$TMP_ROOT/abort-b.err" >/dev/null 2>&1 \
+  || fail "post-create abort fixture B did not reach the armed metadata failure"
 ABORT_A_PANE=$(cat "$POST_CREATE_ABORT_CONTROL/abort-a/task-pane")
 ABORT_B_PANE=$(cat "$POST_CREATE_ABORT_CONTROL/abort-b/task-pane")
 ABORT_SEQUENCE=$(sed -n "$((ABORT_FOCUS_START + 1)),\$p" "$FOCUS_AUDIT_LOG" | awk -F '\t' -v a="$ABORT_A_PANE" -v b="$ABORT_B_PANE" '
@@ -776,8 +790,9 @@ for ABORT_PANE in "$ABORT_A_PANE" "$ABORT_B_PANE"; do
     fail "serialized post-create abort cleanup left exact task pane $ABORT_PANE alive"
   fi
 done
-[ ! -e "$HOME_DIR/state/abort-a.meta" ] && [ ! -e "$HOME_DIR/state/abort-b.meta" ] \
-  || fail "post-create abort fixtures published task metadata before launch"
+[ ! -f "$HOME_DIR/state/abort-a.meta" ] && [ ! -f "$HOME_DIR/state/abort-b.meta" ] \
+  || fail "post-create abort fixtures published regular task metadata before launch"
+rm -rf "$HOME_DIR/state/abort-a.meta" "$HOME_DIR/state/abort-b.meta"
 rm -rf "$POST_CREATE_ABORT_CONTROL"
 rm -f "$HOME_DIR/state/abort-a.herdr-presentation" "$HOME_DIR/state/abort-b.herdr-presentation"
 pass "real Herdr lab: concurrent post-create abort cleanup stays serialized with exact focus restoration"
