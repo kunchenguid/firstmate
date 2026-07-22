@@ -31,7 +31,7 @@ test_fm_home_parameterization() {
   out=$(FM_HOME="$home_one" "$ROOT/bin/fm-project-mode.sh" app)
   [ "$out" = "local-only on" ] || fail "fm-project-mode did not read projects.md from FM_HOME"
   out=$(FM_HOME="$home_two" "$ROOT/bin/fm-project-mode.sh" app 2>/dev/null)
-  [ "$out" = "no-mistakes off" ] || fail "fm-project-mode did not isolate missing registry by home"
+  [ "$out" = "direct-PR off" ] || fail "fm-project-mode did not isolate missing registry by home"
 
   FM_HOME="$home_one" "$ROOT/bin/fm-brief.sh" task-a app >/dev/null || fail "brief scaffold failed under FM_HOME"
   brief="$home_one/data/task-a/brief.md"
