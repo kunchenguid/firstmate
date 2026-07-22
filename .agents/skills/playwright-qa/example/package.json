@@ -1,0 +1,12 @@
+{
+  "name": "playwright-qa-example",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Runnable proof of the firstmate Playwright QA harness. Not published; documents the demo's own dev dependency.",
+  "scripts": {
+    "test": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.61.1"
+  }
+}

@@ -1,0 +1,3 @@
+# Playwright QA run artifacts - traces, videos, and the HTML report.
+# Screenshots live in qa/screenshots/ and are committed as evidence.
+results/

@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Playwright QA demo page</title>
+  <style>
+    :root { color-scheme: light dark; }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      font: 16px/1.5 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+      background: linear-gradient(135deg, #293c46, #4c6a7c);
+      color: #fff;
+    }
+    main {
+      text-align: center;
+      padding: 3rem;
+      max-width: 40rem;
+    }
+    h1 { font-size: clamp(1.8rem, 4vw, 3rem); margin: 0 0 1rem; }
+    p { opacity: 0.9; margin: 0 0 2rem; }
+    button {
+      font: inherit;
+      font-weight: 600;
+      color: #fff;
+      background: #f15a29;
+      border: 0;
+      border-radius: 999px;
+      padding: 0.75rem 2rem;
+      cursor: pointer;
+    }
+    #status[data-clicked="true"] { color: #ffd7c7; font-weight: 600; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Firstmate Playwright QA harness</h1>
+    <p>Deterministic, headless, exact-viewport UI checks with committed screenshot evidence.</p>
+    <button id="cta" type="button">Run the checks</button>
+    <p id="status" data-clicked="false">Ready.</p>
+  </main>
+  <script>
+    document.getElementById('cta').addEventListener('click', () => {
+      const status = document.getElementById('status');
+      status.textContent = 'Checks passed.';
+      status.dataset.clicked = 'true';
+    });
+  </script>
+</body>
+</html>

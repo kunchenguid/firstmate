@@ -1,0 +1,5 @@
+# The demo installs Playwright locally to run; never commit installed deps or
+# run artifacts. The committed evidence is qa/screenshots/*.png.
+node_modules/
+package-lock.json
+qa/results/
