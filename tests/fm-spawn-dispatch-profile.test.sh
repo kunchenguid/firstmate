@@ -13,6 +13,14 @@ set -u
 SPAWN="$ROOT/bin/fm-spawn.sh"
 TMP_ROOT=$(fm_test_tmproot fm-spawn-dispatch-profile)
 
+PI_TEST_COMMAND=${FM_PI_COMMAND:-}
+if [ -z "$PI_TEST_COMMAND" ] && command -v npm >/dev/null 2>&1; then
+  PI_TEST_COMMAND="$(npm prefix -g)/bin/pi"
+fi
+if [ ! -x "$PI_TEST_COMMAND" ]; then
+  PI_TEST_COMMAND=$(command -v pi 2>/dev/null || true)
+fi
+
 make_spawn_fakebin() {
   local dir=$1 fakebin
   fakebin=$(fm_fakebin "$dir")
@@ -385,6 +393,98 @@ JSON
   pass "top-level default array resolves through quota selection into the real spawn path"
 }
 
+write_pi_delegated_profile() {
+  local home=$1 agent_dir
+  [ -x "$PI_TEST_COMMAND" ] || return 2
+  agent_dir="$home/pi-agent"
+  mkdir -p "$agent_dir"
+  printf '%s\n' '{"compaction":{"enabled":true,"reserveTokens":108800,"keepRecentTokens":20000}}' > "$agent_dir/settings.json"
+  {
+    printf 'pi_command=%s\n' "$PI_TEST_COMMAND"
+    printf 'pi_version=0.81.1\n'
+    printf 'agent_dir=%s\n' "$agent_dir"
+    printf 'model=openai-codex/gpt-5.6-sol\n'
+    printf 'context_window=272000\n'
+    printf 'effort=medium\n'
+    printf 'boundary_percent=60\n'
+    printf 'keep_recent_tokens=20000\n'
+  } > "$home/config/pi-delegated-profile"
+}
+
+test_pi_delegated_profile_pins_command_model_effort_and_resources() {
+  local rec id out status launch
+  id=profile-pi-delegated-z81
+  rec=$(make_spawn_case profile-pi-delegated pi "$id")
+  read_case_record "$rec"
+  if ! write_pi_delegated_profile "$HOME_DIR"; then
+    echo "skip: Pi coding-agent command not found for delegated profile dispatch checks"
+    return
+  fi
+
+  out=$(PI_CODING_AGENT_DIR="$CASE_DIR/hostile-agent" HOME="$CASE_DIR/hostile-home" \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "configured delegated Pi spawn should succeed"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" pi openai-codex/gpt-5.6-sol medium
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "PI_CODING_AGENT_DIR='$HOME_DIR/pi-agent'" "Pi launch did not override hostile ambient agent-dir resolution"
+  assert_contains "$launch" "'$PI_TEST_COMMAND' --model 'openai-codex/gpt-5.6-sol' --thinking 'medium'" "Pi launch did not pin the exact model and explicit medium thinking"
+  assert_contains "$launch" "--no-approve --no-extensions --models 'openai-codex/gpt-5.6-sol'" "Pi launch did not neutralize project settings, extension discovery, and cycling"
+  assert_contains "$launch" "-e '$ROOT/bin/fm-pi-profile-guard.ts'" "Pi launch did not explicitly load the profile guard"
+  assert_not_contains "$launch" "xhigh" "delegated Pi launch inherited primary xhigh"
+  pass "configured delegated Pi profile overrides hostile ambience and pins the controlled command"
+}
+
+test_pi_delegated_profile_refuses_model_and_effort_overrides() {
+  local rec id out status
+  id=profile-pi-refuse-z82
+  rec=$(make_spawn_case profile-pi-refuse pi "$id")
+  read_case_record "$rec"
+  if ! write_pi_delegated_profile "$HOME_DIR"; then
+    echo "skip: Pi coding-agent command not found for delegated profile override checks"
+    return
+  fi
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model other/model)
+  status=$?
+  expect_code 1 "$status" "delegated Pi model override should be refused"
+  assert_contains "$out" "refuses model override" "model refusal was not actionable"
+  assert_absent "$HOME_DIR/state/$id.meta" "model refusal happened after endpoint/meta creation"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --effort xhigh)
+  status=$?
+  expect_code 1 "$status" "delegated Pi effort override should be refused"
+  assert_contains "$out" "refuses effort override" "effort refusal was not actionable"
+  assert_absent "$HOME_DIR/state/$id.meta" "effort refusal happened after endpoint/meta creation"
+  pass "configured delegated Pi profile refuses model and effort substitution before launch"
+}
+
+test_pi_delegated_profile_refuses_every_raw_launch_shape() {
+  local rec id out status raw
+  id=profile-pi-raw-refuse-z83
+  rec=$(make_spawn_case profile-pi-raw-refuse pi "$id")
+  read_case_record "$rec"
+  if ! write_pi_delegated_profile "$HOME_DIR"; then
+    echo "skip: Pi coding-agent command not found for delegated profile raw-launch checks"
+    return
+  fi
+
+  for raw in \
+    "PI_CODING_AGENT_DIR=/tmp/hostile $PI_TEST_COMMAND --thinking xhigh" \
+    "env PI_CODING_AGENT_DIR=/tmp/hostile $PI_TEST_COMMAND --thinking xhigh" \
+    "bash -lc '$PI_TEST_COMMAND --thinking xhigh'" \
+    "custom-agent --unprovable"; do
+    out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+      "$id" "$PROJ_DIR" --harness "$raw")
+    status=$?
+    expect_code 1 "$status" "active delegated Pi profile should refuse raw launch: $raw"
+    assert_contains "$out" "cannot prove a raw launch command" "raw launch refusal was not actionable: $raw"
+    assert_absent "$HOME_DIR/state/$id.meta" "raw launch refusal happened after endpoint/meta creation: $raw"
+    [ ! -s "$LAUNCH_LOG" ] || fail "raw launch reached the backend command handoff: $raw"
+  done
+  pass "active delegated Pi profile refuses env, env-command, shell-wrapper, and unknown raw launches"
+}
+
 test_batch_forwards_shared_profile_flags() {
   local rec id1 id2 out status
   id1=profile-batch-a-z9
@@ -437,6 +537,9 @@ test_grok_omits_invalid_xhigh_reasoning_effort
 test_opencode_threads_model_and_ignores_effort_axis
 test_pi_threads_model_and_max_effort
 test_quota_selected_default_array_reaches_spawn
+test_pi_delegated_profile_pins_command_model_effort_and_resources
+test_pi_delegated_profile_refuses_model_and_effort_overrides
+test_pi_delegated_profile_refuses_every_raw_launch_shape
 test_batch_forwards_shared_profile_flags
 test_active_dispatch_profile_does_not_block_secondmate_launch
 

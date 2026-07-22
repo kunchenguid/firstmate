@@ -135,6 +135,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-pi-profile.sh
+. "$SCRIPT_DIR/fm-pi-profile.sh"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
 # a direct report (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
@@ -431,9 +433,9 @@ launch_template() {
     opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}}'\'' opencode __MODELFLAG__--prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     pi)
       if [ "$kind" = secondmate ]; then
-        printf '%s' 'pi __MODELFLAG____EFFORTFLAG__-e __PITURNEND__ -e __PIWATCH__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+        printf '%s' '__PIBRIEFENV__ __PICMD__ __MODELFLAG____EFFORTFLAG____PIPROFILE__-e __PITURNEND__ -e __PIWATCH__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
       else
-        printf '%s' 'pi __MODELFLAG____EFFORTFLAG__-e __PIEXT__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+        printf '%s' '__PIBRIEFENV__ __PICMD__ __MODELFLAG____EFFORTFLAG____PIPROFILE__-e __PIEXT__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
       fi
       ;;
     # grok (Grok Build TUI): a positional prompt starts the supervised interactive
@@ -448,8 +450,10 @@ launch_template() {
   esac
 }
 
+RAW_LAUNCH=0
 case "$ARG3" in
   *' '*)  # raw launch command (unverified-adapter escape hatch)
+    RAW_LAUNCH=1
     LAUNCH=$ARG3
     HARNESS=""
     for word in $LAUNCH; do
@@ -751,6 +755,34 @@ else
   BRIEF="$DATA/$ID/brief.md"
 fi
 [ -f "$BRIEF" ] || { echo "error: no brief at $BRIEF" >&2; exit 1; }
+
+# A configured delegated Pi profile is proved before any backend creates an
+# endpoint. Omitted axes are filled from the home policy; conflicting caller
+# axes and raw Pi launch commands are refused because their exact profile cannot
+# be proved. --no-approve neutralizes trusted project overrides, while
+# --no-extensions suppresses every ambient cancellation surface before the
+# required FirstMate extensions are explicitly re-added below.
+PICMD=pi
+PIPROFILE=
+if [ -f "$CONFIG/pi-delegated-profile" ] && [ "$RAW_LAUNCH" -eq 1 ]; then
+  echo "error: delegated Pi profile is active and cannot prove a raw launch command" >&2
+  exit 1
+fi
+if [ "$HARNESS" = pi ] && [ -f "$CONFIG/pi-delegated-profile" ]; then
+  fm_pi_profile_load "$CONFIG" "$PROJ_ABS" || exit 1
+  if [ "$MODEL_SET" -eq 1 ] && [ "$MODEL" != "$FM_PI_MODEL" ]; then
+    echo "error: delegated Pi profile refuses model override '$MODEL' (pinned '$FM_PI_MODEL')" >&2
+    exit 1
+  fi
+  if [ "$EFFORT_SET" -eq 1 ] && [ "$EFFORT" != medium ]; then
+    echo "error: delegated Pi profile refuses effort override '$EFFORT' (required 'medium')" >&2
+    exit 1
+  fi
+  MODEL=$FM_PI_MODEL
+  EFFORT=medium
+  PICMD="PI_CODING_AGENT_DIR=$(shell_quote "$FM_PI_AGENT_DIR") FM_PI_DELEGATED_MODEL=$(shell_quote "$FM_PI_MODEL") FM_PI_DELEGATED_CONTEXT_WINDOW=$(shell_quote "$FM_PI_CONTEXT_WINDOW") $(shell_quote "$FM_PI_COMMAND")"
+  PIPROFILE="--no-approve --no-extensions --models $(shell_quote "$FM_PI_MODEL") -e $(shell_quote "$FM_ROOT/bin/fm-pi-profile-guard.ts") "
+fi
 
 # PROJ_ABS can still carry a symlinked path component (e.g. macOS's /tmp ->
 # /private/tmp) when it came from the ship/scout branch's logical `pwd` above.
@@ -1261,6 +1293,8 @@ sq_piwatch=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-pi-watch.ts")
 sq_opinput=$(shell_quote "$FM_ROOT/bin/fm-operational-input.sh")
 MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
 EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT")
+LAUNCH=${LAUNCH//__PICMD__/$PICMD}
+LAUNCH=${LAUNCH//__PIPROFILE__/$PIPROFILE}
 LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
 LAUNCH=${LAUNCH//__EFFORTFLAG__/$EFFORTFLAG}
 LAUNCH=${LAUNCH//__BRIEF__/$sq_brief}

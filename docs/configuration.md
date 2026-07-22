@@ -195,6 +195,19 @@ Those inherited values are defaults and rules only; `fm-spawn` still permits a c
 For grok, `fm-spawn.sh` installs one firstmate-owned global turn-end hook under `$GROK_HOME/hooks/`, or `~/.grok/hooks/` when `GROK_HOME` is unset, and drops a per-task `.fm-grok-turnend` pointer in the worktree, with teardown removing the task token and pointer.
 For Pi secondmate launches, `fm-spawn.sh` starts Pi with `-e` pointed at the secondmate home's own tracked `.pi/extensions/fm-primary-pi-watch.ts` and `.pi/extensions/fm-primary-turnend-guard.ts`, both already present from the secondmate home's git worktree.
 
+## Delegated Pi profile (config/pi-delegated-profile)
+
+`config/pi-delegated-profile` is an optional local, gitignored profile that makes every Pi worker launched by that home use one exact provider/model, explicit medium thinking, and automatic compaction immediately after 60 percent of the resolved context window.
+The primary-authoritative file is inherited into secondmate homes, so their own Pi workers use the same profile after every normal inheritance convergence.
+When absent, Pi launch behavior remains backward-compatible.
+When present, `bin/fm-pi-profile.sh` validates every field and Pi 0.81.1's effective model metadata before any endpoint is created.
+The file uses one `key=value` per line and requires `pi_command`, `pi_version`, `agent_dir`, `model`, `context_window`, `effort`, `boundary_percent`, and `keep_recent_tokens` exactly as documented in that script's header.
+The configured `agent_dir` is operator-owned and may retain authentication, skills, prompts, and themes, but its `settings.json` must already contain enabled compaction with `reserveTokens = context_window - floor(0.60 * context_window)` and the configured keep-recent value.
+FirstMate validates that directory without editing it and passes its absolute path through the real `PI_CODING_AGENT_DIR` variable, so ambient `HOME`, `PI_CODING_AGENT_DIR`, and the ineffective `PI_CONFIG_DIR` cannot redirect the worker.
+Delegated launches pass `--no-approve` and `--no-extensions`, which deliberately disables project-local Pi settings/resources and all discovered extensions so neither can alter compaction.
+FirstMate then explicitly loads its required task or secondmate hooks and the tracked profile guard, so turn-end supervision remains available while model cycling, model substitution, and thinking-level changes stop the delegated session.
+This compatibility choice means project-local Pi extensions, skills, prompts, themes, packages, and `.pi/settings.json` are ignored for delegated workers, so operators must not depend on those capabilities until they are deliberately reviewed and added to FirstMate's explicit launch surface.
+
 ## Crew dispatch profiles (config/crew-dispatch.json)
 
 `config/crew-dispatch.json` is an optional local, gitignored file containing natural-language rules that firstmate reads before dispatching a crewmate or scout.
@@ -274,7 +287,7 @@ When a running home advances and its loaded instruction surface (`AGENTS.md`, `b
 If that send fails, bootstrap keeps an idempotent retry marker and emits `NUDGE_SECONDMATES:` with the failure reason.
 The same bootstrap run emits `SECONDMATE_LIVENESS:` only when a live secondmate endpoint is skipped or respawn fails; already-live and successfully respawned endpoints are handled silently.
 For a mid-session inherited local-material edit where tracked-file sync is not needed, run `bin/fm-config-push.sh`.
-It uses the same live secondmate discovery and propagation helper as bootstrap, prints each live home's `crew-dispatch.json`, `crew-harness`, `backlog-backend`, `herdr-presentation-spaces`, and `data/captain-shared.md` result as `pushed`, `unchanged`, `skipped`, or `error`, and exits non-zero for real propagation errors or config-reread send failures.
+It uses the same live secondmate discovery and propagation helper as bootstrap, prints each live home's `crew-dispatch.json`, `crew-harness`, `backlog-backend`, `herdr-presentation-spaces`, `pi-delegated-profile`, and `data/captain-shared.md` result as `pushed`, `unchanged`, `skipped`, or `error`, and exits non-zero for real propagation errors or config-reread send failures.
 When an allowlisted config item changes for an already-running home, it sends the literal-content reread pointer described in [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md); unchanged allowlisted config sends no pointer unless a previous delivery is pending.
 The locked bootstrap inheritance pass uses the same per-home changed-set and reread path for already-running homes; see `secondmate-provisioning` for the single contract owner.
 That live discovery starts from `state/*.meta` records with `kind=secondmate`; `data/secondmates.md` only backfills `home=` for older or incomplete meta records.
