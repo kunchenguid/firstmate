@@ -186,7 +186,11 @@ The inherited-local-material contract is owned by [`secondmate-provisioning`](..
 Those inherited values are defaults and rules only; `fm-spawn` still permits a consciously chosen explicit runtime outside the config.
 `config/secondmate-harness` is not inherited because secondmates do not launch secondmates.
 For grok, `fm-spawn.sh` installs one firstmate-owned global turn-end hook under `$GROK_HOME/hooks/`, or `~/.grok/hooks/` when `GROK_HOME` is unset, and drops a per-task `.fm-grok-turnend` pointer in the worktree, with teardown removing the task token and pointer.
-For Pi secondmate launches, `fm-spawn.sh` starts Pi with `-e` pointed at the secondmate home's own tracked `.pi/extensions/fm-primary-pi-watch.ts` and `.pi/extensions/fm-primary-turnend-guard.ts`, both already present from the secondmate home's git worktree.
+For every Pi crewmate and secondmate launch, `fm-spawn.sh` disables ambient extension, skill, and prompt-template discovery while preserving the target repository's `AGENTS.md` or `CLAUDE.md` discovery.
+Firstmate's required Pi extensions are explicit exceptions loaded with `-e`.
+For Pi secondmate launches, those paths point at the secondmate home's own tracked `.pi/extensions/fm-primary-pi-watch.ts` and `.pi/extensions/fm-primary-turnend-guard.ts`, both already present from the secondmate home's git worktree.
+Model and provider selection are unchanged, including Ollama-backed models supplied through the normal `--model` profile.
+Verified 2026-07-21 on Pi 0.80.10: `pi --help` confirms that the three discovery controls leave explicit `-e` paths and context-file loading available, and `tests/fm-spawn-dispatch-profile.test.sh` pins the isolated launch while rejecting `--no-context-files`.
 
 ## Crew dispatch profiles (config/crew-dispatch.json)
 

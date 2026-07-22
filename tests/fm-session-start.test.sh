@@ -191,6 +191,66 @@ SH
   chmod +x "$fakebin/ps"
 }
 
+make_fake_detached_codex_tmux_harness() {
+  local fakebin=$1
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+pid=""
+prev=""
+for arg in "$@"; do
+  [ "$prev" = "-p" ] && pid="$arg"
+  prev="$arg"
+done
+case "$*" in
+  *"comm="*)
+    if [ "$pid" = "5000" ]; then printf '/opt/homebrew/bin/codex\n'; else printf '/bin/zsh\n'; fi
+    exit 0
+    ;;
+  *"args="*)
+    if [ "$pid" = "5000" ]; then printf 'codex --sandbox workspace-write\n'; else printf 'zsh\n'; fi
+    exit 0
+    ;;
+  *"ppid="*) printf '1\n'; exit 0 ;;
+esac
+exit 1
+SH
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  display-message)
+    case " $* " in
+      *'#{session_name}'*) printf 'omx-firstmate-main-test\n' ;;
+      *) printf '4242\n' ;;
+    esac
+    ;;
+  list-panes)
+    case " $* " in
+      *' -a '*) printf 'omx-firstmate-main-test|1|%s\n' "${FM_FAKE_ROOT:?}" ;;
+      *) printf '4242\n' ;;
+    esac
+    ;;
+  show-environment)
+    key=
+    for arg in "$@"; do key=$arg; done
+    case "$key" in
+      OMX_ROOT) [ -n "${FM_FAKE_OMX_ROOT:-}" ] || exit 1; printf 'OMX_ROOT=%s\n' "$FM_FAKE_OMX_ROOT" ;;
+      OMX_SESSION_ID) [ -n "${FM_FAKE_OMX_SESSION_ID:-}" ] || exit 1; printf 'OMX_SESSION_ID=%s\n' "$FM_FAKE_OMX_SESSION_ID" ;;
+      *) exit 1 ;;
+    esac
+    ;;
+  *) exit 1 ;;
+esac
+SH
+  cat > "$fakebin/pgrep" <<'SH'
+#!/usr/bin/env bash
+[ "${1:-}" = -P ] || exit 1
+[ "${2:-}" = 4242 ] || exit 1
+printf '5000\n'
+SH
+  chmod +x "$fakebin/ps" "$fakebin/tmux" "$fakebin/pgrep"
+}
+
 # make_fake_tmux <fakebin> <live-target>: display-message succeeds only for
 # the given "session:window" target - the exact primitive
 # fm_backend_target_exists uses for a tmux endpoint liveness read.
@@ -603,6 +663,68 @@ EOF
   pass "fm-session-start.sh composes the real fm-lock.sh, fm-bootstrap.sh, and fm-wake-drain.sh output verbatim"
 }
 
+test_lock_finds_detached_codex_via_tmux_pane() {
+  local rec root home fakebin out
+  rec=$(new_world lock-detached-codex)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_detached_codex_tmux_harness "$fakebin"
+
+  out=$(FM_HOME="$home" TMUX_PANE='%9' PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-lock.sh")
+
+  assert_contains "$out" "lock acquired: harness pid 5000" "detached Codex harness was not resolved from the tmux pane"
+  [ "$(cat "$home/state/.lock")" = "5000" ] || fail "fleet lock did not record the detached Codex harness pid"
+
+  pass "fm-lock finds a detached Codex harness through the current tmux pane"
+}
+
+test_lock_finds_detached_codex_via_attached_tmux_session() {
+  local rec root home fakebin out
+  rec=$(new_world lock-detached-codex-attached-session)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_detached_codex_tmux_harness "$fakebin"
+
+  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$root" FM_FAKE_ROOT="$root" \
+    TMUX='/tmp/tmux-test/default,123,0' TMUX_PANE='' \
+    PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-lock.sh")
+
+  assert_contains "$out" "lock acquired: harness pid 5000" "detached Codex harness was not resolved from the attached tmux session"
+  [ "$(cat "$home/state/.lock")" = "5000" ] || fail "fleet lock did not record the attached session's Codex harness pid"
+
+  pass "fm-lock finds detached Codex through the single attached tmux session when TMUX_PANE is stripped"
+}
+
+test_lock_uses_omx_session_pointer_when_process_discovery_is_sandboxed() {
+  local rec root home fakebin runtime out
+  rec=$(new_world lock-detached-codex-omx-pointer)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_detached_codex_tmux_harness "$fakebin"
+  runtime="$TMP_ROOT/lock-detached-codex-omx-pointer/runtime"
+  mkdir -p "$runtime/.omx/state"
+  cat > "$runtime/.omx/state/session.json" <<EOF
+{
+  "session_id": "omx-test-controller",
+  "cwd": "$root",
+  "pid": 6000
+}
+EOF
+
+  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$root" FM_FAKE_ROOT="$root" \
+    FM_FAKE_OMX_ROOT="$runtime" FM_FAKE_OMX_SESSION_ID='omx-test-controller' \
+    TMUX='/tmp/tmux-test/default,123,0' TMUX_PANE='%9' \
+    PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-lock.sh")
+
+  assert_contains "$out" "lock acquired: harness pid 6000" "OMX session pointer did not resolve the sandbox-hidden Codex harness"
+  [ "$(cat "$home/state/.lock")" = "6000" ] || fail "fleet lock did not record the OMX session pointer pid"
+
+  pass "fm-lock uses the validated OMX tmux session pointer when process discovery is sandboxed"
+}
+
 # --- fleet-state digest: compact backlog rendering --------------------------
 
 write_long_body_backlog() {
@@ -912,6 +1034,9 @@ test_orphan_status_logs_are_printed
 test_endpoint_liveness_tmux
 test_endpoint_liveness_herdr
 test_composition_invokes_real_scripts
+test_lock_finds_detached_codex_via_tmux_pane
+test_lock_finds_detached_codex_via_attached_tmux_session
+test_lock_uses_omx_session_pointer_when_process_discovery_is_sandboxed
 test_backlog_compact_tasks_axi_omits_bodies_and_keeps_metadata
 test_backlog_compact_manual_backend_skips_indented_bodies
 test_backlog_compact_tasks_axi_unavailable_uses_manual_fallback

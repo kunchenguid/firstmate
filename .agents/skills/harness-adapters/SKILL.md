@@ -233,6 +233,8 @@ Pi has no permission system, so crewmates are always autonomous.
 Keep the brief as one positional argument.
 Multiple positional args become separate queued messages; `fm-spawn`'s template already does this correctly.
 
+Firstmate-launched Pi worker isolation is documented under [`docs/configuration.md`](../../../docs/configuration.md#harness-support), while `bin/fm-spawn.sh` owns the exact launch flags and explicit extension paths.
+
 Project trust dialog can appear on the first pi run in any not-yet-trusted directory, observed even on clean worktrees.
 Accept with Enter.
 The decision persists per path in `~/.pi/agent/trust.json`, so later spawns in the same worktree slot skip it.
@@ -247,7 +249,6 @@ Without `deliverAs: "followUp"`, Pi rejects the send while the agent is still pr
 Pi's primary watcher protocol also requires the tracked `.pi/extensions/fm-primary-pi-watch.ts` extension, same trust-once discovery as the turn-end guard.
 The model arms through `fm_watch_arm_pi`, never a foreground bash arm; the watcher tool result and clean-exit fallback are owned by `docs/supervision-protocols/pi.md`.
 `bin/fm-session-start.sh` reports when the live Pi session has not loaded both the turn-end guard and watcher extensions, and points at plain `pi` after project trust as the fix, with `-e` as a trust-free fallback.
-When a secondmate is launched on Pi, `fm-spawn.sh --secondmate` launches Pi with both `-e .pi/extensions/fm-primary-turnend-guard.ts` and `-e .pi/extensions/fm-primary-pi-watch.ts`, both already present in the secondmate home's git worktree.
 
 ## grok (VERIFIED 2026-06-29, grok 0.2.73; slash-submit re-verified 2026-07-03 on 0.2.82; reasoning-effort ceiling re-verified 2026-07-13 on 0.2.99; exit paths re-verified 2026-07-19 on grok 0.2.103)
 

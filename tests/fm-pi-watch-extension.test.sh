@@ -71,12 +71,14 @@ test_spawn_template_mentions_pi_watch_placeholder() {
   local text launch_text
   text=$(cat "$ROOT/bin/fm-spawn.sh")
   launch_text=$(cat "$ROOT/bin/fm-launch-lib.sh")
-  assert_contains "$launch_text" "-e __PITURNEND__ -e __PIWATCH__" "Pi secondmate launch template does not include both primary extensions"
+  assert_contains "$launch_text" "pi --no-extensions --no-skills --no-prompt-templates __MODELFLAG____EFFORTFLAG__-e __PITURNEND__ -e __PIWATCH__" \
+    "Pi secondmate launch template is not hermetic or does not include both primary extensions"
+  assert_not_contains "$launch_text" "pi --no-context-files" "Pi launch template must preserve project context-file discovery"
   assert_contains "$text" "\$PROJ_ABS/.pi/extensions/fm-primary-pi-watch.ts" "fm-spawn does not point the Pi secondmate watch placeholder at the tracked extension"
   assert_not_contains "$text" "fm-pi-watch-extension.sh" "fm-spawn should no longer generate the Pi watch extension before launch"
   assert_contains "$text" "__PITURNEND__" "fm-spawn does not replace the Pi turn-end guard extension placeholder"
   assert_contains "$text" "__PIWATCH__" "fm-spawn does not replace the Pi watch extension placeholder"
-  pass "Pi secondmate launch wiring includes both tracked primary extensions"
+  pass "Pi secondmate launch is hermetic and includes both tracked primary extensions"
 }
 
 test_pi_extension_reports_external_healthy_watcher() {
