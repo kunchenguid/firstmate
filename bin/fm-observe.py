@@ -291,25 +291,27 @@ def evidence(connection: sqlite3.Connection, run_id: str, kind: str, ref: Option
     )
 
 
-def tail_status(path: Path) -> list[tuple[int, str]]:
+def tail_status(path: Path) -> list[tuple[int, Optional[int], str]]:
     try:
         size = path.stat().st_size
         with path.open("rb") as handle:
-            truncated = size > MAX_STATUS_BYTES
-            if truncated:
+            byte_truncated = size > MAX_STATUS_BYTES
+            start_offset = 0
+            if byte_truncated:
                 handle.seek(-MAX_STATUS_BYTES, os.SEEK_END)
-                handle.readline()
+                start_offset = handle.tell()
+                start_offset += len(handle.readline())
             raw = handle.read(MAX_STATUS_BYTES)
     except OSError:
         return []
-    lines = raw.decode("utf-8", "replace").splitlines()
-    if len(lines) > MAX_STATUS_LINES:
-        lines = lines[-MAX_STATUS_LINES:]
-        truncated = True
-    if truncated:
-        start = -len(lines)
-        return [(start + index, line) for index, line in enumerate(lines)]
-    return [(index + 1, line) for index, line in enumerate(lines)]
+    entries: list[tuple[int, Optional[int], str]] = []
+    offset = start_offset
+    for index, raw_line in enumerate(raw.splitlines(keepends=True)):
+        line_number = None if byte_truncated else index + 1
+        line = raw_line.rstrip(b"\r\n").decode("utf-8", "replace")
+        entries.append((offset, line_number, line))
+        offset += len(raw_line)
+    return entries[-MAX_STATUS_LINES:]
 
 
 def status_fields(line: str) -> tuple[Optional[str], Optional[str], Optional[int], Optional[str], Optional[str]]:
@@ -604,14 +606,18 @@ def collect_no_mistakes(
     branch = run.get("branch_ref") or f"fm/{run['task_id']}"
     project = canonical(str(run.get("project_ref") or ""))
     try:
-        rows = source.execute(
-            """SELECT r.id,r.status,r.pr_url,r.pr_state,r.created_at,r.updated_at,
-                      p.working_path
-                 FROM runs r JOIN repos p ON p.id=r.repo_id
-                WHERE r.branch=? AND r.created_at>=?
-                ORDER BY r.created_at LIMIT ?""",
-            (branch, int(run["started_at"]) - 300, MAX_NM_RUNS),
-        ).fetchall()
+        source.create_function("fm_canonical", 1, canonical, deterministic=True)
+        query = """SELECT r.id,r.status,r.pr_url,r.pr_state,r.created_at,r.updated_at,
+                          p.working_path
+                     FROM runs r JOIN repos p ON p.id=r.repo_id
+                    WHERE r.branch=? AND r.created_at>=?"""
+        parameters: list[Any] = [branch, int(run["started_at"]) - 300]
+        if project:
+            query += " AND fm_canonical(p.working_path)=?"
+            parameters.append(project)
+        query += " ORDER BY r.created_at DESC,r.id DESC LIMIT ?"
+        parameters.append(MAX_NM_RUNS)
+        rows = list(reversed(source.execute(query, parameters).fetchall()))
     except sqlite3.Error:
         source.close()
         return 0, None, None, None, None, None
@@ -750,17 +756,17 @@ def insert_status_events(
         fallback_time = int(status_path.stat().st_mtime)
     except OSError:
         return
-    for line_no, line in tail_status(status_path):
+    for byte_offset, line_no, line in tail_status(status_path):
         state, event_key, observed, line_run, line_session = status_fields(line)
         if state is None:
             continue
         if line_run and line_run != run["run_id"]:
             continue
-        if not line_run and line_no > 0 and line_no <= status_start_line:
+        if not line_run and (line_no is None or line_no <= status_start_line):
             continue
         observed = observed or fallback_time
         source_key = stable_key(
-            "status", run["run_id"], status_path, line_no, observed, state,
+            "status", run["run_id"], status_path, byte_offset,
             event_key or "", line_session or "",
         )
         connection.execute(

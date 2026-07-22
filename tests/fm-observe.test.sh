@@ -158,6 +158,66 @@ PY
 [ "$?" -eq 0 ] || fail "idempotent database assertions failed"
 pass "fm-observe: repeated collection is idempotent"
 
+python3 - "$STATE/observe-feature.status" <<'PY'
+import sys
+path = sys.argv[1]
+with open(path, 'ab') as handle:
+    for index in range(20000):
+        handle.write(f"working: old-{index} [run=old-run] [at=2026-01-01T00:00:00Z]\n".encode())
+    handle.write(b"needs-decision: uncorrelated [at=2026-01-01T00:05:00Z]\n")
+    handle.write(b"working: current [run=observe-feature-20260101T000000Z-42] [at=2026-01-01T00:06:00Z]\n")
+PY
+run_collect >/dev/null || fail "truncated status collection failed"
+events_after_tail=$(python3 - "$DATA/observability.sqlite3" <<'PY'
+import sqlite3, sys
+c = sqlite3.connect(sys.argv[1])
+assert c.execute("SELECT COUNT(*) FROM events WHERE state='needs-decision'").fetchone()[0] == 1
+assert c.execute("SELECT COUNT(*) FROM events WHERE observed_at=1767225960").fetchone()[0] == 1
+print(c.execute('SELECT COUNT(*) FROM events').fetchone()[0])
+PY
+) || fail "truncated status boundary assertions failed"
+printf 'done: appended [run=observe-feature-20260101T000000Z-42] [at=2026-01-01T00:07:00Z]\n' >> "$STATE/observe-feature.status"
+run_collect >/dev/null || fail "growing truncated status collection failed"
+python3 - "$DATA/observability.sqlite3" "$events_after_tail" <<'PY'
+import sqlite3, sys
+c = sqlite3.connect(sys.argv[1])
+before = int(sys.argv[2])
+assert c.execute('SELECT COUNT(*) FROM events').fetchone()[0] == before + 1
+PY
+[ "$?" -eq 0 ] || fail "truncated status append duplicated existing events"
+pass "fm-observe: truncated status tails remain bounded, correlated, and idempotent"
+
+python3 - "$NM_DB" "$WT" <<'PY'
+import sqlite3, sys
+path, project = sys.argv[1:]
+c = sqlite3.connect(path)
+for index in range(60):
+    run_id = f'01NMNEW{index:02d}'
+    status = 'completed' if index == 59 else 'failed'
+    c.execute('INSERT INTO runs VALUES(?,?,?,?,?,?,?,?)', (
+        run_id, 'repo-1', 'fm/observe-feature', status, None, None,
+        1767226000 + index, 1767226000 + index))
+c.execute('INSERT INTO repos VALUES(?,?)', ('repo-2', project + '/other'))
+for index in range(60):
+    c.execute('INSERT INTO runs VALUES(?,?,?,?,?,?,?,?)', (
+        f'01NMOTHER{index:02d}', 'repo-2', 'fm/observe-feature', 'failed', None, None,
+        1767227000 + index, 1767227000 + index))
+c.commit()
+PY
+run_collect >/dev/null || fail "newest no-mistakes collection failed"
+python3 - "$DATA/observability.sqlite3" <<'PY'
+import sqlite3, sys
+c = sqlite3.connect(sys.argv[1])
+r = c.execute("SELECT no_mistakes_runs,outcome FROM runs WHERE task_id='observe-feature'").fetchone()
+assert r == (50, 'completed'), r
+refs = [row[0] for row in c.execute("SELECT ref FROM evidence WHERE kind='no-mistakes-run'")]
+assert 'no-mistakes://run/01NMNEW59' in refs
+assert 'no-mistakes://run/01NMNEW09' not in refs
+assert not any('OTHER' in ref for ref in refs)
+PY
+[ "$?" -eq 0 ] || fail "newest no-mistakes ordering and limit assertions failed"
+pass "fm-observe: no-mistakes selection uses the newest project runs deterministically"
+
 for secret in SECRET_PROMPT_MUST_NOT_ENTER_DB SECRET_RESPONSE_MUST_NOT_ENTER_DB SECRET_COMMAND_OUTPUT_MUST_NOT_ENTER_DB SECRET_FINDING_DESCRIPTION; do
   if grep -aF "$secret" "$DATA/observability.sqlite3" >/dev/null; then
     fail "privacy violation: SQLite contains $secret"
