@@ -18,7 +18,7 @@ Before fan-out, Firstmate builds one stable filtered project view and makes its 
 The Linux participant process installs a Landlock policy before the model starts, so the source project and other participant homes are unreadable and unwritable while the fixed view is readable but unwritable.
 Persistent filesystem writes are limited to the participant's own private home and answer outbox, with only its terminal and `/dev/null` admitted as device sinks.
 Execution is granted only on the exact controller-supplied binary allowlist, never on the whole system tree.
-A seccomp filter denies new Unix-domain sockets while retaining provider TCP access, so a participant cannot reach Herdr or another terminal-control service by guessing its socket path; it verifies the x86_64 audit architecture and denies alternate syscall ABIs outright.
+A seccomp filter denies new Unix-domain sockets (from `socket` and `socketpair` alike) and io_uring setup while retaining provider TCP access, so a participant cannot reach Herdr or another terminal-control service by guessing its socket path or through ring-submitted socket operations; it verifies the x86_64 audit architecture and denies alternate syscall ABIs outright.
 Home-local control clients and socket metadata are also outside the admitted filesystem and absent from the sanitized environment, which passes through only the participant's own provider credentials.
 
 The filter excludes version-control metadata, common dependency and cache directories, symlinks, special files, oversized files, `.env` variants, private keys, and common credential files.
