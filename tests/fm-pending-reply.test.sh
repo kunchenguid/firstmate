@@ -275,6 +275,41 @@ test_transport_success_is_not_reply_success() {
   pass "transport success cannot masquerade as reply success"
 }
 
+test_undelivered_records_are_scan_immutable() {
+  (
+    local home state sm_home corr rec before after
+    home=$(setup_parent undelivered-scan)
+    state="$home/state"
+    sm_home="$home/sm"
+    mkdir -p "$sm_home/state"
+    export FM_PENDING_REPLY_NOW=5500
+    corr=$(fm_pending_reply_create "$home" "$state" hibit "not delivered yet")
+    rec=$(fm_pending_reply_path "$state" "$corr")
+    printf 'done [corr=%s]: arrived too early\n' "$corr" > "$state/hibit.status"
+    printf 'done [corr=%s]: wrong home too early\n' "$corr" > "$sm_home/state/hibit.status"
+    fm_write_secondmate_meta "$state/hibit.meta" "$sm_home" "sess:fm-hibit"
+    before=$(cat "$rec")
+    if fm_pending_reply_try_resolve "$state" "$corr"; then
+      fail "undelivered expectation must not resolve"
+    fi
+    fm_pending_reply_detect_wrong_home "$state" "$corr" "$sm_home" \
+      || fail "undelivered wrong-home check should be inert"
+    fm_pending_reply_tick_one "$state" "$corr" busy "$sm_home" \
+      || fail "undelivered direct tick should be inert"
+    fm_backend_busy_state() { fail "undelivered watcher tick must not probe the backend"; }
+    fm_backend_capture() { fail "undelivered watcher tick must not capture the backend"; }
+    fm_pending_reply_tick "$state" || fail "undelivered watcher tick should succeed"
+    after=$(cat "$rec")
+    [ "$after" = "$before" ] || fail "scan paths must not mutate an undelivered record"
+    fm_pending_reply_mark_delivered "$state" "$corr" || fail "delivery marker should succeed"
+    fm_pending_reply_tick_one "$state" "$corr" unknown "$sm_home" \
+      || fail "delivered direct tick should succeed"
+    [ "$(phase_of "$state" "$corr")" = resolved ] \
+      || fail "correlated parent status should resolve after delivery"
+  ) || fail "undelivered scan immutability regression failed"
+  pass "undelivered records remain immutable across scan paths"
+}
+
 test_unrelated_and_stale_corr_cannot_resolve() {
   local home state corr other
   home=$(setup_parent stale-corr)
@@ -658,6 +693,7 @@ test_recovery_reply_resolves_original
 test_second_missed_turn_escalates_once_and_stays_durable
 test_escalation_publication_failure_retries
 test_transport_success_is_not_reply_success
+test_undelivered_records_are_scan_immutable
 test_unrelated_and_stale_corr_cannot_resolve
 test_restart_preserves_expectation_and_parent_destination
 test_wrong_home_detected_not_acknowledged

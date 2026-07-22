@@ -362,13 +362,15 @@ fm_pending_reply_resolve_via_of_line() {  # <line>
 # Returns 0 when the record is resolved after the call (already or newly).
 fm_pending_reply_try_resolve() {  # <state-dir> <corr_id> [status-file-override]
   local state=$1 corr=$2 status_override=${3-}
-  local rec phase status_file signature previous line via now
+  local rec phase delivered status_file signature previous line via now
   rec=$(fm_pending_reply_path "$state" "$corr")
   [ -f "$rec" ] || return 1
   phase=$(fm_pending_reply_get "$rec" phase)
   if [ "$phase" = resolved ]; then
     return 0
   fi
+  delivered=$(fm_pending_reply_get "$rec" delivered_epoch)
+  [ -n "$delivered" ] || return 1
   status_file=${status_override:-$(fm_pending_reply_get "$rec" parent_status)}
   if [ -z "$status_override" ]; then
     signature=$(fm_pending_reply_file_signature "$status_file")
@@ -608,12 +610,14 @@ fm_pending_reply_maybe_escalate() {  # <state-dir> <corr_id>
 # without treating it as acknowledgement.
 fm_pending_reply_detect_wrong_home() {  # <state-dir> <corr_id> <secondmate-home>
   local state=$1 corr=$2 sm_home=$3
-  local rec hits sightings snapshot previous status_file line line_no sighting_id phase changed=0
+  local rec delivered hits sightings snapshot previous status_file line line_no sighting_id phase changed=0
   rec=$(fm_pending_reply_path "$state" "$corr")
   [ -f "$rec" ] || return 1
   [ -n "$sm_home" ] && [ -d "$sm_home" ] || return 0
   phase=$(fm_pending_reply_get "$rec" phase)
   [ "$phase" != resolved ] || return 0
+  delivered=$(fm_pending_reply_get "$rec" delivered_epoch)
+  [ -n "$delivered" ] || return 0
   snapshot=$(fm_pending_reply_status_set_signature "$sm_home/state")
   previous=$(fm_pending_reply_get "$rec" wrong_home_scan_signature)
   [ "$snapshot" != "$previous" ] || return 0
@@ -654,9 +658,11 @@ fm_pending_reply_detect_wrong_home() {  # <state-dir> <corr_id> <secondmate-home
 # secondmate_home may be empty when unknown.
 fm_pending_reply_tick_one() {  # <state-dir> <corr_id> <busy_state> [secondmate-home]
   local state=$1 corr=$2 busy_state=$3 sm_home=${4-}
-  local rec phase
+  local rec phase delivered
   rec=$(fm_pending_reply_path "$state" "$corr")
   [ -f "$rec" ] || return 1
+  delivered=$(fm_pending_reply_get "$rec" delivered_epoch)
+  [ -n "$delivered" ] || return 0
   # Correlated parent report always wins and is idempotent.
   if fm_pending_reply_try_resolve "$state" "$corr"; then
     return 0
@@ -695,7 +701,7 @@ fm_pending_reply_tick_one() {  # <state-dir> <corr_id> <busy_state> [secondmate-
 # Never scrapes secondmate conversation; uses only parent status, backend busy
 # state, and optional secondmate-home wrong-home path checks.
 fm_pending_reply_tick() {  # <state-dir>
-  local state=$1 dir rec corr task_id phase meta backend target label busy sm_home
+  local state=$1 dir rec corr task_id phase delivered meta backend target label busy sm_home
   local observation observation_task found i
   local -a observation_tasks=() observation_values=()
   dir=$(fm_pending_reply_dir "$state")
@@ -710,6 +716,8 @@ fm_pending_reply_tick() {  # <state-dir>
     task_id=$(fm_pending_reply_get "$rec" task_id)
     phase=$(fm_pending_reply_get "$rec" phase)
     [ "$phase" != resolved ] || continue
+    delivered=$(fm_pending_reply_get "$rec" delivered_epoch)
+    [ -n "$delivered" ] || continue
     meta="$state/${task_id}.meta"
     if [ "$phase" = escalated ]; then
       if fm_pending_reply_try_resolve "$state" "$corr"; then
