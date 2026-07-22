@@ -104,6 +104,9 @@ test_normal_correlated_reply_resolves_once() {
   corr=$(fm_pending_reply_create "$home" "$state" "hibit" "audit the ledger")
   fm_pending_reply_mark_delivered "$state" "$corr"
   status="$state/hibit.status"
+  if fm_pending_reply_try_resolve "$state" "$corr"; then
+    fail "missing status must not resolve"
+  fi
   printf 'done [corr=%s]: ledger clean\n' "$corr" > "$status"
   fm_pending_reply_try_resolve "$state" "$corr" || fail "correlated status should resolve"
   [ "$(phase_of "$state" "$corr")" = resolved ] || fail "phase should be resolved"
@@ -495,11 +498,13 @@ test_unknown_backend_state_uses_capture_fallback() {
 
 test_tick_skips_terminal_and_reuses_target_observation() {
   (
-    local home state open1 open2 resolved escalated rec probe_log probes
+    local home state open1 open2 resolved escalated rec probe_log probes scan_log scans snapshot
     home=$(setup_parent observation-cache)
     state="$home/state"
     probe_log="$home/backend-probes.log"
+    scan_log="$home/status-scans.log"
     : > "$probe_log"
+    : > "$scan_log"
     export FM_PENDING_REPLY_NOW=10100
     open1=$(fm_pending_reply_create "$home" "$state" hibit "first open request")
     open2=$(fm_pending_reply_create "$home" "$state" hibit "second open request")
@@ -513,6 +518,8 @@ test_tick_skips_terminal_and_reuses_target_observation() {
     fm_pending_reply_mark_delivered "$state" "$escalated"
     rec=$(fm_pending_reply_path "$state" "$escalated")
     fm_pending_reply_set "$rec" phase escalated || fail "escalated fixture should transition"
+    mkdir -p "$home/escalated/state"
+    printf 'done [corr=%s]: wrong home\n' "$escalated" > "$home/escalated/state/escalated.status"
     fm_write_secondmate_meta "$state/hibit.meta" "$home/hibit" "sess:fm-hibit"
     fm_write_secondmate_meta "$state/resolved.meta" "$home/resolved" "sess:fm-resolved"
     fm_write_secondmate_meta "$state/escalated.meta" "$home/escalated" "sess:fm-escalated"
@@ -521,6 +528,17 @@ test_tick_skips_terminal_and_reuses_target_observation() {
       printf 'busy'
     }
     fm_backend_capture() { fail "native busy observations should not capture"; }
+    fm_pending_reply_find_resolve_line() {
+      local status_file=$1 corr=$2 line
+      printf '%s\t%s\n' "$status_file" "$corr" >> "$scan_log"
+      [ -f "$status_file" ] || return 0
+      while IFS= read -r line || [ -n "$line" ]; do
+        fm_pending_reply_line_resolves "$line" "$corr" || continue
+        printf '%s' "$line"
+        return 0
+      done < "$status_file"
+      return 0
+    }
     fm_pending_reply_tick "$state"
     probes=$(wc -l < "$probe_log" | tr -d ' ')
     [ "$probes" = 1 ] || fail "two open records for one target should use one probe, got $probes"
@@ -530,6 +548,15 @@ test_tick_skips_terminal_and_reuses_target_observation() {
     rec=$(fm_pending_reply_path "$state" "$open2")
     [ "$(fm_pending_reply_get "$rec" turn_seen_busy)" = 1 ] \
       || fail "cached observation should update the second open record"
+    rec=$(fm_pending_reply_path "$state" "$escalated")
+    snapshot=$(fm_pending_reply_get "$rec" wrong_home_scan_signature)
+    [ -n "$snapshot" ] || fail "wrong-home scan should persist its file-set signature"
+    fm_pending_reply_tick "$state"
+    scans=$(wc -l < "$scan_log" | tr -d ' ')
+    [ "$scans" = 3 ] \
+      || fail "unchanged records should scan two open and one escalated status only once, got $scans"
+    [ "$(fm_pending_reply_get "$rec" wrong_home_scan_signature)" = "$snapshot" ] \
+      || fail "unchanged wrong-home logs should retain their scan signature"
   ) || fail "terminal-skip and observation-cache regression failed"
   pass "tick skips terminal records and reuses target observations"
 }

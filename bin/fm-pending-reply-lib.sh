@@ -25,6 +25,7 @@
 #   task_id=                secondmate task id in the parent home
 #   parent_home=            absolute parent FM_HOME
 #   parent_status=          absolute path of parent state/<task_id>.status
+#   parent_status_scan_signature=
 #   request_summary=        short sanitized summary (no secrets by design)
 #   created_epoch=          when the expectation was created
 #   delivered_epoch=        when the marked request was confirmed delivered
@@ -40,6 +41,7 @@
 #   resolved_via=           status | document | helper | empty
 #   wrong_home_hits=        count of corr sightings under the secondmate home
 #   wrong_home_sightings=   comma-separated identities of counted sightings
+#   wrong_home_scan_signature=
 #   grace_secs=             bounded grace before recovery is eligible
 #
 # Sourced by bin/fm-send.sh, bin/fm-watch.sh, bin/fm-secondmate-report.sh, and
@@ -239,6 +241,7 @@ corr_id=$corr
 task_id=$task_id
 parent_home=$parent_home
 parent_status=$status_path
+parent_status_scan_signature=
 request_summary=$summary
 created_epoch=$now
 delivered_epoch=
@@ -253,6 +256,7 @@ resolved_epoch=
 resolved_via=
 wrong_home_hits=0
 wrong_home_sightings=
+wrong_home_scan_signature=
 grace_secs=$(fm_pending_reply_grace_secs)
 EOF
   chmod 600 "$tmp" 2>/dev/null || true
@@ -317,6 +321,27 @@ fm_pending_reply_find_resolve_line() {  # <status-file> <corr_id>
   return 0
 }
 
+fm_pending_reply_file_signature() {  # <path>
+  local path=$1
+  [ -f "$path" ] || { printf 'missing'; return 0; }
+  if [ "$(uname -s 2>/dev/null)" = Darwin ]; then
+    LC_ALL=C stat -f '%d:%i:%z:%m:%c' "$path" 2>/dev/null || printf 'unreadable'
+  else
+    LC_ALL=C stat -c '%d:%i:%s:%Y:%Z' "$path" 2>/dev/null || printf 'unreadable'
+  fi
+}
+
+fm_pending_reply_status_set_signature() {  # <status-dir>
+  local status_dir=$1 status_file signature
+  {
+    for status_file in "$status_dir"/*.status; do
+      [ -f "$status_file" ] || continue
+      signature=$(fm_pending_reply_file_signature "$status_file")
+      printf '%s:%s:%s\n' "${#status_file}" "$status_file" "$signature"
+    done
+  } | cksum 2>/dev/null | awk '{printf "%s-%s", $1, $2}'
+}
+
 # Classify how a resolving line acknowledged the request.
 fm_pending_reply_resolve_via_of_line() {  # <line>
   local line=$1
@@ -337,7 +362,7 @@ fm_pending_reply_resolve_via_of_line() {  # <line>
 # Returns 0 when the record is resolved after the call (already or newly).
 fm_pending_reply_try_resolve() {  # <state-dir> <corr_id> [status-file-override]
   local state=$1 corr=$2 status_override=${3-}
-  local rec phase status_file line via now
+  local rec phase status_file signature previous line via now
   rec=$(fm_pending_reply_path "$state" "$corr")
   [ -f "$rec" ] || return 1
   phase=$(fm_pending_reply_get "$rec" phase)
@@ -345,8 +370,18 @@ fm_pending_reply_try_resolve() {  # <state-dir> <corr_id> [status-file-override]
     return 0
   fi
   status_file=${status_override:-$(fm_pending_reply_get "$rec" parent_status)}
+  if [ -z "$status_override" ]; then
+    signature=$(fm_pending_reply_file_signature "$status_file")
+    previous=$(fm_pending_reply_get "$rec" parent_status_scan_signature)
+    [ "$signature" != "$previous" ] || return 1
+  fi
   line=$(fm_pending_reply_find_resolve_line "$status_file" "$corr")
-  [ -n "$line" ] || return 1
+  if [ -z "$line" ]; then
+    if [ -z "$status_override" ]; then
+      fm_pending_reply_set "$rec" parent_status_scan_signature "$signature" || return 1
+    fi
+    return 1
+  fi
   via=$(fm_pending_reply_resolve_via_of_line "$line")
   now=$(fm_pending_reply_now)
   fm_pending_reply_set "$rec" phase resolved || return 1
@@ -573,12 +608,15 @@ fm_pending_reply_maybe_escalate() {  # <state-dir> <corr_id>
 # without treating it as acknowledgement.
 fm_pending_reply_detect_wrong_home() {  # <state-dir> <corr_id> <secondmate-home>
   local state=$1 corr=$2 sm_home=$3
-  local rec hits sightings status_file line line_no sighting_id phase changed=0
+  local rec hits sightings snapshot previous status_file line line_no sighting_id phase changed=0
   rec=$(fm_pending_reply_path "$state" "$corr")
   [ -f "$rec" ] || return 1
   [ -n "$sm_home" ] && [ -d "$sm_home" ] || return 0
   phase=$(fm_pending_reply_get "$rec" phase)
   [ "$phase" != resolved ] || return 0
+  snapshot=$(fm_pending_reply_status_set_signature "$sm_home/state")
+  previous=$(fm_pending_reply_get "$rec" wrong_home_scan_signature)
+  [ "$snapshot" != "$previous" ] || return 0
   hits=$(fm_pending_reply_get "$rec" wrong_home_hits)
   case "$hits" in ''|*[!0-9]*) hits=0 ;; esac
   sightings=$(fm_pending_reply_get "$rec" wrong_home_sightings)
@@ -607,6 +645,7 @@ fm_pending_reply_detect_wrong_home() {  # <state-dir> <corr_id> <secondmate-home
     fm_pending_reply_set "$rec" wrong_home_sightings "$sightings" || return 1
     fm_pending_reply_set "$rec" wrong_home_hits "$hits" || return 1
   fi
+  fm_pending_reply_set "$rec" wrong_home_scan_signature "$snapshot" || return 1
   return 0
 }
 
@@ -668,13 +707,14 @@ fm_pending_reply_tick() {  # <state-dir>
     esac
     corr=$(fm_pending_reply_get "$rec" corr_id)
     [ -n "$corr" ] || corr=$(basename "$rec")
-    if fm_pending_reply_try_resolve "$state" "$corr"; then
-      continue
-    fi
     task_id=$(fm_pending_reply_get "$rec" task_id)
     phase=$(fm_pending_reply_get "$rec" phase)
+    [ "$phase" != resolved ] || continue
     meta="$state/${task_id}.meta"
     if [ "$phase" = escalated ]; then
+      if fm_pending_reply_try_resolve "$state" "$corr"; then
+        continue
+      fi
       if [ -f "$meta" ]; then
         sm_home=$(fm_meta_get "$meta" home)
         if [ -n "$sm_home" ]; then
