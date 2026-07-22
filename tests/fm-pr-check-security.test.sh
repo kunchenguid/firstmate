@@ -7,6 +7,8 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh disable=SC1091
 . "$ROOT/bin/fm-pr-lib.sh"
+# shellcheck source=bin/fm-wake-lib.sh disable=SC1091
+. "$ROOT/bin/fm-wake-lib.sh"
 # shellcheck source=bin/fm-x-lib.sh disable=SC1091
 . "$ROOT/bin/fm-x-lib.sh"
 # shellcheck source=bin/fm-check-lib.sh disable=SC1091
@@ -642,9 +644,6 @@ test_rejected_metacharacter_bytes_are_inert() {
   dir=$(make_case rejected-metacharacters)
   write_task_meta "$dir"
   write_poll_meta "$dir/home/state" safe-check https://github.com/o/r/pull/99
-  fm_pr_poll_prepare "$dir/home/state" safe-check github https://github.com/o/r/pull/99 github.com o/r 99 "$POLL" \
-    || fail "could not prepare bounded watcher poll"
-  fm_pr_poll_publish_prepared || fail "could not publish bounded watcher poll"
   families=(
     'https://github.com/o$/r/pull/1'
     'https://github.com/o(/r/pull/1'
@@ -652,6 +651,9 @@ test_rejected_metacharacter_bytes_are_inert() {
     'https://github.com/o`/r/pull/1'
   )
   for family in "${families[@]}"; do
+    fm_pr_poll_prepare "$dir/home/state" safe-check github https://github.com/o/r/pull/99 github.com o/r 99 "$POLL" \
+      || fail "could not prepare bounded watcher poll"
+    fm_pr_poll_publish_prepared || fail "could not publish bounded watcher poll"
     rm -f "$dir/home/state/task-a.check.sh" "$dir/home/state/task-a.pr-poll"
     set +e
     run_check_entry "$dir" task-a "$family" > /dev/null 2> "$dir/stderr"
@@ -751,6 +753,61 @@ test_static_poll_contract() {
   pass "static poll is silent except for one merged line and remains watcher-bounded"
 }
 
+test_terminal_poll_retirement_and_replacement() {
+  local dir state rc old_data_identity old_check_identity
+  dir=$(make_case terminal-retirement)
+  state="$dir/home/state"
+  write_task_meta "$dir"
+  run_check_entry "$dir" task-a https://github.com/o/r/pull/1 >/dev/null 2>/dev/null \
+    || fail "could not arm the first PR poll"
+
+  set +e
+  FM_TEST_GH_STATE=MERGED run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/first-watch.out" 2> "$dir/first-watch.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "first merged watcher did not complete"
+  [ "$(grep -c '^check: .*: merged$' "$dir/first-watch.out")" -eq 1 ] \
+    || fail "first merged watcher did not emit exactly one wake"
+  [ ! -e "$state/task-a.check.sh" ] && [ ! -e "$state/task-a.pr-poll" ] \
+    && [ ! -e "$state/task-a.pr-poll-registration" ] \
+    || fail "merged watcher did not retire all poll artifacts"
+
+  [ "$(grep -c "$(printf '\tcheck\t')" "$state/.wake-queue")" -eq 1 ] \
+    || fail "merged poll queued more than one terminal wake"
+
+  run_check_entry "$dir" task-a https://github.com/o/r/pull/2 >/dev/null 2>/dev/null \
+    || fail "could not arm the follow-up PR poll"
+  fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+    || fail "follow-up PR poll was not authenticated"
+  old_data_identity=$(fm_pr_file_identity "$state/task-a.pr-poll")
+  old_check_identity=$(fm_pr_file_identity "$state/task-a.check.sh")
+  run_check_entry "$dir" task-a https://github.com/o/r/pull/3 >/dev/null 2>/dev/null \
+    || fail "could not replace the follow-up PR poll"
+  set +e
+  fm_pr_poll_retire_validated "$state" task-a "$POLL" \
+    https://github.com/o/r/pull/2 "$old_data_identity" "$old_check_identity"
+  rc=$?
+  set -e
+  [ "$rc" -eq 2 ] || fail "obsolete poll retirement did not identify its replacement"
+  fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+    || fail "obsolete poll retirement removed the replacement"
+  fm_pr_poll_data_parse "$state/task-a.pr-poll" || fail "replacement sidecar became invalid"
+  [ "$FM_PR_DATA_URL" = https://github.com/o/r/pull/3 ] \
+    || fail "obsolete poll retirement changed the replacement identity"
+
+  set +e
+  FM_TEST_GH_STATE=MERGED run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/follow-up-watch.out" 2> "$dir/follow-up-watch.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "follow-up merged watcher did not complete"
+  [ "$(grep -c '^check: .*: merged$' "$dir/follow-up-watch.out")" -eq 1 ] \
+    || fail "replacement PR was not monitored through one terminal wake"
+  [ ! -e "$state/task-a.check.sh" ] && [ ! -e "$state/task-a.pr-poll" ] \
+    && [ ! -e "$state/task-a.pr-poll-registration" ] \
+    || fail "replacement PR poll was not retired after merging"
+  pass "terminal PR polls wake once and exact-generation retirement preserves replacements"
+}
+
 test_atomic_interruption_leaves_no_partial_artifact() {
   local dir rc
   dir=$(make_case interrupted-write)
@@ -809,16 +866,15 @@ SH
     [ "$rc" -eq 0 ] || fail "concurrent watcher did not complete"
     grep -q '^check: .*: merged$' "$dir/watch.out" || fail "concurrent watcher never saw complete poll"
     [ ! -s "$dir/watch.err" ] || fail "concurrent watcher observed a partial artifact error"
-    cmp -s "$POLL" "$dir/home/state/task-a.check.sh" || fail "concurrent publication check bytes changed"
-    [ "$(file_mode "$dir/home/state/task-a.check.sh")" = 600 ] || fail "concurrent check mode was not private"
-    [ "$(file_mode "$dir/home/state/task-a.pr-poll")" = 600 ] || fail "concurrent sidecar mode was not private"
-    [ "$(file_mode "$dir/home/state/task-a.pr-poll-registration")" = 600 ] \
-      || fail "concurrent registration mode was not private"
-    fm_pr_poll_artifacts_valid "$dir/home/state" task-a "$POLL" \
-      || fail "concurrent publication did not leave canonical provenance"
+    [ ! -e "$dir/home/state/task-a.check.sh" ] \
+      && [ ! -e "$dir/home/state/task-a.pr-poll" ] \
+      && [ ! -e "$dir/home/state/task-a.pr-poll-registration" ] \
+      || fail "concurrent merged publication was not retired completely"
+    [ "$(grep -c "$(printf '\tcheck\t')" "$dir/home/state/.wake-queue")" -eq 1 ] \
+      || fail "concurrent merged publication queued duplicate wakes"
     n=$((n + 1))
   done
-  pass "concurrent watchers observe only complete private poll publications"
+  pass "concurrent watchers observe only complete publications and retire each merged generation once"
 }
 
 test_migration_excludes_older_watcher_before_scan() {
@@ -2845,6 +2901,7 @@ test_invalid_entrypoints_have_zero_side_effects
 test_valid_recording_and_merge_derivation
 test_rejected_metacharacter_bytes_are_inert
 test_static_poll_contract
+test_terminal_poll_retirement_and_replacement
 test_atomic_interruption_leaves_no_partial_artifact
 test_concurrent_watcher_sees_only_complete_publication
 test_postrename_poll_validation_revokes_and_retries

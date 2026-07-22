@@ -7,10 +7,10 @@ set -u
 
 validate_contract() {
   awk '
-    /^### Validate$/ { found = 1; next }
-    found && /^### / { exit }
+    /^## Validate$/ { found = 1; next }
+    found && /^## / { exit }
     found { print }
-  ' "$ROOT/AGENTS.md"
+  ' "$ROOT/.agents/skills/task-lifecycle/SKILL.md"
 }
 
 test_worker_owns_synchronous_driver() {

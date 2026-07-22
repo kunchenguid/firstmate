@@ -16,9 +16,10 @@ SECONDMATE="$ROOT/.agents/skills/secondmate-provisioning/SKILL.md"
 CONFIG="$ROOT/docs/configuration.md"
 AGENTS="$ROOT/AGENTS.md"
 BRIEF="$ROOT/bin/fm-brief.sh"
+LIFECYCLE="$ROOT/.agents/skills/task-lifecycle/SKILL.md"
 
 test_new_skill_metadata_and_triggers() {
-  local skill name count
+  local skill name
   for pair in "diagnostic-reasoning:$DIAG" "project-management:$PROJECT"; do
     name=${pair%%:*}
     skill=${pair#*:}
@@ -26,18 +27,20 @@ test_new_skill_metadata_and_triggers() {
     assert_grep "name: $name" "$skill" "$name skill metadata has the wrong name"
     assert_grep "user-invocable: false" "$skill" "$name skill must not be user-invocable"
     assert_grep "  internal: true" "$skill" "$name skill must be internal"
-    count=$(grep -Fc -- "- \`$name\` -" "$ROOT/AGENTS.md")
-    [ "$count" -eq 1 ] || fail "$name must have exactly one AGENTS.md trigger entry, found $count"
   done
   assert_grep 'Use before scoping a reported bug and before acting on a diagnostic report.' "$DIAG" \
     "diagnostic skill metadata lost its precise load trigger"
-  assert_grep '`diagnostic-reasoning` - load before scoping a reported bug and before acting on a diagnostic report.' "$ROOT/AGENTS.md" \
+  assert_grep 'Load `diagnostic-reasoning` before scoping a reported bug and before acting on a diagnostic report.' "$ROOT/AGENTS.md" \
     "AGENTS.md lost the diagnostic-reasoning trigger"
   assert_grep 'Use before adding, creating, removing, or initializing a project.' "$PROJECT" \
     "project-management skill metadata lost its precise load trigger"
-  assert_grep '`project-management` - load before adding, creating, removing, or initializing a project.' "$ROOT/AGENTS.md" \
+  assert_grep 'Load `project-management` before adding, creating, removing, or initializing a project.' "$ROOT/AGENTS.md" \
     "AGENTS.md lost the project-management trigger"
-  pass "new internal skills have one precise AGENTS.md trigger each"
+  [ "$(grep -Fc 'Load `diagnostic-reasoning` before scoping a reported bug and before acting on a diagnostic report.' "$AGENTS")" -eq 1 ] \
+    || fail "diagnostic-reasoning must have exactly one inline trigger"
+  [ "$(grep -Fc 'Load `project-management` before adding, creating, removing, or initializing a project.' "$AGENTS")" -eq 1 ] \
+    || fail "project-management must have exactly one inline trigger"
+  pass "new internal skills have one precise inline trigger each"
 }
 
 test_diagnostic_owner_covers_causal_procedure() {
@@ -165,27 +168,31 @@ test_state_startup_and_ordinary_recovery_placement() {
     "ordinary recovery lost treehouse inventory inspection"
   assert_grep "recorded \`orca_worktree_id=\` and \`terminal=\`" "$RECOVERY" \
     "ordinary recovery lost Orca inventory inspection"
-  assert_grep "session-start digest reports an ordinary direct report's endpoint dead or its metadata has no window" "$AGENTS" \
+  assert_grep "ordinary report whose endpoint is dead or metadata lacks a window" "$AGENTS" \
     "AGENTS.md does not trigger ordinary dead-report recovery"
   pass "state, startup, and ordinary recovery have focused owners and triggers"
 }
 
 test_compressed_agents_owner_map() {
-  assert_grep '`docs/configuration.md` is the single owner of the top-level operational-home layout' "$AGENTS" \
+  assert_grep '`docs/configuration.md` owns the operational-home layout and configuration schemas' "$AGENTS" \
     "AGENTS.md lost the state-layout owner pointer"
-  assert_grep 'header is the single owner of composed commands, ordering, and digest contents' "$AGENTS" \
+  assert_grep 'its header owns ordering and contents' "$AGENTS" \
     "AGENTS.md lost the session-start owner pointer"
-  assert_grep '`docs/configuration.md` owns dispatch-profile and runtime-backend schemas' "$AGENTS" \
+  assert_grep '`docs/configuration.md` and the dispatch/spawn scripts own schemas and mechanics' "$AGENTS" \
     "AGENTS.md lost the dispatch-schema owner pointer"
-  assert_grep 'That skill owns registry syntax, delivery-mode selection' "$AGENTS" \
+  assert_grep 'Load `project-management` before adding, creating, removing, or initializing a project.' "$AGENTS" \
     "AGENTS.md lost the project-management owner pointer"
-  assert_grep 'The delivery lifecycle is an always-loaded operational contract' "$AGENTS" \
-    "AGENTS.md no longer owns the delivery lifecycle"
+  assert_grep 'Load `task-lifecycle` before classifying, recording, dispatching, validating, landing, tearing down, promoting, or completing task work' "$AGENTS" \
+    "AGENTS.md lost the task-lifecycle trigger"
+  assert_grep 'That skill owns the complete ship/scout, delivery, validation, landing, backlog, and brief procedure' "$AGENTS" \
+    "AGENTS.md lost the task-lifecycle owner pointer"
+  assert_grep 'name: task-lifecycle' "$LIFECYCLE" \
+    "task-lifecycle skill metadata is missing"
   assert_grep 'Fleet supervision is an always-loaded operational contract' "$AGENTS" \
     "AGENTS.md no longer owns fleet supervision"
-  assert_grep '`.tasks.toml`, `docs/configuration.md`, and current `tasks-axi --help` own the backlog schema' "$AGENTS" \
+  assert_grep '`.tasks.toml`, `docs/configuration.md`, and current backend help own schema and mechanics.' "$AGENTS" \
     "AGENTS.md lost the backlog-mechanics owner pointer"
-  assert_grep '`bin/fm-brief.sh` and its help own scaffold syntax' "$AGENTS" \
+  assert_grep '`bin/fm-brief.sh` and its help own exact syntax and generated safety mechanics.' "$AGENTS" \
     "AGENTS.md lost the brief-mechanics owner pointer"
   assert_grep '`docs/configuration.md` owns activation, generated state, cadence, wire protocol' "$AGENTS" \
     "AGENTS.md lost the X-mode mechanics owner pointer"
@@ -194,20 +201,23 @@ test_compressed_agents_owner_map() {
 
 test_compressed_agents_retains_authority_and_supervision_safety() {
   for phrase in \
-    'A lock-refused session must not spawn, steer, merge, drain the wake queue' \
-    'A diagnostic request, report, recommendation, or implementation-ready finding is evidence, not authorization to change code.' \
-    'The selected delivery path owns its own rigor.' \
-    'When no-mistakes is selected, no-mistakes alone owns review, fixes, tests, documentation, push, PR, and CI; otherwise follow the faster path without adding an independent reviewer.' \
-    'Never hold work outside no-mistakes for a manual clean verdict, stack serial manual reviews, or infer authority for one from security, architecture, or risk alone.' \
-    'A separate review or audit is allowed only when the captain explicitly requests that deliverable or the authorized task is a knowledge-only review; one named question remains scoped to that question.' \
-    'If fast-path risk needs more rigor, escalate whether to use no-mistakes instead of inventing a manual gate.' \
-    '**local-only** has the worker stop with a clean ready branch, then waits for the configured merge authority' \
+    'If the session lock is refused, tell the captain another session owns the fleet and remain read-only without draining, spawning, steering, merging, or repairing anything.' \
+    'No report, recommendation, or implementation-ready finding authorizes code changes without a separate implementation request.' \
     'A status line is a wake event, not current state' \
     'keep exactly one live supervision cycle' \
     'Never broadly kill watchers' \
     'While `state/.afk` exists, the daemon owns supervision' \
     'post the final completion follow-up before teardown'; do
     assert_grep "$phrase" "$AGENTS" "compressed AGENTS.md lost safety phrase '$phrase'"
+  done
+  for phrase in \
+    'The selected delivery path owns its own rigor.' \
+    'When no-mistakes is selected, no-mistakes alone owns review, fixes, tests, documentation, push, PR, and CI; otherwise follow the faster path without adding an independent reviewer.' \
+    'Never hold work outside no-mistakes for a manual clean verdict, stack serial manual reviews, or infer authority for one from security, architecture, or risk alone.' \
+    'A separate review or audit is allowed only when the captain explicitly requests that deliverable or the authorized task is a knowledge-only review; one named question remains scoped to that question.' \
+    'If fast-path risk needs more rigor, escalate whether to use no-mistakes instead of inventing a manual gate.' \
+    '**local-only** has the worker stop with a clean ready branch, then waits for the configured merge authority'; do
+    assert_grep "$phrase" "$LIFECYCLE" "task-lifecycle lost safety phrase '$phrase'"
   done
   assert_no_grep 'Firstmate does not personally review code or deliverables' "$AGENTS" \
     "AGENTS.md retained the weaker duplicate review prohibition"
@@ -218,7 +228,7 @@ test_compressed_agents_retains_authority_and_supervision_safety() {
   if grep -q "$(printf '\342\200\224')" "$AGENTS"; then
     fail "AGENTS.md contains an em dash"
   fi
-  pass "compressed AGENTS.md retains authority, supervision, AFK, and X safety"
+  pass "compressed AGENTS.md and task-lifecycle retain authority, supervision, AFK, and X safety"
 }
 
 test_new_skill_metadata_and_triggers

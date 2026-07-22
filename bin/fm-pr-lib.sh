@@ -57,6 +57,7 @@ FM_PR_POLL_EXPECT_DATA_IDENTITY=
 FM_PR_POLL_EXPECT_CHECK_IDENTITY=
 FM_PR_POLL_TEMPLATE=
 FM_PR_POLL_STATE_DEVICE=
+FM_PR_POLL_LOCK=
 
 fm_task_id_path_safe() {
   local id=${1-}
@@ -398,6 +399,32 @@ fm_pr_poll_cleanup() {
   FM_PR_POLL_REG_TMP=
 }
 
+# Publication and terminal retirement share one task-scoped lock so the
+# generation validated by a watcher cannot be replaced between its identity
+# check and removal. The canonical wake-lock helper owns stale-owner recovery.
+fm_pr_poll_lock_acquire() {
+  local state=$1 id=$2 attempt=0 lock
+  fm_pr_task_id_valid "$id" || return 1
+  declare -F fm_lock_try_acquire >/dev/null 2>&1 || return 1
+  [ -d "$state" ] && [ ! -L "$state" ] || return 1
+  lock="$state/.$id.pr-poll.lock"
+  while [ "$attempt" -lt 50 ]; do
+    if fm_lock_try_acquire "$lock"; then
+      FM_PR_POLL_LOCK=$lock
+      return 0
+    fi
+    sleep 0.1
+    attempt=$((attempt + 1))
+  done
+  return 1
+}
+
+fm_pr_poll_lock_release() {
+  [ -n "$FM_PR_POLL_LOCK" ] || return 0
+  fm_lock_release "$FM_PR_POLL_LOCK"
+  FM_PR_POLL_LOCK=
+}
+
 fm_pr_poll_revoke_final() {
   local failed=0
   # Neutralize the runnable name first so a failed rearm cannot consume state
@@ -584,4 +611,46 @@ fm_pr_poll_artifacts_valid() {
   [ "$FM_PR_META_HOST" = "$FM_PR_DATA_HOST" ] || return 1
   [ "$FM_PR_META_PATH" = "$FM_PR_DATA_PATH" ] || return 1
   [ "$FM_PR_META_NUMBER" = "$FM_PR_DATA_NUMBER" ]
+}
+
+# Retire one exact authenticated poll generation after it reports a terminal
+# result. The caller supplies the identities captured before running the poll,
+# so a follow-up PR published concurrently is never mistaken for the completed
+# generation. Return 2 when that generation has already been replaced, and 1
+# when its current artifacts cannot be validated or neutralized safely.
+fm_pr_poll_retire_validated() {
+  local state=$1 id=$2 template=$3 expected_url=$4 expected_data_identity=$5 expected_check_identity=$6
+  local check data registration state_device current_data_identity current_check_identity
+  fm_pr_task_id_valid "$id" || return 1
+  [ -d "$state" ] && [ ! -L "$state" ] || return 1
+  state_device=$(fm_pr_file_device "$state") || return 1
+  check="$state/$id.check.sh"
+  data="$state/$id.pr-poll"
+  registration="$state/$id.pr-poll-registration"
+
+  if ! fm_pr_poll_artifacts_valid "$state" "$id" "$template"; then
+    if fm_pr_metadata_identity_parse "$state/$id.meta" && [ "$FM_PR_META_URL" != "$expected_url" ]; then
+      return 2
+    fi
+    return 1
+  fi
+  current_data_identity=$(fm_pr_file_identity "$data") || return 1
+  current_check_identity=$(fm_pr_file_identity "$check") || return 1
+  if [ "$FM_PR_DATA_URL" != "$expected_url" ] \
+    || [ "$current_data_identity" != "$expected_data_identity" ] \
+    || [ "$current_check_identity" != "$expected_check_identity" ]; then
+    return 2
+  fi
+
+  # Remove the runnable name first. Any later failure leaves the poll inert and
+  # makes a subsequent fm-pr-check publication replace the remnants normally.
+  fm_pr_private_file_valid "$check" 600 "$state_device" || return 1
+  rm -f -- "$check" || return 1
+  [ ! -e "$check" ] && [ ! -L "$check" ] || return 1
+  fm_pr_private_file_valid "$registration" 600 "$state_device" || return 1
+  rm -f -- "$registration" || return 1
+  [ ! -e "$registration" ] && [ ! -L "$registration" ] || return 1
+  fm_pr_private_file_valid "$data" 600 "$state_device" || return 1
+  rm -f -- "$data" || return 1
+  [ ! -e "$data" ] && [ ! -L "$data" ]
 }

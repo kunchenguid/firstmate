@@ -725,6 +725,7 @@ watcher_cleanup() {
   fm_active_check_stop || return 1
   fm_check_output_cleanup
   fm_custom_check_snapshot_cleanup
+  fm_pr_poll_lock_release || true
   fm_lock_release "$WATCH_LOCK"
 }
 trap watcher_cleanup EXIT
@@ -782,9 +783,24 @@ while :; do
           host=$FM_PR_DATA_HOST
           path=$FM_PR_DATA_PATH
           number=$FM_PR_DATA_NUMBER
+          poll_data_identity=$(fm_pr_file_identity "$STATE/$id.pr-poll") || exit 1
+          poll_check_identity=$(fm_pr_file_identity "$c") || exit 1
           run_check_capture "$SCRIPT_DIR/fm-pr-poll.sh" --validated \
             "$provider" "$url" "$host" "$path" "$number" || exit 1
           out=$FM_CHECK_RESULT
+          if [ "$out" = merged ]; then
+            fm_pr_poll_lock_acquire "$STATE" "$id" || exit 1
+            fm_pr_poll_retire_validated "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh" \
+              "$url" "$poll_data_identity" "$poll_check_identity"
+            retire_rc=$?
+            fm_pr_poll_lock_release
+            if [ "$retire_rc" -eq 2 ]; then
+              # A newer PR poll won the race. Its generation remains armed and
+              # the obsolete merged result is not actionable anymore.
+              continue
+            fi
+            [ "$retire_rc" -eq 0 ] || exit 1
+          fi
         elif fm_custom_check_snapshot_prepare "$STATE" "$id"; then
           custom_snapshot=$FM_CUSTOM_CHECK_SNAPSHOT
           run_check_capture "$custom_snapshot" || exit 1
