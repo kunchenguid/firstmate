@@ -80,7 +80,7 @@ test_user_facing_identity_surfaces_use_jay_language() {
 test_complete_instruction_and_document_surface_uses_jay_language() {
   local residue
   residue=$(
-    git grep -n -w -i captain -- \
+    git grep -n -i captain -- \
       AGENTS.md README.md CONTRIBUTING.md .agents/skills skills docs bin 2>/dev/null \
       | awk -F: '{
           text = $0
@@ -88,6 +88,8 @@ test_complete_instruction_and_document_surface_uses_jay_language() {
           if ($1 !~ /^bin\// || text !~ /^[[:space:]]*#/) print
         }' \
       | sed \
+        -e 's/[[:alnum:]_]*_captain[[:alnum:]_]*/ /Ig' \
+        -e 's/[[:alnum:]_]*captain_[[:alnum:]_]*/ /Ig' \
         -e 's/captain-shared\.md//Ig' \
         -e 's/\.fm-captain-shared//Ig' \
         -e 's/captain\.md//Ig' \
@@ -117,7 +119,7 @@ test_complete_instruction_and_document_surface_uses_jay_language() {
         -e 's/`captain` file//Ig' \
         -e 's/never call Jay "captain\."//Ig' \
         -e 's/`ABSENT` `captain`//Ig' \
-      | grep -w -i captain || true
+      | grep -i captain || true
   )
   [ -z "$residue" ] || fail "user-facing instruction or documentation prose still calls Jay captain: $residue"
   pass "complete instruction and documentation surface uses Jay language"

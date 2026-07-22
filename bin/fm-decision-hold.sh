@@ -211,7 +211,7 @@ verify_resolution_identity() {
     *) fail "decision hold $id has no retry identity record" ;;
   esac
   case "$resolution_fields" in
-    *'\nRouted identities: '*'\n\nCaptain decision:'*) : ;;
+    *'\nRouted identities: '*'\n\nJay decision:'*) : ;;
     *) fail "decision hold $id has an invalid retry identity record" ;;
   esac
   recorded_digest=${resolution_fields%%\\n*}
@@ -432,7 +432,7 @@ command_resolve() {
     esac
   done
 
-  body=$(printf 'Resolution recorded by fm-decision-hold.\nDecision digest: %s\nRouted identities: %s\n\nCaptain decision:\n%s\n\nRouted work:\n' "$decision_digest" "$routed_csv" "$decision")
+  body=$(printf 'Resolution recorded by fm-decision-hold.\nDecision digest: %s\nRouted identities: %s\n\nJay decision:\n%s\n\nRouted work:\n' "$decision_digest" "$routed_csv" "$decision")
   for dep in $routed; do
     body="${body}- ${dep}"$'\n'
   done
