@@ -14,8 +14,12 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 LOCK="$STATE/.lock"
 mkdir -p "$STATE"
 
-# Known harness command names; extend when a new adapter is verified.
-HARNESS_RE='claude|codex|opencode|grok|^pi$'
+# Known harness command names used only for session-lock holder identity.
+# This list is intentionally broader than the verified spawn/crew adapter set:
+# a primary may hold the fleet lock before its full spawn/supervision adapter is
+# verified. Hermes is recognized here so a Hermes primary can acquire the lock;
+# crewmates still refuse unverified adapters via fm-spawn / fm-harness.
+HARNESS_RE='claude|codex|opencode|grok|hermes|^pi$'
 
 harness_pid() {
   local pid=$$ comm args
