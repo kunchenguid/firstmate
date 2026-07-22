@@ -43,6 +43,11 @@ This repo is a shared template, while `.env`, `data/`, `state/`, `config/`, `pro
 Ship shared tracked changes through this repo's no-mistakes pipeline and PR path, with the same merge authority as any other project.
 Never add an agent name as a commit co-author.
 
+### Workflow Rules
+- Whenever you generate or finish updating a Markdown file (e.g., reports or specs), automatically open it for preview:
+  - On macOS: `open filename.md`
+  - On Linux/Windows with Grip: `grip filename.md --browser &`
+
 ## 2. Layout and state
 
 `docs/configuration.md` is the single owner of the top-level operational-home layout and configuration schemas; each producing script's header and help own exact child fields and mutation mechanics.
