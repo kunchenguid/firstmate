@@ -118,21 +118,17 @@ EOF
 }
 
 test_fm_lock_recognizes_grok_holder() {
-  local home fakebin out
+  local home fakebin out grok_pid
   home="$TMP_ROOT/lock-home"
   fakebin=$(fm_fakebin "$TMP_ROOT/lock-fake")
   mkdir -p "$home/state"
-  printf '%s\n' "$$" > "$home/state/.lock"
-  cat > "$fakebin/ps" <<'SH'
-#!/usr/bin/env bash
-case "$*" in
-  *"comm="*) printf '%s\n' '/usr/local/bin/grok'; exit 0 ;;
-  *"args="*) printf '%s\n' 'grok'; exit 0 ;;
-esac
-exit 1
-SH
-  chmod +x "$fakebin/ps"
+  cp /usr/bin/python3 "$fakebin/grok"
+  "$fakebin/grok" -c 'import time; time.sleep(30)' &
+  grok_pid=$!
+  printf '%s\n' "$grok_pid" > "$home/state/.lock"
   out=$(FM_HOME="$home" PATH="$fakebin:$PATH" "$ROOT/bin/fm-lock.sh" status)
+  kill "$grok_pid" 2>/dev/null || true
+  wait "$grok_pid" 2>/dev/null || true
   assert_contains "$out" "lock: held by live harness pid" "fm-lock did not recognize grok as a live holder"
   pass "fm-lock recognizes grok harness processes"
 }
