@@ -247,6 +247,19 @@ select_family() {
   [ "$found" -eq 1 ] || die "no tests mapped to family '$want'"
 }
 
+families_for_test_reference() {
+  local needle=$1 s
+  local found=0
+  while IFS= read -r s; do
+    [ -n "$s" ] || continue
+    if grep -Fq "$needle" "$s"; then
+      family_for_basename "$(basename "$s")"
+      found=1
+    fi
+  done < <(all_repo_tests)
+  [ "$found" -eq 1 ]
+}
+
 # Conservative path → family map. Over-selects rather than under-selects.
 # Never expands to the complete suite.
 families_for_changed_path() {
@@ -254,6 +267,10 @@ families_for_changed_path() {
   case "$path" in
     tests/fm-test-run.test.sh)
       printf '%s\n' pure-contract-unit
+      ;;
+    tests/fm-backend-herdr-eventwait.test.py)
+      printf '%s\n' real-herdr-gated
+      printf '%s\n' backend-dispatch
       ;;
     tests/*.test.sh)
       # A single test file change selects only that script via basename family
@@ -292,6 +309,12 @@ families_for_changed_path() {
       printf '%s\n' afk
       printf '%s\n' real-herdr-gated
       ;;
+    bin/fm-supervisor-target-lib.sh)
+      printf '%s\n' watcher-wake-lock
+      printf '%s\n' real-herdr-gated
+      printf '%s\n' live-harness-optin
+      printf '%s\n' afk
+      ;;
     bin/fm-secondmate*|bin/fm-home-seed.sh|bin/fm-backlog-handoff.sh|\
     bin/fm-config-inherit-lib.sh|bin/fm-config-push.sh|bin/fm-shared*)
       printf '%s\n' secondmate
@@ -325,12 +348,15 @@ families_for_changed_path() {
       printf '%s\n' pure-contract-unit
       ;;
     tests/lib.sh|tests/*-helpers.sh)
-      # Shared test helpers can affect many families; pick a broad but still
-      # non-complete set of high-churn families rather than --all.
-      printf '%s\n' pure-contract-unit
-      printf '%s\n' watcher-wake-lock
-      printf '%s\n' session-bootstrap
-      printf '%s\n' backend-dispatch
+      families_for_test_reference "$(basename "$path")" \
+        || printf '%s\n' "__unmapped__:$path"
+      ;;
+    bin/*)
+      families_for_test_reference "$(basename "$path")" \
+        || printf '%s\n' "__unmapped__:$path"
+      ;;
+    tests/*)
+      printf '%s\n' "__unmapped__:$path"
       ;;
     *)
       # No mapping: select nothing for this path (conservative non-expansion).
@@ -355,6 +381,9 @@ select_changed() {
         __script__:*)
           script_name=${entry#__script__:}
           wanted_scripts+=("$script_name")
+          ;;
+        __unmapped__:*)
+          die "no changed-test mapping for source path: ${entry#__unmapped__:}"
           ;;
         *)
           wanted_families+=("$entry")
@@ -596,12 +625,14 @@ fi
 
 if [ "${#SCRIPTS[@]}" -eq 0 ]; then
   log "nothing to run"
+  printf 'FM_TEST_SUMMARY total=0 failed=0 skipped_gate=0 duration_ms=0\n'
   if [ -n "$JSON_PATH" ]; then
     empty_rec=$(mktemp)
     empty_fam=$(mktemp)
     : >"$empty_rec"
     : >"$empty_fam"
     started=$(now_iso)
+    mkdir -p "$(dirname "$JSON_PATH")"
     write_json_artifact "$JSON_PATH" "$started" "$started" "empty" 0 0 0 0 "$SELECTION_DESC" "$empty_rec" "$empty_fam"
     rm -f "$empty_rec" "$empty_fam"
   fi

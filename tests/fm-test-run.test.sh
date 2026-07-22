@@ -89,6 +89,99 @@ test_changed_file_selection_is_conservative() {
   pass "changed-file selection stays conservative (never silent full suite)"
 }
 
+init_changed_fixture_repo() {
+  local repo=$1 script
+  mkdir -p "$repo/bin" "$repo/tests"
+  cp "$RUNNER" "$repo/bin/fm-test-run.sh"
+  chmod +x "$repo/bin/fm-test-run.sh"
+  for script in \
+    fm-brief.test.sh \
+    fm-daemon.test.sh \
+    fm-backend-herdr-smoke.test.sh \
+    fm-secondmate-safety.test.sh \
+    fm-session-start.test.sh \
+    fm-afk-pi-herdr-return-e2e.test.sh \
+    fm-backend.test.sh \
+    fm-pr-merge.test.sh \
+    fm-afk-return.test.sh \
+    fm-bearings-snapshot.test.sh \
+    fm-backend-cmux.test.sh \
+    fm-backend-zellij.test.sh \
+    fm-backend-orca.test.sh; do
+    printf '#!/usr/bin/env bash\n# tests/lib.sh\n' >"$repo/tests/$script"
+    chmod +x "$repo/tests/$script"
+  done
+  : >"$repo/tests/lib.sh"
+  : >"$repo/tests/fm-backend-herdr-eventwait.test.py"
+  : >"$repo/bin/fm-supervisor-target-lib.sh"
+  : >"$repo/bin/unmapped-source.sh"
+  git -C "$repo" init -q
+  git -C "$repo" add .
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm baseline
+}
+
+test_changed_dependency_selection_and_unmapped_failure() {
+  local tmp repo listed rc
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-changed.XXXXXX")
+  repo="$tmp/repo"
+  init_changed_fixture_repo "$repo"
+
+  printf '\n' >>"$repo/tests/lib.sh"
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
+  assert_contains "$listed" "tests/fm-pr-merge.test.sh" "shared helper selects pr-forge dependents"
+  assert_contains "$listed" "tests/fm-secondmate-safety.test.sh" "shared helper selects secondmate dependents"
+  assert_contains "$listed" "tests/fm-bearings-snapshot.test.sh" "shared helper selects snapshot dependents"
+  git -C "$repo" add tests/lib.sh
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm helper-change
+
+  printf '\n' >>"$repo/tests/fm-backend-herdr-eventwait.test.py"
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
+  assert_contains "$listed" "tests/fm-backend-herdr-smoke.test.sh" "eventwait test selects Herdr coverage"
+  assert_contains "$listed" "tests/fm-backend.test.sh" "eventwait test selects backend coverage"
+  git -C "$repo" add tests/fm-backend-herdr-eventwait.test.py
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm eventwait-change
+
+  printf '\n' >>"$repo/bin/fm-supervisor-target-lib.sh"
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
+  assert_contains "$listed" "tests/fm-daemon.test.sh" "supervisor target selects daemon coverage"
+  assert_contains "$listed" "tests/fm-afk-return.test.sh" "supervisor target selects afk coverage"
+  git -C "$repo" add bin/fm-supervisor-target-lib.sh
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm supervisor-change
+
+  printf '\n' >>"$repo/bin/unmapped-source.sh"
+  set +e
+  (cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD) >"$tmp/out" 2>"$tmp/err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 2 ] || fail "unmapped changed source must fail with exit 2, got $rc"
+  grep -Fq 'no changed-test mapping for source path: bin/unmapped-source.sh' "$tmp/err" \
+    || fail "unmapped changed source failure is not actionable: $(cat "$tmp/err")"
+  rm -rf "$tmp"
+  pass "changed selection covers dependents and fails closed for unmapped source"
+}
+
+test_empty_selection_emits_summary() {
+  local tmp repo out json
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-empty.XXXXXX")
+  repo="$tmp/repo"
+  init_changed_fixture_repo "$repo"
+  printf 'documentation only\n' >"$repo/README.md"
+  out=$(cd "$repo" && bin/fm-test-run.sh --changed --base HEAD --json "$tmp/artifacts/timing.json" 2>"$tmp/err") \
+    || fail "empty valid changed selection must pass"
+  [ "$out" = "FM_TEST_SUMMARY total=0 failed=0 skipped_gate=0 duration_ms=0" ] \
+    || fail "empty selection summary is missing or non-deterministic: $out"
+  json="$tmp/artifacts/timing.json"
+  python3 -c '
+import json, sys
+doc = json.load(open(sys.argv[1]))
+assert doc["summary"] == {"duration_ms": 0, "failed": 0, "skipped_gate": 0, "total": 0}
+assert doc["scripts"] == []
+assert doc["families"] == []
+' "$json" || { rm -rf "$tmp"; fail "empty selection JSON summary is wrong"; }
+  rm -rf "$tmp"
+  pass "empty changed selection emits deterministic text and JSON summaries"
+}
+
 test_timing_markers_and_json() {
   local tmp fixture out json begin_n end_n summary
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-timing.XXXXXX")
@@ -227,6 +320,8 @@ test_list_all_exact_suite_coverage
 test_family_selection
 test_single_script_selection
 test_changed_file_selection_is_conservative
+test_changed_dependency_selection_and_unmapped_failure
+test_empty_selection_emits_summary
 test_timing_markers_and_json
 test_aggregate_exit_behavior
 test_gate_skip_accounting
