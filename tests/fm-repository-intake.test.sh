@@ -12,7 +12,7 @@ WATCH="$ROOT/bin/fm-watch.sh"
 TMP_ROOT=$(fm_test_tmproot fm-repository-intake)
 
 make_home() { # <fixture-name> <registry-mode> [project-name]
-  local fixture=$1 mode=$2 name=${3:-alpha} home="$TMP_ROOT/$1-home" repo
+  local mode=$2 name=${3:-alpha} home="$TMP_ROOT/$1-home" repo
   repo="$home/projects/$name"
   mkdir -p "$home/data" "$home/state" "$home/config" "$repo"
   git -C "$repo" init -q
