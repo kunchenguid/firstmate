@@ -74,6 +74,10 @@
 #   secondmate receives the primary's read-only shared captain-preference file
 #   (fm-config-inherit-lib.sh). A successful launch clears pending inherited
 #   config reread generations because the new agent reads the converged files.
+#   Every kind reads config/dev_startup.env once before allocation through
+#   fm-dev-startup-env-lib.sh. When present and valid, its literal values are
+#   loaded from a generated task-private artifact by the common launch path,
+#   then the artifact is removed without placing any .env file in the worktree.
 #   --scout records kind=scout in the task's meta (report deliverable, scratch worktree;
 #   see AGENTS.md task lifecycle); --secondmate records kind=secondmate and launches in a
 #   provisioned firstmate home; the default is kind=ship.
@@ -128,6 +132,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-config-inherit-lib.sh
 . "$SCRIPT_DIR/fm-config-inherit-lib.sh"
+# shellcheck source=bin/fm-dev-startup-env-lib.sh
+. "$SCRIPT_DIR/fm-dev-startup-env-lib.sh"
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-gate-refuse-lib.sh
@@ -190,6 +196,10 @@ case "$EFFORT" in
   *) echo "error: --effort must be one of low, medium, high, xhigh, max" >&2; exit 1 ;;
 esac
 
+# Parse and retain the task startup environment before any task lock, worktree,
+# endpoint, task temp, or metadata is created. The source is read exactly once.
+fm_dev_startup_env_validate "$CONFIG/dev_startup.env" || exit 1
+
 # Backend selection (data/fm-backend-design-d7): explicit --backend, else
 # FM_BACKEND env, else config/backend, else runtime auto-detection, else
 # default tmux (fm_backend_name). fm_backend_validate_spawn refuses unknown or
@@ -248,6 +258,9 @@ parse_orca_worktree_result() {
 
 spawn_abort_cleanup() {
   local status=$?
+  if [ -n "${FM_DEV_STARTUP_ENV_ARTIFACT:-}" ]; then
+    rm -f "$FM_DEV_STARTUP_ENV_ARTIFACT" 2>/dev/null || true
+  fi
   if [ "$HERDR_PROJECTION_ABORT_CLEANUP" = 1 ] \
      && [ "$HERDR_PRESENTATION_ORDER_LOCK_HELD" != 1 ]; then
     if ! spawn_herdr_presentation_order_lock_acquire "${HERDR_PROJECTION_ABORT_SESSION:-}"; then
@@ -1089,6 +1102,7 @@ fi
 # targeted knob: TMPDIR is too broad (affects every program's temp, not just Go's).
 TASK_TMP="/tmp/fm-$ID"
 mkdir -p "$TASK_TMP/gotmp"
+fm_dev_startup_env_prepare "$TASK_TMP" || exit 1
 
 # Per-harness turn-end hook: a file that touches state/<id>.turn-ended when the
 # agent finishes a turn. Worktree-resident hooks are kept out of git's view so
@@ -1270,6 +1284,7 @@ if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")
   LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_HOME=$sq_home $LAUNCH"
 fi
+LAUNCH=$(fm_dev_startup_env_wrap_launch "$LAUNCH")
 # Export GOTMPDIR into the crewmate's pane shell so the agent and every child
 # process (go build, go test, ...) inherit it. Sent before the launch command so
 # the env is set when the agent starts; the brief sleep lets the export land.
@@ -1282,6 +1297,9 @@ if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
   spawn_herdr_presentation_order_lock_release
 fi
 spawn_send_key "$T" Enter
+# The launched shell now owns immediate artifact removal. Do not let the parent
+# success trap race with the launch command before it loads the generated file.
+FM_DEV_STARTUP_ENV_ARTIFACT=
 if [ "$KIND" = secondmate ]; then
   if ! fm_config_reread_discard_pending "$PROJ_ABS" "$ID" "$FM_HOME"; then
     if fm_config_reread_quarantine_pending "$PROJ_ABS" "$ID" "$FM_HOME"; then

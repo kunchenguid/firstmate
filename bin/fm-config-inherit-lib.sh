@@ -5,8 +5,9 @@
 # (e.g. primary config/crew-dispatch.json makes a secondmate use the same dispatch
 # profile rules, primary config/crew-harness=codex makes a secondmate's crewmates
 # spawn on codex too, primary config/backlog-backend=manual makes that home
-# hand-edit backlog files too, and primary config/herdr-presentation-spaces
-# enables the same default-off Herdr presentation projection). It also pushes
+# hand-edit backlog files too, config/dev_startup.env supplies future task process
+# environments, and primary config/herdr-presentation-spaces enables the same
+# default-off Herdr presentation projection). It also pushes
 # the one primary-authoritative shared captain-preference file,
 # data/captain-shared.md, into each secondmate home's data/ as a read-only copy.
 #
@@ -22,7 +23,8 @@
 # primary; an item the primary does not set is mirrored as absence downstream.
 # After successful config/* changes under an already-running secondmate, callers
 # invoke fm_config_send_reread_nudge so the live agent re-reads exact post-write
-# bytes (spawn/respawn already re-reads at launch and needs no redundant nudge).
+# bytes, except dev_startup.env, which applies only to future processes and is
+# deliberately excluded from live-agent reread instructions.
 #
 # Extensible by design: FM_INHERITABLE_CONFIG is the single declared list of
 # config-dir-relative items the primary propagates. Add an item there and every
@@ -40,7 +42,8 @@ FM_SHARED_CAPTAIN_MODE="444"
 # The declared inheritable set (space-separated, config-dir-relative item paths).
 # Extend here to inherit more of the primary's local config; override via the
 # environment only in tests. Items must not contain whitespace.
-FM_INHERITABLE_CONFIG="${FM_INHERITABLE_CONFIG:-crew-dispatch.json crew-harness backlog-backend herdr-presentation-spaces}"
+FM_INHERITABLE_CONFIG="${FM_INHERITABLE_CONFIG:-crew-dispatch.json crew-harness backlog-backend herdr-presentation-spaces dev_startup.env}"
+FM_INHERITABLE_CONFIG_NO_REREAD="${FM_INHERITABLE_CONFIG_NO_REREAD:-dev_startup.env}"
 
 fm_inherit_file_mode() {
   if [ "$(uname)" = Darwin ]; then
@@ -461,6 +464,9 @@ FM_CONFIG_REREAD_FRAMING='These inherited config files changed. Re-read and appl
 # allowlisted here and must never be inlined into a reread instruction.
 fm_config_reread_is_allowlisted_item() {
   local item=$1 candidate
+  for candidate in $FM_INHERITABLE_CONFIG_NO_REREAD; do
+    [ "$candidate" = "$item" ] && return 1
+  done
   for candidate in $FM_INHERITABLE_CONFIG; do
     [ "$candidate" = "$item" ] && return 0
   done
@@ -474,6 +480,7 @@ fm_config_reread_changed_items() {
   local report=$1 item status
   [ -n "$report" ] && [ -f "$report" ] || return 0
   for item in $FM_INHERITABLE_CONFIG; do
+    fm_config_reread_is_allowlisted_item "$item" || continue
     status=$(awk -F '\t' -v item="$item" '$1 == item { print $2; exit }' "$report" 2>/dev/null) || status=""
     [ "$status" = pushed ] || continue
     printf '%s\n' "$item"

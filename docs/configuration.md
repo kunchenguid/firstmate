@@ -18,6 +18,34 @@ The tracked code root contains the shared instruction, skill, documentation, wor
 The producing PR and X helpers own the fields they append, `bin/fm-classify-lib.sh` owns status-event vocabulary, and `bin/fm-crew-state.sh` owns current-state reconciliation.
 Wake, watcher, away-mode, and X-specific state mechanics remain with their named scripts and reference sections rather than being duplicated into one exhaustive state tree here.
 
+## Task startup environment (config/dev_startup.env)
+
+A local `${FM_CONFIG_OVERRIDE:-$FM_HOME/config}/dev_startup.env` supplies environment variables to every newly spawned crewmate, scout, or secondmate harness process and all of its child processes.
+Normal `FM_HOME` fallback behavior selects the config directory when `FM_CONFIG_OVERRIDE` is unset.
+The file stays local and gitignored with the rest of `config/`, and Firstmate never writes or links a `.env` file into a project worktree.
+A missing file is an exact backward-compatible no-op.
+Each task reads the file once at spawn, so a running task keeps its original environment while a new spawn or respawn reads the current file.
+An explicitly present ambient variable wins over the file for the same key, including when the ambient value is empty.
+
+The supported dotenv syntax is intentionally lightweight.
+Blank lines and full-line `#` comments are ignored.
+Assignments may have an optional leading `export`, and keys must match `[A-Za-z_][A-Za-z0-9_]*` in `KEY=value` records.
+Values may be unquoted or wrapped in one matching layer of single or double quotes, empty values are allowed, and the last assignment wins when a key is repeated.
+Values are literal, `#` inside an assignment is part of the value, and Firstmate performs no shell expansion, command substitution, or source-file execution.
+Invalid syntax stops the spawn before a worktree, endpoint, task metadata, or task-private temp directory is created.
+
+Firstmate rejects only names that can corrupt task routing or shell identity.
+The protected exact names are `FM_HOME`, `FM_ROOT_OVERRIDE`, `FM_STATE_OVERRIDE`, `FM_DATA_OVERRIDE`, `FM_PROJECTS_OVERRIDE`, `FM_CONFIG_OVERRIDE`, `FM_BACKEND`, `FM_SUPERVISOR_BACKEND`, `FM_SUPERVISOR_TARGET`, `HOME`, `PATH`, `SHELL`, `PWD`, `OLDPWD`, `GOTMPDIR`, `TMUX`, `TMUX_PANE`, `BASH_ENV`, `ENV`, `IFS`, `CDPATH`, `BASHOPTS`, and `SHELLOPTS`.
+The protected runtime identity prefixes are `FM_BACKEND_`, `HERDR_`, `ZELLIJ_`, `CMUX_`, `ORCA_`, `FM_HERDR_`, `FM_ZELLIJ_`, `FM_CMUX_`, and `FM_ORCA_`.
+A rejection diagnostic names the key but never its value, and it stops the spawn before allocation.
+The policy deliberately adds no secret manager, encryption, redaction framework, key allowlist, or hard file-mode requirement.
+
+After validation, `fm-spawn.sh` prepares a mode-0600 generated export artifact under the task-private temp directory and loads it through the common launch path used by every harness and runtime backend.
+The generated artifact contains only shell-quoted literal conditional exports, is removed immediately after loading, and otherwise follows existing task-private temp cleanup ownership.
+Configured values do not enter the launch command, brief, task metadata, status, or normal spawn output.
+`dev_startup.env` is primary-authoritative inherited local material for secondmate homes, so initial spawn, bootstrap convergence, and `fm-config-push.sh` copy updates and mirror primary-side removal as downstream absence.
+A secondmate's own future tasks read that inherited file, while a change never rewrites the environment of the already-running secondmate or any other existing task.
+
 `bin/fm-session-start.sh`'s header is the single owner of session-start ordering, composed commands, digest contents, and the digest's startup mechanism.
 `docs/sessionstart-nudge.md` owns the native session-open adapter mechanics that nudge the digest command.
 `AGENTS.md` retains the run-once and read-once operator rules, lock-refusal safety, installation consent, and direct-report recovery boundaries because those facts apply at every session start.
@@ -263,8 +291,9 @@ When a running home advances and its loaded instruction surface (`AGENTS.md`, `b
 If that send fails, bootstrap keeps an idempotent retry marker and emits `NUDGE_SECONDMATES:` with the failure reason.
 The same bootstrap run emits `SECONDMATE_LIVENESS:` only when a live secondmate endpoint is skipped or respawn fails; already-live and successfully respawned endpoints are handled silently.
 For a mid-session inherited local-material edit where tracked-file sync is not needed, run `bin/fm-config-push.sh`.
-It uses the same live secondmate discovery and propagation helper as bootstrap, prints each live home's `crew-dispatch.json`, `crew-harness`, `backlog-backend`, `herdr-presentation-spaces`, and `data/captain-shared.md` result as `pushed`, `unchanged`, `skipped`, or `error`, and exits non-zero for real propagation errors or config-reread send failures.
+It uses the same live secondmate discovery and propagation helper as bootstrap, prints each live home's `crew-dispatch.json`, `crew-harness`, `backlog-backend`, `herdr-presentation-spaces`, `dev_startup.env`, and `data/captain-shared.md` result as `pushed`, `unchanged`, `skipped`, or `error`, and exits non-zero for real propagation errors or config-reread send failures.
 When an allowlisted config item changes for an already-running home, it sends the literal-content reread pointer described in [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md); unchanged allowlisted config sends no pointer unless a previous delivery is pending.
+`dev_startup.env` is excluded from that reread path because it applies only when a future process starts.
 The locked bootstrap inheritance pass uses the same per-home changed-set and reread path for already-running homes; see `secondmate-provisioning` for the single contract owner.
 That live discovery starts from `state/*.meta` records with `kind=secondmate`; `data/secondmates.md` only backfills `home=` for older or incomplete meta records.
 Skipped items, such as a destination checkout that does not yet gitignore the item, are visible warnings but not hard failures.

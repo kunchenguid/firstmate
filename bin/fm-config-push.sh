@@ -3,15 +3,17 @@
 # Usage: fm-config-push.sh [--help]
 #
 # Mid-session convergence for inherited local material such as
-# config/crew-dispatch.json edits or data/captain-shared.md updates. This
+# config/crew-dispatch.json, config/dev_startup.env, or data/captain-shared.md
+# updates. This
 # discovers live secondmate homes from state/*.meta, backfills
 # home= from data/secondmates.md for older meta records, and reuses the same
 # propagation machinery as bootstrap, but deliberately does not
 # fast-forward tracked files.
-# After a successful per-home propagation that changes any allowlisted config/*
+# After a successful per-home propagation that changes a live-reread config/*
 # item, writes a generation-specific literal-content reread instruction and
 # sends its pointer to that live secondmate via fm-config-inherit-lib.sh
-# (fm_config_send_reread_nudge).
+# (fm_config_send_reread_nudge). dev_startup.env is inherited but excluded from
+# reread instructions because it applies only to future task processes.
 # Unchanged config and data/captain-shared.md-only updates send no reread
 # message unless a previous send failure is pending for that home.
 # Warnings-only skips exit 0; real propagation or reread-send errors exit non-zero.
@@ -26,9 +28,9 @@ live secondmate home.
 
 This is local-material-only:
   - does not fast-forward tracked files
-  - after successful config/* changes, writes a generation-specific
+  - after successful live-reread config/* changes, writes a generation-specific
     literal-content reread instruction and sends its pointer to that live secondmate
-    (no message when config is unchanged unless a previous send failure is pending)
+    (dev_startup.env applies only to future processes and sends no reread message)
   - reports each live home and each inheritable item as pushed, unchanged,
     skipped, or error
   - exits non-zero for real propagation errors or reread-send failures
