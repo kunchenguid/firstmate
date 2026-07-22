@@ -52,8 +52,9 @@
 #          with update --archive-body and mv [<id>...]); an installed but
 #          incompatible build reports MISSING like no-mistakes. A compatible
 #          tasks-axi default backend is silent. quota-axi is required because
-#          crew-dispatch quota-balanced may call it; fm-dispatch-select.sh still
-#          degrades at runtime when quota data is unavailable.
+#          every crew-dispatch profile array calls it automatically;
+#          fm-dispatch-select.sh still uses OS-backed random selection across
+#          valid candidates when quota data is unavailable.
 #          X mode is OPTIONAL and inert unless FM_HOME/.env has a non-empty
 #          FMX_PAIRING_TOKEN. When opted in, bootstrap requires curl+jq, writes
 #          the relay poll shim and 30s cadence config, and prints an FMX line.
@@ -722,14 +723,20 @@ crew_dispatch_validate() {
       elif $h == "opencode" then false
       else true
       end;
-    def use_profiles($u):
-      if ($u | type) == "array" then $u
-      elif ($u | type) == "object" then [$u]
+    def profiles($value):
+      if ($value | type) == "array" then $value
+      elif ($value | type) == "object" then [$value]
       else []
       end;
+    def configured_profiles:
+      ([(.rules // [])[]? | profiles(.use?)[]?]
+        + (if has("default") then [profiles(.default)[]?] else [] end));
+    def malformed_optional_fields($items):
+      ($items | any(has("model") and (((.model | type) != "string") or (.model | length) == 0)))
+      or ($items | any(has("effort") and (((.effort | type) != "string") or (.effort | length) == 0)));
     def bad_efforts:
-      ([(.rules // [])[]? | use_profiles(.use?)[]? | {h: .harness, e: .effort}]
-        + (if (.default? | type) == "object" then [{h: .default.harness, e: .default.effort}] else [] end))
+      configured_profiles
+      | map({h: .harness, e: .effort})
       | map(select(.e != null))
       | map(select((.h | type) == "string" and verified(.h)))
       | map(select(. as $p | effort_ok($p.h; $p.e) | not))
@@ -741,15 +748,20 @@ crew_dispatch_validate() {
     elif [(.rules // [])[]? | select((.when? | type) != "string" or (.when | length) == 0)] | length > 0 then "each rule needs non-empty when"
     elif [(.rules // [])[]? | select((.use? | type) != "object" and (.use? | type) != "array")] | length > 0 then "each rule needs use"
     elif [(.rules // [])[]? | select((.use? | type) == "array" and (.use | length) == 0)] | length > 0 then "each rule needs at least one use profile"
-    elif [(.rules // [])[]? | use_profiles(.use?)[]? | select(type != "object")] | length > 0 then "each use profile must be an object"
-    elif [(.rules // [])[]? | use_profiles(.use?)[]? | select((.harness? | type) != "string" or (.harness | length) == 0)] | length > 0 then "each use profile needs harness"
+    elif [(.rules // [])[]? | profiles(.use?)[]? | select(type != "object")] | length > 0 then "each use profile must be an object"
+    elif [(.rules // [])[]? | profiles(.use?)[]? | select((.harness? | type) != "string" or (.harness | length) == 0)] | length > 0 then "each use profile needs harness"
+    elif malformed_optional_fields([(.rules // [])[]? | profiles(.use?)[]?]) then "use profile model and effort must be non-empty strings when present"
     elif [(.rules // [])[]? | select(has("select") and ((.select? | type) != "string" or (.select | length) == 0))] | length > 0 then "select must be a non-empty string"
     elif [(.rules // [])[]? | .select? // empty | select(. != "quota-balanced")] | length > 0 then
       "unknown select: " + ([ (.rules // [])[]? | .select? // empty | select(. != "quota-balanced") ] | unique | join(", "))
-    elif has("default") and (.default | type) != "object" then "default must be an object"
-    elif has("default") and ((.default.harness? | type) != "string" or (.default.harness | length) == 0) then "default needs harness when present"
+    elif has("default") and ((.default | type) != "object" and (.default | type) != "array") then "default must be a profile object or non-empty profile array"
+    elif has("default") and ((.default | type) == "array" and (.default | length) == 0) then "default needs at least one profile"
+    elif has("default") and ([profiles(.default)[]? | select(type != "object")] | length) > 0 then "each default profile must be an object"
+    elif has("default") and ([profiles(.default)[]? | select((.harness? | type) != "string" or (.harness | length) == 0)] | length) > 0 then "each default profile needs harness"
+    elif has("default") and malformed_optional_fields([profiles(.default)[]?]) then "default profile model and effort must be non-empty strings when present"
     else
-      ([(.rules // [])[]? | use_profiles(.use?)[]?.harness] + [.default?.harness?]
+      (configured_profiles
+        | map(.harness)
         | map(select(. != null))
         | map(select(. as $h | verified($h) | not))
         | unique) as $bad_harnesses
@@ -771,15 +783,14 @@ crew_dispatch_validate() {
          elif ($p.effort? != null) then "/default"
          else "" end)
       + (if ($p.effort? != null) then "/" + ($p.effort | tostring) else "" end);
-    def use_label($r):
-      if ($r.use | type) == "array" then
-        ((if ($r.select? != null) then ($r.select | tostring) else "first" end)
-          + "[" + ([$r.use[] | profile(.)] | join(", ")) + "]")
-      else profile($r.use)
+    def profile_set($value; $selector):
+      if ($value | type) == "array" then
+        (($selector // "quota-balanced") + "[" + ([$value[] | profile(.)] | join(", ")) + "]")
+      else profile($value)
       end;
     (["BOOTSTRAP_INFO: crew dispatch active config/crew-dispatch.json"]
-      + [(.rules // [])[]? | "BOOTSTRAP_INFO: crew dispatch rule: " + (.when | tostring) + " -> " + use_label(.)]
-      + (if (.default? | type) == "object" then ["BOOTSTRAP_INFO: crew dispatch default: " + profile(.default)] else [] end))
+      + [(.rules // [])[]? | "BOOTSTRAP_INFO: crew dispatch rule: " + (.when | tostring) + " -> " + profile_set(.use; .select?)]
+      + (if has("default") then ["BOOTSTRAP_INFO: crew dispatch default: " + profile_set(.default; null)] else [] end))
     | .[]
   ' "$file"
   fi

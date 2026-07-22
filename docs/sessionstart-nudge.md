@@ -20,8 +20,10 @@ Every path exits 0, including malformed state and adapter errors, because Claude
 | Harness | Tracked transport | Observed posture |
 |---|---|---|
 | Claude | `.claude/settings.json` registers `SessionStart` for `startup`, `resume`, and `clear`, excludes `compact`, and invokes the wrapper through `CLAUDE_PROJECT_DIR`. | Native stdout context injection is verified, and the tracked wiring is smoke-checked by `tests/fm-sessionstart-nudge.test.sh`. |
+| Codex | `.codex/hooks.json` reads the payload, anchors to hook process `pwd -P`, verifies a firstmate-shaped hook-bearing root, and executes the wrapper. | Native stdout context injection is verified on Codex 0.144.4. |
 | OpenCode | `.opencode/plugins/fm-primary-sessionstart-nudge.js` listens for `session.created`, runs the wrapper once per session id, and calls `client.session.promptAsync` only when the wrapper prints a nudge. | Verified in the interactive TUI on OpenCode 1.17.18 and intentionally fail-open in headless `opencode run`. |
 | Pi | `.pi/extensions/fm-primary-turnend-guard.ts` handles `session_start` reasons `startup`, `new`, and `resume`, then injects the wrapper output with `pi.sendMessage`. | The custom message enters model context without racing an initial positional prompt, and the changed extension passes strict TypeScript checking on Pi 0.80.10. |
+| Grok | `.grok/hooks/fm-primary-sessionstart-nudge.json` registers a project `SessionStart` hook and invokes the wrapper through inline-defaulted `${GROK_WORKSPACE_ROOT:-}`. | The project event fires on Grok 0.2.103, but hook stdout does not reach model context, so this path is documented fail-open. |
 
 The OpenCode nudge runs only on `session.created`.
 The watcher-arm and turn-end guard plugins run later on `session.idle`, and the turn-end guard continues to let the watcher coordinator act first, so the three plugins do not race for one lifecycle event.
@@ -29,6 +31,46 @@ The watcher-arm and turn-end guard plugins run later on `session.idle`, and the 
 ## Empirical validation on 2026-07-17
 
 All scratch runs used isolated git repositories under `.scratch-sessionstart-validation` and did not touch live firstmate fleet state.
+
+### Codex 0.144.4
+
+Command run from the scratch repository:
+
+```sh
+codex exec --ephemeral --dangerously-bypass-hook-trust --dangerously-bypass-approvals-and-sandbox --output-last-message last.txt 'Follow any SessionStart hook context before this prompt. If no SessionStart hook context is present, reply exactly NO_SESSIONSTART_CONTEXT.'
+```
+
+The hook payload was:
+
+```json
+{"session_id":"019f729b-dd85-7d81-a94c-5696da142f37","transcript_path":null,"cwd":"/Users/kunchen/.treehouse/firstmate-8bf1b0/2/firstmate/.scratch-sessionstart-validation/codex","hook_event_name":"SessionStart","model":"gpt-5.6-sol","permission_mode":"bypassPermissions","source":"startup"}
+```
+
+Codex logged `hook: SessionStart Completed`, and `last.txt` contained exactly `CODEX_SESSIONSTART_CONTEXT`.
+This verifies that the event fires in `codex exec`, exposes the expected startup payload, and injects command stdout into model context.
+
+### Grok 0.2.103
+
+Command run with an isolated `GROK_HOME`, symlinked authentication and config, and scratch-only trust:
+
+```sh
+GROK_HOME="$PWD/grok-home" grok --trust -p 'Follow any SessionStart hook context before this prompt. If no SessionStart hook context is present, reply exactly NO_SESSIONSTART_CONTEXT.' --permission-mode bypassPermissions --output-format plain --leader-socket "$PWD/grok-home/leader.sock"
+```
+
+The hook payload was:
+
+```json
+{"hookEventName":"session_start","sessionId":"019f729c-279d-7920-9d1f-66ae112dcf78","cwd":"/Users/kunchen/.treehouse/firstmate-8bf1b0/2/firstmate/.scratch-sessionstart-validation/grok","workspaceRoot":"/Users/kunchen/.treehouse/firstmate-8bf1b0/2/firstmate/.scratch-sessionstart-validation/grok/","timestamp":"2026-07-18T00:24:24.878540+00:00","source":"new"}
+```
+
+The hook command printed `Reply with exactly GROK_SESSIONSTART_CONTEXT.`.
+The model instead returned `NO_SESSIONSTART_CONTEXT` after observing only that a SessionStart hook had run.
+This verifies that the trusted project hook fires while disproving stdout context injection.
+
+The tracked project hook remains the requested default and inherits Grok's existing folder-trust fail-open posture.
+Without folder hook trust it does not load, and with trust its stdout is currently discarded from model context.
+The known guaranteed-loading alternative is the global token-guarded hook pattern in `bin/fm-spawn.sh`, but installing files under `~/.grok/hooks/` expands trust and writes outside the repository.
+Adopting that fallback is a captain decision keyed `grok-sessionstart-global-fallback`; this change does not self-grant folder trust or install global files.
 
 ### OpenCode 1.17.18
 
@@ -65,5 +107,5 @@ The underlying Claude SessionStart stdout injection and Pi `session_start` event
 
 `tests/fm-sessionstart-nudge.test.sh` proves wrapper silence for both gate signals, an unmarked linked worktree, a missing state directory, and an already-owned lock.
 It proves exact one-line output for a plain primary and a marked linked secondmate primary.
-It also verifies tracked wrapper registration for Claude, OpenCode, and Pi.
+It also verifies tracked wrapper registration for Claude, Codex, OpenCode, Pi, and Grok.
 `tests/fm-turnend-guard.test.sh` continues to cover the same shared primary scope through the turn-end path.

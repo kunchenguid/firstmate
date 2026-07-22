@@ -2,6 +2,7 @@
 name: upstream-integrate
 description: Selectively integrate upstream firstmate commits into a local fork through an interactive captain dialogue and a spawned crewmate. Use when the captain invokes /upstream-integrate, asks "what's new in upstream", "what did the author add", or otherwise wants to review and selectively pull upstream commits into a fork where /updatefirstmate's fast-forward skips (diverged local branch). Fetches upstream, presents the new commits, captures the captain's selection, then dispatches a worker to cherry-pick each chosen commit, resolve conflicts toward local intent, run lint and tests, and land a local commit per change. Never auto-merges, never pushes; the captain selects each integration and the captain's explicit word gates any push.
 user-invocable: true
+disable-model-invocation: true
 metadata:
   internal: true
 ---
