@@ -704,7 +704,7 @@ test_bootstrap_reports_missing_x_dependency() {
   local home fakebin out tool tool_path
   home="$TMP_ROOT/boot-missing-x"; mkdir -p "$home"
   fakebin=$(fm_fakebin "$home")
-  fm_fake_exit0 "$fakebin" tmux node no-mistakes gh-axi chrome-devtools-axi lavish-axi curl
+  fm_fake_exit0 "$fakebin" tmux node no-mistakes gh-axi lavish-axi curl
   for tool in dirname grep tail; do
     tool_path=$(command -v "$tool") || fail "test host must provide $tool"
     ln -s "$tool_path" "$fakebin/$tool"
