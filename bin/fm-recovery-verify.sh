@@ -8,9 +8,9 @@
 # This command reads the live foreground process cwd from the recorded backend,
 # then requires its Git top-level to equal worktree= and its canonical Git
 # common directory to equal project_git_common_dir=.
-# A missing field, unreadable backend cwd, unsupported live-cwd backend, path
-# mismatch, or clone-identity mismatch fails closed and requires a fresh launch
-# in the recorded worktree instead of continuing the resumed session.
+# A missing field, a lost or ambiguous backend endpoint, unreadable backend
+# cwd, unsupported live-cwd backend, path mismatch, or clone-identity mismatch
+# fails closed and requires a fresh launch in the recorded worktree instead.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -75,7 +75,14 @@ TARGET=$(fm_backend_target_of_meta "$META")
 fm_backend_source "$BACKEND" || exit 1
 
 case "$BACKEND" in
-  tmux) ACTUAL=$(fm_backend_tmux_current_path "$TARGET" || true) ;;
+  tmux)
+    WINDOW_ID=$(fm_backend_tmux_resolve_window_id "$TARGET" || true)
+    if [ -z "$WINDOW_ID" ]; then
+      echo "error: task $ID tmux target '$TARGET' does not resolve to exactly one live window; refusing recovery resume" >&2
+      exit 1
+    fi
+    ACTUAL=$(fm_backend_tmux_current_path "$WINDOW_ID" || true)
+    ;;
   herdr) ACTUAL=$(fm_backend_herdr_current_path "$TARGET" || true) ;;
   zellij|orca|cmux)
     echo "error: backend=$BACKEND does not expose a verified passive live foreground cwd; refusing recovery resume for task $ID" >&2

@@ -25,7 +25,8 @@ case "${1:-}" in
     done
     printf 'firstmate\n'
     ;;
-  list-windows|has-session|set-window-option|kill-window) ;;
+  list-windows) [ -z "${FM_FAKE_WINDOW_LIST:-}" ] || printf '%s\n' "$FM_FAKE_WINDOW_LIST" ;;
+  has-session|set-window-option|kill-window) ;;
   new-session) ;;
   new-window) printf '@71\n' ;;
   send-keys)
@@ -140,10 +141,11 @@ write_recovery_meta() {
 }
 
 run_recovery_verify() {
-  local id=$1 actual=$2
+  local id=$1 actual=$2 windows=${3-"@71 fm-$1"}
   FM_ROOT_OVERRIDE='' FM_HOME="$HOME_A" FM_STATE_OVERRIDE="$HOME_A/state" \
     FM_CONFIG_OVERRIDE="$HOME_A/config" TMUX="fake,1,0" \
-    FM_FAKE_ACTUAL_CWD="$actual" PATH="$FAKEBIN:$PATH" \
+    FM_FAKE_ACTUAL_CWD="$actual" FM_FAKE_WINDOW_LIST="$windows" \
+    PATH="$FAKEBIN:$PATH" \
     "$RECOVERY_VERIFY" "$id" 2>&1
 }
 
@@ -159,6 +161,32 @@ test_resume_historical_foreign_cwd_is_rejected() {
   assert_contains "$out" "exit this resumed agent and relaunch fresh" "resume refusal did not provide the safe recovery action"
   assert_contains "$out" "$FOREIGN_WT" "resume refusal did not identify the actual historical cwd"
   pass "recovery refuses a resumed agent whose historical cwd crosses the selected clone boundary"
+}
+
+test_resume_lost_window_name_fails_closed() {
+  local id out rc
+  id=resume-lost-window
+  write_recovery_meta "$id"
+
+  out=$(run_recovery_verify "$id" "$OWNED_WT" $'@71 renamed-away\n@72 unrelated')
+  rc=$?
+
+  [ "$rc" -ne 0 ] || fail "recovery verifier should fail closed when the recorded window name is lost, even if a name-fallback read would report the recorded worktree"
+  assert_contains "$out" "does not resolve to exactly one live window" "lost-window refusal did not name the endpoint resolution failure"
+  pass "recovery fails closed on a lost or renamed tmux window name instead of falling back to the active client"
+}
+
+test_resume_ambiguous_window_name_fails_closed() {
+  local id out rc
+  id=resume-ambiguous-window
+  write_recovery_meta "$id"
+
+  out=$(run_recovery_verify "$id" "$OWNED_WT" $'@71 fm-resume-ambiguous-window\n@72 fm-resume-ambiguous-window')
+  rc=$?
+
+  [ "$rc" -ne 0 ] || fail "recovery verifier should fail closed on an ambiguous recorded window name"
+  assert_contains "$out" "does not resolve to exactly one live window" "ambiguous-window refusal did not name the endpoint resolution failure"
+  pass "recovery fails closed when the recorded window name matches more than one live window"
 }
 
 test_resume_recorded_worktree_is_accepted() {
@@ -177,6 +205,8 @@ test_resume_recorded_worktree_is_accepted() {
 test_foreign_pooled_worktree_is_rejected_before_launch_or_meta
 test_owned_worktree_records_selected_clone_identity
 test_resume_historical_foreign_cwd_is_rejected
+test_resume_lost_window_name_fails_closed
+test_resume_ambiguous_window_name_fails_closed
 test_resume_recorded_worktree_is_accepted
 
 echo "# all fm-spawn-clone-identity tests passed"

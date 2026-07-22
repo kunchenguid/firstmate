@@ -101,6 +101,32 @@ fm_backend_tmux_current_path() {  # <target>
   tmux display-message -p -t "$1" '#{pane_current_path}' 2>/dev/null
 }
 
+# fm_backend_tmux_resolve_window_id: resolve a recorded `session:window`
+# target to the exactly-one live stable window id it names, without tmux's
+# own -t name resolution - display-message with a lost or renamed window
+# name falls back to the active client's window (the hazard documented at
+# fm-spawn.sh's worktree-detection poll), which a verifier must never
+# inherit. Lists the session's windows and requires exactly one whose name
+# (or id) equals the target's window part; zero or multiple matches fail so
+# callers that must not guess can fail closed.
+fm_backend_tmux_resolve_window_id() {  # <session:window> -> prints the window id
+  local target=$1 ses name ids
+  case "$target" in
+    ?*:?*) ;;
+    *) return 1 ;;
+  esac
+  ses=${target%%:*}
+  name=${target#*:}
+  ids=$(tmux list-windows -t "$ses" -F '#{window_id} #{window_name}' 2>/dev/null |
+    awk -v n="$name" '$1 == n || substr($0, index($0, " ") + 1) == n { print $1 }' |
+    sort -u)
+  [ -n "$ids" ] || return 1
+  case "$ids" in
+    *$'\n'*) return 1 ;;
+  esac
+  printf '%s\n' "$ids"
+}
+
 # fm_backend_tmux_send_text_line: send one line of TEXT then Enter, with no
 # composer verification - used for the fixed spawn-time commands
 # (`treehouse get`, the GOTMPDIR export) that already ran this exact sequence
