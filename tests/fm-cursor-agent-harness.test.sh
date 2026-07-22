@@ -41,6 +41,14 @@ test_launch_template_cursor_agent() {
   pass "launch_template emits cursor-agent oneshot command"
 }
 
+test_launch_template_cursor_agent_rejects_secondmate() {
+  extract_launch_template
+  if launch_template cursor-agent secondmate >/dev/null 2>&1; then
+    fail "cursor-agent must not have a secondmate launch template"
+  fi
+  pass "launch_template refuses cursor-agent secondmate"
+}
+
 test_crew_harness_resolves_cursor_agent() {
   local cfg got
   cfg="$TMP_ROOT/config"
@@ -73,5 +81,6 @@ test_detect_own_cursor_agent_env() {
 
 test_usage_lists_cursor_agent
 test_launch_template_cursor_agent
+test_launch_template_cursor_agent_rejects_secondmate
 test_crew_harness_resolves_cursor_agent
 test_detect_own_cursor_agent_env

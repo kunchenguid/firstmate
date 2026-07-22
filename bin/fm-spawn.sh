@@ -449,7 +449,10 @@ launch_template() {
     # Not a verified primary (no turn-end/watch hooks). Interactive Herdr launch
     # is unverified - do not use this template for multiturn panes. See
     # docs/cursor-agent-crew.md. Canonical name is cursor-agent (not bare cursor).
-    cursor-agent) printf '%s' 'cursor-agent -p --force --trust --workspace "$(pwd)" "$(cat __BRIEF__)"' ;;
+    cursor-agent)
+      [ "$kind" != secondmate ] || return 1
+      printf '%s' 'cursor-agent -p --force --trust --workspace "$(pwd)" "$(cat __BRIEF__)"'
+      ;;
     *) return 1 ;;
   esac
 }
