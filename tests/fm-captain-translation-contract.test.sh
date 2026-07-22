@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Static regression tests for the captain-facing plain-English translation
 # contract owned by AGENTS.md section 9.
+# shellcheck disable=SC2016
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -15,6 +16,8 @@ HARNESS="$ROOT/.agents/skills/harness-adapters/SKILL.md"
 CODEXAPP="$ROOT/.agents/skills/firstmate-codexapp/SKILL.md"
 FMX="$ROOT/.agents/skills/fmx-respond/SKILL.md"
 UPDATE="$ROOT/.agents/skills/updatefirstmate/SKILL.md"
+AHOY="$ROOT/.agents/skills/ahoy/SKILL.md"
+README="$ROOT/README.md"
 
 section_9() {
   awk '
@@ -138,6 +141,46 @@ test_section_9_owner_is_not_duplicated_into_skills() {
   pass "skills cross-reference section 9 instead of duplicating the mapping list"
 }
 
+test_ahoy_is_an_internal_user_invocable_skill() {
+  assert_present "$AHOY" "ahoy skill is missing"
+  assert_grep 'name: ahoy' "$AHOY" "ahoy skill metadata has the wrong name"
+  assert_grep 'user-invocable: true' "$AHOY" "ahoy skill is not user-invocable"
+  assert_grep '  internal: true' "$AHOY" "ahoy skill is not internal"
+  [ ! -e "$ROOT/skills/ahoy" ] || fail "ahoy must not exist in the public installer-facing skills directory"
+  pass "ahoy is internal, user-invocable, and absent from public skills"
+}
+
+test_ahoy_readme_uses_cross_harness_convention() {
+  assert_grep 'Claude and grok use the slash form shown here; codex uses the same names with `$`' "$README" \
+    "README lost the cross-harness slash and dollar convention"
+  assert_grep '| `/ahoy`' "$README" "README built-in skills table does not list /ahoy"
+  pass "README lists ahoy under the shared cross-harness invocation convention"
+}
+
+test_ahoy_owns_only_the_visible_session_recap() {
+  assert_grep '[`../bearings/SKILL.md`](../bearings/SKILL.md)' "$AHOY" \
+    "first-message fallback does not delegate to Bearings by relative pointer"
+  assert_grep 'If no prior real captain message exists' "$AHOY" \
+    "ahoy does not limit Bearings fallback to the first real captain message"
+  assert_grep 'System, developer, tool, watcher, guard, away-mode, and other injected operational messages are not captain messages.' "$AHOY" \
+    "ahoy incorrectly treats synthetic operational messages as captain messages"
+  assert_grep 'The normal recap branch is session-history-only.' "$AHOY" \
+    "later ahoy invocation is not explicitly session-history-only"
+  assert_grep 'Do not call Bearings, shell commands, fleet snapshots, status readers, GitHub or browser APIs, tools, or file reads or writes.' "$AHOY" \
+    "normal recap does not prohibit fresh fleet, file, and tool reads"
+  assert_grep 'do not guess current live state beyond the last visible event' "$AHOY" \
+    "normal recap may falsely claim a live snapshot"
+  assert_grep 'If context compaction makes the prior boundary unavailable' "$AHOY" \
+    "ahoy does not disclose an unavailable compacted boundary"
+  assert_grep 'summarize only visibly supported events' "$AHOY" \
+    "compacted fallback may invent unsupported events"
+  assert_no_grep 'fm-bearings-snapshot.sh' "$AHOY" \
+    "ahoy copied Bearings gathering mechanics instead of referencing its owner"
+  assert_no_grep "Captain's Call" "$AHOY" \
+    "ahoy copied Bearings response contract instead of referencing its owner"
+  pass "ahoy delegates first-message fallback and keeps later recaps visible-session-only"
+}
+
 test_section_9_owns_positive_translation_contract
 test_scout_remains_allowed_house_vocabulary
 test_compressed_safety_labels_have_plain_renderings
@@ -145,3 +188,6 @@ test_mapping_list_covers_high_risk_internal_families
 test_verbatim_internal_evidence_is_rejected_from_chat
 test_outward_facing_skill_points_reference_section_9_owner
 test_section_9_owner_is_not_duplicated_into_skills
+test_ahoy_is_an_internal_user_invocable_skill
+test_ahoy_readme_uses_cross_harness_convention
+test_ahoy_owns_only_the_visible_session_recap
