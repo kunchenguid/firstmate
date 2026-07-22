@@ -99,6 +99,9 @@
 # launch= appears only when a named launch variant was selected.
 # mode/yolo are resolved per-project from data/projects.md for ship/scout tasks;
 # secondmate spawns record mode=secondmate, yolo=off, home=, and projects=.
+# After metadata is durable, ship and scout spawns also ask tasks-axi to move the
+# matching backlog row to In flight. A missing row or failed write is loud but
+# never rolls back a live launch - state/<id>.meta remains the runtime record.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -1355,6 +1358,59 @@ META_WINDOW=$T
   fi
 } > "$STATE/$ID.meta"
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
+
+backlog_start_failure_banner() {  # <heading> <detail> <repair-command>
+  local heading=$1 detail=$2 repair=$3 rule
+  rule='━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'
+  {
+    printf '●%s\n' "$rule"
+    printf '●  %s\n' "$heading"
+    printf '●  The launch succeeded and %s is live, but data/backlog.md was not updated.\n' "$ID"
+    printf '●  %s\n' "$detail"
+    printf '●  Repair now: %s\n' "$repair"
+    printf '●%s\n' "$rule"
+  } >&2
+}
+
+backlog_mark_started() {
+  local backlog out repair retry
+  [ "$KIND" = secondmate ] && return 0
+  backlog="$DATA/backlog.md"
+  repair="cd $(shell_quote "$FM_HOME") && tasks-axi add $(shell_quote "$ID") $(shell_quote '<task title>') --kind $(shell_quote "$KIND") --repo $(shell_quote "$PROJ_NAME") --start --file $(shell_quote "$backlog")"
+  retry="cd $(shell_quote "$FM_HOME") && tasks-axi start $(shell_quote "$ID") --file $(shell_quote "$backlog")"
+
+  if [ ! -f "$backlog" ]; then
+    backlog_start_failure_banner \
+      "BACKLOG ROW MISSING - $ID WAS DISPATCHED WITHOUT A BACKLOG ITEM" \
+      "No backlog exists at $backlog, so this task has no durable task record." \
+      "$repair"
+    return 0
+  fi
+
+  # tasks-axi reads local configuration from the home, while --file keeps the
+  # mutation pinned to that home's backlog even when fm-spawn was invoked elsewhere.
+  if out=$(cd "$FM_HOME" && tasks-axi start "$ID" --file "$backlog" 2>&1); then
+    return 0
+  fi
+
+  printf '%s\n' "$out" >&2
+  case "$out" in
+    *'not found in this backlog'*|*'code: NOT_FOUND'*)
+      backlog_start_failure_banner \
+        "BACKLOG ROW MISSING - $ID WAS DISPATCHED WITHOUT A BACKLOG ITEM" \
+        "Create its durable task record with the command below (replace <task title> with the real title)." \
+        "$repair"
+      ;;
+    *)
+      backlog_start_failure_banner \
+        "BACKLOG START FAILED - $ID IS STILL NOT MARKED IN FLIGHT" \
+        "The backlog write failed, but the launch continues so the live task is not interrupted." \
+        "$retry"
+      ;;
+  esac
+}
+
+backlog_mark_started
 
 sq_brief=$(shell_quote "$BRIEF")
 sq_turnend=$(shell_quote "$TURNEND")
