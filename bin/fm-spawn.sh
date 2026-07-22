@@ -758,6 +758,10 @@ same_filesystem_object() {  # <left-path> <right-path>
   [ -e "$1" ] && [ -e "$2" ] && [ "$1" -ef "$2" ]
 }
 
+distinct_filesystem_objects() {  # <left-path> <right-path>
+  [ -e "$1" ] && [ -e "$2" ] && ! [ "$1" -ef "$2" ]
+}
+
 git_worktree_root() {  # <path>
   git -C "$1" rev-parse --show-toplevel 2>/dev/null
 }
@@ -774,7 +778,7 @@ validate_spawn_worktree() {  # <source> <inspect-target>
   local source=$1 inspect_target=$2 wt_top
   wt_top=$(git -C "$WT" rev-parse --show-toplevel 2>/dev/null || true)
   if [ -z "$wt_top" ] || ! same_filesystem_object "$WT" "$wt_top" \
-     || same_filesystem_object "$wt_top" "$PROJ_ABS"; then
+     || ! distinct_filesystem_objects "$wt_top" "$PROJ_ABS"; then
     echo "error: $source did not yield an isolated worktree (resolved '$WT'; worktree root '${wt_top:-none}'; primary '$PROJ_ABS'); refusing to launch to avoid tangling the primary checkout. Inspect target $inspect_target" >&2
     exit 1
   fi
@@ -1043,10 +1047,10 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   candidate=""
   for _ in $(seq 1 60); do
     p=$(spawn_current_path "$WT_TARGET" || true)
-    if [ -n "$p" ] && ! same_filesystem_object "$p" "$PROJ_ABS"; then
+    if [ -n "$p" ] && distinct_filesystem_objects "$p" "$PROJ_ABS"; then
       p_top=$(git_worktree_root "$p" || true)
       if [ -n "$p_top" ] && same_filesystem_object "$p" "$p_top" \
-         && ! same_filesystem_object "$p_top" "$PROJ_ABS"; then
+         && distinct_filesystem_objects "$p_top" "$PROJ_ABS"; then
         if [ -n "$candidate" ] && same_filesystem_object "$p_top" "$candidate"; then
           WT="$p_top"
           break

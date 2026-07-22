@@ -39,6 +39,9 @@ case "$*" in
     [ -f "$countfile" ] && n=$(cat "$countfile")
     n=$((n + 1))
     printf '%s\n' "$n" > "$countfile"
+    if [ "$n" -eq 1 ] && [ -n "${FM_FAKE_RENAME_FROM:-}" ]; then
+      mv "$FM_FAKE_RENAME_FROM" "${FM_FAKE_RENAME_TO:?FM_FAKE_RENAME_TO unset}"
+    fi
     if [ "$n" -le "${FM_FAKE_PANE_STALE_READS:-0}" ]; then
       printf '%s\n' "${FM_FAKE_PANE_STALE:-}"
     else
@@ -86,6 +89,9 @@ case "${1:-} ${2:-}" in
     printf '{"ok":true,"result":{"repo":{"id":"repo-primary-alias"}}}\n'
     ;;
   'worktree create')
+    if [ -n "${FM_FAKE_RENAME_FROM:-}" ]; then
+      mv "$FM_FAKE_RENAME_FROM" "${FM_FAKE_RENAME_TO:?FM_FAKE_RENAME_TO unset}"
+    fi
     printf '{"ok":true,"result":{"worktree":{"id":"wt-primary-alias","path":"%s"},"terminal":{"handle":"term-primary-alias"}}}\n' \
       "${FM_FAKE_ORCA_WORKTREE_PATH:?}"
     ;;
@@ -278,9 +284,60 @@ test_validator_refuses_case_variant_primary_alias_without_settle_loop() {
   pass "validate_spawn_worktree independently rejects a case-variant primary alias by filesystem identity"
 }
 
+test_settle_loop_refuses_missing_primary_identity() {
+  local rec id out status renamed_project
+  id=settle-missing-primary-z5
+  rec=$(make_settle_case settle-missing-primary "$id" 60)
+  read_settle_record "$rec"
+  renamed_project="$(dirname "$PROJ_DIR")/renamed-primary"
+  STALE_DIR=$renamed_project
+
+  out=$(
+    FM_FAKE_RENAME_FROM="$PROJ_DIR" FM_FAKE_RENAME_TO="$renamed_project" \
+      run_settle_spawn "$id" 2>&1
+  )
+  status=$?
+  expect_code 1 "$status" "settle loop should refuse to infer distinction after the primary path disappears"
+  assert_contains "$out" "treehouse get did not enter a worktree" \
+    "settle loop accepted the renamed primary checkout as isolated"
+  assert_absent "$HOME_DIR/state/$id.meta" \
+    "settle loop published metadata after losing the primary identity path"
+  pass "settle loop requires positive filesystem distinction from an existing primary path"
+}
+
+test_validator_refuses_missing_primary_identity() {
+  local rec id out status renamed_project orca_log
+  id=validate-missing-primary-z6
+  rec=$(make_settle_case validate-missing-primary "$id" 0)
+  read_settle_record "$rec"
+  renamed_project="$(dirname "$PROJ_DIR")/renamed-primary"
+  orca_log="$HOME_DIR/orca.log"
+  : > "$orca_log"
+  add_nonisolated_orca_fake "$FAKEBIN_DIR"
+
+  out=$(
+    FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
+      FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
+      FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
+      FM_SPAWN_NO_GUARD=1 FM_FAKE_ORCA_LOG="$orca_log" \
+      FM_FAKE_RENAME_FROM="$PROJ_DIR" FM_FAKE_RENAME_TO="$renamed_project" \
+      FM_FAKE_ORCA_WORKTREE_PATH="$renamed_project" PATH="$FAKEBIN_DIR:$PATH" \
+      "$SPAWN" "$id" "$PROJ_DIR" --harness codex --backend orca 2>&1
+  )
+  status=$?
+  expect_code 1 "$status" "validator should refuse to infer distinction after the primary path disappears"
+  assert_contains "$out" "orca worktree create did not yield an isolated worktree" \
+    "validator accepted the renamed primary checkout as isolated"
+  assert_absent "$HOME_DIR/state/$id.meta" \
+    "validator published metadata after losing the primary identity path"
+  pass "validator requires positive filesystem distinction from an existing primary path"
+}
+
 test_single_stale_first_read_is_not_accepted
 test_already_settled_pane_costs_one_confirm_sleep
 test_case_variant_primary_alias_waits_for_real_worktree_and_cleanup_target
 test_validator_refuses_case_variant_primary_alias_without_settle_loop
+test_settle_loop_refuses_missing_primary_identity
+test_validator_refuses_missing_primary_identity
 
 echo "# all fm-spawn-worktree-settle tests passed"
