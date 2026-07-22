@@ -28,6 +28,7 @@ FM_GITHUB_NO_MISTAKES_BINARY=${FM_GITHUB_NO_MISTAKES_BINARY:-}
 FM_GITHUB_INVOCATION_ENDPOINT=${FM_GITHUB_INVOCATION_ENDPOINT:-}
 FM_GITHUB_INVOCATION_BROKER_PID=${FM_GITHUB_INVOCATION_BROKER_PID:-}
 FM_GITHUB_INVOCATION_BROKER_IDENTITY=${FM_GITHUB_INVOCATION_BROKER_IDENTITY:-}
+FM_GITHUB_INVOCATION_TOKEN=${FM_GITHUB_INVOCATION_TOKEN:-}
 
 fm_github_lib_dir() {
   cd "$(dirname "${BASH_SOURCE[0]}")" && pwd
@@ -409,23 +410,18 @@ fm_github_run_with_capability() {
   shift 2
   if fm_github_node - "$operation" "$binary" "$FM_GITHUB_REPOSITORY" "$@" <<'NODE'
 const net = require("node:net");
+const crypto = require("node:crypto");
 const {spawn, spawnSync} = require("node:child_process");
 const [operation, binary, repository, ...args] = process.argv.slice(2);
 const identity = spawnSync("/bin/ps", ["-o", "lstart=", "-p", String(process.pid)], {encoding: "utf8"}).stdout.trim();
 if (!identity) process.exit(1);
+const token = crypto.randomBytes(32).toString("base64url");
 let used = false;
-let childPid = 0;
-const processField = (field, pid) => spawnSync("/bin/ps", ["-o", `${field}=`, "-p", String(pid)], {encoding: "utf8"}).stdout.trim();
-const isChildProcess = (pid) => {
-  let current = pid;
-  for (let count = 0; count < 12 && current > 0; count += 1) {
-    if (current === childPid) return true;
-    const parent = Number(processField("ppid", current));
-    if (!Number.isSafeInteger(parent) || parent <= 0 || parent === current) return false;
-    current = parent;
-  }
-  return false;
-};
+const typeOperation = operation === "gh-axi-api" && args[0] === "issue"
+  && ((args[1] === "create" && args.some((arg) => arg === "--type" || arg.startsWith("--type=")))
+    || (args[1] === "edit" && args.some((arg) => arg === "--type" || arg.startsWith("--type="))));
+const allowedGrant = (grant) => grant === operation || (operation === "gh-axi-api"
+  && (grant === "read" || (typeOperation && (grant === "issue-type-read" || grant === "issue-type-write"))));
 const server = net.createServer((connection) => {
   let input = "";
   connection.setEncoding("utf8");
@@ -441,14 +437,12 @@ const server = net.createServer((connection) => {
       connection.end("deny\n");
       return;
     }
-    const requesterPid = request?.pid;
-    if (!used && request?.version === 1 && request.operation === operation
+    if ((!used || operation === "gh-axi-api") && request?.version === 1 && request.operation === operation
       && request.binary === binary && request.repository === repository
-      && Number.isSafeInteger(requesterPid) && requesterPid > 0
-      && request.identity === processField("lstart", requesterPid) && isChildProcess(requesterPid)) {
-      used = true;
+      && request.token === token && allowedGrant(request.grant)) {
+      if (operation !== "gh-axi-api") used = true;
       connection.end("ok\n");
-      server.close();
+      if (operation !== "gh-axi-api") server.close();
     } else {
       connection.end("deny\n");
     }
@@ -465,9 +459,9 @@ server.listen({host: "127.0.0.1", port: 0, exclusive: true}, () => {
   const env = {...process.env,
     FM_GITHUB_INVOCATION_ENDPOINT: `127.0.0.1:${address.port}`,
     FM_GITHUB_INVOCATION_BROKER_PID: String(process.pid),
-    FM_GITHUB_INVOCATION_BROKER_IDENTITY: identity};
+    FM_GITHUB_INVOCATION_BROKER_IDENTITY: identity,
+    FM_GITHUB_INVOCATION_TOKEN: token};
   const child = spawn(binary, args, {stdio: "inherit", env});
-  childPid = child.pid;
   child.on("error", () => finish(1));
   child.on("exit", (code, signal) => finish(signal ? 1 : (code ?? 1)));
 });
@@ -481,14 +475,15 @@ NODE
 }
 
 fm_github_validate_capability() {
-  local operation=$1 expected_binary=$2 endpoint=${FM_GITHUB_INVOCATION_ENDPOINT:-} port
+  local operation=$1 expected_binary=$2 grant=${3:-$1} endpoint=${FM_GITHUB_INVOCATION_ENDPOINT:-} port
   local pid=${FM_GITHUB_INVOCATION_BROKER_PID:-} identity=${FM_GITHUB_INVOCATION_BROKER_IDENTITY:-}
-  local current ancestor found=0 count=0 response
+  local token=${FM_GITHUB_INVOCATION_TOKEN:-} current ancestor found=0 count=0 response
   case "$endpoint" in 127.0.0.1:*) port=${endpoint#127.0.0.1:} ;; *) return 1 ;; esac
   case "$port" in ''|*[!0-9]*) return 1 ;; esac
   [ "$port" -ge 1 ] 2>/dev/null && [ "$port" -le 65535 ] 2>/dev/null || return 1
   case "$pid" in ''|*[!0-9]*) return 1 ;; esac
-  [ -n "$identity" ] || return 1
+  [ -n "$identity" ] && [ ${#token} -eq 43 ] || return 1
+  case "$token" in *[!A-Za-z0-9_-]*) return 1 ;; esac
   ancestor=$PPID
   while [ "$count" -lt 12 ] && [ -n "$ancestor" ]; do
     if [ "$ancestor" = "$pid" ]; then found=1; break; fi
@@ -498,15 +493,12 @@ fm_github_validate_capability() {
   [ "$found" -eq 1 ] || return 1
   current=$(fm_github_process_identity "$pid" || true)
   [ -n "$current" ] && [ "$current" = "$identity" ] || return 1
-  response=$(fm_github_node - "$port" "$operation" "$expected_binary" "$FM_GITHUB_REPOSITORY" <<'NODE'
+  response=$(fm_github_node - "$port" "$operation" "$expected_binary" "$FM_GITHUB_REPOSITORY" "$grant" "$token" <<'NODE'
 const net = require("node:net");
-const {spawnSync} = require("node:child_process");
-const [port, operation, binary, repository] = process.argv.slice(2);
+const [port, operation, binary, repository, grant, token] = process.argv.slice(2);
 let output = "";
-const identity = spawnSync("/bin/ps", ["-o", "lstart=", "-p", String(process.pid)], {encoding: "utf8"}).stdout.trim();
-if (!identity) process.exit(1);
 const client = net.createConnection({host: "127.0.0.1", port: Number(port)}, () => {
-  client.end(JSON.stringify({version: 1, operation, binary, repository, pid: process.pid, identity}));
+  client.end(JSON.stringify({version: 1, operation, binary, repository, grant, token}));
 });
 client.setEncoding("utf8");
 client.setTimeout(2000, () => client.destroy());
@@ -1428,7 +1420,7 @@ fm_github_projects_cwd() {
 }
 
 fm_github_validate_internal_api() {
-  local endpoint= method= field= query= owner= name= name_variable= pending= arg value key path canonical validation suffix number
+  local endpoint= method= field= query= owner= name= name_variable= node_id= type_id= pending= arg value key path canonical validation suffix number kind mode
   shift
   while [ "$#" -gt 0 ]; do
     arg=$1
@@ -1449,6 +1441,8 @@ fm_github_validate_internal_api() {
           query) query=$value ;;
           owner) owner=$value ;;
           name|repo) name=$value; name_variable=$key ;;
+          id) node_id=$value ;;
+          typeId) type_id=$value ;;
           first|last|after|before|endCursor|cursor) [ ${#value} -le 1024 ] || return 1 ;;
           *) return 1 ;;
         esac
@@ -1477,16 +1471,35 @@ fm_github_validate_internal_api() {
     [ -z "$method" ] || [ "$method" = POST ] || return 1
     [ -n "$query" ] || return 1
     [ -n "$name_variable" ] || name_variable=name
-    validation=$(fm_github_node "$(fm_github_lib_dir)/fm-github-config.mjs" validate-graphql-read \
+    validation=$(fm_github_node "$(fm_github_lib_dir)/fm-github-config.mjs" validate-graphql-operation \
       --query "$query" --name-variable "$name_variable" --owner "$owner" --name "$name" 2>/dev/null) || return 1
     owner=$(printf '%s\n' "$validation" | sed -n $'s/^owner\t//p')
     name=$(printf '%s\n' "$validation" | sed -n $'s/^name\t//p')
-    [ -n "$owner" ] && [ -n "$name" ] || return 1
-    canonical=$(fm_github_repository_allowed "github.com/$owner/$name") || return 1
-    printf '%s\n' "$canonical"
+    kind=$(printf '%s\n' "$validation" | sed -n $'s/^kind\t//p')
+    mode=$(printf '%s\n' "$validation" | sed -n $'s/^mode\t//p')
+    case "$kind" in
+      read|issue-type-read)
+        [ -z "$node_id$type_id$mode" ] && [ -n "$owner" ] && [ -n "$name" ] || return 1
+        canonical=$(fm_github_repository_allowed "github.com/$owner/$name") || return 1
+        ;;
+      issue-type-write)
+        [ -z "$owner$name" ] && [ -n "$node_id" ] && [ ${#node_id} -le 256 ] || return 1
+        case "$node_id" in *[!A-Za-z0-9_=-]*) return 1 ;; esac
+        case "$mode" in
+          set)
+            [ -n "$type_id" ] && [ ${#type_id} -le 256 ] || return 1
+            case "$type_id" in *[!A-Za-z0-9_=-]*) return 1 ;; esac
+            ;;
+          *) return 1 ;;
+        esac
+        canonical=$FM_GITHUB_REPOSITORY
+        ;;
+      *) return 1 ;;
+    esac
+    printf '%s\t%s\n' "$kind" "$canonical"
     return
   fi
-  [ -z "$query$owner$name" ] || return 1
+  [ -z "$query$owner$name$node_id$type_id" ] || return 1
   [ -z "$method" ] || [ "$method" = GET ] || return 1
   path=${endpoint#/}
   path=${path%%\?*}
@@ -1505,22 +1518,29 @@ fm_github_validate_internal_api() {
     ;;
   esac
   fm_github_repository_allowed "$canonical" >/dev/null || return 1
-  printf '%s\n' "$canonical"
+  printf 'read\t%s\n' "$canonical"
 }
 
 fm_github_internal_gh_api_command() {
-  local project=$1 repository=$2 required_profile=$3 target_repository repo_path
+  local project=$1 repository=$2 required_profile=$3 target_repository repo_path validation access
   shift 3
   [ "${1:-}" = api ] || return 1
   fm_github_activate "$project" "$repository" "$required_profile" || return 1
-  fm_github_validate_capability gh-axi-api "$FM_GITHUB_GH_AXI_BINARY" || return 1
-  target_repository=$(fm_github_validate_internal_api "$@") || return 1
+  validation=$(fm_github_validate_internal_api "$@") || return 1
+  access=${validation%%$'\t'*}
+  [ "$validation" != "$access" ] || return 1
+  target_repository=${validation#*$'\t'}
+  fm_github_validate_capability gh-axi-api "$FM_GITHUB_GH_AXI_BINARY" "$access" || return 1
   repo_path=$(fm_github_actual_repository_path "${FM_GITHUB_PROJECT_PATH:-}") || {
     echo "error: current repository is not the configured project or task copy" >&2
     return 1
   }
   fm_github_validate_repository_path "$repo_path" || return 1
-  fm_github_preflight read "$target_repository" || return 1
+  case "$access" in
+    read|issue-type-read) fm_github_preflight read "$target_repository" || return 1 ;;
+    issue-type-write) fm_github_preflight write "$target_repository" || return 1 ;;
+    *) return 1 ;;
+  esac
   if ! command "$FM_GITHUB_GH_BINARY" "$@" 2>/dev/null; then
     echo "error: routed GitHub command failed for profile $FM_GITHUB_PROFILE_ID" >&2
     return 1

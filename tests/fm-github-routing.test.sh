@@ -123,12 +123,33 @@ case "${FM_TEST_GH_AXI_TYPED_API:-}" in
     exit
     ;;
   reviews) gh api repos/Owner-A/repo-a/pulls/17/reviews --paginate --slurp; exit ;;
+  review-pair)
+    gh api repos/Owner-A/repo-a/pulls/17/reviews --paginate --slurp
+    gh api repos/Owner-A/repo-a/pulls/17/comments --paginate --slurp
+    exit
+    ;;
+  relationships)
+    gh api graphql -f 'query=query { repository(owner: "Owner-A", name: "repo-a") { issue(number: 17) { parent { number } subIssues(first: 100) { totalCount nodes { number } } } } }'
+    exit
+    ;;
+  issue-type)
+    gh api graphql -f owner=Owner-A -f name=repo-a \
+      -f 'query=query($owner:String!,$name:String!){repository(owner:$owner,name:$name){issueTypes(first:25){nodes{id name}}}}'
+    gh api graphql -f id=ISSUE_node_17 -f typeId=TYPE_node_bug \
+      -f 'query=mutation($id:ID!,$typeId:ID!){updateIssue(input:{id:$id,issueTypeId:$typeId}){issue{id}}}'
+    exit
+    ;;
   foreign) gh api repos/Other/repo-a; exit ;;
   forks) gh api repos/Owner-A/repo-a/forks; exit ;;
   mutation)
     gh api graphql --hostname github.com \
       -f 'query=mutation($owner:String!,$name:String!){deleteRepository(input:{repositoryId:"x"}){clientMutationId}}' \
       -f owner=Owner-A -f name=repo-a
+    exit
+    ;;
+  type-mutation)
+    gh api graphql -f id=ISSUE_node_17 \
+      -f 'query=mutation($id:ID!){deleteIssue(input:{issueId:$id}){clientMutationId}}'
     exit
     ;;
   traversal)
@@ -643,11 +664,20 @@ test_forbidden_commands_and_access_diagnostics() {
   FM_TEST_GH_AXI_TYPED_API=read run_exec "$d" exec --project repo-a --repository "$d/home/projects/repo-a" -- \
     gh-axi pr view 1 >/dev/null \
     || fail "verified gh-axi descendant could not perform its typed internal API operation"
-  for kind in inline reviews; do
+  for kind in inline reviews review-pair; do
     FM_TEST_GH_AXI_TYPED_API=$kind run_exec "$d" exec --project repo-a --repository "$d/home/projects/repo-a" -- \
       gh-axi pr view 1 >/dev/null \
       || fail "verified gh-axi descendant could not perform its typed $kind operation"
   done
+  FM_TEST_GH_AXI_TYPED_API=relationships run_exec "$d" exec --project repo-a --repository "$d/home/projects/repo-a" -- \
+    gh-axi issue view 17 >/dev/null \
+    || fail "verified gh-axi descendant could not read typed issue relationships"
+  FM_TEST_GH_AXI_TYPED_API=issue-type run_exec "$d" exec --project repo-a --repository "$d/home/projects/repo-a" -- \
+    gh-axi issue create --title typed --type Bug >/dev/null \
+    || fail "verified gh-axi descendant could not apply a scoped issue type"
+  FM_TEST_GH_AXI_TYPED_API=issue-type run_exec "$d" exec --project repo-a --repository "$d/home/projects/repo-a" -- \
+    gh-axi issue edit 17 --type Bug >/dev/null \
+    || fail "verified gh-axi descendant could not edit a scoped issue type"
   assert_grep $'gh\tprofile-a\tapi graphql --hostname github.com' "$d/routes.log" \
     "typed gh-axi internal API call did not retain the selected profile"
   for kind in foreign forks mutation traversal head-repository; do
@@ -658,6 +688,12 @@ test_forbidden_commands_and_access_diagnostics() {
     set -e
     expect_code 1 "$rc" "gh-axi internal API broker $kind request"
   done
+  set +e
+  FM_TEST_GH_AXI_TYPED_API=type-mutation run_exec "$d" exec --project repo-a --repository "$d/home/projects/repo-a" -- \
+    gh-axi issue create --title typed --type Bug >/dev/null 2>&1
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "gh-axi non-typed mutation under issue-type grant"
   (cd "$d/home/projects" && FM_TEST_FAKE_NETWORK=1 FM_TEST_CLONE_SOURCE="$d/home/projects/repo-a" \
     run_exec "$d" exec --project clone-project --repository github.com/Owner-A/clone-project -- \
       gh repo clone Owner-A/clone-project clone-project >/dev/null) \
@@ -1048,7 +1084,7 @@ SH
 }
 
 test_no_mistakes_context_handoff_is_typed_and_secret_free() {
-  local d fake_nm captured log refresh_count rc err expected_pwd marker marker_before override_marker p1 p2 status current_branch current_head
+  local d fake_nm captured log refresh_count rc err expected_pwd marker marker_before override_marker p1 p2 status current_branch
   d=$(make_fixture no-mistakes)
   fake_nm="$d/exact/no-mistakes"
   captured="$d/nm-context.json"
@@ -1070,7 +1106,7 @@ fi
 if [ "${1:-}" = axi ] && [ "${2:-}" = status ]; then
   [ -z "${FM_TEST_NM_STATUS_FAIL:-}" ] || exit 73
   branch=${FM_TEST_NM_BRANCH:-$(git symbolic-ref --quiet --short HEAD)}
-  head=$(git rev-parse HEAD)
+  head=${FM_TEST_NM_HEAD:-$(git rev-parse HEAD)}
   run_id=run-0
   [ ! -e "$FM_TEST_NM_CAPTURE.run-id" ] || run_id=$(cat "$FM_TEST_NM_CAPTURE.run-id")
   status=completed
@@ -1145,15 +1181,23 @@ SH
   node -e 'const fs=require("fs"); const p=process.argv[1]; const v=JSON.parse(fs.readFileSync(p)); v.profiles["profile-a"].commit_identity.name="Account A"; fs.writeFileSync(p,JSON.stringify(v)); fs.chmodSync(p,0o600)' "$d/home/config/github-accounts.json"
   marker_before=$(cat "$marker")
   current_branch=$(git -C "$d/home/projects/repo-a" symbolic-ref --quiet --short HEAD)
-  current_head=$(git -C "$d/home/projects/repo-a" rev-parse --short HEAD)
   set +e
-  FM_TEST_NM_BRANCH=other-branch FM_TEST_NM_RUNS="running $current_branch $current_head 2026-07-22" \
+  FM_TEST_NM_BRANCH=other-branch \
+    FM_TEST_NM_RUNS="running $current_branch deadbee 2026-07-22 12:34:56 https://github.com/Owner-A/repo-a/pull/17" \
     FM_TEST_NM_CAPTURE="$captured" FM_TEST_NM_LOG="$log" \
     run_exec "$d" exec --project repo-a --repository "$d/home/projects/repo-a" -- no-mistakes axi respond accepted >/dev/null 2>&1
   rc=$?
   set -e
   expect_code 1 "$rc" "cross-branch no-mistakes continuation"
   [ "$(cat "$marker")" = "$marker_before" ] || fail "cross-branch continuation changed the active no-mistakes binding marker"
+  assert_grep 'runs --limit 101' "$log" "cross-branch no-mistakes lookup was not authoritatively bounded"
+  set +e
+  FM_TEST_NM_HEAD=deadbee FM_TEST_NM_CAPTURE="$captured" FM_TEST_NM_LOG="$log" \
+    run_exec "$d" exec --project repo-a --repository "$d/home/projects/repo-a" -- no-mistakes axi respond accepted >/dev/null 2>&1
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "active mismatched-head no-mistakes continuation"
+  [ "$(cat "$marker")" = "$marker_before" ] || fail "active head mismatch changed the no-mistakes binding marker"
   node -e 'const fs=require("fs"); const p=process.argv[1]; const v=JSON.parse(fs.readFileSync(p)); v.profiles["profile-a"].commit_identity.name="Refreshed Account A"; fs.writeFileSync(p,JSON.stringify(v)); fs.chmodSync(p,0o600)' "$d/home/config/github-accounts.json"
   set +e
   err=$(FM_TEST_NM_CAPTURE="$captured" FM_TEST_NM_LOG="$log" \

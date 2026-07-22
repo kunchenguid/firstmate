@@ -214,8 +214,12 @@ function canonicalNamedExecutable(value, basename) {
 function validateRepositoryGraphQL(query, nameVariable, suppliedOwner, suppliedName) {
   if (typeof query !== "string" || Buffer.byteLength(query, "utf8") > 16 * 1024 || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u.test(query)
     || !["name", "repo"].includes(nameVariable)) throw new Error("invalid GraphQL request");
+  const compact = query.replace(/[ \t\r\n]/gu, "");
+  if (compact === "mutation($id:ID!,$typeId:ID!){updateIssue(input:{id:$id,issueTypeId:$typeId}){issue{id}}}") {
+    return {owner: "", name: "", kind: "issue-type-write", mode: "set"};
+  }
   const tokens = query.match(/"(?:\\["\\/bfnrt]|\\u[0-9A-Fa-f]{4}|[^"\\\u0000-\u001f])*"|\$[A-Za-z_][A-Za-z0-9_]*|[A-Za-z_][A-Za-z0-9_]*|[!$():=@\[\]{|},]|\d+/gu);
-  if (!tokens || tokens.join("") !== query.replace(/[ \t\r\n]/gu, "")) throw new Error("invalid GraphQL request");
+  if (!tokens || tokens.join("") !== compact) throw new Error("invalid GraphQL request");
   let index = 0;
   const take = (expected) => {
     if (tokens[index] !== expected) throw new Error("invalid GraphQL request");
@@ -262,6 +266,7 @@ function validateRepositoryGraphQL(query, nameVariable, suppliedOwner, suppliedN
   take(")");
   take("{");
   let selections = 0;
+  let kind = "read";
   while (tokens[index] !== "}") {
     const field = tokens[index];
     if (field === "id") {
@@ -292,6 +297,70 @@ function validateRepositoryGraphQL(query, nameVariable, suppliedOwner, suppliedN
       take("{");
       take("totalCount");
       take("}");
+    } else if (field === "issueTypes") {
+      if (selections !== 0) throw new Error("invalid GraphQL request");
+      index += 1;
+      take("(");
+      take("first");
+      take(":");
+      take("25");
+      take(")");
+      take("{");
+      take("nodes");
+      take("{");
+      take("id");
+      take("name");
+      take("}");
+      take("}");
+      kind = "issue-type-read";
+    } else if (field === "issue") {
+      if (selections !== 0) throw new Error("invalid GraphQL request");
+      index += 1;
+      take("(");
+      take("number");
+      take(":");
+      const number = tokens[index];
+      if (!/^\d+$/u.test(number || "") || Number(number) < 1 || Number(number) > 2147483647) throw new Error("invalid GraphQL request");
+      index += 1;
+      take(")");
+      take("{");
+      const relationshipFields = new Set();
+      while (tokens[index] !== "}") {
+        const relationship = tokens[index];
+        if (relationshipFields.has(relationship)) throw new Error("invalid GraphQL request");
+        relationshipFields.add(relationship);
+        if (relationship === "parent") {
+          index += 1;
+          take("{");
+          take("number");
+          take("}");
+        } else if (relationship === "subIssues") {
+          index += 1;
+          take("(");
+          take("first");
+          take(":");
+          take("100");
+          take(")");
+          take("{");
+          take("totalCount");
+          take("nodes");
+          take("{");
+          const nodeFields = new Set();
+          while (tokens[index] !== "}") {
+            const nodeField = tokens[index];
+            if (!["number", "title", "state"].includes(nodeField) || nodeFields.has(nodeField)) throw new Error("invalid GraphQL request");
+            nodeFields.add(nodeField);
+            index += 1;
+          }
+          if (!nodeFields.has("number")) throw new Error("invalid GraphQL request");
+          take("}");
+          take("}");
+        } else {
+          throw new Error("invalid GraphQL request");
+        }
+      }
+      if (relationshipFields.size === 0) throw new Error("invalid GraphQL request");
+      take("}");
     } else {
       throw new Error("invalid GraphQL request");
     }
@@ -305,7 +374,7 @@ function validateRepositoryGraphQL(query, nameVariable, suppliedOwner, suppliedN
   const name = inlineName ?? suppliedName;
   if (!login(owner) || !projectName(name)) throw new Error("invalid GraphQL request");
   if ((inlineOwner === null) !== (inlineName === null)) throw new Error("invalid GraphQL request");
-  return {owner, name};
+  return {owner, name, kind};
 }
 
 function within(candidate, root) {
@@ -542,10 +611,12 @@ try {
     emit("executable", canonicalNamedExecutable(option("--path"), basename));
     process.exit(0);
   }
-  if (action === "validate-graphql-read") {
+  if (action === "validate-graphql-operation") {
     const result = validateRepositoryGraphQL(option("--query"), option("--name-variable"), option("--owner"), option("--name"));
     emit("owner", result.owner);
     emit("name", result.name);
+    emit("kind", result.kind);
+    emit("mode", result.mode || "");
     process.exit(0);
   }
   if (action === "resolve") {

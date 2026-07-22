@@ -28,7 +28,7 @@ case "${1:-}" in
   *)
     FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
     unset FM_GITHUB_ACTIVE FM_GITHUB_ALLOW_UNREGISTERED_PROJECT FM_GITHUB_CLONE_CAPABILITY FM_GITHUB_CLONE_ROOT
-    unset FM_GITHUB_INVOCATION_ENDPOINT FM_GITHUB_INVOCATION_BROKER_PID FM_GITHUB_INVOCATION_BROKER_IDENTITY
+    unset FM_GITHUB_INVOCATION_ENDPOINT FM_GITHUB_INVOCATION_BROKER_PID FM_GITHUB_INVOCATION_BROKER_IDENTITY FM_GITHUB_INVOCATION_TOKEN
     ;;
 esac
 export FM_HOME
@@ -250,27 +250,38 @@ no_mistakes_head_matches() {
 }
 
 no_mistakes_prove_run_absent() {
-  local binary=$1 current_branch=$2 current_head=$3 output rows status branch head
-  output=$(cd "$repository" && LC_ALL=C command "$binary" runs --limit 2147483647 2>/dev/null) || return 1
-  rows=$(printf '%s\n' "$output" | fm_github_node -e '
+  local binary=$1 current_branch=$2 current_head=$3 output parsed rows count status branch head
+  output=$(cd "$repository" && LC_ALL=C command "$binary" runs --limit 101 2>/dev/null) || return 1
+  parsed=$(printf '%s\n' "$output" | fm_github_node -e '
 let input = "";
 process.stdin.setEncoding("utf8");
 process.stdin.on("data", (chunk) => { input += chunk; });
 process.stdin.on("end", () => {
   const lines = input.split(/\r?\n/u).filter((line) => line.trim() !== "");
+  process.stdout.write(`count\t${lines.length}\n`);
   for (const line of lines) {
-    const match = line.trim().match(/^(running|fixing|ci|awaiting_approval|fix_review|completed|failed|cancelled)\s+(\S+)\s+([0-9a-fA-F]{7,40})\s+\S+(?:\s+\S+)?$/u);
+    const match = line.trim().match(/^(running|fixing|ci|awaiting_approval|fix_review|completed|failed|cancelled)\s+(\S+)\s+([0-9a-fA-F]{7,40})\s+\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}(?::\d{2})?(?:Z|[+-]\d{2}:?\d{2})?(?:\s+https:\/\/github\.com\/\S+)?$/u);
     if (!match) process.exit(1);
     process.stdout.write(`${match[1]}\t${match[2]}\t${match[3]}\n`);
   }
 });
 ') || return 1
+  count=$(printf '%s\n' "$parsed" | sed -n $'s/^count\t//p')
+  case "$count" in ''|*[!0-9]*) return 1 ;; esac
+  rows=$(printf '%s\n' "$parsed" | sed '1d')
   while IFS=$'\t' read -r status branch head; do
     [ -n "$status" ] || continue
-    if [ "$branch" = "$current_branch" ] && no_mistakes_head_matches "$head" "$current_head"; then
-      return 1
+    if [ "$branch" = "$current_branch" ]; then
+      case "$status" in
+        running|fixing|ci|awaiting_approval|fix_review) return 1 ;;
+        completed|failed|cancelled)
+          no_mistakes_head_matches "$head" "$current_head" && return 1
+          ;;
+        *) return 1 ;;
+      esac
     fi
   done <<< "$rows"
+  [ "$count" -lt 101 ] || return 1
   return 0
 }
 
@@ -299,6 +310,9 @@ no_mistakes_run_details() {
   esac
   if [ "$NM_RUN_BRANCH" = "$current_branch" ] && no_mistakes_head_matches "$NM_RUN_HEAD" "$current_head"; then
     return 0
+  fi
+  if [ "$NM_RUN_BRANCH" = "$current_branch" ] && [ "$NM_RUN_STATE" = active ]; then
+    return 1
   fi
   no_mistakes_prove_run_absent "$binary" "$current_branch" "$current_head" || return 1
   return 2

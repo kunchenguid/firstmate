@@ -241,7 +241,7 @@ It applies the optional commit identity, always sets `user.useConfigOnly=true`, 
 Repository-local and per-worktree credential, include, URL rewrite, remote URL, push URL, gh-resolved remote, proxy, TLS, certificate, cookie, authorization-header, editor, prompt, recursive-submodule, and transport keys are rejected or validated by key name without printing their values.
 The guarded owner inspects the actual descendant working tree and an explicit Git `-C` target, rejects a discovered unrelated repository, and validates every gh-selectable remote rather than trusting the primary clone or only its origin.
 Every routed clone, fetch, pull, push, and `ls-remote` target must canonicalize to the configured HTTPS parent or selected-profile fork before network access.
-Every routed clone also requires a live one-shot invocation broker bound to the exact operation and child process, plus an exact conventional destination under either the active home's `projects/` directory or the selected secondmate home's `projects/` directory.
+Every routed clone also requires an authenticated one-shot grant from a live invocation broker bound to the exact root operation, plus an exact conventional destination under either the active home's `projects/` directory or the selected secondmate home's `projects/` directory.
 Push resolves `--repo`, `branch.<name>.pushRemote`, `remote.pushDefault`, and `branch.<name>.remote` before falling back to `origin`; command-scoped remote selection is rejected.
 Clone bundle URIs, custom upload/receive programs, recursive submodule network paths, routed remote mutation, and submodule commands are refused.
 Unknown Git commands and unknown GitHub CLI command families or subcommands are refused, so network plumbing, aliases, extensions, authentication state, SSH keys, and future mutators cannot inherit read-only treatment accidentally.
@@ -250,7 +250,7 @@ Every resource-bearing field must agree with the configured parent or selected-p
 Organization-, user-, and environment-scoped secret or variable targets and arbitrary OCI operands are refused, while known-owner repository creation validates the selected login before the outward write.
 FirstMate-owned commands invoke exact configured binaries with argv arrays.
 The guarded `git`, `gh`, and `gh-axi` PATH shims protect ordinary descendants, including `gh-axi` resolving `gh`, but are not an operating-system sandbox against a deliberately malicious process that invokes another absolute executable or independently accesses credentials.
-Raw `gh api` remains unavailable, while an authenticated invocation of the exact configured `gh-axi` may broker only the exact typed read-only REST endpoints or positively validated single-repository GraphQL selections required by `gh-axi`.
+Raw `gh api` remains unavailable, while an authenticated invocation of the exact configured `gh-axi` may broker only exact typed REST reads, positively validated single-repository GraphQL reads, and the issue-type lookup and `updateIssue` mutation required by an outer `issue create/edit --type` command.
 
 Authentication validation never invokes `gh auth token` or Git credential fill.
 It confirms secure credential storage from `gh auth status`, verifies `/user` matches `expected_login`, and probes repository permission through the selected profile.
