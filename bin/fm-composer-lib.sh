@@ -206,10 +206,16 @@ fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [
   if fm_composer_idle_matches "$content" "$idle_re" "$idle_case"; then
     printf 'empty'; return 0
   fi
-  # Strip a leading prompt glyph, then re-judge the remainder.
+  # Strip a leading prompt glyph, then re-judge the remainder. Remove the glyph
+  # by its literal bytes rather than a fixed count of `?` metacharacters: `?`
+  # counts LOCALE characters, so under a C/POSIX locale it drops only part of a
+  # multibyte glyph like ❯ (leaving a stray continuation byte that then defeats
+  # the idle-placeholder match below). The whitespace trim that follows drops any
+  # space left between the glyph and the text.
   case "$content" in
-    '❯ '*|'› '*|'> '*|'$ '*|'% '*|'# '*) content=${content#??} ;;
-    '❯'*|'›'*|'>'*|'$'*|'%'*|'#'*) content=${content#?} ;;
+    '❯'*) content=${content#'❯'} ;;
+    '›'*) content=${content#'›'} ;;
+    '>'*|'$'*|'%'*|'#'*) content=${content#?} ;;
   esac
   content="${content#"${content%%[![:space:]]*}"}"
   content="${content%"${content##*[![:space:]]}"}"
