@@ -8,7 +8,9 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-${STATE:-$FM_HOME/state}}"
 FM_WAKE_QUEUE="${FM_WAKE_QUEUE:-$STATE/.wake-queue}"
 FM_WAKE_QUEUE_LOCK="${FM_WAKE_QUEUE_LOCK:-$STATE/.wake-queue.lock}"
+FM_WAKE_PUBLICATIONS="${FM_WAKE_PUBLICATIONS:-$STATE/.wake-publications}"
 FM_LOCK_STALE_AFTER="${FM_LOCK_STALE_AFTER:-2}"
+FM_WAKE_APPEND_RESULT=
 mkdir -p "$STATE"
 
 fm_current_pid() {
@@ -371,8 +373,49 @@ fm_wake_clean_field() {
   LC_ALL=C tr '\t\r\n' '   '
 }
 
+fm_wake_file_mode() {
+  if [ "$(uname)" = Darwin ]; then
+    stat -f %Lp "$1" 2>/dev/null
+  else
+    stat -c %a "$1" 2>/dev/null
+  fi
+}
+
+fm_wake_file_link_count() {
+  if [ "$(uname)" = Darwin ]; then
+    stat -f %l "$1" 2>/dev/null
+  else
+    stat -c %h "$1" 2>/dev/null
+  fi
+}
+
+fm_wake_publications_valid() {
+  [ ! -e "$FM_WAKE_PUBLICATIONS" ] && [ ! -L "$FM_WAKE_PUBLICATIONS" ] && return 0
+  [ -f "$FM_WAKE_PUBLICATIONS" ] && [ ! -L "$FM_WAKE_PUBLICATIONS" ] \
+    && [ "$(fm_wake_file_mode "$FM_WAKE_PUBLICATIONS")" = 600 ] \
+    && [ "$(fm_wake_file_link_count "$FM_WAKE_PUBLICATIONS")" = 1 ]
+}
+
+fm_wake_publication_id_valid() {
+  local publication_id=$1 pattern='^pr-poll:[A-Za-z0-9._-]+:[0-9a-f]{64}$'
+  [[ "$publication_id" =~ $pattern ]]
+}
+
+fm_wake_publication_delivered() {
+  local publication_id=$1
+  [ -f "$FM_WAKE_PUBLICATIONS" ] || return 1
+  grep -Fx -- "$publication_id" "$FM_WAKE_PUBLICATIONS" >/dev/null 2>&1
+}
+
+fm_wake_publication_queued() {
+  local publication_id=$1
+  [ -f "$FM_WAKE_QUEUE" ] || return 1
+  awk -F '\t' -v publication_id="$publication_id" \
+    'NF >= 6 && $6 == publication_id { found=1; exit } END { exit !found }' "$FM_WAKE_QUEUE"
+}
+
 fm_wake_append() {
-  local kind=$1 key=$2 payload=$3 clean_key clean_payload epoch seq seq_file status
+  local kind=$1 key=$2 payload=$3 publication_id=${4:-} clean_key clean_payload epoch seq seq_file status
   case "$kind" in
     signal|stale|check|heartbeat) ;;
     *) printf 'fm_wake_append: invalid wake kind: %s\n' "$kind" >&2; return 2 ;;
@@ -383,8 +426,27 @@ fm_wake_append() {
   epoch=$(date +%s)
   seq_file="$STATE/.wake-queue.seq"
   status=0
+  FM_WAKE_APPEND_RESULT=
 
   fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
+  if [ -n "$publication_id" ]; then
+    if ! fm_wake_publication_id_valid "$publication_id" || ! fm_wake_publications_valid; then
+      fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+      return 2
+    fi
+    if fm_wake_publication_delivered "$publication_id"; then
+      # shellcheck disable=SC2034 # Read by a caller after fm_wake_append returns.
+      FM_WAKE_APPEND_RESULT=delivered
+      fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+      return 0
+    fi
+    if fm_wake_publication_queued "$publication_id"; then
+      # shellcheck disable=SC2034 # Read by a caller after fm_wake_append returns.
+      FM_WAKE_APPEND_RESULT=queued
+      fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+      return 0
+    fi
+  fi
   seq=$(cat "$seq_file" 2>/dev/null || echo 0)
   case "$seq" in
     ''|*[!0-9]*) seq=0 ;;
@@ -392,7 +454,18 @@ fm_wake_append() {
   seq=$((seq + 1))
   printf '%s\n' "$seq" > "$seq_file" || status=$?
   if [ "$status" -eq 0 ]; then
-    printf '%s\t%s\t%s\t%s\t%s\n' "$epoch" "$seq" "$kind" "$clean_key" "$clean_payload" >> "$FM_WAKE_QUEUE" || status=$?
+    if [ -n "$publication_id" ]; then
+      printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "$epoch" "$seq" "$kind" "$clean_key" "$clean_payload" "$publication_id" \
+        >> "$FM_WAKE_QUEUE" || status=$?
+    else
+      printf '%s\t%s\t%s\t%s\t%s\n' "$epoch" "$seq" "$kind" "$clean_key" "$clean_payload" \
+        >> "$FM_WAKE_QUEUE" || status=$?
+    fi
+  fi
+  if [ "$status" -eq 0 ]; then
+    # shellcheck disable=SC2034 # Read by a caller after fm_wake_append returns.
+    FM_WAKE_APPEND_RESULT=appended
   fi
   fm_lock_release "$FM_WAKE_QUEUE_LOCK"
   return "$status"
@@ -413,6 +486,9 @@ fm_wake_print_deduped() {
   awk -F '\t' '
     NF >= 5 {
       dedupe = $3 SUBSEP $4
+      if (NF >= 6) {
+        dedupe = "publication" SUBSEP $6
+      }
       if ($3 == "heartbeat") {
         dedupe = "heartbeat"
       }
@@ -428,6 +504,82 @@ fm_wake_print_deduped() {
       }
     }
   ' "$file"
+}
+
+fm_wake_print_pending_deduped() {
+  local file=$1 publications=$FM_WAKE_PUBLICATIONS
+  fm_wake_publications_valid || return 1
+  [ -f "$publications" ] || publications=/dev/null
+  awk -F '\t' '
+    FILENAME == ARGV[1] && NF == 1 { delivered[$1] = 1; next }
+    FILENAME == ARGV[2] && NF >= 5 {
+      if (NF >= 6 && $6 in delivered) next
+      dedupe = $3 SUBSEP $4
+      if (NF >= 6) dedupe = "publication" SUBSEP $6
+      if ($3 == "heartbeat") dedupe = "heartbeat"
+      if (!(dedupe in seen)) {
+        order[++count] = dedupe
+        seen[dedupe] = 1
+      }
+      line[dedupe] = $0
+    }
+    END { for (i = 1; i <= count; i++) print line[order[i]] }
+  ' "$publications" "$file"
+}
+
+fm_wake_publications_commit() {
+  local rows=$1 tmp publication_id publication_ids=
+  [ -n "$rows" ] || return 0
+  fm_wake_publications_valid || return 1
+  while IFS=$'\t' read -r _ _ _ _ _ publication_id _; do
+    [ -n "$publication_id" ] || continue
+    fm_wake_publication_id_valid "$publication_id" || return 1
+    publication_ids="${publication_ids}${publication_ids:+$'\n'}$publication_id"
+  done <<< "$rows"
+  [ -n "$publication_ids" ] || return 0
+  tmp=$(mktemp "$STATE/.wake-publications.XXXXXX") || return 1
+  if [ -f "$FM_WAKE_PUBLICATIONS" ]; then
+    cp "$FM_WAKE_PUBLICATIONS" "$tmp" || { rm -f "$tmp"; return 1; }
+  fi
+  while IFS= read -r publication_id; do
+    grep -Fx -- "$publication_id" "$tmp" >/dev/null 2>&1 \
+      || printf '%s\n' "$publication_id" >> "$tmp" \
+      || { rm -f "$tmp"; return 1; }
+  done <<< "$publication_ids"
+  chmod 0600 "$tmp" || { rm -f "$tmp"; return 1; }
+  mv -f -- "$tmp" "$FM_WAKE_PUBLICATIONS"
+}
+
+fm_wake_publications_forget_task() {
+  local state=$1 id=$2 tmp prefix status publications queue_lock
+  case "$id" in ''|.*|*[!A-Za-z0-9._-]*) return 1 ;; esac
+  [ -d "$state" ] && [ ! -L "$state" ] || return 1
+  publications="$state/.wake-publications"
+  queue_lock="$state/.wake-queue.lock"
+  fm_lock_acquire_wait "$queue_lock"
+  if [ -e "$publications" ] || [ -L "$publications" ]; then
+    if [ ! -f "$publications" ] || [ -L "$publications" ] \
+      || [ "$(fm_wake_file_mode "$publications")" != 600 ] \
+      || [ "$(fm_wake_file_link_count "$publications")" != 1 ]; then
+      fm_lock_release "$queue_lock"
+      return 1
+    fi
+  fi
+  if [ ! -f "$publications" ]; then
+    fm_lock_release "$queue_lock"
+    return 0
+  fi
+  tmp=$(mktemp "$state/.wake-publications-forget.XXXXXX") || {
+    fm_lock_release "$queue_lock"
+    return 1
+  }
+  prefix="pr-poll:$id:"
+  awk -v prefix="$prefix" 'index($0, prefix) != 1 { print }' "$publications" > "$tmp" \
+    && chmod 0600 "$tmp" && mv -f -- "$tmp" "$publications"
+  status=$?
+  [ "$status" -eq 0 ] || rm -f "$tmp"
+  fm_lock_release "$queue_lock"
+  return "$status"
 }
 
 # Map one structurally valid signal key to its home-local status filename.

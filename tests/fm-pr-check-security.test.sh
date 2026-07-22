@@ -19,6 +19,7 @@ PR_MERGE="$ROOT/bin/fm-pr-merge.sh"
 MIGRATE="$ROOT/bin/fm-pr-check-migrate.sh"
 POLL="$ROOT/bin/fm-pr-poll.sh"
 WATCH="$ROOT/bin/fm-watch.sh"
+DRAIN="$ROOT/bin/fm-wake-drain.sh"
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
 REGISTER="$ROOT/bin/fm-check-register.sh"
 TMP_ROOT=$(fm_test_tmproot fm-pr-check-security)
@@ -857,6 +858,57 @@ SH
   [ "$(printf '%s\n' "$deduped" | grep -c "$(printf '\tcheck\t')")" -eq 1 ] \
     || fail "recovery exposed more than one actionable merged wake"
   pass "published merged wakes survive and recover from interrupted retirement"
+}
+
+test_publication_identity_survives_intervening_drain() {
+  local dir state rc first_checks second_checks
+  dir=$(make_case intervening-drain)
+  state="$dir/home/state"
+  write_task_meta "$dir"
+  run_check_entry "$dir" task-a https://github.com/o/r/pull/1 >/dev/null 2>/dev/null \
+    || fail "could not arm the intervening-drain poll"
+
+  cat > "$dir/fakebin/mv" <<SH
+#!/usr/bin/env bash
+destination=
+for argument in "\$@"; do destination=\$argument; done
+if [ "\$destination" = '$state/task-a.pr-poll-retired' ] \
+  && [ ! -e '$dir/receipt-rename-failed-once' ]; then
+  touch '$dir/receipt-rename-failed-once'
+  exit 1
+fi
+exec '$REAL_MV' "\$@"
+SH
+  chmod +x "$dir/fakebin/mv"
+
+  set +e
+  FM_TEST_GH_STATE=MERGED run_watcher_bounded "$dir/home" "$dir/fakebin" \
+    > "$dir/failed-watch.out" 2> "$dir/failed-watch.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "injected retirement-receipt rename failure was ignored"
+  fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+    || fail "receipt rename failure did not leave the generation retryable"
+  FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$dir/root" "$DRAIN" > "$dir/first-drain.out" \
+    || fail "first merged wake did not drain"
+  first_checks=$(grep -c "$(printf '\tcheck\t')" "$dir/first-drain.out" || true)
+  [ "$first_checks" -eq 1 ] || fail "first drain did not expose exactly one merged wake"
+  grep -E '^pr-poll:task-a:[0-9a-f]{64}$' "$state/.wake-publications" >/dev/null \
+    || fail "successful drain did not retain the generation publication identity"
+
+  write_task_meta "$dir" task-b
+  printf 'done: retry trigger\n' > "$state/task-b.status"
+  FM_TEST_GH_STATE=MERGED run_watcher_bounded "$dir/home" "$dir/fakebin" \
+    > "$dir/retry-watch.out" 2> "$dir/retry-watch.err" \
+    || fail "watcher did not retry after the intervening drain"
+  FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$dir/root" "$DRAIN" > "$dir/second-drain.out" \
+    || fail "second queue batch did not drain"
+  second_checks=$(grep -c "$(printf '\tcheck\t')" "$dir/second-drain.out" || true)
+  [ "$second_checks" -eq 0 ] || fail "retry republished the merged wake after an intervening drain"
+  [ ! -e "$state/task-a.check.sh" ] && [ ! -e "$state/task-a.pr-poll" ] \
+    && [ ! -e "$state/task-a.pr-poll-registration" ] \
+    || fail "retry did not retire the delivered poll generation"
+  pass "generation publication identity prevents duplicate wakes across intervening drains"
 }
 
 test_atomic_interruption_leaves_no_partial_artifact() {
@@ -2704,6 +2756,10 @@ test_teardown_removes_poll_artifacts() {
   printf 'data\n' > "$dir/home/state/task-a.pr-poll"
   printf 'registration\n' > "$dir/home/state/task-a.pr-poll-registration"
   printf 'retirement\n' > "$dir/home/state/task-a.pr-poll-retired"
+  printf 'temporary\n' > "$dir/home/state/.task-a.fm-pr-poll-retirement.crash"
+  chmod 0600 "$dir/home/state/.task-a.fm-pr-poll-retirement.crash"
+  printf 'pr-poll:task-a:%064d\npr-poll:task-b:%064d\n' 0 1 > "$dir/home/state/.wake-publications"
+  chmod 0600 "$dir/home/state/.wake-publications"
   printf 'trust\n' > "$dir/home/state/task-a.check-trust"
   mkdir -p "$dir/home/state/.pr-check-quarantine"
   chmod 0700 "$dir/home/state/.pr-check-quarantine"
@@ -2715,6 +2771,14 @@ exit 0
 SH
   chmod +x "$fakebin/tmux"
   touch "$dir/home/state/.last-watcher-beat"
+  FM_STATE_OVERRIDE="$dir/home/state" bash -c '
+    . "$1"
+    . "$2"
+    fm_pr_poll_lock_acquire "$3" task-a
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$ROOT/bin/fm-pr-lib.sh" "$dir/home/state" \
+    || fail "could not leave a crash-stale task poll lock"
+  [ -L "$dir/home/state/.task-a.pr-poll.lock" ] \
+    || fail "stale-lock fixture did not leave the task poll lock"
 
   FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" PATH="$fakebin:$BASE_PATH" \
     "$TEARDOWN" task-a --force > "$dir/teardown.out" 2> "$dir/teardown.err" \
@@ -2723,6 +2787,16 @@ SH
   [ ! -e "$dir/home/state/task-a.pr-poll" ] || fail "teardown left the sidecar"
   [ ! -e "$dir/home/state/task-a.pr-poll-registration" ] || fail "teardown left the PR poll registration"
   [ ! -e "$dir/home/state/task-a.pr-poll-retired" ] || fail "teardown left the PR poll retirement receipt"
+  [ ! -e "$dir/home/state/.task-a.fm-pr-poll-retirement.crash" ] \
+    || fail "teardown left the scoped retirement temporary"
+  [ ! -e "$dir/home/state/.task-a.pr-poll.lock" ] \
+    || fail "teardown left the crash-stale task poll lock"
+  ! find "$dir/home/state" -maxdepth 1 -name '.task-a.pr-poll.lock.owner.*' -print | grep . >/dev/null \
+    || fail "teardown left the crash-stale task poll owner directory"
+  ! grep -F 'pr-poll:task-a:' "$dir/home/state/.wake-publications" >/dev/null \
+    || fail "teardown left the task publication identity"
+  grep -F 'pr-poll:task-b:' "$dir/home/state/.wake-publications" >/dev/null \
+    || fail "teardown removed another task publication identity"
   [ ! -e "$dir/home/state/task-a.check-trust" ] || fail "teardown left the custom check registration"
   ! find "$dir/home/state/.pr-check-quarantine" -name 'task-a.*' -print 2>/dev/null | grep . >/dev/null \
     || fail "teardown left task quarantine artifacts"
@@ -2956,6 +3030,7 @@ test_rejected_metacharacter_bytes_are_inert
 test_static_poll_contract
 test_terminal_poll_retirement_and_replacement
 test_published_wake_survives_interrupted_retirement
+test_publication_identity_survives_intervening_drain
 test_atomic_interruption_leaves_no_partial_artifact
 test_concurrent_watcher_sees_only_complete_publication
 test_postrename_poll_validation_revokes_and_retries

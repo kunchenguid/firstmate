@@ -47,6 +47,38 @@ test_concurrent_append_and_drain() {
   pass "concurrent append plus drain preserves queue records"
 }
 
+test_publication_identity_survives_drain() {
+  local dir state first second publication_id successor_id
+  dir=$(make_case publication-identity)
+  state="$dir/state"
+  first="$dir/first.out"
+  second="$dir/second.out"
+  publication_id="pr-poll:task-a:$(printf '%064d' 0)"
+  successor_id="pr-poll:task-a:$(printf '%064d' 1)"
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_wake_append check task-a.check.sh "check: merged" "$2"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$publication_id" \
+    || fail "generation-scoped wake append failed"
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_wake_append check task-a.check.sh "check: successor merged" "$2"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$successor_id" \
+    || fail "successor generation wake append failed"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$first" || fail "generation-scoped wake did not drain"
+  [ "$(grep -c "$(printf '\tcheck\t')" "$first" || true)" -eq 2 ] \
+    || fail "one drain did not preserve both distinct poll generations"
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_wake_append check task-a.check.sh "check: merged retry" "$2"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$publication_id" \
+    || fail "delivered generation retry failed"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$second" || fail "retry queue did not drain"
+  [ "$(grep -c "$(printf '\tcheck\t')" "$second" || true)" -eq 0 ] \
+    || fail "delivered generation was exposed by a second drain"
+  pass "generation-scoped publication identity survives queue consumption"
+}
+
 test_signal_catchup_without_running_watcher() {
   local dir state fakebin out drain_out status_file
   dir=$(make_case signal)
@@ -430,6 +462,7 @@ test_interruption_before_and_after_raw_commit() {
 }
 
 test_concurrent_append_and_drain
+test_publication_identity_survives_drain
 test_signal_catchup_without_running_watcher
 test_stale_enqueue_before_suppressor
 test_not_working_stale_enqueue_before_suppressor

@@ -237,6 +237,29 @@ fm_pr_sha256() {
   fi
 }
 
+fm_pr_sha256_text() {
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 2>/dev/null | awk '{print $1}'
+  elif command -v sha256sum >/dev/null 2>&1; then
+    sha256sum 2>/dev/null | awk '{print $1}'
+  else
+    return 1
+  fi
+}
+
+fm_pr_poll_publication_id() {
+  local id=$1 url=$2 data_identity=$3 check_identity=$4 registration_identity=$5 digest
+  fm_pr_task_id_valid "$id" || return 1
+  fm_pr_url_parse "$url" || return 1
+  [[ "$data_identity" =~ ^[0-9]+:[0-9]+$ ]] || return 1
+  [[ "$check_identity" =~ ^[0-9]+:[0-9]+$ ]] || return 1
+  [[ "$registration_identity" =~ ^[0-9]+:[0-9]+$ ]] || return 1
+  digest=$(printf '%s\n%s\n%s\n%s\n%s\n' "$id" "$url" "$data_identity" \
+    "$check_identity" "$registration_identity" | fm_pr_sha256_text) || return 1
+  [[ "$digest" =~ ^[0-9a-f]{64}$ ]] || return 1
+  printf 'pr-poll:%s:%s\n' "$id" "$digest"
+}
+
 fm_pr_private_file_valid() {
   local path=$1 mode=$2 device=$3
   [ -f "$path" ] && [ ! -L "$path" ] || return 1
@@ -699,7 +722,7 @@ fm_pr_poll_retire_validated() {
   else
     fm_pr_poll_generation_matches "$state" "$id" "$template" "$expected_url" \
       "$expected_data_identity" "$expected_check_identity" "$expected_registration_identity" || return $?
-    retirement_tmp=$(mktemp "$state/.fm-pr-poll-retirement.XXXXXX") || return 1
+    retirement_tmp=$(mktemp "$state/.$id.fm-pr-poll-retirement.XXXXXX") || return 1
     if ! printf '%s\n%s\n%s\n%s\n%s\n%s\n' fm-pr-poll-retirement-v1 "$id" "$expected_url" \
         "$expected_data_identity" "$expected_check_identity" "$expected_registration_identity" > "$retirement_tmp" \
       || ! chmod 0600 "$retirement_tmp" \

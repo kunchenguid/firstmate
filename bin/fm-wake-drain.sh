@@ -56,17 +56,19 @@ rm -f "$DRAIN_TMP"
 mv "$FM_WAKE_QUEUE" "$DRAIN_TMP" || exit 1
 : > "$FM_WAKE_QUEUE" || exit 1
 
-RAW_ROWS=$(fm_wake_print_deduped "$DRAIN_TMP") || exit "$?"
+RAW_ROWS=$(fm_wake_print_pending_deduped "$DRAIN_TMP") || exit "$?"
 case "${FM_WAKE_DRAIN_TEST_DELAY_BEFORE_COMMIT:-0}" in
   0) ;;
   ''|*[!0-9]*) ;;
   *) sleep "$FM_WAKE_DRAIN_TEST_DELAY_BEFORE_COMMIT" ;;
 esac
 if [ -n "$RAW_ROWS" ]; then
-  # Print-before-delete is the deliberate at-least-once no-loss boundary: a
-  # crash in this micro-gap may replay a wake, and annotations stay outside it.
+  # Print-before-delete is the deliberate at-least-once no-loss boundary.
+  # Generation-scoped publication IDs commit after printing and before batch
+  # deletion, so a successful drain suppresses their later retry across queues.
   printf '%s\n' "$RAW_ROWS" || exit "$?"
 fi
+fm_wake_publications_commit "$RAW_ROWS" || exit "$?"
 rm -f "$DRAIN_TMP" || exit "$?"
 DRAIN_TMP=
 fm_lock_release "$FM_WAKE_QUEUE_LOCK"

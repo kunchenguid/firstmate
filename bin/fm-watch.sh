@@ -804,6 +804,8 @@ while :; do
           poll_data_identity=$(fm_pr_file_identity "$STATE/$id.pr-poll") || exit 1
           poll_check_identity=$(fm_pr_file_identity "$c") || exit 1
           poll_registration_identity=$(fm_pr_file_identity "$STATE/$id.pr-poll-registration") || exit 1
+          poll_publication_id=$(fm_pr_poll_publication_id "$id" "$url" "$poll_data_identity" \
+            "$poll_check_identity" "$poll_registration_identity") || exit 1
           run_check_capture "$SCRIPT_DIR/fm-pr-poll.sh" --validated \
             "$provider" "$url" "$host" "$path" "$number" || exit 1
           out=$FM_CHECK_RESULT
@@ -818,14 +820,20 @@ while :; do
             fi
             [ "$generation_rc" -eq 0 ] || { fm_pr_poll_lock_release; exit 1; }
             reason="check: $c: $out"
-            fm_wake_append check "$c" "$reason" || { fm_pr_poll_lock_release; exit 1; }
+            fm_wake_append check "$c" "$reason" "$poll_publication_id" \
+              || { fm_pr_poll_lock_release; exit 1; }
+            publication_result=$FM_WAKE_APPEND_RESULT
             fm_pr_poll_retire_validated "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh" \
               "$url" "$poll_data_identity" "$poll_check_identity" "$poll_registration_identity"
             retire_rc=$?
             fm_pr_poll_lock_release
             [ "$retire_rc" -eq 0 ] || exit 1
             touch "$STATE/.last-check"
-            wake "$reason"
+            if [ "$publication_result" != delivered ]; then
+              wake "$reason"
+            fi
+            out=
+            continue
           fi
         elif fm_custom_check_snapshot_prepare "$STATE" "$id"; then
           custom_snapshot=$FM_CUSTOM_CHECK_SNAPSHOT

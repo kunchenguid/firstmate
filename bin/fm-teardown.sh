@@ -120,6 +120,8 @@ FM_LOCK_LOG_PREFIX=teardown
 
 META="$STATE/$ID.meta"
 [ -f "$META" ] || { echo "error: no meta for task $ID at $META" >&2; exit 1; }
+# shellcheck source=bin/fm-wake-lib.sh
+. "$SCRIPT_DIR/fm-wake-lib.sh"
 WT=$(grep '^worktree=' "$META" | cut -d= -f2-)
 T=$(grep '^window=' "$META" | cut -d= -f2-)
 PROJ=$(grep '^project=' "$META" | cut -d= -f2-)
@@ -214,6 +216,10 @@ validate_pr_poll_cleanup() {
     [ -e "$artifact" ] || [ -L "$artifact" ] || continue
     has_artifact=1
   done
+  for artifact in "$state_dir/.$id.fm-pr-poll-retirement."*; do
+    [ -e "$artifact" ] || [ -L "$artifact" ] || continue
+    has_artifact=1
+  done
   if [ -e "$quarantine" ] || [ -L "$quarantine" ]; then
     has_artifact=1
   fi
@@ -228,6 +234,13 @@ validate_pr_poll_cleanup() {
       || [ "$(fm_pr_file_device "$artifact")" != "$state_device" ] \
       || [ "$(fm_pr_file_link_count "$artifact")" != 1 ]; then
       echo "REFUSED: unsafe task PR-check artifact; preserving task state." >&2
+      return 1
+    fi
+  done
+  for artifact in "$state_dir/.$id.fm-pr-poll-retirement."*; do
+    [ -e "$artifact" ] || [ -L "$artifact" ] || continue
+    if ! fm_pr_private_file_valid "$artifact" 600 "$state_device"; then
+      echo "REFUSED: unsafe task PR-poll retirement temporary; preserving task state." >&2
       return 1
     fi
   done
@@ -251,12 +264,16 @@ validate_pr_poll_cleanup() {
   done
 }
 
-remove_pr_poll_artifacts() {
+remove_pr_poll_artifacts_locked() {
   local state_dir=$1 id=$2 quarantine artifact
   validate_pr_poll_cleanup "$state_dir" "$id" || return 1
   rm -f "$state_dir/$id.check.sh" "$state_dir/$id.pr-poll" \
     "$state_dir/$id.pr-poll-registration" "$state_dir/$id.pr-poll-retired" \
     "$state_dir/$id.check-trust" || return 1
+  for artifact in "$state_dir/.$id.fm-pr-poll-retirement."*; do
+    [ -e "$artifact" ] || [ -L "$artifact" ] || continue
+    rm -f -- "$artifact" || return 1
+  done
   if fm_task_id_path_safe "$id"; then
     quarantine="$state_dir/.pr-check-quarantine"
     if [ -d "$quarantine" ] && [ ! -L "$quarantine" ]; then
@@ -267,6 +284,16 @@ remove_pr_poll_artifacts() {
       rmdir "$quarantine" 2>/dev/null || true
     fi
   fi
+  fm_wake_publications_forget_task "$state_dir" "$id"
+}
+
+remove_pr_poll_artifacts() {
+  local state_dir=$1 id=$2 status
+  fm_pr_poll_lock_acquire "$state_dir" "$id" || return 1
+  remove_pr_poll_artifacts_locked "$state_dir" "$id"
+  status=$?
+  fm_pr_poll_lock_release
+  return "$status"
 }
 
 # Resolve the PR number for a worktree branch via gh-axi. Echoes the number on a
@@ -1155,8 +1182,6 @@ if [ "$BACKEND" = herdr ] \
 fi
 
 if [ "$HERDR_PRESENTATION_RETIRE_CANDIDATE" = 1 ]; then
-  # shellcheck source=bin/fm-wake-lib.sh
-  . "$SCRIPT_DIR/fm-wake-lib.sh"
   HERDR_PRESENTATION_FOCUS_LOCK=
   HERDR_PRESENTATION_FOCUS_LOCK_HELD=0
   HERDR_PRESENTATION_FOCUS_LOCK_ATTEMPT=0
