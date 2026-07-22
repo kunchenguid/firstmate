@@ -3,11 +3,11 @@
 # behavior-test candidates (Phase 2 pre-shard gate).
 #
 # This is the single owner of the proven parallel candidate set, the concurrent
-# proof run, and the isolation checks that must pass before any production CI
-# sharding or general local --jobs land (those are a later phase).
+# proof run, and the isolation checks that informed production CI sharding.
+# The production matrix uses isolated hosts and does not reuse this local pool.
 #
 # It does NOT:
-#   - change CI Behavior sharding
+#   - own or execute CI Behavior shard selection
 #   - add --jobs to bin/fm-test-run.sh
 #   - run real Herdr, real default-server tmux, watcher lock races, AFK, live
 #     harnesses, or GUI backends

@@ -3,8 +3,8 @@
 #
 # Firstmate must not configure commands.test as a complete tests/*.test.sh walk
 # (that duplicated CI and burned local pipeline time). Lint stays pinned to
-# bin/fm-lint.sh. Remote CI Behavior must keep running the complete portable
-# suite through bin/fm-test-run.sh --all (exact tests/*.test.sh coverage).
+# bin/fm-lint.sh. Remote CI Behavior must keep running every tests/*.test.sh
+# through the canonical runner's completeness-checked shard selection.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -12,6 +12,8 @@ set -u
 
 NM="$ROOT/.no-mistakes.yaml"
 CI="$ROOT/.github/workflows/ci.yml"
+TEST_RUNNER="$ROOT/bin/fm-test-run.sh"
+TEST_MANIFEST="$ROOT/tests/behavior-shards.txt"
 
 test_nm_yaml_tracked() {
   assert_present "$NM" "tracked .no-mistakes.yaml is missing"
@@ -95,9 +97,17 @@ test_nm_has_no_complete_local_test_command() {
 
 test_ci_still_runs_broad_behavior_suite() {
   assert_present "$CI" "ci.yml is missing"
-  # Behavior job still runs every portable behavior script via the one owner.
-  grep -Fq 'bin/fm-test-run.sh --all' "$CI" \
-    || fail "CI Behavior job must invoke bin/fm-test-run.sh --all"
+  assert_present "$TEST_RUNNER" "the complete behavior runner is missing"
+  assert_present "$TEST_MANIFEST" "the complete behavior manifest is missing"
+  grep -Fq 'shard: [1, 2, 3, 4]' "$CI" \
+    || fail "CI Behavior must schedule every owned shard"
+  # shellcheck disable=SC2016 # GitHub's expression must remain literal test data.
+  grep -Fq 'bin/fm-test-run.sh --shard "${{ matrix.shard }}/4"' "$CI" \
+    || fail "CI Behavior must execute every shard through bin/fm-test-run.sh"
+  for shard in 1 2 3 4; do
+    "$TEST_RUNNER" --list --shard "$shard/4" >/dev/null \
+      || fail "CI Behavior manifest must assign every tests/*.test.sh file exactly once"
+  done
   # Guard against regression to an uninstrumented inline loop that drops timing.
   if grep -Eq 'for test_script in tests/\*\.test\.sh' "$CI"; then
     fail "CI Behavior must not re-spell an inline tests/*.test.sh loop; use fm-test-run.sh"

@@ -3,8 +3,8 @@
 # isolation proof harness.
 #
 # These tests assert the candidate-set contract, serial exclusions, aggregate
-# failure reporting, and that production CI sharding / fm-test-run --jobs are
-# still off. They deliberately do NOT re-run the full concurrent candidate
+# failure reporting, and that the canonical runner does not gain local --jobs.
+# They deliberately do NOT re-run the full concurrent candidate
 # matrix on every invocation (that matrix is owned by the harness itself and
 # archived under docs/fm-test-isolation-proof.md after a deliberate proof run).
 set -u
@@ -181,24 +181,20 @@ SH
   pass "aggregate failure reporting survives concurrency"
 }
 
-test_production_sharding_still_off() {
+test_production_sharding_preserves_isolation_boundary() {
   assert_present "$CI" "ci.yml missing"
-  # Behavior remains a single serial fm-test-run --all job (no matrix shards).
-  grep -Fq 'bin/fm-test-run.sh --all' "$CI" \
-    || fail "CI Behavior must still call serial bin/fm-test-run.sh --all"
-  if grep -E 'strategy:[[:space:]]*$' "$CI" >/dev/null 2>&1; then
-    # Only fail if a Behavior-related matrix appears; lint/macos jobs stay simple.
-    if grep -A20 'name: Behavior tests' "$CI" | grep -q 'matrix:'; then
-      fail "CI Behavior must not enable production sharding in Phase 2"
-    fi
+  # shellcheck disable=SC2016 # GitHub's expression must remain literal test data.
+  grep -Fq 'bin/fm-test-run.sh --shard "${{ matrix.shard }}/4"' "$CI" \
+    || fail "CI Behavior must shard through the canonical runner"
+  if grep -Fq 'fm-test-isolation-proof.sh --jobs' "$CI"; then
+    fail "CI must not reuse the shared-host isolation proof as production sharding"
   fi
-  # Serial runner header must still refuse general --jobs.
-  grep -Fq 'no local --jobs parallelism' "$RUNNER" \
-    || fail "fm-test-run.sh must still document no local --jobs"
+  grep -Fq 'Each invocation remains serial' "$RUNNER" \
+    || fail "fm-test-run.sh must document serial execution within each shard"
   if grep -E '^[[:space:]]*--jobs\)' "$RUNNER" >/dev/null 2>&1; then
-    fail "fm-test-run.sh must not grow production --jobs in Phase 2"
+    fail "fm-test-run.sh must not grow shared-host --jobs"
   fi
-  pass "production CI sharding and fm-test-run --jobs remain off"
+  pass "isolated CI sharding does not weaken the local concurrency boundary"
 }
 
 test_docs_record_proof_owner() {
@@ -222,5 +218,5 @@ test_extra_hermetic_candidates_present
 test_list_exclusions_documents_reasons
 test_family_map_labels_this_contract
 test_aggregate_failure_under_concurrency
-test_production_sharding_still_off
+test_production_sharding_preserves_isolation_boundary
 test_docs_record_proof_owner

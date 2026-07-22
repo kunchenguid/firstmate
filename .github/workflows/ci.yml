@@ -25,11 +25,14 @@ jobs:
       - run: bin/fm-lint.sh
 
   tests:
-    name: Behavior tests
+    name: Behavior tests (shard ${{ matrix.shard }}/4)
     runs-on: ubuntu-latest
-    # Measured portable suite wall-clock is ~13-15+ minutes without Herdr.
-    # This cap is a hang tripwire for a stuck watcher or tmux test, not the
-    # expected end of a healthy suite (and not a substitute for green results).
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    # Measured shards target 3.5-5 minutes on GitHub runners. This cap remains
+    # a generous hang tripwire for a stuck watcher or tmux test.
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v6
@@ -53,20 +56,35 @@ jobs:
           set -eu
           npm install -g tasks-axi
           tasks-axi --version
-      # Single owner of serial suite selection, timing markers, and aggregate
-      # failure. Do not re-spell a for-loop over tests/*.test.sh here.
+      # The canonical runner owns selection, manifest completeness, timing,
+      # and deterministic aggregate failure. CI selects only the shard number.
       - name: Run portable behavior suite
         run: |
           set -eu
           mkdir -p "$RUNNER_TEMP/fm-test"
-          bin/fm-test-run.sh --all --json "$RUNNER_TEMP/fm-test/fm-test-timing.json"
+          bin/fm-test-run.sh --shard "${{ matrix.shard }}/4" --json "$RUNNER_TEMP/fm-test/fm-test-timing-${{ matrix.shard }}.json"
       - name: Upload behavior timing artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: fm-test-timing
-          path: ${{ runner.temp }}/fm-test/fm-test-timing.json
+          name: fm-test-timing-${{ matrix.shard }}
+          path: ${{ runner.temp }}/fm-test/fm-test-timing-${{ matrix.shard }}.json
           if-no-files-found: warn
+
+  behavior:
+    name: Behavior tests
+    needs: tests
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Preserve the canonical aggregate check
+        env:
+          SHARD_RESULT: ${{ needs.tests.result }}
+        run: |
+          if [ "$SHARD_RESULT" != success ]; then
+            echo "::error::one or more behavior shards failed"
+            exit 1
+          fi
 
   macos-stock-bash:
     name: Stock macOS Bash snapshot compatibility
@@ -87,6 +105,7 @@ jobs:
           /bin/bash --version | head -1
           command -v jq >/dev/null || { echo "::error::jq is required"; exit 1; }
           /bin/bash -n bin/fm-fleet-snapshot.sh
+          /bin/bash bin/fm-test-run.sh --list --shard 1/4 >/dev/null
 
           snapshot_output=$(/bin/bash tests/fm-fleet-snapshot-view.test.sh)
           printf '%s\n' "$snapshot_output"

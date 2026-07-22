@@ -317,8 +317,9 @@ assert doc["summary"]["failed"] == 0
 test_ci_and_docs_call_the_owner() {
   assert_present "$CI" "ci.yml missing"
   assert_present "$CONTRIB" "CONTRIBUTING.md missing"
-  grep -Fq 'bin/fm-test-run.sh --all' "$CI" \
-    || fail "CI Behavior must invoke bin/fm-test-run.sh --all"
+  # shellcheck disable=SC2016 # GitHub's expression must remain literal test data.
+  grep -Fq 'bin/fm-test-run.sh --shard "${{ matrix.shard }}/4"' "$CI" \
+    || fail "CI Behavior must invoke canonical manifest shards"
   grep -Fq 'timeout-minutes: 25' "$CI" \
     || fail "CI Behavior timeout-minutes must be 25 (hang tripwire)"
   # Stale "~2-3 minutes" claim must not remain.
@@ -327,6 +328,8 @@ test_ci_and_docs_call_the_owner() {
   fi
   grep -Fq 'fm-test-timing' "$CI" \
     || fail "CI must upload the timing artifact"
+  grep -Fq '/bin/bash bin/fm-test-run.sh --list --shard 1/4' "$CI" \
+    || fail "stock macOS Bash must validate canonical shard listing"
   grep -Fq 'bin/fm-test-run.sh --all' "$CONTRIB" \
     || fail "CONTRIBUTING must document bin/fm-test-run.sh --all"
   grep -Fq 'bin/fm-test-run.sh --family' "$CONTRIB" \

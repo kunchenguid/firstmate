@@ -156,9 +156,9 @@ Every candidate exited 0 under concurrency=4.
 Policy: a script that fails only under concurrency is **removed** from the candidate set and investigated.
 It is never retried into green, skipped more broadly, or weakened in assertions.
 
-## What this phase does not do
+## Production boundary
 
-- No production CI Behavior matrix / shard jobs
+- The archived proof did not itself enable production CI sharding; the later CI performance change uses four isolated GitHub jobs through `bin/fm-test-run.sh`.
 - No `bin/fm-test-run.sh --jobs`
 - No Herdr install lane (Phase 3+)
 - No complete-suite local re-run as part of this proof (focused matrix only)

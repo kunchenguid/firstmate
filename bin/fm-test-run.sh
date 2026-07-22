@@ -1,18 +1,20 @@
 #!/usr/bin/env bash
-# fm-test-run.sh - single owner of Firstmate's serial behavior-test runner.
+# fm-test-run.sh - single owner of Firstmate's behavior-test runner.
 #
 # Replaces duplicated `for test_script in tests/*.test.sh` loops in CONTRIBUTING
-# and the CI Behavior job. This phase is intentionally serial: no sharding and
-# no local --jobs parallelism.
+# and the CI Behavior job. Each invocation remains serial, while CI can select
+# one completeness-checked manifest shard per isolated runner.
 #
-# Selection modes (exactly one of: --all, --family, --changed, or script paths):
+# Selection modes (exactly one of --all, --shard, --family, --changed, or paths):
 #   fm-test-run.sh --all
+#   fm-test-run.sh --shard <N/4>
 #   fm-test-run.sh --family <name>
 #   fm-test-run.sh --changed [--base <git-ref>]
 #   fm-test-run.sh tests/<name>.test.sh [more scripts...]
 #
 # Inspection (no execution):
 #   fm-test-run.sh --list --all
+#   fm-test-run.sh --list --shard <N/4>
 #   fm-test-run.sh --list --family <name>
 #   fm-test-run.sh --list-families
 #
@@ -49,6 +51,8 @@ LIST_FAMILIES=0
 FAMILY=
 BASE_REF=origin/main
 JSON_PATH=
+SHARD=
+SHARD_MANIFEST="$ROOT/tests/behavior-shards.txt"
 SCRIPTS=()
 
 usage() {
@@ -230,6 +234,50 @@ select_all() {
     [ -n "$s" ] || continue
     add_script "$s"
   done < <(all_repo_tests)
+}
+
+# Validate the complete checked-in inventory before selecting a shard.
+# This makes a newly added test fail every shard closed until it is assigned,
+# and makes duplicate or stale assignments deterministic contract failures.
+select_shard() {
+  local requested=$1 shard_number line_number=0 shard path extra duplicate missing unexpected
+  local tmp
+  case "$requested" in
+    [1-4]/4) ;;
+    *) die "--shard must be N/4 where N is 1, 2, 3, or 4" ;;
+  esac
+  [ -f "$SHARD_MANIFEST" ] || die "shard manifest not found: $SHARD_MANIFEST"
+  shard_number=${requested%/*}
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-shard.XXXXXX")
+  : >"$tmp/paths"
+  : >"$tmp/normalized"
+
+  while IFS=$'\t ' read -r shard path extra; do
+    line_number=$((line_number + 1))
+    [ -n "$shard" ] || continue
+    case "$shard" in \#*) continue ;; esac
+    [ -z "${extra:-}" ] || die "manifest line $line_number must contain exactly a shard and path"
+    case "$shard" in 1|2|3|4) ;; *) die "manifest line $line_number has invalid shard: $shard" ;; esac
+    case "$path" in tests/*.test.sh) ;; *) die "manifest line $line_number has invalid test path: $path" ;; esac
+    printf '%s\n' "$path" >>"$tmp/paths"
+    printf '%s\t%s\n' "$shard" "$path" >>"$tmp/normalized"
+  done <"$SHARD_MANIFEST"
+
+  duplicate=$(LC_ALL=C sort "$tmp/paths" | uniq -d | head -1)
+  [ -z "$duplicate" ] || die "manifest assigns a test more than once: $duplicate"
+  all_repo_tests >"$tmp/inventory"
+  LC_ALL=C sort "$tmp/paths" >"$tmp/manifest"
+  missing=$(comm -23 "$tmp/inventory" "$tmp/manifest" | head -1)
+  [ -z "$missing" ] || die "manifest does not assign test: $missing"
+  unexpected=$(comm -13 "$tmp/inventory" "$tmp/manifest" | head -1)
+  [ -z "$unexpected" ] || die "manifest assigns missing test: $unexpected"
+
+  while IFS=$'\t' read -r shard path; do
+    [ "$shard" = "$shard_number" ] || continue
+    add_script "$path"
+  done <"$tmp/normalized"
+  rm -rf "$tmp"
+  [ "${#SCRIPTS[@]}" -gt 0 ] || die "shard $requested selects no tests"
 }
 
 select_family() {
@@ -521,6 +569,19 @@ while [ "$#" -gt 0 ]; do
       MODE=all
       shift
       ;;
+    --shard)
+      [ -z "$MODE" ] || die "only one selection mode is allowed"
+      [ "$#" -gt 1 ] || die "--shard requires N/4"
+      MODE=shard
+      SHARD=$2
+      shift 2
+      ;;
+    --shard=*)
+      [ -z "$MODE" ] || die "only one selection mode is allowed"
+      MODE=shard
+      SHARD=${1#--shard=}
+      shift
+      ;;
     --family)
       [ -z "$MODE" ] || die "only one selection mode is allowed"
       [ "$#" -gt 1 ] || die "--family requires a name"
@@ -601,6 +662,10 @@ case "${MODE:-}" in
     select_all
     SELECTION_DESC="all"
     ;;
+  shard)
+    select_shard "$SHARD"
+    SELECTION_DESC="shard=$SHARD"
+    ;;
   family)
     select_family "$FAMILY"
     SELECTION_DESC="family=$FAMILY"
@@ -619,7 +684,7 @@ case "${MODE:-}" in
     SELECTION_DESC="scripts"
     ;;
   *)
-    die "select with --all, --family <name>, --changed, or one or more script paths (see --help)"
+    die "select with --all, --shard <N/4>, --family <name>, --changed, or script paths (see --help)"
     ;;
 esac
 

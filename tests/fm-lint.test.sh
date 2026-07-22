@@ -22,7 +22,8 @@ CI="$ROOT/.github/workflows/ci.yml"
 NM="$ROOT/.no-mistakes.yaml"
 INSTALLER="$ROOT/bin/fm-install-shellcheck.sh"
 # The authoritative file set the one owner must run.
-CANON='shellcheck --norc bin/*.sh bin/backends/*.sh tests/*.sh'
+CANON_TOOLBELT='lint_toolbelt=(bin/*.sh bin/backends/*.sh)'
+CANON_TESTS='lint_tests=(tests/*.sh)'
 # The pinned version, read from the single source (the one owner itself).
 REQUIRED=$("$LINT" --required-version)
 
@@ -40,12 +41,13 @@ test_owner_exists_and_executable() {
 }
 
 test_owner_defines_canonical_set() {
-  assert_grep "$CANON" "$LINT" "fm-lint.sh must run the canonical shellcheck file set"
+  assert_grep "$CANON_TOOLBELT" "$LINT" "fm-lint.sh must own the toolbelt/backend file set"
+  assert_grep "$CANON_TESTS" "$LINT" "fm-lint.sh must own the behavior-test file set"
   # It must not weaken CI: no severity downgrade and no blanket disable/exclude
   # that would hide findings CI fails on.
   assert_no_grep '--severity' "$LINT" "fm-lint.sh must not lower severity below the CI default"
   assert_no_grep '--exclude' "$LINT" "fm-lint.sh must not blanket-exclude checks CI enforces"
-  [ "$(grep -Fc 'exec shellcheck --norc' "$LINT")" -eq 2 ] || fail "both lint modes must ignore ambient ShellCheck configuration"
+  [ "$(grep -Fc 'shellcheck --norc' "$LINT")" -eq 2 ] || fail "both focused and canonical lint modes must ignore ambient configuration"
   pass "fm-lint.sh is the sole authoritative definition at CI-default severity"
 }
 
@@ -180,6 +182,95 @@ SH
   pass "fm-lint.sh passes a clean fixture"
 }
 
+test_parallel_output_and_failure_are_deterministic() {
+  local tmp fakebin state out rc toolbelt_line tests_line
+  tmp=$(fm_test_tmproot fm-lint-parallel)
+  fakebin=$(fm_fakebin "$tmp")
+  state="$tmp/state"
+  mkdir -p "$state"
+  cat > "$fakebin/shellcheck" <<'SH'
+#!/usr/bin/env bash
+if [ "$1" = "--version" ]; then
+  printf 'ShellCheck - shell script analysis tool\nversion: 0.11.0\nlicense: x\nwebsite: y\n'
+  exit 0
+fi
+group=toolbelt
+for arg in "$@"; do case "$arg" in tests/*) group=tests ;; esac; done
+touch "$FM_LINT_TEST_STATE/active.$group"
+active=$(find "$FM_LINT_TEST_STATE" -name 'active.*' | wc -l)
+[ "$active" -le 2 ] || { printf 'too many workers: %s\n' "$active"; exit 9; }
+sleep 1
+printf 'finding-%s\n' "$group"
+rm -f "$FM_LINT_TEST_STATE/active.$group"
+[ "$group" != tests ]
+SH
+  chmod +x "$fakebin/shellcheck"
+
+  rc=0
+  out=$(FM_LINT_JOBS=2 FM_LINT_TEST_STATE="$state" PATH="$fakebin:$PATH" "$LINT" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "parallel lint hid a worker failure"
+  assert_not_contains "$out" 'too many workers' "parallel lint exceeded its configured worker bound"
+  assert_contains "$out" 'finding-tests' "parallel lint omitted the failing group"
+  toolbelt_line=$(printf '%s\n' "$out" | grep -n 'finding-toolbelt' | cut -d: -f1)
+  tests_line=$(printf '%s\n' "$out" | grep -n 'finding-tests' | cut -d: -f1)
+  [ "$toolbelt_line" -lt "$tests_line" ] || fail "parallel lint output did not follow canonical group order"
+  pass "parallel lint is bounded, deterministically ordered, and fails on any worker finding"
+}
+
+test_rejects_unbounded_worker_counts() {
+  local tmp fakebin out rc
+  tmp=$(fm_test_tmproot fm-lint-jobs)
+  fakebin=$(fm_fakebin "$tmp")
+  cat > "$fakebin/shellcheck" <<'SH'
+#!/usr/bin/env bash
+if [ "$1" = "--version" ]; then
+  printf 'version: 0.11.0\n'
+  exit 0
+fi
+exit 0
+SH
+  chmod +x "$fakebin/shellcheck"
+  rc=0
+  out=$(FM_LINT_JOBS=3 PATH="$fakebin:$PATH" "$LINT" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "fm-lint.sh accepted an unbounded worker count"
+  assert_contains "$out" 'FM_LINT_JOBS must be 1 or 2' "fm-lint.sh did not explain the worker bound"
+  pass "fm-lint.sh rejects worker counts above its documented bound"
+}
+
+test_parallel_groups_retain_sourced_file_context() {
+  if ! pinned_ready; then
+    pass "SKIP (ShellCheck $REQUIRED not resolved): sourced-file parallel parity check"
+    return
+  fi
+  local tmp fixture helper consumer out rc
+  tmp=$(fm_test_tmproot fm-lint-source)
+  mkdir -p "$tmp"
+  fixture="$tmp/fixture"
+  mkdir -p "$fixture/bin/backends" "$fixture/tests"
+  cp "$LINT" "$fixture/bin/fm-lint.sh"
+  helper="$fixture/bin/helper.sh"
+  consumer="$fixture/tests/consumer.sh"
+  cat > "$helper" <<'SH'
+#!/usr/bin/env bash
+# shellcheck disable=SC2034 # The consumer sources this fixture variable.
+sourced_value=ready
+SH
+  cat > "$consumer" <<SH
+#!/usr/bin/env bash
+# shellcheck source=$helper
+. "$helper"
+printf '%s\n' "\$sourced_value"
+SH
+  rc=0
+  printf '#!/usr/bin/env bash\nset -u\n' > "$fixture/bin/backends/clean.sh"
+  printf '#!/usr/bin/env bash\nset -u\n' > "$fixture/tests/clean.sh"
+  out=$(FM_LINT_JOBS=2 "$fixture/bin/fm-lint.sh" 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "parallel lint lost sourced-file context"$'\n'"$out"
+  assert_not_contains "$out" 'SC1091' "parallel lint emitted the split-invocation source false positive"
+  assert_not_contains "$out" 'SC2154' "parallel lint forgot variables defined by a sourced canonical file"
+  pass "parallel groups retain the monolithic invocation's sourced-file context"
+}
+
 test_owner_exists_and_executable
 test_owner_defines_canonical_set
 test_ci_invokes_the_owner
@@ -190,3 +281,6 @@ test_rejects_wrong_shellcheck_version
 test_catches_a_real_lint_defect
 test_ignores_ambient_shellcheck_opts
 test_clean_fixture_passes
+test_parallel_output_and_failure_are_deterministic
+test_rejects_unbounded_worker_counts
+test_parallel_groups_retain_sourced_file_context
