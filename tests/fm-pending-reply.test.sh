@@ -436,6 +436,17 @@ test_delivery_confirmation_fallback_reconciles() {
     escalations=$(grep -Fc "pending-reply-id=$prepared_corr" "$state/hibit.status")
     [ "$escalations" = 1 ] \
       || fail "delivery-unknown escalation should publish once, got $escalations"
+    printf 'done [corr=%s]: late report proves delivery\n' "$prepared_corr" >> "$state/hibit.status"
+    fm_pending_reply_tick "$state" || fail "watcher should accept a late delivery report"
+    [ "$(phase_of "$state" "$prepared_corr")" = resolved ] \
+      || fail "late report should resolve escalated delivery-unknown"
+    [ "$(fm_pending_reply_get "$prepared_rec" delivered_epoch)" = 5760 ] \
+      || fail "late report should provide delivery evidence"
+    escalations=$(grep -Fc "pending-reply-id=$prepared_corr" "$state/hibit.status")
+    [ "$escalations" = 1 ] || fail "late report must not re-escalate delivery-unknown"
+    fm_pending_reply_tick "$state" || fail "resolved late report should remain idempotent"
+    [ "$(phase_of "$state" "$prepared_corr")" = resolved ] \
+      || fail "late report resolution should remain durable"
     export FM_PENDING_REPLY_NOW=5800
     reported_corr=$(fm_pending_reply_create "$home" "$state" hibit "reported delivery")
     reported_rec=$(fm_pending_reply_path "$state" "$reported_corr")

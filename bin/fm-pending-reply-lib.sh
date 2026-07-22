@@ -866,9 +866,10 @@ fm_pending_reply_tick_one() {  # <state-dir> <corr_id> <busy_state> [secondmate-
   phase=$(fm_pending_reply_get "$rec" phase)
   delivered=$(fm_pending_reply_get "$rec" delivered_epoch)
   if [ -z "$delivered" ]; then
-    if [ "$phase" = delivery_unknown ]; then
-      fm_pending_reply_maybe_escalate "$state" "$corr" 2>/dev/null || true
-    fi
+    case "$phase" in
+      delivery_unknown) fm_pending_reply_maybe_escalate "$state" "$corr" 2>/dev/null || true ;;
+      escalated) fm_pending_reply_try_resolve "$state" "$corr" >/dev/null 2>&1 || true ;;
+    esac
     return 0
   fi
   # Correlated parent report always wins and is idempotent.
@@ -943,9 +944,11 @@ fm_pending_reply_tick() {  # <state-dir>
     phase=$(fm_pending_reply_get "$rec" phase)
     delivered=$(fm_pending_reply_get "$rec" delivered_epoch)
     if [ -z "$delivered" ]; then
-      if [ "$phase" = delivery_unknown ]; then
-        fm_pending_reply_tick_one "$state" "$corr" unknown "" || true
-      fi
+      case "$phase" in
+        delivery_unknown|escalated)
+          fm_pending_reply_tick_one "$state" "$corr" unknown "" || true
+          ;;
+      esac
       continue
     fi
     case "$phase" in
