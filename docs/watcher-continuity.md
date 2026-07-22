@@ -7,16 +7,18 @@ Must-work continuity now lives above that process boundary instead of depending 
 
 Pi's `.pi/extensions/fm-primary-pi-watch.ts` and OpenCode's `.opencode/plugins/fm-primary-watch-arm.js` own continuous re-arm after an actionable child close.
 Each adapter starts the next arm before delivering the wake prompt, checks current session-lock ownership at launch, preserves one child or scheduled retry at a time, and applies bounded exponential retry after an unexpected or failed close.
-A failed follow-up never cancels continuity restoration.
+A failed prompt handoff never cancels continuity restoration.
 
 ## Actionable wake ordering
 
-After an actionable Pi or OpenCode child close, the adapter starts and verifies one singleton successor before it delivers the original wake.
+After an actionable Pi or OpenCode child close, the adapter starts and verifies one singleton successor before handing off the original wake.
+Pi hands off that wake only if its durable event is still current at final validation.
 It waits at most one readiness timeout per attempt, then sends TERM and waits a bounded retirement confirmation before the next lock-verified exponential retry.
 If the unready arm does not retire within that bound, the adapter keeps ownership, starts no overlapping retry, and delivers the typed fallback immediately.
 When that retained arm later closes, its actual close is classified as a new supervised event without replaying the earlier fallback.
-After the configured retry bound is exhausted, it delivers the original wake with a typed continuity-restoration failure even if every successor arm hung without reporting readiness.
-This is deliberate Option B ordering: the fleet is protected before the model handles the wake whenever restoration succeeds, but the model is never left blind when it does not.
+After the configured retry bound is exhausted, it surfaces a typed continuity-restoration failure even if every successor arm hung without reporting readiness.
+OpenCode includes the original wake, while Pi includes it only if final validation still finds a current durable event.
+This is deliberate Option B ordering: the fleet is protected before the model handles a still-current wake whenever restoration succeeds, but restoration failure is never hidden.
 
 Pi additionally captures a receipt for the matching durable queue rows and their current home-local sources before successor restoration.
 When Pi is already running a turn, the extension retains that receipt itself instead of entering Pi's irrevocable `followUp` queue.
