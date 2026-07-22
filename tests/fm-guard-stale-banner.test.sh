@@ -163,6 +163,28 @@ test_queued_wake_warning_stays_independent() {
   pass "fm-guard stale banner: queued-wake warning remains independent"
 }
 
+# Pins the intentional beacon-only predicate: fm-guard.sh keys solely off
+# state/.last-watcher-beat and never inspects the watcher lock, so a watcher
+# that has died while its beacon is still within grace stays silent for up to
+# FM_GUARD_GRACE (the bounded blind window). The identity-matched live-lock
+# backstop that catches this case at the next turn end is fm-turnend-guard.sh,
+# covered by test_hook_blocks_when_dead_lock_has_fresh_beacon in
+# fm-turnend-guard.test.sh. If fm-guard.sh is ever strengthened to call
+# fm_watcher_healthy, this assertion fails, surfacing that divergence.
+test_fresh_beacon_silent_with_dead_lock() {
+  local dir home dead out
+  dir=$(make_guard_case fresh-beacon-dead-lock)
+  home=$(case_home "$dir")
+  dead=999999
+  while kill -0 "$dead" 2>/dev/null; do dead=$((dead + 1)); done
+  mkdir -p "$home/state/.watch.lock"
+  printf '%s\n' "$dead" > "$home/state/.watch.lock/pid"
+  touch "$home/state/.last-watcher-beat"
+  out=$(run_guard_case "$dir")
+  [ -z "$out" ] || fail "fm-guard must stay silent on a fresh beacon even with a dead watcher lock (beacon-only predicate), got: $out"
+  pass "fm-guard: fresh beacon stays silent with a dead watcher lock (bounded blind window; live-lock backstop is fm-turnend-guard.sh)"
+}
+
 test_read_only_before_writable_does_not_consume_full_banner() {
   local dir home marker lock out_ro out_rw
   dir=$(make_guard_case read-only-before-writable)
@@ -246,6 +268,7 @@ test_healthy_recovery_rearms_next_stale_episode
 test_concurrent_same_episode_prints_one_full_banner
 test_home_isolation
 test_queued_wake_warning_stays_independent
+test_fresh_beacon_silent_with_dead_lock
 test_read_only_before_writable_does_not_consume_full_banner
 test_read_only_during_episode_observes_without_mutating_marker
 test_healthy_read_only_does_not_clear_marker
