@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
-# Record a PR-ready task: store one validated canonical pr=<url> and the exact
-# pr_head=<sha> when available (GitHub via gh, Bitbucket Data Center via bkt),
-# then atomically arm a static merge poll.
+# Record a PR-ready task: store one validated canonical pr=<url> and the forge's
+# exact pr_head=<sha> when available (GitHub via gh, Bitbucket Data Center via
+# bkt), then atomically arm a static merge poll.
 # The watcher check source is byte-for-byte bin/fm-pr-poll.sh; task and PR data
 # live only in a private sidecar and are never interpolated into shell source.
+# A GitHub pull request URL, a Bitbucket Data Center pull request URL, and a
+# GitLab merge request URL are all accepted, including a self-hosted GitLab or
+# Bitbucket Data Center instance.
 # Usage: fm-pr-check.sh <task-id> <pr-url>
 set -eu
 
@@ -26,8 +29,9 @@ if ! fm_pr_task_id_valid "$ID" || ! fm_pr_url_parse "$RAW_URL"; then
   exit 2
 fi
 URL=$FM_PR_URL
-OWNER=$FM_PR_OWNER
-REPO=$FM_PR_REPO
+PROVIDER=$FM_PR_PROVIDER
+HOST=$FM_PR_HOST
+PROJECT_PATH=$FM_PR_PATH
 NUMBER=$FM_PR_NUMBER
 
 # Task-derived paths are constructed only after the canonical ID validation.
@@ -37,25 +41,42 @@ if [ ! -f "$META" ] || [ -L "$META" ] || [ "$(fm_pr_file_link_count "$META")" !=
   exit 1
 fi
 
+# Refuse to arm a GitLab watch with no glab on PATH. The poll is silent on
+# every error by design, so a missing CLI would be indistinguishable from a
+# merge request that is never merged. Arming is the one point where that can be
+# reported, so the absent tool stops the watch here instead of watching nothing.
+if [ "$PROVIDER" = gitlab ] && ! command -v glab >/dev/null 2>&1; then
+  echo "error: watching a GitLab merge request requires glab on PATH" >&2
+  exit 1
+fi
+
 # Neutralize any pre-fix poll before recording or arming this task. The
 # migration never executes legacy artifacts and holds watcher exclusion while
 # it quarantines or rebuilds them.
 "$SCRIPT_DIR/fm-pr-check-migrate.sh" --checks-safe || exit 1
 "$FM_ROOT/bin/fm-guard.sh" || true
 
+# pr_head is recorded only when the forge's CLI can supply it. gh exposes the
+# head commit as a selectable field for GitHub, bkt exposes it for Bitbucket
+# Data Center, and plain glab exposes it only inside its JSON output, which
+# would need a JSON processor firstmate does not require, so a GitLab task
+# records no pr_head. Both consumers already treat it as optional:
+# bin/fm-teardown.sh reads the head from the forge at teardown rather than from
+# metadata and falls back to its provider-agnostic content check, and
+# bin/fm-review-diff.sh resolves the head from the remote when none is recorded.
 WT=$(grep '^worktree=' "$META" | tail -1 | cut -d= -f2- || true)
 PR_HEAD=
-if [ "$FM_PR_PROVIDER" = bitbucket-dc ]; then
+if [ "$PROVIDER" = bitbucket-dc ]; then
   # bkt resolves the API host from its context, so the worktree is not needed;
   # fm_pr_dc_pr_field fails closed on any tool error or ambiguous host, leaving
   # PR_HEAD empty so recording still proceeds without a head SHA.
   if command -v bkt >/dev/null 2>&1; then
-    if REMOTE_HEAD=$(fm_pr_dc_pr_field "$FM_PR_HOST" "$OWNER" "$REPO" "$NUMBER" '.pull_request.fromRef.latestCommit') \
+    if REMOTE_HEAD=$(fm_pr_dc_pr_field "$FM_PR_HOST" "$FM_PR_OWNER" "$FM_PR_REPO" "$NUMBER" '.pull_request.fromRef.latestCommit') \
       && fm_pr_head_valid "$REMOTE_HEAD"; then
       PR_HEAD=$REMOTE_HEAD
     fi
   fi
-elif [ -n "$WT" ] && [ -d "$WT" ] && command -v gh >/dev/null 2>&1; then
+elif [ "$PROVIDER" = github ] && [ -n "$WT" ] && [ -d "$WT" ] && command -v gh >/dev/null 2>&1; then
   if REMOTE_HEAD=$(cd "$WT" && gh pr view "$URL" --json headRefOid -q .headRefOid 2>/dev/null) \
     && fm_pr_head_valid "$REMOTE_HEAD"; then
     PR_HEAD=$REMOTE_HEAD
@@ -69,7 +90,7 @@ pr_check_cleanup() {
 }
 trap pr_check_cleanup EXIT
 trap 'exit 1' HUP INT TERM
-fm_pr_poll_prepare "$STATE" "$ID" "$URL" "$OWNER" "$REPO" "$NUMBER" "$SCRIPT_DIR/fm-pr-poll.sh" \
+fm_pr_poll_prepare "$STATE" "$ID" "$PROVIDER" "$URL" "$HOST" "$PROJECT_PATH" "$NUMBER" "$SCRIPT_DIR/fm-pr-poll.sh" \
   || { echo "error: could not prepare PR poll" >&2; exit 1; }
 
 META_DEVICE=$(fm_pr_file_device "$META") || exit 1
@@ -87,15 +108,17 @@ printf 'pr=%s\n' "$URL" >> "$META_TMP" || exit 1
 chmod 0600 "$META_TMP" || exit 1
 fm_pr_private_file_valid "$META_TMP" 600 "$STATE_DEVICE" || exit 1
 fm_pr_metadata_identity_parse "$META_TMP" || exit 1
-[ "$FM_PR_META_URL" = "$URL" ] && [ "$FM_PR_META_OWNER" = "$OWNER" ] \
-  && [ "$FM_PR_META_REPO" = "$REPO" ] && [ "$FM_PR_META_NUMBER" = "$NUMBER" ] || exit 1
+[ "$FM_PR_META_PROVIDER" = "$PROVIDER" ] && [ "$FM_PR_META_URL" = "$URL" ] \
+  && [ "$FM_PR_META_HOST" = "$HOST" ] && [ "$FM_PR_META_PATH" = "$PROJECT_PATH" ] \
+  && [ "$FM_PR_META_NUMBER" = "$NUMBER" ] || exit 1
 fm_pr_regular_destination_on_device_or_absent "$META" "$STATE_DEVICE" || exit 1
 mv -f -- "$META_TMP" "$META" || exit 1
 META_TMP=
 fm_pr_private_file_valid "$META" 600 "$STATE_DEVICE" || exit 1
 fm_pr_metadata_identity_parse "$META" || exit 1
-[ "$FM_PR_META_URL" = "$URL" ] && [ "$FM_PR_META_OWNER" = "$OWNER" ] \
-  && [ "$FM_PR_META_REPO" = "$REPO" ] && [ "$FM_PR_META_NUMBER" = "$NUMBER" ] || exit 1
+[ "$FM_PR_META_PROVIDER" = "$PROVIDER" ] && [ "$FM_PR_META_URL" = "$URL" ] \
+  && [ "$FM_PR_META_HOST" = "$HOST" ] && [ "$FM_PR_META_PATH" = "$PROJECT_PATH" ] \
+  && [ "$FM_PR_META_NUMBER" = "$NUMBER" ] || exit 1
 
 fm_pr_poll_publish_prepared || {
   echo "error: could not publish PR poll" >&2

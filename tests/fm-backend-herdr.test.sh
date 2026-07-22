@@ -672,8 +672,8 @@ test_projection_create_uses_exact_response_ids_and_leaves_one_task_pane() {
   journal="$state/task-p2.herdr-presentation"
   token=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_journal_token "$1" task-p2' "$ROOT" "$journal") \
     || fail "projection journal was not readable"
-  assert_contains "$(cat "$log")" $'workspace\x1fcreate\x1f--cwd\x1f/tmp/proj\x1f--label\x1ffirstmate/task-p2 · p:'"$token"$'\x1f--no-focus' \
-    "projection workspace create did not use the visible full token and --no-focus"
+  assert_contains "$(cat "$log")" $'workspace\x1fcreate\x1f--cwd\x1f/tmp/proj\x1f--label\x1f└ task-p2 · p:'"$token"$'\x1f--no-focus' \
+    "projection workspace create did not use the corner label, full token, and --no-focus"
   assert_contains "$(cat "$log")" $'tab\x1fcreate\x1f--workspace\x1fw9\x1f--cwd\x1f/tmp/proj\x1f--label\x1ffm-task-p2\x1f--no-focus' \
     "projection task tab did not target the exact new workspace"
   assert_contains "$(cat "$log")" $'pane\x1fclose\x1fw9:p1' \
@@ -791,12 +791,35 @@ test_projection_seeded_prune_refuses_active_tab() {
   pass "herdr presentation focus: projected seeded pruning refuses the active tab"
 }
 
+test_projection_label_builder_uses_corner_and_strips_owner_prefixes() {
+  local primary secondmate token
+  token='AbCdEfGhIjKlMnOpQrStUv'
+  [ "${#token}" -eq 22 ] || fail "fixture token must be 22 characters"
+  primary=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_workspace_label task-p2 '"$token" "$ROOT")
+  [ "$primary" = "└ task-p2 · p:$token" ] \
+    || fail "primary child label was wrong: $primary"
+  secondmate=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_workspace_label secondmate-child-demo '"$token" "$ROOT")
+  [ "$secondmate" = "└ secondmate-child-demo · p:$token" ] \
+    || fail "secondmate child label was wrong: $secondmate"
+  primary=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_workspace_label firstmate/task-p2 '"$token" "$ROOT")
+  [ "$primary" = "└ task-p2 · p:$token" ] \
+    || fail "firstmate/ owner prefix was not stripped: $primary"
+  secondmate=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_workspace_label 2ndmate-fmdev-f2/child '"$token" "$ROOT")
+  [ "$secondmate" = "└ child · p:$token" ] \
+    || fail "2ndmate owner prefix was not stripped: $secondmate"
+  primary=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_workspace_label fm-task-p2 '"$token" "$ROOT")
+  [ "$primary" = "└ task-p2 · p:$token" ] \
+    || fail "presentation fm- owner prefix was not stripped: $primary"
+  case "$primary" in $'└ '*) ;; *) fail "label must start with U+2514 and one space" ;; esac
+  pass "herdr presentation labels: └ concise-task · p:<full-token> for primary and secondmate children"
+}
+
 test_projection_order_moves_only_exact_new_workspace_and_preserves_relative_order() {
   local dir log resp fb mover mover_log out status
   dir="$TMP_ROOT/projection-order"; mkdir -p "$dir/responses"
   log="$dir/log"; resp="$dir/responses"; mover="$dir/mover"; mover_log="$dir/mover.log"
   : > "$log"; : > "$mover_log"
-  printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate","focused":false},{"workspace_id":"w2","label":"firstmate/old · p:AbCdEfGhIjKlMnOpQrStUv","focused":false},{"workspace_id":"w3","label":"2ndmate-alpha","focused":false},{"workspace_id":"w4","label":"2ndmate-bravo","focused":true},{"workspace_id":"w5","label":"firstmate/new · p:ZyXwVuTsRqPoNmLkJiHgFe","focused":false}]}}' > "$resp/1.out"
+  printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate","focused":false},{"workspace_id":"w2","label":"firstmate/old · p:AbCdEfGhIjKlMnOpQrStUv","focused":false},{"workspace_id":"w3","label":"2ndmate-alpha","focused":false},{"workspace_id":"w4","label":"2ndmate-bravo","focused":true},{"workspace_id":"w5","label":"└ new · p:ZyXwVuTsRqPoNmLkJiHgFe","focused":false}]}}' > "$resp/1.out"
   printf '%s\n' '{"client":{"version":"0.7.4","protocol":16},"server":{"running":true}}' > "$resp/2.out"
   # shellcheck disable=SC2016 # $defs is a literal JSON Schema key.
   printf '%s\n' '{"schemas":{"request":{"oneOf":[{"properties":{"method":{"const":"workspace.move"}}}],"$defs":{"WorkspaceMoveParams":{"required":["workspace_id","insert_index"],"properties":{"insert_index":{"type":"integer"}}}}}}}' > "$resp/3.out"
@@ -804,29 +827,139 @@ test_projection_order_moves_only_exact_new_workspace_and_preserves_relative_orde
   cat > "$mover" <<'SH'
 #!/usr/bin/env bash
 printf '%s\t%s\t%s\n' "$1" "$2" "$3" >> "$FM_FAKE_MOVER_LOG"
-printf '%s\n' '{"id":"fm-workspace-move","result":{"type":"workspace_list","workspaces":[{"workspace_id":"w1","label":"firstmate","focused":false},{"workspace_id":"w2","label":"firstmate/old · p:AbCdEfGhIjKlMnOpQrStUv","focused":false},{"workspace_id":"w5","label":"firstmate/new · p:ZyXwVuTsRqPoNmLkJiHgFe","focused":false},{"workspace_id":"w3","label":"2ndmate-alpha","focused":false},{"workspace_id":"w4","label":"2ndmate-bravo","focused":true}]}}'
+printf '%s\n' '{"id":"fm-workspace-move","result":{"type":"workspace_list","workspaces":[{"workspace_id":"w1","label":"firstmate","focused":false},{"workspace_id":"w2","label":"firstmate/old · p:AbCdEfGhIjKlMnOpQrStUv","focused":false},{"workspace_id":"w5","label":"└ new · p:ZyXwVuTsRqPoNmLkJiHgFe","focused":false},{"workspace_id":"w3","label":"2ndmate-alpha","focused":false},{"workspace_id":"w4","label":"2ndmate-bravo","focused":true}]}}'
 SH
   chmod +x "$mover"
   fb=$(make_herdr_fakebin "$dir")
   out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_SCRIPT_STATUS=1 \
     FM_BACKEND_HERDR_WORKSPACE_MOVER="$mover" FM_FAKE_MOVER_LOG="$mover_log" \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_focus_snapshot() { printf "w4\tw4:t2"; }; fm_backend_herdr_projection_focus_restore() { return 0; }; fm_backend_herdr_projection_order_best_effort fmtest w5' "$ROOT" 2>&1)
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_focus_snapshot() { printf "w4\tw4:t2"; }; fm_backend_herdr_projection_focus_restore() { return 0; }; fm_backend_herdr_projection_order_best_effort fmtest w5 firstmate' "$ROOT" 2>&1)
   status=$?
   [ "$status" -eq 0 ] || fail "best-effort projection ordering must not fail the spawn"
   [ -z "$out" ] || fail "successful projection ordering emitted a warning: $out"
-  [ "$(cat "$mover_log")" = $'/tmp/fmtest.sock\tw5\t2' ] \
-    || fail "projection ordering did not move only the exact new response id to the stable append index"
+  [ "$(cat "$mover_log")" = "$(cd /tmp && pwd -P)/fmtest.sock"$'\t'"w5"$'\t'"2" ] \
+    || fail "projection ordering did not move only the exact new response id to the owning-parent append index"
   assert_not_contains "$(cat "$log")" $'workspace\x1fclose' "projection ordering called workspace close"
   assert_not_contains "$(cat "$log")" $'session\x1fdelete' "projection ordering called session delete"
   assert_not_contains "$(cat "$log")" $'workspace\x1frename' "projection ordering called a label-based workspace mutation"
   pass "herdr presentation ordering: exact new workspace appends to the primary block while focus and relative orders stay stable"
 }
 
+test_projection_order_secondmate_parent_block() {
+  local dir log resp fb mover mover_log out status
+  dir="$TMP_ROOT/projection-order-secondmate"; mkdir -p "$dir/responses"
+  log="$dir/log"; resp="$dir/responses"; mover="$dir/mover"; mover_log="$dir/mover.log"
+  : > "$log"; : > "$mover_log"
+  # firstmate, primary child, 2ndmate-A, A-child legacy, 2ndmate-B, human, NEW for A
+  printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate"},{"workspace_id":"w2","label":"└ primary · p:AbCdEfGhIjKlMnOpQrStUv"},{"workspace_id":"w3","label":"2ndmate-alpha"},{"workspace_id":"w4","label":"2ndmate-alpha/old · p:AbCdEfGhIjKlMnOpQrStU1"},{"workspace_id":"w5","label":"2ndmate-bravo"},{"workspace_id":"wH","label":"human-notes"},{"workspace_id":"w6","label":"└ new-a · p:ZyXwVuTsRqPoNmLkJiHgFe"}]}}' > "$resp/1.out"
+  printf '%s\n' '{"client":{"version":"0.7.4","protocol":16},"server":{"running":true}}' > "$resp/2.out"
+  # shellcheck disable=SC2016
+  printf '%s\n' '{"schemas":{"request":{"oneOf":[{"properties":{"method":{"const":"workspace.move"}}}],"$defs":{"WorkspaceMoveParams":{"required":["workspace_id","insert_index"],"properties":{"insert_index":{"type":"integer"}}}}}}}' > "$resp/3.out"
+  printf '%s\n' '{"sessions":[{"name":"fmtest","running":true,"socket_path":"/tmp/fmtest.sock"}]}' > "$resp/4.out"
+  cat > "$mover" <<'SH'
+#!/usr/bin/env bash
+printf '%s\t%s\t%s\n' "$1" "$2" "$3" >> "$FM_FAKE_MOVER_LOG"
+printf '%s\n' '{"id":"fm-workspace-move","result":{"type":"workspace_list","workspaces":[{"workspace_id":"w1","label":"firstmate"},{"workspace_id":"w2","label":"└ primary · p:AbCdEfGhIjKlMnOpQrStUv"},{"workspace_id":"w3","label":"2ndmate-alpha"},{"workspace_id":"w4","label":"2ndmate-alpha/old · p:AbCdEfGhIjKlMnOpQrStU1"},{"workspace_id":"w6","label":"└ new-a · p:ZyXwVuTsRqPoNmLkJiHgFe"},{"workspace_id":"w5","label":"2ndmate-bravo"},{"workspace_id":"wH","label":"human-notes"}]}}'
+SH
+  chmod +x "$mover"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_SCRIPT_STATUS=1 \
+    FM_BACKEND_HERDR_WORKSPACE_MOVER="$mover" FM_FAKE_MOVER_LOG="$mover_log" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_focus_snapshot() { printf "w5\tw5:t1"; }; fm_backend_herdr_projection_focus_restore() { return 0; }; fm_backend_herdr_projection_order_best_effort fmtest w6 2ndmate-alpha' "$ROOT" 2>&1)
+  status=$?
+  [ "$status" -eq 0 ] || fail "secondmate parent ordering must not fail the spawn: $out"
+  [ -z "$out" ] || fail "successful secondmate ordering emitted a warning: $out"
+  [ "$(cat "$mover_log")" = "$(cd /tmp && pwd -P)/fmtest.sock"$'\t'"w6"$'\t'"4" ] \
+    || fail "secondmate child was not inserted after its parent block: $(cat "$mover_log")"
+  assert_not_contains "$(cat "$log")" $'workspace\x1frename' "secondmate ordering renamed a legacy child"
+  pass "herdr presentation ordering: secondmate children append under their owning parent block"
+}
+
+test_projection_order_foreign_legacy_child_is_read_only() {
+  local dir log resp fb mover out status
+  dir="$TMP_ROOT/projection-order-foreign-legacy"; mkdir -p "$dir/responses"
+  log="$dir/log"; resp="$dir/responses"; mover="$dir/mover"; : > "$log"
+  printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate"},{"workspace_id":"w2","label":"2ndmate-alpha"},{"workspace_id":"w3","label":"2ndmate-bravo/foreign · p:AbCdEfGhIjKlMnOpQrStUv"},{"workspace_id":"w4","label":"└ new-alpha · p:ZyXwVuTsRqPoNmLkJiHgFe"}]}}' > "$resp/1.out"
+  cat > "$mover" <<'SH'
+#!/usr/bin/env bash
+echo called > "$FM_FAKE_MOVER_CALLED"
+exit 0
+SH
+  chmod +x "$mover"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    FM_BACKEND_HERDR_WORKSPACE_MOVER="$mover" FM_FAKE_MOVER_CALLED="$dir/called" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_order_best_effort fmtest w4 2ndmate-alpha' "$ROOT" 2>&1)
+  status=$?
+  [ "$status" -eq 0 ] || fail "foreign legacy ordering must not fail the spawn"
+  assert_contains "$out" "ambiguous workspace layout" "foreign legacy child did not warn"
+  [ ! -e "$dir/called" ] || fail "foreign legacy child attempted workspace.move"
+  assert_not_contains "$(cat "$log")" $'workspace\x1fclose' "foreign legacy layout triggered workspace cleanup"
+  assert_not_contains "$(cat "$log")" $'session\x1fdelete' "foreign legacy layout triggered session cleanup"
+  assert_not_contains "$(cat "$log")" $'workspace\x1frename' "foreign legacy layout triggered workspace rename"
+  pass "herdr presentation ordering: a foreign legacy child is warning-only and read-only"
+}
+
+test_projection_order_allows_intervening_parent_child_block() {
+  local dir log resp fb mover mover_log out status
+  dir="$TMP_ROOT/projection-order-intervening-parent"; mkdir -p "$dir/responses"
+  log="$dir/log"; resp="$dir/responses"; mover="$dir/mover"; mover_log="$dir/mover.log"
+  : > "$log"; : > "$mover_log"
+  printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate"},{"workspace_id":"w2","label":"firstmate/old · p:AbCdEfGhIjKlMnOpQrStUv"},{"workspace_id":"w3","label":"2ndmate-alpha"},{"workspace_id":"w4","label":"2ndmate-bravo"},{"workspace_id":"w5","label":"└ bravo-child · p:QqWwEeRrTtYyUuIiOoPpAa"},{"workspace_id":"w6","label":"└ new-first · p:ZyXwVuTsRqPoNmLkJiHgFe"}]}}' > "$resp/1.out"
+  printf '%s\n' '{"client":{"version":"0.7.4","protocol":16},"server":{"running":true}}' > "$resp/2.out"
+  # shellcheck disable=SC2016
+  printf '%s\n' '{"schemas":{"request":{"oneOf":[{"properties":{"method":{"const":"workspace.move"}}}],"$defs":{"WorkspaceMoveParams":{"required":["workspace_id","insert_index"],"properties":{"insert_index":{"type":"integer"}}}}}}}' > "$resp/3.out"
+  printf '%s\n' '{"sessions":[{"name":"fmtest","running":true,"socket_path":"/tmp/fmtest.sock"}]}' > "$resp/4.out"
+  cat > "$mover" <<'SH'
+#!/usr/bin/env bash
+printf '%s\t%s\t%s\n' "$1" "$2" "$3" >> "$FM_FAKE_MOVER_LOG"
+printf '%s\n' '{"id":"fm-workspace-move","result":{"type":"workspace_list","workspaces":[{"workspace_id":"w1","label":"firstmate"},{"workspace_id":"w2","label":"firstmate/old · p:AbCdEfGhIjKlMnOpQrStUv"},{"workspace_id":"w6","label":"└ new-first · p:ZyXwVuTsRqPoNmLkJiHgFe"},{"workspace_id":"w3","label":"2ndmate-alpha"},{"workspace_id":"w4","label":"2ndmate-bravo"},{"workspace_id":"w5","label":"└ bravo-child · p:QqWwEeRrTtYyUuIiOoPpAa"}]}}'
+SH
+  chmod +x "$mover"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_SCRIPT_STATUS=1 \
+    FM_BACKEND_HERDR_WORKSPACE_MOVER="$mover" FM_FAKE_MOVER_LOG="$mover_log" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_focus_snapshot() { printf "w4\tw4:t1"; }; fm_backend_herdr_projection_focus_restore() { return 0; }; fm_backend_herdr_projection_order_best_effort fmtest w6 firstmate' "$ROOT" 2>&1)
+  status=$?
+  [ "$status" -eq 0 ] || fail "intervening parent ordering must not fail the spawn: $out"
+  [ -z "$out" ] || fail "legitimate intervening parent ordering emitted a warning: $out"
+  [ "$(cat "$mover_log")" = "$(cd /tmp && pwd -P)/fmtest.sock"$'\t'"w6"$'\t'"2" ] \
+    || fail "intervening parent block prevented the owning-parent insertion: $(cat "$mover_log")"
+  pass "herdr presentation ordering: intervening parent child blocks remain traversable"
+}
+
+test_projection_order_human_spaces_never_move_targets() {
+  local dir log resp fb mover mover_log out status
+  dir="$TMP_ROOT/projection-order-human"; mkdir -p "$dir/responses"
+  log="$dir/log"; resp="$dir/responses"; mover="$dir/mover"; mover_log="$dir/mover.log"
+  : > "$log"; : > "$mover_log"
+  printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"wH1","label":"notes"},{"workspace_id":"w1","label":"firstmate"},{"workspace_id":"wH2","label":"scratch"},{"workspace_id":"w2","label":"2ndmate-alpha"},{"workspace_id":"w3","label":"└ new · p:ZyXwVuTsRqPoNmLkJiHgFe"}]}}' > "$resp/1.out"
+  printf '%s\n' '{"client":{"version":"0.7.4","protocol":16},"server":{"running":true}}' > "$resp/2.out"
+  # shellcheck disable=SC2016
+  printf '%s\n' '{"schemas":{"request":{"oneOf":[{"properties":{"method":{"const":"workspace.move"}}}],"$defs":{"WorkspaceMoveParams":{"required":["workspace_id","insert_index"],"properties":{"insert_index":{"type":"integer"}}}}}}}' > "$resp/3.out"
+  printf '%s\n' '{"sessions":[{"name":"fmtest","running":true,"socket_path":"/tmp/fmtest.sock"}]}' > "$resp/4.out"
+  cat > "$mover" <<'SH'
+#!/usr/bin/env bash
+printf '%s\t%s\t%s\n' "$1" "$2" "$3" >> "$FM_FAKE_MOVER_LOG"
+printf '%s\n' '{"id":"fm-workspace-move","result":{"type":"workspace_list","workspaces":[{"workspace_id":"wH1","label":"notes"},{"workspace_id":"w1","label":"firstmate"},{"workspace_id":"w3","label":"└ new · p:ZyXwVuTsRqPoNmLkJiHgFe"},{"workspace_id":"wH2","label":"scratch"},{"workspace_id":"w2","label":"2ndmate-alpha"}]}}'
+SH
+  chmod +x "$mover"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_SCRIPT_STATUS=1 \
+    FM_BACKEND_HERDR_WORKSPACE_MOVER="$mover" FM_FAKE_MOVER_LOG="$mover_log" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_focus_snapshot() { printf "w2\tw2:t1"; }; fm_backend_herdr_projection_focus_restore() { return 0; }; fm_backend_herdr_projection_order_best_effort fmtest w3 firstmate' "$ROOT" 2>&1)
+  status=$?
+  [ "$status" -eq 0 ] || fail "human-interleaved ordering must not fail: $out"
+  [ "$(cat "$mover_log")" = "$(cd /tmp && pwd -P)/fmtest.sock"$'\t'"w3"$'\t'"2" ] \
+    || fail "human spaces changed the move target or insert index: $(cat "$mover_log")"
+  pass "herdr presentation ordering: only the exact new id moves; human spaces keep relative order"
+}
+
 test_projection_order_failure_warns_without_cleanup_or_spawn_failure() {
   local dir log resp fb mover out status
   dir="$TMP_ROOT/projection-order-failure"; mkdir -p "$dir/responses"
   log="$dir/log"; resp="$dir/responses"; mover="$dir/mover"; : > "$log"
-  printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate","focused":true},{"workspace_id":"w2","label":"2ndmate-alpha","focused":false},{"workspace_id":"w3","label":"firstmate/new · p:ZyXwVuTsRqPoNmLkJiHgFe","focused":false}]}}' > "$resp/1.out"
+  printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate","focused":true},{"workspace_id":"w2","label":"2ndmate-alpha","focused":false},{"workspace_id":"w3","label":"└ new · p:ZyXwVuTsRqPoNmLkJiHgFe","focused":false}]}}' > "$resp/1.out"
   printf '%s\n' '{"client":{"version":"0.7.4","protocol":16},"server":{"running":true}}' > "$resp/2.out"
   # shellcheck disable=SC2016 # $defs is a literal JSON Schema key.
   printf '%s\n' '{"schemas":{"request":{"oneOf":[{"properties":{"method":{"const":"workspace.move"}}}],"$defs":{"WorkspaceMoveParams":{"required":["workspace_id","insert_index"],"properties":{"insert_index":{"type":"integer"}}}}}}}' > "$resp/3.out"
@@ -839,7 +972,7 @@ SH
   fb=$(make_herdr_fakebin "$dir")
   out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_SCRIPT_STATUS=1 \
     FM_BACKEND_HERDR_WORKSPACE_MOVER="$mover" \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_focus_snapshot() { printf "w1\tw1:t1"; }; fm_backend_herdr_projection_focus_restore() { return 0; }; fm_backend_herdr_projection_order_best_effort fmtest w3' "$ROOT" 2>&1)
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_focus_snapshot() { printf "w1\tw1:t1"; }; fm_backend_herdr_projection_focus_restore() { return 0; }; fm_backend_herdr_projection_order_best_effort fmtest w3 firstmate' "$ROOT" 2>&1)
   status=$?
   [ "$status" -eq 0 ] || fail "a workspace.move failure must not fail the projected spawn"
   assert_contains "$out" "workspace move failed or had an ambiguous response" \
@@ -854,7 +987,8 @@ test_projection_order_ambiguous_existing_block_is_read_only() {
   local dir log resp fb mover out status
   dir="$TMP_ROOT/projection-order-ambiguous"; mkdir -p "$dir/responses"
   log="$dir/log"; resp="$dir/responses"; mover="$dir/mover"; : > "$log"
-  printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate","focused":true},{"workspace_id":"w2","label":"2ndmate-alpha","focused":false},{"workspace_id":"w3","label":"firstmate/old · p:AbCdEfGhIjKlMnOpQrStUv","focused":false},{"workspace_id":"w4","label":"firstmate/new · p:ZyXwVuTsRqPoNmLkJiHgFe","focused":false}]}}' > "$resp/1.out"
+  # Detached legacy child after the next parent breaks the contiguous block.
+  printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate","focused":true},{"workspace_id":"w2","label":"2ndmate-alpha","focused":false},{"workspace_id":"w3","label":"firstmate/old · p:AbCdEfGhIjKlMnOpQrStUv","focused":false},{"workspace_id":"w4","label":"└ new · p:ZyXwVuTsRqPoNmLkJiHgFe","focused":false}]}}' > "$resp/1.out"
   cat > "$mover" <<'SH'
 #!/usr/bin/env bash
 echo called > "$FM_FAKE_MOVER_CALLED"
@@ -864,7 +998,7 @@ SH
   fb=$(make_herdr_fakebin "$dir")
   out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     FM_BACKEND_HERDR_WORKSPACE_MOVER="$mover" FM_FAKE_MOVER_CALLED="$dir/called" \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_order_best_effort fmtest w4' "$ROOT" 2>&1)
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_order_best_effort fmtest w4 firstmate' "$ROOT" 2>&1)
   status=$?
   [ "$status" -eq 0 ] || fail "ambiguous projection ordering must not fail the spawn"
   assert_contains "$out" "ambiguous workspace layout" "ambiguous projection layout did not warn"
@@ -872,6 +1006,196 @@ SH
   [ "$(wc -l < "$log" | tr -d '[:space:]')" = 1 ] \
     || fail "ambiguous projection ordering did more than one read-only workspace list"
   pass "herdr presentation ordering: an ambiguous existing worker block is warning-only and read-only"
+}
+
+test_projection_order_foreign_new_child_before_parent_is_read_only() {
+  local dir log resp fb mover out status
+  dir="$TMP_ROOT/projection-order-foreign-new"; mkdir -p "$dir/responses"
+  log="$dir/log"; resp="$dir/responses"; mover="$dir/mover"; : > "$log"
+  printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate","focused":true},{"workspace_id":"wH","label":"human-notes","focused":false},{"workspace_id":"w2","label":"└ foreign · p:AbCdEfGhIjKlMnOpQrStUv","focused":false},{"workspace_id":"w3","label":"2ndmate-alpha","focused":false},{"workspace_id":"w4","label":"└ new · p:ZyXwVuTsRqPoNmLkJiHgFe","focused":false}]}}' > "$resp/1.out"
+  cat > "$mover" <<'SH'
+#!/usr/bin/env bash
+echo called > "$FM_FAKE_MOVER_CALLED"
+exit 0
+SH
+  chmod +x "$mover"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    FM_BACKEND_HERDR_WORKSPACE_MOVER="$mover" FM_FAKE_MOVER_CALLED="$dir/called" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_order_best_effort fmtest w4 firstmate' "$ROOT" 2>&1)
+  status=$?
+  [ "$status" -eq 0 ] || fail "foreign new-child ordering must not fail the spawn"
+  assert_contains "$out" "ambiguous workspace layout" "foreign new child before its parent did not warn"
+  [ ! -e "$dir/called" ] || fail "foreign new child before its parent attempted workspace.move"
+  [ "$(wc -l < "$log" | tr -d '[:space:]')" = 1 ] \
+    || fail "foreign new-child ordering did more than one read-only workspace list"
+  pass "herdr presentation ordering: a foreign new-format child is warning-only and read-only"
+}
+
+test_projection_order_missing_parent_is_read_only() {
+  local dir log resp fb mover out status
+  dir="$TMP_ROOT/projection-order-missing-parent"; mkdir -p "$dir/responses"
+  log="$dir/log"; resp="$dir/responses"; mover="$dir/mover"; : > "$log"
+  printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate"},{"workspace_id":"w2","label":"└ new · p:ZyXwVuTsRqPoNmLkJiHgFe"}]}}' > "$resp/1.out"
+  cat > "$mover" <<'SH'
+#!/usr/bin/env bash
+echo called > "$FM_FAKE_MOVER_CALLED"
+exit 0
+SH
+  chmod +x "$mover"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    FM_BACKEND_HERDR_WORKSPACE_MOVER="$mover" FM_FAKE_MOVER_CALLED="$dir/called" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_order_best_effort fmtest w2 2ndmate-missing' "$ROOT" 2>&1)
+  status=$?
+  [ "$status" -eq 0 ] || fail "missing parent must not fail the spawn"
+  assert_contains "$out" "ambiguous workspace layout" "missing parent did not warn"
+  [ ! -e "$dir/called" ] || fail "missing parent attempted workspace.move"
+  pass "herdr presentation ordering: missing owning parent is warning-only and read-only"
+}
+
+test_presentation_session_lock_path_is_shared_across_homes() {
+  local dir log resp fb path_a path_b path_other path_tmp path_private
+  dir="$TMP_ROOT/presentation-session-lock"; mkdir -p "$dir/responses" "$dir/sockdir"
+  log="$dir/log"; resp="$dir/responses"; : > "$log"
+  : > "$dir/sockdir/fmtest.sock"
+  printf '%s\n' "{\"sessions\":[{\"name\":\"fmtest\",\"running\":true,\"socket_path\":\"$dir/sockdir/fmtest.sock\"}]}" > "$resp/1.out"
+  printf '%s\n' "{\"sessions\":[{\"name\":\"fmtest\",\"running\":true,\"socket_path\":\"$dir/sockdir/fmtest.sock\"}]}" > "$resp/2.out"
+  printf '%s\n' "{\"sessions\":[{\"name\":\"other\",\"running\":true,\"socket_path\":\"$dir/sockdir/other.sock\"}]}" > "$resp/3.out"
+  : > "$dir/sockdir/other.sock"
+  fb=$(make_herdr_fakebin "$dir")
+  path_a=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_presentation_session_lock_path fmtest' "$ROOT") \
+    || fail "session lock path resolution failed for home A"
+  path_b=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_presentation_session_lock_path fmtest' "$ROOT") \
+    || fail "session lock path resolution failed for home B"
+  [ "$path_a" = "$path_b" ] || fail "same session/socket must resolve one shared lock path"
+  case "$path_a" in
+    /tmp/firstmate-herdr-presentation/order-*.lock) ;;
+    *) fail "session lock path must use the shared machine namespace: $path_a" ;;
+  esac
+  case "$path_a" in
+    */state/*) fail "session lock path must not live under a home state directory: $path_a" ;;
+  esac
+  path_other=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_presentation_session_lock_path other' "$ROOT") \
+    || fail "session lock path resolution failed for a different session"
+  [ "$path_other" != "$path_a" ] || fail "different sessions must not share one lock path"
+  # Symlink parents such as /tmp -> /private/tmp must not split the lock identity.
+  if [ -L /tmp ] || [ "$(cd /tmp && pwd -P)" != /tmp ]; then
+    : > /tmp/fm-herdr-lock-canon-$$.sock
+    printf '%s\n' '{"sessions":[{"name":"canon","running":true,"socket_path":"/tmp/fm-herdr-lock-canon-'"$$"'.sock"}]}' > "$resp/4.out"
+    printf '%s\n' "{\"sessions\":[{\"name\":\"canon\",\"running\":true,\"socket_path\":\"$(cd /tmp && pwd -P)/fm-herdr-lock-canon-$$.sock\"}]}" > "$resp/5.out"
+    path_tmp=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+      bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_presentation_session_lock_path canon' "$ROOT") \
+      || fail "lock path with /tmp socket failed"
+    path_private=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+      bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_presentation_session_lock_path canon' "$ROOT") \
+      || fail "lock path with canonical socket failed"
+    rm -f /tmp/fm-herdr-lock-canon-$$.sock
+    [ "$path_tmp" = "$path_private" ] \
+      || fail "symlink parent socket paths must resolve one lock: $path_tmp vs $path_private"
+  fi
+  pass "herdr presentation lock: one path per session/socket across homes"
+}
+
+test_presentation_session_lock_path_rejects_malformed_socket() {
+  local dir log resp fb path status
+  dir="$TMP_ROOT/presentation-malformed-socket"; mkdir -p "$dir/responses"
+  log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '%s\n' '{"sessions":[{"name":"fmtest","running":true,"socket_path":null}]}' > "$resp/1.out"
+  printf '%s\n' '{"sessions":[{"name":"fmtest","running":true}]}' > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  path=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_presentation_session_lock_path fmtest' "$ROOT" 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "null socket_path must refuse the presentation lock path"
+  [ -z "$path" ] || fail "null socket_path returned a lock path: $path"
+  case "$path" in *null*) fail "null socket_path leaked into a lock path: $path" ;; esac
+  path=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_presentation_session_lock_path fmtest' "$ROOT" 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "missing socket_path must refuse the presentation lock path"
+  [ -z "$path" ] || fail "missing socket_path returned a lock path: $path"
+  pass "herdr presentation lock: null and missing socket paths fail closed"
+}
+
+test_presentation_lock_malformed_socket_falls_back() {
+  local dir log resp fb out status lock_source
+  dir="$TMP_ROOT/presentation-malformed-socket-fallback"; mkdir -p "$dir/responses"
+  log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '%s\n' '{"sessions":[{"name":"fmtest","running":true,"socket_path":null}]}' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  lock_source=$(sed -n '/^spawn_herdr_presentation_order_lock_acquire()/,/^spawn_herdr_presentation_order_lock_release()/p' "$ROOT/bin/fm-spawn.sh" | sed '$d')
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    LOCK_SOURCE="$lock_source" \
+    bash -c '
+      . "$0/bin/backends/herdr.sh"
+      eval "$LOCK_SOURCE"
+      if spawn_herdr_presentation_order_lock_acquire fmtest; then
+        printf "%s" acquired
+      else
+        printf "%s" flat
+      fi
+    ' "$ROOT" 2>&1)
+  status=$?
+  [ "$status" -eq 0 ] || fail "malformed socket fallback must not fail the spawn path: $out"
+  [ "$out" = flat ] || fail "malformed socket_path must fall back flat, got '$out'"
+  pass "herdr presentation lock: malformed socket metadata degrades to flat"
+}
+
+test_projection_order_rejects_malformed_socket() {
+  local dir log resp fb mover out status
+  dir="$TMP_ROOT/projection-order-malformed-socket"; mkdir -p "$dir/responses"
+  log="$dir/log"; resp="$dir/responses"; mover="$dir/mover"; : > "$log"
+  printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate"},{"workspace_id":"wH","label":"2ndmate-alpha"},{"workspace_id":"w2","label":"└ new · p:ZyXwVuTsRqPoNmLkJiHgFe"}]}}' > "$resp/1.out"
+  printf '%s\n' '{"client":{"version":"0.7.4","protocol":16},"server":{"running":true}}' > "$resp/2.out"
+  # shellcheck disable=SC2016
+  printf '%s\n' '{"schemas":{"request":{"oneOf":[{"properties":{"method":{"const":"workspace.move"}}}],"$defs":{"WorkspaceMoveParams":{"required":["workspace_id","insert_index"],"properties":{"insert_index":{"type":"integer"}}}}}}}' > "$resp/3.out"
+  printf '%s\n' '{"sessions":[{"name":"fmtest","running":true,"socket_path":null}]}' > "$resp/4.out"
+  cat > "$mover" <<'SH'
+#!/usr/bin/env bash
+echo called > "$FM_FAKE_MOVER_CALLED"
+exit 0
+SH
+  chmod +x "$mover"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_SCRIPT_STATUS=1 \
+    FM_BACKEND_HERDR_WORKSPACE_MOVER="$mover" FM_FAKE_MOVER_CALLED="$dir/called" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_order_best_effort fmtest w2 firstmate' "$ROOT" 2>&1)
+  status=$?
+  [ "$status" -eq 0 ] || fail "malformed ordering socket must not fail the spawn"
+  assert_contains "$out" "ambiguous named session socket" "malformed ordering socket did not warn"
+  [ ! -e "$dir/called" ] || fail "malformed ordering socket attempted workspace.move"
+  pass "herdr presentation ordering: malformed socket metadata is warning-only and read-only"
+}
+
+test_presentation_lock_insecure_namespace_falls_back() {
+  local dir log resp fb bad out status lock_source
+  dir="$TMP_ROOT/presentation-insecure-lock"; mkdir -p "$dir/responses" "$dir/sockdir"
+  log="$dir/log"; resp="$dir/responses"; : > "$log"
+  : > "$dir/sockdir/fmtest.sock"
+  bad="$dir/insecure"; mkdir -m 755 "$bad"
+  printf '%s\n' "{\"sessions\":[{\"name\":\"fmtest\",\"running\":true,\"socket_path\":\"$dir/sockdir/fmtest.sock\"}]}" > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  lock_source=$(sed -n '/^spawn_herdr_presentation_order_lock_acquire()/,/^spawn_herdr_presentation_order_lock_release()/p' "$ROOT/bin/fm-spawn.sh" | sed '$d')
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    BAD_NAMESPACE="$bad" LOCK_SOURCE="$lock_source" \
+    bash -c '
+      . "$0/bin/backends/herdr.sh"
+      eval "$LOCK_SOURCE"
+      fm_backend_herdr_presentation_lock_namespace() { printf "%s" "$BAD_NAMESPACE"; }
+      if spawn_herdr_presentation_order_lock_acquire fmtest; then
+        printf "%s" acquired
+      else
+        printf "%s" flat
+      fi
+    ' "$ROOT" 2>&1)
+  status=$?
+  [ "$status" -eq 0 ] || fail "an insecure lock namespace must not fail the spawn path: $out"
+  [ "$out" = flat ] || fail "an insecure lock namespace must fall back flat, got '$out'"
+  pass "herdr presentation lock: insecure shared namespace refuses acquisition for flat fallback"
 }
 
 test_spawn_task_lock_covers_all_backend_creation_and_metadata_publication() {
@@ -2457,9 +2781,21 @@ test_projection_focus_snapshot_requires_exact_workspace_and_tab
 test_projection_close_restores_exact_prior_focus
 test_projection_close_refuses_active_tab
 test_projection_seeded_prune_refuses_active_tab
+test_projection_label_builder_uses_corner_and_strips_owner_prefixes
 test_projection_order_moves_only_exact_new_workspace_and_preserves_relative_order
+test_projection_order_secondmate_parent_block
+test_projection_order_foreign_legacy_child_is_read_only
+test_projection_order_allows_intervening_parent_child_block
+test_projection_order_human_spaces_never_move_targets
 test_projection_order_failure_warns_without_cleanup_or_spawn_failure
 test_projection_order_ambiguous_existing_block_is_read_only
+test_projection_order_foreign_new_child_before_parent_is_read_only
+test_projection_order_missing_parent_is_read_only
+test_presentation_session_lock_path_is_shared_across_homes
+test_presentation_session_lock_path_rejects_malformed_socket
+test_presentation_lock_malformed_socket_falls_back
+test_projection_order_rejects_malformed_socket
+test_presentation_lock_insecure_namespace_falls_back
 test_spawn_task_lock_covers_all_backend_creation_and_metadata_publication
 test_projected_spawn_disarms_cleanup_before_ambiguous_launch_submission
 test_projected_abort_cleanup_holds_presentation_lock

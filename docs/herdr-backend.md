@@ -34,8 +34,8 @@ With the optional projection disabled, attach to the selected `HERDR_SESSION` an
 You do not need to attach for routine supervision: from an active firstmate session, `bin/fm-peek.sh fm-<id>` reads a task's pane without attaching, and `FM_HOME=<this-firstmate-home> bin/fm-send.sh fm-<id> "<text>"` steers it unless `FM_HOME` is already set to the active firstmate home.
 
 An optional local `config/herdr-presentation-spaces` presence flag gives a clean new task a disposable one-task workspace instead.
-The flag is absent by default, and the feature is presentation-only and best-effort rather than durable grouping.
-Primary-home projected workspaces are placed in a stable contiguous block immediately after `firstmate` when Herdr protocol 16 `workspace.move` and `python3` are available.
+The flag is absent by default, is inherited into secondmate homes through the primary-authoritative inheritable-config owner, and the feature is presentation-only and best-effort rather than durable grouping.
+Every newly projected child created by a primary or secondmate home is inserted as a top-level space immediately after its owning parent (`firstmate` or `2ndmate-<id>`) contiguous child block when Herdr protocol 16 `workspace.move` and `python3` are available.
 Unavailable or failed ordering warns and leaves the successfully created worker running in Herdr's current order.
 See "Optional disposable single-task presentation spaces" below before enabling it.
 
@@ -136,16 +136,21 @@ Teardown (`fm_backend_herdr_kill`) closes only the task's pane/tab, never the wo
 
 ## Optional disposable single-task presentation spaces
 
-Create the local, gitignored `config/herdr-presentation-spaces` file to enable the Stage 1 presentation projection for that Firstmate home.
+Create the local, gitignored `config/herdr-presentation-spaces` file on the primary home to enable the presentation projection.
+The primary's literal presence or absence converges to registered secondmate homes through the same launch, bootstrap, and config-push inheritance owner as the other declared inheritable config items.
 An absent file is off, and the off path runs the existing home-workspace and `fm-<id>`-tab command sequence unchanged.
+A home that has not yet converged stays flat rather than gaining partial projection authority.
 This is a visual convenience, not a task container authority, lifecycle foundation, or durable grouping guarantee.
+The `kind=secondmate` agent itself always uses its ordinary `2ndmate-<id>` parent workspace and never receives a corner projection; only eligible crewmates and scouts launched by that home project beneath it.
 
 Only a Herdr task with neither `state/<id>.meta` nor `state/<id>.herdr-presentation` is eligible for a projected create.
 Firstmate generates 128 random bits, encodes them as a 22-character base64url `projection_id`, and atomically publishes `state/<id>.herdr-presentation` before asking Herdr to create anything.
 The three-line journal contains only `version=1`, `task_id=<id>`, and `projection_id=<token>`.
 It records that a visual projection was attempted and never selects or authorizes send, capture, kill, Treehouse return, or task-ownership decisions.
 
-The new workspace is created with the normal project cwd, `--no-focus`, and a visible label such as `firstmate/release-notes · p:AbCdEfGhIjKlMnOpQrStUv`.
+The new workspace is created with the normal project cwd, `--no-focus`, and a visible label such as `└ release-notes · p:AbCdEfGhIjKlMnOpQrStUv`.
+Every newly created child uses the literal U+2514 `└`, one space, the concise task label with redundant `firstmate/`, `2ndmate-<id>/`, and presentation-level `fm-` owner prefixes removed, then the unchanged ` · p:<full-22-character-token>` suffix.
+The ordinary task tab remains `fm-<id>` and is unchanged.
 The full token is intentionally visible because Herdr has no verified persistent hidden field suitable for this non-adversarial correlator.
 The create response's exact workspace, seeded tab, and root pane IDs are retained only in the spawning process.
 The normal `fm-<id>` tab is created in that exact workspace, and only the exact seeded tab from the same workspace-create response is eligible for pruning.
@@ -155,16 +160,20 @@ Immediately before and after projected workspace create, task-tab create, seeded
 The snapshot comes only from the named session's response and is cross-checked against that workspace's focused tab.
 An ambiguous pre-operation snapshot refuses the focus-sensitive mutation rather than guessing from a label, order, or ambient client.
 
-For a primary-home projected create, Firstmate makes one presentation-only ordering attempt after that exact workspace has converged.
-A bounded shared lock serializes primary projected creates across workspace creation and ordering, so the workers retain Herdr's actual create order even when Firstmate starts them concurrently.
-The new response-derived workspace id is appended to the existing contiguous `firstmate/... · p:<token>` prefix immediately after `firstmate`.
-This puts the complete primary-worker block before every `2ndmate-*` workspace while leaving every existing workspace, including all secondmate workspaces, in its previous relative order.
+For every eligible projected create from a primary or secondmate home, Firstmate makes one presentation-only ordering attempt after that exact workspace has converged.
+One bounded lock per live named Herdr session/socket serializes projected creates, ordering, abort cleanup, and projected normal cleanup across every Firstmate home that shares the session.
+The lock key is derived from the verified session name and canonical socket path and lives in a machine-private shared runtime namespace, never inside any one home's `state/`.
+An unverified or ambiguous socket or an insecure shared-lock namespace fails closed for presentation mutation, warns, and leaves the task on the ordinary flat path.
+The new response-derived workspace id is inserted immediately after its owning parent (`firstmate` or `2ndmate-<id>`) contiguous child block and before the next parent.
+New-format `└ ... · p:<token>` children define that block; already-adjacent old-format `firstmate/... · p:<token>` or `2ndmate-<id>/... · p:<token>` projections may extend it read-only for compatibility and are never renamed or migrated.
+An ambiguous, foreign, or detached presentation child makes the ordering shape unverifiable, so Firstmate warns and skips the move instead of assigning ownership by guesswork.
 Only the exact workspace id returned by the current projected create is ever a move target.
-Labels are used only to validate the presentation shape and calculate an insert index, never as task authority or as a destructive target selector.
+After a successful move, the sequence of every pre-existing workspace id excluding the new id must be byte-identical to the pre-move sequence.
+Labels and tokens remain non-authoritative correlators only; they never authorize adoption, close, delete, rename, task routing, Treehouse return, or recovery.
 
 Herdr 0.7.4 protocol 16 exposes `workspace.move` in `herdr api schema`, with exact parameters `workspace_id` and zero-based `insert_index`, but does not expose it as a CLI subcommand.
 `bin/backends/herdr-workspace-move.py` therefore sends that one whitelisted method over the exact named session's Unix socket and accepts only its matching `workspace_list` response.
-The returned order is checked against the primary-worker relative order and secondmate relative order.
+The returned order is checked against the full pre-existing workspace-id sequence and the owning-parent insertion point.
 The installed move does not focus its target, but Firstmate still compares the exact pre-operation workspace and tab afterward and restores that exact tab if a future or failed move changes focus.
 Focus restoration is not an ordering retry and grants no authority over the moved workspace.
 
@@ -203,7 +212,8 @@ Any live or unknown pane in those matches refuses the duplicate launch.
 The user-visible compromises are intentional:
 
 - Grouping is best-effort during a clean Herdr server lifetime, not durable or guaranteed.
-- Clean primary-home projected creates form one stable contiguous worker block immediately after `firstmate`; existing ambiguous or manually interleaved layouts degrade with a warning instead of being rewritten.
+- Clean projected creates form one stable contiguous child block immediately after their owning parent (`firstmate` or `2ndmate-<id>`); existing ambiguous or manually interleaved layouts degrade with a warning instead of being rewritten.
+- Existing live or recovered projected spaces are never force-renamed, moved, or promoted from tabs into the new topology.
 - A Herdr restart restores the token-bearing layout as an agent-free husk, and the task respawns flat while that old space is left untouched.
 - Crashes, response loss, failed exact-pane close, or human renames can leave stale empty-looking spaces that Firstmate never auto-deletes.
 - Spaces have no cross-home cleanup.
@@ -214,19 +224,32 @@ The user-visible compromises are intentional:
 The projection and its ordering follow-up make no Herdr provider/API change, no Treehouse lease or return change, no ownership registry, and no cross-home cleanup path.
 It is intentionally separate from any future Treehouse hardening work.
 
-### Isolated E2E evidence (2026-07-20)
+### Isolated E2E evidence (2026-07-21)
 
-The mandatory projection suite ran against Herdr 0.7.4, protocol 16, on macOS aarch64 through the guarded named-session lab contract.
+The mandatory projection suite, including multi-home secondmate-child topology, ran against Herdr 0.7.4, protocol 16, on macOS aarch64 through the guarded named-session lab contract.
 The default-session fleet-state tripwire was identical before and after teardown.
 
 Exact command:
 
 ```sh
-HERDR_LAB_HELPER=/Users/kunchen/.treehouse/firstmate-b8697d/3/firstmate/bin/fm-herdr-lab.sh \
+HERDR_LAB_HELPER="$(pwd)/bin/fm-herdr-lab.sh" \
   bash tests/fm-backend-herdr-presentation-e2e.test.sh
 ```
 
-Exact result:
+Exact result (abridged; full suite includes primary and secondmate multi-child topology, concurrent cross-home waves, session-lock contention, legacy coexistence, and exact-pane teardown):
+
+```text
+ok - real Herdr lab: primary presentation opt-in inherits into real secondmate homes
+ok - real Herdr lab: primary and two secondmate homes each own a top-level contiguous child block
+ok - real Herdr lab: concurrent primary/A/B spawns stay session-locked with zero focus drift
+ok - real Herdr lab: session lock contention from a secondmate home falls back flat with no journal
+ok - real Herdr lab: legacy projection labels and flat secondmate tabs are left unmigrated
+ok - real Herdr lab: multi-home exact-pane teardowns restore captain focus without workspace close authority
+ok - real Herdr lab validation completed on Herdr 0.7.4 with the default-session tripwire intact
+```
+
+Earlier Stage 1 primary-only projection results from 2026-07-20 remain valid for the non-topology cases they covered.
+
 
 ```text
 ok - real Herdr lab: flag-off spawn retains the Stage 1 Herdr command sequence with zero ordering calls
