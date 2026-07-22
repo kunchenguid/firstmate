@@ -280,6 +280,101 @@ EOF
   pass "malformed control timestamps fail closed"
 }
 
+test_control_timestamp_accepts_fractional_seconds_and_offsets() {
+  local home project task_worktree transcripts snapshot registry now session_id out codes
+  home="$TMP_ROOT/iso-timestamp-home"
+  project="$TMP_ROOT/iso-timestamp-project"
+  task_worktree="$TMP_ROOT/iso-timestamp-worktree"
+  transcripts="$TMP_ROOT/iso-timestamp-transcripts"
+  snapshot="$TMP_ROOT/iso-timestamp-snapshot.json"
+  registry="$TMP_ROOT/iso-timestamp-sources.json"
+  now=2026-07-20T10:00:00Z
+  session_id=66666666-6666-4666-8666-666666666666
+
+  mkdir -p "$home/data/iso-task" "$home/state" "$home/config" "$project/.ai" "$transcripts"
+  fm_git_init_commit "$project"
+  git -C "$project" worktree add --quiet -b iso-task "$task_worktree"
+  cat > "$project/state.md" <<'EOF'
+## Position
+updated: 2026-07-20T09:45:00Z
+EOF
+  printf '# Handoff\n' > "$project/.ai/HANDOFF-old.md"
+  touch -t 202607200900 "$project/.ai/HANDOFF-old.md"
+  cat > "$transcripts/$session_id.jsonl" <<EOF
+{"sessionId":"$session_id","cwd":"$task_worktree","timestamp":"2026-07-20T09:30:00Z"}
+EOF
+  cat > "$snapshot" <<EOF
+{
+  "schema": "fm-fleet-snapshot.v1",
+  "generated": "$now",
+  "fm_home": "$home",
+  "backlog": {
+    "records": [
+      {"structured":true,"id":"iso-task","state":"in_flight","title":"ISO Task","repo":"sample","kind":"ship"}
+    ]
+  },
+  "tasks": [
+    {
+      "id":"iso-task",
+      "kind":"ship",
+      "project":"sample",
+      "mode":"no-mistakes",
+      "yolo":"off",
+      "current_state":{"state":"working","source":"pane","detail":"active","freshness":"fresh"},
+      "endpoint":{"status":"present","observed_at":"$now","freshness":"fresh"},
+      "paths":{"worktree":{"path":"$task_worktree","present":true}},
+      "pr":{"url":null,"source":"absent"},
+      "hints":{"open_decisions":[],"last_event_text":"working"},
+      "backlog":{"structured":true,"id":"iso-task","state":"in_flight","title":"ISO Task","repo":"sample","kind":"ship"}
+    }
+  ]
+}
+EOF
+  cat > "$home/data/iso-task/control.json" <<EOF
+{
+  "schema":"fm-control-item.v1",
+  "id":"iso-task",
+  "title":"ISO Task",
+  "purpose":"Prove durable custody",
+  "business_outcome":"A user-visible outcome can eventually be verified",
+  "capability":"sample-capability",
+  "owner":{"type":"firstmate-task","id":"iso-task","source":"fleet-home"},
+  "next_action":{"description":"Run the bounded validation","capability":"worker.validate"},
+  "authority":{"level":"worker","source":"task-brief","delivery":"no-mistakes"},
+  "updated_at":"2026-07-20T09:45:00.123+05:30",
+  "freshness_seconds":7200,
+  "proof_requirements":{
+    "implemented":{"required":true},
+    "validated":{"required":true},
+    "release_ready":{"required":true},
+    "in_production":{"required":true},
+    "real_users":{"required":true},
+    "revenue":{"required":true}
+  },
+  "proofs":[
+    {"stage":"implemented","kind":"git_commit","project_source_id":"sample-project","ref":"HEAD","source":"git","observed_at":"2026-07-20T09:45:00Z","freshness_seconds":7200}
+  ]
+}
+EOF
+  cat > "$registry" <<EOF
+{
+  "schema":"fm-control-plane-sources.v1",
+  "scope":{"id":"test-software","description":"test scope","trust_domain":"software"},
+  "capabilities":[{"id":"observe.reconcile","access":"read-only"}],
+  "sources":[
+    {"id":"fleet-home","kind":"firstmate-home","path":"$home","snapshot_path":"$snapshot","backend_observation":false,"trust_domain":"software-operations","access":"read-only","retention":"metadata-only","freshness_seconds":900,"capabilities":["observe.reconcile"]},
+    {"id":"sample-project","kind":"git-project","path":"$project","trust_domain":"software-source","access":"read-only","retention":"pointers-only","freshness_seconds":900,"capabilities":["observe.reconcile"]},
+    {"id":"iso-session","kind":"claude-session","path":"$transcripts/$session_id.jsonl","session_id":"$session_id","project_source_id":"sample-project","work_item_id":"iso-task","runtime_observation":{"state":"idle","source":"runtime-fixture","observed_at":"2026-07-20T09:50:00Z","endpoint":"pane"},"trust_domain":"software-agent-metadata","access":"metadata-read-only","retention":"native-id-path-time-cwd-only","freshness_seconds":7200,"capabilities":["observe.reconcile"]}
+  ]
+}
+EOF
+
+  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" "$CONTROL" --sources "$registry" --snapshot "$snapshot" --now "$now" --json) || fail "offset/fractional control timestamp failed"
+  codes=$(printf '%s' "$out" | jq -r '[.invariants.violations[].code] | unique | join(",")')
+  assert_not_contains "$codes" CONTROL_RECORD_INVALID "offset/fractional ISO timestamp was rejected"
+  pass "control timestamps accept fractional seconds and offsets"
+}
+
 test_idle_session_accepts_not_applicable_revenue() {
   local home project task_worktree transcripts snapshot registry now session_id out codes
   home="$TMP_ROOT/not-applicable-home"
@@ -491,6 +586,7 @@ test_stable_identity_and_reconciliation
 test_freshness_conflict_and_invariants
 test_malformed_position_marker_still_triggers_freshness
 test_invalid_control_timestamp_is_rejected
+test_control_timestamp_accepts_fractional_seconds_and_offsets
 test_idle_session_accepts_not_applicable_revenue
 test_secret_registry_rejected
 test_metadata_only_snapshot

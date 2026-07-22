@@ -133,9 +133,9 @@ function epochOf(value) {
 function strictIsoTimestamp(value) {
   if (typeof value !== "string") return null;
   const trimmed = value.trim();
-  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/.test(trimmed)) return null;
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(trimmed)) return null;
   const parsed = Date.parse(trimmed);
-  return Number.isFinite(parsed) && iso(parsed) === trimmed ? parsed : null;
+  return Number.isFinite(parsed) ? parsed : null;
 }
 
 function statSafe(target) {
