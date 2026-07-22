@@ -28,6 +28,7 @@ The `home:` path points to the seeded home containing `data/charter.md`; no extr
 The home-seeded `data/charter.md` is the sole owner of boilerplate idle-by-default behavior, the normal delegation lifecycle, and standard escalation contracts, so point to that charter rather than restating those contracts in the registry entry.
 The `scope:` field is used during intake.
 The `projects:` field is a non-exclusive clone list, not ownership.
+An optional trailing `; label: <display name>` field (after `added <date>`) pins the secondmate's session display name, for example `SM CNC`; `fm-spawn` re-reads it on every relaunch and derives `SM <Title-cased id suffix>` when it is absent, so set an explicit label whenever the derived form is wrong (acronyms, house names).
 
 ## Charter and seed
 
@@ -39,6 +40,7 @@ bin/fm-brief.sh <id> --secondmate {<project>...|--no-projects}
 
 The scaffold writes a charter brief instead of a task brief.
 Set `FM_SECONDMATE_CHARTER='<charter>'` to fill the charter text and `FM_SECONDMATE_SCOPE='<scope>'` when the routing scope differs.
+Set `FM_SECONDMATE_LABEL='<display name>'` at seed time to pin the explicit session display name described under the routing table; for an already-registered secondmate, add or edit the trailing `label:` field on its registry line directly and the next relaunch picks it up.
 If you scaffold without `FM_SECONDMATE_CHARTER`, replace the `{TASK}` placeholder before seeding.
 Pass `--no-projects` instead of a project list to scaffold a project-less charter for a domain whose subject is the firstmate repo itself, whose home is a firstmate worktree and whose crews take pooled worktrees of the same repo.
 `--no-projects` is mutually exclusive with a project list, and omitting both still fails loudly, so an accidental omission is never mistaken for a deliberate project-less seed.

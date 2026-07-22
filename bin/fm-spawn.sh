@@ -79,6 +79,17 @@
 #   provisioned firstmate home; the default is kind=ship.
 #   Before a secondmate launch, the home is locally fast-forwarded to the primary
 #   default-branch commit when safe; skipped syncs warn and launch unchanged.
+#   A --secondmate spawn also resolves a session display name (label) so the
+#   captain's phone app can tell persistent sessions apart. Resolution order:
+#   the registry line's optional "label: <display name>" field in
+#   data/secondmates.md, then a prior label= in state/<id>.meta, then the
+#   derived fallback "SM <Title-cased id suffix>" (sm-portal -> "SM Portal").
+#   The resolved label is recorded as label= in meta on every spawn and passed
+#   only to harnesses with a verified session-name flag (claude: -n/--name);
+#   other harnesses keep the label in meta and emit no flag, the same omission
+#   contract as an unsupported --effort value. The name flag only sets the
+#   display name; it never changes remote-control state. Ship/scout spawns
+#   carry no label (crew windows keep their fm-<id> names).
 #   Ship/scout spawns refuse to launch unless the resolved task path is a real
 #   git worktree root distinct from the primary project checkout.
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
@@ -102,7 +113,7 @@
 # plus a gitignored .fm-grok-turnend worktree pointer and a state token.
 # On success prints: spawned <id> harness=<name> kind=<ship|scout|secondmate> mode=<mode> yolo=<on|off> window=<backend-target> worktree=<path>
 # mode/yolo are resolved per-project from data/projects.md for ship/scout tasks;
-# secondmate spawns record mode=secondmate, yolo=off, home=, and projects=.
+# secondmate spawns record mode=secondmate, yolo=off, home=, projects=, and label=.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -419,7 +430,7 @@ launch_template() {
     # does NOT suppress the interactive ghost text (verified empirically), so the env
     # var is the correct control. The dim-aware composer reader in fm-tmux-lib.sh is
     # the defense-in-depth backstop for any pane this flag cannot reach.
-    claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions __MODELFLAG____EFFORTFLAG__"$(cat __BRIEF__)"' ;;
+    claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions __MODELFLAG____EFFORTFLAG____NAMEFLAG__"$(cat __BRIEF__)"' ;;
     codex)
       if [ "$kind" = secondmate ]; then
         printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox "$(cat __BRIEF__)"'
@@ -514,6 +525,7 @@ secondmate_registry_value() {
   case "$key" in
     home) value=$(printf '%s\n' "$line" | sed -n 's/^[^(]*(home: \([^;)]*\);.*/\1/p') ;;
     projects) value=$(printf '%s\n' "$line" | sed -n 's/^[^(]*(home: [^;)]*; scope: [^;)]*; projects: \([^;)]*\); added .*/\1/p') ;;
+    label) value=$(printf '%s\n' "$line" | sed -n 's/.*; label: \([^;)]*\).*/\1/p') ;;
     *) return 1 ;;
   esac
   [ -n "$value" ] || return 1
@@ -572,6 +584,36 @@ effort_flag_for_harness() {
     # opencode's interactive `opencode --prompt` launch has a verified --model
     # flag but no verified effort flag. Its `opencode run --variant` flag belongs
     # to a different, non-interactive launch mode, so fm-spawn does not pass it.
+  esac
+}
+
+# Derived session-label fallback for a secondmate with no explicit label:
+# strip a leading "sm-", title-case each hyphen-separated word, prefix "SM ".
+# sm-portal -> "SM Portal"; an acronym or house name (sm-cnc -> "SM CNC",
+# sm-fw -> "SM Firmware") needs an explicit registry "label:" field instead.
+secondmate_derived_label() {
+  local id=$1 suffix word out first
+  suffix=${id#sm-}
+  out=
+  for word in ${suffix//-/ }; do
+    first=$(printf '%s' "${word:0:1}" | tr '[:lower:]' '[:upper:]')
+    out="$out $first${word:1}"
+  done
+  printf 'SM%s\n' "$out"
+}
+
+name_flag_for_harness() {
+  local harness=$1 name=$2
+  [ -n "$name" ] || return 0
+  case "$harness" in
+    claude)
+      # Verified on Claude Code 2.1.217 (2026-07-22): -n/--name sets the session
+      # display name the Claude phone app shows; it does not change
+      # remote-control state. No other harness has a verified session-name
+      # flag, so like an unsupported --effort value the label stays in meta
+      # and no flag is emitted for them.
+      printf -- '--name %s ' "$(shell_quote "$name")"
+      ;;
   esac
 }
 
@@ -1198,10 +1240,20 @@ fi
 # branch on them. Mode governs ship tasks; a scout's deliverable is a report, not a
 # merge, so scout teardown ignores mode.
 SECONDMATE_PROJECTS=
+SECONDMATE_LABEL=
 if [ "$KIND" = secondmate ]; then
   MODE=secondmate
   YOLO=off
   SECONDMATE_PROJECTS=$(secondmate_registry_value "$ID" projects || true)
+  # Session display name: registry label -> prior meta label= (backfill for a
+  # registry line without one) -> derived fallback. Re-resolving here on every
+  # spawn is what makes the captain's naming convention durable across
+  # recovery, /updatefirstmate, and restart, exactly like the harness axis.
+  SECONDMATE_LABEL=$(secondmate_registry_value "$ID" label || true)
+  if [ -z "$SECONDMATE_LABEL" ] && [ -f "$STATE/$ID.meta" ]; then
+    SECONDMATE_LABEL=$(grep '^label=' "$STATE/$ID.meta" | cut -d= -f2- || true)
+  fi
+  [ -n "$SECONDMATE_LABEL" ] || SECONDMATE_LABEL=$(secondmate_derived_label "$ID")
 else
   PROJ_NAME=$(basename "$PROJ_ABS")
   read -r MODE YOLO <<EOF
@@ -1248,6 +1300,7 @@ META_WINDOW=$T
   if [ "$KIND" = secondmate ]; then
     echo "home=$PROJ_ABS"
     echo "projects=$SECONDMATE_PROJECTS"
+    echo "label=$SECONDMATE_LABEL"
   fi
 } > "$STATE/$ID.meta"
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
@@ -1259,8 +1312,13 @@ sq_piturnend=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-turnend-guard.ts
 sq_piwatch=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-pi-watch.ts")
 MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
 EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT")
+NAMEFLAG=
+if [ "$KIND" = secondmate ]; then
+  NAMEFLAG=$(name_flag_for_harness "$HARNESS" "$SECONDMATE_LABEL")
+fi
 LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
 LAUNCH=${LAUNCH//__EFFORTFLAG__/$EFFORTFLAG}
+LAUNCH=${LAUNCH//__NAMEFLAG__/$NAMEFLAG}
 LAUNCH=${LAUNCH//__BRIEF__/$sq_brief}
 LAUNCH=${LAUNCH//__TURNEND__/$sq_turnend}
 LAUNCH=${LAUNCH//__PIEXT__/$sq_piext}

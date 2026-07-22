@@ -112,6 +112,11 @@ The supported launch-profile flags below are verified locally; each row records 
 When a requested effort value is outside the harness-specific accepted set, `fm-spawn` records the requested `effort=` in meta but emits no effort flag for that harness.
 This preserves launch success instead of passing a known-bad value.
 
+Secondmate spawns also carry a session display-name axis: `fm-spawn --secondmate` resolves the secondmate's label (its header owns the resolution order) and passes it only where a session-name flag is verified.
+`claude` is verified: `-n`/`--name <name>` sets the display name the Claude phone app shows, on Claude Code 2.1.217 (2026-07-22), and only sets the name - it never changes remote-control state.
+No other harness has a verified session-name flag, so `fm-spawn` records the resolved `label=` in meta and emits no flag for them, the same omission contract as an unsupported effort value.
+The captain's main session is not spawned by `fm-spawn`; `bin/fm-main.sh` owns its `FM Main` launch naming.
+
 ## no-mistakes skill invocation
 
 Send the validation skill using the target harness's skill invocation form.

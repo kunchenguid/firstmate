@@ -109,6 +109,35 @@ EOF
   pass "seed allows overlapping project clone lists and drops the owns/owner routing"
 }
 
+test_home_seed_records_optional_label_field() {
+  # FM_SECONDMATE_LABEL pins the session display name as a trailing registry
+  # field; fm-spawn re-reads it on every relaunch. Labels carrying the registry
+  # delimiters are refused so the single-line format stays parseable.
+  local home sm
+  home="$TMP_ROOT/label-main"
+  sm="$TMP_ROOT/label-sm"
+  mkdir -p "$home/projects" "$home/data" "$home/state"
+  fm_git_init_commit "$home/projects/alpha"
+  fm_git_add_origin "$home/projects/alpha" "$TMP_ROOT/remotes/seed-label-alpha.git"
+  cat > "$home/data/projects.md" <<EOF
+- alpha [direct-PR] - alpha project (added 2026-06-22)
+EOF
+  FM_HOME="$home" FM_SECONDMATE_CHARTER='cnc work for alpha' \
+    FM_SECONDMATE_SCOPE='cnc work for alpha' FM_SECONDMATE_LABEL='SM CNC' \
+    "$ROOT/bin/fm-home-seed.sh" sm-cnc "$sm" alpha >/dev/null \
+    || fail "seed with FM_SECONDMATE_LABEL failed"
+  assert_grep '; label: SM CNC)' "$home/data/secondmates.md" "registry line missing trailing label field"
+  FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" validate >/dev/null \
+    || fail "registry validation rejected the label field"
+  if FM_HOME="$home" FM_SECONDMATE_CHARTER='bad label seed' \
+    FM_SECONDMATE_SCOPE='bad label seed' FM_SECONDMATE_LABEL='SM (bad)' \
+    "$ROOT/bin/fm-home-seed.sh" sm-bad "$TMP_ROOT/label-bad" alpha >/dev/null 2>&1; then
+    fail "seed accepted a label containing registry delimiters"
+  fi
+  assert_no_grep 'sm-bad' "$home/data/secondmates.md" "refused seed leaked a registry line"
+  pass "seed records the optional session label and refuses delimiter labels"
+}
+
 test_home_seed_validate_rejects_duplicate_homes() {
   local home subhome subhome_abs err
   home="$TMP_ROOT/duplicate-home"
@@ -2167,6 +2196,7 @@ EOF
 test_fm_home_parameterization
 test_lock_status_is_per_home
 test_seed_allows_overlapping_clones_and_drops_owner
+test_home_seed_records_optional_label_field
 test_home_seed_validate_rejects_duplicate_homes
 test_home_seed_validate_rejects_duplicate_ids
 test_home_seed_validate_rejects_nested_homes
