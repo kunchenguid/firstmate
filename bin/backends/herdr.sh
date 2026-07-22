@@ -476,7 +476,7 @@ fm_backend_herdr_projection_close_pane_focus_preserving() {  # <session> <pane-i
     return 1
   fi
   if [ "$target_tab" = "$active_tab" ]; then
-    echo "warning: herdr presentation cleanup target is the captain's active tab; refusing a close that cannot preserve focus" >&2
+    echo "warning: herdr presentation cleanup target is Jay's active tab; refusing a close that cannot preserve focus" >&2
     return 1
   fi
   if fm_backend_herdr_cli "$session" pane close "$pane_id" >/dev/null 2>&1; then

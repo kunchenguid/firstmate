@@ -362,7 +362,7 @@ fm_afk_launch_create_herdr() {  # <captain-target> <captain-backend>
   local captain_target=$1 captain_backend=$2 session out wsid pane entry cmd label recovered create_result
   session=${captain_target%%:*}
   if [ -z "$session" ] || [ "$session" = "$captain_target" ]; then
-    fm_afk_launch_log "cannot derive herdr session from captain target '$captain_target'"
+    fm_afk_launch_log "cannot derive herdr session from supervisor target '$captain_target'"
     return 1
   fi
   fm_backend_source herdr || return 1
@@ -443,9 +443,9 @@ fm_afk_launch_start() {
   fi
   # Capture the captain pane FIRST, before creating anything.
   captain_target=$(discover_supervisor_target) || {
-    fm_afk_launch_log "could not resolve the captain supervisor pane (set FM_SUPERVISOR_TARGET)"; return 1; }
+    fm_afk_launch_log "could not resolve Jay's supervisor pane (set FM_SUPERVISOR_TARGET)"; return 1; }
   captain_backend=$(discover_supervisor_backend) || {
-    fm_afk_launch_log "could not resolve the captain supervisor backend (set FM_SUPERVISOR_BACKEND)"; return 1; }
+    fm_afk_launch_log "could not resolve Jay's supervisor backend (set FM_SUPERVISOR_BACKEND)"; return 1; }
 
   mkdir -p "$FM_AFK_LAUNCH_STATE"
 

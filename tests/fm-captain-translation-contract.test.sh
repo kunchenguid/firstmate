@@ -15,6 +15,10 @@ HARNESS="$ROOT/.agents/skills/harness-adapters/SKILL.md"
 CODEXAPP="$ROOT/.agents/skills/firstmate-codexapp/SKILL.md"
 FMX="$ROOT/.agents/skills/fmx-respond/SKILL.md"
 UPDATE="$ROOT/.agents/skills/updatefirstmate/SKILL.md"
+PROJECT_MANAGEMENT="$ROOT/.agents/skills/project-management/SKILL.md"
+TEARDOWN="$ROOT/bin/fm-teardown.sh"
+AFK_LAUNCH="$ROOT/bin/fm-afk-launch.sh"
+HERDR_BACKEND="$ROOT/bin/backends/herdr.sh"
 
 section_9() {
   awk '
@@ -37,11 +41,15 @@ test_identity_and_natural_address_contract() {
 }
 
 test_user_facing_identity_surfaces_use_jay_language() {
-  local bearings decision fmx afk_return
+  local bearings decision fmx afk_return project_management teardown afk_launch herdr_backend
   bearings=$(cat "$ROOT/.agents/skills/bearings/SKILL.md")
   decision=$(sed 's/captain-held//g' "$DECISION")
   fmx=$(cat "$FMX")
   afk_return=$(cat "$ROOT/bin/fm-afk-return.sh")
+  project_management=$(cat "$PROJECT_MANAGEMENT")
+  teardown=$(cat "$TEARDOWN")
+  afk_launch=$(cat "$AFK_LAUNCH")
+  herdr_backend=$(cat "$HERDR_BACKEND")
   assert_not_contains "$bearings" "Captain's Call" \
     "Bearings retains the old user-facing heading"
   assert_contains "$bearings" "**Your Call**" \
@@ -54,6 +62,18 @@ test_user_facing_identity_surfaces_use_jay_language() {
     "away-return output still calls Jay captain"
   assert_not_contains "$afk_return" "the captain request" \
     "away-return output still calls Jay captain"
+  assert_not_contains "$project_management" "captain" \
+    "project-management instructions still call Jay captain"
+  assert_not_contains "$teardown" "the captain's explicit OK" \
+    "teardown output still calls Jay captain"
+  assert_not_contains "$teardown" "the captain approves" \
+    "teardown approval output still calls Jay captain"
+  assert_not_contains "$afk_launch" 'fm_afk_launch_log "could not resolve the captain' \
+    "away-launch resolution output still calls Jay captain"
+  assert_not_contains "$afk_launch" 'fm_afk_launch_log "cannot derive herdr session from captain target' \
+    "away-launch target output still calls Jay captain"
+  assert_not_contains "$herdr_backend" 'echo "warning: herdr presentation cleanup target is the captain' \
+    "Herdr cleanup output still calls Jay captain"
   pass "user-facing identity surfaces consistently use Jay language"
 }
 
