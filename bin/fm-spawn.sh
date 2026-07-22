@@ -83,7 +83,8 @@
 #   Before a secondmate launch, the home is locally fast-forwarded to the primary
 #   default-branch commit when safe; skipped syncs warn and launch unchanged.
 #   Ship/scout spawns refuse to launch unless the resolved task path is a real
-#   git worktree root distinct from the primary project checkout.
+#   git worktree root distinct from the primary project checkout and attached
+#   to that selected clone's canonical Git common directory.
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
@@ -138,6 +139,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-worktree-identity-lib.sh
+. "$SCRIPT_DIR/fm-worktree-identity-lib.sh"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
 # a direct report (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
@@ -220,6 +223,7 @@ if [ "$BACKEND" = orca ]; then
   fm_backend_orca_runtime_check || exit 1
 fi
 ORCA_ABORT_CLEANUP=0
+ORCA_ABORT_METADATA_ALLOWED=1
 ORCA_WORKTREE_ID=
 ORCA_TERMINAL=
 HERDR_PROJECTION_ABORT_CLEANUP=0
@@ -277,12 +281,15 @@ spawn_abort_cleanup() {
     fi
     if [ -n "${ORCA_WORKTREE_ID:-}" ]; then
       if ! fm_backend_remove_worktree orca "$ORCA_WORKTREE_ID" 2>/dev/null; then
-        mkdir -p "$STATE" 2>/dev/null || true
-        if [ -d "$STATE" ]; then
+        if [ "$ORCA_ABORT_METADATA_ALLOWED" = 1 ]; then
+          mkdir -p "$STATE" 2>/dev/null || true
+        fi
+        if [ "$ORCA_ABORT_METADATA_ALLOWED" = 1 ] && [ -d "$STATE" ]; then
           {
             echo "window=$W"
             echo "worktree=${WT:-}"
             echo "project=$PROJ_ABS"
+            [ -z "${PROJECT_GIT_COMMON_DIR:-}" ] || echo "project_git_common_dir=$PROJECT_GIT_COMMON_DIR"
             echo "harness=$HARNESS"
             echo "kind=$KIND"
             echo "mode=${MODE:-no-mistakes}"
@@ -294,6 +301,8 @@ spawn_abort_cleanup() {
             echo "orca_worktree_id=$ORCA_WORKTREE_ID"
             [ -z "${ORCA_TERMINAL:-}" ] || echo "terminal=$ORCA_TERMINAL"
           } > "$STATE/$ID.meta" 2>/dev/null || true
+        else
+          echo "error: failed to remove unvalidated Orca worktree $ORCA_WORKTREE_ID; task metadata remains unpublished because clone identity was not accepted" >&2
         fi
       fi
     fi
@@ -766,6 +775,34 @@ fi
 # once here so every downstream comparison uses the same physical form
 # (docs/herdr-backend.md "Known gaps").
 PROJ_ABS_REAL=$(cd "$PROJ_ABS" 2>/dev/null && pwd -P) || PROJ_ABS_REAL="$PROJ_ABS"
+PROJECT_GIT_COMMON_DIR=
+if [ "$KIND" != secondmate ]; then
+  PROJECT_GIT_COMMON_DIR=$(fm_git_common_dir_canonical "$PROJ_ABS") || {
+    echo "error: selected project clone has no resolvable canonical Git common directory: $PROJ_ABS; refusing to create a task endpoint" >&2
+    exit 1
+  }
+  if [ -f "$STATE/$ID.meta" ]; then
+    RECORDED_PROJECT_GIT_COMMON_DIR=$(fm_meta_get "$STATE/$ID.meta" project_git_common_dir)
+    if [ -z "$RECORDED_PROJECT_GIT_COMMON_DIR" ]; then
+      RECORDED_PROJECT=$(fm_meta_get "$STATE/$ID.meta" project)
+      RECORDED_PROJECT_GIT_COMMON_DIR=$(fm_git_common_dir_canonical "$RECORDED_PROJECT" 2>/dev/null || true)
+    fi
+    [ -n "$RECORDED_PROJECT_GIT_COMMON_DIR" ] || {
+      echo "error: existing metadata for $ID has no usable selected-clone identity; refusing recovery spawn until the recorded project and worktree are reconciled" >&2
+      exit 1
+    }
+    if [ "$RECORDED_PROJECT_GIT_COMMON_DIR" != "$PROJECT_GIT_COMMON_DIR" ]; then
+      echo "error: recovery spawn for $ID selected clone '$PROJECT_GIT_COMMON_DIR', but task metadata records clone '$RECORDED_PROJECT_GIT_COMMON_DIR'; refusing to cross the task's clone boundary" >&2
+      exit 1
+    fi
+    RECORDED_WT=$(fm_meta_get "$STATE/$ID.meta" worktree)
+    RECORDED_WT_COMMON=$(fm_git_common_dir_canonical "$RECORDED_WT" 2>/dev/null || true)
+    if [ "$RECORDED_WT_COMMON" != "$PROJECT_GIT_COMMON_DIR" ]; then
+      echo "error: recovery spawn for $ID recorded worktree '${RECORDED_WT:-none}' belongs to clone '${RECORDED_WT_COMMON:-unresolved}', not selected clone '$PROJECT_GIT_COMMON_DIR'; refusing to launch" >&2
+      exit 1
+    fi
+  fi
+fi
 
 real_path_or_raw() {  # <path>
   local path=$1 real
@@ -785,7 +822,7 @@ real_path_or_raw() {  # <path>
 # that every downstream operation (send/capture/kill) already treats as opaque
 # per-backend routing (fm_backend_resolve_selector).
 validate_spawn_worktree() {  # <source> <inspect-target>
-  local source=$1 inspect_target=$2 wt_real proj_real wt_top wt_top_real
+  local source=$1 inspect_target=$2 wt_real proj_real wt_top wt_top_real wt_common
   wt_real=
   if ! wt_real=$(cd "$WT" 2>/dev/null && pwd -P); then
     wt_real=
@@ -798,6 +835,11 @@ validate_spawn_worktree() {  # <source> <inspect-target>
   fi
   if [ -z "$wt_real" ] || [ -z "$wt_top_real" ] || [ "$wt_real" != "$wt_top_real" ] || [ "$wt_real" = "$proj_real" ]; then
     echo "error: $source did not yield an isolated worktree (resolved '$WT'; worktree root '${wt_top:-none}'; primary '$PROJ_ABS'); refusing to launch to avoid tangling the primary checkout. Inspect target $inspect_target" >&2
+    exit 1
+  fi
+  wt_common=$(fm_git_common_dir_canonical "$WT" 2>/dev/null || true)
+  if [ -z "$wt_common" ] || [ "$wt_common" != "$PROJECT_GIT_COMMON_DIR" ]; then
+    echo "error: $source yielded worktree '$wt_real' owned by clone '${wt_common:-unresolved}', but task $ID selected clone '$PROJECT_GIT_COMMON_DIR' from '$PROJ_ABS'; refusing before hooks, agent launch, or metadata publication. Inspect the shared worktree pool binding for target $inspect_target" >&2
     exit 1
   fi
 }
@@ -1077,7 +1119,9 @@ EOF
       echo "error: orca did not return a worktree id/path for $W" >&2
       exit 1
     fi
+    ORCA_ABORT_METADATA_ALLOWED=0
     validate_spawn_worktree "orca worktree create" "$W"
+    ORCA_ABORT_METADATA_ALLOWED=1
     if [ -z "$ORCA_TERMINAL" ]; then
       ORCA_TERMINAL=$(fm_backend_orca_terminal_create "$ORCA_WORKTREE_ID" "$W") || exit 1
     fi
@@ -1304,10 +1348,12 @@ fi
 
 META_WINDOW=$T
 [ "$BACKEND" = orca ] && META_WINDOW=$W
+set +e
 {
   echo "window=$META_WINDOW"
   echo "worktree=$WT"
   echo "project=$PROJ_ABS"
+  [ -z "$PROJECT_GIT_COMMON_DIR" ] || echo "project_git_common_dir=$PROJECT_GIT_COMMON_DIR"
   echo "harness=$HARNESS"
   echo "kind=$KIND"
   echo "mode=$MODE"
@@ -1343,6 +1389,12 @@ META_WINDOW=$T
     echo "projects=$SECONDMATE_PROJECTS"
   fi
 } > "$STATE/$ID.meta"
+META_WRITE_STATUS=$?
+set -e
+if [ "$META_WRITE_STATUS" -ne 0 ]; then
+  echo "error: could not publish task metadata for $ID" >&2
+  exit 1
+fi
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
 
 sq_brief=$(shell_quote "$BRIEF")
