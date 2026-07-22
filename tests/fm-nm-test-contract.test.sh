@@ -95,9 +95,16 @@ test_nm_has_no_complete_local_test_command() {
 
 test_ci_still_runs_broad_behavior_suite() {
   assert_present "$CI" "ci.yml is missing"
-  # Behavior job still runs every portable behavior script via the one owner.
-  grep -Fq 'bin/fm-test-run.sh --all' "$CI" \
-    || fail "CI Behavior job must invoke bin/fm-test-run.sh --all"
+  # Portable shards and the serial remainder cover every portable behavior
+  # script through the one owner, with a deterministic inventory guard.
+  grep -Fq 'bin/fm-test-run.sh --lane portable-parallel-1' "$CI" \
+    || fail "CI must invoke portable parallel shard 1 through fm-test-run.sh"
+  grep -Fq 'bin/fm-test-run.sh --lane portable-parallel-2' "$CI" \
+    || fail "CI must invoke portable parallel shard 2 through fm-test-run.sh"
+  grep -Fq 'bin/fm-test-run.sh --lane portable-serial' "$CI" \
+    || fail "CI must invoke the portable serial remainder through fm-test-run.sh"
+  grep -Fq 'bin/fm-test-run.sh --check-coverage' "$CI" \
+    || fail "CI must prove complete lane coverage through fm-test-run.sh"
   # Guard against regression to an uninstrumented inline loop that drops timing.
   if grep -Eq 'for test_script in tests/\*\.test\.sh' "$CI"; then
     fail "CI Behavior must not re-spell an inline tests/*.test.sh loop; use fm-test-run.sh"
@@ -111,7 +118,7 @@ test_ci_still_runs_broad_behavior_suite() {
     || fail "CI must retain the repo invariants job"
   grep -Fq 'tests-herdr:' "$CI" \
     || fail "CI must retain the required Herdr Behavior job"
-  pass "CI still owns the broad behavior suite and companion jobs"
+  pass "CI still owns partitioned broad behavior coverage and companion jobs"
 }
 
 test_nm_yaml_tracked
