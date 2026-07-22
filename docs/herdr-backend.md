@@ -1028,13 +1028,14 @@ Covered by the unit cases in `tests/fm-afk-launch.test.sh` (clear-on-fresh-entry
   The 2026-07-21 Herdr incident proved that string canonicalization was still insufficient on case-insensitive macOS filesystems.
   Herdr 0.7.3 could return the unchanged primary project directory with different letter casing, two stable reads accepted that spelling as the worktree before `treehouse get` finished, and the string-based final validator could accept it too.
   The shell later entered the correct Treehouse worktree, but `worktree=` metadata, printed output, and teardown's Treehouse return target retained the primary path alias.
-  `bin/fm-spawn.sh` now uses Bash's filesystem-aware `-ef` predicate for project-vs-current-path, consecutive-candidate, candidate-vs-git-root, and final primary-vs-worktree identity checks.
+  `bin/fm-spawn.sh` now pins the primary checkout's dereferenced device-and-inode identity from its open directory with BSD/GNU `stat -L`, then uses dereferenced device-and-inode identities for project-vs-current-path, consecutive-candidate, candidate-vs-git-root, and final primary-vs-worktree checks.
   Each acceptable current path must resolve to its own `git rev-parse --show-toplevel`, identify that exact root, remain filesystem-distinct from the primary, and repeat on the next poll before `WT` records the git top-level rather than the backend's current-path spelling.
   `validate_spawn_worktree` independently repeats the root and primary identity checks, so Orca's direct worktree result receives the same refusal even though Orca bypasses the Treehouse settle loop.
   Tmux, Herdr, Zellij, and cmux retain their existing current-path adapters and share the corrected Treehouse loop, while Orca retains its provider path and uses the corrected shared validator.
   Deterministic coverage in `tests/fm-spawn-worktree-settle.test.sh` uses native case aliasing on case-insensitive filesystems and an equivalent differently-cased symlink on case-sensitive CI.
   The regression returns a case-variant primary alias twice before the real worktree, asserts at least four polls, verifies the isolated git root in metadata, runs scout teardown, and verifies `treehouse return --force` receives only that isolated root.
   A fake-Orca case separately proves that the final validator rejects a case-variant primary alias and cleans up the response-derived terminal and worktree IDs.
+  Two rename-race cases remove the primary pathname after its identity is pinned and prove that neither the Treehouse settle loop nor Orca's final validator can accept the renamed primary checkout as isolated.
   `tests/fm-backend-orca.test.sh` separately proves that an accepted Orca worktree symlink is normalized to its resolved git top-level in spawn output and metadata.
   The existing symlink-prefix regression in `tests/fm-backend.test.sh` continues to cover physical and logical initial current-path spellings and now expects the resolved git top-level in spawn output.
   Initial verification ran on 2026-07-21 and focused re-verification ran on 2026-07-22 with GNU bash 3.2.57(1)-release, git 2.50.1 (Apple Git-155), and Darwin 25.3.0 on arm64 macOS.
@@ -1046,6 +1047,8 @@ Covered by the unit cases in `tests/fm-afk-launch.test.sh` (clear-on-fresh-entry
   ok - an already-settled pane confirms via the existing inter-poll sleep, not an extra full cycle
   ok - case-variant primary cwd aliases cannot win the settle race or become metadata/cleanup targets
   ok - validate_spawn_worktree independently rejects a case-variant primary alias by filesystem identity
+  ok - settle loop requires positive filesystem distinction from an existing primary path
+  ok - validator requires positive filesystem distinction from an existing primary path
   # all fm-spawn-worktree-settle tests passed
 
   $ bash tests/fm-backend.test.sh
