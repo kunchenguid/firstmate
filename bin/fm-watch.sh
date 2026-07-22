@@ -76,6 +76,11 @@ mkdir -p "$STATE"
 . "$SCRIPT_DIR/fm-x-lib.sh"
 # shellcheck source=bin/fm-check-lib.sh
 . "$SCRIPT_DIR/fm-check-lib.sh"
+# Parent-owned secondmate missed-report guards: durable pending-reply
+# expectations created by fm-send on marked secondmate requests. The tick is
+# cheap when no records exist and never scrapes secondmate conversation.
+# shellcheck source=bin/fm-pending-reply-lib.sh
+. "$SCRIPT_DIR/fm-pending-reply-lib.sh"
 
 WATCH_LOCK="$STATE/.watch.lock"
 WATCH_PATH="$SCRIPT_DIR/fm-watch.sh"
@@ -753,6 +758,12 @@ while :; do
   # Liveness beacon for fm-guard.sh: a fresh mtime here means a watcher is
   # alive. Supervision scripts warn when this goes stale with tasks in flight.
   touch "$STATE/.last-watcher-beat"
+
+  # Parent-owned secondmate pending-reply reconciliation: resolve correlated
+  # parent reports, observe backend busy/idle turn completion, send one recovery
+  # repost after grace, and escalate once if the recovery turn is also missed.
+  # No conversation scraping; unresolved records are never silently expired.
+  fm_pending_reply_tick "$STATE" || true
 
   # Slow per-task checks (firstmate writes these, e.g. a merged-PR poll).
   # Time-based via .last-check mtime so the cadence survives watcher restarts.
