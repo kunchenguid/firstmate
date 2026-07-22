@@ -588,6 +588,40 @@ test_local_only_merged_to_local_main_allows() {
   pass "local-only worktree with work merged into local main is torn down (no regression)"
 }
 
+# Hook-artifact cleanup must never delete a path the project TRACKS. Projects do
+# commit .claude/settings.local.json (meshery/meshery among them); fm-spawn no
+# longer writes there, so a tracked file at that path is purely project content.
+test_teardown_removes_only_untracked_hook_artifacts() {
+  local case_dir rc wt_head settings dirty
+  case_dir=$(make_case hook-artifacts)
+  write_meta "$case_dir" local-only ship
+  settings='{"enabledMcpjsonServers":["meshery"],"hooks":{"SessionStart":[]}}'
+  mkdir -p "$case_dir/wt/.claude"
+  printf '%s' "$settings" > "$case_dir/wt/.claude/settings.local.json"
+  git -C "$case_dir/wt" add -f -- .claude/settings.local.json
+  git -C "$case_dir/wt" -c user.email=t@t -c user.name=t commit -qm "track claude settings"
+  # A leftover firstmate pointer from a grok task: untracked, so cleanup owns it.
+  printf 'token=fm.abcdefghijkl\n' > "$case_dir/wt/.fm-grok-turnend"
+  wt_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  git -C "$case_dir/project" update-ref refs/heads/main "$wt_head"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "hook-artifacts: teardown should succeed with landed work"
+  assert_present "$case_dir/wt/.claude/settings.local.json" \
+    "hook-artifacts: cleanup deleted the project's tracked .claude/settings.local.json"
+  [ "$(cat "$case_dir/wt/.claude/settings.local.json")" = "$settings" ] ||
+    fail "hook-artifacts: cleanup rewrote the project's tracked .claude/settings.local.json"
+  assert_absent "$case_dir/wt/.fm-grok-turnend" \
+    "hook-artifacts: cleanup left an untracked firstmate turn-end pointer behind"
+  dirty=$(git -C "$case_dir/wt" status --porcelain)
+  [ -z "$dirty" ] || fail "hook-artifacts: cleanup left the worktree dirty"$'\n'"$dirty"
+  pass "teardown removes untracked turn-end artifacts and preserves tracked project files"
+}
+
 test_no_mistakes_origin_remote_allows() {
   local case_dir rc
   case_dir=$(make_case nm-origin)
@@ -1377,6 +1411,7 @@ test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present
 test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
 test_no_mistakes_origin_remote_allows
+test_teardown_removes_only_untracked_hook_artifacts
 test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed
 test_herdr_teardown_clears_escalation_marker

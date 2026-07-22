@@ -97,8 +97,12 @@
 #                  written by this script; outside the worktree to avoid pi's trust gate)
 #     __PITURNEND__ absolute path to .pi/extensions/fm-primary-turnend-guard.ts in a pi secondmate home
 #     __PIWATCH__   absolute path to .pi/extensions/fm-primary-pi-watch.ts in a pi secondmate home
-# Per-harness turn-end hooks are installed automatically; some live outside the worktree.
-# grok uses a firstmate-owned global hook under ${GROK_HOME:-$HOME/.grok}/hooks
+#     __CLAUDESETTINGS__ absolute path to state/<task-id>.claude-settings.json (claude
+#                  turn-end Stop hook, written by this script; outside the worktree so it
+#                  can never collide with a project's own .claude/settings.local.json)
+# Per-harness turn-end hooks are installed automatically; most live outside the worktree.
+# claude, codex, and pi carry theirs on the launch command and write nothing into the
+# worktree at all. grok uses a firstmate-owned global hook under ${GROK_HOME:-$HOME/.grok}/hooks
 # plus a gitignored .fm-grok-turnend worktree pointer and a state token.
 # On success prints: spawned <id> harness=<name> kind=<ship|scout|secondmate> mode=<mode> yolo=<on|off> window=<backend-target> worktree=<path>
 # mode/yolo are resolved per-project from data/projects.md for ship/scout tasks;
@@ -419,7 +423,20 @@ launch_template() {
     # does NOT suppress the interactive ghost text (verified empirically), so the env
     # var is the correct control. The dim-aware composer reader in fm-tmux-lib.sh is
     # the defense-in-depth backstop for any pane this flag cannot reach.
-    claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions __MODELFLAG____EFFORTFLAG__"$(cat __BRIEF__)"' ;;
+    #
+    # --settings loads an ADDITIONAL settings file that merges with the project's
+    # own .claude/settings.local.json rather than replacing it (verified, claude
+    # 2.1.217: both the external Stop hook and a project Stop hook fire, and the
+    # project file stays byte-identical). That is how the turn-end hook stays out
+    # of the worktree entirely, the same shape as codex's notify= and pi's -e.
+    # A secondmate has no per-task turn-end hook, so it takes the plain form.
+    claude)
+      if [ "$kind" = secondmate ]; then
+        printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions __MODELFLAG____EFFORTFLAG__"$(cat __BRIEF__)"'
+      else
+        printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions --settings __CLAUDESETTINGS__ __MODELFLAG____EFFORTFLAG__"$(cat __BRIEF__)"'
+      fi
+      ;;
     codex)
       if [ "$kind" = secondmate ]; then
         printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox "$(cat __BRIEF__)"'
@@ -1096,6 +1113,11 @@ mkdir -p "$TASK_TMP/gotmp"
 mkdir -p "$STATE"
 STATE_REAL=$(cd "$STATE" && pwd -P)
 TURNEND="$STATE_REAL/$ID.turn-ended"
+# exclude_path suppresses an UNTRACKED path only. git still reports a TRACKED
+# file as modified, so an entry here is no protection whatsoever once the project
+# commits that path - which is exactly when overwriting it does damage.
+# refuse_if_tracked below is the guard for that case; exclude_path is only the
+# tidiness half.
 exclude_path() {
   local rel=$1 EXCL
   EXCL=$(git -C "$WT" rev-parse --git-path info/exclude 2>/dev/null || true)
@@ -1103,16 +1125,34 @@ exclude_path() {
   mkdir -p "$(dirname "$EXCL")"
   grep -qxF "$rel" "$EXCL" 2>/dev/null || echo "$rel" >> "$EXCL"
 }
+# Guard every worktree-RESIDENT hook write. Overwriting a path the project tracks
+# destroys committed project content, rides along in any `git add -A` the crewmate
+# runs, and blocks teardown's dirty check with something indistinguishable from
+# real work. Refuse the spawn instead: silently clobbering a project's own file is
+# never the safe default, and the operator can pick a harness whose hook lives
+# outside the worktree. Runs before state/<id>.meta is written, so a refusal
+# leaves no half-recorded task.
+refuse_if_tracked() {
+  local rel=$1
+  git -C "$WT" ls-files --error-unmatch -- "$rel" >/dev/null 2>&1 || return 0
+  echo "REFUSED: $rel is tracked by the project, and the $HARNESS turn-end hook would overwrite it." >&2
+  echo "Untrack or relocate that file in $WT, or dispatch this task on a harness whose turn-end hook lives outside the worktree (claude, codex, pi)." >&2
+  exit 1
+}
 if [ "$KIND" != secondmate ]; then
   case "$HARNESS" in
     claude*)
-      mkdir -p "$WT/.claude"
-      cat > "$WT/.claude/settings.local.json" <<EOF
+      # Written OUTSIDE the worktree and loaded with --settings (see launch_template).
+      # An in-worktree .claude/settings.local.json was the previous shape and was a
+      # data-destroying bug: the write was an unconditional truncate, and projects
+      # (meshery/meshery among them) legitimately TRACK that file with their own MCP
+      # servers and hooks in it. Lives in state/, cleaned by teardown.
+      cat > "$STATE/$ID.claude-settings.json" <<EOF
 {"hooks":{"Stop":[{"hooks":[{"type":"command","command":"touch '$TURNEND'"}]}]}}
 EOF
-      exclude_path '.claude/settings.local.json'
       ;;
     opencode*)
+      refuse_if_tracked '.opencode/plugins/fm-turn-end.js'
       mkdir -p "$WT/.opencode/plugins"
       cat > "$WT/.opencode/plugins/fm-turn-end.js" <<EOF
 export const FmTurnEnd = async ({ \$ }) => ({
@@ -1153,9 +1193,10 @@ EOF
       # guarded no-op for every non-firstmate grok session: it fires only when the
       # current workspace holds a .fm-grok-turnend token pointer that matches the
       # firstmate-owned hook registry. firstmate then drops that per-task pointer
-      # (gitignored, like the other harnesses' worktree hook files).
+      # (gitignored, and refused outright if the project tracks that path).
       # Result: the hook is outside the worktree, needs no trust grant, and never
       # touches grok's managed config - only firstmate-owned files.
+      refuse_if_tracked '.fm-grok-turnend'
       GROK_HOOKS_DIR="${GROK_HOME:-$HOME/.grok}/hooks"
       GROK_AUTH_DIR="$GROK_HOOKS_DIR/fm-turn-end.d"
       mkdir -p "$GROK_AUTH_DIR"
@@ -1255,6 +1296,7 @@ META_WINDOW=$T
 sq_brief=$(shell_quote "$BRIEF")
 sq_turnend=$(shell_quote "$TURNEND")
 sq_piext=$(shell_quote "$STATE/$ID.pi-ext.ts")
+sq_claudesettings=$(shell_quote "$STATE/$ID.claude-settings.json")
 sq_piturnend=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-turnend-guard.ts")
 sq_piwatch=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-pi-watch.ts")
 MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
@@ -1264,6 +1306,7 @@ LAUNCH=${LAUNCH//__EFFORTFLAG__/$EFFORTFLAG}
 LAUNCH=${LAUNCH//__BRIEF__/$sq_brief}
 LAUNCH=${LAUNCH//__TURNEND__/$sq_turnend}
 LAUNCH=${LAUNCH//__PIEXT__/$sq_piext}
+LAUNCH=${LAUNCH//__CLAUDESETTINGS__/$sq_claudesettings}
 LAUNCH=${LAUNCH//__PITURNEND__/$sq_piturnend}
 LAUNCH=${LAUNCH//__PIWATCH__/$sq_piwatch}
 if [ "$KIND" = secondmate ]; then

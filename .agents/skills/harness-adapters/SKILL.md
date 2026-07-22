@@ -143,6 +143,11 @@ Natural language is acceptable if uncertain.
 | Interrupt | single Escape |
 | Skill invocation | `/<skill>` (e.g. `/no-mistakes`) |
 
+Turn-end hook: `fm-spawn` keeps the crewmate turn-end `Stop` hook in `state/<id>.claude-settings.json`, outside the worktree, and loads it with `--settings` on the launch command.
+`--settings` merges an additional settings file with the project's own `.claude/settings.local.json` instead of replacing it, verified on Claude Code 2.1.217: both the external hook and a project `Stop` hook fire, and the project file stays byte-identical.
+Writing the hook into `<worktree>/.claude/settings.local.json` was the earlier shape and destroyed data, because projects such as `meshery/meshery` track that file and the write was an unconditional truncate.
+A `.git/info/exclude` entry cannot mask that: it suppresses untracked paths only, so a tracked collision still reads as a modification and blocks teardown.
+
 First launch in a fresh worktree, or first ever on a machine, may show a trust or bypass-permissions confirmation.
 After every spawn, peek the pane within about 20 seconds.
 If such a dialog is showing, accept it from an active firstmate session using `FM_HOME=<this-firstmate-home> bin/fm-send.sh <window> --key Enter`, or the choice the dialog requires, unless `FM_HOME` is already set to the active firstmate home; verify the brief started processing.
@@ -157,7 +162,7 @@ That styled capture is internal to the boolean detector only.
 `fm-peek` and every other human or LLM-facing capture path stays plain `tmux capture-pane` with no escape codes.
 
 **Primary-session guard fact (verified 2026-07-04, Claude Code 2.1.201; preserved 2026-07-08, Claude Code 2.1.204).**
-This is separate from the per-task crewmate turn-end hook above (that one just `touch`es a marker file in a task's own `.claude/settings.local.json`).
+This is separate from the per-task crewmate turn-end hook above (that one just `touch`es a marker file, from a settings file kept outside the worktree).
 The firstmate PRIMARY's own `.claude/settings.json` registers `bin/fm-turnend-guard.sh` as a Stop hook, and exiting with status 2 plus stderr reliably forces the model to continue.
 Claude Code's stdin payload to a Stop hook carries a `stop_hook_active` boolean that is `true` exactly when the current stop attempt is itself a forced continuation from an earlier block this turn; a hook can and should use that as its own loop-guard (always allow the stop when it is already `true`) rather than tracking state itself.
 A project-level `.claude/settings.json` only takes effect when Claude Code's project root is that exact directory - it does not walk up from a subdirectory looking for one, so firstmate launches the primary from the repo root.
@@ -303,7 +308,8 @@ grok loads PROJECT hooks (`<worktree>/.grok/hooks/`, `<worktree>/.claude/setting
 GLOBAL hooks in `~/.grok/hooks/` are always trusted and load on first launch.
 So `fm-spawn` installs ONE firstmate-owned global hook, `~/.grok/hooks/fm-turn-end.json`, plus the companion `~/.grok/hooks/fm-turn-end.sh`, guarded as a no-op for every non-firstmate grok session.
 Its `Stop` command fires only when the current workspace holds a `.fm-grok-turnend` token pointer that matches the firstmate-owned hook registry under `~/.grok/hooks/fm-turn-end.d/`.
-`fm-spawn` writes that per-task pointer (`<worktree>/.fm-grok-turnend`, gitignored via git info/exclude like the other harnesses' worktree hook files) and a matching registry entry naming this task's `state/<id>.turn-ended`.
+`fm-spawn` writes that per-task pointer (`<worktree>/.fm-grok-turnend`, gitignored via git info/exclude) and a matching registry entry naming this task's `state/<id>.turn-ended`.
+That pointer and opencode's `.opencode/plugins/fm-turn-end.js` are the only turn-end artifacts still written inside a worktree; `fm-spawn` refuses the spawn outright if the project tracks either path, because an exclude entry cannot mask a tracked file and overwriting it would destroy project content.
 The hook reads `$GROK_WORKSPACE_ROOT`, which is always set for hooks and equals the worktree.
 This keeps the hook outside the worktree, needs no trust grant, and writes only firstmate-owned files.
 `fm-teardown` removes the worktree pointer before returning a pooled worktree.

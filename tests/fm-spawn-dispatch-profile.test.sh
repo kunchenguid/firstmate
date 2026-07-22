@@ -1,10 +1,17 @@
 #!/usr/bin/env bash
-# Behavior tests for fm-spawn.sh concrete dispatch profile flags.
+# Behavior tests for fm-spawn.sh concrete dispatch profile flags and per-harness
+# turn-end hook installation.
 #
 # These tests drive fm-spawn through meta writing and launch construction with a
 # fake tmux pane and a real isolated git worktree. The fake tmux captures the
 # literal launch command sent with `tmux send-keys -l`, so assertions pin the
 # command firstmate would run without starting any real harness.
+#
+# The turn-end hook cases exist because a worktree-resident hook file used to be
+# written with an unconditional `cat >`, which truncated the project's own
+# tracked `.claude/settings.local.json`. `.git/info/exclude` cannot mask that:
+# it suppresses UNTRACKED paths only, so a tracked collision stayed visible as a
+# modification and blocked teardown. See bin/fm-spawn.sh's turn-end hook block.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -105,6 +112,92 @@ assert_meta_profile() {
   assert_grep "effort=$effort" "$meta" "meta missing effort=$effort"
 }
 
+# track_worktree_file <worktree> <rel> <content>: commit <rel> inside the
+# worktree so the path is TRACKED - the case a `.git/info/exclude` entry cannot
+# mask and an unconditional `cat >` would destroy.
+track_worktree_file() {
+  local wt=$1 rel=$2 content=$3
+  mkdir -p "$wt/$(dirname "$rel")"
+  printf '%s' "$content" > "$wt/$rel"
+  git -C "$wt" add -f -- "$rel"
+  git -C "$wt" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit -qm "track $rel"
+}
+
+# assert_worktree_pristine <worktree> <baseline> <rel> <label>
+assert_worktree_pristine() {
+  local wt=$1 baseline=$2 rel=$3 label=$4 dirty
+  cmp -s "$baseline" "$wt/$rel" ||
+    fail "$label: spawn rewrote the project's tracked $rel"$'\n'"now: $(cat "$wt/$rel" 2>&1)"
+  dirty=$(git -C "$wt" status --porcelain 2>&1)
+  [ -z "$dirty" ] || fail "$label: spawn left the worktree dirty"$'\n'"$dirty"
+}
+
+test_claude_turnend_hook_preserves_tracked_project_settings() {
+  local rec id out status launch state_real
+  id=turnend-claude-tracked-z17
+  rec=$(make_spawn_case turnend-claude-tracked claude "$id")
+  read_case_record "$rec"
+  # Shape taken from meshery/meshery, which tracks this file.
+  track_worktree_file "$WT_DIR" .claude/settings.local.json \
+    '{"enabledMcpjsonServers":["meshery"],"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"echo project"}]}]}}'
+  cp "$WT_DIR/.claude/settings.local.json" "$CASE_DIR/settings.baseline"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "claude spawn into a worktree that tracks .claude/settings.local.json should succeed"
+  assert_contains "$out" "spawned $id harness=claude" "spawn did not report claude"
+  assert_worktree_pristine "$WT_DIR" "$CASE_DIR/settings.baseline" .claude/settings.local.json \
+    "tracked project settings"
+
+  state_real=$(cd "$HOME_DIR/state" && pwd -P)
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "--settings '$HOME_DIR/state/$id.claude-settings.json'" \
+    "claude launch did not load the turn-end hook from outside the worktree"
+  assert_grep "$state_real/$id.turn-ended" "$HOME_DIR/state/$id.claude-settings.json" \
+    "external claude settings did not carry the turn-end Stop hook"
+  pass "claude turn-end hook leaves a tracked project .claude/settings.local.json byte-identical"
+}
+
+test_claude_turnend_hook_writes_nothing_into_a_clean_worktree() {
+  local rec id out status launch dirty
+  id=turnend-claude-clean-z18
+  rec=$(make_spawn_case turnend-claude-clean claude "$id")
+  read_case_record "$rec"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "claude spawn into a worktree with no project settings should succeed"
+  assert_absent "$WT_DIR/.claude/settings.local.json" \
+    "claude turn-end hook must not be written into the worktree"
+  dirty=$(git -C "$WT_DIR" status --porcelain 2>&1)
+  [ -z "$dirty" ] || fail "claude spawn left the worktree dirty"$'\n'"$dirty"
+
+  assert_present "$HOME_DIR/state/$id.claude-settings.json" "external claude settings file was not written"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "--settings '$HOME_DIR/state/$id.claude-settings.json'" \
+    "claude launch did not load the turn-end hook from outside the worktree"
+  pass "claude turn-end hook adds no worktree artifact for a project without settings"
+}
+
+test_worktree_resident_hook_refuses_a_tracked_collision() {
+  local rec id out status
+  id=turnend-opencode-tracked-z19
+  rec=$(make_spawn_case turnend-opencode-tracked opencode "$id")
+  read_case_record "$rec"
+  track_worktree_file "$WT_DIR" .opencode/plugins/fm-turn-end.js 'export const Project = {}'
+  cp "$WT_DIR/.opencode/plugins/fm-turn-end.js" "$CASE_DIR/plugin.baseline"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 1 "$status" "opencode spawn must refuse when its hook path is tracked by the project"
+  assert_contains "$out" "REFUSED: .opencode/plugins/fm-turn-end.js is tracked by the project" \
+    "spawn did not explain the tracked turn-end hook collision"
+  assert_worktree_pristine "$WT_DIR" "$CASE_DIR/plugin.baseline" .opencode/plugins/fm-turn-end.js \
+    "tracked project plugin"
+  pass "a worktree-resident turn-end hook refuses to overwrite a tracked project file"
+}
+
 test_no_profile_keeps_claude_launch_unchanged() {
   local rec id out status expected launch
   id=profile-off-z1
@@ -118,7 +211,7 @@ test_no_profile_keeps_claude_launch_unchanged() {
   assert_meta_profile "$HOME_DIR/state/$id.meta" claude default default
 
   launch=$(cat "$LAUNCH_LOG")
-  expected="CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$(cat '$HOME_DIR/data/$id/brief.md')\""
+  expected="CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions --settings '$HOME_DIR/state/$id.claude-settings.json' \"\$(cat '$HOME_DIR/data/$id/brief.md')\""
   [ "$launch" = "$expected" ] || fail "no-profile claude launch changed"$'\n'"expected: $expected"$'\n'"actual:   $launch"
   pass "no --model/--effort records defaults and keeps the claude launch byte-identical"
 }
@@ -219,7 +312,7 @@ test_claude_threads_model_and_effort() {
   expect_code 0 "$status" "claude spawn with profile flags should succeed"
   assert_meta_profile "$HOME_DIR/state/$id.meta" claude sonnet high
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "claude --dangerously-skip-permissions --model 'sonnet' --effort 'high'" \
+  assert_contains "$launch" "claude --dangerously-skip-permissions --settings '$HOME_DIR/state/$id.claude-settings.json' --model 'sonnet' --effort 'high'" \
     "claude launch did not thread model and effort flags"
   pass "claude receives --model and --effort profile flags"
 }
@@ -435,5 +528,8 @@ test_pi_threads_model_and_max_effort
 test_quota_selected_default_array_reaches_spawn
 test_batch_forwards_shared_profile_flags
 test_active_dispatch_profile_does_not_block_secondmate_launch
+test_claude_turnend_hook_preserves_tracked_project_settings
+test_claude_turnend_hook_writes_nothing_into_a_clean_worktree
+test_worktree_resident_hook_refuses_a_tracked_collision
 
 echo "# all fm-spawn-dispatch-profile tests passed"

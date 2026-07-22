@@ -70,7 +70,7 @@ Spawn:
 1. Ensure the project repo is registered in Orca, adding it with `orca repo add --path` when needed.
 2. Create an independent Orca worktree with `orca worktree create --repo id:<repo> --name fm-<id> --no-parent --setup skip`.
 3. Reuse the terminal returned by Orca worktree creation only when it appears in the verified `result.terminal.handle` shape, or create a titled terminal in that worktree when Orca returns only the worktree.
-4. Install firstmate's per-harness turn-end hooks in the Orca worktree.
+4. Install firstmate's per-harness turn-end hooks, which reach the Orca worktree only for the harnesses that still keep a hook file there; claude, codex, and pi carry theirs on the launch command instead.
 5. Write metadata, then send `GOTMPDIR` export and the selected harness launch through the recorded Orca terminal.
 
 Operation routing:
