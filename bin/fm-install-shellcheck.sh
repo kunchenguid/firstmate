@@ -14,7 +14,17 @@ DESTINATION=${1:?usage: fm-install-shellcheck.sh <destination-directory>}
 TMP=$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/fm-shellcheck.XXXXXX")
 trap 'rm -rf "$TMP"' EXIT
 
-curl -fsSL "$URL" -o "$TMP/$ARCHIVE"
+DOWNLOAD_ATTEMPTS=3
+download_attempt=1
+while ! curl -fsSL "$URL" -o "$TMP/$ARCHIVE"; do
+  [ "$download_attempt" -lt "$DOWNLOAD_ATTEMPTS" ] || {
+    printf 'fm-install-shellcheck.sh: download failed after %s attempts\n' "$DOWNLOAD_ATTEMPTS" >&2
+    exit 1
+  }
+  printf 'fm-install-shellcheck.sh: download attempt %s failed; retrying\n' "$download_attempt" >&2
+  sleep "$download_attempt"
+  download_attempt=$((download_attempt + 1))
+done
 ACTUAL_SHA256=$(sha256sum "$TMP/$ARCHIVE" | awk '{print $1}')
 [ "$ACTUAL_SHA256" = "$SHA256" ] || {
   printf 'fm-install-shellcheck.sh: checksum mismatch for %s\n' "$ARCHIVE" >&2
