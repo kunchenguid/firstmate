@@ -91,7 +91,7 @@ setup_home() {
 }
 
 test_secondmate_target_is_marked() {
-  local dir fb log home rc got
+  local dir fb log home rc got corr
   dir="$TMP_ROOT/sm"; mkdir -p "$dir"
   fb=$(make_stubs "$dir"); log="$dir/send.log"
   home=$(setup_home sm)
@@ -100,14 +100,23 @@ test_secondmate_target_is_marked() {
   expect_code 0 "$rc" "send to a secondmate target should succeed"
   got=$(cat "$log")
   case "$got" in
-    "$FM_FROMFIRST_MARK"audit\ the\ build) : ;;
-    *) fail "secondmate send: literal text should be marker+text"$'\n'"--- bytes ---"$'\n'"$(printf '%s' "$got" | od -An -c)" ;;
+    "$FM_FROMFIRST_MARK"corr=[a-f0-9][a-f0-9]*) : ;;
+    *) fail "secondmate send: literal text should be marker+corr+text"$'\n'"--- bytes ---"$'\n'"$(printf '%s' "$got" | od -An -c)" ;;
   esac
-  pass "fm-send: a kind=secondmate target gets the from-firstmate marker prepended"
+  case "$got" in
+    *audit\ the\ build) : ;;
+    *) fail "secondmate send lost the request body"$'\n'"$got" ;;
+  esac
+  # shellcheck source=bin/fm-pending-reply-lib.sh
+  . "$ROOT/bin/fm-pending-reply-lib.sh"
+  corr=$(fm_pending_reply_extract_corr "$got")
+  [ -f "$(fm_pending_reply_path "$home/state" "$corr")" ] \
+    || fail "marked secondmate send should create a parent pending-reply record"
+  pass "fm-send: a kind=secondmate target gets the from-firstmate marker and corr prepended"
 }
 
 test_exact_secondmate_task_id_is_marked() {
-  local dir fb log home rc got already_marked
+  local dir fb log home rc got already_marked corr
   dir="$TMP_ROOT/sm-exact"; mkdir -p "$dir"
   fb=$(make_stubs "$dir"); log="$dir/send.log"
   home=$(setup_home sm-exact)
@@ -116,16 +125,22 @@ test_exact_secondmate_task_id_is_marked() {
   expect_code 0 "$rc" "send to an exact secondmate task id should succeed"
   got=$(cat "$log")
   case "$got" in
-    "$FM_FROMFIRST_MARK"audit\ the\ build) : ;;
-    *) fail "exact secondmate send: literal text should be marker+text"$'\n'"--- bytes ---"$'\n'"$(printf '%s' "$got" | od -An -c)" ;;
+    "$FM_FROMFIRST_MARK"corr=[a-f0-9]*) : ;;
+    *) fail "exact secondmate send: literal text should be marker+corr+text"$'\n'"--- bytes ---"$'\n'"$(printf '%s' "$got" | od -An -c)" ;;
   esac
-  already_marked="${FM_FROMFIRST_MARK}already routed"
+  # shellcheck source=bin/fm-pending-reply-lib.sh
+  . "$ROOT/bin/fm-pending-reply-lib.sh"
+  corr=$(fm_pending_reply_extract_corr "$got")
+  # Resend with the same corr already present: embed is idempotent for that corr.
+  already_marked="${FM_FROMFIRST_MARK}corr=${corr} already routed"
   run_send "$fb" "$home" "$log" "domain" "$already_marked"; rc=$?
   expect_code 0 "$rc" "send of already-marked exact-id content should succeed"
   got=$(cat "$log")
-  [ "$got" = "$already_marked" ] \
-    || fail "exact secondmate send double-prefixed already-marked content"$'\n'"--- bytes ---"$'\n'"$(printf '%s' "$got" | od -An -tx1)"
-  pass "fm-send: an exact kind=secondmate task id is marked exactly once"
+  case "$got" in
+    "${FM_FROMFIRST_MARK}corr=${corr} already routed") : ;;
+    *) fail "exact secondmate send altered already-correlated content"$'\n'"--- bytes ---"$'\n'"$(printf '%s' "$got" | od -An -tx1)" ;;
+  esac
+  pass "fm-send: an exact kind=secondmate task id is marked with corr exactly once"
 }
 
 test_crewmate_target_is_not_marked() {
@@ -216,7 +231,7 @@ test_marker_transformation_is_idempotent() {
 }
 
 test_marked_send_preserves_trailing_newlines() {
-  local dir fb log home rc payload expected_hex got_hex
+  local dir fb log home rc payload got_hex body_hex corr
   dir="$TMP_ROOT/sm-trailing-newlines"; mkdir -p "$dir"
   fb=$(make_stubs "$dir"); log="$dir/send.log"
   home=$(setup_home sm-trailing-newlines)
@@ -224,10 +239,17 @@ test_marked_send_preserves_trailing_newlines() {
   payload=$'audit the build\n\n'
   run_send "$fb" "$home" "$log" "domain" "$payload"; rc=$?
   expect_code 0 "$rc" "marked send with trailing newlines should succeed"
-  expected_hex=$(printf '%s%s' "$FM_FROMFIRST_MARK" "$payload" | od -An -tx1 | tr -d ' \n')
+  # shellcheck source=bin/fm-pending-reply-lib.sh
+  . "$ROOT/bin/fm-pending-reply-lib.sh"
+  corr=$(fm_pending_reply_extract_corr "$(cat "$log")")
+  [ -n "$corr" ] || fail "marked send should embed a corr id"
+  # Body after marker+corr+space must preserve the original trailing newlines.
+  body_hex=$(printf '%s' "$payload" | od -An -tx1 | tr -d ' \n')
   got_hex=$(od -An -tx1 "$log" | tr -d ' \n')
-  [ "$got_hex" = "$expected_hex" ] \
-    || fail "marked send changed trailing newline bytes: expected $expected_hex, got $got_hex"
+  case "$got_hex" in
+    *"$body_hex") : ;;
+    *) fail "marked send lost trailing newline body bytes: got $got_hex expected to end with $body_hex" ;;
+  esac
   pass "fm-send: marked secondmate payload preserves trailing newline bytes"
 }
 
