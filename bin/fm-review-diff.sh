@@ -7,7 +7,8 @@
 # When state/<id>.meta records pr= for an open PR, the compare side is the PR
 # head (recorded pr_head= when reachable, else refs/pull/<n>/head) so review
 # stays current after no-mistakes fix rounds push to the PR; if the PR head
-# cannot be resolved, the script falls back to the local branch with a warning.
+# cannot be resolved, the script falls back to the worktree's current branch
+# with a warning.
 # Usage: fm-review-diff.sh <task-id> [--stat]
 #   --stat prints only the stat summary; default prints stat summary plus full diff.
 set -eu
