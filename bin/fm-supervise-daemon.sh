@@ -20,6 +20,18 @@
 # state/.subsuper-escalations and are flushed on the next "while you were out"
 # catch-up or when afk is re-entered.
 #
+# PRESENT MODE (FM_SUPERVISE_PRESENT=1, the Codex/traex durable wake fallback).
+# The same daemon runs a second, simpler mode for a primary harness that cannot
+# be woken by background-task completion (Codex/traex; Claude/grok get that wake
+# natively). Launched by bin/fm-present-launch.sh while the captain is PRESENT
+# (afk off), it runs the watcher child in its NORMAL mode - the watcher itself
+# absorbs benign wakes and exits only on an actionable one - and its sole job is
+# to nudge the captain's pane on that exit so a fresh firstmate turn starts and
+# drains state/.wake-queue. It self-triages nothing (no escalation buffer, no
+# housekeeping), uses a distinct lock/log (.supervise-present.*), injects ONLY
+# while afk is inactive, and yields (exits) the moment state/.afk appears so the
+# away daemon owns supervision. See docs/supervision-protocols/codex.md.
+#
 # SHELL-TARGET SAFETY. When the selected supervisor backend can report the
 # pane's foreground command, the daemon refuses to arm or inject if the target
 # is a login shell. If fallback discovery lands on a shell, set
@@ -1120,10 +1132,24 @@ window_for_task() {  # <task-key> [state]
 inject_msg() {  # <message> [state]
   local msg=$1 state target backend shell_cmd retries sleep_s verdict composer
   state="${2:-$(_state_root)}"
-  # (1) Presence-gate: inject ONLY when afk is active. When afk is off, the
-  # daemon self-handles and stays quiet; firstmate drives the normal always-on
-  # watcher triage. Escalations buffer and survive for the next catch-up flush.
-  afk_active "$state" || { log "inject deferred: afk inactive"; return 1; }
+  # (1) Presence-gate: mutually exclusive by mode, so the away daemon and a
+  # present daemon can never both drive the same pane.
+  #   - Away mode (default): inject ONLY when afk is active. When afk is off the
+  #     away daemon self-handles and stays quiet; firstmate drives the normal
+  #     always-on watcher triage. Escalations buffer for the next catch-up flush.
+  #   - Present mode (FM_SUPERVISE_PRESENT=1, the Codex/traex durable wake
+  #     fallback): inject ONLY while afk is INACTIVE. The nudge is what starts a
+  #     fresh model turn when the captain is at the keyboard. If the captain went
+  #     away and the away daemon took over, this present daemon yields (see
+  #     fm_super_main) and, until it exits, this gate makes its inject a no-op.
+  if [ "${FM_SUPERVISE_PRESENT:-0}" = 1 ]; then
+    if afk_active "$state"; then
+      log "inject deferred: afk active (present daemon yields to away daemon)"
+      return 1
+    fi
+  else
+    afk_active "$state" || { log "inject deferred: afk inactive"; return 1; }
+  fi
   # (2) Single-line digest: collapse any embedded newlines so submission via
   # send-keys + Enter is unambiguous regardless of how the TUI composer treats
   # them. Then prepend the sentinel marker - firstmate's afk-exit contract
@@ -1274,6 +1300,27 @@ handle_wake() {  # <reason> <state>
 # directly and pass state explicitly, so they do not call log).
 log() { [ -n "${LOG:-}" ] && printf '[%s] %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$*" >> "$LOG"; }
 
+# --- present-mode wake handling ---------------------------------------------
+# The Codex/traex durable wake fallback. Unlike away mode, there is nothing to
+# triage here: the watcher child ran in NORMAL mode (state/.afk absent), so it
+# already absorbed every benign wake itself and exits ONLY for an actionable
+# one. The present daemon's sole job is to convert that watcher exit into a
+# fresh firstmate turn by nudging the captain's pane - the wake channel Codex
+# lacks natively and Claude gets for free from background-task completion.
+# Firstmate then drains state/.wake-queue and handles the wake through its
+# emitted supervision protocol. The wake is already durable in state/.wake-queue
+# (fm-watch enqueues before it exits), so a deferred or failed inject loses
+# nothing: the record persists for the next inject attempt, the next watcher
+# wake, or a manual bin/fm-wake-drain.sh at the top of any turn.
+present_handle_wake() {  # <reason> <state>
+  local reason=$1 state=$2
+  if inject_msg "Supervision wake ($reason): drain queued wakes with bin/fm-wake-drain.sh and handle per the emitted supervision protocol." "$state"; then
+    log "present nudge injected: $reason"
+  else
+    log "present nudge deferred (wake persists in state/.wake-queue): $reason"
+  fi
+}
+
 trim_log() {
   local sz tmp
   [ -n "${LOG:-}" ] || return 0
@@ -1299,10 +1346,24 @@ fm_super_main() {
   FM_STATE_OVERRIDE="$STATE" . "$FM_DAEMON_DIR/fm-wake-lib.sh"
 
   local WATCH="$FM_DAEMON_DIR/fm-watch.sh"
-  local LOG="$STATE/.supervise-daemon.log"
-  local WATCH_ERR="$STATE/.supervise-daemon.watcher.err"
-  local LOCK="$STATE/.supervise-daemon.lock"
-  local PIDFILE="$STATE/.supervise-daemon.pid"
+  # Present mode (FM_SUPERVISE_PRESENT=1) is the Codex/traex durable wake
+  # fallback: a distinct lock/log/pidfile so a present daemon and an away daemon
+  # can coexist without fighting over one lock (their inject gates are mutually
+  # exclusive by afk state - see inject_msg - and the watcher singleton lock
+  # keeps only one watcher child alive across both).
+  local PRESENT=${FM_SUPERVISE_PRESENT:-0}
+  local LOG WATCH_ERR LOCK PIDFILE
+  if [ "$PRESENT" = 1 ]; then
+    LOG="$STATE/.supervise-present.log"
+    WATCH_ERR="$STATE/.supervise-present.watcher.err"
+    LOCK="$STATE/.supervise-present.lock"
+    PIDFILE="$STATE/.supervise-present.pid"
+  else
+    LOG="$STATE/.supervise-daemon.log"
+    WATCH_ERR="$STATE/.supervise-daemon.watcher.err"
+    LOCK="$STATE/.supervise-daemon.lock"
+    PIDFILE="$STATE/.supervise-daemon.pid"
+  fi
   local INJECT_FAIL_SLEEP=${FM_INJECT_FAIL_SLEEP:-$INJECT_FAIL_SLEEP_DEFAULT}
   local CRASH_THRESHOLD=${FM_CRASH_THRESHOLD:-$CRASH_THRESHOLD_DEFAULT}
   local CRASH_WINDOW=${FM_CRASH_WINDOW:-$CRASH_WINDOW_DEFAULT}
@@ -1312,11 +1373,12 @@ fm_super_main() {
   [ -x "$WATCH" ] || { echo "error: watcher not found or not executable: $WATCH" >&2; exit 1; }
 
   # --- single instance (portable lock, no flock dependency) ------------------
+  local daemon_label="fm-supervise-daemon"; [ "$PRESENT" = 1 ] && daemon_label="fm-supervise-daemon (present mode)"
   if ! fm_lock_try_acquire "$LOCK"; then
     if [ -n "${FM_LOCK_HELD_PID:-}" ]; then
-      echo "error: another fm-supervise-daemon is already running (pid $FM_LOCK_HELD_PID, lock $LOCK held)" >&2
+      echo "error: another $daemon_label is already running (pid $FM_LOCK_HELD_PID, lock $LOCK held)" >&2
     else
-      echo "error: another fm-supervise-daemon is already running (lock $LOCK held)" >&2
+      echo "error: another $daemon_label is already running (lock $LOCK held)" >&2
     fi
     exit 1
   fi
@@ -1407,7 +1469,8 @@ fm_super_main() {
 
   local afk_status="off"
   afk_active "$STATE" && afk_status="on"
-  log "daemon starting (pid $$); target=$TARGET; target_source=$target_source; backend=$BACKEND; backend_source=$backend_source; afk=$afk_status; inject_skip='${FM_INJECT_SKIP:-$INJECT_SKIP_DEFAULT}'; stale_escalate=${FM_STALE_ESCALATE_SECS:-$STALE_ESCALATE_SECS_DEFAULT}s; batch=${FM_ESCALATE_BATCH_SECS:-$ESCALATE_BATCH_SECS_DEFAULT}s"
+  local mode_label="away"; [ "$PRESENT" = 1 ] && mode_label="present"
+  log "daemon starting (pid $$); mode=$mode_label; target=$TARGET; target_source=$target_source; backend=$BACKEND; backend_source=$backend_source; afk=$afk_status; inject_skip='${FM_INJECT_SKIP:-$INJECT_SKIP_DEFAULT}'; stale_escalate=${FM_STALE_ESCALATE_SECS:-$STALE_ESCALATE_SECS_DEFAULT}s; batch=${FM_ESCALATE_BATCH_SECS:-$ESCALATE_BATCH_SECS_DEFAULT}s"
   migrate_watcher_pause_markers "$STATE"
 
   # --- shutdown: flush buffered escalations, reap child, release lock -------
@@ -1458,6 +1521,17 @@ fm_super_main() {
 
   local rc reason
   while true; do
+    # --- present-mode yield to away mode -----------------------------------
+    # If the captain went away (state/.afk appeared) while a present daemon was
+    # running, the away daemon owns supervision now. Exit cleanly (cleanup kills
+    # our watcher child so the away daemon's own child can take the singleton
+    # lock, and releases our present lock). The next present daemon is launched
+    # on the captain's return. In away mode this branch never fires.
+    if [ "$PRESENT" = 1 ] && afk_active "$STATE"; then
+      log "present daemon yielding: away mode active; exiting so the away daemon owns supervision"
+      cleanup
+    fi
+
     # --- pane-gone guard (preserved) ---------------------------------------
     # With the #29 watcher's enqueue-before-suppress, a wake is no longer
     # swallowed by running the watcher with no injection target. We still back
@@ -1503,7 +1577,11 @@ fm_super_main() {
           continue
         fi
         log "wake: $reason"
-        handle_wake "$reason" "$STATE"
+        if [ "$PRESENT" = 1 ]; then
+          present_handle_wake "$reason" "$STATE"
+        else
+          handle_wake "$reason" "$STATE"
+        fi
         trim_log
       fi
       start_watcher || continue
@@ -1514,8 +1592,12 @@ fm_super_main() {
     # to detect its exit (the kill -0 above) promptly and run housekeeping often
     # enough that batch flushes, stale rechecks, and the catch-all scan fire on
     # cadence. Gating keeps a large fleet cheap between ticks.
+    # Present mode has no escalation buffer, wedge markers, or catch-all scan to
+    # age (the watcher's own normal-mode triage plus firstmate's handling own
+    # all of that), so it skips housekeeping entirely and just polls for the
+    # watcher child's exit and the away-mode yield above.
     sleep 1
-    if [ "$(_file_age "$STATE/.subsuper-last-housekeep")" -ge "${FM_HOUSEKEEPING_TICK:-$HOUSEKEEPING_TICK_DEFAULT}" ]; then
+    if [ "$PRESENT" != 1 ] && [ "$(_file_age "$STATE/.subsuper-last-housekeep")" -ge "${FM_HOUSEKEEPING_TICK:-$HOUSEKEEPING_TICK_DEFAULT}" ]; then
       _now > "$STATE/.subsuper-last-housekeep"
       housekeeping "$STATE"
     fi
