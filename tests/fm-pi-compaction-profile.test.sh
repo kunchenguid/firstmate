@@ -40,12 +40,14 @@ AGENT_DIR="$HOME_DIR/controlled-agent"
 PROJECT_DIR="$TMP_ROOT/project"
 HOSTILE_HOME="$TMP_ROOT/hostile-home"
 HOSTILE_AGENT="$TMP_ROOT/hostile-agent"
-mkdir -p "$HOME_DIR/config" "$AGENT_DIR/extensions" "$PROJECT_DIR/.pi/extensions" "$HOSTILE_HOME" "$HOSTILE_AGENT"
+HOSTILE_PACKAGE="$TMP_ROOT/hostile-package"
+mkdir -p "$HOME_DIR/config" "$AGENT_DIR/extensions" "$PROJECT_DIR/.pi/extensions" "$HOSTILE_HOME" "$HOSTILE_AGENT" "$HOSTILE_PACKAGE"
 
 printf '%s\n' '{"compaction":{"enabled":true,"reserveTokens":108800,"keepRecentTokens":20000},"defaultThinkingLevel":"xhigh"}' > "$AGENT_DIR/settings.json"
 printf '%s\n' '{"compaction":{"enabled":false,"reserveTokens":1},"defaultThinkingLevel":"low"}' > "$PROJECT_DIR/.pi/settings.json"
 printf '%s\n' 'export default pi => { pi.on("session_before_compact", () => ({ cancel: true })); };' > "$PROJECT_DIR/.pi/extensions/cancel.ts"
 printf '%s\n' 'export default pi => { pi.on("session_before_compact", () => ({ cancel: true })); };' > "$AGENT_DIR/extensions/cancel.ts"
+printf '%s\n' '{"name":"hostile-pi","version":"9.9.9","piConfig":{"name":"hostile","configDir":".hostile"}}' > "$HOSTILE_PACKAGE/package.json"
 {
   printf 'pi_command=%s\n' "$PI_COMMAND"
   printf 'pi_version=0.81.1\n'
@@ -58,8 +60,9 @@ printf '%s\n' 'export default pi => { pi.on("session_before_compact", () => ({ c
 } > "$HOME_DIR/config/pi-delegated-profile"
 
 HOME="$HOSTILE_HOME" PI_CODING_AGENT_DIR="$HOSTILE_AGENT" PI_CONFIG_DIR="$TMP_ROOT/ineffective" \
+  PI_PACKAGE_DIR="$HOSTILE_PACKAGE" \
   fm_pi_profile_load "$HOME_DIR/config" "$PROJECT_DIR" \
-  || fail "controlled profile did not neutralize hostile HOME, PI_CODING_AGENT_DIR, PI_CONFIG_DIR, and project settings"
+  || fail "controlled profile did not neutralize hostile HOME, Pi package/config variables, and project settings"
 [ "$FM_PI_CONTEXT_WINDOW" = 272000 ] || fail "effective context window was not 272000"
 [ "$FM_PI_THRESHOLD" = 163200 ] || fail "60 percent threshold was not 163200"
 [ "$FM_PI_RESERVE_TOKENS" = 108800 ] || fail "272000-token model did not derive reserve 108800"

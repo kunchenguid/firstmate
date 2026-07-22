@@ -232,6 +232,7 @@ SPAWN_TASK_LOCK=
 SPAWN_TASK_LOCK_HELD=0
 CONFIG_INHERIT_LOCK=
 CONFIG_INHERIT_LOCK_HELD=0
+CONFIG_INHERIT_REPORT=
 
 parse_orca_worktree_result() {
   local raw=$1 rest
@@ -305,6 +306,10 @@ spawn_abort_cleanup() {
   if [ "$CONFIG_INHERIT_LOCK_HELD" = 1 ]; then
     CONFIG_INHERIT_LOCK_HELD=0
     fm_lock_release "$CONFIG_INHERIT_LOCK" || true
+  fi
+  if [ -n "$CONFIG_INHERIT_REPORT" ]; then
+    rm -f "$CONFIG_INHERIT_REPORT" 2>/dev/null || true
+    CONFIG_INHERIT_REPORT=
   fi
   return "$status"
 }
@@ -743,7 +748,24 @@ if [ "$KIND" = secondmate ]; then
   CONFIG_INHERIT_LOCK_HELD=1
   # Inheritance propagation: push the primary-authoritative local inheritance
   # surface into this secondmate home (fm-config-inherit-lib.sh).
-  propagate_secondmate_inheritance "$FM_HOME" "$PROJ_ABS" "$CONFIG" "$DATA" \
+  sm_inherit_rc=0
+  if [ -f "$CONFIG/pi-delegated-profile" ]; then
+    CONFIG_INHERIT_REPORT=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-spawn-inherit.XXXXXX" 2>/dev/null) || {
+      echo "error: could not verify delegated Pi profile inheritance for secondmate $ID" >&2
+      exit 1
+    }
+    FM_CONFIG_INHERIT_REPORT="$CONFIG_INHERIT_REPORT" \
+      propagate_secondmate_inheritance "$FM_HOME" "$PROJ_ABS" "$CONFIG" "$DATA" || sm_inherit_rc=$?
+    if ! fm_config_inherit_item_converged "$CONFIG_INHERIT_REPORT" pi-delegated-profile; then
+      echo "error: delegated Pi profile did not converge for secondmate $ID" >&2
+      exit 1
+    fi
+    rm -f "$CONFIG_INHERIT_REPORT"
+    CONFIG_INHERIT_REPORT=
+  else
+    propagate_secondmate_inheritance "$FM_HOME" "$PROJ_ABS" "$CONFIG" "$DATA" || sm_inherit_rc=$?
+  fi
+  [ "$sm_inherit_rc" -eq 0 ] \
     || echo "warning: secondmate $ID inheritance failed for $PROJ_ABS" >&2
   if [ -f "$PROJ_ABS/data/charter.md" ]; then
     BRIEF="$PROJ_ABS/data/charter.md"
@@ -790,7 +812,7 @@ if [ "$HARNESS" = pi ] && [ "$PI_PROFILE_CONFIGURED" -eq 1 ]; then
   fi
   MODEL=$FM_PI_MODEL
   EFFORT=medium
-  PICMD="PI_CODING_AGENT_DIR=$(shell_quote "$FM_PI_AGENT_DIR") FM_PI_DELEGATED_MODEL=$(shell_quote "$FM_PI_MODEL") FM_PI_DELEGATED_CONTEXT_WINDOW=$(shell_quote "$FM_PI_CONTEXT_WINDOW") FM_PI_DELEGATED_AGENT_DIR=$(shell_quote "$FM_PI_AGENT_DIR") FM_PI_DELEGATED_RESERVE_TOKENS=$(shell_quote "$FM_PI_RESERVE_TOKENS") FM_PI_DELEGATED_KEEP_RECENT_TOKENS=$(shell_quote "$FM_PI_KEEP_RECENT_TOKENS") $(shell_quote "$FM_PI_COMMAND")"
+  PICMD="PI_PACKAGE_DIR= PI_CODING_AGENT_DIR=$(shell_quote "$FM_PI_AGENT_DIR") FM_PI_DELEGATED_MODEL=$(shell_quote "$FM_PI_MODEL") FM_PI_DELEGATED_CONTEXT_WINDOW=$(shell_quote "$FM_PI_CONTEXT_WINDOW") FM_PI_DELEGATED_AGENT_DIR=$(shell_quote "$FM_PI_AGENT_DIR") FM_PI_DELEGATED_RESERVE_TOKENS=$(shell_quote "$FM_PI_RESERVE_TOKENS") FM_PI_DELEGATED_KEEP_RECENT_TOKENS=$(shell_quote "$FM_PI_KEEP_RECENT_TOKENS") $(shell_quote "$FM_PI_COMMAND")"
   PIPROFILE="--no-approve --no-extensions --models $(shell_quote "$FM_PI_MODEL") -e $(shell_quote "$FM_ROOT/bin/fm-pi-profile-guard.ts") "
 fi
 
