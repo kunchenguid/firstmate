@@ -96,6 +96,8 @@ init_changed_fixture_repo() {
   chmod +x "$repo/bin/fm-test-run.sh"
   for script in \
     fm-brief.test.sh \
+    fm-captain-translation-contract.test.sh \
+    fm-cd-pretool-check.test.sh \
     fm-daemon.test.sh \
     fm-backend-herdr-smoke.test.sh \
     fm-secondmate-safety.test.sh \
@@ -103,6 +105,7 @@ init_changed_fixture_repo() {
     fm-afk-pi-herdr-return-e2e.test.sh \
     fm-backend.test.sh \
     fm-pr-merge.test.sh \
+    fm-pi-watch-extension.test.sh \
     fm-afk-return.test.sh \
     fm-bearings-snapshot.test.sh \
     fm-backend-cmux.test.sh \
@@ -115,6 +118,16 @@ init_changed_fixture_repo() {
   : >"$repo/tests/fm-backend-herdr-eventwait.test.py"
   : >"$repo/bin/fm-supervisor-target-lib.sh"
   : >"$repo/bin/unmapped-source.sh"
+  printf '# .agents/skills/example/SKILL.md\n' >>"$repo/tests/fm-captain-translation-contract.test.sh"
+  printf '# .claude/settings.json\n# .pi/extensions/fm-primary-turnend-guard.ts\n' \
+    >>"$repo/tests/fm-cd-pretool-check.test.sh"
+  printf '# .pi/extensions/fm-primary-pi-watch.ts\n' >>"$repo/tests/fm-pi-watch-extension.test.sh"
+  mkdir -p "$repo/.agents/skills/example" "$repo/.claude" "$repo/.pi/extensions" "$repo/src"
+  : >"$repo/.agents/skills/example/SKILL.md"
+  : >"$repo/.claude/settings.json"
+  : >"$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  : >"$repo/.pi/extensions/fm-primary-turnend-guard.ts"
+  : >"$repo/src/unmapped.ts"
   git -C "$repo" init -q
   git -C "$repo" add .
   git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm baseline
@@ -148,13 +161,24 @@ test_changed_dependency_selection_and_unmapped_failure() {
   git -C "$repo" add bin/fm-supervisor-target-lib.sh
   git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm supervisor-change
 
-  printf '\n' >>"$repo/bin/unmapped-source.sh"
+  printf '\n' >>"$repo/.agents/skills/example/SKILL.md"
+  printf '\n' >>"$repo/.claude/settings.json"
+  printf '\n' >>"$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  printf '\n' >>"$repo/.pi/extensions/fm-primary-turnend-guard.ts"
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
+  assert_contains "$listed" "tests/fm-captain-translation-contract.test.sh" "skill source selects contract coverage"
+  assert_contains "$listed" "tests/fm-cd-pretool-check.test.sh" "Claude and Pi source selects hook coverage"
+  assert_contains "$listed" "tests/fm-pi-watch-extension.test.sh" "Pi source selects watcher coverage"
+  git -C "$repo" add .agents .claude .pi
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm non-bin-source-change
+
+  printf '\n' >>"$repo/src/unmapped.ts"
   set +e
   (cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD) >"$tmp/out" 2>"$tmp/err"
   rc=$?
   set -e
   [ "$rc" -eq 2 ] || fail "unmapped changed source must fail with exit 2, got $rc"
-  grep -Fq 'no changed-test mapping for source path: bin/unmapped-source.sh' "$tmp/err" \
+  grep -Fq 'no changed-test mapping for source path: src/unmapped.ts' "$tmp/err" \
     || fail "unmapped changed source failure is not actionable: $(cat "$tmp/err")"
   rm -rf "$tmp"
   pass "changed selection covers dependents and fails closed for unmapped source"

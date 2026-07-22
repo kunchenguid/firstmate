@@ -347,6 +347,10 @@ families_for_changed_path() {
     .github/workflows/ci.yml|.no-mistakes.yaml)
       printf '%s\n' pure-contract-unit
       ;;
+    .github/*|.tasks.toml|AGENTS.md|CLAUDE.md|CONTRIBUTING.md|\
+    docs/configuration.md|docs/supervision-protocols/*)
+      printf '%s\n' pure-contract-unit
+      ;;
     tests/lib.sh|tests/*-helpers.sh)
       families_for_test_reference "$(basename "$path")" \
         || printf '%s\n' "__unmapped__:$path"
@@ -358,8 +362,11 @@ families_for_changed_path() {
     tests/*)
       printf '%s\n' "__unmapped__:$path"
       ;;
+    README.md|LICENSE|assets/*|docs/*|.gitignore)
+      ;;
     *)
-      # No mapping: select nothing for this path (conservative non-expansion).
+      families_for_test_reference "$path" \
+        || printf '%s\n' "__unmapped__:$path"
       ;;
   esac
 }
