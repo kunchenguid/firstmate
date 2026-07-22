@@ -1658,6 +1658,28 @@ EOF
         and (.reason | contains("unreadable-child"))))
   ' >/dev/null || fail "end-to-end mixed-domain projection was wrong: $json"
 
+  sed '/unreadable-child/a\
+- [ ] ordinary-orphan - Unowned release task (repo: sshhip) (kind: ship)' \
+    "$sshhip/data/backlog.md" > "$sshhip/data/backlog.next"
+  mv "$sshhip/data/backlog.next" "$sshhip/data/backlog.md"
+  canonical=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --json)
+  printf '%s' "$canonical" | jq -e '
+    .secondmate_current.records[] | select(.id == "sshhip")
+    | .current.state == "unknown"
+      and (.current.reason | contains("in-flight backlog item has no child metadata: ordinary-orphan"))
+      and .provenance.selected != "structured-home"
+      and .invalidity == null
+      and .active_children == []
+      and .decisions_open == []
+      and .holds == []
+      and .queued == []
+      and .landed == []
+      and .endpoints == []
+  ' >/dev/null || fail "an unknown child masked a simultaneous ordinary orphan: $canonical"
+  sed '/ordinary-orphan/d' "$sshhip/data/backlog.md" > "$sshhip/data/backlog.next"
+  mv "$sshhip/data/backlog.next" "$sshhip/data/backlog.md"
+
   fm_write_meta "$wheel/state/production-observation.meta" \
     "window=firstmate:fm-production-observation" "worktree=$wheel/projects/worker" "project=wheelhouse" \
     "harness=codex" "kind=scout" "mode=scout"

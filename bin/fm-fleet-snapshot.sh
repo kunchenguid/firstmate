@@ -638,6 +638,26 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
          | $tasks[]
          | select(.id == $work.id and (.current_state.state == "done" or .current_state.state == "failed"))
          | {id,state:.current_state.state} ]) as $terminal_in_flight
+    | ([if $backlog.present != true then
+          {kind:"missing_backlog",ids:[],reason:"missing structured backlog"}
+        else empty end,
+        if ($unstructured_current | length) > 0 then
+          {kind:"unstructured_current",ids:[],reason:"unstructured current backlog row"}
+        else empty end,
+        if ($orphan_in_flight | length) > 0 then
+          {kind:"orphan_in_flight",ids:($orphan_in_flight | map(.id)),
+           reason:("in-flight backlog item has no child metadata: " + ($orphan_in_flight | map(.id) | join(", ")))}
+        else empty end,
+        if ($unowned_current | length) > 0 then
+          {kind:"unowned_current",ids:($unowned_current | map(.id)),
+           reason:("live child state has no in-flight backlog item: " +
+                   ($unowned_current | map(.id + "=" + .state) | join(", ")))}
+        else empty end,
+        if ($terminal_in_flight | length) > 0 then
+          {kind:"terminal_in_flight",ids:($terminal_in_flight | map(.id)),
+           reason:("in-flight backlog item has terminal child state: " +
+                   ($terminal_in_flight | map(.id + "=" + .state) | join(", ")))}
+        else empty end]) as $strict_invalidities
     | ([ $owned_in_flight[] as $work
          | select($work.current_role != "program")
          | $tasks[]
@@ -667,25 +687,12 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
        and ($orphan_in_flight | length) == 0
        and ($unowned_current | length) == 0
        and ($terminal_in_flight | length) == 0) as $valid
-    | (if $backlog.present != true then "missing structured backlog"
-       elif ($unstructured_current | length) > 0 then "unstructured current backlog row"
+    | (if ($strict_invalidities | length) > 0 then $strict_invalidities[0].reason
        elif ($unknown_children | length) > 0 then
          "child current state unavailable: " + ($unknown_children | map(.id) | join(", "))
-       elif ($orphan_in_flight | length) > 0 then
-         "in-flight backlog item has no child metadata: " + ($orphan_in_flight | map(.id) | join(", "))
-       elif ($unowned_current | length) > 0 then
-         "live child state has no in-flight backlog item: " +
-         ($unowned_current | map(.id + "=" + .state) | join(", "))
-       elif ($terminal_in_flight | length) > 0 then
-         "in-flight backlog item has terminal child state: " +
-         ($terminal_in_flight | map(.id + "=" + .state) | join(", "))
        else null end) as $reason
-    | (if $backlog.present != true then {kind:"missing_backlog",ids:[]}
-       elif ($unstructured_current | length) > 0 then {kind:"unstructured_current",ids:[]}
+    | (if ($strict_invalidities | length) > 0 then $strict_invalidities[0] | del(.reason)
        elif ($unknown_children | length) > 0 then {kind:"child_current_unavailable",ids:($unknown_children | map(.id))}
-       elif ($orphan_in_flight | length) > 0 then {kind:"orphan_in_flight",ids:($orphan_in_flight | map(.id))}
-       elif ($unowned_current | length) > 0 then {kind:"unowned_current",ids:($unowned_current | map(.id))}
-       elif ($terminal_in_flight | length) > 0 then {kind:"terminal_in_flight",ids:($terminal_in_flight | map(.id))}
        else {kind:null,ids:[]} end) as $invalidity
     | (if $valid | not then "unknown"
        elif any($decisions_all[]; .verb == "needs-decision" or .verb == "captain-hold") then "captain_decision"
