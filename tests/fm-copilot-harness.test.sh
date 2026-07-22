@@ -228,6 +228,24 @@ SH
   pass "fm-harness reports copilot distinctly for all observed process shapes"
 }
 
+test_fm_harness_copilot_brief_argv_mentions_other_harness() {
+  local fakebin out
+  fakebin=$(fm_fakebin "$TMP_ROOT/brief-fake")
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *"ppid="*) exit 1 ;;
+  *"comm="*) printf '%s\n' 'MainThread'; exit 0 ;;
+  *"args="*) printf '%s\n' 'copilot --allow-all --no-ask-user -i Update CLAUDE.md per the brief'; exit 0 ;;
+esac
+exit 1
+SH
+  chmod +x "$fakebin/ps"
+  out=$(env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT PATH="$fakebin:$PATH" "$HARNESS")
+  [ "$out" = copilot ] || fail "fm-harness printed '$out' instead of copilot when the -i brief argv mentions claude"
+  pass "copilot detection wins over unanchored harness names in the brief argv"
+}
+
 test_fm_harness_existing_detection_unchanged() {
   local fakebin out
   fakebin=$(fm_fakebin "$TMP_ROOT/regress-fake")
@@ -412,6 +430,7 @@ test_fm_lock_ignores_unrelated_copilot_argv
 test_fm_lock_holder_argv_only_matters_for_interpreters
 test_fm_lock_acquires_under_renamed_copilot_wrapper
 test_fm_harness_reports_copilot
+test_fm_harness_copilot_brief_argv_mentions_other_harness
 test_fm_harness_existing_detection_unchanged
 test_spawn_dispatches_copilot_with_flags_and_turnend_hook
 test_spawn_copilot_omits_default_model_effort

@@ -55,15 +55,17 @@ detect_own() {
         # ".../extensions/copilot --locale" never matches.
         args=$(ps -o args= -p "$pid" 2>/dev/null)
         case "$args" in
+          copilot|"copilot "*) echo copilot; return ;;
+        esac
+        case "${args%% *}" in
+          */copilot) echo copilot; return ;;
+        esac
+        case "$args" in
           *claude*) echo claude; return ;;
           *codex*) echo codex; return ;;
           *opencode*) echo opencode; return ;;
           *grok*) echo grok; return ;;
           *" pi "*|*/pi) echo pi; return ;;
-          copilot|"copilot "*) echo copilot; return ;;
-        esac
-        case "${args%% *}" in
-          */copilot) echo copilot; return ;;
         esac ;;
     esac
     pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
