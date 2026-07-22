@@ -235,6 +235,8 @@ SPAWN_TASK_LOCK=
 SPAWN_TASK_LOCK_HELD=0
 CONFIG_INHERIT_LOCK=
 CONFIG_INHERIT_LOCK_HELD=0
+SPAWN_EXCLUDE_LOCK=
+SPAWN_EXCLUDE_LOCK_HELD=0
 # Everything a spawn allocates BEFORE state/<id>.meta exists has no other owner:
 # fm-teardown resolves a task from its meta, so a task that never got one cannot
 # be reclaimed by it at all. Each flag below is raised at its own allocation point
@@ -263,6 +265,20 @@ parse_orca_worktree_result() {
   fi
 }
 
+# 0 only when <worktree> is PROVABLY free of uncommitted work. Anything else -
+# work present, git unable to answer (exit 128 for an unreadable or half-removed
+# worktree), or the path gone - returns non-zero, the same fail-safe branching
+# the tracked-path guard uses. Releasing a worktree is destructive (a return
+# kills what runs there and resets it), so no release may proceed on an
+# unanswered safety check.
+spawn_abort_worktree_is_clean() {  # <worktree>
+  local wt=${1:-} out status=0
+  [ -n "$wt" ] && [ -d "$wt" ] || return 1
+  out=$(git -C "$wt" status --porcelain 2>/dev/null) || status=$?
+  [ "$status" -eq 0 ] || return 1
+  [ -z "$out" ] || return 1
+}
+
 # Return a pooled worktree this spawn allocated (treehouse get) but never handed
 # to fm-teardown. Best effort by design - an abort must not become a second
 # failure - so every step is tolerant and any residue is reported with the exact
@@ -276,6 +292,14 @@ spawn_abort_release_worktree() {
   # secondmate's WT is its HOME, not an allocated worktree. Its caller never
   # raises the flag, and this keeps that true even if a future path does.
   [ "$wt" != "$proj" ] || return 0
+  # A freshly allocated pool worktree is clean, so the ordinary abort still
+  # reclaims it. Anything else is someone's uncommitted work (allocation can
+  # hand over a worktree another live task still owns), and leaking a worktree
+  # is strictly better than resetting work that was never this spawn's.
+  if ! spawn_abort_worktree_is_clean "$wt"; then
+    echo "warning: worktree $wt holds uncommitted changes or could not be inspected; leaving it checked out rather than resetting it - once you have confirmed that work is safe to discard, return it with: (cd $proj && treehouse return --force $wt)" >&2
+    return 0
+  fi
   if ! command -v treehouse >/dev/null 2>&1; then
     echo "warning: treehouse is unavailable; worktree $wt stays checked out - return it with: (cd $proj && treehouse return --force $wt)" >&2
     return 0
@@ -287,6 +311,7 @@ spawn_abort_release_worktree() {
 
 spawn_abort_cleanup() {
   local status=$?
+  local orca_reclaimed
   if [ "$HERDR_PROJECTION_ABORT_CLEANUP" = 1 ] \
      && [ "$HERDR_PRESENTATION_ORDER_LOCK_HELD" != 1 ]; then
     if ! spawn_herdr_presentation_order_lock_acquire "${HERDR_PROJECTION_ABORT_SESSION:-}"; then
@@ -311,7 +336,17 @@ spawn_abort_cleanup() {
       fm_backend_kill orca "$ORCA_TERMINAL" 2>/dev/null || true
     fi
     if [ -n "${ORCA_WORKTREE_ID:-}" ]; then
-      if ! fm_backend_remove_worktree orca "$ORCA_WORKTREE_ID" 2>/dev/null; then
+      # `orca worktree rm --force` is as destructive as a treehouse return, so
+      # it gets the same pre-release check whenever a path is known to inspect.
+      # No path means nothing could have been written there yet, and skipping
+      # the removal would leak an orca worktree nothing else can reclaim.
+      orca_reclaimed=0
+      if [ -n "${WT:-}" ] && ! spawn_abort_worktree_is_clean "$WT"; then
+        echo "warning: orca worktree $WT holds uncommitted changes or could not be inspected; leaving it in place rather than removing it - once you have confirmed that work is safe to discard, remove it with: orca worktree rm --worktree id:$ORCA_WORKTREE_ID --force" >&2
+      elif fm_backend_remove_worktree orca "$ORCA_WORKTREE_ID" 2>/dev/null; then
+        orca_reclaimed=1
+      fi
+      if [ "$orca_reclaimed" != 1 ]; then
         mkdir -p "$STATE" 2>/dev/null || true
         if [ -d "$STATE" ]; then
           {
@@ -359,6 +394,10 @@ spawn_abort_cleanup() {
   if [ "$CONFIG_INHERIT_LOCK_HELD" = 1 ]; then
     CONFIG_INHERIT_LOCK_HELD=0
     fm_lock_release "$CONFIG_INHERIT_LOCK" || true
+  fi
+  if [ "$SPAWN_EXCLUDE_LOCK_HELD" = 1 ]; then
+    SPAWN_EXCLUDE_LOCK_HELD=0
+    fm_lock_release "$SPAWN_EXCLUDE_LOCK" || true
   fi
   return "$status"
 }
@@ -864,7 +903,7 @@ validate_spawn_worktree() {  # <source> <inspect-target>
     wt_top_real=
   fi
   if [ -z "$wt_real" ] || [ -z "$wt_top_real" ] || [ "$wt_real" != "$wt_top_real" ] || [ "$wt_real" = "$proj_real" ]; then
-    echo "error: $source did not yield an isolated worktree (resolved '$WT'; worktree root '${wt_top:-none}'; primary '$PROJ_ABS'); refusing to launch to avoid tangling the primary checkout. Inspect target $inspect_target" >&2
+    echo "error: $source did not yield an isolated worktree (resolved '$WT'; worktree root '${wt_top:-none}'; primary '$PROJ_ABS'); refusing to launch to avoid tangling the primary checkout. Reclaiming this spawn's backend target $inspect_target for task $ID; the resolved path is left untouched and no task metadata was written." >&2
     exit 1
   fi
 }
@@ -1150,7 +1189,7 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
     sleep 1
   done
   if [ -z "$WT" ]; then
-    echo "error: treehouse get did not enter a worktree within 60s; inspect window $T" >&2
+    echo "error: treehouse get did not enter a worktree within 60s for $ID in $PROJ_ABS; reclaiming this spawn's backend target $T, and no task metadata was written." >&2
     exit 1
   fi
 
@@ -1167,8 +1206,11 @@ fi
 # later, and teardown cleans one deterministic path. GOTMPDIR (not TMPDIR) is the
 # targeted knob: TMPDIR is too broad (affects every program's temp, not just Go's).
 TASK_TMP="/tmp/fm-$ID"
+# The root is derived from the task id, not from this process, and respawning a
+# live id is a documented recovery path - so an abort may only remove a root
+# THIS spawn created, never a running task's GOTMPDIR mid-build.
+[ -d "$TASK_TMP" ] || SPAWN_TASK_TMP_ABORT_CLEANUP=1
 mkdir -p "$TASK_TMP/gotmp"
-SPAWN_TASK_TMP_ABORT_CLEANUP=1
 
 # Per-harness turn-end hook: a file that touches state/<id>.turn-ended when the
 # agent finishes a turn. Worktree-resident hooks are kept out of git's view so
@@ -1190,6 +1232,33 @@ TURNEND="$STATE_REAL/$ID.turn-ended"
 # longer writes .claude/settings.local.json anywhere, but the entry it used to add
 # still hides a developer's own settings file from `git status` and `git add .`
 # in every project a claude crewmate was ever spawned into.
+#
+# Both mutations of that shared file therefore serialize on ONE lock beside it.
+# The scope has to be the repository, not the task: `.spawn-<id>.lock` only
+# serializes spawns of the SAME id, while every spawn into the same project
+# writes this one file, and an append landing inside the prune's
+# read-filter-rename would be silently lost.
+exclude_lock_path() {  # <exclude-file>
+  printf '%s.fm-lock\n' "$1"
+}
+exclude_lock_acquire() {  # <exclude-file>
+  local attempt=0
+  SPAWN_EXCLUDE_LOCK=$(exclude_lock_path "$1")
+  while [ "$attempt" -lt 50 ]; do
+    if fm_lock_try_acquire "$SPAWN_EXCLUDE_LOCK"; then
+      SPAWN_EXCLUDE_LOCK_HELD=1
+      return 0
+    fi
+    sleep 0.1
+    attempt=$((attempt + 1))
+  done
+  return 1
+}
+exclude_lock_release() {
+  [ "$SPAWN_EXCLUDE_LOCK_HELD" = 1 ] || return 0
+  SPAWN_EXCLUDE_LOCK_HELD=0
+  fm_lock_release "$SPAWN_EXCLUDE_LOCK" || true
+}
 exclude_path() {
   local rel=$1 EXCL
   EXCL=$(git -C "$WT" rev-parse --git-path info/exclude 2>/dev/null || true)
@@ -1202,7 +1271,14 @@ exclude_path() {
     *) EXCL="$WT/$EXCL" ;;
   esac
   mkdir -p "$(dirname "$EXCL")"
+  # An unavailable lock still appends: the entry is what keeps this task's hook
+  # file out of teardown's dirty check, so dropping it would refuse a teardown
+  # later. That is the pre-lock behavior, and the prune it can race with only
+  # runs while the one obsolete entry is still present.
+  exclude_lock_acquire "$EXCL" ||
+    echo "warning: could not lock $EXCL; appending $rel unserialized" >&2
   grep -qxF "$rel" "$EXCL" 2>/dev/null || echo "$rel" >> "$EXCL"
+  exclude_lock_release
 }
 # Entries firstmate used to add and no longer owns. Pruned from the shared
 # exclude on every spawn, so repos firstmate already touches heal over time
@@ -1214,7 +1290,7 @@ exclude_path() {
 # hidden from git, which is visible and one `echo >>` to undo.
 OBSOLETE_EXCLUDE_ENTRIES=('.claude/settings.local.json')
 prune_obsolete_exclude_entries() {
-  local excl entry tmp rc
+  local excl entry tmp rc found=0
   excl=$(git -C "$WT" rev-parse --git-path info/exclude 2>/dev/null) || return 0
   [ -n "$excl" ] || return 0
   case "$excl" in
@@ -1225,24 +1301,36 @@ prune_obsolete_exclude_entries() {
   # failure: this is opportunistic hygiene, not part of the task's contract.
   [ -f "$excl" ] && [ -r "$excl" ] && [ -w "$excl" ] || return 0
   for entry in "${OBSOLETE_EXCLUDE_ENTRIES[@]}"; do
+    if grep -qxF "$entry" "$excl" 2>/dev/null; then
+      found=1
+      break
+    fi
+  done
+  # Nothing to prune is the steady state, so the common spawn never contends.
+  [ "$found" = 1 ] || return 0
+  # Unlike the append, the rewrite must never run unserialized: it would drop
+  # whatever another spawn added while it was filtering. Skipping instead just
+  # leaves the obsolete entry for the next spawn to prune.
+  exclude_lock_acquire "$excl" || return 0
+  for entry in "${OBSOLETE_EXCLUDE_ENTRIES[@]}"; do
     grep -qxF "$entry" "$excl" 2>/dev/null || continue
     # Copy first (so the rewrite inherits the original's mode in a shared repo),
     # filter into the copy, then rename. A concurrent reader sees either the old
     # file or the new one, never a half-written one, and a failed write leaves
-    # the original untouched. Concurrent prunes compute identical content, so
-    # whichever rename lands last is still correct.
+    # the original untouched.
     tmp="$excl.fm-prune.$$"
-    cp -p "$excl" "$tmp" 2>/dev/null || { rm -f "$tmp"; return 0; }
+    cp -p "$excl" "$tmp" 2>/dev/null || { rm -f "$tmp"; break; }
     rc=0
     grep -vxF "$entry" "$excl" > "$tmp" 2>/dev/null || rc=$?
     # grep exits 1 when it selects no lines at all (the exclude held only this
     # entry), which is a legitimate empty result; only 2+ is a real failure.
     if [ "$rc" -gt 1 ]; then
       rm -f "$tmp"
-      return 0
+      break
     fi
     mv -f "$tmp" "$excl" 2>/dev/null || rm -f "$tmp"
   done
+  exclude_lock_release
 }
 # Guard every worktree-RESIDENT hook write. Overwriting a path the project tracks
 # destroys committed project content, rides along in any `git add -A` the crewmate

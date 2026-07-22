@@ -260,6 +260,54 @@ test_worktree_resident_hook_refusal_releases_what_it_allocated() {
   pass "a refused spawn returns its worktree, kills its window, and removes its temp root"
 }
 
+# `treehouse return --force` kills what runs in the worktree and resets it, so
+# the unwind must never reach a worktree holding work that is not this spawn's.
+test_refusal_never_returns_a_worktree_holding_uncommitted_work() {
+  local rec id out status
+  id=turnend-opencode-dirty-z24
+  rec=$(make_spawn_case turnend-opencode-dirty opencode "$id")
+  read_case_record "$rec"
+  track_worktree_file "$WT_DIR" .opencode/plugins/fm-turn-end.js 'export const Project = {}'
+  printf 'unlanded work\n' > "$WT_DIR/another-task-was-here.txt"
+  : > "$CASE_DIR/treehouse.log"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 1 "$status" "a tracked turn-end hook path must still refuse the spawn"
+  assert_present "$WT_DIR/another-task-was-here.txt" "the unwind destroyed uncommitted work"
+  [ "$(cat "$WT_DIR/another-task-was-here.txt")" = "unlanded work" ] ||
+    fail "the unwind rewrote uncommitted work"
+  assert_no_grep "return --force" "$CASE_DIR/treehouse.log" \
+    "the unwind returned a worktree holding uncommitted changes"
+  assert_contains "$out" "holds uncommitted changes or could not be inspected" \
+    "the unwind did not say why it kept the worktree"
+  assert_contains "$out" "return it with: (cd " \
+    "the unwind did not print the manual return command"
+  assert_contains "$out" "treehouse return --force $WT_DIR)" \
+    "the manual return command did not name the worktree"
+  pass "an abort leaves a worktree with uncommitted work checked out instead of resetting it"
+}
+
+# TASK_TMP is derived from the task id, not from this process, so a respawn of a
+# live id must not let an abort delete the running task's GOTMPDIR.
+test_refusal_keeps_a_temp_root_it_did_not_create() {
+  local rec id out status
+  id=turnend-opencode-tmp-z25
+  rec=$(make_spawn_case turnend-opencode-tmp opencode "$id")
+  read_case_record "$rec"
+  track_worktree_file "$WT_DIR" .opencode/plugins/fm-turn-end.js 'export const Project = {}'
+  mkdir -p "/tmp/fm-$id/gotmp"
+  printf 'live build\n' > "/tmp/fm-$id/gotmp/in-flight.o"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 1 "$status" "a tracked turn-end hook path must still refuse the spawn"
+  assert_present "/tmp/fm-$id/gotmp/in-flight.o" \
+    "the unwind removed a temp root this spawn did not create"
+  rm -rf "/tmp/fm-$id"
+  pass "an abort keeps a per-task temp root that already existed"
+}
+
 # git exiting non-zero for a reason OTHER than "not tracked" (128 for an
 # unreadable or half-removed worktree) is not permission to overwrite.
 test_worktree_resident_hook_refuses_when_tracked_state_is_unknown() {
@@ -658,6 +706,8 @@ test_claude_turnend_hook_preserves_tracked_project_settings
 test_claude_turnend_hook_writes_nothing_into_a_clean_worktree
 test_worktree_resident_hook_refuses_a_tracked_collision
 test_worktree_resident_hook_refusal_releases_what_it_allocated
+test_refusal_never_returns_a_worktree_holding_uncommitted_work
+test_refusal_keeps_a_temp_root_it_did_not_create
 test_worktree_resident_hook_refuses_when_tracked_state_is_unknown
 test_spawn_prunes_only_the_obsolete_shared_exclude_entry
 
