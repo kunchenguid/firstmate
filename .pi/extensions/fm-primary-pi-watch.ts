@@ -50,6 +50,7 @@ const retryLimit = positiveInteger("FM_WATCH_REARM_RETRY_LIMIT", 5);
 const armReadyTimeoutMs = positiveInteger("FM_PI_ARM_READY_TIMEOUT_MS", 12000);
 const armRetireTimeoutMs = positiveInteger("FM_WATCH_ARM_RETIRE_TIMEOUT_MS", 1000);
 const actionableTimeoutMs = positiveInteger("FM_WAKE_ACTIONABLE_TIMEOUT_MS", 3000);
+const pendingFlushLimit = 64;
 
 let child: ChildProcess | null = null;
 let retryTimer: ReturnType<typeof setTimeout> | null = null;
@@ -60,6 +61,7 @@ let restoring = false;
 let activeContext: ExtensionContext | null = null;
 let deliveryStarting = false;
 let flushingWakes = false;
+let pendingFlushTimer: ReturnType<typeof setTimeout> | null = null;
 const pendingWakes: PendingWake[] = [];
 const armReadiness = new WeakMap<ChildProcess, Promise<boolean>>();
 const armClose = new WeakMap<ChildProcess, Promise<void>>();
@@ -149,6 +151,8 @@ export default function (pi: ExtensionAPI) {
     stopping = true;
     if (retryTimer) clearTimeout(retryTimer);
     retryTimer = null;
+    if (pendingFlushTimer) clearTimeout(pendingFlushTimer);
+    pendingFlushTimer = null;
     if (child) child.kill("SIGTERM");
     child = null;
   }
@@ -170,35 +174,54 @@ export default function (pi: ExtensionAPI) {
       timeout: actionableTimeoutMs,
       maxBuffer: 64 * 1024,
     });
+    const receipt = result.stdout.trim();
     if (result.status === 0) {
-      const receipt = result.stdout.trim();
       if (action === "capture" && receipt) return { receipt };
       if (action === "validate") return {};
     }
     if (result.status === 1) return { obsolete: true };
     const detail = result.error?.message || result.stderr.trim() || `validator exited ${String(result.status)}`;
     return {
+      receipt: action === "capture" && receipt ? receipt : undefined,
       failure: `watcher: FAILED - Pi extension could not ${action} wake actionability within ${actionableTimeoutMs}ms\n${detail}`,
     };
+  }
+
+  function schedulePendingFlush(): void {
+    if (stopping || pendingFlushTimer || pendingWakes.length === 0) return;
+    pendingFlushTimer = setTimeout(() => {
+      pendingFlushTimer = null;
+      flushPendingWakes();
+    }, 0);
+    pendingFlushTimer.unref();
   }
 
   function flushPendingWakes(): void {
     if (stopping || flushingWakes || deliveryStarting || pendingWakes.length === 0) return;
     if (activeContext && typeof activeContext.isIdle === "function" && !activeContext.isIdle()) return;
     flushingWakes = true;
-    const batch = pendingWakes.splice(0);
+    const batch = pendingWakes.splice(0, pendingFlushLimit);
+    const deferred: PendingWake[] = [];
     const messages: string[] = [];
-    for (const pending of batch) {
+    let receiptValidated = false;
+    for (let index = 0; index < batch.length; index += 1) {
+      const pending = batch[index];
       if (pending.receipt) {
+        if (receiptValidated) {
+          deferred.push(...batch.slice(index));
+          break;
+        }
+        receiptValidated = true;
         const current = actionability("validate", pending.receipt);
         if (current.failure) messages.push(current.failure);
         if (current.obsolete || current.failure) continue;
       }
       if (!messages.includes(pending.message)) messages.push(pending.message);
     }
+    pendingWakes.unshift(...deferred);
     flushingWakes = false;
     if (messages.length === 0) {
-      if (pendingWakes.length > 0) flushPendingWakes();
+      schedulePendingFlush();
       return;
     }
     deliveryStarting = true;

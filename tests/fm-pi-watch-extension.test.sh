@@ -56,6 +56,9 @@ test_tracked_extension_present_and_self_hashing() {
   assert_not_contains "$text" "deliverAs: \"followUp\"" "tracked extension still queues an irrevocable Pi follow-up before final validation"
   assert_contains "$text" 'pi.on?.("agent_settled"' "tracked extension does not defer busy-turn delivery to Pi's idle boundary"
   assert_contains "$text" "fm-wake-actionable.sh" "tracked extension does not use the repository actionability owner"
+  assert_contains "$text" "receipt: action === \"capture\" && receipt ? receipt : undefined" "tracked extension discards valid receipts returned with capture failures"
+  assert_contains "$text" "pendingFlushLimit" "tracked extension leaves idle-boundary receipt validation unbounded"
+  assert_contains "$text" "receiptValidated" "tracked extension can launch multiple bounded validators in one idle flush"
   assert_contains "$text" ".pi-watch-extension-loaded" "tracked extension missing loaded marker"
   assert_contains "$text" 'createHash("sha256").update(readFileSync(extensionFile)).digest("hex")' "tracked extension does not self-hash its own content for extensionVersion"
   assert_contains "$text" 'fileURLToPath(import.meta.url)' "tracked extension does not self-locate via import.meta.url"
@@ -294,6 +297,93 @@ EOF
   expect_code 0 "$status" "Pi actionable close must start one successor before wake delivery settles"
   [ -z "$out" ] || fail "Pi continuous-rearm test printed output: $out"
   pass "Pi actionable close starts one successor before wake delivery settles"
+}
+
+test_pi_partial_capture_and_pending_validation_stay_bounded() {
+  local repo home plugin log stop out status
+  repo="$TMP_ROOT/pi-bounded-validation-root"
+  home="$TMP_ROOT/pi-bounded-validation-home"
+  log="$TMP_ROOT/pi-bounded-validation.log"
+  stop="$TMP_ROOT/pi-bounded-validation.stop"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-wake-actionable.sh" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  capture)
+    printf '1:1:1\n'
+    case "${2:-}" in *bounded-1) printf 'partial capture\n' >&2; exit 2 ;; esac
+    ;;
+  validate) sleep 0.2 ;;
+  *) exit 2 ;;
+esac
+SH
+  chmod +x "$repo/bin/fm-wake-actionable.sh"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+count=$(wc -l < "$FM_ARM_LOG" | tr -d '[:space:]')
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+if [ "$count" -le 3 ]; then
+  printf 'signal: bounded-%s\n' "$count"
+  exit 0
+fi
+trap 'exit 0' TERM INT
+while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" \
+    FM_WAKE_ACTIONABLE_TIMEOUT_MS=1000 node --input-type=module 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+let tool = null;
+let idle = false;
+const prompts = [];
+const handlers = new Map();
+const context = { isIdle: () => idle };
+const pi = {
+  on(event, handler) { handlers.set(event, handler); },
+  registerCommand() {},
+  registerTool(candidate) { if (candidate.name === "fm_watch_arm_pi") tool = candidate; },
+  sendUserMessage(message) { prompts.push(message); },
+};
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+await handlers.get("session_start")?.({}, context);
+await tool.execute("tool-call-bounded-validation", {}, undefined, undefined, context);
+for (let i = 0; i < 500; i += 1) {
+  const rows = existsSync(process.env.FM_ARM_LOG) ? readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n") : [];
+  if (rows.length >= 4) break;
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+const rows = readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n");
+if (rows.length !== 4) throw new Error(`expected three queued wakes and one successor, got ${rows.length}`);
+if (prompts.length !== 0) throw new Error(`busy Pi received a premature wake: ${prompts.join(" | ")}`);
+idle = true;
+for (let expected = 1; expected <= 3; expected += 1) {
+  const started = Date.now();
+  await handlers.get("agent_settled")?.({}, context);
+  const elapsed = Date.now() - started;
+  if (elapsed >= 450) throw new Error(`idle flush ${expected} exceeded its bound: ${elapsed}ms`);
+  if (prompts.length !== expected) throw new Error(`idle flush ${expected} delivered ${prompts.length} prompts`);
+  await handlers.get("agent_start")?.({}, context);
+}
+const combined = prompts.join("\n");
+for (let expected = 1; expected <= 3; expected += 1) {
+  if (!combined.includes(`signal: bounded-${expected}`)) throw new Error(`lost bounded wake ${expected}: ${combined}`);
+}
+if (!combined.includes("partial capture")) throw new Error(`capture failure was not delivered beside its valid receipt: ${combined}`);
+writeFileSync(process.env.FM_STOP_FILE, "stop\n");
+await handlers.get("session_shutdown")?.();
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "Pi must retain valid partial captures and bound each idle validation flush"
+  [ -z "$out" ] || fail "Pi bounded-validation test printed output: $out"
+  pass "Pi retains partial captures and bounds each idle validation flush"
 }
 
 test_pi_hung_successor_falls_back_to_typed_wake() {
@@ -975,7 +1065,7 @@ EOF
 }
 
 test_wake_actionability_helper_source_and_queue_matrix() {
-  local home state reason receipt before after check xcheck rejected unrelated status fakebin drain_input drain_output count
+  local home state reason receipt before after check xcheck rejected unrelated status fakebin drain_input drain_output count mixed_output
   home="$TMP_ROOT/wake-actionability-home"
   state="$home/state"
   mkdir -p "$state"
@@ -1077,6 +1167,7 @@ test_wake_actionability_helper_source_and_queue_matrix() {
   printf 'window=default:w1:p-unrelated\n' > "$state/unrelated.meta"
   FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$ACTIONABLE" validate "$receipt" \
     || fail "unrelated task creation invalidated a heartbeat receipt"
+  after=$(cat "$state/.wake-queue")
   fakebin="$home/fakebin"
   mkdir -p "$fakebin"
   cat > "$fakebin/tail" <<'SH'
@@ -1091,6 +1182,32 @@ SH
     status=$?
   fi
   [ "$status" -eq 2 ] || fail "source read failure collapsed to obsolete status $status"
+
+  printf 'window=default:w1:p-heartbeat-good\n' > "$state/task-heartbeat-good.meta"
+  printf 'done: readable coalesced heartbeat\n' > "$state/task-heartbeat-good.status"
+  printf 'window=default:w1:p-heartbeat-bad\n' > "$state/task-heartbeat-bad.meta"
+  printf 'done: unreadable coalesced heartbeat\n' > "$state/task-heartbeat-bad.status"
+  {
+    printf '%s\t12\theartbeat\theartbeat:task-heartbeat-good.status\tmixed-heartbeat\n' "$(date +%s)"
+    printf '%s\t13\theartbeat\theartbeat:task-heartbeat-bad.status\tmixed-heartbeat\n' "$(date +%s)"
+  } > "$state/.wake-queue"
+  cat > "$fakebin/tail" <<'SH'
+#!/usr/bin/env bash
+case "${*: -1}" in
+  *task-heartbeat-bad.status) exit 1 ;;
+esac
+exec /usr/bin/tail "$@"
+SH
+  chmod +x "$fakebin/tail"
+  mixed_output=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    "$ACTIONABLE" capture mixed-heartbeat 2>/dev/null)
+  status=$?
+  [ "$status" -eq 2 ] || fail "mixed coalesced capture did not surface its source failure"
+  [ -n "$mixed_output" ] || fail "mixed coalesced capture discarded its valid receipt"
+  FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$ACTIONABLE" validate "$mixed_output" \
+    || fail "receipt retained beside a capture failure did not validate"
+
+  printf '%s\n' "$after" > "$state/.wake-queue"
   printf 'working: heartbeat source is no longer actionable\n' >> "$state/task-heartbeat.status"
   if FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$ACTIONABLE" validate "$receipt"; then
     fail "heartbeat receipt survived a change to its bound status"
@@ -2220,6 +2337,7 @@ test_spawn_template_mentions_pi_watch_placeholder
 test_pi_extension_reports_external_healthy_watcher
 test_pi_tool_returns_agent_tool_result
 test_pi_actionable_close_starts_single_successor_before_delivery
+test_pi_partial_capture_and_pending_validation_stay_bounded
 test_pi_hung_successor_falls_back_to_typed_wake
 test_pi_unretired_successor_falls_back_without_retry
 test_pi_late_unretired_close_resumes_supervision

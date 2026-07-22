@@ -256,9 +256,13 @@ capture() {
   done <<EOF
 $rows
 EOF
+  if [ -n "$receipt" ]; then
+    printf '%s\n' "$receipt"
+    [ "$saw_error" = false ] || return 2
+    return 0
+  fi
   [ "$saw_error" = false ] || return 2
-  [ -n "$receipt" ] || return 1
-  printf '%s\n' "$receipt"
+  return 1
 }
 
 validate_one() {  # <single-row-receipt>
