@@ -36,10 +36,17 @@ detect_own() {
   # is unambiguous when firstmate runs natively on grok.
   [ "${GROK_AGENT:-}" = "1" ] && { echo grok; return; }
   # Layer 2: walk the parent chain and match the command name.
-  local pid=$$ comm args
+  local pid=$$ comm name args
   for _ in 1 2 3 4 5 6 7 8; do
     comm=$(ps -o comm= -p "$pid" 2>/dev/null) || break
-    case "$(basename "$comm")" in
+    # Strip any directory prefix, then a login shell's leading '-' (ps reports a
+    # login shell as "-zsh"). Parameter expansion, not basename(1): BSD basename
+    # parses a leading dash as an option and fails with "illegal option -- z",
+    # spraying stderr on every walk from a login shell. GNU basename accepts it,
+    # so the noise is macOS/BSD-only.
+    name=${comm##*/}
+    name=${name#-}
+    case "$name" in
       *claude*) echo claude; return ;;
       *codex*) echo codex; return ;;
       *opencode*) echo opencode; return ;;
