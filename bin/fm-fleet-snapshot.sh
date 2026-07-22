@@ -1100,7 +1100,7 @@ secondmate_current_json() {  # <parent-tasks-json>
          terminal_evidence:$terminal,contradiction:$contradiction}')
     else
       if [ -n "$event_raw" ]; then
-        provenance=parent-event-fallback
+        provenance='parent-event-fallback'
         freshness=historical-event
       else
         provenance=unknown
