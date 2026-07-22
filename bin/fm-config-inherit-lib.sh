@@ -154,7 +154,7 @@ destination_allows_inherited_item() {
   git -C "$top" check-ignore -q -- "$rel_path" 2>/dev/null
 }
 
-# propagate_inheritable_config <src-config-dir> <dest-config-dir>
+# propagate_inheritable_config <src-config-dir> <dest-config-dir> <canonical-src-home>
 # Copy each declared inheritable item from the primary's config dir (src) into a
 # secondmate home's config dir (dest). SILENT on stdout - callers parse stdout,
 # so this writes nothing there. It emits concise stderr diagnostics only for
@@ -419,24 +419,36 @@ propagate_secondmate_inheritance() {
   [ -n "$src_config" ] || src_config="$src_home/config"
   [ -n "$src_data" ] || src_data="$src_home/data"
   rc=0
-  propagate_inheritable_config "$src_config" "$dest_home/config" || rc=1
+  propagate_inheritable_config "$src_config" "$dest_home/config" "$src_home" || rc=1
   propagate_shared_captain_preferences "$src_data" "$dest_home/data" || rc=1
   return "$rc"
 }
 
 propagate_inheritable_config() {
-  local src_config=$1 dest_config=$2 item src dest transfer_source reason rc
+  local src_config=$1 dest_config=$2 src_home=${3:-} canonical_config item src dest transfer_source reason rc
   [ -n "$src_config" ] || return 1
   [ -n "$dest_config" ] || return 1
+  if [ -z "$src_home" ]; then
+    case " $FM_INHERITABLE_CONFIG " in
+      *' github-accounts.json '*) return 1 ;;
+      *) src_home=${src_config%/*} ;;
+    esac
+  fi
+  [ -n "$src_home" ] && [ "$src_home" != "$src_config" ] || return 1
+  canonical_config="$src_home/config"
   rc=0
   for item in $FM_INHERITABLE_CONFIG; do
     case "$item" in
       ''|/*|.|..|../*|*/../*|*/..) return 1 ;;
     esac
-    src="$src_config/$item"
+    if [ "$item" = github-accounts.json ]; then
+      src="$canonical_config/$item"
+    else
+      src="$src_config/$item"
+    fi
     dest="$dest_config/$item"
     if [ -e "$src" ] || [ -L "$src" ]; then
-      if [ "$item" = github-accounts.json ] && ! validate_github_accounts_config_source "$src_config"; then
+      if [ "$item" = github-accounts.json ] && ! validate_github_accounts_config_source "$canonical_config"; then
         reason="unsafe or invalid primary source"
         warn_inheritable_config_error "$item" "$src" "$reason"
         record_inheritable_config_result "$item" error "$reason"
@@ -451,7 +463,7 @@ propagate_inheritable_config() {
       fi
       transfer_source=$src
       if [ "$item" = github-accounts.json ]; then
-        if ! transfer_source=$(prepare_github_accounts_transfer "$src_config" "$dest"); then
+        if ! transfer_source=$(prepare_github_accounts_transfer "$canonical_config" "$dest"); then
           reason="unsafe or invalid primary source"
           warn_inheritable_config_error "$item" "$src" "$reason"
           record_inheritable_config_result "$item" error "$reason"

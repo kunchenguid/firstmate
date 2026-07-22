@@ -159,6 +159,23 @@ function singleLine(value, max = 256) {
   return typeof value === "string" && value.length > 0 && value.length <= max && !/[\u0000-\u001f\u007f]/u.test(value) && value.trim() === value;
 }
 
+function rejectCredentialStrings(value) {
+  if (typeof value === "string") {
+    if (/(?:github_pat_[A-Za-z0-9_]{20,}|gh[pousr]_[A-Za-z0-9_]{20,})/u.test(value)) throw new Error("credential-shaped value");
+    return;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) rejectCredentialStrings(item);
+    return;
+  }
+  if (object(value)) {
+    for (const [key, item] of Object.entries(value)) {
+      rejectCredentialStrings(key);
+      rejectCredentialStrings(item);
+    }
+  }
+}
+
 function profileID(value) {
   return singleLine(value, 64) && /^[A-Za-z0-9][A-Za-z0-9._-]*$/u.test(value);
 }
@@ -283,6 +300,7 @@ function load() {
     throw new Error("unsafe config file");
   }
   const parsed = new StrictJSONParser(fs.readFileSync(configPath, "utf8")).parse();
+  rejectCredentialStrings(parsed);
   exactKeys(parsed, ["version", "gh_binary", "git_binary", "gh_axi_binary", "require_secure_storage", "profiles", "bindings"]);
   if (parsed.version !== 1 || parsed.require_secure_storage !== true) throw new Error("unsupported config");
   const ghBinary = canonicalExecutable(parsed.gh_binary, "gh");

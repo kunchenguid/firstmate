@@ -295,8 +295,24 @@ fm_github_path_shims_valid() {
   done
 }
 
+fm_github_process_identity() {
+  local pid=$1
+  ps -o lstart= -p "$pid" 2>/dev/null | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//'
+}
+
+fm_github_install_lock_stale() {
+  local lock=$1 pid recorded current
+  [ -d "$lock" ] && [ ! -L "$lock" ] || return 1
+  [ -f "$lock/owner" ] && [ ! -L "$lock/owner" ] || return 1
+  IFS=$'\t' read -r pid recorded < "$lock/owner" || return 1
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  [ -n "$recorded" ] || return 1
+  current=$(fm_github_process_identity "$pid" || true)
+  [ -z "$current" ] || [ "$current" != "$recorded" ]
+}
+
 fm_github_install_path_shims() {
-  local home state base directory executable lock owner=0 attempts=0 tmp= name action
+  local home state base directory executable lock owner=0 attempts=0 tmp= name action identity
   home=$(cd "$(fm_github_home)" 2>/dev/null && pwd -P) || return 1
   state="$home/state"
   if [ ! -e "$state" ]; then
@@ -316,8 +332,11 @@ fm_github_install_path_shims() {
   fi
   [ ! -e "$directory" ] && [ ! -L "$directory" ] || return 1
   lock="$base/.install.lock"
-  while [ "$attempts" -lt 1000 ]; do
+  while [ "$attempts" -lt 50 ]; do
     if mkdir -m 0700 "$lock" 2>/dev/null; then
+      identity=$(fm_github_process_identity "$$") || { rmdir "$lock" 2>/dev/null || true; return 1; }
+      printf '%s\t%s\n' "$$" "$identity" > "$lock/owner" || { rm -f "$lock/owner" 2>/dev/null || true; rmdir "$lock" 2>/dev/null || true; return 1; }
+      chmod 0600 "$lock/owner" || { rm -f "$lock/owner" 2>/dev/null || true; rmdir "$lock" 2>/dev/null || true; return 1; }
       owner=1
       break
     fi
@@ -325,11 +344,23 @@ fm_github_install_path_shims() {
       printf '%s\n' "$directory"
       return 0
     fi
+    if fm_github_install_lock_stale "$lock"; then
+      rm -f "$lock/owner" 2>/dev/null || true
+      rmdir "$lock" 2>/dev/null || true
+      continue
+    fi
     attempts=$((attempts + 1))
+    sleep 0.05
   done
   [ "$owner" -eq 1 ] || return 1
-  tmp=$(mktemp -d "$base/.context-v1.XXXXXX") || { rmdir "$lock" 2>/dev/null || true; return 1; }
-  trap '[ -z "${tmp:-}" ] || { chmod 0700 "$tmp" 2>/dev/null || true; rm -rf -- "$tmp" 2>/dev/null || true; }; [ -z "${lock:-}" ] || rmdir "$lock" 2>/dev/null || true' EXIT HUP INT TERM
+  if fm_github_path_shims_valid "$directory" "$home" "$executable"; then
+    rm -f "$lock/owner" 2>/dev/null || return 1
+    rmdir "$lock" 2>/dev/null || return 1
+    printf '%s\n' "$directory"
+    return 0
+  fi
+  tmp=$(mktemp -d "$base/.context-v1.XXXXXX") || { rm -f "$lock/owner" 2>/dev/null || true; rmdir "$lock" 2>/dev/null || true; return 1; }
+  trap '[ -z "${tmp:-}" ] || { chmod 0700 "$tmp" 2>/dev/null || true; rm -rf -- "$tmp" 2>/dev/null || true; }; [ -z "${lock:-}" ] || { rm -f "$lock/owner" 2>/dev/null || true; rmdir "$lock" 2>/dev/null || true; }' EXIT HUP INT TERM
   for name in git gh gh-axi no-mistakes; do
     case "$name" in
       git) action=child-git ;;
@@ -343,6 +374,7 @@ fm_github_install_path_shims() {
   mv "$tmp" "$directory" || return 1
   tmp=
   chmod 0500 "$directory" || return 1
+  rm -f "$lock/owner" 2>/dev/null || return 1
   rmdir "$lock" 2>/dev/null || return 1
   trap - EXIT HUP INT TERM
   fm_github_path_shims_valid "$directory" "$home" "$executable" || return 1
@@ -387,6 +419,8 @@ fm_github_activate() {
   fm_github_add_git_config "http.https://github.com/.extraHeader" ""
   fm_github_add_git_config core.askPass ""
   fm_github_add_git_config core.sshCommand ""
+  fm_github_add_git_config fetch.recurseSubmodules false
+  fm_github_add_git_config submodule.recurse false
   if [ -n "$FM_GITHUB_COMMIT_NAME" ]; then
     fm_github_add_git_config user.name "$FM_GITHUB_COMMIT_NAME"
     fm_github_add_git_config user.email "$FM_GITHUB_COMMIT_EMAIL"
@@ -1139,7 +1173,7 @@ fm_github_gh_operation() {
 }
 
 fm_github_validate_preregistration_command() {
-  local tool=$1 repository=$2 expected_parent source destination parent canonical
+  local tool=$1 repository=$2 expected_parent source destination parent canonical arg
   shift 2
   [ "$FM_GITHUB_ALLOW_UNREGISTERED_PROJECT" = 1 ] || return 0
   [ -n "$FM_GITHUB_PROJECT" ] && [ ! -d "$repository" ] || return 1
@@ -1158,7 +1192,11 @@ fm_github_validate_preregistration_command() {
       [ "$parent" = "$expected_parent" ] && [ "${destination##*/}" = "$FM_GITHUB_PROJECT" ]
       ;;
     gh|gh-axi)
-      [ "${1:-}" = repo ] && [ "${2:-}" = create ]
+      [ "${1:-}" = repo ] && [ "${2:-}" = create ] || return 1
+      fm_github_projects_cwd || return 1
+      for arg in "$@"; do
+        case "$arg" in --clone|--clone=*|--source|--source=*|--push|--push=*) return 1 ;; esac
+      done
       ;;
     *) return 1 ;;
   esac
@@ -1169,6 +1207,27 @@ fm_github_projects_cwd() {
   projects=$(cd "$(fm_github_home)/projects" 2>/dev/null && pwd -P) || return 1
   cwd=$(pwd -P) || return 1
   [ "$cwd" = "$projects" ]
+}
+
+fm_github_internal_gh_api_command() {
+  local project=$1 repository=$2 required_profile=$3 permission=$4 target_repository=$5
+  shift 5
+  [ "${FM_GITHUB_GH_AXI_INTERNAL_API:-}" = 1 ] || return 1
+  case "$permission" in read|write) ;; *) return 1 ;; esac
+  [ "${1:-}" = api ] || return 1
+  fm_github_activate "$project" "$repository" "$required_profile" || return 1
+  target_repository=$(fm_github_repository_allowed "$target_repository") || return 1
+  local repo_path
+  repo_path=$(fm_github_actual_repository_path "${FM_GITHUB_PROJECT_PATH:-}") || {
+    echo "error: current repository is not the configured project or task copy" >&2
+    return 1
+  }
+  fm_github_validate_repository_path "$repo_path" || return 1
+  fm_github_preflight "$permission" "$target_repository" || return 1
+  if ! command "$FM_GITHUB_GH_BINARY" "$@" 2>/dev/null; then
+    echo "error: routed GitHub command failed for profile $FM_GITHUB_PROFILE_ID" >&2
+    return 1
+  fi
 }
 
 fm_github_context_command() {
@@ -1241,6 +1300,10 @@ fm_github_context_command() {
     gh|gh-axi)
       operation=$(fm_github_gh_operation "$@")
       [ "$operation" != forbidden ] || { echo "error: routed GitHub authentication mutation, unsafe repository mutation, API escape, or token display is forbidden" >&2; return 1; }
+      if [ "$operation" = create ] && [ "${FM_GITHUB_ALLOW_UNREGISTERED_PROJECT:-}" != 1 ]; then
+        echo "error: repository creation requires an authorized pre-registration project route" >&2
+        return 1
+      fi
       case "$operation" in
         local|helper) ;;
         *)
@@ -1277,7 +1340,15 @@ fm_github_context_command() {
       esac
       github_binary=$FM_GITHUB_GH_BINARY
       [ "${tool##*/}" != gh-axi ] || github_binary=$FM_GITHUB_GH_AXI_BINARY
-      if ! command "$github_binary" "$@" 2>/dev/null; then
+      if [ "${tool##*/}" = gh-axi ] && { [ "$operation" = read ] || [ "$operation" = write ]; }; then
+        if ! (export FM_GITHUB_GH_AXI_INTERNAL_API=1
+          export FM_GITHUB_GH_AXI_INTERNAL_PERMISSION=$operation
+          export FM_GITHUB_GH_AXI_INTERNAL_REPOSITORY=${FM_GITHUB_GH_TARGET_REPOSITORY:-$FM_GITHUB_REPOSITORY}
+          command "$github_binary" "$@") 2>/dev/null; then
+          echo "error: routed GitHub command failed for profile $FM_GITHUB_PROFILE_ID" >&2
+          return 1
+        fi
+      elif ! command "$github_binary" "$@" 2>/dev/null; then
         echo "error: routed GitHub command failed for profile $FM_GITHUB_PROFILE_ID" >&2
         return 1
       fi

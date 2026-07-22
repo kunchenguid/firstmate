@@ -904,9 +904,9 @@ if sed -n "$((SECOND_SPAWN_LOG_START + 1)),\$p" "$HERDR_CALL_LOG" \
 fi
 # shellcheck source=bin/fm-config-inherit-lib.sh
 . "$ROOT/bin/fm-config-inherit-lib.sh"
-propagate_inheritable_config "$HOME_DIR/config" "$SECOND_HOME_A/config" \
+propagate_inheritable_config "$HOME_DIR/config" "$SECOND_HOME_A/config" "$HOME_DIR" \
   || fail "inheritance into secondmate A failed"
-propagate_inheritable_config "$HOME_DIR/config" "$SECOND_HOME_B/config" \
+propagate_inheritable_config "$HOME_DIR/config" "$SECOND_HOME_B/config" "$HOME_DIR" \
   || fail "inheritance into secondmate B failed"
 [ -f "$SECOND_HOME_A/config/herdr-presentation-spaces" ] \
   || fail "primary presentation flag did not reach secondmate A"

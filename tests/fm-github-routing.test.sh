@@ -32,6 +32,20 @@ if [ -n "\${GH_TOKEN+x}" ] || [ -n "\${GITHUB_TOKEN+x}" ] || [ -n "\${GIT_ASKPAS
   printf '%s\n' '$SENTINEL' >&2
   exit 90
 fi
+if [ "\${FM_TEST_ASSERT_SUBMODULE_DISABLED:-}" = 1 ] && [[ " \$* " = *' fetch '* ]]; then
+  fetch_recurse= submodule_recurse=
+  index=0
+  while [ "\$index" -lt "\${GIT_CONFIG_COUNT:-0}" ]; do
+    key_name=GIT_CONFIG_KEY_\$index
+    value_name=GIT_CONFIG_VALUE_\$index
+    case "\${!key_name}" in
+      fetch.recurseSubmodules) fetch_recurse=\${!value_name} ;;
+      submodule.recurse) submodule_recurse=\${!value_name} ;;
+    esac
+    index=\$((index + 1))
+  done
+  [ "\$fetch_recurse" = false ] && [ "\$submodule_recurse" = false ] || exit 92
+fi
 printf 'git\t%s\t%s\n' "\${FM_GITHUB_PROFILE_ID:-unselected}" "\$*" >> "\${FM_TEST_ROUTE_LOG:-/dev/null}"
 if [ "\${FM_TEST_FAKE_NETWORK:-}" = 1 ]; then
   case " \$* " in
@@ -87,6 +101,9 @@ SH
 #!/usr/bin/env bash
 set -eu
 printf 'gh-axi\t%s\t%s\n' "${FM_GITHUB_PROFILE_ID:-unselected}" "$*" >> "${FM_TEST_ROUTE_LOG:-/dev/null}"
+if [ "${FM_TEST_GH_AXI_TYPED_API:-}" = 1 ]; then
+  exec gh api graphql --hostname github.com -f query=typed-operation
+fi
 exec gh "$@"
 SH
   cat > "$d/exact/no-mistakes" <<'SH'
@@ -311,6 +328,20 @@ test_schema_and_resolution_strictness() {
   set +e; err=$(run_exec "$d" profile-id --repository "https://$SENTINEL@github.com/Owner-A/repo-a" 2>&1); rc=$?; set -e
   expect_code 1 "$rc" "URL userinfo"
   assert_not_contains "$err" "$SENTINEL" "userinfo error leaked attacker-controlled bytes"
+  write_config "$d"
+  node -e '
+    const fs=require("fs"); const p=process.argv[1]; const v=JSON.parse(fs.readFileSync(p));
+    const token=`ghp_${"A".repeat(36)}`;
+    v.profiles[token]=v.profiles["profile-a"];
+    delete v.profiles["profile-a"];
+    v.bindings.projects["repo-a"]=token;
+    v.bindings.repositories["github.com/Owner-A/repo-a"]=token;
+    v.bindings.owners["github.com/Owner-A"]=token;
+    fs.writeFileSync(p,JSON.stringify(v)); fs.chmodSync(p,0o600);
+  ' "$d/home/config/github-accounts.json"
+  set +e; err=$(run_exec "$d" validate 2>&1); rc=$?; set -e
+  expect_code 1 "$rc" "credential-shaped configured string"
+  assert_not_contains "$err" 'ghp_AAAAA' "credential-shaped config rejection leaked credential bytes"
   pass "strict schema rejects conflicts, unknown fields and versions, unsafe paths, unknown owners, SSH, and userinfo"
 }
 
@@ -353,12 +384,19 @@ test_preregistration_project_bindings_are_narrow() {
     || fail "authorized pre-registration repository creation did not use its project binding"
 
   set +e
+  (cd "$d/home/projects" && run_exec "$d" exec --project created-project --repository github.com/Owner-A/created-project --pre-register-project -- \
+    gh repo create Owner-A/created-project --private --clone >/dev/null 2>&1)
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "combined repository creation and clone"
+
+  set +e
   err=$(run_exec "$d" exec --project created-project --repository github.com/Owner-A/created-project --pre-register-project -- \
     gh repo create Owner-A/created-project --private 2>&1)
   rc=$?
   set -e
   expect_code 1 "$rc" "pre-registration create from unrelated checkout"
-  assert_contains "$err" 'not the configured project or task copy' "pre-registration create accepted an unrelated checkout"
+  assert_contains "$err" 'pre-registration GitHub routing' "pre-registration create accepted an unrelated checkout"
 
   printf '%s\n' '- created-project direct-PR - created (added 2026-07-22)' >> "$d/home/data/projects.md"
   set +e
@@ -374,6 +412,9 @@ test_concurrent_profiles_and_exact_children() {
   local d p1 p2 contexts rc
   d=$(make_fixture concurrent)
   : > "$d/routes.log"
+  mkdir -p "$d/home/state/.github-routing-path/.install.lock"
+  printf '%s\t%s\n' 999999 'stale owner' > "$d/home/state/.github-routing-path/.install.lock/owner"
+  chmod 0600 "$d/home/state/.github-routing-path/.install.lock/owner"
   (run_exec "$d" exec --project repo-a --repository "$d/home/projects/repo-a" -- gh pr view 11 >/dev/null) & p1=$!
   (run_exec "$d" exec --project repo-b --repository "$d/home/projects/repo-b" -- gh-axi pr list --repo Owner-B/repo-b >/dev/null) & p2=$!
   wait "$p1" || fail "profile-a concurrent operation failed"
@@ -385,6 +426,7 @@ test_concurrent_profiles_and_exact_children() {
   contexts=$(find "$d/home/state/.github-routing-path" -maxdepth 1 -type d -name 'context*' | wc -l | tr -d ' ')
   [ "$contexts" -eq 1 ] || fail "routing commands created $contexts persistent shim contexts"
   [ "$(routing_file_mode "$d/home/state/.github-routing-path/context-v1")" = 500 ] || fail "routing shim context is writable"
+  [ ! -e "$d/home/state/.github-routing-path/.install.lock" ] || fail "stale routing shim lock was not recovered"
   chmod 0700 "$d/home/state/.github-routing-path/context-v1/gh"
   set +e
   run_exec "$d" exec --project repo-a --repository "$d/home/projects/repo-a" -- gh pr view 12 >/dev/null 2>&1
@@ -437,6 +479,9 @@ test_forbidden_commands_and_access_diagnostics() {
     set -e
     expect_code 1 "$rc" "recursive submodule configuration: $command"
   done
+  FM_TEST_ASSERT_SUBMODULE_DISABLED=1 FM_TEST_FAKE_NETWORK=1 \
+    run_exec "$d" exec --project repo-a --repository "$d/home/projects/repo-a" -- git fetch origin >/dev/null \
+    || fail "authoritative Git context did not disable implicit submodule recursion"
   git -C "$d/home/projects/repo-a" config --local submodule.escape.url https://github.com/Other/repo-a
   set +e
   run_exec "$d" exec --project repo-a --repository "$d/home/projects/repo-a" -- gh pr view 1 >/dev/null 2>&1
@@ -511,11 +556,16 @@ test_forbidden_commands_and_access_diagnostics() {
   rc=$?
   set -e
   expect_code 1 "$rc" "raw API escape"
+  FM_TEST_GH_AXI_TYPED_API=1 run_exec "$d" exec --project repo-a --repository "$d/home/projects/repo-a" -- \
+    gh-axi pr view 1 >/dev/null \
+    || fail "verified gh-axi descendant could not perform its typed internal API operation"
+  assert_grep $'gh\tprofile-a\tapi graphql --hostname github.com -f query=typed-operation' "$d/routes.log" \
+    "typed gh-axi internal API call did not retain the selected profile"
   set +e
   err=$(run_exec "$d" exec --repository github.com/Owner-A/new -- gh repo create --private Other/new 2>&1); rc=$?
   set -e
   expect_code 1 "$rc" "repository positional after flags"
-  assert_contains "$err" 'outside the configured parent' "repository positional parser skipped a post-flag target"
+  assert_contains "$err" 'requires an authorized pre-registration' "repository creation bypassed its explicit capability"
   for command in \
     'gh repo create Owner-A/new --template Other/template' \
     'gh issue transfer 1 Other/repo-a' \
@@ -534,10 +584,12 @@ test_forbidden_commands_and_access_diagnostics() {
     || fail "GitHub URL body text was mistaken for a repository target"
   assert_grep $'gh\tprofile-a\tpr comment 1 --body https://github.com/Other/repo-a' "$d/routes.log" \
     "typed GitHub grammar did not preserve body data"
-  (cd "$d/home/projects" && run_exec "$d" exec --repository github.com/Owner-A/new-repository -- gh-axi repo create Owner-A/new-repository --private >/dev/null) \
-    || fail "known-owner repository creation did not route through selected login"
-  assert_grep $'gh-axi\tprofile-a\trepo create Owner-A/new-repository --private' "$d/routes.log" \
-    "repository creation did not use the exact selected gh-axi"
+  set +e
+  (cd "$d/home/projects" && run_exec "$d" exec --repository github.com/Owner-A/new-repository -- \
+    gh-axi repo create Owner-A/new-repository --private >/dev/null 2>&1)
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "repository creation without pre-registration capability"
 
   git -C "$d/home/projects/repo-a" config --local http.extraHeader "Authorization: $SENTINEL"
   set +e
@@ -701,7 +753,7 @@ test_pinned_config_and_fork_bindings() {
 }
 
 test_secondmate_routing_inheritance_is_validated_and_sanitized() {
-  local d child report instruction rc err source saved
+  local d child report instruction rc err source saved override
   d=$(make_fixture inheritance)
   child="$d/inherited-home"
   report="$d/inheritance.report"
@@ -711,13 +763,20 @@ test_secondmate_routing_inheritance_is_validated_and_sanitized() {
   node -e 'const fs=require("fs"); const p=process.argv[1]; fs.writeFileSync(p,JSON.stringify(JSON.parse(fs.readFileSync(p)))); fs.chmodSync(p,0o600)' "$source"
   : > "$report"
   FM_CONFIG_INHERIT_REPORT="$report" FM_INHERITABLE_CONFIG=github-accounts.json bash -c \
-    '. "$1/bin/fm-config-inherit-lib.sh"; propagate_inheritable_config "$2" "$3"' \
-    _ "$ROOT" "$d/home/config" "$child/config" \
+    '. "$1/bin/fm-config-inherit-lib.sh"; propagate_inheritable_config "$2" "$3" "$4"' \
+    _ "$ROOT" "$d/home/config" "$child/config" "$d/home" \
     || fail "validated routing inheritance failed"
   [ "$(routing_file_mode "$child/config/github-accounts.json")" = 600 ] || fail "inherited routing config mode is not 0600"
   cmp -s "$source" "$child/config/github-accounts.json" && fail "routing inheritance copied raw source bytes instead of sanitized JSON"
   node -e 'JSON.parse(require("fs").readFileSync(process.argv[1]))' "$child/config/github-accounts.json" \
     || fail "sanitized inherited routing config is not valid JSON"
+  override="$d/override-config"
+  mkdir -p "$override"
+  FM_INHERITABLE_CONFIG=github-accounts.json bash -c \
+    '. "$1/bin/fm-config-inherit-lib.sh"; propagate_inheritable_config "$2" "$3" "$4"' \
+    _ "$ROOT" "$override" "$child/config" "$d/home" \
+    || fail "canonical routing inheritance failed with a specialized config override"
+  [ -f "$child/config/github-accounts.json" ] || fail "specialized config override removed canonical routing inheritance"
   set +e
   FM_INHERITABLE_CONFIG=github-accounts.json bash -c \
     '. "$1/bin/fm-config-inherit-lib.sh"; fm_config_write_reread_instruction "$2" "$3" "$4"' \
@@ -732,8 +791,8 @@ test_secondmate_routing_inheritance_is_validated_and_sanitized() {
   ln -s "$saved" "$source"
   set +e
   err=$(FM_INHERITABLE_CONFIG=github-accounts.json bash -c \
-    '. "$1/bin/fm-config-inherit-lib.sh"; propagate_inheritable_config "$2" "$3"' \
-    _ "$ROOT" "$d/home/config" "$d/symlink-child/config" 2>&1)
+    '. "$1/bin/fm-config-inherit-lib.sh"; propagate_inheritable_config "$2" "$3" "$4"' \
+    _ "$ROOT" "$d/home/config" "$d/symlink-child/config" "$d/home" 2>&1)
   rc=$?
   set -e
   expect_code 1 "$rc" "symlinked routing inheritance source"
@@ -743,8 +802,8 @@ test_secondmate_routing_inheritance_is_validated_and_sanitized() {
   chmod 0644 "$source"
   set +e
   FM_INHERITABLE_CONFIG=github-accounts.json bash -c \
-    '. "$1/bin/fm-config-inherit-lib.sh"; propagate_inheritable_config "$2" "$3"' \
-    _ "$ROOT" "$d/home/config" "$d/mode-child/config" >/dev/null 2>&1
+    '. "$1/bin/fm-config-inherit-lib.sh"; propagate_inheritable_config "$2" "$3" "$4"' \
+    _ "$ROOT" "$d/home/config" "$d/mode-child/config" "$d/home" >/dev/null 2>&1
   rc=$?
   set -e
   expect_code 1 "$rc" "wrong-mode routing inheritance source"
@@ -753,8 +812,8 @@ test_secondmate_routing_inheritance_is_validated_and_sanitized() {
   node -e 'const fs=require("fs"); const p=process.argv[1]; const v=JSON.parse(fs.readFileSync(p)); v.token=process.argv[2]; fs.writeFileSync(p,JSON.stringify(v)); fs.chmodSync(p,0o600)' "$source" "$SENTINEL"
   set +e
   err=$(FM_INHERITABLE_CONFIG=github-accounts.json bash -c \
-    '. "$1/bin/fm-config-inherit-lib.sh"; propagate_inheritable_config "$2" "$3"' \
-    _ "$ROOT" "$d/home/config" "$d/schema-child/config" 2>&1)
+    '. "$1/bin/fm-config-inherit-lib.sh"; propagate_inheritable_config "$2" "$3" "$4"' \
+    _ "$ROOT" "$d/home/config" "$d/schema-child/config" "$d/home" 2>&1)
   rc=$?
   set -e
   expect_code 1 "$rc" "schema-invalid routing inheritance source"
@@ -788,8 +847,8 @@ test_direct_pr_fork_fleet_sync_and_secondmate_child() {
   child="$d/secondmate"
   mkdir -p "$child/config" "$child/data"
   printf '%s\n' '- repo-b direct-PR +yolo - B (added 2026-07-21)' > "$child/data/projects.md"
-  FM_INHERITABLE_CONFIG=github-accounts.json bash -c '. "$1/bin/fm-config-inherit-lib.sh"; propagate_inheritable_config "$2" "$3"' \
-    _ "$ROOT" "$d/home/config" "$child/config" || fail "secondmate routing inheritance failed"
+  FM_INHERITABLE_CONFIG=github-accounts.json bash -c '. "$1/bin/fm-config-inherit-lib.sh"; propagate_inheritable_config "$2" "$3" "$4"' \
+    _ "$ROOT" "$d/home/config" "$child/config" "$d/home" || fail "secondmate routing inheritance failed"
   (cd "$child" && FM_HOME="$child" FM_ROOT_OVERRIDE="$ROOT" FM_TEST_ROUTE_LOG="$d/routes.log" FM_TEST_SENTINEL="$SENTINEL" \
     FM_NO_MISTAKES_BINARY="$d/exact/no-mistakes" PATH="$d/hostile:$PATH" \
     "$EXEC" exec --project repo-b --repository github.com/Owner-B/repo-b -- gh pr view 3 --repo Owner-B/repo-b >/dev/null) \
@@ -853,7 +912,7 @@ SH
 }
 
 test_no_mistakes_context_handoff_is_typed_and_secret_free() {
-  local d fake_nm captured log refresh_count
+  local d fake_nm captured log refresh_count rc err expected_pwd
   d=$(make_fixture no-mistakes)
   fake_nm="$d/exact/no-mistakes"
   captured="$d/nm-context.json"
@@ -872,7 +931,10 @@ if [ "${1:-}" = init ]; then
   done
   exit 0
 fi
-if [ "${1:-}" = axi ] && [ "${2:-}" = run ]; then exit 0; fi
+if [ "${1:-}" = axi ] && { [ "${2:-}" = run ] || [ "${2:-}" = respond ]; }; then
+  printf '%s\n' "$PWD" > "$FM_TEST_NM_CAPTURE.pwd"
+  exit 0
+fi
 exit 91
 SH
   chmod +x "$fake_nm"
@@ -888,31 +950,49 @@ SH
   assert_no_grep "$SENTINEL" "$captured.args" "no-mistakes argv persisted sentinel"
   assert_no_grep 'token' "$captured" "no-mistakes context persisted a token field"
   : > "$log"
-  FM_NO_MISTAKES_BINARY="$fake_nm" FM_TEST_NM_CAPTURE="$captured" FM_TEST_NM_LOG="$log" \
-    run_exec "$d" exec --project repo-a --repository "$d/home/projects/repo-a" -- no-mistakes axi run >/dev/null \
+  fm_git_init_commit "$d/unrelated-no-mistakes"
+  (cd "$d/unrelated-no-mistakes" && FM_HOME="$d/home" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_NO_MISTAKES_BINARY="$fake_nm" FM_TEST_NM_CAPTURE="$captured" FM_TEST_NM_LOG="$log" \
+    FM_TEST_ROUTE_LOG="$d/routes.log" FM_TEST_SENTINEL="$SENTINEL" PATH="$d/hostile:$PATH" \
+    "$EXEC" exec --project repo-a --repository "$d/home/projects/repo-a" -- no-mistakes axi run >/dev/null) \
     || fail "strict no-mistakes run did not refresh its typed context"
+  expected_pwd=$(cd "$d/home/projects/repo-a" && pwd -P)
+  [ "$(cat "$captured.pwd")" = "$expected_pwd" ] || fail "strict no-mistakes run used the caller working directory"
   node -e 'const fs=require("fs"); const p=process.argv[1]; const v=JSON.parse(fs.readFileSync(p)); v.profiles["profile-a"].commit_identity.name="Refreshed Account A"; fs.writeFileSync(p,JSON.stringify(v)); fs.chmodSync(p,0o600)' "$d/home/config/github-accounts.json"
+  set +e
+  err=$(FM_NO_MISTAKES_BINARY="$fake_nm" FM_TEST_NM_CAPTURE="$captured" FM_TEST_NM_LOG="$log" \
+    run_exec "$d" exec --project repo-a --repository "$d/home/projects/repo-a" -- no-mistakes axi respond accepted 2>&1)
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "stale no-mistakes continuation context"
+  assert_contains "$err" 'stale GitHub routing context' "stale no-mistakes continuation did not fail closed"
   FM_NO_MISTAKES_BINARY="$fake_nm" FM_TEST_NM_CAPTURE="$captured" FM_TEST_NM_LOG="$log" \
     run_exec "$d" exec --project repo-a --repository "$d/home/projects/repo-a" -- no-mistakes axi run >/dev/null \
     || fail "second strict no-mistakes run did not refresh its typed context"
   assert_grep '"name": "Refreshed Account A"' "$captured" "strict run preserved stale no-mistakes context"
+  FM_NO_MISTAKES_BINARY="$fake_nm" FM_TEST_NM_CAPTURE="$captured" FM_TEST_NM_LOG="$log" \
+    run_exec "$d" exec --project repo-a --repository "$d/home/projects/repo-a" -- no-mistakes axi respond accepted >/dev/null \
+    || fail "matching no-mistakes continuation did not revalidate its typed context"
   refresh_count=$(grep -c '^init --github-context ' "$log")
-  [ "$refresh_count" -eq 2 ] || fail "strict runs refreshed no-mistakes context $refresh_count times instead of twice"
-  pass "no-mistakes receives secret-free context and refreshes it before every strict run"
+  [ "$refresh_count" -eq 3 ] || fail "strict runs and continuations refreshed no-mistakes context $refresh_count times instead of three times"
+  pass "no-mistakes receives secret-free context and revalidates every strict run and continuation"
 }
 
 test_secondmate_seed_does_not_leak_project_context() {
   local d secondhome
   d=$(make_fixture seed-context)
   secondhome="$d/seeded-secondmate"
-  printf '%s\n' '- repo-b [direct-PR] +yolo - B (added 2026-07-21)' > "$d/home/data/projects.md"
+  printf '%s\n' '- repo-a [no-mistakes] +yolo - A (added 2026-07-21)' \
+    '- repo-b [direct-PR] +yolo - B (added 2026-07-21)' > "$d/home/data/projects.md"
   FM_HOME="$d/home" FM_SECONDMATE_CHARTER='routing seed context' FM_SECONDMATE_SCOPE='routing seed context' \
-    "$ROOT/bin/fm-brief.sh" routing-sm --secondmate repo-b >/dev/null \
+    "$ROOT/bin/fm-brief.sh" routing-sm --secondmate repo-a repo-b >/dev/null \
     || fail "could not scaffold strict secondmate seed fixture"
   FM_HOME="$d/home" FM_NO_MISTAKES_BINARY="$d/exact/no-mistakes" FM_TEST_FAKE_NETWORK=1 \
+    FM_TEST_NO_MISTAKES_CONTEXT="$d/seed-no-mistakes-context.json" \
     FM_TEST_CLONE_SOURCE="$d/home/projects/repo-b" FM_TEST_ROUTE_LOG="$d/routes.log" FM_TEST_SENTINEL="$SENTINEL" \
-    "$ROOT/bin/fm-home-seed.sh" routing-sm "$secondhome" repo-b >/dev/null \
+    "$ROOT/bin/fm-home-seed.sh" routing-sm "$secondhome" repo-a repo-b >/dev/null \
     || fail "strict secondmate seed leaked its project context into local home creation"
+  [ -d "$secondhome/projects/repo-a/.git" ] || fail "strict secondmate seed did not clone its first routed project"
   [ -d "$secondhome/projects/repo-b/.git" ] || fail "strict secondmate seed did not clone the routed project"
   [ "$(git -C "$secondhome/projects/repo-b" remote get-url origin)" = https://github.com/Owner-B/repo-b.git ] \
     || fail "strict secondmate seed did not preserve the routed origin"

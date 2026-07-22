@@ -564,7 +564,7 @@ EOF
     return 0
   fi
   url=$(source_origin_url "$project" "$mode" "$src" "$git_binary") || return 1
-  fm_github_context_command "$project" "$url" "" git clone --quiet "$url" "$dst"
+  ( fm_github_context_command "$project" "$url" "" git clone --quiet "$url" "$dst" )
 }
 
 validate_seed_project() {

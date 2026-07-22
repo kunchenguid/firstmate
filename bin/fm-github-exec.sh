@@ -130,8 +130,23 @@ child_context() {
   fi
 }
 
+no_mistakes_context_marker_path() {
+  local marker_dir key
+  marker_dir="$FM_HOME/state/.github-routing-no-mistakes"
+  if [ ! -e "$marker_dir" ]; then
+    mkdir -m 0700 "$marker_dir" || return 1
+  fi
+  [ -d "$marker_dir" ] && [ ! -L "$marker_dir" ] && [ "$(fm_github_file_mode "$marker_dir")" = 700 ] || return 1
+  key=$(fm_github_node - "$repository" <<'NODE'
+const crypto = require("node:crypto");
+process.stdout.write(crypto.createHash("sha256").update(process.argv[2]).digest("hex"));
+NODE
+  ) || return 1
+  printf '%s/%s.json\n' "$marker_dir" "$key"
+}
+
 run_no_mistakes_init() {
-  local binary context_file context_dir parent fork_repository args=()
+  local match_existing=${1:-refresh} binary context_file binding_file context_dir marker marker_tmp parent fork_repository args=()
   [ -n "$repository" ] || github_exec_usage
   binary=${FM_NO_MISTAKES_BINARY:-${FM_GITHUB_NO_MISTAKES_BINARY:-$(command -v no-mistakes 2>/dev/null || true)}}
   [ -n "$binary" ] && [ -f "$binary" ] && [ -x "$binary" ] || {
@@ -169,14 +184,37 @@ run_no_mistakes_init() {
   }
   context_dir="$FM_HOME/state/.github-routing-tmp"
   umask 077
-  mkdir -p "$context_dir"
-  context_file=$(mktemp "$context_dir/no-mistakes.XXXXXX.json")
-  trap 'rm -f -- "$context_file"' EXIT HUP INT TERM
+  mkdir -p "$context_dir" || return 1
+  context_file=$(mktemp "$context_dir/no-mistakes.XXXXXX") || return 1
+  binding_file=$(mktemp "$context_dir/no-mistakes-binding.XXXXXX") || { rm -f "$context_file" 2>/dev/null || true; return 1; }
+  trap "rm -f -- $(fm_github_shell_quote "$context_file") $(fm_github_shell_quote "$binding_file")" EXIT HUP INT TERM
   fm_github_no_mistakes_context_file "$context_file" || return 1
+  fm_github_node - "$context_file" "$binding_file" "$fork_url" <<'NODE' || return 1
+const fs = require("node:fs");
+const [contextFile, bindingFile, forkUrl] = process.argv.slice(2);
+const binding = {context: JSON.parse(fs.readFileSync(contextFile, "utf8")), fork_url: forkUrl};
+fs.writeFileSync(bindingFile, `${JSON.stringify(binding, null, 2)}\n`, {mode: 0o600});
+NODE
+  [ -s "$binding_file" ] || return 1
+  marker=$(no_mistakes_context_marker_path) || return 1
+  if [ "$match_existing" = match ]; then
+    [ -f "$marker" ] && [ ! -L "$marker" ] && [ "$(fm_github_file_mode "$marker")" = 600 ] && cmp -s "$binding_file" "$marker" || {
+      echo "error: active no-mistakes run is bound to a stale GitHub routing context" >&2
+      return 1
+    }
+  fi
   args=(--github-context "$context_file")
   [ -z "$fork_url" ] || args+=(--fork-url "$fork_url")
-  (cd "$repository" && command "$binary" init "${args[@]}")
-  rm -f -- "$context_file"
+  (cd "$repository" && command "$binary" init "${args[@]}") || return 1
+  if [ "$match_existing" != initialize ]; then
+    { [ ! -e "$marker" ] && [ ! -L "$marker" ]; } || { [ -f "$marker" ] && [ ! -L "$marker" ]; } || return 1
+    marker_tmp=$(mktemp "${marker%/*}/.context.XXXXXX") || return 1
+    if ! cp "$binding_file" "$marker_tmp" || ! chmod 0600 "$marker_tmp" || ! mv -f "$marker_tmp" "$marker"; then
+      rm -f "$marker_tmp" 2>/dev/null || true
+      return 1
+    fi
+  fi
+  rm -f -- "$context_file" "$binding_file"
   trap - EXIT HUP INT TERM
 }
 
@@ -185,13 +223,19 @@ run_no_mistakes_command() {
     echo "error: no-mistakes command not found" >&2
     return 1
   }
-  if [ "${1:-}" = axi ] && [ "${2:-}" = run ]; then
+  if [ "${1:-}" = axi ] && { [ "${2:-}" = run ] || [ "${2:-}" = respond ]; }; then
     [ -n "${FM_GITHUB_PROJECT_PATH:-}" ] && [ -d "$FM_GITHUB_PROJECT_PATH" ] || {
       echo "error: strict no-mistakes refresh requires the configured project or task copy" >&2
       return 1
     }
     repository=$FM_GITHUB_PROJECT_PATH
-    run_no_mistakes_init || return 1
+    if [ "${2:-}" = respond ]; then
+      run_no_mistakes_init match || return 1
+    else
+      run_no_mistakes_init refresh || return 1
+    fi
+    (cd "$repository" && command "$FM_GITHUB_NO_MISTAKES_BINARY" "$@")
+    return
   fi
   command "$FM_GITHUB_NO_MISTAKES_BINARY" "$@"
 }
@@ -227,7 +271,7 @@ case "$action" in
   no-mistakes-init)
     parse_context_args "$@"
     [ "${#CONTEXT_REST[@]}" -eq 0 ] && [ "$pre_register_project" -eq 0 ] || github_exec_usage
-    run_no_mistakes_init
+    run_no_mistakes_init initialize
     ;;
   child-git)
     [ "${1:-}" = --home ] && [ -n "${2:-}" ] && [ "${3:-}" = -- ] || github_exec_usage
@@ -241,7 +285,12 @@ case "$action" in
     shift 3
     child_context
     [ "$#" -gt 0 ] || github_exec_usage
-    fm_github_context_command "$project" "$repository" "$profile" gh "$@"
+    if [ "${FM_GITHUB_GH_AXI_INTERNAL_API:-}" = 1 ] && [ "${1:-}" = api ]; then
+      fm_github_internal_gh_api_command "$project" "$repository" "$profile" \
+        "${FM_GITHUB_GH_AXI_INTERNAL_PERMISSION:-}" "${FM_GITHUB_GH_AXI_INTERNAL_REPOSITORY:-}" "$@"
+    else
+      fm_github_context_command "$project" "$repository" "$profile" gh "$@"
+    fi
     ;;
   child-gh-axi)
     [ "${1:-}" = --home ] && [ -n "${2:-}" ] && [ "${3:-}" = -- ] || github_exec_usage
