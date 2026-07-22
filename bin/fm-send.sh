@@ -229,25 +229,18 @@ else
     # Reuse an existing correlation id for recovery resends; otherwise create a
     # durable parent expectation before delivery. Transport success never
     # resolves that expectation (see fm-pending-reply-lib.sh).
-    if [ -n "${FM_PENDING_REPLY_EXISTING_CORR:-}" ]; then
-      PENDING_REPLY_CORR=$FM_PENDING_REPLY_EXISTING_CORR
-      if [ ! -f "$(fm_pending_reply_path "$STATE" "$PENDING_REPLY_CORR")" ]; then
-        echo "error: FM_PENDING_REPLY_EXISTING_CORR '$PENDING_REPLY_CORR' has no parent pending-reply record under $STATE" >&2
+    existing_corr=${FM_PENDING_REPLY_EXISTING_CORR:-$(fm_pending_reply_extract_corr "$MESSAGE")}
+    if [ -n "$existing_corr" ] \
+      && fm_pending_reply_corr_reusable "$STATE" "$existing_corr" "$TARGET_TASK_ID"; then
+      PENDING_REPLY_CORR=$existing_corr
+    else
+      if [ -z "$TARGET_TASK_ID" ]; then
+        echo "error: cannot create pending-reply expectation without a resolvable secondmate task id" >&2
         exit 1
       fi
-    else
-      existing_corr=$(fm_pending_reply_extract_corr "$MESSAGE")
-      if [ -n "$existing_corr" ] && [ -f "$(fm_pending_reply_path "$STATE" "$existing_corr")" ]; then
-        PENDING_REPLY_CORR=$existing_corr
-      else
-        if [ -z "$TARGET_TASK_ID" ]; then
-          echo "error: cannot create pending-reply expectation without a resolvable secondmate task id" >&2
-          exit 1
-        fi
-        PENDING_REPLY_CORR=$(fm_pending_reply_create "$FM_HOME" "$STATE" "$TARGET_TASK_ID" "$MESSAGE") \
-          || { echo "error: failed to create parent pending-reply expectation for $TARGET_TASK_ID" >&2; exit 1; }
-        PENDING_REPLY_CREATED=1
-      fi
+      PENDING_REPLY_CORR=$(fm_pending_reply_create "$FM_HOME" "$STATE" "$TARGET_TASK_ID" "$MESSAGE") \
+        || { echo "error: failed to create parent pending-reply expectation for $TARGET_TASK_ID" >&2; exit 1; }
+      PENDING_REPLY_CREATED=1
     fi
     fm_pending_reply_embed_corr "$MESSAGE" "$PENDING_REPLY_CORR" MESSAGE
   fi

@@ -58,8 +58,8 @@ _FM_PENDING_REPLY_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/n
 . "$_FM_PENDING_REPLY_LIB_DIR/fm-marker-lib.sh"
 # shellcheck source=bin/fm-backend.sh
 . "$_FM_PENDING_REPLY_LIB_DIR/fm-backend.sh"
-# wake-lib is sourced lazily in fm_pending_reply_maybe_escalate so loading this
-# library does not mkdir state or set queue globals as a side effect.
+# shellcheck source=bin/fm-tmux-lib.sh
+. "$_FM_PENDING_REPLY_LIB_DIR/fm-tmux-lib.sh"
 
 FM_PENDING_REPLY_SCHEMA='fm-pending-reply.v1'
 FM_PENDING_REPLY_CORR_RE='corr=[A-Fa-f0-9]{16}'
@@ -146,6 +146,19 @@ fm_pending_reply_get() {  # <record-path> <key>
   local rec=$1 key=$2
   [ -f "$rec" ] || return 0
   grep "^${key}=" "$rec" 2>/dev/null | tail -1 | cut -d= -f2- || true
+}
+
+fm_pending_reply_corr_reusable() {  # <state-dir> <corr_id> <task_id>
+  local state=$1 corr=$2 task_id=$3 rec phase
+  printf '%s' "$corr" | grep -Eq '^[A-Fa-f0-9]{16}$' || return 1
+  rec=$(fm_pending_reply_path "$state" "$corr")
+  [ -f "$rec" ] || return 1
+  [ "$(fm_pending_reply_get "$rec" task_id)" = "$task_id" ] || return 1
+  phase=$(fm_pending_reply_get "$rec" phase)
+  case "$phase" in
+    awaiting_report|recovery_sent) return 0 ;;
+  esac
+  return 1
 }
 
 # Rewrite one key in a pending-reply record atomically. Other keys preserved.
@@ -391,6 +404,47 @@ fm_pending_reply_observe_busy() {  # <state-dir> <corr_id> <busy_state>
   return 0
 }
 
+fm_pending_reply_fallback_idle_eligible() {  # <record-path>
+  local rec=$1 phase start seen grace now age
+  phase=$(fm_pending_reply_get "$rec" phase)
+  case "$phase" in
+    awaiting_report)
+      start=$(fm_pending_reply_get "$rec" delivered_epoch)
+      seen=$(fm_pending_reply_get "$rec" turn_seen_busy)
+      ;;
+    recovery_sent)
+      start=$(fm_pending_reply_get "$rec" recovery_sent_epoch)
+      seen=$(fm_pending_reply_get "$rec" recovery_turn_seen_busy)
+      ;;
+    *) return 1 ;;
+  esac
+  [ "$seen" = 1 ] && return 0
+  grace=$(fm_pending_reply_get "$rec" grace_secs)
+  case "$start" in ''|*[!0-9]*) return 1 ;; esac
+  case "$grace" in ''|*[!0-9]*) grace=$(fm_pending_reply_grace_secs) ;; esac
+  now=$(fm_pending_reply_now)
+  age=$((now - start))
+  [ "$age" -ge "$grace" ]
+}
+
+fm_pending_reply_backend_busy_state() {  # <record-path> <backend> <target> [expected-label]
+  local rec=$1 backend=$2 target=$3 expected_label=${4-} native tail40
+  native=$(fm_backend_busy_state "$backend" "$target" 2>/dev/null || printf 'unknown')
+  case "$native" in
+    busy|idle) printf '%s' "$native"; return 0 ;;
+  esac
+  tail40=$(fm_backend_capture "$backend" "$target" 40 "$expected_label" 2>/dev/null) \
+    || { printf 'unknown'; return 0; }
+  if printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -6 \
+    | grep -qiE "${FM_BUSY_REGEX:-$FM_TMUX_BUSY_REGEX_DEFAULT}"; then
+    printf 'busy'
+  elif fm_pending_reply_fallback_idle_eligible "$rec"; then
+    printf 'idle'
+  else
+    printf 'unknown'
+  fi
+}
+
 # Explicit turn-completion proof (for tests and turn-end backends that surface
 # a completion event without a busy/idle pair).
 fm_pending_reply_mark_turn_completed() {  # <state-dir> <corr_id> [which: request|recovery]
@@ -488,29 +542,17 @@ fm_pending_reply_maybe_escalate() {  # <state-dir> <corr_id>
   task_id=$(fm_pending_reply_get "$rec" task_id)
   summary=$(fm_pending_reply_get "$rec" request_summary)
   parent_status=$(fm_pending_reply_get "$rec" parent_status)
-  now=$(fm_pending_reply_now)
-  fm_pending_reply_set "$rec" phase escalated || return 1
-  fm_pending_reply_set "$rec" escalated_epoch "$now" || return 1
   # Use pending-reply-id= (not corr=) so this parent-written line cannot be
   # mistaken for a secondmate acknowledgement by fm_pending_reply_line_resolves.
   payload="pending-reply-missed: task=${task_id} pending-reply-id=${corr} request=${summary}"
-  # Durable captain-facing status line on the parent secondmate status log.
-  if [ -n "$parent_status" ]; then
-    mkdir -p "$(dirname "$parent_status")" 2>/dev/null || true
-    printf 'blocked: %s\n' "$payload" >> "$parent_status" 2>/dev/null || true
+  [ -n "$parent_status" ] || return 1
+  mkdir -p "$(dirname "$parent_status")" 2>/dev/null || return 1
+  if ! grep -Fqx "blocked: $payload" "$parent_status" 2>/dev/null; then
+    printf 'blocked: %s\n' "$payload" >> "$parent_status" 2>/dev/null || return 1
   fi
-  # Wake the parent once through the durable wake queue. Run in a subshell so
-  # STATE / FM_STATE_OVERRIDE / wake-lib globals cannot leak into the caller
-  # (tests and long-lived supervisors).
-  mkdir -p "$state" 2>/dev/null || true
-  (
-    # shellcheck disable=SC2030,SC2031
-    export STATE="$state"
-    export FM_STATE_OVERRIDE="$state"
-    # shellcheck source=bin/fm-wake-lib.sh
-    . "$_FM_PENDING_REPLY_LIB_DIR/fm-wake-lib.sh"
-    fm_wake_append check "pending-reply:${corr}" "$payload"
-  ) 2>/dev/null || true
+  now=$(fm_pending_reply_now)
+  fm_pending_reply_set "$rec" escalated_epoch "$now" || return 1
+  fm_pending_reply_set "$rec" phase escalated || return 1
   return 0
 }
 
@@ -601,7 +643,7 @@ fm_pending_reply_tick_one() {  # <state-dir> <corr_id> <busy_state> [secondmate-
 # Never scrapes secondmate conversation; uses only parent status, backend busy
 # state, and optional secondmate-home wrong-home path checks.
 fm_pending_reply_tick() {  # <state-dir>
-  local state=$1 dir rec corr task_id meta backend target busy sm_home
+  local state=$1 dir rec corr task_id meta backend target label busy sm_home
   dir=$(fm_pending_reply_dir "$state")
   [ -d "$dir" ] || return 0
   for rec in "$dir"/*; do
@@ -622,7 +664,8 @@ fm_pending_reply_tick() {  # <state-dir>
       target=$(fm_backend_target_of_meta "$meta")
       sm_home=$(fm_meta_get "$meta" home)
       if [ -n "$target" ]; then
-        busy=$(fm_backend_busy_state "$backend" "$target" 2>/dev/null || printf 'unknown')
+        label="fm-$task_id"
+        busy=$(fm_pending_reply_backend_busy_state "$rec" "$backend" "$target" "$label")
       fi
     fi
     fm_pending_reply_tick_one "$state" "$corr" "$busy" "$sm_home" || true

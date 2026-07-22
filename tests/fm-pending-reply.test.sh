@@ -181,7 +181,7 @@ test_recovery_reply_resolves_original() {
 }
 
 test_second_missed_turn_escalates_once_and_stays_durable() {
-  local home state corr hook_log rec status_line
+  local home state corr hook_log rec status_line escalations
   home=$(setup_parent escalate-once)
   state="$home/state"
   hook_log="$TMP_ROOT/escalate-hook.log"
@@ -206,12 +206,15 @@ test_second_missed_turn_escalates_once_and_stays_durable() {
     blocked:*pending-reply-missed:*pending-reply-id=$corr*) : ;;
     *) fail "parent status should carry one blocked missed-report line"$'\n'"$status_line" ;;
   esac
+  [ ! -s "$state/.wake-queue" ] || fail "direct escalation must not enqueue a duplicate check wake"
   # Second escalate must be a no-op (phase no longer recovery_sent).
   if fm_pending_reply_maybe_escalate "$state" "$corr" 2>/dev/null; then
     # Function returns 1 when phase is not recovery_sent - good.
     :
   fi
   [ "$(phase_of "$state" "$corr")" = escalated ] || fail "phase must stay escalated"
+  escalations=$(grep -Fc "pending-reply-id=$corr" "$state/hibit.status")
+  [ "$escalations" = 1 ] || fail "missed recovery should publish one escalation, got $escalations"
   # Durable record retained (never silently expired).
   rec=$(fm_pending_reply_path "$state" "$corr")
   [ -f "$rec" ] || fail "escalated record must remain on disk"
@@ -224,6 +227,34 @@ test_second_missed_turn_escalates_once_and_stays_durable() {
   fi
   [ "$(phase_of "$state" "$corr")" = escalated ] || fail "must remain escalated after unrelated status"
   pass "second missed turn escalates once and remains durable"
+}
+
+test_escalation_publication_failure_retries() {
+  local home state corr rec target escalations
+  home=$(setup_parent escalation-retry)
+  state="$home/state"
+  export FM_PENDING_REPLY_NOW=4500
+  corr=$(fm_pending_reply_create "$home" "$state" "hibit" "retry escalation")
+  fm_pending_reply_mark_delivered "$state" "$corr"
+  fm_pending_reply_mark_turn_completed "$state" "$corr" request
+  export FM_PENDING_REPLY_SEND_HOOK='true'
+  fm_pending_reply_send_recovery "$state" "$corr" || fail "recovery send failed"
+  fm_pending_reply_mark_turn_completed "$state" "$corr" recovery
+  rec=$(fm_pending_reply_path "$state" "$corr")
+  target="$state/escalation-target"
+  mkdir -p "$target"
+  fm_pending_reply_set "$rec" parent_status "$target" || fail "failed to set escalation target"
+  if fm_pending_reply_maybe_escalate "$state" "$corr" 2>/dev/null; then
+    fail "escalation should fail when its durable status cannot be written"
+  fi
+  [ "$(phase_of "$state" "$corr")" = recovery_sent ] \
+    || fail "publication failure must leave escalation retryable"
+  rmdir "$target"
+  fm_pending_reply_maybe_escalate "$state" "$corr" || fail "escalation retry should succeed"
+  [ "$(phase_of "$state" "$corr")" = escalated ] || fail "successful retry should commit escalation"
+  escalations=$(grep -Fc "pending-reply-id=$corr" "$target")
+  [ "$escalations" = 1 ] || fail "successful retry should publish exactly once, got $escalations"
+  pass "failed escalation publication remains retryable and publishes once"
 }
 
 test_transport_success_is_not_reply_success() {
@@ -421,6 +452,80 @@ test_busy_idle_observation_via_backend_abstraction() {
   pass "backend busy/idle observation covers Pi/Claude paths without conversation scrape"
 }
 
+test_unknown_backend_state_uses_capture_fallback() {
+  local backend
+  for backend in tmux zellij; do
+    (
+      local home state corr rec sm_home
+      home=$(setup_parent "fallback-$backend")
+      state="$home/state"
+      sm_home="$home/sm"
+      mkdir -p "$sm_home/state"
+      export FM_PENDING_REPLY_GRACE_SECS=10
+      export FM_PENDING_REPLY_NOW=10000
+      corr=$(fm_pending_reply_create "$home" "$state" "hibit" "$backend fallback")
+      fm_pending_reply_mark_delivered "$state" "$corr"
+      fm_write_secondmate_meta "$state/hibit.meta" "$sm_home" "session:fm-hibit"
+      [ "$backend" = tmux ] || printf 'backend=%s\n' "$backend" >> "$state/hibit.meta"
+      fm_backend_busy_state() { printf 'unknown'; }
+      fm_backend_capture() { printf '%s' "$FM_PENDING_TEST_CAPTURE"; }
+      recovery_hook() { :; }
+      export FM_PENDING_REPLY_SEND_HOOK=recovery_hook
+      export FM_PENDING_TEST_CAPTURE='idle footer'
+      fm_pending_reply_tick "$state"
+      rec=$(fm_pending_reply_path "$state" "$corr")
+      [ -z "$(fm_pending_reply_get "$rec" request_turn_completed_epoch)" ] \
+        || fail "$backend fallback must not accept stale idle before grace"
+      export FM_PENDING_REPLY_NOW=10010
+      fm_pending_reply_tick "$state"
+      [ "$(phase_of "$state" "$corr")" = recovery_sent ] \
+        || fail "$backend fallback idle should trigger recovery after grace"
+      export FM_PENDING_REPLY_NOW=10011
+      export FM_PENDING_TEST_CAPTURE='Working...'
+      fm_pending_reply_tick "$state"
+      export FM_PENDING_REPLY_NOW=10012
+      export FM_PENDING_TEST_CAPTURE='idle footer'
+      fm_pending_reply_tick "$state"
+      [ "$(phase_of "$state" "$corr")" = escalated ] \
+        || fail "$backend capture busy-to-idle should complete recovery turn"
+    ) || fail "$backend unknown-state capture fallback failed"
+  done
+  pass "tmux and zellij unknown states use bounded capture fallback"
+}
+
+test_correlations_reuse_only_for_matching_open_task() {
+  local dir fb log home state got corr1 corr2 corr3 rec
+  dir="$TMP_ROOT/corr-reuse"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); log="$dir/send.log"
+  home=$(setup_parent corr-reuse)
+  state="$home/state"
+  fm_write_secondmate_meta "$state/domain.meta" "$home/domain" "sess:fm-domain"
+  fm_write_secondmate_meta "$state/other.meta" "$home/other" "sess:fm-other"
+  run_send "$fb" "$home" "$log" domain "first request" || fail "first marked send failed"
+  got=$(cat "$log")
+  corr1=$(fm_pending_reply_extract_corr "$got")
+  export FM_PENDING_REPLY_EXISTING_CORR=$corr1
+  run_send "$fb" "$home" "$log" other "forwarded request" || fail "cross-task send failed"
+  unset FM_PENDING_REPLY_EXISTING_CORR
+  corr2=$(fm_pending_reply_extract_corr "$(cat "$log")")
+  [ -n "$corr2" ] && [ "$corr2" != "$corr1" ] \
+    || fail "cross-task send must receive a new correlation"
+  rec=$(fm_pending_reply_path "$state" "$corr2")
+  [ "$(fm_pending_reply_get "$rec" task_id)" = other ] \
+    || fail "cross-task expectation must belong to the new target"
+  printf 'done [corr=%s]: complete\n' "$corr1" > "$state/domain.status"
+  fm_pending_reply_try_resolve "$state" "$corr1" || fail "first expectation should resolve"
+  run_send "$fb" "$home" "$log" domain "${FM_FROMFIRST_MARK}corr=${corr1} follow-up" \
+    || fail "resolved-correlation follow-up failed"
+  corr3=$(fm_pending_reply_extract_corr "$(cat "$log")")
+  [ -n "$corr3" ] && [ "$corr3" != "$corr1" ] \
+    || fail "resolved correlation must not guard a new send"
+  rec=$(fm_pending_reply_path "$state" "$corr3")
+  [ "$(fm_pending_reply_get "$rec" task_id)" = domain ] \
+    || fail "replacement expectation must belong to the current target"
+  pass "correlations are reused only for matching open task records"
+}
+
 test_tick_end_to_end_missed_then_escalate() {
   local home state corr hook_log sm_home
   home=$(setup_parent tick-e2e)
@@ -483,6 +588,7 @@ test_normal_correlated_reply_resolves_once
 test_completed_turn_no_report_triggers_one_recovery
 test_recovery_reply_resolves_original
 test_second_missed_turn_escalates_once_and_stays_durable
+test_escalation_publication_failure_retries
 test_transport_success_is_not_reply_success
 test_unrelated_and_stale_corr_cannot_resolve
 test_restart_preserves_expectation_and_parent_destination
@@ -492,6 +598,8 @@ test_fm_send_marked_secondmate_creates_pending_and_embeds_corr
 test_document_pointer_resolves
 test_helper_report_resolves
 test_busy_idle_observation_via_backend_abstraction
+test_unknown_backend_state_uses_capture_fallback
+test_correlations_reuse_only_for_matching_open_task
 test_tick_end_to_end_missed_then_escalate
 test_failed_send_discards_undelivered_expectation
 
