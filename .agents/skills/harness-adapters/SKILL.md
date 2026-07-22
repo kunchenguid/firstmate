@@ -1,6 +1,6 @@
 ---
 name: harness-adapters
-description: Agent-only reference for firstmate harness operations. Use before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter. Contains verified facts for claude, codex, opencode, pi, and grok.
+description: Agent-only reference for firstmate harness operations. Use before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter. Contains verified facts for claude, codex, opencode, pi, grok, and hermes (primary-only; see docs/hermes-primary.md).
 user-invocable: false
 metadata:
   internal: true
@@ -316,3 +316,24 @@ The adapter therefore runs the shared predicate and, when it returns 2, forces o
 It does not pass `--permission-mode`, so the passive hook cannot escalate the primary session's tool permissions.
 Project-local Grok hooks require folder trust, verified with launch-time `--trust`; if the primary firstmate checkout is not trusted for Grok hooks, this primary guard fails open and `fm-guard.sh` remains the next-command alarm.
 Grok's primary watcher protocol is Claude-shaped background-notify around `bin/fm-watch-arm.sh`; the passive Stop hook is only a backstop for blind turn ends.
+
+## hermes (VERIFIED PRIMARY 2026-07-23, Hermes Agent v0.19.0)
+
+Hermes Agent CLI (`hermes`) as a firstmate **primary** session.
+
+It is **not** a verified crewmate/secondmate spawn adapter yet.
+When the primary is Hermes, set `config/crew-harness` to a spawn-verified adapter (`claude`, `codex`, `opencode`, `pi`, or `grok`).
+
+| Fact | Value |
+|---|---|
+| Env marker | `HERMES_SESSION_ID` (non-empty) on interactive tool children |
+| Busy-pane signature | not fingerprinted for crew spawn in this pass |
+| Exit / interrupt / skill | not verified for crew recovery in this pass |
+| Primary wake | Hermes terminal tool `background=true` + `notify_on_complete=true` around `bin/fm-watch-arm.sh` |
+| Primary hooks | optional user-global shell hooks via `bin/fm-hermes-install-primary-hooks.sh` → `bin/fm-hermes-primary-hook.sh` |
+| Turn-end force-continue | **unavailable** (no general Stop block; `pre_verify` is coding-only) |
+
+Install hooks once per machine with `bin/fm-hermes-install-primary-hooks.sh`, then restart Hermes (or relaunch with `--accept-hooks`) so consent and registration stick.
+Full evidence and residual gaps: `docs/hermes-primary.md`.
+Supervision recipe: `docs/supervision-protocols/hermes.md`.
+
