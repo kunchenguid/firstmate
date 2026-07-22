@@ -1282,7 +1282,13 @@ META_WINDOW=$T
     echo "home=$PROJ_ABS"
     echo "projects=$SECONDMATE_PROJECTS"
   fi
-} > "$STATE/$ID.meta"
+} > "$STATE/$ID.meta" || {
+  # A redirection failure on a compound command does not trip `set -e`, so publish
+  # failures must be caught explicitly. Exiting here keeps the abort trap armed, so
+  # backend resources created for this task are released instead of leaking.
+  echo "error: failed to publish task metadata to $STATE/$ID.meta" >&2
+  exit 1
+}
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
 
 sq_brief=$(shell_quote "$BRIEF")
