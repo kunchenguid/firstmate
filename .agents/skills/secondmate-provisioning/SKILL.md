@@ -61,6 +61,7 @@ Release happens only on explicit retirement or seed rollback, never on routine r
 `bin/fm-home-seed.sh` copies the charter into the secondmate home as `data/charter.md`.
 It also writes the required `.fm-secondmate-home` identity marker, which is gitignored and must remain in place for home validation.
 `bin/fm-spawn.sh --secondmate` launches it through the secondmate harness path, resolving `config/secondmate-harness` -> `config/crew-harness` -> the primary's own harness unless an explicit per-spawn harness override is passed.
+A `traex` secondmate is supported (its turn-end guard rides the tracked `.trae/hooks.json` Stop hook in the home, its watcher is the traex foreground checkpoint), but its first launch in a fresh home shows TWO trust dialogs - directory trust, then a hooks-review "Trust all" (default, single Enter) - so peek the pane after spawn and answer both before expecting the charter to run; see the `harness-adapters` traex section.
 
 `config/secondmate-harness` may also pin a concrete model and effort for the secondmate agent, in the SAME file rather than a new one: the format is a single whitespace-separated line `<harness> [<model>] [<effort>]`, with only the first non-empty, non-comment line parsed.
 A bare `<harness>` (today's format, e.g. `claude`) behaves exactly as before - harness only, no model/effort flag - so this is fully backward-compatible.

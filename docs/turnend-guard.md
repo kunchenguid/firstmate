@@ -43,15 +43,16 @@ All verified primary harnesses have a tracked integration:
 
 - `claude`: `.claude/settings.json` registers a `Stop` hook command anchored through `"$CLAUDE_PROJECT_DIR"/bin/fm-turnend-guard.sh`.
 - `codex`: `.codex/hooks.json` registers a `Stop` hook that reads the hook payload once, anchors the executable to the hook command process working directory, verifies that root is firstmate-shaped and hook-bearing, and pipes the original payload to that checkout's `bin/fm-turnend-guard.sh`.
+- `traex`: `.trae/hooks.json` registers the same `Stop` hook as codex (traex is a codex fork with the same claude-style project-hook JSON), byte-identical to `.codex/hooks.json` apart from the `.trae/hooks.json` self-reference path. traex loads project hooks only after the repo root is granted directory trust and the hook is granted content trust once; the fixed command hashes stable, so the one-time trust survives new sessions, `exec`, and `resume` (see the harness-adapters skill's traex section).
 - `opencode`: `.opencode/plugins/fm-primary-turnend-guard.js` listens for `session.idle`, lets the watcher-arm coordinator handle normal idle supervision first, runs the shared guard only when that coordinator does not act, and uses `client.session.promptAsync` to force one follow-up prompt when the guard returns 2.
 - `pi`: `.pi/extensions/fm-primary-turnend-guard.ts` listens for `agent_settled`, marks the extension version loaded for session-start checks, runs the shared guard once per logical agent run, and uses `pi.sendUserMessage(..., { deliverAs: "followUp" })` to force one follow-up prompt when the guard returns 2.
 - `grok`: `.grok/hooks/fm-primary-turnend-guard.json` registers a `Stop` hook that invokes `bin/fm-turnend-guard-grok.sh`.
   The adapter runs the shared guard and, when it returns 2, invokes `grok --resume <sessionId> -p <guard-reason>` with `GROK_TURNEND_GUARD_ACTIVE=1`.
   It does not pass `--permission-mode`, so the passive Stop hook cannot grant stronger tool permissions than Grok's resumed-session default.
 
-Claude and Codex support a direct blocking Stop hook.
+Claude, Codex, and traex support a direct blocking Stop hook.
 For those harnesses, exit status 2 plus stderr from `bin/fm-turnend-guard.sh` blocks the stop and feeds the reason back into the model.
-Both payloads include `stop_hook_active`; when it is true, the shared guard exits 0 so the harness can end after one forced continuation.
+Those payloads include `stop_hook_active`; when it is true, the shared guard exits 0 so the harness can end after one forced continuation.
 
 OpenCode, Pi, and Grok expose passive lifecycle callbacks for this purpose.
 Their adapters fail open at the hook boundary to avoid corrupting a user session, but they force one follow-up turn when the shared predicate blocks.
@@ -79,6 +80,12 @@ Command run for root-signal probe: `codex exec --ephemeral --json --dangerously-
 Observed output: the first command printed `<scratch>/outside`, the second command printed `<scratch>`, the Stop hook process `pwd -P` printed `<scratch>`, payload `cwd` printed `<scratch>`, and `CODEX_PROJECT_DIR`, `CODEX_WORKSPACE_ROOT`, and `CODEX_CWD` were empty.
 The tracked command therefore treats hook process PWD as the hook-loaded firstmate root and does not let payload `cwd` choose an executable.
 It still passes the original payload to `bin/fm-turnend-guard.sh`, so the shared loop guard reads `stop_hook_active`.
+
+traex (TRAE CLI 2.0) `traex 0.200.13` was validated on 2026-07-17 (Stop guard full loop, scout `traex-parity-study-n7` §4.3) and 2026-07-20 (PreToolUse seatbelt wrappers), both in isolated `TRAE_HOME` homes with tmux socket `fm-traex-lab`.
+Hook file used: project-level `.trae/hooks.json`.
+Stop-guard observation: the first Stop payload had `stop_hook_active=false`, the stop was blocked, the pane rendered `• Stop hook (blocked)`, the model continued with the guard-instructed word, and the second payload had `stop_hook_active=true` and was allowed; the hook process `pwd -P` equaled the repo root, matching codex, so the tracked `root=$(pwd -P)` anchor is reused unchanged.
+PreToolUse observation: a real captured traex PreToolUse payload is codex-shaped (`{"tool_name":"Bash","tool_input":{"command":"..."},"hook_event_name":"PreToolUse",...}`), so the tracked wrapper's `.tool_input.command` extraction works unchanged; a live run of `bin/fm-watch.sh --arm` in the trusted lab repo was blocked with `Command blocked by PreToolUse hook: {... "[watcher-direct] bin/fm-watch.sh must not be run directly ..."}`, exercising the real `.trae/hooks.json` -> `bin/fm-arm-pretool-check.sh` -> `bin/fm-arm-command-policy.mjs` path end to end.
+traex project hooks load only after directory trust plus a one-time hooks-review "Trust all" (single Enter on the default), and the fixed command hashes are stable across sessions/`exec`/`resume`; an untrusted hook in headless `exec` is silently ignored (fail-open), so any future headless traex use must confirm trust is already established.
 
 OpenCode 1.17.6 was validated with project plugins under scratch `.opencode/plugins/`.
 Hook file used: `.opencode/plugins/fm-smoke.js` for throw testing and `.opencode/plugins/fm-primary-turnend-guard.js` for follow-up testing.

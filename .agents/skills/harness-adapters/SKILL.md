@@ -1,6 +1,6 @@
 ---
 name: harness-adapters
-description: Agent-only reference for firstmate harness operations. Use before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter. Contains verified facts for claude, codex, opencode, pi, and grok.
+description: Agent-only reference for firstmate harness operations. Use before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter. Contains verified facts for claude, codex, opencode, pi, grok, and traex.
 user-invocable: false
 metadata:
   internal: true
@@ -35,6 +35,7 @@ The primary-session watcher wake protocols are rendered from `docs/supervision-p
 The supervision knowledge lives here: busy signature, exit command, interrupt, dialogs, resume behavior, skill invocation, and quirks.
 
 Never dispatch a crewmate or secondmate on an unverified adapter.
+An adapter can also be more thoroughly verified for one ROLE than another: `traex`'s crewmate/scout face is live-verified, while its primary/secondmate face is wired and component-verified but not yet exercised as a real long-running primary session (see the traex section).
 If `config/crew-harness` or `config/secondmate-harness` names an unverified adapter, tell the captain and fall back to firstmate's own harness until that adapter is verified.
 If the captain asks for a new harness, propose verifying it first: spawn a trivial supervised task using `fm-spawn`'s raw-launch-command escape hatch, confirm every fact empirically, then record the mechanics in `fm-spawn`, the busy signature in `fm-watch.sh` and `fm-tmux-lib.sh` defaults, any needed `FM_COMPOSER_IDLE_RE` empty-composer override plus any novel bare agent prompt glyph in `bin/fm-composer-lib.sh`'s shared composer classifier (the one fleet-wide owner of the empty/dead-shell/pending decision, so a new harness's own idle composer is not misread as a dead shell), the tmux agent-process liveness classification in `bin/backends/tmux.sh` when the harness can launch a secondmate, and the verified knowledge here.
 
@@ -99,6 +100,7 @@ The supported launch-profile flags below are verified locally; each row records 
 | grok | `--model <model>` | `--reasoning-effort <low\|medium\|high>` | Verified on grok 0.2.99 (2026-07-13). `--effort` is an alias, but firstmate's profile axis is reasoning effort. As of 0.2.99 the ceiling is `high`; both `xhigh` and `max` are rejected with `use one of: high, medium, low`, so firstmate omits them. |
 | pi | `--model <model>` | `--thinking <low\|medium\|high\|xhigh\|max>` | Verified 2026-07-13 on Pi 0.80.6. `pi --help` advertises `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`; `pi --print --model openai-codex/gpt-5.6-sol --thinking max 'Reply with exactly OK.'` completed successfully. |
 | opencode | `--model <provider/model>` | none for firstmate's interactive launch | Verified on opencode 1.17.6. `opencode run` has `--variant`, but firstmate launches the interactive `opencode --prompt` path, which has no verified effort flag. |
+| traex | `--model <model>` | `-c 'model_reasoning_effort="<low\|medium\|high\|xhigh>"'` | Verified on traex 0.200.13 (2026-07-17). Same config key as codex, and the binary's own parser is authoritative: `-c model_reasoning_effort='"max"'` is rejected with "unknown variant `max`, expected one of `none`, `minimal`, `low`, `medium`, `high`, `xhigh`", so `max` is omitted. The ceiling is `xhigh`, identical to codex. |
 
 When a requested effort value is outside the harness-specific accepted set, `fm-spawn` records the requested `effort=` in meta but emits no effort flag for that harness.
 This preserves launch success instead of passing a known-bad value.
@@ -110,6 +112,7 @@ Natural language is acceptable if uncertain.
 
 - claude: `/<skill>`, for example `/no-mistakes`.
 - codex: `$<skill>`, for example `$no-mistakes`; `/<skill>` is claude-only and codex rejects it as "Unrecognized command".
+- traex: `$<skill>`, the same codex-style popup. But `~/.trae/skills` has no `no-mistakes` skill, so a traex crewmate cannot run the gated pipeline at all; do not route gated work to one (see the traex section below).
 - opencode: no separate verified skill invocation beyond normal slash-command behavior; use natural language if the exact skill command is uncertain.
 - pi: no separate verified skill invocation beyond normal command behavior; use natural language if the exact skill command is uncertain.
 - grok: `/<skill>`, for example `/no-mistakes` (same form as claude). Verified end to end: grok discovers the user-level `no-mistakes` skill, `/no-mistakes` invokes it, and grok drives a real `no-mistakes axi run`. Like codex's `$`/`/` popups, typing `/<skill>` opens grok's slash-autocomplete, so a too-fast Enter selects the popup entry instead of sending, and for an argument-taking command (like `/no-mistakes`'s optional task-first argument) that first Enter only expands the popup selection into an argument-hint placeholder rather than submitting - a genuine second Enter is required (see the grok section below for the 2026-07-03 incident and fix). `fm_tmux_submit_core`'s retried Enter (used by `fm-send` on the tmux backend) already handles this correctly by reading the cursor row; the herdr backend needed a dedicated fix (`fm_backend_herdr_composer_state`, docs/herdr-backend.md) because its prior delta-based verification false-positived on that same popup-close content change.
@@ -278,3 +281,87 @@ The adapter therefore runs the shared predicate and, when it returns 2, forces o
 It does not pass `--permission-mode`, so the passive hook cannot escalate the primary session's tool permissions.
 Project-local Grok hooks require folder trust, verified with launch-time `--trust`; if the primary firstmate checkout is not trusted for Grok hooks, this primary guard fails open and `fm-guard.sh` remains the next-command alarm.
 Grok's primary watcher protocol is Claude-shaped background-notify around `bin/fm-watch-arm.sh`; the passive Stop hook is only a backstop for blind turn ends.
+
+## traex (VERIFIED 2026-07-17, traex 0.200.13; primary/secondmate surfaces added 2026-07-20)
+
+TRAE CLI 2.0, a fork of `openai/codex` maintained by the TRAE team, so it inherits codex's launch shape, `notify=` turn-end, `esc to interrupt` busy line, `$<skill>` popup, and codex's primary supervision shape (foreground checkpoint, blocking Stop hook).
+The crewmate/scout face is fully verified including live runs.
+The primary and secondmate faces are wired (parity work P1-P4) and component-verified - the `.trae/hooks.json` guard and PreToolUse seatbelts, the `traex.md` checkpoint protocol, the lock and liveness arms, and the no-notify secondmate launch - but a real long-running traex primary session (watcher-checkpoint loop, wake handling, afk, X mode) has not been exercised end to end, so treat that as the remaining live gap (see "Scope").
+
+**The binary is `traex`. Never `traecli`.**
+On a box that kept the TRAE CLI 1.0 install, `traecli`, `trae-cli`, `trae-agent`, `coco`, and `ta` all resolve to **coco 1.0 - a different agent** (verified: `traex --version` prints `traecli 0.200.13`, while `traecli --version` prints `coco version 0.120.47`).
+Launching one of those names would leave firstmate supervising the wrong agent while believing it drives TRAE 2.0.
+The trap is easy to walk into because **traex prints the wrong command itself**: on `/quit` it prints `To continue this session, run traecli resume <id>` (verified verbatim).
+The correct resume is `traex resume <id>`; never copy traex's own printed resume line.
+
+| Fact | Value |
+|---|---|
+| Busy-pane signature | `esc to interrupt` - matches the DEFAULT regex with NO override |
+| Exit command | `/quit` (also `/exit`); opens a slash popup, same settle as codex |
+| Interrupt | single Escape (pane shows `■ Interrupted by user`) |
+| Skill invocation | `$<skill>`, codex-style popup (`/<skill>` is claude-only) |
+| Autonomy | `-y` (long form `--dangerously-bypass-approvals-and-sandbox`) |
+| Model flag | `-m`/`--model <MODEL>` |
+| Effort flag | `-c model_reasoning_effort="<none\|minimal\|low\|medium\|high\|xhigh>"`; see the [launch-profile-axes table](#launch-profile-axes) |
+| Turn-end hook | codex-style `-c notify=[...]`, fires in TUI and exec, needs NO hook trust |
+| Env marker | `TRAECLI_SESSION_INBOX` (see the detection warning below) |
+| Resume | `traex resume [SESSION_ID] [--last]`, plus `fork` |
+
+**Busy signature: the anchor is `esc to interrupt` and nothing else.**
+The default `FM_TMUX_BUSY_REGEX_DEFAULT` matches unchanged; no `FM_BUSY_REGEX` override is needed.
+Two observed properties make the anchor load-bearing rather than incidental.
+The status VERB and spinner GLYPH both vary - `◆ ❖ ◇ ◈` with `Working…`, `Thinking longer…`, `Running command…`, and `Poking the model…` all seen live - so anchoring on any verb would be fragile.
+And `Working…` uses a Unicode ellipsis (U+2026, bytes `e2 80 a6`), so the default's `Working\.\.\.` alternative does **not** match: `esc (to )?interrupt` is the only alternative that fires on a traex busy line.
+Verified in both directions against firstmate's own `fm_pane_is_busy` on a live pane: busy renders BUSY, idle renders NOT-BUSY.
+The idle pane's `esc again to edit previous message` hint contains `esc` but not `interrupt`, so it does not false-positive.
+
+**Composer classification: no override needed.**
+Verified against the real `fm_tmux_composer_state`: an idle composer reads `empty` (its ghost placeholder is dim SGR 2, already stripped by `fm_composer_strip_ghost`, and `❯` is already a known agent glyph), and the trust dialog reads `unknown`, so firstmate will not inject into it.
+
+**Detection: use `TRAECLI_SESSION_INBOX`, never `TRAECLI_SESSION_ID`.**
+traex sets `TRAECLI_SESSION_INBOX` for its shell-tool children, and the substring `INBOX` appears nowhere in the coco 1.0 binary, so it cleanly separates 2.0 from 1.0.
+`TRAECLI_SESSION_ID` is present in BOTH binaries and therefore cannot tell them apart - do not use it as a marker.
+traex is a codex fork and also exports `CODEX_CI=1`, `CODEX_THREAD_ID`, `CODEX_SANDBOX`, and `CODEX_SANDBOX_NETWORK_DISABLED`, so its marker must be tested before any codex inference or every traex child reads as codex.
+`bin/fm-harness.sh`'s ancestry arm matches the command name `traex` EXACTLY, never a `*trae*` glob, because such a glob would report traex for coco's process names.
+
+**Startup dialogs: expect ONE, possibly TWO, and `-y` suppresses neither.**
+First run per repo shows the directory-trust dialog (`Do you trust the contents of this directory?` / `❯ 1. Yes, continue` / `2. No, quit`); Enter accepts.
+It is keyed to the REPOSITORY ROOT, not the worktree - launched inside a worktree it says "Trusting will apply to the repository root" - so later worktrees of the same project skip it, exactly like codex.
+Accepting writes `[projects."<repo-root>"] trust_level = "trusted"` into `traecli.toml`, so traex grows the user's own config as projects are trusted; that file is traex's to manage and firstmate must not hand-edit it.
+A SECOND dialog appears when any configured hook is new or changed: `Hooks need review` / `1. Review hooks` / `❯ 2. Trust all and continue` / `3. Continue without trusting (hooks won't run)`.
+It is not triggered by firstmate's own wiring (see hook trust below), but it WILL stall a crewmate whenever the user's `traecli.toml` hooks change, so peek the pane after spawn and answer whatever is showing.
+
+**Hook trust: why the turn-end signal is `notify=` and not `[[hooks.Stop]]`.**
+traex has two independent gates, and directory trust is NOT hook trust: with a directory already `trust_level = "trusted"`, a user-config `[[hooks.PreToolUse]]` still did not run.
+Hook trust is content-addressed - `[hooks.state."<config-path>:<event>:<i>:<i>"] trusted_hash = "sha256:<hash of the hook command>"` - so a per-task hook command (which necessarily embeds that task's own turn-end path) hashes differently every task and could never match a stored hash.
+An untrusted hook in non-interactive `exec` mode is **silently ignored**: no prompt, no warning, the tool call just proceeds.
+That is a fail-OPEN, invisible failure, which is exactly what a turn-end signal must never do.
+`-c notify=[...]` is not hook-trust-gated (verified firing with no bypass flag, in both TUI and exec), needs nothing written into the worktree, and is therefore what `fm-spawn` wires.
+`--dangerously-bypass-hook-trust` runs enabled hooks without persisted trust for one invocation and prints its own warning; firstmate does not use it.
+
+**PreToolUse deny works, and `-y` does not override it.**
+With hook trust bypassed, a claude-style `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"..."}}` blocked the command: the pane showed `hook: PreToolUse Blocked` and the reason reached the model, even under `-y`.
+So the deny semantics an arm seatbelt would need are present - but any such hook is subject to the trust gate above.
+
+**Primary and secondmate surfaces (parity P1-P4, 2026-07-20).**
+traex is now wired as a full-role harness, mirroring codex because it is a codex fork:
+- `.trae/hooks.json` (tracked, a mechanical copy of `.codex/hooks.json`) carries the Stop turn-end guard and the two PreToolUse seatbelts. Verified: the Stop guard blocks on exit 2 with `stop_hook_active` reentry (scout §4.3), and a live `bin/fm-watch.sh --arm` was blocked end to end through the real policy (`[watcher-direct]`).
+- `docs/supervision-protocols/traex.md` is codex's foreground-checkpoint protocol; `bin/fm-supervision-instructions.sh` renders it and its checkpoint repair line for `--harness traex`.
+- `bin/fm-lock.sh` `HARNESS_RE` recognizes a traex session-lock holder; `bin/backends/tmux.sh`'s agent-liveness arm classifies a live traex pane as alive.
+- `bin/fm-spawn.sh` launches a traex secondmate with codex's no-notify shape (turn-end rides the `.trae/hooks.json` guard inside the secondmate home). The earlier fail-closed refusal is gone.
+
+The **remaining live gap**: no real long-running traex primary session (watcher-checkpoint loop, wake handling, afk, X mode) or full live secondmate-home charter run has been exercised end to end; the surfaces above are component-verified (isolated homes, deterministic launch shapes, unit tests). Before running firstmate itself on traex as a primary, exercise a real primary session in a throwaway home and confirm the checkpoint+guard loop.
+
+**Hook trust is the operational precondition for the primary/secondmate guards.**
+The `.trae/hooks.json` hooks load only after the firstmate checkout is granted directory trust AND a one-time hooks-review "Trust all" (default selection, single Enter). The fixed command hashes stay trusted across new sessions, `exec`, and `resume`.
+First launch in any NEW firstmate home (a secondmate home, or the primary on a fresh box) therefore shows TWO dialogs: directory trust, then hooks review. Peek the pane after spawn and press Enter for both.
+Until trust is established the guard and seatbelts are inert, and an untrusted hook in headless `exec` is silently ignored (fail-open) - so any headless traex use must confirm trust is already established.
+
+**A traex crewmate cannot run the no-mistakes gate until the skill is installed.**
+`~/.trae/skills` holds 58 skills but no `no-mistakes`, even though the `no-mistakes` binary is on PATH and the skill exists for claude.
+Parity P0 is to install it into a shared skill root - `~/.agents/skills/no-mistakes/` (recommended, serves every harness) or `~/.trae/skills/no-mistakes/`. Verified: dropped into `$TRAE_HOME/skills`, `$no-mistakes` lists in the popup and injects the SKILL.md content, and the model reaches `no-mistakes axi` in a traex shell child.
+Until it is installed there, do not route gated-pipeline work to a traex crewmate; fast-path work (direct-PR, local-only) is unaffected.
+
+**Startup noise.**
+Every launch prints a non-fatal `Failed to update built-in plugin marketplace 'traex-bd-plugins': ... git@code.byted.org: Permission denied (publickey...)` when no `code.byted.org` SSH key is present.
+It does not match the busy regex and does not corrupt supervision.

@@ -2,18 +2,19 @@
 # fm-send pre-submit popup-settle selection (the codex `$<skill>` fix).
 #
 # Some TUIs open a completion popup when the composer's first character triggers
-# it: codex (and others) for a leading `/` slash command, and codex specifically
-# for a leading `$<skill>` invocation (e.g. `$no-mistakes`). Submitting before the
-# popup settles lets it swallow the Enter, so the line never submits. fm-send
-# absorbs this by pausing `settle` seconds AFTER typing and BEFORE the (retried)
-# Enter - the first sleep fm_tmux_submit_core makes. These tests pin the
-# settle-SELECTION matrix hermetically (stubbed tmux + sleep, no real agent):
+# it: codex (and others) for a leading `/` slash command, and codex and traex
+# specifically for a leading `$<skill>` invocation (e.g. `$no-mistakes`).
+# Submitting before the popup settles lets it swallow the Enter, so the line never
+# submits. fm-send absorbs this by pausing `settle` seconds AFTER typing and BEFORE
+# the (retried) Enter - the first sleep fm_tmux_submit_core makes. These tests pin
+# the settle-SELECTION matrix hermetically (stubbed tmux + sleep, no real agent):
 #
 #   /...            -> 1.2  (universal; `/` only starts a command, never plain text)
 #   $... to codex   -> 1.2  (scoped: codex opens a `$<skill>` popup)
-#   $... to claude  -> 0.3  (NOT codex: `$` commonly starts plain text "$5", "$HOME")
+#   $... to traex   -> 1.2  (scoped: traex is a codex fork and opens the same popup)
+#   $... to claude  -> 0.3  (no `$` popup: `$` commonly starts plain text "$5", "$HOME")
 #   $... explicit   -> 0.3  (session:window target has no meta -> harness unknown
-#                            -> non-codex safe default)
+#                            -> popup-free safe default)
 #   plain text      -> 0.3  (fast path)
 #
 # The popup-settle is the FIRST sleep recorded: fm_tmux_submit_core types the text,
@@ -116,6 +117,21 @@ first_settle 1.2 'codex $skill -> long settle' codex '$no-mistakes'
 # task id, not only by the legacy `fm-<id>` window label.
 first_settle 1.2 'codex $skill exact task id -> long settle' codex '$no-mistakes' exact
 
+# traex opens the same `$<skill>` popup as codex (verified 2026-07-17 on traex
+# 0.200.13: a bare `$` lists `[Skill]` entries under "Press enter to insert or esc
+# to close"), so a `$...` message to a traex target needs the same settle. Without
+# this the first Enter INSERTS the highlighted skill instead of sending, and the
+# invocation never lands.
+first_settle 1.2 'traex $skill -> long settle' traex '$no-mistakes'
+
+# And by exact task id, the same way codex is covered above.
+first_settle 1.2 'traex $skill exact task id -> long settle' traex '$no-mistakes' exact
+
+# Plain `$`-prefixed text to traex still takes the long settle: the scope is
+# per-harness, not per-message-shape, exactly as it is for codex. Pinned so the
+# traex arm is not silently narrowed later.
+first_settle 1.2 'traex "$5/month" -> long settle (harness-scoped, like codex)' traex '$5/month is cheap'
+
 # Same `$` message to claude keeps the fast path: `$` is ordinary text there.
 first_settle 0.3 'claude $-message -> fast path' claude '$no-mistakes'
 
@@ -136,3 +152,7 @@ first_settle 1.2 'codex /command -> long settle (slash unchanged)' codex '/help'
 
 # Plain text to codex takes the fast path - the codex scope is `$`-prefixed only.
 first_settle 0.3 'codex plain text -> fast path' codex 'just a normal steer'
+
+# Plain text to traex likewise takes the fast path: the traex scope is
+# `$`-prefixed only, so ordinary steers are not slowed.
+first_settle 0.3 'traex plain text -> fast path' traex 'just a normal steer'

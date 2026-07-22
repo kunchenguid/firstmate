@@ -67,7 +67,7 @@ SH
 }
 
 test_tmux_agent_alive_classifies() {
-  local fb
+  local fb coco_name verdict
 
   fb=$(make_probe_tmux "$TMP_ROOT/tmux-claude" claude)
   [ "$(PATH="$fb:$BASE_PATH" bash -c '. "$0/bin/fm-backend.sh"; fm_backend_source tmux; fm_backend_tmux_agent_alive sess:win' "$ROOT")" = alive ] \
@@ -84,6 +84,21 @@ test_tmux_agent_alive_classifies() {
   fb=$(make_probe_tmux "$TMP_ROOT/tmux-grok" grok)
   [ "$(PATH="$fb:$BASE_PATH" bash -c '. "$0/bin/fm-backend.sh"; fm_backend_source tmux; fm_backend_tmux_agent_alive sess:win' "$ROOT")" = alive ] \
     || fail "a live grok foreground process should classify as alive"
+
+  fb=$(make_probe_tmux "$TMP_ROOT/tmux-traex" traex)
+  [ "$(PATH="$fb:$BASE_PATH" bash -c '. "$0/bin/fm-backend.sh"; fm_backend_source tmux; fm_backend_tmux_agent_alive sess:win' "$ROOT")" = alive ] \
+    || fail "a live traex foreground process should classify as alive"
+
+  # THE COCO TRAP: on a box that kept the TRAE CLI 1.0 install, these names are
+  # coco 1.0 (a DIFFERENT agent), not traex. A *trae* glob would misread a live
+  # coco pane as a live traex agent and suppress a needed respawn. The arm matches
+  # traex EXACTLY, so every coco name must classify as unknown, never alive.
+  for coco_name in traecli trae-cli trae-agent coco ta; do
+    fb=$(make_probe_tmux "$TMP_ROOT/tmux-$coco_name" "$coco_name")
+    verdict=$(PATH="$fb:$BASE_PATH" bash -c '. "$0/bin/fm-backend.sh"; fm_backend_source tmux; fm_backend_tmux_agent_alive sess:win' "$ROOT")
+    [ "$verdict" != alive ] \
+      || fail "coco 1.0 name '$coco_name' must NEVER classify as a live traex agent (got alive)"
+  done
 
   fb=$(make_probe_tmux "$TMP_ROOT/tmux-zsh" zsh)
   [ "$(PATH="$fb:$BASE_PATH" bash -c '. "$0/bin/fm-backend.sh"; fm_backend_source tmux; fm_backend_tmux_agent_alive sess:win' "$ROOT")" = dead ] \

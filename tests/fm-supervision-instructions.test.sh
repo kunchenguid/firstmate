@@ -27,6 +27,23 @@ test_unknown_fallback() {
   pass "renderer falls back to unknown.md for unverified harness names"
 }
 
+# traex is a verified primary (codex fork), so it must render its OWN snippet, not
+# the unknown fallback, and its repair line is codex's foreground checkpoint.
+test_traex_selected_block_and_repair() {
+  local out home
+  out=$("$RENDER" --harness traex)
+  assert_contains "$out" "SUPERVISION OPERATING INSTRUCTIONS - primary harness: traex" "traex heading missing"
+  assert_contains "$out" "Mode: traex foreground checkpoint." "traex snippet missing"
+  assert_contains "$out" "bin/fm-watch-checkpoint.sh" "traex checkpoint helper missing"
+  assert_not_contains "$out" "Mode: Unknown harness fallback." "traex fell back to the unknown snippet"
+
+  home="$TMP_ROOT/traex-repair-home"
+  mkdir -p "$home/state" "$home/config"
+  out=$(FM_HOME="$home" FM_CODEX_WATCH_CHECKPOINT=9 "$RENDER" --harness traex --repair-line)
+  assert_contains "$out" "bin/fm-watch-checkpoint.sh --seconds 9" "traex repair line did not use the foreground checkpoint helper"
+  pass "renderer prints the traex checkpoint block and repair line"
+}
+
 test_conditional_stanzas() {
   local home config out
   home="$TMP_ROOT/conditional-home"
@@ -109,6 +126,7 @@ test_pi_snippet_uses_effective_extension_path() {
 
 test_selected_harness_block_only
 test_unknown_fallback
+test_traex_selected_block_and_repair
 test_conditional_stanzas
 test_repair_lines
 test_grok_is_background_notify

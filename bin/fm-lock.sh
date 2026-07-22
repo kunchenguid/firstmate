@@ -15,7 +15,9 @@ LOCK="$STATE/.lock"
 mkdir -p "$STATE"
 
 # Known harness command names; extend when a new adapter is verified.
-HARNESS_RE='claude|codex|opencode|grok|^pi$'
+# `traex` is the TRAE CLI 2.0 binary; it is safe as a bare substring because none
+# of coco 1.0's names (traecli, trae-cli, trae-agent, coco, ta) contain "traex".
+HARNESS_RE='claude|codex|opencode|grok|traex|^pi$'
 
 harness_pid() {
   local pid=$$ comm args

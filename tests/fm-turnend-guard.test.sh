@@ -659,6 +659,47 @@ test_codex_hook_invokes_shared_guard() {
   pass ".codex/hooks.json: Stop hook invokes the shared primary guard"
 }
 
+test_traex_hook_invokes_shared_guard() {
+  local settings command
+  settings="$ROOT/.trae/hooks.json"
+  [ -f "$settings" ] || fail "tracked .trae/hooks.json is missing"
+  command=$(jq -r '.hooks.Stop[0].hooks[0].command // empty' "$settings")
+  [ -n "$command" ] || fail "Stop hook command is missing from .trae/hooks.json"
+  assert_contains "$command" 'pwd -P' "traex hook must anchor from the hook process working directory"
+  assert_contains "$command" '.trae/hooks.json' "traex hook must verify the hook-loaded firstmate root"
+  assert_contains "$command" 'fm-turnend-guard.sh' "traex hook must invoke the shared guard"
+  assert_not_contains "$command" '.cwd' "traex hook must not use payload cwd to select the guard executable"
+  # The trap: the traex hook must never reference a coco 1.0 config path.
+  assert_not_contains "$command" '.codex/hooks.json' "traex Stop hook must self-verify .trae/hooks.json, not .codex/hooks.json"
+  pass ".trae/hooks.json: Stop hook invokes the shared primary guard"
+}
+
+# The traex hooks file is a mechanical copy of the codex one: same three fixed
+# commands (Stop guard + arm/cd PreToolUse seatbelts), differing ONLY in the
+# self-reference path token .codex/hooks.json -> .trae/hooks.json. Pin that so a
+# future edit to one file that forgets the other is caught, and so the traex file
+# can never silently drift into a different (untrusted-hash) command shape.
+test_traex_hooks_mirror_codex_apart_from_path() {
+  local codex traex normalized_codex normalized_traex
+  codex="$ROOT/.codex/hooks.json"
+  traex="$ROOT/.trae/hooks.json"
+  [ -f "$codex" ] || fail "tracked .codex/hooks.json is missing"
+  [ -f "$traex" ] || fail "tracked .trae/hooks.json is missing"
+  # All three checkers present in the traex file.
+  jq -e '[.hooks.PreToolUse[0].hooks[].command | select(contains("fm-arm-pretool-check.sh"))] | length == 1' "$traex" >/dev/null \
+    || fail ".trae/hooks.json is missing the arm-pretool PreToolUse seatbelt"
+  jq -e '[.hooks.PreToolUse[0].hooks[].command | select(contains("fm-cd-pretool-check.sh"))] | length == 1' "$traex" >/dev/null \
+    || fail ".trae/hooks.json is missing the cd-pretool PreToolUse seatbelt"
+  jq -e '.hooks.Stop[0].hooks[0].command | contains("fm-turnend-guard.sh")' "$traex" >/dev/null \
+    || fail ".trae/hooks.json is missing the Stop guard"
+  # Byte-identical apart from the path token: mask .codex/.trae in both and compare.
+  normalized_codex=$(jq -S . "$codex" | sed 's#\.codex/hooks\.json#.HOOKS#g')
+  normalized_traex=$(jq -S . "$traex" | sed 's#\.trae/hooks\.json#.HOOKS#g')
+  [ "$normalized_codex" = "$normalized_traex" ] \
+    || fail ".trae/hooks.json diverges from .codex/hooks.json beyond the .codex->.trae path token; keep it a mechanical copy"
+  pass ".trae/hooks.json mirrors .codex/hooks.json apart from the self-reference path"
+}
+
 test_codex_hook_uses_process_pwd_when_payload_cwd_is_outside_root() {
   local settings command dir expected_root outside payload out status
   settings="$ROOT/.codex/hooks.json"
@@ -957,6 +998,8 @@ test_grok_adapter_forces_one_resume_when_unhealthy
 test_grok_adapter_loop_guard_skips_resume
 test_settings_hook_uses_claude_project_dir
 test_codex_hook_invokes_shared_guard
+test_traex_hook_invokes_shared_guard
+test_traex_hooks_mirror_codex_apart_from_path
 test_codex_hook_uses_process_pwd_when_payload_cwd_is_outside_root
 test_codex_hook_ignores_nested_git_root_guard
 test_opencode_plugin_forces_followup

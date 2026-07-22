@@ -18,6 +18,12 @@
 #     vendor's GENERAL windows only - Claude five_hour and seven_day, Codex
 #     five_hour and weekly - ignoring model-scoped windows such as model:fable
 #     and model:codex_bengalfox:*.
+#     Only claude and codex have general quota windows here; every other verified
+#     harness (grok, pi, opencode, and traex) has no quota-axi provider, so it
+#     contributes no metric and is treated as unavailable for quota-balanced.
+#     traex is deliberately in that group: it does NOT participate in
+#     quota-balanced and a rule that lists only traex falls back to the first
+#     profile, exactly like grok/pi/opencode.
 #   - The vendor with the higher minimum remaining quota wins; an exact tie
 #     between equally trusted candidates uses the first array element.
 #   - Stale-but-cached general-window numbers are usable, but a fresh candidate
