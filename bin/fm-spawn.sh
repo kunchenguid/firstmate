@@ -83,7 +83,10 @@
 #   git worktree root distinct from the primary project checkout.
 #   Before any launch side effect, fm-lane-governor.sh reserves capacity for this
 #   home and refuses over-capacity, high-swap, low-RAM, or orphaned-harness starts.
-#   Set FM_SPAWN_NO_GUARD=1 only for test/recovery paths that already own safety.
+#   Set FM_SPAWN_NO_GUARD=1 only for test/recovery paths that already own safety;
+#   it skips both the watcher guard and the lane governor. Set
+#   FM_SPAWN_NO_WATCHER_GUARD=1 to skip only the watcher guard, so a path that owns
+#   watcher arming itself still passes the governor's memory and orphan checks.
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
@@ -142,7 +145,9 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 fm_refuse_if_gate_agent
 # Skip the watcher guard when re-exec'd for one pair of a batch (FM_SPAWN_NO_GUARD is
 # set by the batch loop below), so the guard runs once for the batch, not once per pair.
-[ -n "${FM_SPAWN_NO_GUARD:-}" ] || "$FM_ROOT/bin/fm-guard.sh" || true
+if [ -z "${FM_SPAWN_NO_GUARD:-}" ] && [ -z "${FM_SPAWN_NO_WATCHER_GUARD:-}" ]; then
+  "$FM_ROOT/bin/fm-guard.sh" || true
+fi
 KIND=ship
 HARNESS_ARG=
 MODEL=

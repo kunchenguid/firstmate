@@ -297,6 +297,24 @@ test_sweep_respawns_confirmed_dead_secondmate() {
   pass "sweep: a confirmed-dead secondmate endpoint is killed and respawned"
 }
 
+test_sweep_respawn_still_passes_memory_and_orphan_gate() {
+  local w fb tmuxfb log out
+  w=$(new_world sweep-memguard)
+  add_sm_home "$w" sm1 firstmate:fm-sm1
+  fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
+  log="$w/calls.log"; : > "$log"
+
+  out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" zsh "$log" \
+    FM_LANE_SWAP_USED_MB=99000 FM_LANE_MAX_SWAP_GB=24)
+
+  assert_contains "$out" "SECONDMATE_LIVENESS: secondmate sm1: respawn failed" \
+    "a respawn refused for host memory must be reported, not silently skipped"
+  assert_contains "$out" "swap used" "the respawn failure should name the memory line it crossed"
+  assert_not_contains "$(cat "$log")" "new-window" \
+    "a respawn refused by the memory gate must never launch a window"
+  pass "sweep: an automated respawn still passes the memory and orphan checks"
+}
+
 test_sweep_leaves_alive_secondmate_untouched() {
   local w fb tmuxfb log out
   w=$(new_world sweep-alive)
@@ -406,6 +424,7 @@ test_herdr_agent_alive_maps_pane_agent_state
 test_agent_alive_dispatcher_routes_and_falls_back
 test_sweep_respawns_confirmed_dead_secondmate
 test_sweep_leaves_alive_secondmate_untouched
+test_sweep_respawn_still_passes_memory_and_orphan_gate
 test_sweep_never_acts_on_inconclusive_reading
 test_sweep_never_acts_on_unverified_harness_dead_reading
 test_sweep_converges_no_retouch_once_alive

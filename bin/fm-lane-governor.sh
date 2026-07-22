@@ -11,6 +11,11 @@
 # It refuses new spawns when the current home is at its lane capacity, when swap
 # or available RAM crosses the configured lines, or when a likely orphaned
 # harness process belonging to this home is still alive under a launchd-reparented zsh.
+# Available RAM means reclaimable memory, not just the free list: on Linux it is
+# MemAvailable, and on macOS it is free + speculative + inactive + purgeable pages,
+# so the same threshold means the same thing on both platforms.
+# A harness process is never called an orphan when it is an ancestor of this
+# governor run or when it sits in a worktree or home recorded for a live task.
 # Lane capacity governs transient ship/scout workers only: persistent secondmates
 # keep a kind=secondmate meta in the main home permanently and are excluded from
 # the active count, and a --kind secondmate acquire/check bypasses the capacity gate
@@ -51,7 +56,7 @@ lane_governor_cleanup() {
 trap lane_governor_cleanup EXIT
 
 usage() {
-  sed -n '2,31p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,36p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 case "${1:-}" in
@@ -79,6 +84,13 @@ disabled() {
     0|false|FALSE|no|NO|off|OFF) return 0 ;;
     *) return 1 ;;
   esac
+}
+
+is_uint() {  # <value>
+  case "${1:-}" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  return 0
 }
 
 validate_nonnegative_int() {  # <label> <value>
@@ -246,65 +258,102 @@ parse_unit_mb() {  # <value-with-unit>
     }'
 }
 
+platform_name() {
+  printf '%s\n' "${FM_LANE_PLATFORM:-$(uname)}"
+}
+
+vm_stat_text() {
+  if [ -n "${FM_LANE_VM_STAT_FILE:-}" ]; then
+    cat "$FM_LANE_VM_STAT_FILE" 2>/dev/null || true
+    return 0
+  fi
+  command -v vm_stat >/dev/null 2>&1 || return 0
+  vm_stat 2>/dev/null || true
+}
+
+swapusage_text() {
+  if [ -n "${FM_LANE_SWAPUSAGE_FILE:-}" ]; then
+    cat "$FM_LANE_SWAPUSAGE_FILE" 2>/dev/null || true
+    return 0
+  fi
+  sysctl -n vm.swapusage 2>/dev/null || true
+}
+
+meminfo_path() {
+  printf '%s\n' "${FM_LANE_MEMINFO_FILE:-/proc/meminfo}"
+}
+
+# Reclaimable memory on macOS, in MB, comparable in intent to Linux MemAvailable:
+# the free list alone is routinely a few hundred MB on a healthy Mac because the
+# kernel parks reclaimable memory on the inactive, speculative, and purgeable lists.
+darwin_available_mb() {  # reads vm_stat output on stdin
+  awk '
+    function pages(v) { gsub(/[^0-9]/, "", v); return v + 0 }
+    /page size of/ {
+      line = $0
+      sub(/.*page size of[[:space:]]*/, "", line)
+      sub(/[^0-9].*$/, "", line)
+      if (line != "") page_size = line + 0
+    }
+    /^Pages free:/ { free = pages($NF) }
+    /^Pages speculative:/ { speculative = pages($NF) }
+    /^Pages inactive:/ { inactive = pages($NF) }
+    /^Pages purgeable:/ { purgeable = pages($NF) }
+    END {
+      if (page_size <= 0) exit 1
+      printf "%.0f\n", (free + speculative + inactive + purgeable) * page_size / 1048576
+    }'
+}
+
 MEMORY_AVAILABLE_MB=
 SWAP_USED_MB=
 memory_snapshot() {
-  local total_bytes page_size free_pages speculative_pages swap_line mem_avail swap_total swap_free
+  local vm_text swap_line meminfo mem_avail swap_total swap_free available used
   MEMORY_AVAILABLE_MB=
   SWAP_USED_MB=
 
   if [ -n "${FM_LANE_MEMORY_AVAILABLE_MB:-}" ] || [ -n "${FM_LANE_SWAP_USED_MB:-}" ]; then
     MEMORY_AVAILABLE_MB=${FM_LANE_MEMORY_AVAILABLE_MB:-}
     SWAP_USED_MB=${FM_LANE_SWAP_USED_MB:-}
-    case "$MEMORY_AVAILABLE_MB" in ''|*[!0-9]*) MEMORY_AVAILABLE_MB= ;;
-    esac
-    case "$SWAP_USED_MB" in ''|*[!0-9]*) SWAP_USED_MB= ;;
-    esac
+    is_uint "$MEMORY_AVAILABLE_MB" || MEMORY_AVAILABLE_MB=
+    is_uint "$SWAP_USED_MB" || SWAP_USED_MB=
     return 0
   fi
 
-  if [ "$(uname)" = Darwin ]; then
-    total_bytes=$(sysctl -n hw.memsize 2>/dev/null || true)
-    if [ -n "$total_bytes" ] && command -v vm_stat >/dev/null 2>&1; then
-      page_size=$(vm_stat 2>/dev/null | awk '/page size of/ { gsub(/[^0-9]/, "", $8); print $8; exit }')
-      free_pages=$(vm_stat 2>/dev/null | awk '/Pages free/ { gsub(/\./, "", $3); print $3; exit }')
-      speculative_pages=$(vm_stat 2>/dev/null | awk '/Pages speculative/ { gsub(/\./, "", $3); print $3; exit }')
-      case "$page_size:$free_pages:$speculative_pages" in
-        *[!0-9:]*|::*|*::*) ;;
-        *)
-          MEMORY_AVAILABLE_MB=$(( (free_pages + speculative_pages) * page_size / 1024 / 1024 ))
-          ;;
-      esac
+  if [ "$(platform_name)" = Darwin ]; then
+    vm_text=$(vm_stat_text)
+    if [ -n "$vm_text" ]; then
+      available=$(printf '%s\n' "$vm_text" | darwin_available_mb || true)
+      is_uint "$available" && MEMORY_AVAILABLE_MB=$available
     fi
-    swap_line=$(sysctl -n vm.swapusage 2>/dev/null || true)
+    swap_line=$(swapusage_text)
     if [ -n "$swap_line" ]; then
-      SWAP_USED_MB=$(printf '%s\n' "$swap_line" \
+      used=$(printf '%s\n' "$swap_line" \
         | sed -nE 's/.*used = ([0-9.]+[[:space:]]*[KMG]?)[[:space:]]*.*/\1/p' \
         | head -1 \
-        | while IFS= read -r v; do parse_unit_mb "$v"; done) || SWAP_USED_MB=
+        | while IFS= read -r v; do parse_unit_mb "$v"; done)
+      is_uint "$used" && SWAP_USED_MB=$used
     fi
     return 0
   fi
 
-  if [ -r /proc/meminfo ]; then
-    mem_avail=$(awk '/^MemAvailable:/ { print $2; exit }' /proc/meminfo)
-    swap_total=$(awk '/^SwapTotal:/ { print $2; exit }' /proc/meminfo)
-    swap_free=$(awk '/^SwapFree:/ { print $2; exit }' /proc/meminfo)
-    case "$mem_avail" in ''|*[!0-9]*) : ;; *) MEMORY_AVAILABLE_MB=$((mem_avail / 1024)) ;; esac
-    case "$swap_total:$swap_free" in
-      *[!0-9:]*|::*|*::*)
-        ;;
-      *)
-        SWAP_USED_MB=$(((swap_total - swap_free) / 1024))
-        [ "$SWAP_USED_MB" -lt 0 ] && SWAP_USED_MB=0
-        ;;
-    esac
+  meminfo=$(meminfo_path)
+  if [ -r "$meminfo" ]; then
+    mem_avail=$(awk '/^MemAvailable:/ { print $2; exit }' "$meminfo")
+    swap_total=$(awk '/^SwapTotal:/ { print $2; exit }' "$meminfo")
+    swap_free=$(awk '/^SwapFree:/ { print $2; exit }' "$meminfo")
+    is_uint "$mem_avail" && MEMORY_AVAILABLE_MB=$((mem_avail / 1024))
+    if is_uint "$swap_total" && is_uint "$swap_free"; then
+      SWAP_USED_MB=$(((swap_total - swap_free) / 1024))
+      [ "$SWAP_USED_MB" -lt 0 ] && SWAP_USED_MB=0
+    fi
   fi
 }
 
 harness_from_process() {  # <comm> <args>
   local comm_base args=$2
-  comm_base=$(basename "$1")
+  comm_base=$(basename -- "$1")
+  comm_base=${comm_base#-}
   case "$comm_base" in
     *claude*) printf 'claude\n'; return 0 ;;
     *codex*) printf 'codex\n'; return 0 ;;
@@ -372,11 +421,58 @@ EOF
   return 1
 }
 
+# The governor runs under the very agent it is guarding: a firstmate launched
+# through nohup/setsid, or from a terminal whose session leader has exited, is
+# itself a harness below a reparented zsh. Its own ancestry is never an orphan.
+governor_ancestor_pids() {
+  local pid=$$ next depth=0
+  while [ "$depth" -lt 64 ]; do
+    is_uint "$pid" || break
+    [ "$pid" -gt 1 ] || break
+    printf '%s\n' "$pid"
+    next=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d '[:space:]' || true)
+    is_uint "$next" || break
+    pid=$next
+    depth=$((depth + 1))
+  done
+}
+
+# Worktrees and homes recorded for a task that is not done or failed: a harness
+# sitting in one of those is that task's live worker, not a leaked process.
+live_task_paths() {
+  local meta id state path
+  [ -d "$STATE" ] || return 0
+  for meta in "$STATE"/*.meta; do
+    [ -f "$meta" ] || continue
+    id=$(basename "$meta" .meta)
+    state=$(crew_state_for_id "$id")
+    case "$state" in done|failed) continue ;; esac
+    for path in "$(meta_value "$meta" worktree)" "$(meta_value "$meta" home)"; do
+      [ -n "$path" ] && printf '%s\n' "$path"
+    done
+  done
+}
+
+path_under_any() {  # <path> <newline-separated-roots>
+  local path=$1 roots=$2 root
+  [ -n "$path" ] || return 1
+  while IFS= read -r root; do
+    [ -n "$root" ] || continue
+    case "$path/" in
+      "$root"/*) return 0 ;;
+    esac
+  done <<EOF
+$roots
+EOF
+  return 1
+}
+
 detect_orphaned_harnesses() {
-  local pid ppid comm args harness parent_ppid parent_comm parent_base row cwd
+  local pid ppid comm args harness parent_ppid parent_comm parent_base row cwd ancestors
   case "${FM_LANE_ORPHAN_CHECK:-1}" in
     0|false|FALSE|no|NO|off|OFF) return 0 ;;
   esac
+  ancestors=" $(governor_ancestor_pids | tr '\n' ' ')"
   LC_ALL=C ps -axo pid=,ppid=,comm=,args= 2>/dev/null | while IFS= read -r row; do
     [ -n "$row" ] || continue
     # shellcheck disable=SC2086 # ps fields are intentionally tokenized into pid, ppid, comm, and rest.
@@ -387,14 +483,17 @@ detect_orphaned_harnesses() {
     args=${row#"$pid"}
     args=${args#*"${ppid}"}
     args=${args#*"${comm}"}
-    case "$pid:$ppid" in
-      *[!0-9:]*|::*|*::*) continue ;;
+    is_uint "$pid" || continue
+    is_uint "$ppid" || continue
+    case "$ancestors" in
+      *" $pid "*) continue ;;
     esac
     harness=$(harness_from_process "$comm" "$args" || true)
     [ -n "$harness" ] || continue
     parent_ppid=$(ps -o ppid= -p "$ppid" 2>/dev/null | tr -d '[:space:]' || true)
     parent_comm=$(ps -o comm= -p "$ppid" 2>/dev/null | tr -d '\n' || true)
-    parent_base=$(basename "$parent_comm")
+    parent_base=$(basename -- "$parent_comm")
+    parent_base=${parent_base#-}
     [ "$parent_ppid" = 1 ] || continue
     [ "$parent_base" = zsh ] || continue
     cwd=$(process_cwd "$pid")
@@ -404,7 +503,7 @@ detect_orphaned_harnesses() {
 
 memory_and_orphan_check() {
   local swap_limit_gb avail_min_gb swap_limit_mb avail_min_mb orphans
-  local cwd desc line home_orphans foreign_orphans unresolved_orphans
+  local cwd desc line home_orphans foreign_orphans unresolved_orphans live_paths
   swap_limit_gb=${FM_LANE_MAX_SWAP_GB:-24}
   avail_min_gb=${FM_LANE_MIN_AVAILABLE_RAM_GB:-1}
   validate_decimal FM_LANE_MAX_SWAP_GB "$swap_limit_gb"
@@ -425,12 +524,15 @@ memory_and_orphan_check() {
     home_orphans=
     foreign_orphans=
     unresolved_orphans=
+    live_paths=$(live_task_paths)
     while IFS= read -r line; do
       [ -n "$line" ] || continue
       cwd=${line%%$'\t'*}
       desc=${line#*$'\t'}
       [ -n "$desc" ] || continue
-      if orphan_belongs_to_home "$cwd"; then
+      if path_under_any "$cwd" "$live_paths"; then
+        continue
+      elif orphan_belongs_to_home "$cwd"; then
         home_orphans=${home_orphans:+$home_orphans;}$desc
       elif [ -z "$cwd" ]; then
         unresolved_orphans=${unresolved_orphans:+$unresolved_orphans;}$desc
@@ -452,12 +554,14 @@ EOF
   fi
 }
 
-capacity_check() {  # <requested-count>
-  local requested=$1 max total
+# The exclude id is the task this spawn is for: a recovery relaunch keeps the same
+# task identity, so its own still-recorded meta must not count against its lane.
+capacity_check() {  # <requested-count> [<exclude-id>]
+  local requested=$1 exclude=${2:-} max total
   max=${FM_LANE_MAX_CONCURRENT:-4}
   validate_positive_int FM_LANE_MAX_CONCURRENT "$max"
   validate_positive_int requested_count "$requested"
-  worker_inventory
+  worker_inventory "$exclude"
   if [ -n "$COMPLETED_WORKERS" ]; then
     err "completed worker cleanup recommended before more spawns: $COMPLETED_WORKERS"
   fi
@@ -575,25 +679,22 @@ case "$MODE" in
     exit 0
     ;;
   acquire)
+    # Every check below refuses by exiting, so this is a straight-line sequence:
+    # reaching the end means the lease is published. The EXIT trap releases the
+    # lock on any refusal.
     if [ "$KIND" = secondmate ]; then
-      rc=0
-      memory_and_orphan_check || rc=$?
-      exit "$rc"
+      memory_and_orphan_check
+      exit 0
     fi
     safe_lease_id "$LEASE_ID" || { err "unsafe lease id: $LEASE_ID"; exit 2; }
     mkdir -p "$LEASE_ROOT" "$LEASE_DIR" || die "cannot create lane governor state"
     fm_lock_acquire_wait "$LOCK"
     LANE_LOCK_HELD=1
-    rc=0
-    memory_and_orphan_check || rc=$?
-    if [ "$rc" -eq 0 ]; then
-      capacity_check "$COUNT" || rc=$?
-    fi
-    if [ "$rc" -eq 0 ]; then
-      write_lease "$LEASE_ID" "$KIND" "$COUNT" "$HOLDER_PID" || rc=$?
-    fi
+    memory_and_orphan_check
+    capacity_check "$COUNT" "$LEASE_ID"
+    write_lease "$LEASE_ID" "$KIND" "$COUNT" "$HOLDER_PID"
     fm_lock_release "$LOCK"
     LANE_LOCK_HELD=0
-    exit "$rc"
+    exit 0
     ;;
 esac

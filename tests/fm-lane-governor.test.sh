@@ -29,6 +29,153 @@ run_governor() {
     "$GOV" "$@" 2>&1
 }
 
+# The suite-wide FM_LANE_MEMORY_AVAILABLE_MB/FM_LANE_SWAP_USED_MB pins in tests/lib.sh
+# would mask the real readers, so the parsing tests drop them and feed fixtures instead.
+run_governor_memory() {  # <home> <platform> <args...>
+  local home=$1 platform=$2
+  shift 2
+  env -u FM_LANE_MEMORY_AVAILABLE_MB -u FM_LANE_SWAP_USED_MB \
+    FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" \
+    FM_ROOT_OVERRIDE="$ROOT" \
+    FM_LANE_PLATFORM="$platform" \
+    FM_LANE_ORPHAN_CHECK=0 \
+    "$GOV" "$@" 2>&1
+}
+
+test_darwin_memory_snapshot_counts_reclaimable_pages() {
+  local home out status
+  home=$(make_home darwin-memory)
+  cat > "$home/vm_stat" <<'TXT'
+Mach Virtual Memory Statistics: (page size of 16384 bytes)
+Pages free:                                4544.
+Pages active:                            348455.
+Pages inactive:                          339908.
+Pages speculative:                         7112.
+Pages throttled:                              0.
+Pages wired down:                        327009.
+Pages purgeable:                             14.
+File-backed pages:                       166071.
+Anonymous pages:                         529404.
+TXT
+  printf 'total = 17408.00M  used = 2048.00M  free = 15360.00M  (encrypted)\n' > "$home/swapusage"
+
+  out=$(FM_LANE_VM_STAT_FILE="$home/vm_stat" FM_LANE_SWAPUSAGE_FILE="$home/swapusage" \
+    FM_LANE_MIN_AVAILABLE_RAM_GB=1 FM_LANE_MAX_SWAP_GB=24 \
+    run_governor_memory "$home" Darwin memwatch)
+  status=$?
+
+  [ "$status" -eq 0 ] || fail "macOS available RAM must count reclaimable pages, not just the free list, got: $out"
+  assert_contains "$out" "available_ram=5.4GB" \
+    "macOS available RAM should include inactive, speculative, and purgeable pages"
+  assert_contains "$out" "swap_used=2.0GB" "macOS swap used should parse vm.swapusage"
+  pass "lane governor reads macOS available RAM as reclaimable memory"
+}
+
+test_linux_memory_snapshot_reads_memavailable() {
+  local home out status
+  home=$(make_home linux-memory)
+  cat > "$home/meminfo" <<'TXT'
+MemTotal:       16384000 kB
+MemFree:          524288 kB
+MemAvailable:    6291456 kB
+SwapTotal:       2097152 kB
+SwapFree:        1048576 kB
+TXT
+
+  out=$(FM_LANE_MEMINFO_FILE="$home/meminfo" FM_LANE_MIN_AVAILABLE_RAM_GB=1 FM_LANE_MAX_SWAP_GB=24 \
+    run_governor_memory "$home" Linux memwatch)
+  status=$?
+
+  [ "$status" -eq 0 ] || fail "Linux memory snapshot should pass the default thresholds, got: $out"
+  assert_contains "$out" "available_ram=6.0GB" "Linux available RAM should come from MemAvailable"
+  assert_contains "$out" "swap_used=1.0GB" "Linux swap used should be SwapTotal minus SwapFree"
+  pass "lane governor reads Linux available RAM from MemAvailable"
+}
+
+test_memory_snapshot_survives_truncated_fields() {
+  local home out status
+  home=$(make_home memory-truncated)
+  printf 'Mach Virtual Memory Statistics: (page size of  bytes)\nPages free: 4544.\n' > "$home/vm_stat"
+  printf 'total = 17408.00M  free = 15360.00M\n' > "$home/swapusage"
+
+  out=$(FM_LANE_VM_STAT_FILE="$home/vm_stat" FM_LANE_SWAPUSAGE_FILE="$home/swapusage" \
+    run_governor_memory "$home" Darwin memwatch)
+  status=$?
+
+  [ "$status" -eq 0 ] || fail "an unreadable memory snapshot must not refuse or error, got: $out"
+  assert_not_contains "$out" "operand expected" "empty numeric fields must never reach arithmetic"
+  assert_not_contains "$out" "available_ram" "an unparseable page size should report no available RAM"
+  pass "lane governor skips memory thresholds it cannot measure instead of erroring"
+}
+
+test_capacity_excludes_the_relaunch_target() {
+  local home out status
+  home=$(make_home capacity-relaunch)
+  mkdir -p "$home/projects/stuck"
+  fm_write_meta "$home/state/stuck.meta" "kind=ship" "worktree=$home/projects/stuck"
+  printf 'stuck=working\n' > "$home/states"
+
+  out=$(FM_LANE_MAX_CONCURRENT=1 FM_LANE_CREW_STATE_FILE="$home/states" \
+    run_governor "$home" acquire stuck --holder-pid "$$")
+  status=$?
+
+  [ "$status" -eq 0 ] || fail "relaunching a task must not count that task's own meta against its lane, got: $out"
+  run_governor "$home" release stuck --holder-pid "$$" >/dev/null || true
+  pass "lane governor excludes the relaunch target from its own lane capacity"
+}
+
+test_live_task_worker_is_not_an_orphan() {
+  local home fakebin out status
+  home=$(make_home orphan-live-task)
+  fakebin=$(fm_fakebin "$home")
+  write_orphan_ps "$fakebin"
+  mkdir -p "$home/projects/live"
+  fm_write_meta "$home/state/live.meta" "kind=ship" "worktree=$home/projects/live"
+  printf 'live=working\n' > "$home/states"
+  printf '200=%s\n' "$home/projects/live" > "$home/cwds"
+
+  out=$(PATH="$fakebin:$BASE_PATH" FM_LANE_ORPHAN_CHECK=1 \
+    FM_LANE_CREW_STATE_FILE="$home/states" FM_LANE_PROCESS_CWD_FILE="$home/cwds" \
+    run_governor "$home" memwatch)
+  status=$?
+
+  [ "$status" -eq 0 ] || fail "a harness inside a live task's worktree is that worker, not an orphan, got: $out"
+  assert_not_contains "$out" "orphaned harness" "a live task's own worker must not be reported as an orphan"
+  pass "lane governor never calls a live task's own worker an orphan"
+}
+
+test_governor_ancestor_is_not_an_orphan() {
+  local home fakebin out status
+  home=$(make_home orphan-ancestor)
+  fakebin=$(fm_fakebin "$home")
+  cat > "$fakebin/ps" <<SH
+#!/usr/bin/env bash
+# Report the test shell - a real ancestor of the governor - as a harness below a
+# reparented zsh, and fall through to the real ps so the ancestor walk still works.
+case "\$*" in
+  "-axo pid=,ppid=,comm=,args=")
+    printf '%s\n' '$$ 101 /usr/local/bin/codex codex --dangerously-bypass-approvals-and-sandbox'
+    exit 0
+    ;;
+  "-o ppid= -p 101") printf '%s\n' ' 1'; exit 0 ;;
+  "-o comm= -p 101") printf '%s\n' ' /bin/zsh'; exit 0 ;;
+esac
+exec /bin/ps "\$@"
+SH
+  chmod +x "$fakebin/ps"
+  mkdir -p "$home/projects/self"
+  printf '%s=%s\n' "$$" "$home/projects/self" > "$home/cwds"
+
+  out=$(PATH="$fakebin:$BASE_PATH" FM_LANE_ORPHAN_CHECK=1 FM_LANE_PROCESS_CWD_FILE="$home/cwds" \
+    run_governor "$home" memwatch)
+  status=$?
+
+  [ "$status" -eq 0 ] || fail "the agent the governor runs under must never be its own orphan, got: $out"
+  assert_not_contains "$out" "orphaned harness" "a governor ancestor must not be reported as an orphan"
+  pass "lane governor never calls its own ancestry an orphan"
+}
+
 test_capacity_counts_active_workers() {
   local home out status
   home=$(make_home capacity-active)
@@ -295,6 +442,12 @@ test_lease_ttl_reaps_stale_live_lease() {
 }
 
 test_capacity_counts_active_workers
+test_capacity_excludes_the_relaunch_target
+test_darwin_memory_snapshot_counts_reclaimable_pages
+test_linux_memory_snapshot_reads_memavailable
+test_memory_snapshot_survives_truncated_fields
+test_live_task_worker_is_not_an_orphan
+test_governor_ancestor_is_not_an_orphan
 test_spawn_leases_reserve_capacity_until_released
 test_secondmate_metas_excluded_from_capacity
 test_secondmate_spawn_bypasses_capacity_gate
