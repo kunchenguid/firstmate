@@ -304,6 +304,7 @@ fmp_cursor_store() {
     | fmp_publish "$FMP_PORTAL_DIR" cursor.json
 }
 
+# shellcheck disable=SC2016 # $schema/$id are jq --arg variables, not shell expansions.
 FMP_RECORD_SCHEMA_JQ='
     type == "object"
     and ((keys - ["schema","request_id","request_sha256","state","task_id","received_at","updated_at","claimed_at"]) | length == 0)
