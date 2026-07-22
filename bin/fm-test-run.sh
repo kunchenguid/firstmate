@@ -123,7 +123,7 @@ family_for_basename() {
     fm-dispatch-select.test.sh|fm-ensure-agents-md.test.sh|fm-grok-harness.test.sh|\
     fm-herdr-lab.test.sh|fm-instruction-owners.test.sh|fm-lint.test.sh|\
     fm-install-herdr.test.sh|fm-nm-test-contract.test.sh|fm-no-mistakes-ownership.test.sh|\
-    fm-pi-primary-types.test.sh|\
+    fm-pi-primary-types.test.sh|fm-primary-windows.test.sh|\
     fm-send-popup-settle.test.sh|fm-send-settle.test.sh|fm-stow-contract.test.sh|\
     fm-subagent-pretool-check.test.sh|\
     fm-supervision-instructions.test.sh|fm-tmux-submit-busy.test.sh|fm-transition-lib.test.sh|\
@@ -601,6 +601,9 @@ families_for_changed_path() {
   local path=$1
   case "$path" in
     tests/fm-test-run.test.sh)
+      printf '%s\n' pure-contract-unit
+      ;;
+    tests/fm-primary-windows.test.ps1|windows/firstmate.ps1|windows/firstmate.cmd)
       printf '%s\n' pure-contract-unit
       ;;
     tests/fm-backend-herdr-eventwait.test.py)

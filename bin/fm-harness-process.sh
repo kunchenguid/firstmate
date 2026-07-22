@@ -9,26 +9,33 @@ pid=${1:-}
 case "$pid" in ''|*[!0-9]*|1) exit 1 ;; esac
 [ -r "/proc/$pid/cmdline" ] || exit 1
 
-supported_harness() {
-  case "$1" in codex|pi|grok|claude|opencode) printf '%s\n' "$1"; return 0 ;; esac
-  return 1
-}
+executable=$(python3 - "$pid" 2>/dev/null <<'PY'
+import os, sys
+print(os.readlink(f"/proc/{sys.argv[1]}/exe"))
+PY
+) || exit 1
+case "$executable" in
+  */claude) printf '%s\n' claude; exit 0 ;;
+  */codex) printf '%s\n' codex; exit 0 ;;
+  */opencode) printf '%s\n' opencode; exit 0 ;;
+  */pi) printf '%s\n' pi; exit 0 ;;
+  */grok) printf '%s\n' grok; exit 0 ;;
+esac
 
+name=$(basename "$executable")
 mapfile -d '' -t argv < "/proc/$pid/cmdline" 2>/dev/null || exit 1
-comm=$(ps -o comm= -p "$pid" 2>/dev/null || true)
-for executable in "${argv[0]:-}" "$comm"; do
-  name=$(basename "$executable")
-  supported_harness "$name" && exit 0
-done
-
-case "$(basename "${argv[0]:-}")" in
-  node|nodejs|python|python[0-9]|python[0-9].*) entrypoint=${argv[1]:-} ;;
-  *) exit 1 ;;
+case "$name" in
+  node|nodejs)
+    entrypoint=${argv[1]:-}
+    ;;
+  *)
+    exit 1
+    ;;
 esac
 [ -n "$entrypoint" ] || exit 1
 case "$entrypoint" in
-  /*) ;;
-  *) entrypoint="$(readlink -f "/proc/$pid/cwd/$entrypoint" 2>/dev/null || printf '%s' "$entrypoint")" ;;
+  /*) entrypoint=$(readlink -f "$entrypoint" 2>/dev/null) || exit 1 ;;
+  *) entrypoint=$(readlink -f "/proc/$pid/cwd/$entrypoint" 2>/dev/null) || exit 1 ;;
 esac
 
 entrypoint=$(printf '%s' "$entrypoint" | tr '[:upper:]' '[:lower:]')

@@ -7,6 +7,7 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-primary-launch)
+NATIVE_ROOT=$(mktemp -d "$ROOT/.fm-primary-native.XXXXXX")
 LAUNCH="$ROOT/bin/fm-primary-launch.sh"
 USER_NAME=$(id -un)
 
@@ -16,6 +17,7 @@ cleanup_tmux() {
     socket=$(cat "$marker")
     tmux -L "$socket" kill-server 2>/dev/null || true
   done < <(find "$TMP_ROOT" -name socket-name -type f 2>/dev/null)
+  rm -rf "$NATIVE_ROOT"
   fm_test_cleanup
 }
 trap cleanup_tmux EXIT
@@ -26,7 +28,7 @@ make_case() {
   home="$dir/home"
   fakebin="$dir/fakebin"
   socket="fm-primary-${name//[^a-zA-Z0-9]/}-$$"
-  mkdir -p "$home/bin" "$home/state" "$fakebin"
+  mkdir -p "$home/bin" "$home/state" "$home/native" "$fakebin"
   cp "$LAUNCH" "$home/bin/fm-primary-launch.sh"
   cp "$ROOT/bin/fm-lock.sh" "$home/bin/fm-lock.sh"
   cp "$ROOT/bin/fm-harness-process.sh" "$home/bin/fm-harness-process.sh"
@@ -42,26 +44,29 @@ exit 2
 SH
   chmod +x "$fakebin/no-mistakes"
   for harness in codex pi grok claude opencode; do
-    cat > "$fakebin/$harness" <<'SH'
+    mkdir -p "$NATIVE_ROOT/$name/$harness"
+    cp /usr/bin/python3 "$NATIVE_ROOT/$name/$harness/$harness"
+    cat > "$fakebin/$harness" <<SH
 #!/usr/bin/env bash
 set -u
-harness=$(basename "$0")
 {
-  printf 'harness=%s\n' "$harness"
-  printf 'user=%s\n' "$(id -un)"
-  printf 'cwd=%s\n' "$(pwd -P)"
-  printf 'home=%s\n' "${FM_HOME:-}"
-  printf 'argc=%s\n' "$#"
+  printf 'harness=%s\n' '$harness'
+  printf 'user=%s\n' "\$(id -un)"
+  printf 'cwd=%s\n' "\$(pwd -P)"
+  printf 'home=%s\n' "\${FM_HOME:-}"
+  printf 'argc=%s\n' "\$#"
   i=0
-  for arg in "$@"; do
-    printf 'argv[%s]=<%s>\n' "$i" "$arg"
-    i=$((i + 1))
+  for arg in "\$@"; do
+    printf 'argv[%s]=<%s>\n' "\$i" "\$arg"
+    i=\$((i + 1))
   done
-} > "${FM_PRIMARY_TEST_LOG:?}"
-printf '%s\n' "$$" > "${FM_HOME:?}/state/.lock"
-exec -a "$harness" sleep 300
+} > "\${FM_PRIMARY_TEST_LOG:?}"
+'$NATIVE_ROOT/$name/$harness/$harness' -c 'import time; time.sleep(300)' &
+holder=\$!
+printf '%s\n' "\$holder" > "\${FM_HOME:?}/state/.lock"
+wait "\$holder"
 SH
-    chmod +x "$fakebin/$harness"
+    chmod +x "$fakebin/$harness" "$NATIVE_ROOT/$name/$harness/$harness"
   done
   printf '%s|%s|%s|%s\n' "$dir" "$home" "$fakebin" "$socket"
 }
@@ -206,7 +211,7 @@ test_live_and_stale_lock_behavior() {
 $rec
 EOF
   log="$dir/argv.log"
-  bash -c 'exec -a codex sleep 300' & holder=$!
+  "$NATIVE_ROOT/locks/codex/codex" -c 'import time; time.sleep(300)' & holder=$!
   printf '%s\n' "$holder" > "$home/state/.lock"
   out=$(run_launch "$home" "$fakebin" "$socket" "$log" --codex 2>&1)
   status=$?
@@ -250,7 +255,7 @@ EOF
 }
 
 test_lock_live_pid_query_is_read_only() {
-  local rec dir home fakebin socket out status holder
+  local rec dir home fakebin socket out status holder harness
   rec=$(make_case lock-query)
   IFS='|' read -r dir home fakebin socket <<EOF
 $rec
@@ -262,19 +267,14 @@ EOF
   assert_absent "$home/state" "read-only live-pid query created state"
 
   mkdir -p "$home/state"
-  bash -c 'exec -a codex sleep 300' & holder=$!
-  printf '%s\n' "$holder" > "$home/state/.lock"
-  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$home" "$home/bin/fm-lock.sh" live-pid)
-  [ "$out" = "$holder" ] || fail "live-pid did not return the holder PID"
-  kill "$holder" 2>/dev/null || true
-  wait "$holder" 2>/dev/null || true
-
-  bash -c 'exec -a pi sleep 300' & holder=$!
-  printf '%s\n' "$holder" > "$home/state/.lock"
-  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$home" "$home/bin/fm-lock.sh" live-pid)
-  [ "$out" = "$holder" ] || fail "live-pid did not recognize a Pi holder"
-  kill "$holder" 2>/dev/null || true
-  wait "$holder" 2>/dev/null || true
+  for harness in codex pi; do
+    "$NATIVE_ROOT/lock-query/$harness/$harness" -c 'import time; time.sleep(300)' & holder=$!
+    printf '%s\n' "$holder" > "$home/state/.lock"
+    out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$home" "$home/bin/fm-lock.sh" live-pid)
+    [ "$out" = "$holder" ] || fail "live-pid did not recognize a native $harness holder"
+    kill "$holder" 2>/dev/null || true
+    wait "$holder" 2>/dev/null || true
+  done
   pass "fm-lock live-pid recognizes supported harnesses without mutation"
 }
 
@@ -346,6 +346,22 @@ EOF
   pass "interpreter-hosted lookalikes do not satisfy harness ownership"
 }
 
+test_native_process_rejects_spoofed_argv() {
+  local rec dir home fakebin socket out status holder
+  rec=$(make_case native-spoof)
+  IFS='|' read -r dir home fakebin socket <<EOF
+$rec
+EOF
+  bash -c 'exec -a codex sleep 300' & holder=$!
+  printf '%s\n' "$holder" > "$home/state/.lock"
+  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$home" "$home/bin/fm-lock.sh" live-pid 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "caller-controlled argv authenticated an unrelated executable: $out"
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  pass "native harness ownership rejects spoofed argv names"
+}
+
 test_native_harness_rejects_windows_symlink() {
   local rec dir home fakebin socket out status windows_target
   rec=$(make_case native-symlink)
@@ -381,7 +397,7 @@ EOF
   log="$dir/codex.log"
   run_launch "$home" "$fakebin" "$socket" "$log" --codex >/dev/null
   wait_for_file "$log" || fail "Codex fixture did not start"
-  tmux -L "$socket" respawn-pane -k -t firstmate:0.0 'exec -a pi sleep 300'
+  tmux -L "$socket" respawn-pane -k -t firstmate:0.0 "exec '$NATIVE_ROOT/session-identity/pi/pi' -c 'import time; time.sleep(300)'"
   pane_pid=$(tmux -L "$socket" display-message -p -t firstmate:0.0 '#{pane_pid}')
   printf '%s\n' "$pane_pid" > "$home/state/.lock"
   out=$(run_launch "$home" "$fakebin" "$socket" "$dir/replaced.log" --codex 2>&1)
@@ -390,7 +406,7 @@ EOF
   assert_contains "$out" 'already running on Pi' "replacement-process refusal did not use live harness identity"
 
   tmux -L "$socket" set-option -q -t firstmate @firstmate_harness pi
-  bash -c 'exec -a codex sleep 300' & holder=$!
+  "$NATIVE_ROOT/session-identity/codex/codex" -c 'import time; time.sleep(300)' & holder=$!
   printf '%s\n' "$holder" > "$home/state/.lock"
   out=$(run_launch "$home" "$fakebin" "$socket" "$dir/masked.log" --pi 2>&1)
   status=$?
@@ -411,5 +427,6 @@ test_concurrent_launch_serialization
 test_lock_live_pid_query_is_read_only
 test_interpreter_hosted_process_identity
 test_interpreter_hosted_process_rejects_lookalikes
+test_native_process_rejects_spoofed_argv
 test_native_harness_rejects_windows_symlink
 test_existing_session_requires_positive_identity
