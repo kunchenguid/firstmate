@@ -1035,9 +1035,10 @@ Covered by the unit cases in `tests/fm-afk-launch.test.sh` (clear-on-fresh-entry
   Deterministic coverage in `tests/fm-spawn-worktree-settle.test.sh` uses native case aliasing on case-insensitive filesystems and an equivalent differently-cased symlink on case-sensitive CI.
   The regression returns a case-variant primary alias twice before the real worktree, asserts at least four polls, verifies the isolated git root in metadata, runs scout teardown, and verifies `treehouse return --force` receives only that isolated root.
   A fake-Orca case separately proves that the final validator rejects a case-variant primary alias and cleans up the response-derived terminal and worktree IDs.
+  `tests/fm-backend-orca.test.sh` separately proves that an accepted Orca worktree symlink is normalized to its resolved git top-level in spawn output and metadata.
   The existing symlink-prefix regression in `tests/fm-backend.test.sh` continues to cover physical and logical initial current-path spellings and now expects the resolved git top-level in spawn output.
-  Verification ran on 2026-07-21 with GNU bash 3.2.57(1)-release, git 2.50.1 (Apple Git-155), and Darwin 25.3.0 on arm64 macOS.
-  Exact commands and results were:
+  Initial verification ran on 2026-07-21 and focused re-verification ran on 2026-07-22 with GNU bash 3.2.57(1)-release, git 2.50.1 (Apple Git-155), and Darwin 25.3.0 on arm64 macOS.
+  Exact focused commands and representative results were:
 
   ```text
   $ bash tests/fm-spawn-worktree-settle.test.sh
@@ -1049,6 +1050,10 @@ Covered by the unit cases in `tests/fm-afk-launch.test.sh` (clear-on-fresh-entry
 
   $ bash tests/fm-backend.test.sh
   ok - fm-spawn.sh: a project reached through a symlinked prefix (e.g. macOS /tmp -> /private/tmp) does not trip the isolation guard's false refusal
+  [... all remaining assertions passed ...]
+
+  $ bash tests/fm-backend-orca.test.sh
+  ok - fm-spawn.sh --backend orca: resolves aliased worktree, records metadata, launches harness
   [... all remaining assertions passed ...]
 
   $ bin/fm-lint.sh
