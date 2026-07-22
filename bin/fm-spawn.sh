@@ -700,9 +700,9 @@ fi
 filesystem_object_identity() {  # <path>
   local identity
   if [ "$(uname)" = Darwin ]; then
-    identity=$(stat -f '%d:%i' "$1" 2>/dev/null) || return 1
+    identity=$(stat -Lf '%d:%i' "$1" 2>/dev/null) || return 1
   else
-    identity=$(stat -c '%d:%i' "$1" 2>/dev/null) || return 1
+    identity=$(stat -Lc '%d:%i' "$1" 2>/dev/null) || return 1
   fi
   [ -n "$identity" ] || return 1
   printf '%s\n' "$identity"
