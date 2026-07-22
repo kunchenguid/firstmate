@@ -348,6 +348,23 @@ test_yolo_is_routine_only() {
   pass "+yolo permits only routine green handling and sensitive metadata can only restrict authority"
 }
 
+test_issue_outcomes_reject_pr_only_status() {
+  local home fakebin out issue file err status=0
+  home=$(make_home issue-status 'no-mistakes')
+  fakebin=$(make_fake_gh "$home")
+  out=$(run_intake "$home" "$fakebin" base '2026-07-22T00:00:00Z' --json) || fail "issue discovery failed"
+  issue=$(printf '%s' "$out" | jq -c '.categories.newly_discovered[] | select(.type == "issue")')
+  file="$home/issue-outcome.json"
+  err="$home/issue-outcome.err"
+  jq -n --arg id "$(printf '%s' "$issue" | jq -r .id)" \
+    --arg fingerprint "$(printf '%s' "$issue" | jq -r .source_fingerprint)" \
+    '{schema:"fm-repository-intake-outcome.v1",item_id:$id,source_fingerprint:$fingerprint,status:"pr_ready_or_merged",disposition:"pr_ready",checks_green:true,evidence:[{source:"GitHub checks",pointer:"https://github.com/example/alpha/actions/runs/1",observed_at:"2026-07-22T00:01:00Z",claim:"required checks passed"}],risk:{}}' > "$file"
+  run_intake "$home" "$fakebin" base '2026-07-22T00:02:00Z' --record-outcome "$file" --json > /dev/null 2> "$err" || status=$?
+  [ "$status" -ne 0 ] || fail "issue outcome accepted a PR-only status"
+  assert_contains "$(cat "$err")" 'pr_ready_or_merged only applies to pull requests' "issue outcome rejection did not explain the PR-only guard"
+  pass "issue outcomes reject PR-only terminal status"
+}
+
 wait_for_exit() { # <pid> <ticks>
   local pid=$1 ticks=$2 i=0
   while [ "$i" -lt "$ticks" ]; do
@@ -399,4 +416,5 @@ test_pr_failure_retains_issue_observations
 test_one_repository_failure_does_not_hide_the_rest
 test_untrusted_content_is_data_and_secrets_are_redacted
 test_yolo_is_routine_only
+test_issue_outcomes_reject_pr_only_status
 test_existing_watcher_wake_is_restart_safe

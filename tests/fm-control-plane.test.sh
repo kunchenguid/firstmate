@@ -185,6 +185,110 @@ EOF
   pass "malformed position markers no longer suppress transcript freshness checks"
 }
 
+test_idle_session_accepts_not_applicable_revenue() {
+  local home project task_worktree transcripts snapshot registry now session_id out codes
+  home="$TMP_ROOT/not-applicable-home"
+  project="$TMP_ROOT/not-applicable-project"
+  task_worktree="$TMP_ROOT/not-applicable-worktree"
+  transcripts="$TMP_ROOT/not-applicable-transcripts"
+  snapshot="$TMP_ROOT/not-applicable-snapshot.json"
+  registry="$TMP_ROOT/not-applicable-sources.json"
+  now=2026-07-20T10:00:00Z
+  session_id=44444444-4444-4444-8444-444444444444
+
+  mkdir -p "$home/data/idle-task" "$home/state" "$home/config" "$home/.ai" "$project/.ai" "$transcripts"
+  fm_git_init_commit "$project"
+  git -C "$project" worktree add --quiet -b idle-task "$task_worktree"
+  cat > "$project/state.md" <<'EOF'
+## Position
+updated: 2026-07-20T09:45:00Z
+EOF
+  printf '# Handoff\n' > "$project/.ai/HANDOFF-old.md"
+  touch -t 202607200900 "$project/.ai/HANDOFF-old.md"
+  cat > "$transcripts/$session_id.jsonl" <<EOF
+{"sessionId":"$session_id","cwd":"$task_worktree","timestamp":"2026-07-20T09:30:00Z"}
+EOF
+  cat > "$snapshot" <<EOF
+{
+  "schema": "fm-fleet-snapshot.v1",
+  "generated": "$now",
+  "fm_home": "$home",
+  "backlog": {
+    "records": [
+      {"structured":true,"id":"idle-task","state":"in_flight","title":"Idle Task","repo":"sample","kind":"ship"}
+    ]
+  },
+  "tasks": [
+    {
+      "id":"idle-task",
+      "kind":"ship",
+      "project":"sample",
+      "mode":"no-mistakes",
+      "yolo":"off",
+      "current_state":{"state":"working","source":"pane","detail":"active","freshness":"fresh"},
+      "endpoint":{"status":"present","observed_at":"$now","freshness":"fresh"},
+      "paths":{"worktree":{"path":"$task_worktree","present":true}},
+      "pr":{"url":null,"source":"absent"},
+      "hints":{"open_decisions":[],"last_event_text":"working"},
+      "backlog":{"structured":true,"id":"idle-task","state":"in_flight","title":"Idle Task","repo":"sample","kind":"ship"}
+    }
+  ]
+}
+EOF
+  cat > "$home/data/idle-task/control.json" <<EOF
+{
+  "schema":"fm-control-item.v1",
+  "id":"idle-task",
+  "title":"Idle Task",
+  "purpose":"Prove durable custody",
+  "business_outcome":"A user-visible outcome can eventually be verified",
+  "capability":"sample-capability",
+  "owner":{"type":"firstmate-task","id":"idle-task","source":"fleet-home"},
+  "next_action":{"description":"Run the bounded validation","capability":"worker.validate"},
+  "authority":{"level":"worker","source":"task-brief","delivery":"no-mistakes"},
+  "updated_at":"2026-07-20T09:45:00Z",
+  "freshness_seconds":7200,
+  "proof_requirements":{
+    "implemented":{"required":true},
+    "validated":{"required":true},
+    "release_ready":{"required":true},
+    "in_production":{"required":true},
+    "real_users":{"required":true},
+    "revenue":{"required":false,"reason":"not applicable"}
+  },
+  "proofs":[
+    {"stage":"implemented","kind":"git_commit","project_source_id":"sample-project","ref":"HEAD","source":"git","observed_at":"2026-07-20T09:45:00Z","freshness_seconds":7200},
+    {"stage":"validated","kind":"git_commit","project_source_id":"sample-project","ref":"HEAD","source":"git","observed_at":"2026-07-20T09:45:00Z","freshness_seconds":7200},
+    {"stage":"release_ready","kind":"git_commit","project_source_id":"sample-project","ref":"HEAD","source":"git","observed_at":"2026-07-20T09:45:00Z","freshness_seconds":7200},
+    {"stage":"in_production","kind":"git_commit","project_source_id":"sample-project","ref":"HEAD","source":"git","observed_at":"2026-07-20T09:45:00Z","freshness_seconds":7200},
+    {"stage":"real_users","kind":"git_commit","project_source_id":"sample-project","ref":"HEAD","source":"git","observed_at":"2026-07-20T09:45:00Z","freshness_seconds":7200}
+  ]
+}
+EOF
+  cat > "$registry" <<EOF
+{
+  "schema":"fm-control-plane-sources.v1",
+  "scope":{"id":"test-software","description":"test scope","trust_domain":"software"},
+  "capabilities":[{"id":"observe.reconcile","access":"read-only"}],
+  "sources":[
+    {"id":"fleet-home","kind":"firstmate-home","path":"$home","snapshot_path":"$snapshot","backend_observation":false,"trust_domain":"software-operations","access":"read-only","retention":"metadata-only","freshness_seconds":900,"capabilities":["observe.reconcile"]},
+    {"id":"sample-project","kind":"git-project","path":"$project","trust_domain":"software-source","access":"read-only","retention":"pointers-only","freshness_seconds":900,"capabilities":["observe.reconcile"]},
+    {"id":"idle-session","kind":"claude-session","path":"$transcripts/$session_id.jsonl","session_id":"$session_id","project_source_id":"sample-project","work_item_id":"idle-task","runtime_observation":{"state":"idle","source":"runtime-fixture","observed_at":"2026-07-20T09:50:00Z","endpoint":"pane"},"trust_domain":"software-agent-metadata","access":"metadata-read-only","retention":"native-id-path-time-cwd-only","freshness_seconds":7200,"capabilities":["observe.reconcile"]}
+  ]
+}
+EOF
+
+  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" "$CONTROL" --sources "$registry" --snapshot "$snapshot" --now "$now" --json) || fail "not-applicable control-plane reconciliation failed"
+  codes=$(printf '%s' "$out" | jq -r '[.invariants.violations[].code] | unique | join(",")')
+  assert_not_contains "$codes" SESSION_IDLE_INCOMPLETE "not-applicable revenue still counted as incomplete"
+  printf '%s' "$out" | jq -e '
+    .work_items[] | select(.task_id == "idle-task")
+    | .outcome.furthest_proved_stage == "real_users"
+      and ([.outcome.stages[] | select(.stage == "revenue") | .status] | .[0]) == "not_applicable"
+  ' >/dev/null || fail "not-applicable revenue stage was not preserved"
+  pass "idle sessions ignore explicitly not-applicable revenue stages"
+}
+
 test_secret_registry_rejected() {
   local bad err status=0
   bad="$TMP_ROOT/secret-sources.json"
@@ -291,6 +395,7 @@ test_documented_examples_are_valid() {
 test_stable_identity_and_reconciliation
 test_freshness_conflict_and_invariants
 test_malformed_position_marker_still_triggers_freshness
+test_idle_session_accepts_not_applicable_revenue
 test_secret_registry_rejected
 test_metadata_only_snapshot
 test_attention_wake_restart_deduplication

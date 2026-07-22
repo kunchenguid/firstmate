@@ -457,6 +457,9 @@ function normalizeSnapshotTasks(snapshot, source, nowIso) {
 function validateControl(control, taskId) {
   if (control.schema !== CONTROL_SCHEMA) throw new Error(`control record for ${taskId} has unsupported schema`);
   if (control.id !== taskId) throw new Error(`control record id ${control.id || "<missing>"} does not match ${taskId}`);
+  if (control.updated_at != null && (typeof control.updated_at !== "string" || !Number.isFinite(Date.parse(control.updated_at)))) {
+    throw new Error(`control record for ${taskId} has invalid updated_at`);
+  }
   const secret = hasSecret(control);
   if (secret) throw new Error(`control record for ${taskId} contains secret-like material at ${secret}`);
   return control;
@@ -513,6 +516,10 @@ function outcomeFor(control, projectsBySource, args, nowEpoch) {
     else if (stage.required !== false) break;
   }
   return { furthest_proved_stage: furthest, stages };
+}
+
+function hasIncompleteRequiredStages(outcome) {
+  return outcome.stages.some((stage) => stage.required !== false && stage.status !== "proved");
 }
 
 function violation(code, subjectId, message, severity = "high", sourceIds = []) {
@@ -848,7 +855,7 @@ async function main() {
       if (handoffEpoch !== null && session.observed_epoch > handoffEpoch) violations.push(violation("TRANSCRIPT_NEWER_THAN_HANDOFF", session.id, `${session.provider} transcript is newer than ${project.name} handoff state`, "high", [...session.source_ids, project.source_id]));
     }
     const linked = session.work_item_id ? workItemByTask.get(session.work_item_id) : null;
-    if (session.runtime.state === "idle" && linked && linked.outcome.furthest_proved_stage !== "revenue" && linked.backlog_state !== "done") violations.push(violation("SESSION_IDLE_INCOMPLETE", session.id, `${session.provider} session is idle while ${linked.task_id} remains incomplete`, "high", session.source_ids));
+    if (session.runtime.state === "idle" && linked && hasIncompleteRequiredStages(linked.outcome) && linked.backlog_state !== "done") violations.push(violation("SESSION_IDLE_INCOMPLETE", session.id, `${session.provider} session is idle while ${linked.task_id} remains incomplete`, "high", session.source_ids));
   }
   for (const source of sourceRecords) {
     if (source.status === "unavailable") violations.push(violation("SOURCE_UNAVAILABLE", `source:${source.id}`, `${source.id} is unavailable`, "critical", [source.id]));

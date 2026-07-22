@@ -589,6 +589,7 @@ function validateOutcome(input, item, now) {
   if (input.status === "grouped_design" && (!input.group_id || !input.root_cause)) throw new Error("grouped_design requires group_id and root_cause");
   if (input.status === "implementing" && (!input.task_id || !input.next_action)) throw new Error("implementing requires task_id and next_action");
   if (input.status === "blocked" && (!input.blocker || !input.next_action)) throw new Error("blocked requires blocker and next_action");
+  if (input.status === "pr_ready_or_merged" && item.type !== "pr") throw new Error("pr_ready_or_merged only applies to pull requests");
   if (input.status === "pr_ready_or_merged" && !["pr_ready", "merged"].includes(input.disposition)) throw new Error("pr_ready_or_merged requires disposition pr_ready or merged");
   if (input.status === "pr_ready_or_merged" && input.disposition === "pr_ready" && input.checks_green !== true) throw new Error("pr_ready requires checks_green=true");
   const risk = {};
