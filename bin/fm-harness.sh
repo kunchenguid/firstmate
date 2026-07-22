@@ -1,8 +1,6 @@
 #!/usr/bin/env bash
 # Detect the agent harness this process tree runs on.
 # Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|grok|copilot|unknown
-#                                        (copilot is lock/detection only, never
-#                                        dispatchable as a crew/secondmate harness)
 #        fm-harness.sh crew             print the effective CREWMATE harness
 #                                        (config/crew-harness; "default" resolves to own)
 #        fm-harness.sh secondmate       print the harness the PRIMARY uses to launch
@@ -52,9 +50,8 @@ detect_own() {
         # Bare interpreter: match the harness name in its script path.
         # MainThread is GitHub Copilot CLI's comm (verified 2026-07-21, copilot
         # 1.0.73: the bundled ELF renames its main thread and its args are
-        # exactly "copilot"). copilot is lock/detection only, not dispatchable;
-        # its glob is anchored so argv like ".../extensions/copilot --locale"
-        # never matches.
+        # exactly "copilot"). copilot's glob is anchored so argv like
+        # ".../extensions/copilot --locale" never matches.
         args=$(ps -o args= -p "$pid" 2>/dev/null)
         case "$args" in
           *claude*) echo claude; return ;;

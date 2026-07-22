@@ -85,6 +85,13 @@ test_tmux_agent_alive_classifies() {
   [ "$(PATH="$fb:$BASE_PATH" bash -c '. "$0/bin/fm-backend.sh"; fm_backend_source tmux; fm_backend_tmux_agent_alive sess:win' "$ROOT")" = alive ] \
     || fail "a live grok foreground process should classify as alive"
 
+  # copilot's ELF renames its main thread (ps comm "MainThread"), but tmux's
+  # #{pane_current_command} is cmdline-derived and reports "copilot" (verified
+  # live, copilot 1.0.73, 2026-07-21).
+  fb=$(make_probe_tmux "$TMP_ROOT/tmux-copilot" copilot)
+  [ "$(PATH="$fb:$BASE_PATH" bash -c '. "$0/bin/fm-backend.sh"; fm_backend_source tmux; fm_backend_tmux_agent_alive sess:win' "$ROOT")" = alive ] \
+    || fail "a live copilot foreground process should classify as alive"
+
   fb=$(make_probe_tmux "$TMP_ROOT/tmux-zsh" zsh)
   [ "$(PATH="$fb:$BASE_PATH" bash -c '. "$0/bin/fm-backend.sh"; fm_backend_source tmux; fm_backend_tmux_agent_alive sess:win' "$ROOT")" = dead ] \
     || fail "a bare zsh foreground process should classify as dead"

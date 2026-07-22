@@ -144,7 +144,11 @@ fm_backend_tmux_current_command() {  # <target>
 # "Agent liveness probe" for the empirical basis. Prints one of:
 #   alive   - the foreground command is one of the verified harness binaries
 #             (claude, codex, opencode, grok - each confirmed to run as its
-#             own process name, never wrapped by a generic interpreter).
+#             own process name, never wrapped by a generic interpreter - plus
+#             copilot: its ELF renames its main thread so `ps -o comm=` reports
+#             "MainThread", but tmux's #{pane_current_command} is derived from
+#             the process CMDLINE, which is exactly "copilot" - verified live
+#             on copilot 1.0.73 with tmux 3.x, 2026-07-21).
 #   dead    - the foreground command is a bare shell: nothing is running in
 #             the pane, so a prior agent process has exited.
 #   unknown - anything else, INCLUDING a bare "node"/"python" interpreter
@@ -160,7 +164,7 @@ fm_backend_tmux_agent_alive() {  # <target>
   comm=${comm#-}
   case "$comm" in
     '') printf 'unknown' ;;
-    *claude*|*codex*|*opencode*|*grok*) printf 'alive' ;;
+    *claude*|*codex*|*opencode*|*grok*|*copilot*) printf 'alive' ;;
     zsh|bash|sh|dash|ash|ksh|mksh|tcsh|csh|fish) printf 'dead' ;;
     *) printf 'unknown' ;;
   esac

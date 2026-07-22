@@ -1788,6 +1788,39 @@ test_composer_state_grok_bright_truecolor_real_text_is_pending() {
   pass "fm_backend_herdr_composer_state: grok's real bright typed input still reads pending"
 }
 
+# copilot's idle composer (verified live, copilot 1.0.73, 2026-07-21, real tmux
+# capture-pane -e bytes): a bare `❯ ` styled truecolor 38;2;134;134;134
+# (luminance 134, at/above the ghost threshold so the glyph survives the strip)
+# sitting BETWEEN two full-width horizontal rules - the same separated shape as
+# Pi, so this also proves the Pi separator-pair override does not suppress the
+# generic bare-glyph verdict when the glyph row sits INSIDE the pair.
+test_composer_state_copilot_bare_glyph_between_rules_is_empty() {
+  local dir log resp fb out rule
+  dir="$TMP_ROOT/composer-copilot-idle"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  rule=$(printf '\xe2\x94\x80%.0s' 1 2 3 4 5 6 7 8 9 10 11 12)
+  printf ' \xe2\x9d\xaf Reply with exactly: SECOND TURN OK\n %s\n\x1b[38;2;134;134;134m\xe2\x9d\xaf \x1b[39m\n %s\n / commands \xc2\xb7 ? help \xc2\xb7 tab next tab\n' "$rule" "$rule" > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT" )
+  [ "$out" = empty ] || fail "copilot's idle bare-glyph composer between horizontal rules must read empty, got '$out'"
+  pass "fm_backend_herdr_composer_state: copilot's idle bare ❯ between rules reads empty"
+}
+
+# Same shape with REAL typed-but-unsubmitted text (default foreground after the
+# gray glyph run, as captured live) must read pending - the state fm-send's
+# retried Enter relies on when a copilot submit needs a second Enter on herdr.
+test_composer_state_copilot_typed_text_is_pending() {
+  local dir log resp fb out rule
+  dir="$TMP_ROOT/composer-copilot-typed"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  rule=$(printf '\xe2\x94\x80%.0s' 1 2 3 4 5 6 7 8 9 10 11 12)
+  printf ' %s\n\x1b[38;2;134;134;134m\xe2\x9d\xaf \x1b[39mRun the shell command: sleep 60\n %s\n' "$rule" "$rule" > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT" )
+  [ "$out" = pending ] || fail "real typed text in copilot's composer must read pending, got '$out'"
+  pass "fm_backend_herdr_composer_state: copilot's typed-unsubmitted text reads pending"
+}
+
 test_composer_state_codex_bare_prompt_glyph_is_empty() {
   local dir log resp fb out
   dir="$TMP_ROOT/composer-codex-bare"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
@@ -2830,6 +2863,8 @@ test_composer_state_claude_dim_prompt_suggestion_ghost_is_empty
 test_composer_state_claude_dim_ghost_row_with_real_text_is_pending
 test_composer_state_grok_dark_truecolor_placeholder_is_empty
 test_composer_state_grok_bright_truecolor_real_text_is_pending
+test_composer_state_copilot_bare_glyph_between_rules_is_empty
+test_composer_state_copilot_typed_text_is_pending
 test_composer_state_codex_bare_prompt_glyph_is_empty
 test_composer_state_codex_faint_suggestion_is_empty
 test_composer_state_codex_non_faint_same_text_is_pending

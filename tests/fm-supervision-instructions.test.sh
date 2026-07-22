@@ -32,7 +32,8 @@ test_copilot_detected_but_manual() {
   out=$("$RENDER" --harness copilot)
   assert_contains "$out" "SUPERVISION OPERATING INSTRUCTIONS - primary harness: copilot" "copilot heading missing or renamed to unknown"
   assert_contains "$out" "Mode: Unknown harness fallback." "copilot did not get the manual-supervision fallback snippet"
-  assert_contains "$out" "never dispatchable for crew or secondmate work" "copilot harness note missing"
+  assert_contains "$out" "no verified watcher wake adapter on copilot" "copilot harness note missing"
+  assert_contains "$out" "verified crew/secondmate dispatch harness" "copilot harness note lost the dispatchability fact"
   assert_not_contains "$out" "Mode: Claude background-notify supervision." "copilot must not claim a wired watcher protocol"
   out=$("$RENDER" --harness copilot --repair-line)
   assert_contains "$out" "according to the session-start block for this harness" "copilot repair line should be the generic one"

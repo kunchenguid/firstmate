@@ -73,6 +73,7 @@ A secondmate agent that exits leaves its pane alive as a bare idle shell, which 
 
 `fm_backend_tmux_agent_alive` (`bin/backends/tmux.sh`) answers a deeper question: is a real harness-agent *process* running in the pane right now, not just whether the pane exists?
 It reads tmux's own `#{pane_current_command}`, which reports the pane's live foreground process name - already resolved by tmux from the pty's controlling process group, not something this adapter derives itself.
+That value is cmdline-derived, not the kernel `comm`: verified 2026-07-21 with copilot 1.0.73 live in a tmux pane, `ps -o comm= -p <pid>` reported `MainThread` (the bundled ELF renames its main thread) and `ps -o args= -p <pid>` began `copilot --allow-all ...`, while `tmux display-message -p '#{pane_current_command}'` reported exactly `copilot` - which is why the alive case can match copilot by name with no args-reading special case.
 
 Agent liveness and composer safety are separate checks.
 During away-mode escalation delivery, `fm_tmux_composer_state` sends a bare shell glyph on an unbordered row to the shared composer classifier as `unknown`, and the daemon injects only into an affirmatively `empty` composer; see [Composer-emptiness safety](herdr-backend.md#composer-emptiness-safety-2026-07-10-fleet-wide-across-all-four-backends).

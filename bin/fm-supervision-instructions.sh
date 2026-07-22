@@ -82,9 +82,10 @@ fi
 
 case "$HARNESS" in
   claude|codex|opencode|pi|grok) SNIPPET="$DOC_DIR/$HARNESS.md" ;;
-  # copilot is detected distinctly (lock/detection only, not dispatchable) but
-  # has no verified watcher wake adapter, so it keeps its name in the heading
-  # while operating on the generic manual-supervision fallback snippet.
+  # copilot is detected distinctly (and is a verified crew/secondmate dispatch
+  # harness) but has no verified PRIMARY watcher wake adapter, so it keeps its
+  # name in the heading while operating on the generic manual-supervision
+  # fallback snippet.
   copilot) SNIPPET="$DOC_DIR/unknown.md" ;;
   *) HARNESS=unknown; SNIPPET="$DOC_DIR/unknown.md" ;;
 esac
@@ -208,7 +209,7 @@ else
 fi
 ordinary_wake_line
 if [ "$HARNESS" = copilot ]; then
-  printf '%s\n' '- Harness note: copilot is recognized for session identity only; it has no verified watcher wake adapter and is never dispatchable for crew or secondmate work, so supervise manually per the fallback below.'
+  printf '%s\n' '- Harness note: copilot is a verified crew/secondmate dispatch harness, but this PRIMARY session has no verified watcher wake adapter on copilot, so supervise manually per the fallback below.'
 fi
 printf '\n'
 render_snippet

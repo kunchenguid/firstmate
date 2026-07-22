@@ -1,10 +1,15 @@
 #!/usr/bin/env bash
-# Behavior tests for GitHub Copilot CLI recognition: session-lock acquisition and
-# holder detection, own-harness detection, anchored non-matches against unrelated
-# copilot-flavored argv, and the dispatch refusal that keeps copilot lock/detection
-# only (never a crew/secondmate harness).
+# Behavior tests for GitHub Copilot CLI recognition and crew/secondmate dispatch:
+# session-lock acquisition and holder detection, own-harness detection, anchored
+# non-matches against unrelated copilot-flavored argv, the verified launch template
+# with model/effort flags, the repo-level agentStop turn-end hook install, and its
+# teardown cleanup.
 # Empirical shape (copilot 1.0.73, 2026-07-21): `ps -o comm=` reports "MainThread"
 # (the bundled ELF renames its main thread) and `ps -o args=` is exactly "copilot".
+# Dispatch facts (same session, harness-adapters "copilot" section): -i takes the
+# prompt as its value and auto-executes, --allow-all + --no-ask-user run a turn
+# fully unattended, --effort accepts firstmate's full low..max vocabulary, and
+# repo-level .github/hooks/*.json fire agentStop at every completed turn end.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -200,41 +205,162 @@ SH
   pass "existing pi detection is unchanged by the copilot entry"
 }
 
-test_spawn_refuses_copilot_dispatch() {
-  local case_dir home proj wt fakebin id out status
-  case_dir="$TMP_ROOT/spawn-refuse"
+# A tmux stub that behaves like the grok test's spawn stub but also captures the
+# literal `send-keys -l <cmd>` launch command into FM_FAKE_LAUNCH_LOG, mirroring
+# tests/fm-secondmate-harness.test.sh's make_launch_capturing_tmux.
+make_copilot_spawn_fakebin() {
+  local dir=$1 fakebin
+  fakebin=$(fm_fakebin "$dir")
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "$*" in
+  *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
+esac
+case "${1:-}" in
+  display-message) printf 'firstmate\n'; exit 0 ;;
+  list-windows) exit 0 ;;
+  has-session|new-session|new-window|kill-window) exit 0 ;;
+  send-keys)
+    if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
+      prev=
+      for a in "$@"; do
+        if [ "$prev" = "-l" ]; then
+          printf '%s\n' "$a" >> "$FM_FAKE_LAUNCH_LOG"
+        fi
+        prev=$a
+      done
+    fi
+    exit 0
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/tmux"
+  fm_fake_exit0 "$fakebin" treehouse gh-axi gh
+  printf '%s\n' "$fakebin"
+}
+
+make_copilot_spawn_case() {
+  local name=$1 case_dir home proj wt fakebin id
+  case_dir="$TMP_ROOT/$name"
   home="$case_dir/home"
   proj="$case_dir/project"
   wt="$case_dir/wt"
-  fakebin=$(fm_fakebin "$case_dir/fake")
-  id="copilot-refuse-x1"
+  fakebin=$(make_copilot_spawn_fakebin "$case_dir/fake")
+  id="copilot-$name-x1"
   mkdir -p "$home/data/$id" "$home/projects" "$home/state" "$home/config"
   printf 'brief\n' > "$home/data/$id/brief.md"
   fm_git_worktree "$proj" "$wt" "fm/$id"
   touch "$home/state/.last-watcher-beat"
-  fm_fake_exit0 "$fakebin" tmux treehouse gh-axi gh
+  printf '%s\n' "$case_dir|$home|$proj|$wt|$fakebin|$id"
+}
 
-  # Explicit harness argument.
-  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$home" \
+run_copilot_spawn() {
+  local home=$1 proj=$2 wt=$3 fakebin=$4 id=$5 launchlog=$6
+  shift 6
+  FM_ROOT_OVERRIDE='' FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
-    FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" PATH="$fakebin:$PATH" \
-    "$SPAWN" "$id" "$proj" copilot 2>&1)
-  status=$?
-  expect_code 1 "$status" "explicit copilot harness must be refused"
-  assert_contains "$out" "unknown harness 'copilot'" "spawn did not refuse the explicit copilot harness"
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" FM_FAKE_LAUNCH_LOG="$launchlog" \
+    TMUX="fake,1,0" PATH="$fakebin:$PATH" \
+    "$SPAWN" "$id" "$proj" copilot "$@" 2>&1
+}
 
-  # Configured crew harness resolving to copilot.
-  printf 'copilot\n' > "$home/config/crew-harness"
-  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$home" \
-    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
-    FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
-    FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" PATH="$fakebin:$PATH" \
-    "$SPAWN" "$id" "$proj" 2>&1)
+test_spawn_dispatches_copilot_with_flags_and_turnend_hook() {
+  local rec case_dir home proj wt fakebin id launchlog out status launch hook excl meta
+  rec=$(make_copilot_spawn_case dispatch)
+  IFS='|' read -r case_dir home proj wt fakebin id <<EOF
+$rec
+EOF
+  launchlog="$case_dir/launch.log"
+  : > "$launchlog"
+  out=$(run_copilot_spawn "$home" "$proj" "$wt" "$fakebin" "$id" "$launchlog" \
+    --model claude-haiku-4.5 --effort low)
   status=$?
-  expect_code 1 "$status" "crew-harness copilot must be refused"
-  assert_contains "$out" "no launch template for harness 'copilot'" "spawn did not refuse the configured copilot crew harness"
-  pass "crew/secondmate dispatch of copilot is still refused fail-closed"
+  expect_code 0 "$status" "copilot spawn should succeed"
+  assert_contains "$out" "spawned $id harness=copilot" "copilot spawn did not report success"
+
+  launch=$(cat "$launchlog")
+  assert_contains "$launch" "copilot --allow-all --no-ask-user " \
+    "launch command lost the verified unattended-autonomy flags"
+  assert_contains "$launch" "--model 'claude-haiku-4.5'" "launch command lost the model flag"
+  assert_contains "$launch" "--effort 'low'" "launch command lost the effort flag"
+# shellcheck disable=SC2016  # single quotes are deliberate: the literal $(cat ...) must appear in the launch command
+  assert_contains "$launch" '-i "$(cat ' \
+    "launch command must pass the brief as -i's value (auto-executing interactive mode)"
+
+  hook="$wt/.github/hooks/fm-turn-end.json"
+  assert_present "$hook" "repo-level agentStop turn-end hook was not installed"
+  assert_grep 'agentStop' "$hook" "turn-end hook is not registered on the agentStop event"
+  assert_grep "$id.turn-ended" "$hook" "turn-end hook does not touch the task's turn-ended file"
+  excl=$(git -C "$wt" rev-parse --git-path info/exclude)
+  assert_grep '.github/hooks/fm-turn-end.json' "$excl" \
+    "turn-end hook file was not git-excluded (would dirty teardown's landed-work check)"
+
+  meta="$home/state/$id.meta"
+  assert_grep 'harness=copilot' "$meta" "meta did not record harness=copilot"
+  pass "copilot dispatch wires the verified launch template, flags, and agentStop hook"
+}
+
+test_spawn_copilot_omits_default_model_effort() {
+  local rec case_dir home proj wt fakebin id launchlog out status launch
+  rec=$(make_copilot_spawn_case defaults)
+  IFS='|' read -r case_dir home proj wt fakebin id <<EOF
+$rec
+EOF
+  launchlog="$case_dir/launch.log"
+  : > "$launchlog"
+  out=$(run_copilot_spawn "$home" "$proj" "$wt" "$fakebin" "$id" "$launchlog")
+  status=$?
+  expect_code 0 "$status" "flagless copilot spawn should succeed"
+  launch=$(cat "$launchlog")
+  case "$launch" in
+    *--model*|*--effort*) fail "default model/effort must emit no flag, got: $launch" ;;
+  esac
+  pass "copilot dispatch omits model/effort flags when unset"
+}
+
+# The live-captured busy and idle footers (copilot 1.0.73, 2026-07-21). The busy
+# footer must match the shared default busy regex (via its "esc (to )?interrupt"
+# alternative - no copilot-specific entry exists) and the idle footer must not,
+# so a working copilot crew reads busy and an idle one reads stale-eligible.
+test_copilot_busy_footer_matches_default_busy_regex() {
+  local regex
+  regex=$(bash -c '. "$0/bin/fm-tmux-lib.sh"; printf "%s" "$FM_TMUX_BUSY_REGEX_DEFAULT"' "$ROOT")
+  printf '%s' ' ◎ Working · 916 B esc interrupt' | grep -qiE "$regex" \
+    || fail "copilot's live busy footer did not match the default busy regex"
+  printf '%s' ' ● Working esc interrupt' | grep -qiE "$regex" \
+    || fail "copilot's byte-count-free busy footer did not match the default busy regex"
+  printf '%s' ' / commands · ? help · tab next tab' | grep -qiE "$regex" \
+    && fail "copilot's idle footer must not match the busy regex"
+  grep -qF "BUSY_REGEX=\${FM_BUSY_REGEX:-'esc (to )?interrupt|Working\\.\\.\\.|Ctrl\\+c:cancel'}" "$ROOT/bin/fm-watch.sh" \
+    || fail "fm-watch.sh BUSY_REGEX default drifted from the value these footers were verified against"
+  pass "copilot busy/idle footers classify correctly under the shared busy regex"
+}
+
+test_copilot_teardown_removes_turnend_hook() {
+  local rec case_dir home proj wt fakebin id launchlog out status
+  rec=$(make_copilot_spawn_case teardown)
+  IFS='|' read -r case_dir home proj wt fakebin id <<EOF
+$rec
+EOF
+  launchlog="$case_dir/launch.log"
+  : > "$launchlog"
+  out=$(run_copilot_spawn "$home" "$proj" "$wt" "$fakebin" "$id" "$launchlog")
+  status=$?
+  expect_code 0 "$status" "copilot spawn should succeed before teardown"
+  assert_present "$wt/.github/hooks/fm-turn-end.json" "hook missing before teardown"
+
+  FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    PATH="$fakebin:$PATH" \
+    "$ROOT/bin/fm-teardown.sh" "$id" --force >/dev/null 2>&1 \
+    || fail "copilot teardown failed"
+
+  assert_absent "$wt/.github/hooks/fm-turn-end.json" \
+    "agentStop hook survived teardown (a reused pool worktree would fire signals for a dead task)"
+  assert_absent "$home/state/$id.turn-ended" "turn-ended state file survived teardown"
+  pass "copilot teardown removes the repo-level agentStop hook"
 }
 
 test_fm_lock_acquires_under_copilot_ancestor
@@ -245,4 +371,7 @@ test_fm_lock_holder_argv_only_matters_for_interpreters
 test_fm_lock_acquires_under_renamed_copilot_wrapper
 test_fm_harness_reports_copilot
 test_fm_harness_existing_detection_unchanged
-test_spawn_refuses_copilot_dispatch
+test_spawn_dispatches_copilot_with_flags_and_turnend_hook
+test_spawn_copilot_omits_default_model_effort
+test_copilot_busy_footer_matches_default_busy_regex
+test_copilot_teardown_removes_turnend_hook
