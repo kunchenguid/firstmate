@@ -993,11 +993,12 @@ fi
 SH
   chmod +x "$fakebin/ps"
   bash -c 'sleep 300 # this-deliberately-long-trailer-pushes-the-command-line-well-past-a-narrow-terminal-width
-true' &
+true' >/dev/null 2>&1 &
   pid=$!
   no_proc="$TMP_ROOT/no-proc"
   identity=$(PATH="$fakebin:$PATH" FM_TEST_REAL_PS="$real_ps" FM_TEST_PS_WIDTH=40 FM_PROC_ROOT_OVERRIDE="$no_proc" \
     bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$pid" 2>/dev/null)
+  pkill -P "$pid" 2>/dev/null || true
   kill "$pid" 2>/dev/null || true
   wait "$pid" 2>/dev/null || true
   [ -n "$identity" ] || fail "fm_pid_identity produced no identity through the width-sensitive ps"
@@ -1026,7 +1027,7 @@ test_lock_match_accepts_same_dir_different_spelling() {
   watch_real="$home_real/fm-watch.sh"
   : > "$watch_real"
   watch_alias="$home_alias/fm-watch.sh"
-  sleep 300 &
+  sleep 300 >/dev/null 2>&1 &
   pid=$!
   identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$pid") \
     || fail "could not identify live helper pid"
