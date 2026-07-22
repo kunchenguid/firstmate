@@ -3,9 +3,11 @@
 # docs/configuration.md owns the complete config/github-accounts.json schema.
 # This library resolves one stable profile, installs a process-local exact child
 # context, validates repository-controlled Git routing by key name, and invokes
-# exact configured binaries with argv arrays. It never reads or prints tokens,
-# credential-helper responses, complete environments, or child authentication
-# errors.
+# exact configured binaries with argv arrays. It never reads or prints routing
+# tokens, credential-helper responses, complete environments, or child
+# authentication errors. Routed secret and variable writes may carry at most
+# 1 MiB of caller payload through memory without logging, persistence, retries,
+# or payload output.
 
 FM_GITHUB_MODE=${FM_GITHUB_MODE:-legacy}
 FM_GITHUB_PROFILE_ID=${FM_GITHUB_PROFILE_ID:-}
@@ -451,26 +453,30 @@ NODE
   chmod 0500 "$client" || { rm -rf "$shim_dir" 2>/dev/null || true; return 1; }
   trap "chmod -R u+rwx -- $(fm_github_shell_quote "$shim_dir") 2>/dev/null || true; rm -rf -- $(fm_github_shell_quote "$shim_dir") 2>/dev/null || true" EXIT HUP INT TERM
   if fm_github_node - "$binary" "$FM_GITHUB_GH_BINARY" "$(fm_github_lib_dir)/fm-github-config.mjs" \
+    "$(fm_github_lib_dir)/fm-github-operation-schema.json" \
     "$target_repository" "$destination_repository" "$FM_GITHUB_REPOSITORY" "$shim_dir" "$issue_numbers" "$resource_numbers" "$@" 9<&0 <<'NODE'
 const fs = require("node:fs");
 const net = require("node:net");
 const crypto = require("node:crypto");
 const {spawn, spawnSync} = require("node:child_process");
-const [binary, ghBinary, validator, repository, destinationRepository, baseRepository, shimDir, issueNumbersText, resourceNumbersText, ...args] = process.argv.slice(2);
+const [binary, ghBinary, validator, operationSchemaPath, repository, destinationRepository, baseRepository, shimDir, issueNumbersText, resourceNumbersText, ...args] = process.argv.slice(2);
+const operationSchema = JSON.parse(fs.readFileSync(operationSchemaPath, "utf8"));
+if (operationSchema.version !== 1) process.exit(1);
 const token = crypto.randomBytes(32).toString("base64url");
-const setTypeOperation = args[0] === "issue"
-  && ((args[1] === "create" && args.some((arg) => arg === "--type" || arg.startsWith("--type=")))
-    || (args[1] === "edit" && args.some((arg) => arg === "--type" || arg.startsWith("--type="))));
-const clearTypeOperation = args[0] === "issue" && args[1] === "edit" && args.includes("--no-type");
+const operation = `${args[0]}:${args[1]}`;
+const typeContract = operationSchema.issueTypes[operation] || {};
+const setTypeOperation = typeContract.set && args.some((arg) => arg === typeContract.set || arg.startsWith(`${typeContract.set}=`));
+const clearTypeOperation = typeContract.clear && args.includes(typeContract.clear);
 const typeOperation = setTypeOperation || clearTypeOperation;
-const stdinOperation = ["secret:set", "variable:set"].includes(`${args[0]}:${args[1]}`);
+const issueTypeFlags = new Set([typeContract.set, typeContract.clear, ...(typeContract.forbidden || [])].filter(Boolean));
+const stdinOperation = operationSchema.stdinOperations.includes(operation);
 const flagValue = (name) => {
   const inline = args.find((arg) => arg.startsWith(`${name}=`));
   if (inline) return inline.slice(name.length + 1);
   const index = args.indexOf(name);
   return index >= 0 ? args[index + 1] : "";
 };
-const typeName = setTypeOperation ? flagValue("--type") : "";
+const typeName = setTypeOperation ? flagValue(typeContract.set) : "";
 const issueNumbers = new Set(issueNumbersText ? issueNumbersText.split("\n") : []);
 const resourceNumbers = new Set(resourceNumbersText ? resourceNumbersText.split("\n") : []);
 const issueIds = new Set();
@@ -508,25 +514,10 @@ const repositoryMatches = (requestArgs, selectorRepository = "", expectedReposit
   const selected = [selectorRepository, ...explicit].filter(Boolean);
   return selected.every((value) => value.toLowerCase() === expectedRepository.toLowerCase());
 };
-const booleanFlags = new Set([
-  "--admin", "--all", "--approve", "--archived", "--auto", "--clone", "--comments", "--debug",
-  "--delete-branch", "--draft", "--exclude-drafts", "--exclude-pre-releases", "--exit-status",
-  "--failed", "--full", "--generate-notes", "--internal", "--latest", "--log", "--log-failed",
-  "--merge", "--no-type", "--prerelease", "--private", "--public", "--rebase", "--remove-type",
-  "--request-changes", "--reviews", "--squash", "--verify-tag", "--verbose", "--yes",
-]);
+const booleanFlags = new Set(operationSchema.booleanFlags);
+const schemaSelection = (table, command) => table?.[command] ?? table?.[`${command.split(":")[0]}:*`] ?? table?.default;
 const canonicalFlag = (flag, command) => {
-  if (flag === "-R") return "--repo";
-  if (flag === "-b") return "--body";
-  if (flag === "-t") return "--title";
-  if (flag === "-F") return command.startsWith("release:") ? "--notes-file" : "--body-file";
-  if (flag === "-n") return "--notes";
-  if (flag === "-d" && ["pr:create", "release:create"].includes(command)) return "--draft";
-  if (flag === "-p" && command === "release:create") return "--prerelease";
-  if (flag === "-s" && command === "pr:merge") return "--squash";
-  if (flag === "-m" && command === "pr:merge") return "--merge";
-  if (flag === "-r" && command === "pr:merge") return "--rebase";
-  return flag;
+  return schemaSelection(operationSchema.aliases[flag], command) || flag;
 };
 const addFlag = (flags, name, value) => {
   const values = flags.get(name) || [];
@@ -566,41 +557,18 @@ const parseCommand = (commandArgs) => {
 };
 const sameValues = (first, second) => JSON.stringify(first || []) === JSON.stringify(second || []);
 const jsonFieldsAllowed = (command, value) => {
-  const exact = new Map([
-    ["repo:view", ["name,description,defaultBranchRef,stargazerCount,forkCount,issues,pullRequests,visibility,primaryLanguage"]],
-    ["repo:list", ["name,description,visibility,primaryLanguage,stargazerCount,updatedAt"]],
-    ["pr:view", ["number,title,state,author,isDraft,mergedAt,statusCheckRollup,body,comments,reviews"]],
-    ["issue:view", [
-      "number,title,state,author,createdAt,body", "number,title,state,author,createdAt,body,comments",
-      "number,title,state,author,createdAt,body,issueType", "number,title,state,author,createdAt,body,comments,issueType",
-    ]],
-    ["label:list", ["name"]],
-    ["workflow:list", ["id,name,state,path"]],
-    ["run:view", ["databaseId", "databaseId,displayTitle,status,conclusion,workflowName,headBranch,createdAt,jobs"]],
-    ["release:list", ["tagName,name,isDraft,isPrerelease,publishedAt"]],
-    ["release:view", ["tagName,name,publishedAt,author,body"]],
-    ["secret:list", ["name,updatedAt"]],
-    ["variable:list", ["name,value,updatedAt"]],
-  ]);
-  if ((exact.get(command) || []).includes(value)) return true;
-  const extensible = new Map([
-    ["pr:list", ["number,title,state,author,isDraft,reviewDecision", ["body", "createdAt", "labels", "milestone", "mergedAt", "url"]]],
-    ["issue:list", ["number,title,state,author,createdAt", ["body", "closedAt", "labels", "milestone", "updatedAt", "url"]]],
-    ["run:list", ["databaseId,displayTitle,status,conclusion,workflowName,headBranch,event,createdAt", ["headSha", "number", "url", "updatedAt"]]],
-  ]);
-  const contract = extensible.get(command);
+  if ((operationSchema.jsonFields.exact[command] || []).includes(value)) return true;
+  const contract = operationSchema.jsonFields.extensible[command];
   if (!contract) return false;
-  const base = contract[0].split(",");
+  const base = contract.base.split(",");
   const fields = value.split(",");
   const extras = fields.slice(base.length);
   return JSON.stringify(fields.slice(0, base.length)) === JSON.stringify(base)
-    && new Set(extras).size === extras.length && extras.every((field) => contract[1].includes(field));
+    && new Set(extras).size === extras.length && extras.every((field) => contract.extras.includes(field));
 };
-const defaultLimits = new Map([
-  ["repo:list", "30"], ["pr:list", "30"], ["issue:list", "30"], ["label:list", "500"],
-  ["workflow:list", "20"], ["run:list", "10"], ["release:list", "10"],
-]);
 const outerCommand = parseCommand(args);
+const transformApplies = (transform, command) => transform.command === command
+  || transform.command === `${command.split(":")[0]}:*` || transform.commands?.includes(command);
 const readApprovedFile = (path) => {
   const descriptor = fs.openSync(path, "r");
   try {
@@ -622,12 +590,12 @@ const readApprovedFile = (path) => {
 const approvedGeneratedValues = (() => {
   const values = new Map();
   if (!outerCommand) return values;
-  const file = outerCommand.flags.get("--body-file");
-  if (file?.length === 1) {
-    values.set(outerCommand.command.startsWith("release:") ? "--notes" : "--body", readApprovedFile(file[0]));
+  for (const transform of operationSchema.payloadTransforms) {
+    const source = outerCommand.flags.get(transform.outer);
+    if (transformApplies(transform, outerCommand.command) && source?.length === 1) {
+      values.set(transform.child, transform.source === "file" ? readApprovedFile(source[0]) : source[0]);
+    }
   }
-  const body = outerCommand.flags.get("--body");
-  if (body?.length === 1 && outerCommand.command.startsWith("release:")) values.set("--notes", body[0]);
   return values;
 })();
 const readInvocationStdin = () => {
@@ -655,41 +623,54 @@ const approvedStdin = (() => {
   return readInvocationStdin();
 })();
 const generatedFlagAllowed = (request, outer, name, values) => {
+  const generated = operationSchema.generatedFlags;
   if (name === "--repo") return true;
   if (name === "--json") return values.length === 1 && jsonFieldsAllowed(request.command, values[0]);
   if (name === "--limit") {
-    const expected = outer.flags.get("--limit") || [defaultLimits.get(request.command)];
+    const expected = outer.flags.get("--limit") || [generated.limits[request.command]];
     return expected[0] !== undefined && sameValues(values, expected);
   }
-  if (name === "--state" && request.command === "pr:list" && !outer.flags.has("--state")) {
-    return sameValues(values, ["open"]);
+  if (name === "--state" && generated.defaultState[request.command] && !outer.flags.has("--state")) {
+    return sameValues(values, [generated.defaultState[request.command]]);
   }
-  if (name === "--yes" && ["issue:delete", "label:delete", "release:delete"].includes(request.command)) {
+  if (name === "--yes" && generated.yes.includes(request.command)) {
     return sameValues(values, [null]);
   }
-  if (name === "--exit-status" && request.command === "run:watch") return sameValues(values, [null]);
-  if (name === "--log" && request.command === "run:view" && outer.flags.has("--verbose")) return sameValues(values, [null]);
+  if (name === "--exit-status" && generated.exitStatus.includes(request.command)) return sameValues(values, [null]);
+  if (name === "--log" && generated.logFromVerbose.includes(request.command) && outer.flags.has("--verbose")) return sameValues(values, [null]);
   if (["--body", "--notes"].includes(name) && approvedGeneratedValues.has(name)) {
     return sameValues(values, [approvedGeneratedValues.get(name)]);
   }
-  if (["--merge", "--squash", "--rebase"].includes(name) && request.command === "pr:merge") {
-    return sameValues(values, [null]) && sameValues(outer.flags.get("--method"), [name.slice(2)]);
+  for (const transform of operationSchema.flagTransforms) {
+    const outerValue = outer.flags.get(transform.outer);
+    if (transform.command === request.command && outerValue?.length === 1
+      && transform.values[outerValue[0]] === name) return sameValues(values, [null]);
   }
-  if (name === "--search" && request.command === "issue:list" && outer.flags.has("--sort")) {
+  if (name === "--search" && generated.searchFromSort.includes(request.command) && outer.flags.has("--sort")) {
     return sameValues(values, [`sort:${outer.flags.get("--sort")[0]}-desc`]);
   }
   return false;
 };
-const ignoredOuterFlags = new Set([
-  "--comments", "--conclusion", "--fields", "--full", "--no-type", "--remove-type", "--reviews", "--type",
-]);
+const ignoredOuterFlags = new Set(operationSchema.ignoredOuterFlags);
+const outerFlagConsumed = (request, name, values) => {
+  if (operationSchema.payloadTransforms.some((transform) => transformApplies(transform, request.command)
+    && transform.outer === name && request.flags.has(transform.child))) return true;
+  if (operationSchema.flagTransforms.some((transform) => transform.command === request.command
+    && transform.outer === name && request.flags.has(transform.values[values[0]]))) return true;
+  if (operationSchema.generatedFlags.searchFromSort.includes(request.command)
+    && name === "--sort" && request.flags.has("--search")) return true;
+  if (operationSchema.generatedFlags.logFromVerbose.includes(request.command)
+    && name === "--verbose" && request.flags.has("--log")) return true;
+  return operationSchema.operationFlags.stdinValue[request.command] === name && stdinOperation;
+};
 const sameOperationAllowed = (requestArgs) => {
   const outer = parseCommand(args);
   const request = parseCommand(requestArgs);
   if (!outer || !request || outer.command !== request.command || !repositoryMatches(requestArgs)) return false;
   let expectedPositionals = outer.positionals;
-  if (outer.command === "issue:transfer") {
-    const destination = outer.flags.get("--to-repo");
+  const destinationFlag = operationSchema.operationFlags.destination[outer.command];
+  if (destinationFlag) {
+    const destination = outer.flags.get(destinationFlag);
     if (!destination || destination.length !== 1) return false;
     expectedPositionals = [...outer.positionals, destination[0]];
   } else if (outer.command === "repo:view" && expectedPositionals.length === 0 && request.positionals.length === 1) {
@@ -697,19 +678,11 @@ const sameOperationAllowed = (requestArgs) => {
   }
   if (JSON.stringify(request.positionals) !== JSON.stringify(expectedPositionals)) return false;
   for (const [name, values] of request.flags) {
-    if (name === "--type" || name === "--no-type" || name === "--remove-type") return false;
+    if (issueTypeFlags.has(name)) return false;
     if (!sameValues(values, outer.flags.get(name)) && !generatedFlagAllowed(request, outer, name, values)) return false;
   }
   for (const [name, values] of outer.flags) {
-    if (name === "--repo" || ignoredOuterFlags.has(name) || (name === "--to-repo" && outer.command === "issue:transfer")) continue;
-    if (name === "--body-file" && (request.flags.has("--body")
-      || (request.command.startsWith("release:") && request.flags.has("--notes")))) continue;
-    if (name === "--body" && request.command.startsWith("release:") && request.flags.has("--notes")) continue;
-    if (name === "--body" && request.command === "variable:set" && stdinOperation) continue;
-    if (name === "--method" && request.command === "pr:merge"
-      && request.flags.has(`--${values[0] || ""}`)) continue;
-    if (name === "--sort" && request.command === "issue:list" && request.flags.has("--search")) continue;
-    if (name === "--verbose" && request.command === "run:view" && request.flags.has("--log")) continue;
+    if (name === "--repo" || ignoredOuterFlags.has(name) || name === destinationFlag || outerFlagConsumed(request, name, values)) continue;
     if (!sameValues(values, request.flags.get(name))) return false;
   }
   return true;
@@ -728,45 +701,21 @@ const exactChildAllowed = (requestArgs) => {
   if (!outer) return false;
   const child = withoutRepository(requestArgs);
   const target = outer.positionals[0] || "";
-  const exact = (...values) => values.some((value) => JSON.stringify(child) === JSON.stringify(value));
-  if (outer.command === "issue:transfer" && exact(["issue", "view", target, "--json", "number,url"])) {
-    return destinationRepository && repositoryMatches(requestArgs, "", destinationRepository);
+  for (const contract of operationSchema.childCommands[outer.command] || []) {
+    const expectedRepository = contract.repository === "destination" ? destinationRepository : repository;
+    if (!expectedRepository || !repositoryMatches(requestArgs, "", expectedRepository)) continue;
+    const resources = contract.resource ? [...resourceNumbers] : [target];
+    for (const resource of resources) {
+      const expected = contract.argv.map((value) => value === "$target" ? target : value === "$resource" ? resource : value);
+      if (JSON.stringify(child) === JSON.stringify(expected)) return true;
+    }
   }
-  if (!repositoryMatches(requestArgs)) return false;
-  switch (outer.command) {
-    case "pr:checks": return exact(["pr", "view", target, "--json", "statusCheckRollup"]);
-    case "pr:close": return exact(["pr", "view", target, "--json", "state"]);
-    case "pr:merge": return exact(["pr", "view", target, "--json", "state,mergedBy,mergedAt"]);
-    case "pr:ready": return exact(["pr", "view", target, "--json", "isDraft"]);
-    case "pr:reopen": return exact(["pr", "view", target, "--json", "state"]);
-    case "issue:create":
-      return [...resourceNumbers].some((number) => exact(["issue", "view", number, "--json", "number,title,state,url,id"]));
-    case "issue:edit": return exact(["issue", "view", target, "--json", "number,title,state,labels,assignees,id"]);
-    case "issue:close": return exact(
-      ["issue", "view", target, "--json", "state"], ["issue", "view", target, "--json", "number,state"]);
-    case "issue:reopen": return exact(
-      ["issue", "view", target, "--json", "state"], ["issue", "view", target, "--json", "number,state"]);
-    case "issue:comment": return exact(["issue", "view", target, "--json", "comments"]);
-    case "issue:lock":
-    case "issue:unlock": return exact(
-      ["issue", "view", target, "--json", "state,locked"], ["issue", "view", target, "--json", "number,state,locked"]);
-    case "issue:pin":
-    case "issue:unpin": return exact(
-      ["issue", "view", target, "--json", "state,isPinned"], ["issue", "view", target, "--json", "number,state,isPinned"]);
-    case "issue:transfer": return false;
-    case "label:create": return exact(["label", "list", "--json", "name"]);
-    case "run:cancel": return exact(["run", "view", target, "--json", "status,conclusion"]);
-    case "workflow:view":
-    case "workflow:enable":
-    case "workflow:disable": return exact(["workflow", "list", "--json", "id,name,state,path", "--all"]);
-    case "release:delete": return exact(["release", "view", target, "--json", "tagName"]);
-    default: return false;
-  }
+  return false;
 };
 const validateNonApi = (requestArgs) => {
   const exactOuter = JSON.stringify(requestArgs) === JSON.stringify(args) && repositoryMatches(requestArgs);
-  if (exactOuter && args[0] === "issue" && requestArgs.some((arg) => arg === "--type" || arg.startsWith("--type=")
-    || arg === "--no-type" || arg === "--remove-type")) return null;
+  if (exactOuter && issueTypeFlags.size > 0 && requestArgs.some((arg) => issueTypeFlags.has(arg)
+    || [...issueTypeFlags].some((flag) => arg.startsWith(`${flag}=`)))) return null;
   if (exactOuter) return {kind: args[0] === "issue" && args[1] === "create" ? "issue-create" : "outer", number: ""};
   if (typeOperation && requestArgs[0] === "issue" && requestArgs[1] === "view") {
   let target = null;
@@ -801,8 +750,9 @@ const validateNonApi = (requestArgs) => {
   }
   if (!target || !repositoryMatches(requestArgs, target.repository)) return null;
   const fields = json.split(",");
+  const observedFields = new Set(typeContract.observe || []);
   if (!fields.includes("id") || !fields.includes("number") || fields.length === 0 || new Set(fields).size !== fields.length
-    || fields.some((field) => !["assignees", "id", "labels", "number", "state", "title", "url"].includes(field))) return null;
+    || fields.some((field) => !observedFields.has(field))) return null;
   if (!issueNumbers.has(target.number)) return null;
   return {kind: "issue-view", number: target.number};
   }
@@ -1481,9 +1431,16 @@ fm_github_set_gh_destination_repository() {
 }
 
 fm_github_gh_option_kind() {
-  local family=$1 subcommand=$2 option=$3
+  local family=$1 subcommand=$2 option=$3 schema_kind
+  schema_kind=$(fm_github_node "$(fm_github_lib_dir)/fm-github-operation-schema.mjs" option-kind "$family:$subcommand" "$option") || {
+    printf unknown
+    return
+  }
+  if [ "$schema_kind" != unknown ]; then
+    printf '%s' "$schema_kind"
+    return
+  fi
   case "$option" in
-    --repo|-R) printf repo; return ;;
     --org|--user|--env|--repos)
       case "$family" in secret|variable|ruleset) printf reject; return ;; esac
       ;;
@@ -1496,10 +1453,9 @@ fm_github_gh_option_kind() {
     --hostname)
       case "$family" in attestation) printf host; return ;; esac
       ;;
-    --template|-p)
+    --template)
       case "$family:$subcommand" in
         repo:create) printf repo ;;
-        ruleset:list|ruleset:view|release:create) printf flag ;;
         *) printf data ;;
       esac
       return
@@ -1510,10 +1466,6 @@ fm_github_gh_option_kind() {
       ;;
     --branch-repo)
       if [ "$family" = issue ] && [ "$subcommand" = develop ]; then printf repo; else printf unknown; fi
-      return
-      ;;
-    --to-repo)
-      if [ "$family" = issue ] && [ "$subcommand" = transfer ]; then printf destination_repo; else printf unknown; fi
       return
       ;;
     --head|-H)
@@ -1540,28 +1492,23 @@ fm_github_gh_option_kind() {
       if [ "$family" = attestation ]; then printf reject; else printf unknown; fi
       return
       ;;
-    --app|--archive|--assignee|--attempt|--author|--author-email|--base|--body|--body-file|--branch|--bundle|--cert-identity|--cert-identity-regex|--cert-oidc-issuer|--color|--comment|--commit|--created|--custom-trusted-root|--description|--digest-alg|--dir|--discussion-category|--env-file|--event|--exclude|--field|--format|--gitignore|--homepage|--interval|--job|--jq|--key|--label|--language|--license|--limit|--lock-reason|--match-head-commit|--mention|--method|--milestone|--name|--notes|--notes-file|--notes-start-tag|--order|--output|--pattern|--predicate-type|--project|--raw-field|--reason|--recover|--ref|--remote|--remove-assignee|--remove-label|--remove-project|--remove-reviewer|--reviewer|--search|--signer-digest|--source-digest|--source-ref|--state|--status|--subject|--tag|--target|--team|--title|--topic|--tuf-root|--type|--upstream-remote-name|--visibility|--workflow|--add-assignee|--add-label|--add-project|--add-reviewer|--size|--sort)
+    --app|--archive|--assignee|--attempt|--author|--author-email|--base|--body|--body-file|--branch|--bundle|--cert-identity|--cert-identity-regex|--cert-oidc-issuer|--color|--comment|--commit|--created|--custom-trusted-root|--description|--digest-alg|--dir|--discussion-category|--env-file|--event|--exclude|--field|--format|--gitignore|--homepage|--interval|--job|--jq|--key|--label|--language|--license|--limit|--lock-reason|--match-head-commit|--mention|--milestone|--name|--notes|--notes-file|--notes-start-tag|--order|--output|--pattern|--predicate-type|--project|--raw-field|--reason|--recover|--ref|--remote|--remove-assignee|--remove-label|--remove-project|--remove-reviewer|--reviewer|--search|--signer-digest|--source-digest|--source-ref|--state|--status|--subject|--tag|--target|--team|--title|--topic|--tuf-root|--upstream-remote-name|--visibility|--workflow|--add-assignee|--add-label|--add-project|--add-reviewer|--size|--sort)
       printf data; return
       ;;
     --json)
       if [ "$family" = workflow ] && [ "$subcommand" = run ]; then printf flag; else printf data; fi
       return
       ;;
-    --admin|--all|--approve|--archived|--auto|--bundle-from-oci|--checkout|--cleanup-tag|--clobber|--clone|--comments|--compact|--confirm|--conflict-status|--create-if-none|--debug|--default|--delete-branch|--delete-last|--deny-self-hosted-runners|--detach|--disable-auto|--disable-issues|--disable-wiki|--draft|--dry-run|--edit-last|--editor|--exclude-drafts|--exclude-pre-releases|--exit-status|--fail-fast|--fail-on-no-commits|--failed|--fill|--fill-first|--fill-verbose|--force|--fork|--generate-notes|--help|--include-all-branches|--internal|--latest|--list|--log|--log-failed|--merge|--name-only|--no-archived|--no-forks|--no-maintainer-edit|--no-public-good|--no-repos-selected|--no-source|--no-store|--no-type|--no-upstream|--notes-from-tag|--parents|--patch|--prerelease|--private|--public|--push|--rebase|--recurse-submodules|--remove-milestone|--remove-parent|--remove-type|--required|--request-changes|--show-security-settings|--skip-existing|--squash|--succeed-on-no-caches|--undo|--verbose|--verify-only|--verify-tag|--watch|--web|--yaml|--yes)
+    --admin|--all|--approve|--archived|--auto|--bundle-from-oci|--checkout|--cleanup-tag|--clobber|--clone|--comments|--compact|--confirm|--conflict-status|--create-if-none|--debug|--default|--delete-branch|--delete-last|--deny-self-hosted-runners|--detach|--disable-auto|--disable-issues|--disable-wiki|--draft|--dry-run|--edit-last|--editor|--exclude-drafts|--exclude-pre-releases|--exit-status|--fail-fast|--fail-on-no-commits|--failed|--fill|--fill-first|--fill-verbose|--force|--fork|--generate-notes|--help|--include-all-branches|--internal|--latest|--list|--log|--log-failed|--merge|--name-only|--no-archived|--no-forks|--no-maintainer-edit|--no-public-good|--no-repos-selected|--no-source|--no-store|--no-upstream|--notes-from-tag|--parents|--patch|--prerelease|--private|--public|--push|--rebase|--recurse-submodules|--remove-milestone|--remove-parent|--remove-type|--required|--request-changes|--show-security-settings|--skip-existing|--squash|--succeed-on-no-caches|--undo|--verbose|--verify-only|--verify-tag|--watch|--web|--yaml|--yes)
       printf flag; return
       ;;
-    -A|-B|-D|-F|-L|-O|-S|-T|-g|-h|-i|-j|-k|-n|-q|-t) printf data; return ;;
+    -A|-B|-D|-L|-O|-S|-T|-g|-h|-i|-j|-k|-q) printf data; return ;;
     -a)
       case "$family:$subcommand" in pr:review|workflow:list|run:list|cache:delete) printf flag ;; *) printf data ;; esac
       return
       ;;
-    -b) printf data; return ;;
     -c)
       case "$family:$subcommand" in pr:status|pr:view|pr:review|issue:view|issue:develop|repo:create) printf flag ;; *) printf data ;; esac
-      return
-      ;;
-    -d)
-      case "$family:$subcommand" in pr:list|pr:close|pr:create|pr:merge|pr:revert|run:rerun|release:create) printf flag ;; *) printf data ;; esac
       return
       ;;
     -e)
@@ -1574,18 +1521,6 @@ fm_github_gh_option_kind() {
       ;;
     -l)
       case "$family:$subcommand" in issue:develop) printf flag ;; *) printf data ;; esac
-      return
-      ;;
-    -m)
-      case "$family:$subcommand" in pr:merge) printf flag ;; *) printf data ;; esac
-      return
-      ;;
-    -r)
-      case "$family" in secret|variable) printf reject ;; *) case "$family:$subcommand" in pr:merge|pr:review) printf flag ;; *) printf data ;; esac ;; esac
-      return
-      ;;
-    -s)
-      case "$family:$subcommand" in pr:merge) printf flag ;; *) printf data ;; esac
       return
       ;;
     -u)
@@ -1724,28 +1659,6 @@ fm_github_validate_gh_positionals_complete() {
   esac
 }
 
-fm_github_validate_clear_type_command() {
-  local arg pending=0 target=0 clear=0
-  shift 2
-  while [ "$#" -gt 0 ]; do
-    arg=$1
-    shift
-    if [ "$pending" -eq 1 ]; then
-      [ -n "$arg" ] || return 1
-      pending=0
-      continue
-    fi
-    case "$arg" in
-      --no-type) clear=$((clear + 1)) ;;
-      --repo|-R) pending=1 ;;
-      --repo=*|-R?*) ;;
-      -*) return 1 ;;
-      *) target=$((target + 1)) ;;
-    esac
-  done
-  [ "$pending" -eq 0 ] && [ "$target" -eq 1 ] && [ "$clear" -eq 1 ]
-}
-
 fm_github_validate_gh_resource() {
   local family=${1:-} subcommand=${2:-} arg option value kind pending='' position=0
   FM_GITHUB_GH_TARGET_REPOSITORY=
@@ -1773,7 +1686,6 @@ fm_github_validate_gh_resource() {
         FM_GITHUB_GH_NORMALIZED_ARGS+=("$arg")
         option=${arg%%=*}
         value=${arg#*=}
-        [ "$option" != --no-type ] || return 1
         kind=$(fm_github_gh_option_kind "$family" "$subcommand" "$option")
         [ "$kind" != repo ] || FM_GITHUB_GH_REPO_OPTION_SEEN=1
         case "$kind" in
@@ -1821,9 +1733,8 @@ fm_github_validate_gh_resource() {
     FM_GITHUB_GH_NORMALIZED_ARGS+=(--repo "$FM_GITHUB_GH_URL_NORMALIZED_REPOSITORY")
   fi
   if [ "$family:$subcommand" = issue:edit ]; then
-    case " ${FM_GITHUB_GH_NORMALIZED_ARGS[*]} " in
-      *' --no-type '*) fm_github_validate_clear_type_command "${FM_GITHUB_GH_NORMALIZED_ARGS[@]}" || return 1 ;;
-    esac
+    fm_github_node "$(fm_github_lib_dir)/fm-github-operation-schema.mjs" validate-clear-type \
+      "${FM_GITHUB_GH_NORMALIZED_ARGS[@]}" || return 1
   fi
 }
 
@@ -2034,9 +1945,10 @@ fm_github_context_command() {
       operation=$(fm_github_gh_operation "$@")
       [ "$operation" != forbidden ] || { echo "error: routed GitHub authentication mutation, unsafe repository mutation, API escape, or token display is forbidden" >&2; return 1; }
       if [ "${tool##*/}" = gh ] && [ "${1:-}:${2:-}" = issue:create ] || [ "${tool##*/}" = gh ] && [ "${1:-}:${2:-}" = issue:edit ]; then
-        for command_name in "$@"; do
-          case "$command_name" in --type|--type=*|--no-type|--remove-type) echo "error: native issue type mutation is only available through routed gh-axi" >&2; return 1 ;; esac
-        done
+        if fm_github_node "$(fm_github_lib_dir)/fm-github-operation-schema.mjs" has-issue-type-variant "$@"; then
+          echo "error: native issue type mutation is only available through routed gh-axi" >&2
+          return 1
+        fi
       fi
       if [ "$operation" = create ] && [ "${FM_GITHUB_ALLOW_UNREGISTERED_PROJECT:-}" != 1 ]; then
         echo "error: repository creation requires an authorized pre-registration project route" >&2

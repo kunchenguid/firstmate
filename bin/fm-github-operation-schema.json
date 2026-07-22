@@ -1,0 +1,108 @@
+{
+  "version": 1,
+  "publicOptions": {
+    "--method": {"default": "data"},
+    "--no-type": {"default": "flag"},
+    "--repo": {"default": "repo"},
+    "--to-repo": {"issue:transfer": "destination_repo", "default": "unknown"},
+    "--type": {"default": "data"},
+    "-F": {"default": "data"},
+    "-R": {"default": "repo"},
+    "-b": {"default": "data"},
+    "-d": {"pr:list": "flag", "pr:close": "flag", "pr:create": "flag", "pr:merge": "flag", "pr:revert": "flag", "run:rerun": "flag", "release:create": "flag", "default": "data"},
+    "-m": {"pr:merge": "flag", "default": "data"},
+    "-n": {"default": "data"},
+    "-p": {"repo:create": "repo", "ruleset:list": "flag", "ruleset:view": "flag", "release:create": "flag", "default": "data"},
+    "-r": {"secret:*": "reject", "variable:*": "reject", "pr:merge": "flag", "pr:review": "flag", "default": "data"},
+    "-s": {"pr:merge": "flag", "default": "data"},
+    "-t": {"default": "data"}
+  },
+  "aliases": {
+    "-F": {"release:*": "--notes-file", "default": "--body-file"},
+    "-R": {"default": "--repo"},
+    "-b": {"default": "--body"},
+    "-d": {"pr:create": "--draft", "release:create": "--draft"},
+    "-m": {"pr:merge": "--merge"},
+    "-n": {"default": "--notes"},
+    "-p": {"release:create": "--prerelease"},
+    "-r": {"pr:merge": "--rebase"},
+    "-s": {"pr:merge": "--squash"},
+    "-t": {"default": "--title"}
+  },
+  "booleanFlags": [
+    "--admin", "--all", "--approve", "--archived", "--auto", "--clone", "--comments", "--debug",
+    "--delete-branch", "--draft", "--exclude-drafts", "--exclude-pre-releases", "--exit-status",
+    "--failed", "--full", "--generate-notes", "--internal", "--latest", "--log", "--log-failed",
+    "--merge", "--no-type", "--prerelease", "--private", "--public", "--rebase", "--remove-type",
+    "--request-changes", "--reviews", "--squash", "--verify-tag", "--verbose", "--yes"
+  ],
+  "jsonFields": {
+    "exact": {
+      "repo:view": ["name,description,defaultBranchRef,stargazerCount,forkCount,issues,pullRequests,visibility,primaryLanguage"],
+      "repo:list": ["name,description,visibility,primaryLanguage,stargazerCount,updatedAt"],
+      "pr:view": ["number,title,state,author,isDraft,mergedAt,statusCheckRollup,body,comments,reviews"],
+      "issue:view": ["number,title,state,author,createdAt,body", "number,title,state,author,createdAt,body,comments", "number,title,state,author,createdAt,body,issueType", "number,title,state,author,createdAt,body,comments,issueType"],
+      "label:list": ["name"],
+      "workflow:list": ["id,name,state,path"],
+      "run:view": ["databaseId", "databaseId,displayTitle,status,conclusion,workflowName,headBranch,createdAt,jobs"],
+      "release:list": ["tagName,name,isDraft,isPrerelease,publishedAt"],
+      "release:view": ["tagName,name,publishedAt,author,body"],
+      "secret:list": ["name,updatedAt"],
+      "variable:list": ["name,value,updatedAt"]
+    },
+    "extensible": {
+      "pr:list": {"base": "number,title,state,author,isDraft,reviewDecision", "extras": ["body", "createdAt", "labels", "milestone", "mergedAt", "url"]},
+      "issue:list": {"base": "number,title,state,author,createdAt", "extras": ["body", "closedAt", "labels", "milestone", "updatedAt", "url"]},
+      "run:list": {"base": "databaseId,displayTitle,status,conclusion,workflowName,headBranch,event,createdAt", "extras": ["headSha", "number", "url", "updatedAt"]}
+    }
+  },
+  "generatedFlags": {
+    "limits": {"repo:list": "30", "pr:list": "30", "issue:list": "30", "label:list": "500", "workflow:list": "20", "run:list": "10", "release:list": "10"},
+    "defaultState": {"pr:list": "open"},
+    "yes": ["issue:delete", "label:delete", "release:delete"],
+    "exitStatus": ["run:watch"],
+    "logFromVerbose": ["run:view"],
+    "searchFromSort": ["issue:list"]
+  },
+  "operationFlags": {
+    "destination": {"issue:transfer": "--to-repo"},
+    "stdinValue": {"variable:set": "--body"}
+  },
+  "payloadTransforms": [
+    {"command": "release:*", "outer": "--body-file", "child": "--notes", "source": "file"},
+    {"command": "release:*", "outer": "--body", "child": "--notes", "source": "value"},
+    {"commands": ["pr:create", "pr:edit", "pr:merge", "pr:review", "pr:comment", "issue:create", "issue:edit", "issue:comment"], "outer": "--body-file", "child": "--body", "source": "file"}
+  ],
+  "flagTransforms": [
+    {"command": "pr:merge", "outer": "--method", "values": {"merge": "--merge", "squash": "--squash", "rebase": "--rebase"}}
+  ],
+  "ignoredOuterFlags": ["--comments", "--conclusion", "--fields", "--full", "--no-type", "--remove-type", "--reviews", "--type"],
+  "childCommands": {
+    "pr:checks": [{"repository": "source", "argv": ["pr", "view", "$target", "--json", "statusCheckRollup"]}],
+    "pr:close": [{"repository": "source", "argv": ["pr", "view", "$target", "--json", "state"]}],
+    "pr:merge": [{"repository": "source", "argv": ["pr", "view", "$target", "--json", "state,mergedBy,mergedAt"]}],
+    "pr:ready": [{"repository": "source", "argv": ["pr", "view", "$target", "--json", "isDraft"]}],
+    "pr:reopen": [{"repository": "source", "argv": ["pr", "view", "$target", "--json", "state"]}],
+    "issue:create": [{"repository": "source", "resource": true, "argv": ["issue", "view", "$resource", "--json", "number,title,state,url,id"]}],
+    "issue:edit": [{"repository": "source", "argv": ["issue", "view", "$target", "--json", "number,title,state,labels,assignees,id"]}],
+    "issue:close": [{"repository": "source", "argv": ["issue", "view", "$target", "--json", "state"]}, {"repository": "source", "argv": ["issue", "view", "$target", "--json", "number,state"]}],
+    "issue:reopen": [{"repository": "source", "argv": ["issue", "view", "$target", "--json", "state"]}, {"repository": "source", "argv": ["issue", "view", "$target", "--json", "number,state"]}],
+    "issue:comment": [{"repository": "source", "argv": ["issue", "view", "$target", "--json", "comments"]}],
+    "issue:lock": [{"repository": "source", "argv": ["issue", "view", "$target", "--json", "state,locked"]}, {"repository": "source", "argv": ["issue", "view", "$target", "--json", "number,state,locked"]}],
+    "issue:unlock": [{"repository": "source", "argv": ["issue", "view", "$target", "--json", "state,locked"]}, {"repository": "source", "argv": ["issue", "view", "$target", "--json", "number,state,locked"]}],
+    "issue:pin": [{"repository": "source", "argv": ["issue", "view", "$target", "--json", "state,isPinned"]}, {"repository": "source", "argv": ["issue", "view", "$target", "--json", "number,state,isPinned"]}],
+    "issue:unpin": [{"repository": "source", "argv": ["issue", "view", "$target", "--json", "state,isPinned"]}, {"repository": "source", "argv": ["issue", "view", "$target", "--json", "number,state,isPinned"]}],
+    "issue:transfer": [{"repository": "destination", "argv": ["issue", "view", "$target", "--json", "number,url"]}],
+    "label:create": [{"repository": "source", "argv": ["label", "list", "--json", "name"]}],
+    "run:cancel": [{"repository": "source", "argv": ["run", "view", "$target", "--json", "status,conclusion"]}],
+    "workflow:view": [{"repository": "source", "argv": ["workflow", "list", "--json", "id,name,state,path", "--all"]}],
+    "workflow:enable": [{"repository": "source", "argv": ["workflow", "list", "--json", "id,name,state,path", "--all"]}],
+    "workflow:disable": [{"repository": "source", "argv": ["workflow", "list", "--json", "id,name,state,path", "--all"]}],
+    "release:delete": [{"repository": "source", "argv": ["release", "view", "$target", "--json", "tagName"]}]
+  },
+  "issueTypes": {
+    "issue:create": {"set": "--type", "observe": ["number", "title", "state", "labels", "assignees", "id"]},
+    "issue:edit": {"set": "--type", "clear": "--no-type", "forbidden": ["--remove-type"], "clearOptions": {"--no-type": "flag", "--repo": "value", "-R": "value"}, "clearPositionals": 1, "observe": ["number", "title", "state", "labels", "assignees", "id"]}
+  },
+  "stdinOperations": ["secret:set", "variable:set"]
+}

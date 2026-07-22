@@ -245,14 +245,18 @@ Every routed clone is independently revalidated through the public guarded comma
 Push resolves `--repo`, `branch.<name>.pushRemote`, `remote.pushDefault`, and `branch.<name>.remote` before falling back to `origin`; command-scoped remote selection is rejected.
 Clone bundle URIs, custom upload/receive programs, recursive submodule network paths, routed remote mutation, and submodule commands are refused.
 Unknown Git commands and unknown GitHub CLI command families or subcommands are refused, so network plumbing, aliases, extensions, authentication state, SSH keys, and future mutators cannot inherit read-only treatment accidentally.
-One typed, command-specific grammar distinguishes repository, owner, head, issue, host, body, title, template-data, and other data fields for every allowlisted GitHub CLI command regardless of flag ordering.
+`bin/fm-github-operation-schema.json` is the single typed operation table for shared public option classification and aliases, generated flags and payloads, exact descendant commands, stdin operations, and issue-type variants.
+The guarded shell validator consumes that table through `bin/fm-github-operation-schema.mjs`, and the descendant broker reads the same table directly.
+That command-specific grammar distinguishes repository, owner, head, issue, host, body, title, template-data, and other data fields for every allowlisted GitHub CLI command regardless of flag ordering.
 Every resource-bearing field must agree with the configured parent or selected-profile fork, including repository templates, linked-branch repositories, issue relations and transfers, label-clone sources, owner options, and selector URLs, while URLs in body, title, and formatting data remain ordinary text.
 Organization-, user-, and environment-scoped secret or variable targets and arbitrary OCI operands are refused, while known-owner repository creation validates the selected login before the outward write.
 FirstMate-owned commands invoke exact configured binaries with argv arrays.
 The guarded `git`, `gh`, and `gh-axi` PATH shims protect ordinary descendants, including `gh-axi` resolving `gh`, but are not an operating-system sandbox against a deliberately malicious process that invokes another absolute executable or independently accesses credentials.
-Raw `gh api` remains unavailable, while an invocation-scoped broker owned by the exact configured `gh-axi` may execute only exact typed REST reads, positively validated single-repository GraphQL reads, and the issue-type lookup and `updateIssue` mutation required by an outer `issue create/edit --type` command.
-Non-API broker calls are limited to the exact validated outer command or the selected-repository issue create and ID-bearing issue view shapes derived from that command.
-The broker records issue and type node IDs only from selected-repository responses within that exact outer operation and rejects a mutation unless both IDs match those observations.
+Raw `gh api` remains unavailable, while an invocation-scoped broker owned by the exact configured `gh-axi` may execute only exact typed REST reads, positively validated single-repository GraphQL reads, the issue-type lookup and repository-bound `updateIssue` mutation required by an outer `issue create/edit --type` command, and the repository-bound clear mutation required by an outer `issue edit --no-type` command.
+Non-API broker calls are limited to the exact validated outer command or the operation-specific, repository-bound descendant shapes enumerated in the typed operation table.
+For type assignment, the broker records issue and type node IDs only from selected-repository responses within that exact outer operation and rejects the mutation unless both IDs match those observations.
+For type clearing, the broker records the selected-repository issue node ID and accepts only the exact null-type mutation for that observed ID.
+Routed `secret set` and stdin-backed `variable set` carry at most 1 MiB of caller payload through an authenticated in-memory channel that is bound to the exact outer invocation and is never logged, persisted, retried, or emitted as output.
 
 Authentication validation never invokes `gh auth token` or Git credential fill.
 It confirms secure credential storage from `gh auth status`, verifies `/user` matches `expected_login`, and probes repository permission through the selected profile.

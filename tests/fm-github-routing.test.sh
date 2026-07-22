@@ -420,6 +420,30 @@ SH
   pass "github routing absence preserves legacy ambient command behavior"
 }
 
+test_operation_schema_is_shared() {
+  local rc
+  node "$ROOT/bin/fm-github-operation-schema.mjs" validate || fail "typed operation schema validation failed"
+  [ "$(node "$ROOT/bin/fm-github-operation-schema.mjs" option-kind issue:transfer --to-repo)" = destination_repo ] \
+    || fail "public transfer option did not resolve through the typed operation schema"
+  [ "$(node "$ROOT/bin/fm-github-operation-schema.mjs" option-kind release:create -p)" = flag ] \
+    || fail "public release alias did not resolve through the typed operation schema"
+  node "$ROOT/bin/fm-github-operation-schema.mjs" validate-clear-type issue edit 17 --no-type --repo Owner-A/repo-a \
+    || fail "clear-type variant was rejected by the typed operation schema"
+  node "$ROOT/bin/fm-github-operation-schema.mjs" has-issue-type-variant issue edit 17 --no-type \
+    || fail "clear-type variant was not shared with the public native-command boundary"
+  set +e
+  node "$ROOT/bin/fm-github-operation-schema.mjs" validate-clear-type issue edit 17 --no-type --title changed
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "non-atomic clear-type schema variant"
+  set +e
+  node "$ROOT/bin/fm-github-operation-schema.mjs" validate-clear-type issue edit 17 --no-type --repo
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "clear-type schema missing repository value"
+  pass "public and descendant routing consume one typed operation schema"
+}
+
 test_schema_and_resolution_strictness() {
   local d id rc err local_sync
   d=$(make_fixture schema)
@@ -1551,6 +1575,7 @@ test_secondmate_seed_does_not_leak_project_context() {
 }
 
 test_legacy_absence_is_byte_compatible
+test_operation_schema_is_shared
 test_schema_and_resolution_strictness
 test_preregistration_project_bindings_are_narrow
 test_concurrent_profiles_and_exact_children
