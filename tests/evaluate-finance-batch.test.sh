@@ -9,7 +9,7 @@ EVALUATOR="$ROOT/tests/fixtures/fleet-flow-finalization/evaluate-finance-batch.s
 TMP_ROOT=$(fm_test_tmproot evaluate-finance-batch)
 
 make_case() {
-  local name=$1 dir="$TMP_ROOT/$1" project="$TMP_ROOT/$1/project"
+  local dir="$TMP_ROOT/$1" project="$TMP_ROOT/$1/project"
   mkdir -p "$project/inputs" "$project/out" "$dir/finance/bin"
   git -C "$project" init -q
   printf '{"approved":true}\n' > "$project/inputs/artifact.json"
