@@ -90,6 +90,26 @@ emit() {  # <state> <source> [detail]
 
 [ -f "$META" ] || emit unknown none "no metadata for $ID"
 
+# Results-first delivery tasks: authoritative state comes from the delivery record.
+# Legacy No Mistakes tasks fall through to the existing run-step/pane logic below.
+DELIVERY_RECORD="$STATE/$ID.delivery.json"
+if [ -f "$DELIVERY_RECORD" ]; then
+  delivery_poll=$("$FM_ROOT/bin/fm-delivery-poll.sh" "$ID" 2>/dev/null || true)
+  case "$delivery_poll" in
+    delivery:*receipt:delivered)
+      emit "done" delivery-receipt "receipt finalized"
+      ;;
+    delivery:*blocked:*)
+      reason=${delivery_poll#delivery:*blocked:}
+      emit blocked delivery-record "$reason"
+      ;;
+    delivery:*phase:*)
+      phase=${delivery_poll#delivery:*phase:}
+      emit working delivery-record "phase $phase"
+      ;;
+  esac
+fi
+
 meta_value() {  # <key>
   grep "^$1=" "$META" 2>/dev/null | tail -1 | cut -d= -f2- || true
 }
