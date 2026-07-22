@@ -71,14 +71,20 @@ Check and test the toolbelt before pushing:
 ```sh
 for script in bin/*.sh bin/backends/*.sh; do bash -n "$script"; done   # syntax-check the toolbelt
 bin/fm-lint.sh   # lint the toolbelt and behavior tests; the single owner CI and the no-mistakes gate both run
-for test_script in tests/*.test.sh; do bash "$test_script"; done   # full behavior suite (CI Behavior job; optional local full run)
+bin/fm-test-run.sh tests/<subject>.test.sh   # one script (primary local focus path, timed)
+bin/fm-test-run.sh --family pure-contract-unit   # one declared family (serial, timed)
+bin/fm-test-run.sh --changed   # conservative changed-file-informed set (never silent full suite)
+bin/fm-test-run.sh --all   # intentional complete portable suite (CI Behavior; optional local full run)
 [ "$(readlink CLAUDE.md)" = "AGENTS.md" ]
 [ "$(readlink .claude/skills)" = "../.agents/skills" ]
 tmp=$(mktemp -d) && printf 'done: smoke\n' > "$tmp/smoke.status" && FM_STATE_OVERRIDE="$tmp" FM_SIGNAL_GRACE=1 FM_POLL=1 FM_HEARTBEAT=999999 bin/fm-watch-arm.sh  # watcher re-arm smoke test (prints arm status, then an actionable signal)
 ```
 
-Discover tests by listing `tests/*.test.sh`: each is a self-contained bash script named `<subject>.test.sh`, and its header comment describes what it covers, so run one directly to focus on a subject.
-Tests that need a real optional backend or an explicit opt-in (real herdr/zellij/cmux smoke tests, the live Pi regression) skip themselves and print the tool or environment gate needed to enable them, so the run-all loop above is always safe.
+`bin/fm-test-run.sh` is the single owner of serial behavior-suite selection, per-script timing markers, family totals, and the optional JSON timing artifact.
+Its header and `--help` own the flags, family labels, and changed-file map; this section only documents the entry points.
+Local no-mistakes Test stays intent-targeted and must not wire `commands.test` to `--all` or a `tests/*.test.sh` walk; CI Behavior calls `bin/fm-test-run.sh --all` for broad regression.
+Discover tests by listing `tests/*.test.sh`: each is a self-contained bash script named `<subject>.test.sh`, and its header comment describes what it covers, so pass one to `bin/fm-test-run.sh` to focus on a subject with canonical timing output.
+Tests that need a real optional backend or an explicit opt-in (real herdr/zellij/cmux smoke tests, the live Pi regression) skip themselves and print the tool or environment gate needed to enable them, so `--all` remains safe on machines without those tools.
 
 ## Questions
 

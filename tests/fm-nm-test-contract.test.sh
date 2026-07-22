@@ -3,7 +3,8 @@
 #
 # Firstmate must not configure commands.test as a complete tests/*.test.sh walk
 # (that duplicated CI and burned local pipeline time). Lint stays pinned to
-# bin/fm-lint.sh. Remote CI Behavior must keep iterating every tests/*.test.sh.
+# bin/fm-lint.sh. Remote CI Behavior must keep running the complete portable
+# suite through bin/fm-test-run.sh --all (exact tests/*.test.sh coverage).
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -94,11 +95,13 @@ test_nm_has_no_complete_local_test_command() {
 
 test_ci_still_runs_broad_behavior_suite() {
   assert_present "$CI" "ci.yml is missing"
-  # Behavior job still iterates every portable behavior script.
-  grep -Fq 'for test_script in tests/*.test.sh' "$CI" \
-    || fail "CI Behavior job must still loop over tests/*.test.sh"
-  grep -Fq "\"\$test_script\"" "$CI" \
-    || fail "CI Behavior job must still execute each tests/*.test.sh script"
+  # Behavior job still runs every portable behavior script via the one owner.
+  grep -Fq 'bin/fm-test-run.sh --all' "$CI" \
+    || fail "CI Behavior job must invoke bin/fm-test-run.sh --all"
+  # Guard against regression to an uninstrumented inline loop that drops timing.
+  if grep -Eq 'for test_script in tests/\*\.test\.sh' "$CI"; then
+    fail "CI Behavior must not re-spell an inline tests/*.test.sh loop; use fm-test-run.sh"
+  fi
   # Preserve other CI lanes this task must not shrink.
   grep -Eq 'name:[[:space:]]*Lint shell scripts' "$CI" \
     || fail "CI must retain the lint job"

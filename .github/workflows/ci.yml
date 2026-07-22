@@ -27,9 +27,10 @@ jobs:
   tests:
     name: Behavior tests
     runs-on: ubuntu-latest
-    # The suite should finish in ~2-3 minutes; this generous cap fails loudly on a
-    # hung watcher or tmux test instead of riding GitHub's 360-minute default.
-    timeout-minutes: 15
+    # Measured portable suite wall-clock is ~13-15+ minutes without Herdr.
+    # This cap is a hang tripwire for a stuck watcher or tmux test, not the
+    # expected end of a healthy suite (and not a substitute for green results).
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v6
         with:
@@ -52,11 +53,20 @@ jobs:
           set -eu
           npm install -g tasks-axi
           tasks-axi --version
-      - run: |
+      # Single owner of serial suite selection, timing markers, and aggregate
+      # failure. Do not re-spell a for-loop over tests/*.test.sh here.
+      - name: Run portable behavior suite
+        run: |
           set -eu
-          for test_script in tests/*.test.sh; do
-            "$test_script"
-          done
+          mkdir -p "$RUNNER_TEMP/fm-test"
+          bin/fm-test-run.sh --all --json "$RUNNER_TEMP/fm-test/fm-test-timing.json"
+      - name: Upload behavior timing artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fm-test-timing
+          path: ${{ runner.temp }}/fm-test/fm-test-timing.json
+          if-no-files-found: warn
 
   macos-stock-bash:
     name: Stock macOS Bash snapshot compatibility
