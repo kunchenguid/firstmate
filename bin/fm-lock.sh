@@ -20,10 +20,11 @@ mkdir -p "$STATE"
 # (still not a verified primary). Verified 2026-07-21 on copilot 1.0.73:
 # its bundled ELF renames the main thread, so `ps -o comm=` reports "MainThread"
 # while `ps -o args=` is exactly "copilot"; recognition therefore rides the args
-# path. The copilot alternative is anchored to a standalone word so unrelated
-# argv such as ".../extensions/copilot --locale" or
+# path. The copilot alternatives are anchored to a standalone word or a
+# path-prefixed argv[0] (e.g. "/home/x/.local/bin/copilot --allow-all") so
+# unrelated argv such as ".../extensions/copilot --locale" or
 # "@vscode/copilot-typescript-server-plugin" never matches.
-HARNESS_RE='claude|codex|opencode|grok|^pi$|(^| )copilot( |$)'
+HARNESS_RE='claude|codex|opencode|grok|^pi$|(^| )copilot( |$)|^[^ ]*/copilot( |$)'
 
 harness_pid() {
   local pid=$$ comm args

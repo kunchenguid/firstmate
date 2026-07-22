@@ -50,7 +50,8 @@ detect_own() {
         # Bare interpreter: match the harness name in its script path.
         # MainThread is GitHub Copilot CLI's comm (verified 2026-07-21, copilot
         # 1.0.73: the bundled ELF renames its main thread and its args are
-        # exactly "copilot"). copilot's glob is anchored so argv like
+        # exactly "copilot"). copilot's glob is anchored to a standalone word
+        # or a path-prefixed argv[0] so argv like
         # ".../extensions/copilot --locale" never matches.
         args=$(ps -o args= -p "$pid" 2>/dev/null)
         case "$args" in
@@ -60,6 +61,9 @@ detect_own() {
           *grok*) echo grok; return ;;
           *" pi "*|*/pi) echo pi; return ;;
           copilot|"copilot "*) echo copilot; return ;;
+        esac
+        case "${args%% *}" in
+          */copilot) echo copilot; return ;;
         esac ;;
     esac
     pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')

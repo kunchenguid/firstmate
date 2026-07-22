@@ -78,6 +78,33 @@ test_fm_lock_recognizes_copilot_holder() {
   pass "fm-lock recognizes a copilot holder as live"
 }
 
+test_fm_lock_acquires_under_path_prefixed_copilot() {
+  local home fakebin out status
+  home="$TMP_ROOT/pathargv-home"
+  fakebin=$(fm_fakebin "$TMP_ROOT/pathargv-fake")
+  mkdir -p "$home/state"
+  # A copilot primary launched via an absolute path keeps comm MainThread but
+  # carries the full path in argv[0]; it must still read as a harness.
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *"ppid="*) exit 1 ;;
+  *"comm="*) printf '%s\n' 'MainThread'; exit 0 ;;
+  *"args="*) printf '%s\n' '/home/x/.local/bin/copilot --allow-all'; exit 0 ;;
+esac
+exit 1
+SH
+  chmod +x "$fakebin/ps"
+  out=$(FM_HOME="$home" PATH="$fakebin:$PATH" "$LOCK")
+  status=$?
+  expect_code 0 "$status" "path-prefixed copilot argv should acquire the lock"
+  assert_contains "$out" "lock acquired: harness pid" "fm-lock did not accept a path-prefixed copilot argv[0]"
+  printf '%s\n' "$$" > "$home/state/.lock"
+  out=$(FM_HOME="$home" PATH="$fakebin:$PATH" "$LOCK" status)
+  assert_contains "$out" "lock: held by live harness pid" "path-prefixed copilot holder should read as live"
+  pass "fm-lock recognizes a path-prefixed copilot argv[0]"
+}
+
 test_fm_lock_ignores_unrelated_copilot_argv() {
   local home fakebin out status
   home="$TMP_ROOT/plugin-home"
@@ -184,7 +211,21 @@ SH
   chmod +x "$fakebin/ps"
   out=$(env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT PATH="$fakebin:$PATH" "$HARNESS")
   [ "$out" = copilot ] || fail "fm-harness printed '$out' instead of copilot for a copilot comm"
-  pass "fm-harness reports copilot distinctly for both observed process shapes"
+
+  # MainThread comm with a path-prefixed argv[0] (absolute-path launch).
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *"ppid="*) exit 1 ;;
+  *"comm="*) printf '%s\n' 'MainThread'; exit 0 ;;
+  *"args="*) printf '%s\n' '/home/x/.local/bin/copilot --allow-all'; exit 0 ;;
+esac
+exit 1
+SH
+  chmod +x "$fakebin/ps"
+  out=$(env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT PATH="$fakebin:$PATH" "$HARNESS")
+  [ "$out" = copilot ] || fail "fm-harness printed '$out' instead of copilot for a path-prefixed argv[0]"
+  pass "fm-harness reports copilot distinctly for all observed process shapes"
 }
 
 test_fm_harness_existing_detection_unchanged() {
@@ -366,6 +407,7 @@ EOF
 test_fm_lock_acquires_under_copilot_ancestor
 test_fm_lock_overwrites_stale_dead_copilot_holder
 test_fm_lock_recognizes_copilot_holder
+test_fm_lock_acquires_under_path_prefixed_copilot
 test_fm_lock_ignores_unrelated_copilot_argv
 test_fm_lock_holder_argv_only_matters_for_interpreters
 test_fm_lock_acquires_under_renamed_copilot_wrapper
