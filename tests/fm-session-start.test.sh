@@ -759,12 +759,15 @@ EOF
   make_fake_ps_claude "$fakebin"
   fm_fake_exit0 "$fakebin" curl jq
   printf 'FMX_PAIRING_TOKEN=tok-next-step\n' > "$home/.env"
+  printf 'FM_CHECK_INTERVAL=30\n' > "$home/config/topic-mode.env"
 
   out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
 
   assert_contains "$out" "FMX: X mode on" "bootstrap did not activate X mode"
   assert_contains "$out" "SUPERVISION OPERATING INSTRUCTIONS - primary harness: claude" "supervision block missing"
   assert_contains "$out" "- X mode: active" "supervision block did not mention X cadence"
+  assert_contains "$out" "- Topic mode cadence: $home/config/topic-mode.env is loaded by bin/fm-watch-arm.sh" \
+    "supervision block did not explain automatic topic cadence loading"
   assert_contains "$out" "Follow the supervision operating instructions block above" "next step did not point back to the emitted supervision block"
 
   pass "session start emits X-mode cadence guidance in the harness supervision block"

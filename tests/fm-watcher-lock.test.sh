@@ -713,6 +713,66 @@ SH
   pass "arm propagates an immediate watcher wake before confirmation"
 }
 
+test_arm_loads_topic_mode_cadence_unless_overridden() {
+  local dir state fakebin check_file topic_env armout ambientout real_date arm_pid i rc
+  dir=$(make_case arm-topic-mode-cadence)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  check_file="$state/topic.check.sh"
+  topic_env="$dir/config/topic-mode.env"
+  armout="$dir/topic-arm.out"
+  ambientout="$dir/ambient-arm.out"
+  real_date=$(command -v date)
+  mkdir -p "$dir/config"
+  printf 'FM_CHECK_INTERVAL=30\n' > "$topic_env"
+  mark_pr_check_migration_complete "$state"
+  cat > "$check_file" <<'SH'
+#!/usr/bin/env bash
+printf 'topic cadence reached\n'
+SH
+  chmod 0700 "$check_file"
+  FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-check-register.sh" topic >/dev/null \
+    || fail "could not register topic cadence check"
+  touch "$state/.last-check"
+
+  # Advance only the watcher's clock by 30 seconds so this remains a fast,
+  # deterministic proof that the plain arm inherited the topic cadence rather
+  # than the 300-second default.
+  cat > "$fakebin/date" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = +%s ]; then
+  now=\$("$real_date" +%s)
+  printf '%s\\n' "\$((now + 30))"
+  exit 0
+fi
+exec "$real_date" "\$@"
+SH
+  chmod +x "$fakebin/date"
+
+  rc=0
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_HEARTBEAT=999999 \
+    "$WATCH_ARM" > "$armout" || rc=$?
+  [ "$rc" -eq 0 ] || fail "plain arm with topic cadence returned $rc: $(cat "$armout")"
+  grep -F "check: $check_file: topic cadence reached" "$armout" >/dev/null \
+    || fail "plain arm did not run the check at the topic's 30-second cadence: $(cat "$armout")"
+
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_CHECK_INTERVAL=300 FM_POLL=5 FM_SIGNAL_GRACE=1 FM_HEARTBEAT=999999 \
+    "$WATCH_ARM" > "$ambientout" &
+  arm_pid=$!
+  i=0
+  while [ "$i" -lt 50 ] && ! grep -q 'watcher: started pid=' "$ambientout" 2>/dev/null; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  grep -q 'watcher: started pid=' "$ambientout" \
+    || { kill "$arm_pid" 2>/dev/null || true; wait "$arm_pid" 2>/dev/null || true; fail "ambient cadence arm did not start"; }
+  ! grep -qF "check: $check_file: topic cadence reached" "$ambientout" \
+    || { kill "$arm_pid" 2>/dev/null || true; wait "$arm_pid" 2>/dev/null || true; fail "ambient FM_CHECK_INTERVAL did not override topic cadence"; }
+  kill -TERM "$arm_pid" 2>/dev/null || true
+  wait "$arm_pid" 2>/dev/null || true
+  pass "plain arm loads the topic cadence and an ambient interval overrides it"
+}
+
 test_arm_waits_for_peer_beacon_after_child_stands_down() {
   local dir state fakebin armout peer identity armpid status i
   dir=$(make_case arm-peer-startup-race)
@@ -978,6 +1038,7 @@ test_attached_arm_signal_is_recorded_in_cycle_ledger
 test_arm_starts_and_self_heals
 test_arm_hup_cleans_child_and_temp_output
 test_arm_propagates_immediate_wake_before_confirmation
+test_arm_loads_topic_mode_cadence_unless_overridden
 test_arm_waits_for_peer_beacon_after_child_stands_down
 test_arm_fails_loud_when_no_fresh_watcher_confirmable
 test_cycle_exit_ledger_links_successor_and_stays_bounded

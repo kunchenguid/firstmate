@@ -860,13 +860,15 @@ test_reply_text_file_and_stdin() {
 }
 
 test_bootstrap_opt_out_cleanup() {
-  local home out
+  local home out topic_cadence
   home="$TMP_ROOT/boot-optout"; mkdir -p "$home"
   # Opt in, artifacts appear.
   printf 'FMX_PAIRING_TOKEN=tok-out\n' > "$home/.env"
   FM_HOME="$home" "$ROOT/bin/fm-bootstrap.sh" >/dev/null 2>&1
   assert_present "$home/state/x-watch.check.sh" "opt-in must create the shim"
   assert_present "$home/config/x-mode.env" "opt-in must create the cadence config"
+  topic_cadence='FM_CHECK_INTERVAL=30 # topic-board sentinel'
+  printf '%s\n' "$topic_cadence" > "$home/config/topic-mode.env"
   # Opt out: empty the token, re-run bootstrap -> artifacts removed + one off line.
   printf 'FMX_PAIRING_TOKEN=\n' > "$home/.env"
   out=$(CLAUDECODE=1 FM_HOME="$home" "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
@@ -875,6 +877,9 @@ test_bootstrap_opt_out_cleanup() {
   assert_not_contains "$out" "bin/fm-watch-arm.sh --restart" "opt-out remediation must not hardcode a background-arm restart"
   assert_absent "$home/state/x-watch.check.sh" "opt-out must remove the shim"
   assert_absent "$home/config/x-mode.env" "opt-out must remove the cadence config"
+  assert_present "$home/config/topic-mode.env" "opt-out must not remove the topic-board cadence config"
+  [ "$(cat "$home/config/topic-mode.env")" = "$topic_cadence" ] \
+    || fail "opt-out changed the topic-board cadence config"
   # Steady-state off: another run with nothing to remove is silent.
   out=$(FM_HOME="$home" "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
   assert_not_contains "$out" "FMX:" "steady-state off must be silent"

@@ -97,6 +97,7 @@ pi_ext="$FM_ROOT/.pi/extensions/fm-primary-pi-watch.ts"
 pi_turnend_ext="$FM_ROOT/.pi/extensions/fm-primary-turnend-guard.ts"
 x_mode_env="$CONFIG/x-mode.env"
 topic_data="${FM_TOPIC_DATA_DIR:-$FM_HOME/data/fm-telegram-topics}"
+topic_mode_env="$CONFIG/topic-mode.env"
 
 shell_quote() {
   printf "'"
@@ -216,6 +217,9 @@ if [ "$TOPIC_BOARD" -eq 1 ]; then
   printf '%s\n' '- Telegram topic board: active; keep one live supervision cycle even when no project work is in flight.'
 else
   printf '%s\n' '- Telegram topic board: inactive.'
+fi
+if [ -f "$topic_mode_env" ]; then
+  printf '%s%s%s\n' '- Topic mode cadence: ' "$topic_mode_env" ' is loaded by bin/fm-watch-arm.sh unless FM_CHECK_INTERVAL is already set.'
 fi
 ordinary_wake_line
 printf '\n'

@@ -107,11 +107,11 @@ Approved setup nodes are:
 
 - `cd <one path word>`.
 - `export NAME=<one shell word>` with no command substitution, process substitution, or redirection.
-- `source <x-mode path>` or `. <x-mode path>`.
-- `[ -f <x-mode path> ] && source <x-mode path>` and the equivalent dot form.
+- `source <watcher-cadence path>` or `. <watcher-cadence path>`.
+- `[ -f <watcher-cadence path> ] && source <watcher-cadence path>` and the equivalent dot form.
 
-The allowed x-mode paths are `config/x-mode.env`, `./config/x-mode.env`, and an absolute path that normalizes to `<active-firstmate-home>/config/x-mode.env`.
-An absolute x-mode path outside the active home is not an approved setup node.
+The allowed watcher-cadence paths are `config/x-mode.env`, `./config/x-mode.env`, `config/topic-mode.env`, `./config/topic-mode.env`, and absolute paths that normalize to either matching file under `<active-firstmate-home>/config/`.
+An absolute watcher-cadence path outside the active home is not an approved setup node.
 
 Approved nodes may be separated by `;`, a real newline, or `&&`.
 `&&` is accepted after setup so a failed `cd`, `export`, or source prevents the protected call from running under the wrong setup.

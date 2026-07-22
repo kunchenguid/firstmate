@@ -43,6 +43,8 @@ matrix_case A14 allow "[ -f 'config/x-mode.env' ] && source 'config/x-mode.env';
 matrix_case A15 allow "cd $ROOT && exec bin/fm-watch-arm.sh"
 matrix_case A16 allow "export FM_HOME=$ROOT && bin/fm-watch-checkpoint.sh --seconds 180"
 matrix_case A17 allow $'source "config/x-mode.env"\nbin/fm-watch-checkpoint.sh --seconds 180'
+matrix_case A18 allow "[ -f 'config/topic-mode.env' ] && . 'config/topic-mode.env'; exec bin/fm-watch-arm.sh"
+matrix_case A19 allow "[ -f 'config/x-mode.env' ] && . 'config/x-mode.env'; [ -f 'config/topic-mode.env' ] && . 'config/topic-mode.env'; exec bin/fm-watch-arm.sh"
 
 matrix_case R01 allow "pgrep -fl '/bin/fm-watch.sh' || true"
 matrix_case R02 allow "ps aux | rg '/bin/fm-watch.sh'"

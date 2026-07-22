@@ -16,6 +16,11 @@
 # applies the command-position policy before the command runs; see
 # docs/arm-pretool-check.md for the blessed tree and deny reason codes. It is a
 # pre-execution seatbelt, not a substitute for the verification here.
+# When FM_CHECK_INTERVAL is absent from this arm's environment, this script
+# sources config/topic-mode.env when that local file is present and exports the
+# resulting value to the watcher child.
+# An explicitly sourced or ambient FM_CHECK_INTERVAL always takes precedence
+# over config/topic-mode.env.
 #
 # This script forks the watcher as a tracked child, then VERIFIES the outcome
 # before it settles in. It confirms a watcher process is genuinely alive AND the
@@ -58,6 +63,16 @@ set -u
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+
+CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
+TOPIC_MODE_ENV="$CONFIG/topic-mode.env"
+if [ -z "${FM_CHECK_INTERVAL+x}" ] && [ -f "$TOPIC_MODE_ENV" ]; then
+  # shellcheck source=/dev/null
+  . "$TOPIC_MODE_ENV"
+fi
+if [ -n "${FM_CHECK_INTERVAL+x}" ]; then
+  export FM_CHECK_INTERVAL
+fi
 
 WATCH="$SCRIPT_DIR/fm-watch.sh"
 WATCH_LOCK="$STATE/.watch.lock"
