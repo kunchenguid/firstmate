@@ -53,7 +53,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 NM_BIN="${FM_NM_BIN:-no-mistakes}"
+# The durable per-home ledger of run ids this home armed. It outlives the task
+# meta, which teardown deletes, so bin/fm-nm-orphan-scan.sh can still tell one
+# home's orphaned park from the captain's own runs and from another home's.
+LEDGER="$DATA/nm-armed-runs"
 
 usage() {
   cat <<'EOF'
@@ -109,6 +114,21 @@ not_armed() {
 
 meta_field() {  # <meta> <key>
   grep "^$2=" "$1" 2>/dev/null | tail -1 | cut -d= -f2- || true
+}
+
+# Append "<epoch> <run-id> <task-id> <branch>" to the per-home ledger, unless
+# the run is already recorded. Best effort: a failure here never fails the arm,
+# because the meta's nm_watch_run and the poll still cover a live task; the
+# ledger only matters after the task is gone, and the next arm re-records it.
+record_armed_run() {  # <run-id>
+  local run=$1 now
+  [ -n "$run" ] || return 0
+  mkdir -p "$DATA" 2>/dev/null || return 0
+  if [ -f "$LEDGER" ] && awk -v r="$run" '$2 == r { found = 1 } END { exit found ? 0 : 1 }' "$LEDGER"; then
+    return 0
+  fi
+  now=$(date +%s 2>/dev/null || echo 0)
+  printf '%s %s %s %s\n' "$now" "$run" "$ID" "$BRANCH" >> "$LEDGER" 2>/dev/null || true
 }
 
 fm_scm_parse_pr_url "$URL" >/dev/null 2>&1 || not_armed "not a PR/MR URL: $URL"
@@ -170,6 +190,7 @@ if [ -n "$RUN" ]; then
   if [ "$(meta_field "$META" nm_watch_run)" != "$RUN" ]; then
     echo "nm_watch_run=$RUN" >> "$META"
   fi
+  record_armed_run "$RUN"
   echo "watch armed: run $RUN on $BRANCH watching $URL (escalate-only)"
 else
   echo "watch armed: $BRANCH watching $URL (escalate-only; run id not reported, so state/$ID.meta records none)"

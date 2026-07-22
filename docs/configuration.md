@@ -111,26 +111,18 @@ That evidence policy is specific to the firstmate repo: target projects may legi
 That command requires `tmux` on `PATH`, prints `tmux -V`, runs every `tests/*.test.sh` with `bash`, and fails if any script exits non-zero.
 It intentionally mirrors the behavior-test baseline in [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) instead of delegating the test step to an agent.
 
-## Park wake hook (~/.no-mistakes/config.yaml)
+## Orphaned no-mistakes park scan (data/nm-armed-runs)
 
-A no-mistakes run that parks announces itself three ways, and only one of them reaches out: the `notify.on_park` / `notify.on_unpark` edge hook in the global config.
-The other two are the durable record (`no-mistakes parked`, which reads it without the daemon) and the reminder cascade, and both wait to be read.
-With no hook configured, a parked run is found only by someone who thinks to poll: the reminders keep firing into a file nobody is reading, so a run can sit parked for days while its lane looks quiet rather than blocked.
-`bin/fm-nm-park-wake.sh` is the hook that closes that gap, and it covers every lane rather than only direct-PR.
+A no-mistakes run that parks announces itself three ways: the durable record (`no-mistakes parked`, read without the daemon), the reminder cascade, and - for a run a live task still owns - firstmate's own armed poll (`bin/fm-poll-lib.sh`).
+The one park nobody covers is the run whose task is gone: a direct-PR task cancelled or torn down leaves its watch run parked, its meta deleted, and the reminder cascade re-sending into silence.
 
-Install it once per machine by adding this block to `~/.no-mistakes/config.yaml` (or `$NM_HOME/config.yaml`), replacing `<firstmate-repo>` with the absolute path of this repo:
-
-```yaml
-notify:
-  on_park: '<firstmate-repo>/bin/fm-nm-park-wake.sh'
-  on_unpark: '<firstmate-repo>/bin/fm-nm-park-wake.sh'
-  reminder_interval: "10m"
-```
-
-The hook is global-only by design in no-mistakes, because a repo-settable shell hook would hand any contributor a command on the daemon host, so one block covers every repo and every lane on that machine.
-The daemon runs it with the wait in the environment and a 30 second bound, and a failing hook is logged without affecting the run.
-Firstmate is not the daemon's owner, so this file is edited by hand rather than by any script here; `bin/fm-bootstrap.sh` only reports the missing hook as `NM_NOTIFY:` at session start, and any uncommented `on_park` counts as configured.
-The script's `--help` owns which task a park is mapped to, when a wake is emitted or rate-limited, and the `FM_HOME`, `FM_NM_PARK_REWAKE_SECS`, and `FM_NM_PARK_CREW_REMINDERS` knobs.
+`bin/fm-nm-orphan-scan.sh` closes that gap by ownership, not by a machine-wide push hook.
+`bin/fm-nm-watch.sh` records every watch run it arms as one `<epoch> <run-id> <task-id> <branch>` line in this home's `data/nm-armed-runs` ledger, which outlives the task meta that teardown deletes.
+At each session start `bin/fm-bootstrap.sh` runs the scan, which reports only the parked runs recorded in this home's ledger that no live task still owns, as `NM_ORPHAN:` lines.
+A run this home never armed - the captain's own no-mistakes work, or another firstmate home's task - is not in this home's ledger, so it is never read and never reported; that is what lets independent homes on one machine coexist without answering for each other's runs.
+The scan is silent when no-mistakes or `jq` is absent, when this home has armed nothing, when the record cannot be read, or when nothing this home armed is orphaned.
+Timeliness is not a concern: an orphan is by definition a run nobody is waiting on, so a once-per-session-start scan converges as each session start re-reads durable state.
+The script's `--help` owns the `FM_HOME` and `FM_NM_ORPHAN_LEDGER_DAYS` knobs and the ledger hygiene rules.
 
 ## Captain preferences (data/captain.md)
 
@@ -471,9 +463,7 @@ FM_CREW_STATE_RUNS_LIMIT=200  # recent no-mistakes runs rows scanned when cross-
 FM_CREW_STATE_BIN=bin/fm-crew-state.sh   # test override for the current-state reader used by working/paused watcher triage
 FM_NM_BIN=no-mistakes   # no-mistakes binary fm-nm-watch.sh arms the PR watch with and fm-teardown.sh settles the task's own runs through; mainly a test override
 FM_NM_QUERY_TIMEOUT_SECS=20   # seconds allowed per no-mistakes query inside fm-teardown.sh; a timeout reads as an undeterminable run state, which warns instead of refusing
-FM_NM_CONFIG=           # no-mistakes global config read by bootstrap's park-wake-hook probe; defaults to ${NM_HOME:-~/.no-mistakes}/config.yaml, and the test suite points it at a sandbox
-FM_NM_PARK_REWAKE_SECS=3600   # minimum seconds between park wakes for one no-mistakes run (bin/fm-nm-park-wake.sh)
-FM_NM_PARK_CREW_REMINDERS=2   # reminders a crew-driven gate park must survive before it is reported unanswered
+FM_NM_ORPHAN_LEDGER_DAYS=90   # data/nm-armed-runs entries older than this whose run is no longer parked are pruned (bin/fm-nm-orphan-scan.sh)
 FMX_PAIRING_TOKEN=      # X mode pairing token; .env opt-in authorizes replies and eligible lifecycle actions
 FMX_RELAY_URL=https://myfirstmate.io   # optional X relay override, mainly for local relay development
 FMX_ENV_FILE=           # optional alternate .env file for direct X client invocations; bootstrap still checks $FM_HOME/.env
