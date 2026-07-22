@@ -136,6 +136,53 @@ test_ship_project_memory_wording() {
   pass "fm-brief.sh: ship project-memory wording carries the AGENTS.md authoring bar"
 }
 
+test_pr_description_contract_in_pr_producing_modes_only() {
+  local home id brief
+  home="$TMP_ROOT/pr-description-home"
+  write_registry "$home"
+
+  # no-mistakes (default) and direct-PR both open a PR, so both must carry the contract.
+  for id_proj in "brief-prdesc-nomistakes-e1:no-registry-proj" "brief-prdesc-directpr-e2:direct-proj"; do
+    id=${id_proj%%:*}
+    proj=${id_proj##*:}
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" "$proj" >/dev/null 2>&1
+    brief="$home/data/$id/brief.md"
+    assert_grep "# PR description" "$brief" \
+      "$id: brief missing the PR description contract heading"
+    assert_grep "concise, current-state summary" "$brief" \
+      "$id: brief lost the concise current-state requirement"
+    assert_grep "Target a 3-5 minute read" "$brief" \
+      "$id: brief lost the 3-5 minute review target"
+    assert_grep "Leave out chronological CI diaries" "$brief" \
+      "$id: brief lost the chronological-diary exclusion"
+    assert_grep "rewrite the stale section in place" "$brief" \
+      "$id: brief lost the rewrite-not-append update guidance"
+  done
+
+  # local-only never opens a PR, so it must not gain this section.
+  id="brief-prdesc-localonly-e3"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" local-proj >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_no_grep "# PR description" "$brief" \
+    "local-only brief should not carry the PR description contract"
+
+  # Scout and secondmate briefs produce no PR body either.
+  id="brief-prdesc-scout-e4"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" no-registry-proj --scout >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_no_grep "# PR description" "$brief" \
+    "scout brief should not carry the PR description contract"
+
+  id="brief-prdesc-secondmate-e5"
+  FM_HOME="$home" FM_SECONDMATE_CHARTER='sample charter' \
+    "$ROOT/bin/fm-brief.sh" "$id" --secondmate --no-projects >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_no_grep "# PR description" "$brief" \
+    "secondmate charter should not carry the PR description contract"
+
+  pass "fm-brief.sh: PR description contract appears only in PR-producing ship modes"
+}
+
 test_herdr_lab_contract_is_explicit_and_complete() {
   local home id brief
   home="$TMP_ROOT/herdr-lab-home"
@@ -347,6 +394,7 @@ test_ship_modes_generate_clean_briefs
 test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
 test_ship_project_memory_wording
+test_pr_description_contract_in_pr_producing_modes_only
 test_herdr_lab_contract_is_explicit_and_complete
 test_herdr_lab_contract_quotes_foreign_firstmate_path
 test_herdr_lab_omission_is_loud_for_ship_and_scout

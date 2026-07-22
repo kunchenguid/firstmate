@@ -44,6 +44,10 @@
 # it carries the AGENTS.md authoring bar (widely useful knowledge only, pointers
 # over copied detail) and has the crewmate add the fm-ensure-agents-md.sh
 # self-governance section when a touched project AGENTS.md lacks it.
+# The no-mistakes and direct-PR modes also carry a PR-description contract: the
+# PR description must read as a concise current-state summary for a 3-5 minute
+# review, not a chronological diary of attempts and commits. local-only never
+# opens a PR, so it does not carry this section.
 # Refuses to overwrite an existing brief.
 set -eu
 
@@ -277,6 +281,20 @@ read -r MODE _ <<EOF
 $("$FM_ROOT/bin/fm-project-mode.sh" "$REPO")
 EOF
 
+# Single owner of the PR-description contract text. Interpolated into the DOD
+# of every mode that actually produces a PR (direct-PR, no-mistakes); local-only
+# never opens one, so its DOD does not reference this variable.
+PR_DESCRIPTION_CONTRACT=$(cat <<'EOF'
+# PR description
+Write the PR description (or update it) as a concise, current-state summary: what a reviewer needs to approve the change, not a log of how you got there.
+Target a 3-5 minute read: short sections and bullets, not a wall of prose.
+Cover intent, the material behavior changes, reviewer-relevant safety or risk, how it was validated, deployment or rollback notes when they apply, and any genuinely unresolved considerations.
+Leave out chronological CI diaries, superseded claims, repeated failure-then-fix narratives, exhaustive internal helper or event lists, debugging transcripts, and duplicated evidence.
+Keep an exact command or example only when a reviewer or operator will actually need it to act.
+If you update the description later, rewrite the stale section in place rather than appending another dated addendum on top of an earlier one.
+EOF
+)
+
 case "$MODE" in
   direct-PR)
     SETUP2=""
@@ -285,6 +303,9 @@ case "$MODE" in
 # Definition of done
 This project ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
 The task is complete only when committed on your branch.
+
+$PR_DESCRIPTION_CONTRACT
+
 When it is implemented and committed, push your branch and open a PR with \`gh-axi\`, then append \`done: PR {url}\` to the status file and stop.
 Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
 EOF
@@ -312,6 +333,8 @@ EOF
 The task is complete only when committed on your branch.
 When you believe it is complete, append \`done: {summary}\` to the status file and stop.
 Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
+
+$PR_DESCRIPTION_CONTRACT
 
 You drive no-mistakes by responding to its gates, not by implementing fixes.
 Follow the guidance no-mistakes itself provides for the mechanics: it loads when you invoke /no-mistakes, and \`no-mistakes axi run --help\` plus the \`help\` lines in each \`axi\` response are authoritative and version-matched to the installed binary.
