@@ -2,7 +2,8 @@
 
 This document is the archived concurrent isolation proof for the portable parallel candidate set.
 It is the human-readable companion to `bin/fm-test-isolation-proof.sh`.
-Production CI sharding and general local `fm-test-run.sh --jobs` remain **off** until a later phase explicitly enables them.
+Phase 4 production portable shards and bounded local `fm-test-run.sh --jobs` for this exact set are owned by `bin/fm-test-run.sh` and documented in [fm-test-portable-shards.md](fm-test-portable-shards.md).
+The archived proof JSON below still records the Phase 2 proof-time flags (`production_sharding_enabled` / `fm_test_run_jobs_enabled` false at proof time).
 
 ## Owner
 
@@ -156,12 +157,12 @@ Every candidate exited 0 under concurrency=4.
 Policy: a script that fails only under concurrency is **removed** from the candidate set and investigated.
 It is never retried into green, skipped more broadly, or weakened in assertions.
 
-## What this phase does not do
+## What this phase did not do (Phase 2 scope)
 
-- No production CI Behavior matrix / shard jobs
-- No `bin/fm-test-run.sh --jobs`
-- No Herdr install lane (Phase 3+)
-- No complete-suite local re-run as part of this proof (focused matrix only)
+- Did not land production CI Behavior matrix / shard jobs (Phase 4)
+- Did not add general `bin/fm-test-run.sh --jobs` (Phase 4 enables it only for this proven set)
+- Did not land the Herdr install lane (Phase 3)
+- Did not re-run the complete local suite as part of this proof (focused matrix only)
 
 ## How to re-run
 

@@ -82,8 +82,14 @@ test_ci_wires_installers_and_required_lane() {
     "CI Herdr lane must fail on herdr-not-found"
   assert_grep 'family real-herdr-gated' "$CI" \
     "CI Herdr lane must run only the real-herdr-gated family"
-  assert_grep 'exclude-family real-herdr-gated' "$CI" \
-    "portable CI lane must exclude real-herdr-gated once the Herdr job owns it"
+  assert_grep 'lane portable-parallel-1' "$CI" \
+    "portable CI must run parallel shard 1"
+  assert_grep 'lane portable-parallel-2' "$CI" \
+    "portable CI must run parallel shard 2"
+  assert_grep 'lane portable-serial' "$CI" \
+    "portable CI must run the serial remainder"
+  assert_grep 'fm-test-run.sh --check-coverage' "$CI" \
+    "CI must prove portable lanes and Herdr partition the complete inventory"
   # Live harness credential tests must stay out of the default Herdr lane.
   assert_no_grep 'live-harness-optin' "$CI" \
     "CI must not run live-harness-optin in the required Herdr lane"

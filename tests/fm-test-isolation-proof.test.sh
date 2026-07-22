@@ -3,10 +3,10 @@
 # isolation proof harness.
 #
 # These tests assert the candidate-set contract, serial exclusions, aggregate
-# failure reporting, and that production CI sharding / fm-test-run --jobs are
-# still off. They deliberately do NOT re-run the full concurrent candidate
-# matrix on every invocation (that matrix is owned by the harness itself and
-# archived under docs/fm-test-isolation-proof.md after a deliberate proof run).
+# failure reporting, and that Phase 4 production shards consume this exact set.
+# They deliberately do NOT re-run the full concurrent candidate matrix on every
+# invocation (that matrix is owned by the harness itself and archived under
+# docs/fm-test-isolation-proof.md after a deliberate proof run).
 set -u
 
 # shellcheck disable=SC1091
@@ -181,24 +181,32 @@ SH
   pass "aggregate failure reporting survives concurrency"
 }
 
-test_production_sharding_still_off() {
+test_phase4_consumes_proven_set_only() {
   assert_present "$CI" "ci.yml missing"
-  # Behavior remains a single serial fm-test-run --all job (no matrix shards).
-  grep -Fq 'bin/fm-test-run.sh --all' "$CI" \
-    || fail "CI Behavior must still call serial bin/fm-test-run.sh --all"
-  if grep -E 'strategy:[[:space:]]*$' "$CI" >/dev/null 2>&1; then
-    # Only fail if a Behavior-related matrix appears; lint/macos jobs stay simple.
-    if grep -A20 'name: Behavior tests' "$CI" | grep -q 'matrix:'; then
-      fail "CI Behavior must not enable production sharding in Phase 2"
-    fi
-  fi
-  # Serial runner header must still refuse general --jobs.
-  grep -Fq 'no local --jobs parallelism' "$RUNNER" \
-    || fail "fm-test-run.sh must still document no local --jobs"
-  if grep -E '^[[:space:]]*--jobs\)' "$RUNNER" >/dev/null 2>&1; then
-    fail "fm-test-run.sh must not grow production --jobs in Phase 2"
-  fi
-  pass "production CI sharding and fm-test-run --jobs remain off"
+  assert_present "$RUNNER" "fm-test-run.sh missing"
+  # Phase 4 portable parallel lanes must exist and use lane selection, not --all.
+  grep -Fq 'bin/fm-test-run.sh --lane portable-parallel-1' "$CI" \
+    || fail "CI portable parallel 1 must use --lane portable-parallel-1"
+  grep -Fq 'bin/fm-test-run.sh --lane portable-parallel-2' "$CI" \
+    || fail "CI portable parallel 2 must use --lane portable-parallel-2"
+  grep -Fq 'bin/fm-test-run.sh --lane portable-serial' "$CI" \
+    || fail "CI portable serial must use --lane portable-serial"
+  # Shard union must equal this harness's proven list.
+  local proven shards
+  proven=$("$PROOF" --list | LC_ALL=C sort -u)
+  shards=$(
+    {
+      "$RUNNER" --list --lane portable-parallel-1
+      "$RUNNER" --list --lane portable-parallel-2
+    } | LC_ALL=C sort -u
+  )
+  [ "$proven" = "$shards" ] \
+    || fail "portable parallel shards must equal isolation-proof --list exactly"
+  # Local --jobs is bounded to this proven set (refuse is contract-tested in
+  # fm-test-run.test.sh); the option must exist.
+  grep -E '^[[:space:]]*--jobs\)' "$RUNNER" >/dev/null 2>&1 \
+    || fail "fm-test-run.sh must expose bounded --jobs after Phase 4"
+  pass "Phase 4 portable shards consume the proven-isolated set only"
 }
 
 test_docs_record_proof_owner() {
@@ -206,7 +214,7 @@ test_docs_record_proof_owner() {
   grep -Fq 'bin/fm-test-isolation-proof.sh' "$PROOF_DOC" \
     || fail "proof doc must name the harness owner"
   grep -Fq 'production_sharding_enabled' "$PROOF_DOC" \
-    || fail "proof doc must record that production sharding is off"
+    || fail "proof doc must record the archived proof-time sharding flag"
   grep -Fq 'concurrency' "$PROOF_DOC" \
     || fail "proof doc must record concurrency"
   assert_present "$CONTRIB" "CONTRIBUTING.md missing"
@@ -222,5 +230,5 @@ test_extra_hermetic_candidates_present
 test_list_exclusions_documents_reasons
 test_family_map_labels_this_contract
 test_aggregate_failure_under_concurrency
-test_production_sharding_still_off
+test_phase4_consumes_proven_set_only
 test_docs_record_proof_owner
