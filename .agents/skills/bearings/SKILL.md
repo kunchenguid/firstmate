@@ -26,6 +26,7 @@ It never tears down a task, merges a PR, dispatches new work, or mutates any tas
    For registered secondmates, use the snapshot's structured-home classification and provenance; a parent event or bounded terminal contradiction is fallback evidence, never authority over readable structured home state.
    Structured captain-held decisions come from `decision-hold-lifecycle` and appear under `decisions_open`; do not scrape reports or visual-review artifacts to supplement them.
    A queued item under `gates` only becomes "next work" when its blocker is gone and its time/date gate has arrived; until then it stays queued with the reason.
+   The `(main-inventory)` gate is an action-free integrity warning rather than queued work: render it under Charted Next with the related `omitted` disclosure, never invent an Underway row from backlog-only state, and never move it into Captain's Call.
 
 2. **Compose the detailed report file around the four-section spine, adding the richer detail the chat leaves out.**
    The gather step is deterministic; your judgment is scoped to the last mile only - ranking the command's facts by what matters right now and writing the scannable prose.
@@ -35,7 +36,7 @@ It never tears down a task, merges a PR, dispatches new work, or mutates any tas
    - **Captain's Call** - every open decision summarized with its options from the structured decision record, plus each PR ready to merge and each needed credential or login, every PR with the full `https://...` URL, never a bare `#number`.
    - **Recently Landed** - the bounded current recent-completions baseline from structured state across the main fleet and every registered secondmate home, rendered in full on every run.
    - **Underway** - each live direct report making progress, with its current state, and the plans / main pickup pointers worth reopening (`data/<id>/report.md` files, `.lavish/*.html` boards).
-   - **Charted Next** - queued or gated next work, with each item's blocker or date reason.
+   - **Charted Next** - queued or gated work, including any main-inventory integrity warning, with each item's blocker, date, or integrity reason.
 
 3. **Write the dated report file so it persists, then surface the mandatory four-section digest in chat.**
    - Write the full report to `data/status-report-<YYYY-MM-DD>.md` using today's date.
@@ -55,7 +56,7 @@ Every `/bearings` chat response renders EXACTLY these four sections, in THIS ord
    Empty-state: "No recent completions are in the current baseline."
 3. **Underway** - live work progressing on its own, one line of current state per direct report.
    Empty-state: "Nothing is underway."
-4. **Charted Next** - queued or gated work waiting on the fleet or a date, never on the captain.
+4. **Charted Next** - queued or gated work waiting on the fleet or a date, plus action-free fleet-integrity warnings, never on the captain.
    Empty-state: "Nothing is queued."
 
 Rules that keep the contract unambiguous:
@@ -63,7 +64,7 @@ Rules that keep the contract unambiguous:
 - Every section ALWAYS renders, even when empty, with its short empty-state sentence; never omit a section.
 - Every report and chat digest is a complete current snapshot, never a delta against a prior report.
 - Recently Landed always renders the bounded current baseline, even when the same completions appeared in an earlier report.
-- The four buckets are mutually exclusive, so every item is forced into exactly one: needs-your-action is Captain's Call, done is Recently Landed, self-progressing is Underway, not-yet-started is Charted Next.
+- The four buckets are mutually exclusive, so every item is forced into exactly one: needs-your-action is Captain's Call, done is Recently Landed, self-progressing is Underway, and not-yet-started work or an action-free fleet-integrity warning is Charted Next.
 - The strict boundary keeps action-free items OUT of Captain's Call: a working or validating task, a queued item blocked on another task or a date, landed work, a completed scout's report pointer, a declared `paused:` external wait, and a bare recorded PR with no merge-ready signal each belong to one of the other three sections, never Captain's Call.
 - A secondmate appears Underway only for `active_child_work`; `externally_held` belongs in Charted Next, and `unknown` belongs there as an unavailable-state gate unless its reason requires the captain's action.
 - The chat follows `AGENTS.md` section 9 and carries one scannable line per item, each PR as the full `https://...` URL; detailed decisions, plans, full gate reasons, and evidence live only in the report file, which the chat links to, so the chat stays materially shorter than that file.

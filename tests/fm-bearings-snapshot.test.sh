@@ -1368,6 +1368,138 @@ test_captains_call_anti_leak() {
   pass "action-free items (working/done/queued/landed) do not leak into Captain's Call"
 }
 
+# R1: main-home orphan in-flight and unstructured current rows must not vanish
+# silently. Meta remains the sole live-work inventory; disclosure is via
+# main_inventory + omitted[] + a Charted Next gate line, never fake Underway.
+test_main_orphan_in_flight_is_disclosed_not_invented() {
+  local home fakebin json canonical
+  home=$(make_home main-orphan)
+  : > "$home/data/secondmates.md"
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+- [ ] only-orphan - Structured in flight without meta (repo: firstmate) (kind: ship) (since 2026-07-11)
+
+## Queued
+
+## Done
+EOF
+  fakebin=$(make_fakebin "$home")
+  canonical=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --json)
+  printf '%s' "$canonical" | jq -e '
+    .main_inventory.valid == false
+      and .main_inventory.reason == "in-flight backlog item has no child metadata"
+      and (.main_inventory.orphan_in_flight == ["only-orphan"])
+      and .main_inventory.unstructured_current_count == 0
+      and (.tasks | length) == 0
+  ' >/dev/null || fail "canonical main inventory missed orphan: $canonical"
+  json=$(run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e '
+    (.in_flight | length) == 0
+      and ([.in_flight[].id] | index("only-orphan") | not)
+      and ([.decisions_open[].id] | index("only-orphan") | not)
+      and (.gates | any(.id == "(main-inventory)"
+        and (.title | contains("in-flight backlog item has no child metadata"))))
+      and (.omitted | any(.surface == "main in-flight backlog item(s) have no child metadata: 1"))
+  ' >/dev/null || fail "orphan in-flight was invented or not disclosed: $json"
+  pass "main orphan in-flight stays out of Underway and is disclosed in omitted/gates"
+}
+
+test_main_unstructured_current_is_disclosed_with_structured_sibling() {
+  local home fakebin json canonical
+  home=$(make_home main-unstructured)
+  : > "$home/data/secondmates.md"
+  mkdir -p "$home/projects/structured-ship"
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+this current row is not structured
+- [ ] structured-ship - Visible structured sibling (repo: firstmate) (kind: ship) (since 2026-07-11)
+
+## Queued
+another free-form note without checkbox
+- [ ] structured-queued - Structured queued (repo: firstmate) (kind: ship)
+
+## Done
+EOF
+  fm_write_meta "$home/state/structured-ship.meta" \
+    "window=firstmate:fm-structured-ship" \
+    "worktree=$home/projects/structured-ship" \
+    "project=firstmate" \
+    "harness=codex" \
+    "kind=ship" \
+    "mode=no-mistakes"
+  printf 'working: structured sibling still projects\n' > "$home/state/structured-ship.status"
+  fakebin=$(make_fakebin "$home")
+  canonical=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --json)
+  printf '%s' "$canonical" | jq -e '
+    .main_inventory.valid == false
+      and .main_inventory.reason == "unstructured current backlog row"
+      and .main_inventory.unstructured_current_count == 2
+      and (.main_inventory.orphan_in_flight | length) == 0
+  ' >/dev/null || fail "canonical main inventory missed unstructured current: $canonical"
+  json=$(run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e '
+    ([.in_flight[].id] == ["structured-ship"])
+      and ([.gates[].id] | index("structured-queued") != null)
+      and (.gates | any(.id == "(main-inventory)"
+        and (.title | contains("unstructured current backlog row"))))
+      and (.omitted | any(.surface == "main unstructured current backlog row(s): 2"))
+      and ([.decisions_open[].id] | index("(main-inventory)") | not)
+  ' >/dev/null || fail "unstructured current not disclosed or structured sibling lost: $json"
+  pass "main unstructured current is disclosed while structured siblings still project"
+}
+
+test_main_orphan_counterfactual_meta_clears_inventory_warning() {
+  local home fakebin json_before json_after
+  home=$(make_home main-orphan-counterfactual)
+  : > "$home/data/secondmates.md"
+  mkdir -p "$home/projects/orphan-ship"
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+- [ ] orphan-ship - Gains meta in counterfactual (repo: firstmate) (kind: ship) (since 2026-07-11)
+- [ ] visible-ship - Already live (repo: firstmate) (kind: ship) (since 2026-07-11)
+
+## Queued
+- [ ] queued-ship - Ordinary queue (repo: firstmate) (kind: ship)
+
+## Done
+EOF
+  fm_write_meta "$home/state/visible-ship.meta" \
+    "window=firstmate:fm-visible-ship" \
+    "worktree=$home/projects/orphan-ship" \
+    "project=firstmate" \
+    "harness=codex" \
+    "kind=ship" \
+    "mode=no-mistakes"
+  printf 'working: visible sibling\n' > "$home/state/visible-ship.status"
+  fakebin=$(make_fakebin "$home")
+  json_before=$(run "$home" "$fakebin" --json)
+  printf '%s' "$json_before" | jq -e '
+    ([.in_flight[].id] == ["visible-ship"])
+      and ([.in_flight[].id] | index("orphan-ship") | not)
+      and (.omitted | any(.surface == "main in-flight backlog item(s) have no child metadata: 1"))
+      and (.gates | any(.id == "(main-inventory)"))
+      and ([.gates[].id] | index("queued-ship") != null)
+  ' >/dev/null || fail "pre-meta orphan fixture failed: $json_before"
+  fm_write_meta "$home/state/orphan-ship.meta" \
+    "window=firstmate:fm-orphan-ship" \
+    "worktree=$home/projects/orphan-ship" \
+    "project=firstmate" \
+    "harness=codex" \
+    "kind=ship" \
+    "mode=no-mistakes"
+  printf 'working: orphan now has meta\n' > "$home/state/orphan-ship.status"
+  json_after=$(run "$home" "$fakebin" --json)
+  printf '%s' "$json_after" | jq -e '
+    ([.in_flight[].id] | sort) == ["orphan-ship", "visible-ship"]
+      and ([.omitted[].surface] | any(test("main in-flight backlog item")) | not)
+      and ([.gates[].id] | index("(main-inventory)") | not)
+      and ([.decisions_open[].id] | index("orphan-ship") | not)
+  ' >/dev/null || fail "adding meta did not clear inventory warning or project orphan: $json_after"
+  pass "counterfactual meta clears main inventory warning and projects the live task"
+}
+
 # The /bearings skill is the one owner of the four-section chat-response contract.
 # Assert it states exactly the four fixed sections in order, each with its explicit
 # empty-state sentence, documents the At Anchor exclusion, and mandates a chat that is
@@ -1421,6 +1553,9 @@ test_all_landed_keeps_complete_global_order
 test_landed_bounded_and_disclosed
 test_live_blocker_is_not_charted_queue_work
 test_captains_call_anti_leak
+test_main_orphan_in_flight_is_disclosed_not_invented
+test_main_unstructured_current_is_disclosed_with_structured_sibling
+test_main_orphan_counterfactual_meta_clears_inventory_warning
 test_chat_contract_four_sections
 test_completed_scout_report_not_pending
 test_open_decision_surfaces_end_to_end

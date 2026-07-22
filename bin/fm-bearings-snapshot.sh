@@ -22,6 +22,12 @@
 # This wrapper consumes canonical status decisions plus structured captain-held
 # backlog items. It never infers decisions from report or visual-review prose.
 #
+# Main-home inventory validity comes from the canonical snapshot's main_inventory
+# object (orphan structured in-flight without meta, unstructured current rows).
+# Bearings never invents Underway rows from backlog-only ids; it discloses those
+# gaps in omitted[] and, when invalid, a Charted Next gate line so the four-section
+# chat cannot claim an empty fleet while main current state is broken.
+#
 # The landed section merges this home's Done with the canonical snapshot's
 # secondmate_landed roll-up (fm-fleet-snapshot.sh), so merges a secondmate managed -
 # recorded in ITS OWN backlog, never the main one - are visible. It stays bounded by
@@ -379,13 +385,20 @@ MODEL=$(printf '%s' "$SNAP" | jq \
          | select(.source == "backlog" and .verb == "captain-hold")
          | {id:($m.id + "/" + .id),key,verb,
             summary:(((.summary // .id) + ": " + (.reason // "captain decision pending")) | trunc(90)),owner:$m.id} ]) as $decisions_all
-  | ([ .backlog.records[]
-       | select(.state == "queued" and .structured)
-       | select((.kind == "captain" and .hold_kind == "captain" and .hold_reason != null) | not)
-       | select(($all_queued == 1)
-                or (((.body_excerpt // "") | test("SUPERSEDED|NOT REQUIRED|NOT-REQUIRED|DEFERRED"; "i")) | not))
-       | {id, title:(.title | trunc(60)), blocked_by:(.blocked_by // "-"),
-          reason:((.blocked_reason // "-") | trunc(40)),owner:"(main)"} ]
+  | ((if (.main_inventory.valid == false) then
+        [{id:"(main-inventory)",
+          title:((.main_inventory.reason // "main inventory invalid") | trunc(60)),
+          blocked_by:"-",
+          reason:"main inventory",
+          owner:"(main)"}]
+      else [] end)
+     + [ .backlog.records[]
+         | select(.state == "queued" and .structured)
+         | select((.kind == "captain" and .hold_kind == "captain" and .hold_reason != null) | not)
+         | select(($all_queued == 1)
+                  or (((.body_excerpt // "") | test("SUPERSEDED|NOT REQUIRED|NOT-REQUIRED|DEFERRED"; "i")) | not))
+         | {id, title:(.title | trunc(60)), blocked_by:(.blocked_by // "-"),
+            reason:((.blocked_reason // "-") | trunc(40)),owner:"(main)"} ]
      + [ (.secondmate_current.records // [])[] as $m
          | select($m.provenance.selected == "structured-home")
          | $m.queued[]?
@@ -431,6 +444,10 @@ MODEL=$(printf '%s' "$SNAP" | jq \
         (if $all_landed == 0 and $home_cap_dropped > 0 then {surface:("landed per-home capped at \($landed_per_home_n) for \($home_cap_dropped) home(s)"), reveal:"--all-landed"} else empty end),
         (if (($snap.secondmate_landed.unreadable // []) | length) > 0 then {surface:("secondmate home(s) with unreadable backlog: \(($snap.secondmate_landed.unreadable // []) | length)"), reveal:"inspect the listed secondmate home backlogs"} else empty end),
         (if $all_landed == 0 and (($snap.secondmate_landed.truncated // []) | length) > 0 then {surface:("secondmate home Done capped at the snapshot layer for \(($snap.secondmate_landed.truncated // []) | length) home(s)"), reveal:"--all-landed"} else empty end),
+        ((($snap.main_inventory.orphan_in_flight // []) | length) as $n
+         | if $n > 0 then {surface:("main in-flight backlog item(s) have no child metadata: \($n)"), reveal:"inspect main data/backlog.md In flight vs state/*.meta"} else empty end),
+        ((($snap.main_inventory.unstructured_current_count // 0)) as $n
+         | if $n > 0 then {surface:("main unstructured current backlog row(s): \($n)"), reveal:"inspect main data/backlog.md In flight and Queued free-form rows"} else empty end),
         (if $all_in_flight == 0 and ($in_flight_all | length) > $in_flight_n then {surface:("in_flight showing \($in_flight_n) of \($in_flight_all | length)"), reveal:"--all-in-flight"} else empty end),
         (if $all_secondmates == 0 and ($secondmates_all | length) > $secondmates_n then {surface:("secondmates showing \($secondmates_n) of \($secondmates_all | length)"), reveal:"--all-secondmates"} else empty end),
         (if (($snap.secondmate_current.truncated // 0) > 0) then {surface:("registered secondmates omitted by snapshot bound: \($snap.secondmate_current.truncated)"), reveal:"raise FM_SNAPSHOT_SECONDMATES"} else empty end),
