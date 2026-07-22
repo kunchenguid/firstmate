@@ -26,6 +26,9 @@ Every collection and explicit prune applies the same policy.
 Input is bounded to 500 task metadata files, the newest 200 session files per
 harness, 16 MiB per session file, 1 MiB or 10,000 lines per status file, 50
 no-mistakes runs with 500 rounds each, and 50 commit references per task run.
+No-mistakes detail is reconciled from the newest 50 matching runs on every
+collection, while first-pass quality is preserved from the earliest matching
+run that has an initial review, test, or lint round, even when it is older.
 Override those limits only for a deliberate local run.  Delete the database and
 HTML file to reverse the feature completely.
 
