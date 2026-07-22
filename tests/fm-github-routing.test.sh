@@ -162,8 +162,12 @@ case "${FM_TEST_GH_AXI_TYPED_API:-}" in
   issue-type)
     gh api graphql -f owner=Owner-A -f name=repo-a \
       -f 'query=query($owner:String!,$name:String!){repository(owner:$owner,name:$name){issueTypes(first:25){nodes{id name}}}}'
-    if [ "${2:-}" = create ]; then gh issue create --title typed; fi
-    gh issue view 17 --json number,title,state,labels,assignees,id
+    if [ "${2:-}" = create ]; then
+      gh issue create --title typed
+      gh issue view 17 --json number,title,state,url,id
+    else
+      gh issue view 17 --json number,title,state,labels,assignees,id
+    fi
     gh api graphql -f id=ISSUE_node_17 -f typeId=TYPE_node_bug \
       -f 'query=mutation($id:ID!,$typeId:ID!){updateIssue(input:{id:$id,issueTypeId:$typeId}){issue{id}}}'
     exit
@@ -421,12 +425,30 @@ SH
 }
 
 test_operation_schema_is_shared() {
-  local rc
+  local command option expected actual classifications rc
   node "$ROOT/bin/fm-github-operation-schema.mjs" validate || fail "typed operation schema validation failed"
   [ "$(node "$ROOT/bin/fm-github-operation-schema.mjs" option-kind issue:transfer --to-repo)" = destination_repo ] \
     || fail "public transfer option did not resolve through the typed operation schema"
   [ "$(node "$ROOT/bin/fm-github-operation-schema.mjs" option-kind release:create -p)" = flag ] \
     || fail "public release alias did not resolve through the typed operation schema"
+  while IFS='|' read -r command option expected; do
+    actual=$(node "$ROOT/bin/fm-github-operation-schema.mjs" option-kind "$command" "$option")
+    [ "$actual" = "$expected" ] || fail "$command $option resolved as $actual instead of $expected"
+  done <<'EOF'
+pr:list|--fields|data
+issue:list|--fields|data
+run:list|--fields|data
+pr:view|--reviews|flag
+pr:view|--full|flag
+pr:diff|--full|flag
+issue:view|--full|flag
+release:view|--full|flag
+run:view|--conclusion|data
+EOF
+  classifications=$(node "$ROOT/bin/fm-github-operation-schema.mjs" classify-argv pr:view \
+    pr view 17 --reviews --full --repo=Owner-A/repo-a)
+  [ "$classifications" = $'--reviews\tflag\n--full\tflag\n--repo\trepo' ] \
+    || fail "complete argv classification did not preserve operation-specific option kinds"
   node "$ROOT/bin/fm-github-operation-schema.mjs" validate-clear-type issue edit 17 --no-type --repo Owner-A/repo-a \
     || fail "clear-type variant was rejected by the typed operation schema"
   node "$ROOT/bin/fm-github-operation-schema.mjs" has-issue-type-variant issue edit 17 --no-type \
@@ -442,6 +464,36 @@ test_operation_schema_is_shared() {
   set -e
   expect_code 1 "$rc" "clear-type schema missing repository value"
   pass "public and descendant routing consume one typed operation schema"
+}
+
+test_operation_schema_batches_argv_classification() {
+  local d real_node count
+  d=$(make_fixture schema-batch)
+  real_node=$(command -v node)
+  mkdir -p "$d/counting"
+  cat > "$d/counting/node" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = "$ROOT/bin/fm-github-operation-schema.mjs" ] && [ "\${2:-}" = classify-argv ]; then
+  printf '%s\n' classify >> "$d/classify.log"
+fi
+exec "$real_node" "\$@"
+SH
+  chmod +x "$d/counting/node"
+  PATH="$d/counting:$PATH" bash -c '
+    set -e
+    . "$1"
+    fm_github_validate_gh_resource pr list --fields body,url
+    fm_github_validate_gh_resource issue list --fields body,url
+    fm_github_validate_gh_resource run list --fields headSha,url
+    fm_github_validate_gh_resource pr view 17 --reviews --full
+    fm_github_validate_gh_resource pr diff 17 --full
+    fm_github_validate_gh_resource issue view 17 --full
+    fm_github_validate_gh_resource release view v1 --full
+    fm_github_validate_gh_resource run view 44 --conclusion success
+  ' _ "$ROOT/bin/fm-github-lib.sh" || fail "batched public option classification rejected a supported command"
+  count=$(wc -l < "$d/classify.log" | tr -d ' ')
+  [ "$count" -eq 8 ] || fail "eight complete argv classifications invoked the schema helper $count times"
+  pass "complete GitHub argv classification uses one schema helper invocation"
 }
 
 test_schema_and_resolution_strictness() {
@@ -1576,6 +1628,7 @@ test_secondmate_seed_does_not_leak_project_context() {
 
 test_legacy_absence_is_byte_compatible
 test_operation_schema_is_shared
+test_operation_schema_batches_argv_classification
 test_schema_and_resolution_strictness
 test_preregistration_project_bindings_are_narrow
 test_concurrent_profiles_and_exact_children

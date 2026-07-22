@@ -1431,15 +1431,13 @@ fm_github_set_gh_destination_repository() {
 }
 
 fm_github_gh_option_kind() {
-  local family=$1 subcommand=$2 option=$3 schema_kind
-  schema_kind=$(fm_github_node "$(fm_github_lib_dir)/fm-github-operation-schema.mjs" option-kind "$family:$subcommand" "$option") || {
-    printf unknown
-    return
-  }
-  if [ "$schema_kind" != unknown ]; then
-    printf '%s' "$schema_kind"
-    return
-  fi
+  local family=$1 subcommand=$2 option=$3 schema_options=${4:-} schema_option schema_kind
+  while IFS=$'\t' read -r schema_option schema_kind; do
+    if [ "$schema_option" = "$option" ]; then
+      printf '%s' "$schema_kind"
+      return
+    fi
+  done <<< "$schema_options"
   case "$option" in
     --org|--user|--env|--repos)
       case "$family" in secret|variable|ruleset) printf reject; return ;; esac
@@ -1660,7 +1658,7 @@ fm_github_validate_gh_positionals_complete() {
 }
 
 fm_github_validate_gh_resource() {
-  local family=${1:-} subcommand=${2:-} arg option value kind pending='' position=0
+  local family=${1:-} subcommand=${2:-} arg option value kind schema_options pending='' position=0
   FM_GITHUB_GH_TARGET_REPOSITORY=
   FM_GITHUB_GH_SOURCE_REPOSITORY=
   FM_GITHUB_GH_DESTINATION_REPOSITORY=
@@ -1673,6 +1671,8 @@ fm_github_validate_gh_resource() {
   FM_GITHUB_GH_NORMALIZED_ARGS=("$family" "$subcommand")
   [ -n "$family" ] && [ -n "$subcommand" ] && [ "$family" != api ] || return 1
   shift 2
+  schema_options=$(fm_github_node "$(fm_github_lib_dir)/fm-github-operation-schema.mjs" classify-argv \
+    "$family:$subcommand" "$@") || return 1
   for arg in "$@"; do
     if [ -n "$pending" ]; then
       fm_github_validate_gh_value "$pending" "$arg" || return 1
@@ -1686,7 +1686,7 @@ fm_github_validate_gh_resource() {
         FM_GITHUB_GH_NORMALIZED_ARGS+=("$arg")
         option=${arg%%=*}
         value=${arg#*=}
-        kind=$(fm_github_gh_option_kind "$family" "$subcommand" "$option")
+        kind=$(fm_github_gh_option_kind "$family" "$subcommand" "$option" "$schema_options")
         [ "$kind" != repo ] || FM_GITHUB_GH_REPO_OPTION_SEEN=1
         case "$kind" in
           flag) case "$value" in true|false) ;; *) return 1 ;; esac ;;
@@ -1697,13 +1697,13 @@ fm_github_validate_gh_resource() {
       -R?*) FM_GITHUB_GH_REPO_OPTION_SEEN=1; FM_GITHUB_GH_NORMALIZED_ARGS+=("$arg"); fm_github_validate_gh_value repo "${arg#-R}" || return 1 ;;
       -H?*)
         FM_GITHUB_GH_NORMALIZED_ARGS+=("$arg")
-        kind=$(fm_github_gh_option_kind "$family" "$subcommand" -H)
+        kind=$(fm_github_gh_option_kind "$family" "$subcommand" -H "$schema_options")
         [ "$kind" != unknown ] && fm_github_validate_gh_value "$kind" "${arg#-H}" || return 1
         ;;
       -q?*|-L?*|-t?*|-b?*|-B?*|-F?*|-T?*|-D?*|-O?*|-S?*|-n?*) FM_GITHUB_GH_NORMALIZED_ARGS+=("$arg") ;;
       -*)
         FM_GITHUB_GH_NORMALIZED_ARGS+=("$arg")
-        kind=$(fm_github_gh_option_kind "$family" "$subcommand" "$arg")
+        kind=$(fm_github_gh_option_kind "$family" "$subcommand" "$arg" "$schema_options")
         [ "$kind" != repo ] || FM_GITHUB_GH_REPO_OPTION_SEEN=1
         case "$kind" in
           flag) ;;

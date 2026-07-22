@@ -14,6 +14,19 @@ function optionKind(command, option) {
   return selection(schema.publicOptions[option], command) ?? "unknown";
 }
 
+function classifyArgv(command, args) {
+  const classifications = [];
+  const seen = new Set();
+  for (const arg of args) {
+    const option = arg.startsWith("--") && arg.includes("=") ? arg.slice(0, arg.indexOf("=")) : arg;
+    const kind = optionKind(command, option);
+    if (kind === "unknown" || seen.has(option)) continue;
+    seen.add(option);
+    classifications.push(`${option}\t${kind}`);
+  }
+  return classifications;
+}
+
 function clearTypeValid(args) {
   const command = `${args[0] || ""}:${args[1] || ""}`;
   const contract = schema.issueTypes[command];
@@ -45,6 +58,12 @@ function clearTypeValid(args) {
 function validate() {
   if (schema.version !== 1 || !schema.publicOptions || !schema.aliases || !schema.generatedFlags
     || !schema.childCommands || !schema.issueTypes || !Array.isArray(schema.stdinOperations)) return false;
+  const optionKinds = new Set(["data", "destination_repo", "flag", "head", "host", "issue", "owner", "reject", "repo", "unknown"]);
+  for (const selections of Object.values(schema.publicOptions)) {
+    if (!selections || typeof selections !== "object"
+      || Object.values(selections).some((kind) => !optionKinds.has(kind))) return false;
+  }
+  if (schema.ignoredOuterFlags.some((option) => !schema.publicOptions[option])) return false;
   for (const [alias, selections] of Object.entries(schema.aliases)) {
     if (!schema.publicOptions[alias]) return false;
     for (const [command, target] of Object.entries(selections)) {
@@ -61,9 +80,15 @@ function validate() {
   for (const [command, contract] of Object.entries(schema.issueTypes)) {
     if (!Array.isArray(contract.observe) || contract.observe.length === 0 || !command.includes(":")) return false;
     if (contract.set && optionKind(command, contract.set) !== "data") return false;
+    if ((contract.forbidden || []).some((option) => optionKind(command, option) !== "flag")) return false;
     if (contract.clear && (optionKind(command, contract.clear) !== "flag"
       || contract.clearOptions?.[contract.clear] !== "flag" || contract.clearPositionals !== 1
       || Object.values(contract.clearOptions).some((kind) => !["flag", "value"].includes(kind)))) return false;
+    const observedFields = schema.childCommands[command]
+      ?.filter(({argv}) => argv[0] === "issue" && argv[1] === "view")
+      .map(({argv}) => argv[argv.indexOf("--json") + 1])
+      .filter(Boolean) || [];
+    if (!observedFields.includes(contract.observe.join(","))) return false;
   }
   for (const contracts of Object.values(schema.childCommands)) {
     if (!Array.isArray(contracts) || contracts.length === 0
@@ -82,6 +107,9 @@ function hasIssueTypeVariant(args) {
 const action = process.argv[2] || "";
 if (action === "option-kind") {
   process.stdout.write(`${optionKind(process.argv[3] || "", process.argv[4] || "")}\n`);
+} else if (action === "classify-argv") {
+  const classifications = classifyArgv(process.argv[3] || "", process.argv.slice(4));
+  if (classifications.length > 0) process.stdout.write(`${classifications.join("\n")}\n`);
 } else if (action === "validate-clear-type") {
   const args = process.argv.slice(3);
   if (!clearTypeValid(args)) process.exit(1);
