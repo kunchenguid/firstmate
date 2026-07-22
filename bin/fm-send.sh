@@ -192,9 +192,9 @@ if [ -n "$TARGET_SELECTOR" ] && [ -n "$TARGET_META" ] && [ "$(fm_meta_get "$TARG
 fi
 
 # Resolve the target's harness from its meta (recorded by fm-spawn), used only to
-# scope the codex `$<skill>` popup-settle below. A task selector carries
+# scope the codex/traex `$<skill>` popup-settle below. A task selector carries
 # meta; an explicit backend-target escape hatch has none, so its harness is
-# unknown and treated as non-codex (the safe default that keeps the fast path).
+# unknown and treated as popup-free (the safe default that keeps the fast path).
 # The target's BACKEND comes from selector meta, from matching an explicit target
 # back to recorded meta, or from strict explicit-target shape validation.
 # Do not add a separate passive liveness preflight here. Active send paths own
@@ -216,15 +216,21 @@ else
   # Slash commands open a completion popup in some TUIs (verified on codex);
   # submitting too fast selects nothing, so give the popup time to settle before
   # the (retried) Enter. Codex opens the same kind of popup for a `$<skill>`
-  # invocation, so a `$...` message to a codex target gets the same settle. That
-  # `$` case is scoped to codex on purpose: unlike `/`, a leading `$` commonly
-  # starts ordinary text ("$5/month", "$HOME"), so a universal `$` rule would
-  # needlessly slow plain text to claude/opencode/pi. The target backend's
-  # verified submit retry still backs the settle up either way.
+  # invocation, so a `$...` message to a codex target gets the same settle, and
+  # traex (a codex fork) opens the same popup - verified 2026-07-17: typing a bare
+  # `$` lists `[Skill]` entries and offers "Press enter to insert or esc to close",
+  # so a too-fast Enter inserts the highlighted entry instead of sending. That `$`
+  # case stays scoped to the popup-opening harnesses on purpose: unlike `/`, a
+  # leading `$` commonly starts ordinary text ("$5/month", "$HOME"), so a universal
+  # `$` rule would needlessly slow plain text to claude/opencode/pi. The target
+  # backend's verified submit retry still backs the settle up either way.
   case "$*" in
     /*) settle=1.2 ;;
     \$*)
-      if [ "$TARGET_HARNESS" = codex ]; then settle=1.2; else settle=0.3; fi
+      case "$TARGET_HARNESS" in
+        codex|traex) settle=1.2 ;;
+        *) settle=0.3 ;;
+      esac
       ;;
     *) settle=0.3 ;;
   esac

@@ -159,6 +159,11 @@ fm_backend_tmux_agent_alive() {  # <target>
   comm=$(fm_backend_tmux_current_command "$target") || { printf 'unknown'; return 0; }
   case "${comm#-}" in
     '') printf 'unknown' ;;
+    # traex is matched EXACTLY, never a *trae* glob: on a box that kept the TRAE
+    # CLI 1.0 install, the names traecli/trae-cli/trae-agent (coco 1.0) would match
+    # *trae* and a live coco pane would be misread as a live traex agent. tmux
+    # pane_current_command reports the bare command name, so exact `traex` is right.
+    traex) printf 'alive' ;;
     *claude*|*codex*|*opencode*|*grok*) printf 'alive' ;;
     *) if fm_is_login_shell_name "$comm"; then printf 'dead'; else printf 'unknown'; fi ;;
   esac

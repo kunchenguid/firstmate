@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Detect the agent harness this process tree runs on.
-# Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|grok|unknown
+# Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|grok|traex|unknown
 #        fm-harness.sh crew             print the effective CREWMATE harness
 #                                        (config/crew-harness; "default" resolves to own)
 #        fm-harness.sh secondmate       print the harness the PRIMARY uses to launch
@@ -35,6 +35,16 @@ detect_own() {
   # It does NOT set CLAUDECODE despite being Claude-Code-compatible, so this marker
   # is unambiguous when firstmate runs natively on grok.
   [ "${GROK_AGENT:-}" = "1" ] && { echo grok; return; }
+  # traex (TRAE CLI 2.0) sets TRAECLI_SESSION_INBOX for its shell-tool children
+  # (verified 2026-07-17, traex 0.200.13). traex is a codex fork and also sets
+  # CODEX_CI/CODEX_THREAD_ID/CODEX_SANDBOX, so this marker MUST be tested before
+  # any codex inference to keep a traex child from reading as codex.
+  # It must be TRAECLI_SESSION_INBOX and not TRAECLI_SESSION_ID: the coco 1.0
+  # binary (a DIFFERENT agent that owns the `traecli` name on some boxes) carries
+  # TRAECLI_SESSION_ID too, so that name cannot tell the two apart, while the
+  # substring INBOX appears nowhere in the coco binary. See the harness-adapters
+  # skill's traex section for the evidence.
+  [ -n "${TRAECLI_SESSION_INBOX:-}" ] && { echo traex; return; }
   # Layer 2: walk the parent chain and match the command name.
   local pid=$$ comm args
   for _ in 1 2 3 4 5 6 7 8; do
@@ -44,6 +54,13 @@ detect_own() {
       *codex*) echo codex; return ;;
       *opencode*) echo opencode; return ;;
       *grok*) echo grok; return ;;
+      # EXACT match, never a *trae* glob: on a box that kept the 1.0 install, the
+      # names traecli/trae-cli/trae-agent/coco/ta resolve to coco 1.0, a DIFFERENT
+      # agent whose supervision facts are unverified. A glob here would report
+      # `traex` for a coco process tree and firstmate would supervise the wrong
+      # agent. `ps -o comm=` reports a live TRAE CLI 2.0 process as exactly
+      # `traex` (verified 2026-07-17).
+      traex) echo traex; return ;;
       pi) echo pi; return ;;
       node*|python*)
         # Bare interpreter: match the harness name in its script path.

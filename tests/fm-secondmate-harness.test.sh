@@ -485,6 +485,38 @@ test_spawn_bare_harness_no_model_effort_flag() {
   pass "C2 spawn: a bare harness-only secondmate-harness file launches with no model/effort flag (backward-compat)"
 }
 
+# traex secondmate (parity P3): traex is a codex fork, so a traex secondmate
+# launches with codex's secondmate shape - the brief as the positional PROMPT and
+# NO -c notify= turn-end. A secondmate's own primary turn-end guard rides the
+# tracked .trae/hooks.json Stop hook in its home, not a per-launch notify. Before
+# P3 this spawn failed closed; this pins that it now succeeds with the right shape.
+test_spawn_traex_secondmate_launches_without_notify() {
+  local w sm launchlog launch out status
+  w="$TMP_ROOT/spawn-traex-secondmate"
+  sm="$w/sm"
+  launchlog="$w/launch.log"
+  mkdir -p "$w/home/config"
+  printf 'traex\n' > "$w/home/config/secondmate-harness"
+  make_seeded_home "$sm" sm
+
+  out=$(spawn_secondmate_capture "$w" sm "$sm" "$launchlog" 2>&1); status=$?
+  expect_code 0 "$status" "traex secondmate spawn should succeed (no longer fail-closed): $out"
+
+  [ "$(meta_field "$w/home/state/sm.meta" harness)" = traex ] || fail "traex secondmate meta harness not traex"
+  launch=$(cat "$launchlog")
+  # The launch line carries an env prefix before the binary, so match the binary
+  # word rather than a line prefix.
+  assert_contains "$launch" 'traex ' "traex secondmate launch must invoke the traex binary, got: $launch"
+  # THE TRAP: never a coco 1.0 binary name.
+  case "$launch" in
+    *traecli*|*trae-cli*|*trae-agent*|*coco*)
+      fail "traex secondmate launch names a coco 1.0 binary: $launch" ;;
+  esac
+  assert_contains "$launch" 'cat ' "traex secondmate launch must inject the brief"
+  assert_not_contains "$launch" 'notify=' "a traex SECONDMATE launch must NOT carry -c notify= (turn-end rides the .trae/hooks.json guard in its home)"
+  pass "P3 spawn: a traex secondmate launches with codex's no-notify shape"
+}
+
 # "<harness> <model>" durably threads --model into the secondmate launch and
 # records it in meta, with no --effort flag (no effort token supplied).
 test_spawn_secondmate_harness_model_token() {
@@ -1024,6 +1056,7 @@ test_spawn_bare_backward_compat
 test_spawn_explicit_harness_wins
 test_spawn_unverified_secondmate_harness_refused
 test_spawn_bare_harness_no_model_effort_flag
+test_spawn_traex_secondmate_launches_without_notify
 test_spawn_secondmate_harness_model_token
 test_spawn_secondmate_harness_model_and_effort_tokens
 test_spawn_explicit_model_overrides_secondmate_harness_token

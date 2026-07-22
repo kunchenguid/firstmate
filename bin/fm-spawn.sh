@@ -41,7 +41,7 @@
 #   profile consultation. A --secondmate spawn is exempt and resolves the SECONDMATE
 #   harness (config/secondmate-harness -> config/crew-harness -> own), so the
 #   secondmate-vs-crewmate split is DURABLE across every respawn (recovery,
-#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|grok)
+#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|grok|traex)
 #   overrides it for this spawn (either kind). A non-flag string containing
 #   whitespace is treated as a RAW launch command - the escape hatch for verifying
 #   new adapters.
@@ -79,7 +79,8 @@
 #     __ARGS__     built-in launch args, replaced by config/harness-overrides.json .[<harness>].args
 #     __BRIEF__    absolute path to data/<task-id>/brief.md
 #     __TURNEND__  absolute path to state/<task-id>.turn-ended (for harnesses whose
-#                  turn-end signal rides the launch command, e.g. codex -c notify=[...])
+#                  turn-end signal rides the launch command, e.g. codex and traex
+#                  -c notify=[...])
 #     __PIEXT__    absolute path to state/<task-id>.pi-ext.ts (pi turn-end extension,
 #                  written by this script; outside the worktree to avoid pi's trust gate)
 #     __PITURNEND__ absolute path to .pi/extensions/fm-primary-turnend-guard.ts in a pi secondmate home
@@ -313,7 +314,7 @@ FIRSTMATE_HOME=
 
 if [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
-    ''|claude|codex|opencode|pi|grok)
+    ''|claude|codex|opencode|pi|grok|traex)
       ARG3=${POS[1]:-}
       ;;
     *' '*)
@@ -360,6 +361,28 @@ launch_template() {
         printf '%s' '__ENV____CMD__ __MODELFLAG____EFFORTFLAG____ARGS__-c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(cat __BRIEF__)"'
       fi
       ;;
+    traex)
+      # traex (TRAE CLI 2.0) is a codex fork and takes codex's exact shape.
+      # CREWMATE: the brief is the positional PROMPT and -c notify=[...] is the
+      # turn-end signal. notify= is used instead of a [[hooks.Stop]] entry because
+      # traex's claude-style hooks are gated behind a per-hook-command persisted
+      # trust hash, and an untrusted hook is silently ignored - a per-task turn-end
+      # command would hash differently every task and fail open. notify= is not
+      # trust-gated and fires unprompted (verified 2026-07-17, traex 0.200.13).
+      # SECONDMATE: no notify, exactly like codex. A secondmate runs a firstmate
+      # home whose checkout carries tracked .trae/hooks.json, so its own primary
+      # turn-end guard rides that Stop hook (verified full block loop, scout
+      # traex-parity-study-n7 §4.3), and its watcher uses the traex foreground
+      # checkpoint (docs/supervision-protocols/traex.md). First launch in a new
+      # secondmate home shows TWO dialogs - directory trust, then a hooks-review
+      # "Trust all" (default, single Enter) - after which the fixed hook hashes stay
+      # trusted; see the harness-adapters and secondmate-provisioning skills.
+      if [ "$kind" = secondmate ]; then
+        printf '%s' '__ENV____CMD__ __MODELFLAG____EFFORTFLAG____ARGS__"$(cat __BRIEF__)"'
+      else
+        printf '%s' '__ENV____CMD__ __MODELFLAG____EFFORTFLAG____ARGS__-c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(cat __BRIEF__)"'
+      fi
+      ;;
     opencode) printf '%s' '__ENV____CMD__ __MODELFLAG____ARGS__--prompt "$(cat __BRIEF__)"' ;;
     pi)
       if [ "$kind" = secondmate ]; then
@@ -384,6 +407,11 @@ harness_default_command() {
     opencode) printf '%s' 'opencode' ;;
     pi) printf '%s' 'pi' ;;
     grok) printf '%s' 'grok' ;;
+    # MUST be traex. `traecli`, `trae-cli`, `trae-agent`, `coco`, and `ta` are the
+    # OLD coco 1.0 agent on a box that kept the 1.0 install - a different agent
+    # whose supervision facts firstmate has never verified. Launching one of those
+    # names would silently supervise the wrong agent.
+    traex) printf '%s' 'traex' ;;
   esac
 }
 
@@ -396,6 +424,10 @@ harness_default_args() {
     claude) printf '%s' '--dangerously-skip-permissions' ;;
     codex) printf '%s' '--dangerously-bypass-approvals-and-sandbox' ;;
     grok) printf '%s' '--always-approve' ;;
+    # traex's -y is the same flag name codex uses, spelled short. Verified against
+    # a control on 2026-07-17: under an identical restrictive config, a write was
+    # SandboxDenied without -y and succeeded with it.
+    traex) printf '%s' '-y' ;;
     *) : ;;
   esac
 }
@@ -501,7 +533,7 @@ model_flag_for_harness() {
   local harness=$1 model=$2
   [ -n "$model" ] && [ "$model" != default ] || return 0
   case "$harness" in
-    claude|codex|opencode|pi|grok)
+    claude|codex|opencode|pi|grok|traex)
       printf -- '--model %s ' "$(shell_quote "$model")"
       ;;
   esac
@@ -520,6 +552,16 @@ effort_flag_for_harness() {
       # The installed codex config schema uses model_reasoning_effort, and the
       # bundled model catalog advertises low|medium|high|xhigh. Omit max rather
       # than passing an unsupported value.
+      case "$effort" in
+        low|medium|high|xhigh) printf -- '-c %s ' "$(shell_quote "model_reasoning_effort=\"$effort\"")" ;;
+      esac
+      ;;
+    traex)
+      # Same config key as codex, and the binary's own parser is authoritative:
+      # `-c model_reasoning_effort='"max"'` is rejected with
+      # "unknown variant `max`, expected one of `none`, `minimal`, `low`,
+      # `medium`, `high`, `xhigh`" (verified 2026-07-17, traex 0.200.13). Omit max
+      # rather than passing a known-bad value that would abort the launch.
       case "$effort" in
         low|medium|high|xhigh) printf -- '-c %s ' "$(shell_quote "model_reasoning_effort=\"$effort\"")" ;;
       esac
@@ -1187,6 +1229,14 @@ EOF
       ;;
     codex*)
       # codex: turn-end rides the launch command via -c notify=[...] and __TURNEND__.
+      ;;
+    traex*)
+      # traex: same as codex - turn-end rides -c notify=[...] and __TURNEND__.
+      # Nothing is written into the worktree and no hook trust is needed, which is
+      # exactly why notify= is used instead of traex's claude-style [[hooks.Stop]]:
+      # hook trust is a sha256 of the hook COMMAND, so a per-task command (which
+      # necessarily carries this task's own turn-end path) would hash differently
+      # every task, never match a trusted hash, and be silently ignored.
       ;;
     grok*)
       # grok fires a Stop hook at every turn boundary (verified, grok 0.2.73), the
