@@ -165,10 +165,11 @@ The full cmux home label also includes a short hash of the resolved `FM_ROOT` pa
 
 ## Harness support
 
-claude, codex, opencode, pi, and grok are all empirically verified; new harnesses get verified through a supervised trial task before joining the set.
+`claude`, `codex`, `opencode`, `pi`, and `grok` are the empirically verified primary harnesses; new primary harnesses get verified through a supervised trial task before joining that set.
+`cursor-agent` is a separate partial crew-oneshot adapter; [`docs/cursor-agent-crew.md`](cursor-agent-crew.md) owns its supported scope and exclusions.
 The verified adapter knowledge - busy signatures, interrupt and exit commands, skill-invocation syntax, and per-harness quirks - lives in [`.agents/skills/harness-adapters/SKILL.md`](../.agents/skills/harness-adapters/SKILL.md).
 Launch mechanics, including the verified command templates, live in [`bin/fm-spawn.sh`](../bin/fm-spawn.sh).
-Primary-session turn-end guard integrations for verified harnesses are tracked as repo-level hook files and documented in [`docs/turnend-guard.md`](turnend-guard.md).
+Primary-session turn-end guard integrations for verified primary harnesses are tracked as repo-level hook files and documented in [`docs/turnend-guard.md`](turnend-guard.md).
 Primary-session watcher wake protocols are rendered at session start by [`bin/fm-supervision-instructions.sh`](../bin/fm-supervision-instructions.sh) from [`docs/supervision-protocols/`](supervision-protocols/).
 Claude and Grok use background-notify cycles, Codex uses bounded foreground checkpoints, Pi uses its two tracked primary extensions, and OpenCode uses its TUI plugin.
 `config/crew-harness` is a local, gitignored file containing one adapter name for crewmate and scout launches.
@@ -217,6 +218,7 @@ This section is the single owner of the canonical schema and its per-field seman
 Per rule, `when` and `use` are required.
 Both `use` and the optional top-level `default` accept either one profile object or a non-empty array of profile objects.
 The single-object form stays fully backward-compatible, and every profile needs `harness`.
+Profiles accept only the verified primary harness set from [Harness support](#harness-support); the partial `cursor-agent` adapter is outside this schema until it graduates.
 Profile `model` and `effort` fields and rule `why` are optional.
 An omitted model or effort means the selected harness uses its own default for that axis.
 Every profile array is an implicit quota-aware choice and does not need a selector property.

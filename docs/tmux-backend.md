@@ -12,7 +12,7 @@ Pick tmux unless you have a specific reason to try an experimental backend (herd
 ## Prerequisites
 
 - tmux itself: `brew install tmux` (or your platform's package manager).
-- The universal firstmate prerequisites: a verified crew harness plus the required toolchain, detected at session start and installed only after you approve; [`docs/configuration.md`](configuration.md) owns both lists ("Harness support", "Toolchain").
+- The universal firstmate prerequisites: supported harness scope plus the required toolchain, detected at session start and installed only after you approve; [`docs/configuration.md`](configuration.md) owns both lists ("Harness support", "Toolchain").
 
 ## Selecting it
 

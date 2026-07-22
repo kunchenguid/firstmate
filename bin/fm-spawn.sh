@@ -58,7 +58,8 @@
 #   secondmate-vs-crewmate split is DURABLE across every respawn (recovery,
 #   /updatefirstmate, restart). A bare adapter name
 #   (claude|codex|opencode|pi|grok|cursor-agent) overrides it for this spawn
-#   (either kind). cursor-agent is crew oneshot only (docs/cursor-agent-crew.md).
+#   when that adapter supports the requested kind. cursor-agent is crew oneshot
+#   only (docs/cursor-agent-crew.md).
 #   A non-flag string containing whitespace is treated as a RAW launch command -
 #   the escape hatch for verifying new adapters.
 #   config/secondmate-harness may also carry an optional model and effort as extra

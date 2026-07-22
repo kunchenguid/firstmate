@@ -1,7 +1,8 @@
 # Orca Backend
 
 Orca is an experimental runtime backend for firstmate.
-It is distinct from the crewmate harness: the harness is the agent process firstmate launches (`claude`, `codex`, `opencode`, `pi`, or `grok`), while Orca owns the task worktree and terminal endpoint underneath that process.
+It is distinct from the crewmate harness: the harness is the agent process firstmate launches, while Orca owns the task worktree and terminal endpoint underneath that process.
+[`docs/configuration.md`](configuration.md#harness-support) owns supported harness scope.
 Firstmate agents operating this backend should load the agent-only [`firstmate-orca`](../.agents/skills/firstmate-orca/SKILL.md) checklist before switching to Orca, spawning or supervising Orca-backed work, smoke-testing, debugging task state, or reconciling Orca metadata.
 
 ## Setup
@@ -13,7 +14,7 @@ Prerequisites:
 
 - The Orca app installed at `/Applications/Orca.app`, and **running**.
 - The `orca` CLI: `brew install orca`.
-- The universal firstmate prerequisites - a verified crew harness plus the required toolchain, owned by [`docs/configuration.md`](configuration.md) ("Harness support", "Toolchain") - with `orca` as the only backend-specific tool, since Orca replaces both the session multiplexer CLI and the `treehouse` worktree provider that the other backends require.
+- The universal firstmate prerequisites - supported harness scope plus the required toolchain, owned by [`docs/configuration.md`](configuration.md) ("Harness support", "Toolchain") - with `orca` as the only backend-specific tool, since Orca replaces both the session multiplexer CLI and the `treehouse` worktree provider that the other backends require.
 
 Select Orca by putting `orca` in a local `config/backend` file - the durable way to pick it - or by exporting `FM_BACKEND=orca` when you launch your harness for a one-off session; telling the first mate in chat to use Orca also works.
 It is never auto-detected.

@@ -31,7 +31,7 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 
 detect_own() {
-  # Layer 1: environment markers for verified harnesses.
+  # Layer 1: verified environment markers.
   [ "${CLAUDECODE:-}" = "1" ] && { echo claude; return; }
   [ "${PI_CODING_AGENT:-}" = "true" ] && { echo pi; return; }
   # grok sets GROK_AGENT=1 for its child/tool processes (verified, grok 0.2.73).

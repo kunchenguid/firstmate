@@ -18,7 +18,7 @@ Prerequisites:
 
 - The cmux app itself, installed from [cmux.com](https://cmux.com) or `brew install --cask cmux`, version 0.64.17 or newer.
 - `jq`, required to parse cmux's JSON output: `brew install jq` (or your platform's package manager).
-- The universal firstmate prerequisites - a verified crew harness plus the required toolchain, owned by [`docs/configuration.md`](configuration.md) ("Harness support", "Toolchain"); treehouse still provides the worktree, cmux only provides the session.
+- The universal firstmate prerequisites - supported harness scope plus the required toolchain, owned by [`docs/configuration.md`](configuration.md) ("Harness support", "Toolchain"); treehouse still provides the worktree, cmux only provides the session.
 - The cmux CLI binary is not guaranteed to be on `PATH` after a plain app install (see "CLI is not on PATH by default" below) - the adapter falls back to the well-known bundle path automatically, so this is not a blocker, just something to be aware of if you want to run `cmux` yourself from a shell.
 
 **One-time socket access setup (required, not optional):** cmux's control socket defaults to `automation.socketControlMode: "cmuxOnly"`, which rejects any CLI process not spawned inside cmux itself - firstmate always drives cmux from an external shell, so this must be changed before `backend=cmux` can work at all.

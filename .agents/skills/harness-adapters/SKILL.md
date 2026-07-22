@@ -319,17 +319,6 @@ Grok's primary watcher protocol is Claude-shaped background-notify around `bin/f
 
 ## cursor-agent (CREW ONESHOT ONLY, verified 2026-07-20)
 
-Partial crew adapter for Cursor's `cursor-agent` CLI.
-Launch template (in `bin/fm-spawn.sh`): `cursor-agent -p --force --trust --workspace "$(pwd)" "$(cat <brief>)"`.
-Canonical harness name is `cursor-agent`; do not use bare `cursor` (that names the IDE).
-
-| Fact | Value |
-|---|---|
-| Scope | Crew oneshot ship/scout only. Not a verified primary. |
-| Busy / done | Process exit of the `-p` oneshot. No pane busy-signature, turn-end hook, or watcher protocol. |
-| Env marker | `CURSOR_AGENT=1` (also match process basename/args `*cursor-agent*`; never bare `cursor`). |
-| Autonomy | `--force` and `--trust` skip interactive approval gates for the oneshot. |
-| Interactive | Unverified. Herdr `agent start … -- cursor-agent` returned `agent_status=unknown` and flaky name lookup; do not claim interactive verified. |
-
-Do not arm primary turn-end or watch hooks for this adapter.
-See `docs/cursor-agent-crew.md` for the scope contract.
+`docs/cursor-agent-crew.md` owns the scope contract for this partial adapter.
+`bin/fm-spawn.sh` owns the launch template, and `bin/fm-harness.sh` owns detection.
+There is no primary turn-end or watch hook, secondmate launch, interactive recovery procedure, busy signature, exit command, interrupt, resume, or skill-invocation form to use.

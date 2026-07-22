@@ -7,6 +7,7 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-cursor-agent-harness)
+SPAWN="$ROOT/bin/fm-spawn.sh"
 
 # Extract launch_template() from fm-spawn.sh and evaluate the cursor-agent case
 # without running a full spawn (avoids backend/treehouse fixtures).
@@ -79,8 +80,83 @@ test_detect_own_cursor_agent_env() {
   pass "CURSOR_AGENT=1 detects as cursor-agent"
 }
 
+make_spawn_fakebin() {
+  local dir=$1 fakebin
+  fakebin=$(fm_fakebin "$dir")
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "$*" in
+  *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
+esac
+case "${1:-}" in
+  display-message) printf 'firstmate\n'; exit 0 ;;
+  list-windows) exit 0 ;;
+  has-session|new-session|new-window|set-window-option|kill-window) exit 0 ;;
+  send-keys)
+    if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
+      prev=
+      for a in "$@"; do
+        if [ "$prev" = "-l" ]; then
+          printf '%s\n' "$a" >> "$FM_FAKE_LAUNCH_LOG"
+        fi
+        prev=$a
+      done
+    fi
+    exit 0
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/tmux"
+  fm_fake_exit0 "$fakebin" treehouse
+  printf '%s\n' "$fakebin"
+}
+
+test_spawn_uses_cursor_agent_oneshot() {
+  local id case_dir home proj wt fakebin launchlog out status launch
+  id=cursor-spawn-z6
+  case_dir="$TMP_ROOT/spawn"
+  home="$case_dir/home"
+  proj="$case_dir/project"
+  wt="$case_dir/wt"
+  launchlog="$case_dir/launch.log"
+  fakebin=$(make_spawn_fakebin "$case_dir/fake")
+  mkdir -p "$home/data/$id" "$home/projects" "$home/state" "$home/config"
+  printf '%s\n' 'cursor-agent' > "$home/config/crew-harness"
+  printf 'cursor-agent brief\n' > "$home/data/$id/brief.md"
+  fm_git_worktree "$proj" "$wt" cursor-agent-wt
+  touch "$home/state/.last-watcher-beat"
+  : > "$launchlog"
+
+  out=$(
+    FM_ROOT_OVERRIDE='' FM_HOME="$home" \
+      FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+      FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
+      FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
+      FM_FAKE_LAUNCH_LOG="$launchlog" PATH="$fakebin:$PATH" \
+      "$SPAWN" "$id" "$proj" 2>&1
+  )
+  status=$?
+  rm -rf "/tmp/fm-$id"
+  expect_code 0 "$status" "cursor-agent crew spawn should succeed"
+  assert_contains "$out" "spawned $id harness=cursor-agent kind=ship" \
+    "spawn did not report cursor-agent ship launch"
+  assert_grep 'harness=cursor-agent' "$home/state/$id.meta" \
+    "spawn meta missing cursor-agent harness"
+  assert_grep 'kind=ship' "$home/state/$id.meta" \
+    "spawn meta should record a crew ship task"
+  launch=$(cat "$launchlog")
+  assert_contains "$launch" 'cursor-agent -p --force --trust --workspace "$(pwd)"' \
+    "spawn launch command missing cursor-agent oneshot flags"
+  assert_contains "$launch" "\"\$(cat '$home/data/$id/brief.md')\"" \
+    "spawn launch command missing quoted brief path"
+  pass "fm-spawn uses cursor-agent oneshot template and records cursor-agent metadata"
+}
+
 test_usage_lists_cursor_agent
 test_launch_template_cursor_agent
 test_launch_template_cursor_agent_rejects_secondmate
 test_crew_harness_resolves_cursor_agent
 test_detect_own_cursor_agent_env
+test_spawn_uses_cursor_agent_oneshot

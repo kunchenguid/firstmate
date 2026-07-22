@@ -20,7 +20,7 @@ Prerequisites:
 
 - `herdr` itself, protocol 14 or newer (0.7.1, 0.7.3, and 0.7.4 verified) - see [herdr.dev](https://herdr.dev) for install instructions.
 - `jq`, required to parse herdr's JSON output: `brew install jq` (or your platform's package manager).
-- The universal firstmate prerequisites - a verified crew harness plus the required toolchain, owned by [`docs/configuration.md`](configuration.md) ("Harness support", "Toolchain"); treehouse still provides the worktree, herdr only provides the session.
+- The universal firstmate prerequisites - supported harness scope plus the required toolchain, owned by [`docs/configuration.md`](configuration.md) ("Harness support", "Toolchain"); treehouse still provides the worktree, herdr only provides the session.
 
 ### CI pin and required real-Herdr lane
 

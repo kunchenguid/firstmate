@@ -15,7 +15,7 @@ Prerequisites:
 
 - `zellij` itself, version 0.44 or newer (installed 0.44.0 verified) - see [zellij.dev](https://zellij.dev) for install instructions.
 - `jq`, required to parse zellij's JSON output: `brew install jq` (or your platform's package manager).
-- The universal firstmate prerequisites - a verified crew harness plus the required toolchain, owned by [`docs/configuration.md`](configuration.md) ("Harness support", "Toolchain"); treehouse still provides the worktree, zellij only provides the session.
+- The universal firstmate prerequisites - supported harness scope plus the required toolchain, owned by [`docs/configuration.md`](configuration.md) ("Harness support", "Toolchain"); treehouse still provides the worktree, zellij only provides the session.
 
 Select zellij by putting `zellij` in a local `config/backend` file - the durable way to pick it - or by exporting `FM_BACKEND=zellij` when you launch your harness for a one-off session; telling the first mate in chat to use zellij also works.
 Unlike tmux and herdr, zellij is **never** auto-detected - it always requires an explicit choice.
