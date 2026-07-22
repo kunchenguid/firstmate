@@ -163,7 +163,7 @@ test_completed_turn_no_report_triggers_one_recovery() {
 }
 
 test_recovery_attempt_is_never_reinjected() {
-  local home state corr rec hook_log lines
+  local home state corr rec hook_log lines live_corr live_rec live_pid live_identity
   home=$(setup_parent recovery-at-most-once)
   state="$home/state"
   hook_log="$TMP_ROOT/recovery-at-most-once.log"
@@ -181,13 +181,34 @@ test_recovery_attempt_is_never_reinjected() {
   if fm_pending_reply_send_recovery "$state" "$corr"; then
     fail "failed recovery transport should report failure"
   fi
-  [ "$(phase_of "$state" "$corr")" = recovery_sent ] \
-    || fail "failed recovery attempt should remain non-retryable"
+  [ "$(phase_of "$state" "$corr")" = recovery_failed ] \
+    || fail "failed recovery attempt should preserve failed delivery"
+  [ -z "$(fm_pending_reply_get "$(fm_pending_reply_path "$state" "$corr")" recovery_sent_epoch)" ] \
+    || fail "failed recovery must not record a sent epoch"
   if fm_pending_reply_send_recovery "$state" "$corr" 2>/dev/null; then
     fail "committed recovery attempt must refuse reinjection"
   fi
   lines=$(wc -l < "$hook_log" | tr -d ' ')
   [ "$lines" = 1 ] || fail "recovery transport should be attempted once, got $lines"
+  fm_pending_reply_maybe_escalate "$state" "$corr" \
+    || fail "failed recovery delivery should escalate explicitly"
+  grep -Fq "pending-reply-recovery-delivery-failed:" "$state/hibit.status" \
+    || fail "failed recovery escalation should name delivery failure"
+  live_corr=$(fm_pending_reply_create "$home" "$state" hibit "live recovery")
+  fm_pending_reply_mark_delivered "$state" "$live_corr"
+  fm_pending_reply_mark_turn_completed "$state" "$live_corr" request
+  live_rec=$(fm_pending_reply_path "$state" "$live_corr")
+  live_pid=${BASHPID:-$$}
+  live_identity=$(fm_pending_reply_pid_identity "$live_pid") \
+    || fail "live sender identity should be observable"
+  fm_pending_reply_set "$live_rec" recovery_attempted_epoch 2500 || fail "live attempt precommit failed"
+  fm_pending_reply_set "$live_rec" recovery_sender_pid "$live_pid" || fail "live sender pid commit failed"
+  fm_pending_reply_set "$live_rec" recovery_sender_identity "$live_identity" \
+    || fail "live sender identity commit failed"
+  fm_pending_reply_set "$live_rec" phase recovery_sending || fail "live sending phase failed"
+  fm_pending_reply_tick_one "$state" "$live_corr" unknown || fail "live recovery tick failed"
+  [ "$(phase_of "$state" "$live_corr")" = recovery_sending ] \
+    || fail "live recovery must remain in progress without elapsed-time inference"
   corr=$(fm_pending_reply_create "$home" "$state" hibit "crashed recovery")
   fm_pending_reply_mark_delivered "$state" "$corr"
   fm_pending_reply_mark_turn_completed "$state" "$corr" request
@@ -195,8 +216,14 @@ test_recovery_attempt_is_never_reinjected() {
   fm_pending_reply_set "$rec" recovery_attempted_epoch 2500 || fail "attempt precommit failed"
   fm_pending_reply_set "$rec" phase recovery_sending || fail "sending phase precommit failed"
   fm_pending_reply_tick_one "$state" "$corr" unknown || fail "recovery reconciliation failed"
-  [ "$(phase_of "$state" "$corr")" = recovery_sent ] \
-    || fail "interrupted recovery attempt should reconcile without reinjection"
+  [ "$(phase_of "$state" "$corr")" = escalated ] \
+    || fail "interrupted recovery attempt should escalate unknown delivery"
+  [ "$(fm_pending_reply_get "$rec" recovery_delivery_outcome)" = unknown ] \
+    || fail "interrupted recovery should preserve unknown delivery outcome"
+  [ -z "$(fm_pending_reply_get "$rec" recovery_sent_epoch)" ] \
+    || fail "unknown recovery must not record a sent epoch"
+  grep -Fq "pending-reply-recovery-delivery-unknown:" "$state/hibit.status" \
+    || fail "unknown recovery escalation should name delivery uncertainty"
   lines=$(wc -l < "$hook_log" | tr -d ' ')
   [ "$lines" = 1 ] || fail "reconciliation must not call recovery transport, got $lines attempts"
   unset FM_PENDING_REPLY_SEND_HOOK
@@ -382,14 +409,11 @@ test_delivery_confirmation_fallback_reconciles() {
       || fail "delivery preparation should persist before transport"
     prepared_marker=$(fm_pending_reply_delivery_confirmation_path "$state" "$prepared_corr")
     [ -f "$prepared_marker" ] || fail "prepared delivery marker should persist"
-    export FM_PENDING_REPLY_GRACE_SECS=10
-    export FM_PENDING_REPLY_NOW=5760
     fm_pending_reply_tick_one "$state" "$prepared_corr" unknown \
-      || fail "watcher should reconcile a delivery interrupted after preparation"
-    [ "$(fm_pending_reply_get "$prepared_rec" delivered_epoch)" = 5750 ] \
-      || fail "prepared delivery should remain guarded after sender exit"
-    [ ! -e "$prepared_marker" ] || fail "prepared marker should clear after reconciliation"
-    export FM_PENDING_REPLY_GRACE_SECS=0
+      || fail "watcher should preserve interrupted delivery state"
+    [ -z "$(fm_pending_reply_get "$prepared_rec" delivered_epoch)" ] \
+      || fail "attempted delivery must never be promoted without confirmation"
+    [ -e "$prepared_marker" ] || fail "unknown delivery marker should remain durable"
   ) || fail "delivery confirmation fallback regression failed"
   pass "delivery confirmation fallback reconciles durably"
 }
