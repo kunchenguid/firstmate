@@ -238,22 +238,38 @@ unit_lock_initialization_grace() {
 }
 
 unit_signal_exits_with_lock_cleanup() {
-  local st marker child
+  local st marker ready child sleeper
   st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-signal.XXXXXX")
   marker="$st/resumed"
+  ready="$st/trap-ready"
+  # The stand-in start hook is dispatched only after fm_afk_launch_main has
+  # installed its signal traps, so waiting for its ready marker (not the lock
+  # dir) keeps the TERM below out of the acquire-to-trap window, where it
+  # would kill the child by default action with the lock still held. The
+  # sleeper runs in the background so the trapped TERM interrupts the wait
+  # builtin immediately; its recorded pid lets the test reap it.
   FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" bash -c '
     . "$1"
-    fm_afk_launch_start() { sleep 30; }
+    fm_test_ready=$3
+    fm_test_sleeper_file=$4
+    fm_afk_launch_start() {
+      sleep 30 &
+      printf "%s\n" "$!" > "$fm_test_sleeper_file"
+      : > "$fm_test_ready"
+      wait "$!"
+    }
     fm_afk_launch_main start
     : > "$2"
-  ' _ "$LAUNCH" "$marker" &
+  ' _ "$LAUNCH" "$marker" "$ready" "$st/sleeper-pid" &
   child=$!
   for _ in $(seq 1 40); do
-    [ -d "$st/state/.afk-launch.lock" ] && break
+    [ -e "$ready" ] && break
     sleep 0.05
   done
   kill -TERM "$child" 2>/dev/null || true
   wait "$child" 2>/dev/null || true
+  sleeper=$(cat "$st/sleeper-pid" 2>/dev/null || true)
+  [ -n "$sleeper" ] && kill "$sleeper" 2>/dev/null
   if [ ! -e "$marker" ] && [ ! -e "$st/state/.afk-launch.lock" ]; then
     pass "launcher signal: TERM exits and releases the lifecycle lock"
   else
