@@ -29,7 +29,7 @@ The tracked `.pi/extensions/fm-openai-retention-guard.ts` extension keeps the in
 For direct `openai/*` models, the guard defaults the package's stored-response continuation setting off and removes `store:true`, `previous_response_id`, and retaining context-management fields from provider requests.
 This default prevents an accidental model-picker change from enabling OpenAI server-side conversation retention.
 
-Direct-OpenAI retention requires a local, gitignored opt-in file under the effective `FM_HOME` containing exactly `allow-store`:
+Direct-OpenAI retention requires a local, gitignored opt-in file under the effective `FM_HOME` whose exact bytes are `allow-store` followed by one LF newline:
 
 ```sh
 mkdir -p config

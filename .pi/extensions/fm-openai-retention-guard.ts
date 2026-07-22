@@ -19,7 +19,8 @@ function configPath(): string {
 
 export function directOpenAIRetentionOptedIn(path = configPath()): boolean {
   try {
-    return readFileSync(path, "utf8").trim() === DIRECT_OPENAI_RETENTION_OPT_IN;
+    const expected = Buffer.from(`${DIRECT_OPENAI_RETENTION_OPT_IN}\n`, "utf8");
+    return readFileSync(path).equals(expected);
   } catch {
     return false;
   }

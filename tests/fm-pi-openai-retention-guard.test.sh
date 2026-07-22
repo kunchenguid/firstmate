@@ -123,6 +123,31 @@ assert(!("context_management" in deniedPayload), "direct OpenAI retaining contex
 
 const configPath = `${process.env.FM_CONFIG_OVERRIDE}/pi-direct-openai-retention`;
 mkdirSync(process.env.FM_CONFIG_OVERRIDE, { recursive: true });
+const rejectedOptIns = [
+  ["", "empty file"],
+  ["allow-store", "missing newline"],
+  [" allow-store\n", "leading whitespace"],
+  ["allow-store \n", "trailing whitespace"],
+  ["allow-store\n\n", "extra newline"],
+  ["allow-store\r\n", "carriage return"],
+  ["# allow-store\n", "comment"],
+  ["allow-store\n# retained intentionally\n", "trailing comment"],
+  ["true\n", "unrecognized token"],
+  ["ALLOW-STORE\n", "different token"],
+  [Buffer.from([0x61, 0x6c, 0x6c, 0x6f, 0x77, 0x2d, 0x73, 0x74, 0x6f, 0x72, 0x65, 0x0a, 0xff]), "extra non-UTF-8 byte"],
+];
+for (const [contents, description] of rejectedOptIns) {
+  writeFileSync(configPath, contents);
+  const rejectedInstance = loadExtensionInstance();
+  const rejectedResult = runBeforeProviderRequest({ store: true }, {
+    provider: "openai",
+    api: "openai-responses",
+    id: "gpt-5.6-sol",
+  }, rejectedInstance.handlers);
+  assert(rejectedResult.store === false, `${description} enabled direct OpenAI retention`);
+  assert(process.env[packageEnv] === "0", `${description} enabled package continuation`);
+}
+
 writeFileSync(configPath, `${extension.DIRECT_OPENAI_RETENTION_OPT_IN}\n`);
 const allowedPayload = {
   model: "gpt-5.6-sol",
@@ -152,16 +177,6 @@ const rollbackResult = runBeforeProviderRequest({ store: true }, {
 }, rollbackInstance.handlers);
 assert(rollbackResult.store === false, "removing the opt-in did not restore denial");
 assert(process.env[packageEnv] === "0", "removing the opt-in did not disable package continuation");
-
-writeFileSync(configPath, "true\n");
-const malformedOptInInstance = loadExtensionInstance();
-const malformedOptInResult = runBeforeProviderRequest({ store: true }, {
-  provider: "openai",
-  api: "openai-responses",
-  id: "gpt-5.6-sol",
-}, malformedOptInInstance.handlers);
-assert(malformedOptInResult.store === false, "a non-explicit opt-in value enabled retention");
-assert(process.env[packageEnv] === "0", "a non-explicit opt-in value enabled package continuation");
 
 console.log("ok - Codex compaction stays enabled while direct OpenAI retention requires explicit opt-in");
 JS
