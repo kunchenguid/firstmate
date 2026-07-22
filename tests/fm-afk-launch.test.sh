@@ -238,18 +238,19 @@ unit_lock_initialization_grace() {
 }
 
 unit_signal_exits_with_lock_cleanup() {
-  local st marker child
+  local st marker started child
   st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-signal.XXXXXX")
   marker="$st/resumed"
-  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" bash -c '
+  started="$st/started"
+  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" STARTED="$started" bash -c '
     . "$1"
-    fm_afk_launch_start() { sleep 30; }
+    fm_afk_launch_start() { : > "$STARTED"; while :; do sleep 0.1; done; }
     fm_afk_launch_main start
     : > "$2"
   ' _ "$LAUNCH" "$marker" &
   child=$!
   for _ in $(seq 1 40); do
-    [ -d "$st/state/.afk-launch.lock" ] && break
+    [ -e "$started" ] && break
     sleep 0.05
   done
   kill -TERM "$child" 2>/dev/null || true
