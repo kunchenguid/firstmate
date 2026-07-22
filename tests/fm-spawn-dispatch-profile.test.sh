@@ -410,7 +410,7 @@ write_pi_delegated_profile() {
 }
 
 test_pi_delegated_profile_pins_command_model_effort_and_resources() {
-  local rec id out status launch
+  local rec id out status launch pi_real
   id=profile-pi-delegated-z81
   rec=$(make_spawn_case profile-pi-delegated pi "$id")
   read_case_record "$rec"
@@ -425,8 +425,9 @@ test_pi_delegated_profile_pins_command_model_effort_and_resources() {
   expect_code 0 "$status" "configured delegated Pi spawn should succeed"
   assert_meta_profile "$HOME_DIR/state/$id.meta" pi openai-codex/gpt-5.6-sol medium
   launch=$(cat "$LAUNCH_LOG")
+  pi_real=$(node -e 'process.stdout.write(require("node:fs").realpathSync(process.argv[1]))' "$PI_TEST_COMMAND")
   assert_contains "$launch" "PI_CODING_AGENT_DIR='$HOME_DIR/pi-agent'" "Pi launch did not override hostile ambient agent-dir resolution"
-  assert_contains "$launch" "'$PI_TEST_COMMAND' --model 'openai-codex/gpt-5.6-sol' --thinking 'medium'" "Pi launch did not pin the exact model and explicit medium thinking"
+  assert_contains "$launch" "'$pi_real' --model 'openai-codex/gpt-5.6-sol' --thinking 'medium'" "Pi launch did not pin the exact model and explicit medium thinking"
   assert_contains "$launch" "--no-approve --no-extensions --models 'openai-codex/gpt-5.6-sol'" "Pi launch did not neutralize project settings, extension discovery, and cycling"
   assert_contains "$launch" "-e '$ROOT/bin/fm-pi-profile-guard.ts'" "Pi launch did not explicitly load the profile guard"
   assert_not_contains "$launch" "xhigh" "delegated Pi launch inherited primary xhigh"
@@ -481,6 +482,29 @@ test_pi_delegated_profile_refuses_every_raw_launch_shape() {
     [ ! -s "$LAUNCH_LOG" ] || fail "raw launch reached the backend command handoff: $raw"
   done
   pass "active delegated Pi profile refuses env, env-command, shell-wrapper, and unknown raw launches"
+}
+
+test_pi_delegated_profile_refuses_malformed_profile_paths() {
+  local rec id out status
+  id=profile-pi-malformed-z84
+  rec=$(make_spawn_case profile-pi-malformed pi "$id")
+  read_case_record "$rec"
+
+  mkdir "$HOME_DIR/config/pi-delegated-profile"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 1 "$status" "directory delegated profile path should be refused"
+  assert_contains "$out" "profile path is not a regular file" "malformed profile refusal was not actionable"
+  assert_absent "$HOME_DIR/state/$id.meta" "malformed profile refusal happened after endpoint/meta creation"
+
+  rmdir "$HOME_DIR/config/pi-delegated-profile"
+  ln -s "$CASE_DIR/missing-profile" "$HOME_DIR/config/pi-delegated-profile"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 1 "$status" "broken-symlink delegated profile path should be refused"
+  assert_contains "$out" "profile path is not a regular file" "broken profile symlink refusal was not actionable"
+  assert_absent "$HOME_DIR/state/$id.meta" "broken profile symlink refusal happened after endpoint/meta creation"
+  pass "malformed delegated Pi profile paths fail closed before launch"
 }
 
 test_batch_forwards_shared_profile_flags() {
@@ -538,6 +562,7 @@ test_quota_selected_default_array_reaches_spawn
 test_pi_delegated_profile_pins_command_model_effort_and_resources
 test_pi_delegated_profile_refuses_model_and_effort_overrides
 test_pi_delegated_profile_refuses_every_raw_launch_shape
+test_pi_delegated_profile_refuses_malformed_profile_paths
 test_batch_forwards_shared_profile_flags
 test_active_dispatch_profile_does_not_block_secondmate_launch
 

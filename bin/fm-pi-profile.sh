@@ -70,8 +70,6 @@ fm_pi_profile_load() { # <config-dir> <project-dir>
   case "$FM_PI_COMMAND" in /*) ;; *) fm_pi_profile_fail "pi_command must be an absolute path"; return 1 ;; esac
   [ -x "$FM_PI_COMMAND" ] || { fm_pi_profile_fail "pi_command is not executable: $FM_PI_COMMAND"; return 1; }
   [ "$FM_PI_VERSION" = 0.81.1 ] || { fm_pi_profile_fail "unsupported pi_version '$FM_PI_VERSION' (expected 0.81.1)"; return 1; }
-  [ "$("$FM_PI_COMMAND" --version 2>/dev/null)" = "$FM_PI_VERSION" ] \
-    || { fm_pi_profile_fail "pi_command does not report version $FM_PI_VERSION"; return 1; }
   case "$FM_PI_AGENT_DIR" in /*) ;; *) fm_pi_profile_fail "agent_dir must be an absolute path"; return 1 ;; esac
   [ -d "$FM_PI_AGENT_DIR" ] || { fm_pi_profile_fail "agent_dir does not exist: $FM_PI_AGENT_DIR"; return 1; }
   [ -f "$FM_PI_AGENT_DIR/settings.json" ] || { fm_pi_profile_fail "agent_dir is missing settings.json"; return 1; }
@@ -95,6 +93,9 @@ fm_pi_profile_load() { # <config-dir> <project-dir>
   case "$pi_real" in */dist/cli.js) pi_package=${pi_real%/dist/cli.js} ;;
     *) fm_pi_profile_fail "pi_command is not the Pi coding-agent CLI"; return 1 ;;
   esac
+  FM_PI_COMMAND=$pi_real
+  [ "$("$FM_PI_COMMAND" --version 2>/dev/null)" = "$FM_PI_VERSION" ] \
+    || { fm_pi_profile_fail "pi_command does not report version $FM_PI_VERSION"; return 1; }
   metadata=$(node --input-type=module - "$pi_package" "$FM_PI_AGENT_DIR" "$FM_PI_PROVIDER" "$FM_PI_MODEL_ID" <<'NODE'
 import { pathToFileURL } from "node:url";
 const [pkg, agentDir, provider, modelId] = process.argv.slice(2);
@@ -107,10 +108,11 @@ const runtime = await ModelRuntime.create({
 if (runtime.getError()) throw new Error(runtime.getError());
 const model = runtime.getModel(provider, modelId);
 if (!model) throw new Error(`unknown model ${provider}/${modelId}`);
-process.stdout.write(`${model.provider}\t${model.id}\t${model.contextWindow}`);
+const supportsMedium = model.reasoning && model.thinkingLevelMap?.medium !== null;
+process.stdout.write(`${model.provider}\t${model.id}\t${model.contextWindow}\t${supportsMedium}`);
 NODE
   ) || { fm_pi_profile_fail "could not resolve effective model metadata without a provider request"; return 1; }
-  [ "$metadata" = "$FM_PI_PROVIDER"$'\t'"$FM_PI_MODEL_ID"$'\t'"$FM_PI_CONTEXT_WINDOW" ] \
+  [ "$metadata" = "$FM_PI_PROVIDER"$'\t'"$FM_PI_MODEL_ID"$'\t'"$FM_PI_CONTEXT_WINDOW"$'\t'true ] \
     || { fm_pi_profile_fail "effective model metadata mismatch (resolved $metadata)"; return 1; }
 
   settings=$(node --input-type=module - "$pi_package" "$FM_PI_AGENT_DIR" "$project_dir" <<'NODE'

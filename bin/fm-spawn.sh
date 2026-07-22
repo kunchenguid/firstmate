@@ -765,11 +765,20 @@ fi
 # required FirstMate extensions are explicitly re-added below.
 PICMD=pi
 PIPROFILE=
-if [ -f "$CONFIG/pi-delegated-profile" ] && [ "$RAW_LAUNCH" -eq 1 ]; then
+PI_PROFILE_PATH="$CONFIG/pi-delegated-profile"
+PI_PROFILE_CONFIGURED=0
+if [ -e "$PI_PROFILE_PATH" ] || [ -L "$PI_PROFILE_PATH" ]; then
+  PI_PROFILE_CONFIGURED=1
+  if [ ! -f "$PI_PROFILE_PATH" ]; then
+    echo "error: delegated Pi profile path is not a regular file: $PI_PROFILE_PATH" >&2
+    exit 1
+  fi
+fi
+if [ "$PI_PROFILE_CONFIGURED" -eq 1 ] && [ "$RAW_LAUNCH" -eq 1 ]; then
   echo "error: delegated Pi profile is active and cannot prove a raw launch command" >&2
   exit 1
 fi
-if [ "$HARNESS" = pi ] && [ -f "$CONFIG/pi-delegated-profile" ]; then
+if [ "$HARNESS" = pi ] && [ "$PI_PROFILE_CONFIGURED" -eq 1 ]; then
   fm_pi_profile_load "$CONFIG" "$PROJ_ABS" || exit 1
   if [ "$MODEL_SET" -eq 1 ] && [ "$MODEL" != "$FM_PI_MODEL" ]; then
     echo "error: delegated Pi profile refuses model override '$MODEL' (pinned '$FM_PI_MODEL')" >&2
@@ -781,7 +790,7 @@ if [ "$HARNESS" = pi ] && [ -f "$CONFIG/pi-delegated-profile" ]; then
   fi
   MODEL=$FM_PI_MODEL
   EFFORT=medium
-  PICMD="PI_CODING_AGENT_DIR=$(shell_quote "$FM_PI_AGENT_DIR") FM_PI_DELEGATED_MODEL=$(shell_quote "$FM_PI_MODEL") FM_PI_DELEGATED_CONTEXT_WINDOW=$(shell_quote "$FM_PI_CONTEXT_WINDOW") $(shell_quote "$FM_PI_COMMAND")"
+  PICMD="PI_CODING_AGENT_DIR=$(shell_quote "$FM_PI_AGENT_DIR") FM_PI_DELEGATED_MODEL=$(shell_quote "$FM_PI_MODEL") FM_PI_DELEGATED_CONTEXT_WINDOW=$(shell_quote "$FM_PI_CONTEXT_WINDOW") FM_PI_DELEGATED_AGENT_DIR=$(shell_quote "$FM_PI_AGENT_DIR") FM_PI_DELEGATED_RESERVE_TOKENS=$(shell_quote "$FM_PI_RESERVE_TOKENS") FM_PI_DELEGATED_KEEP_RECENT_TOKENS=$(shell_quote "$FM_PI_KEEP_RECENT_TOKENS") $(shell_quote "$FM_PI_COMMAND")"
   PIPROFILE="--no-approve --no-extensions --models $(shell_quote "$FM_PI_MODEL") -e $(shell_quote "$FM_ROOT/bin/fm-pi-profile-guard.ts") "
 fi
 
