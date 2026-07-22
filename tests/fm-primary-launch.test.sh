@@ -286,19 +286,16 @@ test_tracked_scripts_are_executable() {
 }
 
 test_interpreter_hosted_process_identity() {
-  local harness rec dir home fakebin socket out pane_pid package entrypoint extra
-  for harness in codex pi grok claude opencode; do
-    rec=$(make_case "node-$harness")
+  local harness relative rec dir home fakebin socket out pane_pid entrypoint
+  while IFS='|' read -r harness relative; do
+    rec=$(make_case "node-${harness}-${relative//[^a-zA-Z0-9]/-}")
     IFS='|' read -r dir home fakebin socket <<EOF
 $rec
 EOF
-    package="$home/packages/$harness-client/dist"
-    entrypoint="$package/cli.js"
-    mkdir -p "$package"
+    entrypoint="$home/node_modules/$relative"
+    mkdir -p "$(dirname "$entrypoint")"
     printf '%s\n' 'setInterval(() => {}, 300000)' > "$entrypoint"
-    extra=
-    [ "$harness" != pi ] || extra='--model openai-codex/gpt-5.6-sol'
-    tmux -L "$socket" new-session -d -s firstmate "exec node '$entrypoint' $extra"
+    tmux -L "$socket" new-session -d -s firstmate "exec node '$entrypoint'"
     tmux -L "$socket" set-option -q -t firstmate @firstmate_home "$home"
     tmux -L "$socket" set-option -q -t firstmate @firstmate_harness "$harness"
     pane_pid=$(tmux -L "$socket" display-message -p -t firstmate:0.0 '#{pane_pid}')
@@ -307,8 +304,46 @@ EOF
     assert_contains "$out" "harness=$harness" "Node-hosted $harness package entrypoint was misclassified"
     [ ! -e "$dir/unused.log" ] || fail "Node-hosted $harness attach launched another harness"
     kill_case "$socket"
-  done
-  pass "interpreter-hosted package entrypoints preserve all harness identities"
+  done <<'EOF'
+claude|@anthropic-ai/claude-code/cli.js
+claude|@anthropic-ai/claude-code/bin/claude.js
+codex|@openai/codex/bin/codex.js
+pi|@mariozechner/pi-coding-agent/dist/cli.js
+pi|@earendil-works/pi-coding-agent/dist/cli.js
+opencode|opencode-ai/bin/opencode.js
+EOF
+  pass "verified interpreter-hosted package entrypoints preserve harness identities"
+}
+
+test_interpreter_hosted_process_rejects_lookalikes() {
+  local relative rec dir home fakebin socket out status pane_pid entrypoint
+  while IFS= read -r relative; do
+    rec=$(make_case "node-lookalike-${relative//[^a-zA-Z0-9]/-}")
+    IFS='|' read -r dir home fakebin socket <<EOF
+$rec
+EOF
+    entrypoint="$home/$relative"
+    mkdir -p "$(dirname "$entrypoint")"
+    printf '%s\n' 'setInterval(() => {}, 300000)' > "$entrypoint"
+    tmux -L "$socket" new-session -d -s firstmate "exec node '$entrypoint'"
+    tmux -L "$socket" set-option -q -t firstmate @firstmate_home "$home"
+    tmux -L "$socket" set-option -q -t firstmate @firstmate_harness claude
+    pane_pid=$(tmux -L "$socket" display-message -p -t firstmate:0.0 '#{pane_pid}')
+    printf '%s\n' "$pane_pid" > "$home/state/.lock"
+    out=$(run_launch "$home" "$fakebin" "$socket" "$dir/unused.log" --claude 2>&1)
+    status=$?
+    [ "$status" -ne 0 ] || fail "interpreter lookalike was accepted: $relative"
+    assert_contains "$out" 'no authoritative live lock' "interpreter lookalike rejection was unclear: $relative"
+    kill_case "$socket"
+  done <<'EOF'
+opt/claude-utils/index.js
+node_modules/@anthropic-ai/claude-code-extra/bin/claude.js
+node_modules/vendor/codex/bin/codex.js
+node_modules/@mariozechner/pi-coding-agent-tools/dist/cli.js
+node_modules/opencode-ai-utils/bin/opencode.js
+packages/grok-client/dist/cli.js
+EOF
+  pass "interpreter-hosted lookalikes do not satisfy harness ownership"
 }
 
 test_native_harness_rejects_windows_symlink() {
@@ -375,5 +410,6 @@ test_live_and_stale_lock_behavior
 test_concurrent_launch_serialization
 test_lock_live_pid_query_is_read_only
 test_interpreter_hosted_process_identity
+test_interpreter_hosted_process_rejects_lookalikes
 test_native_harness_rejects_windows_symlink
 test_existing_session_requires_positive_identity

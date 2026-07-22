@@ -178,7 +178,7 @@ attach_session() {
     printf 'attached: session=%s home=%s harness=%s\n' "$SESSION" "$FM_HOME_FIXED" "$HARNESS"
     return 0
   fi
-  if [ -n "${FM_PRIMARY_TMUX_SOCKET:-}" ]; then
+  if [ "$TEST_MODE" = 1 ] && [ -n "${FM_PRIMARY_TMUX_SOCKET:-}" ]; then
     exec tmux -L "$FM_PRIMARY_TMUX_SOCKET" attach-session -t "$SESSION"
   fi
   exec tmux attach-session -t "$SESSION"
