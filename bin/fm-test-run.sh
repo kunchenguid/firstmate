@@ -1283,7 +1283,7 @@ else
     if [ -s "$out" ]; then
       cat "$out"
     fi
-    mode=$(stat -f %Lp "$work" 2>/dev/null || stat -c %a "$work" 2>/dev/null || echo unknown)
+    mode=$(stat -c %a "$work" 2>/dev/null || stat -f %Lp "$work" 2>/dev/null || echo unknown)
     case "$mode" in
       700|0700) ;;
       *)

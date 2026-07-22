@@ -475,17 +475,30 @@ test_jobs_requires_proven_isolated() {
 }
 
 test_jobs_parallel_scheduler_and_failure_propagation() {
-  local tmp repo runner evidence a b c d rc begin_n end_n
+  local tmp repo runner evidence fake_bin a b c d rc begin_n end_n
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-jobs-sched.XXXXXX")
   repo="$tmp/repo"
   runner="$repo/bin/fm-test-run.sh"
   evidence="$tmp/evidence"
+  fake_bin="$tmp/fake-bin"
   a=tests/fm-no-mistakes-ownership.test.sh
   b=tests/fm-stow-contract.test.sh
   c=tests/fm-lint.test.sh
   d=tests/fm-supervision-instructions.test.sh
-  mkdir -p "$repo/bin" "$repo/tests" "$evidence"
+  mkdir -p "$repo/bin" "$repo/tests" "$evidence" "$fake_bin"
   cp "$RUNNER" "$runner"
+  cat >"$fake_bin/stat" <<'SH'
+#!/usr/bin/env bash
+if [ "$1" = "-c" ] && [ "$2" = "%a" ]; then
+  printf '700\n'
+  exit 0
+fi
+if [ "$1" = "-f" ] && [ "$2" = "%Lp" ]; then
+  printf '  File: "%s"\n    ID: fake Namelen: 255 Type: ext2/ext3\n700\n' "$3"
+  exit 0
+fi
+exit 1
+SH
   cat >"$repo/$a" <<'SH'
 #!/usr/bin/env bash
 sleep 0.5
@@ -505,9 +518,10 @@ if [ -e "$SCHED_EVIDENCE/slow-done" ]; then
 fi
 echo "ok - replacement fixture started before slow fixture finished"
 SH
-  chmod +x "$runner" "$repo/$a" "$repo/$b" "$repo/$c"
+  chmod +x "$runner" "$repo/$a" "$repo/$b" "$repo/$c" "$fake_bin/stat"
   set +e
-  SCHED_EVIDENCE="$evidence" "$runner" --jobs 2 --json "$tmp/timing.json" \
+  PATH="$fake_bin:$PATH" SCHED_EVIDENCE="$evidence" \
+    "$runner" --jobs 2 --json "$tmp/timing.json" \
     "$a" "$b" "$c" >"$tmp/out" 2>"$tmp/err"
   rc=$?
   set -e
