@@ -111,8 +111,16 @@ task_show() {  # <id>
 }
 
 show_field() {  # <show-output> <field>
-  local output=$1 field=$2
-  printf '%s\n' "$output" | sed -n "s/^  $field: //p" | head -1
+  local output=$1 field=$2 v
+  # tasks-axi show wraps any value containing a comma or newline in double quotes;
+  # the quotes are a serialization artifact, not part of the value, so strip them
+  # for every field. Callers that parse the raw serialized body (with escaped
+  # newlines) must account for this cleaned form.
+  v=$(printf '%s\n' "$output" | sed -n "s/^  $field: //p" | head -1)
+  case "$v" in
+    '"'*'"') v=${v#\"}; v=${v%\"} ;;
+  esac
+  printf '%s\n' "$v"
 }
 
 origin_exists_here() {  # <origin-id>
@@ -205,7 +213,10 @@ verify_hold_durable() {  # <hold-id>
 
 verify_resolution_identity() {
   local id=$1 hold_body=$2 decision_digest=$3 routed_csv=$4 resolution_prefix resolution_fields recorded_digest recorded_routes
-  resolution_prefix='"Resolution recorded by fm-decision-hold.\nDecision digest: '
+  # show_field strips the wrapping quotes that tasks-axi adds around the multiline
+  # body, so match the cleaned form without the leading quote. The escaped newlines
+  # (\n) inside the body remain and still delimit the recorded fields below.
+  resolution_prefix='Resolution recorded by fm-decision-hold.\nDecision digest: '
   case "$hold_body" in
     "$resolution_prefix"*) resolution_fields=${hold_body#"$resolution_prefix"} ;;
     *) fail "captain hold $id has no retry identity record" ;;
