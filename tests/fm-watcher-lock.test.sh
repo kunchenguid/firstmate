@@ -14,6 +14,11 @@ DRAIN="$ROOT/bin/fm-wake-drain.sh"
 LIB="$ROOT/bin/fm-wake-lib.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-watcher-lock-tests)
+# Caller state must not select guard/X-mode paths or skip their fixture branches.
+FM_HOME="$TMP_ROOT/home"
+mkdir -p "$FM_HOME/state" "$FM_HOME/config" || fail "could not create fixture-owned FM_HOME"
+export FM_HOME
+unset PI_CODING_AGENT
 
 mark_pr_check_migration_complete() {
   local state=$1
@@ -127,7 +132,7 @@ test_guard_warnings() {
   printf 'project=x\n' > "$state/task.meta"
   printf 'project=y\n' > "$state/task2.meta"
   append_wake "$state" heartbeat heartbeat heartbeat || fail "guard heartbeat append failed"
-  CLAUDECODE=1 PI_CODING_AGENT='' GROK_AGENT='' FM_ROOT_OVERRIDE="$dir" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=1 "$ROOT/bin/fm-guard.sh" 2> "$err" >/dev/null || fail "guard failed"
+  CLAUDECODE=1 PI_CODING_AGENT='' GROK_AGENT='' FM_HOME="$dir" FM_ROOT_OVERRIDE="$dir" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=1 "$ROOT/bin/fm-guard.sh" 2> "$err" >/dev/null || fail "guard failed"
   first=$(grep -v '^[[:space:]]*$' "$err" | head -1)
   case "$first" in
     '●'*) ;;
@@ -153,7 +158,7 @@ test_guard_warnings() {
   mkdir -p "$dir/config"
   printf 'project=x\n' > "$state/task.meta"
   : > "$dir/config/x-mode.env"
-  CLAUDECODE=1 PI_CODING_AGENT='' GROK_AGENT='' FM_ROOT_OVERRIDE="$dir" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=1 "$ROOT/bin/fm-guard.sh" 2> "$err" >/dev/null || fail "guard failed"
+  CLAUDECODE=1 PI_CODING_AGENT='' GROK_AGENT='' FM_HOME="$dir" FM_ROOT_OVERRIDE="$dir" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=1 "$ROOT/bin/fm-guard.sh" 2> "$err" >/dev/null || fail "guard failed"
   grep -F "source '$dir/config/x-mode.env' first" "$err" >/dev/null || fail "guard repair line did not source the X-mode cadence config"
 
   # (2) fresh watcher, empty queue -> silence.
@@ -164,7 +169,7 @@ test_guard_warnings() {
   touch "$state/.last-watcher-beat"
   # Non-git FM_ROOT keeps the worktree-tangle check inert so "fresh watcher ->
   # total silence" stays a pure assertion about watcher state.
-  FM_ROOT_OVERRIDE="$dir" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=300 "$ROOT/bin/fm-guard.sh" 2> "$err" >/dev/null || fail "guard failed"
+  FM_HOME="$dir" FM_ROOT_OVERRIDE="$dir" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=300 "$ROOT/bin/fm-guard.sh" 2> "$err" >/dev/null || fail "guard failed"
   [ ! -s "$err" ] || fail "guard warned with a fresh watcher and no queued wakes: $(cat "$err")"
   pass "guard banner leads when down with pending wakes (repair-after-drain) and stays silent when fresh"
 }
@@ -438,14 +443,34 @@ test_watch_restart_rejects_reused_pid() {
 }
 
 test_watch_restart_attaches_to_healthy_peer() {
-  local dir state fakebin out peer identity armpid status i
+  local dir state fakebin out ready term peer identity armpid status i
   dir=$(make_case restart-healthy-peer)
   state="$dir/state"
   fakebin="$dir/fakebin"
   out="$dir/restart.out"
+  ready="$dir/peer.ready"
+  term="$dir/peer.term"
   mark_pr_check_migration_complete "$state"
-  node -e 'process.on("SIGTERM", () => {}); setTimeout(() => {}, 300000)' &
+  # PID identity alone does not prove that the synthetic peer can resist TERM.
+  FM_TEST_PEER_READY="$ready" FM_TEST_PEER_TERM="$term" node -e '
+const fs = require("node:fs");
+process.on("SIGTERM", () => {
+  fs.writeFileSync(process.env.FM_TEST_PEER_TERM, "handled\n");
+});
+fs.writeFileSync(process.env.FM_TEST_PEER_READY, "ready\n");
+setTimeout(() => {}, 300000);
+' &
   peer=$!
+  i=0
+  while [ "$i" -lt 80 ] && [ ! -s "$ready" ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  if [ ! -s "$ready" ]; then
+    kill -KILL "$peer" 2>/dev/null || true
+    wait "$peer" 2>/dev/null || true
+    fail "synthetic peer did not publish handler readiness"
+  fi
   identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$peer") || fail "could not identify peer pid"
   mkdir "$state/.watch.lock"
   printf '%s\n' "$peer" > "$state/.watch.lock/pid"
@@ -457,11 +482,13 @@ test_watch_restart_attaches_to_healthy_peer() {
   armpid=$!
   i=0
   while [ "$i" -lt 80 ]; do
-    grep -qF "watcher: attached pid=$peer" "$out" 2>/dev/null && break
+    grep -qF "watcher: attached pid=$peer" "$out" 2>/dev/null && [ -s "$term" ] && break
     sleep 0.1
     i=$((i + 1))
   done
+  [ -s "$term" ] || fail "restart did not deliver SIGTERM to the ready synthetic peer"
   grep -qF "watcher: attached pid=$peer" "$out" || fail "restart did not attach to the verified healthy peer: $(cat "$out")"
+  ! grep -qF 'watcher: started pid=' "$out" || fail "restart started a replacement behind the ready synthetic peer"
   is_live_non_zombie "$armpid" || fail "restart arm exited instead of following the healthy peer"
   is_live_non_zombie "$peer" || fail "restart killed a TERM-resistant peer unexpectedly"
   kill -KILL "$peer" 2>/dev/null || true
