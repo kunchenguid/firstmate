@@ -358,7 +358,7 @@ fm_afk_launch_restore_backup() {  # <backup> <had-afk>
 # (so the daemon can inject into Jay's pane, which lives there). A
 # dedicated background workspace (--no-focus) holds exactly one tab/pane; it
 # never touches Jay's active tab. Prints the record line on success.
-fm_afk_launch_create_herdr() {  # <captain-target> <captain-backend>
+fm_afk_launch_create_herdr() {  # <supervisor-target> <supervisor-backend>
   local captain_target=$1 captain_backend=$2 session out wsid pane entry cmd label recovered create_result
   session=${captain_target%%:*}
   if [ -z "$session" ] || [ "$session" = "$captain_target" ]; then
@@ -412,7 +412,7 @@ fm_afk_launch_create_herdr() {  # <captain-target> <captain-backend>
 # Launch the daemon in a detached tmux session (never a split-window in the
 # Jay's window). tmux pane ids are server-global, so the daemon reaches the
 # Jay's pane by its %id from this separate session.
-fm_afk_launch_create_tmux() {  # <captain-target> <captain-backend>
+fm_afk_launch_create_tmux() {  # <supervisor-target> <supervisor-backend>
   local captain_target=$1 captain_backend=$2 session entry cmd hash nonce
   hash=$(printf '%s' "$FM_HOME" | cksum | cut -d' ' -f1)
   nonce="$$-${RANDOM:-0}-$(date '+%s')"

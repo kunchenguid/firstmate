@@ -103,7 +103,7 @@ tasks_axi() {
 require_tasks_axi() {
   fm_tasks_axi_compatible || fail "compatible tasks-axi is required"
   tasks-axi hold --help 2>&1 | grep -F -- '--kind captain' >/dev/null \
-    || fail "tasks-axi does not expose the captain-hold contract"
+    || fail "tasks-axi does not expose the decision-hold contract"
 }
 
 task_show() {  # <id>
@@ -159,15 +159,15 @@ origin_open_decisions() {  # <origin-id>
 
 verify_hold_active() {  # <hold-id>
   local id=$1 show state held kind hold_kind
-  show=$(task_show "$id") || fail "captain hold $id is absent from $FM_HOME/data/backlog.md"
+  show=$(task_show "$id") || fail "decision hold $id is absent from $FM_HOME/data/backlog.md"
   state=$(show_field "$show" state)
   held=$(show_field "$show" held)
   kind=$(show_field "$show" kind)
   hold_kind=$(show_field "$show" hold_kind)
-  [ "$state" = queued ] || fail "captain hold $id is not queued (state=$state)"
-  [ "$held" = yes ] || fail "captain hold $id is not active"
+  [ "$state" = queued ] || fail "decision hold $id is not queued (state=$state)"
+  [ "$held" = yes ] || fail "decision hold $id is not active"
   [ "$kind" = captain ] || fail "backlog item $id is not kind captain"
-  [ "$hold_kind" = captain ] || fail "backlog item $id is not held for the captain"
+  [ "$hold_kind" = captain ] || fail "backlog item $id is not held for Jay"
 }
 
 verify_hold_resolved() {  # <hold-id>
@@ -208,19 +208,19 @@ verify_resolution_identity() {
   resolution_prefix='"Resolution recorded by fm-decision-hold.\nDecision digest: '
   case "$hold_body" in
     "$resolution_prefix"*) resolution_fields=${hold_body#"$resolution_prefix"} ;;
-    *) fail "captain hold $id has no retry identity record" ;;
+    *) fail "decision hold $id has no retry identity record" ;;
   esac
   case "$resolution_fields" in
     *'\nRouted identities: '*'\n\nCaptain decision:'*) : ;;
-    *) fail "captain hold $id has an invalid retry identity record" ;;
+    *) fail "decision hold $id has an invalid retry identity record" ;;
   esac
   recorded_digest=${resolution_fields%%\\n*}
   resolution_fields=${resolution_fields#*\\nRouted identities: }
   recorded_routes=${resolution_fields%%\\n*}
   [ "$recorded_digest" = "$decision_digest" ] \
-    || fail "captain hold $id records a different decision from Jay"
+    || fail "decision hold $id records a different decision from Jay"
   [ "$recorded_routes" = "$routed_csv" ] \
-    || fail "captain hold $id records different routed work"
+    || fail "decision hold $id records different routed work"
 }
 
 command_id() {
@@ -255,7 +255,7 @@ command_hold() {
     existing_title=$(show_field "$show" title)
     [ "$state" != "done" ] || fail "decision from Jay $id is already durably resolved; use a new decision key for a new decision"
     [ "$kind" = captain ] || fail "existing backlog identity $id is not kind captain"
-    [ "$existing_title" = "$title" ] || fail "existing captain hold $id has a different title"
+    [ "$existing_title" = "$title" ] || fail "existing decision hold $id has a different title"
   else
     if [ -z "$repo" ] && [ -f "$STATE/$origin.meta" ]; then
       repo=$(meta_value "$STATE/$origin.meta" project)
@@ -269,7 +269,7 @@ command_hold() {
       || fail "could not create decision from Jay item $id"
   fi
   tasks_axi hold "$id" --reason "$reason" --kind captain >/dev/null \
-    || fail "could not activate captain hold $id"
+    || fail "could not activate decision hold $id"
   verify_hold_active "$id"
   printf '%s\n' "$id"
 }
@@ -450,8 +450,8 @@ command_resolve() {
         ;;
     esac
   done
-  tasks_axi "done" "$id" >/dev/null || fail "could not close resolved captain hold $id"
-  verify_hold_resolved "$id" || fail "captain hold $id did not retain its durable resolution record"
+  tasks_axi "done" "$id" >/dev/null || fail "could not close resolved decision hold $id"
+  verify_hold_resolved "$id" || fail "decision hold $id did not retain its durable resolution record"
   printf 'resolved: %s -> %s\n' "$id" "$routed"
 }
 

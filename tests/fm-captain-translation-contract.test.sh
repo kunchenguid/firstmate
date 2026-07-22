@@ -81,9 +81,15 @@ test_complete_instruction_and_document_surface_uses_jay_language() {
   local residue
   residue=$(
     git grep -n -w -i captain -- \
-      AGENTS.md README.md CONTRIBUTING.md .agents/skills skills docs 2>/dev/null \
+      AGENTS.md README.md CONTRIBUTING.md .agents/skills skills docs bin 2>/dev/null \
+      | awk -F: '{
+          text = $0
+          sub(/^[^:]*:[0-9]+:/, "", text)
+          if ($1 !~ /^bin\// || text !~ /^[[:space:]]*#/) print
+        }' \
       | sed \
         -e 's/captain-shared\.md//Ig' \
+        -e 's/\.fm-captain-shared//Ig' \
         -e 's/captain\.md//Ig' \
         -e 's/shared-captain//Ig' \
         -e 's/captain-held//Ig' \
@@ -91,11 +97,23 @@ test_complete_instruction_and_document_surface_uses_jay_language() {
         -e 's/captain-hold//Ig' \
         -e 's/captain-relevant//Ig' \
         -e 's/FM_CAPTAIN_RE//g' \
+        -e 's/FM_SHARED_CAPTAIN_FILE//g' \
         -e 's/--kind captain//Ig' \
         -e 's/kind `captain`//Ig' \
         -e 's/kind captain//Ig' \
         -e 's/hold-kind: `captain`//Ig' \
         -e 's/hold-kind: captain//Ig' \
+        -e 's/= captain/= /Ig' \
+        -e 's/hold_kind == "captain"//Ig' \
+        -e 's/hold_kind != "captain"//Ig' \
+        -e 's/kind == "captain"//Ig' \
+        -e 's/kind != "captain"//Ig' \
+        -e 's/\.kind == "captain"//Ig' \
+        -e 's/\.kind != "captain"//Ig' \
+        -e 's/\.hold_kind == "captain"//Ig' \
+        -e 's/\.hold_kind != "captain"//Ig' \
+        -e 's/"captain"//Ig' \
+        -e "s/'captain'//Ig" \
         -e 's/`captain` file//Ig' \
         -e 's/never call Jay "captain\."//Ig' \
         -e 's/`ABSENT` `captain`//Ig' \

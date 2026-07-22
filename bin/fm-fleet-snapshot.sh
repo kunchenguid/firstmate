@@ -141,7 +141,7 @@ JSON is the stable machine-readable output contract.
 --secondmate-home-summary emits the bounded structured summary used after a
 validated registered-home handoff. It is local-only, skips nested secondmate
 aggregation, and marks missing or unstructured current backlog state invalid.
-Active tasks-axi captain holds appear as decisions_open and stay visible in
+Active tasks-axi decision holds appear as decisions_open and stay visible in
 queued with hold_reason and hold_kind for downstream projections.
 Cross-home reads use FM_SNAPSHOT_SECONDMATES (default 20, 0 lifts the count
 bound), FM_SNAPSHOT_SECONDMATE_TIMEOUT, and FM_SNAPSHOT_SECONDMATE_MAX_BYTES.
