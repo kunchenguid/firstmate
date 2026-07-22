@@ -415,6 +415,8 @@ fm_wake_print_deduped() {
       dedupe = $3 SUBSEP $4
       if ($3 == "heartbeat") {
         dedupe = "heartbeat"
+      } else if ($3 == "check" && index($4, "unauthenticated-state-checks:") == 1) {
+        dedupe = $3 SUBSEP "unauthenticated-state-checks"
       }
       if (!(dedupe in seen)) {
         order[++count] = dedupe

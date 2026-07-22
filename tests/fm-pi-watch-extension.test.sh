@@ -975,7 +975,7 @@ EOF
 }
 
 test_wake_actionability_helper_source_and_queue_matrix() {
-  local home state reason receipt before after check xcheck rejected unrelated status
+  local home state reason receipt before after check xcheck rejected unrelated status fakebin drain_input drain_output count
   home="$TMP_ROOT/wake-actionability-home"
   state="$home/state"
   mkdir -p "$state"
@@ -1077,6 +1077,20 @@ test_wake_actionability_helper_source_and_queue_matrix() {
   printf 'window=default:w1:p-unrelated\n' > "$state/unrelated.meta"
   FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$ACTIONABLE" validate "$receipt" \
     || fail "unrelated task creation invalidated a heartbeat receipt"
+  fakebin="$home/fakebin"
+  mkdir -p "$fakebin"
+  cat > "$fakebin/tail" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+  chmod +x "$fakebin/tail"
+  if PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    "$ACTIONABLE" validate "$receipt" 2>/dev/null; then
+    fail "unreadable heartbeat status validated as current"
+  else
+    status=$?
+  fi
+  [ "$status" -eq 2 ] || fail "source read failure collapsed to obsolete status $status"
   printf 'working: heartbeat source is no longer actionable\n' >> "$state/task-heartbeat.status"
   if FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$ACTIONABLE" validate "$receipt"; then
     fail "heartbeat receipt survived a change to its bound status"
@@ -1112,6 +1126,16 @@ test_wake_actionability_helper_source_and_queue_matrix() {
     status=$?
   fi
   [ "$status" -eq 2 ] || fail "unreadable queue collapsed to obsolete status $status"
+
+  drain_input="$home/rejected-check-drain-input"
+  drain_output="$home/rejected-check-drain-output"
+  {
+    printf '%s\t10\tcheck\tunauthenticated-state-checks:first.check.sh\trejected-checks\n' "$(date +%s)"
+    printf '%s\t11\tcheck\tunauthenticated-state-checks:second.check.sh\trejected-checks\n' "$(date +%s)"
+  } > "$drain_input"
+  bash -c '. "$1"; fm_wake_print_deduped "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$drain_input" > "$drain_output"
+  count=$(awk 'NF { count++ } END { print count + 0 }' "$drain_output")
+  [ "$count" -eq 1 ] || fail "shared drain exposed one rejected-check reason $count times"
   pass "wake actionability receipts bind queue rows and home-local signal, stale, check, X, and heartbeat sources"
 }
 

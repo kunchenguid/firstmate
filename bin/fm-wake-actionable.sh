@@ -53,37 +53,68 @@ acquire_queue_lock() {
 }
 
 path_identity() {  # <regular-nonsymlink-path>
-  local path=$1
+  local path=$1 identity
+  [ -e "$path" ] || return 1
   [ -f "$path" ] && [ ! -L "$path" ] || return 1
   if [ "$(uname)" = Darwin ]; then
-    stat -f '%d:%i' "$path" 2>/dev/null
+    identity=$(stat -f '%d:%i' "$path" 2>/dev/null) || {
+      [ -e "$path" ] || return 1
+      return 2
+    }
   else
-    stat -c '%d:%i' "$path" 2>/dev/null
+    identity=$(stat -c '%d:%i' "$path" 2>/dev/null) || {
+      [ -e "$path" ] || return 1
+      return 2
+    }
   fi
+  printf '%s\n' "$identity"
 }
 
 entry_identity() {  # <regular-or-symlink-path>
-  local path=$1
+  local path=$1 identity
   { [ -f "$path" ] || [ -L "$path" ]; } || return 1
   if [ "$(uname)" = Darwin ]; then
-    stat -f '%d:%i' "$path" 2>/dev/null
+    identity=$(stat -f '%d:%i' "$path" 2>/dev/null) || {
+      { [ -f "$path" ] || [ -L "$path" ]; } || return 1
+      return 2
+    }
   else
-    stat -c '%d:%i' "$path" 2>/dev/null
+    identity=$(stat -c '%d:%i' "$path" 2>/dev/null) || {
+      { [ -f "$path" ] || [ -L "$path" ]; } || return 1
+      return 2
+    }
   fi
+  printf '%s\n' "$identity"
 }
 
 status_identity() {  # <regular-nonsymlink-status>
-  local path=$1 identity size digest checksum bytes
-  identity=$(path_identity "$path") || return 1
-  if [ "$(uname)" = Darwin ]; then
-    size=$(stat -f '%z' "$path" 2>/dev/null) || return 1
+  local path=$1 identity size digest checksum bytes status
+  if identity=$(path_identity "$path"); then
+    :
   else
-    size=$(stat -c '%s' "$path" 2>/dev/null) || return 1
+    status=$?
+    return "$status"
   fi
-  digest=$(tail -c 65536 "$path" 2>/dev/null | cksum) || return 1
+  if [ "$(uname)" = Darwin ]; then
+    size=$(stat -f '%z' "$path" 2>/dev/null) || {
+      [ -e "$path" ] || return 1
+      return 2
+    }
+  else
+    size=$(stat -c '%s' "$path" 2>/dev/null) || {
+      [ -e "$path" ] || return 1
+      return 2
+    }
+  fi
+  digest=$(set -o pipefail; tail -c 65536 "$path" 2>/dev/null | cksum) || {
+    [ -e "$path" ] || return 1
+    return 2
+  }
   read -r checksum bytes <<EOF
 $digest
 EOF
+  case "$checksum:$bytes" in *[!0-9:]*) return 2 ;; esac
+  [ -n "$checksum" ] && [ -n "$bytes" ] || return 2
   printf '%s:%s:%s:%s\n' "$identity" "$size" "$checksum" "$bytes"
 }
 
@@ -95,16 +126,19 @@ valid_task_id() {
 }
 
 meta_has_endpoint() {  # <meta> <endpoint>
-  local meta=$1 endpoint=$2
-  LC_ALL=C awk -v endpoint="$endpoint" '
+  local meta=$1 endpoint=$2 result
+  result=$(LC_ALL=C awk -v endpoint="$endpoint" '
     NR > 256 { exit }
-    $0 == "window=" endpoint || $0 == "terminal=" endpoint { found = 1; exit }
-    END { exit(found ? 0 : 1) }
-  ' "$meta" 2>/dev/null
+    $0 == "window=" endpoint || $0 == "terminal=" endpoint { print "found"; exit }
+  ' "$meta" 2>/dev/null) || {
+    [ -e "$meta" ] || return 1
+    return 2
+  }
+  [ "$result" = found ]
 }
 
 source_manifest() {  # <kind> <key>
-  local kind=$1 key=$2 task source meta identity count=0 base
+  local kind=$1 key=$2 task source meta identity count=0 base status
   case "$kind" in
     signal)
       fm_wake_status_key_map "$key" || return 1
@@ -112,18 +146,24 @@ source_manifest() {  # <kind> <key>
       task=${FM_WAKE_STATUS_KEY%.status}
       valid_task_id "$task" || return 1
       meta="$STATE/$task.meta"
-      identity=$(path_identity "$source") || return 1
+      if identity=$(path_identity "$source"); then :; else status=$?; return "$status"; fi
       printf 'source\t%s\t%s\n' "$key" "$identity"
-      identity=$(path_identity "$meta") || return 1
+      if identity=$(path_identity "$meta"); then :; else status=$?; return "$status"; fi
       printf 'meta\t%s.meta\t%s\n' "$task" "$identity"
       ;;
     stale)
       for meta in "$STATE"/*.meta; do
         [ -f "$meta" ] && [ ! -L "$meta" ] || continue
-        meta_has_endpoint "$meta" "$key" || continue
+        if meta_has_endpoint "$meta" "$key"; then
+          :
+        else
+          status=$?
+          [ "$status" -ne 2 ] || return 2
+          continue
+        fi
         task=$(basename "$meta" .meta)
         valid_task_id "$task" || return 1
-        identity=$(path_identity "$meta") || return 1
+        if identity=$(path_identity "$meta"); then :; else status=$?; return "$status"; fi
         printf 'meta\t%s.meta\t%s\n' "$task" "$identity"
         count=$((count + 1))
       done
@@ -144,7 +184,7 @@ source_manifest() {  # <kind> <key>
           esac
           [ "${#base}" -le 255 ] || return 1
           source="$STATE/$base"
-          identity=$(entry_identity "$source") || return 1
+          if identity=$(entry_identity "$source"); then :; else status=$?; return "$status"; fi
           printf 'rejected-check\t%s\t%s\n' "$base" "$identity"
           return 0
           ;;
@@ -157,7 +197,7 @@ source_manifest() {  # <kind> <key>
       esac
       task=${base%.check.sh}
       valid_task_id "$task" || [ "$task" = x-watch ] || return 1
-      identity=$(path_identity "$key") || return 1
+      if identity=$(path_identity "$key"); then :; else status=$?; return "$status"; fi
       printf 'check\t%s\t%s\n' "$base" "$identity"
       ;;
     heartbeat)
@@ -172,9 +212,9 @@ source_manifest() {  # <kind> <key>
       task=${FM_WAKE_STATUS_KEY%.status}
       valid_task_id "$task" || return 1
       meta="$STATE/$task.meta"
-      identity=$(status_identity "$source") || return 1
+      if identity=$(status_identity "$source"); then :; else status=$?; return "$status"; fi
       printf 'status\t%s\t%s\n' "$base" "$identity"
-      identity=$(path_identity "$meta") || return 1
+      if identity=$(path_identity "$meta"); then :; else status=$?; return "$status"; fi
       printf 'meta\t%s.meta\t%s\n' "$task" "$identity"
       ;;
     *) return 1 ;;
@@ -182,23 +222,24 @@ source_manifest() {  # <kind> <key>
 }
 
 row_receipt() {  # <queue-row>
-  local row=$1 epoch seq kind key _payload manifest digest checksum bytes
+  local row=$1 epoch seq kind key _payload manifest digest checksum bytes status
   IFS=$(printf '\t') read -r epoch seq kind key _payload <<EOF
 $row
 EOF
   case "$epoch:$seq" in *[!0-9:]*) return 1 ;; esac
   [ -n "$epoch" ] && [ -n "$seq" ] || return 1
-  manifest=$(source_manifest "$kind" "$key") || return 1
-  digest=$(printf '%s\n%s\n' "$row" "$manifest" | cksum) || return 1
+  if manifest=$(source_manifest "$kind" "$key"); then :; else status=$?; return "$status"; fi
+  digest=$(set -o pipefail; printf '%s\n%s\n' "$row" "$manifest" | cksum) || return 2
   read -r checksum bytes <<EOF
 $digest
 EOF
-  case "$checksum:$bytes" in *[!0-9:]*) return 1 ;; esac
+  case "$checksum:$bytes" in *[!0-9:]*) return 2 ;; esac
+  [ -n "$checksum" ] && [ -n "$bytes" ] || return 2
   printf '%s:%s:%s\n' "$seq" "$checksum" "$bytes"
 }
 
 capture() {
-  local reason=$1 rows row item receipt=''
+  local reason=$1 rows row item receipt='' status saw_error=false
   [ -n "$reason" ] || return 1
   rows=$(LC_ALL=C awk -F '\t' -v reason="$reason" '
     NF >= 5 && $5 == reason { print }
@@ -206,17 +247,22 @@ capture() {
   [ -n "$rows" ] || return 1
   while IFS= read -r row; do
     [ -n "$row" ] || continue
-    item=$(row_receipt "$row") || continue
-    if [ -n "$receipt" ]; then receipt="$receipt,$item"; else receipt=$item; fi
+    if item=$(row_receipt "$row"); then
+      if [ -n "$receipt" ]; then receipt="$receipt,$item"; else receipt=$item; fi
+    else
+      status=$?
+      [ "$status" -ne 2 ] || saw_error=true
+    fi
   done <<EOF
 $rows
 EOF
+  [ "$saw_error" = false ] || return 2
   [ -n "$receipt" ] || return 1
   printf '%s\n' "$receipt"
 }
 
 validate_one() {  # <single-row-receipt>
-  local item=$1 seq expected_checksum expected_bytes row actual
+  local item=$1 seq expected_checksum expected_bytes row actual status
   IFS=: read -r seq expected_checksum expected_bytes <<EOF
 $item
 EOF
@@ -224,7 +270,7 @@ EOF
   [ -n "$seq" ] && [ -n "$expected_checksum" ] && [ -n "$expected_bytes" ] || return 1
   row=$(LC_ALL=C awk -F '\t' -v seq="$seq" 'NF >= 5 && $2 == seq { print; exit }' "$FM_WAKE_QUEUE" 2>/dev/null) || return 2
   [ -n "$row" ] || return 1
-  actual=$(row_receipt "$row") || return 1
+  if actual=$(row_receipt "$row"); then :; else status=$?; return "$status"; fi
   [ "$actual" = "$item" ]
 }
 
