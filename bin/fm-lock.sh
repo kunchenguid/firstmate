@@ -15,8 +15,9 @@ LOCK="$STATE/.lock"
 mkdir -p "$STATE"
 
 # Known harness command names; extend when a new adapter is verified.
-# copilot (GitHub Copilot CLI) is recognized for lock/detection only - it is NOT
-# a dispatchable crew/secondmate harness. Verified 2026-07-21 on copilot 1.0.73:
+# copilot (GitHub Copilot CLI) is recognized for the session lock and
+# own-harness detection, and is a verified dispatchable crew/secondmate harness
+# (still not a verified primary). Verified 2026-07-21 on copilot 1.0.73:
 # its bundled ELF renames the main thread, so `ps -o comm=` reports "MainThread"
 # while `ps -o args=` is exactly "copilot"; recognition therefore rides the args
 # path. The copilot alternative is anchored to a standalone word so unrelated
