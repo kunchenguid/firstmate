@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# Contract coverage for the bounded fleet-flow-finalization finance-batch evaluator.
 set -u
 
 # shellcheck source=tests/lib.sh
