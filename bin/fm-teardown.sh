@@ -645,6 +645,20 @@ teardown_treehouse_return() {
   return 1
 }
 
+require_results_first_receipt() {
+  local inflight receipt
+  [ "$FORCE" != "--force" ] || return 0
+  case "$KIND" in secondmate|scout) return 0 ;; esac
+  inflight="${FM_STATE_OVERRIDE:-$FM_HOME/state}/$ID.delivery.json"
+  receipt="${FM_DATA_OVERRIDE:-$FM_HOME/data}/$ID/delivery-receipt.json"
+  [ -f "$inflight" ] || return 0
+  if [ ! -f "$receipt" ]; then
+    echo "REFUSED: results-first task $ID has an in-flight delivery record but no finalized receipt at $receipt." >&2
+    echo "Finalize the delivery receipt before teardown, or use --force after explicit discard approval." >&2
+    return 1
+  fi
+}
+
 validate_worktree_teardown_safety() {
   local dirty_raw dirty unpushed_raw unpushed DEFAULT unmerged_raw unmerged branch
   [ -d "$WT" ] || return 0
@@ -1075,6 +1089,8 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ] &&
   require_orca_worktree_path_match "$ORCA_WORKTREE_ID" "$WT" || exit 1
   ORCA_PATH_MATCH_VERIFIED=1
 fi
+
+require_results_first_receipt || exit 1
 
 if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
   if validate_worktree_teardown_safety; then
