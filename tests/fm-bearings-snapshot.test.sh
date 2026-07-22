@@ -1630,9 +1630,15 @@ EOF
           and .provenance.trust == "partial-structured"
           and .invalidity == {kind:"child_current_unavailable",ids:["unreadable-child"]}
           and [.decisions_open[].id] == ["reviewer-decision"]
+          and [.holds[].id] == ["reviewer-decision"]
           and [.queued[].id] == ["reviewer-decision"]
           and [.landed[].id] == ["prior-release"]
-          and [.endpoints[].id] == ["unreadable-child"])
+          and [.endpoints[].id] == ["unreadable-child"]
+          and .counts.decisions_open == 1
+          and .counts.holds == 1
+          and .counts.queued == 1
+          and .counts.landed == 1
+          and .counts.endpoints == 1)
       and (.secondmate_landed.partial | length) == 1
       and (.secondmate_landed.partial[0] | endswith("/mixed-sshhip-home"))
       and (.secondmate_landed.unreadable | length) == 0
@@ -1766,7 +1772,7 @@ EOF
       and (.gates | any(.id == "captain-run" and .owner == "home-assistant" and .blocked_by == "missing"))
   ' >/dev/null || fail "a missing Home Assistant blocker was treated as Done: $json"
 
-  sed 's/(kind: program)/(kind: ship)/' "$hibit/data/backlog.md" > "$hibit/data/backlog.next"
+  sed 's/(kind: program)/(kind: mystery)/' "$hibit/data/backlog.md" > "$hibit/data/backlog.next"
   mv "$hibit/data/backlog.next" "$hibit/data/backlog.md"
   canonical=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
     "$ROOT/bin/fm-fleet-snapshot.sh" --json)
@@ -1776,7 +1782,12 @@ EOF
       and (.current.reason | contains("in-flight backlog item has no child metadata: dogfood-program"))
       and .provenance.selected != "structured-home"
       and .active_children == []
-  ' >/dev/null || fail "ordinary or unknown worker kinds no longer stayed strict: $canonical"
+      and .decisions_open == []
+      and .holds == []
+      and .queued == []
+      and .landed == []
+      and .endpoints == []
+  ' >/dev/null || fail "an unrecognized worker kind no longer stayed strict: $canonical"
   pass "mixed secondmate roles, partial state, and captain readiness project independently"
 }
 

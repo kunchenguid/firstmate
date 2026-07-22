@@ -112,9 +112,10 @@ landed merges this home's Done with registered secondmate homes' Done, bounded b
   with omitted[] disclosure. Default selection is balanced across deterministic home
   order while preserving each home's internal newest-first order; sparse homes do
   not waste capacity. --all-landed reveals the full global newest-first set.
-For every registered secondmate, validated structured state from its own home is
-  authoritative. Parent events and bounded terminal reads are labeled fallback or
-  contradiction evidence and never become current work.
+For every registered secondmate, readable structured facts from its own home are
+  authoritative, including independently trustworthy surfaces from a partial summary.
+  Parent events and bounded terminal reads are labeled fallback or contradiction
+  evidence and never become current work.
 Opt-in surfaces: --fields bodies|paths|actions|endpoints, --all-in-flight,
   --all-decisions, --all-secondmates, --all-landed, --all-reports, --all-queued, --all-recorded-prs,
   --all-unhealthy, --all-pr-repos, --include-prs (adds candidate_prs).
