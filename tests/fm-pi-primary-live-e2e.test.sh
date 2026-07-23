@@ -28,9 +28,11 @@ PROJECT="$LAB/project"
 AHOY_PROJECT="$LAB/ahoy-project"
 HOME_DIR="$LAB/fmhome"
 PI_VERSION=$(pi --version)
+# shellcheck disable=SC2016 # Backticks are literal prompt markup.
 LEGACY_START='Run `bin/fm-session-start.sh` now, exactly once, before executing any other instructions.'
 LEGACY_AWAY=$'\xE2\x81\xA3Supervisor escalate (1 event(s)): done: legacy rollout'
 MARKER_NEAR_MISS=$'\xE2\x81\xA3Captain note: this invisible separator is intentional.'
+# shellcheck disable=SC2016 # Backticks are literal prompt markup.
 START_NEAR_MISS='Captain quote: Run `bin/fm-session-start.sh` now, exactly once, before executing any other instructions.'
 
 capture() {
@@ -134,6 +136,7 @@ run_ahoy_case() {
 run_ahoy_transcript_regressions() {
   mkdir -p "$PROJECT/.agents/skills/ahoy" "$PROJECT/.agents/skills/bearings"
   cp "$ROOT/.agents/skills/ahoy/SKILL.md" "$PROJECT/.agents/skills/ahoy/SKILL.md"
+  # shellcheck disable=SC2016 # Backticks are literal prompt markup.
   printf '%s\n' \
     '---' \
     'name: bearings' \
@@ -172,6 +175,7 @@ run_native_ahoy_regressions() {
     "$AHOY_PROJECT/bin/"
   cp "$ROOT/.agents/skills/ahoy/SKILL.md" "$AHOY_PROJECT/.agents/skills/ahoy/SKILL.md"
   chmod +x "$AHOY_PROJECT/bin/fm-sessionstart-nudge.sh"
+  # shellcheck disable=SC2016 # Variables expand in the generated script, not this test shell.
   printf '%s\n' \
     '#!/usr/bin/env bash' \
     'set -u' \
@@ -183,6 +187,7 @@ run_native_ahoy_regressions() {
     'printf "SESSION_START_DONE count=%s\n" "$count"' \
     > "$AHOY_PROJECT/bin/fm-session-start.sh"
   chmod +x "$AHOY_PROJECT/bin/fm-session-start.sh"
+  # shellcheck disable=SC2016 # Backticks are literal prompt markup.
   printf '%s\n' \
     '---' \
     'name: bearings' \
@@ -193,6 +198,7 @@ run_native_ahoy_regressions() {
     '' \
     'Respond exactly `AHOY_BEARINGS_BRANCH`.' \
     > "$AHOY_PROJECT/.agents/skills/bearings/SKILL.md"
+  # shellcheck disable=SC2016 # Backticks are literal prompt markup.
   printf '%s\n' \
     '# Native Pi Ahoy regression fixture' \
     '' \
