@@ -164,12 +164,16 @@ test_ahoy_owns_only_the_visible_session_recap() {
     "ahoy does not limit Bearings fallback to the first real captain message"
   assert_grep 'A captain boundary is an ordinary user-role message unless it matches one of the narrow operational exclusions below.' "$AHOY" \
     "ahoy lacks an explicit captain-authored boundary rule"
-  assert_grep 'Exclude messages that begin with U+2063, including both legacy bare-marker away-mode injections and the current U+2063 `FIRSTMATE_OP:` injection prefix.' "$AHOY" \
-    "ahoy does not exclude legacy bare-marker operational injections"
+  assert_grep 'Exclude messages that begin with the current U+2063 `FIRSTMATE_OP:` injection prefix.' "$AHOY" \
+    "ahoy does not exclude current marked operational injections"
+  assert_grep 'Exclude legacy bare-marker away-mode injections only when U+2063 is immediately followed by `Supervisor escalate (`.' "$AHOY" \
+    "ahoy does not narrowly exclude the legacy away-mode injection shape"
   assert_grep 'Exclude the exact legacy unmarked session-start payload ``Run `bin/fm-session-start.sh` now, exactly once, before executing any other instructions.``' "$AHOY" \
     "ahoy does not exclude the legacy unmarked session-start payload"
-  assert_grep 'Do not exclude an ordinary captain message merely because it contains ASCII `FIRSTMATE_OP:` without a leading U+2063, quotes or mentions the legacy session-start payload, or adds any text to that payload.' "$AHOY" \
+  assert_grep 'Do not exclude an ordinary captain message merely because it begins with U+2063 followed by other text, contains ASCII `FIRSTMATE_OP:` without a leading U+2063, quotes or mentions the legacy session-start payload, or adds any text to that payload.' "$AHOY" \
     "ahoy lacks genuine near-miss protection for ordinary captain messages"
+  assert_grep 'Apply the legacy startup exclusion as a literal whole-message match: ``Captain quote: Run `bin/fm-session-start.sh` now, exactly once, before executing any other instructions.`` is a captain boundary.' "$AHOY" \
+    "ahoy does not pin the altered-startup behavioral near miss"
   assert_grep 'System, developer, tool, watcher, guard, away-mode, and other injected operational messages are not captain messages.' "$AHOY" \
     "ahoy incorrectly treats synthetic operational messages as captain messages"
   assert_grep 'The normal recap branch is session-history-only.' "$AHOY" \

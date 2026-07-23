@@ -26,6 +26,10 @@ LAB="$ROOT/.pi-live-e2e.$$"
 PROJECT="$LAB/project"
 HOME_DIR="$LAB/fmhome"
 PI_VERSION=$(pi --version)
+LEGACY_START='Run `bin/fm-session-start.sh` now, exactly once, before executing any other instructions.'
+LEGACY_AWAY=$'\xE2\x81\xA3Supervisor escalate (1 event(s)): done: legacy rollout'
+MARKER_NEAR_MISS=$'\xE2\x81\xA3Captain note: this invisible separator is intentional.'
+START_NEAR_MISS='Captain quote: Run `bin/fm-session-start.sh` now, exactly once, before executing any other instructions.'
 
 capture() {
   "$TMUX" -L "$SOCKET" capture-pane -p -t "$SESSION" -S -600 2>/dev/null || true
@@ -103,8 +107,51 @@ wait_pid_dead() {
   return 1
 }
 
+run_ahoy_case() {
+  local label=$1 preceding=$2 expected=$3 out status=0
+  out=$(
+    cd "$PROJECT" &&
+      pi --print --approve --no-session --no-context-files --no-extensions \
+        --no-skills --skill .agents/skills --tools read \
+        --model openai-codex/gpt-5.6-sol --thinking low \
+        "$preceding" "/ahoy"
+  ) || status=$?
+  [ "$status" -eq 0 ] || fail "Pi Ahoy $label case exited $status: $out"
+  case "$expected" in
+    bearings)
+      printf '%s\n' "$out" | grep -Fq "AHOY_BEARINGS_BRANCH" \
+        || fail "Pi Ahoy $label case did not take Bearings: $out"
+      ;;
+    boundary)
+      printf '%s\n' "$out" | grep -Fq "AHOY_BEARINGS_BRANCH" \
+        && fail "Pi Ahoy $label near miss was treated as operational: $out"
+      ;;
+  esac
+}
+
+run_ahoy_transcript_regressions() {
+  mkdir -p "$PROJECT/.agents/skills/ahoy" "$PROJECT/.agents/skills/bearings"
+  cp "$ROOT/.agents/skills/ahoy/SKILL.md" "$PROJECT/.agents/skills/ahoy/SKILL.md"
+  printf '%s\n' \
+    '---' \
+    'name: bearings' \
+    'description: Test-only Bearings branch sentinel.' \
+    '---' \
+    '' \
+    '# bearings' \
+    '' \
+    'Respond exactly `AHOY_BEARINGS_BRANCH`.' \
+    > "$PROJECT/.agents/skills/bearings/SKILL.md"
+
+  run_ahoy_case legacy-start "$LEGACY_START" bearings
+  run_ahoy_case legacy-away "$LEGACY_AWAY" bearings
+  run_ahoy_case marker-near-miss "$MARKER_NEAR_MISS" boundary
+  run_ahoy_case startup-near-miss "$START_NEAR_MISS" boundary
+}
+
 mkdir -p "$LAB"
 git clone -q "$ROOT" "$PROJECT"
+run_ahoy_transcript_regressions
 mkdir -p "$PROJECT/.pi/extensions/lib"
 cp "$ROOT/.pi/extensions/fm-primary-pi-watch.ts" "$PROJECT/.pi/extensions/fm-primary-pi-watch.ts"
 cp "$ROOT/.pi/extensions/lib/fm-calm-visibility.ts" "$PROJECT/.pi/extensions/lib/fm-calm-visibility.ts"
@@ -165,4 +212,4 @@ wait_for_text "PI_EXIT=0" 60 || fail "Pi did not exit cleanly"
 wait_pid_dead "$watcher_pid" || fail "watcher child survived clean Pi exit"
 wait_pid_dead "$arm_pid" || fail "arm child survived clean Pi exit"
 
-printf 'ok - Pi %s live E2E used shared Codex auth, auto-started one successor before turn end, and cleaned up\n' "$PI_VERSION"
+printf 'ok - Pi %s live E2E covered Ahoy legacy transcripts and near misses, auto-started one successor, and cleaned up\n' "$PI_VERSION"

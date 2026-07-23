@@ -25,6 +25,11 @@ LAB="$ROOT/.opencode-live-e2e.$$"
 PROJECT="$LAB/project"
 HOME_DIR="$LAB/fmhome"
 OPENCODE_VERSION=$(opencode --version)
+AHOY_PROJECT="$LAB/ahoy-project"
+LEGACY_START='Run `bin/fm-session-start.sh` now, exactly once, before executing any other instructions.'
+LEGACY_AWAY=$'\xE2\x81\xA3Supervisor escalate (1 event(s)): done: legacy rollout'
+MARKER_NEAR_MISS=$'\xE2\x81\xA3Captain note: this invisible separator is intentional.'
+START_NEAR_MISS='Captain quote: Run `bin/fm-session-start.sh` now, exactly once, before executing any other instructions.'
 
 capture() {
   "$TMUX" -L "$SOCKET" capture-pane -p -t "$SESSION" -S -800 2>/dev/null || true
@@ -97,7 +102,62 @@ cleanup() {
 }
 trap cleanup EXIT
 
+run_ahoy_case() {
+  local label=$1 preceding=$2 expected=$3 db="$LAB/opencode-$1.db"
+  local first_out second_out session_id status=0
+  first_out=$(
+    cd "$AHOY_PROJECT" &&
+      OPENCODE_DB="$db" OPENCODE_DISABLE_AUTOUPDATE=1 OPENCODE_DISABLE_LSP_DOWNLOAD=1 \
+        OPENCODE_CONFIG_CONTENT='{"permission":{"*":"allow"}}' \
+        opencode run --pure --format json "$preceding"
+  ) || status=$?
+  [ "$status" -eq 0 ] || fail "OpenCode Ahoy $label setup exited $status: $first_out"
+  session_id=$(printf '%s\n' "$first_out" | jq -r 'select(.sessionID != null) | .sessionID' | head -1)
+  [ -n "$session_id" ] || fail "OpenCode Ahoy $label setup did not return a session id: $first_out"
+
+  status=0
+  second_out=$(
+    cd "$AHOY_PROJECT" &&
+      OPENCODE_DB="$db" OPENCODE_DISABLE_AUTOUPDATE=1 OPENCODE_DISABLE_LSP_DOWNLOAD=1 \
+        OPENCODE_CONFIG_CONTENT='{"permission":{"*":"allow"}}' \
+        opencode run --pure --format json --session "$session_id" "/ahoy"
+  ) || status=$?
+  [ "$status" -eq 0 ] || fail "OpenCode Ahoy $label case exited $status: $second_out"
+  case "$expected" in
+    bearings)
+      printf '%s\n' "$second_out" | grep -Fq "AHOY_BEARINGS_BRANCH" \
+        || fail "OpenCode Ahoy $label case did not take Bearings: $second_out"
+      ;;
+    boundary)
+      printf '%s\n' "$second_out" | grep -Fq "AHOY_BEARINGS_BRANCH" \
+        && fail "OpenCode Ahoy $label near miss was treated as operational: $second_out"
+      ;;
+  esac
+}
+
+run_ahoy_transcript_regressions() {
+  mkdir -p "$AHOY_PROJECT/.agents/skills/ahoy" "$AHOY_PROJECT/.agents/skills/bearings"
+  git init -q "$AHOY_PROJECT"
+  cp "$ROOT/.agents/skills/ahoy/SKILL.md" "$AHOY_PROJECT/.agents/skills/ahoy/SKILL.md"
+  printf '%s\n' \
+    '---' \
+    'name: bearings' \
+    'description: Test-only Bearings branch sentinel.' \
+    '---' \
+    '' \
+    '# bearings' \
+    '' \
+    'Respond exactly `AHOY_BEARINGS_BRANCH`.' \
+    > "$AHOY_PROJECT/.agents/skills/bearings/SKILL.md"
+
+  run_ahoy_case legacy-start "$LEGACY_START" bearings
+  run_ahoy_case legacy-away "$LEGACY_AWAY" bearings
+  run_ahoy_case marker-near-miss "$MARKER_NEAR_MISS" boundary
+  run_ahoy_case startup-near-miss "$START_NEAR_MISS" boundary
+}
+
 mkdir -p "$LAB"
+run_ahoy_transcript_regressions
 git clone -q "$ROOT" "$PROJECT"
 cp "$ROOT/.opencode/plugins/fm-primary-watch-arm.js" "$PROJECT/.opencode/plugins/fm-primary-watch-arm.js"
 cp "$ROOT/bin/fm-watch-arm.sh" "$PROJECT/bin/fm-watch-arm.sh"
@@ -154,4 +214,4 @@ if printf '%s\n' "$pane" | grep -Fq '$ bin/fm-watch-arm.sh'; then
   fail "OpenCode model attempted to re-arm instead of leaving continuity to the plugin"
 fi
 
-printf 'ok - OpenCode %s live E2E auto-started one successor before prompt handling without a model re-arm\n' "$OPENCODE_VERSION"
+printf 'ok - OpenCode %s live E2E covered Ahoy legacy transcripts and near misses, then auto-started one successor\n' "$OPENCODE_VERSION"
