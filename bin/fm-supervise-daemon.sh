@@ -20,9 +20,9 @@
 # state/.subsuper-escalations and are flushed on the next "while you were out"
 # catch-up or when afk is re-entered.
 #
-# IN-BAND OPERATIONAL PREFIX. Every current daemon injection is prefixed with
-# FM_OPERATIONAL_PREFIX: FM_INJECT_MARK (U+2063 INVISIBLE SEPARATOR) followed by
-# the stable FIRSTMATE_OP label. A human cannot type U+2063 from a normal
+# IN-BAND OPERATIONAL INPUT. bin/fm-operational-input.sh constructs every
+# current daemon injection as the typed away-supervisor kind after the stable
+# FM_OPERATIONAL_PREFIX. A human cannot type its leading U+2063 from a normal
 # keyboard at the start of a message, and Herdr transports it as text.
 # Firstmate's contract: a message that starts with the current prefix, or a
 # legacy bare-marker daemon escalation, is internal (stay afk); an unmarked

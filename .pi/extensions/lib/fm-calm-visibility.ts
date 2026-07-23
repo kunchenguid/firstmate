@@ -110,9 +110,8 @@ export function classifyFirstmateSyntheticInput(
   const classified = classifyFirstmateOperationalText(content);
   if (classified !== undefined && isFirstmateSyntheticKind(classified)) return classified;
 
-  // Positional launch instructions are the one current Pi path with stronger
-  // per-process origin than an in-band envelope. Keep the exact env-bound
-  // fallback only for launch commands created before the typed protocol.
+  // Keep the exact per-process origin fallback only for positional launch
+  // commands created before the typed protocol.
   if (
     source === "interactive" &&
     launchBriefContent !== undefined &&
