@@ -42,8 +42,8 @@ See the [no-mistakes quick start](https://kunchenguid.github.io/no-mistakes/star
   A local `config/backlog-backend=manual` opt-out forces firstmate's routine backlog updates to hand-editing and stays gitignored; validated secondmate handoffs still delegate through `tasks-axi mv`.
   A local `config/backend` file explicitly overrides runtime auto-detection for new task endpoints and stays gitignored; spawn-supported values are `tmux` plus experimental `herdr`, `zellij`, `orca`, and `cmux`, while `codex-app` is documented only in `docs/codex-app-backend.md`.
   It does not make `data/` tracked.
-- Helper scripts in `bin/` are plain bash.
-  Each starts with a usage header comment; keep it accurate when you change behavior.
+- Most helper scripts in `bin/` are plain bash; Python and Node helpers use explicit `.py` and `.mjs` suffixes.
+  Each documents its behavior and invocation in a leading comment or docstring; keep it accurate when you change behavior.
   Test scripts and helpers in `tests/` are plain bash too.
   `bin/fm-lint.sh` must pass: it is the single owner of the lint definition (the shellcheck file set, config, and pinned shellcheck version), and both CI and the no-mistakes pre-push gate run it, so local and CI can never diverge.
   It pins one exact shellcheck version and refuses to run under any other; print it with `bin/fm-lint.sh --required-version` and install that build locally.

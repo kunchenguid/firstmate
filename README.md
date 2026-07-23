@@ -60,6 +60,7 @@ Full detail on every feature lives in [docs/architecture.md](docs/architecture.m
 
 - A verified agent harness: Claude Code, Grok, Pi, Codex, or OpenCode.
 - Git and the GitHub CLI, authenticated through `gh auth login`.
+- Python 3, for local Markdown previews.
 - The CLI and dependencies for your selected runtime backend; tmux is the reference default.
 
 The first mate detects and offers to install supported missing tools after you approve.
