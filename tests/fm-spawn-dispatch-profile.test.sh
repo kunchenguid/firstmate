@@ -366,6 +366,25 @@ test_cursor_preserves_unrelated_explicit_model() {
   pass "cursor preserves an explicit model outside its default mapping family"
 }
 
+test_cursor_preserves_explicit_in_family_model() {
+  local rec id out status launch
+  id=profile-cursor-in-family-z21
+  rec=$(make_spawn_case profile-cursor-in-family cursor "$id")
+  read_case_record "$rec"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --model cursor-grok-4.5-low --effort high)
+  status=$?
+  expect_code 0 "$status" "cursor spawn with an explicit in-family model and conflicting effort should succeed"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" cursor cursor-grok-4.5-low high
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "--model 'cursor-grok-4.5-low'" \
+    "cursor launch remapped an explicit in-family model based on effort"
+  assert_not_contains "$launch" "cursor-grok-4.5-high" \
+    "cursor effort mapping must not override an explicitly selected in-family model"
+  pass "cursor keeps an explicit in-family model despite a conflicting effort"
+}
+
 test_cursor_refuses_secondmate_launch() {
   local rec id sm out status
   id=profile-cursor-secondmate-z20
@@ -490,6 +509,7 @@ test_grok_omits_invalid_xhigh_reasoning_effort
 test_opencode_threads_model_and_ignores_effort_axis
 test_cursor_maps_effort_to_concrete_model
 test_cursor_preserves_unrelated_explicit_model
+test_cursor_preserves_explicit_in_family_model
 test_cursor_refuses_secondmate_launch
 test_pi_threads_model_and_max_effort
 test_quota_selected_default_array_reaches_spawn

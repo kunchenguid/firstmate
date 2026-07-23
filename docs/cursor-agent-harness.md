@@ -19,7 +19,7 @@ The adapter never edits `~/.cursor/cli-config.json` or any other global Cursor s
 A positional prompt starts the first turn and the TUI stays open for follow-ups.
 
 Cursor has no standalone effort flag.
-When no unrelated explicit model overrides the mapping, Firstmate maps its effort axis to the empirically listed Cursor Grok 4.5 models:
+When no explicit model is supplied, Firstmate maps its effort axis to the empirically listed Cursor Grok 4.5 models:
 
 | Firstmate effort | Cursor model id |
 |---|---|
@@ -30,7 +30,7 @@ When no unrelated explicit model overrides the mapping, Firstmate maps its effor
 | `max` | `cursor-grok-4.5-high` |
 
 The Cursor Grok 4.5 catalog has no `xhigh` or `max` entry, so those values cap at its highest listed model instead of becoming an invented flag or model id.
-An explicit model outside the verified Cursor Grok 4.5 family wins unchanged.
+Any explicitly requested model — inside or outside the Cursor Grok 4.5 family — always wins unchanged; effort never remaps it.
 
 ## Supervision signals
 

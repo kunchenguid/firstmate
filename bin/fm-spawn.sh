@@ -524,19 +524,16 @@ if [ "$KIND" = secondmate ] && [ -z "$ARG3" ]; then
 fi
 
 # Cursor exposes no standalone effort flag. Its catalog encodes effort in model
-# ids, so map Firstmate's effort axis onto the empirically listed Cursor Grok 4.5
-# models. xhigh/max cap at that family's highest listed model. An explicit model
-# outside this verified family wins unchanged rather than receiving an invented
-# suffix or bracket override.
-if [ "$HARNESS" = cursor ] && [ -n "$EFFORT" ]; then
-  case "$MODEL" in
-    ''|default|cursor-grok-4.5-low|cursor-grok-4.5-medium|cursor-grok-4.5-high)
-      case "$EFFORT" in
-        low) MODEL=cursor-grok-4.5-low ;;
-        medium) MODEL=cursor-grok-4.5-medium ;;
-        high|xhigh|max) MODEL=cursor-grok-4.5-high ;;
-      esac
-      ;;
+# ids, so when no explicit model was requested, map Firstmate's effort axis onto
+# the empirically listed Cursor Grok 4.5 models. xhigh/max cap at that family's
+# highest listed model. An explicitly selected model always wins unchanged
+# rather than being remapped or receiving an invented suffix or bracket
+# override.
+if [ "$HARNESS" = cursor ] && [ -n "$EFFORT" ] && [ "$MODEL_SET" -eq 0 ]; then
+  case "$EFFORT" in
+    low) MODEL=cursor-grok-4.5-low ;;
+    medium) MODEL=cursor-grok-4.5-medium ;;
+    high|xhigh|max) MODEL=cursor-grok-4.5-high ;;
   esac
 fi
 
