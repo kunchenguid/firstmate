@@ -176,25 +176,40 @@ def read_source(path):
         fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0))
     except OSError as error:
         raise PreviewError(f"cannot read Markdown source: {error}") from error
+    operation_failed = False
     try:
-        before = os.fstat(fd)
-        if not stat.S_ISREG(before.st_mode):
-            raise PreviewError("Markdown source is not a regular file")
-        chunks = []
-        total = 0
-        while True:
-            chunk = os.read(fd, min(65536, MAX_SOURCE_BYTES + 1 - total))
-            if not chunk:
-                break
-            chunks.append(chunk)
-            total += len(chunk)
-            if total > MAX_SOURCE_BYTES:
-                raise PreviewError(
-                    f"Markdown source exceeds {MAX_SOURCE_BYTES} bytes"
-                )
-        after = os.fstat(fd)
+        try:
+            before = os.fstat(fd)
+            if not stat.S_ISREG(before.st_mode):
+                raise PreviewError("Markdown source is not a regular file")
+            chunks = []
+            total = 0
+            while True:
+                chunk = os.read(fd, min(65536, MAX_SOURCE_BYTES + 1 - total))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                total += len(chunk)
+                if total > MAX_SOURCE_BYTES:
+                    raise PreviewError(
+                        f"Markdown source exceeds {MAX_SOURCE_BYTES} bytes"
+                    )
+            after = os.fstat(fd)
+        except OSError as error:
+            raise PreviewError(
+                f"cannot read Markdown source: {error}"
+            ) from error
+    except BaseException:
+        operation_failed = True
+        raise
     finally:
-        os.close(fd)
+        try:
+            os.close(fd)
+        except OSError as error:
+            if not operation_failed:
+                raise PreviewError(
+                    f"cannot close Markdown source: {error}"
+                ) from error
     identity_before = (
         before.st_dev,
         before.st_ino,
@@ -809,7 +824,12 @@ def run(args):
     thread = None
     thread_started = False
     try:
-        server = PreviewServer(state)
+        try:
+            server = PreviewServer(state)
+        except OSError as error:
+            raise PreviewError(
+                f"could not start local preview server: {error}"
+            ) from error
         thread = threading.Thread(
             target=server.serve_forever,
             name="fm-markdown-preview",

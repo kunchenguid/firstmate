@@ -172,6 +172,80 @@ PY
   pass "FIFO sources fail without blocking"
 }
 
+test_source_descriptor_errors_are_controlled() {
+  local source="$TMP_ROOT/descriptor-errors.md"
+  printf '# Descriptor errors\n' >"$source"
+
+  if ! python3 - "$HELPER" "$source" "$TMP_ROOT" <<'PY'
+import importlib.util
+import sys
+
+spec = importlib.util.spec_from_file_location("fm_markdown_preview", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+source = sys.argv[2]
+directory = sys.argv[3]
+
+def expect_preview_error(call, required, forbidden=None):
+    try:
+        call()
+    except module.PreviewError as error:
+        message = str(error)
+        if required not in message:
+            raise SystemExit(f"missing controlled error text: {message}")
+        if forbidden is not None and forbidden in message:
+            raise SystemExit(f"masked original preview error: {message}")
+    else:
+        raise SystemExit("descriptor failure unexpectedly succeeded")
+
+original_fstat = module.os.fstat
+def fail_fstat(_fd):
+    raise OSError("injected fstat failure")
+module.os.fstat = fail_fstat
+try:
+    expect_preview_error(
+        lambda: module.read_source(source),
+        "cannot read Markdown source",
+    )
+finally:
+    module.os.fstat = original_fstat
+
+original_read = module.os.read
+def fail_read(_fd, _count):
+    raise OSError("injected read failure")
+module.os.read = fail_read
+try:
+    expect_preview_error(
+        lambda: module.read_source(source),
+        "cannot read Markdown source",
+    )
+finally:
+    module.os.read = original_read
+
+original_close = module.os.close
+def fail_close(fd):
+    original_close(fd)
+    raise OSError("injected close failure")
+module.os.close = fail_close
+try:
+    expect_preview_error(
+        lambda: module.read_source(source),
+        "cannot close Markdown source",
+    )
+    expect_preview_error(
+        lambda: module.read_source(directory),
+        "not a regular file",
+        "close failure",
+    )
+finally:
+    module.os.close = original_close
+PY
+  then
+    fail "source descriptor errors escaped the controlled failure contract"
+  fi
+  pass "source descriptor errors remain controlled"
+}
+
 test_changed_source_fails_closed() {
   local source="$TMP_ROOT/changed.md" capture="$TMP_ROOT/changed-capture" rc=0
   printf '# Original snapshot\n' >"$source"
@@ -312,6 +386,38 @@ PY
     fail "server cleanup deadlocked when its thread never started"
   fi
   pass "unstarted server thread closes without shutdown deadlock"
+}
+
+test_server_bind_errors_are_controlled() {
+  local source="$TMP_ROOT/server-bind.md"
+  printf '# Server bind failure\n' >"$source"
+
+  if ! python3 - "$HELPER" "$OPENER" "$source" <<'PY'
+import importlib.util
+import sys
+from types import SimpleNamespace
+
+spec = importlib.util.spec_from_file_location("fm_markdown_preview", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+
+def fail_server(_state):
+    raise OSError("injected bind failure")
+
+module.PreviewServer = fail_server
+args = SimpleNamespace(file=sys.argv[3], opener=sys.argv[2], timeout=0.2)
+try:
+    module.run(args)
+except module.PreviewError as error:
+    if "could not start local preview server" not in str(error):
+        raise
+else:
+    raise SystemExit("server bind failure unexpectedly succeeded")
+PY
+  then
+    fail "server bind error escaped the controlled failure contract"
+  fi
+  pass "server bind errors remain controlled"
 }
 
 test_inline_delimiter_scan_is_bounded() {
@@ -546,11 +652,13 @@ PY
 
 test_safe_render_and_cleanup
 test_fifo_source_is_rejected_without_blocking
+test_source_descriptor_errors_are_controlled
 test_changed_source_fails_closed
 test_server_wait_is_bounded
 test_verified_delivery_detaches_long_lived_opener
 test_verification_bypasses_proxy_environment
 test_unstarted_server_thread_cleans_up_without_deadlock
+test_server_bind_errors_are_controlled
 test_inline_delimiter_scan_is_bounded
 test_inline_fragment_budget_fails_before_accumulation
 test_block_parser_scans_are_bounded
