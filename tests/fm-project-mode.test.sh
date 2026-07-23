@@ -224,6 +224,7 @@ test_every_caller_reads_the_field_it_intends() {
       case "$window" in
         *'read -r mode _'*|*'read -r MODE _'*) ;;               # mode only
         *'%% *'*) ;;                                            # mode only
+        *"cut -d' ' -f1"*) ;;                                   # mode only
         *'read -r MODE GRANTS'*) ;;                             # mode and grants
         *) fail "unreviewed fm-project-mode.sh caller at $file:$line"$'\n'"$window" ;;
       esac
@@ -233,7 +234,11 @@ test_every_caller_reads_the_field_it_intends() {
     # the script name but never invokes it, so it must not register as a caller.
     done < <(grep -nE 'bin/fm-project-mode\.sh"' "$file" | grep -v ':[[:space:]]*#' | cut -d: -f1)
   done < <(grep -rl 'fm-project-mode\.sh' "$ROOT/bin")
-  [ "$callers" -ge 6 ] || fail "expected at least 6 resolver call sites in bin/, found $callers"
+  # Floor is the live inventory, not a historical one: fm-spawn's deviation
+  # notice, fm-fleet-sync's local-only skip, and fm-home-seed's three sites.
+  # fm-brief.sh stopped resolving from the registry when a ship task's mode
+  # became an explicit spawn-time argument, so the count is 5, not 6.
+  [ "$callers" -ge 5 ] || fail "expected at least 5 resolver call sites in bin/, found $callers"
   pass "every fm-project-mode.sh caller in bin/ reads the field it intends ($callers sites)"
 }
 
