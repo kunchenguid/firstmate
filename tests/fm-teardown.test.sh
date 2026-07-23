@@ -2217,7 +2217,7 @@ SH
 }
 
 test_forced_secondmate_retains_unverified_process_group() {
-  local case_dir child_worktree child_id lock child_pid_file rc
+  local case_dir child_worktree child_id lock child_pid_file rc group anchor_state owner
   child_id=child-return-unverified-x8
   setup_forced_secondmate_child_case secondmate-child-return-unverified "$child_id"
   case_dir=$FORCED_CHILD_CASE_DIR
@@ -2250,10 +2250,14 @@ SH
   rc=$?
   set -e
 
-  expect_code 125 "$rc" "unverified Treehouse process cleanup should fail distinctly"
+  expect_code 76 "$rc" "unverified Treehouse process cleanup should fail distinctly"
   assert_present "$child_pid_file" "unverified Treehouse return did not start its descendant"
   assert_present "$lock" "unverified process cleanup released the checkout lock"
   assert_present "$lock/process-group" "unverified process cleanup lost its guarded group identity"
+  group=$(cat "$lock/process-group")
+  anchor_state=$(ps -p "$group" -o pid= -o pgid= 2>/dev/null | awk '{$1=$1; print}')
+  [ "$anchor_state" = "$group $group" ] \
+    || fail "unverified process cleanup did not retain its identity-pinned group anchor"
   assert_present "$child_worktree" "unverified process cleanup deleted the child worktree"
   assert_present "$case_dir/wt/state/$child_id.meta" "unverified process cleanup removed child retry metadata"
   assert_present "$case_dir/state/task-x1.meta" "unverified process cleanup removed parent retry metadata"
@@ -2261,7 +2265,31 @@ SH
     "unverified process cleanup did not surface the supervisor failure"
   assert_grep "Treehouse return process cleanup could not be verified" "$case_dir/stderr" \
     "unverified process cleanup did not surface retain-only Treehouse handling"
+  owner=$(readlink "$lock")
+  kill -KILL -- "-$group" 2>/dev/null || true
+  for _ in $(seq 1 50); do
+    kill -0 "$group" 2>/dev/null || break
+    sleep 0.02
+  done
+  ! kill -0 "$group" 2>/dev/null || fail "test cleanup could not terminate retained anchored group $group"
+  rm -f "$lock"
+  rm -rf "$owner"
   pass "unverified Treehouse process cleanup retains worktree and checkout lock"
+}
+
+test_bounded_runner_preserves_command_status_125() {
+  local rc
+  # shellcheck source=bin/fm-process-tree-lib.sh
+  . "$ROOT/bin/fm-process-tree-lib.sh"
+  if fm_run_bounded 2 sh -c 'exit 125'; then
+    rc=0
+  else
+    rc=$?
+  fi
+  expect_code 125 "$rc" "bounded runner changed a legitimate command exit 125"
+  [ "$FM_PROCESS_TREE_CLEANUP_STATUS" = verified ] \
+    || fail "bounded runner confused command exit 125 with cleanup failure"
+  pass "bounded runner preserves command exit 125 separately from cleanup state"
 }
 
 test_forced_secondmate_retains_child_when_treehouse_unavailable() {
@@ -2693,6 +2721,14 @@ if [ "${FM_TEST_FOCUSED:-}" = review-round-11-process-group ]; then
   test_forced_secondmate_retains_child_on_treehouse_failure
   test_treehouse_return_timeout_reaps_children_before_unlock
   test_forced_secondmate_retains_unverified_process_group
+  exit 0
+fi
+
+if [ "${FM_TEST_FOCUSED:-}" = review-round-12-ownership ]; then
+  test_forced_secondmate_retains_child_on_treehouse_failure
+  test_treehouse_return_timeout_reaps_children_before_unlock
+  test_forced_secondmate_retains_unverified_process_group
+  test_bounded_runner_preserves_command_status_125
   exit 0
 fi
 

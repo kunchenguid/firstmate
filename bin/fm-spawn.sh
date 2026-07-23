@@ -1206,6 +1206,7 @@ cleanup_continuation_launch_transport() {
 }
 
 spawn_return_created_worktree() {
+  local return_output return_status
   [ "$WORKTREE_CREATED" = 1 ] || return 0
   [ "${BACKEND:-tmux}" != orca ] || return 0
   [ -n "${WT:-}" ] && [ -d "$WT" ] || return 0
@@ -1223,7 +1224,19 @@ spawn_return_created_worktree() {
     echo "warning: retained acquired worktree $WT because post-cleanup repository safety could not be re-proven" >&2
     return 1
   fi
-  fm_checkout_treehouse_return "$WT" "$CHECKOUT_LOCK_ROOT" "$PROJ_ABS" >/dev/null 2>&1
+  if return_output=$(fm_checkout_treehouse_return "$WT" "$CHECKOUT_LOCK_ROOT" "$PROJ_ABS" 2>&1); then
+    [ -z "$return_output" ] || printf '%s\n' "$return_output" >&2
+    return 0
+  else
+    return_status=$?
+  fi
+  [ -z "$return_output" ] || printf '%s\n' "$return_output" >&2
+  case "$return_status:$return_output" in
+    "$FM_CHECKOUT_PROCESS_CLEANUP_FAILURE_STATUS:"*"Treehouse return process cleanup could not be verified"*)
+      echo "warning: retained rollback worktree $WT because Treehouse return process cleanup is unverified; inspect the reported anchored process group, terminate only its remaining processes, and retry cleanup" >&2
+      ;;
+  esac
+  return "$return_status"
 }
 
 spawn_restore_unmanaged_state_locked() {

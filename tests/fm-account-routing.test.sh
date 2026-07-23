@@ -197,6 +197,14 @@ if [ "${1:-}" = return ] && [ -n "${FM_EXPECT_CHECKOUT_LOCK:-}" ]; then
   kill -0 "$lock_pid" 2>/dev/null || exit 92
   [ -z "${FM_EXPECT_CHECKOUT_LOCK_MARKER:-}" ] || touch "$FM_EXPECT_CHECKOUT_LOCK_MARKER"
 fi
+if [ "${1:-}" = return ] && [ -n "${FM_FAKE_TREEHOUSE_RETURN_CHILD_PID_FILE:-}" ]; then
+  [ -z "${FM_FAKE_TREEHOUSE_RETURN_MARKER:-}" ] || : > "$FM_FAKE_TREEHOUSE_RETURN_MARKER"
+  (
+    trap '' HUP TERM
+    while :; do sleep 0.1; done
+  ) &
+  printf '%s\n' "$!" > "$FM_FAKE_TREEHOUSE_RETURN_CHILD_PID_FILE"
+fi
 if [ "${1:-}" = get ]; then
   printf '%s\n' "${FM_FAKE_TREEHOUSE_PATH:?}"
 fi
@@ -403,6 +411,9 @@ run_spawn() {
     FM_EXPECT_CHECKOUT_LOCK_MARKER="${FM_EXPECT_CHECKOUT_LOCK_MARKER:-}" \
     FM_FAKE_TREEHOUSE_PATH="$WT_DIR" FM_TREEHOUSE_ROOT="$CASE_DIR/treehouse-pools" \
     FM_FAKE_TREEHOUSE_SLEEP="${FM_FAKE_TREEHOUSE_SLEEP:-}" \
+    FM_FAKE_TREEHOUSE_RETURN_CHILD_PID_FILE="${FM_FAKE_TREEHOUSE_RETURN_CHILD_PID_FILE:-}" \
+    FM_FAKE_TREEHOUSE_RETURN_MARKER="${FM_FAKE_TREEHOUSE_RETURN_MARKER:-}" \
+    FM_TEST_REAL_PS="${FM_TEST_REAL_PS:-}" \
     FM_TREEHOUSE_ACQUIRE_TIMEOUT="${FM_TREEHOUSE_ACQUIRE_TIMEOUT:-60}" \
     FM_FAKE_ORCA_LOG="$ORCA_LOG" \
     FM_FAKE_TMUX_FAIL_SEND_MATCH="${FM_FAKE_TMUX_FAIL_SEND_MATCH:-}" \
@@ -678,6 +689,63 @@ test_unmanaged_postinstall_failure_restores_prior_state() {
     "spawn rollback did not hold the common checkout lock during Treehouse return"
   [ -n "$out" ] || true
   pass "unmanaged post-install failures restore prior lifecycle state transactionally"
+}
+
+test_spawn_rollback_relays_unverified_treehouse_cleanup() {
+  local id rec out status real_ps common key lock group owner child_pid
+  id=checkout-unverified-return-z1h
+  rec=$(make_case checkout-unverified-return pi "$id")
+  read_case "$rec"
+  real_ps=$(command -v ps)
+  cat > "$FAKEBIN_DIR/ps" <<'SH'
+#!/usr/bin/env bash
+if [ -f "${FM_FAKE_TREEHOUSE_RETURN_MARKER:-/nonexistent}" ] \
+  && [ "$*" = "-axo pid=,pgid=" ]; then
+  exit 1
+fi
+exec "${FM_TEST_REAL_PS:?}" "$@"
+SH
+  chmod +x "$FAKEBIN_DIR/ps"
+
+  if out=$(FM_TEST_REAL_PS="$real_ps" \
+      FM_FAKE_TREEHOUSE_RETURN_CHILD_PID_FILE="$CASE_DIR/treehouse-return-child.pid" \
+      FM_FAKE_TREEHOUSE_RETURN_MARKER="$CASE_DIR/treehouse-return-started" \
+      FM_FAKE_TMUX_FAIL_SEND_MATCH=GOTMPDIR run_spawn "$id" "$PROJ_DIR"); then
+    status=0
+  else
+    status=$?
+  fi
+
+  [ "$status" -ne 0 ] || fail "spawn with unverified rollback cleanup unexpectedly succeeded"
+  common=$(git -C "$WT_DIR" rev-parse --git-common-dir)
+  case "$common" in /*) ;; *) common="$WT_DIR/$common" ;; esac
+  common=$(cd "$common" && pwd -P)
+  key=$(printf '%s' "$common" | shasum -a 256 | awk '{print substr($1,1,24)}')
+  lock="$CASE_DIR/checkout-refresh-locks/$key.lock"
+  assert_present "$CASE_DIR/treehouse-return-child.pid" \
+    "spawn rollback did not exercise a surviving Treehouse descendant"
+  assert_present "$lock" "spawn rollback released an unverified checkout lock"
+  assert_present "$lock/process-group" "spawn rollback lost the guarded process-group identity"
+  assert_contains "$out" "bounded command process cleanup could not be verified for anchored group" \
+    "spawn rollback suppressed the bounded supervisor diagnostic"
+  assert_contains "$out" "Treehouse return process cleanup could not be verified" \
+    "spawn rollback suppressed the locked-return cleanup diagnostic"
+  assert_contains "$out" "retained rollback worktree $WT_DIR" \
+    "spawn rollback did not provide actionable retain-only recovery guidance"
+  group=$(cat "$lock/process-group")
+  child_pid=$(cat "$CASE_DIR/treehouse-return-child.pid")
+  kill -0 "$child_pid" 2>/dev/null \
+    || fail "unverified Treehouse descendant exited before retention could be inspected"
+  owner=$(readlink "$lock")
+  kill -KILL -- "-$group" 2>/dev/null || true
+  for _ in $(seq 1 50); do
+    kill -0 "$group" 2>/dev/null || break
+    sleep 0.02
+  done
+  ! kill -0 "$group" 2>/dev/null || fail "test cleanup could not terminate retained anchored group $group"
+  rm -f "$lock"
+  rm -rf "$owner"
+  pass "spawn rollback relays unverified cleanup and retains guarded resources"
 }
 
 test_unmanaged_rollback_waits_for_metadata_lock() {
@@ -5701,6 +5769,12 @@ if [ "${FM_TEST_FOCUSED:-}" = review-round-4 ]; then
   run_isolated_test test_treehouse_acquisition_timeout_is_bounded_before_endpoint_creation
   run_isolated_test test_changed_acquisition_is_retained_during_unmanaged_rollback
   run_isolated_test test_unmanaged_postinstall_failure_restores_prior_state
+  exit 0
+fi
+
+if [ "${FM_TEST_FOCUSED:-}" = review-round-12-ownership ]; then
+  run_isolated_test test_unmanaged_postinstall_failure_restores_prior_state
+  run_isolated_test test_spawn_rollback_relays_unverified_treehouse_cleanup
   exit 0
 fi
 

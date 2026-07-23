@@ -13,6 +13,7 @@ FM_CHECKOUT_LOCK_HELPERS_LOADED=0
 FM_CHECKOUT_TREEHOUSE_RETURN_CONFIG_STATUS=64
 FM_CHECKOUT_LOCK_FAILURE_STATUS=74
 FM_CHECKOUT_LOCK_CONTENTION_STATUS=75
+FM_CHECKOUT_PROCESS_CLEANUP_FAILURE_STATUS=76
 FM_CHECKOUT_TREEHOUSE_RETURN_TIMEOUT_STATUS=124
 FM_CHECKOUT_TREEHOUSE_RETURN_UNAVAILABLE_STATUS=127
 # shellcheck source=bin/fm-process-tree-lib.sh
@@ -117,7 +118,7 @@ fm_checkout_lock_run() {
 }
 
 fm_checkout_treehouse_return_locked() {
-  local checkout=$1 lock_root=$2 project=$3 checkout_lock timeout status
+  local checkout=$1 lock_root=$2 project=$3 checkout_lock timeout status previous_dir cleanup_status
   checkout_lock=$(fm_checkout_lock_path "$checkout" "$lock_root") || {
     echo "error: cannot resolve shared checkout mutation lock identity for $checkout" >&2
     return "$FM_CHECKOUT_LOCK_FAILURE_STATUS"
@@ -133,15 +134,22 @@ fm_checkout_treehouse_return_locked() {
       return "$FM_CHECKOUT_TREEHOUSE_RETURN_CONFIG_STATUS"
       ;;
   esac
-  if ( cd "$project" && fm_run_bounded "$timeout" treehouse return --force "$checkout" ); then
-    return 0
+  previous_dir=$(pwd -P) || return "$FM_CHECKOUT_LOCK_FAILURE_STATUS"
+  cd "$project" || return "$FM_CHECKOUT_LOCK_FAILURE_STATUS"
+  if fm_run_bounded "$timeout" treehouse return --force "$checkout"; then
+    status=0
   else
     status=$?
   fi
+  cleanup_status=$FM_PROCESS_TREE_CLEANUP_STATUS
+  cd "$previous_dir" || return "$FM_CHECKOUT_LOCK_FAILURE_STATUS"
+  if [ "$cleanup_status" != verified ]; then
+    echo "error: Treehouse return process cleanup could not be verified for $checkout; retained for inspection under the guarded checkout lock" >&2
+    return "$FM_CHECKOUT_PROCESS_CLEANUP_FAILURE_STATUS"
+  fi
+  [ "$status" -ne 0 ] || return 0
   if [ "$status" -eq "$FM_CHECKOUT_TREEHOUSE_RETURN_TIMEOUT_STATUS" ]; then
     echo "error: Treehouse return timed out after ${timeout}s for $checkout" >&2
-  elif [ "$status" -eq "$FM_PROCESS_TREE_CLEANUP_FAILURE_STATUS" ]; then
-    echo "error: Treehouse return process cleanup could not be verified for $checkout; retained for inspection" >&2
   fi
   return "$status"
 }
@@ -156,7 +164,7 @@ fm_checkout_treehouse_return_requires_retention() {
   [ "$1" -eq "$FM_CHECKOUT_TREEHOUSE_RETURN_CONFIG_STATUS" ] \
     || [ "$1" -eq "$FM_CHECKOUT_LOCK_FAILURE_STATUS" ] \
     || [ "$1" -eq "$FM_CHECKOUT_LOCK_CONTENTION_STATUS" ] \
+    || [ "$1" -eq "$FM_CHECKOUT_PROCESS_CLEANUP_FAILURE_STATUS" ] \
     || [ "$1" -eq "$FM_CHECKOUT_TREEHOUSE_RETURN_TIMEOUT_STATUS" ] \
-    || [ "$1" -eq "$FM_PROCESS_TREE_CLEANUP_FAILURE_STATUS" ] \
     || [ "$1" -eq "$FM_CHECKOUT_TREEHOUSE_RETURN_UNAVAILABLE_STATUS" ]
 }

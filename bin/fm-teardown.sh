@@ -368,11 +368,16 @@ LIVE_DEFAULT_BRANCH=
 LIVE_DEFAULT_TIP=
 LIVE_DEFAULT_OUTPUT=
 probe_live_origin_default() {
-  local line ref
+  local line ref status
   LIVE_DEFAULT_BRANCH=
   LIVE_DEFAULT_TIP=
-  LIVE_DEFAULT_OUTPUT=$(fm_run_bounded "$TEARDOWN_UPSTREAM_TIMEOUT" \
-    git -C "$WT" ls-remote --symref origin HEAD 2>&1) || return 1
+  if fm_run_bounded_capture --combine-stderr LIVE_DEFAULT_OUTPUT "$TEARDOWN_UPSTREAM_TIMEOUT" \
+      git -C "$WT" ls-remote --symref origin HEAD; then
+    status=0
+  else
+    status=$?
+  fi
+  [ "$status" -eq 0 ] && fm_process_tree_cleanup_verified || return 1
   while IFS= read -r line; do
     case "$line" in
       "ref: refs/heads/"*$'\t'"HEAD")
@@ -545,7 +550,7 @@ content_matches_ref() {
 }
 
 content_in_origin_default() {
-  local initial_branch initial_tip ref fetched fetch_output reason
+  local initial_branch initial_tip ref fetched fetch_output reason fetch_status
   if ! probe_live_origin_default; then
     reason=$(printf '%s\n' "$LIVE_DEFAULT_OUTPUT" | sed -n '1s/[[:space:]]\{1,\}/ /g;1p')
     echo "teardown: cannot prove the live origin default for $PROJ${reason:+: $reason}; retaining $WT" >&2
@@ -553,9 +558,14 @@ content_in_origin_default() {
   fi
   initial_branch=$LIVE_DEFAULT_BRANCH
   initial_tip=$LIVE_DEFAULT_TIP
-  if ! fetch_output=$(fm_run_bounded "$TEARDOWN_UPSTREAM_TIMEOUT" \
+  if fm_run_bounded_capture --combine-stderr fetch_output "$TEARDOWN_UPSTREAM_TIMEOUT" \
       git -C "$WT" fetch --quiet origin \
-      "+refs/heads/$initial_branch:refs/remotes/origin/$initial_branch" 2>&1); then
+      "+refs/heads/$initial_branch:refs/remotes/origin/$initial_branch"; then
+    fetch_status=0
+  else
+    fetch_status=$?
+  fi
+  if [ "$fetch_status" -ne 0 ] || ! fm_process_tree_cleanup_verified; then
     reason=$(printf '%s\n' "$fetch_output" | sed -n '1s/[[:space:]]\{1,\}/ /g;1p')
     echo "teardown: cannot fetch live origin/$initial_branch for landing proof${reason:+: $reason}; retaining $WT" >&2
     return 1

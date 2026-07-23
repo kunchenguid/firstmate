@@ -460,14 +460,22 @@ acquire_worktree() {
     export FM_PROCESS_TREE_GUARD_FILE="${FM_LOCK_OWNER_DIR:?}/process-group"
     trap 'fm_lock_release "$checkout_lock"' EXIT
     cd "$expected_source" || exit 1
-    fm_run_bounded "$ACQUIRE_TIMEOUT" treehouse get --lease --lease-holder "$lease_holder"
+    if fm_run_bounded "$ACQUIRE_TIMEOUT" treehouse get --lease --lease-holder "$lease_holder"; then
+      status=0
+    else
+      status=$?
+    fi
+    if ! fm_process_tree_cleanup_verified; then
+      exit "$FM_CHECKOUT_PROCESS_CLEANUP_FAILURE_STATUS"
+    fi
+    exit "$status"
   ) || status=$?
   case "$status" in
     0) return 0 ;;
     124)
       echo "error: Treehouse worktree acquisition timed out after ${ACQUIRE_TIMEOUT}s and terminated its process tree" >&2
       ;;
-    "$FM_PROCESS_TREE_CLEANUP_FAILURE_STATUS")
+    "$FM_CHECKOUT_PROCESS_CLEANUP_FAILURE_STATUS")
       echo "error: Treehouse worktree acquisition process cleanup could not be verified; no worktree was accepted for $lease_holder" >&2
       ;;
     *)
@@ -480,10 +488,16 @@ acquire_worktree() {
 PROBE_BRANCH=
 PROBE_TIP=
 probe_upstream() {
-  local checkout=$1 out line ref
+  local checkout=$1 out line ref status
   PROBE_BRANCH=
   PROBE_TIP=
-  out=$(fm_run_bounded "$PROBE_TIMEOUT" git -C "$checkout" ls-remote --symref origin HEAD 2>/dev/null) || return 1
+  if fm_run_bounded_capture out "$PROBE_TIMEOUT" \
+      git -C "$checkout" ls-remote --symref origin HEAD 2>/dev/null; then
+    status=0
+  else
+    status=$?
+  fi
+  [ "$status" -eq 0 ] && fm_process_tree_cleanup_verified || return 1
   while IFS= read -r line; do
     case "$line" in
       "ref: refs/heads/"*$'\t'"HEAD")

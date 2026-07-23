@@ -376,11 +376,15 @@ sync_project() (
     echo "$PROJ: skipped: repository lock identity cannot be resolved"
     return 0
   }
-  if ! fm_lock_try_acquire "$checkout_lock"; then
-    echo "$PROJ: skipped: refresh already running (pid ${FM_LOCK_HELD_PID:-unknown})"
-    return 0
+  FM_CHECKOUT_LOCK_ACTIVE_PATH=${FM_FLEET_SYNC_LOCK_PATH:-}
+  FM_CHECKOUT_LOCK_ACTIVE_OWNER_DIR=${FM_FLEET_SYNC_LOCK_OWNER_DIR:-}
+  FM_CHECKOUT_LOCK_ACTIVE_OWNER_PID=${FM_FLEET_SYNC_LOCK_OWNER_PID:-}
+  if [ "${FM_FLEET_SYNC_BOUNDED_CHILD:-0}" != 1 ] \
+    || [ "$FM_CHECKOUT_LOCK_ACTIVE_PATH" != "$checkout_lock" ] \
+    || ! fm_checkout_lock_active_scope_owns "$checkout_lock"; then
+    echo "$label: skipped: bounded refresh does not own the shared checkout mutation lock"
+    return "$FM_CHECKOUT_LOCK_FAILURE_STATUS"
   fi
-  trap 'fm_lock_release "$checkout_lock"' EXIT
 
   if ! fetch_with_packed_refs_lock_guard; then
     reason="fetch failed"
@@ -509,31 +513,67 @@ sync_project() (
   return 0
 )
 
-run_sync_project_bounded() {
-  local project=$1 status label
-  if fm_run_bounded "$FLEET_SYNC_TIMEOUT" \
-      env FM_FLEET_SYNC_BOUNDED_CHILD=1 "$SCRIPT_DIR/fm-fleet-sync.sh" "$project"; then
+run_sync_project_bounded() (
+  local project=$1 status label checkout_lock lock_owner_dir lock_owner_pid cleanup_status
+  if [ ! -d "$project" ] \
+    || ! git -C "$project" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    sync_project "$project"
+    return
+  fi
+  PROJ=$project
+  label=$(project_label)
+  if ! fm_checkout_lock_prepare "$CHECKOUT_LOCK_ROOT"; then
+    echo "$project: skipped: refresh lock setup failed"
     return 0
+  fi
+  checkout_lock=$(fm_checkout_lock_path "$project" "$CHECKOUT_LOCK_ROOT") || {
+    echo "$project: skipped: repository lock identity cannot be resolved"
+    return 0
+  }
+  if ! fm_lock_try_acquire "$checkout_lock"; then
+    echo "$project: skipped: refresh already running (pid ${FM_LOCK_HELD_PID:-unknown})"
+    return 0
+  fi
+  lock_owner_dir=${FM_LOCK_OWNER_DIR:?}
+  lock_owner_pid=$(cat "$lock_owner_dir/pid" 2>/dev/null) || {
+    fm_lock_release "$checkout_lock"
+    echo "$project: skipped: refresh lock ownership cannot be proved"
+    return 0
+  }
+  export FM_PROCESS_TREE_GUARD_FILE="$lock_owner_dir/process-group"
+  trap 'fm_lock_release "$checkout_lock"' EXIT
+  if fm_run_bounded "$FLEET_SYNC_TIMEOUT" \
+      env FM_FLEET_SYNC_BOUNDED_CHILD=1 \
+      FM_FLEET_SYNC_LOCK_PATH="$checkout_lock" \
+      FM_FLEET_SYNC_LOCK_OWNER_DIR="$lock_owner_dir" \
+      FM_FLEET_SYNC_LOCK_OWNER_PID="$lock_owner_pid" \
+      "$SCRIPT_DIR/fm-fleet-sync.sh" "$project"; then
+    status=0
   else
     status=$?
   fi
+  cleanup_status=$FM_PROCESS_TREE_CLEANUP_STATUS
+  if [ "$cleanup_status" != verified ]; then
+    printf '%s: skipped: refresh process cleanup is unverified; the guarded checkout lock is retained for inspection\n' "$label"
+    return "$FM_CHECKOUT_PROCESS_CLEANUP_FAILURE_STATUS"
+  fi
+  [ "$status" -ne 0 ] || return 0
   if [ "$status" -eq 124 ]; then
-    PROJ=$project
-    label=$(project_label)
     printf '%s: skipped: refresh timed out after %ss\n' "$label" "$FLEET_SYNC_TIMEOUT"
     return 0
   fi
   return "$status"
-}
+)
 
 if [ $# -eq 1 ]; then
   project=$(resolve_project_arg "$1")
   if [ "${FM_FLEET_SYNC_BOUNDED_CHILD:-0}" = 1 ]; then
     sync_project "$project"
+    exit $?
   else
     run_sync_project_bounded "$project"
+    exit $?
   fi
-  exit 0
 fi
 
 [ -d "$PROJECTS" ] || exit 0

@@ -396,13 +396,19 @@ test_direct_sync_honors_shared_checkout_lock() {
 }
 
 test_direct_sync_timeout_terminates_descendants() {
-  local home clone fakebin real_git out status parent_pid child_pid
+  local home clone fakebin real_git out status parent_pid child_pid common key lock_root lock
   home=$(new_home)
   clone=$(build_pair "$home" direct-timeout)
   advance_origin "$home" direct-timeout C1
   fakebin="$home/direct-timeout-fakebin"
   real_git=$(command -v git)
   mkdir -p "$fakebin"
+  common=$(git -C "$clone" rev-parse --git-common-dir)
+  case "$common" in /*) ;; *) common="$clone/$common" ;; esac
+  common=$(cd "$common" && pwd -P)
+  key=$(printf '%s' "$common" | shasum -a 256 | awk '{print substr($1,1,24)}')
+  lock_root="$home/checkout-refresh-state/locks"
+  lock="$lock_root/$key.lock"
   cat > "$fakebin/git" <<'SH'
 #!/usr/bin/env bash
 is_fetch=0
@@ -410,14 +416,23 @@ for arg in "$@"; do
   [ "$arg" = fetch ] && is_fetch=1
 done
 if [ "$is_fetch" -eq 1 ]; then
-  trap '' TERM
+  if { [ -e "$FM_TEST_EXPECT_LOCK" ] || [ -L "$FM_TEST_EXPECT_LOCK" ]; } \
+    && lock_pid=$(cat "$FM_TEST_EXPECT_LOCK/pid" 2>/dev/null) \
+    && kill -0 "$lock_pid" 2>/dev/null; then
+    : > "$FM_TEST_LOCK_BEFORE_MUTATION"
+  fi
+  trap '
+    if [ -e "$FM_TEST_EXPECT_LOCK" ] || [ -L "$FM_TEST_EXPECT_LOCK" ]; then
+      : > "$FM_TEST_LOCK_DURING_CLEANUP"
+    fi
+  ' TERM
   printf '%s\n' "$BASHPID" > "${FM_TEST_FETCH_PARENT:?}"
   (
     trap '' TERM
     printf '%s\n' "$BASHPID" > "${FM_TEST_FETCH_CHILD:?}"
-    while :; do sleep 1; done
+    while :; do sleep 0.1; done
   ) &
-  wait
+  while :; do wait || true; done
 fi
 exec "${FM_TEST_REAL_GIT:?}" "$@"
 SH
@@ -427,6 +442,9 @@ SH
   out=$(FM_TEST_REAL_GIT="$real_git" \
     FM_TEST_FETCH_PARENT="$home/direct-fetch-parent.pid" \
     FM_TEST_FETCH_CHILD="$home/direct-fetch-child.pid" \
+    FM_TEST_EXPECT_LOCK="$lock" \
+    FM_TEST_LOCK_BEFORE_MUTATION="$home/lock-before-mutation" \
+    FM_TEST_LOCK_DURING_CLEANUP="$home/lock-during-cleanup" \
     FM_CHECKOUT_REFRESH_SYNC_TIMEOUT=1 \
     FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
     FM_CHECKOUT_REFRESH_STATE_BASE="$home/checkout-refresh-state" \
@@ -443,6 +461,11 @@ SH
   if kill -0 "$parent_pid" 2>/dev/null || kill -0 "$child_pid" 2>/dev/null; then
     fail "direct fleet sync returned while a fetch descendant was still alive"
   fi
+  assert_present "$home/lock-before-mutation" \
+    "direct fleet sync started mutation before the supervising process acquired the checkout lock"
+  assert_present "$home/lock-during-cleanup" \
+    "direct fleet sync released the checkout lock before descendant cleanup"
+  assert_absent "$lock" "direct fleet sync retained its checkout lock after verified cleanup"
   pass "direct fleet sync bounds and reaps its mutation process tree"
 }
 
@@ -746,6 +769,12 @@ test_non_signature_fetch_failure_is_not_retried() {
 
 if [ "${FM_TEST_FOCUSED:-}" = review-round-6 ]; then
   test_live_default_probe_overrides_stale_origin_head
+  test_direct_sync_honors_shared_checkout_lock
+  test_direct_sync_timeout_terminates_descendants
+  exit 0
+fi
+
+if [ "${FM_TEST_FOCUSED:-}" = review-round-12-ownership ]; then
   test_direct_sync_honors_shared_checkout_lock
   test_direct_sync_timeout_terminates_descendants
   exit 0
