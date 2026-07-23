@@ -608,6 +608,20 @@ EOF
   chmod +x "$home/fakebin/shasum"
 }
 
+install_late_active_mutator() {  # <home>
+  local home=$1
+  cat > "$home/fakebin/shasum" <<'EOF'
+#!/usr/bin/env bash
+if [ "$#" -eq 2 ] && [ "$1" = -a ] && [ "$2" = 256 ] \
+  && [ ! -f "$FM_HOME/late-active-mutated" ]; then
+  : > "$FM_HOME/late-active-mutated"
+  cat "$FM_HOME/late-active-append" >> "$FM_HOME/data/backlog.md"
+fi
+exec "$REAL_SHASUM" "$@"
+EOF
+  chmod +x "$home/fakebin/shasum"
+}
+
 test_retained_decisions_are_strictly_archive_aware() {
   local home origin older_hold newer_hold archive record unresolved_record heading digest closed variant before after show
   local separator_label separator_code separator
@@ -848,6 +862,12 @@ NODE
   rewrite_once "$variant/data/done-archive.md" "(hold-kind: captain)" "(hold-kind: ship)"
   assert_archive_verify_fails "$variant" "$origin" wrong-hold-kind-record
 
+  variant=$(clone_home "$home" retained-empty-hold-reason)
+  rewrite_once "$variant/data/done-archive.md" "(hold: captain retained route pending)" "(hold: )"
+  assert_archive_verify_fails "$variant" "$origin" empty-hold-reason
+  assert_grep "has no hold reason" "$variant/empty-hold-reason.err" \
+    "an encoded empty hold reason passed archived validation"
+
   variant=$(clone_home "$home" retained-invalid-closure)
   rewrite_once "$variant/data/done-archive.md" "(done $closed)" "(done 2026-02-31)"
   assert_archive_verify_fails "$variant" "$origin" invalid-closure-record
@@ -863,6 +883,11 @@ NODE
     "  Decision digest: e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
   rewrite_once "$variant/data/done-archive.md" "  Use the retained route." "  "
   assert_archive_verify_fails "$variant" "$origin" empty-decision-record
+
+  variant=$(clone_home "$home" retained-lossy-blank-line)
+  rewrite_once "$variant/data/done-archive.md" \
+    $'\n\n  Combining: ' $'\n \t\n  Combining: '
+  assert_archive_verify_fails "$variant" "$origin" lossy-blank-line
 
   variant=$(clone_home "$home" retained-unresolved)
   rewrite_once "$variant/data/done-archive.md" \
@@ -1007,6 +1032,42 @@ EOF
   assert_archive_verify_fails "$variant" "$origin" unreadable-archive
   chmod 600 "$variant/data/done-archive.md"
 
+  variant=$(clone_home "$home" retained-absent-active-store)
+  rewrite_once "$variant/state/$origin.meta" "decision_keys=newer,older" "decision_keys=older"
+  rm "$variant/data/backlog.md"
+  run_decisions "$variant" verify "$origin" >/dev/null \
+    || fail "an absent active store was not treated as empty"
+
+  variant=$(clone_home "$home" retained-symlink-active-store)
+  rewrite_once "$variant/state/$origin.meta" "decision_keys=newer,older" "decision_keys=older"
+  mv "$variant/data/backlog.md" "$variant/data/backlog-target.md"
+  ln -s backlog-target.md "$variant/data/backlog.md"
+  assert_archive_verify_fails "$variant" "$origin" symlink-active-store
+
+  variant=$(clone_home "$home" retained-broken-symlink-active-store)
+  rewrite_once "$variant/state/$origin.meta" "decision_keys=newer,older" "decision_keys=older"
+  rm "$variant/data/backlog.md"
+  ln -s missing-backlog.md "$variant/data/backlog.md"
+  assert_archive_verify_fails "$variant" "$origin" broken-symlink-active-store
+
+  variant=$(clone_home "$home" retained-directory-active-store)
+  rewrite_once "$variant/state/$origin.meta" "decision_keys=newer,older" "decision_keys=older"
+  mv "$variant/data/backlog.md" "$variant/data/backlog-target.md"
+  mkdir "$variant/data/backlog.md"
+  assert_archive_verify_fails "$variant" "$origin" directory-active-store
+
+  variant=$(clone_home "$home" retained-fifo-active-store)
+  rewrite_once "$variant/state/$origin.meta" "decision_keys=newer,older" "decision_keys=older"
+  mv "$variant/data/backlog.md" "$variant/data/backlog-target.md"
+  mkfifo "$variant/data/backlog.md"
+  assert_archive_verify_fails "$variant" "$origin" fifo-active-store
+
+  variant=$(clone_home "$home" retained-unreadable-active-store)
+  rewrite_once "$variant/state/$origin.meta" "decision_keys=newer,older" "decision_keys=older"
+  chmod 000 "$variant/data/backlog.md"
+  assert_archive_verify_fails "$variant" "$origin" unreadable-active-store
+  chmod 600 "$variant/data/backlog.md"
+
   variant=$(clone_home "$home" retained-concurrent-change)
   cat > "$variant/fakebin/tasks-axi" <<'EOF'
 #!/usr/bin/env bash
@@ -1039,11 +1100,21 @@ EOF
     "$variant/late-nonidentity-change.err" \
     "a non-identity mutation during structured validation escaped the final archive recheck"
 
+  variant=$(clone_home "$home" retained-late-active-collision)
+  rewrite_once "$variant/state/$origin.meta" "decision_keys=newer,older" "decision_keys=older"
+  printf '\n## Queued\n\n- [ ] %s - Late active collision (repo: sample) (kind: captain) (hold: captain collision pending) (hold-kind: captain)\n' \
+    "$older_hold" > "$variant/late-active-append"
+  install_late_active_mutator "$variant"
+  assert_archive_verify_fails "$variant" "$origin" late-active-collision
+  assert_grep "appeared in the active backlog during verification" \
+    "$variant/late-active-collision.err" \
+    "an active identity inserted during structured validation escaped the final recheck"
+
   variant=$(clone_home "$home" retained-active-archive-collision)
   printf '\n%s\n' "$record" >> "$variant/data/backlog.md"
   assert_archive_verify_fails "$variant" "$origin" active-archive-collision
 
-  pass "canonical Unicode survives retention while malformed bytes, lossy whitespace, late mutations, duplicates, and unsafe archives are rejected"
+  pass "canonical Unicode survives retention while malformed bytes, lossy text, late collisions, duplicates, and unsafe stores are rejected"
 }
 
 test_uninventoried_report_decision_refuses_completion

@@ -15,11 +15,12 @@ It rejects an identity collision, a changed title, and attempts to reopen an alr
 
 One shared scanner mirrors tasks-axi's lexical task-header forms and ECMAScript level-two heading boundary while counting every exact identity independently of section validity across the active backlog and archive.
 Only a terminal header under an exact canonical `## Archived YYYY-MM-DD` heading is eligible for structured archive verification.
-It rejects duplicate active identities, duplicate archived identities, active/archive collisions, symlink or non-regular archives, unreadable archives, and archive bytes that change during verification.
+It rejects duplicate active identities, duplicate archived identities, active/archive collisions, symlink, non-regular, or unreadable active and archive stores, and archive bytes that change during verification.
 Archive fingerprinting accepts only a successful lowercase SHA-256 digest before any comparison.
 For an archived identity, it extracts only that record into a private single-record `## Done` view and parses it through public `tasks-axi show --full --file` output.
+The extractor rejects non-empty whitespace-only archive lines so the typed parser cannot collapse different stored bytes into the same decision body.
 The archived record is accepted only when its terminal checkbox and typed state, captain kind and hold kind, closure date, decision digest, sorted unique routed identities, non-empty decision, and exact routed-work suffix all match the durable bytes written by `resolve`.
-Immediately before acceptance, it rechecks the archive fingerprint and exact identity counts after active-store and structured record validation have both finished.
+Immediately before acceptance, it rechecks the archive fingerprint and exact identity counts after active-store and structured record validation have both finished, then rechecks the active identity after final archive validation.
 This preserves the historical `Routed work:- <first-id>` writer format without rewriting active or archived records.
 
 The `complete` subcommand unions the reviewed keys into `decision_keys=` and appends `decisions_reviewed=1` while originating task metadata is live.
@@ -74,7 +75,7 @@ ok - resolved findings and decision-like prose do not create false holds
 ok - terminal single-owner stale status decisions do not block empty inventory
 ok - main-home and secondmate-home captain holds remain correctly routed
 ok - resolve matches first/middle/last in quoted blocked_by and rejects a genuinely absent id
-ok - canonical Unicode survives retention while malformed bytes, lossy whitespace, late mutations, duplicates, and unsafe archives are rejected
+ok - canonical Unicode survives retention while malformed bytes, lossy text, late collisions, duplicates, and unsafe stores are rejected
 
 $ bash tests/fm-fleet-snapshot-view.test.sh
 ok - backlog normalization preserves strict roles and resolves every blocker compatibly

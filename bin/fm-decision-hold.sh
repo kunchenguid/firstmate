@@ -277,7 +277,8 @@ function extractRecord(start) {
     const line = lines[index];
     const semantic = semanticLine(line);
     if (isSectionHeading(line) || taskHeader(line) !== undefined) break;
-    if (semantic.trim().length === 0 || semantic.startsWith("  ")) {
+    if (line.length > 0 && line.trim().length === 0) process.exit(1);
+    if (line.length === 0 || semantic.startsWith("  ")) {
       record.push(line);
       continue;
     }
@@ -322,18 +323,22 @@ try {
 NODE
 }
 
+store_file_is_safe() {  # <label> <path>
+  local label=$1 path=$2
+  [ ! -L "$path" ] || fail "$label must not be a symlink: $path"
+  [ -e "$path" ] || return 1
+  [ -f "$path" ] || fail "$label is not a regular file: $path"
+  [ -r "$path" ] || fail "$label is not readable: $path"
+}
+
 active_identity_count() {  # <id>
   local id=$1 backlog="$DATA/backlog.md"
-  [ -f "$backlog" ] || { printf '0\n'; return 0; }
+  store_file_is_safe "active backlog" "$backlog" || { printf '0\n'; return 0; }
   scan_decision_identity active-count "$backlog" "$id"
 }
 
 archive_is_safe() {  # <archive>
-  local archive=$1
-  [ ! -L "$archive" ] || fail "decision archive must not be a symlink: $archive"
-  [ -e "$archive" ] || return 1
-  [ -f "$archive" ] || fail "decision archive is not a regular file: $archive"
-  [ -r "$archive" ] || fail "decision archive is not readable: $archive"
+  store_file_is_safe "decision archive" "$1"
 }
 
 archive_identity_counts() {  # <archive> <id>
@@ -393,6 +398,13 @@ verify_archived_resolution() {  # <id> <show-output> <raw-header>
   [ "$state" = "done" ] || fail "archived captain decision $id is not typed done"
   [ "$kind" = captain ] || fail "archived backlog item $id is not kind captain"
   [ "$hold_kind" = captain ] || fail "archived backlog item $id is not held for the captain"
+  case "$hold_reason" in
+    \"*)
+      hold_reason=$(decode_json_string "$hold_reason" && printf '\034') \
+        || fail "archived captain decision $id has an invalid hold reason"
+      hold_reason=${hold_reason%$'\034'}
+      ;;
+  esac
   [ -n "$hold_reason" ] && [ "$hold_reason" != '-' ] \
     || fail "archived captain decision $id has no hold reason"
   valid_date "$closed" || fail "archived captain decision $id has an invalid closure date: $closed"
@@ -508,6 +520,10 @@ decision_lookup() {  # <decision-id>
       || fail "captain decision $id appeared in the active backlog during verification"
     verify_archived_resolution "$id" "$DECISION_SHOW" "$header"
     verify_archive_identity_unchanged "$archive" "$id" "$archive_digest" "$counts"
+    current_active=$(active_identity_count "$id") \
+      || fail "could not recheck active decision identity $id"
+    [ "$current_active" -eq 0 ] \
+      || fail "captain decision $id appeared in the active backlog during verification"
     return 0
   fi
   if [ -n "$archive_digest" ]; then
