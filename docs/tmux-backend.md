@@ -92,6 +92,13 @@ a busy pane means the harness accepted and queued the Enter (reported as `empty`
 This is the only place that exception lives; the herdr adapter observes the same opencode behavior but needs a separate fix (see the opencode note in [harness-adapters](../.agents/skills/harness-adapters/SKILL.md) and the opencode-busy gap recorded in [herdr-backend.md](herdr-backend.md)).
 Regression coverage: `tests/fm-tmux-submit-busy.test.sh` covers the four scenarios (busy pane + pending composer -> `empty`, idle pane + pending composer -> `pending`, busy pane + cleared composer -> `empty`, idle pane + cleared composer -> `empty`).
 
+**Boot guard (still-launching panes).** Before it types anything, `fm_tmux_submit_enter_core` waits out a pane that is still booting, so a steer cannot be typed into a harness that has not finished starting.
+Two signatures are recognized as booting: a `Update available!` / `Press enter to continue` update prompt, and a Codex `OpenAI Codex` / `model: loading` splash.
+The core polls up to `FM_TMUX_BOOT_WAIT_SECS` (default 20, `FM_TMUX_BOOT_POLL_SLEEP` seconds apart) for the pane to leave the booting state.
+If the pane is ready (or its state is unknown) the submit proceeds normally; if it is still booting past the wait window the verdict is `send-deferred` and `fm-send` prints `send-deferred: pane booting` and exits non-zero (exit code 2) rather than typing into a booting pane.
+The full verdict set is now `empty | pending | unknown | send-failed | send-deferred`.
+Regression coverage: `tests/fm-tmux-boot-guard.test.sh`.
+
 Verified empirically with real tmux 3.6a on macOS (Darwin 25.5.0), 2026-07-07:
 
 ```sh

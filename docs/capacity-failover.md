@@ -6,6 +6,8 @@ It does not enable automatic account rotation.
 It does not change `fm-spawn.sh` or `fm-dispatch-select.sh` while `config/capacity-failover` is absent.
 It does not clean disk or kill agents.
 
+The one exception is the lane governor documented below: it is a separate always-on spawn guard, not gated by `config/capacity-failover`.
+
 ## Evidence Scope
 
 The implemented signatures are only the observed ones.
@@ -15,6 +17,7 @@ VibeProxy auth exhaustion is recognized from `auth_unavailable: no auth availabl
 Explicit provider rate limits are recognized from `rate limit`, `too many requests`, or HTTP 429 text.
 `Retry-After: <seconds>` is treated as observed reset evidence.
 Login-required output such as `Not logged in - Please run /login` is recognized as auth exhaustion.
+Generic `unauthorized`, `authentication`, or `forbidden` text is also classified as `class=auth` with `reason=auth_error`.
 Unknown model and transient provider throttles classify as `other`, not quota.
 
 ## Classification
@@ -62,7 +65,8 @@ The helper never creates a new task id and never discards dirty work.
 
 ## Rehome Helper
 
-`bin/fm-rehome-quota-wall.sh <task-id> --harness <verified-harness>` performs the manual same-worktree rehome procedure used for quota-wedged work.
+`bin/fm-rehome-quota-wall.sh <task-id> --harness <verified-harness> [--model <model>] [--effort <effort>]` performs the manual same-worktree rehome procedure used for quota-wedged work.
+The optional `--model` / `--effort` axes carry through to the relaunched harness (and `handle-wall` emits a rehome command with them when a route specifies them).
 The helper currently supports only the evidence-backed tmux path.
 It refuses non-tmux task metadata instead of guessing a backend-specific recovery path.
 
@@ -83,6 +87,26 @@ The caller must pass a verified target harness explicitly.
 When `config/crew-dispatch.json` exists, the helper refuses unless `--dispatch-approved` is also passed.
 That flag means firstmate has already consulted the dispatch rules and is not letting the helper bypass them.
 
+## Lane Governor
+
+`bin/fm-lane-governor.sh` is a separate, always-on spawn-time guard, distinct from the rest of this substrate: it runs on every `fm-spawn.sh` launch regardless of whether `config/capacity-failover` exists (only test/recovery paths that set `FM_SPAWN_NO_GUARD=1`, or `FM_LANE_GOVERNOR=0`, bypass it).
+Before any launch side effect, the governor reserves a lane lease and refuses the spawn when the home is already at its lane capacity, when swap or available RAM crosses a configured line, or when a likely orphaned harness process is still alive.
+Completed workers (PR-ready or report-ready) are reported for cleanup but do not consume lane capacity, because such work may legitimately wait on approval.
+
+Its defaults live in the script (no config file required):
+
+```text
+FM_LANE_MAX_CONCURRENT=4          # max active workers per home
+FM_LANE_MAX_SWAP_GB=24            # refuse above this swap use (0 disables)
+FM_LANE_MIN_AVAILABLE_RAM_GB=1    # refuse below this free RAM (0 disables)
+FM_LANE_LEASE_TTL_SECONDS=600     # lease expiry
+FM_LANE_ORPHAN_CHECK=1            # refuse on a likely orphaned harness
+```
+
+The guard is on by default; set `FM_LANE_GOVERNOR=0` to bypass it deliberately.
+Subcommands are `acquire`, `release`, `check`, and `memwatch`; lease state is volatile under `state/.lane-governor/`.
+Because this default cap of active workers backstops every spawn, "no concurrency cap" in `AGENTS.md` is bounded in practice by this guard even without `config/capacity-failover`; opt-in host-pressure backpressure (below) is an additional layer.
+
 ## Host Pressure Backpressure
 
 `bin/fm-host-pressure.sh check` reports bounded memory, disk, and active-task pressure as key-value evidence.
@@ -90,7 +114,7 @@ It is passive unless `config/capacity-failover` contains `host-pressure=on`.
 When that opt-in is present, `fm-spawn.sh` runs the check before creating task ownership metadata.
 Warnings are surfaced and the spawn continues.
 Critical pressure refuses the new spawn and leaves existing task ownership untouched.
-`bin/fm-host-pressure.sh gate --kind test` gives the same disk-floor decision to validation/test launch wrappers.
+`bin/fm-host-pressure.sh gate --kind test` (and `--kind spawn`) gives the same disk-floor decision to validation/test and spawn launch wrappers.
 
 The file supports these optional thresholds:
 
@@ -98,13 +122,16 @@ The file supports these optional thresholds:
 host-pressure=on
 min_memory_available_mb=2048
 warn_memory_available_mb=4096
-disk_floor_mb=10240
-disk_clear_mb=20480
+min_disk_available_mb=10240      # base hard disk floor
+warn_disk_available_mb=20480     # base disk warn line / default clear target
+disk_floor_mb=10240              # optional override of min_disk_available_mb
+disk_clear_mb=20480              # optional override of warn_disk_available_mb
 disk_alert_cooldown_secs=900
 max_running_tasks=30
 ```
 
 The default thresholds above apply only after `host-pressure=on`.
+`min_disk_available_mb` / `warn_disk_available_mb` are the base disk keys; `disk_floor_mb` defaults from `min_disk_available_mb` and `disk_clear_mb` from `warn_disk_available_mb`, and `warn_disk_available_mb` independently drives the disk-available-below-warn state.
 `disk_floor_mb` is the hard floor.
 Once entered, disk pressure remains active until free space reaches `disk_clear_mb`; this hysteresis prevents repeated enter/exit flapping.
 Absent `config/capacity-failover`, or with `host-pressure` off, spawn behavior is unchanged.
@@ -118,13 +145,15 @@ It does not kill those processes; callers own any stop/retry policy.
 
 `bin/fm-shared-github-quota.sh` coordinates GitHub API quota as a fleet-wide shared resource.
 Its state is intentionally independent of any one `FM_HOME`.
-By default it uses `${XDG_STATE_HOME:-$HOME/.local/state}/firstmate/shared-github-quota/`; tests and unusual deployments can set `FM_SHARED_STATE_OVERRIDE`.
+By default it uses `${XDG_STATE_HOME:-$HOME/.local/state}/firstmate/shared-github-quota/`; tests and unusual deployments can set `FM_SHARED_STATE_OVERRIDE` (or `FM_SHARED_STATE`).
 
 Cooldown records are keyed by `(provider, account, route)`.
-The account comes from `--account`, `FM_GITHUB_ACCOUNT_ID`, a locally cached account learned from prior rate-limit evidence, or a best-effort `gh api user` derivation.
+The route defaults to `FM_GITHUB_ROUTE`.
+The account comes from `--account`, `FM_GITHUB_ACCOUNT_ID`, a locally cached account learned from prior rate-limit evidence, or a best-effort `gh api user` derivation (disable that derivation with `FM_SHARED_GITHUB_QUOTA_DERIVE_ACCOUNT=0`).
 `mark` and `mark-from-text` write the cooldown.
 `check` prints `state=allow` or `state=defer` with provider, account, route, reset time, and remaining seconds.
 Expired records are removed by `check`, so polling resumes only at or after the recorded reset time.
+`cache-put` and `cache-get` store and read the small shared PR-state cache that lets pollers answer `MERGED` locally during a cooldown.
 
 `fm-pr-check.sh` uses this guard when it records PR metadata and in the static `fm-pr-poll.sh` poller.
 During a shared cooldown, PR pollers do not call `gh`.
