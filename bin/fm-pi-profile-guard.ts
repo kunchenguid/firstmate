@@ -1,4 +1,5 @@
 import {
+	AgentSession,
 	SettingsManager,
 	type ExtensionAPI,
 	type ExtensionContext,
@@ -11,6 +12,45 @@ export default function (pi: ExtensionAPI) {
 	const expectedReserve = Number(process.env.FM_PI_DELEGATED_RESERVE_TOKENS);
 	const expectedKeepRecent = Number(process.env.FM_PI_DELEGATED_KEEP_RECENT_TOKENS);
 	let rejected = false;
+
+	const setModel = AgentSession.prototype.setModel as typeof AgentSession.prototype.setModel & {
+		fmDelegatedProfileGuard?: boolean;
+	};
+	if (!setModel.fmDelegatedProfileGuard) {
+		const guardedSetModel: typeof AgentSession.prototype.setModel & {
+			fmDelegatedProfileGuard?: boolean;
+		} = async function (model) {
+			throw new Error(`Delegated Pi profile prevents model change to ${model.provider}/${model.id}.`);
+		};
+		guardedSetModel.fmDelegatedProfileGuard = true;
+		AgentSession.prototype.setModel = guardedSetModel;
+	}
+
+	const cycleModel = AgentSession.prototype.cycleModel as typeof AgentSession.prototype.cycleModel & {
+		fmDelegatedProfileGuard?: boolean;
+	};
+	if (!cycleModel.fmDelegatedProfileGuard) {
+		const guardedCycleModel: typeof AgentSession.prototype.cycleModel & {
+			fmDelegatedProfileGuard?: boolean;
+		} = async function () {
+			return undefined;
+		};
+		guardedCycleModel.fmDelegatedProfileGuard = true;
+		AgentSession.prototype.cycleModel = guardedCycleModel;
+	}
+
+	const setThinkingLevel = AgentSession.prototype.setThinkingLevel as typeof AgentSession.prototype.setThinkingLevel & {
+		fmDelegatedProfileGuard?: boolean;
+	};
+	if (!setThinkingLevel.fmDelegatedProfileGuard) {
+		const guardedSetThinkingLevel: typeof AgentSession.prototype.setThinkingLevel & {
+			fmDelegatedProfileGuard?: boolean;
+		} = function (level) {
+			if (level === "medium") setThinkingLevel.call(this, level);
+		};
+		guardedSetThinkingLevel.fmDelegatedProfileGuard = true;
+		AgentSession.prototype.setThinkingLevel = guardedSetThinkingLevel;
+	}
 
 	const compactionIsValid = (ctx: ExtensionContext) => {
 		if (!expectedAgentDir || !Number.isSafeInteger(expectedReserve) || !Number.isSafeInteger(expectedKeepRecent)) {
