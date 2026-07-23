@@ -86,6 +86,7 @@ test_safe_render_and_cleanup() {
 
 [Safe remote link](https://example.invalid/read)
 [Unsafe link](javascript:alert(1))
+[Malformed link](https://[invalid)
 
 ```html
 <iframe src="https://frames.example.invalid/"></iframe>
@@ -124,6 +125,10 @@ MD
     "preview retained an unsafe link scheme"
   assert_grep 'href="https://example.invalid/read"' "$capture/body" \
     "preview dropped an ordinary remote hyperlink"
+  assert_grep "Malformed link" "$capture/body" \
+    "preview dropped the label for a malformed link"
+  assert_no_grep 'href="https://[invalid"' "$capture/body" \
+    "preview retained a malformed link target"
 
   if python3 - "$(cat "$capture/url")" >/dev/null 2>&1 <<'PY'
 import sys
@@ -324,6 +329,95 @@ PY
   pass "inline delimiter scanning remains bounded"
 }
 
+test_block_parser_scans_are_bounded() {
+  local source="$TMP_ROOT/block-scans.md" capture="$TMP_ROOT/block-scans-capture"
+  python3 - "$source" <<'PY'
+import sys
+from pathlib import Path
+
+marker = b"~" * (2 * 1024 * 1024)
+heading = b"# title" + b" " * (2 * 1024 * 1024) + b"x\n"
+Path(sys.argv[1]).write_bytes(
+    marker + b"\n" + b"body\n" * 512 + marker + b"\n\n" + heading
+)
+PY
+
+  if ! FM_PREVIEW_TEST_CAPTURE="$capture" \
+    python3 - "$HELPER" "$OPENER" "$source" <<'PY'
+import os
+import subprocess
+import sys
+
+try:
+    result = subprocess.run(
+        [sys.argv[1], "--opener", sys.argv[2], "--timeout", "2", sys.argv[3]],
+        capture_output=True,
+        env=os.environ.copy(),
+        text=True,
+        timeout=20,
+    )
+except subprocess.TimeoutExpired:
+    raise SystemExit(124)
+if result.returncode != 0:
+    sys.stderr.write(result.stderr)
+    raise SystemExit(result.returncode)
+PY
+  then
+    fail "block delimiter-heavy Markdown exceeded its bounded render time"
+  fi
+  pass "fence and heading parsing remain bounded"
+}
+
+test_render_object_budgets_fail_before_accumulation() {
+  local lines="$TMP_ROOT/too-many-lines.md" parts="$TMP_ROOT/too-many-parts.md" rc=0
+  python3 - "$lines" "$parts" <<'PY'
+import sys
+from pathlib import Path
+
+Path(sys.argv[1]).write_bytes(b"x\n\n" * 100001)
+Path(sys.argv[2]).write_bytes(
+    b"|a|b|\n|---|---|\n" + b"|x|x|\n" * 40000
+)
+PY
+
+  "$HELPER" --opener "$OPENER" --timeout 2 "$lines" \
+    >"$TMP_ROOT/too-many-lines.out" 2>"$TMP_ROOT/too-many-lines.err" || rc=$?
+  [ "$rc" -ne 0 ] || fail "excessive source lines were accepted"
+  assert_grep "source exceeds" "$TMP_ROOT/too-many-lines.err" \
+    "source line budget failure was not explained"
+
+  rc=0
+  "$HELPER" --opener "$OPENER" --timeout 2 "$parts" \
+    >"$TMP_ROOT/too-many-parts.out" 2>"$TMP_ROOT/too-many-parts.err" || rc=$?
+  [ "$rc" -ne 0 ] || fail "excessive render parts were accepted"
+  assert_grep "rendered preview exceeds" "$TMP_ROOT/too-many-parts.err" \
+    "render part budget failure was not explained"
+  pass "source line and render part budgets fail before accumulation"
+}
+
+test_non_table_delimiters_do_not_trigger_table_limits() {
+  local source="$TMP_ROOT/non-table.md" capture="$TMP_ROOT/non-table-capture"
+  python3 - "$source" <<'PY'
+import sys
+from pathlib import Path
+
+Path(sys.argv[1]).write_text(
+    "Ordinary | prose\n" + "value|" * 2048 + "\n",
+    encoding="utf-8",
+)
+PY
+
+  FM_PREVIEW_TEST_CAPTURE="$capture" \
+    "$HELPER" --opener "$OPENER" --timeout 2 "$source" \
+    >"$TMP_ROOT/non-table.out" 2>"$TMP_ROOT/non-table.err" \
+    || fail "non-table delimiters triggered table limits: $(cat "$TMP_ROOT/non-table.err")"
+
+  wait_for_file "$capture/body"
+  assert_grep "Ordinary | prose" "$capture/body" \
+    "non-table prose was not rendered"
+  pass "table limits apply only after divider recognition"
+}
+
 test_blockquote_nesting_is_bounded() {
   local source="$TMP_ROOT/blockquote-depth.md" rc=0
   python3 - "$source" <<'PY'
@@ -340,6 +434,24 @@ PY
   assert_grep "blockquote nesting exceeds" "$TMP_ROOT/blockquote-depth.err" \
     "blockquote depth failure was not explained"
   pass "blockquote nesting fails closed at its configured bound"
+}
+
+test_blockquote_copy_budget_fails_before_amplification() {
+  local source="$TMP_ROOT/blockquote-copy.md" rc=0
+  python3 - "$source" <<'PY'
+import sys
+from pathlib import Path
+
+Path(sys.argv[1]).write_bytes(b"> " * 64 + b"x" * (6 * 1024 * 1024) + b"\n")
+PY
+
+  "$HELPER" --opener "$OPENER" --timeout 2 "$source" \
+    >"$TMP_ROOT/blockquote-copy.out" 2>"$TMP_ROOT/blockquote-copy.err" || rc=$?
+
+  [ "$rc" -ne 0 ] || fail "amplifying blockquote input was accepted"
+  assert_grep "blockquote input exceeds" "$TMP_ROOT/blockquote-copy.err" \
+    "blockquote copy budget failure was not explained"
+  pass "blockquote copies fail before input amplification"
 }
 
 test_table_cell_budget_fails_before_wide_render() {
@@ -392,6 +504,10 @@ test_verified_delivery_detaches_long_lived_opener
 test_verification_bypasses_proxy_environment
 test_unstarted_server_thread_cleans_up_without_deadlock
 test_inline_delimiter_scan_is_bounded
+test_block_parser_scans_are_bounded
+test_render_object_budgets_fail_before_accumulation
+test_non_table_delimiters_do_not_trigger_table_limits
 test_blockquote_nesting_is_bounded
+test_blockquote_copy_budget_fails_before_amplification
 test_table_cell_budget_fails_before_wide_render
 test_expanded_render_verifies_in_full

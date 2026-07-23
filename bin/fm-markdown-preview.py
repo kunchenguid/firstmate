@@ -52,6 +52,9 @@ MAX_SOURCE_BYTES = 8 * 1024 * 1024
 MAX_RENDERED_BYTES = 64 * 1024 * 1024
 INLINE_SCAN_FACTOR = 4
 MAX_BLOCKQUOTE_DEPTH = 64
+MAX_SOURCE_LINES = 100000
+MAX_RENDER_PARTS = 150000
+MAX_RETAINED_QUOTE_CHARS = MAX_SOURCE_BYTES
 MAX_TABLE_COLUMNS = 1024
 MAX_TABLE_CELLS = 100000
 DEFAULT_TIMEOUT = 12.0
@@ -73,7 +76,7 @@ CSP = (
 )
 
 FENCE_PREFIX_RE = re.compile(r"^[ \t]{0,3}(`{3,}|~{3,})(.*)$")
-HEADING_RE = re.compile(r"^\s{0,3}(#{1,6})\s+(.+?)\s*#*\s*$")
+HEADING_PREFIX_RE = re.compile(r"^[ \t]{0,3}(#{1,6})[ \t](.*)$")
 UNORDERED_RE = re.compile(r"^\s{0,3}[-+*]\s+(.+)$")
 ORDERED_RE = re.compile(r"^\s{0,3}\d+[.)]\s+(.+)$")
 QUOTE_RE = re.compile(r"^\s{0,3}>\s?(.*)$")
@@ -89,9 +92,14 @@ class RenderBuffer:
     def __init__(self):
         self.parts = []
         self.size = 0
+        self.retained_quote_chars = 0
         self.table_cells = 0
 
     def append(self, value):
+        if len(self.parts) >= MAX_RENDER_PARTS:
+            raise PreviewError(
+                f"rendered preview exceeds {MAX_RENDER_PARTS} parts"
+            )
         size = len(value.encode("utf-8"))
         if self.size + size > MAX_RENDERED_BYTES:
             raise PreviewError(
@@ -99,6 +107,14 @@ class RenderBuffer:
             )
         self.parts.append(value)
         self.size += size
+
+    def add_quote_copy(self, count):
+        if self.retained_quote_chars + count > MAX_RETAINED_QUOTE_CHARS:
+            raise PreviewError(
+                "blockquote input exceeds "
+                f"{MAX_RETAINED_QUOTE_CHARS} retained characters"
+            )
+        self.retained_quote_chars += count
 
     def add_table_cells(self, count):
         if self.table_cells + count > MAX_TABLE_CELLS:
@@ -163,7 +179,10 @@ def safe_href(target):
         return None
     if value.startswith("#"):
         return value
-    parsed = urlsplit(value)
+    try:
+        parsed = urlsplit(value)
+    except ValueError:
+        return None
     if parsed.scheme.lower() not in {"http", "https", "mailto"}:
         return None
     return value
@@ -292,38 +311,77 @@ def parse_fence(line):
     return marker, tail.strip()
 
 
-def split_table_row(line):
+def parse_heading(line):
+    match = HEADING_PREFIX_RE.match(line)
+    if not match:
+        return None
+    marker, raw_body = match.groups()
+    if not raw_body:
+        return None
+    body = raw_body.rstrip()
+    without_hashes = body.rstrip("#")
+    if without_hashes:
+        body = without_hashes.rstrip()
+    elif body:
+        body = "#"
+    else:
+        body = " "
+    return marker, body
+
+
+def iter_table_cells(line):
     stripped = line.strip().strip("|")
     if not stripped:
-        return []
-    columns = stripped.count("|") + 1
-    if columns > MAX_TABLE_COLUMNS:
+        return
+    start = 0
+    while True:
+        end = stripped.find("|", start)
+        if end == -1:
+            yield stripped[start:].strip()
+            return
+        yield stripped[start:end].strip()
+        start = end + 1
+
+
+def split_table_row(line):
+    cells = []
+    for cell in iter_table_cells(line):
+        cells.append(cell)
+        if len(cells) > MAX_TABLE_COLUMNS:
+            raise PreviewError(
+                f"Markdown table exceeds {MAX_TABLE_COLUMNS} columns"
+            )
+    return cells
+
+
+def table_column_count(lines, index):
+    if index + 1 >= len(lines) or "|" not in lines[index]:
+        return None
+    count = 0
+    for cell in iter_table_cells(lines[index + 1]):
+        if not TABLE_DIVIDER_RE.fullmatch(cell):
+            return None
+        count += 1
+    if count == 0:
+        return None
+    if count > MAX_TABLE_COLUMNS:
         raise PreviewError(
             f"Markdown table exceeds {MAX_TABLE_COLUMNS} columns"
         )
-    return [cell.strip() for cell in stripped.split("|")]
-
-
-def is_table(lines, index):
-    if index + 1 >= len(lines) or "|" not in lines[index]:
-        return False
-    dividers = split_table_row(lines[index + 1])
-    return bool(dividers) and all(
-        TABLE_DIVIDER_RE.fullmatch(cell) for cell in dividers
-    )
+    return count
 
 
 def starts_block(lines, index):
     line = lines[index]
     return (
         parse_fence(line) is not None
-        or HEADING_RE.match(line)
+        or parse_heading(line) is not None
         or UNORDERED_RE.match(line)
         or ORDERED_RE.match(line)
         or QUOTE_RE.match(line)
         or THEMATIC_RE.match(line)
         or line.startswith("    ")
-        or is_table(lines, index)
+        or table_column_count(lines, index) is not None
     )
 
 
@@ -347,7 +405,7 @@ def render_blocks(lines, quote_depth=0, output=None):
             code_lines = []
             while index < len(lines):
                 candidate = lines[index].lstrip()
-                if candidate.startswith(marker[0] * len(marker)):
+                if candidate.startswith(marker):
                     index += 1
                     break
                 code_lines.append(lines[index])
@@ -361,11 +419,12 @@ def render_blocks(lines, quote_depth=0, output=None):
             output.append(f"<pre><code{language_attr}>{code}</code></pre>")
             continue
 
-        heading = HEADING_RE.match(line)
+        heading = parse_heading(line)
         if heading:
-            level = len(heading.group(1))
+            marker, body = heading
+            level = len(marker)
             output.append(
-                f"<h{level}>{render_inline(heading.group(2))}</h{level}>"
+                f"<h{level}>{render_inline(body)}</h{level}>"
             )
             index += 1
             continue
@@ -375,28 +434,25 @@ def render_blocks(lines, quote_depth=0, output=None):
             index += 1
             continue
 
-        if is_table(lines, index):
+        divider_count = table_column_count(lines, index)
+        if divider_count is not None:
             headings = split_table_row(line)
-            divider_count = len(split_table_row(lines[index + 1]))
             output.add_table_cells(divider_count)
             index += 2
-            rows = []
-            while index < len(lines) and lines[index].strip() and "|" in lines[index]:
-                row = split_table_row(lines[index])
-                output.add_table_cells(divider_count)
-                rows.append(row)
-                index += 1
             headings = (headings + [""] * divider_count)[:divider_count]
             output.append("<table><thead><tr>")
             for cell in headings:
                 output.append(f"<th>{render_inline(cell)}</th>")
             output.append("</tr></thead><tbody>")
-            for row in rows:
+            while index < len(lines) and lines[index].strip() and "|" in lines[index]:
+                row = split_table_row(lines[index])
+                output.add_table_cells(divider_count)
                 row = (row + [""] * divider_count)[:divider_count]
                 output.append("<tr>")
                 for cell in row:
                     output.append(f"<td>{render_inline(cell)}</td>")
                 output.append("</tr>")
+                index += 1
             output.append("</tbody></table>")
             continue
 
@@ -411,7 +467,9 @@ def render_blocks(lines, quote_depth=0, output=None):
                 match = QUOTE_RE.match(lines[index])
                 if not match:
                     break
-                quoted.append(match.group(1))
+                start, end = match.span(1)
+                output.add_quote_copy(end - start)
+                quoted.append(lines[index][start:end])
                 index += 1
             output.append("<blockquote>")
             render_blocks(quoted, quote_depth + 1, output)
@@ -470,7 +528,12 @@ def render_blocks(lines, quote_depth=0, output=None):
 
 
 def render_document(source, title):
-    lines = source.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    normalized = source.replace("\r\n", "\n").replace("\r", "\n")
+    lines = normalized.split("\n", MAX_SOURCE_LINES)
+    if len(lines) > MAX_SOURCE_LINES:
+        raise PreviewError(
+            f"Markdown source exceeds {MAX_SOURCE_LINES} lines"
+        )
     body = render_blocks(lines)
     safe_title = html.escape(title, quote=True)
     rendered = (
