@@ -28,7 +28,8 @@ That existing tool owns the actual resume mechanics (terminal, trust dialog, kic
 
 ## Cooldown
 
-After a fire, `bin/fm-orchestrator.sh` writes the current epoch to `state/.orchestrator-cooldown` and refuses to fire again until `FM_ORCHESTRATOR_COOLDOWN_SECS` (default 1800) has elapsed, even if `check` runs again sooner.
+After a fire attempt, `bin/fm-orchestrator.sh` writes the current epoch to `state/.orchestrator-cooldown` and refuses to fire again until `FM_ORCHESTRATOR_COOLDOWN_SECS` (default 1800) has elapsed, even if `check` runs again sooner.
+The cooldown is recorded even when `bin/fm-relaunch.sh run` itself fails - a failed resume still counts against the cooldown, and `check` then propagates that failure's exit code rather than swallowing it - so a persistently broken resume cannot turn into a tight fire-loop either.
 This exists because a relaunched session can itself immediately hit the same account limit and exit fast; without a cooldown, a recurring timer firing every `StartInterval` would retry in a tight loop.
 The cooldown is a simple timestamp file, not a lock - convergent and idempotent the same way `fm-relaunch.sh install` converges on repeated calls.
 
