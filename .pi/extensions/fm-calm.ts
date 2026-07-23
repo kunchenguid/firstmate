@@ -35,10 +35,7 @@ import type { TSchema } from "typebox";
 import {
   calmPresentationHides,
   calmPresentationIsActive,
-  classifyFirstmateSyntheticInput,
-  deliverFirstmateSyntheticInput,
   FIRSTMATE_CALM_PRESENTATION_EVENT,
-  FIRSTMATE_PI_LAUNCH_BRIEF_ENV,
   registerFirstmateSyntheticPresentation,
   setCalmPresentation,
   setCalmStockExportRendering,
@@ -76,7 +73,6 @@ const root = resolve(extensionDir, "../..");
 
 export default function (pi: ExtensionAPI) {
   let exportRendering = false;
-  let launchBriefContent: string | undefined;
   let removeTerminalInputHandler: (() => void) | undefined;
 
   const fmHome = process.env.FM_HOME || process.env.FM_ROOT_OVERRIDE || root;
@@ -103,15 +99,6 @@ export default function (pi: ExtensionAPI) {
       rmSync(temporaryPath, { force: true });
     }
   };
-
-  const launchBriefPath = process.env[FIRSTMATE_PI_LAUNCH_BRIEF_ENV];
-  if (launchBriefPath) {
-    try {
-      launchBriefContent = readFileSync(launchBriefPath, "utf8").replace(/\n+$/, "");
-    } catch {
-      launchBriefContent = undefined;
-    }
-  }
 
   const publishPresentationState = (): void => {
     pi.events.emit(FIRSTMATE_CALM_PRESENTATION_EVENT, {
@@ -229,25 +216,6 @@ export default function (pi: ExtensionAPI) {
   registerBuiltIn(createGrepToolDefinition);
   registerBuiltIn(createFindToolDefinition);
   registerBuiltIn(createLsToolDefinition);
-
-  pi.on("input", (event, ctx) => {
-    if (event.images && event.images.length > 0) return { action: "continue" };
-    const kind = classifyFirstmateSyntheticInput(event.text, event.source, launchBriefContent);
-    if (!kind) return { action: "continue" };
-    if (kind === "launch-brief") launchBriefContent = undefined;
-
-    const redrawPresentation = (): void => {
-      const expanded = ctx.ui.getToolsExpanded();
-      ctx.ui.setToolsExpanded(!expanded);
-      ctx.ui.setToolsExpanded(expanded);
-    };
-    deliverFirstmateSyntheticInput(pi, event.text, kind, {
-      deliverAs: event.streamingBehavior ?? "followUp",
-      redrawPresentation,
-      triggerTurn: true,
-    });
-    return { action: "handled" };
-  });
 
   pi.on("session_start", (_event, ctx) => {
     exportRendering = false;
