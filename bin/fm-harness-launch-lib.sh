@@ -124,6 +124,36 @@ fm_launch_effort_flag_for_harness() {
   esac
 }
 
+fm_launch_codex_mcp_flag() {
+  local harness=$1 kind=$2 config_dir=$3 knob value
+  case "$harness" in codex*) ;; *) return 0 ;; esac
+  [ "$kind" != secondmate ] || return 0
+  knob="$config_dir/crew-codex-mcp"
+  if [ -f "$knob" ]; then
+    value=$(sed -n '
+      /^[[:space:]]*#/d
+      /^[[:space:]]*$/d
+      {
+        s/^[[:space:]]*//
+        s/[[:space:]]*$//
+        p
+        q
+      }
+    ' "$knob")
+    case "$value" in
+      enabled|keep|on|true|1)
+        return 0
+        ;;
+      ''|disabled|disable|off|false|0)
+        ;;
+      *)
+        echo "warning: unrecognized config/crew-codex-mcp value '$value'; disabling Codex MCP servers for this crew launch" >&2
+        ;;
+    esac
+  fi
+  printf -- '-c %s ' "$(fm_launch_shell_quote 'mcp_servers={}')"
+}
+
 fm_launch_exclude_path() {
   local wt=$1 rel=$2 excl
   excl=$(git -C "$wt" rev-parse --git-path info/exclude 2>/dev/null || true)

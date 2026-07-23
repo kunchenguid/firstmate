@@ -693,33 +693,7 @@ EOF
 }
 
 codex_mcp_flag_for_launch() {
-  local knob value
-  case "$HARNESS" in codex*) ;; *) return 0 ;; esac
-  [ "$KIND" != secondmate ] || return 0
-  knob="$CONFIG/crew-codex-mcp"
-  if [ -f "$knob" ]; then
-    value=$(sed -n '
-      /^[[:space:]]*#/d
-      /^[[:space:]]*$/d
-      {
-        s/^[[:space:]]*//
-        s/[[:space:]]*$//
-        p
-        q
-      }
-    ' "$knob")
-    case "$value" in
-      enabled|keep|on|true|1)
-        return 0
-        ;;
-      ''|disabled|disable|off|false|0)
-        ;;
-      *)
-        echo "warning: unrecognized config/crew-codex-mcp value '$value'; disabling Codex MCP servers for this crew launch" >&2
-        ;;
-    esac
-  fi
-  printf -- '-c %s ' "$(shell_quote 'mcp_servers={}')"
+  fm_launch_codex_mcp_flag "$HARNESS" "$KIND" "$CONFIG"
 }
 
 resolved_existing_dir() {
