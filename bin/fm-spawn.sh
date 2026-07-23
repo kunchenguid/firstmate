@@ -384,7 +384,7 @@ FIRSTMATE_HOME=
 
 if [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
-    ''|claude|codex|opencode|pi|grok)
+    ''|claude|codex|opencode|pi|grok|agy)
       ARG3=${POS[1]:-}
       ;;
     *' '*)
@@ -448,7 +448,7 @@ launch_template() {
     # agy starts an interactive, steerable session in the pane cwd. Keep this
     # literal command substitution child-side: the pane shell reads the brief
     # after launch, so no parent expansion can leak or alter its contents.
-    agy) printf '%s' 'agy --dangerously-skip-permissions __MODELFLAG____EFFORTFLAG__-i "$(cat __BRIEF__)"' ;;
+    agy) printf '%s' 'agy --dangerously-skip-permissions __MODELFLAG____EFFORTFLAG__-i "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     *) return 1 ;;
   esac
 }
