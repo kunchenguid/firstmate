@@ -115,10 +115,11 @@ The classifier (`fm_backend_tmux_agent_alive`) maps the observed name to `alive`
 - `dead` - the name is a bare shell (`zsh`, `bash`, `sh`, `dash`, `ash`, `ksh`, `mksh`, `tcsh`, `csh`, `fish`).
 - `unknown` - anything else, including an unreadable pane.
 
-### Known gap: `pi` cannot be confidently classified
+### Known gap: `pi` and `cursor` cannot be confidently classified
 
 `pi` is a `#!/usr/bin/env node` script (confirmed via its shebang and installed path, 2026-07-07), so a live `pi` agent's pane reports `node` as its `pane_current_command`, not `pi` - verified by running a long-lived `node -e` script in a pane and confirming its foreground process is a genuine child reachable via `pgrep -P <pane_pid>` with an inspectable `ps -o args=` (the same technique `bin/fm-harness.sh`'s own self-detection uses when walking UP its ancestry), while `pi --version` itself was observed to exit too quickly under the same pane to reliably capture its live foreground state - real `pi` invocations were not available to test.
 Since `node` is also the generic name for a plain interpreter session, any future JS-based harness, or someone's unrelated node script, there is no way to attribute a bare `node` foreground process back to `pi` specifically from outside the pane without deeper (and fragile) argument introspection.
+`cursor` (verified 2026-07-21 for crewmate and scout spawns) is exactly such a case: its launcher re-execs into node, so a live cursor pane also reports `node` and classifies as `unknown` - harmless for the secondmate sweep because cursor never runs a secondmate, and its working supervision signals (turn-end hook, busy signature, and the argv shape a future probe would need) are owned by the cursor section of `.agents/skills/harness-adapters/SKILL.md`.
 The classifier deliberately reports `unknown` for `node`/`python`/`python3` rather than guess - per the secondmate-liveness sweep's correctness bar, a wrong `alive` is harmless but a wrong `dead` spins up a duplicate agent, so an unresolvable case must never be treated as confidently dead.
 Practical effect: a dead `pi` secondmate is not auto-healed by the liveness sweep today; it is reported as `skipped: liveness probe inconclusive` instead, which still surfaces it for a human to act on.
 Resolving this would need either a `pi`-specific env marker inspectable from outside the process (mirroring `PI_CODING_AGENT=true`, which `bin/fm-harness.sh` already uses for self-detection but which is not readable from a different process without deeper introspection) or accepting the argument-inspection fragility - not attempted here.
@@ -126,4 +127,4 @@ Resolving this would need either a `pi`-specific env marker inspectable from out
 ## Limitations
 
 None specific to tmux for the reference path itself - it is the fully verified reference backend, while Orca and cmux are the backends without secondmate support.
-The agent-liveness probe above has one known gap (`pi`'s generic `node` process name, see above).
+The agent-liveness probe above has one known gap (the generic `node` process name that hides `pi` and `cursor`, see above).

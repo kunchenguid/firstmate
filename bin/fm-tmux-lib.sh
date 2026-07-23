@@ -62,8 +62,10 @@
 
 # Busy footers per harness (mirror fm-watch.sh). claude/codex: "esc to
 # interrupt"; opencode: "esc interrupt"; pi: "Working..."; grok: "Ctrl+c:cancel"
-# (grok's mid-turn cancel hint, shown iff a turn is running - verified grok 0.2.73).
-FM_TMUX_BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel'
+# (grok's mid-turn cancel hint, shown iff a turn is running - verified grok 0.2.73);
+# cursor: "ctrl+c to stop" (cursor's mid-turn hint; at idle that slot instead reads
+# "Run Everything" - verified cursor-agent 2026.07.17-3e2a980).
+FM_TMUX_BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel|ctrl\+c to stop'
 
 # fm_tmux_strip_ghost: thin adapter over the shared, fleet-wide ghost extractor
 # fm_composer_strip_ghost (bin/fm-composer-lib.sh). It drops de-emphasised

@@ -1,6 +1,6 @@
 ---
 name: harness-adapters
-description: Agent-only reference for firstmate harness operations. Use before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter. Contains verified facts for claude, codex, opencode, pi, and grok.
+description: Agent-only reference for firstmate harness operations. Use before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter. Contains verified facts for claude, codex, opencode, pi, grok, and cursor.
 user-invocable: false
 metadata:
   internal: true
@@ -31,6 +31,7 @@ The primary-session watcher wake protocols are rendered from `docs/supervision-p
 The supervision knowledge lives here: busy signature, exit command, interrupt, dialogs, resume behavior, skill invocation, and quirks.
 
 Never dispatch a crewmate or secondmate on an unverified adapter.
+`cursor` is verified for crewmate and scout spawns only, so treat it as unverified for any secondmate or primary role.
 If `config/crew-harness` or `config/secondmate-harness` names an unverified adapter, tell the captain under `AGENTS.md` section 9 that the requested worker runtime is not verified yet, use firstmate's own verified runtime for current work, and ask only whether to verify the requested runtime before future use.
 Do not pause current work for that future-verification choice, and never launch an unverified adapter.
 If the captain asks for a new harness, propose verifying it first: spawn a trivial supervised task using `fm-spawn`'s raw-launch-command escape hatch, confirm every fact empirically, then record the mechanics in `fm-spawn`, the busy signature in `fm-watch.sh` and `fm-tmux-lib.sh` defaults, any needed `FM_COMPOSER_IDLE_RE` empty-composer override plus any novel bare agent prompt glyph in `bin/fm-composer-lib.sh`'s shared composer classifier (the one fleet-wide owner of the empty/dead-shell/pending decision, so a new harness's own idle composer is not misread as a dead shell), the tmux agent-process liveness classification in `bin/backends/tmux.sh` when the harness can launch a secondmate, and the verified knowledge here.
@@ -119,6 +120,7 @@ The supported launch-profile flags below are verified locally; each row records 
 | grok | `--model <model>` | `--reasoning-effort <low\|medium\|high>` | Verified on grok 0.2.99 (2026-07-13). `--effort` is an alias, but firstmate's profile axis is reasoning effort. As of 0.2.99 the ceiling is `high`; both `xhigh` and `max` are rejected with `use one of: high, medium, low`, so firstmate omits them. |
 | pi | `--model <model>` | `--thinking <low\|medium\|high\|xhigh\|max>` | Verified 2026-07-13 on Pi 0.80.6. `pi --help` advertises `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`; `pi --print --model openai-codex/gpt-5.6-sol --thinking max 'Reply with exactly OK.'` completed successfully. |
 | opencode | `--model <provider/model>` | none for firstmate's interactive launch | Verified on opencode 1.17.6. `opencode run` has `--variant`, but firstmate launches the interactive `opencode --prompt` path, which has no verified effort flag. |
+| cursor | `--model <model-id>` | none; effort is part of the model id | Verified 2026-07-21 on cursor-agent 2026.07.17-3e2a980. `cursor agent models` lists ~180 ids that already encode the reasoning level as a suffix (`claude-sonnet-5-thinking-high`, `gpt-5.6-sol-medium`, `claude-opus-4-8-thinking-xhigh`), and a bracket form `'claude-opus-4-8[context=1m,effort=high,fast=false]'` also parses. There is no separate effort flag, so firstmate emits none and records the requested `effort=` in meta for traceability. To honor an effort choice on cursor, select a model id carrying that level. |
 
 When a requested effort value is outside the harness-specific accepted set, `fm-spawn` records the requested `effort=` in meta but emits no effort flag for that harness.
 This preserves launch success instead of passing a known-bad value.
@@ -132,6 +134,7 @@ Natural language is acceptable if uncertain.
 - codex: `$<skill>`, for example `$no-mistakes`; `/<skill>` is claude-only and codex rejects it as "Unrecognized command".
 - opencode: no separate verified skill invocation beyond normal slash-command behavior; use natural language if the exact skill command is uncertain.
 - pi: no separate verified skill invocation beyond normal command behavior; use natural language if the exact skill command is uncertain.
+- cursor: `/<skill>`, for example `/no-mistakes`. Cursor natively discovers `.agents/skills/`, `.cursor/skills/`, `.cursor/commands/`, and `~/.claude/skills`, so firstmate's existing skill layout is picked up with no porting; `/no-mistakes` was confirmed present and invocable in a bare scratch repo. Its `/` popup is the same swallow hazard as codex's `$` and grok's `/`: sending text and Enter together left the invocation unsubmitted and needed three Enters, while typing, letting the popup settle for one to two seconds, then sending Enter landed on the first try. `fm-send`'s existing `/` settle plus the backend submit retry covers this; still verify the invocation actually submitted rather than assuming.
 - grok: `/<skill>`, for example `/no-mistakes` (same form as claude). Verified end to end: grok discovers the user-level `no-mistakes` skill, `/no-mistakes` invokes it, and grok drives a real `no-mistakes axi run`. Like codex's `$`/`/` popups, typing `/<skill>` opens grok's slash-autocomplete, so a too-fast Enter selects the popup entry instead of sending, and for an argument-taking command (like `/no-mistakes`'s optional task-first argument) that first Enter only expands the popup selection into an argument-hint placeholder rather than submitting - a genuine second Enter is required (see the grok section below for the 2026-07-03 incident and fix). `fm_tmux_submit_core`'s retried Enter (used by `fm-send` on the tmux backend) already handles this correctly by reading the cursor row; the herdr backend needed a dedicated fix (`fm_backend_herdr_composer_state`, docs/herdr-backend.md) because its prior delta-based verification false-positived on that same popup-close content change.
 
 ## claude (VERIFIED)
@@ -259,6 +262,52 @@ Pi's primary watcher protocol also requires the tracked `.pi/extensions/fm-prima
 The model arms through `fm_watch_arm_pi`, never a foreground bash arm; the watcher tool result and clean-exit fallback are owned by `docs/supervision-protocols/pi.md`.
 `bin/fm-session-start.sh` reports when the live Pi session has not loaded both the turn-end guard and watcher extensions, and points at plain `pi` after project trust as the fix, with `-e` as a trust-free fallback.
 When a secondmate is launched on Pi, `fm-spawn.sh --secondmate` launches Pi with both `-e .pi/extensions/fm-primary-turnend-guard.ts` and `-e .pi/extensions/fm-primary-pi-watch.ts`, both already present in the secondmate home's git worktree.
+
+## cursor (VERIFIED 2026-07-21, cursor-agent 2026.07.17-3e2a980)
+
+Cursor Agent TUI (`cursor agent`), the agent CLI bundled with Cursor.
+The binary is `~/.local/bin/cursor`, a symlink into `/Applications/Cursor.app`; the agent CLI carries its own version namespace, so `cursor --version` (the app, 3.12.29) and `cursor agent --version` (the agent) differ.
+Launch with a positional prompt: `cursor agent --force "$(cat <brief>)"`.
+
+**Cursor is verified for CREWMATE and SCOUT spawns only, not as a secondmate or primary harness.**
+It has no verified primary turn-end guard, PreToolUse seatbelt, or watcher protocol, all of which a secondmate needs because a secondmate runs a full firstmate session.
+`fm-spawn` refuses `--secondmate` on cursor for exactly that reason.
+
+| Fact | Value |
+|---|---|
+| Busy-pane signature | `ctrl+c to stop`, the right-aligned mid-turn hint on the `→ Add a follow-up` line. At idle that same slot reads `Run Everything` instead, so the marker is unambiguous. Matched in ASCII to avoid the locale fragility of cursor's braille spinner (`⠘⠤ Working` / `⠘⠤ Running N tokens`). |
+| Exit command | `Ctrl+D` is the cleanest programmatic exit - no popup to fight. `/exit` also works but goes through the slash popup. Both print `To resume this session: cursor agent --resume=<session-id>`. `Ctrl+C` twice at idle does NOT exit. |
+| Interrupt | single `Ctrl+C`; cancels the turn, leaves the TUI alive and the composer idle, and a follow-up sent right after is accepted. |
+| Autonomy | `--force` (alias `--yolo`), which force-allows every command unless explicitly denied. Read-only modes are `--mode plan` and `--mode ask`; `--mode plan` was confirmed genuinely read-only even alongside `--force`. |
+| Resume | `cursor agent --resume=<session-id>` (id printed on exit, and returned as `session_id` in headless JSON) or `--continue` for the workspace's latest session. `cursor agent ls` is NOT a listing command - it is a TTY-only interactive picker and errors under a pipe. |
+| Auth | per-invocation `CURSOR_API_KEY` (or `--api-key`). This is what makes a multi-account cursor pool possible: the stored browser login holds one account at a time, but API keys run concurrently with no logout/login cycling. |
+
+**Authentication is mandatory and fails quietly, which is the trap.**
+With no `CURSOR_API_KEY` the TUI does not error - it parks on `Press any key to log in...` indefinitely, which reads to supervision as a live-but-silent pane, and pressing a key starts a browser OAuth flow.
+`fm-spawn` therefore refuses a cursor spawn up front unless a dispatch-pool account supplies a key or `CURSOR_API_KEY` is already exported.
+Note that `cursor agent status` and `cursor agent about` IGNORE `CURSOR_API_KEY` and report the stale stored identity, so neither is a valid preflight for a key-based setup; a trivial `-p` run is.
+An invalid key exits 1 with `The provided API key is invalid.` on stderr as PLAIN TEXT even under `--output-format json`, with stdout empty, so detect auth failure from the exit code and stderr, never by parsing stdout.
+
+**Workspace Trust dialog on the first launch in every new worktree.**
+Cursor's `--trust` flag cannot help here: it is rejected outside `--print`/headless mode with `--trust can only be used with --print/headless mode`, and `--force` does NOT bypass the dialog.
+So a fresh worktree shows a boxed menu, `⚠ Workspace Trust Required`, with `▶ [a] Trust this workspace` and `[q] Quit`.
+Accept it by sending the bare `a` key (no Enter) from an active firstmate session with `FM_HOME=<this-firstmate-home> bin/fm-send.sh <window> --key a`, then verify the brief started processing.
+The menu appears about 1.5 seconds after launch, so poll the pane for `Workspace Trust Required` rather than firing a keystroke at a fixed delay.
+Trust persists per workspace at `~/.cursor/projects/<slugged-path>/.workspace-trusted`, so a reused worktree slot skips it.
+A verified zero-dialog alternative, if the dialog ever proves unreliable: one cheap headless `cursor agent -p 'say OK' --trust` in the worktree writes that marker, after which the interactive launch shows no menu at all.
+Firstmate does not do this by default because it costs a real model call per spawn.
+
+Turn-end hook: cursor fires a project `stop` hook at every turn boundary, including after a Ctrl+C-interrupted turn.
+`fm-spawn` writes `<worktree>/.cursor/hooks.json` as `{"version":1,"hooks":{"stop":[{"type":"command","command":"touch <state>/<id>.turn-ended"}]}}` and git-excludes it like every other harness's worktree hook file.
+Unlike grok, cursor needs NO separate hook-trust grant - ordinary Workspace Trust is enough, and a hook added to an already-trusted workspace fires on the next launch.
+A bare `touch` that reads no stdin and writes no stdout is accepted with no warning and no stray pane output, despite the documented JSON hook stdin/stdout protocol.
+The headless `-p` path does NOT fire this hook, but firstmate only ever launches the interactive TUI, where it does.
+
+**Known gap: pane-process liveness reads `unknown`, never `dead`.**
+Cursor's launcher re-execs into node, so `pane_current_command` is the generic `node`, exactly like pi.
+`fm_backend_tmux_agent_alive` therefore classifies a cursor pane as `unknown`, which is safe - callers never treat `unknown` as confirmed-dead - but it means cursor gets no positive process-liveness signal.
+The real agent process is `cursor-agent` (hyphenated) with argv containing `index.js agent`, and a long-lived `worker-server` daemon plus unrelated Cursor.app Electron processes are nearby false positives, so any future probe must match the argv, not the command name.
+Turn-end hooks and the busy signature are the working supervision signals for cursor in the meantime.
 
 ## grok (VERIFIED 2026-06-29, grok 0.2.73; slash-submit re-verified 2026-07-03 on 0.2.82; reasoning-effort ceiling re-verified 2026-07-13 on 0.2.99; exit paths re-verified 2026-07-19 on grok 0.2.103)
 

@@ -8,12 +8,11 @@ data/
 __pycache__/
 *.pyc
 .env
-config/crew-harness
-config/crew-dispatch.json
-config/secondmate-harness
-config/backlog-backend
-config/backend
-config/x-mode.env
-config/cmux-socket-password
-config/wedge-alarm
-config/herdr-presentation-spaces
+# config/ is captain-private local operating choices (AGENTS.md section 2).
+# Ignore the whole directory, not a hand-maintained list of names: every earlier
+# named-file rule left any NEW config file silently addable by `git add -A`, and
+# a secret written to config/ was exposed exactly that way. Nothing under config/
+# has ever been tracked, so ignoring the directory un-ignores nothing.
+config/
+# Credential material anywhere in the tree, wherever a key file lands.
+*.key

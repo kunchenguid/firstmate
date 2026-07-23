@@ -165,7 +165,9 @@ The full cmux home label also includes a short hash of the resolved `FM_ROOT` pa
 
 ## Harness support
 
-claude, codex, opencode, pi, and grok are all empirically verified; new harnesses get verified through a supervised trial task before joining the set.
+claude, codex, opencode, pi, and grok are all empirically verified for every role; new harnesses get verified through a supervised trial task before joining the set.
+cursor is empirically verified for crewmate and scout spawns only - it has no verified primary turn-end guard, PreToolUse seatbelt, or watcher protocol, so `fm-spawn.sh` refuses it for `--secondmate`.
+cursor also authenticates per invocation from `CURSOR_API_KEY`, and because a keyless launch parks silently on a login prompt rather than failing, `fm-spawn.sh` refuses a cursor spawn unless a dispatch-pool account supplies a key or one is already exported.
 The verified adapter knowledge - busy signatures, interrupt and exit commands, skill-invocation syntax, and per-harness quirks - lives in [`.agents/skills/harness-adapters/SKILL.md`](../.agents/skills/harness-adapters/SKILL.md).
 Launch mechanics, including the verified command templates, live in [`bin/fm-spawn.sh`](../bin/fm-spawn.sh).
 Primary-session turn-end guard integrations for verified harnesses are tracked as repo-level hook files and documented in [`docs/turnend-guard.md`](turnend-guard.md).
@@ -231,6 +233,17 @@ Valid files stay silent by default; with `FM_BOOTSTRAP_VERBOSE_FACTS=1`, bootstr
 Malformed JSON, an empty or malformed rule/default array, an unverified harness, an unknown `select`, or an effort value unsupported by that harness is reported as `CREW_DISPATCH: invalid config/crew-dispatch.json - ...`; missing `jq` is reported through the normal `MISSING: jq` install-consent flow.
 Because the spawn backstop is gated by file presence, any fallback path after a missing match, validation error, or missing `jq` still passes a resolved harness explicitly until the file is fixed or removed.
 Secondmate homes inherit this file from the primary, so a secondmate's own crewmates apply the same dispatch profile behavior.
+
+## Multi-account dispatch pool (config/dispatch-pool.json)
+
+`config/dispatch-pool.json` is an optional local, gitignored file declaring the agent ACCOUNTS that new spawns rotate across, so one account's session limit cannot wedge the whole fleet at once.
+
+[`docs/dispatch-pool.md`](dispatch-pool.md) owns the schema, rotation contract, key handling, limit-signature catalogue, and failover procedure in full.
+[`docs/examples/dispatch-pool.json`](examples/dispatch-pool.json) is a starting point to copy into local `config/dispatch-pool.json`.
+
+Two facts belong here because they interact with the rest of this document.
+The pool is a different axis from the runtime backend above: `config/backend` selects the session provider and is recorded as `backend=`, while the pool selects the agent account and is recorded as `pool_backend=`.
+The pool is inert while the file is absent, so every path documented elsewhere in this file behaves identically until the captain opts in.
 
 ## Toolchain
 
@@ -372,6 +385,10 @@ FM_ZELLIJ_SESSION=firstmate  # zellij-only: named session for normal backend ops
 FM_BACKEND_CMUX_COMPOSER_LINES=20  # cmux-only: tail lines scanned to locate the composer row for submit verification
 FM_BACKEND_CMUX_IDLE_RE='^Type a message\.\.\.$'  # cmux-only: empty-composer placeholder regex after border/prompt stripping
 CMUX_SOCKET_PASSWORD=   # cmux-only: socket password fallback when config/cmux-socket-password is absent (docs/cmux-backend.md)
+FM_POOL_CONFIG=          # dispatch-pool config path override, mainly for tests (default config/dispatch-pool.json)
+FM_POOL_KEY_DIR=         # dispatch-pool key directory override, mainly for tests (default ~/.config/firstmate/keys)
+FM_POOL_NOW=             # epoch seconds the pool treats as "now", mainly for cooldown-expiry tests
+FM_POOL_MAX_COOLDOWN_SECONDS=86400  # ceiling on any single account cooldown, so a misparsed reset cannot strand an account
 FM_SESSION_START_STATUS_TAIL=5   # state/*.status lines printed per task in the session-start digest
 FM_BOOTSTRAP_DETECT_ONLY=0   # internal/read-only session-start mode: skip bootstrap's mutating sweeps and print advisory TANGLE wording
 FM_GUARD_READ_ONLY=0    # internal/read-only guard mode: keep alarms but suppress drain, supervision repair, and checkout repair commands
@@ -423,7 +440,7 @@ FM_STALE_WORKTREE_LOCK_RETRY_WAIT_SECS=   # legacy alias for FM_TREEHOUSE_RETURN
 FM_FLEET_SYNC_PACKED_REFS_LOCK_RETRIES=3        # fetch retries after fm-fleet-sync.sh hits the orphaned .git/packed-refs.lock signature
 FM_FLEET_SYNC_PACKED_REFS_LOCK_RETRY_WAIT_SECS=1 # seconds fm-fleet-sync.sh waits before each of those retries
 FM_FLEET_SYNC_PACKED_REFS_LOCK_AGE_SECS=30       # min mtime age before fm-fleet-sync.sh treats a leftover packed-refs.lock as provably stale
-FM_BUSY_REGEX='esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel'   # busy-pane signatures, shared by watcher, fm-crew-state pane fallback, and tmux helper
+FM_BUSY_REGEX='esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel|ctrl\+c to stop'   # busy-pane signatures, shared by watcher, fm-crew-state pane fallback, and tmux helper
 FM_COMPOSER_IDLE_RE=    # optional empty-composer regex, applied after ghost and border stripping
 FM_COMPOSER_GHOST_LUMA_MAX=128   # fleet-wide: max perceived luminance (0.299R+0.587G+0.114B, 0-255) for a TRUECOLOR foreground to count as de-emphasised ghost/placeholder text and be stripped; dim/faint (SGR 2) is stripped regardless. Assumes a dark terminal theme (bin/fm-composer-lib.sh's fm_composer_strip_ghost, shared by the tmux and herdr composer readers)
 GROK_HOME=              # optional Grok config home for firstmate's global grok turn-end hook; defaults to ~/.grok
