@@ -5,11 +5,10 @@
 # helper compares remote-backed projects against origin/<default> after fetching
 # the default branch, and local-only projects against the local default branch.
 # When state/<id>.meta records pr= for an open PR/MR, the compare side is the
-# PR/MR head (recorded pr_head= when reachable, else resolved and fetched
-# through the bin/fm-scm-lib.sh provider seam, which covers GitHub PRs and
-# Codebase MRs) so review stays current after no-mistakes fix rounds push to the
-# PR; if the head cannot be resolved, the script falls back to the local branch
-# with a warning.
+# PR/MR head freshly resolved and fetched through bin/fm-scm-lib.sh's provider
+# seam, which covers GitHub PRs and Codebase MRs. A reachable recorded pr_head=
+# is only a fallback when the provider cannot resolve the current remote head;
+# if neither is available, the script warns and falls back to the local branch.
 # Usage: fm-review-diff.sh <task-id> [--stat]
 #   --stat prints only the stat summary; default prints stat summary plus full diff.
 set -eu

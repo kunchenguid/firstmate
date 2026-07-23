@@ -22,14 +22,21 @@ pass() { printf 'ok - %s\n' "$1"; }
 # Every needle passed here must be text the pane can only show by EXECUTING a
 # command - never text that also appears in the command line itself, or this
 # would go back to passing on an idle shell's echo.
-wait_for_pane_output() {  # <needle> <timeout-secs> <what-failed>
-  local needle=$1 timeout=$2 what=$3
+pane_shows() {  # <needle> <timeout-secs> -> 0 if seen, 1 on timeout (never fails)
+  local needle=$1 timeout=$2
   local deadline=$((SECONDS + timeout)) out=
   while [ "$SECONDS" -lt "$deadline" ]; do
     out=$("$REAL_TMUX" -L "$SOCKET" capture-pane -p -t "$TARGET" 2>/dev/null) || out=
     case "$out" in *"$needle"*) return 0 ;; esac
     sleep 0.05
   done
+  return 1
+}
+wait_for_pane_output() {  # <needle> <timeout-secs> <what-failed>
+  local needle=$1 timeout=$2 what=$3
+  pane_shows "$needle" "$timeout" && return 0
+  local out
+  out=$("$REAL_TMUX" -L "$SOCKET" capture-pane -p -t "$TARGET" 2>/dev/null) || out=
   fail "$what: '$needle' never reached the pane within ${timeout}s; the pane's shell is not executing what it is sent"$'\n'"--- pane ---"$'\n'"$out"
 }
 
@@ -150,8 +157,19 @@ pass "real tmux: fm_backend_tmux_create_task creates a window and refuses a dupl
 tmux send-keys -t "$TARGET" "cd /tmp && PS1='smoke\$ '" Enter
 tmux send-keys -t "$TARGET" -l "clear" ; tmux send-keys -t "$TARGET" Enter
 READY="fm-smoke-ready-$$"
-tmux send-keys -t "$TARGET" -l "echo ${READY}'-'MARK" ; tmux send-keys -t "$TARGET" Enter
-wait_for_pane_output "${READY}-MARK" 60 "real tmux: pane shell never became ready"
+# A newly-created interactive shell can exist before its startup files and line
+# editor are ready to accept Enter, so a single send races startup and is
+# silently lost. Retry the harmless ready probe (interrupting any half-typed
+# line first) until the pane shows the sentinel. The `'-'` quoting splits the
+# literal so the sentinel's OUTPUT text differs from the command that produced
+# it: a match proves the shell EXECUTED the command, not the tty echoing it.
+shell_ready=false
+for _ in $(seq 1 60); do
+  tmux send-keys -t "$TARGET" C-c
+  tmux send-keys -t "$TARGET" -l "echo ${READY}'-'MARK" ; tmux send-keys -t "$TARGET" Enter
+  if pane_shows "${READY}-MARK" 1; then shell_ready=true; break; fi
+done
+[ "$shell_ready" = true ] || fail "real tmux: pane shell never became ready"
 pass "real tmux: pane shell is ready and executing sent commands"
 
 # --- send text + Enter -------------------------------------------------------

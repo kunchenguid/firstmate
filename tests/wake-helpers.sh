@@ -79,6 +79,11 @@ if [ "${1:-}" = "capture-pane" ]; then
   fi
   exit 0
 fi
+if [ "${1:-}" = "display-message" ]; then
+  case "$*" in
+    *pane_current_command*) printf '%s\n' "${FM_FAKE_TMUX_CURRENT_COMMAND:-}"; exit 0 ;;
+  esac
+fi
 exit 1
 SH
   chmod +x "$fakebin/tmux"
@@ -246,7 +251,7 @@ SH
 wait_for_exit() {
   local pid=$1 limit=${2:-50} i=0
   while [ "$i" -lt "$limit" ]; do
-    if ! kill -0 "$pid" 2>/dev/null; then
+    if ! is_live_non_zombie "$pid"; then
       wait "$pid"
       return "$?"
     fi

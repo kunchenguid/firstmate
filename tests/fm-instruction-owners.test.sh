@@ -12,6 +12,7 @@ PROJECT="$ROOT/.agents/skills/project-management/SKILL.md"
 HARNESS="$ROOT/.agents/skills/harness-adapters/SKILL.md"
 CODING="$ROOT/.agents/skills/firstmate-coding-guidelines/SKILL.md"
 RECOVERY="$ROOT/.agents/skills/stuck-crewmate-recovery/SKILL.md"
+SECONDMATE="$ROOT/.agents/skills/secondmate-provisioning/SKILL.md"
 CONFIG="$ROOT/docs/configuration.md"
 AGENTS="$ROOT/AGENTS.md"
 BRIEF="$ROOT/bin/fm-brief.sh"
@@ -111,6 +112,46 @@ test_shared_authoring_requirements_are_owned() {
   pass "firstmate-coding-guidelines owns compatibility review and deterministic enforcement"
 }
 
+test_secondmate_registry_contract_stays_concise() {
+  local guidance routing_section schema_line
+  routing_section=$(awk '
+    /^## Routing table$/ { found = 1 }
+    found && /^## Charter and seed$/ { exit }
+    found { print }
+  ' "$SECONDMATE")
+  guidance=$(awk '
+    /^## Routing table$/ { found = 1 }
+    found && /^## Backlog handoff$/ { exit }
+    found { print }
+  ' "$SECONDMATE")
+  schema_line="- <id> - <one-sentence charter summary> (home: <absolute-home-path>; scope: <natural-language responsibility>; projects: <project-a>, <project-b>; added <date>)"
+  assert_contains "$routing_section" "$schema_line" \
+    "secondmate routing table lost the parser-compatible single-line schema"
+  assert_contains "$routing_section" "Each registry entry stays concise and single-line" \
+    "secondmate routing table no longer requires concise single-line entries"
+  assert_contains "$routing_section" "genuinely domain-specific hard rules" \
+    "secondmate routing table no longer limits extra prose to domain-specific hard rules"
+  assert_contains "$routing_section" "The home-seeded \`data/charter.md\` is the sole owner of boilerplate idle-by-default behavior, the normal delegation lifecycle, and standard escalation contracts" \
+    "secondmate routing table lost the explicit charter ownership pointer"
+  assert_contains "$routing_section" "no extra registry pointer field is needed" \
+    "secondmate routing table no longer explains why the existing home field is the charter pointer"
+  for phrase in \
+    "go idle and wait silently" \
+    "Act only on tasks" \
+    "never spawn a survey" \
+    "run normal firstmate bootstrap" \
+    "escalation back to the main firstmate status file" \
+    "requests-from-main-firstmate contract" \
+    "waits for routed tasks, never self-initiating a survey or audit" \
+    "marked supervisor requests return through status" \
+    "unmarked captain messages stay conversational"; do
+    if printf '%s\n' "$guidance" | grep -F "$phrase" >/dev/null; then
+      fail "secondmate provisioning guidance restated charter boilerplate: $phrase"
+    fi
+  done
+  pass "secondmate registry guidance keeps concise routes and points to the charter"
+}
+
 test_state_startup_and_ordinary_recovery_placement() {
   assert_grep "single owner of the top-level operational-home layout" "$CONFIG" \
     "configuration docs do not own the operational state layout"
@@ -130,9 +171,9 @@ test_state_startup_and_ordinary_recovery_placement() {
 }
 
 test_compressed_agents_owner_map() {
-  assert_grep '`docs/configuration.md` is the single owner of the operational-home layout' "$AGENTS" \
+  assert_grep '`docs/configuration.md` is the single owner of the top-level operational-home layout' "$AGENTS" \
     "AGENTS.md lost the state-layout owner pointer"
-  assert_grep 'header is the single owner of composed commands, ordering, digest contents' "$AGENTS" \
+  assert_grep 'header is the single owner of composed commands, ordering, and digest contents' "$AGENTS" \
     "AGENTS.md lost the session-start owner pointer"
   assert_grep '`docs/configuration.md` owns dispatch-profile and runtime-backend schemas' "$AGENTS" \
     "AGENTS.md lost the dispatch-schema owner pointer"
@@ -185,6 +226,7 @@ test_diagnostic_owner_covers_causal_procedure
 test_project_management_owner_covers_guarded_operations
 test_generic_effort_fallback_respects_precedence
 test_shared_authoring_requirements_are_owned
+test_secondmate_registry_contract_stays_concise
 test_state_startup_and_ordinary_recovery_placement
 test_compressed_agents_owner_map
 test_compressed_agents_retains_authority_and_supervision_safety

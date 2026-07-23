@@ -26,6 +26,13 @@
 #   (j) a poll generated before bin/fm-poll-lib.sh existed picks up today's
 #       signals without its file being touched
 #   (k) a re-armed watch (a new run id) can report a park again
+#
+# Cases (c) through (i) and (k) are gated off while the poll's extra questions
+# have no consumer. (c), (d), (f), (h), and (k) assert wakes nothing can produce
+# today; (e), (g), and (i) assert the ABSENCE of such a wake, which is trivially
+# true when nothing asks the question at all, so leaving them running would report
+# passes that prove nothing. tests/lib.sh's fm_extra_poll_questions_have_consumer
+# owns why and what turns them all back on.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -67,6 +74,17 @@ case " \$* " in
       exit 1
     fi
     printf '%s\t%s\n' "\$(cat '$case_dir/pr-state')" '9999999999999999999999999999999999999999'
+    exit 0
+    ;;
+  *"--json state -q"*)
+    # bin/fm-pr-poll.sh asks for the state alone. Answering only the older
+    # two-field query made this mock return nothing here, so a merged PR read as
+    # silence and the poll looked broken when it was the mock that was.
+    if [ -e '$case_dir/gh-broken' ]; then
+      echo "gh: authentication failed" >&2
+      exit 1
+    fi
+    cat '$case_dir/pr-state'
     exit 0
     ;;
 esac
@@ -170,6 +188,10 @@ test_merged_wakes_and_clears_state() {
 
 test_park_wakes_once() {
   local case_dir first second
+  if ! fm_extra_poll_questions_have_consumer; then
+    pass "SKIP ($FM_EXTRA_POLL_SKIP): this task's parked watch run wakes firstmate once and stays quiet while it stays parked"
+    return
+  fi
   case_dir=$(make_case park-once)
   arm_poll "$case_dir"
   watch_run "$case_dir" "$MY_RUN"
@@ -189,6 +211,10 @@ test_park_wakes_once() {
 
 test_park_clearing_rearms_the_one_shot() {
   local case_dir first cleared again
+  if ! fm_extra_poll_questions_have_consumer; then
+    pass "SKIP ($FM_EXTRA_POLL_SKIP): a park that clears re-arms the one-shot so a later park wakes firstmate again"
+    return
+  fi
   case_dir=$(make_case park-rearm)
   arm_poll "$case_dir"
   watch_run "$case_dir" "$MY_RUN"
@@ -211,6 +237,10 @@ test_park_clearing_rearms_the_one_shot() {
 
 test_another_runs_park_is_never_reported() {
   local case_dir out
+  if ! fm_extra_poll_questions_have_consumer; then
+    pass "SKIP ($FM_EXTRA_POLL_SKIP): a park belonging to another run is never read as this task's"
+    return
+  fi
   case_dir=$(make_case park-not-mine)
   arm_poll "$case_dir"
   watch_run "$case_dir" "$MY_RUN"
@@ -228,6 +258,10 @@ test_another_runs_park_is_never_reported() {
 
 test_gone_watch_wakes_once_with_the_rearm() {
   local case_dir first second
+  if ! fm_extra_poll_questions_have_consumer; then
+    pass "SKIP ($FM_EXTRA_POLL_SKIP): a watch run that is gone or ended wakes firstmate once with the re-arm instruction"
+    return
+  fi
   case_dir=$(make_case watch-gone)
   arm_poll "$case_dir"
   watch_run "$case_dir" "$MY_RUN"
@@ -252,6 +286,10 @@ test_gone_watch_wakes_once_with_the_rearm() {
 
 test_unknown_status_is_not_reported_as_gone() {
   local case_dir out
+  if ! fm_extra_poll_questions_have_consumer; then
+    pass "SKIP ($FM_EXTRA_POLL_SKIP): a run status the poll does not recognize is left undecided, not reported as gone"
+    return
+  fi
   case_dir=$(make_case watch-unknown)
   arm_poll "$case_dir"
   watch_run "$case_dir" "$MY_RUN"
@@ -264,6 +302,10 @@ test_unknown_status_is_not_reported_as_gone() {
 
 test_watch_lookup_failure_fails_closed() {
   local case_dir first second third fourth
+  if ! fm_extra_poll_questions_have_consumer; then
+    pass "SKIP ($FM_EXTRA_POLL_SKIP): a watch lookup that cannot answer fails closed instead of inventing a signal"
+    return
+  fi
   case_dir=$(make_case watch-unreadable)
   arm_poll "$case_dir"
   watch_run "$case_dir" "$MY_RUN"
@@ -292,6 +334,10 @@ test_watch_lookup_failure_fails_closed() {
 
 test_no_recorded_run_asks_no_watch_question() {
   local case_dir out
+  if ! fm_extra_poll_questions_have_consumer; then
+    pass "SKIP ($FM_EXTRA_POLL_SKIP): a task with no recorded watch run asks no watch question at all"
+    return
+  fi
   case_dir=$(make_case no-run-id)
   arm_poll "$case_dir"
   # No nm_watch_run in the meta, but the captain's own run IS parked.
@@ -307,6 +353,10 @@ test_no_recorded_run_asks_no_watch_question() {
 
 test_rearmed_watch_can_park_again() {
   local case_dir first second
+  if ! fm_extra_poll_questions_have_consumer; then
+    pass "SKIP ($FM_EXTRA_POLL_SKIP): a re-armed watch run reports its own park rather than inheriting the answered one"
+    return
+  fi
   case_dir=$(make_case park-rearmed-run)
   arm_poll "$case_dir"
   watch_run "$case_dir" "$MY_RUN"

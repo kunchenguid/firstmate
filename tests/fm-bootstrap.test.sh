@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # Behavior tests for fm-bootstrap.sh reporting and session-start clone refresh bounds.
 #
-# Bootstrap prints one block or line per problem or capability fact and is silent when all
-# is well. firstmate consumes the exact 'MISSING: treehouse (install: ...)',
+# Bootstrap prints one block or line per actionable problem, optional verbose
+# BOOTSTRAP_INFO fact, or completed bootstrap no-action fact and is silent when
+# all is well. firstmate consumes the exact 'MISSING: treehouse (install: ...)',
 # 'MISSING: tasks-axi (install: ...)', 'MISSING: quota-axi (install: ...)', and
-# 'TASKS_AXI: available' lines, so those contracts are pinned verbatim. The cases
+# 'BOOTSTRAP_INFO: ...' lines, so those contracts are pinned verbatim. The cases
 # are table-driven over the inputs that vary: whether `treehouse get --help`
 # advertises --lease, which (if any) tasks-axi version is on PATH, whether
 # tasks-axi update advertises --archive-body, whether its mv help advertises
@@ -317,7 +318,7 @@ test_bootstrap_reporting() {
   done <<'ROWS'
 treehouse --lease support is accepted silently^1^0.1.1^1^manual^empty^^
 treehouse without --lease reports an upgrade, gh auth is fine^0^0.1.1^1^-^grep^MISSING: treehouse (install: curl -fsSL https://kunchenguid.github.io/treehouse/install.sh | sh)^NEEDS_GH_AUTH
-compatible tasks-axi is reported available by default^1^0.1.1^1^-^exact^TASKS_AXI: available^
+compatible tasks-axi is silent by default^1^0.1.1^1^-^empty^^
 missing tasks-axi is required by default^1^-^1^-^exact^MISSING: tasks-axi (install: npm install -g tasks-axi)^
 incompatible tasks-axi is required by default^1^0.1.0^1^-^exact^MISSING: tasks-axi (install: npm install -g tasks-axi)^
 tasks-axi without archive-body is required by default^1^0.1.2:noarchive^1^-^exact^MISSING: tasks-axi (install: npm install -g tasks-axi)^
@@ -712,21 +713,110 @@ test_fleet_sync_timeout_is_computed_before_launch() {
   pass "bootstrap computes the timeout before launching fleet sync"
 }
 
-test_crew_dispatch_active_rules_are_surfaced() {
+make_routine_bootstrap_fixture() {
+  local case_dir=$1 fakebin root home sm c1
+  root="$case_dir/root"
+  home="$case_dir/home"
+  sm="$case_dir/sm"
+  fm_git_identity
+  mkdir -p "$home/config" "$home/state"
+  printf '%s\n' codex > "$home/config/crew-harness"
+  printf '%s\n' '{"rules":[{"when":"normal work","use":{"harness":"codex"}}],"default":{"harness":"claude","effort":"low"}}' \
+    > "$home/config/crew-dispatch.json"
+  git init -q -b main "$root"
+  {
+    printf '%s\n' '.fm-secondmate-home'
+    printf '%s\n' 'config/crew-harness'
+    printf '%s\n' 'config/crew-dispatch.json'
+  } > "$root/.gitignore"
+  printf '%s\n' 'instructions' > "$root/AGENTS.md"
+  mkdir -p "$root/bin" "$root/.agents/skills"
+  printf '%s\n' 'echo ok' > "$root/bin/fm-spawn.sh"
+  printf '%s\n' 'skill' > "$root/.agents/skills/example.md"
+  git -C "$root" add -A
+  git -C "$root" commit -qm initial
+  c1=$(git -C "$root" rev-parse HEAD)
+  git -C "$root" worktree add -q --detach "$sm" "$c1"
+  printf '%s\n' sm > "$sm/.fm-secondmate-home"
+  {
+    printf 'window=firstmate:fm-sm\n'
+    printf 'kind=secondmate\n'
+    printf 'harness=codex\n'
+    printf 'home=%s\n' "$sm"
+  } > "$home/state/sm.meta"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  add_real_jq "$fakebin"
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = display-message ]; then
+  printf '%s\n' codex
+  exit 0
+fi
+exit 0
+SH
+  chmod +x "$fakebin/tmux"
+  printf '%s|%s|%s\n' "$root" "$home" "$fakebin"
+}
+
+run_routine_bootstrap_fixture() {
+  local shell=$1 case_dir=$2 fixture root home fakebin
+  fixture=$(make_routine_bootstrap_fixture "$case_dir")
+  root=${fixture%%|*}
+  fixture=${fixture#*|}
+  home=${fixture%%|*}
+  fakebin=${fixture#*|}
+  PATH="$fakebin:$BASE_PATH" FM_BACKEND=tmux FM_HOME="$home" FM_ROOT_OVERRIDE="$root" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 \
+    "$shell" "$ROOT/bin/fm-bootstrap.sh"
+}
+
+test_routine_bootstrap_confirmations_are_silent() {
+  local out
+  out=$(run_routine_bootstrap_fixture bash "$TMP_ROOT/routine-silent")
+  [ -z "$out" ] || fail "routine bootstrap confirmations should be silent, got: $out"
+  pass "bootstrap keeps routine tasks-axi, harness, dispatch, and already-live liveness confirmations silent"
+}
+
+test_routine_bootstrap_contract_runs_under_system_bash() {
+  local out
+  [ -x /bin/bash ] || { pass "bootstrap routine contract skipped without /bin/bash"; return; }
+  out=$(run_routine_bootstrap_fixture /bin/bash "$TMP_ROOT/routine-bash")
+  [ -z "$out" ] || fail "routine bootstrap contract should be silent under /bin/bash, got: $out"
+  pass "bootstrap routine contract runs under system /bin/bash"
+}
+
+test_bootstrap_info_is_no_load_and_actionable_lines_trigger() {
+  local trigger
+  # shellcheck disable=SC2016 # The backtick-delimited skill names are literal Markdown.
+  trigger=$(sed -n '/- `bootstrap-diagnostics`/,/- `diagnostic-reasoning`/p' "$ROOT/AGENTS.md")
+  assert_contains "$trigger" "actionable diagnostic line" "bootstrap-diagnostics trigger should be action-scoped"
+  assert_contains "$trigger" "BOOTSTRAP_INFO:" "bootstrap-diagnostics trigger should classify BOOTSTRAP_INFO as no-load"
+  assert_not_contains "$trigger" "TASKS_AXI:" "tasks-axi availability must not trigger diagnostics loading"
+  assert_not_contains "$trigger" "CREW_HARNESS_OVERRIDE:" "harness override confirmation must not trigger diagnostics loading"
+  assert_not_contains "$trigger" "CREW_DISPATCH: active" "active dispatch confirmation must not trigger diagnostics loading"
+  assert_not_contains "$trigger" "already-live" "already-live secondmate liveness must not trigger diagnostics loading"
+  pass "bootstrap diagnostics trigger excludes benign lines and keeps actionable prefixes"
+}
+
+test_crew_dispatch_active_rules_are_verbose_bootstrap_info() {
   local case_dir fakebin out expect
   case_dir="$TMP_ROOT/dispatch-active"
   mkdir -p "$case_dir/home/config"
   printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
-  printf '%s\n' '{"rules":[{"when":"fresh news","use":{"harness":"grok"},"why":"current context"},{"when":"big feature","use":[{"harness":"claude","model":"claude-sonnet-5","effort":"high"},{"harness":"codex","model":"gpt-5.5","effort":"high"}],"select":"quota-balanced"}],"default":{"harness":"claude","model":"haiku","effort":"low"}}' > "$case_dir/home/config/crew-dispatch.json"
+  printf '%s\n' '{"rules":[{"when":"fresh news","use":{"harness":"grok"},"why":"current context"},{"when":"big feature","use":[{"harness":"claude","model":"claude-sonnet-5","effort":"high"},{"harness":"codex","model":"gpt-5.5","effort":"high"}]},{"when":"legacy feature","use":[{"harness":"claude"},{"harness":"codex"}],"select":"quota-balanced"}],"default":[{"harness":"pi","model":"anthropic/claude-sonnet-5","effort":"high"},{"harness":"grok","model":"grok-4.5","effort":"high"}]}' > "$case_dir/home/config/crew-dispatch.json"
   fakebin=$(make_fake_toolchain "$case_dir")
   add_real_jq "$fakebin"
 
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ -z "$out" ] || fail "active dispatch profile should be silent by default, got: $out"
 
-  expect=$'CREW_DISPATCH: active config/crew-dispatch.json\n  rule: fresh news -> grok\n  rule: big feature -> quota-balanced[claude/claude-sonnet-5/high, codex/gpt-5.5/high]\n  default: claude/haiku/low'
-  [ "$out" = "$expect" ] || fail "active dispatch profile block mismatch"$'\n'"expected: $expect"$'\n'"actual:   $out"
-  pass "bootstrap surfaces active crew-dispatch rules and default"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_BOOTSTRAP_VERBOSE_FACTS=1 FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+
+  expect=$'BOOTSTRAP_INFO: crew dispatch active config/crew-dispatch.json\nBOOTSTRAP_INFO: crew dispatch rule: fresh news -> grok\nBOOTSTRAP_INFO: crew dispatch rule: big feature -> quota-balanced[claude/claude-sonnet-5/high, codex/gpt-5.5/high]\nBOOTSTRAP_INFO: crew dispatch rule: legacy feature -> quota-balanced[claude, codex]\nBOOTSTRAP_INFO: crew dispatch default: quota-balanced[pi/anthropic/claude-sonnet-5/high, grok/grok-4.5/high]'
+  [ "$out" = "$expect" ] || fail "active dispatch verbose info block mismatch"$'\n'"expected: $expect"$'\n'"actual:   $out"
+  pass "bootstrap surfaces active crew-dispatch rules only as verbose BOOTSTRAP_INFO"
 }
 
 # Orphan-row integrity check: a row under `## In flight` whose state/<id>.meta is
@@ -800,18 +890,26 @@ unverified dispatch harness is flagged^{"rules":[{"when":"anything","use":{"harn
 unsupported codex max effort is flagged^{"rules":[{"when":"big feature","use":{"harness":"codex","model":"gpt-5","effort":"max"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: codex:max
 unsupported grok max effort is flagged^{"rules":[{"when":"deep current work","use":{"harness":"grok","model":"grok-4","effort":"max"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: grok:max
 unsupported grok xhigh effort is flagged^{"rules":[{"when":"deep current work","use":{"harness":"grok","model":"grok-4","effort":"xhigh"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: grok:xhigh
-pi max effort is accepted^{"rules":[{"when":"deep coding","use":{"harness":"pi","model":"openai-codex/gpt-5.6-sol","effort":"max"}}]}^grep^  rule: deep coding -> pi/openai-codex/gpt-5.6-sol/max
-traex xhigh effort is accepted^{"rules":[{"when":"deep investigation","use":{"harness":"traex","effort":"xhigh"}}]}^grep^  rule: deep investigation -> traex/default/xhigh
+pi max effort is accepted^{"rules":[{"when":"deep coding","use":{"harness":"pi","model":"openai-codex/gpt-5.6-sol","effort":"max"}}]}^empty^
+traex xhigh effort is accepted^{"rules":[{"when":"deep investigation","use":{"harness":"traex","effort":"xhigh"}}]}^empty^
 unsupported traex max effort is flagged^{"rules":[{"when":"deep work","use":{"harness":"traex","effort":"max"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: traex:max
 unsupported opencode effort is flagged^{"rules":[{"when":"opencode work","use":{"harness":"opencode","model":"anthropic/claude-sonnet-4-5","effort":"high"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: opencode:high
-array use with quota-balanced is accepted^{"rules":[{"when":"big feature","use":[{"harness":"claude","model":"claude-sonnet-5","effort":"high"},{"harness":"codex","model":"gpt-5.5","effort":"high"}],"select":"quota-balanced"}]}^grep^CREW_DISPATCH: active config/crew-dispatch.json
-array use without select is accepted^{"rules":[{"when":"big feature","use":[{"harness":"claude"},{"harness":"codex"}]}]}^grep^CREW_DISPATCH: active config/crew-dispatch.json
+array use with quota-balanced is accepted^{"rules":[{"when":"big feature","use":[{"harness":"claude","model":"claude-sonnet-5","effort":"high"},{"harness":"codex","model":"gpt-5.5","effort":"high"}],"select":"quota-balanced"}]}^empty^
+array use without select is accepted^{"rules":[{"when":"big feature","use":[{"harness":"claude"},{"harness":"codex"}]}]}^empty^
+one-element array use is accepted^{"rules":[{"when":"focused feature","use":[{"harness":"claude"}]}]}^empty^
+default array is accepted^{"default":[{"harness":"pi","model":"anthropic/claude-sonnet-5"},{"harness":"grok"}]}^empty^
+one-element default array is accepted^{"default":[{"harness":"codex"}]}^empty^
 empty array use is flagged^{"rules":[{"when":"big feature","use":[]}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - each rule needs at least one use profile
 array profile without harness is flagged^{"rules":[{"when":"big feature","use":[{"model":"gpt-5.5"}]}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - each use profile needs harness
+array profile with malformed model is flagged^{"rules":[{"when":"big feature","use":[{"harness":"codex","model":5}]}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - use profile model and effort must be non-empty strings when present
 unknown select is flagged^{"rules":[{"when":"big feature","use":[{"harness":"claude"},{"harness":"codex"}],"select":"mystery"}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - unknown select: mystery
 array profile unsupported effort is flagged^{"rules":[{"when":"big feature","use":[{"harness":"codex","effort":"max"}]}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: codex:max
 empty launch is flagged^{"rules":[{"when":"gateway work","use":[{"harness":"claude","launch":""}]}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - launch must be a non-empty string
 non-string launch is flagged^{"rules":[{"when":"gateway work","use":[{"harness":"claude","launch":3}]}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - launch must be a non-empty string
+empty default array is flagged^{"default":[]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - default needs at least one profile
+non-object default array entry is flagged^{"default":["codex"]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - each default profile must be an object
+default array profile without harness is flagged^{"default":[{"model":"gpt-5.5"}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - each default profile needs harness
+default array malformed effort is flagged^{"default":[{"harness":"codex","effort":3}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - default profile model and effort must be non-empty strings when present
 ROWS
   pass "bootstrap validates crew-dispatch.json and reports malformed or unverified configs"
 }
@@ -866,8 +964,10 @@ test_crew_dispatch_launch_cross_file_check() {
   fakebin=$(make_fake_toolchain "$case_dir")
   add_real_jq "$fakebin"
 
+  # The rule listing is a capability fact, so it is verbose-only; the cross-file
+  # complaint below stays unconditional because it is a real misconfiguration.
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
-    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+    FM_BOOTSTRAP_VERBOSE_FACTS=1 FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
   printf '%s\n' "$out" | grep -F 'rule: overflow work -> claude launch=gateway' >/dev/null \
     || fail "a declared launch variant should be shown in the active rule listing: $out"
   printf '%s\n' "$out" | grep -F 'undeclared harness variant' >/dev/null \
@@ -900,7 +1000,10 @@ test_fleet_sync_timeout_floor_preserves_small_fleets
 test_fleet_sync_timeout_explicit_override_wins
 test_fleet_sync_timeout_empty_override_uses_default
 test_fleet_sync_timeout_is_computed_before_launch
-test_crew_dispatch_active_rules_are_surfaced
+test_routine_bootstrap_confirmations_are_silent
+test_routine_bootstrap_contract_runs_under_system_bash
+test_bootstrap_info_is_no_load_and_actionable_lines_trigger
+test_crew_dispatch_active_rules_are_verbose_bootstrap_info
 test_crew_dispatch_validation
 test_backlog_orphan_rows_are_reported
 test_harness_overrides_variants_validation

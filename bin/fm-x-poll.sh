@@ -3,18 +3,20 @@
 #
 # Inert by default: a HARD no-op (exit 0, no output) unless X mode is configured
 # via a non-empty FMX_PAIRING_TOKEN (from the home's .env or the environment).
-# This script is the body of the watcher check shim state/x-watch.check.sh, where
-# the contract is "output => wake firstmate, silence => keep sleeping", so the
+# The watcher invokes this trusted repository script directly only after
+# state/x-watch.check.sh matches the expected byte-static identity shim.
+# Its contract is "output => wake firstmate, silence => keep sleeping", so the
 # no-op keeps the watcher behaving exactly as today until a user opts in.
 #
 # Behavior when X mode is on:
 #   HTTP 204 / empty / missing text              -> print nothing, exit 0 (no wake)
 #   auth/config errors                           -> print one rate-limited diagnostic
-#   a mention JSON with non-empty text           -> stash the full object to
+#   a newly offered mention with non-empty text -> stash the full object to
 #       state/x-inbox/<request_id>.json, record the durable per-request reply
-#       context to state/x-context/<request_id>.json (best-effort; see
-#       fm-x-lib.sh), and print one compact line "x-mention <request_id>" (which
-#       becomes the watcher's check: wake payload)
+#       context to state/x-context/<request_id>.json (best-effort), atomically
+#       claim state/x-context/<request_id>.offered.json, and print one compact
+#       line "x-mention <request_id>" (which becomes the watcher wake payload)
+#   an already offered request_id                -> print nothing, exit 0
 # The full object is stashed verbatim, so any conversation context the relay
 # includes (in_reply_to: {author_handle, text}, null for a fresh mention) is
 # preserved for fmx-respond to handle follow-ups with continuity. The durable
@@ -38,19 +40,38 @@ fmx_load_config
 [ -n "$FMX_TOKEN" ] || exit 0
 
 ERROR_FILE="$STATE/x-poll.error"
+CLAIM_ERROR_FILE="$STATE/x-poll.claim-error"
 
 emit_error_once() {
   local msg=$1
-  mkdir -p "$STATE" 2>/dev/null || true
-  if [ -f "$ERROR_FILE" ] && [ "$(cat "$ERROR_FILE" 2>/dev/null)" = "$msg" ]; then
+  if fmx_private_artifact_file_valid "$STATE" "x-poll.error" 600 \
+    && [ "$(cat "$ERROR_FILE" 2>/dev/null)" = "$msg" ]; then
     return 0
   fi
-  printf '%s\n' "$msg" > "$ERROR_FILE" 2>/dev/null || true
+  printf '%s\n' "$msg" \
+    | fmx_private_artifact_publish_stdin "$STATE" "x-poll.error" 600 2>/dev/null || true
   printf 'x-mode-error %s\n' "$msg"
 }
 
 clear_error() {
+  fmx_private_artifact_dir_device "$STATE" >/dev/null 2>&1 || return 0
   rm -f "$ERROR_FILE" 2>/dev/null || true
+}
+
+emit_claim_error_once() {
+  local msg=$1
+  if fmx_private_artifact_file_valid "$STATE" "x-poll.claim-error" 600 \
+    && [ "$(cat "$CLAIM_ERROR_FILE" 2>/dev/null)" = "$msg" ]; then
+    return 0
+  fi
+  printf '%s\n' "$msg" \
+    | fmx_private_artifact_publish_stdin "$STATE" "x-poll.claim-error" 600 2>/dev/null || true
+  printf 'x-mode-error %s\n' "$msg"
+}
+
+clear_claim_error() {
+  fmx_private_artifact_dir_device "$STATE" >/dev/null 2>&1 || return 0
+  rm -f "$CLAIM_ERROR_FILE" 2>/dev/null || true
 }
 
 command -v curl >/dev/null 2>&1 || { emit_error_once "missing curl"; exit 0; }
@@ -97,18 +118,21 @@ case "$REQ" in
   ''|.*|*[!A-Za-z0-9._-]*) clear_error; exit 0 ;;
 esac
 
+# The offer marker outlives the inbox file, which fmx-respond removes after a
+# successful answer or dismiss. Checking it before the inbox stash keeps both a
+# still-pending request and the relay's brief post-answer re-offer silent without
+# recreating a drained inbox. The startup prune above bounds marker retention.
+if fmx_private_artifact_file_valid "$STATE/x-context" "$REQ.offered.json" 600; then
+  clear_error
+  clear_claim_error
+  exit 0
+fi
+
 INBOX="$STATE/x-inbox"
-mkdir -p "$INBOX" 2>/dev/null || { emit_error_once "cannot create inbox"; exit 0; }
 # Stash the full mention object atomically so a concurrent reader never sees a
 # half-written file.
-if jq '.' "$BODY_FILE" > "$INBOX/$REQ.json.tmp" 2>/dev/null; then
-  if ! mv -f "$INBOX/$REQ.json.tmp" "$INBOX/$REQ.json" 2>/dev/null; then
-    rm -f "$INBOX/$REQ.json.tmp"
-    emit_error_once "cannot write inbox"
-    exit 0
-  fi
-else
-  rm -f "$INBOX/$REQ.json.tmp"
+if ! (set -o pipefail; jq '.' "$BODY_FILE" 2>/dev/null \
+  | fmx_private_artifact_publish_stdin "$INBOX" "$REQ.json" 600); then
   emit_error_once "cannot write inbox"
   exit 0
 fi
@@ -127,5 +151,10 @@ if [ -n "$POLL_CTX" ]; then
   fmx_context_registry_set "$STATE" "$REQ" "$POLL_PLATFORM" "$POLL_MAX" 2>/dev/null || true
 fi
 
-clear_error
-printf 'x-mention %s\n' "$REQ"
+fmx_offer_registry_claim "$STATE" "$REQ"
+offer_rc=$?
+case "$offer_rc" in
+  0) clear_error; clear_claim_error; printf 'x-mention %s\n' "$REQ" ;;
+  1) clear_error; clear_claim_error; exit 0 ;;
+  *) emit_claim_error_once "cannot record mention offer"; exit 0 ;;
+esac

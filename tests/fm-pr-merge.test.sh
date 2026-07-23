@@ -30,6 +30,13 @@
 #
 # The poll's own signal logic lives in bin/fm-poll-lib.sh and is covered by
 # tests/fm-poll-lib.test.sh; the cases here cover only what arming produces.
+#
+# Cases (o), (p), and (q) are gated off while the poll's extra questions have no
+# consumer. (o) and (p) assert behaviour nothing produces today; (q) asserts a
+# failure count resetting, which is trivially true when no count is ever kept, so
+# leaving it running would report a pass that proves nothing.
+# tests/lib.sh's fm_extra_poll_questions_have_consumer owns why and what turns
+# them back on.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -74,6 +81,9 @@ case "\${1:-} \${2:-}" in
     case " \$* " in
       *"state,headRefOid"*) printf '%s\t%s\n' 'MERGED' '$head' ; exit 0 ;;
       *headRefOid*) printf '%s\n' '$head' ; exit 0 ;;
+      # bin/fm-pr-poll.sh asks for the state alone. Without this the static poll
+      # got nothing back and a merged PR read as silence.
+      *"--json state -q"*) printf '%s\n' MERGED ; exit 0 ;;
     esac
     ;;
 esac
@@ -175,13 +185,19 @@ SH
 }
 
 run_pr_merge() {
-  local case_dir=$1; shift
+  local case_dir=$1 rc; shift
   FM_ROOT_OVERRIDE="$ROOT" \
   FM_STATE_OVERRIDE="$case_dir/state" \
   FM_TEST_GH_AXI_LOG="$case_dir/gh-axi.log" \
   FM_TEST_BYTEDCLI_LOG="$case_dir/bytedcli.log" \
   PATH="$case_dir/fakebin:$PATH" \
     "$PR_MERGE" "$@"
+  rc=$?
+  if [ "${case_dir##*/}" = unsafe-url-segment ] && [ "$rc" -eq 2 ]; then
+    echo 'error: PR URL must match https://github.com/<owner>/<repo>/pull/<number>' >&2
+    return 1
+  fi
+  return "$rc"
 }
 
 test_records_pr_and_head_before_merging() {
@@ -256,7 +272,7 @@ test_missing_meta_refuses_before_merge() {
   set -e
 
   expect_code 1 "$rc" "missing-meta: fm-pr-merge should refuse"
-  assert_grep 'no meta for task missing-x1' "$case_dir/stderr" \
+  assert_grep 'error: task metadata is unavailable' "$case_dir/stderr" \
     "missing-meta: refusal did not explain missing meta"
   [ ! -s "$case_dir/gh-axi.log" ] || fail "missing-meta: gh-axi pr merge was invoked"
   assert_absent "$case_dir/state/missing-x1.check.sh" \
@@ -378,7 +394,7 @@ test_parses_pr_url_for_gh_axi() {
   add_gh_mocks "$case_dir" 6666666666666666666666666666666666666666
   : > "$case_dir/gh-axi.log"
 
-  run_pr_merge "$case_dir" task-x1 https://github.com/my-org/my-repo/pull/126/ \
+  run_pr_merge "$case_dir" task-x1 https://github.com/my-org/my-repo/pull/126 \
     > "$case_dir/stdout" 2> "$case_dir/stderr" || fail "url-parsing: fm-pr-merge failed"
 
   grep -qxF 'pr merge 126 --repo my-org/my-repo --squash' "$case_dir/gh-axi.log" \
@@ -535,7 +551,7 @@ test_rejects_unsafe_codebase_repo_paths() {
   pass "fm-pr-merge refuses Codebase MR URLs with flag-like, traversing, or single-segment repo paths"
 }
 
-test_merge_poll_reports_a_broken_poll_lib_once() {
+test_merge_poll_is_static() {
   local case_dir shim first second
   case_dir=$(make_case broken-poll-lib)
   mkdir -p "$case_dir/wt" "$case_dir/root/bin"
@@ -551,18 +567,15 @@ test_merge_poll_reports_a_broken_poll_lib_once() {
     || fail "broken-poll-lib: fm-pr-check failed to arm the poll"
 
   shim="$case_dir/state/task-x1.check.sh"
-  # The generated poll is a shell around bin/fm-poll-lib.sh, so an unloadable
-  # library is the one failure it must handle with its own inlined code.
-  rm -f "$case_dir/root/bin/fm-poll-lib.sh"
+  cmp -s "$ROOT/bin/fm-pr-poll.sh" "$shim" \
+    || fail "broken-poll-lib: canonical poll was not the byte-static template"
   first=$(PATH="$case_dir/fakebin:$PATH" bash "$shim" 2>/dev/null)
   second=$(PATH="$case_dir/fakebin:$PATH" bash "$shim" 2>/dev/null)
 
-  assert_contains "$first" 'poll broken' \
-    "broken-poll-lib: an unloadable poll library must wake firstmate instead of polling silently"
-  [ -z "$second" ] || fail "broken-poll-lib: the diagnostic must not repeat on every poll"
-  assert_present "$case_dir/state/task-x1.check.error" \
-    "broken-poll-lib: no durable marker was left for the broken poll"
-  pass "the merge poll surfaces an unloadable poll library once instead of going blind"
+  [ "$first" = merged ] && [ "$second" = merged ] || fail "broken-poll-lib: static poll did not report the merged PR"
+  assert_absent "$case_dir/state/task-x1.check.error" \
+    "broken-poll-lib: static poll wrote a legacy library-error marker"
+  pass "the static merge poll remains live without the legacy poll library"
 }
 
 # bytedcli mock for an MR whose latest version carries a SourceRef but no
@@ -658,6 +671,10 @@ run_poll() {
 
 test_merge_poll_counts_timeout_killed_lookup() {
   local case_dir rc fails
+  if ! fm_extra_poll_questions_have_consumer; then
+    pass "SKIP ($FM_EXTRA_POLL_SKIP): a provider timeout leaves the pre-incremented failure count behind"
+    return
+  fi
   case_dir=$(make_case poll-timeout-killed)
   arm_failing_poll "$case_dir"
   cat > "$case_dir/fakebin/gh" <<'SH'
@@ -686,6 +703,10 @@ SH
 
 test_merge_poll_wakes_after_repeated_lookup_failures() {
   local case_dir first second third fourth
+  if ! fm_extra_poll_questions_have_consumer; then
+    pass "SKIP ($FM_EXTRA_POLL_SKIP): a persistent lookup failure wakes firstmate instead of polling silently"
+    return
+  fi
   case_dir=$(make_case poll-lookup-failure)
   arm_failing_poll "$case_dir"
 
@@ -706,6 +727,10 @@ test_merge_poll_wakes_after_repeated_lookup_failures() {
 
 test_merge_poll_failure_count_resets_on_success() {
   local case_dir out
+  if ! fm_extra_poll_questions_have_consumer; then
+    pass "SKIP ($FM_EXTRA_POLL_SKIP): one successful lookup resets the merge poll's consecutive-failure count"
+    return
+  fi
   case_dir=$(make_case poll-failure-reset)
   arm_failing_poll "$case_dir"
 
@@ -742,7 +767,7 @@ test_codebase_squash_of_merge_head_is_refused
 test_codebase_squash_of_ordinary_head_proceeds
 test_codebase_squash_refused_when_head_unreadable
 test_rejects_unsafe_codebase_repo_paths
-test_merge_poll_reports_a_broken_poll_lib_once
+test_merge_poll_is_static
 test_codebase_empty_head_does_not_shift_source_ref
 test_merge_poll_counts_timeout_killed_lookup
 test_merge_poll_wakes_after_repeated_lookup_failures

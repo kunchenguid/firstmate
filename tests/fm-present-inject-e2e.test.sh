@@ -268,7 +268,12 @@ test_pr_check_auto_wake() {
 #!/usr/bin/env bash
 echo "merged: PR https://example.test/pr/200"
 CHK
-  chmod +x "$STATE_DIR/merge-200.check.sh"
+  # A custom watcher check must be bound to its own bytes before the sweep will
+  # run it, so register it exactly as firstmate does rather than dropping a bare
+  # executable the watcher is right to reject.
+  chmod 0700 "$STATE_DIR/merge-200.check.sh"
+  FM_STATE_OVERRIDE="$STATE_DIR" "$ROOT/bin/fm-check-register.sh" merge-200 >/dev/null \
+    || fail "Event 2: could not register the merge poll as a custom check"
   wait_for_nudge "check:" \
     || { echo "daemon log:" >&2; cat "$STATE_DIR/.supervise-present.log" >&2 2>/dev/null || true; \
          fail "Event 2: PR check.sh did not auto-inject a check nudge (manual drain would have been required)"; }

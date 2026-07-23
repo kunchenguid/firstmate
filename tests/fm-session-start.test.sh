@@ -6,7 +6,7 @@
 # Coverage:
 #   - absent-file markers vs empty-but-present files in the context digest
 #   - the lock-refusal read-only path: banner leads, every mutating step is
-#     skipped (including bootstrap's four mutating sweeps, verified by their
+#     skipped (including bootstrap's five mutating sweeps, verified by their
 #     ABSENCE), the digest still completes
 #   - output section ordering: diagnostics/banners lead, bulk file dumps follow
 #   - context-aware next-step guidance for read-only, AFK, X mode, and normal
@@ -78,6 +78,56 @@ exit 0
 SH
   chmod +x "$fakebin/no-mistakes"
   printf '%s\n' manual > "${fakebin%/*}/home-placeholder" 2>/dev/null || true
+}
+
+make_fake_tasks_axi_compact() {
+  local fakebin=$1
+  cat > "$fakebin/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+set -u
+log=${FM_FAKE_TASKS_AXI_LOG:-}
+[ -n "$log" ] && printf '%s\n' "$*" >> "$log"
+case "${1:-}" in
+  --version|-v|-V)
+    printf '%s\n' '0.2.3'
+    exit 0
+    ;;
+  update)
+    if [ "${2:-}" = --help ]; then
+      printf '%s\n' 'usage: tasks-axi update <id> [--archive-body]'
+      exit 0
+    fi
+    ;;
+  mv)
+    if [ "${2:-}" = --help ]; then
+      printf '%s\n' 'usage: tasks-axi mv <dest> [<id>...]'
+      exit 0
+    fi
+    ;;
+  list)
+    case "$*" in
+      *'--fields '*'body'*|*'--fields='*'body'*)
+        printf '%s\n' 'unexpected body field requested' >&2
+        exit 9
+        ;;
+    esac
+    case "$*" in *'--limit 80'*) : ;; *) printf '%s\n' 'missing compact limit' >&2; exit 9 ;; esac
+    case "$*" in *'--file '*) : ;; *) printf '%s\n' 'missing explicit backlog file' >&2; exit 9 ;; esac
+    cat <<'OUT'
+count: 2
+tasks[2]{id,state,kind,repo,title,blocked_by,hold_kind,hold_reason}:
+  compact-startup,in_flight,ship,firstmate,Compact startup digest,none,captain,captain choice pending
+  blocked-followup,queued,scout,firstmate,Follow compact startup,compact-startup,"-","-"
+help[2]:
+  - Run `tasks-axi show <id> --full` for full notes on a task
+  - Run `tasks-axi ready` to see unblocked queued work
+OUT
+    exit 0
+    ;;
+esac
+exit 1
+SH
+  chmod +x "$fakebin/tasks-axi"
 }
 
 # make_fake_ps_claude <fakebin>: harness_pid()/holder_alive() (fm-lock.sh) walk
@@ -252,7 +302,7 @@ EOF
 
   printf '%s\n' '- demo [no-mistakes] - a demo project (added 2026-07-01)' > "$home/data/projects.md"
   : > "$home/data/captain.md"
-  # secondmates.md and learnings.md deliberately absent
+  # secondmates.md, captain-shared.md, and learnings.md deliberately absent
 
   out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
 
@@ -260,15 +310,17 @@ EOF
   assert_contains "$out" "- demo [no-mistakes] - a demo project (added 2026-07-01)" "digest did not print projects.md content"
 
   assert_contains "$out" "data/captain.md" "digest did not label the captain.md section"
+  assert_contains "$out" "data/captain-shared.md (shared, main-authoritative, read-only in secondmate homes)" \
+    "digest did not label the shared captain section"
 
   assert_contains "$out" "data/secondmates.md" "digest did not label the secondmates.md section"
   assert_contains "$out" "data/learnings.md" "digest did not label the learnings.md section"
 
-  # Exactly two ABSENT markers (secondmates.md, learnings.md; backlog.md is
-  # covered by its own test) - and the present-but-empty captain.md must NOT
-  # print ABSENT.
+  # Exactly four context ABSENT markers (secondmates.md, captain-shared.md,
+  # learnings.md; backlog.md is covered by its own test) - and the
+  # present-but-empty captain.md must NOT print ABSENT.
   absent_count=$(printf '%s\n' "$out" | grep -c '^ABSENT$')
-  [ "$absent_count" -eq 3 ] || fail "expected 3 ABSENT markers (secondmates.md, learnings.md, backlog.md), got $absent_count: $out"
+  [ "$absent_count" -eq 4 ] || fail "expected 4 ABSENT markers (secondmates.md, captain-shared.md, learnings.md, backlog.md), got $absent_count: $out"
 
   cap_section=$(printf '%s\n' "$out" | awk '/^data\/captain\.md$/{flag=1;next}/^data\//{flag=0}flag')
   assert_contains "$cap_section" "(present, empty)" "empty-but-present captain.md was not distinguished from ABSENT"
@@ -535,7 +587,8 @@ EOF
   make_fake_ps_claude "$fakebin"
   rm -f "$fakebin/node"
 
-  append_wake "$home/state" signal task-z "needs-decision: pick a library"
+  printf 'needs-decision: pick a library\n' > "$home/state/task-z.status"
+  append_wake "$home/state" signal task-z.status "needs-decision: pick a library"
 
   out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
 
@@ -544,9 +597,119 @@ EOF
   # fm-bootstrap.sh's own exact MISSING-tool line format.
   assert_contains "$out" "MISSING: node (install:" "fm-bootstrap.sh's real detect line did not appear verbatim"
   # fm-wake-drain.sh's real drained record (raw tab-separated queue line).
-  assert_contains "$out" "$(printf 'signal\ttask-z\tneeds-decision: pick a library')" "fm-wake-drain.sh's real drained record did not appear"
+  assert_contains "$out" "$(printf 'signal\ttask-z.status\tneeds-decision: pick a library')" "fm-wake-drain.sh's real drained record did not appear"
+  assert_contains "$out" "wake annotation: latest wake-EVENT observed at drain, not current state: task-z.status: needs-decision: pick a library" "fm-session-start.sh did not preserve the drain's separate annotation line"
 
   pass "fm-session-start.sh composes the real fm-lock.sh, fm-bootstrap.sh, and fm-wake-drain.sh output verbatim"
+}
+
+# --- fleet-state digest: compact backlog rendering --------------------------
+
+write_long_body_backlog() {
+  local path=$1
+  cat > "$path" <<'EOF'
+# Backlog
+
+## In flight
+- [ ] compact-startup - Compact startup digest (repo: firstmate) (kind: ship) (since 2026-07-15) (hold: captain choice pending) (hold-kind: captain)
+  OVERSIZED-BODY-LINE current startup leaks task note bodies into the session digest.
+  Another long body line that should not be printed after the fix.
+
+## Queued
+- [ ] blocked-followup - Follow compact startup blocked-by: compact-startup - waits for implementation (repo: firstmate) (kind: scout) (since 2026-07-15)
+  QUEUED-BODY-LINE this is another long multiline note.
+
+## Done
+EOF
+}
+
+test_backlog_compact_tasks_axi_omits_bodies_and_keeps_metadata() {
+  local rec root home fakebin out log
+  rec=$(new_world backlog-compact-tasks-axi)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_tasks_axi_compact "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  write_long_body_backlog "$home/data/backlog.md"
+  mkdir -p "$home/projects/firstmate"
+  printf 'window=fm-sess:compact\nworktree=%s\nproject=firstmate\nkind=ship\n' "$home/projects/firstmate" \
+    > "$home/state/compact-startup.meta"
+  log="$home/tasks-axi.log"
+
+  out=$(FM_FAKE_TASKS_AXI_LOG="$log" run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+
+  assert_contains "$out" "compact backlog listing (tasks-axi; max 80 item(s); task bodies omitted)" \
+    "compatible tasks-axi backend did not render the compact backlog listing"
+  assert_contains "$out" "tasks[2]{id,state,kind,repo,title,blocked_by,hold_kind,hold_reason}:" \
+    "tasks-axi compact listing omitted the expected structured field header"
+  assert_contains "$out" "compact-startup,in_flight,ship,firstmate,Compact startup digest,none,captain,captain choice pending" \
+    "tasks-axi compact listing omitted in-flight identity, state, or hold metadata"
+  assert_contains "$out" 'blocked-followup,queued,scout,firstmate,Follow compact startup,compact-startup,"-","-"' \
+    "tasks-axi compact listing omitted blocked-by metadata"
+  assert_not_contains "$out" "OVERSIZED-BODY-LINE" "tasks-axi compact digest leaked an in-flight task body"
+  assert_not_contains "$out" "QUEUED-BODY-LINE" "tasks-axi compact digest leaked a queued task body"
+  assert_contains "$out" "--- compact-startup ---" "in-flight meta identity disappeared from startup recovery digest"
+  assert_contains "$out" "worktree=$home/projects/firstmate" "in-flight recovery worktree identity disappeared from startup digest"
+  assert_contains "$out" "Full task bodies remain available on demand: tasks-axi show <id> --full" \
+    "compact digest omitted the full-body lookup pointer"
+  assert_grep "list --file $home/data/backlog.md --limit 80 --fields blocked_by,hold_kind,hold_reason" "$log" \
+    "session start did not ask tasks-axi for the bounded compact field set"
+
+  pass "compatible tasks-axi backlog rendering is compact, bounded, and preserves recovery metadata"
+}
+
+test_backlog_compact_manual_backend_skips_indented_bodies() {
+  local rec root home fakebin out
+  rec=$(new_world backlog-compact-manual)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  printf '%s\n' manual > "$home/config/backlog-backend"
+  write_long_body_backlog "$home/data/backlog.md"
+
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+
+  assert_contains "$out" "compact backlog listing (manual backend; max 80 item(s); indented task bodies omitted)" \
+    "manual backend did not use compact title-line rendering"
+  assert_contains "$out" "## In flight" "manual compact rendering omitted the in-flight section heading"
+  assert_contains "$out" "- [ ] compact-startup - Compact startup digest" \
+    "manual compact rendering omitted the in-flight title line"
+  assert_contains "$out" "(hold: captain choice pending) (hold-kind: captain)" \
+    "manual compact rendering omitted hold metadata"
+  assert_contains "$out" "blocked-by: compact-startup - waits for implementation" \
+    "manual compact rendering omitted blocker metadata"
+  assert_not_contains "$out" "OVERSIZED-BODY-LINE" "manual compact digest leaked an in-flight task body"
+  assert_not_contains "$out" "QUEUED-BODY-LINE" "manual compact digest leaked a queued task body"
+  assert_contains "$out" "(shown 2 of 2 backlog item title line(s))" \
+    "manual compact rendering did not report its bound accounting"
+  assert_contains "$out" "or data/backlog.md" "manual compact digest omitted the data/backlog.md full-body pointer"
+
+  pass "manual backlog rendering prints only title lines with hold and blocker metadata"
+}
+
+test_backlog_compact_tasks_axi_unavailable_uses_manual_fallback() {
+  local rec root home fakebin out
+  rec=$(new_world backlog-compact-unavailable)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  write_long_body_backlog "$home/data/backlog.md"
+
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+
+  assert_contains "$out" "compact backlog listing (tasks-axi unavailable or incompatible; max 80 item(s); indented task bodies omitted)" \
+    "unavailable tasks-axi did not fall back to compact title-line rendering"
+  assert_contains "$out" "- [ ] compact-startup - Compact startup digest" \
+    "unavailable tasks-axi fallback omitted a backlog title line"
+  assert_not_contains "$out" "OVERSIZED-BODY-LINE" "unavailable tasks-axi fallback leaked an in-flight task body"
+
+  pass "unavailable or incompatible tasks-axi falls back to compact manual backlog rendering"
 }
 
 # --- fleet-state digest: no in-flight tasks ----------------------------------
@@ -749,6 +912,9 @@ test_orphan_status_logs_are_printed
 test_endpoint_liveness_tmux
 test_endpoint_liveness_herdr
 test_composition_invokes_real_scripts
+test_backlog_compact_tasks_axi_omits_bodies_and_keeps_metadata
+test_backlog_compact_manual_backend_skips_indented_bodies
+test_backlog_compact_tasks_axi_unavailable_uses_manual_fallback
 test_fleet_digest_empty_fleet
 test_next_step_sources_x_mode_cadence
 test_next_step_afk_delegates_to_daemon

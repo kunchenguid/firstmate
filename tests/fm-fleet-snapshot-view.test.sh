@@ -120,7 +120,15 @@ test_empty_fleet_json() {
   local home out view
   home=$(make_home empty)
   out=$(FM_HOME="$home" "$SNAPSHOT" --json)
-  printf '%s' "$out" | jq -e '.schema == "fm-fleet-snapshot.v1" and .backlog.present == false and (.tasks|length == 0)' >/dev/null \
+  printf '%s' "$out" | jq -e '
+    .schema == "fm-fleet-snapshot.v1"
+      and .backlog.present == false
+      and (.tasks|length == 0)
+      and .main_inventory.valid == true
+      and .main_inventory.reason == null
+      and (.main_inventory.orphan_in_flight | length) == 0
+      and .main_inventory.unstructured_current_count == 0
+  ' >/dev/null \
     || fail "empty snapshot schema or absence markers wrong: $out"
   view=$(FM_HOME="$home" "$VIEW")
   assert_contains "$view" "No live task metadata found." "empty fleet view should say no live metadata"
@@ -171,6 +179,164 @@ test_fixture_snapshot_json() {
     | .state == "done" and .pr_url == "https://github.com/kunchenguid/firstmate/pull/7"
   ' >/dev/null || fail "done backlog PR row missing"
   pass "fixture snapshot covers task rows, backlog rows, pointers, and stable ordering"
+}
+
+# R1 owner contract: main_inventory discloses orphan in-flight and unstructured
+# current rows without inventing task rows.
+test_main_inventory_orphan_and_unstructured_disclosure() {
+  local home fakebin out
+  home=$(make_home main-inventory)
+  mkdir -p "$home/projects/visible"
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+free-form current note
+- [ ] orphan-ship - Structured without meta (repo: alpha) (kind: ship) (since 2026-07-11)
+- [ ] visible-ship - Structured with meta (repo: alpha) (kind: ship) (since 2026-07-11)
+
+## Queued
+another free-form queued note
+- [ ] queued-ship - Structured queued (repo: alpha) (kind: ship)
+
+## Done
+EOF
+  fm_write_meta "$home/state/visible-ship.meta" \
+    "window=firstmate:fm-visible-ship" \
+    "worktree=$home/projects/visible" \
+    "project=alpha" \
+    "harness=codex" \
+    "kind=ship" \
+    "mode=ship"
+  printf 'working: visible\n' > "$home/state/visible-ship.status"
+  fakebin=$(make_fakebin "$home")
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json)
+  printf '%s' "$out" | jq -e '
+    .main_inventory.valid == false
+      and .main_inventory.reason == "unstructured current backlog row"
+      and .main_inventory.unstructured_current_count == 2
+      and (.main_inventory.orphan_in_flight == ["orphan-ship"])
+      and ([.tasks[].id] == ["visible-ship"])
+  ' >/dev/null || fail "main_inventory did not disclose orphan/unstructured: $out"
+  # Counterfactual: add meta for the orphan and strip free-form current lines.
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+- [ ] orphan-ship - Structured without meta (repo: alpha) (kind: ship) (since 2026-07-11)
+- [ ] visible-ship - Structured with meta (repo: alpha) (kind: ship) (since 2026-07-11)
+
+## Queued
+- [ ] queued-ship - Structured queued (repo: alpha) (kind: ship)
+
+## Done
+EOF
+  fm_write_meta "$home/state/orphan-ship.meta" \
+    "window=firstmate:fm-orphan-ship" \
+    "worktree=$home/projects/visible" \
+    "project=alpha" \
+    "harness=codex" \
+    "kind=ship" \
+    "mode=ship"
+  printf 'working: orphan now live\n' > "$home/state/orphan-ship.status"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json)
+  printf '%s' "$out" | jq -e '
+    .main_inventory.valid == true
+      and .main_inventory.reason == null
+      and .main_inventory.unstructured_current_count == 0
+      and (.main_inventory.orphan_in_flight | length) == 0
+      and (([.tasks[].id] | sort) == ["orphan-ship", "visible-ship"])
+  ' >/dev/null || fail "main_inventory stayed invalid after meta + structured cleanup: $out"
+  pass "main_inventory discloses orphan/unstructured and clears when inventory is consistent"
+}
+
+test_normalized_roles_and_plural_blocker_readiness() {
+  local home fakebin out
+  home=$(make_home normalized-records)
+  mkdir -p "$home/projects/worker"
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+- [ ] program - Aggregate program (repo: alpha) (kind: program)
+- [ ] observation - Held observation (repo: alpha) (kind: scout) (hold: watch production) (hold-kind: external)
+- [ ] worker - Real worker (repo: alpha) (kind: ship)
+- [ ] orphan - Ordinary missing worker (repo: alpha) (kind: ship)
+
+## Queued
+- [ ] review - Security review (repo: alpha) (kind: ship)
+- [ ] captain-run - Run canary blocked-by: worker blocked-by: review (repo: alpha) (kind: captain) (hold: captain runs canary) (hold-kind: captain)
+
+## Done
+EOF
+  fm_write_meta "$home/state/worker.meta" \
+    "window=firstmate:fm-worker" "worktree=$home/projects/worker" "project=alpha" \
+    "harness=codex" "kind=ship" "mode=ship"
+  printf 'working: preparing canary\n' > "$home/state/worker.status"
+  fakebin=$(make_fakebin "$home")
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json)
+  printf '%s' "$out" | jq -e '
+    .main_inventory.orphan_in_flight == ["orphan"]
+      and (.backlog.records[] | select(.id == "program")
+        | .current_role == "program" and .requires_child_metadata == false)
+      and (.backlog.records[] | select(.id == "observation")
+        | .current_role == "held" and .requires_child_metadata == false)
+      and (.backlog.records[] | select(.id == "orphan")
+        | .current_role == "worker" and .requires_child_metadata == true)
+      and (.backlog.records[] | select(.id == "captain-run")
+        | .blocked_by == "review"
+          and .blocked_by_ids == ["worker", "review"]
+          and .unresolved_blocker_ids == ["worker", "review"]
+          and .captain_actionable == false)
+  ' >/dev/null || fail "normalized role or plural blocker fields were wrong: $out"
+
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+- [ ] program - Aggregate program (repo: alpha) (kind: program)
+- [ ] observation - Held observation (repo: alpha) (kind: scout) (hold: watch production) (hold-kind: external)
+
+## Queued
+- [ ] review - Security review (repo: alpha) (kind: ship)
+- [ ] captain-run - Run canary blocked-by: worker blocked-by: review (repo: alpha) (kind: captain) (hold: captain runs canary) (hold-kind: captain)
+
+## Done
+- [x] worker - Real worker (repo: alpha) (kind: ship) (done 2026-07-22)
+EOF
+  rm "$home/state/worker.meta" "$home/state/worker.status"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json)
+  printf '%s' "$out" | jq -e '
+    .backlog.records[] | select(.id == "captain-run")
+    | .blocked_by == "review"
+      and .blocked_by_ids == ["worker", "review"]
+      and .unresolved_blocker_ids == ["review"]
+      and .captain_actionable == false
+  ' >/dev/null || fail "one completed blocker did not leave exactly one unresolved id: $out"
+
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+- [ ] program - Aggregate program (repo: alpha) (kind: program)
+- [ ] observation - Held observation (repo: alpha) (kind: scout) (hold: watch production) (hold-kind: external)
+
+## Queued
+- [ ] captain-run - Run canary blocked-by: worker blocked-by: review (repo: alpha) (kind: captain) (hold: captain runs canary) (hold-kind: captain)
+
+## Done
+- [x] worker - Real worker (repo: alpha) (kind: ship) (done 2026-07-22)
+- [x] review - Security review (repo: alpha) (kind: ship) (done 2026-07-22)
+EOF
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json)
+  printf '%s' "$out" | jq -e '
+    .backlog.records[] | select(.id == "captain-run")
+    | .blocked_by == "review"
+      and .blocked_by_ids == ["worker", "review"]
+      and .unresolved_blocker_ids == []
+      and .captain_actionable == true
+  ' >/dev/null || fail "completed blockers did not make the captain hold actionable: $out"
+
+  sed 's/blocked-by: review/blocked-by: missing/' "$home/data/backlog.md" > "$home/data/backlog.next"
+  mv "$home/data/backlog.next" "$home/data/backlog.md"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json)
+  printf '%s' "$out" | jq -e '
+    .backlog.records[] | select(.id == "captain-run")
+    | .blocked_by_ids == ["worker", "missing"]
+      and .unresolved_blocker_ids == ["missing"]
+      and .captain_actionable == false
+  ' >/dev/null || fail "a missing blocker was incorrectly treated as resolved: $out"
+  pass "backlog normalization preserves strict roles and resolves every blocker compatibly"
 }
 
 test_event_hints_follow_reconciled_current_state() {
@@ -588,6 +754,8 @@ test_parked_scout_decision_stays_pending() {
 
 test_empty_fleet_json
 test_fixture_snapshot_json
+test_main_inventory_orphan_and_unstructured_disclosure
+test_normalized_roles_and_plural_blocker_readiness
 test_event_hints_follow_reconciled_current_state
 test_open_decision_survives_later_unrelated_event
 test_secondmate_open_decision_survives_live_endpoint

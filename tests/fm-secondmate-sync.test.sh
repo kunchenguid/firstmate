@@ -12,11 +12,12 @@
 #     and refuses - leaving work untouched - on a dirty, diverged, or
 #     in-flight (feature-branch) home.
 #   - No origin fetch happens in the local-HEAD sync path.
-#   - The bootstrap sweep fast-forwards every live secondmate home and reports a
-#     nudge (NUDGE_SECONDMATES:) ONLY for a running secondmate whose instruction
-#     surface actually changed; an already-current or readme-only home is never
-#     nudged, a skipped home is reported as SECONDMATE_SYNC:, and a home with no
-#     live metadata is never swept.
+#   - The bootstrap sweep fast-forwards every live secondmate home and sends a
+#     reread nudge ONLY for a running secondmate whose instruction surface
+#     actually changed; a successful send is reported as BOOTSTRAP_INFO:, a
+#     failed send is reported as NUDGE_SECONDMATES:, an already-current or
+#     readme-only home is never nudged, a skipped home is reported as
+#     SECONDMATE_SYNC:, and a home with no live metadata is never swept.
 #   - Spawning a secondmate fast-forwards its worktree to the primary's HEAD
 #     before launch, or warns and launches unchanged when the sync is skipped.
 set -u
@@ -289,7 +290,24 @@ make_fake_toolchain() {
   local dir=$1 fakebin
   fakebin="$dir/fakebin"
   mkdir -p "$fakebin"
-  fm_fake_exit0 "$fakebin" tmux node gh-axi chrome-devtools-axi lavish-axi
+  fm_fake_exit0 "$fakebin" node gh-axi chrome-devtools-axi lavish-axi
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+if [ -n "${FM_FAKE_TMUX_LOG:-}" ]; then
+  printf '%s\n' "$*" >> "$FM_FAKE_TMUX_LOG"
+fi
+case "$*" in
+  *display-message*'#{pane_current_command}'*) printf '%s\n' codex; exit 0 ;;
+  *display-message*'#{pane_id}'*) printf '%s\n' '%1'; exit 0 ;;
+  *display-message*'#{cursor_y}'*) printf '%s\n' 0; exit 0 ;;
+  *'send-keys'*' -l '*)
+    [ "${FM_FAKE_TMUX_FAIL_LITERAL:-0}" = 1 ] && exit 1
+    exit 0
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/tmux"
   cat > "$fakebin/gh" <<'SH'
 #!/usr/bin/env bash
 exit 0
@@ -312,6 +330,21 @@ fi
 exit 0
 SH
   chmod +x "$fakebin/no-mistakes"
+  cat > "$fakebin/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  "--version ") printf '%s\n' '0.1.1' ;;
+  "update --help") printf '%s\n' 'usage: tasks-axi update <id> [flags]' '  --archive-body' ;;
+  "mv --help") printf '%s\n' 'usage: tasks-axi mv <id> [<id>...] --to <path-or-dir>' ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/tasks-axi"
+  cat > "$fakebin/quota-axi" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$fakebin/quota-axi"
   printf '%s\n' "$fakebin"
 }
 
@@ -326,7 +359,7 @@ SH
 }
 
 test_bootstrap_sweep_nudges_only_instruction_change() {
-  local w c1 c2 c3 fakebin out nudge_line
+  local w c1 c2 c3 fakebin out info_line log marker_dir
   w=$(new_world boot-sweep)
   c1=$(head_of "$w/main")
   add_sm_worktree "$w" sm-instr "$c1"        # behind by an instruction change
@@ -341,15 +374,23 @@ test_bootstrap_sweep_nudges_only_instruction_change() {
   printf 'sm-nonlive\n' > "$w/sm-nonlive/.fm-secondmate-home"
 
   fakebin=$(make_fake_toolchain "$w")
+  log="$w/tmux.log"
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
+    FM_SEND_SETTLE=0 FM_FAKE_TMUX_LOG="$log" \
     "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
 
-  nudge_line=$(printf '%s\n' "$out" | grep '^NUDGE_SECONDMATES:' || true)
-  [ -n "$nudge_line" ] || fail "no NUDGE_SECONDMATES line emitted (got: $out)"
-  assert_contains "$nudge_line" "fm-sm-instr" "instruction-changed running secondmate is nudged"
-  assert_not_contains "$nudge_line" "firstmate:fm-sm-instr" "nudge lists stable fm-<id> selectors, not raw backend targets"
-  assert_not_contains "$nudge_line" "sm-readme" "readme-only advance is not nudged"
-  assert_not_contains "$nudge_line" "sm-current" "already-current secondmate is not nudged"
+  info_line=$(printf '%s\n' "$out" | grep '^BOOTSTRAP_INFO: nudged fm-sm-instr ' || true)
+  [ -n "$info_line" ] || fail "no BOOTSTRAP_INFO nudge line emitted (got: $out)"
+  assert_contains "$info_line" "firstmate was updated to the latest - please re-read your AGENTS.md to pick up the new instructions." \
+    "successful nudge report should include the exact message sent"
+  assert_not_contains "$out" "NUDGE_SECONDMATES:" "successful nudge must not leave a firstmate action item"
+  assert_not_contains "$out" "sm-readme" "readme-only advance is not nudged"
+  assert_not_contains "$out" "sm-current" "already-current secondmate is not nudged"
+  assert_contains "$(cat "$log")" "[fm-from-firstmate]" "nudge send should use the marked fm-send secondmate path"
+  assert_contains "$(cat "$log")" "firstmate was updated to the latest - please re-read your AGENTS.md" \
+    "nudge send should type the exact re-read message"
+  marker_dir="$w/home/state/.secondmate-nudge-pending"
+  [ ! -e "$marker_dir/sm-instr.pending" ] || fail "successful nudge should clear its retry marker"
 
   # Every live home advanced to the primary's HEAD; the already-current one stayed.
   [ "$(head_of "$w/sm-instr")" = "$c3" ] || fail "sm-instr not at primary HEAD"
@@ -357,10 +398,157 @@ test_bootstrap_sweep_nudges_only_instruction_change() {
   [ "$(head_of "$w/sm-current")" = "$c3" ] || fail "sm-current moved off primary HEAD"
   # The non-live home is never touched by the bootstrap sweep.
   [ "$(head_of "$w/sm-nonlive")" = "$c1" ] || fail "a home with no live meta was swept"
-  pass "T8 bootstrap sweeps live homes, nudges only the running real-instruction-change secondmate"
+  pass "T8 bootstrap sweeps live homes and sends exactly one marked nudge for the instruction change"
 }
 
-# --- T8b: nudge selectors stay fm-<id> when liveness respawn rotates herdr ----
+test_bootstrap_nudge_send_uses_state_override() {
+  local w c1 fakebin out log override_state marker
+  w=$(new_world nudge-state-override)
+  c1=$(head_of "$w/main")
+  add_sm_worktree "$w" sm-instr "$c1"
+  bump_primary "$w" instr
+  override_state="$w/override-state"
+  mkdir -p "$override_state"
+  mv "$w/home/state/sm-instr.meta" "$override_state/sm-instr.meta"
+  touch "$override_state/.last-watcher-beat"
+  fakebin=$(make_fake_toolchain "$w")
+  log="$w/tmux.log"
+
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
+    FM_STATE_OVERRIDE="$override_state" FM_SEND_SETTLE=0 FM_FAKE_TMUX_LOG="$log" \
+    "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
+
+  assert_contains "$out" "BOOTSTRAP_INFO: nudged fm-sm-instr with" \
+    "nudge send should resolve fm-sm-instr through the effective state dir"
+  assert_not_contains "$out" "NUDGE_SECONDMATES:" \
+    "effective-state nudge should not fail through FM_HOME/state"
+  assert_contains "$(cat "$log")" "[fm-from-firstmate]" \
+    "effective-state nudge should still use secondmate marker metadata"
+  marker="$override_state/.secondmate-nudge-pending/sm-instr.pending"
+  assert_absent "$marker" "successful effective-state nudge should clear its retry marker"
+  pass "T8a bootstrap nudge send respects FM_STATE_OVERRIDE"
+}
+
+test_bootstrap_nudge_retry_rejects_malformed_marker_id() {
+  local w c1 fakebin out marker log evil
+  w=$(new_world nudge-malformed-id)
+  c1=$(head_of "$w/main")
+  evil="$w/evil"
+  git -C "$w/main" worktree add -q --detach "$evil" "$c1"
+  printf '../escape\n' > "$evil/.fm-secondmate-home"
+  mkdir -p "$w/home/state/.secondmate-nudge-pending"
+  marker="$w/home/state/.secondmate-nudge-pending/bad.pending"
+  {
+    printf 'id=../escape\n'
+    printf 'selector=fm-../escape\n'
+    printf 'home=%s\n' "$evil"
+    printf 'commit=%s\n' "$c1"
+    printf 'instructions=AGENTS.md\n'
+    printf 'message=firstmate was updated to the latest - please re-read your AGENTS.md to pick up the new instructions.\n'
+  } > "$marker"
+  {
+    printf 'window=firstmate:fm-evil\n'
+    printf 'kind=secondmate\n'
+    printf 'home=%s\n' "$evil"
+  } > "$w/home/escape.meta"
+  fakebin=$(make_fake_toolchain "$w")
+  log="$w/tmux.log"
+
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
+    FM_SEND_SETTLE=0 FM_FAKE_TMUX_LOG="$log" \
+    "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
+
+  assert_contains "$out" "NUDGE_SECONDMATES: secondmate ../escape: send failed: retry marker has unsafe id" \
+    "malformed retry marker id should be rejected before target resolution"
+  assert_not_contains "$out" "BOOTSTRAP_INFO: nudged fm-../escape" \
+    "malformed retry marker id must never send through a path-traversed selector"
+  assert_present "$marker" "malformed retry marker should remain for operator inspection"
+  assert_absent "$log" "malformed retry marker should not invoke fm-send"
+  pass "T8f bootstrap nudge retry rejects malformed marker ids"
+}
+
+test_bootstrap_nudge_failure_records_retry_marker() {
+  local w c1 fakebin out marker
+  w=$(new_world nudge-failure)
+  c1=$(head_of "$w/main")
+  add_sm_worktree "$w" sm-instr "$c1"
+  bump_primary "$w" instr
+  fakebin=$(make_fake_toolchain "$w")
+
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
+    FM_SEND_SETTLE=0 FM_FAKE_TMUX_FAIL_LITERAL=1 \
+    "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
+
+  assert_contains "$out" "NUDGE_SECONDMATES: secondmate sm-instr: send failed:" \
+    "failed nudge send should be surfaced as actionable bootstrap output"
+  marker="$w/home/state/.secondmate-nudge-pending/sm-instr.pending"
+  assert_present "$marker" "failed nudge should leave a retry marker"
+  assert_grep "selector=fm-sm-instr" "$marker" "retry marker should pin the stable selector"
+  assert_grep "message=firstmate was updated to the latest - please re-read your AGENTS.md to pick up the new instructions." \
+    "$marker" "retry marker should pin the exact message"
+  pass "T8c failed bootstrap nudge is surfaced and recorded for retry"
+}
+
+test_bootstrap_nudge_retry_is_idempotent() {
+  local w c1 fakebin out marker out2
+  w=$(new_world nudge-retry)
+  c1=$(head_of "$w/main")
+  add_sm_worktree "$w" sm-instr "$c1"
+  bump_primary "$w" instr
+  fakebin=$(make_fake_toolchain "$w")
+
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
+    FM_SEND_SETTLE=0 FM_FAKE_TMUX_FAIL_LITERAL=1 \
+    "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
+  assert_contains "$out" "NUDGE_SECONDMATES: secondmate sm-instr: send failed:" \
+    "precondition: first nudge should fail"
+  marker="$w/home/state/.secondmate-nudge-pending/sm-instr.pending"
+  assert_present "$marker" "precondition: failed nudge should leave marker"
+
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
+    FM_SEND_SETTLE=0 "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
+  assert_contains "$out" "BOOTSTRAP_INFO: nudged fm-sm-instr with" \
+    "retry should send the pending nudge once the endpoint works"
+  assert_absent "$marker" "successful retry should clear the marker"
+
+  out2=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
+    FM_SEND_SETTLE=0 "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
+  [ -z "$out2" ] || fail "idempotent retry should converge to silence, got: $out2"
+  pass "T8d bootstrap nudge retry is idempotent after success"
+}
+
+test_bootstrap_nudge_retry_refuses_changed_home() {
+  local w c1 fakebin marker out other
+  w=$(new_world nudge-retry-home-change)
+  c1=$(head_of "$w/main")
+  add_sm_worktree "$w" sm-instr "$c1"
+  bump_primary "$w" instr
+  fakebin=$(make_fake_toolchain "$w")
+
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
+    FM_SEND_SETTLE=0 FM_FAKE_TMUX_FAIL_LITERAL=1 \
+    "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
+  assert_contains "$out" "NUDGE_SECONDMATES: secondmate sm-instr: send failed:" \
+    "precondition: first nudge should fail"
+  marker="$w/home/state/.secondmate-nudge-pending/sm-instr.pending"
+  assert_present "$marker" "precondition: failed nudge should leave marker"
+
+  other="$w/sm-other"
+  git -C "$w/main" worktree add -q --detach "$other" "$(head_of "$w/sm-instr")"
+  printf '%s\n' sm-instr > "$other/.fm-secondmate-home"
+  sed -i.bak "s|^home=.*|home=$other|" "$w/home/state/sm-instr.meta" 2>/dev/null || \
+    sed -i "s|^home=.*|home=$other|" "$w/home/state/sm-instr.meta"
+  rm -f "$w/home/state/sm-instr.meta.bak"
+
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
+    FM_SEND_SETTLE=0 "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
+  assert_contains "$out" "NUDGE_SECONDMATES: secondmate sm-instr: send failed: retry target home changed" \
+    "retry must not infer a nudge target outside the recorded failed home"
+  assert_present "$marker" "ambiguous retry should keep marker for operator inspection"
+  pass "T8e bootstrap nudge retry refuses a changed home instead of guessing"
+}
+
+# --- T8b: stale herdr nudge failures retry through current fm-<id> metadata ---
 # Reproduces the 2026-07-07 session-start bug: secondmate_sync used to print raw
 # backend targets (default:w9:pY) that liveness respawn immediately replaced
 # (default:wA:p2), so fm-send with the printed target fell back to tmux and failed
@@ -408,8 +596,8 @@ SH
   printf '%s\n' "$fakebin"
 }
 
-test_nudge_selector_stable_after_herdr_respawn() {
-  local w c1 stale fresh fakebin herdrfb toolchain out nudge_line meta window resolved stale_send fresh_send spawn_stub
+test_nudge_retry_uses_fresh_herdr_endpoint_after_respawn() {
+  local w c1 stale fresh fakebin herdrfb toolchain out meta window resolved stale_send fresh_send spawn_stub marker
   stale=default:w9:pY
   fresh=default:wA:p2
   w=$(new_world nudge-herdr-rotate)
@@ -448,18 +636,17 @@ SH
     return
   fi
   out=$(PATH="$herdrfb:$toolchain:$BASE_PATH" HERDR_ENV=1 FM_BACKEND=herdr \
+    FM_SEND_SETTLE=0 \
     FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
     "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
 
-  nudge_line=$(printf '%s\n' "$out" | grep '^NUDGE_SECONDMATES:' || true)
-  [ -n "$nudge_line" ] || fail "no NUDGE_SECONDMATES line emitted (got: $out)"
-  assert_contains "$nudge_line" "fm-sm-instr" "bootstrap nudge lists stable fm-<id>"
-  assert_not_contains "$nudge_line" "w9:pY" "bootstrap nudge must not list stale herdr endpoint"
-  assert_contains "$out" "SECONDMATE_LIVENESS: secondmate sm-instr: respawned" \
-    "liveness respawn rotated the herdr endpoint in the same bootstrap run"
+  assert_contains "$out" "NUDGE_SECONDMATES: secondmate sm-instr: send failed:" \
+    "stale herdr endpoint should surface a failed immediate nudge"
 
   window=$(grep '^window=' "$meta" | tail -1 | cut -d= -f2-)
   [ "$window" = "$fresh" ] || fail "respawn stub did not rotate meta window to '$fresh' (got '$window')"
+  marker="$w/home/state/.secondmate-nudge-pending/sm-instr.pending"
+  assert_present "$marker" "failed stale herdr nudge should leave a retry marker"
 
   # shellcheck disable=SC2016  # $0/$1 belong to the inner bash -c process.
   resolved=$(bash -c '. "$0/bin/fm-backend.sh"; fm_backend_resolve_selector fm-sm-instr "$1"' "$ROOT" "$w/home/state")
@@ -475,7 +662,7 @@ SH
     '. "$0/bin/fm-backend.sh"; fm_backend_source herdr; fm_backend_herdr_send_literal "$1" "nudge"' "$ROOT" "$fresh" 2>/dev/null; printf '%s' "$?")
   [ "$fresh_send" = 0 ] || fail "send through fm-<id>-resolved fresh endpoint should succeed"
 
-  pass "T8b nudge selectors stay fm-<id> when liveness respawn rotates herdr endpoint"
+  pass "T8b stale herdr nudge failures leave a retry marker after respawn rotates fm-<id> metadata"
 }
 
 # --- T9: bootstrap surfaces a skipped dirty live secondmate home --------------
@@ -662,7 +849,12 @@ test_ff_inflight_feature_branch
 test_no_fetch_in_local_path
 test_sweep_nudge_requires_instruction_change
 test_bootstrap_sweep_nudges_only_instruction_change
-test_nudge_selector_stable_after_herdr_respawn
+test_bootstrap_nudge_send_uses_state_override
+test_bootstrap_nudge_retry_rejects_malformed_marker_id
+test_bootstrap_nudge_failure_records_retry_marker
+test_bootstrap_nudge_retry_is_idempotent
+test_bootstrap_nudge_retry_refuses_changed_home
+test_nudge_retry_uses_fresh_herdr_endpoint_after_respawn
 test_bootstrap_sweep_surfaces_skipped_home
 test_spawn_fast_forwards_before_launch
 test_spawn_warns_when_sync_skipped_before_launch

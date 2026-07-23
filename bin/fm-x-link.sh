@@ -43,6 +43,8 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 # shellcheck source=bin/fm-x-lib.sh
 . "$SCRIPT_DIR/fm-x-lib.sh"
+# shellcheck source=bin/fm-pr-lib.sh
+. "$SCRIPT_DIR/fm-pr-lib.sh"
 
 usage() {
   echo "usage: fm-x-link.sh <task-id> <request_id> [--carry-count <n> --carry-ts <epoch> [--carry-platform <x|discord>] [--carry-max <n>]]" >&2
@@ -112,9 +114,7 @@ fi
 
 # task-id composes a path (state/<id>.meta); request_id composes a path elsewhere
 # (the inbox/outbox record). Reject anything outside a safe slug for both.
-case "$ID" in
-  ''|.*|*[!A-Za-z0-9._-]*) echo "fm-x-link: unsafe task id: $ID" >&2; exit 2 ;;
-esac
+fm_pr_task_id_valid "$ID" || { echo "fm-x-link: unsafe task id: $ID" >&2; exit 2; }
 case "$RID" in
   ''|.*|*[!A-Za-z0-9._-]*) echo "fm-x-link: unsafe request_id: $RID" >&2; exit 2 ;;
 esac
