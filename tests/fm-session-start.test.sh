@@ -42,7 +42,8 @@ new_world() {
   root="$w/root"
   home="$w/home"
   fakebin="$w/fakebin"
-  mkdir -p "$home/state" "$home/data" "$home/config" "$fakebin"
+  mkdir -p "$root/bin" "$home/state" "$home/data" "$home/config" "$fakebin"
+  cp "$ROOT/bin/fm-harness-process.sh" "$root/bin/fm-harness-process.sh"
   git init -q -b main "$root"
   git -C "$root" commit -q --allow-empty -m init
   printf '%s|%s|%s\n' "$root" "$home" "$fakebin"
@@ -149,6 +150,7 @@ harness=${FM_FAKE_HARNESS:-claude}
 case "$*" in
   *"comm="*) printf '/usr/local/bin/%s\n' "$harness"; exit 0 ;;
   *"args="*) printf '%s\n' "$harness"; exit 0 ;;
+  *"ppid="*) exec /bin/ps "$@" ;;
 esac
 exit 1
 SH
@@ -242,8 +244,14 @@ SH
 # claude/pi/grok session fails cases that pin a different fake harness while CI
 # (no ambient markers) still passes.
 run_session_start() {
-  local home=$1 root=$2 path=$3
-  env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
+  local home=$1 root=$2 path=$3 fakebin harness harness_bin
+  fakebin=${path%%:*}
+  harness=${FM_FAKE_HARNESS:-$(cat "$fakebin/.harness-name" 2>/dev/null || printf '%s\n' claude)}
+  harness_bin="$home/test-bin/$harness"
+  mkdir -p "${harness_bin%/*}"
+  cp "$(command -v perl)" "$harness_bin"
+  "$harness_bin" -e 'system @ARGV; exit($? >> 8)' \
+    env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
     FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$path" \
     "$SESSION_START"
 }
@@ -337,7 +345,6 @@ test_lock_refusal_read_only_path() {
 $rec
 EOF
   make_fake_toolchain "$fakebin"
-  make_fake_ps_claude "$fakebin"
 
   # A live secondmate meta with a window pointed at nothing real - if the
   # bootstrap sweep's secondmate_sync ran (a MUTATING step), it would try to
@@ -349,7 +356,8 @@ EOF
   append_wake "$home/state" signal sm-x "done: surfaced before refusal" || fail "seed wake failed"
   git -C "$root" checkout -q -B fm/read-only-tangle
 
-  sleep 300 &
+  cp "$(command -v perl)" "$fakebin/claude"
+  "$fakebin/claude" -e 'sleep 300' &
   holder_pid=$!
   printf '%s\n' "$holder_pid" > "$home/state/.lock"
 
@@ -401,8 +409,7 @@ $rec
 EOF
   make_fake_toolchain "$fakebin"
   make_fake_ps_claude "$fakebin"
-  # Force a MISSING diagnostic line so the bootstrap section is non-trivial.
-  rm -f "$fakebin/node"
+  # tasks-axi is intentionally absent from the portable fixture, giving the bootstrap section a deterministic MISSING diagnostic.
 
   printf 'window=fm-sess:w1\nkind=ship\n' > "$home/state/task-a.meta"
 
@@ -425,7 +432,7 @@ EOF
   [ "$context_line" -lt "$fleet_line" ] || fail "CONTEXT did not precede FLEET STATE"
   [ "$fleet_line" -lt "$next_line" ] || fail "FLEET STATE did not precede NEXT STEP"
 
-  missing_line=$(printf '%s\n' "$out" | grep -n 'MISSING: node' | head -1 | cut -d: -f1)
+  missing_line=$(printf '%s\n' "$out" | grep -n 'MISSING: tasks-axi' | head -1 | cut -d: -f1)
   [ -n "$missing_line" ] || fail "MISSING diagnostic did not appear at all"
   [ "$missing_line" -lt "$fleet_line" ] || fail "actionable MISSING diagnostic was buried after the bulk fleet-state digest"
 
@@ -585,7 +592,6 @@ $rec
 EOF
   make_fake_toolchain "$fakebin"
   make_fake_ps_claude "$fakebin"
-  rm -f "$fakebin/node"
 
   printf 'needs-decision: pick a library\n' > "$home/state/task-z.status"
   append_wake "$home/state" signal task-z.status "needs-decision: pick a library"
@@ -595,7 +601,7 @@ EOF
   # fm-lock.sh's own exact success text.
   assert_contains "$out" "lock acquired: harness pid" "fm-lock.sh's real output did not appear (composition, not reimplementation)"
   # fm-bootstrap.sh's own exact MISSING-tool line format.
-  assert_contains "$out" "MISSING: node (install:" "fm-bootstrap.sh's real detect line did not appear verbatim"
+  assert_contains "$out" "MISSING: tasks-axi (install:" "fm-bootstrap.sh's real detect line did not appear verbatim"
   # fm-wake-drain.sh's real drained record (raw tab-separated queue line).
   assert_contains "$out" "$(printf 'signal\ttask-z.status\tneeds-decision: pick a library')" "fm-wake-drain.sh's real drained record did not appear"
   assert_contains "$out" "wake annotation: latest wake-EVENT observed at drain, not current state: task-z.status: needs-decision: pick a library" "fm-session-start.sh did not preserve the drain's separate annotation line"
@@ -807,7 +813,8 @@ $rec
 EOF
   make_fake_toolchain "$fakebin"
 
-  sleep 300 &
+  cp "$(command -v perl)" "$fakebin/pi"
+  "$fakebin/pi" -e 'sleep 300' &
   holder_pid=$!
   make_fake_ps_pi_holder "$fakebin" "$holder_pid"
   install_pi_turnend_extension_fixture "$root"
@@ -834,7 +841,8 @@ $rec
 EOF
   make_fake_toolchain "$fakebin"
 
-  sleep 300 &
+  cp "$(command -v perl)" "$fakebin/pi"
+  "$fakebin/pi" -e 'sleep 300' &
   holder_pid=$!
   make_fake_ps_pi_holder "$fakebin" "$holder_pid"
   install_pi_turnend_extension_fixture "$root"
@@ -859,7 +867,8 @@ $rec
 EOF
   make_fake_toolchain "$fakebin"
 
-  sleep 300 &
+  cp "$(command -v perl)" "$fakebin/pi"
+  "$fakebin/pi" -e 'sleep 300' &
   holder_pid=$!
   make_fake_ps_pi_holder "$fakebin" "$holder_pid"
   install_pi_turnend_extension_fixture "$root"
@@ -884,7 +893,8 @@ $rec
 EOF
   make_fake_toolchain "$fakebin"
 
-  sleep 300 &
+  cp "$(command -v perl)" "$fakebin/pi"
+  "$fakebin/pi" -e 'sleep 300' &
   holder_pid=$!
   make_fake_ps_pi_holder "$fakebin" "$holder_pid"
   install_pi_turnend_extension_fixture "$root"
