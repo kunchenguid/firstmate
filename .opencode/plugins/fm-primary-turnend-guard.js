@@ -1,9 +1,9 @@
 import { spawn } from "node:child_process";
 import { realpathSync } from "node:fs";
 import { resolve } from "node:path";
+import { encodeFirstmateOperationalInput } from "./lib/fm-operational-input.js";
 
 const COORDINATOR_KEY = "__firstmateOpenCodeWatchArm";
-const OPERATIONAL_PREFIX = "\u2063FIRSTMATE_OP: ";
 
 let skipNextIdle = false;
 
@@ -75,19 +75,17 @@ export const FmPrimaryTurnendGuard = async ({ client, directory, worktree }) => 
       if (result.code !== 2) return;
 
       try {
+        const text = await encodeFirstmateOperationalInput(
+          root,
+          "turn-end-guard",
+          "TURN WOULD END BLIND - supervision is off. " +
+            "The watcher cycle is missing, failed, or unhealthy. Follow the harness recovery instruction below before ending the turn.\n\n" +
+            result.stderr,
+        );
         await client.session.promptAsync({
           path: { id: sessionID },
           body: {
-            parts: [
-              {
-                type: "text",
-                text:
-                  OPERATIONAL_PREFIX +
-                  "TURN WOULD END BLIND - supervision is off. " +
-                  "The watcher cycle is missing, failed, or unhealthy. Follow the harness recovery instruction below before ending the turn.\n\n" +
-                  result.stderr,
-              },
-            ],
+            parts: [{ type: "text", text }],
           },
         });
         skipNextIdle = true;

@@ -526,7 +526,8 @@ test_escalate_batches_into_one_digest() {
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_SENT="$sent" \
     FM_FAKE_TMUX_CAPTURE="$capture" FM_ESCALATE_BATCH_SECS=0 escalate_flush "$state" \
     || fail "escalate_flush failed"
-  grep -F 'FIRSTMATE_OP: ' "$sent" >/dev/null || fail "batch digest lacks the shared operational label"
+  grep -F 'FIRSTMATE_OP: v1 away-supervisor: ' "$sent" >/dev/null \
+    || fail "batch digest lacks the exact current away-supervisor kind"
   grep -F "event A" "$sent" >/dev/null || fail "batch digest missing event A"
   grep -F "event B" "$sent" >/dev/null || fail "batch digest missing event B"
   grep -F 'event A: done: PR 1 | event B: done: PR 2' "$sent" >/dev/null \
@@ -749,10 +750,15 @@ test_should_exit_afk_when_afk_inactive() {
 }
 
 test_strip_injection_marker() {
-  local stripped
+  local encoded stripped
+  fm_operational_input_encode away-supervisor "Supervisor escalate: done" encoded \
+    || fail "could not encode current away fixture"
+  stripped=$(strip_injection_marker "$encoded")
+  [ "$stripped" = "Supervisor escalate: done" ] \
+    || fail "current typed operational envelope not stripped: '$stripped'"
   stripped=$(strip_injection_marker "${FM_OPERATIONAL_PREFIX}Supervisor escalate: done")
   [ "$stripped" = "Supervisor escalate: done" ] \
-    || fail "operational prefix not stripped: '$stripped'"
+    || fail "landed untyped operational prefix not stripped: '$stripped'"
   stripped=$(strip_injection_marker "${FM_INJECT_MARK}Supervisor escalate: done")
   [ "$stripped" = "Supervisor escalate: done" ] \
     || fail "legacy marker not stripped: '$stripped'"

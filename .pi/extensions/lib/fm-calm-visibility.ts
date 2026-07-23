@@ -3,6 +3,12 @@ import {
   type ExtensionAPI,
   UserMessageComponent,
 } from "@earendil-works/pi-coding-agent";
+import {
+  classifyFirstmateOperationalText,
+  encodeFirstmateOperationalInput,
+} from "./fm-operational-input.ts";
+
+export { encodeFirstmateOperationalInput } from "./fm-operational-input.ts";
 
 export const CALM_TRANSCRIPT_CLASSES = [
   "genuine-user-prompt",
@@ -34,18 +40,6 @@ const CALM_VISIBLE_CLASSES = new Set<CalmTranscriptClass>([
   "genuine-agent-response",
 ]);
 
-const FIRSTMATE_SESSIONSTART_NUDGE =
-  "Run `bin/fm-session-start.sh` now, exactly once, before executing any other instructions.";
-const FIRSTMATE_WATCHER_PREFIX = "FIRSTMATE WATCHER WAKE: ";
-const FIRSTMATE_WATCHER_SUFFIX =
-  "\n\nRun bin/fm-wake-drain.sh first and handle the queued wake. Watcher continuity is extension-owned.";
-const FIRSTMATE_TURNEND_PREFIX =
-  "TURN WOULD END BLIND - supervision is off. " +
-  "The watcher cycle is missing, failed, or unhealthy. " +
-  "Follow the harness recovery instruction below before ending the turn.\n\n";
-const FM_INJECT_MARK = "\u2063";
-const FM_FROMFIRST_MARK = "[fm-from-firstmate]\u2063";
-
 export const FIRSTMATE_SYNTHETIC_CONTEXT_TYPE = "firstmate-synthetic-input";
 export const FIRSTMATE_SYNTHETIC_PRESENTATION_TYPE = "firstmate-synthetic-input-presentation";
 export const FIRSTMATE_CALM_PRESENTATION_EVENT = "firstmate:calm-presentation";
@@ -56,13 +50,18 @@ export type CalmPresentationState = {
   stockExportRendering: boolean;
 };
 
-export type FirstmateSyntheticKind =
-  | "session-start"
-  | "watcher"
-  | "turn-end-guard"
-  | "away-supervisor"
-  | "from-firstmate"
-  | "launch-brief";
+export const FIRSTMATE_SYNTHETIC_KINDS = [
+  "session-start",
+  "watcher",
+  "turn-end-guard",
+  "away-supervisor",
+  "from-firstmate",
+  "launch-brief",
+  "legacy-operational",
+] as const;
+
+export type FirstmateSyntheticKind = (typeof FIRSTMATE_SYNTHETIC_KINDS)[number];
+export type FirstmateInputSource = "interactive" | "rpc" | "extension";
 
 type SyntheticDeliveryOptions = {
   deliverAs?: "steer" | "followUp" | "nextTurn";
@@ -99,28 +98,26 @@ export function calmPresentationHides(itemClass: CalmTranscriptClass): boolean {
   return calm && !stockExportRendering && !calmTranscriptClassIsVisible(itemClass);
 }
 
+function isFirstmateSyntheticKind(value: string): value is FirstmateSyntheticKind {
+  return (FIRSTMATE_SYNTHETIC_KINDS as readonly string[]).includes(value);
+}
+
 export function classifyFirstmateSyntheticInput(
   content: string,
+  source: FirstmateInputSource,
   launchBriefContent?: string,
 ): FirstmateSyntheticKind | undefined {
-  if (launchBriefContent !== undefined && content === launchBriefContent) return "launch-brief";
-  if (content === FIRSTMATE_SESSIONSTART_NUDGE) return "session-start";
-  if (content.startsWith(FM_INJECT_MARK)) return "away-supervisor";
-  if (content.startsWith(FM_FROMFIRST_MARK) && content.length > FM_FROMFIRST_MARK.length) {
-    return "from-firstmate";
-  }
+  const classified = classifyFirstmateOperationalText(content);
+  if (classified !== undefined && isFirstmateSyntheticKind(classified)) return classified;
+
+  // Keep the exact per-process origin fallback only for positional launch
+  // commands created before the typed protocol.
   if (
-    content.startsWith(FIRSTMATE_WATCHER_PREFIX) &&
-    content.endsWith(FIRSTMATE_WATCHER_SUFFIX) &&
-    content.length > FIRSTMATE_WATCHER_PREFIX.length + FIRSTMATE_WATCHER_SUFFIX.length
+    source === "interactive" &&
+    launchBriefContent !== undefined &&
+    content === launchBriefContent
   ) {
-    return "watcher";
-  }
-  if (
-    content.startsWith(FIRSTMATE_TURNEND_PREFIX) &&
-    content.length > FIRSTMATE_TURNEND_PREFIX.length
-  ) {
-    return "turn-end-guard";
+    return "launch-brief";
   }
   return undefined;
 }

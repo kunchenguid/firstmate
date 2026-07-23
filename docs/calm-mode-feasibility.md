@@ -55,27 +55,24 @@ The smallest counterfactuals produced these results:
 The disconfirming checks deliberately retained contradictory evidence.
 An arbitrary third-party custom tool and a built-in read image remain visible because Pi exposes neither a global tool renderer nor image-row control.
 An expanded thinking fixture remains visible, and an empty collapsed-thinking label leaves blank spacing, so this implementation does not claim complete reasoning-row removal.
-An ordinary user prompt beginning with `FIRSTMATE WATCHER WAKE:` but lacking the exact authoritative suffix remains visible, disproving a broad prefix-only classifier.
+An ordinary user prompt may quote or reuse watcher, guard, startup, or supervisor wording and remains visible unless it carries a structurally valid operational envelope.
 
 ## Central visibility and injection policy
 
-`.pi/extensions/lib/fm-calm-visibility.ts` is the single owner of the allowlist-style transcript policy and Firstmate synthetic-input classifier.
+`.pi/extensions/lib/fm-calm-visibility.ts` owns the allowlist-style transcript policy and delivery into Pi's structured hidden context entries.
+`bin/fm-operational-input.sh` owns current cross-language operational-input construction and parsing, while the thin Pi adapter lives at `.pi/extensions/lib/fm-operational-input.ts`.
 Only `genuine-user-prompt` and `genuine-agent-response` are policy-visible.
 Every other audited class is policy-hidden even when Pi currently lacks a supported renderer for enforcing that result.
 
-The classifier recognizes only these authoritative Firstmate forms:
+Current session-start, watcher, turn-end guard, away supervisor, and launch-brief inputs use the versioned kind carried after the landed U+2063 `FIRSTMATE_OP: ` prefix.
+The established leading `[fm-from-firstmate]` plus U+2063 routing carrier remains current and is parsed as `from-firstmate` through the same owner so running secondmate charters remain compatible.
+Pi persists the resulting exact kind in both the presentation entry and the non-displayed context message.
+A landed untyped `FIRSTMATE_OP` input is retained as `legacy-operational` rather than having a subtype inferred from its body.
+Narrow pre-protocol parsing for the exact startup line, watcher and guard shapes, and bare-marker away escalation is isolated from the current parser.
+The per-process `FM_FIRSTMATE_PI_LAUNCH_BRIEF` binding remains only as compatibility for a raw launch created before typed launch instructions.
 
-| Form | Authoritative source | Classification evidence |
-| --- | --- | --- |
-| Session-start nudge | `.pi/extensions/fm-primary-turnend-guard.ts` via `bin/fm-sessionstart-nudge.sh` | Exact complete nudge text; Pi already sends it as a non-displayed custom message. |
-| Watcher notification | `.pi/extensions/fm-primary-pi-watch.ts` | Exact `FIRSTMATE WATCHER WAKE: ` prefix plus the complete stable drain suffix and non-empty wake content. |
-| Turn-end guard | `.pi/extensions/fm-primary-turnend-guard.ts` | Exact complete guard paragraph plus non-empty guard diagnostics. |
-| Away supervisor | `bin/fm-supervise-daemon.sh` | Leading U+2063 `FM_INJECT_MARK`, which normal terminal typing cannot produce. |
-| From-firstmate request | `bin/fm-marker-lib.sh` through `bin/fm-send.sh` | Exact `[fm-from-firstmate]` plus U+2063 marker and non-empty request content. |
-| Pi launch brief | `bin/fm-spawn.sh` | Per-process `FM_FIRSTMATE_PI_LAUNCH_BRIEF` path identifies the exact unchanged positional brief content after the launch shell's standard trailing-newline removal; the match is consumed once. |
-
-Positive fixtures cover every form in that table.
-Near-miss fixtures cover the visible watcher phrase without its suffix, a modified drain instruction, a guard-like captain question, visible marker labels without U+2063, an unmarked supervisor phrase, the session-start wording without its authoritative punctuation, and launch-brief text without the per-process origin.
+Positive fixtures cover every current kind and a separate legacy matrix.
+Near-miss fixtures cover quoted operational content, ASCII-only labels, arbitrary U+2063-prefixed text, altered legacy text, visible routing labels without U+2063, and launch-brief text without its source binding.
 
 Synthetic inputs that would otherwise render as user rows are rerouted only at Pi input presentation time.
 Their full text is persisted in a non-displayed custom message that Pi converts back to an ordinary user message for provider context, and a TUI-only custom entry restores stock user styling while Calm is off.

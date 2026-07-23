@@ -2,7 +2,7 @@
 
 AGENTS.md section 3 remains the single authoritative behavioral contract for session start.
 The tracked native adapters are an enforcement layer that injects one instruction and never runs the digest, lock acquisition, bootstrap sweeps, wake drain, or supervision arm itself.
-The payload starts with U+2063 and the stable `FIRSTMATE_OP: ` label, followed by exactly ``Run `bin/fm-session-start.sh` now, exactly once, before executing any other instructions.``
+The payload starts with U+2063 and the stable `FIRSTMATE_OP: ` label, carries the current `session-start` protocol kind, and retains exactly ``Run `bin/fm-session-start.sh` now, exactly once, before executing any other instructions.`` as its body.
 The Ahoy skill owns the rule that this explicitly marked operational input is never a captain-authored session boundary.
 
 ## Shared wrapper and safety
@@ -133,7 +133,7 @@ A fresh Grok run was attempted on 2026-07-22 but stopped at `402 Payment Require
 ## Regression coverage
 
 `tests/fm-sessionstart-nudge.test.sh` proves wrapper silence for both gate signals, an unmarked linked worktree, a missing state directory, and an already-owned lock.
-It proves exact U+2063 `FIRSTMATE_OP:`-prefixed one-line output for a plain primary and a marked linked secondmate primary.
+It proves exact U+2063 `FIRSTMATE_OP:`-prefixed, `session-start`-typed one-line output for a plain primary and a marked linked secondmate primary.
 It also verifies tracked wrapper registration for Claude, Codex, OpenCode, Pi, and Grok.
 `tests/fm-captain-translation-contract.test.sh` proves Ahoy's current marker rule, narrow legacy compatibility exclusions, genuine captain-message near misses, and the shared marker on every supported user-role operational injection.
 `tests/fm-pi-primary-live-e2e.test.sh` sends the exact legacy startup and bare-marker away-mode rows through a persistent model transcript, invokes Ahoy, and contrasts both with unrelated-marker and altered-startup captain near misses.

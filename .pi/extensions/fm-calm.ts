@@ -193,7 +193,7 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("input", (event, ctx) => {
     if (event.images && event.images.length > 0) return { action: "continue" };
-    const kind = classifyFirstmateSyntheticInput(event.text, launchBriefContent);
+    const kind = classifyFirstmateSyntheticInput(event.text, event.source, launchBriefContent);
     if (!kind) return { action: "continue" };
     if (kind === "launch-brief") launchBriefContent = undefined;
 

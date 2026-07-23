@@ -28,12 +28,19 @@ PROJECT="$LAB/project"
 HOME_DIR="$LAB/fmhome"
 OPENCODE_VERSION=$(opencode --version)
 AHOY_PROJECT="$LAB/ahoy-project"
-OPERATIONAL_PREFIX=$'\xE2\x81\xA3FIRSTMATE_OP: '
+# shellcheck source=bin/fm-operational-input.sh
+. "$ROOT/bin/fm-operational-input.sh"
 # shellcheck disable=SC2016 # Backticks are literal prompt markup.
 LEGACY_START='Run `bin/fm-session-start.sh` now, exactly once, before executing any other instructions.'
+fm_operational_input_encode session-start "$LEGACY_START" CURRENT_START \
+  || fail "could not construct the current session-start fixture"
 MARKER_NEAR_MISS=$'\xE2\x81\xA3Captain note: this invisible separator is intentional.'
 # shellcheck disable=SC2016 # Backticks are literal prompt markup.
 START_NEAR_MISS='Captain quote: Run `bin/fm-session-start.sh` now, exactly once, before executing any other instructions.'
+fm_operational_input_encode watcher "CURRENT_AHOY_WATCHER_BODY" CURRENT_WATCHER \
+  || fail "could not construct current Ahoy watcher fixture"
+QUOTED_CURRENT="Captain quote: $CURRENT_WATCHER"
+ASCII_ONLY='FIRSTMATE_OP: v1 watcher: captain-authored text'
 
 capture() {
   "$TMUX" -L "$SOCKET" capture-pane -p -t "$SESSION" -S -800 2>/dev/null || true
@@ -154,6 +161,7 @@ run_ahoy_transcript_regressions() {
     "$ROOT/bin/fm-sessionstart-nudge.sh" \
     "$ROOT/bin/fm-primary-scope-lib.sh" \
     "$ROOT/bin/fm-gate-refuse-lib.sh" \
+    "$ROOT/bin/fm-operational-input.sh" \
     "$AHOY_PROJECT/bin/"
   cp "$ROOT/.agents/skills/ahoy/SKILL.md" "$AHOY_PROJECT/.agents/skills/ahoy/SKILL.md"
   chmod +x "$AHOY_PROJECT/bin/fm-sessionstart-nudge.sh"
@@ -189,6 +197,8 @@ run_ahoy_transcript_regressions() {
 
   run_ahoy_case marker-near-miss "$MARKER_NEAR_MISS" boundary
   run_ahoy_case startup-near-miss "$START_NEAR_MISS" boundary
+  run_ahoy_case quoted-current "$QUOTED_CURRENT" boundary
+  run_ahoy_case ascii-only "$ASCII_ONLY" boundary
 }
 
 wait_for_db_count() {
@@ -230,8 +240,8 @@ run_native_ahoy_regressions() {
   startup_text=$(sqlite3 -json "$first_db" \
     "select json_extract(p.data,'$.text') text from message m join part p on p.message_id=m.id where json_extract(m.data,'$.role')='user' and json_extract(p.data,'$.text') like '%FIRSTMATE_OP:%' order by m.time_created limit 1;" \
     | jq -r '.[0].text')
-  [ "$startup_text" = "${OPERATIONAL_PREFIX}${LEGACY_START}" ] \
-    || fail "OpenCode native first-message session stored an unexpected startup input: $startup_text"
+  [ "$startup_text" = "$CURRENT_START" ] \
+    || fail "OpenCode native first-message session stored an unexpected typed startup input: $startup_text"
   assistant_text=$(sqlite3 -json "$first_db" \
     "select json_extract(p.data,'$.text') text from message m join part p on p.message_id=m.id where json_extract(m.data,'$.role')='assistant' and json_extract(p.data,'$.type')='text' order by m.time_created desc limit 1;" \
     | jq -r '.[0].text')
@@ -285,8 +295,12 @@ mkdir -p "$LAB"
 run_ahoy_transcript_regressions
 run_native_ahoy_regressions
 git clone -q "$ROOT" "$PROJECT"
+mkdir -p "$PROJECT/.opencode/plugins/lib"
 cp "$ROOT/.opencode/plugins/fm-primary-watch-arm.js" "$PROJECT/.opencode/plugins/fm-primary-watch-arm.js"
+cp "$ROOT/.opencode/plugins/lib/fm-operational-input.js" "$PROJECT/.opencode/plugins/lib/fm-operational-input.js"
 cp "$ROOT/bin/fm-watch-arm.sh" "$PROJECT/bin/fm-watch-arm.sh"
+cp "$ROOT/bin/fm-operational-input.sh" "$PROJECT/bin/fm-operational-input.sh"
+chmod +x "$PROJECT/bin/fm-operational-input.sh"
 mkdir -p "$HOME_DIR/state" "$HOME_DIR/config"
 printf 'project=fixture\n' > "$HOME_DIR/state/opencode-e2e.meta"
 
