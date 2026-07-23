@@ -147,7 +147,7 @@ first_line() {
 }
 
 canonical_dir() {
-  [ -d "$1" ] || return 1
+  [ -d "$1" ] && [ ! -L "$1" ] || return 1
   (cd "$1" 2>/dev/null && pwd -P)
 }
 
@@ -257,6 +257,8 @@ failed = False
 
 
 def directory_entries(path, label):
+    if os.path.islink(path):
+        raise OSError(f"{label} must not be a symlink")
     metadata = os.stat(path)
     if not stat.S_ISDIR(metadata.st_mode):
         raise NotADirectoryError(path)
@@ -281,11 +283,24 @@ except OSError as error:
 state_paths = []
 for pool_entry in pool_entries:
     try:
-        if not pool_entry.is_dir(follow_symlinks=True):
+        metadata = pool_entry.stat(follow_symlinks=False)
+        if stat.S_ISLNK(metadata.st_mode):
+            try:
+                target = pool_entry.stat(follow_symlinks=True)
+            except OSError as error:
+                raise OSError("broken Treehouse pool symlink") from error
+            if stat.S_ISDIR(target.st_mode):
+                raise OSError("Treehouse pool must not be a symlink")
             continue
+        if not stat.S_ISDIR(metadata.st_mode):
+            continue
+        if any(character in pool_entry.path for character in ("\n", "\r", "\t")):
+            raise OSError("Treehouse pool path contains unsupported control characters")
         entries = directory_entries(pool_entry.path, "Treehouse pool")
-        if any(entry.name == "treehouse-state.json" for entry in entries):
-            state_paths.append(os.path.join(pool_entry.path, "treehouse-state.json"))
+        states = [entry for entry in entries if entry.name == "treehouse-state.json"]
+        if len(states) != 1:
+            raise OSError("Treehouse pool must contain exactly one treehouse-state.json")
+        state_paths.append(os.path.join(pool_entry.path, "treehouse-state.json"))
     except OSError as error:
         failed = True
         print(
@@ -295,6 +310,12 @@ for pool_entry in pool_entries:
 
 for state_path in state_paths:
     try:
+        metadata = os.lstat(state_path)
+        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+            raise OSError("Treehouse state must be a real regular file")
+        permissions = stat.S_IMODE(metadata.st_mode)
+        if not permissions & 0o444:
+            raise PermissionError("Treehouse state is unreadable")
         with open(state_path, encoding="utf-8") as stream:
             state = json.load(stream)
         if not isinstance(state, dict):
@@ -310,7 +331,11 @@ for state_path in state_paths:
             path = entry.get("path")
             if not isinstance(path, str) or not path:
                 raise TypeError("worktree path must be a non-empty string")
-            print(path)
+            if not os.path.isabs(path):
+                raise TypeError("worktree path must be absolute")
+            if any(character in path for character in ("\n", "\r", "\t")):
+                raise TypeError("worktree path contains unsupported control characters")
+            print(f"{state_path}\t{os.path.dirname(state_path)}\t{path}")
     except (OSError, ValueError, TypeError) as error:
         failed = True
         print(
@@ -343,6 +368,8 @@ failed = False
 
 
 def directory_entries(path, label):
+    if os.path.islink(path):
+        raise OSError(f"{label} must not be a symlink")
     metadata = os.stat(path)
     if not stat.S_ISDIR(metadata.st_mode):
         raise NotADirectoryError(path)
@@ -366,8 +393,19 @@ except OSError as error:
 
 for project_entry in project_entries:
     try:
-        if not project_entry.is_dir(follow_symlinks=True):
+        metadata = project_entry.stat(follow_symlinks=False)
+        if stat.S_ISLNK(metadata.st_mode):
+            try:
+                target = project_entry.stat(follow_symlinks=True)
+            except OSError as error:
+                raise OSError("broken active-home project symlink") from error
+            if stat.S_ISDIR(target.st_mode):
+                raise OSError("active-home project must not be a symlink")
             continue
+        if not stat.S_ISDIR(metadata.st_mode):
+            continue
+        if any(character in project_entry.path for character in ("\n", "\r")):
+            raise OSError("active-home project path contains unsupported control characters")
         directory_entries(project_entry.path, "active-home project")
         print(project_entry.path)
     except OSError as error:
@@ -383,12 +421,64 @@ PY
 }
 
 backing_checkout() {
-  local worktree=$1 main
-  [ -d "$worktree" ] || return 1
-  main=$(git -C "$worktree" worktree list --porcelain 2>/dev/null \
-    | sed -n 's/^worktree //p' | sed -n '1p')
+  local worktree=$1 pool=$2 state=$3 worktree_root pool_root state_root main
+  local worktree_common main_common listed line listed_root matches=0
+  worktree_root=$(exact_git_root "$worktree") || return 1
+  pool_root=$(canonical_dir "$pool") || return 1
+  [ "$worktree_root" != "$pool_root" ] || return 1
+  case "$worktree_root" in "$pool_root"/*) ;; *) return 1 ;; esac
+  [ -f "$state" ] && [ ! -L "$state" ] && [ -r "$state" ] || return 1
+  state_root=$(canonical_dir "$(dirname "$state")") || return 1
+  [ "$state_root" = "$pool_root" ] || return 1
+  [ "$(basename "$state")" = treehouse-state.json ] || return 1
+  python3 - "$state" "$worktree_root" <<'PY' || return 1
+import json
+import os
+import sys
+
+state_path, expected = sys.argv[1:]
+try:
+    with open(state_path, encoding="utf-8") as stream:
+        state = json.load(stream)
+    worktrees = state["worktrees"]
+    if not isinstance(worktrees, list):
+        raise TypeError("worktrees must be an array")
+    matches = []
+    for entry in worktrees:
+        if not isinstance(entry, dict):
+            raise TypeError("worktree entry must be an object")
+        path = entry.get("path")
+        if not isinstance(path, str) or not path:
+            raise TypeError("worktree path must be a non-empty string")
+        if not os.path.isabs(path):
+            raise TypeError("worktree path must be absolute")
+        if os.path.realpath(path) == expected:
+            matches.append(entry)
+    if len(matches) != 1:
+        raise ValueError("expected exactly one matching worktree entry")
+except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
+    raise SystemExit(1)
+PY
+  listed=$(git -C "$worktree_root" -c core.quotePath=false worktree list --porcelain 2>/dev/null) || return 1
+  main=$(printf '%s\n' "$listed" | sed -n 's/^worktree //p' | sed -n '1p')
   [ -n "$main" ] || return 1
-  canonical_dir "$main"
+  main=$(exact_git_root "$main") || return 1
+  [ "$main" != "$worktree_root" ] || return 1
+  worktree_common=$(fm_checkout_git_common_dir "$worktree_root") || return 1
+  main_common=$(fm_checkout_git_common_dir "$main") || return 1
+  [ "$worktree_common" = "$main_common" ] || return 1
+  while IFS= read -r line; do
+    case "$line" in
+      worktree\ *)
+        listed_root=$(exact_git_root "${line#worktree }" 2>/dev/null) || return 1
+        [ "$listed_root" != "$worktree_root" ] || matches=$(( matches + 1 ))
+        ;;
+    esac
+  done <<EOF
+$listed
+EOF
+  [ "$matches" -eq 1 ] || return 1
+  printf '%s\n' "$main"
 }
 
 origin_url() {
@@ -420,6 +510,8 @@ import sys
 
 root = sys.argv[1]
 try:
+    if os.path.islink(root):
+        raise OSError("scan root must not be a symlink")
     metadata = os.stat(root)
     permissions = stat.S_IMODE(metadata.st_mode)
     if not stat.S_ISDIR(metadata.st_mode):
@@ -428,7 +520,21 @@ try:
         raise PermissionError("scan root is unreadable")
     with os.scandir(root) as entries:
         for entry in sorted(entries, key=lambda candidate: candidate.name):
-            if entry.is_dir(follow_symlinks=True):
+            metadata = entry.stat(follow_symlinks=False)
+            if stat.S_ISLNK(metadata.st_mode):
+                try:
+                    target = entry.stat(follow_symlinks=True)
+                except OSError as error:
+                    raise OSError(f"broken scan candidate symlink: {entry.path}") from error
+                if stat.S_ISDIR(target.st_mode):
+                    raise OSError(f"scan candidate must not be a symlink: {entry.path}")
+                continue
+            if stat.S_ISDIR(metadata.st_mode):
+                if any(character in entry.path for character in ("\n", "\r")):
+                    raise OSError("scan candidate path contains unsupported control characters")
+                permissions = stat.S_IMODE(metadata.st_mode)
+                if not permissions & 0o444 or not permissions & 0o111:
+                    raise PermissionError(f"scan candidate is unreadable: {entry.path}")
                 print(entry.path)
 except OSError as error:
     print(error, file=sys.stderr)
@@ -438,7 +544,7 @@ PY
 
 discover() {
   local tmp seeds origins scans scan_candidates configured_paths configured_scans treehouse_paths project_paths
-  local path project worktree main root candidate url failed=0
+  local path project worktree pool treehouse_state main root candidate url failed=0
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-checkout-refresh-discover.XXXXXX") || return 1
   seeds="$tmp/seeds"
   origins="$tmp/origins"
@@ -484,12 +590,12 @@ discover() {
     fi
   done < "$configured_paths"
 
-  while IFS= read -r worktree; do
+  while IFS=$'\t' read -r treehouse_state pool worktree; do
     [ -n "$worktree" ] || continue
-    if main=$(backing_checkout "$worktree" 2>/dev/null); then
+    if main=$(backing_checkout "$worktree" "$pool" "$treehouse_state" 2>/dev/null); then
       printf '%s\n' "$main" >> "$seeds"
     else
-      echo "checkout-refresh: skipped: Treehouse worktree is not inspectable: $worktree" >&2
+      echo "checkout-refresh: skipped: Treehouse worktree identity or registration is not inspectable: $worktree" >&2
       failed=1
     fi
   done < "$treehouse_paths"
@@ -535,6 +641,10 @@ discover() {
   while IFS= read -r candidate; do
     [ -n "$candidate" ] || continue
     if ! git -C "$candidate" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+      if [ -e "$candidate/.git" ] || [ -L "$candidate/.git" ]; then
+        echo "checkout-refresh: skipped: discovered Git identity cannot be inspected: $candidate" >&2
+        failed=1
+      fi
       continue
     fi
     if ! main=$(exact_git_root "$candidate"); then
@@ -810,19 +920,20 @@ surface_skill_drafts() {
 }
 
 prepare_hygiene_discovery() {
-  local seed_file=$1 hygiene_file=$2 treehouse_paths worktree canonical failed=0
+  local seed_file=$1 hygiene_file=$2 treehouse_paths treehouse_state pool worktree canonical failed=0
   cp "$seed_file" "$hygiene_file" || return 1
   treehouse_paths=$(mktemp "$STATE_ROOT/.treehouse-worktrees.XXXXXX") || return 1
   if ! treehouse_worktree_paths > "$treehouse_paths"; then
     rm -f "$treehouse_paths"
     return 1
   fi
-  while IFS= read -r worktree; do
+  while IFS=$'\t' read -r treehouse_state pool worktree; do
     [ -n "$worktree" ] || continue
-    if canonical=$(canonical_dir "$worktree" 2>/dev/null); then
+    if backing_checkout "$worktree" "$pool" "$treehouse_state" >/dev/null 2>&1 \
+        && canonical=$(exact_git_root "$worktree" 2>/dev/null); then
       printf '%s\n' "$canonical" >> "$hygiene_file"
     else
-      echo "checkout-refresh: skipped: Treehouse worktree is not inspectable: $worktree" >&2
+      echo "checkout-refresh: skipped: Treehouse worktree identity or registration is not inspectable: $worktree" >&2
       failed=1
     fi
   done < "$treehouse_paths"
@@ -1260,7 +1371,7 @@ preflight() {
 }
 
 pool_preflight() {
-  local expected_source=$1 expected_common treehouse_paths worktree canonical common dirty example failed=0
+  local expected_source=$1 expected_common treehouse_paths treehouse_state pool worktree canonical common dirty example failed=0
   expected_source=$(require_exact_git_root "$expected_source" "expected Treehouse source") || return 1
   expected_common=$(fm_checkout_git_common_dir "$expected_source") || {
     echo "error: cannot resolve expected Treehouse repository identity for $expected_source" >&2
@@ -1271,10 +1382,15 @@ pool_preflight() {
     rm -f "$treehouse_paths"
     return 1
   fi
-  while IFS= read -r worktree; do
+  while IFS=$'\t' read -r treehouse_state pool worktree; do
     [ -n "$worktree" ] || continue
-    canonical=$(canonical_dir "$worktree" 2>/dev/null) || {
-      echo "checkout-refresh: skipped: Treehouse worktree is not inspectable: $worktree" >&2
+    backing_checkout "$worktree" "$pool" "$treehouse_state" >/dev/null 2>&1 || {
+      echo "checkout-refresh: skipped: Treehouse worktree identity or registration is not inspectable: $worktree" >&2
+      failed=1
+      continue
+    }
+    canonical=$(exact_git_root "$worktree" 2>/dev/null) || {
+      echo "checkout-refresh: skipped: Treehouse worktree is not an exact Git root: $worktree" >&2
       failed=1
       continue
     }

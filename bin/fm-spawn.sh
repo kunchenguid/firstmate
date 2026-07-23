@@ -483,18 +483,20 @@ spawn_preflight_meta_value() {  # <key>
 }
 
 spawn_refuse_report_required_orca() {
-  local report_required=1
-  if [ "$SPAWN_META_PRESENT" = 1 ]; then
-    if printf '%s\n' "$SPAWN_META_SNAPSHOT" | grep -q '^report_required='; then
-      [ "$(spawn_preflight_meta_value report_required)" = 1 ] || report_required=0
-    else
-      report_required=0
-    fi
-  fi
-  if [ "$report_required" = 1 ]; then
+  local report_count
+  if [ "$SPAWN_META_PRESENT" != 1 ]; then
     echo "error: backend=orca cannot host new report-required tasks: Orca has no reliable endpoint-absence proof, so report-gated teardown could never complete; spawn report-required work on tmux, herdr, zellij, or cmux" >&2
     return 1
   fi
+  report_count=$(printf '%s\n' "$SPAWN_META_SNAPSHOT" | grep -c '^report_required=' || true)
+  [ "$report_count" -eq 0 ] || {
+    if [ "$report_count" -eq 1 ] && [ "$(spawn_preflight_meta_value report_required)" = 1 ]; then
+      echo "error: backend=orca cannot host new report-required tasks: Orca has no reliable endpoint-absence proof, so report-gated teardown could never complete; spawn report-required work on tmux, herdr, zellij, or cmux" >&2
+    else
+      echo "error: invalid report_required metadata for $SPAWN_PREFLIGHT_ID; legacy Orca recovery requires the marker to be absent" >&2
+    fi
+    return 1
+  }
 }
 
 reconcile_failed_direct_recovery() {
@@ -1286,7 +1288,7 @@ spawn_restore_unmanaged_state() {
 }
 
 spawn_abort_cleanup() {
-  local status=$? endpoint_state endpoint_gone=1 account_clean=1 state_clean=1 worktree_clean=1 rollback_lock='' rollback_tmp restored_existing_meta=0 artifact_backup_name orca_meta_tmp release_status
+  local status=$? endpoint_state endpoint_gone=1 account_clean=1 state_clean=1 worktree_clean=1 rollback_lock='' rollback_tmp restored_existing_meta=0 artifact_backup_name orca_meta_tmp release_status orca_cleanup_failed=0
   trap - EXIT
   # This is an EXIT trap whose job is to attempt every independent cleanup
   # action and then return the original spawn status. The parent script runs
@@ -1302,10 +1304,16 @@ spawn_abort_cleanup() {
   if [ "$ORCA_ABORT_CLEANUP" = 1 ]; then
     ORCA_ABORT_CLEANUP=0
     if [ -n "${ORCA_TERMINAL:-}" ]; then
-      fm_backend_kill orca "$ORCA_TERMINAL" 2>/dev/null || true
+      fm_backend_orca_quiesce_terminal "$ORCA_TERMINAL" || orca_cleanup_failed=1
     fi
-    if [ -n "${ORCA_WORKTREE_ID:-}" ]; then
-      if ! fm_backend_remove_worktree orca "$ORCA_WORKTREE_ID" 2>/dev/null; then
+    if [ -n "${ORCA_WORKTREE_ID:-}" ] && [ "$orca_cleanup_failed" = 0 ]; then
+      fm_backend_remove_worktree orca "$ORCA_WORKTREE_ID" || orca_cleanup_failed=1
+    fi
+    if [ "$orca_cleanup_failed" = 1 ]; then
+      endpoint_gone=0
+      worktree_clean=0
+      echo "warning: retaining Orca cleanup metadata for ${ID:-unknown} because endpoint absence or worktree removal is unproven" >&2
+      if [ -n "${ORCA_WORKTREE_ID:-}" ]; then
         mkdir -p "$STATE" 2>/dev/null || true
         if [ -d "$STATE" ] && [ ! -L "$STATE" ]; then
           orca_meta_tmp=$(mktemp "$STATE/.${ID:-unknown}.meta.orca-cleanup.XXXXXX" 2>/dev/null) || orca_meta_tmp=
@@ -1325,6 +1333,7 @@ spawn_abort_cleanup() {
             echo "backend=orca"
             echo "orca_worktree_id=$ORCA_WORKTREE_ID"
             [ -z "${ORCA_TERMINAL:-}" ] || echo "terminal=$ORCA_TERMINAL"
+            echo "orca_cleanup_pending=1"
           } > "$orca_meta_tmp" 2>/dev/null || true
           if fm_account_safe_file_destination "$STATE/${ID:-unknown}.meta"; then
             mv "$orca_meta_tmp" "$STATE/${ID:-unknown}.meta" 2>/dev/null || true

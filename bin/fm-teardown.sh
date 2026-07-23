@@ -127,7 +127,26 @@ ID=$1
 FORCE=${2:-}
 
 META="$STATE/$ID.meta"
-[ -f "$META" ] || { echo "error: no meta for task $ID at $META" >&2; exit 1; }
+
+require_safe_task_metadata() {
+  local state_root meta_parent
+  [ -d "$STATE" ] && [ ! -L "$STATE" ] || {
+    echo "error: task state must be a real directory: $STATE" >&2
+    return 1
+  }
+  [ -f "$META" ] && [ ! -L "$META" ] && [ -r "$META" ] || {
+    echo "error: task metadata must be a real readable file for $ID at $META" >&2
+    return 1
+  }
+  state_root=$(cd "$STATE" 2>/dev/null && pwd -P) || return 1
+  meta_parent=$(cd "$(dirname "$META")" 2>/dev/null && pwd -P) || return 1
+  [ "$state_root" = "$meta_parent" ] && [ "$(basename "$META")" = "$ID.meta" ] || {
+    echo "error: task metadata identity does not match requested task $ID" >&2
+    return 1
+  }
+}
+
+require_safe_task_metadata || exit 1
 TEARDOWN_ACCOUNT_LOCKS=('')
 MANAGED_ACCOUNT_LOCK=
 ACCOUNT_DELETE_LOCK=
@@ -148,7 +167,7 @@ managed_account_meta() {
 MANAGED_ACCOUNT=0
 ACCOUNT_DELETE_LOCK=$(fm_account_lifecycle_lock_acquire "$STATE" "$ID") || exit 1
 TEARDOWN_ACCOUNT_LOCKS+=("$ACCOUNT_DELETE_LOCK")
-[ -f "$META" ] || { echo "error: task metadata disappeared while teardown waited for $ID" >&2; exit 1; }
+require_safe_task_metadata || { echo "error: task metadata changed while teardown waited for $ID" >&2; exit 1; }
 if managed_account_meta "$META"; then
   MANAGED_ACCOUNT=1
   managed_account_meta "$META" || { echo "error: managed task metadata changed while teardown waited for $ID" >&2; exit 1; }
@@ -186,7 +205,10 @@ MODE=$(grep '^mode=' "$META" | cut -d= -f2- || true)
 [ -n "$MODE" ] || MODE=no-mistakes
 REPORT_GATED=0
 REPORT_REQUIRED_COUNT=$(grep -c '^report_required=' "$META" 2>/dev/null || true)
-if [ "$REPORT_REQUIRED_COUNT" -gt 0 ]; then
+if [ "$BACKEND" = orca ] && [ "$REPORT_REQUIRED_COUNT" -ne 0 ]; then
+  echo "error: invalid report_required metadata for legacy Orca task $ID; the marker must be absent" >&2
+  exit 1
+elif [ "$REPORT_REQUIRED_COUNT" -gt 0 ]; then
   if [ "$REPORT_REQUIRED_COUNT" -ne 1 ] || [ "$(fm_meta_get "$META" report_required)" != 1 ]; then
     echo "error: invalid report_required metadata for $ID; refusing teardown" >&2
     exit 1
@@ -480,6 +502,15 @@ require_orca_worktree_id() {
     return 1
   fi
   printf '%s\n' "$id"
+}
+
+require_orca_task_metadata_identity() {
+  local meta=$1 expected_id=$2 window_count
+  window_count=$(grep -c '^window=' "$meta" 2>/dev/null || true)
+  if [ "$window_count" -ne 1 ] || [ "$(meta_value "$meta" window)" != "fm-$expected_id" ]; then
+    echo "error: Orca metadata is not bound to requested task $expected_id" >&2
+    return 1
+  fi
 }
 
 require_orca_terminal() {
@@ -862,6 +893,7 @@ require_treehouse_return_authority() {
 validate_teardown_target_identity() {
   local project_root worktree_root project_common worktree_common
   [ "$KIND" != secondmate ] || return 0
+  require_safe_task_metadata || return 1
   project_root=$(exact_git_worktree_root "$PROJ") || {
     echo "error: teardown project metadata is not an exact inspectable repository root: ${PROJ:-<missing>}" >&2
     return 1
@@ -881,6 +913,7 @@ validate_teardown_target_identity() {
     return 1
   }
   if [ "$BACKEND" = orca ]; then
+    require_orca_task_metadata_identity "$META" "$ID" || return 1
     require_orca_worktree_path_match "$ORCA_WORKTREE_ID" "$worktree_root" || return 1
     ORCA_PATH_MATCH_VERIFIED=1
     return 0
@@ -1285,6 +1318,110 @@ registered_descendant_home_for_removal() {
   return 1
 }
 
+secondmate_registry_for_source() {
+  local source=$1 source_root root
+  source_root=$(exact_git_worktree_root "$source") || return 1
+  root=$(exact_git_worktree_root "$FM_ROOT") || return 1
+  if [ "$source_root" = "$root" ]; then
+    printf '%s\n' "$SECONDMATE_REG"
+  else
+    printf '%s/data/secondmates.md\n' "$source_root"
+  fi
+}
+
+require_registered_secondmate_home() {
+  local reg=$1 expected_id=$2 expected_home=$3 line id registered_home registered_abs
+  local expected_abs matches=0
+  [ -f "$reg" ] && [ ! -L "$reg" ] && [ -r "$reg" ] || {
+    echo "REFUSED: secondmate registry is missing, unsafe, or unreadable at $reg" >&2
+    return 1
+  }
+  expected_abs=$(removal_target_abs_path "$expected_home") || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      "- "*)
+        id=${line#- }
+        id=${id%% *}
+        [ "$id" = "$expected_id" ] || continue
+        registered_home=$(printf '%s\n' "$line" | registry_home_for_line)
+        [ -n "$registered_home" ] || {
+          echo "REFUSED: secondmate registry entry for $expected_id has no home" >&2
+          return 1
+        }
+        registered_abs=$(removal_target_abs_path "$registered_home" 2>/dev/null) || {
+          echo "REFUSED: secondmate registry home for $expected_id is uninspectable" >&2
+          return 1
+        }
+        [ "$registered_abs" = "$expected_abs" ] || {
+          echo "REFUSED: secondmate registry home for $expected_id is $registered_abs, not $expected_abs" >&2
+          return 1
+        }
+        matches=$(( matches + 1 ))
+        ;;
+    esac
+  done < "$reg"
+  [ "$matches" -eq 1 ] || {
+    echo "REFUSED: expected exactly one secondmate registry entry for $expected_id at $expected_abs" >&2
+    return 1
+  }
+}
+
+secondmate_state_metadata() {
+  local home=$1 state
+  state="$home/state"
+  command -v python3 >/dev/null 2>&1 || {
+    echo "REFUSED: python3 is required to inspect secondmate child state" >&2
+    return 1
+  }
+  python3 - "$home" "$state" <<'PY'
+import os
+import stat
+import sys
+
+home, state_path = sys.argv[1:]
+try:
+    if os.path.islink(state_path):
+        raise OSError("state directory must not be a symlink")
+    metadata = os.stat(state_path)
+    permissions = stat.S_IMODE(metadata.st_mode)
+    if not stat.S_ISDIR(metadata.st_mode):
+        raise NotADirectoryError(state_path)
+    if not permissions & 0o444 or not permissions & 0o111:
+        raise PermissionError("state directory is unreadable")
+    home_root = os.path.realpath(home)
+    state_root = os.path.realpath(state_path)
+    if state_root != os.path.join(home_root, "state"):
+        raise OSError("state directory resolves outside its secondmate home")
+    with os.scandir(state_path) as entries:
+        for entry in sorted(entries, key=lambda item: item.name):
+            metadata = entry.stat(follow_symlinks=False)
+            if not entry.name.endswith(".meta"):
+                continue
+            if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+                raise OSError(f"unsafe child metadata entry: {entry.path}")
+            if not stat.S_IMODE(metadata.st_mode) & 0o444:
+                raise PermissionError(f"unreadable child metadata entry: {entry.path}")
+            if any(character in entry.path for character in ("\n", "\r")):
+                raise OSError("child metadata path contains unsupported control characters")
+            print(entry.path)
+except OSError as error:
+    print(
+        f"REFUSED: secondmate child state is unprovable at {state_path}: {error}",
+        file=sys.stderr,
+    )
+    raise SystemExit(1)
+PY
+}
+
+require_empty_secondmate_state() {
+  local home=$1 child_metas
+  child_metas=$(secondmate_state_metadata "$home") || return 1
+  [ -z "$child_metas" ] || {
+    echo "REFUSED: secondmate child metadata appeared before home removal at $home/state" >&2
+    return 1
+  }
+}
+
 validate_firstmate_operational_dirs_for_removal() {
   local home=$1 label=$2 name dir abs_home abs_dir
   abs_home=$(removal_target_abs_path "$home")
@@ -1502,8 +1639,9 @@ EOF
 }
 
 validate_firstmate_home_for_removal() {
-  local home=$1 label=$2 expected_id=${3:-} expected_source=${4:-$FM_ROOT}
-  local abs_home_path marker_id conflict child_id child_home
+  local home=$1 label=$2 expected_id=${3:-} expected_source=${4:-$FM_ROOT} expected_registry=${5:-} expected_project
+  local abs_home_path metadata_home_root marker_id conflict child_id child_home
+  expected_project=${6:-$home}
   [ -n "$home" ] || return 0
   [ -e "$home" ] || return 0
   abs_home_path=$(validate_removal_target "$home" "$label") || return 1
@@ -1517,14 +1655,25 @@ validate_firstmate_home_for_removal() {
       echo "REFUSED: unsafe $label removal target $home is marked for secondmate ${marker_id:-unknown}, expected $expected_id" >&2
       return 1
     fi
+    [ -n "$expected_registry" ] || expected_registry=$(secondmate_registry_for_source "$expected_source") || return 1
+    require_registered_secondmate_home "$expected_registry" "$expected_id" "$abs_home_path" || return 1
   fi
+  metadata_home_root=$(exact_git_worktree_root "$expected_project") || {
+    echo "REFUSED: secondmate project metadata is not an exact repository root: ${expected_project:-<missing>}" >&2
+    return 1
+  }
+  [ "$metadata_home_root" = "$abs_home_path" ] || {
+    echo "REFUSED: secondmate project metadata resolves to $metadata_home_root, not registered home $abs_home_path" >&2
+    return 1
+  }
   validate_firstmate_home_repository_identity "$abs_home_path" "$expected_source" || return 1
   if [ -n "$expected_id" ] && firstmate_home_has_treehouse_slot "$abs_home_path" "$expected_source"; then
     require_treehouse_task_lease "$abs_home_path" "$expected_id" || return 1
   fi
   [ "$FORCE" = "--force" ] || validate_secondmate_home_landed_state "$abs_home_path" "$expected_source" || return 1
   validate_firstmate_operational_dirs_for_removal "$abs_home_path" "$label" || return 1
-  conflict=$(registered_descendant_home_for_removal "$SECONDMATE_REG" "$abs_home_path" || true)
+  secondmate_state_metadata "$abs_home_path" >/dev/null || return 1
+  conflict=$(registered_descendant_home_for_removal "${expected_registry:-$SECONDMATE_REG}" "$abs_home_path" || true)
   if [ -z "$conflict" ]; then
     conflict=$(registered_descendant_home_for_removal "$abs_home_path/data/secondmates.md" "$abs_home_path" || true)
   fi
@@ -1539,9 +1688,11 @@ EOF
 }
 
 remove_explicit_firstmate_home_locked() {
-  local home=$1 label=$2 expected_id=$3 expected_source=$4 validated
-  validated=$(validate_firstmate_home_for_removal "$home" "$label" "$expected_id" "$expected_source") || return 1
+  local home=$1 label=$2 expected_id=$3 expected_source=$4 expected_registry=${5:-} expected_project validated
+  expected_project=${6:-$home}
+  validated=$(validate_firstmate_home_for_removal "$home" "$label" "$expected_id" "$expected_source" "$expected_registry" "$expected_project") || return 1
   [ "$validated" = "$home" ] || return 1
+  require_empty_secondmate_state "$home" || return 1
   firstmate_home_has_treehouse_slot "$home" "$expected_source" && {
     echo "error: $label became a Treehouse worktree before explicit removal" >&2
     return 1
@@ -1550,14 +1701,16 @@ remove_explicit_firstmate_home_locked() {
 }
 
 validate_treehouse_firstmate_home_locked() {
-  validate_firstmate_home_for_removal "$1" "secondmate home" "$3" "$2" >/dev/null
+  validate_firstmate_home_for_removal "$1" "secondmate home" "$3" "$2" >/dev/null \
+    && require_empty_secondmate_state "$1"
 }
 
 remove_firstmate_home() {
-  local home=$1 label=$2 expected_id=${3:-} expected_source=${4:-$FM_ROOT} abs_home_path
+  local home=$1 label=$2 expected_id=${3:-} expected_source=${4:-$FM_ROOT} expected_registry=${5:-} expected_project abs_home_path
+  expected_project=${6:-$home}
   [ -n "$home" ] || return 0
   [ -e "$home" ] || return 0
-  abs_home_path=$(validate_firstmate_home_for_removal "$home" "$label" "$expected_id" "$expected_source") || return 1
+  abs_home_path=$(validate_firstmate_home_for_removal "$home" "$label" "$expected_id" "$expected_source" "$expected_registry" "$expected_project") || return 1
   [ -n "$abs_home_path" ] || return 0
   if firstmate_home_has_treehouse_slot "$abs_home_path" "$expected_source"; then
     command -v treehouse >/dev/null 2>&1 || {
@@ -1572,15 +1725,15 @@ remove_firstmate_home() {
     return 0
   fi
   fm_checkout_lock_run "$abs_home_path" "$CHECKOUT_LOCK_ROOT" \
-    remove_explicit_firstmate_home_locked "$abs_home_path" "$label" "$expected_id" "$expected_source"
+    remove_explicit_firstmate_home_locked "$abs_home_path" "$label" "$expected_id" "$expected_source" "$expected_registry" "$expected_project"
 }
 
 validate_firstmate_home_children_removal() {
-  local home=$1 sub_state child_meta child_id child_wt child_proj child_kind child_home child_backend child_orca_worktree_id
+  local home=$1 sub_state child_metas child_meta child_id child_wt child_proj child_kind child_home child_backend child_orca_worktree_id
   sub_state="$home/state"
-  [ -d "$sub_state" ] || return 0
-  for child_meta in "$sub_state"/*.meta; do
-    [ -e "$child_meta" ] || continue
+  child_metas=$(secondmate_state_metadata "$home") || return 1
+  while IFS= read -r child_meta; do
+    [ -n "$child_meta" ] || continue
     child_id=$(basename "$child_meta" .meta)
     child_wt=$(meta_value "$child_meta" worktree)
     child_kind=$(meta_value "$child_meta" kind)
@@ -1592,23 +1745,30 @@ validate_firstmate_home_children_removal() {
     fi
     child_backend=$(fm_backend_of_meta "$child_meta")
     if [ "$child_kind" = secondmate ]; then
+      child_proj=$(meta_value "$child_meta" project)
       child_home=$(meta_value "$child_meta" home)
       [ -n "$child_home" ] || child_home=$child_wt
-      validate_firstmate_home_for_removal "$child_home" "child firstmate home" "$child_id" "$home" >/dev/null || return 1
+      validate_firstmate_home_for_removal "$child_home" "child firstmate home" "$child_id" "$home" "$home/data/secondmates.md" "$child_proj" >/dev/null || return 1
       validate_firstmate_home_children_removal "$child_home" || return 1
     elif [ "$child_backend" = orca ]; then
+      require_orca_task_metadata_identity "$child_meta" "$child_id" || return 1
       child_orca_worktree_id=$(require_orca_worktree_id "$child_meta") || return 1
       if [ -n "$child_wt" ] && [ -e "$child_wt" ]; then
         child_proj=$(meta_value "$child_meta" project)
         validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
         require_orca_worktree_path_match "$child_orca_worktree_id" "$child_wt" || return 1
       fi
-    elif [ -n "$child_wt" ] && [ -e "$child_wt" ]; then
+    elif [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
       child_proj=$(meta_value "$child_meta" project)
       validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
       require_treehouse_task_lease "$(canonical_existing_dir "$child_wt")" "firstmate-$child_id" || return 1
+    else
+      echo "error: retained child metadata for $child_id because its Treehouse worktree is missing or uninspectable" >&2
+      return 1
     fi
-  done
+  done <<EOF
+$child_metas
+EOF
 }
 
 remove_child_orca_worktree_locked() {
@@ -1624,15 +1784,16 @@ remove_child_orca_worktree_locked() {
 }
 
 cleanup_firstmate_home_children() {
-  local home=$1 sub_state child_meta child_id child_wt child_proj child_kind child_home child_backend child_orca_worktree_id child_return_rc child_account_lock child_endpoint_home
+  local home=$1 sub_state child_metas child_meta child_id child_wt child_proj child_kind child_home child_backend child_orca_worktree_id child_return_rc child_account_lock child_endpoint_home
   sub_state="$home/state"
-  [ -d "$sub_state" ] || return 0
-  for child_meta in "$sub_state"/*.meta; do
-    [ -e "$child_meta" ] || continue
+  child_metas=$(secondmate_state_metadata "$home") || return 1
+  while IFS= read -r child_meta; do
+    [ -n "$child_meta" ] || continue
     child_id=$(basename "$child_meta" .meta)
     child_account_lock=$(fm_account_lifecycle_lock_acquire "$sub_state" "$child_id") || return 1
     TEARDOWN_ACCOUNT_LOCKS+=("$child_account_lock")
-    [ -f "$child_meta" ] || { echo "error: child metadata disappeared while teardown waited for $child_id" >&2; return 1; }
+    [ -f "$child_meta" ] && [ ! -L "$child_meta" ] && [ -r "$child_meta" ] \
+      || { echo "error: child metadata changed while teardown waited for $child_id" >&2; return 1; }
     if managed_account_meta "$child_meta"; then
       if [ ! -f "$child_meta" ] || ! managed_account_meta "$child_meta"; then
         echo "error: managed child metadata changed while teardown waited for $child_id" >&2
@@ -1650,10 +1811,19 @@ cleanup_firstmate_home_children() {
     fi
     child_backend=$(fm_backend_of_meta "$child_meta")
     if [ "$child_backend" = orca ] && [ "$child_kind" != secondmate ]; then
+      require_orca_task_metadata_identity "$child_meta" "$child_id" || return 1
       child_orca_worktree_id=$(require_orca_worktree_id "$child_meta") || return 1
       if [ -n "$child_wt" ] && [ -e "$child_wt" ]; then
         validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
       fi
+    fi
+    if [ "$child_kind" != secondmate ] && [ "$child_backend" != orca ]; then
+      if [ -z "$child_wt" ] || [ ! -d "$child_wt" ]; then
+        echo "error: retained child metadata for $child_id because its Treehouse worktree is missing or uninspectable" >&2
+        return 1
+      fi
+      validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
+      require_treehouse_task_lease "$(canonical_existing_dir "$child_wt")" "firstmate-$child_id" || return 1
     fi
     if managed_account_meta "$child_meta"; then
       child_endpoint_home=$(fm_backend_endpoint_home "$child_backend" "$child_kind" "$home" "$child_home")
@@ -1665,7 +1835,8 @@ cleanup_firstmate_home_children() {
     if [ "$child_kind" = secondmate ]; then
       if [ -n "$child_home" ] && [ -d "$child_home" ]; then
         cleanup_firstmate_home_children "$child_home" || return 1
-        remove_firstmate_home "$child_home" "child firstmate home" "$child_id" "$home" || return 1
+        remove_firstmate_home "$child_home" "child firstmate home" "$child_id" "$home" "$home/data/secondmates.md" "$child_proj" || return 1
+        remove_secondmate_registry_entry "$child_id" "$child_home" "$home/data/secondmates.md" || return 1
       fi
     elif [ "$child_backend" = orca ]; then
       if [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
@@ -1708,22 +1879,25 @@ cleanup_firstmate_home_children() {
     remove_grok_turnend_auth "$sub_state" "$child_id"
     rm -f "$sub_state/$child_id.status" "$sub_state/$child_id.turn-ended" "$sub_state/$child_id.check.sh" "$sub_state/$child_id.meta" "$sub_state/$child_id.pi-ext.ts" "$sub_state/$child_id.grok-turnend-token"
     [ -z "$child_account_lock" ] || fm_account_lifecycle_lock_release "$child_account_lock" >/dev/null 2>&1 || true
-  done
+  done <<EOF
+$child_metas
+EOF
 }
 
 remove_secondmate_registry_entry() {
-  local id=$1 tmp
-  [ -f "$SECONDMATE_REG" ] || return 0
-  fm_account_safe_file_destination "$SECONDMATE_REG" || return 1
-  tmp=$(mktemp "$DATA/.secondmates.XXXXXX") || return 1
-  grep -vE "^- $id( |$)" "$SECONDMATE_REG" > "$tmp" || true
-  fm_account_safe_file_destination "$SECONDMATE_REG" || { rm -f "$tmp"; return 1; }
-  mv "$tmp" "$SECONDMATE_REG"
+  local id=$1 home=$2 reg=${3:-$SECONDMATE_REG} tmp reg_dir
+  require_registered_secondmate_home "$reg" "$id" "$home" || return 1
+  fm_account_safe_file_destination "$reg" || return 1
+  reg_dir=$(dirname "$reg")
+  tmp=$(mktemp "$reg_dir/.secondmates.XXXXXX") || return 1
+  grep -vE "^- $id( |$)" "$reg" > "$tmp" || true
+  fm_account_safe_file_destination "$reg" || { rm -f "$tmp"; return 1; }
+  mv "$tmp" "$reg"
 }
 
 if [ "$KIND" = secondmate ]; then
   [ -n "$HOME_PATH" ] || HOME_PATH=$WT
-  validate_firstmate_home_for_removal "$HOME_PATH" "secondmate home" "$ID" >/dev/null || exit 1
+  validate_firstmate_home_for_removal "$HOME_PATH" "secondmate home" "$ID" "$FM_ROOT" "$SECONDMATE_REG" "$PROJ" >/dev/null || exit 1
   if [ "$FORCE" = "--force" ]; then
     validate_firstmate_home_children_removal "$HOME_PATH" || exit 1
   fi
@@ -1732,13 +1906,12 @@ if [ "$KIND" = secondmate ]; then
     validate_firstmate_home_children_removal "$HOME_PATH" || exit 1
   else
     SUB_STATE="$HOME_PATH/state"
-    if [ -d "$SUB_STATE" ]; then
-      for child_meta in "$SUB_STATE"/*.meta; do
-        [ -e "$child_meta" ] || continue
-        echo "REFUSED: secondmate $ID still has in-flight work in $SUB_STATE." >&2
-        echo "Found $(basename "$child_meta"). Let that home finish or explicitly discard with --force." >&2
-        exit 1
-      done
+    CHILD_METAS=$(secondmate_state_metadata "$HOME_PATH") || exit 1
+    if [ -n "$CHILD_METAS" ]; then
+      child_meta=${CHILD_METAS%%$'\n'*}
+      echo "REFUSED: secondmate $ID still has in-flight work in $SUB_STATE." >&2
+      echo "Found $(basename "$child_meta"). Let that home finish or explicitly discard with --force." >&2
+      exit 1
     fi
   fi
 fi
@@ -1951,8 +2124,8 @@ if [ "$DIRECT_SPAWN_CLEANUP" = pending ] && [ -n "$DIRECT_SPAWN_BACKUP" ]; then
 fi
 if [ "$KIND" = secondmate ]; then
   [ -n "$HOME_PATH" ] || HOME_PATH=$WT
-  remove_firstmate_home "$HOME_PATH" "secondmate home" "$ID" || exit 1
-  remove_secondmate_registry_entry "$ID" || exit 1
+  remove_firstmate_home "$HOME_PATH" "secondmate home" "$ID" "$FM_ROOT" "$SECONDMATE_REG" "$PROJ" || exit 1
+  remove_secondmate_registry_entry "$ID" "$HOME_PATH" || exit 1
 fi
 remove_grok_turnend_auth "$STATE" "$ID"
 fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true

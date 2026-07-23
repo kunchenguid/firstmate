@@ -139,7 +139,10 @@ fm_backend_orca_worktree_create() {  # <project-path> <name>
   terminal=$(printf '%s' "$out" | fm_backend_orca_json_get worktree-terminal-handle 2>/dev/null || true)
   wt_path=$(printf '%s' "$out" | fm_backend_orca_json_get worktree-path) || {
     echo "error: orca worktree create did not return a path for $name" >&2
-    [ -z "$terminal" ] || fm_backend_orca_kill "$terminal" >/dev/null 2>&1 || true
+    if [ -n "$terminal" ] && ! fm_backend_orca_quiesce_terminal "$terminal"; then
+      printf '%s\t\t%s' "$wt_id" "$terminal"
+      return 2
+    fi
     if fm_backend_orca_remove_worktree "$wt_id" >/dev/null; then
       return 1
     fi
@@ -238,6 +241,22 @@ if (status === 0 && data.ok !== false && knownTerminal) {
 }
 process.stdout.write("unknown");
 ' "$status"
+}
+
+fm_backend_orca_quiesce_terminal() {  # <terminal-id>
+  local terminal=$1 attempt state
+  [ -n "$terminal" ] || return 1
+  fm_backend_orca_kill "$terminal" || {
+    echo "error: failed to close Orca terminal $terminal" >&2
+    return 1
+  }
+  for attempt in 1 2 3 4 5; do
+    state=$(fm_backend_orca_terminal_state "$terminal")
+    [ "$state" != absent ] || return 0
+    sleep 0.1
+  done
+  echo "error: Orca terminal $terminal is not proven absent after close" >&2
+  return 1
 }
 
 fm_backend_orca_json_text() {  # <json>

@@ -219,6 +219,81 @@ test_discovery_rejects_nested_configured_and_scanned_paths() {
   pass "configured and scanned checkouts require exact Git roots"
 }
 
+test_discovery_provenance_failures_invalidate_coverage() {
+  local fixture home state remote project pool out status scan fakebin real_git
+  fixture="$TMP_ROOT/discovery-provenance"
+  home="$fixture/home"
+  state="$fixture/state"
+  scan="$fixture/scan"
+  fakebin="$fixture/fakebin"
+  mkdir -p "$home/user" "$home/projects" "$home/config" "$state" "$scan" "$fakebin"
+  remote=$(build_origin discovery-provenance)
+  project="$home/projects/relvino"
+  clone_from "$remote" "$project"
+  pool="$home/user/.treehouse/relvino"
+  mkdir -p "$pool"
+  printf '{"worktrees":[{"name":"bad","path":"%s"}]}\n' "$project" \
+    > "$pool/treehouse-state.json"
+
+  set +e
+  out=$(run_isolated_refresh "$home" "$state" discover 2>&1)
+  status=$?
+  set -e
+  [ "$status" -ne 0 ] || fail "unrelated Treehouse backing checkout was accepted"
+  assert_contains "$out" "Treehouse worktree identity or registration is not inspectable: $project" \
+    "unrelated Treehouse state path was not surfaced"
+
+  rm -rf "$home/user/.treehouse"
+  ln -s "$fixture/missing-project" "$home/projects/broken-project"
+  printf 'scan %s\n' "$scan" > "$home/config/checkout-refresh"
+  ln -s "$fixture/missing-scan-target" "$scan/broken-candidate"
+  set +e
+  out=$(run_isolated_refresh "$home" "$state" run-once --force 2>&1)
+  status=$?
+  set -e
+  [ "$status" -ne 0 ] || fail "broken discovery symlinks reported healthy coverage"
+  assert_contains "$out" "broken active-home project symlink" \
+    "broken active-project symlink was not surfaced"
+  assert_refresh_state "$state" unhealthy
+
+  rm -f "$home/projects/broken-project"
+  set +e
+  out=$(run_isolated_refresh "$home" "$state" run-once --force 2>&1)
+  status=$?
+  set -e
+  [ "$status" -ne 0 ] || fail "broken scanned symlink reported healthy coverage"
+  assert_contains "$out" "broken scan candidate symlink" \
+    "broken scanned symlink was not surfaced"
+  assert_refresh_state "$state" unhealthy
+
+  rm -f "$scan/broken-candidate"
+  clone_from "$remote" "$scan/scanned-repo"
+  : > "$scan/scanned-repo/.fm-fail-git-probe"
+  real_git=$(command -v git)
+  cat > "$fakebin/git" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = -C ] && [ -f "${2:-}/.fm-fail-git-probe" ] \
+    && [ "${3:-}" = rev-parse ] && [ "${4:-}" = --is-inside-work-tree ]; then
+  exit 128
+fi
+exec "$FM_REAL_GIT" "$@"
+SH
+  chmod +x "$fakebin/git"
+  set +e
+  out=$(
+    export PATH="$fakebin:$PATH"
+    export FM_REAL_GIT="$real_git"
+    run_isolated_refresh "$home" "$state" run-once --force 2>&1
+  )
+  status=$?
+  set -e
+  [ "$status" -ne 0 ] || fail "uninspectable discovered Git identity reported healthy coverage"
+  assert_contains "$out" "discovered Git identity cannot be inspected:" \
+    "discovered rev-parse failure was classified as a non-Git directory"
+  assert_refresh_state "$state" unhealthy
+  pass "discovery provenance failures invalidate coverage health"
+}
+
 test_upstream_tip_signal_refreshes_between_firstmate_events() {
   local project external remote out
   project="$FM_TEST_HOME/projects/relvino"
@@ -1408,6 +1483,11 @@ if [ "${FM_TEST_FOCUSED:-}" = review-round-refresh-followups ]; then
   test_unreadable_scanned_origin_invalidates_coverage_health
   test_failed_alert_persistence_forces_reinspection
   test_local_authority_is_fully_inspected_and_tracks_origin_identity
+  exit 0
+fi
+
+if [ "${FM_TEST_FOCUSED:-}" = review-round-refresh-provenance ]; then
+  test_discovery_provenance_failures_invalidate_coverage
   exit 0
 fi
 

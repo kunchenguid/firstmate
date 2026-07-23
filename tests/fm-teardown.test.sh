@@ -3043,6 +3043,98 @@ test_teardown_rejects_malformed_report_requirement() {
   pass "teardown treats only one exact report_required marker as valid"
 }
 
+write_secondmate_meta() {
+  local case_dir=$1 home
+  home=${2:-$case_dir/wt}
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    'window=fm-task-x1' \
+    'tmux_session_target=firstmate:fm-task-x1' \
+    "worktree=$home" \
+    "project=$home" \
+    'kind=secondmate' \
+    'mode=secondmate' \
+    "home=$home"
+}
+
+test_secondmate_state_enumeration_fails_closed() {
+  local case_dir rc
+  case_dir=$(make_case missing-secondmate-state)
+  prepare_secondmate_home_fixture "$case_dir"
+  write_secondmate_meta "$case_dir"
+  rmdir "$case_dir/wt/state"
+  set +e
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "missing secondmate state teardown exit"
+  assert_present "$case_dir/wt" "missing state allowed secondmate home removal"
+  assert_present "$case_dir/state/task-x1.meta" "missing state allowed secondmate metadata removal"
+  assert_grep 'secondmate child state is unprovable' "$case_dir/stderr" \
+    "missing secondmate state was not surfaced"
+
+  case_dir=$(make_case unreadable-secondmate-state)
+  prepare_secondmate_home_fixture "$case_dir"
+  write_secondmate_meta "$case_dir"
+  chmod 100 "$case_dir/wt/state"
+  set +e
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  chmod 700 "$case_dir/wt/state"
+  expect_code 1 "$rc" "unreadable secondmate state teardown exit"
+  assert_present "$case_dir/wt" "unreadable state allowed secondmate home removal"
+  assert_present "$case_dir/state/task-x1.meta" "unreadable state allowed secondmate metadata removal"
+  pass "secondmate child-state enumeration fails closed"
+}
+
+test_secondmate_missing_treehouse_child_is_retained() {
+  local case_dir child_id missing_worktree rc
+  case_dir=$(make_case missing-treehouse-child)
+  child_id=missing-child
+  missing_worktree="$case_dir/missing-child-worktree"
+  prepare_secondmate_home_fixture "$case_dir"
+  write_secondmate_meta "$case_dir"
+  fm_write_meta "$case_dir/wt/state/$child_id.meta" \
+    "window=fm-$child_id" \
+    "tmux_session_target=firstmate:fm-$child_id" \
+    "worktree=$missing_worktree" \
+    "project=$case_dir/project" \
+    'harness=claude' \
+    'kind=ship' \
+    'mode=local-only'
+  set +e
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "missing Treehouse child teardown exit"
+  assert_present "$case_dir/wt/state/$child_id.meta" \
+    "missing Treehouse child metadata was forgotten"
+  assert_present "$case_dir/wt" "missing Treehouse child allowed parent home removal"
+  assert_grep 'Treehouse worktree is missing or uninspectable' "$case_dir/stderr" \
+    "missing Treehouse child lease blocker was not surfaced"
+  pass "missing Treehouse children retain their metadata and parent home"
+}
+
+test_secondmate_registry_home_drift_blocks_removal() {
+  local case_dir copied rc
+  case_dir=$(make_case secondmate-registry-drift)
+  prepare_secondmate_home_fixture "$case_dir"
+  copied="$case_dir/copied-home"
+  cp -R "$case_dir/wt" "$copied"
+  write_secondmate_meta "$case_dir" "$copied"
+  set +e
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "secondmate registry drift teardown exit"
+  assert_present "$copied" "registry drift allowed copied home removal"
+  assert_present "$case_dir/wt" "registry drift damaged the registered home"
+  assert_present "$case_dir/data/secondmates.md" "registry drift removed the real registration"
+  assert_grep 'secondmate registry home for task-x1' "$case_dir/stderr" \
+    "secondmate registry drift was not surfaced"
+  pass "secondmate retirement requires exact registry-home ownership"
+}
+
 test_retained_direct_spawn_requires_confirmed_endpoint_quiescence() {
   local case_dir rc
   case_dir=$(make_case retained-direct-spawn-quiescence)
@@ -3105,6 +3197,13 @@ fi
 
 if [ "${FM_TEST_FOCUSED:-}" = direct-spawn-cleanup ]; then
   test_retained_direct_spawn_requires_confirmed_endpoint_quiescence
+  exit 0
+fi
+
+if [ "${FM_TEST_FOCUSED:-}" = review-round-teardown-state ]; then
+  test_secondmate_state_enumeration_fails_closed
+  test_secondmate_missing_treehouse_child_is_retained
+  test_secondmate_registry_home_drift_blocks_removal
   exit 0
 fi
 
@@ -3213,6 +3312,9 @@ test_forced_secondmate_retains_unquiesced_unmanaged_child
 test_teardown_retains_untracked_claude_skill_draft
 test_teardown_refuses_unsafe_tasktmp_metadata
 test_teardown_rejects_malformed_report_requirement
+test_secondmate_state_enumeration_fails_closed
+test_secondmate_missing_treehouse_child_is_retained
+test_secondmate_registry_home_drift_blocks_removal
 test_retained_direct_spawn_requires_confirmed_endpoint_quiescence
 test_squash_merged_branch_deleted_allows
 test_squash_merged_pr_allows_when_head_ancestor_of_pr_head

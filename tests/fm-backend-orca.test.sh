@@ -547,6 +547,28 @@ test_worktree_create_removes_worktree_when_path_missing() {
   pass "fm_backend_orca_worktree_create: removes created worktree when path is missing"
 }
 
+test_worktree_create_retains_resources_when_terminal_close_fails() {
+  local out status
+  orca_case lifecycle-close-failure
+  printf '1\n' > "$RESP/1.exit"
+  printf '{"ok":true,"result":{"repo":{"id":"repo-close-failure"}}}\n' > "$RESP/2.out"
+  printf '{"ok":true,"result":{"worktree":{"id":"wt-close-failure"},"terminal":{"handle":"term-close-failure"}}}\n' > "$RESP/3.out"
+  printf '{"ok":false,"error":{"code":"terminal_close_failed","message":"terminal close failed"}}\n' > "$RESP/4.out"
+  set +e
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_worktree_create /repo/path fm-task' "$ROOT" 2>&1 )
+  status=$?
+  set -e
+  expect_code 2 "$status" "pathless Orca worktree close-failure status"
+  assert_contains "$out" $'wt-close-failure\t\tterm-close-failure' \
+    "close failure did not return durable Orca cleanup identity"
+  assert_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''close'$'\x1f''--terminal'$'\x1f''term-close-failure' \
+    "pathless cleanup did not attempt terminal close"
+  assert_not_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''rm' \
+    "pathless cleanup removed a worktree after terminal close failed"
+  pass "Orca pathless cleanup retains resources when terminal close fails"
+}
+
 test_spawn_preserves_orca_metadata_when_pathless_worktree_cleanup_fails() {
   local proj data state config id out status
   id="orcapathlessz6"
@@ -691,6 +713,36 @@ test_spawn_refuses_orca_respawn_of_report_required_task() {
   assert_not_contains "$(cat "$LOG")" $'orca\x1f''worktree' \
     "report-required Orca respawn refusal should fire before Orca worktree creation"
   pass "fm-spawn.sh --backend orca: refuses respawning a report-required task before any owned mutation"
+}
+
+test_spawn_refuses_malformed_legacy_orca_report_metadata() {
+  local proj data state config id out status
+  id="orcamalformedreportz2"
+  proj="$TMP_ROOT/malformed-report-project"
+  data="$TMP_ROOT/malformed-report-data"
+  state="$TMP_ROOT/malformed-report-state"
+  config="$TMP_ROOT/malformed-report-config"
+  fm_git_init_commit "$proj"
+  mkdir -p "$data/$id" "$state" "$config"
+  printf 'brief\n' > "$data/$id/brief.md"
+  touch "$state/.last-watcher-beat"
+  seed_legacy_task_meta "$state" "$id" "$proj"
+  printf 'report_required=0\n' >> "$state/$id.meta"
+  orca_case malformed-report-refusal
+  set +e
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 \
+    "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude --backend orca 2>&1 )
+  status=$?
+  set -e
+  [ "$status" -ne 0 ] || fail "malformed legacy Orca report metadata was launched"
+  assert_contains "$out" "invalid report_required metadata for $id" \
+    "malformed legacy Orca report metadata was not diagnosed"
+  assert_grep 'report_required=0' "$state/$id.meta" \
+    "malformed legacy metadata was rewritten during refusal"
+  [ ! -s "$LOG" ] || fail "malformed legacy Orca metadata reached backend mutation"
+  pass "Orca recovery accepts only an absent report marker"
 }
 
 test_spawn_refuses_report_required_orca_batch_pair_before_mutation() {
@@ -1016,6 +1068,74 @@ test_spawn_preserves_orca_metadata_when_abort_cleanup_fails() {
   assert_grep "orca_worktree_id=wt-cleanup-fail" "$state/$id.meta" "preserved metadata missing Orca worktree id"
   assert_no_grep "terminal=" "$state/$id.meta" "preserved metadata should not invent a terminal handle"
   pass "fm-spawn.sh --backend orca: preserves metadata when abort cleanup fails"
+}
+
+test_spawn_retains_orca_worktree_when_abort_close_fails() {
+  local proj data state config id out status
+  id="orcaabortclosez4"
+  proj="$TMP_ROOT/abort-close-project"
+  data="$TMP_ROOT/abort-close-data"
+  state="$TMP_ROOT/abort-close-state"
+  config="$TMP_ROOT/abort-close-config"
+  fm_git_init_commit "$proj"
+  mkdir -p "$data/$id" "$state" "$config"
+  printf 'brief\n' > "$data/$id/brief.md"
+  touch "$state/.last-watcher-beat"
+  orca_case abort-close-failure
+  seed_legacy_task_meta "$state" "$id" "$proj"
+  add_dead_tmux_fake "$FB"
+  printf '1\n' > "$RESP/1.exit"
+  printf '{"ok":true,"result":{"repo":{"id":"repo-abort-close"}}}\n' > "$RESP/2.out"
+  printf '{"ok":true,"result":{"worktree":{"id":"wt-abort-close","path":"%s"},"terminal":{"handle":"term-abort-close"}}}\n' "$proj" > "$RESP/3.out"
+  printf '{"ok":false,"error":{"code":"terminal_close_failed","message":"terminal close failed"}}\n' > "$RESP/4.out"
+  set +e
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 \
+    "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude --backend orca 2>&1 )
+  status=$?
+  set -e
+  [ "$status" -ne 0 ] || fail "Orca spawn should fail after non-isolated worktree creation"
+  assert_contains "$out" "retaining Orca cleanup metadata" \
+    "abort close failure did not surface durable retention"
+  assert_not_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''rm' \
+    "abort cleanup removed an Orca worktree after terminal close failed"
+  assert_grep 'terminal=term-abort-close' "$state/$id.meta" \
+    "abort close failure did not preserve terminal identity"
+  assert_grep 'orca_worktree_id=wt-abort-close' "$state/$id.meta" \
+    "abort close failure did not preserve worktree identity"
+  assert_grep 'orca_cleanup_pending=1' "$state/$id.meta" \
+    "abort close failure did not mark durable cleanup state"
+  assert_no_grep 'report_required=' "$state/$id.meta" \
+    "abort close failure changed the legacy report contract"
+  pass "Orca abort cleanup retains worktrees until terminal absence is proven"
+}
+
+test_teardown_rejects_symlinked_orca_task_metadata() {
+  local state data config neutral out status
+  state="$TMP_ROOT/orca-meta-alias-state"
+  data="$TMP_ROOT/orca-meta-alias-data"
+  config="$TMP_ROOT/orca-meta-alias-config"
+  mkdir -p "$state" "$data" "$config"
+  fm_write_meta "$state/bar.meta" \
+    'window=fm-bar' 'terminal=term-bar' 'worktree=/missing/bar' 'project=/missing/project' \
+    'harness=claude' 'kind=ship' 'mode=no-mistakes' 'backend=orca' 'orca_worktree_id=wt-bar'
+  ln -s bar.meta "$state/foo.meta"
+  orca_case teardown-meta-alias
+  neutral=$(neutral_fm_root "$CASE_DIR/meta-alias-neutral")
+  set +e
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ROOT_OVERRIDE="$neutral" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    "$ROOT/bin/fm-teardown.sh" foo --force 2>&1 )
+  status=$?
+  set -e
+  [ "$status" -ne 0 ] || fail "symlinked Orca task metadata was accepted"
+  assert_contains "$out" "task metadata must be a real readable file for foo" \
+    "symlinked Orca task metadata was not diagnosed"
+  assert_present "$state/foo.meta" "symlinked task metadata was removed"
+  assert_present "$state/bar.meta" "aliased task metadata target was removed"
+  [ ! -s "$LOG" ] || fail "symlinked Orca task metadata reached backend mutation"
+  pass "Orca teardown binds real metadata to the requested task"
 }
 
 test_spawn_refuses_invalid_state_before_orca_resource_creation() {
@@ -1644,6 +1764,15 @@ if [ "${FM_TEST_FOCUSED:-}" = review-round-orca-quiescence ]; then
   exit 0
 fi
 
+if [ "${FM_TEST_FOCUSED:-}" = review-round-orca-final ]; then
+  test_worktree_create_removes_worktree_when_path_missing
+  test_worktree_create_retains_resources_when_terminal_close_fails
+  test_spawn_refuses_malformed_legacy_orca_report_metadata
+  test_spawn_retains_orca_worktree_when_abort_close_fails
+  test_teardown_rejects_symlinked_orca_task_metadata
+  exit 0
+fi
+
 test_capture_reads_terminal_tail_json
 test_capture_falls_back_to_text_fields
 test_capture_fails_on_orca_error_json
@@ -1670,10 +1799,12 @@ test_dispatcher_sources_orca_and_routes_primitives
 test_json_get_ignores_undocumented_terminal_id_shapes
 test_worktree_and_terminal_helpers_parse_json
 test_worktree_create_removes_worktree_when_path_missing
+test_worktree_create_retains_resources_when_terminal_close_fails
 test_spawn_preserves_orca_metadata_when_pathless_worktree_cleanup_fails
 test_legacy_respawn_writes_orca_metadata_and_launches_harness
 test_spawn_refuses_new_report_required_orca_task_before_mutation
 test_spawn_refuses_orca_respawn_of_report_required_task
+test_spawn_refuses_malformed_legacy_orca_report_metadata
 test_spawn_refuses_report_required_orca_batch_pair_before_mutation
 test_report_required_orca_refusal_preserves_competing_lifecycle_state
 test_report_required_orca_recovery_preserves_inherited_lifecycle_state
@@ -1682,6 +1813,7 @@ test_spawn_refuses_orca_when_runtime_not_ready
 test_spawn_refuses_orca_nonisolated_worktree
 test_spawn_removes_orca_worktree_when_terminal_create_fails
 test_spawn_preserves_orca_metadata_when_abort_cleanup_fails
+test_spawn_retains_orca_worktree_when_abort_close_fails
 test_spawn_refuses_invalid_state_before_orca_resource_creation
 test_peek_send_and_crew_state_route_through_orca_meta
 test_peek_and_crew_state_fail_closed_on_orca_error_json
@@ -1697,6 +1829,7 @@ test_ship_teardown_refuses_orca_unresolvable_worktree_id
 test_ship_teardown_refuses_orca_id_path_mismatch
 test_teardown_refuses_orca_missing_worktree_id
 test_teardown_refuses_orca_worktree_without_terminal_handle
+test_teardown_rejects_symlinked_orca_task_metadata
 test_secondmate_force_teardown_removes_orca_child_via_orca
 test_secondmate_force_teardown_refuses_orca_child_id_path_mismatch
 test_secondmate_force_teardown_retains_partial_orca_child
