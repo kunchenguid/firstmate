@@ -104,13 +104,13 @@ pi
 For Grok, `--trust` is needed once per clone so project hooks and the turn-end guard load; `/hooks-trust` inside Grok works too.
 For Pi, approve the project trust prompt once per clone on first launch so the tracked `.pi/extensions/*.ts` files auto-load.
 `/calm` is a conversation-focused transcript toggle whose last choice persists for the effective Firstmate home across Pi session starts and resumes.
-While active, it keeps Pi's built-in `Working...` activity visible and uses Pi's supported presentation APIs to hide collapsed thinking labels, all seven built-in tool shells, the Firstmate watcher tool shell, and canonically typed Firstmate operational inputs.
-Calm adds no persistent status row, and hidden Firstmate operational rows are removed without reserving vertical space.
-Every injected input remains in model context and session storage.
-Inputs that ordinarily render as user rows use a TUI-only custom entry so Calm can hide and restore their presentation without changing delivery; the session-start nudge remains on its existing non-displayed custom-message path.
+While active, it keeps Pi's built-in `Working...` activity visible and uses Pi's supported presentation APIs to hide collapsed thinking labels, all seven built-in tool shells, the Firstmate watcher tool shell, and compatible presentation entries stored by earlier Calm versions.
+Calm adds no persistent status row, and controllable hidden rows are removed without reserving vertical space.
+Canonically typed Firstmate operational input remains an ordinary user-role message with its exact origin, ordering, model authority, and session persistence unchanged.
+Pi 0.81.1 exposes no supported renderer for ordinary user rows, so those operational rows remain visible rather than being semantically rerouted or risking a duplicate or lost turn; the session-start nudge remains on its existing non-displayed custom-message path.
 Toggling off restores ordinary rendering, and `Ctrl+O` expansion behavior stays unchanged.
 Tool execution, model context, session storage, diagnostics, and `/export` and `/share` operation remain unchanged.
-Exports and shares remain complete session artifacts: their main message transcript may omit hidden operational custom messages, while serialized session data and Pi 0.81.1's sidebar tree retain the full operational text.
+Exports and shares remain complete session artifacts, including visible current operational user messages and any legacy hidden custom messages retained in serialized session data and Pi 0.81.1's sidebar tree.
 Pi 0.81.1 still exposes no global transcript filter, so expanded reasoning, its reserved spacing, built-in tool images, user-bash rows, skill and summary rows, status notices, and arbitrary custom-tool or extension rows remain supported-API boundaries.
 The version-scoped feasibility evidence and complete render taxonomy are recorded in [docs/calm-mode-feasibility.md](docs/calm-mode-feasibility.md).
 
