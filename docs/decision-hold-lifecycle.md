@@ -19,6 +19,7 @@ It rejects duplicate active identities, duplicate archived identities, active/ar
 Archive fingerprinting accepts only a successful lowercase SHA-256 digest before any comparison.
 For an archived identity, it extracts only that record into a private single-record `## Done` view and parses it through public `tasks-axi show --full --file` output.
 The archived record is accepted only when its terminal checkbox and typed state, captain kind and hold kind, closure date, decision digest, sorted unique routed identities, non-empty decision, and exact routed-work suffix all match the durable bytes written by `resolve`.
+Immediately before acceptance, it rechecks the archive fingerprint and exact identity counts after active-store and structured record validation have both finished.
 This preserves the historical `Routed work:- <first-id>` writer format without rewriting active or archived records.
 
 The `complete` subcommand unions the reviewed keys into `decision_keys=` and appends `decisions_reviewed=1` while originating task metadata is live.
@@ -32,7 +33,7 @@ Scout teardown calls the script's read-only `verify` subcommand after checking f
 The `--force` path remains the explicit captain-approved discard escape hatch.
 
 The `resolve` subcommand requires a decision file and at least one existing dependent task whose structured `blocked-by` edge points to the hold.
-It rejects carriage-return line endings before any backlog mutation so accepted decision bytes remain recomputable after structured Markdown retention.
+It rejects carriage-return line endings and non-empty whitespace-only lines before any backlog mutation so accepted decision bytes remain recomputable after structured Markdown retention while canonical empty lines remain unchanged.
 It records the decision digest and routed task identities as a retry identity in the hold body, clears each dependency edge through tasks-axi, and marks the hold Done only after those writes succeed.
 An exact retry can finish a partial routing operation, while a changed decision or routed-task set is rejected.
 A failed intermediate step leaves the hold open.
@@ -72,7 +73,7 @@ ok - resolved findings and decision-like prose do not create false holds
 ok - terminal single-owner stale status decisions do not block empty inventory
 ok - main-home and secondmate-home captain holds remain correctly routed
 ok - resolve matches first/middle/last in quoted blocked_by and rejects a genuinely absent id
-ok - one canonical retained decision verifies while CRLF, grammar escapes, invalid duplicates, hash failures, and unsafe records are rejected
+ok - canonical LF decisions survive retention while whitespace-only inputs, late mutations, invalid duplicates, and unsafe archives are rejected
 
 $ bash tests/fm-fleet-snapshot-view.test.sh
 ok - backlog normalization preserves strict roles and resolves every blocker compatibly

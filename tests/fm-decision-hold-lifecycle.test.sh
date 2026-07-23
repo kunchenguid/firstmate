@@ -11,6 +11,7 @@ TEARDOWN="$ROOT/bin/fm-teardown.sh"
 BEARINGS="$ROOT/bin/fm-bearings-snapshot.sh"
 TMP_ROOT=$(fm_test_tmproot fm-decision-hold)
 TASKS_AXI_BIN=$(command -v tasks-axi || true)
+SHASUM_BIN=$(command -v shasum || true)
 
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found"; exit 0; }
 command -v tasks-axi >/dev/null 2>&1 || { echo "skip: tasks-axi not found"; exit 0; }
@@ -102,7 +103,7 @@ tasks_in() {  # <home> <tasks-axi args...>
 run_decisions() {  # <home> <command args...>
   local home=$1
   shift
-  PATH="$home/fakebin:$PATH" REAL_TASKS_AXI="$TASKS_AXI_BIN" \
+  PATH="$home/fakebin:$PATH" REAL_TASKS_AXI="$TASKS_AXI_BIN" REAL_SHASUM="$SHASUM_BIN" \
     FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_CONFIG_OVERRIDE="$home/config" "$ROOT/bin/fm-decision-hold.sh" "$@"
 }
@@ -593,9 +594,24 @@ assert_archive_verify_fails() {  # <home> <origin> <case>
   fi
 }
 
+install_late_archive_mutator() {  # <home>
+  local home=$1
+  cat > "$home/fakebin/shasum" <<'EOF'
+#!/usr/bin/env bash
+if [ "$#" -eq 2 ] && [ "$1" = -a ] && [ "$2" = 256 ] \
+  && [ ! -f "$FM_HOME/late-archive-mutated" ]; then
+  : > "$FM_HOME/late-archive-mutated"
+  cat "$FM_HOME/late-archive-append" >> "$FM_HOME/data/done-archive.md"
+fi
+exec "$REAL_SHASUM" "$@"
+EOF
+  chmod +x "$home/fakebin/shasum"
+}
+
 test_retained_decisions_are_strictly_archive_aware() {
   local home origin older_hold newer_hold archive record unresolved_record heading digest closed variant before after show
   local separator_label separator_code separator
+  local decision_case decision_bytes decision_path
   local dependent=sample-retained-dependent
   home=$(make_home retained-decisions)
   origin=sample-retained-review
@@ -626,7 +642,31 @@ test_retained_decisions_are_strictly_archive_aware() {
   [ "$before" = "$after" ] || fail "CRLF rejection mutated the backlog"
   assert_grep "decision file must use LF line endings" "$home/crlf-decision.err" \
     "CRLF rejection did not report the canonical decision-file requirement"
-  printf 'Use the retained route.\n' > "$home/retained-decision.txt"
+
+  for decision_case in internal-space internal-tab internal-mixed all-space all-tab all-mixed; do
+    case "$decision_case" in
+      internal-space) decision_bytes=$'Use the retained route.\n   \nKeep the fallback available.\n' ;;
+      internal-tab) decision_bytes=$'Use the retained route.\n\t\t\nKeep the fallback available.\n' ;;
+      internal-mixed) decision_bytes=$'Use the retained route.\n \t \nKeep the fallback available.\n' ;;
+      all-space) decision_bytes=$'   \n' ;;
+      all-tab) decision_bytes=$'\t\t\n' ;;
+      all-mixed) decision_bytes=$' \t \n' ;;
+    esac
+    decision_path="$home/$decision_case-decision.txt"
+    printf '%s' "$decision_bytes" > "$decision_path"
+    if run_decisions "$home" resolve "$origin" older \
+      --decision-file "$decision_path" --routed-to "$dependent" \
+      > "$home/$decision_case-decision.out" 2> "$home/$decision_case-decision.err"; then
+      fail "resolve accepted the $decision_case whitespace-only decision line fixture"
+    fi
+    after=$(shasum -a 256 "$home/data/backlog.md" | awk '{print $1}')
+    [ "$before" = "$after" ] || fail "$decision_case rejection mutated the backlog"
+    assert_grep "decision file contains a whitespace-only line" \
+      "$home/$decision_case-decision.err" \
+      "$decision_case rejection did not report how to make the decision canonical"
+  done
+
+  printf 'Use the retained route.\n\nKeep the fallback available.\n' > "$home/retained-decision.txt"
   run_decisions "$home" resolve "$origin" older --decision-file "$home/retained-decision.txt" \
     --routed-to "$dependent" >/dev/null \
     || fail "could not resolve the decision before retention"
@@ -915,11 +955,27 @@ EOF
   chmod +x "$variant/fakebin/tasks-axi"
   assert_archive_verify_fails "$variant" "$origin" concurrent-change
 
+  variant=$(clone_home "$home" retained-late-duplicate-change)
+  printf '\n%s\n%s\n' "$heading" "$record" > "$variant/late-archive-append"
+  install_late_archive_mutator "$variant"
+  assert_archive_verify_fails "$variant" "$origin" late-duplicate-change
+  assert_grep "decision archive changed during verification" \
+    "$variant/late-duplicate-change.err" \
+    "a duplicate appended during structured validation escaped the final archive recheck"
+
+  variant=$(clone_home "$home" retained-late-nonidentity-change)
+  printf '\n# late non-identity archive mutation\n' > "$variant/late-archive-append"
+  install_late_archive_mutator "$variant"
+  assert_archive_verify_fails "$variant" "$origin" late-nonidentity-change
+  assert_grep "decision archive changed during verification" \
+    "$variant/late-nonidentity-change.err" \
+    "a non-identity mutation during structured validation escaped the final archive recheck"
+
   variant=$(clone_home "$home" retained-active-archive-collision)
   printf '\n%s\n' "$record" >> "$variant/data/backlog.md"
   assert_archive_verify_fails "$variant" "$origin" active-archive-collision
 
-  pass "one canonical retained decision verifies while CRLF, grammar escapes, invalid duplicates, hash failures, and unsafe records are rejected"
+  pass "canonical LF decisions survive retention while whitespace-only inputs, late mutations, invalid duplicates, and unsafe archives are rejected"
 }
 
 test_uninventoried_report_decision_refuses_completion

@@ -186,6 +186,14 @@ valid_date() {  # <YYYY-MM-DD>
   ' "$1"
 }
 
+decision_lines_are_canonical() {  # <text>
+  command -v node >/dev/null 2>&1 || fail "node is required to validate captain decision text"
+  node -e '
+    const lines = process.argv[1].split("\n");
+    if (lines.some(line => line.length > 0 && line.trim().length === 0)) process.exit(1);
+  ' -- "$1"
+}
+
 scan_decision_identity() {  # <mode> <path> <id> [archive-view]
   command -v node >/dev/null 2>&1 || fail "node is required to inspect decision identities"
   node - "$@" <<'NODE'
@@ -304,6 +312,16 @@ verify_archive_unchanged() {  # <archive> <expected-digest>
   archive_is_safe "$archive" || fail "decision archive disappeared during verification: $archive"
   current=$(sha256_file "$archive") || fail "could not fingerprint decision archive: $archive"
   [ "$current" = "$expected" ] || fail "decision archive changed during verification: $archive"
+}
+
+verify_archive_identity_unchanged() {  # <archive> <id> <expected-digest> <expected-counts>
+  local archive=$1 id=$2 expected_digest=$3 expected_counts=$4 current_counts
+  verify_archive_unchanged "$archive" "$expected_digest"
+  current_counts=$(archive_identity_counts "$archive" "$id") \
+    || fail "could not recheck archived decision identity $id"
+  verify_archive_unchanged "$archive" "$expected_digest"
+  [ "$current_counts" = "$expected_counts" ] \
+    || fail "decision archive identity changed during verification: $id"
 }
 
 verify_archive_absent() {  # <archive>
@@ -455,6 +473,7 @@ decision_lookup() {  # <decision-id>
     [ "$current_active" -eq 0 ] \
       || fail "captain decision $id appeared in the active backlog during verification"
     verify_archived_resolution "$id" "$DECISION_SHOW" "$header"
+    verify_archive_identity_unchanged "$archive" "$id" "$archive_digest" "$counts"
     return 0
   fi
   if [ -n "$archive_digest" ]; then
@@ -743,6 +762,8 @@ command_resolve() {
   [ -n "$decision" ] || fail "decision file must not be empty"
   [ "$(printf '%s' "$decision" | LC_ALL=C wc -c | tr -d ' ')" -le 8192 ] \
     || fail "decision file exceeds 8192 bytes"
+  decision_lines_are_canonical "$decision" \
+    || fail "decision file contains a whitespace-only line; remove its whitespace or use an empty line"
   [ -n "$routed" ] || fail "at least one --routed-to task is required"
   routed=$(printf '%s\n' "$routed" | tr ' ' '\n' | sed '/^$/d' | LC_ALL=C sort -u | paste -sd' ' -)
   routed_csv=$(printf '%s\n' "$routed" | tr ' ' ',')
