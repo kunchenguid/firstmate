@@ -54,6 +54,9 @@ INLINE_SCAN_FACTOR = 4
 MAX_BLOCKQUOTE_DEPTH = 64
 MAX_SOURCE_LINES = 100000
 MAX_RENDER_PARTS = 150000
+MAX_INLINE_FRAGMENTS = 150000
+INLINE_CHUNK_BYTES = 64 * 1024
+INLINE_CHUNK_FRAGMENTS = 1024
 MAX_RETAINED_QUOTE_CHARS = MAX_SOURCE_BYTES
 MAX_TABLE_COLUMNS = 1024
 MAX_TABLE_CELLS = 100000
@@ -127,9 +130,50 @@ class RenderBuffer:
         return "".join(self.parts)
 
 
+class InlineBuffer:
+    def __init__(self):
+        self.chunks = []
+        self.pending = []
+        self.pending_bytes = 0
+        self.size = 0
+        self.fragments = 0
+
+    def append(self, value):
+        if not value:
+            return
+        if self.fragments >= MAX_INLINE_FRAGMENTS:
+            raise PreviewError(
+                f"inline rendering exceeds {MAX_INLINE_FRAGMENTS} fragments"
+            )
+        size = len(value.encode("utf-8"))
+        if self.size + size > MAX_RENDERED_BYTES:
+            raise PreviewError(
+                f"inline rendering exceeds {MAX_RENDERED_BYTES} bytes"
+            )
+        self.pending.append(value)
+        self.pending_bytes += size
+        self.size += size
+        self.fragments += 1
+        if (
+            self.pending_bytes >= INLINE_CHUNK_BYTES
+            or len(self.pending) >= INLINE_CHUNK_FRAGMENTS
+        ):
+            self.flush()
+
+    def flush(self):
+        if self.pending:
+            self.chunks.append("".join(self.pending))
+            self.pending.clear()
+            self.pending_bytes = 0
+
+    def finish(self):
+        self.flush()
+        return "".join(self.chunks)
+
+
 def read_source(path):
     try:
-        fd = os.open(path, os.O_RDONLY)
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0))
     except OSError as error:
         raise PreviewError(f"cannot read Markdown source: {error}") from error
     try:
@@ -188,19 +232,21 @@ def safe_href(target):
     return value
 
 
-def render_inline(source, depth=0):
+def render_inline(source, depth=0, output=None):
+    root = output is None
+    if root:
+        output = InlineBuffer()
     if depth > 4:
-        return html.escape(source, quote=True)
-    rendered = []
-    plain = []
+        output.append(html.escape(source, quote=True))
+        return output.finish() if root else None
     length = len(source)
     index = 0
+    plain_start = 0
     remaining_scan = length * INLINE_SCAN_FACTOR
 
-    def flush_plain():
-        if plain:
-            rendered.append(html.escape("".join(plain), quote=True))
-            plain.clear()
+    def flush_plain(end):
+        if end > plain_start:
+            output.append(html.escape(source[plain_start:end], quote=True))
 
     def find_delimiter(marker, start):
         nonlocal remaining_scan
@@ -216,8 +262,10 @@ def render_inline(source, depth=0):
 
     while index < length:
         if source[index] == "\\" and index + 1 < length:
-            plain.append(source[index + 1])
+            flush_plain(index)
+            output.append(html.escape(source[index + 1], quote=True))
             index += 2
+            plain_start = index
             continue
 
         if source[index] == "`":
@@ -227,12 +275,14 @@ def render_inline(source, depth=0):
             marker = source[index:marker_end]
             close = find_delimiter(marker, marker_end)
             if close != -1:
-                flush_plain()
+                flush_plain(index)
                 code = source[marker_end:close].strip(" ")
-                rendered.append(f"<code>{html.escape(code, quote=True)}</code>")
+                output.append("<code>")
+                output.append(html.escape(code, quote=True))
+                output.append("</code>")
                 index = close + len(marker)
+                plain_start = index
                 continue
-            plain.append(marker)
             index = marker_end
             continue
 
@@ -245,26 +295,25 @@ def render_inline(source, depth=0):
                 find_delimiter(")", label_end + 2) if label_end != -1 else -1
             )
             if label_end != -1 and target_end != -1:
-                flush_plain()
+                flush_plain(index)
                 label = source[label_start:label_end]
                 target = source[label_end + 2 : target_end]
                 if image_start:
-                    rendered.append(
-                        '<span class="image-alt">Image: '
-                        f"{html.escape(label, quote=True)}</span>"
-                    )
+                    output.append('<span class="image-alt">Image: ')
+                    output.append(html.escape(label, quote=True))
+                    output.append("</span>")
                 else:
                     href = safe_href(target)
-                    label_html = render_inline(label, depth + 1)
-                    if href is None:
-                        rendered.append(label_html)
-                    else:
-                        rendered.append(
+                    if href is not None:
+                        output.append(
                             '<a rel="noreferrer noopener" target="_blank" '
                             f'href="{html.escape(href, quote=True)}">'
-                            f"{label_html}</a>"
                         )
+                    render_inline(label, depth + 1, output)
+                    if href is not None:
+                        output.append("</a>")
                 index = target_end + 1
+                plain_start = index
                 continue
 
         matched_delimiter = False
@@ -272,12 +321,13 @@ def render_inline(source, depth=0):
             if source.startswith(marker, index):
                 close = find_delimiter(marker, index + len(marker))
                 if close > index + len(marker):
-                    flush_plain()
+                    flush_plain(index)
                     inner = source[index + len(marker) : close]
-                    rendered.append(
-                        f"<{tag}>{render_inline(inner, depth + 1)}</{tag}>"
-                    )
+                    output.append(f"<{tag}>")
+                    render_inline(inner, depth + 1, output)
+                    output.append(f"</{tag}>")
                     index = close + len(marker)
+                    plain_start = index
                     matched_delimiter = True
                     break
         if matched_delimiter:
@@ -287,18 +337,20 @@ def render_inline(source, depth=0):
             marker = source[index]
             close = find_delimiter(marker, index + 1)
             if close > index + 1:
-                flush_plain()
-                rendered.append(
-                    f"<em>{render_inline(source[index + 1:close], depth + 1)}</em>"
-                )
+                flush_plain(index)
+                output.append("<em>")
+                render_inline(source[index + 1:close], depth + 1, output)
+                output.append("</em>")
                 index = close + 1
+                plain_start = index
                 continue
 
-        plain.append(source[index])
         index += 1
 
-    flush_plain()
-    return "".join(rendered)
+    flush_plain(length)
+    if root:
+        return output.finish()
+    return None
 
 
 def parse_fence(line):

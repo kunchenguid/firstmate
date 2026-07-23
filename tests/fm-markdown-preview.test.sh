@@ -143,6 +143,35 @@ PY
   pass "Markdown preview escapes HTML, blocks subresources, and cleans up"
 }
 
+test_fifo_source_is_rejected_without_blocking() {
+  local source="$TMP_ROOT/source.fifo"
+  mkfifo "$source"
+
+  if ! python3 - "$HELPER" "$OPENER" "$source" <<'PY'
+import subprocess
+import sys
+
+try:
+    result = subprocess.run(
+        [sys.argv[1], "--opener", sys.argv[2], "--timeout", "2", sys.argv[3]],
+        capture_output=True,
+        text=True,
+        timeout=2,
+    )
+except subprocess.TimeoutExpired:
+    raise SystemExit(124)
+if result.returncode == 0:
+    raise SystemExit("FIFO source unexpectedly succeeded")
+if "not a regular file" not in result.stderr:
+    sys.stderr.write(result.stderr)
+    raise SystemExit("FIFO source failure was not explained")
+PY
+  then
+    fail "FIFO source blocked before regular-file validation"
+  fi
+  pass "FIFO sources fail without blocking"
+}
+
 test_changed_source_fails_closed() {
   local source="$TMP_ROOT/changed.md" capture="$TMP_ROOT/changed-capture" rc=0
   printf '# Original snapshot\n' >"$source"
@@ -329,6 +358,24 @@ PY
   pass "inline delimiter scanning remains bounded"
 }
 
+test_inline_fragment_budget_fails_before_accumulation() {
+  local source="$TMP_ROOT/inline-fragments.md" rc=0
+  python3 - "$source" <<'PY'
+import sys
+from pathlib import Path
+
+Path(sys.argv[1]).write_bytes(b"*x*" * 200000 + b"\n")
+PY
+
+  "$HELPER" --opener "$OPENER" --timeout 2 "$source" \
+    >"$TMP_ROOT/inline-fragments.out" 2>"$TMP_ROOT/inline-fragments.err" || rc=$?
+
+  [ "$rc" -ne 0 ] || fail "excessive inline fragments were accepted"
+  assert_grep "inline rendering exceeds" "$TMP_ROOT/inline-fragments.err" \
+    "inline fragment budget failure was not explained"
+  pass "inline fragment budgets fail before accumulation"
+}
+
 test_block_parser_scans_are_bounded() {
   local source="$TMP_ROOT/block-scans.md" capture="$TMP_ROOT/block-scans-capture"
   python3 - "$source" <<'PY'
@@ -498,12 +545,14 @@ PY
 }
 
 test_safe_render_and_cleanup
+test_fifo_source_is_rejected_without_blocking
 test_changed_source_fails_closed
 test_server_wait_is_bounded
 test_verified_delivery_detaches_long_lived_opener
 test_verification_bypasses_proxy_environment
 test_unstarted_server_thread_cleans_up_without_deadlock
 test_inline_delimiter_scan_is_bounded
+test_inline_fragment_budget_fails_before_accumulation
 test_block_parser_scans_are_bounded
 test_render_object_budgets_fail_before_accumulation
 test_non_table_delimiters_do_not_trigger_table_limits
