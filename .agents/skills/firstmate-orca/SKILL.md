@@ -25,26 +25,19 @@ Use raw `orca` only when the helper surface cannot answer the inspection questio
 Work from the current firstmate home or repo root.
 If `FM_HOME` is set, remember that operational state lives under `$FM_HOME` while the helper scripts still run from this repo's `bin/`.
 
-Before recovering a task onto Orca:
+Before inspecting an Orca-backed legacy task:
 
 - Confirm the task meets the eligibility contract in `docs/orca-backend.md`; new work must use tmux, Herdr, zellij, or cmux.
-- Confirm Orca is intentionally selected for this eligible recovery through `--backend orca` or `FM_BACKEND=orca`.
-- Confirm the Orca app is running and the backend readiness checks pass before expecting the respawn to work.
 - Inspect active `state/*.meta` records before changing backend selection.
 - Do not set Orca as the durable backend for a home that launches new tasks.
 - Reconcile watcher wakes before unrelated work, especially if Orca tasks are already in flight.
+- Do not respawn or destructively tear down an Orca task while the adapter reports that lifecycle authority capabilities are unavailable.
 
 ## Spawn
 
-Use `bin/fm-spawn.sh` for an eligible pre-cutover respawn so firstmate creates the worktree, terminal, metadata, status file, and watcher surface together.
-New task spawns refuse `backend=orca` before any owned mutation; `docs/orca-backend.md` owns the rationale and exact legacy eligibility rule.
-
-After spawn, check the task with firstmate helpers:
-
-- `bin/fm-peek.sh fm-<id>` for launch failures, trust dialogs, or first output.
-- `state/<id>.meta` for `backend=orca`, `terminal=`, `orca_worktree_id=`, and `worktree=`.
-- `bin/fm-crew-state.sh <id>` when the current run state matters.
-- `bin/fm-watch.sh` whenever there are tasks in flight and this session owns supervision.
+New task spawns refuse `backend=orca` before any owned mutation.
+Legacy respawn also fails closed until an empirically verified provider capability can bind terminal, task label, worktree, and repository identity and enumerate every terminal attached to a worktree.
+`docs/orca-backend.md` owns the evidence and re-enablement contract.
 
 Do not manually create the Orca worktree or terminal for an eligible firstmate recovery.
 Do not manually patch metadata to make an externally-created Orca terminal look like a firstmate task.
@@ -74,18 +67,12 @@ For a messy Orca-backed task:
 5. Avoid raw deletion of Orca worktrees or manual branch cleanup.
 6. Stop and inspect if the recorded worktree path, Orca worktree id, or project checkout no longer matches expectations.
 
-Teardown remains governed by `docs/orca-backend.md`'s eligible legacy task contract; follow its report and landing rules exactly.
+Teardown remains governed by `docs/orca-backend.md` and retains resources when lifecycle authority is unavailable.
 
 ## Regression Verification
 
 Do not synthesize legacy metadata or spawn a disposable Orca task merely to smoke-test the backend.
 Run the focused fake-Orca suite in `docs/orca-backend.md` to verify lifecycle plumbing.
-When an actual eligible legacy recovery is already required, verify it through the normal lifecycle:
-
-1. Confirm the task metadata has no `report_required` marker and select Orca for that recovery.
-2. Respawn through `bin/fm-spawn.sh`.
-3. Confirm metadata records the Orca backend, terminal, Orca worktree id, and isolated worktree path.
-4. Verify `bin/fm-peek.sh`, a short `bin/fm-send.sh` steer, watcher wake behavior, and `bin/fm-crew-state.sh`.
-5. Tear down through `bin/fm-teardown.sh` after the task is safely disposable or landed.
+Do not use an actual legacy recovery to assert lifecycle safety until the required authority capability has empirical evidence.
 
 Do not mix adapter verification with unrelated feature work.

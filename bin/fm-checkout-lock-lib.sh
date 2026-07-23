@@ -8,6 +8,10 @@
 # Use fm_checkout_treehouse_return <checkout> <lock-root> <project> for a
 # process-tree-bounded `treehouse return --force` under that lock.
 
+if [ "${FM_CHECKOUT_LOCK_LIB_LOADED:-0}" = 1 ]; then
+  return 0
+fi
+FM_CHECKOUT_LOCK_LIB_LOADED=1
 FM_CHECKOUT_LOCK_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_CHECKOUT_LOCK_HELPERS_LOADED=0
 FM_CHECKOUT_TREEHOUSE_RETURN_CONFIG_STATUS=64
@@ -16,8 +20,21 @@ FM_CHECKOUT_LOCK_CONTENTION_STATUS=75
 FM_CHECKOUT_PROCESS_CLEANUP_FAILURE_STATUS=76
 FM_CHECKOUT_TREEHOUSE_RETURN_TIMEOUT_STATUS=124
 FM_CHECKOUT_TREEHOUSE_RETURN_UNAVAILABLE_STATUS=127
+FM_CHECKOUT_SYSTEM_PERL_BIN=
+[ ! -x /usr/bin/perl ] || FM_CHECKOUT_SYSTEM_PERL_BIN=/usr/bin/perl
+[ -n "$FM_CHECKOUT_SYSTEM_PERL_BIN" ] || [ ! -x /bin/perl ] || FM_CHECKOUT_SYSTEM_PERL_BIN=/bin/perl
+[ "${FM_CHECKOUT_TEST_DISABLE_SYSTEM_PERL:-0}" != 1 ] || FM_CHECKOUT_SYSTEM_PERL_BIN=
 # shellcheck source=bin/fm-process-tree-lib.sh
 . "$FM_CHECKOUT_LOCK_LIB_DIR/fm-process-tree-lib.sh"
+
+fm_checkout_system_perl() {
+  [ -n "$FM_CHECKOUT_SYSTEM_PERL_BIN" ] || return 127
+  PERL5OPT='' PERL5LIB='' PERLLIB='' \
+    DYLD_INSERT_LIBRARIES='' DYLD_LIBRARY_PATH='' LD_PRELOAD='' \
+    LD_LIBRARY_PATH='' LD_AUDIT='' LD_DEBUG='' GCONV_PATH='' \
+    BASH_ENV='' ENV='' \
+    "$FM_CHECKOUT_SYSTEM_PERL_BIN" "$@"
+}
 
 fm_checkout_lock_root() {
   local state_base=$1
@@ -37,42 +54,36 @@ fm_checkout_canonical_dir() {
 
 fm_checkout_lexical_path() {
   local candidate=$1 allow_missing=${2:-0}
-  command -v python3 >/dev/null 2>&1 || return 1
-  python3 - "$candidate" "$allow_missing" <<'PY'
-import os
-import stat
-import sys
-
-candidate, allow_missing = sys.argv[1:]
-if not candidate or any(character in candidate for character in "\0\n\r"):
-    raise SystemExit(1)
-if candidate.startswith("/"):
-    absolute = candidate
-else:
-    absolute = os.path.join(os.getcwd(), candidate)
-current = "/"
-missing = False
-for component in absolute.split("/"):
-    if component in ("", "."):
-        continue
-    if component == "..":
-        raise SystemExit(1)
-    current = os.path.join(current, component)
-    if missing:
-        continue
-    try:
-        metadata = os.lstat(current)
-    except FileNotFoundError:
-        missing = True
-        continue
-    except OSError:
-        raise SystemExit(1)
-    if stat.S_ISLNK(metadata.st_mode):
-        raise SystemExit(1)
-if missing and allow_missing != "1":
-    raise SystemExit(1)
-print(os.path.normpath(absolute))
-PY
+  fm_checkout_system_perl -MCwd=getcwd -MErrno=ENOENT -MFile::Spec -e '
+    my ($raw, $allow_missing) = @ARGV;
+    exit 1 if !defined($raw) || $raw eq q{} || $raw =~ /[\0\r\n]/;
+    my @stack;
+    if (!File::Spec->file_name_is_absolute($raw)) {
+      my $cwd = getcwd();
+      exit 1 if !defined($cwd) || $cwd !~ m{^/};
+      @stack = grep { $_ ne q{} } split m{/+}, $cwd;
+    }
+    my $missing = 0;
+    for my $component (split m{/+}, $raw) {
+      next if $component eq q{} || $component eq q{.};
+      if ($component eq q{..}) {
+        pop @stack if @stack;
+      } else {
+        push @stack, $component;
+      }
+      my $current = q{/} . join q{/}, @stack;
+      if (lstat($current)) {
+        exit 1 if -l _;
+        $missing = 0;
+      } elsif ($! == ENOENT) {
+        $missing = 1;
+      } else {
+        exit 1;
+      }
+    }
+    exit 1 if $missing && $allow_missing ne q{1};
+    print q{/} . join(q{/}, @stack) . qq{\n};
+  ' "$candidate" "$allow_missing"
 }
 
 fm_checkout_trusted_dir() {
@@ -85,16 +96,110 @@ fm_checkout_trusted_dir() {
 }
 
 fm_checkout_git_common_dir() {
-  local checkout=$1 common
-  common=$(git -C "$checkout" rev-parse --git-common-dir 2>/dev/null) || return 1
+  fm_checkout_validate_git_metadata "$1"
+}
+
+fm_checkout_validate_git_metadata() {
+  local checkout=$1 root metadata absolute_git common listed line listed_root found=0
+  root=$(fm_checkout_trusted_dir "$checkout") || return 1
+  metadata="$root/.git"
+  [ -e "$metadata" ] && [ ! -L "$metadata" ] || return 1
+  absolute_git=$(git -C "$root" rev-parse --absolute-git-dir 2>/dev/null) || return 1
+  absolute_git=$(fm_checkout_trusted_dir "$absolute_git") || return 1
+  common=$(git -C "$root" rev-parse --git-common-dir 2>/dev/null) || return 1
   case "$common" in
-    /*) fm_checkout_canonical_dir "$common" ;;
-    *) fm_checkout_canonical_dir "$checkout/$common" ;;
+    /*) ;;
+    *) common="$root/$common" ;;
   esac
+  common=$(fm_checkout_trusted_dir "$common") || return 1
+  if [ -d "$metadata" ]; then
+    [ "$(fm_checkout_trusted_dir "$metadata")" = "$absolute_git" ] || return 1
+    [ "$absolute_git" = "$common" ] || return 1
+  elif [ -f "$metadata" ]; then
+    case "$absolute_git" in "$common"/worktrees/*) ;; *) return 1 ;; esac
+  else
+    return 1
+  fi
+  listed=$(git -C "$root" worktree list --porcelain 2>/dev/null) || return 1
+  while IFS= read -r line; do
+    case "$line" in
+      "worktree "*)
+        listed_root=$(fm_checkout_trusted_dir "${line#worktree }" 2>/dev/null) || return 1
+        [ "$listed_root" != "$root" ] || found=$((found + 1))
+        ;;
+    esac
+  done <<EOF
+$listed
+EOF
+  [ "$found" -eq 1 ] || return 1
+  printf '%s\n' "$common"
+}
+
+fm_checkout_hash_value() {
+  local value=$1 length=${2:-64} hash
+  case "$length" in ''|*[!0-9]*|0) return 1 ;; esac
+  [ "$length" -le 64 ] || return 1
+  hash=$(fm_checkout_system_perl -MDigest::SHA=sha256_hex -e '
+    my ($value, $length) = @ARGV;
+    exit 1 if !defined($value) || !defined($length) || $value =~ /[\0\r\n]/;
+    print substr(sha256_hex($value), 0, $length);
+  ' "$value" "$length") || return 1
+  [ "${#hash}" -eq "$length" ] || return 1
+  case "$hash" in *[!0-9a-f]*) return 1 ;; esac
+  printf '%s\n' "$hash"
+}
+
+fm_checkout_hash_file() {
+  local path=$1 hash
+  [ -f "$path" ] && [ ! -L "$path" ] || return 1
+  hash=$(fm_checkout_system_perl -MDigest::SHA -e '
+    my $path = shift;
+    open my $fh, q{<}, $path or exit 1;
+    binmode $fh;
+    my $sha = Digest::SHA->new(256);
+    $sha->addfile($fh);
+    print $sha->hexdigest;
+  ' "$path") || return 1
+  [ "${#hash}" -eq 64 ] || return 1
+  case "$hash" in *[!0-9a-f]*) return 1 ;; esac
+  printf '%s\n' "$hash"
+}
+
+fm_checkout_stable_path_key() {
+  local path=$1 expected_type=${2:-any} allow_missing=${3:-0} length=${4:-24}
+  local lexical identity
+  lexical=$(fm_checkout_lexical_path "$path" "$allow_missing") || return 1
+  identity=$(fm_checkout_system_perl -MErrno=ENOENT -e '
+    my ($path, $expected, $allow_missing) = @ARGV;
+    if (lstat($path)) {
+      exit 1 if -l _;
+      exit 1 if $expected eq q{directory} && !-d _;
+      exit 1 if $expected eq q{file} && !-f _;
+      my @s = stat(_);
+      exit 1 if !@s;
+      my $kind = -d _ ? q{directory} : -f _ ? q{file} : q{other};
+      print join(q{:}, q{existing}, $kind, $s[0], $s[1]);
+      exit 0;
+    }
+    exit 1 if $! != ENOENT || $allow_missing ne q{1};
+    my $probe = $path;
+    my @tail;
+    while (!lstat($probe)) {
+      exit 1 if $! != ENOENT || $probe eq q{/};
+      $probe =~ s{/+([^/]+)$}{};
+      unshift @tail, $1;
+      $probe = q{/} if $probe eq q{};
+    }
+    exit 1 if -l _ || !-d _;
+    my @s = stat(_);
+    exit 1 if !@s;
+    print join(q{:}, q{missing}, $s[0], $s[1], map { lc($_) } @tail);
+  ' "$lexical" "$expected_type" "$allow_missing") || return 1
+  fm_checkout_hash_value "$identity" "$length"
 }
 
 fm_checkout_lock_key() {
-  printf '%s' "$1" | shasum -a 256 | awk '{print substr($1,1,24)}'
+  fm_checkout_stable_path_key "$1" directory 0 24
 }
 
 fm_checkout_lock_path() {

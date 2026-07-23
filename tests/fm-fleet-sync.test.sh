@@ -723,6 +723,34 @@ test_single_project_unresolvable_name_still_skips() {
   pass "single-project form leaves a genuinely bad name unresolved"
 }
 
+test_parent_relative_exact_root_and_lock_identity_failure() {
+  local home clone caller out before status
+  home=$(new_home)
+  clone=$(build_pair "$home" parent-relative)
+  advance_origin "$home" parent-relative C1
+  caller="$home/caller"
+  mkdir -p "$caller"
+  out=$(
+    cd "$caller" || exit 1
+    run_sync "$home" ../projects/parent-relative
+  )
+  assert_contains "$out" "parent-relative: synced" \
+    "parent-relative exact repository root was rejected"
+  [ "$(head_sha "$clone")" = "$(git -C "$clone" rev-parse origin/main)" ] \
+    || fail "parent-relative fleet sync did not reach origin/main"
+
+  before=$(head_sha "$clone")
+  set +e
+  FM_CHECKOUT_TEST_DISABLE_SYSTEM_PERL=1 bash -c \
+    '. "$1"; fm_checkout_lock_path "$2" "$3" >/dev/null' \
+    _ "$ROOT/bin/fm-checkout-lock-lib.sh" "$clone" "$home/locks"
+  status=$?
+  set -e
+  [ "$status" -ne 0 ] || fail "checkout lock identity succeeded without its fixed identity tool"
+  [ "$(head_sha "$clone")" = "$before" ] || fail "lock identity failure mutated the checkout"
+  pass "parent-relative roots work and lock identity failures fail closed"
+}
+
 test_whole_fleet_form() {
   local home behind current out
   home=$(new_home)
@@ -920,6 +948,11 @@ if [ "${FM_TEST_FOCUSED:-}" = review-round-refresh-symlinks ]; then
   exit 0
 fi
 
+if [ "${FM_TEST_FOCUSED:-}" = review-round-refresh-authority ]; then
+  test_parent_relative_exact_root_and_lock_identity_failure
+  exit 0
+fi
+
 test_status_failure_is_never_treated_as_clean
 test_direct_and_batch_sync_reject_nested_repository_paths
 test_direct_and_batch_sync_reject_symlink_repository_paths
@@ -942,6 +975,7 @@ test_single_project_by_bare_name_ignores_cwd_shadow
 test_single_project_by_projects_relative_name_resolves
 test_single_project_by_projects_relative_name_ignores_cwd_shadow
 test_single_project_unresolvable_name_still_skips
+test_parent_relative_exact_root_and_lock_identity_failure
 test_whole_fleet_form
 test_bootstrap_relays_recovered_and_stuck
 test_orphaned_stale_packed_refs_lock_recovers

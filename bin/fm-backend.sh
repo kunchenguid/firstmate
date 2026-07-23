@@ -17,9 +17,10 @@
 # auto-detection (report.md's Open Question #2: start with a dedicated
 # background session for predictability, unlike tmux's/herdr's ambient-session
 # reuse); see report.md's "Zellij Backend" section and docs/zellij-backend.md
-# for its empirical basis. P4 added Orca lifecycle support with Orca owning
-# both the task worktree and terminal endpoint; new report-required tasks now
-# refuse Orca, while eligible pre-cutover tasks may still respawn there.
+# for its empirical basis. P4 added an Orca lifecycle design with Orca owning
+# both the task worktree and terminal endpoint. New report-required tasks refuse
+# Orca, and legacy lifecycle mutation now also fails closed until provider
+# authority is empirically verified.
 # P5 adds bin/backends/cmux.sh, also
 # EXPERIMENTAL and spawn-capable, behind `--backend cmux`/`FM_BACKEND=cmux`/
 # `config/backend`, and behind runtime auto-detection when firstmate itself is
@@ -36,8 +37,8 @@
 # `backend=tmux` for a default-backend task, so existing and newly spawned
 # default-path metas stay byte-identical. Only a task spawned on a non-tmux
 # spawn-capable backend, currently experimental herdr, zellij, or cmux,
-# carries an explicit `backend=` line; an eligible legacy Orca respawn also
-# carries `backend=orca`.
+# carries an explicit `backend=` line; retained legacy Orca metadata carries
+# `backend=orca`.
 #
 # Event-source framing (herdr-addendum "Events as the core abstraction"): a
 # backend's supervision surface is conceptually an EVENT SOURCE - it produces

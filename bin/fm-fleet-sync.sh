@@ -159,6 +159,7 @@ exact_git_root() {
   top=$(git -C "$canonical" rev-parse --show-toplevel 2>/dev/null) || return 1
   canonical_top=$(canonical_dir "$top") || return 1
   [ "$canonical" = "$canonical_top" ] || return 1
+  fm_checkout_validate_git_metadata "$canonical" >/dev/null || return 1
   printf '%s\n' "$canonical"
 }
 

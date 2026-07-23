@@ -243,76 +243,10 @@ registry_id_conflict_for_assignment() {
 }
 
 validate_registry() {
-  local tmp line id registered_home home_key duplicate_homes duplicate_ids overlaps
-  tmp=$(mktemp "${TMPDIR:-/tmp}/fm-firstmates.XXXXXX")
-  if [ -f "$REG" ]; then
-    while IFS= read -r line; do
-      case "$line" in
-        "- "*)
-          id=${line#- }
-          id=${id%% *}
-          registered_home=$(printf '%s\n' "$line" | registry_home_for_line)
-          [ -n "$registered_home" ] || continue
-          home_key=$(resolved_path "$registered_home")
-          printf '%s\t%s\n' "$home_key" "$id" >> "$tmp"
-          ;;
-      esac
-    done < "$REG"
-  fi
-  duplicate_homes=$(awk -F '\t' '
-    {
-      if (($1 in owner) && owner[$1] != $2) {
-        print $1 ": " owner[$1] ", " $2
-        bad=1
-      } else {
-        owner[$1]=$2
-      }
-    }
-    END { exit bad ? 1 : 0 }
-  ' "$tmp" 2>/dev/null) || {
-    rm -f "$tmp"
-    printf 'error: duplicate secondmate home assignment:\n%s\n' "$duplicate_homes" >&2
+  fm_secondmate_registry_query "$REG" validate || {
+    echo "error: secondmate registry is malformed, duplicated, redirected, or uninspectable: $REG" >&2
     return 1
   }
-  duplicate_ids=$(awk -F '\t' '
-    {
-      if ($2 in home) {
-        print $2 ": " home[$2] ", " $1
-        bad=1
-      } else {
-        home[$2]=$1
-      }
-    }
-    END { exit bad ? 1 : 0 }
-  ' "$tmp" 2>/dev/null) || {
-    rm -f "$tmp"
-    printf 'error: duplicate secondmate id assignment:\n%s\n' "$duplicate_ids" >&2
-    return 1
-  }
-  overlaps=$(awk -F '\t' '
-    function ancestor(a, b) { return a != b && index(b, a "/") == 1 }
-    {
-      for (i = 1; i <= count; i++) {
-        if (ancestor($1, path[i])) {
-          print $1 " (" $2 ") contains " path[i] " (" id[i] ")"
-          bad=1
-        } else if (ancestor(path[i], $1)) {
-          print path[i] " (" id[i] ") contains " $1 " (" $2 ")"
-          bad=1
-        }
-      }
-      count++
-      path[count]=$1
-      id[count]=$2
-    }
-    END { exit bad ? 1 : 0 }
-  ' "$tmp" 2>/dev/null) || {
-    rm -f "$tmp"
-    printf 'error: overlapping secondmate home assignment:\n%s\n' "$overlaps" >&2
-    return 1
-  }
-  rm -f "$tmp"
-  return 0
 }
 
 join_projects() {
@@ -613,6 +547,7 @@ SEED_SUB_REG_EXISTED=0
 SEED_CHARTER_EXISTED=0
 SEED_MARKER_EXISTED=0
 SEED_HOME_LIFECYCLE_LOCK=
+SEED_PARENT_HOME_LIFECYCLE_LOCK=
 
 restore_seed_file() {
   local existed=$1 backup=$2 path=$3
@@ -756,6 +691,10 @@ seed_release_locks() {
   if [ -n "${SEED_HOME_LIFECYCLE_LOCK:-}" ]; then
     fm_account_lifecycle_lock_release "$SEED_HOME_LIFECYCLE_LOCK" >/dev/null 2>&1 || true
     SEED_HOME_LIFECYCLE_LOCK=
+  fi
+  if [ -n "${SEED_PARENT_HOME_LIFECYCLE_LOCK:-}" ]; then
+    fm_account_lifecycle_lock_release "$SEED_PARENT_HOME_LIFECYCLE_LOCK" >/dev/null 2>&1 || true
+    SEED_PARENT_HOME_LIFECYCLE_LOCK=
   fi
 }
 
@@ -992,6 +931,17 @@ seed_home() {
   SEED_CHARTER_EXISTED=0
   SEED_MARKER_EXISTED=0
   trap seed_exit_cleanup EXIT
+  SEED_PARENT_HOME_LIFECYCLE_LOCK=$(fm_secondmate_home_lifecycle_lock_acquire "$CHECKOUT_LOCK_ROOT" "$FM_HOME") || return 1
+  fm_checkout_trusted_dir "$FM_HOME" >/dev/null || {
+    echo "error: active firstmate home was removed or redirected while seed waited for lifecycle ownership" >&2
+    return 1
+  }
+  if [ -e "$FM_HOME/data/charter.md" ]; then
+    [ -f "$FM_HOME/$SUB_HOME_MARKER" ] && [ ! -L "$FM_HOME/$SUB_HOME_MARKER" ] || {
+      echo "error: active secondmate home changed while seed waited for lifecycle ownership" >&2
+      return 1
+    }
+  fi
 
   if [ "$requested_home" = "-" ]; then
     SEED_HOME_ACQUIRED=1
@@ -1010,8 +960,8 @@ seed_home() {
     home=$(verify_firstmate_home "$home")
   else
     requested_abs=$(abs_path_for_new "$requested_home")
-    SEED_HOME_LIFECYCLE_LOCK=$(fm_secondmate_home_lifecycle_lock_acquire "$CHECKOUT_LOCK_ROOT" "$requested_abs") || return 1
     refuse_active_home_path "$requested_abs" || return 1
+    SEED_HOME_LIFECYCLE_LOCK=$(fm_secondmate_home_lifecycle_lock_acquire "$CHECKOUT_LOCK_ROOT" "$requested_abs") || return 1
     validate_home_assignment "$id" "$requested_abs" || return 1
     "$SCRIPT_DIR/fm-checkout-refresh.sh" preflight "$FM_ROOT" >/dev/null 2>&1 || true
     SEED_HOME="$requested_abs"

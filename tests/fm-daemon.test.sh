@@ -6,6 +6,8 @@
 # fm-send swallow reporting, composer-pending ANSI parsing). The operator-visible
 # inject flow lives in fm-afk-inject-e2e and fm-wake-daemon-lifecycle-e2e.
 set -u
+export FM_ORCA_TEST_LAB=firstmate-orca-test-lab-v1
+export FM_ORCA_TEST_AUTHORITY_CAPABILITIES=verified-v1
 
 # shellcheck source=tests/wake-helpers.sh
 . "$(dirname "${BASH_SOURCE[0]}")/wake-helpers.sh"

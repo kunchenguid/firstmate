@@ -133,7 +133,7 @@ EOF
   if FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" validate >/dev/null 2>"$err"; then
     fail "registry validation accepted two secondmates with the same home"
   fi
-  grep -F 'duplicate secondmate home assignment' "$err" >/dev/null \
+  grep -F 'secondmate registry is malformed, duplicated, redirected, or uninspectable' "$err" >/dev/null \
     || fail "registry validation did not explain duplicate home assignment"
   pass "home seed validation rejects duplicate home routes"
 }
@@ -155,7 +155,7 @@ EOF
   if FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" validate >/dev/null 2>"$err"; then
     fail "registry validation accepted two homes for the same secondmate id"
   fi
-  grep -F 'duplicate secondmate id assignment' "$err" >/dev/null \
+  grep -F 'secondmate registry is malformed, duplicated, redirected, or uninspectable' "$err" >/dev/null \
     || fail "registry validation did not explain duplicate id assignment"
   pass "home seed validation rejects duplicate id routes"
 }
@@ -177,9 +177,26 @@ EOF
   if FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" validate >/dev/null 2>"$err"; then
     fail "registry validation accepted nested secondmate homes"
   fi
-  grep -F 'overlapping secondmate home assignment' "$err" >/dev/null \
+  grep -F 'secondmate registry is malformed, duplicated, redirected, or uninspectable' "$err" >/dev/null \
     || fail "registry validation did not explain nested home assignment"
   pass "home seed validation rejects nested home routes"
+}
+
+test_home_seed_validate_rejects_partial_registry_rows() {
+  local home registered err
+  home="$TMP_ROOT/partial-registry-home"
+  registered="$TMP_ROOT/partial-registry-target"
+  err="$TMP_ROOT/partial-registry.err"
+  mkdir -p "$home/data" "$registered"
+  printf '%s\n' "- partial - incomplete (home: $registered; scope: partial; added 2026-07-23)" \
+    > "$home/data/secondmates.md"
+
+  if FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" validate >/dev/null 2>"$err"; then
+    fail "registry validation accepted an entry with a missing projects field"
+  fi
+  assert_grep 'secondmate registry is malformed, duplicated, redirected, or uninspectable' "$err" \
+    "partial registry row was not surfaced"
+  pass "home seed validation rejects partial registry rows"
 }
 
 test_home_seed_uses_treehouse_acquired_home() {
@@ -704,6 +721,48 @@ test_home_seed_serializes_with_home_retirement() {
       "registry-locked seed overwrote the shared registry"
   fi
   pass "secondmate home seeding serializes with retirement and registry updates"
+}
+
+test_home_seed_requires_parent_lifecycle_authority() {
+  local home sub state holder_pid waited status
+  home="$TMP_ROOT/parent-seed-lock-home"
+  sub="$TMP_ROOT/parent-seed-lock-subhome"
+  state="$TMP_ROOT/parent-seed-lock-state"
+  mkdir -p "$home/projects" "$home/data" "$home/state"
+  bash -c '
+    . "$1/bin/fm-account-routing-lib.sh"
+    lock=$(fm_secondmate_home_lifecycle_lock_acquire "$2/locks" "$3") || exit 1
+    : > "$4"
+    while [ ! -f "$5" ]; do sleep 0.05; done
+    fm_account_lifecycle_lock_release "$lock"
+  ' _ "$ROOT" "$state" "$home" "$TMP_ROOT/parent-seed-lock-ready" "$TMP_ROOT/parent-seed-lock-release" &
+  holder_pid=$!
+  waited=0
+  while [ ! -f "$TMP_ROOT/parent-seed-lock-ready" ] && [ "$waited" -lt 200 ]; do
+    sleep 0.05
+    waited=$((waited + 1))
+  done
+  [ -f "$TMP_ROOT/parent-seed-lock-ready" ] || {
+    : > "$TMP_ROOT/parent-seed-lock-release"
+    wait "$holder_pid" || true
+    fail "parent home lifecycle lock holder did not start"
+  }
+  set +e
+  FM_HOME="$home" FM_SECONDMATE_CHARTER='nested seed domain' \
+    FM_SECONDMATE_SCOPE='nested seed work' \
+    FM_CHECKOUT_REFRESH_STATE_BASE="$state" \
+    FM_ACCOUNT_LIFECYCLE_LOCK_WAIT_SECONDS=0 \
+    "$ROOT/bin/fm-home-seed.sh" nested-seed "$sub" --no-projects \
+      > "$TMP_ROOT/parent-seed-lock.out" 2> "$TMP_ROOT/parent-seed-lock.err"
+  status=$?
+  set -e
+  : > "$TMP_ROOT/parent-seed-lock-release"
+  wait "$holder_pid" || fail "parent home lifecycle lock holder failed to release"
+  [ "$status" -ne 0 ] || fail "nested seed bypassed parent home lifecycle authority"
+  assert_absent "$sub" "parent-locked seed created a child home"
+  assert_grep 'secondmate home lifecycle lock' "$TMP_ROOT/parent-seed-lock.err" \
+    "parent home lock contention was not surfaced"
+  pass "nested home seeding requires parent lifecycle authority"
 }
 
 test_home_seed_refuses_projectful_reused_charter_for_projectless_home() {
@@ -1654,8 +1713,8 @@ EOF
   pass "secondmate teardown raw-removes plain-clone homes"
 }
 
-test_secondmate_force_teardown_discards_child_work() {
-  local home subhome childproj childwt fakebin log
+test_secondmate_force_teardown_retains_unlanded_child_work() {
+  local home subhome childproj childwt fakebin log err rc
   home="$TMP_ROOT/force-teardown-home"
   subhome="$TMP_ROOT/force-teardown-subhome"
   childproj="$subhome/projects/alpha"
@@ -1686,20 +1745,24 @@ yolo=off
 EOF
   fakebin=$(make_fake_tmux "$TMP_ROOT/force-teardown-fake")
   log="$TMP_ROOT/force-teardown-fake/tmux.log"
+  err="$TMP_ROOT/force-teardown-fake/teardown.err"
+  printf '%s\n' retained > "$childwt/untracked-child.txt"
   if PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/force-teardown-fake/pane.txt" \
     "$ROOT/bin/fm-teardown.sh" domain >/dev/null 2>&1; then
     fail "teardown allowed a secondmate with in-flight child work"
   fi
+  set +e
   PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/force-teardown-fake/pane.txt" \
-    "$ROOT/bin/fm-teardown.sh" domain --force >/dev/null 2>/dev/null \
-    || fail "force teardown failed to discard child work"
-  [ ! -d "$subhome" ] || fail "force teardown did not remove the retired secondmate home"
-  [ ! -d "$childwt" ] || fail "force teardown did not remove child worktree"
-  [ ! -e "$home/state/domain.meta" ] || fail "teardown did not clear parent meta"
-  grep -F -- '- domain ' "$home/data/secondmates.md" >/dev/null && fail "force teardown did not remove secondmate registry route"
-  grep -F 'kill-window -t firstmate:fm-child' "$log" >/dev/null || fail "force teardown did not kill child window"
-  grep -F 'kill-window -t firstmate:fm-domain' "$log" >/dev/null || fail "force teardown did not kill parent window"
-  pass "secondmate force teardown discards child work"
+    "$ROOT/bin/fm-teardown.sh" domain --force >/dev/null 2>"$err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "force teardown discarded unlanded child work"
+  assert_present "$subhome" "force teardown removed the parent home"
+  assert_present "$childwt/untracked-child.txt" "force teardown discarded untracked child work"
+  assert_present "$home/state/domain.meta" "force teardown removed parent retry metadata"
+  assert_present "$subhome/state/child.meta" "force teardown removed child retry metadata"
+  assert_grep '- domain ' "$home/data/secondmates.md" "force teardown removed the parent registry route"
+  pass "secondmate force teardown retains unlanded child work"
 }
 
 test_secondmate_force_teardown_preserves_child_on_unproven_lock() {
@@ -2389,12 +2452,20 @@ if [ "${FM_TEST_FOCUSED:-}" = review-round-refresh-races ]; then
   exit 0
 fi
 
+if [ "${FM_TEST_FOCUSED:-}" = review-round-secondmate-authority ]; then
+  test_home_seed_validate_rejects_partial_registry_rows
+  test_home_seed_requires_parent_lifecycle_authority
+  test_secondmate_force_teardown_retains_unlanded_child_work
+  exit 0
+fi
+
 test_fm_home_parameterization
 test_lock_status_is_per_home
 test_seed_allows_overlapping_clones_and_drops_owner
 test_home_seed_validate_rejects_duplicate_homes
 test_home_seed_validate_rejects_duplicate_ids
 test_home_seed_validate_rejects_nested_homes
+test_home_seed_validate_rejects_partial_registry_rows
 test_home_seed_uses_treehouse_acquired_home
 test_home_seed_acquisition_honors_shared_checkout_lock
 test_home_seed_rejects_stale_treehouse_acquired_home
@@ -2409,6 +2480,7 @@ test_home_seed_refuses_placeholder_charter
 test_home_seed_refuses_empty_charter_fields
 test_home_seed_no_projects_end_to_end
 test_home_seed_serializes_with_home_retirement
+test_home_seed_requires_parent_lifecycle_authority
 test_home_seed_refuses_projectful_reused_charter_for_projectless_home
 test_home_seed_refuses_projectless_conversion_of_populated_home
 test_home_seed_refuses_projectless_home_with_uninspectable_projects
@@ -2437,7 +2509,7 @@ test_fm_send_refuses_bare_window_without_home_meta
 test_secondmate_teardown_retires_empty_home
 test_secondmate_teardown_refuses_failed_leased_home_return
 test_secondmate_teardown_removes_plain_clone_home_without_treehouse_return
-test_secondmate_force_teardown_discards_child_work
+test_secondmate_force_teardown_retains_unlanded_child_work
 test_secondmate_force_teardown_preserves_child_on_unproven_lock
 test_secondmate_force_teardown_allows_operational_dir_symlinks_inside_home
 test_secondmate_force_teardown_refuses_operational_dir_symlink_outside_home

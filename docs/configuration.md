@@ -25,7 +25,7 @@ The file format is unchanged in both modes; tasks-axi and manual edits produce t
 
 The runtime session-provider backend controls where task windows/endpoints are created, captured, sent to, watched, and killed.
 `tmux` is the verified reference backend (see [`docs/tmux-backend.md`](tmux-backend.md)); `herdr`, `zellij`, and `cmux` are experimental new-task spawn backends, while `orca` is retained only for eligible pre-cutover task recovery (see [`docs/herdr-backend.md`](herdr-backend.md), [`docs/zellij-backend.md`](zellij-backend.md), [`docs/orca-backend.md`](orca-backend.md), and [`docs/cmux-backend.md`](cmux-backend.md)).
-Treehouse remains the worktree provider for tmux, herdr, zellij, and cmux, since herdr, zellij, and cmux are session providers only; eligible legacy Orca recoveries use Orca for both the task worktree and terminal endpoint.
+Treehouse remains the worktree provider for tmux, herdr, zellij, and cmux, since herdr, zellij, and cmux are session providers only. Orca metadata may describe legacy Orca-owned worktrees and terminals, but lifecycle mutation is disabled until the authority capability documented in `docs/orca-backend.md` is empirically verified.
 New spawns choose the backend in this order: an explicit `--backend` flag firstmate passes when it spawns a task, then `FM_BACKEND`, then the first non-empty line of local gitignored `config/backend`, then runtime auto-detection from `$TMUX`, `HERDR_ENV=1`, or cmux runtime signals, then default `tmux`.
 If more than one runtime marker is present, detection resolves innermost-first: `$TMUX` is checked before `HERDR_ENV=1`, which is checked before cmux's primary `CMUX_WORKSPACE_ID` marker and its documented fallback signals - tmux or herdr started from inside a cmux terminal is the innermost, currently-executing layer, while cmux itself (a terminal application, not a nestable multiplexer) is always checked last.
 See [`docs/cmux-backend.md`](cmux-backend.md#runtime-auto-detection) for why cmux can be selected when `CMUX_WORKSPACE_ID` is absent.
@@ -34,7 +34,7 @@ Zellij is never auto-detected; select it through local `config/backend`, `FM_BAC
 Orca is also never auto-detected and may be selected only under the [`docs/orca-backend.md`](orca-backend.md#eligibility) eligibility contract.
 Any value other than `tmux`, `herdr`, `zellij`, `orca`, or `cmux` is rejected until another adapter is implemented and verified.
 `fm-spawn.sh` accepts `tmux`, `herdr`, `zellij`, and `cmux` for new ship and scout tasks; `backend=cmux` still refuses `--secondmate` until its secondmate launch semantics are designed.
-Every new task refuses `backend=orca` before any owned mutation, and Orca also refuses `--secondmate`; the Orca guide owns the rationale and exact legacy eligibility rule.
+Every new task refuses `backend=orca` before any owned mutation, legacy respawn and destructive teardown currently fail closed on unavailable authority capability, and Orca also refuses `--secondmate`; the Orca guide owns the rationale and re-enablement contract.
 `codex-app` is not an accepted runtime backend yet; [`docs/codex-app-backend.md`](codex-app-backend.md) owns the Codex App boundary.
 The session-start secondmate liveness sweep uses a deeper `fm_backend_agent_alive` probe where verified.
 Today that probe can classify tmux and herdr secondmate endpoints as `alive`, `dead`, or `unknown`; zellij, Orca, and cmux report `unknown` until their own agent-process classifiers are verified.
@@ -45,7 +45,7 @@ A backend spawn refusal from a missing dependency, version gate, or unauthentica
 Task meta records `backend=` only for a non-default backend; an absent `backend=` means `tmux`, preserving existing default-path meta files.
 A herdr task additionally records `herdr_session=`, `herdr_workspace_id=`, `herdr_tab_id=`, and `herdr_pane_id=`.
 A zellij task additionally records `zellij_session=`, `zellij_tab_id=`, and `zellij_pane_id=`.
-An eligible legacy Orca task additionally records `orca_worktree_id=` and `terminal=`, with `window=fm-<id>` kept as the shared firstmate alias.
+A legacy Orca task may additionally record `orca_worktree_id=` and `terminal=`, with `window=fm-<id>` kept as the shared firstmate alias.
 A cmux task additionally records `cmux_workspace_id=` and `cmux_surface_id=`.
 Task selectors for `fm-peek.sh`, `fm-send.sh`, and `fm-crew-state.sh` resolve centrally through `fm_backend_resolve_selector`.
 A selector containing `:` is passed through as an explicit backend endpoint escape hatch.
@@ -354,7 +354,7 @@ The per-backend delta is required only for the backend resolved from `FM_BACKEND
 That delta is owned in code by `fm_backend_required_tools` in `bin/fm-backend.sh`: the resolved backend's own session-provider CLI (`tmux`, `herdr`, `zellij`, `orca`, or `cmux`), `jq` for the JSON-emitting experimental adapters (`herdr`, `zellij`, `cmux`) whose spawn and liveness paths parse the backend's JSON output, `nohup` for Herdr's portable detached `setsid` server launcher, and the `treehouse` worktree provider for every session-provider-only backend (`tmux`, `herdr`, `zellij`, `cmux`).
 Backend tool availability uses the adapter's own executable resolver, so bootstrap and spawn agree on supported non-`PATH` locations such as cmux's bundled CLI.
 An unknown resolved backend emits `BACKEND_INVALID` and blocks dispatch instead of silently dropping its dependency delta or falling back to tmux.
-For an eligible pre-cutover task, Orca provides both the task worktree and terminal endpoint (see "Runtime backend" above), so `backend=orca` requires only `orca` on top of the universal toolchain and skips both `treehouse` and every other backend's session CLI.
+Legacy Orca metadata refers to an Orca-owned task worktree and terminal endpoint (see "Runtime backend" above). Existing read-only supervision requires the `orca` CLI, while lifecycle mutation remains unavailable until the authority capability gate is backed by real provider evidence.
 A herdr, zellij, or cmux home is therefore never told `tmux` is missing, and the `treehouse` durable-lease upgrade check runs only for the backends that actually use treehouse.
 Bootstrap reports missing `jq`, fixed system Perl, or Herdr whenever local routing mode, dispatch configuration, or existing ship/scout `account_home=` metadata can activate direct account-directory launches.
 It reports missing Agent Fleet when enforced secondmate routing is configured or legacy task metadata still carries `account_profile=` or pending rollback cleanup and may need managed recovery.

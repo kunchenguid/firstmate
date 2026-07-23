@@ -6,6 +6,8 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=bin/fm-checkout-lock-lib.sh
+. "$ROOT/bin/fm-checkout-lock-lib.sh"
 
 fm_git_identity fmtest fmtest@example.invalid
 
@@ -15,6 +17,10 @@ FM_TEST_HOME="$TMP_ROOT/fm-home"
 STATE_ROOT="$TMP_ROOT/refresh-state"
 LOCK_ROOT="$TMP_ROOT/refresh-locks"
 mkdir -p "$TEST_HOME/.treehouse" "$FM_TEST_HOME/projects" "$FM_TEST_HOME/config" "$STATE_ROOT"
+
+checkout_state_key() {
+  fm_checkout_stable_path_key "$1" directory 0 "${2:-24}"
+}
 
 commit_file() {
   local dir=$1 file=$2 content=$3 message=$4
@@ -383,7 +389,7 @@ test_skill_drafts_surface_on_every_probe_without_log_spam() {
   grep -Fq '# local one' "$draft_one" || fail "safe refresh discarded the first draft"
   grep -Fq '# local two' "$draft_two" || fail "safe refresh discarded the second draft"
 
-  key=$(printf '%s' "$project" | shasum -a 256 | awk '{print substr($1,1,24)}')
+  key=$(checkout_state_key "$project")
   alert="$STATE_ROOT/$key.hygiene-alert"
   [ -f "$alert" ] || fail "the unresolved hygiene alert was not persisted"
   rm -rf "$project/.agents" "$project/skills"
@@ -424,7 +430,7 @@ test_treehouse_pool_skill_drafts_are_inventoried() {
     "an untracked draft in a Treehouse pool worktree was not surfaced"
   grep -Fq '# pool draft' "$draft" || fail "pool hygiene inventory changed the draft"
 
-  key=$(printf '%s' "$pool_worktree" | shasum -a 256 | awk '{print substr($1,1,24)}')
+  key=$(checkout_state_key "$pool_worktree")
   alert="$STATE_ROOT/$key.hygiene-alert"
   [ -f "$alert" ] || fail "the pool-worktree hygiene alert was not persisted"
   rm -rf "$pool_worktree/.agents"
@@ -501,7 +507,7 @@ test_bootstrap_relays_hygiene_alerts() {
     "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
   rm "$FM_TEST_HOME/config/checkout-refresh"
   mv "$config_real" "$FM_TEST_HOME/config/checkout-refresh"
-  assert_contains "$out" "FLEET_SYNC: checkout-refresh: skipped: unsafe symlink config" \
+  assert_contains "$out" "FLEET_SYNC: checkout-refresh: skipped: unsafe config path" \
     "session-start bootstrap suppressed the unsafe configuration warning"
   grep -Fq '# bootstrap draft' "$draft" || fail "bootstrap refresh changed the draft"
   rm -rf "$project/.agents"
@@ -625,6 +631,76 @@ test_raw_treehouse_root_symlink_invalidates_coverage_health() {
   pass "raw, ancestor-symlinked, and missing configured Treehouse roots fail closed"
 }
 
+test_empty_treehouse_and_identity_tool_failures_fail_closed() {
+  local out status
+  set +e
+  out=$(HOME="$TEST_HOME" FM_HOME="$FM_TEST_HOME" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_CHECKOUT_REFRESH_STATE_ROOT="$STATE_ROOT" FM_CHECKOUT_REFRESH_LOCK_ROOT="$LOCK_ROOT" \
+    FM_TREEHOUSE_ROOT= FM_CHECKOUT_REFRESH_TEST=1 \
+    "$ROOT/bin/fm-checkout-refresh.sh" run-once --force 2>&1)
+  status=$?
+  set -e
+  [ "$status" -ne 0 ] || fail "explicitly empty Treehouse root fell back to the default"
+  assert_contains "$out" "configured root is unsafe or unreadable:" \
+    "explicitly empty Treehouse root was not surfaced"
+
+  set +e
+  out=$(FM_CHECKOUT_TEST_DISABLE_SYSTEM_PERL=1 run_refresh run-once --force 2>&1)
+  status=$?
+  set -e
+  [ "$status" -ne 0 ] || fail "missing fixed identity tool reported healthy coverage"
+  assert_contains "$out" "checkout-refresh home identity is unavailable" \
+    "fixed identity-tool failure did not fail before state aliasing"
+  pass "empty Treehouse configuration and identity-tool failures fail closed"
+}
+
+test_config_git_metadata_and_non_git_races_fail_closed() {
+  local real_config linked_config remote source redirected scan candidate out status
+  real_config="$TMP_ROOT/config-real"
+  linked_config="$TMP_ROOT/config-linked"
+  mkdir -p "$real_config"
+  printf '# valid\n' > "$real_config/checkout-refresh"
+  ln -s "$real_config" "$linked_config"
+  set +e
+  out=$(FM_CONFIG_OVERRIDE="$linked_config" run_refresh run-once --force 2>&1)
+  status=$?
+  set -e
+  [ "$status" -ne 0 ] || fail "config through a symlinked ancestor reported healthy coverage"
+  assert_contains "$out" "unsafe config path" \
+    "config ancestor redirect was not surfaced"
+  rm -f "$linked_config"
+
+  remote=$(build_origin redirected-git)
+  source="$TMP_ROOT/redirected-git-source"
+  redirected="$TMP_ROOT/redirected-git-candidate"
+  clone_from "$remote" "$source"
+  mkdir -p "$redirected"
+  ln -s "$source/.git" "$redirected/.git"
+  printf 'path %s\n' "$redirected" > "$FM_TEST_HOME/config/checkout-refresh"
+  set +e
+  out=$(run_refresh run-once --force 2>&1)
+  status=$?
+  set -e
+  [ "$status" -ne 0 ] || fail "redirected Git metadata reported healthy coverage"
+  assert_contains "$out" "configured checkout is not an exact inspectable Git repository root" \
+    "redirected Git metadata was not surfaced"
+  rm -f "$FM_TEST_HOME/config/checkout-refresh"
+
+  scan="$TMP_ROOT/non-git-race-scan"
+  candidate="$scan/candidate"
+  mkdir -p "$candidate"
+  printf 'scan %s\n' "$scan" > "$FM_TEST_HOME/config/checkout-refresh"
+  set +e
+  out=$(FM_CHECKOUT_TEST_CREATE_GIT_AT="$candidate" run_refresh run-once --force 2>&1)
+  status=$?
+  set -e
+  [ "$status" -ne 0 ] || fail "concurrent Git metadata creation was classified as non-Git"
+  assert_contains "$out" "discovered Git identity cannot be inspected or disproved" \
+    "concurrent Git metadata creation was not surfaced"
+  rm -f "$FM_TEST_HOME/config/checkout-refresh"
+  pass "config, Git metadata, and non-Git classification races fail closed"
+}
+
 test_skill_inventory_failure_preserves_alert_and_invalidates_coverage() {
   local project draft key alert prior fakebin real_git out status
   project=$(cd "$FM_TEST_HOME/projects/relvino" && pwd -P)
@@ -632,7 +708,7 @@ test_skill_inventory_failure_preserves_alert_and_invalidates_coverage() {
   mkdir -p "$(dirname "$draft")"
   printf '%s\n' '# retained draft' > "$draft"
   run_refresh run-once >/dev/null
-  key=$(printf '%s' "$project" | shasum -a 256 | awk '{print substr($1,1,24)}')
+  key=$(checkout_state_key "$project")
   alert="$STATE_ROOT/$key.hygiene-alert"
   [ -f "$alert" ] || fail "inventory-failure setup did not persist a hygiene alert"
   prior=$(cat "$alert")
@@ -746,7 +822,7 @@ SH
     || fail "both post-discovery passes did not repeat the exact-root proof"
   [ "$(git -C "$project" rev-parse HEAD)" = "$initial_head" ] \
     || fail "identity-drifted covered path was refreshed through its enclosing repository"
-  key=$(printf '%s' "$project" | shasum -a 256 | awk '{print substr($1,1,24)}')
+  key=$(checkout_state_key "$project")
   alert="$state_root/$key.alert"
   assert_grep "covered checkout became uninspectable during refresh" "$alert" \
     "covered-checkout reinspection failure did not persist an alert"
@@ -848,7 +924,7 @@ test_failed_alert_persistence_forces_reinspection() {
   mkdir -p "$home/user" "$home/projects" "$home/config" "$state_root"
   clone_from "$remote" "$project"
   run_isolated_refresh "$home" "$state_root" run-once --force >/dev/null
-  key=$(printf '%s' "$(cd "$project" && pwd -P)" | shasum -a 256 | awk '{print substr($1,1,24)}')
+  key=$(checkout_state_key "$project")
   alert="$state_root/$key.alert"
   last_file="$state_root/$key.last"
   printf '%s\n' 1 > "$last_file"
@@ -1008,7 +1084,7 @@ test_refresh_locks_recover_stale_owners_and_surface_contention() {
   common=$(git -C "$checkout" rev-parse --git-common-dir)
   case "$common" in /*) ;; *) common="$checkout/$common" ;; esac
   common=$(cd "$common" && pwd -P)
-  key=$(printf '%s' "$common" | shasum -a 256 | awk '{print substr($1,1,24)}')
+  key=$(checkout_state_key "$common")
   checkout_lock="$LOCK_ROOT/$key.lock"
   mkdir -p "$checkout_lock"
   printf '%s\n' "$$" > "$checkout_lock/pid"
@@ -1112,7 +1188,7 @@ test_config_and_external_identity_fail_closed() {
   status=$?
   set -e
   [ "$status" -ne 0 ] || fail "symlinked checkout-refresh config reported success"
-  assert_contains "$out" "unsafe symlink config" "symlinked config was not surfaced"
+  assert_contains "$out" "unsafe config path" "symlinked config was not surfaced"
   assert_refresh_state "$STATE_ROOT" unhealthy
   rm -f "$FM_TEST_HOME/config/checkout-refresh" "$config_real"
   pass "configuration and prior external identity failures invalidate coverage"
@@ -1152,6 +1228,11 @@ test_public_entrypoints_reject_nested_repository_paths() {
   [ "$status" -ne 0 ] || fail "preflight accepted a repository through a symlinked ancestor and trailing slash"
   assert_contains "$out" "must be an exact inspectable Git repository root" \
     "ancestor-symlinked preflight refusal was unclear"
+  mkdir -p "$source/relative-caller"
+  (
+    cd "$source/relative-caller" || exit 1
+    run_refresh preflight .. >/dev/null
+  ) || fail "parent-relative exact repository root was rejected"
   pass "public refresh entrypoints require lexical and canonical repository roots"
 }
 
@@ -1326,7 +1407,7 @@ SH
   common=$(git -C "$source" rev-parse --git-common-dir)
   case "$common" in /*) ;; *) common="$source/$common" ;; esac
   common=$(cd "$common" && pwd -P)
-  key=$(printf '%s' "$common" | shasum -a 256 | awk '{print substr($1,1,24)}')
+  key=$(checkout_state_key "$common")
   lock="$LOCK_ROOT/$key.lock"
   mkdir -p "$lock"
   printf '%s\n' "$$" > "$lock/pid"
@@ -1371,7 +1452,7 @@ SH
     FM_FAKE_LAUNCHCTL_LOG="$log" \
     "$ROOT/bin/fm-checkout-refresh.sh" install
 
-  key=$(printf '%s' "$(cd "$FM_TEST_HOME" && pwd -P)" | shasum -a 256 | awk '{print substr($1,1,16)}')
+  key=$(checkout_state_key "$FM_TEST_HOME" 16)
   plist="$agents/com.firstmate.checkout-refresh.$key.plist"
   install_state_root="$install_state_base/homes/$key"
   assert_grep '<key>StartInterval</key><integer>60</integer>' "$plist" \
@@ -1476,7 +1557,7 @@ SH
     FM_CHECKOUT_REFRESH_LAUNCHCTL="$fakebin/launchctl" \
     FM_FAKE_LAUNCHCTL_LOG="$log" \
     "$ROOT/bin/fm-checkout-refresh.sh" install
-  second_key=$(printf '%s' "$(cd "$second_home" && pwd -P)" | shasum -a 256 | awk '{print substr($1,1,16)}')
+  second_key=$(checkout_state_key "$second_home" 16)
   second_plist="$agents/com.firstmate.checkout-refresh.$second_key.plist"
   [ -f "$plist" ] && [ -f "$second_plist" ] \
     || fail "installing a second home displaced the first home's LaunchAgent"
@@ -1557,6 +1638,13 @@ if [ "${FM_TEST_FOCUSED:-}" = review-round-refresh-symlinks ]; then
   exit 0
 fi
 
+if [ "${FM_TEST_FOCUSED:-}" = review-round-refresh-authority ]; then
+  test_empty_treehouse_and_identity_tool_failures_fail_closed
+  test_config_git_metadata_and_non_git_races_fail_closed
+  test_public_entrypoints_reject_nested_repository_paths
+  exit 0
+fi
+
 test_discovery_covers_projects_treehouse_external_and_config
 test_uninspectable_active_project_invalidates_coverage_health
 test_nested_active_project_invalidates_coverage_health
@@ -1572,6 +1660,8 @@ test_pool_preflight_surfaces_dirty_worktrees_without_blocking_clean_selection
 test_bootstrap_relays_hygiene_alerts
 test_treehouse_discovery_failure_invalidates_coverage_health
 test_raw_treehouse_root_symlink_invalidates_coverage_health
+test_empty_treehouse_and_identity_tool_failures_fail_closed
+test_config_git_metadata_and_non_git_races_fail_closed
 test_skill_inventory_failure_preserves_alert_and_invalidates_coverage
 test_lock_root_failure_invalidates_coverage_before_preparation
 test_reinspection_failure_invalidates_coverage_health

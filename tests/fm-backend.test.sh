@@ -25,6 +25,8 @@
 # The real tmux smoke test (create session, send text + Enter, capture, list,
 # kill) lives in tests/fm-backend-tmux-smoke.test.sh.
 set -u
+export FM_ORCA_TEST_LAB=firstmate-orca-test-lab-v1
+export FM_ORCA_TEST_AUTHORITY_CAPABILITIES=verified-v1
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"

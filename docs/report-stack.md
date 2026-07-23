@@ -29,7 +29,7 @@ A safety refusal after quiescence preserves all work and metadata but leaves the
 If a required heading is absent or lacks substantive content, publication names every missing or empty section, identifies the exact report source to edit, and gives the publish and teardown retry commands.
 Publication failure leaves the prior durable entry unchanged and stops teardown before destructive cleanup, preserving the task for repair and retry.
 Tasks that were already in flight at cutover lack the marker and retain the earlier teardown contract.
-An explicit `--force` teardown is a discard and does not create a completion report.
+`--force` does not bypass completion-report publication or any work-retention proof.
 Retiring a persistent secondmate is also not a completion; ordinary tasks completed inside its home publish to the same machine-global stack.
 
 ## Stored entry

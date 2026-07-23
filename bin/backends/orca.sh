@@ -45,10 +45,20 @@ const state = runtime.state || r.runtimeState || "";
 if (reachable === true && state === "ready") process.exit(0);
 console.error(`error: backend=orca requires a ready Orca runtime (reachable=${String(reachable)}, state=${state || "unknown"})`);
 process.exit(1);
-'
+' || return 1
+  fm_backend_orca_authority_capabilities_check
 }
 
-fm_backend_orca_json_get() {  # <field> ; fields: worktree-id worktree-path worktree-name terminal-handle terminal-title worktree-terminal-handle repo-id
+fm_backend_orca_authority_capabilities_check() {
+  if [ "${FM_ORCA_TEST_LAB:-}" = firstmate-orca-test-lab-v1 ] \
+    && [ "${FM_ORCA_TEST_AUTHORITY_CAPABILITIES:-}" = verified-v1 ]; then
+    return 0
+  fi
+  echo "error: Orca lifecycle authority is disabled because no empirically verified terminal/worktree identity and inventory capability is available" >&2
+  return 1
+}
+
+fm_backend_orca_json_get() {  # <field> ; fields: worktree-id worktree-path terminal-handle terminal-title worktree-terminal-handle repo-id
   # Terminal handles are accepted only from verified terminal result shapes:
   # result.terminal or a root terminal object with .handle. Undocumented
   # result.id and result.worktree.terminal shapes are ignored until a real Orca
@@ -78,7 +88,6 @@ function handle(obj) {
 let v = "";
 if (field === "worktree-id") v = wt.id || wt.worktreeId || r.worktreeId || "";
 if (field === "worktree-path") v = wt.path || (wt.git && wt.git.path) || r.path || "";
-if (field === "worktree-name") v = wt.name || wt.title || r.worktreeName || r.name || r.title || "";
 if (field === "terminal-handle") v = handle(explicitTerm || r) || "";
 if (field === "terminal-title") v = scalar((explicitTerm || r).title) || scalar((explicitTerm || r).name) || "";
 if (field === "worktree-terminal-handle") v = handle(explicitTerm) || "";
@@ -132,7 +141,7 @@ fm_backend_orca_repo_ensure() {  # <project-path>
 }
 
 fm_backend_orca_worktree_create() {  # <project-path> <name>
-  local project=$1 name=$2 repo_id out wt_id wt_path worktree_name terminal status proof
+  local project=$1 name=$2 repo_id out wt_id wt_path terminal status proof
   repo_id=$(fm_backend_orca_repo_ensure "$project") || return 1
   if out=$(orca worktree create --repo "id:$repo_id" --name "$name" --no-parent --setup skip --json); then
     status=0
@@ -142,11 +151,10 @@ fm_backend_orca_worktree_create() {  # <project-path> <name>
   wt_id=$(printf '%s' "$out" | fm_backend_orca_json_get worktree-id 2>/dev/null || true)
   terminal=$(printf '%s' "$out" | fm_backend_orca_json_get worktree-terminal-handle 2>/dev/null || true)
   wt_path=$(printf '%s' "$out" | fm_backend_orca_json_get worktree-path 2>/dev/null || true)
-  worktree_name=$(printf '%s' "$out" | fm_backend_orca_json_get worktree-name 2>/dev/null || true)
   proof=unproven
   [ -z "$terminal" ] || proof=recorded
-  printf '%s\t%s\t%s\t%s\t%s\t%s' "$wt_id" "$wt_path" "$terminal" "$proof" "$repo_id" "$worktree_name"
-  if [ "$status" -ne 0 ] || [ -z "$wt_id" ] || [ -z "$wt_path" ] || [ "$worktree_name" != "$name" ]; then
+  printf '%s\t%s\t%s\t%s\t%s' "$wt_id" "$wt_path" "$terminal" "$proof" "$repo_id"
+  if [ "$status" -ne 0 ] || [ -z "$wt_id" ] || [ -z "$wt_path" ]; then
     echo "error: orca worktree create returned incomplete or unsuccessful authority for $name" >&2
     return 2
   fi
@@ -203,6 +211,12 @@ fm_backend_orca_capture() {  # <terminal-id> <lines>
 
 fm_backend_orca_terminal_state() {  # <terminal-id> [expected-worktree-id] [expected-label] -> present|absent|unknown
   local terminal=$1 expected_worktree_id=${2:-} expected_label=${3:-} out status
+  if [ -n "$expected_worktree_id" ] || [ -n "$expected_label" ]; then
+    fm_backend_orca_authority_capabilities_check >/dev/null 2>&1 || {
+      printf 'unknown'
+      return 0
+    }
+  fi
   fm_backend_orca_tool_check || { printf 'unknown'; return 0; }
   if out=$(orca terminal read --terminal "$terminal" --limit 1 --json 2>/dev/null); then
     status=0
@@ -277,6 +291,10 @@ process.stdout.write("unknown");
 fm_backend_orca_worktree_terminal_state() {
   local worktree_id=$1 expected_label=${2:-} out
   [ -n "$worktree_id" ] || { printf 'unknown'; return 0; }
+  fm_backend_orca_authority_capabilities_check >/dev/null 2>&1 || {
+    printf 'unknown'
+    return 0
+  }
   fm_backend_orca_tool_check || { printf 'unknown'; return 0; }
   out=$(orca worktree show --worktree "id:$worktree_id" --json 2>/dev/null) || {
     printf 'unknown'
@@ -322,6 +340,7 @@ if (id !== expected || (expectedLabel && label !== expectedLabel) ||
 fm_backend_orca_worktree_terminals() {
   local worktree_id=$1 expected_label=$2 out
   [ -n "$worktree_id" ] && [ -n "$expected_label" ] || return 1
+  fm_backend_orca_authority_capabilities_check || return 1
   fm_backend_orca_tool_check || return 1
   out=$(orca worktree show --worktree "id:$worktree_id" --json 2>/dev/null) || return 1
   printf '%s' "$out" | node -e '
@@ -353,6 +372,18 @@ for (const terminal of terminals) {
 ' "$worktree_id" "$expected_label"
 }
 
+fm_backend_orca_worktree_terminal_contains() {
+  local worktree_id=$1 expected_label=$2 expected_terminal=$3 terminals terminal found=0
+  [ -n "$expected_terminal" ] || return 1
+  terminals=$(fm_backend_orca_worktree_terminals "$worktree_id" "$expected_label") || return 1
+  while IFS= read -r terminal; do
+    [ "$terminal" != "$expected_terminal" ] || found=$((found + 1))
+  done <<EOF
+$terminals
+EOF
+  [ "$found" -eq 1 ]
+}
+
 fm_backend_orca_quiesce_terminal() {  # <terminal-id> [expected-worktree-id] [expected-label]
   local terminal=$1 expected_worktree_id=${2:-} expected_label=${3:-} attempt state
   [ -n "$terminal" ] || return 1
@@ -377,11 +408,32 @@ fm_backend_orca_quiesce_terminal() {  # <terminal-id> [expected-worktree-id] [ex
 }
 
 fm_backend_orca_quiesce_worktree_terminals() {
-  local worktree_id=$1 expected_label=$2 terminals terminal
+  local worktree_id=$1 expected_label=$2 known_terminal=${3:-} terminals terminal known_state
   terminals=$(fm_backend_orca_worktree_terminals "$worktree_id" "$expected_label") || {
     echo "error: Orca worktree terminal authority is unproven for $worktree_id" >&2
     return 1
   }
+  if [ -n "$known_terminal" ]; then
+    known_state=$(fm_backend_orca_terminal_state "$known_terminal" "$worktree_id" "$expected_label")
+    case "$known_state" in
+      present)
+        fm_backend_orca_worktree_terminal_contains "$worktree_id" "$expected_label" "$known_terminal" || {
+          echo "error: Orca terminal inventory disagrees with the recorded live terminal for $worktree_id" >&2
+          return 1
+        }
+        ;;
+      absent)
+        if fm_backend_orca_worktree_terminal_contains "$worktree_id" "$expected_label" "$known_terminal"; then
+          echo "error: Orca terminal inventory contains a terminal reported absent for $worktree_id" >&2
+          return 1
+        fi
+        ;;
+      *)
+        echo "error: recorded Orca terminal authority is unproven for $worktree_id" >&2
+        return 1
+        ;;
+    esac
+  fi
   while IFS= read -r terminal; do
     [ -n "$terminal" ] || continue
     fm_backend_orca_quiesce_terminal "$terminal" "$worktree_id" "$expected_label" || return 1
@@ -392,6 +444,12 @@ EOF
     echo "error: Orca worktree $worktree_id still has terminals or cannot prove their absence" >&2
     return 1
   }
+  if [ -n "$known_terminal" ]; then
+    [ "$(fm_backend_orca_terminal_state "$known_terminal" "$worktree_id" "$expected_label")" = absent ] || {
+      echo "error: recorded Orca terminal $known_terminal is not proven absent" >&2
+      return 1
+    }
+  fi
 }
 
 fm_backend_orca_json_text() {  # <json>

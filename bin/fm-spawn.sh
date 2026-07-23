@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # FM_ACCOUNT_DIRECTORY_CUTOVER: direct-observe-passwd-home-v2
 # Spawn a direct report: a new crewmate in a treehouse worktree, an eligible
-# pre-cutover Orca respawn, or a secondmate in its isolated firstmate home.
+# pre-cutover Orca direct recovery with empirically verified provider authority,
+# or a secondmate in its isolated firstmate home.
 # Usage: fm-spawn.sh <task-id> <project-dir> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--account-pool <pool>] [--account-profile <profile>] [--no-account-routing] [--scout]
 #        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--account-pool <pool>] [--account-profile <profile>] [--no-account-routing] --secondmate
 #        fm-spawn.sh <task-id> --recover-direct-account
@@ -19,10 +20,10 @@
 #   fm_backend_detect, with cmux fallback details in docs/cmux-backend.md),
 #   then tmux.
 #   New-task spawn-capable backends are the reference tmux adapter and
-#   experimental herdr, zellij, and cmux. Orca is available only to respawn a
-#   pre-cutover task whose meta has no report_required marker; it owns both the
-#   task worktree and terminal, so an eligible Orca respawn does not acquire a
-#   Treehouse lease. cmux is a session provider only, exactly like herdr/zellij,
+#   experimental herdr, zellij, and cmux. Orca's legacy respawn design owns both
+#   the task worktree and terminal, but currently fails closed before provider
+#   mutation because its lifecycle authority is unverified. cmux is a session
+#   provider only, exactly like herdr/zellij,
 #   so it does. An auto-detected herdr or cmux spawn prints a loud stderr notice;
 #   auto-detected tmux stays silent; zellij and orca are never auto-detected.
 #   codex-app is not a known backend yet; docs/codex-app-backend.md owns that
@@ -701,18 +702,22 @@ if [ "$BACKEND" = orca ] && [ "$SPAWN_PREFLIGHT_BATCH" = 0 ]; then
   [ "$DIRECT_ACCOUNT_RECOVERY" = 1 ] || spawn_refuse_existing_orca_provider_identity || exit 1
 fi
 
-if [ "$SPAWN_PREFLIGHT_BATCH" = 0 ] \
-  && { [ -e "$FM_HOME/$SUB_HOME_MARKER" ] || [ -L "$FM_HOME/$SUB_HOME_MARKER" ]; }; then
-  [ -f "$FM_HOME/$SUB_HOME_MARKER" ] && [ ! -L "$FM_HOME/$SUB_HOME_MARKER" ] || {
-    echo "error: unsafe secondmate home marker at $FM_HOME/$SUB_HOME_MARKER" >&2
-    exit 1
-  }
+if [ "$SPAWN_PREFLIGHT_BATCH" = 0 ]; then
   SECONDMATE_HOME_LIFECYCLE_LOCK=$(fm_secondmate_home_lifecycle_lock_acquire "$CHECKOUT_LOCK_ROOT" "$FM_HOME") || exit 1
   trap '[ -z "${SECONDMATE_HOME_LIFECYCLE_LOCK:-}" ] || fm_account_lifecycle_lock_release "$SECONDMATE_HOME_LIFECYCLE_LOCK" >/dev/null 2>&1 || true' EXIT
-  [ -f "$FM_HOME/$SUB_HOME_MARKER" ] && [ ! -L "$FM_HOME/$SUB_HOME_MARKER" ] || {
-    echo "error: secondmate home changed while spawn waited for lifecycle ownership" >&2
+  fm_checkout_trusted_dir "$FM_HOME" >/dev/null || {
+    echo "error: active firstmate home was removed or redirected while spawn waited for lifecycle ownership" >&2
     exit 1
   }
+  if [ -e "$FM_HOME/$SUB_HOME_MARKER" ] || [ -L "$FM_HOME/$SUB_HOME_MARKER" ]; then
+    [ -f "$FM_HOME/$SUB_HOME_MARKER" ] && [ ! -L "$FM_HOME/$SUB_HOME_MARKER" ] || {
+      echo "error: unsafe secondmate home marker at $FM_HOME/$SUB_HOME_MARKER" >&2
+      exit 1
+    }
+  elif [ -f "$FM_HOME/data/charter.md" ]; then
+    echo "error: secondmate home changed while spawn waited for lifecycle ownership" >&2
+    exit 1
+  fi
 fi
 
 if [ -n "${FM_ACCOUNT_LIFECYCLE_LOCK_HELD:-}" ]; then
@@ -989,10 +994,9 @@ parse_orca_worktree_result() {
   ORCA_TERMINAL_PROOF=${rest%%$'\t'*}
   [ "$rest" != "$ORCA_TERMINAL_PROOF" ] || return 1
   rest=${rest#*$'\t'}
-  ORCA_REPO_ID=${rest%%$'\t'*}
-  [ "$rest" != "$ORCA_REPO_ID" ] || return 1
-  ORCA_PROVIDER_TASK=${rest#*$'\t'}
-  [ "$ORCA_PROVIDER_TASK" = "$ORCA_EXPECTED_TASK" ]
+  ORCA_REPO_ID=$rest
+  case "$ORCA_REPO_ID" in *$'\t'*) return 1 ;; esac
+  ORCA_PROVIDER_TASK=
 }
 
 persist_orca_cleanup_quarantine() {
@@ -1004,7 +1008,7 @@ persist_orca_cleanup_quarantine() {
     "${MODE:-no-mistakes}" "${YOLO:-off}" "${TASK_TMP:-}" "${MODEL:-default}" \
     "${EFFORT:-default}" "${ORCA_WORKTREE_ID:-}" "${ORCA_TERMINAL:-}" \
     "${ORCA_TERMINAL_PROOF:-unproven}" "${ORCA_REPO_ID:-}" "fm-$ID" \
-    "${ORCA_PROVIDER_TASK:-}" <<'PY'
+    "repo-path:${PROJ_ABS:-}" <<'PY'
 import os
 import stat
 import sys
@@ -1012,7 +1016,7 @@ import tempfile
 
 (state, metadata, phase, window, worktree, project, harness, kind, mode, yolo,
  tasktmp, model, effort, worktree_id, terminal, proof, repo_id, expected_task,
- provider_task) = sys.argv[1:]
+ provider_scope) = sys.argv[1:]
 values = [
     ("window", window),
     ("worktree", worktree),
@@ -1036,13 +1040,15 @@ values.extend([
     ("orca_terminal_proof", proof),
     ("orca_repo_id", repo_id),
     ("orca_expected_task", expected_task),
-    ("orca_provider_task", provider_task),
+    ("orca_discovery_label", expected_task),
+    ("orca_provider_scope", provider_scope),
 ])
 owned = {
     "window", "worktree", "project", "harness", "kind", "mode", "yolo",
     "tasktmp", "model", "effort", "backend", "orca_worktree_id", "terminal",
     "orca_cleanup_pending", "orca_cleanup_phase", "orca_terminal_proof",
-    "orca_repo_id", "orca_expected_task", "orca_provider_task",
+    "orca_repo_id", "orca_expected_task", "orca_discovery_label",
+    "orca_provider_scope",
 }
 for key, value in values:
     if any(character in value for character in "\0\r\n"):
@@ -1051,6 +1057,7 @@ state_metadata = os.lstat(state)
 if not stat.S_ISDIR(state_metadata.st_mode) or stat.S_ISLNK(state_metadata.st_mode):
     raise SystemExit(1)
 preserved = []
+retained = {}
 try:
     metadata_state = os.lstat(metadata)
 except FileNotFoundError:
@@ -1063,6 +1070,15 @@ if metadata_state is not None:
             key = line.split("=", 1)[0]
             if key not in owned:
                 preserved.append(line)
+            elif "=" in line:
+                retained[key] = line.rstrip("\n").split("=", 1)[1]
+values = [
+    (key, retained.get(key, value) if value == "" else value)
+    for key, value in values
+]
+for key, value in values:
+    if any(character in value for character in "\0\r\n"):
+        raise SystemExit(1)
 descriptor, temporary = tempfile.mkstemp(prefix=".orca-quarantine.", dir=state)
 try:
     with os.fdopen(descriptor, "w", encoding="utf-8") as output:
@@ -1469,7 +1485,13 @@ spawn_abort_cleanup() {
       orca_cleanup_failed=1
     fi
     if [ -n "${ORCA_WORKTREE_ID:-}" ] && [ "$orca_cleanup_failed" = 0 ]; then
-      fm_backend_orca_quiesce_worktree_terminals "$ORCA_WORKTREE_ID" "fm-${ID:-unknown}" || orca_cleanup_failed=1
+      validate_orca_abort_worktree_identity || orca_cleanup_failed=1
+    fi
+    if [ -n "${ORCA_WORKTREE_ID:-}" ] && [ "$orca_cleanup_failed" = 0 ]; then
+      fm_backend_orca_quiesce_worktree_terminals "$ORCA_WORKTREE_ID" "fm-${ID:-unknown}" "${ORCA_TERMINAL:-}" || orca_cleanup_failed=1
+    fi
+    if [ -n "${ORCA_WORKTREE_ID:-}" ] && [ "$orca_cleanup_failed" = 0 ]; then
+      validate_orca_abort_worktree_identity || orca_cleanup_failed=1
     fi
     if [ -n "${ORCA_WORKTREE_ID:-}" ] && [ "$orca_cleanup_failed" = 0 ]; then
       fm_backend_remove_worktree orca "$ORCA_WORKTREE_ID" || orca_cleanup_failed=1
@@ -2288,18 +2310,7 @@ if [ "$ACCOUNT_EFFECTIVE_MODE" != enforce ]; then
 fi
 
 secondmate_registry_value() {
-  local id=$1 key=$2 reg line value
-  reg="$DATA/secondmates.md"
-  [ -f "$reg" ] || return 1
-  line=$(grep -E "^- $id( |$)" "$reg" | tail -1 || true)
-  [ -n "$line" ] || return 1
-  case "$key" in
-    home) value=$(printf '%s\n' "$line" | sed -n 's/^[^(]*(home: \([^;)]*\);.*/\1/p') ;;
-    projects) value=$(printf '%s\n' "$line" | sed -n 's/^[^(]*(home: [^;)]*; scope: [^;)]*; projects: \([^;)]*\); added .*/\1/p') ;;
-    *) return 1 ;;
-  esac
-  [ -n "$value" ] || return 1
-  printf '%s\n' "$value"
+  fm_secondmate_registry_query "$DATA/secondmates.md" query "$1" "$2"
 }
 
 shell_quote() {
@@ -2649,7 +2660,7 @@ fi
 # that every downstream operation (send/capture/kill) already treats as opaque
 # per-backend routing (fm_backend_resolve_selector).
 validate_spawn_worktree() {  # <source> <inspect-target>
-  local source=$1 inspect_target=$2 wt_real proj_real wt_top wt_top_real
+  local source=$1 inspect_target=$2 wt_real proj_real wt_top wt_top_real wt_common proj_common provider_path provider_real
   wt_real=
   if ! wt_real=$(cd "$WT" 2>/dev/null && pwd -P); then
     wt_real=
@@ -2664,6 +2675,45 @@ validate_spawn_worktree() {  # <source> <inspect-target>
     echo "error: $source did not yield an isolated worktree (resolved '$WT'; worktree root '${wt_top:-none}'; primary '$PROJ_ABS'); refusing to launch to avoid tangling the primary checkout. Inspect target $inspect_target" >&2
     exit 1
   fi
+  fm_checkout_validate_git_metadata "$wt_real" >/dev/null || {
+    echo "error: $source returned redirected or unprovable Git metadata at $wt_real" >&2
+    exit 1
+  }
+  fm_checkout_validate_git_metadata "$proj_real" >/dev/null || {
+    echo "error: project Git metadata is unprovable at $proj_real" >&2
+    exit 1
+  }
+  wt_common=$(fm_checkout_git_common_dir "$wt_real") || exit 1
+  proj_common=$(fm_checkout_git_common_dir "$proj_real") || exit 1
+  [ "$wt_common" = "$proj_common" ] || {
+    echo "error: $source returned a worktree from an unrelated repository" >&2
+    exit 1
+  }
+  if [ "$BACKEND" = orca ]; then
+    fm_backend_orca_authority_capabilities_check || exit 1
+    provider_path=$(fm_backend_orca_worktree_path "$ORCA_WORKTREE_ID") || exit 1
+    provider_real=$(fm_checkout_trusted_dir "$provider_path") || exit 1
+    [ "$provider_real" = "$wt_real" ] || {
+      echo "error: Orca worktree identity does not match its returned path" >&2
+      exit 1
+    }
+  fi
+}
+
+validate_orca_abort_worktree_identity() {
+  local wt_root project_root wt_common project_common provider_path provider_root
+  [ -n "${ORCA_WORKTREE_ID:-}" ] && [ -n "${WT:-}" ] && [ -n "${PROJ_ABS:-}" ] || return 1
+  wt_root=$(fm_checkout_trusted_dir "$WT") || return 1
+  project_root=$(fm_checkout_trusted_dir "$PROJ_ABS") || return 1
+  [ "$wt_root" != "$project_root" ] || return 1
+  fm_checkout_validate_git_metadata "$wt_root" >/dev/null || return 1
+  fm_checkout_validate_git_metadata "$project_root" >/dev/null || return 1
+  wt_common=$(fm_checkout_git_common_dir "$wt_root") || return 1
+  project_common=$(fm_checkout_git_common_dir "$project_root") || return 1
+  [ "$wt_common" = "$project_common" ] || return 1
+  provider_path=$(fm_backend_orca_worktree_path "$ORCA_WORKTREE_ID") || return 1
+  provider_root=$(fm_checkout_trusted_dir "$provider_path") || return 1
+  [ "$provider_root" = "$wt_root" ]
 }
 
 if [ "$DIRECT_ACCOUNT_RECOVERY" = 1 ]; then
@@ -2871,8 +2921,7 @@ EOF
         exit 1
       }
       ORCA_TERMINAL=$(fm_backend_orca_terminal_create "$ORCA_WORKTREE_ID" "$W") || exit 1
-      T="$ORCA_TERMINAL"
-      ENDPOINT_CREATED=1
+      ORCA_TERMINAL_PROOF=recorded
     else
       ORCA_EXPECTED_TASK="fm-$ID"
       ORCA_TERMINAL_PROOF=unproven
@@ -2912,10 +2961,15 @@ EOF
           exit 1
         }
       fi
-      T="$ORCA_TERMINAL"
-      ENDPOINT_CREATED=1
       WORKTREE_CREATED=1
     fi
+    [ "$(fm_backend_orca_terminal_state "$ORCA_TERMINAL" "$ORCA_WORKTREE_ID" "$W")" = present ] \
+      && fm_backend_orca_worktree_terminal_contains "$ORCA_WORKTREE_ID" "$W" "$ORCA_TERMINAL" || {
+        echo "error: Orca terminal is not authoritatively bound to worktree $ORCA_WORKTREE_ID and task $W" >&2
+        exit 1
+      }
+    T="$ORCA_TERMINAL"
+    ENDPOINT_CREATED=1
     ;;
 esac
 if [ "$ACCOUNT_EFFECTIVE_MODE" = enforce ]; then
@@ -3286,7 +3340,8 @@ META_TMP=$(mktemp "$STATE/.$ID.meta.XXXXXX") || exit 1
     echo "terminal=$ORCA_TERMINAL"
     echo "orca_repo_id=$ORCA_REPO_ID"
     echo "orca_expected_task=$ORCA_EXPECTED_TASK"
-    echo "orca_provider_task=$ORCA_PROVIDER_TASK"
+    echo "orca_discovery_label=$ORCA_EXPECTED_TASK"
+    echo "orca_provider_scope=repo-path:$PROJ_ABS"
   fi
   if [ "$BACKEND" = cmux ]; then
     echo "cmux_workspace_id=$CMUX_WORKSPACE_ID"
@@ -3404,6 +3459,17 @@ fi
 # Export GOTMPDIR into the crewmate's pane shell so the agent and every child
 # process (go build, go test, ...) inherit it. Sent before the launch command so
 # the env is set when the agent starts; the brief sleep lets the export land.
+if [ "$BACKEND" = orca ]; then
+  [ "$(fm_backend_orca_terminal_state "$T" "$ORCA_WORKTREE_ID" "$W")" = present ] \
+    && fm_backend_orca_worktree_terminal_contains "$ORCA_WORKTREE_ID" "$W" "$T" || {
+      echo "error: Orca terminal authority changed before launch for $ID" >&2
+      exit 1
+    }
+  validate_orca_abort_worktree_identity || {
+    echo "error: Orca worktree authority changed before launch for $ID" >&2
+    exit 1
+  }
+fi
 spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp"
 sleep 0.3
 spawn_send_literal "$T" "$LAUNCH"

@@ -15,6 +15,8 @@
 # override, blank-env defaulting, partial-output relay, and pre-launch timeout
 # scan.
 set -u
+export FM_ORCA_TEST_LAB=firstmate-orca-test-lab-v1
+export FM_ORCA_TEST_AUTHORITY_CAPABILITIES=verified-v1
 
 # shellcheck source=tests/lib.sh disable=SC1091
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"

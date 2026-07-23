@@ -86,16 +86,22 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 # shellcheck source=bin/fm-checkout-lock-lib.sh
 . "$SCRIPT_DIR/fm-checkout-lock-lib.sh"
-if FM_HOME_CANONICAL=$(cd "$FM_HOME" 2>/dev/null && pwd -P); then
-  :
-else
-  FM_HOME_CANONICAL=$FM_HOME
-fi
-FM_HOME_KEY=$(printf '%s' "$FM_HOME_CANONICAL" | shasum -a 256 | awk '{print substr($1,1,16)}')
+FM_HOME_CANONICAL=$(fm_checkout_trusted_dir "$FM_HOME") || {
+  echo "error: checkout-refresh home identity is unavailable: $FM_HOME" >&2
+  exit 1
+}
+FM_HOME_KEY=$(fm_checkout_stable_path_key "$FM_HOME_CANONICAL" directory 0 16) || {
+  echo "error: checkout-refresh home lock identity is unavailable: $FM_HOME" >&2
+  exit 1
+}
 PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 CONFIG_FILE="${FM_CHECKOUT_REFRESH_CONFIG:-$CONFIG/checkout-refresh}"
-TREEHOUSE_ROOT_RAW="${FM_TREEHOUSE_ROOT:-$HOME/.treehouse}"
+if [ "${FM_TREEHOUSE_ROOT+x}" = x ]; then
+  TREEHOUSE_ROOT_RAW=$FM_TREEHOUSE_ROOT
+else
+  TREEHOUSE_ROOT_RAW="$HOME/.treehouse"
+fi
 TREEHOUSE_ROOT=$TREEHOUSE_ROOT_RAW
 TREEHOUSE_ROOT_CANONICAL=
 TREEHOUSE_ROOT_INVALID=0
@@ -166,6 +172,7 @@ exact_git_root() {
   top=$(git -C "$canonical" rev-parse --show-toplevel 2>/dev/null) || return 1
   canonical_top=$(canonical_dir "$top") || return 1
   [ "$canonical" = "$canonical_top" ] || return 1
+  fm_checkout_validate_git_metadata "$canonical" >/dev/null || return 1
   printf '%s\n' "$canonical"
 }
 
@@ -190,18 +197,24 @@ expand_config_path() {
 }
 
 parse_config() {
-  local paths_file=$1 scans_file=$2 line directive value expanded failed=0
+  local paths_file=$1 scans_file=$2 line directive value expanded failed=0 config_lexical config_parent
   : > "$paths_file"
   : > "$scans_file"
-  if [ ! -e "$CONFIG_FILE" ] && [ ! -L "$CONFIG_FILE" ]; then
+  config_lexical=$(fm_checkout_lexical_path "$CONFIG_FILE" 1) || {
+    echo "checkout-refresh: skipped: unsafe config path $CONFIG_FILE" >&2
+    return 1
+  }
+  config_parent=${config_lexical%/*}
+  [ -n "$config_parent" ] || config_parent=/
+  fm_checkout_trusted_dir "$config_parent" >/dev/null || {
+    echo "checkout-refresh: skipped: config parent is missing, redirected, or unreadable: $config_parent" >&2
+    return 1
+  }
+  if [ ! -e "$config_lexical" ]; then
     return 0
   fi
-  if [ -L "$CONFIG_FILE" ]; then
-    echo "checkout-refresh: skipped: unsafe symlink config $CONFIG_FILE" >&2
-    return 1
-  fi
-  if [ ! -f "$CONFIG_FILE" ] || [ ! -r "$CONFIG_FILE" ]; then
-    echo "checkout-refresh: skipped: unsafe or unreadable config $CONFIG_FILE" >&2
+  if [ ! -f "$config_lexical" ] || [ ! -r "$config_lexical" ]; then
+    echo "checkout-refresh: skipped: unsafe or unreadable config $config_lexical" >&2
     return 1
   fi
   while IFS= read -r line || [ -n "$line" ]; do
@@ -240,7 +253,7 @@ parse_config() {
         failed=1
         ;;
     esac
-  done < "$CONFIG_FILE"
+  done < "$config_lexical"
   [ "$failed" -eq 0 ]
 }
 
@@ -571,12 +584,45 @@ try:
     if not permissions & 0o444 or not permissions & 0o111:
         raise PermissionError("candidate is unreadable")
     with os.scandir(candidate) as entries:
-        names = {entry.name for entry in entries}
+        snapshot = sorted(
+            (
+                entry.name,
+                entry.inode(),
+                entry.stat(follow_symlinks=False).st_mode,
+                entry.stat(follow_symlinks=False).st_mtime_ns,
+            )
+            for entry in entries
+        )
+    if (
+        os.environ.get("FM_CHECKOUT_REFRESH_TEST") == "1"
+        and os.environ.get("FM_CHECKOUT_TEST_CREATE_GIT_AT") == candidate
+    ):
+        os.mkdir(os.path.join(candidate, ".git"))
     after = os.lstat(candidate)
-    if (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino):
+    with os.scandir(candidate) as entries:
+        confirmation = sorted(
+            (
+                entry.name,
+                entry.inode(),
+                entry.stat(follow_symlinks=False).st_mode,
+                entry.stat(follow_symlinks=False).st_mtime_ns,
+            )
+            for entry in entries
+        )
+    if (
+        (before.st_dev, before.st_ino, before.st_mtime_ns, before.st_ctime_ns)
+        != (after.st_dev, after.st_ino, after.st_mtime_ns, after.st_ctime_ns)
+        or snapshot != confirmation
+    ):
         raise OSError("candidate identity changed")
-    if ".git" in names:
+    if any(name == ".git" for name, *_ in confirmation):
         raise OSError("candidate contains Git metadata")
+    try:
+        os.lstat(os.path.join(candidate, ".git"))
+    except FileNotFoundError:
+        pass
+    else:
+        raise OSError("candidate gained Git metadata")
 except OSError:
     raise SystemExit(1)
 PY
@@ -793,9 +839,7 @@ EOF
 }
 
 checkout_key() {
-  local identity
-  identity=$(canonical_dir "$1" 2>/dev/null) || identity=$1
-  printf '%s' "$identity" | shasum -a 256 | awk '{print substr($1,1,24)}'
+  fm_checkout_stable_path_key "$1" directory 0 24
 }
 
 read_epoch() {
@@ -943,7 +987,11 @@ surface_skill_drafts() {
     return 0
   fi
 
-  signature=$(shasum -a 256 "$inventory" | awk '{print $1}')
+  signature=$(fm_checkout_hash_file "$inventory") || {
+    rm -f "$inventory"
+    echo "$checkout: HYGIENE: inventory signature failed - coverage remains unhealthy" >&2
+    return 1
+  }
   count=$(awk 'END { print NR + 0 }' "$inventory")
   HYGIENE_FOUND=1
   prior=$(sed -n '2p' "$alert" 2>/dev/null || true)
@@ -1019,7 +1067,10 @@ record_alert() {
 
 record_reinspection_failure() {
   local checkout=$1 key alert output
-  key=$(checkout_key "$checkout")
+  key=$(checkout_key "$checkout") || {
+    printf '%s: skipped: covered checkout lock identity cannot be resolved\n' "$checkout"
+    return 1
+  }
   alert="$STATE_ROOT/$key.alert"
   output="$checkout: skipped: covered checkout became uninspectable during refresh; restore access and rerun checkout refresh"
   printf '%s\n' "$output"
@@ -1209,7 +1260,12 @@ run_once() {
       coverage_failed=1
       continue
     fi
-    key=$(checkout_key "$checkout")
+    key=$(checkout_key "$checkout") || {
+      echo "$checkout: skipped: checkout hygiene identity cannot be resolved" >&2
+      coverage_failed=1
+      status=1
+      continue
+    }
     if [ "$force" -eq 1 ] || [ "$verbose" -eq 1 ]; then
       surface_skill_drafts "$checkout" "$key" 1 || hygiene_failed=1
     else
@@ -1228,7 +1284,12 @@ run_once() {
       coverage_failed=1
       continue
     fi
-    key=$(checkout_key "$checkout")
+    key=$(checkout_key "$checkout") || {
+      echo "$checkout: skipped: checkout refresh identity cannot be resolved" >&2
+      coverage_failed=1
+      status=1
+      continue
+    }
     tip_file="$STATE_ROOT/$key.tip"
     last_file="$STATE_ROOT/$key.last"
     alert_file="$STATE_ROOT/$key.alert"
@@ -1373,7 +1434,10 @@ preflight() {
   canonical=$(require_exact_git_root "$checkout" "checkout-refresh preflight target") || return 1
   checkout=$canonical
   ensure_lock_roots || return 1
-  key=$(checkout_key "$checkout")
+  key=$(checkout_key "$checkout") || {
+    echo "error: checkout-refresh preflight identity is unavailable for $checkout" >&2
+    return 1
+  }
   tip_file="$STATE_ROOT/$key.tip"
   surface_skill_drafts "$checkout" "$key" 1 || return 1
   hygiene_found=$HYGIENE_FOUND

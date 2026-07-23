@@ -42,19 +42,17 @@
 # Orca tasks use the same safety checks, then close the recorded terminal, prove
 # the handle stale, and remove the recorded worktree under its checkout lock;
 # teardown never substitutes the shared window alias for a missing terminal.
-# Secondmates (kind=secondmate in meta) are retired explicitly. Normal teardown
-# proves the home clean and every local ref landed, then quiesces its endpoint and
-# refuses while the home has in-flight crewmate meta files. --force is the approved
-# discard path that prevalidates child removal targets, proves child endpoints
-# absent, discards child work, and removes the retired home. Removing a
+# Secondmates (kind=secondmate in meta) are retired explicitly. Teardown proves
+# the home clean and every local ref landed, then quiesces its endpoint and
+# refuses while the home has in-flight crewmate meta files. --force authorizes
+# recursive retirement only after every child passes the same endpoint, identity,
+# cleanliness, stash, and landed-work proofs. Removing a
 # leased home releases its durable treehouse lease so the pool slot is freed,
 # never left leased forever. If the treehouse return fails, teardown leaves the
 # leased home and state in place instead of hiding a still-held lease.
 # Usage: fm-teardown.sh <task-id> [--force]
-#   --force skips ordinary-task dirty and landed-work checks, skips scout and
-#   required-report publication checks, and discards secondmate child work for
-#   kind=secondmate. It is an explicit discard and never publishes completion.
-#   Only use it when the captain has explicitly said to discard the work.
+#   --force permits recursive kind=secondmate retirement. It never bypasses
+#   dirty, untracked, stash, landed-work, endpoint, identity, or report proofs.
 #
 # Transient / stale worktree git lock recovery (teardown-lock-race): a crew process
 # killed mid-git-operation can leave a .git/worktrees/<wt>/index.lock (or, for a
@@ -152,6 +150,11 @@ MANAGED_ACCOUNT_LOCK=
 ACCOUNT_DELETE_LOCK=
 SECONDMATE_HOME_LIFECYCLE_LOCK=
 SECONDMATE_REGISTRY_LOCK=
+PREPARED_REGISTRY_PATH=
+PREPARED_REGISTRY_BACKUP=
+PREPARED_REGISTRY_ID=
+PREPARED_REGISTRY_HOME=
+PREPARED_REGISTRY_LOCK=
 
 release_teardown_account_locks() {
   local lock
@@ -189,6 +192,8 @@ BACKEND=$(fm_backend_of_meta "$META")
 if [ "$BACKEND" = orca ]; then
   T_ORCA=$(grep '^terminal=' "$META" | tail -1 | cut -d= -f2- || true)
   T=$T_ORCA
+  fm_backend_source orca || exit 1
+  fm_backend_orca_authority_capabilities_check || exit 1
 fi
 HOME_PATH=$(grep '^home=' "$META" | cut -d= -f2- || true)
 PR_URL=$(grep '^pr=' "$META" | tail -1 | cut -d= -f2- || true)
@@ -228,6 +233,13 @@ if [ "$ORCA_CLEANUP_PENDING_COUNT" -ne 0 ]; then
     echo "error: Orca cleanup quarantine is not bound to requested task $ID" >&2
     exit 1
   }
+  if [ -z "$ORCA_WORKTREE_ID" ]; then
+    [ "$(fm_meta_get "$META" orca_discovery_label)" = "fm-$ID" ] \
+      && [ -n "$(fm_meta_get "$META" orca_provider_scope)" ] || {
+        echo "error: Orca cleanup quarantine discovery authority is unavailable for $ID" >&2
+        exit 1
+      }
+  fi
   ORCA_CLEANUP_PENDING=1
 fi
 
@@ -249,7 +261,7 @@ elif [ "$REPORT_REQUIRED_COUNT" -gt 0 ]; then
     echo "error: invalid report_required metadata for $ID; refusing teardown" >&2
     exit 1
   fi
-  if [ "$KIND" != secondmate ] && [ "$FORCE" != "--force" ]; then
+  if [ "$KIND" != secondmate ]; then
     REPORT_GATED=1
   fi
 fi
@@ -305,7 +317,7 @@ quiesce_authoritative_orca_endpoint() {
       *) return 1 ;;
     esac
   fi
-  fm_backend_quiesce_worktree_terminals orca "$worktree_id" "$expected_label"
+  fm_backend_quiesce_worktree_terminals orca "$worktree_id" "$expected_label" "$target"
 }
 
 quiesce_secondmate_endpoint() {
@@ -577,7 +589,7 @@ require_orca_worktree_id() {
 }
 
 require_orca_task_metadata_identity() {
-  local meta=$1 expected_id=$2 window_count expected_count provider_count provider_task
+  local meta=$1 expected_id=$2 window_count expected_count discovery_count scope_count provider_count provider_task
   window_count=$(grep -c '^window=' "$meta" 2>/dev/null || true)
   if [ "$window_count" -ne 1 ] || [ "$(meta_value "$meta" window)" != "fm-$expected_id" ]; then
     echo "error: Orca metadata is not bound to requested task $expected_id" >&2
@@ -587,6 +599,19 @@ require_orca_task_metadata_identity() {
   if [ "$expected_count" -ne 0 ] \
     && { [ "$expected_count" -ne 1 ] || [ "$(meta_value "$meta" orca_expected_task)" != "fm-$expected_id" ]; }; then
     echo "error: Orca metadata expected-task authority drifted for $expected_id" >&2
+    return 1
+  fi
+  discovery_count=$(grep -c '^orca_discovery_label=' "$meta" 2>/dev/null || true)
+  if [ "$discovery_count" -ne 0 ] \
+    && { [ "$discovery_count" -ne 1 ] || [ "$(meta_value "$meta" orca_discovery_label)" != "fm-$expected_id" ]; }; then
+    echo "error: Orca metadata discovery-label authority drifted for $expected_id" >&2
+    return 1
+  fi
+  scope_count=$(grep -c '^orca_provider_scope=' "$meta" 2>/dev/null || true)
+  if [ "$scope_count" -ne 0 ] \
+    && { [ "$scope_count" -ne 1 ] \
+      || [ "$(meta_value "$meta" orca_provider_scope)" != "repo-path:$(meta_value "$meta" project)" ]; }; then
+    echo "error: Orca metadata provider scope is unavailable for $expected_id" >&2
     return 1
   fi
   provider_count=$(grep -c '^orca_provider_task=' "$meta" 2>/dev/null || true)
@@ -903,6 +928,7 @@ exact_git_worktree_root() {
   top=$(git -C "$canonical" rev-parse --show-toplevel 2>/dev/null) || return 1
   canonical_top=$(canonical_existing_dir "$top") || return 1
   [ "$canonical" = "$canonical_top" ] || return 1
+  fm_checkout_validate_git_metadata "$canonical" >/dev/null || return 1
   printf '%s\n' "$canonical"
 }
 
@@ -1244,19 +1270,26 @@ cleanup_returned_worktree() {
 }
 
 validate_worktree_teardown_safety() {
-  local dirty_raw dirty unpushed_raw unpushed DEFAULT unmerged_raw unmerged branch
+  local dirty_raw dirty unpushed_raw unpushed DEFAULT unmerged_raw unmerged branch stash_list
   [ -d "$WT" ] || return 0
-  [ "$FORCE" != "--force" ] || return 0
   case "$KIND" in
-    secondmate|scout) return 0 ;;
+    secondmate) return 0 ;;
   esac
+  stash_list=$(git -C "$WT" stash list 2>/dev/null) || {
+    echo "REFUSED: cannot inspect worktree $WT for retained stash history." >&2
+    return 1
+  }
+  [ -z "$stash_list" ] || {
+    echo "REFUSED: worktree $WT has retained stash history." >&2
+    return 1
+  }
 
   if ! dirty_raw=$(git -C "$WT" status --porcelain=v1 --untracked-files=all 2>/dev/null); then
     if worktree_safety_blocked_by_lock "uncommitted changes"; then
       return "$TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED"
     fi
     echo "REFUSED: cannot inspect worktree $WT for uncommitted changes." >&2
-    echo "Restore the git index state, or get the captain's explicit OK to discard, then --force." >&2
+    echo "Restore the git index state, then retry teardown." >&2
     return 1
   fi
   dirty=$(printf '%s\n' "$dirty_raw" \
@@ -1268,7 +1301,7 @@ validate_worktree_teardown_safety() {
       return "$TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED"
     fi
     echo "REFUSED: cannot inspect worktree $WT for commits not on a remote." >&2
-    echo "Restore the git index state, or get the captain's explicit OK to discard, then --force." >&2
+    echo "Restore the git index state, then retry teardown." >&2
     return 1
   fi
   unpushed=$(printf '%s\n' "$unpushed_raw" | head -5)
@@ -1280,7 +1313,7 @@ validate_worktree_teardown_safety() {
         return "$TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED"
       fi
       echo "REFUSED: cannot inspect worktree $WT for commits not on $DEFAULT." >&2
-      echo "Restore the git index state, or get the captain's explicit OK to discard, then --force." >&2
+      echo "Restore the git index state, then retry teardown." >&2
       return 1
     fi
     unmerged=$(printf '%s\n' "$unmerged_raw" | head -5)
@@ -1288,13 +1321,13 @@ validate_worktree_teardown_safety() {
       echo "REFUSED: local-only worktree $WT has work not yet merged into $DEFAULT and not on any remote." >&2
       [ -n "$dirty" ] && echo "uncommitted changes present" >&2
       [ -n "$unmerged" ] && printf 'commits not yet on %s:\n%s\n' "$DEFAULT" "$unmerged" >&2
-      echo "Merge the branch into local $DEFAULT first (bin/fm-merge-local.sh after the captain approves), or push to a fork/remote, or get the captain's explicit OK to discard, then --force." >&2
+      echo "Merge the branch into local $DEFAULT first (bin/fm-merge-local.sh after the captain approves), or push it to a fork or remote, then retry teardown." >&2
       return 1
     fi
   elif [ -n "$dirty" ]; then
     echo "REFUSED: worktree $WT has uncommitted changes." >&2
     echo "uncommitted changes present" >&2
-    echo "Commit them (or get the captain's explicit OK to discard, then --force)." >&2
+    echo "Commit and land them, then retry teardown." >&2
     return 1
   elif [ -n "$unpushed" ]; then
     branch=${TEARDOWN_WORKTREE_BRANCH_FOR_SAFETY:-}
@@ -1305,14 +1338,43 @@ validate_worktree_teardown_safety() {
     if ! work_is_landed "$branch"; then
       echo "REFUSED: worktree $WT has work not on any remote and not landed." >&2
       printf 'unpushed commits:\n%s\n' "$unpushed" >&2
-      echo "Push the branch, land its PR, or get the captain's explicit OK to discard, then --force." >&2
+      echo "Push the branch or land its PR, then retry teardown." >&2
       return 1
     fi
   fi
 }
 
+validate_child_worktree_landed_state() {
+  local child_meta=$1 child_id=$2 child_worktree=$3 child_project=$4
+  local stash_list
+  local WT=$child_worktree PROJ=$child_project ID=$child_id KIND=ship FORCE=
+  local MODE PR_URL TEARDOWN_WORKTREE_BRANCH_FOR_SAFETY=
+  MODE=$(meta_value "$child_meta" mode)
+  [ -n "$MODE" ] || MODE=no-mistakes
+  PR_URL=$(meta_value "$child_meta" pr)
+  stash_list=$(git -C "$WT" stash list 2>/dev/null) || {
+    echo "REFUSED: child worktree stash state is uninspectable at $WT" >&2
+    return 1
+  }
+  [ -z "$stash_list" ] || {
+    echo "REFUSED: child worktree has retained stash history at $WT" >&2
+    return 1
+  }
+  validate_worktree_teardown_safety
+}
+
+CHILD_RETURN_META=
+CHILD_RETURN_ID=
+validate_child_worktree_return_safety() {
+  local child_worktree=$1 child_project=$2
+  [ -n "$CHILD_RETURN_META" ] && [ -n "$CHILD_RETURN_ID" ] || return 1
+  validate_child_worktree_landed_state "$CHILD_RETURN_META" "$CHILD_RETURN_ID" "$child_worktree" "$child_project"
+}
+
 require_orca_worktree_path_match() {
   local worktree_id=$1 inspected=$2 resolved inspected_abs resolved_abs
+  fm_backend_source orca || return 1
+  fm_backend_orca_authority_capabilities_check || return 1
   resolved=$(fm_backend_worktree_path orca "$worktree_id") || {
     echo "REFUSED: cannot resolve Orca worktree id $worktree_id to a path; preserving metadata." >&2
     return 1
@@ -1419,65 +1481,25 @@ secondmate_registry_for_source() {
 }
 
 require_registered_secondmate_home() {
-  local reg=$1 expected_id=$2 expected_home=$3 expected_abs
-  [ -f "$reg" ] && [ ! -L "$reg" ] && [ -r "$reg" ] || {
-    echo "REFUSED: secondmate registry is missing, unsafe, or unreadable at $reg" >&2
+  local reg=$1 expected_id=$2 expected_home=$3 registered expected_key registered_key
+  if ! registered=$(fm_secondmate_registry_query "$reg" query "$expected_id" home); then
+    if [ "$reg" = "$PREPARED_REGISTRY_PATH" ] \
+      && [ "$expected_id" = "$PREPARED_REGISTRY_ID" ] \
+      && [ "$expected_home" = "$PREPARED_REGISTRY_HOME" ] \
+      && [ -n "$PREPARED_REGISTRY_BACKUP" ] \
+      && fm_account_lifecycle_lock_owned "$PREPARED_REGISTRY_LOCK"; then
+      registered=$(fm_secondmate_registry_query "$PREPARED_REGISTRY_BACKUP" query "$expected_id" home) || return 1
+    else
+      echo "REFUSED: secondmate registry is malformed, duplicated, redirected, or missing $expected_id at $reg" >&2
+      return 1
+    fi
+  fi
+  expected_key=$(fm_checkout_stable_path_key "$expected_home" directory 0 24) || return 1
+  registered_key=$(fm_checkout_stable_path_key "$registered" directory 0 24) || return 1
+  [ "$expected_key" = "$registered_key" ] || {
+    echo "REFUSED: secondmate registry home for $expected_id does not match $expected_home" >&2
     return 1
   }
-  expected_abs=$(removal_target_abs_path "$expected_home") || return 1
-  python3 - "$reg" "$expected_id" "$expected_abs" <<'PY'
-import os
-import re
-import sys
-
-registry, expected_id, expected_home = sys.argv[1:]
-pattern = re.compile(r"^- ([A-Za-z0-9][A-Za-z0-9._-]*) .*?\(home: ([^;\r\n)]+);")
-entries = []
-try:
-    with open(registry, encoding="utf-8") as stream:
-        for number, line in enumerate(stream, 1):
-            if not line.startswith("- "):
-                continue
-            match = pattern.match(line)
-            if match is None:
-                raise ValueError(f"malformed entry on line {number}")
-            item_id, home = match.groups()
-            if not os.path.isabs(home) or any(character in home for character in "\t\r\n"):
-                raise ValueError(f"unsafe home on line {number}")
-            entries.append((item_id, os.path.realpath(home)))
-except (OSError, ValueError) as error:
-    print(f"REFUSED: secondmate registry is unprovable at {registry}: {error}", file=sys.stderr)
-    raise SystemExit(1)
-
-seen_ids = set()
-seen_homes = {}
-for item_id, home in entries:
-    if item_id in seen_ids:
-        print(f"REFUSED: duplicate secondmate registry id {item_id}", file=sys.stderr)
-        raise SystemExit(1)
-    seen_ids.add(item_id)
-    if home in seen_homes:
-        print(
-            f"REFUSED: secondmate registry home {home} is shared by {seen_homes[home]} and {item_id}",
-            file=sys.stderr,
-        )
-        raise SystemExit(1)
-    seen_homes[home] = item_id
-
-matches = [home for item_id, home in entries if item_id == expected_id]
-if len(matches) != 1:
-    print(
-        f"REFUSED: expected exactly one secondmate registry entry for {expected_id} at {expected_home}",
-        file=sys.stderr,
-    )
-    raise SystemExit(1)
-if matches[0] != expected_home:
-    print(
-        f"REFUSED: secondmate registry home for {expected_id} is {matches[0]}, not {expected_home}",
-        file=sys.stderr,
-    )
-    raise SystemExit(1)
-PY
 }
 
 secondmate_state_metadata() {
@@ -1722,15 +1744,15 @@ validate_secondmate_home_landed_state() {
   home_common=$(fm_checkout_git_common_dir "$home") || return 1
   source_common=$(fm_checkout_git_common_dir "$expected_source") || return 1
   refs=
+  stash_list=$(git -C "$home" stash list 2>/dev/null) || {
+    echo "REFUSED: secondmate home stash state is uninspectable at $home" >&2
+    return 1
+  }
+  [ -z "$stash_list" ] || {
+    echo "REFUSED: secondmate home has retained stash history at $home" >&2
+    return 1
+  }
   if [ "$home_common" != "$source_common" ]; then
-    stash_list=$(git -C "$home" stash list 2>/dev/null) || {
-      echo "REFUSED: secondmate home stash state is uninspectable at $home" >&2
-      return 1
-    }
-    [ -z "$stash_list" ] || {
-      echo "REFUSED: secondmate home has retained stash history at $home" >&2
-      return 1
-    }
     refs=$(git -C "$home" for-each-ref --format='%(refname)' 2>/dev/null) || {
       echo "REFUSED: secondmate home refs are uninspectable at $home" >&2
       return 1
@@ -1784,7 +1806,7 @@ validate_firstmate_home_for_removal() {
   if [ -n "$expected_id" ] && firstmate_home_has_treehouse_slot "$abs_home_path" "$expected_source"; then
     require_treehouse_task_lease "$abs_home_path" "$expected_id" || return 1
   fi
-  [ "$FORCE" = "--force" ] || validate_secondmate_home_landed_state "$abs_home_path" "$expected_source" || return 1
+  validate_secondmate_home_landed_state "$abs_home_path" "$expected_source" || return 1
   validate_firstmate_operational_dirs_for_removal "$abs_home_path" "$label" || return 1
   secondmate_state_metadata "$abs_home_path" >/dev/null || return 1
   conflict=$(registered_descendant_home_for_removal "${expected_registry:-$SECONDMATE_REG}" "$abs_home_path" || true)
@@ -1871,11 +1893,13 @@ validate_firstmate_home_children_removal() {
         child_proj=$(meta_value "$child_meta" project)
         validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
         require_orca_worktree_path_match "$child_orca_worktree_id" "$child_wt" || return 1
+        validate_child_worktree_landed_state "$child_meta" "$child_id" "$child_wt" "$child_proj" || return 1
       fi
     elif [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
       child_proj=$(meta_value "$child_meta" project)
       validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
       require_treehouse_task_lease "$(canonical_existing_dir "$child_wt")" "firstmate-$child_id" || return 1
+      validate_child_worktree_landed_state "$child_meta" "$child_id" "$child_wt" "$child_proj" || return 1
     else
       echo "error: retained child metadata for $child_id because its Treehouse worktree is missing or uninspectable" >&2
       return 1
@@ -1886,10 +1910,11 @@ EOF
 }
 
 remove_child_orca_worktree_locked() {
-  local child_worktree=$1 child_project=$2 child_worktree_id=$3 child_id=$4 branch=HEAD
+  local child_worktree=$1 child_project=$2 child_worktree_id=$3 child_id=$4 child_meta=$5 branch=HEAD
   validate_child_worktree_for_removal "$child_worktree" "$child_project" >/dev/null || return 1
   require_orca_worktree_path_match "$child_worktree_id" "$child_worktree" || return 1
-  fm_backend_quiesce_worktree_terminals orca "$child_worktree_id" "fm-$child_id" || return 1
+  fm_backend_quiesce_worktree_terminals orca "$child_worktree_id" "fm-$child_id" "$(meta_value "$child_meta" terminal)" || return 1
+  validate_child_worktree_landed_state "$child_meta" "$child_id" "$child_worktree" "$child_project" || return 1
   branch=$(git -C "$child_worktree" rev-parse --abbrev-ref HEAD 2>/dev/null) || return 1
   fm_backend_remove_worktree orca "$child_worktree_id" || return 1
   if [ "$branch" != "HEAD" ]; then
@@ -1899,7 +1924,7 @@ remove_child_orca_worktree_locked() {
 }
 
 cleanup_firstmate_home_children() {
-  local home=$1 sub_state child_metas child_meta child_id child_wt child_proj child_kind child_prelock_kind child_home child_home_after child_home_lock child_registry_lock child_backend child_orca_worktree_id child_return_rc child_account_lock child_endpoint_home remaining_child_metas
+  local home=$1 sub_state child_metas child_meta child_id child_wt child_proj child_kind child_prelock_kind child_home child_home_after child_home_lock child_registry_lock child_backend child_orca_worktree_id child_return_rc child_account_lock child_endpoint_home remaining_child_metas child_registry_prepared child_registry_update child_registry_backup
   sub_state="$home/state"
   child_metas=$(secondmate_state_metadata "$home") || return 1
   while IFS= read -r child_meta; do
@@ -1978,8 +2003,34 @@ cleanup_firstmate_home_children() {
         validate_firstmate_home_for_removal "$child_home" "child firstmate home" "$child_id" "$home" "$home/data/secondmates.md" "$child_proj" >/dev/null || return 1
         remaining_child_metas=$(secondmate_state_metadata "$child_home") || return 1
         [ -z "$remaining_child_metas" ] || return 1
-        remove_firstmate_home "$child_home" "child firstmate home" "$child_id" "$home" "$home/data/secondmates.md" "$child_proj" || return 1
-        remove_secondmate_registry_entry "$child_id" "$child_home" "$home/data/secondmates.md" "$child_registry_lock" || return 1
+        child_registry_prepared=$(prepare_secondmate_registry_removal "$child_id" "$child_home" "$home/data/secondmates.md" "$child_registry_lock") || return 1
+        IFS=$'\t' read -r child_registry_update child_registry_backup <<EOF
+$child_registry_prepared
+EOF
+        PREPARED_REGISTRY_PATH="$home/data/secondmates.md"
+        PREPARED_REGISTRY_BACKUP=$child_registry_backup
+        PREPARED_REGISTRY_ID=$child_id
+        PREPARED_REGISTRY_HOME=$child_home
+        PREPARED_REGISTRY_LOCK=$child_registry_lock
+        activate_secondmate_registry_removal "$home/data/secondmates.md" "$child_registry_lock" "$child_registry_update" || {
+          rm -f "$child_registry_update" "$child_registry_backup"
+          return 1
+        }
+        remove_firstmate_home "$child_home" "child firstmate home" "$child_id" "$home" "$home/data/secondmates.md" "$child_proj" || {
+          rollback_secondmate_registry_removal "$home/data/secondmates.md" "$child_registry_lock" "$child_registry_backup"
+          PREPARED_REGISTRY_PATH=
+          PREPARED_REGISTRY_BACKUP=
+          PREPARED_REGISTRY_ID=
+          PREPARED_REGISTRY_HOME=
+          PREPARED_REGISTRY_LOCK=
+          return 1
+        }
+        rm -f "$child_registry_backup"
+        PREPARED_REGISTRY_PATH=
+        PREPARED_REGISTRY_BACKUP=
+        PREPARED_REGISTRY_ID=
+        PREPARED_REGISTRY_HOME=
+        PREPARED_REGISTRY_LOCK=
         fm_account_lifecycle_lock_release "$child_registry_lock" || return 1
         child_registry_lock=
       fi
@@ -1987,7 +2038,7 @@ cleanup_firstmate_home_children() {
       if [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
         validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
         fm_checkout_lock_run "$child_wt" "$CHECKOUT_LOCK_ROOT" \
-          remove_child_orca_worktree_locked "$child_wt" "$child_proj" "$child_orca_worktree_id" "$child_id" || return 1
+          remove_child_orca_worktree_locked "$child_wt" "$child_proj" "$child_orca_worktree_id" "$child_id" "$child_meta" || return 1
       else
         echo "error: child Orca worktree identity for $child_id is unavailable; refusing provider removal" >&2
         return 1
@@ -1999,8 +2050,10 @@ cleanup_firstmate_home_children() {
           echo "error: retained child worktree $child_wt because Treehouse is unavailable; install or restore treehouse, then retry teardown" >&2
           return "$FM_CHECKOUT_TREEHOUSE_RETURN_UNAVAILABLE_STATUS"
         fi
+        CHILD_RETURN_META=$child_meta
+        CHILD_RETURN_ID=$child_id
         if teardown_treehouse_return "$child_wt" "$child_proj" "child worktree" \
-            "firstmate-$child_id" "" cleanup_returned_worktree; then
+            "firstmate-$child_id" validate_child_worktree_return_safety cleanup_returned_worktree; then
           :
         else
           child_return_rc=$?
@@ -2017,7 +2070,10 @@ cleanup_firstmate_home_children() {
           esac
           return "$child_return_rc"
         fi
+        CHILD_RETURN_META=
+        CHILD_RETURN_ID=
       else
+        validate_child_worktree_landed_state "$child_meta" "$child_id" "$child_wt" "$child_proj" || return 1
         safe_rm_rf_child_worktree "$child_wt" "$child_proj"
       fi
     fi
@@ -2029,52 +2085,55 @@ $child_metas
 EOF
 }
 
-remove_secondmate_registry_entry() {
-  local id=$1 home=$2 reg=${3:-$SECONDMATE_REG} registry_lock=${4:-} release_lock=0 tmp reg_dir status=1
-  if [ -n "$registry_lock" ]; then
-    fm_account_lifecycle_lock_owned "$registry_lock" || return 1
-  else
-    registry_lock=$(fm_secondmate_registry_lock_acquire "$CHECKOUT_LOCK_ROOT" "$reg") || return 1
-    release_lock=1
-  fi
-  require_registered_secondmate_home "$reg" "$id" "$home" || {
-    [ "$release_lock" != 1 ] || fm_account_lifecycle_lock_release "$registry_lock" >/dev/null 2>&1 || true
-    return 1
-  }
-  fm_account_safe_file_destination "$reg" || {
-    [ "$release_lock" != 1 ] || fm_account_lifecycle_lock_release "$registry_lock" >/dev/null 2>&1 || true
-    return 1
-  }
+prepare_secondmate_registry_removal() {
+  local id=$1 home=$2 reg=$3 registry_lock=$4 tmp backup reg_dir
+  fm_account_lifecycle_lock_owned "$registry_lock" || return 1
+  require_registered_secondmate_home "$reg" "$id" "$home" || return 1
+  fm_account_safe_file_destination "$reg" || return 1
   reg_dir=$(dirname "$reg")
-  tmp=$(mktemp "$reg_dir/.secondmates.XXXXXX") || {
-    [ "$release_lock" != 1 ] || fm_account_lifecycle_lock_release "$registry_lock" >/dev/null 2>&1 || true
+  tmp=$(mktemp "$reg_dir/.secondmates.XXXXXX") || return 1
+  backup=$(mktemp "$reg_dir/.secondmates-backup.XXXXXX") || {
+    rm -f "$tmp"
     return 1
   }
-  if ! python3 - "$reg" "$tmp" "$id" <<'PY'
-import sys
-
-source, destination, expected = sys.argv[1:]
-removed = 0
-with open(source, encoding="utf-8") as stream, open(destination, "w", encoding="utf-8") as output:
-    for line in stream:
-        if line.startswith("- "):
-            item = line[2:].split(None, 1)[0] if line[2:].strip() else ""
-            if item == expected:
-                removed += 1
-                continue
-        output.write(line)
-if removed != 1:
-    raise SystemExit(1)
-PY
-  then
-    rm -f "$tmp"
-  elif fm_account_safe_file_destination "$reg" && mv "$tmp" "$reg"; then
-    status=0
-  else
-    rm -f "$tmp"
+  if ! fm_account_system_perl -e '
+    my ($source, $destination, $backup, $expected) = @ARGV;
+    open my $input, q{<}, $source or exit 1;
+    open my $output, q{>}, $destination or exit 1;
+    open my $saved, q{>}, $backup or exit 1;
+    my $removed = 0;
+    while (my $line = <$input>) {
+      print {$saved} $line or exit 1;
+      if ($line =~ /^- ([A-Za-z0-9][A-Za-z0-9._-]*) / && $1 eq $expected) {
+        ++$removed;
+        next;
+      }
+      print {$output} $line or exit 1;
+    }
+    close $output or exit 1;
+    close $saved or exit 1;
+    exit 1 if $removed != 1;
+  ' "$reg" "$tmp" "$backup" "$id"; then
+    rm -f "$tmp" "$backup"
+    return 1
   fi
-  [ "$release_lock" != 1 ] || fm_account_lifecycle_lock_release "$registry_lock" >/dev/null 2>&1 || true
-  return "$status"
+  printf '%s\t%s\n' "$tmp" "$backup"
+}
+
+activate_secondmate_registry_removal() {
+  local reg=$1 registry_lock=$2 tmp=$3
+  fm_account_lifecycle_lock_owned "$registry_lock" || return 1
+  [ -f "$tmp" ] && [ ! -L "$tmp" ] || return 1
+  fm_account_safe_file_destination "$reg" || return 1
+  mv "$tmp" "$reg"
+}
+
+rollback_secondmate_registry_removal() {
+  local reg=$1 registry_lock=$2 backup=$3
+  fm_account_lifecycle_lock_owned "$registry_lock" || return 1
+  [ -f "$backup" ] && [ ! -L "$backup" ] || return 1
+  fm_account_safe_file_destination "$reg" || return 1
+  mv "$backup" "$reg"
 }
 
 validate_pending_orca_worktree_identity() {
@@ -2118,16 +2177,14 @@ pending_orca_endpoint_absent() {
         ;;
     esac
   fi
-  fm_backend_quiesce_worktree_terminals orca "$ORCA_WORKTREE_ID" "fm-$ID"
+  fm_backend_quiesce_worktree_terminals orca "$ORCA_WORKTREE_ID" "fm-$ID" "$T"
 }
 
 remove_pending_orca_worktree_locked() {
   validate_pending_orca_worktree_identity || return 1
   pending_orca_endpoint_absent || return 1
-  if [ "$FORCE" != "--force" ]; then
-    validate_worktree_teardown_safety || return 1
-    validate_pending_orca_worktree_identity || return 1
-  fi
+  validate_worktree_teardown_safety || return 1
+  validate_pending_orca_worktree_identity || return 1
   fm_backend_remove_worktree orca "$ORCA_WORKTREE_ID"
 }
 
@@ -2137,17 +2194,7 @@ if [ "$ORCA_CLEANUP_PENDING" = 1 ]; then
     exit 1
   }
   if [ -z "$ORCA_WORKTREE_ID" ]; then
-    if [ -n "$T" ]; then
-      case "$(fm_backend_target_state orca "$T" "fm-$ID" "")" in
-        present) fm_backend_quiesce_terminal orca "$T" "" "fm-$ID" || exit 1 ;;
-        absent) ;;
-        *)
-          echo "error: quarantined Orca terminal identity remains unproven for $ID" >&2
-          exit 1
-          ;;
-      esac
-    fi
-    echo "error: quarantined Orca worktree id remains unavailable for $ID; endpoint cleanup was attempted and retained metadata still blocks reuse" >&2
+    echo "error: quarantined Orca worktree id remains unavailable for $ID; refusing to close an unscoped terminal and retaining metadata for provider-assisted recovery by recorded project and task label" >&2
     exit 1
   fi
   WT=$(fm_backend_worktree_path orca "$ORCA_WORKTREE_ID") || {
@@ -2186,17 +2233,17 @@ if [ "$KIND" = secondmate ]; then
     if [ -n "$CHILD_METAS" ]; then
       child_meta=${CHILD_METAS%%$'\n'*}
       echo "REFUSED: secondmate $ID still has in-flight work in $SUB_STATE." >&2
-      echo "Found $(basename "$child_meta"). Let that home finish or explicitly discard with --force." >&2
+      echo "Found $(basename "$child_meta"). Let that home finish, or use --force to retire only after every child is proven landed and quiescent." >&2
       exit 1
     fi
   fi
 fi
 
-if [ "$KIND" = scout ] && [ "$FORCE" != "--force" ]; then
+if [ "$KIND" = scout ]; then
   REPORT="$DATA/$ID/report.md"
   if [ ! -f "$REPORT" ]; then
     echo "REFUSED: scout task $ID has no report at $REPORT." >&2
-    echo "The report is the work product. Have the crewmate write it, or use --force after explicit discard approval." >&2
+    echo "The report is the work product. Have the crewmate write it, then retry teardown." >&2
     exit 1
   fi
 fi
@@ -2294,10 +2341,10 @@ elif [ "$KIND" != secondmate ]; then
   validate_teardown_target_identity || { post_quiescence_safety_refusal; exit 1; }
 fi
 
-if [ "$BACKEND" = orca ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$FORCE" != "--force" ]; then
+if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
   if ! inspectable_git_worktree "$WT"; then
-    echo "REFUSED: Orca ship task $ID has no inspectable git worktree at ${WT:-<missing>}." >&2
-    echo "Cannot verify dirty or unlanded work; restore the worktree path or get explicit OK to discard, then --force." >&2
+    echo "REFUSED: Orca task $ID has no inspectable git worktree at ${WT:-<missing>}." >&2
+    echo "Cannot verify dirty or unlanded work; restore the worktree path, then retry teardown." >&2
     post_quiescence_safety_refusal
     exit 1
   fi
@@ -2305,7 +2352,7 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ] &&
   ORCA_PATH_MATCH_VERIFIED=1
 fi
 
-if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
+if [ -d "$WT" ]; then
   if validate_worktree_teardown_safety; then
     :
   else
@@ -2322,7 +2369,6 @@ fi
 
 # Report-gated tasks restore any pending rollback generation and fail closed on
 # their machine-global completion report before lease release or worktree removal.
-# --force is an explicit discard, not a completion.
 if [ "$REPORT_GATED" = 1 ]; then
   if [ "$MANAGED_ACCOUNT" = 1 ]; then
     reconcile_managed_account_rollback "$META" "$ID" "$DATA" || exit $?
@@ -2344,11 +2390,9 @@ fi
 remove_orca_worktree_locked() {
   local branch=HEAD
   validate_teardown_target_identity || return 1
-  fm_backend_quiesce_worktree_terminals orca "$ORCA_WORKTREE_ID" "fm-$ID" || return 1
-  if [ "$FORCE" != "--force" ]; then
-    validate_worktree_teardown_safety || return 1
-    validate_teardown_target_identity || return 1
-  fi
+  fm_backend_quiesce_worktree_terminals orca "$ORCA_WORKTREE_ID" "fm-$ID" "$T" || return 1
+  validate_worktree_teardown_safety || return 1
+  validate_teardown_target_identity || return 1
   if [ -d "$WT" ]; then
     branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null) || return 1
   fi
@@ -2371,7 +2415,7 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   # the project. teardown_treehouse_return tolerates transient and stale git locks
   # left by a killed crew process; see the script header for retry and stale-lock proof.
   post_lock_cleanup_check=
-  if [ "$FORCE" != "--force" ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ]; then
+  if [ "$KIND" != secondmate ]; then
     post_lock_cleanup_check=validate_worktree_teardown_safety
   fi
   teardown_treehouse_return "$WT" "$PROJ" "worktree" "firstmate-$ID" "$post_lock_cleanup_check" cleanup_returned_worktree || {
@@ -2424,8 +2468,29 @@ if [ "$KIND" = secondmate ]; then
     echo "error: secondmate $ID gained child state before its final removal boundary" >&2
     exit 1
   }
-  remove_firstmate_home "$HOME_PATH" "secondmate home" "$ID" "$FM_ROOT" "$SECONDMATE_REG" "$PROJ" || exit 1
-  remove_secondmate_registry_entry "$ID" "$HOME_PATH" "$SECONDMATE_REG" "$SECONDMATE_REGISTRY_LOCK" || exit 1
+  SECONDMATE_REGISTRY_PREPARED=$(prepare_secondmate_registry_removal "$ID" "$HOME_PATH" "$SECONDMATE_REG" "$SECONDMATE_REGISTRY_LOCK") || exit 1
+  IFS=$'\t' read -r SECONDMATE_REGISTRY_UPDATE SECONDMATE_REGISTRY_BACKUP <<EOF
+$SECONDMATE_REGISTRY_PREPARED
+EOF
+  PREPARED_REGISTRY_PATH=$SECONDMATE_REG
+  PREPARED_REGISTRY_BACKUP=$SECONDMATE_REGISTRY_BACKUP
+  PREPARED_REGISTRY_ID=$ID
+  PREPARED_REGISTRY_HOME=$HOME_PATH
+  PREPARED_REGISTRY_LOCK=$SECONDMATE_REGISTRY_LOCK
+  activate_secondmate_registry_removal "$SECONDMATE_REG" "$SECONDMATE_REGISTRY_LOCK" "$SECONDMATE_REGISTRY_UPDATE" || {
+    rm -f "$SECONDMATE_REGISTRY_UPDATE" "$SECONDMATE_REGISTRY_BACKUP"
+    exit 1
+  }
+  remove_firstmate_home "$HOME_PATH" "secondmate home" "$ID" "$FM_ROOT" "$SECONDMATE_REG" "$PROJ" || {
+    rollback_secondmate_registry_removal "$SECONDMATE_REG" "$SECONDMATE_REGISTRY_LOCK" "$SECONDMATE_REGISTRY_BACKUP"
+    exit 1
+  }
+  rm -f "$SECONDMATE_REGISTRY_BACKUP"
+  PREPARED_REGISTRY_PATH=
+  PREPARED_REGISTRY_BACKUP=
+  PREPARED_REGISTRY_ID=
+  PREPARED_REGISTRY_HOME=
+  PREPARED_REGISTRY_LOCK=
 fi
 remove_grok_turnend_auth "$STATE" "$ID"
 fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true

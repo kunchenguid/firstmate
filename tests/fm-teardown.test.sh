@@ -26,7 +26,7 @@
 #   (c) local-only + merged into local main, no remote         -> ALLOW  (no regression)
 #   (d) no-mistakes + HEAD on origin remote-tracking branch    -> ALLOW  (no regression)
 #   (e) no-mistakes + unpushed, no PR, content not in default  -> REFUSE (safety)
-#   (f) local-only + truly unpushed + --force                  -> ALLOW  (escape hatch)
+#   (f) local-only + truly unpushed + --force                  -> REFUSE (force retains work)
 #   (g) no-mistakes + squash-merged PR, exact PR head          -> ALLOW  (squash fix)
 #   (h) no-mistakes + no PR but content already in default     -> ALLOW  (content fallback)
 #   (i) no-mistakes + dirty worktree, even when work landed     -> REFUSE (dirty wins)
@@ -691,7 +691,7 @@ test_local_only_fork_remote_allows() {
   add_fork_with_pushed_branch "$case_dir"
 
   set +e
-  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
   rc=$?
   set -e
 
@@ -1741,7 +1741,7 @@ test_fractional_legacy_retry_wait_refuses_without_arithmetic_error() {
   pass "fractional legacy retry wait remains supported without arithmetic"
 }
 
-test_local_only_force_overrides_unpushed() {
+test_local_only_force_retains_unpushed() {
   local case_dir rc
   case_dir=$(make_case force-override)
   write_meta "$case_dir" local-only ship
@@ -1752,9 +1752,12 @@ test_local_only_force_overrides_unpushed() {
   rc=$?
   set -e
 
-  expect_code 0 "$rc" "force-override: --force should bypass the unpushed-work check"
-  ! grep -q REFUSED "$case_dir/stderr" || fail "force-override: REFUSED printed despite --force"
-  pass "local-only worktree with unpushed work is torn down under --force (escape hatch)"
+  expect_code 1 "$rc" "force-retention: --force must not bypass the unpushed-work check"
+  assert_present "$case_dir/wt" "force-retention removed a worktree with unpushed work"
+  assert_present "$case_dir/state/task-x1.meta" "force-retention removed task metadata"
+  assert_grep 'work not yet merged' "$case_dir/stderr" \
+    "force-retention did not surface the unpushed work"
+  pass "force teardown retains local-only unpushed work"
 }
 
 add_fake_agent_fleet() {
@@ -1788,7 +1791,7 @@ SH
   chmod +x "$case_dir/fakebin/agent-fleet" "$case_dir/fakebin/tmux"
 }
 
-test_managed_force_teardown_releases_lease_and_session() {
+test_managed_force_teardown_retains_unlanded_lease_and_session() {
   local case_dir af_log rc
   case_dir=$(make_case managed-force-release)
   af_log="$case_dir/agent-fleet.log"
@@ -1809,11 +1812,12 @@ test_managed_force_teardown_releases_lease_and_session() {
   rc=$?
   set -e
 
-  expect_code 0 "$rc" "managed-force-release: teardown should succeed: $(cat "$case_dir/stderr")"
-  assert_grep 'lease release --task fm-home-task-x1-attempt-a1 --force' "$af_log" "managed teardown did not release the lease"
-  assert_grep 'session remove --task fm-home-task-x1-attempt-a1' "$af_log" "managed teardown did not remove the session mapping"
-  assert_absent "$case_dir/state/task-x1.meta" "managed teardown left task metadata"
-  pass "managed teardown releases its lease and session mapping only after endpoint removal"
+  expect_code 1 "$rc" "managed-force-retention: teardown must retain unlanded work"
+  assert_no_grep 'lease release' "$af_log" "managed force teardown released the retained lease"
+  assert_no_grep 'session remove' "$af_log" "managed force teardown removed the retained session mapping"
+  assert_present "$case_dir/state/task-x1.meta" "managed force teardown removed retry metadata"
+  assert_present "$case_dir/wt" "managed force teardown removed unlanded work"
+  pass "managed force teardown retains unlanded lease and session state"
 }
 
 test_managed_teardown_retains_lease_when_endpoint_state_is_unknown() {
@@ -2854,7 +2858,7 @@ test_normal_secondmate_retires_proven_detached_head() {
   pass "normal secondmate retirement proves endpoint absence"
 }
 
-test_normal_secondmate_retains_untracked_skill_draft() {
+test_forced_secondmate_retains_untracked_skill_draft() {
   local case_dir draft rc
   case_dir=$(make_case secondmate-untracked-skill)
   prepare_secondmate_home_fixture "$case_dir"
@@ -2871,19 +2875,19 @@ test_normal_secondmate_retains_untracked_skill_draft() {
   printf '%s\n' draft > "$draft"
 
   set +e
-  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
   rc=$?
   set -e
-  expect_code 1 "$rc" "normal secondmate retirement must retain an untracked skill draft"
+  expect_code 1 "$rc" "forced secondmate retirement must retain an untracked skill draft"
   assert_present "$case_dir/fakebin/.tmux-live" "dirty-home refusal stopped the secondmate endpoint"
-  assert_present "$draft" "normal secondmate retirement discarded an untracked skill draft"
+  assert_present "$draft" "forced secondmate retirement discarded an untracked skill draft"
   assert_present "$case_dir/state/task-x1.meta" "dirty-home refusal removed secondmate metadata"
   assert_grep "new-skill/SKILL.md" "$case_dir/stderr" \
     "dirty-home refusal did not surface the untracked skill draft"
-  pass "normal secondmate retirement retains untracked skill drafts"
+  pass "forced secondmate retirement retains untracked skill drafts"
 }
 
-test_normal_secondmate_retains_unique_detached_head() {
+test_forced_secondmate_retains_unique_detached_head() {
   local case_dir rc
   case_dir=$(make_case secondmate-clean-unique-commit)
   prepare_secondmate_home_fixture "$case_dir"
@@ -2902,16 +2906,67 @@ test_normal_secondmate_retains_unique_detached_head() {
     commit --quiet -m unique
 
   set +e
-  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
   rc=$?
   set -e
-  expect_code 1 "$rc" "normal secondmate retirement must retain a clean unique commit"
+  expect_code 1 "$rc" "forced secondmate retirement must retain a clean unique commit"
   assert_present "$case_dir/fakebin/.tmux-live" "unique-commit refusal stopped the secondmate endpoint"
-  assert_present "$case_dir/wt/unique.txt" "normal secondmate retirement discarded a clean unique commit"
+  assert_present "$case_dir/wt/unique.txt" "forced secondmate retirement discarded a clean unique commit"
   assert_present "$case_dir/state/task-x1.meta" "unique-commit refusal removed secondmate metadata"
   assert_grep "not proven in authoritative" "$case_dir/stderr" \
     "unique-commit refusal did not surface the unlanded ref"
-  pass "normal secondmate retirement retains clean unique commits"
+  pass "forced secondmate retirement retains clean unique commits"
+}
+
+test_forced_secondmate_retains_stash() {
+  local case_dir rc
+  case_dir=$(make_case secondmate-retained-stash)
+  prepare_secondmate_home_fixture "$case_dir"
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    'window=fm-task-x1' \
+    'tmux_session_target=firstmate:fm-task-x1' \
+    "worktree=$case_dir/wt" \
+    "project=$case_dir/wt" \
+    'kind=secondmate' \
+    'mode=secondmate' \
+    "home=$case_dir/wt"
+  printf '%s\n' retained > "$case_dir/wt/retained-stash.txt"
+  git -C "$case_dir/wt" add retained-stash.txt
+  git -C "$case_dir/wt" stash push --quiet
+
+  set +e
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "forced secondmate retirement must retain stash history"
+  assert_present "$case_dir/wt" "forced secondmate retirement removed a home with a stash"
+  assert_present "$case_dir/state/task-x1.meta" "stash refusal removed secondmate metadata"
+  [ -n "$(git -C "$case_dir/wt" stash list)" ] || fail "forced secondmate retirement discarded the stash"
+  assert_grep "retained stash history" "$case_dir/stderr" \
+    "stash refusal was not surfaced"
+  pass "forced secondmate retirement retains stash history"
+}
+
+test_forced_secondmate_retains_unlanded_child_work() {
+  local case_dir child_id child_worktree rc
+  child_id=child-unlanded-x7
+  setup_forced_secondmate_child_case secondmate-child-unlanded "$child_id"
+  case_dir=$FORCED_CHILD_CASE_DIR
+  child_worktree=$FORCED_CHILD_WORKTREE
+  printf '%s\n' retained > "$child_worktree/untracked-child.txt"
+
+  set +e
+  FM_FAKE_PARENT_LIVE="$FORCED_CHILD_PARENT_LIVE" \
+    run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "forced secondmate cleanup must retain unlanded child work"
+  assert_present "$child_worktree/untracked-child.txt" "forced cleanup discarded untracked child work"
+  assert_present "$case_dir/wt/state/$child_id.meta" "forced cleanup removed child retry metadata"
+  assert_present "$case_dir/state/task-x1.meta" "forced cleanup removed parent retry metadata"
+  assert_grep "uncommitted changes" "$case_dir/stderr" \
+    "forced child retention did not surface uncommitted work"
+  pass "forced secondmate cleanup retains unlanded child work"
 }
 
 test_forced_secondmate_retains_unquiesced_unmanaged_child() {
@@ -3197,7 +3252,7 @@ test_secondmate_registry_duplicate_home_blocks_removal() {
   expect_code 1 "$rc" "duplicate secondmate registry home teardown exit"
   assert_present "$case_dir/wt" "duplicate registry home allowed secondmate removal"
   assert_present "$case_dir/state/task-x1.meta" "duplicate registry home allowed metadata removal"
-  assert_grep 'is shared by task-x1 and other-secondmate' "$case_dir/stderr" \
+  assert_grep 'secondmate registry is malformed, duplicated, redirected' "$case_dir/stderr" \
     "duplicate secondmate registry home was not surfaced"
   pass "secondmate retirement rejects registry home aliases"
 }
@@ -3382,12 +3437,12 @@ if [ "${FM_TEST_FOCUSED:-}" = tasktmp-safety ]; then
 fi
 
 if [ "${FM_TEST_FOCUSED:-}" = managed-force-release ]; then
-  test_managed_force_teardown_releases_lease_and_session
+  test_managed_force_teardown_retains_unlanded_lease_and_session
   exit 0
 fi
 
 if [ "${FM_TEST_FOCUSED:-}" = managed-endpoint-identity ]; then
-  test_managed_force_teardown_releases_lease_and_session
+  test_managed_force_teardown_retains_unlanded_lease_and_session
   test_managed_teardown_retains_lease_when_endpoint_state_is_unknown
   exit 0
 fi
@@ -3479,8 +3534,10 @@ if [ "${FM_TEST_FOCUSED:-}" = review-round-teardown-ownership ]; then
   test_teardown_rechecks_treehouse_lease_after_locked_safety
   test_secondmate_rejects_drifted_home_repository_identity
   test_normal_secondmate_retires_proven_detached_head
-  test_normal_secondmate_retains_untracked_skill_draft
-  test_normal_secondmate_retains_unique_detached_head
+  test_forced_secondmate_retains_untracked_skill_draft
+  test_forced_secondmate_retains_unique_detached_head
+  test_forced_secondmate_retains_stash
+  test_forced_secondmate_retains_unlanded_child_work
   test_forced_secondmate_retains_unquiesced_unmanaged_child
   exit 0
 fi
@@ -3500,8 +3557,8 @@ test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
 test_no_mistakes_origin_remote_allows
 test_no_mistakes_truly_unpushed_refuses
-test_local_only_force_overrides_unpushed
-test_managed_force_teardown_releases_lease_and_session
+test_local_only_force_retains_unpushed
+test_managed_force_teardown_retains_unlanded_lease_and_session
 test_managed_teardown_retains_lease_when_endpoint_state_is_unknown
 test_managed_release_failure_preserves_unrecycled_worktree_for_retry
 test_managed_teardown_locks_generation_before_endpoint_cleanup
@@ -3522,8 +3579,10 @@ test_teardown_rejects_drifted_treehouse_task_lease
 test_teardown_rechecks_treehouse_lease_after_locked_safety
 test_secondmate_rejects_drifted_home_repository_identity
 test_normal_secondmate_retires_proven_detached_head
-test_normal_secondmate_retains_untracked_skill_draft
-test_normal_secondmate_retains_unique_detached_head
+test_forced_secondmate_retains_untracked_skill_draft
+test_forced_secondmate_retains_unique_detached_head
+test_forced_secondmate_retains_stash
+test_forced_secondmate_retains_unlanded_child_work
 test_forced_secondmate_retains_unquiesced_unmanaged_child
 test_secondmate_registry_duplicate_home_blocks_removal
 test_secondmate_retirement_serializes_child_spawn

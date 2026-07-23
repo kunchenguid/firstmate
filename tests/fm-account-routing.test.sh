@@ -5,6 +5,8 @@
 set -u
 export FM_ACCOUNT_ROUTING_TEST_LAB=firstmate-account-routing-test-lab-v1
 export FM_ACCOUNT_ROUTING_LEGACY_NEW_LAUNCH_TEST=firstmate-remove-fleet-routing-deadcode-fixture-v1
+export FM_ORCA_TEST_LAB=firstmate-orca-test-lab-v1
+export FM_ORCA_TEST_AUTHORITY_CAPABILITIES=verified-v1
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
@@ -5798,7 +5800,7 @@ test_secondmate_home_lock_key_fails_closed_without_fixed_hasher() {
     FM_ACCOUNT_TEST_HOOKS=firstmate-account-tests-v1 \
     bash -c '
       . "$1/bin/fm-account-routing-lib.sh"
-      FM_ACCOUNT_SYSTEM_PERL_BIN=
+      FM_CHECKOUT_SYSTEM_PERL_BIN=
       fm_secondmate_home_lifecycle_lock_acquire "$2" "$3"
     ' _ "$ROOT" "$state" "$home" 2>&1)
   status=$?
@@ -5811,6 +5813,33 @@ test_secondmate_home_lock_key_fails_closed_without_fixed_hasher() {
   pass "secondmate home lifecycle locks fail closed without fixed hashing"
 }
 
+test_secondmate_home_lock_key_uses_filesystem_identity() {
+  local home dotted case_alias missing_upper missing_lower key dotted_key case_key missing_upper_key missing_lower_key
+  home="$TMP_ROOT/secondmate-lock-identity-home"
+  mkdir -p "$home"
+  dotted="$home/."
+  key=$(bash -c '. "$1/bin/fm-account-routing-lib.sh"; fm_account_stable_path_key "$2" directory' _ "$ROOT" "$home") \
+    || fail "secondmate home identity key was unavailable"
+  dotted_key=$(bash -c '. "$1/bin/fm-account-routing-lib.sh"; fm_account_stable_path_key "$2" directory' _ "$ROOT" "$dotted") \
+    || fail "dotted secondmate home identity key was unavailable"
+  [ "$key" = "$dotted_key" ] || fail "one physical home produced different keys through a dotted alias"
+  case_alias=$(printf '%s\n' "$home" | tr '[:lower:]' '[:upper:]')
+  if [ "$case_alias" != "$home" ] && [ -d "$case_alias" ]; then
+    case_key=$(bash -c '. "$1/bin/fm-account-routing-lib.sh"; fm_account_stable_path_key "$2" directory' _ "$ROOT" "$case_alias") \
+      || fail "case-aliased secondmate home identity key was unavailable"
+    [ "$key" = "$case_key" ] || fail "one physical home produced different keys through a case alias"
+  fi
+  missing_upper="$TMP_ROOT/Missing-Secondmate-Home"
+  missing_lower="$TMP_ROOT/missing-secondmate-home"
+  missing_upper_key=$(bash -c '. "$1/bin/fm-account-routing-lib.sh"; fm_account_stable_path_key "$2" directory' _ "$ROOT" "$missing_upper") \
+    || fail "missing secondmate home identity key was unavailable"
+  missing_lower_key=$(bash -c '. "$1/bin/fm-account-routing-lib.sh"; fm_account_stable_path_key "$2" directory' _ "$ROOT" "$missing_lower") \
+    || fail "case-folded missing secondmate home identity key was unavailable"
+  [ "$missing_upper_key" = "$missing_lower_key" ] \
+    || fail "case aliases for one not-yet-created home produced different lifecycle keys"
+  pass "secondmate home lifecycle keys follow filesystem identity"
+}
+
 if [ "${FM_TEST_FOCUSED:-}" = symlink-artifacts ]; then
   run_isolated_test test_task_owned_account_artifacts_reject_symlink_paths
   exit 0
@@ -5818,6 +5847,7 @@ fi
 
 if [ "${FM_TEST_FOCUSED:-}" = review-round-refresh-races ]; then
   run_isolated_test test_secondmate_home_lock_key_fails_closed_without_fixed_hasher
+  run_isolated_test test_secondmate_home_lock_key_uses_filesystem_identity
   exit 0
 fi
 
@@ -6240,6 +6270,7 @@ run_isolated_test test_linux_stat_selection_avoids_filesystem_stat_output
 run_isolated_test test_stale_reclaim_guard_is_owned_before_lock_removal
 run_isolated_test test_task_owned_account_artifacts_reject_symlink_paths
 run_isolated_test test_secondmate_home_lock_key_fails_closed_without_fixed_hasher
+run_isolated_test test_secondmate_home_lock_key_uses_filesystem_identity
 run_isolated_test test_account_lineage_rejects_parent_swap_during_transaction
 run_isolated_test test_agent_fleet_contract_is_validated_before_routing
 run_isolated_test test_agent_fleet_entrypoint_is_physically_pinned_per_operation
