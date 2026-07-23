@@ -34,6 +34,7 @@ const retryMaxMs = positiveInteger("FM_WATCH_REARM_RETRY_MAX_MS", 4000);
 const retryLimit = positiveInteger("FM_WATCH_REARM_RETRY_LIMIT", 5);
 const armReadyTimeoutMs = positiveInteger("FM_PI_ARM_READY_TIMEOUT_MS", 12000);
 const armRetireTimeoutMs = positiveInteger("FM_WATCH_ARM_RETIRE_TIMEOUT_MS", 1000);
+const repairOnlyHint = "call fm_watch_arm_pi again only after a later notification says the cycle is missing, failed, or unhealthy";
 
 let child: ChildProcess | null = null;
 let retryTimer: ReturnType<typeof setTimeout> | null = null;
@@ -248,8 +249,18 @@ export default function (pi: ExtensionAPI) {
       };
     }
     markLoaded();
-    if (child) return { ok: true, message: "watcher: healthy - Pi extension already has an arm child" };
-    if (retryTimer) return { ok: true, message: "watcher: continuity retry already scheduled by the Pi extension" };
+    if (child) {
+      return {
+        ok: true,
+        message: `watcher: unchanged - Pi extension already owns an arm child; no manual re-arm needed; ${repairOnlyHint}`,
+      };
+    }
+    if (retryTimer) {
+      return {
+        ok: true,
+        message: `watcher: unchanged - Pi extension already owns a scheduled continuity retry; no manual re-arm needed; ${repairOnlyHint}`,
+      };
+    }
     const id = ++seq;
     const env = {
       ...process.env,
@@ -335,7 +346,10 @@ export default function (pi: ExtensionAPI) {
       if (restoring) return;
       scheduleRetry(`watcher: FAILED - Pi extension arm child ${id} failed: ${error.message}`, String(armChild.pid ?? ""));
     });
-    return { ok: true, message: `watcher: started Pi extension arm child ${id}` };
+    return {
+      ok: true,
+      message: `watcher: started Pi extension arm child ${id}; future ordinary re-arms are automatic; ${repairOnlyHint}`,
+    };
   }
 
   pi.on?.("session_start", () => {
@@ -357,10 +371,10 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool?.({
     name: "fm_watch_arm_pi",
     label: "Arm firstmate watcher",
-    description: "Arm Pi watcher supervision. Always use this tool instead of running bin/fm-watch-arm.sh through bash.",
-    promptSnippet: "Arm firstmate watcher supervision through Pi without a foreground bash arm.",
+    description: "Start the first required Pi watcher cycle, or repair one only after a notification says the cycle is missing, failed, or unhealthy. Do not call after ordinary work or ordinary notifications; the Pi extension re-arms automatically. Never run bin/fm-watch-arm.sh through bash.",
+    promptSnippet: "Start the first required Pi watcher cycle or repair a cycle reported missing, failed, or unhealthy; ordinary re-arming is automatic.",
     promptGuidelines: [
-      "For Pi watcher supervision, call fm_watch_arm_pi instead of running bin/fm-watch-arm.sh through bash.",
+      "Call fm_watch_arm_pi only for the first required cycle or after a notification says the cycle is missing, failed, or unhealthy. Do not call it after ordinary work, turn completion, or ordinary signal, stale, check, or heartbeat handling because the Pi extension owns re-arming. Never run bin/fm-watch-arm.sh through bash.",
     ],
     parameters: Type.Object({}),
     execute: async () => {

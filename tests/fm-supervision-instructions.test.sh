@@ -67,30 +67,51 @@ test_repair_lines() {
   pass "renderer repair-line mode is harness-aware and honors conditional state"
 }
 
-test_ordinary_wake_lines_are_distinct_from_repair() {
-  local claude_ordinary opencode_ordinary out pi_ordinary
+test_cross_harness_ordinary_continuation_and_repair_matrix() {
+  local ordinary out
 
   out=$("$RENDER" --harness pi)
-  pi_ordinary=$(printf '%s\n' "$out" | grep -F -- '- Ordinary wake:')
-  assert_contains "$pi_ordinary" "Pi extension already owns watcher continuity" "pi ordinary-wake line does not leave continuity to the extension"
-  assert_not_contains "$pi_ordinary" "fm_watch_arm_pi" "pi ordinary-wake line incorrectly calls the recovery tool"
-
+  ordinary=$(printf '%s\n' "$out" | grep -F -- '- Ordinary wake:')
+  assert_contains "$ordinary" "Pi extension already owns watcher continuity" "pi ordinary-wake line does not leave continuity to the extension"
+  assert_not_contains "$ordinary" "fm_watch_arm_pi" "pi ordinary-wake line incorrectly calls the recovery tool"
   out=$("$RENDER" --harness pi --repair-line)
   assert_contains "$out" "fm_watch_arm_pi" "pi recovery line lost the extension-owned repair tool"
 
-  out=$("$RENDER" --harness claude)
-  claude_ordinary=$(printf '%s\n' "$out" | grep -F -- '- Ordinary wake:')
-  assert_contains "$claude_ordinary" "re-arm" "claude ordinary-wake line does not tell the model to re-arm"
-  assert_contains "$claude_ordinary" "bin/fm-watch-arm.sh" "claude ordinary-wake line lost the background arm command"
-
   out=$("$RENDER" --harness opencode)
-  opencode_ordinary=$(printf '%s\n' "$out" | grep -F -- '- Ordinary wake:')
-  assert_contains "$opencode_ordinary" "plugin already owns watcher continuity" "opencode ordinary-wake line does not leave continuity to the plugin"
-  assert_not_contains "$opencode_ordinary" "bin/fm-watch-arm.sh" "opencode ordinary-wake line incorrectly calls the recovery probe"
-
+  ordinary=$(printf '%s\n' "$out" | grep -F -- '- Ordinary wake:')
+  assert_contains "$ordinary" "plugin already owns watcher continuity" "opencode ordinary-wake line does not leave continuity to the plugin"
+  assert_not_contains "$ordinary" "bin/fm-watch-arm.sh" "opencode ordinary-wake line incorrectly calls the recovery probe"
   out=$("$RENDER" --harness opencode --repair-line)
   assert_contains "$out" "manual recovery probe" "opencode recovery line lost its manual probe"
-  pass "renderer distinguishes ordinary wake continuation from failure recovery"
+
+  out=$("$RENDER" --harness claude)
+  ordinary=$(printf '%s\n' "$out" | grep -F -- '- Ordinary wake:')
+  assert_contains "$ordinary" "re-arm" "claude ordinary-wake line does not tell the model to re-arm"
+  assert_contains "$ordinary" "Claude Code background task" "claude ordinary-wake line lost tracked background ownership"
+  assert_contains "$ordinary" "bin/fm-watch-arm.sh" "claude ordinary-wake line lost the background arm command"
+  out=$("$RENDER" --harness claude --repair-line)
+  assert_contains "$out" "Claude Code background task" "claude recovery line lost its tracked background repair"
+  assert_contains "$out" "bin/fm-watch-arm.sh" "claude recovery line lost the arm command"
+
+  out=$("$RENDER" --harness grok)
+  ordinary=$(printf '%s\n' "$out" | grep -F -- '- Ordinary wake:')
+  assert_contains "$ordinary" "re-arm" "grok ordinary-wake line does not tell the model to re-arm"
+  assert_contains "$ordinary" "Grok tracked background task" "grok ordinary-wake line lost tracked background ownership"
+  assert_contains "$ordinary" "bin/fm-watch-arm.sh" "grok ordinary-wake line lost the background arm command"
+  out=$("$RENDER" --harness grok --repair-line)
+  assert_contains "$out" "Grok tracked background task" "grok recovery line lost its tracked background repair"
+  assert_contains "$out" "bin/fm-watch-arm.sh" "grok recovery line lost the arm command"
+
+  out=$("$RENDER" --harness codex)
+  ordinary=$(printf '%s\n' "$out" | grep -F -- '- Ordinary wake:')
+  assert_contains "$ordinary" "next foreground" "codex ordinary-wake line lost its foreground checkpoint"
+  assert_contains "$ordinary" "bin/fm-watch-checkpoint.sh" "codex ordinary-wake line lost the checkpoint command"
+  assert_not_contains "$ordinary" "bin/fm-watch-arm.sh" "codex ordinary-wake line incorrectly uses a background arm"
+  out=$("$RENDER" --harness codex --repair-line)
+  assert_contains "$out" "foreground checkpoint" "codex recovery line lost its checkpoint repair"
+  assert_contains "$out" "bin/fm-watch-checkpoint.sh" "codex recovery line lost the checkpoint command"
+
+  pass "renderer preserves every harness ordinary-continuation and missing-cycle repair path"
 }
 
 test_grok_is_background_notify() {
@@ -137,7 +158,7 @@ test_selected_harness_block_only
 test_unknown_fallback
 test_conditional_stanzas
 test_repair_lines
-test_ordinary_wake_lines_are_distinct_from_repair
+test_cross_harness_ordinary_continuation_and_repair_matrix
 test_grok_is_background_notify
 test_grok_command_sources_effective_config
 test_pi_snippet_uses_effective_extension_path
