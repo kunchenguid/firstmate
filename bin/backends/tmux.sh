@@ -54,17 +54,38 @@ fm_backend_tmux_send_text_submit() {  # <target> <text> <retries> <enter-sleep> 
   fm_tmux_submit_core "$@"
 }
 
-# fm_backend_tmux_container_ensure: reuse the current tmux session when
-# firstmate itself runs inside tmux, else ensure a dedicated detached
-# "firstmate" session exists. Mirrors fm-spawn.sh's container-ensure block;
-# prints the resolved session name.
+# fm_backend_tmux_container_ensure: ensure the session named after FM_HOME's
+# basename, claim an existing unstamped session for compatibility, and refuse
+# a session already stamped with another physical FM_HOME. The readable name
+# keeps `tmux attach -t <home-basename>` practical while the stamp makes equal
+# basenames under different parent directories fail closed. Prints the
+# resolved session name.
 fm_backend_tmux_container_ensure() {
-  if [ -n "${TMUX:-}" ]; then
-    tmux display-message -p '#S'
-  else
-    tmux has-session -t firstmate 2>/dev/null || tmux new-session -d -s firstmate
-    printf 'firstmate'
+  local home session owner option=@firstmate-home
+  home=$(cd "$FM_HOME" 2>/dev/null && pwd -P) || {
+    echo "error: tmux backend cannot resolve FM_HOME '$FM_HOME'" >&2
+    return 1
+  }
+  session=${home##*/}
+  if [ -z "$session" ]; then
+    echo "error: tmux backend cannot derive a session name from FM_HOME '$home'" >&2
+    return 1
   fi
+  if ! tmux list-sessions -F '#{session_name}' 2>/dev/null | grep -Fqx "$session"; then
+    tmux new-session -d -s "$session" 2>/dev/null \
+      || tmux list-sessions -F '#{session_name}' 2>/dev/null | grep -Fqx "$session" \
+      || return 1
+  fi
+  owner=$(tmux show-options -t "$session" -v "$option" 2>/dev/null) || owner=
+  if [ -z "$owner" ]; then
+    tmux set-option -o -t "$session" "$option" "$home" 2>/dev/null || true
+    owner=$(tmux show-options -t "$session" -v "$option" 2>/dev/null) || owner=
+  fi
+  if [ "$owner" != "$home" ]; then
+    echo "error: tmux session '$session' belongs to FM_HOME '${owner:-unknown}', not '$home'; refusing to reuse it" >&2
+    return 1
+  fi
+  printf '%s' "$session"
 }
 
 # fm_backend_tmux_create_task: create the task's window in <proj-abs>,

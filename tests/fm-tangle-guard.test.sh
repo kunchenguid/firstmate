@@ -163,6 +163,8 @@ case "$*" in
 esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
+  list-sessions) basename "$(cd "$FM_HOME" && pwd -P)"; exit 0 ;;
+  show-options) (cd "$FM_HOME" && pwd -P); exit 0 ;;
   list-windows) exit 0 ;;
   has-session|new-session|new-window|send-keys) exit 0 ;;
 esac
@@ -243,6 +245,8 @@ case "$*" in
 esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
+  list-sessions) basename "$(cd "$FM_HOME" && pwd -P)"; exit 0 ;;
+  show-options) (cd "$FM_HOME" && pwd -P); exit 0 ;;
   new-window) printf '%s\n' "@spawnwid"; exit 0 ;;
   list-windows) exit 0 ;;
   has-session|new-session|send-keys|set-window-option) exit 0 ;;
@@ -283,9 +287,9 @@ test_spawn_tmux_window_construction() {
   assert_contains "$out" "spawned rec-win-gg7" "recording spawn did not report success"
 
   # Bug 1 fix: append-form window creation (trailing colon on the session target).
-  assert_grep "new-window -dP -F #{window_id} -t firstmate: -n fm-rec-win-gg7" "$rec" \
+  assert_grep "new-window -dP -F #{window_id} -t spawn-rec-home: -n fm-rec-win-gg7" "$rec" \
     "new-window must append at the session (trailing colon) and capture the window id"
-  assert_no_grep "new-window -dP -F #{window_id} -t firstmate -n" "$rec" \
+  assert_no_grep "new-window -dP -F #{window_id} -t spawn-rec-home -n" "$rec" \
     "new-window must not target the bare session name (collides under base-index 1)"
 
   # Bug 2 fix (a): pin the window name against automatic-rename / allow-rename.

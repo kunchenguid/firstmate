@@ -20,6 +20,8 @@ case "$*" in
 esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
+  list-sessions) basename "$(cd "$FM_HOME" && pwd -P)"; exit 0 ;;
+  show-options) (cd "$FM_HOME" && pwd -P); exit 0 ;;
   list-windows) exit 0 ;;
   has-session|new-session|new-window|send-keys|kill-window) exit 0 ;;
 esac

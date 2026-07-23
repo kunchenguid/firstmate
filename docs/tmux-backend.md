@@ -26,20 +26,20 @@ This mainly matters as an opt-out of herdr or cmux runtime auto-detection (see [
 Nothing to provision up front.
 The first crewmate spawn creates whatever tmux session and window it needs.
 
-## Run inside tmux for the best experience
+## Session per firstmate home
 
-Launch your harness from inside a tmux session (`tmux new -s firstmate` or similar, then start your agent).
-Every crewmate window then lands in that same session, where you can watch the crew work in real time or type into any window to intervene.
-When following the commands below, use that session's actual name.
-Inside tmux, `tmux display-message -p '#S'` prints it.
+Every firstmate home uses the tmux session named after that home's directory basename, whether the harness runs inside or outside tmux.
+For example, `~/orca/firstmate` uses `firstmate`, while `~/orca/firstmate-life` uses `firstmate-life`.
+Each session carries an `@firstmate-home` option containing the physical `FM_HOME` path.
+If another home with the same basename tries to reuse that session, firstmate reports the conflicting owner and refuses the spawn.
+An existing unstamped session is stamped on its first reuse so the historical `firstmate` session and all of its existing windows and task records remain valid.
 
-## Outside tmux: the detached `firstmate` session
+## Watching crew in tmux
 
-If you launch your harness outside of tmux, crewmate windows land in a detached session named `firstmate`, created on first use.
-Attach to it any time with:
+Attach to the session named after the active firstmate home:
 
 ```sh
-tmux attach -t firstmate
+tmux attach -t <home-basename>
 ```
 
 ## Watching and typing into crew windows
@@ -51,7 +51,7 @@ tmux list-windows -t <session-name>          # see every crew window
 tmux select-window -t <session-name>:fm-<id> # jump to one, or use ctrl-b <n>
 ```
 
-Use the current tmux session name when firstmate was launched inside tmux; use `firstmate` only for the detached outside-tmux path.
+Use the firstmate home basename as the session name.
 Typing directly into an attached window is authoritative direct intervention - the first mate treats it the same as any other captain instruction and reconciles at the next heartbeat.
 You do not need to attach at all for routine supervision: from an active firstmate session, the first mate reads crew windows itself with `bin/fm-peek.sh fm-<id>` (a bounded, read-only capture) and steers a crew with `FM_HOME=<this-firstmate-home> bin/fm-send.sh fm-<id> "<text>"` unless `FM_HOME` is already set to the active firstmate home.
 
@@ -60,11 +60,22 @@ You do not need to attach at all for routine supervision: from an active firstma
 Ask the first mate for any small piece of work, or spawn a trivial scout task, and confirm a new window shows up:
 
 ```sh
-tmux list-windows -t <session-name>
+tmux list-windows -t <home-basename>
 ```
 
-Use the current tmux session name for the run-inside-tmux path, or `firstmate` for the detached outside-tmux path.
 You should see a `fm-<id>` window for the task, live and updating as the crewmate works.
+
+### Home-isolation verification, 2026-07-22
+
+Verified empirically with tmux 3.6a on macOS (Darwin 25.5.0 arm64) by `tests/fm-backend-tmux-smoke.test.sh` on a private tmux socket:
+
+```text
+ok - real tmux: two FM_HOME basenames create separate stamped sessions and task windows
+ok - real tmux: a basename collision with a mismatched ownership stamp errors and stops
+ok - real tmux: an existing unstamped basename session is claimed without disturbing its windows
+```
+
+The test creates `firstmate` and `firstmate-life`, creates one task window in each, reads both ownership stamps, attempts a conflicting second `firstmate` home, and confirms a legacy unstamped session keeps its existing window while being claimed.
 
 ## Agent liveness probe
 
