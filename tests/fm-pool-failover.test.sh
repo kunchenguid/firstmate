@@ -9,6 +9,12 @@ set -u
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
+# Fix a deterministic identity so this test's own fixture commit (the "task
+# work" commit below) never depends on the host git config. Without it, a
+# runner with no user.name/user.email (e.g. CI) aborts the commit with
+# "empty ident name" and the whole file exits 128.
+fm_git_identity
+
 FAILOVER="$ROOT/bin/fm-pool-failover.sh"
 TMP_ROOT=$(fm_test_tmproot fm-pool-failover)
 mkdir -p "$TMP_ROOT"
