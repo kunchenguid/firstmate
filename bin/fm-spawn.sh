@@ -197,12 +197,19 @@ esac
 # behind. Validated HERE, before any window exists, so a bad value refuses with
 # nothing to clean up rather than aborting mid-spawn or polling forever.
 WT_TIMEOUT=${FM_SPAWN_WORKTREE_TIMEOUT:-60}   # seconds allowed for treehouse get to enter the worktree
+WT_TIMEOUT_OK=1
 case "$WT_TIMEOUT" in
-  ''|*[!0-9]*|0)
-    echo "error: FM_SPAWN_WORKTREE_TIMEOUT must be a positive whole number of seconds (got '$WT_TIMEOUT')" >&2
-    exit 1
-    ;;
+  ''|*[!0-9]*) WT_TIMEOUT_OK=0 ;;
+  # Digits-only by here, so the numeric floor is safe to evaluate. It also
+  # subsumes 0 and the all-zero spellings 00/000, which the pattern above lets
+  # through: `[` reads leading zeros as decimal, and an all-zero budget would
+  # otherwise poll zero times on GNU seq but twice on BSD seq.
+  *) [ "$WT_TIMEOUT" -ge 2 ] || WT_TIMEOUT_OK=0 ;;
 esac
+[ "$WT_TIMEOUT_OK" -eq 1 ] || {
+  echo "error: FM_SPAWN_WORKTREE_TIMEOUT must be a whole number of seconds of at least 2, because the worktree-detection loop needs two polls to confirm the pane settled (got '$WT_TIMEOUT')" >&2
+  exit 1
+}
 
 # Backend selection (data/fm-backend-design-d7): explicit --backend, else
 # FM_BACKEND env, else config/backend, else runtime auto-detection, else
@@ -1070,7 +1077,12 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   # pane that is already settled by the first real read only costs the one existing
   # inter-poll sleep as confirmation, not a whole extra cycle on top.
   candidate=""
-  for _ in $(seq 1 "$WT_TIMEOUT"); do
+  # Counted rather than `for _ in $(seq 1 "$WT_TIMEOUT")`: the bound is operator
+  # controlled, and the command substitution would materialize the whole range
+  # before the first poll, so a fat-fingered budget would stall the spawn instead
+  # of simply waiting longer.
+  wt_poll=1
+  while [ "$wt_poll" -le "$WT_TIMEOUT" ]; do
     p=$(spawn_current_path "$WT_TARGET" || true)
     if [ -n "$p" ]; then
       p_real=$(real_path_or_raw "$p")
@@ -1087,6 +1099,7 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
       candidate=""
     fi
     sleep 1
+    wt_poll=$((wt_poll + 1))
   done
   if [ -z "$WT" ]; then
     echo "error: treehouse get did not enter a worktree within ${WT_TIMEOUT}s; a first-ever worktree for this project can need longer, so raise FM_SPAWN_WORKTREE_TIMEOUT and respawn. Inspect window $T" >&2

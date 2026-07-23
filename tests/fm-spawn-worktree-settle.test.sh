@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Regression test for the fm-spawn.sh treehouse-get worktree-detection loop
-# (bin/fm-spawn.sh, the `for _ in $(seq 1 "$WT_TIMEOUT")` loop after
+# (bin/fm-spawn.sh, the `while [ "$wt_poll" -le "$WT_TIMEOUT" ]` loop after
 # `treehouse get`), covering both how it settles on a worktree and how long it
 # is willing to wait for one.
 #
@@ -249,9 +249,12 @@ test_raised_budget_survives_a_slow_first_worktree() {
 
 # An unusable budget is refused by name and by value, before any window exists -
 # never silently reset to the default and never left to poll forever.
+# 1 is unusable because the loop needs two polls to confirm a worktree, and the
+# all-zero spellings are unusable in a platform-dependent way: `seq 1 00` yields
+# no iterations on GNU seq but counts down to two on BSD seq.
 test_invalid_budget_is_refused_before_spawning() {
   local rec id bad out status n=0
-  for bad in abc 0 -5 '3s' 6.5; do
+  for bad in abc 0 -5 '3s' 6.5 1 00 000; do
     n=$((n + 1))
     id="settle-budget-invalid-$n-z6"
     rec=$(make_settle_case "settle-budget-invalid-$n" "$id" 0)
@@ -260,14 +263,14 @@ test_invalid_budget_is_refused_before_spawning() {
     out=$(FM_SPAWN_WORKTREE_TIMEOUT="$bad" run_settle_spawn "$id")
     status=$?
     expect_code 1 "$status" "spawn should refuse FM_SPAWN_WORKTREE_TIMEOUT='$bad'"
-    assert_contains "$out" "FM_SPAWN_WORKTREE_TIMEOUT must be a positive whole number of seconds (got '$bad')" \
+    assert_contains "$out" "FM_SPAWN_WORKTREE_TIMEOUT must be a whole number of seconds of at least 2, because the worktree-detection loop needs two polls to confirm the pane settled (got '$bad')" \
       "refusal did not name the offending FM_SPAWN_WORKTREE_TIMEOUT value '$bad'"
     assert_absent "$HOME_DIR/state/$id.meta" \
       "a refused budget must not leave task metadata behind for '$bad'"
     [ "$(pane_reads)" = 0 ] || \
       fail "spawn polled the pane $(pane_reads) times before refusing '$bad', expected 0"
   done
-  pass "a non-numeric, fractional, zero, or negative FM_SPAWN_WORKTREE_TIMEOUT is refused by value before any window is created"
+  pass "a non-numeric, fractional, negative, all-zero, or below-two FM_SPAWN_WORKTREE_TIMEOUT is refused by value before any window is created"
 }
 
 test_single_stale_first_read_is_not_accepted
