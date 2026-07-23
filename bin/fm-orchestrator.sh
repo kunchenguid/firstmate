@@ -259,9 +259,17 @@ cmd_check() {
     echo "error: $RELAUNCH_BIN not found or not executable; cannot fire" >&2
     exit 1
   }
+  local rc=0
+  set +e
   "$RELAUNCH_BIN" run
+  rc=$?
+  set -e
   mkdir -p "$STATE"
   date +%s > "$COOLDOWN_FILE"
+  if [ "$rc" -ne 0 ]; then
+    echo "error: $RELAUNCH_BIN run failed (exit $rc)" >&2
+    exit "$rc"
+  fi
   echo "check: fired session resume"
 }
 
