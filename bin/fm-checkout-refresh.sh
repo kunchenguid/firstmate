@@ -27,8 +27,8 @@
 # Its default state is under checkout-refresh/homes/<FM_HOME hash>, while
 # checkout-refresh/locks remains shared so every fm-fleet-sync.sh caller
 # serializes mutation of the same clone.
-# Bounded child commands stay inside the refresher's process group, so the
-# aggregate session-start timeout still owns every nested fetch and fast-forward.
+# Bounded probes and acquisitions terminate and reap their complete process tree.
+# fm-fleet-sync.sh owns the equivalent per-checkout refresh bound for every caller.
 # FM_TREEHOUSE_ACQUIRE_TIMEOUT applies the same process-tree ownership to the
 # synchronous durable lease acquired before a task endpoint is created.
 #
@@ -119,6 +119,8 @@ LAUNCHCTL=${FM_CHECKOUT_REFRESH_LAUNCHCTL:-launchctl}
 # shellcheck source=bin/fm-gate-refuse-lib.sh
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 fm_refuse_if_gate_agent
+# shellcheck source=bin/fm-process-tree-lib.sh
+. "$SCRIPT_DIR/fm-process-tree-lib.sh"
 
 case "$INTERVAL" in ''|*[!0-9]*|0) echo "error: FM_CHECKOUT_REFRESH_INTERVAL must be a positive integer" >&2; exit 2 ;; esac
 case "$BACKSTOP" in ''|*[!0-9]*|0) echo "error: FM_CHECKOUT_REFRESH_BACKSTOP must be a positive integer" >&2; exit 2 ;; esac
@@ -137,6 +139,15 @@ first_line() {
 canonical_dir() {
   [ -d "$1" ] || return 1
   (cd "$1" 2>/dev/null && pwd -P)
+}
+
+exact_git_root() {
+  local candidate=$1 canonical top canonical_top
+  canonical=$(canonical_dir "$candidate") || return 1
+  top=$(git -C "$canonical" rev-parse --show-toplevel 2>/dev/null) || return 1
+  canonical_top=$(canonical_dir "$top") || return 1
+  [ "$canonical" = "$canonical_top" ] || return 1
+  printf '%s\n' "$canonical"
 }
 
 expand_config_path() {
@@ -358,10 +369,10 @@ discover() {
   fi
   while IFS= read -r project; do
     [ -n "$project" ] || continue
-    if main=$(canonical_dir "$project" 2>/dev/null); then
+    if main=$(exact_git_root "$project"); then
       printf '%s\n' "$main" >> "$seeds"
     else
-      echo "checkout-refresh: skipped: active-home project is not canonically inspectable: $project" >&2
+      echo "checkout-refresh: skipped: active-home project is not an exact inspectable Git repository root: $project" >&2
       failed=1
     fi
   done < "$project_paths"
@@ -427,24 +438,25 @@ discover() {
   rm -rf "$tmp"
 }
 
-run_bounded() {
-  local seconds=$1
-  shift
-  command -v perl >/dev/null 2>&1 || {
-    echo "error: perl is required for bounded checkout refresh process control" >&2
-    return 127
-  }
-  # shellcheck disable=SC2016
-  perl -e 'sub tree { my ($root) = @_; my %children; open my $ps, "-|", "ps", "-axo", "pid=,ppid=" or return ($root); while (<$ps>) { my ($pid, $ppid) = /(\d+)\s+(\d+)/; push @{$children{$ppid}}, $pid if defined $pid } close $ps; my @out = ($root); for (my $i = 0; $i < @out; $i++) { push @out, @{$children{$out[$i]} || []} } return @out } sub alive { grep { kill 0, $_ } @_ } sub stop_tree { my ($root) = @_; my @seen = tree($root); kill "TERM", reverse @seen; for (1 .. 20) { last unless alive(@seen); select undef, undef, undef, 0.05 } my %seen; @seen = grep { !$seen{$_}++ } (@seen, tree($root)); my @left = alive(@seen); kill "KILL", reverse @left if @left; waitpid $root, 0; for (1 .. 20) { last unless alive(@seen); select undef, undef, undef, 0.05 } } my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { exec @ARGV; exit 127 } local $SIG{ALRM} = sub { stop_tree($pid); exit 124 }; alarm $t; waitpid $pid, 0; alarm 0; my $status = $?; exit(($status & 127) ? 128 + ($status & 127) : $status >> 8)' "$seconds" "$@"
-}
-
 acquire_worktree() {
   local expected_source=$1 lease_holder=$2 status=0
   [ -d "$expected_source" ] \
     || { echo "error: Treehouse acquisition source is not a directory: $expected_source" >&2; return 1; }
   (
+    local expected_common checkout_lock
+    ensure_lock_roots || exit 1
+    expected_common=$(git_common_dir "$expected_source") || {
+      echo "error: cannot resolve Treehouse acquisition lock identity for $expected_source" >&2
+      exit 1
+    }
+    checkout_lock="$LOCK_ROOT/$(checkout_key "$expected_common").lock"
+    if ! fm_lock_try_acquire "$checkout_lock"; then
+      echo "error: Treehouse acquisition already running for $expected_source (pid ${FM_LOCK_HELD_PID:-unknown})" >&2
+      exit 1
+    fi
+    trap 'fm_lock_release "$checkout_lock"' EXIT
     cd "$expected_source" || exit 1
-    run_bounded "$ACQUIRE_TIMEOUT" treehouse get --lease --lease-holder "$lease_holder"
+    fm_run_bounded "$ACQUIRE_TIMEOUT" treehouse get --lease --lease-holder "$lease_holder"
   ) || status=$?
   case "$status" in
     0) return 0 ;;
@@ -464,7 +476,7 @@ probe_upstream() {
   local checkout=$1 out line ref
   PROBE_BRANCH=
   PROBE_TIP=
-  out=$(run_bounded "$PROBE_TIMEOUT" git -C "$checkout" ls-remote --symref origin HEAD 2>/dev/null) || return 1
+  out=$(fm_run_bounded "$PROBE_TIMEOUT" git -C "$checkout" ls-remote --symref origin HEAD 2>/dev/null) || return 1
   while IFS= read -r line; do
     case "$line" in
       "ref: refs/heads/"*$'\t'"HEAD")
@@ -605,15 +617,14 @@ sync_checkout() {
   local status
   if (
     export FM_FLEET_PRUNE="$prune"
-    run_bounded "$SYNC_TIMEOUT" "$SCRIPT_DIR/fm-fleet-sync.sh" "$checkout"
+    export FM_CHECKOUT_REFRESH_SYNC_TIMEOUT="$SYNC_TIMEOUT"
+    "$SCRIPT_DIR/fm-fleet-sync.sh" "$checkout"
   ) > "$output_file" 2>&1; then
     status=0
   else
     status=$?
   fi
-  if [ "$status" -eq 124 ]; then
-    printf '%s: skipped: refresh timed out after %ss\n' "$checkout" "$SYNC_TIMEOUT" > "$output_file"
-  elif [ "$status" -ne 0 ]; then
+  if [ "$status" -ne 0 ]; then
     printf '%s: skipped: refresh failed with exit %s\n' "$checkout" "$status" >> "$output_file"
   fi
 }

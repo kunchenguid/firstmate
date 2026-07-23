@@ -276,10 +276,11 @@ Matching by origin discovers parallel clones such as `~/relvino` without embeddi
 Optional `path` and shallow `scan` directives in the gitignored `config/checkout-refresh` file extend that set.
 
 Each `FM_HOME` owns a distinct background identity and state directory, so primary and secondmate homes can cover their own projects without displacing one another.
-Checkout-level owner locks are held by the shared `fm-fleet-sync.sh` mutation path, so home-scoped services, spawn preflight, teardown, and merged-PR wake handling serialize overlapping checkouts safely.
+Checkout-level owner locks are held by the shared `fm-fleet-sync.sh` mutation path and around Treehouse acquisition, so home-scoped services, spawn, secondmate seeding, teardown, and merged-PR wake handling serialize overlapping checkouts safely.
 Each background owner probes every covered checkout's remote default-branch tip every 60 seconds.
 Any upstream-tip change triggers `fm-fleet-sync.sh` immediately, regardless of who pushed or merged it.
 Every `fm-fleet-sync.sh` invocation repeats the live upstream-default probe after fetching and proves that the fetched ref matches the live tip instead of trusting a checkout's possibly stale `origin/HEAD`.
+Each shared checkout mutation is process-tree bounded by `FM_CHECKOUT_REFRESH_SYNC_TIMEOUT`, including direct teardown and merged-PR wake calls.
 If the upstream default branch changes, a checkout still on the old branch is reported as `STUCK:` and left unchanged under the fast-forward-only posture.
 A full safe refresh runs at least every 15 minutes even when no change signal is observed, so transient network failures, a missed probe, or lost local state cannot create unbounded drift.
 Every probe also inventories non-ignored untracked files in covered seed checkouts and Treehouse pool worktrees under `.agents/skills`, `.claude/skills`, `.codex/skills`, and `skills`.
@@ -295,10 +296,11 @@ The forced session-start mode preserves the existing gone-branch pruning pass.
 
 Treehouse v2.0 already excludes dirty pool entries, fetches `origin`, and resets only an available clean detached worktree to the freshest default ref.
 Firstmate surfaces matching dirty pool entries, acquires the selected path with `treehouse get --lease`, and verifies the durable lease before creating its endpoint.
-That synchronous acquisition is process-tree bounded by `FM_TREEHOUSE_ACQUIRE_TIMEOUT`, which defaults to 60 seconds.
+That synchronous acquisition holds the common-Git-directory mutation lock and is process-tree bounded by `FM_TREEHOUSE_ACQUIRE_TIMEOUT`, which defaults to 60 seconds.
 The accepted lease must be clean, belong to the requested repository, have the same origin identity, and match the live upstream default-branch tip.
 Remote-free `local-only` acquisitions use the same repository and cleanliness proof, with the requested checkout's local `main` or `master` tip as their freshness authority.
 Treehouse-acquired secondmate homes receive the same proof before seeding.
+They use the same locked, bounded acquisition entrypoint as ordinary task worktrees.
 A stale, dirty, or uninspectable acquisition remains durably leased without forced return and is surfaced for manual recovery.
 If an unmanaged spawn fails after publishing metadata or task artifacts, it restores the prior task generation before returning only a worktree whose repository identity, cleanliness, and expected detached tip are re-proven.
 That makes the acquisition proof explicit even if the background owner was offline.

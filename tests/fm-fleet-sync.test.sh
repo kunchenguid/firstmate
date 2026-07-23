@@ -395,6 +395,57 @@ test_direct_sync_honors_shared_checkout_lock() {
   pass "direct sync serializes through the shared canonical checkout lock"
 }
 
+test_direct_sync_timeout_terminates_descendants() {
+  local home clone fakebin real_git out status parent_pid child_pid
+  home=$(new_home)
+  clone=$(build_pair "$home" direct-timeout)
+  advance_origin "$home" direct-timeout C1
+  fakebin="$home/direct-timeout-fakebin"
+  real_git=$(command -v git)
+  mkdir -p "$fakebin"
+  cat > "$fakebin/git" <<'SH'
+#!/usr/bin/env bash
+is_fetch=0
+for arg in "$@"; do
+  [ "$arg" = fetch ] && is_fetch=1
+done
+if [ "$is_fetch" -eq 1 ]; then
+  trap '' TERM
+  printf '%s\n' "$BASHPID" > "${FM_TEST_FETCH_PARENT:?}"
+  (
+    trap '' TERM
+    printf '%s\n' "$BASHPID" > "${FM_TEST_FETCH_CHILD:?}"
+    while :; do sleep 1; done
+  ) &
+  wait
+fi
+exec "${FM_TEST_REAL_GIT:?}" "$@"
+SH
+  chmod +x "$fakebin/git"
+
+  set +e
+  out=$(FM_TEST_REAL_GIT="$real_git" \
+    FM_TEST_FETCH_PARENT="$home/direct-fetch-parent.pid" \
+    FM_TEST_FETCH_CHILD="$home/direct-fetch-child.pid" \
+    FM_CHECKOUT_REFRESH_SYNC_TIMEOUT=1 \
+    FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_CHECKOUT_REFRESH_STATE_BASE="$home/checkout-refresh-state" \
+    PATH="$fakebin:$PATH" \
+    "$ROOT/bin/fm-fleet-sync.sh" "$clone" 2>&1)
+  status=$?
+  set -e
+
+  [ "$status" -eq 0 ] || fail "direct bounded fleet sync failed unexpectedly: $out"
+  assert_contains "$out" "direct-timeout: skipped: refresh timed out after 1s" \
+    "direct fleet sync did not surface its process-tree timeout"
+  parent_pid=$(cat "$home/direct-fetch-parent.pid")
+  child_pid=$(cat "$home/direct-fetch-child.pid")
+  if kill -0 "$parent_pid" 2>/dev/null || kill -0 "$child_pid" 2>/dev/null; then
+    fail "direct fleet sync returned while a fetch descendant was still alive"
+  fi
+  pass "direct fleet sync bounds and reaps its mutation process tree"
+}
+
 test_already_current_unchanged() {
   local home clone out before
   home=$(new_home)
@@ -693,6 +744,13 @@ test_non_signature_fetch_failure_is_not_retried() {
   pass "a non-packed-refs.lock fetch failure keeps today's behavior (no retry)"
 }
 
+if [ "${FM_TEST_FOCUSED:-}" = review-round-6 ]; then
+  test_live_default_probe_overrides_stale_origin_head
+  test_direct_sync_honors_shared_checkout_lock
+  test_direct_sync_timeout_terminates_descendants
+  exit 0
+fi
+
 test_detached_clean_ancestor_recovers
 test_detached_unique_commit_is_stuck_untouched
 test_detached_clean_ancestor_with_diverged_local_default_is_stuck_untouched
@@ -702,6 +760,7 @@ test_diverged_is_stuck_untouched
 test_on_default_clean_behind_fast_forwards
 test_live_default_probe_overrides_stale_origin_head
 test_direct_sync_honors_shared_checkout_lock
+test_direct_sync_timeout_terminates_descendants
 test_already_current_unchanged
 test_no_origin_skipped
 test_local_only_skipped

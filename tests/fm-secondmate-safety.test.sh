@@ -213,6 +213,45 @@ test_home_seed_uses_treehouse_acquired_home() {
   pass "home seeding durably leases treehouse-acquired dash homes under the secondmate id"
 }
 
+test_home_seed_acquisition_honors_shared_checkout_lock() {
+  local home acquired fakebin log err source common key lock_root lock state_root
+  home="$TMP_ROOT/dash-lock-home"
+  acquired="$TMP_ROOT/dash-lock-acquired-home"
+  err="$TMP_ROOT/dash-lock.err"
+  mkdir -p "$home/projects" "$home/data" "$home/state"
+  fm_git_init_commit "$home/projects/alpha"
+  fm_git_add_origin "$home/projects/alpha" "$TMP_ROOT/remotes/dash-lock-alpha.git"
+  printf '%s\n' '- alpha [direct-PR] - alpha project (added 2026-06-22)' > "$home/data/projects.md"
+  source=$(make_live_default_firstmate_worktree "$acquired" dash-lock-firstmate)
+  fakebin=$(make_fake_tmux "$TMP_ROOT/dash-lock-fake")
+  log="$TMP_ROOT/dash-lock-fake/tmux.log"
+  state_root="$TMP_ROOT/dash-lock-state"
+  lock_root="$TMP_ROOT/dash-lock-locks"
+  common=$(git -C "$source" rev-parse --git-common-dir)
+  case "$common" in /*) ;; *) common="$source/$common" ;; esac
+  common=$(cd "$common" && pwd -P)
+  key=$(printf '%s' "$common" | shasum -a 256 | awk '{print substr($1,1,24)}')
+  lock="$lock_root/$key.lock"
+  mkdir -p "$lock" "$state_root"
+  printf '%s\n' "$$" > "$lock/pid"
+
+  if PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TREEHOUSE_HOME="$acquired" \
+    FM_FAKE_TMUX_LOG="$log" FM_ROOT_OVERRIDE="$source" \
+    FM_CHECKOUT_REFRESH_STATE_ROOT="$state_root" \
+    FM_CHECKOUT_REFRESH_LOCK_ROOT="$lock_root" \
+    FM_SECONDMATE_CHARTER='dash lock scope' FM_SECONDMATE_SCOPE='dash lock scope' \
+    "$ROOT/bin/fm-home-seed.sh" dash-lock - alpha >/dev/null 2>"$err"; then
+    fail "secondmate acquisition bypassed the shared checkout lock"
+  fi
+
+  grep -F "Treehouse acquisition already running for $source (pid $$)" "$err" >/dev/null \
+    || fail "secondmate acquisition did not surface shared-lock contention"
+  if [ -f "$log" ] && grep -F 'treehouse get' "$log" >/dev/null; then
+    fail "secondmate acquisition invoked Treehouse while the shared lock was held"
+  fi
+  pass "secondmate acquisition uses the common locked entrypoint"
+}
+
 test_home_seed_rejects_stale_treehouse_acquired_home() {
   local home acquired acquired_abs fakebin log err source before
   home="$TMP_ROOT/dash-stale-home"
@@ -2241,6 +2280,11 @@ if [ "${FM_TEST_FOCUSED:-}" = checkout-freshness ]; then
   exit 0
 fi
 
+if [ "${FM_TEST_FOCUSED:-}" = review-round-6 ]; then
+  test_home_seed_acquisition_honors_shared_checkout_lock
+  exit 0
+fi
+
 test_fm_home_parameterization
 test_lock_status_is_per_home
 test_seed_allows_overlapping_clones_and_drops_owner
@@ -2248,6 +2292,7 @@ test_home_seed_validate_rejects_duplicate_homes
 test_home_seed_validate_rejects_duplicate_ids
 test_home_seed_validate_rejects_nested_homes
 test_home_seed_uses_treehouse_acquired_home
+test_home_seed_acquisition_honors_shared_checkout_lock
 test_home_seed_rejects_stale_treehouse_acquired_home
 test_home_seed_retains_dirty_treehouse_acquired_home
 test_home_seed_retains_repository_mismatch_acquisition

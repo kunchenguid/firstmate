@@ -1038,6 +1038,31 @@ test_content_fallback_refreshes_stale_origin_ref() {
   pass "content fallback refreshes origin default before comparing trees"
 }
 
+test_content_fallback_uses_live_default() {
+  local case_dir rc baseline
+  case_dir=$(make_case content-live-default)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  land_on_origin_main "$case_dir" feature.txt hello
+  baseline=$(git --git-dir="$case_dir/origin.git" rev-parse main^)
+  git --git-dir="$case_dir/origin.git" update-ref refs/heads/trunk "$baseline"
+  git --git-dir="$case_dir/origin.git" symbolic-ref HEAD refs/heads/trunk
+  [ "$(git -C "$case_dir/project" symbolic-ref --short refs/remotes/origin/HEAD)" = origin/main ] \
+    || fail "live-default teardown fixture did not preserve stale origin/HEAD"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "live-default teardown must refuse content absent from live trunk"
+  assert_present "$case_dir/wt" "live-default teardown discarded the task worktree"
+  assert_present "$case_dir/state/task-x1.meta" "live-default teardown removed task metadata"
+  assert_grep "task content is not present in authoritative refs/remotes/origin/trunk" \
+    "$case_dir/stderr" "live-default teardown did not identify the authoritative branch"
+  pass "teardown landing proof uses the live upstream default"
+}
+
 test_dirty_worktree_refuses() {
   local case_dir rc pr_head
   case_dir=$(make_case dirty-wt)
@@ -2196,6 +2221,13 @@ if [ "${FM_TEST_FOCUSED:-}" = legacy-pr-generation ]; then
   exit 0
 fi
 
+if [ "${FM_TEST_FOCUSED:-}" = review-round-6 ]; then
+  test_content_in_default_fallback_allows
+  test_content_fallback_refreshes_stale_origin_ref
+  test_content_fallback_uses_live_default
+  exit 0
+fi
+
 test_local_only_fork_remote_allows
 test_teardown_prompts_tasks_axi_done_when_compatible
 test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present
@@ -2229,6 +2261,7 @@ test_pr_check_serializes_with_account_session_updates
 test_pr_check_rejects_reused_task_generation
 test_content_in_default_fallback_allows
 test_content_fallback_refreshes_stale_origin_ref
+test_content_fallback_uses_live_default
 test_dirty_worktree_refuses
 test_gh_error_and_content_absent_refuses
 test_stale_index_lock_cleared_and_teardown_succeeds

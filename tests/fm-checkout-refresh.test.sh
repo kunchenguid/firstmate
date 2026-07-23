@@ -131,6 +131,34 @@ test_uninspectable_active_project_invalidates_heartbeat() {
   pass "uninspectable active-home projects invalidate heartbeat health"
 }
 
+test_nested_active_project_invalidates_heartbeat() {
+  local container projects nested nested_state out status
+  container="$TMP_ROOT/active-project-container"
+  fm_git_init_commit "$container"
+  projects="$container/projects"
+  nested="$projects/nested-directory"
+  nested_state="$TMP_ROOT/nested-active-state"
+  mkdir -p "$nested" "$nested_state"
+  printf '%s\n' preserved-nested-heartbeat > "$nested_state/heartbeat"
+
+  set +e
+  out=$(HOME="$TEST_HOME" FM_HOME="$FM_TEST_HOME" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_PROJECTS_OVERRIDE="$projects" \
+    FM_CHECKOUT_REFRESH_STATE_ROOT="$nested_state" \
+    FM_CHECKOUT_REFRESH_LOCK_ROOT="$TMP_ROOT/nested-active-locks" \
+    FM_TREEHOUSE_ROOT="$TMP_ROOT/nested-active-treehouse" \
+    "$ROOT/bin/fm-checkout-refresh.sh" run-once --force 2>&1)
+  status=$?
+  set -e
+
+  [ "$status" -ne 0 ] || fail "nested non-repository active project reported healthy coverage"
+  assert_contains "$out" "active-home project is not an exact inspectable Git repository root: $nested" \
+    "nested non-repository active project was not surfaced"
+  [ "$(cat "$nested_state/heartbeat")" = preserved-nested-heartbeat ] \
+    || fail "nested non-repository active project advanced the healthy heartbeat"
+  pass "active projects must be exact canonical Git repository roots"
+}
+
 test_upstream_tip_signal_refreshes_between_firstmate_events() {
   local project external remote out
   project="$FM_TEST_HOME/projects/relvino"
@@ -661,6 +689,41 @@ SH
   pass "bounded refresh terminates and reaps its complete descendant tree"
 }
 
+test_acquisition_honors_shared_checkout_lock() {
+  local source fakebin common key lock out status marker
+  source="$TMP_ROOT/acquisition-lock-source"
+  fakebin="$TMP_ROOT/acquisition-lock-fakebin"
+  marker="$TMP_ROOT/acquisition-lock-called"
+  fm_git_init_commit "$source"
+  mkdir -p "$fakebin"
+  cat > "$fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+touch "${FM_TEST_TREEHOUSE_CALLED:?}"
+printf '%s\n' "$PWD/acquired"
+SH
+  chmod +x "$fakebin/treehouse"
+  common=$(git -C "$source" rev-parse --git-common-dir)
+  case "$common" in /*) ;; *) common="$source/$common" ;; esac
+  common=$(cd "$common" && pwd -P)
+  key=$(printf '%s' "$common" | shasum -a 256 | awk '{print substr($1,1,24)}')
+  lock="$LOCK_ROOT/$key.lock"
+  mkdir -p "$lock"
+  printf '%s\n' "$$" > "$lock/pid"
+
+  set +e
+  out=$(FM_TEST_TREEHOUSE_CALLED="$marker" PATH="$fakebin:$PATH" \
+    run_refresh acquire-worktree "$source" firstmate-lock-test 2>&1)
+  status=$?
+  set -e
+
+  [ "$status" -ne 0 ] || fail "Treehouse acquisition bypassed the shared checkout lock"
+  assert_contains "$out" "Treehouse acquisition already running for $source (pid $$)" \
+    "contended Treehouse acquisition did not identify the shared lock owner"
+  [ ! -e "$marker" ] || fail "Treehouse ran while the shared checkout lock was held"
+  rm -rf "$lock"
+  pass "Treehouse acquisition serializes through the common Git lock"
+}
+
 test_launch_agent_definition_is_home_scoped_with_scheduler_seam() {
   local fakebin agents log plist second_home second_plist key second_key install_state_base install_state_root
   local custom_treehouse="$TMP_ROOT/custom-treehouse" other_treehouse="$TMP_ROOT/other-treehouse" out status
@@ -792,8 +855,16 @@ SH
   pass "scheduler ownership is home-scoped and Linux remains an explicit adapter seam"
 }
 
+if [ "${FM_TEST_FOCUSED:-}" = review-round-6 ]; then
+  test_nested_active_project_invalidates_heartbeat
+  test_bounded_refresh_terminates_descendants
+  test_acquisition_honors_shared_checkout_lock
+  exit 0
+fi
+
 test_discovery_covers_projects_treehouse_external_and_config
 test_uninspectable_active_project_invalidates_heartbeat
+test_nested_active_project_invalidates_heartbeat
 test_upstream_tip_signal_refreshes_between_firstmate_events
 test_periodic_backstop_repairs_drift_without_a_new_tip
 test_live_default_change_is_surfaced_without_switching_branches
@@ -810,4 +881,5 @@ test_refresh_locks_recover_stale_owners_and_surface_contention
 test_session_mode_preserves_gone_branch_pruning
 test_worktree_freshness_verification_fails_closed
 test_bounded_refresh_terminates_descendants
+test_acquisition_honors_shared_checkout_lock
 test_launch_agent_definition_is_home_scoped_with_scheduler_seam

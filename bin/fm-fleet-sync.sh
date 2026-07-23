@@ -25,6 +25,8 @@
 # The common mutation path owns a cooperative lock keyed by the canonical Git
 # common directory, so scheduler, preflight, teardown, and merge-wake callers
 # serialize every fetch, prune, checkout, and fast-forward of the same clone.
+# Each checkout mutation entrypoint is process-tree bounded by
+# FM_CHECKOUT_REFRESH_SYNC_TIMEOUT, including direct teardown and merge-wake calls.
 # When the fetch fails on an orphaned .git/packed-refs.lock (left by a ref rewrite
 # killed mid-write - e.g. a timed-out bootstrap sync or a teardown process kill),
 # it is retried with a bounded wait and removed only when provably stale; see
@@ -56,8 +58,18 @@ fi
 fm_refuse_if_gate_agent
 # shellcheck source=bin/fm-lock-lib.sh
 . "$SCRIPT_DIR/fm-lock-lib.sh"
+# shellcheck source=bin/fm-process-tree-lib.sh
+. "$SCRIPT_DIR/fm-process-tree-lib.sh"
 FM_LOCK_LOG_PREFIX=fleet-sync
 "$FM_ROOT/bin/fm-guard.sh" || true
+
+FLEET_SYNC_TIMEOUT=${FM_CHECKOUT_REFRESH_SYNC_TIMEOUT:-60}
+case "$FLEET_SYNC_TIMEOUT" in
+  ''|*[!0-9]*|0)
+    echo "error: FM_CHECKOUT_REFRESH_SYNC_TIMEOUT must be a positive integer" >&2
+    exit 2
+    ;;
+esac
 
 # Bounded recovery for an orphaned .git/packed-refs.lock. A git ref rewrite
 # (fetch --prune, branch -D, pack-refs) killed after creating the lock but before
@@ -522,8 +534,30 @@ sync_project() (
   return 0
 )
 
+run_sync_project_bounded() {
+  local project=$1 status label
+  if fm_run_bounded "$FLEET_SYNC_TIMEOUT" \
+      env FM_FLEET_SYNC_BOUNDED_CHILD=1 "$SCRIPT_DIR/fm-fleet-sync.sh" "$project"; then
+    return 0
+  else
+    status=$?
+  fi
+  if [ "$status" -eq 124 ]; then
+    PROJ=$project
+    label=$(project_label)
+    printf '%s: skipped: refresh timed out after %ss\n' "$label" "$FLEET_SYNC_TIMEOUT"
+    return 0
+  fi
+  return "$status"
+}
+
 if [ $# -eq 1 ]; then
-  sync_project "$(resolve_project_arg "$1")"
+  project=$(resolve_project_arg "$1")
+  if [ "${FM_FLEET_SYNC_BOUNDED_CHILD:-0}" = 1 ]; then
+    sync_project "$project"
+  else
+    run_sync_project_bounded "$project"
+  fi
   exit 0
 fi
 
@@ -531,5 +565,5 @@ fi
 for proj in "$PROJECTS"/*; do
   [ -e "$proj" ] || continue
   [ -d "$proj" ] || continue
-  sync_project "$proj"
+  run_sync_project_bounded "$proj"
 done

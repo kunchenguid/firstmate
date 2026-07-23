@@ -21,6 +21,8 @@
 # by itself causes a false refusal of landed work.
 # A gh lookup error falls back to the content check; if that is also inconclusive,
 # teardown refuses rather than risk discarding unlanded work.
+# Origin-backed content checks prove the live upstream default with a bounded
+# remote HEAD probe before fetching or comparing trees.
 # Uncommitted changes are never landed.
 # local-only projects additionally accept work merged into the local default
 # branch (firstmate performs that merge on the captain's approval) as a fallback
@@ -91,6 +93,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-lock-lib.sh
 . "$SCRIPT_DIR/fm-lock-lib.sh"
+# shellcheck source=bin/fm-process-tree-lib.sh
+. "$SCRIPT_DIR/fm-process-tree-lib.sh"
 # shellcheck source=bin/fm-gate-refuse-lib.sh
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never tear
@@ -100,6 +104,13 @@ fm_refuse_if_gate_agent
 . "$SCRIPT_DIR/fm-account-routing-lib.sh"
 FM_LOCK_LOG_PREFIX=teardown
 "$FM_ROOT/bin/fm-guard.sh" || true
+TEARDOWN_UPSTREAM_TIMEOUT=${FM_CHECKOUT_REFRESH_PROBE_TIMEOUT:-15}
+case "$TEARDOWN_UPSTREAM_TIMEOUT" in
+  ''|*[!0-9]*|0)
+    echo "error: FM_CHECKOUT_REFRESH_PROBE_TIMEOUT must be a positive integer" >&2
+    exit 2
+    ;;
+esac
 ID=$1
 FORCE=${2:-}
 
@@ -346,6 +357,33 @@ default_branch() {
   return 1
 }
 
+LIVE_DEFAULT_BRANCH=
+LIVE_DEFAULT_TIP=
+LIVE_DEFAULT_OUTPUT=
+probe_live_origin_default() {
+  local line ref
+  LIVE_DEFAULT_BRANCH=
+  LIVE_DEFAULT_TIP=
+  LIVE_DEFAULT_OUTPUT=$(fm_run_bounded "$TEARDOWN_UPSTREAM_TIMEOUT" \
+    git -C "$WT" ls-remote --symref origin HEAD 2>&1) || return 1
+  while IFS= read -r line; do
+    case "$line" in
+      "ref: refs/heads/"*$'\t'"HEAD")
+        ref=${line#ref: refs/heads/}
+        LIVE_DEFAULT_BRANCH=${ref%$'\t'HEAD}
+        ;;
+      *$'\t'"HEAD")
+        LIVE_DEFAULT_TIP=${line%$'\t'HEAD}
+        ;;
+    esac
+  done <<EOF
+$LIVE_DEFAULT_OUTPUT
+EOF
+  [ -n "$LIVE_DEFAULT_BRANCH" ] \
+    && [ -n "$LIVE_DEFAULT_TIP" ] \
+    && git check-ref-format --branch "$LIVE_DEFAULT_BRANCH" >/dev/null 2>&1
+}
+
 meta_value() {
   local meta=$1 key=$2
   fm_meta_get "$meta" "$key"
@@ -491,21 +529,47 @@ pr_is_merged() {
 # "added". Returns non-zero when inconclusive (no default ref, or a merge conflict),
 # so the caller refuses rather than guesses.
 content_in_default() {
-  local name ref default_tree merged_tree
-  name=$(default_branch) || return 1
+  local name ref default_tree merged_tree fetched fetch_output reason
   if git -C "$WT" remote get-url origin >/dev/null 2>&1; then
-    git -C "$WT" fetch --quiet origin "+refs/heads/$name:refs/remotes/origin/$name" >/dev/null 2>&1 || return 1
+    if ! probe_live_origin_default; then
+      reason=$(printf '%s\n' "$LIVE_DEFAULT_OUTPUT" | sed -n '1s/[[:space:]]\{1,\}/ /g;1p')
+      echo "teardown: cannot prove the live origin default for $PROJ${reason:+: $reason}; retaining $WT" >&2
+      return 1
+    fi
+    name=$LIVE_DEFAULT_BRANCH
+    if ! fetch_output=$(fm_run_bounded "$TEARDOWN_UPSTREAM_TIMEOUT" \
+        git -C "$WT" fetch --quiet origin \
+        "+refs/heads/$name:refs/remotes/origin/$name" 2>&1); then
+      reason=$(printf '%s\n' "$fetch_output" | sed -n '1s/[[:space:]]\{1,\}/ /g;1p')
+      echo "teardown: cannot fetch live origin/$name for landing proof${reason:+: $reason}; retaining $WT" >&2
+      return 1
+    fi
     ref="refs/remotes/origin/$name"
-  elif git -C "$WT" rev-parse --quiet --verify "refs/heads/$name" >/dev/null 2>&1; then
-    ref="refs/heads/$name"
+    fetched=$(git -C "$WT" rev-parse --quiet --verify "$ref^{commit}" 2>/dev/null) || {
+      echo "teardown: cannot inspect fetched live origin/$name; retaining $WT" >&2
+      return 1
+    }
+    if [ "$fetched" != "$LIVE_DEFAULT_TIP" ]; then
+      echo "teardown: fetched origin/$name does not match live origin HEAD; retaining $WT" >&2
+      return 1
+    fi
   else
-    return 1
+    name=$(default_branch) || return 1
+    if git -C "$WT" rev-parse --quiet --verify "refs/heads/$name" >/dev/null 2>&1; then
+      ref="refs/heads/$name"
+    else
+      return 1
+    fi
   fi
   default_tree=$(git -C "$WT" rev-parse --quiet --verify "$ref^{tree}" 2>/dev/null) || return 1
   [ -n "$default_tree" ] || return 1
   merged_tree=$(git -C "$WT" merge-tree --write-tree "$ref" HEAD 2>/dev/null) || return 1
   merged_tree=$(printf '%s\n' "$merged_tree" | head -1)
-  [ "$merged_tree" = "$default_tree" ]
+  if [ "$merged_tree" != "$default_tree" ]; then
+    echo "teardown: task content is not present in authoritative $ref; retaining $WT" >&2
+    return 1
+  fi
+  return 0
 }
 
 # Has the worktree's committed work actually LANDED, though its commits are not

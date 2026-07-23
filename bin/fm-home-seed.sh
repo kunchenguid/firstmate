@@ -4,10 +4,11 @@
 # Usage:
 #   fm-home-seed.sh <id> <home|-> {<project>...|--no-projects}
 #       Provision <home> as an isolated firstmate home. If <home> is "-", acquire
-#       a fresh firstmate worktree via "treehouse get --lease", which durably
-#       leases the worktree under the secondmate <id> so the home survives with
-#       no live process and is never recycled until the lease is released with
-#       "treehouse return". The acquired home is accepted only when its HEAD
+#       a fresh firstmate worktree through the shared locked, bounded
+#       "treehouse get --lease" entrypoint, which durably leases the worktree
+#       under the secondmate <id> so the home survives with no live process and
+#       is never recycled until the lease is released with "treehouse return".
+#       The acquired home is accepted only when its HEAD
 #       belongs to the Firstmate repository, is clean, and matches the live
 #       upstream default-branch tip. An unsafe or unverifiable acquired home is
 #       retained without force-return so its unlanded work remains untouched.
@@ -478,7 +479,7 @@ acquire_treehouse_home() {
   # live process and is skipped by later get/prune, so the home survives restarts
   # until teardown or rollback returns it. treehouse prints only the worktree path
   # to stdout (banners go to stderr), so command substitution captures the path.
-  home=$(cd "$FM_ROOT" && treehouse get --lease --lease-holder "$id") || {
+  home=$("$SCRIPT_DIR/fm-checkout-refresh.sh" acquire-worktree "$FM_ROOT" "$id") || {
     echo "error: treehouse get --lease failed to lease a firstmate home" >&2
     return 1
   }
