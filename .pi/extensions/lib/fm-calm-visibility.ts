@@ -3,7 +3,6 @@ import {
   type ExtensionAPI,
   UserMessageComponent,
 } from "@earendil-works/pi-coding-agent";
-import { Container } from "@earendil-works/pi-tui";
 
 export const CALM_TRANSCRIPT_CLASSES = [
   "genuine-user-prompt",
@@ -48,6 +47,7 @@ const FM_INJECT_MARK = "\u2063";
 const FM_FROMFIRST_MARK = "[fm-from-firstmate]\u2063";
 
 export const FIRSTMATE_SYNTHETIC_CONTEXT_TYPE = "firstmate-synthetic-input";
+export const FIRSTMATE_SYNTHETIC_PRESENTATION_TYPE = "firstmate-synthetic-input-presentation";
 export const FIRSTMATE_CALM_PRESENTATION_EVENT = "firstmate:calm-presentation";
 export const FIRSTMATE_PI_LAUNCH_BRIEF_ENV = "FM_FIRSTMATE_PI_LAUNCH_BRIEF";
 
@@ -67,6 +67,11 @@ export type FirstmateSyntheticKind =
 type SyntheticDeliveryOptions = {
   deliverAs?: "steer" | "followUp" | "nextTurn";
   triggerTurn?: boolean;
+};
+
+type FirstmateSyntheticPresentation = {
+  content: string;
+  kind: FirstmateSyntheticKind;
 };
 
 let calm = false;
@@ -119,18 +124,13 @@ export function classifyFirstmateSyntheticInput(
 }
 
 export function registerFirstmateSyntheticPresentation(pi: ExtensionAPI): void {
-  pi.registerMessageRenderer(
-    FIRSTMATE_SYNTHETIC_CONTEXT_TYPE,
-    (message) => {
-      if (calmPresentationHides("synthetic-user")) return new Container();
-      const content =
-        typeof message.content === "string"
-          ? message.content
-          : message.content
-              .filter((item) => item.type === "text")
-              .map((item) => item.text)
-              .join("\n");
-      return new UserMessageComponent(content, getMarkdownTheme());
+  pi.registerEntryRenderer<FirstmateSyntheticPresentation>(
+    FIRSTMATE_SYNTHETIC_PRESENTATION_TYPE,
+    (entry) => {
+      if (calmPresentationHides("synthetic-user")) return undefined;
+      const data = entry.data;
+      if (!data || typeof data.content !== "string") return undefined;
+      return new UserMessageComponent(data.content, getMarkdownTheme());
     },
   );
 }
@@ -141,11 +141,15 @@ export function deliverFirstmateSyntheticInput(
   kind: FirstmateSyntheticKind,
   options: SyntheticDeliveryOptions = {},
 ): void {
+  pi.appendEntry<FirstmateSyntheticPresentation>(FIRSTMATE_SYNTHETIC_PRESENTATION_TYPE, {
+    content,
+    kind,
+  });
   pi.sendMessage(
     {
       customType: FIRSTMATE_SYNTHETIC_CONTEXT_TYPE,
       content,
-      display: true,
+      display: false,
       details: { kind },
     },
     options,

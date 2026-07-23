@@ -32,6 +32,27 @@ wait_for_text() {
   return 1
 }
 
+find_chrome() {
+  local candidate
+  if [ -n "${FM_CHROME_BIN:-}" ] && [ -x "$FM_CHROME_BIN" ]; then
+    printf '%s\n' "$FM_CHROME_BIN"
+    return 0
+  fi
+  for candidate in \
+    google-chrome \
+    google-chrome-stable \
+    chromium \
+    chromium-browser \
+    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+  do
+    if command -v "$candidate" >/dev/null 2>&1; then
+      command -v "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
 test_static_contract() {
   local text visibility watch
   assert_present "$EXT" "tracked Pi calm extension is missing"
@@ -90,7 +111,8 @@ import { writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
 const packageRoot = process.env.PI_PACKAGE_DIR;
-const [{ ToolExecutionComponent }, { initTheme, theme }, { Text, getKeybindings, setCapabilities }, { createToolHtmlRenderer }] = await Promise.all([
+const [{ CustomEntryComponent }, { ToolExecutionComponent }, { initTheme, theme }, { Text, getKeybindings, setCapabilities }, { createToolHtmlRenderer }] = await Promise.all([
+  import(pathToFileURL(`${packageRoot}/dist/modes/interactive/components/custom-entry.js`).href),
   import(pathToFileURL(`${packageRoot}/dist/modes/interactive/components/tool-execution.js`).href),
   import(pathToFileURL(`${packageRoot}/dist/modes/interactive/theme/theme.js`).href),
   import(pathToFileURL(`${packageRoot}/node_modules/@earendil-works/pi-tui/dist/index.js`).href),
@@ -105,7 +127,7 @@ process.env.FM_FIRSTMATE_PI_LAUNCH_BRIEF = `${process.cwd()}/launch-brief.md`;
 const tools = [];
 const handlers = new Map();
 const entryRenderers = new Map();
-const messageRenderers = new Map();
+const appendedEntries = [];
 const sentMessages = [];
 const eventListeners = new Map();
 let calmCommand;
@@ -120,6 +142,9 @@ const pi = {
       eventListeners.set(name, listeners);
     },
   },
+  appendEntry(customType, data) {
+    appendedEntries.push({ customType, data });
+  },
   sendMessage(message, options) {
     sentMessages.push({ message, options });
   },
@@ -133,9 +158,6 @@ const pi = {
   },
   registerEntryRenderer(customType, renderer) {
     entryRenderers.set(customType, renderer);
-  },
-  registerMessageRenderer(customType, renderer) {
-    messageRenderers.set(customType, renderer);
   },
   registerTool(tool) {
     tools.push(tool);
@@ -245,10 +267,10 @@ for (const [name, args, result] of cases) {
 
 const watchPi = {
   ...pi,
+  appendEntry() {},
   sendMessage() {},
   registerCommand() {},
   registerEntryRenderer() {},
-  registerMessageRenderer() {},
 };
 const watchExtension = await import(`${pathToFileURL(process.env.WATCH_EXT).href}?test=${Date.now()}`);
 watchExtension.default(watchPi);
@@ -400,6 +422,7 @@ const launchBriefResult = await inputHandler({
 }, commandContext);
 if (
   launchBriefResult?.action !== "handled" ||
+  appendedEntries.length !== 1 ||
   sentMessages.length !== 1 ||
   sentMessages[0].message.details.kind !== "launch-brief" ||
   sentMessages[0].message.content !== launchBrief
@@ -412,7 +435,11 @@ const repeatedBriefResult = await inputHandler({
   source: "interactive",
   streamingBehavior: undefined,
 }, commandContext);
-if (repeatedBriefResult?.action !== "continue" || sentMessages.length !== 1) {
+if (
+  repeatedBriefResult?.action !== "continue" ||
+  appendedEntries.length !== 1 ||
+  sentMessages.length !== 1
+) {
   throw new Error("consumed launch origin hid a later genuine matching prompt");
 }
 const syntheticResult = await inputHandler({
@@ -421,24 +448,33 @@ const syntheticResult = await inputHandler({
   source: "extension",
   streamingBehavior: "followUp",
 }, commandContext);
-if (syntheticResult?.action !== "handled" || sentMessages.length !== 2) {
+if (
+  syntheticResult?.action !== "handled" ||
+  appendedEntries.length !== 2 ||
+  sentMessages.length !== 2
+) {
   throw new Error("known Firstmate synthetic input was not rerouted through controllable delivery");
 }
 if (
   sentMessages[1].message.content !== watcherMessage ||
-  sentMessages[1].message.display !== true ||
+  sentMessages[1].message.display !== false ||
   sentMessages[1].options.triggerTurn !== true ||
   sentMessages[1].options.deliverAs !== "followUp"
 ) {
   throw new Error("synthetic input delivery or context semantics changed");
 }
-const presentationRenderer = messageRenderers.get("firstmate-synthetic-input");
+const presentationRenderer = entryRenderers.get("firstmate-synthetic-input-presentation");
 if (!presentationRenderer) throw new Error("synthetic presentation renderer was not registered");
 const presentationEntry = {
-  content: watcherMessage,
-  details: { kind: "watcher" },
+  customType: "firstmate-synthetic-input-presentation",
+  data: { content: watcherMessage, kind: "watcher" },
 };
-if (!presentationRenderer(presentationEntry, { expanded }, theme).render(100).join("\n").includes("FIRSTMATE WATCHER WAKE")) {
+const presentationComponent = new CustomEntryComponent(presentationEntry, presentationRenderer);
+presentationComponent.setExpanded(expanded);
+if (
+  !presentationComponent.hasContent() ||
+  !presentationComponent.render(100).join("\n").includes("FIRSTMATE WATCHER WAKE")
+) {
   throw new Error("Calm-off synthetic presentation did not use a stock user-message row");
 }
 const nearMissResult = await inputHandler({
@@ -447,7 +483,11 @@ const nearMissResult = await inputHandler({
   source: "interactive",
   streamingBehavior: undefined,
 }, commandContext);
-if (nearMissResult?.action !== "continue" || sentMessages.length !== 2) {
+if (
+  nearMissResult?.action !== "continue" ||
+  appendedEntries.length !== 2 ||
+  sentMessages.length !== 2
+) {
   throw new Error("genuine near-miss input was intercepted");
 }
 
@@ -455,8 +495,9 @@ await calmCommand.handler("", commandContext);
 if (expanded !== true || workingVisible !== false || hiddenThinkingLabel !== "" || statuses.get("firstmate-calm") !== "calm transcript") {
   throw new Error("Calm did not apply its supported working, thinking, and footer presentation controls");
 }
-if (presentationRenderer(presentationEntry, { expanded }, theme).render(100).length !== 0) {
-  throw new Error("Calm left a synthetic Firstmate presentation entry visible");
+presentationComponent.setExpanded(!expanded);
+if (presentationComponent.hasContent() || presentationComponent.render(100).length !== 0) {
+  throw new Error("Calm left a synthetic Firstmate presentation row or spacer visible");
 }
 for (const { name, actual } of rows) {
   if (actual.render(100).length !== 0) {
@@ -548,7 +589,11 @@ if (JSON.stringify(watchActual.render(100)) !== JSON.stringify(watchBaseline.ren
 if (workingVisible !== true || hiddenThinkingLabel !== undefined || statuses.get("firstmate-calm") !== undefined) {
   throw new Error("turning Calm off did not restore stock presentation controls");
 }
-if (!presentationRenderer(presentationEntry, { expanded }, theme).render(100).join("\n").includes("FIRSTMATE WATCHER WAKE")) {
+presentationComponent.setExpanded(expanded);
+if (
+  !presentationComponent.hasContent() ||
+  !presentationComponent.render(100).join("\n").includes("FIRSTMATE WATCHER WAKE")
+) {
   throw new Error("turning Calm off did not restore synthetic user-row presentation");
 }
 
@@ -583,7 +628,7 @@ JS
 }
 
 test_interactive_terminal_e2e() {
-  local project config session_file export_file default_snapshot expanded_snapshot hidden_snapshot export_snapshot restored_snapshot hash_before hash_after now version
+  local project config session_file export_file export_dom default_snapshot expanded_snapshot hidden_snapshot export_snapshot restored_snapshot hash_before hash_after now version chrome chrome_pid chrome_wait
   if ! command -v pi >/dev/null 2>&1 || ! command -v tmux >/dev/null 2>&1; then
     echo "skip: pi or tmux not found for Pi calm interactive E2E"
     return 0
@@ -595,6 +640,7 @@ test_interactive_terminal_e2e() {
   config="$TMP_ROOT/e2e-config"
   session_file="$TMP_ROOT/calm-session.jsonl"
   export_file="$TMP_ROOT/calm-export.html"
+  export_dom="$TMP_ROOT/calm-export-dom.html"
   default_snapshot="$TMP_ROOT/default.txt"
   expanded_snapshot="$TMP_ROOT/expanded.txt"
   hidden_snapshot="$TMP_ROOT/hidden.txt"
@@ -617,7 +663,8 @@ test_interactive_terminal_e2e() {
 {"type":"message","id":"a0000006","parentId":"a0000005","timestamp":"$now","message":{"role":"toolResult","toolCallId":"call_find_e2e","toolName":"find","content":[{"type":"text","text":"CALM_EXPORT_FIND.txt"}],"details":{},"isError":false,"timestamp":6}}
 {"type":"message","id":"a0000007","parentId":"a0000006","timestamp":"$now","message":{"role":"assistant","content":[{"type":"thinking","thinking":"third internal reasoning block"},{"type":"toolCall","id":"call_watch_e2e","name":"fm_watch_arm_pi","arguments":{}}],"api":"anthropic-messages","provider":"anthropic","model":"claude-sonnet-4-5","usage":{"input":2,"output":1,"cacheRead":0,"cacheWrite":0,"totalTokens":3,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"toolUse","timestamp":7}}
 {"type":"message","id":"a0000008","parentId":"a0000007","timestamp":"$now","message":{"role":"toolResult","toolCallId":"call_watch_e2e","toolName":"fm_watch_arm_pi","content":[{"type":"text","text":"watcher: started Pi extension arm child 1"}],"details":{"ok":true,"message":"watcher: started Pi extension arm child 1"},"isError":false,"timestamp":8}}
-{"type":"custom_message","id":"a0000010","parentId":"a0000008","timestamp":"$now","customType":"firstmate-synthetic-input","content":"FIRSTMATE WATCHER WAKE: signal: /tmp/probe.status\\n\\nRun bin/fm-wake-drain.sh first and handle the queued wake. Watcher continuity is extension-owned.","display":true,"details":{"kind":"watcher"}}
+{"type":"custom","id":"a0000009","parentId":"a0000008","timestamp":"$now","customType":"firstmate-synthetic-input-presentation","data":{"content":"FIRSTMATE WATCHER WAKE: signal: /tmp/probe.status\\n\\nRun bin/fm-wake-drain.sh first and handle the queued wake. Watcher continuity is extension-owned.","kind":"watcher"}}
+{"type":"custom_message","id":"a0000010","parentId":"a0000009","timestamp":"$now","customType":"firstmate-synthetic-input","content":"FIRSTMATE WATCHER WAKE: signal: /tmp/probe.status\\n\\nRun bin/fm-wake-drain.sh first and handle the queued wake. Watcher continuity is extension-owned.","display":false,"details":{"kind":"watcher"}}
 {"type":"message","id":"a0000011","parentId":"a0000010","timestamp":"$now","message":{"role":"user","content":[{"type":"text","text":"FIRSTMATE WATCHER WAKE: can you explain this phrase?"}],"timestamp":11}}
 {"type":"message","id":"a0000012","parentId":"a0000011","timestamp":"$now","message":{"role":"assistant","content":[{"type":"text","text":"The deterministic tool example is complete."}],"api":"anthropic-messages","provider":"anthropic","model":"claude-sonnet-4-5","usage":{"input":2,"output":1,"cacheRead":0,"cacheWrite":0,"totalTokens":3,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"stop","timestamp":12}}
 JSON
@@ -660,7 +707,7 @@ JSON
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" M-s
   wait_for_text "$export_snapshot" "Session exported to: $export_file" \
     || fail "/export did not complete while calm mode was on"
-  node - "$export_file" <<'JS' || fail "calm-mode HTML export omitted hidden tool or synthetic-message data"
+  node - "$export_file" <<'JS' || fail "calm-mode HTML export lost tool data or persisted synthetic provenance"
 const html = require("node:fs").readFileSync(process.argv[2], "utf8");
 const match = html.match(/<script id="session-data" type="application\/json">([^<]+)<\/script>/);
 if (!match) process.exit(1);
@@ -673,7 +720,36 @@ const entries = session.session?.entries ?? session.entries ?? [];
 const serialized = JSON.stringify(entries);
 if (!serialized.includes("firstmate-synthetic-input") || !serialized.includes("/tmp/probe.status")) process.exit(1);
 const synthetic = entries.find((entry) => entry.type === "custom_message" && entry.customType === "firstmate-synthetic-input");
-if (!synthetic?.display) process.exit(1);
+if (!synthetic || synthetic.display) process.exit(1);
+JS
+  chrome=$(find_chrome) || fail "Chrome or Chromium is required for rendered export DOM assertions"
+  "$chrome" \
+    --headless=new \
+    --disable-gpu \
+    --no-sandbox \
+    --user-data-dir="$TMP_ROOT/chrome-profile" \
+    --virtual-time-budget=2000 \
+    --dump-dom \
+    "file://$export_file" >"$export_dom" 2>/dev/null &
+  chrome_pid=$!
+  chrome_wait=0
+  while kill -0 "$chrome_pid" 2>/dev/null && [ "$chrome_wait" -lt 100 ]; do
+    grep -Fq '</html>' "$export_dom" 2>/dev/null && break
+    sleep 0.1
+    chrome_wait=$((chrome_wait + 1))
+  done
+  kill "$chrome_pid" 2>/dev/null || true
+  wait "$chrome_pid" 2>/dev/null || true
+  grep -Fq '</html>' "$export_dom" 2>/dev/null \
+    || fail "could not render calm-mode HTML export DOM"
+  node - "$export_dom" <<'JS' || fail "rendered export DOM violated the Calm conversation boundary"
+const dom = require("node:fs").readFileSync(process.argv[2], "utf8");
+const messages = dom.match(/<div id="messages">([\s\S]*?)<\/main>/)?.[1];
+if (!messages) process.exit(1);
+if (!/<div class="user-message"[^>]*>[\s\S]*Show a deterministic tool example\./.test(messages)) process.exit(1);
+if (!/<div class="assistant-message"[^>]*>[\s\S]*The deterministic tool example is complete\./.test(messages)) process.exit(1);
+if (messages.includes('<div class="hook-message"')) process.exit(1);
+if (messages.includes("[firstmate-synthetic-input]")) process.exit(1);
 JS
 
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l "/calm"

@@ -5,7 +5,7 @@ The README owns the user-facing `/calm` usage and limitation contract.
 
 ## Required extension surface
 
-A qualifying implementation must auto-load from the trusted project, keep the toggle session-local, redraw already-rendered controllable rows, restore ordinary rendering, and leave delivery, tool execution, model context, session storage, exports, diagnostics, and expansion state unchanged.
+A qualifying implementation must auto-load from the trusted project, keep the toggle session-local, redraw already-rendered controllable rows, restore ordinary rendering, and leave delivery, tool execution, model context, session storage, export and share operation, diagnostics, and expansion state unchanged.
 The governing presentation policy allows only genuine original user prompts and genuine user-facing assistant text.
 Changing persisted context to remove hidden content, filtering provider context, patching installed harness code, or claiming coverage outside a supported renderer does not satisfy that boundary.
 
@@ -41,8 +41,11 @@ The smallest counterfactuals produced these results:
 - Calling `setHiddenThinkingLabel("")` removed every collapsed `Thinking...` label, but Pi's `AssistantMessageComponent` retained one leading spacer for each reasoning-bearing message.
 - Expanding thinking still rendered full reasoning because Pi exposes no supported getter or setter for the transcript-wide thinking expansion state.
 - Adding supported empty renderer slots to a scratch copy of `fm_watch_arm_pi` removed its row while the real watcher still started and the model still returned `PROBE_COMPLETE`.
-- Delivering a scratch custom message with `display: true` still produced the model response `SYNTHETIC_DELIVERED`, persisted the full custom message in session JSONL, and kept it in HTML exports.
-- Registering a custom-message renderer allowed Calm to hide and restore that same context-bearing row with no content loss or exporter-invisible parallel entry.
+- Delivering a scratch custom message with `display: false` still produced the model response `SYNTHETIC_DELIVERED` and persisted the full custom message in session JSONL.
+- Pairing that hidden context message with a TUI-only custom entry allowed Calm to hide and restore the synthetic user presentation with no content loss.
+- Pi's `CustomMessageComponent` unconditionally adds a leading spacer before invoking a registered message renderer, so returning an empty component cannot hide the whole row.
+- Pi's `CustomEntryComponent` adds spacing only when its renderer returns content, so an undefined Calm renderer result removes the complete live row without a residual gap.
+- Pi's HTML exporter ignores plain custom entries and `display: false` custom messages and does not invoke TUI renderers, so synthetic control inputs cannot retain stock user styling in exported or shared HTML through Pi 0.81.1's supported API.
 
 The disconfirming checks deliberately retained contradictory evidence.
 An arbitrary third-party custom tool and a built-in read image remain visible because Pi exposes neither a global tool renderer nor image-row control.
@@ -70,9 +73,10 @@ Positive fixtures cover every form in that table.
 Near-miss fixtures cover the visible watcher phrase without its suffix, a modified drain instruction, a guard-like captain question, visible marker labels without U+2063, an unmarked supervisor phrase, the session-start wording without its authoritative punctuation, and launch-brief text without the per-process origin.
 
 Known synthetic inputs are rerouted only at Pi input presentation time.
-Their full text is persisted in one display-bearing custom message that Pi converts back to an ordinary user message for provider context and includes in `/export` and `/share`.
-A registered message renderer gives that same row stock user styling in the live TUI while Calm is off and an empty presentation while Calm is on.
-Cycling tool expansion and restoring its original value rebuilds those custom messages and leaves final `Ctrl+O` state unchanged.
+Their full text is persisted in a non-displayed custom message that Pi converts back to an ordinary user message for provider context, and a TUI-only custom entry restores stock user styling while Calm is off.
+The custom-entry host omits the complete row when the renderer returns undefined under Calm, including its normally conditional leading spacer.
+Cycling tool expansion and restoring its original value rebuilds those custom entries and leaves final `Ctrl+O` state unchanged.
+Exported and shared HTML retain genuine user prompts, genuine assistant responses, and ordinary tool rendering, while omitting the synthetic presentation entry and hidden context message at the documented Pi 0.81.1 exporter boundary.
 
 ## Complete currently reachable Pi transcript taxonomy
 
@@ -89,8 +93,8 @@ The test fixture enumerates every class below through the centralized policy, an
 | `tool-image` | Image children appended outside tool renderer slots | Unsupported boundary; remains visible. |
 | `user-bash` | `BashExecutionComponent` for `!` and `!!` | Unsupported boundary; remains visible. |
 | `skill-invocation` | `SkillInvocationMessageComponent` plus parsed user text | Unsupported boundary; remains visible. |
-| `custom-message` | `CustomMessageComponent` when `display` is true | Firstmate's known synthetic context messages use a registered renderer and are hidden; arbitrary extension messages remain an unsupported boundary. |
-| `custom-entry` | `CustomEntryComponent` with a registered renderer | No Calm-owned entry is required; arbitrary extension entries remain an unsupported boundary. |
+| `custom-message` | `CustomMessageComponent` when `display` is true | Firstmate's known synthetic context messages use `display: false`; arbitrary extension messages remain an unsupported boundary. |
+| `custom-entry` | `CustomEntryComponent` with a registered renderer | Firstmate's synthetic presentation entry is hidden without a residual spacer; arbitrary extension entries remain an unsupported boundary. |
 | `compaction-summary` | `CompactionSummaryMessageComponent` | Unsupported boundary; remains visible. |
 | `branch-summary` | `BranchSummaryMessageComponent` | Unsupported boundary; remains visible. |
 | `working-status` | `WorkingStatusIndicator` | Hidden through `setWorkingVisible(false)`. |
@@ -98,7 +102,7 @@ The test fixture enumerates every class below through the centralized policy, an
 | `system-notice` | `showStatus`, `showError`, compaction, retry, and startup warning rows | Unsupported boundary; remains visible. |
 | `cache-notice` | Non-persisted cache-miss `Text` row | Unsupported boundary; remains visible. |
 | `project-trust-warning` | Non-persisted startup `Text` row | Unsupported boundary; remains visible. |
-| `synthetic-user` | Firstmate extension `sendUserMessage`, terminal-injected input, or Firstmate-generated Pi positional brief | All authoritative Firstmate forms are rerouted to one context- and export-bearing message with a controllable live renderer. |
+| `synthetic-user` | Firstmate extension `sendUserMessage`, terminal-injected input, or Firstmate-generated Pi positional brief | All authoritative Firstmate forms are rerouted to hidden context plus a gapless controllable presentation entry. |
 | `synthetic-assistant` | No authoritative Firstmate source found | Policy-hidden, but Pi exposes no generic assistant-role renderer. |
 | `unknown` | Future or unclassified transcript component | Policy-hidden, but no generic renderer exists; never claimed as covered. |
 
@@ -135,7 +139,7 @@ They do not claim that a harness can never add the missing renderer API.
 
 ## Regression coverage
 
-`tests/fm-calm-pi-extension.test.sh` compares wrapped and stock renderers, verifies all seven built-ins plus `fm_watch_arm_pi`, exercises redraw of already-rendered tool and synthetic rows, checks the image and generic custom-tool boundaries, covers every policy class and synthetic fixture, covers session reset reasons, proves exports remain ordinary, and drives a genuine 180 by 44 interactive terminal fixture.
+`tests/fm-calm-pi-extension.test.sh` compares wrapped and stock renderers, verifies all seven built-ins plus `fm_watch_arm_pi`, exercises redraw of already-rendered tool and synthetic rows, checks the gapless custom-entry host, covers every policy class and synthetic fixture, covers session reset reasons, asserts the rendered export DOM, and drives a genuine 180 by 44 interactive terminal fixture.
 `tests/fm-pi-primary-types.test.sh` performs strict no-emit TypeScript checking against the installed Pi 0.81.1 declarations.
 
 The relevant commands are:
