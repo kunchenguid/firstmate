@@ -535,12 +535,17 @@ fm_backend_cmux_capture() {  # <target> <lines> [expected-label]
 # send-and-verify logic, and cmux's `read-screen` gives plain-text capture
 # with no cursor-row primitive and no ANSI style channel like herdr's newer
 # `pane read --format ansi` path. The cmux classifier recognizes either a row
-# enclosed by matching composer borders or a bare row beginning with a verified
-# agent-only glyph, scanning forward and keeping the LAST match so an earlier
-# composer-shaped line in scrollback never outranks the bottom-anchored composer.
+# enclosed by matching composer borders or a bare row beginning with Cursor
+# Agent's `→` glyph specifically (NOT the generic `❯`/`›` set - a dead shell
+# running a starship/pure-style `❯` prompt must stay unknown here), scanning
+# forward and keeping the LAST match so an earlier composer-shaped line in
+# scrollback never outranks the bottom-anchored composer. Cursor renders its
+# busy stop hint on the composer row itself, so a busy-regex match on the found
+# row short-circuits to empty (a landed submit), mirroring fm_tmux_composer_state.
 FM_BACKEND_CMUX_COMPOSER_LINES=${FM_BACKEND_CMUX_COMPOSER_LINES:-20}
 FM_BACKEND_CMUX_IDLE_RE=${FM_BACKEND_CMUX_IDLE_RE:-'^(Type a message\.\.\.|Add a follow-up|Plan, search, build anything)$'}
-FM_BACKEND_CMUX_BARE_PROMPT_RE=${FM_BACKEND_CMUX_BARE_PROMPT_RE:-'^[❯›→]'}
+FM_BACKEND_CMUX_BARE_PROMPT_RE=${FM_BACKEND_CMUX_BARE_PROMPT_RE:-'^→( |$)'}
+FM_BACKEND_CMUX_BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel|ctrl\+c to stop'
 
 fm_backend_cmux_composer_state() {  # <target> [expected-label] -> empty|pending|unknown
   local target=$1 expected_label=${2:-} cap line trimmed stripped="" found=0 bordered=0
@@ -567,7 +572,11 @@ fm_backend_cmux_composer_state() {  # <target> [expected-label] -> empty|pending
   fi
   stripped="${stripped#"${stripped%%[![:space:]]*}"}"
   stripped="${stripped%"${stripped##*[![:space:]]}"}"
-  # A bare shape is accepted only for a verified agent glyph; a dead-shell
+  if [ -n "$stripped" ] \
+     && printf '%s' "$stripped" | grep -qiE "${FM_BUSY_REGEX:-$FM_BACKEND_CMUX_BUSY_REGEX_DEFAULT}"; then
+    printf 'empty'; return 0
+  fi
+  # A bare shape is accepted only for Cursor's own `→` glyph; a dead-shell
   # prompt cannot reach the shared classifier as an empty composer.
   fm_composer_classify_content "$bordered" "$stripped" "$FM_BACKEND_CMUX_IDLE_RE"
 }

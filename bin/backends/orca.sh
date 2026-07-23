@@ -264,10 +264,16 @@ fm_backend_orca_read_text_paged() {  # <terminal-id> <limit>
 
 FM_BACKEND_ORCA_COMPOSER_LINES=${FM_BACKEND_ORCA_COMPOSER_LINES:-200}
 FM_BACKEND_ORCA_IDLE_RE=${FM_BACKEND_ORCA_IDLE_RE:-'^(Type a message\.\.\.|Add a follow-up|Plan, search, build anything)$'}
-FM_BACKEND_ORCA_BARE_PROMPT_RE=${FM_BACKEND_ORCA_BARE_PROMPT_RE:-'^[❯›→]'}
+FM_BACKEND_ORCA_BARE_PROMPT_RE=${FM_BACKEND_ORCA_BARE_PROMPT_RE:-'^→( |$)'}
+FM_BACKEND_ORCA_BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel|ctrl\+c to stop'
 
-# fm_backend_orca_composer_state: classify the composer's own bordered or
-# verified-agent bare row as empty|pending|unknown. Real text stays pending, including a slash-command
+# fm_backend_orca_composer_state: classify the composer's own row - bordered,
+# or bare beginning with Cursor Agent's `→` glyph specifically (NOT the generic
+# `❯`/`›` set, so a dead shell running a starship/pure-style `❯` prompt stays
+# unknown) - as empty|pending|unknown. Cursor renders its busy stop hint on the
+# composer row itself, so a busy-regex match on the found row short-circuits to
+# empty (a landed submit), mirroring fm_tmux_composer_state. Real text stays
+# pending, including a slash-command
 # popup that closed by filling an argument-hint placeholder into the composer;
 # that first Enter selected the popup item, it did not submit the command.
 fm_backend_orca_composer_state() {  # <terminal-id> -> empty|pending|unknown
@@ -295,7 +301,11 @@ fm_backend_orca_composer_state() {  # <terminal-id> -> empty|pending|unknown
   fi
   stripped="${stripped#"${stripped%%[![:space:]]*}"}"
   stripped="${stripped%"${stripped##*[![:space:]]}"}"
-  # A bare shape is accepted only for a verified agent glyph; a dead-shell
+  if [ -n "$stripped" ] \
+     && printf '%s' "$stripped" | grep -qiE "${FM_BUSY_REGEX:-$FM_BACKEND_ORCA_BUSY_REGEX_DEFAULT}"; then
+    printf 'empty'; return 0
+  fi
+  # A bare shape is accepted only for Cursor's own `→` glyph; a dead-shell
   # prompt cannot reach the shared classifier as an empty composer.
   fm_composer_classify_content "$bordered" "$stripped" "$FM_BACKEND_ORCA_IDLE_RE"
 }

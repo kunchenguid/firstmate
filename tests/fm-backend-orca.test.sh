@@ -207,6 +207,26 @@ test_composer_state_cursor_bare_placeholder_is_empty() {
   pass "fm_backend_orca_composer_state: Cursor Agent's bare idle composer reads empty"
 }
 
+test_composer_state_cursor_busy_hint_is_empty() {
+  local out
+  orca_case composer-cursor-busy
+  printf '{"ok":true,"result":{"terminal":{"tail":["  ⠞ Working","","  → Add a follow-up                          ctrl+c to stop","","  Cursor Grok 4.5 Low"]}}}\n' > "$RESP/1.out"
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_composer_state term-123' "$ROOT" )
+  [ "$out" = empty ] || fail "Cursor's busy composer row (ctrl+c to stop) must read empty so Enter is not re-sent into a live turn, got '$out'"
+  pass "fm_backend_orca_composer_state: Cursor Agent's busy stop hint reads empty, not pending"
+}
+
+test_composer_state_bare_chevron_shell_prompt_is_unknown() {
+  local out
+  orca_case composer-bare-chevron
+  printf '{"ok":true,"result":{"terminal":{"tail":["some earlier output","❯ "]}}}\n' > "$RESP/1.out"
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_composer_state term-123' "$ROOT" )
+  [ "$out" = unknown ] || fail "a bare '❯' dead-shell prompt (starship/pure default) must read unknown, got '$out'"
+  pass "fm_backend_orca_composer_state: a bare '❯' dead-shell prompt reads unknown, never empty"
+}
+
 # Dead-shell injection safety (task fm-composer-shellglyph-safety): a pane whose
 # agent has exited to a bare login shell has no bordered composer row, so the
 # classifier finds nothing and reports `unknown` - NOT a safe (empty) injection
@@ -1297,6 +1317,8 @@ test_send_text_submit_keeps_current_tail_when_limited
 test_send_text_submit_retries_when_composer_stays_pending
 test_composer_state_popup_placeholder_fill_is_pending
 test_composer_state_cursor_bare_placeholder_is_empty
+test_composer_state_cursor_busy_hint_is_empty
+test_composer_state_bare_chevron_shell_prompt_is_unknown
 test_composer_state_bare_shell_prompt_is_unknown
 test_send_text_submit_popup_autocomplete_requires_second_enter
 test_send_literal_constructs_non_enter_send

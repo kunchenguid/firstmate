@@ -709,6 +709,30 @@ test_composer_state_cursor_bare_placeholder_is_empty() {
   pass "fm_backend_cmux_composer_state: Cursor Agent's bare idle composer reads empty"
 }
 
+test_composer_state_cursor_busy_hint_is_empty() {
+  local dir fb out
+  dir="$TMP_ROOT/composer-cursor-busy"; mkdir -p "$dir/responses"
+  cmux_panes_response "$dir" 1 "bbbbbbbb-1111-1111-1111-111111111111"
+  cmux_read_screen_response "$dir" 2 $'  ⠞ Working\n\n  → Add a follow-up                          ctrl+c to stop\n\n  Cursor Grok 4.5 Low'
+  fb=$(make_cmux_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_composer_state "aaaaaaaa-0000-0000-0000-000000000000:bbbbbbbb-1111-1111-1111-111111111111"' "$ROOT" )
+  [ "$out" = empty ] || fail "Cursor's busy composer row (ctrl+c to stop) must read empty so Enter is not re-sent into a live turn, got '$out'"
+  pass "fm_backend_cmux_composer_state: Cursor Agent's busy stop hint reads empty, not pending"
+}
+
+test_composer_state_bare_chevron_shell_prompt_is_unknown() {
+  local dir fb out
+  dir="$TMP_ROOT/composer-bare-chevron"; mkdir -p "$dir/responses"
+  cmux_panes_response "$dir" 1 "bbbbbbbb-1111-1111-1111-111111111111"
+  cmux_read_screen_response "$dir" 2 $'some earlier output\n❯ '
+  fb=$(make_cmux_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_composer_state "aaaaaaaa-0000-0000-0000-000000000000:bbbbbbbb-1111-1111-1111-111111111111"' "$ROOT" )
+  [ "$out" = unknown ] || fail "a bare '❯' dead-shell prompt (starship/pure default) must read unknown, got '$out'"
+  pass "fm_backend_cmux_composer_state: a bare '❯' dead-shell prompt reads unknown, never empty"
+}
+
 test_composer_state_real_text_is_pending() {
   local dir fb out
   dir="$TMP_ROOT/composer-pending"; mkdir -p "$dir/responses"
@@ -1058,6 +1082,8 @@ test_current_path_probes_with_marker
 test_composer_state_bare_prompt_is_empty
 test_composer_state_ghost_placeholder_is_empty
 test_composer_state_cursor_bare_placeholder_is_empty
+test_composer_state_cursor_busy_hint_is_empty
+test_composer_state_bare_chevron_shell_prompt_is_unknown
 test_composer_state_real_text_is_pending
 test_composer_state_popup_placeholder_fill_is_pending
 test_composer_state_unknown_on_capture_failure

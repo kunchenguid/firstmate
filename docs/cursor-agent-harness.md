@@ -68,8 +68,8 @@ All supported runtime backend integration surfaces were reviewed before enabling
 - Herdr prefers native registered-agent state when available and falls back to the shared busy regex and structural composer classifier when it is not.
   Its bare composer set now includes `→` and the two Cursor placeholders.
 - Orca has no native semantic busy state and uses capture plus the shared regex.
-  Its structural composer classifier now accepts bare verified agent glyphs while retaining bare-shell refusal.
-- cmux has the same capture and structural-classifier posture as Orca and now recognizes the Cursor composer shape.
+  Its structural composer classifier now accepts Cursor's bare `→` composer row specifically, short-circuits Cursor's on-row `ctrl+c to stop` busy hint to `empty` (a landed submit, no duplicate Enter), and retains bare-shell refusal - the generic `❯`/`›` glyphs are not accepted bare, so a `❯`-prompt dead shell stays `unknown`.
+- cmux has the same capture and structural-classifier posture as Orca and recognizes the Cursor composer shape under the same Cursor-only bare-glyph and busy-hint rules.
 - zellij has no separate composer-state API and retains its existing type-once, Enter-retry, screen-delta submit verification.
   Cursor uses that generic path without changing zellij lifecycle behavior.
 

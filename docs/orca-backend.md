@@ -78,7 +78,8 @@ Operation routing:
 - `fm-peek.sh` captures with `orca terminal read`.
 - `fm-send.sh` types text with `orca terminal send --text ...`, submits with Enter, and verifies the composer row cleared before returning; when Orca reports a limited page, the verifier follows `oldestCursor` and preserves the current tail so older text cannot hide still-pending composer input.
   A slash-command popup that closes by filling an argument-hint placeholder still reads as pending, so the retry loop sends the required second Enter rather than treating the first Enter as a submission.
-  A bordered row or a bare row beginning with a verified agent-only glyph is classified through the shared composer classifier; a bare shell prompt has no genuine composer row and reads `unknown`, not confirmed empty.
+  A bordered row or a bare row beginning with Cursor Agent's `→` glyph specifically is classified through the shared composer classifier; the generic `❯`/`›` glyphs are not accepted bare, so a bare shell prompt - including a starship/pure-style `❯` - has no genuine composer row and reads `unknown`, not confirmed empty.
+  A found composer row matching the shared busy regex (Cursor renders `ctrl+c to stop` on the composer row itself while generating) short-circuits to `empty` - the submit landed - so the Enter-retry loop never re-sends Enter into a live turn.
   Cursor Agent's 2026-07-23 tmux capture established the bare `→ Add a follow-up` shape, and `tests/fm-backend-orca.test.sh` replays that exact plain-text shape through Orca's `terminal read` response parser.
   This is structural compatibility evidence rather than a claim that the optional Orca and Cursor combination was driven live; [`cursor-agent-harness.md`](cursor-agent-harness.md) records the exact CLI capture and backend review scope.
 - `fm-send.sh --key Enter` and `--key C-c` are supported.
