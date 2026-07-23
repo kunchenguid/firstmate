@@ -345,7 +345,7 @@ test_scout_and_secondmate_scaffold() {
 # secondmate does not. Existing brief shape (Task, Setup, Rules, Definition of done)
 # must remain intact.
 test_loan_package_on_ship_and_scout_not_secondmate() {
-  local home ship scout charter help
+  local home ship scout charter help override_data override_ship override_scout
   home="$TMP_ROOT/loan-package-home"
   mkdir -p "$home/data"
 
@@ -394,12 +394,31 @@ test_loan_package_on_ship_and_scout_not_secondmate() {
     "scout brief must use the same absolute Firstmate-home return path"
   assert_grep "Write the \`## Palautusehdotus\` return proposal to \`$home/data/loan-scout/palautus.md\` before done." "$scout" \
     "scout DOD must require the Firstmate-home return proposal"
-  assert_grep "the report, the return proposal, and the status file below" "$scout" \
+  assert_grep "the report at \`$home/data/loan-scout/report.md\`, the return proposal at \`$home/data/loan-scout/palautus.md\`, and the status file below" "$scout" \
     "scout rules must allow the Firstmate-home return proposal"
   assert_grep "may accept evidence-backed factual corrections directly onto a library card" "$scout" \
     "scout brief missing firstmate fact-correction authority"
   assert_grep "SCOUT task" "$scout" "scout brief lost SCOUT task declaration"
   assert_grep "report.md" "$scout" "scout brief lost report deliverable"
+
+  override_data="$home/redirected-data"
+  FM_HOME="$home" FM_DATA_OVERRIDE="$override_data" \
+    "$ROOT/bin/fm-brief.sh" loan-override-ship alpha >/dev/null 2>&1 \
+    || fail "ship scaffold with data override exited non-zero"
+  override_ship="$override_data/loan-override-ship/brief.md"
+  assert_grep "return proposal at \`$home/data/loan-override-ship/palautus.md\`" "$override_ship" \
+    "ship return path must remain under FM_HOME/data when DATA is overridden"
+  assert_no_grep "$override_data/loan-override-ship/palautus.md" "$override_ship" \
+    "ship return path followed FM_DATA_OVERRIDE"
+
+  FM_HOME="$home" FM_DATA_OVERRIDE="$override_data" \
+    "$ROOT/bin/fm-brief.sh" loan-override-scout alpha --scout >/dev/null 2>&1 \
+    || fail "scout scaffold with data override exited non-zero"
+  override_scout="$override_data/loan-override-scout/brief.md"
+  assert_grep "return proposal at \`$home/data/loan-override-scout/palautus.md\`" "$override_scout" \
+    "scout return path must match the ship FM_HOME/data destination"
+  assert_no_grep "$override_data/loan-override-scout/palautus.md" "$override_scout" \
+    "scout return path followed FM_DATA_OVERRIDE"
 
   FM_HOME="$home" FM_SECONDMATE_CHARTER='loan domain' \
     "$ROOT/bin/fm-brief.sh" loan-sm --secondmate --no-projects >/dev/null 2>&1 \

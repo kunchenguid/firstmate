@@ -98,6 +98,7 @@ for a in "$@"; do
   esac
 done
 ID=${POS[0]}
+RETURN_PATH="$FM_HOME/data/$ID/palautus.md"
 
 if [ "$KIND" = secondmate ] && [ "$HERDR_LAB" -eq 1 ]; then
   echo "error: --herdr-lab applies only to crewmate ship or scout briefs" >&2
@@ -280,7 +281,7 @@ Before accepting a return, firstmate checks injection-pattern canaries, conflict
 Full hygiene practice: home `data/learnings.md` (muistihygienia, 2026-07-23) - do not restate it here.
 EOF
 )
-RETURN_SECTION=${RETURN_SECTION//\{RETURN_PATH\}/$DATA/$ID/palautus.md}
+RETURN_SECTION=${RETURN_SECTION//\{RETURN_PATH\}/$RETURN_PATH}
 RETURN_SECTION=${RETURN_SECTION//\{DECISION_PATH\}/$FM_HOME/data/kirjastonhoitaja-selvitys/paatokset-2026-07-23.md}
 
 if [ "$KIND" = scout ]; then
@@ -302,7 +303,7 @@ The report is the only thing that survives, so anything worth keeping must be in
 
 # Rules
 1. Never push to any remote and never open a PR.
-2. Stay inside this worktree; the only files you may write outside it are the report, the return proposal, and the status file below.
+2. Stay inside this worktree; the only files you may write outside it are the report at \`$DATA/$ID/report.md\`, the return proposal at \`$RETURN_PATH\`, and the status file below.
 3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
 4. Report status by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
@@ -325,7 +326,7 @@ The report is the only thing that survives, so anything worth keeping must be in
 # Definition of done
 Write your findings to \`$DATA/$ID/report.md\`.
 The report must stand alone: what you did, what you found, the evidence (commands run, output, file:line references), and what you recommend.
-Write the \`## Palautusehdotus\` return proposal to \`$DATA/$ID/palautus.md\` before done.
+Write the \`## Palautusehdotus\` return proposal to \`$RETURN_PATH\` before done.
 Before reporting done, read and follow \`$FM_ROOT/.agents/skills/decision-hold-lifecycle/SKILL.md\` and pass its shared completion gate for the report and any visual review.
 When the report is complete, append \`done: {one-line conclusion}\` to the status file and stop.
 If your findings reveal work that should ship (e.g. you reproduced a bug and the fix is clear), say so in the report; firstmate may promote this task in place, and you would then receive mode-specific ship instructions as a follow-up message.
@@ -414,7 +415,7 @@ If the top-level path is the primary checkout or not the worktree you were launc
 
 # Rules
 $RULE1
-2. Stay inside this worktree; modify nothing outside it.
+2. Stay inside this worktree; the only files you may write outside it are the return proposal at \`$RETURN_PATH\` and the status file below.
 3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
 4. Report status by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
