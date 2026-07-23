@@ -56,7 +56,7 @@ The later duplicate-turn evidence below supersedes custom-message rerouting as a
 The disconfirming checks deliberately retained contradictory evidence.
 An arbitrary third-party custom tool and a built-in read image remain visible because Pi exposes neither a global tool renderer nor image-row control.
 An expanded thinking fixture remains visible, and an empty collapsed-thinking label leaves blank spacing, so this implementation does not claim complete reasoning-row removal.
-An ordinary user prompt may quote or reuse watcher, guard, startup, or supervisor wording and remains visible unless it carries a structurally valid operational envelope.
+Every ordinary user-role message remains visible, including a genuine captain prompt that quotes watcher, guard, startup, or supervisor wording and a structurally valid operational envelope.
 
 ## Duplicate-turn regression and semantic boundary
 
