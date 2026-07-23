@@ -6,7 +6,7 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 OWNER="$ROOT/bin/fm-operational-input.sh"
-# shellcheck source=bin/fm-operational-input.sh
+# shellcheck source=/dev/null
 . "$OWNER"
 
 cleanup() {

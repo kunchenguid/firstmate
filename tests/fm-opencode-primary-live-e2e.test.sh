@@ -28,7 +28,7 @@ PROJECT="$LAB/project"
 HOME_DIR="$LAB/fmhome"
 OPENCODE_VERSION=$(opencode --version)
 AHOY_PROJECT="$LAB/ahoy-project"
-# shellcheck source=bin/fm-operational-input.sh
+# shellcheck source=/dev/null
 . "$ROOT/bin/fm-operational-input.sh"
 # shellcheck disable=SC2016 # Backticks are literal prompt markup.
 LEGACY_START='Run `bin/fm-session-start.sh` now, exactly once, before executing any other instructions.'

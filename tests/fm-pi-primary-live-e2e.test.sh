@@ -28,7 +28,7 @@ PROJECT="$LAB/project"
 AHOY_PROJECT="$LAB/ahoy-project"
 HOME_DIR="$LAB/fmhome"
 PI_VERSION=$(pi --version)
-# shellcheck source=bin/fm-operational-input.sh
+# shellcheck source=/dev/null
 . "$ROOT/bin/fm-operational-input.sh"
 # shellcheck disable=SC2016 # Backticks are literal prompt markup.
 LEGACY_START='Run `bin/fm-session-start.sh` now, exactly once, before executing any other instructions.'
