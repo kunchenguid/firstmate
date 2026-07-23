@@ -594,7 +594,7 @@ assert_archive_verify_fails() {  # <home> <origin> <case>
 }
 
 test_retained_decisions_are_strictly_archive_aware() {
-  local home origin older_hold newer_hold archive record heading digest closed variant
+  local home origin older_hold newer_hold archive record heading digest closed variant before after
   local dependent=sample-retained-dependent
   home=$(make_home retained-decisions)
   origin=sample-retained-review
@@ -614,6 +614,17 @@ test_retained_decisions_are_strictly_archive_aware() {
     || fail "could not create retained-decision dependent work"
   tasks_in "$home" block "$dependent" --by "$older_hold" >/dev/null \
     || fail "could not block retained-decision dependent work"
+  printf 'Use the retained route.\r\n' > "$home/crlf-retained-decision.txt"
+  before=$(shasum -a 256 "$home/data/backlog.md" | awk '{print $1}')
+  if run_decisions "$home" resolve "$origin" older \
+    --decision-file "$home/crlf-retained-decision.txt" --routed-to "$dependent" \
+    > "$home/crlf-decision.out" 2> "$home/crlf-decision.err"; then
+    fail "resolve accepted a CRLF captain decision"
+  fi
+  after=$(shasum -a 256 "$home/data/backlog.md" | awk '{print $1}')
+  [ "$before" = "$after" ] || fail "CRLF rejection mutated the backlog"
+  assert_grep "decision file must use LF line endings" "$home/crlf-decision.err" \
+    "CRLF rejection did not report the canonical decision-file requirement"
   printf 'Use the retained route.\n' > "$home/retained-decision.txt"
   run_decisions "$home" resolve "$origin" older --decision-file "$home/retained-decision.txt" \
     --routed-to "$dependent" >/dev/null \
@@ -756,6 +767,11 @@ EOF
   rewrite_once "$variant/data/done-archive.md" "$heading" "$heading extra"
   assert_archive_verify_fails "$variant" "$origin" malformed-section
 
+  variant=$(clone_home "$home" retained-tab-heading)
+  rewrite_once "$variant/data/done-archive.md" "$heading" \
+    "${heading}"$'\n\n##\tDone'
+  assert_archive_verify_fails "$variant" "$origin" tab-heading-section-escape
+
   variant=$(clone_home "$home" retained-symlink)
   mv "$variant/data/done-archive.md" "$variant/data/archive-target.md"
   ln -s archive-target.md "$variant/data/done-archive.md"
@@ -791,7 +807,7 @@ EOF
   printf '\n%s\n' "$record" >> "$variant/data/backlog.md"
   assert_archive_verify_fails "$variant" "$origin" active-archive-collision
 
-  pass "retained decisions support complete/verify/retry and malformed, forged, wrong-kind, unresolved, arbitrary, duplicate, and unsafe archives fail closed"
+  pass "retained LF decisions verify after archival while CRLF, tab-heading, malformed, forged, duplicate, and unsafe records are rejected"
 }
 
 test_uninventoried_report_decision_refuses_completion

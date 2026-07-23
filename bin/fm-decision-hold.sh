@@ -49,6 +49,7 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 ARCHIVE_VIEW=''
+TASKS_AXI_SECTION_HEADING_RE='^##[[:space:]]+'
 
 # shellcheck source=bin/fm-classify-lib.sh
 # shellcheck disable=SC1091
@@ -191,11 +192,11 @@ archive_is_safe() {  # <archive>
 
 archive_identity_counts() {  # <archive> <id>
   local archive=$1 id=$2
-  awk -v id="$id" '
+  awk -v id="$id" -v section_heading_re="$TASKS_AXI_SECTION_HEADING_RE" '
     function target(line) {
       return index(line, "- [ ] " id " - ") == 1 || index(line, "- [x] " id " - ") == 1
     }
-    /^## / {
+    $0 ~ section_heading_re {
       archived = ($0 ~ /^## Archived [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]$/)
     }
     target($0) {
@@ -226,20 +227,20 @@ extract_archive_record() {  # <archive> <id>
     umask 077
     mktemp "$DATA/.fm-decision-hold-archive.XXXXXX"
   ) || fail "could not create private archive parser view"
-  awk -v id="$id" '
+  awk -v id="$id" -v section_heading_re="$TASKS_AXI_SECTION_HEADING_RE" '
     BEGIN {
       print "## Done"
       print ""
     }
     capturing {
-      if ($0 ~ /^- \[[ x]\] / || $0 ~ /^## /) exit
+      if ($0 ~ /^- \[[ x]\] / || $0 ~ section_heading_re) exit
       if ($0 == "" || substr($0, 1, 2) == "  ") {
         print
         next
       }
       exit
     }
-    /^## / {
+    $0 ~ section_heading_re {
       archived = ($0 ~ /^## Archived [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]$/)
     }
     archived && (index($0, "- [ ] " id " - ") == 1 || index($0, "- [x] " id " - ") == 1) {
@@ -266,7 +267,7 @@ verify_archived_resolution() {  # <id> <show-output> <raw-header>
   closed=$(show_field "$show" closed)
   body_json=$(show_field "$show" body)
   [ "$parsed_id" = "$id" ] || fail "archived captain decision has the wrong identity: $parsed_id"
-  [ "$state" = done ] || fail "archived captain decision $id is not typed done"
+  [ "$state" = "done" ] || fail "archived captain decision $id is not typed done"
   [ "$kind" = captain ] || fail "archived backlog item $id is not kind captain"
   [ "$hold_kind" = captain ] || fail "archived backlog item $id is not held for the captain"
   [ -n "$hold_reason" ] && [ "$hold_reason" != '-' ] \
@@ -665,6 +666,7 @@ command_resolve() {
   [ -n "$decision_file" ] || fail "--decision-file is required"
   [ -f "$decision_file" ] || fail "decision file does not exist: $decision_file"
   decision=$(cat "$decision_file")
+  case "$decision" in *$'\r'*) fail "decision file must use LF line endings" ;; esac
   [ -n "$decision" ] || fail "decision file must not be empty"
   [ "$(printf '%s' "$decision" | LC_ALL=C wc -c | tr -d ' ')" -le 8192 ] \
     || fail "decision file exceeds 8192 bytes"

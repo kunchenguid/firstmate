@@ -13,7 +13,7 @@ The `hold` subcommand maps an originating work id and stable decision key to `<o
 It creates a kind `captain` backlog item when absent and invokes `tasks-axi hold <id> --reason <reason> --kind captain` on every retry.
 It rejects an identity collision, a changed title, and attempts to reopen an already resolved identity.
 
-Every decision lookup counts the exact identity across the active backlog and canonical `## Archived YYYY-MM-DD` sections in `data/done-archive.md`.
+Every decision lookup resets archive membership at every tasks-axi-recognized level-two heading and counts the exact identity only in canonical `## Archived YYYY-MM-DD` sections in `data/done-archive.md`.
 It rejects duplicate active identities, duplicate archived identities, active/archive collisions, symlink or non-regular archives, unreadable archives, and archive bytes that change during verification.
 For an archived identity, it extracts only that record into a private single-record `## Done` view and parses it through public `tasks-axi show --full --file` output.
 The archived record is accepted only when its terminal checkbox and typed state, captain kind and hold kind, closure date, decision digest, sorted unique routed identities, non-empty decision, and exact routed-work suffix all match the durable bytes written by `resolve`.
@@ -30,6 +30,7 @@ Scout teardown calls the script's read-only `verify` subcommand after checking f
 The `--force` path remains the explicit captain-approved discard escape hatch.
 
 The `resolve` subcommand requires a decision file and at least one existing dependent task whose structured `blocked-by` edge points to the hold.
+It rejects carriage-return line endings before any backlog mutation so accepted decision bytes remain recomputable after structured Markdown retention.
 It records the decision digest and routed task identities as a retry identity in the hold body, clears each dependency edge through tasks-axi, and marks the hold Done only after those writes succeed.
 An exact retry can finish a partial routing operation, while a changed decision or routed-task set is rejected.
 A failed intermediate step leaves the hold open.
@@ -69,7 +70,7 @@ ok - resolved findings and decision-like prose do not create false holds
 ok - terminal single-owner stale status decisions do not block empty inventory
 ok - main-home and secondmate-home captain holds remain correctly routed
 ok - resolve matches first/middle/last in quoted blocked_by and rejects a genuinely absent id
-ok - retained decisions support complete/verify/retry and malformed, forged, wrong-kind, unresolved, arbitrary, duplicate, and unsafe archives fail closed
+ok - retained LF decisions verify after archival while CRLF, tab-heading, malformed, forged, duplicate, and unsafe records are rejected
 
 $ bash tests/fm-fleet-snapshot-view.test.sh
 ok - backlog normalization preserves strict roles and resolves every blocker compatibly
