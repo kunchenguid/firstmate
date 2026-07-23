@@ -351,7 +351,7 @@ The firstmate PRIMARY's own `.cursor/hooks.json` registers:
 - `beforeShellExecution` -> `bin/fm-arm-pretool-check.sh --cursor` and `bin/fm-cd-pretool-check.sh --cursor` (Cursor permission deny JSON on stdout; also exit 2)
 - `stop` -> `bin/fm-turnend-guard-cursor.sh` with `loop_limit: 1` (returns `followup_message` when the shared turn-end guard exits 2; `loop_count > 0` allows the stop)
 
-Cursor stop hooks are passive for exit status; `followup_message` is the forced-continuation lever.
+Cursor stop hooks are passive for exit status; `followup_message` is the forced-continuation lever and must carry a typed `turn-end-guard` operational input from `bin/fm-operational-input.sh` (same envelope as Grok/OpenCode/Pi).
 Cursor's primary watcher protocol is Claude-shaped background-notify around `bin/fm-watch-arm.sh` via a Cursor Agent background Shell task.
 Known gap (tmux agent liveness): Cursor's foreground process name is often `MainThread`, so `fm_backend_tmux_agent_alive` may report `unknown` rather than `alive`; herdr liveness via registered agent status is unaffected.
 
