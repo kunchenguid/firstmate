@@ -30,11 +30,13 @@ command -v tmux >/dev/null 2>&1 || { echo "skip: tmux not found"; exit 0; }
 REAL_TMUX=$(command -v tmux)
 SOCKET="fm-backend-smoke-$$"
 SHIM_DIR=
+SEL_DIR=
 trap cleanup_all EXIT
 
 cleanup_all() {
   "$REAL_TMUX" -L "$SOCKET" kill-server >/dev/null 2>&1 || true
   [ -n "${SHIM_DIR:-}" ] && rm -rf "$SHIM_DIR"
+  [ -n "${SEL_DIR:-}" ] && rm -rf "$SEL_DIR"
 }
 
 # A `tmux` shim on PATH that transparently redirects every call to the private
@@ -251,6 +253,61 @@ if tmux list-windows -a -F '#{session_name}:#{window_name}' | grep -qx "firstmat
   fail "the exact recorded target no longer kills its own window"
 fi
 pass "real tmux: the exact-match pin still resolves and kills a target by its recorded name pair"
+
+# --- tmux's special/relative window selectors must survive the pin -----------
+# tmux looks a window up as a SPECIAL TOKEN first, then index, then id, then
+# name, so an "=" prefix does not exact-match a token, it suppresses it: the
+# selector silently falls back to the session's CURRENT window and still exits
+# 0 (docs/tmux-backend.md "Window-target selector tokens"). These are reachable
+# user input, because fm_backend_resolve_selector passes any colon-bearing raw
+# selector through verbatim. Each window gets its own cwd so
+# fm_backend_tmux_current_path names which window a selector actually reached,
+# and the primitive's answer is compared against RAW tmux asked the same
+# (unpinned) way - the resolution the user typed and is entitled to.
+tmux kill-session -t "=firstmate2" 2>/dev/null || true
+SEL_DIR=$(mktemp -d "${TMPDIR:-/tmp}/fm-backend-smoke-sel.XXXXXX")
+mkdir -p "$SEL_DIR/w0" "$SEL_DIR/w1" "$SEL_DIR/w2"
+tmux new-session -d -s selses -n selw0 -c "$SEL_DIR/w0" -x 200 -y 50 \
+  || fail "real tmux: could not create the selector-probe session"
+fm_backend_tmux_create_task selses selw1 "$SEL_DIR/w1" >/dev/null \
+  || fail "real tmux: could not create selector-probe window selw1"
+fm_backend_tmux_create_task selses selw2 "$SEL_DIR/w2" >/dev/null \
+  || fail "real tmux: could not create selector-probe window selw2"
+# Current window selw1, last window selw2, so EVERY token below resolves to a
+# window other than the current one - which is exactly what a suppressed token
+# would collapse to.
+tmux select-window -t "=selses:=selw2" || fail "real tmux: could not select selw2"
+tmux select-window -t "=selses:=selw1" || fail "real tmux: could not select selw1"
+# Read the per-window cwds back from tmux rather than assuming $SEL_DIR is not
+# reached through a symlink (macOS /tmp -> /private/tmp).
+SELW1_PATH=$(tmux display-message -p -t "=selses:=selw1" '#{pane_current_path}')
+SELW2_PATH=$(tmux display-message -p -t "=selses:=selw2" '#{pane_current_path}')
+[ -n "$SELW1_PATH" ] && [ "$SELW1_PATH" != "$SELW2_PATH" ] \
+  || fail "real tmux: the selector-probe windows did not get distinct working directories"
+
+for sel in '^' '$' '!' '+' '-' '+1' '-1' '+2' \
+  '{start}' '{end}' '{last}' '{next}' '{previous}' '$.0' '{end}.0'; do
+  raw=$(tmux display-message -p -t "selses:$sel" '#{pane_current_path}' 2>/dev/null)
+  [ -n "$raw" ] || fail "selector '$sel' did not resolve at all under raw tmux"
+  [ "$raw" != "$SELW1_PATH" ] \
+    || fail "selector '$sel' resolves to the current window under raw tmux, so it cannot detect a suppressed token"
+  got=$(fm_backend_tmux_current_path "selses:$sel")
+  [ "$got" = "$raw" ] \
+    || fail "selector 'selses:$sel' resolved to '$got' through the adapter but '$raw' under raw tmux (the pin suppressed the token)"
+done
+pass "real tmux: the pin leaves tmux's special/relative window selectors resolving exactly as raw tmux does"
+
+# The exclusion must stay narrow: an ordinary window name and a window INDEX
+# both keep the exact-match pin.
+[ "$(fm_backend_tmux_current_path 'selses:selw2')" = "$SELW2_PATH" ] \
+  || fail "an ordinary window name no longer resolves through the pin"
+[ "$(fm_backend_tmux_current_path 'selses:2')" = "$SELW2_PATH" ] \
+  || fail "a window index no longer resolves through the pin"
+[ "$(fm_tmux_pin_target 'selses:selw2')" = '=selses:=selw2' ] \
+  || fail "an ordinary window name lost its exact-match pin"
+[ "$(fm_tmux_pin_target '=selses:$')" = '=selses:$' ] \
+  || fail "fm_tmux_pin_target is not idempotent for an unpinned special selector"
+pass "real tmux: ordinary window names and indexes keep the exact-match pin, and the rewrite stays idempotent"
 
 cleanup_all
 trap - EXIT

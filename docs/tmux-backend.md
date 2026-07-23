@@ -142,6 +142,46 @@ A `=` on the window half does not break index targeting: `-t '=sesA:=1'` still r
 
 `bin/backends/tmux.sh` therefore targets sessions as `=$ses` / `=$ses:` at container-ensure and create-task time, and `bin/fm-afk-launch.sh` resolves its recorded daemon session with `=`.
 
+### Window-target selector tokens
+
+`=` must NOT be applied to tmux's special and relative window selectors, because it suppresses them rather than exact-matching them.
+`tmux(1)` looks a window up as a special token FIRST, then as an index, then as a window id, then as an exact name, then as a name prefix, then as a glob; an `=` prefix skips straight past the special-token step.
+The documented tokens are `{start}` / `^`, `{end}` / `$`, `{last}` / `!`, `{next}` / `+` and `{previous}` / `-`, where `+` and `-` may carry an offset such as `+2`.
+
+Verified 2026-07-23, tmux 3.6, on a private `-L` socket, with session `sesA` holding windows `0:w0`, `1:w1`, `2:w2` and `w1` selected as the current window (so the current window is `w1` and the last window is `w0`).
+Each selector was read back with `tmux display-message -p -t '<target>' '#{window_name}'`, unpinned and then with both halves pinned; every call exited 0, so a suppressed selector is silent.
+
+```
+target                    unpinned   ->   both halves pinned
+sesA:^        / =sesA:=^        w0     ->   w1
+sesA:$        / =sesA:=$        w2     ->   w1
+sesA:!        / =sesA:=!        w0     ->   w1
+sesA:+        / =sesA:=+        w2     ->   w1
+sesA:-        / =sesA:=-        w0     ->   w1
+sesA:+1       / =sesA:=+1       w2     ->   w1
+sesA:-1       / =sesA:=-1       w0     ->   w1
+sesA:+2       / =sesA:=+2       w0     ->   w1
+sesA:{start}  / =sesA:={start}  w0     ->   w1
+sesA:{end}    / =sesA:={end}    w2     ->   w1
+sesA:{last}   / =sesA:={last}   w0     ->   w1
+sesA:{next}   / =sesA:={next}   w2     ->   w1
+sesA:{previous} / =sesA:={previous} w0 ->   w1
+sesA:$.0      / =sesA:=$.0      w2     ->   w1
+sesA:{end}.0  / =sesA:={end}.0  w2     ->   w1
+sesA:w1       / =sesA:=w1       w1     ->   w1
+sesA:1        / =sesA:=1        w1     ->   w1
+sesA:@2       / =sesA:=@2       w2     ->   w2
+```
+
+The last three rows are the cases the pin must keep: an exact window name, a window INDEX (`=` does not suppress index lookup) and a window id (already unambiguous).
+The `.0` rows show a selector still counts as special when it carries a pane suffix.
+
+`{mouse}` / `=` and `{marked}` / `~` are whole-target tokens, not window-half tokens, so they need no exclusion.
+With a pane in `w2` marked via `tmux select-pane -m -t '=sesA:=w2'`, `tmux display-message -p -t '~' '#{window_name}'` printed `w2`, while both `-t 'sesA:~'` and `-t '=sesA:=~'` printed `w1` - the window half is inert either way.
+
+`fm_tmux_pin_target` therefore leaves the window half unpinned when it is `^`, `$` or `!` (alone or followed by a `.<pane>` suffix), starts with `+` or `-`, or is a `{...}` token.
+These selectors are reachable user input: `fm_backend_resolve_selector` (`bin/fm-backend.sh`) passes any colon-bearing raw selector through verbatim as its documented escape hatch for a window outside this firstmate home, so `fm-peek 'sesA:$'` and `fm-send 'sesA:+' '...'` must keep meaning what tmux says they mean.
+
 ### Where the pin is applied for a recorded endpoint
 
 A task's endpoint is persisted (`window=` in `<state>/<id>.meta`) as the PLAIN `<session>:<window>` name pair, because that string is also the task's identity key - `window_to_task`, `fm_backend_meta_for_window` and the human-facing target column all read it back, and a `=`-decorated handle would break them and every record written before the pin existed.
@@ -152,7 +192,7 @@ This covers stale records, records written before the pin, and targets typed on 
 
 `fm_backend_tmux_resolve_bare_selector` compares the listed window name LITERALLY rather than as a `grep` regex, so a selector containing a metacharacter cannot resolve to a different live window.
 
-`tests/fm-backend-tmux-smoke.test.sh` (numeric session name, prefix-sibling container-ensure, and a stale `firstmate:fm-abc` record against a live `firstmate2:fm-abcd`) and `tests/fm-afk-launch.test.sh` (prefix-sibling close/liveness) pin these behaviors against a real tmux.
+`tests/fm-backend-tmux-smoke.test.sh` (numeric session name, prefix-sibling container-ensure, a stale `firstmate:fm-abc` record against a live `firstmate2:fm-abcd`, and the special/relative window selectors above) and `tests/fm-afk-launch.test.sh` (prefix-sibling close/liveness) pin these behaviors against a real tmux.
 
 Caveat recorded, not fixed here: `tmux display-message` exits 0 even when its target does not resolve (it falls back to the current session's pane and prints empty fields for a missing session), so `fm_backend_target_exists`'s tmux arm is a pane-readability probe rather than a strict endpoint-identity check.
 The pin removes the dangerous case - a stale record can no longer read a STRANGER session's pane - but a window that has closed inside a still-live session is still reported as present.

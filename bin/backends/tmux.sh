@@ -61,9 +61,9 @@ fm_backend_tmux_send_key() {  # <target> <key>
 }
 
 # fm_backend_tmux_target_exists: cheap, read-only presence check for <target>'s
-# pane. The tmux arm of fm_backend_target_exists (bin/fm-backend.sh) and of
-# fm-crew-state.sh's pane_readable, kept here so the exact-match pin cannot be
-# forgotten by an inline caller.
+# pane. The one tmux arm of fm_backend_target_exists (bin/fm-backend.sh), which
+# fm-crew-state.sh's pane_readable also dispatches through, so the exact-match
+# pin cannot be forgotten by an inline caller.
 fm_backend_tmux_target_exists() {  # <target>
   tmux display-message -p -t "$(fm_tmux_pin_target "$1")" '#{pane_id}' >/dev/null 2>&1
 }

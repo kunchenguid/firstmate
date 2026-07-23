@@ -90,6 +90,21 @@ FM_TMUX_BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel'
 # safe), and anything else - a bare name, an empty half, a herdr-shaped
 # three-part target - is returned unchanged so this can never alter what a
 # non-tmux endpoint means.
+#
+# The window half is left UNPINNED when it is one of tmux's special or relative
+# window selectors, because "=" suppresses them instead of exact-matching them:
+# tmux looks a window up as special token FIRST, then index, then id, then exact
+# name, and an "=" prefix skips straight past the token step, so the selector
+# silently falls back to the session's CURRENT window and still exits 0
+# (verified tmux 3.6, docs/tmux-backend.md "Window-target selector tokens").
+# These reach us as user input, because fm_backend_resolve_selector
+# (bin/fm-backend.sh) passes any colon-bearing raw selector through verbatim as
+# its documented escape hatch for a window outside this firstmate home. The set
+# is tmux's own documented one: the tokens {start} {end} {last} {next}
+# {previous}, their single-character aliases ^ $ ! + -, and a +/- relative
+# offset - each optionally carrying a ".<pane>" suffix. Ordinary window names
+# keep the pin; an index (`ses:1`) keeps it too, because "=" does not suppress
+# index lookup.
 fm_tmux_pin_target() {  # <target> -> <pinned-target>
   local target=${1:-} ses win
   case "$target" in
@@ -100,7 +115,11 @@ fm_tmux_pin_target() {  # <target> -> <pinned-target>
   win=${target#*:}
   case "$win" in *:*) printf '%s' "$target"; return 0 ;; esac
   case "$ses" in ''|'='*|'$'*) ;; *) ses="=$ses" ;; esac
-  case "$win" in ''|'='*|'@'*|'%'*) ;; *) win="=$win" ;; esac
+  case "$win" in
+    ''|'='*|'@'*|'%'*) ;;
+    '^'|'$'|'!'|'^.'*|'$.'*|'!.'*|'+'*|'-'*|'{'*) ;;
+    *) win="=$win" ;;
+  esac
   printf '%s:%s' "$ses" "$win"
 }
 
