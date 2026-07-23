@@ -302,12 +302,16 @@ Turn-end hook: cursor fires a project `stop` hook at every turn boundary, includ
 Unlike grok, cursor needs NO separate hook-trust grant - ordinary Workspace Trust is enough, and a hook added to an already-trusted workspace fires on the next launch.
 A bare `touch` that reads no stdin and writes no stdout is accepted with no warning and no stray pane output, despite the documented JSON hook stdin/stdout protocol.
 The headless `-p` path does NOT fire this hook, but firstmate only ever launches the interactive TUI, where it does.
+Unlike `.claude/settings.local.json`, `.cursor/hooks.json` is a PROJECT config file and some projects commit it, so `fm-spawn` writes it only when it is absent or untracked.
+When the project tracks it, firstmate leaves it alone and warns that cursor turn-end detection is disabled for that task; teardown likewise removes only an untracked copy, so a tracked project file is never left modified or deleted.
 
 **Known gap: pane-process liveness reads `unknown`, never `dead`.**
 Cursor's launcher re-execs into node, so `pane_current_command` is the generic `node`, exactly like pi.
 `fm_backend_tmux_agent_alive` therefore classifies a cursor pane as `unknown`, which is safe - callers never treat `unknown` as confirmed-dead - but it means cursor gets no positive process-liveness signal.
 The real agent process is `cursor-agent` (hyphenated) with argv containing `index.js agent`, and a long-lived `worker-server` daemon plus unrelated Cursor.app Electron processes are nearby false positives, so any future probe must match the argv, not the command name.
 Turn-end hooks and the busy signature are the working supervision signals for cursor in the meantime.
+
+Regression coverage: `tests/fm-cursor-harness.test.sh` pins the launch command, the model-flag-but-no-effort-flag split, the turn-end hook file (including leaving a project-tracked `.cursor/hooks.json` alone), the `--secondmate` and missing-key refusals, and the busy signature; `tests/fm-teardown.test.sh` pins that teardown removes only an untracked hook file.
 
 ## grok (VERIFIED 2026-06-29, grok 0.2.73; slash-submit re-verified 2026-07-03 on 0.2.82; reasoning-effort ceiling re-verified 2026-07-13 on 0.2.99; exit paths re-verified 2026-07-19 on grok 0.2.103)
 

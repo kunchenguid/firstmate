@@ -1242,6 +1242,61 @@ test_local_only_force_overrides_unpushed() {
   pass "local-only worktree with unpushed work is torn down under --force (escape hatch)"
 }
 
+# Teardown removes the turn-end hook files firstmate wrote into the worktree, so a
+# reused pool worktree cannot fire signals for a dead task. .cursor/hooks.json is
+# the one hook path that a PROJECT may legitimately own and track, and deleting a
+# tracked file would return the worktree carrying a deletion. These two cases pin
+# both halves: firstmate's own untracked hook goes, a tracked one stays.
+test_untracked_cursor_hook_is_removed_on_teardown() {
+  local case_dir rc hook
+  case_dir=$(make_case cursor-hook-untracked)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "fix the thing"
+  add_fork_with_pushed_branch "$case_dir"
+  # Exactly what fm-spawn writes for a cursor crewmate: the hook file plus a
+  # git-exclude entry, so it never shows up as a worktree change.
+  hook="$case_dir/wt/.cursor/hooks.json"
+  mkdir -p "$case_dir/wt/.cursor"
+  printf '%s\n' '{"version":1,"hooks":{"stop":[{"type":"command","command":"touch /tmp/x"}]}}' > "$hook"
+  printf '%s\n' '.cursor/hooks.json' >> "$(git -C "$case_dir/wt" rev-parse --git-path info/exclude)"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "cursor-hook-untracked: teardown should succeed"
+  [ ! -e "$hook" ] \
+    || fail "teardown left firstmate's own .cursor/hooks.json behind; a reused worktree would fire turn-end for a dead task"
+  pass "teardown removes the untracked cursor turn-end hook it wrote"
+}
+
+test_tracked_cursor_hook_is_never_deleted_on_teardown() {
+  local case_dir rc hook status
+  case_dir=$(make_case cursor-hook-tracked)
+  write_meta "$case_dir" local-only ship
+  hook="$case_dir/wt/.cursor/hooks.json"
+  mkdir -p "$case_dir/wt/.cursor"
+  wt_commit_file "$case_dir" ".cursor/hooks.json" \
+    '{"version":1,"hooks":{"stop":[{"type":"command","command":"project-owned"}]}}' \
+    "project-owned cursor hooks"
+  add_fork_with_pushed_branch "$case_dir"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "cursor-hook-tracked: teardown should succeed"
+  [ -e "$hook" ] \
+    || fail "teardown deleted a TRACKED .cursor/hooks.json; the returned worktree would carry a deletion"
+  assert_contains "$(cat "$hook")" "project-owned" "the project's own hook contents must be untouched"
+  status=$(git -C "$case_dir/wt" status --porcelain)
+  [ -z "$status" ] \
+    || fail "teardown left the worktree dirty against the project's tracked hook file: $status"
+  pass "teardown never deletes a project-tracked .cursor/hooks.json"
+}
+
 test_herdr_teardown_clears_escalation_marker() {
   local case_dir marker
   case_dir=$(make_case herdr-marker-cleanup)
@@ -1379,6 +1434,8 @@ test_local_only_merged_to_local_main_allows
 test_no_mistakes_origin_remote_allows
 test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed
+test_untracked_cursor_hook_is_removed_on_teardown
+test_tracked_cursor_hook_is_never_deleted_on_teardown
 test_herdr_teardown_clears_escalation_marker
 test_herdr_projection_teardown_retires_journal_only_after_confirmed_close
 test_herdr_projection_teardown_retains_journal_when_close_unconfirmed
