@@ -258,6 +258,7 @@ Selection is always an explicit human choice, in this order:
 Nothing else selects a variant.
 Firstmate deliberately does not route between launch identities on quota, load, or any other runtime signal: the available quota readings are not accurate enough to route on, and `quota-axi` cannot see a gateway account's balance at all, because it reads the local subscription credentials while a gateway bills through a third party.
 `quota-balanced` selects among dispatch profiles by vendor and never picks a launch variant.
+"Custom quota sources" below makes a gateway identity's balance readable, and deliberately makes it readable only as a reminder.
 
 Naming a variant the resolved harness does not declare is a hard spawn refusal from every source, and so is `--launch` with no usable override file.
 A silent fallback would run the work on the wrong billing account, so the refusal is the safe behavior; bootstrap reports the same problem at session start.
@@ -279,6 +280,41 @@ Read past it to the real error.
 Bootstrap validates the variant shape and lists what a home declares as `HARNESS_OVERRIDES: <harness> launch variants: <name>[ (default)], ...`.
 A `variants` value that is not an object, a variant that is not an object, a bad `command`, `args`, or `env` inside one, and a `default_variant` naming a variant that is not declared are each reported as `HARNESS_OVERRIDES: invalid config/harness-overrides.json - <reason>`.
 A home with no `variants` key stays silent and behaves exactly as it did before variants existed.
+
+### Custom quota sources
+
+A launch identity may declare how its own balance is read, with an optional `quota` block:
+
+```json
+{
+  "claude": {
+    "default_variant": "subscription",
+    "variants": {
+      "subscription": { "command": "/absolute/path/to/cc" },
+      "gateway": {
+        "command": "/absolute/path/to/claude-gw",
+        "quota": { "command": "llm-quota", "args": ["--json"], "key": "claude_code" }
+      }
+    }
+  }
+}
+```
+
+This exists because `quota-axi` reads local subscription credentials and is therefore blind to a gateway or otherwise third-party-billed identity, exactly as the section above describes.
+A `quota` block lives with the identity it measures because this file already answers "what is this identity"; "how do I read its balance" is part of that same answer, which is why it does not belong in `config/crew-dispatch.json`, whose question is which profile a task gets.
+`command` is required and `key` selects this identity's entry in that command's output; `args` is optional.
+The block sits on a variant when the harness declares variants, and on the harness entry when it declares none.
+Declaring it on a harness that also declares variants is refused, because a lane must never inherit another lane's balance and report a healthy number for an account it does not bill.
+Credentials stay in the command the block names, never in this file, on the same rule as `command` above.
+
+`bin/fm-quota-alert.sh` is the single owner of the reading contract - output shape, entry matching, the remaining-percent ladder, the bounded run, and every degradation reason - and its header states it in full.
+Bootstrap validates a declared block through that same script and reports a bad one as `HARNESS_OVERRIDES: invalid config/harness-overrides.json - <reason>`; validation never runs the quota command, so session start makes no network call.
+
+Reading a lane can only produce a reminder.
+Firstmate runs `bin/fm-quota-alert.sh` when a worker hits an account or billing wall and when the captain asks what capacity is left, and reports which lane is exhausted, which other declared identities remain, and the model and effort `config/crew-dispatch.json` would use for each.
+No selector consults these readings, and `bin/fm-dispatch-select.sh` never reads this file at all, so a quota number can never move work onto a different billing identity: only the captain's word or an explicit config change switches identities.
+Every read failure degrades to an explicit unreadable reason and exit 0, so an unreachable usage endpoint neither reads as a healthy lane nor becomes a reason to hold up dispatch.
+A metered entry that no declared identity claims is reported too: that is a real billed lane firstmate cannot select because nothing here declares how to launch it, and the fix is to declare that identity rather than to leave it invisible.
 
 ## Crew dispatch profiles (config/crew-dispatch.json)
 
@@ -554,6 +590,8 @@ FM_CRASH_BACKOFF=60                # seconds to wait after crossing the crash th
 FM_CRASH_NORMAL_SLEEP=5            # seconds to wait after an isolated watcher crash
 FM_LOG_MAX_BYTES=1048576           # daemon log size that triggers trimming
 FM_LOG_KEEP_LINES=2000             # daemon log lines kept when trimming
+FM_QUOTA_THRESHOLD=10              # remaining percent at or below which fm-quota-alert.sh calls a launch identity low
+FM_QUOTA_TIMEOUT=15                # seconds allowed per declared quota-source command
 ```
 
 `fm-teardown.sh` retries only Git's `Unable to create '...index.lock': File exists` return failure up to `FM_TREEHOUSE_RETURN_LOCK_RETRIES` times.

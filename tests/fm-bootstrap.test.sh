@@ -945,6 +945,9 @@ undeclared default_variant is flagged^{"claude":{"default_variant":"gone","varia
 default_variant with no variants is flagged^{"claude":{"default_variant":"gateway"}}^exact^HARNESS_OVERRIDES: invalid config/harness-overrides.json - default_variant names a variant that is not declared: claude.gateway
 bad command inside a variant is flagged^{"claude":{"variants":{"gateway":{"command":7}}}}^exact^HARNESS_OVERRIDES: invalid config/harness-overrides.json - command must be a string
 bad env inside a variant is flagged^{"claude":{"variants":{"gateway":{"env":{"K":9}}}}}^exact^HARNESS_OVERRIDES: invalid config/harness-overrides.json - env values must be strings
+a valid quota source stays silent^{"claude":{"variants":{"gateway":{"quota":{"command":"llm-quota","args":["--json"],"key":"claude_code"}}}}}^exact^HARNESS_OVERRIDES: claude launch variants: gateway
+a quota source without a key is flagged^{"claude":{"variants":{"gateway":{"quota":{"command":"llm-quota"}}}}}^exact^HARNESS_OVERRIDES: invalid config/harness-overrides.json - quota needs a non-empty key (claude.gateway)
+a harness-level quota beside variants is flagged^{"claude":{"quota":{"command":"llm-quota","key":"k"},"variants":{"gateway":{}}}}^exact^HARNESS_OVERRIDES: invalid config/harness-overrides.json - quota must be declared on each variant, not on claude, which declares variants
 ROWS
   pass "bootstrap validates and surfaces harness-overrides launch variants"
 }

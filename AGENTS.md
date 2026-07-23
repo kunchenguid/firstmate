@@ -162,6 +162,7 @@ If configured harness data names an unverified adapter, report it and fall back 
 It owns the optional `config/harness-overrides.json` schema too, which customizes how a resolved harness launches without changing which harness it is.
 That file may declare named launch variants, so an alternative launch identity such as a gateway-billed account is a selectable option; pass the chosen one as `fm-spawn --launch <variant>` or a dispatch profile's `launch` field.
 A launch variant is chosen only by an explicit captain instruction or configured selection, never by quota or any other runtime signal, because the available quota readings are not accurate enough to route on and cannot see a gateway account at all.
+When a worker hits an account or billing wall, and when the captain asks what capacity is left, run `bin/fm-quota-alert.sh` and relay which identity is exhausted and which remain; its readings drive that reminder only and never a switch.
 When dispatch profiles exist, consult them at every crewmate or scout intake and pass the resolved concrete profile required by `fm-spawn`.
 Routing precedence is an explicit per-task captain override, then the best-fit configured rule, then the configured default, then the static crewmate harness.
 The generic effort fallback and its precedence are owned by `harness-adapters`: explicit captain and standing configured effort win; otherwise use low for well-understood explicit work, xhigh for ambiguous investigation or design, intermediate levels proportionally, and never max without explicit captain preference.
