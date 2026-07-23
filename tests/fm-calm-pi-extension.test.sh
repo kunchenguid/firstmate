@@ -896,15 +896,26 @@ export default function (pi: ExtensionAPI): void {
     baseUrl: "http://127.0.0.1/unused",
     apiKey: "test-only",
     api: "calm-e2e-api",
-    models: [{
-      id: "delayed",
-      name: "Delayed Calm working-row fixture",
-      reasoning: false,
-      input: ["text"],
-      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-      contextWindow: 4096,
-      maxTokens: 128,
-    }],
+    models: [
+      {
+        id: "delayed",
+        name: "Delayed Calm working-row fixture",
+        reasoning: false,
+        input: ["text"],
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        contextWindow: 4096,
+        maxTokens: 128,
+      },
+      {
+        id: "operational-error",
+        name: "Calm gapless operational-row fixture",
+        reasoning: false,
+        input: ["text"],
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        contextWindow: 4096,
+        maxTokens: 128,
+      },
+    ],
     streamSimple(model, _context, options) {
       const stream = createAssistantMessageEventStream();
       const output: AssistantMessage = {
@@ -925,6 +936,14 @@ export default function (pi: ExtensionAPI): void {
         timestamp: Date.now(),
       };
       void (async () => {
+        if (model.id === "operational-error") {
+          await new Promise((resolve) => setTimeout(resolve, 25));
+          output.stopReason = "error";
+          output.errorMessage = "CALM_OPERATIONAL_E2E_ERROR";
+          stream.push({ type: "error", reason: "error", error: output });
+          stream.end();
+          return;
+        }
         await new Promise((resolve) => setTimeout(resolve, 1500));
         if (options?.signal?.aborted) {
           output.stopReason = "aborted";
@@ -954,7 +973,7 @@ export default function (pi: ExtensionAPI): void {
   });
   pi.registerCommand("calm-inject-e2e", {
     description: "Inject one current Calm operational kind.",
-    handler: async (args) => {
+    handler: async (args, ctx) => {
       const fixtures = new Map([
         ["watcher", "CURRENT_WATCHER_E2E /tmp/active-probe.status"],
         ["turn-end-guard", "CURRENT_TURN_END_E2E"],
@@ -965,6 +984,10 @@ export default function (pi: ExtensionAPI): void {
       const kind = args.trim() as Parameters<typeof encodeFirstmateOperationalInput>[0];
       const body = fixtures.get(kind);
       if (!body) throw new Error(`unknown current operational kind: ${kind}`);
+      const model = ctx.modelRegistry.find("calm-e2e", "operational-error");
+      if (!model || !(await pi.setModel(model))) {
+        throw new Error("could not select the deterministic Calm operational-error model");
+      }
       await pi.sendUserMessage(encodeFirstmateOperationalInput(kind, body), {
         deliverAs: "followUp",
       });
@@ -1073,11 +1096,13 @@ JSON
     tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l "/calm-inject-e2e $kind"
     tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" M-s
     active_wait=0
-    while ! grep -Fq "$needle" "$session_file" 2>/dev/null && [ "$active_wait" -lt 120 ]; do
+    while ! grep -F '"customType":"firstmate-synthetic-input"' "$session_file" 2>/dev/null |
+      grep -Fq "$needle" && [ "$active_wait" -lt 120 ]; do
       sleep 0.05
       active_wait=$((active_wait + 1))
     done
-    grep -Fq "$needle" "$session_file" \
+    grep -F '"customType":"firstmate-synthetic-input"' "$session_file" |
+      grep -Fq "$needle" \
       || fail "current operational kind $kind was not received while Calm was active"
     sleep 0.1
   done

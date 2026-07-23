@@ -5,7 +5,7 @@ The README owns the user-facing `/calm` usage and limitation contract.
 
 ## Required extension surface
 
-A qualifying implementation must auto-load from the trusted project, persist the toggle choice for the effective Firstmate home across Pi session starts and resumes, keep Pi's built-in working activity visible, emit no Calm status row, redraw already-rendered controllable rows without gaps, restore ordinary rendering, and leave delivery, tool execution, model context, session storage, export and share operation, diagnostics, and expansion state unchanged.
+A qualifying implementation must auto-load from the trusted project, persist the toggle choice for the effective Firstmate home across Pi session starts and resumes, keep Pi's built-in working activity visible, emit no Calm status row, redraw already-rendered controllable rows, hide Firstmate operational rows without gaps, restore ordinary rendering, and leave delivery, tool execution, model context, session storage, export and share operation, diagnostics, and expansion state unchanged.
 The governing presentation policy allows genuine original user prompts, genuine user-facing assistant text, and Pi's native working activity.
 Changing persisted context to remove hidden content, filtering provider context, patching installed harness code, or claiming coverage outside a supported renderer does not satisfy that boundary.
 
@@ -74,7 +74,7 @@ The per-process `FM_FIRSTMATE_PI_LAUNCH_BRIEF` binding remains only as compatibi
 
 Positive fixtures cover every current kind and a separate legacy matrix.
 Near-miss fixtures cover quoted operational content, ASCII-only labels, arbitrary U+2063-prefixed text, altered legacy text, visible routing labels without U+2063, and launch-brief text without its source binding.
-An exact current static envelope is sufficient provenance regardless of whether Pi reports its input source as interactive or extension, so exact copy-paste risk is accepted without nonce, replay, or secondary-token machinery.
+An exact current static envelope is sufficient provenance regardless of whether Pi reports its input source as interactive or extension, so exact copy-paste risk is accepted without nonce, source-authentication, replay-prevention, secondary-token, blocking, redaction, or private-retrieval machinery.
 
 Synthetic inputs that would otherwise render as user rows are rerouted only at Pi input presentation time.
 Their full text is persisted in a non-displayed custom message that Pi converts back to an ordinary user message for provider context, and a TUI-only custom entry restores stock user styling while Calm is off.
