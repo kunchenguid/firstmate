@@ -409,76 +409,6 @@ if ! fm_lock_try_acquire "$SPAWN_TASK_LOCK"; then
 fi
 SPAWN_TASK_LOCK_HELD=1
 
-# --- multi-account dispatch pool (bin/fm-pool.sh) ---------------------------
-#
-# Resolve WHICH ACCOUNT this spawn launches on, before the harness is resolved,
-# because the chosen account declares its own harness. The pool never touches a
-# running agent and never logs anything out: it only contributes env for this one
-# launch. With no config/dispatch-pool.json the selector exits 3 and this whole
-# block degrades to a single warning, leaving the spawn identical to an unpooled
-# one - that is the backward-compatibility contract.
-POOL_BACKEND=
-POOL_ENV_ASSIGNMENTS=()
-POOL_KEY_ENV=
-POOL_KEY_FILE=
-if [ "$POOL" -eq 1 ]; then
-  pool_args=()
-  if [ -n "$POOL_BACKEND_ARG" ]; then
-    pool_args=(resolve "$POOL_BACKEND_ARG")
-  else
-    pool_args=(select)
-    # An explicit --harness narrows rotation to accounts of that harness, so a
-    # captain's per-task harness override still wins over the pool's own spread.
-    [ -z "$HARNESS_ARG" ] || pool_args+=(--harness "$HARNESS_ARG")
-  fi
-  set +e
-  pool_out=$("$FM_ROOT/bin/fm-pool.sh" "${pool_args[@]}")
-  pool_status=$?
-  set -e
-  case "$pool_status" in
-    0) ;;
-    3)
-      echo "warning: --pool requested but no dispatch pool is configured; spawning exactly as an unpooled task" >&2
-      POOL=0
-      ;;
-    *)
-      echo "error: dispatch pool could not supply a healthy account for $ID (fm-pool.sh exited $pool_status); refusing to launch on an exhausted account" >&2
-      exit 1
-      ;;
-  esac
-  if [ "$POOL" -eq 1 ]; then
-    pool_model=
-    pool_effort=
-    while IFS= read -r pool_line; do
-      case "$pool_line" in
-        backend=*) POOL_BACKEND=${pool_line#backend=} ;;
-        harness=*) pool_harness=${pool_line#harness=} ;;
-        model=*) pool_model=${pool_line#model=} ;;
-        effort=*) pool_effort=${pool_line#effort=} ;;
-        env=*) POOL_ENV_ASSIGNMENTS+=("${pool_line#env=}") ;;
-        key_env=*) POOL_KEY_ENV=${pool_line#key_env=} ;;
-        key_file=*) POOL_KEY_FILE=${pool_line#key_file=} ;;
-      esac
-    done <<EOF
-$pool_out
-EOF
-    [ -n "$POOL_BACKEND" ] && [ -n "${pool_harness:-}" ] || {
-      echo "error: dispatch pool returned no usable account for $ID" >&2
-      exit 1
-    }
-    # The account's harness becomes this spawn's harness unless the caller named
-    # one; --model/--effort from the caller still beat the account's defaults.
-    [ "$HARNESS_SET" -eq 1 ] || HARNESS_ARG=$pool_harness
-    if [ "$MODEL_SET" -eq 0 ] && [ -n "$pool_model" ]; then MODEL=$pool_model; fi
-    if [ "$EFFORT_SET" -eq 0 ] && [ -n "$pool_effort" ]; then
-      case "$pool_effort" in
-        low|medium|high|xhigh|max) EFFORT=$pool_effort ;;
-        *) echo "warning: dispatch pool account $POOL_BACKEND pins effort '$pool_effort', which is not one of low, medium, high, xhigh, max; ignoring" >&2 ;;
-      esac
-    fi
-  fi
-fi
-
 PROJ=
 ARG3=
 FIRSTMATE_HOME=
@@ -505,6 +435,95 @@ else
   PROJ=${POS[1]}
   ARG3=${POS[2]:-}
 fi
+
+# --- multi-account dispatch pool (bin/fm-pool.sh) ---------------------------
+#
+# Resolve WHICH ACCOUNT this spawn launches on, before the harness is resolved,
+# because the chosen account declares its own harness. The pool never touches a
+# running agent and never logs anything out: it only contributes env for this one
+# launch. With no config/dispatch-pool.json the selector exits 3 and this whole
+# block degrades to a single warning, leaving the spawn identical to an unpooled
+# one - that is the backward-compatibility contract.
+POOL_BACKEND=
+POOL_ENV_ASSIGNMENTS=()
+POOL_KEY_ENV=
+POOL_KEY_FILE=
+# The harness the CALLER asked for, by either spelling: --harness, or the
+# back-compat positional. Both are per-task overrides that outrank the pool's own
+# spread, so both narrow rotation and both survive the pool's harness default.
+POOL_CALLER_HARNESS=$HARNESS_ARG
+[ -n "$POOL_CALLER_HARNESS" ] || POOL_CALLER_HARNESS=$ARG3
+if [ "$POOL" -eq 1 ]; then
+  pool_args=()
+  if [ -n "$POOL_BACKEND_ARG" ]; then
+    pool_args=(resolve "$POOL_BACKEND_ARG")
+  else
+    pool_args=(select)
+    # An explicit harness narrows rotation to accounts of that harness, so a
+    # captain's per-task harness override still wins over the pool's own spread.
+    # A raw launch command (it carries a space) names no pool harness, so it only
+    # suppresses the pool's default; it cannot filter rotation.
+    case "$POOL_CALLER_HARNESS" in
+      ''|*' '*) ;;
+      *) pool_args+=(--harness "$POOL_CALLER_HARNESS") ;;
+    esac
+  fi
+  set +e
+  pool_out=$("$FM_ROOT/bin/fm-pool.sh" "${pool_args[@]}")
+  pool_status=$?
+  set -e
+  case "$pool_status" in
+    0) ;;
+    3)
+      echo "warning: --pool requested but no dispatch pool is configured; spawning exactly as an unpooled task" >&2
+      POOL=0
+      ;;
+    4)
+      echo "error: dispatch pool has no healthy account for $ID; refusing to launch on an exhausted account" >&2
+      exit 1
+      ;;
+    2)
+      echo "error: the dispatch pool could not be read for $ID: config/dispatch-pool.json is malformed, names an unknown backend, or jq is missing (fm-pool.sh exited 2). This is a configuration error, not exhausted capacity - fix the config and retry." >&2
+      exit 1
+      ;;
+    *)
+      echo "error: fm-pool.sh failed unexpectedly for $ID (exit $pool_status); refusing to launch until the pool answers cleanly" >&2
+      exit 1
+      ;;
+  esac
+  if [ "$POOL" -eq 1 ]; then
+    pool_model=
+    pool_effort=
+    while IFS= read -r pool_line; do
+      case "$pool_line" in
+        backend=*) POOL_BACKEND=${pool_line#backend=} ;;
+        harness=*) pool_harness=${pool_line#harness=} ;;
+        model=*) pool_model=${pool_line#model=} ;;
+        effort=*) pool_effort=${pool_line#effort=} ;;
+        env=*) POOL_ENV_ASSIGNMENTS+=("${pool_line#env=}") ;;
+        key_env=*) POOL_KEY_ENV=${pool_line#key_env=} ;;
+        key_file=*) POOL_KEY_FILE=${pool_line#key_file=} ;;
+      esac
+    done <<EOF
+$pool_out
+EOF
+    [ -n "$POOL_BACKEND" ] && [ -n "${pool_harness:-}" ] || {
+      echo "error: dispatch pool returned no usable account for $ID" >&2
+      exit 1
+    }
+    # The account's harness becomes this spawn's harness unless the caller named
+    # one; --model/--effort from the caller still beat the account's defaults.
+    [ -n "$POOL_CALLER_HARNESS" ] || HARNESS_ARG=$pool_harness
+    if [ "$MODEL_SET" -eq 0 ] && [ -n "$pool_model" ]; then MODEL=$pool_model; fi
+    if [ "$EFFORT_SET" -eq 0 ] && [ -n "$pool_effort" ]; then
+      case "$pool_effort" in
+        low|medium|high|xhigh|max) EFFORT=$pool_effort ;;
+        *) echo "warning: dispatch pool account $POOL_BACKEND pins effort '$pool_effort', which is not one of low, medium, high, xhigh, max; ignoring" >&2 ;;
+      esac
+    fi
+  fi
+fi
+
 [ -z "$HARNESS_ARG" ] || ARG3=$HARNESS_ARG
 
 # The verified launch command per adapter. The knowledge half of each adapter
@@ -1283,10 +1302,22 @@ EOF
       # stray pane output, despite the documented JSON hook protocol.
       # NOTE: the headless `-p` path does NOT fire this hook, but firstmate only
       # ever launches the interactive TUI, where it does.
-      mkdir -p "$WT/.cursor"
-      printf '{"version":1,"hooks":{"stop":[{"type":"command","command":"touch %s"}]}}\n' \
-        "$(json_escape "$(shell_quote "$TURNEND")")" > "$WT/.cursor/hooks.json"
-      exclude_path '.cursor/hooks.json'
+      # Unlike .claude/settings.local.json (a per-user local file) and the
+      # opencode plugin, .cursor/hooks.json is cursor's PROJECT hooks config and
+      # some projects commit it. Firstmate only ever writes files it owns, so a
+      # tracked hooks.json is left exactly as the project wrote it: clobbering it
+      # would disable the project's own hooks, dirty a tracked path for the whole
+      # task (blocking failover and teardown), and risk being committed onto the
+      # task branch. The cost is losing turn-end detection for that task, which is
+      # a supervision degradation, not a correctness one - so say so loudly.
+      if git -C "$WT" ls-files --error-unmatch .cursor/hooks.json >/dev/null 2>&1; then
+        echo "warning: $WT/.cursor/hooks.json is tracked by this project, so firstmate will not touch it; cursor turn-end detection is DISABLED for task $ID and the watcher will fall back to pane-based idle detection" >&2
+      else
+        mkdir -p "$WT/.cursor"
+        printf '{"version":1,"hooks":{"stop":[{"type":"command","command":"touch %s"}]}}\n' \
+          "$(json_escape "$(shell_quote "$TURNEND")")" > "$WT/.cursor/hooks.json"
+        exclude_path '.cursor/hooks.json'
+      fi
       ;;
     codex*)
       # codex: turn-end rides the launch command via -c notify=[...] and __TURNEND__.

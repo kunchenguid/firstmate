@@ -302,6 +302,8 @@ Turn-end hook: cursor fires a project `stop` hook at every turn boundary, includ
 Unlike grok, cursor needs NO separate hook-trust grant - ordinary Workspace Trust is enough, and a hook added to an already-trusted workspace fires on the next launch.
 A bare `touch` that reads no stdin and writes no stdout is accepted with no warning and no stray pane output, despite the documented JSON hook stdin/stdout protocol.
 The headless `-p` path does NOT fire this hook, but firstmate only ever launches the interactive TUI, where it does.
+Unlike `.claude/settings.local.json`, `.cursor/hooks.json` is a PROJECT config file and some projects commit it, so `fm-spawn` writes it only when it is absent or untracked.
+When the project tracks it, firstmate leaves it alone and warns that cursor turn-end detection is disabled for that task; teardown likewise removes only an untracked copy, so a tracked project file is never left modified or deleted.
 
 **Known gap: pane-process liveness reads `unknown`, never `dead`.**
 Cursor's launcher re-execs into node, so `pane_current_command` is the generic `node`, exactly like pi.

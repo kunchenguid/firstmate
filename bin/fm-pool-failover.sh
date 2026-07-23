@@ -35,10 +35,11 @@
 #      the task's own harness are preferred; when none is healthy the search
 #      widens to every harness, and a cross-harness move drops the recorded
 #      model/effort so the new harness runs on its own defaults.
-#   5. Kills the old agent endpoint, re-checks that the worktree is still clean
-#      (the agent may have written while being shut down), and only then returns
-#      the worktree to the pool.
-#   6. Appends a RESUME NOTE to data/<id>/brief.md naming the branch and tip.
+#   5. Kills the old agent endpoint and re-checks that the worktree is still
+#      clean (the agent may have written while being shut down). A re-check that
+#      refuses stops here, having changed nothing else.
+#   6. Appends a RESUME NOTE to data/<id>/brief.md naming the branch and tip,
+#      then returns the old worktree to the pool.
 #   7. Respawns the task on the replacement account via fm-spawn.sh --pool-backend.
 #
 # It never force-pushes, never touches a `main` branch, never writes inside the
@@ -185,7 +186,9 @@ fi
 case "$POOL_STATUS" in
   0) ;;
   3) die "no dispatch pool is configured, so there is no other account to fail over to" ;;
-  *) die "no healthy replacement account is available (fm-pool.sh exited $POOL_STATUS); the task stays where it is rather than moving to an exhausted account" ;;
+  4) die "no healthy replacement account is available; the task stays where it is rather than moving to an exhausted account" ;;
+  2) die "the dispatch pool could not be read: config/dispatch-pool.json is malformed, names an unknown backend, or jq is missing. That is a configuration error, not exhausted capacity; fix the config and re-run. The task stays where it is." ;;
+  *) die "fm-pool.sh failed unexpectedly (exit $POOL_STATUS); the task stays where it is rather than moving on a result we cannot trust" ;;
 esac
 NEW_POOL=$(printf '%s\n' "$POOL_OUT" | sed -n 's/^backend=//p' | head -1)
 [ -n "$NEW_POOL" ] || die "dispatch pool returned no replacement account"
@@ -215,11 +218,38 @@ if [ "$DO_COOLDOWN" = 1 ] && [ -n "$OLD_POOL" ]; then
   if [ -n "$FROM_FILE" ]; then
     cooldown_args+=(--from-file "$FROM_FILE")
   fi
-  if ! pool_call cooldown "${cooldown_args[@]}"; then
-    # A cooldown that could not be derived must not abort the move; the point of
+  COOLDOWN_STATUS=0
+  pool_call cooldown "${cooldown_args[@]}" || COOLDOWN_STATUS=$?
+  if [ "$COOLDOWN_STATUS" != 0 ] && [ -n "$FROM_FILE" ]; then
+    # The evidence file carried no signature fm-pool.sh recognizes, so it wrote no
+    # cooldown at all. Leaving the old account fully healthy is the worst possible
+    # outcome - the next rotation hands it the very next crewmate - and it is
+    # strictly worse than the same failover run without --from-file. Fall back to
+    # the default interval that evidence-free path would have applied.
+    log "no usable usage-limit signature in $FROM_FILE; cooling $OLD_POOL down for the default interval instead"
+    fallback_args=("$OLD_POOL")
+    [ -z "$REASON" ] || fallback_args+=(--reason "$REASON")
+    COOLDOWN_STATUS=0
+    pool_call cooldown "${fallback_args[@]}" || COOLDOWN_STATUS=$?
+  fi
+  if [ "$COOLDOWN_STATUS" != 0 ]; then
+    # A cooldown that could not be recorded must not abort the move; the point of
     # this script is getting the task onto a working account.
     log "could not record a cooldown for $OLD_POOL; continuing with the failover"
   fi
+fi
+
+# --- abandon the old endpoint and worktree ----------------------------------
+if [ -n "$TARGET" ]; then
+  fm_backend_kill "$RUNTIME_BACKEND" "$TARGET" 2>/dev/null \
+    || log "could not kill the old endpoint $TARGET; continuing"
+fi
+DIRTY=$(worktree_dirty "$WT") \
+  || die "cannot re-read git status in $WT after killing the old agent; the worktree was NOT abandoned"
+if [ -n "$DIRTY" ]; then
+  log "REFUSED: worktree $WT gained uncommitted changes between the first check and the old agent's shutdown."
+  printf '%s\n' "$DIRTY" >&2
+  die "the worktree was NOT abandoned so that work is preserved; commit it on '$BRANCH', then re-run"
 fi
 
 # --- append the RESUME NOTE --------------------------------------------------
@@ -227,6 +257,11 @@ fi
 # Same shape as every other firstmate recovery note: it overrides the brief's
 # Setup step, states plainly that committed work is safe and where it lives, and
 # gives the exact recovery commands.
+#
+# Written only AFTER the post-kill clean re-check has passed, because everything
+# it asserts - fresh worktree, new account, work safe on the branch - is only
+# true once the move is actually going ahead. The re-check refusal leaves the
+# brief untouched, exactly like the pre-kill refusal does.
 #
 # The template is piped STRAIGHT to the brief rather than captured in `$(...)`:
 # the note contains backticks, and a backtick inside a quoted heredoc nested in a
@@ -253,18 +288,6 @@ Nothing about the task, its acceptance criteria, or any decision already made ha
 NOTE_TEMPLATE
 log "appended a RESUME NOTE to $DATA/$ID/brief.md"
 
-# --- abandon the old endpoint and worktree ----------------------------------
-if [ -n "$TARGET" ]; then
-  fm_backend_kill "$RUNTIME_BACKEND" "$TARGET" 2>/dev/null \
-    || log "could not kill the old endpoint $TARGET; continuing"
-fi
-DIRTY=$(worktree_dirty "$WT") \
-  || die "cannot re-read git status in $WT after killing the old agent; the worktree was NOT abandoned"
-if [ -n "$DIRTY" ]; then
-  log "REFUSED: worktree $WT gained uncommitted changes between the first check and the old agent's shutdown."
-  printf '%s\n' "$DIRTY" >&2
-  die "the worktree was NOT abandoned so that work is preserved; commit it on '$BRANCH', then re-run"
-fi
 if command -v treehouse >/dev/null 2>&1; then
   if ! ( cd "$FM_ROOT" && treehouse return --force "$WT" ) >/dev/null 2>&1; then
     log "could not return the old worktree $WT to the pool; the replacement may need to wait for the branch"

@@ -108,6 +108,12 @@ The refusal is a stop-and-investigate result: commit the work on the task branch
 It also refuses a detached HEAD, a worktree sitting on a default branch, and a secondmate task.
 It never force-pushes and never touches a default branch.
 
+The dirty-worktree check runs twice: once before anything is touched, and again after the old agent is killed, because a dying agent can still write.
+The second refusal stops with nothing else changed - the RESUME NOTE is appended only after that re-check passes, so a refused failover never leaves the brief claiming a move that did not happen.
+
+`--from-file <agent-output>` supplies the limit evidence that sets the old account's cooldown.
+When that file holds no signature the matcher recognizes, the failover still cools the account down for `cooldown_default_seconds` rather than leaving it healthy: a wedged account left in rotation would be handed the very next crewmate, which is worse than the evidence-free default.
+
 ## Interactive sessions are never affected
 
 The pool only ever influences NEW spawns.

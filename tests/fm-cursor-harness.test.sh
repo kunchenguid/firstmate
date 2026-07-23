@@ -122,6 +122,35 @@ test_cursor_turn_end_hook() {
   pass "cursor gets a project stop hook that touches the task's turn-end marker and is git-excluded"
 }
 
+# .cursor/hooks.json is a PROJECT config file, unlike .claude/settings.local.json.
+# When the project commits it, firstmate must leave it exactly as it is: clobbering
+# it disables the project's own hooks, dirties a tracked path for the whole task
+# (which then blocks failover and teardown), and can ride along in a commit.
+test_cursor_leaves_a_tracked_hook_file_alone() {
+  local rec id out hook before
+  id=cursor-tracked-hook-g1
+  rec=$(make_case cursor-tracked-hook "$id")
+  read_case "$rec"
+  hook="$WT_DIR/.cursor/hooks.json"
+  mkdir -p "$WT_DIR/.cursor"
+  printf '{"version":1,"hooks":{"stop":[{"type":"command","command":"true"}]}}\n' > "$hook"
+  fm_git_identity
+  git -C "$WT_DIR" add .cursor/hooks.json
+  git -C "$WT_DIR" commit --quiet -m 'project hooks'
+  before=$(cat "$hook")
+
+  out=$(CURSOR_API_KEY=present run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --harness cursor)
+  expect_code 0 $? "a tracked hooks.json must degrade supervision, not fail the spawn: $out"
+
+  [ "$(cat "$hook")" = "$before" ] || fail "a tracked .cursor/hooks.json must never be rewritten, got: $(cat "$hook")"
+  [ -z "$(git -C "$WT_DIR" status --porcelain)" ] \
+    || fail "the worktree must stay clean; got: $(git -C "$WT_DIR" status --porcelain)"
+  assert_contains "$out" "cursor turn-end detection is DISABLED" \
+    "the spawn should say plainly that turn-end detection is off for this task"
+  pass "a tracked .cursor/hooks.json is left untouched and the lost turn-end signal is announced"
+}
+
 test_cursor_model_flag_but_no_effort_flag() {
   local rec id out launch meta
   id=cursor-model-c1
@@ -220,6 +249,7 @@ test_cursor_busy_signature_is_recognized() {
 
 test_cursor_launch_command
 test_cursor_turn_end_hook
+test_cursor_leaves_a_tracked_hook_file_alone
 test_cursor_model_flag_but_no_effort_flag
 test_cursor_refuses_secondmate
 test_cursor_refuses_without_a_key

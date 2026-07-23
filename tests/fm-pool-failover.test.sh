@@ -348,11 +348,12 @@ test_falls_back_across_harnesses_and_drops_model() {
 }
 
 test_recheck_after_kill_preserves_late_work() {
-  local rec id out status
+  local rec id out status brief_before
   id=failover-late-i1
   rec=$(make_case failover-late "$id")
   read_case "$rec"
   commit_work "$WT_DIR"
+  brief_before=$(cat "$HOME_DIR/data/$id/brief.md")
   # A still-running agent can write between the first cleanliness check and its
   # own shutdown; this fake tmux plays that agent by dirtying the worktree the
   # moment the old endpoint is killed.
@@ -372,7 +373,35 @@ SH
   assert_contains "$out" "late-work.txt" \
     "the refusal should show WHAT appeared since the first check"
   [ -f "$WT_DIR/late-work.txt" ] || fail "the late work must survive a refused abandonment"
+  # The RESUME NOTE asserts a fresh worktree on a new account. None of that
+  # happened here, so the brief must read exactly as it did before.
+  [ "$(cat "$HOME_DIR/data/$id/brief.md")" = "$brief_before" ] \
+    || fail "a refused failover must not leave a RESUME NOTE describing a move that did not happen"
   pass "a worktree dirtied between the first check and the kill is refused, not abandoned"
+}
+
+# --from-file is evidence, not a precondition. If it holds nothing the matcher
+# recognizes, the old account must still be cooled down for the default interval:
+# leaving it healthy would hand it the very next crewmate, which is strictly worse
+# than the same failover run with no evidence at all.
+test_unrecognized_evidence_still_cools_the_old_account() {
+  local rec id out status
+  id=failover-evidence-j1
+  rec=$(make_case failover-evidence "$id")
+  read_case "$rec"
+  commit_work "$WT_DIR"
+  printf 'the agent just stopped talking; no limit banner anywhere in here\n' > "$CASE_DIR/agent.log"
+
+  set +e
+  out=$(failover "$HOME_DIR" "$FAKEBIN_DIR" "$id" --from-file "$CASE_DIR/agent.log" --no-respawn)
+  status=$?
+  set -e
+  expect_code 0 "$status" "unparseable evidence must not abort the move: $out"
+  [ -f "$HOME_DIR/state/.pool-cooldown-claude-1" ] \
+    || fail "the old account must be cooled down even when the evidence parses to nothing"
+  assert_contains "$out" "default interval" \
+    "the fallback should say the default interval was used instead"
+  pass "evidence with no recognizable limit signature still cools the old account down"
 }
 
 test_refuses_a_dirty_worktree
@@ -380,6 +409,7 @@ test_succeeds_on_a_clean_worktree
 test_prefers_a_same_harness_account
 test_falls_back_across_harnesses_and_drops_model
 test_recheck_after_kill_preserves_late_work
+test_unrecognized_evidence_still_cools_the_old_account
 test_refuses_a_detached_head
 test_refuses_a_default_branch
 test_refuses_when_no_other_account_is_healthy
