@@ -163,7 +163,9 @@ LAUNCH_AGENTS_DIR=${FM_CHECKOUT_REFRESH_LAUNCH_AGENTS_DIR:-$HOME/Library/LaunchA
 PLIST="$LAUNCH_AGENTS_DIR/$LABEL.plist"
 PHYSICAL_PLIST="$LAUNCH_AGENTS_DIR/$PHYSICAL_LABEL.plist"
 LAUNCHCTL=${FM_CHECKOUT_REFRESH_LAUNCHCTL:-launchctl}
-HOME_STATE_NAMESPACE_MOVED=0
+HOME_STATE_NAMESPACE_STAGED=0
+HOME_MIGRATION_ACTIVE=0
+HOME_MIGRATION_RUN_LOCK=
 PHYSICAL_AGENT_STOPPED=0
 
 # shellcheck source=bin/fm-gate-refuse-lib.sh
@@ -1016,8 +1018,190 @@ ensure_state_root() {
     || { echo "error: unsafe checkout-refresh state directory: $STATE_ROOT" >&2; return 1; }
 }
 
+discover_home_launch_agent_namespaces() {
+  local discovered label state count=0 logical_count=0
+  [ -e "$LAUNCH_AGENTS_DIR" ] || [ -L "$LAUNCH_AGENTS_DIR" ] || return 0
+  discovered=$(python3 - "$LAUNCH_AGENTS_DIR" "$LABEL_BASE" \
+      "$SCRIPT_DIR/fm-checkout-refresh.sh" "$FM_HOME_CANONICAL" "$FM_HOME" "$STATE_BASE" <<'PY'
+import html
+import os
+import re
+import stat
+import sys
+
+root, label_base, script, canonical_home, raw_home, state_base = sys.argv[1:]
+try:
+    root_meta = os.lstat(root)
+    if stat.S_ISLNK(root_meta.st_mode) or not stat.S_ISDIR(root_meta.st_mode):
+        raise OSError("unsafe launch agent directory")
+    entries = sorted(os.scandir(root), key=lambda entry: entry.name)
+    for entry in entries:
+        if entry.name != label_base + ".plist" and (
+            not entry.name.startswith(label_base + ".") or not entry.name.endswith(".plist")
+        ):
+            continue
+        meta = entry.stat(follow_symlinks=False)
+        if stat.S_ISLNK(meta.st_mode) or not stat.S_ISREG(meta.st_mode):
+            raise OSError("unsafe launch agent definition")
+        with open(entry.path, "r", encoding="utf-8") as stream:
+            content = stream.read()
+        strings = [html.unescape(value) for value in re.findall(r"<string>(.*?)</string>", content, re.S)]
+        home_match = re.search(
+            r"<key>FM_HOME</key>\s*<string>(.*?)</string>", content, re.S
+        )
+        state_match = re.search(
+            r"<key>FM_CHECKOUT_REFRESH_STATE_ROOT</key>\s*<string>(.*?)</string>",
+            content,
+            re.S,
+        )
+        parsed_home = html.unescape(home_match.group(1)) if home_match else ""
+        mentions_home = parsed_home in (canonical_home, raw_home)
+        mentions_script = script in strings
+        if parsed_home and not mentions_home:
+            continue
+        if not mentions_home or not mentions_script or state_match is None:
+            raise OSError("incomplete launch agent identity")
+        label = entry.name[:-6]
+        suffix = label[len(label_base) + 1 :]
+        if re.fullmatch(r"[0-9a-f]{16}", suffix) is None:
+            raise OSError("invalid launch agent label")
+        parsed_state = html.unescape(state_match.group(1))
+        expected_state = os.path.join(state_base, "homes", suffix)
+        if parsed_state != expected_state:
+            raise OSError("launch agent state identity mismatch")
+        print(f"{label}\t{parsed_state}")
+except (OSError, UnicodeError):
+    raise SystemExit(1)
+PY
+  ) || {
+    echo "error: checkout-refresh LaunchAgent namespaces cannot be safely enumerated" >&2
+    return 1
+  }
+  while IFS=$'\t' read -r label state; do
+    [ -n "$label" ] || continue
+    if [ "$label" = "$LABEL" ]; then
+      logical_count=$((logical_count + 1))
+      continue
+    fi
+    PHYSICAL_LABEL=$label
+    PHYSICAL_PLIST="$LAUNCH_AGENTS_DIR/$label.plist"
+    PHYSICAL_STATE_ROOT=$state
+    count=$((count + 1))
+  done <<EOF
+$discovered
+EOF
+  [ "$logical_count" -le 1 ] && [ "$count" -le 1 ] || {
+    echo "error: ambiguous checkout-refresh LaunchAgent namespaces for $FM_HOME_CANONICAL" >&2
+    return 1
+  }
+  if [ "$count" -eq 1 ]; then
+    case "${FM_CHECKOUT_REFRESH_STATE_ROOT:-$DEFAULT_STATE_ROOT}" in
+      "$PHYSICAL_STATE_ROOT")
+        STATE_ROOT=$PHYSICAL_STATE_ROOT
+        USING_PHYSICAL_STATE_ROOT=1
+        CUSTOM_STATE_ROOT=0
+        ;;
+    esac
+  fi
+}
+
+stage_home_state_namespace() {
+  local source=$1 destination=$2 parent
+  parent=${destination%/*}
+  python3 - "$source" "$destination" "$parent" <<'PY'
+import os
+import shutil
+import stat
+import sys
+import tempfile
+
+source, destination, parent = sys.argv[1:]
+staging = ""
+
+def failed(error):
+    raise error
+
+try:
+    source_meta = os.lstat(source)
+    parent_meta = os.lstat(parent)
+    if stat.S_ISLNK(source_meta.st_mode) or not stat.S_ISDIR(source_meta.st_mode):
+        raise OSError("unsafe source namespace")
+    if stat.S_ISLNK(parent_meta.st_mode) or not stat.S_ISDIR(parent_meta.st_mode):
+        raise OSError("unsafe namespace parent")
+    if os.path.lexists(destination):
+        raise OSError("destination namespace exists")
+    staging = tempfile.mkdtemp(prefix=".home-state-migration.", dir=parent)
+    payload = os.path.join(staging, "state")
+    os.mkdir(payload, 0o700)
+    for current, directories, files in os.walk(
+        source, topdown=True, followlinks=False, onerror=failed
+    ):
+        relative = os.path.relpath(current, source)
+        target = payload if relative == "." else os.path.join(payload, relative)
+        safe_directories = []
+        for name in sorted(directories):
+            if relative == "." and (
+                name == ".run-lock" or name.startswith(".run-lock.")
+            ):
+                continue
+            path = os.path.join(current, name)
+            metadata = os.lstat(path)
+            if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+                raise OSError("unsafe state directory")
+            os.mkdir(os.path.join(target, name), metadata.st_mode & 0o777)
+            safe_directories.append(name)
+        directories[:] = safe_directories
+        for name in sorted(files):
+            if relative == "." and (
+                name == ".run-lock" or name.startswith(".run-lock.")
+            ):
+                continue
+            path = os.path.join(current, name)
+            metadata = os.lstat(path)
+            if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+                raise OSError("unsafe state file")
+            target_file = os.path.join(target, name)
+            shutil.copyfile(path, target_file)
+            os.chmod(target_file, metadata.st_mode & 0o777)
+            with open(target_file, "rb") as stream:
+                os.fsync(stream.fileno())
+    if os.environ.get("FM_CHECKOUT_REFRESH_TEST") == "1" and os.environ.get(
+        "FM_CHECKOUT_TEST_HOME_MIGRATION_FAILURE"
+    ) == "stage":
+        raise OSError("injected staging failure")
+    os.replace(payload, destination)
+    os.rmdir(staging)
+except OSError:
+    if staging:
+        shutil.rmtree(staging, ignore_errors=True)
+    raise SystemExit(1)
+PY
+}
+
+remove_home_state_namespace() {
+  python3 - "$1" "${1%/*}" <<'PY'
+import os
+import shutil
+import stat
+import sys
+
+target, parent = sys.argv[1:]
+try:
+    parent_real = os.path.realpath(parent)
+    target_meta = os.lstat(target)
+    if stat.S_ISLNK(target_meta.st_mode) or not stat.S_ISDIR(target_meta.st_mode):
+        raise OSError("unsafe state namespace")
+    if os.path.dirname(os.path.realpath(target)) != parent_real:
+        raise OSError("escaping state namespace")
+    shutil.rmtree(target)
+except OSError:
+    raise SystemExit(1)
+PY
+}
+
 prepare_home_state_namespace() {
   local parent command=${1:-}
+  discover_home_launch_agent_namespaces || return 1
   [ "$CUSTOM_STATE_ROOT" -eq 0 ] || return 0
   [ "$DEFAULT_STATE_ROOT" != "$PHYSICAL_STATE_ROOT" ] || return 0
   parent=${DEFAULT_STATE_ROOT%/*}
@@ -1054,8 +1238,7 @@ prepare_home_state_namespace() {
     [ -d "$parent" ] && [ ! -L "$parent" ] || return 1
   fi
   if [ -e "$PHYSICAL_PLIST" ] || [ -L "$PHYSICAL_PLIST" ]; then
-    if [ ! -e "$PHYSICAL_STATE_ROOT" ] && [ ! -L "$PHYSICAL_STATE_ROOT" ] \
-      && [ ! -e "$DEFAULT_STATE_ROOT" ] && [ ! -L "$DEFAULT_STATE_ROOT" ]; then
+    if [ ! -e "$PHYSICAL_STATE_ROOT" ] && [ ! -L "$PHYSICAL_STATE_ROOT" ]; then
       echo "error: physical checkout-refresh LaunchAgent has no durable state namespace to migrate" >&2
       return 1
     fi
@@ -1074,24 +1257,46 @@ prepare_home_state_namespace() {
     fi
   fi
   if [ -e "$PHYSICAL_STATE_ROOT" ] || [ -L "$PHYSICAL_STATE_ROOT" ]; then
-    mv "$PHYSICAL_STATE_ROOT" "$DEFAULT_STATE_ROOT" || {
-      echo "error: cannot migrate checkout-refresh home state to its logical namespace" >&2
+    fm_checkout_lock_prepare "$LOCK_ROOT" || {
       rollback_home_state_namespace_migration || true
       return 1
     }
-    HOME_STATE_NAMESPACE_MOVED=1
+    HOME_MIGRATION_RUN_LOCK="$PHYSICAL_STATE_ROOT/.run-lock"
+    fm_lock_try_acquire "$HOME_MIGRATION_RUN_LOCK" || {
+      echo "error: checkout-refresh physical state is busy; migration retained the prior namespace" >&2
+      HOME_MIGRATION_RUN_LOCK=
+      rollback_home_state_namespace_migration || true
+      return 1
+    }
+    stage_home_state_namespace "$PHYSICAL_STATE_ROOT" "$DEFAULT_STATE_ROOT" || {
+      echo "error: cannot stage checkout-refresh home state in its logical namespace" >&2
+      rollback_home_state_namespace_migration || true
+      return 1
+    }
+    HOME_STATE_NAMESPACE_STAGED=1
   fi
+  HOME_MIGRATION_ACTIVE=1
 }
 
 rollback_home_state_namespace_migration() {
   local failed=0
-  if [ "$HOME_STATE_NAMESPACE_MOVED" -eq 1 ]; then
-    if [ -e "$PHYSICAL_STATE_ROOT" ] || [ -L "$PHYSICAL_STATE_ROOT" ] \
-      || ! mv "$DEFAULT_STATE_ROOT" "$PHYSICAL_STATE_ROOT"; then
+  if [ "$HOME_MIGRATION_ACTIVE" -eq 1 ] && [ "$PLATFORM" = Darwin ]; then
+    "$LAUNCHCTL" bootout "gui/$(id -u)/$LABEL" >/dev/null 2>&1 || true
+    if [ -e "$PLIST" ] || [ -L "$PLIST" ]; then
+      [ -f "$PLIST" ] && [ ! -L "$PLIST" ] && rm -f "$PLIST" || failed=1
+    fi
+  fi
+  if [ "$HOME_STATE_NAMESPACE_STAGED" -eq 1 ]; then
+    if [ ! -d "$DEFAULT_STATE_ROOT" ] || [ -L "$DEFAULT_STATE_ROOT" ] \
+      || ! remove_home_state_namespace "$DEFAULT_STATE_ROOT"; then
       failed=1
     else
-      HOME_STATE_NAMESPACE_MOVED=0
+      HOME_STATE_NAMESPACE_STAGED=0
     fi
+  fi
+  if [ -n "$HOME_MIGRATION_RUN_LOCK" ]; then
+    fm_lock_release "$HOME_MIGRATION_RUN_LOCK" || failed=1
+    HOME_MIGRATION_RUN_LOCK=
   fi
   if [ "$PHYSICAL_AGENT_STOPPED" -eq 1 ]; then
     if [ -f "$PHYSICAL_PLIST" ] && [ ! -L "$PHYSICAL_PLIST" ] \
@@ -1101,7 +1306,43 @@ rollback_home_state_namespace_migration() {
       failed=1
     fi
   fi
+  [ "$failed" -ne 0 ] || HOME_MIGRATION_ACTIVE=0
   [ "$failed" -eq 0 ]
+}
+
+commit_home_state_namespace_migration() {
+  local retired=
+  [ "$HOME_MIGRATION_ACTIVE" -eq 1 ] || return 0
+  if [ -e "$PHYSICAL_STATE_ROOT" ] || [ -L "$PHYSICAL_STATE_ROOT" ]; then
+    [ -d "$PHYSICAL_STATE_ROOT" ] && [ ! -L "$PHYSICAL_STATE_ROOT" ] || return 1
+    retired="$PHYSICAL_STATE_ROOT.retired.$$"
+    [ ! -e "$retired" ] && [ ! -L "$retired" ] || return 1
+    mv "$PHYSICAL_STATE_ROOT" "$retired" || return 1
+    if [ -n "$HOME_MIGRATION_RUN_LOCK" ]; then
+      HOME_MIGRATION_RUN_LOCK="$retired/.run-lock"
+      if ! fm_lock_release "$HOME_MIGRATION_RUN_LOCK"; then
+        mv "$retired" "$PHYSICAL_STATE_ROOT" || true
+        HOME_MIGRATION_RUN_LOCK="$PHYSICAL_STATE_ROOT/.run-lock"
+        return 1
+      fi
+      HOME_MIGRATION_RUN_LOCK=
+    fi
+  fi
+  if [ -e "$PHYSICAL_PLIST" ] || [ -L "$PHYSICAL_PLIST" ]; then
+    if [ ! -f "$PHYSICAL_PLIST" ] || [ -L "$PHYSICAL_PLIST" ] \
+      || { [ "${FM_CHECKOUT_REFRESH_TEST:-0}:${FM_CHECKOUT_TEST_HOME_MIGRATION_FAILURE:-}" = "1:commit" ]; } \
+      || ! rm -f "$PHYSICAL_PLIST"; then
+      [ -z "$retired" ] || mv "$retired" "$PHYSICAL_STATE_ROOT" || true
+      return 1
+    fi
+  fi
+  HOME_MIGRATION_ACTIVE=0
+  HOME_STATE_NAMESPACE_STAGED=0
+  PHYSICAL_AGENT_STOPPED=0
+  if [ -n "$retired" ] && ! remove_home_state_namespace "$retired"; then
+    echo "warning: retired checkout-refresh state remains quarantined at $retired" >&2
+  fi
+  remove_matching_legacy_launch_agent "gui/$(id -u)" || return 1
 }
 
 ensure_lock_roots() {
@@ -1259,7 +1500,7 @@ resolve_checkout_refresh_authority() {
 
 migrate_checkout_identity_state() {
   local checkout=$1 key=$2 destination="$STATE_ROOT/$key.identity"
-  local candidate source_prefix destination_prefix match= count=0 extension
+  local candidate source_prefix destination_prefix match= count=0 lines current_physical current_physical_key
   for candidate in "$STATE_ROOT"/*.identity; do
     [ -e "$candidate" ] || [ -L "$candidate" ] || continue
     [ -f "$candidate" ] && [ ! -L "$candidate" ] && [ -r "$candidate" ] || return 1
@@ -1269,22 +1510,117 @@ migrate_checkout_identity_state() {
   done
   [ "$count" -le 1 ] || return 1
   [ "$count" -eq 1 ] || return 0
-  [ "$match" != "$destination" ] || return 0
+  lines=$(awk 'END { print NR + 0 }' "$match") || return 1
+  if [ "$match" = "$destination" ]; then
+    if [ "$lines" -eq 2 ]; then
+      echo "$checkout: skipped: legacy checkout identity is not bound to a proven physical checkout"
+      return 1
+    fi
+    return 0
+  fi
+  { [ "$lines" -eq 2 ] || [ "$lines" -eq 3 ]; } || return 1
+  current_physical=$(fm_checkout_physical_path_identity "$checkout" directory) || return 1
+  current_physical_key=$(fm_checkout_physical_path_key "$checkout" directory 24) || return 1
   [ ! -e "$destination" ] && [ ! -L "$destination" ] || return 1
   source_prefix=${match%.identity}
   destination_prefix="$STATE_ROOT/$key"
-  for extension in identity tip last alert hygiene-alert; do
-    candidate="$source_prefix.$extension"
-    [ -e "$candidate" ] || [ -L "$candidate" ] || continue
-    [ -f "$candidate" ] && [ ! -L "$candidate" ] && [ -r "$candidate" ] || return 1
-    [ ! -e "$destination_prefix.$extension" ] && [ ! -L "$destination_prefix.$extension" ] || return 1
-    atomic_copy "$candidate" "$destination_prefix.$extension" || return 1
-  done
-  for extension in identity tip last alert hygiene-alert; do
-    candidate="$source_prefix.$extension"
-    [ -e "$candidate" ] || [ -L "$candidate" ] || continue
-    rm -f "$candidate" || return 1
-  done
+  if [ "$lines" -eq 2 ] && [ "${source_prefix##*/}" != "$current_physical_key" ]; then
+    echo "$checkout: skipped: legacy checkout identity filename does not match the current physical checkout"
+    return 1
+  fi
+  if [ "$lines" -eq 3 ] && [ "$(sed -n '3p' "$match")" != "$current_physical" ]; then
+    echo "$checkout: skipped: legacy checkout physical identity drifted before migration"
+    return 1
+  fi
+  python3 - "$source_prefix" "$destination_prefix" "$current_physical" "$lines" <<'PY'
+import os
+import shutil
+import stat
+import sys
+import tempfile
+
+source_prefix, destination_prefix, physical, line_count = sys.argv[1:]
+extensions = ("identity", "tip", "last", "alert", "hygiene-alert")
+state_root = os.path.dirname(destination_prefix)
+staging = ""
+moved_sources = []
+published = []
+try:
+    sources = []
+    for extension in extensions:
+        source = source_prefix + "." + extension
+        destination = destination_prefix + "." + extension
+        if not os.path.lexists(source):
+            continue
+        metadata = os.lstat(source)
+        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+            raise OSError("unsafe source state")
+        publish = True
+        if os.path.lexists(destination):
+            destination_meta = os.lstat(destination)
+            if extension not in ("alert", "hygiene-alert") or stat.S_ISLNK(
+                destination_meta.st_mode
+            ) or not stat.S_ISREG(destination_meta.st_mode):
+                raise OSError("destination state exists")
+            publish = False
+        sources.append(
+            (extension, source, destination, metadata.st_mode & 0o777, publish)
+        )
+    if not sources or sources[0][0] != "identity":
+        raise OSError("identity state is missing")
+    staging = tempfile.mkdtemp(prefix=".checkout-identity-migration.", dir=state_root)
+    new_root = os.path.join(staging, "new")
+    old_root = os.path.join(staging, "old")
+    os.mkdir(new_root, 0o700)
+    os.mkdir(old_root, 0o700)
+    for extension, source, _, mode, _ in sources:
+        staged = os.path.join(new_root, extension)
+        if extension == "identity" and line_count == "2":
+            with open(source, "r", encoding="utf-8") as stream:
+                values = stream.read().splitlines()
+            if len(values) != 2:
+                raise OSError("identity changed during migration")
+            with open(staged, "w", encoding="utf-8") as stream:
+                stream.write("\n".join(values + [physical]) + "\n")
+        else:
+            shutil.copyfile(source, staged)
+        os.chmod(staged, mode)
+        with open(staged, "rb") as stream:
+            os.fsync(stream.fileno())
+    if os.environ.get("FM_CHECKOUT_REFRESH_TEST") == "1" and os.environ.get(
+        "FM_CHECKOUT_TEST_IDENTITY_MIGRATION_FAILURE"
+    ) == "stage":
+        raise OSError("injected staging failure")
+    for extension, source, _, _, _ in sources:
+        retained = os.path.join(old_root, extension)
+        os.replace(source, retained)
+        moved_sources.append((retained, source))
+    if os.environ.get("FM_CHECKOUT_REFRESH_TEST") == "1" and os.environ.get(
+        "FM_CHECKOUT_TEST_IDENTITY_MIGRATION_FAILURE"
+    ) == "publish":
+        raise OSError("injected publish failure")
+    for extension, _, destination, _, publish in sources:
+        if not publish:
+            continue
+        staged = os.path.join(new_root, extension)
+        os.replace(staged, destination)
+        published.append(destination)
+    shutil.rmtree(staging)
+except (OSError, UnicodeError):
+    for destination in reversed(published):
+        try:
+            os.unlink(destination)
+        except OSError:
+            pass
+    for retained, source in reversed(moved_sources):
+        try:
+            os.replace(retained, source)
+        except OSError:
+            pass
+    if staging:
+        shutil.rmtree(staging, ignore_errors=True)
+    raise SystemExit(1)
+PY
 }
 
 validate_covered_checkout_identity() {
@@ -1325,12 +1661,6 @@ validate_covered_checkout_identity() {
     if [ "$lines" -eq 3 ] && [ "$recorded_physical" != "$current_physical" ]; then
       echo "$checkout: skipped: covered checkout physical identity drifted at $checkout"
       return 1
-    fi
-    if [ "$lines" -eq 2 ]; then
-      atomic_write "$identity_file" "$checkout" "$current_identity" "$current_physical" || {
-        echo "$checkout: skipped: covered checkout physical identity cannot be persisted"
-        return 1
-      }
     fi
     return 0
   fi
@@ -1947,7 +2277,8 @@ physical_launch_agent_matches_home() {
 validate_launch_agent_namespaces() {
   [ "$PHYSICAL_LABEL" != "$LABEL" ] || return 0
   if { [ -e "$PLIST" ] || [ -L "$PLIST" ]; } \
-    && { [ -e "$PHYSICAL_PLIST" ] || [ -L "$PHYSICAL_PLIST" ]; }; then
+    && { [ -e "$PHYSICAL_PLIST" ] || [ -L "$PHYSICAL_PLIST" ]; } \
+    && [ "$HOME_MIGRATION_ACTIVE" -ne 1 ]; then
     echo "error: ambiguous logical and physical checkout-refresh LaunchAgents for $FM_HOME_CANONICAL" >&2
     return 1
   fi
@@ -2028,19 +2359,11 @@ EOF
   "$LAUNCHCTL" bootout "$domain/$LABEL" >/dev/null 2>&1 || true
   if "$LAUNCHCTL" bootstrap "$domain" "$PLIST" \
     && "$LAUNCHCTL" kickstart "$domain/$LABEL"; then
-    if ! remove_matching_physical_launch_agent "$domain"; then
-      "$LAUNCHCTL" bootout "$domain/$LABEL" >/dev/null 2>&1 || true
-      if [ -f "$previous" ]; then
-        mv -f "$previous" "$PLIST" || return 1
-        "$LAUNCHCTL" bootstrap "$domain" "$PLIST" >/dev/null 2>&1 || true
-      else
-        rm -f "$PLIST" || return 1
-      fi
-      echo "error: checkout-refresh physical LaunchAgent cleanup failed; previous definition restored" >&2
-      return 1
-    fi
     rm -f "$previous"
-    remove_matching_legacy_launch_agent "$domain"
+    if [ "$HOME_MIGRATION_ACTIVE" -ne 1 ]; then
+      remove_matching_physical_launch_agent "$domain" || return 1
+      remove_matching_legacy_launch_agent "$domain" || return 1
+    fi
     return 0
   fi
   if [ -f "$previous" ]; then
@@ -2102,7 +2425,9 @@ scheduler_install() {
   local status
   case "$PLATFORM" in
     Darwin)
-      if install_launch_agent; then
+      if install_launch_agent \
+        && { [ "$HOME_MIGRATION_ACTIVE" -ne 1 ] || ensure_launch_agent; } \
+        && commit_home_state_namespace_migration; then
         return 0
       else
         status=$?
@@ -2127,7 +2452,7 @@ scheduler_ensure() {
   local status
   case "$PLATFORM" in
     Darwin)
-      if ensure_launch_agent; then
+      if ensure_launch_agent && commit_home_state_namespace_migration; then
         return 0
       else
         status=$?

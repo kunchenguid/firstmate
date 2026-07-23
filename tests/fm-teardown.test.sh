@@ -91,9 +91,13 @@ PY
 }
 
 prepare_secondmate_home_fixture() {
-  local case_dir=$1 id=${2:-task-x1} root_default default root_tip exclude
-  mkdir -p "$case_dir/wt/data" "$case_dir/wt/state" "$case_dir/wt/config" "$case_dir/wt/projects"
+  local case_dir=$1 id=${2:-task-x1} root_default default root_tip exclude home_abs
+  mkdir -p "$case_dir/data" "$case_dir/wt/data" "$case_dir/wt/state" "$case_dir/wt/config" \
+    "$case_dir/wt/projects" "$case_dir/source-projects"
   printf '%s\n' "$id" > "$case_dir/wt/.fm-secondmate-home"
+  home_abs=$(cd "$case_dir/wt" && pwd -P)
+  printf '%s\n' "- $id - test secondmate (home: $home_abs; scope: test; projects: test; added 2026-07-23)" \
+    > "$case_dir/data/secondmates.md"
   root_default=$(git -C "$ROOT" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || printf 'origin/main')
   default=${root_default#origin/}
   root_tip=$(git -C "$ROOT" rev-parse "$root_default")
@@ -104,6 +108,7 @@ prepare_secondmate_home_fixture() {
   git -C "$case_dir/project" remote set-url origin "$ROOT"
   git -C "$case_dir/project" update-ref "refs/remotes/origin/$default" "$root_tip"
   git -C "$case_dir/project" symbolic-ref refs/remotes/origin/HEAD "refs/remotes/origin/$default"
+  git clone --quiet "$case_dir/origin.git" "$case_dir/source-projects/test"
   git clone --quiet "$case_dir/origin.git" "$case_dir/wt/projects/test"
   exclude=$(git -C "$case_dir/wt" rev-parse --git-path info/exclude)
   printf '%s\n' '.fm-secondmate-home' '/data/' '/state/' '/config/' '/projects/' >> "$exclude"
@@ -660,7 +665,9 @@ run_teardown() {
   local case_dir=$1; shift
   FM_ROOT_OVERRIDE="$ROOT" \
   FM_STATE_OVERRIDE="$case_dir/state" \
+  FM_DATA_OVERRIDE="${FM_DATA_OVERRIDE:-$case_dir/data}" \
   FM_CONFIG_OVERRIDE="$case_dir/config" \
+  FM_PROJECTS_OVERRIDE="${FM_PROJECTS_OVERRIDE:-$case_dir/source-projects}" \
   FM_CHECKOUT_REFRESH_LOCK_ROOT="${FM_CHECKOUT_REFRESH_LOCK_ROOT:-$case_dir/checkout-locks}" \
   FM_EXPECT_CHECKOUT_LOCK="${FM_EXPECT_CHECKOUT_LOCK:-}" \
   FM_EXPECT_CHECKOUT_LOCK_MARKER="${FM_EXPECT_CHECKOUT_LOCK_MARKER:-}" \
@@ -677,6 +684,7 @@ run_teardown_named() {
   FM_STATE_OVERRIDE="$case_dir/state" \
   FM_DATA_OVERRIDE="$case_dir/data" \
   FM_CONFIG_OVERRIDE="$case_dir/config" \
+  FM_PROJECTS_OVERRIDE="${FM_PROJECTS_OVERRIDE:-$case_dir/source-projects}" \
   FM_CHECKOUT_REFRESH_LOCK_ROOT="$case_dir/checkout-locks" \
   FM_FAKE_FIRSTMATE_SOURCE="$ROOT" \
   FM_ACCOUNT_ROUTING_TEST_LAB=firstmate-account-routing-test-lab-v1 \
@@ -3301,6 +3309,99 @@ test_secondmate_retirement_retains_unlanded_project_clone() {
   pass "force retirement retains unlanded nested project clones"
 }
 
+test_secondmate_project_tags_do_not_prove_landing() {
+  local case_dir clone rc
+  case_dir=$(make_case secondmate-project-tag-only)
+  prepare_secondmate_home_fixture "$case_dir"
+  write_secondmate_meta "$case_dir"
+  clone="$case_dir/wt/projects/test"
+  printf 'tag only\n' > "$clone/tag-only.txt"
+  git -C "$clone" add tag-only.txt
+  git -C "$clone" commit -qm "tag-only project work"
+  git -C "$clone" tag tag-only-proof
+  git -C "$clone" push -q origin refs/tags/tag-only-proof
+  set +e
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "tag-only project reachability must block retirement"
+  assert_present "$clone/tag-only.txt" "tag-only project work was discarded"
+  assert_present "$case_dir/state/task-x1.meta" "tag-only project work allowed metadata removal"
+  assert_grep 'not proven on a live remote branch' "$case_dir/stderr" \
+    "tag-only reachability was not distinguished from a durable branch"
+  pass "remote tags alone never prove secondmate project work landed"
+}
+
+test_secondmate_project_origin_authority_survives_home_removal() {
+  local drift_case drift_clone drift_origin in_home_case in_home_clone in_home_origin rc
+  drift_case=$(make_case secondmate-project-origin-drift)
+  prepare_secondmate_home_fixture "$drift_case"
+  write_secondmate_meta "$drift_case"
+  drift_clone="$drift_case/wt/projects/test"
+  drift_origin="$drift_case/drift-origin.git"
+  git clone --quiet --bare "$drift_case/origin.git" "$drift_origin"
+  git -C "$drift_clone" remote set-url origin "$drift_origin"
+  set +e
+  run_teardown "$drift_case" --force > "$drift_case/stdout" 2> "$drift_case/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "drifted project origin must block retirement"
+  assert_present "$drift_clone" "drifted project origin allowed clone removal"
+  assert_grep 'origin drifted from its registered source' "$drift_case/stderr" \
+    "drifted project origin was not surfaced"
+
+  in_home_case=$(make_case secondmate-project-in-home-origin)
+  prepare_secondmate_home_fixture "$in_home_case"
+  write_secondmate_meta "$in_home_case"
+  in_home_clone="$in_home_case/wt/projects/test"
+  in_home_origin="$in_home_case/wt/data/in-home-origin.git"
+  git clone --quiet --bare "$in_home_case/origin.git" "$in_home_origin"
+  git -C "$in_home_clone" remote set-url origin "$in_home_origin"
+  set +e
+  run_teardown "$in_home_case" --force > "$in_home_case/stdout" 2> "$in_home_case/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "in-home project origin must block retirement"
+  assert_present "$in_home_origin" "in-home landing authority was deleted"
+  assert_grep 'does not survive home removal' "$in_home_case/stderr" \
+    "in-home project landing authority was not surfaced"
+  pass "project landing authority is bound and survives secondmate removal"
+}
+
+test_secondmate_retirement_recurses_into_ignored_nested_repositories() {
+  local case_dir source_clone clone nested_origin nested rc
+  case_dir=$(make_case secondmate-nested-project-repository)
+  prepare_secondmate_home_fixture "$case_dir"
+  write_secondmate_meta "$case_dir"
+  source_clone="$case_dir/source-projects/test"
+  clone="$case_dir/wt/projects/test"
+  nested_origin="$case_dir/nested-origin.git"
+  git clone --quiet --bare "$case_dir/origin.git" "$nested_origin"
+  git -C "$source_clone" -c protocol.file.allow=always submodule add -q \
+    "$nested_origin" vendor/nested
+  git -C "$source_clone" commit -qm "register nested project fixture"
+  git -C "$source_clone" push -q origin main
+  git -C "$clone" pull -q --ff-only
+  git -C "$clone" -c protocol.file.allow=always submodule update -q --init
+  nested="$clone/vendor/nested"
+  printf 'unlanded nested work\n' > "$nested/unlanded.txt"
+  git -C "$nested" add unlanded.txt
+  git -C "$nested" commit -qm "unlanded nested repository work"
+  git -C "$clone" add vendor/nested
+  git -C "$clone" commit -qm "reference unlanded nested repository work"
+  git -C "$clone" push -q origin main
+  set +e
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "unpushed submodule repository must block retirement"
+  assert_present "$nested/unlanded.txt" "unpushed submodule repository work was discarded"
+  assert_present "$case_dir/state/task-x1.meta" "nested repository work allowed metadata removal"
+  assert_grep 'not proven on a live remote branch' "$case_dir/stderr" \
+    "unlanded nested repository ref was not surfaced"
+  pass "secondmate retirement recursively proves submodule repositories"
+}
+
 test_secondmate_retirement_serializes_child_spawn() {
   local case_dir child_project rc teardown_pid spawn_rc waited
   case_dir=$(make_case secondmate-retirement-child-race)
@@ -3597,6 +3698,9 @@ fi
 if [ "${FM_TEST_FOCUSED:-}" = review-round-durable-secondmate ]; then
   test_secondmate_retirement_retains_idle_registered_child
   test_secondmate_retirement_retains_unlanded_project_clone
+  test_secondmate_project_tags_do_not_prove_landing
+  test_secondmate_project_origin_authority_survives_home_removal
+  test_secondmate_retirement_recurses_into_ignored_nested_repositories
   exit 0
 fi
 
@@ -3637,6 +3741,9 @@ test_forced_secondmate_retains_unquiesced_unmanaged_child
 test_secondmate_registry_duplicate_home_blocks_removal
 test_secondmate_retirement_retains_idle_registered_child
 test_secondmate_retirement_retains_unlanded_project_clone
+test_secondmate_project_tags_do_not_prove_landing
+test_secondmate_project_origin_authority_survives_home_removal
+test_secondmate_retirement_recurses_into_ignored_nested_repositories
 test_secondmate_retirement_serializes_child_spawn
 test_nested_secondmate_cleanup_requires_child_home_lock
 test_secondmate_registry_updates_are_locked_and_literal

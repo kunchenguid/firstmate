@@ -1751,65 +1751,227 @@ $refs
 EOF
 }
 
-validate_secondmate_project_clone_landed_state() {
-  local clone=$1 dirty stash refs ref tip remote_output remote_status
-  local remote_tips remote_tip remote_commit landed
-  [ "$(exact_git_worktree_root "$clone")" = "$clone" ] || {
-    echo "REFUSED: secondmate project clone is not an exact repository root at $clone" >&2
+exact_git_repository_root() {
+  local repository=$1 container=${2:-$1} bare git_dir common metadata top container_git
+  bare=$(git -C "$repository" rev-parse --is-bare-repository 2>/dev/null) || return 1
+  if [ "$bare" = true ]; then
+    git_dir=$(git -C "$repository" rev-parse --absolute-git-dir 2>/dev/null) || return 1
+    git_dir=$(fm_checkout_trusted_dir "$git_dir") || return 1
+    [ "$git_dir" = "$repository" ] || return 1
+    printf '%s\n' "$repository"
+  elif exact_git_worktree_root "$repository" >/dev/null 2>&1; then
+    exact_git_worktree_root "$repository"
+  else
+    top=$(git -C "$repository" rev-parse --show-toplevel 2>/dev/null) || return 1
+    top=$(fm_checkout_trusted_dir "$top") || return 1
+    [ "$top" = "$repository" ] || return 1
+    metadata="$repository/.git"
+    [ -f "$metadata" ] && [ ! -L "$metadata" ] || return 1
+    git_dir=$(git -C "$repository" rev-parse --absolute-git-dir 2>/dev/null) || return 1
+    git_dir=$(fm_checkout_trusted_dir "$git_dir") || return 1
+    common=$(git -C "$repository" rev-parse --git-common-dir 2>/dev/null) || return 1
+    case "$common" in /*) ;; *) common="$repository/$common" ;; esac
+    common=$(fm_checkout_trusted_dir "$common") || return 1
+    [ "$git_dir" = "$common" ] || return 1
+    container=$(fm_checkout_trusted_dir "$container") || return 1
+    container_git=$(git -C "$container" rev-parse --absolute-git-dir 2>/dev/null) || return 1
+    container_git=$(fm_checkout_trusted_dir "$container_git") || return 1
+    case "$common/" in "$container_git/modules/"*) ;; *) return 1 ;; esac
+    printf '%s\n' "$repository"
+  fi
+}
+
+secondmate_remote_identity() {
+  local repository=$1 retiring_home=$2 url path canonical bare git_dir
+  url=$(git -C "$repository" remote get-url origin 2>/dev/null) || return 1
+  [ -n "$url" ] || return 1
+  case "$url" in
+    file://*) path=${url#file://} ;;
+    *://*|*@*:*|[A-Za-z]:*) printf 'network\t%s\n' "$url"; return 0 ;;
+    /*) path=$url ;;
+    *) path="$repository/$url" ;;
+  esac
+  canonical=$(fm_checkout_trusted_dir "$path") || return 1
+  bare=$(git -C "$canonical" rev-parse --is-bare-repository 2>/dev/null) || return 1
+  if [ "$bare" = true ]; then
+    git_dir=$(git -C "$canonical" rev-parse --absolute-git-dir 2>/dev/null) || return 1
+    git_dir=$(fm_checkout_trusted_dir "$git_dir") || return 1
+    [ "$git_dir" = "$canonical" ] || return 1
+  else
+    [ "$(exact_git_worktree_root "$canonical")" = "$canonical" ] || return 1
+  fi
+  case "$canonical/" in
+    "$retiring_home/"*) return 1 ;;
+  esac
+  printf 'local\t%s\n' "$canonical"
+}
+
+enumerate_secondmate_project_repositories() {
+  python3 - "$1" <<'PY'
+import os
+import stat
+import sys
+
+root = sys.argv[1]
+repositories = {"."}
+
+def failed(error):
+    raise error
+
+try:
+    for current, directories, _ in os.walk(root, topdown=True, followlinks=False, onerror=failed):
+        relative = os.path.relpath(current, root)
+        safe_directories = []
+        for name in sorted(directories):
+            path = os.path.join(current, name)
+            metadata = os.lstat(path)
+            if stat.S_ISLNK(metadata.st_mode):
+                continue
+            if not stat.S_ISDIR(metadata.st_mode):
+                raise OSError("unsafe project directory")
+            if name == ".git":
+                continue
+            safe_directories.append(name)
+        directories[:] = safe_directories
+        if relative == ".":
+            continue
+        git_marker = os.path.join(current, ".git")
+        if os.path.lexists(git_marker):
+            marker = os.lstat(git_marker)
+            if stat.S_ISLNK(marker.st_mode) or not (
+                stat.S_ISDIR(marker.st_mode) or stat.S_ISREG(marker.st_mode)
+            ):
+                raise OSError("unsafe git marker")
+            repositories.add(relative)
+            continue
+        head = os.path.join(current, "HEAD")
+        config = os.path.join(current, "config")
+        objects = os.path.join(current, "objects")
+        refs = os.path.join(current, "refs")
+        if all(os.path.exists(path) for path in (head, config, objects, refs)):
+            if not os.path.isfile(head) or not os.path.isfile(config):
+                raise OSError("unsafe bare repository")
+            if not os.path.isdir(objects) or not os.path.isdir(refs):
+                raise OSError("unsafe bare repository")
+            repositories.add(relative)
+            directories[:] = []
+    for repository in sorted(repositories):
+        print(repository)
+except OSError:
+    raise SystemExit(1)
+PY
+}
+
+validate_secondmate_declared_submodules() {
+  local repository=$1 container=${2:-$1} modules="$repository/.gitmodules" entries status key path submodule
+  [ -e "$modules" ] || [ -L "$modules" ] || return 0
+  [ -f "$modules" ] && [ ! -L "$modules" ] && [ -r "$modules" ] || return 1
+  if entries=$(git -C "$repository" config --file .gitmodules \
+      --get-regexp '^submodule\..*\.path$' 2>/dev/null); then
+    status=0
+  else
+    status=$?
+  fi
+  [ "$status" -eq 0 ] && [ -n "$entries" ] || return 1
+  while read -r key path; do
+    [ -n "$key" ] && [ -n "$path" ] || return 1
+    submodule=$(fm_checkout_lexical_path "$repository/$path") || return 1
+    case "$submodule/" in
+      "$repository/"*) ;;
+      *) return 1 ;;
+    esac
+    [ "$(exact_git_repository_root "$submodule" "$container")" = "$submodule" ] || return 1
+  done <<EOF
+$entries
+EOF
+}
+
+validate_secondmate_project_repository_landed_state() {
+  local repository=$1 source_repository=$2 retiring_home=$3 repository_container=${4:-$1}
+  local source_container=${5:-$2} dirty refs ref tip remote_output remote_status
+  local remote_tips remote_tip remote_commit landed repository_identity source_identity bare stash_status
+  [ "$(exact_git_repository_root "$repository" "$repository_container")" = "$repository" ] || {
+    echo "REFUSED: secondmate project repository is not an exact repository root at $repository" >&2
     return 1
   }
-  dirty=$(GIT_OPTIONAL_LOCKS=0 git -C "$clone" status --porcelain=v1 --untracked-files=all 2>/dev/null) || {
-    echo "REFUSED: secondmate project clone cleanliness is uninspectable at $clone" >&2
+  [ "$(exact_git_repository_root "$source_repository" "$source_container")" = "$source_repository" ] || {
+    echo "REFUSED: registered source project repository is not an exact repository root at $source_repository" >&2
     return 1
   }
-  [ -z "$dirty" ] || {
-    echo "REFUSED: secondmate project clone has unlanded changes at $clone" >&2
+  validate_secondmate_declared_submodules "$repository" "$repository_container" || {
+    echo "REFUSED: secondmate project submodule state is uninspectable at $repository" >&2
     return 1
   }
-  stash=$(git -C "$clone" stash list 2>/dev/null) || {
-    echo "REFUSED: secondmate project clone stash state is uninspectable at $clone" >&2
+  bare=$(git -C "$repository" rev-parse --is-bare-repository 2>/dev/null) || return 1
+  if [ "$bare" != true ]; then
+    dirty=$(GIT_OPTIONAL_LOCKS=0 git -C "$repository" status --porcelain=v1 --untracked-files=all 2>/dev/null) || {
+      echo "REFUSED: secondmate project clone cleanliness is uninspectable at $repository" >&2
+      return 1
+    }
+    [ -z "$dirty" ] || {
+      echo "REFUSED: secondmate project clone has unlanded changes at $repository" >&2
+      return 1
+    }
+  fi
+  if git -C "$repository" show-ref --verify --quiet refs/stash 2>/dev/null; then
+    echo "REFUSED: secondmate project repository has retained stash history at $repository" >&2
+    return 1
+  else
+    stash_status=$?
+  fi
+  [ "$stash_status" -eq 1 ] || {
+    echo "REFUSED: secondmate project repository stash state is uninspectable at $repository" >&2
     return 1
   }
-  [ -z "$stash" ] || {
-    echo "REFUSED: secondmate project clone has retained stash history at $clone" >&2
+  repository_identity=$(secondmate_remote_identity "$repository" "$retiring_home") || {
+    echo "REFUSED: secondmate project remote identity is unsafe or does not survive home removal at $repository" >&2
+    return 1
+  }
+  source_identity=$(secondmate_remote_identity "$source_repository" "$retiring_home") || {
+    echo "REFUSED: registered source project remote identity is unsafe or unreadable at $source_repository" >&2
+    return 1
+  }
+  [ "$repository_identity" = "$source_identity" ] || {
+    echo "REFUSED: secondmate project origin drifted from its registered source at $repository" >&2
     return 1
   }
   if fm_run_bounded_capture --combine-stderr remote_output "$TEARDOWN_UPSTREAM_TIMEOUT" \
-      git -C "$clone" ls-remote origin 'refs/heads/*' 'refs/tags/*'; then
+      git -C "$repository" ls-remote origin 'refs/heads/*'; then
     remote_status=0
   else
     remote_status=$?
   fi
   fm_process_tree_cleanup_verified || {
-    echo "REFUSED: secondmate project clone upstream probe cleanup is unverified at $clone" >&2
+    echo "REFUSED: secondmate project repository upstream probe cleanup is unverified at $repository" >&2
     return 1
   }
   [ "$remote_status" -eq 0 ] || {
-    echo "REFUSED: secondmate project clone remote refs are uninspectable at $clone" >&2
+    echo "REFUSED: secondmate project remote branches are uninspectable at $repository" >&2
     return 1
   }
-  remote_tips=$(printf '%s\n' "$remote_output" | awk 'NF == 2 { print $1 }' | sort -u) || return 1
+  remote_tips=$(printf '%s\n' "$remote_output" \
+    | awk 'NF == 2 && index($2, "refs/heads/") == 1 { print $1 }' | sort -u) || return 1
   [ -n "$remote_tips" ] || {
-    echo "REFUSED: secondmate project clone has no live remote refs at $clone" >&2
+    echo "REFUSED: secondmate project repository has no live remote branches at $repository" >&2
     return 1
   }
-  refs=$(git -C "$clone" for-each-ref --format='%(refname)' 2>/dev/null) || {
-    echo "REFUSED: secondmate project clone refs are uninspectable at $clone" >&2
+  refs=$(git -C "$repository" for-each-ref --format='%(refname)' 2>/dev/null) || {
+    echo "REFUSED: secondmate project repository refs are uninspectable at $repository" >&2
     return 1
   }
   refs=$(printf '%s\n' "$refs" | awk '$0 !~ /^refs\/remotes\// && $0 != "refs/stash" { print }') || return 1
   refs=$(printf 'HEAD\n%s\n' "$refs")
   while IFS= read -r ref; do
     [ -n "$ref" ] || continue
-    tip=$(git -C "$clone" rev-parse "$ref^{commit}" 2>/dev/null) || {
-      echo "REFUSED: secondmate project clone ref $ref is uninspectable at $clone" >&2
+    tip=$(git -C "$repository" rev-parse "$ref^{commit}" 2>/dev/null) || {
+      echo "REFUSED: secondmate project repository ref $ref is uninspectable at $repository" >&2
       return 1
     }
     landed=0
     while IFS= read -r remote_tip; do
       [ -n "$remote_tip" ] || continue
-      remote_commit=$(git -C "$clone" rev-parse "$remote_tip^{commit}" 2>/dev/null) || continue
-      if git -C "$clone" merge-base --is-ancestor "$tip" "$remote_commit" 2>/dev/null; then
+      remote_commit=$(git -C "$repository" rev-parse "$remote_tip^{commit}" 2>/dev/null) || continue
+      if git -C "$repository" merge-base --is-ancestor "$tip" "$remote_commit" 2>/dev/null; then
         landed=1
         break
       fi
@@ -1817,7 +1979,7 @@ validate_secondmate_project_clone_landed_state() {
 $remote_tips
 EOF
     [ "$landed" -eq 1 ] || {
-      echo "REFUSED: secondmate project clone ref $ref is not proven on a live remote ref at $clone" >&2
+      echo "REFUSED: secondmate project repository ref $ref is not proven on a live remote branch at $repository" >&2
       return 1
     }
   done <<EOF
@@ -1826,7 +1988,8 @@ EOF
 }
 
 validate_secondmate_project_clones() {
-  local home=$1 registry=$2 expected_id=$3 projects_root expected listed project clone
+  local home=$1 registry=$2 expected_id=$3 expected_source=$4 projects_root source_projects_root
+  local expected listed project clone source_clone repositories relative repository source_repository
   expected=$(fm_secondmate_registry_query "$registry" query "$expected_id" projects) || {
     echo "REFUSED: secondmate project registration is unprovable for $expected_id" >&2
     return 1
@@ -1863,10 +2026,43 @@ PY
     echo "REFUSED: secondmate project clones do not exactly match the registration for $expected_id" >&2
     return 1
   }
+  if [ "$expected_source" = "$FM_ROOT" ] && [ -n "${FM_PROJECTS_OVERRIDE:-}" ]; then
+    source_projects_root=$FM_PROJECTS_OVERRIDE
+  else
+    source_projects_root="$expected_source/projects"
+  fi
+  source_projects_root=$(fm_checkout_trusted_dir "$source_projects_root") || {
+    echo "REFUSED: registered source projects are unavailable or redirected at $source_projects_root" >&2
+    return 1
+  }
   while IFS= read -r project; do
     [ -n "$project" ] || continue
     clone=$(fm_checkout_trusted_dir "$projects_root/$project") || return 1
-    validate_secondmate_project_clone_landed_state "$clone" || return 1
+    source_clone=$(fm_checkout_trusted_dir "$source_projects_root/$project") || {
+      echo "REFUSED: registered source project is unavailable or redirected for $project" >&2
+      return 1
+    }
+    repositories=$(enumerate_secondmate_project_repositories "$clone") || {
+      echo "REFUSED: nested project repositories cannot be safely enumerated at $clone" >&2
+      return 1
+    }
+    while IFS= read -r relative; do
+      [ -n "$relative" ] || continue
+      if [ "$relative" = . ]; then
+        repository=$clone
+        source_repository=$source_clone
+      else
+        repository=$(fm_checkout_trusted_dir "$clone/$relative") || return 1
+        source_repository=$(fm_checkout_trusted_dir "$source_clone/$relative") || {
+          echo "REFUSED: nested project repository has no registered source counterpart at $clone/$relative" >&2
+          return 1
+        }
+      fi
+      validate_secondmate_project_repository_landed_state \
+        "$repository" "$source_repository" "$home" "$clone" "$source_clone" || return 1
+    done <<EOF
+$repositories
+EOF
   done <<EOF
 $listed
 EOF
@@ -1906,7 +2102,8 @@ validate_firstmate_home_for_removal() {
   fi
   validate_secondmate_home_landed_state "$abs_home_path" "$expected_source" || return 1
   if [ -n "$expected_id" ]; then
-    validate_secondmate_project_clones "$abs_home_path" "$expected_registry" "$expected_id" || return 1
+    validate_secondmate_project_clones \
+      "$abs_home_path" "$expected_registry" "$expected_id" "$expected_source" || return 1
   fi
   validate_firstmate_operational_dirs_for_removal "$abs_home_path" "$label" || return 1
   secondmate_state_metadata "$abs_home_path" >/dev/null || return 1

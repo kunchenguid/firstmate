@@ -1158,6 +1158,34 @@ test_resume_uses_sticky_recovery_and_preserves_mapping_on_failure() {
   pass "resume uses below-reserve sticky recovery and never deletes mapping on a failed attempt"
 }
 
+test_recovered_secondmate_kind_blocks_unsupported_cmux_backend_early() {
+  local id rec meta replacement out status
+  id=acct-cmux-sm-z9b
+  rec=$(make_case recovered-cmux-secondmate claude "$id")
+  read_case "$rec"
+  mkdir -p "$CASE_DIR/treehouse-pools"
+  out=$(FM_FAKE_AF_POOL=claude-crew run_spawn "$id" "$PROJ_DIR" --account-pool claude-crew)
+  status=$?
+  [ "$status" -eq 0 ] || fail "recovered cmux secondmate precondition spawn failed: $out"
+  meta="$HOME_DIR/state/$id.meta"
+  replacement="$meta.replacement"
+  sed 's/^kind=.*/kind=secondmate/;/^backend=/d' "$meta" > "$replacement"
+  printf 'backend=cmux\n' >> "$replacement"
+  mv "$replacement" "$meta"
+  rm -f "$CASE_DIR/endpoint-live"
+  clear_case_logs
+  out=$(run_spawn "$id" --resume-account)
+  status=$?
+  [ "$status" -ne 0 ] || fail "metadata-recovered cmux secondmate launched"
+  assert_contains "$out" "backend=cmux does not support --secondmate spawns yet" \
+    "metadata-recovered secondmate missed the cmux backend guard"
+  assert_not_grep 'lease recover\|lease choose\|lease acquire' "$AF_LOG" \
+    "unsupported recovered secondmate reached account mutation"
+  assert_not_grep '^new-window ' "$TMUX_LOG" \
+    "unsupported recovered secondmate created an endpoint"
+  pass "metadata kind recovery precedes unsupported secondmate backend checks"
+}
+
 test_managed_recovery_accepts_inherited_lifecycle_lock() {
   local id rec out status held account_task
   id=account-inherited-recovery-z9d
@@ -5761,6 +5789,11 @@ if [ "${FM_TEST_FOCUSED:-}" = review-round-40 ]; then
   exit 0
 fi
 
+if [ "${FM_TEST_FOCUSED:-}" = review-round-durable-secondmate ]; then
+  run_isolated_test test_recovered_secondmate_kind_blocks_unsupported_cmux_backend_early
+  exit 0
+fi
+
 if [ "${FM_TEST_FOCUSED:-}" = review-round-8 ]; then
   run_isolated_test test_unmanaged_postinstall_failure_restores_prior_state
   exit 0
@@ -6179,6 +6212,7 @@ run_isolated_test test_enforce_failure_rolls_back_prepared_endpoint
 run_isolated_test test_pane_failure_happens_before_account_reservation
 run_isolated_test test_batch_partial_failure_releases_only_failed_item
 run_isolated_test test_resume_uses_sticky_recovery_and_preserves_mapping_on_failure
+run_isolated_test test_recovered_secondmate_kind_blocks_unsupported_cmux_backend_early
 run_isolated_test test_managed_recovery_accepts_inherited_lifecycle_lock
 run_isolated_test test_inherited_lifecycle_handoff_releases_on_child_abort
 run_isolated_test test_inherited_lifecycle_lock_rejects_owner_aba

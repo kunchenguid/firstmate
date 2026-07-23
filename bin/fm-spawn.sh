@@ -652,6 +652,17 @@ spawn_refuse_existing_orca_provider_identity() {
   }
 }
 
+spawn_refuse_unsupported_secondmate_backend() {
+  [ "$KIND" != secondmate ] || [ "$BACKEND" != orca ] || {
+    echo "error: backend=orca does not support --secondmate spawns yet" >&2
+    return 1
+  }
+  [ "$KIND" != secondmate ] || [ "$BACKEND" != cmux ] || {
+    echo "error: backend=cmux does not support --secondmate spawns yet" >&2
+    return 1
+  }
+}
+
 if [ "$RECOVERY_ACCOUNT" = 1 ]; then
   [ "${#POS[@]}" -ge 1 ] || { echo "error: account recovery requires a task id" >&2; exit 1; }
   case "$SPAWN_PREFLIGHT_ID" in *=*) echo "error: account recovery does not support batch syntax" >&2; exit 1 ;; esac
@@ -660,9 +671,18 @@ if [ "$RECOVERY_ACCOUNT" = 1 ]; then
     exit 1
   fi
   spawn_preflight_load_meta 1 || exit 1
+  recorded_kind=$(spawn_preflight_meta_value kind)
+  [ -n "$recorded_kind" ] || recorded_kind=ship
+  case "$recorded_kind" in
+    ship|scout|secondmate) ;;
+    *) echo "error: managed recovery metadata has invalid kind '$recorded_kind' for $SPAWN_PREFLIGHT_ID" >&2; exit 1 ;;
+  esac
+  if [ "$KIND" != ship ] && [ "$KIND" != "$recorded_kind" ]; then
+    echo "error: account recovery kind '$KIND' does not match recorded kind '$recorded_kind'" >&2
+    exit 1
+  fi
+  KIND=$recorded_kind
   if [ "$DIRECT_ACCOUNT_RECOVERY" = 1 ]; then
-    KIND=$(spawn_preflight_meta_value kind)
-    [ -n "$KIND" ] || KIND=ship
     case "$KIND" in
       ship|scout) ;;
       *) echo "error: --recover-direct-account supports only recorded ship or scout tasks" >&2; exit 1 ;;
@@ -685,14 +705,7 @@ else
 fi
 fm_backend_validate_spawn "$BACKEND" || exit 1
 fm_backend_source "$BACKEND" || exit 1
-if [ "$BACKEND" = orca ] && [ "$KIND" = secondmate ]; then
-  echo "error: backend=orca does not support --secondmate spawns yet" >&2
-  exit 1
-fi
-if [ "$BACKEND" = cmux ] && [ "$KIND" = secondmate ]; then
-  echo "error: backend=cmux does not support --secondmate spawns yet" >&2
-  exit 1
-fi
+spawn_refuse_unsupported_secondmate_backend || exit 1
 if [ "$BACKEND" = orca ] && [ "$RECOVERY_ACCOUNT" = 0 ] && [ "$SPAWN_PREFLIGHT_BATCH" = 0 ] \
   && { [ -e "$STATE/$SPAWN_PREFLIGHT_ID.meta" ] || [ -L "$STATE/$SPAWN_PREFLIGHT_ID.meta" ]; }; then
   spawn_preflight_load_meta 0 || exit 1
@@ -1798,10 +1811,6 @@ ARG3=
 FIRSTMATE_HOME=
 SECONDMATE_PROJECTS=
 
-if [ "$RECOVERY_ACCOUNT" = 1 ] && [ "$(spawn_preflight_meta_value kind)" = secondmate ]; then
-  KIND=secondmate
-fi
-
 if [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
     ''|claude|codex|opencode|pi|grok)
@@ -1891,6 +1900,7 @@ if [ "$RECOVERY_ACCOUNT" = 1 ]; then
     exit 1
   fi
   KIND=$RECORDED_KIND
+  spawn_refuse_unsupported_secondmate_backend || exit 1
   RECORDED_HARNESS=$(fm_meta_get "$RESUME_META" harness)
   RECORDED_PROJECT=$(fm_meta_get "$RESUME_META" project)
   RECORDED_WORKTREE=$(fm_meta_get "$RESUME_META" worktree)

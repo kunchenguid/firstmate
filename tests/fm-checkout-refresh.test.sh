@@ -1585,13 +1585,17 @@ SH
 }
 
 test_logical_home_state_migrates_and_ambiguity_fails_closed() {
-  local home state_base logical_key physical_key logical physical agents fakebin physical_plist logical_plist now out status
+  local home state_base logical_key current_physical_key physical_key logical physical agents fakebin physical_plist logical_plist now out status
   local rollback_home rollback_logical_key rollback_physical_key rollback_logical rollback_physical rollback_physical_plist rollback_logical_plist
+  local staging_home staging_logical_key staging_physical_key staging_logical staging_physical staging_physical_plist
   home="$TMP_ROOT/state-migration-home"
   state_base="$TMP_ROOT/state-migration-base"
   mkdir -p "$home/projects" "$home/config" "$home/user/.treehouse"
   logical_key=$(checkout_state_key "$home" 16)
-  physical_key=$(fm_checkout_physical_path_key "$home" directory 16)
+  current_physical_key=$(fm_checkout_physical_path_key "$home" directory 16)
+  physical_key=1111111111111111
+  [ "$physical_key" != "$logical_key" ] || physical_key=2222222222222222
+  [ "$physical_key" != "$current_physical_key" ] || physical_key=3333333333333333
   logical="$state_base/homes/$logical_key"
   physical="$state_base/homes/$physical_key"
   agents="$TMP_ROOT/state-migration-agents"
@@ -1625,7 +1629,8 @@ SH
   rollback_home="$TMP_ROOT/state-migration-rollback-home"
   mkdir -p "$rollback_home/projects" "$rollback_home/config" "$rollback_home/user/.treehouse"
   rollback_logical_key=$(checkout_state_key "$rollback_home" 16)
-  rollback_physical_key=$(fm_checkout_physical_path_key "$rollback_home" directory 16)
+  rollback_physical_key=4444444444444444
+  [ "$rollback_physical_key" != "$rollback_logical_key" ] || rollback_physical_key=5555555555555555
   rollback_logical="$state_base/homes/$rollback_logical_key"
   rollback_physical="$state_base/homes/$rollback_physical_key"
   rollback_physical_plist="$agents/com.firstmate.checkout-refresh.$rollback_physical_key.plist"
@@ -1636,11 +1641,8 @@ SH
     "$ROOT" "$(cd "$rollback_home" && pwd -P)" "$rollback_physical" > "$rollback_physical_plist"
   cat > "$fakebin/launchctl" <<'SH'
 #!/usr/bin/env bash
-case "${1:-}" in
-  print|bootout|kickstart) exit 0 ;;
-  bootstrap) [ "${3:-}" = "$FM_TEST_PHYSICAL_PLIST" ] ;;
-esac
-exit 1
+printf '%s\n' "$*" >> "$FM_TEST_LAUNCHCTL_LOG"
+exit 0
 SH
   chmod +x "$fakebin/launchctl"
   set +e
@@ -1651,6 +1653,7 @@ SH
     FM_CHECKOUT_REFRESH_LAUNCH_AGENTS_DIR="$agents" \
     FM_CHECKOUT_REFRESH_LAUNCHCTL="$fakebin/launchctl" \
     FM_TEST_PHYSICAL_PLIST="$rollback_physical_plist" \
+    FM_TEST_LAUNCHCTL_LOG="$TMP_ROOT/state-migration-rollback-launchctl.log" \
     "$ROOT/bin/fm-checkout-refresh.sh" install 2>&1)
   status=$?
   set -e
@@ -1660,8 +1663,40 @@ SH
   [ -f "$rollback_physical_plist" ] || fail "failed LaunchAgent migration removed the prior definition"
   [ ! -e "$rollback_logical" ] || fail "failed LaunchAgent migration left a logical state namespace"
   [ ! -e "$rollback_logical_plist" ] || fail "failed LaunchAgent migration left a logical definition"
+  assert_grep "bootstrap gui/$(id -u) $rollback_physical_plist" "$TMP_ROOT/state-migration-rollback-launchctl.log" \
+    "failed logical health verification did not restart the prior LaunchAgent"
 
-  mkdir -p "$physical"
+  staging_home="$TMP_ROOT/state-migration-stage-home"
+  mkdir -p "$staging_home/projects" "$staging_home/config" "$staging_home/user/.treehouse"
+  staging_logical_key=$(checkout_state_key "$staging_home" 16)
+  staging_physical_key=6666666666666666
+  [ "$staging_physical_key" != "$staging_logical_key" ] || staging_physical_key=7777777777777777
+  staging_logical="$state_base/homes/$staging_logical_key"
+  staging_physical="$state_base/homes/$staging_physical_key"
+  staging_physical_plist="$agents/com.firstmate.checkout-refresh.$staging_physical_key.plist"
+  mkdir -p "$staging_physical"
+  printf 'preserved-stage\n' > "$staging_physical/external-identities"
+  printf '<plist><string>%s/bin/fm-checkout-refresh.sh</string><key>FM_HOME</key><string>%s</string><key>FM_CHECKOUT_REFRESH_STATE_ROOT</key><string>%s</string></plist>\n' \
+    "$ROOT" "$(cd "$staging_home" && pwd -P)" "$staging_physical" > "$staging_physical_plist"
+  set +e
+  out=$(HOME="$staging_home/user" FM_HOME="$staging_home" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_CHECKOUT_REFRESH_STATE_BASE="$state_base" \
+    FM_TREEHOUSE_ROOT="$staging_home/user/.treehouse" \
+    FM_CHECKOUT_REFRESH_PLATFORM=Darwin \
+    FM_CHECKOUT_REFRESH_LAUNCH_AGENTS_DIR="$agents" \
+    FM_CHECKOUT_REFRESH_LAUNCHCTL="$fakebin/launchctl" \
+    FM_CHECKOUT_REFRESH_TEST=1 \
+    FM_CHECKOUT_TEST_HOME_MIGRATION_FAILURE=stage \
+    FM_TEST_LAUNCHCTL_LOG="$TMP_ROOT/state-migration-stage-launchctl.log" \
+    "$ROOT/bin/fm-checkout-refresh.sh" ensure 2>&1)
+  status=$?
+  set -e
+  [ "$status" -ne 0 ] || fail "partial home-state staging failure reported success"
+  [ -f "$staging_physical/external-identities" ] || fail "partial staging failure damaged prior state"
+  [ -f "$staging_physical_plist" ] || fail "partial staging failure removed prior LaunchAgent"
+  [ ! -e "$staging_logical" ] || fail "partial staging failure published a logical namespace"
+
+  mkdir -p "$state_base/homes/$current_physical_key"
   set +e
   out=$(HOME="$home/user" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
     FM_CHECKOUT_REFRESH_STATE_BASE="$state_base" \
@@ -1673,7 +1708,7 @@ SH
   [ "$status" -ne 0 ] || fail "ambiguous state namespaces were accepted"
   assert_contains "$out" "ambiguous checkout-refresh home state namespaces" \
     "ambiguous state namespaces did not fail closed"
-  pass "logical home state migrates once and ambiguous namespaces fail closed"
+  pass "logical home state migration is discoverable, staged, and rollback-safe"
 }
 
 test_same_path_replacement_and_manifest_failures_are_unhealthy() {
@@ -1723,6 +1758,55 @@ test_same_path_replacement_and_manifest_failures_are_unhealthy() {
   pass "same-path replacement and manifest failures invalidate coverage"
 }
 
+test_legacy_identity_requires_physical_binding_and_migrates_transactionally() {
+  local home state checkout remote origin stable_key physical_key legacy_prefix stable_prefix out
+  home="$TMP_ROOT/legacy-identity-home"
+  state="$TMP_ROOT/legacy-identity-state"
+  checkout="$TMP_ROOT/legacy-identity-checkout"
+  mkdir -p "$home/projects" "$home/config" "$home/user/.treehouse" "$state"
+  remote=$(build_origin legacy-identity)
+  clone_from "$remote" "$checkout"
+  origin=$(git -C "$checkout" remote get-url origin)
+  printf 'path %s\n' "$checkout" > "$home/config/checkout-refresh"
+  stable_key=$(checkout_state_key "$checkout")
+  physical_key=$(fm_checkout_physical_path_key "$checkout" directory 24)
+  legacy_prefix="$state/aaaaaaaaaaaaaaaaaaaaaaaa"
+  [ "${legacy_prefix##*/}" != "$physical_key" ] || legacy_prefix="$state/bbbbbbbbbbbbbbbbbbbbbbbb"
+  printf '%s\norigin %s\n' "$checkout" "$origin" > "$legacy_prefix.identity"
+  printf 'legacy-tip\n' > "$legacy_prefix.tip"
+  set +e
+  out=$(run_isolated_refresh "$home" "$state" run-once --force 2>&1)
+  set -e
+  assert_contains "$out" "filename does not match the current physical checkout" \
+    "unbindable legacy checkout identity did not surface its missing physical proof"
+  assert_present "$legacy_prefix.identity" "unbindable legacy identity history was rewritten"
+  assert_absent "$state/$stable_key.identity" "unbindable legacy identity was rebaselined"
+  assert_refresh_state "$state" unhealthy
+
+  mv "$legacy_prefix.identity" "$state/$physical_key.identity"
+  mv "$legacy_prefix.tip" "$state/$physical_key.tip"
+  legacy_prefix="$state/$physical_key"
+  stable_prefix="$state/$stable_key"
+  set +e
+  out=$(FM_CHECKOUT_TEST_IDENTITY_MIGRATION_FAILURE=publish \
+    run_isolated_refresh "$home" "$state" run-once --force 2>&1)
+  set -e
+  assert_present "$legacy_prefix.identity" "partial identity publish failure lost legacy identity"
+  assert_present "$legacy_prefix.tip" "partial identity publish failure lost legacy tip"
+  assert_absent "$stable_prefix.identity" "partial identity publish failure exposed destination identity"
+  assert_absent "$stable_prefix.tip" "partial identity publish failure exposed destination tip"
+  assert_refresh_state "$state" unhealthy
+
+  run_isolated_refresh "$home" "$state" run-once --force >/dev/null \
+    || fail "physically bound legacy identity did not migrate"
+  [ "$(awk 'END { print NR + 0 }' "$stable_prefix.identity")" -eq 3 ] \
+    || fail "migrated legacy identity did not retain its physical binding"
+  assert_absent "$legacy_prefix.identity" "successful identity migration retained the legacy identity name"
+  assert_absent "$legacy_prefix.tip" "successful identity migration retained the legacy tip name"
+  assert_refresh_state "$state" healthy
+  pass "legacy checkout identities require binding and publish transactionally"
+}
+
 test_lock_key_failure_cannot_construct_a_shared_lock_path() {
   local out status
   set +e
@@ -1767,6 +1851,7 @@ fi
 if [ "${FM_TEST_FOCUSED:-}" = review-round-durable-identity ]; then
   test_logical_home_state_migrates_and_ambiguity_fails_closed
   test_same_path_replacement_and_manifest_failures_are_unhealthy
+  test_legacy_identity_requires_physical_binding_and_migrates_transactionally
   test_lock_key_failure_cannot_construct_a_shared_lock_path
   test_logical_lock_keys_survive_creation_and_atomic_replacement
   exit 0
@@ -1872,5 +1957,6 @@ test_acquisition_honors_shared_checkout_lock
 test_launch_agent_definition_is_home_scoped_with_scheduler_seam
 test_logical_home_state_migrates_and_ambiguity_fails_closed
 test_same_path_replacement_and_manifest_failures_are_unhealthy
+test_legacy_identity_requires_physical_binding_and_migrates_transactionally
 test_lock_key_failure_cannot_construct_a_shared_lock_path
 test_logical_lock_keys_survive_creation_and_atomic_replacement
