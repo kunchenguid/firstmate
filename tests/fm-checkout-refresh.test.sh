@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Behavior tests for the checkout-refresh discovery, upstream signal, timed
-# backstop, untracked skill-draft hygiene, safety posture, worktree freshness
-# proof, and LaunchAgent definition.
+# backstop, independent coverage and scheduler health, untracked skill-draft
+# hygiene, safety posture, worktree freshness proof, and LaunchAgent definition.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -64,15 +64,19 @@ run_refresh() {
 }
 
 assert_refresh_state() {
-  local state_root=$1 expected=$2 heartbeat coverage_epoch coverage
-  heartbeat=$(sed -n '1p' "$state_root/heartbeat" 2>/dev/null || true)
+  local state_root=$1 expected=$2 coverage_epoch coverage
   coverage_epoch=$(sed -n '1p' "$state_root/coverage-health" 2>/dev/null || true)
   coverage=$(sed -n '2p' "$state_root/coverage-health" 2>/dev/null || true)
-  case "$heartbeat" in ''|*[!0-9]*) fail "refresh liveness heartbeat is missing" ;; esac
-  [ "$coverage_epoch" = "$heartbeat" ] \
-    || fail "coverage health does not describe the latest liveness heartbeat"
+  case "$coverage_epoch" in ''|*[!0-9]*) fail "coverage health timestamp is missing" ;; esac
   [ "$coverage" = "$expected" ] \
     || fail "expected $expected coverage health, found ${coverage:-missing}"
+}
+
+assert_heartbeat_value() {
+  local state_root=$1 expected=$2 actual
+  actual=$(sed -n '1p' "$state_root/heartbeat" 2>/dev/null || true)
+  [ "$actual" = "$expected" ] \
+    || fail "expected heartbeat $expected, found ${actual:-missing}"
 }
 
 assert_head_matches_origin() {
@@ -525,6 +529,105 @@ SH
   pass "skill inventory failures preserve alerts and invalidate coverage health"
 }
 
+test_lock_root_failure_invalidates_coverage_before_preparation() {
+  local state_root="$TMP_ROOT/lock-root-health-state" bad_lock="$TMP_ROOT/lock-root-health-file"
+  local out status now
+  mkdir -p "$state_root"
+  printf '%s\n' occupied > "$bad_lock"
+  printf '%s\n' manual-heartbeat > "$state_root/heartbeat"
+  now=$(date +%s)
+  printf '%s\n%s\n' "$now" healthy > "$state_root/coverage-health"
+
+  set +e
+  out=$(HOME="$TEST_HOME" FM_HOME="$FM_TEST_HOME" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_CHECKOUT_REFRESH_STATE_ROOT="$state_root" \
+    FM_CHECKOUT_REFRESH_LOCK_ROOT="$bad_lock" \
+    FM_TREEHOUSE_ROOT="$TEST_HOME/.treehouse" \
+    "$ROOT/bin/fm-checkout-refresh.sh" run-once --force 2>&1)
+  status=$?
+  set -e
+
+  [ "$status" -ne 0 ] || fail "unsafe lock-root preparation preserved healthy coverage"
+  assert_contains "$out" "unsafe checkout-refresh lock directory: $bad_lock" \
+    "unsafe lock-root preparation was not surfaced"
+  assert_refresh_state "$state_root" unhealthy
+  assert_heartbeat_value "$state_root" manual-heartbeat
+  pass "lock-root preparation failures invalidate coverage without refreshing liveness"
+}
+
+test_reinspection_failure_invalidates_coverage_health() {
+  local remote home state_root lock_root treehouse project fakebin real_git out key alert
+  remote=$(build_origin reinspection)
+  home="$TMP_ROOT/reinspection-home"
+  state_root="$TMP_ROOT/reinspection-state"
+  lock_root="$TMP_ROOT/reinspection-locks"
+  treehouse="$TMP_ROOT/reinspection-treehouse"
+  project="$home/projects/reinspection"
+  fakebin="$TMP_ROOT/reinspection-fakebin"
+  real_git=$(command -v git)
+  mkdir -p "$home/projects" "$home/config" "$state_root" "$treehouse" "$fakebin"
+  clone_from "$remote" "$project"
+  project=$(cd "$project" && pwd -P)
+  printf '%s\n' manual-reinspection-heartbeat > "$state_root/heartbeat"
+  cat > "$fakebin/git" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = -C ] \
+  && [ "${2:-}" = "${FM_TEST_REINSPECTION_TARGET:?}" ] \
+  && [ "${3:-}" = rev-parse ] \
+  && [ "${4:-}" = --is-inside-work-tree ]; then
+  exit 74
+fi
+exec "${FM_TEST_REAL_GIT:?}" "$@"
+SH
+  chmod +x "$fakebin/git"
+
+  out=$(HOME="$TEST_HOME" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_CHECKOUT_REFRESH_STATE_ROOT="$state_root" \
+    FM_CHECKOUT_REFRESH_LOCK_ROOT="$lock_root" \
+    FM_TREEHOUSE_ROOT="$treehouse" \
+    FM_TEST_REAL_GIT="$real_git" FM_TEST_REINSPECTION_TARGET="$project" \
+    PATH="$fakebin:$PATH" \
+    "$ROOT/bin/fm-checkout-refresh.sh" run-once --force 2>&1)
+
+  assert_contains "$out" "$project: skipped: covered checkout became uninspectable during refresh" \
+    "covered-checkout reinspection failure was not surfaced"
+  assert_refresh_state "$state_root" unhealthy
+  assert_heartbeat_value "$state_root" manual-reinspection-heartbeat
+  key=$(printf '%s' "$project" | shasum -a 256 | awk '{print substr($1,1,24)}')
+  alert="$state_root/$key.alert"
+  assert_grep "covered checkout became uninspectable during refresh" "$alert" \
+    "covered-checkout reinspection failure did not persist an alert"
+  pass "covered-checkout reinspection failures invalidate coverage health"
+}
+
+test_scheduler_liveness_is_scheduler_owned() {
+  local home="$TMP_ROOT/scheduler-owned-home" state_root="$TMP_ROOT/scheduler-owned-state"
+  local lock_root="$TMP_ROOT/scheduler-owned-locks" treehouse="$TMP_ROOT/scheduler-owned-treehouse"
+  local project heartbeat
+  project="$home/projects/local"
+  mkdir -p "$home/projects" "$home/config" "$state_root" "$treehouse"
+  fm_git_init_commit "$project"
+  printf '%s\n' manual-sentinel > "$state_root/heartbeat"
+
+  HOME="$TEST_HOME" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_CHECKOUT_REFRESH_STATE_ROOT="$state_root" \
+    FM_CHECKOUT_REFRESH_LOCK_ROOT="$lock_root" \
+    FM_TREEHOUSE_ROOT="$treehouse" \
+    "$ROOT/bin/fm-checkout-refresh.sh" run-once --force >/dev/null
+  assert_refresh_state "$state_root" healthy
+  assert_heartbeat_value "$state_root" manual-sentinel
+
+  HOME="$TEST_HOME" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_CHECKOUT_REFRESH_STATE_ROOT="$state_root" \
+    FM_CHECKOUT_REFRESH_LOCK_ROOT="$lock_root" \
+    FM_TREEHOUSE_ROOT="$treehouse" \
+    "$ROOT/bin/fm-checkout-refresh.sh" run-once --scheduled --force >/dev/null
+  heartbeat=$(sed -n '1p' "$state_root/heartbeat" 2>/dev/null || true)
+  case "$heartbeat" in ''|*[!0-9]*) fail "scheduled run did not advance scheduler liveness" ;; esac
+  assert_refresh_state "$state_root" healthy
+  pass "only scheduler-owned runs advance the liveness heartbeat"
+}
+
 test_dirty_nondefault_and_diverged_checkouts_are_untouched() {
   local remote dirty feature diverged dirty_head feature_head diverged_head out
   remote=$(build_origin safety)
@@ -799,6 +902,8 @@ SH
     "LaunchAgent does not persist the timed backstop"
   assert_grep 'fm-checkout-refresh.sh</string>' "$plist" \
     "LaunchAgent does not invoke the checkout refresher"
+  assert_grep '<string>--scheduled</string>' "$plist" \
+    "LaunchAgent does not identify its scheduler-owned invocation"
   assert_grep "<key>FM_HOME</key><string>$(cd "$FM_TEST_HOME" && pwd -P)</string>" "$plist" \
     "LaunchAgent does not bind the active Firstmate home"
   assert_grep "<key>FM_TREEHOUSE_ROOT</key><string>$custom_treehouse</string>" "$plist" \
@@ -811,7 +916,7 @@ SH
   assert_grep 'kickstart' "$log" "LaunchAgent was not started"
   now=$(date +%s)
   printf '%s\n' "$now" > "$install_state_root/heartbeat"
-  printf '%s\n%s\n' "$now" healthy > "$install_state_root/coverage-health"
+  printf '%s\n%s\n' "$((now - 1))" healthy > "$install_state_root/coverage-health"
   HOME="$TEST_HOME" FM_HOME="$FM_TEST_HOME" FM_ROOT_OVERRIDE="$ROOT" \
     FM_TREEHOUSE_ROOT="$custom_treehouse" \
     FM_CHECKOUT_REFRESH_STATE_BASE="$install_state_base" \
@@ -920,6 +1025,14 @@ if [ "${FM_TEST_FOCUSED:-}" = review-round-14 ]; then
   exit 0
 fi
 
+if [ "${FM_TEST_FOCUSED:-}" = review-round-15 ]; then
+  test_lock_root_failure_invalidates_coverage_before_preparation
+  test_reinspection_failure_invalidates_coverage_health
+  test_scheduler_liveness_is_scheduler_owned
+  test_launch_agent_definition_is_home_scoped_with_scheduler_seam
+  exit 0
+fi
+
 if [ "${FM_TEST_FOCUSED:-}" = review-round-6 ]; then
   test_nested_active_project_invalidates_coverage_health
   test_bounded_refresh_terminates_descendants
@@ -947,6 +1060,9 @@ test_pool_preflight_surfaces_dirty_worktrees_without_blocking_clean_selection
 test_bootstrap_relays_hygiene_alerts
 test_treehouse_discovery_failure_invalidates_coverage_health
 test_skill_inventory_failure_preserves_alert_and_invalidates_coverage
+test_lock_root_failure_invalidates_coverage_before_preparation
+test_reinspection_failure_invalidates_coverage_health
+test_scheduler_liveness_is_scheduler_owned
 test_dirty_nondefault_and_diverged_checkouts_are_untouched
 test_refresh_locks_recover_stale_owners_and_surface_contention
 test_session_mode_preserves_gone_branch_pruning

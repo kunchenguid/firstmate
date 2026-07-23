@@ -290,7 +290,7 @@ Every probe also inventories non-ignored untracked files in covered seed checkou
 Gitignored files are intentional local material and remain outside this collision guard.
 A new or growing inventory produces a durable `HYGIENE:` alert immediately, while forced session-start and spawn-preflight checks repeat any unresolved alert for an operator.
 An inventory read failure preserves the prior hygiene alert and marks the latest coverage result unhealthy until a complete scan succeeds.
-Unreadable active-home project directories or unreadable or malformed Treehouse state surface an incomplete-coverage diagnostic and mark the latest coverage result unhealthy.
+Unreadable active-home project directories, unreadable or malformed Treehouse state, or a covered checkout that becomes uninspectable during either refresh pass surface an actionable diagnostic and mark the latest coverage result unhealthy.
 The ordinary safe-refresh warning separately quantifies every non-ignored untracked file and the subset under those skill directories, so other untracked accumulation is bounded by the same 15-minute backstop.
 These checks inspect paths only and never delete, move, stash, reset, or edit a draft.
 The signal interval and backstop are configurable through `FM_CHECKOUT_REFRESH_INTERVAL` and `FM_CHECKOUT_REFRESH_BACKSTOP`.
@@ -328,7 +328,8 @@ bin/fm-bootstrap.sh install checkout-refresh
 
 The locked session-start sweep still runs the same broad discovery and a forced refresh, so the service has an operator-visible backstop.
 The LaunchAgent is intentionally independent of the Firstmate watcher and continues polling when no fleet task or Firstmate session is active.
-Its heartbeat proves scheduler liveness only, while `ensure` separately requires the latest run's matching coverage result to be healthy.
+Only the LaunchAgent's scheduled invocation advances its heartbeat, while foreground session and manual runs update coverage health without refreshing scheduler liveness.
+The heartbeat proves scheduler liveness only, while `ensure` independently requires the latest coverage result to be healthy.
 Its definition persists the configured Treehouse root, refresh interval, and backstop, and health validation rejects any installed value that no longer matches the current configuration.
 macOS launchd is the primary fleet scheduler in this release.
 Scheduler installation and health checks dispatch through an adapter seam, while a future Linux cron or systemd adapter remains explicit follow-up work rather than silently claiming coverage today.

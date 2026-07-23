@@ -23,7 +23,10 @@
 # FM_CHECKOUT_REFRESH_BACKSTOP seconds without a refresh triggers one anyway, so
 # missed signals and lost state remain bounded.
 # The home-scoped per-user LaunchAgent installed by `install` runs this probe
-# every FM_CHECKOUT_REFRESH_INTERVAL seconds while that Firstmate home is idle.
+# with `run-once --scheduled` every FM_CHECKOUT_REFRESH_INTERVAL seconds while
+# that Firstmate home is idle.
+# Every run publishes coverage health, while only that scheduler-owned mode
+# advances the independent liveness heartbeat.
 # Its default state is under checkout-refresh/homes/<FM_HOME hash>, while
 # checkout-refresh/locks remains shared so every fm-fleet-sync.sh caller
 # serializes mutation of the same clone.
@@ -57,7 +60,7 @@
 #
 # Usage:
 #   fm-checkout-refresh.sh discover
-#   fm-checkout-refresh.sh run-once [--force] [--verbose] [--session]
+#   fm-checkout-refresh.sh run-once [--force] [--verbose] [--session] [--scheduled]
 #   fm-checkout-refresh.sh preflight <checkout>
 #   fm-checkout-refresh.sh pool-preflight <expected-source>
 #   fm-checkout-refresh.sh acquire-worktree <expected-source> <lease-holder>
@@ -130,7 +133,7 @@ case "$SYNC_TIMEOUT" in ''|*[!0-9]*|0) echo "error: FM_CHECKOUT_REFRESH_SYNC_TIM
 case "$ACQUIRE_TIMEOUT" in ''|*[!0-9]*|0) echo "error: FM_TREEHOUSE_ACQUIRE_TIMEOUT must be a positive integer" >&2; exit 2 ;; esac
 
 usage() {
-  echo "usage: fm-checkout-refresh.sh discover|run-once [--force] [--verbose] [--session]|preflight <checkout>|pool-preflight <expected-source>|acquire-worktree <expected-source> <lease-holder>|verify-worktree <worktree> <expected-source>|verify-returnable <worktree> <expected-source> <expected-tip>|ensure|install" >&2
+  echo "usage: fm-checkout-refresh.sh discover|run-once [--force] [--verbose] [--session] [--scheduled]|preflight <checkout>|pool-preflight <expected-source>|acquire-worktree <expected-source> <lease-holder>|verify-worktree <worktree> <expected-source>|verify-returnable <worktree> <expected-source> <expected-tip>|ensure|install" >&2
 }
 
 first_line() {
@@ -537,10 +540,12 @@ atomic_write() {
 }
 
 record_run_result() {
-  local coverage=$1 now write_status=0
+  local coverage=$1 scheduled=${2:-0} now write_status=0
   now=$(date +%s)
-  atomic_write "$STATE_ROOT/heartbeat" "$now" "$SCRIPT_DIR/fm-checkout-refresh.sh" \
-    || write_status=1
+  if [ "$scheduled" -eq 1 ]; then
+    atomic_write "$STATE_ROOT/heartbeat" "$now" "$SCRIPT_DIR/fm-checkout-refresh.sh" \
+      || write_status=1
+  fi
   atomic_write "$STATE_ROOT/coverage-health" "$now" "$coverage" \
     || write_status=1
   return "$write_status"
@@ -656,8 +661,17 @@ record_alert() {
   atomic_write "$alert" "$checkout" "$(date +%s)" "$(first_line "$output")"
 }
 
+record_reinspection_failure() {
+  local checkout=$1 key alert output
+  key=$(checkout_key "$checkout")
+  alert="$STATE_ROOT/$key.alert"
+  output="$checkout: skipped: covered checkout became uninspectable during refresh; restore access and rerun checkout refresh"
+  record_alert "$alert" "$checkout" "$output"
+  printf '%s\n' "$output"
+}
+
 run_once() {
-  local force=0 verbose=0 session=0 prune=0 arg lock discovery hygiene checkout key tip_file last_file alert_file
+  local force=0 verbose=0 session=0 scheduled=0 prune=0 arg lock discovery hygiene checkout key tip_file last_file alert_file
   local prior_tip now last due probe_ok output_file output line hygiene_failed=0 coverage_failed=0 status=0
   local coverage=healthy
   for arg in "$@"; do
@@ -665,43 +679,53 @@ run_once() {
       --force) force=1 ;;
       --verbose) verbose=1 ;;
       --session) session=1 ;;
+      --scheduled) scheduled=1 ;;
       *) usage; return 2 ;;
     esac
   done
   [ "$session" -eq 0 ] || prune=1
 
-  ensure_lock_roots || return 1
+  ensure_state_root || return 1
+  atomic_write "$STATE_ROOT/coverage-health" "$(date +%s)" running || return 1
+  if ! fm_checkout_lock_prepare "$LOCK_ROOT"; then
+    echo "error: unsafe checkout-refresh lock directory: $LOCK_ROOT" >&2
+    record_run_result unhealthy "$scheduled" || true
+    return 1
+  fi
   lock="$STATE_ROOT/.run-lock"
   if ! fm_lock_try_acquire "$lock"; then
     printf 'checkout-refresh: skipped: refresh already running (pid %s)\n' "${FM_LOCK_HELD_PID:-unknown}"
     return 0
   fi
   trap 'fm_lock_release "$STATE_ROOT/.run-lock"' EXIT
-  atomic_write "$STATE_ROOT/coverage-health" "$(date +%s)" running || return 1
   discovery=$(mktemp "$STATE_ROOT/.discover.XXXXXX") || {
-    record_run_result unhealthy || true
+    record_run_result unhealthy "$scheduled" || true
     return 1
   }
   hygiene=$(mktemp "$STATE_ROOT/.hygiene-discover.XXXXXX") || {
     rm -f "$discovery"
-    record_run_result unhealthy || true
+    record_run_result unhealthy "$scheduled" || true
     return 1
   }
   if ! discover > "$discovery"; then
     rm -f "$discovery" "$hygiene"
-    record_run_result unhealthy || true
+    record_run_result unhealthy "$scheduled" || true
     return 1
   fi
   prepare_hygiene_discovery "$discovery" "$hygiene" || {
     rm -f "$discovery" "$hygiene"
-    record_run_result unhealthy || true
+    record_run_result unhealthy "$scheduled" || true
     return 1
   }
   now=$(date +%s)
 
   while IFS= read -r checkout; do
     [ -n "$checkout" ] || continue
-    git -C "$checkout" rev-parse --is-inside-work-tree >/dev/null 2>&1 || continue
+    if ! git -C "$checkout" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+      record_reinspection_failure "$checkout"
+      coverage_failed=1
+      continue
+    fi
     key=$(checkout_key "$checkout")
     if [ "$force" -eq 1 ] || [ "$verbose" -eq 1 ]; then
       surface_skill_drafts "$checkout" "$key" 1 || hygiene_failed=1
@@ -713,7 +737,11 @@ run_once() {
 
   while IFS= read -r checkout; do
     [ -n "$checkout" ] || continue
-    git -C "$checkout" rev-parse --is-inside-work-tree >/dev/null 2>&1 || continue
+    if ! git -C "$checkout" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+      record_reinspection_failure "$checkout"
+      coverage_failed=1
+      continue
+    fi
     git -C "$checkout" remote get-url origin >/dev/null 2>&1 || continue
     key=$(checkout_key "$checkout")
     tip_file="$STATE_ROOT/$key.tip"
@@ -782,7 +810,7 @@ EOF
     status=1
   fi
   [ "$coverage_failed" -eq 0 ] || coverage=unhealthy
-  record_run_result "$coverage" || status=1
+  record_run_result "$coverage" "$scheduled" || status=1
   trap - EXIT
   fm_lock_release "$lock"
   return "$status"
@@ -1000,6 +1028,7 @@ install_launch_agent() {
 <string>$(xml_escape "$bash_runtime")</string>
 <string>$(xml_escape "$SCRIPT_DIR/fm-checkout-refresh.sh")</string>
 <string>run-once</string>
+<string>--scheduled</string>
 </array>
 <key>EnvironmentVariables</key><dict>
 <key>HOME</key><string>$(xml_escape "$HOME")</string>
@@ -1044,6 +1073,8 @@ ensure_launch_agent() {
     || { echo "checkout-refresh LaunchAgent is not installed" >&2; return 1; }
   grep -Fq "<string>$(xml_escape "$SCRIPT_DIR/fm-checkout-refresh.sh")</string>" "$PLIST" \
     || { echo "checkout-refresh LaunchAgent points at a different Firstmate checkout" >&2; return 1; }
+  grep -Fq '<string>--scheduled</string>' "$PLIST" \
+    || { echo "checkout-refresh LaunchAgent does not own scheduler liveness" >&2; return 1; }
   grep -Fq "<key>FM_HOME</key><string>$(xml_escape "$FM_HOME_CANONICAL")</string>" "$PLIST" \
     || { echo "checkout-refresh LaunchAgent belongs to a different Firstmate home" >&2; return 1; }
   grep -Fq "<key>FM_TREEHOUSE_ROOT</key><string>$(xml_escape "$TREEHOUSE_ROOT")</string>" "$PLIST" \
@@ -1068,7 +1099,7 @@ ensure_launch_agent() {
     || { echo "checkout-refresh heartbeat is stale or missing" >&2; return 1; }
   coverage_epoch=$(read_epoch "$STATE_ROOT/coverage-health")
   coverage=$(sed -n '2p' "$STATE_ROOT/coverage-health" 2>/dev/null || true)
-  [ "$coverage_epoch" -eq "$heartbeat" ] && [ "$coverage" = healthy ] \
+  [ "$coverage_epoch" -gt 0 ] && [ "$coverage" = healthy ] \
     || {
       echo "checkout-refresh latest coverage run is missing or unhealthy; inspect $STATE_ROOT for checkout alerts and scheduler diagnostics" >&2
       return 1
