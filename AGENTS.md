@@ -108,6 +108,7 @@ state/               volatile runtime signals; gitignored
   .watch-triage.log  watcher's absorbed-wake debug log (size-capped); never relied on, safe to delete
   .last-watcher-beat watcher liveness beacon, touched every poll (including while absorbing benign wakes); guard scripts read it
   .subsuper-* .supervise-daemon.*   sub-supervisor internals; never touch
+visuals/             firstmate's own fleet and operational visual aids (status boards, review dashboards); LOCAL, gitignored (section 9)
 .no-mistakes/        local validation state and evidence; gitignored
 ```
 
