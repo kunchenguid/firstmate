@@ -33,7 +33,7 @@ set -u
 
 # shellcheck source=tests/wake-helpers.sh
 . "$(dirname "${BASH_SOURCE[0]}")/wake-helpers.sh"
-# shellcheck source=bin/fm-classify-lib.sh
+# shellcheck source=/dev/null
 . "$ROOT/bin/fm-classify-lib.sh"
 
 WATCH="$ROOT/bin/fm-watch.sh"
