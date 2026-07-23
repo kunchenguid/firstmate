@@ -92,3 +92,5 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-x-dismiss.sh`        | Dismiss a skipped X-mode mention at the relay without replying                       |
 | `fm-x-link.sh`           | Link a spawned task to its originating X-mode mention in task meta                   |
 | `fm-x-followup.sh`       | Detect, post, and cap completion follow-ups for an X-mode-linked task                |
+| `fm-relaunch.sh`         | On-demand session resume via launchd, deliberately no auto-trigger (see `docs/relaunch-tool.md`) |
+| `fm-orchestrator.sh`     | Recurring gated resume watchdog that calls `fm-relaunch.sh` (see `docs/orchestrator-tool.md`) |
