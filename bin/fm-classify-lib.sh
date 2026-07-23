@@ -323,19 +323,27 @@ signal_reason_is_actionable() {  # <file> ...
 #             (e.g. waiting on CI);
 #   paused  - the crew's authoritative current state is a declared external-wait
 #             pause (paused:), which is EXPECTED to idle;
-#   none    - neither, so the wake must surface (a stopped/finished/parked/failed/
-#             torn-down/unknown crew, or an unreadable verdict).
+#   none    - the read SUCCEEDED and reported neither, so the wake must surface (a
+#             stopped/finished/parked/failed/torn-down/unknown crew);
+#   unreadable - no verdict at all: the reader failed or printed nothing usable (a
+#             timeout, contention, an unresolvable or empty task id). This is NOT
+#             evidence the crew stopped, and callers that act on a lost work signal
+#             must treat it as "no new information" rather than folding it into
+#             none. It is never absorbable, so it never counts as provably working.
 # One fm-crew-state.sh read serves BOTH absorb reasons at once. Reading the state
 # authoritatively (not the status log) is what keeps run-step precedence: a crew
 # that appended paused: but then STARTED a run reports working, never paused.
 # NOT a pure read: fm-crew-state.sh may make a bounded no-mistakes call, so callers
-# run it only on no-verb signal and first-sighting stale paths, never every wake.
+# run it only on no-verb signal and first-sighting stale paths, plus ONE periodic
+# caller - fm-watch.sh's wedge_timer_check, bounded to at most one read per
+# FM_STALE_ESCALATE_SECS per stale window, which is what paces its repeat
+# escalations on fresh evidence. Never every wake, and never every poll.
 # FM_CREW_STATE_BIN lets tests stub the verdict.
 crew_absorb_class() {  # <id>
   local id=$1 line state src
-  [ -n "$id" ] || { printf 'none'; return; }
+  [ -n "$id" ] || { printf 'unreadable'; return; }
   line=$("$FM_CREW_STATE_BIN" "$id" 2>/dev/null) || true
-  case "$line" in state:*) ;; *) printf 'none'; return ;; esac
+  case "$line" in state:*) ;; *) printf 'unreadable'; return ;; esac
   state=${line#state: }; state=${state%% *}
   if [ "$state" = paused ]; then printf 'paused'; return; fi
   if [ "$state" = working ]; then
@@ -351,7 +359,8 @@ crew_absorb_class() {  # <id>
 # ONLY when this returns 0, and SURFACED otherwise (the crew may be done, waiting
 # on a decision, or wedged). For stale panes it is checked before trusting the
 # status log so a pre-validation captain-relevant line does not override an active
-# run. See crew_absorb_class for the exact working/paused/none decision.
+# run. An unreadable verdict is not positive evidence either, so it surfaces too.
+# See crew_absorb_class for the exact working/paused/none/unreadable decision.
 crew_is_provably_working() {  # <id>
   [ "$(crew_absorb_class "$1")" = working ]
 }

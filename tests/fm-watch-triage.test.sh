@@ -270,9 +270,17 @@ test_crew_absorb_class_classifier() {
   FM_FAKE_CREW_STATE='state: unknown · source: none · worktree gone'
   [ "$(crew_absorb_class a)" = none ] || fail "unknown crew classed absorbable"
   ! crew_is_paused a || fail "unknown crew classed paused"
-  [ "$(crew_absorb_class "")" = none ] || fail "empty id not classed none"
+  [ "$(crew_absorb_class "")" = unreadable ] || fail "an unresolvable id was classed as a confirmed stop"
+  ! crew_is_provably_working "" || fail "empty id treated as provably working"
+  # A read that produced no verdict line is UNKNOWN, not a stopped crew: callers
+  # that act on a lost work signal must be able to tell the two apart, and it is
+  # still never absorbable.
+  FM_FAKE_CREW_STATE='fm-crew-state.sh: timed out resolving the task'
+  [ "$(crew_absorb_class a)" = unreadable ] || fail "a failed state read was collapsed into a stopped-crew verdict"
+  ! crew_is_provably_working a || fail "an unreadable read was treated as provably working"
+  ! crew_is_paused a || fail "an unreadable read was classed paused"
   unset FM_FAKE_CREW_STATE
-  pass "crew_absorb_class: working/paused/none from one read; crew_is_paused and crew_is_provably_working agree"
+  pass "crew_absorb_class: working/paused/none/unreadable from one read; crew_is_paused and crew_is_provably_working agree"
 }
 
 # signal_crew_provably_working: a no-verb "signal:" wake is benign ONLY when EVERY
@@ -650,9 +658,12 @@ test_nonterminal_stale_paused_absorbed_then_resurfaced() {
 # bounded pause handling.
 # A still-live agent at an external-decision gate is the disconfirming case: it
 # must surface once, while the unchanged hash must not append the same wake on
-# every watcher re-arm.
+# every watcher re-arm. That single sighting carries the declared-pause label
+# rather than a bare window, so firstmate is told a pause is waiting on it and
+# not handed something that reads as a stopped or wedged crew; surfacing it as a
+# bare stale is what fm-watch-false-wedge.test.sh's symptom-A cover forbids.
 test_exited_declared_pause_is_bounded_but_live_gate_surfaces() {
-  local dir state fakebin out capture_file statusf window key pane_hash sig pid back round wakes bare
+  local dir state fakebin out capture_file statusf window key pane_hash sig pid back round wakes bare labeled
   dir=$(make_case exited-declared-pause); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/held.status"
   window="test:fm-held"
@@ -747,9 +758,10 @@ test_exited_declared_pause_is_bounded_but_live_gate_surfaces() {
   [ ! -e "$state/.stale-since-$key" ] || { reap "$pid"; fail "live external-decision gate retained the wedge timer"; }
   reap "$pid"
   wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' "$state/.wake-queue")
-  bare=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w && $5 == "stale: " w { n++ } END { print n + 0 }' "$state/.wake-queue")
+  labeled=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w && $5 ~ /declared pause/ { n++ } END { print n + 0 }' "$state/.wake-queue")
   [ "$wakes" -eq 1 ] || fail "live external-decision gate should surface once, got $wakes wakes"
-  [ "$bare" -eq 1 ] || fail "live external-decision gate lost its immediate bare stale surface"
+  [ "$labeled" -eq 1 ] || fail "live external-decision gate lost its immediate declared-pause surface"
+  grep -F "possible wedge" "$state/.wake-queue" >/dev/null && fail "a live external-decision gate was reported as a possible wedge"
   pass "exited declared-pause and captain-held panes use bounded pause cadence while a live decision gate still surfaces once"
 }
 
@@ -1000,9 +1012,16 @@ test_wedge_escalation_marks_demand_deep_inspection_after_threshold() {
   n=1
   while [ "$n" -le 3 ]; do
     # Backdate the wedge timer past the threshold before each round, mirroring
-    # the existing wedge-escalation tests' Phase B (the subsequent-sight timer
-    # path does not re-read the crew state).
-    echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+    # the existing wedge-escalation tests' Phase B. Repeat escalations of an
+    # unchanged pane are now spaced by wedge_escalate_interval (240s, 480s, then
+    # the 900s cap) and gated on a re-read of the crew state, so each round is
+    # placed past the LARGEST of those windows and its evidence probe is aged out
+    # too; fm-watch-false-wedge.test.sh owns the cover for the spacing itself.
+    echo $(( $(date +%s) - 1000 )) > "$state/.stale-since-$key"
+    if [ -e "$state/.wedge-probe-$key" ]; then
+      if [ "$(uname)" = Darwin ]; then touch -mt "$(date -r "$(( $(date +%s) - 1000 ))" '+%Y%m%d%H%M.%S')" "$state/.wedge-probe-$key"
+      else touch -m -d "@$(( $(date +%s) - 1000 ))" "$state/.wedge-probe-$key"; fi
+    fi
     : > "$out"
     PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
       FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
