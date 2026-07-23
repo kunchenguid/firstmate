@@ -103,6 +103,29 @@ SH
   pass "A2 fm-harness.sh detects the verified kimi-code process name through ancestry"
 }
 
+test_fm_lock_recognizes_kimi_holder() {
+  local home fakebin out
+  home="$TMP_ROOT/kimi-lock-home"
+  fakebin=$(fm_fakebin "$TMP_ROOT/kimi-lock-fake")
+  mkdir -p "$home/state"
+  printf '%s\n' "$$" > "$home/state/.lock"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *"comm="*) printf '%s\n' kimi-code; exit 0 ;;
+  *"args="*) printf '%s\n' kimi-code; exit 0 ;;
+esac
+exit 1
+SH
+  chmod +x "$fakebin/ps"
+  out=$(FM_HOME="$home" PATH="$fakebin:$PATH" "$ROOT/bin/fm-lock.sh" status)
+  assert_contains "$out" "lock: held by live harness pid" "fm-lock did not recognize kimi-code as a live holder"
+  mkdir -p "$TMP_ROOT/kimi-lock-home-fresh/state"
+  out=$(FM_HOME="$TMP_ROOT/kimi-lock-home-fresh" PATH="$fakebin:$PATH" "$ROOT/bin/fm-lock.sh")
+  assert_contains "$out" "lock acquired: harness pid" "fm-lock could not locate the kimi-code harness in ancestry"
+  pass "A3 fm-lock.sh recognizes kimi-code harness processes for status and acquisition"
+}
+
 # ===========================================================================
 # C) fm-harness.sh secondmate-model / secondmate-effort token resolution
 # ===========================================================================
@@ -2127,6 +2150,7 @@ SH
 
 test_harness_resolution
 test_kimi_process_ancestry_detection
+test_fm_lock_recognizes_kimi_holder
 test_secondmate_model_effort_tokens
 test_propagate_lib
 test_spawn_split_and_inherit

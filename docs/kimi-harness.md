@@ -216,6 +216,13 @@ Inside matching side borders it is Kimi's agent composer prompt and must classif
 A bordered row such as `│ > /quit │` must classify as `pending`.
 The shared `fm_composer_classify_bordered_row` function owns this distinction, and both tmux and Herdr delegate the Kimi-shaped row to it.
 
+## Primary session wiring
+
+The verified `kimi-code` process name from the ancestry probe above also drives the primary-session paths a Kimi secondmate walks at session start.
+`bin/fm-lock.sh` matches `kimi` and `kimi-code` in its harness ancestry regex, so lock acquisition resolves the long-lived Kimi harness PID instead of failing into read-only mode.
+`bin/fm-supervision-instructions.sh` renders the dedicated `docs/supervision-protocols/kimi.md` block instead of the unknown fallback.
+Because Kimi has neither an installed turn-end hook (see the gap below) nor a verified tracked background-task wake mechanism, that protocol uses bounded foreground watcher checkpoints via `bin/fm-watch-checkpoint.sh`, with the cadence knob `FM_KIMI_WATCH_CHECKPOINT` (default 180 seconds).
+
 ## Turn-end hook gap
 
 Kimi 0.29.0 supports global `[[hooks]]` configuration in `~/.kimi-code/config.toml`, including the `Stop` event.

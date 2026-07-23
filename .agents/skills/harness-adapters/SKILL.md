@@ -285,6 +285,8 @@ Kimi K3 advertises `maxContextSize: 1048576`, `supportEfforts: ["low","high","ma
 The CLI exposes `-m/--model` but no per-call effort option.
 `k3:max` is not a configured model alias and is rejected.
 
+As a primary (secondmate) harness, Kimi is recognized by `bin/fm-lock.sh`'s ancestry regex (`kimi`/`kimi-code`), and `bin/fm-supervision-instructions.sh` renders `docs/supervision-protocols/kimi.md`: bounded foreground watcher checkpoints (`bin/fm-watch-checkpoint.sh`, cadence `FM_KIMI_WATCH_CHECKPOINT`, default 180s), because no tracked background-task wake mechanism is verified for Kimi.
+
 Kimi supports global `[[hooks]]` entries in `~/.kimi-code/config.toml`, including a `Stop` event.
 Firstmate does not install a Kimi turn-end hook yet because safely and idempotently merging an owned entry into an existing shared TOML file is not verified.
 Do not ship a partial config rewriter.

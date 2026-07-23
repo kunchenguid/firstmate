@@ -111,6 +111,15 @@ test_cross_harness_ordinary_continuation_and_repair_matrix() {
   assert_contains "$out" "foreground checkpoint" "codex recovery line lost its checkpoint repair"
   assert_contains "$out" "bin/fm-watch-checkpoint.sh" "codex recovery line lost the checkpoint command"
 
+  out=$("$RENDER" --harness kimi)
+  ordinary=$(printf '%s\n' "$out" | grep -F -- '- Ordinary wake:')
+  assert_contains "$ordinary" "next foreground" "kimi ordinary-wake line lost its foreground checkpoint"
+  assert_contains "$ordinary" "bin/fm-watch-checkpoint.sh" "kimi ordinary-wake line lost the checkpoint command"
+  assert_not_contains "$ordinary" "bin/fm-watch-arm.sh" "kimi ordinary-wake line incorrectly uses a background arm"
+  out=$("$RENDER" --harness kimi --repair-line)
+  assert_contains "$out" "foreground checkpoint" "kimi recovery line lost its checkpoint repair"
+  assert_contains "$out" "bin/fm-watch-checkpoint.sh" "kimi recovery line lost the checkpoint command"
+
   pass "renderer preserves every harness ordinary-continuation and missing-cycle repair path"
 }
 
@@ -126,6 +135,23 @@ test_grok_is_background_notify() {
   out=$("$RENDER" --harness grok --repair-line)
   assert_contains "$out" "Grok tracked background task" "grok repair line is not background-notify shaped"
   pass "grok supervision is Claude-shaped background notify with passive Stop-hook backstop"
+}
+
+test_kimi_is_foreground_checkpoint() {
+  local home out
+  home="$TMP_ROOT/kimi-home"
+  mkdir -p "$home/state" "$home/config"
+  out=$("$RENDER" --harness kimi)
+  assert_contains "$out" "primary harness: kimi" "kimi heading missing"
+  assert_contains "$out" "Mode: Kimi foreground checkpoint." "kimi snippet missing"
+  assert_contains "$out" "bin/fm-watch-checkpoint.sh" "kimi checkpoint helper missing"
+  assert_not_contains "$out" "Mode: Unknown harness fallback." "kimi fell back to the unknown snippet"
+  assert_not_contains "$out" "__FM_X_MODE_ENV" "renderer leaked an x-mode path placeholder"
+  assert_contains "$out" "no verified tracked background-task mechanism" "kimi snippet lost the no-background rationale"
+  assert_not_contains "$out" "background: true" "kimi snippet must not use tracked background-task supervision"
+  out=$(FM_HOME="$home" FM_KIMI_WATCH_CHECKPOINT=9 "$RENDER" --harness kimi --repair-line)
+  assert_contains "$out" "bin/fm-watch-checkpoint.sh --seconds 9" "kimi repair line did not use checkpoint helper and env override"
+  pass "kimi supervision is Codex-shaped foreground checkpoint without a hook backstop"
 }
 
 test_grok_command_sources_effective_config() {
@@ -160,5 +186,6 @@ test_conditional_stanzas
 test_repair_lines
 test_cross_harness_ordinary_continuation_and_repair_matrix
 test_grok_is_background_notify
+test_kimi_is_foreground_checkpoint
 test_grok_command_sources_effective_config
 test_pi_snippet_uses_effective_extension_path
