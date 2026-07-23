@@ -455,6 +455,62 @@ EOF
   pass "main-home and secondmate-home captain holds remain correctly routed"
 }
 
+test_multi_hold_last_entry_resolves() {
+  # Regression: tasks-axi show wraps a blocked_by list of >=2 ids in double quotes
+  # ("a,b"). fm-decision-hold's resolve verification matched ",$id," against that
+  # raw value, so the last id in the list (ending in a quote, not a comma) never
+  # matched and resolve failed with "not durably blocked". show_field must strip the
+  # wrapping quotes so the last id resolves. Older tests only ever blocked a task by
+  # a single hold, so this multi-value case was never exercised.
+  local home origin task keyA keyB holdB blocked_line last_id last_key show
+  home=$(make_home multi-hold-tail)
+  origin=sample-multi-review
+  mkdir -p "$home/data/$origin"
+  tasks_in "$home" add "$origin" "Investigate multi-hold sample" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create multi-hold investigation fixture"
+  write_origin_meta "$home" "$origin"
+  keyA=alpha
+  keyB=beta
+  run_decisions "$home" hold "$origin" "$keyA" \
+    --title "Choose alpha" --reason "captain alpha choice pending" --repo sample >/dev/null \
+    || fail "could not register alpha hold"
+  run_decisions "$home" hold "$origin" "$keyB" \
+    --title "Choose beta" --reason "captain beta choice pending" --repo sample >/dev/null \
+    || fail "could not register beta hold"
+
+  task=sample-multi-impl
+  tasks_in "$home" add "$task" "Apply the multi-hold sample" --kind ship --repo sample >/dev/null \
+    || fail "could not create routed task fixture"
+  tasks_in "$home" block "$task" --by "$origin-decision-$keyA" >/dev/null \
+    || fail "could not route task behind alpha hold"
+  tasks_in "$home" block "$task" --by "$origin-decision-$keyB" >/dev/null \
+    || fail "could not route task behind beta hold"
+
+  # Confirm the fixture actually reproduces the >=2-value (quoted) blocked_by shape,
+  # then target the LAST id in that ordered list - the entry the bug could never match.
+  blocked_line=$(tasks_in "$home" show "$task" --full | sed -n 's/^  blocked_by: //p' | head -1)
+  case "$blocked_line" in
+    '"'*','*'"') : ;;
+    *) fail "fixture did not produce a quoted multi-value blocked_by list: <$blocked_line>" ;;
+  esac
+  last_id=${blocked_line%\"}
+  last_id=${last_id##*,}
+  last_key=${last_id#"$origin"-decision-}
+  [ "$last_key" != "$last_id" ] || fail "could not map last blocked_by id to a decision key: $last_id"
+
+  printf 'Use the %s option for the sample.\n' "$last_key" > "$home/multi-decision.txt"
+  run_decisions "$home" resolve "$origin" "$last_key" --decision-file "$home/multi-decision.txt" \
+    --routed-to "$task" > "$home/multi-resolve.out" 2> "$home/multi-resolve.err" \
+    || fail "resolving the last id of a >=2 blocked_by list failed: $(cat "$home/multi-resolve.err")"
+  holdB="$origin-decision-$last_key"
+  show=$(tasks_in "$home" show "$holdB" --full)
+  assert_contains "$show" "state: done" "last-entry hold did not close after resolve"
+  show=$(tasks_in "$home" show "$task" --full)
+  blocked_line=$(printf '%s\n' "$show" | sed -n 's/^  blocked_by: //p' | head -1)
+  assert_not_contains "$blocked_line" "$holdB" "resolve did not clear the last-entry dependency edge"
+  pass "the last id of a multi-value blocked_by list resolves durably"
+}
+
 test_uninventoried_report_decision_refuses_completion
 test_scout_teardown_always_requires_inventory_verification
 test_structured_holds_survive_teardown_and_route_resolution
@@ -463,3 +519,4 @@ test_visual_review_uses_shared_completion_owner
 test_none_inventory_and_resolved_prose_do_not_create_holds
 test_terminal_single_owner_status_decision_does_not_block_empty_inventory
 test_secondmate_hold_stays_in_authoritative_home
+test_multi_hold_last_entry_resolves
