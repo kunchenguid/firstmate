@@ -2515,6 +2515,79 @@ set_fake_agent() {  # <agent-dir> <window-or-pane> <status>
   printf '%s' "$status" > "$dir/$key.status"
 }
 
+# --- events_capable: verdict + a silent probe (no EPIPE noise) ---------------
+#
+# `herdr api schema --json` is a large multi-line payload (248KB at 0.7.5).
+# Feeding it into a short-circuiting reader (`printf '%s' "$schema" | grep -Fq`)
+# left the writer blocked mid-payload when the reader exited on its match, so
+# the probe printed `printf: write error: Broken pipe` to stderr on nearly
+# every watcher arm and buried real diagnostics. `trap '' PIPE` in the driver
+# below is what makes that regression OBSERVABLE: it is the disposition the
+# watcher inherits, and under the default disposition the writer dies silently
+# and stderr stays clean even with the bug present.
+
+# make_herdr_schema_fake: a `herdr` stub answering just the two calls the
+# capability probe makes - `status --json` (protocol FM_FAKE_PROTOCOL) and
+# `api schema --json` (the fixture at FM_FAKE_SCHEMA).
+make_herdr_schema_fake() {  # <dir> -> echoes fakebin dir
+  local fb="$1/fakebin"
+  mkdir -p "$fb"
+  cat > "$fb/herdr" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-} ${2:-}" in
+  "status --json") printf '{"client":{"version":"0.7.5","protocol":%s},"server":{"running":true}}\n' "${FM_FAKE_PROTOCOL:?}" ;;
+  "api schema") cat "${FM_FAKE_SCHEMA:?}" ;;
+esac
+exit 0
+SH
+  chmod +x "$fb/herdr"
+  printf '%s\n' "$fb"
+}
+
+# write_fake_schemas: a ~250KB multi-line schema fixture carrying both required
+# tokens, plus one variant per missing token and an empty one. Both tokens sit
+# past the 64KB pipe buffer with well over a buffer's worth of payload behind
+# them, which is what a short-circuiting reader needs to strand the writer.
+write_fake_schemas() {  # <dir>
+  local dir=$1
+  {
+    awk 'BEGIN{for(i=0;i<1600;i++) printf "              \"description\": \"filler filler filler filler %d\",\n", i}'
+    printf '                  "const": "pane.agent_status_changed",\n'
+    awk 'BEGIN{for(i=0;i<800;i++) printf "              \"description\": \"filler filler filler filler %d\",\n", i}'
+    printf '                  "const": "events.subscribe",\n'
+    awk 'BEGIN{for(i=0;i<1600;i++) printf "              \"description\": \"filler filler filler filler %d\",\n", i}'
+  } > "$dir/both.json"
+  grep -vF 'events.subscribe' "$dir/both.json" > "$dir/no-subscribe.json"
+  grep -vF 'pane.agent_status_changed' "$dir/both.json" > "$dir/no-status.json"
+  : > "$dir/empty.json"
+}
+
+test_events_capable_verdict_and_silent_probe() {
+  local dir fb min schema err rc verdict size
+  dir="$TMP_ROOT/events-capable"; mkdir -p "$dir"
+  write_fake_schemas "$dir"
+  fb=$(make_herdr_schema_fake "$dir")
+  min=$(bash -c '. "$0/bin/backends/herdr.sh"; printf %s "$FM_BACKEND_HERDR_MIN_EVENTS_PROTOCOL"' "$ROOT")
+  size=$(wc -c < "$dir/both.json")
+  [ "$size" -gt 200000 ] || fail "the schema fixture must dwarf the 64KB pipe buffer, got $size bytes"
+
+  for schema in both:0 no-subscribe:1 no-status:1 empty:1; do
+    err="$dir/${schema%%:*}.err"
+    PATH="$fb:$PATH" FM_FAKE_SCHEMA="$dir/${schema%%:*}.json" FM_FAKE_PROTOCOL="$min" \
+      FM_BACKEND_HERDR_EVENT_READER="fake-reader" \
+      bash -c 'trap "" PIPE; . "$0/bin/backends/herdr.sh"; fm_backend_herdr_events_capable fmtest' \
+      "$ROOT" >/dev/null 2>"$err"
+    rc=$?
+    verdict=${schema##*:}
+    expect_code "$verdict" "$rc" "events_capable verdict wrong for the ${schema%%:*} schema"
+    if [ -s "$err" ]; then
+      fail "events_capable must probe silently for the ${schema%%:*} schema, got stderr: $(cat "$err")"
+    fi
+  done
+  pass "fm_backend_herdr_events_capable: correct verdict on every schema, and probes a large schema without stderr noise"
+}
+
 test_normalize_event_leaves_from_empty() {
   local rec
   rec=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_normalize_event wG:pQ wG blocked claude' "$ROOT")
@@ -2855,6 +2928,7 @@ test_dispatch_routes_herdr_backend
 test_dispatch_busy_state_unknown_for_tmux
 test_dispatch_composer_state_routes_by_backend
 test_scripts_route_explicit_target_through_meta_backend
+test_events_capable_verdict_and_silent_probe
 test_normalize_event_leaves_from_empty
 test_escalation_marker_keys_like_watcher
 test_apply_transition_blocked_requires_commit_to_dedupe

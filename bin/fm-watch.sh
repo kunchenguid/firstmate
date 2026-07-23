@@ -156,8 +156,10 @@ TRIAGE_LOG_MAX_BYTES=${FM_WATCH_TRIAGE_LOG_MAX_BYTES:-262144}
 # capability, so a transient herdr hiccup self-heals on the next cycle chain.
 EVENT_CAP_FAIL_MAX=${FM_EVENT_CAP_FAIL_MAX:-3}
 # Per-process memo for the push-capability probe (fm_backend_events_capable runs
-# a ~220KB `herdr api schema` read, too heavy to repeat every poll). Keyed by
-# "<backend>:<session>"; re-probed only when that key changes.
+# a large `herdr api schema` read, too heavy to repeat every poll - see
+# fm_backend_herdr_events_capable in bin/backends/herdr.sh for the payload and
+# its constraints). Keyed by "<backend>:<session>"; re-probed only when that key
+# changes.
 _event_cap_key=""
 _event_cap_ok=0
 _event_cap_fails=0
