@@ -550,6 +550,250 @@ test_resolve_matches_quoted_blocked_by_edges() {
   pass "resolve matches first/middle/last in quoted blocked_by and rejects a genuinely absent id"
 }
 
+clone_home() {  # <source-home> <name>
+  local source=$1 destination="$TMP_ROOT/$2"
+  cp -R "$source" "$destination"
+  printf '%s\n' "$destination"
+}
+
+rewrite_once() {  # <file> <old> <new>
+  local file=$1 old=$2 new=$3 content
+  content=$(cat "$file")
+  case "$content" in
+    *"$old"*) : ;;
+    *) fail "archive fixture text was not found in $file: $old" ;;
+  esac
+  content=${content/"$old"/"$new"}
+  printf '%s\n' "$content" > "$file"
+}
+
+archive_record() {  # <archive> <id>
+  local archive=$1 id=$2
+  awk -v id="$id" '
+    capturing {
+      if ($0 ~ /^- \[[ x]\] / || $0 ~ /^## /) exit
+      if ($0 == "" || substr($0, 1, 2) == "  ") {
+        print
+        next
+      }
+      exit
+    }
+    index($0, "- [x] " id " - ") == 1 {
+      capturing = 1
+      print
+    }
+  ' "$archive"
+}
+
+assert_archive_verify_fails() {  # <home> <origin> <case>
+  local home=$1 origin=$2 case_name=$3
+  if run_decisions "$home" verify "$origin" \
+    > "$home/$case_name.out" 2> "$home/$case_name.err"; then
+    fail "archive verification accepted $case_name"
+  fi
+}
+
+test_retained_decisions_are_strictly_archive_aware() {
+  local home origin older_hold newer_hold archive record heading digest closed variant
+  local dependent=sample-retained-dependent
+  home=$(make_home retained-decisions)
+  origin=sample-retained-review
+  mkdir -p "$home/data/$origin"
+  tasks_in "$home" add "$origin" "Review retained decisions" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create retained-decision origin"
+  write_origin_meta "$home" "$origin"
+  printf 'done: retained-decision report complete\n' > "$home/state/$origin.status"
+  printf '# Retained decision review\n\nOne historical decision is resolved.\n' > "$home/data/$origin/report.md"
+
+  older_hold=$(run_decisions "$home" hold "$origin" older \
+    --title "Choose the retained route" --reason "captain retained route pending" --repo sample) \
+    || fail "could not create the decision that will be retained"
+  run_decisions "$home" complete "$origin" older >/dev/null \
+    || fail "could not inventory the decision before retention"
+  tasks_in "$home" add "$dependent" "Apply the retained route" --kind ship --repo sample >/dev/null \
+    || fail "could not create retained-decision dependent work"
+  tasks_in "$home" block "$dependent" --by "$older_hold" >/dev/null \
+    || fail "could not block retained-decision dependent work"
+  printf 'Use the retained route.\n' > "$home/retained-decision.txt"
+  run_decisions "$home" resolve "$origin" older --decision-file "$home/retained-decision.txt" \
+    --routed-to "$dependent" >/dev/null \
+    || fail "could not resolve the decision before retention"
+
+  for number in 01 02 03 04 05 06 07 08 09 10 11; do
+    tasks_in "$home" add "sample-retention-$number" "Retention filler $number" \
+      --kind ship --repo sample >/dev/null \
+      || fail "could not create retention filler $number"
+    tasks_in "$home" "done" "sample-retention-$number" >/dev/null \
+      || fail "could not complete retention filler $number"
+  done
+  archive="$home/data/done-archive.md"
+  assert_present "$archive" "done_keep retention did not create an archive"
+  assert_no_grep "- [x] $older_hold -" "$home/data/backlog.md" \
+    "retained decision remained active instead of entering the archive"
+  assert_grep "- [x] $older_hold -" "$archive" \
+    "retained decision was not archived"
+
+  cat > "$home/fakebin/tasks-axi" <<'EOF'
+#!/usr/bin/env bash
+previous=''
+view=''
+for argument in "$@"; do
+  if [ "$previous" = --file ]; then view=$argument; fi
+  previous=$argument
+done
+if [ -n "$view" ]; then
+  if [ "$(uname)" = Darwin ]; then
+    mode=$(stat -f %Lp "$view")
+  else
+    mode=$(stat -c %a "$view")
+  fi
+  [ "$mode" = 600 ] || exit 91
+  grep -F -- '- [x] sample-retained-review-decision-older -' "$view" >/dev/null || exit 92
+  [ "$(grep -c '^- \[' "$view")" = 1 ] || exit 93
+  ! grep -F -- 'sample-retention-01' "$view" >/dev/null || exit 94
+  : > "$FM_HOME/private-parser-view-checked"
+fi
+exec "$REAL_TASKS_AXI" "$@"
+EOF
+  chmod +x "$home/fakebin/tasks-axi"
+
+  newer_hold=$(run_decisions "$home" hold "$origin" newer \
+    --title "Choose the current route" --reason "captain current route pending" --repo sample) \
+    || fail "could not create the current decision after retention"
+  run_decisions "$home" complete "$origin" older newer >/dev/null \
+    || fail "completion could not verify a retained historical decision"
+  run_decisions "$home" complete "$origin" older newer >/dev/null \
+    || fail "repeated completion was not idempotent after retention"
+  run_decisions "$home" verify "$origin" >/dev/null \
+    || fail "verification could not read the retained decision"
+  assert_present "$home/private-parser-view-checked" \
+    "archive verification did not use a private exact-record parser view"
+  run_decisions "$home" resolve "$origin" older --decision-file "$home/retained-decision.txt" \
+    --routed-to "$dependent" >/dev/null \
+    || fail "identical resolution retry could not read the retained decision"
+  printf 'Use a different retained route.\n' > "$home/changed-retained-decision.txt"
+  if run_decisions "$home" resolve "$origin" older \
+    --decision-file "$home/changed-retained-decision.txt" --routed-to "$dependent" \
+    > "$home/archived-changed-decision.out" 2> "$home/archived-changed-decision.err"; then
+    fail "archived resolution retry accepted a different captain decision"
+  fi
+  if run_decisions "$home" resolve "$origin" older \
+    --decision-file "$home/retained-decision.txt" --routed-to sample-retained-other \
+    > "$home/archived-changed-routes.out" 2> "$home/archived-changed-routes.err"; then
+    fail "archived resolution retry accepted different routed work"
+  fi
+  if run_decisions "$home" hold "$origin" older \
+    --title "Choose the retained route" --reason "captain retained route pending" --repo sample \
+    > "$home/archived-hold.out" 2> "$home/archived-hold.err"; then
+    fail "hold reopened a retained resolved identity"
+  fi
+  assert_no_grep "- [ ] $older_hold -" "$home/data/backlog.md" \
+    "hold created an active duplicate of a retained identity"
+  assert_grep "decision_keys=newer,older" "$home/state/$origin.meta" \
+    "retained and current decisions were not unioned deterministically"
+  assert_grep "- [ ] $newer_hold -" "$home/data/backlog.md" \
+    "the current active decision did not survive retained verification"
+
+  record=$(archive_record "$archive" "$older_hold")
+  [ -n "$record" ] || fail "could not extract the retained synthetic record"
+  heading=$(sed -n '/^## Archived /{p;q;}' "$archive")
+  [ -n "$heading" ] || fail "retained archive has no canonical section heading"
+  digest=$(printf '%s\n' "$record" | sed -n 's/^  Decision digest: //p' | head -1)
+  [ -n "$digest" ] || fail "retained record has no decision digest"
+  closed=$(printf '%s\n' "$record" | sed -n 's/.*(done \([0-9][0-9-]*\)).*/\1/p' | head -1)
+  [ -n "$closed" ] || fail "retained record has no closure date"
+
+  variant=$(clone_home "$home" retained-truncated)
+  rewrite_once "$variant/data/done-archive.md" \
+    "  Routed work:- $dependent" "  Routed work:"
+  assert_archive_verify_fails "$variant" "$origin" truncated-record
+
+  variant=$(clone_home "$home" retained-forged)
+  rewrite_once "$variant/data/done-archive.md" \
+    "  Decision digest: $digest" \
+    "  Decision digest: 0000000000000000000000000000000000000000000000000000000000000000"
+  assert_archive_verify_fails "$variant" "$origin" forged-record
+
+  variant=$(clone_home "$home" retained-wrong-kind)
+  rewrite_once "$variant/data/done-archive.md" "(kind: captain)" "(kind: ship)"
+  assert_archive_verify_fails "$variant" "$origin" wrong-kind-record
+
+  variant=$(clone_home "$home" retained-wrong-hold-kind)
+  rewrite_once "$variant/data/done-archive.md" "(hold-kind: captain)" "(hold-kind: ship)"
+  assert_archive_verify_fails "$variant" "$origin" wrong-hold-kind-record
+
+  variant=$(clone_home "$home" retained-invalid-closure)
+  rewrite_once "$variant/data/done-archive.md" "(done $closed)" "(done 2026-02-31)"
+  assert_archive_verify_fails "$variant" "$origin" invalid-closure-record
+
+  variant=$(clone_home "$home" retained-duplicate-routes)
+  rewrite_once "$variant/data/done-archive.md" \
+    "  Routed identities: $dependent" "  Routed identities: $dependent,$dependent"
+  assert_archive_verify_fails "$variant" "$origin" duplicate-routed-identities
+
+  variant=$(clone_home "$home" retained-empty-decision)
+  rewrite_once "$variant/data/done-archive.md" \
+    "  Decision digest: $digest" \
+    "  Decision digest: e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  rewrite_once "$variant/data/done-archive.md" "  Use the retained route." "  "
+  assert_archive_verify_fails "$variant" "$origin" empty-decision-record
+
+  variant=$(clone_home "$home" retained-unresolved)
+  rewrite_once "$variant/data/done-archive.md" \
+    "- [x] $older_hold -" "- [ ] $older_hold -"
+  assert_archive_verify_fails "$variant" "$origin" unresolved-record
+
+  variant=$(clone_home "$home" retained-arbitrary-id)
+  rewrite_once "$variant/data/done-archive.md" \
+    "- [x] $older_hold -" "- [x] $older_hold-unrelated -"
+  assert_archive_verify_fails "$variant" "$origin" arbitrary-id-record
+
+  variant=$(clone_home "$home" retained-duplicate)
+  printf '\n## Archived 2026-07-24\n%s\n' "$record" >> "$variant/data/done-archive.md"
+  assert_archive_verify_fails "$variant" "$origin" duplicate-record
+
+  variant=$(clone_home "$home" retained-malformed-section)
+  rewrite_once "$variant/data/done-archive.md" "$heading" "$heading extra"
+  assert_archive_verify_fails "$variant" "$origin" malformed-section
+
+  variant=$(clone_home "$home" retained-symlink)
+  mv "$variant/data/done-archive.md" "$variant/data/archive-target.md"
+  ln -s archive-target.md "$variant/data/done-archive.md"
+  assert_archive_verify_fails "$variant" "$origin" symlink-archive
+
+  variant=$(clone_home "$home" retained-directory)
+  mv "$variant/data/done-archive.md" "$variant/data/archive-target.md"
+  mkdir "$variant/data/done-archive.md"
+  assert_archive_verify_fails "$variant" "$origin" non-regular-archive
+
+  variant=$(clone_home "$home" retained-unreadable)
+  chmod 000 "$variant/data/done-archive.md"
+  assert_archive_verify_fails "$variant" "$origin" unreadable-archive
+  chmod 600 "$variant/data/done-archive.md"
+
+  variant=$(clone_home "$home" retained-concurrent-change)
+  cat > "$variant/fakebin/tasks-axi" <<'EOF'
+#!/usr/bin/env bash
+case " $* " in
+  *" show "*" --file "*)
+    if [ ! -f "$FM_HOME/archive-changed-once" ]; then
+      : > "$FM_HOME/archive-changed-once"
+      printf '\n# concurrent archive change\n' >> "$FM_HOME/data/done-archive.md"
+    fi
+    ;;
+esac
+exec "$REAL_TASKS_AXI" "$@"
+EOF
+  chmod +x "$variant/fakebin/tasks-axi"
+  assert_archive_verify_fails "$variant" "$origin" concurrent-change
+
+  variant=$(clone_home "$home" retained-active-archive-collision)
+  printf '\n%s\n' "$record" >> "$variant/data/backlog.md"
+  assert_archive_verify_fails "$variant" "$origin" active-archive-collision
+
+  pass "retained decisions support complete/verify/retry and malformed, forged, wrong-kind, unresolved, arbitrary, duplicate, and unsafe archives fail closed"
+}
+
 test_uninventoried_report_decision_refuses_completion
 
 test_scout_teardown_always_requires_inventory_verification
@@ -560,3 +804,4 @@ test_none_inventory_and_resolved_prose_do_not_create_holds
 test_terminal_single_owner_status_decision_does_not_block_empty_inventory
 test_secondmate_hold_stays_in_authoritative_home
 test_resolve_matches_quoted_blocked_by_edges
+test_retained_decisions_are_strictly_archive_aware

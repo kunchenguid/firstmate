@@ -15,6 +15,10 @@
 # is idempotent. A different decision key creates a different backlog identity.
 # All backlog mutations run in the active FM_HOME, which keeps main-home and
 # secondmate-home ownership aligned with the work that discovered the decision.
+# Resolved decisions remain verifiable after normal retention moves them from the
+# active backlog to data/done-archive.md. Archive reads reject unsafe files,
+# duplicate identities, concurrent changes, and records that do not exactly match
+# the durable resolution format written by this command.
 #
 # Usage:
 #   fm-decision-hold.sh id <origin-id> <decision-key>
@@ -44,6 +48,7 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
+ARCHIVE_VIEW=''
 
 # shellcheck source=bin/fm-classify-lib.sh
 # shellcheck disable=SC1091
@@ -65,6 +70,18 @@ fail() {
   exit 1
 }
 
+cleanup_archive_view() {
+  if [ -n "$ARCHIVE_VIEW" ]; then
+    rm -f -- "$ARCHIVE_VIEW"
+    ARCHIVE_VIEW=''
+  fi
+}
+
+trap cleanup_archive_view EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
 validate_slug() {  # <label> <value>
   local label=$1 value=$2
   case "$value" in
@@ -85,6 +102,16 @@ sha256_text() {  # <text>
     printf '%s' "$1" | shasum -a 256 | awk '{print $1}'
   elif command -v sha256sum >/dev/null 2>&1; then
     printf '%s' "$1" | sha256sum | awk '{print $1}'
+  else
+    fail "shasum or sha256sum is required"
+  fi
+}
+
+sha256_file() {  # <path>
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | awk '{print $1}'
+  elif command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
   else
     fail "shasum or sha256sum is required"
   fi
@@ -113,6 +140,255 @@ task_show() {  # <id>
 show_field() {  # <show-output> <field>
   local output=$1 field=$2
   printf '%s\n' "$output" | sed -n "s/^  $field: //p" | head -1
+}
+
+decode_json_string() {  # <json-string>
+  command -v node >/dev/null 2>&1 || fail "node is required to decode tasks-axi output"
+  printf '%s' "$1" | node -e '
+    let input = "";
+    process.stdin.setEncoding("utf8");
+    process.stdin.on("data", chunk => { input += chunk; });
+    process.stdin.on("end", () => {
+      try {
+        const value = JSON.parse(input);
+        if (typeof value !== "string" || value.includes("\u0000")) process.exit(1);
+        process.stdout.write(value);
+      } catch (_) {
+        process.exit(1);
+      }
+    });
+  '
+}
+
+valid_date() {  # <YYYY-MM-DD>
+  command -v node >/dev/null 2>&1 || fail "node is required to validate tasks-axi output"
+  node -e '
+    const value = process.argv[1];
+    if (!/^[0-9]{4}-[0-9]{2}-[0-9]{2}$/.test(value)) process.exit(1);
+    const [year, month, day] = value.split("-").map(Number);
+    const leap = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+    const days = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    if (year < 1 || month < 1 || month > 12 || day < 1 || day > days[month - 1]) process.exit(1);
+  ' "$1"
+}
+
+active_identity_count() {  # <id>
+  local id=$1 backlog="$DATA/backlog.md"
+  [ -f "$backlog" ] || { printf '0\n'; return 0; }
+  awk -v id="$id" '
+    index($0, "- [ ] " id " - ") == 1 || index($0, "- [x] " id " - ") == 1 { count++ }
+    END { print count + 0 }
+  ' "$backlog"
+}
+
+archive_is_safe() {  # <archive>
+  local archive=$1
+  [ ! -L "$archive" ] || fail "decision archive must not be a symlink: $archive"
+  [ -e "$archive" ] || return 1
+  [ -f "$archive" ] || fail "decision archive is not a regular file: $archive"
+  [ -r "$archive" ] || fail "decision archive is not readable: $archive"
+}
+
+archive_identity_counts() {  # <archive> <id>
+  local archive=$1 id=$2
+  awk -v id="$id" '
+    function target(line) {
+      return index(line, "- [ ] " id " - ") == 1 || index(line, "- [x] " id " - ") == 1
+    }
+    /^## / {
+      archived = ($0 ~ /^## Archived [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]$/)
+    }
+    target($0) {
+      total++
+      if (archived) valid++
+    }
+    END { print total + 0, valid + 0 }
+  ' "$archive"
+}
+
+verify_archive_unchanged() {  # <archive> <expected-digest>
+  local archive=$1 expected=$2 current
+  archive_is_safe "$archive" || fail "decision archive disappeared during verification: $archive"
+  current=$(sha256_file "$archive") || fail "could not fingerprint decision archive: $archive"
+  [ "$current" = "$expected" ] || fail "decision archive changed during verification: $archive"
+}
+
+verify_archive_absent() {  # <archive>
+  local archive=$1
+  [ ! -L "$archive" ] || fail "decision archive appeared during verification: $archive"
+  [ ! -e "$archive" ] || fail "decision archive appeared during verification: $archive"
+}
+
+extract_archive_record() {  # <archive> <id>
+  local archive=$1 id=$2
+  cleanup_archive_view
+  ARCHIVE_VIEW=$(
+    umask 077
+    mktemp "$DATA/.fm-decision-hold-archive.XXXXXX"
+  ) || fail "could not create private archive parser view"
+  awk -v id="$id" '
+    BEGIN {
+      print "## Done"
+      print ""
+    }
+    capturing {
+      if ($0 ~ /^- \[[ x]\] / || $0 ~ /^## /) exit
+      if ($0 == "" || substr($0, 1, 2) == "  ") {
+        print
+        next
+      }
+      exit
+    }
+    /^## / {
+      archived = ($0 ~ /^## Archived [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]$/)
+    }
+    archived && (index($0, "- [ ] " id " - ") == 1 || index($0, "- [x] " id " - ") == 1) {
+      found++
+      capturing = 1
+      print
+    }
+    END { if (found != 1) exit 1 }
+  ' "$archive" > "$ARCHIVE_VIEW" || fail "could not extract exact archived decision $id"
+}
+
+verify_archived_resolution() {  # <id> <show-output> <raw-header>
+  local id=$1 show=$2 header=$3 parsed_id state kind hold_kind hold_reason closed body_json body
+  local marker rest digest routes route sorted_routes route_suffix expected_prefix decision
+  case "$header" in
+    "- [x] $id - "*) : ;;
+    *) fail "archived captain decision $id is not an exact terminal record" ;;
+  esac
+  parsed_id=$(show_field "$show" id)
+  state=$(show_field "$show" state)
+  kind=$(show_field "$show" kind)
+  hold_kind=$(show_field "$show" hold_kind)
+  hold_reason=$(show_field "$show" hold_reason)
+  closed=$(show_field "$show" closed)
+  body_json=$(show_field "$show" body)
+  [ "$parsed_id" = "$id" ] || fail "archived captain decision has the wrong identity: $parsed_id"
+  [ "$state" = done ] || fail "archived captain decision $id is not typed done"
+  [ "$kind" = captain ] || fail "archived backlog item $id is not kind captain"
+  [ "$hold_kind" = captain ] || fail "archived backlog item $id is not held for the captain"
+  [ -n "$hold_reason" ] && [ "$hold_reason" != '-' ] \
+    || fail "archived captain decision $id has no hold reason"
+  valid_date "$closed" || fail "archived captain decision $id has an invalid closure date: $closed"
+  body=$(decode_json_string "$body_json" && printf '\034') \
+    || fail "archived captain decision $id has an invalid structured body"
+  body=${body%$'\034'}
+
+  marker=$'Resolution recorded by fm-decision-hold.\nDecision digest: '
+  case "$body" in
+    "$marker"*) rest=${body#"$marker"} ;;
+    *) fail "archived captain decision $id has no exact resolution record" ;;
+  esac
+  case "$rest" in
+    *$'\n'*) digest=${rest%%$'\n'*}; rest=${rest#*$'\n'} ;;
+    *) fail "archived captain decision $id has a truncated decision digest" ;;
+  esac
+  [ "${#digest}" -eq 64 ] || fail "archived captain decision $id has an invalid decision digest"
+  case "$digest" in
+    *[!0-9a-f]*) fail "archived captain decision $id has an invalid decision digest" ;;
+  esac
+  case "$rest" in
+    'Routed identities: '*) rest=${rest#'Routed identities: '} ;;
+    *) fail "archived captain decision $id has no exact routed identity record" ;;
+  esac
+  case "$rest" in
+    *$'\n'*) routes=${rest%%$'\n'*} ;;
+    *) fail "archived captain decision $id has a truncated routed identity record" ;;
+  esac
+  case "$routes" in
+    ''|,*|*,|*,,*) fail "archived captain decision $id has invalid routed identities" ;;
+  esac
+  while IFS= read -r route; do
+    validate_slug routed-identity "$route"
+  done <<EOF
+$(printf '%s\n' "$routes" | tr ',' '\n')
+EOF
+  sorted_routes=$(printf '%s\n' "$routes" | tr ',' '\n' | LC_ALL=C sort -u | paste -sd, -)
+  [ "$routes" = "$sorted_routes" ] \
+    || fail "archived captain decision $id has unsorted or duplicate routed identities"
+
+  route_suffix=$'\n\nRouted work:'
+  while IFS= read -r route; do
+    if [ "$route_suffix" = $'\n\nRouted work:' ]; then
+      route_suffix="${route_suffix}- $route"
+    else
+      route_suffix="${route_suffix}"$'\n'"- $route"
+    fi
+  done <<EOF
+$(printf '%s\n' "$routes" | tr ',' '\n')
+EOF
+  case "$body" in
+    *"$route_suffix") rest=${body%"$route_suffix"} ;;
+    *) fail "archived captain decision $id has invalid or truncated routed work" ;;
+  esac
+  expected_prefix="${marker}${digest}"$'\n'"Routed identities: ${routes}"$'\n\nCaptain decision:\n'
+  case "$rest" in
+    "$expected_prefix"*) decision=${rest#"$expected_prefix"} ;;
+    *) fail "archived captain decision $id has an invalid resolution body" ;;
+  esac
+  [ -n "$decision" ] || fail "archived captain decision $id has an empty captain decision"
+  [ "$(sha256_text "$decision")" = "$digest" ] \
+    || fail "archived captain decision $id does not match its decision digest"
+}
+
+DECISION_SHOW=''
+
+decision_lookup() {  # <decision-id>
+  local id=$1 archive="$DATA/done-archive.md" active_count counts archive_count=0 archive_valid=0
+  local archive_digest='' current_active header
+  validate_slug decision-id "$id"
+  DECISION_SHOW=''
+  active_count=$(active_identity_count "$id") || fail "could not inspect active decision identity $id"
+  [ "$active_count" -le 1 ] || fail "duplicate active captain decision identity: $id"
+  if archive_is_safe "$archive"; then
+    archive_digest=$(sha256_file "$archive") || fail "could not fingerprint decision archive: $archive"
+    counts=$(archive_identity_counts "$archive" "$id") \
+      || fail "could not inspect archived decision identity $id"
+    archive_count=${counts%% *}
+    archive_valid=${counts##* }
+    verify_archive_unchanged "$archive" "$archive_digest"
+    [ "$archive_count" = "$archive_valid" ] \
+      || fail "captain decision $id appears outside a canonical archive section"
+    [ "$archive_count" -le 1 ] || fail "duplicate archived captain decision identity: $id"
+  fi
+  [ "$active_count" -eq 0 ] || [ "$archive_count" -eq 0 ] \
+    || fail "captain decision $id exists in both active backlog and archive"
+
+  if [ "$active_count" -eq 1 ]; then
+    DECISION_SHOW=$(task_show "$id") || fail "active captain decision $id changed during verification"
+    current_active=$(active_identity_count "$id") \
+      || fail "could not recheck active decision identity $id"
+    [ "$current_active" -eq 1 ] || fail "active captain decision $id changed during verification"
+    if [ -n "$archive_digest" ]; then
+      verify_archive_unchanged "$archive" "$archive_digest"
+    else
+      verify_archive_absent "$archive"
+    fi
+    return 0
+  fi
+  if [ "$archive_count" -eq 1 ]; then
+    extract_archive_record "$archive" "$id"
+    verify_archive_unchanged "$archive" "$archive_digest"
+    header=$(sed -n '3p' "$ARCHIVE_VIEW")
+    DECISION_SHOW=$(tasks_axi show "$id" --full --file "$ARCHIVE_VIEW" 2>/dev/null) \
+      || fail "could not parse exact archived captain decision $id"
+    cleanup_archive_view
+    verify_archive_unchanged "$archive" "$archive_digest"
+    current_active=$(active_identity_count "$id") \
+      || fail "could not recheck active decision identity $id"
+    [ "$current_active" -eq 0 ] \
+      || fail "captain decision $id appeared in the active backlog during verification"
+    verify_archived_resolution "$id" "$DECISION_SHOW" "$header"
+    return 0
+  fi
+  if [ -n "$archive_digest" ]; then
+    verify_archive_unchanged "$archive" "$archive_digest"
+  else
+    verify_archive_absent "$archive"
+  fi
+  return 1
 }
 
 origin_exists_here() {  # <origin-id>
@@ -159,7 +435,8 @@ origin_open_decisions() {  # <origin-id>
 
 verify_hold_active() {  # <hold-id>
   local id=$1 show state held kind hold_kind
-  show=$(task_show "$id") || fail "captain hold $id is absent from $FM_HOME/data/backlog.md"
+  decision_lookup "$id" || fail "captain hold $id is absent from the active backlog and decision archive"
+  show=$DECISION_SHOW
   state=$(show_field "$show" state)
   held=$(show_field "$show" held)
   kind=$(show_field "$show" kind)
@@ -172,7 +449,8 @@ verify_hold_active() {  # <hold-id>
 
 verify_hold_resolved() {  # <hold-id>
   local id=$1 show state kind body
-  show=$(task_show "$id") || return 1
+  decision_lookup "$id" || return 1
+  show=$DECISION_SHOW
   state=$(show_field "$show" state)
   kind=$(show_field "$show" kind)
   body=$(show_field "$show" body)
@@ -186,7 +464,9 @@ verify_hold_resolved() {  # <hold-id>
 
 verify_hold_durable() {  # <hold-id>
   local id=$1 show state held kind hold_kind body
-  show=$(task_show "$id") || fail "captain decision $id is absent from $FM_HOME/data/backlog.md"
+  decision_lookup "$id" \
+    || fail "captain decision $id is absent from the active backlog and decision archive"
+  show=$DECISION_SHOW
   state=$(show_field "$show" state)
   held=$(show_field "$show" held)
   kind=$(show_field "$show" kind)
@@ -249,7 +529,8 @@ command_hold() {
   require_tasks_axi
   origin_exists_here "$origin" || fail "origin $origin is not owned by the active home $FM_HOME"
   id=$(hold_id "$origin" "$key")
-  if show=$(task_show "$id"); then
+  if decision_lookup "$id"; then
+    show=$DECISION_SHOW
     state=$(show_field "$show" state)
     kind=$(show_field "$show" kind)
     existing_title=$(show_field "$show" title)
@@ -394,14 +675,14 @@ command_resolve() {
   require_tasks_axi
   id=$(hold_id "$origin" "$key")
   if verify_hold_resolved "$id"; then
-    hold_show=$(task_show "$id")
+    hold_show=$DECISION_SHOW
     hold_body=$(show_field "$hold_show" body)
     verify_resolution_identity "$id" "$hold_body" "$decision_digest" "$routed_csv"
     printf 'resolved: %s\n' "$id"
     return 0
   fi
   verify_hold_active "$id"
-  hold_show=$(task_show "$id")
+  hold_show=$DECISION_SHOW
   hold_body=$(show_field "$hold_show" body)
   case "$hold_body" in
     *"Resolution recorded by fm-decision-hold."*)
