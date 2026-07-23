@@ -113,13 +113,15 @@ test_direct_pr_review_gate() {
   # crewmate cannot run.
   assert_no_grep "codex review --base" "$brief" \
     "direct-PR brief used the --base form that codex rejects alongside a prompt"
-  # A bare <default-branch> placeholder inside the shell block parses as a
-  # redirection and fails before codex runs, so the base must arrive as a
-  # substitutable variable the crewmate can execute as written.
-  assert_grep "BASE=main" "$brief" \
-    "direct-PR brief lost the runnable default-branch variable"
+  # The base must be runnable as written: a bare <default-branch> placeholder
+  # parses as a redirection, and a hardcoded branch name reviews the wrong ref
+  # on any project whose default branch is not main.
+  assert_grep "refs/remotes/origin/HEAD" "$brief" \
+    "direct-PR brief stopped resolving the default branch of the project"
   assert_no_grep "git fetch origin <" "$brief" \
     "direct-PR brief left a shell-invalid placeholder in the fetch command"
+  assert_no_grep "BASE=main" "$brief" \
+    "direct-PR brief hardcoded main as the review base"
   assert_grep "Fix every P0 and P1 finding it reports, commit the fixes, and rerun the same review" "$brief" \
     "direct-PR brief lost the fix, commit, and re-review loop"
   assert_grep "opencode/grok-4.5" "$brief" \

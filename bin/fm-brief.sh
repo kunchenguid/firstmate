@@ -289,10 +289,10 @@ The task is complete only when committed on your branch.
 
 When it is implemented and committed, run the pre-push review gate on your own diff before you push:
 \`\`\`bash
-BASE=main   # the default branch of this project
-git fetch origin "\$BASE"
+BASE=\$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD || echo origin/main)
+git fetch origin "\${BASE#origin/}"
 codex review -c model_reasoning_effort="xhigh" \\
-  "Review this branch against origin/\$BASE. Intent: <what this task set out to accomplish>. Acceptance criteria: <the acceptance criteria from the task above>"
+  "Review this branch against \$BASE. Intent: <what this task set out to accomplish>. Acceptance criteria: <the acceptance criteria from the task above>"
 \`\`\`
 Name the base inside the prompt rather than with \`--base\`, which codex refuses to combine with a prompt, and fetch first because a pooled clone keeps a stale local default branch.
 The prompt is what buys the spec review axis on top of the coding-standards one, so fill it from the Task section.
