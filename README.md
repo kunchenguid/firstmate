@@ -115,12 +115,13 @@ When activated, direct OpenAI requests still gain `store: true` and `context_man
 There is no setting that disables `store: true` while keeping the direct OpenAI integration active.
 OpenAI Codex keeps Pi's built-in transport and receives reconstructed remote compaction history only after a compaction boundary.
 Opaque provider artifacts and usage metadata are saved in local Pi session JSONL, while Pi also retains a portable text summary for model switches, tree operations, forks, and no-extension recovery.
+Known limitations are that upstream ships no lockfile, so the `ws` dependency can drift between reinstalls, and remote compaction is experimental and may fall back to Pi's local compaction if the remote request fails.
 
 Activation requires an explicitly approved compatible Pi runtime, followed by changing the package's `autoload` value in `.pi/settings.json` to `true` and restarting Pi or running `/reload`.
 The approved temporary runtime is npm Pi 0.80.10 invoked explicitly as `~/.npm-global/bin/pi`; do not replace the earlier Homebrew path entry or auto-upgrade this runtime to Pi 0.81.x while the extension requires `<0.81.0`.
 Verify activation with a new non-sensitive synthetic session and the configured notifications.
 Rollback is the inverse one-line tracked change back to `false`; Pi's normal local compaction remains available, and `--no-extensions` is an emergency bypass that also disables firstmate's Pi watcher and turn-end extensions.
-Return to `/opt/homebrew/bin/pi` and uninstall the temporary npm runtime only after Homebrew offers a version inside the pinned extension's audited Pi range.
+Return to `/opt/homebrew/bin/pi` and uninstall the temporary npm runtime only after Homebrew offers Pi `>=0.80.9 <0.81.0`, the pinned revision supports that exact version, and Node 22 or newer is available.
 To update the package, audit a new upstream commit first, change the immutable source revision, repeat the isolated validation, and never run the update in the live primary Pi session.
 The dated security and data-flow audit, exact validation commands, provider behavior, residual dependency risk, and rollback mechanics are in [docs/pi-openai-server-compaction.md](docs/pi-openai-server-compaction.md).
 
