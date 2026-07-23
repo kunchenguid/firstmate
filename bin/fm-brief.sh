@@ -49,6 +49,8 @@
 # it fills {TASK}. Default form is a path reference list, not copied card bodies.
 # Placeholders: {LOAN_GIVEN}, {LOAN_NOT_GIVEN}, {LOAN_EXTRA_SEARCH}.
 # The worker never free-writes the library; it only leaves a return proposal.
+# Return boxes: Uusi tieto, Korjaukset vanhaan, and Pakettiarvio (whether the
+# loan package hit, including what was missing or unnecessary).
 # Ship and scout returns share the absolute Firstmate-home destination
 # <FM_HOME>/data/<task-id>/palautus.md.
 # Firstmate gates any library write: injection-pattern canary, conflict with an
@@ -275,7 +277,7 @@ Do **not** write directly into `data/kirjasto/`, `data/learnings.md`, or `data/c
 Fill these three boxes (either of the first two may be empty):
 - **Uusi tieto** - facts not already on a card, in your own words, with source and FAKTA/ARVIO
 - **Korjaukset vanhaan** - card path that is wrong or stale, with evidence (old claim / new claim / source / as_of)
-- **Arvio** - did the loan package hit? what was missing or unnecessary?
+- **Pakettiarvio** - did the loan package hit? what was missing or unnecessary?
 
 Firstmate alone gates library writes. It may accept evidence-backed factual corrections directly onto a library card; the captain decides only line, preference, and security (decision: `{DECISION_PATH}` item 2).
 Before accepting a return, firstmate checks injection-pattern canaries, conflict with an existing card, and FAKTA/ARVIO labeling with sources.

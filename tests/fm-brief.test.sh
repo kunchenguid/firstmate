@@ -358,6 +358,8 @@ test_loan_package_on_ship_and_scout_not_secondmate() {
   assert_grep "### Sallittu lisähaku" "$ship" "ship brief missing ### Sallittu lisähaku"
   assert_grep "### Palautusvelvollisuus" "$ship" "ship brief missing ### Palautusvelvollisuus"
   assert_grep "## Palautusehdotus" "$ship" "ship brief missing ## Palautusehdotus"
+  assert_grep "**Pakettiarvio**" "$ship" "ship return proposal missing Pakettiarvio box"
+  assert_no_grep "**Arvio**" "$ship" "ship return proposal retained old Arvio box name"
   assert_grep "{LOAN_GIVEN}" "$ship" "ship brief missing {LOAN_GIVEN} placeholder"
   assert_grep "{LOAN_NOT_GIVEN}" "$ship" "ship brief missing {LOAN_NOT_GIVEN} placeholder"
   assert_grep "{LOAN_EXTRA_SEARCH}" "$ship" "ship brief missing {LOAN_EXTRA_SEARCH} placeholder"
@@ -389,6 +391,8 @@ test_loan_package_on_ship_and_scout_not_secondmate() {
   assert_grep "### Sallittu lisähaku" "$scout" "scout brief missing ### Sallittu lisähaku"
   assert_grep "### Palautusvelvollisuus" "$scout" "scout brief missing ### Palautusvelvollisuus"
   assert_grep "## Palautusehdotus" "$scout" "scout brief missing ## Palautusehdotus"
+  assert_grep "**Pakettiarvio**" "$scout" "scout return proposal missing Pakettiarvio box"
+  assert_no_grep "**Arvio**" "$scout" "scout return proposal retained old Arvio box name"
   assert_grep "{LOAN_GIVEN}" "$scout" "scout brief missing {LOAN_GIVEN} placeholder"
   assert_grep "record the return proposal at \`$home/data/loan-scout/palautus.md\`" "$scout" \
     "scout brief must use the same absolute Firstmate-home return path"
@@ -440,6 +444,8 @@ test_loan_package_on_ship_and_scout_not_secondmate() {
     "fm-brief.sh --help must document the loan package"
   assert_contains "$help" "{LOAN_GIVEN}" \
     "fm-brief.sh --help must document loan placeholders"
+  assert_contains "$help" "Pakettiarvio" \
+    "fm-brief.sh --help must document the Pakettiarvio return box"
   assert_contains "$help" "data/learnings.md" \
     "fm-brief.sh --help must point at learnings for gate hygiene"
   pass "fm-brief.sh: loan package on ship/scout only; secondmate excluded; shapes intact"
