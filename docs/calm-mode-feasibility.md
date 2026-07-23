@@ -45,6 +45,8 @@ The smallest counterfactuals produced these results:
 - Pairing that hidden context message with a TUI-only custom entry allowed Calm to hide and restore the synthetic user presentation with no content loss.
 - Pi's `CustomMessageComponent` unconditionally adds a leading spacer before invoking a registered message renderer, so returning an empty component cannot hide the whole row.
 - Pi's `CustomEntryComponent` adds spacing only when its renderer returns content, so an undefined Calm renderer result removes the complete live row without a residual gap.
+- Pi does not mount a `CustomEntryComponent` whose initial renderer result is undefined, so disabling Calm rebuilds the current persisted leaf through `ExtensionCommandContext.navigateTree()` to restore entries received while Calm was active.
+- Navigating to the current leaf is a session-data no-op in Pi 0.81.1, while interactive mode clears and reconstructs the transcript from persisted entries; Pi adds its ordinary navigation status row as an unsupported generic command-status boundary.
 - Pi's HTML exporter ignores plain custom entries and `display: false` custom messages and does not invoke TUI renderers, so synthetic control inputs cannot retain stock user styling in exported or shared HTML through Pi 0.81.1's supported API.
 
 The disconfirming checks deliberately retained contradictory evidence.
@@ -94,7 +96,7 @@ The test fixture enumerates every class below through the centralized policy, an
 | `user-bash` | `BashExecutionComponent` for `!` and `!!` | Unsupported boundary; remains visible. |
 | `skill-invocation` | `SkillInvocationMessageComponent` plus parsed user text | Unsupported boundary; remains visible. |
 | `custom-message` | `CustomMessageComponent` when `display` is true | Firstmate's known synthetic context messages use `display: false`; arbitrary extension messages remain an unsupported boundary. |
-| `custom-entry` | `CustomEntryComponent` with a registered renderer | Firstmate's synthetic presentation entry is hidden without a residual spacer; arbitrary extension entries remain an unsupported boundary. |
+| `custom-entry` | `CustomEntryComponent` with a registered renderer | Firstmate's synthetic presentation entry is hidden without a residual spacer and restored through a current-leaf transcript rebuild; arbitrary extension entries remain an unsupported boundary. |
 | `compaction-summary` | `CompactionSummaryMessageComponent` | Unsupported boundary; remains visible. |
 | `branch-summary` | `BranchSummaryMessageComponent` | Unsupported boundary; remains visible. |
 | `working-status` | `WorkingStatusIndicator` | Hidden through `setWorkingVisible(false)`. |
@@ -131,7 +133,7 @@ grok 0.2.106 (bde89716f679)
 | Claude Code 2.1.216 | Not feasible through the inspected supported project surface. | Project hooks can observe lifecycle and tool events, while the plugin CLI packages supported components; neither inspected surface exposes a transcript-row renderer or transcript-wide redraw API. |
 | Codex CLI 0.144.6 | Not feasible through the inspected supported project surface. | The tracked hooks expose session, pre-tool, and stop handling, while the plugin and feature inventories expose no TUI tool-row renderer or transcript redraw control. |
 | OpenCode 1.17.18 | Not feasible without violating the preservation boundary. | Plugins expose events and tool execution hooks, not a built-in transcript-row renderer; same-name tool replacement changes execution rather than presentation alone. |
-| Pi 0.81.1 | Partially feasible and implemented to the supported boundary. | Public APIs control working visibility, collapsed labels, known tool slots, custom entries, and transcript-wide expansion redraws, but not built-in message containers or generic tool and status rows. |
+| Pi 0.81.1 | Partially feasible and implemented to the supported boundary. | Public APIs control working visibility, collapsed labels, known tool slots, custom entries, expansion redraws, and current-leaf transcript reconstruction, but not built-in message containers or generic tool and status rows. |
 | Grok CLI 0.2.106 | Not feasible through the inspected supported project surface. | Project hooks expose lifecycle and tool interception, while the plugin CLI exposes no row-renderer contract; `--minimal` changes the whole screen mode rather than selected transcript rows. |
 
 These conclusions are deliberately limited to the named versions and supported surfaces.
@@ -139,7 +141,7 @@ They do not claim that a harness can never add the missing renderer API.
 
 ## Regression coverage
 
-`tests/fm-calm-pi-extension.test.sh` compares wrapped and stock renderers, verifies all seven built-ins plus `fm_watch_arm_pi`, exercises redraw of already-rendered tool and synthetic rows, checks the gapless custom-entry host, covers every policy class and synthetic fixture, covers session reset reasons, asserts the rendered export DOM, and drives a genuine 180 by 44 interactive terminal fixture.
+`tests/fm-calm-pi-extension.test.sh` compares wrapped and stock renderers, verifies all seven built-ins plus `fm_watch_arm_pi`, exercises redraw of already-rendered tool and synthetic rows, checks the gapless custom-entry host, restores an entry received while Calm is active through the supported current-leaf lifecycle, covers every policy class and synthetic fixture, covers session reset reasons, asserts the rendered export DOM, and drives a genuine 180 by 44 interactive terminal fixture.
 `tests/fm-pi-primary-types.test.sh` performs strict no-emit TypeScript checking against the installed Pi 0.81.1 declarations.
 
 The relevant commands are:

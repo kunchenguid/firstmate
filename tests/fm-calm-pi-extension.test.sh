@@ -65,6 +65,8 @@ test_static_contract() {
   assert_contains "$text" 'setCalmPresentation(false)' "Pi calm extension does not default to stock transcript presentation"
   assert_contains "$text" 'ctx.ui.setToolsExpanded(!expanded)' "Pi calm extension does not redraw existing custom entries"
   assert_contains "$text" 'ctx.ui.setToolsExpanded(expanded)' "Pi calm extension does not restore Ctrl+O state after redraw"
+  assert_contains "$text" 'ctx.sessionManager.getLeafId()' "Pi calm extension does not resolve the persisted transcript leaf"
+  assert_contains "$text" 'await ctx.navigateTree(leafId)' "Pi calm extension does not rebuild entries skipped while Calm was active"
   assert_contains "$text" 'ctx.ui.setWorkingVisible(!active)' "Pi calm extension does not hide the live working row"
   assert_contains "$text" 'ctx.ui.setHiddenThinkingLabel(active ? "" : undefined)' "Pi calm extension does not hide collapsed thinking labels"
   assert_contains "$text" 'pi.on("input"' "Pi calm extension does not classify input-origin Firstmate injections"
@@ -376,11 +378,38 @@ let editorText = "";
 let terminalInputHandler;
 let workingVisible;
 let hiddenThinkingLabel = "unset";
+const navigationTargets = [];
+const rebuiltPresentationComponents = [];
 const statuses = new Map();
 const sessionEntries = [{ type: "message", message: { role: "toolResult", content: "kept" } }];
 const entriesBefore = JSON.stringify(sessionEntries);
 const commandContext = {
-  sessionManager: { getEntries: () => sessionEntries },
+  sessionManager: {
+    getEntries: () => sessionEntries,
+    getLeafId: () => "current-leaf",
+  },
+  async navigateTree(targetId) {
+    navigationTargets.push(targetId);
+    for (const row of rows) {
+      row.actual.setExpanded(!expanded);
+      row.actual.setExpanded(expanded);
+    }
+    watchActual.setExpanded(!expanded);
+    watchActual.setExpanded(expanded);
+    customRow.setExpanded(!expanded);
+    customRow.setExpanded(expanded);
+    imageRow.setExpanded(!expanded);
+    imageRow.setExpanded(expanded);
+    rebuiltPresentationComponents.length = 0;
+    const renderer = entryRenderers.get("firstmate-synthetic-input-presentation");
+    for (const entry of appendedEntries) {
+      if (entry.customType !== "firstmate-synthetic-input-presentation") continue;
+      const component = new CustomEntryComponent(entry, renderer);
+      component.setExpanded(expanded);
+      if (component.hasContent()) rebuiltPresentationComponents.push(component);
+    }
+    return { cancelled: false };
+  },
   ui: {
     getEditorText: () => editorText,
     getToolsExpanded: () => expanded,
@@ -571,10 +600,46 @@ if (JSON.stringify(sessionEntries) !== entriesBefore) {
   throw new Error("calm mode changed session entries or model context");
 }
 
-// The image-boundary probe changed terminal capabilities after the original
-// stock renders, so refresh the stock comparison under the same capabilities.
+const activeWatcherMessage =
+  "FIRSTMATE WATCHER WAKE: signal: /tmp/active-probe.status\n\n" +
+  "Run bin/fm-wake-drain.sh first and handle the queued wake. Watcher continuity is extension-owned.";
+const activeSyntheticResult = await inputHandler({
+  text: activeWatcherMessage,
+  images: undefined,
+  source: "extension",
+  streamingBehavior: "followUp",
+}, commandContext);
+if (
+  activeSyntheticResult?.action !== "handled" ||
+  appendedEntries.length !== 3 ||
+  sentMessages.length !== 3
+) {
+  throw new Error("synthetic input received while Calm was active was not delivered");
+}
+const activePresentationComponent = new CustomEntryComponent(
+  appendedEntries[2],
+  presentationRenderer,
+);
+activePresentationComponent.setExpanded(expanded);
+if (
+  activePresentationComponent.hasContent() ||
+  activePresentationComponent.render(100).length !== 0
+) {
+  throw new Error("synthetic input received while Calm was active left a row or blank gap");
+}
+
 for (const { baseline } of rows) baseline.setExpanded(expanded);
 await calmCommand.handler("", commandContext);
+if (
+  navigationTargets.length !== 1 ||
+  navigationTargets[0] !== "current-leaf" ||
+  rebuiltPresentationComponents.length !== 3 ||
+  !rebuiltPresentationComponents.some((component) =>
+    component.render(100).join("\n").includes("/tmp/active-probe.status")
+  )
+) {
+  throw new Error("turning Calm off did not immediately rebuild a synthetic row received while active");
+}
 for (const { name, baseline, actual } of rows) {
   if (JSON.stringify(actual.render(100)) !== JSON.stringify(baseline.render(100))) {
     throw new Error(`${name} did not restore the expanded standard renderer`);
@@ -628,7 +693,7 @@ JS
 }
 
 test_interactive_terminal_e2e() {
-  local project config session_file export_file export_dom default_snapshot expanded_snapshot hidden_snapshot export_snapshot restored_snapshot hash_before hash_after now version chrome chrome_pid chrome_wait
+  local project config session_file export_file export_dom default_snapshot expanded_snapshot hidden_snapshot active_before_snapshot active_hidden_snapshot active_before_boundary active_hidden_boundary export_snapshot restored_snapshot hash_before hash_after now version chrome chrome_pid chrome_wait active_wait active_screen_wait
   if ! command -v pi >/dev/null 2>&1 || ! command -v tmux >/dev/null 2>&1; then
     echo "skip: pi or tmux not found for Pi calm interactive E2E"
     return 0
@@ -644,12 +709,34 @@ test_interactive_terminal_e2e() {
   default_snapshot="$TMP_ROOT/default.txt"
   expanded_snapshot="$TMP_ROOT/expanded.txt"
   hidden_snapshot="$TMP_ROOT/hidden.txt"
+  active_before_snapshot="$TMP_ROOT/active-before.txt"
+  active_hidden_snapshot="$TMP_ROOT/active-hidden.txt"
+  active_before_boundary="$TMP_ROOT/active-before-boundary.txt"
+  active_hidden_boundary="$TMP_ROOT/active-hidden-boundary.txt"
   export_snapshot="$TMP_ROOT/export.txt"
   restored_snapshot="$TMP_ROOT/restored.txt"
   mkdir -p "$project/.pi/extensions/lib" "$config"
   cp "$EXT" "$project/.pi/extensions/fm-calm.ts"
   cp "$VISIBILITY" "$project/.pi/extensions/lib/fm-calm-visibility.ts"
   cp "$WATCH_EXT" "$project/.pi/extensions/fm-primary-pi-watch.ts"
+  cat >"$project/.pi/extensions/fm-calm-e2e-inject.ts" <<'TS'
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { deliverFirstmateSyntheticInput } from "./lib/fm-calm-visibility.ts";
+
+export default function (pi: ExtensionAPI): void {
+  pi.registerCommand("calm-inject-e2e", {
+    description: "Inject the Calm lifecycle fixture.",
+    handler: async () => {
+      deliverFirstmateSyntheticInput(
+        pi,
+        "FIRSTMATE WATCHER WAKE: signal: /tmp/active-probe.status\n\nRun bin/fm-wake-drain.sh first and handle the queued wake. Watcher continuity is extension-owned.",
+        "watcher",
+        { deliverAs: "followUp", triggerTurn: false },
+      );
+    },
+  });
+}
+TS
   printf '%s\n' '{"tui.input.submit":"alt+s"}' >"$config/keybindings.json"
   printf '%s\n' '{"hideThinkingBlock":true}' >"$config/settings.json"
   now=$(date -u +%Y-%m-%dT%H:%M:%S.000Z)
@@ -678,8 +765,6 @@ JSON
   assert_contains "$(cat "$default_snapshot")" "FIRSTMATE WATCHER WAKE: signal: /tmp/probe.status" "Calm-off transcript did not show the synthetic Firstmate presentation row"
   assert_contains "$(cat "$default_snapshot")" "Thinking..." "reasoning fixture did not render Pi's collapsed thinking label"
   assert_contains "$(cat "$default_snapshot")" "fm-calm.ts" "project-local Pi calm extension did not auto-load"
-  hash_before=$(shasum -a 256 "$session_file" | awk '{print $1}')
-
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" C-o
   wait_for_text "$expanded_snapshot" "escape to interrupt" \
     || fail "Ctrl+O did not retain Pi's ordinary startup and tool expansion behavior"
@@ -702,6 +787,35 @@ JSON
   assert_contains "$(cat "$hidden_snapshot")" "FIRSTMATE WATCHER WAKE: can you explain this phrase?" "/calm hid a genuine near-miss user prompt"
   assert_contains "$(cat "$hidden_snapshot")" "I will run one command." "/calm removed assistant conversation before a tool"
   assert_contains "$(cat "$hidden_snapshot")" "The deterministic tool example is complete." "/calm removed assistant conversation after a tool"
+
+  tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" >"$active_before_snapshot"
+  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l "/calm-inject-e2e"
+  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" M-s
+  active_wait=0
+  while ! grep -Fq "/tmp/active-probe.status" "$session_file" 2>/dev/null && [ "$active_wait" -lt 120 ]; do
+    sleep 0.05
+    active_wait=$((active_wait + 1))
+  done
+  grep -Fq "/tmp/active-probe.status" "$session_file" \
+    || fail "synthetic lifecycle fixture was not received while Calm was active"
+  active_screen_wait=0
+  while [ "$active_screen_wait" -lt 120 ]; do
+    tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" >"$active_hidden_snapshot"
+    ! grep -Fq "/calm-inject-e2e" "$active_hidden_snapshot" && break
+    sleep 0.05
+    active_screen_wait=$((active_screen_wait + 1))
+  done
+  assert_not_contains "$(cat "$active_hidden_snapshot")" "/calm-inject-e2e" "synthetic lifecycle command did not leave the editor"
+  assert_not_contains "$(cat "$active_hidden_snapshot")" "/tmp/active-probe.status" "Calm showed a synthetic row received while active"
+  awk '/The deterministic tool example is complete\./ { capture = 1 } capture { print } capture && /^─/ { exit }' \
+    "$active_before_snapshot" >"$active_before_boundary"
+  awk '/The deterministic tool example is complete\./ { capture = 1 } capture { print } capture && /^─/ { exit }' \
+    "$active_hidden_snapshot" >"$active_hidden_boundary"
+  if ! cmp -s "$active_before_boundary" "$active_hidden_boundary"; then
+    diff -u "$active_before_boundary" "$active_hidden_boundary" >&2 || true
+    fail "Calm changed the screenshot or left a gap for a synthetic row received while active"
+  fi
+  hash_before=$(shasum -a 256 "$session_file" | awk '{print $1}')
 
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l "/export $export_file"
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" M-s
@@ -756,6 +870,8 @@ JS
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" M-s
   wait_for_text "$restored_snapshot" "CALM_E2E_OUTPUT" \
     || fail "second /calm did not restore tool result output"
+  wait_for_text "$restored_snapshot" "/tmp/active-probe.status" \
+    || fail "second /calm did not restore a synthetic row received while Calm was active"
   assert_contains "$(cat "$restored_snapshot")" "fm_watch_arm_pi" "second /calm did not restore the Firstmate watcher tool shell"
   assert_contains "$(cat "$restored_snapshot")" "FIRSTMATE WATCHER WAKE: signal: /tmp/probe.status" "second /calm did not restore the synthetic Firstmate user row"
   assert_contains "$(cat "$restored_snapshot")" "Thinking..." "second /calm did not restore Pi's collapsed thinking labels"

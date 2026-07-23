@@ -249,12 +249,22 @@ export default function (pi: ExtensionAPI) {
       ctx.ui.setHiddenThinkingLabel(active ? "" : undefined);
       ctx.ui.setStatus("firstmate-calm", active ? "calm transcript" : undefined);
 
-      // Cycling expansion and restoring its original value is Pi's supported
-      // transcript-wide redraw path for both tool rows and custom entries.
-      // Both writes happen in one command turn, so Ctrl+O state is unchanged.
       const expanded = ctx.ui.getToolsExpanded();
-      ctx.ui.setToolsExpanded(!expanded);
-      ctx.ui.setToolsExpanded(expanded);
+      if (active) {
+        ctx.ui.setToolsExpanded(!expanded);
+        ctx.ui.setToolsExpanded(expanded);
+      } else {
+        const leafId = ctx.sessionManager.getLeafId();
+        if (leafId) {
+          await ctx.navigateTree(leafId);
+        } else {
+          ctx.ui.setToolsExpanded(!expanded);
+          ctx.ui.setToolsExpanded(expanded);
+        }
+        if (ctx.ui.getToolsExpanded() !== expanded) {
+          ctx.ui.setToolsExpanded(expanded);
+        }
+      }
     },
   });
 }
