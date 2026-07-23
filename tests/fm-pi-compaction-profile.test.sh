@@ -114,21 +114,27 @@ fm_pi_profile_load "$HOME_DIR/config" "$PROJECT_DIR" \
 pass "raw Pi launch wrappers are rejected without execution"
 
 STARTUP_REDIRECT="$TMP_ROOT/project-session-redirect"
-mkdir -p "$PROJECT_DIR/.pi/commands"
+STARTUP_GUARD_DIR="$TMP_ROOT/root with spaces/bin"
+mkdir -p "$PROJECT_DIR/.pi/commands" "$PROJECT_DIR/.pi/hooks" "$PROJECT_DIR/.pi/tools" "$STARTUP_GUARD_DIR"
 printf '%s\n' 'legacy project command' > "$PROJECT_DIR/.pi/commands/legacy.md"
+printf '%s\n' 'legacy project hook' > "$PROJECT_DIR/.pi/hooks/legacy.js"
+printf '%s\n' 'legacy project tool' > "$PROJECT_DIR/.pi/tools/custom-tool"
 printf '{"sessionDir":"%s"}\n' "$STARTUP_REDIRECT" > "$PROJECT_DIR/.pi/settings.json"
+cp "$ROOT/bin/fm-pi-startup-guard.cjs" "$STARTUP_GUARD_DIR/fm-pi-startup-guard.cjs"
 startup_status=0
 (
   cd "$PROJECT_DIR" \
-    && NODE_OPTIONS="--require=$ROOT/bin/fm-pi-startup-guard.cjs" \
+    && NODE_OPTIONS= \
       NODE_PATH= \
       PI_PACKAGE_DIR= \
       PI_CODING_AGENT_DIR="$AGENT_DIR" \
       PI_CODING_AGENT_SESSION_DIR="$FM_PI_SESSION_DIR" \
       FM_PI_DELEGATED_PROJECT_DIR="$FM_PI_PROJECT_DIR" \
       PI_SKIP_VERSION_CHECK=1 \
-      "$PI_COMMAND" --no-approve --no-extensions --no-tools --offline \
-        --model openai-codex/gpt-5.6-sol --thinking medium --print startup-check
+      perl -e 'my $seconds = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", $pid; waitpid $pid, 0; exit 124 }; alarm $seconds; waitpid $pid, 0; alarm 0; exit($? >> 8)' \
+        10 node --require "$STARTUP_GUARD_DIR/fm-pi-startup-guard.cjs" "$PI_COMMAND" \
+          --no-approve --no-extensions --no-tools --offline \
+          --model openai-codex/gpt-5.6-sol --thinking medium --print startup-check
 ) > "$TMP_ROOT/startup.stdout" 2> "$TMP_ROOT/startup.stderr" || startup_status=$?
 [ "$startup_status" -ne 0 ] || fail "provider-free delegated Pi startup unexpectedly completed a provider request"
 if ! grep -q 'No API key found' "$TMP_ROOT/startup.stdout" \
@@ -138,8 +144,10 @@ fi
 assert_absent "$STARTUP_REDIRECT" "project sessionDir redirected delegated Pi session storage"
 assert_absent "$PROJECT_DIR/.pi/prompts" "Pi migrated project commands before applying delegated isolation"
 assert_grep 'legacy project command' "$PROJECT_DIR/.pi/commands/legacy.md" "project commands changed during delegated Pi startup"
+assert_grep 'legacy project hook' "$PROJECT_DIR/.pi/hooks/legacy.js" "project hooks changed during delegated Pi startup"
+assert_grep 'legacy project tool' "$PROJECT_DIR/.pi/tools/custom-tool" "project tools changed during delegated Pi startup"
 [ -d "$FM_PI_SESSION_DIR" ] || fail "delegated Pi did not use its controlled project-specific session directory"
-pass "pre-flag startup cannot read project sessionDir or migrate project commands"
+pass "pre-flag startup ignores project settings and migrations through whitespace paths"
 
 node --input-type=module - "$PI_PACKAGE_DIR" 272000 108800 <<'NODE' \
   || fail "Pi shouldCompact strict-boundary proof failed"
