@@ -857,6 +857,234 @@ SH
   pass "cycle-exit ledger links a verified successor and remains size-capped"
 }
 
+# SIGKILL and process-group kills cannot run the arm's traps, so a cycle that dies
+# that way used to leave NO ledger record at all - the one death mode the ledger
+# most needs to explain. The arm now publishes the cycle's row when the cycle
+# begins and rewrites it in place at close, so a killed cycle stays visible as an
+# unclosed exit_code=open record while a normal cycle still yields exactly one
+# classified row.
+test_killed_cycle_leaves_an_unclosed_ledger_record() {
+  local dir state fakebin armout armpid watcher_pid ledger i rows
+  dir=$(make_case killed-cycle-ledger)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout="$dir/arm.out"
+  ledger="$state/.watch-cycle-exits.log"
+  mark_pr_check_migration_complete "$state"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$armout" &
+  armpid=$!
+  i=0
+  while [ "$i" -lt 80 ]; do
+    grep -qF 'watcher: started pid=' "$armout" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  grep -qF 'watcher: started pid=' "$armout" || fail "killed-cycle arm did not start a watcher"
+  watcher_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+  grep -q "arm_pid=$armpid.*exit_code=open.*reason=cycle-open" "$ledger" \
+    || fail "a running cycle published no open ledger record"
+
+  kill -KILL "$armpid" 2>/dev/null || fail "could not SIGKILL the arm"
+  wait "$armpid" 2>/dev/null || true
+  # The killed arm never ran its traps, so its watcher child is orphaned; reap it
+  # so the case leaves no stray process behind.
+  kill -TERM "$watcher_pid" 2>/dev/null || true
+
+  grep -q "arm_pid=$armpid.*exit_code=open.*reason=cycle-open" "$ledger" \
+    || fail "an untrappable kill left no evidence of the cycle in the ledger"
+  grep -q "arm_pid=$armpid.*reason=arm-interrupted" "$ledger" \
+    && fail "an untrappable kill was recorded as a trapped interruption"
+  rows=$(grep -c "^arm_pid=$armpid	" "$ledger")
+  [ "$rows" -eq 1 ] || fail "a killed cycle left $rows ledger rows instead of one"
+  ! grep -v '^arm_pid=.*watcher_pid=.*started_at=.*ended_at=.*exit_code=.*signal=.*reason=.*beacon_age=.*lock_before=.*lock_after=.*successor=' "$ledger" | grep . >/dev/null \
+    || fail "the open lifecycle record does not match the ledger field order"
+
+  # A normally-ending cycle still closes its row in place: one classified record,
+  # no leftover open row for that arm.
+  dir=$(make_case closed-cycle-ledger)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout="$dir/closed-arm.out"
+  ledger="$state/.watch-cycle-exits.log"
+  mark_pr_check_migration_complete "$state"
+  cat > "$state/task.check.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'done: synthetic cycle\n'
+SH
+  chmod 0700 "$state/task.check.sh"
+  FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-check-register.sh" task >/dev/null \
+    || fail "could not register closed-cycle check"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=0 FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=0 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$armout" &
+  armpid=$!
+  wait "$armpid" || fail "closed-cycle arm did not surface its actionable wake"
+  grep -q "arm_pid=$armpid.*exit_code=0.*reason=actionable-check" "$ledger" \
+    || fail "a normally-ending cycle lost its classified ledger record"
+  grep -q "arm_pid=$armpid.*exit_code=open" "$ledger" \
+    && fail "a normally-ending cycle left its open row behind"
+  rows=$(grep -c "^arm_pid=$armpid	" "$ledger")
+  [ "$rows" -eq 1 ] || fail "a closed cycle left $rows ledger rows instead of one"
+  pass "an untrappable kill leaves one unclosed cycle record while a normal cycle closes its row in place"
+}
+
+# The ledger is bounded evidence, not a growing file. A home whose arms are always
+# killed untrappably only ever writes OPEN rows - the close path that used to be
+# the sole place the cap was applied never runs - so the cap has to hold on the
+# open path too or the one death mode the ledger exists to explain is also the one
+# that grows it without bound.
+test_open_ledger_rows_stay_bounded_under_repeated_kills() {
+  local dir state fakebin armout armpid watcher_pid ledger i iteration size rows
+  dir=$(make_case open-row-bounded)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  ledger="$state/.watch-cycle-exits.log"
+  mark_pr_check_migration_complete "$state"
+  iteration=0
+  while [ "$iteration" -lt 6 ]; do
+    armout="$dir/killed-$iteration.out"
+    PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_WATCH_CYCLE_LOG_MAX_BYTES=700 FM_WATCH_CYCLE_LOG_KEEP_LINES=2 FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$armout" &
+    armpid=$!
+    i=0
+    while [ "$i" -lt 80 ]; do
+      grep -qF 'watcher: started pid=' "$armout" 2>/dev/null && break
+      sleep 0.1
+      i=$((i + 1))
+    done
+    grep -qF 'watcher: started pid=' "$armout" || fail "open-row bounded cycle $iteration did not start"
+    watcher_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+    kill -KILL "$armpid" 2>/dev/null || fail "could not SIGKILL open-row bounded arm $iteration"
+    wait "$armpid" 2>/dev/null || true
+    # The killed arm never ran its traps, so reap its orphaned watcher child.
+    kill -TERM "$watcher_pid" 2>/dev/null || true
+    i=0
+    while [ "$i" -lt 50 ] && is_live_non_zombie "$watcher_pid"; do
+      sleep 0.1
+      i=$((i + 1))
+    done
+    iteration=$((iteration + 1))
+  done
+  rows=$(grep -c 'exit_code=open' "$ledger")
+  [ "$rows" -ge 1 ] || fail "repeated untrappable kills left no open ledger rows at all"
+  size=$(wc -c < "$ledger" | tr -d '[:space:]')
+  [ "$size" -le 700 ] || fail "open ledger rows grew past the configured cap ($size bytes)"
+  ! grep -v '^arm_pid=.*watcher_pid=.*started_at=.*ended_at=.*exit_code=.*signal=.*reason=.*beacon_age=.*lock_before=.*lock_after=.*successor=' "$ledger" | grep . >/dev/null \
+    || fail "bounding the open ledger rows left a partial or malformed record"
+  pass "open cycle rows stay inside the ledger cap when every arm is killed untrappably"
+}
+
+# A close that loses the ledger lock drops its rewrite and moves on, leaving that
+# cycle's row open. The next cycle of the SAME arm must retire the stranded row
+# before publishing its own: two unclosed rows for one live arm make the older one
+# read as the untrappable kill the open row exists to report, for the life of the
+# ledger. Ownership is arm pid AND start stamp, never the pid alone: pids are
+# recycled, so a killed predecessor's row can carry this arm's pid while belonging
+# to a cycle this process never ran, and retiring that row would erase exactly the
+# evidence the open row exists to keep. The rows are seeded rather than raced
+# through the real lock budget, because the invariant holds however a row got
+# stranded while racing the budget would settle the outcome on timing.
+test_arm_retires_its_own_stranded_open_row() {
+  local dir state fakebin armout ledger peer identity armpid foreign published i stranded recycled surviving open_rows status
+  dir=$(make_case stranded-open-row)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout="$dir/arm.out"
+  ledger="$state/.watch-cycle-exits.log"
+  mark_pr_check_migration_complete "$state"
+  sleep 300 &
+  peer=$!
+  identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$peer") || fail "could not identify peer pid"
+  mkdir "$state/.watch.lock"
+  printf '%s\n' "$peer" > "$state/.watch.lock/pid"
+  printf '%s\n' "$dir" > "$state/.watch.lock/fm-home"
+  printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
+  printf '%s\n' "$identity" > "$state/.watch.lock/pid-identity"
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_ARM_CONFIRM_TIMEOUT=3 FM_ARM_ATTACH_POLL=0.1 "$WATCH_ARM" > "$armout" &
+  armpid=$!
+  foreign=$((armpid + 1))
+  i=0
+  while [ "$i" -lt 80 ]; do
+    grep -qF "watcher: already running pid $peer" "$state"/.watch-arm-output.* 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  grep -qF "watcher: already running pid $peer" "$state"/.watch-arm-output.* 2>/dev/null \
+    || fail "arm child did not stand down behind the peer watcher"
+  i=0
+  while [ "$i" -lt 80 ]; do
+    grep -q "^arm_pid=$armpid"$'\t' "$ledger" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  published=$(awk -F'\t' -v target="arm_pid=$armpid" \
+    '$1 == target && $6 == "exit_code=open" { sub(/^started_at=/, "", $4); print $4; exit }' "$ledger")
+  [ -n "$published" ] || fail "arm published no open ledger row for its first cycle"
+  # The arm is parked waiting for the peer beacon, so nothing else writes the
+  # ledger here. Seed three unclosed rows AHEAD of the arm's own row, so the close
+  # rewrite (which takes the last match) closes the arm's row and leaves these:
+  # one this arm published and left open, one carrying its pid under a start stamp
+  # from a predecessor that held the pid before it, and one from another arm.
+  {
+    printf 'arm_pid=%s\twatcher_pid=%s\torigin=started\tstarted_at=%s\tended_at=0\texit_code=open\tsignal=none\treason=cycle-open\tbeacon_age=0\tlock_before=pid:none|identity:none\tlock_after=pending\tsuccessor=started:4242\n' \
+      "$armpid" "$peer" "$published"
+    printf 'arm_pid=%s\twatcher_pid=%s\torigin=started\tstarted_at=111\tended_at=0\texit_code=open\tsignal=none\treason=cycle-open\tbeacon_age=0\tlock_before=pid:none|identity:none\tlock_after=pending\tsuccessor=none\n' \
+      "$armpid" "$peer"
+    printf 'arm_pid=%s\twatcher_pid=%s\torigin=started\tstarted_at=222\tended_at=0\texit_code=open\tsignal=none\treason=cycle-open\tbeacon_age=0\tlock_before=pid:none|identity:none\tlock_after=pending\tsuccessor=none\n' \
+      "$foreign" "$peer"
+    cat "$ledger"
+  } > "$dir/seeded-ledger" && mv "$dir/seeded-ledger" "$ledger"
+
+  touch "$state/.last-watcher-beat"
+  i=0
+  while [ "$i" -lt 80 ]; do
+    grep -qF "watcher: attached pid=$peer" "$armout" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  grep -qF "watcher: attached pid=$peer" "$armout" \
+    || fail "arm did not attach to the peer watcher: $(cat "$armout")"
+  i=0
+  while [ "$i" -lt 80 ]; do
+    grep -q 'exit_code=superseded' "$ledger" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  stranded=$(grep 'successor=started:4242' "$ledger" || true)
+  case "$stranded" in
+    *"exit_code=superseded"*"reason=cycle-superseded"*"successor=started:4242") : ;;
+    *) fail "the next cycle did not retire the row this arm left open: $stranded" ;;
+  esac
+  case "$stranded" in
+    *"ended_at=0"$'\t'*) fail "the retired row kept its open ended_at stamp: $stranded" ;;
+  esac
+  case "$stranded" in
+    "arm_pid=$armpid"$'\t'"watcher_pid=$peer"$'\t'"origin=started"$'\t'"started_at=$published"$'\t'*) : ;;
+    *) fail "retiring the stranded row rewrote the cycle it describes: $stranded" ;;
+  esac
+  recycled=$(grep 'started_at=111' "$ledger" || true)
+  case "$recycled" in
+    *"exit_code=open"*"reason=cycle-open"*) : ;;
+    *) fail "a predecessor's kill evidence under this recycled pid was rewritten: $recycled" ;;
+  esac
+  surviving=$(grep "^arm_pid=$foreign"$'\t' "$ledger" || true)
+  case "$surviving" in
+    *"exit_code=open"*"reason=cycle-open"*) : ;;
+    *) fail "another arm's unclosed kill evidence was rewritten: $surviving" ;;
+  esac
+
+  kill "$peer" 2>/dev/null || true
+  wait "$peer" 2>/dev/null || true
+  wait_for_exit "$armpid" 100
+  status=$?
+  [ "$status" -ne 0 ] && [ "$status" -ne 124 ] \
+    || fail "attached arm did not fail after its peer died (status $status): $(cat "$armout")"
+  open_rows=$(grep "^arm_pid=$armpid"$'\t' "$ledger" | grep 'exit_code=open' | grep -cv 'started_at=111' || true)
+  [ "$open_rows" -eq 0 ] || fail "the exited arm left $open_rows of its own rows unclosed"
+  grep -q 'started_at=111.*exit_code=open' "$ledger" \
+    || fail "the exiting arm rewrote a predecessor's kill evidence under its recycled pid"
+  ! grep -v '^arm_pid=.*watcher_pid=.*started_at=.*ended_at=.*exit_code=.*signal=.*reason=.*beacon_age=.*lock_before=.*lock_after=.*successor=' "$ledger" | grep . >/dev/null \
+    || fail "retiring a stranded row broke the ledger field order"
+  pass "an arm retires only the open rows it published and leaves other arms' untouched"
+}
+
 test_stopped_watcher_is_live_but_stale_then_exit_is_classified() {
   local dir state fakebin armout armpid watcher_pid i status
   dir=$(make_case stopped-watcher)
@@ -982,4 +1210,7 @@ test_arm_propagates_immediate_wake_before_confirmation
 test_arm_waits_for_peer_beacon_after_child_stands_down
 test_arm_fails_loud_when_no_fresh_watcher_confirmable
 test_cycle_exit_ledger_links_successor_and_stays_bounded
+test_killed_cycle_leaves_an_unclosed_ledger_record
+test_open_ledger_rows_stay_bounded_under_repeated_kills
+test_arm_retires_its_own_stranded_open_row
 test_stopped_watcher_is_live_but_stale_then_exit_is_classified

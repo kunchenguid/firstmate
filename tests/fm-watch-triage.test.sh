@@ -158,7 +158,7 @@ test_classifier_primitives() {
     && fail "FM_CAPTAIN_RE override bypassed paused: suppression"
   FM_CAPTAIN_RE='custom-verb:' status_is_captain_relevant "custom-verb: x" \
     || fail "nonterminal suppression weakened custom bare-line behavior"
-  printf 'needs-decision: should docs mention [key=prose]?\nneeds-decision [key=q1]: real choice\nresolved: docs still mention [key=q1]\nneeds-decision [key=bad key]: malformed\n' > "$state/keys.status"
+  printf 'needs-decision: should docs mention [key=prose]?\nneeds-decision [key=q1]: real choice\nresolved: docs still mention [key=q1] in the note\nneeds-decision [key=bad key]: malformed\n' > "$state/keys.status"
   open=$(status_open_decisions "$state/keys.status")
   printf '%s' "$open" | grep -F $'q1\t' >/dev/null \
     || fail "a key token in resolved note prose closed the keyed decision"
@@ -189,6 +189,49 @@ EOF
   [ -z "$(status_open_activities "$state/legacy-activity.status")" ] \
     || fail "a legacy terminal event did not supersede the default working phase"
   pass "classifier primitives: keyed decisions and activity phases, captain relevance, window-to-task, and overrides"
+}
+
+# _fm_decision_key positions. The canonical token sits before the colon, but the
+# ordinary crewmate scaffold long said only "add the same [key=<slug>]" without
+# fixing the position, so status files on disk carry it after the colon. Reading
+# only the prefix folded every such line onto "default", where a second concurrent
+# decision dropped the first from the open set - a captain decision silently
+# vanishing from the durable inventory while appearing answered. The trailing
+# token is the only other accepted position, so a key quoted mid-note stays prose.
+test_decision_key_positions() {
+  local dir state open
+  dir=$(make_case decision-key-positions); state="$dir/state"
+  [ "$(_fm_decision_key 'needs-decision [key=alpha]: pick A or B')" = alpha ] \
+    || fail "the canonical key before the colon was not read"
+  [ "$(_fm_decision_key 'needs-decision: pick A or B [key=alpha]')" = alpha ] \
+    || fail "a trailing key token written after the colon was not read"
+  [ "$(_fm_decision_key 'needs-decision: pick C or D [key=beta]')" = beta ] \
+    || fail "a second trailing key token written after the colon was not read"
+  [ "$(_fm_decision_key 'needs-decision [key=alpha]: pick B or C [key=beta]')" = alpha ] \
+    || fail "the key before the colon did not win over a trailing token"
+  [ "$(_fm_decision_key 'resolved: the [key=<slug>] token belongs before the colon')" = default ] \
+    || fail "a key token quoted mid-note changed the decision key"
+  [ "$(_fm_decision_key 'resolved: documented the token as [key=<slug>]')" = default ] \
+    || fail "a malformed trailing token was read as a key instead of prose"
+  _fm_decision_key 'needs-decision [key=bad key]: malformed' >/dev/null \
+    && fail "an invalid key slug was accepted"
+  [ "$(status_line_verb 'needs-decision: pick A or B [key=alpha]')" = needs-decision ] \
+    || fail "a trailing key token disturbed the leading verb"
+
+  printf 'needs-decision: pick A or B [key=alpha]\nneeds-decision: pick C or D [key=beta]\n' > "$state/concurrent.status"
+  open=$(status_open_decisions "$state/concurrent.status")
+  printf '%s' "$open" | grep -F $'alpha\tneeds-decision\tpick A or B [key=alpha]' >/dev/null \
+    || fail "the first of two concurrent after-colon decisions was dropped from the open set"
+  printf '%s' "$open" | grep -F $'beta\tneeds-decision\tpick C or D [key=beta]' >/dev/null \
+    || fail "the second of two concurrent after-colon decisions was dropped from the open set"
+
+  printf 'needs-decision: pick A or B [key=alpha]\nneeds-decision: pick C or D [key=beta]\nresolved: went with A [key=alpha]\n' > "$state/resolve.status"
+  open=$(status_open_decisions "$state/resolve.status")
+  printf '%s' "$open" | grep -F $'beta\t' >/dev/null \
+    || fail "resolving one after-colon decision closed the unrelated concurrent one"
+  printf '%s' "$open" | grep -F $'alpha\t' >/dev/null \
+    && fail "a keyed after-colon resolution did not close its own decision"
+  pass "_fm_decision_key: a key after the colon resolves, the canonical position wins, and concurrent decisions stay distinct"
 }
 
 # crew_is_provably_working: the absorb-only-when-provably-working predicate. It is
@@ -1274,6 +1317,7 @@ test_signal_reason_is_actionable_classifier
 test_stale_is_terminal_classifier
 test_scan_captain_relevant_statuses_classifier
 test_classifier_primitives
+test_decision_key_positions
 test_crew_is_provably_working_classifier
 test_status_is_paused_classifier
 test_crew_absorb_class_classifier
