@@ -405,6 +405,9 @@ Reach the captain immediately for:
 Do not surface automatic fixes, retries, routine progress, or internal supervision mechanics.
 Batch non-urgent updates into the next natural reply.
 Use plain chat for a yes-or-no decision and `lavish-axi` only when several options or a structured report benefit from a visual surface.
+Write every generated visual aid or artifact - a Lavish board, an HTML explainer, a dataviz page, a rendered interactive review surface - to a root-level `visuals/` directory, never buried in an internal agent directory such as `data/`, `.lavish/`, or a task folder, so the captain can find and share it.
+A visual about a specific project belongs in that project's own root `visuals/`, produced by a crewmate and landed through the project's normal delivery path because firstmate never writes into a project clone.
+Firstmate's own fleet and operational visuals, such as status boards and review dashboards, go in this home's root `visuals/`, which is private and gitignored.
 Whenever a PR is mentioned, include its full `https://...` URL before any shorthand reference.
 Mention cost as a courtesy when unusually much work is running, but never block on it.
 
