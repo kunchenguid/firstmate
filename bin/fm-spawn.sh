@@ -1201,41 +1201,78 @@ EOF
       ;;
     cursor*)
       # Cursor Agent loads project hooks from <worktree>/.cursor/hooks.json
-      # (verified 2026-07-23). Never clobber an existing hooks.json: merge a stop
-      # entry when one is already present, or create hooks.json only when absent.
-      # Markers let teardown reverse exactly what we did without deleting
-      # unrelated Cursor hooks.
+      # (verified 2026-07-23). Owned stop command is the collision-proof path
+      # .cursor/hooks/fm-firstmate-turn-end.sh (exact match only). Legacy
+      # .cursor/hooks/fm-turn-end.sh from earlier adapters is reconciled before
+      # install. Never clobber an existing hooks.json: merge when present, or
+      # create only when absent. Marker + optional byte backup let teardown
+      # reverse exactly what we did without deleting unrelated Cursor hooks.
+      CURSOR_HOOK_CMD='.cursor/hooks/fm-firstmate-turn-end.sh'
+      CURSOR_HOOK_LEGACY_CMD='.cursor/hooks/fm-turn-end.sh'
+      CURSOR_HOOK_SCRIPT="$WT/.cursor/hooks/fm-firstmate-turn-end.sh"
+      CURSOR_HOOK_LEGACY_SCRIPT="$WT/.cursor/hooks/fm-turn-end.sh"
+      CURSOR_HOOKS_JSON="$WT/.cursor/hooks.json"
+      CURSOR_HOOKS_BAK="$WT/.fm-cursor-hooks.json.bak"
       mkdir -p "$WT/.cursor/hooks"
-      cat > "$WT/.cursor/hooks/fm-turn-end.sh" <<EOF
+      # Reconcile legacy ownership before installing the current generation.
+      rm -f "$CURSOR_HOOK_LEGACY_SCRIPT"
+      if [ -f "$CURSOR_HOOKS_JSON" ] && command -v jq >/dev/null 2>&1 \
+        && jq -e 'type == "object"' "$CURSOR_HOOKS_JSON" >/dev/null 2>&1 \
+        && jq -e --arg legacy "$CURSOR_HOOK_LEGACY_CMD" '
+            (.hooks.stop // []) | map(.command // "") | any(. == $legacy)
+          ' "$CURSOR_HOOKS_JSON" >/dev/null 2>&1; then
+        tmp=$(mktemp "$CURSOR_HOOKS_JSON.XXXXXX") || {
+          echo "error: cannot stage Cursor legacy-hook cleanup for $ID" >&2
+          exit 1
+        }
+        if ! jq --arg legacy "$CURSOR_HOOK_LEGACY_CMD" '
+            .hooks.stop = ((.hooks.stop // []) | map(select((.command // "") != $legacy)))
+            | if ((.hooks.stop // []) | length) == 0 then del(.hooks.stop) else . end
+          ' "$CURSOR_HOOKS_JSON" > "$tmp"; then
+          rm -f "$tmp"
+          echo "error: cannot remove legacy Cursor turn-end hook for $ID" >&2
+          exit 1
+        fi
+        mv "$tmp" "$CURSOR_HOOKS_JSON"
+      fi
+      cat > "$CURSOR_HOOK_SCRIPT" <<EOF
 #!/usr/bin/env bash
 set -u
 touch $(shell_quote "$TURNEND") 2>/dev/null || true
 printf '%s\n' '{}'
 EOF
-      chmod +x "$WT/.cursor/hooks/fm-turn-end.sh"
+      chmod +x "$CURSOR_HOOK_SCRIPT"
+      exclude_path '.cursor/hooks/fm-firstmate-turn-end.sh'
       exclude_path '.cursor/hooks/fm-turn-end.sh'
-      if [ -f "$WT/.cursor/hooks.json" ]; then
+      if [ -f "$CURSOR_HOOKS_JSON" ]; then
         if command -v jq >/dev/null 2>&1 \
-          && jq -e 'type == "object"' "$WT/.cursor/hooks.json" >/dev/null 2>&1; then
-          if ! jq -e '
+          && jq -e 'type == "object"' "$CURSOR_HOOKS_JSON" >/dev/null 2>&1; then
+          if ! jq -e --arg cmd "$CURSOR_HOOK_CMD" '
               (.hooks.stop // [])
               | map(.command // "")
-              | any(contains("fm-turn-end.sh"))
-            ' "$WT/.cursor/hooks.json" >/dev/null 2>&1; then
-            tmp=$(mktemp "$WT/.cursor/hooks.json.XXXXXX") || {
+              | any(. == $cmd)
+            ' "$CURSOR_HOOKS_JSON" >/dev/null 2>&1; then
+            if [ ! -f "$CURSOR_HOOKS_BAK" ]; then
+              cp "$CURSOR_HOOKS_JSON" "$CURSOR_HOOKS_BAK" || {
+                echo "error: cannot backup Cursor hooks.json before merge for $ID" >&2
+                exit 1
+              }
+              exclude_path '.fm-cursor-hooks.json.bak'
+            fi
+            tmp=$(mktemp "$CURSOR_HOOKS_JSON.XXXXXX") || {
               echo "error: cannot stage Cursor hooks merge for $ID" >&2
               exit 1
             }
-            if ! jq '
+            if ! jq --arg cmd "$CURSOR_HOOK_CMD" '
                 .version = (.version // 1)
                 | .hooks = (.hooks // {})
-                | .hooks.stop = ((.hooks.stop // []) + [{"command":".cursor/hooks/fm-turn-end.sh","loop_limit":0}])
-              ' "$WT/.cursor/hooks.json" > "$tmp"; then
+                | .hooks.stop = ((.hooks.stop // []) + [{"command":$cmd,"loop_limit":0}])
+              ' "$CURSOR_HOOKS_JSON" > "$tmp"; then
               rm -f "$tmp"
               echo "error: cannot merge Cursor turn-end hook into existing .cursor/hooks.json for $ID" >&2
               exit 1
             fi
-            mv "$tmp" "$WT/.cursor/hooks.json"
+            mv "$tmp" "$CURSOR_HOOKS_JSON"
           fi
           printf 'merged\n' > "$WT/.fm-cursor-turnend"
         else
@@ -1243,8 +1280,8 @@ EOF
           exit 1
         fi
       else
-        cat > "$WT/.cursor/hooks.json" <<'EOF'
-{"version":1,"hooks":{"stop":[{"command":".cursor/hooks/fm-turn-end.sh","loop_limit":0}]}}
+        cat > "$CURSOR_HOOKS_JSON" <<EOF
+{"version":1,"hooks":{"stop":[{"command":"$CURSOR_HOOK_CMD","loop_limit":0}]}}
 EOF
         printf 'created\n' > "$WT/.fm-cursor-turnend"
         exclude_path '.cursor/hooks.json'

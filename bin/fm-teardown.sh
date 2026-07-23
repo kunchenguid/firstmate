@@ -198,26 +198,34 @@ remove_grok_turnend_auth() {
 
 # Reverse firstmate-installed Cursor turn-end hooks without deleting unrelated
 # project Cursor hooks. Marker modes: created (we wrote hooks.json) or merged
-# (we appended a stop entry to an existing hooks.json).
+# (we appended a stop entry to an existing hooks.json). Owned stop command is
+# .cursor/hooks/fm-firstmate-turn-end.sh; legacy .cursor/hooks/fm-turn-end.sh is
+# also removed. Prefer restoring the pre-merge byte backup when present.
 remove_cursor_turnend() {
   local wt=$1 mode tmp
   [ -n "$wt" ] && [ -d "$wt" ] || return 0
-  rm -f "$wt/.cursor/hooks/fm-turn-end.sh"
+  rm -f "$wt/.cursor/hooks/fm-firstmate-turn-end.sh" \
+    "$wt/.cursor/hooks/fm-turn-end.sh"
   mode=$(cat "$wt/.fm-cursor-turnend" 2>/dev/null || true)
   case "$mode" in
     created)
       rm -f "$wt/.cursor/hooks.json"
       ;;
     merged)
-      if [ -f "$wt/.cursor/hooks.json" ] && command -v jq >/dev/null 2>&1; then
+      if [ -f "$wt/.fm-cursor-hooks.json.bak" ]; then
+        mv "$wt/.fm-cursor-hooks.json.bak" "$wt/.cursor/hooks.json"
+      elif [ -f "$wt/.cursor/hooks.json" ] && command -v jq >/dev/null 2>&1; then
         tmp=$(mktemp "$wt/.cursor/hooks.json.XXXXXX") || true
         if [ -n "${tmp:-}" ] \
           && jq '
               .hooks.stop = (
                 ((.hooks.stop // [])
-                 | map(select((.command // "") | contains("fm-turn-end.sh") | not)))
+                 | map(select(
+                     ((.command // "") != ".cursor/hooks/fm-firstmate-turn-end.sh")
+                     and ((.command // "") != ".cursor/hooks/fm-turn-end.sh")
+                   )))
               )
-              | if (.hooks.stop | length) == 0 then del(.hooks.stop) else . end
+              | if ((.hooks.stop // []) | length) == 0 then del(.hooks.stop) else . end
             ' "$wt/.cursor/hooks.json" > "$tmp" 2>/dev/null; then
           mv "$tmp" "$wt/.cursor/hooks.json"
         else
@@ -226,7 +234,39 @@ remove_cursor_turnend() {
       fi
       ;;
   esac
-  rm -f "$wt/.fm-cursor-turnend"
+  rm -f "$wt/.fm-cursor-turnend" "$wt/.fm-cursor-hooks.json.bak"
+}
+
+# Non-mutating porcelain filter: drop only exact firstmate-owned Cursor/Claude
+# hook artifacts so validate_worktree_teardown_safety can run before destructive
+# remove_cursor_turnend. Staged or tracked unlanded .cursor/hooks.json is kept.
+filter_owned_hook_dirtiness() {
+  local wt=$1 mode path status
+  mode=$(cat "$wt/.fm-cursor-turnend" 2>/dev/null || true)
+  while IFS= read -r line || [ -n "${line:-}" ]; do
+    [ -n "${line:-}" ] || continue
+    status=${line:0:2}
+    path=${line:3}
+    case "$path" in
+      .claude/*|.fm-grok-turnend|.fm-cursor-turnend|.fm-cursor-hooks.json.bak|\
+      .cursor/hooks/fm-firstmate-turn-end.sh|.cursor/hooks/fm-turn-end.sh)
+        [ "$status" = '??' ] && continue
+        ;;
+      .cursor/hooks.json)
+        if [ "$status" = '??' ] && [ "$mode" = created ]; then
+          # Staged/index presence must still refuse teardown.
+          if ! git -C "$wt" ls-files --error-unmatch -- .cursor/hooks.json >/dev/null 2>&1; then
+            continue
+          fi
+        elif [ "$mode" = merged ] && [ -f "$wt/.fm-cursor-hooks.json.bak" ]; then
+          case "$status" in
+            ' M'|'M '|'MM'|'AM'|'MA') continue ;;
+          esac
+        fi
+        ;;
+    esac
+    printf '%s\n' "$line"
+  done
 }
 
 validate_pr_poll_cleanup() {
@@ -705,7 +745,7 @@ validate_worktree_teardown_safety() {
     echo "Restore the git index state, or get the captain's explicit OK to discard, then --force." >&2
     return 1
   fi
-  dirty=$(printf '%s\n' "$dirty_raw" | grep -vE '^\?\? (\.claude/|\.cursor/|\.fm-grok-turnend$|\.fm-cursor-turnend$)' | head -1 || true)
+  dirty=$(printf '%s\n' "$dirty_raw" | filter_owned_hook_dirtiness "$WT" | head -1 || true)
 
   if ! unpushed_raw=$(git -C "$WT" log --oneline HEAD --not --remotes -- 2>/dev/null); then
     if worktree_safety_blocked_by_lock "commits not on a remote"; then

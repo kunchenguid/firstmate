@@ -102,10 +102,11 @@ SH
   expect_code 0 "$status" "cursor spawn should succeed"
   assert_contains "$out" "spawned $id harness=cursor" "cursor spawn did not report success"
   assert_present "$wt/.cursor/hooks.json" "cursor turn-end hooks.json missing"
-  assert_present "$wt/.cursor/hooks/fm-turn-end.sh" "cursor turn-end script missing"
+  assert_present "$wt/.cursor/hooks/fm-firstmate-turn-end.sh" "cursor turn-end script missing"
+  assert_absent "$wt/.cursor/hooks/fm-turn-end.sh" "legacy cursor turn-end script should not be installed"
   assert_present "$wt/.fm-cursor-turnend" "cursor turn-end ownership marker missing"
   assert_grep 'created' "$wt/.fm-cursor-turnend" "fresh worktree should mark hooks.json as created"
-  assert_grep 'fm-turn-end.sh' "$wt/.cursor/hooks.json" "hooks.json does not point at turn-end script"
+  assert_grep 'fm-firstmate-turn-end.sh' "$wt/.cursor/hooks.json" "hooks.json does not point at owned turn-end script"
   pass "cursor spawn installs project-local turn-end hook"
 }
 
@@ -146,9 +147,93 @@ SH
     "$SPAWN" "$id" "$proj" cursor 2>&1) || status=$?
   expect_code 0 "$status" "cursor merge spawn should succeed"
   assert_grep 'keep-me' "$wt/.cursor/hooks.json" "existing Cursor hooks were destroyed"
-  assert_grep 'fm-turn-end.sh' "$wt/.cursor/hooks.json" "merged stop hook missing"
+  assert_grep 'fm-firstmate-turn-end.sh' "$wt/.cursor/hooks.json" "merged stop hook missing"
   assert_grep 'merged' "$wt/.fm-cursor-turnend" "merge ownership marker missing"
+  assert_present "$wt/.fm-cursor-hooks.json.bak" "merge should keep a pre-merge hooks backup"
+  assert_grep 'keep-me' "$wt/.fm-cursor-hooks.json.bak" "backup should preserve pre-merge hooks"
   pass "cursor spawn merges into existing hooks.json"
+}
+
+test_cursor_spawn_reconciles_legacy_hook() {
+  local case_dir home proj wt fakebin id out status=0
+  case_dir="$TMP_ROOT/spawn-legacy"
+  home="$case_dir/home"
+  proj="$case_dir/project"
+  wt="$case_dir/wt"
+  id="cursor-legacy-x1"
+  fakebin=$(fm_fakebin "$case_dir/fake")
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "$*" in
+  *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
+esac
+case "${1:-}" in
+  display-message) printf 'firstmate\n'; exit 0 ;;
+  list-windows) exit 0 ;;
+  has-session|new-session|new-window|send-keys|kill-window) exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/tmux"
+  fm_fake_exit0 "$fakebin" treehouse gh-axi gh cursor-agent
+  mkdir -p "$home/data/$id" "$home/projects" "$home/state" "$home/config"
+  printf 'brief\n' > "$home/data/$id/brief.md"
+  fm_git_worktree "$proj" "$wt" "fm/$id"
+  mkdir -p "$wt/.cursor/hooks"
+  printf '%s\n' '#!/bin/sh' > "$wt/.cursor/hooks/fm-turn-end.sh"
+  chmod +x "$wt/.cursor/hooks/fm-turn-end.sh"
+  printf '%s\n' '{"version":1,"hooks":{"stop":[{"command":".cursor/hooks/fm-turn-end.sh","loop_limit":0}],"sessionStart":[{"command":"echo keep-me"}]}}' \
+    > "$wt/.cursor/hooks.json"
+  printf 'merged\n' > "$wt/.fm-cursor-turnend"
+  touch "$home/state/.last-watcher-beat"
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
+    PATH="$fakebin:$PATH" \
+    "$SPAWN" "$id" "$proj" cursor 2>&1) || status=$?
+  expect_code 0 "$status" "legacy reconcile spawn should succeed"
+  assert_absent "$wt/.cursor/hooks/fm-turn-end.sh" "legacy script must be removed on respawn"
+  assert_present "$wt/.cursor/hooks/fm-firstmate-turn-end.sh" "current owned script must be installed"
+  assert_grep 'fm-firstmate-turn-end.sh' "$wt/.cursor/hooks.json" "current stop command missing after reconcile"
+  if grep -q 'fm-turn-end.sh"' "$wt/.cursor/hooks.json"; then
+    fail "legacy stop command left after reconcile"
+  fi
+  assert_grep 'keep-me' "$wt/.cursor/hooks.json" "unrelated hooks destroyed during legacy reconcile"
+  # Teardown must leave neither generation behind.
+  # shellcheck source=bin/fm-teardown.sh
+  remove_cursor_turnend() { :; }
+  # Call the real teardown helper by sourcing the function definition.
+  # shellcheck disable=SC1090
+  eval "$(sed -n '/^remove_cursor_turnend()/,/^}/p' "$ROOT/bin/fm-teardown.sh")"
+  remove_cursor_turnend "$wt"
+  assert_absent "$wt/.cursor/hooks/fm-firstmate-turn-end.sh" "teardown left current script"
+  assert_absent "$wt/.cursor/hooks/fm-turn-end.sh" "teardown left legacy script"
+  if grep -q 'fm-firstmate-turn-end.sh\|fm-turn-end.sh' "$wt/.cursor/hooks.json" 2>/dev/null; then
+    fail "teardown left owned stop commands in hooks.json"
+  fi
+  assert_grep 'keep-me' "$wt/.cursor/hooks.json" "teardown destroyed unrelated hooks"
+  pass "cursor spawn reconciles legacy hook then teardown cleans both generations"
+}
+
+test_cursor_teardown_refuses_staged_created_hooks() {
+  local case_dir wt mode_out
+  case_dir="$TMP_ROOT/teardown-staged"
+  wt="$case_dir/wt"
+  mkdir -p "$wt/.cursor/hooks"
+  fm_git_identity fmtest fmtest@example.invalid
+  git init -q "$wt"
+  git -C "$wt" commit -q --allow-empty -m init
+  printf '%s\n' '{"version":1,"hooks":{"stop":[{"command":".cursor/hooks/fm-firstmate-turn-end.sh","loop_limit":0}]}}' \
+    > "$wt/.cursor/hooks.json"
+  printf 'created\n' > "$wt/.fm-cursor-turnend"
+  git -C "$wt" add .cursor/hooks.json
+  # shellcheck disable=SC1090
+  eval "$(sed -n '/^filter_owned_hook_dirtiness()/,/^}/p' "$ROOT/bin/fm-teardown.sh")"
+  mode_out=$(git -C "$wt" status --porcelain | filter_owned_hook_dirtiness "$wt")
+  assert_contains "$mode_out" '.cursor/hooks.json' "staged created hooks.json must remain dirty"
+  pass "cursor teardown filter keeps staged created hooks.json"
 }
 
 test_cursor_turnend_adapter_encodes_operational_input() {
@@ -198,5 +283,7 @@ test_cursor_arm_check_deny_shape
 test_cursor_sessionstart_nudge_wrapper
 test_cursor_spawn_installs_turnend_hook
 test_cursor_spawn_merges_existing_hooks
+test_cursor_spawn_reconciles_legacy_hook
+test_cursor_teardown_refuses_staged_created_hooks
 test_cursor_turnend_adapter_encodes_operational_input
 test_tracked_cursor_hooks_register_primary_adapters

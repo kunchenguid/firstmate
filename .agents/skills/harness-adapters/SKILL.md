@@ -342,7 +342,7 @@ For model / effort axes, see the [launch-profile-axes table](#launch-profile-axe
 Directory trust: `--trust` on launch skips the workspace trust prompt.
 `fm-spawn` always passes it for crewmates.
 
-Turn-end hook (crewmate): project-local `.cursor/hooks.json` with a `stop` command that touches `state/<id>.turn-ended` and returns `{}`, with `loop_limit: 0` so it never auto-follows up.
+Turn-end hook (crewmate): project-local `.cursor/hooks.json` with exact owned stop command `.cursor/hooks/fm-firstmate-turn-end.sh` that touches `state/<id>.turn-ended` and returns `{}`, with `loop_limit: 0` so it never auto-follows up.
 Installed by `fm-spawn` and gitignored via info/exclude like the other harnesses' worktree hooks.
 
 **Primary-session guard fact (verified 2026-07-23, cursor-agent 2026.07.20-8cc9c0b).**
@@ -353,5 +353,7 @@ The firstmate PRIMARY's own `.cursor/hooks.json` registers:
 
 Cursor stop hooks are passive for exit status; `followup_message` is the forced-continuation lever and must carry a typed `turn-end-guard` operational input from `bin/fm-operational-input.sh` (same envelope as Grok/OpenCode/Pi).
 Cursor's primary watcher protocol is Claude-shaped background-notify around `bin/fm-watch-arm.sh` via a Cursor Agent background Shell task.
+Detection, lock, spawn, busy signature, sessionStart, beforeShellExecution seatbelt, and the unit-tested typed stop contract are verified for dispatch.
+Residual (2026-07-23): live interactive primary `stop` -> `followup_message` delivery into a second model turn is unit-covered via the typed operational-input contract, not yet confirmed end-to-end in a live Cursor TUI second turn.
 Known gap (tmux agent liveness): Cursor's foreground process name is often `MainThread`, so `fm_backend_tmux_agent_alive` may report `unknown` rather than `alive`; herdr liveness via registered agent status is unaffected.
 
