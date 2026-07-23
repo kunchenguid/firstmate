@@ -210,7 +210,7 @@ The verified adapter knowledge - busy signatures, interrupt and exit commands, s
 Launch mechanics, including the verified command templates, live in [`bin/fm-spawn.sh`](../bin/fm-spawn.sh).
 Primary-session turn-end guard integrations for verified harnesses are tracked as repo-level hook files and documented in [`docs/turnend-guard.md`](turnend-guard.md).
 Primary-session watcher wake protocols are rendered at session start by [`bin/fm-supervision-instructions.sh`](../bin/fm-supervision-instructions.sh) from [`docs/supervision-protocols/`](supervision-protocols/).
-Claude and Grok use background-notify cycles, Codex uses bounded foreground checkpoints, Pi uses its two tracked primary extensions, and OpenCode uses its TUI plugin.
+Claude, Grok, and omp use background-notify cycles, Codex uses bounded foreground checkpoints, Pi uses its two tracked primary extensions, and OpenCode uses its TUI plugin.
 `config/crew-harness` is a local, gitignored file containing one adapter name for crewmate and scout launches.
 When it is absent or contains `default`, crewmates mirror the firstmate's own harness.
 `config/secondmate-harness` is a separate local, gitignored file containing the adapter the primary uses to launch secondmate agents, optionally followed by model and effort tokens on the same line.
@@ -233,6 +233,7 @@ Use that opt-out only for homes whose needed MCP servers are local and reliable 
 For grok, `fm-spawn.sh` installs one firstmate-owned global turn-end hook under `$GROK_HOME/hooks/`, or `~/.grok/hooks/` when `GROK_HOME` is unset, and drops a per-task `.fm-grok-turnend` pointer in the worktree, with teardown removing the task token and pointer.
 For omp, `fm-spawn.sh` writes a firstmate-owned per-task extension under `state/<id>.omp-ext.ts` and passes it with `--hook` for crewmate and scout launches, with teardown removing the state extension.
 For Pi secondmate launches, `fm-spawn.sh` starts Pi with `-e` pointed at the secondmate home's own tracked `.pi/extensions/fm-primary-pi-watch.ts` and `.pi/extensions/fm-primary-turnend-guard.ts`, both already present from the secondmate home's git worktree.
+For the claude harness, the optional `config/claude-rotation` file rotates OAuth accounts across launches; see "Claude OAuth rotation" below.
 
 ## Crew dispatch profiles (config/crew-dispatch.json)
 
@@ -283,7 +284,31 @@ Absent this file, spawn and dispatch behavior is unchanged.
 The current implementation is substrate only: `bin/fm-capacity-classify.sh`, `bin/fm-capacity-cooldown.sh`, `bin/fm-capacity-route.sh`, `bin/fm-rehome-quota-wall.sh`, `bin/fm-host-pressure.sh`, and `bin/fm-shared-github-quota.sh`.
 `host-pressure=on` enables bounded memory, disk-floor, and active-task spawn backpressure; without that line, even a present config file does not change spawn pressure behavior.
 `route=<harness>|<account-or-provider>|<profile>|<model>|<effort>` lines define optional verified routes for the manual route selector.
-See [`docs/capacity-failover.md`](capacity-failover.md) for the classifier signatures, cooldown record format, route-selection contract, manual rehome contract, host-pressure thresholds, shared GitHub quota guard, and opposite-harness constraint.
+Separately, `bin/fm-lane-governor.sh` is an always-on spawn guard (not gated by this file) that caps active workers per home and refuses spawns under swap/RAM/orphan pressure; set `FM_LANE_GOVERNOR=0` to bypass it.
+See [`docs/capacity-failover.md`](capacity-failover.md) for the classifier signatures, cooldown record format, route-selection contract, manual rehome contract, lane-governor thresholds, host-pressure thresholds, shared GitHub quota guard, and opposite-harness constraint.
+
+## Claude OAuth rotation (config/claude-rotation)
+
+`config/claude-rotation` is an optional local, private file (keep it out of version control) that turns on firstmate's native Claude Code OAuth account rotation for the `claude` harness only.
+When the file is absent, spawning is unchanged and no rotation happens.
+When the file is present, `fm-spawn.sh` rotates each new `claude`-harness launch across the OAuth account files in `~/.cli-proxy-api/claude-*.json` (override the directory with `FM_CLAUDE_ACCOUNT_DIR`), selecting through the shared helper `bin/fm-claude-accounts.sh`.
+A one-shot `FM_CLAUDE_ROTATION=1` opts a single spawn in without the file; the file may also carry an explicit `enabled`/`disabled` first token.
+
+The file is key-value, one setting per non-comment line:
+
+```text
+policy=round-robin              # round-robin (default) or first-available
+account_dir=/absolute/path      # optional; overrides ~/.cli-proxy-api
+refresh_margin_seconds=300      # refresh a token this many seconds before expiry
+cooldown_seconds=1800           # how long a rate-limited account is skipped
+refresh_url=https://claude.ai/v1/oauth/token   # optional token refresh endpoint
+client_id=<oauth-client-id>     # optional refresh client id
+```
+
+Rotation records identity only (never a token) into task meta as `claude_oauth_account`, `claude_oauth_account_id`, and `claude_oauth_rotation_policy`.
+Its rotation state lives under the home's `state/` as `.claude-rotation-cursor` (round-robin position), `.claude-rotation-cooling/` (per-account cooldown markers), and `.claude-rotation-locks/` (per-account selection mutex).
+Like `config/backend`, this is a per-home setting and is not inherited by secondmate homes.
+`bin/fm-claude-accounts.sh` also exposes `list`, `select`, `exec`, `token`, and `cool` subcommands; its header owns the exact account-file schema and refresh mechanics.
 
 ## Toolchain
 
@@ -397,6 +422,40 @@ When an image is attached, the dry-run record uses compact `{media_type, bytes, 
 In dry-run, `fm-x-dismiss.sh` records `{request_id, endpoint:"dismiss"}` to the same outbox path, prints a `DRY RUN` summary, echoes the `request_id`, and exits 0.
 The live answer and follow-up bodies intentionally stay the same shape, including optional `image`; the relay distinguishes them by endpoint, and dismiss stays `{request_id}`.
 These paths need `jq` to build the JSON payload, but they run before token and network checks, so they need neither `FMX_PAIRING_TOKEN` nor `curl`.
+
+## Intake mode (config/intake.env / config/intake-sla.env)
+
+`config/intake.env` is an optional local, private file (keep it out of version control) that opts a home into intake mode.
+When it is absent, `bin/fm-intake-poll.sh` is a hard no-op, bootstrap removes any stale `state/intake.check.sh`, and behavior is unchanged.
+When it is present, bootstrap requires `jq`, arms a byte-static intake poll shim at `state/intake.check.sh` wired into the authenticated watcher check mechanism, and reports the result as an `INTAKE:` line.
+The poll refreshes a GitHub + Linear open-work picture, derives a backlog view, keeps working snapshots under `state/intake/`, and emits a watcher wake line only on actionable changes; its side effects are otherwise silent.
+
+`config/intake.env` is sourced as shell, so it sets `FM_*` variables. The poll's own defaults (from `bin/fm-intake-poll.sh`) are:
+
+```sh
+FM_GH_REPO=lindy-ai/lindy          # GitHub repo scanned for open work
+FM_GH_OWNER=lindy-ai
+FM_GH_USER=twaldin
+FM_GH_LIMIT=1000
+FM_INTAKE_GH_CMD=gh-axi            # GitHub CLI wrapper
+FM_INTAKE_LINEAR_ASSIGNEE=tim@lindy.ai
+FM_INTAKE_LINEAR_QUERY='assignee:$FM_INTAKE_LINEAR_ASSIGNEE state:!Done state:!Canceled state:!Duplicate'
+FM_INTAKE_LINEAR_ONCALL_LABEL='🚨 On Call'
+FM_INTAKE_BACKLOG_OUT=data/backlog.md   # derived backlog view target
+FM_INTAKE_BROKER_CMD=bin/fm-mcp-broker  # MCP broker used for Linear reads
+```
+
+`config/intake-sla.env` is an optional companion, sourced only when present, that sets per-lane warn/breach SLA thresholds.
+Durations accept an integer with an optional `h`/`m`/`s` suffix; a bare number is seconds.
+Its defaults are:
+
+```sh
+FM_INTAKE_ONCALL_WARN=18h    FM_INTAKE_ONCALL_BREACH=24h
+FM_INTAKE_REVIEW_WARN=24h    FM_INTAKE_REVIEW_BREACH=      # empty = disabled
+FM_INTAKE_NORMAL_WARN=       FM_INTAKE_NORMAL_BREACH=      # empty = disabled
+```
+
+`bin/fm-intake-status.sh` prints a compact read-only status from the latest snapshot (also usable as a tmux `status-right` overlay), and `bin/fm-intake-tui.sh` renders a read-only terminal view over the snapshot and fleet lanes.
 
 ## Environment variables
 

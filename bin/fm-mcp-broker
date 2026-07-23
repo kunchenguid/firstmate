@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Run the firstmate MCP auth broker.
-# Usage: fm-mcp-broker <connect|refresh|status|render|proxy|relay|call|verify> ...
+# Usage: fm-mcp-broker <connect|login|refresh|status|render|proxy|relay|call|verify> ...
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
