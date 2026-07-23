@@ -155,27 +155,29 @@ cmd_fire() {
     echo "error: osascript not found; cannot open a terminal" >&2
     exit 1
   }
-  local target_dir quoted_cd script
+  local target_dir script
   target_dir=$FM_HOME
-  quoted_cd=$(printf '%q' "$target_dir")
-  script=$(cat <<APPLESCRIPT
-tell application "Terminal"
-  activate
-  do script "cd $quoted_cd && exec claude"
-end tell
-delay 2.5
-tell application "System Events"
-  tell process "Terminal"
-    set frontmost to true
-    key code 36
-    delay 1
-    keystroke "hi"
-    key code 36
+  script=$(cat <<'APPLESCRIPT'
+on run argv
+  set targetDir to item 1 of argv
+  tell application "Terminal"
+    activate
+    do script "cd " & quoted form of targetDir & " && exec claude"
   end tell
-end tell
+  delay 2.5
+  tell application "System Events"
+    tell process "Terminal"
+      set frontmost to true
+      key code 36
+      delay 1
+      keystroke "hi"
+      key code 36
+    end tell
+  end tell
+end run
 APPLESCRIPT
 )
-  osascript -e "$script"
+  osascript -e "$script" -- "$target_dir"
 }
 
 case "${1:-}" in
