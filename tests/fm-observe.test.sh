@@ -180,14 +180,18 @@ run_collect >/dev/null || fail "collection without no-mistakes database failed"
 if ! python3 - "$DATA/observability.sqlite3" <<'PY'
 import sqlite3, sys
 c = sqlite3.connect(sys.argv[1])
-r = c.execute("SELECT first_pass_quality FROM runs WHERE task_id='observe-feature'").fetchone()
-assert r == (0,), r
+r = c.execute("""SELECT first_pass_quality,no_mistakes_runs,retries,outcome,
+                        quality_findings,quality_unresolved
+                   FROM runs WHERE task_id='observe-feature'""").fetchone()
+assert r == (0, 1, 0, 'landed', 1, 0), r
+assert c.execute("SELECT COUNT(*) FROM sessions WHERE source='no-mistakes'").fetchone()[0] == 1
+assert c.execute("SELECT COUNT(*) FROM evidence WHERE kind='no-mistakes-run'").fetchone()[0] == 1
 PY
 then
-  fail "unavailable no-mistakes database erased preserved first-pass quality"
+  fail "unavailable no-mistakes database erased reconciled lifecycle state"
 fi
 mv "$NM_DB.unavailable" "$NM_DB"
-pass "fm-observe: unavailable quality evidence preserves earliest first pass"
+pass "fm-observe: unavailable quality evidence preserves reconciled lifecycle state"
 
 python3 - "$STATE/observe-feature.status" <<'PY'
 import sys

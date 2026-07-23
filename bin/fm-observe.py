@@ -625,10 +625,10 @@ def collect_no_mistakes(
     connection: sqlite3.Connection,
     run: dict[str, Any],
     database: Path,
-) -> tuple[int, Optional[int], Optional[str], Optional[str], Optional[str], Optional[int]]:
+) -> tuple[bool, int, Optional[int], Optional[str], Optional[str], Optional[str], Optional[int]]:
     source = read_only_sqlite(database)
     if source is None:
-        return 0, None, None, None, None, None
+        return False, 0, None, None, None, None, None
     branch = run.get("branch_ref") or f"fm/{run['task_id']}"
     project = canonical(str(run.get("worktree_ref") or ""))
     try:
@@ -660,7 +660,7 @@ def collect_no_mistakes(
         ).fetchone()
     except sqlite3.Error:
         source.close()
-        return 0, None, None, None, None, None
+        return False, 0, None, None, None, None, None
     matched = [row for row in rows if not project or canonical(row["working_path"]) == project]
     first_pass: Optional[int] = None
     if first_row:
@@ -674,7 +674,8 @@ def collect_no_mistakes(
                 (first_row["id"],),
             ).fetchall()
         except sqlite3.Error:
-            initial_rounds = []
+            source.close()
+            return False, 0, None, None, None, None, None
         if initial_rounds:
             initial_findings = 0
             for initial_round in initial_rounds:
@@ -686,6 +687,7 @@ def collect_no_mistakes(
                 )
                 initial_findings += len(combined)
             first_pass = 1 if initial_findings == 0 else 0
+    connection.execute("SAVEPOINT no_mistakes_reconcile")
     connection.execute(
         "DELETE FROM sessions WHERE run_id=? AND source='no-mistakes'",
         (run["run_id"],),
@@ -718,7 +720,10 @@ def collect_no_mistakes(
                 (nm_run["id"],),
             ).fetchone()
         except sqlite3.Error:
-            aggregate = None
+            connection.execute("ROLLBACK TO no_mistakes_reconcile")
+            connection.execute("RELEASE no_mistakes_reconcile")
+            source.close()
+            return False, 0, None, None, None, None, None
         if aggregate and any(integer(aggregate[key]) for key in (
             "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens"
         )):
@@ -750,7 +755,10 @@ def collect_no_mistakes(
                 (nm_run["id"],),
             ).fetchall()
         except sqlite3.Error:
-            rounds = []
+            connection.execute("ROLLBACK TO no_mistakes_reconcile")
+            connection.execute("RELEASE no_mistakes_reconcile")
+            source.close()
+            return False, 0, None, None, None, None, None
         by_step: dict[str, list[tuple[int, list[tuple[str, Optional[str]]], Optional[str], str]]] = collections.defaultdict(list)
         for round_row in rounds:
             combined = findings(round_row["findings_json"])
@@ -784,9 +792,10 @@ def collect_no_mistakes(
                     ),
                 )
     latest = matched[-1] if matched else None
+    connection.execute("RELEASE no_mistakes_reconcile")
     source.close()
     return (
-        len(matched), first_pass,
+        True, len(matched), first_pass,
         str(latest["status"]) if latest and latest["status"] else None,
         str(latest["pr_state"]) if latest and latest["pr_state"] else None,
         str(latest["pr_url"]) if latest and latest["pr_url"] else None,
@@ -898,7 +907,7 @@ def summarize_run(
     connection: sqlite3.Connection,
     run_id: str,
     first_pass: Optional[int],
-    nm_runs: int,
+    nm_runs: Optional[int],
 ) -> None:
     totals = connection.execute(
         """SELECT COALESCE(SUM(tokens_input),0) AS ti,
@@ -919,13 +928,15 @@ def summarize_run(
     connection.execute(
         """UPDATE runs SET tokens_input=?,tokens_output=?,tokens_cache_read=?,
              tokens_cache_write=?,tokens_reasoning=?,tokens_total=?,cost_usd=?,turns=?,
-             retries=?,first_pass_quality=COALESCE(?,first_pass_quality),
+             retries=COALESCE(?,retries),
+             first_pass_quality=COALESCE(?,first_pass_quality),
              quality_findings=?,quality_unresolved=?,
-             no_mistakes_runs=? WHERE run_id=?""",
+             no_mistakes_runs=COALESCE(?,no_mistakes_runs) WHERE run_id=?""",
         (
             totals["ti"], totals["tout"], totals["tcr"], totals["tcw"],
             totals["tr"], totals["tt"], totals["cost"], totals["turns"],
-            max(0, nm_runs - 1), first_pass, quality["findings"],
+            max(0, nm_runs - 1) if nm_runs is not None else None,
+            first_pass, quality["findings"],
             quality["unresolved"], nm_runs, run_id,
         ),
     )
@@ -1010,19 +1021,26 @@ def collect_one(
     status_start = integer(meta.get("status_start_line"))
     insert_status_events(connection, run, state / f"{task_id}.status", status_start)
     outcome, ended, first_activity, interventions, waits = outcome_and_interventions(connection, run_id, now)
-    nm_runs, first_pass, nm_status, nm_pr_state, nm_pr, nm_ended = collect_no_mistakes(
+    previous = connection.execute(
+        "SELECT outcome,ended_at FROM runs WHERE run_id=?",
+        (run_id,),
+    ).fetchone()
+    reconciled, nm_runs, first_pass, nm_status, nm_pr_state, nm_pr, nm_ended = collect_no_mistakes(
         connection, run, no_mistakes_db
     )
-    if nm_pr:
+    if reconciled and nm_pr:
         connection.execute("UPDATE runs SET pr_ref=? WHERE run_id=?", (nm_pr, run_id))
-    if nm_pr_state == "merged":
+    if reconciled and nm_pr_state == "merged":
         outcome = "landed"
         ended = nm_ended or ended
-    elif nm_status == "completed" and outcome == "active":
+    elif reconciled and nm_status == "completed" and outcome == "active":
         outcome = "done-verified"
         ended = nm_ended or ended
+    elif not reconciled and previous["outcome"] in {"landed", "done-verified"}:
+        outcome = previous["outcome"]
+        ended = previous["ended_at"]
     collect_harness_sessions(connection, run, max_files, max_bytes, ended)
-    summarize_run(connection, run_id, first_pass, nm_runs)
+    summarize_run(connection, run_id, first_pass, nm_runs if reconciled else None)
     connection.execute(
         """UPDATE runs SET first_activity_at=?,last_seen_at=?,ended_at=?,outcome=?,
              intervention_count=?,wait_seconds=? WHERE run_id=?""",
