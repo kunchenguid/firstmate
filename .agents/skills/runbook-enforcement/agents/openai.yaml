@@ -1,0 +1,4 @@
+interface:
+  display_name: "Runbook Enforcement"
+  short_description: "Enforce durable execution runbooks"
+  default_prompt: "Use $runbook-enforcement to execute this task with a durable runbook."
