@@ -5,7 +5,7 @@
 # no-mistakes announces a parked run three ways: the durable record (`no-mistakes
 # parked`, read without the daemon), a level-triggered reminder cascade, and -
 # for a run a LIVE task still owns - firstmate's own armed poll, which asks by run
-# id whether this task's watch run parked (bin/fm-poll-lib.sh). The poll covers
+# id whether this task's watch run parked (bin/fm-poll-extra.sh). The poll covers
 # every park a live task owns; a crew-driven gate park is reported by the crew
 # itself; a stuck worker is caught by the stale path. The one park nobody covers
 # is the run whose task is GONE: a direct-PR task that was cancelled or torn down

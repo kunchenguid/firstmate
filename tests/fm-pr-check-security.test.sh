@@ -806,6 +806,44 @@ test_static_poll_contract() {
   pass "static poll is silent except for one merged line and remains watcher-bounded"
 }
 
+# bin/fm-pr-poll.sh has one optional extension point, bin/fm-poll-extra.sh, and
+# it must not widen what the poll can execute. The extension is resolved beside
+# the tracked program and only for the validated call that names the task, so a
+# script dropped into the state directory next to the published copy is never
+# reached; and because the merge answer is the poll's alone, an extension that
+# fails must not change it.
+test_poll_extension_boundary() {
+  local dir out
+  dir=$(make_case poll-extension)
+  make_poll_fixture "$dir"
+
+  cat > "$dir/home/state/fm-poll-extra.sh" <<SH
+#!/usr/bin/env bash
+printf 'executed\n' >> '$dir/state-extra.log'
+SH
+  chmod +x "$dir/home/state/fm-poll-extra.sh"
+  out=$(FM_TEST_GH_STATE=MERGED run_poll "$dir")
+  [ "$out" = merged ] || fail "poll-extension: the self-reading poll did not report the merged PR"
+  assert_absent "$dir/state-extra.log" \
+    "poll-extension: the poll executed a script dropped into the state directory"
+
+  cp "$POLL" "$dir/root/bin/fm-pr-poll.sh"
+  cat > "$dir/root/bin/fm-poll-extra.sh" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$1" >> '$dir/bin-extra.log'
+echo "extension is broken" >&2
+exit 9
+SH
+  chmod +x "$dir/root/bin/fm-pr-poll.sh" "$dir/root/bin/fm-poll-extra.sh"
+  out=$(FM_TEST_GH_LOG="$dir/gh.log" FM_TEST_GH_STATE=MERGED PATH="$dir/fakebin:$BASE_PATH" \
+    "$dir/root/bin/fm-pr-poll.sh" --validated github https://github.com/o/r/pull/1 \
+    github.com o/r 1 "$dir/home/state/task-a.check.sh" 2>/dev/null)
+  [ "$out" = merged ] || fail "poll-extension: a failing extension changed the merge answer (got '$out')"
+  [ "$(tr '\n' ' ' < "$dir/bin-extra.log")" = "begin merged " ] \
+    || fail "poll-extension: the extension saw '$(tr '\n' ' ' < "$dir/bin-extra.log")', not the lookup's begin then merged"
+  pass "the poll's extension point is reachable only beside the program and never changes the merge answer"
+}
+
 test_atomic_interruption_leaves_no_partial_artifact() {
   local dir rc
   dir=$(make_case interrupted-write)
@@ -2901,6 +2939,7 @@ test_invalid_entrypoints_have_zero_side_effects
 test_valid_recording_and_merge_derivation
 test_rejected_metacharacter_bytes_are_inert
 test_static_poll_contract
+test_poll_extension_boundary
 test_atomic_interruption_leaves_no_partial_artifact
 test_concurrent_watcher_sees_only_complete_publication
 test_postrename_poll_validation_revokes_and_retries

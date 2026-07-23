@@ -27,16 +27,15 @@
 #   (o) the armed merge poll increments failures before provider lookup
 #   (p) the armed merge poll wakes once after repeated state-lookup failures
 #   (q) one successful lookup resets the poll's consecutive-failure count
+#   (u) a poll that recovered and broke again reports the second episode too
 #
 # The poll's own signal logic lives in bin/fm-poll-lib.sh and is covered by
 # tests/fm-poll-lib.test.sh; the cases here cover only what arming produces.
 #
-# Cases (o), (p), and (q) are gated off while the poll's extra questions have no
-# consumer. (o) and (p) assert behaviour nothing produces today; (q) asserts a
-# failure count resetting, which is trivially true when no count is ever kept, so
-# leaving it running would report a pass that proves nothing.
-# tests/lib.sh's fm_extra_poll_questions_have_consumer owns why and what turns
-# them back on.
+# Cases (o), (p), and (q) are about the failure accounting bin/fm-poll-extra.sh
+# keeps for an armed poll, so they drive the poll as bin/fm-watch.sh does: the
+# program under bin/, with the published poll path that names the task. Case (m)
+# is the one that deliberately runs the published copy on its own.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -664,17 +663,17 @@ arm_failing_poll() {
     || fail "fm-pr-check failed to arm the poll"
 }
 
+# The poll as bin/fm-watch.sh runs it: the program under bin/, the validated PR
+# data, and the published poll path that names the task the PR belongs to.
 run_poll() {
   local case_dir=$1
-  PATH="$case_dir/fakebin:$PATH" bash "$case_dir/state/task-x1.check.sh" 2>/dev/null
+  PATH="$case_dir/fakebin:$PATH" "$ROOT/bin/fm-pr-poll.sh" --validated \
+    github https://github.com/example/repo/pull/31 github.com example/repo 31 \
+    "$case_dir/state/task-x1.check.sh" 2>/dev/null
 }
 
 test_merge_poll_counts_timeout_killed_lookup() {
   local case_dir rc fails
-  if ! fm_extra_poll_questions_have_consumer; then
-    pass "SKIP ($FM_EXTRA_POLL_SKIP): a provider timeout leaves the pre-incremented failure count behind"
-    return
-  fi
   case_dir=$(make_case poll-timeout-killed)
   arm_failing_poll "$case_dir"
   cat > "$case_dir/fakebin/gh" <<'SH'
@@ -688,11 +687,15 @@ SH
     my $pid = fork();
     die "fork failed: $!" unless defined $pid;
     if ($pid == 0) { exec @ARGV or die "exec failed: $!" }
-    sleep 1;
+    # Long enough that a loaded machine has certainly started the lookup (the gh
+    # mock then sleeps a further 60s), short enough that the poll never answers.
+    sleep 2;
     kill "TERM", $pid;
     waitpid($pid, 0);
     exit 124;
-  ' bash "$case_dir/state/task-x1.check.sh" >/dev/null 2>&1 || rc=$?
+  ' "$ROOT/bin/fm-pr-poll.sh" --validated github \
+    https://github.com/example/repo/pull/31 github.com example/repo 31 \
+    "$case_dir/state/task-x1.check.sh" >/dev/null 2>&1 || rc=$?
 
   [ "$rc" != 0 ] || fail "poll-timeout-killed: killed poll unexpectedly succeeded"
   fails=$(cat "$case_dir/state/task-x1.check.fails" 2>/dev/null || true)
@@ -703,10 +706,6 @@ SH
 
 test_merge_poll_wakes_after_repeated_lookup_failures() {
   local case_dir first second third fourth
-  if ! fm_extra_poll_questions_have_consumer; then
-    pass "SKIP ($FM_EXTRA_POLL_SKIP): a persistent lookup failure wakes firstmate instead of polling silently"
-    return
-  fi
   case_dir=$(make_case poll-lookup-failure)
   arm_failing_poll "$case_dir"
 
@@ -727,10 +726,6 @@ test_merge_poll_wakes_after_repeated_lookup_failures() {
 
 test_merge_poll_failure_count_resets_on_success() {
   local case_dir out
-  if ! fm_extra_poll_questions_have_consumer; then
-    pass "SKIP ($FM_EXTRA_POLL_SKIP): one successful lookup resets the merge poll's consecutive-failure count"
-    return
-  fi
   case_dir=$(make_case poll-failure-reset)
   arm_failing_poll "$case_dir"
 
@@ -748,6 +743,35 @@ test_merge_poll_failure_count_resets_on_success() {
   assert_absent "$case_dir/state/task-x1.check.error" \
     "poll-failure-reset: a single failure after a success must not mark the poll broken"
   pass "one successful lookup resets the merge poll's consecutive-failure count"
+}
+
+# The broken-poll diagnostic costs one wake per EPISODE, and an episode ends when
+# the poll answers again. Nothing else clears the marker on a live task, so a
+# poll that recovered and then broke a second time has to report itself again.
+test_merge_poll_reports_a_second_broken_episode() {
+  local case_dir out
+  case_dir=$(make_case poll-second-episode)
+  arm_failing_poll "$case_dir"
+
+  run_poll "$case_dir" >/dev/null
+  run_poll "$case_dir" >/dev/null
+  out=$(run_poll "$case_dir")
+  assert_contains "$out" 'poll broken' \
+    "poll-second-episode: the first broken episode must wake firstmate"
+
+  : > "$case_dir/gh-ok"
+  out=$(run_poll "$case_dir")
+  [ -z "$out" ] || fail "poll-second-episode: a recovered poll must not wake firstmate, got '$out'"
+  assert_absent "$case_dir/state/task-x1.check.error" \
+    "poll-second-episode: a poll that answered again must not stay marked broken"
+
+  rm -f "$case_dir/gh-ok"
+  run_poll "$case_dir" >/dev/null
+  run_poll "$case_dir" >/dev/null
+  out=$(run_poll "$case_dir")
+  assert_contains "$out" 'poll broken' \
+    "poll-second-episode: a poll that breaks again after recovering must wake firstmate again"
+  pass "the merge poll reports a second broken episode after it recovered from the first"
 }
 
 test_records_pr_and_head_before_merging
@@ -772,3 +796,4 @@ test_codebase_empty_head_does_not_shift_source_ref
 test_merge_poll_counts_timeout_killed_lookup
 test_merge_poll_wakes_after_repeated_lookup_failures
 test_merge_poll_failure_count_resets_on_success
+test_merge_poll_reports_a_second_broken_episode

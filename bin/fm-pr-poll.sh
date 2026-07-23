@@ -6,17 +6,29 @@
 # interpolated into this source: these bytes are identical for every task.
 # Each provider is read through its own standard CLI, gh for GitHub and glab
 # for GitLab, so an upstream checkout needs no extra tooling to follow either.
+#
+# The optional 7th --validated field is the poll's published path under state/,
+# which names the task the PR belongs to and the state directory holding its
+# records. It is passed straight to bin/fm-poll-extra.sh, an optional local
+# extension that answers a checkout's own extra questions about that task from
+# the same wake; see that script's header. The field stays optional so a watcher
+# still running the older 6-field call keeps polling for merges instead of being
+# rejected, and the merge answer below never depends on it. That extension is the
+# one thing that can add a line to this program's output; the merge answer above
+# stays exactly as described whether or not a checkout has it.
 set -u
 LC_ALL=C
 export LC_ALL
 
-if [ "$#" -eq 6 ] && [ "$1" = --validated ]; then
+if { [ "$#" -eq 6 ] || [ "$#" -eq 7 ]; } && [ "$1" = --validated ]; then
   provider=$2
   url=$3
   host=$4
   path=$5
   number=$6
+  check=${7:-}
 elif [ "$#" -eq 0 ]; then
+  check=
   case "$0" in
     *.check.sh) data=${0%.check.sh}.pr-poll ;;
     *) exit 0 ;;
@@ -45,6 +57,35 @@ case "$number" in
   *[!0-9]*) exit 0 ;;
 esac
 
+# The optional local extension point. It is resolved beside THIS program, never
+# beside the published copy the state directory holds, so nothing dropped into
+# state/ can be executed here; and it is resolved only when the caller passed the
+# poll's published path, which the self-reading branch above never has. A
+# checkout without the script, or one whose script fails, polls for merges
+# exactly as before: every call is best effort and its errors are discarded, so
+# an extension that cannot answer stays silent instead of colouring the merge
+# answer. Phases: "begin" before the provider lookup, then exactly one of
+# "merged", "open", or "unknown" once the lookup has answered or failed to.
+extra=
+if [ -n "$check" ]; then
+  extra=$(dirname "$0")/fm-poll-extra.sh
+  [ -f "$extra" ] && [ ! -L "$extra" ] && [ -x "$extra" ] || extra=
+fi
+
+poll_extra() {  # <phase>
+  [ -n "$extra" ] || return 0
+  "$extra" "$1" "$check" "$provider" "$url" "$host" "$path" "$number" 2>/dev/null || true
+}
+
+# A lookup that could not answer. Never a merge, and never silence that reads as
+# "not merged": the extension counts it so a persistently broken poll is visible.
+unanswered() {
+  poll_extra unknown
+  exit 0
+}
+
+merged=0
+
 # Every component is revalidated here rather than trusted from the sidecar, and
 # the stored URL must then be exactly reconstructible from those components, so
 # a doctored sidecar cannot redirect this poll at another host or project.
@@ -62,8 +103,9 @@ case "$provider" in
       .|..|*[!A-Za-z0-9._-]*) exit 0 ;;
     esac
     [ "$url" = "https://github.com/$owner/$repo/pull/$number" ] || exit 0
-    state=$(gh pr view "$url" --json state -q .state 2>/dev/null) || exit 0
-    [ "$state" = MERGED ] && printf '%s\n' merged
+    poll_extra begin
+    state=$(gh pr view "$url" --json state -q .state 2>/dev/null) || unanswered
+    [ "$state" = MERGED ] && merged=1
     ;;
   gitlab)
     [ "${#host}" -ge 1 ] && [ "${#host}" -le 253 ] || exit 0
@@ -101,9 +143,10 @@ case "$provider" in
     # because plain glab has no field selector and firstmate does not require a
     # JSON processor; only an exact "merged" wakes, so a changed format or an
     # unreadable merge request stays silent instead of reporting a merge.
-    raw=$(glab mr view "$number" -R "https://$host/$path" 2>/dev/null) || exit 0
-    state=$(printf '%s\n' "$raw" | sed -n 's/^state:[[:space:]]*//p' | head -1) || exit 0
-    [ "$state" = merged ] && printf '%s\n' merged
+    poll_extra begin
+    raw=$(glab mr view "$number" -R "https://$host/$path" 2>/dev/null) || unanswered
+    state=$(printf '%s\n' "$raw" | sed -n 's/^state:[[:space:]]*//p' | head -1) || unanswered
+    [ "$state" = merged ] && merged=1
     ;;
   codebase)
     case "$host" in
@@ -131,12 +174,20 @@ case "$provider" in
     [ "$segments" -ge 2 ] || exit 0
     [ "$url" = "https://$host/$path/merge_requests/$number" ] || exit 0
     command -v jq >/dev/null 2>&1 || exit 0
-    raw=$(bytedcli --json codebase mr get "$number" -R "$path" 2>/dev/null) || exit 0
-    state=$(printf '%s\n' "$raw" | jq -r 'if .status == "success" then (.data.merge_request.Status // .data.merge_request.status // "") else "" end' 2>/dev/null) || exit 0
+    poll_extra begin
+    raw=$(bytedcli --json codebase mr get "$number" -R "$path" 2>/dev/null) || unanswered
+    state=$(printf '%s\n' "$raw" | jq -r 'if .status == "success" then (.data.merge_request.Status // .data.merge_request.status // "") else "" end' 2>/dev/null) || unanswered
     case "$state" in
-      merged|MERGED) printf '%s\n' merged ;;
+      merged|MERGED) merged=1 ;;
     esac
     ;;
   *) exit 0 ;;
 esac
+
+if [ "$merged" = 1 ]; then
+  printf '%s\n' merged
+  poll_extra merged
+else
+  poll_extra open
+fi
 exit 0

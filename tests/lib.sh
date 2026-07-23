@@ -50,28 +50,6 @@ pass() {
   printf 'ok - %s\n' "$1"
 }
 
-# --- extra poll questions gate ----------------------------------------------
-#
-# bin/fm-poll-lib.sh answers more than "has it merged?": whether THIS task's
-# no-mistakes watch run has parked, whether it is still alive, how many lookups
-# in a row have failed, and whether the poll itself is broken. The upstream poll
-# rewrite replaced the generated per-task poll with the byte-static
-# bin/fm-pr-poll.sh, which answers the merge question alone, so fm_poll_check
-# has no caller and none of those extra answers can be produced today.
-#
-# Assertions covering them are kept verbatim as the executable specification for
-# the follow-up task fm-poll-extra-watch-questions, which restores a consumer at
-# bin/fm-poll-extra.sh, and are gated on that file existing rather than on a
-# hardcoded flag so they resume by themselves the day it lands.
-# Consumed by sourcing test files, not by this library, so it reads as "unused"
-# here - same as ROOT above.
-# shellcheck disable=SC2034
-FM_EXTRA_POLL_SKIP='extra poll questions have no consumer after the upstream poll rewrite; fm-poll-extra-watch-questions restores them and re-enables this'
-
-fm_extra_poll_questions_have_consumer() {
-  [ -x "$ROOT/bin/fm-poll-extra.sh" ] && [ ! -L "$ROOT/bin/fm-poll-extra.sh" ]
-}
-
 # --- self-cleaning temp root ------------------------------------------------
 #
 # fm_test_tmproot <prefix> echoes a fresh temp dir and registers it for removal

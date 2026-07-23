@@ -15,7 +15,7 @@
 # orchestration-layer backstop and asks, for this task's run id only, whether
 # the PR merged, whether the run parked, and whether the run is still alive - so
 # a watch that dies takes firstmate's attention with it instead of going quiet.
-# bin/fm-poll-lib.sh's header owns that contract.
+# bin/fm-poll-extra.sh's header owns that contract.
 #
 # Ownership: the watch run belongs to the DAEMON, not to whoever armed it and
 # not to a worktree. It uses no worktree and calls no agent, so it survives crew
