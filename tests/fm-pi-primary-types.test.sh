@@ -4,7 +4,17 @@ set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-command -v npm >/dev/null 2>&1 || { echo "skip: npm not found for Pi extension typecheck"; exit 0; }
+if [ -n "${FM_PI_PACKAGE_DIR:-}" ]; then
+  PI_PACKAGE_DIR=$FM_PI_PACKAGE_DIR
+else
+  command -v npm >/dev/null 2>&1 || { echo "skip: npm not found for Pi extension typecheck"; exit 0; }
+  PI_PACKAGE_DIR="$(npm root -g)/@earendil-works/pi-coding-agent"
+fi
+if [ ! -f "$PI_PACKAGE_DIR/package.json" ]; then
+  echo "skip: Pi package not found at $PI_PACKAGE_DIR"
+  exit 0
+fi
+
 command -v tsc >/dev/null 2>&1 || { echo "skip: tsc not found for Pi extension typecheck"; exit 0; }
 if ! TSC_VERSION=$(tsc --version 2>/dev/null); then
   echo "not ok - tsc version probe failed" >&2
@@ -21,11 +31,6 @@ if [ "$TSC_MAJOR" -lt 5 ]; then
   exit 0
 fi
 
-PI_PACKAGE_DIR=${FM_PI_PACKAGE_DIR:-"$(npm root -g)/@earendil-works/pi-coding-agent"}
-if [ ! -f "$PI_PACKAGE_DIR/package.json" ]; then
-  echo "skip: installed @earendil-works/pi-coding-agent package not found"
-  exit 0
-fi
 if [ ! -d "$PI_PACKAGE_DIR/node_modules/typebox" ] || \
    [ ! -d "$PI_PACKAGE_DIR/node_modules/@earendil-works/pi-tui" ] || \
    [ ! -d "$PI_PACKAGE_DIR/node_modules/@types/node" ]; then
