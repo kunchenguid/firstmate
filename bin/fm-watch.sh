@@ -1055,11 +1055,21 @@ EOF
                 ;;
             esac
           elif [ "$(cat "$suf" 2>/dev/null || true)" = "$h" ]; then
-            # This exact hash was already surfaced once. Never surface it again:
-            # age it toward wedge escalation like any other already-classified
-            # stale hash. This is the guard that turns the per-poll re-surface
-            # loop into one wake plus the normal wedge cadence.
-            wedge_timer_check "$w" "$ssf" "non-terminal stale (already surfaced)" "$ewf"
+            # This exact hash was already surfaced once, and this guard exists so
+            # it is never surfaced twice - not so that it is always aged into a
+            # possible wedge. Which cadence it ages on still depends on the pane:
+            # one sitting in a declared pause or a captain hold keeps the long
+            # pause cadence and drops any residual wedge timer, and only a pane
+            # with no such declaration ages toward wedge escalation.
+            # The pause test here is deliberately the cheap one - the marker file,
+            # or the status file's last line - because this branch runs on every
+            # poll of an already-classified hash and must not read crew state.
+            task=$(window_to_task "$w" "$STATE")
+            if [ -e "$pf" ] || status_is_paused_or_captain_held "$(last_status_line "$STATE/$task.status")"; then
+              handle_paused_stale "$w" "$task" "$h"
+            else
+              wedge_timer_check "$w" "$ssf" "non-terminal stale (already surfaced)" "$ewf"
+            fi
           else
             task=$(window_to_task "$w" "$STATE")
             if [ -e "$pf" ] || status_is_paused_or_captain_held "$(last_status_line "$STATE/$task.status")"; then
