@@ -18,10 +18,11 @@ $ pi --version
 0.81.1
 ```
 
-A real isolated Pi TUI ran at 180 columns by 44 rows with the tracked Calm and watcher extensions, an isolated `FM_HOME`, and a live home-owned watcher cycle.
+The pre-cleanup reproduction used a real isolated Pi TUI at 180 columns by 44 rows with the tracked Calm and watcher extensions, an isolated `FM_HOME`, and a live home-owned watcher cycle.
 The model called `fm_watch_arm_pi`, the real tool returned `watcher: started Pi extension arm child 1`, and a `done:` status write caused the watcher extension to inject `FIRSTMATE WATCHER WAKE: signal: ...` followed by the stable drain instruction.
-Before Calm, the captured transcript contained the genuine user prompt, the full watcher tool shell, the synthetic user-role wake, four collapsed `Thinking...` labels, built-in tool rows from wake handling, and the final assistant response.
-After `/calm`, the existing seven built-in tool rows disappeared, but the watcher tool shell, synthetic wake, and all four `Thinking...` labels remained.
+With Calm off, the captured transcript contained the genuine user prompt, the full watcher tool shell, the synthetic user-role wake, four collapsed `Thinking...` labels, built-in tool rows from wake handling, and the final assistant response.
+With the pre-cleanup implementation's Calm mode on, the existing seven built-in tool rows disappeared, but the watcher tool shell, synthetic wake, and all four `Thinking...` labels remained.
+The final screenshot-scale regression reproduced the same transcript after the cleanup and verified that Calm removed those remaining controlled rows while retaining the genuine prompt, a watcher-shaped genuine near-miss prompt, and the genuine assistant responses.
 
 The observed causal separation was:
 
@@ -76,8 +77,9 @@ The classifier recognizes only these authoritative Firstmate forms:
 Positive fixtures cover every form in that table.
 Near-miss fixtures cover the visible watcher phrase without its suffix, a modified drain instruction, a guard-like captain question, visible marker labels without U+2063, an unmarked supervisor phrase, the session-start wording without its authoritative punctuation, and launch-brief text without the per-process origin.
 
-Known synthetic inputs are rerouted only at Pi input presentation time.
+Synthetic inputs that would otherwise render as user rows are rerouted only at Pi input presentation time.
 Their full text is persisted in a non-displayed custom message that Pi converts back to an ordinary user message for provider context, and a TUI-only custom entry restores stock user styling while Calm is off.
+The session-start nudge already uses a non-displayed custom message at its authoritative source, so it remains on that existing hidden presentation path while retaining model context and session persistence.
 The custom-entry host omits the complete row when the renderer returns undefined under Calm, including its normally conditional leading spacer.
 Cycling tool expansion and restoring its original value rebuilds those custom entries and leaves final `Ctrl+O` state unchanged.
 Exported and shared HTML retain genuine user prompts, genuine assistant responses, and ordinary tool rendering, while omitting the synthetic presentation entry and hidden context message at the documented Pi 0.81.1 exporter boundary.
@@ -106,7 +108,7 @@ The test fixture enumerates every class below through the centralized policy, an
 | `system-notice` | `showStatus`, `showError`, compaction, retry, and startup warning rows | Unsupported boundary; remains visible. |
 | `cache-notice` | Non-persisted cache-miss `Text` row | Unsupported boundary; remains visible. |
 | `project-trust-warning` | Non-persisted startup `Text` row | Unsupported boundary; remains visible. |
-| `synthetic-user` | Firstmate extension `sendUserMessage`, terminal-injected input, or Firstmate-generated Pi positional brief | All authoritative Firstmate forms are rerouted to hidden context plus a gapless controllable presentation entry. |
+| `synthetic-user` | Firstmate extension `sendUserMessage`, terminal-injected input, Firstmate-generated Pi positional brief, or the already non-displayed session-start nudge | Forms that ordinarily render as user rows are rerouted to hidden context plus a gapless controllable presentation entry; the session-start nudge retains its existing non-displayed custom-message path. |
 | `synthetic-assistant` | No authoritative Firstmate source found | Policy-hidden, but Pi exposes no generic assistant-role renderer. |
 | `unknown` | Future or unclassified transcript component | Policy-hidden, but no generic renderer exists; never claimed as covered. |
 
