@@ -180,6 +180,10 @@
 # Projected closes share the presentation-order lock, refuse to close the
 # captain's active tab, and restore the exact response-derived pre-close tab
 # if Herdr's last-pane cleanup focuses an unrelated neighboring workspace.
+# For ship and scout worktrees, teardown checks `treehouse status` before attempting
+# the return to confirm the slot is still held as in-use. If treehouse is absent or
+# status fails the check is skipped (fails open). If the slot is not in-use the return
+# is skipped with a warning rather than returning an unowned slot (batch-race guard).
 # Secondmates (kind=secondmate in meta) are retired explicitly. Normal
 # teardown refuses while their home has in-flight crewmate meta files; --force
 # is the approved discard path that prevalidates child removal targets, locks each
