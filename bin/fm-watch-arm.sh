@@ -138,6 +138,29 @@ cycle_log_lock() {
   return 0
 }
 
+# Hold the ledger to its bounded size. Every write path calls this while it still
+# holds CYCLE_LOG_LOCK, so a home whose arms are repeatedly killed untrappably
+# cannot grow the log without bound through open rows alone. Trimming keeps the
+# TAIL, so the row the caller just wrote survives and an in-place record rewrite
+# cannot be corrupted. Best-effort like every other ledger write: a failed trim
+# leaves the log as it was and never fails the cycle.
+cycle_log_trim() {
+  local size tmp raw
+  size=$(wc -c < "$CYCLE_LOG" 2>/dev/null | tr -d '[:space:]')
+  case "$size" in
+    ''|*[!0-9]*) return 0 ;;
+  esac
+  [ "$size" -ge "$CYCLE_LOG_MAX_BYTES" ] || return 0
+  tmp="$CYCLE_LOG.tmp.$ARM_PID"
+  raw="$tmp.raw"
+  tail -n "$CYCLE_LOG_KEEP_LINES" "$CYCLE_LOG" 2>/dev/null \
+    | tail -c "$CYCLE_LOG_MAX_BYTES" > "$raw" 2>/dev/null \
+    && awk 'NR > 1 || /^arm_pid=/' "$raw" > "$tmp" 2>/dev/null \
+    && mv -f "$tmp" "$CYCLE_LOG" 2>/dev/null
+  rm -f "$tmp" "$raw" 2>/dev/null || true
+  return 0
+}
+
 # Publish the cycle's row BEFORE the cycle runs. SIGKILL and process-group kills
 # cannot run the traps that close a record, so a cycle that dies that way used to
 # leave no ledger evidence at all - the one death mode the ledger most needs to
@@ -146,6 +169,7 @@ cycle_log_lock() {
 cycle_log_open_row() {
   cycle_log_lock || return 0
   cycle_record_line 0 open none cycle-open "$(fm_path_age "$BEAT")" pending none >> "$CYCLE_LOG" 2>/dev/null || true
+  cycle_log_trim
   fm_lock_release "$CYCLE_LOG_LOCK"
 }
 
@@ -174,14 +198,16 @@ cycle_signal_name() {
 }
 
 cycle_log_append() {
-  local exit_code=$1 signal=$2 reason=$3 successor=$4 ended_at beacon_age lock_after record closed=0 size tmp raw
+  local exit_code=$1 signal=$2 reason=$3 successor=$4 ended_at beacon_age lock_after record closed=0 tmp
   [ "$cycle_active" -eq 1 ] || return 0
   ended_at=$(date +%s)
   beacon_age=$(fm_path_age "$BEAT")
   lock_after=$(lock_snapshot)
   record=$(cycle_record_line "$ended_at" "$exit_code" "$signal" "$reason" "$beacon_age" "$lock_after" "$successor")
 
-  cycle_log_lock || return 0
+  # A budget-exhausted close drops its record, but the cycle it describes is over
+  # either way, so the cycle is never left half-open.
+  cycle_log_lock || { cycle_active=0; return 0; }
   # Close this cycle's own open row in place, identified by arm pid AND start
   # stamp so a reused pid's abandoned row is never rewritten. The values reach awk
   # through the environment, never -v, so no field can be reinterpreted as an
@@ -216,21 +242,7 @@ cycle_log_append() {
   fi
   [ "$closed" -eq 1 ] || printf '%s\n' "$record" >> "$CYCLE_LOG" 2>/dev/null || true
 
-  size=$(wc -c < "$CYCLE_LOG" 2>/dev/null | tr -d '[:space:]')
-  case "$size" in
-    ''|*[!0-9]*) ;;
-    *)
-      if [ "$size" -ge "$CYCLE_LOG_MAX_BYTES" ]; then
-        tmp="$CYCLE_LOG.tmp.$ARM_PID"
-        raw="$tmp.raw"
-        tail -n "$CYCLE_LOG_KEEP_LINES" "$CYCLE_LOG" 2>/dev/null \
-          | tail -c "$CYCLE_LOG_MAX_BYTES" > "$raw" 2>/dev/null \
-          && awk 'NR > 1 || /^arm_pid=/' "$raw" > "$tmp" 2>/dev/null \
-          && mv -f "$tmp" "$CYCLE_LOG" 2>/dev/null
-        rm -f "$tmp" "$raw" 2>/dev/null || true
-      fi
-      ;;
-  esac
+  cycle_log_trim
   fm_lock_release "$CYCLE_LOG_LOCK"
   cycle_active=0
 }

@@ -169,6 +169,18 @@ status_is_paused_or_captain_held() {  # <status-line>
 # first from the open set. The trailing position is deliberately the ONLY other
 # accepted position: a token that is quoted mid-sentence stays prose, so an
 # incidental "[key=" in a note cannot change or close a real decision.
+#
+# Reading the trailing position changes how already-written files fold, and one
+# consequence is accepted deliberately: a decision opened with a TRAILING key and
+# later closed with a bare "resolved:" now keys the open to that slug while the
+# bare resolve still closes "default", so it resurfaces as open once and has to be
+# closed again under its own key. That errs toward re-surfacing a decision the
+# captain already settled rather than silently losing one, which is exactly the
+# loss this parser exists to stop - loud and safe, never data loss. Two
+# alternatives were considered and rejected: letting a bare resolve close EVERY
+# open key reintroduces the mass-closing this fix removes, and letting it close
+# the single open key when exactly one is open stops being deterministic the
+# moment two decisions are open.
 status_line_verb() {  # <status-line> -> leading verb word
   local v=${1%%:*}
   v=${v%%\[key=*}

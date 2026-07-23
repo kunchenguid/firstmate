@@ -926,6 +926,51 @@ SH
   pass "an untrappable kill leaves one unclosed cycle record while a normal cycle closes its row in place"
 }
 
+# The ledger is bounded evidence, not a growing file. A home whose arms are always
+# killed untrappably only ever writes OPEN rows - the close path that used to be
+# the sole place the cap was applied never runs - so the cap has to hold on the
+# open path too or the one death mode the ledger exists to explain is also the one
+# that grows it without bound.
+test_open_ledger_rows_stay_bounded_under_repeated_kills() {
+  local dir state fakebin armout armpid watcher_pid ledger i iteration size rows
+  dir=$(make_case open-row-bounded)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  ledger="$state/.watch-cycle-exits.log"
+  mark_pr_check_migration_complete "$state"
+  iteration=0
+  while [ "$iteration" -lt 6 ]; do
+    armout="$dir/killed-$iteration.out"
+    PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_WATCH_CYCLE_LOG_MAX_BYTES=700 FM_WATCH_CYCLE_LOG_KEEP_LINES=2 FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$armout" &
+    armpid=$!
+    i=0
+    while [ "$i" -lt 80 ]; do
+      grep -qF 'watcher: started pid=' "$armout" 2>/dev/null && break
+      sleep 0.1
+      i=$((i + 1))
+    done
+    grep -qF 'watcher: started pid=' "$armout" || fail "open-row bounded cycle $iteration did not start"
+    watcher_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+    kill -KILL "$armpid" 2>/dev/null || fail "could not SIGKILL open-row bounded arm $iteration"
+    wait "$armpid" 2>/dev/null || true
+    # The killed arm never ran its traps, so reap its orphaned watcher child.
+    kill -TERM "$watcher_pid" 2>/dev/null || true
+    i=0
+    while [ "$i" -lt 50 ] && is_live_non_zombie "$watcher_pid"; do
+      sleep 0.1
+      i=$((i + 1))
+    done
+    iteration=$((iteration + 1))
+  done
+  rows=$(grep -c 'exit_code=open' "$ledger")
+  [ "$rows" -ge 1 ] || fail "repeated untrappable kills left no open ledger rows at all"
+  size=$(wc -c < "$ledger" | tr -d '[:space:]')
+  [ "$size" -le 700 ] || fail "open ledger rows grew past the configured cap ($size bytes)"
+  ! grep -v '^arm_pid=.*watcher_pid=.*started_at=.*ended_at=.*exit_code=.*signal=.*reason=.*beacon_age=.*lock_before=.*lock_after=.*successor=' "$ledger" | grep . >/dev/null \
+    || fail "bounding the open ledger rows left a partial or malformed record"
+  pass "open cycle rows stay inside the ledger cap when every arm is killed untrappably"
+}
+
 test_stopped_watcher_is_live_but_stale_then_exit_is_classified() {
   local dir state fakebin armout armpid watcher_pid i status
   dir=$(make_case stopped-watcher)
@@ -1052,4 +1097,5 @@ test_arm_waits_for_peer_beacon_after_child_stands_down
 test_arm_fails_loud_when_no_fresh_watcher_confirmable
 test_cycle_exit_ledger_links_successor_and_stays_bounded
 test_killed_cycle_leaves_an_unclosed_ledger_record
+test_open_ledger_rows_stay_bounded_under_repeated_kills
 test_stopped_watcher_is_live_but_stale_then_exit_is_classified

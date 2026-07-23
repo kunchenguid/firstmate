@@ -260,7 +260,7 @@ The report is the only thing that survives, so anything worth keeping must be in
    append \`needs-decision [key=<slug>]: {summary of options}\` and stop, where <slug> is a short name you pick
    for this decision (letters, digits, dot, dash, underscore) and the key goes BEFORE the colon so a second
    open decision cannot fold onto the first. Firstmate will reply with the decision.
-   When firstmate replies or a blocker clears and you resume, append \`resolved [key=<slug>]: {how it was decided or unblocked}\` with that same key so the decision or blocker is durably closed and does not keep resurfacing.
+   When firstmate replies or a blocker clears and you resume, append \`resolved [key=<slug>]: {how it was decided or unblocked}\` with that same key, or a bare \`resolved: {how it was decided or unblocked}\` if you opened it without a key, so the decision or blocker is durably closed and does not keep resurfacing.
 7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
    every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
    daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
@@ -372,7 +372,7 @@ $RULE1
    append \`needs-decision [key=<slug>]: {summary of options}\` and stop, where <slug> is a short name you pick
    for this decision (letters, digits, dot, dash, underscore) and the key goes BEFORE the colon so a second
    open decision cannot fold onto the first. Firstmate will reply with the decision.
-   When firstmate replies or a blocker clears and you resume, append \`resolved [key=<slug>]: {how it was decided or unblocked}\` with that same key so the decision or blocker is durably closed and does not keep resurfacing.
+   When firstmate replies or a blocker clears and you resume, append \`resolved [key=<slug>]: {how it was decided or unblocked}\` with that same key, or a bare \`resolved: {how it was decided or unblocked}\` if you opened it without a key, so the decision or blocker is durably closed and does not keep resurfacing.
 7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
    every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
    daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
