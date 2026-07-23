@@ -38,6 +38,7 @@ test_static_contract() {
   assert_contains "$text" 'pi.on("session_start"' "Pi calm extension does not reset on every session start"
   assert_contains "$text" 'calm = false' "Pi calm extension does not default to visible tool activity"
   assert_contains "$text" 'ctx.ui.setToolsExpanded(ctx.ui.getToolsExpanded())' "Pi calm extension does not redraw existing rows while preserving Ctrl+O state"
+  assert_contains "$text" 'ctx.ui.onTerminalInput' "Pi calm extension does not scope hiding to interactive rendering"
   assert_contains "$text" 'renderShell: "self"' "Pi calm extension cannot remove the complete tool shell"
   assert_contains "$text" 'built-in read images and custom/third-party tool rows stay visible' "Pi calm command description does not disclose both visibility boundaries"
   assert_contains "$text" 'built-in read images and custom/third-party tool rows remain visible' "Pi calm enabled status does not disclose both visibility boundaries"
@@ -75,10 +76,11 @@ import { writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
 const packageRoot = process.env.PI_PACKAGE_DIR;
-const [{ ToolExecutionComponent }, { initTheme }, { Text, setCapabilities }] = await Promise.all([
+const [{ ToolExecutionComponent }, { initTheme, theme }, { Text, setCapabilities }, { createToolHtmlRenderer }] = await Promise.all([
   import(pathToFileURL(`${packageRoot}/dist/modes/interactive/components/tool-execution.js`).href),
   import(pathToFileURL(`${packageRoot}/dist/modes/interactive/theme/theme.js`).href),
   import(pathToFileURL(`${packageRoot}/node_modules/@earendil-works/pi-tui/dist/index.js`).href),
+  import(pathToFileURL(`${packageRoot}/dist/core/export-html/tool-renderer.js`).href),
 ]);
 initTheme("dark");
 setCapabilities({ images: null, trueColor: true, hyperlinks: false });
@@ -214,12 +216,21 @@ if (!imageVisibleBefore.join("\n").includes("\x1b]1337;File=")) {
 
 let expanded = true;
 let notification = "";
+let editorText = "";
+let terminalInputHandler;
 const sessionEntries = [{ type: "message", message: { role: "toolResult", content: "kept" } }];
 const entriesBefore = JSON.stringify(sessionEntries);
 const commandContext = {
   sessionManager: { getEntries: () => sessionEntries },
   ui: {
+    getEditorText: () => editorText,
     getToolsExpanded: () => expanded,
+    onTerminalInput(handler) {
+      terminalInputHandler = handler;
+      return () => {
+        if (terminalInputHandler === handler) terminalInputHandler = undefined;
+      };
+    },
     setToolsExpanded(value) {
       if (value !== expanded) throw new Error("/calm changed the ordinary Ctrl+O expansion state");
       for (const row of rows) row.actual.setExpanded(value);
@@ -232,7 +243,31 @@ const commandContext = {
   },
 };
 
+await handlers.get("session_start")({ reason: "startup" }, commandContext);
 await calmCommand.handler("", commandContext);
+editorText = "/export calm.html";
+terminalInputHandler("\r");
+const htmlRenderer = createToolHtmlRenderer({
+  getToolDefinition: (name) => tools.find((tool) => tool.name === name),
+  theme,
+  cwd: process.cwd(),
+});
+for (const [name, args, result] of cases.filter(([toolName]) => toolName === "grep" || toolName === "find")) {
+  const toolCallId = `export-${name}`;
+  const callHtml = htmlRenderer.renderCall(toolCallId, name, args);
+  const resultHtml = htmlRenderer.renderResult(
+    toolCallId,
+    name,
+    result.content,
+    result.details,
+    result.isError,
+  );
+  if (!callHtml || !resultHtml?.expanded) {
+    throw new Error(`${name} disappeared from HTML export while calm mode was on`);
+  }
+}
+editorText = "";
+await new Promise((resolve) => setTimeout(resolve, 0));
 for (const { name, actual } of rows) {
   const rendered = actual.render(100);
   if (rendered.length !== 0) {
@@ -306,7 +341,7 @@ JS
 }
 
 test_interactive_terminal_e2e() {
-  local project config session_file default_snapshot expanded_snapshot hidden_snapshot restored_snapshot hash_before hash_after now version
+  local project config session_file export_file default_snapshot expanded_snapshot hidden_snapshot export_snapshot restored_snapshot hash_before hash_after now version
   if ! command -v pi >/dev/null 2>&1 || ! command -v tmux >/dev/null 2>&1; then
     echo "skip: pi or tmux not found for Pi calm interactive E2E"
     return 0
@@ -317,9 +352,11 @@ test_interactive_terminal_e2e() {
   project="$TMP_ROOT/e2e-project"
   config="$TMP_ROOT/e2e-config"
   session_file="$TMP_ROOT/calm-session.jsonl"
+  export_file="$TMP_ROOT/calm-export.html"
   default_snapshot="$TMP_ROOT/default.txt"
   expanded_snapshot="$TMP_ROOT/expanded.txt"
   hidden_snapshot="$TMP_ROOT/hidden.txt"
+  export_snapshot="$TMP_ROOT/export.txt"
   restored_snapshot="$TMP_ROOT/restored.txt"
   mkdir -p "$project/.pi/extensions" "$config"
   cp "$EXT" "$project/.pi/extensions/fm-calm.ts"
@@ -329,7 +366,10 @@ test_interactive_terminal_e2e() {
 {"type":"message","id":"a0000001","parentId":null,"timestamp":"$now","message":{"role":"user","content":[{"type":"text","text":"Show a deterministic tool example."}],"timestamp":1}}
 {"type":"message","id":"a0000002","parentId":"a0000001","timestamp":"$now","message":{"role":"assistant","content":[{"type":"text","text":"I will run one command."},{"type":"toolCall","id":"call_calm_e2e","name":"bash","arguments":{"command":"printf 'CALM_E2E_OUTPUT\\n'"}}],"api":"anthropic-messages","provider":"anthropic","model":"claude-sonnet-4-5","usage":{"input":1,"output":1,"cacheRead":0,"cacheWrite":0,"totalTokens":2,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"toolUse","timestamp":2}}
 {"type":"message","id":"a0000003","parentId":"a0000002","timestamp":"$now","message":{"role":"toolResult","toolCallId":"call_calm_e2e","toolName":"bash","content":[{"type":"text","text":"CALM_E2E_OUTPUT"}],"details":{},"isError":false,"timestamp":3}}
-{"type":"message","id":"a0000004","parentId":"a0000003","timestamp":"$now","message":{"role":"assistant","content":[{"type":"text","text":"The deterministic tool example is complete."}],"api":"anthropic-messages","provider":"anthropic","model":"claude-sonnet-4-5","usage":{"input":2,"output":1,"cacheRead":0,"cacheWrite":0,"totalTokens":3,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"stop","timestamp":4}}
+{"type":"message","id":"a0000004","parentId":"a0000003","timestamp":"$now","message":{"role":"assistant","content":[{"type":"toolCall","id":"call_grep_e2e","name":"grep","arguments":{"pattern":"CALM_EXPORT_GREP","path":"."}},{"type":"toolCall","id":"call_find_e2e","name":"find","arguments":{"pattern":"CALM_EXPORT_FIND*","path":"."}}],"api":"anthropic-messages","provider":"anthropic","model":"claude-sonnet-4-5","usage":{"input":2,"output":1,"cacheRead":0,"cacheWrite":0,"totalTokens":3,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"toolUse","timestamp":4}}
+{"type":"message","id":"a0000005","parentId":"a0000004","timestamp":"$now","message":{"role":"toolResult","toolCallId":"call_grep_e2e","toolName":"grep","content":[{"type":"text","text":"sample.txt:1:CALM_EXPORT_GREP"}],"details":{},"isError":false,"timestamp":5}}
+{"type":"message","id":"a0000006","parentId":"a0000005","timestamp":"$now","message":{"role":"toolResult","toolCallId":"call_find_e2e","toolName":"find","content":[{"type":"text","text":"CALM_EXPORT_FIND.txt"}],"details":{},"isError":false,"timestamp":6}}
+{"type":"message","id":"a0000007","parentId":"a0000006","timestamp":"$now","message":{"role":"assistant","content":[{"type":"text","text":"The deterministic tool example is complete."}],"api":"anthropic-messages","provider":"anthropic","model":"claude-sonnet-4-5","usage":{"input":2,"output":1,"cacheRead":0,"cacheWrite":0,"totalTokens":3,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"stop","timestamp":7}}
 JSON
 
   tmux -L "$TMUX_SOCKET" new-session -d -s "$TMUX_SESSION" -x 120 -y 40 \
@@ -350,9 +390,26 @@ JSON
   wait_for_text "$hidden_snapshot" "Tool activity is hidden where supported; built-in read images and custom/third-party tool rows remain visible." \
     || fail "/calm did not report hidden tool activity and its visibility boundaries"
   assert_not_contains "$(cat "$hidden_snapshot")" "CALM_E2E_OUTPUT" "/calm left tool result output in the transcript"
+  assert_not_contains "$(cat "$hidden_snapshot")" "CALM_EXPORT_GREP" "/calm left the grep row in the transcript"
+  assert_not_contains "$(cat "$hidden_snapshot")" "CALM_EXPORT_FIND" "/calm left the find row in the transcript"
   assert_not_contains "$(cat "$hidden_snapshot")" "\$ printf" "/calm left the tool-call row in the transcript"
   assert_contains "$(cat "$hidden_snapshot")" "I will run one command." "/calm removed assistant conversation before a tool"
   assert_contains "$(cat "$hidden_snapshot")" "The deterministic tool example is complete." "/calm removed assistant conversation after a tool"
+
+  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l "/export $export_file"
+  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" Enter
+  wait_for_text "$export_snapshot" "Session exported to: $export_file" \
+    || fail "/export did not complete while calm mode was on"
+  node - "$export_file" <<'JS' || fail "calm-mode HTML export omitted grep or find rendering"
+const html = require("node:fs").readFileSync(process.argv[2], "utf8");
+const match = html.match(/<script id="session-data" type="application\/json">([^<]+)<\/script>/);
+if (!match) process.exit(1);
+const session = JSON.parse(Buffer.from(match[1], "base64").toString("utf8"));
+for (const id of ["call_grep_e2e", "call_find_e2e"]) {
+  const rendered = session.renderedTools?.[id];
+  if (!rendered?.callHtml || !rendered?.resultHtmlExpanded) process.exit(1);
+}
+JS
 
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l "/calm"
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" Enter

@@ -50,6 +50,8 @@ type StandardShellState = {
 
 export default function (pi: ExtensionAPI) {
   let calm = false;
+  let exportRendering = false;
+  let removeTerminalInputHandler: (() => void) | undefined;
 
   function registerBuiltIn<TParams extends TSchema, TDetails, TState>(
     factory: DefinitionFactory<TParams, TDetails, TState>,
@@ -118,6 +120,7 @@ export default function (pi: ExtensionAPI) {
         theme: RenderTheme<TParams, TDetails, TState>,
         context: RenderContext<TParams, TDetails, TState>,
       ) {
+        if (exportRendering) return originalRenderCall(args, theme, context);
         if (calm) return new Container();
         if (originalSelfShell) return originalRenderCall(args, theme, context);
 
@@ -135,6 +138,7 @@ export default function (pi: ExtensionAPI) {
         theme: RenderTheme<TParams, TDetails, TState>,
         context: RenderContext<TParams, TDetails, TState>,
       ) {
+        if (exportRendering) return originalRenderResult(result, options, theme, context);
         if (calm) return new Container();
         if (originalSelfShell) return originalRenderResult(result, options, theme, context);
 
@@ -157,8 +161,21 @@ export default function (pi: ExtensionAPI) {
   registerBuiltIn(createFindToolDefinition);
   registerBuiltIn(createLsToolDefinition);
 
-  pi.on("session_start", () => {
+  pi.on("session_start", (_event, ctx) => {
     calm = false;
+    exportRendering = false;
+    removeTerminalInputHandler?.();
+    removeTerminalInputHandler = ctx.ui.onTerminalInput((data) => {
+      if (!calm || (data !== "\r" && data !== "\n")) return;
+
+      const input = ctx.ui.getEditorText().trim();
+      if (input !== "/export" && !input.startsWith("/export ")) return;
+
+      exportRendering = true;
+      setTimeout(() => {
+        exportRendering = false;
+      }, 0);
+    });
   });
 
   pi.registerCommand("calm", {
