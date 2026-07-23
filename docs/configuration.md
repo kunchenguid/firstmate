@@ -301,7 +301,7 @@ See [`docs/capacity-failover.md`](capacity-failover.md) for the classifier signa
 
 ## Claude OAuth rotation (config/claude-rotation)
 
-`config/claude-rotation` is an optional local, private file (keep it out of version control) that turns on firstmate's native Claude Code OAuth account rotation for the `claude` harness only.
+`config/claude-rotation` is an optional LOCAL, gitignored file that turns on firstmate's native Claude Code OAuth account rotation for the `claude` harness only.
 When the file is absent, spawning is unchanged and no rotation happens.
 When the file is present, `fm-spawn.sh` rotates each new `claude`-harness launch across the OAuth account files in `~/.cli-proxy-api/claude-*.json` (override the directory with `FM_CLAUDE_ACCOUNT_DIR`), selecting through the shared helper `bin/fm-claude-accounts.sh`.
 A one-shot `FM_CLAUDE_ROTATION=1` opts a single spawn in without the file; the file may also carry an explicit `enabled`/`disabled` first token.
@@ -439,7 +439,7 @@ These paths need `jq` to build the JSON payload, but they run before token and n
 
 ## Intake mode (config/intake.env / config/intake-sla.env)
 
-`config/intake.env` is an optional local, private file (keep it out of version control) that opts a home into intake mode.
+`config/intake.env` is an optional LOCAL, gitignored file that opts a home into intake mode.
 When it is absent, `bin/fm-intake-poll.sh` is a hard no-op, bootstrap removes any stale `state/intake.check.sh`, and behavior is unchanged.
 When it is present, bootstrap requires `jq`, arms a byte-static intake poll shim at `state/intake.check.sh` wired into the authenticated watcher check mechanism, and reports the result as an `INTAKE:` line.
 The poll refreshes a GitHub + Linear open-work picture, derives a backlog view, keeps working snapshots under `state/intake/`, and emits a watcher wake line only on actionable changes; its side effects are otherwise silent.
