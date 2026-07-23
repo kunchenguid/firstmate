@@ -13,10 +13,8 @@
 # deterministic shard and root order after every worker finishes. FM_LINT_JOBS=1
 # runs the same shards serially with byte-identical diagnostics and exit selection.
 #
-# Optional telemetry is quiet and bounded. FM_LINT_TELEMETRY=<path> writes one
-# TSV snapshot with root and source-boundary counts, content identity, timing,
-# CPU, maximum worker RSS, shard weights, load, and competing ShellCheck counts.
-# Routine lint output is unchanged when telemetry is not requested.
+# Optional quiet telemetry writes one bounded TSV snapshot of content and source
+# graph identity, wall/CPU/RSS, shard load, and competing ShellCheck processes.
 #
 # Usage:
 #   fm-lint.sh                         lint the canonical file set
