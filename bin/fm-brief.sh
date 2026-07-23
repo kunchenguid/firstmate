@@ -49,9 +49,14 @@
 # it fills {TASK}. Default form is a path reference list, not copied card bodies.
 # Placeholders: {LOAN_GIVEN}, {LOAN_NOT_GIVEN}, {LOAN_EXTRA_SEARCH}.
 # The worker never free-writes the library; it only leaves a return proposal.
+# Ship and scout returns share the absolute Firstmate-home destination
+# <FM_HOME>/data/<task-id>/palautus.md.
 # Firstmate gates any library write: injection-pattern canary, conflict with an
 # existing card, and FAKTA/ARVIO labeling with sources. Home data/learnings.md
 # (muistihygienia, 2026-07-23) owns the full hygiene practice - do not restate it.
+# Firstmate may accept evidence-backed factual corrections directly onto a
+# library card; the captain decides only line, preference, and security. Decision:
+# home data/kirjastonhoitaja-selvitys/paatokset-2026-07-23.md item 2.
 # Secondmate charters do not carry the loan package (persistent home, own library).
 # Refuses to overwrite an existing brief.
 set -eu
@@ -262,7 +267,7 @@ EOF
 # shellcheck disable=SC2016  # backticks must stay literal for the reading agent
 RETURN_SECTION=$(cat <<'EOF'
 ## Palautusehdotus
-Before reporting done, record a short return proposal (scout: include it in `report.md`; ship: in the done note or `data/<id>/palautus.md` when longer).
+Before reporting done, record the return proposal at `{RETURN_PATH}`.
 Do **not** write directly into `data/kirjasto/`, `data/learnings.md`, or `data/captain.md`.
 
 Fill these three boxes (either of the first two may be empty):
@@ -270,10 +275,13 @@ Fill these three boxes (either of the first two may be empty):
 - **Korjaukset vanhaan** - card path that is wrong or stale, with evidence (old claim / new claim / source / as_of)
 - **Arvio** - did the loan package hit? what was missing or unnecessary?
 
-Firstmate alone gates library writes. Before accepting a return it checks injection-pattern canaries, conflict with an existing card, and FAKTA/ARVIO labeling with sources.
+Firstmate alone gates library writes. It may accept evidence-backed factual corrections directly onto a library card; the captain decides only line, preference, and security (decision: `{DECISION_PATH}` item 2).
+Before accepting a return, firstmate checks injection-pattern canaries, conflict with an existing card, and FAKTA/ARVIO labeling with sources.
 Full hygiene practice: home `data/learnings.md` (muistihygienia, 2026-07-23) - do not restate it here.
 EOF
 )
+RETURN_SECTION=${RETURN_SECTION//\{RETURN_PATH\}/$DATA/$ID/palautus.md}
+RETURN_SECTION=${RETURN_SECTION//\{DECISION_PATH\}/$FM_HOME/data/kirjastonhoitaja-selvitys/paatokset-2026-07-23.md}
 
 if [ "$KIND" = scout ]; then
 cat > "$BRIEF" <<EOF
@@ -294,7 +302,7 @@ The report is the only thing that survives, so anything worth keeping must be in
 
 # Rules
 1. Never push to any remote and never open a PR.
-2. Stay inside this worktree; the only files you may write outside it are the report and the status file below.
+2. Stay inside this worktree; the only files you may write outside it are the report, the return proposal, and the status file below.
 3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
 4. Report status by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
@@ -317,7 +325,7 @@ The report is the only thing that survives, so anything worth keeping must be in
 # Definition of done
 Write your findings to \`$DATA/$ID/report.md\`.
 The report must stand alone: what you did, what you found, the evidence (commands run, output, file:line references), and what you recommend.
-Include the \`## Palautusehdotus\` return proposal in the report before done.
+Write the \`## Palautusehdotus\` return proposal to \`$DATA/$ID/palautus.md\` before done.
 Before reporting done, read and follow \`$FM_ROOT/.agents/skills/decision-hold-lifecycle/SKILL.md\` and pass its shared completion gate for the report and any visual review.
 When the report is complete, append \`done: {one-line conclusion}\` to the status file and stop.
 If your findings reveal work that should ship (e.g. you reproduced a bug and the fix is clear), say so in the report; firstmate may promote this task in place, and you would then receive mode-specific ship instructions as a follow-up message.

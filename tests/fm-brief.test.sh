@@ -364,6 +364,14 @@ test_loan_package_on_ship_and_scout_not_secondmate() {
   assert_grep "path reference list" "$ship" "ship brief missing path-reference-list default"
   assert_grep "injection-pattern canaries" "$ship" "ship brief missing gate canary pointer"
   assert_grep "data/learnings.md" "$ship" "ship brief must point at learnings hygiene, not restate it"
+  assert_grep "record the return proposal at \`$home/data/loan-ship/palautus.md\`" "$ship" \
+    "ship brief must use the absolute Firstmate-home return path"
+  assert_grep "may accept evidence-backed factual corrections directly onto a library card" "$ship" \
+    "ship brief missing firstmate fact-correction authority"
+  assert_grep "$home/data/kirjastonhoitaja-selvitys/paatokset-2026-07-23.md\` item 2" "$ship" \
+    "ship brief missing the absolute authority-decision pointer"
+  assert_no_grep "\`data/<id>/palautus.md\`" "$ship" \
+    "ship brief retained the project-relative return path"
   assert_grep "# Task" "$ship" "ship brief lost # Task section"
   assert_grep "# Setup" "$ship" "ship brief lost # Setup section"
   assert_grep "# Rules" "$ship" "ship brief lost # Rules section"
@@ -382,8 +390,14 @@ test_loan_package_on_ship_and_scout_not_secondmate() {
   assert_grep "### Palautusvelvollisuus" "$scout" "scout brief missing ### Palautusvelvollisuus"
   assert_grep "## Palautusehdotus" "$scout" "scout brief missing ## Palautusehdotus"
   assert_grep "{LOAN_GIVEN}" "$scout" "scout brief missing {LOAN_GIVEN} placeholder"
-  assert_grep "Include the \`## Palautusehdotus\` return proposal in the report before done." "$scout" \
-    "scout DOD must require the return proposal in the report"
+  assert_grep "record the return proposal at \`$home/data/loan-scout/palautus.md\`" "$scout" \
+    "scout brief must use the same absolute Firstmate-home return path"
+  assert_grep "Write the \`## Palautusehdotus\` return proposal to \`$home/data/loan-scout/palautus.md\` before done." "$scout" \
+    "scout DOD must require the Firstmate-home return proposal"
+  assert_grep "the report, the return proposal, and the status file below" "$scout" \
+    "scout rules must allow the Firstmate-home return proposal"
+  assert_grep "may accept evidence-backed factual corrections directly onto a library card" "$scout" \
+    "scout brief missing firstmate fact-correction authority"
   assert_grep "SCOUT task" "$scout" "scout brief lost SCOUT task declaration"
   assert_grep "report.md" "$scout" "scout brief lost report deliverable"
 
