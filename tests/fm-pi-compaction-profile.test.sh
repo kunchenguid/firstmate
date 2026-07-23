@@ -152,9 +152,10 @@ import { dirname } from "node:path";
 import { pathToFileURL } from "node:url";
 const [guardPath, agentDir, cwd] = process.argv.slice(2);
 const { default: loadGuard } = await import(pathToFileURL(guardPath));
-const { AgentSession } = await import(pathToFileURL(
+const { AgentSession, SettingsSelectorComponent, initTheme } = await import(pathToFileURL(
   `${dirname(guardPath)}/node_modules/@earendil-works/pi-coding-agent/dist/index.js`,
 ));
+initTheme("dark");
 const handlers = new Map();
 loadGuard({ on(name, handler) { handlers.set(name, handler); } });
 let shutdowns = 0;
@@ -208,10 +209,56 @@ const effectiveCompaction = Object.getOwnPropertyDescriptor(
   AgentSession.prototype,
   "autoCompactionEnabled",
 ).get.call(guardedSession);
+let footerCompaction = true;
+let callbackCompaction;
+const settingsSelector = new SettingsSelectorComponent({
+  autoCompact: true,
+  showImages: false,
+  imageWidthCells: 80,
+  autoResizeImages: true,
+  blockImages: false,
+  enableSkillCommands: true,
+  steeringMode: "one-at-a-time",
+  followUpMode: "one-at-a-time",
+  transport: "sse",
+  httpIdleTimeoutMs: 300000,
+  thinkingLevel: "medium",
+  availableThinkingLevels: ["off", "low", "medium", "high"],
+  currentTheme: "dark",
+  terminalTheme: "dark",
+  availableThemes: ["dark"],
+  hideThinkingBlock: false,
+  showCacheMissNotices: true,
+  collapseChangelog: false,
+  enableInstallTelemetry: false,
+  doubleEscapeAction: "tree",
+  treeFilterMode: "default",
+  showHardwareCursor: false,
+  editorPaddingX: 0,
+  outputPad: 0,
+  autocompleteMaxVisible: 10,
+  quietStartup: false,
+  defaultProjectTrust: "ask",
+  clearOnShrink: false,
+  showTerminalProgress: false,
+  warnings: {},
+}, {
+  onAutoCompactChange(enabled) {
+    callbackCompaction = enabled;
+    AgentSession.prototype.setAutoCompactionEnabled.call(guardedSession, enabled);
+    footerCompaction = enabled;
+  },
+});
+const settingsList = settingsSelector.getSettingsList();
+settingsList.activateItem();
+const selectorCompaction = settingsList.items.find((item) => item.id === "autocompact")?.currentValue;
 if (
   transientState.model !== expectedModel ||
   transientState.thinkingLevel !== "medium" ||
   effectiveCompaction !== true ||
+  callbackCompaction !== true ||
+  footerCompaction !== true ||
+  selectorCompaction !== "true" ||
   persistentWrites !== 0
 ) {
   process.exit(1);
@@ -260,6 +307,7 @@ assert_grep 'AgentSession.prototype.setModel = guardedSetModel' "$ROOT/bin/fm-pi
 assert_grep 'AgentSession.prototype.cycleModel = guardedCycleModel' "$ROOT/bin/fm-pi-profile-guard.ts" "profile guard does not prevent model cycling before mutation"
 assert_grep 'AgentSession.prototype.setThinkingLevel = guardedSetThinkingLevel' "$ROOT/bin/fm-pi-profile-guard.ts" "profile guard does not keep medium stable before mutation"
 assert_grep 'AgentSession.prototype.setAutoCompactionEnabled = guardedSetAutoCompactionEnabled' "$ROOT/bin/fm-pi-profile-guard.ts" "profile guard does not preserve compaction before mutation"
+assert_grep 'SettingsSelectorComponent.prototype.getSettingsList = guardedGetSettingsList' "$ROOT/bin/fm-pi-profile-guard.ts" "profile guard does not preserve displayed compaction state"
 assert_grep 'session_before_compact' "$ROOT/bin/fm-pi-profile-guard.ts" "profile guard does not validate runtime compaction"
 assert_grep 'pi-delegated-profile' "$ROOT/bin/fm-config-inherit-lib.sh" "secondmate homes do not inherit the delegated Pi profile"
 pass "hostile project and extension surfaces are neutralized while explicit FirstMate extensions remain supported"

@@ -1,6 +1,7 @@
 import {
 	AgentSession,
 	SettingsManager,
+	SettingsSelectorComponent,
 	type ExtensionAPI,
 	type ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
@@ -62,6 +63,29 @@ export default function (pi: ExtensionAPI) {
 		} = function () {};
 		guardedSetAutoCompactionEnabled.fmDelegatedProfileGuard = true;
 		AgentSession.prototype.setAutoCompactionEnabled = guardedSetAutoCompactionEnabled;
+	}
+
+	const getSettingsList =
+		SettingsSelectorComponent.prototype.getSettingsList as typeof SettingsSelectorComponent.prototype.getSettingsList & {
+			fmDelegatedProfileGuard?: boolean;
+		};
+	if (!getSettingsList.fmDelegatedProfileGuard) {
+		const guardedGetSettingsList: typeof SettingsSelectorComponent.prototype.getSettingsList & {
+			fmDelegatedProfileGuard?: boolean;
+		} = function () {
+			const settingsList = getSettingsList.call(this);
+			const mutableSettingsList = settingsList as unknown as {
+				items: Array<{ id: string; currentValue: string; values?: string[] }>;
+			};
+			const autoCompact = mutableSettingsList.items.find((item) => item.id === "autocompact");
+			if (autoCompact) {
+				autoCompact.currentValue = "true";
+				autoCompact.values = ["true"];
+			}
+			return settingsList;
+		};
+		guardedGetSettingsList.fmDelegatedProfileGuard = true;
+		SettingsSelectorComponent.prototype.getSettingsList = guardedGetSettingsList;
 	}
 
 	const compactionIsValid = (ctx: ExtensionContext) => {
