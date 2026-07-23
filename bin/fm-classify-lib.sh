@@ -159,6 +159,16 @@ status_is_paused_or_captain_held() {  # <status-line>
 # one-open-decision-per-task behavior (a bare "resolved:" closes "default").
 # The three parsers are pure reads of a single line; the verb parser strips any
 # key token before the colon so the leading word is recovered cleanly.
+#
+# The key-before-the-colon form above is canonical and every scaffold emits it.
+# _fm_decision_key ALSO accepts the token as a standalone trailing token at the
+# end of the line, because briefs long told crewmates to "add the same
+# [key=<slug>]" without fixing the position, so status files already on disk
+# carry it after the colon. Reading only the prefix folded every such line onto
+# the key "default", where a second concurrent decision silently dropped the
+# first from the open set. The trailing position is deliberately the ONLY other
+# accepted position: a token that is quoted mid-sentence stays prose, so an
+# incidental "[key=" in a note cannot change or close a real decision.
 status_line_verb() {  # <status-line> -> leading verb word
   local v=${1%%:*}
   v=${v%%\[key=*}
@@ -173,18 +183,32 @@ status_line_note() {  # <status-line> -> text after the first colon, trimmed
   esac
 }
 _fm_decision_key() {  # <status-line> -> key slug, or "default" when no token
-  local prefix=${1%%:*} k
+  local prefix=${1%%:*} trailing k
   case "$prefix" in
     *\[key=*\]*)
+      # Canonical position. A malformed slug here is a malformed key, not prose,
+      # so it is rejected rather than folded onto another decision's key.
       k=${prefix#*\[key=}
       k=${k%%\]*}
       case "$k" in
         ''|*[!A-Za-z0-9._-]*) return 1 ;;
-        *) printf '%s' "$k" ;;
+        *) printf '%s' "$k"; return 0 ;;
       esac
       ;;
-    *) printf 'default' ;;
   esac
+  # Compatibility position: the last token on the line, ignoring trailing blanks.
+  trailing=${1%"${1##*[![:space:]]}"}
+  case "$trailing" in
+    *\[key=*\])
+      k=${trailing##*\[key=}
+      k=${k%\]}
+      case "$k" in
+        ''|*[!A-Za-z0-9._-]*) ;;
+        *) printf '%s' "$k"; return 0 ;;
+      esac
+      ;;
+  esac
+  printf 'default'
 }
 # Drop the record for <key> from a newline-terminated "<key>\t<verb>\t<note>" set.
 # Portable (no associative arrays) so the fold runs on bash 3.2 as well as 4+.

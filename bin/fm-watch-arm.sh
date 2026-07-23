@@ -39,12 +39,22 @@
 # loud. A live cycle already present means re-arm attaches - do not start a second
 # watcher.
 #
-# Every observed watcher cycle appends one tab-separated lifecycle record to
+# Every observed watcher cycle holds one tab-separated lifecycle record in
 # state/.watch-cycle-exits.log. The arm layer owns that bounded ledger; it records
 # arm/watcher identities, timestamps, exit/signal classification, beacon age,
 # lock identity before and after close, and successor disposition. The separate
 # state/.watch-triage.log remains exclusively the watcher's absorbed-wake debug
 # log and is never written here.
+#
+# The record is written OPEN when the cycle begins (ended_at=0, exit_code=open,
+# reason=cycle-open, lock_after=pending, successor=none) and rewritten in place
+# with its classified outcome when the cycle ends. SIGKILL and process-group kills
+# cannot run the traps below, so a cycle that dies that way leaves its open record
+# behind instead of vanishing from the ledger built to explain exactly that. Find
+# those cycles with:
+#   grep 'exit_code=open' state/.watch-cycle-exits.log
+# and treat a row whose arm_pid is no longer alive as an unexplained cycle death;
+# a row whose arm_pid is still alive is simply the cycle running right now.
 #
 # --restart: stop ONLY this FM_HOME's watcher (the pid recorded in THIS home's
 # state/.watch.lock) and own a fresh cycle, or attach if a verified live peer
@@ -96,12 +106,56 @@ cycle_origin=unknown
 cycle_started_at=0
 cycle_lock_before='pid:none|identity:none'
 
+# One record shape for both ends of a cycle: the OPEN row written when the cycle
+# begins and the classified record that replaces it in place when the cycle ends.
+# The field order is the ledger's contract (tests/fm-watcher-lock.test.sh guards
+# it); change it there and here together.
+cycle_record_line() {  # <ended_at> <exit_code> <signal> <reason> <beacon_age> <lock_after> <successor>
+  printf 'arm_pid=%s\twatcher_pid=%s\torigin=%s\tstarted_at=%s\tended_at=%s\texit_code=%s\tsignal=%s\treason=%s\tbeacon_age=%s\tlock_before=%s\tlock_after=%s\tsuccessor=%s\n' \
+    "$ARM_PID" \
+    "$(cycle_clean_field "$cycle_watcher_pid")" \
+    "$(cycle_clean_field "$cycle_origin")" \
+    "$cycle_started_at" \
+    "$1" \
+    "$(cycle_clean_field "$2")" \
+    "$(cycle_clean_field "$3")" \
+    "$(cycle_clean_field "$4")" \
+    "$5" \
+    "$(cycle_clean_field "$cycle_lock_before")" \
+    "$(cycle_clean_field "$6")" \
+    "$(cycle_clean_field "$7")"
+}
+
+# Bounded, best-effort serialization for every ledger mutation. A budget-exhausted
+# caller gives up on the write rather than delaying the cycle it is describing.
+cycle_log_lock() {
+  local i=0
+  while ! fm_lock_try_acquire "$CYCLE_LOG_LOCK"; do
+    [ "$i" -lt 20 ] || return 1
+    sleep 0.02
+    i=$((i + 1))
+  done
+  return 0
+}
+
+# Publish the cycle's row BEFORE the cycle runs. SIGKILL and process-group kills
+# cannot run the traps that close a record, so a cycle that dies that way used to
+# leave no ledger evidence at all - the one death mode the ledger most needs to
+# explain. The open row survives instead, and close rewrites it in place, so the
+# ledger keeps exactly one row per observed cycle.
+cycle_log_open_row() {
+  cycle_log_lock || return 0
+  cycle_record_line 0 open none cycle-open "$(fm_path_age "$BEAT")" pending none >> "$CYCLE_LOG" 2>/dev/null || true
+  fm_lock_release "$CYCLE_LOG_LOCK"
+}
+
 cycle_begin() {
   cycle_watcher_pid=$1
   cycle_origin=$2
   cycle_started_at=$(date +%s)
   cycle_lock_before=$(lock_snapshot)
   cycle_active=1
+  cycle_log_open_row
 }
 
 cycle_refresh_lock_before() {
@@ -120,31 +174,47 @@ cycle_signal_name() {
 }
 
 cycle_log_append() {
-  local exit_code=$1 signal=$2 reason=$3 successor=$4 ended_at beacon_age lock_after size tmp raw i
+  local exit_code=$1 signal=$2 reason=$3 successor=$4 ended_at beacon_age lock_after record closed=0 size tmp raw
   [ "$cycle_active" -eq 1 ] || return 0
   ended_at=$(date +%s)
   beacon_age=$(fm_path_age "$BEAT")
   lock_after=$(lock_snapshot)
+  record=$(cycle_record_line "$ended_at" "$exit_code" "$signal" "$reason" "$beacon_age" "$lock_after" "$successor")
 
-  i=0
-  while ! fm_lock_try_acquire "$CYCLE_LOG_LOCK"; do
-    [ "$i" -lt 20 ] || return 0
-    sleep 0.02
-    i=$((i + 1))
-  done
-  printf 'arm_pid=%s\twatcher_pid=%s\torigin=%s\tstarted_at=%s\tended_at=%s\texit_code=%s\tsignal=%s\treason=%s\tbeacon_age=%s\tlock_before=%s\tlock_after=%s\tsuccessor=%s\n' \
-    "$ARM_PID" \
-    "$(cycle_clean_field "$cycle_watcher_pid")" \
-    "$(cycle_clean_field "$cycle_origin")" \
-    "$cycle_started_at" \
-    "$ended_at" \
-    "$(cycle_clean_field "$exit_code")" \
-    "$(cycle_clean_field "$signal")" \
-    "$(cycle_clean_field "$reason")" \
-    "$beacon_age" \
-    "$(cycle_clean_field "$cycle_lock_before")" \
-    "$(cycle_clean_field "$lock_after")" \
-    "$(cycle_clean_field "$successor")" >> "$CYCLE_LOG" 2>/dev/null || true
+  cycle_log_lock || return 0
+  # Close this cycle's own open row in place, identified by arm pid AND start
+  # stamp so a reused pid's abandoned row is never rewritten. The values reach awk
+  # through the environment, never -v, so no field can be reinterpreted as an
+  # escape. If the row is gone (rotated away) or the rewrite fails, fall back to a
+  # plain append so a classified record is never lost to an observability failure.
+  if [ -f "$CYCLE_LOG" ]; then
+    tmp="$CYCLE_LOG.close.$ARM_PID"
+    if FM_CYCLE_TARGET="arm_pid=$ARM_PID" \
+      FM_CYCLE_STARTED="started_at=$cycle_started_at" \
+      FM_CYCLE_RECORD="$record" awk '
+      BEGIN { FS = "\t" }
+      {
+        lines[NR] = $0
+        if ($1 == ENVIRON["FM_CYCLE_TARGET"] && $4 == ENVIRON["FM_CYCLE_STARTED"] && $6 == "exit_code=open") {
+          open_row = NR
+          open_successor = $NF
+        }
+      }
+      END {
+        if (!open_row) exit 1
+        record = ENVIRON["FM_CYCLE_RECORD"]
+        # A successor already linked onto this row by the next arm outranks the
+        # closing default, so linking and closing the same cycle cannot race.
+        if (open_successor != "successor=none" && record ~ /\tsuccessor=none$/)
+          sub(/\tsuccessor=none$/, "\t" open_successor, record)
+        for (i = 1; i <= NR; i += 1) print (i == open_row ? record : lines[i])
+      }
+    ' "$CYCLE_LOG" > "$tmp" 2>/dev/null && mv -f "$tmp" "$CYCLE_LOG" 2>/dev/null; then
+      closed=1
+    fi
+    rm -f "$tmp" 2>/dev/null || true
+  fi
+  [ "$closed" -eq 1 ] || printf '%s\n' "$record" >> "$CYCLE_LOG" 2>/dev/null || true
 
   size=$(wc -c < "$CYCLE_LOG" 2>/dev/null | tr -d '[:space:]')
   case "$size" in
@@ -170,17 +240,12 @@ cycle_log_append() {
 # one-record-per-cycle ledger captures the actual successor outcome without an
 # extra synthetic lifecycle row.
 cycle_mark_predecessor_successor() {
-  local successor=$1 predecessor=${FM_WATCH_PREDECESSOR_ARM_PID:-} i tmp
+  local successor=$1 predecessor=${FM_WATCH_PREDECESSOR_ARM_PID:-} tmp
   case "$predecessor" in
     ''|*[!0-9]*) return 0 ;;
   esac
   [ -f "$CYCLE_LOG" ] || return 0
-  i=0
-  while ! fm_lock_try_acquire "$CYCLE_LOG_LOCK"; do
-    [ "$i" -lt 20 ] || return 0
-    sleep 0.02
-    i=$((i + 1))
-  done
+  cycle_log_lock || return 0
   tmp="$CYCLE_LOG.link.$ARM_PID"
   awk -v target="arm_pid=$predecessor" -v replacement="successor=$(cycle_clean_field "$successor")" '
     {

@@ -857,6 +857,75 @@ SH
   pass "cycle-exit ledger links a verified successor and remains size-capped"
 }
 
+# SIGKILL and process-group kills cannot run the arm's traps, so a cycle that dies
+# that way used to leave NO ledger record at all - the one death mode the ledger
+# most needs to explain. The arm now publishes the cycle's row when the cycle
+# begins and rewrites it in place at close, so a killed cycle stays visible as an
+# unclosed exit_code=open record while a normal cycle still yields exactly one
+# classified row.
+test_killed_cycle_leaves_an_unclosed_ledger_record() {
+  local dir state fakebin armout armpid watcher_pid ledger i rows
+  dir=$(make_case killed-cycle-ledger)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout="$dir/arm.out"
+  ledger="$state/.watch-cycle-exits.log"
+  mark_pr_check_migration_complete "$state"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$armout" &
+  armpid=$!
+  i=0
+  while [ "$i" -lt 80 ]; do
+    grep -qF 'watcher: started pid=' "$armout" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  grep -qF 'watcher: started pid=' "$armout" || fail "killed-cycle arm did not start a watcher"
+  watcher_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+  grep -q "arm_pid=$armpid.*exit_code=open.*reason=cycle-open" "$ledger" \
+    || fail "a running cycle published no open ledger record"
+
+  kill -KILL "$armpid" 2>/dev/null || fail "could not SIGKILL the arm"
+  wait "$armpid" 2>/dev/null || true
+  # The killed arm never ran its traps, so its watcher child is orphaned; reap it
+  # so the case leaves no stray process behind.
+  kill -TERM "$watcher_pid" 2>/dev/null || true
+
+  grep -q "arm_pid=$armpid.*exit_code=open.*reason=cycle-open" "$ledger" \
+    || fail "an untrappable kill left no evidence of the cycle in the ledger"
+  grep -q "arm_pid=$armpid.*reason=arm-interrupted" "$ledger" \
+    && fail "an untrappable kill was recorded as a trapped interruption"
+  rows=$(grep -c "^arm_pid=$armpid	" "$ledger")
+  [ "$rows" -eq 1 ] || fail "a killed cycle left $rows ledger rows instead of one"
+  ! grep -v '^arm_pid=.*watcher_pid=.*started_at=.*ended_at=.*exit_code=.*signal=.*reason=.*beacon_age=.*lock_before=.*lock_after=.*successor=' "$ledger" | grep . >/dev/null \
+    || fail "the open lifecycle record does not match the ledger field order"
+
+  # A normally-ending cycle still closes its row in place: one classified record,
+  # no leftover open row for that arm.
+  dir=$(make_case closed-cycle-ledger)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout="$dir/closed-arm.out"
+  ledger="$state/.watch-cycle-exits.log"
+  mark_pr_check_migration_complete "$state"
+  cat > "$state/task.check.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'done: synthetic cycle\n'
+SH
+  chmod 0700 "$state/task.check.sh"
+  FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-check-register.sh" task >/dev/null \
+    || fail "could not register closed-cycle check"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=0 FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=0 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$armout" &
+  armpid=$!
+  wait "$armpid" || fail "closed-cycle arm did not surface its actionable wake"
+  grep -q "arm_pid=$armpid.*exit_code=0.*reason=actionable-check" "$ledger" \
+    || fail "a normally-ending cycle lost its classified ledger record"
+  grep -q "arm_pid=$armpid.*exit_code=open" "$ledger" \
+    && fail "a normally-ending cycle left its open row behind"
+  rows=$(grep -c "^arm_pid=$armpid	" "$ledger")
+  [ "$rows" -eq 1 ] || fail "a closed cycle left $rows ledger rows instead of one"
+  pass "an untrappable kill leaves one unclosed cycle record while a normal cycle closes its row in place"
+}
+
 test_stopped_watcher_is_live_but_stale_then_exit_is_classified() {
   local dir state fakebin armout armpid watcher_pid i status
   dir=$(make_case stopped-watcher)
@@ -982,4 +1051,5 @@ test_arm_propagates_immediate_wake_before_confirmation
 test_arm_waits_for_peer_beacon_after_child_stands_down
 test_arm_fails_loud_when_no_fresh_watcher_confirmable
 test_cycle_exit_ledger_links_successor_and_stays_bounded
+test_killed_cycle_leaves_an_unclosed_ledger_record
 test_stopped_watcher_is_live_but_stale_then_exit_is_classified
