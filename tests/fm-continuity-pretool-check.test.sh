@@ -61,7 +61,8 @@ test_gate_scope_and_recovery_exceptions() {
   expect_deny "nested forced teardown is not recovery" "bash -lc 'bin/fm-teardown.sh task --force'" 'fm-teardown.sh' "$unsafe_teardown_reason"
   # shellcheck disable=SC2016  # single quotes are deliberate: "$TEARDOWN_MODE" is literal test data (an unsafe shell-expanded arg the gate must deny), not an expansion here
   expect_deny "dynamic teardown mode is not recovery" 'bin/fm-teardown.sh task "$TEARDOWN_MODE"' 'fm-teardown.sh' "$unsafe_teardown_reason"
-  expect_deny "unrelated fleet command" 'bin/fm-crew-state.sh task' 'fm-crew-state.sh'
+  wake_handling_reason='[watcher-continuity] tasks are in flight and no live watcher holds this home lock; fm-crew-state.sh is normally allowed to handle a wake, but no wake in hand: the durable queue at state/.wake-queue is empty and was not drained within the last 300s, so drain a wake with bin/fm-wake-drain.sh first or re-arm with bin/fm-watch-arm.sh as a tracked Claude background task before retrying (blocked: fm-crew-state.sh)'
+  expect_deny "unrelated fleet command" 'bin/fm-crew-state.sh task' 'fm-crew-state.sh' "$wake_handling_reason"
   expect_deny "recovery bundled with unrelated fleet command" 'bin/fm-wake-drain.sh; bin/fm-send.sh task hi' 'fm-send.sh'
   expect_deny "literal nested fleet command" "bash -lc 'bin/fm-bootstrap.sh'" 'fm-bootstrap.sh'
   pass "continuity gate allows recovery and ordinary commands but denies only other fleet execution"
@@ -104,6 +105,16 @@ test_dead_supervision_still_denies_unrelated_mutation_without_wake() {
     'bin/fm-spawn.sh task project ship claude model low' \
     'fm-spawn.sh'
   pass "dead supervision without a wake still blocks unrelated fleet mutation"
+}
+
+test_wake_handling_script_denied_without_wake_in_hand() {
+  local expected
+  rm -f "$STATE/.wake-queue"
+  expected="[watcher-continuity] tasks are in flight and no live watcher holds this home lock; fm-topic-inbox.sh is normally allowed to handle a wake, but no wake in hand: the durable queue at state/.wake-queue is empty and was not drained within the last 300s, so drain a wake with bin/fm-wake-drain.sh first or re-arm with bin/fm-watch-arm.sh as a tracked Claude background task before retrying (blocked: fm-topic-inbox.sh)"
+  expect_deny "wake-handling script without a wake in hand" \
+    'bin/fm-topic-inbox.sh claim 77 main' \
+    'fm-topic-inbox.sh' "$expected"
+  pass "a wake-handling script denied for lack of a wake explains no wake is in hand, not the generic recovery message"
 }
 
 test_live_lock_allows_fleet_command_even_with_stale_beacon() {
@@ -161,6 +172,7 @@ test_claude_hook_registration_preserves_stop_backstop() {
 test_gate_scope_and_recovery_exceptions
 test_topic_wake_can_be_handled_after_watcher_exit_and_drain
 test_dead_supervision_still_denies_unrelated_mutation_without_wake
+test_wake_handling_script_denied_without_wake_in_hand
 test_live_lock_allows_fleet_command_even_with_stale_beacon
 test_child_worktree_and_malformed_input_fail_open
 test_claude_hook_registration_preserves_stop_backstop

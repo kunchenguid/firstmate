@@ -127,6 +127,9 @@ case "$REASON_CODE" in
   unsafe-teardown)
     REASON="[watcher-continuity] tasks are in flight and no live watcher holds this home lock; during recovery only the ordinary literal bin/fm-teardown.sh is allowed, so drop --force and any shell-expanded arguments and retry the literal invocation (blocked: $BLOCKED_SCRIPT)"
     ;;
+  wake-handling)
+    REASON="[watcher-continuity] tasks are in flight and no live watcher holds this home lock; $BLOCKED_SCRIPT is normally allowed to handle a wake, but no wake in hand: the durable queue at state/.wake-queue is empty and was not drained within the last ${WAKE_HANDLING_GRACE}s, so drain a wake with bin/fm-wake-drain.sh first or re-arm with bin/fm-watch-arm.sh as a tracked Claude background task before retrying (blocked: $BLOCKED_SCRIPT)"
+    ;;
   *)
     REASON="[watcher-continuity] tasks are in flight and no live watcher holds this home lock; drain wakes with bin/fm-wake-drain.sh, use fail-closed bin/fm-teardown.sh for completed tasks when needed, then re-arm with bin/fm-watch-arm.sh as a tracked Claude background task before running other fleet commands (blocked: $BLOCKED_SCRIPT)"
     ;;
