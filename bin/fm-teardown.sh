@@ -794,7 +794,7 @@ teardown_treehouse_return_locked() {
   fi
 
   if ! treehouse_return_is_index_lock_error "$out"; then
-    return 1
+    return "$return_status"
   fi
 
   lock=$(worktree_git_lock_path "$dir") || lock=""
@@ -826,7 +826,7 @@ teardown_treehouse_return_locked() {
 
     if ! treehouse_return_is_index_lock_error "$out"; then
       echo "teardown: $label return failed with a non-lock error after retry; aborting" >&2
-      return 1
+      return "$return_status"
     fi
   done
 
@@ -856,7 +856,7 @@ teardown_treehouse_return_locked() {
       if fm_checkout_treehouse_return_requires_retention "$return_status"; then
         return "$return_status"
       fi
-      return 1
+      return "$return_status"
     fi
 
     echo "teardown: $label return failed: git lock $lock_desc persisted across ${max_retries} retries (waiting ${TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS}s each) and is not provably stale (may belong to a live process); leaving it in place" >&2
@@ -1240,29 +1240,27 @@ cleanup_firstmate_home_children() {
     elif [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
       validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
       rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js" "$child_wt/.fm-grok-turnend"
-      if [ -n "$child_proj" ] && [ -d "$child_proj" ] && command -v treehouse >/dev/null 2>&1; then
+      if [ -n "$child_proj" ] && [ -d "$child_proj" ]; then
+        if ! command -v treehouse >/dev/null 2>&1; then
+          echo "error: retained child worktree $child_wt because Treehouse is unavailable; install or restore treehouse, then retry teardown" >&2
+          return "$FM_CHECKOUT_TREEHOUSE_RETURN_UNAVAILABLE_STATUS"
+        fi
         if teardown_treehouse_return "$child_wt" "$child_proj" "child worktree"; then
           :
         else
           child_return_rc=$?
-          if [ "$child_return_rc" -eq "$TEARDOWN_TREEHOUSE_LOCK_REFUSED" ]; then
-            return "$child_return_rc"
-          fi
-          if fm_checkout_treehouse_return_requires_retention "$child_return_rc"; then
-            case "$child_return_rc" in
-              "$FM_CHECKOUT_LOCK_CONTENTION_STATUS")
-                echo "error: retained child worktree $child_wt because its common checkout mutation lock is busy" >&2
-                ;;
-              "$FM_CHECKOUT_TREEHOUSE_RETURN_TIMEOUT_STATUS")
-                echo "error: retained child worktree $child_wt because its Treehouse return timed out" >&2
-                ;;
-              *)
-                echo "error: retained child worktree $child_wt because its locked Treehouse return could not complete safely (status $child_return_rc)" >&2
-                ;;
-            esac
-            return "$child_return_rc"
-          fi
-          safe_rm_rf_child_worktree "$child_wt" "$child_proj"
+          case "$child_return_rc" in
+            "$FM_CHECKOUT_LOCK_CONTENTION_STATUS")
+              echo "error: retained child worktree $child_wt because its common checkout mutation lock is busy" >&2
+              ;;
+            "$FM_CHECKOUT_TREEHOUSE_RETURN_TIMEOUT_STATUS")
+              echo "error: retained child worktree $child_wt because its Treehouse return timed out" >&2
+              ;;
+            *)
+              echo "error: retained child worktree $child_wt because its locked Treehouse return failed (status $child_return_rc); resolve the Treehouse failure, then retry teardown" >&2
+              ;;
+          esac
+          return "$child_return_rc"
         fi
       else
         safe_rm_rf_child_worktree "$child_wt" "$child_proj"

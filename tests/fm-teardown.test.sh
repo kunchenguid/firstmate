@@ -2118,6 +2118,122 @@ SH
   pass "forced secondmate teardown quiesces and verifies the parent before child cleanup"
 }
 
+setup_forced_secondmate_child_case() {
+  local name=$1 child_id=$2
+  FORCED_CHILD_CASE_DIR=$(make_case "$name")
+  FORCED_CHILD_PROJECT="$FORCED_CHILD_CASE_DIR/child-project"
+  FORCED_CHILD_WORKTREE="$FORCED_CHILD_CASE_DIR/child-worktree"
+  FORCED_CHILD_PARENT_LIVE="$FORCED_CHILD_CASE_DIR/parent-live"
+  mkdir -p "$FORCED_CHILD_CASE_DIR/wt/data" "$FORCED_CHILD_CASE_DIR/wt/state" \
+    "$FORCED_CHILD_CASE_DIR/wt/config" "$FORCED_CHILD_CASE_DIR/wt/projects"
+  printf '%s\n' task-x1 > "$FORCED_CHILD_CASE_DIR/wt/.fm-secondmate-home"
+  fm_write_meta "$FORCED_CHILD_CASE_DIR/state/task-x1.meta" \
+    'window=fm-task-x1' \
+    'tmux_session_target=firstmate:fm-task-x1' \
+    "worktree=$FORCED_CHILD_CASE_DIR/wt" \
+    "project=$FORCED_CHILD_CASE_DIR/project" \
+    'kind=secondmate' \
+    'mode=secondmate' \
+    "home=$FORCED_CHILD_CASE_DIR/wt"
+  fm_git_worktree "$FORCED_CHILD_PROJECT" "$FORCED_CHILD_WORKTREE" child-branch
+  fm_write_meta "$FORCED_CHILD_CASE_DIR/wt/state/$child_id.meta" \
+    "window=fm-$child_id" \
+    "worktree=$FORCED_CHILD_WORKTREE" \
+    "project=$FORCED_CHILD_PROJECT" \
+    'kind=ship' \
+    'mode=local-only'
+  : > "$FORCED_CHILD_PARENT_LIVE"
+  cat > "$FORCED_CHILD_CASE_DIR/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  display-message) [ -f "$FM_FAKE_PARENT_LIVE" ]; exit $? ;;
+  list-panes) exit 0 ;;
+  kill-window) rm -f "$FM_FAKE_PARENT_LIVE"; exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$FORCED_CHILD_CASE_DIR/fakebin/tmux"
+}
+
+test_forced_secondmate_retains_child_on_treehouse_failure() {
+  local case_dir child_worktree child_id lock child_pid_file child_pid term_marker rc
+  child_id=child-return-failure-x6
+  setup_forced_secondmate_child_case secondmate-child-return-failure "$child_id"
+  case_dir=$FORCED_CHILD_CASE_DIR
+  child_worktree=$FORCED_CHILD_WORKTREE
+  lock=$(checkout_lock_path "$child_worktree" "$case_dir/checkout-locks")
+  child_pid_file="$case_dir/treehouse-child.pid"
+  term_marker="$case_dir/treehouse-child-terminated-under-lock"
+  cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = return ]; then
+  (
+    trap '
+      if [ -e "$FM_EXPECT_CHECKOUT_LOCK" ] || [ -L "$FM_EXPECT_CHECKOUT_LOCK" ]; then
+        : > "$TREEHOUSE_RETURN_CHILD_TERM_MARKER"
+      fi
+      exit 0
+    ' TERM
+    while :; do
+      sleep 1
+    done
+  ) &
+  child=$!
+  printf '%s\n' "$child" > "$TREEHOUSE_RETURN_CHILD_PID_FILE"
+  sleep 0.2
+  exit 17
+fi
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+
+  set +e
+  FM_FAKE_PARENT_LIVE="$FORCED_CHILD_PARENT_LIVE" \
+  FM_EXPECT_CHECKOUT_LOCK="$lock" \
+  TREEHOUSE_RETURN_CHILD_PID_FILE="$child_pid_file" \
+  TREEHOUSE_RETURN_CHILD_TERM_MARKER="$term_marker" \
+    run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 17 "$rc" "forced secondmate cleanup should preserve the failed Treehouse return status"
+  assert_present "$child_pid_file" "failed Treehouse return did not start its descendant"
+  child_pid=$(cat "$child_pid_file")
+  ! kill -0 "$child_pid" 2>/dev/null \
+    || fail "failed Treehouse return left descendant $child_pid alive"
+  assert_present "$term_marker" "failed Treehouse return released the checkout lock before terminating descendants"
+  assert_absent "$lock" "failed Treehouse return left the checkout lock held"
+  assert_present "$child_worktree" "failed Treehouse return deleted the child worktree"
+  assert_present "$case_dir/wt/state/$child_id.meta" "failed Treehouse return removed child retry metadata"
+  assert_present "$case_dir/state/task-x1.meta" "failed Treehouse return removed parent retry metadata"
+  assert_grep "retained child worktree $child_worktree because its locked Treehouse return failed (status 17)" \
+    "$case_dir/stderr" "forced secondmate cleanup did not report failed-return retention"
+  pass "forced secondmate cleanup retains failed returns after reaping descendants"
+}
+
+test_forced_secondmate_retains_child_when_treehouse_unavailable() {
+  local case_dir child_worktree child_id rc
+  child_id=child-return-unavailable-x7
+  setup_forced_secondmate_child_case secondmate-child-return-unavailable "$child_id"
+  case_dir=$FORCED_CHILD_CASE_DIR
+  child_worktree=$FORCED_CHILD_WORKTREE
+  rm -f "$case_dir/fakebin/treehouse"
+
+  set +e
+  PATH=/usr/bin:/bin FM_FAKE_PARENT_LIVE="$FORCED_CHILD_PARENT_LIVE" \
+    run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 127 "$rc" "forced secondmate cleanup should surface unavailable Treehouse distinctly"
+  assert_present "$child_worktree" "unavailable Treehouse deleted the child worktree"
+  assert_present "$case_dir/wt/state/$child_id.meta" "unavailable Treehouse removed child retry metadata"
+  assert_present "$case_dir/state/task-x1.meta" "unavailable Treehouse removed parent retry metadata"
+  assert_grep "retained child worktree $child_worktree because Treehouse is unavailable" \
+    "$case_dir/stderr" "forced secondmate cleanup did not report unavailable-return retention"
+  pass "forced secondmate cleanup retains child worktree when Treehouse is unavailable"
+}
+
 test_forced_secondmate_retains_child_on_checkout_lock_contention() {
   local case_dir child_project child_worktree child_id lock_root lock parent_live rc
   case_dir=$(make_case secondmate-child-checkout-contention)
@@ -2514,6 +2630,12 @@ if [ "${FM_TEST_FOCUSED:-}" = review-round-9 ]; then
   exit 0
 fi
 
+if [ "${FM_TEST_FOCUSED:-}" = review-round-10-treehouse-return ]; then
+  test_forced_secondmate_retains_child_on_treehouse_failure
+  test_forced_secondmate_retains_child_when_treehouse_unavailable
+  exit 0
+fi
+
 test_local_only_fork_remote_allows
 test_teardown_prompts_tasks_axi_done_when_compatible
 test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present
@@ -2529,6 +2651,8 @@ test_managed_teardown_locks_generation_before_endpoint_cleanup
 test_managed_child_teardown_locks_generation_before_snapshot
 test_forced_secondmate_child_uses_child_home_for_endpoint_verification
 test_forced_secondmate_quiesces_parent_before_child_cleanup
+test_forced_secondmate_retains_child_on_treehouse_failure
+test_forced_secondmate_retains_child_when_treehouse_unavailable
 test_forced_secondmate_retains_child_on_checkout_lock_contention
 test_herdr_teardown_clears_escalation_marker
 test_required_report_blocks_then_publishes_before_cleanup
