@@ -25,11 +25,11 @@ Ordinary dead-direct-report recovery is owned by `stuck-crewmate-recovery`, whil
 
 ## Pi direct-OpenAI retention (config/pi-direct-openai-retention)
 
-The tracked `.pi/extensions/fm-openai-retention-guard.ts` extension keeps the installed OpenAI server-compaction package enabled for `openai-codex/*` models without changing its automatic compaction threshold or normal interaction flow.
-For direct `openai/*` models, the guard defaults the package's stored-response continuation setting off and removes `store:true`, `previous_response_id`, and retaining context-management fields from provider requests.
+The tracked `.pi/extensions/fm-openai-retention-guard.ts` extension leaves the installed OpenAI server-compaction package's enabled state, automatic compaction threshold, and normal interaction flow unchanged for `openai-codex/*` models.
+For direct `openai/*` models, the guard defaults the package's stored-response continuation setting off, forces `store:false`, and removes `previous_response_id` and `context_management` from provider requests.
 This default prevents an accidental model-picker change from enabling OpenAI server-side conversation retention.
 
-Direct-OpenAI retention requires a local, gitignored opt-in file under the effective `FM_HOME` whose exact bytes are `allow-store` followed by one LF newline:
+Direct-OpenAI retention requires a local, gitignored opt-in file in the effective config directory, normally `config/` under the effective `FM_HOME`, whose exact bytes are `allow-store` followed by one LF newline:
 
 ```sh
 mkdir -p config
