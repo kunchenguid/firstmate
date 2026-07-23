@@ -186,6 +186,7 @@ Those inherited values are defaults and rules only; `fm-spawn` still permits a c
 `config/secondmate-harness` is not inherited because secondmates do not launch secondmates.
 For grok, `fm-spawn.sh` installs one firstmate-owned global turn-end hook under `$GROK_HOME/hooks/`, or `~/.grok/hooks/` when `GROK_HOME` is unset, and drops a per-task `.fm-grok-turnend` pointer in the worktree, with teardown removing the task token and pointer.
 For Pi secondmate launches, `fm-spawn.sh` starts Pi with `-e` pointed at the secondmate home's own tracked `.pi/extensions/fm-primary-pi-watch.ts` and `.pi/extensions/fm-primary-turnend-guard.ts`, both already present from the secondmate home's git worktree.
+For pi and claude, `fm-spawn.sh` also prefixes the final launch command with an inline `PI_CODING_AGENT_DIR` or `CLAUDE_CONFIG_DIR` assignment carrying the spawning session's config-directory selection, so crewmates and secondmates authenticate against the primary's config directory instead of a fresh one; see [`harness-adapters`](../.agents/skills/harness-adapters/SKILL.md) "Spawned credential-config directories" for the full contract.
 
 ## Crew dispatch profiles (config/crew-dispatch.json)
 
@@ -427,6 +428,8 @@ FM_BUSY_REGEX='esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel'   # busy-pane s
 FM_COMPOSER_IDLE_RE=    # optional empty-composer regex, applied after ghost and border stripping
 FM_COMPOSER_GHOST_LUMA_MAX=128   # fleet-wide: max perceived luminance (0.299R+0.587G+0.114B, 0-255) for a TRUECOLOR foreground to count as de-emphasised ghost/placeholder text and be stripped; dim/faint (SGR 2) is stripped regardless. Assumes a dark terminal theme (bin/fm-composer-lib.sh's fm_composer_strip_ghost, shared by the tmux and herdr composer readers)
 GROK_HOME=              # optional Grok config home for firstmate's global grok turn-end hook; defaults to ~/.grok
+PI_CODING_AGENT_DIR=    # pi-only: config directory forwarded inline to spawned pi launches so crew inherit the primary's authenticated config; defaults to ~/.pi/agent
+CLAUDE_CONFIG_DIR=      # claude-only: config directory forwarded inline to spawned claude launches so crew inherit the primary's authenticated config; defaults to ~/.claude
 FM_SEND_RETRIES=3       # fm-send Enter-retry attempts after typing the line once
 FM_SEND_SLEEP=0.4       # seconds between fm-send submit checks
 FM_SEND_SETTLE=1        # seconds fm-send waits after a successful text submit; 0 disables
