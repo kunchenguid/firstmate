@@ -188,6 +188,30 @@ class ProtocolContractTest(unittest.TestCase):
             with self.subTest(status=variant.status):
                 self.assertEqual(validate_message(variant.to_wire()), variant)
 
+    def test_positive_bridge_results_require_durable_entry_fields(self):
+        common = {
+            "request_id": "req-6",
+            "external_id": EXTERNAL_ID,
+            "payload_sha256": HASH_B,
+        }
+        for status in (BridgeStatus.ACCEPTED, BridgeStatus.DUPLICATE):
+            with self.subTest(status=status):
+                with self.assertRaises(ProtocolValidationError):
+                    BridgeResult(**common, status=status)
+        hacked = object.__new__(BridgeResult)
+        for key, value in {
+            **common,
+            "status": BridgeStatus.ACCEPTED,
+            "session_epoch": None,
+            "session_id": None,
+            "adapter_entry_id": None,
+            "retry_after_ms": None,
+            "reason_code": None,
+        }.items():
+            object.__setattr__(hacked, key, value)
+        with self.assertRaises(ProtocolValidationError):
+            hacked.to_wire()
+
     def test_normalized_milestones_are_allowlisted_and_detail_free(self):
         for sequence, kind in enumerate(MilestoneKind):
             event = Milestone(
@@ -320,6 +344,17 @@ class EnvelopeContractTest(unittest.TestCase):
         del update["edited_message"]["edit_date"]
         with self.assertRaises(TelegramEnvelopeError):
             normalize_update(update, self.bot, self.auth)
+
+    def test_present_thread_and_reply_ids_are_rejected_when_malformed(self):
+        for mutation in (
+            lambda update: update["message"].__setitem__("message_thread_id", 0),
+            lambda update: update["message"].__setitem__("reply_to_message", {"message_id": 0}),
+        ):
+            update = self.message_update()
+            mutation(update)
+            with self.subTest(update=update):
+                with self.assertRaises(TelegramEnvelopeError):
+                    normalize_update(update, self.bot, self.auth)
 
     def test_callback_envelope_retains_private_payload_for_later_lane(self):
         update = {
@@ -693,6 +728,20 @@ class TelegramApiContractTest(unittest.TestCase):
             with self.subTest(result=result):
                 with self.assertRaises(AmbiguousResponse):
                     client.send_message(chat_id="424242", text="reply")
+
+    def test_edit_message_text_requires_exact_chat_and_message_id(self):
+        for result in (
+            {"message_id": 8, "chat": {"id": 424242}},
+            {"message_id": 7, "chat": {"id": 999}},
+        ):
+            client, _ = self.client(
+                [json_response(200, {"ok": True, "result": result})]
+            )
+            with self.subTest(result=result):
+                with self.assertRaises(AmbiguousResponse):
+                    client.edit_message_text(
+                        chat_id="424242", message_id="7", text="activity"
+                    )
 
     def test_token_and_diagnostics_are_structurally_secret_safe(self):
         secret = "123456:credential-that-must-not-leak"

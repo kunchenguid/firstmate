@@ -66,7 +66,11 @@ class FakeTelegramServer:
                 with owner._lock:
                     owner._requests.append(RecordedRequest(method, payload))
                     script = owner._scripts[method]
-                    reply = script.popleft() if script else owner._default(method)
+                    reply = (
+                        script.popleft()
+                        if script
+                        else owner._default(method, payload)
+                    )
                 if reply.disconnect_after_read:
                     self.close_connection = True
                     return
@@ -120,13 +124,24 @@ class FakeTelegramServer:
         with self._lock:
             return list(self._requests)
 
-    def _default(self, method: str) -> FakeReply:
+    def _default(self, method: str, payload: Mapping[str, Any]) -> FakeReply:
         if method == "getUpdates":
             return FakeReply(payload={"ok": True, "result": []})
         if method == "getWebhookInfo":
             return FakeReply(payload={"ok": True, "result": {"url": ""}})
         if method in ("deleteMessage", "answerCallbackQuery"):
             return FakeReply(payload={"ok": True, "result": True})
+        message_id = payload.get("message_id")
+        if method == "editMessageText" and isinstance(message_id, int) and message_id > 0:
+            return FakeReply(
+                payload={
+                    "ok": True,
+                    "result": {
+                        "message_id": message_id,
+                        "chat": {"id": int(self.chat_id)},
+                    },
+                }
+            )
         return FakeReply(
             payload={
                 "ok": True,

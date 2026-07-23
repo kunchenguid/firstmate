@@ -325,7 +325,12 @@ class TelegramBotApiClient:
             {"chat_id": chat_id, "message_id": int(message_id), "text": text},
             mutation=True,
         )
-        return _positive_message(result, chat_id, "editMessageText")
+        return _positive_message(
+            result,
+            chat_id,
+            "editMessageText",
+            expected_message_id=message_id,
+        )
 
     def delete_message(self, *, chat_id: str, message_id: str) -> bool:
         _chat_id(chat_id)
@@ -442,7 +447,13 @@ def _retry_after(decoded: Mapping[str, Any]) -> int:
     return min(value, MAX_RETRY_AFTER_SECONDS)
 
 
-def _positive_message(result: Any, expected_chat_id: str, method: str) -> dict:
+def _positive_message(
+    result: Any,
+    expected_chat_id: str,
+    method: str,
+    *,
+    expected_message_id: Optional[str] = None,
+) -> dict:
     if not isinstance(result, dict):
         raise AmbiguousResponse(method)
     message_id = result.get("message_id")
@@ -454,6 +465,8 @@ def _positive_message(result: Any, expected_chat_id: str, method: str) -> dict:
         or not isinstance(chat, dict)
         or str(chat.get("id")) != expected_chat_id
     ):
+        raise AmbiguousResponse(method)
+    if expected_message_id is not None and str(message_id) != expected_message_id:
         raise AmbiguousResponse(method)
     return result
 

@@ -144,6 +144,54 @@ def _wire_dict(value: Any) -> Dict[str, Any]:
     return result
 
 
+def _bridge_result_field_is_required(field: str) -> None:
+    raise ProtocolValidationError(f"{field} is invalid")
+
+
+def _validate_bridge_result(result: "BridgeResult") -> None:
+    _string(result.request_id, "request_id")
+    _external_id(result.external_id)
+    _sha256(result.payload_sha256, "payload_sha256")
+    if result.status in (BridgeStatus.ACCEPTED, BridgeStatus.DUPLICATE):
+        _positive_int(result.session_epoch, "session_epoch")
+        _string(result.session_id, "session_id")
+        _string(result.adapter_entry_id, "adapter_entry_id")
+        if result.retry_after_ms is not None:
+            _bridge_result_field_is_required("retry_after_ms")
+        if result.reason_code is not None:
+            _bridge_result_field_is_required("reason_code")
+    elif result.status == BridgeStatus.NOT_FOUND:
+        _positive_int(result.session_epoch, "session_epoch")
+        _string(result.session_id, "session_id")
+        if result.adapter_entry_id is not None:
+            _bridge_result_field_is_required("adapter_entry_id")
+        if result.retry_after_ms is not None:
+            _bridge_result_field_is_required("retry_after_ms")
+        if result.reason_code is not None:
+            _bridge_result_field_is_required("reason_code")
+    elif result.status == BridgeStatus.BUSY:
+        _positive_int(result.session_epoch, "session_epoch")
+        _positive_int(result.retry_after_ms, "retry_after_ms")
+        if result.session_id is not None:
+            _bridge_result_field_is_required("session_id")
+        if result.adapter_entry_id is not None:
+            _bridge_result_field_is_required("adapter_entry_id")
+        if result.reason_code is not None:
+            _bridge_result_field_is_required("reason_code")
+    elif result.status in (BridgeStatus.UNAVAILABLE, BridgeStatus.AMBIGUOUS):
+        _reason(result.reason_code)
+        if result.session_epoch is not None:
+            _bridge_result_field_is_required("session_epoch")
+        if result.session_id is not None:
+            _bridge_result_field_is_required("session_id")
+        if result.adapter_entry_id is not None:
+            _bridge_result_field_is_required("adapter_entry_id")
+        if result.retry_after_ms is not None:
+            _bridge_result_field_is_required("retry_after_ms")
+    else:
+        raise ProtocolValidationError("status is invalid")
+
+
 @dataclass(frozen=True)
 class SessionRegistration:
     """An explicit claim by one adapter for one active Firstmate session."""
@@ -371,7 +419,11 @@ class BridgeResult:
     retry_after_ms: Optional[int] = None
     reason_code: Optional[str] = None
 
+    def __post_init__(self) -> None:
+        _validate_bridge_result(self)
+
     def to_wire(self) -> Dict[str, Any]:
+        _validate_bridge_result(self)
         return _wire_dict(self)
 
     @classmethod
