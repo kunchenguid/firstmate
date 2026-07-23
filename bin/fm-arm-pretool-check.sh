@@ -13,24 +13,28 @@
 # Usage:
 #   <PreToolUse JSON on stdin> | bin/fm-arm-pretool-check.sh
 #   bin/fm-arm-pretool-check.sh --command '<cmd>' [--background true|false]
+#   ... | bin/fm-arm-pretool-check.sh --cursor
 #
-# Stdin mode extracts .toolInput.command for Grok or .tool_input.command for
-# Claude and Codex.
+# Stdin mode extracts .toolInput.command for Grok, .tool_input.command for
+# Claude and Codex, or top-level .command for Cursor beforeShellExecution.
 # CLI mode is used by OpenCode and Pi after their adapters extract the exact
 # command string.
 # --background remains accepted for compatibility, but harness-native tracked
 # background execution is not itself a policy signal.
+# --cursor renders Cursor beforeShellExecution deny JSON on stdout.
 #
 # Exit/output contract:
 #   ALLOW - exit 0 and no output.
 #   DENY - exit 2, a Claude-shaped deny object on stderr, and a Grok-shaped
-#          deny object on stdout unless --claude was supplied.
+#          deny object on stdout unless --claude was supplied; with --cursor,
+#          a Cursor permission deny object on stdout instead of the Grok object.
 #   FAIL OPEN - malformed or empty stdin, missing jq for stdin transport,
 #               missing Node or policy owner, or an invalid policy response.
 #
 # Claude requires stdout to remain empty on deny.
 # Codex blocks on exit 2 and displays stderr.
 # Grok consumes the stdout decision object.
+# Cursor consumes the stdout permission object (and also honors exit 2).
 # OpenCode and Pi consume exit 2 plus stderr.
 set -u
 
@@ -38,16 +42,19 @@ CMD=""
 CMD_SET=0
 BACKGROUND=""
 CLAUDE_MODE=0
+CURSOR_MODE=0
 
 usage() {
   cat <<'EOF'
-Usage: fm-arm-pretool-check.sh [--command <cmd>] [--background true|false] [--claude]
+Usage: fm-arm-pretool-check.sh [--command <cmd>] [--background true|false] [--claude] [--cursor]
 
 With no --command, reads a PreToolUse-style JSON payload on stdin (Grok
-toolInput.command, or Claude/Codex tool_input.command).
+toolInput.command, Claude/Codex tool_input.command, or Cursor top-level
+command).
 Exits 0 to allow and 2 to deny.
 The deny reason is written to stderr, with a Grok decision object on stdout
-unless --claude is supplied.
+unless --claude was supplied; --cursor prints a Cursor permission deny object
+on stdout instead.
 Malformed transport and an unavailable classifier runtime fail open.
 EOF
 }
@@ -78,6 +85,10 @@ while [ "$#" -gt 0 ]; do
       CLAUDE_MODE=1
       shift
       ;;
+    --cursor)
+      CURSOR_MODE=1
+      shift
+      ;;
     -h|--help)
       usage
       exit 0
@@ -94,7 +105,7 @@ if [ "$CMD_SET" -eq 0 ]; then
   PAYLOAD=$(cat 2>/dev/null || true)
   [ -n "$PAYLOAD" ] || exit 0
   command -v jq >/dev/null 2>&1 || exit 0
-  CMD=$(printf '%s' "$PAYLOAD" | jq -r '(.toolInput.command // .tool_input.command // empty)' 2>/dev/null) || exit 0
+  CMD=$(printf '%s' "$PAYLOAD" | jq -r '(.toolInput.command // .tool_input.command // .command // empty)' 2>/dev/null) || exit 0
   [ -n "$CMD" ] || exit 0
   # Kept for transport parity only.
   # shellcheck disable=SC2034
@@ -169,5 +180,9 @@ json_escape() {
 DETAIL="[$CODE] $REASON"
 ESCAPED=$(json_escape "$DETAIL")
 printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny"},"systemMessage":"%s"}\n' "$ESCAPED" >&2
-[ "$CLAUDE_MODE" -eq 1 ] || printf '{"decision":"deny","reason":"%s"}\n' "$ESCAPED"
+if [ "$CURSOR_MODE" -eq 1 ]; then
+  printf '{"permission":"deny","agent_message":"%s"}\n' "$ESCAPED"
+elif [ "$CLAUDE_MODE" -eq 0 ]; then
+  printf '{"decision":"deny","reason":"%s"}\n' "$ESCAPED"
+fi
 exit 2
