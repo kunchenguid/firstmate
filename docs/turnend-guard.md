@@ -44,6 +44,9 @@ If `jq` is missing or hook stdin is empty, the guard exits 0 because it cannot s
 - Pi listens for `agent_settled` in `.pi/extensions/fm-primary-turnend-guard.ts`, runs once per logical agent run, and calls `pi.sendUserMessage(..., { deliverAs: "followUp" })` once when the guard returns 2.
 - Grok registers a `Stop` hook in `.grok/hooks/fm-primary-turnend-guard.json` and uses `bin/fm-turnend-guard-grok.sh` to resume the reported session once when the shared guard returns 2.
   The adapter intentionally omits `--permission-mode`, so a passive hook cannot grant stronger permissions than the resumed session default.
+- Cursor registers a `stop` hook in `.cursor/hooks.json` that invokes `.cursor/hooks/fm-cursor-stop.sh`.
+  The adapter maps Cursor's `loop_count` to `stop_hook_active`, runs the shared guard, and on exit 2 returns `{followup_message: ...}` so Cursor auto-submits one repair turn.
+  `loop_limit: null` avoids the default five-stop cap while supervision is still unhealthy.
 
 Claude and Codex can block a Stop directly with exit status 2 and stderr.
 Both payloads carry `stop_hook_active`.

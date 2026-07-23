@@ -183,7 +183,18 @@ test_tracked_harness_registration() {
   assert_contains "$opencode_plugin" 'fm-sessionstart-nudge.sh' "OpenCode plugin does not invoke the wrapper"
   assert_contains "$opencode_plugin" 'promptAsync' "OpenCode plugin does not prompt the nudge turn"
 
-  pass "all five verified harnesses register the shared session-start nudge"
+  command=$(jq -r '.hooks.sessionStart[0].command' "$ROOT/.cursor/hooks.json")
+  assert_contains "$command" 'fm-cursor-sessionstart.sh' "Cursor sessionStart hook does not invoke the adapter"
+  jq -e '[.hooks.preToolUse[]?.command? | select(contains("fm-arm-pretool-check.sh"))] | length == 1' \
+    "$ROOT/.cursor/hooks.json" >/dev/null || fail "Cursor preToolUse must invoke the watcher-arm guard"
+  jq -e '[.hooks.preToolUse[]?.command? | select(contains("fm-cd-pretool-check.sh"))] | length == 1' \
+    "$ROOT/.cursor/hooks.json" >/dev/null || fail "Cursor preToolUse must invoke the cd guard"
+  jq -e '[.hooks.preToolUse[]?.command? | select(contains("fm-continuity-pretool-check.sh"))] | length == 1' \
+    "$ROOT/.cursor/hooks.json" >/dev/null || fail "Cursor preToolUse must invoke the continuity guard"
+  jq -e '.hooks.stop[0].command | contains("fm-cursor-stop.sh")' "$ROOT/.cursor/hooks.json" >/dev/null \
+    || fail "Cursor stop hook does not invoke the turn-end adapter"
+
+  pass "all six verified primary harnesses register the shared session-start nudge"
 }
 
 test_genuine_primary_nudges

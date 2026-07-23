@@ -1,0 +1,35 @@
+{
+  "version": 1,
+  "hooks": {
+    "sessionStart": [
+      {
+        "command": ".cursor/hooks/fm-cursor-sessionstart.sh",
+        "timeout": 10
+      }
+    ],
+    "preToolUse": [
+      {
+        "command": "bin/fm-arm-pretool-check.sh --claude",
+        "matcher": "Shell",
+        "timeout": 10
+      },
+      {
+        "command": "bin/fm-cd-pretool-check.sh --claude",
+        "matcher": "Shell",
+        "timeout": 10
+      },
+      {
+        "command": "bin/fm-continuity-pretool-check.sh",
+        "matcher": "Shell",
+        "timeout": 10
+      }
+    ],
+    "stop": [
+      {
+        "command": ".cursor/hooks/fm-cursor-stop.sh",
+        "timeout": 30,
+        "loop_limit": null
+      }
+    ]
+  }
+}

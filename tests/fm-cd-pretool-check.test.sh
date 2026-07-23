@@ -434,6 +434,21 @@ test_pi_wiring() {
   pass ".pi primary extension: tool_call runs the cd-guard alongside the watcher-arm check"
 }
 
+test_cursor_wiring() {
+  local settings
+  settings="$ROOT/.cursor/hooks.json"
+  [ -f "$settings" ] || fail "tracked .cursor/hooks.json is missing"
+  jq -e '[.hooks.preToolUse[]?.command? | select(contains("fm-cd-pretool-check.sh") and contains("--claude"))] | length == 1' \
+    "$settings" >/dev/null || fail "Cursor preToolUse must invoke fm-cd-pretool-check.sh with --claude"
+  jq -e '[.hooks.preToolUse[]?.command? | select(contains("fm-arm-pretool-check.sh"))] | length == 1' \
+    "$settings" >/dev/null || fail "Cursor preToolUse must invoke the watcher-arm guard"
+  jq -e '[.hooks.preToolUse[]?.command? | select(contains("fm-continuity-pretool-check.sh"))] | length == 1' \
+    "$settings" >/dev/null || fail "Cursor preToolUse must invoke the continuity guard"
+  jq -e '.hooks.stop[0].command | contains("fm-cursor-stop.sh")' "$settings" >/dev/null \
+    || fail "Cursor stop hook must invoke the turn-end adapter"
+  pass ".cursor/hooks.json: preToolUse and stop invoke the firstmate guards"
+}
+
 test_scripts_are_shellcheck_clean() {
   command -v shellcheck >/dev/null 2>&1 || { pass "shellcheck not installed, skipping"; return; }
   shellcheck "$ROOT/bin/fm-cd-pretool-check.sh" >/dev/null 2>&1 \
@@ -458,4 +473,5 @@ test_codex_wiring
 test_grok_wiring
 test_opencode_wiring
 test_pi_wiring
+test_cursor_wiring
 test_scripts_are_shellcheck_clean
