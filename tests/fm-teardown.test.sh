@@ -39,6 +39,19 @@
 #   (p) fm-pr-check when local HEAD lags                        -> record remote PR head
 #   (q) no-mistakes + NO pr= recorded, PR discovered by branch  -> ALLOW  (yolo/no-CI merge)
 #
+# Forge-agnostic patch-id proof (no PR head ref exists, as on Bitbucket Cloud). The
+# GitHub PR-head range is unchanged and stays covered by (g), (m), (n) and (k).
+#   (z1) patch replayed and still present + conflicting advance -> ALLOW  (default range)
+#   (z2) same shape, patch never replayed                       -> REFUSE (safety)
+#   (z2b) same shape, patch replayed then reverted on default   -> REFUSE (content gone)
+#   (z2c) replayed two-commit stack, still present on default   -> ALLOW  (stack rollback)
+#   (z2d) same stack, only the first commit replayed            -> REFUSE (safety)
+#   (z2e) replayed binary + blank-line-terminated diffs         -> ALLOW  (no patch mangling)
+#   (z3) same shape plus one further unpushed commit            -> REFUSE (total containment)
+#   (z4a) same shape, scan limit truncates the landed commit -> REFUSE (bounded scan)
+#   (z4) Bitbucket origin                                       -> no refs/pull fetch
+#   (z5) /pull/ and /pull-requests/ PR URLs                      -> both parse to 7
+#
 # Also covers backlog teardown-lock-race: a git index.lock left in the worktree by a
 # killed crew process (bin/fm-teardown.sh's teardown_treehouse_return).
 #   (r) provably-stale index.lock (old mtime, no live holder) -> lock removed, ALLOW
@@ -301,6 +314,179 @@ commit_tree_from_wt_head() {
   local case_dir=$1 parent=$2 msg=$3 tree
   tree=$(git -C "$case_dir/wt" rev-parse "$parent^{tree}") || return 1
   printf '%s\n' "$msg" | git -C "$case_dir/wt" commit-tree "$tree" -p "$parent"
+}
+
+# Build the shape the forge-agnostic patch-id proof exists for. Leaves:
+#   origin/main      = baseline -> replayed <file>=<content> -> other.txt advance
+#   origin/side-work = baseline -> other.txt=side
+#   worktree         = baseline -> other.txt=side -> <file>=<content>  (last unpushed)
+# The branch's own <file> commit is reachable from no remote and its patch IS on the
+# default branch, still present in its current content. The conflict that makes
+# content_in_default inconclusive comes from other.txt, which both sides changed
+# differently - and that commit is safe to discard because it lives on origin/side-work.
+# So only the patch-id proof can answer, and answering yes loses nothing.
+# landed=no skips the replay, leaving genuinely unlanded work with the same conflict.
+# landed=reverted replays the patch and then undoes it, so the patch id is in the
+# range but the content is NOT in the default branch any more.
+# Args: case_dir file content [landed]
+setup_replayed_patch_with_conflicting_advance() {
+  local case_dir=$1 file=$2 content=$3 landed=${4:-yes} tmp
+  wt_commit_file "$case_dir" "$file" baseline "baseline $file"
+  push_conflict_baseline "$case_dir"
+  # The branch's own work: never pushed anywhere.
+  wt_commit_file "$case_dir" "$file" "$content" "branch change"
+
+  tmp=$(clone_origin_for_advance "$case_dir")
+  if [ "$landed" != no ]; then
+    # Replay the identical diff on main. patch-id hashes the diff only, so this
+    # commit carries the same patch id as the branch's own commit.
+    commit_in_clone "$tmp" "replayed change" "$file" "$content"
+  fi
+  if [ "$landed" = reverted ]; then
+    commit_in_clone "$tmp" "revert replayed change" "$file" baseline
+  fi
+  push_conflicting_advance "$tmp"
+}
+
+# Baseline other.txt, push it to origin/main, then add a commit that main will later
+# contradict - pushed to origin/side-work so it counts as landed-on-a-remote and the
+# patch-id proof never has to vouch for it. It exists purely to make
+# content_in_default's whole-branch 3-way merge conflict. Args: case_dir
+push_conflict_baseline() {
+  local case_dir=$1
+  wt_commit_file "$case_dir" other.txt baseline "baseline other.txt"
+  git -C "$case_dir/wt" push -q origin "HEAD:refs/heads/main"
+  git -C "$case_dir/project" fetch -q origin main
+  wt_commit_file "$case_dir" other.txt side "side work"
+  git -C "$case_dir/wt" push -q origin "HEAD:refs/heads/side-work"
+  git -C "$case_dir/wt" fetch -q origin
+}
+
+# A scratch clone of origin in which to build the default branch's own history.
+# Echoes its path. Args: case_dir
+clone_origin_for_advance() {
+  local case_dir=$1 tmp
+  tmp="$case_dir/_advance"
+  git clone -q "$case_dir/origin.git" "$tmp"
+  printf '%s\n' "$tmp"
+}
+
+# Commit file=content in the scratch clone. Args: tmp message file content
+commit_in_clone() {
+  local tmp=$1 msg=$2 file=$3 content=$4
+  printf '%s\n' "$content" > "$tmp/$file"
+  git -C "$tmp" add -- "$file"
+  git -C "$tmp" -c user.email=t@t -c user.name=t commit -q -m "$msg"
+}
+
+# Advance main past the branch in a way that conflicts with the side-work commit,
+# push it, and drop the scratch clone. Args: tmp
+push_conflicting_advance() {
+  local tmp=$1
+  commit_in_clone "$tmp" "advance main" other.txt "advanced past the branch"
+  git -C "$tmp" push -q origin HEAD:main
+  rm -rf "$tmp"
+}
+
+# A replayed multi-commit STACK, the flow the patch-id proof mainly serves (a squash
+# merge produces one combined commit that matches no individual branch commit, so
+# content_in_default owns those). Branch = C1 adds foo.ts containing "a", C2 rewrites
+# it to "a\nb"; both are replayed onto main in order and are still present there.
+# Verifying C1 requires undoing C2 first, because C1's post-image is an intermediate
+# state the default branch's final tree no longer holds.
+# landed=partial replays only C1, leaving C2 landed nowhere. Args: case_dir [landed]
+setup_replayed_stack_with_conflicting_advance() {
+  local case_dir=$1 landed=${2:-all} tmp
+  push_conflict_baseline "$case_dir"
+  wt_commit_file "$case_dir" foo.ts a "add foo.ts"
+  printf '%s\n' a b > "$case_dir/wt/foo.ts"
+  git -C "$case_dir/wt" add -- foo.ts
+  git -C "$case_dir/wt" -c user.email=t@t -c user.name=t commit -q -m "extend foo.ts"
+
+  tmp=$(clone_origin_for_advance "$case_dir")
+  commit_in_clone "$tmp" "replayed add foo.ts" foo.ts a
+  if [ "$landed" = all ]; then
+    printf '%s\n' a b > "$tmp/foo.ts"
+    git -C "$tmp" add -- foo.ts
+    git -C "$tmp" -c user.email=t@t -c user.name=t commit -q -m "replayed extend foo.ts"
+  fi
+  push_conflicting_advance "$tmp"
+}
+
+# Two replayed commits whose diffs are newline-fragile: one text diff whose final hunk
+# line is an empty context line, and one that adds a binary file (whose patch carries
+# base85 blocks terminated by blank lines). Both are still present on main, so the
+# proof must succeed - anything that round-trips these diffs through a shell variable
+# mangles their trailing newlines and refuses instead. Args: case_dir
+setup_replayed_fragile_diffs_with_conflicting_advance() {
+  local case_dir=$1 tmp
+  printf '%s\n\n' keep > "$case_dir/wt/trail.txt"
+  git -C "$case_dir/wt" add -- trail.txt
+  git -C "$case_dir/wt" -c user.email=t@t -c user.name=t commit -q -m "baseline trail.txt"
+  push_conflict_baseline "$case_dir"
+
+  printf '%s\n\n' changed > "$case_dir/wt/trail.txt"
+  git -C "$case_dir/wt" add -- trail.txt
+  git -C "$case_dir/wt" -c user.email=t@t -c user.name=t commit -q -m "trailing-blank-line change"
+  printf '\000\001\002binary\000' > "$case_dir/wt/blob.bin"
+  git -C "$case_dir/wt" add -- blob.bin
+  git -C "$case_dir/wt" -c user.email=t@t -c user.name=t commit -q -m "add binary blob"
+
+  tmp=$(clone_origin_for_advance "$case_dir")
+  printf '%s\n\n' changed > "$tmp/trail.txt"
+  git -C "$tmp" add -- trail.txt
+  git -C "$tmp" -c user.email=t@t -c user.name=t commit -q -m "replayed trailing-blank-line change"
+  printf '\000\001\002binary\000' > "$tmp/blob.bin"
+  git -C "$tmp" add -- blob.bin
+  git -C "$tmp" -c user.email=t@t -c user.name=t commit -q -m "replayed binary blob"
+  push_conflicting_advance "$tmp"
+}
+
+# Replace git with a wrapper that logs every fetch invocation to $FM_FETCH_LOG and,
+# when $FM_FAKE_ORIGIN_URL is set, reports that URL for `remote get-url origin`.
+# The URL is faked rather than really set so the rest of the case stays hermetic
+# against the local bare origin. Args: case_dir
+add_fetch_logging_git() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/git" <<'SH'
+#!/usr/bin/env bash
+real=${REAL_GIT_FOR_TEST:-/usr/bin/git}
+for a in "$@"; do
+  if [ "$a" = fetch ]; then
+    [ -n "${FM_FETCH_LOG:-}" ] && printf '%s\n' "$*" >> "$FM_FETCH_LOG"
+    break
+  fi
+done
+if [ -n "${FM_FAKE_ORIGIN_URL:-}" ]; then
+  case " $* " in
+    *" remote get-url origin "*) printf '%s\n' "$FM_FAKE_ORIGIN_URL"; exit 0 ;;
+  esac
+fi
+exec "$real" "$@"
+SH
+  chmod +x "$case_dir/fakebin/git"
+}
+
+# Report PR $2 as merged with a head commit that exists in no local repository, so
+# ensure_commit_object must decide whether to attempt a refs/pull fetch for it.
+# Args: case_dir pr_url
+add_gh_pr_merged_with_unfetchable_head() {
+  local case_dir=$1 pr_url=$2
+  cat > "$case_dir/fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  "pr view")
+    case " $* " in
+      *"state,headRefOid"*)
+        printf '%s\t%s\n' 'MERGED' '0123456789abcdef0123456789abcdef01234567' ; exit 0 ;;
+    esac
+    ;;
+esac
+echo "error: pull request not found" >&2
+exit 1
+SH
+  chmod +x "$case_dir/fakebin/gh"
+  printf 'pr=%s\n' "$pr_url" >> "$case_dir/state/task-x1.meta"
 }
 
 land_equivalent_patch_on_origin_branch() {
@@ -2591,6 +2777,208 @@ EOF
   pass "the run abort and the leaked-process reap both complete before the destructive worktree return"
 }
 
+test_patch_id_proof_uses_default_branch_when_no_pr_head_exists() {
+  local case_dir rc
+  case_dir=$(make_case patch-id-default-range)
+  write_meta "$case_dir" no-mistakes ship
+  # The Bitbucket shape: no pr= recorded, no PR head ref anywhere to fetch, and the
+  # default branch has advanced past the branch in a conflicting way, so the content
+  # proof is inconclusive. The branch's patch IS on the default branch.
+  setup_replayed_patch_with_conflicting_advance "$case_dir" shared.txt branch-change
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "patch-id-default-range: teardown should succeed on the default-branch patch-id proof"
+  ! grep -q REFUSED "$case_dir/stderr" \
+    || fail "patch-id-default-range: teardown printed a REFUSED line"
+  pass "patch-id proof takes its range from the default branch when no PR head ref exists (Bitbucket shape)"
+}
+
+test_patch_id_default_range_still_refuses_genuinely_unlanded_work() {
+  local case_dir rc
+  case_dir=$(make_case patch-id-default-range-unlanded)
+  write_meta "$case_dir" no-mistakes ship
+  # Identical to the case above except the branch's patch was never replayed onto
+  # the default branch. Both git proofs must stay inconclusive and teardown refuse.
+  setup_replayed_patch_with_conflicting_advance "$case_dir" shared.txt branch-change no
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "patch-id-default-range-unlanded: teardown must refuse genuinely unlanded work"
+  grep -q REFUSED "$case_dir/stderr" \
+    || fail "patch-id-default-range-unlanded: no REFUSED line in stderr"
+  pass "default-branch patch-id proof still refuses work that never landed (regression guard)"
+}
+
+test_patch_id_default_range_refuses_a_reverted_patch() {
+  local case_dir rc
+  case_dir=$(make_case patch-id-default-range-reverted)
+  write_meta "$case_dir" no-mistakes ship
+  # The default branch applied the branch's exact diff and then REVERTED it, so its
+  # patch id is in the scanned range while the content is gone. The only surviving
+  # copy is the unpushed local commit: a patch-id match alone must not authorize
+  # hard-resetting it away.
+  setup_replayed_patch_with_conflicting_advance "$case_dir" shared.txt branch-change reverted
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "patch-id-default-range-reverted: teardown must refuse a landed-then-reverted patch"
+  grep -q REFUSED "$case_dir/stderr" \
+    || fail "patch-id-default-range-reverted: no REFUSED line in stderr"
+  pass "default-branch patch-id proof refuses a patch the default branch has since reverted"
+}
+
+test_patch_id_default_range_allows_replayed_stack() {
+  local case_dir rc
+  case_dir=$(make_case patch-id-default-range-stack)
+  write_meta "$case_dir" no-mistakes ship
+  # A two-commit stack replayed onto the default branch and still present there.
+  # Only a newest-first rollback can confirm the older commit, whose post-image the
+  # default branch's final tree no longer holds.
+  setup_replayed_stack_with_conflicting_advance "$case_dir"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "patch-id-default-range-stack: teardown should succeed for a fully replayed stack"
+  ! grep -q REFUSED "$case_dir/stderr" \
+    || fail "patch-id-default-range-stack: teardown printed a REFUSED line"
+  pass "default-branch patch-id proof confirms a replayed multi-commit stack, not just a single commit"
+}
+
+test_patch_id_default_range_refuses_partly_replayed_stack() {
+  local case_dir rc
+  case_dir=$(make_case patch-id-default-range-stack-partial)
+  write_meta "$case_dir" no-mistakes ship
+  # Only the stack's first commit was replayed; the second landed nowhere.
+  setup_replayed_stack_with_conflicting_advance "$case_dir" partial
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "patch-id-default-range-stack-partial: a partly replayed stack must refuse"
+  grep -q REFUSED "$case_dir/stderr" \
+    || fail "patch-id-default-range-stack-partial: no REFUSED line in stderr"
+  pass "default-branch patch-id proof refuses a stack whose later commits never landed"
+}
+
+test_patch_id_default_range_allows_newline_fragile_diffs() {
+  local case_dir rc
+  case_dir=$(make_case patch-id-default-range-fragile)
+  write_meta "$case_dir" no-mistakes ship
+  # A binary diff and a text diff ending in an empty context line, both replayed and
+  # still present. Mangling their trailing newlines would refuse landed work.
+  setup_replayed_fragile_diffs_with_conflicting_advance "$case_dir"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "patch-id-default-range-fragile: newline-fragile diffs must not refuse landed work"
+  ! grep -q REFUSED "$case_dir/stderr" \
+    || fail "patch-id-default-range-fragile: teardown printed a REFUSED line"
+  pass "default-branch patch-id proof handles binary and blank-line-terminated diffs without spurious refusal"
+}
+
+test_patch_id_default_range_refuses_when_only_some_commits_landed() {
+  local case_dir rc
+  case_dir=$(make_case patch-id-default-range-partial)
+  write_meta "$case_dir" no-mistakes ship
+  setup_replayed_patch_with_conflicting_advance "$case_dir" shared.txt branch-change
+  # One further unpushed commit that exists nowhere but here. Containment must be
+  # total: a single missing patch id refuses the whole worktree.
+  wt_commit_file "$case_dir" extra.txt local-only "local follow-up"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "patch-id-default-range-partial: teardown must refuse when one unpushed commit is missing"
+  grep -q REFUSED "$case_dir/stderr" \
+    || fail "patch-id-default-range-partial: no REFUSED line in stderr"
+  pass "default-branch patch-id proof refuses when any single unpushed commit is absent from the default branch"
+}
+
+test_patch_id_default_range_scan_limit_errs_toward_refusing() {
+  local case_dir rc
+  case_dir=$(make_case patch-id-default-range-limit)
+  write_meta "$case_dir" no-mistakes ship
+  setup_replayed_patch_with_conflicting_advance "$case_dir" shared.txt branch-change
+  # The replayed commit is the second-newest on the default branch, so a scan limit
+  # of 1 truncates it out of the range. Truncation must lose the match and refuse,
+  # never be treated as "not found, therefore fine".
+  set +e
+  FM_LANDED_PATCH_SCAN_LIMIT=1 \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "patch-id-default-range-limit: a truncated scan must refuse"
+  grep -q REFUSED "$case_dir/stderr" \
+    || fail "patch-id-default-range-limit: no REFUSED line in stderr"
+  pass "default-branch patch-id scan limit errs toward refusing when it truncates the landed commit"
+}
+
+test_bitbucket_origin_skips_github_pr_head_fetch() {
+  local case_dir rc log
+  case_dir=$(make_case bitbucket-no-pr-ref-fetch)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  add_fetch_logging_git "$case_dir"
+  add_gh_pr_merged_with_unfetchable_head "$case_dir" \
+    "https://bitbucket.org/example/repo/pull-requests/7"
+  log="$case_dir/fetch.log"; : > "$log"
+
+  set +e
+  FM_FETCH_LOG="$log" FM_FAKE_ORIGIN_URL="https://bitbucket.org/example/repo.git" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "bitbucket-no-pr-ref-fetch: unlanded work must still refuse"
+  ! grep -q 'refs/pull/' "$log" \
+    || fail "bitbucket-no-pr-ref-fetch: attempted a GitHub PR-head fetch on a Bitbucket remote: $(cat "$log")"
+  pass "a Bitbucket origin never attempts the GitHub-shaped refs/pull PR-head fetch"
+}
+
+test_pr_number_parses_both_forge_url_forms() {
+  local case_dir url form log
+  for form in pull pull-requests; do
+    case_dir=$(make_case "pr-number-$form")
+    write_meta "$case_dir" no-mistakes ship
+    wt_commit_file "$case_dir" feature.txt hello "add feature"
+    add_fetch_logging_git "$case_dir"
+    url="https://github.com/example/repo/$form/7"
+    add_gh_pr_merged_with_unfetchable_head "$case_dir" "$url"
+    log="$case_dir/fetch.log"; : > "$log"
+
+    set +e
+    FM_FETCH_LOG="$log" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+    set -e
+
+    # A logged refs/pull/7/head fetch proves the PR number was parsed out of the
+    # URL; before the fix, /pull-requests/ matched nothing and no fetch happened.
+    grep -q 'refs/pull/7/head' "$log" \
+      || fail "pr-number-$form: PR number was not parsed from $url: $(cat "$log")"
+  done
+  pass "pr_number_from_target parses both /pull/ and /pull-requests/ URL forms"
+}
+
 test_local_only_fork_remote_allows
 test_teardown_prompts_tasks_axi_done_when_compatible
 test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present
@@ -2649,3 +3037,13 @@ test_process_spawned_during_grace_is_reaped_on_later_pass
 test_persistent_scan_refuses_after_bounded_retries
 test_process_exit_during_identity_lookup_does_not_refuse
 test_run_abort_precedes_process_reap_precedes_worktree_removal
+test_patch_id_proof_uses_default_branch_when_no_pr_head_exists
+test_patch_id_default_range_still_refuses_genuinely_unlanded_work
+test_patch_id_default_range_refuses_a_reverted_patch
+test_patch_id_default_range_allows_replayed_stack
+test_patch_id_default_range_refuses_partly_replayed_stack
+test_patch_id_default_range_allows_newline_fragile_diffs
+test_patch_id_default_range_refuses_when_only_some_commits_landed
+test_patch_id_default_range_scan_limit_errs_toward_refusing
+test_bitbucket_origin_skips_github_pr_head_fetch
+test_pr_number_parses_both_forge_url_forms
