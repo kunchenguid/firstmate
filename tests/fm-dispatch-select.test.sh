@@ -281,6 +281,10 @@ SH
   assert_profile "$out" '{"harness":"grok","model":"grok-4.5","effort":"high"}' "single profile object should resolve to itself"
   [ ! -e "$marker" ] || fail "single profile object should not invoke quota-axi"
 
+  out=$(PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-dispatch-select.sh" \
+    '{"harness":"cursor","effort":"xhigh"}' 2>/dev/null)
+  assert_profile "$out" '{"harness":"cursor","effort":"xhigh"}' "Cursor should be accepted as a verified effort-mapped worker runtime"
+
   out=$(PATH="$fakebin:$BASE_PATH" FM_DISPATCH_RANDOM_SOURCE="$RANDOM_ONE" "$ROOT/bin/fm-dispatch-select.sh" \
     '[{"harness":"grok","model":"grok-4.5","effort":"high"}]' 2>"$TMP_ROOT/one.err")
   err=$(cat "$TMP_ROOT/one.err")

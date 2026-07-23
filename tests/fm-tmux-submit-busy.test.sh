@@ -12,6 +12,13 @@ set -u
 TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/fm-tmux-submit-busy.XXXXXX")
 trap 'rm -rf "$TMP_ROOT"' EXIT
 
+test_cursor_busy_signature_is_in_shared_default() {
+  printf '%s\n' '→ Add a follow-up    ctrl+c to stop' \
+    | grep -qiE "$FM_TMUX_BUSY_REGEX_DEFAULT" \
+    || fail "Cursor Agent's busy-only stop hint is missing from the shared busy regex"
+  pass "FM_TMUX_BUSY_REGEX_DEFAULT recognizes Cursor Agent's busy hint"
+}
+
 # Override fm_pane_is_busy for testing: FM_FAKE_PANE_BUSY=1 means busy.
 fm_pane_is_busy() {
   [ "${FM_FAKE_PANE_BUSY:-0}" = 1 ]
@@ -122,6 +129,7 @@ test_idle_pane_composer_clears_first_try() {
   pass "fm_tmux_submit_enter_core: idle pane clears composer on first Enter - returns empty as before"
 }
 
+test_cursor_busy_signature_is_in_shared_default
 test_busy_pane_pending_returns_empty
 test_idle_pane_pending_returns_pending
 test_busy_pane_composer_clears_first_try

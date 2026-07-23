@@ -72,6 +72,7 @@ All three have verified turn-end guard paths when launched with their documented
 Pick whichever one matches your subscription and workflow.
 
 Codex and OpenCode are also verified and supported as primary harnesses; Codex uses bounded foreground checkpoints, and OpenCode uses a TUI plugin, so both carry more harness-specific supervision tradeoffs than the three co-primaries.
+Cursor Agent is verified as a crewmate and scout runtime only, not as the primary firstmate or a persistent secondmate.
 
 ### Install and launch
 

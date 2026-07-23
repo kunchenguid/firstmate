@@ -75,6 +75,7 @@ test_harness_resolution() {
 both absent -> own (backward-compat)^-^-^claude^claude
 crew set, secondmate absent -> crew (backward-compat)^codex^-^codex^codex
 crew set, secondmate set -> secondmate wins, crew untouched^codex^grok^grok^codex
+Cursor crewmate runtime resolves without becoming the secondmate^cursor^claude^claude^cursor
 crew absent, secondmate set -> secondmate value, crew own^-^grok^grok^claude
 secondmate=default defers to crew^codex^default^codex^codex
 crew=default resolves to own, secondmate follows^default^-^claude^claude

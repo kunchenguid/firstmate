@@ -1538,6 +1538,17 @@ test_composer_state_ghost_placeholder_is_empty() {
   pass "fm_backend_herdr_composer_state: the ghost placeholder text reads empty, not pending"
 }
 
+test_composer_state_cursor_bare_placeholder_is_empty() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/composer-cursor-idle"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '  Cursor Agent\n\n  → Add a follow-up\n\n  Ask (shift+tab to cycle)\n' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT" )
+  [ "$out" = empty ] || fail "the bare Cursor follow-up placeholder should read empty, got '$out'"
+  pass "fm_backend_herdr_composer_state: Cursor Agent's bare idle composer reads empty"
+}
+
 test_composer_state_real_text_is_pending() {
   local dir log resp fb out
   dir="$TMP_ROOT/composer-pending"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
@@ -2815,6 +2826,7 @@ test_busy_state_done_and_blocked_map_to_idle
 test_busy_state_unknown_on_no_agent
 test_composer_state_bare_prompt_is_empty
 test_composer_state_ghost_placeholder_is_empty
+test_composer_state_cursor_bare_placeholder_is_empty
 test_composer_state_real_text_is_pending
 test_composer_state_popup_placeholder_fill_is_pending
 test_composer_state_unknown_on_capture_failure

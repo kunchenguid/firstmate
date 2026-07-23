@@ -330,6 +330,59 @@ test_opencode_threads_model_and_ignores_effort_axis() {
   pass "opencode receives --model and omits the unsupported effort axis"
 }
 
+test_cursor_maps_effort_to_concrete_model() {
+  local rec id out status launch
+  id=profile-cursor-z18
+  rec=$(make_spawn_case profile-cursor cursor "$id")
+  read_case_record "$rec"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --effort xhigh)
+  status=$?
+  expect_code 0 "$status" "cursor spawn with xhigh effort should map to the highest verified concrete model"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" cursor cursor-grok-4.5-high xhigh
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "agent --force --trust --workspace '$WT_DIR' --model 'cursor-grok-4.5-high'" \
+    "cursor launch did not use agent, task-scoped trust, force approval, and the mapped concrete model"
+  assert_not_contains "$launch" "--effort" "cursor launch must not invent an effort flag"
+  assert_not_contains "$launch" "--thinking" "cursor launch must not borrow another harness's thinking flag"
+  pass "cursor maps xhigh effort to its highest verified concrete model"
+}
+
+test_cursor_preserves_unrelated_explicit_model() {
+  local rec id out status launch
+  id=profile-cursor-explicit-z19
+  rec=$(make_spawn_case profile-cursor-explicit cursor "$id")
+  read_case_record "$rec"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --model claude-opus-4-8-thinking-high --effort low)
+  status=$?
+  expect_code 0 "$status" "cursor spawn with an explicit unrelated model should succeed"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" cursor claude-opus-4-8-thinking-high low
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "--model 'claude-opus-4-8-thinking-high'" \
+    "cursor launch changed an explicit model outside the verified mapping family"
+  assert_not_contains "$launch" "cursor-grok-4.5-low" "cursor effort mapping must not overwrite an unrelated explicit model"
+  pass "cursor preserves an explicit model outside its default mapping family"
+}
+
+test_cursor_refuses_secondmate_launch() {
+  local rec id sm out status
+  id=profile-cursor-secondmate-z20
+  rec=$(make_spawn_case profile-cursor-secondmate cursor "$id")
+  read_case_record "$rec"
+  sm="$CASE_DIR/secondmate-home"
+  make_seeded_secondmate_home "$sm" "$id"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --harness cursor --secondmate)
+  status=$?
+  expect_code 1 "$status" "cursor should be refused as a secondmate harness"
+  assert_contains "$out" "harness=cursor supports crewmate and scout spawns only" \
+    "cursor secondmate refusal did not explain its verified scope"
+  assert_absent "$HOME_DIR/state/$id.meta" "cursor secondmate refusal should happen before metadata is written"
+  pass "cursor is accepted only for ordinary crewmate and scout spawns"
+}
+
 test_pi_threads_model_and_max_effort() {
   local rec id out status launch
   id=profile-pi-z8
@@ -435,6 +488,9 @@ test_grok_threads_model_and_reasoning_effort
 test_grok_omits_invalid_max_reasoning_effort
 test_grok_omits_invalid_xhigh_reasoning_effort
 test_opencode_threads_model_and_ignores_effort_axis
+test_cursor_maps_effort_to_concrete_model
+test_cursor_preserves_unrelated_explicit_model
+test_cursor_refuses_secondmate_launch
 test_pi_threads_model_and_max_effort
 test_quota_selected_default_array_reaches_spawn
 test_batch_forwards_shared_profile_flags

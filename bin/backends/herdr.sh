@@ -1397,7 +1397,8 @@ fm_backend_herdr_strip_ansi() {  # <text>
 #              INTERIOR separator and does not start with one, so it never
 #              matches either.
 #   bare     - an UNBORDERED composer (verified real claude 2.x and codex
-#              0.142.x, both under herdr 0.7.1, docs/herdr-backend.md
+#              0.142.x under herdr 0.7.1, plus Cursor Agent's empirically
+#              verified `→` composer shape from its tmux TUI capture; docs/herdr-backend.md
 #              "Incident (2026-07-07)"): the row's TRIMMED content starts with
 #              one of the verified agent-specific prompt glyphs but carries no
 #              closing border at all - claude's own live input row is a bare
@@ -1451,11 +1452,11 @@ fm_backend_herdr_strip_ansi() {  # <text>
 FM_BACKEND_HERDR_COMPOSER_LINES=${FM_BACKEND_HERDR_COMPOSER_LINES:-20}
 # Known ghost/placeholder composer text. Extend this if another
 # herdr-verified harness needs its own idle placeholder recognized.
-FM_BACKEND_HERDR_IDLE_RE=${FM_BACKEND_HERDR_IDLE_RE:-'^Type a message\.\.\.$'}
+FM_BACKEND_HERDR_IDLE_RE=${FM_BACKEND_HERDR_IDLE_RE:-'^(Type a message\.\.\.|Add a follow-up|Plan, search, build anything)$'}
 # Known bare (unbordered) prompt glyphs a composer row may start with: ❯
-# (claude) and › (codex) only. Generic shell-style glyphs > $ % # are still
-# recognized after a bordered composer row has already been structurally found.
-FM_BACKEND_HERDR_BARE_PROMPT_RE=${FM_BACKEND_HERDR_BARE_PROMPT_RE:-'^[❯›]'}
+# (claude), › (codex), and → (Cursor Agent). Generic shell-style glyphs > $ % #
+# are still recognized after a bordered composer row has been structurally found.
+FM_BACKEND_HERDR_BARE_PROMPT_RE=${FM_BACKEND_HERDR_BARE_PROMPT_RE:-'^[❯›→]'}
 # Pi allows a multi-line composer between its horizontal separators. Bound the
 # structural candidate so two unrelated transcript rules with an arbitrarily
 # large region between them can never be promoted into a composer.
@@ -1619,7 +1620,7 @@ EOF
   fi
   # Delegate the empty/pending/unknown decision to the shared owner. The bare
   # shape only ever starts with an AGENT glyph (FM_BACKEND_HERDR_BARE_PROMPT_RE
-  # is '^[❯›]'), so a bare shell prompt never reaches here - it stays 'unknown'
+  # is '^[❯›→]'), so a bare shell prompt never reaches here - it stays 'unknown'
   # via the no-composer-row path above, exactly as before.
   fm_composer_classify_content "$bordered" "$stripped" "$FM_BACKEND_HERDR_IDLE_RE"
 }

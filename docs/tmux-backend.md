@@ -115,7 +115,7 @@ The classifier (`fm_backend_tmux_agent_alive`) maps the observed name to `alive`
 - `dead` - the name is a bare shell (`zsh`, `bash`, `sh`, `dash`, `ash`, `ksh`, `mksh`, `tcsh`, `csh`, `fish`).
 - `unknown` - anything else, including an unreadable pane.
 
-### Known gap: `pi` cannot be confidently classified
+### Known gaps: `pi` and Cursor Agent cannot be confidently classified
 
 `pi` is a `#!/usr/bin/env node` script (confirmed via its shebang and installed path, 2026-07-07), so a live `pi` agent's pane reports `node` as its `pane_current_command`, not `pi` - verified by running a long-lived `node -e` script in a pane and confirming its foreground process is a genuine child reachable via `pgrep -P <pane_pid>` with an inspectable `ps -o args=` (the same technique `bin/fm-harness.sh`'s own self-detection uses when walking UP its ancestry), while `pi --version` itself was observed to exit too quickly under the same pane to reliably capture its live foreground state - real `pi` invocations were not available to test.
 Since `node` is also the generic name for a plain interpreter session, any future JS-based harness, or someone's unrelated node script, there is no way to attribute a bare `node` foreground process back to `pi` specifically from outside the pane without deeper (and fragile) argument introspection.
@@ -123,7 +123,23 @@ The classifier deliberately reports `unknown` for `node`/`python`/`python3` rath
 Practical effect: a dead `pi` secondmate is not auto-healed by the liveness sweep today; it is reported as `skipped: liveness probe inconclusive` instead, which still surfaces it for a human to act on.
 Resolving this would need either a `pi`-specific env marker inspectable from outside the process (mirroring `PI_CODING_AGENT=true`, which `bin/fm-harness.sh` already uses for self-detection but which is not readable from a different process without deeper introspection) or accepting the argument-inspection fragility - not attempted here.
 
+Cursor Agent has the same conservative outcome for a different verified launch shape.
+On 2026-07-23, Cursor Agent `2026.07.20-8cc9c0b` was launched in a scratch tmux session with:
+
+```sh
+agent --force --trust --workspace "$PWD" --model cursor-grok-4.5-low 'Reply exactly PONG.'
+tmux display-message -p -t "$session:cursor" '#{pane_current_command}'
+tmux display-message -p -t "$session:cursor" '#{pane_tty}'
+ps -t "${tty#/dev/}" -o pid=,ppid=,pgid=,comm=,args=
+```
+
+The exact current-command output was `node`.
+The process listing showed the foreground argv beginning with `$HOME/.local/bin/agent --use-system-ca $HOME/.local/share/cursor-agent/versions/2026.07.20-8cc9c0b/index.js --force --trust --workspace ...`, with `$HOME` normalized from the observed absolute home path.
+That argv distinguishes this particular installed Cursor process, but Firstmate deliberately does not turn path- and version-shaped argument introspection into a liveness authority.
+A generic `node` remains `unknown`, never `dead`, so an ambiguous read cannot license a duplicate process.
+Cursor is crewmate/scout-only, so this does not weaken secondmate recovery.
+
 ## Limitations
 
 None specific to tmux for the reference path itself - it is the fully verified reference backend, while Orca and cmux are the backends without secondmate support.
-The agent-liveness probe above has one known gap (`pi`'s generic `node` process name, see above).
+The agent-liveness probe above conservatively reports `unknown` for the generic `node` process names used by Pi and Cursor Agent; Cursor is not eligible for secondmate dispatch.

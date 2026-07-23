@@ -669,7 +669,7 @@ test_current_path_probes_with_marker() {
   pass "fm_backend_cmux_current_path: actively probes with marked begin/end lines (zellij-shape frozen cwd)"
 }
 
-# --- composer_state: structural border-row classification (adapted from herdr) ----
+# --- composer_state: structural bordered/bare classification (adapted from herdr) ----
 
 test_composer_state_bare_prompt_is_empty() {
   local dir fb out
@@ -695,6 +695,18 @@ test_composer_state_ghost_placeholder_is_empty() {
     bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_composer_state "aaaaaaaa-0000-0000-0000-000000000000:bbbbbbbb-1111-1111-1111-111111111111"' "$ROOT" )
   [ "$out" = empty ] || fail "the known ghost placeholder 'Type a message...' should read as empty, got '$out'"
   pass "fm_backend_cmux_composer_state: the ghost placeholder text reads empty, not pending"
+}
+
+test_composer_state_cursor_bare_placeholder_is_empty() {
+  local dir fb out
+  dir="$TMP_ROOT/composer-cursor-idle"; mkdir -p "$dir/responses"
+  cmux_panes_response "$dir" 1 "bbbbbbbb-1111-1111-1111-111111111111"
+  cmux_read_screen_response "$dir" 2 $'  Cursor Agent\n\n  → Add a follow-up\n\n  Ask (shift+tab to cycle)'
+  fb=$(make_cmux_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_composer_state "aaaaaaaa-0000-0000-0000-000000000000:bbbbbbbb-1111-1111-1111-111111111111"' "$ROOT" )
+  [ "$out" = empty ] || fail "the bare Cursor follow-up placeholder should read empty, got '$out'"
+  pass "fm_backend_cmux_composer_state: Cursor Agent's bare idle composer reads empty"
 }
 
 test_composer_state_real_text_is_pending() {
@@ -749,7 +761,7 @@ test_composer_state_unknown_when_no_composer_row_found() {
   out=$( PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
     bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_composer_state "aaaaaaaa-0000-0000-0000-000000000000:bbbbbbbb-1111-1111-1111-111111111111"' "$ROOT" )
   [ "$out" = unknown ] || fail "a capture with no recognizable composer row should read as unknown, got '$out'"
-  pass "fm_backend_cmux_composer_state: reports unknown when no border-delimited composer row is found"
+  pass "fm_backend_cmux_composer_state: reports unknown when no verified composer row is found"
 }
 
 # --- send_text_submit: structural composer-row verify-and-retry --------------
@@ -1045,6 +1057,7 @@ test_send_literal_uses_separator_for_option_shaped_text
 test_current_path_probes_with_marker
 test_composer_state_bare_prompt_is_empty
 test_composer_state_ghost_placeholder_is_empty
+test_composer_state_cursor_bare_placeholder_is_empty
 test_composer_state_real_text_is_pending
 test_composer_state_popup_placeholder_fill_is_pending
 test_composer_state_unknown_on_capture_failure

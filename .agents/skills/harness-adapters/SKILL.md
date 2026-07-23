@@ -1,6 +1,6 @@
 ---
 name: harness-adapters
-description: Agent-only reference for firstmate harness operations. Use before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter. Contains verified facts for claude, codex, opencode, pi, and grok.
+description: Agent-only reference for firstmate harness operations. Use before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter. Contains verified facts for claude, codex, opencode, pi, grok, and the crewmate-only Cursor adapter.
 user-invocable: false
 metadata:
   internal: true
@@ -31,6 +31,8 @@ The primary-session watcher wake protocols are rendered from `docs/supervision-p
 The supervision knowledge lives here: busy signature, exit command, interrupt, dialogs, resume behavior, skill invocation, and quirks.
 
 Never dispatch a crewmate or secondmate on an unverified adapter.
+Cursor is verified only for ordinary crewmate and scout dispatch.
+Do not select it as a primary or secondmate harness because no primary session-start, watcher, or turn-end integration has been verified for Cursor Agent.
 If `config/crew-harness` or `config/secondmate-harness` names an unverified adapter, tell the captain under `AGENTS.md` section 9 that the requested worker runtime is not verified yet, use firstmate's own verified runtime for current work, and ask only whether to verify the requested runtime before future use.
 Do not pause current work for that future-verification choice, and never launch an unverified adapter.
 If the captain asks for a new harness, propose verifying it first: spawn a trivial supervised task using `fm-spawn`'s raw-launch-command escape hatch, confirm every fact empirically, then record the mechanics in `fm-spawn`, the busy signature in `fm-watch.sh` and `fm-tmux-lib.sh` defaults, any needed `FM_COMPOSER_IDLE_RE` empty-composer override plus any novel bare agent prompt glyph in `bin/fm-composer-lib.sh`'s shared composer classifier (the one fleet-wide owner of the empty/dead-shell/pending decision, so a new harness's own idle composer is not misread as a dead shell), the tmux agent-process liveness classification in `bin/backends/tmux.sh` when the harness can launch a secondmate, and the verified knowledge here.
@@ -43,7 +45,8 @@ If the captain asks for a new harness, propose verifying it first: spawn a trivi
 `bin/fm-spawn.sh` uses `crew` mode for a crewmate/scout launch and `secondmate` mode for a `--secondmate` launch, re-resolving on every spawn so the split is durable across respawns; an explicit per-spawn harness arg overrides either.
 On `unknown`, ask the captain instead of guessing.
 A captain override always beats detection.
-When verifying a new adapter, record its env marker and command name in `bin/fm-harness.sh`.
+When verifying a new primary adapter, record its env marker and command name in `bin/fm-harness.sh`.
+A crewmate-only adapter remains intentionally absent from own-primary detection.
 
 For stuck recovery, the target window's harness is recorded as `harness=` in `state/<id>.meta`.
 Use that value for interrupt, exit, resume, and skill-invocation facts.
@@ -51,6 +54,7 @@ Use that value for interrupt, exit, resume, and skill-invocation facts.
 ## Primary turn-end guard
 
 Every verified primary harness has an empirically validated hook path for the "no turn ends blind" guard.
+Cursor is not a verified primary harness and has no tracked primary hook path.
 `claude` and `codex` block directly through Stop hooks that preserve exit status 2 and stderr from `bin/fm-turnend-guard.sh`.
 `opencode`, `pi`, and `grok` expose passive lifecycle callbacks for this purpose, so their tracked primary adapters force one bounded follow-up or resume when the shared predicate blocks.
 The exact hook files, commands, validation transcripts, scoping rules, and fail-open tradeoffs are owned by `docs/turnend-guard.md`.
@@ -119,8 +123,10 @@ The supported launch-profile flags below are verified locally; each row records 
 | grok | `--model <model>` | `--reasoning-effort <low\|medium\|high>` | Verified on grok 0.2.99 (2026-07-13). `--effort` is an alias, but firstmate's profile axis is reasoning effort. As of 0.2.99 the ceiling is `high`; both `xhigh` and `max` are rejected with `use one of: high, medium, low`, so firstmate omits them. |
 | pi | `--model <model>` | `--thinking <low\|medium\|high\|xhigh\|max>` | Verified 2026-07-13 on Pi 0.80.6. `pi --help` advertises `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`; `pi --print --model openai-codex/gpt-5.6-sol --thinking max 'Reply with exactly OK.'` completed successfully. |
 | opencode | `--model <provider/model>` | none for firstmate's interactive launch | Verified on opencode 1.17.6. `opencode run` has `--variant`, but firstmate launches the interactive `opencode --prompt` path, which has no verified effort flag. |
+| cursor | `--model <model-id>` | mapped to `cursor-grok-4.5-low`, `cursor-grok-4.5-medium`, or `cursor-grok-4.5-high` | Verified 2026-07-23 on Cursor Agent 2026.07.20-8cc9c0b. Cursor has no standalone effort flag. `low` and `medium` map directly; `high`, `xhigh`, and `max` map to the highest listed Cursor Grok 4.5 model, `cursor-grok-4.5-high`. An explicit model outside that family wins unchanged. |
 
 When a requested effort value is outside the harness-specific accepted set, `fm-spawn` records the requested `effort=` in meta but emits no effort flag for that harness.
+Cursor instead maps the shared effort vocabulary to its three verified concrete model ids and caps `xhigh`/`max` at that model family's highest listed entry.
 This preserves launch success instead of passing a known-bad value.
 
 ## no-mistakes skill invocation
@@ -133,6 +139,7 @@ Natural language is acceptable if uncertain.
 - opencode: no separate verified skill invocation beyond normal slash-command behavior; use natural language if the exact skill command is uncertain.
 - pi: no separate verified skill invocation beyond normal command behavior; use natural language if the exact skill command is uncertain.
 - grok: `/<skill>`, for example `/no-mistakes` (same form as claude). Verified end to end: grok discovers the user-level `no-mistakes` skill, `/no-mistakes` invokes it, and grok drives a real `no-mistakes axi run`. Like codex's `$`/`/` popups, typing `/<skill>` opens grok's slash-autocomplete, so a too-fast Enter selects the popup entry instead of sending, and for an argument-taking command (like `/no-mistakes`'s optional task-first argument) that first Enter only expands the popup selection into an argument-hint placeholder rather than submitting - a genuine second Enter is required (see the grok section below for the 2026-07-03 incident and fix). `fm_tmux_submit_core`'s retried Enter (used by `fm-send` on the tmux backend) already handles this correctly by reading the cursor row; the herdr backend needed a dedicated fix (`fm_backend_herdr_composer_state`, docs/herdr-backend.md) because its prior delta-based verification false-positived on that same popup-close content change.
+- cursor: no separate verified skill invocation; send a natural-language instruction to load and run the skill.
 
 ## claude (VERIFIED)
 
@@ -259,6 +266,27 @@ Pi's primary watcher protocol also requires the tracked `.pi/extensions/fm-prima
 The model arms through `fm_watch_arm_pi`, never a foreground bash arm; the watcher tool result and clean-exit fallback are owned by `docs/supervision-protocols/pi.md`.
 `bin/fm-session-start.sh` reports when the live Pi session has not loaded both the turn-end guard and watcher extensions, and points at plain `pi` after project trust as the fix, with `-e` as a trust-free fallback.
 When a secondmate is launched on Pi, `fm-spawn.sh --secondmate` launches Pi with both `-e .pi/extensions/fm-primary-turnend-guard.ts` and `-e .pi/extensions/fm-primary-pi-watch.ts`, both already present in the secondmate home's git worktree.
+
+## cursor (CREWMATE/SCOUT ONLY, VERIFIED 2026-07-23, Cursor Agent 2026.07.20-8cc9c0b)
+
+Launch through the explicit `agent` command with `--force --trust --workspace <isolated-task-directory>` and one positional launch prompt.
+This grants the captain-approved broad command posture only to that worker process and does not modify `~/.cursor/cli-config.json` or any other global Cursor setting.
+Do not launch Cursor as a primary or secondmate harness.
+The empirical record is [`docs/cursor-agent-harness.md`](../../../docs/cursor-agent-harness.md).
+
+| Fact | Value |
+|---|---|
+| Busy-pane signature | `ctrl+c to stop`, shown only while a turn is active. `Working` and `Thinking N tokens` also appear, but the explicit ASCII stop hint is less ambiguous. |
+| Idle composer | Bare `→ Add a follow-up` after a completed turn, or `→ Plan, search, build anything` before the first turn. The shared composer classifier recognizes `→` as an agent-only prompt glyph and both placeholders as empty. |
+| Exit | From idle, send `Ctrl+C` once, verify `Press Ctrl+C again to exit`, then send `Ctrl+C` once more. The exit banner prints `agent --resume=<chat-id>`. |
+| Interrupt | Cursor advertises `Ctrl+C`, but an automated PTY probe did not stop an active stream. Send at most one `Ctrl+C`, re-peek, and if generation continues let the turn settle before redirecting. Never blindly repeat it because an idle first `Ctrl+C` arms process exit. |
+| Resume | `agent --force --trust --workspace <isolated-task-directory> --resume=<chat-id>`, using the id printed at clean exit. `agent --continue` resumes the most recent session for the workspace when the exact id is unavailable. |
+| Skill invocation | Natural-language instruction only; no Cursor-specific skill command is verified. |
+| Turn-end notification | None verified. Ordinary pane hashing, the busy hint, and stable-idle monitoring supervise Cursor workers. |
+| Terminal liveness | Cursor's `agent` launcher reports `node` as tmux's `#{pane_current_command}`. That is ambiguous, like Pi, so process-level liveness remains `unknown`; endpoint presence and the composer dead-shell guard remain available. |
+
+For recovery, do not treat one unsuccessful `Ctrl+C` as permission to send a second while the turn is still busy.
+If Cursor is genuinely wedged, preserve the isolated task directory, close the backend endpoint through its normal recovery path, and resume the printed chat id with the same trust, workspace, force, and mapped model posture.
 
 ## grok (VERIFIED 2026-06-29, grok 0.2.73; slash-submit re-verified 2026-07-03 on 0.2.82; reasoning-effort ceiling re-verified 2026-07-13 on 0.2.99; exit paths re-verified 2026-07-19 on grok 0.2.103)
 

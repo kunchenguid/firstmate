@@ -9,8 +9,8 @@
 #      (unsafe-for-injection), never `empty`. This is the safety fix.
 #   2. The SAME shell glyph INSIDE a bordered composer box is the harness's own
 #      prompt and still reads `empty` (existing behavior preserved).
-#   3. The AGENT prompt glyphs `❯` (claude) and `›` (codex) are a genuine empty
-#      agent composer either way, bordered or bare.
+#   3. The AGENT prompt glyphs `❯` (claude), `›` (codex), and `→` (Cursor Agent)
+#      are a genuine empty agent composer either way, bordered or bare.
 #   4. Real unsubmitted text reads `pending`; a known idle placeholder reads
 #      `empty`.
 set -u
@@ -43,7 +43,7 @@ test_stripped_unbordered_content_uses_plain_content() {
     [ "$out" = unknown ] \
       || fail "stripped unbordered content '$plain' must retain its unknown safety verdict, got '$out'"
   done
-  for plain in '❯' '›'; do
+  for plain in '❯' '›' '→'; do
     out=$(classify 0 '' '' sensitive "$plain")
     [ "$out" = empty ] \
       || fail "a stripped agent glyph '$plain' must remain empty, got '$out'"
@@ -79,7 +79,9 @@ test_agent_glyphs_are_empty_bordered_and_bare() {
   out=$(classify 0 '›'); [ "$out" = empty ] || fail "bare codex '›' should read empty, got '$out'"
   out=$(classify 1 '❯'); [ "$out" = empty ] || fail "bordered claude '❯' should read empty, got '$out'"
   out=$(classify 1 '›'); [ "$out" = empty ] || fail "bordered codex '›' should read empty, got '$out'"
-  pass "fm_composer_classify_content: agent prompt glyphs (❯ claude, › codex) read empty bordered or bare"
+  out=$(classify 0 '→'); [ "$out" = empty ] || fail "bare Cursor Agent '→' should read empty, got '$out'"
+  out=$(classify 1 '→'); [ "$out" = empty ] || fail "bordered Cursor Agent '→' should read empty, got '$out'"
+  pass "fm_composer_classify_content: verified agent prompt glyphs read empty bordered or bare"
 }
 
 # --- Empty content and idle placeholder -------------------------------------
@@ -99,10 +101,16 @@ test_idle_placeholder_is_empty() {
   # Placeholder after an agent glyph (post-strip match).
   out=$(classify 0 '❯ Type a message...' "$idle")
   [ "$out" = empty ] || fail "the idle placeholder after a glyph should read empty, got '$out'"
+  # Cursor Agent uses an unbordered arrow plus an idle placeholder.
+  idle='^(Add a follow-up|Plan, search, build anything)$'
+  out=$(classify 0 '→ Add a follow-up' "$idle")
+  [ "$out" = empty ] || fail "the Cursor follow-up placeholder should read empty, got '$out'"
+  out=$(classify 0 '→ Plan, search, build anything' "$idle")
+  [ "$out" = empty ] || fail "the Cursor new-chat placeholder should read empty, got '$out'"
   # Without the idle regex it is just text -> pending.
   out=$(classify 1 'Type a message...')
   [ "$out" = pending ] || fail "without an idle regex the placeholder text is pending, got '$out'"
-  pass "fm_composer_classify_content: a known idle placeholder reads empty, before and after glyph stripping"
+  pass "fm_composer_classify_content: known idle placeholders read empty, including Cursor Agent"
 }
 
 test_idle_placeholder_case_mode_is_explicit() {

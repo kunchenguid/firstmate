@@ -263,36 +263,41 @@ fm_backend_orca_read_text_paged() {  # <terminal-id> <limit>
 }
 
 FM_BACKEND_ORCA_COMPOSER_LINES=${FM_BACKEND_ORCA_COMPOSER_LINES:-200}
-FM_BACKEND_ORCA_IDLE_RE=${FM_BACKEND_ORCA_IDLE_RE:-'^Type a message\.\.\.$'}
+FM_BACKEND_ORCA_IDLE_RE=${FM_BACKEND_ORCA_IDLE_RE:-'^(Type a message\.\.\.|Add a follow-up|Plan, search, build anything)$'}
+FM_BACKEND_ORCA_BARE_PROMPT_RE=${FM_BACKEND_ORCA_BARE_PROMPT_RE:-'^[❯›→]'}
 
-# fm_backend_orca_composer_state: classify the composer's own bordered row as
-# empty|pending|unknown. Real text stays pending, including a slash-command
+# fm_backend_orca_composer_state: classify the composer's own bordered or
+# verified-agent bare row as empty|pending|unknown. Real text stays pending, including a slash-command
 # popup that closed by filling an argument-hint placeholder into the composer;
 # that first Enter selected the popup item, it did not submit the command.
 fm_backend_orca_composer_state() {  # <terminal-id> -> empty|pending|unknown
-  local terminal=$1 cap line trimmed stripped="" found=0
+  local terminal=$1 cap line trimmed stripped="" found=0 bordered=0
   cap=$(fm_backend_orca_read_text_paged "$terminal" "$FM_BACKEND_ORCA_COMPOSER_LINES") || { printf 'unknown'; return 0; }
   while IFS= read -r line; do
     trimmed="${line#"${line%%[![:space:]]*}"}"
     trimmed="${trimmed%"${trimmed##*[![:space:]]}"}"
     [ -n "$trimmed" ] || continue
     case "$trimmed" in
-      '│'*'│'|'┃'*'┃'|'|'*'|') : ;;
-      *) continue ;;
+      '│'*'│'|'┃'*'┃'|'|'*'|') bordered=1 ;;
+      *)
+        printf '%s' "$trimmed" | grep -qE "$FM_BACKEND_ORCA_BARE_PROMPT_RE" || continue
+        bordered=0
+        ;;
     esac
     stripped=$trimmed
     found=1
   done < <(printf '%s\n' "$cap")
   [ "$found" -eq 1 ] || { printf 'unknown'; return 0; }
-  stripped=${stripped//│/}
-  stripped=${stripped//┃/}
-  stripped=${stripped//|/}
+  if [ "$bordered" = 1 ]; then
+    stripped=${stripped//│/}
+    stripped=${stripped//┃/}
+    stripped=${stripped//|/}
+  fi
   stripped="${stripped#"${stripped%%[![:space:]]*}"}"
   stripped="${stripped%"${stripped##*[![:space:]]}"}"
-  # A row was found only by the bordered shape above, so content came from a
-  # genuine composer box - delegate to the shared owner with bordered=1. A bare
-  # dead-shell prompt has no bordered row and already returned 'unknown' above.
-  fm_composer_classify_content 1 "$stripped" "$FM_BACKEND_ORCA_IDLE_RE"
+  # A bare shape is accepted only for a verified agent glyph; a dead-shell
+  # prompt cannot reach the shared classifier as an empty composer.
+  fm_composer_classify_content "$bordered" "$stripped" "$FM_BACKEND_ORCA_IDLE_RE"
 }
 
 fm_backend_orca_send_key() {  # <terminal-id> <key>

@@ -6,9 +6,9 @@
 #   --harness <name> is the explicit per-spawn harness/profile adapter. The old
 #   positional harness arg still works for back-compat.
 #   --model <name> and --effort <low|medium|high|xhigh|max> are concrete profile
-#   axes chosen by firstmate at intake. They are only threaded into harnesses whose
-#   installed CLIs were verified to support that axis; unsupported axes are omitted
-#   from that harness's launch rather than guessed.
+#   axes chosen by firstmate at intake. They are threaded only through verified
+#   adapter behavior: native flags where supported, concrete model ids for Cursor,
+#   and omission where an axis is unsupported rather than guessed.
 #   --backend <name> is the explicit runtime session-provider backend for this
 #   spawn. Without it, the script resolves FM_BACKEND, then config/backend, then
 #   runtime auto-detection (the runtime firstmate itself is executing inside -
@@ -56,8 +56,9 @@
 #   profile consultation. A --secondmate spawn is exempt and resolves the SECONDMATE
 #   harness (config/secondmate-harness -> config/crew-harness -> own), so the
 #   secondmate-vs-crewmate split is DURABLE across every respawn (recovery,
-#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|grok)
-#   overrides it for this spawn (either kind). A non-flag string containing
+#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|grok|cursor)
+#   overrides it for this spawn. Cursor is crewmate/scout-only and is refused
+#   for --secondmate. A non-flag string containing
 #   whitespace is treated as a RAW launch command - the escape hatch for verifying
 #   new adapters.
 #   config/secondmate-harness may also carry an optional model and effort as extra
@@ -98,6 +99,8 @@
 #     __PITURNEND__ absolute path to .pi/extensions/fm-primary-turnend-guard.ts in a pi secondmate home
 #     __PIWATCH__   absolute path to .pi/extensions/fm-primary-pi-watch.ts in a pi secondmate home
 #     __OPINPUT__   absolute path to the canonical operational-input encoder
+#     __WORKSPACE__ shell-quoted isolated task directory (Cursor workspace trust scope)
+#     __PIBRIEFENV__ shell assignment identifying the unchanged Pi positional brief
 # Per-harness turn-end hooks are installed automatically; some live outside the worktree.
 # grok uses a firstmate-owned global hook under ${GROK_HOME:-$HOME/.grok}/hooks
 # plus a gitignored .fm-grok-turnend worktree pointer and a state token.
@@ -383,7 +386,7 @@ FIRSTMATE_HOME=
 
 if [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
-    ''|claude|codex|opencode|pi|grok)
+    ''|claude|codex|opencode|pi|grok|cursor)
       ARG3=${POS[1]:-}
       ;;
     *' '*)
@@ -444,6 +447,11 @@ launch_template() {
     # launch command - it is a Stop-event hook installed below (global hook +
     # per-task pointer), so the template is identical for ship/scout/secondmate.
     grok) printf '%s' 'grok --always-approve __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    # Cursor Agent CLI stays interactive after the positional launch prompt.
+    # Use the unambiguous `agent` entry point, scope trust to the isolated task
+    # directory, and grant the captain-approved unattended command posture only
+    # for this launched worker. No global Cursor setting is modified.
+    cursor) printf '%s' 'agent --force --trust --workspace __WORKSPACE__ __MODELFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     *) return 1 ;;
   esac
 }
@@ -484,6 +492,15 @@ case "$ARG3" in
     ;;
 esac
 
+# Cursor is verified as a crewmate/scout runtime, not as a primary firstmate or
+# persistent secondmate runtime. A secondmate needs primary session-start,
+# turn-end, and watcher integrations that Cursor does not expose through a
+# verified adapter, so refuse before touching the secondmate home.
+if [ "$KIND" = secondmate ] && [ "$HARNESS" = cursor ]; then
+  echo "error: harness=cursor supports crewmate and scout spawns only; Cursor primary/secondmate supervision is not verified" >&2
+  exit 1
+fi
+
 # config/secondmate-harness may carry optional model/effort tokens alongside the
 # harness ("<harness> [<model>] [<effort>]"). They apply only when this is a
 # --secondmate spawn and no explicit per-spawn harness/raw launch was supplied, so
@@ -504,6 +521,23 @@ if [ "$KIND" = secondmate ] && [ -z "$ARG3" ]; then
       esac
     fi
   fi
+fi
+
+# Cursor exposes no standalone effort flag. Its catalog encodes effort in model
+# ids, so map Firstmate's effort axis onto the empirically listed Cursor Grok 4.5
+# models. xhigh/max cap at that family's highest listed model. An explicit model
+# outside this verified family wins unchanged rather than receiving an invented
+# suffix or bracket override.
+if [ "$HARNESS" = cursor ] && [ -n "$EFFORT" ]; then
+  case "$MODEL" in
+    ''|default|cursor-grok-4.5-low|cursor-grok-4.5-medium|cursor-grok-4.5-high)
+      case "$EFFORT" in
+        low) MODEL=cursor-grok-4.5-low ;;
+        medium) MODEL=cursor-grok-4.5-medium ;;
+        high|xhigh|max) MODEL=cursor-grok-4.5-high ;;
+      esac
+      ;;
+  esac
 fi
 
 secondmate_registry_value() {
@@ -531,7 +565,7 @@ model_flag_for_harness() {
   local harness=$1 model=$2
   [ -n "$model" ] && [ "$model" != default ] || return 0
   case "$harness" in
-    claude|codex|opencode|pi|grok)
+    claude|codex|opencode|pi|grok|cursor)
       printf -- '--model %s ' "$(shell_quote "$model")"
       ;;
   esac
@@ -1142,6 +1176,10 @@ EOF
     codex*)
       # codex: turn-end rides the launch command via -c notify=[...] and __TURNEND__.
       ;;
+    cursor*)
+      # Cursor Agent exposes no verified per-turn hook. The ordinary pane-hash,
+      # busy-signature, and stable-idle watcher path supervises this crewmate.
+      ;;
     grok*)
       # grok fires a Stop hook at every turn boundary (verified, grok 0.2.73), the
       # clean equivalent of codex's notify= and pi's turn_end. But grok only loads
@@ -1259,6 +1297,9 @@ sq_piext=$(shell_quote "$STATE/$ID.pi-ext.ts")
 sq_piturnend=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-turnend-guard.ts")
 sq_piwatch=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-pi-watch.ts")
 sq_opinput=$(shell_quote "$FM_ROOT/bin/fm-operational-input.sh")
+sq_workspace=$(shell_quote "$WT")
+PIBRIEFENV=
+[ "$HARNESS" != pi ] || PIBRIEFENV="FM_FIRSTMATE_PI_LAUNCH_BRIEF=$sq_brief"
 MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
 EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT")
 LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
@@ -1269,6 +1310,8 @@ LAUNCH=${LAUNCH//__PIEXT__/$sq_piext}
 LAUNCH=${LAUNCH//__PITURNEND__/$sq_piturnend}
 LAUNCH=${LAUNCH//__PIWATCH__/$sq_piwatch}
 LAUNCH=${LAUNCH//__OPINPUT__/$sq_opinput}
+LAUNCH=${LAUNCH//__WORKSPACE__/$sq_workspace}
+LAUNCH=${LAUNCH//__PIBRIEFENV__/$PIBRIEFENV}
 if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")
   LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_HOME=$sq_home $LAUNCH"

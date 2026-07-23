@@ -327,11 +327,14 @@ Same as herdr's tabs and zellij's tabs, unlike tmux's own window-name uniqueness
 Verified live: two workspaces created with the identical title `fm-test-dup` both succeeded and listed simultaneously with distinct ids; two surfaces within one workspace both renamed to the identical tab title also succeeded.
 `fm_backend_cmux_create_task`'s own title-based duplicate check is therefore required, mirroring both prior adapters' posture exactly.
 
-## Composer verification: structural border-row classification (adapted from herdr)
+## Composer verification: structural bordered-or-agent-row classification (adapted from herdr)
 
 cmux's `read-screen` gives plain-text capture with no cursor-row primitive and no ANSI style channel, unlike tmux's `#{cursor_y}` and herdr's `--format ansi` path for ANSI-aware ghost/placeholder classification.
-Per this build task's explicit direction, `fm_backend_cmux_composer_state` is adapted directly from herdr's post-incident structural border-row classifier (`fm_backend_herdr_composer_state`, `docs/herdr-backend.md`) rather than zellij's content-diff approach: it locates the composer's own row as the only captured line whose trimmed content both starts and ends with the same border glyph (`│`, `┃`, or a plain ASCII `|`), scanning forward and keeping the LAST match so an earlier border-shaped line can never outrank the real bottom-anchored composer row.
-After that adapter-owned row finding, cmux delegates the shared `empty`/`pending`/`unknown` decision to `bin/fm-composer-lib.sh`; a bare shell prompt with no boxed composer row reads `unknown`, not empty.
+`fm_backend_cmux_composer_state` is adapted directly from herdr's post-incident structural classifier (`fm_backend_herdr_composer_state`, `docs/herdr-backend.md`) rather than zellij's content-diff approach.
+It recognizes either a row enclosed by matching `│`, `┃`, or plain ASCII `|` borders, or an unbordered row beginning with a verified agent-only glyph, scanning forward and keeping the last match so earlier transcript content cannot outrank the bottom-anchored composer.
+After that adapter-owned row finding, cmux delegates the shared `empty`/`pending`/`unknown` decision to `bin/fm-composer-lib.sh`; a bare shell prompt without a verified agent glyph reads `unknown`, not empty.
+Cursor Agent's 2026-07-23 tmux capture established the bare `→ Add a follow-up` shape, and `tests/fm-backend-cmux.test.sh` replays that exact plain-text shape through cmux's `read-screen` response parser.
+This is structural compatibility evidence rather than a claim that the captain-owned cmux app was used for a live Cursor run; [`cursor-agent-harness.md`](cursor-agent-harness.md) records the exact CLI capture and backend review scope.
 This directly defends against the same class of incident herdr hit on 2026-07-03: a slash-command popup's first Enter can close the popup and fill an argument-hint placeholder into the composer rather than submitting, which a raw pane-content-diff check (zellij's approach) would misread as "submitted".
 `tests/fm-backend-cmux.test.sh` pins this exact regression shape (`test_send_text_submit_popup_autocomplete_requires_second_enter`), verifying the adapter retries a genuine second Enter rather than declaring victory after the first one closes a popup.
 All implemented submit-verifying backends expose the identical caller-facing verdict vocabulary (`empty`, `pending`, `unknown`, `send-failed`), so `fm-send.sh` needs no cmux-specific branching.
