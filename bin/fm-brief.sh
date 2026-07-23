@@ -205,6 +205,7 @@ exit 0
 fi
 
 REPO=${POS[1]}
+mkdir -p "$FM_HOME/data/$ID"
 
 if [ "$HERDR_LAB" -eq 1 ]; then
 HERDR_LAB_HELPER=$(shell_quote "$FM_ROOT/bin/fm-herdr-lab.sh")

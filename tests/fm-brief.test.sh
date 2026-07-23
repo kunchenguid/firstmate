@@ -406,6 +406,8 @@ test_loan_package_on_ship_and_scout_not_secondmate() {
     "$ROOT/bin/fm-brief.sh" loan-override-ship alpha >/dev/null 2>&1 \
     || fail "ship scaffold with data override exited non-zero"
   override_ship="$override_data/loan-override-ship/brief.md"
+  [ -d "$home/data/loan-override-ship" ] \
+    || fail "ship scaffold did not create the FM_HOME return directory"
   assert_grep "return proposal at \`$home/data/loan-override-ship/palautus.md\`" "$override_ship" \
     "ship return path must remain under FM_HOME/data when DATA is overridden"
   assert_no_grep "$override_data/loan-override-ship/palautus.md" "$override_ship" \
@@ -415,6 +417,8 @@ test_loan_package_on_ship_and_scout_not_secondmate() {
     "$ROOT/bin/fm-brief.sh" loan-override-scout alpha --scout >/dev/null 2>&1 \
     || fail "scout scaffold with data override exited non-zero"
   override_scout="$override_data/loan-override-scout/brief.md"
+  [ -d "$home/data/loan-override-scout" ] \
+    || fail "scout scaffold did not create the FM_HOME return directory"
   assert_grep "return proposal at \`$home/data/loan-override-scout/palautus.md\`" "$override_scout" \
     "scout return path must match the ship FM_HOME/data destination"
   assert_no_grep "$override_data/loan-override-scout/palautus.md" "$override_scout" \
