@@ -13,7 +13,7 @@
 #                 "HARNESS_OVERRIDES: <harness> launch variants: <name>[ (default)], ...",
 #                 "FLEET_SYNC: <repo>: skipped|recovered|STUCK: <detail>",
 #                 "TASKS_AXI: available", "TANGLE: <remediation>",
-#                 "NM_NOTIFY: no park wake hook in <path> - a parked no-mistakes run wakes nobody",
+#                 "NM_ORPHAN: no-mistakes ... run parked ... - no live task in this home owns it ...",
 #                 "BACKLOG_ORPHAN: <id> is In flight in data/backlog.md but has no state/<id>.meta ...",
 #                 "SECONDMATE_SYNC: secondmate <id>: skipped: <reason>",
 #                 "NUDGE_SECONDMATES: fm-<id>...",
@@ -529,23 +529,18 @@ backlog_orphan_rows() {
   done < <(fm_backlog_inflight_ids "$backlog")
 }
 
-# A no-mistakes run that parks announces itself three ways, but only one of them
-# reaches out: the notify.on_park hook in the GLOBAL config (a pushed branch can
-# never set it). With no hook configured, a parked run is found only by someone
-# thinking to poll, which is how two runs here sat parked for over a day through
-# 31 and 25 re-notifications with nobody woken. Any uncommented on_park counts as
-# configured, so a captain's own hook is never nagged about.
-# The config it reads is a machine-level path outside every firstmate home, so
-# FM_NM_CONFIG exists to point the probe at a sandbox; tests/lib.sh sets it for
-# the whole suite, which is what keeps this check from reading the developer's
-# real config mid-test.
-nm_notify_check() {
-  local cfg
-  command -v no-mistakes >/dev/null 2>&1 || return 0
-  cfg="${FM_NM_CONFIG:-${NM_HOME:-$HOME/.no-mistakes}/config.yaml}"
-  [ -f "$cfg" ] || return 0
-  grep -qE '^[[:space:]]*on_park:[[:space:]]*[^[:space:]#]' "$cfg" && return 0
-  echo "NM_NOTIFY: no park wake hook in $cfg - a parked no-mistakes run wakes nobody; install the block from docs/configuration.md \"Park wake hook\""
+# A no-mistakes run that parks with no live task left to answer it (a direct-PR
+# task cancelled or torn down while its watch run stayed parked) wakes nobody:
+# the reminder cascade re-sends into silence. bin/fm-nm-orphan-scan.sh closes
+# that gap by OWNERSHIP - it reports only the parked runs THIS home armed,
+# recorded in data/nm-armed-runs by bin/fm-nm-watch.sh, that no live task owns.
+# It is the right place for a once-per-session-start scan: an orphan is a run
+# nobody waits on, so timeliness does not matter, and session start already
+# re-reads durable state and converges. The scan self-locates and is silent
+# unless it finds one of this home's own orphans; that skill owns the boundary.
+nm_orphan_scan() {
+  FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" FM_HOME="$FM_HOME" \
+    "$SCRIPT_DIR/fm-nm-orphan-scan.sh" 2>/dev/null || true
 }
 
 crew_dispatch_validate() {
@@ -785,7 +780,7 @@ backlog_orphan_rows
 if ! fm_backlog_backend_manual "$CONFIG" && fm_tasks_axi_compatible; then
   echo "TASKS_AXI: available"
 fi
-nm_notify_check
+nm_orphan_scan
 if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
   secondmate_sync
   secondmate_liveness_sweep

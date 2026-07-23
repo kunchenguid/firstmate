@@ -883,53 +883,6 @@ test_crew_dispatch_launch_cross_file_check() {
   pass "bootstrap cross-checks dispatch launch names against declared harness variants"
 }
 
-# The park wake hook is the only outbound layer of no-mistakes' park announcement,
-# so a missing one means parked runs wake nobody. The probe reads a machine-level
-# config outside every home (FM_NM_CONFIG points it at this sandbox), and any
-# uncommented on_park counts as configured so a captain's own hook is not nagged.
-test_park_wake_hook_is_reported_when_absent() {
-  local case_dir fakebin out cfg
-  case_dir="$TMP_ROOT/nm-notify"
-  cfg="$case_dir/nm-config.yaml"
-  mkdir -p "$case_dir/home/config"
-  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
-  fakebin=$(make_fake_toolchain "$case_dir")
-
-  # No config file at all: nothing to report against.
-  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
-    FM_NM_CONFIG="$cfg" FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
-  [ -z "$out" ] || fail "no config file: expected silence, got: $out"
-
-  # A config with only the commented example is not a configured hook.
-  printf 'auto_fix:\n  ci: 3\n# notify:\n#   on_park: %s\n' "'echo parked'" > "$cfg"
-  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
-    FM_NM_CONFIG="$cfg" FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
-  case "$out" in
-    "NM_NOTIFY: no park wake hook in $cfg"*) ;;
-    *) fail "commented hook: expected the NM_NOTIFY report, got: $out" ;;
-  esac
-  case "$out" in
-    *'wakes nobody'*) ;;
-    *) fail "commented hook: the report did not say what the absence costs: $out" ;;
-  esac
-
-  # Any uncommented on_park counts, including a hook that is not firstmate's.
-  printf 'notify:\n  on_park: %s\n' "'/opt/somewhere/my-own-hook.sh'" > "$cfg"
-  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
-    FM_NM_CONFIG="$cfg" FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
-  [ -z "$out" ] || fail "captain's own hook: expected silence, got: $out"
-
-  # Without no-mistakes on PATH there is no daemon to park a run in the first place.
-  rm -f "$fakebin/no-mistakes"
-  printf 'auto_fix:\n  ci: 3\n' > "$cfg"
-  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
-    FM_NM_CONFIG="$cfg" FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
-  case "$out" in
-    *NM_NOTIFY*) fail "no no-mistakes on PATH: expected no NM_NOTIFY line, got: $out" ;;
-  esac
-  pass "bootstrap reports a missing park wake hook and stays quiet once one is configured"
-}
-
 test_bootstrap_reporting
 test_no_mistakes_present_or_internal_source
 test_bytedcli_required_for_codebase_fleet
@@ -952,4 +905,3 @@ test_crew_dispatch_validation
 test_backlog_orphan_rows_are_reported
 test_harness_overrides_variants_validation
 test_crew_dispatch_launch_cross_file_check
-test_park_wake_hook_is_reported_when_absent

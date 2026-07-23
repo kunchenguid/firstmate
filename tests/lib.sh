@@ -34,14 +34,6 @@ FM_TEST_LIB_SOURCED=1
 # strips this to verify real refusal.
 export FM_GATE_REFUSE_BYPASS=1
 
-# Point bin/fm-bootstrap.sh's park-wake-hook probe at a path that does not exist,
-# so it reads a sandbox instead of the developer's real ~/.no-mistakes/config.yaml.
-# Without this, every bootstrap assertion of silence or exact output would depend
-# on whether the machine running the suite happens to have the hook installed -
-# green in CI (no config file) and red on a developer machine that has one without
-# the hook. A test that wants the probe exercised sets FM_NM_CONFIG itself.
-export FM_NM_CONFIG="${FM_NM_CONFIG:-/nonexistent/fm-tests/no-mistakes-config.yaml}"
-
 # Resolve the repo root from this library's own location. Consumed by sourcing
 # test files, not by this library, so it reads as "unused" here.
 # shellcheck disable=SC2034
