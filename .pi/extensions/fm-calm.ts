@@ -191,14 +191,20 @@ export default function (pi: ExtensionAPI) {
   registerBuiltIn(createFindToolDefinition);
   registerBuiltIn(createLsToolDefinition);
 
-  pi.on("input", (event) => {
+  pi.on("input", (event, ctx) => {
     if (event.images && event.images.length > 0) return { action: "continue" };
     const kind = classifyFirstmateSyntheticInput(event.text, launchBriefContent);
     if (!kind) return { action: "continue" };
     if (kind === "launch-brief") launchBriefContent = undefined;
 
+    const redrawPresentation = (): void => {
+      const expanded = ctx.ui.getToolsExpanded();
+      ctx.ui.setToolsExpanded(!expanded);
+      ctx.ui.setToolsExpanded(expanded);
+    };
     deliverFirstmateSyntheticInput(pi, event.text, kind, {
       deliverAs: event.streamingBehavior ?? "followUp",
+      redrawPresentation,
       triggerTurn: true,
     });
     return { action: "handled" };
@@ -250,21 +256,8 @@ export default function (pi: ExtensionAPI) {
       ctx.ui.setStatus("firstmate-calm", active ? "calm transcript" : undefined);
 
       const expanded = ctx.ui.getToolsExpanded();
-      if (active) {
-        ctx.ui.setToolsExpanded(!expanded);
-        ctx.ui.setToolsExpanded(expanded);
-      } else {
-        const leafId = ctx.sessionManager.getLeafId();
-        if (leafId) {
-          await ctx.navigateTree(leafId);
-        } else {
-          ctx.ui.setToolsExpanded(!expanded);
-          ctx.ui.setToolsExpanded(expanded);
-        }
-        if (ctx.ui.getToolsExpanded() !== expanded) {
-          ctx.ui.setToolsExpanded(expanded);
-        }
-      }
+      ctx.ui.setToolsExpanded(!expanded);
+      ctx.ui.setToolsExpanded(expanded);
     },
   });
 }

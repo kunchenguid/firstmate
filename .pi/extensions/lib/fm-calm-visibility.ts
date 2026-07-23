@@ -66,6 +66,7 @@ export type FirstmateSyntheticKind =
 
 type SyntheticDeliveryOptions = {
   deliverAs?: "steer" | "followUp" | "nextTurn";
+  redrawPresentation?: () => void;
   triggerTurn?: boolean;
 };
 
@@ -75,6 +76,7 @@ type FirstmateSyntheticPresentation = {
 };
 
 let calm = false;
+let mountingSyntheticPresentation = false;
 let stockExportRendering = false;
 
 export function calmTranscriptClassIsVisible(itemClass: CalmTranscriptClass): boolean {
@@ -127,7 +129,12 @@ export function registerFirstmateSyntheticPresentation(pi: ExtensionAPI): void {
   pi.registerEntryRenderer<FirstmateSyntheticPresentation>(
     FIRSTMATE_SYNTHETIC_PRESENTATION_TYPE,
     (entry) => {
-      if (calmPresentationHides("synthetic-user")) return undefined;
+      if (
+        calmPresentationHides("synthetic-user") &&
+        !mountingSyntheticPresentation
+      ) {
+        return undefined;
+      }
       const data = entry.data;
       if (!data || typeof data.content !== "string") return undefined;
       return new UserMessageComponent(data.content, getMarkdownTheme());
@@ -141,10 +148,19 @@ export function deliverFirstmateSyntheticInput(
   kind: FirstmateSyntheticKind,
   options: SyntheticDeliveryOptions = {},
 ): void {
-  pi.appendEntry<FirstmateSyntheticPresentation>(FIRSTMATE_SYNTHETIC_PRESENTATION_TYPE, {
-    content,
-    kind,
-  });
+  const mountForRedraw =
+    calmPresentationHides("synthetic-user") &&
+    options.redrawPresentation !== undefined;
+  mountingSyntheticPresentation = mountForRedraw;
+  try {
+    pi.appendEntry<FirstmateSyntheticPresentation>(FIRSTMATE_SYNTHETIC_PRESENTATION_TYPE, {
+      content,
+      kind,
+    });
+  } finally {
+    mountingSyntheticPresentation = false;
+  }
+  if (mountForRedraw) options.redrawPresentation?.();
   pi.sendMessage(
     {
       customType: FIRSTMATE_SYNTHETIC_CONTEXT_TYPE,
