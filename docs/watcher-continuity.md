@@ -40,6 +40,7 @@ Each record includes arm and watcher PIDs, start and end timestamps, exit code a
 The record is published open when the cycle begins and rewritten in place with its classified outcome when the cycle ends, so the one-row-per-cycle shape holds while the cycle is still running.
 SIGKILL and process-group kills cannot run the arm's signal traps, so a cycle that dies that way leaves its open record behind instead of vanishing from the ledger built to explain exactly that; `bin/fm-watch-arm.sh`'s header owns the open-record fields and the command that lists unclosed cycles.
 Ledger writes stay bounded and best-effort, so a failed or contended write is dropped rather than allowed to stall an otherwise healthy cycle.
+A row whose close was dropped that way is retired under its own classified reason when the same arm opens its next cycle, so one arm never leaves a second unclosed row behind to be misread as an untrappable kill.
 The file is size-capped through `FM_WATCH_CYCLE_LOG_MAX_BYTES` and `FM_WATCH_CYCLE_LOG_KEEP_LINES`.
 `state/.watch-triage.log` remains only the watcher's bounded absorbed-wake debug log and carries no lifecycle semantics.
 
@@ -49,7 +50,7 @@ Only the watcher process touches `state/.last-watcher-beat`; no helper process c
 ## Regression coverage
 
 `tests/fm-pi-watch-extension.test.sh` checks Pi's first-cycle-or-explicit-repair tool metadata and ownership-based redundant-call no-ops, then simulates actionable and empty child closes against the actual Pi and OpenCode close handlers, blocks prompt delivery to prove the successor launches first, verifies single-flight behavior, changes the session lock before close to prove ownership is rechecked, and hangs each successor arm to prove bounded fallback delivery includes the typed restoration failure.
-`tests/fm-watcher-lock.test.sh` covers verified-successor attach, the typed self-eviction failure, bounded and successor-linked lifecycle rows, a SIGKILL counterfactual that proves an untrappable kill leaves one unclosed record while a normal cycle closes its row in place, and a SIGSTOP counterfactual that distinguishes a live PID from a stale beacon before classifying termination.
+`tests/fm-watcher-lock.test.sh` covers verified-successor attach, the typed self-eviction failure, bounded and successor-linked lifecycle rows, a SIGKILL counterfactual that proves an untrappable kill leaves one unclosed record while a normal cycle closes its row in place, the retirement of a row an arm left open when its close lost the ledger lock, and a SIGSTOP counterfactual that distinguishes a live PID from a stale beacon before classifying termination.
 `tests/fm-continuity-pretool-check.test.sh` proves the Claude gate rejects only non-recovery fleet execution in the precise unhealthy state and preserves the existing Stop registration.
 
 ## Sanitized live evidence, 2026-07-17

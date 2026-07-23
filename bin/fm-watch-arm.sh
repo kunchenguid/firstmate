@@ -54,7 +54,10 @@
 # those cycles with:
 #   grep 'exit_code=open' state/.watch-cycle-exits.log
 # and treat a row whose arm_pid is no longer alive as an unexplained cycle death;
-# a row whose arm_pid is still alive is simply the cycle running right now.
+# a row whose arm_pid is still alive is simply the cycle running right now. A row
+# its own arm could not close because the ledger lock was contended is retired as
+# exit_code=superseded reason=cycle-superseded when that arm opens its next cycle,
+# so one arm never leaves a second unclosed row to be read as a kill.
 #
 # --restart: stop ONLY this FM_HOME's watcher (the pid recorded in THIS home's
 # state/.watch.lock) and own a fresh cycle, or attach if a verified live peer
@@ -105,6 +108,7 @@ cycle_watcher_pid=none
 cycle_origin=unknown
 cycle_started_at=0
 cycle_lock_before='pid:none|identity:none'
+cycle_rows_published=0
 
 # One record shape for both ends of a cycle: the OPEN row written when the cycle
 # begins and the classified record that replaces it in place when the cycle ends.
@@ -161,6 +165,41 @@ cycle_log_trim() {
   return 0
 }
 
+# A close that loses the ledger lock gives up on its rewrite, so this arm's row
+# stays open while the arm moves on. Retire any still-open row left by an EARLIER
+# cycle of this same arm before publishing the next one: one live arm must never
+# show two unclosed rows, or the older one reads for the rest of the ledger's life
+# as the untrappable kill the open row exists to report. The retired row keeps the
+# cycle it describes (arm, watcher, origin, start stamp, lock identity before) and
+# any successor already linked onto it, and carries its own classified reason so it
+# is never confused with a normal close or with a genuine unexplained death.
+# Only rows THIS process published are eligible, so a dead arm's evidence under a
+# recycled pid is never rewritten. Idempotent: a retired row no longer matches.
+# Callers hold CYCLE_LOG_LOCK.
+cycle_supersede_stranded_rows() {
+  local tmp
+  [ "$cycle_rows_published" -eq 1 ] || return 0
+  [ -f "$CYCLE_LOG" ] || return 0
+  tmp="$CYCLE_LOG.supersede.$ARM_PID"
+  FM_CYCLE_TARGET="arm_pid=$ARM_PID" \
+    FM_CYCLE_ENDED="$(date +%s)" \
+    FM_CYCLE_BEACON="$(fm_path_age "$BEAT")" \
+    FM_CYCLE_LOCK_AFTER="$(cycle_clean_field "$(lock_snapshot)")" awk '
+    BEGIN { FS = "\t"; OFS = "\t" }
+    NF == 12 && $1 == ENVIRON["FM_CYCLE_TARGET"] && $6 == "exit_code=open" {
+      $5 = "ended_at=" ENVIRON["FM_CYCLE_ENDED"]
+      $6 = "exit_code=superseded"
+      $7 = "signal=none"
+      $8 = "reason=cycle-superseded"
+      $9 = "beacon_age=" ENVIRON["FM_CYCLE_BEACON"]
+      $11 = "lock_after=" ENVIRON["FM_CYCLE_LOCK_AFTER"]
+    }
+    { print }
+  ' "$CYCLE_LOG" > "$tmp" 2>/dev/null && mv -f "$tmp" "$CYCLE_LOG" 2>/dev/null
+  rm -f "$tmp" 2>/dev/null || true
+  return 0
+}
+
 # Publish the cycle's row BEFORE the cycle runs. SIGKILL and process-group kills
 # cannot run the traps that close a record, so a cycle that dies that way used to
 # leave no ledger evidence at all - the one death mode the ledger most needs to
@@ -168,7 +207,9 @@ cycle_log_trim() {
 # ledger keeps exactly one row per observed cycle.
 cycle_log_open_row() {
   cycle_log_lock || return 0
+  cycle_supersede_stranded_rows
   cycle_record_line 0 open none cycle-open "$(fm_path_age "$BEAT")" pending none >> "$CYCLE_LOG" 2>/dev/null || true
+  cycle_rows_published=1
   cycle_log_trim
   fm_lock_release "$CYCLE_LOG_LOCK"
 }
