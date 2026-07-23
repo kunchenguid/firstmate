@@ -86,7 +86,8 @@
 #   profile consultation. A --secondmate spawn is exempt and resolves the SECONDMATE
 #   harness (config/secondmate-harness -> config/crew-harness -> own), so the
 #   secondmate-vs-crewmate split is DURABLE across every respawn (recovery,
-#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|muse)
+#   /updatefirstmate, restart). A bare adapter name
+#   (claude|codex|opencode|pi|pi-signed|grok|agy|kimi|muse)
 #   overrides it for this spawn (either kind). A non-flag string containing
 #   whitespace is treated as a RAW launch command - the escape hatch for verifying
 #   new adapters. pi-signed launches that exact executable name from PATH and
@@ -789,7 +790,7 @@ FIRSTMATE_HOME=
 
 if [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
-    ''|claude|codex|opencode|pi|pi-signed|grok|kimi|muse)
+    ''|claude|codex|opencode|pi|pi-signed|grok|agy|kimi|muse)
       ARG3=${POS[1]:-}
       ;;
     *' '*)
@@ -850,6 +851,10 @@ launch_template() {
     # launch command - it is a Stop-event hook installed below (global hook +
     # per-task pointer), so the template is identical for ship/scout/secondmate.
     grok) printf '%s' 'grok --always-approve __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    # agy starts an interactive, steerable session in the pane cwd. Keep this
+    # literal command substitution child-side: the pane shell reads the brief
+    # after launch, so no parent expansion can leak or alter its contents.
+    agy) printf '%s' 'agy --dangerously-skip-permissions __MODELFLAG____EFFORTFLAG__-i "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     # Kimi Code rejects a positional prompt, so it launches bare and receives
     # only an absolute brief pointer after the TUI readiness gate below.
     # Its turn-end signal is a globally configured Stop hook plus a guarded
@@ -877,6 +882,10 @@ launch_template() {
     # written below. Nothing to place in the template for it.
     # codex, opencode, and kimi are also markerless and share this inherited-marker hazard; changing their verified launch boundaries belongs in follow-up work.
     muse) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS XDG_CONFIG_HOME=__MUSECONFIG__ XDG_DATA_HOME=__MUSEDATA__ MUSE_EXPERIMENTAL_FOREIGN_PERSONAL_CONTEXT_KILL=on __MUSEBIN__ --yolo __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    # agy starts an interactive, steerable session in the pane cwd. Keep this
+    # literal command substitution child-side: the pane shell reads the brief
+    # after launch, so no parent expansion can leak or alter its contents.
+    agy) printf '%s' 'agy --dangerously-skip-permissions __MODELFLAG____EFFORTFLAG__-i "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     *) return 1 ;;
   esac
 }
@@ -1049,7 +1058,7 @@ model_flag_for_harness() {
   local harness=$1 model=$2
   [ -n "$model" ] && [ "$model" != default ] || return 0
   case "$harness" in
-    claude|codex|opencode|pi|pi-signed|grok|kimi|muse)
+    claude|codex|opencode|pi|pi-signed|grok|agy|kimi|muse)
       printf -- '--model %s ' "$(shell_quote "$model")"
       ;;
   esac
@@ -1088,6 +1097,16 @@ effort_flag_for_harness() {
         low|medium|high|xhigh|max) printf -- '--thinking %s ' "$(shell_quote "$effort")" ;;
       esac
       ;;
+    agy)
+      # Antigravity CLI (agy 1.1.5) exposes --effort low|medium|high (verified
+      # `agy --help`). Its model catalog also bakes an effort suffix into some
+      # model names (e.g. gemini-3.6-flash-high); firstmate keeps --model as the
+      # bare catalog name and drives the reasoning axis through --effort. The
+      # ceiling is high, so omit xhigh|max rather than passing a known-bad value.
+      case "$effort" in
+        low|medium|high) printf -- '--effort %s ' "$(shell_quote "$effort")" ;;
+      esac
+      ;;
     muse)
       # muse 0.1.0-R708.1 --reasoning-effort accepts none|minimal|low|medium|
       # high|xhigh|ultra and defaults to high, so low..xhigh map straight across.
@@ -1100,6 +1119,16 @@ effort_flag_for_harness() {
       case "$effort" in
         low|medium|high|xhigh) printf -- '--reasoning-effort %s ' "$(shell_quote "$effort")" ;;
         max) printf -- '--reasoning-effort %s ' "$(shell_quote ultra)" ;;
+      esac
+      ;;
+    agy)
+      # Antigravity CLI (agy 1.1.5) exposes --effort low|medium|high (verified
+      # `agy --help`). Its model catalog also bakes an effort suffix into some
+      # model names (e.g. gemini-3.6-flash-high); firstmate keeps --model as the
+      # bare catalog name and drives the reasoning axis through --effort. The
+      # ceiling is high, so omit xhigh|max rather than passing a known-bad value.
+      case "$effort" in
+        low|medium|high) printf -- '--effort %s ' "$(shell_quote "$effort")" ;;
       esac
       ;;
     # opencode's interactive `opencode --prompt` launch has a verified --model
