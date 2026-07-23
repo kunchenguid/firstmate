@@ -13,16 +13,20 @@ set -u
 TMP_ROOT=$(fm_test_tmproot fm-secondmate-safety)
 export FM_BACKEND=tmux
 
-make_live_default_firstmate_clone() {
-  local destination=$1 name=$2 remote remote_abs head
+make_live_default_firstmate_worktree() {
+  local destination=$1 name=$2 remote remote_abs head source
   remote="$TMP_ROOT/remotes/$name.git"
+  source="$TMP_ROOT/sources/$name"
   mkdir -p "$TMP_ROOT/remotes"
   git clone --quiet --bare "$ROOT" "$remote"
   head=$(git -C "$ROOT" rev-parse HEAD)
   git -C "$remote" update-ref refs/heads/main "$head"
   git -C "$remote" symbolic-ref HEAD refs/heads/main
   remote_abs=$(cd "$remote" && pwd -P)
-  git clone --quiet "file://$remote_abs" "$destination"
+  mkdir -p "$TMP_ROOT/sources"
+  git clone --quiet "file://$remote_abs" "$source"
+  git -C "$source" worktree add --quiet --detach "$destination" main
+  printf '%s\n' "$source"
 }
 
 
@@ -179,20 +183,21 @@ EOF
 }
 
 test_home_seed_uses_treehouse_acquired_home() {
-  local home acquired acquired_abs fakebin log lease out
+  local home acquired acquired_abs fakebin log lease out source
   home="$TMP_ROOT/dash-home"
   acquired="$TMP_ROOT/dash-acquired-home"
   mkdir -p "$home/projects" "$home/data" "$home/state"
   fm_git_init_commit "$home/projects/alpha"
   fm_git_add_origin "$home/projects/alpha" "$TMP_ROOT/remotes/dash-alpha.git"
   printf '%s\n' '- alpha [direct-PR] - alpha project (added 2026-06-22)' > "$home/data/projects.md"
-  make_live_default_firstmate_clone "$acquired" dash-firstmate
+  source=$(make_live_default_firstmate_worktree "$acquired" dash-firstmate)
   fakebin=$(make_fake_tmux "$TMP_ROOT/dash-fake")
   log="$TMP_ROOT/dash-fake/tmux.log"
   lease="$TMP_ROOT/dash-fake/lease"
 
   out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TREEHOUSE_HOME="$acquired" FM_FAKE_TMUX_LOG="$log" \
     FM_FAKE_TREEHOUSE_LEASE_FILE="$lease" \
+    FM_ROOT_OVERRIDE="$source" \
     FM_SECONDMATE_CHARTER='dash acquired scope' FM_SECONDMATE_SCOPE='dash acquired scope' \
     "$ROOT/bin/fm-home-seed.sh" dash - alpha) \
     || fail "seed failed for a treehouse-acquired home"
@@ -209,7 +214,7 @@ test_home_seed_uses_treehouse_acquired_home() {
 }
 
 test_home_seed_rejects_stale_treehouse_acquired_home() {
-  local home acquired acquired_abs fakebin log err before
+  local home acquired acquired_abs fakebin log err source
   home="$TMP_ROOT/dash-stale-home"
   acquired="$TMP_ROOT/dash-stale-acquired-home"
   err="$TMP_ROOT/dash-stale.err"
@@ -217,19 +222,18 @@ test_home_seed_rejects_stale_treehouse_acquired_home() {
   fm_git_init_commit "$home/projects/alpha"
   fm_git_add_origin "$home/projects/alpha" "$TMP_ROOT/remotes/dash-stale-alpha.git"
   printf '%s\n' '- alpha [direct-PR] - alpha project (added 2026-06-22)' > "$home/data/projects.md"
-  make_live_default_firstmate_clone "$acquired" dash-stale-firstmate
-  before=$(git -C "$acquired" rev-parse HEAD)
-  printf '%s\n' upstream > "$acquired/upstream.txt"
-  git -C "$acquired" add upstream.txt
-  git -C "$acquired" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+  source=$(make_live_default_firstmate_worktree "$acquired" dash-stale-firstmate)
+  printf '%s\n' upstream > "$source/upstream.txt"
+  git -C "$source" add upstream.txt
+  git -C "$source" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
     commit -qm upstream
-  git -C "$acquired" push -q origin main
-  git -C "$acquired" reset --hard -q "$before"
+  git -C "$source" push -q origin main
   acquired_abs=$(cd "$acquired" && pwd -P)
   fakebin=$(make_fake_tmux "$TMP_ROOT/dash-stale-fake")
   log="$TMP_ROOT/dash-stale-fake/tmux.log"
 
   if PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TREEHOUSE_HOME="$acquired" FM_FAKE_TMUX_LOG="$log" \
+    FM_ROOT_OVERRIDE="$source" \
     FM_SECONDMATE_CHARTER='dash stale scope' FM_SECONDMATE_SCOPE='dash stale scope' \
     "$ROOT/bin/fm-home-seed.sh" dash-stale - alpha >/dev/null 2>"$err"; then
     fail "seed accepted a stale Treehouse-acquired secondmate home"
@@ -246,8 +250,47 @@ test_home_seed_rejects_stale_treehouse_acquired_home() {
   pass "secondmate acquisition proves the live upstream default before seeding"
 }
 
+test_home_seed_retains_dirty_treehouse_acquired_home() {
+  local home acquired acquired_abs fakebin log err source draft
+  home="$TMP_ROOT/dash-dirty-home"
+  acquired="$TMP_ROOT/dash-dirty-acquired-home"
+  err="$TMP_ROOT/dash-dirty.err"
+  mkdir -p "$home/projects" "$home/data" "$home/state"
+  fm_git_init_commit "$home/projects/alpha"
+  fm_git_add_origin "$home/projects/alpha" "$TMP_ROOT/remotes/dash-dirty-alpha.git"
+  printf '%s\n' '- alpha [direct-PR] - alpha project (added 2026-06-22)' > "$home/data/projects.md"
+  source=$(make_live_default_firstmate_worktree "$acquired" dash-dirty-firstmate)
+  acquired_abs=$(cd "$acquired" && pwd -P)
+  draft="$acquired/.agents/skills/unlanded/SKILL.md"
+  mkdir -p "$(dirname "$draft")"
+  printf '%s\n' '# unlanded secondmate work' > "$draft"
+  fakebin=$(make_fake_tmux "$TMP_ROOT/dash-dirty-fake")
+  log="$TMP_ROOT/dash-dirty-fake/tmux.log"
+
+  if PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TREEHOUSE_HOME="$acquired" FM_FAKE_TMUX_LOG="$log" \
+    FM_ROOT_OVERRIDE="$source" \
+    FM_SECONDMATE_CHARTER='dash dirty scope' FM_SECONDMATE_SCOPE='dash dirty scope' \
+    "$ROOT/bin/fm-home-seed.sh" dash-dirty - alpha >/dev/null 2>"$err"; then
+    fail "seed accepted a dirty Treehouse-acquired secondmate home"
+  fi
+
+  grep -F 'acquired worktree is dirty' "$err" >/dev/null \
+    || fail "dirty secondmate-home refusal did not identify the unlanded work"
+  grep -F 'retaining dirty treehouse-acquired home' "$err" >/dev/null \
+    || fail "dirty secondmate-home refusal did not surface retain-only cleanup"
+  grep -F "treehouse return --force $acquired_abs" "$log" >/dev/null \
+    && fail "dirty secondmate-home refusal used destructive Treehouse return"
+  [ -d "$acquired" ] || fail "dirty secondmate-home refusal removed the acquired worktree"
+  grep -Fq '# unlanded secondmate work' "$draft" \
+    || fail "dirty secondmate-home refusal changed its draft"
+  if [ -f "$home/data/secondmates.md" ] && grep -F -- '- dash-dirty ' "$home/data/secondmates.md" >/dev/null; then
+    fail "dirty secondmate-home refusal wrote a registry route"
+  fi
+  pass "dirty secondmate acquisitions are retained untouched for recovery"
+}
+
 test_home_seed_returns_treehouse_acquired_home_on_assignment_failure() {
-  local home acquired acquired_abs fakebin log err
+  local home acquired acquired_abs fakebin log err source
   home="$TMP_ROOT/dash-fail-home"
   acquired="$TMP_ROOT/dash-fail-acquired-home"
   err="$TMP_ROOT/dash-fail.err"
@@ -255,13 +298,14 @@ test_home_seed_returns_treehouse_acquired_home_on_assignment_failure() {
   fm_git_init_commit "$home/projects/alpha"
   fm_git_add_origin "$home/projects/alpha" "$TMP_ROOT/remotes/dash-fail-alpha.git"
   printf '%s\n' '- alpha [direct-PR] - alpha project (added 2026-06-22)' > "$home/data/projects.md"
-  make_live_default_firstmate_clone "$acquired" dash-fail-firstmate
+  source=$(make_live_default_firstmate_worktree "$acquired" dash-fail-firstmate)
   acquired_abs=$(cd "$acquired" && pwd -P)
   printf 'other\n' > "$acquired/.fm-secondmate-home"
   fakebin=$(make_fake_tmux "$TMP_ROOT/dash-fail-fake")
   log="$TMP_ROOT/dash-fail-fake/tmux.log"
 
   if PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TREEHOUSE_HOME="$acquired" FM_FAKE_TMUX_LOG="$log" \
+    FM_ROOT_OVERRIDE="$source" \
     FM_SECONDMATE_CHARTER='dash acquired scope' FM_SECONDMATE_SCOPE='dash acquired scope' \
     "$ROOT/bin/fm-home-seed.sh" dash - alpha >/dev/null 2>"$err"; then
     fail "seed reused an acquired home marked for another secondmate"
@@ -276,7 +320,7 @@ test_home_seed_returns_treehouse_acquired_home_on_assignment_failure() {
 }
 
 test_home_seed_warns_when_acquired_home_return_fails() {
-  local home acquired acquired_abs fakebin log err lease
+  local home acquired acquired_abs fakebin log err lease source
   home="$TMP_ROOT/dash-return-fail-home"
   acquired="$TMP_ROOT/dash-return-fail-acquired-home"
   err="$TMP_ROOT/dash-return-fail.err"
@@ -284,7 +328,7 @@ test_home_seed_warns_when_acquired_home_return_fails() {
   fm_git_init_commit "$home/projects/alpha"
   fm_git_add_origin "$home/projects/alpha" "$TMP_ROOT/remotes/dash-return-fail-alpha.git"
   printf '%s\n' '- alpha [direct-PR] - alpha project (added 2026-06-22)' > "$home/data/projects.md"
-  make_live_default_firstmate_clone "$acquired" dash-return-fail-firstmate
+  source=$(make_live_default_firstmate_worktree "$acquired" dash-return-fail-firstmate)
   acquired_abs=$(cd "$acquired" && pwd -P)
   printf 'other\n' > "$acquired/.fm-secondmate-home"
   fakebin=$(make_fake_tmux "$TMP_ROOT/dash-return-fail-fake")
@@ -293,6 +337,7 @@ test_home_seed_warns_when_acquired_home_return_fails() {
 
   if PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TREEHOUSE_HOME="$acquired" FM_FAKE_TMUX_LOG="$log" \
     FM_FAKE_TREEHOUSE_LEASE_FILE="$lease" FM_FAKE_TREEHOUSE_RETURN_FAIL=1 \
+    FM_ROOT_OVERRIDE="$source" \
     FM_SECONDMATE_CHARTER='dash acquired scope' FM_SECONDMATE_SCOPE='dash acquired scope' \
     "$ROOT/bin/fm-home-seed.sh" dash - alpha >/dev/null 2>"$err"; then
     fail "seed reused an acquired home after return failure setup"
@@ -2150,6 +2195,7 @@ EOF
 
 if [ "${FM_TEST_FOCUSED:-}" = checkout-freshness ]; then
   test_home_seed_rejects_stale_treehouse_acquired_home
+  test_home_seed_retains_dirty_treehouse_acquired_home
   exit 0
 fi
 
@@ -2161,6 +2207,7 @@ test_home_seed_validate_rejects_duplicate_ids
 test_home_seed_validate_rejects_nested_homes
 test_home_seed_uses_treehouse_acquired_home
 test_home_seed_rejects_stale_treehouse_acquired_home
+test_home_seed_retains_dirty_treehouse_acquired_home
 test_home_seed_returns_treehouse_acquired_home_on_assignment_failure
 test_home_seed_warns_when_acquired_home_return_fails
 test_home_seed_does_not_return_unsafe_acquired_home

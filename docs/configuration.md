@@ -284,6 +284,8 @@ If the upstream default branch changes, a checkout still on the old branch is re
 A full safe refresh runs at least every 15 minutes even when no change signal is observed, so transient network failures, a missed probe, or lost local state cannot create unbounded drift.
 Every probe also inventories untracked files in covered seed checkouts and Treehouse pool worktrees under `.agents/skills`, `.claude/skills`, `.codex/skills`, and `skills`.
 A new or growing inventory produces a durable `HYGIENE:` alert immediately, while forced session-start and spawn-preflight checks repeat any unresolved alert for an operator.
+An inventory read failure preserves the prior hygiene alert and suppresses the healthy heartbeat until a complete scan succeeds.
+Unreadable or malformed Treehouse state likewise surfaces an incomplete-coverage diagnostic and prevents the service from advancing its healthy heartbeat.
 The ordinary safe-refresh warning separately quantifies every untracked file and the subset under those skill directories, so other untracked accumulation is bounded by the same 15-minute backstop.
 These checks inspect paths only and never delete, move, stash, reset, or edit a draft.
 The signal interval and backstop are configurable through `FM_CHECKOUT_REFRESH_INTERVAL` and `FM_CHECKOUT_REFRESH_BACKSTOP`.
@@ -291,8 +293,11 @@ Every cadence and spawn-preflight refresh disables gone-branch pruning and retai
 The forced session-start mode preserves the existing gone-branch pruning pass.
 
 Treehouse v2.0 already fetches `origin` before every acquisition and resets an available detached pool worktree to the freshest default ref.
-Firstmate adds a pre-acquisition primary-checkout refresh and refuses the launch after acquisition unless the worktree HEAD matches the upstream default-branch tip.
-Treehouse-acquired secondmate homes receive the same live-default proof before seeding, and a failed proof returns the lease transactionally.
+Firstmate adds a pre-acquisition primary-checkout refresh and accepts an acquired worktree only when it is clean, belongs to the requested repository, has the same origin identity, and its HEAD matches the live upstream default-branch tip.
+Remote-free `local-only` acquisitions use the same repository and cleanliness proof, with the requested checkout's local `main` or `master` tip as their freshness authority.
+Treehouse-acquired secondmate homes receive the same proof before seeding.
+A stale clean acquisition is returned transactionally, while a dirty or uninspectable acquisition is retained without forced return and surfaced for manual recovery.
+If an unmanaged spawn fails after publishing metadata or task artifacts, it restores the prior task generation before returning only a worktree that is still provably clean.
 That makes the acquisition proof explicit even if the background owner was offline.
 Orca is an explicit legacy-recovery-only exception because this change creates no new Orca tasks or acquisitions.
 
@@ -334,6 +339,7 @@ Bootstrap also reports a `TANGLE:` line when `FM_ROOT` is on a named non-default
 In a read-only session that did not get the fleet lock, the same line is advisory and omits the checkout command.
 The locked session-start bootstrap step also runs a best-effort covered-checkout refresh through `fm-checkout-refresh.sh`, which delegates individual safe updates to `fm-fleet-sync.sh`.
 It emits `FLEET_SYNC:` for skipped refreshes that may matter, recovered self-heals, and `STUCK:` alarms.
+Checkout discovery and configuration diagnostics use the same relay so an omitted configured clone cannot remain silent.
 Normal completed runs keep local-only and no-origin skips silent.
 If bootstrap kills a timed-out refresh, it replays any completed checkout-refresh output before the aggregate timeout skip so no finished result is lost.
 A killed refresh (or a teardown process kill) can leave an orphaned `.git/packed-refs.lock` in a clone, which makes the next refresh's fetch fail with Git's `Unable to create '...packed-refs.lock': File exists`.

@@ -86,9 +86,11 @@
 #   default-branch commit when safe; skipped syncs warn and launch unchanged.
 #   Ship/scout spawns refresh the primary checkout before Treehouse acquisition,
 #   record ownership as soon as acquisition is validated, then refuse to launch
-#   unless the acquired path is a real isolated worktree whose HEAD matches the
-#   live upstream default-branch tip. Any pre-commit failure closes the
-#   prepared endpoint and returns the acquired Treehouse worktree.
+#   unless the acquired path is a clean isolated worktree from the requested
+#   repository whose HEAD matches its live upstream or local default-branch tip.
+#   Dirty acquisitions are retained untouched for manual recovery. Other
+#   pre-commit failures close the prepared endpoint, restore prior task state,
+#   and return only a worktree that remains clean after owned hook cleanup.
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
@@ -873,6 +875,7 @@ ACCOUNT_PREDECESSOR_SESSION=
 CONTINUATION_PACKET=
 ENDPOINT_CREATED=0
 WORKTREE_CREATED=0
+WORKTREE_RETAIN_ON_ABORT=0
 META_INSTALLED=0
 META_BACKUP=
 EXISTING_ARTIFACT_BACKUP=
@@ -1194,15 +1197,55 @@ cleanup_continuation_launch_transport() {
 }
 
 spawn_return_created_worktree() {
+  local dirty
   [ "$WORKTREE_CREATED" = 1 ] || return 0
   [ "${BACKEND:-tmux}" != orca ] || return 0
   [ -n "${WT:-}" ] && [ -d "$WT" ] || return 0
+  if [ "$WORKTREE_RETAIN_ON_ABORT" = 1 ]; then
+    echo "warning: retained unsafe acquired worktree $WT for manual recovery" >&2
+    return 1
+  fi
   rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" "$WT/.fm-grok-turnend"
+  if ! dirty=$(GIT_OPTIONAL_LOCKS=0 git -C "$WT" status --porcelain=v1 --untracked-files=all 2>/dev/null); then
+    echo "warning: retained acquired worktree $WT because post-failure cleanliness could not be proved" >&2
+    return 1
+  fi
+  if [ -n "$dirty" ]; then
+    echo "warning: retained dirty acquired worktree $WT after failed spawn; recover its unlanded work manually" >&2
+    return 1
+  fi
   ( cd "$PROJ_ABS" && treehouse return --force "$WT" ) >/dev/null 2>&1
 }
 
+spawn_restore_unmanaged_state() {
+  local meta="$STATE/$ID.meta" current_generation artifact_backup_name
+  [ "${ACCOUNT_EFFECTIVE_MODE:-off}" != enforce ] || return 0
+  if [ -n "$EXISTING_ARTIFACT_BACKUP" ]; then
+    artifact_backup_name=${EXISTING_ARTIFACT_BACKUP##*/}
+    fm_account_restore_artifacts "$STATE" "$ID" "$artifact_backup_name" "/tmp/fm-$ID" 1 || return 1
+  fi
+  if [ -n "$META_BACKUP" ]; then
+    [ -f "$META_BACKUP" ] && [ -f "$meta" ] || return 1
+    current_generation=$(fm_meta_get "$meta" generation_id)
+    if [ "$META_INSTALLED" = 1 ]; then
+      [ "$current_generation" = "$SPAWN_GENERATION_ID" ] || return 1
+    else
+      cmp -s "$meta" "$META_BACKUP" || return 1
+    fi
+    fm_account_meta_merge_extensions "$meta" "$META_BACKUP" || return 1
+    fm_account_safe_file_destination "$meta" || return 1
+    mv "$META_BACKUP" "$meta" || return 1
+    META_BACKUP=
+  elif [ "$META_INSTALLED" = 1 ] && [ -e "$meta" ]; then
+    current_generation=$(fm_meta_get "$meta" generation_id)
+    [ "$current_generation" = "$SPAWN_GENERATION_ID" ] || return 1
+    rm -f "$meta" || return 1
+  fi
+  discard_existing_artifact_backup
+}
+
 spawn_abort_cleanup() {
-  local status=$? endpoint_state endpoint_gone=1 account_clean=1 worktree_clean=1 rollback_lock='' rollback_tmp restored_existing_meta=0 artifact_backup_name orca_meta_tmp release_status
+  local status=$? endpoint_state endpoint_gone=1 account_clean=1 state_clean=1 worktree_clean=1 rollback_lock='' rollback_tmp restored_existing_meta=0 artifact_backup_name orca_meta_tmp release_status
   trap - EXIT
   # This is an EXIT trap whose job is to attempt every independent cleanup
   # action and then return the original spawn status. The parent script runs
@@ -1270,7 +1313,13 @@ spawn_abort_cleanup() {
   fi
   if [ "$ACCOUNT_SPAWN_COMMITTED" != 1 ] && [ "$endpoint_gone" = 1 ] \
     && [ "${ACCOUNT_EFFECTIVE_MODE:-off}" != enforce ]; then
-    spawn_return_created_worktree || worktree_clean=0
+    spawn_restore_unmanaged_state || state_clean=0
+    if [ "$state_clean" = 1 ]; then
+      spawn_return_created_worktree || worktree_clean=0
+    else
+      worktree_clean=0
+      echo "warning: retained failed spawn resources for ${ID:-unknown} because prior task state could not be restored" >&2
+    fi
     [ "$worktree_clean" = 1 ] || echo "warning: failed to return rollback worktree for ${ID:-unknown}" >&2
   fi
   [ -z "${ACCOUNT_NATIVE_LAUNCH_DIR:-}" ] || rm -rf "$ACCOUNT_NATIVE_LAUNCH_DIR"
@@ -2030,11 +2079,14 @@ if [ "$RECOVERY_ACCOUNT" = 0 ] && [ -f "$STATE/$ID.meta" ]; then
     present) echo "error: endpoint is already alive for $ID; refusing duplicate spawn" >&2; exit 1 ;;
     *) echo "error: endpoint state is unknown for $ID; refusing duplicate spawn" >&2; exit 1 ;;
   esac
-  if [ "$ACCOUNT_EFFECTIVE_MODE" = enforce ] || [ "$DIRECT_ACCOUNT_ROUTING" = 1 ]; then
-    META_BACKUP=$(mktemp "$STATE/.$ID.meta.rollback.XXXXXX") || exit 1
-    cp -p "$STATE/$ID.meta" "$META_BACKUP" || exit 1
+  META_BACKUP=$(mktemp "$STATE/.$ID.meta.rollback.XXXXXX") || exit 1
+  cp -p "$STATE/$ID.meta" "$META_BACKUP" || exit 1
+  if [ "$ACCOUNT_EFFECTIVE_MODE" = enforce ]; then
     snapshot_existing_artifacts || exit 1
   fi
+fi
+if [ "$ACCOUNT_EFFECTIVE_MODE" != enforce ]; then
+  snapshot_existing_artifacts || exit 1
 fi
 
 secondmate_registry_value() {
@@ -2693,8 +2745,11 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] && [ "$RECOVERY_ACCOUNT" 
 
   validate_spawn_worktree "treehouse get" "$T"
   WORKTREE_CREATED=1
-  if ! "$SCRIPT_DIR/fm-checkout-refresh.sh" verify-worktree "$WT"; then
-    echo "error: refusing to launch $W from an acquired worktree whose upstream freshness could not be proved" >&2
+  freshness_status=0
+  "$SCRIPT_DIR/fm-checkout-refresh.sh" verify-worktree "$WT" "$PROJ_ABS" || freshness_status=$?
+  if [ "$freshness_status" -ne 0 ]; then
+    [ "$freshness_status" -ne 3 ] || WORKTREE_RETAIN_ON_ABORT=1
+    echo "error: refusing to launch $W from an acquired worktree whose repository identity, cleanliness, or default-tip freshness could not be proved" >&2
     exit 1
   fi
 fi

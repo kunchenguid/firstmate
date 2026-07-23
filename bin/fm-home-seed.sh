@@ -8,7 +8,9 @@
 #       leases the worktree under the secondmate <id> so the home survives with
 #       no live process and is never recycled until the lease is released with
 #       "treehouse return". The acquired home is accepted only when its HEAD
-#       matches the live upstream default-branch tip. Projects are cloned
+#       belongs to the Firstmate repository, is clean, and matches the live
+#       upstream default-branch tip. A dirty acquired home is retained without
+#       force-return so its unlanded work remains untouched. Projects are cloned
 #       from the active home into the secondmate home's projects/ directory.
 #       That project list is non-exclusive provisioning data. Pass --no-projects
 #       instead of a project list to seed a project-less home for a domain whose
@@ -21,8 +23,9 @@
 #       data/secondmates.md is updated.
 #       Seeding is transactional: on validation, clone, init, or registry failure,
 #       generated briefs, new homes, new project clones, and registry edits are
-#       rolled back. Treehouse-acquired homes are returned only when the rollback
-#       target is safe; a failed return warns because the lease may still be held.
+#       rolled back. Clean Treehouse-acquired homes are returned only when the
+#       rollback target is safe; a failed return warns because the lease may still
+#       be held.
 #       Set FM_SECONDMATE_CHARTER='<charter>' to seed from inline charter text
 #       when no filled charter brief exists. Set FM_SECONDMATE_SCOPE='<scope>'
 #       to override the registry routing scope. Otherwise the registry summary
@@ -585,6 +588,7 @@ SEED_ROLLBACK_ACTIVE=0
 SEED_COMMITTED=0
 SEED_HOME=
 SEED_HOME_ACQUIRED=0
+SEED_HOME_RETAINED=0
 SEED_HOME_CREATED=0
 SEED_HOME_BACKED_UP=0
 SEED_BACKUP_DIR=
@@ -703,7 +707,11 @@ seed_rollback() {
 
   if [ -n "${SEED_HOME:-}" ] && [ "$SEED_HOME" != "/" ]; then
     if [ "$SEED_HOME_ACQUIRED" = 1 ]; then
-      seed_return_treehouse_home "$SEED_HOME"
+      if [ "$SEED_HOME_RETAINED" = 1 ]; then
+        echo "warning: retaining dirty treehouse-acquired home $SEED_HOME for manual recovery" >&2
+      else
+        seed_return_treehouse_home "$SEED_HOME"
+      fi
     elif [ "$SEED_HOME_CREATED" = 1 ]; then
       seed_remove_created_home "$SEED_HOME"
     else
@@ -903,8 +911,8 @@ seed_home() {
   SEED_COMMITTED=0
   SEED_HOME=
   SEED_HOME_ACQUIRED=0
+  SEED_HOME_RETAINED=0
   SEED_HOME_CREATED=0
-  SEED_HOME_ACQUIRED=0
   SEED_HOME_BACKED_UP=0
   SEED_BACKUP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/fm-home-seed.XXXXXX")
   SEED_CREATED_PROJECTS_FILE="$SEED_BACKUP_DIR/created-projects"
@@ -927,7 +935,10 @@ seed_home() {
     home=$(acquire_treehouse_home "$id")
     SEED_HOME="$home"
     home=$(verify_firstmate_home "$home")
-    if ! "$SCRIPT_DIR/fm-checkout-refresh.sh" verify-worktree "$home"; then
+    freshness_status=0
+    "$SCRIPT_DIR/fm-checkout-refresh.sh" verify-worktree "$home" "$FM_ROOT" || freshness_status=$?
+    if [ "$freshness_status" -ne 0 ]; then
+      [ "$freshness_status" -ne 3 ] || SEED_HOME_RETAINED=1
       echo "error: refusing secondmate home acquired from a stale or unverifiable upstream default" >&2
       return 1
     fi

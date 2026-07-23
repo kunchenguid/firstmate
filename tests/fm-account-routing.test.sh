@@ -122,6 +122,9 @@ case "${1:-}" in
     exit 0
     ;;
   send-keys)
+    if [ -n "${FM_FAKE_TMUX_FAIL_SEND_MATCH:-}" ]; then
+      case "$*" in *"$FM_FAKE_TMUX_FAIL_SEND_MATCH"*) exit 72 ;; esac
+    fi
     if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
       prev=
       for arg in "$@"; do
@@ -338,6 +341,7 @@ make_case() {
   mkdir -p "$home/data" "$home/projects" "$home/state" "$home/config"
   printf '%s\n' "$harness" > "$home/config/crew-harness"
   fm_git_worktree "$proj" "$wt" "wt-$name"
+  fm_git_add_origin "$proj" "$case_dir/origin.git"
   touch "$home/state/.last-watcher-beat"
   for id in "$@"; do
     mkdir -p "$home/data/$id"
@@ -375,6 +379,7 @@ run_spawn() {
     FM_FAKE_TMUX_LOG="$TMUX_LOG" FM_FAKE_AF_LOG="$AF_LOG" \
     FM_FAKE_TREEHOUSE_LOG="$TREEHOUSE_LOG" FM_FAKE_LIFECYCLE_LOG="$LIFECYCLE_LOG" \
     FM_FAKE_ORCA_LOG="$ORCA_LOG" \
+    FM_FAKE_TMUX_FAIL_SEND_MATCH="${FM_FAKE_TMUX_FAIL_SEND_MATCH:-}" \
     FM_CHECKOUT_REFRESH_STATE_ROOT="$CASE_DIR/checkout-refresh-state" \
     FM_CHECKOUT_REFRESH_LOCK_ROOT="$CASE_DIR/checkout-refresh-locks" \
     FM_FAKE_ENDPOINT_FILE="$CASE_DIR/endpoint-live" FM_FAKE_TMUX_LABEL_FILE="$CASE_DIR/tmux-label" \
@@ -458,7 +463,6 @@ test_failed_freshness_proof_rolls_back_unmanaged_resources() {
   id=checkout-freshness-rollback-z1a
   rec=$(make_case checkout-freshness-rollback claude "$id")
   read_case "$rec"
-  fm_git_add_origin "$PROJ_DIR" "$CASE_DIR/origin.git"
   default_branch=$(git -C "$PROJ_DIR" branch --show-current)
   printf '%s\n' upstream > "$PROJ_DIR/upstream.txt"
   git -C "$PROJ_DIR" add upstream.txt
@@ -484,6 +488,95 @@ test_failed_freshness_proof_rolls_back_unmanaged_resources() {
   assert_absent "$HOME_DIR/state/$id.meta" \
     "failed unmanaged freshness proof published task metadata"
   pass "failed freshness proofs unwind endpoints and worktrees in unmanaged mode"
+}
+
+test_local_only_spawn_uses_local_default_tip() {
+  local id rec out status
+  id=checkout-local-only-z1b
+  rec=$(make_case checkout-local-only claude "$id")
+  read_case "$rec"
+  git -C "$PROJ_DIR" remote remove origin
+  printf '%s\n' '- project [local-only] - local project (added 2026-07-23)' \
+    > "$HOME_DIR/data/projects.md"
+
+  out=$(run_spawn "$id" "$PROJ_DIR")
+  status=$?
+
+  [ "$status" -eq 0 ] || fail "remote-free local-only spawn failed its local freshness proof: $out"
+  assert_contains "$out" "spawned $id" "remote-free local-only spawn did not complete"
+  assert_not_grep 'return --force' "$TREEHOUSE_LOG" \
+    "successful remote-free local-only spawn returned its acquired worktree"
+  pass "remote-free local-only spawns prove the local default tip"
+}
+
+test_dirty_acquisition_is_retained_without_force_return() {
+  local id rec draft out status
+  id=checkout-dirty-retain-z1c
+  rec=$(make_case checkout-dirty-retain claude "$id")
+  read_case "$rec"
+  draft="$WT_DIR/.agents/skills/unlanded/SKILL.md"
+  mkdir -p "$(dirname "$draft")"
+  printf '%s\n' '# unlanded work' > "$draft"
+
+  if out=$(run_spawn "$id" "$PROJ_DIR"); then
+    status=0
+  else
+    status=$?
+  fi
+
+  [ "$status" -ne 0 ] || fail "spawn accepted a dirty acquired pool worktree"
+  assert_contains "$out" "acquired worktree is dirty" \
+    "dirty acquisition refusal did not identify the retained worktree"
+  assert_contains "$out" "retained unsafe acquired worktree" \
+    "dirty acquisition cleanup did not surface its retain-only action"
+  assert_not_grep 'return --force' "$TREEHOUSE_LOG" \
+    "dirty acquisition was returned through the destructive Treehouse path"
+  grep -Fq '# unlanded work' "$draft" || fail "dirty acquisition cleanup changed its draft"
+  assert_absent "$CASE_DIR/endpoint-live" \
+    "dirty acquisition refusal left its prepared endpoint alive"
+  assert_absent "$HOME_DIR/state/$id.meta" \
+    "dirty acquisition refusal published task metadata"
+  pass "dirty pool acquisitions are diagnosed and retained untouched"
+}
+
+test_unmanaged_postinstall_failure_restores_prior_state() {
+  local id rec expected out status artifact
+  id=checkout-unmanaged-restore-z1d
+  rec=$(make_case checkout-unmanaged-restore pi "$id")
+  read_case "$rec"
+  fm_write_meta "$HOME_DIR/state/$id.meta" \
+    "window=firstmate:fm-$id" \
+    "worktree=$WT_DIR" \
+    "project=$PROJ_DIR" \
+    "harness=pi" \
+    "kind=ship" \
+    "mode=no-mistakes" \
+    "custom_extension=retain-me"
+  expected="$CASE_DIR/original.meta"
+  cp "$HOME_DIR/state/$id.meta" "$expected"
+  for artifact in status turn-ended check.sh pi-ext.ts grok-turnend-token; do
+    printf 'prior-%s\n' "$artifact" > "$HOME_DIR/state/$id.$artifact"
+  done
+
+  if out=$(FM_FAKE_TMUX_FAIL_SEND_MATCH=GOTMPDIR run_spawn "$id" "$PROJ_DIR"); then
+    status=0
+  else
+    status=$?
+  fi
+
+  [ "$status" -ne 0 ] || fail "post-metadata unmanaged launch failure unexpectedly succeeded"
+  cmp -s "$HOME_DIR/state/$id.meta" "$expected" \
+    || fail "post-metadata unmanaged failure did not restore prior metadata"
+  for artifact in status turn-ended check.sh pi-ext.ts grok-turnend-token; do
+    [ "$(cat "$HOME_DIR/state/$id.$artifact" 2>/dev/null)" = "prior-$artifact" ] \
+      || fail "post-metadata unmanaged failure did not restore prior $artifact state"
+  done
+  assert_absent "$CASE_DIR/endpoint-live" \
+    "post-metadata unmanaged failure left its endpoint alive"
+  assert_grep "return --force $WT_DIR" "$TREEHOUSE_LOG" \
+    "post-metadata unmanaged failure did not return its clean worktree"
+  [ -n "$out" ] || true
+  pass "unmanaged post-install failures restore prior lifecycle state transactionally"
 }
 
 test_completion_contract_upgrade_is_contained_nonfollowing_and_atomic() {
@@ -5436,6 +5529,9 @@ fi
 
 if [ "${FM_TEST_FOCUSED:-}" = checkout-freshness-cleanup ]; then
   run_isolated_test test_failed_freshness_proof_rolls_back_unmanaged_resources
+  run_isolated_test test_local_only_spawn_uses_local_default_tip
+  run_isolated_test test_dirty_acquisition_is_retained_without_force_return
+  run_isolated_test test_unmanaged_postinstall_failure_restores_prior_state
   exit 0
 fi
 
@@ -5769,6 +5865,9 @@ fi
 run_isolated_test test_reserved_generation_is_durable_before_lease_mutation
 run_isolated_test test_off_is_byte_compatible_and_never_calls_agent_fleet
 run_isolated_test test_failed_freshness_proof_rolls_back_unmanaged_resources
+run_isolated_test test_local_only_spawn_uses_local_default_tip
+run_isolated_test test_dirty_acquisition_is_retained_without_force_return
+run_isolated_test test_unmanaged_postinstall_failure_restores_prior_state
 run_isolated_test test_completion_contract_upgrade_is_contained_nonfollowing_and_atomic
 run_isolated_test test_completion_contract_ignores_raw_html_headings
 run_isolated_test test_enforce_pool_wraps_backend_and_records_real_session

@@ -36,6 +36,8 @@
 # Every probe also inventories untracked files in both the covered seed
 # checkouts and the Treehouse pool worktrees under repository skill directories
 # (`.agents/skills`, `.claude/skills`, `.codex/skills`, and `skills`).
+# Unreadable or malformed Treehouse state invalidates discovery and suppresses
+# the healthy heartbeat until every pool state file can be inspected.
 # A new or changed inventory is surfaced immediately and persisted as a separate
 # hygiene alert, even when no upstream change or backstop refresh is due.
 # Forced/operator-visible runs repeat unresolved hygiene alerts.
@@ -54,7 +56,7 @@
 #   fm-checkout-refresh.sh discover
 #   fm-checkout-refresh.sh run-once [--force] [--verbose] [--session]
 #   fm-checkout-refresh.sh preflight <checkout>
-#   fm-checkout-refresh.sh verify-worktree <worktree>
+#   fm-checkout-refresh.sh verify-worktree <worktree> <expected-source>
 #   fm-checkout-refresh.sh ensure
 #   fm-checkout-refresh.sh install
 #
@@ -107,7 +109,7 @@ case "$PROBE_TIMEOUT" in ''|*[!0-9]*|0) echo "error: FM_CHECKOUT_REFRESH_PROBE_T
 case "$SYNC_TIMEOUT" in ''|*[!0-9]*|0) echo "error: FM_CHECKOUT_REFRESH_SYNC_TIMEOUT must be a positive integer" >&2; exit 2 ;; esac
 
 usage() {
-  echo "usage: fm-checkout-refresh.sh discover|run-once [--force] [--verbose] [--session]|preflight <checkout>|verify-worktree <worktree>|ensure|install" >&2
+  echo "usage: fm-checkout-refresh.sh discover|run-once [--force] [--verbose] [--session]|preflight <checkout>|verify-worktree <worktree> <expected-source>|ensure|install" >&2
 }
 
 first_line() {
@@ -126,7 +128,7 @@ expand_config_path() {
     "\$HOME") printf '%s\n' "$HOME" ;;
     "\$HOME/"*) printf '%s/%s\n' "$HOME" "${1#\$HOME/}" ;;
     /*) printf '%s\n' "$1" ;;
-    *) echo "checkout-refresh: skipped config path '$1': paths must be absolute, ~/..., or \$HOME/..." >&2; return 1 ;;
+    *) echo "checkout-refresh: skipped: config path '$1' must be absolute, ~/..., or \$HOME/..." >&2; return 1 ;;
   esac
 }
 
@@ -142,7 +144,7 @@ config_values() {
     case "$line" in ""|\#*) continue ;; esac
     directive=${line%%[[:space:]]*}
     if [ "$directive" = "$line" ]; then
-      echo "checkout-refresh: skipped malformed config directive '$line'" >&2
+      echo "checkout-refresh: skipped: malformed config directive '$line'" >&2
       continue
     fi
     value=${line#"$directive"}
@@ -152,7 +154,7 @@ config_values() {
         [ "$directive" = "$wanted" ] || continue
         expand_config_path "$value" || true
         ;;
-      *) echo "checkout-refresh: skipped unknown config directive '$directive'" >&2 ;;
+      *) echo "checkout-refresh: skipped: unknown config directive '$directive'" >&2 ;;
     esac
   done < "$CONFIG_FILE"
 }
@@ -160,8 +162,8 @@ config_values() {
 treehouse_worktree_paths() {
   [ -d "$TREEHOUSE_ROOT" ] || return 0
   command -v python3 >/dev/null 2>&1 || {
-    echo "checkout-refresh: cannot discover Treehouse pools because python3 is unavailable" >&2
-    return 0
+    echo "checkout-refresh: skipped: incomplete Treehouse coverage because python3 is unavailable" >&2
+    return 1
   }
   python3 - "$TREEHOUSE_ROOT" <<'PY'
 import glob
@@ -169,16 +171,31 @@ import json
 import os
 import sys
 
+failed = False
 for state_path in sorted(glob.glob(os.path.join(sys.argv[1], "*", "treehouse-state.json"))):
     try:
         with open(state_path, encoding="utf-8") as stream:
             state = json.load(stream)
-        for entry in state.get("worktrees", []):
+        if not isinstance(state, dict):
+            raise TypeError("root must be an object")
+        worktrees = state.get("worktrees", [])
+        if not isinstance(worktrees, list):
+            raise TypeError("worktrees must be an array")
+        for entry in worktrees:
+            if not isinstance(entry, dict):
+                raise TypeError("worktree entry must be an object")
             path = entry.get("path")
-            if isinstance(path, str) and path:
-                print(path)
-    except (OSError, ValueError, TypeError):
-        continue
+            if not isinstance(path, str) or not path:
+                raise TypeError("worktree path must be a non-empty string")
+            print(path)
+    except (OSError, ValueError, TypeError) as error:
+        failed = True
+        print(
+            f"checkout-refresh: skipped: incomplete Treehouse coverage at {state_path}: {error}",
+            file=sys.stderr,
+        )
+if failed:
+    raise SystemExit(1)
 PY
 }
 
@@ -196,14 +213,19 @@ origin_url() {
 }
 
 discover() {
-  local tmp seeds origins scans path project worktree main root candidate url
+  local tmp seeds origins scans treehouse_paths path project worktree main root candidate url
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-checkout-refresh-discover.XXXXXX") || return 1
   seeds="$tmp/seeds"
   origins="$tmp/origins"
   scans="$tmp/scans"
+  treehouse_paths="$tmp/treehouse-worktrees"
   : > "$seeds"
   : > "$origins"
   : > "$scans"
+  if ! treehouse_worktree_paths > "$treehouse_paths"; then
+    rm -rf "$tmp"
+    return 1
+  fi
 
   if [ -d "$PROJECTS" ]; then
     for project in "$PROJECTS"/*; do
@@ -217,7 +239,7 @@ discover() {
     if main=$(canonical_dir "$path" 2>/dev/null); then
       printf '%s\n' "$main" >> "$seeds"
     else
-      echo "checkout-refresh: skipped configured checkout that is not a directory: $path" >&2
+      echo "checkout-refresh: skipped: configured checkout is not a directory: $path" >&2
     fi
   done < <(config_values path)
 
@@ -226,7 +248,7 @@ discover() {
     if main=$(backing_checkout "$worktree" 2>/dev/null); then
       printf '%s\n' "$main" >> "$seeds"
     fi
-  done < <(treehouse_worktree_paths)
+  done < "$treehouse_paths"
 
   sort -u "$seeds" -o "$seeds"
   while IFS= read -r path; do
@@ -242,7 +264,7 @@ discover() {
     if main=$(canonical_dir "$root" 2>/dev/null); then
       printf '%s\n' "$main" >> "$scans"
     else
-      echo "checkout-refresh: skipped configured scan root that is not a directory: $root" >&2
+      echo "checkout-refresh: skipped: configured scan root is not a directory: $root" >&2
     fi
   done < <(config_values scan)
   sort -u "$scans" -o "$scans"
@@ -269,14 +291,8 @@ discover() {
 run_bounded() {
   local seconds=$1
   shift
-  if [ "$PLATFORM" != Darwin ] && command -v timeout >/dev/null 2>&1; then
-    timeout --foreground --kill-after=1 "$seconds" "$@"
-  elif [ "$PLATFORM" != Darwin ] && command -v gtimeout >/dev/null 2>&1; then
-    gtimeout --foreground --kill-after=1 "$seconds" "$@"
-  else
-    # shellcheck disable=SC2016
-    perl -e 'sub tree { my ($root) = @_; my %children; open my $ps, "-|", "ps", "-axo", "pid=,ppid=" or return ($root); while (<$ps>) { my ($pid, $ppid) = /(\d+)\s+(\d+)/; push @{$children{$ppid}}, $pid if defined $pid } close $ps; my @out = ($root); for (my $i = 0; $i < @out; $i++) { push @out, @{$children{$out[$i]} || []} } return @out } my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { exec @ARGV } local $SIG{ALRM} = sub { my @tree = tree($pid); kill "TERM", reverse @tree; select undef, undef, undef, 0.2; kill "KILL", reverse @tree; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' "$seconds" "$@"
-  fi
+  # shellcheck disable=SC2016
+  perl -e 'sub tree { my ($root) = @_; my %children; open my $ps, "-|", "ps", "-axo", "pid=,ppid=" or return ($root); while (<$ps>) { my ($pid, $ppid) = /(\d+)\s+(\d+)/; push @{$children{$ppid}}, $pid if defined $pid } close $ps; my @out = ($root); for (my $i = 0; $i < @out; $i++) { push @out, @{$children{$out[$i]} || []} } return @out } sub alive { grep { kill 0, $_ } @_ } sub stop_tree { my ($root) = @_; my @seen = tree($root); kill "TERM", reverse @seen; for (1 .. 20) { last unless alive(@seen); select undef, undef, undef, 0.05 } my %seen; @seen = grep { !$seen{$_}++ } (@seen, tree($root)); my @left = alive(@seen); kill "KILL", reverse @left if @left; waitpid $root, 0; for (1 .. 20) { last unless alive(@seen); select undef, undef, undef, 0.05 } } my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { exec @ARGV; exit 127 } local $SIG{ALRM} = sub { stop_tree($pid); exit 124 }; alarm $t; waitpid $pid, 0; alarm 0; my $status = $?; exit(($status & 127) ? 128 + ($status & 127) : $status >> 8)' "$seconds" "$@"
 }
 
 PROBE_BRANCH=
@@ -345,9 +361,12 @@ ensure_lock_roots() {
 
 skill_draft_inventory() {
   local checkout=$1
-  git -C "$checkout" ls-files --others --exclude-standard -- \
-    .agents/skills .claude/skills .codex/skills skills 2>/dev/null \
-    | LC_ALL=C sort
+  (
+    set -o pipefail
+    git -C "$checkout" ls-files --others --exclude-standard -- \
+      .agents/skills .claude/skills .codex/skills skills 2>/dev/null \
+      | LC_ALL=C sort
+  )
 }
 
 # Surface a changed untracked-skill inventory on the ordinary 60-second probe,
@@ -360,7 +379,11 @@ surface_skill_drafts() {
   HYGIENE_FOUND=0
   inventory=$(mktemp "$STATE_ROOT/.hygiene-inventory.XXXXXX") || return 1
   alert="$STATE_ROOT/$key.hygiene-alert"
-  skill_draft_inventory "$checkout" > "$inventory"
+  if ! skill_draft_inventory "$checkout" > "$inventory"; then
+    rm -f "$inventory"
+    echo "$checkout: HYGIENE: inventory failed - preserving the prior alert" >&2
+    return 1
+  fi
   if [ ! -s "$inventory" ]; then
     rm -f "$inventory" "$alert"
     return 0
@@ -380,14 +403,20 @@ surface_skill_drafts() {
 }
 
 prepare_hygiene_discovery() {
-  local seed_file=$1 hygiene_file=$2 worktree canonical
+  local seed_file=$1 hygiene_file=$2 treehouse_paths worktree canonical
   cp "$seed_file" "$hygiene_file" || return 1
+  treehouse_paths=$(mktemp "$STATE_ROOT/.treehouse-worktrees.XXXXXX") || return 1
+  if ! treehouse_worktree_paths > "$treehouse_paths"; then
+    rm -f "$treehouse_paths"
+    return 1
+  fi
   while IFS= read -r worktree; do
     [ -n "$worktree" ] || continue
     if canonical=$(canonical_dir "$worktree" 2>/dev/null); then
       printf '%s\n' "$canonical" >> "$hygiene_file"
     fi
-  done < <(treehouse_worktree_paths)
+  done < "$treehouse_paths"
+  rm -f "$treehouse_paths"
   sort -u "$hygiene_file" -o "$hygiene_file"
 }
 
@@ -443,7 +472,7 @@ record_alert() {
 
 run_once() {
   local force=0 verbose=0 session=0 prune=0 arg lock discovery hygiene checkout key tip_file last_file alert_file
-  local prior_tip now last due probe_ok output_file output line
+  local prior_tip now last due probe_ok output_file output line hygiene_failed=0 status=0
   for arg in "$@"; do
     case "$arg" in
       --force) force=1 ;;
@@ -463,7 +492,10 @@ run_once() {
   trap 'fm_lock_release "$STATE_ROOT/.run-lock"' EXIT
   discovery=$(mktemp "$STATE_ROOT/.discover.XXXXXX") || return 1
   hygiene=$(mktemp "$STATE_ROOT/.hygiene-discover.XXXXXX") || { rm -f "$discovery"; return 1; }
-  discover > "$discovery"
+  if ! discover > "$discovery"; then
+    rm -f "$discovery" "$hygiene"
+    return 1
+  fi
   prepare_hygiene_discovery "$discovery" "$hygiene" || {
     rm -f "$discovery" "$hygiene"
     return 1
@@ -475,9 +507,9 @@ run_once() {
     git -C "$checkout" rev-parse --is-inside-work-tree >/dev/null 2>&1 || continue
     key=$(checkout_key "$checkout")
     if [ "$force" -eq 1 ] || [ "$verbose" -eq 1 ]; then
-      surface_skill_drafts "$checkout" "$key" 1
+      surface_skill_drafts "$checkout" "$key" 1 || hygiene_failed=1
     else
-      surface_skill_drafts "$checkout" "$key" 0
+      surface_skill_drafts "$checkout" "$key" 0 || hygiene_failed=1
     fi
   done < "$hygiene"
   clear_stale_hygiene_alerts "$hygiene"
@@ -536,9 +568,14 @@ EOF
   done < "$discovery"
 
   rm -f "$discovery" "$hygiene"
-  atomic_write "$STATE_ROOT/heartbeat" "$now" "$SCRIPT_DIR/fm-checkout-refresh.sh"
+  if [ "$hygiene_failed" -eq 0 ]; then
+    atomic_write "$STATE_ROOT/heartbeat" "$now" "$SCRIPT_DIR/fm-checkout-refresh.sh" || status=1
+  else
+    status=1
+  fi
   trap - EXIT
   fm_lock_release "$lock"
+  return "$status"
 }
 
 preflight() {
@@ -546,7 +583,7 @@ preflight() {
   [ -d "$checkout" ] || { echo "error: checkout-refresh preflight target is not a directory: $checkout" >&2; return 1; }
   ensure_lock_roots || return 1
   key=$(checkout_key "$checkout")
-  surface_skill_drafts "$checkout" "$key" 1
+  surface_skill_drafts "$checkout" "$key" 1 || return 1
   hygiene_found=$HYGIENE_FOUND
   output_file=$(mktemp "$STATE_ROOT/.preflight.XXXXXX") || return 1
   if git -C "$checkout" remote get-url origin >/dev/null 2>&1; then
@@ -568,20 +605,76 @@ preflight() {
   return 0
 }
 
+git_common_dir() {
+  local checkout=$1 common
+  common=$(git -C "$checkout" rev-parse --git-common-dir 2>/dev/null) || return 1
+  case "$common" in
+    /*) canonical_dir "$common" ;;
+    *) canonical_dir "$checkout/$common" ;;
+  esac
+}
+
+local_default_branch() {
+  local checkout=$1 branch
+  for branch in main master; do
+    if git -C "$checkout" show-ref --verify --quiet "refs/heads/$branch"; then
+      printf '%s\n' "$branch"
+      return 0
+    fi
+  done
+  return 1
+}
+
 verify_worktree() {
-  local worktree=$1 head
+  local worktree=$1 expected_source=$2 dirty dirty_example worktree_common source_common
+  local worktree_origin source_origin default tip head expected
   [ -d "$worktree" ] || { echo "error: worktree freshness target is not a directory: $worktree" >&2; return 1; }
-  git -C "$worktree" remote get-url origin >/dev/null 2>&1 || {
-    echo "error: cannot verify the upstream default-branch tip for $worktree: origin remote is missing" >&2
+  [ -d "$expected_source" ] || { echo "error: expected worktree source is not a directory: $expected_source" >&2; return 1; }
+  if ! dirty=$(GIT_OPTIONAL_LOCKS=0 git -C "$worktree" status --porcelain=v1 --untracked-files=all 2>/dev/null); then
+    echo "error: acquired worktree safety cannot be inspected at $worktree; retain it for manual recovery" >&2
+    return 3
+  fi
+  if [ -n "$dirty" ]; then
+    dirty_example=$(first_line "$dirty")
+    echo "error: acquired worktree is dirty at $worktree; retain it for manual recovery without reset, clean, stash, or forced return ($dirty_example)" >&2
+    return 3
+  fi
+  worktree_common=$(git_common_dir "$worktree") || {
+    echo "error: cannot resolve acquired worktree repository identity for $worktree" >&2
     return 1
   }
-  probe_upstream "$worktree" || {
-    echo "error: cannot verify the upstream default-branch tip for $worktree" >&2
+  source_common=$(git_common_dir "$expected_source") || {
+    echo "error: cannot resolve expected repository identity for $expected_source" >&2
     return 1
   }
+  if [ "$worktree_common" != "$source_common" ]; then
+    echo "error: acquired worktree repository mismatch: $worktree does not belong to $expected_source" >&2
+    return 1
+  fi
+  worktree_origin=$(git -C "$worktree" remote get-url origin 2>/dev/null || true)
+  source_origin=$(git -C "$expected_source" remote get-url origin 2>/dev/null || true)
+  if [ "$worktree_origin" != "$source_origin" ]; then
+    echo "error: acquired worktree origin mismatch: $worktree does not match $expected_source" >&2
+    return 1
+  fi
+  if [ -n "$source_origin" ]; then
+    probe_upstream "$expected_source" || {
+      echo "error: cannot verify the upstream default-branch tip for $expected_source" >&2
+      return 1
+    }
+    tip=$PROBE_TIP
+    expected="origin/$PROBE_BRANCH"
+  else
+    default=$(local_default_branch "$expected_source") || {
+      echo "error: cannot determine the local default branch for $expected_source" >&2
+      return 1
+    }
+    tip=$(git -C "$expected_source" rev-parse "refs/heads/$default^{commit}" 2>/dev/null) || return 1
+    expected="local $default"
+  fi
   head=$(git -C "$worktree" rev-parse HEAD 2>/dev/null) || return 1
-  if [ "$head" != "$PROBE_TIP" ]; then
-    echo "error: acquired worktree is stale: HEAD $head does not match origin/$PROBE_BRANCH $PROBE_TIP" >&2
+  if [ "$head" != "$tip" ]; then
+    echo "error: acquired worktree is stale: HEAD $head does not match $expected $tip" >&2
     return 1
   fi
   return 0
@@ -738,8 +831,8 @@ case "${1:-}" in
     preflight "$2"
     ;;
   verify-worktree)
-    [ $# -eq 2 ] || { usage; exit 2; }
-    verify_worktree "$2"
+    [ $# -eq 3 ] || { usage; exit 2; }
+    verify_worktree "$2" "$3"
     ;;
   ensure)
     [ $# -eq 1 ] || { usage; exit 2; }

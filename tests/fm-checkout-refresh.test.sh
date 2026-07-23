@@ -250,23 +250,89 @@ test_treehouse_pool_skill_drafts_are_inventoried() {
 }
 
 test_bootstrap_relays_hygiene_alerts() {
-  local project draft out
+  local project draft out config_backup
   project=$(cd "$FM_TEST_HOME/projects/relvino" && pwd -P)
   draft="$project/.agents/skills/bootstrap-draft/SKILL.md"
   mkdir -p "$(dirname "$draft")"
   printf '%s\n' '# bootstrap draft' > "$draft"
+  config_backup=$(mktemp "$TMP_ROOT/checkout-refresh-config.XXXXXX")
+  cp "$FM_TEST_HOME/config/checkout-refresh" "$config_backup"
+  printf '%s\n' 'unexpected directive' >> "$FM_TEST_HOME/config/checkout-refresh"
 
   out=$(HOME="$TEST_HOME" FM_HOME="$FM_TEST_HOME" FM_ROOT_OVERRIDE="$ROOT" \
     FM_CHECKOUT_REFRESH_STATE_ROOT="$STATE_ROOT" FM_TREEHOUSE_ROOT="$TEST_HOME/.treehouse" \
     FM_CHECKOUT_REFRESH_BOOTSTRAP_TEST=1 \
     "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
+  mv "$config_backup" "$FM_TEST_HOME/config/checkout-refresh"
 
   assert_contains "$out" "FLEET_SYNC: $project: HYGIENE: 1 untracked skill-draft files" \
     "session-start bootstrap did not relay the unresolved hygiene alert"
+  assert_contains "$out" "FLEET_SYNC: checkout-refresh: skipped: unknown config directive 'unexpected'" \
+    "session-start bootstrap swallowed checkout discovery diagnostics"
   grep -Fq '# bootstrap draft' "$draft" || fail "bootstrap refresh changed the draft"
   rm -rf "$project/.agents"
   run_refresh run-once >/dev/null
-  pass "session-start bootstrap relays unresolved skill-draft hygiene"
+  pass "session-start bootstrap relays hygiene and discovery diagnostics"
+}
+
+test_treehouse_discovery_failure_invalidates_heartbeat() {
+  local bad_state="$TEST_HOME/.treehouse/broken/treehouse-state.json" out status
+  mkdir -p "$(dirname "$bad_state")"
+  printf '%s\n' '{"worktrees":[' > "$bad_state"
+  printf '%s\n' preserved-heartbeat > "$STATE_ROOT/heartbeat"
+
+  set +e
+  out=$(run_refresh run-once --force 2>&1)
+  status=$?
+  set -e
+
+  [ "$status" -ne 0 ] || fail "malformed Treehouse state reported healthy checkout coverage"
+  assert_contains "$out" "incomplete Treehouse coverage at $bad_state" \
+    "malformed Treehouse state was not surfaced"
+  [ "$(cat "$STATE_ROOT/heartbeat")" = preserved-heartbeat ] \
+    || fail "malformed Treehouse state advanced the healthy heartbeat"
+  rm -rf "$(dirname "$bad_state")"
+  pass "incomplete Treehouse discovery invalidates the healthy heartbeat"
+}
+
+test_skill_inventory_failure_preserves_alert_and_heartbeat() {
+  local project draft key alert prior fakebin real_git out status
+  project=$(cd "$FM_TEST_HOME/projects/relvino" && pwd -P)
+  draft="$project/.agents/skills/inventory-failure/SKILL.md"
+  mkdir -p "$(dirname "$draft")"
+  printf '%s\n' '# retained draft' > "$draft"
+  run_refresh run-once >/dev/null
+  key=$(printf '%s' "$project" | shasum -a 256 | awk '{print substr($1,1,24)}')
+  alert="$STATE_ROOT/$key.hygiene-alert"
+  [ -f "$alert" ] || fail "inventory-failure setup did not persist a hygiene alert"
+  prior=$(cat "$alert")
+  printf '%s\n' preserved-inventory-heartbeat > "$STATE_ROOT/heartbeat"
+  fakebin="$TMP_ROOT/inventory-fakebin"
+  real_git=$(command -v git)
+  mkdir -p "$fakebin"
+  cat > "$fakebin/git" <<'SH'
+#!/usr/bin/env bash
+if [ "${3:-}" = ls-files ]; then
+  exit 74
+fi
+exec "${FM_TEST_REAL_GIT:?}" "$@"
+SH
+  chmod +x "$fakebin/git"
+
+  set +e
+  out=$(FM_TEST_REAL_GIT="$real_git" PATH="$fakebin:$PATH" run_refresh run-once --force 2>&1)
+  status=$?
+  set -e
+
+  [ "$status" -ne 0 ] || fail "skill inventory failure reported healthy coverage"
+  assert_contains "$out" "HYGIENE: inventory failed - preserving the prior alert" \
+    "skill inventory failure was not surfaced"
+  [ "$(cat "$alert")" = "$prior" ] || fail "skill inventory failure changed the prior alert"
+  [ "$(cat "$STATE_ROOT/heartbeat")" = preserved-inventory-heartbeat ] \
+    || fail "skill inventory failure advanced the healthy heartbeat"
+  rm -rf "$fakebin" "$project/.agents"
+  run_refresh run-once >/dev/null
+  pass "skill inventory failures preserve alerts and invalidate heartbeat health"
 }
 
 test_dirty_nondefault_and_diverged_checkouts_are_untouched() {
@@ -354,7 +420,7 @@ test_session_mode_preserves_gone_branch_pruning() {
 }
 
 test_worktree_freshness_verification_fails_closed() {
-  local remote primary worktree no_origin before status
+  local remote primary worktree unrelated local_source local_worktree before status dirty
   remote=$(build_origin verify)
   primary="$TMP_ROOT/verify-primary"
   worktree="$TMP_ROOT/verify-worktree"
@@ -366,7 +432,7 @@ test_worktree_freshness_verification_fails_closed() {
   set +e
   HOME="$TEST_HOME" FM_HOME="$FM_TEST_HOME" FM_ROOT_OVERRIDE="$ROOT" \
     FM_CHECKOUT_REFRESH_STATE_ROOT="$STATE_ROOT" \
-    "$ROOT/bin/fm-checkout-refresh.sh" verify-worktree "$worktree" >/dev/null 2>&1
+    "$ROOT/bin/fm-checkout-refresh.sh" verify-worktree "$worktree" "$primary" >/dev/null 2>&1
   status=$?
   set -e
   [ "$status" -ne 0 ] || fail "stale acquired worktree passed freshness verification"
@@ -375,17 +441,82 @@ test_worktree_freshness_verification_fails_closed() {
   git -C "$worktree" checkout --quiet --detach origin/main
   HOME="$TEST_HOME" FM_HOME="$FM_TEST_HOME" FM_ROOT_OVERRIDE="$ROOT" \
     FM_CHECKOUT_REFRESH_STATE_ROOT="$STATE_ROOT" \
-    "$ROOT/bin/fm-checkout-refresh.sh" verify-worktree "$worktree" \
+    "$ROOT/bin/fm-checkout-refresh.sh" verify-worktree "$worktree" "$primary" \
     || fail "fresh acquired worktree failed verification"
 
-  no_origin="$TMP_ROOT/verify-no-origin"
-  fm_git_init_commit "$no_origin"
+  unrelated="$TMP_ROOT/verify-unrelated"
+  fm_git_init_commit "$unrelated"
   set +e
-  run_refresh verify-worktree "$no_origin" >/dev/null 2>&1
+  run_refresh verify-worktree "$unrelated" "$primary" >/dev/null 2>&1
   status=$?
   set -e
-  [ "$status" -ne 0 ] || fail "originless acquired worktree passed freshness verification"
-  pass "post-acquisition proof refuses a worktree whose HEAD is not the upstream default tip"
+  [ "$status" -ne 0 ] || fail "an unrelated repository passed worktree identity verification"
+
+  local_source="$TMP_ROOT/verify-local-source"
+  local_worktree="$TMP_ROOT/verify-local-worktree"
+  fm_git_worktree "$local_source" "$local_worktree" local-acquisition
+  run_refresh verify-worktree "$local_worktree" "$local_source" \
+    || fail "clean remote-free worktree failed its local default-tip proof"
+  commit_file "$local_source" local.txt advanced advance-local-default
+  set +e
+  run_refresh verify-worktree "$local_worktree" "$local_source" >/dev/null 2>&1
+  status=$?
+  set -e
+  [ "$status" -ne 0 ] || fail "stale remote-free worktree passed its local default-tip proof"
+
+  git -C "$local_worktree" reset --hard -q "$(git -C "$local_source" rev-parse HEAD)"
+  dirty="$local_worktree/.agents/skills/retained/SKILL.md"
+  mkdir -p "$(dirname "$dirty")"
+  printf '%s\n' '# retain me' > "$dirty"
+  set +e
+  run_refresh verify-worktree "$local_worktree" "$local_source" >/dev/null 2>&1
+  status=$?
+  set -e
+  [ "$status" -eq 3 ] || fail "dirty acquired worktree did not return the retain-only status"
+  grep -Fq '# retain me' "$dirty" || fail "dirty worktree verification changed its draft"
+  pass "acquisition proof validates repository identity, local freshness, and cleanliness"
+}
+
+test_bounded_refresh_terminates_descendants() {
+  local remote checkout fakebin real_git out status parent_pid child_pid
+  remote=$(build_origin bounded)
+  checkout="$FM_TEST_HOME/projects/bounded"
+  clone_from "$remote" "$checkout"
+  fakebin="$TMP_ROOT/bounded-fakebin"
+  real_git=$(command -v git)
+  mkdir -p "$fakebin"
+  cat > "$fakebin/git" <<'SH'
+#!/usr/bin/env bash
+if [ "${3:-}" = fetch ]; then
+  trap '' TERM
+  printf '%s\n' "$BASHPID" > "${FM_TEST_FETCH_PARENT:?}"
+  (
+    trap '' TERM
+    printf '%s\n' "$BASHPID" > "${FM_TEST_FETCH_CHILD:?}"
+    while :; do sleep 1; done
+  ) &
+  wait
+fi
+exec "${FM_TEST_REAL_GIT:?}" "$@"
+SH
+  chmod +x "$fakebin/git"
+
+  set +e
+  out=$(FM_TEST_REAL_GIT="$real_git" FM_TEST_FETCH_PARENT="$TMP_ROOT/fetch-parent.pid" \
+    FM_TEST_FETCH_CHILD="$TMP_ROOT/fetch-child.pid" FM_CHECKOUT_REFRESH_SYNC_TIMEOUT=1 \
+    PATH="$fakebin:$PATH" run_refresh run-once --force 2>&1)
+  status=$?
+  set -e
+  [ "$status" -eq 0 ] || fail "bounded refresh command failed unexpectedly: $out"
+  assert_contains "$out" "refresh timed out after 1s" \
+    "bounded refresh did not report its timeout"
+  parent_pid=$(cat "$TMP_ROOT/fetch-parent.pid")
+  child_pid=$(cat "$TMP_ROOT/fetch-child.pid")
+  if kill -0 "$parent_pid" 2>/dev/null || kill -0 "$child_pid" 2>/dev/null; then
+    fail "bounded refresh returned while a fetch descendant was still alive"
+  fi
+  rm -rf "$fakebin" "$checkout"
+  pass "bounded refresh terminates and reaps its complete descendant tree"
 }
 
 test_launch_agent_definition_is_home_scoped_with_scheduler_seam() {
@@ -465,8 +596,11 @@ test_skill_drafts_surface_on_every_probe_without_log_spam
 test_preflight_rejects_hygiene_without_an_origin
 test_treehouse_pool_skill_drafts_are_inventoried
 test_bootstrap_relays_hygiene_alerts
+test_treehouse_discovery_failure_invalidates_heartbeat
+test_skill_inventory_failure_preserves_alert_and_heartbeat
 test_dirty_nondefault_and_diverged_checkouts_are_untouched
 test_refresh_locks_recover_stale_owners_and_surface_contention
 test_session_mode_preserves_gone_branch_pruning
 test_worktree_freshness_verification_fails_closed
+test_bounded_refresh_terminates_descendants
 test_launch_agent_definition_is_home_scoped_with_scheduler_seam

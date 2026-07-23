@@ -61,7 +61,8 @@
 #          Fleet sync discovers projects/, Treehouse backing checkouts,
 #          configured checkouts, and matching-origin top-level clones, then
 #          fetches and fast-forwards safe default-branch states and reports
-#          recovered and STUCK clone drift plus untracked skill-draft hygiene.
+#          recovered and STUCK clone drift, incomplete discovery, invalid
+#          coverage configuration, and untracked skill-draft hygiene.
 #          Session-start refresh keeps the existing gone-branch prune behavior;
 #          the independent checkout-refresh cadence disables pruning, while
 #          this session-start invocation passes --session to preserve it.
@@ -207,7 +208,7 @@ fleet_sync() {
   set -m 2>/dev/null || true
   if [ -x "$FM_ROOT/bin/fm-checkout-refresh.sh" ] \
     && { [ "${FM_GATE_REFUSE_BYPASS:-0}" != 1 ] || [ "${FM_CHECKOUT_REFRESH_BOOTSTRAP_TEST:-0}" = 1 ]; }; then
-    "$FM_ROOT/bin/fm-checkout-refresh.sh" run-once --force --verbose --session >"$tmp" 2>/dev/null &
+    "$FM_ROOT/bin/fm-checkout-refresh.sh" run-once --force --verbose --session >"$tmp" 2>&1 &
   else
     [ -d "$PROJECTS" ] || { rm -f "$tmp"; return 0; }
     "$FM_ROOT/bin/fm-fleet-sync.sh" >"$tmp" 2>/dev/null &
