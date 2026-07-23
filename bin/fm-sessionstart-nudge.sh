@@ -35,5 +35,5 @@ lock_is_in_ancestry() {
 }
 
 lock_is_in_ancestry && exit 0
-printf '%s\n' "Run \`bin/fm-session-start.sh\` now, exactly once, before executing any other instructions."
+printf '\342\201\243FIRSTMATE_OP: %s\n' "Run \`bin/fm-session-start.sh\` now, exactly once, before executing any other instructions."
 exit 0

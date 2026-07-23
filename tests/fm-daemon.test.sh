@@ -526,6 +526,7 @@ test_escalate_batches_into_one_digest() {
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_SENT="$sent" \
     FM_FAKE_TMUX_CAPTURE="$capture" FM_ESCALATE_BATCH_SECS=0 escalate_flush "$state" \
     || fail "escalate_flush failed"
+  grep -F 'FIRSTMATE_OP: ' "$sent" >/dev/null || fail "batch digest lacks the shared operational label"
   grep -F "event A" "$sent" >/dev/null || fail "batch digest missing event A"
   grep -F "event B" "$sent" >/dev/null || fail "batch digest missing event B"
   grep -F 'event A: done: PR 1 | event B: done: PR 2' "$sent" >/dev/null \
@@ -697,9 +698,13 @@ test_marker_detection() {
   marker_hex=$(printf '%s' "$FM_INJECT_MARK" | od -An -tx1 | tr -d ' \n')
   [ "$marker_hex" = e281a3 ] \
     || fail "FM_INJECT_MARK must use terminal-safe U+2063 bytes, got $marker_hex"
+  [ "$FM_OPERATIONAL_PREFIX" = "${FM_INJECT_MARK}FIRSTMATE_OP: " ] \
+    || fail "away-mode operational prefix drifted from the shared captain-boundary marker"
   # message_is_injection: marker present -> injection; absent -> real message
+  message_is_injection "${FM_OPERATIONAL_PREFIX}Supervisor escalate: done" \
+    || fail "operationally-prefixed message not detected as injection"
   message_is_injection "${FM_INJECT_MARK}Supervisor escalate: done" \
-    || fail "marker-prefixed message not detected as injection"
+    || fail "legacy marker-prefixed message not detected as injection"
   message_is_injection "how's it going?" \
     && fail "plain message misdetected as injection"
   message_is_injection "" && fail "empty message misdetected as injection"
@@ -745,9 +750,12 @@ test_should_exit_afk_when_afk_inactive() {
 
 test_strip_injection_marker() {
   local stripped
+  stripped=$(strip_injection_marker "${FM_OPERATIONAL_PREFIX}Supervisor escalate: done")
+  [ "$stripped" = "Supervisor escalate: done" ] \
+    || fail "operational prefix not stripped: '$stripped'"
   stripped=$(strip_injection_marker "${FM_INJECT_MARK}Supervisor escalate: done")
   [ "$stripped" = "Supervisor escalate: done" ] \
-    || fail "marker not stripped: '$stripped'"
+    || fail "legacy marker not stripped: '$stripped'"
   # No marker → unchanged.
   stripped=$(strip_injection_marker "no marker here")
   [ "$stripped" = "no marker here" ] \

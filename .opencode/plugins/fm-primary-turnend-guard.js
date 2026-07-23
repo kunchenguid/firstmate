@@ -3,6 +3,7 @@ import { realpathSync } from "node:fs";
 import { resolve } from "node:path";
 
 const COORDINATOR_KEY = "__firstmateOpenCodeWatchArm";
+const OPERATIONAL_PREFIX = "\u2063FIRSTMATE_OP: ";
 
 let skipNextIdle = false;
 
@@ -81,6 +82,7 @@ export const FmPrimaryTurnendGuard = async ({ client, directory, worktree }) => 
               {
                 type: "text",
                 text:
+                  OPERATIONAL_PREFIX +
                   "TURN WOULD END BLIND - supervision is off. " +
                   "The watcher cycle is missing, failed, or unhealthy. Follow the harness recovery instruction below before ending the turn.\n\n" +
                   result.stderr,

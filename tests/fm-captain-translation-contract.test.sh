@@ -162,6 +162,8 @@ test_ahoy_owns_only_the_visible_session_recap() {
     "first-message fallback does not delegate to Bearings by relative pointer"
   assert_grep 'If no prior real captain message exists' "$AHOY" \
     "ahoy does not limit Bearings fallback to the first real captain message"
+  assert_grep 'A captain boundary is only an ordinary user-role message that does not begin with the U+2063 `FIRSTMATE_OP:` injection prefix.' "$AHOY" \
+    "ahoy lacks an explicit captain-authored boundary rule"
   assert_grep 'System, developer, tool, watcher, guard, away-mode, and other injected operational messages are not captain messages.' "$AHOY" \
     "ahoy incorrectly treats synthetic operational messages as captain messages"
   assert_grep 'The normal recap branch is session-history-only.' "$AHOY" \
@@ -181,6 +183,24 @@ test_ahoy_owns_only_the_visible_session_recap() {
   pass "ahoy delegates first-message fallback and keeps later recaps visible-session-only"
 }
 
+test_ahoy_user_role_injections_share_one_marker() {
+  local daemon grok_guard opencode_guard opencode_watch pi_guard pi_watch
+  daemon=$(cat "$ROOT/bin/fm-supervise-daemon.sh")
+  grok_guard=$(cat "$ROOT/bin/fm-turnend-guard-grok.sh")
+  opencode_guard=$(cat "$ROOT/.opencode/plugins/fm-primary-turnend-guard.js")
+  opencode_watch=$(cat "$ROOT/.opencode/plugins/fm-primary-watch-arm.js")
+  pi_guard=$(cat "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts")
+  pi_watch=$(cat "$ROOT/.pi/extensions/fm-primary-pi-watch.ts")
+
+  assert_contains "$daemon" 'FIRSTMATE_OP: ' "away-mode injection lacks the shared operational label"
+  assert_contains "$grok_guard" 'FIRSTMATE_OP: ' "Grok guard injection lacks the shared operational label"
+  assert_contains "$opencode_guard" '\u2063FIRSTMATE_OP: ' "OpenCode guard injection lacks the shared operational prefix"
+  assert_contains "$opencode_watch" '\u2063FIRSTMATE_OP: ' "OpenCode watcher injection lacks the shared operational prefix"
+  assert_contains "$pi_guard" '\u2063FIRSTMATE_OP: ' "Pi guard injection lacks the shared operational prefix"
+  assert_contains "$pi_watch" '\u2063FIRSTMATE_OP: ' "Pi watcher injection lacks the shared operational prefix"
+  pass "ahoy: supported user-role operational injections share the explicit boundary marker"
+}
+
 test_section_9_owns_positive_translation_contract
 test_scout_remains_allowed_house_vocabulary
 test_compressed_safety_labels_have_plain_renderings
@@ -191,3 +211,4 @@ test_section_9_owner_is_not_duplicated_into_skills
 test_ahoy_is_an_internal_user_invocable_skill
 test_ahoy_readme_uses_cross_harness_convention
 test_ahoy_owns_only_the_visible_session_recap
+test_ahoy_user_role_injections_share_one_marker

@@ -12,8 +12,10 @@ Give the captain a concise session-only recap without gathering fresh state.
 
 1. Inspect only conversation or session history already visible to the current first mate.
 2. Find the most recent real captain-authored message before the current `/ahoy` invocation.
-   Use Firstmate's existing distinction between captain input and internal or synthetic notifications.
+   A captain boundary is only an ordinary user-role message that does not begin with the U+2063 `FIRSTMATE_OP:` injection prefix.
+   Custom-role messages such as Pi's `firstmate-sessionstart-nudge` are not captain messages.
    System, developer, tool, watcher, guard, away-mode, and other injected operational messages are not captain messages.
+   Never infer captain authorship merely because a synthetic message appears in the user-role transcript; Firstmate user-role injections carry the prefix.
 3. If no prior real captain message exists, load [`../bearings/SKILL.md`](../bearings/SKILL.md) and follow it exactly.
    Bearings alone owns its gathering, artifact, and response contract.
    Do not restate that contract or combine a session recap with Bearings output.
