@@ -1,15 +1,9 @@
 #!/usr/bin/env bash
 # Deterministic delegated-Pi profile support for fm-spawn.sh.
 #
-# A home opts in with config/pi-delegated-profile using exactly these keys:
-#   pi_command=/absolute/path/to/pi
-#   pi_version=0.81.1
-#   agent_dir=/absolute/path/to/a/dedicated/pi/agent/directory
-#   model=<provider>/<model-id>
-#   context_window=<positive integer>
-#   effort=medium
-#   boundary_percent=60
-#   keep_recent_tokens=<positive integer below the boundary>
+# A home opts in with config/pi-delegated-profile.
+# docs/configuration.md "Delegated Pi profile" owns the file schema and
+# operator-facing compatibility contract.
 #
 # The configured agent directory remains operator-owned and may contain auth,
 # skills, prompts, and themes. Its settings.json must already contain the exact

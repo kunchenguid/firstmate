@@ -196,14 +196,30 @@ It does not change the primary Pi path or its xhigh thinking level.
 The file is in the primary-authoritative secondmate inheritance allowlist, whose safety guard copies it only when the destination checkout gitignores `config/pi-delegated-profile`; a launch or recovery stops before creating an endpoint unless that item reports verified convergence.
 When absent, Pi launch behavior remains backward-compatible.
 When present, `bin/fm-pi-profile.sh` validates every field and Pi 0.81.1's effective model metadata before any endpoint is created.
-The file uses one `key=value` per line and requires `pi_command`, `pi_version`, `agent_dir`, `model`, `context_window`, `effort`, `boundary_percent`, and `keep_recent_tokens` exactly as documented in that script's header.
+The file uses one `key=value` per line, allows blank lines and comments beginning with `#`, and requires exactly the following keys:
+
+```text
+pi_command=/absolute/path/to/pi
+pi_version=0.81.1
+agent_dir=/absolute/path/to/a/dedicated/pi/agent/directory
+model=<provider>/<model-id>
+context_window=<positive integer>
+effort=medium
+boundary_percent=60
+keep_recent_tokens=<positive integer below the boundary>
+```
+
+Unknown, duplicate, missing, empty, or malformed fields fail closed.
+`pi_command` must be executable and resolve directly to Pi 0.81.1's `dist/cli.js`; launch wrappers are rejected without execution.
+The configured model must resolve provider-free from that Pi installation and agent directory to the exact provider, model id, context window, and effective medium-thinking support declared by the profile.
 The configured `agent_dir` is operator-owned and may retain authentication, skills, prompts, and themes, but its `settings.json` must already contain enabled compaction with `reserveTokens = context_window - floor(0.60 * context_window)` and the configured keep-recent value.
 FirstMate validates that directory without editing it, clears `NODE_OPTIONS`, `NODE_PATH`, and `PI_PACKAGE_DIR` during validation and launch, and passes the absolute directory through the real `PI_CODING_AGENT_DIR` variable, so ambient Node preload/search injection, package metadata, `HOME`, `PI_CODING_AGENT_DIR`, and the ineffective `PI_CONFIG_DIR` cannot redirect the worker.
 The policy covers Pi ships, scouts, batches, and recovery launches on tmux, Herdr, Zellij, Orca, and cmux, plus secondmates on their supported routes; the existing Orca and cmux secondmate refusals remain unchanged.
 While the profile exists, every raw launch command is refused before endpoint creation because FirstMate cannot prove its runtime, even when the selected raw command is not Pi; a concrete verified non-Pi harness remains selectable.
 For a Pi launch, omitted model and effort axes resolve to the pinned values, matching explicit values are accepted, and conflicting explicit values are refused before endpoint creation.
 Delegated launches pass `--no-approve` and `--no-extensions`, which deliberately disables project-local Pi settings/resources and all discovered extensions so neither can alter compaction.
-FirstMate then explicitly loads its required task or secondmate hooks and the tracked profile guard, so turn-end supervision remains available while model cycling, model substitution, and thinking-level changes stop the delegated session.
+FirstMate then explicitly loads its required task or secondmate hooks and the tracked profile guard, so turn-end supervision remains available while model cycling, model substitution, thinking-level changes, and compaction changes are rejected without persistent mutation.
+If an unexpected event-level model, thinking, or compaction change still reaches the guard, it shuts down the delegated session.
 This compatibility choice means project-local Pi extensions, skills, prompts, themes, packages, and `.pi/settings.json` are ignored for delegated workers, so operators must not depend on those capabilities until they are deliberately reviewed and added to FirstMate's explicit launch surface.
 
 ## Crew dispatch profiles (config/crew-dispatch.json)
