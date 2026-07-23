@@ -36,3 +36,13 @@ The isolated live test copied no credential material and created no account.
 The model called `fm_watch_arm_pi` exactly once, an actionable status closed that cycle, the extension ledger-linked a verified successor before the handling turn ended, the turn-end guard never fired, and `/quit` cleaned up both child processes.
 Command: `FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh`.
 Observed output: `ok - Pi 0.80.10 live E2E used shared Codex auth, auto-started one successor before turn end, and cleaned up`.
+
+Continuity and Calm verification on 2026-07-23 used Pi 0.81.1 with the existing shared Pi credential store and the explicit `openai-codex/gpt-5.6-sol` provider/model pin.
+The isolated live test activated Calm, proved Pi's native `Working...` row remained visible during a credentialed provider request, proved no `calm transcript` status appeared, restored Calm off, and then completed the unchanged watcher successor and clean-exit lifecycle.
+Command: `FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh`.
+Observed output: `ok - Pi 0.81.1 live E2E covered native Calm Working visibility, Ahoy first/later messages, legacy transcripts, near misses, and watcher continuity`.
+
+Operational follow-up verification on 2026-07-23 used Pi 0.81.1's native TUI and a deterministic in-process provider without credential material.
+It proved one captain answer, exact user-role monitoring envelopes, one intended processing result, Calm loaded on, Calm loaded off, Calm absent, adjacent coalesced notifications, and restart with persisted Calm state.
+Command: `tests/fm-calm-pi-extension.test.sh`.
+Observed output: `ok - Pi operational follow-up E2E preserves one captain answer, exact user-role monitoring turns, Calm on/off/absent behavior, adjacent coalescing, genuine prompts, and restart persistence`.

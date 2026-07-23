@@ -18,8 +18,8 @@ mkdir -p "$PRIMARY/bin" "$STATE"
 printf '# fixture\n' > "$PRIMARY/AGENTS.md"
 git -C "$PRIMARY" init -q
 
-BRIEF_ONLY_ROUTE='investigation and ship work both go to bin/fm-brief.sh then bin/fm-spawn.sh'
-SCOUT_ROUTE='investigation or diagnosis goes to bin/fm-scout.sh "<question>" [project], and ship work goes to bin/fm-brief.sh then bin/fm-spawn.sh'
+BRIEF_ONLY_ROUTE='first classify the work under the AGENTS.md intake contract, then use bin/fm-brief.sh followed by bin/fm-spawn.sh for dispatched work'
+SCOUT_ROUTE='first classify the work under the AGENTS.md intake contract: work already classified as a scout goes to bin/fm-scout.sh "<question>" [project], while authorized ship work and its bounded research go to bin/fm-brief.sh then bin/fm-spawn.sh'
 
 # Every delegation, scheduling, worktree, and task-tracking tool Claude Code
 # 2.1.217 offered a primary session in the observed baseline.
@@ -118,14 +118,17 @@ test_guard_never_classifies_mcp_tools() {
   pass "MCP tool names are never classified as harness delegation"
 }
 
-test_scout_entry_point_named_when_present() {
+test_deny_message_defers_to_intake_classification() {
   local actual
   printf '#!/usr/bin/env bash\n' > "$PRIMARY/bin/fm-scout.sh"
   run_tool Agent && fail "scout-present case must still deny"
   actual=$(jq -r '.systemMessage' "$ERR")
   case "$actual" in
     *"$SCOUT_ROUTE"*) ;;
-    *) fail "deny must name bin/fm-scout.sh when it exists: $actual" ;;
+    *) fail "deny must reserve bin/fm-scout.sh for classified scout work: $actual" ;;
+  esac
+  case "$actual" in
+    *'investigation or diagnosis goes to bin/fm-scout.sh'*) fail "deny must not classify all investigation or diagnosis as scout work: $actual" ;;
   esac
   rm -f "$PRIMARY/bin/fm-scout.sh"
   run_tool Agent && fail "scout-absent case must still deny"
@@ -134,7 +137,7 @@ test_scout_entry_point_named_when_present() {
     *"$BRIEF_ONLY_ROUTE"*) ;;
     *) fail "deny must degrade to brief-then-spawn when fm-scout.sh is absent: $actual" ;;
   esac
-  pass "deny names bin/fm-scout.sh when it exists and degrades gracefully when it does not"
+  pass "deny defers to intake classification and degrades gracefully without fm-scout.sh"
 }
 
 test_escape_hatch_allows_deliberate_use() {
@@ -274,7 +277,7 @@ test_guard_denies_every_currently_known_delegation_tool
 test_guard_denies_hypothetical_future_tools
 test_guard_allows_ordinary_and_observe_only_tools
 test_guard_never_classifies_mcp_tools
-test_scout_entry_point_named_when_present
+test_deny_message_defers_to_intake_classification
 test_escape_hatch_allows_deliberate_use
 test_task_worktree_and_non_firstmate_repo_are_inert
 test_secondmate_home_is_in_scope

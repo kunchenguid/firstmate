@@ -49,7 +49,7 @@ chmod +x "$SHIM_DIR/tmux"
 PATH="$SHIM_DIR:$PATH"
 export PATH
 
-# shellcheck source=bin/fm-backend.sh
+# shellcheck source=/dev/null
 . "$ROOT/bin/fm-backend.sh"
 fm_backend_source tmux || fail "fm_backend_source tmux failed"
 

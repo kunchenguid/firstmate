@@ -18,7 +18,7 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
-# shellcheck source=bin/fm-marker-lib.sh
+# shellcheck source=/dev/null
 . "$ROOT/bin/fm-marker-lib.sh"
 
 SEND="$ROOT/bin/fm-send.sh"
@@ -107,7 +107,7 @@ test_secondmate_target_is_marked() {
     *audit\ the\ build) : ;;
     *) fail "secondmate send lost the request body"$'\n'"$got" ;;
   esac
-  # shellcheck source=bin/fm-pending-reply-lib.sh
+  # shellcheck source=/dev/null
   . "$ROOT/bin/fm-pending-reply-lib.sh"
   corr=$(fm_pending_reply_extract_corr "$got")
   [ -f "$(fm_pending_reply_path "$home/state" "$corr")" ] \
@@ -128,7 +128,7 @@ test_exact_secondmate_task_id_is_marked() {
     "$FM_FROMFIRST_MARK"corr=[a-f0-9]*) : ;;
     *) fail "exact secondmate send: literal text should be marker+corr+text"$'\n'"--- bytes ---"$'\n'"$(printf '%s' "$got" | od -An -c)" ;;
   esac
-  # shellcheck source=bin/fm-pending-reply-lib.sh
+  # shellcheck source=/dev/null
   . "$ROOT/bin/fm-pending-reply-lib.sh"
   corr=$(fm_pending_reply_extract_corr "$got")
   # Resend with the same corr already present: embed is idempotent for that corr.
@@ -239,7 +239,7 @@ test_marked_send_preserves_trailing_newlines() {
   payload=$'audit the build\n\n'
   run_send "$fb" "$home" "$log" "domain" "$payload"; rc=$?
   expect_code 0 "$rc" "marked send with trailing newlines should succeed"
-  # shellcheck source=bin/fm-pending-reply-lib.sh
+  # shellcheck source=/dev/null
   . "$ROOT/bin/fm-pending-reply-lib.sh"
   corr=$(fm_pending_reply_extract_corr "$(cat "$log")")
   [ -n "$corr" ] || fail "marked send should embed a corr id"

@@ -1,11 +1,21 @@
-// Firstmate's session-local Pi transcript presentation toggle.
+// Firstmate's home-persistent Pi transcript presentation toggle.
 //
 // Compatibility boundary: Pi 0.81.1 exposes built-in ToolDefinitions, per-slot
 // renderers, renderShell: "self", session_start replacement reasons,
 // ExtensionUIContext.setToolsExpanded(), setWorkingVisible(), and
 // setHiddenThinkingLabel(). The focused tests pin those assumptions. Pi still
 // exposes no global renderer for built-in message rows or arbitrary custom tools.
-import { readFileSync } from "node:fs";
+// docs/configuration.md owns the home-local Calm preference contract.
+import { randomUUID } from "node:crypto";
+import {
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import type {
   ExtensionAPI,
   ToolDefinition,
@@ -22,13 +32,11 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Box, Container, getKeybindings, type Component } from "@earendil-works/pi-tui";
 import type { TSchema } from "typebox";
+import { installCalmAssistantLayout } from "./lib/fm-calm-assistant-layout.ts";
 import {
   calmPresentationHides,
   calmPresentationIsActive,
-  classifyFirstmateSyntheticInput,
-  deliverFirstmateSyntheticInput,
   FIRSTMATE_CALM_PRESENTATION_EVENT,
-  FIRSTMATE_PI_LAUNCH_BRIEF_ENV,
   registerFirstmateSyntheticPresentation,
   setCalmPresentation,
   setCalmStockExportRendering,
@@ -60,19 +68,40 @@ type StandardShellState = {
   result?: Component;
 };
 
+const extensionFile = fileURLToPath(import.meta.url);
+const extensionDir = dirname(extensionFile);
+const root = resolve(extensionDir, "../..");
+
 export default function (pi: ExtensionAPI) {
+  installCalmAssistantLayout();
+
   let exportRendering = false;
-  let launchBriefContent: string | undefined;
   let removeTerminalInputHandler: (() => void) | undefined;
 
-  const launchBriefPath = process.env[FIRSTMATE_PI_LAUNCH_BRIEF_ENV];
-  if (launchBriefPath) {
+  const fmHome = process.env.FM_HOME || process.env.FM_ROOT_OVERRIDE || root;
+  const configDirectory = process.env.FM_CONFIG_OVERRIDE || resolve(fmHome, "config");
+  const calmPreferencePath = resolve(configDirectory, "calm");
+  const loadCalmPreference = (): boolean => {
     try {
-      launchBriefContent = readFileSync(launchBriefPath, "utf8").replace(/\n+$/, "");
+      return readFileSync(calmPreferencePath, "utf8").trim() === "on";
     } catch {
-      launchBriefContent = undefined;
+      return false;
     }
-  }
+  };
+  const persistCalmPreference = (active: boolean): void => {
+    mkdirSync(dirname(calmPreferencePath), { recursive: true });
+    const temporaryPath = `${calmPreferencePath}.${process.pid}.${randomUUID()}.tmp`;
+    try {
+      writeFileSync(temporaryPath, active ? "on\n" : "off\n", {
+        encoding: "utf8",
+        flag: "wx",
+        mode: 0o600,
+      });
+      renameSync(temporaryPath, calmPreferencePath);
+    } finally {
+      rmSync(temporaryPath, { force: true });
+    }
+  };
 
   const publishPresentationState = (): void => {
     pi.events.emit(FIRSTMATE_CALM_PRESENTATION_EVENT, {
@@ -191,32 +220,13 @@ export default function (pi: ExtensionAPI) {
   registerBuiltIn(createFindToolDefinition);
   registerBuiltIn(createLsToolDefinition);
 
-  pi.on("input", (event, ctx) => {
-    if (event.images && event.images.length > 0) return { action: "continue" };
-    const kind = classifyFirstmateSyntheticInput(event.text, event.source, launchBriefContent);
-    if (!kind) return { action: "continue" };
-    if (kind === "launch-brief") launchBriefContent = undefined;
-
-    const redrawPresentation = (): void => {
-      const expanded = ctx.ui.getToolsExpanded();
-      ctx.ui.setToolsExpanded(!expanded);
-      ctx.ui.setToolsExpanded(expanded);
-    };
-    deliverFirstmateSyntheticInput(pi, event.text, kind, {
-      deliverAs: event.streamingBehavior ?? "followUp",
-      redrawPresentation,
-      triggerTurn: true,
-    });
-    return { action: "handled" };
-  });
-
   pi.on("session_start", (_event, ctx) => {
     exportRendering = false;
-    setCalmPresentation(false);
+    setCalmPresentation(loadCalmPreference());
     setCalmStockExportRendering(false);
     publishPresentationState();
     ctx.ui.setWorkingVisible(true);
-    ctx.ui.setHiddenThinkingLabel();
+    ctx.ui.setHiddenThinkingLabel(calmPresentationIsActive() ? "" : undefined);
     ctx.ui.setStatus("firstmate-calm", undefined);
     removeTerminalInputHandler?.();
     removeTerminalInputHandler = ctx.ui.onTerminalInput((data) => {
@@ -249,11 +259,12 @@ export default function (pi: ExtensionAPI) {
     description: "Toggle Firstmate's supported conversation-only transcript presentation.",
     handler: async (_args, ctx) => {
       const active = !calmPresentationIsActive();
+      persistCalmPreference(active);
       setCalmPresentation(active);
       publishPresentationState();
-      ctx.ui.setWorkingVisible(!active);
+      ctx.ui.setWorkingVisible(true);
       ctx.ui.setHiddenThinkingLabel(active ? "" : undefined);
-      ctx.ui.setStatus("firstmate-calm", active ? "calm transcript" : undefined);
+      ctx.ui.setStatus("firstmate-calm", undefined);
 
       const expanded = ctx.ui.getToolsExpanded();
       ctx.ui.setToolsExpanded(!expanded);

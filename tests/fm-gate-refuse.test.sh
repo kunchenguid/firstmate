@@ -91,7 +91,7 @@ run_guard_lib() {
       empty) export NO_MISTAKES_GATE= ;;
     esac
     set -eu
-    # shellcheck source=bin/fm-gate-refuse-lib.sh
+    # shellcheck source=/dev/null
     . "$GATE_LIB"
     fm_refuse_if_gate_agent
   ) 2>&1
