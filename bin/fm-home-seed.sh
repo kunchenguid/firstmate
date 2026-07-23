@@ -12,6 +12,8 @@
 #       belongs to the Firstmate repository, is clean, and matches the live
 #       upstream default-branch tip. An unsafe or unverifiable acquired home is
 #       retained without force-return so its unlanded work remains untouched.
+#       An explicit home must pass the same live-tip proof after its safe
+#       fast-forward, and a failed proof aborts the transactional seed.
 #       Projects are cloned from the active home into the secondmate home's
 #       projects/ directory.
 #       That project list is non-exclusive provisioning data. Pass --no-projects
@@ -962,9 +964,18 @@ seed_home() {
     requested_abs=$(abs_path_for_new "$requested_home")
     refuse_active_home_path "$requested_abs" || return 1
     validate_home_assignment "$id" "$requested_abs" || return 1
+    "$SCRIPT_DIR/fm-checkout-refresh.sh" preflight "$FM_ROOT" >/dev/null 2>&1 || true
     SEED_HOME="$requested_abs"
     [ -e "$requested_abs" ] || SEED_HOME_CREATED=1
     home=$(ensure_home "$id" "$requested_abs")
+    "$SCRIPT_DIR/fm-checkout-refresh.sh" preflight "$home" || {
+      echo "error: refusing explicit secondmate home whose default branch cannot be refreshed safely" >&2
+      return 1
+    }
+    "$SCRIPT_DIR/fm-checkout-refresh.sh" verify-home "$home" "$FM_ROOT" || {
+      echo "error: refusing explicit secondmate home whose live default-tip freshness cannot be proved" >&2
+      return 1
+    }
   fi
   SEED_HOME="$home"
   validate_registry_home_text "$home" || return 1

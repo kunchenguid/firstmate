@@ -257,22 +257,29 @@ fetch_with_packed_refs_lock_guard() {
 }
 
 prune_gone_branches() {
-  # Delete local branches whose upstream tracking branch is gone - the remote
-  # branch was deleted, which in this fleet means its PR merged - as long as
-  # nothing still needs them. Never the checked-out branch, and never a branch
-  # that still has a worktree (a live or not-yet-torn-down task). "Gone" plus
-  # "no worktree" already proves the work landed: teardown removes a branch's
-  # worktree only after confirming the work reached the remote. We deliberately
-  # do NOT also require the branch to be an ancestor of origin/<default> - PRs in
-  # this fleet are squash-merged, so a merged branch is never an ancestor and
-  # such a check would prune nothing. The no-worktree guard is the real safety
-  # net. Set FM_FLEET_PRUNE=0 to skip pruning entirely.
   [ "${FM_FLEET_PRUNE:-1}" != "0" ] || return 0
 
-  local worktree_branches current refline branch track
-  worktree_branches=$(git -C "$PROJ" worktree list --porcelain 2>/dev/null \
-    | sed -n 's#^branch refs/heads/##p')
+  local worktree_output worktree_branches current refs_output refline branch track
+  local remote_refs remote_ref base_tree merged_tree landed
+  worktree_output=$(git -C "$PROJ" worktree list --porcelain 2>/dev/null) || {
+    echo "$label: skipped: cannot inspect worktree ownership before branch pruning"
+    return 1
+  }
+  worktree_branches=$(printf '%s\n' "$worktree_output" | sed -n 's#^branch refs/heads/##p')
   current=$(git -C "$PROJ" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
+  refs_output=$(git -C "$PROJ" for-each-ref \
+    --format='%(refname:short) %(upstream:track)' refs/heads 2>/dev/null) || {
+    echo "$label: skipped: cannot inspect local branches before pruning"
+    return 1
+  }
+  remote_refs=$(git -C "$PROJ" for-each-ref --format='%(refname)' refs/remotes 2>/dev/null) || {
+    echo "$label: skipped: cannot inspect remote refs before branch pruning"
+    return 1
+  }
+  base_tree=$(git -C "$PROJ" rev-parse "$BASE^{tree}" 2>/dev/null) || {
+    echo "$label: skipped: cannot inspect default-branch content before branch pruning"
+    return 1
+  }
 
   while IFS= read -r refline; do
     branch=${refline%% *}
@@ -283,11 +290,30 @@ prune_gone_branches() {
     if printf '%s\n' "$worktree_branches" | grep -Fxq -- "$branch"; then
       continue
     fi
+    landed=0
+    while IFS= read -r remote_ref; do
+      [ -n "$remote_ref" ] || continue
+      if git -C "$PROJ" merge-base --is-ancestor "$branch" "$remote_ref" 2>/dev/null; then
+        landed=1
+        break
+      fi
+    done <<EOF
+$remote_refs
+EOF
+    if [ "$landed" -eq 0 ]; then
+      merged_tree=$(git -C "$PROJ" merge-tree --write-tree "$BASE" "$branch" 2>/dev/null || true)
+      [ -n "$merged_tree" ] && [ "$merged_tree" = "$base_tree" ] && landed=1
+    fi
+    if [ "$landed" -eq 0 ]; then
+      echo "$label: STUCK: retained gone branch $branch because landed work cannot be proved"
+      continue
+    fi
     if git -C "$PROJ" branch -D -- "$branch" >/dev/null 2>&1; then
       echo "$label: pruned $branch"
     fi
-  done < <(git -C "$PROJ" for-each-ref \
-    --format='%(refname:short) %(upstream:track)' refs/heads 2>/dev/null)
+  done <<EOF
+$refs_output
+EOF
 }
 
 # True when some worktree of $PROJ has $DEFAULT checked out (so we cannot attach
@@ -418,11 +444,14 @@ sync_project() (
     return 0
   fi
 
-  prune_gone_branches || true
-
   cur=$(git -C "$PROJ" symbolic-ref --short HEAD 2>/dev/null || echo "")
   dirty=no
-  [ -z "$(git -C "$PROJ" status --porcelain 2>/dev/null | head -1)" ] || dirty=yes
+  if ! status_raw=$(GIT_OPTIONAL_LOCKS=0 git -C "$PROJ" status --porcelain=v1 --untracked-files=all 2>/dev/null); then
+    echo "$label: skipped: working tree cleanliness cannot be inspected"
+    return 0
+  fi
+  [ -z "$status_raw" ] || dirty=yes
+  prune_gone_branches || return 0
   untracked_count=0
   skill_draft_count=0
   if [ "$dirty" = yes ]; then

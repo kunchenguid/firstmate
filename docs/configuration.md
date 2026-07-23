@@ -275,6 +275,8 @@ The default covered set is every clone under the active home's `projects/`, ever
 Matching by origin discovers parallel clones such as `~/relvino` without embedding a captain-specific path in shared code.
 Optional `path` and shallow `scan` directives in the gitignored `config/checkout-refresh` file extend that set.
 Every declared checkout and matching-origin scan result must resolve to its exact canonical Git worktree root, so nested directories can never redirect refresh to an enclosing repository.
+A symlinked or unreadable configuration file, an unknown or malformed directive, or an invalid declared path or scan root makes coverage unhealthy.
+The owner persists the canonical path and origin identity of each discovered external clone and retains the prior manifest until every previously covered identity is inspectable and unchanged.
 
 Each `FM_HOME` owns a distinct background identity and state directory, so primary and secondmate homes can cover their own projects without displacing one another.
 Checkout-level owner locks are held by the shared `fm-fleet-sync.sh` mutation path, Treehouse acquisition, and every authorized Treehouse return, so home-scoped services, spawn, secondmate seeding, teardown, and merged-PR wake handling serialize overlapping checkouts safely.
@@ -295,7 +297,8 @@ The ordinary safe-refresh warning separately quantifies every non-ignored untrac
 These checks inspect paths only and never delete, move, stash, reset, or edit a draft.
 The signal interval and backstop are configurable through `FM_CHECKOUT_REFRESH_INTERVAL` and `FM_CHECKOUT_REFRESH_BACKSTOP`.
 Every cadence and spawn-preflight refresh disables gone-branch pruning and retains `fm-fleet-sync.sh`'s fail-safe behavior: a dirty, diverged, or non-default checkout is left untouched and recorded as an alert.
-The forced session-start mode preserves the existing gone-branch pruning pass.
+The forced session-start mode prunes a gone branch only when its tip is reachable from a surviving remote ref or its content is already present in the live default branch.
+An unproven branch is retained and surfaced as `STUCK:`.
 
 Treehouse v2.0 already excludes dirty pool entries, fetches `origin`, and resets only an available clean detached worktree to the freshest default ref.
 Firstmate surfaces matching dirty pool entries, acquires the selected path with `treehouse get --lease`, and verifies the durable lease before creating its endpoint.
@@ -304,6 +307,7 @@ The accepted lease must be clean, belong to the requested repository, have the s
 Remote-free `local-only` acquisitions use the same repository and cleanliness proof, with the requested checkout's local `main` or `master` tip as their freshness authority.
 Treehouse-acquired secondmate homes receive the same proof before seeding.
 They use the same locked, bounded acquisition entrypoint as ordinary task worktrees.
+Explicit secondmate homes are refreshed and must independently match the same live upstream or local default tip before seeding and again before launch.
 A stale, dirty, or uninspectable acquisition remains durably leased without forced return and is surfaced for manual recovery.
 If an unmanaged spawn fails after publishing metadata or task artifacts, it restores the prior task generation before returning only a worktree whose repository identity, cleanliness, and expected detached tip are re-proven.
 That makes the acquisition proof explicit even if the background owner was offline.

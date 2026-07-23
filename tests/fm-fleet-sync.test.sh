@@ -211,6 +211,34 @@ run_sync_guarded() {
 
 # --- tests ------------------------------------------------------------------
 
+test_status_failure_is_never_treated_as_clean() {
+  local home clone fakebin out err before
+  home=$(new_home)
+  clone=$(build_pair "$home" status-unreadable)
+  advance_origin "$home" status-unreadable C1
+  before=$(head_sha "$clone")
+  fakebin="$home/fakebin"
+  out="$home/status-unreadable.out"
+  err="$home/status-unreadable.err"
+  mkdir -p "$fakebin"
+  cat > "$fakebin/git" <<'SH'
+#!/usr/bin/env bash
+for argument in "$@"; do
+  if [ "$argument" = status ]; then
+    exit 74
+  fi
+done
+exec "${REAL_GIT_FOR_TEST:?}" "$@"
+SH
+  chmod +x "$fakebin/git"
+  run_sync_guarded "$home" "$fakebin" "$out" "$err" "$clone"
+  assert_contains "$(cat "$out")" "working tree cleanliness cannot be inspected" \
+    "status failure was not surfaced"
+  [ "$(head_sha "$clone")" = "$before" ] \
+    || fail "status failure was treated as clean and advanced the checkout"
+  pass "unreadable git status cannot produce a clean refresh"
+}
+
 test_detached_clean_ancestor_recovers() {
   local home clone out before after
   home=$(new_home)
@@ -780,6 +808,12 @@ if [ "${FM_TEST_FOCUSED:-}" = review-round-12-ownership ]; then
   exit 0
 fi
 
+if [ "${FM_TEST_FOCUSED:-}" = review-round-refresh-safety ]; then
+  test_status_failure_is_never_treated_as_clean
+  exit 0
+fi
+
+test_status_failure_is_never_treated_as_clean
 test_detached_clean_ancestor_recovers
 test_detached_unique_commit_is_stuck_untouched
 test_detached_clean_ancestor_with_diverged_local_default_is_stuck_untouched

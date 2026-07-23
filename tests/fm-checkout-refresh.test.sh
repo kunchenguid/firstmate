@@ -707,14 +707,14 @@ test_refresh_locks_recover_stale_owners_and_surface_contention() {
   alias="$TMP_ROOT/relvino-checkout-alias"
   ln -s "$checkout" "$alias"
   out=$(run_refresh preflight "$alias") || true
-  assert_contains "$out" "$alias: skipped: refresh already running (pid $$)" \
+  assert_contains "$out" "$checkout: skipped: refresh already running (pid $$)" \
     "a symlink alias bypassed the canonical repository lock"
   rm -rf "$checkout_lock"
   pass "refresh locks recover abandoned owners and serialize every checkout alias"
 }
 
 test_session_mode_preserves_gone_branch_pruning() {
-  local remote work project
+  local remote work project out
   remote=$(build_origin prune)
   work="$TMP_ROOT/work-prune"
   git -C "$work" checkout -q -b merged
@@ -731,11 +731,150 @@ test_session_mode_preserves_gone_branch_pruning() {
   git -C "$project" show-ref --verify --quiet refs/heads/merged \
     || fail "cadence refresh pruned a gone branch"
 
+  out=$(run_refresh run-once --force --session)
+  git -C "$project" show-ref --verify --quiet refs/heads/merged \
+    || fail "session refresh deleted a gone branch without landed-work proof"
+  assert_contains "$out" "retained gone branch merged because landed work cannot be proved" \
+    "session refresh did not surface an unproven gone branch"
+
+  git -C "$work" merge -q --no-ff merged -m land-merged
+  git -C "$work" push -q origin main
   run_refresh run-once --force --session >/dev/null
   if git -C "$project" show-ref --verify --quiet refs/heads/merged; then
-    fail "session refresh did not preserve gone-branch pruning"
+    fail "session refresh retained a gone branch after its content landed"
   fi
-  pass "session mode preserves pruning while cadence mode disables it"
+  pass "session pruning requires positive landed-work proof"
+}
+
+test_config_and_external_identity_fail_closed() {
+  local remote project external original_origin out status config_real
+  remote=$(build_origin identity-history)
+  project="$FM_TEST_HOME/projects/identity-history"
+  external="$TEST_HOME/identity-history"
+  clone_from "$remote" "$project"
+  clone_from "$remote" "$external"
+  run_refresh run-once --force >/dev/null
+
+  original_origin=$(git -C "$external" remote get-url origin)
+  git -C "$external" remote set-url origin file://"$TMP_ROOT/remotes/unrelated.git"
+  set +e
+  out=$(run_refresh run-once --force 2>&1)
+  status=$?
+  set -e
+  [ "$status" -ne 0 ] || fail "external origin drift reported successful coverage"
+  assert_contains "$out" "prior external checkout origin changed at" \
+    "external origin drift was silently dropped from discovery"
+  assert_refresh_state "$STATE_ROOT" unhealthy
+  git -C "$external" remote set-url origin "$original_origin"
+  run_refresh run-once --force >/dev/null
+
+  printf '%s\n' 'unexpected directive' > "$FM_TEST_HOME/config/checkout-refresh"
+  set +e
+  out=$(run_refresh run-once --force 2>&1)
+  status=$?
+  set -e
+  [ "$status" -ne 0 ] || fail "unknown checkout-refresh config reported successful coverage"
+  assert_contains "$out" "unknown config directive" "unknown config was not surfaced"
+  assert_refresh_state "$STATE_ROOT" unhealthy
+  rm -f "$FM_TEST_HOME/config/checkout-refresh"
+
+  {
+    printf 'path %s\n' "$TMP_ROOT/missing-configured-checkout"
+    printf 'scan %s\n' "$TMP_ROOT/missing-configured-scan"
+  } > "$FM_TEST_HOME/config/checkout-refresh"
+  set +e
+  out=$(run_refresh run-once --force 2>&1)
+  status=$?
+  set -e
+  [ "$status" -ne 0 ] || fail "invalid configured coverage paths reported success"
+  assert_contains "$out" "configured checkout is not an exact inspectable Git repository root" \
+    "invalid configured checkout was not surfaced"
+  assert_contains "$out" "configured scan root is not a directory" \
+    "invalid configured scan root was not surfaced"
+  rm -f "$FM_TEST_HOME/config/checkout-refresh"
+
+  config_real="$TMP_ROOT/checkout-refresh-symlink-target"
+  printf '# valid target\n' > "$config_real"
+  ln -s "$config_real" "$FM_TEST_HOME/config/checkout-refresh"
+  set +e
+  out=$(run_refresh run-once --force 2>&1)
+  status=$?
+  set -e
+  [ "$status" -ne 0 ] || fail "symlinked checkout-refresh config reported success"
+  assert_contains "$out" "unsafe symlink config" "symlinked config was not surfaced"
+  assert_refresh_state "$STATE_ROOT" unhealthy
+  rm -f "$FM_TEST_HOME/config/checkout-refresh" "$config_real"
+  pass "configuration and prior external identity failures invalidate coverage"
+}
+
+test_public_entrypoints_reject_nested_repository_paths() {
+  local source worktree nested out status
+  source="$TMP_ROOT/exact-entry-source"
+  worktree="$TMP_ROOT/exact-entry-worktree"
+  fm_git_worktree "$source" "$worktree" exact-entry
+  nested="$source/nested"
+  mkdir -p "$nested"
+  set +e
+  out=$(run_refresh preflight "$nested" 2>&1)
+  status=$?
+  set -e
+  [ "$status" -ne 0 ] || fail "preflight accepted a nested repository path"
+  assert_contains "$out" "must be an exact inspectable Git repository root" \
+    "nested preflight refusal was unclear"
+  set +e
+  run_refresh acquire-worktree "$nested" nested-test >/dev/null 2>&1
+  status=$?
+  set -e
+  [ "$status" -ne 0 ] || fail "worktree acquisition accepted a nested repository path"
+  set +e
+  run_refresh verify-worktree "$worktree" "$nested" >/dev/null 2>&1
+  status=$?
+  set -e
+  [ "$status" -ne 0 ] || fail "worktree verification accepted a nested source path"
+  pass "public refresh entrypoints require exact repository roots"
+}
+
+test_explicit_secondmate_home_requires_live_default_tip() {
+  local remote source home status
+  remote=$(build_origin explicit-home-freshness)
+  source="$TMP_ROOT/explicit-home-source"
+  home="$TMP_ROOT/explicit-secondmate-home"
+  clone_from "$remote" "$source"
+  git clone --quiet "$source" "$home"
+  run_refresh verify-home "$home" "$source" \
+    || fail "fresh explicit secondmate home failed live-tip verification"
+  advance_origin explicit-home-freshness C1
+  set +e
+  run_refresh verify-home "$home" "$source" >/dev/null 2>&1
+  status=$?
+  set -e
+  [ "$status" -ne 0 ] || fail "stale explicit secondmate home passed live-tip verification"
+  run_refresh preflight "$source" >/dev/null
+  run_refresh preflight "$home" >/dev/null
+  run_refresh verify-home "$home" "$source" \
+    || fail "refreshed explicit secondmate home failed live-tip verification"
+  pass "explicit secondmate homes require proven live-tip freshness"
+}
+
+test_lock_owner_symlink_cannot_escape_state_directory() {
+  local outside lock status
+  outside="$TEST_HOME/external-lock-owner"
+  lock="$STATE_ROOT/escaped-lock"
+  mkdir -p "$outside"
+  printf '%s\n' 999999 > "$outside/pid"
+  printf '%s\n' 999999 > "$outside/process-group"
+  ln -s "$outside" "$lock"
+  set +e
+  FM_HOME="$FM_TEST_HOME" FM_ROOT="$ROOT" \
+    bash -c '. "$1/bin/fm-wake-lib.sh"; FM_LOCK_STALE_AFTER=0; fm_lock_try_acquire "$2"' \
+    bash "$ROOT" "$lock" >/dev/null 2>&1
+  status=$?
+  set -e
+  [ "$status" -ne 0 ] || fail "lock acquisition accepted an external owner target"
+  assert_present "$outside/pid" "lock cleanup deleted an external owner pid"
+  assert_present "$outside/process-group" "lock cleanup deleted an external process-group guard"
+  [ -L "$lock" ] || fail "lock cleanup rewrote a malformed external owner link"
+  pass "lock cleanup remains confined to state-owned owner directories"
 }
 
 test_worktree_freshness_verification_fails_closed() {
@@ -1068,6 +1207,15 @@ if [ "${FM_TEST_FOCUSED:-}" = review-round-7 ]; then
   exit 0
 fi
 
+if [ "${FM_TEST_FOCUSED:-}" = review-round-refresh-safety ]; then
+  test_config_and_external_identity_fail_closed
+  test_public_entrypoints_reject_nested_repository_paths
+  test_explicit_secondmate_home_requires_live_default_tip
+  test_session_mode_preserves_gone_branch_pruning
+  test_lock_owner_symlink_cannot_escape_state_directory
+  exit 0
+fi
+
 test_discovery_covers_projects_treehouse_external_and_config
 test_uninspectable_active_project_invalidates_coverage_health
 test_nested_active_project_invalidates_coverage_health
@@ -1089,6 +1237,10 @@ test_scheduler_liveness_is_scheduler_owned
 test_dirty_nondefault_and_diverged_checkouts_are_untouched
 test_refresh_locks_recover_stale_owners_and_surface_contention
 test_session_mode_preserves_gone_branch_pruning
+test_config_and_external_identity_fail_closed
+test_public_entrypoints_reject_nested_repository_paths
+test_explicit_secondmate_home_requires_live_default_tip
+test_lock_owner_symlink_cannot_escape_state_directory
 test_worktree_freshness_verification_fails_closed
 test_bounded_refresh_terminates_descendants
 test_acquisition_honors_shared_checkout_lock

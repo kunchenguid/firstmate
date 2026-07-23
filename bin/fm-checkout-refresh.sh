@@ -36,7 +36,8 @@
 # synchronous durable lease acquired before a task endpoint is created.
 #
 # Cadence and spawn-preflight refreshes delegate to fm-fleet-sync.sh with pruning
-# disabled, while the explicit session-start mode preserves gone-branch pruning.
+# disabled, while session-start pruning retains every branch whose landed state
+# cannot be proved from repository content or a surviving remote ref.
 # Dirty, diverged, non-default, and otherwise unsafe checkouts remain untouched
 # and are recorded as durable alerts.
 # Every probe also inventories non-ignored untracked files in both the covered seed
@@ -65,6 +66,7 @@
 #   fm-checkout-refresh.sh pool-preflight <expected-source>
 #   fm-checkout-refresh.sh acquire-worktree <expected-source> <lease-holder>
 #   fm-checkout-refresh.sh verify-worktree <worktree> <expected-source>
+#   fm-checkout-refresh.sh verify-home <home> <expected-source>
 #   fm-checkout-refresh.sh verify-returnable <worktree> <expected-source> <expected-tip>
 #   fm-checkout-refresh.sh ensure
 #   fm-checkout-refresh.sh install
@@ -133,7 +135,7 @@ case "$SYNC_TIMEOUT" in ''|*[!0-9]*|0) echo "error: FM_CHECKOUT_REFRESH_SYNC_TIM
 case "$ACQUIRE_TIMEOUT" in ''|*[!0-9]*|0) echo "error: FM_TREEHOUSE_ACQUIRE_TIMEOUT must be a positive integer" >&2; exit 2 ;; esac
 
 usage() {
-  echo "usage: fm-checkout-refresh.sh discover|run-once [--force] [--verbose] [--session] [--scheduled]|preflight <checkout>|pool-preflight <expected-source>|acquire-worktree <expected-source> <lease-holder>|verify-worktree <worktree> <expected-source>|verify-returnable <worktree> <expected-source> <expected-tip>|ensure|install" >&2
+  echo "usage: fm-checkout-refresh.sh discover|run-once [--force] [--verbose] [--session] [--scheduled]|preflight <checkout>|pool-preflight <expected-source>|acquire-worktree <expected-source> <lease-holder>|verify-worktree <worktree> <expected-source>|verify-home <home> <expected-source>|verify-returnable <worktree> <expected-source> <expected-tip>|ensure|install" >&2
 }
 
 first_line() {
@@ -154,6 +156,15 @@ exact_git_root() {
   printf '%s\n' "$canonical"
 }
 
+require_exact_git_root() {
+  local candidate=$1 label=$2 canonical
+  canonical=$(exact_git_root "$candidate") || {
+    echo "error: $label must be an exact inspectable Git repository root: $candidate" >&2
+    return 1
+  }
+  printf '%s\n' "$canonical"
+}
+
 expand_config_path() {
   case "$1" in
     "~") printf '%s\n' "$HOME" ;;
@@ -165,31 +176,59 @@ expand_config_path() {
   esac
 }
 
-config_values() {
-  local wanted=$1 line directive value
-  [ -f "$CONFIG_FILE" ] || return 0
-  [ ! -L "$CONFIG_FILE" ] || {
-    echo "checkout-refresh: skipped: unsafe symlink config $CONFIG_FILE" >&2
+parse_config() {
+  local paths_file=$1 scans_file=$2 line directive value expanded failed=0
+  : > "$paths_file"
+  : > "$scans_file"
+  if [ ! -e "$CONFIG_FILE" ] && [ ! -L "$CONFIG_FILE" ]; then
     return 0
-  }
+  fi
+  if [ -L "$CONFIG_FILE" ]; then
+    echo "checkout-refresh: skipped: unsafe symlink config $CONFIG_FILE" >&2
+    return 1
+  fi
+  if [ ! -f "$CONFIG_FILE" ] || [ ! -r "$CONFIG_FILE" ]; then
+    echo "checkout-refresh: skipped: unsafe or unreadable config $CONFIG_FILE" >&2
+    return 1
+  fi
   while IFS= read -r line || [ -n "$line" ]; do
     line=$(printf '%s\n' "$line" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
     case "$line" in ""|\#*) continue ;; esac
     directive=${line%%[[:space:]]*}
     if [ "$directive" = "$line" ]; then
       echo "checkout-refresh: skipped: malformed config directive '$line'" >&2
+      failed=1
       continue
     fi
     value=${line#"$directive"}
     value=$(printf '%s\n' "$value" | sed 's/^[[:space:]]*//')
+    [ -n "$value" ] || {
+      echo "checkout-refresh: skipped: malformed config directive '$line'" >&2
+      failed=1
+      continue
+    }
     case "$directive" in
-      path|scan)
-        [ "$directive" = "$wanted" ] || continue
-        expand_config_path "$value" || true
+      path)
+        if expanded=$(expand_config_path "$value"); then
+          printf '%s\n' "$expanded" >> "$paths_file"
+        else
+          failed=1
+        fi
         ;;
-      *) echo "checkout-refresh: skipped: unknown config directive '$directive'" >&2 ;;
+      scan)
+        if expanded=$(expand_config_path "$value"); then
+          printf '%s\n' "$expanded" >> "$scans_file"
+        else
+          failed=1
+        fi
+        ;;
+      *)
+        echo "checkout-refresh: skipped: unknown config directive '$directive'" >&2
+        failed=1
+        ;;
     esac
   done < "$CONFIG_FILE"
+  [ "$failed" -eq 0 ]
 }
 
 treehouse_worktree_paths() {
@@ -353,16 +392,23 @@ origin_url() {
 }
 
 discover() {
-  local tmp seeds origins scans treehouse_paths project_paths path project worktree main root candidate url failed=0
+  local tmp seeds origins scans configured_paths configured_scans treehouse_paths project_paths
+  local path project worktree main root candidate url failed=0
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-checkout-refresh-discover.XXXXXX") || return 1
   seeds="$tmp/seeds"
   origins="$tmp/origins"
   scans="$tmp/scans"
+  configured_paths="$tmp/configured-paths"
+  configured_scans="$tmp/configured-scans"
   treehouse_paths="$tmp/treehouse-worktrees"
   project_paths="$tmp/active-projects"
   : > "$seeds"
   : > "$origins"
   : > "$scans"
+  if ! parse_config "$configured_paths" "$configured_scans"; then
+    rm -rf "$tmp"
+    return 1
+  fi
   if ! treehouse_worktree_paths > "$treehouse_paths"; then
     rm -rf "$tmp"
     return 1
@@ -387,8 +433,9 @@ discover() {
       printf '%s\n' "$main" >> "$seeds"
     else
       echo "checkout-refresh: skipped: configured checkout is not an exact inspectable Git repository root: $path" >&2
+      failed=1
     fi
-  done < <(config_values path)
+  done < "$configured_paths"
 
   while IFS= read -r worktree; do
     [ -n "$worktree" ] || continue
@@ -399,11 +446,6 @@ discover() {
       failed=1
     fi
   done < "$treehouse_paths"
-  if [ "$failed" -ne 0 ]; then
-    rm -rf "$tmp"
-    return 1
-  fi
-
   sort -u "$seeds" -o "$seeds"
   while IFS= read -r path; do
     [ -n "$path" ] || continue
@@ -412,15 +454,21 @@ discover() {
   done < "$seeds"
   sort -u "$origins" -o "$origins"
 
-  canonical_dir "$HOME" >> "$scans" 2>/dev/null || true
+  if main=$(canonical_dir "$HOME" 2>/dev/null); then
+    printf '%s\n' "$main" >> "$scans"
+  else
+    echo "checkout-refresh: skipped: home scan root is not inspectable: $HOME" >&2
+    failed=1
+  fi
   while IFS= read -r root; do
     [ -n "$root" ] || continue
     if main=$(canonical_dir "$root" 2>/dev/null); then
       printf '%s\n' "$main" >> "$scans"
     else
       echo "checkout-refresh: skipped: configured scan root is not a directory: $root" >&2
+      failed=1
     fi
-  done < <(config_values scan)
+  done < "$configured_scans"
   sort -u "$scans" -o "$scans"
 
   if [ -s "$origins" ]; then
@@ -434,21 +482,32 @@ discover() {
         fi
         if main=$(exact_git_root "$candidate"); then
           printf '%s\n' "$main" >> "$seeds"
+          if [ -n "${DISCOVERY_IDENTITIES_FILE:-}" ]; then
+            printf '%s\t%s\n' "$main" "$url" >> "$DISCOVERY_IDENTITIES_FILE"
+          fi
         else
           echo "checkout-refresh: skipped: discovered clone is not an exact inspectable Git repository root: $candidate" >&2
+          failed=1
         fi
       done
     done < "$scans"
   fi
 
+  if [ -n "${DISCOVERY_IDENTITIES_FILE:-}" ]; then
+    sort -u "$DISCOVERY_IDENTITIES_FILE" -o "$DISCOVERY_IDENTITIES_FILE"
+  fi
+  [ "$failed" -eq 0 ] || {
+    rm -rf "$tmp"
+    return 1
+  }
   sort -u "$seeds"
   rm -rf "$tmp"
 }
 
 acquire_worktree() {
-  local expected_source=$1 lease_holder=$2 status=0
-  [ -d "$expected_source" ] \
-    || { echo "error: Treehouse acquisition source is not a directory: $expected_source" >&2; return 1; }
+  local expected_source=$1 lease_holder=$2 status=0 canonical
+  canonical=$(require_exact_git_root "$expected_source" "Treehouse acquisition source") || return 1
+  expected_source=$canonical
   (
     local checkout_lock
     ensure_lock_roots || exit 1
@@ -537,6 +596,49 @@ atomic_write() {
   printf '%s\n' "$@" > "$tmp" || { rm -f "$tmp"; return 1; }
   chmod 600 "$tmp" || { rm -f "$tmp"; return 1; }
   mv -f "$tmp" "$destination"
+}
+
+atomic_copy() {
+  local source=$1 destination=$2 tmp
+  tmp=$(mktemp "$STATE_ROOT/.checkout-refresh-write.XXXXXX") || return 1
+  cp "$source" "$tmp" || { rm -f "$tmp"; return 1; }
+  chmod 600 "$tmp" || { rm -f "$tmp"; return 1; }
+  mv -f "$tmp" "$destination"
+}
+
+validate_external_identity_history() {
+  local current=$1 prior="$STATE_ROOT/external-identities" path recorded_origin inspected current_origin failed=0
+  if [ ! -e "$prior" ] && [ ! -L "$prior" ]; then
+    return 0
+  fi
+  if [ -L "$prior" ] || [ ! -f "$prior" ] || [ ! -r "$prior" ]; then
+    echo "checkout-refresh: skipped: prior external checkout identity manifest is unsafe or unreadable: $prior" >&2
+    return 1
+  fi
+  if ! awk -F '\t' 'NF != 2 || $1 == "" || $2 == "" { failed = 1 } END { exit failed }' "$prior"; then
+    echo "checkout-refresh: skipped: prior external checkout identity manifest is malformed: $prior" >&2
+    return 1
+  fi
+  while IFS=$'\t' read -r path recorded_origin; do
+    [ -n "$path" ] || continue
+    if grep -Fqx -- "$path"$'\t'"$recorded_origin" "$current"; then
+      continue
+    fi
+    if inspected=$(exact_git_root "$path" 2>/dev/null); then
+      current_origin=$(origin_url "$inspected" || true)
+      if [ "$inspected" != "$path" ]; then
+        echo "checkout-refresh: skipped: prior external checkout root identity drifted at $path" >&2
+      elif [ -z "$current_origin" ]; then
+        echo "checkout-refresh: skipped: prior external checkout origin is unreadable at $path" >&2
+      else
+        echo "checkout-refresh: skipped: prior external checkout origin changed at $path" >&2
+      fi
+    else
+      echo "checkout-refresh: skipped: prior external checkout disappeared or became unreadable at $path" >&2
+    fi
+    failed=1
+  done < "$prior"
+  [ "$failed" -eq 0 ]
 }
 
 record_run_result() {
@@ -671,7 +773,7 @@ record_reinspection_failure() {
 }
 
 run_once() {
-  local force=0 verbose=0 session=0 scheduled=0 prune=0 arg lock discovery hygiene checkout key tip_file last_file alert_file
+  local force=0 verbose=0 session=0 scheduled=0 prune=0 arg lock discovery identities hygiene checkout key tip_file last_file alert_file
   local prior_tip now last due probe_ok output_file output line reinspected hygiene_failed=0 coverage_failed=0 status=0
   local coverage=healthy
   for arg in "$@"; do
@@ -702,16 +804,34 @@ run_once() {
     record_run_result unhealthy "$scheduled" || true
     return 1
   }
-  hygiene=$(mktemp "$STATE_ROOT/.hygiene-discover.XXXXXX") || {
+  identities=$(mktemp "$STATE_ROOT/.external-identities.XXXXXX") || {
     rm -f "$discovery"
     record_run_result unhealthy "$scheduled" || true
     return 1
   }
+  : > "$identities"
+  hygiene=$(mktemp "$STATE_ROOT/.hygiene-discover.XXXXXX") || {
+    rm -f "$discovery" "$identities"
+    record_run_result unhealthy "$scheduled" || true
+    return 1
+  }
+  DISCOVERY_IDENTITIES_FILE=$identities
   if ! discover > "$discovery"; then
-    rm -f "$discovery" "$hygiene"
+    rm -f "$discovery" "$identities" "$hygiene"
     record_run_result unhealthy "$scheduled" || true
     return 1
   fi
+  if ! validate_external_identity_history "$identities"; then
+    rm -f "$discovery" "$identities" "$hygiene"
+    record_run_result unhealthy "$scheduled" || true
+    return 1
+  fi
+  if ! atomic_copy "$identities" "$STATE_ROOT/external-identities"; then
+    rm -f "$discovery" "$identities" "$hygiene"
+    record_run_result unhealthy "$scheduled" || true
+    return 1
+  fi
+  rm -f "$identities"
   prepare_hygiene_discovery "$discovery" "$hygiene" || {
     rm -f "$discovery" "$hygiene"
     record_run_result unhealthy "$scheduled" || true
@@ -817,8 +937,9 @@ EOF
 }
 
 preflight() {
-  local checkout=$1 output key output_file hygiene_found=0
-  [ -d "$checkout" ] || { echo "error: checkout-refresh preflight target is not a directory: $checkout" >&2; return 1; }
+  local checkout=$1 output key output_file hygiene_found=0 canonical
+  canonical=$(require_exact_git_root "$checkout" "checkout-refresh preflight target") || return 1
+  checkout=$canonical
   ensure_lock_roots || return 1
   key=$(checkout_key "$checkout")
   surface_skill_drafts "$checkout" "$key" 1 || return 1
@@ -844,8 +965,7 @@ preflight() {
 
 pool_preflight() {
   local expected_source=$1 expected_common treehouse_paths worktree canonical common dirty example failed=0
-  [ -d "$expected_source" ] \
-    || { echo "error: expected Treehouse source is not a directory: $expected_source" >&2; return 1; }
+  expected_source=$(require_exact_git_root "$expected_source" "expected Treehouse source") || return 1
   expected_common=$(fm_checkout_git_common_dir "$expected_source") || {
     echo "error: cannot resolve expected Treehouse repository identity for $expected_source" >&2
     return 1
@@ -893,10 +1013,12 @@ local_default_branch() {
 }
 
 verify_worktree_safety() {
-  local worktree=$1 expected_source=$2 dirty dirty_example worktree_common source_common
+  local worktree=$1 expected_source=$2 dirty dirty_example worktree_common source_common canonical
   local worktree_origin source_origin branch
-  [ -d "$worktree" ] || { echo "error: worktree freshness target is not a directory: $worktree" >&2; return 1; }
-  [ -d "$expected_source" ] || { echo "error: expected worktree source is not a directory: $expected_source" >&2; return 1; }
+  canonical=$(require_exact_git_root "$worktree" "worktree freshness target") || return 1
+  worktree=$canonical
+  canonical=$(require_exact_git_root "$expected_source" "expected worktree source") || return 1
+  expected_source=$canonical
   if ! dirty=$(GIT_OPTIONAL_LOCKS=0 git -C "$worktree" status --porcelain=v1 --untracked-files=all 2>/dev/null); then
     echo "error: acquired worktree safety cannot be inspected at $worktree; retain it for manual recovery" >&2
     return 3
@@ -929,6 +1051,84 @@ verify_worktree_safety() {
     return 3
   fi
   return 0
+}
+
+remote_identity() {
+  local checkout=$1 remote=$2 candidate
+  case "$remote" in
+    file://*) candidate=${remote#file://} ;;
+    /*|./*|../*) candidate=$remote ;;
+    *) printf 'remote:%s\n' "$remote"; return 0 ;;
+  esac
+  case "$candidate" in
+    /*) ;;
+    *) candidate="$checkout/$candidate" ;;
+  esac
+  candidate=$(canonical_dir "$candidate" 2>/dev/null) || return 1
+  printf 'path:%s\n' "$candidate"
+}
+
+verify_home() {
+  local home=$1 expected_source=$2 canonical dirty home_common source_common home_origin source_origin
+  local home_identity source_identity source_path_identity default branch tip head expected
+  canonical=$(require_exact_git_root "$home" "secondmate home freshness target") || return 1
+  home=$canonical
+  canonical=$(require_exact_git_root "$expected_source" "expected secondmate source") || return 1
+  expected_source=$canonical
+  dirty=$(GIT_OPTIONAL_LOCKS=0 git -C "$home" status --porcelain=v1 --untracked-files=all 2>/dev/null) || {
+    echo "error: secondmate home cleanliness cannot be inspected at $home" >&2
+    return 1
+  }
+  [ -z "$dirty" ] || {
+    echo "error: secondmate home is dirty at $home; retain it for manual recovery" >&2
+    return 1
+  }
+  home_common=$(fm_checkout_git_common_dir "$home") || return 1
+  source_common=$(fm_checkout_git_common_dir "$expected_source") || return 1
+  if [ "$home_common" != "$source_common" ]; then
+    home_origin=$(origin_url "$home" || true)
+    source_origin=$(origin_url "$expected_source" || true)
+    [ -n "$home_origin" ] || {
+      echo "error: secondmate home origin is unavailable at $home" >&2
+      return 1
+    }
+    home_identity=$(remote_identity "$home" "$home_origin") || return 1
+    source_path_identity="path:$expected_source"
+    source_identity=
+    [ -z "$source_origin" ] || source_identity=$(remote_identity "$expected_source" "$source_origin") || return 1
+    if [ "$home_identity" != "$source_path_identity" ] && [ "$home_identity" != "$source_identity" ]; then
+      echo "error: secondmate home repository identity does not match $expected_source" >&2
+      return 1
+    fi
+  fi
+  source_origin=$(origin_url "$expected_source" || true)
+  if [ -n "$source_origin" ]; then
+    probe_upstream "$expected_source" || {
+      echo "error: cannot verify the live upstream default-branch tip for $expected_source" >&2
+      return 1
+    }
+    branch=$PROBE_BRANCH
+    tip=$PROBE_TIP
+    expected="origin/$branch"
+  else
+    branch=$(local_default_branch "$expected_source") || {
+      echo "error: cannot determine the local default branch for $expected_source" >&2
+      return 1
+    }
+    tip=$(git -C "$expected_source" rev-parse "refs/heads/$branch^{commit}" 2>/dev/null) || return 1
+    expected="local $branch"
+  fi
+  if default=$(git -C "$home" symbolic-ref --quiet --short HEAD 2>/dev/null); then
+    [ "$default" = "$branch" ] || {
+      echo "error: secondmate home is on non-default branch $default at $home" >&2
+      return 1
+    }
+  fi
+  head=$(git -C "$home" rev-parse HEAD 2>/dev/null) || return 1
+  [ "$head" = "$tip" ] || {
+    echo "error: secondmate home is stale: HEAD $head does not match $expected $tip" >&2
+    return 1
+  }
 }
 
 verify_worktree() {
@@ -1158,6 +1358,10 @@ case "${1:-}" in
   verify-worktree)
     [ $# -eq 3 ] || { usage; exit 2; }
     verify_worktree "$2" "$3"
+    ;;
+  verify-home)
+    [ $# -eq 3 ] || { usage; exit 2; }
+    verify_home "$2" "$3"
     ;;
   verify-returnable)
     [ $# -eq 4 ] || { usage; exit 2; }

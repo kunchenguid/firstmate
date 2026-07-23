@@ -27,6 +27,10 @@
 # FM_TREEHOUSE_RETURN_TIMEOUT while holding the same common checkout mutation
 # lock across its retry and stale-index-lock recovery sequence.
 # Uncommitted changes are never landed.
+# Ordinary teardown first proves that metadata names the exact registered project
+# and worktree roots, then quiesces the endpoint before its final safety checks.
+# Each locked Treehouse return repeats the safety check immediately before the
+# destructive return command.
 # local-only projects additionally accept work merged into the local default
 # branch (firstmate performs that merge on the captain's approval) as a fallback
 # for the common case where there is no remote at all.
@@ -706,6 +710,47 @@ canonical_existing_dir() {
   ( cd "$target" && pwd -P )
 }
 
+exact_git_worktree_root() {
+  local target=$1 canonical top canonical_top
+  canonical=$(canonical_existing_dir "$target") || return 1
+  top=$(git -C "$canonical" rev-parse --show-toplevel 2>/dev/null) || return 1
+  canonical_top=$(canonical_existing_dir "$top") || return 1
+  [ "$canonical" = "$canonical_top" ] || return 1
+  printf '%s\n' "$canonical"
+}
+
+validate_teardown_target_identity() {
+  local project_root worktree_root project_common worktree_common
+  [ "$KIND" != secondmate ] || return 0
+  project_root=$(exact_git_worktree_root "$PROJ") || {
+    echo "error: teardown project metadata is not an exact inspectable repository root: ${PROJ:-<missing>}" >&2
+    return 1
+  }
+  worktree_root=$(exact_git_worktree_root "$WT") || {
+    echo "error: teardown worktree metadata is not an exact inspectable repository root: ${WT:-<missing>}" >&2
+    return 1
+  }
+  [ "$project_root" != "$worktree_root" ] || {
+    echo "error: teardown worktree metadata resolves to the primary project root: $worktree_root" >&2
+    return 1
+  }
+  if [ "$BACKEND" = orca ]; then
+    require_orca_worktree_path_match "$ORCA_WORKTREE_ID" "$worktree_root" || return 1
+    ORCA_PATH_MATCH_VERIFIED=1
+    return 0
+  fi
+  project_common=$(fm_checkout_git_common_dir "$project_root") || return 1
+  worktree_common=$(fm_checkout_git_common_dir "$worktree_root") || return 1
+  [ "$project_common" = "$worktree_common" ] || {
+    echo "error: teardown worktree does not belong to the recorded project: $worktree_root" >&2
+    return 1
+  }
+  worktree_registered_for_project "$project_root" "$worktree_root" || {
+    echo "error: teardown worktree is not registered to the recorded project: $worktree_root" >&2
+    return 1
+  }
+}
+
 retry_wait_secs_is_valid() {
   [[ "$1" =~ ^([0-9]+([.][0-9]*)?|[.][0-9]+)$ ]]
 }
@@ -790,8 +835,10 @@ teardown_treehouse_return_locked() {
   local dir=$1 cd_dir=$2 label=$3 post_cleanup_check=${4:-}
   local out lock attempt=0 max_retries lock_desc return_status
 
-  # Capture stdout+stderr so non-lock failures stay visible and lock failures can
-  # be matched by signature even when the lock file is already gone mid-check.
+  if [ -n "$post_cleanup_check" ] && ! "$post_cleanup_check"; then
+    echo "teardown: $label return aborted because the final locked safety check failed" >&2
+    return 1
+  fi
   if out=$(fm_checkout_treehouse_return_locked "$dir" "$CHECKOUT_LOCK_ROOT" "$cd_dir" 2>&1); then
     [ -n "$out" ] && printf '%s\n' "$out"
     return 0
@@ -822,6 +869,10 @@ teardown_treehouse_return_locked() {
     echo "teardown: $label return failed with transient git lock ($lock_desc); waiting ${TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS}s and retrying ($attempt/${max_retries})" >&2
     sleep "$TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS"
 
+    if [ -n "$post_cleanup_check" ] && ! "$post_cleanup_check"; then
+      echo "teardown: $label return aborted because the final locked safety check failed" >&2
+      return 1
+    fi
     if out=$(fm_checkout_treehouse_return_locked "$dir" "$CHECKOUT_LOCK_ROOT" "$cd_dir" 2>&1); then
       [ -n "$out" ] && printf '%s\n' "$out"
       echo "teardown: $label return succeeded on retry; lock cleared on its own" >&2
@@ -890,7 +941,7 @@ validate_worktree_teardown_safety() {
     secondmate|scout) return 0 ;;
   esac
 
-  if ! dirty_raw=$(git -C "$WT" status --porcelain 2>/dev/null); then
+  if ! dirty_raw=$(git -C "$WT" status --porcelain=v1 --untracked-files=all 2>/dev/null); then
     if worktree_safety_blocked_by_lock "uncommitted changes"; then
       return "$TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED"
     fi
@@ -898,7 +949,9 @@ validate_worktree_teardown_safety() {
     echo "Restore the git index state, or get the captain's explicit OK to discard, then --force." >&2
     return 1
   fi
-  dirty=$(printf '%s\n' "$dirty_raw" | grep -vE '^\?\? (\.claude/|\.fm-grok-turnend$)' | head -1 || true)
+  dirty=$(printf '%s\n' "$dirty_raw" \
+    | grep -vE '^\?\? (\.claude/settings\.local\.json|\.opencode/plugins/fm-turn-end\.js|\.fm-grok-turnend)$' \
+    | head -1 || true)
 
   if ! unpushed_raw=$(git -C "$WT" log --oneline HEAD --not --remotes -- 2>/dev/null); then
     if worktree_safety_blocked_by_lock "commits not on a remote"; then
@@ -1322,11 +1375,13 @@ if [ "$KIND" = scout ] && [ "$FORCE" != "--force" ]; then
   fi
 fi
 
+[ "$KIND" = secondmate ] || validate_teardown_target_identity || exit 1
+
 PROBE_HOME=
 ENDPOINT_HOME=$(fm_backend_endpoint_home "$BACKEND" "$KIND" "$FM_HOME" "$HOME_PATH")
 [ "$ENDPOINT_HOME" = "$FM_HOME" ] || PROBE_HOME=$ENDPOINT_HOME
 
-quiesce_completion_report_endpoint() {
+quiesce_task_endpoint() {
   local endpoint_status zellij_tab
   if [ "$MANAGED_ACCOUNT" = 1 ]; then
     quiesce_managed_account_endpoint "$META" "$ID" "$PROBE_HOME"
@@ -1346,9 +1401,9 @@ quiesce_completion_report_endpoint() {
     endpoint_status=$?
   fi
   if [ "$endpoint_status" -eq 2 ]; then
-    echo "error: completion-report endpoint state for $ID is unknown; retaining metadata" >&2
+    echo "error: task endpoint state for $ID is unknown; retaining metadata" >&2
   else
-    echo "error: completion-report endpoint for $ID is still alive; retaining metadata" >&2
+    echo "error: task endpoint for $ID is still alive; retaining metadata" >&2
   fi
   return 1
 }
@@ -1376,25 +1431,25 @@ quiesce_retained_direct_spawn_endpoint() {
   return 1
 }
 
-report_gated_safety_refusal() {
-  [ "$REPORT_GATED" = 1 ] || return 0
-  echo "The completion-report endpoint has already been shut down; the worktree and task metadata are preserved for a safe retry." >&2
+post_quiescence_safety_refusal() {
+  [ "$KIND" != secondmate ] || return 0
+  echo "The task endpoint has already been shut down; the worktree and task metadata are preserved for a safe retry." >&2
 }
 
-[ "$DIRECT_SPAWN_CLEANUP" != pending ] || quiesce_retained_direct_spawn_endpoint || exit 1
-
-if [ "$REPORT_GATED" = 1 ]; then
-  quiesce_completion_report_endpoint || exit 1
+if [ "$DIRECT_SPAWN_CLEANUP" = pending ]; then
+  quiesce_retained_direct_spawn_endpoint || exit 1
+elif [ "$KIND" != secondmate ]; then
+  quiesce_task_endpoint || exit 1
 fi
 
 if [ "$BACKEND" = orca ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$FORCE" != "--force" ]; then
   if ! inspectable_git_worktree "$WT"; then
     echo "REFUSED: Orca ship task $ID has no inspectable git worktree at ${WT:-<missing>}." >&2
     echo "Cannot verify dirty or unlanded work; restore the worktree path or get explicit OK to discard, then --force." >&2
-    report_gated_safety_refusal
+    post_quiescence_safety_refusal
     exit 1
   fi
-  require_orca_worktree_path_match "$ORCA_WORKTREE_ID" "$WT" || { report_gated_safety_refusal; exit 1; }
+  require_orca_worktree_path_match "$ORCA_WORKTREE_ID" "$WT" || { post_quiescence_safety_refusal; exit 1; }
   ORCA_PATH_MATCH_VERIFIED=1
 fi
 
@@ -1404,20 +1459,18 @@ if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
   else
     safety_rc=$?
     if [ "$safety_rc" -eq "$TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED" ]; then
-      cleanup_stale_lock_for_safety_check "$WT" || { report_gated_safety_refusal; exit 1; }
-      validate_worktree_teardown_safety || { report_gated_safety_refusal; exit 1; }
+      cleanup_stale_lock_for_safety_check "$WT" || { post_quiescence_safety_refusal; exit 1; }
+      validate_worktree_teardown_safety || { post_quiescence_safety_refusal; exit 1; }
     else
-      report_gated_safety_refusal
+      post_quiescence_safety_refusal
       exit 1
     fi
   fi
 fi
 
-# New tasks quiesce their endpoint, restore any pending rollback generation,
-# and fail closed on their machine-global completion report before lease release
-# or worktree removal. Tasks already in flight when this feature lands have no
-# report_required marker and retain the legacy teardown contract. --force is an
-# explicit discard, not a completion.
+# Report-gated tasks restore any pending rollback generation and fail closed on
+# their machine-global completion report before lease release or worktree removal.
+# --force is an explicit discard, not a completion.
 if [ "$REPORT_GATED" = 1 ]; then
   if [ "$MANAGED_ACCOUNT" = 1 ]; then
     reconcile_managed_account_rollback "$META" "$ID" "$DATA" || exit $?

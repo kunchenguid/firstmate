@@ -113,7 +113,12 @@ exit 0
 SH
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
-# tmux kill-window etc.: succeed silently.
+state="$(dirname "$0")/.tmux-live"
+case "${1:-}" in
+  display-message) [ -f "$state" ]; exit $? ;;
+  list-windows) [ ! -f "$state" ] || printf '%s\n' fm-task-x1; exit 0 ;;
+  kill-window) rm -f "$state"; exit 0 ;;
+esac
 exit 0
 SH
   # Default gh-axi mock: no PR is associated with the branch, and viewing any PR
@@ -136,6 +141,7 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/treehouse" "$fakebin/tmux" "$fakebin/gh-axi" "$fakebin/gh"
+  : > "$fakebin/.tmux-live"
 
   # Bare origin so the clone has an `origin` remote and origin/HEAD.
   git init -q --bare "$case_dir/origin.git"
@@ -186,6 +192,7 @@ write_meta() {
   local case_dir=$1 mode=$2 kind=$3
   fm_write_meta "$case_dir/state/task-x1.meta" \
     "window=fm-task-x1" \
+    "tmux_session_target=firstmate:fm-task-x1" \
     "worktree=$case_dir/wt" \
     "project=$case_dir/project" \
     "kind=$kind" \
@@ -2569,6 +2576,90 @@ SH
   pass "required report teardown quiesces before its final safety validation"
 }
 
+test_legacy_teardown_revalidates_after_quiescence() {
+  local case_dir live rc
+  case_dir=$(make_case legacy-post-quiesce-safety)
+  live="$case_dir/legacy-endpoint-live"
+  write_meta "$case_dir" no-mistakes ship
+  cat > "$case_dir/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  display-message) [ -f "$FM_FAKE_REPORT_LIVE" ]; exit $? ;;
+  list-windows) exit 0 ;;
+  kill-window)
+    printf 'late work\n' > "$FM_FAKE_WORKTREE/late-work.txt"
+    rm -f "$FM_FAKE_REPORT_LIVE"
+    exit 0
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/tmux"
+  : > "$live"
+
+  set +e
+  FM_FAKE_REPORT_LIVE="$live" FM_FAKE_WORKTREE="$case_dir/wt" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "legacy teardown: post-quiescence dirty work must refuse return"
+  assert_absent "$live" "legacy teardown validated before endpoint quiescence"
+  assert_present "$case_dir/wt/late-work.txt" "legacy teardown discarded post-quiescence work"
+  assert_present "$case_dir/state/task-x1.meta" "legacy teardown removed metadata after safety refusal"
+  assert_grep 'endpoint has already been shut down; the worktree and task metadata are preserved' "$case_dir/stderr" \
+    "legacy teardown did not explain its post-quiescence fail-safe state"
+  pass "legacy teardown quiesces before landed-work validation"
+}
+
+test_teardown_rejects_nested_metadata_roots_before_quiescence() {
+  local case_dir marker nested tmp rc
+  case_dir=$(make_case nested-teardown-root)
+  write_meta "$case_dir" no-mistakes ship
+  nested="$case_dir/project/nested"
+  marker="$case_dir/endpoint-killed"
+  mkdir -p "$nested"
+  tmp="$case_dir/meta.tmp"
+  sed "s#^project=.*#project=$nested#" "$case_dir/state/task-x1.meta" > "$tmp"
+  mv "$tmp" "$case_dir/state/task-x1.meta"
+  cat > "$case_dir/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+[ "${1:-}" != kill-window ] || : > "$FM_FAKE_KILL_MARKER"
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/tmux"
+
+  set +e
+  FM_FAKE_KILL_MARKER="$marker" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "nested teardown project metadata must be rejected"
+  assert_absent "$marker" "teardown quiesced an endpoint before validating metadata roots"
+  assert_present "$case_dir/state/task-x1.meta" "nested metadata refusal removed task metadata"
+  assert_grep 'not an exact inspectable repository root' "$case_dir/stderr" \
+    "nested metadata root refusal was unclear"
+  pass "teardown validates exact repository identity before mutation"
+}
+
+test_teardown_retains_untracked_claude_skill_draft() {
+  local case_dir draft rc
+  case_dir=$(make_case retained-claude-skill)
+  write_meta "$case_dir" no-mistakes ship
+  draft="$case_dir/wt/.claude/skills/draft/SKILL.md"
+  mkdir -p "$(dirname "$draft")"
+  printf '%s\n' '# draft' > "$draft"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "untracked .claude skill draft must refuse teardown"
+  assert_present "$draft" "teardown discarded an untracked .claude skill draft"
+  assert_present "$case_dir/state/task-x1.meta" "skill-draft refusal removed task metadata"
+  assert_grep 'has uncommitted changes' "$case_dir/stderr" \
+    "skill-draft refusal did not surface uncommitted work"
+  pass "teardown retains untracked .claude skill drafts"
+}
+
 test_teardown_refuses_unsafe_tasktmp_metadata() {
   local case_dir sentinel rc
   case_dir=$(make_case unsafe-tasktmp)
@@ -2732,6 +2823,13 @@ if [ "${FM_TEST_FOCUSED:-}" = review-round-12-ownership ]; then
   exit 0
 fi
 
+if [ "${FM_TEST_FOCUSED:-}" = review-round-refresh-safety ]; then
+  test_legacy_teardown_revalidates_after_quiescence
+  test_teardown_rejects_nested_metadata_roots_before_quiescence
+  test_teardown_retains_untracked_claude_skill_draft
+  exit 0
+fi
+
 test_local_only_fork_remote_allows
 test_teardown_prompts_tasks_axi_done_when_compatible
 test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present
@@ -2755,6 +2853,9 @@ test_herdr_teardown_clears_escalation_marker
 test_required_report_blocks_then_publishes_before_cleanup
 test_required_report_restores_rollback_generation_before_publish
 test_required_report_revalidates_after_quiescence
+test_legacy_teardown_revalidates_after_quiescence
+test_teardown_rejects_nested_metadata_roots_before_quiescence
+test_teardown_retains_untracked_claude_skill_draft
 test_teardown_refuses_unsafe_tasktmp_metadata
 test_teardown_rejects_malformed_report_requirement
 test_retained_direct_spawn_requires_confirmed_endpoint_quiescence

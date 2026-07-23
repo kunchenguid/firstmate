@@ -82,8 +82,9 @@
 #   --scout records kind=scout in the task's meta (report deliverable, scratch worktree;
 #   see AGENTS.md task lifecycle); --secondmate records kind=secondmate and launches in a
 #   provisioned firstmate home; the default is kind=ship.
-#   Before a secondmate launch, the home is locally fast-forwarded to the primary
-#   default-branch commit when safe; skipped syncs warn and launch unchanged.
+#   Before a secondmate launch, the home must fast-forward safely to the primary
+#   default-branch commit and independently match the live default tip.
+#   Any unproven freshness state refuses launch.
 #   Ship/scout spawns refresh the primary checkout before Treehouse acquisition,
 #   surface dirty pool entries, and durably lease one available worktree before
 #   creating the endpoint. They refuse to create that endpoint unless the leased
@@ -2373,26 +2374,24 @@ if [ "$RECOVERY_ACCOUNT" = 1 ]; then
 fi
 
 if [ "$KIND" = secondmate ]; then
-  # Local-HEAD sync: before launch, fast-forward this secondmate's worktree to the
-  # PRIMARY checkout's current default-branch commit, so a freshly spawned or
-  # recovery-respawned secondmate always runs the primary's version (AGENTS.md
-  # spawn section). Purely local - no fetch: the home is a worktree of this same
-  # repo and already holds the commit. ff-only and guarded; a dirty, diverged, or
-  # wrong-branch home is left untouched and launches as-is. The agent re-reads
-  # AGENTS.md fresh on launch, so no nudge is needed here.
-  if sm_primary_head=$(primary_head_commit "$FM_ROOT"); then
-    sm_ff_out=$(ff_target "$PROJ_ABS" "secondmate $ID" "$sm_primary_head" yes yes 2>&1 || true)
-    case "$sm_ff_out" in
-      *': skipped:'*)
-        sm_ff_line=$(first_line "$sm_ff_out")
-        sm_ff_prefix="secondmate $ID: skipped: "
-        sm_ff_reason=${sm_ff_line#"$sm_ff_prefix"}
-        echo "warning: secondmate $ID sync skipped before launch: $sm_ff_reason" >&2
-        ;;
-    esac
-  else
-    echo "warning: secondmate $ID sync skipped before launch: primary default-branch commit cannot be resolved" >&2
+  sm_primary_head=$(primary_head_commit "$FM_ROOT") || {
+    echo "error: refusing secondmate launch because the primary default-branch commit cannot be resolved" >&2
+    exit 1
+  }
+  if ! sm_ff_out=$(ff_target "$PROJ_ABS" "secondmate $ID" "$sm_primary_head" yes yes 2>&1); then
+    echo "error: refusing secondmate launch because its home cannot fast-forward safely: $(first_line "$sm_ff_out")" >&2
+    exit 1
   fi
+  case "$sm_ff_out" in
+    *': skipped:'*)
+      echo "error: refusing secondmate launch because its home freshness is unresolved: $(first_line "$sm_ff_out")" >&2
+      exit 1
+      ;;
+  esac
+  "$SCRIPT_DIR/fm-checkout-refresh.sh" verify-home "$PROJ_ABS" "$FM_ROOT" || {
+    echo "error: refusing secondmate launch because its live default-tip freshness cannot be proved" >&2
+    exit 1
+  }
   # Inheritable-config propagation: push the primary's declared LOCAL config into
   # this secondmate home's config/, so the secondmate's OWN crewmates and backlog
   # backend inherit the primary's settings. config/ is gitignored, so this is a
