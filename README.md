@@ -41,7 +41,7 @@ There is no app to install; the whole orchestrator is an `AGENTS.md` file that a
 - **Guarded by construction** - the first mate is read-only over your projects except for clean local default-branch refreshes, safe pruning of local branches whose remote is gone, and approved `local-only` fast-forward merges; crewmates work in disposable [treehouse](https://github.com/kunchenguid/treehouse) worktrees.
   Ship tasks follow each project's delivery mode, and scout tasks produce local reports without pushing anything.
 
-This is not an agent harness. This is not a skill. This is not a CLI.
+This is not an agent harness. The orchestrator itself is not a skill. This is not a CLI.
 
 This is.. a directory that turns any agent into your firstmate, and you the captain.
 
