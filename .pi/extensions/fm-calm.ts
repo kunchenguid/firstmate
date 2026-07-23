@@ -32,6 +32,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Box, Container, getKeybindings, type Component } from "@earendil-works/pi-tui";
 import type { TSchema } from "typebox";
+import { installCalmAssistantLayout } from "./lib/fm-calm-assistant-layout.ts";
 import {
   calmPresentationHides,
   calmPresentationIsActive,
@@ -72,6 +73,8 @@ const extensionDir = dirname(extensionFile);
 const root = resolve(extensionDir, "../..");
 
 export default function (pi: ExtensionAPI) {
+  installCalmAssistantLayout();
+
   let exportRendering = false;
   let removeTerminalInputHandler: (() => void) | undefined;
 
