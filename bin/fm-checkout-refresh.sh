@@ -672,7 +672,7 @@ record_reinspection_failure() {
 
 run_once() {
   local force=0 verbose=0 session=0 scheduled=0 prune=0 arg lock discovery hygiene checkout key tip_file last_file alert_file
-  local prior_tip now last due probe_ok output_file output line hygiene_failed=0 coverage_failed=0 status=0
+  local prior_tip now last due probe_ok output_file output line reinspected hygiene_failed=0 coverage_failed=0 status=0
   local coverage=healthy
   for arg in "$@"; do
     case "$arg" in
@@ -721,7 +721,7 @@ run_once() {
 
   while IFS= read -r checkout; do
     [ -n "$checkout" ] || continue
-    if ! git -C "$checkout" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    if ! reinspected=$(exact_git_root "$checkout") || [ "$reinspected" != "$checkout" ]; then
       record_reinspection_failure "$checkout"
       coverage_failed=1
       continue
@@ -737,7 +737,7 @@ run_once() {
 
   while IFS= read -r checkout; do
     [ -n "$checkout" ] || continue
-    if ! git -C "$checkout" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    if ! reinspected=$(exact_git_root "$checkout") || [ "$reinspected" != "$checkout" ]; then
       record_reinspection_failure "$checkout"
       coverage_failed=1
       continue

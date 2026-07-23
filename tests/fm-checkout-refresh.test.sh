@@ -557,6 +557,7 @@ test_lock_root_failure_invalidates_coverage_before_preparation() {
 
 test_reinspection_failure_invalidates_coverage_health() {
   local remote home state_root lock_root treehouse project fakebin real_git out key alert
+  local initial_head reinspection_count
   remote=$(build_origin reinspection)
   home="$TMP_ROOT/reinspection-home"
   state_root="$TMP_ROOT/reinspection-state"
@@ -565,17 +566,27 @@ test_reinspection_failure_invalidates_coverage_health() {
   project="$home/projects/reinspection"
   fakebin="$TMP_ROOT/reinspection-fakebin"
   real_git=$(command -v git)
+  fm_git_init_commit "$home"
   mkdir -p "$home/projects" "$home/config" "$state_root" "$treehouse" "$fakebin"
   clone_from "$remote" "$project"
   project=$(cd "$project" && pwd -P)
+  home=$(cd "$home" && pwd -P)
+  initial_head=$(git -C "$project" rev-parse HEAD)
+  advance_origin reinspection changed-after-discovery
   printf '%s\n' manual-reinspection-heartbeat > "$state_root/heartbeat"
   cat > "$fakebin/git" <<'SH'
 #!/usr/bin/env bash
 if [ "${1:-}" = -C ] \
   && [ "${2:-}" = "${FM_TEST_REINSPECTION_TARGET:?}" ] \
   && [ "${3:-}" = rev-parse ] \
-  && [ "${4:-}" = --is-inside-work-tree ]; then
-  exit 74
+  && [ "${4:-}" = --show-toplevel ]; then
+  count=$(cat "${FM_TEST_REINSPECTION_COUNT:?}" 2>/dev/null || printf 0)
+  count=$((count + 1))
+  printf '%s\n' "$count" > "$FM_TEST_REINSPECTION_COUNT"
+  if [ "$count" -gt 1 ]; then
+    printf '%s\n' "${FM_TEST_REINSPECTION_ENCLOSING:?}"
+    exit 0
+  fi
 fi
 exec "${FM_TEST_REAL_GIT:?}" "$@"
 SH
@@ -586,6 +597,8 @@ SH
     FM_CHECKOUT_REFRESH_LOCK_ROOT="$lock_root" \
     FM_TREEHOUSE_ROOT="$treehouse" \
     FM_TEST_REAL_GIT="$real_git" FM_TEST_REINSPECTION_TARGET="$project" \
+    FM_TEST_REINSPECTION_ENCLOSING="$home" \
+    FM_TEST_REINSPECTION_COUNT="$TMP_ROOT/reinspection-count" \
     PATH="$fakebin:$PATH" \
     "$ROOT/bin/fm-checkout-refresh.sh" run-once --force 2>&1)
 
@@ -593,6 +606,11 @@ SH
     "covered-checkout reinspection failure was not surfaced"
   assert_refresh_state "$state_root" unhealthy
   assert_heartbeat_value "$state_root" manual-reinspection-heartbeat
+  reinspection_count=$(cat "$TMP_ROOT/reinspection-count")
+  [ "$reinspection_count" -eq 3 ] \
+    || fail "both post-discovery passes did not repeat the exact-root proof"
+  [ "$(git -C "$project" rev-parse HEAD)" = "$initial_head" ] \
+    || fail "identity-drifted covered path was refreshed through its enclosing repository"
   key=$(printf '%s' "$project" | shasum -a 256 | awk '{print substr($1,1,24)}')
   alert="$state_root/$key.alert"
   assert_grep "covered checkout became uninspectable during refresh" "$alert" \
@@ -1030,6 +1048,11 @@ if [ "${FM_TEST_FOCUSED:-}" = review-round-15 ]; then
   test_reinspection_failure_invalidates_coverage_health
   test_scheduler_liveness_is_scheduler_owned
   test_launch_agent_definition_is_home_scoped_with_scheduler_seam
+  exit 0
+fi
+
+if [ "${FM_TEST_FOCUSED:-}" = review-round-16 ]; then
+  test_reinspection_failure_invalidates_coverage_health
   exit 0
 fi
 
