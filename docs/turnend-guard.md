@@ -38,7 +38,7 @@ If `jq` is missing or hook stdin is empty, the guard fails open and exits 0 beca
 
 ## Harness Integrations
 
-All verified primary harnesses have a tracked integration:
+All verified primary harnesses except Kimi have a tracked integration; Kimi runs without a turn-end hook because its shared `~/.kimi-code/config.toml` stays untouched until a safe idempotent global `Stop`-hook merger is verified, so it relies solely on its bounded foreground checkpoint protocol (see [kimi-harness.md](kimi-harness.md)).
 
 - `claude`: `.claude/settings.json` registers a `Stop` hook command anchored through `"$CLAUDE_PROJECT_DIR"/bin/fm-turnend-guard.sh`.
 - `codex`: `.codex/hooks.json` registers a `Stop` hook that reads the hook payload once, anchors the executable to the hook command process working directory, verifies that root is firstmate-shaped and hook-bearing, and pipes the original payload to that checkout's `bin/fm-turnend-guard.sh`.
@@ -149,6 +149,6 @@ No Herdr command was issued and no fleet state was touched; the experiment wrote
 
 ## Tests
 
-`tests/fm-turnend-guard.test.sh` covers the shared predicate, primary scoping (including a secondmate's own home being guarded like the main primary while its child worktrees stay exempt), `FM_HOME` and `FM_STATE_OVERRIDE` precedence, Pi logical-run latch behavior for no-tool and multi-tool runs, fail-open behavior without `jq`, tracked hook registration for all five harnesses, and the Grok adapter's forced-resume loop guard and permission-mode regression.
+`tests/fm-turnend-guard.test.sh` covers the shared predicate, primary scoping (including a secondmate's own home being guarded like the main primary while its child worktrees stay exempt), `FM_HOME` and `FM_STATE_OVERRIDE` precedence, Pi logical-run latch behavior for no-tool and multi-tool runs, fail-open behavior without `jq`, tracked hook registration for all five hook-integrated harnesses, and the Grok adapter's forced-resume loop guard and permission-mode regression.
 The default behavior suite does not invoke live language-model harnesses.
 `FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh` opts into the isolated interactive Pi regression recorded above.

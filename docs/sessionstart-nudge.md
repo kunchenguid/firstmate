@@ -26,6 +26,8 @@ Every path exits 0, including malformed state and adapter errors, because Claude
 | Pi | `.pi/extensions/fm-primary-turnend-guard.ts` handles `session_start` reasons `startup`, `new`, and `resume`, then injects the wrapper output with `pi.sendMessage`. | The custom message enters model context without racing an initial positional prompt, and the changed extension passes strict TypeScript checking on Pi 0.80.10. |
 | Grok | `.grok/hooks/fm-primary-sessionstart-nudge.json` registers a project `SessionStart` hook and invokes the wrapper through inline-defaulted `${GROK_WORKSPACE_ROOT:-}`. | The project event fires on Grok 0.2.103, but hook stdout does not reach model context, so this path is documented fail-open. |
 
+Kimi has no tracked transport because firstmate installs no Kimi hooks; see the hook gap in [`docs/kimi-harness.md`](kimi-harness.md).
+
 The OpenCode nudge runs only on `session.created`.
 The watcher-arm and turn-end guard plugins run later on `session.idle`, and the turn-end guard continues to let the watcher coordinator act first, so the three plugins do not race for one lifecycle event.
 
