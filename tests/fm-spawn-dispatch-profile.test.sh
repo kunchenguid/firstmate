@@ -124,6 +124,63 @@ test_no_profile_keeps_claude_launch_unchanged() {
   pass "no --model/--effort records defaults and keeps the claude launch byte-identical"
 }
 
+test_capacity_failover_absent_keeps_spawn_unchanged() {
+  local rec id out status expected launch state_real
+  id=capacity-off-z16
+  rec=$(make_spawn_case capacity-off codex "$id")
+  read_case_record "$rec"
+  mkdir -p "$HOME_DIR/state/capacity-cooldowns"
+  printf '%s\n' \
+    'schema=fm-capacity-cooldown.v1' \
+    'harness=codex' \
+    'profile=gpt-5.5' \
+    'reset_epoch=9999999999' \
+    > "$HOME_DIR/state/capacity-cooldowns/ignored.env"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "spawn should ignore capacity cooldowns when config/capacity-failover is absent"
+  assert_contains "$out" "spawned $id harness=codex" "spawn did not report codex"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" codex default default
+  assert_absent "$HOME_DIR/config/capacity-failover" "test setup should leave capacity failover disabled"
+
+  state_real=$(cd "$HOME_DIR/state" && pwd -P)
+  launch=$(cat "$LAUNCH_LOG")
+  expected="codex --dangerously-bypass-approvals-and-sandbox -c \"notify=[\\\"bash\\\",\\\"-c\\\",\\\"touch '$state_real/$id.turn-ended'\\\"]\" \"\$(cat '$HOME_DIR/data/$id/brief.md')\""
+  [ "$launch" = "$expected" ] || fail "capacity-off codex launch changed"$'\n'"expected: $expected"$'\n'"actual:   $launch"
+  pass "absent config/capacity-failover keeps spawn behavior byte-identical even with cooldown records present"
+}
+
+test_capacity_failover_host_pressure_opt_in_refuses_spawn() {
+  local rec id out status errexit_was_set
+  id=capacity-pressure-z17
+  rec=$(make_spawn_case capacity-pressure codex "$id")
+  read_case_record "$rec"
+  printf '%s\n' \
+    'host-pressure=on' \
+    'disk_floor_mb=9000' \
+    'disk_clear_mb=12000' \
+    'max_running_tasks=10' \
+    > "$HOME_DIR/config/capacity-failover"
+
+  export FM_PRESSURE_MEMORY_AVAILABLE_MB=5000
+  export FM_PRESSURE_DISK_AVAILABLE_MB=8200
+  export FM_PRESSURE_RUNNING_TASKS=0
+  case $- in *e*) errexit_was_set=1 ;; *) errexit_was_set=0 ;; esac
+  set +e
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  if [ "$errexit_was_set" -eq 1 ]; then set -e; else set +e; fi
+  unset FM_PRESSURE_MEMORY_AVAILABLE_MB FM_PRESSURE_DISK_AVAILABLE_MB FM_PRESSURE_RUNNING_TASKS
+
+  expect_code 1 "$status" "critical host pressure should refuse spawn when explicitly enabled"
+  assert_contains "$out" "state=critical" "host-pressure refusal should print pressure evidence"
+  assert_contains "$out" "disk_floor_below_min" "spawn refusal should be caused by hard disk floor"
+  assert_contains "$out" "backpressure refused spawn of $id" "spawn refusal should explain ownership-preserving backpressure"
+  assert_absent "$HOME_DIR/state/$id.meta" "pressure refusal should happen before task meta ownership is created"
+  pass "opt-in disk-floor backpressure refuses new spawn before ownership metadata changes"
+}
+
 test_active_dispatch_profile_requires_explicit_harness_for_ship() {
   local rec id out status
   id=profile-required-ship-z11
@@ -527,6 +584,8 @@ test_omp_secondmate_omits_turn_end_hook() {
 }
 
 test_no_profile_keeps_claude_launch_unchanged
+test_capacity_failover_absent_keeps_spawn_unchanged
+test_capacity_failover_host_pressure_opt_in_refuses_spawn
 test_active_dispatch_profile_requires_explicit_harness_for_ship
 test_active_dispatch_profile_requires_explicit_harness_for_scout
 test_active_dispatch_profile_allows_explicit_harness

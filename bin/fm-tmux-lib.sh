@@ -31,6 +31,20 @@
 # benefits, and the herdr adapter routes through the same owner (task
 # afk-herdr-false-pending), so the two backends cannot drift.
 #
+# Busy-queued Enter (opencode 1.18.4, on the tmux backend only for now): when
+# the agent is mid-turn, opencode accepts Enter as a "send when the turn ends"
+# keystroke but does NOT clear the composer until then, so the composer keeps
+# showing the typed text the whole time. The plain "empty iff composer cleared"
+# acknowledgement above false-positives on a swallowed Enter for every steer
+# sent to a busy opencode pane, and `fm-send` exits non-zero on a normal
+# captain instruction. The submit core now falls back to `fm_pane_is_busy` once
+# the Enter-retry budget is spent: a busy pane means the harness accepted and
+# queued the Enter (report `empty` so the caller does not re-send), while an
+# idle pane keeps the `pending` verdict (a genuine swallow). The herdr backend
+# observes the same opencode behavior but needs a separate fix; it is recorded
+# as a known gap in `docs/herdr-backend.md` rather than patched here, so the
+# tmux adapter does not paper over a herdr-specific shape.
+#
 # Per-harness override: FM_COMPOSER_IDLE_RE matches an empty composer after
 # ghost and structural border stripping. FM_BUSY_REGEX overrides the busy
 # footer set (mirrors fm-watch.sh / the daemon).
@@ -242,8 +256,18 @@ fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep> [text start en
       [ "$region_state" = empty ] && { printf 'empty'; return 0; }
     fi
     i=$((i + 1))
-    [ "$i" -lt "$retries" ] || { printf 'pending'; return 0; }
+    [ "$i" -lt "$retries" ] || break
   done
+  # Retries exhausted, composer still shows pending.
+  # If the pane is busy (agent mid-turn), the harness accepted the Enter
+  # and queued the message for processing when the current turn ends.
+  # Treat it as submitted so the caller does not re-send.
+  # On an idle pane, keep reporting pending - a genuine swallow.
+  if fm_pane_is_busy "$target"; then
+    printf 'empty'
+  else
+    printf 'pending'
+  fi
 }
 
 fm_tmux_submit_core() {  # <target> <text> <retries> <enter-sleep> <settle>

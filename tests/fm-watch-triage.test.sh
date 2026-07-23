@@ -129,11 +129,35 @@ test_classifier_primitives() {
   status_is_captain_relevant "done: b" || fail "done: not recognized as captain-relevant"
   status_is_captain_relevant "needs-decision [key=q1]: b" || fail "keyed needs-decision not recognized as captain-relevant"
   status_is_captain_relevant "working: b" && fail "working: wrongly recognized as captain-relevant"
+  # Incident regression: free-text "merged" inside a nonterminal working: line must
+  # not become captain-relevant (AFK false-terminal path).
+  status_is_captain_relevant \
+    "working: stage 2 setup complete on PR #74 exact source branch rebased onto merged #76; task dates preserved" \
+    && fail "working: ... merged #N wrongly recognized as captain-relevant"
+  status_is_captain_relevant "working: rebased onto predecessor #76" \
+    && fail "working: predecessor prose wrongly recognized as captain-relevant"
+  status_is_captain_relevant "working: PR ready checks green merged ready in branch" \
+    && fail "working: free-text tokens wrongly recognized as captain-relevant"
+  status_is_captain_relevant "done: PR https://x/pull/76 checks green" \
+    || fail "genuine done: checks green not captain-relevant"
+  status_is_terminal_verb "done: PR https://x/pull/76 checks green" \
+    || fail "done: not a terminal verb"
+  status_is_terminal_verb "working: rebased onto merged #76" \
+    && fail "working: wrongly classed as terminal verb"
+  status_is_captain_relevant "merged" || fail "legacy bare merged free-text not captain-relevant"
+  status_is_captain_relevant "PR ready https://x/pull/2" \
+    || fail "legacy bare PR ready free-text not captain-relevant"
   [ "$(window_to_task "sess:fm-fix-login-k3")" = "fix-login-k3" ] || fail "window_to_task did not strip session+fm- prefix"
   fm_write_meta "$state/herdr-task.meta" "window=default:w1:p2" "backend=herdr"
   [ "$(window_to_task "default:w1:p2" "$state")" = "herdr-task" ] || fail "window_to_task did not resolve opaque backend target through metadata"
   FM_CAPTAIN_RE='custom-verb:' status_is_captain_relevant "custom-verb: x" || fail "FM_CAPTAIN_RE override not honored"
   FM_CAPTAIN_RE='custom-verb:' status_is_captain_relevant "done: x" && fail "FM_CAPTAIN_RE override did not replace the default verb set"
+  FM_CAPTAIN_RE='merged|custom-verb:' status_is_captain_relevant "working: rebased onto merged #76" \
+    && fail "FM_CAPTAIN_RE override bypassed working: suppression"
+  FM_CAPTAIN_RE='checks green|custom-verb:' status_is_captain_relevant "paused: checks green pending approval" \
+    && fail "FM_CAPTAIN_RE override bypassed paused: suppression"
+  FM_CAPTAIN_RE='custom-verb:' status_is_captain_relevant "custom-verb: x" \
+    || fail "nonterminal suppression weakened custom bare-line behavior"
   printf 'needs-decision: should docs mention [key=prose]?\nneeds-decision [key=q1]: real choice\nresolved: docs still mention [key=q1]\nneeds-decision [key=bad key]: malformed\n' > "$state/keys.status"
   open=$(status_open_decisions "$state/keys.status")
   printf '%s' "$open" | grep -F $'q1\t' >/dev/null \
@@ -809,7 +833,7 @@ test_secondmate_unpause_clears_pause_tracking() {
 }
 
 test_nonterminal_stale_pause_transitions_reclassify_unchanged_hash() {
-  local dir state fakebin out capture_file window key pane_hash sig pid
+  local dir state fakebin out capture_file window key pane_hash sig pid i
   dir=$(make_case nonterminal-stale-pause-transition); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-transition"
   printf 'idle awaiting external\n' > "$capture_file"
@@ -829,11 +853,16 @@ test_nonterminal_stale_pause_transitions_reclassify_unchanged_hash() {
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
-  if ! wait_live "$pid" 30; then
-    reap "$pid"; fail "a stale hash that entered pause was wedge-escalated: $(cat "$out")"
-  fi
+  i=0
+  while [ "$i" -lt 100 ] && kill -0 "$pid" 2>/dev/null; do
+    [ -e "$state/.paused-$key" ] && [ ! -e "$state/.stale-since-$key" ] && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  kill -0 "$pid" 2>/dev/null || { reap "$pid"; fail "a stale hash that entered pause was wedge-escalated: $(cat "$out")"; }
   [ -e "$state/.paused-$key" ] || { reap "$pid"; fail "unchanged stale hash did not enter paused mode"; }
   [ ! -e "$state/.stale-since-$key" ] || { reap "$pid"; fail "pause transition retained its wedge timer"; }
+  wait_live "$pid" 30 || { reap "$pid"; fail "a stale hash that entered pause was wedge-escalated: $(cat "$out")"; }
   reap "$pid"
 
   printf 'working: upstream landed, resuming\n' > "$state/transition.status"
@@ -844,11 +873,16 @@ test_nonterminal_stale_pause_transitions_reclassify_unchanged_hash() {
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
-  if ! wait_live "$pid" 30; then
-    reap "$pid"; fail "a stale hash that left pause did not resume wedge tracking: $(cat "$out")"
-  fi
+  i=0
+  while [ "$i" -lt 100 ] && kill -0 "$pid" 2>/dev/null; do
+    [ ! -e "$state/.paused-$key" ] && [ -s "$state/.stale-since-$key" ] && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  kill -0 "$pid" 2>/dev/null || { reap "$pid"; fail "a stale hash that left pause did not resume wedge tracking: $(cat "$out")"; }
   [ ! -e "$state/.paused-$key" ] || { reap "$pid"; fail "unchanged stale hash retained paused mode after resume"; }
   [ -s "$state/.stale-since-$key" ] || { reap "$pid"; fail "unchanged stale hash did not restart wedge tracking after resume"; }
+  wait_live "$pid" 30 || { reap "$pid"; fail "a stale hash that left pause did not resume wedge tracking: $(cat "$out")"; }
   reap "$pid"
   unset FM_FAKE_CREW_STATE
   pass "unchanged stale hashes reclassify when a crew enters or leaves pause"
