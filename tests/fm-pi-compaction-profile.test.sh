@@ -315,8 +315,8 @@ pass "hostile project and extension surfaces are neutralized while explicit Firs
 for backend in tmux herdr zellij orca cmux; do
   assert_grep "  $backend)" "$ROOT/bin/fm-spawn.sh" "spawn lost the $backend route"
 done
-assert_grep 'MODELFLAG=$(model_flag_for_harness' "$ROOT/bin/fm-spawn.sh" "backend routes no longer converge on one rendered profile"
-assert_grep 'spawn_send_literal "$T" "$LAUNCH"' "$ROOT/bin/fm-spawn.sh" "rendered profile is not submitted through the common backend handoff"
+assert_grep "MODELFLAG=\$(model_flag_for_harness" "$ROOT/bin/fm-spawn.sh" "backend routes no longer converge on one rendered profile"
+assert_grep "spawn_send_literal \"\$T\" \"\$LAUNCH\"" "$ROOT/bin/fm-spawn.sh" "rendered profile is not submitted through the common backend handoff"
 assert_grep 'backend=orca does not support --secondmate' "$ROOT/bin/fm-spawn.sh" "Orca secondmate safe refusal changed"
 assert_grep 'backend=cmux does not support --secondmate' "$ROOT/bin/fm-spawn.sh" "cmux secondmate safe refusal changed"
 pass "ships, scouts, batches, recovery, and supported secondmates share one profile across all backends"

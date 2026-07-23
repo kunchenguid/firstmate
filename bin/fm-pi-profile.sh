@@ -82,15 +82,15 @@ fm_pi_profile_load() { # <config-dir> <project-dir>
   [ "$FM_PI_KEEP_RECENT_TOKENS" -lt "$FM_PI_THRESHOLD" ] \
     || { fm_pi_profile_fail "keep_recent_tokens must be below the compaction boundary"; return 1; }
 
-  pi_real=$(NODE_OPTIONS= NODE_PATH= node -e 'process.stdout.write(require("node:fs").realpathSync(process.argv[1]))' "$FM_PI_COMMAND") \
+  pi_real=$(NODE_OPTIONS='' NODE_PATH='' node -e 'process.stdout.write(require("node:fs").realpathSync(process.argv[1]))' "$FM_PI_COMMAND") \
     || { fm_pi_profile_fail "cannot resolve pi_command"; return 1; }
   case "$pi_real" in */dist/cli.js) pi_package=${pi_real%/dist/cli.js} ;;
     *) fm_pi_profile_fail "pi_command is not the Pi coding-agent CLI"; return 1 ;;
   esac
   FM_PI_COMMAND=$pi_real
-  [ "$(NODE_OPTIONS= NODE_PATH= PI_PACKAGE_DIR= "$FM_PI_COMMAND" --version 2>/dev/null)" = "$FM_PI_VERSION" ] \
+  [ "$(NODE_OPTIONS='' NODE_PATH='' PI_PACKAGE_DIR='' "$FM_PI_COMMAND" --version 2>/dev/null)" = "$FM_PI_VERSION" ] \
     || { fm_pi_profile_fail "pi_command does not report version $FM_PI_VERSION"; return 1; }
-  metadata=$(NODE_OPTIONS= NODE_PATH= PI_PACKAGE_DIR= node --input-type=module - "$pi_package" "$FM_PI_AGENT_DIR" "$FM_PI_PROVIDER" "$FM_PI_MODEL_ID" <<'NODE'
+  metadata=$(NODE_OPTIONS='' NODE_PATH='' PI_PACKAGE_DIR='' node --input-type=module - "$pi_package" "$FM_PI_AGENT_DIR" "$FM_PI_PROVIDER" "$FM_PI_MODEL_ID" <<'NODE'
 import { pathToFileURL } from "node:url";
 const [pkg, agentDir, provider, modelId] = process.argv.slice(2);
 const { ModelRuntime } = await import(pathToFileURL(`${pkg}/dist/index.js`));
@@ -109,7 +109,7 @@ NODE
   [ "$metadata" = "$FM_PI_PROVIDER"$'\t'"$FM_PI_MODEL_ID"$'\t'"$FM_PI_CONTEXT_WINDOW"$'\t'true ] \
     || { fm_pi_profile_fail "effective model metadata mismatch (resolved $metadata)"; return 1; }
 
-  settings=$(NODE_OPTIONS= NODE_PATH= PI_PACKAGE_DIR= node --input-type=module - "$pi_package" "$FM_PI_AGENT_DIR" "$project_dir" <<'NODE'
+  settings=$(NODE_OPTIONS='' NODE_PATH='' PI_PACKAGE_DIR='' node --input-type=module - "$pi_package" "$FM_PI_AGENT_DIR" "$project_dir" <<'NODE'
 import { pathToFileURL } from "node:url";
 const [pkg, agentDir, cwd] = process.argv.slice(2);
 const { SettingsManager } = await import(pathToFileURL(`${pkg}/dist/index.js`));
