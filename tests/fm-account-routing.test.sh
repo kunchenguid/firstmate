@@ -375,6 +375,8 @@ run_spawn() {
     FM_FAKE_TMUX_LOG="$TMUX_LOG" FM_FAKE_AF_LOG="$AF_LOG" \
     FM_FAKE_TREEHOUSE_LOG="$TREEHOUSE_LOG" FM_FAKE_LIFECYCLE_LOG="$LIFECYCLE_LOG" \
     FM_FAKE_ORCA_LOG="$ORCA_LOG" \
+    FM_CHECKOUT_REFRESH_STATE_ROOT="$CASE_DIR/checkout-refresh-state" \
+    FM_CHECKOUT_REFRESH_LOCK_ROOT="$CASE_DIR/checkout-refresh-locks" \
     FM_FAKE_ENDPOINT_FILE="$CASE_DIR/endpoint-live" FM_FAKE_TMUX_LABEL_FILE="$CASE_DIR/tmux-label" \
     FM_FAKE_AF_RESUME_ARM="$CASE_DIR/resume-arm" FM_FAKE_AF_SESSION_REFRESHED="$CASE_DIR/session-refreshed" \
     FM_FAKE_AF_RESUME_READY="$HOME_DIR/state/.$id.account-native-ready" FM_FAKE_AF_RESUME_GO="$HOME_DIR/state/.$id.account-native-go" \
@@ -449,6 +451,39 @@ test_off_is_byte_compatible_and_never_calls_agent_fleet() {
   assert_grep "Summary, What changed, Verification, Visual evidence, Artifacts, and Follow-ups" "$HOME_DIR/data/$id/brief.md" "upgraded brief omitted the completion-report sections"
   assert_contains "$out" "spawned $id" "default-off spawn did not complete"
   pass "routing off makes no Agent Fleet call and preserves launch/meta bytes"
+}
+
+test_failed_freshness_proof_rolls_back_unmanaged_resources() {
+  local id rec out status default_branch
+  id=checkout-freshness-rollback-z1a
+  rec=$(make_case checkout-freshness-rollback claude "$id")
+  read_case "$rec"
+  fm_git_add_origin "$PROJ_DIR" "$CASE_DIR/origin.git"
+  default_branch=$(git -C "$PROJ_DIR" branch --show-current)
+  printf '%s\n' upstream > "$PROJ_DIR/upstream.txt"
+  git -C "$PROJ_DIR" add upstream.txt
+  git -C "$PROJ_DIR" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit -qm upstream
+  git -C "$PROJ_DIR" push -q -u origin "$default_branch"
+
+  if out=$(run_spawn "$id" "$PROJ_DIR"); then
+    status=0
+  else
+    status=$?
+  fi
+
+  [ "$status" -ne 0 ] || fail "stale acquired worktree passed the spawn freshness proof"
+  assert_contains "$out" "acquired worktree is stale" \
+    "failed freshness proof did not identify the stale acquired worktree"
+  assert_regex '^kill-window ' "$TMUX_LOG" \
+    "failed unmanaged freshness proof retained its prepared endpoint"
+  assert_grep "return --force $WT_DIR" "$TREEHOUSE_LOG" \
+    "failed unmanaged freshness proof did not return its acquired worktree"
+  assert_absent "$CASE_DIR/endpoint-live" \
+    "failed unmanaged freshness proof left its endpoint alive"
+  assert_absent "$HOME_DIR/state/$id.meta" \
+    "failed unmanaged freshness proof published task metadata"
+  pass "failed freshness proofs unwind endpoints and worktrees in unmanaged mode"
 }
 
 test_completion_contract_upgrade_is_contained_nonfollowing_and_atomic() {
@@ -5399,6 +5434,11 @@ if [ "${FM_TEST_FOCUSED:-}" = stale-reclaim-generation ]; then
   exit 0
 fi
 
+if [ "${FM_TEST_FOCUSED:-}" = checkout-freshness-cleanup ]; then
+  run_isolated_test test_failed_freshness_proof_rolls_back_unmanaged_resources
+  exit 0
+fi
+
 if [ "${FM_TEST_FOCUSED:-}" = continuation-status-timeout ]; then
   run_isolated_test test_continuation_bounds_no_mistakes_status_snapshot
   exit 0
@@ -5728,6 +5768,7 @@ fi
 
 run_isolated_test test_reserved_generation_is_durable_before_lease_mutation
 run_isolated_test test_off_is_byte_compatible_and_never_calls_agent_fleet
+run_isolated_test test_failed_freshness_proof_rolls_back_unmanaged_resources
 run_isolated_test test_completion_contract_upgrade_is_contained_nonfollowing_and_atomic
 run_isolated_test test_completion_contract_ignores_raw_html_headings
 run_isolated_test test_enforce_pool_wraps_backend_and_records_real_session

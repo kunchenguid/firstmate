@@ -21,10 +21,16 @@
 # A changed tip triggers an immediate safe refresh.
 # FM_CHECKOUT_REFRESH_BACKSTOP seconds without a refresh triggers one anyway, so
 # missed signals and lost state remain bounded.
-# The per-user LaunchAgent installed by `install` runs this probe every
-# FM_CHECKOUT_REFRESH_INTERVAL seconds while Firstmate is idle.
+# The home-scoped per-user LaunchAgent installed by `install` runs this probe
+# every FM_CHECKOUT_REFRESH_INTERVAL seconds while that Firstmate home is idle.
+# Its default state is under checkout-refresh/homes/<FM_HOME hash>, while
+# checkout-refresh/locks remains shared so overlapping home coverage serializes
+# mutation of the same clone.
+# Bounded child commands stay inside the refresher's process group, so the
+# aggregate session-start timeout still owns every nested fetch and fast-forward.
 #
-# Every refresh delegates to fm-fleet-sync.sh with pruning disabled.
+# Cadence and spawn-preflight refreshes delegate to fm-fleet-sync.sh with pruning
+# disabled, while the explicit session-start mode preserves gone-branch pruning.
 # Dirty, diverged, non-default, and otherwise unsafe checkouts remain untouched
 # and are recorded as durable alerts.
 # Every probe also inventories untracked files in both the covered seed
@@ -46,27 +52,47 @@
 #
 # Usage:
 #   fm-checkout-refresh.sh discover
-#   fm-checkout-refresh.sh run-once [--force] [--verbose]
+#   fm-checkout-refresh.sh run-once [--force] [--verbose] [--session]
 #   fm-checkout-refresh.sh preflight <checkout>
 #   fm-checkout-refresh.sh verify-worktree <worktree>
 #   fm-checkout-refresh.sh ensure
 #   fm-checkout-refresh.sh install
+#
+# `install` and `ensure` dispatch through the scheduler adapter seam.
+# macOS launchd is the implemented primary-fleet adapter.
+# Linux currently has no cron/systemd adapter and reports that limitation
+# explicitly instead of pretending a background backstop exists.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
+if FM_HOME_CANONICAL=$(cd "$FM_HOME" 2>/dev/null && pwd -P); then
+  :
+else
+  FM_HOME_CANONICAL=$FM_HOME
+fi
+FM_HOME_KEY=$(printf '%s' "$FM_HOME_CANONICAL" | shasum -a 256 | awk '{print substr($1,1,16)}')
 PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 CONFIG_FILE="${FM_CHECKOUT_REFRESH_CONFIG:-$CONFIG/checkout-refresh}"
 TREEHOUSE_ROOT="${FM_TREEHOUSE_ROOT:-$HOME/.treehouse}"
-STATE_ROOT="${FM_CHECKOUT_REFRESH_STATE_ROOT:-${XDG_STATE_HOME:-$HOME/.local/state}/firstmate/checkout-refresh}"
+STATE_BASE="${FM_CHECKOUT_REFRESH_STATE_BASE:-${XDG_STATE_HOME:-$HOME/.local/state}/firstmate/checkout-refresh}"
+if [ -n "${FM_CHECKOUT_REFRESH_STATE_ROOT:-}" ]; then
+  STATE_ROOT=$FM_CHECKOUT_REFRESH_STATE_ROOT
+  LOCK_ROOT="${FM_CHECKOUT_REFRESH_LOCK_ROOT:-$STATE_ROOT/locks}"
+else
+  STATE_ROOT="$STATE_BASE/homes/$FM_HOME_KEY"
+  LOCK_ROOT="${FM_CHECKOUT_REFRESH_LOCK_ROOT:-$STATE_BASE/locks}"
+fi
 INTERVAL=${FM_CHECKOUT_REFRESH_INTERVAL:-60}
 BACKSTOP=${FM_CHECKOUT_REFRESH_BACKSTOP:-900}
 PROBE_TIMEOUT=${FM_CHECKOUT_REFRESH_PROBE_TIMEOUT:-15}
 SYNC_TIMEOUT=${FM_CHECKOUT_REFRESH_SYNC_TIMEOUT:-60}
 PLATFORM=${FM_CHECKOUT_REFRESH_PLATFORM:-$(uname)}
-LABEL=${FM_CHECKOUT_REFRESH_LABEL:-com.firstmate.checkout-refresh}
+LABEL_BASE=com.firstmate.checkout-refresh
+LABEL=${FM_CHECKOUT_REFRESH_LABEL:-$LABEL_BASE.$FM_HOME_KEY}
+LEGACY_LABEL=${FM_CHECKOUT_REFRESH_LEGACY_LABEL:-$LABEL_BASE}
 LAUNCH_AGENTS_DIR=${FM_CHECKOUT_REFRESH_LAUNCH_AGENTS_DIR:-$HOME/Library/LaunchAgents}
 PLIST="$LAUNCH_AGENTS_DIR/$LABEL.plist"
 LAUNCHCTL=${FM_CHECKOUT_REFRESH_LAUNCHCTL:-launchctl}
@@ -81,7 +107,7 @@ case "$PROBE_TIMEOUT" in ''|*[!0-9]*|0) echo "error: FM_CHECKOUT_REFRESH_PROBE_T
 case "$SYNC_TIMEOUT" in ''|*[!0-9]*|0) echo "error: FM_CHECKOUT_REFRESH_SYNC_TIMEOUT must be a positive integer" >&2; exit 2 ;; esac
 
 usage() {
-  echo "usage: fm-checkout-refresh.sh discover|run-once [--force] [--verbose]|preflight <checkout>|verify-worktree <worktree>|ensure|install" >&2
+  echo "usage: fm-checkout-refresh.sh discover|run-once [--force] [--verbose] [--session]|preflight <checkout>|verify-worktree <worktree>|ensure|install" >&2
 }
 
 first_line() {
@@ -243,13 +269,13 @@ discover() {
 run_bounded() {
   local seconds=$1
   shift
-  if command -v timeout >/dev/null 2>&1; then
-    timeout --kill-after=1 "$seconds" "$@"
-  elif command -v gtimeout >/dev/null 2>&1; then
-    gtimeout --kill-after=1 "$seconds" "$@"
+  if [ "$PLATFORM" != Darwin ] && command -v timeout >/dev/null 2>&1; then
+    timeout --foreground --kill-after=1 "$seconds" "$@"
+  elif [ "$PLATFORM" != Darwin ] && command -v gtimeout >/dev/null 2>&1; then
+    gtimeout --foreground --kill-after=1 "$seconds" "$@"
   else
     # shellcheck disable=SC2016
-    perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' "$seconds" "$@"
+    perl -e 'sub tree { my ($root) = @_; my %children; open my $ps, "-|", "ps", "-axo", "pid=,ppid=" or return ($root); while (<$ps>) { my ($pid, $ppid) = /(\d+)\s+(\d+)/; push @{$children{$ppid}}, $pid if defined $pid } close $ps; my @out = ($root); for (my $i = 0; $i < @out; $i++) { push @out, @{$children{$out[$i]} || []} } return @out } my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { exec @ARGV } local $SIG{ALRM} = sub { my @tree = tree($pid); kill "TERM", reverse @tree; select undef, undef, undef, 0.2; kill "KILL", reverse @tree; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' "$seconds" "$@"
   fi
 }
 
@@ -302,6 +328,21 @@ ensure_state_root() {
     || { echo "error: unsafe checkout-refresh state directory: $STATE_ROOT" >&2; return 1; }
 }
 
+CHECKOUT_LOCK_HELPERS_LOADED=0
+ensure_lock_roots() {
+  local FM_STATE_OVERRIDE="$STATE_ROOT" STATE='' FM_WAKE_LIB_DIR='' FM_WAKE_DEFAULT_ROOT=''
+  local FM_WAKE_QUEUE='' FM_WAKE_QUEUE_LOCK='' FM_ROOT="$FM_ROOT" FM_HOME="$FM_HOME"
+  ensure_state_root || return 1
+  mkdir -p "$LOCK_ROOT" || return 1
+  [ -d "$LOCK_ROOT" ] && [ ! -L "$LOCK_ROOT" ] \
+    || { echo "error: unsafe checkout-refresh lock directory: $LOCK_ROOT" >&2; return 1; }
+  if [ "$CHECKOUT_LOCK_HELPERS_LOADED" -eq 0 ]; then
+    # shellcheck source=bin/fm-wake-lib.sh
+    . "$SCRIPT_DIR/fm-wake-lib.sh" || return 1
+    CHECKOUT_LOCK_HELPERS_LOADED=1
+  fi
+}
+
 skill_draft_inventory() {
   local checkout=$1
   git -C "$checkout" ls-files --others --exclude-standard -- \
@@ -316,6 +357,7 @@ skill_draft_inventory() {
 surface_skill_drafts() {
   local checkout=$1 key=$2 repeat=${3:-0}
   local inventory alert prior signature count examples message
+  HYGIENE_FOUND=0
   inventory=$(mktemp "$STATE_ROOT/.hygiene-inventory.XXXXXX") || return 1
   alert="$STATE_ROOT/$key.hygiene-alert"
   skill_draft_inventory "$checkout" > "$inventory"
@@ -326,6 +368,7 @@ surface_skill_drafts() {
 
   signature=$(shasum -a 256 "$inventory" | awk '{print $1}')
   count=$(awk 'END { print NR + 0 }' "$inventory")
+  HYGIENE_FOUND=1
   prior=$(sed -n '2p' "$alert" 2>/dev/null || true)
   examples=$(awk 'NR <= 3 { if (shown) printf ", "; printf "%s", $0; shown = 1 } END { if (NR > 3) printf ", ..." }' "$inventory")
   message="$checkout: HYGIENE: $count untracked skill-draft files under repository skill directories - reconcile before an upstream collision"
@@ -360,12 +403,32 @@ clear_stale_hygiene_alerts() {
 }
 
 sync_checkout() {
-  local checkout=$1 output_file=$2 status
-  if FM_FLEET_PRUNE=0 run_bounded "$SYNC_TIMEOUT" "$SCRIPT_DIR/fm-fleet-sync.sh" "$checkout" > "$output_file" 2>&1; then
+  local checkout=$1 output_file=$2 prune=${3:-0} live_default=${4:-}
+  local status lock held
+  ensure_lock_roots || {
+    printf '%s: skipped: refresh lock setup failed\n' "$checkout" > "$output_file"
+    return
+  }
+  lock="$LOCK_ROOT/$(checkout_key "$checkout").lock"
+  if ! fm_lock_try_acquire "$lock"; then
+    held=${FM_LOCK_HELD_PID:-unknown}
+    printf '%s: skipped: refresh already running (pid %s)\n' "$checkout" "$held" > "$output_file"
+    return
+  fi
+  if (
+    export FM_FLEET_PRUNE="$prune"
+    if [ -n "$live_default" ]; then
+      export FM_FLEET_DEFAULT_BRANCH="$live_default"
+    else
+      unset FM_FLEET_DEFAULT_BRANCH
+    fi
+    run_bounded "$SYNC_TIMEOUT" "$SCRIPT_DIR/fm-fleet-sync.sh" "$checkout"
+  ) > "$output_file" 2>&1; then
     status=0
   else
     status=$?
   fi
+  fm_lock_release "$lock"
   if [ "$status" -eq 124 ]; then
     printf '%s: skipped: refresh timed out after %ss\n' "$checkout" "$SYNC_TIMEOUT" > "$output_file"
   elif [ "$status" -ne 0 ]; then
@@ -379,22 +442,25 @@ record_alert() {
 }
 
 run_once() {
-  local force=0 verbose=0 arg lock discovery hygiene checkout key tip_file last_file alert_file
+  local force=0 verbose=0 session=0 prune=0 arg lock discovery hygiene checkout key tip_file last_file alert_file
   local prior_tip now last due probe_ok output_file output line
   for arg in "$@"; do
     case "$arg" in
       --force) force=1 ;;
       --verbose) verbose=1 ;;
+      --session) session=1 ;;
       *) usage; return 2 ;;
     esac
   done
+  [ "$session" -eq 0 ] || prune=1
 
-  ensure_state_root || return 1
+  ensure_lock_roots || return 1
   lock="$STATE_ROOT/.run-lock"
-  if ! mkdir "$lock" 2>/dev/null; then
+  if ! fm_lock_try_acquire "$lock"; then
+    printf 'checkout-refresh: skipped: refresh already running (pid %s)\n' "${FM_LOCK_HELD_PID:-unknown}"
     return 0
   fi
-  trap 'rmdir "$lock" 2>/dev/null || true' EXIT
+  trap 'fm_lock_release "$STATE_ROOT/.run-lock"' EXIT
   discovery=$(mktemp "$STATE_ROOT/.discover.XXXXXX") || return 1
   hygiene=$(mktemp "$STATE_ROOT/.hygiene-discover.XXXXXX") || { rm -f "$discovery"; return 1; }
   discover > "$discovery"
@@ -437,7 +503,11 @@ run_once() {
     [ "$due" -eq 1 ] || continue
 
     output_file=$(mktemp "$STATE_ROOT/.sync.XXXXXX") || continue
-    sync_checkout "$checkout" "$output_file"
+    if [ "$probe_ok" -eq 1 ]; then
+      sync_checkout "$checkout" "$output_file" "$prune" "$PROBE_BRANCH"
+    else
+      printf '%s: skipped: cannot probe live upstream default branch\n' "$checkout" > "$output_file"
+    fi
     output=$(cat "$output_file")
     rm -f "$output_file"
     atomic_write "$last_file" "$now"
@@ -468,28 +538,43 @@ EOF
   rm -f "$discovery" "$hygiene"
   atomic_write "$STATE_ROOT/heartbeat" "$now" "$SCRIPT_DIR/fm-checkout-refresh.sh"
   trap - EXIT
-  rmdir "$lock" 2>/dev/null || true
+  fm_lock_release "$lock"
 }
 
 preflight() {
-  local checkout=$1 output key output_file
+  local checkout=$1 output key output_file hygiene_found=0 live_default=
   [ -d "$checkout" ] || { echo "error: checkout-refresh preflight target is not a directory: $checkout" >&2; return 1; }
-  ensure_state_root || return 1
+  ensure_lock_roots || return 1
   key=$(checkout_key "$checkout")
   surface_skill_drafts "$checkout" "$key" 1
+  hygiene_found=$HYGIENE_FOUND
   output_file=$(mktemp "$STATE_ROOT/.preflight.XXXXXX") || return 1
-  sync_checkout "$checkout" "$output_file"
+  if git -C "$checkout" remote get-url origin >/dev/null 2>&1; then
+    if probe_upstream "$checkout"; then
+      live_default=$PROBE_BRANCH
+      sync_checkout "$checkout" "$output_file" 0 "$live_default"
+    else
+      printf '%s: skipped: cannot probe live upstream default branch\n' "$checkout" > "$output_file"
+    fi
+  else
+    sync_checkout "$checkout" "$output_file" 0
+  fi
   output=$(cat "$output_file")
   rm -f "$output_file"
   printf '%s\n' "$output"
+  [ "$hygiene_found" -eq 0 ] || return 1
   case "$output" in *': STUCK:'*|*': skipped: fetch failed'*|*': skipped: refresh '*) return 1 ;; esac
+  case "$output" in *': skipped: cannot probe live upstream default branch'*) return 1 ;; esac
   return 0
 }
 
 verify_worktree() {
   local worktree=$1 head
   [ -d "$worktree" ] || { echo "error: worktree freshness target is not a directory: $worktree" >&2; return 1; }
-  git -C "$worktree" remote get-url origin >/dev/null 2>&1 || return 0
+  git -C "$worktree" remote get-url origin >/dev/null 2>&1 || {
+    echo "error: cannot verify the upstream default-branch tip for $worktree: origin remote is missing" >&2
+    return 1
+  }
   probe_upstream "$worktree" || {
     echo "error: cannot verify the upstream default-branch tip for $worktree" >&2
     return 1
@@ -506,6 +591,19 @@ xml_escape() {
   printf '%s' "$1" | sed 's/&/\&amp;/g;s/</\&lt;/g;s/>/\&gt;/g;s/"/\&quot;/g;s/'"'"'/\&apos;/g'
 }
 
+remove_matching_legacy_launch_agent() {
+  local domain=$1 legacy_plist="$LAUNCH_AGENTS_DIR/$LEGACY_LABEL.plist"
+  [ "$LABEL" != "$LEGACY_LABEL" ] || return 0
+  [ -f "$legacy_plist" ] && [ ! -L "$legacy_plist" ] || return 0
+  grep -Fq "<string>$(xml_escape "$SCRIPT_DIR/fm-checkout-refresh.sh")</string>" "$legacy_plist" || return 0
+  if ! grep -Fq "<key>FM_HOME</key><string>$(xml_escape "$FM_HOME_CANONICAL")</string>" "$legacy_plist" \
+    && ! grep -Fq "<key>FM_HOME</key><string>$(xml_escape "$FM_HOME")</string>" "$legacy_plist"; then
+    return 0
+  fi
+  "$LAUNCHCTL" bootout "$domain/$LEGACY_LABEL" >/dev/null 2>&1 || true
+  rm -f "$legacy_plist"
+}
+
 install_launch_agent() {
   local bash_runtime python_runtime runtime_path temp previous domain
   [ "$PLATFORM" = Darwin ] || {
@@ -517,9 +615,10 @@ install_launch_agent() {
   python_runtime=$(command -v python3) || return 1
   case "$bash_runtime" in /*) ;; *) echo "error: cannot resolve an absolute Bash runtime" >&2; return 1 ;; esac
   runtime_path="$(dirname "$python_runtime"):/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
-  mkdir -p "$LAUNCH_AGENTS_DIR" "$STATE_ROOT" || return 1
+  mkdir -p "$LAUNCH_AGENTS_DIR" "$STATE_ROOT" "$LOCK_ROOT" || return 1
   [ -d "$LAUNCH_AGENTS_DIR" ] && [ ! -L "$LAUNCH_AGENTS_DIR" ] \
     && [ -d "$STATE_ROOT" ] && [ ! -L "$STATE_ROOT" ] \
+    && [ -d "$LOCK_ROOT" ] && [ ! -L "$LOCK_ROOT" ] \
     || { echo "error: unsafe checkout-refresh installation directories" >&2; return 1; }
   temp=$(mktemp "$LAUNCH_AGENTS_DIR/.$LABEL.XXXXXX") || return 1
   previous=$(mktemp "$LAUNCH_AGENTS_DIR/.$LABEL.previous.XXXXXX") || { rm -f "$temp"; return 1; }
@@ -542,8 +641,9 @@ install_launch_agent() {
 <key>EnvironmentVariables</key><dict>
 <key>HOME</key><string>$(xml_escape "$HOME")</string>
 <key>PATH</key><string>$(xml_escape "$runtime_path")</string>
-<key>FM_HOME</key><string>$(xml_escape "$FM_HOME")</string>
+<key>FM_HOME</key><string>$(xml_escape "$FM_HOME_CANONICAL")</string>
 <key>FM_CHECKOUT_REFRESH_STATE_ROOT</key><string>$(xml_escape "$STATE_ROOT")</string>
+<key>FM_CHECKOUT_REFRESH_LOCK_ROOT</key><string>$(xml_escape "$LOCK_ROOT")</string>
 <key>FM_CHECKOUT_REFRESH_INTERVAL</key><string>$(xml_escape "$INTERVAL")</string>
 <key>FM_CHECKOUT_REFRESH_BACKSTOP</key><string>$(xml_escape "$BACKSTOP")</string>
 </dict>
@@ -560,6 +660,7 @@ EOF
   if "$LAUNCHCTL" bootstrap "$domain" "$PLIST" \
     && "$LAUNCHCTL" kickstart "$domain/$LABEL"; then
     rm -f "$previous"
+    remove_matching_legacy_launch_agent "$domain"
     return 0
   fi
   if [ -f "$previous" ]; then
@@ -579,6 +680,12 @@ ensure_launch_agent() {
     || { echo "checkout-refresh LaunchAgent is not installed" >&2; return 1; }
   grep -Fq "<string>$(xml_escape "$SCRIPT_DIR/fm-checkout-refresh.sh")</string>" "$PLIST" \
     || { echo "checkout-refresh LaunchAgent points at a different Firstmate checkout" >&2; return 1; }
+  grep -Fq "<key>FM_HOME</key><string>$(xml_escape "$FM_HOME_CANONICAL")</string>" "$PLIST" \
+    || { echo "checkout-refresh LaunchAgent belongs to a different Firstmate home" >&2; return 1; }
+  grep -Fq "<key>FM_CHECKOUT_REFRESH_STATE_ROOT</key><string>$(xml_escape "$STATE_ROOT")</string>" "$PLIST" \
+    || { echo "checkout-refresh LaunchAgent uses a different home-scoped state root" >&2; return 1; }
+  grep -Fq "<key>FM_CHECKOUT_REFRESH_LOCK_ROOT</key><string>$(xml_escape "$LOCK_ROOT")</string>" "$PLIST" \
+    || { echo "checkout-refresh LaunchAgent uses a different shared lock root" >&2; return 1; }
   domain="gui/$(id -u)"
   "$LAUNCHCTL" print "$domain/$LABEL" >/dev/null 2>&1 \
     || { echo "checkout-refresh LaunchAgent is not loaded" >&2; return 1; }
@@ -587,6 +694,34 @@ ensure_launch_agent() {
   max_age=$((INTERVAL * 3 + 30))
   [ "$heartbeat" -gt 0 ] && [ "$((now - heartbeat))" -le "$max_age" ] \
     || { echo "checkout-refresh heartbeat is stale or missing" >&2; return 1; }
+}
+
+scheduler_install() {
+  case "$PLATFORM" in
+    Darwin) install_launch_agent ;;
+    Linux)
+      echo "error: checkout-refresh has no Linux scheduler adapter yet; use run-once from cron or systemd until one is implemented" >&2
+      return 1
+      ;;
+    *)
+      echo "error: checkout-refresh has no scheduler adapter for $PLATFORM" >&2
+      return 1
+      ;;
+  esac
+}
+
+scheduler_ensure() {
+  case "$PLATFORM" in
+    Darwin) ensure_launch_agent ;;
+    Linux)
+      echo "error: checkout-refresh has no Linux scheduler adapter yet" >&2
+      return 1
+      ;;
+    *)
+      echo "error: checkout-refresh has no scheduler adapter for $PLATFORM" >&2
+      return 1
+      ;;
+  esac
 }
 
 case "${1:-}" in
@@ -608,11 +743,11 @@ case "${1:-}" in
     ;;
   ensure)
     [ $# -eq 1 ] || { usage; exit 2; }
-    ensure_launch_agent
+    scheduler_ensure
     ;;
   install)
     [ $# -eq 1 ] || { usage; exit 2; }
-    install_launch_agent
+    scheduler_install
     ;;
   *) usage; exit 2 ;;
 esac

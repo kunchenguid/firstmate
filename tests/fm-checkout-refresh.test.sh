@@ -13,6 +13,7 @@ TMP_ROOT=$(fm_test_tmproot fm-checkout-refresh-tests)
 TEST_HOME="$TMP_ROOT/user"
 FM_TEST_HOME="$TMP_ROOT/fm-home"
 STATE_ROOT="$TMP_ROOT/refresh-state"
+LOCK_ROOT="$TMP_ROOT/refresh-locks"
 mkdir -p "$TEST_HOME" "$FM_TEST_HOME/projects" "$FM_TEST_HOME/config" "$STATE_ROOT"
 
 commit_file() {
@@ -46,9 +47,18 @@ advance_origin() {
   git -C "$work" push -q origin main
 }
 
+switch_origin_default() {
+  local work="$TMP_ROOT/work-$1" remote="$TMP_ROOT/remotes/$1.git"
+  git -C "$work" checkout -q -b trunk
+  commit_file "$work" trunk.txt trunk default-trunk
+  git -C "$work" push -q origin trunk
+  git -C "$remote" symbolic-ref HEAD refs/heads/trunk
+}
+
 run_refresh() {
   HOME="$TEST_HOME" FM_HOME="$FM_TEST_HOME" FM_ROOT_OVERRIDE="$ROOT" \
-    FM_CHECKOUT_REFRESH_STATE_ROOT="$STATE_ROOT" FM_TREEHOUSE_ROOT="$TEST_HOME/.treehouse" \
+    FM_CHECKOUT_REFRESH_STATE_ROOT="$STATE_ROOT" FM_CHECKOUT_REFRESH_LOCK_ROOT="$LOCK_ROOT" \
+    FM_TREEHOUSE_ROOT="$TEST_HOME/.treehouse" \
     FM_CHECKOUT_REFRESH_TEST=1 \
     "$ROOT/bin/fm-checkout-refresh.sh" "$@"
 }
@@ -130,6 +140,23 @@ test_periodic_backstop_repairs_drift_without_a_new_tip() {
   pass "periodic backstop repairs local drift even when the observed upstream tip is unchanged"
 }
 
+test_live_default_change_is_surfaced_without_switching_branches() {
+  local project before out
+  project=$(cd "$FM_TEST_HOME/projects/relvino" && pwd -P)
+  before=$(git -C "$project" rev-parse HEAD)
+  switch_origin_default relvino
+
+  out=$(run_refresh run-once --force)
+
+  assert_contains "$out" "$project: STUCK: on branch main" \
+    "a live upstream default-branch change was not surfaced as an unsafe checkout"
+  [ "$(git -C "$project" rev-parse HEAD)" = "$before" ] \
+    || fail "default-branch change moved the checkout"
+  [ "$(git -C "$project" branch --show-current)" = main ] \
+    || fail "default-branch change switched the checkout"
+  pass "live default-branch changes are excluded and surfaced without mutation"
+}
+
 test_skill_drafts_surface_on_every_probe_without_log_spam() {
   local project draft_one draft_two out key alert status
   project=$(cd "$FM_TEST_HOME/projects/relvino" && pwd -P)
@@ -179,6 +206,25 @@ test_skill_drafts_surface_on_every_probe_without_log_spam() {
   run_refresh run-once >/dev/null
   [ ! -e "$alert" ] || fail "the hygiene alert did not clear after drafts were reconciled"
   pass "skill-draft accumulation surfaces promptly, persists, and never changes draft contents"
+}
+
+test_preflight_rejects_hygiene_without_an_origin() {
+  local checkout="$TMP_ROOT/no-origin-checkout" draft out status
+  fm_git_init_commit "$checkout"
+  draft="$checkout/.agents/skills/local-only/SKILL.md"
+  mkdir -p "$(dirname "$draft")"
+  printf '%s\n' '# local only' > "$draft"
+
+  set +e
+  out=$(run_refresh preflight "$checkout")
+  status=$?
+  set -e
+
+  [ "$status" -ne 0 ] || fail "preflight accepted untracked skill drafts in a no-origin checkout"
+  assert_contains "$out" "HYGIENE: 1 untracked skill-draft files" \
+    "no-origin preflight swallowed its hygiene finding"
+  grep -Fq '# local only' "$draft" || fail "no-origin preflight changed the draft"
+  pass "preflight treats hygiene as actionable independently of sync eligibility"
 }
 
 test_treehouse_pool_skill_drafts_are_inventoried() {
@@ -253,8 +299,62 @@ test_dirty_nondefault_and_diverged_checkouts_are_untouched() {
   pass "background refresh preserves and surfaces dirty, non-default, and diverged work"
 }
 
+test_refresh_locks_recover_stale_owners_and_surface_contention() {
+  local run_lock="$STATE_ROOT/.run-lock" checkout key checkout_lock out
+  mkdir -p "$run_lock"
+  touch -t 200001010000 "$run_lock"
+
+  out=$(run_refresh run-once --force)
+  assert_not_contains "$out" "refresh already running" \
+    "an abandoned ownerless run lock was not recovered"
+  [ ! -e "$run_lock" ] || fail "recovered run lock was not released"
+
+  mkdir -p "$run_lock"
+  printf '%s\n' "$$" > "$run_lock/pid"
+  out=$(run_refresh run-once --force)
+  assert_contains "$out" "checkout-refresh: skipped: refresh already running (pid $$)" \
+    "live run-lock contention was silent"
+  rm -rf "$run_lock"
+
+  checkout=$(cd "$FM_TEST_HOME/projects/relvino" && pwd -P)
+  key=$(printf '%s' "$checkout" | shasum -a 256 | awk '{print substr($1,1,24)}')
+  checkout_lock="$LOCK_ROOT/$key.lock"
+  mkdir -p "$checkout_lock"
+  printf '%s\n' "$$" > "$checkout_lock/pid"
+  out=$(run_refresh run-once --force)
+  assert_contains "$out" "$checkout: skipped: refresh already running (pid $$)" \
+    "shared-checkout lock contention was not surfaced"
+  rm -rf "$checkout_lock"
+  pass "refresh locks recover abandoned owners and serialize shared checkouts"
+}
+
+test_session_mode_preserves_gone_branch_pruning() {
+  local remote work project
+  remote=$(build_origin prune)
+  work="$TMP_ROOT/work-prune"
+  git -C "$work" checkout -q -b merged
+  commit_file "$work" merged.txt merged merged
+  git -C "$work" push -q -u origin merged
+  git -C "$work" checkout -q main
+  project="$FM_TEST_HOME/projects/prune"
+  clone_from "$remote" "$project"
+  git -C "$project" checkout -q -b merged --track origin/merged
+  git -C "$project" checkout -q main
+  git -C "$work" push -q origin --delete merged
+
+  run_refresh run-once --force >/dev/null
+  git -C "$project" show-ref --verify --quiet refs/heads/merged \
+    || fail "cadence refresh pruned a gone branch"
+
+  run_refresh run-once --force --session >/dev/null
+  if git -C "$project" show-ref --verify --quiet refs/heads/merged; then
+    fail "session refresh did not preserve gone-branch pruning"
+  fi
+  pass "session mode preserves pruning while cadence mode disables it"
+}
+
 test_worktree_freshness_verification_fails_closed() {
-  local remote primary worktree before status
+  local remote primary worktree no_origin before status
   remote=$(build_origin verify)
   primary="$TMP_ROOT/verify-primary"
   worktree="$TMP_ROOT/verify-worktree"
@@ -277,14 +377,23 @@ test_worktree_freshness_verification_fails_closed() {
     FM_CHECKOUT_REFRESH_STATE_ROOT="$STATE_ROOT" \
     "$ROOT/bin/fm-checkout-refresh.sh" verify-worktree "$worktree" \
     || fail "fresh acquired worktree failed verification"
+
+  no_origin="$TMP_ROOT/verify-no-origin"
+  fm_git_init_commit "$no_origin"
+  set +e
+  run_refresh verify-worktree "$no_origin" >/dev/null 2>&1
+  status=$?
+  set -e
+  [ "$status" -ne 0 ] || fail "originless acquired worktree passed freshness verification"
   pass "post-acquisition proof refuses a worktree whose HEAD is not the upstream default tip"
 }
 
-test_launch_agent_definition_has_signal_cadence_and_backstop() {
-  local fakebin agents log plist
+test_launch_agent_definition_is_home_scoped_with_scheduler_seam() {
+  local fakebin agents log plist second_home second_plist key second_key install_state_base out status
   fakebin="$TMP_ROOT/fakebin"
   agents="$TMP_ROOT/LaunchAgents"
   log="$TMP_ROOT/launchctl.log"
+  install_state_base="$TMP_ROOT/install-state"
   mkdir -p "$fakebin" "$agents"
   cat > "$fakebin/launchctl" <<'SH'
 #!/usr/bin/env bash
@@ -294,31 +403,70 @@ SH
   chmod +x "$fakebin/launchctl"
 
   HOME="$TEST_HOME" FM_HOME="$FM_TEST_HOME" FM_ROOT_OVERRIDE="$ROOT" \
-    FM_CHECKOUT_REFRESH_STATE_ROOT="$STATE_ROOT" \
+    FM_CHECKOUT_REFRESH_STATE_BASE="$install_state_base" \
     FM_CHECKOUT_REFRESH_PLATFORM=Darwin \
     FM_CHECKOUT_REFRESH_LAUNCH_AGENTS_DIR="$agents" \
     FM_CHECKOUT_REFRESH_LAUNCHCTL="$fakebin/launchctl" \
     FM_FAKE_LAUNCHCTL_LOG="$log" \
     "$ROOT/bin/fm-checkout-refresh.sh" install
 
-  plist="$agents/com.firstmate.checkout-refresh.plist"
+  key=$(printf '%s' "$(cd "$FM_TEST_HOME" && pwd -P)" | shasum -a 256 | awk '{print substr($1,1,16)}')
+  plist="$agents/com.firstmate.checkout-refresh.$key.plist"
   assert_grep '<key>StartInterval</key><integer>60</integer>' "$plist" \
     "LaunchAgent does not carry the upstream signal cadence"
   assert_grep '<key>FM_CHECKOUT_REFRESH_BACKSTOP</key><string>900</string>' "$plist" \
     "LaunchAgent does not persist the timed backstop"
   assert_grep 'fm-checkout-refresh.sh</string>' "$plist" \
     "LaunchAgent does not invoke the checkout refresher"
+  assert_grep "<key>FM_HOME</key><string>$(cd "$FM_TEST_HOME" && pwd -P)</string>" "$plist" \
+    "LaunchAgent does not bind the active Firstmate home"
+  assert_grep "<key>FM_CHECKOUT_REFRESH_STATE_ROOT</key><string>$install_state_base/homes/$key</string>" "$plist" \
+    "LaunchAgent does not use home-scoped state"
+  assert_grep "<key>FM_CHECKOUT_REFRESH_LOCK_ROOT</key><string>$install_state_base/locks</string>" "$plist" \
+    "LaunchAgent does not use the shared checkout lock root"
   assert_grep 'bootstrap' "$log" "LaunchAgent was not bootstrapped"
   assert_grep 'kickstart' "$log" "LaunchAgent was not started"
-  pass "LaunchAgent persists the signal cadence and timed backstop"
+
+  second_home="$TMP_ROOT/fm-home-two"
+  mkdir -p "$second_home/projects" "$second_home/config"
+  HOME="$TEST_HOME" FM_HOME="$second_home" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_CHECKOUT_REFRESH_STATE_BASE="$install_state_base" \
+    FM_CHECKOUT_REFRESH_PLATFORM=Darwin \
+    FM_CHECKOUT_REFRESH_LAUNCH_AGENTS_DIR="$agents" \
+    FM_CHECKOUT_REFRESH_LAUNCHCTL="$fakebin/launchctl" \
+    FM_FAKE_LAUNCHCTL_LOG="$log" \
+    "$ROOT/bin/fm-checkout-refresh.sh" install
+  second_key=$(printf '%s' "$(cd "$second_home" && pwd -P)" | shasum -a 256 | awk '{print substr($1,1,16)}')
+  second_plist="$agents/com.firstmate.checkout-refresh.$second_key.plist"
+  [ -f "$plist" ] && [ -f "$second_plist" ] \
+    || fail "installing a second home displaced the first home's LaunchAgent"
+  assert_grep "<key>FM_HOME</key><string>$(cd "$second_home" && pwd -P)</string>" "$second_plist" \
+    "second LaunchAgent does not bind its own Firstmate home"
+  assert_grep "<key>FM_CHECKOUT_REFRESH_STATE_ROOT</key><string>$install_state_base/homes/$second_key</string>" "$second_plist" \
+    "second LaunchAgent does not use its own state directory"
+
+  set +e
+  out=$(HOME="$TEST_HOME" FM_HOME="$FM_TEST_HOME" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_CHECKOUT_REFRESH_PLATFORM=Linux \
+    "$ROOT/bin/fm-checkout-refresh.sh" ensure 2>&1)
+  status=$?
+  set -e
+  [ "$status" -ne 0 ] || fail "Linux scheduler seam silently reported background coverage"
+  assert_contains "$out" "no Linux scheduler adapter yet" \
+    "Linux scheduler seam did not report its explicit platform limitation"
+  pass "scheduler ownership is home-scoped and Linux remains an explicit adapter seam"
 }
 
 test_discovery_covers_projects_treehouse_external_and_config
 test_upstream_tip_signal_refreshes_between_firstmate_events
 test_periodic_backstop_repairs_drift_without_a_new_tip
+test_live_default_change_is_surfaced_without_switching_branches
 test_skill_drafts_surface_on_every_probe_without_log_spam
+test_preflight_rejects_hygiene_without_an_origin
 test_treehouse_pool_skill_drafts_are_inventoried
 test_bootstrap_relays_hygiene_alerts
 test_dirty_nondefault_and_diverged_checkouts_are_untouched
+test_refresh_locks_recover_stale_owners_and_surface_contention
+test_session_mode_preserves_gone_branch_pruning
 test_worktree_freshness_verification_fails_closed
-test_launch_agent_definition_has_signal_cadence_and_backstop
+test_launch_agent_definition_is_home_scoped_with_scheduler_seam

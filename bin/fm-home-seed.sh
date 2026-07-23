@@ -7,7 +7,8 @@
 #       a fresh firstmate worktree via "treehouse get --lease", which durably
 #       leases the worktree under the secondmate <id> so the home survives with
 #       no live process and is never recycled until the lease is released with
-#       "treehouse return". Projects are cloned
+#       "treehouse return". The acquired home is accepted only when its HEAD
+#       matches the live upstream default-branch tip. Projects are cloned
 #       from the active home into the secondmate home's projects/ directory.
 #       That project list is non-exclusive provisioning data. Pass --no-projects
 #       instead of a project list to seed a project-less home for a domain whose
@@ -926,6 +927,10 @@ seed_home() {
     home=$(acquire_treehouse_home "$id")
     SEED_HOME="$home"
     home=$(verify_firstmate_home "$home")
+    if ! "$SCRIPT_DIR/fm-checkout-refresh.sh" verify-worktree "$home"; then
+      echo "error: refusing secondmate home acquired from a stale or unverifiable upstream default" >&2
+      return 1
+    fi
   else
     requested_abs=$(abs_path_for_new "$requested_home")
     refuse_active_home_path "$requested_abs" || return 1

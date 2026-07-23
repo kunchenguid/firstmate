@@ -85,8 +85,10 @@
 #   Before a secondmate launch, the home is locally fast-forwarded to the primary
 #   default-branch commit when safe; skipped syncs warn and launch unchanged.
 #   Ship/scout spawns refresh the primary checkout before Treehouse acquisition,
-#   then refuse to launch unless the acquired path is a real isolated worktree
-#   whose HEAD matches the tracked upstream default-branch tip.
+#   record ownership as soon as acquisition is validated, then refuse to launch
+#   unless the acquired path is a real isolated worktree whose HEAD matches the
+#   live upstream default-branch tip. Any pre-commit failure closes the
+#   prepared endpoint and returns the acquired Treehouse worktree.
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
@@ -1191,6 +1193,14 @@ cleanup_continuation_launch_transport() {
   CONTINUATION_PROMPT_CONTENT_ID=
 }
 
+spawn_return_created_worktree() {
+  [ "$WORKTREE_CREATED" = 1 ] || return 0
+  [ "${BACKEND:-tmux}" != orca ] || return 0
+  [ -n "${WT:-}" ] && [ -d "$WT" ] || return 0
+  rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" "$WT/.fm-grok-turnend"
+  ( cd "$PROJ_ABS" && treehouse return --force "$WT" ) >/dev/null 2>&1
+}
+
 spawn_abort_cleanup() {
   local status=$? endpoint_state endpoint_gone=1 account_clean=1 worktree_clean=1 rollback_lock='' rollback_tmp restored_existing_meta=0 artifact_backup_name orca_meta_tmp release_status
   trap - EXIT
@@ -1241,6 +1251,7 @@ spawn_abort_cleanup() {
     fi
   fi
   if [ "$ACCOUNT_SPAWN_COMMITTED" != 1 ] \
+    && [ "${BACKEND:-tmux}" != orca ] \
     && { [ "${ACCOUNT_EFFECTIVE_MODE:-off}" = enforce ] || [ "${DIRECT_ACCOUNT_ROUTING:-0}" = 1 ]; } \
     && [ "$ENDPOINT_CREATED" = 1 ] && [ -n "${T:-}" ]; then
     spawn_managed_endpoint_kill "${BACKEND:-tmux}" "$T" "${ZELLIJ_TAB_ID:-}" "fm-${ID:-unknown}" "${KIND:-ship}" "${PROJ_ABS:-}" "${META_WINDOW:-}" 2>/dev/null || true
@@ -1249,13 +1260,18 @@ spawn_abort_cleanup() {
       absent) ;;
       present)
         endpoint_gone=0
-        echo "warning: retaining managed state for ${ID:-unknown} because the failed spawn endpoint is still alive" >&2
+        echo "warning: retaining failed spawn resources for ${ID:-unknown} because the endpoint is still alive" >&2
         ;;
       *)
         endpoint_gone=0
-        echo "warning: retaining managed state for ${ID:-unknown} because the failed spawn endpoint state is unknown" >&2
+        echo "warning: retaining failed spawn resources for ${ID:-unknown} because the endpoint state is unknown" >&2
         ;;
     esac
+  fi
+  if [ "$ACCOUNT_SPAWN_COMMITTED" != 1 ] && [ "$endpoint_gone" = 1 ] \
+    && [ "${ACCOUNT_EFFECTIVE_MODE:-off}" != enforce ]; then
+    spawn_return_created_worktree || worktree_clean=0
+    [ "$worktree_clean" = 1 ] || echo "warning: failed to return rollback worktree for ${ID:-unknown}" >&2
   fi
   [ -z "${ACCOUNT_NATIVE_LAUNCH_DIR:-}" ] || rm -rf "$ACCOUNT_NATIVE_LAUNCH_DIR"
   cleanup_continuation_launch_transport
@@ -1372,14 +1388,9 @@ spawn_abort_cleanup() {
         fm_account_lineage_append "$DATA" "$ID" rolled-back "$ACCOUNT_ATTEMPT" "$ACCOUNT_TASK" "$HARNESS" "$ACCOUNT_POOL" "$ACCOUNT_PROFILE" pending "$ACCOUNT_PREDECESSOR_TASK" >/dev/null 2>&1 || true
       fi
     fi
-    if [ "$account_clean" = 1 ] && { [ "$WORKTREE_CREATED" = 1 ] || [ "$ORCA_ABORT_CLEANUP" = 1 ]; }; then
-      if [ "${BACKEND:-tmux}" = orca ]; then
-        [ -z "${ORCA_WORKTREE_ID:-}" ] || fm_backend_remove_worktree orca "$ORCA_WORKTREE_ID" 2>/dev/null || worktree_clean=0
-      elif [ -n "${WT:-}" ] && [ -d "$WT" ]; then
-        rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" "$WT/.fm-grok-turnend"
-        ( cd "$PROJ_ABS" && treehouse return --force "$WT" ) >/dev/null 2>&1 || worktree_clean=0
-      fi
-      [ "$worktree_clean" = 1 ] || echo "warning: failed to return rollback worktree for ${ID:-unknown}; retaining unmanaged cleanup metadata" >&2
+    if [ "$account_clean" = 1 ]; then
+      spawn_return_created_worktree || worktree_clean=0
+      [ "$worktree_clean" = 1 ] || echo "warning: failed to return rollback worktree for ${ID:-unknown}" >&2
     fi
     if [ -z "$rollback_lock" ]; then
       if rollback_lock=$(fm_account_meta_lock_acquire "$STATE" "${ID:-unknown}"); then
@@ -2681,11 +2692,11 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] && [ "$RECOVERY_ACCOUNT" 
   fi
 
   validate_spawn_worktree "treehouse get" "$T"
+  WORKTREE_CREATED=1
   if ! "$SCRIPT_DIR/fm-checkout-refresh.sh" verify-worktree "$WT"; then
     echo "error: refusing to launch $W from an acquired worktree whose upstream freshness could not be proved" >&2
     exit 1
   fi
-  WORKTREE_CREATED=1
 fi
 if [ -z "$WT" ] && [ "$BACKEND" = orca ]; then
   WT="$PROJ_ABS"

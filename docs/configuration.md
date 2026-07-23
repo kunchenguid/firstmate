@@ -275,21 +275,28 @@ The default covered set is every clone under the active home's `projects/`, ever
 Matching by origin discovers parallel clones such as `~/relvino` without embedding a captain-specific path in shared code.
 Optional `path` and shallow `scan` directives in the gitignored `config/checkout-refresh` file extend that set.
 
-The background owner probes each checkout's remote default-branch tip every 60 seconds.
+Each `FM_HOME` owns a distinct background identity and state directory, so primary and secondmate homes can cover their own projects without displacing one another.
+Checkout-level owner locks are shared across those home-scoped services, so overlapping Treehouse backing checkouts or configured external clones are serialized safely.
+Each background owner probes every covered checkout's remote default-branch tip every 60 seconds.
 Any upstream-tip change triggers `fm-fleet-sync.sh` immediately, regardless of who pushed or merged it.
+The live probe's branch name is authoritative for that refresh instead of a checkout's possibly stale `origin/HEAD`.
+If the upstream default branch changes, a checkout still on the old branch is reported as `STUCK:` and left unchanged under the fast-forward-only posture.
 A full safe refresh runs at least every 15 minutes even when no change signal is observed, so transient network failures, a missed probe, or lost local state cannot create unbounded drift.
 Every probe also inventories untracked files in covered seed checkouts and Treehouse pool worktrees under `.agents/skills`, `.claude/skills`, `.codex/skills`, and `skills`.
 A new or growing inventory produces a durable `HYGIENE:` alert immediately, while forced session-start and spawn-preflight checks repeat any unresolved alert for an operator.
 The ordinary safe-refresh warning separately quantifies every untracked file and the subset under those skill directories, so other untracked accumulation is bounded by the same 15-minute backstop.
 These checks inspect paths only and never delete, move, stash, reset, or edit a draft.
 The signal interval and backstop are configurable through `FM_CHECKOUT_REFRESH_INTERVAL` and `FM_CHECKOUT_REFRESH_BACKSTOP`.
-Every scheduled refresh disables gone-branch pruning and retains `fm-fleet-sync.sh`'s fail-safe behavior: a dirty, diverged, or non-default checkout is left untouched and recorded as an alert.
+Every cadence and spawn-preflight refresh disables gone-branch pruning and retains `fm-fleet-sync.sh`'s fail-safe behavior: a dirty, diverged, or non-default checkout is left untouched and recorded as an alert.
+The forced session-start mode preserves the existing gone-branch pruning pass.
 
 Treehouse v2.0 already fetches `origin` before every acquisition and resets an available detached pool worktree to the freshest default ref.
 Firstmate adds a pre-acquisition primary-checkout refresh and refuses the launch after acquisition unless the worktree HEAD matches the upstream default-branch tip.
+Treehouse-acquired secondmate homes receive the same live-default proof before seeding, and a failed proof returns the lease transactionally.
 That makes the acquisition proof explicit even if the background owner was offline.
+Orca is an explicit legacy-recovery-only exception because this change creates no new Orca tasks or acquisitions.
 
-On macOS, bootstrap reports `MISSING: checkout-refresh` until the per-user LaunchAgent is installed.
+On macOS, bootstrap reports `MISSING: checkout-refresh` until that home's per-user LaunchAgent is installed.
 After the captain approves the background owner, install it with:
 
 ```sh
@@ -298,6 +305,8 @@ bin/fm-bootstrap.sh install checkout-refresh
 
 The locked session-start sweep still runs the same broad discovery and a forced refresh, so the service has an operator-visible backstop.
 The LaunchAgent is intentionally independent of the Firstmate watcher and continues polling when no fleet task or Firstmate session is active.
+macOS launchd is the primary fleet scheduler in this release.
+Scheduler installation and health checks dispatch through an adapter seam, while a future Linux cron or systemd adapter remains explicit follow-up work rather than silently claiming coverage today.
 
 ## Toolchain
 

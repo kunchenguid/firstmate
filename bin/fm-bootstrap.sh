@@ -63,7 +63,8 @@
 #          fetches and fast-forwards safe default-branch states and reports
 #          recovered and STUCK clone drift plus untracked skill-draft hygiene.
 #          Session-start refresh keeps the existing gone-branch prune behavior;
-#          the independent checkout-refresh cadence disables pruning.
+#          the independent checkout-refresh cadence disables pruning, while
+#          this session-start invocation passes --session to preserve it.
 #          The cadence needs the checkout-refresh background service installed
 #          with explicit captain approval through the MISSING diagnostic.
 #          Session-start fleet sync is
@@ -206,7 +207,7 @@ fleet_sync() {
   set -m 2>/dev/null || true
   if [ -x "$FM_ROOT/bin/fm-checkout-refresh.sh" ] \
     && { [ "${FM_GATE_REFUSE_BYPASS:-0}" != 1 ] || [ "${FM_CHECKOUT_REFRESH_BOOTSTRAP_TEST:-0}" = 1 ]; }; then
-    "$FM_ROOT/bin/fm-checkout-refresh.sh" run-once --force --verbose >"$tmp" 2>/dev/null &
+    "$FM_ROOT/bin/fm-checkout-refresh.sh" run-once --force --verbose --session >"$tmp" 2>/dev/null &
   else
     [ -d "$PROJECTS" ] || { rm -f "$tmp"; return 0; }
     "$FM_ROOT/bin/fm-fleet-sync.sh" >"$tmp" 2>/dev/null &

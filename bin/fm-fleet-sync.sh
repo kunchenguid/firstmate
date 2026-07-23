@@ -18,6 +18,9 @@
 # and fetch failures.
 # Pruning never deletes the checked-out branch or a branch that still has a
 # worktree, so it cannot discard unlanded work; set FM_FLEET_PRUNE=0 to disable it.
+# Set FM_FLEET_DEFAULT_BRANCH to a branch name already proven by a live
+# `ls-remote --symref origin HEAD` probe when a caller must not trust the
+# checkout's possibly stale refs/remotes/origin/HEAD.
 # When the fetch fails on an orphaned .git/packed-refs.lock (left by a ref rewrite
 # killed mid-write - e.g. a timed-out bootstrap sync or a teardown process kill),
 # it is retried with a bounded wait and removed only when provably stale; see
@@ -117,6 +120,11 @@ resolve_project_arg() {
 
 default_branch() {
   local ref branch
+  if [ -n "${FM_FLEET_DEFAULT_BRANCH:-}" ]; then
+    git check-ref-format --branch "$FM_FLEET_DEFAULT_BRANCH" >/dev/null 2>&1 || return 1
+    printf '%s\n' "$FM_FLEET_DEFAULT_BRANCH"
+    return 0
+  fi
   ref=$(git -C "$PROJ" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)
   if [ -n "$ref" ]; then
     echo "${ref#origin/}"
