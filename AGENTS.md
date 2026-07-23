@@ -44,9 +44,9 @@ Ship shared tracked changes through this repo's no-mistakes pipeline and PR path
 Never add an agent name as a commit co-author.
 
 ### Workflow Rules
-- Whenever you generate or finish updating a Markdown file (e.g., reports or specs), automatically open it for preview:
-  - On macOS: `open filename.md`
-  - On Linux/Windows with Grip: `grip filename.md --browser &`
+- Whenever you generate or finish updating a Markdown file (e.g., reports or specs), preview it before delivery.
+- Use only a verified local-only Markdown renderer that sends no document content to external APIs.
+- Manage preview servers collision-safely by stopping the previous server or allocating a fresh port, then verify the current file is served before opening it so later previews cannot show stale content.
 
 ## 2. Layout and state
 
