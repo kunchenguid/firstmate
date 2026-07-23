@@ -56,7 +56,7 @@
 #   profile consultation. A --secondmate spawn is exempt and resolves the SECONDMATE
 #   harness (config/secondmate-harness -> config/crew-harness -> own), so the
 #   secondmate-vs-crewmate split is DURABLE across every respawn (recovery,
-#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|grok)
+#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|grok|kimi)
 #   overrides it for this spawn (either kind). A non-flag string containing
 #   whitespace is treated as a RAW launch command - the escape hatch for verifying
 #   new adapters.
@@ -383,7 +383,7 @@ FIRSTMATE_HOME=
 
 if [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
-    ''|claude|codex|opencode|pi|grok)
+    ''|claude|codex|opencode|pi|grok|kimi)
       ARG3=${POS[1]:-}
       ;;
     *' '*)
@@ -444,6 +444,15 @@ launch_template() {
     # launch command - it is a Stop-event hook installed below (global hook +
     # per-task pointer), so the template is identical for ship/scout/secondmate.
     grok) printf '%s' 'grok --always-approve __MODELFLAG____EFFORTFLAG__"$(cat __BRIEF__)"' ;;
+    # kimi (Kimi Code CLI): has no positional or stdin initial-prompt injection
+    # that keeps the interactive session alive - -p/--prompt and piped stdin
+    # both run one-shot and exit the process (verified; see the harness-adapters
+    # skill). The launch command therefore starts a bare interactive session;
+    # the brief is typed into the composer as the first message by the
+    # post-launch injection step below, once the pane reports composer_state
+    # "empty". --afk auto-dismisses AskUserQuestion on top of --yolo's tool
+    # auto-approval, since no one is present to answer either prompt.
+    kimi) printf '%s' 'kimi --yolo --afk __MODELFLAG__' ;;
     *) return 1 ;;
   esac
 }
@@ -531,7 +540,7 @@ model_flag_for_harness() {
   local harness=$1 model=$2
   [ -n "$model" ] && [ "$model" != default ] || return 0
   case "$harness" in
-    claude|codex|opencode|pi|grok)
+    claude|codex|opencode|pi|grok|kimi)
       printf -- '--model %s ' "$(shell_quote "$model")"
       ;;
   esac
@@ -1294,6 +1303,35 @@ if [ "$KIND" = secondmate ]; then
       echo "CONFIG_REREAD: secondmate $ID: cleanup failed; pre-relaunch generations were force-cleared where possible (destination=$PROJ_ABS source=$FM_HOME)" >&2
     fi
   fi
+fi
+
+# kimi has no launch-command brief injection (see launch_template above): type
+# the brief into the composer as the first message once the TUI has rendered
+# its empty composer, using the same shared submit primitive fm-send uses for
+# an ordinary steer. Verified 2026-07-17 (kimi-cli 1.49.0): a multi-line brief
+# buffers correctly without premature submission, and the composer classifier
+# already reads kimi's idle/pending states correctly with no per-harness
+# override, so no changes were needed in fm-tmux-lib.sh or fm-composer-lib.sh.
+if [ "$HARNESS" = kimi ]; then
+  kimi_ready=
+  for _ in $(seq 1 30); do
+    if [ "$(fm_backend_composer_state "$BACKEND" "$T" 2>/dev/null)" = empty ]; then
+      kimi_ready=1
+      break
+    fi
+    sleep 0.5
+  done
+  [ -n "$kimi_ready" ] || { echo "error: kimi composer did not become ready within 15s; inspect window $T" >&2; exit 1; }
+  verdict=$(fm_backend_send_text_submit "$BACKEND" "$T" "$(cat "$BRIEF")" 5 0.5 0.3) || {
+    echo "error: failed to send brief to kimi window $T" >&2
+    exit 1
+  }
+  case "$verdict" in
+    pending|send-failed)
+      echo "error: brief not delivered to kimi window $T (verdict=$verdict); inspect and steer manually" >&2
+      exit 1
+      ;;
+  esac
 fi
 
 echo "spawned $ID harness=$HARNESS kind=$KIND mode=$MODE yolo=$YOLO window=$META_WINDOW worktree=$WT"
