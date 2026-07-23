@@ -5,8 +5,8 @@ The README owns the user-facing `/calm` usage and limitation contract.
 
 ## Required extension surface
 
-A qualifying implementation must auto-load from the trusted project, keep the toggle session-local, redraw already-rendered controllable rows, restore ordinary rendering, and leave delivery, tool execution, model context, session storage, export and share operation, diagnostics, and expansion state unchanged.
-The governing presentation policy allows only genuine original user prompts and genuine user-facing assistant text.
+A qualifying implementation must auto-load from the trusted project, persist the toggle choice for the effective Firstmate home across Pi session starts and resumes, keep Pi's built-in working activity visible, emit no Calm status row, redraw already-rendered controllable rows, hide Firstmate operational rows without gaps, restore ordinary rendering, and leave delivery, tool execution, model context, session storage, export and share operation, diagnostics, and expansion state unchanged.
+The governing presentation policy allows genuine original user prompts, genuine user-facing assistant text, and Pi's native working activity.
 Changing persisted context to remove hidden content, filtering provider context, patching installed harness code, or claiming coverage outside a supported renderer does not satisfy that boundary.
 
 ## Pi 0.81.1 end-to-end reproduction
@@ -50,7 +50,7 @@ The smallest counterfactuals produced these results:
 - Synthetic delivery therefore mounts its presentation synchronously before Pi's `entry_appended` event returns, then immediately cycles the supported expansion state so Calm removes the host spacer and content while retaining the zero-height parent for later restoration.
 - Pi coalesces those synchronous render requests, so the genuine interactive fixture shows neither the temporary presentation nor a blank gap.
 - Whole-transcript reconstruction was rejected because it drops non-persisted diagnostics and adds an unrelated navigation status row.
-- Pi's HTML exporter ignores plain custom entries and `display: false` custom messages and does not invoke TUI renderers, so synthetic control inputs cannot retain stock user styling in exported or shared HTML through Pi 0.81.1's supported API.
+- Pi's HTML exporter omits plain custom entries and `display: false` custom messages from the main message transcript and does not invoke TUI renderers, but the complete artifact retains hidden operational text in serialized session data and the sidebar tree.
 
 The disconfirming checks deliberately retained contradictory evidence.
 An arbitrary third-party custom tool and a built-in read image remain visible because Pi exposes neither a global tool renderer nor image-row control.
@@ -61,8 +61,9 @@ An ordinary user prompt may quote or reuse watcher, guard, startup, or superviso
 
 `.pi/extensions/lib/fm-calm-visibility.ts` owns the allowlist-style transcript policy and delivery into Pi's structured hidden context entries.
 `bin/fm-operational-input.sh` owns current cross-language operational-input construction and parsing, while the thin Pi adapter lives at `.pi/extensions/lib/fm-operational-input.ts`.
-Only `genuine-user-prompt` and `genuine-agent-response` are policy-visible.
+Only `genuine-user-prompt`, `genuine-agent-response`, and `working-status` are policy-visible.
 Every other audited class is policy-hidden even when Pi currently lacks a supported renderer for enforcing that result.
+The home-local persistence schema is owned by [`docs/configuration.md`](configuration.md#pi-calm-preference-configcalm).
 
 Current session-start, watcher, turn-end guard, away supervisor, and launch-brief inputs use the versioned kind carried after the landed U+2063 `FIRSTMATE_OP: ` prefix.
 The established leading `[fm-from-firstmate]` plus U+2063 routing carrier remains current and is parsed as `from-firstmate` through the same owner so running secondmate charters remain compatible.
@@ -73,13 +74,15 @@ The per-process `FM_FIRSTMATE_PI_LAUNCH_BRIEF` binding remains only as compatibi
 
 Positive fixtures cover every current kind and a separate legacy matrix.
 Near-miss fixtures cover quoted operational content, ASCII-only labels, arbitrary U+2063-prefixed text, altered legacy text, visible routing labels without U+2063, and launch-brief text without its source binding.
+An exact current static envelope is sufficient provenance regardless of whether Pi reports its input source as interactive or extension, so exact copy-paste risk is accepted without nonce, source-authentication, replay-prevention, secondary-token, blocking, redaction, or private-retrieval machinery.
 
 Synthetic inputs that would otherwise render as user rows are rerouted only at Pi input presentation time.
 Their full text is persisted in a non-displayed custom message that Pi converts back to an ordinary user message for provider context, and a TUI-only custom entry restores stock user styling while Calm is off.
 The session-start nudge already uses a non-displayed custom message at its authoritative source, so it remains on that existing hidden presentation path while retaining model context and session persistence.
 The custom-entry host omits the complete row when the renderer returns undefined under Calm, including its normally conditional leading spacer.
 Cycling tool expansion and restoring its original value rebuilds those custom entries and leaves final `Ctrl+O` state unchanged.
-Exported and shared HTML retain genuine user prompts, genuine assistant responses, and ordinary tool rendering, while omitting the synthetic presentation entry and hidden context message at the documented Pi 0.81.1 exporter boundary.
+Exported and shared HTML retain genuine user prompts, genuine assistant responses, ordinary tool rendering, and the complete session artifact.
+The main message transcript omits the synthetic presentation entry and hidden context message, while serialized session data and Pi 0.81.1's sidebar tree retain the full hidden operational text.
 
 ## Complete currently reachable Pi transcript taxonomy
 
@@ -90,7 +93,7 @@ The test fixture enumerates every class below through the centralized policy, an
 | --- | --- | --- |
 | `genuine-user-prompt` | `UserMessageComponent` | Visible. |
 | `genuine-agent-response` | Assistant text in `AssistantMessageComponent` | Visible. |
-| `assistant-thinking` | Working indicator and thinking content in `AssistantMessageComponent` | Live working row and collapsed labels hidden; expanded reasoning and reserved collapsed spacing remain unsupported boundaries. |
+| `assistant-thinking` | Thinking content in `AssistantMessageComponent` | Collapsed labels hidden; expanded reasoning and reserved collapsed spacing remain unsupported boundaries. |
 | `assistant-tool-call` | `ToolExecutionComponent` | Seven built-ins and `fm_watch_arm_pi` hidden; arbitrary custom tools remain an unsupported boundary. |
 | `tool-result` | `ToolExecutionComponent` | Text results for the controlled tools hidden; arbitrary custom results remain an unsupported boundary. |
 | `tool-image` | Image children appended outside tool renderer slots | Unsupported boundary; remains visible. |
@@ -100,7 +103,7 @@ The test fixture enumerates every class below through the centralized policy, an
 | `custom-entry` | `CustomEntryComponent` with a registered renderer | Firstmate's synthetic presentation entry is mounted synchronously, rebuilt to zero children without a residual spacer, and restored by the ordinary expansion redraw; arbitrary extension entries remain an unsupported boundary. |
 | `compaction-summary` | `CompactionSummaryMessageComponent` | Unsupported boundary; remains visible. |
 | `branch-summary` | `BranchSummaryMessageComponent` | Unsupported boundary; remains visible. |
-| `working-status` | `WorkingStatusIndicator` | Hidden through `setWorkingVisible(false)`. |
+| `working-status` | `WorkingStatusIndicator` | Visible through Pi's unchanged built-in row while Calm is active. |
 | `command-status` | Interactive command result and status rows | Calm emits no enable notice, but generic Pi command rows remain an unsupported boundary. |
 | `system-notice` | `showStatus`, `showError`, compaction, retry, and startup warning rows | Unsupported boundary; remains visible. |
 | `cache-notice` | Non-persisted cache-miss `Text` row | Unsupported boundary; remains visible. |
@@ -114,11 +117,11 @@ Runtime prototype replacement, ANSI cursor erasure, provider-context mutation, a
 
 ## Cross-harness verification record
 
-The original five-harness inspection was performed on 2026-07-22, with Pi reverified at 0.81.1 for this change.
+The original five-harness inspection was performed on 2026-07-22, with every integration surface rechecked and Pi reverified at 0.81.1 on 2026-07-23 for this change.
 
 ```text
 $ claude --version
-2.1.216 (Claude Code)
+2.1.218 (Claude Code)
 $ codex --version
 codex-cli 0.144.6
 $ opencode --version
@@ -131,7 +134,7 @@ grok 0.2.106 (bde89716f679)
 
 | Harness | Conclusion | Evidence |
 | --- | --- | --- |
-| Claude Code 2.1.216 | Not feasible through the inspected supported project surface. | Project hooks can observe lifecycle and tool events, while the plugin CLI packages supported components; neither inspected surface exposes a transcript-row renderer or transcript-wide redraw API. |
+| Claude Code 2.1.218 | Not feasible through the inspected supported project surface. | Project hooks can observe lifecycle and tool events, while the plugin CLI packages supported components; neither inspected surface exposes a transcript-row renderer or transcript-wide redraw API. |
 | Codex CLI 0.144.6 | Not feasible through the inspected supported project surface. | The tracked hooks expose session, pre-tool, and stop handling, while the plugin and feature inventories expose no TUI tool-row renderer or transcript redraw control. |
 | OpenCode 1.17.18 | Not feasible without violating the preservation boundary. | Plugins expose events and tool execution hooks, not a built-in transcript-row renderer; same-name tool replacement changes execution rather than presentation alone. |
 | Pi 0.81.1 | Partially feasible and implemented to the supported boundary. | Public APIs control working visibility, collapsed labels, known tool slots, custom entries, and expansion redraws, but not built-in message containers or generic tool and status rows. |
@@ -142,12 +145,14 @@ They do not claim that a harness can never add the missing renderer API.
 
 ## Regression coverage
 
-`tests/fm-calm-pi-extension.test.sh` compares wrapped and stock renderers, verifies all seven built-ins plus `fm_watch_arm_pi`, exercises redraw of already-rendered tool and synthetic rows, checks the gapless mounted custom-entry lifecycle, preserves a transient diagnostic while restoring an entry received under Calm, covers every policy class and synthetic fixture, covers session reset reasons, asserts the rendered export DOM, and drives a genuine 180 by 44 interactive terminal fixture.
+`tests/fm-calm-pi-extension.test.sh` compares wrapped and stock renderers, verifies all seven built-ins plus `fm_watch_arm_pi`, exercises redraw of already-rendered tool and synthetic rows, checks the gapless mounted custom-entry lifecycle, preserves a transient diagnostic while restoring an entry received under Calm, covers every policy class and synthetic fixture, pins exact static envelopes under interactive and extension sources, covers persisted preference restoration across session-start reasons and a real restart/resume, proves Pi's native `Working...` row through a delayed deterministic provider, asserts no Calm status row, asserts the main transcript omission plus complete sidebar and serialized export artifact, and drives a genuine 180 by 44 interactive terminal fixture.
+`tests/fm-pi-primary-live-e2e.test.sh` also proves the unchanged built-in `Working...` row while Calm is active on the credentialed provider path before continuing its ordinary watcher lifecycle.
 `tests/fm-pi-primary-types.test.sh` performs strict no-emit TypeScript checking against the installed Pi 0.81.1 declarations.
 
 The relevant commands are:
 
 ```sh
 tests/fm-calm-pi-extension.test.sh
+FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh
 tests/fm-pi-primary-types.test.sh
 ```

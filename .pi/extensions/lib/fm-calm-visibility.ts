@@ -38,6 +38,7 @@ export type CalmTranscriptClass = (typeof CALM_TRANSCRIPT_CLASSES)[number];
 const CALM_VISIBLE_CLASSES = new Set<CalmTranscriptClass>([
   "genuine-user-prompt",
   "genuine-agent-response",
+  "working-status",
 ]);
 
 export const FIRSTMATE_SYNTHETIC_CONTEXT_TYPE = "firstmate-synthetic-input";
