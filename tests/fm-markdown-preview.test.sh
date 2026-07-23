@@ -307,7 +307,7 @@ test_verified_delivery_detaches_long_lived_opener() {
     || fail "verified delivery terminated the foreground browser handler"
 
   kill "$LONG_LIVED_PID" 2>/dev/null || true
-  for attempt in 1 2 3 4 5 6 7 8 9 10; do
+  for ((attempt = 0; attempt < 10; attempt += 1)); do
     kill -0 "$LONG_LIVED_PID" 2>/dev/null || break
     sleep 0.05
   done
@@ -327,8 +327,8 @@ test_verification_bypasses_proxy_environment() {
     https_proxy=http://127.0.0.1:9 \
     HTTPS_PROXY=http://127.0.0.1:9 \
     ALL_PROXY=http://127.0.0.1:9 \
-    no_proxy= \
-    NO_PROXY= \
+    no_proxy='' \
+    NO_PROXY='' \
     FM_PREVIEW_TEST_CAPTURE="$capture" \
     "$HELPER" --opener "$OPENER" --timeout 2 "$source" \
     >"$TMP_ROOT/proxy.out" 2>"$TMP_ROOT/proxy.err" \
