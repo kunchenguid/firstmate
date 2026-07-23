@@ -46,7 +46,9 @@
 # the home clean and every local ref landed, then quiesces its endpoint and
 # refuses while the home has in-flight crewmate meta files. --force authorizes
 # recursive retirement only after every child passes the same endpoint, identity,
-# cleanliness, stash, and landed-work proofs. Removing a
+# cleanliness, stash, and landed-work proofs. Project retirement also rejects
+# mount boundaries and landing authorities whose Git metadata, objects, alternates,
+# or network endpoint may depend on the retiring home or local machine. Removing a
 # leased home releases its durable treehouse lease so the pool slot is freed,
 # never left leased forever. If the treehouse return fails, teardown leaves the
 # leased home and state in place instead of hiding a still-held lease.
@@ -1598,15 +1600,102 @@ validate_child_worktree_for_removal() {
   printf '%s\n' "$abs_target"
 }
 
+validate_removal_tree_boundaries() {
+  local target=$1 label=$2
+  FM_REMOVAL_BOUNDARY_LABEL=$label python3 - "$target" <<'PY'
+import os
+import stat
+import sys
+
+root = os.path.realpath(sys.argv[1])
+label = os.environ["FM_REMOVAL_BOUNDARY_LABEL"]
+injected = ""
+if os.environ.get("FM_ACCOUNT_ROUTING_TEST_LAB") == "firstmate-account-routing-test-lab-v1":
+    injected = os.environ.get("FM_TEARDOWN_TEST_MOUNT_PATH", "")
+    if injected:
+        injected = os.path.realpath(injected)
+
+def mountinfo_paths():
+    paths = set()
+    path = "/proc/self/mountinfo"
+    if not os.path.exists(path):
+        return paths
+    with open(path, "r", encoding="utf-8") as stream:
+        for line in stream:
+            fields = line.rstrip("\n").split()
+            if len(fields) < 5:
+                raise OSError("malformed mount table")
+            value = fields[4]
+            for encoded, decoded in (
+                ("\\040", " "),
+                ("\\011", "\t"),
+                ("\\012", "\n"),
+                ("\\134", "\\"),
+            ):
+                value = value.replace(encoded, decoded)
+            paths.add(os.path.realpath(value))
+    return paths
+
+try:
+    root_metadata = os.lstat(root)
+    if stat.S_ISLNK(root_metadata.st_mode) or not stat.S_ISDIR(root_metadata.st_mode):
+        raise OSError("removal root is not a real directory")
+    root_device = root_metadata.st_dev
+    mounted = mountinfo_paths()
+
+    def reject_boundary(path, metadata):
+        canonical = os.path.realpath(path)
+        if canonical == injected:
+            raise OSError(f"mounted path {canonical}")
+        if metadata.st_dev != root_device:
+            raise OSError(f"filesystem device boundary at {canonical}")
+        if canonical != root and (canonical in mounted or os.path.ismount(canonical)):
+            raise OSError(f"mount boundary at {canonical}")
+
+    reject_boundary(root, root_metadata)
+    for current, directories, files in os.walk(
+        root, topdown=True, followlinks=False, onerror=lambda error: (_ for _ in ()).throw(error)
+    ):
+        current_metadata = os.lstat(current)
+        reject_boundary(current, current_metadata)
+        safe_directories = []
+        for name in sorted(directories):
+            path = os.path.join(current, name)
+            metadata = os.lstat(path)
+            if stat.S_ISLNK(metadata.st_mode):
+                continue
+            if not stat.S_ISDIR(metadata.st_mode):
+                raise OSError(f"non-directory traversal entry at {path}")
+            reject_boundary(path, metadata)
+            safe_directories.append(name)
+        directories[:] = safe_directories
+        for name in sorted(files):
+            path = os.path.join(current, name)
+            metadata = os.lstat(path)
+            if stat.S_ISLNK(metadata.st_mode):
+                continue
+            if os.path.ismount(path) or os.path.realpath(path) in mounted:
+                raise OSError(f"mounted file at {path}")
+except OSError as error:
+    print(
+        f"REFUSED: {label} removal crosses an untrusted filesystem boundary: {error}",
+        file=sys.stderr,
+    )
+    raise SystemExit(1)
+PY
+}
+
 safe_rm_rf() {
   local target=$1 label=$2
   validate_removal_target "$target" "$label" >/dev/null || return 1
+  validate_removal_tree_boundaries "$target" "$label" || return 1
   rm -rf -- "$target"
 }
 
 safe_rm_rf_child_worktree() {
   local target=$1 project=$2
   validate_child_worktree_for_removal "$target" "$project" >/dev/null || return 1
+  validate_removal_tree_boundaries "$target" "child worktree" || return 1
   rm -rf -- "$target"
 }
 
@@ -1781,8 +1870,291 @@ exact_git_repository_root() {
   fi
 }
 
+secondmate_network_remote_identity() {
+  local url=$1 transport=$2 host=$3 ssh_output ssh_status resolved_host
+  local proxy_command proxy_jump resolution resolution_status
+  case "$host" in
+    ''|-*|*$'\n'*|*$'\r'*|*$'\t'*) return 1 ;;
+  esac
+  resolved_host=$host
+  if [ "$transport" = ssh ]; then
+    [ -x /usr/bin/ssh ] || return 1
+    if fm_run_bounded_capture --combine-stderr ssh_output "$TEARDOWN_UPSTREAM_TIMEOUT" \
+        /usr/bin/ssh -G "$host"; then
+      ssh_status=0
+    else
+      ssh_status=$?
+    fi
+    fm_process_tree_cleanup_verified || return 1
+    [ "$ssh_status" -eq 0 ] || return 1
+    [ "$(printf '%s\n' "$ssh_output" | awk '$1 == "hostname" { count++ } END { print count + 0 }')" -eq 1 ] \
+      || return 1
+    resolved_host=$(printf '%s\n' "$ssh_output" | awk '$1 == "hostname" { print $2; exit }')
+    proxy_command=$(printf '%s\n' "$ssh_output" | awk '$1 == "proxycommand" { $1=""; sub(/^ /, ""); print; exit }')
+    proxy_jump=$(printf '%s\n' "$ssh_output" | awk '$1 == "proxyjump" { print $2; exit }')
+    [ -z "$proxy_command" ] || [ "$proxy_command" = none ] || return 1
+    [ -z "$proxy_jump" ] || [ "$proxy_jump" = none ] || return 1
+  fi
+  if fm_run_bounded_capture --combine-stderr resolution "$TEARDOWN_UPSTREAM_TIMEOUT" \
+      python3 - "$resolved_host" <<'PY'
+import ipaddress
+import os
+import re
+import socket
+import subprocess
+import sys
+
+host = sys.argv[1].lower().rstrip(".")
+
+def addresses(name):
+    values = set()
+    for result in socket.getaddrinfo(name, None, socket.AF_UNSPEC, socket.SOCK_STREAM):
+        value = result[4][0].split("%", 1)[0]
+        values.add(ipaddress.ip_address(value))
+    return values
+
+def local_interface_addresses():
+    values = set()
+    commands = (
+        ("/sbin/ifconfig",),
+        ("/usr/sbin/ifconfig",),
+        ("/usr/sbin/ip", "-o", "addr", "show"),
+        ("/sbin/ip", "-o", "addr", "show"),
+    )
+    output = None
+    for command in commands:
+        if not os.path.isfile(command[0]) or not os.access(command[0], os.X_OK):
+            continue
+        completed = subprocess.run(
+            command,
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=5,
+        )
+        if completed.returncode == 0:
+            output = completed.stdout
+            break
+    if output is None:
+        raise OSError("local interface inventory unavailable")
+    for match in re.findall(r"\binet6?\s+(?:addr:)?([0-9A-Fa-f:.]+)(?:%[^\s]+)?", output):
+        try:
+            values.add(ipaddress.ip_address(match))
+        except ValueError:
+            pass
+    if not values:
+        raise OSError("local interface inventory is empty")
+    return values
+
+try:
+    local_names = {
+        "localhost",
+        socket.gethostname().lower().rstrip("."),
+        socket.getfqdn().lower().rstrip("."),
+    }
+    if host in local_names:
+        raise OSError("remote hostname names this machine")
+    remote = addresses(host)
+    local = local_interface_addresses()
+    for name in tuple(local_names):
+        if not name:
+            continue
+        try:
+            local.update(addresses(name))
+        except OSError:
+            pass
+    if not remote:
+        raise OSError("remote hostname has no addresses")
+    for address in remote:
+        if (
+            address.is_loopback
+            or address.is_link_local
+            or address.is_unspecified
+            or address.is_multicast
+            or address in local
+        ):
+            raise OSError("remote hostname resolves to local or ephemeral storage")
+    print(",".join(sorted(str(address) for address in remote)))
+except (OSError, ValueError, socket.gaierror, subprocess.SubprocessError):
+    raise SystemExit(1)
+PY
+  then
+    resolution_status=0
+  else
+    resolution_status=$?
+  fi
+  fm_process_tree_cleanup_verified || return 1
+  [ "$resolution_status" -eq 0 ] && [ -n "$resolution" ] || return 1
+  printf 'network\t%s\n' "$url"
+}
+
+validate_surviving_repository_authority() {
+  local repository=$1 retiring_home=$2 repository_container=${3:-$1}
+  local label=${4:-repository} common git_dir objects listed records path kind canonical
+  local listed_common bare_repository count=0 refs ref
+  [ "$(exact_git_repository_root "$repository" "$repository_container")" = "$repository" ] \
+    || return 1
+  [ -z "${GIT_OBJECT_DIRECTORY:-}" ] \
+    && [ -z "${GIT_ALTERNATE_OBJECT_DIRECTORIES:-}" ] || {
+      echo "REFUSED: $label uses ambient Git object storage that cannot be proven durable" >&2
+      return 1
+    }
+  common=$(git -C "$repository" rev-parse --git-common-dir 2>/dev/null) || return 1
+  case "$common" in /*) ;; *) common="$repository/$common" ;; esac
+  common=$(fm_checkout_trusted_dir "$common") || return 1
+  git_dir=$(git -C "$repository" rev-parse --absolute-git-dir 2>/dev/null) || return 1
+  git_dir=$(fm_checkout_trusted_dir "$git_dir") || return 1
+  objects=$(git -C "$repository" rev-parse --git-path objects 2>/dev/null) || return 1
+  case "$objects" in /*) ;; *) objects="$repository/$objects" ;; esac
+  objects=$(fm_checkout_trusted_dir "$objects") || return 1
+  for path in "$common" "$git_dir" "$objects"; do
+    case "$path/" in
+      "$retiring_home/"*)
+        echo "REFUSED: $label Git storage depends on the retiring home at $path" >&2
+        return 1
+        ;;
+    esac
+  done
+  FM_SURVIVING_OBJECTS_LABEL=$label python3 - "$objects" "$retiring_home" <<'PY'
+import os
+import stat
+import sys
+
+initial, retiring_home = map(os.path.realpath, sys.argv[1:])
+label = os.environ["FM_SURVIVING_OBJECTS_LABEL"]
+visited = set()
+
+def confined_to_retiring_home(path):
+    try:
+        return os.path.commonpath((retiring_home, path)) == retiring_home
+    except ValueError:
+        return False
+
+def trusted_directory(path):
+    path = os.path.normpath(path)
+    if not os.path.isabs(path):
+        raise OSError("object directory is not absolute")
+    current = os.path.sep
+    for component in path.split(os.path.sep):
+        if not component:
+            continue
+        current = os.path.join(current, component)
+        metadata = os.lstat(current)
+        if stat.S_ISLNK(metadata.st_mode):
+            raise OSError(f"redirected object path {current}")
+    metadata = os.lstat(path)
+    if not stat.S_ISDIR(metadata.st_mode) or os.path.realpath(path) != path:
+        raise OSError(f"unsafe object directory {path}")
+    return path
+
+def inspect(objects):
+    objects = trusted_directory(objects)
+    metadata = os.lstat(objects)
+    identity = (metadata.st_dev, metadata.st_ino)
+    if identity in visited:
+        return
+    visited.add(identity)
+    if confined_to_retiring_home(objects):
+        raise OSError(f"object directory depends on retiring home: {objects}")
+    info = os.path.join(objects, "info")
+    alternates = os.path.join(info, "alternates")
+    http_alternates = os.path.join(info, "http-alternates")
+    if os.path.lexists(http_alternates):
+        raise OSError(f"HTTP alternates are not durable proof: {http_alternates}")
+    if not os.path.lexists(alternates):
+        return
+    metadata = os.lstat(alternates)
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+        raise OSError(f"unsafe alternates file: {alternates}")
+    with open(alternates, "r", encoding="utf-8") as stream:
+        entries = [line.rstrip("\n") for line in stream]
+    if not entries or any(not entry or "\x00" in entry for entry in entries):
+        raise OSError(f"malformed alternates file: {alternates}")
+    for entry in entries:
+        if entry.startswith('"') or entry.endswith('"'):
+            raise OSError(f"quoted alternates are ambiguous: {alternates}")
+        candidate = entry if os.path.isabs(entry) else os.path.join(objects, entry)
+        inspect(os.path.realpath(candidate))
+
+try:
+    inspect(initial)
+except (OSError, UnicodeError) as error:
+    print(f"REFUSED: {label} object storage is not independently durable: {error}", file=sys.stderr)
+    raise SystemExit(1)
+PY
+  bare_repository=$(git -C "$repository" rev-parse --is-bare-repository 2>/dev/null) || return 1
+  listed=$(git -C "$repository" -c core.quotePath=false worktree list --porcelain 2>/dev/null) || {
+    echo "REFUSED: $label linked-worktree graph is uninspectable at $repository" >&2
+    return 1
+  }
+  records=$(printf '%s\n' "$listed" | awk '
+    function emit() {
+      if (path != "") printf "%s\t%s\n", path, is_bare ? "bare" : "worktree"
+      path = ""
+      is_bare = 0
+    }
+    /^worktree / { emit(); path = substr($0, 10); next }
+    /^bare$/ { is_bare = 1; next }
+    /^$/ { emit() }
+    END { emit() }
+  ') || return 1
+  while IFS=$'\t' read -r path kind; do
+    [ -n "$path" ] || continue
+    canonical=$(fm_checkout_trusted_dir "$path") || {
+      echo "REFUSED: $label linked worktree is missing or redirected at $path" >&2
+      return 1
+    }
+    case "$canonical/" in
+      "$retiring_home/"*)
+        echo "REFUSED: $label linked-worktree graph depends on the retiring home at $canonical" >&2
+        return 1
+        ;;
+    esac
+    case "$kind" in
+      bare)
+        [ "$canonical" = "$common" ] && [ "$bare_repository" = true ] || return 1
+        [ "$canonical" != "$repository" ] || count=$((count + 1))
+        ;;
+      worktree)
+        if [ "$canonical" = "$repository" ] \
+            || { [ -f "$repository/.git" ] && [ "$canonical" = "$common" ]; }; then
+          count=$((count + 1))
+        else
+          listed_common=$(fm_checkout_git_common_dir "$canonical") || return 1
+          [ "$listed_common" = "$common" ] || return 1
+        fi
+        ;;
+      *) return 1 ;;
+    esac
+  done <<EOF
+$records
+EOF
+  [ "$count" -eq 1 ] || {
+    echo "REFUSED: $label worktree identity is ambiguous at $repository" >&2
+    return 1
+  }
+  refs=$(git -C "$repository" for-each-ref --format='%(refname)' 2>/dev/null) || {
+    echo "REFUSED: $label refs are uninspectable at $repository" >&2
+    return 1
+  }
+  while IFS= read -r ref; do
+    [ -n "$ref" ] || continue
+    git -C "$repository" cat-file -e "$ref^{object}" 2>/dev/null || {
+      echo "REFUSED: $label ref $ref depends on unavailable objects" >&2
+      return 1
+    }
+  done <<EOF
+$refs
+EOF
+  git -C "$repository" fsck --connectivity-only --no-dangling >/dev/null 2>&1 || {
+    echo "REFUSED: $label required Git objects are incomplete at $repository" >&2
+    return 1
+  }
+}
+
 secondmate_remote_identity() {
-  local repository=$1 retiring_home=$2 url parsed kind path canonical bare git_dir
+  local repository=$1 retiring_home=$2 url parsed kind transport host path canonical bare git_dir
   url=$(git -C "$repository" remote get-url origin 2>/dev/null) || return 1
   [ -n "$url" ] || return 1
   parsed=$(python3 - "$url" "$repository" <<'PY'
@@ -1826,7 +2198,7 @@ try:
                     raise ValueError
                 print("local\t" + path)
             elif host:
-                print("network\t" + url)
+                print("network\t" + scheme + "\t" + host + "\t" + url)
             else:
                 raise ValueError
         else:
@@ -1840,7 +2212,7 @@ try:
                     raise ValueError
                 print("local\t" + path)
             else:
-                print("network\t" + url)
+                print("network\tssh\t" + host + "\t" + url)
         else:
             path = url if os.path.isabs(url) else os.path.join(repository, url)
             print("local\t" + path)
@@ -1848,13 +2220,15 @@ except (OSError, ValueError):
     raise SystemExit(1)
 PY
   ) || return 1
-  kind=${parsed%%$'\t'*}
-  path=${parsed#*$'\t'}
+  IFS=$'\t' read -r kind transport host path <<EOF
+$parsed
+EOF
   if [ "$kind" = network ]; then
-    printf 'network\t%s\n' "$path"
-    return 0
+    secondmate_network_remote_identity "$path" "$transport" "$host"
+    return $?
   fi
   [ "$kind" = local ] || return 1
+  path=$transport
   canonical=$(fm_checkout_trusted_dir "$path") || return 1
   bare=$(git -C "$canonical" rev-parse --is-bare-repository 2>/dev/null) || return 1
   if [ "$bare" = true ]; then
@@ -1867,6 +2241,9 @@ PY
   case "$canonical/" in
     "$retiring_home/"*) return 1 ;;
   esac
+  validate_surviving_repository_authority \
+    "$canonical" "$retiring_home" "$canonical" "secondmate project landing authority" \
+    || return 1
   printf 'local\t%s\n' "$canonical"
 }
 
@@ -2075,6 +2452,9 @@ validate_secondmate_project_repository_landed_state() {
     echo "REFUSED: registered source project repository is not an exact repository root at $source_repository" >&2
     return 1
   }
+  validate_surviving_repository_authority \
+    "$source_repository" "$retiring_home" "$source_container" \
+    "registered source project repository" || return 1
   validate_secondmate_repository_worktree_graph \
     "$repository" "$retiring_home" "$repository_container" || return 1
   validate_secondmate_declared_submodules "$repository" "$repository_container" || {
@@ -2221,6 +2601,7 @@ PY
       echo "REFUSED: registered source project is unavailable or redirected for $project" >&2
       return 1
     }
+    validate_removal_tree_boundaries "$clone" "secondmate project clone" || return 1
     repositories=$(enumerate_secondmate_project_repositories "$clone") || {
       echo "REFUSED: nested project repositories cannot be safely enumerated at $clone" >&2
       return 1

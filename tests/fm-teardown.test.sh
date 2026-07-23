@@ -672,6 +672,8 @@ run_teardown() {
   FM_EXPECT_CHECKOUT_LOCK="${FM_EXPECT_CHECKOUT_LOCK:-}" \
   FM_EXPECT_CHECKOUT_LOCK_MARKER="${FM_EXPECT_CHECKOUT_LOCK_MARKER:-}" \
   FM_FAKE_FIRSTMATE_SOURCE="${FM_FAKE_FIRSTMATE_SOURCE:-$ROOT}" \
+  FM_TEARDOWN_TEST_MOUNT_PATH="${FM_TEARDOWN_TEST_MOUNT_PATH:-}" \
+  HOME="${FM_TEST_TEARDOWN_HOME:-$HOME}" \
   FM_ACCOUNT_ROUTING_TEST_LAB=firstmate-account-routing-test-lab-v1 \
   PATH="$case_dir/fakebin:$PATH" \
     "$TEARDOWN" task-x1 "$@"
@@ -3421,7 +3423,7 @@ test_secondmate_retirement_rejects_linked_worktree_graphs() {
   expect_code 1 "$rc" "nested linked worktree must block retirement"
   assert_present "$nested_worktree" "nested linked worktree was removed without unregistering its owner"
   assert_present "$nested_case/state/task-x1.meta" "nested linked worktree allowed metadata removal"
-  assert_grep 'linked worktree owned outside the retiring home' "$nested_case/stderr" \
+  assert_grep 'linked-worktree graph depends on the retiring home' "$nested_case/stderr" \
     "nested linked-worktree ownership was not surfaced"
 
   external_case=$(make_case secondmate-external-linked-worktree)
@@ -3523,6 +3525,105 @@ test_secondmate_retirement_rejects_loopback_and_stale_tracking_authority() {
   assert_grep 'ref refs/remotes/origin/deleted is not proven on a live remote branch' "$stale_case/stderr" \
     "stale remote-tracking work was not surfaced"
   pass "loopback and stale remote-tracking authority never prove landing"
+}
+
+test_secondmate_retirement_rejects_mount_boundaries() {
+  local case_dir mounted rc
+  case_dir=$(make_case secondmate-project-mount-boundary)
+  prepare_secondmate_home_fixture "$case_dir"
+  write_secondmate_meta "$case_dir"
+  mounted="$case_dir/wt/projects/test/mounted-storage"
+  mkdir -p "$mounted"
+  set +e
+  FM_TEARDOWN_TEST_MOUNT_PATH="$mounted" \
+    run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "mounted project subtree must block retirement"
+  assert_present "$case_dir/wt" "mounted project subtree allowed home removal"
+  assert_present "$case_dir/state/task-x1.meta" "mounted project subtree allowed metadata removal"
+  assert_grep 'crosses an untrusted filesystem boundary' "$case_dir/stderr" \
+    "mounted project subtree was not surfaced"
+  pass "secondmate retirement refuses mounted deletion boundaries"
+}
+
+test_secondmate_retirement_rejects_local_network_aliases() {
+  local case_dir clone source ssh_home local_origin rc
+  case_dir=$(make_case secondmate-local-network-alias)
+  prepare_secondmate_home_fixture "$case_dir"
+  write_secondmate_meta "$case_dir"
+  clone="$case_dir/wt/projects/test"
+  source="$case_dir/source-projects/test"
+  local_origin="$case_dir/wt/data/local-alias-origin.git"
+  ssh_home="$case_dir/ssh-home"
+  mkdir -p "$ssh_home/.ssh"
+  chmod 700 "$ssh_home/.ssh"
+  git clone --quiet --bare "$case_dir/origin.git" "$local_origin"
+  printf '%s\n' \
+    'Host local-store-alias' \
+    '  HostName localhost' \
+    > "$ssh_home/.ssh/config"
+  chmod 600 "$ssh_home/.ssh/config"
+  git -C "$clone" remote set-url origin "ssh://local-store-alias$local_origin"
+  git -C "$source" remote set-url origin "ssh://local-store-alias$local_origin"
+  set +e
+  FM_TEST_TEARDOWN_HOME="$ssh_home" \
+    run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "local SSH alias must block retirement"
+  assert_present "$local_origin" "local SSH alias landing authority was deleted"
+  assert_present "$case_dir/state/task-x1.meta" "local SSH alias allowed metadata removal"
+  assert_grep 'remote identity is unsafe' "$case_dir/stderr" \
+    "local SSH alias was assumed to be durable network storage"
+  pass "network-shaped local aliases never prove durable landing"
+}
+
+test_secondmate_retirement_rejects_in_home_remote_object_storage() {
+  local case_dir clone source in_home_origin external_authority rc
+  case_dir=$(make_case secondmate-remote-object-alternate)
+  prepare_secondmate_home_fixture "$case_dir"
+  write_secondmate_meta "$case_dir"
+  clone="$case_dir/wt/projects/test"
+  source="$case_dir/source-projects/test"
+  in_home_origin="$case_dir/wt/data/in-home-object-authority.git"
+  external_authority="$case_dir/external-shared-authority.git"
+  git clone --quiet --bare "$case_dir/origin.git" "$in_home_origin"
+  git clone --quiet --bare --shared "$in_home_origin" "$external_authority"
+  git -C "$clone" remote set-url origin "$external_authority"
+  git -C "$source" remote set-url origin "$external_authority"
+  set +e
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "remote object alternate inside the home must block retirement"
+  assert_present "$in_home_origin" "remote object authority inside the home was deleted"
+  assert_present "$case_dir/state/task-x1.meta" "in-home remote object storage allowed metadata removal"
+  assert_grep 'object storage is not independently durable' "$case_dir/stderr" \
+    "remote object alternates were not included in survival proof"
+  pass "landing authority object storage must survive home removal"
+}
+
+test_secondmate_retirement_rejects_source_common_dir_in_home() {
+  local case_dir source owner rc
+  case_dir=$(make_case secondmate-source-common-in-home)
+  prepare_secondmate_home_fixture "$case_dir"
+  write_secondmate_meta "$case_dir"
+  source="$case_dir/source-projects/test"
+  owner="$case_dir/wt/data/source-owner"
+  rm -rf "$source"
+  git clone --quiet "$case_dir/origin.git" "$owner"
+  git -C "$owner" worktree add --quiet --detach "$source" main
+  set +e
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "source project common directory inside the home must block retirement"
+  assert_present "$owner/.git" "source project common directory inside the home was deleted"
+  assert_present "$case_dir/state/task-x1.meta" "source common-directory drift allowed metadata removal"
+  assert_grep 'registered source project repository Git storage depends on the retiring home' \
+    "$case_dir/stderr" "source project storage graph was not validated"
+  pass "registered source storage must survive secondmate removal"
 }
 
 test_secondmate_retirement_serializes_child_spawn() {
@@ -3827,6 +3928,10 @@ if [ "${FM_TEST_FOCUSED:-}" = review-round-durable-secondmate ]; then
   test_secondmate_retirement_rejects_linked_worktree_graphs
   test_secondmate_retirement_accounts_for_directory_symlinks
   test_secondmate_retirement_rejects_loopback_and_stale_tracking_authority
+  test_secondmate_retirement_rejects_mount_boundaries
+  test_secondmate_retirement_rejects_local_network_aliases
+  test_secondmate_retirement_rejects_in_home_remote_object_storage
+  test_secondmate_retirement_rejects_source_common_dir_in_home
   exit 0
 fi
 
@@ -3873,6 +3978,10 @@ test_secondmate_retirement_recurses_into_ignored_nested_repositories
 test_secondmate_retirement_rejects_linked_worktree_graphs
 test_secondmate_retirement_accounts_for_directory_symlinks
 test_secondmate_retirement_rejects_loopback_and_stale_tracking_authority
+test_secondmate_retirement_rejects_mount_boundaries
+test_secondmate_retirement_rejects_local_network_aliases
+test_secondmate_retirement_rejects_in_home_remote_object_storage
+test_secondmate_retirement_rejects_source_common_dir_in_home
 test_secondmate_retirement_serializes_child_spawn
 test_nested_secondmate_cleanup_requires_child_home_lock
 test_secondmate_registry_updates_are_locked_and_literal

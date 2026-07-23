@@ -132,6 +132,96 @@ plist_generation() {
   sed -n 's#.*<key>FM_CHECKOUT_REFRESH_GENERATION</key><string>\([^<]*\)</string>.*#\1#p' "$1"
 }
 
+write_stateful_launchctl_fake() {
+  local path=$1
+  cat > "$path" <<'SH'
+#!/usr/bin/env bash
+state=${FM_FAKE_LAUNCHCTL_STATE:?}
+mkdir -p "$state"
+[ -z "${FM_FAKE_LAUNCHCTL_LOG:-}" ] || printf '%s\n' "$*" >> "$FM_FAKE_LAUNCHCTL_LOG"
+absent() {
+  echo "Could not find service \"${1:-unknown}\" in domain" >&2
+  exit 3
+}
+case "${1:-}" in
+  print)
+    target=${2:-}
+    label=${target##*/}
+    record="$state/$label"
+    [ -f "$record" ] || absent "$label"
+    plist=$(cat "$record")
+    [ -f "$plist" ] || exit 4
+    python3 - "$target" "$plist" <<'PY'
+import plistlib
+import sys
+
+target, path = sys.argv[1:]
+with open(path, "rb") as stream:
+    definition = plistlib.load(stream)
+arguments = definition["ProgramArguments"]
+environment = definition["EnvironmentVariables"]
+print(f"{target} = {{")
+print(f"    path = {path}")
+print(f"    program = {arguments[0]}")
+print("    arguments = {")
+for argument in arguments:
+    print(f"        {argument}")
+print("    }")
+print("    environment = {")
+for key, value in environment.items():
+    print(f"        {key} => {value}")
+print("    }")
+print("}")
+PY
+    ;;
+  bootout)
+    target=${2:-}
+    label=${target##*/}
+    [ "${FM_TEST_LAUNCHCTL_BOOTOUT_FAIL_LABEL:-}" != "$label" ] || {
+      echo "injected bootout failure for $label" >&2
+      exit 70
+    }
+    [ -f "$state/$label" ] || absent "$label"
+    rm -f "$state/$label"
+    ;;
+  bootstrap)
+    plist=${3:-}
+    label=$(python3 - "$plist" <<'PY'
+import plistlib
+import sys
+with open(sys.argv[1], "rb") as stream:
+    print(plistlib.load(stream)["Label"])
+PY
+)
+    printf '%s\n' "$plist" > "$state/$label"
+    ;;
+  kickstart)
+    target=${2:-}
+    label=${target##*/}
+    [ -f "$state/$label" ] || absent "$label"
+    plist=$(cat "$state/$label")
+    if [ -n "${FM_TEST_LOGICAL_STATE:-}" ] \
+        && [ -n "${FM_TEST_LOGICAL_PLIST:-}" ] \
+        && [ "$plist" = "$FM_TEST_LOGICAL_PLIST" ]; then
+      generation=$(sed -n 's#.*<key>FM_CHECKOUT_REFRESH_GENERATION</key><string>\([^<]*\)</string>.*#\1#p' "$plist")
+      now=$(date +%s)
+      printf '%s\n' "$now" > "$FM_TEST_LOGICAL_STATE/heartbeat"
+      printf '%s\nhealthy\n' "$now" > "$FM_TEST_LOGICAL_STATE/coverage-health"
+      printf '%s\n' "$generation" > "$FM_TEST_LOGICAL_STATE/scheduler-generation"
+    fi
+    ;;
+  *) exit 2 ;;
+esac
+SH
+  chmod +x "$path"
+}
+
+mark_launch_agent_loaded() {
+  local state=$1 label=$2 plist=$3
+  mkdir -p "$state"
+  printf '%s\n' "$plist" > "$state/$label"
+}
+
 test_discovery_covers_projects_treehouse_external_and_config() {
   local remote project external pool_worktree explicit_remote explicit custom_root scanned out
   remote=$(build_origin relvino)
@@ -1456,21 +1546,18 @@ SH
 }
 
 test_launch_agent_definition_is_home_scoped_with_scheduler_seam() {
-  local fakebin agents log plist second_home second_plist key second_key install_state_base install_state_root
+  local fakebin fake_state agents log plist second_home second_plist key second_key install_state_base install_state_root
+  local loaded_drift
   local custom_treehouse="$TMP_ROOT/custom-treehouse" other_treehouse="$TMP_ROOT/other-treehouse" out status now generation
   fakebin="$TMP_ROOT/fakebin"
+  fake_state="$TMP_ROOT/fake-launchctl-state"
   agents="$TMP_ROOT/LaunchAgents"
   log="$TMP_ROOT/launchctl.log"
   install_state_base="$TMP_ROOT/install-state"
-  mkdir -p "$fakebin" "$agents" "$custom_treehouse" "$other_treehouse"
+  mkdir -p "$fakebin" "$fake_state" "$agents" "$custom_treehouse" "$other_treehouse"
   custom_treehouse=$(cd "$custom_treehouse" && pwd -P)
   other_treehouse=$(cd "$other_treehouse" && pwd -P)
-  cat > "$fakebin/launchctl" <<'SH'
-#!/usr/bin/env bash
-printf '%s\n' "$*" >> "${FM_FAKE_LAUNCHCTL_LOG:?}"
-exit 0
-SH
-  chmod +x "$fakebin/launchctl"
+  write_stateful_launchctl_fake "$fakebin/launchctl"
 
   HOME="$TEST_HOME" FM_HOME="$FM_TEST_HOME" FM_ROOT_OVERRIDE="$ROOT" \
     FM_TREEHOUSE_ROOT="$custom_treehouse" \
@@ -1478,6 +1565,7 @@ SH
     FM_CHECKOUT_REFRESH_PLATFORM=Darwin \
     FM_CHECKOUT_REFRESH_LAUNCH_AGENTS_DIR="$agents" \
     FM_CHECKOUT_REFRESH_LAUNCHCTL="$fakebin/launchctl" \
+    FM_FAKE_LAUNCHCTL_STATE="$fake_state" \
     FM_FAKE_LAUNCHCTL_LOG="$log" \
     "$ROOT/bin/fm-checkout-refresh.sh" install
 
@@ -1514,6 +1602,7 @@ SH
     FM_CHECKOUT_REFRESH_PLATFORM=Darwin \
     FM_CHECKOUT_REFRESH_LAUNCH_AGENTS_DIR="$agents" \
     FM_CHECKOUT_REFRESH_LAUNCHCTL="$fakebin/launchctl" \
+    FM_FAKE_LAUNCHCTL_STATE="$fake_state" \
     FM_FAKE_LAUNCHCTL_LOG="$log" \
     "$ROOT/bin/fm-checkout-refresh.sh" ensure \
     || fail "matching LaunchAgent scheduler configuration was reported unhealthy"
@@ -1526,6 +1615,7 @@ SH
     FM_CHECKOUT_REFRESH_PLATFORM=Darwin \
     FM_CHECKOUT_REFRESH_LAUNCH_AGENTS_DIR="$agents" \
     FM_CHECKOUT_REFRESH_LAUNCHCTL="$fakebin/launchctl" \
+    FM_FAKE_LAUNCHCTL_STATE="$fake_state" \
     FM_FAKE_LAUNCHCTL_LOG="$log" \
     "$ROOT/bin/fm-checkout-refresh.sh" ensure 2>&1)
   status=$?
@@ -1534,6 +1624,27 @@ SH
   assert_contains "$out" "latest coverage run is missing or unhealthy" \
     "LaunchAgent health did not diagnose the failed coverage run"
   printf '%s\n%s\n' "$now" healthy > "$install_state_root/coverage-health"
+  loaded_drift="$TMP_ROOT/loaded-launch-agent-drift.plist"
+  cp "$plist" "$loaded_drift"
+  sed -i.bak 's#<key>FM_HOME</key><string>[^<]*</string>#<key>FM_HOME</key><string>/stale/home</string>#' "$loaded_drift"
+  rm -f "$loaded_drift.bak"
+  mark_launch_agent_loaded "$fake_state" "com.firstmate.checkout-refresh.$key" "$loaded_drift"
+  set +e
+  out=$(HOME="$TEST_HOME" FM_HOME="$FM_TEST_HOME" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_TREEHOUSE_ROOT="$custom_treehouse" \
+    FM_CHECKOUT_REFRESH_STATE_BASE="$install_state_base" \
+    FM_CHECKOUT_REFRESH_PLATFORM=Darwin \
+    FM_CHECKOUT_REFRESH_LAUNCH_AGENTS_DIR="$agents" \
+    FM_CHECKOUT_REFRESH_LAUNCHCTL="$fakebin/launchctl" \
+    FM_FAKE_LAUNCHCTL_STATE="$fake_state" \
+    FM_FAKE_LAUNCHCTL_LOG="$log" \
+    "$ROOT/bin/fm-checkout-refresh.sh" ensure 2>&1)
+  status=$?
+  set -e
+  [ "$status" -ne 0 ] || fail "LaunchAgent health trusted a stale same-label loaded job"
+  assert_contains "$out" "loaded identity is missing or untrusted" \
+    "loaded LaunchAgent identity drift was not surfaced before health"
+  mark_launch_agent_loaded "$fake_state" "com.firstmate.checkout-refresh.$key" "$plist"
 
   set +e
   out=$(HOME="$TEST_HOME" FM_HOME="$FM_TEST_HOME" FM_ROOT_OVERRIDE="$ROOT" \
@@ -1542,6 +1653,7 @@ SH
     FM_CHECKOUT_REFRESH_PLATFORM=Darwin \
     FM_CHECKOUT_REFRESH_LAUNCH_AGENTS_DIR="$agents" \
     FM_CHECKOUT_REFRESH_LAUNCHCTL="$fakebin/launchctl" \
+    FM_FAKE_LAUNCHCTL_STATE="$fake_state" \
     FM_FAKE_LAUNCHCTL_LOG="$log" \
     "$ROOT/bin/fm-checkout-refresh.sh" ensure 2>&1)
   status=$?
@@ -1557,6 +1669,7 @@ SH
     FM_CHECKOUT_REFRESH_PLATFORM=Darwin \
     FM_CHECKOUT_REFRESH_LAUNCH_AGENTS_DIR="$agents" \
     FM_CHECKOUT_REFRESH_LAUNCHCTL="$fakebin/launchctl" \
+    FM_FAKE_LAUNCHCTL_STATE="$fake_state" \
     FM_FAKE_LAUNCHCTL_LOG="$log" \
     "$ROOT/bin/fm-checkout-refresh.sh" ensure 2>&1)
   status=$?
@@ -1572,6 +1685,7 @@ SH
     FM_CHECKOUT_REFRESH_PLATFORM=Darwin \
     FM_CHECKOUT_REFRESH_LAUNCH_AGENTS_DIR="$agents" \
     FM_CHECKOUT_REFRESH_LAUNCHCTL="$fakebin/launchctl" \
+    FM_FAKE_LAUNCHCTL_STATE="$fake_state" \
     FM_FAKE_LAUNCHCTL_LOG="$log" \
     "$ROOT/bin/fm-checkout-refresh.sh" ensure 2>&1)
   status=$?
@@ -1587,6 +1701,7 @@ SH
     FM_CHECKOUT_REFRESH_PLATFORM=Darwin \
     FM_CHECKOUT_REFRESH_LAUNCH_AGENTS_DIR="$agents" \
     FM_CHECKOUT_REFRESH_LAUNCHCTL="$fakebin/launchctl" \
+    FM_FAKE_LAUNCHCTL_STATE="$fake_state" \
     FM_FAKE_LAUNCHCTL_LOG="$log" \
     "$ROOT/bin/fm-checkout-refresh.sh" install
   second_key=$(checkout_state_key "$second_home" 16)
@@ -1611,7 +1726,7 @@ SH
 }
 
 test_logical_home_state_migrates_and_ambiguity_fails_closed() {
-  local home state_base logical_key current_physical_key physical_key logical physical agents fakebin physical_plist logical_plist now out status
+  local home state_base logical_key current_physical_key physical_key logical physical agents fakebin fake_state physical_plist logical_plist now out status
   local rollback_home rollback_logical_key rollback_physical_key rollback_logical rollback_physical rollback_physical_plist rollback_logical_plist
   local staging_home staging_logical_key staging_physical_key staging_logical staging_physical staging_physical_plist
   home="$TMP_ROOT/state-migration-home"
@@ -1626,33 +1741,26 @@ test_logical_home_state_migrates_and_ambiguity_fails_closed() {
   physical="$state_base/homes/$physical_key"
   agents="$TMP_ROOT/state-migration-agents"
   fakebin="$TMP_ROOT/state-migration-fakebin"
+  fake_state="$TMP_ROOT/state-migration-launchctl-state"
   physical_plist="$agents/com.firstmate.checkout-refresh.$physical_key.plist"
   logical_plist="$agents/com.firstmate.checkout-refresh.$logical_key.plist"
-  mkdir -p "$physical" "$agents" "$fakebin"
+  mkdir -p "$physical" "$agents" "$fakebin" "$fake_state"
   printf 'preserved\n' > "$physical/external-identities"
   now=$(date +%s)
   printf '%s\n%s\n' "$now" "$ROOT/bin/fm-checkout-refresh.sh" > "$physical/heartbeat"
   printf '%s\nhealthy\n' "$now" > "$physical/coverage-health"
   write_launch_agent_fixture "$physical_plist" \
     "com.firstmate.checkout-refresh.$physical_key" "$home" "$physical"
-  cat > "$fakebin/launchctl" <<'SH'
-#!/usr/bin/env bash
-if [ "${1:-}" = kickstart ]; then
-  generation=$(sed -n 's#.*<key>FM_CHECKOUT_REFRESH_GENERATION</key><string>\([^<]*\)</string>.*#\1#p' "$FM_TEST_LOGICAL_PLIST")
-  now=$(date +%s)
-  printf '%s\n' "$now" > "$FM_TEST_LOGICAL_STATE/heartbeat"
-  printf '%s\nhealthy\n' "$now" > "$FM_TEST_LOGICAL_STATE/coverage-health"
-  printf '%s\n' "$generation" > "$FM_TEST_LOGICAL_STATE/scheduler-generation"
-fi
-exit 0
-SH
-  chmod +x "$fakebin/launchctl"
+  write_stateful_launchctl_fake "$fakebin/launchctl"
+  mark_launch_agent_loaded "$fake_state" \
+    "com.firstmate.checkout-refresh.$physical_key" "$physical_plist"
   out=$(HOME="$home/user" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
     FM_CHECKOUT_REFRESH_STATE_BASE="$state_base" \
     FM_TREEHOUSE_ROOT="$home/user/.treehouse" \
     FM_CHECKOUT_REFRESH_PLATFORM=Darwin \
     FM_CHECKOUT_REFRESH_LAUNCH_AGENTS_DIR="$agents" \
     FM_CHECKOUT_REFRESH_LAUNCHCTL="$fakebin/launchctl" \
+    FM_FAKE_LAUNCHCTL_STATE="$fake_state" \
     FM_TEST_LOGICAL_PLIST="$logical_plist" \
     FM_TEST_LOGICAL_STATE="$logical" \
     "$ROOT/bin/fm-checkout-refresh.sh" ensure 2>&1)
@@ -1677,12 +1785,8 @@ SH
   write_launch_agent_fixture "$rollback_physical_plist" \
     "com.firstmate.checkout-refresh.$rollback_physical_key" \
     "$rollback_home" "$rollback_physical"
-  cat > "$fakebin/launchctl" <<'SH'
-#!/usr/bin/env bash
-printf '%s\n' "$*" >> "$FM_TEST_LAUNCHCTL_LOG"
-exit 0
-SH
-  chmod +x "$fakebin/launchctl"
+  mark_launch_agent_loaded "$fake_state" \
+    "com.firstmate.checkout-refresh.$rollback_physical_key" "$rollback_physical_plist"
   set +e
   out=$(HOME="$rollback_home/user" FM_HOME="$rollback_home" FM_ROOT_OVERRIDE="$ROOT" \
     FM_CHECKOUT_REFRESH_STATE_BASE="$state_base" \
@@ -1690,9 +1794,10 @@ SH
     FM_CHECKOUT_REFRESH_PLATFORM=Darwin \
     FM_CHECKOUT_REFRESH_LAUNCH_AGENTS_DIR="$agents" \
     FM_CHECKOUT_REFRESH_LAUNCHCTL="$fakebin/launchctl" \
+    FM_FAKE_LAUNCHCTL_STATE="$fake_state" \
     FM_CHECKOUT_REFRESH_ACTIVATION_TIMEOUT=1 \
     FM_TEST_PHYSICAL_PLIST="$rollback_physical_plist" \
-    FM_TEST_LAUNCHCTL_LOG="$TMP_ROOT/state-migration-rollback-launchctl.log" \
+    FM_FAKE_LAUNCHCTL_LOG="$TMP_ROOT/state-migration-rollback-launchctl.log" \
     "$ROOT/bin/fm-checkout-refresh.sh" install 2>&1)
   status=$?
   set -e
@@ -1720,6 +1825,8 @@ SH
   write_launch_agent_fixture "$staging_physical_plist" \
     "com.firstmate.checkout-refresh.$staging_physical_key" \
     "$staging_home" "$staging_physical"
+  mark_launch_agent_loaded "$fake_state" \
+    "com.firstmate.checkout-refresh.$staging_physical_key" "$staging_physical_plist"
   set +e
   out=$(HOME="$staging_home/user" FM_HOME="$staging_home" FM_ROOT_OVERRIDE="$ROOT" \
     FM_CHECKOUT_REFRESH_STATE_BASE="$state_base" \
@@ -1727,9 +1834,10 @@ SH
     FM_CHECKOUT_REFRESH_PLATFORM=Darwin \
     FM_CHECKOUT_REFRESH_LAUNCH_AGENTS_DIR="$agents" \
     FM_CHECKOUT_REFRESH_LAUNCHCTL="$fakebin/launchctl" \
+    FM_FAKE_LAUNCHCTL_STATE="$fake_state" \
     FM_CHECKOUT_REFRESH_TEST=1 \
     FM_CHECKOUT_TEST_HOME_MIGRATION_FAILURE=stage \
-    FM_TEST_LAUNCHCTL_LOG="$TMP_ROOT/state-migration-stage-launchctl.log" \
+    FM_FAKE_LAUNCHCTL_LOG="$TMP_ROOT/state-migration-stage-launchctl.log" \
     "$ROOT/bin/fm-checkout-refresh.sh" ensure 2>&1)
   status=$?
   set -e
@@ -1754,32 +1862,22 @@ SH
 }
 
 test_launch_agent_label_and_custom_legacy_state_are_authoritative() {
-  local home state_base custom_state agents fakebin logical_key logical_label logical_plist legacy_plist out status
+  local home state_base custom_state agents fakebin fake_state logical_key logical_label logical_plist legacy_plist out status
   home="$TMP_ROOT/launch-agent-identity-home"
   state_base="$TMP_ROOT/launch-agent-identity-state-base"
   custom_state="$TMP_ROOT/launch-agent-custom-state"
   agents="$TMP_ROOT/launch-agent-identity-agents"
   fakebin="$TMP_ROOT/launch-agent-identity-fakebin"
+  fake_state="$TMP_ROOT/launch-agent-identity-launchctl-state"
   mkdir -p "$home/projects" "$home/config" "$home/user/.treehouse" \
-    "$custom_state" "$agents" "$fakebin"
+    "$custom_state" "$agents" "$fakebin" "$fake_state"
   logical_key=$(checkout_state_key "$home" 16)
   logical_label="com.firstmate.checkout-refresh.$logical_key"
   logical_plist="$agents/$logical_label.plist"
   legacy_plist="$agents/com.firstmate.checkout-refresh.plist"
   write_launch_agent_fixture "$logical_plist" \
     "com.firstmate.checkout-refresh.aaaaaaaaaaaaaaaa" "$home" "$custom_state"
-  cat > "$fakebin/launchctl" <<'SH'
-#!/usr/bin/env bash
-if [ "${1:-}" = kickstart ]; then
-  generation=$(sed -n 's#.*<key>FM_CHECKOUT_REFRESH_GENERATION</key><string>\([^<]*\)</string>.*#\1#p' "$FM_TEST_LOGICAL_PLIST")
-  now=$(date +%s)
-  printf '%s\n' "$now" > "$FM_TEST_LOGICAL_STATE/heartbeat"
-  printf '%s\nhealthy\n' "$now" > "$FM_TEST_LOGICAL_STATE/coverage-health"
-  printf '%s\n' "$generation" > "$FM_TEST_LOGICAL_STATE/scheduler-generation"
-fi
-exit 0
-SH
-  chmod +x "$fakebin/launchctl"
+  write_stateful_launchctl_fake "$fakebin/launchctl"
   set +e
   out=$(HOME="$home/user" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
     FM_CHECKOUT_REFRESH_STATE_BASE="$state_base" \
@@ -1787,6 +1885,7 @@ SH
     FM_CHECKOUT_REFRESH_PLATFORM=Darwin \
     FM_CHECKOUT_REFRESH_LAUNCH_AGENTS_DIR="$agents" \
     FM_CHECKOUT_REFRESH_LAUNCHCTL="$fakebin/launchctl" \
+    FM_FAKE_LAUNCHCTL_STATE="$fake_state" \
     "$ROOT/bin/fm-checkout-refresh.sh" ensure 2>&1)
   status=$?
   set -e
@@ -1798,12 +1897,32 @@ SH
   printf 'legacy-state\n' > "$custom_state/external-identities"
   write_launch_agent_fixture "$legacy_plist" \
     "com.firstmate.checkout-refresh" "$home" "$custom_state"
+  mark_launch_agent_loaded "$fake_state" \
+    "com.firstmate.checkout-refresh" "$legacy_plist"
+  set +e
+  out=$(HOME="$home/user" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_CHECKOUT_REFRESH_STATE_BASE="$state_base" \
+    FM_TREEHOUSE_ROOT="$home/user/.treehouse" \
+    FM_CHECKOUT_REFRESH_PLATFORM=Darwin \
+    FM_CHECKOUT_REFRESH_LAUNCH_AGENTS_DIR="$agents" \
+    FM_CHECKOUT_REFRESH_LAUNCHCTL="$fakebin/launchctl" \
+    FM_FAKE_LAUNCHCTL_STATE="$fake_state" \
+    FM_TEST_LAUNCHCTL_BOOTOUT_FAIL_LABEL=com.firstmate.checkout-refresh \
+    "$ROOT/bin/fm-checkout-refresh.sh" ensure 2>&1)
+  status=$?
+  set -e
+  [ "$status" -ne 0 ] || fail "legacy LaunchAgent bootout failure allowed replacement activation"
+  assert_present "$legacy_plist" "failed legacy bootout removed its tracking definition"
+  assert_absent "$logical_plist" "failed legacy bootout activated a duplicate logical scheduler"
+  assert_contains "$out" "cannot quiesce checkout-refresh LaunchAgent" \
+    "legacy bootout failure was not surfaced"
   HOME="$home/user" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
     FM_CHECKOUT_REFRESH_STATE_BASE="$state_base" \
     FM_TREEHOUSE_ROOT="$home/user/.treehouse" \
     FM_CHECKOUT_REFRESH_PLATFORM=Darwin \
     FM_CHECKOUT_REFRESH_LAUNCH_AGENTS_DIR="$agents" \
     FM_CHECKOUT_REFRESH_LAUNCHCTL="$fakebin/launchctl" \
+    FM_FAKE_LAUNCHCTL_STATE="$fake_state" \
     FM_TEST_LOGICAL_PLIST="$logical_plist" \
     FM_TEST_LOGICAL_STATE="$custom_state" \
     "$ROOT/bin/fm-checkout-refresh.sh" ensure >/dev/null \
@@ -1818,6 +1937,7 @@ SH
     FM_CHECKOUT_REFRESH_PLATFORM=Darwin \
     FM_CHECKOUT_REFRESH_LAUNCH_AGENTS_DIR="$agents" \
     FM_CHECKOUT_REFRESH_LAUNCHCTL="$fakebin/launchctl" \
+    FM_FAKE_LAUNCHCTL_STATE="$fake_state" \
     "$ROOT/bin/fm-checkout-refresh.sh" ensure >/dev/null \
     || fail "logical custom-state LaunchAgent could not rediscover its namespace"
   pass "LaunchAgent Label and custom legacy state remain authoritative"
@@ -1971,6 +2091,7 @@ if [ "${FM_TEST_FOCUSED:-}" = review-round-14 ]; then
 fi
 
 if [ "${FM_TEST_FOCUSED:-}" = review-round-durable-identity ]; then
+  test_launch_agent_definition_is_home_scoped_with_scheduler_seam
   test_logical_home_state_migrates_and_ambiguity_fails_closed
   test_launch_agent_label_and_custom_legacy_state_are_authoritative
   test_same_path_replacement_and_manifest_failures_are_unhealthy

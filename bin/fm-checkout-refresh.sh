@@ -27,6 +27,8 @@
 # that Firstmate home is idle.
 # Every run publishes coverage health, while only that scheduler-owned mode
 # advances the independent liveness heartbeat.
+# Scheduler health also binds the loaded launchd job's definition, arguments,
+# environment, home, state root, and generation to its retained plist.
 # Its default state is under checkout-refresh/homes/<FM_HOME hash>, while
 # checkout-refresh/locks remains shared so every fm-fleet-sync.sh caller
 # serializes mutation of the same clone.
@@ -1039,6 +1041,136 @@ ensure_state_root() {
     || { echo "error: unsafe checkout-refresh state directory: $STATE_ROOT" >&2; return 1; }
 }
 
+launch_agent_loaded_state() {
+  local domain=$1 label=$2 plist=${3:-} output status
+  output=$("$LAUNCHCTL" print "$domain/$label" 2>&1)
+  status=$?
+  if [ "$status" -ne 0 ]; then
+    case "$output" in
+      *"Could not find service"*|*"service not found"*|*"No such process"*)
+        return 3
+        ;;
+      *)
+        echo "error: cannot prove whether checkout-refresh LaunchAgent $label is loaded" >&2
+        return 4
+        ;;
+    esac
+  fi
+  [ -n "$plist" ] && [ -f "$plist" ] && [ ! -L "$plist" ] && [ -r "$plist" ] || {
+    echo "error: loaded checkout-refresh LaunchAgent $label has no authoritative definition" >&2
+    return 4
+  }
+  FM_CHECKOUT_LOADED_JOB=$output python3 - "$plist" "$domain/$label" <<'PY'
+import os
+import plistlib
+import re
+import sys
+
+plist_path, target = sys.argv[1:]
+loaded = os.environ.get("FM_CHECKOUT_LOADED_JOB", "")
+
+def decode(value):
+    value = value.strip()
+    if len(value) >= 2 and value[0] == value[-1] == '"':
+        value = value[1:-1]
+    return value
+
+def scalar(name):
+    matches = re.findall(
+        rf"(?m)^[ \t]*{re.escape(name)}[ \t]*=[ \t]*(.+?)[ \t]*$",
+        loaded,
+    )
+    if len(matches) != 1:
+        raise ValueError(f"ambiguous {name}")
+    return decode(matches[0])
+
+def block(name):
+    match = re.search(
+        rf"(?ms)^[ \t]*{re.escape(name)}[ \t]*=[ \t]*\{{[ \t]*\n(.*?)^[ \t]*\}}[ \t]*$",
+        loaded,
+    )
+    if match is None:
+        raise ValueError(f"missing {name}")
+    if re.search(
+        rf"(?m)^[ \t]*{re.escape(name)}[ \t]*=[ \t]*\{{",
+        loaded[: match.start()] + loaded[match.end() :],
+    ):
+        raise ValueError(f"duplicate {name}")
+    return [line.strip() for line in match.group(1).splitlines() if line.strip()]
+
+try:
+    first = next(line.strip() for line in loaded.splitlines() if line.strip())
+    if first != target + " = {":
+        raise ValueError("loaded target differs")
+    with open(plist_path, "rb") as stream:
+        definition = plistlib.load(stream)
+    expected_arguments = definition.get("ProgramArguments")
+    expected_environment = definition.get("EnvironmentVariables")
+    if (
+        definition.get("Label") != target.rsplit("/", 1)[-1]
+        or not isinstance(expected_arguments, list)
+        or not expected_arguments
+        or not all(isinstance(value, str) for value in expected_arguments)
+        or not isinstance(expected_environment, dict)
+        or not all(
+            isinstance(key, str) and isinstance(value, str)
+            for key, value in expected_environment.items()
+        )
+    ):
+        raise ValueError("authoritative definition is malformed")
+    if scalar("path") != os.path.abspath(plist_path):
+        raise ValueError("loaded definition path differs")
+    if scalar("program") != expected_arguments[0]:
+        raise ValueError("loaded program differs")
+    arguments = [decode(line) for line in block("arguments")]
+    if arguments != expected_arguments:
+        raise ValueError("loaded arguments differ")
+    environment = {}
+    for line in block("environment"):
+        if " => " not in line:
+            raise ValueError("malformed loaded environment")
+        key, value = line.split(" => ", 1)
+        key = decode(key)
+        if not key or key in environment:
+            raise ValueError("ambiguous loaded environment")
+        environment[key] = decode(value)
+    for key, value in expected_environment.items():
+        if environment.get(key) != value:
+            raise ValueError(f"loaded environment differs for {key}")
+except (OSError, StopIteration, ValueError, plistlib.InvalidFileException):
+    raise SystemExit(1)
+PY
+  status=$?
+  unset FM_CHECKOUT_LOADED_JOB
+  if [ "$status" -ne 0 ]; then
+    echo "error: loaded checkout-refresh LaunchAgent $label identity differs from $plist" >&2
+    return 4
+  fi
+}
+
+quiesce_launch_agent_verified() {
+  local domain=$1 label=$2 plist=$3 state output status
+  launch_agent_loaded_state "$domain" "$label" "$plist"
+  state=$?
+  case "$state" in
+    3) return 0 ;;
+    0) ;;
+    *) return 1 ;;
+  esac
+  output=$("$LAUNCHCTL" bootout "$domain/$label" 2>&1)
+  status=$?
+  [ "$status" -eq 0 ] || {
+    echo "error: cannot quiesce checkout-refresh LaunchAgent $label: ${output:-bootout failed}" >&2
+    return 1
+  }
+  launch_agent_loaded_state "$domain" "$label" "$plist"
+  state=$?
+  [ "$state" -eq 3 ] || {
+    echo "error: checkout-refresh LaunchAgent $label remains live after bootout" >&2
+    return 1
+  }
+}
+
 discover_home_launch_agent_namespaces() {
   local discovered label state count=0 logical_count=0 logical_state=
   [ -e "$LAUNCH_AGENTS_DIR" ] || [ -L "$LAUNCH_AGENTS_DIR" ] || return 0
@@ -1298,9 +1430,25 @@ PY
 }
 
 prepare_home_state_namespace() {
-  local parent command=${1:-}
+  local parent command=${1:-} loaded_state
   discover_home_launch_agent_namespaces || return 1
-  [ "$CUSTOM_STATE_ROOT" -eq 0 ] || return 0
+  if [ "$CUSTOM_STATE_ROOT" -eq 1 ]; then
+    if [ "$PHYSICAL_LABEL" != "$LABEL" ] \
+        && { [ -e "$PHYSICAL_PLIST" ] || [ -L "$PHYSICAL_PLIST" ]; }; then
+      [ "$command" = ensure ] || [ "$command" = install ] || {
+        echo "error: checkout-refresh legacy LaunchAgent requires an ensure or install migration before use" >&2
+        return 1
+      }
+      [ "$PLATFORM" = Darwin ] || {
+        echo "error: checkout-refresh legacy LaunchAgent migration requires macOS" >&2
+        return 1
+      }
+      command -v "$LAUNCHCTL" >/dev/null 2>&1 || return 1
+      validate_launch_agent_namespaces || return 1
+      HOME_MIGRATION_ACTIVE=1
+    fi
+    return 0
+  fi
   [ "$DEFAULT_STATE_ROOT" != "$PHYSICAL_STATE_ROOT" ] || return 0
   parent=${DEFAULT_STATE_ROOT%/*}
   if { [ -e "$DEFAULT_STATE_ROOT" ] || [ -L "$DEFAULT_STATE_ROOT" ]; } \
@@ -1327,6 +1475,10 @@ prepare_home_state_namespace() {
     echo "error: checkout-refresh physical state requires an ensure or install migration before use" >&2
     return 1
   fi
+  if [ ! -e "$PHYSICAL_STATE_ROOT" ] && [ ! -L "$PHYSICAL_STATE_ROOT" ] \
+      && [ ! -e "$PHYSICAL_PLIST" ] && [ ! -L "$PHYSICAL_PLIST" ]; then
+    return 0
+  fi
   if [ -e "$PHYSICAL_STATE_ROOT" ] || [ -L "$PHYSICAL_STATE_ROOT" ]; then
     [ -d "$PHYSICAL_STATE_ROOT" ] && [ ! -L "$PHYSICAL_STATE_ROOT" ] || {
       echo "error: unsafe physical checkout-refresh home state namespace: $PHYSICAL_STATE_ROOT" >&2
@@ -1346,13 +1498,17 @@ prepare_home_state_namespace() {
     }
     command -v "$LAUNCHCTL" >/dev/null 2>&1 || return 1
     validate_launch_agent_namespaces || return 1
-    if "$LAUNCHCTL" print "gui/$(id -u)/$PHYSICAL_LABEL" >/dev/null 2>&1; then
-      "$LAUNCHCTL" bootout "gui/$(id -u)/$PHYSICAL_LABEL" >/dev/null 2>&1 || {
-        echo "error: cannot quiesce the physical checkout-refresh LaunchAgent before migration" >&2
-        return 1
-      }
-      PHYSICAL_AGENT_STOPPED=1
-    fi
+    launch_agent_loaded_state "gui/$(id -u)" "$PHYSICAL_LABEL" "$PHYSICAL_PLIST"
+    loaded_state=$?
+    case "$loaded_state" in
+      0)
+        quiesce_launch_agent_verified \
+          "gui/$(id -u)" "$PHYSICAL_LABEL" "$PHYSICAL_PLIST" || return 1
+        PHYSICAL_AGENT_STOPPED=1
+        ;;
+      3) ;;
+      *) return 1 ;;
+    esac
   fi
   if [ -e "$PHYSICAL_STATE_ROOT" ] || [ -L "$PHYSICAL_STATE_ROOT" ]; then
     fm_checkout_lock_prepare "$LOCK_ROOT" || {
@@ -1377,11 +1533,19 @@ prepare_home_state_namespace() {
 }
 
 rollback_home_state_namespace_migration() {
-  local failed=0
+  local failed=0 loaded_state
   if [ "$HOME_MIGRATION_ACTIVE" -eq 1 ] && [ "$PLATFORM" = Darwin ]; then
-    "$LAUNCHCTL" bootout "gui/$(id -u)/$LABEL" >/dev/null 2>&1 || true
     if [ -e "$PLIST" ] || [ -L "$PLIST" ]; then
-      [ -f "$PLIST" ] && [ ! -L "$PLIST" ] && rm -f "$PLIST" || failed=1
+      if [ -f "$PLIST" ] && [ ! -L "$PLIST" ] \
+          && quiesce_launch_agent_verified "gui/$(id -u)" "$LABEL" "$PLIST"; then
+        rm -f "$PLIST" || failed=1
+      else
+        return 1
+      fi
+    else
+      launch_agent_loaded_state "gui/$(id -u)" "$LABEL" ""
+      loaded_state=$?
+      [ "$loaded_state" -eq 3 ] || return 1
     fi
   fi
   if [ "$HOME_STATE_NAMESPACE_STAGED" -eq 1 ]; then
@@ -1398,7 +1562,9 @@ rollback_home_state_namespace_migration() {
   fi
   if [ "$PHYSICAL_AGENT_STOPPED" -eq 1 ]; then
     if [ -f "$PHYSICAL_PLIST" ] && [ ! -L "$PHYSICAL_PLIST" ] \
-      && "$LAUNCHCTL" bootstrap "gui/$(id -u)" "$PHYSICAL_PLIST" >/dev/null 2>&1; then
+      && "$LAUNCHCTL" bootstrap "gui/$(id -u)" "$PHYSICAL_PLIST" >/dev/null 2>&1 \
+      && launch_agent_loaded_state \
+        "gui/$(id -u)" "$PHYSICAL_LABEL" "$PHYSICAL_PLIST"; then
       PHYSICAL_AGENT_STOPPED=0
     else
       failed=1
@@ -1411,7 +1577,8 @@ rollback_home_state_namespace_migration() {
 commit_home_state_namespace_migration() {
   local retired=
   [ "$HOME_MIGRATION_ACTIVE" -eq 1 ] || return 0
-  if [ -e "$PHYSICAL_STATE_ROOT" ] || [ -L "$PHYSICAL_STATE_ROOT" ]; then
+  if [ "$PHYSICAL_STATE_ROOT" != "$STATE_ROOT" ] \
+      && { [ -e "$PHYSICAL_STATE_ROOT" ] || [ -L "$PHYSICAL_STATE_ROOT" ]; }; then
     [ -d "$PHYSICAL_STATE_ROOT" ] && [ ! -L "$PHYSICAL_STATE_ROOT" ] || return 1
     retired="$PHYSICAL_STATE_ROOT.retired.$$"
     [ ! -e "$retired" ] && [ ! -L "$retired" ] || return 1
@@ -1429,6 +1596,8 @@ commit_home_state_namespace_migration() {
   if [ -e "$PHYSICAL_PLIST" ] || [ -L "$PHYSICAL_PLIST" ]; then
     if [ ! -f "$PHYSICAL_PLIST" ] || [ -L "$PHYSICAL_PLIST" ] \
       || { [ "${FM_CHECKOUT_REFRESH_TEST:-0}:${FM_CHECKOUT_TEST_HOME_MIGRATION_FAILURE:-}" = "1:commit" ]; } \
+      || ! quiesce_launch_agent_verified \
+        "gui/$(id -u)" "$PHYSICAL_LABEL" "$PHYSICAL_PLIST" \
       || ! rm -f "$PHYSICAL_PLIST"; then
       [ -z "$retired" ] || mv "$retired" "$PHYSICAL_STATE_ROOT" || true
       return 1
@@ -2578,7 +2747,7 @@ remove_matching_legacy_launch_agent() {
     && ! grep -Fq "<key>FM_HOME</key><string>$(xml_escape "$FM_HOME")</string>" "$legacy_plist"; then
     return 0
   fi
-  "$LAUNCHCTL" bootout "$domain/$LEGACY_LABEL" >/dev/null 2>&1 || true
+  quiesce_launch_agent_verified "$domain" "$LEGACY_LABEL" "$legacy_plist" || return 1
   rm -f "$legacy_plist"
 }
 
@@ -2613,8 +2782,26 @@ remove_matching_physical_launch_agent() {
   [ "$PHYSICAL_LABEL" != "$LABEL" ] || return 0
   [ -e "$PHYSICAL_PLIST" ] || [ -L "$PHYSICAL_PLIST" ] || return 0
   physical_launch_agent_matches_home || return 1
-  "$LAUNCHCTL" bootout "$domain/$PHYSICAL_LABEL" >/dev/null 2>&1 || true
+  quiesce_launch_agent_verified "$domain" "$PHYSICAL_LABEL" "$PHYSICAL_PLIST" || return 1
   rm -f "$PHYSICAL_PLIST"
+}
+
+quiesce_matching_physical_launch_agent() {
+  local domain=$1 loaded_state
+  [ "$PHYSICAL_LABEL" != "$LABEL" ] || return 0
+  [ -e "$PHYSICAL_PLIST" ] || [ -L "$PHYSICAL_PLIST" ] || return 0
+  physical_launch_agent_matches_home || return 1
+  launch_agent_loaded_state "$domain" "$PHYSICAL_LABEL" "$PHYSICAL_PLIST"
+  loaded_state=$?
+  case "$loaded_state" in
+    0)
+      quiesce_launch_agent_verified "$domain" "$PHYSICAL_LABEL" "$PHYSICAL_PLIST" \
+        || return 1
+      PHYSICAL_AGENT_STOPPED=1
+      ;;
+    3) ;;
+    *) return 1 ;;
+  esac
 }
 
 launch_agent_environment_value() {
@@ -2688,7 +2875,7 @@ generate_scheduler_generation() {
 }
 
 install_launch_agent() {
-  local bash_runtime python_runtime perl_runtime runtime_path temp previous domain generation
+  local bash_runtime python_runtime perl_runtime runtime_path temp previous domain generation loaded_state
   [ "$PLATFORM" = Darwin ] || {
     echo "error: checkout-refresh background installation currently requires macOS" >&2
     return 1
@@ -2744,11 +2931,28 @@ install_launch_agent() {
 </dict></plist>
 EOF
   chmod 600 "$temp" || return 1
-  mv -f "$temp" "$PLIST" || return 1
   domain="gui/$(id -u)"
-  "$LAUNCHCTL" bootout "$domain/$LABEL" >/dev/null 2>&1 || true
+  if [ -e "$PLIST" ] || [ -L "$PLIST" ]; then
+    quiesce_launch_agent_verified "$domain" "$LABEL" "$PLIST" || {
+      rm -f "$temp" "$previous"
+      return 1
+    }
+  else
+    launch_agent_loaded_state "$domain" "$LABEL" ""
+    loaded_state=$?
+    [ "$loaded_state" -eq 3 ] || {
+      rm -f "$temp" "$previous"
+      return 1
+    }
+  fi
+  quiesce_matching_physical_launch_agent "$domain" || {
+    rm -f "$temp" "$previous"
+    return 1
+  }
+  mv -f "$temp" "$PLIST" || return 1
   if "$LAUNCHCTL" bootstrap "$domain" "$PLIST" \
-    && "$LAUNCHCTL" kickstart "$domain/$LABEL"; then
+    && "$LAUNCHCTL" kickstart "$domain/$LABEL" \
+    && launch_agent_loaded_state "$domain" "$LABEL" "$PLIST"; then
     rm -f "$previous"
     if [ "$HOME_MIGRATION_ACTIVE" -ne 1 ]; then
       remove_matching_physical_launch_agent "$domain" || return 1
@@ -2756,9 +2960,17 @@ EOF
     fi
     return 0
   fi
+  if ! quiesce_launch_agent_verified "$domain" "$LABEL" "$PLIST"; then
+    echo "error: checkout-refresh LaunchAgent activation failed and the replacement could not be quiesced; definitions were retained" >&2
+    return 1
+  fi
   if [ -f "$previous" ]; then
     mv -f "$previous" "$PLIST"
-    "$LAUNCHCTL" bootstrap "$domain" "$PLIST" >/dev/null 2>&1 || true
+    if ! "$LAUNCHCTL" bootstrap "$domain" "$PLIST" >/dev/null 2>&1 \
+        || ! launch_agent_loaded_state "$domain" "$LABEL" "$PLIST"; then
+      echo "error: checkout-refresh LaunchAgent activation failed and the previous definition could not be restarted" >&2
+      return 1
+    fi
   else
     rm -f "$PLIST"
   fi
@@ -2804,8 +3016,8 @@ ensure_launch_agent() {
   [ "${#generation}" -eq 32 ] \
     || { echo "checkout-refresh LaunchAgent scheduler generation is malformed" >&2; return 1; }
   domain="gui/$(id -u)"
-  "$LAUNCHCTL" print "$domain/$LABEL" >/dev/null 2>&1 \
-    || { echo "checkout-refresh LaunchAgent is not loaded" >&2; return 1; }
+  launch_agent_loaded_state "$domain" "$LABEL" "$PLIST" \
+    || { echo "checkout-refresh LaunchAgent loaded identity is missing or untrusted" >&2; return 1; }
   heartbeat=$(read_epoch "$STATE_ROOT/heartbeat")
   now=$(date +%s)
   max_age=$((INTERVAL * 3 + 30))
