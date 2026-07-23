@@ -109,6 +109,8 @@ fm_checkout_lock_run() {
     local FM_CHECKOUT_LOCK_ACTIVE_PATH="$checkout_lock"
     local FM_CHECKOUT_LOCK_ACTIVE_OWNER_DIR="${FM_LOCK_OWNER_DIR:-}"
     local FM_CHECKOUT_LOCK_ACTIVE_OWNER_PID="${BASHPID:-$$}"
+    local FM_PROCESS_TREE_GUARD_FILE="$FM_CHECKOUT_LOCK_ACTIVE_OWNER_DIR/process-group"
+    export FM_PROCESS_TREE_GUARD_FILE
     trap 'fm_lock_release "$checkout_lock"' EXIT
     "$@"
   )
@@ -138,6 +140,8 @@ fm_checkout_treehouse_return_locked() {
   fi
   if [ "$status" -eq "$FM_CHECKOUT_TREEHOUSE_RETURN_TIMEOUT_STATUS" ]; then
     echo "error: Treehouse return timed out after ${timeout}s for $checkout" >&2
+  elif [ "$status" -eq "$FM_PROCESS_TREE_CLEANUP_FAILURE_STATUS" ]; then
+    echo "error: Treehouse return process cleanup could not be verified for $checkout; retained for inspection" >&2
   fi
   return "$status"
 }
@@ -153,5 +157,6 @@ fm_checkout_treehouse_return_requires_retention() {
     || [ "$1" -eq "$FM_CHECKOUT_LOCK_FAILURE_STATUS" ] \
     || [ "$1" -eq "$FM_CHECKOUT_LOCK_CONTENTION_STATUS" ] \
     || [ "$1" -eq "$FM_CHECKOUT_TREEHOUSE_RETURN_TIMEOUT_STATUS" ] \
+    || [ "$1" -eq "$FM_PROCESS_TREE_CLEANUP_FAILURE_STATUS" ] \
     || [ "$1" -eq "$FM_CHECKOUT_TREEHOUSE_RETURN_UNAVAILABLE_STATUS" ]
 }

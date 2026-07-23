@@ -2156,13 +2156,14 @@ SH
 }
 
 test_forced_secondmate_retains_child_on_treehouse_failure() {
-  local case_dir child_worktree child_id lock child_pid_file child_pid term_marker rc
+  local case_dir child_worktree child_id lock child_pid_file child_ready_file child_pid term_marker rc
   child_id=child-return-failure-x6
   setup_forced_secondmate_child_case secondmate-child-return-failure "$child_id"
   case_dir=$FORCED_CHILD_CASE_DIR
   child_worktree=$FORCED_CHILD_WORKTREE
   lock=$(checkout_lock_path "$child_worktree" "$case_dir/checkout-locks")
   child_pid_file="$case_dir/treehouse-child.pid"
+  child_ready_file="$case_dir/treehouse-child.ready"
   term_marker="$case_dir/treehouse-child-terminated-under-lock"
   cat > "$case_dir/fakebin/treehouse" <<'SH'
 #!/usr/bin/env bash
@@ -2174,13 +2175,16 @@ if [ "${1:-}" = return ]; then
       fi
       exit 0
     ' TERM
+    : > "$TREEHOUSE_RETURN_CHILD_READY_FILE"
     while :; do
       sleep 1
     done
   ) &
   child=$!
   printf '%s\n' "$child" > "$TREEHOUSE_RETURN_CHILD_PID_FILE"
-  sleep 0.2
+  while [ ! -f "$TREEHOUSE_RETURN_CHILD_READY_FILE" ]; do
+    :
+  done
   exit 17
 fi
 exit 0
@@ -2191,6 +2195,7 @@ SH
   FM_FAKE_PARENT_LIVE="$FORCED_CHILD_PARENT_LIVE" \
   FM_EXPECT_CHECKOUT_LOCK="$lock" \
   TREEHOUSE_RETURN_CHILD_PID_FILE="$child_pid_file" \
+  TREEHOUSE_RETURN_CHILD_READY_FILE="$child_ready_file" \
   TREEHOUSE_RETURN_CHILD_TERM_MARKER="$term_marker" \
     run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
   rc=$?
@@ -2209,6 +2214,54 @@ SH
   assert_grep "retained child worktree $child_worktree because its locked Treehouse return failed (status 17)" \
     "$case_dir/stderr" "forced secondmate cleanup did not report failed-return retention"
   pass "forced secondmate cleanup retains failed returns after reaping descendants"
+}
+
+test_forced_secondmate_retains_unverified_process_group() {
+  local case_dir child_worktree child_id lock child_pid_file rc
+  child_id=child-return-unverified-x8
+  setup_forced_secondmate_child_case secondmate-child-return-unverified "$child_id"
+  case_dir=$FORCED_CHILD_CASE_DIR
+  child_worktree=$FORCED_CHILD_WORKTREE
+  lock=$(checkout_lock_path "$child_worktree" "$case_dir/checkout-locks")
+  child_pid_file="$case_dir/treehouse-unverified-child.pid"
+  cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = return ]; then
+  (
+    trap '' TERM
+    while :; do
+      sleep 1
+    done
+  ) &
+  printf '%s\n' "$!" > "$TREEHOUSE_RETURN_CHILD_PID_FILE"
+fi
+exit 0
+SH
+  cat > "$case_dir/fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+  chmod +x "$case_dir/fakebin/treehouse" "$case_dir/fakebin/ps"
+
+  set +e
+  FM_FAKE_PARENT_LIVE="$FORCED_CHILD_PARENT_LIVE" \
+  TREEHOUSE_RETURN_CHILD_PID_FILE="$child_pid_file" \
+    run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 125 "$rc" "unverified Treehouse process cleanup should fail distinctly"
+  assert_present "$child_pid_file" "unverified Treehouse return did not start its descendant"
+  assert_present "$lock" "unverified process cleanup released the checkout lock"
+  assert_present "$lock/process-group" "unverified process cleanup lost its guarded group identity"
+  assert_present "$child_worktree" "unverified process cleanup deleted the child worktree"
+  assert_present "$case_dir/wt/state/$child_id.meta" "unverified process cleanup removed child retry metadata"
+  assert_present "$case_dir/state/task-x1.meta" "unverified process cleanup removed parent retry metadata"
+  assert_grep "bounded command process cleanup could not be verified" "$case_dir/stderr" \
+    "unverified process cleanup did not surface the supervisor failure"
+  assert_grep "Treehouse return process cleanup could not be verified" "$case_dir/stderr" \
+    "unverified process cleanup did not surface retain-only Treehouse handling"
+  pass "unverified Treehouse process cleanup retains worktree and checkout lock"
 }
 
 test_forced_secondmate_retains_child_when_treehouse_unavailable() {
@@ -2636,6 +2689,13 @@ if [ "${FM_TEST_FOCUSED:-}" = review-round-10-treehouse-return ]; then
   exit 0
 fi
 
+if [ "${FM_TEST_FOCUSED:-}" = review-round-11-process-group ]; then
+  test_forced_secondmate_retains_child_on_treehouse_failure
+  test_treehouse_return_timeout_reaps_children_before_unlock
+  test_forced_secondmate_retains_unverified_process_group
+  exit 0
+fi
+
 test_local_only_fork_remote_allows
 test_teardown_prompts_tasks_axi_done_when_compatible
 test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present
@@ -2652,6 +2712,7 @@ test_managed_child_teardown_locks_generation_before_snapshot
 test_forced_secondmate_child_uses_child_home_for_endpoint_verification
 test_forced_secondmate_quiesces_parent_before_child_cleanup
 test_forced_secondmate_retains_child_on_treehouse_failure
+test_forced_secondmate_retains_unverified_process_group
 test_forced_secondmate_retains_child_when_treehouse_unavailable
 test_forced_secondmate_retains_child_on_checkout_lock_contention
 test_herdr_teardown_clears_escalation_marker

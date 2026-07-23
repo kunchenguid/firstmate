@@ -457,6 +457,7 @@ acquire_worktree() {
       echo "error: Treehouse acquisition already running for $expected_source (pid ${FM_LOCK_HELD_PID:-unknown})" >&2
       exit 1
     fi
+    export FM_PROCESS_TREE_GUARD_FILE="${FM_LOCK_OWNER_DIR:?}/process-group"
     trap 'fm_lock_release "$checkout_lock"' EXIT
     cd "$expected_source" || exit 1
     fm_run_bounded "$ACQUIRE_TIMEOUT" treehouse get --lease --lease-holder "$lease_holder"
@@ -465,6 +466,9 @@ acquire_worktree() {
     0) return 0 ;;
     124)
       echo "error: Treehouse worktree acquisition timed out after ${ACQUIRE_TIMEOUT}s and terminated its process tree" >&2
+      ;;
+    "$FM_PROCESS_TREE_CLEANUP_FAILURE_STATUS")
+      echo "error: Treehouse worktree acquisition process cleanup could not be verified; no worktree was accepted for $lease_holder" >&2
       ;;
     *)
       echo "error: Treehouse worktree acquisition failed for $lease_holder (exit $status)" >&2

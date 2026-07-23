@@ -94,6 +94,7 @@ fm_lock_clean_known_files() {
     "$lockdir/pid" \
     "$lockdir/fm-home" \
     "$lockdir/pid-identity" \
+    "$lockdir/process-group" \
     "$lockdir/watcher-path" \
     2>/dev/null || true
 }
@@ -239,6 +240,44 @@ fm_lock_mid_acquire_is_fresh() {
   return 1
 }
 
+fm_lock_process_group_guarded() {
+  local lockdir=$1 ownerdir guard group groups
+  if [ -L "$lockdir" ]; then
+    ownerdir=$(fm_lock_link_owner "$lockdir" 2>/dev/null) || return 1
+  elif [ -d "$lockdir" ]; then
+    ownerdir=$lockdir
+  else
+    return 1
+  fi
+  guard="$ownerdir/process-group"
+  [ -e "$guard" ] || [ -L "$guard" ] || return 1
+  [ -f "$guard" ] && [ ! -L "$guard" ] || {
+    FM_LOCK_HELD_PID=unknown
+    return 0
+  }
+  group=$(cat "$guard" 2>/dev/null || true)
+  case "$group" in
+    ''|*[!0-9]*)
+      FM_LOCK_HELD_PID=unknown
+      return 0
+      ;;
+  esac
+  FM_LOCK_HELD_PID=$group
+  groups=$(ps -axo pgid= 2>/dev/null) || return 0
+  if printf '%s\n' "$groups" | awk -v group="$group" '$1 == group { found = 1 } END { exit !found }'; then
+    return 0
+  fi
+  if [ -L "$lockdir" ]; then
+    fm_lock_points_to_owner "$lockdir" "$ownerdir" || return 0
+  elif [ "$ownerdir" != "$lockdir" ]; then
+    return 0
+  fi
+  [ "$(cat "$guard" 2>/dev/null || true)" = "$group" ] || return 0
+  rm -f "$guard" 2>/dev/null || return 0
+  FM_LOCK_HELD_PID=
+  return 1
+}
+
 fm_lock_recheck_stale_owner() {
   local lockdir=$1 expected_owner=$2 expected_pid=$3 actual_pid
   if [ -n "$expected_owner" ]; then
@@ -264,6 +303,10 @@ fm_lock_try_acquire() {
 
   if fm_lock_try_create "$lockdir"; then
     return 0
+  fi
+
+  if fm_lock_process_group_guarded "$lockdir"; then
+    return 1
   fi
 
   pid=$(cat "$lockdir/pid" 2>/dev/null || true)
@@ -343,6 +386,7 @@ fm_lock_release() {
   if [ -L "$lockdir" ]; then
     ownerdir=$(fm_lock_link_owner "$lockdir" 2>/dev/null || true)
     [ -n "$ownerdir" ] || return 0
+    { [ ! -e "$ownerdir/process-group" ] && [ ! -L "$ownerdir/process-group" ]; } || return 0
     pid=$(cat "$ownerdir/pid" 2>/dev/null || true)
     [ "$pid" = "$current" ] || return 0
     fm_lock_points_to_owner "$lockdir" "$ownerdir" || return 0
@@ -350,6 +394,7 @@ fm_lock_release() {
     fm_lock_discard_owner "$ownerdir"
     return 0
   fi
+  { [ ! -e "$lockdir/process-group" ] && [ ! -L "$lockdir/process-group" ]; } || return 0
   pid=$(cat "$lockdir/pid" 2>/dev/null || true)
   [ "$pid" = "$current" ] || return 0
   fm_lock_clean_known_files "$lockdir"
