@@ -23,6 +23,19 @@ Wake, watcher, away-mode, and X-specific state mechanics remain with their named
 `AGENTS.md` retains the run-once and read-once operator rules, lock-refusal safety, installation consent, and direct-report recovery boundaries because those facts apply at every session start.
 Ordinary dead-direct-report recovery is owned by `stuck-crewmate-recovery`, while persistent-secondmate recovery is owned by `secondmate-provisioning`.
 
+## Operating control plane (config/control-plane-sources.json)
+
+The optional local `config/control-plane-sources.json` registers the exact software sources that `bin/fm-control-plane.sh` may reconcile.
+It stays gitignored and has no effect until present.
+[`control-plane.md`](control-plane.md) owns its schema, privacy boundary, proof records, operator commands, and existing-watcher integration.
+The tracked registration example is [`examples/control-plane-sources.json`](examples/control-plane-sources.json).
+
+## Daily repository intake (data/projects.md)
+
+When `data/projects.md` exists, or when a prior private intake checkpoint at `data/repository-intake/checkpoint.json` already exists, the existing watcher runs `bin/fm-repository-intake.sh` on its bounded heartbeat.
+The command attempts one complete GitHub issue and PR discovery per Asia/Kolkata calendar day through `gh-axi`, stores its private checkpoint under `data/repository-intake/`, and wakes only for changed attention.
+[`repository-intake.md`](repository-intake.md) owns the source map, checkpoint, freshness, rate-limit, privacy, recovery, outcome, and authority contracts.
+
 ## Backlog backend (.tasks.toml / config/backlog-backend)
 
 The tracked `.tasks.toml` pins the default `tasks-axi` markdown backend to `data/backlog.md`, with `done_keep = 10` and an archive at `data/done-archive.md`.
