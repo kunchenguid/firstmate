@@ -48,9 +48,10 @@ State that resolved default while confirming the source, local name, and posture
 Existing registry entries keep the meaning they already have and are never migrated or reinterpreted, so a legacy entry with no bracket stays `no-mistakes`.
 Registering a conditional policy is a one-time choice and never requires classifying any change; the per-task surface classification happens at each task's intake, and internal-only is never inferred from file location or project name.
 
-The optional `+yolo` posture changes routine approval authority but does not change the delivery mode.
-Default it off for every project and every posture, and enable it only on the captain's explicit instruction.
-`AGENTS.md` section 7 owns the complete authority boundary and exceptions when it is on.
+The optional autonomy grants change routine approval authority but do not change the delivery mode.
+`findings`, `merge`, and `local-merge` are granted independently, so a captain who delegates one keeps the others; bare `+yolo` grants all three.
+Confirm which grants the captain intends rather than assuming a single posture, default them all off for every project and every posture, and add them only on the captain's explicit instruction.
+`AGENTS.md` section 7 owns the complete authority boundary and exceptions when any grant is on.
 
 ## Add or clone an existing project
 

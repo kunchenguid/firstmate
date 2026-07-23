@@ -94,7 +94,7 @@ EOF
     "harness=claude" \
     "kind=ship" \
     "mode=ship" \
-    "yolo=off" \
+    "grants=none" \
     "pr=https://github.com/kunchenguid/firstmate/pull/9"
   printf 'needs-decision: choose an API shape\n' > "$home/state/ship-task.status"
   # A working ship task proves it through its own semantic busy-state record
@@ -110,7 +110,7 @@ EOF
     "harness=codex" \
     "kind=scout" \
     "mode=scout" \
-    "yolo=off"
+    "grants=none"
   printf 'done: report ready\n' > "$home/state/scout-task.status"
   fm_write_meta "$home/state/secondmate-task.meta" \
     "window=firstmate:fm-secondmate-task" \

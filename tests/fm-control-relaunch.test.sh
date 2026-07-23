@@ -150,7 +150,7 @@ add_ship_task() {
     echo "harness=$harness"
     echo "kind=ship"
     echo "mode=no-mistakes"
-    echo "yolo=off"
+    echo "grants=none"
     echo "tasktmp=/tmp/fm-$id"
     echo "model=default"
     echo "effort=default"
@@ -622,7 +622,7 @@ test_secondmate_relaunch_picks_up_the_configured_harness_pin() {
     echo "harness=claude"
     echo "kind=secondmate"
     echo "mode=secondmate"
-    echo "yolo=off"
+    echo "grants=none"
     echo "model=default"
     echo "effort=default"
     echo "home=$dir/smhome"
@@ -661,7 +661,7 @@ test_secondmate_relaunch_ignores_invalid_configured_effort_before_stop() {
     echo "harness=claude"
     echo "kind=secondmate"
     echo "mode=secondmate"
-    echo "yolo=off"
+    echo "grants=none"
     echo "model=default"
     echo "effort=default"
     echo "home=$dir/smhome"
@@ -702,7 +702,7 @@ test_secondmate_relaunch_onto_a_crewmate_only_adapter_refuses_before_stop() {
     echo "harness=claude"
     echo "kind=secondmate"
     echo "mode=secondmate"
-    echo "yolo=off"
+    echo "grants=none"
     echo "model=default"
     echo "effort=default"
     echo "home=$dir/smhome"
@@ -740,7 +740,7 @@ test_explicit_secondmate_harness_ignores_configured_profile_axes() {
     echo "harness=claude"
     echo "kind=secondmate"
     echo "mode=secondmate"
-    echo "yolo=off"
+    echo "grants=none"
     echo "model=opus"
     echo "effort=high"
     echo "home=$dir/smhome"
@@ -1083,7 +1083,7 @@ test_secondmate_relaunch_checkpoints_child_work_and_spares_the_charter() {
     echo "harness=claude"
     echo "kind=secondmate"
     echo "mode=secondmate"
-    echo "yolo=off"
+    echo "grants=none"
     echo "model=default"
     echo "effort=default"
     echo "home=$dir/smhome"
@@ -1122,7 +1122,7 @@ test_secondmate_relaunch_refuses_an_unmarked_home() {
     echo "harness=claude"
     echo "kind=secondmate"
     echo "mode=secondmate"
-    echo "yolo=off"
+    echo "grants=none"
   } > "$home/state/sm2.meta"
   printf '%s\n' "fm-sm2" > "$dir/fake/windows"
   out=$(run_control "$dir" sm2 relaunch); rc=$?
@@ -1150,7 +1150,7 @@ test_secondmate_checkpoint_refuses_unreadable_child_state() {
     echo "harness=claude"
     echo "kind=secondmate"
     echo "mode=secondmate"
-    echo "yolo=off"
+    echo "grants=none"
     echo "home=$dir/smhome"
   } > "$home/state/sm5.meta"
   printf '%s\n' "fm-sm5" > "$dir/fake/windows"
@@ -1249,7 +1249,7 @@ test_promotion_participates_in_the_lifecycle_lock_before_metadata_resolution() {
     i=$((i + 1))
   done
   [ -e "$lock" ] || fail "could not stage the promotion lifecycle lock"
-  out=$(FM_HOME="$dir/home" "$PROMOTE" rl29 --mode direct-PR --yolo on 2>&1); rc=$?
+  out=$(FM_HOME="$dir/home" "$PROMOTE" rl29 --mode direct-PR --grants findings,merge,local-merge 2>&1); rc=$?
   kill "$holder" 2>/dev/null || true
   wait "$holder" 2>/dev/null || true
   expect_code 1 "$rc" "promotion should refuse a concurrent lifecycle action"

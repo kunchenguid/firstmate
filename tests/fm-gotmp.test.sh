@@ -103,7 +103,7 @@ project=$TMP_ROOT/nonexistent-project-$id
 harness=claude
 kind=ship
 mode=no-mistakes
-yolo=off
+grants=none
 tasktmp=$tasktmp
 META
   printf '%s' "$fake"
@@ -177,7 +177,7 @@ project=$TMP_ROOT/nonexistent-proj-$id
 harness=claude
 kind=ship
 mode=no-mistakes
-yolo=off
+grants=none
 META
   FM_HOME="$fake" bash "$fake/bin/fm-teardown.sh" "$id" >/dev/null 2>&1 \
     || fail "teardown exited non-zero when tasktmp= was absent"

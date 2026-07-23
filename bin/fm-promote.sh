@@ -7,12 +7,12 @@
 # intended fix changes, create branch fm/<task-id>, implement, then report done
 # according to this task's delivery mode).
 # A scout records no delivery posture, so promotion is where this task's delivery
-# contract is decided: --mode and --yolo are REQUIRED and written into the meta
+# contract is decided: --mode and --grants are REQUIRED and written into the meta
 # alongside the kind= flip. Firstmate resolves both at promotion time, having just
 # read the scout's report (AGENTS.md section 7); data/projects.md holds the
 # captain's standing posture as context, and this script never looks it up.
 # no-mistakes-prod-only is a registry policy rather than a task mode and is refused.
-# Usage: fm-promote.sh <task-id> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off>
+# Usage: fm-promote.sh <task-id> --mode <no-mistakes|direct-PR|local-only> --grants <none|findings[,merge][,local-merge]>
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -21,14 +21,16 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
 # shellcheck source=bin/fm-pr-lib.sh
+# shellcheck source=bin/fm-grants-lib.sh
+. "$SCRIPT_DIR/fm-grants-lib.sh"
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 
 MODE=
-YOLO=
+GRANTS=
 MODE_SET=0
-YOLO_SET=0
+GRANTS_SET=0
 POS=()
 want_value=
 for a in "$@"; do
@@ -38,7 +40,8 @@ for a in "$@"; do
     esac
     case "$want_value" in
       mode) MODE=$a; MODE_SET=1 ;;
-      yolo) YOLO=$a; YOLO_SET=1 ;;
+      grants) GRANTS=$a; GRANTS_SET=1 ;;
+      yolo) GRANTS=$(fm_grants_from_legacy_yolo "$a") || exit 1; GRANTS_SET=1 ;;
     esac
     want_value=
     continue
@@ -46,19 +49,21 @@ for a in "$@"; do
   case "$a" in
     --mode) want_value=mode ;;
     --mode=*) MODE=${a#--mode=}; MODE_SET=1 ;;
+    --grants) want_value=grants ;;
     --yolo) want_value=yolo ;;
-    --yolo=*) YOLO=${a#--yolo=}; YOLO_SET=1 ;;
+    --grants=*) GRANTS=${a#--grants=}; GRANTS_SET=1 ;;
+    --yolo=*) GRANTS=$(fm_grants_from_legacy_yolo "${a#--yolo=}") || exit 1; GRANTS_SET=1 ;;
     *) POS+=("$a") ;;
   esac
 done
 [ -z "$want_value" ] || { echo "error: --$want_value requires a value" >&2; exit 1; }
-[ "${#POS[@]}" -ge 1 ] || { echo "usage: fm-promote.sh <task-id> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off>" >&2; exit 1; }
+[ "${#POS[@]}" -ge 1 ] || { echo "usage: fm-promote.sh <task-id> --mode <no-mistakes|direct-PR|local-only> --grants <none|findings[,merge][,local-merge]>" >&2; exit 1; }
 [ "$MODE_SET" -eq 1 ] || {
   echo "error: promotion requires --mode <no-mistakes|direct-PR|local-only>; decide it now from the scout's findings and the project's registered posture in data/projects.md" >&2
   exit 1
 }
-[ "$YOLO_SET" -eq 1 ] || {
-  echo "error: promotion requires --yolo <on|off>; it is this task's routine approval authority, not a project lookup" >&2
+[ "$GRANTS_SET" -eq 1 ] || {
+  echo "error: promotion requires --grants <none|findings[,merge][,local-merge]>; they are this task's routine approval authority, not a project lookup" >&2
   exit 1
 }
 case "$MODE" in
@@ -68,10 +73,7 @@ case "$MODE" in
     exit 1 ;;
   *) echo "error: --mode must be one of no-mistakes, direct-PR, local-only (got '$MODE')" >&2; exit 1 ;;
 esac
-case "$YOLO" in
-  on|off) ;;
-  *) echo "error: --yolo must be on or off (got '$YOLO')" >&2; exit 1 ;;
-esac
+GRANTS=$(fm_canonical_grants "$GRANTS") || exit 1
 
 ID=${POS[0]}
 fm_task_id_creation_valid "$ID" || { echo "error: invalid task id" >&2; exit 2; }
@@ -109,11 +111,11 @@ META_LOCK_HELD=1
 grep -qx 'kind=scout' "$META" || { echo "error: task $ID is not a scout task (kind=scout not in meta)" >&2; exit 1; }
 
 TMP="$STATE/.$ID.meta.promote.${BASHPID:-$$}"
-grep -v -e '^kind=' -e '^mode=' -e '^yolo=' "$META" > "$TMP"
+grep -v -e '^kind=' -e '^mode=' -e '^yolo=' -e '^grants=' "$META" > "$TMP"
 {
   echo "kind=ship"
   echo "mode=$MODE"
-  echo "yolo=$YOLO"
+  echo "grants=$GRANTS"
 } >> "$TMP"
 mv "$TMP" "$META"
 TMP=
@@ -121,5 +123,5 @@ fm_lock_release "$META_LOCK"
 META_LOCK_HELD=0
 
 HOME_Q=$(printf '%q' "$FM_HOME")
-echo "promoted $ID to ship mode=$MODE yolo=$YOLO (teardown protection restored)"
+echo "promoted $ID to ship mode=$MODE grants=$GRANTS (teardown protection restored)"
 echo "next: FM_HOME=$HOME_Q bin/fm-send.sh fm-$ID '<ship instructions for mode=$MODE: review scratch state with git status and git log; reset to a clean default-branch base; carry over only intended fix changes; create branch fm/$ID; implement; report done>'"

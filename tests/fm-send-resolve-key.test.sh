@@ -357,7 +357,7 @@ setup_remote_home() {  # <name> -> echoes home dir with remote meta + registry
     "harness=claude" \
     "kind=secondmate" \
     "mode=secondmate" \
-    "yolo=off" \
+    "grants=none" \
     "remote_host=remote-mac" \
     "remote_root=/remote/root" \
     "remote_backend=herdr" \

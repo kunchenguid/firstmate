@@ -37,7 +37,7 @@
 #   (n) no-mistakes + replayed unpushed patch in merged PR head -> ALLOW  (replayed local)
 #   (o) fm-pr-check rerun after HEAD moved                      -> no stale pr_head
 #   (p) fm-pr-check when local HEAD lags                        -> record remote PR head
-#   (q) no-mistakes + NO pr= recorded, PR discovered by branch  -> ALLOW  (yolo/no-CI merge)
+#   (q) no-mistakes + NO pr= recorded, PR discovered by branch  -> ALLOW  (granted/no-CI merge)
 #
 # Also covers backlog teardown-lock-race: a git index.lock left in the worktree by a
 # killed crew process (bin/fm-teardown.sh's teardown_treehouse_return).
@@ -740,7 +740,7 @@ test_no_pr_recorded_discovers_merged_pr_by_branch_allows() {
   case_dir=$(make_case no-pr-branch-discovery)
   write_meta "$case_dir" no-mistakes ship
   # Reproduces the real false-refusal report exactly, with NO pr=/pr_head=
-  # recorded in meta at all (fm-pr-check.sh was never run, e.g. a yolo merge on
+  # recorded in meta at all (fm-pr-check.sh was never run, e.g. a granted merge on
   # a repo with no PR CI so the "checks green" trigger that fires it never
   # happened): a branch with a commit, a no-mistakes auto-fix commit pushed on
   # top that never made it back into the local worktree, a squash merge onto

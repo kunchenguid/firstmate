@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
 # secondmate in its isolated firstmate home.
-# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
+# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --grants <none|findings[,merge][,local-merge]> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
 #        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
 #        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
-#   --mode and --yolo are this task's delivery contract, REQUIRED for every ship
+#   --mode and --grants are this task's delivery contract, REQUIRED for every ship
 #   spawn and refused on --scout and --secondmate spawns. Firstmate resolves both
 #   per task at intake (AGENTS.md section 7); data/projects.md holds the captain's
 #   standing posture as context, not as this task's answer, so a spawn never looks
@@ -141,7 +141,7 @@
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
-#   source of truth; shared --scout/--harness/--model/--effort/--backend/--mode/--yolo
+#   source of truth; shared --scout/--harness/--model/--effort/--backend/--mode/--grants
 #   applies to every pair. A ship batch therefore carries one delivery contract, and each
 #   pair still checks it against its own brief; a batch spanning modes is two invocations.
 #   If config/crew-dispatch.json exists, shared --harness is required for crewmate
@@ -176,9 +176,9 @@
 # resolver because `cursor` is not the CLI name. A cursor SECONDMATE instead runs
 # the tracked project-scope .cursor/hooks.json in its own home, whose stop-hook
 # park owns that home's supervision (docs/supervision-protocols/cursor.md).
-# On success prints: spawned <id> harness=<name> kind=<ship|scout|secondmate> [mode=<mode> yolo=<on|off>] window=<backend-target> worktree=<path>
-# A ship task records the explicit mode/yolo it was passed; a secondmate spawn records
-# mode=secondmate, yolo=off, home=, and projects=; a scout records neither, and both the
+# On success prints: spawned <id> harness=<name> kind=<ship|scout|secondmate> [mode=<mode> grants=<list|none>] window=<backend-target> worktree=<path>
+# A ship task records the explicit mode/grants it was passed; a secondmate spawn records
+# mode=secondmate, grants=none, home=, and projects=; a scout records neither, and both the
 # success line and state/<id>.meta omit them.
 # Every fresh spawn or relaunch records a new spawn_gen= incarnation token so durable
 # consumers can distinguish a replacement worker that reuses the same task id.
@@ -240,6 +240,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-ff-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-grants-lib.sh
+. "$SCRIPT_DIR/fm-grants-lib.sh"
 # shellcheck source=bin/fm-secondmate-nudge-lib.sh
 . "$SCRIPT_DIR/fm-secondmate-nudge-lib.sh"
 # shellcheck source=bin/fm-config-inherit-lib.sh
@@ -267,20 +269,22 @@ fm_refuse_if_gate_agent
 # set by the batch loop below), so the guard runs once for the batch, not once per pair.
 [ -n "${FM_SPAWN_NO_GUARD:-}" ] || "$FM_ROOT/bin/fm-guard.sh" || true
 KIND=ship
+
+
 KIND_SET=0
 HARNESS_ARG=
 MODEL=
 EFFORT=
 BACKEND_ARG=
 MODE=
-YOLO=
+GRANTS=
 TRACEPARENT_ARG=
 HARNESS_SET=0
 MODEL_SET=0
 EFFORT_SET=0
 BACKEND_SET=0
 MODE_SET=0
-YOLO_SET=0
+GRANTS_SET=0
 TRACEPARENT_SET=0
 RELAUNCH=0
 POS=()
@@ -296,7 +300,8 @@ for a in "$@"; do
       effort) EFFORT=$a; EFFORT_SET=1 ;;
       backend) BACKEND_ARG=$a; BACKEND_SET=1 ;;
       mode) MODE=$a; MODE_SET=1 ;;
-      yolo) YOLO=$a; YOLO_SET=1 ;;
+      grants) GRANTS=$a; GRANTS_SET=1 ;;
+      yolo) GRANTS=$(fm_grants_from_legacy_yolo "$a") || exit 1; GRANTS_SET=1 ;;
       traceparent) TRACEPARENT_ARG=$a; TRACEPARENT_SET=1 ;;
       *) echo "error: internal parser state for --$want_value" >&2; exit 1 ;;
     esac
@@ -317,8 +322,10 @@ for a in "$@"; do
     --backend=*) BACKEND_ARG=${a#--backend=}; BACKEND_SET=1 ;;
     --mode) want_value=mode ;;
     --mode=*) MODE=${a#--mode=}; MODE_SET=1 ;;
+    --grants) want_value=grants ;;
+    --grants=*) GRANTS=${a#--grants=}; GRANTS_SET=1 ;;
     --yolo) want_value=yolo ;;
-    --yolo=*) YOLO=${a#--yolo=}; YOLO_SET=1 ;;
+    --yolo=*) GRANTS=$(fm_grants_from_legacy_yolo "${a#--yolo=}") || exit 1; GRANTS_SET=1 ;;
     --traceparent) want_value=traceparent ;;
     --traceparent=*) TRACEPARENT_ARG=${a#--traceparent=}; TRACEPARENT_SET=1 ;;
     *) POS+=("$a") ;;
@@ -330,7 +337,7 @@ done
 [ "$EFFORT_SET" -eq 0 ] || [ -n "$EFFORT" ] || { echo "error: --effort requires a non-empty value" >&2; exit 1; }
 [ "$BACKEND_SET" -eq 0 ] || [ -n "$BACKEND_ARG" ] || { echo "error: --backend requires a non-empty value" >&2; exit 1; }
 [ "$MODE_SET" -eq 0 ] || [ -n "$MODE" ] || { echo "error: --mode requires a non-empty value" >&2; exit 1; }
-[ "$YOLO_SET" -eq 0 ] || [ -n "$YOLO" ] || { echo "error: --yolo requires a non-empty value" >&2; exit 1; }
+[ "$GRANTS_SET" -eq 0 ] || [ -n "$GRANTS" ] || { echo "error: --grants requires a non-empty value" >&2; exit 1; }
 [ "$TRACEPARENT_SET" -eq 0 ] || [ -n "$TRACEPARENT_ARG" ] || { echo "error: --traceparent requires a non-empty value" >&2; exit 1; }
 # A parent-delivered carrier replaces this home's own resolution, so it is
 # refused unless it is a secondmate spawn carrying a strictly valid W3C value.
@@ -358,9 +365,9 @@ if [ "$RELAUNCH" -eq 1 ]; then
   [ "$BACKEND_SET" -eq 0 ] || { echo "error: --relaunch reuses the task's recorded backend; --backend cannot override it" >&2; exit 1; }
   [ "$KIND_SET" -eq 0 ] || { echo "error: --relaunch reuses the task's recorded kind; --scout/--secondmate cannot override it" >&2; exit 1; }
   [ "$MODE_SET" -eq 0 ] || { echo "error: --relaunch reuses the task's recorded delivery mode; --mode cannot override it" >&2; exit 1; }
-  [ "$YOLO_SET" -eq 0 ] || { echo "error: --relaunch reuses the task's recorded yolo posture; --yolo cannot override it" >&2; exit 1; }
+  [ "$GRANTS_SET" -eq 0 ] || { echo "error: --relaunch reuses the task's recorded autonomy grants; --grants cannot override them" >&2; exit 1; }
 else
-  # Delivery contract (AGENTS.md section 7). A ship task's mode and yolo are
+  # Delivery contract (AGENTS.md section 7). A ship task's mode and grants are
   # firstmate's per-task decision, so they are required and closed-set validated
   # here rather than resolved from the project registry. Scouts deliver a report
   # and record no delivery posture; secondmate spawns hardcode theirs.
@@ -369,8 +376,8 @@ else
       echo "error: ship spawns require --mode <no-mistakes|direct-PR|local-only>; resolve it at intake from the captain's instruction and the project's registered posture in data/projects.md" >&2
       exit 1
     }
-    [ "$YOLO_SET" -eq 1 ] || {
-      echo "error: ship spawns require --yolo <on|off>; it is this task's routine approval authority, not a project lookup" >&2
+    [ "$GRANTS_SET" -eq 1 ] || {
+      echo "error: ship spawns require --grants <none|findings[,merge][,local-merge]>; they are this task's routine approval authority, not a project lookup" >&2
       exit 1
     }
     case "$MODE" in
@@ -380,17 +387,14 @@ else
         exit 1 ;;
       *) echo "error: --mode must be one of no-mistakes, direct-PR, local-only (got '$MODE')" >&2; exit 1 ;;
     esac
-    case "$YOLO" in
-      on|off) ;;
-      *) echo "error: --yolo must be on or off (got '$YOLO')" >&2; exit 1 ;;
-    esac
+    GRANTS=$(fm_canonical_grants "$GRANTS") || exit 1
   else
     [ "$MODE_SET" -eq 0 ] || {
       echo "error: --mode applies only to ship spawns; a scout delivers a report and a secondmate records its own fixed posture" >&2
       exit 1
     }
-    [ "$YOLO_SET" -eq 0 ] || {
-      echo "error: --yolo applies only to ship spawns; a scout delivers a report and a secondmate records its own fixed posture" >&2
+    [ "$GRANTS_SET" -eq 0 ] || {
+      echo "error: --grants applies only to ship spawns; a scout delivers a report and a secondmate records its own fixed posture" >&2
       exit 1
     }
   fi
@@ -615,7 +619,7 @@ spawn_remote_secondmate() {
     echo "harness=$harness"
     echo "kind=secondmate"
     echo "mode=secondmate"
-    echo "yolo=off"
+    echo "grants=none"
     echo "tasktmp="
     echo "model=${model#-}"
     echo "effort=${effort#-}"
@@ -640,7 +644,7 @@ spawn_remote_secondmate() {
     echo "error: remote secondmate $id launched, but its reply source could not be armed; endpoint metadata is preserved" >&2
     return 1
   fi
-  echo "spawned $id harness=$harness kind=secondmate mode=secondmate yolo=off window=remote:$id worktree=$home remote=$host backend=$remote_backend"
+  echo "spawned $id harness=$harness kind=secondmate mode=secondmate grants=none window=remote:$id worktree=$home remote=$host backend=$remote_backend"
   return 0
 }
 
@@ -750,7 +754,7 @@ spawn_abort_cleanup() {
             echo "harness=$HARNESS"
             echo "kind=$KIND"
             [ -z "${MODE:-}" ] || echo "mode=$MODE"
-            [ -z "${YOLO:-}" ] || echo "yolo=$YOLO"
+            [ -z "${GRANTS:-}" ] || echo "grants=$GRANTS"
             echo "tasktmp=${TASK_TMP:-}"
             echo "model=${MODEL:-default}"
             echo "effort=${EFFORT:-default}"
@@ -867,7 +871,7 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
   # harness. Each pair still re-validates it against its own brief, so a batch
   # spanning several modes is two invocations rather than a silent mixed dispatch.
   [ "$MODE_SET" -eq 0 ] || shared_args+=(--mode "$MODE")
-  [ "$YOLO_SET" -eq 0 ] || shared_args+=(--yolo "$YOLO")
+  [ "$GRANTS_SET" -eq 0 ] || shared_args+=(--grants "$GRANTS")
   for pair in "${POS[@]}"; do
     case "$pair" in
       *=*) : ;;
@@ -1011,7 +1015,13 @@ if [ "$RELAUNCH" -eq 1 ]; then
   KIND=$(fm_meta_get "$RELAUNCH_META" kind)
   [ -n "$KIND" ] || KIND=ship
   MODE=$(fm_meta_get "$RELAUNCH_META" mode)
-  YOLO=$(fm_meta_get "$RELAUNCH_META" yolo)
+  # A task recorded before grants were split carries yolo= instead; map it so a
+  # relaunch reuses exactly the authority the task was spawned with.
+  GRANTS=$(fm_meta_get "$RELAUNCH_META" grants)
+  if [ -z "$GRANTS" ]; then
+    RELAUNCH_LEGACY_YOLO=$(fm_meta_get "$RELAUNCH_META" yolo)
+    [ -z "$RELAUNCH_LEGACY_YOLO" ] || GRANTS=$(fm_grants_from_legacy_yolo "$RELAUNCH_LEGACY_YOLO") || exit 1
+  fi
   RELAUNCH_WT=$(fm_meta_get "$RELAUNCH_META" worktree)
   [ -n "$RELAUNCH_WT" ] && [ -d "$RELAUNCH_WT" ] || {
     echo "error: task $ID's recorded worktree '${RELAUNCH_WT:-none}' is missing; refusing to relaunch without the local copy its work lives in" >&2
@@ -2582,11 +2592,11 @@ fi
 # requires an explicit mode when a scout is promoted to a ship task).
 if [ "$KIND" = secondmate ]; then
   MODE=secondmate
-  YOLO=off
+  GRANTS=off
   : "${SECONDMATE_PROJECTS:=}"
 elif [ "$KIND" = scout ]; then
   MODE=
-  YOLO=
+  GRANTS=
 fi
 
 # Resolve the optional default-off W3C trace context (bin/fm-trace-context-lib.sh,
@@ -2632,7 +2642,7 @@ fi
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
+      split("window endpoint_task_id worktree project harness kind mode grants tasktmp model effort busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -2646,7 +2656,7 @@ preserve_relaunch_meta() {
   echo "harness=$HARNESS"
   echo "kind=$KIND"
   [ -z "$MODE" ] || echo "mode=$MODE"
-  [ -z "$YOLO" ] || echo "yolo=$YOLO"
+  [ -z "$GRANTS" ] || echo "grants=$GRANTS"
   echo "tasktmp=$TASK_TMP"
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
@@ -2848,5 +2858,5 @@ if [ "$KIND" = secondmate ] && [ "${FM_SKIP_SECONDMATE_INHERIT:-0}" != 1 ]; then
 fi
 
 SPAWN_DELIVERY=
-[ -z "$MODE" ] || SPAWN_DELIVERY=" mode=$MODE yolo=$YOLO"
+[ -z "$MODE" ] || SPAWN_DELIVERY=" mode=$MODE grants=$GRANTS"
 echo "spawned $ID harness=$HARNESS kind=$KIND$SPAWN_DELIVERY window=$META_WINDOW worktree=$WT"

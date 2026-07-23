@@ -79,7 +79,7 @@ EOF
   echo "harness=claude"
   echo "kind=ship"
   echo "mode=no-mistakes"
-  echo "yolo=off"
+  echo "grants=none"
   echo "model=default"
   echo "effort=default"
   echo "backend=herdr"
