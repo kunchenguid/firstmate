@@ -65,6 +65,64 @@
 # (grok's mid-turn cancel hint, shown iff a turn is running - verified grok 0.2.73).
 FM_TMUX_BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel'
 
+# fm_tmux_pin_target: rewrite a composed "<session>:<window>" endpoint into
+# tmux's EXACT-match target form "=<session>:=<window>".
+#
+# tmux resolves an unqualified session OR window target by exact name, then by
+# PREFIX, then by fnmatch (verified tmux 3.6, docs/tmux-backend.md
+# "Session-target resolution"). Firstmate records a task's endpoint as the NAME
+# pair "<session>:<window>", so a record that outlives its window reaches into
+# whatever stranger merely EXTENDS that name: with only "firstmate2:fm-abcd"
+# alive, `kill-window -t firstmate:fm-abc` destroyed it and
+# `display-message -p -t firstmate:fm-abc` reported it as ours. Pinned, both
+# fail loudly with "can't find session: firstmate" instead.
+#
+# The pin lives HERE - at the single boundary where a recorded endpoint is
+# handed to tmux - and NOT in the recorded string, so the persisted `window=`
+# handle stays the plain name pair that every identity comparison already reads
+# (window_to_task, fm_backend_meta_for_window, the human-facing target column),
+# and so records written before this fix, plus targets typed on the command
+# line, are pinned too.
+#
+# Only a two-part "<a>:<b>" target is rewritten. Stable tmux object ids
+# (@window, %pane, $session) are already unambiguous, an already-pinned half is
+# left alone (the rewrite is idempotent, so nesting two pinned callers is
+# safe), and anything else - a bare name, an empty half, a herdr-shaped
+# three-part target - is returned unchanged so this can never alter what a
+# non-tmux endpoint means.
+#
+# The window half is left UNPINNED when it is one of tmux's special or relative
+# window selectors, because "=" suppresses them instead of exact-matching them:
+# tmux looks a window up as special token FIRST, then index, then id, then exact
+# name, and an "=" prefix skips straight past the token step, so the selector
+# silently falls back to the session's CURRENT window and still exits 0
+# (verified tmux 3.6, docs/tmux-backend.md "Window-target selector tokens").
+# These reach us as user input, because fm_backend_resolve_selector
+# (bin/fm-backend.sh) passes any colon-bearing raw selector through verbatim as
+# its documented escape hatch for a window outside this firstmate home. The set
+# is tmux's own documented one: the tokens {start} {end} {last} {next}
+# {previous}, their single-character aliases ^ $ ! + -, and a +/- relative
+# offset - each optionally carrying a ".<pane>" suffix. Ordinary window names
+# keep the pin; an index (`ses:1`) keeps it too, because "=" does not suppress
+# index lookup.
+fm_tmux_pin_target() {  # <target> -> <pinned-target>
+  local target=${1:-} ses win
+  case "$target" in
+    *:*) ;;
+    *) printf '%s' "$target"; return 0 ;;
+  esac
+  ses=${target%%:*}
+  win=${target#*:}
+  case "$win" in *:*) printf '%s' "$target"; return 0 ;; esac
+  case "$ses" in ''|'='*|'$'*) ;; *) ses="=$ses" ;; esac
+  case "$win" in
+    ''|'='*|'@'*|'%'*) ;;
+    '^'|'$'|'!'|'^.'*|'$.'*|'!.'*|'+'*|'-'*|'{'*) ;;
+    *) win="=$win" ;;
+  esac
+  printf '%s:%s' "$ses" "$win"
+}
+
 # fm_tmux_strip_ghost: thin adapter over the shared, fleet-wide ghost extractor
 # fm_composer_strip_ghost (bin/fm-composer-lib.sh). It drops de-emphasised
 # ghost/placeholder runs - dim/faint (SGR 2, claude's/codex's ghost) AND a
@@ -100,7 +158,8 @@ fm_tmux_strip_ghost() { fm_composer_strip_ghost; }
 # (claude's own idle composer) read empty while a bare, unbordered `$ ` dead-shell
 # prompt reads unknown.
 fm_tmux_composer_state() {  # <target> -> empty|pending|unknown
-  local target=$1 cy raw plain stripped bordered=0
+  local target cy raw plain stripped bordered=0
+  target=$(fm_tmux_pin_target "$1")
   cy=$(tmux display-message -p -t "$target" '#{cursor_y}' 2>/dev/null) || { printf 'unknown'; return 0; }
   case "$cy" in ''|*[!0-9]*) printf 'unknown'; return 0 ;; esac
   raw=$(tmux capture-pane -e -p -t "$target" -S "$cy" -E "$cy" 2>/dev/null) || { printf 'unknown'; return 0; }
@@ -141,7 +200,8 @@ fm_pane_input_pending() {  # <target>
 # fm_pane_is_busy: 0 if the pane's last few non-blank lines show a busy footer
 # (an agent mid-turn). Scans a 40-line tail like fm-watch.sh.
 fm_pane_is_busy() {  # <target>
-  local win=$1 tail40
+  local win tail40
+  win=$(fm_tmux_pin_target "$1")
   tail40=$(tmux capture-pane -p -t "$win" -S -40 2>/dev/null) || return 1
   printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -6 \
     | grep -qiE "${FM_BUSY_REGEX:-$FM_TMUX_BUSY_REGEX_DEFAULT}"
@@ -166,7 +226,8 @@ fm_pane_is_busy() {  # <target>
 # fm-send's lenient success policies both treat a busy-queued Enter as
 # delivered.
 fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep>
-  local target=$1 retries=$2 sleep_s=$3 i=0 state
+  local target retries=$2 sleep_s=$3 i=0 state
+  target=$(fm_tmux_pin_target "$1")
   while :; do
     tmux send-keys -t "$target" Enter 2>/dev/null || true
     sleep "$sleep_s"
@@ -188,7 +249,8 @@ fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep>
 }
 
 fm_tmux_submit_core() {  # <target> <text> <retries> <enter-sleep> <settle>
-  local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5
+  local target text=$2 retries=$3 sleep_s=$4 settle=$5
+  target=$(fm_tmux_pin_target "$1")
   tmux send-keys -t "$target" -l "$text" 2>/dev/null || { printf 'send-failed'; return 0; }
   sleep "$settle"
   fm_tmux_submit_enter_core "$target" "$retries" "$sleep_s"

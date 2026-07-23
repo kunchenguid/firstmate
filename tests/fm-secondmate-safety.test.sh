@@ -1273,7 +1273,7 @@ test_fm_send_refuses_bare_window_without_home_meta() {
   fi
   grep -F "no metadata for fm-missing in $home/state" "$err" >/dev/null \
     || fail "fm-send did not explain missing home metadata"
-  grep -F 'send-keys -t other-session:fm-missing' "$log" >/dev/null \
+  grep -F 'send-keys -t =other-session:=fm-missing' "$log" >/dev/null \
     && fail "fm-send fell back to a foreign same-name window"
   pass "fm-send refuses a bare firstmate window with no metadata in this home"
 }
@@ -1435,8 +1435,8 @@ EOF
   [ ! -d "$childwt" ] || fail "force teardown did not remove child worktree"
   [ ! -e "$home/state/domain.meta" ] || fail "teardown did not clear parent meta"
   grep -F -- '- domain ' "$home/data/secondmates.md" >/dev/null && fail "force teardown did not remove secondmate registry route"
-  grep -F 'kill-window -t firstmate:fm-child' "$log" >/dev/null || fail "force teardown did not kill child window"
-  grep -F 'kill-window -t firstmate:fm-domain' "$log" >/dev/null || fail "force teardown did not kill parent window"
+  grep -F 'kill-window -t =firstmate:=fm-child' "$log" >/dev/null || fail "force teardown did not kill child window"
+  grep -F 'kill-window -t =firstmate:=fm-domain' "$log" >/dev/null || fail "force teardown did not kill parent window"
   pass "secondmate force teardown discards child work"
 }
 
@@ -1614,7 +1614,7 @@ EOF
       || fail "force teardown refused $opdir symlinked inside the secondmate home"
     [ ! -e "$subhome" ] || fail "force teardown did not remove subhome with inside $opdir symlink"
     [ ! -e "$home/state/domain.meta" ] || fail "force teardown did not clear parent meta for inside $opdir symlink"
-    grep -F 'kill-window -t firstmate:fm-domain' "$log" >/dev/null || fail "force teardown did not kill parent window for inside $opdir symlink"
+    grep -F 'kill-window -t =firstmate:=fm-domain' "$log" >/dev/null || fail "force teardown did not kill parent window for inside $opdir symlink"
   done
   pass "force teardown allows operational directory symlinks inside the subhome"
 }

@@ -189,8 +189,11 @@ fm_afk_launch_close_terminal() {  # <backend> <target>
       fm_backend_herdr_cli "$session" pane close "$pane" >/dev/null 2>&1
       ;;
     tmux)
-      # target is the dedicated daemon session name - kill exactly it.
-      tmux kill-session -t "$target" 2>/dev/null
+      # target is the dedicated daemon session name - kill exactly it. The "="
+      # pins exact-name matching: a bare session target falls back to PREFIX
+      # matching (docs/tmux-backend.md "Session-target resolution"), so a stale
+      # record could otherwise kill a live sibling whose name extends it.
+      tmux kill-session -t "=$target" 2>/dev/null
       ;;
     none)
       return 0
@@ -216,7 +219,9 @@ fm_afk_launch_terminal_absent() {  # <backend> <target>
       [ "$code" = pane_not_found ]
       ;;
     tmux)
-      out=$(tmux has-session -t "$target" 2>&1)
+      # "=" pins exact-name matching, so a prefix-sibling session cannot mask
+      # the recorded session's absence.
+      out=$(tmux has-session -t "=$target" 2>&1)
       result=$?
       [ "$result" -eq 1 ] || return 1
       printf '%s' "$out" | grep -Eq "can't find session"
@@ -250,7 +255,9 @@ fm_afk_launch_terminal_alive() {  # <backend> <target>
       fm_backend_herdr_cli "$session" pane get "$pane" >/dev/null 2>&1
       ;;
     tmux)
-      tmux has-session -t "$target" 2>/dev/null
+      # "=" pins exact-name matching, so a prefix-sibling session cannot
+      # report the recorded session as alive.
+      tmux has-session -t "=$target" 2>/dev/null
       ;;
     *) return 1 ;;
   esac

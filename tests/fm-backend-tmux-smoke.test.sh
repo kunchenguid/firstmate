@@ -30,11 +30,13 @@ command -v tmux >/dev/null 2>&1 || { echo "skip: tmux not found"; exit 0; }
 REAL_TMUX=$(command -v tmux)
 SOCKET="fm-backend-smoke-$$"
 SHIM_DIR=
+SEL_DIR=
 trap cleanup_all EXIT
 
 cleanup_all() {
   "$REAL_TMUX" -L "$SOCKET" kill-server >/dev/null 2>&1 || true
   [ -n "${SHIM_DIR:-}" ] && rm -rf "$SHIM_DIR"
+  [ -n "${SEL_DIR:-}" ] && rm -rf "$SEL_DIR"
 }
 
 # A `tmux` shim on PATH that transparently redirects every call to the private
@@ -78,10 +80,14 @@ pass "real tmux: fm_backend_tmux_create_task creates a window and refuses a dupl
 # A newly-created interactive shell can exist before its startup files and line
 # editor are ready to accept Enter. Prove command execution with an output token
 # that does not appear contiguously in the command, retrying the harmless probe
-# until the shell acknowledges it.
+# until the shell acknowledges it. Clear any half-typed retry with C-u (a
+# line-editing key), never C-c: SIGINT delivered while bash is still sourcing
+# its startup files kills it before the interactive handler is armed, which
+# closes the pane and the window with it (observed deterministically on a slow
+# WSL2 host, tmux 3.6, 2026-07-22).
 SHELL_READY=false
 for _ in $(seq 1 100); do
-  tmux send-keys -t "$TARGET" C-c
+  tmux send-keys -t "$TARGET" C-u
   tmux send-keys -t "$TARGET" -l "printf 'shell-%s\\n' ready"
   tmux send-keys -t "$TARGET" Enter
   if wait_for_capture_text "$TARGET" "shell-ready" 10; then
@@ -165,6 +171,148 @@ fi
 # Best-effort contract: killing an already-gone window must not error.
 fm_backend_tmux_kill "$TARGET" || fail "fm_backend_tmux_kill on an already-dead target must stay best-effort (never fail)"
 pass "real tmux: fm_backend_tmux_kill removes the window and is idempotent/best-effort"
+
+# --- numeric session name: a bare -t "$ses" parses "1" as a window INDEX -----
+# Regression (observed live 2026-07-16): with firstmate inside a tmux session
+# literally named "1" and window index 1 occupied, the old bare-name form
+# `new-window -d -t "$ses"` resolved "1" as a window INDEX in the current
+# session, so the first spawn filled index 1 and every further concurrent
+# spawn failed with "create window failed: index 1 in use". The "=$ses:"
+# target pins exact session-NAME parsing and appends at the next free index,
+# so consecutive creations must all succeed. Kill the smoke session first so
+# "1" is the server's only (and therefore current) session, matching the live
+# failure's resolution context.
+tmux kill-session -t "=$SESSION" 2>/dev/null || true
+NUMSES="1"
+tmux new-session -d -s "$NUMSES" -x 200 -y 50 \
+  || fail "real tmux: could not create a session literally named '1'"
+tmux new-window -d -t "=$NUMSES:" -n occupier \
+  || fail "real tmux: could not occupy window index 1 of session '1'"
+fm_backend_tmux_create_task "$NUMSES" "fm-num-a" "$HOME" >/dev/null \
+  || fail "numeric session: first fm_backend_tmux_create_task failed"
+fm_backend_tmux_create_task "$NUMSES" "fm-num-b" "$HOME" >/dev/null \
+  || fail "numeric session: second fm_backend_tmux_create_task failed (bare -t parsed the session name as a window index?)"
+for w in fm-num-a fm-num-b; do
+  tmux list-windows -t "=$NUMSES" -F '#{window_name}' | grep -qx "$w" \
+    || fail "numeric session: window $w did not land in session '$NUMSES'"
+done
+pass "real tmux: two consecutive task creations succeed in a session literally named '1' with index 1 occupied"
+
+# --- exact-match session resolution: bare session names PREFIX-match ---------
+# tmux resolves an unqualified session target by exact name, then prefix, then
+# fnmatch: with only "firstmate2" present, a bare `has-session -t firstmate`
+# succeeds, container-ensure would never create the real "firstmate" session,
+# and every task window would land in the stranger session. The "=" probe pins
+# exact-name matching, so the dedicated session must be created alongside the
+# prefix-sibling. TMUX is unset in a subshell to force the detached-session
+# branch regardless of where the test itself runs.
+tmux new-session -d -s firstmate2 -x 200 -y 50 \
+  || fail "real tmux: could not create the decoy session firstmate2"
+ses=$( (unset TMUX; fm_backend_tmux_container_ensure) ) \
+  || fail "fm_backend_tmux_container_ensure failed next to a prefix-sibling session"
+[ "$ses" = firstmate ] || fail "fm_backend_tmux_container_ensure printed '$ses', expected 'firstmate'"
+tmux has-session -t "=firstmate" 2>/dev/null \
+  || fail "container-ensure did not create the exact 'firstmate' session (bare probe prefix-matched 'firstmate2'?)"
+pass "real tmux: fm_backend_tmux_container_ensure creates the exact 'firstmate' session even when a prefix-sibling exists"
+
+# --- a STALE recorded target must never reach into a stranger session --------
+# The recorded endpoint is the plain "<session>:<window>" name pair, and tmux
+# resolves BOTH halves by exact name, then prefix, then fnmatch. Verified live
+# (tmux 3.6): with only session "firstmate2" holding window "fm-abcd",
+# `display-message -p -t firstmate:fm-abc` reported "firstmate2:fm-abcd" and
+# `kill-window -t firstmate:fm-abc` destroyed it. fm_tmux_pin_target pins every
+# target the tmux primitives compose, so the stale record must now read as gone
+# and leave the stranger's window standing.
+tmux kill-session -t "=$NUMSES" 2>/dev/null || true
+tmux kill-session -t "=firstmate" 2>/dev/null || true
+tmux kill-session -t "=firstmate2" 2>/dev/null || true
+tmux new-session -d -s firstmate2 -x 200 -y 50 \
+  || fail "real tmux: could not create the stranger session firstmate2"
+fm_backend_tmux_create_task firstmate2 fm-abcd "$HOME" >/dev/null \
+  || fail "real tmux: could not create the stranger window firstmate2:fm-abcd"
+STALE="firstmate:fm-abc"
+
+[ "$(fm_backend_tmux_current_path "$STALE")" = "" ] \
+  || fail "a stale record resolved to a live pane (bare target prefix-matched firstmate2:fm-abcd?)"
+[ "$(fm_backend_tmux_current_command "$STALE")" = "" ] \
+  || fail "a stale record read a live pane's foreground command (bare target prefix-matched?)"
+if fm_backend_tmux_send_text_line "$STALE" "echo intruder" 2>/dev/null; then
+  fail "a stale record accepted a send (bare target prefix-matched a stranger's pane?)"
+fi
+fm_backend_tmux_kill "$STALE"
+tmux list-windows -a -F '#{session_name}:#{window_name}' | grep -qx "firstmate2:fm-abcd" \
+  || fail "killing a stale record destroyed the stranger's window firstmate2:fm-abcd"
+pass "real tmux: a stale '$STALE' record neither reads, writes to, nor kills the stranger window firstmate2:fm-abcd"
+
+# The pin must not cost the exact target anything: the same primitives still
+# reach the real window by its recorded name pair.
+[ -n "$(fm_backend_tmux_current_path "firstmate2:fm-abcd")" ] \
+  || fail "the exact recorded target no longer resolves its own pane's cwd"
+fm_backend_tmux_kill "firstmate2:fm-abcd"
+if tmux list-windows -a -F '#{session_name}:#{window_name}' | grep -qx "firstmate2:fm-abcd"; then
+  fail "the exact recorded target no longer kills its own window"
+fi
+pass "real tmux: the exact-match pin still resolves and kills a target by its recorded name pair"
+
+# --- tmux's special/relative window selectors must survive the pin -----------
+# tmux looks a window up as a SPECIAL TOKEN first, then index, then id, then
+# name, so an "=" prefix does not exact-match a token, it suppresses it: the
+# selector silently falls back to the session's CURRENT window and still exits
+# 0 (docs/tmux-backend.md "Window-target selector tokens"). These are reachable
+# user input, because fm_backend_resolve_selector passes any colon-bearing raw
+# selector through verbatim. Each window gets its own cwd so
+# fm_backend_tmux_current_path names which window a selector actually reached,
+# and the primitive's answer is compared against RAW tmux asked the same
+# (unpinned) way - the resolution the user typed and is entitled to.
+tmux kill-session -t "=firstmate2" 2>/dev/null || true
+SEL_DIR=$(mktemp -d "${TMPDIR:-/tmp}/fm-backend-smoke-sel.XXXXXX")
+mkdir -p "$SEL_DIR/w0" "$SEL_DIR/w1" "$SEL_DIR/w2"
+tmux new-session -d -s selses -n selw0 -c "$SEL_DIR/w0" -x 200 -y 50 \
+  || fail "real tmux: could not create the selector-probe session"
+fm_backend_tmux_create_task selses selw1 "$SEL_DIR/w1" >/dev/null \
+  || fail "real tmux: could not create selector-probe window selw1"
+fm_backend_tmux_create_task selses selw2 "$SEL_DIR/w2" >/dev/null \
+  || fail "real tmux: could not create selector-probe window selw2"
+# Current window selw1, last window selw2, so EVERY token below resolves to a
+# window other than the current one - which is exactly what a suppressed token
+# would collapse to.
+tmux select-window -t "=selses:=selw2" || fail "real tmux: could not select selw2"
+tmux select-window -t "=selses:=selw1" || fail "real tmux: could not select selw1"
+# Read the per-window cwds back from tmux rather than assuming $SEL_DIR is not
+# reached through a symlink (macOS /tmp -> /private/tmp).
+SELW1_PATH=$(tmux display-message -p -t "=selses:=selw1" '#{pane_current_path}')
+SELW2_PATH=$(tmux display-message -p -t "=selses:=selw2" '#{pane_current_path}')
+[ -n "$SELW1_PATH" ] && [ "$SELW1_PATH" != "$SELW2_PATH" ] \
+  || fail "real tmux: the selector-probe windows did not get distinct working directories"
+# Ask tmux for selw2's real index rather than assuming the default base-index:
+# the private -L socket isolates SESSIONS but not the user config, so a captain
+# whose ~/.tmux.conf sets `base-index 1` numbers these windows 1/2/3.
+SELW2_IDX=$(tmux display-message -p -t "=selses:=selw2" '#{window_index}')
+[ -n "$SELW2_IDX" ] || fail "real tmux: could not read back selw2's window index"
+
+for sel in '^' '$' '!' '+' '-' '+1' '-1' '+2' \
+  '{start}' '{end}' '{last}' '{next}' '{previous}' '$.0' '{end}.0'; do
+  raw=$(tmux display-message -p -t "selses:$sel" '#{pane_current_path}' 2>/dev/null)
+  [ -n "$raw" ] || fail "selector '$sel' did not resolve at all under raw tmux"
+  [ "$raw" != "$SELW1_PATH" ] \
+    || fail "selector '$sel' resolves to the current window under raw tmux, so it cannot detect a suppressed token"
+  got=$(fm_backend_tmux_current_path "selses:$sel")
+  [ "$got" = "$raw" ] \
+    || fail "selector 'selses:$sel' resolved to '$got' through the adapter but '$raw' under raw tmux (the pin suppressed the token)"
+done
+pass "real tmux: the pin leaves tmux's special/relative window selectors resolving exactly as raw tmux does"
+
+# The exclusion must stay narrow: an ordinary window name and a window INDEX
+# both keep the exact-match pin.
+[ "$(fm_backend_tmux_current_path 'selses:selw2')" = "$SELW2_PATH" ] \
+  || fail "an ordinary window name no longer resolves through the pin"
+[ "$(fm_backend_tmux_current_path "selses:$SELW2_IDX")" = "$SELW2_PATH" ] \
+  || fail "a window index ($SELW2_IDX) no longer resolves through the pin"
+[ "$(fm_tmux_pin_target 'selses:selw2')" = '=selses:=selw2' ] \
+  || fail "an ordinary window name lost its exact-match pin"
+[ "$(fm_tmux_pin_target '=selses:$')" = '=selses:$' ] \
+  || fail "fm_tmux_pin_target is not idempotent for an unpinned special selector"
+pass "real tmux: ordinary window names and indexes keep the exact-match pin, and the rewrite stays idempotent"
 
 cleanup_all
 trap - EXIT

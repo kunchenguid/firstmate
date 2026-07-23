@@ -35,7 +35,9 @@ GLOBAL_CLEANUP() {
   rm -f "$SLEEPER" 2>/dev/null || true
   local s
   for s in $TRACK_TMUX_SESSIONS; do
-    tmux kill-session -t "$s" 2>/dev/null || true
+    # "=" pins exact-name matching: a tracked session already gone by trap time
+    # must not prefix-match and kill an unrelated live host session.
+    tmux kill-session -t "=$s" 2>/dev/null || true
   done
 }
 trap GLOBAL_CLEANUP EXIT
@@ -418,6 +420,34 @@ unit_tmux_absence_distinguishes_probe_failure() {
   else
     fail "tmux absence: probe failure was treated as confirmed absence"
   fi
+  rm -rf "$st"
+}
+
+# ---------------------------------------------------------------------------
+# UNIT: recorded-session close and liveness must resolve the name EXACTLY.
+# tmux falls back to PREFIX matching for a bare session target, so a stale
+# record naming a gone session must neither kill nor report alive a live
+# sibling whose name merely extends it (real tmux; skipped when absent).
+# ---------------------------------------------------------------------------
+unit_tmux_exact_session_resolution() {
+  command -v tmux >/dev/null 2>&1 || { echo "skip: tmux not found (exact resolution)"; return 0; }
+  local st gone sibling
+  gone="fm-afk-exact-$$"
+  sibling="${gone}2"
+  TRACK_TMUX_SESSIONS="$TRACK_TMUX_SESSIONS $sibling"
+  tmux new-session -d -s "$sibling" 2>/dev/null || { fail "exact resolution: sibling session creation failed"; return 0; }
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-tmux-exact.XXXXXX")
+  if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" bash -c '
+    . "$1"
+    fm_afk_launch_terminal_absent tmux "$2" || exit 1
+    ! fm_afk_launch_terminal_alive tmux "$2" || exit 1
+    fm_afk_launch_close_terminal tmux "$2" || true
+  ' _ "$LAUNCH" "$gone" && tmux has-session -t "=$sibling" 2>/dev/null; then
+    pass "tmux exact resolution: a stale record neither reads nor kills a prefix-sibling session"
+  else
+    fail "tmux exact resolution: bare session target prefix-matched the sibling (read it as alive or killed it)"
+  fi
+  tmux kill-session -t "=$sibling" 2>/dev/null || true
   rm -rf "$st"
 }
 
@@ -875,6 +905,7 @@ unit_record_failure_closes_terminal
 unit_readiness_failure_rolls_back_terminal
 unit_readiness_failure_preserves_unconfirmed_record
 unit_tmux_absence_distinguishes_probe_failure
+unit_tmux_exact_session_resolution
 unit_native_lifecycle
 unit_native_entry_preserves_prepared_state
 unit_close_failure_preserves_record

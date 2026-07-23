@@ -852,6 +852,13 @@ case "$BACKEND" in
     # treehouse cd's into the worktree. WT_TARGET carries that stable id for the
     # rename-critical worktree-detection steps below; the persisted window= handle
     # stays $T (the name form), which is safe now that rename is disabled.
+    # $T is deliberately the PLAIN "<session>:<window>" pair, not tmux's
+    # exact-match "=<session>:=<window>" form: it is also this task's identity
+    # key (window_to_task, fm_backend_meta_for_window, the human-facing target
+    # column all read it back). The exact-match pin is applied where the handle
+    # is handed to tmux instead - fm_tmux_pin_target (bin/fm-tmux-lib.sh),
+    # called by every tmux primitive - so records written before that pin
+    # existed, and targets typed on the command line, are covered too.
     WID=$(fm_backend_tmux_create_task "$SES" "$W" "$PROJ_ABS") || exit 1
     WT_TARGET="$WID"
     ;;
