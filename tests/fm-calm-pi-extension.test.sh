@@ -997,7 +997,7 @@ JS
 
 test_hidden_block_geometry_e2e() {
   local project home config sessions session_file snapshot expanded_snapshot calm_off_snapshot restarted_snapshot
-  local version pane skill_line final_line gap i
+  local version skill_line final_line gap i
   if ! command -v pi >/dev/null 2>&1 || ! command -v tmux >/dev/null 2>&1; then
     echo "skip: pi or tmux not found for Pi Calm hidden-block geometry E2E"
     return 0
@@ -1102,6 +1102,22 @@ TS
       "cd '$project' && env FM_HOME='$home' PI_CODING_AGENT_DIR='$config' PI_OFFLINE=1 pi --approve --no-context-files --no-prompt-templates --no-extensions -e ./.pi/extensions/fm-calm.ts -e ./geometry-provider.ts $session_arg; rc=\$?; printf '\nPI_EXIT=%s\n' \"\$rc\"; sleep 20"
   }
 
+  capture_geometry_viewport() {
+    local file=$1
+    tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" >"$file" 2>/dev/null
+  }
+
+  wait_for_geometry_text() {
+    local file=$1 text=$2 attempt=0
+    while [ "$attempt" -lt 120 ]; do
+      capture_geometry_viewport "$file" || true
+      grep -Fq "$text" "$file" 2>/dev/null && return 0
+      sleep 0.05
+      attempt=$((attempt + 1))
+    done
+    return 1
+  }
+
   assert_geometry_gap() {
     local file=$1 label=$2
     skill_line=$(grep -n -m1 '\[skill\] ahoy' "$file" | cut -d: -f1)
@@ -1114,18 +1130,18 @@ TS
   }
 
   start_geometry_pi "--session-dir '$sessions'"
-  wait_for_text "$snapshot" "geometry-provider.ts" \
+  wait_for_geometry_text "$snapshot" "geometry-provider.ts" \
     || fail "Pi Calm hidden-block geometry E2E did not reach the ready composer"
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l '/calm-geometry-e2e'
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" Enter
   sleep 0.1
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l '/skill:ahoy'
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" Enter
-  wait_for_text "$snapshot" "visible row two" \
+  wait_for_geometry_text "$snapshot" "visible row two" \
     || fail "Pi Calm hidden-block geometry E2E did not complete the /skill:ahoy turn"
   i=0
   while [ "$i" -lt 120 ]; do
-    tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" -S - >"$snapshot"
+    capture_geometry_viewport "$snapshot"
     tail -12 "$snapshot" | grep -Fq "Working..." || break
     sleep 0.05
     i=$((i + 1))
@@ -1147,17 +1163,17 @@ TS
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l '/reload'
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" Enter
   sleep 0.3
-  tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" -S - >"$snapshot"
+  capture_geometry_viewport "$snapshot"
   assert_geometry_gap "$snapshot" "reloaded native Calm transcript"
 
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" C-t
-  wait_for_text "$expanded_snapshot" "CALM_GEOMETRY_THINKING_ONE" \
+  wait_for_geometry_text "$expanded_snapshot" "CALM_GEOMETRY_THINKING_ONE" \
     || fail "thinking expansion did not restore Calm-hidden reasoning"
   assert_not_contains "$(cat "$expanded_snapshot")" "probe-one.txt" "thinking expansion restored Calm-hidden tool rows"
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" C-t
   i=0
   while [ "$i" -lt 120 ]; do
-    tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" -S - >"$snapshot"
+    capture_geometry_viewport "$snapshot"
     grep -Fq "CALM_GEOMETRY_THINKING_ONE" "$snapshot" || break
     sleep 0.05
     i=$((i + 1))
@@ -1167,14 +1183,14 @@ TS
 
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l '/calm'
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" Enter
-  wait_for_text "$calm_off_snapshot" "probe-one.txt" \
+  wait_for_geometry_text "$calm_off_snapshot" "probe-one.txt" \
     || fail "turning Calm off did not restore the tool-call row"
   assert_contains "$(cat "$calm_off_snapshot")" "Thinking..." "turning Calm off did not restore collapsed thinking labels"
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l '/calm'
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" Enter
   i=0
   while [ "$i" -lt 120 ]; do
-    tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" -S - >"$snapshot"
+    capture_geometry_viewport "$snapshot"
     if ! grep -Fq "probe-one.txt" "$snapshot" && ! grep -Fq "Thinking..." "$snapshot"; then
       break
     fi
@@ -1188,7 +1204,7 @@ TS
   sleep 0.2
   tmux -L "$TMUX_SOCKET" kill-session -t "$TMUX_SESSION" 2>/dev/null || true
   start_geometry_pi "--session '$session_file'"
-  wait_for_text "$restarted_snapshot" "visible row two" \
+  wait_for_geometry_text "$restarted_snapshot" "visible row two" \
     || fail "Pi did not restore the Calm hidden-block geometry session"
   assert_not_contains "$(cat "$restarted_snapshot")" "Thinking..." "restart restored a collapsed thinking label under Calm"
   assert_not_contains "$(cat "$restarted_snapshot")" "probe-one.txt" "restart restored a tool-call row under Calm"
