@@ -109,7 +109,37 @@ if fm_pi_profile_load "$HOME_DIR/config" "$PROJECT_DIR" >/dev/null 2>&1; then
 fi
 assert_absent "$WRAPPER_MARKER" "raw Pi launch wrapper executed before validation"
 mv "$HOME_DIR/config/pi-delegated-profile.good" "$HOME_DIR/config/pi-delegated-profile"
+fm_pi_profile_load "$HOME_DIR/config" "$PROJECT_DIR" \
+  || fail "controlled profile did not reload after wrapper rejection"
 pass "raw Pi launch wrappers are rejected without execution"
+
+STARTUP_REDIRECT="$TMP_ROOT/project-session-redirect"
+mkdir -p "$PROJECT_DIR/.pi/commands"
+printf '%s\n' 'legacy project command' > "$PROJECT_DIR/.pi/commands/legacy.md"
+printf '{"sessionDir":"%s"}\n' "$STARTUP_REDIRECT" > "$PROJECT_DIR/.pi/settings.json"
+startup_status=0
+(
+  cd "$PROJECT_DIR" \
+    && NODE_OPTIONS="--require=$ROOT/bin/fm-pi-startup-guard.cjs" \
+      NODE_PATH= \
+      PI_PACKAGE_DIR= \
+      PI_CODING_AGENT_DIR="$AGENT_DIR" \
+      PI_CODING_AGENT_SESSION_DIR="$FM_PI_SESSION_DIR" \
+      FM_PI_DELEGATED_PROJECT_DIR="$FM_PI_PROJECT_DIR" \
+      PI_SKIP_VERSION_CHECK=1 \
+      "$PI_COMMAND" --no-approve --no-extensions --no-tools --offline \
+        --model openai-codex/gpt-5.6-sol --thinking medium --print startup-check
+) > "$TMP_ROOT/startup.stdout" 2> "$TMP_ROOT/startup.stderr" || startup_status=$?
+[ "$startup_status" -ne 0 ] || fail "provider-free delegated Pi startup unexpectedly completed a provider request"
+if ! grep -q 'No API key found' "$TMP_ROOT/startup.stdout" \
+  && ! grep -q 'No API key found' "$TMP_ROOT/startup.stderr"; then
+  fail "delegated Pi did not reach the provider-free startup boundary"
+fi
+assert_absent "$STARTUP_REDIRECT" "project sessionDir redirected delegated Pi session storage"
+assert_absent "$PROJECT_DIR/.pi/prompts" "Pi migrated project commands before applying delegated isolation"
+assert_grep 'legacy project command' "$PROJECT_DIR/.pi/commands/legacy.md" "project commands changed during delegated Pi startup"
+[ -d "$FM_PI_SESSION_DIR" ] || fail "delegated Pi did not use its controlled project-specific session directory"
+pass "pre-flag startup cannot read project sessionDir or migrate project commands"
 
 node --input-type=module - "$PI_PACKAGE_DIR" 272000 108800 <<'NODE' \
   || fail "Pi shouldCompact strict-boundary proof failed"
@@ -302,6 +332,8 @@ fi
 
 assert_grep 'no-approve' "$ROOT/bin/fm-spawn.sh" "delegated Pi command does not suppress trusted project overrides"
 assert_grep 'no-extensions' "$ROOT/bin/fm-spawn.sh" "delegated Pi command does not suppress discovered cancellation extensions"
+assert_grep 'fm-pi-startup-guard.cjs' "$ROOT/bin/fm-spawn.sh" "delegated Pi command does not guard pre-flag project startup reads"
+assert_grep 'PI_CODING_AGENT_SESSION_DIR' "$ROOT/bin/fm-spawn.sh" "delegated Pi command does not pin controlled session storage"
 assert_grep 'fm-pi-profile-guard.ts' "$ROOT/bin/fm-spawn.sh" "delegated Pi command does not preserve the explicit profile guard"
 assert_grep 'AgentSession.prototype.setModel = guardedSetModel' "$ROOT/bin/fm-pi-profile-guard.ts" "profile guard does not prevent model selection before mutation"
 assert_grep 'AgentSession.prototype.cycleModel = guardedCycleModel' "$ROOT/bin/fm-pi-profile-guard.ts" "profile guard does not prevent model cycling before mutation"
