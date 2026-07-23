@@ -46,7 +46,7 @@ export default function (pi: ExtensionAPI) {
 	if (!setThinkingLevel.fmDelegatedProfileGuard) {
 		const guardedSetThinkingLevel: typeof AgentSession.prototype.setThinkingLevel & {
 			fmDelegatedProfileGuard?: boolean;
-		} = function (level) {
+		} = function (this: AgentSession, level) {
 			if (level === "medium") setThinkingLevel.call(this, level);
 		};
 		guardedSetThinkingLevel.fmDelegatedProfileGuard = true;
@@ -72,7 +72,7 @@ export default function (pi: ExtensionAPI) {
 	if (!getSettingsList.fmDelegatedProfileGuard) {
 		const guardedGetSettingsList: typeof SettingsSelectorComponent.prototype.getSettingsList & {
 			fmDelegatedProfileGuard?: boolean;
-		} = function () {
+		} = function (this: SettingsSelectorComponent) {
 			const settingsList = getSettingsList.call(this);
 			const mutableSettingsList = settingsList as unknown as {
 				items: Array<{ id: string; currentValue: string; values?: string[] }>;
