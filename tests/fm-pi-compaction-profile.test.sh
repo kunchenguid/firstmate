@@ -124,9 +124,9 @@ cp "$ROOT/bin/fm-pi-startup-guard.cjs" "$STARTUP_GUARD_DIR/fm-pi-startup-guard.c
 startup_status=0
 (
   cd "$PROJECT_DIR" \
-    && NODE_OPTIONS= \
-      NODE_PATH= \
-      PI_PACKAGE_DIR= \
+    && NODE_OPTIONS='' \
+      NODE_PATH='' \
+      PI_PACKAGE_DIR='' \
       PI_CODING_AGENT_DIR="$AGENT_DIR" \
       PI_CODING_AGENT_SESSION_DIR="$FM_PI_SESSION_DIR" \
       FM_PI_DELEGATED_PROJECT_DIR="$FM_PI_PROJECT_DIR" \
