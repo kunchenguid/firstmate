@@ -103,11 +103,14 @@ pi
 
 For Grok, `--trust` is needed once per clone so project hooks and the turn-end guard load; `/hooks-trust` inside Grok works too.
 For Pi, approve the project trust prompt once per clone on first launch so the tracked `.pi/extensions/*.ts` files auto-load.
-Every Pi session starts with calm mode off and tool activity visible; `/calm` is a session-local toggle that hides all seven built-in call shells and text-result rows, including existing rows.
+Every Pi session starts with calm mode off; `/calm` is a session-local conversation-focused transcript toggle.
+While active, it uses Pi's supported presentation APIs to hide the live working row, collapsed thinking labels, all seven built-in tool shells, the Firstmate watcher tool shell, and known Firstmate-injected inputs.
+Every injected input remains in model context and session storage.
+Inputs that ordinarily render as user rows use a TUI-only custom entry so Calm can hide and restore their presentation without changing delivery; the session-start nudge remains on its existing non-displayed custom-message path.
 Toggling off restores ordinary rendering, and `Ctrl+O` expansion behavior stays unchanged.
-Built-in `read` images on image-capable terminals and custom or third-party tool rows remain visible because Pi 0.80.10 does not expose those rows to supported extension renderers.
-The toggle changes only interactive rendering, not tool execution, model context, session storage, exports, or diagnostics.
-The version-scoped feasibility evidence for keeping this feature Pi-only is recorded in [docs/calm-mode-feasibility.md](docs/calm-mode-feasibility.md).
+Tool execution, model context, session storage, diagnostics, and `/export` and `/share` operation remain unchanged; Pi's exporter omits synthetic control inputs because its supported renderer surface cannot preserve their stock user styling without leaving live transcript gaps.
+Pi 0.81.1 still exposes no global transcript filter, so expanded reasoning, its reserved spacing, built-in tool images, user-bash rows, skill and summary rows, status notices, and arbitrary custom-tool or extension rows remain supported-API boundaries.
+The version-scoped feasibility evidence and complete render taxonomy are recorded in [docs/calm-mode-feasibility.md](docs/calm-mode-feasibility.md).
 
 ### Talk to it
 
