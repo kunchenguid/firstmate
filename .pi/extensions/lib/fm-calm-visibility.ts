@@ -3,6 +3,7 @@ import {
   type ExtensionAPI,
   UserMessageComponent,
 } from "@earendil-works/pi-coding-agent";
+import { Container } from "@earendil-works/pi-tui";
 
 export const CALM_TRANSCRIPT_CLASSES = [
   "genuine-user-prompt",
@@ -47,8 +48,8 @@ const FM_INJECT_MARK = "\u2063";
 const FM_FROMFIRST_MARK = "[fm-from-firstmate]\u2063";
 
 export const FIRSTMATE_SYNTHETIC_CONTEXT_TYPE = "firstmate-synthetic-input";
-export const FIRSTMATE_SYNTHETIC_PRESENTATION_TYPE = "firstmate-synthetic-input-presentation";
 export const FIRSTMATE_CALM_PRESENTATION_EVENT = "firstmate:calm-presentation";
+export const FIRSTMATE_PI_LAUNCH_BRIEF_ENV = "FM_FIRSTMATE_PI_LAUNCH_BRIEF";
 
 export type CalmPresentationState = {
   active: boolean;
@@ -60,12 +61,8 @@ export type FirstmateSyntheticKind =
   | "watcher"
   | "turn-end-guard"
   | "away-supervisor"
-  | "from-firstmate";
-
-type FirstmateSyntheticPresentation = {
-  content: string;
-  kind: FirstmateSyntheticKind;
-};
+  | "from-firstmate"
+  | "launch-brief";
 
 type SyntheticDeliveryOptions = {
   deliverAs?: "steer" | "followUp" | "nextTurn";
@@ -95,7 +92,11 @@ export function calmPresentationHides(itemClass: CalmTranscriptClass): boolean {
   return calm && !stockExportRendering && !calmTranscriptClassIsVisible(itemClass);
 }
 
-export function classifyFirstmateSyntheticInput(content: string): FirstmateSyntheticKind | undefined {
+export function classifyFirstmateSyntheticInput(
+  content: string,
+  launchBriefContent?: string,
+): FirstmateSyntheticKind | undefined {
+  if (launchBriefContent !== undefined && content === launchBriefContent) return "launch-brief";
   if (content === FIRSTMATE_SESSIONSTART_NUDGE) return "session-start";
   if (content.startsWith(FM_INJECT_MARK)) return "away-supervisor";
   if (content.startsWith(FM_FROMFIRST_MARK) && content.length > FM_FROMFIRST_MARK.length) {
@@ -118,13 +119,18 @@ export function classifyFirstmateSyntheticInput(content: string): FirstmateSynth
 }
 
 export function registerFirstmateSyntheticPresentation(pi: ExtensionAPI): void {
-  pi.registerEntryRenderer<FirstmateSyntheticPresentation>(
-    FIRSTMATE_SYNTHETIC_PRESENTATION_TYPE,
-    (entry) => {
-      if (calmPresentationHides("synthetic-user")) return undefined;
-      const data = entry.data;
-      if (!data || typeof data.content !== "string") return undefined;
-      return new UserMessageComponent(data.content, getMarkdownTheme());
+  pi.registerMessageRenderer(
+    FIRSTMATE_SYNTHETIC_CONTEXT_TYPE,
+    (message) => {
+      if (calmPresentationHides("synthetic-user")) return new Container();
+      const content =
+        typeof message.content === "string"
+          ? message.content
+          : message.content
+              .filter((item) => item.type === "text")
+              .map((item) => item.text)
+              .join("\n");
+      return new UserMessageComponent(content, getMarkdownTheme());
     },
   );
 }
@@ -135,15 +141,11 @@ export function deliverFirstmateSyntheticInput(
   kind: FirstmateSyntheticKind,
   options: SyntheticDeliveryOptions = {},
 ): void {
-  pi.appendEntry<FirstmateSyntheticPresentation>(FIRSTMATE_SYNTHETIC_PRESENTATION_TYPE, {
-    content,
-    kind,
-  });
   pi.sendMessage(
     {
       customType: FIRSTMATE_SYNTHETIC_CONTEXT_TYPE,
       content,
-      display: false,
+      display: true,
       details: { kind },
     },
     options,

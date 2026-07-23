@@ -5,6 +5,7 @@
 // ExtensionUIContext.setToolsExpanded(), setWorkingVisible(), and
 // setHiddenThinkingLabel(). The focused tests pin those assumptions. Pi still
 // exposes no global renderer for built-in message rows or arbitrary custom tools.
+import { readFileSync } from "node:fs";
 import type {
   ExtensionAPI,
   ToolDefinition,
@@ -27,6 +28,7 @@ import {
   classifyFirstmateSyntheticInput,
   deliverFirstmateSyntheticInput,
   FIRSTMATE_CALM_PRESENTATION_EVENT,
+  FIRSTMATE_PI_LAUNCH_BRIEF_ENV,
   registerFirstmateSyntheticPresentation,
   setCalmPresentation,
   setCalmStockExportRendering,
@@ -60,7 +62,17 @@ type StandardShellState = {
 
 export default function (pi: ExtensionAPI) {
   let exportRendering = false;
+  let launchBriefContent: string | undefined;
   let removeTerminalInputHandler: (() => void) | undefined;
+
+  const launchBriefPath = process.env[FIRSTMATE_PI_LAUNCH_BRIEF_ENV];
+  if (launchBriefPath) {
+    try {
+      launchBriefContent = readFileSync(launchBriefPath, "utf8").replace(/\n+$/, "");
+    } catch {
+      launchBriefContent = undefined;
+    }
+  }
 
   const publishPresentationState = (): void => {
     pi.events.emit(FIRSTMATE_CALM_PRESENTATION_EVENT, {
@@ -181,8 +193,9 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("input", (event) => {
     if (event.images && event.images.length > 0) return { action: "continue" };
-    const kind = classifyFirstmateSyntheticInput(event.text);
+    const kind = classifyFirstmateSyntheticInput(event.text, launchBriefContent);
     if (!kind) return { action: "continue" };
+    if (kind === "launch-brief") launchBriefContent = undefined;
 
     deliverFirstmateSyntheticInput(pi, event.text, kind, {
       deliverAs: event.streamingBehavior ?? "followUp",

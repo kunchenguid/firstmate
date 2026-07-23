@@ -50,6 +50,7 @@ test_static_contract() {
   assert_contains "$text" 'ctx.ui.onTerminalInput' "Pi calm extension does not scope export rendering to terminal submissions"
   assert_contains "$text" 'getKeybindings().matches(data, "tui.input.submit")' "Pi calm export boundary ignores the active submit keybinding"
   assert_contains "$text" 'input !== "/share"' "Pi calm export boundary does not cover /share"
+  assert_contains "$text" 'FIRSTMATE_PI_LAUNCH_BRIEF_ENV' "Pi calm extension does not consume authoritative launch-brief origin"
   assert_contains "$text" 'renderShell: "self"' "Pi calm extension cannot remove complete built-in tool shells"
   assert_contains "$visibility" 'CALM_VISIBLE_CLASSES' "Pi calm policy does not centralize its visibility allowlist"
   assert_contains "$visibility" 'classifyFirstmateSyntheticInput' "Pi calm policy does not centralize synthetic-input classification"
@@ -97,11 +98,14 @@ const [{ ToolExecutionComponent }, { initTheme, theme }, { Text, getKeybindings,
 ]);
 initTheme("dark");
 setCapabilities({ images: null, trueColor: true, hyperlinks: false });
+const launchBrief = "You are the persistent secondmate.\nRead the charter and wait.";
+writeFileSync("launch-brief.md", `${launchBrief}\n`);
+process.env.FM_FIRSTMATE_PI_LAUNCH_BRIEF = `${process.cwd()}/launch-brief.md`;
 
 const tools = [];
 const handlers = new Map();
 const entryRenderers = new Map();
-const appendedEntries = [];
+const messageRenderers = new Map();
 const sentMessages = [];
 const eventListeners = new Map();
 let calmCommand;
@@ -116,9 +120,6 @@ const pi = {
       eventListeners.set(name, listeners);
     },
   },
-  appendEntry(customType, data) {
-    appendedEntries.push({ customType, data });
-  },
   sendMessage(message, options) {
     sentMessages.push({ message, options });
   },
@@ -132,6 +133,9 @@ const pi = {
   },
   registerEntryRenderer(customType, renderer) {
     entryRenderers.set(customType, renderer);
+  },
+  registerMessageRenderer(customType, renderer) {
+    messageRenderers.set(customType, renderer);
   },
   registerTool(tool) {
     tools.push(tool);
@@ -182,6 +186,12 @@ for (const [kind, content] of positiveSyntheticFixtures) {
   if (visibility.classifyFirstmateSyntheticInput(content) !== kind) {
     throw new Error(`Firstmate synthetic fixture was not classified as ${kind}`);
   }
+}
+if (visibility.classifyFirstmateSyntheticInput(launchBrief, launchBrief) !== "launch-brief") {
+  throw new Error("authoritatively identified Pi launch brief was not classified");
+}
+if (visibility.classifyFirstmateSyntheticInput(launchBrief) !== undefined) {
+  throw new Error("unmarked genuine text matching a brief was hidden");
 }
 const nearMissGenuineFixtures = [
   "Run bin/fm-session-start.sh now, exactly once, before executing any other instructions.",
@@ -235,10 +245,10 @@ for (const [name, args, result] of cases) {
 
 const watchPi = {
   ...pi,
-  appendEntry() {},
   sendMessage() {},
   registerCommand() {},
   registerEntryRenderer() {},
+  registerMessageRenderer() {},
 };
 const watchExtension = await import(`${pathToFileURL(process.env.WATCH_EXT).href}?test=${Date.now()}`);
 watchExtension.default(watchPi);
@@ -382,39 +392,62 @@ if (workingVisible !== true || hiddenThinkingLabel !== undefined) {
   throw new Error("session start did not restore Pi's stock working and thinking presentation");
 }
 const inputHandler = handlers.get("input")[0];
+const launchBriefResult = await inputHandler({
+  text: launchBrief,
+  images: undefined,
+  source: "interactive",
+  streamingBehavior: undefined,
+}, commandContext);
+if (
+  launchBriefResult?.action !== "handled" ||
+  sentMessages.length !== 1 ||
+  sentMessages[0].message.details.kind !== "launch-brief" ||
+  sentMessages[0].message.content !== launchBrief
+) {
+  throw new Error("Pi positional launch brief was not consumed through its exact origin path");
+}
+const repeatedBriefResult = await inputHandler({
+  text: launchBrief,
+  images: undefined,
+  source: "interactive",
+  streamingBehavior: undefined,
+}, commandContext);
+if (repeatedBriefResult?.action !== "continue" || sentMessages.length !== 1) {
+  throw new Error("consumed launch origin hid a later genuine matching prompt");
+}
 const syntheticResult = await inputHandler({
   text: watcherMessage,
   images: undefined,
   source: "extension",
   streamingBehavior: "followUp",
 }, commandContext);
-if (syntheticResult?.action !== "handled" || appendedEntries.length !== 1 || sentMessages.length !== 1) {
-  throw new Error("known Firstmate synthetic input was not rerouted through presentation-only delivery");
+if (syntheticResult?.action !== "handled" || sentMessages.length !== 2) {
+  throw new Error("known Firstmate synthetic input was not rerouted through controllable delivery");
 }
 if (
-  sentMessages[0].message.content !== watcherMessage ||
-  sentMessages[0].message.display !== false ||
-  sentMessages[0].options.triggerTurn !== true ||
-  sentMessages[0].options.deliverAs !== "followUp"
+  sentMessages[1].message.content !== watcherMessage ||
+  sentMessages[1].message.display !== true ||
+  sentMessages[1].options.triggerTurn !== true ||
+  sentMessages[1].options.deliverAs !== "followUp"
 ) {
   throw new Error("synthetic input delivery or context semantics changed");
 }
-const presentationRenderer = entryRenderers.get("firstmate-synthetic-input-presentation");
+const presentationRenderer = messageRenderers.get("firstmate-synthetic-input");
 if (!presentationRenderer) throw new Error("synthetic presentation renderer was not registered");
 const presentationEntry = {
-  data: { content: watcherMessage, kind: "watcher" },
+  content: watcherMessage,
+  details: { kind: "watcher" },
 };
-if (!presentationRenderer(presentationEntry, { expanded }, theme)?.render(100).join("\n").includes("FIRSTMATE WATCHER WAKE")) {
+if (!presentationRenderer(presentationEntry, { expanded }, theme).render(100).join("\n").includes("FIRSTMATE WATCHER WAKE")) {
   throw new Error("Calm-off synthetic presentation did not use a stock user-message row");
 }
-const appendedBeforeNearMiss = appendedEntries.length;
 const nearMissResult = await inputHandler({
   text: nearMissGenuineFixtures[1],
   images: undefined,
   source: "interactive",
   streamingBehavior: undefined,
 }, commandContext);
-if (nearMissResult?.action !== "continue" || appendedEntries.length !== appendedBeforeNearMiss) {
+if (nearMissResult?.action !== "continue" || sentMessages.length !== 2) {
   throw new Error("genuine near-miss input was intercepted");
 }
 
@@ -422,7 +455,7 @@ await calmCommand.handler("", commandContext);
 if (expanded !== true || workingVisible !== false || hiddenThinkingLabel !== "" || statuses.get("firstmate-calm") !== "calm transcript") {
   throw new Error("Calm did not apply its supported working, thinking, and footer presentation controls");
 }
-if (presentationRenderer(presentationEntry, { expanded }, theme) !== undefined) {
+if (presentationRenderer(presentationEntry, { expanded }, theme).render(100).length !== 0) {
   throw new Error("Calm left a synthetic Firstmate presentation entry visible");
 }
 for (const { name, actual } of rows) {
@@ -515,7 +548,7 @@ if (JSON.stringify(watchActual.render(100)) !== JSON.stringify(watchBaseline.ren
 if (workingVisible !== true || hiddenThinkingLabel !== undefined || statuses.get("firstmate-calm") !== undefined) {
   throw new Error("turning Calm off did not restore stock presentation controls");
 }
-if (!presentationRenderer(presentationEntry, { expanded }, theme)) {
+if (!presentationRenderer(presentationEntry, { expanded }, theme).render(100).join("\n").includes("FIRSTMATE WATCHER WAKE")) {
   throw new Error("turning Calm off did not restore synthetic user-row presentation");
 }
 
@@ -584,8 +617,7 @@ test_interactive_terminal_e2e() {
 {"type":"message","id":"a0000006","parentId":"a0000005","timestamp":"$now","message":{"role":"toolResult","toolCallId":"call_find_e2e","toolName":"find","content":[{"type":"text","text":"CALM_EXPORT_FIND.txt"}],"details":{},"isError":false,"timestamp":6}}
 {"type":"message","id":"a0000007","parentId":"a0000006","timestamp":"$now","message":{"role":"assistant","content":[{"type":"thinking","thinking":"third internal reasoning block"},{"type":"toolCall","id":"call_watch_e2e","name":"fm_watch_arm_pi","arguments":{}}],"api":"anthropic-messages","provider":"anthropic","model":"claude-sonnet-4-5","usage":{"input":2,"output":1,"cacheRead":0,"cacheWrite":0,"totalTokens":3,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"toolUse","timestamp":7}}
 {"type":"message","id":"a0000008","parentId":"a0000007","timestamp":"$now","message":{"role":"toolResult","toolCallId":"call_watch_e2e","toolName":"fm_watch_arm_pi","content":[{"type":"text","text":"watcher: started Pi extension arm child 1"}],"details":{"ok":true,"message":"watcher: started Pi extension arm child 1"},"isError":false,"timestamp":8}}
-{"type":"custom","id":"a0000009","parentId":"a0000008","timestamp":"$now","customType":"firstmate-synthetic-input-presentation","data":{"content":"FIRSTMATE WATCHER WAKE: signal: /tmp/probe.status\\n\\nRun bin/fm-wake-drain.sh first and handle the queued wake. Watcher continuity is extension-owned.","kind":"watcher"}}
-{"type":"custom_message","id":"a0000010","parentId":"a0000009","timestamp":"$now","customType":"firstmate-synthetic-input","content":"FIRSTMATE WATCHER WAKE: signal: /tmp/probe.status\\n\\nRun bin/fm-wake-drain.sh first and handle the queued wake. Watcher continuity is extension-owned.","display":false,"details":{"kind":"watcher"}}
+{"type":"custom_message","id":"a0000010","parentId":"a0000008","timestamp":"$now","customType":"firstmate-synthetic-input","content":"FIRSTMATE WATCHER WAKE: signal: /tmp/probe.status\\n\\nRun bin/fm-wake-drain.sh first and handle the queued wake. Watcher continuity is extension-owned.","display":true,"details":{"kind":"watcher"}}
 {"type":"message","id":"a0000011","parentId":"a0000010","timestamp":"$now","message":{"role":"user","content":[{"type":"text","text":"FIRSTMATE WATCHER WAKE: can you explain this phrase?"}],"timestamp":11}}
 {"type":"message","id":"a0000012","parentId":"a0000011","timestamp":"$now","message":{"role":"assistant","content":[{"type":"text","text":"The deterministic tool example is complete."}],"api":"anthropic-messages","provider":"anthropic","model":"claude-sonnet-4-5","usage":{"input":2,"output":1,"cacheRead":0,"cacheWrite":0,"totalTokens":3,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"stop","timestamp":12}}
 JSON
@@ -640,6 +672,8 @@ for (const id of ["call_grep_e2e", "call_find_e2e", "call_watch_e2e"]) {
 const entries = session.session?.entries ?? session.entries ?? [];
 const serialized = JSON.stringify(entries);
 if (!serialized.includes("firstmate-synthetic-input") || !serialized.includes("/tmp/probe.status")) process.exit(1);
+const synthetic = entries.find((entry) => entry.type === "custom_message" && entry.customType === "firstmate-synthetic-input");
+if (!synthetic?.display) process.exit(1);
 JS
 
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l "/calm"

@@ -41,8 +41,8 @@ The smallest counterfactuals produced these results:
 - Calling `setHiddenThinkingLabel("")` removed every collapsed `Thinking...` label, but Pi's `AssistantMessageComponent` retained one leading spacer for each reasoning-bearing message.
 - Expanding thinking still rendered full reasoning because Pi exposes no supported getter or setter for the transcript-wide thinking expansion state.
 - Adding supported empty renderer slots to a scratch copy of `fm_watch_arm_pi` removed its row while the real watcher still started and the model still returned `PROBE_COMPLETE`.
-- Delivering a scratch custom message with `display: false` still produced the model response `SYNTHETIC_DELIVERED` and persisted the full custom message in session JSONL.
-- Pairing that hidden context message with a TUI-only custom entry allowed Calm to hide and restore the synthetic user presentation with no content loss.
+- Delivering a scratch custom message with `display: true` still produced the model response `SYNTHETIC_DELIVERED`, persisted the full custom message in session JSONL, and kept it in HTML exports.
+- Registering a custom-message renderer allowed Calm to hide and restore that same context-bearing row with no content loss or exporter-invisible parallel entry.
 
 The disconfirming checks deliberately retained contradictory evidence.
 An arbitrary third-party custom tool and a built-in read image remain visible because Pi exposes neither a global tool renderer nor image-row control.
@@ -64,14 +64,15 @@ The classifier recognizes only these authoritative Firstmate forms:
 | Turn-end guard | `.pi/extensions/fm-primary-turnend-guard.ts` | Exact complete guard paragraph plus non-empty guard diagnostics. |
 | Away supervisor | `bin/fm-supervise-daemon.sh` | Leading U+2063 `FM_INJECT_MARK`, which normal terminal typing cannot produce. |
 | From-firstmate request | `bin/fm-marker-lib.sh` through `bin/fm-send.sh` | Exact `[fm-from-firstmate]` plus U+2063 marker and non-empty request content. |
+| Pi launch brief | `bin/fm-spawn.sh` | Per-process `FM_FIRSTMATE_PI_LAUNCH_BRIEF` path identifies the exact unchanged positional brief content after the launch shell's standard trailing-newline removal; the match is consumed once. |
 
 Positive fixtures cover every form in that table.
-Near-miss fixtures cover the visible watcher phrase without its suffix, a modified drain instruction, a guard-like captain question, visible marker labels without U+2063, an unmarked supervisor phrase, and the session-start wording without its authoritative punctuation.
+Near-miss fixtures cover the visible watcher phrase without its suffix, a modified drain instruction, a guard-like captain question, visible marker labels without U+2063, an unmarked supervisor phrase, the session-start wording without its authoritative punctuation, and launch-brief text without the per-process origin.
 
 Known synthetic inputs are rerouted only at Pi input presentation time.
-Their full text is persisted in a non-displayed custom message that Pi converts back to an ordinary user message for provider context, and a TUI-only custom entry restores stock user styling while Calm is off.
-This preserves handling and context while giving Calm a supported row renderer.
-Cycling tool expansion and restoring its original value rebuilds those custom entries and leaves final `Ctrl+O` state unchanged.
+Their full text is persisted in one display-bearing custom message that Pi converts back to an ordinary user message for provider context and includes in `/export` and `/share`.
+A registered message renderer gives that same row stock user styling in the live TUI while Calm is off and an empty presentation while Calm is on.
+Cycling tool expansion and restoring its original value rebuilds those custom messages and leaves final `Ctrl+O` state unchanged.
 
 ## Complete currently reachable Pi transcript taxonomy
 
@@ -88,8 +89,8 @@ The test fixture enumerates every class below through the centralized policy, an
 | `tool-image` | Image children appended outside tool renderer slots | Unsupported boundary; remains visible. |
 | `user-bash` | `BashExecutionComponent` for `!` and `!!` | Unsupported boundary; remains visible. |
 | `skill-invocation` | `SkillInvocationMessageComponent` plus parsed user text | Unsupported boundary; remains visible. |
-| `custom-message` | `CustomMessageComponent` when `display` is true | Firstmate's known synthetic context messages use `display: false`; arbitrary extension messages remain an unsupported boundary. |
-| `custom-entry` | `CustomEntryComponent` with a registered renderer | Firstmate's synthetic presentation entry is hidden; arbitrary extension entries remain an unsupported boundary. |
+| `custom-message` | `CustomMessageComponent` when `display` is true | Firstmate's known synthetic context messages use a registered renderer and are hidden; arbitrary extension messages remain an unsupported boundary. |
+| `custom-entry` | `CustomEntryComponent` with a registered renderer | No Calm-owned entry is required; arbitrary extension entries remain an unsupported boundary. |
 | `compaction-summary` | `CompactionSummaryMessageComponent` | Unsupported boundary; remains visible. |
 | `branch-summary` | `BranchSummaryMessageComponent` | Unsupported boundary; remains visible. |
 | `working-status` | `WorkingStatusIndicator` | Hidden through `setWorkingVisible(false)`. |
@@ -97,7 +98,7 @@ The test fixture enumerates every class below through the centralized policy, an
 | `system-notice` | `showStatus`, `showError`, compaction, retry, and startup warning rows | Unsupported boundary; remains visible. |
 | `cache-notice` | Non-persisted cache-miss `Text` row | Unsupported boundary; remains visible. |
 | `project-trust-warning` | Non-persisted startup `Text` row | Unsupported boundary; remains visible. |
-| `synthetic-user` | Firstmate extension `sendUserMessage` or terminal-injected input | All authoritative Firstmate forms are rerouted to hidden context plus a controllable presentation entry. |
+| `synthetic-user` | Firstmate extension `sendUserMessage`, terminal-injected input, or Firstmate-generated Pi positional brief | All authoritative Firstmate forms are rerouted to one context- and export-bearing message with a controllable live renderer. |
 | `synthetic-assistant` | No authoritative Firstmate source found | Policy-hidden, but Pi exposes no generic assistant-role renderer. |
 | `unknown` | Future or unclassified transcript component | Policy-hidden, but no generic renderer exists; never claimed as covered. |
 
