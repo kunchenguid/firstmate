@@ -116,6 +116,8 @@ A bare U+2063 marker did not change the wrong response.
 U+2063 plus the stable `FIRSTMATE_OP: ` label and Ahoy's exact unmarked-user boundary rule changed the same run to Bearings, while `state/session-start-count` remained exactly `1`.
 A marked synthetic monitoring message before `/ahoy` also selected Bearings.
 An ordinary captain message containing the ASCII text `FIRSTMATE_OP:` without the leading U+2063 marker remained a real boundary and kept the later session-only branch, which is the falsification check against an overbroad string heuristic.
+Rollout compatibility additionally excludes the exact pre-marker session-start payload and user-role away-mode messages beginning with the legacy bare U+2063 marker.
+Messages that merely quote, mention, prefix, or extend the old session-start payload remain genuine captain boundaries.
 
 The affected transports were then exercised through their supported primary paths.
 Pi 0.81.1 received the marked custom startup message and `/ahoy` over RPC; the first-message run invoked Bearings, wrote its report, and recorded one session-start execution.
@@ -133,5 +135,5 @@ A fresh Grok run was attempted on 2026-07-22 but stopped at `402 Payment Require
 `tests/fm-sessionstart-nudge.test.sh` proves wrapper silence for both gate signals, an unmarked linked worktree, a missing state directory, and an already-owned lock.
 It proves exact U+2063 `FIRSTMATE_OP:`-prefixed one-line output for a plain primary and a marked linked secondmate primary.
 It also verifies tracked wrapper registration for Claude, Codex, OpenCode, Pi, and Grok.
-`tests/fm-captain-translation-contract.test.sh` proves Ahoy's exact unmarked-user boundary and the shared marker on every supported user-role operational injection.
+`tests/fm-captain-translation-contract.test.sh` proves Ahoy's current marker rule, narrow legacy compatibility exclusions, genuine captain-message near misses, and the shared marker on every supported user-role operational injection.
 `tests/fm-turnend-guard.test.sh`, `tests/fm-pi-watch-extension.test.sh`, and `tests/fm-daemon.test.sh` cover marked guard, monitoring, and away-mode delivery without changing their behavior.

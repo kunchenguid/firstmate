@@ -162,8 +162,14 @@ test_ahoy_owns_only_the_visible_session_recap() {
     "first-message fallback does not delegate to Bearings by relative pointer"
   assert_grep 'If no prior real captain message exists' "$AHOY" \
     "ahoy does not limit Bearings fallback to the first real captain message"
-  assert_grep 'A captain boundary is only an ordinary user-role message that does not begin with the U+2063 `FIRSTMATE_OP:` injection prefix.' "$AHOY" \
+  assert_grep 'A captain boundary is an ordinary user-role message unless it matches one of the narrow operational exclusions below.' "$AHOY" \
     "ahoy lacks an explicit captain-authored boundary rule"
+  assert_grep 'Exclude messages that begin with U+2063, including both legacy bare-marker away-mode injections and the current U+2063 `FIRSTMATE_OP:` injection prefix.' "$AHOY" \
+    "ahoy does not exclude legacy bare-marker operational injections"
+  assert_grep 'Exclude the exact legacy unmarked session-start payload ``Run `bin/fm-session-start.sh` now, exactly once, before executing any other instructions.``' "$AHOY" \
+    "ahoy does not exclude the legacy unmarked session-start payload"
+  assert_grep 'Do not exclude an ordinary captain message merely because it contains ASCII `FIRSTMATE_OP:` without a leading U+2063, quotes or mentions the legacy session-start payload, or adds any text to that payload.' "$AHOY" \
+    "ahoy lacks genuine near-miss protection for ordinary captain messages"
   assert_grep 'System, developer, tool, watcher, guard, away-mode, and other injected operational messages are not captain messages.' "$AHOY" \
     "ahoy incorrectly treats synthetic operational messages as captain messages"
   assert_grep 'The normal recap branch is session-history-only.' "$AHOY" \
