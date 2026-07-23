@@ -110,14 +110,10 @@ assert.equal(wsManifest.version, lock.packages["node_modules/ws"].version);
 NODE
 
 for package_name in pi-coding-agent pi-agent-core pi-ai; do
-  case "$package_name" in
-    pi-coding-agent)
-      peer="$runtime/node_modules/@earendil-works/$package_name"
-      ;;
-    *)
-      peer="$runtime/node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/$package_name"
-      ;;
-  esac
+  peer="$runtime/node_modules/@earendil-works/$package_name"
+  if [ ! -d "$peer" ]; then
+    peer="$runtime/node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/$package_name"
+  fi
   [ -d "$peer" ] || fail "isolated Pi is missing peer package @earendil-works/$package_name"
   mkdir -p "$package_dir/node_modules/@earendil-works"
   ln -s "$peer" "$package_dir/node_modules/@earendil-works/$package_name"
