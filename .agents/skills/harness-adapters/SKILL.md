@@ -290,7 +290,7 @@ Firstmate does not install a Kimi turn-end hook yet because safely and idempoten
 Do not ship a partial config rewriter.
 Kimi crewmates therefore rely on the watcher busy signatures and stale-pane detection until a guarded global hook installer has its own live safety proof.
 
-The dated commands and exact output excerpts for these facts are in [`docs/kimi-backend.md`](../../../docs/kimi-backend.md).
+The dated commands and exact output excerpts for these facts are in [`docs/kimi-harness.md`](../../../docs/kimi-harness.md).
 
 ## grok (VERIFIED 2026-06-29, grok 0.2.73; slash-submit re-verified 2026-07-03 on 0.2.82; reasoning-effort ceiling re-verified 2026-07-13 on 0.2.99; exit paths re-verified 2026-07-19 on grok 0.2.103)
 
