@@ -32,9 +32,10 @@
 # it is retried with a bounded wait and removed only when provably stale; see
 # fetch_with_packed_refs_lock_guard and the FM_FLEET_SYNC_PACKED_REFS_LOCK_* knobs.
 # Usage: fm-fleet-sync.sh [<project-dir-or-name>]
-# The single-project form accepts either a path (absolute, or relative to the
-# caller's cwd) or a bare "<name>"/"projects/<name>" form, resolved against
-# this home's projects dir ($FM_HOME/projects, or $FM_PROJECTS_OVERRIDE).
+# The single-project form accepts an exact Git repository root (absolute, or
+# relative to the caller's cwd) or a bare "<name>"/"projects/<name>" form,
+# resolved against this home's projects dir ($FM_HOME/projects, or
+# $FM_PROJECTS_OVERRIDE).
 # Delivery mode lookup always uses the checkout directory's basename, so a
 # discovered parallel clone still honors the registry entry for that project.
 # Bare names and "projects/<name>" forms prefer this home's projects dir before
@@ -141,6 +142,15 @@ resolve_project_arg() {
 canonical_dir() {
   [ -d "$1" ] || return 1
   (cd "$1" 2>/dev/null && pwd -P)
+}
+
+exact_git_root() {
+  local candidate=$1 canonical top canonical_top
+  canonical=$(canonical_dir "$candidate") || return 1
+  top=$(git -C "$canonical" rev-parse --show-toplevel 2>/dev/null) || return 1
+  canonical_top=$(canonical_dir "$top") || return 1
+  [ "$canonical" = "$canonical_top" ] || return 1
+  printf '%s\n' "$canonical"
 }
 
 LIVE_DEFAULT_BRANCH=
@@ -373,7 +383,6 @@ report_stuck() {
 sync_project() (
   PROJ=$1
   label=$(project_label)
-  registry_name=$(basename "$PROJ")
 
   if [ ! -d "$PROJ" ]; then
     echo "$label: skipped: not a directory"
@@ -383,6 +392,13 @@ sync_project() (
     echo "$label: skipped: not a git repo"
     return 0
   fi
+  canonical=$(exact_git_root "$PROJ") || {
+    echo "$label: skipped: target must be an exact canonical Git repository root"
+    return 1
+  }
+  PROJ=$canonical
+  label=$(project_label)
+  registry_name=$(basename "$PROJ")
   mode_line=$("$FM_ROOT/bin/fm-project-mode.sh" "$registry_name" 2>/dev/null || echo "no-mistakes off")
   mode=${mode_line%% *}
   if [ "$mode" = "local-only" ]; then
@@ -543,12 +559,17 @@ sync_project() (
 )
 
 run_sync_project_bounded() (
-  local project=$1 status label checkout_lock lock_owner_dir lock_owner_pid cleanup_status
+  local project=$1 status label checkout_lock lock_owner_dir lock_owner_pid cleanup_status canonical
   if [ ! -d "$project" ] \
     || ! git -C "$project" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     sync_project "$project"
     return
   fi
+  canonical=$(exact_git_root "$project") || {
+    printf '%s: skipped: target must be an exact canonical Git repository root\n' "$project"
+    return 1
+  }
+  project=$canonical
   PROJ=$project
   label=$(project_label)
   if ! fm_checkout_lock_prepare "$CHECKOUT_LOCK_ROOT"; then

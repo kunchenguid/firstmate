@@ -63,6 +63,65 @@ export REAL_GIT_FOR_TEST
 REAL_STAT_FOR_TEST=$(command -v stat)
 export REAL_STAT_FOR_TEST
 
+write_treehouse_lease() {
+  local worktree=$1 holder=$2 slot pool state
+  slot=$(cd "$(dirname "$worktree")" && pwd -P)
+  pool=$(cd "$(dirname "$slot")" && pwd -P)
+  state="$pool/treehouse-state.json"
+  python3 - "$state" "$(cd "$worktree" && pwd -P)" "$holder" <<'PY'
+import json
+import sys
+
+state, path, holder = sys.argv[1:]
+with open(state, "w", encoding="utf-8") as stream:
+    json.dump(
+        {
+            "worktrees": [
+                {
+                    "name": "1",
+                    "path": path,
+                    "leased": True,
+                    "lease_holder": holder,
+                }
+            ]
+        },
+        stream,
+    )
+PY
+}
+
+prepare_secondmate_home_fixture() {
+  local case_dir=$1 id=${2:-task-x1} root_default default root_tip exclude
+  mkdir -p "$case_dir/wt/data" "$case_dir/wt/state" "$case_dir/wt/config" "$case_dir/wt/projects"
+  printf '%s\n' "$id" > "$case_dir/wt/.fm-secondmate-home"
+  root_default=$(git -C "$ROOT" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || printf 'origin/main')
+  default=${root_default#origin/}
+  root_tip=$(git -C "$ROOT" rev-parse "$root_default")
+  git -C "$case_dir/project" fetch --quiet "$ROOT" "$root_tip"
+  git -C "$case_dir/project" checkout --quiet --detach
+  git -C "$case_dir/wt" checkout --quiet -B "$default" "$root_tip"
+  git -C "$case_dir/project" branch -D fm/task-x1 >/dev/null 2>&1 || true
+  git -C "$case_dir/project" remote set-url origin "$ROOT"
+  git -C "$case_dir/project" update-ref "refs/remotes/origin/$default" "$root_tip"
+  git -C "$case_dir/project" symbolic-ref refs/remotes/origin/HEAD "refs/remotes/origin/$default"
+  exclude=$(git -C "$case_dir/wt" rev-parse --git-path info/exclude)
+  printf '%s\n' '.fm-secondmate-home' '/data/' '/state/' '/config/' '/projects/' >> "$exclude"
+  cat > "$case_dir/fakebin/git" <<'SH'
+#!/usr/bin/env bash
+case " $* " in
+  *" ls-remote --symref origin HEAD "*|*" ls-remote --symref origin HEAD")
+    remote_head=$("$REAL_GIT_FOR_TEST" -C "$FM_FAKE_FIRSTMATE_SOURCE" \
+      symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || printf 'origin/main')
+    remote_tip=$("$REAL_GIT_FOR_TEST" -C "$FM_FAKE_FIRSTMATE_SOURCE" rev-parse "$remote_head")
+    printf 'ref: refs/heads/%s\tHEAD\n%s\tHEAD\n' "${remote_head#origin/}" "$remote_tip"
+    exit 0
+    ;;
+esac
+exec "$REAL_GIT_FOR_TEST" "$@"
+SH
+  chmod +x "$case_dir/fakebin/git"
+}
+
 # Build a fresh sandbox for one test case. Sets up:
 #   $CASE/state/        - firstmate state dir (with a fresh watcher beacon)
 #   $CASE/fakebin/      - mocks for treehouse, tmux (PATH-prepended by caller)
@@ -157,6 +216,7 @@ SH
   git -C "$case_dir/project" remote set-head origin main 2>/dev/null || true
   # Add a worktree on a fresh task branch; that branch is where the crewmate commits.
   git -C "$case_dir/project" worktree add -q -b fm/task-x1 "$case_dir/wt" main
+  write_treehouse_lease "$case_dir/wt" firstmate-task-x1
 
   # Fresh watcher beacon so fm-guard stays quiet.
   touch "$case_dir/state/.last-watcher-beat"
@@ -603,6 +663,7 @@ run_teardown() {
   FM_CHECKOUT_REFRESH_LOCK_ROOT="${FM_CHECKOUT_REFRESH_LOCK_ROOT:-$case_dir/checkout-locks}" \
   FM_EXPECT_CHECKOUT_LOCK="${FM_EXPECT_CHECKOUT_LOCK:-}" \
   FM_EXPECT_CHECKOUT_LOCK_MARKER="${FM_EXPECT_CHECKOUT_LOCK_MARKER:-}" \
+  FM_FAKE_FIRSTMATE_SOURCE="${FM_FAKE_FIRSTMATE_SOURCE:-$ROOT}" \
   FM_ACCOUNT_ROUTING_TEST_LAB=firstmate-account-routing-test-lab-v1 \
   PATH="$case_dir/fakebin:$PATH" \
     "$TEARDOWN" task-x1 "$@"
@@ -1901,8 +1962,7 @@ test_managed_child_teardown_locks_generation_before_snapshot() {
   kill_started="$case_dir/kill-started"
   allow_kill="$case_dir/allow-kill"
   : > "$af_log"
-  mkdir -p "$case_dir/wt/data" "$case_dir/wt/state" "$case_dir/wt/config" "$case_dir/wt/projects"
-  printf '%s\n' task-x1 > "$case_dir/wt/.fm-secondmate-home"
+  prepare_secondmate_home_fixture "$case_dir"
   fm_write_meta "$case_dir/state/task-x1.meta" \
     'window=fm-task-x1' \
     'tmux_session_target=firstmate:fm-task-x1' \
@@ -1912,6 +1972,7 @@ test_managed_child_teardown_locks_generation_before_snapshot() {
     'mode=secondmate' \
     "home=$case_dir/wt"
   fm_git_worktree "$child_project" "$child_worktree" child-branch
+  write_treehouse_lease "$child_worktree" "firstmate-$child_id"
   fm_write_meta "$case_dir/wt/state/$child_id.meta" \
     "window=fm-$child_id" \
     "tmux_session_target=firstmate:fm-$child_id" \
@@ -2008,8 +2069,7 @@ test_forced_secondmate_child_uses_child_home_for_endpoint_verification() {
   child_id=child-zellij-x2
   : > "$af_log"
   : > "$zellij_log"
-  mkdir -p "$case_dir/wt/data" "$case_dir/wt/state" "$case_dir/wt/config" "$case_dir/wt/projects"
-  printf '%s\n' task-x1 > "$case_dir/wt/.fm-secondmate-home"
+  prepare_secondmate_home_fixture "$case_dir"
   fm_write_meta "$case_dir/state/task-x1.meta" \
     'window=fm-task-x1' \
     'tmux_session_target=firstmate:fm-task-x1' \
@@ -2019,6 +2079,7 @@ test_forced_secondmate_child_uses_child_home_for_endpoint_verification() {
     'mode=secondmate' \
     "home=$case_dir/wt"
   fm_git_worktree "$child_project" "$child_worktree" child-branch
+  write_treehouse_lease "$child_worktree" "firstmate-$child_id"
   fm_write_meta "$case_dir/wt/state/$child_id.meta" \
     'window=firstmate:9' \
     "worktree=$child_worktree" \
@@ -2079,8 +2140,7 @@ test_forced_secondmate_quiesces_parent_before_child_cleanup() {
   child_id=child-after-quiesce-x4
   parent_live="$case_dir/parent-live"
   parent_quiesced="$case_dir/parent-quiesced"
-  mkdir -p "$case_dir/wt/data" "$case_dir/wt/state" "$case_dir/wt/config" "$case_dir/wt/projects"
-  printf '%s\n' task-x1 > "$case_dir/wt/.fm-secondmate-home"
+  prepare_secondmate_home_fixture "$case_dir"
   fm_write_meta "$case_dir/state/task-x1.meta" \
     'window=fm-task-x1' \
     'tmux_session_target=firstmate:fm-task-x1' \
@@ -2090,6 +2150,7 @@ test_forced_secondmate_quiesces_parent_before_child_cleanup() {
     'mode=secondmate' \
     "home=$case_dir/wt"
   fm_git_worktree "$child_project" "$child_worktree" child-branch
+  write_treehouse_lease "$child_worktree" "firstmate-$child_id"
   fm_write_meta "$case_dir/wt/state/$child_id.meta" \
     "window=fm-$child_id" \
     "worktree=$child_worktree" \
@@ -2131,9 +2192,7 @@ setup_forced_secondmate_child_case() {
   FORCED_CHILD_PROJECT="$FORCED_CHILD_CASE_DIR/child-project"
   FORCED_CHILD_WORKTREE="$FORCED_CHILD_CASE_DIR/child-worktree"
   FORCED_CHILD_PARENT_LIVE="$FORCED_CHILD_CASE_DIR/parent-live"
-  mkdir -p "$FORCED_CHILD_CASE_DIR/wt/data" "$FORCED_CHILD_CASE_DIR/wt/state" \
-    "$FORCED_CHILD_CASE_DIR/wt/config" "$FORCED_CHILD_CASE_DIR/wt/projects"
-  printf '%s\n' task-x1 > "$FORCED_CHILD_CASE_DIR/wt/.fm-secondmate-home"
+  prepare_secondmate_home_fixture "$FORCED_CHILD_CASE_DIR"
   fm_write_meta "$FORCED_CHILD_CASE_DIR/state/task-x1.meta" \
     'window=fm-task-x1' \
     'tmux_session_target=firstmate:fm-task-x1' \
@@ -2143,6 +2202,7 @@ setup_forced_secondmate_child_case() {
     'mode=secondmate' \
     "home=$FORCED_CHILD_CASE_DIR/wt"
   fm_git_worktree "$FORCED_CHILD_PROJECT" "$FORCED_CHILD_WORKTREE" child-branch
+  write_treehouse_lease "$FORCED_CHILD_WORKTREE" "firstmate-$child_id"
   fm_write_meta "$FORCED_CHILD_CASE_DIR/wt/state/$child_id.meta" \
     "window=fm-$child_id" \
     "worktree=$FORCED_CHILD_WORKTREE" \
@@ -2329,8 +2389,7 @@ test_forced_secondmate_retains_child_on_checkout_lock_contention() {
   child_worktree="$case_dir/child-worktree"
   child_id=child-contention-x5
   lock_root="$case_dir/checkout-locks"
-  mkdir -p "$case_dir/wt/data" "$case_dir/wt/state" "$case_dir/wt/config" "$case_dir/wt/projects"
-  printf '%s\n' task-x1 > "$case_dir/wt/.fm-secondmate-home"
+  prepare_secondmate_home_fixture "$case_dir"
   fm_write_meta "$case_dir/state/task-x1.meta" \
     'window=fm-task-x1' \
     'tmux_session_target=firstmate:fm-task-x1' \
@@ -2340,6 +2399,7 @@ test_forced_secondmate_retains_child_on_checkout_lock_contention() {
     'mode=secondmate' \
     "home=$case_dir/wt"
   fm_git_worktree "$child_project" "$child_worktree" child-branch
+  write_treehouse_lease "$child_worktree" "firstmate-$child_id"
   fm_write_meta "$case_dir/wt/state/$child_id.meta" \
     "window=fm-$child_id" \
     "worktree=$child_worktree" \
@@ -2640,6 +2700,283 @@ SH
   pass "teardown validates exact repository identity before mutation"
 }
 
+test_teardown_rejects_drifted_treehouse_task_lease() {
+  local case_dir marker rc
+  case_dir=$(make_case drifted-treehouse-task-lease)
+  write_meta "$case_dir" no-mistakes ship
+  write_treehouse_lease "$case_dir/wt" firstmate-other-task
+  marker="$case_dir/endpoint-killed"
+  cat > "$case_dir/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+[ "${1:-}" != kill-window ] || : > "$FM_FAKE_KILL_MARKER"
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/tmux"
+
+  set +e
+  FM_FAKE_KILL_MARKER="$marker" run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "drifted Treehouse task lease must be rejected"
+  assert_absent "$marker" "teardown stopped an endpoint before proving Treehouse task ownership"
+  assert_present "$case_dir/state/task-x1.meta" "Treehouse ownership refusal removed task metadata"
+  assert_grep "expected 'firstmate-task-x1'" "$case_dir/stderr" \
+    "Treehouse ownership refusal did not identify the expected task holder"
+  pass "teardown requires the recorded Treehouse lease holder"
+}
+
+test_teardown_rechecks_treehouse_lease_after_locked_safety() {
+  local case_dir count_file return_marker state rc branch
+  case_dir=$(make_case lease-drift-during-locked-safety)
+  write_meta "$case_dir" no-mistakes ship
+  count_file="$case_dir/status-count"
+  return_marker="$case_dir/treehouse-returned"
+  state="$TMP_ROOT/treehouse-state.json"
+  cat > "$case_dir/fakebin/git" <<'SH'
+#!/usr/bin/env bash
+set -u
+case " $* " in
+  *" status --porcelain"*)
+    count=0
+    [ ! -f "$FM_FAKE_STATUS_COUNT" ] || count=$(cat "$FM_FAKE_STATUS_COUNT")
+    count=$((count + 1))
+    printf '%s\n' "$count" > "$FM_FAKE_STATUS_COUNT"
+    if [ "$count" -eq 2 ]; then
+      python3 - "$FM_FAKE_TREEHOUSE_STATE" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as stream:
+    state = json.load(stream)
+state["worktrees"][0]["lease_holder"] = "firstmate-other-task"
+with open(path, "w", encoding="utf-8") as stream:
+    json.dump(state, stream)
+PY
+    fi
+    ;;
+esac
+exec "$REAL_GIT_FOR_TEST" "$@"
+SH
+  cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+: > "$FM_FAKE_TREEHOUSE_RETURNED"
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/git" "$case_dir/fakebin/treehouse"
+
+  set +e
+  FM_FAKE_STATUS_COUNT="$count_file" FM_FAKE_TREEHOUSE_STATE="$state" \
+    FM_FAKE_TREEHOUSE_RETURNED="$return_marker" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "lease reassignment during locked safety checks must abort return"
+  assert_absent "$return_marker" "Treehouse return ran after the task lease changed"
+  assert_present "$case_dir/wt" "lease reassignment removed the task worktree"
+  assert_present "$case_dir/state/task-x1.meta" "lease reassignment removed task metadata"
+  branch=$("$REAL_GIT_FOR_TEST" -C "$case_dir/wt" symbolic-ref --quiet --short HEAD)
+  [ "$branch" = fm/task-x1 ] || fail "lease reassignment detached or deleted the task branch"
+  assert_grep "ownership changed during final safety checks" "$case_dir/stderr" \
+    "lease reassignment was not surfaced at the locked mutation boundary"
+  pass "locked teardown rechecks ownership before return mutation"
+}
+
+test_secondmate_rejects_drifted_home_repository_identity() {
+  local case_dir marker rc
+  case_dir=$(make_case secondmate-home-identity-drift)
+  mkdir -p "$case_dir/wt/data" "$case_dir/wt/state" "$case_dir/wt/config" "$case_dir/wt/projects"
+  printf '%s\n' task-x1 > "$case_dir/wt/.fm-secondmate-home"
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    'window=fm-task-x1' \
+    'tmux_session_target=firstmate:fm-task-x1' \
+    "worktree=$case_dir/wt" \
+    "project=$case_dir/project" \
+    'kind=secondmate' \
+    'mode=secondmate' \
+    "home=$case_dir/wt"
+  marker="$case_dir/endpoint-killed"
+  cat > "$case_dir/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+[ "${1:-}" != kill-window ] || : > "$FM_FAKE_KILL_MARKER"
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/tmux"
+
+  set +e
+  FM_FAKE_KILL_MARKER="$marker" run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "secondmate home repository identity drift must block teardown"
+  assert_absent "$marker" "secondmate endpoint was stopped before home identity was proved"
+  assert_present "$case_dir/wt" "identity-drifted secondmate home was removed"
+  assert_present "$case_dir/state/task-x1.meta" "identity-drifted secondmate metadata was removed"
+  assert_grep "secondmate home repository identity does not match" "$case_dir/stderr" \
+    "secondmate home identity drift was not surfaced"
+  pass "secondmate teardown proves its home repository identity"
+}
+
+test_normal_secondmate_retires_proven_detached_head() {
+  local case_dir rc
+  case_dir=$(make_case normal-secondmate-quiescence)
+  prepare_secondmate_home_fixture "$case_dir"
+  git -C "$case_dir/wt" checkout --quiet --detach
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    'window=fm-task-x1' \
+    'tmux_session_target=firstmate:fm-task-x1' \
+    "worktree=$case_dir/wt" \
+    "project=$case_dir/project" \
+    'kind=secondmate' \
+    'mode=secondmate' \
+    "home=$case_dir/wt"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "normal secondmate retirement should quiesce and complete"
+  assert_absent "$case_dir/fakebin/.tmux-live" "normal secondmate retirement left its endpoint alive"
+  assert_absent "$case_dir/wt" "normal secondmate retirement retained its home"
+  pass "normal secondmate retirement proves endpoint absence"
+}
+
+test_normal_secondmate_retains_untracked_skill_draft() {
+  local case_dir draft rc
+  case_dir=$(make_case secondmate-untracked-skill)
+  prepare_secondmate_home_fixture "$case_dir"
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    'window=fm-task-x1' \
+    'tmux_session_target=firstmate:fm-task-x1' \
+    "worktree=$case_dir/wt" \
+    "project=$case_dir/wt" \
+    'kind=secondmate' \
+    'mode=secondmate' \
+    "home=$case_dir/wt"
+  draft="$case_dir/wt/.claude/skills/new-skill/SKILL.md"
+  mkdir -p "$(dirname "$draft")"
+  printf '%s\n' draft > "$draft"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "normal secondmate retirement must retain an untracked skill draft"
+  assert_present "$case_dir/fakebin/.tmux-live" "dirty-home refusal stopped the secondmate endpoint"
+  assert_present "$draft" "normal secondmate retirement discarded an untracked skill draft"
+  assert_present "$case_dir/state/task-x1.meta" "dirty-home refusal removed secondmate metadata"
+  assert_grep "new-skill/SKILL.md" "$case_dir/stderr" \
+    "dirty-home refusal did not surface the untracked skill draft"
+  pass "normal secondmate retirement retains untracked skill drafts"
+}
+
+test_normal_secondmate_retains_unique_detached_head() {
+  local case_dir rc
+  case_dir=$(make_case secondmate-clean-unique-commit)
+  prepare_secondmate_home_fixture "$case_dir"
+  git -C "$case_dir/wt" checkout --quiet --detach
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    'window=fm-task-x1' \
+    'tmux_session_target=firstmate:fm-task-x1' \
+    "worktree=$case_dir/wt" \
+    "project=$case_dir/wt" \
+    'kind=secondmate' \
+    'mode=secondmate' \
+    "home=$case_dir/wt"
+  printf '%s\n' unique > "$case_dir/wt/unique.txt"
+  git -C "$case_dir/wt" add unique.txt
+  git -C "$case_dir/wt" -c user.name=tests -c user.email=tests@example.invalid \
+    commit --quiet -m unique
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "normal secondmate retirement must retain a clean unique commit"
+  assert_present "$case_dir/fakebin/.tmux-live" "unique-commit refusal stopped the secondmate endpoint"
+  assert_present "$case_dir/wt/unique.txt" "normal secondmate retirement discarded a clean unique commit"
+  assert_present "$case_dir/state/task-x1.meta" "unique-commit refusal removed secondmate metadata"
+  assert_grep "not proven in authoritative" "$case_dir/stderr" \
+    "unique-commit refusal did not surface the unlanded ref"
+  pass "normal secondmate retirement retains clean unique commits"
+}
+
+test_forced_secondmate_retains_unquiesced_unmanaged_child() {
+  local case_dir child_id child_project child_worktree parent_live child_live rc
+  case_dir=$(make_case secondmate-unmanaged-child-live)
+  child_id=child-live-x9
+  child_project="$case_dir/child-project"
+  child_worktree="$case_dir/child-worktree"
+  parent_live="$case_dir/parent-live"
+  child_live="$case_dir/child-live"
+  prepare_secondmate_home_fixture "$case_dir"
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    'window=fm-task-x1' \
+    'tmux_session_target=firstmate:fm-task-x1' \
+    "worktree=$case_dir/wt" \
+    "project=$case_dir/project" \
+    'kind=secondmate' \
+    'mode=secondmate' \
+    "home=$case_dir/wt"
+  fm_git_worktree "$child_project" "$child_worktree" child-branch
+  write_treehouse_lease "$child_worktree" "firstmate-$child_id"
+  fm_write_meta "$case_dir/wt/state/$child_id.meta" \
+    "window=fm-$child_id" \
+    "tmux_session_target=firstmate:fm-$child_id" \
+    "worktree=$child_worktree" \
+    "project=$child_project" \
+    'kind=ship' \
+    'mode=local-only'
+  : > "$parent_live"
+  : > "$child_live"
+  cat > "$case_dir/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+target=
+prev=
+for arg in "$@"; do
+  [ "$prev" = -t ] && target=$arg
+  prev=$arg
+done
+case "${1:-}" in
+  display-message)
+    case "$target" in
+      *task-x1) [ -f "$FM_FAKE_PARENT_LIVE" ] ;;
+      *child-live-x9) [ -f "$FM_FAKE_CHILD_LIVE" ] ;;
+      *) exit 1 ;;
+    esac
+    exit $?
+    ;;
+  list-windows)
+    [ -f "$FM_FAKE_PARENT_LIVE" ] && printf '%s\n' fm-task-x1
+    [ -f "$FM_FAKE_CHILD_LIVE" ] && printf '%s\n' fm-child-live-x9
+    ;;
+  kill-window)
+    case "$target" in
+      *child-live-x9) exit 74 ;;
+      *) rm -f "$FM_FAKE_PARENT_LIVE" ;;
+    esac
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/tmux"
+
+  set +e
+  FM_FAKE_PARENT_LIVE="$parent_live" FM_FAKE_CHILD_LIVE="$child_live" \
+    run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "a live unmanaged child must block forced secondmate cleanup"
+  assert_present "$child_live" "the child endpoint fixture unexpectedly disappeared"
+  assert_present "$case_dir/wt" "forced cleanup removed the parent home after child quiescence failed"
+  assert_present "$child_worktree" "forced cleanup removed a worktree with a live child endpoint"
+  assert_present "$case_dir/wt/state/$child_id.meta" "forced cleanup removed live-child retry metadata"
+  assert_present "$case_dir/state/task-x1.meta" "forced cleanup removed parent metadata after child quiescence failed"
+  assert_grep "child endpoint for $child_id is still alive" "$case_dir/stderr" \
+    "forced cleanup did not surface the surviving child endpoint"
+  pass "forced secondmate cleanup retains unquiesced unmanaged children"
+}
+
 test_teardown_retains_untracked_claude_skill_draft() {
   local case_dir draft rc
   case_dir=$(make_case retained-claude-skill)
@@ -2830,6 +3167,17 @@ if [ "${FM_TEST_FOCUSED:-}" = review-round-refresh-safety ]; then
   exit 0
 fi
 
+if [ "${FM_TEST_FOCUSED:-}" = review-round-teardown-ownership ]; then
+  test_teardown_rejects_drifted_treehouse_task_lease
+  test_teardown_rechecks_treehouse_lease_after_locked_safety
+  test_secondmate_rejects_drifted_home_repository_identity
+  test_normal_secondmate_retires_proven_detached_head
+  test_normal_secondmate_retains_untracked_skill_draft
+  test_normal_secondmate_retains_unique_detached_head
+  test_forced_secondmate_retains_unquiesced_unmanaged_child
+  exit 0
+fi
+
 test_local_only_fork_remote_allows
 test_teardown_prompts_tasks_axi_done_when_compatible
 test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present
@@ -2855,6 +3203,13 @@ test_required_report_restores_rollback_generation_before_publish
 test_required_report_revalidates_after_quiescence
 test_legacy_teardown_revalidates_after_quiescence
 test_teardown_rejects_nested_metadata_roots_before_quiescence
+test_teardown_rejects_drifted_treehouse_task_lease
+test_teardown_rechecks_treehouse_lease_after_locked_safety
+test_secondmate_rejects_drifted_home_repository_identity
+test_normal_secondmate_retires_proven_detached_head
+test_normal_secondmate_retains_untracked_skill_draft
+test_normal_secondmate_retains_unique_detached_head
+test_forced_secondmate_retains_unquiesced_unmanaged_child
 test_teardown_retains_untracked_claude_skill_draft
 test_teardown_refuses_unsafe_tasktmp_metadata
 test_teardown_rejects_malformed_report_requirement

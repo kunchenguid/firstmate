@@ -27,10 +27,10 @@
 # FM_TREEHOUSE_RETURN_TIMEOUT while holding the same common checkout mutation
 # lock across its retry and stale-index-lock recovery sequence.
 # Uncommitted changes are never landed.
-# Ordinary teardown first proves that metadata names the exact registered project
-# and worktree roots, then quiesces the endpoint before its final safety checks.
-# Each locked Treehouse return repeats the safety check immediately before the
-# destructive return command.
+# Ordinary teardown first proves that metadata names the exact registered project,
+# worktree, and task lease, then quiesces the endpoint before its final safety checks.
+# Each locked Treehouse return repeats repository, lease, and landed-work checks
+# immediately before the destructive return command.
 # local-only projects additionally accept work merged into the local default
 # branch (firstmate performs that merge on the captain's approval) as a fallback
 # for the common case where there is no remote at all.
@@ -39,13 +39,14 @@
 # product. A pre-cutover scout proceeds once that report exists; a task carrying
 # report_required=1 must satisfy the shared completion and publication contract
 # owned by docs/report-stack.md before teardown discards the scratch worktree.
-# Orca tasks use the same safety checks, then close the recorded terminal and
-# remove the recorded worktree through `orca worktree rm`; teardown never guesses
-# an Orca target from ambient CLI state.
-# Secondmates (kind=secondmate in meta) are retired explicitly. Normal
-# teardown refuses while their home has in-flight crewmate meta files; --force
-# is the approved discard path that prevalidates child removal targets, discards
-# child work, kills child runtime endpoints, and removes the retired home. Removing a
+# Orca tasks use the same safety checks, then close the recorded terminal, prove
+# the handle stale, and remove the recorded worktree under its checkout lock;
+# teardown never substitutes the shared window alias for a missing terminal.
+# Secondmates (kind=secondmate in meta) are retired explicitly. Normal teardown
+# proves the home clean and every local ref landed, then quiesces its endpoint and
+# refuses while the home has in-flight crewmate meta files. --force is the approved
+# discard path that prevalidates child removal targets, proves child endpoints
+# absent, discards child work, and removes the retired home. Removing a
 # leased home releases its durable treehouse lease so the pool slot is freed,
 # never left leased forever. If the treehouse return fails, teardown leaves the
 # leased home and state in place instead of hiding a still-held lease.
@@ -158,7 +159,7 @@ PROJ=$(grep '^project=' "$META" | cut -d= -f2-)
 BACKEND=$(fm_backend_of_meta "$META")
 if [ "$BACKEND" = orca ]; then
   T_ORCA=$(grep '^terminal=' "$META" | tail -1 | cut -d= -f2- || true)
-  [ -n "$T_ORCA" ] && T=$T_ORCA
+  T=$T_ORCA
 fi
 HOME_PATH=$(grep '^home=' "$META" | cut -d= -f2- || true)
 PR_URL=$(grep '^pr=' "$META" | tail -1 | cut -d= -f2- || true)
@@ -171,7 +172,6 @@ if [ -n "$TASK_TMP" ] && [ "$TASK_TMP" != "/tmp/fm-$ID" ]; then
 fi
 ORCA_WORKTREE_ID=$(fm_meta_get "$META" orca_worktree_id)
 ORCA_PATH_MATCH_VERIFIED=0
-SECONDMATE_ENDPOINT_QUIESCED=0
 DIRECT_SPAWN_CLEANUP=$(fm_meta_get "$META" direct_spawn_cleanup)
 DIRECT_SPAWN_BACKUP=$(fm_meta_get "$META" direct_spawn_backup)
 DIRECT_SPAWN_ARTIFACTS=$(fm_meta_get "$META" direct_spawn_artifacts)
@@ -226,19 +226,38 @@ managed_endpoint_blocker() {  # <status> <task> [restored]
   fi
 }
 
+teardown_backend_target_of_meta() {
+  local meta=$1 backend
+  backend=$(fm_backend_of_meta "$meta")
+  if [ "$backend" = orca ]; then
+    fm_meta_get "$meta" terminal || true
+    return 0
+  else
+    fm_backend_target_of_meta "$meta"
+  fi
+}
+
 quiesce_secondmate_endpoint() {
   local endpoint_home probe_home='' endpoint_status
   endpoint_home=$(fm_backend_endpoint_home "$BACKEND" "$KIND" "$FM_HOME" "$HOME_PATH")
   [ "$endpoint_home" = "$FM_HOME" ] || probe_home=$endpoint_home
+  if managed_endpoint_is_gone "$BACKEND" "$T" "fm-$ID" "$probe_home" "$(meta_value "$META" tmux_session_target)"; then
+    return 0
+  fi
   if [ -n "$T" ]; then
     if [ -n "$probe_home" ]; then
-      ( unset FM_ROOT_OVERRIDE; FM_HOME="$probe_home" FM_ROOT="$probe_home" fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" "$(meta_value "$META" tmux_session_target)" ) 2>/dev/null || true
+      ( unset FM_ROOT_OVERRIDE; FM_HOME="$probe_home" FM_ROOT="$probe_home" fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" "$(meta_value "$META" tmux_session_target)" ) 2>/dev/null || {
+        echo "error: failed to stop secondmate endpoint for $ID; refusing child cleanup" >&2
+        return 1
+      }
     else
-      fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" "$(meta_value "$META" tmux_session_target)" 2>/dev/null || true
+      fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" "$(meta_value "$META" tmux_session_target)" 2>/dev/null || {
+        echo "error: failed to stop secondmate endpoint for $ID; refusing child cleanup" >&2
+        return 1
+      }
     fi
   fi
   if managed_endpoint_is_gone "$BACKEND" "$T" "fm-$ID" "$probe_home" "$(meta_value "$META" tmux_session_target)"; then
-    SECONDMATE_ENDPOINT_QUIESCED=1
     return 0
   fi
   endpoint_status=$?
@@ -246,6 +265,45 @@ quiesce_secondmate_endpoint() {
     echo "error: secondmate endpoint state for $ID is unknown; refusing child cleanup" >&2
   else
     echo "error: secondmate endpoint for $ID is still alive; refusing child cleanup" >&2
+  fi
+  return 1
+}
+
+quiesce_child_endpoint() {
+  local meta=$1 task=$2 owner_home=$3 child_home=${4:-}
+  local backend target kind endpoint_home probe_home='' endpoint_status
+  backend=$(fm_backend_of_meta "$meta")
+  target=$(teardown_backend_target_of_meta "$meta")
+  kind=$(meta_value "$meta" kind)
+  [ -n "$kind" ] || kind=ship
+  endpoint_home=$(fm_backend_endpoint_home "$backend" "$kind" "$owner_home" "$child_home")
+  [ "$endpoint_home" = "$FM_HOME" ] || probe_home=$endpoint_home
+  if managed_endpoint_is_gone "$backend" "$target" "fm-$task" "$probe_home" "$(meta_value "$meta" tmux_session_target)"; then
+    return 0
+  fi
+  [ -n "$target" ] || {
+    echo "error: child endpoint identity for $task is missing; refusing destructive cleanup" >&2
+    return 1
+  }
+  if [ -n "$probe_home" ]; then
+    ( unset FM_ROOT_OVERRIDE; FM_HOME="$probe_home" FM_ROOT="$probe_home" fm_backend_kill "$backend" "$target" "$(meta_value "$meta" zellij_tab_id)" "fm-$task" "$(meta_value "$meta" tmux_session_target)" ) 2>/dev/null || {
+      echo "error: failed to stop child endpoint for $task; refusing destructive cleanup" >&2
+      return 1
+    }
+  else
+    ( unset FM_ROOT_OVERRIDE; FM_HOME="$owner_home" FM_ROOT="$owner_home" fm_backend_kill "$backend" "$target" "$(meta_value "$meta" zellij_tab_id)" "fm-$task" "$(meta_value "$meta" tmux_session_target)" ) 2>/dev/null || {
+      echo "error: failed to stop child endpoint for $task; refusing destructive cleanup" >&2
+      return 1
+    }
+  fi
+  if managed_endpoint_is_gone "$backend" "$target" "fm-$task" "$probe_home" "$(meta_value "$meta" tmux_session_target)"; then
+    return 0
+  fi
+  endpoint_status=$?
+  if [ "$endpoint_status" -eq 2 ]; then
+    echo "error: child endpoint state for $task is unknown; refusing destructive cleanup" >&2
+  else
+    echo "error: child endpoint for $task is still alive; refusing destructive cleanup" >&2
   fi
   return 1
 }
@@ -266,16 +324,25 @@ quiesce_managed_account_endpoint() {  # <meta> <task> [probe-home]
     return 1
   fi
   backend=$(fm_backend_of_meta "$meta")
-  target=$(fm_backend_target_of_meta "$meta")
+  target=$(teardown_backend_target_of_meta "$meta")
   zellij_tab=$(fm_meta_get "$meta" zellij_tab_id)
   tmux_session_target=$(fm_meta_get "$meta" tmux_session_target)
   [ -n "$tmux_session_target" ] || tmux_session_target=$(fm_meta_get "$meta" window)
   fm_account_meta_lock_release "$lock" || return 1
+  if managed_endpoint_is_gone "$backend" "$target" "fm-$task" "$probe_home" "$tmux_session_target"; then
+    return 0
+  fi
   if [ -n "$target" ]; then
     if [ -n "$probe_home" ]; then
-      ( unset FM_ROOT_OVERRIDE; FM_HOME="$probe_home" FM_ROOT="$probe_home" fm_backend_kill "$backend" "$target" "$zellij_tab" "fm-$task" "$tmux_session_target" ) 2>/dev/null || true
+      ( unset FM_ROOT_OVERRIDE; FM_HOME="$probe_home" FM_ROOT="$probe_home" fm_backend_kill "$backend" "$target" "$zellij_tab" "fm-$task" "$tmux_session_target" ) 2>/dev/null || {
+        echo "error: failed to stop managed endpoint for $task; retaining its Agent Fleet lease and metadata" >&2
+        return 1
+      }
     else
-      fm_backend_kill "$backend" "$target" "$zellij_tab" "fm-$task" "$tmux_session_target" 2>/dev/null || true
+      fm_backend_kill "$backend" "$target" "$zellij_tab" "fm-$task" "$tmux_session_target" 2>/dev/null || {
+        echo "error: failed to stop managed endpoint for $task; retaining its Agent Fleet lease and metadata" >&2
+        return 1
+      }
     fi
   fi
   if managed_endpoint_is_gone "$backend" "$target" "fm-$task" "$probe_home" "$tmux_session_target"; then
@@ -719,6 +786,79 @@ exact_git_worktree_root() {
   printf '%s\n' "$canonical"
 }
 
+treehouse_state_for_worktree() {
+  local worktree=$1 slot pool state
+  slot=$(canonical_existing_dir "$(dirname "$worktree")") || return 1
+  pool=$(canonical_existing_dir "$(dirname "$slot")") || return 1
+  state="$pool/treehouse-state.json"
+  [ -f "$state" ] && [ ! -L "$state" ] || return 1
+  printf '%s\n' "$state"
+}
+
+require_treehouse_task_lease() {
+  local worktree=$1 expected_holder=$2 state
+  state=$(treehouse_state_for_worktree "$worktree") || {
+    echo "error: cannot resolve authoritative Treehouse state for $worktree" >&2
+    return 1
+  }
+  python3 - "$state" "$worktree" "$expected_holder" <<'PY'
+import json
+import os
+import sys
+
+state_path, expected_path, expected_holder = sys.argv[1:]
+try:
+    with open(state_path, encoding="utf-8") as stream:
+        state = json.load(stream)
+    worktrees = state["worktrees"]
+    if not isinstance(worktrees, list):
+        raise TypeError("worktrees must be an array")
+    matches = []
+    for entry in worktrees:
+        if not isinstance(entry, dict):
+            continue
+        path = entry.get("path")
+        if not isinstance(path, str) or not path:
+            continue
+        if os.path.realpath(path) == expected_path:
+            matches.append(entry)
+    if len(matches) != 1:
+        raise ValueError("expected exactly one matching worktree entry")
+    entry = matches[0]
+    if entry.get("leased") is not True:
+        raise ValueError("worktree is not durably leased")
+    if entry.get("lease_holder") != expected_holder:
+        raise ValueError(
+            f"lease holder is {entry.get('lease_holder')!r}, expected {expected_holder!r}"
+        )
+    if entry.get("destroying") is True:
+        raise ValueError("worktree is already being destroyed")
+except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError) as error:
+    print(
+        f"error: Treehouse ownership for {expected_path} is unprovable: {error}",
+        file=sys.stderr,
+    )
+    raise SystemExit(1)
+PY
+}
+
+require_treehouse_return_authority() {
+  local worktree=$1 project=$2 worktree_root project_root worktree_common project_common
+  worktree_root=$(exact_git_worktree_root "$worktree") || return 1
+  project_root=$(exact_git_worktree_root "$project") || return 1
+  worktree_common=$(fm_checkout_git_common_dir "$worktree_root") || return 1
+  project_common=$(fm_checkout_git_common_dir "$project_root") || return 1
+  [ "$worktree_common" = "$project_common" ] || {
+    echo "error: Treehouse return target $worktree_root does not belong to $project_root" >&2
+    return 1
+  }
+  worktree_registered_for_project "$project_root" "$worktree_root" || {
+    echo "error: Treehouse return target $worktree_root is not registered to $project_root" >&2
+    return 1
+  }
+  require_treehouse_task_lease "$worktree_root" "$3"
+}
+
 validate_teardown_target_identity() {
   local project_root worktree_root project_common worktree_common
   [ "$KIND" != secondmate ] || return 0
@@ -734,21 +874,22 @@ validate_teardown_target_identity() {
     echo "error: teardown worktree metadata resolves to the primary project root: $worktree_root" >&2
     return 1
   }
-  if [ "$BACKEND" = orca ]; then
-    require_orca_worktree_path_match "$ORCA_WORKTREE_ID" "$worktree_root" || return 1
-    ORCA_PATH_MATCH_VERIFIED=1
-    return 0
-  fi
   project_common=$(fm_checkout_git_common_dir "$project_root") || return 1
   worktree_common=$(fm_checkout_git_common_dir "$worktree_root") || return 1
   [ "$project_common" = "$worktree_common" ] || {
     echo "error: teardown worktree does not belong to the recorded project: $worktree_root" >&2
     return 1
   }
+  if [ "$BACKEND" = orca ]; then
+    require_orca_worktree_path_match "$ORCA_WORKTREE_ID" "$worktree_root" || return 1
+    ORCA_PATH_MATCH_VERIFIED=1
+    return 0
+  fi
   worktree_registered_for_project "$project_root" "$worktree_root" || {
     echo "error: teardown worktree is not registered to the recorded project: $worktree_root" >&2
     return 1
   }
+  require_treehouse_task_lease "$worktree_root" "firstmate-$ID"
 }
 
 retry_wait_secs_is_valid() {
@@ -832,15 +973,32 @@ cleanup_stale_lock_for_safety_check() {
 # Return a worktree/home via `treehouse return --force`, tolerating a transient or
 # stale git index.lock left by a killed crew process. See the script header.
 teardown_treehouse_return_locked() {
-  local dir=$1 cd_dir=$2 label=$3 post_cleanup_check=${4:-}
-  local out lock attempt=0 max_retries lock_desc return_status
+  local dir=$1 cd_dir=$2 label=$3 expected_holder=$4 post_cleanup_check=${5:-} post_return_cleanup=${6:-}
+  local out lock attempt=0 max_retries lock_desc return_status return_branch=
 
-  if [ -n "$post_cleanup_check" ] && ! "$post_cleanup_check"; then
+  require_treehouse_return_authority "$dir" "$cd_dir" "$expected_holder" || {
+    echo "teardown: $label return aborted because Treehouse task ownership changed" >&2
+    return 1
+  }
+  if [ -n "$post_cleanup_check" ] && ! "$post_cleanup_check" "$dir" "$cd_dir" "$expected_holder"; then
     echo "teardown: $label return aborted because the final locked safety check failed" >&2
     return 1
   fi
+  require_treehouse_return_authority "$dir" "$cd_dir" "$expected_holder" || {
+    echo "teardown: $label return aborted because Treehouse task ownership changed during final safety checks" >&2
+    return 1
+  }
+  if [ -n "$post_return_cleanup" ]; then
+    return_branch=$(git -C "$dir" rev-parse --abbrev-ref HEAD 2>/dev/null) || {
+      echo "teardown: $label return aborted because the task branch cannot be inspected under lock" >&2
+      return 1
+    }
+  fi
   if out=$(fm_checkout_treehouse_return_locked "$dir" "$CHECKOUT_LOCK_ROOT" "$cd_dir" 2>&1); then
     [ -n "$out" ] && printf '%s\n' "$out"
+    if [ -n "$post_return_cleanup" ]; then
+      "$post_return_cleanup" "$return_branch" "$dir" "$cd_dir" || return 1
+    fi
     return 0
   else
     return_status=$?
@@ -869,12 +1027,23 @@ teardown_treehouse_return_locked() {
     echo "teardown: $label return failed with transient git lock ($lock_desc); waiting ${TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS}s and retrying ($attempt/${max_retries})" >&2
     sleep "$TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS"
 
-    if [ -n "$post_cleanup_check" ] && ! "$post_cleanup_check"; then
+    if ! require_treehouse_return_authority "$dir" "$cd_dir" "$expected_holder"; then
+      echo "teardown: $label return aborted because Treehouse task ownership changed" >&2
+      return 1
+    fi
+    if [ -n "$post_cleanup_check" ] && ! "$post_cleanup_check" "$dir" "$cd_dir" "$expected_holder"; then
       echo "teardown: $label return aborted because the final locked safety check failed" >&2
+      return 1
+    fi
+    if ! require_treehouse_return_authority "$dir" "$cd_dir" "$expected_holder"; then
+      echo "teardown: $label return aborted because Treehouse task ownership changed during final safety checks" >&2
       return 1
     fi
     if out=$(fm_checkout_treehouse_return_locked "$dir" "$CHECKOUT_LOCK_ROOT" "$cd_dir" 2>&1); then
       [ -n "$out" ] && printf '%s\n' "$out"
+      if [ -n "$post_return_cleanup" ]; then
+        "$post_return_cleanup" "$return_branch" "$dir" "$cd_dir" || return 1
+      fi
       echo "teardown: $label return succeeded on retry; lock cleared on its own" >&2
       return 0
     else
@@ -899,14 +1068,25 @@ teardown_treehouse_return_locked() {
     if fm_lock_is_provably_stale "$lock" "$dir" "$STALE_WORKTREE_LOCK_AGE_SECS"; then
       rm -f "$lock"
       echo "teardown: removed provably-stale git lock $lock (age >= ${STALE_WORKTREE_LOCK_AGE_SECS}s, no live holder) and retrying $label return" >&2
+      if ! require_treehouse_return_authority "$dir" "$cd_dir" "$expected_holder"; then
+        echo "teardown: $label return aborted after stale-lock cleanup because Treehouse task ownership changed" >&2
+        return 1
+      fi
       if [ -n "$post_cleanup_check" ]; then
-        if ! "$post_cleanup_check"; then
+        if ! "$post_cleanup_check" "$dir" "$cd_dir" "$expected_holder"; then
           echo "teardown: $label return aborted after stale-lock cleanup because safety checks failed" >&2
           return 1
         fi
       fi
+      if ! require_treehouse_return_authority "$dir" "$cd_dir" "$expected_holder"; then
+        echo "teardown: $label return aborted after stale-lock cleanup because Treehouse task ownership changed during safety checks" >&2
+        return 1
+      fi
       if out=$(fm_checkout_treehouse_return_locked "$dir" "$CHECKOUT_LOCK_ROOT" "$cd_dir" 2>&1); then
         [ -n "$out" ] && printf '%s\n' "$out"
+        if [ -n "$post_return_cleanup" ]; then
+          "$post_return_cleanup" "$return_branch" "$dir" "$cd_dir" || return 1
+        fi
         echo "teardown: $label return succeeded after stale-lock cleanup" >&2
         return 0
       else
@@ -931,6 +1111,14 @@ teardown_treehouse_return_locked() {
 teardown_treehouse_return() {
   local dir=$1
   fm_checkout_lock_run "$dir" "$CHECKOUT_LOCK_ROOT" teardown_treehouse_return_locked "$@"
+}
+
+cleanup_returned_worktree() {
+  local branch=$1 worktree=$2 project=$3
+  if [ "$branch" != "HEAD" ]; then
+    git -C "$project" branch -D "$branch" >/dev/null 2>&1 || true
+  fi
+  rm -f "$worktree/.claude/settings.local.json" "$worktree/.opencode/plugins/fm-turn-end.js" "$worktree/.fm-grok-turnend"
 }
 
 validate_worktree_teardown_safety() {
@@ -1029,8 +1217,8 @@ require_orca_worktree_path_match_if_present() {
 }
 
 firstmate_home_has_treehouse_slot() {
-  local home=$1
-  worktree_registered_for_project "$FM_ROOT" "$home"
+  local home=$1 expected_source=${2:-$FM_ROOT}
+  worktree_registered_for_project "$expected_source" "$home"
 }
 
 validate_removal_target() {
@@ -1123,10 +1311,22 @@ validate_firstmate_operational_dirs_for_removal() {
 }
 
 validate_child_worktree_for_removal() {
-  local target=$1 project=$2 abs_target abs_home abs_root
+  local target=$1 project=$2 abs_target abs_project abs_home abs_root target_common project_common
   [ -n "$target" ] || return 0
   [ -e "$target" ] || return 0
   abs_target=$(validate_removal_target "$target" "child worktree") || return 1
+  abs_target=$(exact_git_worktree_root "$abs_target") || {
+    echo "REFUSED: unsafe child worktree removal target $target is not an exact Git root" >&2
+    return 1
+  }
+  abs_project=$(exact_git_worktree_root "$project") || {
+    echo "REFUSED: child project metadata $project is not an exact Git root" >&2
+    return 1
+  }
+  [ "$abs_target" != "$abs_project" ] || {
+    echo "REFUSED: child worktree removal target resolves to its backing project root: $abs_target" >&2
+    return 1
+  }
   if abs_home=$(cd "$FM_HOME" 2>/dev/null && pwd -P); then
     if path_is_ancestor_of "$abs_home" "$abs_target"; then
       echo "REFUSED: unsafe child worktree removal target $target is inside the active firstmate home" >&2
@@ -1138,8 +1338,11 @@ validate_child_worktree_for_removal() {
     echo "REFUSED: unsafe child worktree removal target $target is inside the firstmate repo" >&2
     return 1
   fi
-  if ! worktree_registered_for_project "$project" "$target"; then
-    echo "REFUSED: unsafe child worktree removal target $target is not a git worktree for ${project:-the recorded project}" >&2
+  target_common=$(fm_checkout_git_common_dir "$abs_target") || return 1
+  project_common=$(fm_checkout_git_common_dir "$abs_project") || return 1
+  if [ "$target_common" != "$project_common" ] \
+      || ! worktree_registered_for_project "$abs_project" "$abs_target"; then
+    echo "REFUSED: unsafe child worktree removal target $target is not a git worktree for $abs_project" >&2
     return 1
   fi
   printf '%s\n' "$abs_target"
@@ -1157,8 +1360,150 @@ safe_rm_rf_child_worktree() {
   rm -rf -- "$target"
 }
 
+repository_remote_identity() {
+  local repository=$1 remote=$2 candidate
+  case "$remote" in
+    file://*) candidate=${remote#file://} ;;
+    /*|./*|../*) candidate=$remote ;;
+    *) printf 'remote:%s\n' "$remote"; return 0 ;;
+  esac
+  case "$candidate" in
+    /*) ;;
+    *) candidate="$repository/$candidate" ;;
+  esac
+  candidate=$(canonical_existing_dir "$candidate") || return 1
+  printf 'path:%s\n' "$candidate"
+}
+
+validate_firstmate_home_repository_identity() {
+  local home=$1 expected_source=$2 home_root source_root home_common source_common home_origin source_origin
+  local home_identity source_identity source_path_identity
+  home_root=$(exact_git_worktree_root "$home") || {
+    echo "REFUSED: secondmate home repository identity is uninspectable at $home" >&2
+    return 1
+  }
+  source_root=$(exact_git_worktree_root "$expected_source") || return 1
+  home_common=$(fm_checkout_git_common_dir "$home_root") || return 1
+  source_common=$(fm_checkout_git_common_dir "$source_root") || return 1
+  [ "$home_common" != "$source_common" ] || return 0
+  home_origin=$(git -C "$home_root" remote get-url origin 2>/dev/null) || {
+    echo "REFUSED: secondmate home origin identity is unavailable at $home_root" >&2
+    return 1
+  }
+  home_identity=$(repository_remote_identity "$home_root" "$home_origin") || return 1
+  source_path_identity="path:$source_root"
+  source_identity=
+  if source_origin=$(git -C "$source_root" remote get-url origin 2>/dev/null); then
+    source_identity=$(repository_remote_identity "$source_root" "$source_origin") || return 1
+  fi
+  if [ "$home_identity" != "$source_path_identity" ] && [ "$home_identity" != "$source_identity" ]; then
+    echo "REFUSED: secondmate home repository identity does not match $source_root" >&2
+    return 1
+  fi
+}
+
+validate_secondmate_home_landed_state() {
+  local home=$1 expected_source=$2 dirty unsafe branch default source_default_ref source_default_tip
+  local refs ref tip live_output live_branch live_tip cached_tip stash_list home_common source_common live_status
+  dirty=$(GIT_OPTIONAL_LOCKS=0 git -C "$home" status --porcelain=v1 --untracked-files=all 2>/dev/null) || {
+    echo "REFUSED: secondmate home cleanliness is uninspectable at $home" >&2
+    return 1
+  }
+  unsafe=$(printf '%s\n' "$dirty" | awk '
+    $0 == "?? .claude/settings.local.json" { next }
+    $0 == "?? .opencode/plugins/fm-turn-end.js" { next }
+    $0 == "?? .fm-grok-turnend" { next }
+    $0 != "" { print }
+  ')
+  [ -z "$unsafe" ] || {
+    echo "REFUSED: secondmate home has unlanded changes at $home" >&2
+    printf '%s\n' "$unsafe" >&2
+    return 1
+  }
+  if git -C "$expected_source" remote get-url origin >/dev/null 2>&1; then
+    if fm_run_bounded_capture --combine-stderr live_output "$TEARDOWN_UPSTREAM_TIMEOUT" \
+        git -C "$expected_source" ls-remote --symref origin HEAD; then
+      live_status=0
+    else
+      live_status=$?
+    fi
+    fm_process_tree_cleanup_verified || {
+      echo "REFUSED: secondmate home upstream probe cleanup is unverified for $expected_source" >&2
+      return 1
+    }
+    [ "$live_status" -eq 0 ] || {
+      echo "REFUSED: secondmate home live upstream default is uninspectable from $expected_source" >&2
+      return 1
+    }
+    live_branch=$(printf '%s\n' "$live_output" | sed -n 's/^ref: refs\/heads\/\([^[:space:]]*\)[[:space:]]*HEAD$/\1/p' | head -1)
+    live_tip=$(printf '%s\n' "$live_output" | awk '$2 == "HEAD" && $1 != "ref:" { print $1; exit }')
+    [ -n "$live_branch" ] && [ -n "$live_tip" ] || {
+      echo "REFUSED: secondmate home live upstream default identity is malformed" >&2
+      return 1
+    }
+    default=$live_branch
+    source_default_ref="refs/remotes/origin/$default"
+    cached_tip=$(git -C "$expected_source" rev-parse "$source_default_ref^{commit}" 2>/dev/null) || return 1
+    [ "$cached_tip" = "$live_tip" ] || {
+      echo "REFUSED: secondmate home source default is stale against live origin/$default" >&2
+      return 1
+    }
+  elif git -C "$expected_source" show-ref --verify --quiet refs/heads/main; then
+    default=main
+    source_default_ref=refs/heads/main
+  elif git -C "$expected_source" show-ref --verify --quiet refs/heads/master; then
+    default=master
+    source_default_ref=refs/heads/master
+  else
+    echo "REFUSED: secondmate home default branch is unprovable from $expected_source" >&2
+    return 1
+  fi
+  if branch=$(git -C "$home" symbolic-ref --quiet --short HEAD 2>/dev/null); then
+    [ "$branch" = "$default" ] || {
+      echo "REFUSED: secondmate home is on non-default branch $branch at $home" >&2
+      return 1
+    }
+  fi
+  source_default_tip=$(git -C "$expected_source" rev-parse "$source_default_ref^{commit}" 2>/dev/null) || {
+    echo "REFUSED: secondmate home authoritative default tip is uninspectable at $expected_source" >&2
+    return 1
+  }
+  home_common=$(fm_checkout_git_common_dir "$home") || return 1
+  source_common=$(fm_checkout_git_common_dir "$expected_source") || return 1
+  refs=
+  if [ "$home_common" != "$source_common" ]; then
+    stash_list=$(git -C "$home" stash list 2>/dev/null) || {
+      echo "REFUSED: secondmate home stash state is uninspectable at $home" >&2
+      return 1
+    }
+    [ -z "$stash_list" ] || {
+      echo "REFUSED: secondmate home has retained stash history at $home" >&2
+      return 1
+    }
+    refs=$(git -C "$home" for-each-ref --format='%(refname)' 2>/dev/null) || {
+      echo "REFUSED: secondmate home refs are uninspectable at $home" >&2
+      return 1
+    }
+  fi
+  refs=$(printf 'HEAD\n%s\n' "$refs")
+  while IFS= read -r ref; do
+    [ -n "$ref" ] || continue
+    tip=$(git -C "$home" rev-parse "$ref^{commit}" 2>/dev/null) || {
+      echo "REFUSED: secondmate home ref $ref cannot be resolved to a commit" >&2
+      return 1
+    }
+    git -C "$home" merge-base --is-ancestor "$tip" "$source_default_tip" 2>/dev/null || {
+      echo "REFUSED: secondmate home ref $ref has commits not proven in authoritative $default" >&2
+      return 1
+    }
+  done <<EOF
+$refs
+EOF
+}
+
 validate_firstmate_home_for_removal() {
-  local home=$1 label=$2 expected_id=${3:-} abs_home_path marker_id conflict child_id child_home
+  local home=$1 label=$2 expected_id=${3:-} expected_source=${4:-$FM_ROOT}
+  local abs_home_path marker_id conflict child_id child_home
   [ -n "$home" ] || return 0
   [ -e "$home" ] || return 0
   abs_home_path=$(validate_removal_target "$home" "$label") || return 1
@@ -1173,6 +1518,11 @@ validate_firstmate_home_for_removal() {
       return 1
     fi
   fi
+  validate_firstmate_home_repository_identity "$abs_home_path" "$expected_source" || return 1
+  if [ -n "$expected_id" ] && firstmate_home_has_treehouse_slot "$abs_home_path" "$expected_source"; then
+    require_treehouse_task_lease "$abs_home_path" "$expected_id" || return 1
+  fi
+  [ "$FORCE" = "--force" ] || validate_secondmate_home_landed_state "$abs_home_path" "$expected_source" || return 1
   validate_firstmate_operational_dirs_for_removal "$abs_home_path" "$label" || return 1
   conflict=$(registered_descendant_home_for_removal "$SECONDMATE_REG" "$abs_home_path" || true)
   if [ -z "$conflict" ]; then
@@ -1188,24 +1538,41 @@ EOF
   printf '%s\n' "$abs_home_path"
 }
 
+remove_explicit_firstmate_home_locked() {
+  local home=$1 label=$2 expected_id=$3 expected_source=$4 validated
+  validated=$(validate_firstmate_home_for_removal "$home" "$label" "$expected_id" "$expected_source") || return 1
+  [ "$validated" = "$home" ] || return 1
+  firstmate_home_has_treehouse_slot "$home" "$expected_source" && {
+    echo "error: $label became a Treehouse worktree before explicit removal" >&2
+    return 1
+  }
+  safe_rm_rf "$home" "$label"
+}
+
+validate_treehouse_firstmate_home_locked() {
+  validate_firstmate_home_for_removal "$1" "secondmate home" "$3" "$2" >/dev/null
+}
+
 remove_firstmate_home() {
-  local home=$1 label=$2 expected_id=${3:-} abs_home_path
+  local home=$1 label=$2 expected_id=${3:-} expected_source=${4:-$FM_ROOT} abs_home_path
   [ -n "$home" ] || return 0
   [ -e "$home" ] || return 0
-  abs_home_path=$(validate_firstmate_home_for_removal "$home" "$label" "$expected_id") || return 1
+  abs_home_path=$(validate_firstmate_home_for_removal "$home" "$label" "$expected_id" "$expected_source") || return 1
   [ -n "$abs_home_path" ] || return 0
-  if firstmate_home_has_treehouse_slot "$abs_home_path"; then
+  if firstmate_home_has_treehouse_slot "$abs_home_path" "$expected_source"; then
     command -v treehouse >/dev/null 2>&1 || {
       echo "error: treehouse command not found; cannot return $label $abs_home_path" >&2
       return 1
     }
-    teardown_treehouse_return "$abs_home_path" "$FM_ROOT" "$label" || {
+    teardown_treehouse_return "$abs_home_path" "$expected_source" "$label" "$expected_id" \
+      validate_treehouse_firstmate_home_locked || {
       echo "error: treehouse return failed for $label $abs_home_path; lease may still be held" >&2
       return 1
     }
     return 0
   fi
-  safe_rm_rf "$abs_home_path" "$label"
+  fm_checkout_lock_run "$abs_home_path" "$CHECKOUT_LOCK_ROOT" \
+    remove_explicit_firstmate_home_locked "$abs_home_path" "$label" "$expected_id" "$expected_source"
 }
 
 validate_firstmate_home_children_removal() {
@@ -1227,7 +1594,7 @@ validate_firstmate_home_children_removal() {
     if [ "$child_kind" = secondmate ]; then
       child_home=$(meta_value "$child_meta" home)
       [ -n "$child_home" ] || child_home=$child_wt
-      validate_firstmate_home_for_removal "$child_home" "child firstmate home" "$child_id" >/dev/null || return 1
+      validate_firstmate_home_for_removal "$child_home" "child firstmate home" "$child_id" "$home" >/dev/null || return 1
       validate_firstmate_home_children_removal "$child_home" || return 1
     elif [ "$child_backend" = orca ]; then
       child_orca_worktree_id=$(require_orca_worktree_id "$child_meta") || return 1
@@ -1239,12 +1606,25 @@ validate_firstmate_home_children_removal() {
     elif [ -n "$child_wt" ] && [ -e "$child_wt" ]; then
       child_proj=$(meta_value "$child_meta" project)
       validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
+      require_treehouse_task_lease "$(canonical_existing_dir "$child_wt")" "firstmate-$child_id" || return 1
     fi
   done
 }
 
+remove_child_orca_worktree_locked() {
+  local child_worktree=$1 child_project=$2 child_worktree_id=$3 branch=HEAD
+  validate_child_worktree_for_removal "$child_worktree" "$child_project" >/dev/null || return 1
+  require_orca_worktree_path_match "$child_worktree_id" "$child_worktree" || return 1
+  branch=$(git -C "$child_worktree" rev-parse --abbrev-ref HEAD 2>/dev/null) || return 1
+  fm_backend_remove_worktree orca "$child_worktree_id" || return 1
+  if [ "$branch" != "HEAD" ]; then
+    git -C "$child_project" branch -D "$branch" >/dev/null 2>&1 || true
+  fi
+  rm -f "$child_worktree/.claude/settings.local.json" "$child_worktree/.opencode/plugins/fm-turn-end.js" "$child_worktree/.fm-grok-turnend"
+}
+
 cleanup_firstmate_home_children() {
-  local home=$1 sub_state child_meta child_id child_t child_wt child_proj child_kind child_home child_backend child_orca_worktree_id child_return_rc child_account_lock child_endpoint_home
+  local home=$1 sub_state child_meta child_id child_wt child_proj child_kind child_home child_backend child_orca_worktree_id child_return_rc child_account_lock child_endpoint_home
   sub_state="$home/state"
   [ -d "$sub_state" ] || return 0
   for child_meta in "$sub_state"/*.meta; do
@@ -1269,11 +1649,6 @@ cleanup_firstmate_home_children() {
       [ -n "$child_home" ] || child_home=$child_wt
     fi
     child_backend=$(fm_backend_of_meta "$child_meta")
-    if [ "$child_backend" = orca ]; then
-      child_t=$(meta_value "$child_meta" terminal)
-    else
-      child_t=$(fm_backend_target_of_meta "$child_meta")
-    fi
     if [ "$child_backend" = orca ] && [ "$child_kind" != secondmate ]; then
       child_orca_worktree_id=$(require_orca_worktree_id "$child_meta") || return 1
       if [ -n "$child_wt" ] && [ -e "$child_wt" ]; then
@@ -1285,30 +1660,31 @@ cleanup_firstmate_home_children() {
       release_managed_account "$child_meta" "$child_id" "$child_endpoint_home" "$child_account_lock" "$home/data" || return 1
       child_account_lock=$MANAGED_ACCOUNT_LOCK
     else
-      if [ -n "$child_t" ]; then
-        ( unset FM_ROOT_OVERRIDE; FM_HOME="$home" FM_ROOT="$home" fm_backend_kill "$child_backend" "$child_t" "$(meta_value "$child_meta" zellij_tab_id)" "fm-$child_id" "$(meta_value "$child_meta" tmux_session_target)" ) 2>/dev/null || true
-      fi
+      quiesce_child_endpoint "$child_meta" "$child_id" "$home" "$child_home" || return 1
     fi
     if [ "$child_kind" = secondmate ]; then
       if [ -n "$child_home" ] && [ -d "$child_home" ]; then
-        cleanup_firstmate_home_children "$child_home"
-        remove_firstmate_home "$child_home" "child firstmate home" "$child_id"
+        cleanup_firstmate_home_children "$child_home" || return 1
+        remove_firstmate_home "$child_home" "child firstmate home" "$child_id" "$home" || return 1
       fi
     elif [ "$child_backend" = orca ]; then
       if [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
         validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
-        rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js" "$child_wt/.fm-grok-turnend"
+        fm_checkout_lock_run "$child_wt" "$CHECKOUT_LOCK_ROOT" \
+          remove_child_orca_worktree_locked "$child_wt" "$child_proj" "$child_orca_worktree_id" || return 1
+      else
+        echo "error: child Orca worktree identity for $child_id is unavailable; refusing provider removal" >&2
+        return 1
       fi
-      fm_backend_remove_worktree "$child_backend" "$child_orca_worktree_id" || return 1
     elif [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
       validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
-      rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js" "$child_wt/.fm-grok-turnend"
       if [ -n "$child_proj" ] && [ -d "$child_proj" ]; then
         if ! command -v treehouse >/dev/null 2>&1; then
           echo "error: retained child worktree $child_wt because Treehouse is unavailable; install or restore treehouse, then retry teardown" >&2
           return "$FM_CHECKOUT_TREEHOUSE_RETURN_UNAVAILABLE_STATUS"
         fi
-        if teardown_treehouse_return "$child_wt" "$child_proj" "child worktree"; then
+        if teardown_treehouse_return "$child_wt" "$child_proj" "child worktree" \
+            "firstmate-$child_id" "" cleanup_returned_worktree; then
           :
         else
           child_return_rc=$?
@@ -1350,19 +1726,20 @@ if [ "$KIND" = secondmate ]; then
   validate_firstmate_home_for_removal "$HOME_PATH" "secondmate home" "$ID" >/dev/null || exit 1
   if [ "$FORCE" = "--force" ]; then
     validate_firstmate_home_children_removal "$HOME_PATH" || exit 1
-    quiesce_secondmate_endpoint || exit 1
   fi
-fi
-
-if [ "$KIND" = secondmate ] && [ "$FORCE" != "--force" ]; then
-  SUB_STATE="$HOME_PATH/state"
-  if [ -d "$SUB_STATE" ]; then
-    for child_meta in "$SUB_STATE"/*.meta; do
-      [ -e "$child_meta" ] || continue
-      echo "REFUSED: secondmate $ID still has in-flight work in $SUB_STATE." >&2
-      echo "Found $(basename "$child_meta"). Let that home finish or explicitly discard with --force." >&2
-      exit 1
-    done
+  quiesce_secondmate_endpoint || exit 1
+  if [ "$FORCE" = "--force" ]; then
+    validate_firstmate_home_children_removal "$HOME_PATH" || exit 1
+  else
+    SUB_STATE="$HOME_PATH/state"
+    if [ -d "$SUB_STATE" ]; then
+      for child_meta in "$SUB_STATE"/*.meta; do
+        [ -e "$child_meta" ] || continue
+        echo "REFUSED: secondmate $ID still has in-flight work in $SUB_STATE." >&2
+        echo "Found $(basename "$child_meta"). Let that home finish or explicitly discard with --force." >&2
+        exit 1
+      done
+    fi
   fi
 fi
 
@@ -1388,11 +1765,20 @@ quiesce_task_endpoint() {
     return $?
   fi
   zellij_tab=$(meta_value "$META" zellij_tab_id)
+  if managed_endpoint_is_gone "$BACKEND" "$T" "fm-$ID" "$PROBE_HOME" "$(meta_value "$META" tmux_session_target)"; then
+    return 0
+  fi
   if [ -n "$T" ]; then
     if [ -n "$PROBE_HOME" ]; then
-      ( unset FM_ROOT_OVERRIDE; FM_HOME="$PROBE_HOME" FM_ROOT="$PROBE_HOME" fm_backend_kill "$BACKEND" "$T" "$zellij_tab" "fm-$ID" "$(meta_value "$META" tmux_session_target)" ) 2>/dev/null || true
+      ( unset FM_ROOT_OVERRIDE; FM_HOME="$PROBE_HOME" FM_ROOT="$PROBE_HOME" fm_backend_kill "$BACKEND" "$T" "$zellij_tab" "fm-$ID" "$(meta_value "$META" tmux_session_target)" ) 2>/dev/null || {
+        echo "error: failed to stop task endpoint for $ID; retaining metadata" >&2
+        return 1
+      }
     else
-      fm_backend_kill "$BACKEND" "$T" "$zellij_tab" "fm-$ID" "$(meta_value "$META" tmux_session_target)" 2>/dev/null || true
+      fm_backend_kill "$BACKEND" "$T" "$zellij_tab" "fm-$ID" "$(meta_value "$META" tmux_session_target)" 2>/dev/null || {
+        echo "error: failed to stop task endpoint for $ID; retaining metadata" >&2
+        return 1
+      }
     fi
   fi
   if managed_endpoint_is_gone "$BACKEND" "$T" "fm-$ID" "$PROBE_HOME" "$(meta_value "$META" tmux_session_target)"; then
@@ -1438,8 +1824,10 @@ post_quiescence_safety_refusal() {
 
 if [ "$DIRECT_SPAWN_CLEANUP" = pending ]; then
   quiesce_retained_direct_spawn_endpoint || exit 1
+  validate_teardown_target_identity || { post_quiescence_safety_refusal; exit 1; }
 elif [ "$KIND" != secondmate ]; then
   quiesce_task_endpoint || exit 1
+  validate_teardown_target_identity || { post_quiescence_safety_refusal; exit 1; }
 fi
 
 if [ "$BACKEND" = orca ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$FORCE" != "--force" ]; then
@@ -1484,37 +1872,35 @@ if [ "$MANAGED_ACCOUNT" = 1 ]; then
 fi
 
 if [ "$KIND" = secondmate ] && [ "$FORCE" = "--force" ]; then
-  cleanup_firstmate_home_children "$HOME_PATH"
+  cleanup_firstmate_home_children "$HOME_PATH" || exit 1
 fi
 
-# Best-effort: drop the local task branch so the shared repo does not accumulate refs.
+[ "$KIND" = secondmate ] || validate_teardown_target_identity || exit 1
+
+remove_orca_worktree_locked() {
+  local branch=HEAD
+  validate_teardown_target_identity || return 1
+  if [ "$FORCE" != "--force" ]; then
+    validate_worktree_teardown_safety || return 1
+    validate_teardown_target_identity || return 1
+  fi
+  if [ -d "$WT" ]; then
+    branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null) || return 1
+  fi
+  fm_backend_remove_worktree "$BACKEND" "$ORCA_WORKTREE_ID" || return 1
+  if [ "$branch" != "HEAD" ]; then
+    git -C "$PROJ" branch -D "$branch" >/dev/null 2>&1 || true
+  fi
+  rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" "$WT/.fm-grok-turnend"
+}
+
 if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
   if [ "$ORCA_PATH_MATCH_VERIFIED" != 1 ]; then
     require_orca_worktree_path_match_if_present "$ORCA_WORKTREE_ID" "$WT" || exit 1
     ORCA_PATH_MATCH_VERIFIED=1
   fi
-  if [ -d "$WT" ]; then
-    branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
-    if [ "$branch" != "HEAD" ]; then
-      if git -C "$WT" checkout --detach -q 2>/dev/null; then
-        git -C "$WT" branch -D "$branch" >/dev/null 2>&1 || true
-      fi
-    fi
-    rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" "$WT/.fm-grok-turnend"
-  fi
-  if [ "$MANAGED_ACCOUNT" = 0 ]; then
-    [ -z "$T_ORCA" ] || fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" "$(meta_value "$META" tmux_session_target)" 2>/dev/null || true
-  fi
-  fm_backend_remove_worktree "$BACKEND" "$ORCA_WORKTREE_ID"
+  fm_checkout_lock_run "$WT" "$CHECKOUT_LOCK_ROOT" remove_orca_worktree_locked || exit 1
 elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
-  branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
-  if [ "$branch" != "HEAD" ]; then
-    if git -C "$WT" checkout --detach -q 2>/dev/null; then
-      git -C "$WT" branch -D "$branch" >/dev/null 2>&1 || true
-    fi
-  fi
-  # Remove our hook file so a reused pool worktree cannot fire signals for a dead task.
-  rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" "$WT/.fm-grok-turnend"
   # Kills remaining processes in the worktree (including the agent), resets, returns
   # to pool. treehouse resolves the pool from the working directory, so run it from
   # the project. teardown_treehouse_return tolerates transient and stale git locks
@@ -1523,15 +1909,12 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   if [ "$FORCE" != "--force" ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ]; then
     post_lock_cleanup_check=validate_worktree_teardown_safety
   fi
-  teardown_treehouse_return "$WT" "$PROJ" "worktree" "$post_lock_cleanup_check" || {
+  teardown_treehouse_return "$WT" "$PROJ" "worktree" "firstmate-$ID" "$post_lock_cleanup_check" cleanup_returned_worktree || {
     echo "error: treehouse return failed for worktree $WT; teardown aborted" >&2
     exit 1
   }
 fi
 
-if [ "$MANAGED_ACCOUNT" = 0 ] && [ "$BACKEND" != orca ] && [ "$SECONDMATE_ENDPOINT_QUIESCED" = 0 ]; then
-  fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" "$(meta_value "$META" tmux_session_target)" 2>/dev/null || true
-fi
 if [ "$DIRECT_SPAWN_CLEANUP" = pending ] && [ -n "$DIRECT_SPAWN_BACKUP" ]; then
   case "$DIRECT_SPAWN_BACKUP" in
     ".$ID.meta.rollback."*) ;;
@@ -1568,8 +1951,8 @@ if [ "$DIRECT_SPAWN_CLEANUP" = pending ] && [ -n "$DIRECT_SPAWN_BACKUP" ]; then
 fi
 if [ "$KIND" = secondmate ]; then
   [ -n "$HOME_PATH" ] || HOME_PATH=$WT
-  remove_firstmate_home "$HOME_PATH" "secondmate home" "$ID"
-  remove_secondmate_registry_entry "$ID"
+  remove_firstmate_home "$HOME_PATH" "secondmate home" "$ID" || exit 1
+  remove_secondmate_registry_entry "$ID" || exit 1
 fi
 remove_grok_turnend_auth "$STATE" "$ID"
 fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true

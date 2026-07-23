@@ -275,8 +275,10 @@ The default covered set is every clone under the active home's `projects/`, ever
 Matching by origin discovers parallel clones such as `~/relvino` without embedding a captain-specific path in shared code.
 Optional `path` and shallow `scan` directives in the gitignored `config/checkout-refresh` file extend that set.
 Every declared checkout and matching-origin scan result must resolve to its exact canonical Git worktree root, so nested directories can never redirect refresh to an enclosing repository.
-A symlinked or unreadable configuration file, an unknown or malformed directive, or an invalid declared path or scan root makes coverage unhealthy.
-The owner persists the canonical path and origin identity of each discovered external clone and retains the prior manifest until every previously covered identity is inspectable and unchanged.
+Every scan root must also be readable, searchable, and successfully enumerable rather than treating an unreadable directory as empty.
+A symlinked or unreadable configuration file, an unknown or malformed directive, or an invalid or unenumerable declared path or scan root makes coverage unhealthy.
+An exact Git repository found during a scan must have inspectable remote metadata even when it does not match the currently tracked origins.
+The owner persists the canonical path and actual origin identity of every covered checkout plus the identity of each discovered external clone, and retains each prior identity until it is inspectable and unchanged.
 
 Each `FM_HOME` owns a distinct background identity and state directory, so primary and secondmate homes can cover their own projects without displacing one another.
 Checkout-level owner locks are held by the shared `fm-fleet-sync.sh` mutation path, Treehouse acquisition, and every authorized Treehouse return, so home-scoped services, spawn, secondmate seeding, teardown, and merged-PR wake handling serialize overlapping checkouts safely.
@@ -288,6 +290,7 @@ Each shared checkout mutation is process-tree bounded by `FM_CHECKOUT_REFRESH_SY
 Teardown holds that same checkout lock while its landed-content fallback probes, fetches, re-probes, and compares the live default, and it retains the worktree unless both live branch identity and tip remain unchanged.
 If the upstream default branch changes, a checkout still on the old branch is reported as `STUCK:` and left unchanged under the fast-forward-only posture.
 A full safe refresh runs at least every 15 minutes even when no change signal is observed, so transient network failures, a missed probe, or lost local state cannot create unbounded drift.
+The owner advances a checkout's successful cadence and tip state only after a benign inspection result, and any failed or unsafe alert-state write keeps coverage unhealthy and forces the next run to reinspect before the backstop.
 Every probe also inventories non-ignored untracked files in covered seed checkouts and Treehouse pool worktrees under `.agents/skills`, `.claude/skills`, `.codex/skills`, and `skills`.
 Gitignored files are intentional local material and remain outside this collision guard.
 A new or growing inventory produces a durable `HYGIENE:` alert immediately, while forced session-start and spawn-preflight checks repeat any unresolved alert for an operator.
@@ -297,6 +300,7 @@ The ordinary safe-refresh warning separately quantifies every non-ignored untrac
 These checks inspect paths only and never delete, move, stash, reset, or edit a draft.
 The signal interval and backstop are configurable through `FM_CHECKOUT_REFRESH_INTERVAL` and `FM_CHECKOUT_REFRESH_BACKSTOP`.
 Every cadence and spawn-preflight refresh disables gone-branch pruning and retains `fm-fleet-sync.sh`'s fail-safe behavior: a dirty, diverged, or non-default checkout is left untouched and recorded as an alert.
+Registered `local-only` checkouts and repositories without `origin` are fully inspected against their proven local `main` or `master` tip without fetching, including when a local-only checkout still has a remote configured.
 The forced session-start mode prunes a gone branch only when its tip is reachable from a surviving remote ref or its content is already present in the live default branch.
 An unproven branch is retained and surfaced as `STUCK:`.
 

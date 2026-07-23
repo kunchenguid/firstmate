@@ -45,6 +45,10 @@
 # (`.agents/skills`, `.claude/skills`, `.codex/skills`, and `skills`).
 # Unreadable or malformed Treehouse state invalidates coverage health while the
 # heartbeat records scheduler liveness independently.
+# Every scan root must be readable and successfully enumerable, and every covered
+# checkout retains its actual origin identity across runs.
+# Registered local-only checkouts and remote-free repositories use their proven
+# local default tip while still surfacing dirty, stale, or non-default states.
 # A new or changed inventory is surfaced immediately and persisted as a separate
 # hygiene alert, even when no upstream change or backstop refresh is due.
 # Forced/operator-visible runs repeat unresolved hygiene alerts.
@@ -391,13 +395,55 @@ origin_url() {
   git -C "$1" remote get-url origin 2>/dev/null
 }
 
+CHECKOUT_ORIGIN_KIND=
+CHECKOUT_ORIGIN_VALUE=
+inspect_checkout_origin() {
+  local checkout=$1 remotes
+  CHECKOUT_ORIGIN_KIND=
+  CHECKOUT_ORIGIN_VALUE=
+  remotes=$(git -C "$checkout" remote 2>/dev/null) || return 1
+  if printf '%s\n' "$remotes" | grep -Fxq origin; then
+    CHECKOUT_ORIGIN_VALUE=$(origin_url "$checkout") || return 1
+    [ -n "$CHECKOUT_ORIGIN_VALUE" ] || return 1
+    CHECKOUT_ORIGIN_KIND=origin
+  else
+    CHECKOUT_ORIGIN_KIND=no-origin
+  fi
+}
+
+scan_root_candidates() {
+  command -v python3 >/dev/null 2>&1 || return 1
+  python3 - "$1" <<'PY'
+import os
+import stat
+import sys
+
+root = sys.argv[1]
+try:
+    metadata = os.stat(root)
+    permissions = stat.S_IMODE(metadata.st_mode)
+    if not stat.S_ISDIR(metadata.st_mode):
+        raise NotADirectoryError(root)
+    if not permissions & 0o444 or not permissions & 0o111:
+        raise PermissionError("scan root is unreadable")
+    with os.scandir(root) as entries:
+        for entry in sorted(entries, key=lambda candidate: candidate.name):
+            if entry.is_dir(follow_symlinks=True):
+                print(entry.path)
+except OSError as error:
+    print(error, file=sys.stderr)
+    raise SystemExit(1)
+PY
+}
+
 discover() {
-  local tmp seeds origins scans configured_paths configured_scans treehouse_paths project_paths
+  local tmp seeds origins scans scan_candidates configured_paths configured_scans treehouse_paths project_paths
   local path project worktree main root candidate url failed=0
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-checkout-refresh-discover.XXXXXX") || return 1
   seeds="$tmp/seeds"
   origins="$tmp/origins"
   scans="$tmp/scans"
+  scan_candidates="$tmp/scan-candidates"
   configured_paths="$tmp/configured-paths"
   configured_scans="$tmp/configured-scans"
   treehouse_paths="$tmp/treehouse-worktrees"
@@ -405,6 +451,7 @@ discover() {
   : > "$seeds"
   : > "$origins"
   : > "$scans"
+  : > "$scan_candidates"
   if ! parse_config "$configured_paths" "$configured_scans"; then
     rm -rf "$tmp"
     return 1
@@ -449,8 +496,14 @@ discover() {
   sort -u "$seeds" -o "$seeds"
   while IFS= read -r path; do
     [ -n "$path" ] || continue
-    url=$(origin_url "$path" || true)
-    [ -n "$url" ] && printf '%s\n' "$url" >> "$origins"
+    if ! inspect_checkout_origin "$path"; then
+      echo "checkout-refresh: skipped: covered checkout origin identity cannot be inspected: $path" >&2
+      failed=1
+      continue
+    fi
+    if [ "$CHECKOUT_ORIGIN_KIND" = origin ]; then
+      printf '%s\n' "$CHECKOUT_ORIGIN_VALUE" >> "$origins"
+    fi
   done < "$seeds"
   sort -u "$origins" -o "$origins"
 
@@ -471,27 +524,39 @@ discover() {
   done < "$configured_scans"
   sort -u "$scans" -o "$scans"
 
-  if [ -s "$origins" ]; then
-    while IFS= read -r root; do
-      [ -n "$root" ] || continue
-      for candidate in "$root"/*; do
-        [ -d "$candidate" ] || continue
-        url=$(origin_url "$candidate" || true)
-        if [ -z "$url" ] || ! grep -Fxq -- "$url" "$origins"; then
-          continue
-        fi
-        if main=$(exact_git_root "$candidate"); then
-          printf '%s\n' "$main" >> "$seeds"
-          if [ -n "${DISCOVERY_IDENTITIES_FILE:-}" ]; then
-            printf '%s\t%s\n' "$main" "$url" >> "$DISCOVERY_IDENTITIES_FILE"
-          fi
-        else
-          echo "checkout-refresh: skipped: discovered clone is not an exact inspectable Git repository root: $candidate" >&2
-          failed=1
-        fi
-      done
-    done < "$scans"
-  fi
+  while IFS= read -r root; do
+    [ -n "$root" ] || continue
+    if ! scan_root_candidates "$root" >> "$scan_candidates"; then
+      echo "checkout-refresh: skipped: scan root is unreadable or cannot be enumerated: $root" >&2
+      failed=1
+    fi
+  done < "$scans"
+
+  while IFS= read -r candidate; do
+    [ -n "$candidate" ] || continue
+    if ! git -C "$candidate" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+      continue
+    fi
+    if ! main=$(exact_git_root "$candidate"); then
+      echo "checkout-refresh: skipped: discovered clone is not an exact inspectable Git repository root: $candidate" >&2
+      failed=1
+      continue
+    fi
+    if ! inspect_checkout_origin "$main"; then
+      echo "checkout-refresh: skipped: discovered checkout origin identity cannot be inspected: $main" >&2
+      failed=1
+      continue
+    fi
+    [ "$CHECKOUT_ORIGIN_KIND" = origin ] || continue
+    url=$CHECKOUT_ORIGIN_VALUE
+    if [ ! -s "$origins" ] || ! grep -Fxq -- "$url" "$origins"; then
+      continue
+    fi
+    printf '%s\n' "$main" >> "$seeds"
+    if [ -n "${DISCOVERY_IDENTITIES_FILE:-}" ]; then
+      printf '%s\t%s\n' "$main" "$url" >> "$DISCOVERY_IDENTITIES_FILE"
+    fi
+  done < "$scan_candidates"
 
   if [ -n "${DISCOVERY_IDENTITIES_FILE:-}" ]; then
     sort -u "$DISCOVERY_IDENTITIES_FILE" -o "$DISCOVERY_IDENTITIES_FILE"
@@ -595,7 +660,10 @@ atomic_write() {
   tmp=$(mktemp "$STATE_ROOT/.checkout-refresh-write.XXXXXX") || return 1
   printf '%s\n' "$@" > "$tmp" || { rm -f "$tmp"; return 1; }
   chmod 600 "$tmp" || { rm -f "$tmp"; return 1; }
-  mv -f "$tmp" "$destination"
+  if ! atomic_replace "$tmp" "$destination"; then
+    rm -f "$tmp"
+    return 1
+  fi
 }
 
 atomic_copy() {
@@ -603,7 +671,32 @@ atomic_copy() {
   tmp=$(mktemp "$STATE_ROOT/.checkout-refresh-write.XXXXXX") || return 1
   cp "$source" "$tmp" || { rm -f "$tmp"; return 1; }
   chmod 600 "$tmp" || { rm -f "$tmp"; return 1; }
-  mv -f "$tmp" "$destination"
+  if ! atomic_replace "$tmp" "$destination"; then
+    rm -f "$tmp"
+    return 1
+  fi
+}
+
+atomic_replace() {
+  local source=$1 destination=$2
+  python3 - "$source" "$destination" <<'PY'
+import os
+import stat
+import sys
+
+source, destination = sys.argv[1:]
+try:
+    if os.path.lexists(destination):
+        metadata = os.lstat(destination)
+        if not stat.S_ISREG(metadata.st_mode):
+            raise OSError("destination is not a regular file")
+    os.replace(source, destination)
+    metadata = os.lstat(destination)
+    if not stat.S_ISREG(metadata.st_mode):
+        raise OSError("replacement is not a regular file")
+except OSError:
+    raise SystemExit(1)
+PY
 }
 
 validate_external_identity_history() {
@@ -691,7 +784,11 @@ surface_skill_drafts() {
     return 1
   fi
   if [ ! -s "$inventory" ]; then
-    rm -f "$inventory" "$alert"
+    rm -f "$inventory" || return 1
+    if ! rm -f "$alert"; then
+      echo "$checkout: HYGIENE: stale alert cannot be cleared - coverage remains unhealthy" >&2
+      return 1
+    fi
     return 0
   fi
 
@@ -701,7 +798,11 @@ surface_skill_drafts() {
   prior=$(sed -n '2p' "$alert" 2>/dev/null || true)
   examples=$(awk 'NR <= 3 { if (shown) printf ", "; printf "%s", $0; shown = 1 } END { if (NR > 3) printf ", ..." }' "$inventory")
   message="$checkout: HYGIENE: $count untracked skill-draft files under repository skill directories - reconcile before an upstream collision"
-  atomic_write "$alert" "$checkout" "$signature" "$count" "$(date +%s)" "$examples"
+  if ! atomic_write "$alert" "$checkout" "$signature" "$count" "$(date +%s)" "$examples"; then
+    rm -f "$inventory"
+    echo "$checkout: HYGIENE: alert persistence failed - coverage remains unhealthy" >&2
+    return 1
+  fi
   rm -f "$inventory"
   if [ "$repeat" -eq 1 ] || [ "$signature" != "$prior" ]; then
     printf '%s (%s)\n' "$message" "$examples"
@@ -731,14 +832,15 @@ prepare_hygiene_discovery() {
 }
 
 clear_stale_hygiene_alerts() {
-  local hygiene_file=$1 alert checkout
+  local hygiene_file=$1 alert checkout failed=0
   for alert in "$STATE_ROOT"/*.hygiene-alert; do
     [ -f "$alert" ] || continue
     checkout=$(sed -n '1p' "$alert" 2>/dev/null || true)
     if [ -z "$checkout" ] || ! grep -Fxq -- "$checkout" "$hygiene_file"; then
-      rm -f "$alert"
+      rm -f "$alert" || failed=1
     fi
   done
+  [ "$failed" -eq 0 ]
 }
 
 sync_checkout() {
@@ -768,13 +870,119 @@ record_reinspection_failure() {
   key=$(checkout_key "$checkout")
   alert="$STATE_ROOT/$key.alert"
   output="$checkout: skipped: covered checkout became uninspectable during refresh; restore access and rerun checkout refresh"
-  record_alert "$alert" "$checkout" "$output"
   printf '%s\n' "$output"
+  record_alert "$alert" "$checkout" "$output" || {
+    printf '%s: skipped: checkout alert cannot be persisted\n' "$checkout"
+    return 1
+  }
+}
+
+CHECKOUT_REFRESH_AUTHORITY=
+resolve_checkout_refresh_authority() {
+  local checkout=$1 mode_line mode
+  CHECKOUT_REFRESH_AUTHORITY=
+  mode_line=$("$FM_ROOT/bin/fm-project-mode.sh" "$(basename "$checkout")" 2>/dev/null) || return 1
+  mode=${mode_line%% *}
+  if [ "$mode" = local-only ] || [ "$CHECKOUT_ORIGIN_KIND" = no-origin ]; then
+    CHECKOUT_REFRESH_AUTHORITY=local
+  else
+    CHECKOUT_REFRESH_AUTHORITY=upstream
+  fi
+}
+
+validate_covered_checkout_identity() {
+  local checkout=$1 key=$2 tip_file=$3 identity_file current_identity recorded_checkout recorded_identity lines
+  identity_file="$STATE_ROOT/$key.identity"
+  if [ "$CHECKOUT_ORIGIN_KIND" = origin ]; then
+    current_identity="origin $CHECKOUT_ORIGIN_VALUE"
+  else
+    current_identity=no-origin
+  fi
+  if [ -e "$identity_file" ] || [ -L "$identity_file" ]; then
+    if [ -L "$identity_file" ] || [ ! -f "$identity_file" ] || [ ! -r "$identity_file" ]; then
+      echo "$checkout: skipped: covered checkout identity record is unsafe or unreadable"
+      return 1
+    fi
+    lines=$(awk 'END { print NR + 0 }' "$identity_file") || return 1
+    recorded_checkout=$(sed -n '1p' "$identity_file") || return 1
+    recorded_identity=$(sed -n '2p' "$identity_file") || return 1
+    if [ "$lines" -ne 2 ] || [ "$recorded_checkout" != "$checkout" ] || [ -z "$recorded_identity" ]; then
+      echo "$checkout: skipped: covered checkout identity record is malformed"
+      return 1
+    fi
+    if [ "$recorded_identity" != "$current_identity" ]; then
+      echo "$checkout: skipped: covered checkout origin identity drifted from $recorded_identity to $current_identity"
+      return 1
+    fi
+    return 0
+  fi
+  if [ "$current_identity" = no-origin ] && [ -e "$tip_file" ]; then
+    echo "$checkout: skipped: covered checkout lost its previously tracked origin identity"
+    return 1
+  fi
+  atomic_write "$identity_file" "$checkout" "$current_identity" || {
+    echo "$checkout: skipped: covered checkout identity cannot be persisted"
+    return 1
+  }
+}
+
+LOCAL_DEFAULT_BRANCH=
+LOCAL_DEFAULT_TIP=
+inspect_local_checkout() {
+  local checkout=$1 status_raw default current head state untracked_count
+  LOCAL_DEFAULT_BRANCH=
+  LOCAL_DEFAULT_TIP=
+  if ! status_raw=$(GIT_OPTIONAL_LOCKS=0 git -C "$checkout" status --porcelain=v1 --untracked-files=all 2>/dev/null); then
+    echo "$checkout: skipped: local checkout cleanliness cannot be inspected"
+    return 0
+  fi
+  default=$(local_default_branch "$checkout") || {
+    echo "$checkout: skipped: local default branch cannot be determined"
+    return 0
+  }
+  LOCAL_DEFAULT_BRANCH=$default
+  LOCAL_DEFAULT_TIP=$(git -C "$checkout" rev-parse "refs/heads/$default^{commit}" 2>/dev/null) || {
+    echo "$checkout: skipped: local default tip cannot be inspected"
+    return 0
+  }
+  head=$(git -C "$checkout" rev-parse "HEAD^{commit}" 2>/dev/null) || {
+    echo "$checkout: skipped: local checkout HEAD cannot be inspected"
+    return 0
+  }
+  if current=$(git -C "$checkout" symbolic-ref --quiet --short HEAD 2>/dev/null); then
+    if [ "$current" = "$default" ]; then
+      state="local default branch $default"
+    else
+      state="non-default branch $current"
+    fi
+  else
+    current=
+    state="detached HEAD"
+  fi
+  if [ -n "$status_raw" ]; then
+    untracked_count=$(printf '%s\n' "$status_raw" | awk 'substr($0, 1, 3) == "?? " { count++ } END { print count + 0 }')
+    echo "$checkout: STUCK: on $state with uncommitted changes ($untracked_count untracked) - needs attention"
+    return 0
+  fi
+  if [ "$current" != "$default" ]; then
+    if [ "$head" != "$LOCAL_DEFAULT_TIP" ]; then
+      echo "$checkout: STUCK: on $state at stale local tip $head instead of local $default $LOCAL_DEFAULT_TIP - needs attention"
+    else
+      echo "$checkout: STUCK: on $state instead of local default branch $default - needs attention"
+    fi
+    return 0
+  fi
+  if [ "$head" != "$LOCAL_DEFAULT_TIP" ]; then
+    echo "$checkout: STUCK: local default branch $default is stale at $head instead of $LOCAL_DEFAULT_TIP - needs attention"
+    return 0
+  fi
+  echo "$checkout: already current at local $default"
 }
 
 run_once() {
   local force=0 verbose=0 session=0 scheduled=0 prune=0 arg lock discovery identities hygiene checkout key tip_file last_file alert_file
-  local prior_tip now last due probe_ok output_file output line reinspected hygiene_failed=0 coverage_failed=0 status=0
+  local prior_tip previous_coverage retry_unhealthy now last due probe_ok output_file output line reinspected identity_output
+  local state_persisted hygiene_failed=0 coverage_failed=0 status=0
   local coverage=healthy
   for arg in "$@"; do
     case "$arg" in
@@ -788,6 +996,9 @@ run_once() {
   [ "$session" -eq 0 ] || prune=1
 
   ensure_state_root || return 1
+  previous_coverage=$(sed -n '2p' "$STATE_ROOT/coverage-health" 2>/dev/null || true)
+  retry_unhealthy=1
+  [ "$previous_coverage" != healthy ] || retry_unhealthy=0
   atomic_write "$STATE_ROOT/coverage-health" "$(date +%s)" running || return 1
   if ! fm_checkout_lock_prepare "$LOCK_ROOT"; then
     echo "error: unsafe checkout-refresh lock directory: $LOCK_ROOT" >&2
@@ -842,7 +1053,7 @@ run_once() {
   while IFS= read -r checkout; do
     [ -n "$checkout" ] || continue
     if ! reinspected=$(exact_git_root "$checkout") || [ "$reinspected" != "$checkout" ]; then
-      record_reinspection_failure "$checkout"
+      record_reinspection_failure "$checkout" || status=1
       coverage_failed=1
       continue
     fi
@@ -853,65 +1064,134 @@ run_once() {
       surface_skill_drafts "$checkout" "$key" 0 || hygiene_failed=1
     fi
   done < "$hygiene"
-  clear_stale_hygiene_alerts "$hygiene"
+  clear_stale_hygiene_alerts "$hygiene" || {
+    echo "checkout-refresh: skipped: stale hygiene alerts cannot be cleared" >&2
+    hygiene_failed=1
+  }
 
   while IFS= read -r checkout; do
     [ -n "$checkout" ] || continue
     if ! reinspected=$(exact_git_root "$checkout") || [ "$reinspected" != "$checkout" ]; then
-      record_reinspection_failure "$checkout"
+      record_reinspection_failure "$checkout" || status=1
       coverage_failed=1
       continue
     fi
-    git -C "$checkout" remote get-url origin >/dev/null 2>&1 || continue
     key=$(checkout_key "$checkout")
     tip_file="$STATE_ROOT/$key.tip"
     last_file="$STATE_ROOT/$key.last"
     alert_file="$STATE_ROOT/$key.alert"
+    if ! inspect_checkout_origin "$checkout"; then
+      output="$checkout: skipped: covered checkout origin identity cannot be inspected"
+      printf '%s\n' "$output"
+      if ! record_alert "$alert_file" "$checkout" "$output"; then
+        printf '%s: skipped: checkout alert cannot be persisted\n' "$checkout"
+        status=1
+      fi
+      coverage_failed=1
+      continue
+    fi
+    if ! identity_output=$(validate_covered_checkout_identity "$checkout" "$key" "$tip_file"); then
+      [ -n "$identity_output" ] || identity_output="$checkout: skipped: covered checkout identity validation failed"
+      printf '%s\n' "$identity_output"
+      if ! record_alert "$alert_file" "$checkout" "$identity_output"; then
+        printf '%s: skipped: checkout alert cannot be persisted\n' "$checkout"
+        status=1
+      fi
+      coverage_failed=1
+      continue
+    fi
+    if ! resolve_checkout_refresh_authority "$checkout"; then
+      output="$checkout: skipped: checkout refresh authority cannot be determined"
+      printf '%s\n' "$output"
+      if ! record_alert "$alert_file" "$checkout" "$output"; then
+        printf '%s: skipped: checkout alert cannot be persisted\n' "$checkout"
+        status=1
+      fi
+      coverage_failed=1
+      continue
+    fi
     last=$(read_epoch "$last_file")
     due=0
-    [ "$force" -eq 0 ] || due=1
-    [ "$((now - last))" -lt "$BACKSTOP" ] || due=1
-    probe_ok=0
-    if probe_upstream "$checkout"; then
-      probe_ok=1
-      prior_tip=$(sed -n '1,2p' "$tip_file" 2>/dev/null || true)
-      [ "$prior_tip" = "$PROBE_BRANCH"$'\n'"$PROBE_TIP" ] || due=1
-    else
+    probe_ok=1
+    if [ "$CHECKOUT_REFRESH_AUTHORITY" = local ]; then
       due=1
+    else
+      [ "$retry_unhealthy" -eq 0 ] || due=1
+      [ "$force" -eq 0 ] || due=1
+      [ "$((now - last))" -lt "$BACKSTOP" ] || due=1
+      probe_ok=0
+      if probe_upstream "$checkout"; then
+        probe_ok=1
+        prior_tip=$(sed -n '1,2p' "$tip_file" 2>/dev/null || true)
+        [ "$prior_tip" = "$PROBE_BRANCH"$'\n'"$PROBE_TIP" ] || due=1
+      else
+        due=1
+      fi
     fi
     if [ "$due" -eq 0 ]; then
-      [ ! -f "$alert_file" ] || coverage_failed=1
+      if [ -e "$alert_file" ] || [ -L "$alert_file" ]; then
+        coverage_failed=1
+        if [ ! -f "$alert_file" ] || [ -L "$alert_file" ]; then
+          printf '%s: skipped: checkout alert state is unsafe\n' "$checkout"
+          status=1
+        fi
+      fi
       continue
     fi
 
     output_file=$(mktemp "$STATE_ROOT/.sync.XXXXXX") || {
       output="$checkout: skipped: cannot allocate refresh output"
-      record_alert "$alert_file" "$checkout" "$output"
       printf '%s\n' "$output"
+      if ! record_alert "$alert_file" "$checkout" "$output"; then
+        printf '%s: skipped: checkout alert cannot be persisted\n' "$checkout"
+        status=1
+      fi
       coverage_failed=1
       continue
     }
-    if [ "$probe_ok" -eq 1 ]; then
+    if [ "$CHECKOUT_REFRESH_AUTHORITY" = local ]; then
+      inspect_local_checkout "$checkout" > "$output_file"
+    elif [ "$probe_ok" -eq 1 ]; then
       sync_checkout "$checkout" "$output_file" "$prune"
     else
       printf '%s: skipped: cannot probe live upstream default branch\n' "$checkout" > "$output_file"
     fi
     output=$(cat "$output_file")
     rm -f "$output_file"
-    atomic_write "$last_file" "$now"
-    if [ "$probe_ok" -eq 1 ]; then
-      atomic_write "$tip_file" "$PROBE_BRANCH" "$PROBE_TIP"
-    fi
 
     case "$output" in
       *': STUCK:'*|*': skipped:'*)
-        record_alert "$alert_file" "$checkout" "$output"
         printf '%s\n' "$output"
+        if ! record_alert "$alert_file" "$checkout" "$output"; then
+          printf '%s: skipped: checkout alert cannot be persisted\n' "$checkout"
+          status=1
+        fi
         coverage_failed=1
         ;;
       *)
-        rm -f "$alert_file"
-        if [ "$verbose" -eq 1 ]; then
+        state_persisted=1
+        if ! rm -f "$alert_file"; then
+          printf '%s: skipped: checkout alert cannot be cleared\n' "$checkout"
+          state_persisted=0
+        elif [ "$CHECKOUT_REFRESH_AUTHORITY" = local ]; then
+          if [ -z "$LOCAL_DEFAULT_BRANCH" ] || [ -z "$LOCAL_DEFAULT_TIP" ] \
+            || ! atomic_write "$tip_file" "$LOCAL_DEFAULT_BRANCH" "$LOCAL_DEFAULT_TIP"; then
+            printf '%s: skipped: local checkout tip state cannot be persisted\n' "$checkout"
+            state_persisted=0
+          fi
+        elif [ "$probe_ok" -eq 1 ] \
+          && ! atomic_write "$tip_file" "$PROBE_BRANCH" "$PROBE_TIP"; then
+          printf '%s: skipped: upstream checkout tip state cannot be persisted\n' "$checkout"
+          state_persisted=0
+        fi
+        if [ "$state_persisted" -eq 1 ] && ! atomic_write "$last_file" "$now"; then
+          printf '%s: skipped: checkout cadence state cannot be persisted\n' "$checkout"
+          state_persisted=0
+        fi
+        if [ "$state_persisted" -eq 0 ]; then
+          coverage_failed=1
+          status=1
+        elif [ "$verbose" -eq 1 ]; then
           printf '%s\n' "$output"
         else
           while IFS= read -r line; do
@@ -937,29 +1217,45 @@ EOF
 }
 
 preflight() {
-  local checkout=$1 output key output_file hygiene_found=0 canonical
+  local checkout=$1 output key output_file tip_file identity_output hygiene_found=0 canonical
   canonical=$(require_exact_git_root "$checkout" "checkout-refresh preflight target") || return 1
   checkout=$canonical
   ensure_lock_roots || return 1
   key=$(checkout_key "$checkout")
+  tip_file="$STATE_ROOT/$key.tip"
   surface_skill_drafts "$checkout" "$key" 1 || return 1
   hygiene_found=$HYGIENE_FOUND
   output_file=$(mktemp "$STATE_ROOT/.preflight.XXXXXX") || return 1
-  if git -C "$checkout" remote get-url origin >/dev/null 2>&1; then
+  if ! inspect_checkout_origin "$checkout"; then
+    rm -f "$output_file"
+    echo "$checkout: skipped: covered checkout origin identity cannot be inspected"
+    return 1
+  fi
+  if ! identity_output=$(validate_covered_checkout_identity "$checkout" "$key" "$tip_file"); then
+    rm -f "$output_file"
+    [ -n "$identity_output" ] || identity_output="$checkout: skipped: covered checkout identity validation failed"
+    printf '%s\n' "$identity_output"
+    return 1
+  fi
+  if ! resolve_checkout_refresh_authority "$checkout"; then
+    rm -f "$output_file"
+    echo "$checkout: skipped: checkout refresh authority cannot be determined"
+    return 1
+  fi
+  if [ "$CHECKOUT_REFRESH_AUTHORITY" = local ]; then
+    inspect_local_checkout "$checkout" > "$output_file"
+  else
     if probe_upstream "$checkout"; then
       sync_checkout "$checkout" "$output_file" 0
     else
       printf '%s: skipped: cannot probe live upstream default branch\n' "$checkout" > "$output_file"
     fi
-  else
-    sync_checkout "$checkout" "$output_file" 0
   fi
   output=$(cat "$output_file")
   rm -f "$output_file"
   printf '%s\n' "$output"
   [ "$hygiene_found" -eq 0 ] || return 1
-  case "$output" in *': STUCK:'*|*': skipped: fetch failed'*|*': skipped: refresh '*) return 1 ;; esac
-  case "$output" in *': skipped: cannot probe live upstream default branch'*) return 1 ;; esac
+  case "$output" in *': STUCK:'*|*': skipped:'*) return 1 ;; esac
   return 0
 }
 

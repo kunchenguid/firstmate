@@ -153,7 +153,7 @@ Secondmates are idle by default: after startup recovery reconciles only work alr
 When called with `FM_HOME=<this-firstmate-home>` or when `FM_HOME` is already set to the active firstmate home, metadata-routed `fm-send.sh` requests to a live `kind=secondmate` are prefixed with the from-firstmate marker from `bin/fm-marker-lib.sh`, so the secondmate returns terse answers through status lines and detailed answers through docs plus status pointers instead of replying only in its own chat.
 Explicit backend-target sends and direct human typing stay unmarked, so captain intervention in a secondmate pane remains conversational.
 After seeding a secondmate, `fm-backlog-handoff.sh` validates the fleet-specific handoff, then atomically delegates already-judged in-scope queued item moves to `tasks-axi mv` so the domain queue starts in the right place.
-Idle secondmate panes are healthy; teardown is explicit and refuses while the secondmate home has in-flight work unless the captain has approved discard with `--force`.
+Idle secondmate panes are healthy; teardown is explicit, proves the home identity and landed state before quiescing its endpoint, repeats those checks at the locked removal boundary, and refuses while the home has in-flight work unless the captain has approved discard with `--force`.
 
 Secondmate homes converge conservatively to the primary's version and declared inheritable configuration at launch and during locked session start.
 The [`secondmate-provisioning` skill](../.agents/skills/secondmate-provisioning/SKILL.md) owns the full guarded sync, propagation, nudge, and mid-session configuration-push contract.
@@ -232,12 +232,13 @@ Generalizable firstmate knowledge goes to shared tracked docs through the normal
 The installed checkout-refresh owner polls tracked upstream default-branch tips independently of Firstmate tasks and reacts to changes from any contributor.
 A 15-minute full-refresh backstop bounds drift when a signal is missed, while the locked session-start sweep, PR-based teardown, and merged-PR wake handling remain additional refresh paths.
 The covered set includes exact Git roots for the active home's project clones, Treehouse backing checkouts, configured paths, and matching-origin top-level clones such as a parallel checkout under `$HOME`.
-Uninspectable active-home projects, invalid checkout-refresh configuration, malformed or unreadable Treehouse state, changed or missing prior external clone identities, and failed skill inventories invalidate coverage health until discovery and hygiene inspection complete.
+Uninspectable active-home projects, unreadable or unenumerable scan roots and repository origins, invalid checkout-refresh configuration, malformed or unreadable Treehouse state, changed or missing prior checkout identities, unsafe alert state, and failed skill inventories invalidate coverage health until discovery and hygiene inspection complete.
 Treehouse skips dirty pool entries and fetches origin when Firstmate requests a durable task lease.
 Firstmate verifies each task lease and every leased or explicit secondmate home is clean, belongs to the requested repository, and matches the upstream tip before creating an endpoint, seeding, or launching.
 Remote-free local-only acquisitions use the requested repository's local default tip, while stale, dirty, changed, or unverifiable acquisitions are diagnosed and remain leased without destructive return.
 Rollback returns a task lease only after re-proving its repository identity, cleanliness, and expected detached tip.
 Clean default-branch clones fast-forward to `origin/<default>`, and a clean detached HEAD that holds no unique commits is re-attached to the default branch before the same fast-forward path runs.
+Registered local-only and remote-free clones are inspected without fetching and must be clean, on their local default branch, and at that branch's proven tip.
 The shared mutation path holds one canonical repository lock for refresh, Treehouse acquisition, and every process-tree-bounded Treehouse return, and proves the fetched default ref against the live upstream `HEAD`, while teardown requires its locked pre-fetch and post-fetch probes to agree, so scheduler, preflight, teardown, and merged-PR wake callers neither race nor trust stale `origin/HEAD`.
 Every signal probe also surfaces a new or growing inventory of non-ignored untracked files under repository skill directories in covered seed checkouts and Treehouse pool worktrees, while each full safe refresh quantifies all non-ignored untracked files in any dirty-checkout alarm.
 That early hygiene signal prevents local skill drafts from silently accumulating until an upstream commit claims the same paths.

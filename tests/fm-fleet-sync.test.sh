@@ -239,6 +239,40 @@ SH
   pass "unreadable git status cannot produce a clean refresh"
 }
 
+test_direct_and_batch_sync_reject_nested_repository_paths() {
+  local home clone nested out before status batch_home batch_nested batch_out batch_before batch_status
+  home=$(new_home)
+  clone=$(build_pair "$home" nested-direct)
+  advance_origin "$home" nested-direct C1
+  nested="$clone/child"
+  mkdir -p "$nested"
+  before=$(head_sha "$clone")
+
+  out=$(run_sync "$home" "$nested")
+  status=$?
+
+  assert_contains "$out" "target must be an exact canonical Git repository root" \
+    "direct fleet sync accepted a nested repository path"
+  [ "$status" -ne 0 ] || fail "direct fleet sync reported success for a nested repository path"
+  [ "$(head_sha "$clone")" = "$before" ] || fail "direct nested target mutated its enclosing repository"
+
+  batch_home=$(new_home)
+  fm_git_init_commit "$batch_home/projects"
+  batch_nested="$batch_home/projects/child"
+  mkdir -p "$batch_nested"
+  batch_before=$(head_sha "$batch_home/projects")
+
+  batch_out=$(run_sync "$batch_home")
+  batch_status=$?
+
+  assert_contains "$batch_out" "target must be an exact canonical Git repository root" \
+    "batch fleet sync accepted a nested repository path"
+  [ "$batch_status" -ne 0 ] || fail "batch fleet sync reported success for a nested repository path"
+  [ "$(head_sha "$batch_home/projects")" = "$batch_before" ] \
+    || fail "batch nested target mutated its enclosing repository"
+  pass "direct and batch sync reject nested repository paths"
+}
+
 test_detached_clean_ancestor_recovers() {
   local home clone out before after
   home=$(new_home)
@@ -813,7 +847,13 @@ if [ "${FM_TEST_FOCUSED:-}" = review-round-refresh-safety ]; then
   exit 0
 fi
 
+if [ "${FM_TEST_FOCUSED:-}" = review-round-refresh-followups ]; then
+  test_direct_and_batch_sync_reject_nested_repository_paths
+  exit 0
+fi
+
 test_status_failure_is_never_treated_as_clean
+test_direct_and_batch_sync_reject_nested_repository_paths
 test_detached_clean_ancestor_recovers
 test_detached_unique_commit_is_stuck_untouched
 test_detached_clean_ancestor_with_diverged_local_default_is_stuck_untouched

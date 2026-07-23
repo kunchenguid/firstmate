@@ -203,6 +203,43 @@ fm_backend_orca_capture() {  # <terminal-id> <lines>
   fm_backend_orca_json_text "$out"
 }
 
+fm_backend_orca_terminal_state() {  # <terminal-id> -> present|absent|unknown
+  local terminal=$1 out status
+  fm_backend_orca_tool_check || { printf 'unknown'; return 0; }
+  if out=$(orca terminal read --terminal "$terminal" --limit 1 --json 2>/dev/null); then
+    status=0
+  else
+    status=$?
+  fi
+  printf '%s' "$out" | node -e '
+const fs = require("fs");
+const status = Number(process.argv[1]);
+let data;
+try {
+  data = JSON.parse(fs.readFileSync(0, "utf8"));
+} catch (_) {
+  process.stdout.write("unknown");
+  process.exit(0);
+}
+if (data.ok === false) {
+  const code = data.error && data.error.code;
+  process.stdout.write(code === "terminal_handle_stale" ? "absent" : "unknown");
+  process.exit(0);
+}
+const r = data.result;
+const knownTerminal =
+  r && typeof r === "object" &&
+  ((r.terminal && typeof r.terminal === "object") ||
+   Array.isArray(r.tail) ||
+   ["text", "output", "content", "preview"].some((key) => typeof r[key] === "string"));
+if (status === 0 && data.ok !== false && knownTerminal) {
+  process.stdout.write("present");
+  process.exit(0);
+}
+process.stdout.write("unknown");
+' "$status"
+}
+
 fm_backend_orca_json_text() {  # <json>
   printf '%s' "$1" | node -e '
 const fs = require("fs");
@@ -331,6 +368,6 @@ fm_backend_orca_send_text_submit() {  # <terminal-id> <text> <retries> <enter-sl
 }
 
 fm_backend_orca_kill() {  # <terminal-id>
-  fm_backend_orca_tool_check || return 0
-  orca terminal close --terminal "$1" --json >/dev/null 2>&1 || true
+  fm_backend_orca_tool_check || return 1
+  fm_backend_orca_run_json orca terminal close --terminal "$1" --json
 }

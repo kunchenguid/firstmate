@@ -364,6 +364,7 @@ fm_backend_target_of_meta() {  # <meta-file>
   if [ "$backend" = orca ]; then
     terminal=$(fm_meta_get "$meta" terminal)
     [ -n "$terminal" ] && { printf '%s' "$terminal"; return 0; }
+    return 0
   elif [ "$backend" = tmux ]; then
     tmux_window_id=$(fm_meta_get "$meta" tmux_window_id)
     [ -n "$tmux_window_id" ] && { printf '%s' "$tmux_window_id"; return 0; }
@@ -734,6 +735,11 @@ fm_backend_target_state() {  # <backend> <target> [expected-label] [recorded-sco
   local workspace surface workspaces workspace_record title_record title_count expected_title resolved_workspace
   session=
   [ -n "$target" ] || { printf 'unknown'; return 0; }
+  if [ "$backend" = orca ]; then
+    fm_backend_source orca >/dev/null 2>&1 || { printf 'unknown'; return 0; }
+    fm_backend_orca_terminal_state "$target"
+    return 0
+  fi
   if fm_backend_target_exists "$backend" "$target" "$expected_label" "$recorded_scoped_target" 2>/dev/null; then
     printf 'present'
     return 0

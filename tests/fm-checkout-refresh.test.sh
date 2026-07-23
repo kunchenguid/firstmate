@@ -63,6 +63,17 @@ run_refresh() {
     "$ROOT/bin/fm-checkout-refresh.sh" "$@"
 }
 
+run_isolated_refresh() {
+  local home=$1 state_root=$2
+  shift 2
+  HOME="$home/user" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_CHECKOUT_REFRESH_STATE_ROOT="$state_root" \
+    FM_CHECKOUT_REFRESH_LOCK_ROOT="$state_root-locks" \
+    FM_TREEHOUSE_ROOT="$home/user/.treehouse" \
+    FM_CHECKOUT_REFRESH_TEST=1 \
+    "$ROOT/bin/fm-checkout-refresh.sh" "$@"
+}
+
 assert_refresh_state() {
   local state_root=$1 expected=$2 coverage_epoch coverage
   coverage_epoch=$(sed -n '1p' "$state_root/coverage-health" 2>/dev/null || true)
@@ -646,6 +657,182 @@ test_scheduler_liveness_is_scheduler_owned() {
   pass "only scheduler-owned runs advance the liveness heartbeat"
 }
 
+test_unreadable_scan_root_invalidates_coverage_health() {
+  local home="$TMP_ROOT/unreadable-scan-home" state_root="$TMP_ROOT/unreadable-scan-state"
+  local scan_root="$TMP_ROOT/unreadable-scan-root" canonical_scan project out status
+  project="$home/projects/local"
+  mkdir -p "$home/user" "$home/projects" "$home/config" "$state_root" "$scan_root"
+  fm_git_init_commit "$project"
+  printf 'scan %s\n' "$scan_root" > "$home/config/checkout-refresh"
+  canonical_scan=$(cd "$scan_root" && pwd -P)
+  chmod 111 "$scan_root"
+
+  out=$(run_isolated_refresh "$home" "$state_root" run-once --force 2>&1)
+  status=$?
+  chmod 700 "$scan_root"
+
+  [ "$status" -ne 0 ] || fail "unreadable scan root reported successful coverage"
+  assert_contains "$out" "scan root is unreadable or cannot be enumerated: $canonical_scan" \
+    "unreadable scan root was silently enumerated as empty"
+  assert_refresh_state "$state_root" unhealthy
+  pass "scan roots must be readable and successfully enumerable"
+}
+
+test_unreadable_scanned_origin_invalidates_coverage_health() {
+  local remote home="$TMP_ROOT/unreadable-origin-home" state_root="$TMP_ROOT/unreadable-origin-state"
+  local project scan_root candidate canonical_candidate fakebin real_git out status
+  remote=$(build_origin unreadable-scanned-origin)
+  project="$home/projects/seed"
+  scan_root="$home/shared"
+  candidate="$scan_root/candidate"
+  fakebin="$home/fakebin"
+  real_git=$(command -v git)
+  mkdir -p "$home/user" "$home/projects" "$home/config" "$state_root" "$scan_root" "$fakebin"
+  clone_from "$remote" "$project"
+  clone_from "$remote" "$candidate"
+  canonical_candidate=$(cd "$candidate" && pwd -P)
+  printf 'scan %s\n' "$scan_root" > "$home/config/checkout-refresh"
+  cat > "$fakebin/git" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = -C ] \
+  && [ "${2:-}" = "${FM_TEST_UNREADABLE_ORIGIN_TARGET:?}" ] \
+  && [ "${3:-}" = remote ] \
+  && [ "$#" -eq 3 ]; then
+  exit 74
+fi
+exec "${FM_TEST_REAL_GIT:?}" "$@"
+SH
+  chmod +x "$fakebin/git"
+
+  out=$(FM_TEST_REAL_GIT="$real_git" FM_TEST_UNREADABLE_ORIGIN_TARGET="$canonical_candidate" \
+    PATH="$fakebin:$PATH" \
+    run_isolated_refresh "$home" "$state_root" run-once --force 2>&1)
+  status=$?
+
+  [ "$status" -ne 0 ] || fail "unreadable scanned origin reported successful coverage"
+  assert_contains "$out" "discovered checkout origin identity cannot be inspected: $canonical_candidate" \
+    "unreadable scanned origin was treated as an irrelevant directory"
+  assert_refresh_state "$state_root" unhealthy
+  pass "scanned repository origin failures invalidate coverage"
+}
+
+test_failed_alert_persistence_forces_reinspection() {
+  local remote home="$TMP_ROOT/alert-persistence-home" state_root="$TMP_ROOT/alert-persistence-state"
+  local project key alert last_file out status
+  remote=$(build_origin alert-persistence)
+  project="$home/projects/alert-persistence"
+  mkdir -p "$home/user" "$home/projects" "$home/config" "$state_root"
+  clone_from "$remote" "$project"
+  run_isolated_refresh "$home" "$state_root" run-once --force >/dev/null
+  key=$(printf '%s' "$(cd "$project" && pwd -P)" | shasum -a 256 | awk '{print substr($1,1,24)}')
+  alert="$state_root/$key.alert"
+  last_file="$state_root/$key.last"
+  printf '%s\n' 1 > "$last_file"
+  mkdir "$alert"
+  printf '%s\n' dirty > "$project/untracked.txt"
+
+  out=$(run_isolated_refresh "$home" "$state_root" run-once --force 2>&1)
+  status=$?
+
+  [ "$status" -ne 0 ] || fail "failed checkout-alert persistence reported success"
+  assert_contains "$out" "STUCK:" "failed alert write did not surface the unsafe checkout"
+  assert_contains "$out" "checkout alert cannot be persisted" \
+    "failed alert write was not surfaced"
+  [ "$(cat "$last_file")" = 1 ] || fail "failed refresh advanced checkout cadence state"
+  assert_refresh_state "$state_root" unhealthy
+
+  out=$(run_isolated_refresh "$home" "$state_root" run-once 2>&1)
+  status=$?
+
+  [ "$status" -ne 0 ] || fail "run after failed alert persistence reported success"
+  assert_contains "$out" "STUCK:" \
+    "prior unhealthy coverage did not force pre-backstop reinspection"
+  assert_contains "$out" "checkout alert cannot be persisted" \
+    "second alert persistence failure was hidden"
+  [ "$(cat "$last_file")" = 1 ] || fail "failed retry advanced checkout cadence state"
+  assert_refresh_state "$state_root" unhealthy
+  pass "failed alert persistence cannot become healthy before reinspection"
+}
+
+test_local_authority_is_fully_inspected_and_tracks_origin_identity() {
+  local remote home="$TMP_ROOT/local-authority-home" state_root="$TMP_ROOT/local-authority-state"
+  local project initial out status fakebin real_git old_tip
+  remote=$(build_origin local-authority)
+  project="$home/projects/local-authority"
+  mkdir -p "$home/user" "$home/projects" "$home/config" "$home/data" "$state_root"
+  clone_from "$remote" "$project"
+  project=$(cd "$project" && pwd -P)
+  printf -- '- local-authority [local-only] - test project (added 2026-07-23)\n' > "$home/data/projects.md"
+  initial=$(git -C "$project" rev-parse HEAD)
+  advance_origin local-authority upstream-only-change
+
+  out=$(run_isolated_refresh "$home" "$state_root" run-once --force --verbose)
+
+  assert_contains "$out" "$project: already current at local main" \
+    "local-only checkout with origin did not use its local default tip"
+  assert_refresh_state "$state_root" healthy
+  [ "$(git -C "$project" rev-parse HEAD)" = "$initial" ] \
+    || fail "local-only checkout advanced to its remote"
+
+  printf '%s\n' draft > "$project/untracked.txt"
+  out=$(run_isolated_refresh "$home" "$state_root" run-once --force 2>&1)
+  assert_contains "$out" "with uncommitted changes (1 untracked)" \
+    "local-only untracked work was not surfaced"
+  assert_refresh_state "$state_root" unhealthy
+  status=0
+  run_isolated_refresh "$home" "$state_root" preflight "$project" >/dev/null 2>&1 || status=$?
+  [ "$status" -ne 0 ] || fail "local-only preflight accepted untracked work"
+  rm -f "$project/untracked.txt"
+
+  git -C "$project" checkout -q -b feature
+  out=$(run_isolated_refresh "$home" "$state_root" run-once --force 2>&1)
+  assert_contains "$out" "on non-default branch feature" \
+    "local-only non-default branch was not surfaced"
+  assert_refresh_state "$state_root" unhealthy
+  status=0
+  run_isolated_refresh "$home" "$state_root" preflight "$project" >/dev/null 2>&1 || status=$?
+  [ "$status" -ne 0 ] || fail "local-only preflight accepted a non-default branch"
+  git -C "$project" checkout -q main
+
+  commit_file "$project" local.txt local local-default-advance
+  old_tip=$(git -C "$project" rev-parse HEAD^)
+  git -C "$project" checkout -q --detach "$old_tip"
+  out=$(run_isolated_refresh "$home" "$state_root" run-once --force 2>&1)
+  assert_contains "$out" "detached HEAD at stale local tip" \
+    "stale local-only checkout was not surfaced"
+  assert_refresh_state "$state_root" unhealthy
+  git -C "$project" checkout -q main
+
+  fakebin="$home/fakebin"
+  real_git=$(command -v git)
+  mkdir -p "$fakebin"
+  cat > "$fakebin/git" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = -C ] \
+  && [ "${2:-}" = "${FM_TEST_LOCAL_STATUS_TARGET:?}" ] \
+  && [ "${3:-}" = status ]; then
+  exit 74
+fi
+exec "${FM_TEST_REAL_GIT:?}" "$@"
+SH
+  chmod +x "$fakebin/git"
+  out=$(FM_TEST_REAL_GIT="$real_git" FM_TEST_LOCAL_STATUS_TARGET="$project" \
+    PATH="$fakebin:$PATH" \
+    run_isolated_refresh "$home" "$state_root" run-once --force 2>&1)
+  assert_contains "$out" "local checkout cleanliness cannot be inspected" \
+    "unreadable local-only status was treated as clean"
+  assert_refresh_state "$state_root" unhealthy
+  rm -rf "$fakebin"
+
+  run_isolated_refresh "$home" "$state_root" run-once --force >/dev/null
+  git -C "$project" remote remove origin
+  out=$(run_isolated_refresh "$home" "$state_root" run-once --force 2>&1)
+  assert_contains "$out" "covered checkout origin identity drifted" \
+    "persisted local-only origin removal was not surfaced"
+  assert_refresh_state "$state_root" unhealthy
+  pass "local authority inspects safety and preserves origin identity"
+}
+
 test_dirty_nondefault_and_diverged_checkouts_are_untouched() {
   local remote dirty feature diverged dirty_head feature_head diverged_head out
   remote=$(build_origin safety)
@@ -1216,6 +1403,14 @@ if [ "${FM_TEST_FOCUSED:-}" = review-round-refresh-safety ]; then
   exit 0
 fi
 
+if [ "${FM_TEST_FOCUSED:-}" = review-round-refresh-followups ]; then
+  test_unreadable_scan_root_invalidates_coverage_health
+  test_unreadable_scanned_origin_invalidates_coverage_health
+  test_failed_alert_persistence_forces_reinspection
+  test_local_authority_is_fully_inspected_and_tracks_origin_identity
+  exit 0
+fi
+
 test_discovery_covers_projects_treehouse_external_and_config
 test_uninspectable_active_project_invalidates_coverage_health
 test_nested_active_project_invalidates_coverage_health
@@ -1234,6 +1429,10 @@ test_skill_inventory_failure_preserves_alert_and_invalidates_coverage
 test_lock_root_failure_invalidates_coverage_before_preparation
 test_reinspection_failure_invalidates_coverage_health
 test_scheduler_liveness_is_scheduler_owned
+test_unreadable_scan_root_invalidates_coverage_health
+test_unreadable_scanned_origin_invalidates_coverage_health
+test_failed_alert_persistence_forces_reinspection
+test_local_authority_is_fully_inspected_and_tracks_origin_identity
 test_dirty_nondefault_and_diverged_checkouts_are_untouched
 test_refresh_locks_recover_stale_owners_and_surface_contention
 test_session_mode_preserves_gone_branch_pruning
