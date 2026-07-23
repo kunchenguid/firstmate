@@ -314,8 +314,9 @@ Orca is an explicit legacy-recovery-only exception because this change creates n
 - A checkout without `origin` still uses the local default-tip proof without first proving that its registered project mode is explicitly `local-only`.
 - Home-scoped refresh owners still enumerate the shared user-level Treehouse root without filtering pool entries by owning `FM_HOME`.
 - Secondmate home acquisition still relies on Treehouse's dirty-entry skip and does not run Firstmate's `pool-preflight` before requesting its durable lease.
+- The rare SIGKILL lock-to-guard handoff race, exact wrapped-exit-code fidelity, and setup-failure diagnostic precision remain deferred under `clone-refresh-followup-edges`; current fail-safe behavior may retain or refuse work or require retry, but must not claim healthy coverage or discard unlanded work.
 
-One consolidated follow-up should tighten explicit local-only mode proof, add home-filtered pool ownership, and apply pool preflight to secondmate acquisition.
+The consolidated `clone-refresh-followup-edges` follow-up should tighten explicit local-only mode proof, add home-filtered pool ownership, apply pool preflight to secondmate acquisition, and close the three process-ownership edges above.
 These are bounded completeness limitations: coverage health fails closed when Treehouse enumeration cannot be proved, and rollback retains any worktree whose repository identity and expected detached tip cannot be re-proven, so the deferred formalization does not create a false healthy-coverage signal or a destructive data-loss path.
 
 On macOS, bootstrap reports `MISSING: checkout-refresh` until that home's per-user LaunchAgent is installed.
