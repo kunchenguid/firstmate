@@ -7,6 +7,8 @@ set -u
 
 TMP_ROOT=$(fm_test_tmproot fm-calm-pi-extension)
 EXT="$ROOT/.pi/extensions/fm-calm.ts"
+VISIBILITY="$ROOT/.pi/extensions/lib/fm-calm-visibility.ts"
+WATCH_EXT="$ROOT/.pi/extensions/fm-primary-pi-watch.ts"
 PI_PACKAGE_DIR=${FM_PI_PACKAGE_DIR:-"$(npm root -g 2>/dev/null)/@earendil-works/pi-coding-agent"}
 TMUX_SOCKET="fm-calm-$$"
 TMUX_SESSION="fm-calm-e2e"
@@ -31,25 +33,32 @@ wait_for_text() {
 }
 
 test_static_contract() {
-  local text
+  local text visibility watch
   assert_present "$EXT" "tracked Pi calm extension is missing"
+  assert_present "$VISIBILITY" "tracked Pi calm visibility policy is missing"
   text=$(cat "$EXT")
+  visibility=$(cat "$VISIBILITY")
+  watch=$(cat "$WATCH_EXT")
   assert_contains "$text" 'pi.registerCommand("calm"' "Pi calm extension does not register /calm"
   assert_contains "$text" 'pi.on("session_start"' "Pi calm extension does not reset on every session start"
-  assert_contains "$text" 'calm = false' "Pi calm extension does not default to visible tool activity"
-  assert_contains "$text" 'ctx.ui.setToolsExpanded(ctx.ui.getToolsExpanded())' "Pi calm extension does not redraw existing rows while preserving Ctrl+O state"
-  assert_contains "$text" 'ctx.ui.onTerminalInput' "Pi calm extension does not scope hiding to interactive rendering"
+  assert_contains "$text" 'setCalmPresentation(false)' "Pi calm extension does not default to stock transcript presentation"
+  assert_contains "$text" 'ctx.ui.setToolsExpanded(!expanded)' "Pi calm extension does not redraw existing custom entries"
+  assert_contains "$text" 'ctx.ui.setToolsExpanded(expanded)' "Pi calm extension does not restore Ctrl+O state after redraw"
+  assert_contains "$text" 'ctx.ui.setWorkingVisible(!active)' "Pi calm extension does not hide the live working row"
+  assert_contains "$text" 'ctx.ui.setHiddenThinkingLabel(active ? "" : undefined)' "Pi calm extension does not hide collapsed thinking labels"
+  assert_contains "$text" 'pi.on("input"' "Pi calm extension does not classify input-origin Firstmate injections"
+  assert_contains "$text" 'ctx.ui.onTerminalInput' "Pi calm extension does not scope export rendering to terminal submissions"
   assert_contains "$text" 'getKeybindings().matches(data, "tui.input.submit")' "Pi calm export boundary ignores the active submit keybinding"
   assert_contains "$text" 'input !== "/share"' "Pi calm export boundary does not cover /share"
-  assert_contains "$text" 'renderShell: "self"' "Pi calm extension cannot remove the complete tool shell"
-  assert_contains "$text" 'built-in read images and custom/third-party tool rows stay visible' "Pi calm command description does not disclose both visibility boundaries"
-  assert_contains "$text" 'built-in read images and custom/third-party tool rows remain visible' "Pi calm enabled status does not disclose both visibility boundaries"
-  assert_not_contains "$text" 'appendEntry' "Pi calm extension persists its session-local toggle"
-  assert_not_contains "$text" 'sendMessage' "Pi calm extension changes model context"
+  assert_contains "$text" 'renderShell: "self"' "Pi calm extension cannot remove complete built-in tool shells"
+  assert_contains "$visibility" 'CALM_VISIBLE_CLASSES' "Pi calm policy does not centralize its visibility allowlist"
+  assert_contains "$visibility" 'classifyFirstmateSyntheticInput' "Pi calm policy does not centralize synthetic-input classification"
+  assert_contains "$watch" 'calmHides("assistant-tool-call")' "Firstmate watcher tool does not participate in Calm presentation"
+  assert_contains "$watch" 'renderShell: "self"' "Firstmate watcher tool cannot remove its complete shell"
   for name in Read Bash Edit Write Grep Find Ls; do
     assert_contains "$text" "create${name}ToolDefinition" "Pi calm extension does not wrap the $name built-in"
   done
-  pass "Pi calm extension has the default-off, redraw, seven-built-in text-row, and explicit limitation contract"
+  pass "Pi calm extension has one default-off visibility policy, supported redraw controls, and the Firstmate watcher-tool integration"
 }
 
 test_rendering_and_session_lifecycle() {
@@ -63,17 +72,19 @@ test_rendering_and_session_lifecycle() {
     return 0
   fi
   version=$(node -p "require('$PI_PACKAGE_DIR/package.json').version")
-  [ "$version" = "0.80.10" ] || fail "Pi calm compatibility assumptions require Pi 0.80.10, found $version"
+  [ "$version" = "0.81.1" ] || fail "Pi calm compatibility assumptions require Pi 0.81.1, found $version"
 
   fixture="$TMP_ROOT/renderer"
-  mkdir -p "$fixture/node_modules/@earendil-works"
+  mkdir -p "$fixture/home" "$fixture/lib" "$fixture/node_modules/@earendil-works"
   cp "$EXT" "$fixture/fm-calm.ts"
+  cp "$VISIBILITY" "$fixture/lib/fm-calm-visibility.ts"
+  cp "$WATCH_EXT" "$fixture/fm-primary-pi-watch.ts"
   ln -s "$PI_PACKAGE_DIR" "$fixture/node_modules/@earendil-works/pi-coding-agent"
   ln -s "$PI_PACKAGE_DIR/node_modules/@earendil-works/pi-tui" "$fixture/node_modules/@earendil-works/pi-tui"
   ln -s "$PI_PACKAGE_DIR/node_modules/typebox" "$fixture/node_modules/typebox"
   printf '%s\n' '{"type":"module"}' >"$fixture/package.json"
 
-  out=$(cd "$fixture" && EXT="$fixture/fm-calm.ts" PI_PACKAGE_DIR="$PI_PACKAGE_DIR" node --input-type=module 2>&1 <<'JS'
+  out=$(cd "$fixture" && EXT="$fixture/fm-calm.ts" WATCH_EXT="$fixture/fm-primary-pi-watch.ts" FM_HOME="$fixture/home" PI_PACKAGE_DIR="$PI_PACKAGE_DIR" node --input-type=module 2>&1 <<'JS'
 import { writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
@@ -89,16 +100,38 @@ setCapabilities({ images: null, trueColor: true, hyperlinks: false });
 
 const tools = [];
 const handlers = new Map();
+const entryRenderers = new Map();
+const appendedEntries = [];
+const sentMessages = [];
+const eventListeners = new Map();
 let calmCommand;
 const pi = {
-  appendEntry() {
-    throw new Error("calm mode must not persist extension state");
+  events: {
+    emit(name, data) {
+      for (const listener of eventListeners.get(name) ?? []) listener(data);
+    },
+    on(name, listener) {
+      const listeners = eventListeners.get(name) ?? [];
+      listeners.push(listener);
+      eventListeners.set(name, listeners);
+    },
+  },
+  appendEntry(customType, data) {
+    appendedEntries.push({ customType, data });
+  },
+  sendMessage(message, options) {
+    sentMessages.push({ message, options });
   },
   on(event, handler) {
-    handlers.set(event, handler);
+    const eventHandlers = handlers.get(event) ?? [];
+    eventHandlers.push(handler);
+    handlers.set(event, eventHandlers);
   },
   registerCommand(name, command) {
     if (name === "calm") calmCommand = command;
+  },
+  registerEntryRenderer(customType, renderer) {
+    entryRenderers.set(customType, renderer);
   },
   registerTool(tool) {
     tools.push(tool);
@@ -106,20 +139,62 @@ const pi = {
 };
 const extension = await import(`${pathToFileURL(process.env.EXT).href}?test=${Date.now()}`);
 extension.default(pi);
+const visibility = await import(`${pathToFileURL(`${process.cwd()}/lib/fm-calm-visibility.ts`).href}?policy=${Date.now()}`);
 
 const names = tools.map((tool) => tool.name);
 const expectedNames = ["read", "bash", "edit", "write", "grep", "find", "ls"];
 if (JSON.stringify(names) !== JSON.stringify(expectedNames)) {
   throw new Error(`unexpected wrapped built-ins: ${names.join(",")}`);
 }
-if (!calmCommand || !handlers.has("session_start")) {
-  throw new Error("calm command or session lifecycle handler was not registered");
+if (!calmCommand || !handlers.has("session_start") || !handlers.has("input")) {
+  throw new Error("calm command, input classifier, or session lifecycle handler was not registered");
 }
 if (
   calmCommand.description !==
-  "Toggle built-in call and text-result rows; built-in read images and custom/third-party tool rows stay visible."
+  "Toggle Firstmate's supported conversation-only transcript presentation."
 ) {
-  throw new Error(`calm command description does not disclose both visibility boundaries: ${calmCommand.description}`);
+  throw new Error(`unexpected calm command description: ${calmCommand.description}`);
+}
+
+for (const itemClass of visibility.CALM_TRANSCRIPT_CLASSES) {
+  const visible = visibility.calmTranscriptClassIsVisible(itemClass);
+  const expected = itemClass === "genuine-user-prompt" || itemClass === "genuine-agent-response";
+  if (visible !== expected) {
+    throw new Error(`Calm allowlist classified ${itemClass} as visible=${visible}`);
+  }
+}
+const watcherMessage =
+  "FIRSTMATE WATCHER WAKE: signal: /tmp/probe.status\n\n" +
+  "Run bin/fm-wake-drain.sh first and handle the queued wake. Watcher continuity is extension-owned.";
+const turnEndMessage =
+  "TURN WOULD END BLIND - supervision is off. " +
+  "The watcher cycle is missing, failed, or unhealthy. " +
+  "Follow the harness recovery instruction below before ending the turn.\n\n" +
+  "watcher: FAILED - probe";
+const positiveSyntheticFixtures = [
+  ["session-start", "Run `bin/fm-session-start.sh` now, exactly once, before executing any other instructions."],
+  ["watcher", watcherMessage],
+  ["turn-end-guard", turnEndMessage],
+  ["away-supervisor", "\u2063Supervisor escalate (1 event(s)): done"],
+  ["from-firstmate", "[fm-from-firstmate]\u2063[fm-corr:abc] inspect the report"],
+];
+for (const [kind, content] of positiveSyntheticFixtures) {
+  if (visibility.classifyFirstmateSyntheticInput(content) !== kind) {
+    throw new Error(`Firstmate synthetic fixture was not classified as ${kind}`);
+  }
+}
+const nearMissGenuineFixtures = [
+  "Run bin/fm-session-start.sh now, exactly once, before executing any other instructions.",
+  "FIRSTMATE WATCHER WAKE: can you explain this phrase?",
+  "FIRSTMATE WATCHER WAKE: signal: /tmp/probe.status\n\nRun bin/fm-wake-drain.sh when convenient.",
+  "TURN WOULD END BLIND - can you make this warning friendlier?",
+  "Supervisor escalate (1 event(s)): is this wording clear?",
+  "[fm-from-firstmate] inspect this visible label",
+];
+for (const content of nearMissGenuineFixtures) {
+  if (visibility.classifyFirstmateSyntheticInput(content) !== undefined) {
+    throw new Error(`genuine near-miss input was hidden: ${content}`);
+  }
 }
 
 writeFileSync("sample.txt", "alpha\n");
@@ -156,6 +231,54 @@ for (const [name, args, result] of cases) {
     throw new Error(`${name} expanded rendering changed while calm mode was off`);
   }
   rows.push({ name, baseline, actual });
+}
+
+const watchPi = {
+  ...pi,
+  appendEntry() {},
+  sendMessage() {},
+  registerCommand() {},
+  registerEntryRenderer() {},
+};
+const watchExtension = await import(`${pathToFileURL(process.env.WATCH_EXT).href}?test=${Date.now()}`);
+watchExtension.default(watchPi);
+const watchTool = tools.find((tool) => tool.name === "fm_watch_arm_pi");
+if (!watchTool) throw new Error("Firstmate watcher extension did not register fm_watch_arm_pi");
+const stockWatchTool = { ...watchTool };
+delete stockWatchTool.renderCall;
+delete stockWatchTool.renderResult;
+delete stockWatchTool.renderShell;
+const watchArgs = {};
+const watchResult = {
+  content: [{ type: "text", text: "watcher: started Pi extension arm child 1" }],
+  details: { ok: true, message: "watcher: started Pi extension arm child 1" },
+  isError: false,
+};
+const watchBaseline = new ToolExecutionComponent(
+  "fm_watch_arm_pi",
+  "watch-baseline",
+  watchArgs,
+  { showImages: false },
+  stockWatchTool,
+  renderUi,
+  process.cwd(),
+);
+const watchActual = new ToolExecutionComponent(
+  "fm_watch_arm_pi",
+  "watch-actual",
+  watchArgs,
+  { showImages: false },
+  watchTool,
+  renderUi,
+  process.cwd(),
+);
+for (const row of [watchBaseline, watchActual]) {
+  row.markExecutionStarted();
+  row.setArgsComplete();
+  row.updateResult(watchResult);
+}
+if (JSON.stringify(watchActual.render(100)) !== JSON.stringify(watchBaseline.render(100))) {
+  throw new Error("Firstmate watcher tool changed stock rendering while Calm was off");
 }
 
 const customDefinition = {
@@ -217,9 +340,11 @@ if (!imageVisibleBefore.join("\n").includes("\x1b]1337;File=")) {
 }
 
 let expanded = true;
-let notification = "";
 let editorText = "";
 let terminalInputHandler;
+let workingVisible;
+let hiddenThinkingLabel = "unset";
+const statuses = new Map();
 const sessionEntries = [{ type: "message", message: { role: "toolResult", content: "kept" } }];
 const entriesBefore = JSON.stringify(sessionEntries);
 const commandContext = {
@@ -233,20 +358,78 @@ const commandContext = {
         if (terminalInputHandler === handler) terminalInputHandler = undefined;
       };
     },
+    setHiddenThinkingLabel(value) {
+      hiddenThinkingLabel = value;
+    },
+    setStatus(key, value) {
+      statuses.set(key, value);
+    },
     setToolsExpanded(value) {
-      if (value !== expanded) throw new Error("/calm changed the ordinary Ctrl+O expansion state");
+      expanded = value;
       for (const row of rows) row.actual.setExpanded(value);
+      watchActual.setExpanded(value);
       customRow.setExpanded(value);
       imageRow.setExpanded(value);
     },
-    notify(message) {
-      notification = message;
+    setWorkingVisible(value) {
+      workingVisible = value;
     },
   },
 };
 
-await handlers.get("session_start")({ reason: "startup" }, commandContext);
+await handlers.get("session_start")[0]({ reason: "startup" }, commandContext);
+if (workingVisible !== true || hiddenThinkingLabel !== undefined) {
+  throw new Error("session start did not restore Pi's stock working and thinking presentation");
+}
+const inputHandler = handlers.get("input")[0];
+const syntheticResult = await inputHandler({
+  text: watcherMessage,
+  images: undefined,
+  source: "extension",
+  streamingBehavior: "followUp",
+}, commandContext);
+if (syntheticResult?.action !== "handled" || appendedEntries.length !== 1 || sentMessages.length !== 1) {
+  throw new Error("known Firstmate synthetic input was not rerouted through presentation-only delivery");
+}
+if (
+  sentMessages[0].message.content !== watcherMessage ||
+  sentMessages[0].message.display !== false ||
+  sentMessages[0].options.triggerTurn !== true ||
+  sentMessages[0].options.deliverAs !== "followUp"
+) {
+  throw new Error("synthetic input delivery or context semantics changed");
+}
+const presentationRenderer = entryRenderers.get("firstmate-synthetic-input-presentation");
+if (!presentationRenderer) throw new Error("synthetic presentation renderer was not registered");
+const presentationEntry = {
+  data: { content: watcherMessage, kind: "watcher" },
+};
+if (!presentationRenderer(presentationEntry, { expanded }, theme)?.render(100).join("\n").includes("FIRSTMATE WATCHER WAKE")) {
+  throw new Error("Calm-off synthetic presentation did not use a stock user-message row");
+}
+const appendedBeforeNearMiss = appendedEntries.length;
+const nearMissResult = await inputHandler({
+  text: nearMissGenuineFixtures[1],
+  images: undefined,
+  source: "interactive",
+  streamingBehavior: undefined,
+}, commandContext);
+if (nearMissResult?.action !== "continue" || appendedEntries.length !== appendedBeforeNearMiss) {
+  throw new Error("genuine near-miss input was intercepted");
+}
+
 await calmCommand.handler("", commandContext);
+if (expanded !== true || workingVisible !== false || hiddenThinkingLabel !== "" || statuses.get("firstmate-calm") !== "calm transcript") {
+  throw new Error("Calm did not apply its supported working, thinking, and footer presentation controls");
+}
+if (presentationRenderer(presentationEntry, { expanded }, theme) !== undefined) {
+  throw new Error("Calm left a synthetic Firstmate presentation entry visible");
+}
+for (const { name, actual } of rows) {
+  if (actual.render(100).length !== 0) {
+    throw new Error(`${name} was not hidden before export rendering`);
+  }
+}
 async function assertStockHtmlRendering(command, submitData) {
   editorText = command;
   terminalInputHandler(submitData);
@@ -255,7 +438,11 @@ async function assertStockHtmlRendering(command, submitData) {
     theme,
     cwd: process.cwd(),
   });
-  for (const [name, args, result] of cases.filter(([toolName]) => toolName === "grep" || toolName === "find")) {
+  const exportCases = [
+    ...cases.filter(([toolName]) => toolName === "grep" || toolName === "find"),
+    ["fm_watch_arm_pi", watchArgs, watchResult],
+  ];
+  for (const [name, args, result] of exportCases) {
     const toolCallId = `${command}-${name}`;
     const callHtml = htmlRenderer.renderCall(toolCallId, name, args);
     const resultHtml = htmlRenderer.renderResult(
@@ -301,13 +488,10 @@ if (calmImageOutput.includes("pixel.png")) {
   throw new Error("calm mode left the built-in read call shell beside the disclosed image output");
 }
 if (!customRow.render(100).join("\n").includes("CUSTOM_CALL")) {
-  throw new Error("calm mode incorrectly claimed or applied custom-tool coverage");
+  throw new Error("calm mode incorrectly claimed or applied generic custom-tool coverage");
 }
-if (
-  notification !==
-  "Tool activity is hidden where supported; built-in read images and custom/third-party tool rows remain visible."
-) {
-  throw new Error(`unexpected hidden status: ${notification}`);
+if (watchActual.render(100).length !== 0) {
+  throw new Error("Calm left the fm_watch_arm_pi call/result shell visible");
 }
 if (JSON.stringify(sessionEntries) !== entriesBefore) {
   throw new Error("calm mode changed session entries or model context");
@@ -325,13 +509,19 @@ for (const { name, baseline, actual } of rows) {
 if (JSON.stringify(imageRow.render(100)) !== JSON.stringify(imageVisibleBefore)) {
   throw new Error("built-in read image row did not restore its ordinary call shell and image output");
 }
-if (notification !== "Tool activity is visible.") {
-  throw new Error(`unexpected visible status: ${notification}`);
+if (JSON.stringify(watchActual.render(100)) !== JSON.stringify(watchBaseline.render(100))) {
+  throw new Error("fm_watch_arm_pi did not restore its stock call/result shell");
+}
+if (workingVisible !== true || hiddenThinkingLabel !== undefined || statuses.get("firstmate-calm") !== undefined) {
+  throw new Error("turning Calm off did not restore stock presentation controls");
+}
+if (!presentationRenderer(presentationEntry, { expanded }, theme)) {
+  throw new Error("turning Calm off did not restore synthetic user-row presentation");
 }
 
 for (const reason of ["startup", "new", "resume", "fork", "reload"]) {
   await calmCommand.handler("", commandContext);
-  await handlers.get("session_start")({ reason }, commandContext);
+  await handlers.get("session_start")[0]({ reason }, commandContext);
   for (const row of rows) row.actual.setExpanded(expanded);
   for (const { name, baseline, actual } of rows) {
     if (JSON.stringify(actual.render(100)) !== JSON.stringify(baseline.render(100))) {
@@ -356,7 +546,7 @@ JS
   status=$?
   [ "$status" -eq 0 ] || fail "Pi calm renderer and lifecycle contract failed: $out"
   [ -z "$out" ] || fail "Pi calm renderer test printed output: $out"
-  pass "Pi calm preserves standard rendering and execution, hides seven built-in call and text rows, keeps read images and custom rows visible, and resets per session"
+  pass "Pi calm centralizes transcript visibility, preserves execution/export data, hides built-ins plus fm_watch_arm_pi and Firstmate injections, and resets per session"
 }
 
 test_interactive_terminal_e2e() {
@@ -366,7 +556,7 @@ test_interactive_terminal_e2e() {
     return 0
   fi
   version=$(pi --version 2>/dev/null || true)
-  [ "$version" = "0.80.10" ] || fail "Pi calm interactive E2E requires Pi 0.80.10, found $version"
+  [ "$version" = "0.81.1" ] || fail "Pi calm interactive E2E requires Pi 0.81.1, found $version"
 
   project="$TMP_ROOT/e2e-project"
   config="$TMP_ROOT/e2e-config"
@@ -377,26 +567,37 @@ test_interactive_terminal_e2e() {
   hidden_snapshot="$TMP_ROOT/hidden.txt"
   export_snapshot="$TMP_ROOT/export.txt"
   restored_snapshot="$TMP_ROOT/restored.txt"
-  mkdir -p "$project/.pi/extensions" "$config"
+  mkdir -p "$project/.pi/extensions/lib" "$config"
   cp "$EXT" "$project/.pi/extensions/fm-calm.ts"
+  cp "$VISIBILITY" "$project/.pi/extensions/lib/fm-calm-visibility.ts"
+  cp "$WATCH_EXT" "$project/.pi/extensions/fm-primary-pi-watch.ts"
   printf '%s\n' '{"tui.input.submit":"alt+s"}' >"$config/keybindings.json"
+  printf '%s\n' '{"hideThinkingBlock":true}' >"$config/settings.json"
   now=$(date -u +%Y-%m-%dT%H:%M:%S.000Z)
   cat >"$session_file" <<JSON
 {"type":"session","version":3,"id":"11111111-1111-4111-8111-111111111111","timestamp":"$now","cwd":"$project"}
 {"type":"message","id":"a0000001","parentId":null,"timestamp":"$now","message":{"role":"user","content":[{"type":"text","text":"Show a deterministic tool example."}],"timestamp":1}}
-{"type":"message","id":"a0000002","parentId":"a0000001","timestamp":"$now","message":{"role":"assistant","content":[{"type":"text","text":"I will run one command."},{"type":"toolCall","id":"call_calm_e2e","name":"bash","arguments":{"command":"printf 'CALM_E2E_OUTPUT\\n'"}}],"api":"anthropic-messages","provider":"anthropic","model":"claude-sonnet-4-5","usage":{"input":1,"output":1,"cacheRead":0,"cacheWrite":0,"totalTokens":2,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"toolUse","timestamp":2}}
+{"type":"message","id":"a0000002","parentId":"a0000001","timestamp":"$now","message":{"role":"assistant","content":[{"type":"thinking","thinking":"first internal reasoning block"},{"type":"text","text":"I will run one command."},{"type":"toolCall","id":"call_calm_e2e","name":"bash","arguments":{"command":"printf 'CALM_E2E_OUTPUT\\n'"}}],"api":"anthropic-messages","provider":"anthropic","model":"claude-sonnet-4-5","usage":{"input":1,"output":1,"cacheRead":0,"cacheWrite":0,"totalTokens":2,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"toolUse","timestamp":2}}
 {"type":"message","id":"a0000003","parentId":"a0000002","timestamp":"$now","message":{"role":"toolResult","toolCallId":"call_calm_e2e","toolName":"bash","content":[{"type":"text","text":"CALM_E2E_OUTPUT"}],"details":{},"isError":false,"timestamp":3}}
-{"type":"message","id":"a0000004","parentId":"a0000003","timestamp":"$now","message":{"role":"assistant","content":[{"type":"toolCall","id":"call_grep_e2e","name":"grep","arguments":{"pattern":"CALM_EXPORT_GREP","path":"."}},{"type":"toolCall","id":"call_find_e2e","name":"find","arguments":{"pattern":"CALM_EXPORT_FIND*","path":"."}}],"api":"anthropic-messages","provider":"anthropic","model":"claude-sonnet-4-5","usage":{"input":2,"output":1,"cacheRead":0,"cacheWrite":0,"totalTokens":3,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"toolUse","timestamp":4}}
+{"type":"message","id":"a0000004","parentId":"a0000003","timestamp":"$now","message":{"role":"assistant","content":[{"type":"thinking","thinking":"second internal reasoning block"},{"type":"toolCall","id":"call_grep_e2e","name":"grep","arguments":{"pattern":"CALM_EXPORT_GREP","path":"."}},{"type":"toolCall","id":"call_find_e2e","name":"find","arguments":{"pattern":"CALM_EXPORT_FIND*","path":"."}}],"api":"anthropic-messages","provider":"anthropic","model":"claude-sonnet-4-5","usage":{"input":2,"output":1,"cacheRead":0,"cacheWrite":0,"totalTokens":3,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"toolUse","timestamp":4}}
 {"type":"message","id":"a0000005","parentId":"a0000004","timestamp":"$now","message":{"role":"toolResult","toolCallId":"call_grep_e2e","toolName":"grep","content":[{"type":"text","text":"sample.txt:1:CALM_EXPORT_GREP"}],"details":{},"isError":false,"timestamp":5}}
 {"type":"message","id":"a0000006","parentId":"a0000005","timestamp":"$now","message":{"role":"toolResult","toolCallId":"call_find_e2e","toolName":"find","content":[{"type":"text","text":"CALM_EXPORT_FIND.txt"}],"details":{},"isError":false,"timestamp":6}}
-{"type":"message","id":"a0000007","parentId":"a0000006","timestamp":"$now","message":{"role":"assistant","content":[{"type":"text","text":"The deterministic tool example is complete."}],"api":"anthropic-messages","provider":"anthropic","model":"claude-sonnet-4-5","usage":{"input":2,"output":1,"cacheRead":0,"cacheWrite":0,"totalTokens":3,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"stop","timestamp":7}}
+{"type":"message","id":"a0000007","parentId":"a0000006","timestamp":"$now","message":{"role":"assistant","content":[{"type":"thinking","thinking":"third internal reasoning block"},{"type":"toolCall","id":"call_watch_e2e","name":"fm_watch_arm_pi","arguments":{}}],"api":"anthropic-messages","provider":"anthropic","model":"claude-sonnet-4-5","usage":{"input":2,"output":1,"cacheRead":0,"cacheWrite":0,"totalTokens":3,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"toolUse","timestamp":7}}
+{"type":"message","id":"a0000008","parentId":"a0000007","timestamp":"$now","message":{"role":"toolResult","toolCallId":"call_watch_e2e","toolName":"fm_watch_arm_pi","content":[{"type":"text","text":"watcher: started Pi extension arm child 1"}],"details":{"ok":true,"message":"watcher: started Pi extension arm child 1"},"isError":false,"timestamp":8}}
+{"type":"custom","id":"a0000009","parentId":"a0000008","timestamp":"$now","customType":"firstmate-synthetic-input-presentation","data":{"content":"FIRSTMATE WATCHER WAKE: signal: /tmp/probe.status\\n\\nRun bin/fm-wake-drain.sh first and handle the queued wake. Watcher continuity is extension-owned.","kind":"watcher"}}
+{"type":"custom_message","id":"a0000010","parentId":"a0000009","timestamp":"$now","customType":"firstmate-synthetic-input","content":"FIRSTMATE WATCHER WAKE: signal: /tmp/probe.status\\n\\nRun bin/fm-wake-drain.sh first and handle the queued wake. Watcher continuity is extension-owned.","display":false,"details":{"kind":"watcher"}}
+{"type":"message","id":"a0000011","parentId":"a0000010","timestamp":"$now","message":{"role":"user","content":[{"type":"text","text":"FIRSTMATE WATCHER WAKE: can you explain this phrase?"}],"timestamp":11}}
+{"type":"message","id":"a0000012","parentId":"a0000011","timestamp":"$now","message":{"role":"assistant","content":[{"type":"text","text":"The deterministic tool example is complete."}],"api":"anthropic-messages","provider":"anthropic","model":"claude-sonnet-4-5","usage":{"input":2,"output":1,"cacheRead":0,"cacheWrite":0,"totalTokens":3,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"stop","timestamp":12}}
 JSON
 
-  tmux -L "$TMUX_SOCKET" new-session -d -s "$TMUX_SESSION" -x 120 -y 40 \
+  tmux -L "$TMUX_SOCKET" new-session -d -s "$TMUX_SESSION" -x 180 -y 44 \
     "cd '$project' && env PI_CODING_AGENT_DIR='$config' PI_OFFLINE=1 pi --approve --no-skills --no-prompt-templates --no-context-files --session '$session_file'; rc=\$?; printf '\nPI_EXIT=%s\n' \"\$rc\"; sleep 30"
   wait_for_text "$default_snapshot" "The deterministic tool example is complete." \
     || fail "Pi calm E2E did not reach the restored session transcript"
   assert_contains "$(cat "$default_snapshot")" "CALM_E2E_OUTPUT" "calm mode was not off by default"
+  assert_contains "$(cat "$default_snapshot")" "fm_watch_arm_pi" "Calm-off transcript did not show the Firstmate watcher tool"
+  assert_contains "$(cat "$default_snapshot")" "FIRSTMATE WATCHER WAKE: signal: /tmp/probe.status" "Calm-off transcript did not show the synthetic Firstmate presentation row"
+  assert_contains "$(cat "$default_snapshot")" "Thinking..." "reasoning fixture did not render Pi's collapsed thinking label"
   assert_contains "$(cat "$default_snapshot")" "fm-calm.ts" "project-local Pi calm extension did not auto-load"
   hash_before=$(shasum -a 256 "$session_file" | awk '{print $1}')
 
@@ -407,12 +608,19 @@ JSON
 
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l "/calm"
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" M-s
-  wait_for_text "$hidden_snapshot" "Tool activity is hidden where supported; built-in read images and custom/third-party tool rows remain visible." \
-    || fail "/calm did not report hidden tool activity and its visibility boundaries"
+  wait_for_text "$hidden_snapshot" "calm transcript" \
+    || fail "/calm did not activate its footer status"
   assert_not_contains "$(cat "$hidden_snapshot")" "CALM_E2E_OUTPUT" "/calm left tool result output in the transcript"
   assert_not_contains "$(cat "$hidden_snapshot")" "CALM_EXPORT_GREP" "/calm left the grep row in the transcript"
   assert_not_contains "$(cat "$hidden_snapshot")" "CALM_EXPORT_FIND" "/calm left the find row in the transcript"
   assert_not_contains "$(cat "$hidden_snapshot")" "\$ printf" "/calm left the tool-call row in the transcript"
+  assert_not_contains "$(cat "$hidden_snapshot")" "Thinking..." "/calm left collapsed thinking labels in the transcript"
+  assert_not_contains "$(cat "$hidden_snapshot")" "fm_watch_arm_pi" "/calm left the Firstmate watcher tool call shell in the transcript"
+  assert_not_contains "$(cat "$hidden_snapshot")" "watcher: started Pi extension arm child" "/calm left the Firstmate watcher tool result in the transcript"
+  assert_not_contains "$(cat "$hidden_snapshot")" "FIRSTMATE WATCHER WAKE: signal: /tmp/probe.status" "/calm left a synthetic Firstmate user-role presentation in the transcript"
+  assert_not_contains "$(cat "$hidden_snapshot")" "Tool activity is hidden where supported" "/calm appended its own command-status row"
+  assert_contains "$(cat "$hidden_snapshot")" "Show a deterministic tool example." "/calm removed a genuine user prompt"
+  assert_contains "$(cat "$hidden_snapshot")" "FIRSTMATE WATCHER WAKE: can you explain this phrase?" "/calm hid a genuine near-miss user prompt"
   assert_contains "$(cat "$hidden_snapshot")" "I will run one command." "/calm removed assistant conversation before a tool"
   assert_contains "$(cat "$hidden_snapshot")" "The deterministic tool example is complete." "/calm removed assistant conversation after a tool"
 
@@ -420,29 +628,34 @@ JSON
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" M-s
   wait_for_text "$export_snapshot" "Session exported to: $export_file" \
     || fail "/export did not complete while calm mode was on"
-  node - "$export_file" <<'JS' || fail "calm-mode HTML export omitted grep or find rendering"
+  node - "$export_file" <<'JS' || fail "calm-mode HTML export omitted hidden tool or synthetic-message data"
 const html = require("node:fs").readFileSync(process.argv[2], "utf8");
 const match = html.match(/<script id="session-data" type="application\/json">([^<]+)<\/script>/);
 if (!match) process.exit(1);
 const session = JSON.parse(Buffer.from(match[1], "base64").toString("utf8"));
-for (const id of ["call_grep_e2e", "call_find_e2e"]) {
+for (const id of ["call_grep_e2e", "call_find_e2e", "call_watch_e2e"]) {
   const rendered = session.renderedTools?.[id];
   if (!rendered?.callHtml || !rendered?.resultHtmlExpanded) process.exit(1);
 }
+const entries = session.session?.entries ?? session.entries ?? [];
+const serialized = JSON.stringify(entries);
+if (!serialized.includes("firstmate-synthetic-input") || !serialized.includes("/tmp/probe.status")) process.exit(1);
 JS
 
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l "/calm"
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" M-s
-  wait_for_text "$restored_snapshot" "Tool activity is visible." \
-    || fail "second /calm did not report visible tool activity"
-  assert_contains "$(cat "$restored_snapshot")" "CALM_E2E_OUTPUT" "second /calm did not restore tool result output"
+  wait_for_text "$restored_snapshot" "CALM_E2E_OUTPUT" \
+    || fail "second /calm did not restore tool result output"
+  assert_contains "$(cat "$restored_snapshot")" "fm_watch_arm_pi" "second /calm did not restore the Firstmate watcher tool shell"
+  assert_contains "$(cat "$restored_snapshot")" "FIRSTMATE WATCHER WAKE: signal: /tmp/probe.status" "second /calm did not restore the synthetic Firstmate user row"
+  assert_contains "$(cat "$restored_snapshot")" "Thinking..." "second /calm did not restore Pi's collapsed thinking labels"
   assert_contains "$(cat "$restored_snapshot")" "escape to interrupt" "/calm changed the active Ctrl+O expansion state"
 
   hash_after=$(shasum -a 256 "$session_file" | awk '{print $1}')
   [ "$hash_before" = "$hash_after" ] || fail "/calm changed the persisted session or context data"
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l "/quit"
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" M-s
-  pass "Pi calm text-row E2E proves remapped-submit export, default-off, hide, redraw restoration, unchanged persistence, and ordinary Ctrl+O behavior"
+  pass "Pi calm screenshot-scale E2E hides thinking labels, built-ins, fm_watch_arm_pi, and Firstmate injections while preserving genuine conversation, exports, persistence, and Ctrl+O"
 }
 
 test_static_contract

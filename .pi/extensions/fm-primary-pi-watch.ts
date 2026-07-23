@@ -4,8 +4,14 @@ import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
+import { Box, Container, Text, type Component } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
+import {
+  type CalmPresentationState,
+  calmTranscriptClassIsVisible,
+  FIRSTMATE_CALM_PRESENTATION_EVENT,
+} from "./lib/fm-calm-visibility.ts";
 
 type ArmResult = {
   ok: boolean;
@@ -18,6 +24,36 @@ type CloseClassification = {
   kind: "actionable" | "failure";
   message: string;
 };
+
+type WatchToolShellState = {
+  shell?: Box;
+  call?: Component;
+  result?: Component;
+};
+
+type WatchToolRenderContext = {
+  isError: boolean;
+  isPartial: boolean;
+};
+
+function refreshWatchToolShell(
+  state: WatchToolShellState,
+  theme: Theme,
+  context: WatchToolRenderContext,
+): Box {
+  const background = context.isPartial
+    ? (text: string) => theme.bg("toolPendingBg", text)
+    : context.isError
+      ? (text: string) => theme.bg("toolErrorBg", text)
+      : (text: string) => theme.bg("toolSuccessBg", text);
+  const shell = state.shell ?? new Box(1, 1, background);
+  state.shell = shell;
+  shell.setBgFn(background);
+  shell.clear();
+  if (state.call) shell.addChild(state.call);
+  if (state.result) shell.addChild(state.result);
+  return shell;
+}
 
 const extensionFile = fileURLToPath(import.meta.url);
 const extensionDir = dirname(extensionFile);
@@ -126,6 +162,22 @@ function classifyClose(stdout: string, stderr: string, code: number | null, sign
 }
 
 export default function (pi: ExtensionAPI) {
+  let calmPresentation: CalmPresentationState = {
+    active: false,
+    stockExportRendering: false,
+  };
+  pi.events?.on?.(FIRSTMATE_CALM_PRESENTATION_EVENT, (data) => {
+    const next = data as Partial<CalmPresentationState>;
+    calmPresentation = {
+      active: next.active === true,
+      stockExportRendering: next.stockExportRendering === true,
+    };
+  });
+  const calmHides = (itemClass: Parameters<typeof calmTranscriptClassIsVisible>[0]): boolean =>
+    calmPresentation.active &&
+    !calmPresentation.stockExportRendering &&
+    !calmTranscriptClassIsVisible(itemClass);
+
   function stopArm(): void {
     stopping = true;
     if (retryTimer) clearTimeout(retryTimer);
@@ -377,6 +429,32 @@ export default function (pi: ExtensionAPI) {
       "Call fm_watch_arm_pi only for the first required cycle or after a notification says the cycle is missing, failed, or unhealthy. Do not call it after ordinary work, turn completion, or ordinary signal, stale, check, or heartbeat handling because the Pi extension owns re-arming. Never run bin/fm-watch-arm.sh through bash.",
     ],
     parameters: Type.Object({}),
+    renderShell: "self",
+    renderCall: (_args, theme, context) => {
+      if (calmHides("assistant-tool-call")) return new Container();
+      if (calmPresentation.stockExportRendering) {
+        return new Text(theme.fg("toolTitle", theme.bold("fm_watch_arm_pi")), 0, 0);
+      }
+      const state = context.state as WatchToolShellState;
+      state.call = new Text(theme.fg("toolTitle", theme.bold("fm_watch_arm_pi")), 0, 0);
+      return refreshWatchToolShell(state, theme, context);
+    },
+    renderResult: (result, _options, theme, context) => {
+      if (calmHides("tool-result")) return new Container();
+      const output = result.content
+        .filter((item) => item.type === "text")
+        .map((item) => item.text)
+        .join("\n");
+      if (calmPresentation.stockExportRendering) {
+        return new Text(theme.fg("toolOutput", output), 0, 0);
+      }
+      const state = context.state as WatchToolShellState;
+      state.result = output
+        ? new Text(theme.fg("toolOutput", output), 0, 0)
+        : new Container();
+      refreshWatchToolShell(state, theme, context);
+      return new Container();
+    },
     execute: async () => {
       const result = startArm();
       return {
