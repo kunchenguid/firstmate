@@ -9,6 +9,8 @@ TMP_ROOT=$(fm_test_tmproot fm-calm-pi-extension)
 EXT="$ROOT/.pi/extensions/fm-calm.ts"
 VISIBILITY="$ROOT/.pi/extensions/lib/fm-calm-visibility.ts"
 WATCH_EXT="$ROOT/.pi/extensions/fm-primary-pi-watch.ts"
+OPERATIONAL_INPUT="$ROOT/bin/fm-operational-input.sh"
+PI_OPERATIONAL_INPUT="$ROOT/.pi/extensions/lib/fm-operational-input.ts"
 PI_PACKAGE_DIR=${FM_PI_PACKAGE_DIR:-"$(npm root -g 2>/dev/null)/@earendil-works/pi-coding-agent"}
 TMUX_SOCKET="fm-calm-$$"
 TMUX_SESSION="fm-calm-e2e"
@@ -54,12 +56,13 @@ find_chrome() {
 }
 
 test_static_contract() {
-  local text visibility watch
+  local text visibility watch operational
   assert_present "$EXT" "tracked Pi calm extension is missing"
   assert_present "$VISIBILITY" "tracked Pi calm visibility policy is missing"
   text=$(cat "$EXT")
   visibility=$(cat "$VISIBILITY")
   watch=$(cat "$WATCH_EXT")
+  operational=$(cat "$PI_OPERATIONAL_INPUT")
   assert_contains "$text" 'pi.registerCommand("calm"' "Pi calm extension does not register /calm"
   assert_contains "$text" 'pi.on("session_start"' "Pi calm extension does not reset on every session start"
   assert_contains "$text" 'setCalmPresentation(false)' "Pi calm extension does not default to stock transcript presentation"
@@ -78,6 +81,12 @@ test_static_contract() {
   assert_contains "$text" 'renderShell: "self"' "Pi calm extension cannot remove complete built-in tool shells"
   assert_contains "$visibility" 'CALM_VISIBLE_CLASSES' "Pi calm policy does not centralize its visibility allowlist"
   assert_contains "$visibility" 'classifyFirstmateSyntheticInput' "Pi calm policy does not centralize synthetic-input classification"
+  assert_contains "$operational" 'fm-operational-input.sh' "Pi adapter does not delegate to the canonical cross-language owner"
+  assert_not_contains "$visibility" 'FIRSTMATE WATCHER WAKE:' "current Calm classification still matches watcher payload prose"
+  assert_not_contains "$visibility" 'TURN WOULD END BLIND' "current Calm classification still matches turn-end payload prose"
+  # shellcheck disable=SC2016 # Backticks are literal prompt markup.
+  assert_not_contains "$visibility" 'Run `bin/fm-session-start.sh`' "current Calm classification still matches session-start payload prose"
+  assert_not_contains "$visibility" 'FIRSTMATE_OP: ' "current Calm classification duplicates the canonical marker grammar"
   assert_contains "$watch" 'calmHides("assistant-tool-call")' "Firstmate watcher tool does not participate in Calm presentation"
   assert_contains "$watch" 'renderShell: "self"' "Firstmate watcher tool cannot remove its complete shell"
   for name in Read Bash Edit Write Grep Find Ls; do
@@ -103,13 +112,14 @@ test_rendering_and_session_lifecycle() {
   mkdir -p "$fixture/home" "$fixture/lib" "$fixture/node_modules/@earendil-works"
   cp "$EXT" "$fixture/fm-calm.ts"
   cp "$VISIBILITY" "$fixture/lib/fm-calm-visibility.ts"
+  cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$fixture/lib/fm-operational-input.ts"
   cp "$WATCH_EXT" "$fixture/fm-primary-pi-watch.ts"
   ln -s "$PI_PACKAGE_DIR" "$fixture/node_modules/@earendil-works/pi-coding-agent"
   ln -s "$PI_PACKAGE_DIR/node_modules/@earendil-works/pi-tui" "$fixture/node_modules/@earendil-works/pi-tui"
   ln -s "$PI_PACKAGE_DIR/node_modules/typebox" "$fixture/node_modules/typebox"
   printf '%s\n' '{"type":"module"}' >"$fixture/package.json"
 
-  out=$(cd "$fixture" && EXT="$fixture/fm-calm.ts" WATCH_EXT="$fixture/fm-primary-pi-watch.ts" FM_HOME="$fixture/home" PI_PACKAGE_DIR="$PI_PACKAGE_DIR" node --input-type=module 2>&1 <<'JS'
+  out=$(cd "$fixture" && EXT="$fixture/fm-calm.ts" WATCH_EXT="$fixture/fm-primary-pi-watch.ts" FM_HOME="$fixture/home" FM_OPERATIONAL_INPUT_SCRIPT="$OPERATIONAL_INPUT" PI_PACKAGE_DIR="$PI_PACKAGE_DIR" node --input-type=module 2>&1 <<'JS'
 import { writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
@@ -199,31 +209,52 @@ for (const itemClass of visibility.CALM_TRANSCRIPT_CLASSES) {
     throw new Error(`Calm allowlist classified ${itemClass} as visible=${visible}`);
   }
 }
-const watcherMessage =
+const watcherBody =
   "FIRSTMATE WATCHER WAKE: signal: /tmp/probe.status\n\n" +
   "Run bin/fm-wake-drain.sh first and handle the queued wake. Watcher continuity is extension-owned.";
-const turnEndMessage =
+const turnEndBody =
   "TURN WOULD END BLIND - supervision is off. " +
   "The watcher cycle is missing, failed, or unhealthy. " +
   "Follow the harness recovery instruction below before ending the turn.\n\n" +
   "watcher: FAILED - probe";
-const positiveSyntheticFixtures = [
-  ["session-start", "Run `bin/fm-session-start.sh` now, exactly once, before executing any other instructions."],
-  ["watcher", watcherMessage],
-  ["turn-end-guard", turnEndMessage],
-  ["away-supervisor", "\u2063Supervisor escalate (1 event(s)): done"],
-  ["from-firstmate", "[fm-from-firstmate]\u2063[fm-corr:abc] inspect the report"],
-];
+const currentBodies = new Map([
+  ["session-start", "CURRENT_SESSION_START_BODY"],
+  ["watcher", watcherBody],
+  ["turn-end-guard", turnEndBody],
+  ["away-supervisor", "CURRENT_AWAY_BODY"],
+  ["from-firstmate", "corr=0123456789abcdef CURRENT_ROUTED_BODY"],
+  ["launch-brief", launchBrief],
+]);
+const positiveSyntheticFixtures = [...currentBodies].map(([kind, body]) => [
+  kind,
+  visibility.encodeFirstmateOperationalInput(kind, body),
+]);
 for (const [kind, content] of positiveSyntheticFixtures) {
-  if (visibility.classifyFirstmateSyntheticInput(content) !== kind) {
-    throw new Error(`Firstmate synthetic fixture was not classified as ${kind}`);
+  if (visibility.classifyFirstmateSyntheticInput(content, "extension") !== kind) {
+    throw new Error(`current Firstmate fixture was not classified as ${kind}`);
   }
 }
-if (visibility.classifyFirstmateSyntheticInput(launchBrief, launchBrief) !== "launch-brief") {
-  throw new Error("authoritatively identified Pi launch brief was not classified");
+const watcherMessage = positiveSyntheticFixtures.find(([kind]) => kind === "watcher")[1];
+const legacyUntyped = `\u2063FIRSTMATE_OP: ${watcherBody}`;
+if (visibility.classifyFirstmateSyntheticInput(legacyUntyped, "interactive") !== "legacy-operational") {
+  throw new Error("landed untyped FIRSTMATE_OP input was falsely assigned a current subtype");
 }
-if (visibility.classifyFirstmateSyntheticInput(launchBrief) !== undefined) {
-  throw new Error("unmarked genuine text matching a brief was hidden");
+const legacyFixtures = [
+  ["session-start", "Run `bin/fm-session-start.sh` now, exactly once, before executing any other instructions."],
+  ["watcher", watcherBody],
+  ["turn-end-guard", turnEndBody],
+  ["away-supervisor", "\u2063Supervisor escalate (1 event(s)): done"],
+];
+for (const [kind, content] of legacyFixtures) {
+  if (visibility.classifyFirstmateSyntheticInput(content, "interactive") !== kind) {
+    throw new Error(`isolated legacy fixture was not classified as ${kind}`);
+  }
+}
+if (visibility.classifyFirstmateSyntheticInput(launchBrief, "interactive", launchBrief) !== "launch-brief") {
+  throw new Error("legacy env-identified Pi launch brief was not classified");
+}
+if (visibility.classifyFirstmateSyntheticInput(launchBrief, "interactive") !== undefined) {
+  throw new Error("unmarked genuine text matching a brief was hidden without its source binding");
 }
 const nearMissGenuineFixtures = [
   "Run bin/fm-session-start.sh now, exactly once, before executing any other instructions.",
@@ -232,9 +263,13 @@ const nearMissGenuineFixtures = [
   "TURN WOULD END BLIND - can you make this warning friendlier?",
   "Supervisor escalate (1 event(s)): is this wording clear?",
   "[fm-from-firstmate] inspect this visible label",
+  "FIRSTMATE_OP: v1 watcher",
+  "\u2063Captain-authored arbitrary invisible-separator text",
+  `Captain quote: ${positiveSyntheticFixtures[0][1]}`,
+  "Captain quote: Run `bin/fm-session-start.sh` now, exactly once, before executing any other instructions.",
 ];
 for (const content of nearMissGenuineFixtures) {
-  if (visibility.classifyFirstmateSyntheticInput(content) !== undefined) {
+  if (visibility.classifyFirstmateSyntheticInput(content, "interactive") !== undefined) {
     throw new Error(`genuine near-miss input was hidden: ${content}`);
   }
 }
@@ -584,9 +619,11 @@ if (JSON.stringify(sessionEntries) !== entriesBefore) {
   throw new Error("calm mode changed session entries or model context");
 }
 
-const activeWatcherMessage =
+const activeWatcherMessage = visibility.encodeFirstmateOperationalInput(
+  "watcher",
   "FIRSTMATE WATCHER WAKE: signal: /tmp/active-probe.status\n\n" +
-  "Run bin/fm-wake-drain.sh first and handle the queued wake. Watcher continuity is extension-owned.";
+    "Run bin/fm-wake-drain.sh first and handle the queued wake. Watcher continuity is extension-owned.",
+);
 const activeSyntheticResult = await inputHandler({
   text: activeWatcherMessage,
   images: undefined,
@@ -699,12 +736,24 @@ test_interactive_terminal_e2e() {
   active_hidden_boundary="$TMP_ROOT/active-hidden-boundary.txt"
   export_snapshot="$TMP_ROOT/export.txt"
   restored_snapshot="$TMP_ROOT/restored.txt"
-  mkdir -p "$project/.pi/extensions/lib" "$config"
+  mkdir -p "$project/.pi/extensions/lib" "$project/bin" "$project/state" "$config"
+  fm_git_init_commit "$project"
+  : > "$project/AGENTS.md"
   cp "$EXT" "$project/.pi/extensions/fm-calm.ts"
   cp "$VISIBILITY" "$project/.pi/extensions/lib/fm-calm-visibility.ts"
+  cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$project/.pi/extensions/lib/fm-operational-input.ts"
   cp "$WATCH_EXT" "$project/.pi/extensions/fm-primary-pi-watch.ts"
+  cp "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$project/.pi/extensions/fm-primary-turnend-guard.ts"
+  cp \
+    "$ROOT/bin/fm-sessionstart-nudge.sh" \
+    "$ROOT/bin/fm-primary-scope-lib.sh" \
+    "$ROOT/bin/fm-gate-refuse-lib.sh" \
+    "$ROOT/bin/fm-operational-input.sh" \
+    "$project/bin/"
+  chmod +x "$project/bin/"*.sh
   cat >"$project/.pi/extensions/fm-calm-e2e-inject.ts" <<'TS'
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { encodeFirstmateOperationalInput } from "./lib/fm-calm-visibility.ts";
 
 export default function (pi: ExtensionAPI): void {
   pi.registerCommand("calm-diagnostic-e2e", {
@@ -714,12 +763,21 @@ export default function (pi: ExtensionAPI): void {
     },
   });
   pi.registerCommand("calm-inject-e2e", {
-    description: "Inject the Calm lifecycle fixture.",
-    handler: async () => {
-      pi.sendUserMessage(
-        "FIRSTMATE WATCHER WAKE: signal: /tmp/active-probe.status\n\nRun bin/fm-wake-drain.sh first and handle the queued wake. Watcher continuity is extension-owned.",
-        { deliverAs: "followUp" },
-      );
+    description: "Inject one current Calm operational kind.",
+    handler: async (args) => {
+      const fixtures = new Map([
+        ["watcher", "CURRENT_WATCHER_E2E /tmp/active-probe.status"],
+        ["turn-end-guard", "CURRENT_TURN_END_E2E"],
+        ["away-supervisor", "CURRENT_AWAY_E2E"],
+        ["from-firstmate", "corr=0123456789abcdef CURRENT_FROM_FIRSTMATE_E2E"],
+        ["launch-brief", "CURRENT_LAUNCH_BRIEF_E2E"],
+      ] as const);
+      const kind = args.trim() as Parameters<typeof encodeFirstmateOperationalInput>[0];
+      const body = fixtures.get(kind);
+      if (!body) throw new Error(`unknown current operational kind: ${kind}`);
+      await pi.sendUserMessage(encodeFirstmateOperationalInput(kind, body), {
+        deliverAs: "followUp",
+      });
     },
   });
 }
@@ -744,7 +802,7 @@ TS
 JSON
 
   tmux -L "$TMUX_SOCKET" new-session -d -s "$TMUX_SESSION" -x 180 -y 44 \
-    "cd '$project' && env PI_CODING_AGENT_DIR='$config' PI_OFFLINE=1 pi --approve --no-skills --no-prompt-templates --no-context-files --session '$session_file'; rc=\$?; printf '\nPI_EXIT=%s\n' \"\$rc\"; sleep 30"
+    "cd '$project' && env PI_CODING_AGENT_DIR='$config' FM_OPERATIONAL_INPUT_SCRIPT='$OPERATIONAL_INPUT' PI_OFFLINE=1 pi --approve --no-skills --no-prompt-templates --no-context-files --session '$session_file'; rc=\$?; printf '\nPI_EXIT=%s\n' \"\$rc\"; sleep 30"
   wait_for_text "$default_snapshot" "The deterministic tool example is complete." \
     || fail "Pi calm E2E did not reach the restored session transcript"
   assert_contains "$(cat "$default_snapshot")" "CALM_E2E_OUTPUT" "calm mode was not off by default"
@@ -752,6 +810,9 @@ JSON
   assert_contains "$(cat "$default_snapshot")" "FIRSTMATE WATCHER WAKE: signal: /tmp/probe.status" "Calm-off transcript did not show the synthetic Firstmate presentation row"
   assert_contains "$(cat "$default_snapshot")" "Thinking..." "reasoning fixture did not render Pi's collapsed thinking label"
   assert_contains "$(cat "$default_snapshot")" "fm-calm.ts" "project-local Pi calm extension did not auto-load"
+  # shellcheck disable=SC2016 # Backticks are literal prompt markup.
+  assert_not_contains "$(cat "$default_snapshot")" 'Run `bin/fm-session-start.sh` now' \
+    "native session-start context unexpectedly rendered while Calm was off"
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" C-o
   wait_for_text "$expanded_snapshot" "escape to interrupt" \
     || fail "Ctrl+O did not retain Pi's ordinary startup and tool expansion behavior"
@@ -790,19 +851,67 @@ JSON
   assert_contains "$(cat "$active_before_snapshot")" "Warning: CALM_TRANSIENT_DIAGNOSTIC" "transient diagnostic fixture was not shown"
   assert_not_contains "$(cat "$active_before_snapshot")" "/calm-diagnostic-e2e" "transient diagnostic command did not leave the editor"
 
-  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l "/calm-inject-e2e"
-  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" M-s
-  active_wait=0
-  while ! grep -Fq "/tmp/active-probe.status" "$session_file" 2>/dev/null && [ "$active_wait" -lt 120 ]; do
-    sleep 0.05
-    active_wait=$((active_wait + 1))
+  for fixture in \
+    "watcher|CURRENT_WATCHER_E2E" \
+    "turn-end-guard|CURRENT_TURN_END_E2E" \
+    "away-supervisor|CURRENT_AWAY_E2E" \
+    "from-firstmate|CURRENT_FROM_FIRSTMATE_E2E" \
+    "launch-brief|CURRENT_LAUNCH_BRIEF_E2E"
+  do
+    kind=${fixture%%|*}
+    needle=${fixture#*|}
+    tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l "/calm-inject-e2e $kind"
+    tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" M-s
+    active_wait=0
+    while ! grep -Fq "$needle" "$session_file" 2>/dev/null && [ "$active_wait" -lt 120 ]; do
+      sleep 0.05
+      active_wait=$((active_wait + 1))
+    done
+    grep -Fq "$needle" "$session_file" \
+      || fail "current operational kind $kind was not received while Calm was active"
+    sleep 0.1
   done
-  grep -Fq "/tmp/active-probe.status" "$session_file" \
-    || fail "synthetic lifecycle fixture was not received while Calm was active"
+  node - "$session_file" <<'JS' || fail "native Pi did not preserve every exact current operational kind"
+const fs = require("node:fs");
+const entries = fs.readFileSync(process.argv[2], "utf8").trim().split("\n").map(JSON.parse);
+const nativeSessionStart = entries.find((entry) =>
+  entry.type === "custom_message" &&
+  entry.customType === "firstmate-sessionstart-nudge"
+);
+if (
+  !nativeSessionStart ||
+  nativeSessionStart.display !== false ||
+  nativeSessionStart.details?.kind !== "session-start" ||
+  !nativeSessionStart.content?.startsWith("\u2063FIRSTMATE_OP: v1 session-start: ")
+) {
+  throw new Error(`native session-start provenance was not retained: ${JSON.stringify(nativeSessionStart)}`);
+}
+const expected = new Map([
+  ["CURRENT_WATCHER_E2E", "watcher"],
+  ["CURRENT_TURN_END_E2E", "turn-end-guard"],
+  ["CURRENT_AWAY_E2E", "away-supervisor"],
+  ["CURRENT_FROM_FIRSTMATE_E2E", "from-firstmate"],
+  ["CURRENT_LAUNCH_BRIEF_E2E", "launch-brief"],
+]);
+const current = entries.filter((entry) =>
+  entry.type === "custom_message" &&
+  entry.customType === "firstmate-synthetic-input" &&
+  [...expected.keys()].some((needle) => entry.content?.includes(needle))
+);
+if (current.length !== expected.size) {
+  throw new Error(`expected ${expected.size} current entries, found ${current.length}: ${JSON.stringify(current)}`);
+}
+for (const [needle, kind] of expected) {
+  const entry = current.find((candidate) => candidate.content.includes(needle));
+  if (!entry || entry.display !== false || entry.details?.kind !== kind) {
+    throw new Error(`expected ${needle} as ${kind}, found ${JSON.stringify(entry)}`);
+  }
+}
+JS
   active_screen_wait=0
   while [ "$active_screen_wait" -lt 120 ]; do
     tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" >"$active_hidden_snapshot"
-    if grep -Fq "Error: Unknown provider: unknown" "$active_hidden_snapshot" &&
+    if grep -Fq " Error:" "$active_hidden_snapshot" &&
       ! grep -Fq "/calm-inject-e2e" "$active_hidden_snapshot"; then
       break
     fi
@@ -810,10 +919,21 @@ JSON
     active_screen_wait=$((active_screen_wait + 1))
   done
   assert_not_contains "$(cat "$active_hidden_snapshot")" "/calm-inject-e2e" "synthetic lifecycle command did not leave the editor"
-  assert_not_contains "$(cat "$active_hidden_snapshot")" "/tmp/active-probe.status" "Calm showed a synthetic row received while active"
+  # shellcheck disable=SC2016 # Backticks are literal prompt markup.
+  assert_not_contains "$(cat "$active_hidden_snapshot")" 'Run `bin/fm-session-start.sh` now' \
+    "Calm showed the native session-start operational input"
+  for hidden in \
+    CURRENT_WATCHER_E2E \
+    CURRENT_TURN_END_E2E \
+    CURRENT_AWAY_E2E \
+    CURRENT_FROM_FIRSTMATE_E2E \
+    CURRENT_LAUNCH_BRIEF_E2E
+  do
+    assert_not_contains "$(cat "$active_hidden_snapshot")" "$hidden" "Calm showed current operational kind $hidden"
+  done
   assert_contains "$(cat "$active_hidden_snapshot")" "Warning: CALM_TRANSIENT_DIAGNOSTIC" "synthetic arrival lost its preceding transient diagnostic"
-  assert_contains "$(cat "$active_hidden_snapshot")" "Error: Unknown provider: unknown" "synthetic delivery did not produce its transient offline diagnostic"
-  awk '/Warning: CALM_TRANSIENT_DIAGNOSTIC/ { capture = 1 } capture { print } /Error: Unknown provider: unknown/ { exit }' \
+  assert_contains "$(cat "$active_hidden_snapshot")" " Error:" "synthetic delivery did not produce a transient provider diagnostic"
+  awk '/Warning: CALM_TRANSIENT_DIAGNOSTIC/ { capture = 1 } capture { print } / Error:/ { exit }' \
     "$active_hidden_snapshot" >"$active_hidden_boundary"
   [ "$(wc -l <"$active_hidden_boundary" | tr -d ' ')" -eq 3 ] \
     || fail "Calm left a blank transcript gap between diagnostics around a synthetic row received while active"
@@ -876,8 +996,17 @@ JS
     || fail "second /calm did not restore a synthetic row received while Calm was active"
   assert_contains "$(cat "$restored_snapshot")" "fm_watch_arm_pi" "second /calm did not restore the Firstmate watcher tool shell"
   assert_contains "$(cat "$restored_snapshot")" "FIRSTMATE WATCHER WAKE: signal: /tmp/probe.status" "second /calm did not restore the synthetic Firstmate user row"
+  for restored in \
+    CURRENT_WATCHER_E2E \
+    CURRENT_TURN_END_E2E \
+    CURRENT_AWAY_E2E \
+    CURRENT_FROM_FIRSTMATE_E2E \
+    CURRENT_LAUNCH_BRIEF_E2E
+  do
+    assert_contains "$(cat "$restored_snapshot")" "$restored" "second /calm did not restore current operational kind $restored"
+  done
   assert_contains "$(cat "$restored_snapshot")" "Warning: CALM_TRANSIENT_DIAGNOSTIC" "second /calm dropped a transient diagnostic"
-  assert_contains "$(cat "$restored_snapshot")" "Error: Unknown provider: unknown" "second /calm dropped the synthetic delivery diagnostic"
+  assert_contains "$(cat "$restored_snapshot")" " Error:" "second /calm dropped the synthetic delivery diagnostic"
   assert_not_contains "$(cat "$restored_snapshot")" "Navigated to selected point" "second /calm added a navigation status row"
   assert_contains "$(cat "$restored_snapshot")" "Thinking..." "second /calm did not restore Pi's collapsed thinking labels"
   assert_contains "$(cat "$restored_snapshot")" "escape to interrupt" "/calm changed the active Ctrl+O expansion state"
@@ -886,7 +1015,7 @@ JS
   [ "$hash_before" = "$hash_after" ] || fail "/calm changed the persisted session or context data"
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l "/quit"
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" M-s
-  pass "Pi calm screenshot-scale E2E hides thinking labels, built-ins, fm_watch_arm_pi, and Firstmate injections while preserving genuine conversation, exports, persistence, and Ctrl+O"
+  pass "Pi calm native E2E shows only genuine prompts and final responses while hiding every exactly typed current operational kind and preserving exports, persistence, and Ctrl+O"
 }
 
 test_static_contract

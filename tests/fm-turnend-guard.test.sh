@@ -88,6 +88,7 @@ install_guard_scripts() {
   mkdir -p "$dir/bin"
   cp "$ROOT/bin/fm-turnend-guard.sh" "$dir/bin/fm-turnend-guard.sh"
   cp "$ROOT/bin/fm-turnend-guard-grok.sh" "$dir/bin/fm-turnend-guard-grok.sh"
+  cp "$ROOT/bin/fm-operational-input.sh" "$dir/bin/fm-operational-input.sh"
   cp "$ROOT/bin/fm-supervision-instructions.sh" "$dir/bin/fm-supervision-instructions.sh"
   cp "$ROOT/bin/fm-harness.sh" "$dir/bin/fm-harness.sh"
   cp "$ROOT/bin/fm-primary-scope-lib.sh" "$dir/bin/fm-primary-scope-lib.sh"
@@ -95,7 +96,7 @@ install_guard_scripts() {
   cp "$ROOT/bin/fm-wake-lib.sh" "$dir/bin/fm-wake-lib.sh"
   mkdir -p "$dir/docs"
   cp -R "$ROOT/docs/supervision-protocols" "$dir/docs/supervision-protocols"
-  chmod +x "$dir/bin/fm-turnend-guard.sh" "$dir/bin/fm-turnend-guard-grok.sh" "$dir/bin/fm-supervision-instructions.sh" "$dir/bin/fm-harness.sh"
+  chmod +x "$dir/bin/fm-turnend-guard.sh" "$dir/bin/fm-turnend-guard-grok.sh" "$dir/bin/fm-operational-input.sh" "$dir/bin/fm-supervision-instructions.sh" "$dir/bin/fm-harness.sh"
 }
 
 mark_codex_hook_root() {
@@ -571,7 +572,7 @@ EOF
   assert_contains "$(cat "$log")" '<session-test>' "grok adapter must pass the hook session id"
   assert_not_contains "$(cat "$log")" '<--permission-mode>' "grok adapter must not add a stronger permission mode"
   assert_not_contains "$(cat "$log")" '<bypassPermissions>' "grok adapter must not bypass permissions on forced resume"
-  assert_contains "$(cat "$log")" 'FIRSTMATE_OP: TURN WOULD END BLIND' "grok adapter must mark its forced operational prompt"
+  assert_contains "$(cat "$log")" 'FIRSTMATE_OP: v1 turn-end-guard: TURN WOULD END BLIND' "grok adapter must retain the typed guard kind"
   pass "fm-turnend-guard-grok: forces one explicitly marked same-session resume when the shared predicate blocks"
 }
 
@@ -693,7 +694,7 @@ test_opencode_plugin_forces_followup() {
   assert_contains "$content" 'session.idle' "OpenCode plugin must run on session.idle"
   assert_contains "$content" 'fm-turnend-guard.sh' "OpenCode plugin must invoke the shared guard"
   assert_contains "$content" 'promptAsync' "OpenCode plugin must force a follow-up turn"
-  assert_contains "$content" '\u2063FIRSTMATE_OP: ' "OpenCode plugin must mark its synthetic user-role follow-up"
+  assert_contains "$content" 'encodeFirstmateOperationalInput' "OpenCode plugin must use the typed operational-input constructor"
   assert_contains "$content" 'skipNextIdle' "OpenCode plugin must carry a loop guard"
   assert_contains "$content" 'worktree' "OpenCode plugin must anchor the guard from the git worktree path"
   assert_contains "$content" 'watcher cycle is missing, failed, or unhealthy' "OpenCode plugin must identify a blind turn as watcher recovery"
@@ -737,8 +738,8 @@ const hooks = await mod.FmPrimaryTurnendGuard({
   worktree: process.env.WORKTREE,
 });
 await hooks.event({ event: { type: "session.idle", properties: { sessionID: "session-test" } } });
-if (!promptBody.startsWith("\u2063FIRSTMATE_OP: ")) {
-  console.error(`unmarked operational prompt: ${promptBody}`);
+if (!promptBody.startsWith("\u2063FIRSTMATE_OP: v1 turn-end-guard: ")) {
+  console.error(`untyped operational prompt: ${promptBody}`);
   process.exit(1);
 }
 if (!promptBody.includes("guard-fired")) {
@@ -769,7 +770,7 @@ test_pi_extension_forces_followup() {
   assert_contains "$content" 'agent_settled' "pi extension must run after one logical agent run settles"
   assert_contains "$content" 'fm-turnend-guard.sh' "pi extension must invoke the shared guard"
   assert_contains "$content" 'sendUserMessage' "pi extension must force a follow-up turn"
-  assert_contains "$content" '\u2063FIRSTMATE_OP: ' "pi extension must mark its synthetic user-role follow-up"
+  assert_contains "$content" 'encodeFirstmateOperationalInput' "pi extension must use the typed operational-input constructor"
   assert_contains "$content" 'deliverAs: "followUp"' "pi extension must queue the follow-up safely"
   assert_contains "$content" 'guardFollowupActive' "pi extension must carry a logical-run loop guard"
   assert_not_contains "$content" 'skipNextTurnEnd' "pi extension kept the internal-turn loop guard"
@@ -791,8 +792,10 @@ test_pi_extension_injects_once_per_logical_agent_run() {
   home="$TMP_ROOT/pi-logical-run-home"
   ext="$repo/.pi/extensions/fm-primary-turnend-guard.ts"
   log="$TMP_ROOT/pi-logical-run-guard.log"
-  mkdir -p "$repo/.pi/extensions" "$repo/bin" "$home/state"
+  mkdir -p "$repo/.pi/extensions/lib" "$repo/bin" "$home/state"
   cp "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$ext"
+  cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$repo/.pi/extensions/lib/fm-operational-input.ts"
+  cp "$ROOT/bin/fm-operational-input.sh" "$repo/bin/fm-operational-input.sh"
   cat > "$repo/bin/fm-turnend-guard.sh" <<'SH'
 #!/usr/bin/env bash
 cat >/dev/null
@@ -817,7 +820,7 @@ const pi = {
   },
   async sendUserMessage(message, options) {
     prompts += 1;
-    if (!message.startsWith("\u2063FIRSTMATE_OP: ")) throw new Error(`unmarked operational prompt: ${message}`);
+    if (!message.startsWith("\u2063FIRSTMATE_OP: v1 turn-end-guard: ")) throw new Error(`untyped operational prompt: ${message}`);
     if (!message.includes("TURN WOULD END BLIND")) throw new Error(`unexpected prompt: ${message}`);
     if (!message.includes("watcher cycle is missing, failed, or unhealthy")) throw new Error(`guard prompt omitted recovery-only state: ${message}`);
     if (message.includes("Resume supervision according to the session-start operating block")) throw new Error(`guard prompt used ordinary continuity: ${message}`);
@@ -855,8 +858,10 @@ test_pi_extension_retries_after_followup_delivery_failure() {
   repo="$TMP_ROOT/pi-delivery-failure-root"
   home="$TMP_ROOT/pi-delivery-failure-home"
   ext="$repo/.pi/extensions/fm-primary-turnend-guard.ts"
-  mkdir -p "$repo/.pi/extensions" "$repo/bin" "$home/state"
+  mkdir -p "$repo/.pi/extensions/lib" "$repo/bin" "$home/state"
   cp "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$ext"
+  cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$repo/.pi/extensions/lib/fm-operational-input.ts"
+  cp "$ROOT/bin/fm-operational-input.sh" "$repo/bin/fm-operational-input.sh"
   cat > "$repo/bin/fm-turnend-guard.sh" <<'SH'
 #!/usr/bin/env bash
 cat >/dev/null

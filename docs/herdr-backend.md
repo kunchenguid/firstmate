@@ -451,7 +451,7 @@ The extracted content still routes through the shared `bin/fm-composer-lib.sh` d
 
 Making the Pi composer injectable exposed the already-proven terminal-control hazard from the 2026-07-13 incident: Herdr consumed a leading ASCII `0x1f`, so Pi received `Supervisor escalate...` without the away marker.
 At the time of this reproduction, `FM_INJECT_MARK` used a bare leading U+2063 INVISIBLE SEPARATOR, while the from-firstmate marker remained a visible label followed by U+2063, so their full prefixes stayed distinct.
-The `/afk` skill owns the current daemon injection-prefix contract.
+`bin/fm-operational-input.sh` owns current operational-input construction, while the `/afk` skill owns the daemon's stay-away handling and legacy bare-marker compatibility.
 U+2063 has no normal keyboard keystroke and the real post-fix Pi prompt capture retained its `e281a3` prefix byte-exact.
 
 The return half of the same reproduction showed that separate `stop` and `wake-drain` calls left policy ownership to the operator and allowed an ordinary Bearings request to begin while the live blocker remained open.
