@@ -200,6 +200,40 @@ test_opposite_harness_constraint_refuses_same_harness() {
   pass "rehome preserves adversarial-review opposite-harness constraints"
 }
 
+test_codex_rehome_substitutes_mcp_flag() {
+  local rec out status launch
+  rec=$(make_case codexmcp task-codexmcp)
+  read_case "$rec"
+
+  out=$(run_rehome "$HOME_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$TMUX_LOG" "$OLD_EXISTS" \
+    task-codexmcp --harness codex --model gpt-5 --effort high)
+  status=$?
+  expect_code 0 "$status" "codex rehome should succeed"
+
+  launch=$(cat "$LAUNCH_LOG")
+  assert_not_contains "$launch" "__CODEXMCPFLAG__" "codex rehome must not emit the literal MCP placeholder"
+  assert_contains "$launch" "-c 'mcp_servers={}' --dangerously-bypass-approvals-and-sandbox" \
+    "codex rehome should strip MCP servers by default"
+  pass "codex rehome substitutes the MCP override flag"
+}
+
+test_codex_rehome_honors_mcp_optout() {
+  local rec out status launch
+  rec=$(make_case codexmcpkeep task-codexmcpkeep)
+  read_case "$rec"
+  printf 'enabled\n' > "$HOME_DIR/config/crew-codex-mcp"
+
+  out=$(run_rehome "$HOME_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$TMUX_LOG" "$OLD_EXISTS" \
+    task-codexmcpkeep --harness codex --model gpt-5 --effort high)
+  status=$?
+  expect_code 0 "$status" "codex rehome with MCP opt-out should succeed"
+
+  launch=$(cat "$LAUNCH_LOG")
+  assert_not_contains "$launch" "__CODEXMCPFLAG__" "codex rehome must not emit the literal MCP placeholder"
+  assert_not_contains "$launch" "mcp_servers={}" "codex rehome must honor the crew-codex-mcp opt-out"
+  pass "codex rehome honors the crew-codex-mcp opt-out"
+}
+
 test_alive_old_endpoint_refuses_duplicate_owner() {
   local rec out status
   rec=$(make_case alive task-alive)
@@ -222,6 +256,8 @@ test_rehome_reuses_task_identity_and_worktree
 test_dirty_worktree_refuses_without_override
 test_dispatch_profile_requires_approval_flag
 test_opposite_harness_constraint_refuses_same_harness
+test_codex_rehome_substitutes_mcp_flag
+test_codex_rehome_honors_mcp_optout
 test_alive_old_endpoint_refuses_duplicate_owner
 
 echo "# all fm-rehome-quota-wall tests passed"
