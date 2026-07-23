@@ -148,22 +148,65 @@ FM_PI_DELEGATED_KEEP_RECENT_TOKENS=20000 \
 node --experimental-strip-types --no-warnings --input-type=module - "$GUARD_RUNTIME_DIR/guard.ts" "$AGENT_DIR" "$PROJECT_DIR" <<'NODE' \
   || fail "delegated profile runtime compaction guard proof failed"
 import { writeFileSync } from "node:fs";
+import { dirname } from "node:path";
 import { pathToFileURL } from "node:url";
 const [guardPath, agentDir, cwd] = process.argv.slice(2);
 const { default: loadGuard } = await import(pathToFileURL(guardPath));
+const { AgentSession } = await import(pathToFileURL(
+  `${dirname(guardPath)}/node_modules/@earendil-works/pi-coding-agent/dist/index.js`,
+));
 const handlers = new Map();
 loadGuard({ on(name, handler) { handlers.set(name, handler); } });
 let shutdowns = 0;
 const ctx = { cwd, ui: { notify() {} }, shutdown() { shutdowns += 1; } };
 await handlers.get("session_start")({}, ctx);
 if (shutdowns !== 0) process.exit(1);
+let persistentWrites = 0;
+const expectedModel = {
+  provider: "openai-codex",
+  id: "gpt-5.6-sol",
+  contextWindow: 272000,
+};
+const transientState = { model: expectedModel, thinkingLevel: "medium" };
+const guardedSession = {
+  agent: { state: transientState },
+  sessionManager: {
+    appendModelChange() { persistentWrites += 1; },
+    appendThinkingLevelChange() { persistentWrites += 1; },
+  },
+  settingsManager: {
+    setDefaultModelAndProvider() { persistentWrites += 1; },
+    setDefaultThinkingLevel() { persistentWrites += 1; },
+  },
+  getAvailableThinkingLevels() { return ["off", "low", "medium", "high"]; },
+  supportsThinking() { return true; },
+  _emit() {},
+  _extensionRunner: { emit() {} },
+};
+const changedModel = {
+  provider: "openai",
+  id: "gpt-4o",
+  contextWindow: 128000,
+};
+let modelRejected = false;
+try {
+  await AgentSession.prototype.setModel.call(guardedSession, changedModel);
+} catch {
+  modelRejected = true;
+}
+if (!modelRejected) process.exit(1);
+if (await AgentSession.prototype.cycleModel.call(guardedSession) !== undefined) process.exit(1);
+AgentSession.prototype.setThinkingLevel.call(guardedSession, "high");
+if (transientState.model !== expectedModel || transientState.thinkingLevel !== "medium" || persistentWrites !== 0) {
+  process.exit(1);
+}
 writeFileSync(`${agentDir}/settings.json`, '{"compaction":{"enabled":false,"reserveTokens":108800,"keepRecentTokens":20000}}\n');
 const inputResult = await handlers.get("input")({}, ctx);
 const compactResult = await handlers.get("session_before_compact")({}, ctx);
 if (inputResult?.action !== "handled" || compactResult?.cancel !== true || shutdowns !== 2) process.exit(1);
 NODE
 printf '%s\n' '{"compaction":{"enabled":true,"reserveTokens":108800,"keepRecentTokens":20000},"defaultThinkingLevel":"xhigh"}' > "$AGENT_DIR/settings.json"
-pass "runtime compaction changes block turns and compaction"
+pass "runtime controls cannot leak model, thinking, or compaction changes"
 
 TSC_COMMAND=${FM_TSC_COMMAND:-}
 if [ -z "$TSC_COMMAND" ]; then
@@ -197,8 +240,9 @@ fi
 assert_grep 'no-approve' "$ROOT/bin/fm-spawn.sh" "delegated Pi command does not suppress trusted project overrides"
 assert_grep 'no-extensions' "$ROOT/bin/fm-spawn.sh" "delegated Pi command does not suppress discovered cancellation extensions"
 assert_grep 'fm-pi-profile-guard.ts' "$ROOT/bin/fm-spawn.sh" "delegated Pi command does not preserve the explicit profile guard"
-assert_grep 'event.level !== "medium"' "$ROOT/bin/fm-pi-profile-guard.ts" "profile guard does not keep medium stable on resume"
-assert_grep 'selected !== expectedModel' "$ROOT/bin/fm-pi-profile-guard.ts" "profile guard does not refuse model cycling"
+assert_grep 'AgentSession.prototype.setModel = guardedSetModel' "$ROOT/bin/fm-pi-profile-guard.ts" "profile guard does not prevent model selection before mutation"
+assert_grep 'AgentSession.prototype.cycleModel = guardedCycleModel' "$ROOT/bin/fm-pi-profile-guard.ts" "profile guard does not prevent model cycling before mutation"
+assert_grep 'AgentSession.prototype.setThinkingLevel = guardedSetThinkingLevel' "$ROOT/bin/fm-pi-profile-guard.ts" "profile guard does not keep medium stable before mutation"
 assert_grep 'session_before_compact' "$ROOT/bin/fm-pi-profile-guard.ts" "profile guard does not validate runtime compaction"
 assert_grep 'pi-delegated-profile' "$ROOT/bin/fm-config-inherit-lib.sh" "secondmate homes do not inherit the delegated Pi profile"
 pass "hostile project and extension surfaces are neutralized while explicit FirstMate extensions remain supported"
