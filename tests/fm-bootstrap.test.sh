@@ -964,8 +964,10 @@ test_crew_dispatch_launch_cross_file_check() {
   fakebin=$(make_fake_toolchain "$case_dir")
   add_real_jq "$fakebin"
 
+  # The rule listing is a capability fact, so it is verbose-only; the cross-file
+  # complaint below stays unconditional because it is a real misconfiguration.
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
-    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+    FM_BOOTSTRAP_VERBOSE_FACTS=1 FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
   printf '%s\n' "$out" | grep -F 'rule: overflow work -> claude launch=gateway' >/dev/null \
     || fail "a declared launch variant should be shown in the active rule listing: $out"
   printf '%s\n' "$out" | grep -F 'undeclared harness variant' >/dev/null \

@@ -45,8 +45,47 @@ case "$*" in
     exit 0
     ;;
 esac
+# bin/backends/tmux.sh stamps the session with its owning FM_HOME and refuses to
+# reuse a session whose stamp does not read back, so the fake must persist
+# set-option and echo it from show-options or every spawn is refused as another
+# home's session.
+optfile() {  # <session> <option>
+  printf '%s/opt-%s-%s' "$(dirname "$0")" "$(printf '%s' "$1" | tr -c 'A-Za-z0-9_.-' '_')" \
+    "$(printf '%s' "$2" | tr -c 'A-Za-z0-9_.-' '_')"
+}
 case "${1:-}" in
+  show-options)
+    sess=; opt=
+    shift
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        -t) sess=${2:-}; shift 2 ;;
+        -v) opt=${2:-}; shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    f=$(optfile "$sess" "$opt")
+    [ -f "$f" ] && cat "$f"
+    exit 0
+    ;;
+  set-option)
+    sess=; args=
+    shift
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        -t) sess=${2:-}; shift 2 ;;
+        -o) shift ;;
+        *) args="$args $1"; shift ;;
+      esac
+    done
+    # shellcheck disable=SC2086
+    set -- $args
+    [ "$#" -ge 2 ] || exit 0
+    printf '%s' "$2" > "$(optfile "$sess" "$1")"
+    exit 0
+    ;;
   display-message) printf 'firstmate\n'; exit 0 ;;
+  list-sessions) exit 0 ;;
   list-windows) exit 0 ;;
   has-session|new-session|new-window|kill-window) exit 0 ;;
   send-keys) exit 0 ;;
