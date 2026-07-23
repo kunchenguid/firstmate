@@ -36,13 +36,14 @@ test_help_includes_entire_header() {
   pass "fm-brief.sh: --help renders the complete header"
 }
 
-# Registry with one project per delivery mode, so each ship-mode DOD branch is
-# exercised. A project absent from the registry defaults to no-mistakes.
+# Registry with one project per non-default delivery mode, so each ship-mode DOD
+# branch is exercised. A project absent from the registry defaults to direct-PR.
 write_registry() {
   local home=$1
   mkdir -p "$home/data"
   cat > "$home/data/projects.md" <<'EOF'
 - direct-proj [direct-PR] - fixture for direct-PR mode (added 2026-07-01)
+- no-mistakes-proj [no-mistakes] - fixture for no-mistakes mode (added 2026-07-01)
 - local-proj [local-only] - fixture for local-only mode (added 2026-07-01)
 EOF
 }
@@ -57,7 +58,7 @@ test_ship_modes_generate_clean_briefs() {
   home="$TMP_ROOT/ship-home"
   write_registry "$home"
 
-  for id_proj in "brief-nomistakes-a1:no-registry-proj" "brief-directpr-a2:direct-proj" "brief-localonly-a3:local-proj"; do
+  for id_proj in "brief-nomistakes-a1:no-mistakes-proj" "brief-directpr-a2:direct-proj" "brief-default-a3:no-registry-proj" "brief-localonly-a4:local-proj"; do
     id=${id_proj%%:*}
     proj=${id_proj##*:}
     FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" "$proj" >/dev/null 2>&1; status=$?
@@ -69,8 +70,53 @@ test_ship_modes_generate_clean_briefs() {
     assert_grep "mid-task \`working:\` line (including setup complete) is nonterminal" "$brief" \
       "$id: brief missing nonterminal working:/setup-complete gate protection"
     assert_no_grep "EOF" "$brief" "$id: brief leaked a heredoc EOF marker (unterminated heredoc)"
+    assert_no_grep 'no-mistakes init' "$brief" \
+      "$id: ship brief must not move provisioning into a task worktree"
+    case "$id" in
+      brief-directpr-*|brief-default-*)
+        assert_no_grep '/no-mistakes' "$brief" \
+          "$id: routine direct-PR brief unexpectedly invokes no-mistakes"
+        assert_no_grep 'no-mistakes doctor' "$brief" \
+          "$id: routine direct-PR brief unexpectedly probes no-mistakes"
+        ;;
+    esac
   done
   pass "fm-brief.sh: no-mistakes/direct-PR/local-only briefs generate cleanly"
+}
+
+test_task_validation_override_records_three_lanes() {
+  local home brief review_brief
+  home="$TMP_ROOT/mode-override-home"
+  write_registry "$home"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-mode-override-a5 direct-proj --validation full >/dev/null 2>&1 \
+    || fail "fm-brief.sh rejected a valid full-pipeline lane"
+  brief="$home/data/brief-mode-override-a5/brief.md"
+  assert_grep "Firstmate will then instruct you to run /no-mistakes" "$brief" \
+    "full validation lane did not select the no-mistakes brief"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-review-only-a6 direct-proj --validation review-only >/dev/null 2>&1 \
+    || fail "fm-brief.sh rejected a valid review-only lane"
+  review_brief="$home/data/brief-review-only-a6/brief.md"
+  assert_grep 'This task uses the **review-only** medium-risk lane and lands by direct PR.' "$review_brief" \
+    "review-only lane did not keep direct-PR landing"
+  assert_grep 'Confirm the intended diff and rebase the branch onto the authoritative base before review.' "$review_brief" \
+    "review-only lane lost its intent and rebase contract"
+  # shellcheck disable=SC2016  # single quotes preserve literal Markdown backticks
+  assert_grep '`--skip=test,document,lint,push,pr,ci`' "$review_brief" \
+    "review-only lane lost its exact no-mistakes skip set"
+  assert_grep 'While the run is active, it alone owns its findings and fixes' "$review_brief" \
+    "review-only lane lost run ownership"
+  # shellcheck disable=SC2016  # single quotes preserve literal Markdown backticks
+  assert_grep 'run the targeted repository-native checks, push your branch, and open a PR with `gh-axi`' "$review_brief" \
+    "review-only lane lost targeted checks and direct-PR landing"
+  assert_no_grep 'no-mistakes init' "$review_brief" \
+    "review-only brief moved provisioning into a task worktree"
+
+  if FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-mode-scout-a7 direct-proj --scout --validation routine >/dev/null 2>&1; then
+    fail "fm-brief.sh accepted a validation lane for a scout"
+  fi
+  pass "fm-brief.sh records routine, review-only, and full validation lanes"
 }
 
 test_faster_paths_use_configured_authority_without_stacked_review() {
@@ -101,9 +147,9 @@ test_faster_paths_use_configured_authority_without_stacked_review() {
 test_no_mistakes_dod_wording() {
   local home id brief
   home="$TMP_ROOT/wording-home"
-  mkdir -p "$home/data"
+  write_registry "$home"
   id="brief-wording-b1"
-  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj >/dev/null 2>&1
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" no-mistakes-proj >/dev/null 2>&1
   brief="$home/data/$id/brief.md"
   assert_present "$brief" "brief was not scaffolded"
   assert_grep "no-mistakes itself provides for the mechanics" "$brief" \
@@ -344,6 +390,7 @@ test_scout_and_secondmate_scaffold() {
 test_script_parses
 test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
+test_task_validation_override_records_three_lanes
 test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
 test_ship_project_memory_wording

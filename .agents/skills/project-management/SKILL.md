@@ -30,10 +30,11 @@ Do not overwrite or repurpose an existing path.
 
 Choose the delivery mode when adding or creating the project:
 
-- `no-mistakes` runs the full validation pipeline before a PR and is the default when the captain does not specify a mode.
-- `direct-PR` pushes and opens a PR without the no-mistakes pipeline.
+- `direct-PR` pushes and opens a PR with repository-native tests and CI, and is the default when the captain does not specify a mode.
+- `no-mistakes` runs the full validation pipeline before a PR and is selected as a standing project mode only on the captain's explicit request.
 - `local-only` has no required remote or PR and lands only through the approved local fast-forward path.
 
+AGENTS.md section 7 is the single owner of the three task-level validation lanes, which can add review-only or full-pipeline no-mistakes to an otherwise direct-PR project.
 The optional `+yolo` posture changes routine approval authority but does not change the delivery mode.
 Default it off, and enable it only on the captain's explicit instruction.
 Destructive, irreversible, and security-sensitive decisions still require captain approval when it is on.
@@ -49,7 +50,7 @@ A `local-only` project may have no remote and skips no-mistakes initialization.
 ## Create a project
 
 Creating a GitHub repository is outward-facing.
-Before making that remote change, propose the repository name, owner or organization, visibility, and delivery mode, defaulting visibility to private and delivery mode to `no-mistakes`, then obtain the captain's explicit consent for those values.
+Before making that remote change, propose the repository name, owner or organization, visibility, and delivery mode, defaulting visibility to private and delivery mode to `direct-PR`, then obtain the captain's explicit consent for those values.
 Use `gh-axi` for the approved GitHub operation and consult its current help rather than relying on remembered flags.
 After remote creation succeeds, clone it locally, add the registry entry, and initialize it according to its delivery mode.
 
@@ -58,6 +59,8 @@ The captain's request to create that local project authorizes this local initial
 
 ## Initialize
 
+No-mistakes initialization is a project-provisioning action only.
+Never delegate it to a per-task ship brief or run it from a disposable task worktree.
 Run no-mistakes initialization only for `no-mistakes` projects:
 
 ```sh

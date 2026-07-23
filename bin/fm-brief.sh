@@ -6,8 +6,12 @@
 # description, acceptance criteria, and context, and may adjust other sections
 # when the task genuinely deviates (e.g. working an existing external PR instead
 # of shipping a new one).
-# Usage: fm-brief.sh <task-id> <repo-name> [--scout] [--herdr-lab]
+# Usage: fm-brief.sh <task-id> <repo-name> [--validation <routine|review-only|full>] [--scout] [--herdr-lab]
 #        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
+#   --validation records the task lane selected by AGENTS.md's risk contract.
+#   Without it, a direct-PR or local-only project uses routine and a
+#   no-mistakes project uses full.
+#   It is invalid for scouts and secondmates.
 #   --scout writes the scout contract instead: the deliverable is a report at
 #   data/<task-id>/report.md (no branch, no push, no PR) and the worktree is scratch.
 #   --secondmate writes a persistent secondmate charter. The project list
@@ -26,11 +30,11 @@
 #   The flag must be explicit because {TASK} is filled after scaffolding and the
 #   caller-supplied repo string cannot reliably identify this repo. Briefs made
 #   without it carry a loud declaration so an omitted contract cannot be silent.
-# For ship tasks, the definition of done is shaped by the project's delivery mode
-# (data/projects.md via fm-project-mode.sh; see the project-management skill
-# and AGENTS.md task lifecycle):
-#   no-mistakes  implement -> /no-mistakes pipeline -> PR -> captain merge (default)
-#   direct-PR    implement -> push + open PR via gh-axi (no pipeline) -> captain merge
+# For ship tasks, the definition of done is shaped by the risk-selected validation
+# lane, with data/projects.md via fm-project-mode.sh supplying the baseline:
+#   routine      implement -> native checks -> direct PR -> hosted CI -> captain merge (default)
+#   review-only  implement -> review-only no-mistakes -> native checks -> direct PR -> hosted CI -> captain merge
+#   full         implement -> full no-mistakes pipeline -> PR -> captain merge
 #   local-only   implement on branch, stop and report "ready in branch" (no push/PR);
 #                captain approves, firstmate merges to local main
 # Ship briefs begin with a worktree-isolation assertion before the branch step.
@@ -73,16 +77,36 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 KIND=ship
 HERDR_LAB=0
 NO_PROJECTS=0
+VALIDATION_OVERRIDE=
 POS=()
+want_value=
 for a in "$@"; do
+  if [ -n "$want_value" ]; then
+    case "$a" in
+      --*) echo "error: --$want_value requires a value" >&2; exit 1 ;;
+    esac
+    case "$want_value" in
+      validation) VALIDATION_OVERRIDE=$a ;;
+      *) echo "error: internal parser state for --$want_value" >&2; exit 1 ;;
+    esac
+    want_value=
+    continue
+  fi
   case "$a" in
     --scout) KIND=scout ;;
     --secondmate) KIND=secondmate ;;
     --herdr-lab) HERDR_LAB=1 ;;
     --no-projects) NO_PROJECTS=1 ;;
+    --validation) want_value=validation ;;
+    --validation=*) VALIDATION_OVERRIDE=${a#--validation=} ;;
     *) POS+=("$a") ;;
   esac
 done
+[ -z "$want_value" ] || { echo "error: --$want_value requires a value" >&2; exit 1; }
+case "$VALIDATION_OVERRIDE" in
+  ''|routine|review-only|full) ;;
+  *) echo "error: --validation must be one of routine, review-only, full" >&2; exit 1 ;;
+esac
 ID=${POS[0]}
 
 if [ "$KIND" = secondmate ] && [ "$HERDR_LAB" -eq 1 ]; then
@@ -92,6 +116,11 @@ fi
 
 if [ "$NO_PROJECTS" -eq 1 ] && [ "$KIND" != secondmate ]; then
   echo "error: --no-projects applies only to --secondmate charters" >&2
+  exit 1
+fi
+
+if [ -n "$VALIDATION_OVERRIDE" ] && [ "$KIND" != ship ]; then
+  echo "error: --validation applies only to ship briefs" >&2
   exit 1
 fi
 
@@ -271,26 +300,40 @@ echo "scaffolded: $BRIEF (scout; replace {TASK})"
 exit 0
 fi
 
-# Ship task: shape Setup / Rule 1 / Definition of done by the project's delivery mode.
+# Ship task: shape Setup / Rule 1 / Definition of done by the risk-selected lane.
 # yolo does not affect the brief (it governs firstmate's approval behaviour), so discard it.
 read -r MODE _ <<EOF
 $("$FM_ROOT/bin/fm-project-mode.sh" "$REPO")
 EOF
+if [ -n "$VALIDATION_OVERRIDE" ]; then
+  VALIDATION=$VALIDATION_OVERRIDE
+else
+  case "$MODE" in
+    no-mistakes) VALIDATION=full ;;
+    *) VALIDATION=routine ;;
+  esac
+fi
+case "$VALIDATION" in
+  full) MODE=no-mistakes ;;
+  review-only) MODE=direct-PR ;;
+  routine) [ "$MODE" = no-mistakes ] && MODE=direct-PR ;;
+esac
 
-case "$MODE" in
-  direct-PR)
+case "$VALIDATION:$MODE" in
+  routine:direct-PR)
     SETUP2=""
     RULE1='1. Never push to the default branch (push only your `fm/'"$ID"'` branch). Never merge a PR.'
     DOD=$(cat <<EOF
 # Definition of done
 This project ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
-The task is complete only when committed on your branch.
+The task is complete only when deterministic repository-native checks and authoritative exact-SHA Lab validation where applicable pass and the change is committed on your branch.
 When it is implemented and committed, push your branch and open a PR with \`gh-axi\`, then append \`done: PR {url}\` to the status file and stop.
-Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
+Repository-native CI must pass before merge.
+Do not start a no-mistakes run. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
 EOF
 )
     ;;
-  local-only)
+  routine:local-only)
     SETUP2=""
     RULE1="1. Never push to any remote and never open a PR. Work only on your \`fm/$ID\` branch; firstmate handles the merge into local \`main\`."
     DOD=$(cat <<EOF
@@ -303,9 +346,26 @@ The configured merge authority approves the ready branch, then firstmate merges 
 EOF
 )
     ;;
-  *)  # no-mistakes (default)
+  review-only:direct-PR)
     SETUP2="
-2. Run \`no-mistakes doctor\`; if it reports the repo is not initialized here, run \`no-mistakes init\`."
+2. Run \`no-mistakes doctor\`; if it reports the repo is not initialized here, append \`blocked: no-mistakes provisioning is missing\` to the status file and stop. Initialization belongs to project provisioning, never a task worktree."
+    RULE1='1. Never push to the default branch (push only your `fm/'"$ID"'` branch). Never merge a PR.'
+    DOD=$(cat <<EOF
+# Definition of done
+This task uses the **review-only** medium-risk lane and lands by direct PR.
+Confirm the intended diff and rebase the branch onto the authoritative base before review.
+Then start no-mistakes with \`--skip=test,document,lint,push,pr,ci\` and drive that review-only run through a terminal state.
+While the run is active, it alone owns its findings and fixes; do not hand-edit or commit fixes outside it.
+After it finishes, run the targeted repository-native checks, push your branch, and open a PR with \`gh-axi\`.
+Append \`done: PR {url}\` to the status file and stop.
+Repository-native CI must pass before merge.
+The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
+EOF
+)
+    ;;
+  full:no-mistakes)
+    SETUP2="
+2. Run \`no-mistakes doctor\`; if it reports the repo is not initialized here, append \`blocked: no-mistakes provisioning is missing\` to the status file and stop. Initialization belongs to project provisioning, never a task worktree."
     RULE1='1. Never push to the default branch. Never merge a PR.'
     DOD=$(cat <<EOF
 # Definition of done
@@ -325,6 +385,10 @@ Two firstmate-specific rules layer on top of that guidance:
 After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR {url} checks green\` and stop. You are finished.
 EOF
 )
+    ;;
+  *)
+    echo "error: unsupported validation/delivery combination \"$VALIDATION:$MODE\" for $REPO" >&2
+    exit 2
     ;;
 esac
 

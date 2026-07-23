@@ -370,6 +370,23 @@ test_local_only_skipped() {
   pass "local-only clone is skipped (benign), not flagged STUCK"
 }
 
+test_invalid_delivery_mode_requires_classification() {
+  local home clone before out
+  home=$(new_home)
+  clone=$(build_pair "$home" invalid-mode)
+  advance_origin "$home" invalid-mode C1
+  before=$(head_sha "$clone")
+  printf -- '- invalid-mode [mystery] - malformed project mode (added 2026-07-22)\n' > "$home/data/projects.md"
+
+  out=$(run_sync "$home" invalid-mode)
+
+  assert_contains "$out" "invalid-mode: skipped: invalid delivery mode requires classification" \
+    "invalid delivery mode did not require classification"
+  [ "$(head_sha "$clone")" = "$before" ] \
+    || fail "invalid delivery mode changed the clone before classification"
+  pass "invalid delivery mode is skipped until classification"
+}
+
 test_single_project_by_bare_name_resolves() {
   local home out
   home=$(new_home)
@@ -613,6 +630,7 @@ test_on_default_clean_behind_fast_forwards
 test_already_current_unchanged
 test_no_origin_skipped
 test_local_only_skipped
+test_invalid_delivery_mode_requires_classification
 test_single_project_by_bare_name_resolves
 test_single_project_by_bare_name_ignores_cwd_shadow
 test_single_project_by_projects_relative_name_resolves

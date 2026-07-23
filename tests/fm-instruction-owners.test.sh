@@ -16,6 +16,10 @@ SECONDMATE="$ROOT/.agents/skills/secondmate-provisioning/SKILL.md"
 CONFIG="$ROOT/docs/configuration.md"
 AGENTS="$ROOT/AGENTS.md"
 BRIEF="$ROOT/bin/fm-brief.sh"
+README="$ROOT/README.md"
+CONTRIBUTING="$ROOT/CONTRIBUTING.md"
+STOW="$ROOT/.agents/skills/stow/SKILL.md"
+BLANKET_WORKFLOW="$ROOT/.github/workflows/no-mistakes-required.yml"
 
 test_new_skill_metadata_and_triggers() {
   local skill name count
@@ -67,14 +71,83 @@ test_project_management_owner_covers_guarded_operations() {
     '`no-mistakes`' \
     '`direct-PR`' \
     '`local-only`' \
+    'is the default when the captain does not specify a mode' \
+    'selected as a standing project mode only on the captain'\''s explicit request' \
+    'AGENTS.md section 7 is the single owner of the three task-level validation lanes' \
     'Default it off' \
     'Creating a GitHub repository is outward-facing.' \
     "captain's explicit consent" \
     'Never issue a raw removal command from Firstmate.' \
+    'No-mistakes initialization is a project-provisioning action only.' \
+    'Never delegate it to a per-task ship brief or run it from a disposable task worktree.' \
     'no-mistakes init && no-mistakes doctor'; do
     assert_grep "$phrase" "$PROJECT" "project-management owner is missing '$phrase'"
   done
   pass "project-management owns registry, delivery posture, consent, initialization, and removal safety"
+}
+
+test_risk_tiered_validation_policy_is_authoritative() {
+  local tmp out rc promote_root pointer
+  for phrase in \
+    'Use exactly three validation lanes:' \
+    '**Routine** - styling, copy, small templates, presentation-only XML, documentation, tests, CI configuration, narrow UI changes, and small bounded fixes do not invoke no-mistakes.' \
+    'Run deterministic repository-native checks, authoritative exact-SHA Lab validation when the affected project has an applicable Lab path, push a direct PR, and require hosted CI before merge.' \
+    '**Medium risk** - application-behavior changes run no-mistakes as review-only with `--skip=test,document,lint,push,pr,ci`.' \
+    '**High risk** - security, privacy or PHI, authentication or authorization, destructive data or schema behavior, billing or payments, production deployment or infrastructure, migrations, complex workflows, and other broad or high-blast-radius changes run the full no-mistakes pipeline.' \
+    'An explicit `/no-mistakes` request selects the requested pipeline.' \
+    'A routine request to commit, push, ship, or validate never implies the full pipeline.' \
+    'Once a no-mistakes run is intentionally started, that run alone owns its findings and fixes through a terminal state, including a review-only medium-risk run.'; do
+    assert_grep "$phrase" "$AGENTS" "AGENTS.md lost risk-tiered validation phrase '$phrase'"
+  done
+  assert_grep 'Risk-tiered validation' "$README" \
+    "README does not summarize the risk-tiered validation posture"
+  assert_grep 'The three-lane validation contract in [`AGENTS.md`](AGENTS.md#selected-delivery-path-and-approval-authority) is authoritative.' "$CONTRIBUTING" \
+    "CONTRIBUTING does not point to the authoritative validation contract"
+  assert_grep 'branch -> risk-selected validation -> PR -> captain-merge path owned by AGENTS.md sections 1 and 7' "$STOW" \
+    "stow still hard-codes a no-mistakes path for shared tracked knowledge"
+  for pointer in "$README" "$CONTRIBUTING" "$PROJECT" "$STOW"; do
+    assert_no_grep 'presentation-only XML' "$pointer" \
+      "$pointer duplicates the authoritative routine category list"
+    assert_no_grep 'destructive data or schema behavior' "$pointer" \
+      "$pointer duplicates the authoritative high-risk category list"
+  done
+  assert_absent "$BLANKET_WORKFLOW" \
+    "the blanket GitHub workflow still rejects direct PRs without a no-mistakes signature"
+
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-validation-policy.XXXXXX")
+  mkdir -p "$tmp/data"
+  out=$(FM_HOME="$tmp" "$ROOT/bin/fm-project-mode.sh" routine 2>/dev/null) || fail "missing project default failed"
+  [ "$out" = "direct-PR off" ] || fail "missing project did not default to direct-PR off: $out"
+  printf '%s\n' '- routine - ordinary project (added 2026-07-22)' > "$tmp/data/projects.md"
+  out=$(FM_HOME="$tmp" "$ROOT/bin/fm-project-mode.sh" routine) || fail "unqualified project default failed"
+  [ "$out" = "direct-PR off" ] || fail "unqualified project did not default to direct-PR off: $out"
+  printf '%s\n' '- routine [mystery] - malformed project mode (added 2026-07-22)' > "$tmp/data/projects.md"
+  set +e
+  out=$(FM_HOME="$tmp" "$ROOT/bin/fm-project-mode.sh" routine 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -eq 2 ] || fail "unknown project mode did not require classification with exit 2: $rc"
+  assert_contains "$out" "bounded validation classification required" \
+    "unknown project mode did not report the classification requirement"
+
+  mkdir -p "$tmp/state"
+  printf '%s\n' 'window=fm-risky' 'worktree=/tmp/risky' 'project=/tmp/project' \
+    'harness=codex' 'kind=scout' 'mode=direct-PR' 'yolo=off' > "$tmp/state/risky.meta"
+  promote_root="$tmp/promote-root"
+  mkdir -p "$promote_root/bin"
+  cp "$ROOT/bin/fm-promote.sh" "$promote_root/bin/fm-promote.sh"
+  printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$promote_root/bin/fm-guard.sh"
+  chmod +x "$promote_root/bin/fm-promote.sh" "$promote_root/bin/fm-guard.sh"
+  FM_ROOT_OVERRIDE="$promote_root" FM_HOME="$tmp" FM_STATE_OVERRIDE="$tmp/state" \
+    "$promote_root/bin/fm-promote.sh" risky --validation review-only >/dev/null \
+    || fail "scout promotion rejected a valid review-only lane"
+  assert_grep 'kind=ship' "$tmp/state/risky.meta" "promotion did not change scout to ship"
+  assert_grep 'mode=direct-PR' "$tmp/state/risky.meta" \
+    "review-only promotion did not retain direct-PR landing"
+  assert_grep 'validation=review-only' "$tmp/state/risky.meta" \
+    "promotion did not record the review-only validation lane"
+  rm -rf "$tmp"
+  pass "risk-tiered policy defaults routine work to direct PR and removes blanket rejection"
 }
 
 test_generic_effort_fallback_respects_precedence() {
@@ -197,10 +270,10 @@ test_compressed_agents_retains_authority_and_supervision_safety() {
     'A lock-refused session must not spawn, steer, merge, drain the wake queue' \
     'A diagnostic request, report, recommendation, or implementation-ready finding is evidence, not authorization to change code.' \
     'The selected delivery path owns its own rigor.' \
-    'When no-mistakes is selected, no-mistakes alone owns review, fixes, tests, documentation, push, PR, and CI; otherwise follow the faster path without adding an independent reviewer.' \
-    'Never hold work outside no-mistakes for a manual clean verdict, stack serial manual reviews, or infer authority for one from security, architecture, or risk alone.' \
+    'Once a no-mistakes run is intentionally started, that run alone owns its findings and fixes through a terminal state, including a review-only medium-risk run.' \
+    'For full-pipeline work it also owns tests, documentation, lint, push, PR, and CI; otherwise follow the selected lane without adding an independent reviewer.' \
+    'Never hold work outside no-mistakes for a manual clean verdict or stack serial manual reviews.' \
     'A separate review or audit is allowed only when the captain explicitly requests that deliverable or the authorized task is a knowledge-only review; one named question remains scoped to that question.' \
-    'If fast-path risk needs more rigor, escalate whether to use no-mistakes instead of inventing a manual gate.' \
     '**local-only** has the worker stop with a clean ready branch, then waits for the configured merge authority' \
     'A status line is a wake event, not current state' \
     'keep exactly one live supervision cycle' \
@@ -224,6 +297,7 @@ test_compressed_agents_retains_authority_and_supervision_safety() {
 test_new_skill_metadata_and_triggers
 test_diagnostic_owner_covers_causal_procedure
 test_project_management_owner_covers_guarded_operations
+test_risk_tiered_validation_policy_is_authoritative
 test_generic_effort_fallback_respects_precedence
 test_shared_authoring_requirements_are_owned
 test_secondmate_registry_contract_stays_concise

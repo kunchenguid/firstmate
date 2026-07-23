@@ -123,6 +123,24 @@ test_no_profile_keeps_claude_launch_unchanged() {
   pass "no --model/--effort records defaults and keeps the claude launch byte-identical"
 }
 
+test_task_validation_lane_is_recorded_in_meta() {
+  local rec id out status
+  id=profile-mode-override-z17
+  rec=$(make_spawn_case profile-mode-override claude "$id")
+  read_case_record "$rec"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --validation review-only)
+  status=$?
+  expect_code 0 "$status" "valid review-only lane should reach spawn"
+  assert_contains "$out" "mode=direct-PR" "review-only lane did not keep direct-PR landing"
+  assert_grep "mode=direct-PR" "$HOME_DIR/state/$id.meta" \
+    "review-only lane did not record direct-PR landing"
+  assert_grep "validation=review-only" "$HOME_DIR/state/$id.meta" \
+    "review-only validation lane was not recorded in metadata"
+  pass "task-level validation lane is recorded in spawn metadata"
+}
+
 test_active_dispatch_profile_requires_explicit_harness_for_ship() {
   local rec id out status
   id=profile-required-ship-z11
@@ -390,14 +408,18 @@ test_batch_forwards_shared_profile_flags() {
   enable_dispatch_profile "$HOME_DIR"
 
   out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
-    "$id1=$PROJ_DIR" "$id2=$PROJ_DIR" --harness codex --model gpt-5 --effort high)
+    "$id1=$PROJ_DIR" "$id2=$PROJ_DIR" --harness codex --model gpt-5 --effort high --validation full)
   status=$?
   expect_code 0 "$status" "batch spawn with shared profile flags should succeed"
   assert_contains "$out" "spawned $id1 harness=codex" "first batch task did not use shared harness"
   assert_contains "$out" "spawned $id2 harness=codex" "second batch task did not use shared harness"
   assert_meta_profile "$HOME_DIR/state/$id1.meta" codex gpt-5 high
   assert_meta_profile "$HOME_DIR/state/$id2.meta" codex gpt-5 high
-  pass "batch dispatch forwards shared --harness, --model, and --effort to every pair"
+  assert_grep "mode=no-mistakes" "$HOME_DIR/state/$id1.meta" "first batch task lost shared mode override"
+  assert_grep "mode=no-mistakes" "$HOME_DIR/state/$id2.meta" "second batch task lost shared mode override"
+  assert_grep "validation=full" "$HOME_DIR/state/$id1.meta" "first batch task lost full validation lane"
+  assert_grep "validation=full" "$HOME_DIR/state/$id2.meta" "second batch task lost full validation lane"
+  pass "batch dispatch forwards shared profile and validation lanes to every pair"
 }
 
 test_active_dispatch_profile_does_not_block_secondmate_launch() {
@@ -419,6 +441,7 @@ test_active_dispatch_profile_does_not_block_secondmate_launch() {
 }
 
 test_no_profile_keeps_claude_launch_unchanged
+test_task_validation_lane_is_recorded_in_meta
 test_active_dispatch_profile_requires_explicit_harness_for_ship
 test_active_dispatch_profile_requires_explicit_harness_for_scout
 test_active_dispatch_profile_allows_explicit_harness
