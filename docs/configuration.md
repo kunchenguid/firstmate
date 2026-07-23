@@ -230,9 +230,6 @@ The trade-off is that Codex crew lanes cannot use MCP tools unless a home opts o
 Set the local, gitignored `config/crew-codex-mcp` first non-empty line to `enabled`, `keep`, `on`, `true`, or `1` to keep configured MCP servers for Codex crewmate and scout launches.
 Use that opt-out only for homes whose needed MCP servers are local and reliable enough to be worth the fresh-launch startup risk.
 `config/crew-codex-mcp` is inherited by secondmate homes with the other crew config items.
-If a fresh Codex crew still shows `Starting MCP servers ...`, `fm-watch.sh` requires two corroborating polls, refuses dirty or ahead worktrees, returns the recorded clean worktree, preserves non-spawn `state/<id>.meta` sidecar fields, writes `.codex-mcp-stall-<id>` and `.codex-mcp-recovered-<id>` markers, and respawns once.
-`FM_CODEX_MCP_STALL_SECS` and `FM_CODEX_FRESH_LAUNCH_WINDOW_SECS` tune that detector.
-`FM_SPAWN_BIN` is a test and recovery seam for the respawn command; production should leave it unset.
 For grok, `fm-spawn.sh` installs one firstmate-owned global turn-end hook under `$GROK_HOME/hooks/`, or `~/.grok/hooks/` when `GROK_HOME` is unset, and drops a per-task `.fm-grok-turnend` pointer in the worktree, with teardown removing the task token and pointer.
 For omp, `fm-spawn.sh` writes a firstmate-owned per-task extension under `state/<id>.omp-ext.ts` and passes it with `--hook` for crewmate and scout launches, with teardown removing the state extension.
 For Pi secondmate launches, `fm-spawn.sh` starts Pi with `-e` pointed at the secondmate home's own tracked `.pi/extensions/fm-primary-pi-watch.ts` and `.pi/extensions/fm-primary-turnend-guard.ts`, both already present from the secondmate home's git worktree.
@@ -437,9 +434,6 @@ FM_HEARTBEAT_MAX=7200   # heartbeat backoff cap
 FM_CHECK_INTERVAL=300   # seconds between slow checks (authenticated merge polls, custom checks, or X-mode dispatch)
 FM_CHECK_TIMEOUT=30     # seconds allowed per slow check script
 FM_CODEX_WATCH_CHECKPOINT=180   # seconds per foreground watcher checkpoint in Codex primary supervision
-FM_CODEX_MCP_STALL_SECS=15      # seconds in a Codex "Starting MCP servers ..." line before the fresh-launch recovery detector considers it stalled
-FM_CODEX_FRESH_LAUNCH_WINDOW_SECS=300   # seconds after task meta creation during which the Codex MCP fresh-launch recovery detector may act
-FM_SPAWN_BIN=bin/fm-spawn.sh    # test/recovery seam for watcher-initiated respawns; production should leave it unset
 FM_CREW_STATE_NM_TIMEOUT=10   # seconds allowed per no-mistakes query inside fm-crew-state.sh
 FM_CREW_STATE_RUNS_LIMIT=200  # recent no-mistakes run rows scanned when axi status cannot be attributed to the current code
 FM_CREW_STATE_BIN=bin/fm-crew-state.sh   # test override for the current-state reader used by working/paused watcher triage
