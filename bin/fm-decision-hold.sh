@@ -398,6 +398,7 @@ verify_archived_resolution() {  # <id> <show-output> <raw-header>
   [ "$state" = "done" ] || fail "archived captain decision $id is not typed done"
   [ "$kind" = captain ] || fail "archived backlog item $id is not kind captain"
   [ "$hold_kind" = captain ] || fail "archived backlog item $id is not held for the captain"
+  [ "$hold_reason" != '-' ] || fail "archived captain decision $id has no hold reason"
   case "$hold_reason" in
     \"*)
       hold_reason=$(decode_json_string "$hold_reason" && printf '\034') \
@@ -405,8 +406,7 @@ verify_archived_resolution() {  # <id> <show-output> <raw-header>
       hold_reason=${hold_reason%$'\034'}
       ;;
   esac
-  [ -n "$hold_reason" ] && [ "$hold_reason" != '-' ] \
-    || fail "archived captain decision $id has no hold reason"
+  [ -n "$hold_reason" ] || fail "archived captain decision $id has no hold reason"
   valid_date "$closed" || fail "archived captain decision $id has an invalid closure date: $closed"
   body=$(decode_json_string "$body_json" && printf '\034') \
     || fail "archived captain decision $id has an invalid structured body"

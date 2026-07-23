@@ -622,6 +622,56 @@ EOF
   chmod +x "$home/fakebin/shasum"
 }
 
+test_retained_quoted_dash_hold_reason_survives_lifecycle() {
+  local home origin hold dependent archive record number
+  home=$(make_home retained-dash-hold-reason)
+  origin=sample-dash-reason-review
+  dependent=sample-dash-reason-dependent
+  mkdir -p "$home/data/$origin"
+  tasks_in "$home" add "$origin" "Review dash reason retention" \
+    --kind scout --repo sample --start >/dev/null \
+    || fail "could not create dash-reason origin"
+  write_origin_meta "$home" "$origin"
+  printf 'done: dash-reason report complete\n' > "$home/state/$origin.status"
+  printf '# Dash reason review\n\nThe retained decision is resolved.\n' > "$home/data/$origin/report.md"
+
+  hold=$(run_decisions "$home" hold "$origin" retained \
+    --title "Choose the dash-reason route" --reason "-" --repo sample) \
+    || fail "could not create a writer-owned dash hold reason"
+  run_decisions "$home" complete "$origin" retained >/dev/null \
+    || fail "could not inventory the dash-reason decision"
+  tasks_in "$home" add "$dependent" "Apply the dash-reason route" \
+    --kind ship --repo sample >/dev/null \
+    || fail "could not create dash-reason dependent work"
+  tasks_in "$home" block "$dependent" --by "$hold" >/dev/null \
+    || fail "could not block dash-reason dependent work"
+  printf 'Use the retained dash-reason route.\n' > "$home/dash-reason-decision.txt"
+  run_decisions "$home" resolve "$origin" retained \
+    --decision-file "$home/dash-reason-decision.txt" --routed-to "$dependent" >/dev/null \
+    || fail "could not resolve the dash-reason decision"
+
+  for number in 01 02 03 04 05 06 07 08 09 10 11; do
+    tasks_in "$home" add "sample-dash-retention-$number" "Dash retention filler $number" \
+      --kind ship --repo sample >/dev/null \
+      || fail "could not create dash retention filler $number"
+    tasks_in "$home" "done" "sample-dash-retention-$number" >/dev/null \
+      || fail "could not complete dash retention filler $number"
+  done
+  archive="$home/data/done-archive.md"
+  record=$(archive_record "$archive" "$hold")
+  assert_contains "$record" "(hold: -) (hold-kind: captain)" \
+    "retention did not preserve the writer-owned dash hold reason"
+  run_decisions "$home" complete "$origin" retained >/dev/null \
+    || fail "retained complete rejected the quoted dash hold reason"
+  run_decisions "$home" verify "$origin" >/dev/null \
+    || fail "retained verify rejected the quoted dash hold reason"
+  run_decisions "$home" resolve "$origin" retained \
+    --decision-file "$home/dash-reason-decision.txt" --routed-to "$dependent" >/dev/null \
+    || fail "idempotent resolve rejected the quoted dash hold reason"
+
+  pass "retained quoted dash hold reasons survive complete, verify, and idempotent resolve"
+}
+
 test_retained_decisions_are_strictly_archive_aware() {
   local home origin older_hold newer_hold archive record unresolved_record heading digest closed variant before after show
   local separator_label separator_code separator
@@ -1127,4 +1177,5 @@ test_none_inventory_and_resolved_prose_do_not_create_holds
 test_terminal_single_owner_status_decision_does_not_block_empty_inventory
 test_secondmate_hold_stays_in_authoritative_home
 test_resolve_matches_quoted_blocked_by_edges
+test_retained_quoted_dash_hold_reason_survives_lifecycle
 test_retained_decisions_are_strictly_archive_aware

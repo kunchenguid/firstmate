@@ -19,7 +19,7 @@ It rejects duplicate active identities, duplicate archived identities, active/ar
 Archive fingerprinting accepts only a successful lowercase SHA-256 digest before any comparison.
 For an archived identity, it extracts only that record into a private single-record `## Done` view and parses it through public `tasks-axi show --full --file` output.
 The extractor rejects non-empty whitespace-only archive lines so the typed parser cannot collapse different stored bytes into the same decision body.
-The archived record is accepted only when its terminal checkbox and typed state, captain kind and hold kind, closure date, decision digest, sorted unique routed identities, non-empty decision, and exact routed-work suffix all match the durable bytes written by `resolve`.
+The archived record is accepted only when its terminal checkbox and typed state, captain kind and hold kind, present hold reason distinct from the raw unquoted missing sentinel, closure date, decision digest, sorted unique routed identities, non-empty decision, and exact routed-work suffix all match the durable bytes written by `resolve`.
 Immediately before acceptance, it rechecks the archive fingerprint and exact identity counts after active-store and structured record validation have both finished, then rechecks the active identity after final archive validation.
 This preserves the historical `Routed work:- <first-id>` writer format without rewriting active or archived records.
 
@@ -75,6 +75,7 @@ ok - resolved findings and decision-like prose do not create false holds
 ok - terminal single-owner stale status decisions do not block empty inventory
 ok - main-home and secondmate-home captain holds remain correctly routed
 ok - resolve matches first/middle/last in quoted blocked_by and rejects a genuinely absent id
+ok - retained quoted dash hold reasons survive complete, verify, and idempotent resolve
 ok - canonical Unicode survives retention while malformed bytes, lossy text, late collisions, duplicates, and unsafe stores are rejected
 
 $ bash tests/fm-fleet-snapshot-view.test.sh
