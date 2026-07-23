@@ -9,14 +9,11 @@
 # HEAD-continuity guard; see docs/architecture.md "No-mistakes gate authority boundary."
 disable_project_settings: true
 
-# Pin lint to the same deterministic command CI runs, instead of leaving it to
-# no-mistakes' default handling. Without a configured commands.lint, the gate's
-# lint step never ran the deterministic
-# `shellcheck bin/*.sh bin/backends/*.sh tests/*.sh` that CI runs, so info-level
-# ShellCheck findings (e.g. SC2015) were not surfaced locally before CI rejected
-# them. commands.lint delegates to bin/fm-lint.sh, the single owner of the lint
-# definition that .github/workflows/ci.yml also invokes, so local can never
-# diverge from CI again (parity asserted by tests/fm-lint.test.sh).
+# Pin lint to the same owner CI runs instead of leaving it to no-mistakes'
+# default handling, which does not invoke the repository's canonical lint gate.
+# `bin/fm-lint.sh` owns the complete lint definition and
+# `.github/workflows/ci.yml` invokes it directly, with parity asserted by
+# `tests/fm-lint.test.sh`.
 #
 # Do not set commands.test to a complete tests/*.test.sh walk. Local no-mistakes
 # Test is intent-targeted validation of whether the change meets its brief;

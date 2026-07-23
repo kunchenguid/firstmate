@@ -902,7 +902,7 @@ if sed -n "$((SECOND_SPAWN_LOG_START + 1)),\$p" "$HERDR_CALL_LOG" \
   | grep -E $'^(workspace\tmove|session\tlist)' >/dev/null 2>&1; then
   fail "secondmate spawn attempted presentation ordering"
 fi
-# shellcheck source=bin/fm-config-inherit-lib.sh
+# shellcheck source=/dev/null
 . "$ROOT/bin/fm-config-inherit-lib.sh"
 propagate_inheritable_config "$HOME_DIR/config" "$SECOND_HOME_A/config" \
   || fail "inheritance into secondmate A failed"
@@ -1137,7 +1137,7 @@ teardown_task restart1 "$HOME_DIR" > "$TMP_ROOT/restart-teardown.out" 2> "$TMP_R
 # Missing, renamed, and duplicate tokens are read-only recovery diagnostics.
 # The duplicate case allows flat fallback only when every matching pane is
 # positively agent-free.
-# shellcheck source=bin/backends/herdr.sh
+# shellcheck source=/dev/null
 . "$ROOT/bin/backends/herdr.sh"
 
 MISSING_STATE="$TMP_ROOT/missing-state"; mkdir -p "$MISSING_STATE"

@@ -23,7 +23,7 @@ set -u
 LIB="$ROOT/bin/fm-tmux-lib.sh"
 PEEK="$ROOT/bin/fm-peek.sh"
 
-# shellcheck source=bin/fm-tmux-lib.sh
+# shellcheck source=/dev/null
 . "$LIB"
 
 TMP_ROOT=$(fm_test_tmproot fm-ghost-tests)

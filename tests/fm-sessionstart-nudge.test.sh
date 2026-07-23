@@ -9,7 +9,7 @@ unset NO_MISTAKES_GATE
 
 TMP_ROOT=$(fm_test_tmproot fm-sessionstart-nudge)
 NUDGE="$ROOT/bin/fm-sessionstart-nudge.sh"
-# shellcheck source=bin/fm-operational-input.sh
+# shellcheck source=/dev/null
 . "$ROOT/bin/fm-operational-input.sh"
 NUDGE_TEXT="Run \`bin/fm-session-start.sh\` now, exactly once, before executing any other instructions."
 fm_operational_input_encode session-start "$NUDGE_TEXT" NUDGE_LINE \

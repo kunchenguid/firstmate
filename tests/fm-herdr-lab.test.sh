@@ -71,7 +71,7 @@ esac
 SH
 chmod +x "$FAKEBIN/herdr"
 
-# shellcheck source=bin/fm-herdr-lab.sh
+# shellcheck source=/dev/null
 . "$ROOT/bin/fm-herdr-lab.sh"
 
 run_with_fake() {

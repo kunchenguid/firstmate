@@ -437,7 +437,7 @@ test_dispatch_routes_zellij_backend() {
 }
 
 test_dispatch_busy_state_unknown_for_zellij() {
-  # shellcheck source=bin/fm-backend.sh
+  # shellcheck source=/dev/null
   . "$ROOT/bin/fm-backend.sh"
   [ "$(fm_backend_busy_state zellij 'firstmate:5')" = unknown ] \
     || fail "fm_backend_busy_state should report unknown for zellij (no native agent-state primitive; D5: watcher falls back to regex, same as tmux)"
@@ -1010,7 +1010,7 @@ test_scripts_reject_fm_target_label_mismatch() {
   pass "fm-send: fm-id zellij targets reject pane ids whose tab label no longer matches"
 }
 
-# shellcheck source=bin/fm-backend.sh
+# shellcheck source=/dev/null
 . "$ROOT/bin/fm-backend.sh"
 
 test_version_check_accepts_current_version

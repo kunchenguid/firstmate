@@ -27,7 +27,7 @@ DAEMON="$ROOT/bin/fm-supervise-daemon.sh"
 # Source the daemon's pure functions (its main loop is guarded out under sourcing).
 if [ -z "${FM_TEST_DAEMON_SOURCED:-}" ]; then
   export FM_TEST_DAEMON_SOURCED=1
-  # shellcheck source=bin/fm-supervise-daemon.sh
+  # shellcheck source=/dev/null
   . "$DAEMON"
 fi
 
