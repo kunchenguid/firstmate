@@ -231,6 +231,7 @@ scan_decision_identity() {  # <mode> <path> <id> [archive-view]
   command -v node >/dev/null 2>&1 || fail "node is required to inspect decision identities"
   node - "$@" <<'NODE'
 const fs = require("fs");
+const { TextDecoder } = require("util");
 
 const [mode, path, id, view] = process.argv.slice(2);
 if (!["active-count", "archive-count", "archive-extract"].includes(mode) || !path || !id) {
@@ -239,7 +240,7 @@ if (!["active-count", "archive-count", "archive-extract"].includes(mode) || !pat
 
 let source;
 try {
-  source = fs.readFileSync(path, "utf8");
+  source = new TextDecoder("utf-8", { fatal: true }).decode(fs.readFileSync(path));
 } catch (_) {
   process.exit(1);
 }

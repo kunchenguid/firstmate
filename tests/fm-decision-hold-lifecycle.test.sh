@@ -815,6 +815,31 @@ EOF
     "  Decision digest: 0000000000000000000000000000000000000000000000000000000000000000"
   assert_archive_verify_fails "$variant" "$origin" forged-record
 
+  variant=$(clone_home "$home" retained-invalid-utf8)
+  node - "$variant/data/done-archive.md" "$variant/retained-decision.txt" "$digest" <<'NODE' \
+    || fail "could not build the invalid UTF-8 archive fixture"
+const crypto = require("crypto");
+const fs = require("fs");
+
+const [archivePath, decisionPath, oldDigest] = process.argv.slice(2);
+const archive = fs.readFileSync(archivePath);
+const decision = fs.readFileSync(decisionPath);
+const decisionLine = Buffer.from("  Use the retained route.");
+const decisionIndex = archive.indexOf(decisionLine);
+const digestBytes = Buffer.from(oldDigest);
+const digestIndex = archive.indexOf(digestBytes);
+if (decisionIndex === -1 || digestIndex === -1 || archive.indexOf(digestBytes, digestIndex + 1) !== -1) {
+  process.exit(1);
+}
+archive[decisionIndex + 2] = 0x80;
+decision[0] = 0x80;
+const lossyDecision = decision.toString("utf8").replace(/\n+$/, "");
+const lossyDigest = crypto.createHash("sha256").update(lossyDecision).digest("hex");
+Buffer.from(lossyDigest).copy(archive, digestIndex);
+fs.writeFileSync(archivePath, archive);
+NODE
+  assert_archive_verify_fails "$variant" "$origin" invalid-utf8-record
+
   variant=$(clone_home "$home" retained-wrong-kind)
   rewrite_once "$variant/data/done-archive.md" "(kind: captain)" "(kind: ship)"
   assert_archive_verify_fails "$variant" "$origin" wrong-kind-record
