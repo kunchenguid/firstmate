@@ -25,7 +25,7 @@
 #   --interval N, -n  Seconds between redraws in the live loop
 #                     (default 4, env FM_TASKLIST_INTERVAL). Ignored with --once.
 #   --width N         Target column width for wrapping/truncation
-#                     (default: $COLUMNS, else 80). Narrow panes are fine.
+#                     (default: $COLUMNS, else 80; minimum 56).
 #   --done N          Max DONE-RECENT rows to show (default 8, env
 #                     FM_TASKLIST_DONE).
 #   --no-clear        Do not clear the screen each frame (stream frames instead).
@@ -89,7 +89,7 @@ case "$INTERVAL" in ''|*[!0-9.]*) invalid_interval ;; esac
 case "$DONE_LIMIT" in ''|*[!0-9]*) echo "fm-tasklist-view: --done must be a non-negative integer" >&2; exit 2 ;; esac
 if [ -z "$WIDTH" ]; then WIDTH="${COLUMNS:-80}"; fi
 case "$WIDTH" in ''|*[!0-9]*|0) WIDTH=80 ;; esac
-[ "$WIDTH" -lt 48 ] && WIDTH=48
+[ "$WIDTH" -lt 56 ] && WIDTH=56
 
 if [ -z "${FM_HOME+x}" ] || [ -z "${FM_HOME:-}" ]; then
   echo "error: FM_HOME is not set; fm-tasklist-view refuses to guess a firstmate home" >&2

@@ -145,7 +145,7 @@ test_priority_ordering() {
 }
 
 test_done_limit_and_width() {
-  local home fakebin out
+  local home fakebin out rule_len
   home=$(make_home limits)
   write_fixture "$home"
   fakebin=$(make_fakebin "$home")
@@ -168,6 +168,9 @@ test_done_limit_and_width() {
 $out
 EOF
   [ "$longest" -le 56 ] || fail "no tabular column line may exceed the requested --width (got $longest > 56)"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$VIEW" --once --no-color --width 48)
+  rule_len=$(printf '%s\n' "$out" | grep '^─' | head -1 | tr -d '\n' | LC_ALL=en_US.UTF-8 wc -m | tr -d ' ')
+  [ "$rule_len" -eq 56 ] || fail "--width below 56 must clamp to a 56-column rule"
   pass "--done caps the done band and --width bounds line length for narrow panes"
 }
 
